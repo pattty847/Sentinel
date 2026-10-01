@@ -134,7 +134,7 @@ On first use, per-chart defaults come from the client YAML keys below (also supp
 | `min_row_px` | 2 | 0.5..32; GPU policy, separate from legacy `target_row_px` |
 | `hysteresis` | 0.25 | 0..0.9 |
 | `crossfade_ms` | 150 | Integer 0..2000; 0 disables |
-| `show_band_edges` | false | Boolean |
+| `show_band_edges` | false | Boolean; saved and editable, drawn by sentinel-lab only (the main chart does not draw band edges yet) |
 | `palette_preset` | `Electric` | `Electric`, `Fire`, `Ocean`, `Monochrome`, `Matrix`, `Custom` |
 | `bid_gradient`, `ask_gradient` | black-to-cyan / black-to-orange | 2..16 `{position, color}` stops; strictly increasing positions, first 0 and last 1; `#RRGGBB` or `#RRGGBBAA` |
 | `sensitivity_min` | 0.05 | 10^-9..10^12, base quantity |
@@ -142,9 +142,11 @@ On first use, per-chart defaults come from the client YAML keys below (also supp
 | `opacity` | 1 | 0..1 |
 | `gpu_cap_bytes` | 335544320 (320 MiB) | Integer 1 MiB..4 GiB per chart |
 | `upload_budget_bytes` | 8388608 (8 MiB) | Integer 1..min(128 MiB, GPU cap) |
-| `prefetch_tiles` | 1 | Integer 0..16 |
-| `live_min_interval_ms` | 500 | Integer 100..5000 |
-| `show_telemetry` | false | Boolean |
+| `prefetch_tiles` | 1 | Integer 0..16; saved and editable, not read by the span planner yet (it prefetches max(2, view width) tiles) |
+| `live_min_interval_ms` | 500 | Integer 100..5000; the shortest spacing of the chart's live-edge compositions (S6c: applied live to its controller; the slow-compose backoff stays max(5000, this)) |
+| `show_telemetry` | false | Boolean; shows the Heatmap Telemetry dock (View menu, its close button and Settings > Debug write it) |
+
+**Settings UI (S6c).** Every field above is editable in the chart's Heatmap Settings dialog (toolbar gear): tabs Tick, Look, Budgets, Live, Debug (and TPO for the chart's TPO controls). Changes apply at once and are saved per chart, except the Debug renderer, which applies to this session only unless "Make default" is ticked. Each tab has a Reset to defaults (the YAML/config defaults). The Budgets tab also edits the process RAM tiers (`heatmap/budgets/...`, every chart, applied to the running data service at once and saved only when it accepts them). The toolbar's Auto/Manual combo and preset combo (beside the timeframe) write `tickMode`/`manualTick`; a preset picked there locks Manual and is remembered under `heatmap/manualTick/<symbol>/<timeframeMs>`; entering Manual with nothing remembered locks the tick drawn now. The dialog, toolbar, telemetry dock and Agent API all go through one `HeatmapSettingsModel` per chart, so a change from any of them shows in the others. Tone mapping (gamma/contrast/shader floor) stays a session control in the Look tab, as before.
 
 Non-finite stored/config numbers fall back to model defaults. The API requires finite numbers and correct types before clamping. Example custom gradient:
 

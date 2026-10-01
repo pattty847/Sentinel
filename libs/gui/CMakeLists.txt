@@ -13,6 +13,8 @@ set(GRID_CORE_SOURCES
 
     # MainWindow modular components
     mainwindow/DockFactory.cpp
+    mainwindow/HeatmapChartControls.cpp
+    mainwindow/HeatmapChartControls.hpp
     mainwindow/DockFactory.h
     mainwindow/QmlSceneController.cpp
     mainwindow/QmlSceneController.h
@@ -154,6 +156,7 @@ set(WIDGET_SOURCES
     "widgets/ServiceLocator.cpp"
     "widgets/StatusBar.cpp"
     "widgets/HeatmapSettingsDialog.cpp"
+    "widgets/HeatmapTelemetryDock.cpp"
     "widgets/TopToolbar.cpp"
     "widgets/WatchlistDock.cpp"
     "widgets/StockChartDock.cpp"
@@ -187,6 +190,8 @@ add_library(sentinel_heatmap_gpu STATIC
     render/heatmap/HeatmapGpuLayer.cpp
     render/heatmap/HeatmapSettingsStore.hpp
     render/heatmap/HeatmapSettingsStore.cpp
+    render/heatmap/HeatmapSettingsModel.hpp
+    render/heatmap/HeatmapSettingsModel.cpp
     render/heatmap/HeatmapDataService.hpp
     render/heatmap/HeatmapDataService.cpp
     render/heatmap/HeatmapSourceController.hpp

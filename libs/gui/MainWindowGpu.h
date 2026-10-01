@@ -19,7 +19,7 @@
 #include <optional>
 #include "mainwindow/AgentApiTypes.hpp"
 #include "mainwindow/AgentApiInput.hpp"
-#include "render/heatmap/HeatmapSettingsStore.hpp"
+#include "render/heatmap/HeatmapSettingsModel.hpp"
 #include "mainwindow/LayoutOrchestrator.h"
 #include "datasources/IGridDataSource.hpp"
 #include "render/TpoHistoryPager.hpp"
@@ -42,6 +42,8 @@ class PaperTradingDock;
 class TopToolbar;
 class ThemeBridge;
 class HeatmapSettingsDialog;
+class HeatmapTelemetryDock;
+class HeatmapChartControls;
 class TradeInputManager;
 class TradeBlotterDock;
 
@@ -64,7 +66,7 @@ public:
     // S6b creates per-chart controllers here, after GUI construction. A view can
     // precede availability: HeatmapSourceController replans on its arrival.
     heatmap::HeatmapDataService *heatmapDataService() const { return m_heatmapDataService.get(); }
-    const heatmap::HeatmapChartSettings &heatmapChartSettings() const { return m_heatmapChartSettings; }
+    const heatmap::HeatmapChartSettings &heatmapChartSettings() const { return m_heatmapSettings->settings(); }
 
 signals:
     /**
@@ -119,12 +121,17 @@ private:
     void onResetLayout();
     void onOpenSecFilingViewer();
     void onOpenFontSettings();
+    HeatmapSettingsDialog* openHeatmapSettingsDialog();
 
     std::unique_ptr<IGridDataSource> m_dataSource;
     // Declared after the source: the adapter/data thread dies before the client.
     std::unique_ptr<heatmap::HeatmapDataService> m_heatmapDataService;
     heatmap::HeatmapSettingsStore m_heatmapSettingsStore;
-    heatmap::HeatmapChartSettings m_heatmapChartSettings;
+    // The main chart's settings: the single source of truth for the chart, the
+    // settings dialog, the toolbar tick selector, the telemetry dock and the API.
+    std::unique_ptr<heatmap::HeatmapSettingsModel> m_heatmapSettings;
+    HeatmapChartControls* m_heatmapControls = nullptr;
+    HeatmapTelemetryDock* m_heatmapTelemetryDock = nullptr;
     AgentApi::InputDispatcher m_agentInput;
     // TPO history: one paced page in flight; see TpoHistoryPager.
     tpo::HistoryPager m_tpoPager;

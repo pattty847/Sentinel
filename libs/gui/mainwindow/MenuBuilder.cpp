@@ -60,6 +60,9 @@ void MenuBuilder::buildViewMenu(const DockWidgets& docks, const Callbacks& callb
     if (docks.paperTradingDock) {
         m_viewMenu->addAction(docks.paperTradingDock->toggleViewAction());
     }
+    if (docks.heatmapTelemetryDock) {
+        m_viewMenu->addAction(docks.heatmapTelemetryDock->toggleViewAction());
+    }
     if (callbacks.toggleSidePanel) {
         m_viewMenu->addSeparator();
         // Hides every right-area dock at once so the chart gets the full width.

@@ -118,6 +118,33 @@ TopToolbar::TopToolbar(QWidget* parent)
     addWidget(m_timeframeCombo);
     connect(m_timeframeCombo, &QComboBox::currentTextChanged, this, &TopToolbar::timeframeSelected);
 
+    // Heatmap tick: Auto/Manual and the preset (S6c). Driven by setTickSelectorState.
+    m_tickModeCombo = new QComboBox(this);
+    m_tickModeCombo->setObjectName("tickModeCombo");
+    m_tickModeCombo->addItems({"Auto", "Manual"});
+    m_tickModeCombo->setFixedWidth(84);
+    addWidget(m_tickModeCombo);
+    connect(m_tickModeCombo, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
+        sLog_App("ui: toolbar tick mode=" << (index == 1 ? "manual" : "auto"));
+        emit tickModeRequested(index == 1);
+    });
+    m_tickPresetCombo = new QComboBox(this);
+    m_tickPresetCombo->setObjectName("tickPresetCombo");
+    m_tickPresetCombo->setFixedWidth(84);
+    addWidget(m_tickPresetCombo);
+    connect(m_tickPresetCombo, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
+        const qint64 units = m_tickPresetCombo->itemData(index).toLongLong();
+        if (units <= 0) return;
+        sLog_App("ui: toolbar tick preset units=" << units);
+        emit tickPresetRequested(units);
+    });
+    m_tickVeilLabel = new QLabel("veiled", this);
+    m_tickVeilLabel->setObjectName("tickVeilLabel");
+    m_tickVeilLabel->setStyleSheet("QLabel { color: #F0B46A; padding-left: 4px; }");
+    m_tickVeilLabel->setVisible(false);
+    addWidget(m_tickVeilLabel);
+    setTickSelectorState({});
+
     m_chartTypeCombo = new QComboBox(this);
     m_chartTypeCombo->addItems({"Candle", "Hollow", "Line"});
     m_chartTypeCombo->setFixedWidth(90);
@@ -254,6 +281,68 @@ void TopToolbar::setLayerToggleStates(bool heatmapEnabled,
         const QSignalBlocker blocker(*m_volumeProfileButton);
         m_volumeProfileButton->setChecked(volumeProfileEnabled);
     }
+}
+
+QString TopToolbar::tickText(int64_t units, double priceScale) {
+    if (units <= 0 || !(priceScale > 0)) return QStringLiteral("-");
+    return QStringLiteral("$") + QString::number(double(units) / priceScale, 'g', 12);
+}
+
+void TopToolbar::fillTickPresetCombo(QComboBox* combo, const TickSelectorState& state, const QString& emptyText) {
+    const QSignalBlocker block(combo);
+    combo->clear();
+    const int64_t shown = state.manual ? state.manualUnits : state.drawnUnits;
+    const bool shownOffered =
+        shown > 0 && std::find(state.offeredUnits.begin(), state.offeredUnits.end(), shown) != state.offeredUnits.end();
+    std::vector<int64_t> units = state.offeredUnits;
+    if (shown > 0 && !shownOffered) {
+        units.push_back(shown);
+        std::sort(units.begin(), units.end());
+    }
+    auto* model = qobject_cast<QStandardItemModel*>(combo->model());
+    for (const int64_t u : units) {
+        const bool offered = u != shown || shownOffered;
+        combo->addItem(tickText(u, state.priceScale) + (offered ? QString() : QStringLiteral(" (unavailable)")),
+                       qlonglong(u));
+        if (!offered && model) {
+            auto* item = model->item(combo->count() - 1);
+            item->setEnabled(false);
+            item->setToolTip(QStringLiteral("No loaded data builds this tick; its columns are veiled."));
+        }
+    }
+    combo->setPlaceholderText(emptyText);
+    combo->setCurrentIndex(shown > 0 ? combo->findData(qlonglong(shown)) : -1);
+}
+
+void TopToolbar::setTickSelectorState(const TickSelectorState& state) {
+    if (m_tickStateSet && state == m_tickState) return;
+    m_tickStateSet = true;
+    m_tickState = state;
+    {
+        const QSignalBlocker block(m_tickModeCombo);
+        m_tickModeCombo->setCurrentIndex(state.manual ? 1 : 0);
+    }
+    fillTickPresetCombo(m_tickPresetCombo, state, QStringLiteral("tick"));
+
+    m_tickModeCombo->setEnabled(state.enabled);
+    m_tickPresetCombo->setEnabled(state.enabled && !state.offeredUnits.empty());
+    if (!state.enabled) {
+        m_tickModeCombo->setToolTip(state.disabledReason);
+        m_tickPresetCombo->setToolTip(state.disabledReason);
+        m_tickVeilLabel->setVisible(false);
+        return;
+    }
+    m_tickModeCombo->setToolTip(state.manual
+        ? QStringLiteral("Manual: the tick stays locked; zoom only scales rows. Remembered per symbol and timeframe.")
+        : QStringLiteral("Auto: the smallest preset whose rows are at least the minimum row height."));
+    QString tip = state.manual ? QStringLiteral("Locked tick %1. Presets: what some loaded data can build.")
+                                     .arg(tickText(state.manualUnits, state.priceScale))
+                               : QStringLiteral("Drawn tick %1 (Auto). Pick a preset to lock it (Manual).")
+                                     .arg(tickText(state.drawnUnits, state.priceScale));
+    if (!state.indicator.isEmpty()) tip += QStringLiteral("\n") + state.indicator;
+    m_tickPresetCombo->setToolTip(tip);
+    m_tickVeilLabel->setToolTip(state.indicator);
+    m_tickVeilLabel->setVisible(!state.indicator.isEmpty());
 }
 
 void TopToolbar::setColorPreset(const QString& preset) {

@@ -142,6 +142,12 @@ ParseResult RequestParser::feed(const QByteArray& bytes) {
     return result;
 }
 
+bool isWidgetScreenshotTarget(const QString& target) {
+    static const QStringList tabs{"Tick", "Look", "Budgets", "Live", "Debug", "TPO"};
+    return target == "telemetry" || target == "toolbar" || target == "settings" ||
+           (target.startsWith("settings:") && tabs.contains(target.mid(9)));
+}
+
 ValidationResult validateQuery(const Request& request, const QString& activeSymbol) {
     const QUrlQuery query(request.query);
     auto reject = [](int status, const char* code, const char* message) {
@@ -276,7 +282,8 @@ ValidationResult validateQuery(const Request& request, const QString& activeSymb
             }
         }
         if (!validName) return reject(422, "invalid_name", "Invalid screenshot name");
-        if (result.screenshotTarget != "main" && result.screenshotTarget != "heatmap" && result.screenshotTarget != "lab")
+        if (result.screenshotTarget != "main" && result.screenshotTarget != "heatmap" && result.screenshotTarget != "lab" &&
+            !isWidgetScreenshotTarget(result.screenshotTarget))
             return reject(422, "invalid_target", "Unknown screenshot target");
         return result;
     }

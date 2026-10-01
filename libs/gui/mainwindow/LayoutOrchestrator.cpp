@@ -9,6 +9,7 @@
 #include "../widgets/StockChartDock.hpp"
 #include "../widgets/OrderBookDock.hpp"
 #include "../widgets/PaperTradingDock.hpp"
+#include "../widgets/HeatmapTelemetryDock.hpp"
 #include "../widgets/LayoutManager.hpp"
 #include <QScreen>
 #include <QGuiApplication>
@@ -89,6 +90,7 @@ void LayoutOrchestrator::removeAllDocks(const DockWidgets& docks) {
     remove(docks.paperTradingDock);
     remove(docks.copenetDock);
     remove(docks.aiCommentaryDock);
+    remove(docks.heatmapTelemetryDock);
 }
 
 void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
@@ -133,6 +135,7 @@ void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
     tabifyRight(docks.screenerDock);
     tabifyRight(docks.stockChartDock);
     tabifyRight(docks.paperTradingDock);
+    tabifyRight(docks.heatmapTelemetryDock);
 
     // Bottom strip: CopeNet and AI Commentary — added to layout but hidden by default.
     // They are not production-ready; users can show them via the View menu.
@@ -170,6 +173,10 @@ void LayoutOrchestrator::applyDockConstraints(const DockWidgets& docks) {
     applyMinimum(docks.paperTradingDock, QSize(360, 280));
     applyMinimum(docks.copenetDock,      fallback);
     applyMinimum(docks.aiCommentaryDock, fallback);
+    if (docks.heatmapTelemetryDock) { // its scroll area hints too narrow a minimum for the table
+        docks.heatmapTelemetryDock->setMinimumSize(HeatmapTelemetryDock::kMinimumWidth, 240);
+        docks.heatmapTelemetryDock->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+    }
 }
 
 void LayoutOrchestrator::setDockSizes(const DockWidgets& docks) {
@@ -202,5 +209,9 @@ void LayoutOrchestrator::showAllDocks(const DockWidgets& docks) {
     // Users can show them via the View menu.
     if (docks.copenetDock)      docks.copenetDock->hide();
     if (docks.aiCommentaryDock) docks.aiCommentaryDock->hide();
+    if (docks.heatmapTelemetryDock) {
+        docks.heatmapTelemetryDock->setVisible(docks.heatmapTelemetryVisible);
+        if (docks.heatmapTelemetryVisible) docks.heatmapTelemetryDock->raise();
+    }
 }
 

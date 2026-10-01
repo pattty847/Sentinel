@@ -436,6 +436,13 @@ QString GuiApiServer::captureScreenshot(const QString& baseName, const QString& 
 }
 
 QImage GuiApiServer::grabTargetImage(const QString& target, QString* error) const {
+    if (AgentApi::isWidgetScreenshotTarget(target)) {
+        if (!m_widgetGrab) {
+            if (error) *error = "widget_target_unavailable";
+            return {};
+        }
+        return m_widgetGrab(target, error);
+    }
     if (target == "heatmap") {
         if (!m_heatmapView || !m_heatmapView->isVisible()) {
             if (error) {

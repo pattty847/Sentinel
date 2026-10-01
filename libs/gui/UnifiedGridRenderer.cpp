@@ -456,6 +456,31 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
   }
 }
 
+// The configured TPO style, session and bracket (startup, and the settings
+// dialog's TPO reset).
+void UnifiedGridRenderer::applyTpoConfig(const ClientTpoConfig& config) {
+  TpoOverlayRenderer::Style style = m_tpoOverlay.style();
+  style.layout = tpo::parseLayout(config.layout, tpo::Layout::Collapsed);
+  style.theme = tpo::parseTheme(config.theme, tpo::Theme::Rainbow);
+  style.rowPx = config.rowPx;
+  style.maxSessions = config.sessions;
+  m_tpoOverlay.setStyle(style);
+  const int sessionType = tpo::parseSessionType(config.session, 4);
+  const int period = static_cast<int>(tpo::resolvePeriodMs(
+      sessionType, static_cast<int64_t>(std::max(1, config.periodMinutes)) * 60000));
+  if (sessionType != m_tpoSessionType || period != m_tpoTimeframeMs) {
+    m_tpoSessionType = sessionType;
+    m_tpoTimeframeMs = period;
+    emit tpoConfigChanged();
+  }
+  sLog_Render("TPO config: layout=" << tpo::layoutName(style.layout)
+              << " theme=" << tpo::themeName(style.theme)
+              << " session=" << tpo::sessionTypeName(sessionType)
+              << " periodMs=" << period << " sessions=" << m_tpoOverlay.style().maxSessions
+              << " rowPx=" << m_tpoOverlay.style().rowPx);
+  update();
+}
+
 void UnifiedGridRenderer::setTpoTimeframeMs(int timeframeMs) {
   const int resolved = static_cast<int>(tpo::resolvePeriodMs(m_tpoSessionType, timeframeMs));
   if (m_tpoTimeframeMs == resolved) {
@@ -1140,27 +1165,7 @@ void UnifiedGridRenderer::applyClientConfig(const ClientConfig &config) {
     m_axisTextService->setAxisLabelPxOverride(config.gui.axisLabelPx);
     m_axisTextService->refreshAxisLayout();
   }
-  {
-    TpoOverlayRenderer::Style style = m_tpoOverlay.style();
-    style.layout = tpo::parseLayout(config.tpo.layout, tpo::Layout::Collapsed);
-    style.theme = tpo::parseTheme(config.tpo.theme, tpo::Theme::Rainbow);
-    style.rowPx = config.tpo.rowPx;
-    style.maxSessions = config.tpo.sessions;
-    m_tpoOverlay.setStyle(style);
-    const int sessionType = tpo::parseSessionType(config.tpo.session, 4);
-    const int period = static_cast<int>(tpo::resolvePeriodMs(
-        sessionType, static_cast<int64_t>(std::max(1, config.tpo.periodMinutes)) * 60000));
-    if (sessionType != m_tpoSessionType || period != m_tpoTimeframeMs) {
-      m_tpoSessionType = sessionType;
-      m_tpoTimeframeMs = period;
-      emit tpoConfigChanged();
-    }
-    sLog_Render("TPO config: layout=" << tpo::layoutName(style.layout)
-                << " theme=" << tpo::themeName(style.theme)
-                << " session=" << tpo::sessionTypeName(sessionType)
-                << " periodMs=" << period << " sessions=" << m_tpoOverlay.style().maxSessions
-                << " rowPx=" << m_tpoOverlay.style().rowPx);
-  }
+  applyTpoConfig(config.tpo);
   if (config.heatmap.labelPx > 0 && config.heatmap.labelPx <= 128) {
     m_heatmapLabelPx = config.heatmap.labelPx;
   } else if (config.heatmap.labelPx > 128) {

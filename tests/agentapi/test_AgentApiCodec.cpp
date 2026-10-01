@@ -211,6 +211,10 @@ TEST(AgentApiCodec, QueryValidation) {
     EXPECT_EQ(screenshot.screenshotTarget, "heatmap");
     EXPECT_EQ(validateQuery({"GET", "/api/v1/screenshot", "name=../outside"}).status, 422);
     EXPECT_EQ(validateQuery({"GET", "/api/v1/screenshot", "target=unknown"}).status, 422);
+    // S6c widget targets: the settings dialog (optionally a tab) and the telemetry dock.
+    for (const char *target : {"settings", "settings:Look", "settings:Budgets", "telemetry", "toolbar"})
+        EXPECT_EQ(validateQuery({"GET", "/api/v1/screenshot", QString("target=") + target}).status, 200) << target;
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/screenshot", "target=settings:Nope"}).status, 422);
     EXPECT_EQ(validateQuery({"GET", "/api/v1/screenshot", "afterOperation=o1"}).status, 200);
 }
 

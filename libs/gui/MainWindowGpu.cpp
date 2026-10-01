@@ -1,4 +1,5 @@
 #include <QQuickView>
+#include <QTabWidget>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
@@ -32,6 +33,8 @@
 #include "widgets/AICommentaryFeedDock.hpp"
 #include "widgets/TopToolbar.hpp"
 #include "widgets/HeatmapSettingsDialog.hpp"
+#include "widgets/HeatmapTelemetryDock.hpp"
+#include "mainwindow/HeatmapChartControls.hpp"
 #include "widgets/WatchlistDock.hpp"
 #include "widgets/StockChartDock.hpp"
 #include "widgets/OrderBookDock.hpp"
@@ -107,20 +110,26 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         QString::fromStdString(clientConfig.server.host),
         QString::fromStdString(clientConfig.server.port),
         QString::fromStdString(clientConfig.server.caFile));
-    m_heatmapChartSettings = m_heatmapSettingsStore.load("main", clientConfig.heatmap);
+    m_heatmapSettings = std::make_unique<heatmap::HeatmapSettingsModel>(m_heatmapSettingsStore, "main",
+                                                                         clientConfig.heatmap);
     if (const auto& renderer = GuiConfigStore::instance().heatmapRendererOverride(); !renderer.isEmpty()) {
         // --heatmap-renderer: this process only; later persisted patches and
         // workspace snapshots never carry it (they save from the stored settings).
-        m_heatmapChartSettings.renderer = renderer.toStdString();
+        m_heatmapSettings->setProcessRenderer(renderer.toStdString());
         sLog_App("Heatmap renderer override (process only): " << renderer);
     }
+    m_heatmapControls = new HeatmapChartControls(m_heatmapSettings.get(), this);
     // Attach BEFORE connect: the adapter learns connection state only from the
     // signal, and subscribe immediately pushes availability. No chart/controller
     // is created in S6a, in either configured renderer mode.
     m_heatmapDataService = std::make_unique<heatmap::HeatmapDataService>(
         [client = remote->streamClient()](QObject *) {
             return new protocol::SentinelStreamClientTransport(*client);
-        }, m_heatmapSettingsStore.loadBudgets(clientConfig.heatmap));
+        }, m_heatmapSettings->budgets());
+    // Budgets tab: the process tiers apply to the live service at once.
+    m_heatmapSettings->setBudgetSink([this](const heatmap::HeatmapBudgets &budgets) {
+        return m_heatmapDataService && m_heatmapDataService->setBudgets(budgets);
+    });
     m_dataSource = std::move(remote);
     ServiceLocator::registerDataSource(m_dataSource.get());
     setupUI();
@@ -193,16 +202,13 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     m_modeController->setCandlesEnabled(true);
     m_layoutOrchestrator = std::make_unique<LayoutOrchestrator>(this);
     m_layoutOrchestrator->setHeatmapHooks(
+        // Named workspaces only; the model ignores _last_session (INV-088). A
+        // restore emits changed(): the chart, toolbar, dialog and dock follow.
+        [this](const QString &name) { m_heatmapSettings->saveLayout(name); },
         [this](const QString &name) {
-            m_heatmapSettingsStore.saveLayout(name, "main", GuiConfigStore::instance().clientConfig().heatmap);
-        },
-        [this](const QString &name) {
-            m_heatmapSettingsStore.restoreLayoutInto(
-                name, "main", m_heatmapChartSettings, GuiConfigStore::instance().clientConfig().heatmap);
-            if (auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr) {
-                renderer->setHeatmapChartSettings(m_heatmapChartSettings);
-                renderer->setHeatmapRenderer(QString::fromStdString(m_heatmapChartSettings.renderer));
-            }
+            m_heatmapSettings->restoreLayout(name);
+            // The dock's saved Qt state may disagree with showTelemetry: the setting wins.
+            m_heatmapControls->requestTelemetryVisible(m_heatmapSettings->settings().showTelemetry);
         });
     // Defer arrangeDefaultLayout() until after show: resizeDocks() fails at default 640x480.
     m_menuBuilder = std::make_unique<MenuBuilder>(menuBar());
@@ -246,6 +252,9 @@ MainWindowGPU::~MainWindowGPU() {
     // docks and the chart: detach the chart's GPU layer while both are alive.
     if (auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr)
         renderer->setHeatmapService(nullptr);
+    // The controls point at the settings model (a member): end them first.
+    delete m_heatmapControls;
+    m_heatmapControls = nullptr;
 }
 
 void MainWindowGPU::setupUI() {
@@ -269,6 +278,12 @@ void MainWindowGPU::setupUI() {
     m_orderBookDock = docks.orderBookDock;
     m_paperTradingDock = new PaperTradingDock(this);
     m_paperTradingDock->setDataSource(m_dataSource.get());
+    m_heatmapTelemetryDock = new HeatmapTelemetryDock(this);
+    // In a dock area from the start (a _last_session restore that predates the dock
+    // leaves it there); shown by the showTelemetry setting (HeatmapChartControls).
+    addDockWidget(Qt::RightDockWidgetArea, m_heatmapTelemetryDock);
+    m_heatmapTelemetryDock->hide();
+    m_heatmapControls->setTelemetryDock(m_heatmapTelemetryDock);
     if (m_screenerDock) {
         if (auto* remote = dynamic_cast<RemoteGridDataSource*>(m_dataSource.get())) {
             m_screenerDock->setStreamClient(remote->streamClient());
@@ -371,11 +386,8 @@ void MainWindowGPU::setupUI() {
         });
         connect(m_heatmapDock->toolbar(), &TopToolbar::colorPresetSelected, this, [this](const QString& preset) {
             // The chart palette is a persisted chart setting both renderers draw (S6b).
-            AgentApi::ControlBody body;
-            body.heatmapSettings = QJsonObject{{"palettePreset", preset}};
-            body.persistHeatmapSettings = true;
-            const auto result = agentApiApplyControl("heatmap/settings", body);
-            if (result.status != 200) sLog_Warning("Palette preset rejected: " << preset << " " << result.message);
+            if (const auto error = m_heatmapSettings->apply({{"palettePreset", preset}}); !error.isEmpty())
+                sLog_Warning("Palette preset rejected: " << preset << " " << error);
         });
         connect(m_heatmapDock->toolbar(), &TopToolbar::chartTypeSelected, this, [this](const QString& type) {
             if (!m_qmlController) return;
@@ -385,18 +397,10 @@ void MainWindowGPU::setupUI() {
             renderer->setCandleStyle(style);
         });
         connect(m_heatmapDock->toolbar(), &TopToolbar::subscribeRequested, this, &MainWindowGPU::onSubscribe);
+        // The tick selector (S6c) reads and writes the chart settings model.
+        m_heatmapControls->setToolbar(m_heatmapDock->toolbar());
         connect(m_heatmapDock->toolbar(), &TopToolbar::settingsRequested, this, [this]() {
-            if (!m_qmlController) return;
-            auto* renderer = m_qmlController->getUnifiedGridRenderer();
-            if (!renderer) return;
-            if (!m_heatmapSettingsDialog) {
-                m_heatmapSettingsDialog = new HeatmapSettingsDialog(renderer, this);
-            } else {
-                m_heatmapSettingsDialog->setRenderer(renderer);
-            }
-            m_heatmapSettingsDialog->show();
-            m_heatmapSettingsDialog->raise();
-            m_heatmapSettingsDialog->activateWindow();
+            if (auto* dialog = openHeatmapSettingsDialog()) dialog->activateWindow();
         });
         connect(m_heatmapDock->toolbar(), &TopToolbar::timeframeSelected, this, [this](const QString& label) {
             const int ms = timeframeMsFromLabel(label);
@@ -409,6 +413,22 @@ void MainWindowGPU::setupUI() {
     }
     
     setUpdatesEnabled(true);
+}
+
+HeatmapSettingsDialog* MainWindowGPU::openHeatmapSettingsDialog() {
+    auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
+    if (!renderer) return nullptr;
+    if (!m_heatmapSettingsDialog) {
+        m_heatmapSettingsDialog = new HeatmapSettingsDialog(m_heatmapSettings.get(), renderer, this);
+        m_heatmapSettingsDialog->setTpoDefaults(GuiConfigStore::instance().clientConfig().tpo);
+        m_heatmapControls->setDialog(m_heatmapSettingsDialog);
+    } else {
+        m_heatmapSettingsDialog->setRenderer(renderer);
+        m_heatmapSettingsDialog->refreshFromModel();
+    }
+    m_heatmapSettingsDialog->show();
+    m_heatmapSettingsDialog->raise();
+    return m_heatmapSettingsDialog;
 }
 
 void MainWindowGPU::setWindowProperties() {
@@ -560,6 +580,35 @@ void MainWindowGPU::setupGuiApiServer() {
                                                     },
                                                     this);
     m_guiApiServer->setHeatmapSnapshot([this] { return agentApiHeatmapSnapshot(); });
+    // S6c widget targets: the settings dialog (opened on demand, a given tab) and
+    // the telemetry dock, grabbed from their own painting (never screen pixels).
+    m_guiApiServer->setWidgetGrab([this](const QString& target, QString* error) -> QImage {
+        if (target == "telemetry") {
+            if (!m_heatmapTelemetryDock || !m_heatmapTelemetryDock->exposed()) {
+                if (error) *error = "telemetry_not_visible";
+                return {};
+            }
+            m_heatmapTelemetryDock->refresh();
+            return m_heatmapTelemetryDock->grab().toImage();
+        }
+        if (target == "toolbar") {
+            auto* toolbar = m_heatmapDock ? m_heatmapDock->toolbar() : nullptr;
+            if (!toolbar || !toolbar->isVisible()) {
+                if (error) *error = "toolbar_not_visible";
+                return {};
+            }
+            return toolbar->grab().toImage();
+        }
+        auto* dialog = openHeatmapSettingsDialog();
+        if (!dialog) {
+            if (error) *error = "settings_unavailable";
+            return {};
+        }
+        if (target.startsWith("settings:"))
+            for (int i = 0; i < dialog->tabs()->count(); ++i)
+                if (dialog->tabs()->tabText(i) == target.mid(9)) dialog->tabs()->setCurrentIndex(i);
+        return dialog->grab().toImage();
+    });
     if (!m_guiApiServer->start(static_cast<quint16>(port), screenshotDir)) {
         sLog_Error("GUI API failed to bind on port " << port << ": " << m_guiApiServer->errorString());
     }
@@ -952,6 +1001,7 @@ void MainWindowGPU::setupMenuBar() {
     docks.stockChartDock = m_stockChartDock;
     docks.orderBookDock = m_orderBookDock;
     docks.paperTradingDock = m_paperTradingDock;
+    docks.heatmapTelemetryDock = m_heatmapTelemetryDock;
 
     MenuBuilder::Callbacks callbacks;
     callbacks.saveLayout = [this]() { onSaveLayout(); };
@@ -1068,11 +1118,16 @@ void MainWindowGPU::connectMarketDataSignals() {
     // S6b: the GPU heatmap layer shares the process service (attached before the
     // stream client connected, INV-088); the chart settings pick the renderer.
     unifiedGridRenderer->setHeatmapService(m_heatmapDataService.get());
-    unifiedGridRenderer->setHeatmapTickMemory(m_heatmapSettingsStore.loadManualTicks());
-    unifiedGridRenderer->setHeatmapChartSettings(m_heatmapChartSettings);
-    unifiedGridRenderer->setHeatmapRenderer(QString::fromStdString(m_heatmapChartSettings.renderer));
-    if (m_heatmapDock && m_heatmapDock->toolbar())
-        m_heatmapDock->toolbar()->setColorPreset(QString::fromStdString(m_heatmapChartSettings.palettePreset));
+    // S6c: the controls apply the tick memory, settings and renderer, then keep the
+    // chart, toolbar, dialog and telemetry dock on the settings model.
+    m_heatmapControls->setRenderer(unifiedGridRenderer);
+    if (m_heatmapDock && m_heatmapDock->toolbar()) {
+        auto* toolbar = m_heatmapDock->toolbar();
+        toolbar->setColorPreset(QString::fromStdString(m_heatmapSettings->settings().palettePreset));
+        connect(m_heatmapSettings.get(), &heatmap::HeatmapSettingsModel::changed, toolbar, [this, toolbar] {
+            toolbar->setColorPreset(QString::fromStdString(m_heatmapSettings->settings().palettePreset));
+        });
+    }
     if (dataProcessor) {
         QMetaObject::invokeMethod(dataProcessor, [dataProcessor, connected = m_connected] {
             dataProcessor->setRecordingConnected(connected);
@@ -1315,6 +1370,8 @@ LayoutOrchestrator::DockWidgets MainWindowGPU::getDockWidgets() const {
     docks.stockChartDock = m_stockChartDock;
     docks.orderBookDock = m_orderBookDock;
     docks.paperTradingDock = m_paperTradingDock;
+    docks.heatmapTelemetryDock = m_heatmapTelemetryDock;
+    docks.heatmapTelemetryVisible = m_heatmapSettings && m_heatmapSettings->settings().showTelemetry;
     return docks;
 }
 
@@ -1399,7 +1456,7 @@ AgentApi::ViewportSnapshot MainWindowGPU::agentApiViewportSnapshot() const {
 }
 
 QJsonObject MainWindowGPU::agentApiHeatmapSnapshot() const {
-    const auto &s = m_heatmapChartSettings;
+    const auto &s = m_heatmapSettings->settings();
     const QJsonValue missing(QJsonValue::Null);
     auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
     const bool gpu = renderer && renderer->gpuHeatmapActive();
@@ -1410,6 +1467,7 @@ QJsonObject MainWindowGPU::agentApiHeatmapSnapshot() const {
         {"drawnTickUnits", missing}, {"indicatorText", missing}, {"residentBytes", missing},
         {"gpuBytes", missing}, {"liveVersion", missing}, {"liveAgeMs", missing}, {"controllerStats", missing},
         {"settings", heatmap::settingsJson(s)}};
+    out["ui"] = m_heatmapControls->uiState();
     if (m_heatmapDataService) {
         const auto stats = m_heatmapDataService->stats();
         out["service"] = QJsonObject{{"connected", m_heatmapDataService->connected()},
@@ -1434,20 +1492,16 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
         return out;
     }
     if (kind == "heatmap/settings") {
-        const auto error = m_heatmapSettingsStore.applyChartPatch(
-            "main", m_heatmapChartSettings, body.heatmapSettings, body.persistHeatmapSettings,
-            GuiConfigStore::instance().clientConfig().heatmap, m_currentSymbol.toStdString(), renderer->getCurrentTimeframe());
+        // The settings model is the single source of truth: its changed() signal
+        // drives the chart (renderer flip, tick policy, palette), the toolbar, the
+        // settings dialog and the telemetry dock (S6c).
+        const auto error = m_heatmapSettings->apply(body.heatmapSettings, body.persistHeatmapSettings);
         if (!error.isEmpty()) {
             out.status = 422; out.code = "invalid_settings"; out.message = error;
             return out;
         }
-        sLog_App("Heatmap settings applied chart=main renderer=" << m_heatmapChartSettings.renderer
+        sLog_App("Heatmap settings applied chart=main renderer=" << m_heatmapSettings->settings().renderer
                  << " persist=" << body.persistHeatmapSettings);
-        // S6b: settings drive the chart now (renderer flip, tick policy, palette).
-        const bool explicitTick = body.heatmapSettings.contains("manualTick") &&
-                                  m_heatmapChartSettings.tickMode == heatmap::TickMode::Manual;
-        renderer->setHeatmapChartSettings(m_heatmapChartSettings, explicitTick);
-        renderer->setHeatmapRenderer(QString::fromStdString(m_heatmapChartSettings.renderer));
         out.data = agentApiHeatmapSnapshot();
         out.data["persist"] = body.persistHeatmapSettings;
     } else if (kind == "input") {

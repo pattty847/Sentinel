@@ -14,6 +14,7 @@ Related: MainWindowGpu.cpp, LayoutManager.hpp.
 #include <QScreen>
 #include <QApplication>
 #include <functional>
+#include <QDockWidget>
 
 // Forward declarations
 class ChartDock;
@@ -40,6 +41,10 @@ public:
         StockChartDock* stockChartDock = nullptr;
         OrderBookDock* orderBookDock = nullptr;
         PaperTradingDock* paperTradingDock = nullptr;
+        // Heatmap telemetry (S6c): tabbed with the right column; its visibility is
+        // the chart's showTelemetry setting, not the default layout.
+        QDockWidget* heatmapTelemetryDock = nullptr;
+        bool heatmapTelemetryVisible = false;
     };
 
     explicit LayoutOrchestrator(QMainWindow* mainWindow);

@@ -33,6 +33,10 @@ public:
 
     void setHeatmapSnapshot(std::function<QJsonObject()> snapshot) { m_heatmapSnapshot = std::move(snapshot); }
     bool start(quint16 port, const QString& screenshotDir);
+    // Widget screenshot targets (S6c): "settings[:<Tab>]", "telemetry" and "toolbar" grab the
+    // widget itself (QWidget::grab: its own painting, never screen pixels).
+    using WidgetGrab = std::function<QImage(const QString& target, QString* error)>;
+    void setWidgetGrab(WidgetGrab grab) { m_widgetGrab = std::move(grab); }
     void stop();
     quint16 port() const { return m_server.serverPort(); }
     QString errorString() const;
@@ -41,6 +45,7 @@ private slots:
     void handleNewConnection();
 
 private:
+    WidgetGrab m_widgetGrab;
     void handleRequest(QTcpSocket* socket);
     void waitForOperation(QTcpSocket* socket, const QString& id, qint64 deadlineMs,
                           bool screenshot, const QString& name = {}, const QString& target = "main");
