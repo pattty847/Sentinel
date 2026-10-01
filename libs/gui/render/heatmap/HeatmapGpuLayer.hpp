@@ -114,6 +114,7 @@ private:
     std::string symbol_;
     int64_t tfMs_ = 60'000;
     ViewWindow view_;
+    bool hasView_ = false; // setView called: views are posted only from then on
     bool priceKnown_ = false;
     double widthPx_ = 0, heightPx_ = 0, dpr_ = 1;
     HeatmapChartSettings settings_;

@@ -117,7 +117,8 @@ void HeatmapGpuLayer::setTimeframeMs(int64_t tfMs) {
 }
 
 void HeatmapGpuLayer::setView(const ViewWindow &view, bool priceKnown) {
-    if (view == view_ && priceKnown == priceKnown_) return;
+    if (hasView_ && view == view_ && priceKnown == priceKnown_) return;
+    hasView_ = true;
     view_ = view;
     priceKnown_ = priceKnown;
     viewChanged();
@@ -210,7 +211,8 @@ void HeatmapGpuLayer::viewChanged() {
 }
 
 void HeatmapGpuLayer::postView() {
-    if (!controller_ || symbol_.empty() || tfMs_ <= 0 || !(view_.timeHiMs > view_.timeLoMs)) return;
+    // Nothing is requested before the chart has a view (no placeholder window).
+    if (!controller_ || !hasView_ || symbol_.empty() || tfMs_ <= 0 || !(view_.timeHiMs > view_.timeLoMs)) return;
     QMetaObject::invokeMethod(controller_, [c = controller_, symbol = symbol_, tf = tfMs_, lo = view_.timeLoMs,
                                             hi = view_.timeHiMs] { c->setView(symbol, tf, lo, hi); },
                               Qt::QueuedConnection);

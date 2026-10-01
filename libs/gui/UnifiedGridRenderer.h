@@ -141,6 +141,10 @@ private:
     bool m_gpuHeatmap = false;
     bool m_gpuPriceKnown = false;   // the viewport's price window is real (not a placeholder)
     bool m_gpuReseedPrice = false;  // a symbol switch: the next book top centres price
+    // The seeded time window follows the chart's size until the user (or the
+    // Agent API) moves the view: the first book top can arrive before layout.
+    bool m_gpuViewPristine = false;
+    bool m_gpuSelfViewport = false; // the seed or follow-live is setting the viewport
     bool m_chartSensitivityApplied = false;
     HeatmapOverlayRenderer m_heatmapOverlay;
     QTimer* m_heatmapRenderTimer = nullptr;
@@ -446,6 +450,8 @@ private:
     void applyGpuLimits();
     void followGpuLive();
     void seedGpuViewport(double bestBid, double bestAsk);
+    void setGpuViewportSelf(qint64 start, qint64 end, double priceMin, double priceMax);
+    qint64 gpuInitialSpanMs(double widthPx) const;
     void syncGpuSurface();
     void computeAndApplyFrameMapping(FrameContext& frame,
                                      HeatmapIntensityNode* texNode,

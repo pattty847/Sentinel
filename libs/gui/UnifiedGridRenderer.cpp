@@ -113,8 +113,14 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
 }
 
 void UnifiedGridRenderer::onTradeReceived(const Trade &trade) {
-  // gpu mode: the legacy price centring must not move the GPU chart's price window.
-  if (!m_gpuHeatmap && QString::fromStdString(trade.product_id) == m_activeSymbol && m_heatmapStreamService) {
+  if (m_gpuHeatmap) {
+    // gpu mode: the legacy price centring must not move the GPU chart's price
+    // window; a trade seeds it only when no book top has (yet) for this symbol.
+    if ((m_gpuReseedPrice || !m_gpuPriceKnown) && QString::fromStdString(trade.product_id) == m_activeSymbol)
+      seedGpuViewport(trade.price, trade.price);
+    return;
+  }
+  if (QString::fromStdString(trade.product_id) == m_activeSymbol && m_heatmapStreamService) {
     m_heatmapStreamService->setLastTrade(trade.price, m_viewState.get());
   }
 }
@@ -179,6 +185,7 @@ void UnifiedGridRenderer::onViewportChanged() {
     return;
   update();
   if (m_gpuHeatmap) {
+    if (!m_gpuSelfViewport) m_gpuViewPristine = false; // someone else moved the view
     // The controller plans from the committed view; the legacy band stream is
     // muted, so its viewport is re-published when the renderer flips back.
     syncGpuView();
@@ -245,6 +252,13 @@ void UnifiedGridRenderer::geometryChange(const QRectF &newGeometry,
       m_axisTextService->refreshAxisLayout();
     }
     syncGpuSurface();
+    if (m_gpuHeatmap && m_gpuViewPristine && m_viewState && m_viewState->isTimeWindowValid() &&
+        newGeometry.width() > 0) {
+      // Untouched seeded view: keep initial_column_px on the laid-out width.
+      const qint64 end = m_viewState->getVisibleTimeEnd();
+      setGpuViewportSelf(end - gpuInitialSpanMs(newGeometry.width()), end, m_viewState->getMinPrice(),
+                         m_viewState->getMaxPrice());
+    }
     update();
   }
 }
@@ -892,7 +906,7 @@ void UnifiedGridRenderer::followGpuLive() {
   const int64_t target = liveEnd + pad;
   if (target <= end) return; // the live bucket is inside the padded view
   const int64_t shift = target - end;
-  m_viewState->setViewport(start + shift, end + shift, m_viewState->getMinPrice(), m_viewState->getMaxPrice());
+  setGpuViewportSelf(start + shift, end + shift, m_viewState->getMinPrice(), m_viewState->getMaxPrice());
   emit liveRenderTick();
 }
 
@@ -907,10 +921,9 @@ void UnifiedGridRenderer::seedGpuViewport(double bestBid, double bestAsk) {
   const int64_t tf = std::max<int64_t>(1, m_currentTimeframe_ms);
   qint64 start = m_viewState->getVisibleTimeStart(), end = m_viewState->getVisibleTimeEnd();
   if (!timeValid) {
-    const auto* scroll = m_heatmapStreamService ? m_heatmapStreamService->autoScrollController() : nullptr;
-    const int gridWidth = m_heatmapStreamService ? m_heatmapStreamService->gridWidth() : 5120;
-    const int64_t span = scroll ? scroll->initialSpanMs(width(), gridWidth, tf) : 256 * tf;
+    const int64_t span = gpuInitialSpanMs(width());
     const int64_t now = QDateTime::currentMSecsSinceEpoch();
+    m_gpuViewPristine = true;
     end = recording::floorDiv(now, tf) * tf + tf +
           std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(span) * m_autoScrollPaddingFrac));
     start = end - span;
@@ -924,9 +937,23 @@ void UnifiedGridRenderer::seedGpuViewport(double bestBid, double bestAsk) {
   m_gpuReseedPrice = false;
   sLog_Render("GPU heatmap viewport seeded from the book top: mid=" << mid << " time=[" << start << ".." << end
               << "] price=[" << mid - span * 0.5 << ".." << mid + span * 0.5 << "]");
-  m_viewState->setViewport(start, end, mid - span * 0.5, mid + span * 0.5);
+  setGpuViewportSelf(start, end, mid - span * 0.5, mid + span * 0.5);
   syncGpuView(); // also when the viewport did not change (priceKnown flips)
   update();
+}
+
+// The legacy first view's time span: initial_column_px per column (16 columns min).
+qint64 UnifiedGridRenderer::gpuInitialSpanMs(double widthPx) const {
+  const int64_t tf = std::max<int64_t>(1, m_currentTimeframe_ms);
+  const auto* scroll = m_heatmapStreamService ? m_heatmapStreamService->autoScrollController() : nullptr;
+  const int gridWidth = m_heatmapStreamService ? m_heatmapStreamService->gridWidth() : 5120;
+  return scroll ? scroll->initialSpanMs(widthPx, gridWidth, tf) : 256 * tf;
+}
+
+void UnifiedGridRenderer::setGpuViewportSelf(qint64 start, qint64 end, double priceMin, double priceMax) {
+  m_gpuSelfViewport = true;
+  m_viewState->setViewport(start, end, priceMin, priceMax);
+  m_gpuSelfViewport = false;
 }
 
 //  COORDINATE SYSTEM INTEGRATION: Expose CoordinateSystem to QML
