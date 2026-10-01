@@ -148,6 +148,41 @@ protected:
     void upload(HeatmapSourceController &c) {
         c.capacity()->report(300ull << 20, uploadKeys(c)); c.pollCapacity(); drainLive();
     }
+    void leaveAndRelease(HeatmapSourceController &c, int64_t tf) {
+        c.setView(symbol, tf, double(base - 4 * tf), double(base)); settle();
+        now += HeatmapSourceController::kLiveReleaseDelayMs;
+        c.pollLive(); settle();
+    }
+    // The deep grid cannot build Manual $1; the near fill pass must keep the
+    // known cell valid. Check the actual CPU bin oracle, not only source count.
+    void sendDeep(uint64_t revision, uint64_t observed = 1000) {
+        auto f = std::make_shared<ChunkFrame>(*tail(10, 10, 10, revision, observed));
+        auto &n = f->columns.columns.back().native.front();
+        n.grid.rowTickUnits = 500;
+        n.baseRow = 19;
+        n.coverage[0] = n.coverage[1] = {{19, 21, observed}};
+        n.entries = {{0, recording::encodeSize(3)}, {packRowSide(20, 19, true), recording::encodeSize(6)}};
+        send(f);
+    }
+    void checkManualCell(const LiveSnapshot &snapshot) {
+        ASSERT_EQ(snapshot.sources.size(), 2u);
+        const auto bucket = recording::floorDiv(minute(10), snapshot.tfMs) * snapshot.tfMs;
+        bool valid = false;
+        for (const auto &s : snapshot.sources) {
+            ASSERT_EQ(bucketState(*s.columns, bucket), BucketState::Present) << s.source;
+            const auto column = std::find_if(s.columns->columns.begin(), s.columns->columns.end(),
+                                            [bucket](const auto &c) { return c.bucketStartMs == bucket; });
+            ASSERT_NE(column, s.columns->columns.end());
+            const auto cell = binCell(*column, 95, 1);
+            if (s.source == source) EXPECT_FALSE(cell.valid);
+            else {
+                EXPECT_TRUE(cell.valid) << "previously drawn Manual $1 cell became veil";
+                EXPECT_GT(cell.bid, 0);
+                valid |= cell.valid;
+            }
+        }
+        EXPECT_TRUE(valid);
+    }
     void coarseRolloverKeepsPreviousBucket(int tfMinutes) {
         const auto tf = tfMinutes * kMinuteMs;
         cutoff = minute(tfMinutes - 1);
@@ -612,6 +647,104 @@ TEST_F(LiveClient, PanningAcrossLiveBoundaryKeepsSubscriptionForThreeSeconds) {
     a.setView(symbol, kMinuteMs, base, minute(80)); drainLive();
     EXPECT_EQ(transport.liveRequests.size(), 2u);
 }
+TEST_F(LiveClient, StaggeredFirstFramesWaitForEverySubscribedSource) {
+    for (const auto tf : {kMinuteMs, 5 * kMinuteMs, kHourMs}) {
+        SCOPED_TRACE(tf);
+        charts.clear(); jobs.clear(); drainLive(); now = 0;
+        transport.push(available(cutoff, true)); drainLive();
+        auto &c = chart(tf); settle(); upload(c); settle();
+        sendDeep(1); settle();
+        EXPECT_FALSE(c.latestLive());
+        advance(c, 700);
+        EXPECT_FALSE(c.latestLive()) << "500 ms cadence must not publish a partial source set";
+        send(tail(10, 10, 10, 1, 1000, "hmc2.near")); settle();
+        ASSERT_TRUE(c.latestLive());
+        checkManualCell(*c.latestLive());
+        EXPECT_EQ(c.stats().livePublications, 1u);
+    }
+}
+TEST_F(LiveClient, ViewChangeAndReturnToLiveKeepEveryPublishedSource) {
+    for (const auto tf : {kMinuteMs, 5 * kMinuteMs, kHourMs}) {
+        SCOPED_TRACE(tf);
+        charts.clear(); jobs.clear(); drainLive(); now = 0;
+        transport.push(available(cutoff, true)); drainLive();
+        auto &c = chart(tf); settle(); upload(c); settle();
+        sendDeep(1); send(tail(10, 10, 10, 1, 1000, "hmc2.near")); settle();
+        advance(c, HeatmapSourceController::kLiveMinIntervalMs); // establish both sources even before the fix
+        ASSERT_TRUE(c.latestLive());
+        const auto before = c.latestLive();
+        checkManualCell(*before);
+        // A same-window view edit retains both sources without re-subscribing.
+        const auto oldSub = sub();
+        c.setView(symbol, tf, double(base + 1), double(minute(79))); settle();
+        EXPECT_EQ(sub(), oldSub);
+        EXPECT_EQ(c.latestLive(), before);
+        leaveAndRelease(c, tf);
+        EXPECT_EQ(c.latestLive(), before) << "keep the known picture across a historical pan";
+        c.setView(symbol, tf, double(base), double(minute(80))); settle();
+        ASSERT_NE(sub(), oldSub);
+        unsigned publications = 0;
+        const auto connection = QObject::connect(&c, &HeatmapSourceController::liveChanged, &c, [&] {
+            if (const auto snapshot = c.latestLive()) { ++publications; checkManualCell(*snapshot); }
+        }, Qt::QueuedConnection);
+        sendDeep(1, 2000); settle();
+        advance(c, 700);
+        EXPECT_EQ(c.latestLive(), before);
+        send(tail(10, 10, 10, 1, 2000, "hmc2.near")); settle();
+        ASSERT_NE(c.latestLive(), before);
+        EXPECT_GT(publications, 0u);
+        checkManualCell(*c.latestLive());
+        QObject::disconnect(connection);
+    }
+}
+TEST_F(LiveClient, DeadSecondSourcePublishesAtTheBoundWithoutRestartingTheWait) {
+    transport.push(available(cutoff, true)); drainLive();
+    auto &c = chart(); settle(); upload(c); settle();
+    sendDeep(1); settle();
+    EXPECT_FALSE(c.latestLive());
+    advance(c, HeatmapSourceController::kLiveSourcesWaitMs - 1);
+    EXPECT_FALSE(c.latestLive());
+    advance(c, 1);
+    ASSERT_TRUE(c.latestLive());
+    ASSERT_EQ(c.latestLive()->sources.size(), 1u);
+    EXPECT_FALSE(live(c).carried);
+    sendDeep(2, 2000);
+    advance(c, HeatmapSourceController::kLiveMinIntervalMs);
+    EXPECT_EQ(live(c).revision, 2u) << "a dead source must not freeze the healthy one";
+    EXPECT_EQ(c.stats().livePublications, 2u);
+}
+TEST_F(LiveClient, DeadSourceAfterResubscriptionCarriesKnownColumnsAtTheBound) {
+    transport.push(available(cutoff, true)); drainLive();
+    auto &c = chart(5 * kMinuteMs); settle(); upload(c); settle();
+    sendDeep(1); send(tail(10, 10, 10, 1, 1000, "hmc2.near")); settle();
+    advance(c, HeatmapSourceController::kLiveMinIntervalMs);
+    ASSERT_TRUE(c.latestLive());
+    const auto before = c.latestLive();
+    checkManualCell(*before);
+    leaveAndRelease(c, 5 * kMinuteMs);
+    c.setView(symbol, 5 * kMinuteMs, double(base), double(minute(80))); settle();
+    sendDeep(1, 2000); settle();
+    advance(c, HeatmapSourceController::kLiveSourcesWaitMs - 1);
+    EXPECT_EQ(c.latestLive(), before);
+    advance(c, 1);
+    ASSERT_TRUE(c.latestLive());
+    ASSERT_NE(c.latestLive(), before);
+    checkManualCell(*c.latestLive());
+    for (const auto &s : c.latestLive()->sources) if (s.source == "hmc2.near") {
+        EXPECT_TRUE(s.carried);
+        for (const auto &old : before->sources) if (old.source == s.source) {
+            EXPECT_EQ(s.columns, old.columns);
+            EXPECT_EQ(s.gpu, old.gpu);
+            EXPECT_EQ(s.openEndMs, old.openEndMs);
+        }
+    }
+    EXPECT_GT(c.stats().liveBytes, 0u);
+    sendDeep(2, 3000); advance(c, HeatmapSourceController::kLiveMinIntervalMs);
+    checkManualCell(*c.latestLive());
+    send(tail(10, 10, 10, 1, 3000, "hmc2.near")); advance(c, HeatmapSourceController::kLiveMinIntervalMs);
+    checkManualCell(*c.latestLive());
+    for (const auto &s : c.latestLive()->sources) EXPECT_FALSE(s.carried);
+}
 TEST_F(LiveClient, LiveLatestWinsRateAndMergedAutoSummary) {
     auto &c = chart(5 * kMinuteMs); settle(); upload(c); settle();
     send(tail(10, 11, 10, 1, 1000)); // queue live job; hold it while newer data arrives
@@ -647,7 +780,10 @@ TEST_F(LiveClient, UnrelatedHistoryEventsDoNotDiscardLiveJobsOrBypassCadenceAndB
         now = 0; cutoff = minute(130); ++chunkRevision;
         transport.push(available(cutoff)); drainLive();
         auto &c = chart(kMinuteMs, 150); settle(); upload(c); settle();
-        send(tail(130, 130, 130, 1));
+        send(tail(130, 130, 130, 1)); settle(); // warm the composer before measuring cadence/backoff
+        now += HeatmapSourceController::kLiveMinIntervalMs;
+        const auto started = now;
+        send(tail(130, 130, 130, 2, 2000));
         ASSERT_EQ(jobs.size(), 1u);
         auto heldLiveJob = std::move(jobs.front()); jobs.pop_front();
         auto historyBurst = [&] {
@@ -660,23 +796,23 @@ TEST_F(LiveClient, UnrelatedHistoryEventsDoNotDiscardLiveJobsOrBypassCadenceAndB
             }
         };
         historyBurst();
-        send(tail(130, 130, 130, 2, 2000));
-        now = HeatmapSourceController::kLiveMinIntervalMs / 2; heldLiveJob(); drainLive(); runJobs(); // before it is due
+        send(tail(130, 130, 130, 3, 3000));
+        now = started + HeatmapSourceController::kLiveMinIntervalMs / 2; heldLiveJob(); drainLive(); runJobs(); // before it is due
         ASSERT_TRUE(c.latestLive());
-        EXPECT_EQ(live(c).revision, 1u);
+        EXPECT_EQ(live(c).revision, 2u);
         EXPECT_EQ(c.stats().liveStaleResults, 0u);
-        EXPECT_EQ(c.stats().livePublications, 1u);
+        EXPECT_EQ(c.stats().livePublications, 2u);
         const auto first = c.latestLive();
         const int interval = costMs > 5 ? HeatmapSourceController::kLiveBackoffIntervalMs
                                         : HeatmapSourceController::kLiveMinIntervalMs;
         EXPECT_EQ(c.stats().liveIntervalMs, interval);
         historyBurst();
-        now = interval - 1; c.pollLive(); runJobs(); EXPECT_EQ(c.latestLive(), first);
-        now = interval; c.pollLive(); runJobs(); EXPECT_EQ(live(c).revision, 2u);
-        EXPECT_EQ(c.stats().livePublications, 2u); // due from job start, not completion
+        now = started + interval - 1; c.pollLive(); runJobs(); EXPECT_EQ(c.latestLive(), first);
+        now = started + interval; c.pollLive(); runJobs(); EXPECT_EQ(live(c).revision, 3u);
+        EXPECT_EQ(c.stats().livePublications, 3u); // due from job start, not completion
         historyBurst();
         now += interval; c.pollLive(); runJobs();
-        EXPECT_EQ(c.stats().livePublications, 2u); // no live input changed
+        EXPECT_EQ(c.stats().livePublications, 3u); // no live input changed
     }
 }
 TEST_F(LiveClient, WarmLiveFrameDoesNotReconcileSpansAndAutoHasUniqueSources) {
@@ -819,12 +955,45 @@ TEST_F(LiveClient, MeasuredCostAboveFiveMsBacksOffToFiveSeconds) {
     auto &c = chart(); settle();
     send(tail(10, 10, 10, 1)); settle();
     ASSERT_TRUE(c.latestLive());
+    EXPECT_EQ(c.stats().liveIntervalMs, HeatmapSourceController::kLiveMinIntervalMs);
+    send(tail(10, 10, 10, 2, 2000)); advance(c, HeatmapSourceController::kLiveMinIntervalMs);
     EXPECT_EQ(c.stats().liveIntervalMs, 5000);
     EXPECT_DOUBLE_EQ(c.stats().liveComposeMs, 6);
     const auto first = c.latestLive();
-    send(tail(10, 10, 10, 2, 2000));
+    send(tail(10, 10, 10, 3, 3000));
     advance(c, 4999); EXPECT_EQ(c.latestLive(), first);
-    advance(c, 1); EXPECT_EQ(live(c).revision, 2u);
+    advance(c, 1); EXPECT_EQ(live(c).revision, 3u);
+}
+TEST_F(LiveClient, ColdFirstComposeAfterResubscriptionDoesNotEnterTheBackoffMedian) {
+    int64_t clock = 0, cost = 16'000'000;
+    composeClock = [&] { const auto t = clock; clock += cost; return t; };
+    for (const auto tf : {5 * kMinuteMs, kHourMs}) {
+        SCOPED_TRACE(tf);
+        charts.clear(); jobs.clear(); drainLive(); now = 0;
+        auto &c = chart(tf); settle(); upload(c); settle();
+        for (int subscription = 0; subscription < 2; ++subscription) {
+            SCOPED_TRACE(subscription);
+            cost = 16'000'000;
+            send(tail(10, 10, 10, 1)); settle();
+            ASSERT_TRUE(c.latestLive());
+            EXPECT_DOUBLE_EQ(c.stats().liveComposeMs, 16);
+            EXPECT_EQ(c.stats().liveIntervalMs, HeatmapSourceController::kLiveMinIntervalMs);
+            // If the cold cost were admitted, [16, 1, 6] would back off.
+            uint64_t revision = 1;
+            for (const int ms : {1, 6}) {
+                cost = int64_t(ms) * 1'000'000;
+                ++revision;
+                send(tail(10, 10, 10, revision, revision * 1000));
+                advance(c, HeatmapSourceController::kLiveMinIntervalMs);
+                EXPECT_EQ(live(c).revision, revision);
+                EXPECT_EQ(c.stats().liveIntervalMs, HeatmapSourceController::kLiveMinIntervalMs);
+            }
+            if (!subscription) {
+                leaveAndRelease(c, tf);
+                c.setView(symbol, tf, double(base), double(minute(80))); settle();
+            }
+        }
+    }
 }
 // S5L-c review 5b: the cost that switches live composition to 5 s is the
 // worker's CPU time, not wall time: a descheduled worker on a busy host (the
@@ -860,13 +1029,15 @@ TEST_F(LiveClient, OneSlowLiveComposeDoesNotBackOffTwoInThreeDo) {
     for (const int ms : {1, 15, 1}) {
         cost = int64_t(ms) * 1'000'000;
         now += HeatmapSourceController::kLiveMinIntervalMs;
-        send(tail(10, 10, 10, ++revision, 1000 + 1000 * revision)); settle();
+        ++revision;
+        send(tail(10, 10, 10, revision, 1000 + 1000 * revision)); settle();
         EXPECT_EQ(live(c).revision, revision);
         EXPECT_EQ(c.stats().liveIntervalMs, HeatmapSourceController::kLiveMinIntervalMs) << "after a " << ms << " ms update";
     }
     cost = 15'000'000;
     now += HeatmapSourceController::kLiveMinIntervalMs;
-    send(tail(10, 10, 10, ++revision, 1000 + 1000 * revision)); settle();
+    ++revision;
+    send(tail(10, 10, 10, revision, 1000 + 1000 * revision)); settle();
     EXPECT_EQ(c.stats().liveIntervalMs, HeatmapSourceController::kLiveBackoffIntervalMs) << "15, 1, 15 ms: median 15";
 }
 // ...and the cost is the composition (owner decision 4: "composing measures
@@ -877,13 +1048,14 @@ TEST_F(LiveClient, TheBackoffMeasuresCompositionNotTheImageBuiltAfterIt) {
     int64_t clock = 0;
     int call = 0;
     composeClock = [&] {
-        static constexpr int64_t steps[] = {0, 1'000'000, 9'000'000, 0};
+        static constexpr int64_t steps[] = {0, 1'000'000, 9'000'000, 0, 0};
         const auto t = clock;
-        clock += steps[call++ % 4];
+        clock += steps[call++ % 5];
         return t;
     };
     auto &c = chart(); settle();
     send(tail(10, 10, 10, 1)); settle();
+    send(tail(10, 10, 10, 2, 2000)); advance(c, HeatmapSourceController::kLiveMinIntervalMs);
     ASSERT_TRUE(c.latestLive());
     EXPECT_DOUBLE_EQ(c.stats().liveComposeMs, 1);
     EXPECT_DOUBLE_EQ(c.stats().liveUpdateMs, 10);
