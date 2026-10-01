@@ -264,10 +264,13 @@ struct BookRecorder::Impl {
         sLog_Data("BookRecorder: invalid symbol=" << name << " time=" << s.clock << " reason=" << reason);
     }
     bool trackMid(Symbol &s) {
-        s.mid = std::midpoint(static_cast<double>(s.bids.rbegin()->first) / cfg.priceScale,
-                              static_cast<double>(s.asks.begin()->first) / cfg.priceScale);
-        if (!std::isfinite(s.mid))
+        if (s.bids.empty() || s.asks.empty())
             return false;
+        const double mid = std::midpoint(static_cast<double>(s.bids.rbegin()->first) / cfg.priceScale,
+                                         static_cast<double>(s.asks.begin()->first) / cfg.priceScale);
+        if (!std::isfinite(mid))
+            return false;
+        s.mid = mid;
         if (!s.midMin) {
             s.midOpen = s.midMin = s.midMax = s.mid;
         }
@@ -280,8 +283,9 @@ struct BookRecorder::Impl {
         s.observed = 0;
         s.flags = 0;
         s.midOpen = s.midMin = s.midMax = s.midClose = 0;
-        if (s.valid)
-            trackMid(s);
+        // A valid one-sided book has no mid: the window keeps the last two-sided one.
+        if (s.valid && !trackMid(s))
+            s.midOpen = s.midMin = s.midMax = s.midClose = s.mid;
     }
     void publish(std::shared_ptr<const Hmc2Record> record) {
         if (!cfg.publisher) return;
@@ -660,10 +664,14 @@ struct BookRecorder::Impl {
             }
         }
         if (s.bids.empty() || s.asks.empty()) {
-            invalidate(m.symbol(), s, "missing two-sided mid");
-            return;
-        }
-        if (!trackMid(s)) {
+            // A snapshot must seed a mid. After a valid update, a one-sided book is
+            // still the exact, continuous book: keep it and integrate (2026-09-30:
+            // treating it as invalid stopped the recorder until the next reconnect).
+            if (m.kind == Kind::Snapshot) {
+                invalidate(m.symbol(), s, "missing two-sided mid");
+                return;
+            }
+        } else if (!trackMid(s)) {
             invalidate(m.symbol(), s, "unrepresentable mid");
             return;
         }

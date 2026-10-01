@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 #include <QTemporaryDir>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <thread>
@@ -37,9 +38,10 @@ class RecorderTest : public testing::Test {
         r.onTick(kEpoch + t);
         r.drainForTest();
     }
-    std::vector<Hmc2Record> read(int64_t tf = 60000, const std::string &layer = "near") {
+    std::vector<Hmc2Record> read(int64_t tf = 60000, const std::string &layer = "near",
+                                 int64_t spanMs = 10 * 3'600'000) {
         auto records =
-            Hmc2Store::readRange(dir.path().toStdString(), "BTC-USD", layer, tf, kEpoch, kEpoch + 10 * 3'600'000);
+            Hmc2Store::readRange(dir.path().toStdString(), "BTC-USD", layer, tf, kEpoch, kEpoch + spanMs);
         for (auto &r : records)
             r.bucketStartMs -= kEpoch;
         return records;
@@ -586,4 +588,56 @@ TEST_F(RecorderTest, PublisherFailureDoesNotLoseCommittedMinuteOrHourRollup) {
     EXPECT_EQ(recorder->stats().columnsWritten, 2);
     EXPECT_EQ(read().size(), 1);
     EXPECT_EQ(read(3600000).size(), 1);
+}
+
+// 2026-09-30 incident: an update batch left the ask side empty at 23:59:28.559 UTC.
+// The recorder invalidated itself, ignored every later update, and wrote nothing
+// for 22 minutes (no next-day file) because no snapshot ever came.
+TEST_F(RecorderTest, OneSidedUpdateDoesNotStopRecordingAcrossUtcDay) {
+    constexpr int64_t D = 86'400'000; // 2000-01-02T00:00Z relative to kEpoch
+    auto r = make(config());
+    snap(*r, D - 150000);
+    update(*r, D - 31441, {{false, 101, 0}}); // ask side empty
+    update(*r, D - 31000, {{false, 101, 4}}); // refilled by the next batch
+    update(*r, D + 30000, {{true, 99, 3}});
+    tick(*r, D + 180000);
+    auto rows = read(60000, "near", 2 * D);
+    // Before the fix: 3 rows, observedMs 30000/60000/28559, invalidations=1.
+    const std::vector<int64_t> buckets{D - 180000, D - 120000, D - 60000, D, D + 60000, D + 120000};
+    const std::vector<uint32_t> observed{30000, 60000, 60000, 60000, 60000, 60000};
+    for (size_t i = 0; i < std::min(rows.size(), buckets.size()); ++i) {
+        EXPECT_EQ(rows[i].bucketStartMs, buckets[i]) << i;
+        EXPECT_EQ(rows[i].observedMs, observed[i]) << i;
+    }
+    EXPECT_EQ(r->stats().invalidations, 0);
+    ASSERT_EQ(rows.size(), 6);
+    value(rows[2], 99, false, 2, 2);
+    value(rows[2], 101, true, 4.0 * 59559 / 60000, 4);
+    EXPECT_DOUBLE_EQ(rows[2].midMin, 100);
+    value(rows[3], 99, false, 2.5, 3);
+    value(rows[3], 101, true, 4, 4);
+    EXPECT_TRUE(std::filesystem::exists(dir.path().toStdString() + "/BTC-USD/near-60000/2000-01-02.hmc2"));
+}
+// A one-sided book that crosses a minute boundary keeps the last two-sided mid
+// for the new window (no mid from an empty side, no UB on the empty map).
+TEST_F(RecorderTest, EmptySideAcrossMinuteBoundaryKeepsLastMid) {
+    auto r = make(config());
+    snap(*r, 0);
+    update(*r, 30000, {{false, 101, 0}});
+    tick(*r, 60000);
+    update(*r, 100000, {{false, 102, 5}});
+    tick(*r, 180000);
+    auto rows = read();
+    ASSERT_EQ(rows.size(), 3);
+    for (const auto &row : rows)
+        EXPECT_EQ(row.observedMs, 60000);
+    EXPECT_EQ(r->stats().invalidations, 0);
+    value(rows[0], 101, true, 2, 4);
+    EXPECT_DOUBLE_EQ(rows[1].midOpen, 100);
+    EXPECT_DOUBLE_EQ(rows[1].midMin, 100);
+    EXPECT_DOUBLE_EQ(rows[1].midClose, 100.5);
+    value(rows[1], 102, true, 5.0 * 20000 / 60000, 5);
+    value(rows[1], 99, false, 2, 2);
+    EXPECT_DOUBLE_EQ(rows[2].midOpen, 100.5);
+    value(rows[2], 102, true, 5, 5);
 }
