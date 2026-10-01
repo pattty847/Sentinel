@@ -8,20 +8,11 @@ layout(std140, binding = 1) uniform Draw {
     vec4 mapping;
     uvec4 dims;
     vec4 style;
+    vec4 tone;
 };
-// Recording-mode log-code normalization and default cyan/orange palette, as in
-// heatmap_intensity.frag / HeatmapOverlayRenderer::ensurePaletteImage.
-vec3 palette(float t, bool ask) {
-    if (!ask) {
-        if (t < 0.35) return mix(vec3(0,20,25), vec3(0,110,130), t / 0.35) / 255.0;
-        if (t < 0.70) return mix(vec3(0,110,130), vec3(0,210,220), (t - 0.35) / 0.35) / 255.0;
-        return mix(vec3(0,210,220), vec3(160,255,248), (t - 0.70) / 0.30) / 255.0;
-    }
-    if (t < 0.30) return mix(vec3(35,5,0), vec3(160,30,10), t / 0.30) / 255.0;
-    if (t < 0.60) return mix(vec3(160,30,10), vec3(230,80,0), (t - 0.30) / 0.30) / 255.0;
-    if (t < 0.85) return mix(vec3(230,80,0), vec3(255,160,30), (t - 0.60) / 0.25) / 255.0;
-    return mix(vec3(255,160,30), vec3(255,230,80), (t - 0.85) / 0.15) / 255.0;
-}
+// The chart's palette (HeatmapPalette.hpp): the legacy 512-texel image, bids in
+// the left half, asks in the right, sampled with linear filtering.
+layout(binding = 2) uniform sampler2D paletteTex;
 vec4 shade() {
     // Bins are anchored to absolute time/price; panning inside the grid only
     // changes this mapping, so the picture translates by sub-bin amounts.
@@ -56,10 +47,16 @@ vec4 shade() {
     }
     float code = float(cell & 0x7fffu);
     if (code <= 0.0) return vec4(0.0);
-    float magnitude = clamp((code - style.x) / style.y, 0.0, 1.0);
+    // Recording-mode tone mapping exactly as heatmap_intensity.frag (A/B parity):
+    // [codeFloor, codeFloor + codeRange] -> [0, 1], then gamma, floor, contrast.
+    float magnitude = clamp((code - style.x) / max(style.y, 1.0), 0.0, 1.0);
     if (magnitude <= 0.0) return vec4(0.0);
-    float adjusted = clamp((max(magnitude, 0.08) - 0.5) * 1.25 + 0.5, 0.0, 1.0);
-    return vec4(palette(adjusted, (cell & 0x8000u) != 0u), 1.0);
+    float adjusted = pow(max(magnitude, tone.z), tone.x);
+    adjusted = clamp((adjusted - 0.5) * tone.y + 0.5, 0.0, 1.0);
+    bool ask = (cell & 0x8000u) != 0u;
+    float u = ask ? 0.51 + adjusted * 0.49 : adjusted * 0.49;
+    vec4 color = textureLod(paletteTex, vec2(u, 0.5), 0.0); // no mips; divergent flow
+    return vec4(color.rgb * color.a, color.a);
 }
 void main() {
     // Premultiplied output; style.z is the layer opacity (crossfade).

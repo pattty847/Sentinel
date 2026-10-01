@@ -1,4 +1,5 @@
 #include "LabSources.hpp"
+#include "render/heatmap/HeatmapGpuLayer.hpp"
 #include "ConfigLoader.hpp"
 #include "heatmap/RecordingLoader.hpp"
 #include "servermodel/RecordingDir.hpp"
@@ -30,26 +31,9 @@ LabSource finish(heatmap::SparseColumns composed, heatmap::gpu::GpuSourceOptions
 }
 } // namespace
 
-// Median over recent columns of the best-bid/best-ask midpoint (highest bid
-// entry, lowest ask entry): the market price the initial view centres on.
-double medianRecentPrice(const heatmap::SparseColumns &data) {
-    std::vector<double> mids;
-    const size_t first = data.columns.size() > 30 ? data.columns.size() - 30 : 0;
-    for (size_t c = first; c < data.columns.size(); ++c)
-        for (const auto &n : data.columns[c].native) {
-            int64_t bestBid = INT64_MIN, bestAsk = INT64_MAX;
-            for (const auto &e : n.entries) {
-                const int64_t row = n.baseRow + e.row();
-                if (e.isAsk()) bestAsk = std::min(bestAsk, row);
-                else bestBid = std::max(bestBid, row);
-            }
-            if (bestBid != INT64_MIN && bestAsk != INT64_MAX)
-                mids.push_back(double(bestBid + bestAsk + 1) / 2 * n.grid.rowTickUnits / n.grid.priceScale);
-        }
-    if (mids.empty()) return 0;
-    std::nth_element(mids.begin(), mids.begin() + mids.size() / 2, mids.end());
-    return mids[mids.size() / 2];
-}
+// Median over recent columns of the best-bid/best-ask midpoint: the market price
+// the initial view centres on (the production layer's implementation).
+double medianRecentPrice(const heatmap::SparseColumns &data) { return heatmap::gpu::medianRecentMid(data); }
 
 std::string recordingRoot() {
     const QString override = qEnvironmentVariable("SENTINEL_RECORDING_ROOT").trimmed();

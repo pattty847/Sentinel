@@ -50,6 +50,7 @@
 #include "mainwindow/GuiApiServer.h"
 #include "mainwindow/AgentApiCodec.hpp"
 #include "render/heatmap/HeatmapDataService.hpp"
+#include "render/heatmap/HeatmapGpuLayer.hpp"
 #include "protocol/SentinelStreamClientTransport.hpp"
 #include "mainwindow/AgentApiSnapshots.hpp"
 #include "datasources/RemoteGridDataSource.hpp"
@@ -107,6 +108,12 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         QString::fromStdString(clientConfig.server.port),
         QString::fromStdString(clientConfig.server.caFile));
     m_heatmapChartSettings = m_heatmapSettingsStore.load("main", clientConfig.heatmap);
+    if (const auto& renderer = GuiConfigStore::instance().heatmapRendererOverride(); !renderer.isEmpty()) {
+        // --heatmap-renderer: this process only; later persisted patches and
+        // workspace snapshots never carry it (they save from the stored settings).
+        m_heatmapChartSettings.renderer = renderer.toStdString();
+        sLog_App("Heatmap renderer override (process only): " << renderer);
+    }
     // Attach BEFORE connect: the adapter learns connection state only from the
     // signal, and subscribe immediately pushes availability. No chart/controller
     // is created in S6a, in either configured renderer mode.
@@ -192,6 +199,10 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         [this](const QString &name) {
             m_heatmapSettingsStore.restoreLayoutInto(
                 name, "main", m_heatmapChartSettings, GuiConfigStore::instance().clientConfig().heatmap);
+            if (auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr) {
+                renderer->setHeatmapChartSettings(m_heatmapChartSettings);
+                renderer->setHeatmapRenderer(QString::fromStdString(m_heatmapChartSettings.renderer));
+            }
         });
     // Defer arrangeDefaultLayout() until after show: resizeDocks() fails at default 640x480.
     m_menuBuilder = std::make_unique<MenuBuilder>(menuBar());
@@ -355,9 +366,12 @@ void MainWindowGPU::setupUI() {
             }
         });
         connect(m_heatmapDock->toolbar(), &TopToolbar::colorPresetSelected, this, [this](const QString& preset) {
-            if (!m_qmlController) return;
-            auto* renderer = m_qmlController->getUnifiedGridRenderer();
-            if (renderer) renderer->setHeatmapColorPreset(preset);
+            // The chart palette is a persisted chart setting both renderers draw (S6b).
+            AgentApi::ControlBody body;
+            body.heatmapSettings = QJsonObject{{"palettePreset", preset}};
+            body.persistHeatmapSettings = true;
+            const auto result = agentApiApplyControl("heatmap/settings", body);
+            if (result.status != 200) sLog_Warning("Palette preset rejected: " << preset << " " << result.message);
         });
         connect(m_heatmapDock->toolbar(), &TopToolbar::chartTypeSelected, this, [this](const QString& type) {
             if (!m_qmlController) return;
@@ -507,6 +521,13 @@ void MainWindowGPU::setupGuiApiServer() {
                                                            std::function<void(heatmap_window::WallsSnapshot)> complete) {
                                                         auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
                                                         auto* processor = renderer ? renderer->getDataProcessor() : nullptr;
+                                                        if (renderer && renderer->gpuHeatmapActive()) {
+                                                            heatmap_window::WallsSnapshot unavailable;
+                                                            unavailable.status = 409; // labels/walls are dark until S7
+                                                            unavailable.gpuRenderer = true;
+                                                            complete(std::move(unavailable));
+                                                            return;
+                                                        }
                                                         if (!processor) {
                                                             heatmap_window::WallsSnapshot unavailable;
                                                             unavailable.status = 503;
@@ -743,6 +764,10 @@ void MainWindowGPU::requestConfiguredHistoryForSymbol(const QString& symbol) {
 void MainWindowGPU::requestHeatmapHistoryForSymbol(const QString& symbol) {
     if (!canRequestConfiguredHistoryForSymbol(symbol)) {
         return;
+    }
+    if (auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
+        renderer && renderer->gpuHeatmapActive()) {
+        return; // the GPU layer's controller plans and fetches its own chunks
     }
     const auto& store = GuiConfigStore::instance();
     if (store.clientConfig().heatmap.source == "recording" &&
@@ -1036,6 +1061,14 @@ void MainWindowGPU::connectMarketDataSignals() {
     
     auto dataProcessor = unifiedGridRenderer->getDataProcessor();
     unifiedGridRenderer->setActiveSymbol(m_currentSymbol);
+    // S6b: the GPU heatmap layer shares the process service (attached before the
+    // stream client connected, INV-088); the chart settings pick the renderer.
+    unifiedGridRenderer->setHeatmapService(m_heatmapDataService.get());
+    unifiedGridRenderer->setHeatmapTickMemory(m_heatmapSettingsStore.loadManualTicks());
+    unifiedGridRenderer->setHeatmapChartSettings(m_heatmapChartSettings);
+    unifiedGridRenderer->setHeatmapRenderer(QString::fromStdString(m_heatmapChartSettings.renderer));
+    if (m_heatmapDock && m_heatmapDock->toolbar())
+        m_heatmapDock->toolbar()->setColorPreset(QString::fromStdString(m_heatmapChartSettings.palettePreset));
     if (dataProcessor) {
         QMetaObject::invokeMethod(dataProcessor, [dataProcessor, connected = m_connected] {
             dataProcessor->setRecordingConnected(connected);
@@ -1312,6 +1345,12 @@ AgentApi::StateSnapshot MainWindowGPU::agentApiStateSnapshot() const {
     if (m_serverConfigReady)
         AgentApi::applyAdvertisedServerConfig(s, GuiConfigStore::instance().serverConfig());
     s.heatmapReceivedAtMs = m_heatmapReceivedAtMs;
+    if (auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
+        renderer && renderer->gpuHeatmapActive()) {
+        // gpu mode: the newest live frame of the chart's symbol/timeframe.
+        const qint64 at = renderer->gpuHeatmapLayer()->liveReceivedAtMs();
+        s.heatmapReceivedAtMs = at > 0 ? std::optional<qint64>(at) : std::nullopt;
+    }
     s.candlesReceivedAtMs = m_candlesReceivedAtMs;
     s.bookReceivedAtMs = m_bookReceivedAtMs;
     s.tradesReceivedAtMs = m_tradesReceivedAtMs;
@@ -1358,7 +1397,9 @@ AgentApi::ViewportSnapshot MainWindowGPU::agentApiViewportSnapshot() const {
 QJsonObject MainWindowGPU::agentApiHeatmapSnapshot() const {
     const auto &s = m_heatmapChartSettings;
     const QJsonValue missing(QJsonValue::Null);
-    QJsonObject out{{"renderer", QString::fromStdString(s.renderer)}, {"activeRenderer", "legacy"},
+    auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
+    const bool gpu = renderer && renderer->gpuHeatmapActive();
+    QJsonObject out{{"renderer", QString::fromStdString(s.renderer)}, {"activeRenderer", gpu ? "gpu" : "legacy"},
         {"tickMode", s.tickMode == heatmap::TickMode::Auto ? "auto" : "manual"},
         {"tickUnits", s.tickMode == heatmap::TickMode::Manual ? QJsonValue(qint64(s.manualTick)) : missing},
         {"offeredPresets", missing}, {"settled", missing}, {"drawnTimeframeMs", missing},
@@ -1372,6 +1413,12 @@ QJsonObject MainWindowGPU::agentApiHeatmapSnapshot() const {
             {"committedCpuBytes", qint64(stats.committedCpuBytes)},
             {"chunkRequests", qint64(stats.fetcher.requests)}};
     } else out["service"] = missing;
+    if (gpu) {
+        // Live layer state replaces the S6a placeholders (plan section 5).
+        const auto state = renderer->gpuHeatmapLayer()->state();
+        for (auto it = state.begin(); it != state.end(); ++it) out[it.key()] = it.value();
+        out["tickUnits"] = state["tickUnits"];
+    }
     return out;
 }
 
@@ -1392,6 +1439,11 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
         }
         sLog_App("Heatmap settings applied chart=main renderer=" << m_heatmapChartSettings.renderer
                  << " persist=" << body.persistHeatmapSettings);
+        // S6b: settings drive the chart now (renderer flip, tick policy, palette).
+        const bool explicitTick = body.heatmapSettings.contains("manualTick") &&
+                                  m_heatmapChartSettings.tickMode == heatmap::TickMode::Manual;
+        renderer->setHeatmapChartSettings(m_heatmapChartSettings, explicitTick);
+        renderer->setHeatmapRenderer(QString::fromStdString(m_heatmapChartSettings.renderer));
         out.data = agentApiHeatmapSnapshot();
         out.data["persist"] = body.persistHeatmapSettings;
     } else if (kind == "input") {

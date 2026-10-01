@@ -17,6 +17,8 @@ public:
     QToolButton* subscribeButton() const { return m_subscribeButton; }
     QComboBox* liquidityModeCombo() const { return m_liquidityModeCombo; }
     void setTimeframeMs(int64_t ms);
+    // Shows the chart's palette preset without emitting colorPresetSelected.
+    void setColorPreset(const QString& preset);
     void setAvailableTimeframes(const std::vector<int64_t>& servedTimeframesMs);
     void setLayerToggleStates(bool heatmapEnabled,
                               bool footprintEnabled,

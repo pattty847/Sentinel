@@ -16,8 +16,9 @@ struct alignas(16) DrawParams { // heatmap_display.vert/.frag uniform block
     float mapping[4];
     uint32_t dims[4];
     float style[4];
+    float tone[4]; // palette gamma, contrast, magnitude floor (HeatmapPalette tone)
 };
-static_assert(sizeof(DrawParams) == 128);
+static_assert(sizeof(DrawParams) == 144);
 constexpr uint32_t kClampRows = 1;    // dims.z bit 0: rows beyond the grid repeat the sentinel rows
 constexpr uint32_t kBlockRows = 8192; // heatmap::tiles::kTileBlockRows (the binner allows 16384)
 constexpr uint32_t kMaxRows = 1u << 18;
@@ -153,6 +154,9 @@ void HeatmapTileNode::releaseAll(bool reportLoss, bool inRhiCleanup) {
     pipeline_.reset(); // before the loading draws: it was created with the first one's bindings
     loadingDraws_.clear();
     loadingCell_.reset();
+    paletteTex_.reset(); // after every binding set that samples it
+    paletteSampler_.reset();
+    uploadedPalette_.reset();
     held_.clear();
     now_.clear();
     for (auto &layer : fading_) { layer.draws.clear(); layer.used = false; }
@@ -486,7 +490,9 @@ bool HeatmapTileNode::binRows(Bin &bin, QRhiCommandBuffer *cb) {
         if (!block.bindings || block.boundTo != block.cells.get()) {
             if (!block.bindings) block.bindings.reset(rhi_->newShaderResourceBindings());
             block.bindings->setBindings({QRhiShaderResourceBinding::bufferLoad(0, fs, block.cells.get()),
-                                         QRhiShaderResourceBinding::uniformBuffer(1, vs | fs, block.params.get())});
+                                         QRhiShaderResourceBinding::uniformBuffer(1, vs | fs, block.params.get()),
+                                         QRhiShaderResourceBinding::sampledTexture(2, fs, paletteTex_.get(),
+                                                                                   paletteSampler_.get())});
             if (!block.bindings->create()) { noteError(QStringLiteral("tile bindings failed")); return false; }
             block.boundTo = block.cells.get();
         }
@@ -707,6 +713,37 @@ bool HeatmapTileNode::subRect(int64_t firstBucket, int64_t endBucket, int64_t tf
     return true;
 }
 
+const HeatmapPalette &HeatmapTileNode::palette() const {
+    static const auto fallback = makePalette(legacyDefaultGradients(), {});
+    return frame_.palette ? *frame_.palette : *fallback;
+}
+
+// The palette texture exists before the first binding set (every draw samples
+// it) and keeps its identity, so binding sets never change with the palette.
+bool HeatmapTileNode::ensurePalette(QRhiCommandBuffer *cb) {
+    if (!paletteTex_) {
+        paletteTex_.reset(rhi_->newTexture(QRhiTexture::RGBA8, QSize(kPaletteWidth, 1)));
+        paletteSampler_.reset(rhi_->newSampler(QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::None,
+                                               QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge));
+        if (!paletteTex_->create() || !paletteSampler_->create()) {
+            paletteTex_.reset();
+            paletteSampler_.reset();
+            noteError(QStringLiteral("palette texture allocation failed"));
+            return false;
+        }
+        uploadedPalette_.reset();
+    }
+    static const auto fallback = makePalette(legacyDefaultGradients(), {});
+    const auto &wanted = frame_.palette ? frame_.palette : fallback;
+    if (uploadedPalette_ == wanted) return true;
+    auto *updates = rhi_->nextResourceUpdateBatch();
+    const QRhiTextureSubresourceUploadDescription texels(wanted->texels.data(), quint32(wanted->texels.size()));
+    updates->uploadTexture(paletteTex_.get(), QRhiTextureUploadDescription(QRhiTextureUploadEntry(0, 0, texels)));
+    cb->resourceUpdate(updates);
+    uploadedPalette_ = wanted;
+    return true;
+}
+
 bool HeatmapTileNode::ensurePipeline(QRhiRenderPassDescriptor *pass, int samples) {
     const auto format = pass->serializedFormat();
     if (pipeline_ && pipelineFormat_ == format && pipelineSamples_ == samples) return true;
@@ -768,6 +805,8 @@ bool HeatmapTileNode::addBinDraw(QRhiResourceUpdateBatch *updates, Bin &bin, flo
         p.mapping[2] = mapping.priceOffset; p.mapping[3] = mapping.priceSpan;
         p.dims[0] = block.grid.columns; p.dims[1] = block.grid.rows; p.dims[2] = kClampRows;
         p.style[0] = frame_.style.codeFloor; p.style[1] = frame_.style.codeRange; p.style[2] = opacity * frame_.style.opacity;
+        const auto &tone = palette().tone;
+        p.tone[0] = tone.gamma; p.tone[1] = tone.contrast; p.tone[2] = tone.floor;
         updates->updateDynamicBuffer(block.params.get(), 0, sizeof(p), &p);
         tileDraws_.push_back({block.bindings.get(), opacity});
         any = true;
@@ -783,7 +822,9 @@ bool HeatmapTileNode::addLoadingSlot() {
     slot->bindings.reset(rhi_->newShaderResourceBindings());
     const auto fs = QRhiShaderResourceBinding::FragmentStage, vs = QRhiShaderResourceBinding::VertexStage;
     slot->bindings->setBindings({QRhiShaderResourceBinding::bufferLoad(0, fs, loadingCell_.get()),
-                                 QRhiShaderResourceBinding::uniformBuffer(1, vs | fs, slot->params.get())});
+                                 QRhiShaderResourceBinding::uniformBuffer(1, vs | fs, slot->params.get()),
+                                 QRhiShaderResourceBinding::sampledTexture(2, fs, paletteTex_.get(),
+                                                                           paletteSampler_.get())});
     if (!slot->bindings->create()) { noteError(QStringLiteral("loading bindings failed")); return false; }
     loadingDraws_.push_back(std::move(slot));
     return true;
@@ -802,6 +843,7 @@ bool HeatmapTileNode::addLoadingDraw(QRhiResourceUpdateBatch *updates, int64_t l
     p.mapping[0] = 0; p.mapping[1] = 0.999f; p.mapping[2] = 0; p.mapping[3] = 1;
     p.dims[0] = 1; p.dims[1] = 1; p.dims[2] = kClampRows;
     p.style[0] = frame_.style.codeFloor; p.style[1] = frame_.style.codeRange; p.style[2] = frame_.style.opacity;
+    p.tone[0] = 1; p.tone[1] = 1; // the hatch does not sample the palette
     updates->updateDynamicBuffer(loadingDraws_[loadingUsed_]->params.get(), 0, sizeof(p), &p);
     ++loadingUsed_;
     return true;
@@ -1141,6 +1183,7 @@ void HeatmapTileNode::prepare() {
     stats_->frames.fetch_add(1);
     if (!binner_) binner_ = std::make_unique<HeatmapGpuBinner>(rhi_);
     binner_->runPrecisionSelfTest(cb);
+    if (!ensurePalette(cb)) return;
     if (!loadingCell_) {
         loadingCell_.reset(rhi_->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer, 16));
         if (!loadingCell_->create()) return noteError(QStringLiteral("loading cell allocation failed"));

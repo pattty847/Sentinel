@@ -15,6 +15,7 @@
 #include "render/ViewportAutoScrollController.hpp"
 #include "render/VolumeProfileState.hpp"
 #include "config/GuiConfigStore.hpp"
+#include "render/heatmap/HeatmapGpuLayer.hpp"
 void UnifiedGridRenderer::init() {
     m_useGpuHeatmap = true;
 
@@ -39,6 +40,31 @@ void UnifiedGridRenderer::init() {
     qRegisterMetaType<Trade>("Trade");
 
     m_viewState = std::make_unique<GridViewState>(this);
+    // S6b: the per-chart GPU heatmap layer (inactive until the renderer is gpu).
+    m_gpuLayer = std::make_unique<heatmap::gpu::HeatmapGpuLayer>();
+    m_gpuLayer->setTone({static_cast<float>(m_heatmapGamma), static_cast<float>(m_heatmapContrast),
+                         static_cast<float>(m_heatmapShaderFloor)});
+    connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::snapshotChanged, this, [this] {
+        // No book top yet (or a symbol switch): centre on the decoded data instead.
+        if (m_gpuHeatmap && (!m_gpuPriceKnown || m_gpuReseedPrice) && m_viewState->isTimeWindowValid()) {
+            if (const double mid = m_gpuLayer->recentMidPrice(); mid > 0) seedGpuViewport(mid, mid);
+        }
+        update();
+    });
+    connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::liveChanged, this, [this] {
+        followGpuLive();
+        emit liveRenderTick();
+        update();
+    });
+    connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::tickChanged, this, [this] {
+        applyGpuLimits();
+        if (m_gpuHeatmap) emit heatmapTickSizeChanged();
+        update();
+    });
+    connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::limitsChanged, this, [this] { applyGpuLimits(); });
+    connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::buildFailed, this, [](const QString& message) {
+        sLog_Warning("GPU heatmap span build failed: " << message);
+    });
     m_heatmapStreamService = std::make_unique<HeatmapStreamService>(this);
     m_heatmapStreamService->init(heatmapGridWidth, heatmapGridHeight,
                                  m_currentTimeframe_ms, 1 /*intensityBytesPerCell*/);
@@ -104,7 +130,7 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
     connect(m_dataProcessor.get(), &DataProcessor::heatmapWindowUpdated,
             this,
             [this](heatmap_window::UpdatePtr windowUpdate) {
-                if (!windowUpdate) return;
+                if (!windowUpdate || m_gpuHeatmap) return; // gpu mode: legacy band updates are stale
                 m_lastIncomingHeatmapSliceTimeframeMs.store(windowUpdate->timeframeMs, std::memory_order_relaxed);
                 if (!m_useGpuHeatmap) {
                     m_useGpuHeatmap = true;
@@ -141,8 +167,11 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
             },
             Qt::QueuedConnection);
 
-    connect(m_dataProcessor.get(), &DataProcessor::heatmapRangeReset,
-            this, &UnifiedGridRenderer::applyHeatmapRangeReset, Qt::QueuedConnection);
+    connect(m_dataProcessor.get(), &DataProcessor::heatmapRangeReset, this,
+            [this](double minPrice, double maxPrice, double tickSize, int gridWidth, int gridHeight) {
+                if (m_gpuHeatmap) return; // gpu mode owns the viewport (stale legacy reset)
+                applyHeatmapRangeReset(minPrice, maxPrice, tickSize, gridWidth, gridHeight);
+            }, Qt::QueuedConnection);
 
     connect(m_dataProcessor.get(), &DataProcessor::footprintColumnReady,
             this,
@@ -206,7 +235,7 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
 void UnifiedGridRenderer::startHeatmapRenderLoop() {
     m_heatmapRenderTimer = new QTimer(this);
     connect(m_heatmapRenderTimer, &QTimer::timeout, this, [this]() {
-        if (!m_useGpuHeatmap) return;
+        if (!m_useGpuHeatmap || m_gpuHeatmap) return; // gpu mode follows LiveSnapshot::openEndMs
         auto result = m_heatmapStreamService->handleRenderTick(m_viewState.get());
         if (!result.shouldUpdate) return;
         if (result.autoScrollApplied && m_panSyncPending) {

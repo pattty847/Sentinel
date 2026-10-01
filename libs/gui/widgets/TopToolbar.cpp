@@ -255,3 +255,11 @@ void TopToolbar::setLayerToggleStates(bool heatmapEnabled,
         m_volumeProfileButton->setChecked(volumeProfileEnabled);
     }
 }
+
+void TopToolbar::setColorPreset(const QString& preset) {
+    if (!m_colorPresetCombo) return;
+    const int index = m_colorPresetCombo->findText(preset);
+    if (index < 0) return; // Custom: no combo entry
+    const QSignalBlocker block(m_colorPresetCombo);
+    m_colorPresetCombo->setCurrentIndex(index);
+}

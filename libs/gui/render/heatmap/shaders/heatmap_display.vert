@@ -6,6 +6,7 @@ layout(std140, binding = 1) uniform Draw {
     vec4 mapping;  // left column offset, columns across rect, top row offset, rows down rect
     uvec4 dims;    // grid columns, rows, flags (bit 0: clamp rows)
     vec4 style;    // code floor, code range, opacity, unused
+    vec4 tone;     // palette gamma, contrast, magnitude floor, unused (fragment stage)
 };
 void main() {
     vec2 corner = vec2(float(gl_VertexIndex & 1), float((gl_VertexIndex >> 1) & 1));

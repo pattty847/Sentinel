@@ -54,6 +54,8 @@ class QRhiGraphicsPipeline;
 class QRhiRenderPassDescriptor;
 class QRhiResourceUpdateBatch;
 class QRhiShaderResourceBindings;
+class QRhiTexture;
+class QRhiSampler;
 struct QRhiReadbackResult;
 
 namespace heatmap::gpu {

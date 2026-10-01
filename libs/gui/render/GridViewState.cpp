@@ -4,8 +4,14 @@
 #include <QSizeF>
 #include "SentinelLogging.hpp"
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 
 namespace {
+// Largest whole-ms time span allowed by maxSpan (<= 0: no limit).
+int64_t timeSpanLimit(double maxSpan) {
+    return maxSpan > 0 ? std::max<int64_t>(1, static_cast<int64_t>(std::floor(maxSpan))) : INT64_MAX;
+}
 double clampProcessedZoomDelta(double rawDelta, double sensitivity, double maxDelta) {
     const double processed = rawDelta * sensitivity;
     return std::max(-maxDelta, std::min(maxDelta, processed));
@@ -18,6 +24,19 @@ GridViewState::GridViewState(QObject* parent)
 }
 
 void GridViewState::setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax) {
+    // Spec rules 1 and 9: a span over the limit shrinks about its centre. The zoom
+    // handlers clamp about their anchor first, so this only acts on direct calls.
+    const int64_t timeLimit = timeSpanLimit(m_maxTimeSpanMs);
+    if (timeEnd - timeStart > timeLimit) {
+        const double centre = (static_cast<double>(timeStart) + static_cast<double>(timeEnd)) * 0.5;
+        timeStart = static_cast<qint64>(std::llround(centre - static_cast<double>(timeLimit) * 0.5));
+        timeEnd = timeStart + timeLimit;
+    }
+    if (m_maxPriceSpan > 0 && priceMax - priceMin > m_maxPriceSpan) {
+        const double centre = (priceMin + priceMax) * 0.5;
+        priceMin = centre - m_maxPriceSpan * 0.5;
+        priceMax = centre + m_maxPriceSpan * 0.5;
+    }
     bool changed = false;
     if (m_visibleTimeStart_ms != timeStart) {
         m_visibleTimeStart_ms = timeStart;
@@ -47,6 +66,15 @@ void GridViewState::setViewport(qint64 timeStart, qint64 timeEnd, double priceMi
                    << " version=" << m_viewportVersion);
         emit viewportChanged();
     }
+}
+
+void GridViewState::setMaxSpans(double maxTimeSpanMs, double maxPriceSpan) {
+    const double time = std::isfinite(maxTimeSpanMs) && maxTimeSpanMs > 0 ? maxTimeSpanMs : 0.0;
+    const double price = std::isfinite(maxPriceSpan) && maxPriceSpan > 0 ? maxPriceSpan : 0.0;
+    if (time == m_maxTimeSpanMs && price == m_maxPriceSpan) return;
+    m_maxTimeSpanMs = time;
+    m_maxPriceSpan = price;
+    if (m_timeWindowValid) setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
 }
 
 void GridViewState::setViewportSize(double width, double height) {
@@ -92,6 +120,7 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
     double zoomMultiplier = 1.0 + clampedDelta;
     double newZoom = m_zoomFactor * zoomMultiplier;
     newZoom = std::max(0.1, std::min(MAX_ZOOM_FACTOR, newZoom));
+    bool clamped = false;
     if (newZoom != m_zoomFactor) {
         if (center.x() >= 0 && center.y() >= 0) {
             int64_t currentTimeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
@@ -104,11 +133,16 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
             }
             const double timeRangeD = static_cast<double>(currentTimeRange) * (m_zoomFactor / newZoom);
             const bool zoomingOut = (newZoom < m_zoomFactor);
-            const int64_t newTimeRange = std::max<int64_t>(
+            const int64_t wantedTimeRange = std::max<int64_t>(
                 1,
                 static_cast<int64_t>(zoomingOut ? std::ceil(timeRangeD) : std::floor(timeRangeD))
             );
-            const double newPriceRange = std::max(1e-6, currentPriceRange * (m_zoomFactor / newZoom));
+            const double wantedPriceRange = std::max(1e-6, currentPriceRange * (m_zoomFactor / newZoom));
+            // Spec rules 1, 2 and 9: the clamps hold about the anchor.
+            const int64_t newTimeRange = std::min(wantedTimeRange, timeSpanLimit(m_maxTimeSpanMs));
+            const double newPriceRange = m_maxPriceSpan > 0 ? std::min(wantedPriceRange, m_maxPriceSpan)
+                                                            : wantedPriceRange;
+            clamped = newTimeRange < wantedTimeRange || newPriceRange < wantedPriceRange;
             if (newTimeRange <= 0 || newPriceRange <= 0.0) {
                 sLog_Warning("Zoom aborted: invalid range timeRange=" << newTimeRange
                              << " priceRange=" << newPriceRange << " zoom=" << m_zoomFactor << "->" << newZoom);
@@ -150,7 +184,8 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
             setViewport(newTimeStart, newTimeEnd, newMinPrice, newMaxPrice);
             emit priceInteracted();
         }
-        m_zoomFactor = newZoom;
+        // A zoom-out the clamps stopped does not use up the zoom factor range.
+        if (!(clamped && newZoom < m_zoomFactor)) m_zoomFactor = newZoom;
         if (m_autoScrollEnabled) {
             m_autoScrollEnabled = false;
             emit autoScrollEnabledChanged();
@@ -233,9 +268,10 @@ void GridViewState::handleTimeZoomWithSensitivity(double rawDelta, double center
 
     const double timeRangeD = static_cast<double>(currentTimeRange) / zoomMultiplier;
     const bool zoomingOut = (processedDelta < 0.0);
-    const int64_t newTimeRange = std::max<int64_t>(
-        1, static_cast<int64_t>(zoomingOut ? std::ceil(timeRangeD)
-                                           : std::floor(timeRangeD)));
+    const int64_t newTimeRange = std::min(
+        std::max<int64_t>(1, static_cast<int64_t>(zoomingOut ? std::ceil(timeRangeD)
+                                                              : std::floor(timeRangeD))),
+        timeSpanLimit(m_maxTimeSpanMs));
     const int64_t currentCenterTime =
         m_visibleTimeStart_ms +
         static_cast<int64_t>(static_cast<double>(currentTimeRange) * centerRatio);
@@ -249,7 +285,8 @@ void GridViewState::handleTimeZoomWithSensitivity(double rawDelta, double center
     }
 
     setViewport(newTimeStart, newTimeEnd, m_minPrice, m_maxPrice);
-    m_zoomFactor = std::max(0.1, std::min(MAX_ZOOM_FACTOR, m_zoomFactor * zoomMultiplier));
+    if (!(zoomingOut && newTimeRange <= currentTimeRange))
+        m_zoomFactor = std::max(0.1, std::min(MAX_ZOOM_FACTOR, m_zoomFactor * zoomMultiplier));
     if (m_autoScrollEnabled) {
         m_autoScrollEnabled = false;
         emit autoScrollEnabledChanged();
@@ -276,7 +313,8 @@ void GridViewState::handlePriceZoomWithSensitivity(double rawDelta, double cente
     double centerRatio = 1.0 - (centerY / viewportHeight);
     centerRatio = std::max(0.0, std::min(1.0, centerRatio));
 
-    const double newPriceRange = std::max(1e-6, currentPriceRange / zoomMultiplier);
+    double newPriceRange = std::max(1e-6, currentPriceRange / zoomMultiplier);
+    if (m_maxPriceSpan > 0) newPriceRange = std::min(newPriceRange, m_maxPriceSpan);
     const double currentCenterPrice = m_minPrice + currentPriceRange * centerRatio;
     const double newMinPrice = currentCenterPrice - newPriceRange * centerRatio;
     const double newMaxPrice =
@@ -287,7 +325,8 @@ void GridViewState::handlePriceZoomWithSensitivity(double rawDelta, double cente
 
     setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, newMinPrice, newMaxPrice);
     emit priceInteracted();
-    m_zoomFactor = std::max(0.1, std::min(MAX_ZOOM_FACTOR, m_zoomFactor * zoomMultiplier));
+    if (!(processedDelta < 0.0 && newPriceRange <= currentPriceRange))
+        m_zoomFactor = std::max(0.1, std::min(MAX_ZOOM_FACTOR, m_zoomFactor * zoomMultiplier));
     if (m_autoScrollEnabled) {
         m_autoScrollEnabled = false;
         emit autoScrollEnabledChanged();

@@ -9,16 +9,25 @@
 #include "render/HeatmapStreamState.hpp"
 #include "render/UgrFrameMath.hpp"
 #include "render/VolumeProfileState.hpp"
+#include "render/heatmap/HeatmapGpuLayer.hpp"
+#include "render/heatmap/HeatmapTileNode.hpp"
 
 #include <QElapsedTimer>
 #include <QSGFlatColorMaterial>
 #include <QSGGeometry>
 #include <QSGGeometryNode>
+#include <QSGOpacityNode>
 #include <QtEndian>
 #include <algorithm>
 #include <cmath>
 
 HeatmapIntensityNode* UnifiedGridRenderer::ensureHeatmapRootNode(QSGNode* oldNode) {
+    if (oldNode && oldNode->type() == QSGNode::BasicNodeType) {
+        // The renderer flipped back from gpu: the scene graph keeps a replaced
+        // paint node, so the old root (tile node, overlays, text) goes here.
+        delete oldNode;
+        oldNode = nullptr;
+    }
     auto* texNode = static_cast<HeatmapIntensityNode*>(oldNode);
     if (!texNode) {
         texNode = new HeatmapIntensityNode();
@@ -264,8 +273,18 @@ void UnifiedGridRenderer::renderOverlays(
             }
         }
     }
+    renderTradeOverlays(texNode, frame, drawFootprint, drawTpo, footprintUploads);
+}
+
+// Footprint, volume profile and TPO under `parent`, after its heatmap content.
+void UnifiedGridRenderer::renderTradeOverlays(
+    QSGNode* parent,
+    const FrameContext& frame,
+    bool drawFootprint,
+    bool drawTpo,
+    std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads) {
     m_footprintOverlay.render(window(),
-                              texNode,
+                              parent,
                               drawFootprint,
                               frame.mapping.viewStartMs, frame.mapping.viewEndMs,
                               frame.mapping.viewMinPrice, frame.mapping.viewMaxPrice, frame.surfaceBounds,
@@ -275,7 +294,7 @@ void UnifiedGridRenderer::renderOverlays(
     VolumeProfileState::Snapshot localSnap;
     m_vpRenderer.drainPending(localBins, localSnap);
 
-    m_vpRenderer.render(texNode,
+    m_vpRenderer.render(parent,
                         m_volumeProfileLayerEnabled && !localBins.empty(),
                         frame.surfaceBounds,
                         frame.mapping.viewMinPrice,
@@ -285,7 +304,7 @@ void UnifiedGridRenderer::renderOverlays(
 
     // TPO maps world -> screen with surfaceBounds + view time/price (INV-037).
     m_tpoOverlay.render(window(),
-                        texNode,
+                        parent,
                         drawTpo,
                         m_chartTextAtlas,
                         m_chartTextAtlasBuilt,
@@ -454,6 +473,115 @@ void UnifiedGridRenderer::clearLabelGeometry() {
     m_heatmapLabelGlyphs.clear();
 }
 
+
+// ── GPU heatmap (S6b) ─────────────────────────────────────────────────────────
+QSGNode* UnifiedGridRenderer::ensureGpuRootNode(QSGNode* oldNode, heatmap::gpu::HeatmapTileNode** tile) {
+    if (oldNode && oldNode->type() != QSGNode::BasicNodeType) {
+        delete oldNode; // the legacy HeatmapIntensityNode root and its children
+        oldNode = nullptr;
+    }
+    QSGNode* root = oldNode;
+    if (!root) {
+        root = new QSGNode();
+        auto* gate = new QSGOpacityNode();
+        gate->appendChildNode(new heatmap::gpu::HeatmapTileNode(m_gpuLayer->tileStatsPtr()));
+        root->appendChildNode(gate);
+        for (auto* overlay : m_overlays)
+            overlay->onRootRebuilt();
+        m_chartTextRenderer.onRootRebuilt();
+    }
+    *tile = static_cast<heatmap::gpu::HeatmapTileNode*>(root->firstChild()->firstChild());
+    return root;
+}
+
+void UnifiedGridRenderer::computeGpuFrameMapping(FrameContext& frame, heatmap::gpu::ViewWindow& view,
+                                                 double tickSize) {
+    const QRectF bounds = frame.surfaceBounds;
+    UgrFrameMath::ViewportState vs;
+    vs.valid = frame.viewport.valid;
+    vs.timeStart = static_cast<double>(frame.viewport.timeStart);
+    vs.timeEnd = static_cast<double>(frame.viewport.timeEnd);
+    vs.minPrice = frame.viewport.minPrice;
+    vs.maxPrice = frame.viewport.maxPrice;
+    vs.panVisualOffset = frame.viewport.panVisualOffset;
+    vs.dragging = frame.viewport.dragging;
+    vs = UgrFrameMath::applyDragPan(vs, bounds); // the drag offset moves heatmap and overlays together
+    view = {vs.timeStart, vs.timeEnd, vs.minPrice, vs.maxPrice};
+    const double tf = static_cast<double>(m_currentTimeframe_ms);
+    const double timeSpan = vs.timeEnd - vs.timeStart, priceSpan = vs.maxPrice - vs.minPrice;
+    // Before a tick is drawn the rows are one pixel tall: the mapping stays valid.
+    const double tick = tickSize > 0 ? tickSize : priceSpan / std::max(1.0, bounds.height());
+    auto& m = frame.mapping;
+    m.viewStartMs = vs.timeStart;
+    m.viewEndMs = vs.timeEnd;
+    m.viewMinPrice = vs.minPrice;
+    m.viewMaxPrice = vs.maxPrice;
+    m.valid = vs.valid && tf > 0 && timeSpan > 0 && priceSpan > 0 && tick > 0 && !bounds.isEmpty();
+    if (!m.valid) {
+        m_lastTimeAxisMapping = m;
+        return;
+    }
+    // Columns are anchored to epoch multiples of the timeframe (spec rule 3).
+    m.dataStartMs = std::floor(vs.timeStart / tf) * tf;
+    m.dataEndMs = std::ceil(vs.timeEnd / tf) * tf;
+    m.actualDataStartMs = vs.timeStart;
+    m.actualDataEndMs = vs.timeEnd;
+    m.dataMinPrice = vs.minPrice;
+    m.dataMaxPrice = vs.maxPrice;
+    m.appendMs = tf;
+    m.tickSize = tick;
+    m.drawRect = bounds;
+    m.srcRect = QRectF((vs.timeStart - m.dataStartMs) / tf, 0.0, timeSpan / tf, priceSpan / tick);
+    m.gridWidth = static_cast<int>(std::ceil(m.srcRect.right())) + 1;
+    m.gridHeight = static_cast<int>(std::ceil(m.srcRect.height()));
+    m.filledColumns = m.gridWidth;
+    m.timeOffset = 0.0f;
+    m.cellW = bounds.width() / m.srcRect.width();
+    m.cellH = bounds.height() / m.srcRect.height();
+    m_lastTimeAxisMapping = m;
+}
+
+QSGNode* UnifiedGridRenderer::updateGpuPaintNode(QSGNode* oldNode, FrameContext& frame, bool profile) {
+    heatmap::gpu::HeatmapTileNode* tile = nullptr;
+    QSGNode* root = ensureGpuRootNode(oldNode, &tile);
+    heatmap::gpu::ViewWindow view;
+    computeGpuFrameMapping(frame, view, 0.0);
+    const bool drawHeatmap = frame.overlays.heatmap && frame.mapping.valid;
+    heatmap::gpu::HeatmapTileNode::Frame tileFrame;
+    const bool prepared = drawHeatmap && m_gpuLayer->prepareFrame(tileFrame, frame.surfaceBounds, view);
+    // The mapping's rows follow the drawn tick (heatmapTickSize, PriceAxisModel).
+    if (m_gpuLayer->tickPrice() > 0) computeGpuFrameMapping(frame, view, m_gpuLayer->tickPrice());
+    auto* gate = static_cast<QSGOpacityNode*>(root->firstChild());
+    const double opacity = prepared ? 1.0 : 0.0; // 0 blocks the subtree: no prepare(), no draw
+    if (gate->opacity() != opacity) gate->setOpacity(opacity);
+    if (prepared) tile->setFrame(std::move(tileFrame));
+    publishFrameContext(frame);
+    m_pendingFrameRevision = frame.controlRevision;
+    m_pendingFrameId = frame.frameId;
+    if (profile) m_frameProfiler.mark(FrameProfiler::Mapping);
+
+    std::vector<FootprintOverlayRenderer::PendingUpload> footprintUploads;
+    m_footprintOverlay.drainPending(footprintUploads);
+    if (profile) m_frameProfiler.mark(FrameProfiler::Uploads);
+    renderTradeOverlays(root, frame, frame.overlays.footprint, frame.overlays.tpo, footprintUploads);
+    if (profile) m_frameProfiler.mark(FrameProfiler::Overlays);
+
+    m_chartTextRenderer.beginFrame(root, window(), m_chartTextAtlas);
+    if (m_axisTextService) {
+        m_axisTextService->submitAxisText(m_chartTextRenderer, m_chartTextAtlas, width(), height());
+    }
+    if (profile) m_frameProfiler.mark(FrameProfiler::AxisText);
+    clearLabelGeometry(); // liquidity labels read the legacy ring: off on the gpu path until S7
+    if (profile) m_frameProfiler.mark(FrameProfiler::Labels);
+    m_chartTextRenderer.endFrame();
+    if (profile) {
+        m_frameProfiler.mark(FrameProfiler::TextEnd);
+        const QString report = m_frameProfiler.endFrame();
+        if (!report.isEmpty()) sLog_Render(report);
+    }
+    return root;
+}
+
 QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) {
     Q_UNUSED(data)
     if (width() <= 0 || height() <= 0 || !m_useGpuHeatmap) {
@@ -474,6 +602,7 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     frame.selectionEpoch = m_controlSelectionEpoch.load(std::memory_order_acquire);
     frame.viewportVersion = m_controlViewportVersion.load(std::memory_order_acquire);
     frame.frameId = ++m_nextFrameId;
+    if (m_gpuHeatmap) return updateGpuPaintNode(oldNode, frame, profile); // the one branch (plan section 2)
     const auto& snapshot = frame.heatmapSnapshot;
     const int64_t cadenceMs = (frame.time.activeTimeframeMs > 0)
         ? frame.time.activeTimeframeMs

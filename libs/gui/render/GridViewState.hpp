@@ -25,6 +25,12 @@ public:
     bool isDragging() const { return m_isDragging; }
     
     void setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax);
+    // Spec rules 1, 2 and 9 (S6b, GPU heatmap): optional maximum spans (<= 0: none).
+    // setViewport and every zoom handler apply them, so wheel, axis drags and the
+    // Agent API clamp the same way; setting them re-clamps the current viewport.
+    void setMaxSpans(double maxTimeSpanMs, double maxPriceSpan);
+    double maxTimeSpanMs() const { return m_maxTimeSpanMs; }
+    double maxPriceSpan() const { return m_maxPriceSpan; }
     void setViewportSize(double width, double height);
     QMatrix4x4 calculateViewportTransform(const QRectF& itemBounds) const;
     
@@ -80,4 +86,6 @@ private:
     double m_panRemainderTimeMs = 0.0;
     QElapsedTimer m_interactionTimer;
     uint64_t m_viewportVersion = 1;
+    double m_maxTimeSpanMs = 0.0;
+    double m_maxPriceSpan = 0.0;
 };
