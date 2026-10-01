@@ -16,6 +16,8 @@ public:
     ~SentinelServerApp();
 
     bool initialize();
+    // True once the recorder started (recording.enabled and a usable directory).
+    bool recording() const { return m_serverModel && m_serverModel->recordingDir().has_value(); }
 
 private:
     ServerConfig m_serverConfig;
