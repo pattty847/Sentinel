@@ -72,22 +72,37 @@ but cannot check the raw bytes referenced in other product directories:
 ```
 
 `--verify` also accepts one `.rawl2` file. It is offline and read-only; stdout is a
-JSON report. Exit 0 means the supplied runs are closed with no observed integrity
-failures; **3** means `ok && !complete` (only the newest run remains open/in progress);
+JSON report. Exit 0 means no observed integrity failures or open runs within
+the supplied scope (including tails excluded by scope); **3** means `ok && !complete` (only the newest run remains open/in progress);
 2 means gaps, corruption, interrupted older runs, missing snapshot anchors,
 missing streams/segments or other failed invariants, and 1 is a fatal invocation error. Existing files are
 never repaired or rewritten by verification.
 
 `ok` is integrity of the supplied scope, while `complete` additionally requires
-closed runs. `routing_checks_deferred` independently identifies product-only
+closed runs or a tail explicitly excluded by the query. `truncated_by_scope`
+on a run (and `truncated_by_scope_runs` in aggregates) means inventory found a
+later segment of that same product/run outside the selected scope. Such a tail
+is neither open nor interrupted and does not itself fail verification; it does
+not certify the unselected suffix or excuse missing start/snapshot context.
+The last selected file of a truncated run is nonterminal in the archive: it must
+be sealed/indexed. An unindexed or torn selected tail increments `bad_tails`
+and fails verification even when its successor is outside the query.
+`routing_checks_deferred` independently identifies product-only
 scans that cannot check other destinations' raw bytes. `ok_closed_runs` includes
 both normally closed and interrupted histories. A run with its start but no stop
-marker has `open: true` / `open_runs > 0` **only if it is the newest run in every
+marker, unless `truncated_by_scope`, has `open: true` / `open_runs > 0` **only if it is the newest run in every
 product stream declared by its header**. Newness uses `(run_started_system_ns,
 run_id)`, not filenames or mtimes. Otherwise it is `interrupted: true`, increments
-`interrupted_runs`, and fails verification. Discovery checks headers in the
-archive root even for a product/month query. Both cases retain the legacy
-`incomplete_runs` count. Its last file may have no index or a partial terminal
+`interrupted_runs`, and fails verification. Both open and interrupted runs retain
+the legacy `incomplete_runs` count. Discovery checks headers in the
+archive root even for a product/month/file query. There is no archive file-count
+limit. Selected paths are externally sorted in temporary indexes with at most
+1,024 paths buffered, then replayed one file at a time. Temporary disk usage is
+proportional to selected paths; in-memory report aggregates scale with the
+number of products, runs and receive days, not hourly files. `inventory_files`
+and `inventory_peak_buffered_files` expose the inventory count and path-buffer
+high-water mark (merge cursors use two additional paths). An open or interrupted
+run's last file may have no index or a partial terminal
 block/index without failing prefix integrity; complete CRC failures and interior
 damage still fail. An open run awaiting its first snapshot is pending, not an
 anchor failure, unless it already received unanchored updates. Closed connections
@@ -102,7 +117,40 @@ whole-root digest comparison is deferred for open runs because product writers
 flush at different times. Interrupted multi-product runs compare bounded groups
 through their common prefix, including a group's available receipts even if a
 peer ended before flushing its raw copy. Such a lost copy is a routing failure,
-in addition to the interruption itself. Header creation itself is not an atomic read snapshot:
+in addition to the interruption itself. The merged unreceipted tail also checks
+sequence continuity, including the transition from the last proven group.
+For interrupted or scope-truncated runs, comparison finishes the first group in which any stream
+ends, including available receipts and merged-tail continuity, then stops.
+Later groups from longer peers are not cross-compared: their absent peer
+coverage cannot justify an additional missing-copy error for every frame.
+Local per-product replay still checks all selected files. A multi-product run
+queried through one product/month is scope-truncated as appropriate and defers
+peer proof. A stable query containing multiple products is its own inventory
+root, but live rotation between file selection and inventory can still expose
+later segments outside the selected list. Cross-stream comparison treats that
+scope-truncation flag like interruption for its tail, without marking the run
+interrupted.
+Routing anomalies increment `routing_errors` individually; `routing_details`
+keeps the first 30; each `connection_runs` entry also has its routing-error count.
+Checking continues at subsequent group boundaries after
+an anomaly. Unsequenced broadcasts are ordered by steady time and per-stream
+position for routing proof; they still count as unsequenced input in the
+integrity report.
+
+Two routing-comparison limitations remain. Recovery advances by group index,
+not by matching boundary identities. If a stream loses a boundary record, later
+groups remain misaligned and report errors; `routing_errors` then counts failed
+comparisons of misaligned groups, not distinct underlying anomalies. This can
+inflate the count but does not hide the loss.
+
+Independent merge heads with exactly equal steady-clock timestamps are ordered
+by their routing key, with unsequenced keys after sequenced keys. If an
+unsequenced frame heads one stream while a sequenced frame heads another at
+that exact timestamp, this tie-break can differ from arrival order. Because
+the receipt digest includes order, it could theoretically report a false
+mismatch. This contrived ambiguity is not currently resolved by the verifier.
+
+Header creation itself is not an atomic read snapshot:
 retry if a concurrent new file has an incomplete header.
 
 The report includes mean frames/s, p99 counts in one-second steady-clock buckets

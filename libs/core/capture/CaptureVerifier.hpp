@@ -20,6 +20,8 @@ struct VerificationReport {
     nlohmann::json json;
     bool ok = false;
 };
-VerificationReport verify(const QString& fileOrDirectory);
+// Optional synchronization point for deterministic live-rotation tests: the
+// selected file list is fixed before this callback, archive inventory follows.
+VerificationReport verify(const QString& fileOrDirectory, const std::function<void()>& afterDiscovery = {});
 
 } // namespace sentinel::capture
