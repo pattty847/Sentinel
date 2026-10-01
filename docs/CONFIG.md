@@ -56,6 +56,7 @@ recording:                # recording v2: near and deep order-book layers (docs/
   deep_tick: 5              # $ rows across [mid*deep_low_frac, mid*deep_high_mult]
   deep_low_frac: 0.25
   deep_high_mult: 4
+  live_publish_ms: 500      # open-minute live publication interval (2 Hz); clamped to [250, 5000]
   # advanced: price_scale (100), size_floor (1e-6), codes_per_octave (819), lateness_ms (2000)
 
 server:
@@ -68,6 +69,8 @@ server:
     connect_timeout_ms: 20000  # resolve + TCP + TLS + WS handshake; timeout -> backoff retry
     close_timeout_ms: 3000     # WS close to an unresponsive peer
 ```
+
+`recording.live_publish_ms` (default 500, clamped to [250, 5000]) is how often the recorder publishes each layer's open minute to live subscribers (owner decision 2026-10-01: 500 ms, 2 Hz). The live worker paces subscriptions at half of it, so each publication is sent at the next worker turn; refused sends back off from there up to 5 s. It does not change what is recorded on disk. Recorder-thread cost: about 0.4 ms per publication for a BTC-USD book (~23,500 near+deep entries), 0.08% of a core at 2 Hz (`recording_live_bench --publish`).
 
 Changing `recording.deep_tick` from $10 to $5 changes the recording config hash and starts a new HMC2 generation; existing files stay in the same series. Display ticks use `{1,2,2.5,5} x 10^k` restricted to native-tick multiples, so the $5 layer supports $25 rows. Pages spanning old $10 and new $5 generations serve both at common multiples (for example $50); at $25, output buckets containing $10 records are unknown while compatible buckets still serve. History and live projection use the same rule.
 
