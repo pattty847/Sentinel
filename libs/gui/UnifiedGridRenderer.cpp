@@ -582,6 +582,7 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
                 << " tfMs=" << timeframe_ms);
     resetHeatmapHistoryStatus();
     setOldestHeatmapAvailableMs(0);
+    const int64_t previousTf = m_currentTimeframe_ms;
     m_currentTimeframe_ms = timeframe_ms;
     if (m_useGpuHeatmap && timeframe_ms > 0 && m_heatmapStreamService) {
       m_heatmapStreamService->handleTimeframeChange(static_cast<int64_t>(timeframe_ms),
@@ -589,7 +590,26 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
     }
     m_manualTimeframeSet = true;
     m_manualTimeframeTimer.start();
+    // Spec rule 1: a column is the timeframe, and a longer one is how to see further
+    // back. Keep the columns on screen (S6d: keeping the time span gave four 1h columns
+    // after 1m, and 1,600 hairline 1m columns after 1h): scale the span by the timeframe
+    // ratio about the view end, inside the GridViewState clamps. The legacy path resets
+    // to initial_column_px columns instead. previousTf >= 1 s skips the 100 ms default
+    // before the server advertises its timeframe. The span is read before the layer's
+    // new limits re-clamp the old view (72 h of 1h is 30.8 h of 1m columns, then /60).
+    const bool keepColumns = m_gpuHeatmap && m_gpuLayer && timeframe_ms > 0 && previousTf >= 1000 && m_viewState &&
+                             m_viewState->isTimeWindowValid();
+    const int64_t end = keepColumns ? m_viewState->getVisibleTimeEnd() : 0;
+    const double span = keepColumns ? static_cast<double>(end - m_viewState->getVisibleTimeStart()) *
+                                          static_cast<double>(timeframe_ms) / static_cast<double>(previousTf)
+                                    : 0.0;
     if (m_gpuLayer && timeframe_ms > 0) m_gpuLayer->setTimeframeMs(timeframe_ms); // limits re-clamp the view
+    if (keepColumns) {
+      m_viewState->setViewport(end - static_cast<int64_t>(std::llround(span)), end, m_viewState->getMinPrice(),
+                               m_viewState->getMaxPrice());
+      syncGpuView();
+      if (m_viewState->isAutoScrollEnabled()) returnGpuToLive(); // the padding follows the span
+    }
     if (m_dataProcessor) {
       QMetaObject::invokeMethod(
           m_dataProcessor.get(),
