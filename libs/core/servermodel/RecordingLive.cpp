@@ -213,6 +213,7 @@ RawTailFrame RawTailBuilder::build(const std::string& symbol, const std::string&
 }
 struct LiveService::Impl {
     std::filesystem::path root;
+    const int64_t cadenceMs; // LiveCadence base; set before the worker starts
     LiveCache cache;
     std::mutex mutex;
     std::condition_variable wake;
@@ -228,7 +229,8 @@ struct LiveService::Impl {
     std::atomic<uint64_t> builds{0}, buildMicros{0}, deliveries{0}, deliveryMicros{0};
     std::atomic<uint64_t> rawEncodings{0}, rawBuildMicros{0}, rawDeliveries{0}, rawBuilds{0}, rawFailures{0};
     std::thread worker;
-    explicit Impl(std::filesystem::path p) : root(std::move(p)), worker([this] { run(); }) {}
+    Impl(std::filesystem::path p, int64_t cadence)
+        : root(std::move(p)), cadenceMs(std::clamp<int64_t>(cadence, 1, kLiveCadenceMaxMs)), worker([this] { run(); }) {}
     ~Impl() { shutdown(); }
     void shutdown() {
         std::lock_guard joinLock(shutdownMutex);
@@ -282,7 +284,7 @@ struct LiveService::Impl {
         std::map<std::pair<const RawSubscription*, std::string>, RawState> rawStates;
         std::map<Series, RawTailBuilder> rawBuilders;
         size_t nextRaw = 0;
-        LiveCadence rawFailureCadence;
+        LiveCadence rawFailureCadence{cadenceMs};
         std::vector<std::pair<std::shared_ptr<RawSubscription>, std::string>> rawJobs;
         auto micros = [](auto start) { return std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - start).count(); };
@@ -313,10 +315,10 @@ struct LiveService::Impl {
                 if (!s->active.load()) continue;
                 auto [it, added] = states.try_emplace(s.get());
                 auto &state = it->second;
-                if (added) state.subscription = s;
+                if (added) { state.subscription = s; state.cadence = {cadenceMs}; }
                 if (!state.cadence.due(nowMs())) continue;
                 auto &group = groups[keyOf(s->view)];
-                if (!group.builder) group.builder = std::make_unique<LiveBuilder>(s->view);
+                if (!group.builder) { group.builder = std::make_unique<LiveBuilder>(s->view); group.cadence = {cadenceMs}; }
                 const auto source = cache.snapshot(s->view.symbol, s->view.layer);
                 if (!source.revision || source.revision == state.deliveredRevision) continue;
                 bool accepted = false;
@@ -411,7 +413,7 @@ struct LiveService::Impl {
                         if (rawWorkHook) rawWorkHook("state");
                         auto [it, added] = rawStates.try_emplace({s.get(), sourceId});
                         auto& state = it->second;
-                        if (added) { state.subscription = s; state.finalThroughMs = s->view.sinceMs; }
+                        if (added) { state.subscription = s; state.cadence = {cadenceMs}; state.finalThroughMs = s->view.sinceMs; }
                         if (!state.cadence.due(nowMs())) continue;
                         const Series series{s->view.symbol, sourceId};
                         auto [sourceIt, fresh] = snapshots.try_emplace(series);
@@ -454,7 +456,7 @@ struct LiveService::Impl {
                         }
                         state.cadence.completed(nowMs(), accepted);
                     }
-                    rawFailureCadence = {};
+                    rawFailureCadence = {cadenceMs};
                 }
             } catch (const std::exception& e) {
                 ++rawFailures;
@@ -471,7 +473,8 @@ struct LiveService::Impl {
         }
     }
 };
-LiveService::LiveService(std::filesystem::path root) : impl_(std::make_unique<Impl>(std::move(root))) {}
+LiveService::LiveService(std::filesystem::path root, int64_t cadenceMs)
+    : impl_(std::make_unique<Impl>(std::move(root), cadenceMs)) {}
 LiveService::~LiveService() = default;
 void LiveService::shutdown() { impl_->shutdown(); }
 void LiveService::start() { impl_->start(); }

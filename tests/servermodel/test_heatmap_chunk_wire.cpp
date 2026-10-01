@@ -796,7 +796,20 @@ TEST(ChunkServiceWatermarks, RecorderCutoffsWinAndColdSeriesKeepAMargin) {
     EXPECT_EQ(service.availabilityFingerprint("BTC-USD"), (std::vector<int64_t>{kEpoch + 42, 7, kEpoch + 42, 7}));
 }
 
-TEST_F(ChunkWire, LiveOneHertzIndependentSlotAndBusyCoalescingKeepFinals) {
+// A non-default recording.live_publish_ms proves the server paces live frames
+// from the config (cadence = half the publish interval), not a constant.
+class ChunkWireConfiguredRate : public ChunkWire {
+protected:
+    void SetUp() override {
+        config.recording.livePublishMs = 1500;
+        ChunkWire::SetUp();
+    }
+};
+
+TEST_F(ChunkWireConfiguredRate, LiveConfiguredCadenceIndependentSlotAndBusyCoalescingKeepFinals) {
+    const int64_t B = recording::liveCadenceMs(config.recording.livePublishMs);
+    ASSERT_EQ(B, 750);
+    const int64_t retry = 8 * B + std::min<int64_t>(recording::kLiveCadenceMaxMs, 8 * B);
     EXPECT_TRUE(buildServerConfigPayload(config, true, true).at("recording").at("chunk_live").get<bool>());
     useLiveClock(); startAndConnect();
     auto session = HeatmapChunkWireTest::onlySession(*server); ASSERT_TRUE(session);
@@ -814,24 +827,24 @@ TEST_F(ChunkWire, LiveOneHertzIndependentSlotAndBusyCoalescingKeepFinals) {
     EXPECT_TRUE(HeatmapChunkWireTest::holdRawSlot(*session)); // refusal must not leak admission
     HeatmapChunkWireTest::releaseRawSlot(*session);
     publishLive(1, true, 2000);
-    liveTurn(999); EXPECT_EQ(inbox.liveFor(sub).size(), 1);
-    liveTurn(1000); ASSERT_EQ(inbox.liveFor(sub).size(), 2);
+    liveTurn(B - 1); EXPECT_EQ(inbox.liveFor(sub).size(), 1);
+    liveTurn(B); ASSERT_EQ(inbox.liveFor(sub).size(), 2);
     EXPECT_EQ(inbox.liveFor(sub)[1]->columns.columns.size(), 1); // final 0 once
     EXPECT_EQ(inbox.liveFor(sub)[1]->columns.columns.back().observedMs, 2000);
 
     ASSERT_TRUE(HeatmapChunkWireTest::holdRawSlot(*session));
     const auto attempts = model->recordingLive()->diagnostics().rawDeliveries;
     publishLive(1, false); publishLive(2, true, 3000);
-    liveTurn(2000); // busy -> due at 4000
-    liveTurn(3999); EXPECT_EQ(model->recordingLive()->diagnostics().rawDeliveries, attempts+1);
-    liveTurn(4000); // busy -> due at 8000
+    liveTurn(2 * B); // busy -> due at 4B
+    liveTurn(4 * B - 1); EXPECT_EQ(model->recordingLive()->diagnostics().rawDeliveries, attempts+1);
+    liveTurn(4 * B); // busy -> due at 8B
     publishLive(2, false); publishLive(3, true, 4000);
-    liveTurn(7999); EXPECT_EQ(model->recordingLive()->diagnostics().rawDeliveries, attempts+2);
-    liveTurn(8000); // busy -> due at 13000 (5 s cap)
+    liveTurn(8 * B - 1); EXPECT_EQ(model->recordingLive()->diagnostics().rawDeliveries, attempts+2);
+    liveTurn(8 * B); // busy -> due 8B later, at most 5 s (the cap at B = 750)
     publishLive(3, false); publishLive(4, true, 5678);
     HeatmapChunkWireTest::releaseRawSlot(*session);
-    liveTurn(12999); EXPECT_EQ(inbox.liveFor(sub).size(), 2);
-    liveTurn(13000);
+    liveTurn(retry - 1); EXPECT_EQ(inbox.liveFor(sub).size(), 2);
+    liveTurn(retry);
     auto frames = inbox.liveFor(sub); ASSERT_EQ(frames.size(), 3);
     const auto& latest = *frames.back();
     EXPECT_EQ(latest.kind, ChunkKind::LiveColumn);
@@ -844,8 +857,8 @@ TEST_F(ChunkWire, LiveOneHertzIndependentSlotAndBusyCoalescingKeepFinals) {
     }
     EXPECT_EQ(latest.columns.columns.back().observedMs, 5678);
     publishLive(4, true, 6789);
-    liveTurn(13999); EXPECT_EQ(inbox.liveFor(sub).size(), 3);
-    liveTurn(14000); ASSERT_EQ(inbox.liveFor(sub).size(), 4);
+    liveTurn(retry + B - 1); EXPECT_EQ(inbox.liveFor(sub).size(), 3);
+    liveTurn(retry + B); ASSERT_EQ(inbox.liveFor(sub).size(), 4);
     EXPECT_EQ(inbox.liveFor(sub).back()->columns.columns.size(), 1);
     EXPECT_EQ(model->recordingLive()->diagnostics().rawDeliveries, attempts+5);
 }

@@ -21,6 +21,10 @@ struct RecorderConfig {
     std::vector<LayerConfig> layers;
     int64_t latenessMs = 2000;
     size_t maxQueuedLevels = 2'000'000;
+    // Open-minute publication interval (integration clock): at most one
+    // provisional record per layer per interval. Server config
+    // recording.live_publish_ms (default 500, clamped to [250, 5000]).
+    int64_t livePublishMs = 500;
     // Worker callback: bounded handoff only; no I/O or projection. Installed before start.
     std::function<void(std::shared_ptr<const Hmc2Record>)> publisher;
     // Deterministic allocation-failure seam, before making a publication copy.

@@ -152,7 +152,7 @@ struct BookRecorder::Impl {
             c.sizeScale.floor <= 0 || !std::isfinite(c.sizeScale.codesPerOctave) || c.sizeScale.codesPerOctave <= 0 ||
             c.latenessMs < 0 || c.latenessMs > kHour || c.maxQueuedLevels == 0 || c.layers.empty() ||
             c.resnapshotIntervalMs <= 0 || c.resnapshotMaxIntervalMs < c.resnapshotIntervalMs ||
-            c.resnapshotStableMs < 0 || c.oneSidedGraceMs < 0)
+            c.resnapshotStableMs < 0 || c.oneSidedGraceMs < 0 || c.livePublishMs <= 0)
             throw std::invalid_argument("BookRecorder: invalid config");
         std::set<std::string> names;
         for (const auto &l : c.layers) {
@@ -357,7 +357,7 @@ struct BookRecorder::Impl {
         }
     }
     void publishOpen(Symbol &s) {
-        if (!cfg.publisher || !s.observed || s.clock - s.lastPublish < 1000) return;
+        if (!cfg.publisher || !s.observed || s.clock - s.lastPublish < cfg.livePublishMs) return;
         s.lastPublish = s.clock;
         for (size_t li = 0; li < s.layers.size(); ++li) {
             const auto &layer = s.layers[li];

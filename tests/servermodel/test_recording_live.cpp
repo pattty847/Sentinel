@@ -109,19 +109,31 @@ TEST(RecordingLive, DelayedCommitCorrectsPriorOutputBucket) {
     EXPECT_EQ(b.columns[1].observedMs, 1000);
 }
 TEST(RecordingLive, CadenceBacksOffAndRecoversWithoutPendingQueue) {
-    LiveCadence c;
-    EXPECT_TRUE(c.due(0));
-    c.completed(0, true);
-    EXPECT_FALSE(c.due(999));
-    EXPECT_TRUE(c.due(1000));
-    c.completed(1000, false);
-    EXPECT_EQ(c.nextMs, 3000);
-    c.completed(3000, false);
-    EXPECT_EQ(c.nextMs, 7000);
-    c.completed(7000, false);
-    EXPECT_EQ(c.nextMs, 12000);
-    c.completed(12000, true);
-    EXPECT_EQ(c.nextMs, 13000);
+    // The base is the configured cadence: the default publish interval's, the
+    // clamp ends' (250 and 5000 ms) and the former fixed 1 s.
+    EXPECT_EQ(kLiveCadenceDefaultMs, 250);
+    EXPECT_EQ(liveCadenceMs(250), 125);
+    EXPECT_EQ(liveCadenceMs(5000), 2500);
+    EXPECT_EQ(LiveCadence{}.baseMs, kLiveCadenceDefaultMs);
+    for (const int64_t base : {kLiveCadenceDefaultMs, liveCadenceMs(250), liveCadenceMs(5000), int64_t{1000}}) {
+        SCOPED_TRACE(base);
+        LiveCadence c{base};
+        EXPECT_TRUE(c.due(0));
+        c.completed(0, true);
+        EXPECT_FALSE(c.due(base - 1));
+        EXPECT_TRUE(c.due(base));
+        int64_t now = base, delay = base;
+        for (int refusal = 0; refusal < 6; ++refusal) { // doubles from the base, capped at 5 s
+            delay = std::min<int64_t>(kLiveCadenceMaxMs, delay * 2);
+            c.completed(now, false);
+            EXPECT_EQ(c.nextMs, now + delay);
+            now = c.nextMs;
+        }
+        EXPECT_EQ(c.delayMs, kLiveCadenceMaxMs);
+        c.completed(now, true); // acceptance resets to the base
+        EXPECT_EQ(c.nextMs, now + base);
+        EXPECT_EQ(c.delayMs, base);
+    }
 }
 TEST(RecordingLive, ServiceDeliversOffProducerAndRegistrationIsBounded) {
     QTemporaryDir dir;
@@ -605,9 +617,9 @@ TEST(RecordingRawTail, FinalsOncePerSubscriberAndSinceResubscribeResends) {
     ASSERT_EQ(a.size(), 1); ASSERT_EQ(b.size(), 1);
     EXPECT_EQ(a[0].columns.columns.size(), 2); EXPECT_EQ(b[0].columns.columns.size(), 1);
     service.publish(record(1, 4, 2000, true));
-    now = 999; RecordingLiveTest::poll(service);
+    now = kLiveCadenceDefaultMs - 1; RecordingLiveTest::poll(service);
     EXPECT_EQ(a.size(), 1); EXPECT_EQ(b.size(), 1);
-    now = 1000; RecordingLiveTest::poll(service);
+    now = kLiveCadenceDefaultMs; RecordingLiveTest::poll(service);
     ASSERT_EQ(a.size(), 2); ASSERT_EQ(b.size(), 2);
     ASSERT_EQ(a[1].columns.columns.size(), 1); ASSERT_EQ(b[1].columns.columns.size(), 1);
     EXPECT_TRUE(a[1].columns.columns.front().flags & kProvisional);
@@ -620,6 +632,37 @@ TEST(RecordingRawTail, FinalsOncePerSubscriberAndSinceResubscribeResends) {
     EXPECT_EQ(reconnect[0].columns.columns.front().bucketStartMs, epoch);
     EXPECT_FALSE(reconnect[0].columns.columns.front().flags & kProvisional);
     service.shutdown();
+}
+
+// 2026-10-01 (owner: live rate 500 ms): the recorder publishes every 500 ms and
+// the worker turns about every 105 ms (100 ms wait plus work; S6d measured
+// frames 1.057 s apart at the former 1 s). Each publication must go out at the
+// first turn after it. A worker cadence equal to the publish interval rounds up
+// to 525 ms here, falls behind the recorder, skips publications and lets the
+// age walk through a whole interval.
+TEST(RecordingRawTail, EachPublicationGoesOutWithinOneWorkerTurn) {
+    QTemporaryDir dir;
+    LiveService service(dir.path().toStdString(), liveCadenceMs(kLivePublishDefaultMs));
+    std::atomic<int64_t> now{-1};
+    RecordingLiveTest::clock(service, [&] { return now.load(); });
+    std::vector<std::pair<int64_t, int64_t>> sent; // (turn time, observedMs of the open minute)
+    auto sub = service.subscribeRaw({"BTC-USD", {"hmc2.near"}, 1, epoch}, [&](auto&, auto&, const RawTailFrame& frame) {
+        sent.emplace_back(now.load(), heatmap::decodeChunk(*frame.bytes).columns.columns.back().observedMs);
+        return true;
+    });
+    ASSERT_TRUE(sub);
+    constexpr int64_t kTurnMs = 105, kSpanMs = 30'000;
+    int64_t nextPublish = 0, publications = 0;
+    for (int64_t t = 0; t < kSpanMs; t += kTurnMs) {
+        for (; nextPublish <= t; nextPublish += kLivePublishDefaultMs, ++publications)
+            service.publish(record(0, 2, uint32_t(nextPublish + 1), true)); // observed = publish time + 1
+        now = t; RecordingLiveTest::poll(service);
+    }
+    service.shutdown();
+    ASSERT_EQ(int64_t(sent.size()), publications) << "a frame per publication: 2 per second, none skipped";
+    int64_t maxAge = 0;
+    for (const auto& [at, observed] : sent) maxAge = std::max(maxAge, at - (observed - 1));
+    EXPECT_LT(maxAge, kTurnMs) << "each publication goes out at the first worker turn after it";
 }
 
 TEST(RecordingRawTail, BusyCoalescesLatestAndBacksOffWithoutLosingFinals) {
@@ -640,18 +683,20 @@ TEST(RecordingRawTail, BusyCoalescesLatestAndBacksOffWithoutLosingFinals) {
     RecordingLiveTest::poll(service);
     ASSERT_EQ(delivered.size(), 1);
     busy = true;
+    constexpr int64_t B = kLiveCadenceDefaultMs; // the configured base
+    constexpr int64_t retry = 7 * B + std::min<int64_t>(kLiveCadenceMaxMs, 8 * B);
     service.publish(record(1, 3)); service.publish(record(2, 4, 1000, true));
-    now = 1000; RecordingLiveTest::poll(service); // refused -> 2 s
-    now = 2999; RecordingLiveTest::poll(service); EXPECT_EQ(attempts.size(), 2);
-    now = 3000; RecordingLiveTest::poll(service); // refused -> 4 s
+    now = B; RecordingLiveTest::poll(service); // refused -> 2B
+    now = 3 * B - 1; RecordingLiveTest::poll(service); EXPECT_EQ(attempts.size(), 2);
+    now = 3 * B; RecordingLiveTest::poll(service); // refused -> 4B
     service.publish(record(2, 4)); service.publish(record(3, 5, 1000, true));
-    now = 6999; RecordingLiveTest::poll(service); EXPECT_EQ(attempts.size(), 3);
-    now = 7000; RecordingLiveTest::poll(service); // refused -> 5 s cap
+    now = 7 * B - 1; RecordingLiveTest::poll(service); EXPECT_EQ(attempts.size(), 3);
+    now = 7 * B; RecordingLiveTest::poll(service); // refused -> 8B (5 s cap)
     service.publish(record(3, 5)); service.publish(record(4, 6, 2345, true));
     busy = false;
-    now = 11999; RecordingLiveTest::poll(service); EXPECT_EQ(delivered.size(), 1);
-    now = 12000; RecordingLiveTest::poll(service);
-    EXPECT_EQ(attempts, (std::vector<int64_t>{0, 1000, 3000, 7000, 12000}));
+    now = retry - 1; RecordingLiveTest::poll(service); EXPECT_EQ(delivered.size(), 1);
+    now = retry; RecordingLiveTest::poll(service);
+    EXPECT_EQ(attempts, (std::vector<int64_t>{0, B, 3 * B, 7 * B, retry}));
     ASSERT_EQ(delivered.size(), 2);
     const auto& latest = delivered.back();
     ASSERT_EQ(latest.columns.columns.size(), 4);
@@ -663,8 +708,8 @@ TEST(RecordingRawTail, BusyCoalescesLatestAndBacksOffWithoutLosingFinals) {
     EXPECT_EQ(latest.columns.columns.back().observedMs, 2345);
     EXPECT_EQ(latest.state.revision, 8);
     service.publish(record(4, 7, 3456, true));
-    now = 12999; RecordingLiveTest::poll(service); EXPECT_EQ(delivered.size(), 2);
-    now = 13000; RecordingLiveTest::poll(service);
+    now = retry + B - 1; RecordingLiveTest::poll(service); EXPECT_EQ(delivered.size(), 2);
+    now = retry + B; RecordingLiveTest::poll(service);
     ASSERT_EQ(delivered.size(), 3);
     EXPECT_EQ(delivered.back().columns.columns.size(), 1); // all refused finals were accepted exactly once
     service.shutdown();
@@ -890,7 +935,7 @@ TEST(RecordingRawTail, OversizedWorkerTrimsPendingLogsAndKeepsFinalMarkers) {
     EXPECT_EQ(markers.front(), epoch+60000);
     EXPECT_TRUE(logs.contains("symbol=BTC-USD source=hmc2.near bytes="));
     service.publish(record(4, 3, 60000, true, epoch+60000));
-    now = 1000; RecordingLiveTest::poll(service);
+    now = kLiveCadenceDefaultMs; RecordingLiveTest::poll(service);
     ASSERT_EQ(frames.size(), 2);
     for (const auto& column : frames.back().columns.columns) EXPECT_TRUE(column.flags & kProvisional);
     EXPECT_EQ(markers.back(), 0); // retained final delivered once
@@ -932,18 +977,19 @@ TEST(RecordingRawTail, AllocationFailureAcrossRawWorkerBacksOffAndRecovers) {
         now = 0; RecordingLiveTest::poll(service);
         EXPECT_EQ(service.diagnostics().rawFailures, 1);
         EXPECT_EQ(deliveries, 0);
-        now = 1999; RecordingLiveTest::poll(service);
+        constexpr int64_t B = kLiveCadenceDefaultMs; // failures back off 2B, then 4B
+        now = 2 * B - 1; RecordingLiveTest::poll(service);
         EXPECT_EQ(service.diagnostics().rawFailures, 1);
-        now = 2000; RecordingLiveTest::poll(service);
+        now = 2 * B; RecordingLiveTest::poll(service);
         EXPECT_EQ(service.diagnostics().rawFailures, 2);
-        now = 5999; RecordingLiveTest::poll(service);
+        now = 6 * B - 1; RecordingLiveTest::poll(service);
         EXPECT_EQ(service.diagnostics().rawFailures, 2);
         fail = false;
-        now = 6000; RecordingLiveTest::poll(service);
+        now = 6 * B; RecordingLiveTest::poll(service);
         EXPECT_EQ(deliveries, 1);
         EXPECT_TRUE(sub->active);
         service.shutdown();
     }
     EXPECT_TRUE(logs.contains("Raw heatmap live worker retry:"));
-    EXPECT_TRUE(logs.contains("delayMs=4000"));
+    EXPECT_TRUE(logs.contains(QString("delayMs=%1").arg(4 * kLiveCadenceDefaultMs)));
 }

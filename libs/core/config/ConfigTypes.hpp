@@ -110,6 +110,10 @@ struct ServerRecordingConfig {
     double deepLowFrac = 0.25;
     double deepHighMult = 4.0;
     int64_t latenessMs = 2000;
+    // Live open-minute publication interval (recording.live_publish_ms); the
+    // loader clamps it to [kLivePublishMinMs, kLivePublishMaxMs].
+    static constexpr int64_t kLivePublishMinMs = 250, kLivePublishMaxMs = 5000;
+    int64_t livePublishMs = 500;
 };
 
 struct ServerConfig {

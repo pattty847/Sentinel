@@ -1,5 +1,6 @@
 // Reproducible worker cost measurement; no exchange or socket cost; disk warmup is excluded.
 #include "servermodel/RecordingLive.hpp"
+#include "servermodel/BookRecorder.hpp"
 #include "protocol/RecordingHistoryWire.hpp"
 #include <QTemporaryDir>
 #include <condition_variable>
@@ -7,6 +8,8 @@
 #include <iostream>
 #include <thread>
 #include <random>
+#include <algorithm>
+#include <cmath>
 using namespace recording;
 namespace {
 int sourceEntries = 12000;
@@ -29,7 +32,88 @@ RecordPtr sample(int minute, int observed, bool provisional) {
     return r;
 }
 }
+// Recorder-thread cost of one open-minute publication (publishOpen: copy and
+// encode every layer's in-window rows, hand off to LiveCache), BTC-like book:
+// mid $84,800, near $1 rows +-5% about half full (recorded minutes hold ~4,500
+// near entries), deep $5 rows over [0.25x, 4x] with ~18,000 occupied (recorded:
+// ~18,350), two $1 levels per occupied deep row so the near layer also tracks
+// every far row it must skip. Two recorders get the same book and the same
+// ticks every 500 ms; only one has a publisher. The difference per tick is the
+// publication cost; minute closes (disk) are outside the timed loops.
+int publishBench(int minutes) {
+    constexpr double mid = 84'800;
+    std::vector<recording::Level> book;
+    std::mt19937 random(11);
+    std::uniform_real_distribution<double> size(0.001, 2.0), coin(0, 1);
+    for (double p = mid * 0.95; p <= mid * 1.05; p += 1)
+        if (coin(random) < 0.53) book.push_back({p < mid, std::floor(p) + 0.37, size(random)});
+    for (double p = mid * 0.25; p <= mid * 4; p += 5) {
+        if (std::abs(p - mid) <= mid * 0.05 || coin(random) >= 0.28) continue;
+        book.push_back({p < mid, std::floor(p) + 1.13, size(random)});
+        book.push_back({p < mid, std::floor(p) + 3.61, size(random)});
+    }
+    struct Run {
+        QTemporaryDir dir;
+        LiveCache cache;
+        int64_t local = 0;
+        uint64_t publications = 0, entries = 0;
+        std::unique_ptr<BookRecorder> recorder;
+        double timedMs = 0;
+        int64_t ticks = 0;
+    };
+    auto make = [&](Run& run, bool publish) {
+        RecorderConfig c;
+        c.root = run.dir.path().toStdString();
+        c.priceScale = 100;
+        c.sizeScale = {1e-8, 819};
+        c.layers = {{"near", 100, 0.95, 1.05, false}, {"deep", 500, 0.25, 4.0, true}};
+        c.livePublishMs = 500;
+        if (publish) c.publisher = [&run](RecordPtr r) {
+            ++run.publications; run.entries += r->entries.size(); run.cache.publish(std::move(r));
+        };
+        run.recorder = std::make_unique<BookRecorder>(std::move(c), [&run] { return run.local; });
+        run.local = kHmc2MinMs;
+        run.recorder->onSnapshot("BTC-USD", run.local, book);
+        run.recorder->drainForTest();
+    };
+    Run with, without;
+    make(with, true);
+    make(without, false);
+    std::vector<double> perTick;
+    for (int m = 0; m < minutes; ++m) {
+        double ms[2] = {0, 0};
+        for (int which = 0; which < 2; ++which) { // alternate order against drift
+            Run& run = (m + which) % 2 ? without : with;
+            const int64_t minute = kHmc2MinMs + m * 60'000;
+            const auto start = std::chrono::steady_clock::now();
+            for (int k = 1; k < 120; ++k) {
+                run.local = minute + k * 500;
+                run.recorder->onTick(run.local);
+                run.recorder->drainForTest();
+            }
+            const double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            run.timedMs += elapsed; run.ticks += 119;
+            ms[&run == &with ? 0 : 1] = elapsed;
+            run.local = minute + 60'000 + 100; // close the minute (disk), untimed
+            run.recorder->onTick(run.local);
+            run.recorder->drainForTest();
+        }
+        perTick.push_back((ms[0] - ms[1]) / 119);
+    }
+    std::sort(perTick.begin(), perTick.end());
+    const double median = perTick[perTick.size() / 2];
+    std::cout << "book levels=" << book.size() << " publications=" << with.publications
+              << " entries/publication(both layers)=" << with.entries / std::max<uint64_t>(1, with.publications / 2) << "\n"
+              << std::fixed << std::setprecision(3)
+              << "tick ms with publisher=" << with.timedMs / with.ticks << " without=" << without.timedMs / without.ticks << "\n"
+              << "publishOpen ms (median of " << minutes << " minutes)=" << median
+              << " min=" << perTick.front() << " max=" << perTick.back() << "\n"
+              << "recorder-thread CPU at 2 Hz=" << median * 2 / 10 << "% of a core\n";
+    return 0;
+}
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string_view(argv[1]) == "--publish")
+        return publishBench(argc > 2 ? std::clamp(std::atoi(argv[2]), 1, 60) : 9);
     if (argc > 1 && std::string_view(argv[1]) == "--raw") {
         const int iterations = argc > 2 ? std::clamp(std::atoi(argv[2]), 2, 1000) : 50;
         std::cout << "raw tail: 12000 shuffled entries/minute; sort, validation, hash and zstd; no disk/TLS\n"

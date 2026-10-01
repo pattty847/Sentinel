@@ -1101,6 +1101,33 @@ TEST_F(LiveClient, AContinuousFrameStreamStillComposesEveryMinimumInterval) {
     EXPECT_GE(composed, 4u) << "a stream of frames must not postpone composition";
     EXPECT_LE(composed, 5u) << "at most one composition per minimum interval";
 }
+// Server live rate 500 ms (owner, 2026-10-01): frames follow the recorder's
+// publications at the live worker's ~105 ms turns, so they arrive 420..630 ms
+// apart around a 500 ms mean. The default minimum interval (500 ms) must
+// compose every one of them (2 Hz), delaying a short-gap frame by at most the
+// shortfall, never merging two frames into one composition.
+TEST_F(LiveClient, TwoHertzServerFramesComposeEveryFrame) {
+    coalesceMs = 15;
+    auto &c = chart(); settle(); upload(c); settle();
+    ASSERT_EQ(c.liveMinInterval(), 500);
+    const auto before = c.stats().livePublications;
+    int64_t arrival = now, maxDelay = 0;
+    constexpr int kFrames = 20;
+    for (int i = 0; i < kFrames; ++i) {
+        arrival += i % 2 ? 580 : 420; // mean 500 ms: 2 Hz
+        now = arrival;
+        send(tail(10, 10, 10, uint64_t(i + 1), 1000 + uint64_t(i) * 500));
+        for (int64_t wait = 0; wait <= 200; wait += 5) {
+            now = arrival + wait; c.pollLive(); settle();
+            if (c.latestLive() && live(c).revision == uint64_t(i + 1)) { maxDelay = std::max(maxDelay, wait); break; }
+        }
+        ASSERT_EQ(live(c).revision, uint64_t(i + 1)) << "frame " << i << " not drawn before the next arrives";
+    }
+    EXPECT_EQ(c.stats().livePublications - before, uint64_t(kFrames)) << "one composition per 2 Hz frame";
+    // The previous frame composed 15 ms after its arrival; a 420 ms gap then
+    // waits for 500 ms after that composition: 15 + 80 ms after its arrival.
+    EXPECT_LE(maxDelay, 15 + 500 - 420) << "a short gap waits only for the minimum interval";
+}
 TEST_F(LiveClient, MeasuredCostAboveFiveMsBacksOffToFiveSeconds) {
     int64_t clock = 0;
     composeClock = [&] { const auto t = clock; clock += 6'000'000; return t; };
