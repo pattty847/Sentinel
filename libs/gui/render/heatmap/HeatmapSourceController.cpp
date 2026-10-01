@@ -875,7 +875,7 @@ void HeatmapSourceController::pollLive() {
     if (inputs.empty()) return;
     struct Result {
         std::shared_ptr<LiveSnapshot> snapshot;
-        double ms = 0;
+        double ms = 0, composeMs = 0, imageMs = 0; // total; composition; image + summary
         uint64_t buckets = 0, pieces = 0;
         size_t bytes = 0;
     };
@@ -897,7 +897,10 @@ void HeatmapSourceController::pollLive() {
             return std::none_of(inputs.begin(), inputs.end(), [&](const auto &in) { return in.edge->source == entry.first; });
         });
         for (const auto &input : inputs) {
+            const auto composeBegin = clock();
             auto composed = state->composers[input.edge->source].compose(*input.edge, input.chunks, tf, input.start);
+            const auto imageBegin = clock();
+            result->composeMs += double(imageBegin - composeBegin) / 1e6;
             result->buckets += composed.composedBuckets;
             result->pieces += composed.committedPieces;
             LiveSourceSnapshot source;
@@ -913,6 +916,7 @@ void HeatmapSourceController::pollLive() {
                 for (const auto &s : column.sources) if (s.commonUnits > 0)
                     source.commonUnits = source.commonUnits ? std::lcm(source.commonUnits, s.commonUnits) : s.commonUnits;
             mergeResolution(out->resolution, summary);
+            result->imageMs += double(clock() - imageBegin) / 1e6;
             result->bytes += sparseBytes(*source.columns) + imageBytes(*source.gpu) +
                              state->composers[input.edge->source].bytes();
             out->sources.push_back(std::move(source));
@@ -926,16 +930,18 @@ void HeatmapSourceController::pollLive() {
     };
     auto done = [this, result, serial, started = now, state = liveWork_](const QString &error) {
         liveRunning_ = false;
-        stats_.liveComposeMs = result->ms;
+        stats_.liveComposeMs = result->composeMs;
+        stats_.liveUpdateMs = result->ms;
         stats_.liveComposedBuckets += result->buckets;
         stats_.liveCommittedPieces += result->pieces;
-        // Measure the whole worker update (compose + upload image + summary) in
-        // the worker's CPU time, and decide on the median of the last three
-        // updates (fewer at first: the one, then the lower of two), so neither a
-        // descheduled worker nor one slow update switches to 5 s.
+        // Owner decision 4: back off when composing measures above 5 ms. Measure
+        // the composition (not the GPU image and summary built after it, a steady
+        // ~1.3 ms at 5m) in the worker's CPU time, and decide on the median of the
+        // last three updates (fewer at first: the one, then the lower of two), so
+        // neither a descheduled worker nor one slow update switches to 5 s.
         if (state == liveWork_ && error.isEmpty()) {
             std::rotate(liveCosts_.begin(), liveCosts_.begin() + 1, liveCosts_.end());
-            liveCosts_.back() = result->ms;
+            liveCosts_.back() = result->composeMs;
             liveCostCount_ = std::min<size_t>(liveCostCount_ + 1, liveCosts_.size());
             std::array<double, 3> recent = liveCosts_;
             std::sort(recent.end() - liveCostCount_, recent.end());
@@ -953,7 +959,8 @@ void HeatmapSourceController::pollLive() {
             }
         }
         sLog_Probe("heatmap.live.compose", "chart=" << chart_ << " symbol=" << symbol_ << " tf=" << tfMs_
-                   << " ms=" << result->ms << " buckets=" << result->buckets << " committed=" << result->pieces
+                   << " ms=" << result->ms << " composeMs=" << result->composeMs << " imageMs=" << result->imageMs
+                   << " buckets=" << result->buckets << " committed=" << result->pieces
                    << " interval=" << stats_.liveIntervalMs);
         if (serial != serial_ || state != liveWork_) {
             ++stats_.liveStaleResults;

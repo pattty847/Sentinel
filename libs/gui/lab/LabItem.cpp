@@ -694,7 +694,7 @@ QVariantMap LabItem::metrics() const {
         m.insert({{"publications", qulonglong(c.publications)}, {"admissions", qulonglong(c.admissions)},
                   {"controllerEvictions", qulonglong(c.evictions)}, {"releasedImages", qulonglong(c.releasedImages)},
                   {"suppressed", qulonglong(c.suppressed)}, {"committedBytes", qulonglong(c.committedBytes)},
-                  {"livePublications", qulonglong(c.livePublications)}, {"liveComposeMs", c.liveComposeMs},
+                  {"livePublications", qulonglong(c.livePublications)}, {"liveComposeMs", c.liveComposeMs}, {"liveUpdateMs", c.liveUpdateMs},
                   {"liveIntervalMs", c.liveIntervalMs}});
     }
     // Refresh the controller's stats for the next call (they belong to its thread).

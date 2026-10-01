@@ -846,6 +846,26 @@ TEST_F(LiveClient, OneSlowLiveComposeDoesNotBackOffTwoInThreeDo) {
     send(tail(10, 10, 10, ++revision, 1000 + 1000 * revision)); settle();
     EXPECT_EQ(c.stats().liveIntervalMs, HeatmapSourceController::kLiveBackoffIntervalMs) << "15, 1, 15 ms: median 15";
 }
+// ...and the cost is the composition (owner decision 4: "composing measures
+// above 5 ms"), not the GPU image and summary built after it.
+TEST_F(LiveClient, TheBackoffMeasuresCompositionNotTheImageBuiltAfterIt) {
+    // Per update the clock is read at its start, around the composition, and at
+    // its end: 1 ms composing, 9 ms building the image and summary.
+    int64_t clock = 0;
+    int call = 0;
+    composeClock = [&] {
+        static constexpr int64_t steps[] = {0, 1'000'000, 9'000'000, 0};
+        const auto t = clock;
+        clock += steps[call++ % 4];
+        return t;
+    };
+    auto &c = chart(); settle();
+    send(tail(10, 10, 10, 1)); settle();
+    ASSERT_TRUE(c.latestLive());
+    EXPECT_DOUBLE_EQ(c.stats().liveComposeMs, 1);
+    EXPECT_DOUBLE_EQ(c.stats().liveUpdateMs, 10);
+    EXPECT_EQ(c.stats().liveIntervalMs, HeatmapSourceController::kLiveMinIntervalMs);
+}
 TEST_F(LiveClient, RecorderReplayMatchesLiveBuilderAndAnalyticalTwapAtOneAndFiveMinutes) {
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());

@@ -380,7 +380,8 @@ public:
         uint64_t livePublications = 0, liveStaleResults = 0, liveComposedBuckets = 0, liveCommittedPieces = 0;
         size_t liveBytes = 0; // composer cache + published columns/image/summary, in CPU ledger
         size_t liveUploadedSpans = 0; // acknowledgements retained inside the live window
-        double liveComposeMs = 0;
+        double liveComposeMs = 0; // composition CPU time of the last live update (backoff input)
+        double liveUpdateMs = 0;  // the whole update: composition, GPU image, summary
         int liveIntervalMs = kLiveMinIntervalMs;
         uint64_t refusals = 0;    // visible spans refused by the CPU ceiling, cumulative
         size_t suppressed = 0;    // spans suppressed by the last reconcile
