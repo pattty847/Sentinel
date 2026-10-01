@@ -797,6 +797,22 @@ TEST_F(LiveClient, LiveFramesComposeOnArrivalAfterTheCoalescingWindow) {
     now = 715 + HeatmapSourceController::kLiveMinIntervalMs; c.pollLive(); settle();
     EXPECT_EQ(live(c).revision, 3u);
 }
+// Review re-check: the coalescing window is anchored to the first pending frame.
+// A continuous stream (a frame every 10 ms for 2 s) still composes about every
+// kLiveMinIntervalMs, and never more often.
+TEST_F(LiveClient, AContinuousFrameStreamStillComposesEveryMinimumInterval) {
+    coalesceMs = 15;
+    auto &c = chart(); settle(); upload(c); settle();
+    const auto before = c.stats().livePublications;
+    for (int i = 0; i < 200; ++i) {
+        now += 10;
+        send(tail(10, 10, 10, uint64_t(i + 1), 1000 + uint64_t(i) * 250));
+        c.pollLive(); settle();
+    }
+    const auto composed = c.stats().livePublications - before;
+    EXPECT_GE(composed, 4u) << "a stream of frames must not postpone composition";
+    EXPECT_LE(composed, 5u) << "at most one composition per minimum interval";
+}
 TEST_F(LiveClient, MeasuredCostAboveFiveMsBacksOffToFiveSeconds) {
     int64_t clock = 0;
     composeClock = [&] { const auto t = clock; clock += 6'000'000; return t; };
@@ -815,15 +831,22 @@ TEST_F(LiveClient, MeasuredCostAboveFiveMsBacksOffToFiveSeconds) {
 // live run measured single 15-58 ms updates whose median was 2-3 ms) costs
 // nothing while it waits.
 TEST(LiveComposeCost, TheDefaultClockIsTheWorkersCpuTime) {
+#if defined(_WIN32) || defined(__APPLE__) || defined(__linux__)
+    ASSERT_TRUE(HeatmapSourceController::threadCpuClockAvailable()) << "every supported platform has a thread CPU clock";
+#endif
+    if (!HeatmapSourceController::threadCpuClockAvailable())
+        GTEST_SKIP() << "no thread CPU clock on this platform: the backoff measures wall time (steady clock)";
     const int64_t idle0 = HeatmapSourceController::threadCpuNs();
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
     const int64_t idle = HeatmapSourceController::threadCpuNs() - idle0;
     EXPECT_LT(idle, 5'000'000) << "sleeping is not cost";
     const int64_t busy0 = HeatmapSourceController::threadCpuNs();
-    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
+    // 50 ms of spinning: at least 20 ms even where CPU time is charged per
+    // scheduler tick (Windows, about 15.6 ms).
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
     volatile uint64_t spin = 0;
     while (std::chrono::steady_clock::now() < until) spin = spin + 1;
-    EXPECT_GE(HeatmapSourceController::threadCpuNs() - busy0, 10'000'000) << "running is";
+    EXPECT_GE(HeatmapSourceController::threadCpuNs() - busy0, 20'000'000) << "running is";
 }
 // ...and one slow update among fast ones does not back off: the decision is the
 // median of the last three updates; two slow ones in three do.

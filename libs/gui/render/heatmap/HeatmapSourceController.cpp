@@ -6,6 +6,15 @@
 #include <algorithm>
 #include <chrono>
 #include <ctime>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h> // GetThreadTimes
+#endif
 #include <numeric>
 #include <set>
 #include <tuple>
@@ -500,7 +509,8 @@ HeatmapSourceController::HeatmapSourceController(ChunkStore &store, ChunkFetcher
         if (symbol.toStdString() != symbol_) return;
         // Compose on arrival (after the coalescing window), not on a fixed phase:
         // frames drift through a fixed 1 s deadline and waited up to 1 s for it.
-        liveCoalesceUntilMs_ = options_.nowMs() + options_.liveCoalesceMs;
+        // Anchored to the first frame: a continuous stream must not postpone it.
+        if (!liveCoalesceUntilMs_) liveCoalesceUntilMs_ = options_.nowMs() + options_.liveCoalesceMs;
         invalidateLive();
         refreshLive();
     }, Qt::QueuedConnection);
@@ -546,8 +556,25 @@ HeatmapSourceController::~HeatmapSourceController() {
     fetcher_.release(chart_);
 }
 
+bool HeatmapSourceController::threadCpuClockAvailable() {
+#if defined(_WIN32) || defined(CLOCK_THREAD_CPUTIME_ID)
+    return true;
+#else
+    return false;
+#endif
+}
+
 int64_t HeatmapSourceController::threadCpuNs() {
-#if defined(CLOCK_THREAD_CPUTIME_ID)
+#if defined(_WIN32)
+    // User + kernel time of this thread, in 100 ns units. Windows charges it per
+    // scheduler tick (about 15.6 ms), so one update reads 0 or a whole tick; the
+    // median of three keeps a single charged tick from switching to 5 s.
+    FILETIME created, exited, kernel, user;
+    if (GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) {
+        auto ticks = [](const FILETIME &f) { return (uint64_t(f.dwHighDateTime) << 32) | uint64_t(f.dwLowDateTime); };
+        return int64_t((ticks(kernel) + ticks(user)) * 100);
+    }
+#elif defined(CLOCK_THREAD_CPUTIME_ID)
     timespec ts{};
     if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0) return int64_t(ts.tv_sec) * 1'000'000'000 + ts.tv_nsec;
 #endif
@@ -691,7 +718,8 @@ void HeatmapSourceController::setLiveBytes(size_t bytes) {
 void HeatmapSourceController::resetLive() {
     liveDirty_ = false;
     liveTimer_->stop();
-    liveDueMs_ = liveCoalesceUntilMs_ = 0;
+    liveDueMs_ = 0;
+    liveCoalesceUntilMs_.reset();
     liveStarts_.clear();
     liveUploadedEnds_.clear();
     stats_.liveUploadedSpans = 0;
@@ -840,7 +868,7 @@ void HeatmapSourceController::pollLive() {
     if (liveReleaseMs_ && options_.nowMs() >= *liveReleaseMs_) { refreshLive(); return; }
     if (!liveDirty_ || liveRunning_ || liveStarts_.empty()) return;
     const auto now = options_.nowMs();
-    if (const auto due = std::max(liveDueMs_, liveCoalesceUntilMs_); now < due) {
+    if (const auto due = std::max(liveDueMs_, liveCoalesceUntilMs_.value_or(0)); now < due) {
         liveTimer_->start(int(std::min<int64_t>(due - now, INT_MAX)));
         return;
     }
@@ -994,6 +1022,7 @@ void HeatmapSourceController::pollLive() {
         liveDirty_ = false;
         liveRunning_ = true;
         liveDueMs_ = now + stats_.liveIntervalMs;
+        liveCoalesceUntilMs_.reset(); // the next frame opens a new window
     } // a full pool retries on settled()
 }
 

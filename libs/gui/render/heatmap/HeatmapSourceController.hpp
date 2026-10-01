@@ -23,6 +23,7 @@
 #include <atomic>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <unordered_set>
 
 namespace heatmap {
@@ -361,6 +362,7 @@ public:
     // CPU time of the calling thread, ns (POSIX thread CPU clock; steady clock
     // where there is none).
     static int64_t threadCpuNs();
+    static bool threadCpuClockAvailable(); // false: threadCpuNs() is the steady clock
 
     // Any thread (including updatePaintNode).
     std::shared_ptr<const SpanSet> latestSnapshot() const;
@@ -447,7 +449,10 @@ private:
     bool liveInterested_ = false;
     uint64_t liveVersion_ = 0;
     bool liveRunning_ = false, liveDirty_ = false;
-    int64_t liveDueMs_ = 0, liveCoalesceUntilMs_ = 0;
+    int64_t liveDueMs_ = 0;
+    // End of the coalescing window, anchored to the first live frame since the
+    // last admitted composition (later frames never extend it).
+    std::optional<int64_t> liveCoalesceUntilMs_;
     std::array<double, 3> liveCosts_{}; // the last update costs (ms), newest last
     size_t liveCostCount_ = 0;
     std::map<std::string, int64_t> liveStarts_;
