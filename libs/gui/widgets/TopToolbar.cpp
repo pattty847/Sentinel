@@ -288,6 +288,32 @@ QString TopToolbar::tickText(int64_t units, double priceScale) {
     return QStringLiteral("$") + QString::number(double(units) / priceScale, 'g', 12);
 }
 
+void TopToolbar::fillTickPresetCombo(QComboBox* combo, const TickSelectorState& state, const QString& emptyText) {
+    const QSignalBlocker block(combo);
+    combo->clear();
+    const int64_t shown = state.manual ? state.manualUnits : state.drawnUnits;
+    const bool shownOffered =
+        shown > 0 && std::find(state.offeredUnits.begin(), state.offeredUnits.end(), shown) != state.offeredUnits.end();
+    std::vector<int64_t> units = state.offeredUnits;
+    if (shown > 0 && !shownOffered) {
+        units.push_back(shown);
+        std::sort(units.begin(), units.end());
+    }
+    auto* model = qobject_cast<QStandardItemModel*>(combo->model());
+    for (const int64_t u : units) {
+        const bool offered = u != shown || shownOffered;
+        combo->addItem(tickText(u, state.priceScale) + (offered ? QString() : QStringLiteral(" (unavailable)")),
+                       qlonglong(u));
+        if (!offered && model) {
+            auto* item = model->item(combo->count() - 1);
+            item->setEnabled(false);
+            item->setToolTip(QStringLiteral("No loaded data builds this tick; its columns are veiled."));
+        }
+    }
+    combo->setPlaceholderText(emptyText);
+    combo->setCurrentIndex(shown > 0 ? combo->findData(qlonglong(shown)) : -1);
+}
+
 void TopToolbar::setTickSelectorState(const TickSelectorState& state) {
     if (m_tickStateSet && state == m_tickState) return;
     m_tickStateSet = true;
@@ -296,23 +322,10 @@ void TopToolbar::setTickSelectorState(const TickSelectorState& state) {
         const QSignalBlocker block(m_tickModeCombo);
         m_tickModeCombo->setCurrentIndex(state.manual ? 1 : 0);
     }
-    const QSignalBlocker block(m_tickPresetCombo);
-    m_tickPresetCombo->clear();
-    // Shown value: the locked preset in Manual, the drawn tick in Auto. It is
-    // listed even when no loaded data builds it (Manual veils those columns).
-    const int64_t shown = state.manual ? state.manualUnits : state.drawnUnits;
-    std::vector<int64_t> units = state.offeredUnits;
-    if (shown > 0 && std::find(units.begin(), units.end(), shown) == units.end()) {
-        units.push_back(shown);
-        std::sort(units.begin(), units.end());
-    }
-    for (const int64_t u : units) m_tickPresetCombo->addItem(tickText(u, state.priceScale), qlonglong(u));
-    if (shown > 0) m_tickPresetCombo->setCurrentIndex(m_tickPresetCombo->findData(qlonglong(shown)));
-    else m_tickPresetCombo->setCurrentIndex(-1);
-    if (state.offeredUnits.empty() && shown <= 0) m_tickPresetCombo->setPlaceholderText(QStringLiteral("tick"));
+    fillTickPresetCombo(m_tickPresetCombo, state, QStringLiteral("tick"));
 
     m_tickModeCombo->setEnabled(state.enabled);
-    m_tickPresetCombo->setEnabled(state.enabled);
+    m_tickPresetCombo->setEnabled(state.enabled && !state.offeredUnits.empty());
     if (!state.enabled) {
         m_tickModeCombo->setToolTip(state.disabledReason);
         m_tickPresetCombo->setToolTip(state.disabledReason);

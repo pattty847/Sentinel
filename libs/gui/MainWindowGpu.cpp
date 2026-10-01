@@ -420,6 +420,7 @@ HeatmapSettingsDialog* MainWindowGPU::openHeatmapSettingsDialog() {
     if (!renderer) return nullptr;
     if (!m_heatmapSettingsDialog) {
         m_heatmapSettingsDialog = new HeatmapSettingsDialog(m_heatmapSettings.get(), renderer, this);
+        m_heatmapSettingsDialog->setTpoDefaults(GuiConfigStore::instance().clientConfig().tpo);
         m_heatmapControls->setDialog(m_heatmapSettingsDialog);
     } else {
         m_heatmapSettingsDialog->setRenderer(renderer);
@@ -583,7 +584,7 @@ void MainWindowGPU::setupGuiApiServer() {
     // the telemetry dock, grabbed from their own painting (never screen pixels).
     m_guiApiServer->setWidgetGrab([this](const QString& target, QString* error) -> QImage {
         if (target == "telemetry") {
-            if (!m_heatmapTelemetryDock || !m_heatmapTelemetryDock->isVisible()) {
+            if (!m_heatmapTelemetryDock || !m_heatmapTelemetryDock->exposed()) {
                 if (error) *error = "telemetry_not_visible";
                 return {};
             }

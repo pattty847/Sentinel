@@ -6,6 +6,8 @@
 // follows the model's changed() signal, so Agent API and toolbar changes show here.
 // Widgets carry objectNames equal to the setting keys (tests and inspection).
 #include "heatmap/HeatmapChartSettings.hpp"
+#include "config/ConfigTypes.hpp"
+#include "TopToolbar.hpp"
 #include <QDialog>
 #include <QJsonObject>
 #include <QPointer>
@@ -53,16 +55,25 @@ public:
     HeatmapSettingsDialog(heatmap::HeatmapSettingsModel *model, UnifiedGridRenderer *renderer,
                           QWidget *parent = nullptr);
     void setRenderer(UnifiedGridRenderer *renderer);
-    // Presets the Manual combo offers (what some loaded data can build), the
-    // chart's price scale and the tick the chart has locked for its symbol and
-    // timeframe (shown in Manual mode). Empty presets: the generic ladder.
-    void setTickPresets(const std::vector<int64_t> &offeredUnits, double priceScale, int64_t lockedUnits);
+    // The chart's tick state, as the toolbar shows it (HeatmapChartControls): the
+    // preset combo lists only the offered presets; a locked Manual tick no loaded
+    // data builds shows as the current value, marked unavailable.
+    void setTickSelectorState(const TopToolbar::TickSelectorState &state);
+    // The TPO tab's Reset (the configured tpo.* values).
+    void setTpoDefaults(const ClientTpoConfig &defaults) { m_tpoDefaults = defaults; }
     void refreshFromModel();
     void refreshFromRenderer();
     QTabWidget *tabs() const { return m_tabs; }
     QString statusText() const;
     // The settings keys each tab owns (its Reset button restores them).
     static QStringList tabKeys(const QString &tab);
+
+signals:
+    // Tick actions go through the chart's controls, as the toolbar's do (a preset
+    // locks Manual and is remembered; entering Manual restores the remembered
+    // tick or locks the drawn one).
+    void tickModeRequested(bool manual);
+    void tickPresetRequested(qint64 units);
 
 private:
     void buildUi();
@@ -75,16 +86,14 @@ private:
     QPushButton *resetButton(const QString &tab, QWidget *parent);
     void apply(const QJsonObject &patch, bool persist = true);
     void applyBudgets();
-    void fillManualTicks();
     void showStatus(const QString &text, bool error);
     void logSettings() const;
 
     heatmap::HeatmapSettingsModel *m_model = nullptr;
     QPointer<UnifiedGridRenderer> m_renderer;
     bool m_loading = false;
-    std::vector<int64_t> m_offeredUnits;
-    double m_priceScale = 100;
-    int64_t m_lockedUnits = 0;
+    TopToolbar::TickSelectorState m_tickState;
+    ClientTpoConfig m_tpoDefaults;
 
     QTabWidget *m_tabs = nullptr;
     QLabel *m_status = nullptr;

@@ -61,7 +61,12 @@ void HeatmapChartControls::setToolbar(TopToolbar *toolbar) {
 }
 
 void HeatmapChartControls::setDialog(HeatmapSettingsDialog *dialog) {
+    if (m_dialog) disconnect(m_dialog, nullptr, this, nullptr);
     m_dialog = dialog;
+    if (!dialog) return;
+    // One path for tick actions: the dialog's are the toolbar's.
+    connect(dialog, &HeatmapSettingsDialog::tickModeRequested, this, &HeatmapChartControls::requestTickMode);
+    connect(dialog, &HeatmapSettingsDialog::tickPresetRequested, this, [this](qint64 units) { requestTickPreset(units); });
     syncNow();
 }
 
@@ -148,7 +153,7 @@ void HeatmapChartControls::syncNow() {
     m_indicatorTimer->stop();
     const auto st = tickSelectorState();
     if (m_toolbar) m_toolbar->setTickSelectorState(st);
-    if (m_dialog) m_dialog->setTickPresets(st.offeredUnits, st.priceScale, st.manual ? st.manualUnits : 0);
+    if (m_dialog) m_dialog->setTickSelectorState(st);
 }
 
 void HeatmapChartControls::requestTickMode(bool manual) {
@@ -180,7 +185,8 @@ QJsonObject HeatmapChartControls::uiState() const {
         toolbar["presetText"] = m_toolbar->tickPresetCombo()->currentText();
     const auto b = m_model->budgets();
     return {{"toolbar", toolbar},
-            {"telemetryVisible", m_dock && m_dock->isVisible()},
+            {"telemetryVisible", m_dock && m_dock->exposed()}, // on screen, not the preference
+            {"telemetryPreferred", m_model->settings().showTelemetry},
             {"settingsDialogOpen", m_dialog && m_dialog->isVisible()},
             {"budgets", QJsonObject{{"decodedChunkBytes", qint64(b.decodedChunks)},
                                     {"spanSourceBytes", qint64(b.spanSources)},

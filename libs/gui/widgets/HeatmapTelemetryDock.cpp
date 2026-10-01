@@ -52,6 +52,7 @@ HeatmapTelemetryDock::HeatmapTelemetryDock(QWidget *parent)
     m_timer = new QTimer(this);
     m_timer->setInterval(kRefreshMs);
     connect(m_timer, &QTimer::timeout, this, &HeatmapTelemetryDock::refresh);
+    connect(this, &QDockWidget::visibilityChanged, this, &HeatmapTelemetryDock::setExposed);
     buildUi();
     setMinimumWidth(kMinimumWidth); // labels and values side by side, as the lab panel
 }
@@ -242,15 +243,17 @@ void HeatmapTelemetryDock::refresh() {
     m_graph->update();
 }
 
-void HeatmapTelemetryDock::showEvent(QShowEvent *event) {
-    DockablePanel::showEvent(event);
-    refresh();
-    m_timer->start();
-}
-
-void HeatmapTelemetryDock::hideEvent(QHideEvent *event) {
-    DockablePanel::hideEvent(event);
-    m_timer->stop();
+// Polls only while on screen: visibilityChanged also follows the tab selection
+// when the dock is tabified (show/hide events do not).
+void HeatmapTelemetryDock::setExposed(bool exposed) {
+    if (exposed == m_exposed) return;
+    m_exposed = exposed;
+    if (exposed) {
+        refresh();
+        m_timer->start();
+    } else {
+        m_timer->stop();
+    }
 }
 
 void HeatmapTelemetryDock::closeEvent(QCloseEvent *event) {

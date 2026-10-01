@@ -64,6 +64,9 @@ signals:
     // tick choice (HeatmapGpuLayer::setSettings remembers it for the context).
     void changed(bool explicitManualTick);
     void budgetsChanged();
+    // The saved default renderer changed (a persisted renderer patch) while the
+    // effective settings may not have: persistence only, the chart does no work.
+    void savedRendererChanged();
 
 private:
     HeatmapSettingsStore &store_;

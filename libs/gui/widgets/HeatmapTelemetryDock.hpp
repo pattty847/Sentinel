@@ -31,6 +31,9 @@ public:
     uint64_t refreshCount() const { return m_refreshes; }
     QTimer *timer() const { return m_timer; }
     bool disabledShown() const;
+    // On screen now: shown and, when tabified, the current tab (visibilityChanged).
+    // Distinct from the persisted showTelemetry preference.
+    bool exposed() const { return m_exposed; }
     // A row's shown value by its metric key (e.g. "tick", "residentBytes").
     QString valueText(const QString &key) const;
     const std::vector<double> &frameHistory() const { return m_frameHistory; }
@@ -41,8 +44,6 @@ signals:
     void closedByUser();
 
 protected:
-    void showEvent(QShowEvent *event) override;
-    void hideEvent(QHideEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
 
 private:
@@ -64,4 +65,6 @@ private:
     std::vector<Row> m_rows;
     std::vector<double> m_frameHistory;
     uint64_t m_refreshes = 0;
+    bool m_exposed = false;
+    void setExposed(bool exposed);
 };

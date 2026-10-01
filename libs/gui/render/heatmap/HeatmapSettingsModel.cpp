@@ -31,8 +31,11 @@ std::string HeatmapSettingsModel::savedRenderer() const { return store_.load(cha
 QString HeatmapSettingsModel::apply(const QJsonObject &patch, bool persist) {
     const Context context = context_ ? context_() : Context{};
     auto next = settings_;
+    const bool savesRenderer = persist && patch.contains("renderer");
+    const std::string savedBefore = savesRenderer ? savedRenderer() : std::string{};
     const auto error = store_.applyChartPatch(chartId_, next, patch, persist, defaults_, context.symbol, context.tfMs);
     if (!error.isEmpty()) return error;
+    if (savesRenderer && savedRenderer() != savedBefore) emit savedRendererChanged();
     // A session-only renderer survives workspace restores; a saved one ends it.
     if (patch.contains("renderer")) processRenderer_ = persist ? std::string{} : next.renderer;
     const bool explicitTick = patch.contains("manualTick") && next.tickMode == TickMode::Manual;

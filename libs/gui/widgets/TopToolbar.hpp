@@ -42,6 +42,11 @@ public:
     QComboBox* tickPresetCombo() const { return m_tickPresetCombo; }
     QLabel* tickVeilLabel() const { return m_tickVeilLabel; }
     static QString tickText(int64_t units, double priceScale);
+    // Fills a preset combo (the toolbar's or the settings dialog's): only offered
+    // presets are selectable; a shown value no loaded data builds (a locked Manual
+    // tick) is listed as the current item, marked unavailable and disabled; with
+    // nothing to list the combo shows `emptyText` and is disabled.
+    static void fillTickPresetCombo(QComboBox* combo, const TickSelectorState& state, const QString& emptyText);
     void setLayerToggleStates(bool heatmapEnabled,
                               bool footprintEnabled,
                               bool tpoEnabled,

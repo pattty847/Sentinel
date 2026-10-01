@@ -19,6 +19,9 @@
 #include "SyntheticHmc2Fixture.hpp"
 #include <QAction>
 #include <QApplication>
+#include <QMainWindow>
+#include <QDockWidget>
+#include <QStandardItemModel>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
@@ -193,11 +196,19 @@ TEST(HeatmapSettingsDialogTest, EveryTabShowsTheModel) {
     t.store.save("main", nonDefaults());
     HeatmapSettingsModel model(t.store, "main", t.config);
     HeatmapSettingsDialog dialog(&model, nullptr);
+    HeatmapChartControls controls(&model);
+    controls.setDialog(&dialog);
     QStringList tabs;
     for (int i = 0; i < dialog.tabs()->count(); ++i) tabs << dialog.tabs()->tabText(i);
     EXPECT_EQ(tabs, (QStringList{"Tick", "Look", "Budgets", "Live", "Debug", "TPO"}));
     EXPECT_EQ(child<QComboBox>(dialog, "tickMode")->currentData().toString(), "manual");
-    EXPECT_EQ(child<QComboBox>(dialog, "manualTick")->currentData().toLongLong(), 500);
+    // No chart, so nothing offered: the locked $5 shows, marked unavailable, and
+    // nothing is selectable.
+    auto *preset = child<QComboBox>(dialog, "manualTick");
+    EXPECT_EQ(preset->currentData().toLongLong(), 500);
+    EXPECT_EQ(preset->currentText(), "$5 (unavailable)");
+    EXPECT_EQ(preset->count(), 1);
+    EXPECT_FALSE(preset->isEnabled());
     EXPECT_EQ(child<QDoubleSpinBox>(dialog, "minRowPx")->value(), 3.5);
     EXPECT_EQ(child<QDoubleSpinBox>(dialog, "hysteresis")->value(), 0.4);
     EXPECT_EQ(child<QComboBox>(dialog, "palettePreset")->currentText(), "Custom");
@@ -221,17 +232,130 @@ TEST(HeatmapSettingsDialogTest, EveryTabShowsTheModel) {
     EXPECT_TRUE(child<QCheckBox>(dialog, "showTelemetry")->isChecked());
 }
 
+// Item 2 of the review: only presets loaded data builds are offered; with nothing
+// loaded (Auto, no chart) the preset is an empty, disabled loading state.
+TEST(HeatmapSettingsDialogTest, NoAvailabilityOffersNoPresets) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    HeatmapChartControls controls(&model);
+    controls.setDialog(&dialog);
+    auto *preset = child<QComboBox>(dialog, "manualTick");
+    EXPECT_EQ(preset->count(), 0); // no generic ladder, no chart-wide manualTick in Auto
+    EXPECT_FALSE(preset->isEnabled());
+    EXPECT_FALSE(preset->placeholderText().isEmpty());
+    // Offered presets become selectable; nothing else is added.
+    TopToolbar::TickSelectorState st;
+    st.enabled = true;
+    st.drawnUnits = 1000;
+    st.offeredUnits = {1000, 2000, 5000};
+    dialog.setTickSelectorState(st);
+    EXPECT_EQ(preset->count(), 3);
+    EXPECT_TRUE(preset->isEnabled());
+    EXPECT_EQ(preset->currentData().toLongLong(), 1000);
+}
+
+// Item 2 of the review: history only on the deep $10 grid (rule 4 offers its
+// presets) and the default Manual $1: the $1 shows as unavailable, and only the
+// offered presets are selectable, in the dialog and the toolbar alike.
+TEST(HeatmapSettingsDialogTest, DeepOnlyHistoryOffersOnlyItsPresets) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    ASSERT_TRUE(model.apply({{"tickMode", "manual"}}).isEmpty());
+    ASSERT_EQ(model.settings().manualTick, 100); // the configured default, $1
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    TopToolbar toolbar;
+    TopToolbar::TickSelectorState st;
+    st.enabled = true;
+    st.manual = true;
+    st.manualUnits = model.settings().manualTick;
+    st.drawnUnits = 100;
+    st.offeredUnits = heatmap::manualPresetUnits(std::vector<int64_t>{1000}, 1'000'000); // deep $10 grid
+    ASSERT_FALSE(st.offeredUnits.empty());
+    dialog.setTickSelectorState(st);
+    toolbar.setTickSelectorState(st);
+    for (QComboBox *combo : {child<QComboBox>(dialog, "manualTick"), toolbar.tickPresetCombo()}) {
+        EXPECT_EQ(combo->currentData().toLongLong(), 100);
+        EXPECT_EQ(combo->currentText(), "$1 (unavailable)");
+        auto *items = qobject_cast<QStandardItemModel *>(combo->model());
+        ASSERT_NE(items, nullptr);
+        std::vector<int64_t> selectable;
+        for (int i = 0; i < combo->count(); ++i)
+            if (items->item(i)->isEnabled()) selectable.push_back(combo->itemData(i).toLongLong());
+        EXPECT_EQ(selectable, st.offeredUnits);
+        for (const int64_t u : selectable) EXPECT_EQ(u % 1000, 0) << u;
+    }
+}
+
+// Item 4 of the review: an identical persisted renderer patch saves the default;
+// the open dialog's "Saved default" follows, and the chart does no work.
+TEST(HeatmapSettingsDialogTest, SavingTheSessionRendererUpdatesSavedDefault) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    ASSERT_TRUE(model.apply({{"renderer", "gpu"}}, false).isEmpty());
+    EXPECT_EQ(child<QLabel>(dialog, "savedRenderer")->text(), "legacy");
+    QSignalSpy changed(&model, &HeatmapSettingsModel::changed);
+    QSignalSpy saved(&model, &HeatmapSettingsModel::savedRendererChanged);
+    ASSERT_TRUE(model.apply({{"renderer", "gpu"}}, true).isEmpty()); // e.g. the API, persist:true
+    EXPECT_EQ(changed.count(), 0); // the effective settings did not change
+    EXPECT_EQ(saved.count(), 1);
+    EXPECT_EQ(child<QLabel>(dialog, "savedRenderer")->text(), "gpu");
+    EXPECT_EQ(t.reload().renderer, "gpu");
+}
+
+// Item 5 of the review: Look reset includes the renderer's tone controls; TPO has
+// a reset to the configured tpo values.
+TEST(HeatmapSettingsDialogTest, ResetCoversRendererBackedControls) {
+    TempStore t;
+    t.config.gamma = 0.9;
+    t.config.contrast = 1.4;
+    t.config.shaderFloor = 0.02;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    UnifiedGridRenderer ugr;
+    ugr.setHeatmapGamma(2.5);
+    ugr.setHeatmapContrast(3.0);
+    ugr.setHeatmapShaderFloor(0.3);
+    ugr.setTpoLayout("split");
+    ugr.setTpoTheme("sage");
+    ugr.setTpoSessionType(0);
+    ugr.setTpoTimeframeMs(3'600'000);
+    HeatmapSettingsDialog dialog(&model, &ugr);
+    ClientTpoConfig tpo; // collapsed, rainbow, 24h, 30m
+    dialog.setTpoDefaults(tpo);
+    child<QPushButton>(dialog, "resetLook")->click();
+    EXPECT_NEAR(ugr.heatmapGamma(), 0.9, 1e-9);
+    EXPECT_NEAR(ugr.heatmapContrast(), 1.4, 1e-9);
+    EXPECT_NEAR(ugr.heatmapShaderFloor(), 0.02, 1e-9);
+    EXPECT_EQ(ugr.tpoLayout(), "split"); // other tabs untouched
+    child<QPushButton>(dialog, "resetTPO")->click();
+    EXPECT_EQ(ugr.tpoLayout(), "collapsed");
+    EXPECT_EQ(ugr.tpoTheme(), "rainbow");
+    EXPECT_EQ(ugr.tpoSessionType(), 4);
+    EXPECT_EQ(ugr.tpoTimeframeMs(), 30 * 60'000);
+    EXPECT_NEAR(ugr.heatmapGamma(), 0.9, 1e-9);
+}
+
 TEST(HeatmapSettingsDialogTest, EveryWidgetWritesItsSettingLiveAndSaved) {
     TempStore t;
     HeatmapSettingsModel model(t.store, "main", t.config);
     std::vector<heatmap::HeatmapBudgets> applied;
     model.setBudgetSink([&](const heatmap::HeatmapBudgets &b) { applied.push_back(b); return true; });
     HeatmapSettingsDialog dialog(&model, nullptr);
+    HeatmapChartControls controls(&model); // tick actions go through the controls
+    controls.setDialog(&dialog);
     QSignalSpy changed(&model, &HeatmapSettingsModel::changed);
     // Tick
     child<QComboBox>(dialog, "tickMode")->setCurrentIndex(1);
+    TopToolbar::TickSelectorState offered;
+    offered.enabled = true;
+    offered.manual = true;
+    offered.manualUnits = 100;
+    offered.offeredUnits = {100, 200, 500, 1000, 2000};
+    dialog.setTickSelectorState(offered); // as a chart with loaded data reports
     auto *manual = child<QComboBox>(dialog, "manualTick");
     manual->setCurrentIndex(manual->findData(qlonglong(2000)));
+    emit manual->activated(manual->currentIndex());
     child<QDoubleSpinBox>(dialog, "minRowPx")->setValue(4);
     child<QDoubleSpinBox>(dialog, "hysteresis")->setValue(0.15);
     // Look
@@ -445,6 +569,49 @@ TEST(HeatmapTelemetryDockTest, VisibilityFollowsShowTelemetry) {
     EXPECT_TRUE(t.reload().showTelemetry);
 }
 
+// Item 3 of the review: a tabified dock polls only while its tab is current, and
+// the API's telemetryVisible is that exposure, not the saved preference.
+TEST(HeatmapTelemetryDockTest, TabifiedBehindAnotherTabItDoesNotPoll) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapChartControls controls(&model);
+    QMainWindow window;
+    window.setCentralWidget(new QWidget);
+    auto *other = new QDockWidget("Other", &window);
+    other->setObjectName("other");
+    other->setWidget(new QLabel("other"));
+    auto *dock = new HeatmapTelemetryDock(&window);
+    window.addDockWidget(Qt::RightDockWidgetArea, other);
+    window.addDockWidget(Qt::RightDockWidgetArea, dock);
+    window.tabifyDockWidget(other, dock);
+    controls.setTelemetryDock(dock);
+    ASSERT_TRUE(model.apply({{"showTelemetry", true}}).isEmpty());
+    window.resize(1200, 800);
+    window.show();
+    dock->raise();
+    QTest::qWait(50);
+    ASSERT_TRUE(dock->exposed());
+    EXPECT_TRUE(dock->timer()->isActive());
+    EXPECT_TRUE(controls.uiState()["telemetryVisible"].toBool());
+    other->raise(); // the user selects the other tab
+    QTest::qWait(50);
+    EXPECT_FALSE(dock->exposed());
+    EXPECT_FALSE(dock->timer()->isActive());
+    const uint64_t polls = dock->refreshCount();
+    QTest::qWait(600);
+    EXPECT_EQ(dock->refreshCount(), polls);
+    EXPECT_FALSE(controls.uiState()["telemetryVisible"].toBool());
+    EXPECT_TRUE(controls.uiState()["telemetryPreferred"].toBool());
+    EXPECT_TRUE(model.settings().showTelemetry); // a tab switch is not a preference change
+    ASSERT_TRUE(model.apply({{"opacity", 0.5}}).isEmpty()); // an unrelated change does not raise it
+    QTest::qWait(50);
+    EXPECT_FALSE(dock->exposed());
+    dock->raise();
+    QTest::qWait(50);
+    EXPECT_TRUE(dock->exposed());
+    EXPECT_TRUE(dock->timer()->isActive());
+}
+
 // --------------------------------------------------------- GPU chart cases
 QTemporaryDir *fixtureDir = nullptr;
 
@@ -532,6 +699,7 @@ TEST_F(HeatmapChartUi, TickSelectorIsDisabledInLegacyWithAReason) {
     EXPECT_FALSE(toolbar->tickPresetCombo()->isEnabled());
     EXPECT_TRUE(toolbar->tickModeCombo()->toolTip().contains("GPU heatmap renderer"));
     gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
     syncUi();
     EXPECT_TRUE(toolbar->tickModeCombo()->isEnabled());
     EXPECT_TRUE(toolbar->tickPresetCombo()->isEnabled());
@@ -609,6 +777,48 @@ TEST_F(HeatmapChartUi, TheToolbarNamesVeiledAvailability) {
     EXPECT_EQ(toolbar->tickVeilLabel()->toolTip(), indicator);
     EXPECT_TRUE(toolbar->tickPresetCombo()->toolTip().contains(indicator));
     EXPECT_EQ(controls->uiState()["toolbar"].toObject()["veiled"].toBool(), true);
+}
+
+// Item 1 of the review: the dialog's tick actions are the toolbar's. A preset
+// picked in Auto locks Manual at once (no remembered tick replaces it); entering
+// Manual restores the remembered tick, or locks the drawn one when none.
+TEST_F(HeatmapChartUi, DialogTickActionsAreTheToolbars) {
+    HeatmapSettingsDialog dialog(model.get(), ugr);
+    controls->setDialog(&dialog);
+    auto *mode = child<QComboBox>(dialog, "tickMode");
+    auto *preset = child<QComboBox>(dialog, "manualTick");
+    const auto pickInDialog = [&](int64_t units) {
+        const int index = preset->findData(qlonglong(units));
+        ASSERT_GE(index, 0) << units;
+        preset->setCurrentIndex(index);
+        emit preset->activated(index); // a user's pick (also of the shown tick)
+    };
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    syncUi();
+    pickInDialog(500); // remember $5 for BTC/1m
+    EXPECT_EQ(layer().manualTickUnits(), 500);
+    mode->setCurrentIndex(0); // back to Auto
+    EXPECT_FALSE(layer().manualMode());
+    syncUi();
+    pickInDialog(2000); // $20 in Auto: Manual $20, not the remembered $5
+    EXPECT_EQ(model->settings().tickMode, TickMode::Manual);
+    EXPECT_EQ(layer().manualTickUnits(), 2000);
+    EXPECT_EQ(mode->currentIndex(), 1);
+    EXPECT_EQ(temp->reloadTicks().get("BTC-USD", minute).value_or(0), 2000);
+    mode->setCurrentIndex(0);
+    mode->setCurrentIndex(1); // Manual again: the remembered $20
+    EXPECT_EQ(layer().manualTickUnits(), 2000);
+    // 5m has nothing remembered: entering Manual from the dialog locks the drawn tick.
+    mode->setCurrentIndex(0);
+    ugr->setTimeframe(int(5 * minute));
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const int64_t drawn = layer().tickUnits();
+    ASSERT_GT(drawn, 0);
+    ASSERT_NE(drawn, model->settings().manualTick); // the chart-wide value would differ
+    mode->setCurrentIndex(1);
+    EXPECT_EQ(layer().manualTickUnits(), drawn);
+    EXPECT_EQ(temp->reloadTicks().get("BTC-USD", 5 * minute).value_or(0), drawn);
 }
 
 TEST_F(HeatmapChartUi, EnteringManualLocksTheDrawnTick) {

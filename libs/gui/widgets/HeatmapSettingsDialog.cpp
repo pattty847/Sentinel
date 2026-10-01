@@ -83,12 +83,6 @@ QString swatchStyle(const QString &color) {
     const double luma = 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue();
     return QStringLiteral("QPushButton { background: %1; color: %2; }").arg(color.left(7), luma > 140 ? "#000000" : "#FFFFFF");
 }
-// Spec rule 4's ladder from one price unit, when no loaded data offers presets yet.
-std::vector<int64_t> genericLadder() {
-    std::vector<int64_t> out;
-    for (int64_t u = 1; u <= 10'000'000; u = heatmap::presetAtLeast(double(u + 1), 1)) out.push_back(u);
-    return out;
-}
 } // namespace
 
 // ------------------------------------------------------------ gradient editor
@@ -219,6 +213,10 @@ HeatmapSettingsDialog::HeatmapSettingsDialog(heatmap::HeatmapSettingsModel *mode
     buildUi();
     if (m_model) connect(m_model, &heatmap::HeatmapSettingsModel::changed, this, [this] { refreshFromModel(); });
     if (m_model) connect(m_model, &heatmap::HeatmapSettingsModel::budgetsChanged, this, [this] { refreshFromModel(); });
+    if (m_model)
+        connect(m_model, &heatmap::HeatmapSettingsModel::savedRendererChanged, this, [this] {
+            m_savedRenderer->setText(QString::fromStdString(m_model->savedRenderer()));
+        });
     refreshFromModel();
     refreshFromRenderer();
 }
@@ -275,6 +273,15 @@ QPushButton *HeatmapSettingsDialog::resetButton(const QString &tab, QWidget *par
         const auto error = m_model->resetKeys(tabKeys(tab));
         QString budgetError;
         if (tab == "Budgets") budgetError = m_model->setBudgets(m_model->defaultBudgets());
+        // Renderer-backed controls return to their configured values too.
+        if (tab == "Look" && m_renderer) {
+            const auto &d = m_model->configDefaults();
+            m_renderer->setHeatmapGamma(d.gamma);
+            m_renderer->setHeatmapContrast(d.contrast);
+            m_renderer->setHeatmapShaderFloor(d.shaderFloor);
+        }
+        if (tab == "TPO" && m_renderer) m_renderer->applyTpoConfig(m_tpoDefaults);
+        refreshFromRenderer();
         if (!error.isEmpty() || !budgetError.isEmpty()) showStatus(error.isEmpty() ? budgetError : error, true);
         else showStatus(tab + " reset to defaults", false);
         refreshFromModel();
@@ -292,24 +299,30 @@ QWidget *HeatmapSettingsDialog::buildTickTab() {
     form->addRow("Tick mode", m_tickMode);
     m_manualTick = new QComboBox(page);
     m_manualTick->setObjectName("manualTick");
-    form->addRow("Manual preset", m_manualTick);
+    form->addRow("Tick preset", m_manualTick);
     m_minRowPx = doubleSpin(page, "minRowPx", 0.5, 32, 0.25, 2);
     m_minRowPx->setSuffix(" px");
     form->addRow("Min row height (Auto)", m_minRowPx);
     m_hysteresis = doubleSpin(page, "hysteresis", 0, 0.9, 0.05, 2);
     form->addRow("Hysteresis h (Auto)", m_hysteresis);
     form->addRow(note("Auto: the smallest preset whose rows are at least the minimum height; it steps finer only "
-                      "at min x (1 + h) and coarser below min x (1 - h). Manual: the preset stays locked, zoom only "
-                      "scales rows; a choice is remembered per symbol and timeframe. Presets are the ones some "
+                      "at min x (1 + h) and coarser below min x (1 - h); the preset shows the drawn tick. Picking a "
+                      "preset locks it (Manual), remembered per symbol and timeframe; entering Manual restores that "
+                      "choice or locks the drawn tick. Presets are the ones some "
                       "loaded data can build; columns that cannot build a locked preset are veiled, never coarsened. "
                       "Tick controls drive the GPU renderer.", page));
     form->addRow(resetButton("Tick", page));
 
-    connect(m_tickMode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
-        apply({{"tickMode", m_tickMode->currentData().toString()}});
+    connect(m_tickMode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
+        if (m_loading) return;
+        emit tickModeRequested(index == 1);
+        refreshFromModel();
     });
-    connect(m_manualTick, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
-        if (index >= 0) apply({{"manualTick", m_manualTick->itemData(index).toLongLong()}});
+    // activated: a user's pick, also of the tick shown now (locks it in Auto).
+    connect(m_manualTick, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
+        if (m_loading || index < 0) return;
+        emit tickPresetRequested(m_manualTick->itemData(index).toLongLong());
+        refreshFromModel();
     });
     connect(m_minRowPx, &QDoubleSpinBox::valueChanged, this, [this](double v) { apply({{"minRowPx", v}}); });
     connect(m_hysteresis, &QDoubleSpinBox::valueChanged, this, [this](double v) { apply({{"hysteresis", v}}); });
@@ -511,6 +524,7 @@ QWidget *HeatmapSettingsDialog::buildTpoTab() {
     m_tpoThemeCombo->addItem("Calm", "calm");
     m_tpoThemeCombo->addItem("Sage", "sage");
     form->addRow("TPO Theme", m_tpoThemeCombo);
+    form->addRow(resetButton("TPO", page));
     connect(m_tpoTimeframeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int idx) {
         if (m_renderer && idx >= 0 && !m_loading) m_renderer->setTpoTimeframeMs(m_tpoTimeframeCombo->itemData(idx).toInt());
     });
@@ -551,34 +565,15 @@ void HeatmapSettingsDialog::applyBudgets() {
     else showStatus(QStringLiteral("Process budgets applied and saved"), false);
 }
 
-void HeatmapSettingsDialog::setTickPresets(const std::vector<int64_t> &offeredUnits, double priceScale,
-                                           int64_t lockedUnits) {
-    if (offeredUnits == m_offeredUnits && priceScale == m_priceScale && lockedUnits == m_lockedUnits) return;
-    m_offeredUnits = offeredUnits;
-    m_priceScale = priceScale > 0 ? priceScale : 100;
-    m_lockedUnits = lockedUnits;
-    const bool was = m_loading;
-    m_loading = true;
-    fillManualTicks();
-    m_loading = was;
-}
-
-void HeatmapSettingsDialog::fillManualTicks() {
-    if (!m_model) return;
-    const auto &s = m_model->settings();
-    const int64_t shown = s.tickMode == heatmap::TickMode::Manual && m_lockedUnits > 0 ? m_lockedUnits : s.manualTick;
-    auto units = m_offeredUnits.empty() ? genericLadder() : m_offeredUnits;
-    if (std::find(units.begin(), units.end(), shown) == units.end()) {
-        units.push_back(shown);
-        std::sort(units.begin(), units.end());
-    }
-    const QSignalBlocker block(m_manualTick);
-    m_manualTick->clear();
-    for (const int64_t u : units) m_manualTick->addItem(TopToolbar::tickText(u, m_priceScale), qlonglong(u));
-    m_manualTick->setCurrentIndex(m_manualTick->findData(qlonglong(shown)));
-    m_manualTick->setToolTip(m_offeredUnits.empty()
-        ? QStringLiteral("No loaded data offers presets yet (GPU renderer): the generic ladder is listed.")
-        : QStringLiteral("Presets some loaded data can build."));
+void HeatmapSettingsDialog::setTickSelectorState(const TopToolbar::TickSelectorState &state) {
+    m_tickState = state;
+    TopToolbar::fillTickPresetCombo(m_manualTick, state,
+                                    state.enabled ? QStringLiteral("Loading presets...")
+                                                  : QStringLiteral("Presets come from loaded data (GPU renderer)"));
+    m_manualTick->setEnabled(!state.offeredUnits.empty());
+    m_manualTick->setToolTip(state.offeredUnits.empty()
+        ? QStringLiteral("No loaded data offers presets yet (the GPU renderer loads them).")
+        : QStringLiteral("Presets some loaded data can build. Picking one locks Manual."));
 }
 
 void HeatmapSettingsDialog::refreshFromModel() {
@@ -594,7 +589,6 @@ void HeatmapSettingsDialog::refreshFromModel() {
         const QSignalBlocker block(m_tickMode);
         m_tickMode->setCurrentIndex(s.tickMode == heatmap::TickMode::Manual ? 1 : 0);
     }
-    fillManualTicks();
     set(m_minRowPx, s.minRowPx);
     set(m_hysteresis, s.hysteresis);
     {

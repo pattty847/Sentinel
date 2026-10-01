@@ -338,6 +338,7 @@ public:
     MappingFrameContext currentFrameContext() const override;
     TimeAxisMapping currentTimeAxisMapping() const override;
     void applyClientConfig(const ClientConfig& config);
+    void applyTpoConfig(const ClientTpoConfig& tpo);
     void applyServerConfig(const ServerConfig& config);
 
     Q_INVOKABLE void setGridResolutionPreset(int preset);
