@@ -4,6 +4,8 @@
 #include "lab/LabSources.hpp"
 #include "lab/RhiBackend.hpp"
 #include "lab/S5Bench.hpp"
+#include "ConfigLoader.hpp"
+#include "config/ConfigTypes.hpp"
 #include <QCommandLineParser>
 #include <QDateTime>
 #include <QGuiApplication>
@@ -13,6 +15,9 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTimer>
+#include <QTimeZone>
+#include <QDir>
+#include <QFileInfo>
 #include <QtQml/qqml.h>
 #include <algorithm>
 #include <functional>
@@ -61,10 +66,21 @@ int main(int argc, char **argv) {
                                  "see only this closed range (default: live)", "time"});
     parser.addOption({"band-edges", "E4: draw the edges of the finest source's coverage band (the near band)"});
     parser.addOption({"center-price", "With --screenshot: centre the view on this price once settled", "price"});
-    parser.addOption({"price-span", "With --screenshot and --center-price: view height in price units", "price"});
+    parser.addOption({"price-span", "View height in price units: with --screenshot and --center-price, or (interactive) "
+                                    "around the recent mid", "price"});
     parser.addOption({"gpu-cap-mb", "Per-chart GPU cap in MiB (default 320)", "mb"});
     parser.addOption({"window-screenshot", "Interactive window: once every chart has settled, grab the whole window "
                                            "(controls and debug panel included) to this PNG and exit", "path"});
+    parser.addOption({"server", "Chunks and the live edge from a running sentinel-server (host, port and CA from "
+                                "config/client_config.yaml) instead of the local recording (S5L-c)"});
+    parser.addOption({"host", "With --server: host (default: config server.host)", "host"});
+    parser.addOption({"port", "With --server: port (default: config server.port)", "port"});
+    parser.addOption({"ca", "With --server: CA file verifying the server (default: config server.ca_file)", "path"});
+    parser.addOption({"window-minutes", "Interactive: the initial time span in minutes instead of --hours", "minutes"});
+    parser.addOption({"live-run", "Interactive window: exit after this many seconds and print the live-edge "
+                                  "telemetry (latency p50/p95, versions, uploads) as JSON", "seconds"});
+    parser.addOption({"live-shots", "With --live-run: grab the window at +10 s and +40 s into every minute and "
+                                    "2 s after each minute rollover into this directory", "dir"});
     parser.process(app);
     bool ok = false;
     const int hours = parser.value("hours").toInt(&ok);
@@ -118,6 +134,21 @@ int main(int argc, char **argv) {
         if (!ok || !(mb > 0)) return 2;
         options.gpuCapBytes = uint64_t(mb * 1048576.0);
     }
+    const bool server = parser.isSet("server");
+    if (server) {
+        if (parser.isSet("end-utc")) return 2; // a pinned end is the local recording's
+        ClientConfig config;
+        ConfigLoader::loadClientConfig("config/client_config.yaml", &config); // defaults when absent
+        lab::LabData::Server endpoint{config.server.host, config.server.port, config.server.caFile};
+        if (parser.isSet("host")) endpoint.host = parser.value("host").toStdString();
+        if (parser.isSet("port")) endpoint.port = parser.value("port").toStdString();
+        if (parser.isSet("ca")) endpoint.caFile = parser.value("ca").toStdString();
+        if (!endpoint.caFile.empty() && !QFileInfo::exists(QString::fromStdString(endpoint.caFile))) {
+            std::cerr << "CA file not found: " << endpoint.caFile << " (pass --ca)" << std::endl;
+            return 2;
+        }
+        lab::LabData::configureServer(endpoint);
+    }
     if (parser.isSet("end-utc")) {
         const auto end = QDateTime::fromString(parser.value("end-utc"), Qt::ISODate);
         if (!end.isValid()) return 2;
@@ -145,6 +176,79 @@ int main(int argc, char **argv) {
     if (auto *item = engine.rootObjects().first()->findChild<lab::LabItem *>(QStringLiteral("binLab"))) {
         item->setPersistTickMemory(true); // Manual ticks per (symbol, timeframe) survive restarts
         lab::applyTickOptions(*item, options);
+    }
+    if (parser.isSet("window-minutes"))
+        if (auto *item = engine.rootObjects().first()->findChild<lab::LabItem *>(QStringLiteral("binLab")))
+            item->setInitialTimeSpanMs(parser.value("window-minutes").toDouble() * 60'000.0);
+    if (parser.isSet("price-span") && !parser.isSet("center-price"))
+        if (auto *item = engine.rootObjects().first()->findChild<lab::LabItem *>(QStringLiteral("binLab")))
+            item->setInitialPriceSpan(options.priceSpan); // interactive: around the recent mid
+    if (server) { // every chart follows the live edge until a pan
+        std::function<void(QQuickItem *)> follow = [&](QQuickItem *item) {
+            if (auto *labItem = qobject_cast<lab::LabItem *>(item)) labItem->setFollowLive(true);
+            for (auto *child : item->childItems()) follow(child);
+        };
+        if (auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first())) follow(window->contentItem());
+    }
+    if (parser.isSet("live-run")) {
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        auto *item = engine.rootObjects().first()->findChild<lab::LabItem *>(QStringLiteral("binLab"));
+        const int seconds = parser.value("live-run").toInt(&ok);
+        if (!window || !item || !ok || seconds < 5) return 2;
+        const QString dir = parser.value("live-shots");
+        if (!dir.isEmpty()) {
+            if (QString why; !lab::labOutputAllowed(dir + "/x.png", &why)) {
+                std::cerr << why.toStdString() << std::endl;
+                return 2;
+            }
+            QDir().mkpath(dir);
+        }
+        // Shots at +10 s and +40 s into each minute and 2 s after each rollover
+        // (UTC), named by tf and time; the frame count shows the forming column
+        // updated between them.
+        auto *tick = new QTimer(&app);
+        auto lastSecond = std::make_shared<int64_t>(-1);
+        QObject::connect(tick, &QTimer::timeout, &app, [window, item, dir, lastSecond, tf] {
+            const int64_t nowMs = QDateTime::currentMSecsSinceEpoch();
+            const int64_t second = nowMs / 1000;
+            if (second == *lastSecond) return;
+            *lastSecond = second;
+            const int into = int(second % 60);
+            if (dir.isEmpty() || (into != 2 && into != 10 && into != 40)) return;
+            const auto m = item->metrics();
+            const QString name = QStringLiteral("%1/s5l-live-%2m-%3-%4.png")
+                .arg(dir).arg(tf)
+                .arg(QDateTime::fromMSecsSinceEpoch(nowMs, QTimeZone::UTC).toString(QStringLiteral("HHmmss")))
+                .arg(into == 2 ? QStringLiteral("rollover") : QStringLiteral("t%1").arg(into));
+            QString why;
+            if (!lab::labOutputAllowed(name, &why)) return;
+            const bool saved = window->grabWindow().save(name, "PNG");
+            std::cerr << "live shot " << name.toStdString() << (saved ? "" : " FAILED")
+                      << " version=" << m.value("liveVersion").toULongLong()
+                      << " L=" << m.value("liveL").toString().toStdString()
+                      << " end=" << m.value("liveEnd").toString().toStdString()
+                      << " from=" << m.value("liveFrom").toString().toStdString()
+                      << " ageMs=" << m.value("liveDataAgeMs").toDouble()
+                      << " publishToDrawMs=" << m.value("livePublishToDrawMs").toDouble()
+                      << " liveBuffersCreated=" << m.value("liveBufferCreations").toULongLong()
+                      << " uploads=" << m.value("liveUploads").toULongLong()
+                      << " connection=" << m.value("connection").toString().toStdString() << std::endl;
+        });
+        tick->start(100);
+        QTimer::singleShot(seconds * 1000, &app, [item, &app, seconds, tf] {
+            const auto m = item->metrics();
+            QJsonObject out;
+            for (const char *key : {"connection", "liveVersion", "livePublished", "liveSamples", "livePublishP50",
+                                    "livePublishP95", "liveAgeP50", "liveAgeP95", "liveUploads", "liveBinPasses",
+                                    "liveBufferCreations", "liveSets", "liveL", "liveEnd", "liveFrom", "liveE",
+                                    "liveSpanMin", "livePublications", "liveComposeMs", "liveIntervalMs", "fps",
+                                    "frameMs", "loadingSlots", "errors", "missingDraws", "tick"})
+                out.insert(QString::fromLatin1(key), QJsonValue::fromVariant(m.value(QString::fromLatin1(key))));
+            out.insert("seconds", seconds);
+            out.insert("timeframe_minutes", tf);
+            std::cout << QJsonDocument(out).toJson(QJsonDocument::Compact).constData() << std::endl;
+            app.exit(0);
+        });
     }
     if (options.gpuCapBytes) { // every chart
         std::function<void(QQuickItem *)> apply = [&](QQuickItem *item) {

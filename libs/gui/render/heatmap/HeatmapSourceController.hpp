@@ -19,9 +19,11 @@
 #include "heatmap/ChunkFetcher.hpp"
 #include "heatmap/HeatmapSpanPlanner.hpp"
 #include <QThreadPool>
+#include <array>
 #include <atomic>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <unordered_set>
 
 namespace heatmap {
@@ -299,6 +301,7 @@ struct LiveSourceSnapshot {
 // makes the node re-index spans. Keep old snapshots with held/fading pictures.
 struct LiveSnapshot {
     uint64_t version = 0, serial = 0;
+    int64_t publishedNs = 0; // steady clock at publication (telemetry: publish-to-draw latency)
     std::string symbol;
     int64_t tfMs = 0;
     std::vector<LiveSourceSnapshot> sources; // coarsest common tick first
@@ -322,13 +325,22 @@ public:
     static constexpr int64_t kMaxLiveLagMs = 2 * kHourMs;
     static constexpr int64_t kMaxLiveLagBuckets = 64;
     static constexpr int kLiveReleaseDelayMs = 3000;
+    // Live composition follows the frames: a live frame's arrival composes after
+    // a short coalescing window (both sources' frames arrive together), at most
+    // once per kLiveMinIntervalMs (other triggers too); kLiveBackoffIntervalMs
+    // while composing is measured slow. The server publishes at 1 Hz.
+    static constexpr int kLiveMinIntervalMs = 500;
+    static constexpr int kLiveBackoffIntervalMs = 5000;
     struct Options {
         size_t gpuBytes = 320ull << 20;          // per-chart cap (HeatmapBudgets::gpuPerChart)
         size_t sourceEstimateBytes = 8ull << 20; // estimate of an unbuilt span source without a size hint
         size_t chunkEstimateBytes = 4ull << 20;  // decoded size of a chunk never seen (as ChunkFetcher)
         int capacityPollMs = 16;                // <= 0: tests call pollCapacity()
-        std::function<int64_t()> composeNowNs;   // worker clock; tests inject measured cost
+        // Worker cost clock (default threadCpuNs(): time the composing thread ran,
+        // so descheduling on a busy host is not cost); tests inject measured cost.
+        std::function<int64_t()> composeNowNs;
         std::function<int64_t()> nowMs;          // monotonic clock; injected in deterministic tests
+        int liveCoalesceMs = 15;                 // wait after a live frame for its siblings (tests: 0)
     };
     HeatmapSourceController(ChunkStore &store, ChunkFetcher &fetcher, SpanSourceCache &cache, Options options,
                             QObject *parent = nullptr);
@@ -347,6 +359,10 @@ public:
     // Applies the CPU tiers to the process-wide store and cache; false (and no
     // change) when the budgets are invalid.
     static bool applyBudgets(const HeatmapBudgets &budgets, ChunkStore &store, SpanSourceCache &cache);
+    // CPU time of the calling thread, ns (POSIX thread CPU clock; steady clock
+    // where there is none).
+    static int64_t threadCpuNs();
+    static bool threadCpuClockAvailable(); // false: threadCpuNs() is the steady clock
 
     // Any thread (including updatePaintNode).
     std::shared_ptr<const SpanSet> latestSnapshot() const;
@@ -366,8 +382,9 @@ public:
         uint64_t livePublications = 0, liveStaleResults = 0, liveComposedBuckets = 0, liveCommittedPieces = 0;
         size_t liveBytes = 0; // composer cache + published columns/image/summary, in CPU ledger
         size_t liveUploadedSpans = 0; // acknowledgements retained inside the live window
-        double liveComposeMs = 0;
-        int liveIntervalMs = 1000;
+        double liveComposeMs = 0; // composition CPU time of the last live update (backoff input)
+        double liveUpdateMs = 0;  // the whole update: composition, GPU image, summary
+        int liveIntervalMs = kLiveMinIntervalMs;
         uint64_t refusals = 0;    // visible spans refused by the CPU ceiling, cumulative
         size_t suppressed = 0;    // spans suppressed by the last reconcile
         size_t refused = 0;       // visible spans refused by the last reconcile
@@ -433,6 +450,11 @@ private:
     uint64_t liveVersion_ = 0;
     bool liveRunning_ = false, liveDirty_ = false;
     int64_t liveDueMs_ = 0;
+    // End of the coalescing window, anchored to the first live frame since the
+    // last admitted composition (later frames never extend it).
+    std::optional<int64_t> liveCoalesceUntilMs_;
+    std::array<double, 3> liveCosts_{}; // the last update costs (ms), newest last
+    size_t liveCostCount_ = 0;
     std::map<std::string, int64_t> liveStarts_;
     std::map<std::pair<SpanId, std::string>, int64_t> liveUploadedEnds_;
     std::unordered_set<ChunkKey, ChunkKeyHash> liveWanted_;

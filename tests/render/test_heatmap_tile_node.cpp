@@ -6,6 +6,7 @@
 // FakeChunkTransport with a manual build executor; no sleeps except where a
 // fade must end.
 #include "HeatmapNodeFixtures.hpp"
+#include "HeatmapNodeScene.hpp"
 #include "protocol/SentinelStreamClient.hpp" // shared-frame metatype
 #include "../servermodel/FakeChunkTransport.hpp"
 #include "heatmap/TimeComposer.hpp"
@@ -164,44 +165,6 @@ TEST(HeatmapFillPass, CombinedCellsMatchTheCpuOracle) {
 }
 
 // ---------------------------------------------------------------- scene
-class NodeHost : public QQuickItem {
-public:
-    NodeHost() { setFlag(ItemHasContents, true); }
-    std::shared_ptr<HeatmapTileStats> stats = std::make_shared<HeatmapTileStats>();
-    HeatmapTileNode::Frame frame;
-    QSGNode *updatePaintNode(QSGNode *old, UpdatePaintNodeData *) override {
-        auto *node = old ? static_cast<HeatmapTileNode *>(old) : new HeatmapTileNode(stats);
-        auto f = frame;
-        f.rect = QRectF(0, 0, width(), height());
-        node->setFrame(std::move(f));
-        return node;
-    }
-};
-struct Scene {
-    lab::OffscreenQuick quick;
-    NodeHost *host = nullptr;
-    QString error;
-    QImage image;
-    bool create(QSize size) {
-        if (!quick.create(size, &error)) return false;
-        quick.window()->setColor(Qt::black);
-        host = new NodeHost;
-        host->setParentItem(quick.window()->contentItem());
-        host->setSize(QSizeF(size));
-        return true;
-    }
-    bool frame() {
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
-        host->update();
-        image = quick.renderFrame(&error);
-        return !image.isNull();
-    }
-    ~Scene() { delete host; }
-};
-bool subset(std::vector<uint64_t> drawn, std::vector<uint64_t> resident) {
-    std::sort(resident.begin(), resident.end());
-    return std::all_of(drawn.begin(), drawn.end(), [&](uint64_t id) { return std::binary_search(resident.begin(), resident.end(), id); });
-}
 int colorDistance(const QColor &a, const QColor &b) {
     return std::abs(a.red() - b.red()) + std::abs(a.green() - b.green()) + std::abs(a.blue() - b.blue());
 }

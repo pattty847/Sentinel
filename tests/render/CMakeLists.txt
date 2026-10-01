@@ -174,6 +174,13 @@ target_include_directories(test_heatmap_tile_node PRIVATE ${CMAKE_SOURCE_DIR}/li
 target_link_libraries(test_heatmap_tile_node PRIVATE sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::Quick)
 add_test(NAME HeatmapTileNodeTests COMMAND test_heatmap_tile_node)
 set_tests_properties(HeatmapTileNodeTests PROPERTIES LABELS "render;heatmap")
+# S5L-c: the live edge in the node (draw clip E/L vs the composed oracle, partial
+# column, rollover coverage, held/fading retention, no buffer churn, disconnect).
+add_executable(test_heatmap_live_node test_heatmap_live_node.cpp)
+target_include_directories(test_heatmap_live_node PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_heatmap_live_node PRIVATE sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::Quick)
+add_test(NAME HeatmapLiveNodeTests COMMAND test_heatmap_live_node)
+set_tests_properties(HeatmapLiveNodeTests PROPERTIES LABELS "render;heatmap")
 # S5c: the lab chart on the production path over a synthetic HMC2 recording.
 add_executable(test_lab_item test_lab_item.cpp)
 target_include_directories(test_lab_item PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)

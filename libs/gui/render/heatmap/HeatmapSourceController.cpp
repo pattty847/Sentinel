@@ -5,6 +5,16 @@
 #include <QTimer>
 #include <algorithm>
 #include <chrono>
+#include <ctime>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h> // GetThreadTimes
+#endif
 #include <numeric>
 #include <set>
 #include <tuple>
@@ -472,10 +482,7 @@ HeatmapSourceController::HeatmapSourceController(ChunkStore &store, ChunkFetcher
         return std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
     };
-    if (!options_.composeNowNs) options_.composeNowNs = [] {
-        return std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-    };
+    if (!options_.composeNowNs) options_.composeNowNs = &HeatmapSourceController::threadCpuNs;
     liveTimer_ = new QTimer(this);
     liveTimer_->setSingleShot(true);
     connect(liveTimer_, &QTimer::timeout, this, &HeatmapSourceController::pollLive);
@@ -499,7 +506,13 @@ HeatmapSourceController::HeatmapSourceController(ChunkStore &store, ChunkFetcher
         schedule();
     }, Qt::QueuedConnection);
     connect(&fetcher_, &ChunkFetcher::liveChanged, this, [this](const QString &symbol) {
-        if (symbol.toStdString() == symbol_) { invalidateLive(); refreshLive(); }
+        if (symbol.toStdString() != symbol_) return;
+        // Compose on arrival (after the coalescing window), not on a fixed phase:
+        // frames drift through a fixed 1 s deadline and waited up to 1 s for it.
+        // Anchored to the first frame: a continuous stream must not postpone it.
+        if (!liveCoalesceUntilMs_) liveCoalesceUntilMs_ = options_.nowMs() + options_.liveCoalesceMs;
+        invalidateLive();
+        refreshLive();
     }, Qt::QueuedConnection);
     connect(&fetcher_, &ChunkFetcher::chunkFailed, this, [this](const ChunkKey &key, const QString &, const QString &) {
         if (!wanted_.contains(key)) return;
@@ -541,6 +554,32 @@ HeatmapSourceController::~HeatmapSourceController() {
     cache_.detach(this);
     slots_.clear(); // releases claims while the cache is alive
     fetcher_.release(chart_);
+}
+
+bool HeatmapSourceController::threadCpuClockAvailable() {
+#if defined(_WIN32) || defined(CLOCK_THREAD_CPUTIME_ID)
+    return true;
+#else
+    return false;
+#endif
+}
+
+int64_t HeatmapSourceController::threadCpuNs() {
+#if defined(_WIN32)
+    // User + kernel time of this thread, in 100 ns units. Windows charges it per
+    // scheduler tick (about 15.6 ms), so one update reads 0 or a whole tick; the
+    // median of three keeps a single charged tick from switching to 5 s.
+    FILETIME created, exited, kernel, user;
+    if (GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) {
+        auto ticks = [](const FILETIME &f) { return (uint64_t(f.dwHighDateTime) << 32) | uint64_t(f.dwLowDateTime); };
+        return int64_t((ticks(kernel) + ticks(user)) * 100);
+    }
+#elif defined(CLOCK_THREAD_CPUTIME_ID)
+    timespec ts{};
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0) return int64_t(ts.tv_sec) * 1'000'000'000 + ts.tv_nsec;
+#endif
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 bool HeatmapSourceController::applyBudgets(const HeatmapBudgets &budgets, ChunkStore &store, SpanSourceCache &cache) {
@@ -680,10 +719,13 @@ void HeatmapSourceController::resetLive() {
     liveDirty_ = false;
     liveTimer_->stop();
     liveDueMs_ = 0;
+    liveCoalesceUntilMs_.reset();
     liveStarts_.clear();
     liveUploadedEnds_.clear();
     stats_.liveUploadedSpans = 0;
-    stats_.liveIntervalMs = 1000;
+    stats_.liveIntervalMs = kLiveMinIntervalMs;
+    liveCosts_ = {};
+    liveCostCount_ = 0;
     setLiveBytes(0);
     liveWanted_.clear();
     // An old job owns its old composer until it finishes; it cannot mutate the
@@ -826,8 +868,8 @@ void HeatmapSourceController::pollLive() {
     if (liveReleaseMs_ && options_.nowMs() >= *liveReleaseMs_) { refreshLive(); return; }
     if (!liveDirty_ || liveRunning_ || liveStarts_.empty()) return;
     const auto now = options_.nowMs();
-    if (now < liveDueMs_) {
-        liveTimer_->start(int(std::min<int64_t>(liveDueMs_ - now, INT_MAX)));
+    if (const auto due = std::max(liveDueMs_, liveCoalesceUntilMs_.value_or(0)); now < due) {
+        liveTimer_->start(int(std::min<int64_t>(due - now, INT_MAX)));
         return;
     }
     struct Input {
@@ -861,7 +903,7 @@ void HeatmapSourceController::pollLive() {
     if (inputs.empty()) return;
     struct Result {
         std::shared_ptr<LiveSnapshot> snapshot;
-        double ms = 0;
+        double ms = 0, composeMs = 0, imageMs = 0; // total; composition; image + summary
         uint64_t buckets = 0, pieces = 0;
         size_t bytes = 0;
     };
@@ -883,7 +925,10 @@ void HeatmapSourceController::pollLive() {
             return std::none_of(inputs.begin(), inputs.end(), [&](const auto &in) { return in.edge->source == entry.first; });
         });
         for (const auto &input : inputs) {
+            const auto composeBegin = clock();
             auto composed = state->composers[input.edge->source].compose(*input.edge, input.chunks, tf, input.start);
+            const auto imageBegin = clock();
+            result->composeMs += double(imageBegin - composeBegin) / 1e6;
             result->buckets += composed.composedBuckets;
             result->pieces += composed.committedPieces;
             LiveSourceSnapshot source;
@@ -899,6 +944,7 @@ void HeatmapSourceController::pollLive() {
                 for (const auto &s : column.sources) if (s.commonUnits > 0)
                     source.commonUnits = source.commonUnits ? std::lcm(source.commonUnits, s.commonUnits) : s.commonUnits;
             mergeResolution(out->resolution, summary);
+            result->imageMs += double(clock() - imageBegin) / 1e6;
             result->bytes += sparseBytes(*source.columns) + imageBytes(*source.gpu) +
                              state->composers[input.edge->source].bytes();
             out->sources.push_back(std::move(source));
@@ -912,24 +958,37 @@ void HeatmapSourceController::pollLive() {
     };
     auto done = [this, result, serial, started = now, state = liveWork_](const QString &error) {
         liveRunning_ = false;
-        stats_.liveComposeMs = result->ms;
+        stats_.liveComposeMs = result->composeMs;
+        stats_.liveUpdateMs = result->ms;
         stats_.liveComposedBuckets += result->buckets;
         stats_.liveCommittedPieces += result->pieces;
-        // Measure the whole worker update (compose + upload image + summary).
+        // Owner decision 4: back off when composing measures above 5 ms. Measure
+        // the composition (not the GPU image and summary built after it, a steady
+        // ~1.3 ms at 5m) in the worker's CPU time, and decide on the median of the
+        // last three updates (fewer at first: the one, then the lower of two), so
+        // neither a descheduled worker nor one slow update switches to 5 s.
         if (state == liveWork_ && error.isEmpty()) {
-            const int interval = result->ms > 5 ? 5000 : 1000;
+            std::rotate(liveCosts_.begin(), liveCosts_.begin() + 1, liveCosts_.end());
+            liveCosts_.back() = result->composeMs;
+            liveCostCount_ = std::min<size_t>(liveCostCount_ + 1, liveCosts_.size());
+            std::array<double, 3> recent = liveCosts_;
+            std::sort(recent.end() - liveCostCount_, recent.end());
+            const double cost = liveCostCount_ == 3 ? recent[1] : recent[3 - liveCostCount_];
+            const int interval = cost > 5 ? kLiveBackoffIntervalMs : kLiveMinIntervalMs;
             if (interval != stats_.liveIntervalMs) {
-                if (interval == 5000)
+                if (interval == kLiveBackoffIntervalMs)
                     sLog_Warning("Heatmap live compose backoff chart=" << chart_ << " symbol=" << symbol_
-                                 << " tf=" << tfMs_ << " ms=" << result->ms << " interval=5000");
+                                 << " tf=" << tfMs_ << " ms=" << result->ms << " medianMs=" << cost
+                                 << " interval=" << interval);
                 else
                     sLog_Data("Heatmap live compose recovered chart=" << chart_ << " symbol=" << symbol_
-                              << " tf=" << tfMs_ << " ms=" << result->ms << " interval=1000");
+                              << " tf=" << tfMs_ << " ms=" << result->ms << " interval=" << interval);
                 stats_.liveIntervalMs = interval;
             }
         }
         sLog_Probe("heatmap.live.compose", "chart=" << chart_ << " symbol=" << symbol_ << " tf=" << tfMs_
-                   << " ms=" << result->ms << " buckets=" << result->buckets << " committed=" << result->pieces
+                   << " ms=" << result->ms << " composeMs=" << result->composeMs << " imageMs=" << result->imageMs
+                   << " buckets=" << result->buckets << " committed=" << result->pieces
                    << " interval=" << stats_.liveIntervalMs);
         if (serial != serial_ || state != liveWork_) {
             ++stats_.liveStaleResults;
@@ -945,6 +1004,8 @@ void HeatmapSourceController::pollLive() {
             return;
         }
         result->snapshot->version = ++liveVersion_;
+        result->snapshot->publishedNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
         setLiveBytes(result->bytes);
         {
             std::scoped_lock lock(latestMutex_);
@@ -961,6 +1022,7 @@ void HeatmapSourceController::pollLive() {
         liveDirty_ = false;
         liveRunning_ = true;
         liveDueMs_ = now + stats_.liveIntervalMs;
+        liveCoalesceUntilMs_.reset(); // the next frame opens a new window
     } // a full pool retries on settled()
 }
 

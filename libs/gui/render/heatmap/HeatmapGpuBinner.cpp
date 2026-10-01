@@ -576,9 +576,27 @@ bool HeatmapGpuBinner::fillComputeParams(const void *sourceParams, const BinGrid
     return true;
 }
 
+HeatmapGpuBinner::PassCache::PassCache() = default;
+HeatmapGpuBinner::PassCache::~PassCache() {
+    // A frame in flight may still reference them.
+    if (params) params.release()->deleteLater();
+    if (bindings) bindings.release()->deleteLater();
+}
+HeatmapGpuBinner::PassCache::PassCache(PassCache &&) noexcept = default;
+HeatmapGpuBinner::PassCache &HeatmapGpuBinner::PassCache::operator=(PassCache &&other) noexcept {
+    if (this == &other) return *this;
+    if (params) params.release()->deleteLater();
+    if (bindings) bindings.release()->deleteLater();
+    params = std::move(other.params);
+    bindings = std::move(other.bindings);
+    boundTo = other.boundTo;
+    created = other.created;
+    return *this;
+}
+
 bool HeatmapGpuBinner::binSourceInto(const SourceBuffers &src, QRhiCommandBuffer *cb, const BinGrid &grid,
                                      const recording::SizeScale &outputScale, QRhiBuffer *target, bool fill,
-                                     QString *error) {
+                                     QString *error, PassCache *cache) {
     const auto &source = src.params;
     if (!cb || !target || grid.tfMs != source.tfMs || !grid.columns || !grid.rows ||
         grid.columns > kMaxGridColumns || grid.rows > kMaxGridRows || !(grid.displayTick > 0) ||
@@ -587,23 +605,58 @@ bool HeatmapGpuBinner::binSourceInto(const SourceBuffers &src, QRhiCommandBuffer
     driveSelfTest(cb);
     auto *updates = rhi_->nextResourceUpdateBatch();
     // A Dynamic uniform buffer is written when its batch is committed, so several
-    // bins recorded in one frame each need their own parameter buffer.
-    auto params = makeBuffer(rhi_, QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(ComputeParams), error);
-    if (!params || !ensureThresholds(updates, outputScale, error)) { updates->release(); return false; }
-    auto bindings = makeComputeBindings(src, target, params.get(), error);
+    // bins recorded in one frame each need their own parameter buffer (a cache
+    // serves one pass per frame).
+    std::unique_ptr<QRhiBuffer> transientParams;
+    QRhiBuffer *params = nullptr;
+    if (cache) {
+        if (!cache->params) {
+            cache->params = makeBuffer(rhi_, QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(ComputeParams), error);
+            cache->created += cache->params ? 1 : 0;
+        }
+        params = cache->params.get();
+    } else {
+        transientParams = makeBuffer(rhi_, QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(ComputeParams), error);
+        params = transientParams.get();
+    }
+    if (!params || !ensureThresholds(updates, outputScale, error) || !ensureLayouts(error)) {
+        updates->release();
+        return false;
+    }
+    std::unique_ptr<QRhiShaderResourceBindings> transientBindings;
+    QRhiShaderResourceBindings *bindings = nullptr;
+    if (cache) {
+        // The buffers the bindings reference: rebuild only when one changed.
+        std::array<const QRhiBuffer *, 8 + kMaxEntryPages> bound{
+            src.bucketSlots.get(), src.columnGroups.get(), src.groups.get(), src.runs.get(), thresholds_.get(),
+            target, params, src.rowIndex.get()};
+        for (uint32_t p = 0; p < kMaxEntryPages; ++p)
+            bound[8 + p] = p < src.pageCount && src.pages[p] ? src.pages[p].get() : dummy_.get();
+        if (!cache->bindings || bound != cache->boundTo) {
+            auto fresh = makeComputeBindings(src, target, params, error);
+            if (!fresh) { updates->release(); return false; }
+            if (cache->bindings) cache->bindings.release()->deleteLater();
+            cache->bindings = std::move(fresh);
+            cache->boundTo = bound;
+        }
+        bindings = cache->bindings.get();
+    } else {
+        transientBindings = makeComputeBindings(src, target, params, error);
+        bindings = transientBindings.get();
+    }
     const KernelVariant kernel = currentKernel();
     if (!bindings || !ensurePipeline(kernel, error)) { updates->release(); return false; }
     ComputeParams values{};
     if (!fillComputeParams(&source, grid, outputScale, fill, &values, error)) { updates->release(); return false; }
-    updates->updateDynamicBuffer(params.get(), 0, sizeof(values), &values);
+    updates->updateDynamicBuffer(params, 0, sizeof(values), &values);
     cb->beginComputePass(updates);
     cb->setComputePipeline(compute_[size_t(kernel)].get());
-    cb->setShaderResources(bindings.get());
+    cb->setShaderResources(bindings);
     cb->dispatch(int((grid.columns + 15) / 16), int((grid.rows + 3) / 4), 1); // heatmap_bin.comp local size
     cb->endComputePass();
     // Released by QRhi once the frames recording them have completed.
-    params.release()->deleteLater();
-    bindings.release()->deleteLater();
+    if (transientParams) transientParams.release()->deleteLater();
+    if (transientBindings) transientBindings.release()->deleteLater();
     return true;
 }
 
@@ -673,10 +726,94 @@ bool HeatmapGpuBinner::isResident(uint64_t sourceId) const {
 
 bool HeatmapGpuBinner::binResidentInto(uint64_t sourceId, QRhiCommandBuffer *cb, const BinGrid &grid,
                                        const recording::SizeScale &outputScale, QRhiBuffer *target, QString *error,
-                                       bool fill) {
+                                       bool fill, PassCache *cache) {
     if (!rhi_) return fail(error, QStringLiteral("QRhi destroyed"));
     if (!isResident(sourceId)) return fail(error, QStringLiteral("heatmap source is not resident"));
-    return binSourceInto(*resident_.at(sourceId), cb, grid, outputScale, target, fill, error);
+    return binSourceInto(*resident_.at(sourceId), cb, grid, outputScale, target, fill, error, cache);
+}
+
+bool HeatmapGpuBinner::beginRefill(uint64_t residentId, std::shared_ptr<const GpuSource> source, bool shrink,
+                                   uint64_t *created, QString *error) {
+    if (!rhi_) return fail(error, QStringLiteral("QRhi destroyed"));
+    if (!source) return fail(error, QStringLiteral("invalid live source"));
+    if (source->entryPages() > kMaxEntryPages)
+        return fail(error, QStringLiteral("heatmap source needs more than %1 entry pages").arg(kMaxEntryPages));
+    auto &slot = resident_[residentId];
+    if (!slot) slot = std::make_unique<SourceBuffers>();
+    auto &s = *slot;
+    const auto &src = *source;
+    struct Spec { std::unique_ptr<QRhiBuffer> *slot; const void *data; uint64_t bytes; };
+    std::vector<Spec> specs{{&s.bucketSlots, src.bucketSlots.data(), src.bucketSlots.size() * 4ull},
+                            {&s.columnGroups, src.columnGroups.data(), src.columnGroups.size() * 4ull},
+                            {&s.groups, src.groups.data(), src.groups.size() * sizeof(GroupMeta)},
+                            {&s.runs, src.runs.data(), src.runs.size() * 8ull},
+                            {&s.rowIndex, src.rowIndex.data(), src.rowIndex.size() * 4ull}};
+    const uint64_t pageWords = src.entriesPerPage() * src.wordsPerEntry();
+    const uint32_t pageCount = std::max<uint32_t>(src.entryPages(), 1);
+    for (uint32_t p = 0; p < pageCount; ++p) {
+        const uint64_t first = uint64_t(p) * pageWords;
+        const uint64_t words = first < src.entries.size() ? std::min<uint64_t>(pageWords, src.entries.size() - first) : 0;
+        specs.push_back({&s.pages[p], src.entries.data() + first, words * 4});
+    }
+    s.parts.clear();
+    s.part = s.offset = 0;
+    s.source.reset();
+    for (uint32_t p = pageCount; p < kMaxEntryPages; ++p) // capacity no image of this size needs
+        if (s.pages[p]) s.pages[p].release()->deleteLater();
+    for (const auto &spec : specs) {
+        const uint64_t need = std::max<uint64_t>((spec.bytes + 15) / 16 * 16, 16);
+        // Headroom: the forming bucket grows during the minute.
+        const uint64_t grown = std::min<uint64_t>(std::max(need + need / 2, uint64_t(4096)),
+                                                  std::max(need, kMaxGpuBufferBytes));
+        const uint64_t have = *spec.slot ? (*spec.slot)->size() : 0;
+        const bool replace = have < need || (shrink && have > 2 * grown);
+        if (replace) {
+            auto buffer = failAllocationsForTest_ ? nullptr
+                : makeBuffer(rhi_, QRhiBuffer::Static, QRhiBuffer::StorageBuffer, grown, error, "heatmap.live");
+            if (!buffer) {
+                if (failAllocationsForTest_ && error) *error = QStringLiteral("GPU buffer allocation failed (test)");
+                resident_.erase(residentId); // never half-filled: the caller starts again
+                return false;
+            }
+            if (*spec.slot) spec.slot->release()->deleteLater(); // a frame in flight may still read it
+            *spec.slot = std::move(buffer);
+            if (created) ++*created;
+        }
+        if (spec.bytes) s.parts.push_back({spec.slot, static_cast<const char *>(spec.data), spec.bytes});
+    }
+    s.source = std::move(source); // keeps the image alive while it pages in
+    s.params = paramsOf(*s.source);
+    s.pageCount = pageCount;
+    if (s.parts.empty()) s.source.reset();
+    return true;
+}
+
+bool HeatmapGpuBinner::refillStep(uint64_t residentId, QRhiCommandBuffer *cb, uint64_t &budget, bool *complete,
+                                  QString *error) {
+    *complete = false;
+    if (!rhi_) return fail(error, QStringLiteral("QRhi destroyed"));
+    const auto it = resident_.find(residentId);
+    if (it == resident_.end() || !cb) return fail(error, QStringLiteral("no live refill in progress"));
+    auto &s = *it->second;
+    if (s.part < s.parts.size() && budget) {
+        auto *updates = rhi_->nextResourceUpdateBatch();
+        while (s.part < s.parts.size() && budget) {
+            const auto &part = s.parts[s.part];
+            const uint64_t chunk = std::min(part.bytes - s.offset, budget);
+            updates->uploadStaticBuffer(part.slot->get(), quint32(s.offset), quint32(chunk), part.data + s.offset);
+            s.offset += chunk;
+            budget -= chunk;
+            if (s.offset == part.bytes) { ++s.part; s.offset = 0; }
+        }
+        cb->resourceUpdate(updates);
+    }
+    *complete = s.part >= s.parts.size();
+    if (*complete) {
+        s.parts.clear();
+        s.part = 0;
+        s.source.reset();
+    }
+    return true;
 }
 
 void HeatmapGpuBinner::releaseResident(uint64_t sourceId) {

@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 #include <deque>
 #include <set>
+#include <thread>
 
 namespace {
 using namespace heatmap;
@@ -87,6 +88,7 @@ protected:
     // Cadence tests must not enter cost backoff because the host was descheduled.
     // The backoff cases override this with an explicitly measured 6 ms update.
     std::function<int64_t()> composeClock = [] { return int64_t(0); };
+    int coalesceMs = 0; // live frames compose at once unless a test sets the window
     std::deque<std::function<void()>> jobs;
     std::unique_ptr<SpanSourceCache> cache;
     std::vector<std::unique_ptr<HeatmapSourceController>> charts;
@@ -103,6 +105,7 @@ protected:
         options.capacityPollMs = 0;
         options.nowMs = [this] { return now; };
         options.composeNowNs = composeClock;
+        options.liveCoalesceMs = coalesceMs;
         charts.push_back(std::make_unique<HeatmapSourceController>(store, fetcher, *cache, options));
         charts.back()->setView(symbol, tf, double(base), double(minute(viewEnd)));
         drainLive();
@@ -621,7 +624,8 @@ TEST_F(LiveClient, LiveLatestWinsRateAndMergedAutoSummary) {
     const auto count = c.stats().liveComposedBuckets;
     send(tail(10, 11, 10, 3, 3000)); runJobs();
     EXPECT_EQ(c.latestLive(), publication); // same clock tick, no second publication
-    now += 999; c.pollLive(); runJobs(); EXPECT_EQ(c.latestLive(), publication);
+    now += HeatmapSourceController::kLiveMinIntervalMs - 1; c.pollLive(); runJobs();
+    EXPECT_EQ(c.latestLive(), publication);
     now += 1; c.pollLive(); runJobs();
     EXPECT_EQ(live(c).revision, 3u);
     EXPECT_EQ(c.stats().liveComposedBuckets - count, 1u);
@@ -657,13 +661,14 @@ TEST_F(LiveClient, UnrelatedHistoryEventsDoNotDiscardLiveJobsOrBypassCadenceAndB
         };
         historyBurst();
         send(tail(130, 130, 130, 2, 2000));
-        now = 500; heldLiveJob(); drainLive(); runJobs();
+        now = HeatmapSourceController::kLiveMinIntervalMs / 2; heldLiveJob(); drainLive(); runJobs(); // before it is due
         ASSERT_TRUE(c.latestLive());
         EXPECT_EQ(live(c).revision, 1u);
         EXPECT_EQ(c.stats().liveStaleResults, 0u);
         EXPECT_EQ(c.stats().livePublications, 1u);
         const auto first = c.latestLive();
-        const int interval = costMs > 5 ? 5000 : 1000;
+        const int interval = costMs > 5 ? HeatmapSourceController::kLiveBackoffIntervalMs
+                                        : HeatmapSourceController::kLiveMinIntervalMs;
         EXPECT_EQ(c.stats().liveIntervalMs, interval);
         historyBurst();
         now = interval - 1; c.pollLive(); runJobs(); EXPECT_EQ(c.latestLive(), first);
@@ -745,7 +750,7 @@ TEST_F(LiveClient, CoarseTimeframesKeepOneHzAndDoNotFetchFromTheBeginningOfTheTi
         send(tail(tfMinutes - 3, tfMinutes - 2, tfMinutes - 3, 1, 1000)); settle();
         ASSERT_TRUE(c.latestLive());
         EXPECT_EQ(live(c).startMs, base);
-        EXPECT_EQ(c.stats().liveIntervalMs, 1000);
+        EXPECT_EQ(c.stats().liveIntervalMs, HeatmapSourceController::kLiveMinIntervalMs);
         const auto count = c.stats().liveComposedBuckets, pieces = c.stats().liveCommittedPieces;
         const auto span = c.latestSnapshot();
         send(tail(tfMinutes - 3, tfMinutes - 2, tfMinutes - 3, 2, 2000)); advance(c);
@@ -769,6 +774,45 @@ TEST_F(LiveClient, TimeframeChangeDropsOldPoolResultAndChartDestructionIsSafe) {
     EXPECT_EQ(cache->stats().jobs, 0u);
     EXPECT_FALSE(transport.liveUnsubscribes.empty());
 }
+// S5L-c review 5a: a live frame composes when it arrives (after the coalescing
+// window that lets its sibling frames in), not on a fixed 1 s phase it drifts
+// through; composition is still spaced by at least kLiveMinIntervalMs.
+TEST_F(LiveClient, LiveFramesComposeOnArrivalAfterTheCoalescingWindow) {
+    coalesceMs = 15;
+    auto &c = chart(); settle(); upload(c); settle();
+    send(tail(10, 10, 10, 1)); settle();
+    EXPECT_FALSE(c.latestLive()) << "inside the coalescing window";
+    now += 15; c.pollLive(); settle();
+    ASSERT_TRUE(c.latestLive());
+    EXPECT_EQ(live(c).revision, 1u);
+    // 700 ms later, between two would-be 1 s deadlines: composes 15 ms after arrival.
+    now += 685; send(tail(10, 10, 10, 2, 2000)); settle();
+    EXPECT_EQ(live(c).revision, 1u);
+    now += 15; c.pollLive(); settle();
+    EXPECT_EQ(live(c).revision, 2u) << "composed on arrival, not on the next 1 s deadline";
+    // A frame inside the minimum spacing waits for it (admitted at +715 ms).
+    now += 100; send(tail(10, 10, 10, 3, 3000));
+    now += 15; c.pollLive(); settle();
+    EXPECT_EQ(live(c).revision, 2u);
+    now = 715 + HeatmapSourceController::kLiveMinIntervalMs; c.pollLive(); settle();
+    EXPECT_EQ(live(c).revision, 3u);
+}
+// Review re-check: the coalescing window is anchored to the first pending frame.
+// A continuous stream (a frame every 10 ms for 2 s) still composes about every
+// kLiveMinIntervalMs, and never more often.
+TEST_F(LiveClient, AContinuousFrameStreamStillComposesEveryMinimumInterval) {
+    coalesceMs = 15;
+    auto &c = chart(); settle(); upload(c); settle();
+    const auto before = c.stats().livePublications;
+    for (int i = 0; i < 200; ++i) {
+        now += 10;
+        send(tail(10, 10, 10, uint64_t(i + 1), 1000 + uint64_t(i) * 250));
+        c.pollLive(); settle();
+    }
+    const auto composed = c.stats().livePublications - before;
+    EXPECT_GE(composed, 4u) << "a stream of frames must not postpone composition";
+    EXPECT_LE(composed, 5u) << "at most one composition per minimum interval";
+}
 TEST_F(LiveClient, MeasuredCostAboveFiveMsBacksOffToFiveSeconds) {
     int64_t clock = 0;
     composeClock = [&] { const auto t = clock; clock += 6'000'000; return t; };
@@ -781,6 +825,69 @@ TEST_F(LiveClient, MeasuredCostAboveFiveMsBacksOffToFiveSeconds) {
     send(tail(10, 10, 10, 2, 2000));
     advance(c, 4999); EXPECT_EQ(c.latestLive(), first);
     advance(c, 1); EXPECT_EQ(live(c).revision, 2u);
+}
+// S5L-c review 5b: the cost that switches live composition to 5 s is the
+// worker's CPU time, not wall time: a descheduled worker on a busy host (the
+// live run measured single 15-58 ms updates whose median was 2-3 ms) costs
+// nothing while it waits.
+TEST(LiveComposeCost, TheDefaultClockIsTheWorkersCpuTime) {
+#if defined(_WIN32) || defined(__APPLE__) || defined(__linux__)
+    ASSERT_TRUE(HeatmapSourceController::threadCpuClockAvailable()) << "every supported platform has a thread CPU clock";
+#endif
+    if (!HeatmapSourceController::threadCpuClockAvailable())
+        GTEST_SKIP() << "no thread CPU clock on this platform: the backoff measures wall time (steady clock)";
+    const int64_t idle0 = HeatmapSourceController::threadCpuNs();
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    const int64_t idle = HeatmapSourceController::threadCpuNs() - idle0;
+    EXPECT_LT(idle, 5'000'000) << "sleeping is not cost";
+    const int64_t busy0 = HeatmapSourceController::threadCpuNs();
+    // 50 ms of spinning: at least 20 ms even where CPU time is charged per
+    // scheduler tick (Windows, about 15.6 ms).
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+    volatile uint64_t spin = 0;
+    while (std::chrono::steady_clock::now() < until) spin = spin + 1;
+    EXPECT_GE(HeatmapSourceController::threadCpuNs() - busy0, 20'000'000) << "running is";
+}
+// ...and one slow update among fast ones does not back off: the decision is the
+// median of the last three updates; two slow ones in three do.
+TEST_F(LiveClient, OneSlowLiveComposeDoesNotBackOffTwoInThreeDo) {
+    int64_t clock = 0, cost = 1'000'000;
+    composeClock = [&] { const auto t = clock; clock += cost; return t; };
+    auto &c = chart(); settle();
+    send(tail(10, 10, 10, 1)); settle();
+    ASSERT_TRUE(c.latestLive());
+    uint64_t revision = 1;
+    for (const int ms : {1, 15, 1}) {
+        cost = int64_t(ms) * 1'000'000;
+        now += HeatmapSourceController::kLiveMinIntervalMs;
+        send(tail(10, 10, 10, ++revision, 1000 + 1000 * revision)); settle();
+        EXPECT_EQ(live(c).revision, revision);
+        EXPECT_EQ(c.stats().liveIntervalMs, HeatmapSourceController::kLiveMinIntervalMs) << "after a " << ms << " ms update";
+    }
+    cost = 15'000'000;
+    now += HeatmapSourceController::kLiveMinIntervalMs;
+    send(tail(10, 10, 10, ++revision, 1000 + 1000 * revision)); settle();
+    EXPECT_EQ(c.stats().liveIntervalMs, HeatmapSourceController::kLiveBackoffIntervalMs) << "15, 1, 15 ms: median 15";
+}
+// ...and the cost is the composition (owner decision 4: "composing measures
+// above 5 ms"), not the GPU image and summary built after it.
+TEST_F(LiveClient, TheBackoffMeasuresCompositionNotTheImageBuiltAfterIt) {
+    // Per update the clock is read at its start, around the composition, and at
+    // its end: 1 ms composing, 9 ms building the image and summary.
+    int64_t clock = 0;
+    int call = 0;
+    composeClock = [&] {
+        static constexpr int64_t steps[] = {0, 1'000'000, 9'000'000, 0};
+        const auto t = clock;
+        clock += steps[call++ % 4];
+        return t;
+    };
+    auto &c = chart(); settle();
+    send(tail(10, 10, 10, 1)); settle();
+    ASSERT_TRUE(c.latestLive());
+    EXPECT_DOUBLE_EQ(c.stats().liveComposeMs, 1);
+    EXPECT_DOUBLE_EQ(c.stats().liveUpdateMs, 10);
+    EXPECT_EQ(c.stats().liveIntervalMs, HeatmapSourceController::kLiveMinIntervalMs);
 }
 TEST_F(LiveClient, RecorderReplayMatchesLiveBuilderAndAnalyticalTwapAtOneAndFiveMinutes) {
     QTemporaryDir dir;
