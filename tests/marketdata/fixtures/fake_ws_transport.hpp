@@ -73,6 +73,8 @@ public:
         m_scenario->changed.notify_all();
     }
     void fail() { m_error("fixture failed connect"); down(); }
+    // Completes a held close (closeDelay set long) from any thread.
+    void downFromAnyThread() { boost::asio::post(m_io, [this] { down(); }); }
     void frame(std::string bytes) {
         m_message(std::move(bytes));
         { std::lock_guard lock(m_scenario->mutex); ++m_scenario->frames; m_scenario->changed.notify_all(); }

@@ -50,6 +50,7 @@ struct Layer {
     int64_t hourThroughMs = 0;
     bool hourWatermarkBlocked = false;
     int64_t publishedMinuteMs = -1, publishedHourMs = -1, publishedColumnMs = -1; // last values handed to readers
+    int64_t lastColumnMs = 0; // newest minute bucket this layer appended successfully
     explicit Layer(std::pmr::memory_resource *pool) : rows(pool) {
         rows.reserve(8192);
         touched.reserve(4096);
@@ -69,11 +70,12 @@ struct Symbol {
     double mid = 0, midOpen = 0, midMin = 0, midMax = 0, midClose = 0;
     uint64_t serial = 0;
     std::deque<Hmc2Record> pending;
-    int64_t lastColumnMs = 0;
     // Set while invalid by the recorder's own decision; cleared by an accepted
     // snapshot or an upstream invalidation (whose reconnect brings a snapshot).
     std::string selfInvalidReason;
-    int64_t nextResnapshotLocal = 0;
+    int64_t nextResnapshotLocal = 0, resnapshotIntervalMs = 0; // 0 = cfg start interval
+    int64_t validSinceLocal = 0;
+    int64_t oneSidedSince = -1; // integration clock when a side emptied, -1 = two-sided
 };
 int64_t systemNow() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
@@ -118,7 +120,8 @@ struct BookRecorder::Impl {
         }
         int64_t time = 0, local = 0;
         std::vector<Level> levels;
-        bool upstream = false; // Invalid from onInvalid(), not the recorder's own overflow control
+        bool upstream = false;        // Invalid from onInvalid(), not the recorder's own overflow control
+        bool droppedSnapshot = false; // InvalidEnvelope that replaced a snapshot
     };
     // Only the producer accesses this set. Its immutable strings have stable
     // addresses, so even long symbols require no allocation on repeated enqueues.
@@ -147,7 +150,9 @@ struct BookRecorder::Impl {
     static RecorderConfig validateConfig(RecorderConfig c) {
         if (c.root.empty() || !std::isfinite(c.priceScale) || c.priceScale <= 0 || !std::isfinite(c.sizeScale.floor) ||
             c.sizeScale.floor <= 0 || !std::isfinite(c.sizeScale.codesPerOctave) || c.sizeScale.codesPerOctave <= 0 ||
-            c.latenessMs < 0 || c.latenessMs > kHour || c.maxQueuedLevels == 0 || c.layers.empty())
+            c.latenessMs < 0 || c.latenessMs > kHour || c.maxQueuedLevels == 0 || c.layers.empty() ||
+            c.resnapshotIntervalMs <= 0 || c.resnapshotMaxIntervalMs < c.resnapshotIntervalMs ||
+            c.resnapshotStableMs < 0 || c.oneSidedGraceMs < 0)
             throw std::invalid_argument("BookRecorder: invalid config");
         std::set<std::string> names;
         for (const auto &l : c.layers) {
@@ -190,6 +195,7 @@ struct BookRecorder::Impl {
         const bool data = m.kind == Kind::Snapshot || m.kind == Kind::Updates;
         if (data && (m.levels.size() > cfg.maxQueuedLevels - queuedLevels || count >= kQueueSlots - 1)) {
             ++queueDrops;
+            m.droppedSnapshot = m.kind == Kind::Snapshot;
             m.kind = Kind::InvalidEnvelope;
             m.reason = "queue level/slot overflow";
             std::vector<Level>{}.swap(m.levels);
@@ -255,9 +261,12 @@ struct BookRecorder::Impl {
     void requestResnapshot(const std::string &name, Symbol &s) {
         if (!cfg.onSelfInvalidated || s.selfInvalidReason.empty() || workerLocal < s.nextResnapshotLocal)
             return;
-        s.nextResnapshotLocal = workerLocal + cfg.resnapshotIntervalMs;
+        // Exponential: a persistent cause must not reconnect the shared socket every interval.
+        const int64_t interval = s.resnapshotIntervalMs ? s.resnapshotIntervalMs : cfg.resnapshotIntervalMs;
+        s.nextResnapshotLocal = workerLocal + interval;
+        s.resnapshotIntervalMs = std::min(interval * 2, std::max(cfg.resnapshotMaxIntervalMs, interval));
         sLog_Warning("BookRecorder: requesting resnapshot symbol=" << name << " reason=" << s.selfInvalidReason
-                                                                   << " time=" << s.clock);
+                                                                   << " time=" << s.clock << " nextInMs=" << interval);
         try {
             cfg.onSelfInvalidated(name, s.selfInvalidReason);
         } catch (const std::exception &e) {
@@ -278,6 +287,7 @@ struct BookRecorder::Impl {
             }
         }
         s.valid = false;
+        s.oneSidedSince = -1;
         s.bids.clear();
         s.asks.clear();
         ++invalidations;
@@ -288,6 +298,19 @@ struct BookRecorder::Impl {
             s.selfInvalidReason = reason;
             requestResnapshot(name, s);
         }
+    }
+    // The backoff resets only after a snapshot has stayed valid for resnapshotStableMs.
+    void noteStable(Symbol &s) {
+        if (s.valid && s.resnapshotIntervalMs && workerLocal - s.validSinceLocal >= cfg.resnapshotStableMs)
+            s.resnapshotIntervalMs = s.nextResnapshotLocal = 0;
+    }
+    // A side that stays empty beyond the grace is a book we can no longer trust to
+    // place the window: close observation at the grace end and ask for a snapshot.
+    void expireOneSided(const std::string &name, Symbol &s, int64_t target) {
+        if (!s.valid || s.oneSidedSince < 0 || target - s.oneSidedSince <= cfg.oneSidedGraceMs)
+            return;
+        advance(s, s.oneSidedSince + cfg.oneSidedGraceMs);
+        invalidate(name, s, "one-sided book");
     }
     bool trackMid(Symbol &s) {
         if (s.bids.empty() || s.asks.empty())
@@ -573,7 +596,9 @@ struct BookRecorder::Impl {
                 sLog_Error("BookRecorder: column lost bucket=" << r.bucketStartMs << " error=" << e.what());
                 continue;
             }
-            s.lastColumnMs = std::max(s.lastColumnMs, r.bucketStartMs);
+            for (auto &l : s.layers)
+                if (l.header.layer == r.header.layer)
+                    l.lastColumnMs = std::max(l.lastColumnMs, r.bucketStartMs);
             publishCopy(r, r.bucketStartMs + kMinute, false);
             try {
                 rollup(s, r);
@@ -614,7 +639,7 @@ struct BookRecorder::Impl {
                 l.hourThroughMs = std::max(l.hourThroughMs, hourBoundary);
             const int64_t hourMs = cfg.layers[li].hourlyRollup ? l.hourThroughMs : 0;
             changed = changed || l.publishedMinuteMs != s.minuteThroughMs || l.publishedHourMs != hourMs ||
-                      l.publishedColumnMs != s.lastColumnMs;
+                      l.publishedColumnMs != l.lastColumnMs;
         }
         if (!changed)
             return;
@@ -623,12 +648,12 @@ struct BookRecorder::Impl {
             auto &l = s.layers[li];
             const int64_t hourMs = cfg.layers[li].hourlyRollup ? l.hourThroughMs : 0;
             if (l.publishedMinuteMs == s.minuteThroughMs && l.publishedHourMs == hourMs &&
-                l.publishedColumnMs == s.lastColumnMs)
+                l.publishedColumnMs == l.lastColumnMs)
                 continue;
-            watermarksBySeries[{l.header.symbol, l.header.layer}] = {s.minuteThroughMs, hourMs, s.lastColumnMs};
+            watermarksBySeries[{l.header.symbol, l.header.layer}] = {s.minuteThroughMs, hourMs, l.lastColumnMs};
             l.publishedMinuteMs = s.minuteThroughMs;
             l.publishedHourMs = hourMs;
-            l.publishedColumnMs = s.lastColumnMs;
+            l.publishedColumnMs = l.lastColumnMs;
         }
     }
     void apply(Symbol &s, const Message &m) {
@@ -701,9 +726,22 @@ struct BookRecorder::Impl {
                 invalidate(m.symbol(), s, "missing two-sided mid");
                 return;
             }
-        } else if (!trackMid(s)) {
-            invalidate(m.symbol(), s, "unrepresentable mid");
-            return;
+            if (s.oneSidedSince < 0) {
+                s.oneSidedSince = s.clock;
+                sLog_Data("BookRecorder: one-sided book symbol=" << m.symbol()
+                                                                << " empty=" << (s.bids.empty() ? "bid" : "ask")
+                                                                << " time=" << s.clock);
+            }
+        } else {
+            if (s.oneSidedSince >= 0) {
+                sLog_Data("BookRecorder: two-sided again symbol=" << m.symbol() << " time=" << s.clock
+                                                                  << " durationMs=" << (s.clock - s.oneSidedSince));
+                s.oneSidedSince = -1;
+            }
+            if (!trackMid(s)) {
+                invalidate(m.symbol(), s, "unrepresentable mid");
+                return;
+            }
         }
         for (auto &l : s.layers)
             for (auto *row : l.touched)
@@ -711,6 +749,7 @@ struct BookRecorder::Impl {
         if (m.kind == Kind::Snapshot) {
             s.valid = true;
             s.selfInvalidReason.clear();
+            s.validSinceLocal = workerLocal;
             sLog_Data("BookRecorder: snapshot symbol=" << m.symbol() << " time=" << s.clock
                                                        << " levels=" << m.levels.size());
         }
@@ -728,20 +767,32 @@ struct BookRecorder::Impl {
                 if (m.kind == Kind::Invalid && !m.symbol().empty() && name != m.symbol())
                     continue;
                 auto &s = *ptr;
-                if (!s.initialized)
+                if (!s.initialized) {
+                    // No observation yet; a lost first snapshot still needs a retry.
+                    if (m.kind == Kind::Invalid)
+                        s.selfInvalidReason = m.upstream ? std::string() : m.reason;
+                    requestResnapshot(name, s);
                     continue;
+                }
                 const auto t = std::clamp(m.time - s.offset, int64_t{0}, kMaxTime);
+                expireOneSided(name, s, t);
                 advance(s, t);
                 if (m.kind == Kind::Invalid)
                     invalidate(name, s, m.reason, m.upstream);
                 else if (!s.valid)
-                    requestResnapshot(name, s); // repeats while still invalid, rate limited
+                    requestResnapshot(name, s); // repeats while still invalid, with backoff
+                noteStable(s);
                 publishOpen(s);
             }
             return;
         }
         auto &s = getSymbol(m.symbol());
         if (!s.initialized) {
+            if (m.kind == Kind::InvalidEnvelope && m.droppedSnapshot) {
+                sLog_Warning("BookRecorder: first snapshot dropped symbol=" << m.symbol() << " reason=" << m.reason);
+                s.selfInvalidReason = m.reason;
+                requestResnapshot(m.symbol(), s);
+            }
             if (m.kind != Kind::Snapshot)
                 return;
             s.initialized = true;
@@ -761,6 +812,7 @@ struct BookRecorder::Impl {
         // envelope; advance() independently clamps the integration clock.
         const int64_t t = std::max(m.time, s.clock);
         s.offset = m.local - m.time;
+        expireOneSided(m.symbol(), s, t);
         advance(s, t);
         if (late)
             s.flags |= kLateEvents;
@@ -771,6 +823,7 @@ struct BookRecorder::Impl {
         }
         if (m.kind == Kind::Snapshot || s.valid)
             apply(s, m);
+        noteStable(s);
         publishOpen(s);
         sLog_Probe("recording.event", "symbol=" << m.symbol() << " envelope=" << m.time << " clock=" << s.clock
                                                 << " valid=" << s.valid << " levels=" << m.levels.size());

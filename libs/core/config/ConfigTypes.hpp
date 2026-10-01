@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -124,6 +126,19 @@ struct ServerConfig {
     uint16_t streamPort = 8080;
     std::vector<std::string> defaultSymbols{"BTC-USD"};
 };
+
+// Pinned symbols exactly as the server subscribes and records them:
+// upper-case, non-empty, first occurrence kept.
+inline std::vector<std::string> normalizedDefaultSymbols(const std::vector<std::string>& input) {
+    std::vector<std::string> out;
+    for (std::string symbol : input) {
+        if (symbol.empty()) continue;
+        std::transform(symbol.begin(), symbol.end(), symbol.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+        if (std::find(out.begin(), out.end(), symbol) == out.end()) out.push_back(std::move(symbol));
+    }
+    return out;
+}
 
 struct ClientHeatmapConfig {
     std::string source = "legacy"; // recording requires advertised recording.available

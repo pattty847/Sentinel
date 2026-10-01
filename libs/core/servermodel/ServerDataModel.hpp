@@ -19,6 +19,7 @@
 #include "TickBinaryLogger.hpp"
 #include "TimeframeAggregator.hpp"
 #include "BookRecorder.hpp"
+#include "RecorderStallMonitor.hpp"
 #include "../marketdata/model/TradeData.h"
 #include "../protocol/HeatmapSlice.hpp"
 #include "../config/ConfigTypes.hpp"
@@ -121,9 +122,9 @@ private:
     std::optional<std::filesystem::path> m_recordingDir;
     QTimer m_recorderTimer;
     int m_recorderTicks = 0;
-    bool m_marketDataConnected = false;
-    struct RecorderProgress { int64_t lastColumnMs = 0, sinceMs = 0; };
-    std::unordered_map<std::string, RecorderProgress> m_recorderProgress; // main thread
+    // Main thread: every pinned symbol x recorded layer must keep committing columns.
+    std::optional<recording::RecorderStallMonitor> m_stallMonitor;
+    std::vector<recording::RecorderStallMonitor::Series> m_stallSeries;
     void startRecorder();
     void checkRecorderProgress(int64_t nowMs);
 };

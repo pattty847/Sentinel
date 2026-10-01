@@ -207,26 +207,7 @@ bool SentinelServerApp::initialize() {
         // Start connection
         m_marketDataCore->start();
 
-        auto parseDefaultSymbols = [](const std::vector<std::string>& input) {
-            std::vector<std::string> out;
-            out.reserve(input.size());
-            std::unordered_set<std::string> seen;
-            for (const auto& sym : input) {
-                if (sym.empty()) {
-                    continue;
-                }
-                std::string normalized = sym;
-                std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
-                    return static_cast<char>(std::toupper(c));
-                });
-                if (seen.insert(normalized).second) {
-                    out.push_back(normalized);
-                }
-            }
-            return out;
-        };
-
-        const auto normalizedSymbols = parseDefaultSymbols(m_serverConfig.defaultSymbols);
+        const auto normalizedSymbols = normalizedDefaultSymbols(m_serverConfig.defaultSymbols);
         std::vector<std::string> symbolList;
         symbolList.reserve(normalizedSymbols.size());
         for (const auto& sym : normalizedSymbols) {
