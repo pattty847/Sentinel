@@ -487,7 +487,7 @@ struct RunCursor {
     }
 };
 void compareStreams(const std::map<std::string, FileRange>& streams,
-                    const std::vector<std::string>& products, bool interrupted,
+                    const std::vector<std::string>& products, bool partialTail,
                     const std::function<void(const std::string&)>& error) {
     std::vector<RunCursor> cursors;
     for (const auto& symbol : products) cursors.emplace_back(streams.at(symbol));
@@ -551,7 +551,7 @@ void compareStreams(const std::map<std::string, FileRange>& streams,
             }
             for (size_t i = 0; i < products.size(); ++i) {
                 const auto& boundary = groups[i].boundary;
-                if (!boundary && interrupted) continue;
+                if (!boundary && partialTail) continue;
                 try {
                     if (!boundary || boundary->kind != Kind::FrameReference ||
                         boundary->time != batch.last || boundary->connection != batch.connection ||
@@ -563,7 +563,7 @@ void compareStreams(const std::map<std::string, FileRange>& streams,
             const auto& first = groups.front().boundary;
             for (const auto& group : groups) {
                 if (!group.frames.empty() && group.boundary) fail("raw frames missing routing range before lifecycle marker");
-                if ((!end || !interrupted) && group.boundary != first) fail("routed lifecycle markers differ");
+                if ((!end || !partialTail) && group.boundary != first) fail("routed lifecycle markers differ");
             }
         }
         // Receipts check continuity for completed groups locally. The merged
@@ -572,16 +572,18 @@ void compareStreams(const std::map<std::string, FileRange>& streams,
         for (const auto& key : order) {
             if (std::get<0>(key)) continue;
             const auto sequence = std::get<1>(key);
-            if (!proof && interrupted && expectedSequence && sequence != *expectedSequence)
+            if (!proof && partialTail && expectedSequence && sequence != *expectedSequence)
                 fail("merged tail sequence gap expected=" + std::to_string(*expectedSequence) + " got=" + std::to_string(sequence));
             expectedSequence = sequence == UINT64_MAX ? std::nullopt : std::optional<uint64_t>(sequence + 1);
         }
         if (!proof && !groups.empty() && groups.front().boundary && groups.front().boundary->kind == Kind::TransportUp)
             expectedSequence = 0;
         if (end) {
-            if (!interrupted && std::any_of(groups.begin(), groups.end(), [](const auto& g) { return g.boundary.has_value(); }))
+            if (!partialTail && std::any_of(groups.begin(), groups.end(), [](const auto& g) { return g.boundary.has_value(); }))
                 fail("routed streams have different lengths");
-            // Keep checking remaining durable groups even after a peer ends.
+            // Finish this common-prefix group (including its merged tail),
+            // then stop: later groups have no peer coverage to compare against.
+            if (partialTail) return;
             if (std::all_of(groups.begin(), groups.end(), [](const auto& g) { return !g.boundary; })) return;
         }
     }
@@ -634,7 +636,7 @@ VerificationReport verifyFiles(const FileRange& files, const std::map<std::strin
             const auto result = scan(file.path, [&](const Record& record) { replay.record(record); });
             ++scanned;
             replay.lastIndexed = result.indexed;
-            if ((!result.indexed || result.tornTail) && haveNext && next.run == run)
+            if ((!result.indexed || result.tornTail) && ((haveNext && next.run == run) || replay.truncated))
                 ++replay.badTails;
             fileBytes += result.fileBytes;
             addDaily(replay.days, utcDay(header.at("opened_system_ns").get<int64_t>()), "file_bytes", result.fileBytes);
@@ -690,7 +692,7 @@ VerificationReport verifyFiles(const FileRange& files, const std::map<std::strin
 }
 } // namespace
 
-VerificationReport verify(const QString& path) {
+VerificationReport verify(const QString& path, const std::function<void()>& afterDiscovery) {
     FileSorter sorter;
     std::map<std::string, FileRange> byProduct;
     std::map<std::string, std::map<std::string, FileRange>> byRun;
@@ -739,6 +741,7 @@ VerificationReport verify(const QString& path) {
             }
         } while (ancestor.cdUp());
     }
+    if (afterDiscovery) afterDiscovery();
     std::map<std::string, std::pair<int64_t, std::string>> latest;
     std::set<RunKey> truncatedRuns;
     QDirIterator inventory(archiveRoot, {"*.rawl2"}, QDir::Files, QDirIterator::Subdirectories);
@@ -762,7 +765,10 @@ VerificationReport verify(const QString& path) {
     if (byProduct.empty()) {
         auto report = verifyFiles(files, newestRuns, truncatedRuns);
         report.json["errors"] = report.json["errors"].get<uint64_t>() + discoveryErrorCount;
-        report.json["details"] = discoveryErrors;
+        for (const auto& detail : discoveryErrors) {
+            if (report.json["details"].size() == 30) break;
+            report.json["details"].push_back(detail);
+        }
         report.json["products"] = nlohmann::json::object();
         report.json["inventory_files"] = discovered;
         report.json["inventory_peak_buffered_files"] = sorter.peak;
@@ -802,8 +808,11 @@ VerificationReport verify(const QString& path) {
         if (!allPresent && !productScope) routingError("missing product stream run=" + id);
         if (expected.size() > 1 && (!allPresent || open)) ++deferred;
         const bool interrupted = std::any_of(members.begin(), members.end(), [](const auto& m) { return m.at("interrupted") == true; });
+        const bool truncated = std::any_of(members.begin(), members.end(), [](const auto& m) { return m.at("truncated_by_scope") == true; });
         if (expected.size() > 1 && allPresent && !open) {
-            compareStreams(byRun.at(id), expected.get<std::vector<std::string>>(), interrupted,
+            // Live rotation between selection and inventory can truncate even
+            // a whole-root query. Compare only the observed common prefix.
+            compareStreams(byRun.at(id), expected.get<std::vector<std::string>>(), interrupted || truncated,
                 [&](const std::string& message) { routingError("run=" + id + ": " + message); });
         }
         auto connection = *representative;
@@ -816,8 +825,7 @@ VerificationReport verify(const QString& path) {
             [](const auto& member) { return member.at("closed") == true; });
         connection["open"] = open;
         connection["interrupted"] = interrupted;
-        connection["truncated_by_scope"] = std::any_of(members.begin(), members.end(),
-            [](const auto& member) { return member.at("truncated_by_scope") == true; });
+        connection["truncated_by_scope"] = truncated;
         connection["routing_checked"] = allPresent && !open;
         connection["routing_errors"] = routingErrors - errorsBefore;
         connections.push_back(std::move(connection));

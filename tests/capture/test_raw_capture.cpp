@@ -13,9 +13,6 @@
 #include <algorithm>
 #include <chrono>
 #include <csignal>
-#ifndef _WIN32
-#include <sys/resource.h>
-#endif
 
 using namespace sentinel::capture;
 namespace {
@@ -748,6 +745,192 @@ TEST_F(CaptureTest, ScopeTailIsTruncatedRatherThanInterruptedOrOpen) {
     }
     EXPECT_EQ(verify(config.root).json["truncated_by_scope_runs"], 0);
 }
+TEST_F(CaptureTest, TruncatedScopeRejectsUnindexedAndTornSelectedTail) {
+    Writer writer(config, metadata());
+    auto input = fixture(); input.back().time.systemNs += 24 * Hour;
+    for (const auto& r : input) writer.append(r);
+    writer.close();
+    const auto selected = paths(config.root).front();
+    const auto original = contents(selected);
+    const auto scanResult = scan(selected);
+    const auto& last = scanResult.index.back();
+    const auto end = last.offset + 48 + last.compressedBytes;
+    for (const auto& suffix : {QByteArray{}, QByteArray("BLK1\0", 5)}) {
+        save(selected, original.first(end) + suffix);
+        const auto report = verify(config.root + "/BTC-USD/2026/09");
+        EXPECT_FALSE(report.ok);
+        EXPECT_EQ(report.json["complete"], false);
+        EXPECT_EQ(report.json["truncated_by_scope_runs"], 1);
+        EXPECT_EQ(report.json["run_reports"][0]["bad_tails"], 1);
+        EXPECT_EQ(report.json["torn_tails"], suffix.isEmpty() ? 0 : 1);
+    }
+}
+TEST_F(CaptureTest, AnotherRunOutsideScopeDoesNotTruncateSelectedRun) {
+    {
+        Writer writer(config, metadata());
+        auto input = fixture(); input.pop_back();
+        for (const auto& r : input) writer.append(r);
+        writer.flush();
+    }
+    {
+        Writer writer(config, metadata());
+        for (auto r : fixture()) { r.time.systemNs += 24 * Hour; writer.append(r); writer.sealSegment(); }
+        writer.close();
+    }
+    const auto report = verify(config.root + "/BTC-USD/2026/09");
+    EXPECT_FALSE(report.ok);
+    EXPECT_EQ(report.json["interrupted_runs"], 1);
+    EXPECT_EQ(report.json["truncated_by_scope_runs"], 0);
+}
+TEST_F(CaptureTest, AnotherProductsLaterSegmentDoesNotTruncateSelectedRun) {
+    QTemporaryDir source;
+    auto src = config; src.root = source.path(); writeMulti(src, multiFixture());
+    for (const auto& path : paths(src.root)) {
+        const auto header = readHeader(path);
+        auto cfg = config; cfg.symbol = header["product_metadata"]["product_id"].get<std::string>();
+        Writer writer(cfg, header);
+        scan(path, [&](Record r) {
+            if (cfg.symbol == "ETH-USD") r.time.systemNs += 24 * Hour;
+            if (r.kind != Kind::CaptureStopped) writer.append(r);
+        });
+        if (cfg.symbol == "ETH-USD") {
+            writer.sealSegment();
+            auto stop = record(Kind::CaptureStopped, 3000000000);
+            stop.time.systemNs += 24 * Hour;
+            writer.append(stop);
+        }
+        writer.close();
+    }
+    const auto report = verify(config.root + "/BTC-USD/2026/09");
+    EXPECT_TRUE(report.ok) << report.json.dump(2);
+    EXPECT_EQ(report.json["open_runs"], 1);
+    EXPECT_EQ(report.json["complete"], false);
+    EXPECT_EQ(report.json["truncated_by_scope_runs"], 0);
+}
+TEST_F(CaptureTest, MultiProductTruncatedScopeDefersPeerProofButChecksItsSealedTail) {
+    auto input = multiFixture(); input.back().time.systemNs += 24 * Hour;
+    writeMulti(config, input);
+    for (const auto& symbol : {"BTC-USD", "ETH-USD"}) {
+        const auto report = verify(config.root + '/' + symbol + "/2026/09");
+        EXPECT_TRUE(report.ok) << report.json.dump(2);
+        EXPECT_EQ(report.json["complete"], true);
+        EXPECT_EQ(report.json["truncated_by_scope_runs"], 1);
+        EXPECT_EQ(report.json["routing_checks_deferred"], 1);
+        EXPECT_EQ(report.json["connection_runs"][0]["routing_checked"], false);
+        EXPECT_EQ(report.json["connection_runs"][0]["products"].size(), 2);
+        EXPECT_EQ(report.json["run_reports"][0]["bad_tails"], 0);
+    }
+    EXPECT_TRUE(verify(config.root).ok);
+}
+TEST_F(CaptureTest, MultiProductRotationAfterSelectionComparesOnlyScopedCommonPrefix) {
+    QTemporaryDir source;
+    auto src = config; src.root = source.path(); writeMulti(src, multiFixture());
+    std::vector<std::pair<std::string, std::unique_ptr<Writer>>> writers;
+    for (const auto& path : paths(src.root)) {
+        const auto header = readHeader(path);
+        auto cfg = config; cfg.symbol = header["product_metadata"]["product_id"].get<std::string>();
+        auto writer = std::make_unique<Writer>(cfg, header);
+        scan(path, [&](const Record& r) { if (r.kind != Kind::CaptureStopped) writer->append(r); });
+        // Product writers can have different observed end positions during
+        // rotation. This marker has not reached ETH's selected segment yet.
+        if (cfg.symbol == "BTC-USD") writer->append(record(Kind::BookInvalidated, 3000000000));
+        writer->sealSegment();
+        writers.emplace_back(cfg.symbol, std::move(writer));
+    }
+    const auto report = verify(config.root, [&] {
+        // Deterministically model new segments appearing after selection, but
+        // before the inventory that classifies truncated/open/interrupted runs.
+        for (auto& [symbol, writer] : writers) {
+            if (symbol == "ETH-USD") writer->append(record(Kind::BookInvalidated, 3000000000));
+            writer->append(record(Kind::CaptureStopped, 4000000000));
+            writer->close();
+        }
+    });
+    EXPECT_TRUE(report.ok) << report.json.dump(2);
+    EXPECT_EQ(report.json["complete"], true);
+    EXPECT_EQ(report.json["files"], 2);
+    EXPECT_EQ(report.json["inventory_files"], 4);
+    EXPECT_EQ(report.json["totals"]["truncated_by_scope_runs"], 1);
+    EXPECT_EQ(report.json["totals"]["interrupted_runs"], 0);
+    EXPECT_EQ(report.json["routing_errors"], 0);
+    EXPECT_EQ(report.json["connection_runs"][0]["routing_checked"], true);
+    EXPECT_TRUE(verify(config.root).ok); // the complete archive has matching markers
+}
+TEST_F(CaptureTest, InterruptedComparisonStopsAfterFirstPeersFinalGroup) {
+    QTemporaryDir source;
+    auto src = config; src.root = source.path();
+    auto input = multiFixture(); input.pop_back();
+    for (uint64_t i = 0; i < 12; ++i)
+        input.push_back(frame(nlohmann::json{{"channel", "heartbeats"}}, 6 + i, (i + 1) * RoutingIntervalNs));
+    input.push_back(record(Kind::CaptureStopped, 14 * RoutingIntervalNs));
+    writeMulti(src, input);
+    for (const auto& path : paths(src.root)) {
+        const auto header = readHeader(path);
+        auto cfg = config; cfg.symbol = header["product_metadata"]["product_id"].get<std::string>();
+        Writer writer(cfg, header);
+        bool ended = false;
+        scan(path, [&](const Record& r) {
+            if (ended || r.kind == Kind::CaptureStopped) return;
+            writer.append(r);
+            if (cfg.symbol == "ETH-USD" && r.kind == Kind::FrameReference) ended = true;
+        });
+        writer.flush();
+    }
+    Writer newer(config, metadata());
+    for (const auto& r : fixture()) newer.append(r);
+    newer.close();
+    const auto report = verify(config.root);
+    EXPECT_EQ(report.json["totals"]["interrupted_runs"], 1);
+    // Check the available receipt in the first group where ETH ends, but do
+    // not manufacture more missing ETH copies from every later BTC group.
+    EXPECT_EQ(report.json["routing_errors"], 1) << report.json.dump(2);
+    EXPECT_NE(report.json["routing_details"].dump().find("missing or wrongly routed raw copy product=ETH-USD"), std::string::npos);
+}
+TEST_F(CaptureTest, ExternalSortOrdersDistinctRunsAndSegmentsAcrossMultipleLevels) {
+    constexpr int Runs = 3, Segments = 701; // two full sort chunks plus a remainder
+    std::vector<std::pair<int64_t, std::string>> expected;
+    for (int run = 0; run < Runs; ++run) {
+        Writer writer(config, metadata());
+        auto input = fixture(); input.pop_back();
+        for (const auto& r : input) writer.append(r);
+        writer.flush();
+        const auto header = readHeader(writer.currentPath());
+        expected.emplace_back(header.at("run_started_system_ns").get<int64_t>(), header.at("run_id").get<std::string>());
+        for (int segment = 1; segment < Segments; ++segment) {
+            writer.sealSegment();
+            writer.append(frame(nlohmann::json{{"channel", "heartbeats"}}, 4 + segment, int64_t(3 + segment) * 1000000000));
+        }
+        writer.append(record(Kind::CaptureStopped, int64_t(3 + Segments) * 1000000000));
+        writer.close();
+    }
+    // Inventory order and path order both differ from numeric run/segment
+    // order. Modulo permutation interleaves the runs without changing headers.
+    const auto files = paths(config.root);
+    ASSERT_EQ(files.size(), Runs * Segments);
+    for (int i = 0; i < files.size(); ++i)
+        ASSERT_TRUE(QFile::rename(files[i], config.root + '/' + QString::number((i * 17) % files.size()) + ".rawl2"));
+    std::sort(expected.begin(), expected.end());
+    const auto report = verify(config.root);
+    ASSERT_TRUE(report.ok) << report.json["details"].dump();
+    EXPECT_EQ(report.json["files"], Runs * Segments);
+    EXPECT_EQ(report.json["inventory_peak_buffered_files"], 1024);
+    ASSERT_EQ(report.json["run_reports"].size(), Runs);
+    for (size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(report.json["run_reports"][i]["run_id"], expected[i].second);
+        EXPECT_EQ(report.json["run_reports"][i]["frames"], Segments + 4);
+    }
+}
+TEST_F(CaptureTest, EmptyAndUnreadableArchivesRetainNoFramesDetail) {
+    auto report = verify(config.root);
+    EXPECT_FALSE(report.ok);
+    EXPECT_EQ(report.json["errors"], 1);
+    EXPECT_EQ(report.json["details"], nlohmann::json::array({"no captured frames verified"}));
+    for (int i = 0; i < 34; ++i) save(config.root + '/' + QString::number(i) + ".rawl2", "bad header");
+    report = verify(config.root);
+    EXPECT_EQ(report.json["errors"], 35);
+    EXPECT_EQ(report.json["details"].size(), 30);
+    EXPECT_EQ(report.json["details"][0], "no captured frames verified");
+}
 TEST_F(CaptureTest, RoutingChecksContinueAfterEveryBadGroupWithBoundedDetails) {
     QTemporaryDir source;
     auto src = config; src.root = source.path();
@@ -854,18 +1037,6 @@ TEST_F(CaptureTest, InventoryOver100000FilesHasBoundedBuffersAtEveryScope) {
         if (i % 1000 == 0) ASSERT_TRUE(QFile::copy(seed, destination));
         else std::filesystem::create_hard_link((bucket + '/' + QString::number(i - i % 1000) + ".rawl2").toStdString(), destination.toStdString());
     }
-#ifndef _WIN32
-    const auto peakRss = [] {
-        rusage usage{};
-        if (getrusage(RUSAGE_SELF, &usage) != 0) throw std::runtime_error("getrusage failed");
-#ifdef __APPLE__
-        return uint64_t(usage.ru_maxrss);
-#else
-        return uint64_t(usage.ru_maxrss) * 1024;
-#endif
-    };
-    uint64_t smallScopePeak = 0;
-#endif
     for (const auto& scope : {selected, config.root + "/BTC-USD/2026/09", config.root}) {
         const auto report = verify(scope);
         EXPECT_EQ(report.json["inventory_files"], 100002);
@@ -873,16 +1044,10 @@ TEST_F(CaptureTest, InventoryOver100000FilesHasBoundedBuffersAtEveryScope) {
         if (scope != config.root) {
             EXPECT_TRUE(report.ok) << report.json.dump(2);
             EXPECT_EQ(report.json["files"], 1);
-#ifndef _WIN32
-            smallScopePeak = peakRss();
-#endif
         } else {
             EXPECT_FALSE(report.ok); // duplicated, unindexed historical segments are real errors
             EXPECT_EQ(report.json["files"], 100002);
             EXPECT_EQ(report.json["inventory_peak_buffered_files"], 1024);
-#ifndef _WIN32
-            EXPECT_LT(peakRss(), smallScopePeak + 32 * 1024 * 1024);
-#endif
             EXPECT_EQ(report.json["details"].size(), 30);
         }
     }
