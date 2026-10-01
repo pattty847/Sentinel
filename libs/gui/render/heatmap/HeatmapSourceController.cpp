@@ -499,7 +499,12 @@ HeatmapSourceController::HeatmapSourceController(ChunkStore &store, ChunkFetcher
         schedule();
     }, Qt::QueuedConnection);
     connect(&fetcher_, &ChunkFetcher::liveChanged, this, [this](const QString &symbol) {
-        if (symbol.toStdString() == symbol_) { invalidateLive(); refreshLive(); }
+        if (symbol.toStdString() != symbol_) return;
+        // Compose on arrival (after the coalescing window), not on a fixed phase:
+        // frames drift through a fixed 1 s deadline and waited up to 1 s for it.
+        liveCoalesceUntilMs_ = options_.nowMs() + options_.liveCoalesceMs;
+        invalidateLive();
+        refreshLive();
     }, Qt::QueuedConnection);
     connect(&fetcher_, &ChunkFetcher::chunkFailed, this, [this](const ChunkKey &key, const QString &, const QString &) {
         if (!wanted_.contains(key)) return;
@@ -679,11 +684,11 @@ void HeatmapSourceController::setLiveBytes(size_t bytes) {
 void HeatmapSourceController::resetLive() {
     liveDirty_ = false;
     liveTimer_->stop();
-    liveDueMs_ = 0;
+    liveDueMs_ = liveCoalesceUntilMs_ = 0;
     liveStarts_.clear();
     liveUploadedEnds_.clear();
     stats_.liveUploadedSpans = 0;
-    stats_.liveIntervalMs = 1000;
+    stats_.liveIntervalMs = kLiveMinIntervalMs;
     setLiveBytes(0);
     liveWanted_.clear();
     // An old job owns its old composer until it finishes; it cannot mutate the
@@ -826,8 +831,8 @@ void HeatmapSourceController::pollLive() {
     if (liveReleaseMs_ && options_.nowMs() >= *liveReleaseMs_) { refreshLive(); return; }
     if (!liveDirty_ || liveRunning_ || liveStarts_.empty()) return;
     const auto now = options_.nowMs();
-    if (now < liveDueMs_) {
-        liveTimer_->start(int(std::min<int64_t>(liveDueMs_ - now, INT_MAX)));
+    if (const auto due = std::max(liveDueMs_, liveCoalesceUntilMs_); now < due) {
+        liveTimer_->start(int(std::min<int64_t>(due - now, INT_MAX)));
         return;
     }
     struct Input {
@@ -917,14 +922,14 @@ void HeatmapSourceController::pollLive() {
         stats_.liveCommittedPieces += result->pieces;
         // Measure the whole worker update (compose + upload image + summary).
         if (state == liveWork_ && error.isEmpty()) {
-            const int interval = result->ms > 5 ? 5000 : 1000;
+            const int interval = result->ms > 5 ? kLiveBackoffIntervalMs : kLiveMinIntervalMs;
             if (interval != stats_.liveIntervalMs) {
-                if (interval == 5000)
+                if (interval == kLiveBackoffIntervalMs)
                     sLog_Warning("Heatmap live compose backoff chart=" << chart_ << " symbol=" << symbol_
-                                 << " tf=" << tfMs_ << " ms=" << result->ms << " interval=5000");
+                                 << " tf=" << tfMs_ << " ms=" << result->ms << " interval=" << interval);
                 else
                     sLog_Data("Heatmap live compose recovered chart=" << chart_ << " symbol=" << symbol_
-                              << " tf=" << tfMs_ << " ms=" << result->ms << " interval=1000");
+                              << " tf=" << tfMs_ << " ms=" << result->ms << " interval=" << interval);
                 stats_.liveIntervalMs = interval;
             }
         }

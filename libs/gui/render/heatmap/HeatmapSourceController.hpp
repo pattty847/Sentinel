@@ -323,6 +323,12 @@ public:
     static constexpr int64_t kMaxLiveLagMs = 2 * kHourMs;
     static constexpr int64_t kMaxLiveLagBuckets = 64;
     static constexpr int kLiveReleaseDelayMs = 3000;
+    // Live composition follows the frames: a live frame's arrival composes after
+    // a short coalescing window (both sources' frames arrive together), at most
+    // once per kLiveMinIntervalMs (other triggers too); kLiveBackoffIntervalMs
+    // while composing is measured slow. The server publishes at 1 Hz.
+    static constexpr int kLiveMinIntervalMs = 500;
+    static constexpr int kLiveBackoffIntervalMs = 5000;
     struct Options {
         size_t gpuBytes = 320ull << 20;          // per-chart cap (HeatmapBudgets::gpuPerChart)
         size_t sourceEstimateBytes = 8ull << 20; // estimate of an unbuilt span source without a size hint
@@ -330,6 +336,7 @@ public:
         int capacityPollMs = 16;                // <= 0: tests call pollCapacity()
         std::function<int64_t()> composeNowNs;   // worker clock; tests inject measured cost
         std::function<int64_t()> nowMs;          // monotonic clock; injected in deterministic tests
+        int liveCoalesceMs = 15;                 // wait after a live frame for its siblings (tests: 0)
     };
     HeatmapSourceController(ChunkStore &store, ChunkFetcher &fetcher, SpanSourceCache &cache, Options options,
                             QObject *parent = nullptr);
@@ -368,7 +375,7 @@ public:
         size_t liveBytes = 0; // composer cache + published columns/image/summary, in CPU ledger
         size_t liveUploadedSpans = 0; // acknowledgements retained inside the live window
         double liveComposeMs = 0;
-        int liveIntervalMs = 1000;
+        int liveIntervalMs = kLiveMinIntervalMs;
         uint64_t refusals = 0;    // visible spans refused by the CPU ceiling, cumulative
         size_t suppressed = 0;    // spans suppressed by the last reconcile
         size_t refused = 0;       // visible spans refused by the last reconcile
@@ -433,7 +440,7 @@ private:
     bool liveInterested_ = false;
     uint64_t liveVersion_ = 0;
     bool liveRunning_ = false, liveDirty_ = false;
-    int64_t liveDueMs_ = 0;
+    int64_t liveDueMs_ = 0, liveCoalesceUntilMs_ = 0;
     std::map<std::string, int64_t> liveStarts_;
     std::map<std::pair<SpanId, std::string>, int64_t> liveUploadedEnds_;
     std::unordered_set<ChunkKey, ChunkKeyHash> liveWanted_;

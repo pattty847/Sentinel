@@ -87,6 +87,7 @@ protected:
     // Cadence tests must not enter cost backoff because the host was descheduled.
     // The backoff cases override this with an explicitly measured 6 ms update.
     std::function<int64_t()> composeClock = [] { return int64_t(0); };
+    int coalesceMs = 0; // live frames compose at once unless a test sets the window
     std::deque<std::function<void()>> jobs;
     std::unique_ptr<SpanSourceCache> cache;
     std::vector<std::unique_ptr<HeatmapSourceController>> charts;
@@ -103,6 +104,7 @@ protected:
         options.capacityPollMs = 0;
         options.nowMs = [this] { return now; };
         options.composeNowNs = composeClock;
+        options.liveCoalesceMs = coalesceMs;
         charts.push_back(std::make_unique<HeatmapSourceController>(store, fetcher, *cache, options));
         charts.back()->setView(symbol, tf, double(base), double(minute(viewEnd)));
         drainLive();
@@ -621,7 +623,8 @@ TEST_F(LiveClient, LiveLatestWinsRateAndMergedAutoSummary) {
     const auto count = c.stats().liveComposedBuckets;
     send(tail(10, 11, 10, 3, 3000)); runJobs();
     EXPECT_EQ(c.latestLive(), publication); // same clock tick, no second publication
-    now += 999; c.pollLive(); runJobs(); EXPECT_EQ(c.latestLive(), publication);
+    now += HeatmapSourceController::kLiveMinIntervalMs - 1; c.pollLive(); runJobs();
+    EXPECT_EQ(c.latestLive(), publication);
     now += 1; c.pollLive(); runJobs();
     EXPECT_EQ(live(c).revision, 3u);
     EXPECT_EQ(c.stats().liveComposedBuckets - count, 1u);
@@ -657,13 +660,14 @@ TEST_F(LiveClient, UnrelatedHistoryEventsDoNotDiscardLiveJobsOrBypassCadenceAndB
         };
         historyBurst();
         send(tail(130, 130, 130, 2, 2000));
-        now = 500; heldLiveJob(); drainLive(); runJobs();
+        now = HeatmapSourceController::kLiveMinIntervalMs / 2; heldLiveJob(); drainLive(); runJobs(); // before it is due
         ASSERT_TRUE(c.latestLive());
         EXPECT_EQ(live(c).revision, 1u);
         EXPECT_EQ(c.stats().liveStaleResults, 0u);
         EXPECT_EQ(c.stats().livePublications, 1u);
         const auto first = c.latestLive();
-        const int interval = costMs > 5 ? 5000 : 1000;
+        const int interval = costMs > 5 ? HeatmapSourceController::kLiveBackoffIntervalMs
+                                        : HeatmapSourceController::kLiveMinIntervalMs;
         EXPECT_EQ(c.stats().liveIntervalMs, interval);
         historyBurst();
         now = interval - 1; c.pollLive(); runJobs(); EXPECT_EQ(c.latestLive(), first);
@@ -745,7 +749,7 @@ TEST_F(LiveClient, CoarseTimeframesKeepOneHzAndDoNotFetchFromTheBeginningOfTheTi
         send(tail(tfMinutes - 3, tfMinutes - 2, tfMinutes - 3, 1, 1000)); settle();
         ASSERT_TRUE(c.latestLive());
         EXPECT_EQ(live(c).startMs, base);
-        EXPECT_EQ(c.stats().liveIntervalMs, 1000);
+        EXPECT_EQ(c.stats().liveIntervalMs, HeatmapSourceController::kLiveMinIntervalMs);
         const auto count = c.stats().liveComposedBuckets, pieces = c.stats().liveCommittedPieces;
         const auto span = c.latestSnapshot();
         send(tail(tfMinutes - 3, tfMinutes - 2, tfMinutes - 3, 2, 2000)); advance(c);
@@ -768,6 +772,29 @@ TEST_F(LiveClient, TimeframeChangeDropsOldPoolResultAndChartDestructionIsSafe) {
     charts.clear(); runJobs();
     EXPECT_EQ(cache->stats().jobs, 0u);
     EXPECT_FALSE(transport.liveUnsubscribes.empty());
+}
+// S5L-c review 5a: a live frame composes when it arrives (after the coalescing
+// window that lets its sibling frames in), not on a fixed 1 s phase it drifts
+// through; composition is still spaced by at least kLiveMinIntervalMs.
+TEST_F(LiveClient, LiveFramesComposeOnArrivalAfterTheCoalescingWindow) {
+    coalesceMs = 15;
+    auto &c = chart(); settle(); upload(c); settle();
+    send(tail(10, 10, 10, 1)); settle();
+    EXPECT_FALSE(c.latestLive()) << "inside the coalescing window";
+    now += 15; c.pollLive(); settle();
+    ASSERT_TRUE(c.latestLive());
+    EXPECT_EQ(live(c).revision, 1u);
+    // 700 ms later, between two would-be 1 s deadlines: composes 15 ms after arrival.
+    now += 685; send(tail(10, 10, 10, 2, 2000)); settle();
+    EXPECT_EQ(live(c).revision, 1u);
+    now += 15; c.pollLive(); settle();
+    EXPECT_EQ(live(c).revision, 2u) << "composed on arrival, not on the next 1 s deadline";
+    // A frame inside the minimum spacing waits for it (admitted at +715 ms).
+    now += 100; send(tail(10, 10, 10, 3, 3000));
+    now += 15; c.pollLive(); settle();
+    EXPECT_EQ(live(c).revision, 2u);
+    now = 715 + HeatmapSourceController::kLiveMinIntervalMs; c.pollLive(); settle();
+    EXPECT_EQ(live(c).revision, 3u);
 }
 TEST_F(LiveClient, MeasuredCostAboveFiveMsBacksOffToFiveSeconds) {
     int64_t clock = 0;
