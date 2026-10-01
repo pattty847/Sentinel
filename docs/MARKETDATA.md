@@ -297,6 +297,17 @@ Clients retry the current confirmed view at the advertised delay, with exponenti
 1..30 s backoff, and drop stale-generation errors. Reconnect and every re-band must
 register anew; generations identify the projection and are echoed unchanged.
 
+A client that mutes its legacy band stream (the GPU heatmap renderer, S6b) releases
+the view so the server stops projecting it:
+
+```json
+{"type":"heatmap_recording_unview","symbol":"BTC-USD"}
+```
+
+The server deactivates and drops the connection's view; there is no reply. Servers
+that predate the message ignore it (the client drops the columns it receives).
+Resuming the legacy stream registers a fresh view through the normal history path.
+
 `heatmap_recording_live` has the heatmap family `schema_version`, `source:"recording"`,
 `status:"complete"`, symbol, timeframe, layer, band, generation, size-code scale, and the
 same `columns` array/encoding as recording history: little-endian u16 base64 `column` and
