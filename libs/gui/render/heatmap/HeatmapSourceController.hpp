@@ -356,6 +356,11 @@ public:
     // node residency uses it (S5c).
     void setTickRequest(TickMode mode, int64_t units);
     void setGpuBudget(size_t bytes);
+    // The chart's liveMinIntervalMs setting (100..5000 ms; default kLiveMinIntervalMs):
+    // the shortest spacing of live compositions. The slow-compose backoff stays
+    // max(kLiveBackoffIntervalMs, this).
+    void setLiveMinInterval(int ms);
+    int liveMinInterval() const { return liveMinIntervalMs_; }
     // Applies the CPU tiers to the process-wide store and cache; false (and no
     // change) when the budgets are invalid.
     static bool applyBudgets(const HeatmapBudgets &budgets, ChunkStore &store, SpanSourceCache &cache);
@@ -450,6 +455,7 @@ private:
     uint64_t liveVersion_ = 0;
     bool liveRunning_ = false, liveDirty_ = false;
     int64_t liveDueMs_ = 0;
+    int liveMinIntervalMs_ = kLiveMinIntervalMs;
     // End of the coalescing window, anchored to the first live frame since the
     // last admitted composition (later frames never extend it).
     std::optional<int64_t> liveCoalesceUntilMs_;

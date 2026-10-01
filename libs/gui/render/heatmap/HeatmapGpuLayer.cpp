@@ -15,6 +15,9 @@ QString money(double price) { return QStringLiteral("$") + QString::number(price
 QString utc(int64_t ms) {
     return QDateTime::fromMSecsSinceEpoch(ms, QTimeZone::UTC).toString(QStringLiteral("MM-dd HH:mm"));
 }
+QString utcSeconds(int64_t ms) {
+    return ms ? QDateTime::fromMSecsSinceEpoch(ms, QTimeZone::UTC).toString(QStringLiteral("HH:mm:ss")) : QString();
+}
 double percentile(std::vector<double> v, double q) {
     if (v.empty()) return 0.0;
     std::sort(v.begin(), v.end());
@@ -95,6 +98,7 @@ void HeatmapGpuLayer::createController() {
     connect(controller_, &HeatmapSourceController::buildFailed, this,
             [this](const QString &message) { emit buildFailed(message); }, Qt::QueuedConnection);
     postedTickUnits_ = -1;
+    postLiveInterval();
     sLog_App("Heatmap GPU layer attached symbol=" << QString::fromStdString(symbol_) << " tfMs=" << tfMs_
              << " gpuCapBytes=" << settings_.gpuCapBytes);
     postView();
@@ -167,6 +171,7 @@ void HeatmapGpuLayer::setSettings(const HeatmapChartSettings &settings, bool exp
     }
     if (wasManual != manualMode_) autoUnits_ = 0; // back to Auto: the rule resumes from the current zoom
     if (previous.gpuCapBytes != settings.gpuCapBytes) postBudget();
+    if (previous.liveMinIntervalMs != settings.liveMinIntervalMs) postLiveInterval();
     refreshStyle();
     if (previous.palettePreset != settings.palettePreset || previous.bidGradient != settings.bidGradient ||
         previous.askGradient != settings.askGradient)
@@ -240,6 +245,12 @@ void HeatmapGpuLayer::postView() {
 void HeatmapGpuLayer::postBudget() {
     if (!controller_) return;
     QMetaObject::invokeMethod(controller_, [c = controller_, b = size_t(settings_.gpuCapBytes)] { c->setGpuBudget(b); },
+                              Qt::QueuedConnection);
+}
+
+void HeatmapGpuLayer::postLiveInterval() {
+    if (!controller_) return;
+    QMetaObject::invokeMethod(controller_, [c = controller_, ms = settings_.liveMinIntervalMs] { c->setLiveMinInterval(ms); },
                               Qt::QueuedConnection);
 }
 
@@ -457,15 +468,104 @@ QJsonObject HeatmapGpuLayer::state() const {
     } else {
         out["controllerStats"] = QJsonValue(QJsonValue::Null);
     }
-    // Refresh the controller's stats for the next call (they belong to its thread).
-    if (controller_)
-        QMetaObject::invokeMethod(controller_, [c = controller_, stats = controllerStats_] {
-            const auto value = c->stats();
-            QMetaObject::invokeMethod(QCoreApplication::instance(), [stats, value] {
-                stats->stats = value;
-                stats->valid = true;
-            }, Qt::QueuedConnection);
-        }, Qt::QueuedConnection);
+    refreshControllerStats();
     return out;
+}
+
+// Refreshes the controller's stats for the next read (they belong to its thread).
+void HeatmapGpuLayer::refreshControllerStats() const {
+    if (!controller_) return;
+    QMetaObject::invokeMethod(controller_, [c = controller_, stats = controllerStats_] {
+        const auto value = c->stats();
+        QMetaObject::invokeMethod(QCoreApplication::instance(), [stats, value] {
+            stats->stats = value;
+            stats->valid = true;
+        }, Qt::QueuedConnection);
+    }, Qt::QueuedConnection);
+}
+
+QVariantMap HeatmapGpuLayer::metrics() const {
+    const auto &s = *tileStats_;
+    const double tick = tickPrice();
+    const double heightPx = heightPx_ * dpr_;
+    const double priceSpan = view_.priceHi - view_.priceLo;
+    QVariantMap m{{"active", active_}, {"symbol", QString::fromStdString(symbol_)}, {"timeframeMs", qlonglong(tfMs_)},
+                  {"mode", manualMode_ ? QStringLiteral("manual") : QStringLiteral("auto")},
+                  {"tick", tick}, {"tickUnits", qlonglong(tickUnits_)},
+                  {"manualTick", isPresetUnits(manualUnits_) ? fromUnits(manualUnits_, priceScale()) : 0.0},
+                  {"hysteresis", settings_.hysteresis}, {"minRowPx", settings_.minRowPx},
+                  {"crossfadeMs", settings_.crossfadeMs}, {"crossfading", s.crossfading.load()},
+                  {"holding", s.holding.load()}, {"tickChanges", qulonglong(tickChanges_)},
+                  {"rowPx", tick > 0 && priceSpan > 0 ? tick * heightPx / priceSpan : 0.0},
+                  {"indicator", resolutionIndicator()}, {"settled", settled()},
+                  {"lastBinMs", s.lastBinMs.load()}, {"prepareMs", s.prepareMs.load()},
+                  {"gpuFrameMs", s.gpuFrameMs.load()}, {"gpuCapBytes", qulonglong(settings_.gpuCapBytes)},
+                  {"gpuBytes", qulonglong(s.gpuBytes.load())}, {"residentBytes", qulonglong(s.residentBytes.load())},
+                  {"sourceBytes", qulonglong(s.sourceBytes.load())}, {"binBytes", qulonglong(s.binBytes.load())},
+                  {"residentSources", qulonglong(s.residentSources.load())},
+                  {"sourcesUploaded", qulonglong(s.sourcesUploaded.load())},
+                  {"binPasses", qulonglong(s.binPasses.load())}, {"fillPasses", qulonglong(s.fillPasses.load())},
+                  {"evictions", qulonglong(s.evictions.load())}, {"missingReports", qulonglong(s.missingReports.load())},
+                  {"readySlots", s.readySlots.load()}, {"fallbackSlots", s.fallbackSlots.load()},
+                  {"partialSlots", s.partialSlots.load()}, {"loadingSlots", s.loadingSlots.load()},
+                  {"kernel", s.preciseKernel.load() ? QStringLiteral("precise") : QStringLiteral("fast")},
+                  {"refusedSpans", snapshot_ ? int(snapshot_->refused.size()) : 0},
+                  {"refusedBytes", snapshot_ ? qulonglong(snapshot_->refusedBytes) : 0},
+                  {"liveVersion", qulonglong(s.liveVersion.load())},
+                  {"livePublished", live_ ? qulonglong(live_->version) : 0},
+                  {"liveUploads", qulonglong(s.liveUploads.load())},
+                  {"liveBinPasses", qulonglong(s.liveBinPasses.load())},
+                  {"liveBufferCreations", qulonglong(s.liveBufferCreations.load())},
+                  {"liveSets", s.liveSets.load()},
+                  {"livePublishToDrawMs", s.livePublishToDrawMs.load()},
+                  {"liveDataAgeMs", s.liveDataAgeMs.load()},
+                  {"liveMinIntervalMs", settings_.liveMinIntervalMs},
+                  {"liveL", utcSeconds(s.liveStartMs.load())}, {"liveEnd", utcSeconds(s.liveEndMs.load())},
+                  {"liveFrom", utcSeconds(s.liveDrawFromMs.load())}, {"liveE", utcSeconds(s.liveEdgeCompleteMs.load())},
+                  {"liveSpanMin", double(s.liveEndMs.load() - s.liveStartMs.load()) / 60'000.0}};
+    {
+        std::vector<double> publish, age;
+        for (const auto &[p, a] : s.liveSamples()) {
+            publish.push_back(p);
+            age.push_back(a);
+        }
+        m["livePublishP50"] = percentile(publish, 0.5);
+        m["livePublishP95"] = percentile(publish, 0.95);
+        m["liveAgeP50"] = percentile(age, 0.5);
+        m["liveAgeP95"] = percentile(age, 0.95);
+    }
+    // The finest source tick in view (rule 4: what Auto can reach here).
+    if (snapshot_ && snapshot_->tfMs == tfMs_) {
+        int64_t finest = 0;
+        for (const auto &column : snapshot_->resolution.columns) {
+            if (!(double(column.startMs) < view_.timeHiMs && double(column.startMs + tfMs_) > view_.timeLoMs)) continue;
+            for (const auto &source : column.sources)
+                if (source.state == BucketState::Present && source.commonUnits > 0 && !source.bands.empty())
+                    finest = finest ? std::min(finest, source.commonUnits) : source.commonUnits;
+        }
+        m["commonTick"] = finest ? fromUnits(finest, snapshot_->priceScale) : 0.0;
+    }
+    if (service_) {
+        const auto data = service_->stats();
+        m.insert({{"connection", service_->connected() ? QStringLiteral("connected") : QStringLiteral("disconnected")},
+                  {"chunkBytes", qulonglong(data.store.bytes)}, {"chunkEntries", qulonglong(data.store.entries)},
+                  {"chunkLoads", qulonglong(data.store.loads)}, {"fetchedChunks", qulonglong(data.fetcher.requestedChunks)},
+                  {"spanBuilds", qulonglong(data.cache.builds)}, {"spanCacheHits", qulonglong(data.cache.hits)},
+                  {"spanLiveBytes", qlonglong(data.cache.liveBytes)}, {"spanCacheBytes", qulonglong(data.cache.bytes)},
+                  {"spanClaimedBytes", qulonglong(data.cache.claimedBytes)},
+                  {"spanReservedBytes", qulonglong(data.cache.reservedBytes)},
+                  {"chunkWantedBytes", qulonglong(data.store.wantedBytes)},
+                  {"cpuCommittedBytes", qulonglong(data.committedCpuBytes)}});
+    }
+    m["footprintBytes"] = qulonglong(processFootprintBytes());
+    if (controllerStats_->valid) {
+        const auto &c = controllerStats_->stats;
+        m.insert({{"publications", qulonglong(c.publications)}, {"admissions", qulonglong(c.admissions)},
+                  {"controllerEvictions", qulonglong(c.evictions)}, {"suppressed", qulonglong(c.suppressed)},
+                  {"committedBytes", qulonglong(c.committedBytes)}, {"livePublications", qulonglong(c.livePublications)},
+                  {"liveComposeMs", c.liveComposeMs}, {"liveIntervalMs", c.liveIntervalMs}});
+    }
+    refreshControllerStats();
+    return m;
 }
 } // namespace heatmap::gpu

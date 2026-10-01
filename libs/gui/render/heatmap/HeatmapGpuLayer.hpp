@@ -19,6 +19,7 @@
 #include "heatmap/HeatmapChartSettings.hpp"
 #include "heatmap/HeatmapResolution.hpp"
 #include <QJsonObject>
+#include <QVariantMap>
 #include <QObject>
 #include <memory>
 #include <optional>
@@ -101,6 +102,10 @@ public:
     // Agent API heatmap state (plan section 5); refreshes the controller stats
     // asynchronously for the next call.
     QJsonObject state() const;
+    // The telemetry panel's values (the lab table: tick, GPU node, live edge, data
+    // controller, render). GUI thread, polled at 4 Hz by HeatmapTelemetryDock;
+    // atomics and shared pointers only, plus the asynchronous controller stats.
+    QVariantMap metrics() const;
 
 signals:
     void snapshotChanged();
@@ -164,6 +169,8 @@ private:
     void onLive();
     void postView();
     void postBudget();
+    void postLiveInterval();
+    void refreshControllerStats() const;
     int64_t chooseTick(const ViewWindow &view);
     void restoreTick();
     void refreshPresets();

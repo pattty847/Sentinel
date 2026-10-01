@@ -5,7 +5,21 @@
 #include <stdexcept>
 #include <exception>
 
+#ifdef __APPLE__
+#include <mach/mach.h>
+#endif
+
 namespace heatmap {
+uint64_t processFootprintBytes() {
+#ifdef __APPLE__
+    task_vm_info_data_t info{};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS)
+        return info.phys_footprint;
+#endif
+    return 0;
+}
+
 HeatmapDataService::HeatmapDataService(TransportFactory factory, HeatmapBudgets budgets, StartTransport start,
                                        std::function<void()> beforeStop) : beforeStop_(std::move(beforeStop)) {
     if (!factory || !budgets.valid()) throw std::invalid_argument("Invalid heatmap service factory or budgets");

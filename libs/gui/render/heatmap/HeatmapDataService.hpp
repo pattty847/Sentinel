@@ -11,6 +11,10 @@
 #include <set>
 
 namespace heatmap {
+// Process physical footprint (macOS task_vm_info; includes GPU memory on unified
+// memory), bytes; 0 where unknown.
+uint64_t processFootprintBytes();
+
 class HeatmapDataService {
 public:
     // Called on the data thread. Return a newly allocated transport; ancillary

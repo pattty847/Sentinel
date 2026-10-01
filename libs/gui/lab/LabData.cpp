@@ -8,20 +8,8 @@
 #include <QCoreApplication>
 #include <QTimer>
 
-#ifdef __APPLE__
-#include <mach/mach.h>
-#endif
-
 namespace lab {
-uint64_t processFootprintBytes() {
-#ifdef __APPLE__
-    task_vm_info_data_t info{};
-    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
-    if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS)
-        return info.phys_footprint;
-#endif
-    return 0;
-}
+uint64_t processFootprintBytes() { return heatmap::processFootprintBytes(); }
 namespace {
 std::mutex instanceMutex;
 std::unique_ptr<LabData> current;

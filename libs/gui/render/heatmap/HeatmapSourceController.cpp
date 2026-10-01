@@ -660,6 +660,16 @@ void HeatmapSourceController::setGpuBudget(size_t bytes) {
     schedule();
 }
 
+void HeatmapSourceController::setLiveMinInterval(int ms) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    ms = std::clamp(ms, 100, 5000);
+    if (ms == liveMinIntervalMs_) return;
+    const bool backedOff = stats_.liveIntervalMs > liveMinIntervalMs_;
+    liveMinIntervalMs_ = ms;
+    stats_.liveIntervalMs = backedOff ? std::max(kLiveBackoffIntervalMs, ms) : ms;
+    sLog_Data("Heatmap live min interval chart=" << chart_ << " ms=" << ms);
+}
+
 std::shared_ptr<const SpanSet> HeatmapSourceController::latestSnapshot() const {
     std::scoped_lock lock(latestMutex_);
     return latest_;
@@ -723,7 +733,7 @@ void HeatmapSourceController::resetLive() {
     liveStarts_.clear();
     liveUploadedEnds_.clear();
     stats_.liveUploadedSpans = 0;
-    stats_.liveIntervalMs = kLiveMinIntervalMs;
+    stats_.liveIntervalMs = liveMinIntervalMs_;
     liveCosts_ = {};
     liveCostCount_ = 0;
     setLiveBytes(0);
@@ -974,9 +984,10 @@ void HeatmapSourceController::pollLive() {
             std::array<double, 3> recent = liveCosts_;
             std::sort(recent.end() - liveCostCount_, recent.end());
             const double cost = liveCostCount_ == 3 ? recent[1] : recent[3 - liveCostCount_];
-            const int interval = cost > 5 ? kLiveBackoffIntervalMs : kLiveMinIntervalMs;
+            const int backoff = std::max(kLiveBackoffIntervalMs, liveMinIntervalMs_);
+            const int interval = cost > 5 ? backoff : liveMinIntervalMs_;
             if (interval != stats_.liveIntervalMs) {
-                if (interval == kLiveBackoffIntervalMs)
+                if (interval == backoff && interval != liveMinIntervalMs_)
                     sLog_Warning("Heatmap live compose backoff chart=" << chart_ << " symbol=" << symbol_
                                  << " tf=" << tfMs_ << " ms=" << result->ms << " medianMs=" << cost
                                  << " interval=" << interval);
