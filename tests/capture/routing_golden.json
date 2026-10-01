@@ -1,0 +1,184 @@
+{
+  "routing": "product-ranges-v2",
+  "products": [
+    "BTC-USD",
+    "ETH-USD"
+  ],
+  "vectors": [
+    {
+      "payload": " {\"channel\":\"l2_data\",\"sequence_num\":0,\"events\":[{\"product_id\":\"BTC-USD\",\"updates\":[{\"product_id\":\"ETH-USD\",\"price_level\":\"100.0100\"}]}]}\n",
+      "identity": {
+        "products": [
+          "BTC-USD"
+        ],
+        "channel": "l2_data",
+        "sequence_num": 0,
+        "received_bytes": 138,
+        "sha256": "436465461346fff4acdf81ec0e3841fec35c5c5da0ed72b2aad3843d6fd4759b"
+      }
+    },
+    {
+      "payload": "{\"channel\":\"market_trades\",\"sequence_num\":1,\"events\":[{\"trades\":[{\"product_id\":\"ETH-USD\"}]}]}",
+      "identity": {
+        "products": [
+          "ETH-USD"
+        ],
+        "channel": "market_trades",
+        "sequence_num": 1,
+        "received_bytes": 93,
+        "sha256": "43072d345062fc7ef48ba1e3dcaed62df1dffba911a92cfbce13c0075cbb6ad3"
+      }
+    },
+    {
+      "payload": "{\"sequence_num\":2,\"channel\":\"l2_data\",\"events\":[{\"product_id\":\"ETH-USD\"},{\"product_id\":\"BTC-USD\"}]}",
+      "identity": {
+        "products": [
+          "BTC-USD",
+          "ETH-USD"
+        ],
+        "channel": "l2_data",
+        "sequence_num": 2,
+        "received_bytes": 99,
+        "sha256": "9c59153cb48999cb07bd1964b545e0b8efe1b4c534190b2e6f70881e9d1ba2e0"
+      }
+    },
+    {
+      "payload": "{\"channel\":\"l2_data\",\"sequence_num\":3,\"events\":[{\"product_id\":\"BTC-USDC\"}]}",
+      "identity": {
+        "products": [
+          "BTC-USD",
+          "ETH-USD"
+        ],
+        "channel": "l2_data",
+        "sequence_num": 3,
+        "received_bytes": 75,
+        "sha256": "e65c320aaf68600b4d51dd4abcb065d68171ee5f8439d2a61ebc44b3d760c838"
+      }
+    },
+    {
+      "payload": "{\"channel\":\"l2_data\",\"sequence_num\":4,\"events\":[{\"product_id\":\"BTC-USD\"},null]}",
+      "identity": {
+        "products": [
+          "BTC-USD",
+          "ETH-USD"
+        ],
+        "channel": "l2_data",
+        "sequence_num": null,
+        "received_bytes": 79,
+        "sha256": "21344b540d4c3193acbd542462a8537944292610464d7e4f9e8d524cbab182ed"
+      }
+    },
+    {
+      "payload": "{\"channel\":\"market_trades\",\"sequence_num\":5,\"events\":[{\"trades\":[{\"product_id\":\"ETH-USD\"}]},{}]}",
+      "identity": {
+        "products": [
+          "BTC-USD",
+          "ETH-USD"
+        ],
+        "channel": "market_trades",
+        "sequence_num": 5,
+        "received_bytes": 96,
+        "sha256": "f024d68f54d384a2f6a619c493c1b98e9d3e2e964ae0d0a1bfcf8f4a5d612759"
+      }
+    },
+    {
+      "payload": "{\"channel\":\"heartbeats\",\"sequence_num\":6,\"events\":[]}",
+      "identity": {
+        "products": [
+          "BTC-USD",
+          "ETH-USD"
+        ],
+        "channel": "heartbeats",
+        "sequence_num": 6,
+        "received_bytes": 53,
+        "sha256": "50a7f38c62309bdff8cfec1fc13782762f0933b05f5d1a29976c5093fb0a3bcc"
+      }
+    },
+    {
+      "payload": "\u0000broken",
+      "identity": {
+        "products": [
+          "BTC-USD",
+          "ETH-USD"
+        ],
+        "channel": "<invalid-envelope>",
+        "sequence_num": null,
+        "received_bytes": 7,
+        "sha256": "d1228a116255c3e1d078d36c02cb0b4ab6adf449a4d6ee922bb63923c2078f0c"
+      }
+    },
+    {
+      "payload": "{\"channel\":\"l2_data\",\"sequence_num\":7,\"events\":[{\"product_id\":\"UNSUBSCRIBED\"},{\"product_id\":\"ETH-USD\"}]}",
+      "identity": {
+        "products": [
+          "BTC-USD",
+          "ETH-USD"
+        ],
+        "channel": "l2_data",
+        "sequence_num": 7,
+        "received_bytes": 104,
+        "sha256": "d59cc255bd8441571eef179c0a6f46926396f136e2fcdf25ab63879a5939ad9d"
+      }
+    },
+    {
+      "payload": "{\"channel\":\"l2_data\",\"sequence_num\":8,\"events\":[{\"product_id\":\"BTC-USD\",\"product_id\":\"ETH-USD\"}]}",
+      "identity": {
+        "products": [
+          "BTC-USD",
+          "ETH-USD"
+        ],
+        "channel": "l2_data",
+        "sequence_num": 8,
+        "received_bytes": 97,
+        "sha256": "cab0b3bcfdc276d5d7a0f593efcf3d5ef5fb08f893cacc2e0ddac48e5106d394"
+      }
+    }
+  ],
+  "identity_lines": [
+    "[11,22,1,{\"channel\":\"l2_data\",\"products\":[\"BTC-USD\"],\"received_bytes\":138,\"sequence_num\":0,\"sha256\":\"436465461346fff4acdf81ec0e3841fec35c5c5da0ed72b2aad3843d6fd4759b\"}]\n",
+    "[12,23,1,{\"channel\":\"market_trades\",\"products\":[\"ETH-USD\"],\"received_bytes\":93,\"sequence_num\":1,\"sha256\":\"43072d345062fc7ef48ba1e3dcaed62df1dffba911a92cfbce13c0075cbb6ad3\"}]\n",
+    "[13,24,1,{\"channel\":\"l2_data\",\"products\":[\"BTC-USD\",\"ETH-USD\"],\"received_bytes\":99,\"sequence_num\":2,\"sha256\":\"9c59153cb48999cb07bd1964b545e0b8efe1b4c534190b2e6f70881e9d1ba2e0\"}]\n"
+  ],
+  "ranges": {
+    "BTC-USD": {
+      "first_seq": 0,
+      "last_seq": 2,
+      "count": 3,
+      "bytes": 330,
+      "foreign_count": 1,
+      "foreign_bytes": 93,
+      "destinations": {
+        "BTC-USD": [
+          2,
+          237
+        ],
+        "ETH-USD": [
+          1,
+          93
+        ]
+      },
+      "sequence_gaps": 0,
+      "sha256": "a591467e8583fd5d786b22ec5cd0f3c1d5d27f14d4f0db8994629348682e0274"
+    },
+    "ETH-USD": {
+      "first_seq": 0,
+      "last_seq": 2,
+      "count": 3,
+      "bytes": 330,
+      "foreign_count": 1,
+      "foreign_bytes": 138,
+      "destinations": {
+        "BTC-USD": [
+          2,
+          237
+        ],
+        "ETH-USD": [
+          1,
+          93
+        ]
+      },
+      "sequence_gaps": 0,
+      "sha256": "a591467e8583fd5d786b22ec5cd0f3c1d5d27f14d4f0db8994629348682e0274"
+    }
+  }
+}

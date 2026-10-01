@@ -1,6 +1,8 @@
 #include "RawCapture.hpp"
+#include "CaptureRouting.hpp"
 #include "SentinelLogging.hpp"
 #include <QDateTime>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFileInfo>
 #include <QStorageInfo>
@@ -13,6 +15,8 @@
 #include <array>
 #include <cerrno>
 #include <cstring>
+#include <coroutine>
+#include <exception>
 #include <limits>
 #include <stdexcept>
 #ifdef _WIN32
@@ -132,7 +136,9 @@ bool hasFollowingFraming(QFile& file, qint64 start, qint64 end) {
 nlohmann::json headerFrom(QFile& file) {
     if (file.size() < 16) fail("incomplete file header");
     const auto prefix = read(file, 16);
-    if (std::string_view(prefix).substr(0, 8) != Magic) fail("bad magic/version");
+    const auto version = static_cast<unsigned char>(prefix[7]);
+    if (std::string_view(prefix).substr(0, 7) != Magic.substr(0, 7) || (version != 1 && version != 2))
+        fail("bad magic/version");
     size_t pos = 8;
     const auto size = get(prefix, pos, 4);
     const auto checksum = get(prefix, pos, 4);
@@ -140,7 +146,7 @@ nlohmann::json headerFrom(QFile& file) {
     const auto data = read(file, size);
     if (crc(data) != checksum) fail("header CRC mismatch");
     auto header = nlohmann::json::parse(data);
-    if (header.at("format_version") != 1) fail("unsupported version");
+    if (header.at("format_version") != version) fail("unsupported version");
     for (const char* field : {"segment", "first_block_ordinal", "run_started_system_ns", "opened_system_ns", "opened_steady_ns"}) {
         const auto& value = header.at(field);
         if (!value.is_number_integer() || (!value.is_number_unsigned() && value.get<int64_t>() < 0))
@@ -155,6 +161,15 @@ nlohmann::json headerFrom(QFile& file) {
     if (!product.at("quote_increment").is_string() || !product.at("base_increment").is_string())
         fail("increments must be strings");
     if (header.at("products") != nlohmann::json::array({product.at("product_id")})) fail("product metadata/subscription mismatch");
+    if (version == 2) {
+        const auto products = header.at("connection_products").get<std::vector<std::string>>();
+        if (products.size() < 2 || products.size() > MaxProducts || !std::is_sorted(products.begin(), products.end()) ||
+            std::adjacent_find(products.begin(), products.end()) != products.end() ||
+            !std::binary_search(products.begin(), products.end(), product.at("product_id").get<std::string>()))
+            fail("invalid connection products");
+        for (const auto& symbol : products) validateSymbol(symbol);
+        if (header.at("routing") != RoutingId) fail("unsupported routing");
+    }
     return header;
 }
 } // namespace
@@ -173,6 +188,7 @@ void validateSymbol(const std::string& symbol) {
     if (symbol.empty() || symbol.size() > 40 || symbol.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-") != std::string::npos)
         fail("invalid symbol");
 }
+
 QString validateRoot(const QString& root) {
     if (!QDir::isAbsolutePath(root)) fail("root must be absolute");
     const auto absolute = QDir::cleanPath(root);
@@ -228,9 +244,12 @@ Writer::Writer(WriterConfig config, nlohmann::json metadata)
         m_config.blockInterval > std::chrono::seconds(60) || m_config.compressionLevel < 1 || m_config.compressionLevel > 19)
         fail("invalid block configuration");
     const auto now = Stamp::now();
-    m_metadata["format_version"] = 1;
-    m_metadata["run_id"] = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
-    m_metadata["run_started_system_ns"] = now.systemNs;
+    const bool multi = m_metadata.contains("connection_products");
+    m_metadata["format_version"] = multi ? 2 : 1;
+    if (!multi) {
+        m_metadata["run_id"] = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
+        m_metadata["run_started_system_ns"] = now.systemNs;
+    }
     m_metadata["products"] = nlohmann::json::array({m_config.symbol});
     m_metadata["channels"] = {"level2", "market_trades", "heartbeats"};
     m_metadata["config"] = {{"root", m_config.root.toStdString()}, {"block_bytes", m_config.blockBytes},
@@ -276,6 +295,7 @@ void Writer::open(Stamp time) {
     const auto json = header.dump();
     if (json.size() > MaxHeaderBytes) fail("header too large");
     std::string prefix(Magic);
+    prefix[7] = static_cast<char>(m_metadata.at("format_version").get<int>());
     put32(prefix, static_cast<uint32_t>(json.size()));
     put32(prefix, crc(json));
     write(prefix); write(json);
@@ -288,7 +308,7 @@ void Writer::append(const Record& record) {
     if (m_closed) fail("append after close");
     if (record.payload.size() > MaxRecordBytes || record.time.systemNs < 0 || record.time.steadyNs < 0)
         fail("record exceeds limits");
-    if (record.kind < Kind::Frame || record.kind > Kind::EngineError) fail("unknown record kind");
+    if (record.kind < Kind::Frame || record.kind > (m_metadata.at("format_version") == 2 ? Kind::FrameReference : Kind::EngineError)) fail("unknown record kind");
     if (m_file.isOpen() && (record.time.systemNs / HourNs != m_hour || m_index.size() >= MaxIndexEntries)) seal();
     if (!m_file.isOpen()) open(record.time);
     const auto size = 32 + record.payload.size();
@@ -297,7 +317,7 @@ void Writer::append(const Record& record) {
     if (m_index.size() >= MaxIndexEntries) { seal(); open(record.time); }
     const RecordLocation location{record.time, record.connection, record.kind};
     if (!m_uncommittedRecord) m_uncommittedRecord = location;
-    if (record.kind == Kind::Frame && !m_uncommittedFrame) m_uncommittedFrame = location;
+    if ((record.kind == Kind::Frame || record.kind == Kind::FrameReference) && !m_uncommittedFrame) m_uncommittedFrame = location;
     if (!m_count) m_first = record.time;
     m_last = record.time;
     put32(m_block, static_cast<uint32_t>(28 + record.payload.size()));
@@ -344,6 +364,7 @@ void Writer::seal() {
     put32(footer, crc(index));
     write(footer); sync(); m_file.close();
 }
+void Writer::sealSegment() { seal(); }
 void Writer::close() {
     if (m_closed) return;
     seal(); m_closed = true;
@@ -364,10 +385,27 @@ nlohmann::json readHeader(const QString& path) {
     if (!file.open(QIODevice::ReadOnly)) fail("cannot read " + path.toStdString());
     return headerFrom(file);
 }
-ScanResult scan(const QString& path, const RecordVisitor& visitor) {
+namespace {
+struct RecordGenerator {
+    struct promise_type {
+        Record value;
+        std::exception_ptr error;
+        RecordGenerator get_return_object() { return RecordGenerator(std::coroutine_handle<promise_type>::from_promise(*this)); }
+        std::suspend_always initial_suspend() noexcept { return {}; }
+        std::suspend_always final_suspend() noexcept { return {}; }
+        std::suspend_always yield_value(Record record) { value = std::move(record); return {}; }
+        void return_void() {}
+        void unhandled_exception() { error = std::current_exception(); }
+    };
+    std::coroutine_handle<promise_type> handle;
+    explicit RecordGenerator(std::coroutine_handle<promise_type> h) : handle(h) {}
+    RecordGenerator(const RecordGenerator&) = delete;
+    RecordGenerator& operator=(const RecordGenerator&) = delete;
+    ~RecordGenerator() { if (handle) handle.destroy(); }
+};
+RecordGenerator readRecords(const QString path, ScanResult& result) {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) fail("cannot read " + path.toStdString());
-    ScanResult result;
     result.header = headerFrom(file);
     // Snapshot length: a concurrent writer's new tail is outside this scan.
     const auto end = file.size();
@@ -428,7 +466,7 @@ ScanResult scan(const QString& path, const RecordVisitor& visitor) {
             if (length < 28 || length > MaxRecordBytes + 28 || length > raw.size() - pos) fail("bad record length");
             const auto start = pos;
             const auto kind = get(raw, pos, 4);
-            if (kind < uint32_t(Kind::Frame) || kind > uint32_t(Kind::EngineError)) fail("bad record kind");
+            if (kind < uint32_t(Kind::Frame) || kind > uint32_t(result.header.at("format_version") == 2 ? Kind::FrameReference : Kind::EngineError)) fail("bad record kind");
             const auto systemNs = get(raw, pos, 8);
             const auto steadyNs = get(raw, pos, 8);
             if (systemNs > uint64_t(INT64_MAX) || steadyNs > uint64_t(INT64_MAX)) fail("invalid timestamp");
@@ -437,7 +475,7 @@ ScanResult scan(const QString& path, const RecordVisitor& visitor) {
             pos = start + length;
         }
         if (pos != raw.size()) fail("record count mismatch");
-        if (visitor) {
+        {
             pos = 0;
             for (uint32_t i = 0; i < entry.records; ++i) {
                 const auto length = get(raw, pos, 4);
@@ -446,12 +484,35 @@ ScanResult scan(const QString& path, const RecordVisitor& visitor) {
                 record.time.systemNs = get(raw, pos, 8); record.time.steadyNs = get(raw, pos, 8);
                 record.connection = get(raw, pos, 8);
                 record.payload = raw.substr(pos, length - 28); pos += length - 28;
-                visitor(record);
+                co_yield std::move(record);
             }
         }
         result.index.push_back(entry); ++nextOrdinal;
         result.validBytes = file.pos();
     }
-    return result;
+    co_return;
+}
+} // namespace
+struct RecordReader::Impl {
+    ScanResult result;
+    RecordGenerator generator;
+    explicit Impl(const QString& path) : generator(readRecords(path, result)) {}
+};
+RecordReader::RecordReader(const QString& path) : m_impl(std::make_unique<Impl>(path)) {}
+RecordReader::~RecordReader() = default;
+const ScanResult& RecordReader::result() const { return m_impl->result; }
+bool RecordReader::next(Record& record) {
+    auto handle = m_impl->generator.handle;
+    if (handle.done()) return false;
+    handle.resume();
+    if (handle.promise().error) std::rethrow_exception(handle.promise().error);
+    if (handle.done()) return false;
+    record = std::move(handle.promise().value); return true;
+}
+ScanResult scan(const QString& path, const RecordVisitor& visitor) {
+    RecordReader reader(path);
+    Record record;
+    while (reader.next(record)) if (visitor) visitor(record);
+    return reader.result();
 }
 } // namespace sentinel::capture

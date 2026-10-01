@@ -11,6 +11,7 @@
 #include <QLockFile>
 #include <QTimer>
 #include <atomic>
+#include <algorithm>
 #include <csignal>
 #include <iostream>
 #include <stdexcept>
@@ -39,8 +40,9 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
     parser.addHelpOption(); parser.addVersionOption();
     parser.addOptions({
         {"root", "Mounted storage root (never the server recording directory).", "directory", "/Volumes/T7/sentinel-data/raw-l2"},
-        {"symbol", "Coinbase product.", "product", "BTC-USD"},
-        {"verify", "Offline verify one file or a directory; JSON report, exit 2 if incomplete/invalid.", "path"},
+        {"symbol", "Coinbase product; repeat for several (default BTC-USD).", "product"},
+        {"symbols", "Comma-separated Coinbase products on one connection.", "A,B,C"},
+        {"verify", "Offline verify one file or a directory; JSON report, exit 2 for integrity failures, 3 for valid incomplete/open captures.", "path"},
         {"block-ms", "Maximum target block latency in milliseconds.", "ms", "1000"},
         {"block-bytes", "Target uncompressed block bytes (large frames remain whole).", "bytes", "1048576"},
         {"fsync-blocks", "Fsync every N blocks; 0 only syncs at close.", "N", "1"},
@@ -55,22 +57,37 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
     if (parser.isSet("verify")) {
         const auto report = verify(parser.value("verify"));
         std::cout << report.json.dump(2) << '\n';
-        return report.ok ? 0 : 2;
+        return !report.ok ? 2 : report.json.at("complete") == true ? 0 : 3;
     }
     WriterConfig config;
     config.root = validateRoot(parser.value("root"));
-    config.symbol = parser.value("symbol").toStdString();
-    validateSymbol(config.symbol);
+    QStringList requested = parser.values("symbol");
+    for (const auto& list : parser.values("symbols")) requested.append(list.split(','));
+    if (requested.empty()) requested.append("BTC-USD");
+    std::vector<std::string> symbols;
+    for (const auto& value : requested) {
+        const auto symbol = value.trimmed().toStdString();
+        validateSymbol(symbol);
+        symbols.push_back(symbol);
+    }
+    std::sort(symbols.begin(), symbols.end());
+    symbols.erase(std::unique(symbols.begin(), symbols.end()), symbols.end());
+    if (symbols.size() > MaxProducts) throw std::runtime_error("at most 32 products per capture");
+    const auto symbolList = nlohmann::json(symbols).dump();
     config.blockBytes = number(parser, "block-bytes", 1, MaxRecordBytes);
     config.blockInterval = std::chrono::milliseconds(number(parser, "block-ms", 1, 60000));
     config.fsyncBlocks = number(parser, "fsync-blocks", 0, 1000000);
     config.compressionLevel = number(parser, "zstd-level", 1, 19);
     const auto queueBytes = size_t(number(parser, "queue-mib", 1, 1024)) * 1024 * 1024;
     const auto duration = number(parser, "duration", 0, 365 * 86400);
-    const auto productDirectory = prepareDirectory(config.root + '/' + QString::fromStdString(config.symbol));
-    QLockFile lock(productDirectory + "/.capture.lock");
-    lock.setStaleLockTime(0);
-    if (!lock.tryLock()) throw std::runtime_error("another capture owns this product directory");
+    std::vector<std::unique_ptr<QLockFile>> locks;
+    for (const auto& symbol : symbols) {
+        const auto directory = prepareDirectory(config.root + '/' + QString::fromStdString(symbol));
+        auto lock = std::make_unique<QLockFile>(directory + "/.capture.lock");
+        lock->setStaleLockTime(0);
+        if (!lock->tryLock()) throw std::runtime_error("another capture owns product directory: " + symbol);
+        locks.push_back(std::move(lock));
+    }
     stopSignal = 0;
     const auto previousTerm = std::signal(SIGTERM, captureSignal);
     const auto previousInt = std::signal(SIGINT, captureSignal);
@@ -85,20 +102,27 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
     mdc.sslCaBundle = parser.value("ca-bundle").toStdString();
     if (mdc.useJwt && !auth.hasCredentials()) throw std::runtime_error("--jwt requires valid credentials");
     CoinbaseRestClient rest(auth, "api.coinbase.com", "443", mdc.sslCaBundle);
-    const auto metadata = dependencies.fetchMetadata ? dependencies.fetchMetadata(rest, config.symbol) :
-                                                       rest.fetchProductMetadata(config.symbol);
-    if (!metadata.ok) throw std::runtime_error("product metadata fetch failed (no connection opened): " + metadata.error);
-    DecimalGrid quote(metadata.quoteIncrement), base(metadata.baseIncrement);
-    if (stopSignal) return 0;
+    std::vector<ProductCapture> products;
+    for (const auto& symbol : symbols) {
+        const auto metadata = dependencies.fetchMetadata ? dependencies.fetchMetadata(rest, symbol) :
+                                                       rest.fetchProductMetadata(symbol);
+        if (!metadata.ok) throw std::runtime_error("product metadata fetch failed (no connection opened): " + symbol + ": " + metadata.error);
+        DecimalGrid quote(metadata.quoteIncrement), base(metadata.baseIncrement);
+        if (stopSignal) return 0;
+        const auto fetched = Stamp::now();
+        nlohmann::json header = {{"tool", "sentinel-capture"}, {"tool_version", Sentinel::getFullVersionString()},
+            {"build", Sentinel::getBuildInfo()}, {"product_metadata", metadata.metadata},
+            {"metadata_source", "https://api.coinbase.com" + metadata.sourcePath},
+            {"metadata_fetched_system_ns", fetched.systemNs}, {"queue_bytes", queueBytes},
+            {"duration_seconds", duration}, {"ca_bundle", mdc.sslCaBundle},
+            {"ws", {{"host", mdc.host}, {"port", mdc.port}, {"target", mdc.target}, {"use_jwt", mdc.useJwt}}},
+            {"clock", "nanoseconds since system_clock/steady_clock epoch; sampled at engine pre-parse ingest seam"}};
+        auto productConfig = config;
+        productConfig.symbol = symbol;
+        products.push_back({std::move(productConfig), std::move(header)});
+    }
     const auto fetched = Stamp::now();
-    nlohmann::json header = {{"tool", "sentinel-capture"}, {"tool_version", Sentinel::getFullVersionString()},
-        {"build", Sentinel::getBuildInfo()}, {"product_metadata", metadata.metadata},
-        {"metadata_source", "https://api.coinbase.com" + metadata.sourcePath},
-        {"metadata_fetched_system_ns", fetched.systemNs}, {"queue_bytes", queueBytes},
-        {"duration_seconds", duration}, {"ca_bundle", mdc.sslCaBundle},
-        {"ws", {{"host", mdc.host}, {"port", mdc.port}, {"target", mdc.target}, {"use_jwt", mdc.useJwt}}},
-        {"clock", "nanoseconds since system_clock/steady_clock epoch; sampled at engine pre-parse ingest seam"}};
-    Session session(config, std::move(header), queueBytes);
+    Session session(std::move(products), queueBytes);
     std::atomic<uint64_t> connection{0};
     std::string transportReason; // accessed only by the current engine I/O thread
     std::atomic<int64_t> disconnectedSince{fetched.steadyNs};
@@ -143,7 +167,7 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
             catch (const std::exception& e) { session.fail(e.what()); }
         });
         // Stage products before starting the I/O thread (no cross-thread mutation).
-        engine->subscribeToSymbols({config.symbol});
+        engine->subscribeToSymbols(symbols);
         engine->start();
     };
     startEngine();
@@ -173,15 +197,15 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
         }
         if (now - lastStats >= 60LL * 1000000000) {
             const auto stats = session.stats();
-            sLog_App("Capture stats: symbol=" << config.symbol << " frames=" << stats.frames
-                << " receivedBytes=" << stats.frameBytes << " fileBytes=" << stats.fileBytes
+            sLog_App("Capture stats: products=" << symbolList << " storedFrames=" << stats.frames
+                << " storedFrameBytes=" << stats.frameBytes << " fileBytes=" << stats.fileBytes
                 << " blocks=" << stats.blocks << " connections=" << connection.load()
                 << " queuedBytes=" << session.queuedBytes());
             lastStats = now;
         }
     }, Qt::QueuedConnection);
     timer.start();
-    sLog_App("Capture running: symbol=" << config.symbol << " root=" << config.root << " pid=" << QCoreApplication::applicationPid());
+    sLog_App("Capture running: products=" << symbolList << " root=" << config.root << " pid=" << QCoreApplication::applicationPid());
     app.exec();
     timer.stop();
     if (engine) { engine->stop(); engine.reset(); } // join the producer before draining the writer
@@ -191,7 +215,7 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
         sLog_Error("Capture incomplete: error=" << error); return 1;
     }
     const auto stats = session.stats();
-    sLog_App("Capture closed: reason=" << stopReason << " frames=" << stats.frames << " fileBytes=" << stats.fileBytes);
+    sLog_App("Capture closed: reason=" << stopReason << " storedFrames=" << stats.frames << " fileBytes=" << stats.fileBytes);
     return 0;
 }
 } // namespace sentinel::capture

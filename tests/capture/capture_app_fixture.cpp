@@ -13,31 +13,50 @@ int main(int argc, char** argv) {
     sentinel::logging::installLogSink("sentinel-capture", argc, argv);
     QCoreApplication app(argc, argv);
     sentinel::capture::ApplicationDependencies dependencies;
-    dependencies.fetchMetadata = [](auto&, const std::string& symbol) {
+    auto products = std::make_shared<std::vector<std::string>>();
+    dependencies.fetchMetadata = [products](auto&, const std::string& symbol) {
+        products->push_back(symbol);
         return ProductMetadataResult{true, {}, "0.01", "0.00000001",
             {{"product_id", symbol}, {"quote_increment", "0.01"}, {"base_increment", "0.00000001"}},
             "/api/v3/brokerage/market/products/" + symbol};
     };
-    dependencies.makeEngine = [](auto& auth, const auto& config) {
+    dependencies.makeEngine = [products](auto& auth, const auto& config) {
+        std::cout << "FIXTURE_ENGINE\n" << std::flush;
         auto state = std::make_shared<fixtures::WsScenario>();
-        state->onAttempt = [](auto& transport, int attempt) {
-            transport.up();
-            transport.frame(fixtures::coinbaseSubscriptionAck({"BTC-USD"}).dump());
-            auto snapshot = fixtures::coinbaseL2Snapshot("BTC-USD", {{100, 1}}, {{101, 2}});
-            snapshot["sequence_num"] = 1;
-            transport.frame(" \n" + snapshot.dump(2) + "\t");
+        state->onFrame = [](size_t sends, int attempt) {
+            if (sends < size_t(attempt) * 3) std::cout << "FIXTURE_EARLY_FRAME\n" << std::flush;
+        };
+        state->onAttempt = [](auto& transport, int) { transport.up(); };
+        state->onSend = [products, weak = std::weak_ptr(state)](auto& transport, size_t sends) {
+            if (sends % 3) return; // wait for all three actual subscription sends
+
+            transport.frame(fixtures::coinbaseSubscriptionAck(*products).dump());
+            uint64_t sequence = 1;
+            for (const auto& product : *products) {
+                auto snapshot = fixtures::coinbaseL2Snapshot(product, {{100, 1}}, {{101, 2}});
+                snapshot["sequence_num"] = sequence++;
+                transport.frame(" \n" + snapshot.dump(2) + "\t");
+            }
             auto trade = nlohmann::json::parse(R"({"channel":"market_trades","sequence_num":2,
                 "timestamp":"2026-09-29T00:00:00Z","events":[{"type":"update","trades":[{
                 "product_id":"BTC-USD","price":"100.01","size":"0.00000001","side":"BUY",
                 "trade_id":"1","time":"2026-09-29T00:00:00Z"}]}]})");
+            trade["events"][0]["trades"][0]["product_id"] = products->front();
+            trade["sequence_num"] = sequence++;
             transport.frame(trade.dump());
-            transport.heartbeats(10ms, 3);
-            if (attempt == 1) transport.later(30ms, [&transport] { transport.down(); });
-            else std::cout << "FIXTURE_READY\n" << std::flush;
+            // Down and readiness follow data delivery, never a short wall-time race.
+            if (sends == 3) transport.down();
+            else {
+                transport.heartbeats(500ms, sequence);
+                if (const auto state = weak.lock()) {
+                    std::lock_guard lock(state->mutex);
+                    std::cout << "FIXTURE_SENDS " << nlohmann::json(state->sends).dump() << "\nFIXTURE_READY\n" << std::flush;
+                }
+            }
         };
         return std::make_unique<MarketDataCoreEngine>(auth, config, [state](auto& io, auto&) {
             return std::make_unique<fixtures::FakeWsTransport>(io, state);
-        }, MarketDataCoreEngine::ReconnectPolicy{20ms, 200ms, 10ms, 2s, 60ms});
+        }, MarketDataCoreEngine::ReconnectPolicy{100ms, 1s, 500ms, 30s, 1s});
     };
     try {
         const int result = sentinel::capture::runApplication(app, dependencies);

@@ -2,6 +2,7 @@
 
 `sentinel-capture` opens its own Coinbase Advanced Trade WebSocket through
 `MarketDataCoreEngine`. It subscribes to `level2`, `market_trades` and `heartbeats`.
+One engine/transport subscribes all requested products on that connection.
 It has no connection to sentinel-server, its recorder, the GUI or the local wire
 protocol. It uses QtCore only. Future server rollups can consume these files;
 this tool does not send raw L2 to clients.
@@ -18,6 +19,20 @@ nohup ./build/mac-clang/apps/sentinel-capture/sentinel-capture \
 capture_pid=$!
 echo "$capture_pid"
 ```
+
+For the owner's seven products on one connection:
+
+```sh
+./build/mac-clang/apps/sentinel-capture/sentinel-capture \
+  --root /Volumes/T7/sentinel-data/raw-l2 \
+  --symbols BTC-USD,ETH-USD,SOL-USD,FARTCOIN-USD,PEPE-USD,DOGE-USD,AVAX-USD
+```
+
+`--symbol` is repeatable; it can also be combined with `--symbols`. Inputs are
+trimmed, validated, deduplicated and sorted. With neither option, the default is
+BTC-USD. A single distinct product uses the unchanged RAWL2 v1 layout and bytes.
+Up to 32 distinct products are accepted. Heartbeats remain connection-scoped
+(the outgoing heartbeat subscription intentionally has no `product_ids`).
 
 Omit `--duration` for continuous capture. Keep the Mac awake for the measurement
 (e.g. `caffeinate -i -w "$capture_pid"` in another terminal). The process exits
@@ -47,21 +62,48 @@ is attempted for the marker. If the volume is still unwritable, even that marker
 cannot be persisted: the run log explicitly says so and exit remains nonzero.
 Check the exit status and the run log.
 
-After stopping, verify the whole product directory to preserve the snapshot and
-sequence context across hour boundaries:
+Verify the whole capture root to check every product and routed frame together.
+A product directory also preserves snapshot and sequence context across hours,
+but cannot check the raw bytes referenced in other product directories:
 
 ```sh
 ./build/mac-clang/apps/sentinel-capture/sentinel-capture \
-  --verify /Volumes/T7/sentinel-data/raw-l2/BTC-USD
+  --verify /Volumes/T7/sentinel-data/raw-l2
 ```
 
 `--verify` also accepts one `.rawl2` file. It is offline and read-only; stdout is a
-JSON report. Exit 0 means all supplied runs were complete and verified, 2 means
-the report found incomplete data, gaps or failed invariants, and 1 is a fatal
-invocation/I/O error. A single middle hour usually lacks the original snapshot
-and start/stop markers: it can pass block integrity while remaining incomplete.
-An active capture likewise has no final index/stop marker yet. Existing files are
+JSON report. Exit 0 means the supplied runs are closed with no observed integrity
+failures; **3** means `ok && !complete` (only the newest run remains open/in progress);
+2 means gaps, corruption, interrupted older runs, missing snapshot anchors,
+missing streams/segments or other failed invariants, and 1 is a fatal invocation error. Existing files are
 never repaired or rewritten by verification.
+
+`ok` is integrity of the supplied scope, while `complete` additionally requires
+closed runs. `routing_checks_deferred` independently identifies product-only
+scans that cannot check other destinations' raw bytes. `ok_closed_runs` includes
+both normally closed and interrupted histories. A run with its start but no stop
+marker has `open: true` / `open_runs > 0` **only if it is the newest run in every
+product stream declared by its header**. Newness uses `(run_started_system_ns,
+run_id)`, not filenames or mtimes. Otherwise it is `interrupted: true`, increments
+`interrupted_runs`, and fails verification. Discovery checks headers in the
+archive root even for a product/month query. Both cases retain the legacy
+`incomplete_runs` count. Its last file may have no index or a partial terminal
+block/index without failing prefix integrity; complete CRC failures and interior
+damage still fail. An open run awaiting its first snapshot is pending, not an
+anchor failure, unless it already received unanchored updates. Closed connections
+must have received that product's snapshot. A single middle hour generally fails
+because the start/snapshot context is missing.
+
+**Open does not prove the process is alive.** A crashed newest run is still
+indistinguishable from a live writer until another run supersedes it; exit 3
+makes that uncertainty distinct from a completed verification. Reverify after
+close to certify completion. Files are scanned to their observed lengths;
+whole-root digest comparison is deferred for open runs because product writers
+flush at different times. Interrupted multi-product runs compare bounded groups
+through their common prefix, including a group's available receipts even if a
+peer ended before flushing its raw copy. Such a lost copy is a routing failure,
+in addition to the interruption itself. Header creation itself is not an atomic read snapshot:
+retry if a concurrent new file has an incomplete header.
 
 The report includes mean frames/s, p99 counts in one-second steady-clock buckets
 (including idle seconds and partial end buckets), received bytes/day, zstd
@@ -74,6 +116,32 @@ between process runs is excluded, disconnections within a run are included.
 Compressed blocks mix channels, so compressed bytes cannot be attributed exactly
 to individual channels.
 
+`products["BTC-USD"]` (and each other product) includes `frames`, `l2_events`,
+`replayed_l2_events`, `snapshots`, `received_bytes`, `file_bytes`, `zstd_bytes`,
+`*_bytes_per_day`, channels, sequence/anchor failures and run status. Its frame
+and received-byte counts cover the **whole raw envelopes physically routed to
+that product**, including shared control traffic and other events inside a mixed
+product envelope. `l2_events` counts only that product's events. Receipts have a
+separate `frame_references` count, not extra received frames. `days[YYYY-MM-DD]`
+contains actual UTC receive-day frame/byte/L2-event counts and physical file bytes
+attributed to the file's opening UTC day. `*_per_day` remains a rate extrapolation
+from steady-clock duration, not the actual daily totals.
+
+`totals.frames` and `totals.received_bytes` count each incoming frame once per
+connection/run; `stored_frames` and `stored_received_bytes` include physical
+routing duplicates. Total file/zstd bytes sum the actual per-product files,
+including receipts, headers and indexes. Total duration counts each shared run
+once (concurrent independent runs each contribute their own span). During an open
+run, connection totals are a lower bound: completed proof groups plus the largest
+observed local raw tail (`totals.counts_in_progress: true`). A run's
+`pending_routing_frames` names raw frames still awaiting a receipt in its
+representative stream. Totals' L2 and
+disk counts sum the product reports; `totals.days` follows the same unique-frame
+and physical-disk rules. Existing single-product top-level verification keys and
+closed-run meanings remain; `products`, `totals` and status fields are additive.
+Multi-product top-level counters mirror totals; detailed snapshot-size and p99
+statistics remain in each product report.
+
 ## Configuration and limits
 
 The capture has CLI options only; it does not load or modify server/client YAML.
@@ -81,12 +149,13 @@ The capture has CLI options only; it does not load or modify server/client YAML.
 | Option | Default | Meaning |
 |---|---|---|
 | `--root` | `/Volumes/T7/sentinel-data/raw-l2` | Absolute storage root; must resolve to a mounted volume |
-| `--symbol` | `BTC-USD` | Single Coinbase product |
+| `--symbol` | `BTC-USD` if no product options | Repeatable Coinbase product |
+| `--symbols` | none | Comma-separated products, combined with repeated `--symbol` |
 | `--block-ms` | `1000` | Block age target, measured from receive steady-clock time; 1..60000 ms |
 | `--block-bytes` | `1048576` | Uncompressed byte target; an individual frame remains whole |
 | `--fsync-blocks` | `1` | Sync every N blocks; 0 syncs at file close only |
 | `--zstd-level` | `3` | 1..19 |
-| `--queue-mib` | `64` | Pending disk queue budget including record overhead; 1..1024 MiB |
+| `--queue-mib` | `64` | Total connection disk queue budget including record overhead; 1..1024 MiB |
 | `--duration` | `0` | Seconds until clean stop; 0 waits for a signal |
 | `--key-file` | `key.json` | Existing optional Coinbase credentials |
 | `--jwt` | off | Enable existing engine JWT auth; public channels need no credentials |
@@ -94,20 +163,29 @@ The capture has CLI options only; it does not load or modify server/client YAML.
 
 The root never falls back to another disk when `/Volumes/<name>` is absent.
 The server's `/Volumes/T7/sentinel-data/recording` tree is refused, including
-canonicalized symlinks. One process holds a per-product lock. Metadata is fetched
-first using `CoinbaseRestClient`, retaining the returned `quote_increment` and
+canonicalized symlinks. One process holds every requested per-product lock
+(including overlaps with single-product runs). All metadata is fetched before
+starting the engine using `CoinbaseRestClient`, retaining `quote_increment` and
 `base_increment` strings and the complete product JSON. Metadata failure prevents
 startup; no WebSocket is opened with guessed increments. Credentials/JWTs are
 never placed in the capture header.
 
 The ingest observer is called before parsing and only stamps/copies records into
-the bounded queue. A disk worker reuses one zstd compression context and handles
-writes and sync. Sync uses the shared persistence primitive: `F_FULLFSYNC` on
-Darwin with `fsync` fallback where full sync is unsupported. A record
+the bounded queue. One disk worker routes frames after queue admission, reuses
+one zstd compression context per product and handles writes and sync. The queue holds each original
+record once and has one total budget, not a separate allowance per product.
+Overflow still stops the entire capture and attempts the same connection-wide
+gap marker in every product. On disk failure only writers that threw abandon their damaged segment. Healthy
+writers flush and seal their buffered data before appending a gap marker in a new
+segment. A writer already closed successfully is left closed: a later peer's
+close failure never adds a duplicate stop. Each remaining stream independently
+attempts its failure marker; an unwritable stream may reject it.
+Sync uses the shared persistence primitive: `F_FULLFSYNC` on Darwin with `fsync` fallback where full sync is unsupported. A record
 is limited to 16 MiB (the existing Beast transport's default message limit), a
 block to that record plus framing, and an index to 65,536 entries; a new segment
 starts if that index limit is reached. Peak capture memory includes the queue,
-one in-flight record, raw/compressed block buffers, the index, and the existing
+one in-flight record and its routing parse, per-product raw/compressed block
+buffers and indexes (bounded by 32 products), and the existing
 engine's transport/JSON parser buffers. Writer failure or queue saturation ends
 the capture with an explicit error. Fsync cannot recover bytes still in the
 queue or current block; with defaults, block flush is targeted at one second or
@@ -121,7 +199,129 @@ also applies to the server. A capture-only supervisor still recreates an engine
 disconnected for 60 seconds as an independent safety net for a transport whose
 connect/close callback never completes. The restart reason is recorded.
 
-## RAWL2 v1 format
+## Routing and RAWL2 v2 for multiple products
+
+Files retain `<root>/<product>/YYYY/MM/DD/HH.rawl2` and exclusive-create collision
+segments. Multi-product writers share a run UUID and run-start timestamp, but
+segment/block ordinals are per product: different payload sizes produce different
+block boundaries. All lifecycle/error/invalidation/resync markers go to every
+product with identical payload, receive clocks and connection ID. Any invalidation
+clears every replay book; only that product's new snapshot re-anchors it.
+Transport-up alone starts a new connection/sequence domain.
+
+Known `l2_data.events[].product_id` and
+`market_trades.events[].trades[].product_id` select destinations. A frame naming
+two products is written **unchanged** in both; it is never split, reserialized or
+filtered. Product IDs must exactly match the subscription set: there is no
+case folding, USD/USDC substitution, alias resolution or implicit subscription.
+If any relevant ID is unsubscribed, an alias, missing, duplicated ambiguously or
+of the wrong type, routing conservatively broadcasts the whole frame. Acks,
+heartbeats, unknown channels, unclassified envelopes and malformed JSON also
+broadcast. No raw frame is discarded. An unexpected L2 product fails book replay
+rather than being silently attributed to another book; trades are retained as
+raw envelopes. Routing uses a bounded SAX parser on the disk thread: it checks
+JSON syntax but never builds the snapshot's `updates` array or copies its price
+and quantity strings into a DOM. The engine's own parser is unchanged.
+
+Each stream contains its own raw frames plus **range receipts**, not one receipt
+per foreign frame. A proof group ends after at most 60 seconds or 65,536 incoming
+frames, before every lifecycle marker, connection change or UTC hour change,
+and at stop. Every stream then receives one kind-9 summary for the same group.
+It covers the entire connection range, including interleaved local frames, and
+accounts for all foreign frames with one digest. Raw data keeps the configured
+block/flush/fsync cadence (default one second); proof groups can span those
+storage blocks. The receipt itself is compressed in an ordinary block. Only
+counts and an incremental hash are held while producing it, not frame history.
+
+This generalizes coalescing adjacent foreign runs: at 22 BTC frames/s those runs
+would still produce thousands of SHA-256 values per minute, and a 1-frame/s
+product would otherwise pay for the whole connection's entropy in each storage
+block. Amortizing the hash over a bounded connection group meets the disk budget
+without delaying raw data durability. The tradeoff is that the latest raw tail
+can precede its routing proof by up to 60 seconds (plus scheduling/flush delay).
+A clean close always finalizes the proof. Single-product replay remains local;
+root verification reconstructs groups by sequence rather than scanning unrelated
+snapshots into the product's book.
+
+V2 changes only the magic's last byte (`RAWL2\r\n\x02`), `format_version: 2`,
+additional header fields, and permission for kind 9. Block, record, index and CRC
+framing are identical to v1. Old readers reject v2 instead of silently losing
+sequence proof. Single-product captures still write v1, with no new header fields
+or record kinds. V2 retains the file's own `product_metadata` and single-entry
+`products`; `connection_products` is the sorted, unique full subscription set.
+The routing identifier is frozen as **`"product-ranges-v2"`**. The experimental
+`product-receipts-v1` layout was never deployed to real data and is rejected;
+future semantic changes require another routing ID.
+
+Kind 9 uses the **last frame's** two receive clocks and connection ID. Its compact
+UTF-8 JSON fields are:
+
+| Field | Meaning |
+|---|---|
+| `first_seq`, `last_seq`, `count`, `bytes` | First/last connection sequence, total frames and exact incoming payload bytes in the group |
+| `foreign_count`, `foreign_bytes` | Frames/bytes not physically stored in this product's group |
+| `destinations` | Map from canonical owner product to `[count, bytes]`; each frame's owner is its lexicographically first raw destination, so these sum to the connection totals without double counting |
+| `sequence_gaps` | Producer-observed discontinuities or invalid sequence values within the group; any nonzero value fails verification |
+| `sha256` | Lowercase SHA-256 of the concatenated frame identity lines, in connection receive order |
+
+A frame identity is the compact JSON object with `channel`, `products` (sorted raw
+destinations), `received_bytes`, `sequence_num`, and lowercase `sha256` of the
+**exact raw bytes**. Its hashed line is compact JSON array
+`[system_ns, steady_ns, connection_id, identity_object]` followed by LF, with
+lexicographically ordered object keys (nlohmann::json default). Golden vectors
+pin the routing ID, identities, lines and range digests independently of writer
+and verifier implementation. These are integrity hashes, not signatures.
+
+Each product checks range continuity/counts, its raw sequence order and its own
+snapshot/metadata anchors. Receipts never supply snapshots or book updates. A
+capture-observed connection sequence discontinuity inserts an invalidation in
+all product streams before the affected raw frame; engine invalidation/resync
+markers remain connection-wide as well. This capture-only behavior does not
+change the server's engine or recorder semantics.
+
+Whole-root verification requires every declared stream. It incrementally merges
+raw identities by sequence for one proof group at a time, checks all expected raw
+copies and their exact hashes/clocks, regenerates every product's receipt, and
+compares lifecycle markers. Memory is bounded by a group plus one decoded storage
+block per stream, not by the run length; snapshot payload capacity is released
+after hashing. Missing copies, receipts, changed bytes/clocks, destination/count
+mismatches and sequence gaps all fail. Interrupted runs use the available common
+prefix and still check a durable receipt against a truncated peer.
+
+A product directory, its descendants (including `<root>/BTC-USD/2026/09`), or a
+single file reports `scope: "product"`. Closed product-only scans can be complete
+for that scope but report `routing_checks_deferred`: they cannot certify other
+products' payloads. `connection_runs[].routing_checked` reports actual whole-set
+comparison; open runs defer it. Reconstruct the exact connection by merging the
+raw copies by connection/sequence, retaining the original clocks and bytes.
+
+The deterministic seven-product measurement uses five minutes of interleaved
+BTC 22, ETH 10, SOL 5, FARTCOIN 2, PEPE 2, DOGE 1 and AVAX 1 frames/s, plus one
+heartbeat/s and initial snapshots: 13,207 incoming frames. Each update contains
+12 levels with deterministic varying quantities. Defaults are zstd level 3,
+one-second/1 MiB blocks; fsync is disabled only for test speed. The baseline
+rewrites the same per-product raw frames and lifecycle markers without receipts,
+using the same header and block settings. Thus the delta includes compression,
+extra framing and indexes, not just JSON sizes:
+
+| Product | Own baseline bytes | With receipts | Overhead bytes | Overhead / own |
+|---|---:|---:|---:|---:|
+| BTC-USD | 723,605 | 725,121 | 1,516 | 0.21% |
+| ETH-USD | 402,730 | 404,199 | 1,469 | 0.36% |
+| SOL-USD | 262,758 | 264,136 | 1,378 | 0.52% |
+| FARTCOIN-USD | 182,079 | 183,416 | 1,337 | 0.73% |
+| PEPE-USD | 179,674 | 181,042 | 1,368 | 0.76% |
+| DOGE-USD | 150,571 | 151,877 | 1,306 | 0.87% |
+| AVAX-USD | 150,553 | 151,854 | 1,301 | 0.86% |
+| Total | 2,051,970 | 2,061,645 | 9,675 | 0.47% |
+
+That is about 2.8 MB/day of receipt overhead at this synthetic mix, with six
+receipts per product. The regression asserts **under 5% for every product** and a
+bounded receipt count. Compression sizes vary slightly with run UUID/header
+values. This is a reproducible synthetic budget, not a promise about every live
+payload distribution or a measured live-data rate.
+
+## RAWL2 v1 framing (also used by v2)
 
 All integers are little-endian, unaligned. Times are signed, nonnegative 64-bit
 nanoseconds from `system_clock` (Unix epoch on supported platforms) and
@@ -167,8 +367,10 @@ Incomplete terminal block/index data and an unframed zero/garbage suffix are
 reported as torn tails and skipped. An unframed suffix is scanned for later valid
 block/index framing; finding it proves interior corruption and fails verification.
 Complete bad CRCs, invalid lengths, zstd errors and mismatching indexes also fail
-verification. Valid prefix blocks remain recoverable. Missing indexes or start/
-stop markers are reported as incomplete, including a crash exactly between blocks.
+verification. Valid prefix blocks remain recoverable. Missing indexes or
+start/stop markers are reported as incomplete. A valid open
+terminal prefix is distinguished from a closed-run integrity failure as described
+above; it includes the ambiguity of a crash exactly between blocks.
 The verifier bounds file discovery at 100,000 files and book replay at 2,000,000
 levels. Book prices/quantities use checked integer arithmetic with metadata
 increments (up to 18 decimal places, 64-bit normalized mantissas/atoms), never
@@ -185,3 +387,40 @@ the production application path with fixture metadata and a fake transport,
 sends POSIX SIGTERM during an unfinished block after a reconnect, and verifies
 the drained data, connection IDs, stop reason, final index and run log. No test
 contacts Coinbase.
+
+Multi-product regressions additionally check the actual outgoing subscriptions
+for all seven products through repeated/comma-separated/mixed CLI forms; exact
+routing and receive clocks; a mixed-product L2 envelope; independent metadata
+increments and snapshots on reconnect; connection-wide gaps/invalidations;
+shared-budget overflow; unique totals and daily accounting; v1 layout/report
+compatibility; active open-prefix verification; mixed v1/v2 runs and hour rotation;
+and missing streams or altered raw/reference bytes/clocks. Review regressions add
+frozen routing/digest vectors, snapshot allocation bounds, superseded interrupted
+runs, crash-tail raw loss, isolated writer failures, shared queue saturation with
+individually fitting frames, live exit 3 and event-driven application readiness.
+Targeted mutation checks disable these behaviors and must fail their regressions.
+
+## launchd arguments (review/deploy separately)
+
+The following is the exact `ProgramArguments` array for the seven-product service
+retaining the current service's runtime executable, working directory and defaults. No service operation is
+performed by capture development/tests; existing capture and recorder services
+must be left alone until an operator separately deploys a new binary/configuration.
+Do not launch this over a currently locked BTC-USD directory.
+
+```xml
+<key>ProgramArguments</key>
+<array>
+  <string>/Users/copeharder/Sentinel-runtime/bin/sentinel-capture</string>
+  <string>--root</string>
+  <string>/Volumes/T7/sentinel-data/raw-l2</string>
+  <string>--symbols</string>
+  <string>BTC-USD,ETH-USD,SOL-USD,FARTCOIN-USD,PEPE-USD,DOGE-USD,AVAX-USD</string>
+  <string>--duration</string>
+  <string>0</string>
+</array>
+```
+
+The 64 MiB queue is shared by all seven products. Overflow retains the existing
+nonzero exit/restart contract; queue size is a memory budget, not a loss guarantee.
+No exchange credentials are required for these public channels.

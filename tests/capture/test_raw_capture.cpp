@@ -2,6 +2,9 @@
 #include "capture/RawCapture.hpp"
 #include "capture/CaptureVerifier.hpp"
 #include "capture/CaptureSession.hpp"
+#include "capture/CaptureRouting.hpp"
+#include <future>
+#include <iostream>
 #include "servermodel/HmcolFormat.hpp"
 #include "marketdata/fixtures/coinbase_messages.hpp"
 #include <QDirIterator>
@@ -261,11 +264,13 @@ TEST_F(CaptureTest, InvalidMetadataAcrossSeveralSegmentsProducesErrorsWithoutRep
     const auto report = verify(config.root);
     EXPECT_FALSE(report.ok); EXPECT_GE(report.json["errors"].get<int>(), 2);
 }
-TEST_F(CaptureTest, MissingStopIsIncompleteEvenWithIntactFooter) {
+TEST_F(CaptureTest, MissingStopReportsOpenPrefixWithoutClaimingCompletion) {
     auto records = fixture(); records.pop_back();
     Writer writer(config, metadata()); for (auto& r : records) writer.append(r); writer.close();
     const auto report = verify(config.root);
-    EXPECT_FALSE(report.ok); EXPECT_EQ(report.json["incomplete_runs"], 1);
+    EXPECT_TRUE(report.ok); EXPECT_EQ(report.json["incomplete_runs"], 1);
+    EXPECT_EQ(report.json["open_runs"], 1); EXPECT_EQ(report.json["complete"], false);
+    EXPECT_EQ(report.json["ok_closed_runs"], true);
 }
 TEST_F(CaptureTest, SessionSigtermStyleCloseDrainsAcceptedRecordsAndSeals) {
     Session session(config, metadata());
@@ -362,6 +367,479 @@ TEST_F(CaptureTest, RefusesMissingVolumeRecordingPathSymlinkAndUnsafeSymbol) {
     EXPECT_THROW(validateSymbol("BTC/USD"), std::runtime_error);
     EXPECT_EQ(validateRoot(dir.path() + "/new/root"), QFileInfo(dir.path()).canonicalFilePath() + "/new/root");
 }
+std::vector<ProductCapture> multiProducts(const WriterConfig& config) {
+    std::vector<ProductCapture> result;
+    for (const auto& symbol : {"BTC-USD", "ETH-USD"}) {
+        auto cfg = config;
+        cfg.symbol = symbol;
+        auto meta = metadata();
+        meta["product_metadata"]["product_id"] = symbol;
+        if (cfg.symbol == "ETH-USD") meta["product_metadata"]["quote_increment"] = "0.001";
+        result.push_back({cfg, meta});
+    }
+    return result;
+}
+std::vector<Record> multiFixture() {
+    auto records = fixture();
+    // Ack, BTC snapshot, ETH snapshot, ETH trades, mixed update, heartbeat.
+    records[2] = frame(fixtures::coinbaseSubscriptionAck({"BTC-USD", "ETH-USD"}), 0, 100);
+    records[3].payload = " \n" + records[3].payload + "\t";
+    auto ethSnapshot = fixtures::coinbaseL2Snapshot("ETH-USD", {{10, 1}}, {{11, 1}});
+    ethSnapshot["events"][0]["updates"][0]["price_level"] = "10.001";
+    records[4] = frame(ethSnapshot, 2, 1000000000);
+    auto trade = nlohmann::json::parse(records[5].payload);
+    trade["events"][0]["trades"][0]["product_id"] = "ETH-USD";
+    records[5] = frame(trade, 3, 1100000000);
+    auto both = fixtures::coinbaseL2Update("BTC-USD", {{"bid", 99, 4}});
+    both["events"].push_back(fixtures::coinbaseL2Update("ETH-USD", {{"offer", 11, 3}})["events"][0]);
+    records[6] = frame(both, 4, 2000000000);
+    records[6].payload = "\n " + records[6].payload + " \t";
+    records.insert(records.end() - 1, frame(nlohmann::json{{"channel", "heartbeats"}, {"events", nlohmann::json::array()}}, 5, 2100000000));
+    return records;
+}
+void writeMulti(const WriterConfig& config, const std::vector<Record>& records) {
+    Session session(multiProducts(config));
+    for (const auto& value : records) ASSERT_TRUE(session.submit(value));
+    session.close();
+    ASSERT_TRUE(session.error().empty()) << session.error();
+}
+TEST_F(CaptureTest, MultiRoutesExactFramesAndClocksWithReceiptsAndMixedProductEnvelope) {
+    const auto input = multiFixture();
+    writeMulti(config, input);
+    ASSERT_EQ(paths(config.root).size(), 2);
+    std::string run;
+    for (const auto& path : paths(config.root)) {
+        std::vector<Record> records;
+        const auto result = scan(path, [&](const auto& r) { records.push_back(r); });
+        EXPECT_EQ(result.header["format_version"], 2);
+        EXPECT_EQ(result.header["routing"], "product-ranges-v2");
+        EXPECT_EQ(contents(path).left(8), QByteArray("RAWL2\r\n\2", 8));
+        const auto id = result.header["run_id"].get<std::string>();
+        if (run.empty()) run = id;
+        EXPECT_EQ(run, id);
+        const bool btc = result.header["product_metadata"]["product_id"] == "BTC-USD";
+        std::vector<Record> expected;
+        for (size_t i = 0; i < input.size(); ++i)
+            if (!(btc ? (i == 4 || i == 5) : i == 3)) expected.push_back(input[i]);
+        ASSERT_EQ(records.size(), expected.size() + 1);
+        const auto proof = records[records.size() - 2];
+        records.erase(records.end() - 2);
+        EXPECT_EQ(records, expected); // mixed frame, whitespace and clocks are byte-exact
+        EXPECT_EQ(proof.kind, Kind::FrameReference);
+        EXPECT_EQ(proof.time, input[input.size() - 2].time);
+        EXPECT_EQ(proof.connection, 1);
+        const auto receipt = nlohmann::json::parse(proof.payload);
+        EXPECT_EQ(receipt["first_seq"], 0); EXPECT_EQ(receipt["last_seq"], 5);
+        EXPECT_EQ(receipt["count"], 6); EXPECT_EQ(receipt["foreign_count"], btc ? 2 : 1);
+        EXPECT_EQ(receipt["sha256"].get<std::string>().size(), 64);
+    }
+    const auto report = verify(config.root);
+    EXPECT_TRUE(report.ok) << report.json.dump(2);
+    EXPECT_EQ(report.json["routing_checks_deferred"], 0);
+    EXPECT_EQ(report.json["connection_runs"].size(), 1);
+}
+TEST_F(CaptureTest, MultiVerifierPerProductAccountingAndUniqueConnectionTotals) {
+    const auto input = multiFixture();
+    writeMulti(config, input);
+    const auto report = verify(config.root);
+    ASSERT_TRUE(report.ok) << report.json.dump(2);
+    uint64_t received = 0, btcBytes = 0, ethBytes = 0, disk = 0;
+    for (size_t i = 0; i < input.size(); ++i) if (input[i].kind == Kind::Frame) {
+        received += input[i].payload.size();
+        if (i != 4 && i != 5) btcBytes += input[i].payload.size();
+        if (i != 3) ethBytes += input[i].payload.size();
+    }
+    for (const auto& path : paths(config.root)) disk += QFileInfo(path).size();
+    const auto& btc = report.json["products"]["BTC-USD"];
+    const auto& eth = report.json["products"]["ETH-USD"];
+    EXPECT_EQ(btc["frames"], 4); EXPECT_EQ(eth["frames"], 5);
+    EXPECT_EQ(btc["l2_events"], 2); EXPECT_EQ(eth["l2_events"], 2);
+    EXPECT_EQ(btc["snapshots"], 1); EXPECT_EQ(eth["snapshots"], 1);
+    EXPECT_EQ(btc["received_bytes"], btcBytes); EXPECT_EQ(eth["received_bytes"], ethBytes);
+    EXPECT_EQ(report.json["totals"]["frames"], 6);
+    EXPECT_EQ(report.json["totals"]["received_bytes"], received);
+    EXPECT_EQ(report.json["totals"]["file_bytes"], disk);
+    EXPECT_EQ(report.json["totals"]["stored_frames"], 9);
+    EXPECT_EQ(report.json["totals"]["l2_events"], 4);
+    EXPECT_EQ(report.json["totals"]["connections"], 1);
+    EXPECT_EQ(report.json["totals"]["days"]["2026-09-30"]["frames"], 6);
+    EXPECT_EQ(report.json["totals"]["days"]["2026-09-30"]["received_bytes"], received);
+    EXPECT_EQ(report.json["totals"]["days"]["2026-09-30"]["file_bytes"], disk);
+    EXPECT_EQ(btc["days"]["2026-09-30"]["frames"], 4);
+    EXPECT_EQ(eth["days"]["2026-09-30"]["l2_events"], 2);
+    EXPECT_DOUBLE_EQ(btc["received_bytes_per_day"].get<double>(), btcBytes * 28800.0);
+    EXPECT_DOUBLE_EQ(eth["file_bytes_per_day"].get<double>(), eth["file_bytes"].get<double>() * 28800.0);
+    EXPECT_DOUBLE_EQ(report.json["totals"]["received_bytes_per_day"].get<double>(), received * 28800.0);
+    const auto alone = verify(config.root + "/BTC-USD");
+    EXPECT_TRUE(alone.ok); EXPECT_EQ(alone.json["sequence_gaps"], 0);
+    EXPECT_EQ(alone.json["routing_checks_deferred"], 1);
+}
+TEST_F(CaptureTest, MultiGapAcrossProductsInvalidatesEveryBookIncludingReceiptOnlyStream) {
+    auto input = multiFixture();
+    input.erase(input.begin() + 5); // ETH trade #3 missing; mixed update #4 must invalidate BOTH books
+    writeMulti(config, input);
+    const auto report = verify(config.root);
+    EXPECT_FALSE(report.ok);
+    EXPECT_EQ(report.json["totals"]["sequence_gaps"], 1);
+    for (const auto& symbol : {"BTC-USD", "ETH-USD"}) {
+        const auto& product = report.json["products"][symbol];
+        EXPECT_EQ(product["sequence_gaps"], 1);
+        EXPECT_EQ(product["unanchored_l2_events"], 1);
+    }
+}
+TEST_F(CaptureTest, MultiSnapshotAnchorsAreIndependentOnEveryConnection) {
+    for (const auto mode : {0, 1, 2}) {
+        QTemporaryDir root;
+        auto cfg = config; cfg.root = root.path();
+        auto input = multiFixture();
+        if (mode == 0) {
+            // BTC's snapshot cannot anchor an ETH update.
+            auto eth = nlohmann::json::parse(input[4].payload);
+            eth["events"][0]["type"] = "update";
+            input[4].payload = eth.dump();
+        } else {
+            input.pop_back();
+            input.push_back(record(Kind::TransportDown, 2200000000));
+            input.push_back(record(Kind::TransportUp, 2300000000, "{}", 2));
+            input.push_back(frame(fixtures::coinbaseL2Snapshot("BTC-USD", {{100, 1}}, {{101, 1}}), 0, 2400000000, 2));
+            input.push_back(frame(mode == 1 ? fixtures::coinbaseL2Update("ETH-USD", {{"bid", 10, 1}}) :
+                fixtures::coinbaseL2Snapshot("ETH-USD", {{10, 1}}, {{11, 1}}), 1, 2500000000, 2));
+            input.push_back(record(Kind::CaptureStopped, 3000000000, "{}", 2));
+        }
+        writeMulti(cfg, input);
+        const auto report = verify(cfg.root);
+        EXPECT_EQ(report.ok, mode == 2) << report.json.dump(2);
+        EXPECT_EQ(report.json["products"]["BTC-USD"]["unanchored_l2_events"], 0);
+        if (mode < 2) {
+            EXPECT_GE(report.json["products"]["ETH-USD"]["unanchored_l2_events"].get<int>(), 1);
+            EXPECT_EQ(report.json["products"]["ETH-USD"]["missing_snapshot_connections"], 1);
+        }
+    }
+}
+TEST_F(CaptureTest, MultiConnectionInvalidationClearsAllAnchors) {
+    auto input = multiFixture();
+    input.insert(input.begin() + 6, record(Kind::BookInvalidated, 1200000000, R"({"product":"BTC-USD","reason":"malformed"})"));
+    writeMulti(config, input);
+    const auto report = verify(config.root);
+    EXPECT_FALSE(report.ok);
+    for (const auto& symbol : {"BTC-USD", "ETH-USD"})
+        EXPECT_EQ(report.json["products"][symbol]["unanchored_l2_events"], 1);
+}
+TEST_F(CaptureTest, MultiBroadcastsUnclassifiedAndMalformedFramesWithoutChangingBytes) {
+    auto input = multiFixture();
+    input.insert(input.end() - 1, record(Kind::Frame, 2200000000, std::string(" \nmalformed\0json", 16)));
+    input.insert(input.end() - 1, record(Kind::Frame, 2300000000, R"({"channel":"future","sequence_num":6,"product_id":"ETH-USD"})"));
+    writeMulti(config, input);
+    for (const auto& path : paths(config.root)) {
+        std::vector<Record> last;
+        scan(path, [&](const auto& r) { if ((r.kind == Kind::Frame || r.kind == Kind::CaptureStopped) && r.time.steadyNs >= input[input.size()-3].time.steadyNs) last.push_back(r); });
+        ASSERT_EQ(last.size(), 3);
+        EXPECT_EQ(last[0], input[input.size()-3]); EXPECT_EQ(last[1], input[input.size()-2]);
+    }
+    EXPECT_FALSE(verify(config.root).ok); // preservation does not bless malformed JSON
+}
+TEST_F(CaptureTest, MultiOverflowUsesOneTotalBudgetAndPersistsGapToEveryProduct) {
+    std::promise<void> release;
+    auto ready = release.get_future().share();
+    Session session(multiProducts(config), 16384, {.beforeDrain = [ready] { ready.wait(); }});
+    auto input = multiFixture();
+    for (size_t i = 0; i + 1 < input.size(); ++i) EXPECT_TRUE(session.submit(input[i]));
+    // Each extra frame fits the 12 KiB data allowance, but their SUM cannot.
+    // Hold the disk consumer so scheduling cannot turn this into a timing test.
+    const auto accepted = record(Kind::Frame, 2150000000, std::string(6000, 'a'));
+    const auto dropped = record(Kind::Frame, 2200000000, std::string(6000, 'b'));
+    EXPECT_TRUE(session.submit(accepted));
+    EXPECT_FALSE(session.submit(dropped));
+    EXPECT_TRUE(session.submit(input.back())); release.set_value(); session.close();
+    ASSERT_FALSE(session.error().empty());
+    const auto report = verify(config.root);
+    EXPECT_FALSE(report.ok);
+    EXPECT_EQ(report.json["totals"]["explicit_capture_gaps"], 1);
+    for (const auto& symbol : {"BTC-USD", "ETH-USD"}) {
+        EXPECT_EQ(report.json["products"][symbol]["explicit_capture_gaps"], 1);
+        EXPECT_EQ(report.json["products"][symbol]["capture_gap_details"][0]["first_dropped_system_ns"], dropped.time.systemNs);
+    }
+}
+TEST_F(CaptureTest, OpenPrefixAcceptsOnlyTerminalUnfinishedDataAndStillRejectsActualGaps) {
+    auto input = fixture(); input.pop_back();
+    Writer writer(config, metadata());
+    for (const auto& r : input) writer.append(r);
+    writer.flush();
+    const auto path = writer.currentPath();
+    auto report = verify(config.root);
+    EXPECT_TRUE(report.ok) << report.json.dump(2);
+    EXPECT_EQ(report.json["open_runs"], 1); EXPECT_EQ(report.json["complete"], false);
+    EXPECT_EQ(report.json["unindexed_files"], 1);
+    // An observed terminal partial write is in progress, with its recoverable prefix explicit.
+    const auto prefix = contents(path);
+    save(path, prefix + QByteArray("BLK1\0", 5));
+    report = verify(config.root);
+    EXPECT_TRUE(report.ok); EXPECT_EQ(report.json["torn_tails"], 1);
+    save(path, prefix);
+    writer.append(frame(nlohmann::json{{"channel", "heartbeats"}}, 7, 2500000000)); writer.flush();
+    report = verify(config.root);
+    EXPECT_FALSE(report.ok); EXPECT_EQ(report.json["sequence_gaps"], 1);
+}
+TEST_F(CaptureTest, SingleProductKeepsV1FileAndExistingVerifyFields) {
+    Session session(config, metadata());
+    const auto input = fixture();
+    for (const auto& r : input) ASSERT_TRUE(session.submit(r));
+    session.close();
+    ASSERT_EQ(paths(config.root).size(), 1);
+    const auto path = paths(config.root).front();
+    EXPECT_TRUE(path.endsWith("/BTC-USD/2026/09/30/00.rawl2"));
+    EXPECT_EQ(contents(path).left(8), QByteArray("RAWL2\r\n\1", 8));
+    std::vector<Record> output;
+    const auto result = scan(path, [&](const auto& r) { output.push_back(r); });
+    EXPECT_EQ(output, input);
+    EXPECT_FALSE(result.header.contains("connection_products"));
+    const auto report = verify(config.root);
+    EXPECT_TRUE(report.ok); EXPECT_EQ(report.json["frames"], 5);
+    EXPECT_EQ(report.json["snapshots"], 1); EXPECT_EQ(report.json["replayed_l2_events"], 2);
+    EXPECT_EQ(report.json["fps_p99_one_second_buckets"], 2);
+    EXPECT_EQ(report.json["products"]["BTC-USD"]["frames"], report.json["frames"]);
+    EXPECT_EQ(report.json["totals"]["received_bytes"], report.json["received_bytes"]);
+}
+
+TEST_F(CaptureTest, MultiWholeRootRejectsMissingStreamsAndReceiptsThatDoNotMatchRawBytes) {
+    writeMulti(config, multiFixture());
+    const auto originalPaths = paths(config.root);
+    for (const auto mutation : {0, 1, 2, 3}) {
+        QTemporaryDir altered;
+        for (const auto& path : originalPaths) {
+            const auto header = readHeader(path);
+            const auto symbol = header["product_metadata"]["product_id"].get<std::string>();
+            if (mutation == 3 && symbol == "ETH-USD") continue;
+            auto cfg = config; cfg.root = altered.path(); cfg.symbol = symbol;
+            Writer writer(cfg, header);
+            scan(path, [&](const Record& original) {
+                auto r = original;
+                if (symbol == "BTC-USD" && r.kind == Kind::Frame) {
+                    const auto envelope = nlohmann::json::parse(r.payload);
+                    if (envelope["sequence_num"] == 1 && mutation == 0) r.payload += " ";
+                    if (envelope["sequence_num"] == 4 && mutation == 1) ++r.time.systemNs;
+                }
+                if (symbol == "BTC-USD" && r.kind == Kind::FrameReference && mutation == 2) {
+                    auto receipt = nlohmann::json::parse(r.payload);
+                    receipt["sha256"] = std::string(64, '0');
+                    r.payload = receipt.dump();
+                }
+                writer.append(r);
+            });
+            writer.close();
+        }
+        const auto report = verify(altered.path());
+        EXPECT_FALSE(report.ok) << mutation << report.json.dump(2);
+        EXPECT_GT(report.json["routing_errors"].get<int>(), 0);
+        // Local sequences and books remain valid; only root comparison can see this loss/mismatch.
+        if (mutation != 0) EXPECT_TRUE(report.json["products"]["BTC-USD"]["ok"].get<bool>());
+    }
+}
+TEST_F(CaptureTest, MultiHourRotationAndMixedLegacyRunsKeepConnectionIdentity) {
+    auto input = multiFixture();
+    for (auto& r : input) r.time.systemNs += Hour - 500000000;
+    writeMulti(config, input);
+    Writer legacy(config, metadata());
+    for (const auto& r : fixture()) legacy.append(r);
+    legacy.close();
+    const auto report = verify(config.root);
+    EXPECT_TRUE(report.ok) << report.json.dump(2);
+    EXPECT_EQ(report.json["totals"]["runs"], 2);
+    EXPECT_EQ(report.json["totals"]["frames"], 11);
+    EXPECT_EQ(report.json["totals"]["connections"], 2);
+    EXPECT_EQ(report.json["products"]["BTC-USD"]["snapshots"], 2);
+    EXPECT_EQ(report.json["products"]["ETH-USD"]["snapshots"], 1);
+}
+
+TEST_F(CaptureTest, MultiDailyCountsFollowReceiveUtcDayAcrossMidnight) {
+    auto input = multiFixture();
+    for (auto& r : input) r.time.systemNs += 24 * Hour - 500000000;
+    writeMulti(config, input);
+    const auto report = verify(config.root);
+    ASSERT_TRUE(report.ok) << report.json.dump(2);
+    const auto& days = report.json["totals"]["days"];
+    ASSERT_EQ(days.size(), 2);
+    EXPECT_EQ(days["2026-09-30"]["frames"], 2);
+    EXPECT_EQ(days["2026-10-01"]["frames"], 4);
+    EXPECT_EQ(days["2026-09-30"]["l2_events"], 1);
+    EXPECT_EQ(days["2026-10-01"]["l2_events"], 3);
+    EXPECT_GT(days["2026-09-30"]["file_bytes"].get<int>(), 0);
+    EXPECT_GT(days["2026-10-01"]["file_bytes"].get<int>(), 0);
+    EXPECT_EQ(report.json["products"]["BTC-USD"]["days"]["2026-10-01"]["frames"], 2);
+}
+
+TEST_F(CaptureTest, SupersededStoplessRunIsInterruptedEvenWhenVerifyingAMonth) {
+    {
+        Writer old(config, metadata());
+        auto input = fixture(); input.pop_back();
+        for (const auto& r : input) old.append(r);
+        old.flush();
+    }
+    EXPECT_TRUE(verify(config.root).ok);
+    Writer newer(config, metadata());
+    for (const auto& r : fixture()) newer.append(r);
+    newer.close();
+    for (const auto& path : {config.root, config.root + "/BTC-USD/2026/09"}) {
+        const auto report = verify(path);
+        EXPECT_FALSE(report.ok);
+        EXPECT_EQ(report.json["interrupted_runs"], 1);
+        EXPECT_EQ(report.json["open_runs"], 0);
+        EXPECT_EQ(report.json["ok_closed_runs"], false);
+    }
+}
+TEST_F(CaptureTest, ProductMonthScopeDefersUnavailablePeerChecks) {
+    writeMulti(config, multiFixture());
+    const auto report = verify(config.root + "/BTC-USD/2026/09");
+    EXPECT_TRUE(report.ok) << report.json.dump(2);
+    EXPECT_EQ(report.json["scope"], "product");
+    EXPECT_EQ(report.json["routing_errors"], 0);
+    EXPECT_EQ(report.json["routing_checks_deferred"], 1);
+}
+TEST_F(CaptureTest, InterruptedRunChecksReceiptAgainstLostRawAtCommonPrefix) {
+    QTemporaryDir source;
+    auto src = config; src.root = source.path(); writeMulti(src, multiFixture());
+    for (const auto& path : paths(src.root)) {
+        const auto header = readHeader(path);
+        auto cfg = config; cfg.symbol = header["product_metadata"]["product_id"].get<std::string>();
+        Writer crashed(cfg, header);
+        bool lost = false;
+        scan(path, [&](const Record& r) {
+            if (r.kind == Kind::CaptureStopped) return;
+            // ETH loses its final raw block AND the as-yet-unflushed receipt.
+            // BTC's durable receipt still certifies that those frames existed.
+            if (cfg.symbol == "ETH-USD" && r.kind == Kind::Frame &&
+                nlohmann::json::parse(r.payload).at("sequence_num") == 2) lost = true;
+            if (!lost) crashed.append(r);
+        });
+        crashed.flush(); // no index, no stop
+    }
+    // A newer run in just ONE member makes the shared old run interrupted.
+    Writer newer(config, metadata());
+    for (const auto& r : fixture()) newer.append(r);
+    newer.close();
+    const auto report = verify(config.root);
+    EXPECT_FALSE(report.ok);
+    EXPECT_EQ(report.json["totals"]["interrupted_runs"], 1);
+    EXPECT_EQ(report.json["totals"]["open_runs"], 0);
+    EXPECT_GT(report.json["routing_errors"].get<int>(), 0) << report.json.dump(2);
+    EXPECT_TRUE(report.json["connection_runs"][0]["routing_checked"].get<bool>());
+}
+TEST_F(CaptureTest, OneWriterAppendFailurePreservesHealthyBufferedFramesAndSealsThem) {
+    auto input = multiFixture();
+    bool injected = false;
+    Session session(multiProducts(config), 64 * 1024 * 1024, {.beforeWriterOperation =
+        [&](const auto& symbol, auto operation, const Record* r) {
+            if (!injected && symbol == "ETH-USD" && operation == "append" && r && r->kind == Kind::Frame &&
+                nlohmann::json::parse(r->payload).at("sequence_num") == 4) {
+                injected = true; throw std::runtime_error("injected ETH disk write failure");
+            }
+        }});
+    for (const auto& r : input) session.submit(r);
+    session.close(); ASSERT_TRUE(injected); EXPECT_FALSE(session.error().empty());
+    std::vector<Record> btc;
+    for (const auto& path : paths(config.root + "/BTC-USD")) {
+        const auto result = scan(path, [&](const Record& r) { btc.push_back(r); });
+        EXPECT_TRUE(result.indexed);
+    }
+    for (const auto i : {2, 3, 6}) EXPECT_EQ(std::count(btc.begin(), btc.end(), input[i]), 1) << i;
+    EXPECT_EQ(std::count_if(btc.begin(), btc.end(), [](const auto& r) { return r.kind == Kind::CaptureStopped; }), 1);
+    EXPECT_EQ(verify(config.root).json["products"]["BTC-USD"]["explicit_capture_gaps"], 1);
+}
+TEST_F(CaptureTest, FailedNormalCloseDoesNotReopenAlreadyClosedWritersOrDuplicateStop) {
+    bool injected = false;
+    Session session(multiProducts(config), 64 * 1024 * 1024, {.beforeWriterOperation =
+        [&](const auto& symbol, auto operation, const Record*) {
+            if (!injected && symbol == "ETH-USD" && operation == "close") {
+                injected = true; throw std::runtime_error("injected close failure");
+            }
+        }});
+    const auto input = multiFixture();
+    for (const auto& r : input) EXPECT_TRUE(session.submit(r));
+    session.close(); ASSERT_TRUE(injected); EXPECT_FALSE(session.error().empty());
+    EXPECT_EQ(paths(config.root + "/BTC-USD").size(), 1);
+    int stops = 0;
+    for (const auto& path : paths(config.root + "/BTC-USD")) {
+        EXPECT_TRUE(scan(path, [&](const Record& r) {
+            if (r.kind == Kind::CaptureStopped) { ++stops; EXPECT_EQ(r, input.back()); }
+        }).indexed);
+    }
+    EXPECT_EQ(stops, 1);
+    const auto btc = verify(config.root + "/BTC-USD");
+    EXPECT_TRUE(btc.ok) << btc.json.dump(2);
+}
+
+TEST_F(CaptureTest, SevenProductRangeReceiptOverheadStaysBelowFivePercentPerStream) {
+    const std::map<std::string, int> rates{{"BTC-USD",22}, {"ETH-USD",10}, {"SOL-USD",5},
+        {"FARTCOIN-USD",2}, {"PEPE-USD",2}, {"DOGE-USD",1}, {"AVAX-USD",1}};
+    std::vector<ProductCapture> products;
+    for (const auto& [symbol, rate] : rates) {
+        auto cfg = config; cfg.symbol = symbol;
+        auto meta = metadata(); meta["product_metadata"]["product_id"] = symbol;
+        products.push_back({cfg, meta});
+    }
+    std::promise<void> release;
+    auto ready = release.get_future().share();
+    Session session(std::move(products), 64 * 1024 * 1024, {.beforeDrain = [ready] { ready.wait(); }});
+    bool admitted = session.submit(record(Kind::CaptureStarted, 0, "{}", 0));
+    admitted = session.submit(record(Kind::TransportUp, 1)) && admitted;
+    uint64_t seq = 0, random = 0xdeadbeef;
+    int64_t offset = 2;
+    for (const auto& [symbol, rate] : rates)
+        admitted = session.submit(frame(fixtures::coinbaseL2Snapshot(symbol, {{100,1}}, {{101,1}}), seq++, offset++)) && admitted;
+    // Five minutes at 43 product frames/s, plus one heartbeat/s. Interleave the
+    // products every second: adjacent-only coalescing cannot meet this budget.
+    for (int second = 0; second < 300; ++second) {
+        std::vector<std::pair<int, std::string>> schedule;
+        for (const auto& [symbol, rate] : rates) for (int i = 0; i < rate; ++i) schedule.emplace_back(i * 1000 / rate, symbol);
+        std::sort(schedule.begin(), schedule.end());
+        for (const auto& [ms, symbol] : schedule) {
+            auto update = fixtures::coinbaseL2Update(symbol, {});
+            for (int i = 0; i < 12; ++i) {
+                random ^= random << 13; random ^= random >> 7; random ^= random << 17;
+                update["events"][0]["updates"].push_back({{"side", "bid"}, {"price_level", std::to_string(70+i) + ".00"},
+                    {"new_quantity", "0." + std::to_string(10000000 + random % 89999999)},
+                    {"event_time", "2026-09-30T00:00:00.000000000Z"}});
+            }
+            offset = 1000000000LL + int64_t(second) * 1000000000 + ms * 1000000;
+            admitted = session.submit(frame(update, seq++, offset)) && admitted;
+        }
+        offset = 1000000000LL + int64_t(second) * 1000000000 + 999000000;
+        admitted = session.submit(frame(nlohmann::json{{"channel", "heartbeats"}, {"events", nlohmann::json::array()}}, seq++, offset)) && admitted;
+    }
+    admitted = session.submit(record(Kind::CaptureStopped, offset + 1)) && admitted;
+    release.set_value(); session.close();
+    ASSERT_TRUE(admitted); ASSERT_TRUE(session.error().empty()) << session.error();
+    QTemporaryDir baselineRoot;
+    nlohmann::json measurements = nlohmann::json::object();
+    uint64_t overheadTotal = 0, fileTotal = 0;
+    for (const auto& path : paths(config.root)) {
+        const auto header = readHeader(path);
+        const auto symbol = header["product_metadata"]["product_id"].get<std::string>();
+        auto cfg = config; cfg.symbol = symbol; cfg.root = baselineRoot.path();
+        Writer baseline(cfg, header);
+        uint64_t receipts = 0;
+        scan(path, [&](const Record& r) {
+            if (r.kind == Kind::FrameReference) ++receipts;
+            else baseline.append(r);
+        });
+        baseline.close();
+        const auto actual = uint64_t(QFileInfo(path).size());
+        const auto own = uint64_t(QFileInfo(baseline.currentPath()).size());
+        ASSERT_GE(actual, own);
+        const auto overhead = actual - own;
+        EXPECT_LE(receipts, 6) << symbol; // formerly thousands of receipts
+        EXPECT_LT(double(overhead) / double(own), 0.05) << symbol;
+        measurements[symbol] = {{"file_bytes", actual}, {"own_baseline_bytes", own},
+            {"receipt_overhead_bytes", overhead}, {"receipts", receipts}};
+        overheadTotal += overhead; fileTotal += actual;
+    }
+    measurements["total"] = {{"frames", seq}, {"seconds", 300}, {"file_bytes", fileTotal}, {"receipt_overhead_bytes", overheadTotal}};
+    std::cout << "RECEIPT_MEASUREMENT " << measurements.dump() << '\n';
+    const auto report = verify(config.root);
+    EXPECT_TRUE(report.ok) << report.json.dump(2);
+    EXPECT_EQ(report.json["totals"]["frames"], seq);
+}
+
 TEST(DecimalGrid, ExactAtomsWithoutFloatingPointOrSilentRounding) {
     DecimalGrid prices("0.01"), quantities("0.00000001");
     EXPECT_EQ(prices.atoms("123456.78000000000000000000"), 12345678);

@@ -1,18 +1,39 @@
 #include "CaptureSession.hpp"
+#include "CaptureRouting.hpp"
 #include "SentinelLogging.hpp"
 #include <algorithm>
+#include <QUuid>
 #include <stdexcept>
 
 namespace sentinel::capture {
-Session::Session(WriterConfig config, nlohmann::json metadata, size_t queueBytes) : m_limit(queueBytes) {
+Session::Session(WriterConfig config, nlohmann::json metadata, size_t queueBytes)
+    : Session(std::vector<ProductCapture>{{std::move(config), std::move(metadata)}}, queueBytes) {}
+Session::Session(std::vector<ProductCapture> products, size_t queueBytes, SessionHooks hooks)
+    : m_limit(queueBytes), m_hooks(std::move(hooks)) {
     if (queueBytes < 2 * FinalRecordReserve || queueBytes > 1024ULL * 1024 * 1024)
         throw std::runtime_error("invalid queue capacity");
+    if (products.empty() || products.size() > MaxProducts) throw std::runtime_error("invalid product count");
+    std::sort(products.begin(), products.end(), [](const auto& a, const auto& b) { return a.config.symbol < b.config.symbol; });
+    std::vector<std::string> symbols;
+    for (const auto& product : products) {
+        validateSymbol(product.config.symbol);
+        if (!symbols.empty() && symbols.back() == product.config.symbol) throw std::runtime_error("duplicate capture product");
+        symbols.push_back(product.config.symbol);
+    }
+    if (products.size() > 1) {
+        const auto run = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
+        const auto started = Stamp::now().systemNs;
+        for (auto& product : products) {
+            product.metadata["run_id"] = run;
+            product.metadata["run_started_system_ns"] = started;
+            product.metadata["connection_products"] = symbols;
+            product.metadata["routing"] = RoutingId;
+        }
+    }
     m_error.reserve(512);
     m_stopRecord.kind = Kind::CaptureStopped;
     m_stopRecord.payload.reserve(FinalRecordReserve);
-    m_thread = std::thread([this, config = std::move(config), metadata = std::move(metadata)]() mutable {
-        run(std::move(config), std::move(metadata));
-    });
+    m_thread = std::thread([this, products = std::move(products)]() mutable { run(std::move(products)); });
 }
 Session::~Session() { close(); }
 void Session::failLocked(std::string_view error, RecordLocation dropped) {
@@ -89,13 +110,75 @@ Record Session::finalRecord() {
     }
     return std::move(m_stopRecord);
 }
-void Session::run(WriterConfig config, nlohmann::json metadata) {
+void Session::run(std::vector<ProductCapture> products) {
     sentinel::logging::setCurrentThreadName("capture-disk");
-    std::unique_ptr<Writer> writer;
+    std::vector<std::unique_ptr<Writer>> writers;
+    std::vector<std::string> symbols;
+    for (const auto& product : products) symbols.push_back(product.config.symbol);
+    const auto publishStats = [&] {
+        WriterStats total;
+        for (const auto& writer : writers) {
+            const auto& stats = writer->stats();
+            total.records += stats.records; total.frames += stats.frames; total.frameBytes += stats.frameBytes;
+            total.blocks += stats.blocks; total.fileBytes += stats.fileBytes; total.files += stats.files;
+        }
+        std::lock_guard lock(m_mutex); m_stats = total;
+    };
+    std::vector<bool> failed(products.size(), false), closed(products.size(), false), proofWritten(products.size(), false);
     std::optional<RecordLocation> current;
-    bool finalAttempted = false;
+    RoutingBatch batch;
+    std::optional<uint64_t> expectedSequence;
+    const auto operation = [&](size_t i, std::string_view name, const Record* record, auto action) {
+        try {
+            if (m_hooks.beforeWriterOperation) m_hooks.beforeWriterOperation(symbols[i], name, record);
+            action();
+        } catch (...) { failed[i] = true; throw; }
+    };
+    const auto each = [&](auto action) {
+        std::exception_ptr first;
+        for (size_t i = 0; i < writers.size(); ++i) if (!failed[i] && !closed[i]) {
+            try { action(i); } catch (...) { if (!first) first = std::current_exception(); }
+        }
+        if (first) std::rethrow_exception(first);
+    };
+    const auto finishBatch = [&] {
+        if (batch.empty()) return;
+        each([&](size_t i) {
+            const Record proof{Kind::FrameReference, batch.last, batch.connection, batch.receipt(symbols[i]).dump()};
+            operation(i, "append", &proof, [&] { writers[i]->append(proof); });
+            proofWritten[i] = true;
+        });
+        batch.clear(); std::fill(proofWritten.begin(), proofWritten.end(), false);
+    };
+    const auto append = [&](const Record& record) {
+        if (record.kind == Kind::TransportUp) expectedSequence = 0;
+        if (writers.size() == 1 || record.kind != Kind::Frame) {
+            finishBatch();
+            each([&](size_t i) { operation(i, "append", &record, [&] { writers[i]->append(record); }); });
+            return;
+        }
+        if (batch.due(record)) finishBatch();
+        const auto identity = frameReceipt(record.payload, symbols);
+        const auto& sequence = identity.at("sequence_num");
+        if (!sequence.is_number_unsigned() || (expectedSequence && sequence.get<uint64_t>() != *expectedSequence)) {
+            finishBatch();
+            const Record invalidated{Kind::BookInvalidated, record.time, record.connection,
+                R"({"reason":"capture connection sequence gap"})"};
+            each([&](size_t i) { operation(i, "append", &invalidated, [&] { writers[i]->append(invalidated); }); });
+        }
+        expectedSequence = sequence.is_number_unsigned() && sequence.get<uint64_t>() != UINT64_MAX ?
+            std::optional<uint64_t>(sequence.get<uint64_t>() + 1) : std::nullopt;
+        const auto targets = identity.at("products").get<std::vector<std::string>>();
+        batch.add(record, identity);
+        each([&](size_t i) {
+            if (std::binary_search(targets.begin(), targets.end(), symbols[i]))
+                operation(i, "append", &record, [&] { writers[i]->append(record); });
+        });
+    };
     try {
-        writer = std::make_unique<Writer>(std::move(config), std::move(metadata));
+        for (auto& product : products)
+            writers.push_back(std::make_unique<Writer>(std::move(product.config), std::move(product.metadata)));
+        if (m_hooks.beforeDrain) m_hooks.beforeDrain();
         while (true) {
             std::optional<Record> next;
             {
@@ -108,50 +191,65 @@ void Session::run(WriterConfig config, nlohmann::json metadata) {
             }
             if (next) {
                 current = RecordLocation{next->time, next->connection, next->kind};
-                writer->append(*next);
+                append(*next);
+            } else {
+                if (!batch.empty() && Stamp::now().steadyNs - batch.first.steadyNs >= RoutingIntervalNs) finishBatch();
+                each([&](size_t i) { operation(i, "flush", nullptr, [&] { writers[i]->flushDue(Stamp::now().steadyNs); }); });
             }
-            // Backlogged receive stamps may already be old. Let append() group
-            // them by receive time/size, not one fsync per old queued frame.
-            else writer->flushDue(Stamp::now().steadyNs);
-            { std::lock_guard lock(m_mutex); m_stats = writer->stats(); }
+            publishStats();
         }
-        auto terminal = finalRecord();
+        finishBatch();
+        const auto terminal = finalRecord();
         current = RecordLocation{terminal.time, terminal.connection, terminal.kind};
-        finalAttempted = true;
-        writer->append(terminal);
-        writer->close();
-        { std::lock_guard lock(m_mutex); m_stats = writer->stats(); }
+        // Complete each writer independently. A later close failure must not
+        // reopen a successfully closed writer or duplicate its stop marker.
+        for (size_t i = 0; i < writers.size(); ++i) {
+            operation(i, "append", &terminal, [&] { writers[i]->append(terminal); });
+            operation(i, "close", nullptr, [&] { writers[i]->close(); });
+            closed[i] = true;
+        }
+        publishStats();
     } catch (const std::exception& e) {
         sLog_Error("Capture disk worker failed: error=" << e.what());
-        const auto uncommitted = writer ? writer->firstUncommitted() : std::nullopt;
-        fail(e.what(), uncommitted ? uncommitted : current);
+        fail(e.what(), current);
+        for (size_t i = 0; i < writers.size(); ++i) if (failed[i])
+            if (auto uncommitted = writers[i]->firstUncommitted()) fail(e.what(), uncommitted);
         {
             std::unique_lock lock(m_mutex);
-            // The app stops/joins the producer before close(), so the terminal
-            // record contains the final connection and first dropped frame.
             m_wake.wait(lock, [&] { return m_stopping; });
-            for (const auto& queued : m_queue)
-                failLocked(m_error, {queued.time, queued.connection, queued.kind});
+            for (const auto& queued : m_queue) failLocked(m_error, {queued.time, queued.connection, queued.kind});
             m_queue.clear(); m_bytes = 0;
-            // finalRecord() may have moved this slot before a failed final sync.
-            if (finalAttempted) {
-                m_stopRecord.kind = Kind::CaptureStopped;
-                m_stopRecord.time = Stamp::now();
-                m_stopRecord.connection = m_lastConnection;
+            m_stopRecord.kind = Kind::CaptureStopped;
+            // Keep an explicitly submitted deterministic stop stamp when possible.
+            if (!m_stopRecord.time.systemNs) m_stopRecord.time = Stamp::now();
+            m_stopRecord.connection = m_lastConnection;
+        }
+        const auto terminal = finalRecord();
+        for (size_t i = 0; i < writers.size(); ++i) {
+            if (closed[i]) continue;
+            try {
+                if (failed[i]) writers[i]->abandonSegment();
+                else {
+                    try {
+                        if (!batch.empty() && !proofWritten[i])
+                            writers[i]->append({Kind::FrameReference, batch.last, batch.connection, batch.receipt(symbols[i]).dump()});
+                        // Preserve healthy buffers before starting a marker segment.
+                        writers[i]->flush();
+                        writers[i]->sealSegment();
+                    } catch (const std::exception& recoveryError) {
+                        sLog_Error("Capture recovery seal failed: product=" << symbols[i] << " error=" << recoveryError.what());
+                        writers[i]->abandonSegment(); // this writer also failed; peers remain sealed
+                    }
+                }
+                writers[i]->append(terminal);
+                writers[i]->close();
+                sLog_Warning("Capture failure marker persisted: product=" << symbols[i]);
+            } catch (const std::exception& markerError) {
+                sLog_Error("Capture failure marker could not be persisted: product=" << symbols[i] << " error=" << markerError.what());
             }
         }
-        try {
-            if (!writer) throw std::runtime_error("writer initialization failed");
-            writer->abandonSegment();
-            writer->append(finalRecord());
-            writer->close();
-            { std::lock_guard lock(m_mutex); m_stats = writer->stats(); }
-            sLog_Warning("Capture failure marker persisted in a new segment");
-        } catch (const std::exception& markerError) {
-            // A removed/full/broken volume may reject even the reserved marker.
-            // Keep the nonzero exit and state the persistence failure explicitly.
-            sLog_Error("Capture failure marker could not be persisted: error=" << markerError.what());
-        }
+        if (writers.size() != products.size()) sLog_Error("Capture failure marker unavailable for uninitialized writers");
+        publishStats();
     }
 }
 } // namespace sentinel::capture

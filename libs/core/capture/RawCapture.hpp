@@ -16,10 +16,11 @@ namespace sentinel::capture {
 constexpr uint32_t MaxRecordBytes = 16 * 1024 * 1024;
 constexpr uint32_t MaxBlockBytes = MaxRecordBytes + 1024;
 constexpr uint32_t MaxIndexEntries = 65536;
+constexpr size_t MaxProducts = 32;
 
 enum class Kind : uint32_t {
     Frame = 1, TransportUp, TransportDown, BookInvalidated, ResyncRequested,
-    CaptureStarted, CaptureStopped, EngineError
+    CaptureStarted, CaptureStopped, EngineError, FrameReference
 };
 struct Stamp {
     int64_t systemNs = 0;
@@ -67,6 +68,10 @@ struct WriterStats {
 QString validateRoot(const QString& root);
 QString prepareDirectory(const QString& directory); // validate, create, fsync new directory entries
 void validateSymbol(const std::string& symbol);
+// Frozen v2 frame identity used for routing and range digests; not an on-disk record.
+// Unknown/control/malformed envelopes are broadcast, never discarded.
+nlohmann::json frameReceipt(std::string_view payload, const std::vector<std::string>& products);
+
 
 // Single-thread owner. Append-only, exclusive-create segments; never opens an old
 // file for writing. Destructor only closes the fd: call close() to commit/index.
@@ -80,6 +85,7 @@ public:
     void flush();
     void flushDue(int64_t steadyNs);
     void close();
+    void sealSegment(); // seal current file; allow append() to open a new segment
     // Used only after an I/O failure: leave the damaged segment untouched and
     // create a fresh segment for the reserved failure marker.
     void abandonSegment();
@@ -115,6 +121,17 @@ struct ScanResult {
     bool tornTail = false;
     uint64_t fileBytes = 0;
     uint64_t validBytes = 0;
+};
+// Incremental, bounded reader used for cross-stream crash-prefix verification.
+class RecordReader {
+public:
+    explicit RecordReader(const QString& path);
+    ~RecordReader();
+    bool next(Record& record);
+    const ScanResult& result() const;
+private:
+    struct Impl;
+    std::unique_ptr<Impl> m_impl;
 };
 using RecordVisitor = std::function<void(const Record&)>;
 nlohmann::json readHeader(const QString& path);

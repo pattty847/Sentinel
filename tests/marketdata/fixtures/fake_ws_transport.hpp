@@ -21,6 +21,8 @@ struct WsScenario {
     int duplicateDowns = 1;
     std::chrono::milliseconds closeDelay{0};
     std::function<void(FakeWsTransport&, int)> onAttempt;
+    std::function<void(FakeWsTransport&, size_t)> onSend;
+    std::function<void(size_t, int)> onFrame;
 
     template<class Predicate> bool wait(Predicate predicate, std::chrono::milliseconds timeout = std::chrono::seconds(4)) {
         std::unique_lock lock(mutex);
@@ -54,8 +56,13 @@ public:
     }
     void send(std::string message) override {
         boost::asio::post(m_io, [this, message = std::move(message)] {
-            std::lock_guard lock(m_scenario->mutex);
-            m_scenario->sends.push_back(message); m_scenario->changed.notify_all();
+            size_t count;
+            {
+                std::lock_guard lock(m_scenario->mutex);
+                m_scenario->sends.push_back(message); count = m_scenario->sends.size();
+                m_scenario->changed.notify_all();
+            }
+            if (m_scenario->onSend) m_scenario->onSend(*this, count);
         });
     }
     void onMessage(MessageCb cb) override { m_message = std::move(cb); }
@@ -76,6 +83,11 @@ public:
     // Completes a held close (closeDelay set long) from any thread.
     void downFromAnyThread() { boost::asio::post(m_io, [this] { down(); }); }
     void frame(std::string bytes) {
+        if (m_scenario->onFrame) {
+            size_t sends;
+            { std::lock_guard lock(m_scenario->mutex); sends = m_scenario->sends.size(); }
+            m_scenario->onFrame(sends, m_attempt);
+        }
         m_message(std::move(bytes));
         { std::lock_guard lock(m_scenario->mutex); ++m_scenario->frames; m_scenario->changed.notify_all(); }
     }
