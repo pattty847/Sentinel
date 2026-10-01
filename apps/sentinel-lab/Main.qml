@@ -359,6 +359,19 @@ ApplicationWindow {
                     StatRow { name: "Slots ready/fallback/partial"; value: (root.metrics.readySlots || 0) + "/" + (root.metrics.fallbackSlots || 0) + "/" + (root.metrics.partialSlots || 0) }
                     StatRow { name: "Loading slots"; value: String(root.metrics.loadingSlots || 0) }
                     StatRow { name: "Refused spans (CPU ceiling)"; value: (root.metrics.refusedSpans || 0) + " · " + root.mb(root.metrics.refusedBytes) }
+                    Label { text: "LIVE EDGE"; color: "#a6e7e9"; font.bold: true; font.pixelSize: 12 }
+                    StatRow { name: "Connection"; value: root.metrics.connection || "—" }
+                    StatRow { name: "Version drawn / published"; value: (root.metrics.liveVersion || 0) + " / " + (root.metrics.livePublished || 0) }
+                    StatRow { name: "Publish to draw"; value: (root.metrics.livePublishToDrawMs || 0).toFixed(1) + " ms" }
+                    StatRow { name: "  p50 / p95"; value: (root.metrics.livePublishP50 || 0).toFixed(1) + " / " + (root.metrics.livePublishP95 || 0).toFixed(1) + " ms" }
+                    StatRow { name: "Data age at draw"; value: (root.metrics.liveDataAgeMs || 0).toFixed(0) + " ms" }
+                    StatRow { name: "  p50 / p95"; value: (root.metrics.liveAgeP50 || 0).toFixed(0) + " / " + (root.metrics.liveAgeP95 || 0).toFixed(0) + " ms" }
+                    StatRow { name: "Window L .. end"; value: (root.metrics.liveL || "—") + " .. " + (root.metrics.liveEnd || "—") }
+                    StatRow { name: "Span (min)"; value: (root.metrics.liveSpanMin || 0).toFixed(1) }
+                    StatRow { name: "Draws from max(L,E) / E"; value: (root.metrics.liveFrom || "—") + " / " + (root.metrics.liveE || "—") }
+                    StatRow { name: "Uploads / passes"; value: (root.metrics.liveUploads || 0) + " / " + (root.metrics.liveBinPasses || 0) }
+                    StatRow { name: "Buffers created / sets"; value: (root.metrics.liveBufferCreations || 0) + " / " + (root.metrics.liveSets || 0) }
+                    StatRow { name: "Compose / interval"; value: (root.metrics.liveComposeMs || 0).toFixed(2) + " ms / " + (root.metrics.liveIntervalMs || 0) + " ms" }
                     Label { text: "DATA (CONTROLLER)"; color: "#a6e7e9"; font.bold: true; font.pixelSize: 12 }
                     StatRow { name: "Decoded chunks"; value: root.mb(root.metrics.chunkBytes) + " · " + (root.metrics.chunkEntries || 0) }
                     StatRow { name: "Chunk decodes / fetched"; value: (root.metrics.chunkLoads || 0) + " / " + (root.metrics.fetchedChunks || 0) }

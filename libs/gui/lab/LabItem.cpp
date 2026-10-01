@@ -21,6 +21,9 @@ QString money(double price) { return QStringLiteral("$") + QString::number(price
 QString utc(int64_t ms) {
     return QDateTime::fromMSecsSinceEpoch(ms, QTimeZone::UTC).toString(QStringLiteral("MM-dd HH:mm"));
 }
+QString utcSeconds(int64_t ms) {
+    return QDateTime::fromMSecsSinceEpoch(ms, QTimeZone::UTC).toString(QStringLiteral("HH:mm:ss"));
+}
 bool inView(const heatmap::ColumnResolution &column, int64_t tfMs, const heatmap::gpu::ViewWindow &view) {
     return double(column.startMs) < view.timeHiMs && double(column.startMs + tfMs) > view.timeLoMs;
 }
@@ -63,10 +66,14 @@ int64_t LabItem::chooseTick() {
         const int64_t units = heatmap::toUnits(manualTick_, priceScale());
         return heatmap::isPresetUnits(units) ? units : tickUnits_;
     }
+    // Auto: the history summary merged with the live window's columns (S5L-b
+    // latestResolution(); a live revision never replaces the SpanSet).
+    const heatmap::ResolutionSummary &summary =
+        resolution_ && resolution_->tfMs == tfMs() ? *resolution_ : snapshot_->resolution;
     const double heightPx = height() * devicePixelRatio();
-    TickKey key{snapshot_->version, snapshot_.get(), view_, heightPx, minRowPx_, hysteresis_, autoUnits_};
+    TickKey key{snapshot_->version, &summary, view_, heightPx, minRowPx_, hysteresis_, autoUnits_};
     if (key == tickKey_) return autoUnits_ > 0 ? autoUnits_ : tickUnits_;
-    const int64_t units = heatmap::autoTickUnits(snapshot_->resolution, autoUnits_, view_.timeLoMs, view_.timeHiMs,
+    const int64_t units = heatmap::autoTickUnits(summary, autoUnits_, view_.timeLoMs, view_.timeHiMs,
                                                  view_.priceLo, view_.priceHi, heightPx, {minRowPx_, hysteresis_});
     if (units > 0) autoUnits_ = units;
     key.current = autoUnits_;
@@ -80,6 +87,8 @@ QSGNode *LabItem::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
     // the node in this frame (no thread hop on a tick change).
     if (controller_) {
         if (auto latest = controller_->latestSnapshot(); latest && latest != snapshot_) snapshot_ = std::move(latest);
+        live_ = controller_->latestLive(); // pointer reads; the node uploads only a new version
+        resolution_ = controller_->latestResolution();
     }
     const int64_t tick = priceKnown_ ? chooseTick() : 0; // nothing to draw before the price view exists
     if (tick != tickUnits_) {
@@ -105,6 +114,7 @@ QSGNode *LabItem::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
     frame.uploadBudgetBytes = uploadBudget_;
     frame.gpuCapBytes = gpuCap_;
     frame.crossfadeMs = crossfade_ ? kCrossfadeMs : 0;
+    frame.live = live_;
     node->setFrame(std::move(frame));
     renderedSerial_ = viewSerial_;
     return node;
@@ -134,6 +144,8 @@ void LabItem::loadReal(int hours) {
         controller_ = data.createController(gpuCap_);
         capacity_ = controller_->capacity();
         connect(controller_, &heatmap::HeatmapSourceController::snapshotChanged, this, [this] { onSnapshot(); },
+                Qt::QueuedConnection);
+        connect(controller_, &heatmap::HeatmapSourceController::liveChanged, this, [this] { onLive(); },
                 Qt::QueuedConnection);
         connect(controller_, &heatmap::HeatmapSourceController::buildFailed, this, [this](const QString &message) {
             status_ = QStringLiteral("Span build failed: %1").arg(message);
@@ -167,8 +179,10 @@ void LabItem::loadReal(int hours) {
             priceKnown_ = true;
         } else {
             const int64_t tf = tfMs();
-            const double right = double(recording::floorDiv(end + tf - 1, tf) * tf);
-            const double span = std::min(double(hours_) * heatmap::kHourMs,
+            // Server mode: the open minute (the live edge) is in view too.
+            const int64_t edge = followLive_ ? end + heatmap::kMinuteMs : end;
+            const double right = double(recording::floorDiv(edge + tf - 1, tf) * tf) + (followLive_ ? 2.0 * tf : 0.0);
+            const double span = std::min(initialTimeSpanMs_ > 0 ? initialTimeSpanMs_ : double(hours_) * heatmap::kHourMs,
                                          heatmap::maxTimeSpanMs(std::max(1.0, width()) * devicePixelRatio(), tf));
             view_.timeHiMs = right;
             view_.timeLoMs = right - span;
@@ -183,6 +197,25 @@ void LabItem::loadReal(int hours) {
         viewChanged();
     });
     poll->start();
+}
+
+// Server mode: keep the newest live bucket in view, a little in from the right
+// edge, until the user pans away.
+void LabItem::onLive() {
+    if (!controller_) return;
+    live_ = controller_->latestLive();
+    update();
+    if (!followLive_ || !live_ || live_->tfMs != tfMs() || !loaded_) return;
+    int64_t end = 0;
+    for (const auto &source : live_->sources) end = std::max(end, source.openEndMs);
+    if (end <= 0) return;
+    const double tf = double(tfMs()), span = view_.timeHiMs - view_.timeLoMs;
+    const double liveEnd = std::ceil(double(end) / tf) * tf;
+    if (liveEnd + 0.5 * tf <= view_.timeHiMs) return;
+    const double shift = liveEnd + std::max(2.0 * tf, 0.08 * span) - view_.timeHiMs;
+    view_.timeLoMs += shift;
+    view_.timeHiMs += shift;
+    viewChanged();
 }
 
 void LabItem::onSnapshot() {
@@ -229,8 +262,8 @@ void LabItem::initialisePrice() {
                     price = heatmap::fromUnits((source.bands.front().lo + source.bands.back().end) / 2, set.priceScale);
     }
     if (!(price > 0)) return;
-    view_.priceLo = price * 0.98;
-    view_.priceHi = price * 1.02;
+    view_.priceLo = initialPriceSpan_ > 0 ? price - initialPriceSpan_ / 2 : price * 0.98;
+    view_.priceHi = initialPriceSpan_ > 0 ? price + initialPriceSpan_ / 2 : price * 1.02;
     priceKnown_ = true;
     clampView();
     viewChanged();
@@ -413,6 +446,7 @@ void LabItem::setShowBandEdges(bool show) {
 // ------------------------------------------------------------------ input
 void LabItem::pan(double dx, double dy) {
     if (!hasContent() || width() <= 0 || height() <= 0) return;
+    if (dx != 0) followLive_ = false;
     const double dt = dx / width() * (view_.timeHiMs - view_.timeLoMs);
     const double dp = dy / height() * (view_.priceHi - view_.priceLo);
     view_.timeLoMs -= dt; view_.timeHiMs -= dt;
@@ -607,7 +641,37 @@ QVariantMap LabItem::metrics() const {
                   {"spanReservedBytes", qulonglong(data.cache.reservedBytes)},
                   {"chunkWantedBytes", qulonglong(data.store.wantedBytes)},
                   {"cpuCommittedBytes", qulonglong(data.committedCpuBytes)},
-                  {"footprintBytes", qulonglong(processFootprintBytes())}};
+                  {"footprintBytes", qulonglong(processFootprintBytes())},
+                  {"connection", LabData::instance().connectionText()},
+                  {"liveVersion", qulonglong(s.liveVersion.load())},
+                  {"livePublished", live_ ? qulonglong(live_->version) : 0},
+                  {"liveUploads", qulonglong(s.liveUploads.load())},
+                  {"liveBinPasses", qulonglong(s.liveBinPasses.load())},
+                  {"liveBufferCreations", qulonglong(s.liveBufferCreations.load())},
+                  {"liveSets", s.liveSets.load()},
+                  {"livePublishToDrawMs", s.livePublishToDrawMs.load()},
+                  {"liveDataAgeMs", s.liveDataAgeMs.load()},
+                  {"liveL", s.liveStartMs.load() ? utcSeconds(s.liveStartMs.load()) : QString()},
+                  {"liveEnd", s.liveEndMs.load() ? utcSeconds(s.liveEndMs.load()) : QString()},
+                  {"liveFrom", s.liveDrawFromMs.load() ? utcSeconds(s.liveDrawFromMs.load()) : QString()},
+                  {"liveE", s.liveEdgeCompleteMs.load() ? utcSeconds(s.liveEdgeCompleteMs.load()) : QString()},
+                  {"liveSpanMin", double(s.liveEndMs.load() - s.liveStartMs.load()) / 60'000.0}};
+    {
+        // Latency percentiles over every live version drawn so far.
+        auto samples = s.liveSamples();
+        auto percentile = [](std::vector<double> v, double q) {
+            if (v.empty()) return 0.0;
+            std::sort(v.begin(), v.end());
+            return v[std::min(v.size() - 1, size_t(q * double(v.size() - 1) + 0.5))];
+        };
+        std::vector<double> publish, age;
+        for (const auto &[p, a] : samples) { publish.push_back(p); age.push_back(a); }
+        m["liveSamples"] = qulonglong(samples.size());
+        m["livePublishP50"] = percentile(publish, 0.5);
+        m["livePublishP95"] = percentile(publish, 0.95);
+        m["liveAgeP50"] = percentile(age, 0.5);
+        m["liveAgeP95"] = percentile(age, 0.95);
+    }
     // E4: the finest source's band in the newest column in view (price).
     if (snapshot_ && snapshot_->tfMs == tfMs()) {
         int64_t finest = 0, lo = 0, hi = 0;
@@ -629,7 +693,9 @@ QVariantMap LabItem::metrics() const {
         const auto &c = controllerStats_->stats;
         m.insert({{"publications", qulonglong(c.publications)}, {"admissions", qulonglong(c.admissions)},
                   {"controllerEvictions", qulonglong(c.evictions)}, {"releasedImages", qulonglong(c.releasedImages)},
-                  {"suppressed", qulonglong(c.suppressed)}, {"committedBytes", qulonglong(c.committedBytes)}});
+                  {"suppressed", qulonglong(c.suppressed)}, {"committedBytes", qulonglong(c.committedBytes)},
+                  {"livePublications", qulonglong(c.livePublications)}, {"liveComposeMs", c.liveComposeMs},
+                  {"liveIntervalMs", c.liveIntervalMs}});
     }
     // Refresh the controller's stats for the next call (they belong to its thread).
     if (controller_)

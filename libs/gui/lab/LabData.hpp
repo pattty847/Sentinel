@@ -2,8 +2,11 @@
 // The lab's heatmap data path: the production S5 components, as the main chart
 // will use them in S6 (plan docs/research/2026-09-s5-plan.md section 2).
 // One per process: a "heatmap-data" QThread hosting the ChunkFetcher, the
-// LocalChunkTransport (HMC2 recording, read-only), the SpanSourceCache and every
-// chart's HeatmapSourceController; one ChunkStore shared by all of them.
+// transport, the SpanSourceCache and every chart's HeatmapSourceController; one
+// ChunkStore shared by all of them. The transport is LocalChunkTransport (HMC2
+// recording, read-only; the default and the pinned bench) or, in server mode
+// (S5L-c), SentinelStreamClientTransport against a running sentinel-server, so
+// the live edge (heatmap_live_subscribe, SHC1 kind 2) is real.
 // GUI thread API unless noted. Charts create their controller here and talk to
 // it with queued calls; they read snapshots and capacity from any thread.
 #include "heatmap/ChunkFetcher.hpp"
@@ -11,6 +14,7 @@
 #include "render/heatmap/HeatmapSourceController.hpp"
 #include <QThread>
 #include <QTimer>
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -34,6 +38,16 @@ public:
     static void configure(const std::string &root, int64_t pinnedEndMs);
     static std::string root();
     static int64_t pinnedEndMs();
+    // Server mode: chunks and the live edge from sentinel-server at host:port
+    // (TLS, caFile verifies it). Like configure(), only before charts exist.
+    struct Server {
+        std::string host, port, caFile;
+    };
+    static void configureServer(const Server &server);
+    static std::optional<Server> server();
+    enum class Connection { Local, Connecting, Connected, Disconnected };
+    Connection connection() const { return connection_.load(); }
+    QString connectionText() const;
 
     heatmap::ChunkStore &store() { return store_; }
     QThread *thread() const { return thread_.get(); }
@@ -71,14 +85,19 @@ public:
     ~LabData();
 
 private:
-    LabData(std::string root, int64_t pinnedEndMs);
+    LabData(std::string root, int64_t pinnedEndMs, std::optional<Server> server);
     void start();
     void shutdown();
     std::string root_;
     int64_t pinnedEndMs_ = 0;
+    std::optional<Server> server_;
     heatmap::ChunkStore store_;
     std::unique_ptr<QThread> thread_;
-    heatmap::LocalChunkTransport *transport_ = nullptr; // data thread objects
+    heatmap::ChunkTransport *transport_ = nullptr; // data thread objects
+    QObject *client_ = nullptr;                     // SentinelStreamClient (server mode)
+    QTimer *reconnectTimer_ = nullptr;
+    std::atomic<Connection> connection_{Connection::Local};
+    void startServerTransport();
     heatmap::ChunkFetcher *fetcher_ = nullptr;
     heatmap::SpanSourceCache *cache_ = nullptr;
     QObject *context_ = nullptr; // data-thread context for timers and relays

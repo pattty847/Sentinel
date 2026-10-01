@@ -17,6 +17,9 @@
 // - a 150 ms crossfade on tick change (a setting turns it into a hard switch).
 // E4 (near-band seam): bandEdges() gives the edges of the finest source's
 // coverage band in view, drawn over the chart when showBandEdges is on.
+// Live edge (S5L-c): the controller's LiveSnapshot goes to the node with the
+// SpanSet in the same frame; Auto reads latestResolution() (history + live). In
+// server mode the view follows the live edge until the user pans.
 #include "LabData.hpp"
 #include "heatmap/HeatmapResolution.hpp"
 #include "render/heatmap/HeatmapTileNode.hpp"
@@ -67,6 +70,10 @@ public:
     // Once the first spans are drawn: zoom price so one common-tick row of the data
     // in view is this many physical pixels tall (0 = off).
     void setInitialRowPx(double px) { initialRowPx_ = px; }
+    // The initial price view: this span around the recent mid (0 = +-2 %).
+    void setInitialPriceSpan(double span) { initialPriceSpan_ = span > 0 ? span : 0; }
+    // The initial time span instead of loadReal's hours (0 = hours).
+    void setInitialTimeSpanMs(double ms) { initialTimeSpanMs_ = ms > 0 ? ms : 0; }
     void setUploadBudgetBytes(uint64_t bytes) { uploadBudget_ = std::max<uint64_t>(bytes, 1); }
     // Per-chart GPU cap (node and controller); default HeatmapBudgets::gpuPerChart.
     void setGpuCapBytes(uint64_t bytes);
@@ -105,6 +112,9 @@ public:
     std::shared_ptr<const heatmap::SpanSet> snapshot() const { return snapshot_; }
     // Tests: the controller (lives on the data thread).
     heatmap::HeatmapSourceController *controller() const { return controller_; }
+    // Keep the newest live bucket in view (server mode default) until a pan.
+    void setFollowLive(bool follow) { followLive_ = follow; }
+    std::shared_ptr<const heatmap::LiveSnapshot> live() const { return live_; }
 signals:
     void statusChanged();
     void timeframeChanged();
@@ -123,6 +133,9 @@ private:
     heatmap::HeatmapSourceController *controller_ = nullptr;
     std::shared_ptr<heatmap::HeatmapCapacity> capacity_;
     std::shared_ptr<const heatmap::SpanSet> snapshot_;
+    std::shared_ptr<const heatmap::LiveSnapshot> live_;
+    std::shared_ptr<const heatmap::ResolutionSummary> resolution_; // Auto: history + live
+    bool followLive_ = false;
     std::shared_ptr<heatmap::gpu::HeatmapTileStats> tileStats_ = std::make_shared<heatmap::gpu::HeatmapTileStats>();
     QString status_ = QStringLiteral("Select a source");
     int timeframeMinutes_ = 1;
@@ -133,7 +146,7 @@ private:
     bool crossfade_ = true;
     bool showBandEdges_ = false;
     bool persistTickMemory_ = false;
-    double initialRowPx_ = 0;
+    double initialRowPx_ = 0, initialPriceSpan_ = 0, initialTimeSpanMs_ = 0;
     heatmap::ManualTickMemory tickMemory_;
     QVariantList offeredTicks_;
     uint64_t uploadBudget_ = kDefaultUploadBudgetBytes;
@@ -143,7 +156,7 @@ private:
     bool postedManual_ = false;
     struct TickKey {
         uint64_t version = 0;
-        const heatmap::SpanSet *set = nullptr;
+        const heatmap::ResolutionSummary *set = nullptr;
         heatmap::gpu::ViewWindow view;
         double heightPx = 0, minRowPx = 0, h = 0;
         int64_t current = 0;
@@ -165,6 +178,7 @@ private:
     std::string symbol() const { return kSymbol; }
     double priceScale() const { return snapshot_ ? snapshot_->priceScale : 100.0; }
     void onSnapshot();
+    void onLive();
     void postView();
     int64_t chooseTick(); // Auto/Manual; GUI state only (called with the GUI thread owning or blocked)
     void clampView();
