@@ -43,7 +43,13 @@ public:
     struct Server {
         std::string host, port, caFile;
     };
-    static void configureServer(const Server &server);
+    // nullopt: back to the local recording.
+    static void configureServer(const std::optional<Server> &server);
+    // Tests: emit the client's connected() inside the next shutdown, right before
+    // the data path is deleted (its queued delivery must never reach a dead client);
+    // and the connection callbacks that ran after the teardown had started.
+    static void queueConnectedOnShutdownForTest(bool queue);
+    static int lateConnectionCallbacksForTest();
     static std::optional<Server> server();
     enum class Connection { Local, Connecting, Connected, Disconnected };
     Connection connection() const { return connection_.load(); }
@@ -97,6 +103,7 @@ private:
     QObject *client_ = nullptr;                     // SentinelStreamClient (server mode)
     QTimer *reconnectTimer_ = nullptr;
     std::atomic<Connection> connection_{Connection::Local};
+    std::atomic<bool> tearingDown_{false};
     void startServerTransport();
     heatmap::ChunkFetcher *fetcher_ = nullptr;
     heatmap::SpanSourceCache *cache_ = nullptr;

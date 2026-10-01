@@ -27,6 +27,8 @@ std::unique_ptr<LabData> current;
 std::string configuredRoot;
 int64_t configuredPin = 0;
 std::optional<LabData::Server> configuredServer;
+std::atomic<bool> queueConnectedOnShutdown{false};
+std::atomic<int> lateConnectionCallbacks{0};
 bool postRoutine = false;
 
 void shutdownInstance() {
@@ -71,7 +73,10 @@ void LabData::configure(const std::string &root, int64_t pinnedEndMs) {
     }
     old.reset(); // the next instance() starts afresh
 }
-void LabData::configureServer(const Server &server) {
+void LabData::queueConnectedOnShutdownForTest(bool queue) { queueConnectedOnShutdown = queue; }
+int LabData::lateConnectionCallbacksForTest() { return lateConnectionCallbacks.load(); }
+
+void LabData::configureServer(const std::optional<Server> &server) {
     std::unique_ptr<LabData> old;
     {
         std::scoped_lock lock(instanceMutex);
@@ -148,21 +153,26 @@ void LabData::start() {
 // Data thread. The stream client has no reconnect of its own: retry every 2 s
 // while not connected. Availability is pushed on "subscribe" (and on change),
 // so subscribe on every connect; the fetcher then (re)subscribes the live edge.
+// Every callback uses the client itself as its context: a delivery queued while
+// the data path shuts down is dropped with the client, never run on a dead one.
 void LabData::startServerTransport() {
     auto *client = new SentinelStreamClient(server_->host, server_->port, server_->caFile);
     client_ = client;
     auto *transport = new protocol::SentinelStreamClientTransport(*client);
     transport_ = transport;
-    QObject::connect(client, &SentinelStreamClient::connected, context_, [this, client] {
+    QObject::connect(client, &SentinelStreamClient::connected, client, [this, client] {
+        if (tearingDown_) ++lateConnectionCallbacks;
         connection_ = Connection::Connected;
         client->subscribe(kSymbol);
         sLog_App("Lab connected to sentinel-server " << server_->host << ":" << server_->port);
     }, Qt::QueuedConnection);
-    QObject::connect(client, &SentinelStreamClient::disconnected, context_, [this] {
+    QObject::connect(client, &SentinelStreamClient::disconnected, client, [this] {
+        if (tearingDown_) ++lateConnectionCallbacks;
         if (connection_.exchange(Connection::Disconnected) != Connection::Disconnected)
             sLog_Warning("Lab disconnected from sentinel-server; the live edge is frozen until it reconnects");
     }, Qt::QueuedConnection);
-    QObject::connect(client, &SentinelStreamClient::errorOccurred, context_, [this](const QString &error) {
+    QObject::connect(client, &SentinelStreamClient::errorOccurred, client, [this](const QString &error) {
+        if (tearingDown_) ++lateConnectionCallbacks;
         if (error == QStringLiteral("heatmap chunk wire version mismatch")) return; // the transport reports it
         if (connection_.load() != Connection::Connected) connection_ = Connection::Disconnected;
         sLog_DataN(5000, "Lab stream client error: " << error);
@@ -180,6 +190,8 @@ void LabData::startServerTransport() {
 void LabData::shutdown() {
     if (!thread_) return;
     onData(context_, [this] {
+        tearingDown_ = true;
+        if (queueConnectedOnShutdown && client_) emit static_cast<SentinelStreamClient *>(client_)->connected();
         delete statsTimer_; // timers stop on their own thread
         statsTimer_ = nullptr;
         delete reconnectTimer_;
@@ -192,6 +204,9 @@ void LabData::shutdown() {
         fetcher_ = nullptr;
         transport_ = nullptr;
         client_ = nullptr;
+        // Whatever was queued to this thread runs (or, for deleted receivers, is
+        // dropped) now, while this object is whole: nothing runs after shutdown.
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
     });
     thread_->quit();
     thread_->wait();

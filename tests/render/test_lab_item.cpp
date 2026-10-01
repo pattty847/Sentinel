@@ -232,6 +232,24 @@ TEST_F(LabItemTest, ShiftWheelScalesPriceOnlyWithinTheClamps) {
     delete item;
     ASSERT_FALSE(scene.renderFrame(&error).isNull());
 }
+// S5L-c review fix 2: the server-mode data path shuts down with a connection
+// completion queued behind it (the stream client's connected() emitted inside
+// the teardown turn, before the client is deleted). Its delivery is dropped with
+// the client: it never runs against a deleted client (no GPU needed; the
+// server address is unreachable, so nothing else connects).
+TEST(LabDataServer, AConnectionCompletionQueuedBehindShutdownNeverRuns) {
+    lab::LabData::configureServer(lab::LabData::Server{"127.0.0.1", "1", ""});
+    auto &data = lab::LabData::instance();
+    ASSERT_NE(data.connection(), lab::LabData::Connection::Local);
+    const int before = lab::LabData::lateConnectionCallbacksForTest();
+    lab::LabData::queueConnectedOnShutdownForTest(true);
+    lab::LabData::configureServer(std::nullopt); // destroys the instance: shutdown on the data thread
+    lab::LabData::queueConnectedOnShutdownForTest(false);
+    EXPECT_EQ(lab::LabData::lateConnectionCallbacksForTest(), before)
+        << "a connection callback ran after the teardown had started";
+    EXPECT_EQ(lab::LabData::instance().connection(), lab::LabData::Connection::Local); // local again
+    lab::LabData::configure({}, 0);
+}
 } // namespace
 
 int main(int argc, char **argv) {
