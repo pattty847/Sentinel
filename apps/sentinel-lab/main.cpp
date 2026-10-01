@@ -5,6 +5,7 @@
 #include "lab/RhiBackend.hpp"
 #include "lab/S5Bench.hpp"
 #include "ConfigLoader.hpp"
+#include "render/heatmap/HeatmapSettingsStore.hpp"
 #include "config/ConfigTypes.hpp"
 #include <QCommandLineParser>
 #include <QDateTime>
@@ -134,11 +135,20 @@ int main(int argc, char **argv) {
         if (!ok || !(mb > 0)) return 2;
         options.gpuCapBytes = uint64_t(mb * 1048576.0);
     }
+    ClientConfig config;
+    ConfigLoader::loadClientConfig("config/client_config.yaml", &config);
+    ConfigLoader::loadClientConfig("config/.client_config.yaml", &config);
+    const auto budgets = heatmap::HeatmapSettingsStore{}.loadBudgets(config.heatmap);
+    int64_t pinnedEndMs = 0;
+    if (parser.isSet("end-utc")) {
+        const auto end = QDateTime::fromString(parser.value("end-utc"), Qt::ISODate);
+        if (!end.isValid()) return 2;
+        pinnedEndMs = end.toMSecsSinceEpoch();
+    }
+    lab::LabData::configure({}, pinnedEndMs, budgets);
     const bool server = parser.isSet("server");
     if (server) {
         if (parser.isSet("end-utc")) return 2; // a pinned end is the local recording's
-        ClientConfig config;
-        ConfigLoader::loadClientConfig("config/client_config.yaml", &config); // defaults when absent
         lab::LabData::Server endpoint{config.server.host, config.server.port, config.server.caFile};
         if (parser.isSet("host")) endpoint.host = parser.value("host").toStdString();
         if (parser.isSet("port")) endpoint.port = parser.value("port").toStdString();
@@ -148,11 +158,6 @@ int main(int argc, char **argv) {
             return 2;
         }
         lab::LabData::configureServer(endpoint);
-    }
-    if (parser.isSet("end-utc")) {
-        const auto end = QDateTime::fromString(parser.value("end-utc"), Qt::ISODate);
-        if (!end.isValid()) return 2;
-        lab::LabData::configure({}, end.toMSecsSinceEpoch());
     }
     if (parser.isSet("s5-bench")) return lab::runS5Bench(parser.value("s5-bench"), parser.isSet("s5-quick"));
     if (parser.isSet("bench")) return lab::runBench(hours, layer, synthetic, tf);

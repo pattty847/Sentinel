@@ -116,6 +116,44 @@ For data-path checks, start the GUI with `SENTINEL_PROBES=heatmap.recording,heat
 tick, scanned interval, `next_end` and exhaustion; `stale` reports obsolete replies.
 Shader/label support for these codes and validity bits is a separate S3b change.
 
+### Heatmap chart settings (S6)
+
+`heatmap.renderer: legacy|gpu` defaults to `legacy`; unknown config values fall back to `legacy`. This is independent of `heatmap.source` (the legacy projection's data source). S6a persists the renderer choice and starts the shared data service in both modes, but the main chart continues drawing legacy until S6b. Setting `gpu` in S6a does not mute data or disable existing labels/walls.
+
+On first use, per-chart defaults come from the client YAML keys below (also supported under `client.heatmap`). Persisted values override those defaults. `HeatmapSettingsStore` uses `QSettings("Sentinel", "SentinelTerminal")`, `heatmap/<chartId>/<field>` with camelCase field names; the main chart ID is `main`. Named layout save/restore snapshots the persisted model under `layouts/<name>/heatmap/<chartId>/<field>`. `_last_session` never saves or restores heatmap settings, preventing stale close-time snapshots from overwriting live changes after a crash. Agent API patches with `persist:false` affect only that process and are excluded from later unrelated persisted patches and named snapshots. Shared manual tick choices live under `heatmap/manualTick/<symbol>/<timeframeMs>` and are independent of layouts. Names are escaped as path segments. Malformed stored fields fall back to their configured defaults.
+
+| YAML key | Default | Validation / meaning |
+|---|---|---|
+| `renderer` | `legacy` | `legacy`, `gpu` |
+| `tick_mode` | `auto` | `auto`, `manual` |
+| `manual_tick` | 100 | Integer price units, clamped 1..10^12 then rounded up to a `{1,2,2.5,5} x 10^k` preset |
+| `min_row_px` | 2 | 0.5..32; GPU policy, separate from legacy `target_row_px` |
+| `hysteresis` | 0.25 | 0..0.9 |
+| `crossfade_ms` | 150 | Integer 0..2000; 0 disables |
+| `show_band_edges` | false | Boolean |
+| `palette_preset` | `Electric` | `Electric`, `Fire`, `Ocean`, `Monochrome`, `Matrix`, `Custom` |
+| `bid_gradient`, `ask_gradient` | black-to-cyan / black-to-orange | 2..16 `{position, color}` stops; strictly increasing positions, first 0 and last 1; `#RRGGBB` or `#RRGGBBAA` |
+| `sensitivity_min` | 0.05 | 10^-9..10^12, base quantity |
+| `sensitivity_max` | 50 | 10^-9..10^15; raised to twice min when <= min |
+| `opacity` | 1 | 0..1 |
+| `gpu_cap_bytes` | 335544320 (320 MiB) | Integer 1 MiB..4 GiB per chart |
+| `upload_budget_bytes` | 8388608 (8 MiB) | Integer 1..min(128 MiB, GPU cap) |
+| `prefetch_tiles` | 1 | Integer 0..16 |
+| `live_min_interval_ms` | 500 | Integer 100..5000 |
+| `show_telemetry` | false | Boolean |
+
+Non-finite stored/config numbers fall back to model defaults. The API requires finite numbers and correct types before clamping. Example custom gradient:
+
+```yaml
+heatmap:
+  renderer: legacy
+  palette_preset: Custom
+  bid_gradient: [{position: 0, color: "#000000"}, {position: 1, color: "#00ffff"}]
+  ask_gradient: [{position: 0, color: "#000000"}, {position: 1, color: "#ffc800"}]
+```
+
+Process budgets use `HeatmapBudgets`, loaded by the main app and sentinel-lab entry point from `heatmap/budgets/decodedChunks`, `spanSources`, and `cpuCeiling` in the same settings domain, with YAML defaults `decoded_chunk_bytes: 536870912`, `span_source_bytes: 268435456`, and `cpu_ceiling_bytes: 1073741824`. Each is clamped to 1 MiB..4 GiB; the ceiling is then raised to at least the sum of the two tiers (up to 8 GiB). The lab passes budgets explicitly through `LabData::configure()` and preserves them across cache clears; direct users/tests use struct defaults without reading YAML or QSettings. The service validates budgets before starting. Chart controllers are created explicitly on its data thread; S6a creates none in the main app. Layouts snapshot chart settings only, not shared CPU budgets or shared manual tick memory.
+
 **Paper trading (server):**
 
 ```yaml

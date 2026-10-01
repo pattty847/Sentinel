@@ -205,6 +205,16 @@ void GuiApiServer::handleRequest(QTcpSocket* socket) {
         respond(socket, 200, AgentApi::jsonBytes(AgentApi::stateJson(snapshot)), "application/json");
         return;
     }
+    if (path == "/api/v1/heatmap/state") {
+        const auto state = m_stateSnapshot();
+        const auto check = AgentApi::validateQuery(parsed.request, state.meta.symbol);
+        if (check.status != 200) {
+            respond(socket, check.status, AgentApi::jsonBytes(AgentApi::error(check.code, check.message)), "application/json");
+        } else if (!m_heatmapSnapshot) {
+            respond(socket, 503, AgentApi::jsonBytes(AgentApi::error("heatmap_unavailable", "Heatmap service unavailable")), "application/json");
+        } else respond(socket, 200, AgentApi::jsonBytes(AgentApi::envelope(state.meta, m_heatmapSnapshot())), "application/json");
+        return;
+    }
     if (path == "/api/v1/viewport") {
         const auto snapshot = m_viewportSnapshot();
         const auto check = AgentApi::validateQuery(parsed.request, snapshot.meta.symbol);

@@ -345,3 +345,63 @@ TEST(AgentApiCodec, SnapshotQueryValidation) {
     RequestParser parser;
     EXPECT_EQ(parser.feed(request("/api/v1/book?levels=1")).kind, ParseResult::Kind::Complete);
 }
+
+TEST(AgentApiHeatmap, NewRoutesAndStrictInputKinds) {
+    for (const auto &route : {QByteArray("/api/v1/heatmap/settings"), QByteArray("/api/v1/input")}) {
+        RequestParser parser;
+        EXPECT_EQ(parser.feed("POST " + route + " HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}").kind, ParseResult::Kind::Complete);
+        RequestParser wrongMethod;
+        EXPECT_EQ(wrongMethod.feed("GET " + route + " HTTP/1.1\r\nHost: localhost\r\n\r\n").status, 405);
+    }
+    RequestParser parser;
+    EXPECT_EQ(parser.feed("GET /api/v1/heatmap/state HTTP/1.1\r\nHost: localhost\r\n\r\n").kind, ParseResult::Kind::Complete);
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/heatmap/state", "symbol=ETH-USD", {}}, "BTC-USD").status, 409);
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/heatmap/state", "bad=1", {}}, "BTC-USD").status, 400);
+    for (const char *kind : {"wheel", "dragStart", "dragMove", "dragEnd", "click"}) {
+        for (const char *target : {"chart", "priceAxis", "timeAxis"}) {
+            QJsonObject body{{"kind", kind}, {"target", target}, {"x", 10.5}, {"y", 20}, {"modifiers", QJsonArray{"shift", "alt"}}};
+            if (QString(kind) == "wheel") body["deltaY"] = -120;
+            const auto out = validateControl({"POST", "/api/v1/input", {}, QJsonDocument(body).toJson()}, {});
+            EXPECT_EQ(out.status, 200) << kind << " " << target;
+            EXPECT_EQ(out.body.input.kind, kind); EXPECT_EQ(out.body.input.target, target);
+            EXPECT_EQ(out.body.input.x, 10.5); EXPECT_EQ(out.body.input.modifiers.size(), 2);
+        }
+    }
+    const auto input = [](const char *json) { return validateControl({"POST", "/api/v1/input", {}, json}, {}).status; };
+    for (const char *bad : {
+        R"({"kind":"wheel","target":"chart","x":1,"y":1})",
+        R"({"kind":"wheel","target":"chart","x":1,"y":1,"deltaY":0})",
+        R"({"kind":"wheel","target":"chart","x":1,"y":1,"deltaY":1.5})",
+        R"({"kind":"wheel","target":"chart","x":1,"y":1,"deltaY":12001})",
+        R"({"kind":"click","target":"chart","x":-1,"y":1})",
+        R"({"kind":"click","target":"chart","x":"1","y":1})",
+        R"({"kind":"click","target":"chart","x":1,"y":1,"deltaY":120})",
+        R"({"kind":"click","target":"chart","x":1,"y":1,"modifiers":["shift","shift"]})",
+        R"({"kind":"click","target":"chart","x":1,"y":1,"modifiers":["super"]})",
+        R"({"kind":"click","target":"chart","x":1,"y":1,"extra":true})",
+        R"({"kind":"type","target":"chart","x":1,"y":1})",
+        R"({"kind":"click","target":"main","x":1,"y":1})"}) EXPECT_EQ(input(bad), 422) << bad;
+}
+TEST(AgentApiHeatmap, SettingsPartialTypesAndGradientValidation) {
+    const auto check = [](const char *json) { return validateControl({"POST", "/api/v1/heatmap/settings", {}, json}, {}); };
+    EXPECT_EQ(check(R"({"renderer":"gpu","manualTick":250,"opacity":0.5})").body.heatmapSettings.size(), 3);
+    EXPECT_EQ(check(R"({"opacity":-2})").status, 200); // numeric limits clamp in the settings model
+    for (const char *bad : {R"({"renderer":"bad"})", R"({"tickMode":"AUTO"})", R"({"manualTick":1.5})",
+        R"({"opacity":null})", R"({"showTelemetry":1})", R"({"unknown":1})", R"({"palettePreset":"bad"})",
+        R"({"bidGradient":[{"position":0,"color":"red"},{"position":1,"color":"#ffffff"}]})",
+        R"({"askGradient":[{"position":0.5,"color":"#000000"},{"position":1,"color":"#ffffff"}]})",
+        R"({"bidGradient":[]})"}) EXPECT_EQ(check(bad).status, 422) << bad;
+}
+
+TEST(AgentApiHeatmap, ProcessOnlySettingsFlagIsStrictAndRemovedFromThePatch) {
+    const auto check = [](const char *json) { return validateControl({"POST", "/api/v1/heatmap/settings", {}, json}, {}); };
+    auto c = check(R"({"renderer":"gpu","persist":false})");
+    ASSERT_EQ(c.status, 200);
+    EXPECT_FALSE(c.body.persistHeatmapSettings);
+    EXPECT_EQ(c.body.heatmapSettings.size(), 1);
+    EXPECT_EQ(c.body.heatmapSettings["renderer"], "gpu");
+    EXPECT_TRUE(check(R"({"opacity":0.4})").body.persistHeatmapSettings);
+    EXPECT_TRUE(check(R"({"opacity":0.4,"persist":true})").body.persistHeatmapSettings);
+    for (const auto *body : {R"({"persist":false})", R"({"renderer":"gpu","persist":0})", R"({"renderer":"gpu","persist":"false"})"})
+        EXPECT_EQ(check(body).status, 422);
+}

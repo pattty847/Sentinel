@@ -44,6 +44,13 @@ struct ValidationResult {
     int waitMs = 0;
 };
 
+struct InputCommand {
+    QString kind, target;
+    double x = 0, y = 0;
+    int deltaY = 0;
+    QStringList modifiers;
+};
+
 struct ControlApply {
     int status = 200;
     QString code, message;

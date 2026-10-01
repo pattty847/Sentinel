@@ -31,8 +31,10 @@ public:
                           std::function<void(quint64)> publishRevision,
                           QObject* parent = nullptr);
 
+    void setHeatmapSnapshot(std::function<QJsonObject()> snapshot) { m_heatmapSnapshot = std::move(snapshot); }
     bool start(quint16 port, const QString& screenshotDir);
     void stop();
+    quint16 port() const { return m_server.serverPort(); }
     QString errorString() const;
 
 private slots:
@@ -48,6 +50,7 @@ private:
     QString captureScreenshot(const QString& baseName, const QString& target, QString* error) const;
     QImage grabTargetImage(const QString& target, QString* error) const;
 
+    std::function<QJsonObject()> m_heatmapSnapshot;
     QTcpServer m_server;
     QWidget* m_targetWindow = nullptr;
     QQuickView* m_heatmapView = nullptr;

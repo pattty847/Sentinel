@@ -247,6 +247,34 @@ always stays. A built source keeps only its open chunks wanted. Results for an
 older serial, or not matching the source's current desired key, are dropped.
 The chunk store never evicts a key some chart wants.
 
+### Shared heatmap data service (S6a)
+
+`HeatmapDataService` in `libs/gui/render/heatmap` owns the process heatmap-data
+thread, `ChunkStore`, `ChunkFetcher`, `SpanSourceCache`, controller creation and
+destruction, and the 250 ms stats timer. Its transport factory runs on the data
+thread; an optional start callback runs only after the consumers are attached.
+The factory may parent ancillary clients/timers to the supplied context. At
+shutdown controllers die before caches, the fetcher before its transport, and
+the transport before context-owned clients; queued calls are drained while the
+service is still alive. `LabData` configures local HMC2 or its own reconnecting
+server client and delegates shared lifecycle/stats to this service.
+
+The main window creates a service around `RemoteGridDataSource::streamClient()`
+before connecting that client, in both renderer modes. It also installs GUI
+hello/config callbacks before connecting. The adapter learns connection state
+only from signals: attaching after connect misses both that state and the
+initial subscription availability push. No main-chart controller exists in
+S6a. In S6b a controller may receive its view/timeframe before availability;
+its existing availability callback replans that pending view. The legacy
+`DataProcessor::setHeatmapEnabled` is a separate mute switch that preserves
+recording capability/mode; disabling recording configuration would instead
+select the old slice path. S6a leaves the mute switch enabled.
+
+`HeatmapChartSettings` is a core value type with no GUI types; validation,
+QSettings storage, layout snapshots and the GUI-thread synthetic input adapter
+belong to GUI. The new API settings acknowledge persistence in S6a, with an
+explicit `activeRenderer: legacy`; renderer application and metrics are S6b.
+
 ### Heatmap tile node (slice S5c)
 
 `HeatmapTileNode` (render thread) draws a `SpanSet`. Each span source build is

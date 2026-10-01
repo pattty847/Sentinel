@@ -13,6 +13,7 @@ Related: MainWindowGpu.cpp, LayoutManager.hpp.
 #include <QMainWindow>
 #include <QScreen>
 #include <QApplication>
+#include <functional>
 
 // Forward declarations
 class ChartDock;
@@ -47,6 +48,9 @@ public:
     void resetLayoutToDefault(const DockWidgets& docks);
     bool restoreLayout(const DockWidgets& docks, const QString& layoutName);
     void saveLayout(const QString& layoutName);
+    void setHeatmapHooks(std::function<void(const QString &)> save, std::function<void(const QString &)> restore) {
+        m_saveHeatmap = std::move(save); m_restoreHeatmap = std::move(restore);
+    }
     
 private:
     void configureDockOptions();
@@ -57,5 +61,6 @@ private:
     void showAllDocks(const DockWidgets& docks);
     
     QMainWindow* m_mainWindow;
+    std::function<void(const QString &)> m_saveHeatmap, m_restoreHeatmap;
 };
 

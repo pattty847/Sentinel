@@ -1,4 +1,5 @@
 #include "AgentApiCodec.hpp"
+#include "../render/heatmap/HeatmapSettingsStore.hpp"
 #include "../../core/config/ConfigTypes.hpp"
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -119,15 +120,16 @@ ParseResult RequestParser::feed(const QByteArray& bytes) {
     const QString path = url.path();
     const bool operation = path.startsWith("/api/v1/operations/") && path.size() > 19;
     const bool control = path == "/api/v1/symbol" || path == "/api/v1/timeframe" ||
-                         path == "/api/v1/viewport" || path == "/api/v1/layers";
+                         path == "/api/v1/viewport" || path == "/api/v1/layers" ||
+                         path == "/api/v1/heatmap/settings" || path == "/api/v1/input";
     const bool known = operation || control || path == "/api/v1/state" ||
                        path == "/api/v1/candles" || path == "/api/v1/book" ||
-                       path == "/api/v1/trades" || path == "/api/v1/heatmap/walls" ||
+                       path == "/api/v1/trades" || path == "/api/v1/heatmap/walls" || path == "/api/v1/heatmap/state" ||
                        path == "/api/v1/screenshot" || path == "/screenshot";
     if (!known) return fail(404, "not_found", "Unknown route");
     const bool readable = operation || path == "/api/v1/state" || path == "/api/v1/viewport" ||
                           path == "/api/v1/candles" || path == "/api/v1/book" ||
-                          path == "/api/v1/trades" || path == "/api/v1/heatmap/walls" ||
+                          path == "/api/v1/trades" || path == "/api/v1/heatmap/walls" || path == "/api/v1/heatmap/state" ||
                           path == "/api/v1/screenshot" || path == "/screenshot";
     if (!((parts[0] == "GET" && readable) || (parts[0] == "POST" && control)))
         return fail(405, "method_not_allowed", "Method not allowed");
@@ -232,7 +234,7 @@ ValidationResult validateQuery(const Request& request, const QString& activeSymb
             return reject(422, "invalid_window", "windowMs exceeds 900000");
         return result;
     }
-    if (request.path == "/api/v1/state" || request.path == "/api/v1/viewport") {
+    if (request.path == "/api/v1/state" || request.path == "/api/v1/viewport" || request.path == "/api/v1/heatmap/state") {
         for (const auto& item : query.queryItems()) {
             if (item.first != "symbol") return reject(400, "invalid_parameter", "Unknown query parameter");
         }
@@ -306,6 +308,54 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
     if (obj.isEmpty()) return reject("invalid_body", "Body must contain a control");
     const QString kind = request.path.mid(QStringLiteral("/api/v1/").size());
     ControlValidation result;
+    if (kind == "heatmap/settings") {
+        auto patch = obj;
+        if (patch.contains("persist")) {
+            if (!patch["persist"].isBool()) return reject("invalid_settings", "persist must be boolean");
+            result.body.persistHeatmapSettings = patch.take("persist").toBool();
+        }
+        if (patch.isEmpty()) return reject("invalid_settings", "Body must contain a heatmap setting");
+        heatmap::HeatmapChartSettings check;
+        const auto error = heatmap::applySettingsPatch(check, patch);
+        if (!error.isEmpty()) {
+            result.status = 422; result.code = "invalid_settings"; result.message = error;
+        } else result.body.heatmapSettings = patch;
+        return result;
+    }
+    if (kind == "input") {
+        const QStringList keys{"kind", "target", "x", "y", "deltaY", "modifiers"};
+        for (auto it = obj.begin(); it != obj.end(); ++it)
+            if (!keys.contains(it.key())) return reject("invalid_field", "Unknown input field");
+        const QStringList kinds{"wheel", "dragStart", "dragMove", "dragEnd", "click"};
+        const QStringList targets{"chart", "priceAxis", "timeAxis"};
+        if (!obj["kind"].isString() || !kinds.contains(obj["kind"].toString())) return reject("invalid_kind", "Unknown input kind");
+        if (!obj["target"].isString() || !targets.contains(obj["target"].toString())) return reject("invalid_target", "Unknown input target");
+        for (const char *key : {"x", "y"})
+            if (!obj[key].isDouble() || !std::isfinite(obj[key].toDouble()) || obj[key].toDouble() < 0 || obj[key].toDouble() > 1000000)
+                return reject("invalid_position", "x and y must be finite logical pixels in 0..1000000");
+        auto &c = result.body.input;
+        c.kind = obj["kind"].toString(); c.target = obj["target"].toString();
+        c.x = obj["x"].toDouble(); c.y = obj["y"].toDouble();
+        if (c.kind == "wheel") {
+            const auto v = obj["deltaY"];
+            if (!v.isDouble() || !std::isfinite(v.toDouble()) || v.toDouble() == 0 ||
+                std::abs(v.toDouble()) > 12000 || std::floor(v.toDouble()) != v.toDouble())
+                return reject("invalid_delta", "Wheel deltaY must be a nonzero integer in +/-12000");
+            c.deltaY = int(v.toDouble());
+        } else if (obj.contains("deltaY")) return reject("invalid_delta", "deltaY is only supported for wheel");
+        if (obj.contains("modifiers")) {
+            if (!obj["modifiers"].isArray()) return reject("invalid_modifiers", "modifiers must be an array");
+            const QStringList allowed{"shift", "control", "alt", "meta"};
+            for (const auto &v : obj["modifiers"].toArray()) {
+                if (!v.isString() || !allowed.contains(v.toString()) || c.modifiers.contains(v.toString()))
+                    return reject("invalid_modifiers", "Unknown or duplicate modifier");
+                c.modifiers.append(v.toString());
+            }
+        }
+        return result;
+    }
+    if (kind != "symbol" && kind != "timeframe" && kind != "viewport" && kind != "layers")
+        return reject("invalid_kind", "Unknown control route");
     for (auto it = obj.begin(); it != obj.end(); ++it) {
         const QString key = it.key();
         const QJsonValue v = it.value();

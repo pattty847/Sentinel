@@ -49,6 +49,8 @@
 #include "mainwindow/ShortcutBinder.h"
 #include "mainwindow/GuiApiServer.h"
 #include "mainwindow/AgentApiCodec.hpp"
+#include "render/heatmap/HeatmapDataService.hpp"
+#include "protocol/SentinelStreamClientTransport.hpp"
 #include "mainwindow/AgentApiSnapshots.hpp"
 #include "datasources/RemoteGridDataSource.hpp"
 #include "TradeInputManager.hpp"
@@ -104,7 +106,14 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
         QString::fromStdString(clientConfig.server.host),
         QString::fromStdString(clientConfig.server.port),
         QString::fromStdString(clientConfig.server.caFile));
-    remote->connectToServer();
+    m_heatmapChartSettings = m_heatmapSettingsStore.load("main", clientConfig.heatmap);
+    // Attach BEFORE connect: the adapter learns connection state only from the
+    // signal, and subscribe immediately pushes availability. No chart/controller
+    // is created in S6a, in either configured renderer mode.
+    m_heatmapDataService = std::make_unique<heatmap::HeatmapDataService>(
+        [client = remote->streamClient()](QObject *) {
+            return new protocol::SentinelStreamClientTransport(*client);
+        }, m_heatmapSettingsStore.loadBudgets(clientConfig.heatmap));
     m_dataSource = std::move(remote);
     ServiceLocator::registerDataSource(m_dataSource.get());
     setupUI();
@@ -176,6 +185,14 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     m_modeController->setPrimaryField(ChartModeController::PrimaryField::Heatmap);
     m_modeController->setCandlesEnabled(true);
     m_layoutOrchestrator = std::make_unique<LayoutOrchestrator>(this);
+    m_layoutOrchestrator->setHeatmapHooks(
+        [this](const QString &name) {
+            m_heatmapSettingsStore.saveLayout(name, "main", GuiConfigStore::instance().clientConfig().heatmap);
+        },
+        [this](const QString &name) {
+            m_heatmapSettingsStore.restoreLayoutInto(
+                name, "main", m_heatmapChartSettings, GuiConfigStore::instance().clientConfig().heatmap);
+        });
     // Defer arrangeDefaultLayout() until after show: resizeDocks() fails at default 640x480.
     m_menuBuilder = std::make_unique<MenuBuilder>(menuBar());
     m_shortcutBinder = std::make_unique<ShortcutBinder>(this);
@@ -198,6 +215,10 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     }
     setWindowProperties();
     setupGuiApiServer();
+    // Register serverConfigUpdated and the other GUI consumers before starting
+    // the client too. A hello/setTimeframe may still precede chunk availability;
+    // it must not synchronously construct a GPU layer from availability (S6b).
+    static_cast<RemoteGridDataSource *>(m_dataSource.get())->connectToServer();
     
     if (!validateComponents()) {
         sLog_Error("Component validation failed, app may not function: qmlController="
@@ -513,6 +534,7 @@ void MainWindowGPU::setupGuiApiServer() {
                                                                                        agentApiViewportSnapshot().viewportVersion.value_or(0));
                                                     },
                                                     this);
+    m_guiApiServer->setHeatmapSnapshot([this] { return agentApiHeatmapSnapshot(); });
     if (!m_guiApiServer->start(static_cast<quint16>(port), screenshotDir)) {
         sLog_Error("GUI API failed to bind on port " << port << ": " << m_guiApiServer->errorString());
     }
@@ -1329,6 +1351,26 @@ AgentApi::ViewportSnapshot MainWindowGPU::agentApiViewportSnapshot() const {
     return s;
 }
 
+QJsonObject MainWindowGPU::agentApiHeatmapSnapshot() const {
+    const auto &s = m_heatmapChartSettings;
+    const QJsonValue missing(QJsonValue::Null);
+    QJsonObject out{{"renderer", QString::fromStdString(s.renderer)}, {"activeRenderer", "legacy"},
+        {"tickMode", s.tickMode == heatmap::TickMode::Auto ? "auto" : "manual"},
+        {"tickUnits", s.tickMode == heatmap::TickMode::Manual ? QJsonValue(qint64(s.manualTick)) : missing},
+        {"offeredPresets", missing}, {"settled", missing}, {"drawnTimeframeMs", missing},
+        {"drawnTickUnits", missing}, {"indicatorText", missing}, {"residentBytes", missing},
+        {"gpuBytes", missing}, {"liveVersion", missing}, {"liveAgeMs", missing}, {"controllerStats", missing},
+        {"settings", heatmap::settingsJson(s)}};
+    if (m_heatmapDataService) {
+        const auto stats = m_heatmapDataService->stats();
+        out["service"] = QJsonObject{{"connected", m_heatmapDataService->connected()},
+            {"availabilityReady", m_heatmapDataService->availability(m_currentSymbol.toStdString()).has_value()},
+            {"committedCpuBytes", qint64(stats.committedCpuBytes)},
+            {"chunkRequests", qint64(stats.fetcher.requests)}};
+    } else out["service"] = missing;
+    return out;
+}
+
 AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, const AgentApi::ControlBody& body) {
     AgentApi::ControlApply out;
     auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
@@ -1336,7 +1378,23 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
         out.status = 503; out.code = "chart_unavailable"; out.message = "Chart renderer is unavailable";
         return out;
     }
-    if (kind == "symbol") {
+    if (kind == "heatmap/settings") {
+        const auto error = m_heatmapSettingsStore.applyChartPatch(
+            "main", m_heatmapChartSettings, body.heatmapSettings, body.persistHeatmapSettings,
+            GuiConfigStore::instance().clientConfig().heatmap, m_currentSymbol.toStdString(), renderer->getCurrentTimeframe());
+        if (!error.isEmpty()) {
+            out.status = 422; out.code = "invalid_settings"; out.message = error;
+            return out;
+        }
+        sLog_App("Heatmap settings applied chart=main renderer=" << m_heatmapChartSettings.renderer
+                 << " persist=" << body.persistHeatmapSettings);
+        out.data = agentApiHeatmapSnapshot();
+        out.data["persist"] = body.persistHeatmapSettings;
+    } else if (kind == "input") {
+        auto *view = m_heatmapDock ? m_heatmapDock->qquickView() : nullptr;
+        out = m_agentInput.apply(view, renderer->mapRectToScene(renderer->boundingRect()), body.input);
+        if (out.status != 200) return out;
+    } else if (kind == "symbol") {
         if (!subscribeSymbol(body.symbol)) {
             out.status = 422; out.code = "invalid_symbol"; out.message = "Invalid symbol";
             return out;

@@ -123,6 +123,7 @@ void DataProcessor::setActiveSymbol(const QString& symbol) {
 }
 
 void DataProcessor::onHeatmapSliceReceived(const HeatmapSlice& slice) {
+    if (!m_heatmapEnabled) return;
     Q_UNUSED(slice.midPrice);
     Q_UNUSED(slice.lastTrade);
     if (m_shuttingDown.load()) {
@@ -289,6 +290,7 @@ void DataProcessor::publishHeatmapWindow(std::shared_ptr<heatmap_window::Update>
 }
 
 void DataProcessor::requestHeatmapFetch() {
+    if (!m_heatmapEnabled) return;
     if (recordingMode()) {
         if (m_recordingInFlight || m_recordingRetry->isActive() || m_recordingDebounce.pending || !m_recordingBand.valid()) return;
         heatmap_window::FetchRequest request;
@@ -508,7 +510,7 @@ void DataProcessor::onHeatmapHistoryReceived(const QString& symbol,
                                              int64_t requestEndMs,
                                              int64_t oldestAvailableMs,
                                              const QVector<IGridDataSource::HeatmapHistoryColumn>& columns) {
-    if (recordingMode() || m_shuttingDown.load()) {
+    if (!m_heatmapEnabled || recordingMode() || m_shuttingDown.load()) {
         return;
     }
     if (!m_activeSymbol.isEmpty() && symbol != m_activeSymbol) {
@@ -680,6 +682,20 @@ void DataProcessor::resetRecordingRequest() {
     m_recordingTimeout->stop();
 }
 
+void DataProcessor::setHeatmapEnabled(bool enabled) {
+    if (m_heatmapEnabled == enabled) return;
+    m_heatmapEnabled = enabled;
+    resetRecordingRequest(); // cancel timers and invalidate in-flight replies
+    m_heatmapFetchInFlight = false;
+    ++m_heatmapFetchGeneration;
+    sLog_App("Legacy heatmap stream enabled=" << enabled);
+    if (enabled) {
+        resetHeatmapWindow(); // discarded slices require a fresh placement/history page
+        scheduleRecordingBand();
+        requestHeatmapFetch();
+    }
+}
+
 void DataProcessor::setRecordingConfig(bool requested, double minRowPx) {
     const bool changed = m_recordingRequested != requested;
     m_recordingRequested = requested;
@@ -711,6 +727,7 @@ void DataProcessor::refreshRecordingHistory() {
 }
 
 void DataProcessor::scheduleRecordingBand() {
+    if (!m_heatmapEnabled) return;
     if (!recordingMode() || !m_recordingConnected || m_activeSymbol.isEmpty()) return;
     const auto wanted = recording_view::requestBand(m_recordingView, m_recordingMinRowPx);
     if (!recording_view::needsReband(m_recordingView, m_recordingBand, wanted)) {
@@ -765,6 +782,7 @@ void DataProcessor::applyRecordingBand() {
 }
 
 void DataProcessor::sendRecordingRequest(int64_t endMs, bool finalRepair) {
+    if (!m_heatmapEnabled) return;
     if (!recordingMode() || !m_recordingConnected || m_activeSymbol.isEmpty() ||
         !m_recordingBand.valid() || m_recordingInFlight) return;
     // A final repair can supersede a pending 250ms history budget retry. Do not

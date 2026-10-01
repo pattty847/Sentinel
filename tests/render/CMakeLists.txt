@@ -228,3 +228,10 @@ target_include_directories(test_heatmap_source_controller PRIVATE ${CMAKE_SOURCE
 target_link_libraries(test_heatmap_source_controller PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
 add_test(NAME HeatmapSourceControllerTests COMMAND test_heatmap_source_controller)
 set_tests_properties(HeatmapSourceControllerTests PROPERTIES LABELS "render;heatmap" TIMEOUT 45)
+
+# S6a service lifecycle, ordering, settings; CPU only, no recording/live dependency.
+add_executable(test_heatmap_plumbing test_heatmap_plumbing.cpp)
+target_include_directories(test_heatmap_plumbing PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_heatmap_plumbing PRIVATE sentinel_lab_lib GTest::gtest_main Qt6::Core)
+add_test(NAME HeatmapPlumbingTests COMMAND test_heatmap_plumbing)
+set_tests_properties(HeatmapPlumbingTests PROPERTIES LABELS "render;heatmap" TIMEOUT 30)

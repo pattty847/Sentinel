@@ -48,6 +48,7 @@ void LayoutOrchestrator::resetLayoutToDefault(const DockWidgets& docks) {
 bool LayoutOrchestrator::restoreLayout(const DockWidgets& docks, const QString& layoutName) {
     bool success = LayoutManager::restoreLayout(m_mainWindow, layoutName);
     if (success) {
+        if (m_restoreHeatmap) m_restoreHeatmap(layoutName);
         applyDockConstraints(docks);
     }
     return success;
@@ -55,6 +56,7 @@ bool LayoutOrchestrator::restoreLayout(const DockWidgets& docks, const QString& 
 
 void LayoutOrchestrator::saveLayout(const QString& layoutName) {
     LayoutManager::saveLayout(m_mainWindow, layoutName);
+    if (m_saveHeatmap) m_saveHeatmap(layoutName);
 }
 
 void LayoutOrchestrator::configureDockOptions() {

@@ -518,3 +518,55 @@ TEST_F(RecordingDataProcessor, RebandsKeepPublishedPictureUntilLatestViewIsCover
     EXPECT_EQ(oldColumn->intensity, QByteArray(4096, '\x11'));
     processor.setRecordingConnected(false);
 }
+
+TEST_F(RecordingDataProcessor, MutingCancelsPendingBandsAndRejectsRepliesThenResumesRecording) {
+    processor.setRecordingCapability(true); // band timer pending
+    processor.setHeatmapEnabled(false);
+    processor.setHeatmapViewport(6'000'000, 12'000'000, false, 11000, 11100, 1000, 500);
+    processor.refreshRecordingHistory();
+    events(180);
+    EXPECT_TRUE(requests.empty());
+    processor.setHeatmapEnabled(true);
+    events(180);
+    ASSERT_EQ(requests.size(), 1);
+    const auto stale = page(requests.back());
+    processor.setHeatmapEnabled(false);
+    const auto count = updates.size();
+    processor.onRecordingHistoryReceived(stale);
+    EXPECT_EQ(updates.size(), count);
+    processor.setHeatmapViewport(6'000'000, 12'000'000, false, 12000, 12100, 1000, 500);
+    events(180);
+    EXPECT_EQ(requests.size(), 1);
+    processor.setHeatmapEnabled(true);
+    events(180);
+    ASSERT_EQ(requests.size(), 2);
+    EXPECT_GT(requests.back().bandGeneration, stale.bandGeneration);
+    EXPECT_GT(requests.back().priceMin, requests.front().priceMin);
+}
+
+TEST_F(RecordingDataProcessor, MutingLegacySlicesAlsoStopsFetchesAndResumesWithoutChangingMode) {
+    processor.setRecordingConfig(false, 2);
+    HeatmapSlice live;
+    live.symbol = "BTC-USD"; live.timeframeMs = 60'000; live.bucketStartMs = 12'000'000;
+    live.gridWidth = 1024; live.gridHeight = 2048; live.minPrice = 8000; live.maxPrice = 12096;
+    live.tickSize = 2; live.format = "u16"; live.column = QByteArray(4096, 0);
+    processor.onHeatmapSliceReceived(live);
+    ASSERT_FALSE(updates.empty());
+    processor.setHeatmapEnabled(false);
+    const auto count = updates.size();
+    int fetches = 0;
+    QObject::connect(&processor, &DataProcessor::heatmapHistoryFetchNeeded, &processor, [&](auto...) { ++fetches; });
+    live.bucketStartMs += 60'000;
+    processor.onHeatmapSliceReceived(live);
+    EXPECT_EQ(updates.size(), count);
+    processor.setHeatmapViewport(5'000'000, 11'000'000, false, 8000, 12096, 1000, 500);
+    EXPECT_EQ(fetches, 0);
+    processor.setHeatmapEnabled(true);
+    EXPECT_EQ(fetches, 0); // a reset window waits for the next live/history placement
+    live.bucketStartMs = 10'980'000;
+    const auto resumed = updates.size();
+    processor.onHeatmapSliceReceived(live);
+    ASSERT_GT(updates.size(), resumed);
+    EXPECT_TRUE(updates.back()->full); // no frozen columns or holes from the muted interval
+    EXPECT_GT(fetches, 0); // first placement backfills slices dropped while muted
+}

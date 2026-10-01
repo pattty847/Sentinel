@@ -1,4 +1,5 @@
 #pragma once
+#include <utility>
 
 #include <algorithm>
 #include <cctype>
@@ -141,6 +142,20 @@ inline std::vector<std::string> normalizedDefaultSymbols(const std::vector<std::
 }
 
 struct ClientHeatmapConfig {
+    std::string renderer = "legacy";
+    std::string tickMode = "auto";
+    int64_t manualTick = 100;
+    double minRowPx = 2, hysteresis = 0.25;
+    int crossfadeMs = 150;
+    bool showBandEdges = false;
+    std::string palettePreset = "Electric";
+    std::vector<std::pair<double, std::string>> bidGradient{{0, "#000000"}, {1, "#00ffff"}};
+    std::vector<std::pair<double, std::string>> askGradient{{0, "#000000"}, {1, "#ffc800"}};
+    double opacity = 1;
+    uint64_t gpuCapBytes = 320ull << 20, uploadBudgetBytes = 8ull << 20;
+    uint64_t decodedChunkBytes = 512ull << 20, spanSourceBytes = 256ull << 20, cpuCeilingBytes = 1024ull << 20;
+    int prefetchTiles = 1, liveMinIntervalMs = 500;
+    bool showTelemetry = false;
     std::string source = "legacy"; // recording requires advertised recording.available
     double gamma = 0.85;
     double contrast = 1.6;
