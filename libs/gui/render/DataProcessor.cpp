@@ -49,7 +49,10 @@ DataProcessor::DataProcessor(QObject* parent)
     m_recordingViewRetry->setSingleShot(true);
     connect(m_recordingViewRetry, &QTimer::timeout, this, [this] {
         if (recordingMode() && m_recordingConnected && m_recordingBandConfirmed &&
-            m_registeredView.generation == m_bandGeneration) emit recordingViewNeeded(m_registeredView);
+            m_registeredView.generation == m_bandGeneration) {
+            m_viewMayBeRegistered = true;
+            emit recordingViewNeeded(m_registeredView);
+        }
     });
     m_recordingFinalRetry = new QTimer(this);
     m_recordingFinalRetry->setSingleShot(true);
@@ -220,6 +223,12 @@ void DataProcessor::onHeatmapSliceReceived(const HeatmapSlice& slice) {
 void DataProcessor::setHeatmapViewport(qint64 viewStartMs, qint64 viewEndMs, bool follow,
                                        double minPrice, double maxPrice, double widthPx, double heightPx) {
     if (m_shuttingDown.load()) {
+        return;
+    }
+    if (!m_heatmapEnabled) {
+        // Muted (gpu renderer): no window placement, publication, band or fetch;
+        // the view is kept and placed when the stream resumes.
+        m_mutedViewport = {viewStartMs, viewEndMs, follow, minPrice, maxPrice, widthPx, heightPx, true};
         return;
     }
     // Placement only changes at bucket granularity; skip sub-bucket pans.
@@ -685,12 +694,27 @@ void DataProcessor::resetRecordingRequest() {
 void DataProcessor::setHeatmapEnabled(bool enabled) {
     if (m_heatmapEnabled == enabled) return;
     m_heatmapEnabled = enabled;
+    // A registered live recording view would keep streaming band columns the
+    // muted processor drops: release it on the server.
+    // The server keeps streaming the last registered view while a re-band is
+    // pending (confirmation of the current band is cleared then), so this tracks
+    // registration itself; an unview is idempotent on the server.
+    if (!enabled && m_viewMayBeRegistered && m_recordingConnected && !m_registeredView.symbol.empty()) {
+        m_viewMayBeRegistered = false;
+        emit recordingViewReleased(m_registeredView);
+    }
     resetRecordingRequest(); // cancel timers and invalidate in-flight replies
     m_heatmapFetchInFlight = false;
     ++m_heatmapFetchGeneration;
     sLog_App("Legacy heatmap stream enabled=" << enabled);
     if (enabled) {
         resetHeatmapWindow(); // discarded slices require a fresh placement/history page
+        if (m_mutedViewport.valid) {
+            // The view the GUI sent while muted is placed now (nothing was published then).
+            const auto v = m_mutedViewport;
+            m_mutedViewport.valid = false;
+            setHeatmapViewport(v.startMs, v.endMs, v.follow, v.minPrice, v.maxPrice, v.widthPx, v.heightPx);
+        }
         scheduleRecordingBand();
         requestHeatmapFetch();
     }
@@ -714,6 +738,7 @@ void DataProcessor::setRecordingCapability(bool available) {
 void DataProcessor::setRecordingConnected(bool connected) {
     m_recordingConnected = connected;
     if (!connected) {
+        m_viewMayBeRegistered = false; // the server drops a connection's view with it
         m_recordingAvailable = false; // require a fresh hello on reconnect
         resetRecordingRequest();
     }
@@ -895,6 +920,7 @@ void DataProcessor::onRecordingHistoryReceived(const SentinelStreamClient::Recor
     if (registerView) {
         m_registeredView = {page.symbol.toStdString(), page.layer.toStdString(), page.timeframeMs,
             {page.bandLo, page.bandTick, static_cast<uint32_t>(page.bandRows)}, page.bandGeneration};
+        m_viewMayBeRegistered = true;
         emit recordingViewNeeded(m_registeredView);
     }
     std::vector<heatmap_window::Column> columns;

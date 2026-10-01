@@ -356,6 +356,15 @@ void SentinelStreamClient::registerRecordingView(const recording::LiveView& view
     });
 }
 
+void SentinelStreamClient::releaseRecordingView(const std::string& symbol) {
+    if (symbol.empty() || symbol.size() > 128) return;
+    net::post(m_strand, [this, payload = protocol::recordingwire::unviewMessage(symbol).dump()]() mutable {
+        if (!m_isConnected) return; // a new connection has no view registered
+        m_writeQueue.push_back(std::move(payload));
+        if (m_writeQueue.size() == 1) doWrite();
+    });
+}
+
 void SentinelStreamClient::requestRecordingHeatmapHistory(const protocol::recordingwire::Request& request) {
     nlohmann::json msg = {{"type", "heatmap_history_request"}, {"source", "recording"},
                           {"symbol", request.symbol}, {"timeframe_ms", request.timeframeMs},

@@ -107,6 +107,21 @@ int main(int argc, char *argv[])
                      << " cwd=" << QDir::currentPath());
     }
     ConfigLoader::loadClientConfig("config/.client_config.yaml", &clientConfig);
+    // Process-only overrides (S6b; A/B runs use two processes on one server):
+    //   --heatmap-renderer legacy|gpu   never persisted (owner decision 2)
+    //   --api-port N                    Agent API port instead of gui.api_port
+    for (int i = 1; i + 1 < argc; ++i) {
+        const QByteArray flag(argv[i]), value(argv[i + 1]);
+        if (flag == "--heatmap-renderer") {
+            if (value == "legacy" || value == "gpu") GuiConfigStore::instance().setHeatmapRendererOverride(QString::fromLatin1(value));
+            else sLog_Warning("Ignored --heatmap-renderer " << value << " (legacy|gpu)");
+        } else if (flag == "--api-port") {
+            bool ok = false;
+            const int port = value.toInt(&ok);
+            if (ok && port > 0 && port <= 65535) clientConfig.gui.apiPort = port;
+            else sLog_Warning("Ignored --api-port " << value);
+        }
+    }
     GuiConfigStore::instance().setClientConfig(clientConfig);
 
     configureGraphicsBackend();

@@ -14,6 +14,7 @@
 #include "lab/RhiBackend.hpp"
 #include "render/heatmap/HeatmapGpuBinner.hpp"
 #include "render/heatmap/HeatmapTileNode.hpp"
+#include "render/heatmap/HeatmapPalette.hpp"
 #include <QCoreApplication>
 #include <QEvent>
 #include <QGuiApplication>
@@ -220,6 +221,71 @@ TEST(HeatmapTileNodeScene, DrawsTheCellStatesAndPansWithoutRebinning) {
     const QColor loadA = scene.image.pixelColor(150, 50), loadB = scene.image.pixelColor(155, 50);
     EXPECT_NE(loadA, loadB) << "loading is a hatch";
     EXPECT_NE(loadA, QColor(Qt::black));
+}
+
+// S6b palette parity (owner decision 4): the node draws a valid cell with the
+// chart's palette texture and the legacy tone mapping, so a preset gives the same
+// colour for the same recording code as heatmap_intensity.frag. The reference is
+// legacyRecordingColor on the shared palette image (the legacy renderer samples
+// the same image: HeatmapOverlayRenderer builds it with paletteTexels).
+TEST(HeatmapTileNodeScene, PresetPaletteMatchesTheLegacyColourForEachCode) {
+    if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty()) GTEST_SKIP() << "GPU case skipped: " << why.toStdString();
+    Scene scene;
+    ASSERT_TRUE(scene.create(QSize(200, 100))) << scene.error.toStdString();
+    FakeSpans spans;
+    const int64_t tile = firstTile();
+    const int64_t first = tiles::tileStartMs(tile, minute);
+    const auto set = spans.set(minute, {{tile, visible(), {spans.build(minute, tile, kCoarse)}}});
+    auto &frame = scene.host->frame;
+    frame.spans = set;
+    frame.tfMs = minute;
+    frame.tickUnits = 1000; // $10: 10 buckets x 10 bins of 20 x 10 px
+    frame.view = {double(first), double(first + 10 * minute), 99'950, 100'050};
+    const CodeWindow window = codeWindow(0.01, 5);
+    frame.style.codeFloor = window.floor;
+    frame.style.codeRange = window.range;
+    const PaletteTone tone{1.05f, 1.15f, 0.01f};
+    for (const char *preset : {"Fire", "Ocean"}) {
+        frame.palette = makePalette(*presetGradients(preset), tone);
+        frame.capture = std::make_shared<HeatmapCellCapture>();
+        for (int i = 0; i < 4; ++i) ASSERT_TRUE(scene.frame()) << scene.error.toStdString();
+        ASSERT_TRUE(scene.frame()) << scene.error.toStdString(); // the capture of the last frame is filled
+        ASSERT_TRUE(scene.host->stats->complete.load());
+        const auto &view = frame.view;
+        int compared = 0, asks = 0, bids = 0, worst = 0;
+        for (const auto &block : frame.capture->blocks) {
+            ASSERT_TRUE(block.result);
+            const auto &g = block.grid;
+            const QByteArray &data = block.result->data;
+            ASSERT_EQ(data.size(), qsizetype(g.columns) * g.rows * 4);
+            for (int y = 5; y < 100; y += 10)
+                for (int x = 10; x < 200; x += 20) {
+                    const double t = view.timeLoMs + (x + 0.5) / 200.0 * (view.timeHiMs - view.timeLoMs);
+                    const double p = view.priceHi - (y + 0.5) / 100.0 * (view.priceHi - view.priceLo);
+                    const int64_t col = int64_t(std::floor(t / double(g.tfMs))) - g.firstBucket;
+                    const int64_t bin = int64_t(std::floor(p / g.displayTick));
+                    const int64_t row = g.firstBin + int64_t(g.rows) - 1 - bin;
+                    if (col < 0 || col >= int64_t(g.columns) || row < 0 || row >= int64_t(g.rows)) continue;
+                    uint32_t cell = 0;
+                    std::memcpy(&cell, data.constData() + (row * g.columns + col) * 4, 4);
+                    if (((cell >> 16) & 3u) != uint32_t(CellState::Valid) || (cell & 0x7fffu) == 0) continue;
+                    const auto want = legacyRecordingColor(uint16_t(cell & 0xffffu), window, *frame.palette);
+                    const QColor got = scene.image.pixelColor(x, y);
+                    const int dr = std::abs(got.red() - int(std::lround(want[0] * 255)));
+                    const int dg = std::abs(got.green() - int(std::lround(want[1] * 255)));
+                    const int db = std::abs(got.blue() - int(std::lround(want[2] * 255)));
+                    worst = std::max({worst, dr, dg, db});
+                    EXPECT_LE(std::max({dr, dg, db}), 3) << preset << " code " << (cell & 0x7fff) << " ask "
+                                                          << ((cell & 0x8000) != 0) << " at " << x << "," << y;
+                    ++compared;
+                    ((cell & 0x8000) ? asks : bids)++;
+                }
+        }
+        EXPECT_GE(compared, 30) << preset;
+        EXPECT_GT(asks, 0) << preset;
+        EXPECT_GT(bids, 0) << preset;
+        std::cout << "[palette] " << preset << " cells compared=" << compared << " worst channel delta=" << worst << std::endl;
+    }
 }
 
 // B1 carry-over (a): an A -> B -> C tick change under a GPU cap tighter than the

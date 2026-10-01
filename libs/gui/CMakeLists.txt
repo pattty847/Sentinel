@@ -181,6 +181,10 @@ add_library(sentinel_heatmap_gpu STATIC
     render/heatmap/HeatmapBinGrid.hpp
     render/heatmap/HeatmapGpuSource.hpp
     render/heatmap/HeatmapGpuSource.cpp
+    render/heatmap/HeatmapPalette.hpp
+    render/heatmap/HeatmapPalette.cpp
+    render/heatmap/HeatmapGpuLayer.hpp
+    render/heatmap/HeatmapGpuLayer.cpp
     render/heatmap/HeatmapSettingsStore.hpp
     render/heatmap/HeatmapSettingsStore.cpp
     render/heatmap/HeatmapDataService.hpp

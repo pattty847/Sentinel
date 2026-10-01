@@ -58,6 +58,12 @@ HeatmapDataService::HeatmapDataService(TransportFactory factory, HeatmapBudgets 
              << " spanBytes=" << budgets.spanSources << " ceilingBytes=" << budgets.cpuCeiling);
 }
 HeatmapDataService::~HeatmapDataService() {
+    // Holders forget their controllers first (each hook may remove itself).
+    while (!shutdownHooks_.empty()) {
+        auto hook = std::move(shutdownHooks_.begin()->second);
+        shutdownHooks_.erase(shutdownHooks_.begin());
+        if (hook) hook();
+    }
     onData([this] {
         if (beforeStop_) beforeStop_();
         destroyData();
@@ -85,6 +91,12 @@ void HeatmapDataService::onData(std::function<void()> work) const {
     if (QThread::currentThread() == thread_.get()) work();
     else QMetaObject::invokeMethod(context_, std::move(work), Qt::BlockingQueuedConnection);
 }
+int HeatmapDataService::addShutdownHook(std::function<void()> hook) {
+    const int id = ++nextHook_;
+    shutdownHooks_[id] = std::move(hook);
+    return id;
+}
+void HeatmapDataService::removeShutdownHook(int id) { shutdownHooks_.erase(id); }
 HeatmapSourceController *HeatmapDataService::createController(size_t gpuBytes) {
     HeatmapSourceController *out = nullptr;
     onData([&] {

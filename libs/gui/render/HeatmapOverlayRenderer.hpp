@@ -13,6 +13,7 @@
 #include <vector>
 
 class HeatmapColumnTexture;
+namespace heatmap::gpu { struct PaletteStop; }
 
 class QQuickWindow;
 class QSGGeometryNode;
@@ -30,6 +31,7 @@ public:
         QColor color;
     };
 
+    static std::vector<ColorStop> toColorStops(const std::vector<heatmap::gpu::PaletteStop>& stops);
     void setGridDimensions(int width, int height);
     void setIntensityBytesPerCell(int bytesPerCell);
     void setBackgroundColor(const QColor& color);
@@ -56,7 +58,6 @@ public:
 private:
     struct ColorGradient {
         std::vector<ColorStop> stops;
-        QColor interpolate(float t) const;
     };
 
     void ensureHeatmapImage();

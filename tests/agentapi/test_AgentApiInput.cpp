@@ -6,12 +6,13 @@
 #include <QTcpSocket>
 #include <QTimer>
 #include <QWheelEvent>
+#include <QMouseEvent>
 #include <gtest/gtest.h>
 
 namespace {
 struct Events : QObject {
     int wheels = 0, presses = 0, moves = 0, releases = 0;
-    QPointF position;
+    QPointF position, releasePosition;
     Qt::KeyboardModifiers modifiers;
     int delta = 0;
     bool eventFilter(QObject *, QEvent *e) override {
@@ -22,7 +23,9 @@ struct Events : QObject {
         }
         if (e->type() == QEvent::MouseButtonPress) { ++presses; return true; }
         if (e->type() == QEvent::MouseMove) { ++moves; return true; }
-        if (e->type() == QEvent::MouseButtonRelease) { ++releases; return true; }
+        if (e->type() == QEvent::MouseButtonRelease) {
+            ++releases; releasePosition = static_cast<QMouseEvent *>(e)->position(); return true;
+        }
         return false;
     }
 };
@@ -90,6 +93,36 @@ TEST(AgentApiInput, BoundsAndDragSequenceAreValidatedBeforeSending) {
     c.kind = "click";
     EXPECT_EQ(dispatcher.apply(&view, {0, 0, 600, 450}, c).status, 200);
     EXPECT_EQ(events.presses, 2); EXPECT_EQ(events.releases, 2);
+}
+// S6a review minor 6: an agent that dies mid-drag never leaves the button down.
+TEST(AgentApiInput, AnAbandonedDragIsReleasedAfterTheTimeout) {
+    QQuickView view;
+    view.resize(640, 480);
+    Events events;
+    view.installEventFilter(&events);
+    AgentApi::InputDispatcher dispatcher;
+    dispatcher.setDragTimeoutMs(50);
+    AgentApi::InputCommand c{"dragStart", "timeAxis", 100, 10, 0, {}};
+    ASSERT_EQ(dispatcher.apply(&view, {0, 0, 600, 450}, c).status, 200);
+    c = {"dragMove", "timeAxis", 120, 12, 0, {}};
+    ASSERT_EQ(dispatcher.apply(&view, {0, 0, 600, 450}, c).status, 200);
+    EXPECT_TRUE(dispatcher.dragActive());
+    QEventLoop loop;
+    QTimer::singleShot(30, &loop, &QEventLoop::quit);
+    loop.exec();
+    EXPECT_EQ(events.releases, 0) << "a move restarts the timeout";
+    QTimer::singleShot(150, &loop, &QEventLoop::quit);
+    loop.exec();
+    EXPECT_EQ(events.releases, 1) << "released once";
+    EXPECT_EQ(events.releasePosition, QPointF(120, 462)) << "where the drag last was (time axis below the chart)";
+    EXPECT_FALSE(dispatcher.dragActive());
+    c.kind = "dragEnd";
+    EXPECT_EQ(dispatcher.apply(&view, {0, 0, 600, 450}, c).status, 409) << "the drag is over";
+    c = {"dragStart", "chart", 10, 10, 0, {}};
+    EXPECT_EQ(dispatcher.apply(&view, {0, 0, 600, 450}, c).status, 200) << "a new drag can start";
+    c.kind = "dragEnd";
+    EXPECT_EQ(dispatcher.apply(&view, {0, 0, 600, 450}, c).status, 200);
+    EXPECT_EQ(events.releases, 2);
 }
 }
 int main(int argc, char **argv) {

@@ -1,6 +1,7 @@
 #include "HeatmapOverlayRenderer.hpp"
 
 #include "HeatmapIntensityNode.hpp"
+#include "heatmap/HeatmapPalette.hpp"
 #include "SentinelLogging.hpp"
 
 #include <QSGFlatColorMaterial>
@@ -12,28 +13,24 @@
 #include <cmath>
 #include <cstring>
 
-QColor HeatmapOverlayRenderer::ColorGradient::interpolate(float t) const {
-    if (stops.empty()) {
-        return QColor(0, 0, 0);
-    }
-    if (stops.size() == 1 || t <= stops.front().position) {
-        return stops.front().color;
-    }
-    if (t >= stops.back().position) {
-        return stops.back().color;
-    }
+namespace {
+std::vector<heatmap::gpu::PaletteStop> paletteStops(const std::vector<HeatmapOverlayRenderer::ColorStop>& stops) {
+    std::vector<heatmap::gpu::PaletteStop> out;
+    out.reserve(stops.size());
+    for (const auto& s : stops) out.push_back({s.position, s.color.red(), s.color.green(), s.color.blue()});
+    return out;
+}
+std::vector<HeatmapOverlayRenderer::ColorStop> colorStops(const std::vector<heatmap::gpu::PaletteStop>& stops) {
+    std::vector<HeatmapOverlayRenderer::ColorStop> out;
+    out.reserve(stops.size());
+    for (const auto& s : stops) out.push_back({s.position, QColor(s.r, s.g, s.b)});
+    return out;
+}
+} // namespace
 
-    for (size_t i = 0; i < stops.size() - 1; ++i) {
-        if (t >= stops[i].position && t <= stops[i + 1].position) {
-            const float localT = (t - stops[i].position) / (stops[i + 1].position - stops[i].position);
-            const QColor& c0 = stops[i].color;
-            const QColor& c1 = stops[i + 1].color;
-            return QColor(c0.red() + (c1.red() - c0.red()) * localT,
-                          c0.green() + (c1.green() - c0.green()) * localT,
-                          c0.blue() + (c1.blue() - c0.blue()) * localT);
-        }
-    }
-    return stops.back().color;
+std::vector<HeatmapOverlayRenderer::ColorStop> HeatmapOverlayRenderer::toColorStops(
+    const std::vector<heatmap::gpu::PaletteStop>& stops) {
+    return colorStops(stops);
 }
 
 void HeatmapOverlayRenderer::setGridDimensions(int width, int height) {
@@ -145,25 +142,11 @@ void HeatmapOverlayRenderer::applyToNode(QQuickWindow* window,
     const bool useIncrementalGlUploads = rendererInterface &&
         rendererInterface->graphicsApi() == QSGRendererInterface::OpenGL;
 
-    if (m_bidGradient.stops.empty()) {
-        // Electric cyan — dark teal → mid cyan → bright cyan → white-hot (defaults)
-        m_bidGradient.stops = {
-            {0.00f, QColor(  0,  20,  25)},
-            {0.35f, QColor(  0, 110, 130)},
-            {0.70f, QColor(  0, 210, 220)},
-            {1.00f, QColor(160, 255, 248)},
-        };
-        m_paletteDirty = true;
-    }
-    if (m_askGradient.stops.empty()) {
-        // Hot orange — dark red → orange-red → hot orange → white-hot (defaults)
-        m_askGradient.stops = {
-            {0.00f, QColor( 35,   5,   0)},
-            {0.30f, QColor(160,  30,  10)},
-            {0.60f, QColor(230,  80,   0)},
-            {0.85f, QColor(255, 160,  30)},
-            {1.00f, QColor(255, 230,  80)},
-        };
+    if (m_bidGradient.stops.empty() || m_askGradient.stops.empty()) {
+        // Electric cyan and hot orange (the shared legacy defaults).
+        const auto defaults = heatmap::gpu::legacyDefaultGradients();
+        if (m_bidGradient.stops.empty()) m_bidGradient.stops = colorStops(defaults.bid);
+        if (m_askGradient.stops.empty()) m_askGradient.stops = colorStops(defaults.ask);
         m_paletteDirty = true;
     }
 
@@ -374,23 +357,20 @@ void HeatmapOverlayRenderer::ensurePaletteImage() {
         return;
     }
 
-    const int width = 512;
+    const int width = heatmap::gpu::kPaletteWidth;
     m_paletteImage = QImage(width, 1, QImage::Format_ARGB32);
     if (m_paletteImage.isNull()) {
         return;
     }
 
+    // One palette image for both renderers (HeatmapPalette.hpp).
+    const auto texels = heatmap::gpu::paletteTexels(
+        {paletteStops(m_bidGradient.stops), paletteStops(m_askGradient.stops), static_cast<float>(m_paletteGamma)});
     auto* row = reinterpret_cast<QRgb*>(m_paletteImage.scanLine(0));
-    const float gamma = static_cast<float>(m_paletteGamma);
     for (int i = 0; i < width; ++i) {
-        const float t = static_cast<float>(i) / static_cast<float>(width - 1);
-        const bool isAsk = (i >= width / 2);
-        const float localT = isAsk ? (t - 0.5f) * 2.0f : t * 2.0f;
-        const float x = std::clamp(localT, 0.0f, 1.0f);
-        const float curve = std::pow(x, gamma);
-        const QColor color = isAsk ? m_askGradient.interpolate(curve) : m_bidGradient.interpolate(curve);
-        row[i] = qRgba(color.red(), color.green(), color.blue(), 255);
+        row[i] = qRgba(texels[size_t(i) * 4], texels[size_t(i) * 4 + 1], texels[size_t(i) * 4 + 2], 255);
     }
+    const float gamma = static_cast<float>(m_paletteGamma);
 
     m_paletteDirty = false;
     sLog_Render("Heatmap palette regenerated with gamma=" << gamma

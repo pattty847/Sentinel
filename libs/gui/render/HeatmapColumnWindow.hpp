@@ -100,6 +100,7 @@ struct Wall {
 
 struct WallsSnapshot {
     int status = 200;
+    bool gpuRenderer = false; // 409: the chart draws the GPU heatmap (walls return in S7)
     int64_t loadedStartMs = 0, loadedEndMs = 0;
     double bandTick = 0;
     int recordedColumns = 0, missingColumns = 0;

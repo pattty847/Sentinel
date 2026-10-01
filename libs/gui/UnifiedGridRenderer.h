@@ -38,6 +38,16 @@
 
 class DataProcessor;
 class HeatmapIntensityNode;
+namespace heatmap {
+class HeatmapDataService;
+class ManualTickMemory;
+struct HeatmapChartSettings;
+}
+namespace heatmap::gpu {
+class HeatmapGpuLayer;
+class HeatmapTileNode;
+struct ViewWindow;
+}
 class QQuickWindow;
 class QScreen;
 
@@ -81,6 +91,7 @@ class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     Q_PROPERTY(double minPrice READ getMinPrice NOTIFY viewportChanged)
     Q_PROPERTY(double maxPrice READ getMaxPrice NOTIFY viewportChanged)
     Q_PROPERTY(double heatmapTickSize READ heatmapTickSize NOTIFY heatmapTickSizeChanged)
+    Q_PROPERTY(bool gpuHeatmapActive READ gpuHeatmapActive NOTIFY heatmapRendererChanged)
 
     Q_PROPERTY(int timeframeMs READ getCurrentTimeframe WRITE setTimeframe NOTIFY timeframeChanged)
 
@@ -125,6 +136,16 @@ private:
     QString m_activeSymbol;
 
     bool m_useGpuHeatmap = false;
+    // S6b GPU heatmap. GUI thread state, read in updatePaintNode (GUI blocked).
+    std::unique_ptr<heatmap::gpu::HeatmapGpuLayer> m_gpuLayer;
+    bool m_gpuHeatmap = false;
+    bool m_gpuPriceKnown = false;   // the viewport's price window is real (not a placeholder)
+    bool m_gpuReseedPrice = false;  // a symbol switch: the next book top centres price
+    // The seeded time window follows the chart's size until the user (or the
+    // Agent API) moves the view: the first book top can arrive before layout.
+    bool m_gpuViewPristine = false;
+    bool m_gpuSelfViewport = false; // the seed or follow-live is setting the viewport
+    bool m_chartSensitivityApplied = false;
     HeatmapOverlayRenderer m_heatmapOverlay;
     QTimer* m_heatmapRenderTimer = nullptr;
     std::unique_ptr<HeatmapStreamService> m_heatmapStreamService;
@@ -257,7 +278,22 @@ public:
     int getCurrentTimeframe() const { return static_cast<int>(m_currentTimeframe_ms); }
     
     Q_INVOKABLE QPointF getPanVisualOffset() const;
-    double heatmapTickSize() const { return m_heatmapStreamService ? m_heatmapStreamService->tickSize() : 0.0; }
+    // The drawn tick: the GPU layer's in gpu mode, else the legacy stream's.
+    double heatmapTickSize() const;
+
+    // ── GPU heatmap renderer (S6b, docs/research/2026-10-s6-plan.md) ─────────
+    // The process service (MainWindowGPU owns it; it outlives this item).
+    void setHeatmapService(heatmap::HeatmapDataService* service);
+    // "legacy" | "gpu", at runtime both ways. gpu mutes the legacy band stream
+    // (DataProcessor::setHeatmapEnabled(false)) and draws HeatmapTileNode; legacy
+    // unmutes it and re-publishes the viewport.
+    void setHeatmapRenderer(const QString& renderer);
+    bool gpuHeatmapActive() const { return m_gpuHeatmap; }
+    // Chart settings (tick policy, palette, sensitivity, budgets). The palette and
+    // sensitivity also apply to the legacy renderer so A/B colours match.
+    void setHeatmapChartSettings(const heatmap::HeatmapChartSettings& settings, bool explicitManualTick = false);
+    void setHeatmapTickMemory(const heatmap::ManualTickMemory& memory);
+    heatmap::gpu::HeatmapGpuLayer* gpuHeatmapLayer() const { return m_gpuLayer.get(); }
 
     bool heatmapDataPriceRange(double& outMin, double& outMax) const;
     bool heatmapDataTimeRange(qint64& outStart, qint64& outEnd) const;
@@ -378,6 +414,7 @@ signals:
     void timeframeChanged();
     void panVisualOffsetChanged();
     void heatmapTickSizeChanged();
+    void heatmapRendererChanged();
     void axisSourcesChanged();
     void axisLayoutChanged();
     void liveRenderTick();
@@ -400,6 +437,31 @@ private:
     void connectDataProcessorSignals();
     void startHeatmapRenderLoop();
     HeatmapIntensityNode* ensureHeatmapRootNode(QSGNode* oldNode);
+    // gpu mode: a plain QSGNode root whose first child is an opacity node holding
+    // the HeatmapTileNode (opacity 0 blocks it while the heatmap layer is off);
+    // overlays and text follow it as later children (drawn on top).
+    QSGNode* ensureGpuRootNode(QSGNode* oldNode, heatmap::gpu::HeatmapTileNode** tile);
+    QSGNode* updateGpuPaintNode(QSGNode* oldNode, FrameContext& frame, bool profile);
+    // gpu mode: TimeAxisMapping from the viewport only (plan section 2 "Mapping").
+    void computeGpuFrameMapping(FrameContext& frame, heatmap::gpu::ViewWindow& view, double tickSize);
+    void renderTradeOverlays(QSGNode* parent, const FrameContext& frame, bool drawFootprint, bool drawTpo,
+                             std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads);
+    void syncGpuView();
+    void applyGpuLimits();
+    void followGpuLive();
+    void seedGpuViewport(double bestBid, double bestAsk);
+    void setGpuViewportSelf(qint64 start, qint64 end, double priceMin, double priceMax);
+    // "Return to live" (follow-live activation): the view's right edge goes one
+    // padding past the live anchor's bucket, in either direction, span kept.
+    void returnGpuToLive();
+    // Cold start without a book or trade: a time-only view from the recording's
+    // availability (price unknown until decoded data supplies it).
+    void bootstrapGpuTimeView();
+    QTimer* m_gpuBootstrapTimer = nullptr;
+    qint64 gpuInitialSpanMs(double widthPx) const;
+    void syncGpuSurface();
+    void syncGpuTone();
+    void bindWindow(QQuickWindow* window);
     void computeAndApplyFrameMapping(FrameContext& frame,
                                      HeatmapIntensityNode* texNode,
                                      int64_t cadenceMs,

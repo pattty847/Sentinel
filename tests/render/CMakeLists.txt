@@ -41,6 +41,13 @@ target_link_libraries(test_UgrFrameMath PRIVATE
 add_test(NAME UgrFrameMathTests COMMAND test_UgrFrameMath)
 set_tests_properties(UgrFrameMathTests PROPERTIES LABELS "render")
 
+# S6b: GridViewState clamps (spec rules 1, 2, 9): wheel, axis drags and direct viewports.
+add_executable(test_GridViewState test_GridViewState.cpp)
+target_include_directories(test_GridViewState PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_GridViewState PRIVATE GTest::gtest sentinel_gui_lib Qt6::Core Qt6::Gui)
+add_test(NAME GridViewStateTests COMMAND test_GridViewState)
+set_tests_properties(GridViewStateTests PROPERTIES LABELS "render")
+
 add_executable(test_HeatmapColumnWindow
     test_HeatmapColumnWindow.cpp
     ${CMAKE_SOURCE_DIR}/libs/gui/render/HeatmapColumnWindow.cpp
@@ -187,6 +194,23 @@ target_include_directories(test_lab_item PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${
 target_link_libraries(test_lab_item PRIVATE sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::Quick)
 add_test(NAME LabItemTests COMMAND test_lab_item)
 set_tests_properties(LabItemTests PROPERTIES LABELS "render;heatmap;lab")
+# S6b: the main chart (UnifiedGridRenderer) on the GPU heatmap path over a
+# synthetic HMC2 recording: settles, column/candle alignment, tf switch coverage,
+# QRhi recreation, TPO hosting, renderer flips, clamps, legacy palette parity and
+# the Agent API input route on the real DepthChartView.qml.
+find_package(Qt6 REQUIRED COMPONENTS QuickPrivate)
+add_executable(test_ugr_gpu test_ugr_gpu.cpp)
+target_include_directories(test_ugr_gpu PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_ugr_gpu PRIVATE sentinel_gui_lib sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::QuickPrivate Qt6::Quick Qt6::Qml)
+target_compile_definitions(test_ugr_gpu PRIVATE SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+add_test(NAME UgrGpuTests COMMAND test_ugr_gpu)
+set_tests_properties(UgrGpuTests PROPERTIES LABELS "render;heatmap" TIMEOUT 300)
+# Review blocker 1 under Guard Malloc: the data service dies before the chart.
+if(APPLE AND EXISTS /usr/lib/libgmalloc.dylib)
+    add_test(NAME UgrGpuServiceTeardownGuardMalloc COMMAND test_ugr_gpu "--gtest_filter=UgrGpu.TheServiceMayDieBeforeTheChart")
+    set_tests_properties(UgrGpuServiceTeardownGuardMalloc PROPERTIES LABELS "render;heatmap" TIMEOUT 300
+                         ENVIRONMENT "DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib")
+endif()
 # Lab outputs never land inside the recording root (links, aliases, missing descendants).
 add_executable(test_lab_output_guard test_lab_output_guard.cpp)
 target_include_directories(test_lab_output_guard PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)

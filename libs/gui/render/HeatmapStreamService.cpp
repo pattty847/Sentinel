@@ -341,6 +341,15 @@ void HeatmapStreamService::resetPriceCenter() {
     m_priceBandReady = false;
 }
 
+void HeatmapStreamService::adoptViewport(const GridViewState& viewState) {
+    if (!viewState.isTimeWindowValid()) return; // nothing established: bootstrap normally
+    m_viewportInitialized = true;
+    if (m_autoScrollController) {
+        m_autoScrollController->adoptView(viewState.getVisibleTimeEnd() - viewState.getVisibleTimeStart(),
+                                          viewState.getVisibleTimeEnd());
+    }
+}
+
 void HeatmapStreamService::setLiveBook(double bid, double ask, GridViewState* viewState) {
     if (!m_autoScrollController) return;
     m_autoScrollController->setLiveBook(bid, ask);

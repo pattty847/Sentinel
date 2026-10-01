@@ -58,6 +58,7 @@
 // Unprepared time inside the snapshot's availability draws the loading hatch, as
 // do visible spans the CPU ceiling refused (SpanSet::refused).
 #include "HeatmapGpuBinner.hpp"
+#include "HeatmapPalette.hpp"
 #include "HeatmapSourceController.hpp"
 #include <QSGRenderNode>
 #include <array>
@@ -84,6 +85,10 @@ struct HeatmapTileStats {
     std::atomic<uint32_t> slotCount{0}, readySlots{0}, fallbackSlots{0}, partialSlots{0}, loadingSlots{0};
     std::atomic<uint32_t> refusedSlots{0}, fadingLayers{0};
     std::atomic<bool> complete{false}, holding{false}, crossfading{false};
+    // The last prepare() left work that needs another frame with no new input:
+    // budgeted uploads, a crossfade, a live replacement paging in, the precision
+    // self-test readback. Hosts schedule a frame while it is set (S6b review 3).
+    std::atomic<bool> wantsFrame{false};
     std::atomic<int64_t> drawnTickUnits{0}, drawnTfMs{0};
     std::atomic<double> prepareMs{0}, lastBinMs{0}, gpuFrameMs{0};
     std::atomic<bool> preciseKernel{true};
@@ -167,6 +172,9 @@ public:
         uint64_t uploadBudgetBytes = 8ull << 20;
         uint64_t gpuCapBytes = 320ull << 20; // HeatmapBudgets::gpuPerChart
         DrawStyle style;
+        // Colours (S6b): the palette image and tone mapping; nullptr draws the
+        // legacy default palette. Uploaded only when the pointer changes.
+        std::shared_ptr<const HeatmapPalette> palette;
         double crossfadeMs = 150;
         // The controller's latest live snapshot (nullptr: none; the last live bin
         // then stays only while a drawn picture holds it).
@@ -235,6 +243,11 @@ private:
     std::vector<std::unique_ptr<QRhiBuffer>> spareBuffers_; // retired bin cell buffers, reused
     std::vector<std::unique_ptr<DrawSlot>> loadingDraws_;
     std::unique_ptr<QRhiBuffer> loadingCell_;
+    // Palette texture: created with the QRhi, before any binding set (every draw
+    // samples it), refilled in place when Frame::palette changes.
+    std::unique_ptr<QRhiTexture> paletteTex_;
+    std::unique_ptr<QRhiSampler> paletteSampler_;
+    std::shared_ptr<const HeatmapPalette> uploadedPalette_;
     std::unique_ptr<QRhiGraphicsPipeline> pipeline_;
     QVector<quint32> pipelineFormat_;
     int pipelineSamples_ = 0;
@@ -263,6 +276,7 @@ private:
     std::vector<SpanSourceKey> reportedMissing_; // not reported again while the snapshot still lists them
     bool lost_ = false;
     std::vector<Source *> order_; // reused per frame
+    bool uploadPending_ = false;   // upload(): wanted sources left for later frames
     std::vector<std::pair<int64_t, int64_t>> covered_;
     std::vector<uint64_t> drawnScratch_;
     std::vector<Piece> pieces_;                                // reused per picture
@@ -315,6 +329,8 @@ private:
     uint64_t spareBytes() const;
     void report();
     bool ensurePipeline(QRhiRenderPassDescriptor *pass, int samples);
+    bool ensurePalette(QRhiCommandBuffer *cb);
+    const HeatmapPalette &palette() const;
     bool addBinDraw(QRhiResourceUpdateBatch *updates, Bin &bin, float opacity, int64_t loMs, int64_t hiMs);
     bool addLoadingDraw(QRhiResourceUpdateBatch *updates, int64_t loMs, int64_t hiMs);
     bool addLoadingSlot();

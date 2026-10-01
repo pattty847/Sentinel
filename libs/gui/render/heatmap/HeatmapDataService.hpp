@@ -23,6 +23,11 @@ public:
     HeatmapDataService(const HeatmapDataService &) = delete;
     HeatmapDataService &operator=(const HeatmapDataService &) = delete;
 
+    // Owner thread (GUI). Hooks run first in the destructor, before any controller
+    // is destroyed, so holders of controller pointers (chart layers) forget them
+    // whatever the destruction order of their owners (S6b review blocker 1).
+    int addShutdownHook(std::function<void()> hook);
+    void removeShutdownHook(int id);
     HeatmapSourceController *createController(size_t gpuBytes);
     void destroyController(HeatmapSourceController *controller);
     size_t controllerCount() const;
@@ -48,6 +53,8 @@ private:
     void destroyData(); // data thread, including partial construction
     void stopThread();
     std::function<void()> beforeStop_;
+    std::map<int, std::function<void()>> shutdownHooks_;
+    int nextHook_ = 0;
     ChunkStore store_;
     std::unique_ptr<QThread> thread_;
     QObject *context_ = nullptr;

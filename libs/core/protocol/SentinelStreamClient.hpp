@@ -107,6 +107,8 @@ public:
                                int64_t endTimeMs,
                                int count);
     void registerRecordingView(const recording::LiveView& view);
+    // heatmap_recording_unview: the server stops this connection's live recording view.
+    void releaseRecordingView(const std::string& symbol);
     void requestRecordingHeatmapHistory(const protocol::recordingwire::Request& request);
     static std::optional<RecordingHistoryPage> parseRecordingHistoryChunk(const nlohmann::json& msg);
     // One heatmap_chunk_request. Each start yields exactly one heatmapChunkReceived

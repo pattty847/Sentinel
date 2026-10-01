@@ -8,6 +8,7 @@ Sentinel — ConfigLoader
 #include <fstream>
 #include <algorithm>
 #include <sstream>
+#include <cmath>
 
 std::vector<std::string> ConfigLoader::s_loadedFiles;
 
@@ -222,13 +223,26 @@ void parseClientConfig(const std::string& filePath, ClientConfig& cfg) {
         readScalar(heatmapNode, "crossfade_ms", cfg.heatmap.crossfadeMs);
         readScalar(heatmapNode, "show_band_edges", cfg.heatmap.showBandEdges);
         readScalar(heatmapNode, "palette_preset", cfg.heatmap.palettePreset);
+        // A malformed gradient (wrong shape, non-numeric position, non-scalar
+        // color) keeps the default instead of failing the whole client config.
         const auto readGradient = [&](const char *key, auto &out) {
             const auto node = heatmapNode[key];
-            if (!node || !node.IsSequence() || node.size() < 2 || node.size() > 16) return;
+            if (!node) return;
+            if (!node.IsSequence() || node.size() < 2 || node.size() > 16) {
+                sLog_Warning("Ignored heatmap." << key << ": expected 2..16 {position, color} stops");
+                return;
+            }
             std::vector<std::pair<double, std::string>> stops;
             for (const auto &stop : node) {
-                if (!stop.IsMap() || !stop["position"] || !stop["color"]) return;
-                stops.emplace_back(stop["position"].as<double>(), stop["color"].as<std::string>());
+                const auto position = stop.IsMap() ? stop["position"] : YAML::Node();
+                const auto color = stop.IsMap() ? stop["color"] : YAML::Node();
+                double value = 0;
+                if (!position || !position.IsScalar() || !color || !color.IsScalar() ||
+                    !YAML::convert<double>::decode(position, value) || !std::isfinite(value)) {
+                    sLog_Warning("Ignored heatmap." << key << ": malformed stop");
+                    return;
+                }
+                stops.emplace_back(value, color.Scalar());
             }
             out = std::move(stops); // chartDefaults validates positions/colors
         };

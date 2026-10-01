@@ -12,7 +12,11 @@
 #include "render/RecordingBandPolicy.hpp"
 #include "render/UgrFrameMath.hpp"
 #include "render/ViewportAutoScrollController.hpp"
+#include "render/heatmap/HeatmapGpuLayer.hpp"
+#include "render/heatmap/HeatmapSettingsStore.hpp"
+#include "servermodel/RecordingCodec.hpp"
 #include "../core/servermodel/SessionManager.hpp"
+#include <QDateTime>
 #include <QMetaObject>
 #include <algorithm>
 #include <cmath>
@@ -67,22 +71,36 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem *parent)
   setFlag(ItemAcceptsInputMethod, true);
 
   setAcceptHoverEvents(false); // Reduce event capture
-  connect(this, &QQuickItem::windowChanged, this,
-          [this](QQuickWindow* w) {
-              if (m_axisTextService) {
-                  m_axisTextService->bindAxisLayoutWindow(w);
-              }
-              if (w) connect(w, &QQuickWindow::afterRendering, this, [this]() {
-                  // Direct render-thread callback: fixed-size frame snapshot only.
-                  m_renderedFrameId.store(m_pendingFrameId, std::memory_order_release);
-                  m_renderedRevision.store(m_pendingFrameRevision, std::memory_order_release);
-              }, Qt::DirectConnection);
-          });
+  connect(this, &QQuickItem::windowChanged, this, [this](QQuickWindow* w) { bindWindow(w); });
 
   init();
+  // An item constructed with a parent already in a window (C++ hosts, tests)
+  // saw windowChanged before the connection above.
+  if (window()) bindWindow(window());
 }
 
+void UnifiedGridRenderer::bindWindow(QQuickWindow* w) {
+  if (m_axisTextService) {
+    m_axisTextService->bindAxisLayoutWindow(w);
+  }
+  syncGpuSurface(); // the device pixel ratio sets the 1 column/px clamp
+  if (!w) return;
+  // The GPU tile node's stats outlive this connection (shared).
+  auto tileStats = m_gpuLayer ? m_gpuLayer->tileStatsPtr() : nullptr;
+  connect(w, &QQuickWindow::afterRendering, this, [this, tileStats]() {
+    // Direct render-thread callback: fixed-size frame snapshot only.
+    m_renderedFrameId.store(m_pendingFrameId, std::memory_order_release);
+    m_renderedRevision.store(m_pendingFrameRevision, std::memory_order_release);
+    // GPU heatmap work left after this frame (budgeted uploads, a crossfade,
+    // live paging): ask for the next frame; an idle node stops asking.
+    if (tileStats && tileStats->wantsFrame.exchange(false))
+      QMetaObject::invokeMethod(this, [this] { update(); }, Qt::QueuedConnection);
+  }, Qt::DirectConnection);
+}
+
+
 UnifiedGridRenderer::~UnifiedGridRenderer() {
+  m_gpuLayer.reset(); // destroys its controller on the heatmap-data thread
   if (m_dataProcessor) {
     if (m_dataProcessorThread && m_dataProcessorThread->isRunning()) {
       QMetaObject::invokeMethod(m_dataProcessor.get(),
@@ -107,12 +125,25 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
 }
 
 void UnifiedGridRenderer::onTradeReceived(const Trade &trade) {
+  if (m_gpuHeatmap) {
+    // gpu mode: the legacy price centring must not move the GPU chart's price
+    // window; a trade seeds it only when no book top has (yet) for this symbol.
+    if ((m_gpuReseedPrice || !m_gpuPriceKnown) && QString::fromStdString(trade.product_id) == m_activeSymbol)
+      seedGpuViewport(trade.price, trade.price);
+    return;
+  }
   if (QString::fromStdString(trade.product_id) == m_activeSymbol && m_heatmapStreamService) {
     m_heatmapStreamService->setLastTrade(trade.price, m_viewState.get());
   }
 }
 
 void UnifiedGridRenderer::setLiveBookTop(double bestBid, double bestAsk) {
+  if (m_gpuHeatmap) {
+    // gpu mode: the book top seeds the first viewport (and the price window after
+    // a symbol switch); the legacy stream's price centring stays out of it.
+    seedGpuViewport(bestBid, bestAsk);
+    return;
+  }
   if (!m_heatmapStreamService) return;
   // Recording mode ignores legacy slices, so nothing else places the first
   // window: seed the viewport from the live mid (a kRows band at the finest
@@ -165,6 +196,14 @@ void UnifiedGridRenderer::onViewportChanged() {
   if (!m_viewState || !m_dataProcessor)
     return;
   update();
+  if (m_gpuHeatmap) {
+    if (!m_gpuSelfViewport) m_gpuViewPristine = false; // someone else moved the view
+    // The controller plans from the committed view; the legacy band stream is
+    // muted, so its viewport is re-published when the renderer flips back.
+    syncGpuView();
+    updateHistoryFloorState();
+    return;
+  }
   if (m_recordingSource && m_heatmapStreamService &&
       !m_heatmapStreamService->recordingViewportReady(m_viewState.get())) return;
 
@@ -223,6 +262,14 @@ void UnifiedGridRenderer::geometryChange(const QRectF &newGeometry,
     }
     if (m_axisTextService) {
       m_axisTextService->refreshAxisLayout();
+    }
+    syncGpuSurface();
+    if (m_gpuHeatmap && m_gpuViewPristine && m_viewState && m_viewState->isTimeWindowValid() &&
+        newGeometry.width() > 0) {
+      // Untouched seeded view: keep initial_column_px on the laid-out width.
+      const qint64 end = m_viewState->getVisibleTimeEnd();
+      setGpuViewportSelf(end - gpuInitialSpanMs(newGeometry.width()), end, m_viewState->getMinPrice(),
+                         m_viewState->getMaxPrice());
     }
     update();
   }
@@ -394,6 +441,11 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
               << " symbol=" << normalized);
   m_activeSymbol = normalized;
   resetLivePriceCenter();
+  // gpu mode: the controller serial switches the heatmap (the node holds the old
+  // picture until the new spans are ready); clearData() resets only the legacy
+  // stream and the trade overlays. The next book top centres the new price.
+  if (m_gpuLayer) m_gpuLayer->setSymbol(normalized.toStdString());
+  if (m_gpuHeatmap) m_gpuReseedPrice = true;
   clearData();
   if (m_dataProcessor) {
     QMetaObject::invokeMethod(m_dataProcessor.get(),
@@ -512,6 +564,7 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
     }
     m_manualTimeframeSet = true;
     m_manualTimeframeTimer.start();
+    if (m_gpuLayer && timeframe_ms > 0) m_gpuLayer->setTimeframeMs(timeframe_ms); // limits re-clamp the view
     if (m_dataProcessor) {
       QMetaObject::invokeMethod(
           m_dataProcessor.get(),
@@ -579,6 +632,7 @@ void UnifiedGridRenderer::setHeatmapGamma(double gamma) {
     return;
   }
   m_heatmapGamma = clamped;
+  syncGpuTone();
   update();
   emit heatmapGammaChanged();
 }
@@ -589,6 +643,7 @@ void UnifiedGridRenderer::setHeatmapContrast(double contrast) {
     return;
   }
   m_heatmapContrast = clamped;
+  syncGpuTone();
   update();
   emit heatmapContrastChanged();
 }
@@ -599,6 +654,7 @@ void UnifiedGridRenderer::setHeatmapShaderFloor(double floor) {
     return;
   }
   m_heatmapShaderFloor = clamped;
+  syncGpuTone();
   update();
   emit heatmapShaderFloorChanged();
 }
@@ -611,54 +667,15 @@ void UnifiedGridRenderer::setCandleStyle(int style) {
 }
 
 void UnifiedGridRenderer::setHeatmapColorPreset(const QString& preset) {
-    using CS = HeatmapOverlayRenderer::ColorStop;
-    struct Preset {
-        std::vector<CS> bid;
-        std::vector<CS> ask;
-        double gamma = 2.0;
-    };
-
-    static const QHash<QString, Preset> kPresets = {
-        // Electric (default): cyan bids, orange asks
-        {"Electric", {
-            {{0.0f, QColor(0,0,0)}, {0.3f, QColor(0,30,60)}, {0.7f, QColor(0,180,220)}, {1.0f, QColor(0,255,255)}},
-            {{0.0f, QColor(0,0,0)}, {0.3f, QColor(60,20,0)}, {0.7f, QColor(220,120,0)}, {1.0f, QColor(255,200,0)}},
-            2.0
-        }},
-        // Fire: dark red → orange → yellow asks; cyan bids stay subtle
-        {"Fire", {
-            {{0.0f, QColor(0,0,0)}, {0.5f, QColor(20,40,80)}, {1.0f, QColor(60,120,200)}},
-            {{0.0f, QColor(0,0,0)}, {0.3f, QColor(80,0,0)}, {0.6f, QColor(200,60,0)}, {0.85f, QColor(255,140,0)}, {1.0f, QColor(255,255,0)}},
-            1.8
-        }},
-        // Ocean: deep blue → teal → white bids; green asks
-        {"Ocean", {
-            {{0.0f, QColor(0,0,0)}, {0.3f, QColor(0,20,80)}, {0.7f, QColor(0,100,180)}, {1.0f, QColor(0,220,255)}},
-            {{0.0f, QColor(0,0,0)}, {0.4f, QColor(0,60,40)}, {0.8f, QColor(0,180,100)}, {1.0f, QColor(0,255,160)}},
-            2.2
-        }},
-        // Monochrome: white bids, gray asks
-        {"Monochrome", {
-            {{0.0f, QColor(0,0,0)}, {0.5f, QColor(80,80,80)}, {1.0f, QColor(220,220,220)}},
-            {{0.0f, QColor(0,0,0)}, {0.5f, QColor(50,50,50)}, {1.0f, QColor(140,140,140)}},
-            2.0
-        }},
-        // Matrix: green only
-        {"Matrix", {
-            {{0.0f, QColor(0,0,0)}, {0.4f, QColor(0,40,0)}, {1.0f, QColor(0,255,0)}},
-            {{0.0f, QColor(0,0,0)}, {0.4f, QColor(0,20,0)}, {1.0f, QColor(0,180,0)}},
-            1.6
-        }},
-    };
-
-    auto it = kPresets.find(preset);
-    if (it == kPresets.end()) {
+    // The five legacy presets live in HeatmapPalette (shared with the GPU path).
+    const auto gradients = heatmap::gpu::presetGradients(preset.toStdString());
+    if (!gradients) {
         sLog_Warning("Unknown heatmap color preset ignored: preset=" << preset);
         return;
     }
-    m_heatmapOverlay.setBidGradient(it->bid);
-    m_heatmapOverlay.setAskGradient(it->ask);
-    m_heatmapOverlay.setPaletteGamma(it->gamma);
+    m_heatmapOverlay.setBidGradient(HeatmapOverlayRenderer::toColorStops(gradients->bid));
+    m_heatmapOverlay.setAskGradient(HeatmapOverlayRenderer::toColorStops(gradients->ask));
+    m_heatmapOverlay.setPaletteGamma(gradients->gamma);
     update();
 }
 
@@ -769,6 +786,14 @@ void UnifiedGridRenderer::setTpoLayerEnabled(bool enabled) {
 }
 
 void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
+  if (m_viewState && m_gpuHeatmap) {
+    m_viewState->enableAutoScroll(enabled);
+    if (enabled) returnGpuToLive(); // back to the live edge from history or the future, same span
+    update();
+    emit autoScrollEnabledChanged();
+    sLog_Render("auto-scroll enabled=" << enabled << " reason=request renderer=gpu");
+    return;
+  }
   if (m_viewState) {
     const bool wasEnabled = m_viewState->isAutoScrollEnabled();
     m_viewState->enableAutoScroll(enabled);
@@ -789,6 +814,218 @@ void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
     // Following again pins the window to live from the cache; no refetch.
     onViewportChanged();
   }
+}
+
+
+// ── GPU heatmap renderer (S6b) ───────────────────────────────────────────────
+double UnifiedGridRenderer::heatmapTickSize() const {
+  if (m_gpuHeatmap && m_gpuLayer) return m_gpuLayer->tickPrice();
+  return m_heatmapStreamService ? m_heatmapStreamService->tickSize() : 0.0;
+}
+
+void UnifiedGridRenderer::setHeatmapService(heatmap::HeatmapDataService* service) {
+  if (m_gpuLayer) m_gpuLayer->setService(service);
+}
+
+void UnifiedGridRenderer::setHeatmapRenderer(const QString& renderer) {
+  const bool gpu = renderer == QStringLiteral("gpu");
+  if (gpu == m_gpuHeatmap || !m_gpuLayer) return;
+  sLog_App("Heatmap renderer=" << (gpu ? "gpu" : "legacy") << " symbol=" << m_activeSymbol
+           << " tfMs=" << m_currentTimeframe_ms);
+  m_gpuHeatmap = gpu;
+  m_gpuLayer->setSymbol(m_activeSymbol.toStdString());
+  m_gpuLayer->setTimeframeMs(m_currentTimeframe_ms);
+  syncGpuSurface();
+  m_gpuLayer->setActive(gpu);
+  if (m_dataProcessor) {
+    // Mute or resume only the legacy band stream (INV-088): footprint, TPO and VP stay.
+    QMetaObject::invokeMethod(m_dataProcessor.get(), [processor = m_dataProcessor.get(), gpu] {
+      processor->setHeatmapEnabled(!gpu);
+    }, Qt::QueuedConnection);
+  }
+  if (gpu) {
+    // A legacy viewport carries on; a fresh one waits for the book-top seed.
+    m_gpuPriceKnown = m_viewState && m_viewState->isTimeWindowValid() &&
+                      m_viewState->getMaxPrice() > m_viewState->getMinPrice();
+    m_gpuReseedPrice = false;
+    applyGpuLimits();
+    syncGpuView();
+    followGpuLive();
+    bootstrapGpuTimeView();
+  } else {
+    if (m_viewState) m_viewState->setMaxSpans(0, 0);
+    // Legacy resume adopts the current view before the stream unmutes: pending
+    // bootstrap/initial centring (from startup or a gpu-mode symbol or tf
+    // change) must not replace it on the next book, trade or window update.
+    if (m_heatmapStreamService && m_viewState) m_heatmapStreamService->adoptViewport(*m_viewState);
+    m_heatmapOverlay.requestFullTextureRebuild();
+    onViewportChanged(); // the processor places its window over the current view again
+  }
+  emit heatmapTickSizeChanged();
+  emit heatmapRendererChanged();
+  update();
+}
+
+void UnifiedGridRenderer::setHeatmapChartSettings(const heatmap::HeatmapChartSettings& settings,
+                                                  bool explicitManualTick) {
+  if (!m_gpuLayer) return;
+  m_gpuLayer->setSettings(settings, explicitManualTick);
+  // Both renderers draw the chart's palette and colour range (A/B parity).
+  const auto gradients = heatmap::gpu::gradientsFor(settings);
+  m_heatmapOverlay.setBidGradient(HeatmapOverlayRenderer::toColorStops(gradients.bid));
+  m_heatmapOverlay.setAskGradient(HeatmapOverlayRenderer::toColorStops(gradients.ask));
+  m_heatmapOverlay.setPaletteGamma(gradients.gamma);
+  if (settings.sensitivityMin > 0.0 && settings.sensitivityMax > settings.sensitivityMin) {
+    m_heatmapSensitivityMin = settings.sensitivityMin;
+    m_heatmapSensitivityMax = settings.sensitivityMax;
+    m_chartSensitivityApplied = true;
+  }
+  applyGpuLimits();
+  update();
+}
+
+void UnifiedGridRenderer::setHeatmapTickMemory(const heatmap::ManualTickMemory& memory) {
+  if (m_gpuLayer) m_gpuLayer->setTickMemory(memory);
+}
+
+// The GPU palette's tone mapping is the legacy shader's gamma/contrast/floor.
+void UnifiedGridRenderer::syncGpuTone() {
+  if (m_gpuLayer) {
+    m_gpuLayer->setTone({static_cast<float>(m_heatmapGamma), static_cast<float>(m_heatmapContrast),
+                         static_cast<float>(m_heatmapShaderFloor)});
+  }
+}
+
+void UnifiedGridRenderer::syncGpuSurface() {
+  if (!m_gpuLayer) return;
+  const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
+  m_gpuLayer->setSurface(width(), height(), dpr);
+}
+
+// Spec rules 1, 2 and 9: GridViewState clamps wheel, axis drags and the Agent
+// API identically; legacy mode keeps its unclamped behaviour.
+void UnifiedGridRenderer::applyGpuLimits() {
+  if (!m_viewState) return;
+  if (m_gpuHeatmap && m_gpuLayer) m_viewState->setMaxSpans(m_gpuLayer->maxTimeSpanMs(), m_gpuLayer->maxPriceSpan());
+  else m_viewState->setMaxSpans(0, 0);
+}
+
+void UnifiedGridRenderer::syncGpuView() {
+  if (!m_gpuHeatmap || !m_gpuLayer || !m_viewState || !m_viewState->isTimeWindowValid()) return;
+  heatmap::gpu::ViewWindow view{static_cast<double>(m_viewState->getVisibleTimeStart()),
+                                static_cast<double>(m_viewState->getVisibleTimeEnd()), m_viewState->getMinPrice(),
+                                m_viewState->getMaxPrice()};
+  m_gpuLayer->setView(view, m_gpuPriceKnown);
+}
+
+// Follow-live from LiveSnapshot::openEndMs (HeatmapStreamService::handleRenderTick
+// is skipped in gpu mode): the view end stays one padding past the live bucket's end.
+void UnifiedGridRenderer::followGpuLive() {
+  if (!m_gpuHeatmap || !m_gpuLayer || !m_viewState || !m_viewState->isTimeWindowValid() ||
+      !m_viewState->isAutoScrollEnabled() || m_viewState->isDragging())
+    return;
+  const int64_t openEnd = m_gpuLayer->liveOpenEndMs();
+  const int64_t tf = m_currentTimeframe_ms;
+  if (openEnd <= 0 || tf <= 0) return;
+  const int64_t start = m_viewState->getVisibleTimeStart(), end = m_viewState->getVisibleTimeEnd();
+  const int64_t span = end - start;
+  const int64_t liveEnd = recording::floorDiv(openEnd + tf - 1, tf) * tf;
+  const int64_t pad = std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(span) * m_autoScrollPaddingFrac));
+  const int64_t target = liveEnd + pad;
+  if (target <= end) return; // the live bucket is inside the padded view
+  const int64_t shift = target - end;
+  setGpuViewportSelf(start + shift, end + shift, m_viewState->getMinPrice(), m_viewState->getMaxPrice());
+  emit liveRenderTick();
+}
+
+// Cold start (plan section 2): the first book top places the first viewport and
+// the view is requested at once; the node draws the loading hatch until the newest
+// span lands. The price window uses initial_price_pct of the legacy band geometry
+// (kRows rows at the finest native tick), as the legacy first view does.
+void UnifiedGridRenderer::seedGpuViewport(double bestBid, double bestAsk) {
+  if (!m_viewState || !std::isfinite(bestBid) || !std::isfinite(bestAsk) || bestBid <= 0 || bestAsk < bestBid) return;
+  const bool timeValid = m_viewState->isTimeWindowValid();
+  if (timeValid && m_gpuPriceKnown && !m_gpuReseedPrice) return;
+  const int64_t tf = std::max<int64_t>(1, m_currentTimeframe_ms);
+  qint64 start = m_viewState->getVisibleTimeStart(), end = m_viewState->getVisibleTimeEnd();
+  if (!timeValid) {
+    const int64_t span = gpuInitialSpanMs(width());
+    const int64_t now = QDateTime::currentMSecsSinceEpoch();
+    m_gpuViewPristine = true;
+    end = recording::floorDiv(now, tf) * tf + tf +
+          std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(span) * m_autoScrollPaddingFrac));
+    start = end - span;
+  }
+  const auto* scroll = m_heatmapStreamService ? m_heatmapStreamService->autoScrollController() : nullptr;
+  const int pct = scroll ? scroll->initialPricePct() : 5;
+  const double full = recording_view::kFinestNativeTick * recording_view::kRows;
+  const double span = pct > 0 && pct < 100 ? full * pct / 100.0 : full;
+  const double mid = (bestBid + bestAsk) * 0.5;
+  m_gpuPriceKnown = true;
+  m_gpuReseedPrice = false;
+  sLog_Render("GPU heatmap viewport seeded from the book top: mid=" << mid << " time=[" << start << ".." << end
+              << "] price=[" << mid - span * 0.5 << ".." << mid + span * 0.5 << "]");
+  setGpuViewportSelf(start, end, mid - span * 0.5, mid + span * 0.5);
+  syncGpuView(); // also when the viewport did not change (priceKnown flips)
+  update();
+}
+
+void UnifiedGridRenderer::returnGpuToLive() {
+  if (!m_gpuHeatmap || !m_gpuLayer || !m_viewState || !m_viewState->isTimeWindowValid()) return;
+  const int64_t anchor = m_gpuLayer->liveAnchorMs();
+  const int64_t tf = m_currentTimeframe_ms;
+  if (anchor <= 0 || tf <= 0) return; // nothing known yet: the next live frame steps forward
+  const int64_t span = m_viewState->getVisibleTimeEnd() - m_viewState->getVisibleTimeStart();
+  const int64_t liveEnd = recording::floorDiv(anchor + tf - 1, tf) * tf;
+  const int64_t pad = std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(span) * m_autoScrollPaddingFrac));
+  sLog_Render("GPU heatmap returns to live: anchor=" << anchor << " end=" << liveEnd + pad);
+  m_viewState->setViewport(liveEnd + pad - span, liveEnd + pad, m_viewState->getMinPrice(), m_viewState->getMaxPrice());
+  syncGpuView(); // publishes the view even when it was already there
+  emit liveRenderTick();
+}
+
+void UnifiedGridRenderer::bootstrapGpuTimeView() {
+  if (!m_gpuHeatmap || !m_gpuLayer || !m_viewState || m_viewState->isTimeWindowValid()) {
+    if (m_gpuBootstrapTimer) m_gpuBootstrapTimer->stop();
+    return;
+  }
+  const int64_t anchor = m_gpuLayer->liveAnchorMs();
+  const int64_t tf = std::max<int64_t>(1, m_currentTimeframe_ms);
+  if (anchor <= 0) {
+    // Availability arrives on the data thread: look again shortly (stops once
+    // a view exists, from here, a book top, a trade or the API).
+    if (!m_gpuBootstrapTimer) {
+      m_gpuBootstrapTimer = new QTimer(this);
+      m_gpuBootstrapTimer->setInterval(50);
+      connect(m_gpuBootstrapTimer, &QTimer::timeout, this, [this] { bootstrapGpuTimeView(); });
+    }
+    if (!m_gpuBootstrapTimer->isActive()) m_gpuBootstrapTimer->start();
+    return;
+  }
+  if (m_gpuBootstrapTimer) m_gpuBootstrapTimer->stop();
+  const int64_t span = gpuInitialSpanMs(width());
+  const int64_t end = recording::floorDiv(anchor, tf) * tf + tf +
+                      std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(span) * m_autoScrollPaddingFrac));
+  sLog_Render("GPU heatmap time-only bootstrap from availability: anchor=" << anchor << " time=[" << end - span
+              << ".." << end << "] (price from the first decoded data)");
+  m_gpuPriceKnown = false;
+  m_gpuViewPristine = true;
+  setGpuViewportSelf(end - span, end, 0.0, 1.0); // placeholder price: nothing draws until it is known
+  syncGpuView();
+}
+
+// The legacy first view's time span: initial_column_px per column (16 columns min).
+qint64 UnifiedGridRenderer::gpuInitialSpanMs(double widthPx) const {
+  const int64_t tf = std::max<int64_t>(1, m_currentTimeframe_ms);
+  const auto* scroll = m_heatmapStreamService ? m_heatmapStreamService->autoScrollController() : nullptr;
+  const int gridWidth = m_heatmapStreamService ? m_heatmapStreamService->gridWidth() : 5120;
+  return scroll ? scroll->initialSpanMs(widthPx, gridWidth, tf) : 256 * tf;
+}
+
+void UnifiedGridRenderer::setGpuViewportSelf(qint64 start, qint64 end, double priceMin, double priceMax) {
+  m_gpuSelfViewport = true;
+  m_viewState->setViewport(start, end, priceMin, priceMax);
+  m_gpuSelfViewport = false;
 }
 
 //  COORDINATE SYSTEM INTEGRATION: Expose CoordinateSystem to QML
@@ -887,9 +1124,11 @@ void UnifiedGridRenderer::applyClientConfig(const ClientConfig &config) {
   setHeatmapGamma(config.heatmap.gamma);
   setHeatmapContrast(config.heatmap.contrast);
   setHeatmapShaderFloor(config.heatmap.shaderFloor);
+  syncGpuTone();
   m_heatmapTargetRowPx = std::clamp(config.heatmap.targetRowPx, 1, 64);
   m_heatmapCellAspect = std::clamp(config.heatmap.cellAspect, 0.05, 4.0);
-  if (config.heatmap.sensitivityMin > 0.0 && config.heatmap.sensitivityMax > config.heatmap.sensitivityMin) {
+  if (!m_chartSensitivityApplied && config.heatmap.sensitivityMin > 0.0 &&
+      config.heatmap.sensitivityMax > config.heatmap.sensitivityMin) {
     m_heatmapSensitivityMin = config.heatmap.sensitivityMin;
     m_heatmapSensitivityMax = config.heatmap.sensitivityMax;
   }
@@ -1093,6 +1332,16 @@ void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent *event) {
 }
 
 void UnifiedGridRenderer::wheelEvent(QWheelEvent *event) {
+  if (m_gpuHeatmap && m_viewState && isVisible() && m_viewState->isTimeWindowValid() &&
+      (event->modifiers() & Qt::ShiftModifier)) {
+    // Shift+wheel scales price only (spec rule 2, as the lab); macOS delivers it
+    // as a horizontal delta, so whichever axis moved is used.
+    const int delta = event->angleDelta().y() != 0 ? event->angleDelta().y() : event->angleDelta().x();
+    if (delta != 0) m_viewState->handlePriceZoomWithSensitivity(delta, event->position().y(), height());
+    update();
+    event->accept();
+    return;
+  }
   if (m_viewState && isVisible() && m_viewState->isTimeWindowValid()) {
     m_viewState->handleZoomWithSensitivity(
         event->angleDelta().y(), event->position(), QSizeF(width(), height()));
@@ -1372,12 +1621,19 @@ void UnifiedGridRenderer::addTrade(const Trade &trade) {
 }
 void UnifiedGridRenderer::setViewport(qint64 timeStart, qint64 timeEnd,
                                       double priceMin, double priceMax) {
+  if (m_gpuHeatmap && priceMax > priceMin) {
+    // An explicit viewport (Agent API, QML) is a real price window: no book-top
+    // seed replaces it.
+    m_gpuPriceKnown = true;
+    m_gpuReseedPrice = false;
+  }
   if (m_viewState && (priceMin != m_viewState->getMinPrice() ||
                       priceMax != m_viewState->getMaxPrice())) {
     m_viewState->enableAutoScroll(false);
     if (m_heatmapStreamService) m_heatmapStreamService->cancelPriceCenter();
   }
   onViewChanged(timeStart, timeEnd, priceMin, priceMax);
+  if (m_gpuHeatmap) syncGpuView(); // also when the values were unchanged (price now known)
 }
 void UnifiedGridRenderer::setGridResolution(int timeResMs, double priceRes) {
   setPriceResolution(priceRes);

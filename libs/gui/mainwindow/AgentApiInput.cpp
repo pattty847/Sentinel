@@ -2,10 +2,32 @@
 #include <QCoreApplication>
 #include <QMouseEvent>
 #include <QThread>
+#include <QTimer>
 #include <QWheelEvent>
+#include "SentinelLogging.hpp"
 #include <cmath>
 
 namespace AgentApi {
+InputDispatcher::InputDispatcher() : dragTimer_(std::make_unique<QTimer>()) {
+    dragTimer_->setSingleShot(true);
+    dragTimer_->setInterval(kDefaultDragTimeoutMs);
+    QObject::connect(dragTimer_.get(), &QTimer::timeout, dragTimer_.get(), [this] { releaseDrag(); });
+}
+InputDispatcher::~InputDispatcher() = default;
+
+void InputDispatcher::setDragTimeoutMs(int ms) { dragTimer_->setInterval(std::max(1, ms)); }
+
+void InputDispatcher::releaseDrag() {
+    if (QQuickView *view = dragView_.data()) {
+        sLog_Warning("Agent API drag timed out on " << dragTarget_ << "; releasing at its last position");
+        QMouseEvent event(QEvent::MouseButtonRelease, dragLocal_, dragLocal_, dragGlobal_, Qt::LeftButton, Qt::NoButton,
+                          dragModifiers_);
+        QCoreApplication::sendEvent(view, &event);
+    }
+    dragView_.clear();
+    dragTarget_.clear();
+}
+
 ControlApply InputDispatcher::apply(QQuickView *view, const QRectF &chart, const InputCommand &c) {
     auto fail = [](int status, const char *code, const char *message) {
         ControlApply out;
@@ -45,10 +67,15 @@ ControlApply InputDispatcher::apply(QQuickView *view, const QRectF &chart, const
     } else if (c.kind == "dragStart") {
         dragView_ = view;
         dragTarget_ = c.target;
+        dragLocal_ = local; dragGlobal_ = global; dragModifiers_ = modifiers;
         mouse(QEvent::MouseButtonPress, Qt::LeftButton, Qt::LeftButton);
+        dragTimer_->start();
     } else if (c.kind == "dragMove") {
+        dragLocal_ = local; dragGlobal_ = global;
         mouse(QEvent::MouseMove, Qt::NoButton, Qt::LeftButton);
+        dragTimer_->start();
     } else if (c.kind == "dragEnd") {
+        dragTimer_->stop();
         mouse(QEvent::MouseButtonRelease, Qt::LeftButton, Qt::NoButton);
         dragView_.clear(); dragTarget_.clear();
     } else if (c.kind == "click") {

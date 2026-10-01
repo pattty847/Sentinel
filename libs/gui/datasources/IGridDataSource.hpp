@@ -39,6 +39,7 @@ public:
                                        int64_t endTimeMs,
                                        int count) = 0;
     virtual void registerRecordingView(const recording::LiveView& view) = 0;
+    virtual void releaseRecordingView(const recording::LiveView& view) { Q_UNUSED(view); }
     virtual void requestRecordingHeatmapHistory(const protocol::recordingwire::Request& request) = 0;
     virtual void requestFootprintHistory(const QString& symbol,
                                          int64_t timeframeMs,

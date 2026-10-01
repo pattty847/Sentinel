@@ -4,6 +4,8 @@
 #include <openssl/pem.h>
 #include <condition_variable>
 #include <future>
+#include <map>
+#include <set>
 
 using namespace std::chrono_literals;
 namespace beast = boost::beast;
@@ -186,4 +188,62 @@ TEST_F(SentinelStreamClientWriteTest, StopDrainsBorrowedBufferBeforeReconnect) {
 TEST_F(SentinelStreamClientWriteTest, UnexpectedAndFailedCompletionsAreSafe) {
     auto c = client();
     checkDefensiveCompletions(*c);
+}
+// S6b (S6a review): the GPU heatmap's data thread calls requestHeatmapChunks and
+// subscribeHeatmapLive (through SentinelStreamClientTransport) while the GUI
+// thread writes its own messages. The calling thread only takes an atomic id and
+// posts to the strand: every message is written exactly once, ids are unique,
+// and the strand keeps each thread's order.
+TEST_F(SentinelStreamClientWriteTest, HeatmapRequestsFromOtherThreadsAreWrittenOnceWithUniqueIds) {
+    auto c = client();
+    c->connectToServer();
+    ASSERT_TRUE(connected(*c));
+    constexpr int kThreads = 4, kEach = 50, kGui = 20;
+    std::vector<std::vector<quint64>> ids(kThreads);
+    std::vector<std::thread> workers;
+    for (int t = 0; t < kThreads; ++t)
+        workers.emplace_back([&, t] {
+            for (int i = 0; i < kEach; ++i)
+                ids[t].push_back(c->requestHeatmapChunks("BTC-USD", "hmc2.near", 60'000,
+                                                         {int64_t(t) * 1'000'000'000 + int64_t(i) * 3'600'000}, {}));
+            ids[t].push_back(c->subscribeHeatmapLive("BTC-USD", {"hmc2.near"}, 0));
+        });
+    for (int i = 0; i < kGui; ++i) c->subscribe("BTC-USD"); // the GUI thread meanwhile
+    for (auto &w : workers) w.join();
+    c->releaseRecordingView("BTC-USD");
+    const size_t total = kThreads * (kEach + 1) + kGui + 1;
+    ASSERT_TRUE(count(total));
+    c->disconnectFromServer();
+    expectDrained(*c);
+    std::set<quint64> unique;
+    for (const auto &v : ids) unique.insert(v.begin(), v.end());
+    EXPECT_EQ(unique.size(), size_t(kThreads * (kEach + 1))) << "request ids are unique across threads";
+    std::lock_guard lock(mutex);
+    ASSERT_EQ(messages.size(), total) << "nothing lost or duplicated";
+    std::map<int, std::vector<int64_t>> startsByThread;
+    std::set<quint64> written;
+    int unview = 0, subscribes = 0;
+    for (const auto &m : messages) {
+        const auto j = nlohmann::json::parse(m);
+        const auto type = j.value("type", std::string{});
+        if (type == "heatmap_chunk_request") {
+            written.insert(j["req"].get<quint64>());
+            const int64_t start = j["starts"][0].get<int64_t>();
+            startsByThread[int(start / 1'000'000'000)].push_back(start);
+        } else if (type == "heatmap_live_subscribe") {
+            written.insert(j["sub"].get<quint64>());
+        } else if (type == "heatmap_recording_unview") {
+            ++unview;
+            EXPECT_EQ(j.value("symbol", std::string{}), "BTC-USD");
+        } else {
+            ++subscribes;
+        }
+    }
+    EXPECT_EQ(written, unique) << "each id was written once";
+    EXPECT_EQ(unview, 1);
+    EXPECT_EQ(subscribes, kGui);
+    for (const auto &[thread, starts] : startsByThread) {
+        EXPECT_EQ(starts.size(), size_t(kEach));
+        EXPECT_TRUE(std::is_sorted(starts.begin(), starts.end())) << "thread " << thread << " kept its order";
+    }
 }

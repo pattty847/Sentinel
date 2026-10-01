@@ -49,6 +49,7 @@ public slots:
                             double minPrice = 0, double maxPrice = 0,
                             double widthPx = 0, double heightPx = 0);
     void setHeatmapEnabled(bool enabled); // processor thread; preserves recording/legacy mode
+    bool heatmapEnabled() const { return m_heatmapEnabled; } // processor thread
     void setRecordingConfig(bool requested, double minRowPx);
     void setRecordingCapability(bool available);
     void setRecordingConnected(bool connected);
@@ -84,6 +85,9 @@ signals:
     // Ring writes for the GPU window; live and history both arrive this way.
     void heatmapWindowUpdated(heatmap_window::UpdatePtr update);
     void recordingViewNeeded(const recording::LiveView& view);
+    // The legacy stream was muted (gpu renderer): the server can stop the live
+    // recording view this connection registered (heatmap_recording_unview).
+    void recordingViewReleased(const recording::LiveView& view);
     void recordingHistoryFetchNeeded(const protocol::recordingwire::Request& request);
     void heatmapHistoryFetchNeeded(qint64 timeframeMs, qint64 endTimeMs, int count);
     void heatmapHistoryStatus(bool loading, qint64 oldestAvailableMs);
@@ -117,6 +121,13 @@ private:
     void sendRecordingRequest(int64_t endMs, bool finalRepair = false);
     void resetRecordingRequest();
     bool m_heatmapEnabled = true;
+    // The last viewport received while muted, placed again when the stream resumes.
+    struct MutedViewport {
+        qint64 startMs = 0, endMs = 0;
+        bool follow = false;
+        double minPrice = 0, maxPrice = 0, widthPx = 0, heightPx = 0;
+        bool valid = false;
+    } m_mutedViewport;
     bool m_recordingRequested = false, m_recordingAvailable = false;
     bool m_recordingConnected = false;
     bool m_recordingInFlight = false, m_recordingBandConfirmed = false;
@@ -134,6 +145,7 @@ private:
     QTimer* m_recordingRetry = nullptr;
     int m_recordingNoProgress = 0;
     recording::LiveView m_registeredView;
+    bool m_viewMayBeRegistered = false; // a view was sent on this connection and not released
     QTimer* m_recordingViewRetry = nullptr;
     int m_recordingViewRetryMs = 1000;
     QTimer* m_recordingFinalRetry = nullptr;

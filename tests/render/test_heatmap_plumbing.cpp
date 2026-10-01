@@ -299,4 +299,23 @@ TEST_F(HeatmapPlumbing, FactoryFailuresCleanUpOnTheWorkerAndJoinBeforeRethrowing
         EXPECT_TRUE(deletedOnWorker);
     }
 }
+// S6a review minor 7: a malformed gradient in YAML (non-numeric position, a map
+// color, a non-map stop) keeps the default gradient; the rest of the file loads.
+TEST_F(HeatmapPlumbing, MalformedGradientStopsKeepTheDefaultAndTheRestLoads) {
+    QTemporaryDir dir;
+    QFile yaml(dir.filePath("client.yaml"));
+    ASSERT_TRUE(yaml.open(QIODevice::WriteOnly));
+    yaml.write("heatmap:\n  palette_preset: Custom\n"
+               "  bid_gradient: [{position: abc, color: \"#123456\"}, {position: 1, color: \"#abcdef\"}]\n"
+               "  ask_gradient: [{position: 0, color: {r: 1}}, 7]\n"
+               "  opacity: 0.5\n");
+    yaml.close();
+    ClientConfig config;
+    ASSERT_TRUE(ConfigLoader::loadClientConfig(yaml.fileName().toStdString(), &config));
+    const ClientHeatmapConfig defaults;
+    EXPECT_EQ(config.heatmap.bidGradient, defaults.bidGradient);
+    EXPECT_EQ(config.heatmap.askGradient, defaults.askGradient);
+    EXPECT_EQ(config.heatmap.palettePreset, "Custom");
+    EXPECT_EQ(config.heatmap.opacity, 0.5) << "later keys still load";
+}
 } // namespace
