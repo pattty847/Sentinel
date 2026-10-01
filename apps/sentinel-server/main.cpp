@@ -4,6 +4,7 @@
 #include "SentinelLogging.hpp"
 #include "SentinelLogSink.hpp"
 #include "ConfigLoader.hpp"
+#include "servermodel/RecordingDir.hpp"
 
 int main(int argc, char *argv[]) {
     sentinel::logging::installLogSink("sentinel-server", argc, argv);
@@ -17,6 +18,20 @@ int main(int argc, char *argv[]) {
                      << " cwd=" << QDir::currentPath());
     }
     ConfigLoader::loadServerConfig("config/.server_config.yaml", &serverConfig);
+
+    // --require-recording (used by the launchd service): never fall back to the
+    // system disk. If the recording volume is not mounted or not accessible
+    // (for example a missing Full Disk Access grant), exit with EX_TEMPFAIL so
+    // launchd retries instead of recording somewhere else.
+    if (QCoreApplication::arguments().contains(QStringLiteral("--require-recording"))) {
+        auto &rc = serverConfig.recording;
+        rc.fallbackDir.clear();
+        if (rc.enabled && recording::resolveRecordingDir(rc.dir, rc.fallbackDir).dir.empty()) {
+            sLog_Error("Recording required but the volume for " << rc.dir
+                       << " is not mounted or not accessible; exiting for retry");
+            return 75;
+        }
+    }
     
     SentinelServerApp serverApp(serverConfig);
     if (!serverApp.initialize()) {
