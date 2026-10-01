@@ -656,3 +656,27 @@ its own contract. [TapeSurf heatmap guide](https://tapesurf.com/learn/orderbook-
 ## Owner decision: price precision (2026-09-30)
 
 Raw L2 is always stored at the exchange's exact precision (BTC-USD: $0.01 prices, exact sizes); that was never open. The rollup levels (1s / 1m / 1h) also keep the exchange's native price precision, stored sparse (only prices that held orders). Coarsening a rollup level is not planned; if a measurement (compression lab) shows a level is too large, that comes back to the owner as a decision. Rollups are rebuildable from raw L2, so any later change is reversible.
+
+## Measured: pristine raw-L2 capture, BTC-USD (2026-09-29 20:13 to 2026-09-30 22:16 EDT)
+
+`sentinel-capture --verify` over 3 runs (26.1 h; the third run is the continuous launchd capture, still open):
+
+| Measure | Value |
+|---|---|
+| Frames received | 2,106,936 (mean 22.5/s, p99 29/s per 1 s bucket) |
+| L2 level events (replayed) | 1,737,078 (about 1.6 M/day) |
+| Received bytes (exact JSON frames) | 3.65 GB = **3.36 GB/day** |
+| On disk (zstd blocks, CRC, index) | 361 MB = **333 MB/day** (about 10.1x) |
+| Coinbase snapshots | 14 (one per connect), 41.2k-41.9k levels, 4.5-4.6 MB each raw |
+| Reconnects / transport-down events | 7 / 7 |
+| Sequence gaps, torn tails, clock regressions, verify errors | 0 / 0 / 0 / 0 |
+
+Implications:
+- Raw L2 for BTC-USD costs about 333 MB/day, about 122 GB/year on the T7, before any further compression work. Storage is not the constraint.
+- Raw is about 40x today's HMC2 (deep 1m is about 8 MB/day), and it is the full-fidelity source.
+- Coinbase sends a full snapshot only on connect. Keyframes for fast seeking are book snapshots we insert ourselves. At about 440 KB each compressed (the ~4.6 MB raw snapshot at the measured ratio), the cost per keyframe interval is:
+  - 1 min: about 630 MB/day (+190 %)
+  - 5 min: about 127 MB/day (+38 %)
+  - 15 min: about 42 MB/day (+13 %)
+  - 60 min: about 11 MB/day (+3 %)
+- Seek cost at 15 min is replaying about 17k level events, which takes milliseconds. Exact numbers come from the compression lab.
