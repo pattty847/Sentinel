@@ -1,10 +1,14 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # heatmap-ab.sh — S6d A/B evidence: two sentinel-gui processes (legacy and gpu heatmap
 # renderer) on the running local recorder, driven through the same Agent API sequence,
 # with target=heatmap screenshots and state snapshots at every step.
 #
 #   scripts/dev/heatmap-ab.sh [run-name]          # A/B sequence -> screenshots/s6d/<run-name>/
 #   scripts/dev/heatmap-ab.sh --soak 10 [run-name] # gpu only, follow-live 1m, N minutes of samples
+#   scripts/dev/heatmap-ab.sh --smoke [run-name]   # launch both, wait until ready, clean up (no steps)
+#   scripts/dev/heatmap-ab.sh --dry-run [run-name] # check preconditions, print the launch commands
+#
+# Runs under the stock macOS /bin/bash 3.2 (no associative arrays).
 #
 # Env: SENTINEL_BUILD_DIR (default build/mac-clang), AB_LEGACY_PORT (17121), AB_GPU_PORT (17122),
 #      AB_SETTLE_TIMEOUT_S (30), AB_LEGACY_SETTLE_S (4), SENTINEL_PROBES (passed to the GUIs).
@@ -15,8 +19,12 @@
 # so no _last_session layout write). The owner's QSettings plist is exported before and after and
 # the diff is reported. Screenshots use target=heatmap only (FM-120).
 #
-# Caveat: sentinel-gui spawns the screener server on port 17200 and kills whatever holds that
-# port first, so this script refuses to run while the owner's GUI (17100 or 17200) is up.
+# Screener: a normal sentinel-gui kills whatever holds port 17200 and starts screener_server.py
+# there, and only its closeEvent stops that child. The A/B GUIs run with --no-screener, so they
+# neither start a screener nor kill one (not the owner's, not each other's). Cleanup still ends
+# every descendant of the two GUI PIDs (and nothing else) before the GUIs themselves.
+# The script refuses to run while the owner's GUI (17100 or 17200) is up: both would write the
+# same QSettings domain, so the before/after settings diff would not prove anything.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -29,8 +37,12 @@ LEGACY_SETTLE=${AB_LEGACY_SETTLE_S:-4}
 SERVER_PORT=${AB_SERVER_PORT:-8080}
 PLIST_DOMAIN=com.sentinel.SentinelTerminal
 
-SOAK_MIN=0
-if [[ "${1:-}" == "--soak" ]]; then SOAK_MIN=${2:?usage: --soak <minutes> [run-name]}; shift 2; fi
+SOAK_MIN=0; SMOKE=0; DRY_RUN=0
+case "${1:-}" in
+    --soak) SOAK_MIN=${2:?usage: --soak <minutes> [run-name]}; shift 2 ;;
+    --smoke) SMOKE=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+esac
 RUN=${1:-$(date +%Y%m%d-%H%M%S)}
 OUT=$ROOT/screenshots/s6d/$RUN
 mkdir -p "$OUT"
@@ -39,24 +51,48 @@ log() { printf '[heatmap-ab %s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
 now_ms() { perl -MTime::HiRes=time -e 'printf("%d\n", time()*1000)'; }
 listening() { lsof -nP -iTCP:"$1" -sTCP:LISTEN -t 2>/dev/null; }
 
-declare -A PID PORT
+# Per-mode values (bash 3.2 has no associative arrays): PID_legacy, PORT_gpu, SPAWN_MS_gpu, ...
+setv() { printf -v "$1_$2" '%s' "$3"; }  # <name> <mode> <value>
+getv() { local n="$1_$2"; printf '%s' "${!n:-}"; }  # <name> <mode>
+LAUNCHED=()
+descendants() { # <pid>: every descendant pid, children first
+    local c
+    for c in $(pgrep -P "$1" 2>/dev/null || true); do
+        descendants "$c"
+        echo "$c"
+    done
+}
 cleanup() {
     local rc=$?
     trap - EXIT INT TERM
-    for mode in "${!PID[@]}"; do
-        if kill -0 "${PID[$mode]}" 2>/dev/null; then
-            # SIGTERM: Qt installs no handler, the process dies before closeEvent, so the
-            # owner's _last_session layout is never written by an A/B process.
-            kill -TERM "${PID[$mode]}" 2>/dev/null || true
-        fi
+    local mode pid kids="" p
+    for mode in ${LAUNCHED[@]+"${LAUNCHED[@]}"}; do
+        pid=$(getv PID "$mode")
+        kill -0 "$pid" 2>/dev/null || continue
+        # Children of this GUI only (a screener if --no-screener was ever dropped, any helper):
+        # collected while the GUI is alive, because a SIGTERM'd GUI orphans them to launchd.
+        kids="$kids $(descendants "$pid" | tr '\n' ' ')"
+        # SIGTERM: Qt installs no handler, the process dies before closeEvent, so the
+        # owner's _last_session layout is never written by an A/B process.
+        kill -TERM "$pid" 2>/dev/null || true
     done
+    for p in $kids; do kill -TERM "$p" 2>/dev/null || true; done
     sleep 1
-    for mode in "${!PID[@]}"; do
-        kill -0 "${PID[$mode]}" 2>/dev/null && kill -KILL "${PID[$mode]}" 2>/dev/null || true
+    for p in $kids; do kill -0 "$p" 2>/dev/null && kill -KILL "$p" 2>/dev/null || true; done
+    for mode in ${LAUNCHED[@]+"${LAUNCHED[@]}"}; do
+        pid=$(getv PID "$mode")
+        kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
         local f
-        f=$(ls -t ~/Library/Logs/Sentinel/sentinel-gui-*-"${PID[$mode]}".log 2>/dev/null | head -1 || true)
+        f=$(ls -t ~/Library/Logs/Sentinel/sentinel-gui-*-"$pid".log 2>/dev/null | head -1 || true)
         [[ -n "$f" ]] && cp "$f" "$OUT/$mode-run.log"
     done
+    local left=""
+    for p in $kids; do kill -0 "$p" 2>/dev/null && left="$left $p"; done
+    for mode in ${LAUNCHED[@]+"${LAUNCHED[@]}"}; do
+        pid=$(getv PID "$mode"); kill -0 "$pid" 2>/dev/null && left="$left $pid"
+    done
+    if [[ -n "$left" ]]; then log "processes still alive after cleanup:$left"; (( rc != 0 )) || rc=1; fi
+    [[ -z "${kids// /}" ]] || log "ended GUI child processes:$kids"
     if [[ -f "$OUT/settings-before.plist" ]]; then
         defaults export "$PLIST_DOMAIN" - >"$OUT/settings-after.plist" 2>/dev/null || true
         if diff -u "$OUT/settings-before.plist" "$OUT/settings-after.plist" >"$OUT/settings-diff.txt"; then
@@ -74,21 +110,29 @@ trap cleanup EXIT INT TERM
 [[ -x "$GUI_BIN" ]] || { log "no sentinel-gui in $BUILD (cmake --build --preset mac-clang)"; exit 1; }
 [[ -n "$(listening "$SERVER_PORT")" ]] || { log "no server listening on :$SERVER_PORT (the recorder must be up; never start one here)"; exit 1; }
 for p in 17100 17200; do
-    [[ -z "$(listening "$p")" ]] || { log "port $p is in use: the owner's GUI seems to be running; refusing (the GUI kills port 17200 holders)"; exit 1; }
+    [[ -z "$(listening "$p")" ]] || { log "port $p is in use: the owner's GUI seems to be running; refusing (shared settings, see header)"; exit 1; }
 done
 for p in "$LEGACY_PORT" "$GPU_PORT"; do
     [[ -z "$(listening "$p")" ]] || { log "port $p is in use; set AB_LEGACY_PORT/AB_GPU_PORT"; exit 1; }
 done
 [[ -f "$ROOT/certs/sentinel-server.crt" ]] || { log "missing certs/sentinel-server.crt (copy it from the main checkout)"; exit 1; }
+if (( DRY_RUN )); then
+    log "dry run: preconditions OK; would run (cwd $ROOT):"
+    for m in legacy gpu; do
+        p=$LEGACY_PORT; [[ $m == gpu ]] && p=$GPU_PORT
+        log "  $GUI_BIN --heatmap-renderer $m --api-port $p --no-screener"
+    done
+    exit 0
+fi
 defaults export "$PLIST_DOMAIN" - >"$OUT/settings-before.plist"
 cd "$ROOT"
 
 # ---------------------------------------------------------------- API helpers
 api() { # <mode> <path>
-    curl -s --max-time 10 "http://127.0.0.1:${PORT[$1]}$2"
+    curl -s --max-time 10 "http://127.0.0.1:$(getv PORT "$1")$2"
 }
 post() { # <mode> <path> <json>
-    curl -s --max-time 10 -H 'Content-Type: application/json' -d "$3" "http://127.0.0.1:${PORT[$1]}$2"
+    curl -s --max-time 10 -H 'Content-Type: application/json' -d "$3" "http://127.0.0.1:$(getv PORT "$1")$2"
 }
 wait_op() { # <mode> <opId> -> prints status
     local st
@@ -155,18 +199,19 @@ row() { # <mode> <step> <opMs> <settleMs> <frameShot> <settledShot>
 
 launch() { # <mode> <port>
     local mode=$1 port=$2
-    PORT[$mode]=$port
-    SPAWN_MS[$mode]=$(now_ms)
-    nohup "$GUI_BIN" --heatmap-renderer "$mode" --api-port "$port" >"$OUT/$mode.out" 2>&1 &
-    PID[$mode]=$!
-    log "$mode started pid ${PID[$mode]} api :$port"
+    setv PORT "$mode" "$port"
+    setv SPAWN_MS "$mode" "$(now_ms)"
+    nohup "$GUI_BIN" --heatmap-renderer "$mode" --api-port "$port" --no-screener >"$OUT/$mode.out" 2>&1 &
+    setv PID "$mode" "$!"
+    disown "$!" 2>/dev/null || true # no "Terminated" job notice from the cleanup's SIGTERM
+    LAUNCHED+=("$mode")
+    log "$mode started pid $(getv PID "$mode") api :$port"
 }
-declare -A SPAWN_MS
 wait_ready() { # <mode>: API up, connected, first heatmap data (legacy) / settled (gpu)
     local mode=$1 t
     for _ in $(seq 300); do
-        [[ -n "$(listening "${PORT[$mode]}")" ]] && break
-        kill -0 "${PID[$mode]}" || { log "$mode exited early"; tail -20 "$OUT/$mode.out" >&2; exit 1; }
+        [[ -n "$(listening "$(getv PORT "$mode")")" ]] && break
+        kill -0 "$(getv PID "$mode")" || { log "$mode exited early"; tail -20 "$OUT/$mode.out" >&2; exit 1; }
         sleep 0.1
     done
     for _ in $(seq 600); do
@@ -177,7 +222,7 @@ wait_ready() { # <mode>: API up, connected, first heatmap data (legacy) / settle
         fi
         sleep 0.1
     done
-    t=$(( $(now_ms) - SPAWN_MS[$mode] ))
+    t=$(( $(now_ms) - $(getv SPAWN_MS "$mode") ))
     log "$mode ready: cold start (spawn -> first heatmap data) ${t} ms"
     echo "$mode	cold_start_ms	$t" >>"$OUT/summary.tsv"
 }
@@ -198,7 +243,7 @@ if (( SOAK_MIN > 0 )); then
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(( $(date +%s) - t0 ))" \
             "$(jq -r '[.data.liveAgeMs,.data.liveAgeP50Ms,.data.liveAgeP95Ms,.data.livePublishP95Ms,.data.liveSamples]|@tsv' <<<"$h")" \
             "$(jq -r '[.data.render.frameP50Ms,.data.render.frameP95Ms,.data.render.rateHz]|@tsv' <<<"$s")" \
-            "$(cpu "${PID[gpu]}")" "$(cpu "$rec_pid")" "$(cpu "$cap_pid")" "$(sysctl -n vm.loadavg)" >>"$OUT/soak.tsv"
+            "$(cpu "$(getv PID gpu)")" "$(cpu "$rec_pid")" "$(cpu "$cap_pid")" "$(sysctl -n vm.loadavg)" >>"$OUT/soak.tsv"
         sleep 5
     done
     shot gpu soak-end >/dev/null
@@ -231,6 +276,13 @@ launch gpu "$GPU_PORT"
 wait_ready legacy
 wait_ready gpu
 MODES=(legacy gpu)
+if (( SMOKE )); then
+    for m in "${MODES[@]}"; do
+        pid=$(getv PID "$m")
+        log "smoke: $m pid $pid children: [$(descendants "$pid" | tr '\n' ' ')]"
+    done
+    exit 0
+fi
 
 # One step on both processes: the op, the frame right after it renders, then the settled frame.
 step() { # <id> <path> <json> [expectTfMs]  (json "-" = no op, screenshot only)

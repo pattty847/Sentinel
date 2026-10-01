@@ -110,6 +110,10 @@ int main(int argc, char *argv[])
     // Process-only overrides (S6b; A/B runs use two processes on one server):
     //   --heatmap-renderer legacy|gpu   never persisted (owner decision 2)
     //   --api-port N                    Agent API port instead of gui.api_port
+    //   --no-screener                   no screener_server.py child (it owns port 17200 and
+    //                                   kills its holder at start, so a second process must not)
+    for (int i = 1; i < argc; ++i)
+        if (QByteArray(argv[i]) == "--no-screener") clientConfig.gui.startScreener = false;
     for (int i = 1; i + 1 < argc; ++i) {
         const QByteArray flag(argv[i]), value(argv[i + 1]);
         if (flag == "--heatmap-renderer") {
