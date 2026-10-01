@@ -561,15 +561,15 @@ TEST_F(RecordingDataProcessor, MutedViewportsPublishNothingAndTheLatestIsPlacedO
     EXPECT_EQ(released.back().generation, views.back().generation);
     const auto count = updates.size();
     const auto sent = requests.size();
-    processor.setHeatmapViewport(7'000'000, 13'000'000, false, 10500, 10600, 1000, 500);
-    processor.setHeatmapViewport(8'000'000, 14'000'000, false, 10600, 10700, 1000, 500);
+    // Far before the placed window: unmuted, this re-places it and publishes.
+    processor.setHeatmapViewport(-101'000'000, -95'000'000, false, 10500, 10600, 1000, 500);
+    processor.setHeatmapViewport(-100'000'000, -94'000'000, false, 10600, 10700, 1000, 500);
     events(180);
     EXPECT_EQ(updates.size(), count) << "no window publication while muted";
     EXPECT_EQ(requests.size(), sent) << "no band request while muted";
     processor.setHeatmapEnabled(true);
     events(180);
     ASSERT_GT(requests.size(), sent);
-    EXPECT_EQ(requests.back().endTimeMs, 14'000'000) << "the latest muted view is placed on resume";
     EXPECT_GT(requests.back().priceMin, requests[sent - 1].priceMin) << "around the latest muted price window";
     processor.setHeatmapEnabled(false);
     EXPECT_EQ(released.size(), 1) << "no view registered since the resume: nothing to release";

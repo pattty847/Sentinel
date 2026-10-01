@@ -35,6 +35,7 @@
 #include <QtQml/qqml.h>
 #include <gtest/gtest.h>
 #include <private/qquickitem_p.h>
+#include <climits>
 #include <cmath>
 #include <iostream>
 
@@ -261,14 +262,26 @@ TEST_F(UgrGpu, TimeframeSwitchNeverShrinksCoverage) {
     ASSERT_TRUE(settle()) << error.toStdString();
     const double before = coverage();
     ASSERT_GT(before, 0.99);
+    // Pixels the heatmap colours (not the black background): the image itself
+    // never blanks, whatever the node's stats say.
+    auto painted = [&] {
+        int n = 0;
+        for (int y = 2; y < 320; y += 4)
+            for (int x = 2; x < 640; x += 4) n += image.pixel(x, y) != qRgb(0, 0, 0);
+        return n;
+    };
+    const int paintedBefore = painted();
+    ASSERT_GT(paintedBefore, 1000);
     double worst = 1;
-    int frames = 0;
+    int frames = 0, fewestPainted = INT_MAX;
     ugr->setTimeframe(int(5 * minute));
     ASSERT_TRUE(pump(30'000, [&] { return layer().settled(); }, [&] {
         ++frames;
         worst = std::min(worst, coverage());
+        fewestPainted = std::min(fewestPainted, painted());
     })) << error.toStdString();
     EXPECT_GE(worst, before - 1e-9) << "a frame of the switch drew less of the view";
+    EXPECT_GE(fewestPainted, paintedBefore / 2) << "a frame of the switch blanked the chart";
     EXPECT_EQ(layer().tileStats().drawnTfMs.load(), 5 * minute);
     // And back to 1m (recent-tf): the same.
     worst = 1;
