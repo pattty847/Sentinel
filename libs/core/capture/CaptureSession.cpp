@@ -1,18 +1,37 @@
 #include "CaptureSession.hpp"
 #include "SentinelLogging.hpp"
 #include <algorithm>
+#include <QUuid>
 #include <stdexcept>
 
 namespace sentinel::capture {
-Session::Session(WriterConfig config, nlohmann::json metadata, size_t queueBytes) : m_limit(queueBytes) {
+Session::Session(WriterConfig config, nlohmann::json metadata, size_t queueBytes)
+    : Session(std::vector<ProductCapture>{{std::move(config), std::move(metadata)}}, queueBytes) {}
+Session::Session(std::vector<ProductCapture> products, size_t queueBytes) : m_limit(queueBytes) {
     if (queueBytes < 2 * FinalRecordReserve || queueBytes > 1024ULL * 1024 * 1024)
         throw std::runtime_error("invalid queue capacity");
+    if (products.empty() || products.size() > MaxProducts) throw std::runtime_error("invalid product count");
+    std::sort(products.begin(), products.end(), [](const auto& a, const auto& b) { return a.config.symbol < b.config.symbol; });
+    std::vector<std::string> symbols;
+    for (const auto& product : products) {
+        validateSymbol(product.config.symbol);
+        if (!symbols.empty() && symbols.back() == product.config.symbol) throw std::runtime_error("duplicate capture product");
+        symbols.push_back(product.config.symbol);
+    }
+    if (products.size() > 1) {
+        const auto run = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
+        const auto started = Stamp::now().systemNs;
+        for (auto& product : products) {
+            product.metadata["run_id"] = run;
+            product.metadata["run_started_system_ns"] = started;
+            product.metadata["connection_products"] = symbols;
+            product.metadata["routing"] = "product-receipts-v1";
+        }
+    }
     m_error.reserve(512);
     m_stopRecord.kind = Kind::CaptureStopped;
     m_stopRecord.payload.reserve(FinalRecordReserve);
-    m_thread = std::thread([this, config = std::move(config), metadata = std::move(metadata)]() mutable {
-        run(std::move(config), std::move(metadata));
-    });
+    m_thread = std::thread([this, products = std::move(products)]() mutable { run(std::move(products)); });
 }
 Session::~Session() { close(); }
 void Session::failLocked(std::string_view error, RecordLocation dropped) {
@@ -89,13 +108,36 @@ Record Session::finalRecord() {
     }
     return std::move(m_stopRecord);
 }
-void Session::run(WriterConfig config, nlohmann::json metadata) {
+void Session::run(std::vector<ProductCapture> products) {
     sentinel::logging::setCurrentThreadName("capture-disk");
-    std::unique_ptr<Writer> writer;
+    std::vector<std::unique_ptr<Writer>> writers;
+    std::vector<std::string> symbols;
+    for (const auto& product : products) symbols.push_back(product.config.symbol);
+    const auto publishStats = [&] {
+        WriterStats total;
+        for (const auto& writer : writers) {
+            const auto& stats = writer->stats();
+            total.records += stats.records; total.frames += stats.frames; total.frameBytes += stats.frameBytes;
+            total.blocks += stats.blocks; total.fileBytes += stats.fileBytes; total.files += stats.files;
+        }
+        std::lock_guard lock(m_mutex); m_stats = total;
+    };
+    const auto append = [&](const Record& record) {
+        if (writers.size() == 1 || record.kind != Kind::Frame) {
+            for (auto& writer : writers) writer->append(record);
+            return;
+        }
+        const auto receipt = frameReceipt(record.payload, symbols);
+        const auto targets = receipt.at("products").get<std::vector<std::string>>();
+        const Record reference{Kind::FrameReference, record.time, record.connection, receipt.dump()};
+        for (size_t i = 0; i < writers.size(); ++i)
+            writers[i]->append(std::binary_search(targets.begin(), targets.end(), symbols[i]) ? record : reference);
+    };
     std::optional<RecordLocation> current;
     bool finalAttempted = false;
     try {
-        writer = std::make_unique<Writer>(std::move(config), std::move(metadata));
+        for (auto& product : products)
+            writers.push_back(std::make_unique<Writer>(std::move(product.config), std::move(product.metadata)));
         while (true) {
             std::optional<Record> next;
             {
@@ -108,23 +150,27 @@ void Session::run(WriterConfig config, nlohmann::json metadata) {
             }
             if (next) {
                 current = RecordLocation{next->time, next->connection, next->kind};
-                writer->append(*next);
+                append(*next);
             }
             // Backlogged receive stamps may already be old. Let append() group
             // them by receive time/size, not one fsync per old queued frame.
-            else writer->flushDue(Stamp::now().steadyNs);
-            { std::lock_guard lock(m_mutex); m_stats = writer->stats(); }
+            else for (auto& writer : writers) writer->flushDue(Stamp::now().steadyNs);
+            publishStats();
         }
         auto terminal = finalRecord();
         current = RecordLocation{terminal.time, terminal.connection, terminal.kind};
         finalAttempted = true;
-        writer->append(terminal);
-        writer->close();
-        { std::lock_guard lock(m_mutex); m_stats = writer->stats(); }
+        append(terminal);
+        for (auto& writer : writers) writer->close();
+        publishStats();
     } catch (const std::exception& e) {
         sLog_Error("Capture disk worker failed: error=" << e.what());
-        const auto uncommitted = writer ? writer->firstUncommitted() : std::nullopt;
-        fail(e.what(), uncommitted ? uncommitted : current);
+        fail(e.what(), current);
+        for (const auto& writer : writers)
+            if (auto uncommitted = writer->firstUncommitted()) {
+                if (uncommitted->kind == Kind::FrameReference) uncommitted->kind = Kind::Frame;
+                fail(e.what(), uncommitted);
+            }
         {
             std::unique_lock lock(m_mutex);
             // The app stops/joins the producer before close(), so the terminal
@@ -140,18 +186,19 @@ void Session::run(WriterConfig config, nlohmann::json metadata) {
                 m_stopRecord.connection = m_lastConnection;
             }
         }
-        try {
-            if (!writer) throw std::runtime_error("writer initialization failed");
+        const auto terminal = finalRecord();
+        // Attempt every product independently: one broken directory must not
+        // prevent the other streams from recording the connection-wide failure.
+        for (auto& writer : writers) try {
             writer->abandonSegment();
-            writer->append(finalRecord());
+            writer->append(terminal);
             writer->close();
-            { std::lock_guard lock(m_mutex); m_stats = writer->stats(); }
             sLog_Warning("Capture failure marker persisted in a new segment");
         } catch (const std::exception& markerError) {
-            // A removed/full/broken volume may reject even the reserved marker.
-            // Keep the nonzero exit and state the persistence failure explicitly.
             sLog_Error("Capture failure marker could not be persisted: error=" << markerError.what());
         }
+        if (writers.size() != products.size()) sLog_Error("Capture failure marker unavailable for uninitialized writers");
+        publishStats();
     }
 }
 } // namespace sentinel::capture

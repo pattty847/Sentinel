@@ -1,6 +1,7 @@
 #include "RawCapture.hpp"
 #include "SentinelLogging.hpp"
 #include <QDateTime>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFileInfo>
 #include <QStorageInfo>
@@ -132,7 +133,9 @@ bool hasFollowingFraming(QFile& file, qint64 start, qint64 end) {
 nlohmann::json headerFrom(QFile& file) {
     if (file.size() < 16) fail("incomplete file header");
     const auto prefix = read(file, 16);
-    if (std::string_view(prefix).substr(0, 8) != Magic) fail("bad magic/version");
+    const auto version = static_cast<unsigned char>(prefix[7]);
+    if (std::string_view(prefix).substr(0, 7) != Magic.substr(0, 7) || (version != 1 && version != 2))
+        fail("bad magic/version");
     size_t pos = 8;
     const auto size = get(prefix, pos, 4);
     const auto checksum = get(prefix, pos, 4);
@@ -140,7 +143,7 @@ nlohmann::json headerFrom(QFile& file) {
     const auto data = read(file, size);
     if (crc(data) != checksum) fail("header CRC mismatch");
     auto header = nlohmann::json::parse(data);
-    if (header.at("format_version") != 1) fail("unsupported version");
+    if (header.at("format_version") != version) fail("unsupported version");
     for (const char* field : {"segment", "first_block_ordinal", "run_started_system_ns", "opened_system_ns", "opened_steady_ns"}) {
         const auto& value = header.at(field);
         if (!value.is_number_integer() || (!value.is_number_unsigned() && value.get<int64_t>() < 0))
@@ -155,6 +158,15 @@ nlohmann::json headerFrom(QFile& file) {
     if (!product.at("quote_increment").is_string() || !product.at("base_increment").is_string())
         fail("increments must be strings");
     if (header.at("products") != nlohmann::json::array({product.at("product_id")})) fail("product metadata/subscription mismatch");
+    if (version == 2) {
+        const auto products = header.at("connection_products").get<std::vector<std::string>>();
+        if (products.size() < 2 || products.size() > MaxProducts || !std::is_sorted(products.begin(), products.end()) ||
+            std::adjacent_find(products.begin(), products.end()) != products.end() ||
+            !std::binary_search(products.begin(), products.end(), product.at("product_id").get<std::string>()))
+            fail("invalid connection products");
+        for (const auto& symbol : products) validateSymbol(symbol);
+        if (header.at("routing") != "product-receipts-v1") fail("unsupported routing");
+    }
     return header;
 }
 } // namespace
@@ -173,6 +185,54 @@ void validateSymbol(const std::string& symbol) {
     if (symbol.empty() || symbol.size() > 40 || symbol.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-") != std::string::npos)
         fail("invalid symbol");
 }
+
+nlohmann::json frameReceipt(std::string_view payload, const std::vector<std::string>& products) {
+    const auto json = nlohmann::json::parse(payload, nullptr, false);
+    std::vector<std::string> targets;
+    std::string channel = "<invalid-envelope>";
+    nlohmann::json sequence = nullptr;
+    if (json.is_object()) {
+        if (json.contains("channel") && json["channel"].is_string()) channel = json["channel"].get<std::string>();
+        if (json.contains("sequence_num")) sequence = json["sequence_num"];
+        // Route only schemas we know. Anything ambiguous stays byte-exact in all
+        // streams, including unknown channels, errors and malformed envelopes.
+        bool known = (channel == "l2_data" || channel == "market_trades") &&
+                     json.contains("events") && json["events"].is_array();
+        const auto add = [&](const nlohmann::json& value) {
+            if (!value.contains("product_id") || !value["product_id"].is_string()) { known = false; return; }
+            const auto symbol = value["product_id"].get<std::string>();
+            if (!std::binary_search(products.begin(), products.end(), symbol)) known = false;
+            else if (std::find(targets.begin(), targets.end(), symbol) == targets.end()) targets.push_back(symbol);
+        };
+        if (known) for (const auto& event : json["events"]) {
+            if (channel == "l2_data") add(event);
+            else if (event.contains("trades") && event["trades"].is_array())
+                for (const auto& trade : event["trades"]) add(trade);
+            else known = false;
+        }
+        if (!known) targets.clear();
+    }
+    if (targets.empty()) targets = products;
+    std::sort(targets.begin(), targets.end());
+    targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
+    const auto digest = QCryptographicHash::hash(QByteArrayView(payload.data(), payload.size()), QCryptographicHash::Sha256);
+    return {{"products", targets}, {"channel", channel}, {"sequence_num", sequence},
+        {"received_bytes", payload.size()}, {"sha256", digest.toHex().toStdString()}};
+}
+void validateReceipt(const nlohmann::json& receipt, const std::vector<std::string>& products) {
+    const auto targets = receipt.at("products").get<std::vector<std::string>>();
+    if (targets.empty() || targets.size() >= products.size() || !std::is_sorted(targets.begin(), targets.end()) ||
+        std::adjacent_find(targets.begin(), targets.end()) != targets.end()) fail("invalid receipt targets");
+    for (const auto& target : targets)
+        if (!std::binary_search(products.begin(), products.end(), target)) fail("unknown receipt target");
+    const auto hash = receipt.at("sha256").get<std::string>();
+    if (hash.size() != 64 || hash.find_first_not_of("0123456789abcdef") != std::string::npos) fail("invalid receipt hash");
+    if (!receipt.at("received_bytes").is_number_unsigned() || receipt["received_bytes"].get<uint64_t>() > MaxRecordBytes)
+        fail("invalid receipt byte count");
+    if (receipt.at("channel") != "l2_data" && receipt.at("channel") != "market_trades") fail("invalid receipt channel");
+    if (!receipt.contains("sequence_num")) fail("receipt missing sequence");
+}
+
 QString validateRoot(const QString& root) {
     if (!QDir::isAbsolutePath(root)) fail("root must be absolute");
     const auto absolute = QDir::cleanPath(root);
@@ -228,9 +288,12 @@ Writer::Writer(WriterConfig config, nlohmann::json metadata)
         m_config.blockInterval > std::chrono::seconds(60) || m_config.compressionLevel < 1 || m_config.compressionLevel > 19)
         fail("invalid block configuration");
     const auto now = Stamp::now();
-    m_metadata["format_version"] = 1;
-    m_metadata["run_id"] = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
-    m_metadata["run_started_system_ns"] = now.systemNs;
+    const bool multi = m_metadata.contains("connection_products");
+    m_metadata["format_version"] = multi ? 2 : 1;
+    if (!multi) {
+        m_metadata["run_id"] = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
+        m_metadata["run_started_system_ns"] = now.systemNs;
+    }
     m_metadata["products"] = nlohmann::json::array({m_config.symbol});
     m_metadata["channels"] = {"level2", "market_trades", "heartbeats"};
     m_metadata["config"] = {{"root", m_config.root.toStdString()}, {"block_bytes", m_config.blockBytes},
@@ -276,6 +339,7 @@ void Writer::open(Stamp time) {
     const auto json = header.dump();
     if (json.size() > MaxHeaderBytes) fail("header too large");
     std::string prefix(Magic);
+    prefix[7] = static_cast<char>(m_metadata.at("format_version").get<int>());
     put32(prefix, static_cast<uint32_t>(json.size()));
     put32(prefix, crc(json));
     write(prefix); write(json);
@@ -288,7 +352,7 @@ void Writer::append(const Record& record) {
     if (m_closed) fail("append after close");
     if (record.payload.size() > MaxRecordBytes || record.time.systemNs < 0 || record.time.steadyNs < 0)
         fail("record exceeds limits");
-    if (record.kind < Kind::Frame || record.kind > Kind::EngineError) fail("unknown record kind");
+    if (record.kind < Kind::Frame || record.kind > (m_metadata.at("format_version") == 2 ? Kind::FrameReference : Kind::EngineError)) fail("unknown record kind");
     if (m_file.isOpen() && (record.time.systemNs / HourNs != m_hour || m_index.size() >= MaxIndexEntries)) seal();
     if (!m_file.isOpen()) open(record.time);
     const auto size = 32 + record.payload.size();
@@ -297,7 +361,7 @@ void Writer::append(const Record& record) {
     if (m_index.size() >= MaxIndexEntries) { seal(); open(record.time); }
     const RecordLocation location{record.time, record.connection, record.kind};
     if (!m_uncommittedRecord) m_uncommittedRecord = location;
-    if (record.kind == Kind::Frame && !m_uncommittedFrame) m_uncommittedFrame = location;
+    if ((record.kind == Kind::Frame || record.kind == Kind::FrameReference) && !m_uncommittedFrame) m_uncommittedFrame = location;
     if (!m_count) m_first = record.time;
     m_last = record.time;
     put32(m_block, static_cast<uint32_t>(28 + record.payload.size()));
@@ -428,7 +492,7 @@ ScanResult scan(const QString& path, const RecordVisitor& visitor) {
             if (length < 28 || length > MaxRecordBytes + 28 || length > raw.size() - pos) fail("bad record length");
             const auto start = pos;
             const auto kind = get(raw, pos, 4);
-            if (kind < uint32_t(Kind::Frame) || kind > uint32_t(Kind::EngineError)) fail("bad record kind");
+            if (kind < uint32_t(Kind::Frame) || kind > uint32_t(result.header.at("format_version") == 2 ? Kind::FrameReference : Kind::EngineError)) fail("bad record kind");
             const auto systemNs = get(raw, pos, 8);
             const auto steadyNs = get(raw, pos, 8);
             if (systemNs > uint64_t(INT64_MAX) || steadyNs > uint64_t(INT64_MAX)) fail("invalid timestamp");

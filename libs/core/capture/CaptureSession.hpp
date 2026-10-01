@@ -7,11 +7,14 @@
 
 namespace sentinel::capture {
 
+struct ProductCapture { WriterConfig config; nlohmann::json metadata; };
+
 // The ingest thread only copies into this bounded queue. Compression and fsync
 // run on the disk thread. Overflow/storage errors fail the capture, never evict.
 class Session {
 public:
     Session(WriterConfig config, nlohmann::json metadata, size_t queueBytes = 64 * 1024 * 1024);
+    Session(std::vector<ProductCapture> products, size_t queueBytes = 64 * 1024 * 1024);
     ~Session();
     bool submit(Record record) noexcept;
     void fail(std::string_view error, std::optional<RecordLocation> dropped = {}) noexcept;
@@ -23,7 +26,7 @@ private:
     static constexpr size_t FinalRecordReserve = 4096;
     void failLocked(std::string_view error, RecordLocation dropped);
     Record finalRecord();
-    void run(WriterConfig config, nlohmann::json metadata);
+    void run(std::vector<ProductCapture> products);
     mutable std::mutex m_mutex;
     std::condition_variable m_wake;
     std::deque<Record> m_queue;
