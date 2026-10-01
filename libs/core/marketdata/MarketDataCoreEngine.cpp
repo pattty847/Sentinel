@@ -609,17 +609,38 @@ void MarketDataCoreEngine::startHeartbeatWatchdog() {
     });
 }
 
-void MarketDataCoreEngine::triggerImmediateReconnect(const char* reason) {
-    net::post(m_strand, [this, r = std::string(reason)] {
-        if (!m_running.load() || m_closePending || m_reconnectScheduled) return;
-        if (m_ingestObserver) observeIngest(IngestKind::ResyncRequested, {}, {}, r);
-        sLog_Data("Immediate reconnect: reason=" << r);
-        if (r == "stale heartbeat")
-            m_backoffDuration = std::max(m_backoffDuration, m_reconnectPolicy.staleHeartbeatDelay);
-        m_closePending = true;
-        m_connected.store(false);
-        // onStatus(false) is the sole retry scheduler, for this close and for
-        // every failed connection attempt that follows it.
-        m_transport->close();
+void MarketDataCoreEngine::requestResnapshot(const std::string& productId) {
+    net::post(m_strand, [this, productId] {
+        if (!m_running.load() || !m_connected.load() || m_closePending || m_reconnectScheduled) return;
+        const int64_t nowMs = steadyClockMs();
+        if (m_lastResnapshotMs >= 0 && nowMs - m_lastResnapshotMs < m_reconnectPolicy.resnapshotCooldown.count()) {
+            sLog_Warning("Resnapshot request ignored, cooldown: product=" << productId
+                         << " sinceLastMs=" << (nowMs - m_lastResnapshotMs));
+            return;
+        }
+        m_lastResnapshotMs = nowMs;
+        sLog_Warning("Resnapshot requested, reconnecting: product=" << productId << " host=" << m_host);
+        const std::string reason = "resnapshot " + productId;
+        // Like a sequence gap: every book is unknown from here until the new
+        // snapshots, not only after the close completes (up to closeTimeoutMs).
+        emitBookInvalidated(std::string(), reason);
+        reconnectNow(reason);
     });
+}
+
+void MarketDataCoreEngine::triggerImmediateReconnect(const char* reason) {
+    net::post(m_strand, [this, r = std::string(reason)] { reconnectNow(r); });
+}
+
+void MarketDataCoreEngine::reconnectNow(const std::string& r) {
+    if (!m_running.load() || m_closePending || m_reconnectScheduled) return;
+    if (m_ingestObserver) observeIngest(IngestKind::ResyncRequested, {}, {}, r);
+    sLog_Data("Immediate reconnect: reason=" << r);
+    if (r == "stale heartbeat")
+        m_backoffDuration = std::max(m_backoffDuration, m_reconnectPolicy.staleHeartbeatDelay);
+    m_closePending = true;
+    m_connected.store(false);
+    // onStatus(false) is the sole retry scheduler, for this close and for
+    // every failed connection attempt that follows it.
+    m_transport->close();
 }

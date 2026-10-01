@@ -66,6 +66,9 @@ public:
         std::chrono::milliseconds watchdogInterval{2000};
         std::chrono::milliseconds heartbeatStale{20000};
         std::chrono::milliseconds staleHeartbeatDelay{5000};
+        // requestResnapshot() ignores requests this soon after its last reconnect,
+        // whichever product asked: one stuck consumer must not keep gapping the rest.
+        std::chrono::milliseconds resnapshotCooldown{20000};
     };
     // Alternate transport/timings support deterministic offline tests. All
     // transport callbacks must run on the supplied I/O context's single thread.
@@ -82,6 +85,11 @@ public:
     // Subscription Management
     void subscribeToSymbols(const std::vector<std::string>& symbols);
     void unsubscribeFromSymbols(const std::vector<std::string>& symbols);
+    // A consumer lost its book for productId on its own (not via onLiveOrderBookInvalidated)
+    // and needs a fresh snapshot: invalidate every book (ordered with accepted frames),
+    // then reconnect, which resubscribes every product. Thread-safe; ignored while
+    // disconnected or reconnecting, and within resnapshotCooldown of the last one.
+    void requestResnapshot(const std::string& productId);
 
     MarketDataCoreEngine(const MarketDataCoreEngine&) = delete;
     MarketDataCoreEngine& operator=(const MarketDataCoreEngine&) = delete;
@@ -123,6 +131,7 @@ private:
     void handleHeartbeats(const nlohmann::json& message);
     void startHeartbeatWatchdog();
     void triggerImmediateReconnect(const char* reason);
+    void reconnectNow(const std::string& reason); // strand only
 
     void emitError(std::string msg);
     void emitConnectionStatus(bool connected);
@@ -164,6 +173,7 @@ private:
     // Coinbase sequence_num is per connection and contiguous across every
     // channel, starting at 0 (measured 2026-09-28). Only touched on the io strand.
     int64_t                         m_lastSequenceNum = -1;
+    int64_t                         m_lastResnapshotMs = -1; // steady ms; io strand only
     bool                            m_loggedEmptySubscriptionAck = false;
 
     TradeCb                          m_onTrade;

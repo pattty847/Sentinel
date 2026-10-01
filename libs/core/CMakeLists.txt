@@ -39,6 +39,7 @@ add_library(sentinel_core
     servermodel/HmcolFormat.cpp
     servermodel/BookRecorder.cpp
     servermodel/BookRecorder.hpp
+    servermodel/RecorderStallMonitor.hpp
     servermodel/RecordingLive.cpp
     servermodel/RecordingLive.hpp
     servermodel/RecordingDir.hpp

@@ -25,6 +25,19 @@ struct RecorderConfig {
     std::function<void(std::shared_ptr<const Hmc2Record>)> publisher;
     // Deterministic allocation-failure seam, before making a publication copy.
     std::function<void(bool provisional)> beforePublicationForTest;
+    // Worker callback: the recorder invalidated a symbol on its own (not via
+    // onInvalid), or dropped its first snapshot, so only a fresh upstream snapshot
+    // can resume it. Repeated while the symbol stays invalid, with a per-symbol
+    // interval (local time) that starts at resnapshotIntervalMs, doubles up to
+    // resnapshotMaxIntervalMs, and resets once a snapshot has stayed valid for
+    // resnapshotStableMs. Must only hand off (queue); no I/O. Installed before start.
+    std::function<void(const std::string &symbol, const std::string &reason)> onSelfInvalidated;
+    int64_t resnapshotIntervalMs = 30'000;
+    int64_t resnapshotMaxIntervalMs = 600'000;
+    int64_t resnapshotStableMs = 60'000;
+    // A valid book may stay one-sided this long (integration clock) before it is
+    // invalidated as "one-sided book": a lasting empty side freezes the mid window.
+    int64_t oneSidedGraceMs = 5'000;
 };
 struct Level {
     bool isBid;
@@ -36,6 +49,7 @@ class BookRecorder {
     struct Watermarks {
         int64_t minuteThroughMs = 0; // exclusive, lateness already applied
         int64_t hourThroughMs = 0;   // exclusive, after hour rollup persistence
+        int64_t lastColumnMs = 0;    // newest minute bucket this layer appended, 0 = none
     };
     explicit BookRecorder(RecorderConfig cfg);
     // Deterministic clock injection for replay/tests; called on the producer only.

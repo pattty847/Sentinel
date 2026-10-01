@@ -170,16 +170,30 @@ void ServerDataModel::startRecorder() {
         {"near", units(rc.nearTick), 1.0 - rc.nearPct, 1.0 + rc.nearPct, false},
         {"deep", units(rc.deepTick), rc.deepLowFrac, rc.deepHighMult, true},
     };
+    // Symbols as the app subscribes them (upper-cased), one series per layer.
+    m_stallSeries.clear();
+    for (const auto& symbol : normalizedDefaultSymbols(m_serverConfig.defaultSymbols))
+        for (const auto& layer : cfg.layers)
+            m_stallSeries.push_back({symbol, layer.name, 0});
+    m_stallMonitor.emplace(rc.latenessMs);
     try {
         m_recordingLive = std::make_shared<recording::LiveService>(dir);
         cfg.publisher = [live = m_recordingLive](recording::RecordPtr record) {
             if (!live->publish(std::move(record)))
                 sLog_Probe("recording.live.drop", "publication exceeds series limit or is stale");
         };
+        cfg.onSelfInvalidated = [this](const std::string& symbol, const std::string& reason) {
+            // Recorder worker thread: hand off only.
+            QMetaObject::invokeMethod(this, [this, s = QString::fromStdString(symbol),
+                                             r = QString::fromStdString(reason)] {
+                emit recordingResnapshotRequested(s, r);
+            }, Qt::QueuedConnection);
+        };
         m_recorder = std::make_unique<recording::BookRecorder>(std::move(cfg));
         m_recordingDir = dir;
     } catch (const std::exception& e) {
         m_recordingLive.reset();
+        m_stallMonitor.reset();
         sLog_Error("Recording v2 failed to start: dir=" << dir.string() << " error=" << e.what());
         return;
     }
@@ -191,7 +205,9 @@ void ServerDataModel::startRecorder() {
     connect(&m_recorderTimer, &QTimer::timeout, this, [this]() {
         if (!m_recorder) return;
         m_recorder->onTick(localNowMs());
-        if (++m_recorderTicks % 240 == 0) {  // once a minute
+        if (++m_recorderTicks % 4 == 0)  // once a second
+            checkRecorderProgress(localNowMs());
+        if (m_recorderTicks % 240 == 0) {  // once a minute
             const auto s = m_recorder->stats();
             sLog_Data("Recording v2 stats: columns=" << s.columnsWritten << " late=" << s.lateEvents
                       << " backward=" << s.backwardSteps << " queueDrops=" << s.queueDrops
@@ -199,6 +215,22 @@ void ServerDataModel::startRecorder() {
         }
     });
     m_recorderTimer.start();
+}
+
+// Warns (throttled per series by the monitor) when a recorded layer stops
+// committing columns while the market-data connection is up.
+void ServerDataModel::checkRecorderProgress(int64_t nowMs) {
+    if (!m_stallMonitor) return;
+    for (auto& series : m_stallSeries)
+        series.lastColumnMs = m_recorder->watermarks(series.symbol, series.layer).lastColumnMs;
+    for (const auto& stall : m_stallMonitor->check(nowMs, m_stallSeries))
+        sLog_Warning("Recording v2 stalled: symbol=" << stall.symbol << " layer=" << stall.layer
+                     << " lastColumnMs=" << stall.lastColumnMs << " overdueMs=" << stall.overdueMs
+                     << " invalidations=" << m_recorder->stats().invalidations);
+}
+
+void ServerDataModel::onMarketDataConnectionChanged(bool connected) {
+    if (m_stallMonitor) m_stallMonitor->setConnected(connected, localNowMs());
 }
 
 SymbolHotData& ServerDataModel::ensureSymbol(const std::string& symbol) {

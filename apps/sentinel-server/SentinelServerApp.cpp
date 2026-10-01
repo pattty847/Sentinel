@@ -147,9 +147,16 @@ bool SentinelServerApp::initialize() {
         });
         
         // Wire up callbacks for logging
-        m_marketDataCore->onConnectionStatus([](bool connected){
+        m_marketDataCore->onConnectionStatus([modelPtr](bool connected){
             sLog_App("MarketDataCore Connection: " << (connected ? "CONNECTED" : "DISCONNECTED"));
+            safeInvoke(modelPtr, [connected](ServerDataModel& model) { model.onMarketDataConnectionChanged(connected); });
         });
+        // The recorder dropped a book on its own: only a fresh snapshot resumes it.
+        connect(m_serverModel.get(), &ServerDataModel::recordingResnapshotRequested, this,
+                [this](const QString& symbol, const QString& reason) {
+                    sLog_Warning("Recording resnapshot request: symbol=" << symbol << " reason=" << reason);
+                    if (m_marketDataCore) m_marketDataCore->requestResnapshot(symbol.toStdString());
+                });
         
         m_marketDataCore->onError([](const std::string& error){
             sLog_Error("MarketDataCore Error: " << error);
@@ -200,26 +207,7 @@ bool SentinelServerApp::initialize() {
         // Start connection
         m_marketDataCore->start();
 
-        auto parseDefaultSymbols = [](const std::vector<std::string>& input) {
-            std::vector<std::string> out;
-            out.reserve(input.size());
-            std::unordered_set<std::string> seen;
-            for (const auto& sym : input) {
-                if (sym.empty()) {
-                    continue;
-                }
-                std::string normalized = sym;
-                std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
-                    return static_cast<char>(std::toupper(c));
-                });
-                if (seen.insert(normalized).second) {
-                    out.push_back(normalized);
-                }
-            }
-            return out;
-        };
-
-        const auto normalizedSymbols = parseDefaultSymbols(m_serverConfig.defaultSymbols);
+        const auto normalizedSymbols = normalizedDefaultSymbols(m_serverConfig.defaultSymbols);
         std::vector<std::string> symbolList;
         symbolList.reserve(normalizedSymbols.size());
         for (const auto& sym : normalizedSymbols) {
