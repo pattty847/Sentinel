@@ -72,15 +72,21 @@ but cannot check the raw bytes referenced in other product directories:
 ```
 
 `--verify` also accepts one `.rawl2` file. It is offline and read-only; stdout is a
-JSON report. Exit 0 means no observed integrity failures in the supplied data;
-2 means gaps, corruption, missing snapshot anchors, missing streams/segments or
-other failed invariants, and 1 is a fatal invocation error. Existing files are
+JSON report. Exit 0 means the supplied runs are closed with no observed integrity
+failures; **3** means `ok && !complete` (only the newest run remains open/in progress);
+2 means gaps, corruption, interrupted older runs, missing snapshot anchors,
+missing streams/segments or other failed invariants, and 1 is a fatal invocation error. Existing files are
 never repaired or rewritten by verification.
 
-`ok` is prefix integrity, while `complete` additionally requires closed runs and,
-for multi-product data, comparison against every destination stream.
-`ok_closed_runs` states whether the closed runs passed. A run with its start but
-no stop marker has `open: true` / `open_runs > 0`, and retains the legacy
+`ok` is integrity of the supplied scope, while `complete` additionally requires
+closed runs. `routing_checks_deferred` independently identifies product-only
+scans that cannot check other destinations' raw bytes. `ok_closed_runs` includes
+both normally closed and interrupted histories. A run with its start but no stop
+marker has `open: true` / `open_runs > 0` **only if it is the newest run in every
+product stream declared by its header**. Newness uses `(run_started_system_ns,
+run_id)`, not filenames or mtimes. Otherwise it is `interrupted: true`, increments
+`interrupted_runs`, and fails verification. Discovery checks headers in the
+archive root even for a product/month query. Both cases retain the legacy
 `incomplete_runs` count. Its last file may have no index or a partial terminal
 block/index without failing prefix integrity; complete CRC failures and interior
 damage still fail. An open run awaiting its first snapshot is pending, not an
@@ -88,12 +94,15 @@ anchor failure, unless it already received unanchored updates. Closed connection
 must have received that product's snapshot. A single middle hour generally fails
 because the start/snapshot context is missing.
 
-**Open does not prove the process is alive.** An interrupted or crashed process
-without a stop marker is indistinguishable from a live writer in these files.
-The report explicitly says it has checked only the readable prefix. Reverify
-after close to certify completion. Files are scanned to their observed lengths;
+**Open does not prove the process is alive.** A crashed newest run is still
+indistinguishable from a live writer until another run supersedes it; exit 3
+makes that uncertainty distinct from a completed verification. Reverify after
+close to certify completion. Files are scanned to their observed lengths;
 whole-root digest comparison is deferred for open runs because product writers
-flush at different times. Header creation itself is not an atomic read snapshot:
+flush at different times. Interrupted multi-product runs compare bounded groups
+through their common prefix, including a group's available receipts even if a
+peer ended before flushing its raw copy. Such a lost copy is a routing failure,
+in addition to the interruption itself. Header creation itself is not an atomic read snapshot:
 retry if a concurrent new file has an incomplete header.
 
 The report includes mean frames/s, p99 counts in one-second steady-clock buckets
@@ -123,7 +132,10 @@ connection/run; `stored_frames` and `stored_received_bytes` include physical
 routing duplicates. Total file/zstd bytes sum the actual per-product files,
 including receipts, headers and indexes. Total duration counts each shared run
 once (concurrent independent runs each contribute their own span). During an open
-run, connection totals use the furthest observed product prefix. Totals' L2 and
+run, connection totals are a lower bound: completed proof groups plus the largest
+observed local raw tail (`totals.counts_in_progress: true`). A run's
+`pending_routing_frames` names raw frames still awaiting a receipt in its
+representative stream. Totals' L2 and
 disk counts sum the product reports; `totals.days` follows the same unique-frame
 and physical-disk rules. Existing single-product top-level verification keys and
 closed-run meanings remain; `products`, `totals` and status fields are additive.
@@ -163,8 +175,11 @@ the bounded queue. One disk worker routes frames after queue admission, reuses
 one zstd compression context per product and handles writes and sync. The queue holds each original
 record once and has one total budget, not a separate allowance per product.
 Overflow still stops the entire capture and attempts the same connection-wide
-gap marker in every product. On disk failure each stream independently attempts
-its reserved failure marker in a new segment; an unwritable stream may reject it.
+gap marker in every product. On disk failure only writers that threw abandon their damaged segment. Healthy
+writers flush and seal their buffered data before appending a gap marker in a new
+segment. A writer already closed successfully is left closed: a later peer's
+close failure never adds a duplicate stop. Each remaining stream independently
+attempts its failure marker; an unwritable stream may reject it.
 Sync uses the shared persistence primitive: `F_FULLFSYNC` on Darwin with `fsync` fallback where full sync is unsupported. A record
 is limited to 16 MiB (the existing Beast transport's default message limit), a
 block to that record plus framing, and an index to 65,536 entries; a new segment
@@ -197,53 +212,114 @@ Transport-up alone starts a new connection/sequence domain.
 Known `l2_data.events[].product_id` and
 `market_trades.events[].trades[].product_id` select destinations. A frame naming
 two products is written **unchanged** in both; it is never split, reserialized or
-filtered. Acks, heartbeats, unknown channels, unclassified envelopes, JSON parse failures and
-ambiguous/unknown product routing are copied to every product. No raw frame is
-discarded. Each product stream has exactly one record per incoming frame: either
-the raw kind-1 frame or a kind-9 routing receipt for a frame stored elsewhere.
-This costs small compressed receipts for unrelated traffic but keeps replay in
-one product directory and avoids decompressing unrelated large snapshots/updates.
-A shared payload file plus side indexes would require coordinated index durability
-and extra seeks; plain filtering would falsely imply connection sequence gaps.
+filtered. Product IDs must exactly match the subscription set: there is no
+case folding, USD/USDC substitution, alias resolution or implicit subscription.
+If any relevant ID is unsubscribed, an alias, missing, duplicated ambiguously or
+of the wrong type, routing conservatively broadcasts the whole frame. Acks,
+heartbeats, unknown channels, unclassified envelopes and malformed JSON also
+broadcast. No raw frame is discarded. An unexpected L2 product fails book replay
+rather than being silently attributed to another book; trades are retained as
+raw envelopes. Routing uses a bounded SAX parser on the disk thread: it checks
+JSON syntax but never builds the snapshot's `updates` array or copies its price
+and quantity strings into a DOM. The engine's own parser is unchanged.
+
+Each stream contains its own raw frames plus **range receipts**, not one receipt
+per foreign frame. A proof group ends after at most 60 seconds or 65,536 incoming
+frames, before every lifecycle marker, connection change or UTC hour change,
+and at stop. Every stream then receives one kind-9 summary for the same group.
+It covers the entire connection range, including interleaved local frames, and
+accounts for all foreign frames with one digest. Raw data keeps the configured
+block/flush/fsync cadence (default one second); proof groups can span those
+storage blocks. The receipt itself is compressed in an ordinary block. Only
+counts and an incremental hash are held while producing it, not frame history.
+
+This generalizes coalescing adjacent foreign runs: at 22 BTC frames/s those runs
+would still produce thousands of SHA-256 values per minute, and a 1-frame/s
+product would otherwise pay for the whole connection's entropy in each storage
+block. Amortizing the hash over a bounded connection group meets the disk budget
+without delaying raw data durability. The tradeoff is that the latest raw tail
+can precede its routing proof by up to 60 seconds (plus scheduling/flush delay).
+A clean close always finalizes the proof. Single-product replay remains local;
+root verification reconstructs groups by sequence rather than scanning unrelated
+snapshots into the product's book.
 
 V2 changes only the magic's last byte (`RAWL2\r\n\x02`), `format_version: 2`,
 additional header fields, and permission for kind 9. Block, record, index and CRC
 framing are identical to v1. Old readers reject v2 instead of silently losing
-sequence proof. Single-product captures continue to write v1, with no new header
-fields or record kinds. V2 headers retain the file's own `product_metadata` and
-single-entry `products`; `connection_products` is the sorted, unique full
-subscription set and `routing` is `"product-receipts-v1"`.
+sequence proof. Single-product captures still write v1, with no new header fields
+or record kinds. V2 retains the file's own `product_metadata` and single-entry
+`products`; `connection_products` is the sorted, unique full subscription set.
+The routing identifier is frozen as **`"product-ranges-v2"`**. The experimental
+`product-receipts-v1` layout was never deployed to real data and is rejected;
+future semantic changes require another routing ID.
 
-Kind 9 retains the original system/steady receive timestamps and connection ID.
-Its UTF-8 JSON payload is a receipt with `products` (sorted raw-frame destinations),
-`channel`, original `sequence_num`, `received_bytes` and the lowercase hex
-`sha256` of the **exact** original frame bytes. It cannot name the current product
-or a product outside the header's connection set. A receipt participates in global
-sequence checks but never supplies a book snapshot/update. Replay still checks
-all events belonging to the current product in each kind-1 L2 envelope, using that
-product's exact metadata increments.
+Kind 9 uses the **last frame's** two receive clocks and connection ID. Its compact
+UTF-8 JSON fields are:
 
-Whole-root verification requires every declared product stream for each run. For
-closed runs it compares streaming SHA-256 identities without retaining frame
-history: for each record, hash compact JSON array
-`[kind, system_ns, steady_ns, connection_id, payload_string]` followed by LF.
-For either frame form, normalize `kind` to 1 and `payload_string` to the compact
-receipt JSON (keys sorted lexicographically, as nlohmann::json's default object);
-for lifecycle markers use their exact payload string. For raw frames the receipt
-is recomputed from the original bytes. Equal digests certify the same receive
-order/clocks, content hashes, sizes, sequence identities and destinations across
-all streams, despite independent block rotation. Each stream must also have the
-correct raw/reference form for its product. Missing streams, changed duplicate
-bytes/clocks, missing receipts and receipt/raw hash mismatches therefore fail.
-These are integrity hashes, not authenticated signatures.
+| Field | Meaning |
+|---|---|
+| `first_seq`, `last_seq`, `count`, `bytes` | First/last connection sequence, total frames and exact incoming payload bytes in the group |
+| `foreign_count`, `foreign_bytes` | Frames/bytes not physically stored in this product's group |
+| `destinations` | Map from canonical owner product to `[count, bytes]`; each frame's owner is its lexicographically first raw destination, so these sum to the connection totals without double counting |
+| `sequence_gaps` | Producer-observed discontinuities or invalid sequence values within the group; any nonzero value fails verification |
+| `sha256` | Lowercase SHA-256 of the concatenated frame identity lines, in connection receive order |
 
-A product-only or single-file scan reports `scope: "product"` and
-`routing_checks_deferred` for multi-product runs: it can prove sequence continuity
-and that product's anchors, but cannot certify other products' raw payloads.
-`connection_runs[].routing_checked` is true only after the whole closed stream set
-has been compared. Reconstruct the exact connection by reading all streams for a
-run, aligning records in stream order, and taking one raw copy wherever another
-stream has a receipt; the root verification above checks those copies agree.
+A frame identity is the compact JSON object with `channel`, `products` (sorted raw
+destinations), `received_bytes`, `sequence_num`, and lowercase `sha256` of the
+**exact raw bytes**. Its hashed line is compact JSON array
+`[system_ns, steady_ns, connection_id, identity_object]` followed by LF, with
+lexicographically ordered object keys (nlohmann::json default). Golden vectors
+pin the routing ID, identities, lines and range digests independently of writer
+and verifier implementation. These are integrity hashes, not signatures.
+
+Each product checks range continuity/counts, its raw sequence order and its own
+snapshot/metadata anchors. Receipts never supply snapshots or book updates. A
+capture-observed connection sequence discontinuity inserts an invalidation in
+all product streams before the affected raw frame; engine invalidation/resync
+markers remain connection-wide as well. This capture-only behavior does not
+change the server's engine or recorder semantics.
+
+Whole-root verification requires every declared stream. It incrementally merges
+raw identities by sequence for one proof group at a time, checks all expected raw
+copies and their exact hashes/clocks, regenerates every product's receipt, and
+compares lifecycle markers. Memory is bounded by a group plus one decoded storage
+block per stream, not by the run length; snapshot payload capacity is released
+after hashing. Missing copies, receipts, changed bytes/clocks, destination/count
+mismatches and sequence gaps all fail. Interrupted runs use the available common
+prefix and still check a durable receipt against a truncated peer.
+
+A product directory, its descendants (including `<root>/BTC-USD/2026/09`), or a
+single file reports `scope: "product"`. Closed product-only scans can be complete
+for that scope but report `routing_checks_deferred`: they cannot certify other
+products' payloads. `connection_runs[].routing_checked` reports actual whole-set
+comparison; open runs defer it. Reconstruct the exact connection by merging the
+raw copies by connection/sequence, retaining the original clocks and bytes.
+
+The deterministic seven-product measurement uses five minutes of interleaved
+BTC 22, ETH 10, SOL 5, FARTCOIN 2, PEPE 2, DOGE 1 and AVAX 1 frames/s, plus one
+heartbeat/s and initial snapshots: 13,207 incoming frames. Each update contains
+12 levels with deterministic varying quantities. Defaults are zstd level 3,
+one-second/1 MiB blocks; fsync is disabled only for test speed. The baseline
+rewrites the same per-product raw frames and lifecycle markers without receipts,
+using the same header and block settings. Thus the delta includes compression,
+extra framing and indexes, not just JSON sizes:
+
+| Product | Own baseline bytes | With receipts | Overhead bytes | Overhead / own |
+|---|---:|---:|---:|---:|
+| BTC-USD | 723,605 | 725,121 | 1,516 | 0.21% |
+| ETH-USD | 402,730 | 404,199 | 1,469 | 0.36% |
+| SOL-USD | 262,758 | 264,136 | 1,378 | 0.52% |
+| FARTCOIN-USD | 182,079 | 183,416 | 1,337 | 0.73% |
+| PEPE-USD | 179,674 | 181,042 | 1,368 | 0.76% |
+| DOGE-USD | 150,571 | 151,877 | 1,306 | 0.87% |
+| AVAX-USD | 150,553 | 151,854 | 1,301 | 0.86% |
+| Total | 2,051,970 | 2,061,645 | 9,675 | 0.47% |
+
+That is about 2.8 MB/day of receipt overhead at this synthetic mix, with six
+receipts per product. The regression asserts **under 5% for every product** and a
+bounded receipt count. Compression sizes vary slightly with run UUID/header
+values. This is a reproducible synthetic budget, not a promise about every live
+payload distribution or a measured live-data rate.
 
 ## RAWL2 v1 framing (also used by v2)
 
@@ -318,10 +394,11 @@ routing and receive clocks; a mixed-product L2 envelope; independent metadata
 increments and snapshots on reconnect; connection-wide gaps/invalidations;
 shared-budget overflow; unique totals and daily accounting; v1 layout/report
 compatibility; active open-prefix verification; mixed v1/v2 runs and hour rotation;
-and missing streams or altered raw/reference bytes/clocks. Fault-injection checks
-that disable subscription membership, routing, mixed-envelope handling, anchor
-isolation, sequence checks, v1 versioning, unique accounting, open-prefix handling
-or cross-file hashing each fail the corresponding regression.
+and missing streams or altered raw/reference bytes/clocks. Review regressions add
+frozen routing/digest vectors, snapshot allocation bounds, superseded interrupted
+runs, crash-tail raw loss, isolated writer failures, shared queue saturation with
+individually fitting frames, live exit 3 and event-driven application readiness.
+Targeted mutation checks disable these behaviors and must fail their regressions.
 
 ## launchd arguments (review/deploy separately)
 

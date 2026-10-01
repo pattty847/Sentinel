@@ -7,6 +7,12 @@
 
 namespace sentinel::capture {
 
+// Optional dependency seam for deterministic storage/queue fault tests. Called
+// only by the disk worker; production uses empty hooks.
+struct SessionHooks {
+    std::function<void()> beforeDrain;
+    std::function<void(const std::string&, std::string_view, const Record*)> beforeWriterOperation;
+};
 struct ProductCapture { WriterConfig config; nlohmann::json metadata; };
 
 // The ingest thread only copies into this bounded queue. Compression and fsync
@@ -14,7 +20,7 @@ struct ProductCapture { WriterConfig config; nlohmann::json metadata; };
 class Session {
 public:
     Session(WriterConfig config, nlohmann::json metadata, size_t queueBytes = 64 * 1024 * 1024);
-    Session(std::vector<ProductCapture> products, size_t queueBytes = 64 * 1024 * 1024);
+    Session(std::vector<ProductCapture> products, size_t queueBytes = 64 * 1024 * 1024, SessionHooks hooks = {});
     ~Session();
     bool submit(Record record) noexcept;
     void fail(std::string_view error, std::optional<RecordLocation> dropped = {}) noexcept;
@@ -38,6 +44,7 @@ private:
     uint64_t m_lastConnection = 0;
     std::optional<RecordLocation> m_firstDropped;
     WriterStats m_stats;
+    SessionHooks m_hooks;
     std::thread m_thread;
 };
 

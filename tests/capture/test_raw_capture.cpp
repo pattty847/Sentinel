@@ -2,6 +2,9 @@
 #include "capture/RawCapture.hpp"
 #include "capture/CaptureVerifier.hpp"
 #include "capture/CaptureSession.hpp"
+#include "capture/CaptureRouting.hpp"
+#include <future>
+#include <iostream>
 #include "servermodel/HmcolFormat.hpp"
 #include "marketdata/fixtures/coinbase_messages.hpp"
 #include <QDirIterator>
@@ -408,27 +411,27 @@ TEST_F(CaptureTest, MultiRoutesExactFramesAndClocksWithReceiptsAndMixedProductEn
     for (const auto& path : paths(config.root)) {
         std::vector<Record> records;
         const auto result = scan(path, [&](const auto& r) { records.push_back(r); });
-        ASSERT_EQ(records.size(), input.size());
         EXPECT_EQ(result.header["format_version"], 2);
+        EXPECT_EQ(result.header["routing"], "product-ranges-v2");
         EXPECT_EQ(contents(path).left(8), QByteArray("RAWL2\r\n\2", 8));
         const auto id = result.header["run_id"].get<std::string>();
         if (run.empty()) run = id;
         EXPECT_EQ(run, id);
         const bool btc = result.header["product_metadata"]["product_id"] == "BTC-USD";
-        for (size_t i = 0; i < input.size(); ++i) {
-            const bool reference = btc ? (i == 4 || i == 5) : i == 3;
-            if (!reference) EXPECT_EQ(records[i], input[i]) << i; // includes two-product frame, whitespace, clocks
-            else {
-                EXPECT_EQ(records[i].kind, Kind::FrameReference);
-                EXPECT_EQ(records[i].time, input[i].time);
-                EXPECT_EQ(records[i].connection, input[i].connection);
-                const auto receipt = nlohmann::json::parse(records[i].payload);
-                EXPECT_EQ(receipt["received_bytes"], input[i].payload.size());
-                EXPECT_EQ(receipt["sequence_num"], i - 2);
-                EXPECT_EQ(receipt["products"], nlohmann::json::array({btc ? "ETH-USD" : "BTC-USD"}));
-                EXPECT_EQ(receipt["sha256"].get<std::string>().size(), 64);
-            }
-        }
+        std::vector<Record> expected;
+        for (size_t i = 0; i < input.size(); ++i)
+            if (!(btc ? (i == 4 || i == 5) : i == 3)) expected.push_back(input[i]);
+        ASSERT_EQ(records.size(), expected.size() + 1);
+        const auto proof = records[records.size() - 2];
+        records.erase(records.end() - 2);
+        EXPECT_EQ(records, expected); // mixed frame, whitespace and clocks are byte-exact
+        EXPECT_EQ(proof.kind, Kind::FrameReference);
+        EXPECT_EQ(proof.time, input[input.size() - 2].time);
+        EXPECT_EQ(proof.connection, 1);
+        const auto receipt = nlohmann::json::parse(proof.payload);
+        EXPECT_EQ(receipt["first_seq"], 0); EXPECT_EQ(receipt["last_seq"], 5);
+        EXPECT_EQ(receipt["count"], 6); EXPECT_EQ(receipt["foreign_count"], btc ? 2 : 1);
+        EXPECT_EQ(receipt["sha256"].get<std::string>().size(), 64);
     }
     const auto report = verify(config.root);
     EXPECT_TRUE(report.ok) << report.json.dump(2);
@@ -529,20 +532,26 @@ TEST_F(CaptureTest, MultiBroadcastsUnclassifiedAndMalformedFramesWithoutChanging
     writeMulti(config, input);
     for (const auto& path : paths(config.root)) {
         std::vector<Record> last;
-        scan(path, [&](const auto& r) { if (r.time.steadyNs >= input[input.size()-3].time.steadyNs) last.push_back(r); });
+        scan(path, [&](const auto& r) { if ((r.kind == Kind::Frame || r.kind == Kind::CaptureStopped) && r.time.steadyNs >= input[input.size()-3].time.steadyNs) last.push_back(r); });
         ASSERT_EQ(last.size(), 3);
         EXPECT_EQ(last[0], input[input.size()-3]); EXPECT_EQ(last[1], input[input.size()-2]);
     }
     EXPECT_FALSE(verify(config.root).ok); // preservation does not bless malformed JSON
 }
 TEST_F(CaptureTest, MultiOverflowUsesOneTotalBudgetAndPersistsGapToEveryProduct) {
-    Session session(multiProducts(config), 16384);
+    std::promise<void> release;
+    auto ready = release.get_future().share();
+    Session session(multiProducts(config), 16384, {.beforeDrain = [ready] { ready.wait(); }});
     auto input = multiFixture();
-    for (size_t i = 0; i + 1 < input.size(); ++i) ASSERT_TRUE(session.submit(input[i]));
-    const auto dropped = record(Kind::Frame, 2200000000, std::string(32768, 'a'));
+    for (size_t i = 0; i + 1 < input.size(); ++i) EXPECT_TRUE(session.submit(input[i]));
+    // Each extra frame fits the 12 KiB data allowance, but their SUM cannot.
+    // Hold the disk consumer so scheduling cannot turn this into a timing test.
+    const auto accepted = record(Kind::Frame, 2150000000, std::string(6000, 'a'));
+    const auto dropped = record(Kind::Frame, 2200000000, std::string(6000, 'b'));
+    EXPECT_TRUE(session.submit(accepted));
     EXPECT_FALSE(session.submit(dropped));
-    EXPECT_TRUE(session.submit(input.back())); session.close();
-    EXPECT_FALSE(session.error().empty());
+    EXPECT_TRUE(session.submit(input.back())); release.set_value(); session.close();
+    ASSERT_FALSE(session.error().empty());
     const auto report = verify(config.root);
     EXPECT_FALSE(report.ok);
     EXPECT_EQ(report.json["totals"]["explicit_capture_gaps"], 1);
@@ -623,7 +632,7 @@ TEST_F(CaptureTest, MultiWholeRootRejectsMissingStreamsAndReceiptsThatDoNotMatch
         EXPECT_FALSE(report.ok) << mutation << report.json.dump(2);
         EXPECT_GT(report.json["routing_errors"].get<int>(), 0);
         // Local sequences and books remain valid; only root comparison can see this loss/mismatch.
-        EXPECT_TRUE(report.json["products"]["BTC-USD"]["ok"].get<bool>());
+        if (mutation != 0) EXPECT_TRUE(report.json["products"]["BTC-USD"]["ok"].get<bool>());
     }
 }
 TEST_F(CaptureTest, MultiHourRotationAndMixedLegacyRunsKeepConnectionIdentity) {
@@ -657,6 +666,178 @@ TEST_F(CaptureTest, MultiDailyCountsFollowReceiveUtcDayAcrossMidnight) {
     EXPECT_GT(days["2026-09-30"]["file_bytes"].get<int>(), 0);
     EXPECT_GT(days["2026-10-01"]["file_bytes"].get<int>(), 0);
     EXPECT_EQ(report.json["products"]["BTC-USD"]["days"]["2026-10-01"]["frames"], 2);
+}
+
+TEST_F(CaptureTest, SupersededStoplessRunIsInterruptedEvenWhenVerifyingAMonth) {
+    {
+        Writer old(config, metadata());
+        auto input = fixture(); input.pop_back();
+        for (const auto& r : input) old.append(r);
+        old.flush();
+    }
+    EXPECT_TRUE(verify(config.root).ok);
+    Writer newer(config, metadata());
+    for (const auto& r : fixture()) newer.append(r);
+    newer.close();
+    for (const auto& path : {config.root, config.root + "/BTC-USD/2026/09"}) {
+        const auto report = verify(path);
+        EXPECT_FALSE(report.ok);
+        EXPECT_EQ(report.json["interrupted_runs"], 1);
+        EXPECT_EQ(report.json["open_runs"], 0);
+        EXPECT_EQ(report.json["ok_closed_runs"], false);
+    }
+}
+TEST_F(CaptureTest, ProductMonthScopeDefersUnavailablePeerChecks) {
+    writeMulti(config, multiFixture());
+    const auto report = verify(config.root + "/BTC-USD/2026/09");
+    EXPECT_TRUE(report.ok) << report.json.dump(2);
+    EXPECT_EQ(report.json["scope"], "product");
+    EXPECT_EQ(report.json["routing_errors"], 0);
+    EXPECT_EQ(report.json["routing_checks_deferred"], 1);
+}
+TEST_F(CaptureTest, InterruptedRunChecksReceiptAgainstLostRawAtCommonPrefix) {
+    QTemporaryDir source;
+    auto src = config; src.root = source.path(); writeMulti(src, multiFixture());
+    for (const auto& path : paths(src.root)) {
+        const auto header = readHeader(path);
+        auto cfg = config; cfg.symbol = header["product_metadata"]["product_id"].get<std::string>();
+        Writer crashed(cfg, header);
+        bool lost = false;
+        scan(path, [&](const Record& r) {
+            if (r.kind == Kind::CaptureStopped) return;
+            // ETH loses its final raw block AND the as-yet-unflushed receipt.
+            // BTC's durable receipt still certifies that those frames existed.
+            if (cfg.symbol == "ETH-USD" && r.kind == Kind::Frame &&
+                nlohmann::json::parse(r.payload).at("sequence_num") == 2) lost = true;
+            if (!lost) crashed.append(r);
+        });
+        crashed.flush(); // no index, no stop
+    }
+    // A newer run in just ONE member makes the shared old run interrupted.
+    Writer newer(config, metadata());
+    for (const auto& r : fixture()) newer.append(r);
+    newer.close();
+    const auto report = verify(config.root);
+    EXPECT_FALSE(report.ok);
+    EXPECT_EQ(report.json["totals"]["interrupted_runs"], 1);
+    EXPECT_EQ(report.json["totals"]["open_runs"], 0);
+    EXPECT_GT(report.json["routing_errors"].get<int>(), 0) << report.json.dump(2);
+    EXPECT_TRUE(report.json["connection_runs"][0]["routing_checked"].get<bool>());
+}
+TEST_F(CaptureTest, OneWriterAppendFailurePreservesHealthyBufferedFramesAndSealsThem) {
+    auto input = multiFixture();
+    bool injected = false;
+    Session session(multiProducts(config), 64 * 1024 * 1024, {.beforeWriterOperation =
+        [&](const auto& symbol, auto operation, const Record* r) {
+            if (!injected && symbol == "ETH-USD" && operation == "append" && r && r->kind == Kind::Frame &&
+                nlohmann::json::parse(r->payload).at("sequence_num") == 4) {
+                injected = true; throw std::runtime_error("injected ETH disk write failure");
+            }
+        }});
+    for (const auto& r : input) session.submit(r);
+    session.close(); ASSERT_TRUE(injected); EXPECT_FALSE(session.error().empty());
+    std::vector<Record> btc;
+    for (const auto& path : paths(config.root + "/BTC-USD")) {
+        const auto result = scan(path, [&](const Record& r) { btc.push_back(r); });
+        EXPECT_TRUE(result.indexed);
+    }
+    for (const auto i : {2, 3, 6}) EXPECT_EQ(std::count(btc.begin(), btc.end(), input[i]), 1) << i;
+    EXPECT_EQ(std::count_if(btc.begin(), btc.end(), [](const auto& r) { return r.kind == Kind::CaptureStopped; }), 1);
+    EXPECT_EQ(verify(config.root).json["products"]["BTC-USD"]["explicit_capture_gaps"], 1);
+}
+TEST_F(CaptureTest, FailedNormalCloseDoesNotReopenAlreadyClosedWritersOrDuplicateStop) {
+    bool injected = false;
+    Session session(multiProducts(config), 64 * 1024 * 1024, {.beforeWriterOperation =
+        [&](const auto& symbol, auto operation, const Record*) {
+            if (!injected && symbol == "ETH-USD" && operation == "close") {
+                injected = true; throw std::runtime_error("injected close failure");
+            }
+        }});
+    const auto input = multiFixture();
+    for (const auto& r : input) EXPECT_TRUE(session.submit(r));
+    session.close(); ASSERT_TRUE(injected); EXPECT_FALSE(session.error().empty());
+    EXPECT_EQ(paths(config.root + "/BTC-USD").size(), 1);
+    int stops = 0;
+    for (const auto& path : paths(config.root + "/BTC-USD")) {
+        EXPECT_TRUE(scan(path, [&](const Record& r) {
+            if (r.kind == Kind::CaptureStopped) { ++stops; EXPECT_EQ(r, input.back()); }
+        }).indexed);
+    }
+    EXPECT_EQ(stops, 1);
+    const auto btc = verify(config.root + "/BTC-USD");
+    EXPECT_TRUE(btc.ok) << btc.json.dump(2);
+}
+
+TEST_F(CaptureTest, SevenProductRangeReceiptOverheadStaysBelowFivePercentPerStream) {
+    const std::map<std::string, int> rates{{"BTC-USD",22}, {"ETH-USD",10}, {"SOL-USD",5},
+        {"FARTCOIN-USD",2}, {"PEPE-USD",2}, {"DOGE-USD",1}, {"AVAX-USD",1}};
+    std::vector<ProductCapture> products;
+    for (const auto& [symbol, rate] : rates) {
+        auto cfg = config; cfg.symbol = symbol;
+        auto meta = metadata(); meta["product_metadata"]["product_id"] = symbol;
+        products.push_back({cfg, meta});
+    }
+    std::promise<void> release;
+    auto ready = release.get_future().share();
+    Session session(std::move(products), 64 * 1024 * 1024, {.beforeDrain = [ready] { ready.wait(); }});
+    bool admitted = session.submit(record(Kind::CaptureStarted, 0, "{}", 0));
+    admitted = session.submit(record(Kind::TransportUp, 1)) && admitted;
+    uint64_t seq = 0, random = 0xdeadbeef;
+    int64_t offset = 2;
+    for (const auto& [symbol, rate] : rates)
+        admitted = session.submit(frame(fixtures::coinbaseL2Snapshot(symbol, {{100,1}}, {{101,1}}), seq++, offset++)) && admitted;
+    // Five minutes at 43 product frames/s, plus one heartbeat/s. Interleave the
+    // products every second: adjacent-only coalescing cannot meet this budget.
+    for (int second = 0; second < 300; ++second) {
+        std::vector<std::pair<int, std::string>> schedule;
+        for (const auto& [symbol, rate] : rates) for (int i = 0; i < rate; ++i) schedule.emplace_back(i * 1000 / rate, symbol);
+        std::sort(schedule.begin(), schedule.end());
+        for (const auto& [ms, symbol] : schedule) {
+            auto update = fixtures::coinbaseL2Update(symbol, {});
+            for (int i = 0; i < 12; ++i) {
+                random ^= random << 13; random ^= random >> 7; random ^= random << 17;
+                update["events"][0]["updates"].push_back({{"side", "bid"}, {"price_level", std::to_string(70+i) + ".00"},
+                    {"new_quantity", "0." + std::to_string(10000000 + random % 89999999)},
+                    {"event_time", "2026-09-30T00:00:00.000000000Z"}});
+            }
+            offset = 1000000000LL + int64_t(second) * 1000000000 + ms * 1000000;
+            admitted = session.submit(frame(update, seq++, offset)) && admitted;
+        }
+        offset = 1000000000LL + int64_t(second) * 1000000000 + 999000000;
+        admitted = session.submit(frame(nlohmann::json{{"channel", "heartbeats"}, {"events", nlohmann::json::array()}}, seq++, offset)) && admitted;
+    }
+    admitted = session.submit(record(Kind::CaptureStopped, offset + 1)) && admitted;
+    release.set_value(); session.close();
+    ASSERT_TRUE(admitted); ASSERT_TRUE(session.error().empty()) << session.error();
+    QTemporaryDir baselineRoot;
+    nlohmann::json measurements = nlohmann::json::object();
+    uint64_t overheadTotal = 0, fileTotal = 0;
+    for (const auto& path : paths(config.root)) {
+        const auto header = readHeader(path);
+        const auto symbol = header["product_metadata"]["product_id"].get<std::string>();
+        auto cfg = config; cfg.symbol = symbol; cfg.root = baselineRoot.path();
+        Writer baseline(cfg, header);
+        uint64_t receipts = 0;
+        scan(path, [&](const Record& r) {
+            if (r.kind == Kind::FrameReference) ++receipts;
+            else baseline.append(r);
+        });
+        baseline.close();
+        const auto actual = uint64_t(QFileInfo(path).size());
+        const auto own = uint64_t(QFileInfo(baseline.currentPath()).size());
+        ASSERT_GE(actual, own);
+        const auto overhead = actual - own;
+        EXPECT_LE(receipts, 6) << symbol; // formerly thousands of receipts
+        EXPECT_LT(double(overhead) / double(own), 0.05) << symbol;
+        measurements[symbol] = {{"file_bytes", actual}, {"own_baseline_bytes", own},
+            {"receipt_overhead_bytes", overhead}, {"receipts", receipts}};
+        overheadTotal += overhead; fileTotal += actual;
+    }
+    measurements["total"] = {{"frames", seq}, {"seconds", 300}, {"file_bytes", fileTotal}, {"receipt_overhead_bytes", overheadTotal}};
+    std::cout << "RECEIPT_MEASUREMENT " << measurements.dump() << '\n';
+    const auto report = verify(config.root);
+    EXPECT_TRUE(report.ok) << report.json.dump(2);
+    EXPECT_EQ(report.json["totals"]["frames"], seq);
 }
 
 TEST(DecimalGrid, ExactAtomsWithoutFloatingPointOrSilentRounding) {

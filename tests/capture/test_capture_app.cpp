@@ -36,11 +36,12 @@ TEST(CaptureApplication, SigtermDrainsAndSealsAfterReconnectWithRealConnectionId
     ASSERT_TRUE(child.waitForStarted(5000)) << child.errorString().toStdString();
     QByteArray output;
     QElapsedTimer deadline; deadline.start();
-    while (!output.contains("FIXTURE_READY\n") && deadline.elapsed() < 5000 && child.state() != QProcess::NotRunning) {
+    while (!output.contains("FIXTURE_READY\n") && deadline.elapsed() < 10000 && child.state() != QProcess::NotRunning) {
         child.waitForReadyRead(100);
         output += child.readAllStandardOutput();
     }
     ASSERT_TRUE(output.contains("FIXTURE_READY\n")) << child.readAllStandardError().toStdString();
+    EXPECT_FALSE(output.contains("FIXTURE_EARLY_FRAME\n"));
     ASSERT_EQ(::kill(static_cast<pid_t>(child.processId()), SIGTERM), 0);
     ASSERT_TRUE(child.waitForFinished(5000));
     ASSERT_EQ(child.exitStatus(), QProcess::NormalExit) << child.readAllStandardError().toStdString();
@@ -117,10 +118,11 @@ TEST(CaptureApplication, SeveralCliFormsSubscribeAllSevenOnOneEngineAndVerifyThe
         ASSERT_TRUE(child.waitForStarted(5000));
         QByteArray output;
         QElapsedTimer deadline; deadline.start();
-        while (!output.contains("FIXTURE_READY\n") && deadline.elapsed() < 5000 && child.state() != QProcess::NotRunning) {
+        while (!output.contains("FIXTURE_READY\n") && deadline.elapsed() < 10000 && child.state() != QProcess::NotRunning) {
             child.waitForReadyRead(100); output += child.readAllStandardOutput();
         }
         ASSERT_TRUE(output.contains("FIXTURE_READY\n")) << child.readAllStandardError().toStdString();
+        EXPECT_FALSE(output.contains("FIXTURE_EARLY_FRAME\n"));
         EXPECT_EQ(output.count("FIXTURE_ENGINE\n"), 1);
         const auto lineStart = output.indexOf("FIXTURE_SENDS ") + 14;
         const auto lineEnd = output.indexOf('\n', lineStart);
@@ -138,6 +140,17 @@ TEST(CaptureApplication, SeveralCliFormsSubscribeAllSevenOnOneEngineAndVerifyThe
             else EXPECT_EQ(message["product_ids"].get<std::set<std::string>>(), expected);
         }
         EXPECT_EQ(channels, (std::map<std::string, int>{{"heartbeats", 2}, {"level2", 2}, {"market_trades", 2}}));
+        // Wait for the disk thread to publish a readable block (read-only).
+        QElapsedTimer flushDeadline; flushDeadline.start();
+        while (flushDeadline.elapsed() < 10000) {
+            QDirIterator files(dir.path() + "/raw", {"*.rawl2"}, QDir::Files, QDirIterator::Subdirectories);
+            int readable = 0;
+            while (files.hasNext()) {
+                try { if (!scan(files.next()).index.empty()) ++readable; } catch (...) { }
+            }
+            if (readable >= 7) break;
+            child.waitForReadyRead(50);
+        }
         const auto live = verify(dir.path() + "/raw");
         EXPECT_TRUE(live.ok) << live.json.dump(2);
         EXPECT_EQ(live.json["complete"], false); EXPECT_EQ(live.json["totals"]["open_runs"], 1);
@@ -145,6 +158,11 @@ TEST(CaptureApplication, SeveralCliFormsSubscribeAllSevenOnOneEngineAndVerifyThe
         EXPECT_EQ(live.json["totals"]["closed_runs"], 0);
         EXPECT_EQ(live.json["routing_checks_deferred"], 1);
         EXPECT_EQ(live.json["products"].size(), 7);
+        QProcess liveVerifier;
+        liveVerifier.setProcessEnvironment(environment);
+        liveVerifier.start(CAPTURE_APP_FIXTURE, {"--verify", dir.path() + "/raw"});
+        ASSERT_TRUE(liveVerifier.waitForFinished(10000));
+        EXPECT_EQ(liveVerifier.exitCode(), 3) << liveVerifier.readAllStandardError().toStdString();
         ASSERT_EQ(::kill(static_cast<pid_t>(child.processId()), SIGTERM), 0);
         ASSERT_TRUE(child.waitForFinished(5000));
         ASSERT_EQ(child.exitCode(), 0) << child.readAllStandardError().toStdString();

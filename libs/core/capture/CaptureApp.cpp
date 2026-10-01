@@ -42,7 +42,7 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
         {"root", "Mounted storage root (never the server recording directory).", "directory", "/Volumes/T7/sentinel-data/raw-l2"},
         {"symbol", "Coinbase product; repeat for several (default BTC-USD).", "product"},
         {"symbols", "Comma-separated Coinbase products on one connection.", "A,B,C"},
-        {"verify", "Offline verify one file or a directory; JSON report, exit 2 for integrity failures; open prefixes are reported separately.", "path"},
+        {"verify", "Offline verify one file or a directory; JSON report, exit 2 for integrity failures, 3 for valid incomplete/open captures.", "path"},
         {"block-ms", "Maximum target block latency in milliseconds.", "ms", "1000"},
         {"block-bytes", "Target uncompressed block bytes (large frames remain whole).", "bytes", "1048576"},
         {"fsync-blocks", "Fsync every N blocks; 0 only syncs at close.", "N", "1"},
@@ -57,7 +57,7 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
     if (parser.isSet("verify")) {
         const auto report = verify(parser.value("verify"));
         std::cout << report.json.dump(2) << '\n';
-        return report.ok ? 0 : 2;
+        return !report.ok ? 2 : report.json.at("complete") == true ? 0 : 3;
     }
     WriterConfig config;
     config.root = validateRoot(parser.value("root"));

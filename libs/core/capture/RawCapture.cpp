@@ -1,4 +1,5 @@
 #include "RawCapture.hpp"
+#include "CaptureRouting.hpp"
 #include "SentinelLogging.hpp"
 #include <QDateTime>
 #include <QCryptographicHash>
@@ -14,6 +15,8 @@
 #include <array>
 #include <cerrno>
 #include <cstring>
+#include <coroutine>
+#include <exception>
 #include <limits>
 #include <stdexcept>
 #ifdef _WIN32
@@ -165,7 +168,7 @@ nlohmann::json headerFrom(QFile& file) {
             !std::binary_search(products.begin(), products.end(), product.at("product_id").get<std::string>()))
             fail("invalid connection products");
         for (const auto& symbol : products) validateSymbol(symbol);
-        if (header.at("routing") != "product-receipts-v1") fail("unsupported routing");
+        if (header.at("routing") != RoutingId) fail("unsupported routing");
     }
     return header;
 }
@@ -184,53 +187,6 @@ Stamp Stamp::now() {
 void validateSymbol(const std::string& symbol) {
     if (symbol.empty() || symbol.size() > 40 || symbol.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-") != std::string::npos)
         fail("invalid symbol");
-}
-
-nlohmann::json frameReceipt(std::string_view payload, const std::vector<std::string>& products) {
-    const auto json = nlohmann::json::parse(payload, nullptr, false);
-    std::vector<std::string> targets;
-    std::string channel = "<invalid-envelope>";
-    nlohmann::json sequence = nullptr;
-    if (json.is_object()) {
-        if (json.contains("channel") && json["channel"].is_string()) channel = json["channel"].get<std::string>();
-        if (json.contains("sequence_num")) sequence = json["sequence_num"];
-        // Route only schemas we know. Anything ambiguous stays byte-exact in all
-        // streams, including unknown channels, errors and malformed envelopes.
-        bool known = (channel == "l2_data" || channel == "market_trades") &&
-                     json.contains("events") && json["events"].is_array();
-        const auto add = [&](const nlohmann::json& value) {
-            if (!value.contains("product_id") || !value["product_id"].is_string()) { known = false; return; }
-            const auto symbol = value["product_id"].get<std::string>();
-            if (!std::binary_search(products.begin(), products.end(), symbol)) known = false;
-            else if (std::find(targets.begin(), targets.end(), symbol) == targets.end()) targets.push_back(symbol);
-        };
-        if (known) for (const auto& event : json["events"]) {
-            if (channel == "l2_data") add(event);
-            else if (event.contains("trades") && event["trades"].is_array())
-                for (const auto& trade : event["trades"]) add(trade);
-            else known = false;
-        }
-        if (!known) targets.clear();
-    }
-    if (targets.empty()) targets = products;
-    std::sort(targets.begin(), targets.end());
-    targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
-    const auto digest = QCryptographicHash::hash(QByteArrayView(payload.data(), payload.size()), QCryptographicHash::Sha256);
-    return {{"products", targets}, {"channel", channel}, {"sequence_num", sequence},
-        {"received_bytes", payload.size()}, {"sha256", digest.toHex().toStdString()}};
-}
-void validateReceipt(const nlohmann::json& receipt, const std::vector<std::string>& products) {
-    const auto targets = receipt.at("products").get<std::vector<std::string>>();
-    if (targets.empty() || targets.size() >= products.size() || !std::is_sorted(targets.begin(), targets.end()) ||
-        std::adjacent_find(targets.begin(), targets.end()) != targets.end()) fail("invalid receipt targets");
-    for (const auto& target : targets)
-        if (!std::binary_search(products.begin(), products.end(), target)) fail("unknown receipt target");
-    const auto hash = receipt.at("sha256").get<std::string>();
-    if (hash.size() != 64 || hash.find_first_not_of("0123456789abcdef") != std::string::npos) fail("invalid receipt hash");
-    if (!receipt.at("received_bytes").is_number_unsigned() || receipt["received_bytes"].get<uint64_t>() > MaxRecordBytes)
-        fail("invalid receipt byte count");
-    if (receipt.at("channel") != "l2_data" && receipt.at("channel") != "market_trades") fail("invalid receipt channel");
-    if (!receipt.contains("sequence_num")) fail("receipt missing sequence");
 }
 
 QString validateRoot(const QString& root) {
@@ -408,6 +364,7 @@ void Writer::seal() {
     put32(footer, crc(index));
     write(footer); sync(); m_file.close();
 }
+void Writer::sealSegment() { seal(); }
 void Writer::close() {
     if (m_closed) return;
     seal(); m_closed = true;
@@ -428,10 +385,27 @@ nlohmann::json readHeader(const QString& path) {
     if (!file.open(QIODevice::ReadOnly)) fail("cannot read " + path.toStdString());
     return headerFrom(file);
 }
-ScanResult scan(const QString& path, const RecordVisitor& visitor) {
+namespace {
+struct RecordGenerator {
+    struct promise_type {
+        Record value;
+        std::exception_ptr error;
+        RecordGenerator get_return_object() { return RecordGenerator(std::coroutine_handle<promise_type>::from_promise(*this)); }
+        std::suspend_always initial_suspend() noexcept { return {}; }
+        std::suspend_always final_suspend() noexcept { return {}; }
+        std::suspend_always yield_value(Record record) { value = std::move(record); return {}; }
+        void return_void() {}
+        void unhandled_exception() { error = std::current_exception(); }
+    };
+    std::coroutine_handle<promise_type> handle;
+    explicit RecordGenerator(std::coroutine_handle<promise_type> h) : handle(h) {}
+    RecordGenerator(const RecordGenerator&) = delete;
+    RecordGenerator& operator=(const RecordGenerator&) = delete;
+    ~RecordGenerator() { if (handle) handle.destroy(); }
+};
+RecordGenerator readRecords(const QString path, ScanResult& result) {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) fail("cannot read " + path.toStdString());
-    ScanResult result;
     result.header = headerFrom(file);
     // Snapshot length: a concurrent writer's new tail is outside this scan.
     const auto end = file.size();
@@ -501,7 +475,7 @@ ScanResult scan(const QString& path, const RecordVisitor& visitor) {
             pos = start + length;
         }
         if (pos != raw.size()) fail("record count mismatch");
-        if (visitor) {
+        {
             pos = 0;
             for (uint32_t i = 0; i < entry.records; ++i) {
                 const auto length = get(raw, pos, 4);
@@ -510,12 +484,35 @@ ScanResult scan(const QString& path, const RecordVisitor& visitor) {
                 record.time.systemNs = get(raw, pos, 8); record.time.steadyNs = get(raw, pos, 8);
                 record.connection = get(raw, pos, 8);
                 record.payload = raw.substr(pos, length - 28); pos += length - 28;
-                visitor(record);
+                co_yield std::move(record);
             }
         }
         result.index.push_back(entry); ++nextOrdinal;
         result.validBytes = file.pos();
     }
-    return result;
+    co_return;
+}
+} // namespace
+struct RecordReader::Impl {
+    ScanResult result;
+    RecordGenerator generator;
+    explicit Impl(const QString& path) : generator(readRecords(path, result)) {}
+};
+RecordReader::RecordReader(const QString& path) : m_impl(std::make_unique<Impl>(path)) {}
+RecordReader::~RecordReader() = default;
+const ScanResult& RecordReader::result() const { return m_impl->result; }
+bool RecordReader::next(Record& record) {
+    auto handle = m_impl->generator.handle;
+    if (handle.done()) return false;
+    handle.resume();
+    if (handle.promise().error) std::rethrow_exception(handle.promise().error);
+    if (handle.done()) return false;
+    record = std::move(handle.promise().value); return true;
+}
+ScanResult scan(const QString& path, const RecordVisitor& visitor) {
+    RecordReader reader(path);
+    Record record;
+    while (reader.next(record)) if (visitor) visitor(record);
+    return reader.result();
 }
 } // namespace sentinel::capture

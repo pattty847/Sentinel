@@ -23,8 +23,13 @@ int main(int argc, char** argv) {
     dependencies.makeEngine = [products](auto& auth, const auto& config) {
         std::cout << "FIXTURE_ENGINE\n" << std::flush;
         auto state = std::make_shared<fixtures::WsScenario>();
-        state->onAttempt = [products, weak = std::weak_ptr(state)](auto& transport, int attempt) {
-            transport.up();
+        state->onFrame = [](size_t sends, int attempt) {
+            if (sends < size_t(attempt) * 3) std::cout << "FIXTURE_EARLY_FRAME\n" << std::flush;
+        };
+        state->onAttempt = [](auto& transport, int) { transport.up(); };
+        state->onSend = [products, weak = std::weak_ptr(state)](auto& transport, size_t sends) {
+            if (sends % 3) return; // wait for all three actual subscription sends
+
             transport.frame(fixtures::coinbaseSubscriptionAck(*products).dump());
             uint64_t sequence = 1;
             for (const auto& product : *products) {
@@ -39,18 +44,19 @@ int main(int argc, char** argv) {
             trade["events"][0]["trades"][0]["product_id"] = products->front();
             trade["sequence_num"] = sequence++;
             transport.frame(trade.dump());
-            transport.heartbeats(10ms, sequence);
-            if (attempt == 1) transport.later(30ms, [&transport] { transport.down(); });
-            else transport.later(20ms, [weak] {
+            // Down and readiness follow data delivery, never a short wall-time race.
+            if (sends == 3) transport.down();
+            else {
+                transport.heartbeats(500ms, sequence);
                 if (const auto state = weak.lock()) {
                     std::lock_guard lock(state->mutex);
                     std::cout << "FIXTURE_SENDS " << nlohmann::json(state->sends).dump() << "\nFIXTURE_READY\n" << std::flush;
                 }
-            });
+            }
         };
         return std::make_unique<MarketDataCoreEngine>(auth, config, [state](auto& io, auto&) {
             return std::make_unique<fixtures::FakeWsTransport>(io, state);
-        }, MarketDataCoreEngine::ReconnectPolicy{20ms, 200ms, 10ms, 2s, 60ms});
+        }, MarketDataCoreEngine::ReconnectPolicy{100ms, 1s, 500ms, 30s, 1s});
     };
     try {
         const int result = sentinel::capture::runApplication(app, dependencies);

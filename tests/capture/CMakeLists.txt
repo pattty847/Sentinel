@@ -15,3 +15,9 @@ target_compile_definitions(test_capture_app PRIVATE
 add_dependencies(test_capture_app capture_app_fixture)
 add_test(NAME CaptureApplicationTests COMMAND test_capture_app)
 set_tests_properties(CaptureApplicationTests PROPERTIES LABELS "capture" TIMEOUT 30)
+
+add_executable(test_capture_routing test_capture_routing.cpp)
+target_link_libraries(test_capture_routing PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+target_compile_definitions(test_capture_routing PRIVATE CAPTURE_ROUTING_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/routing_golden.json")
+add_test(NAME CaptureRoutingTests COMMAND test_capture_routing)
+set_tests_properties(CaptureRoutingTests PROPERTIES LABELS "capture" TIMEOUT 30)

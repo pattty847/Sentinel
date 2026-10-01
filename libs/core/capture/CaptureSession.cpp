@@ -1,4 +1,5 @@
 #include "CaptureSession.hpp"
+#include "CaptureRouting.hpp"
 #include "SentinelLogging.hpp"
 #include <algorithm>
 #include <QUuid>
@@ -7,7 +8,8 @@
 namespace sentinel::capture {
 Session::Session(WriterConfig config, nlohmann::json metadata, size_t queueBytes)
     : Session(std::vector<ProductCapture>{{std::move(config), std::move(metadata)}}, queueBytes) {}
-Session::Session(std::vector<ProductCapture> products, size_t queueBytes) : m_limit(queueBytes) {
+Session::Session(std::vector<ProductCapture> products, size_t queueBytes, SessionHooks hooks)
+    : m_limit(queueBytes), m_hooks(std::move(hooks)) {
     if (queueBytes < 2 * FinalRecordReserve || queueBytes > 1024ULL * 1024 * 1024)
         throw std::runtime_error("invalid queue capacity");
     if (products.empty() || products.size() > MaxProducts) throw std::runtime_error("invalid product count");
@@ -25,7 +27,7 @@ Session::Session(std::vector<ProductCapture> products, size_t queueBytes) : m_li
             product.metadata["run_id"] = run;
             product.metadata["run_started_system_ns"] = started;
             product.metadata["connection_products"] = symbols;
-            product.metadata["routing"] = "product-receipts-v1";
+            product.metadata["routing"] = RoutingId;
         }
     }
     m_error.reserve(512);
@@ -122,22 +124,61 @@ void Session::run(std::vector<ProductCapture> products) {
         }
         std::lock_guard lock(m_mutex); m_stats = total;
     };
+    std::vector<bool> failed(products.size(), false), closed(products.size(), false), proofWritten(products.size(), false);
+    std::optional<RecordLocation> current;
+    RoutingBatch batch;
+    std::optional<uint64_t> expectedSequence;
+    const auto operation = [&](size_t i, std::string_view name, const Record* record, auto action) {
+        try {
+            if (m_hooks.beforeWriterOperation) m_hooks.beforeWriterOperation(symbols[i], name, record);
+            action();
+        } catch (...) { failed[i] = true; throw; }
+    };
+    const auto each = [&](auto action) {
+        std::exception_ptr first;
+        for (size_t i = 0; i < writers.size(); ++i) if (!failed[i] && !closed[i]) {
+            try { action(i); } catch (...) { if (!first) first = std::current_exception(); }
+        }
+        if (first) std::rethrow_exception(first);
+    };
+    const auto finishBatch = [&] {
+        if (batch.empty()) return;
+        each([&](size_t i) {
+            const Record proof{Kind::FrameReference, batch.last, batch.connection, batch.receipt(symbols[i]).dump()};
+            operation(i, "append", &proof, [&] { writers[i]->append(proof); });
+            proofWritten[i] = true;
+        });
+        batch.clear(); std::fill(proofWritten.begin(), proofWritten.end(), false);
+    };
     const auto append = [&](const Record& record) {
+        if (record.kind == Kind::TransportUp) expectedSequence = 0;
         if (writers.size() == 1 || record.kind != Kind::Frame) {
-            for (auto& writer : writers) writer->append(record);
+            finishBatch();
+            each([&](size_t i) { operation(i, "append", &record, [&] { writers[i]->append(record); }); });
             return;
         }
-        const auto receipt = frameReceipt(record.payload, symbols);
-        const auto targets = receipt.at("products").get<std::vector<std::string>>();
-        const Record reference{Kind::FrameReference, record.time, record.connection, receipt.dump()};
-        for (size_t i = 0; i < writers.size(); ++i)
-            writers[i]->append(std::binary_search(targets.begin(), targets.end(), symbols[i]) ? record : reference);
+        if (batch.due(record)) finishBatch();
+        const auto identity = frameReceipt(record.payload, symbols);
+        const auto& sequence = identity.at("sequence_num");
+        if (!sequence.is_number_unsigned() || (expectedSequence && sequence.get<uint64_t>() != *expectedSequence)) {
+            finishBatch();
+            const Record invalidated{Kind::BookInvalidated, record.time, record.connection,
+                R"({"reason":"capture connection sequence gap"})"};
+            each([&](size_t i) { operation(i, "append", &invalidated, [&] { writers[i]->append(invalidated); }); });
+        }
+        expectedSequence = sequence.is_number_unsigned() && sequence.get<uint64_t>() != UINT64_MAX ?
+            std::optional<uint64_t>(sequence.get<uint64_t>() + 1) : std::nullopt;
+        const auto targets = identity.at("products").get<std::vector<std::string>>();
+        batch.add(record, identity);
+        each([&](size_t i) {
+            if (std::binary_search(targets.begin(), targets.end(), symbols[i]))
+                operation(i, "append", &record, [&] { writers[i]->append(record); });
+        });
     };
-    std::optional<RecordLocation> current;
-    bool finalAttempted = false;
     try {
         for (auto& product : products)
             writers.push_back(std::make_unique<Writer>(std::move(product.config), std::move(product.metadata)));
+        if (m_hooks.beforeDrain) m_hooks.beforeDrain();
         while (true) {
             std::optional<Record> next;
             {
@@ -151,51 +192,61 @@ void Session::run(std::vector<ProductCapture> products) {
             if (next) {
                 current = RecordLocation{next->time, next->connection, next->kind};
                 append(*next);
+            } else {
+                if (!batch.empty() && Stamp::now().steadyNs - batch.first.steadyNs >= RoutingIntervalNs) finishBatch();
+                each([&](size_t i) { operation(i, "flush", nullptr, [&] { writers[i]->flushDue(Stamp::now().steadyNs); }); });
             }
-            // Backlogged receive stamps may already be old. Let append() group
-            // them by receive time/size, not one fsync per old queued frame.
-            else for (auto& writer : writers) writer->flushDue(Stamp::now().steadyNs);
             publishStats();
         }
-        auto terminal = finalRecord();
+        finishBatch();
+        const auto terminal = finalRecord();
         current = RecordLocation{terminal.time, terminal.connection, terminal.kind};
-        finalAttempted = true;
-        append(terminal);
-        for (auto& writer : writers) writer->close();
+        // Complete each writer independently. A later close failure must not
+        // reopen a successfully closed writer or duplicate its stop marker.
+        for (size_t i = 0; i < writers.size(); ++i) {
+            operation(i, "append", &terminal, [&] { writers[i]->append(terminal); });
+            operation(i, "close", nullptr, [&] { writers[i]->close(); });
+            closed[i] = true;
+        }
         publishStats();
     } catch (const std::exception& e) {
         sLog_Error("Capture disk worker failed: error=" << e.what());
         fail(e.what(), current);
-        for (const auto& writer : writers)
-            if (auto uncommitted = writer->firstUncommitted()) {
-                if (uncommitted->kind == Kind::FrameReference) uncommitted->kind = Kind::Frame;
-                fail(e.what(), uncommitted);
-            }
+        for (size_t i = 0; i < writers.size(); ++i) if (failed[i])
+            if (auto uncommitted = writers[i]->firstUncommitted()) fail(e.what(), uncommitted);
         {
             std::unique_lock lock(m_mutex);
-            // The app stops/joins the producer before close(), so the terminal
-            // record contains the final connection and first dropped frame.
             m_wake.wait(lock, [&] { return m_stopping; });
-            for (const auto& queued : m_queue)
-                failLocked(m_error, {queued.time, queued.connection, queued.kind});
+            for (const auto& queued : m_queue) failLocked(m_error, {queued.time, queued.connection, queued.kind});
             m_queue.clear(); m_bytes = 0;
-            // finalRecord() may have moved this slot before a failed final sync.
-            if (finalAttempted) {
-                m_stopRecord.kind = Kind::CaptureStopped;
-                m_stopRecord.time = Stamp::now();
-                m_stopRecord.connection = m_lastConnection;
-            }
+            m_stopRecord.kind = Kind::CaptureStopped;
+            // Keep an explicitly submitted deterministic stop stamp when possible.
+            if (!m_stopRecord.time.systemNs) m_stopRecord.time = Stamp::now();
+            m_stopRecord.connection = m_lastConnection;
         }
         const auto terminal = finalRecord();
-        // Attempt every product independently: one broken directory must not
-        // prevent the other streams from recording the connection-wide failure.
-        for (auto& writer : writers) try {
-            writer->abandonSegment();
-            writer->append(terminal);
-            writer->close();
-            sLog_Warning("Capture failure marker persisted in a new segment");
-        } catch (const std::exception& markerError) {
-            sLog_Error("Capture failure marker could not be persisted: error=" << markerError.what());
+        for (size_t i = 0; i < writers.size(); ++i) {
+            if (closed[i]) continue;
+            try {
+                if (failed[i]) writers[i]->abandonSegment();
+                else {
+                    try {
+                        if (!batch.empty() && !proofWritten[i])
+                            writers[i]->append({Kind::FrameReference, batch.last, batch.connection, batch.receipt(symbols[i]).dump()});
+                        // Preserve healthy buffers before starting a marker segment.
+                        writers[i]->flush();
+                        writers[i]->sealSegment();
+                    } catch (const std::exception& recoveryError) {
+                        sLog_Error("Capture recovery seal failed: product=" << symbols[i] << " error=" << recoveryError.what());
+                        writers[i]->abandonSegment(); // this writer also failed; peers remain sealed
+                    }
+                }
+                writers[i]->append(terminal);
+                writers[i]->close();
+                sLog_Warning("Capture failure marker persisted: product=" << symbols[i]);
+            } catch (const std::exception& markerError) {
+                sLog_Error("Capture failure marker could not be persisted: product=" << symbols[i] << " error=" << markerError.what());
+            }
         }
         if (writers.size() != products.size()) sLog_Error("Capture failure marker unavailable for uninitialized writers");
         publishStats();
