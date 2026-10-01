@@ -313,28 +313,68 @@ TEST_F(UgrGpu, TimeframeSwitchKeepsTheColumnsOnScreen) {
     gpuOn(); // 40 one-minute columns ending at viewHi, auto-scroll off
     ASSERT_TRUE(settle()) << error.toStdString();
     const auto *view = ugr->getViewState();
-    const QString v1 = QString::number(view->getViewportVersion());
-    ugr->setTimeframe(int(5 * minute));
+    // A switch is one viewport change (INV-003): the new limits never re-clamp the old
+    // view as a separate step before the scaled view lands (S6d review major 2).
+    auto switchTf = [&](int64_t tfMs) {
+        const uint64_t before = view->getViewportVersion();
+        ugr->setTimeframe(int(tfMs));
+        return view->getViewportVersion() - before;
+    };
+    EXPECT_EQ(switchTf(5 * minute), 1u) << "1m -> 5m";
     EXPECT_EQ(view->getVisibleTimeEnd(), viewHi) << "the view end is the anchor";
     EXPECT_EQ(view->getVisibleTimeEnd() - view->getVisibleTimeStart(), 40 * 5 * minute) << "40 columns of 5m";
-    EXPECT_NE(QString::number(view->getViewportVersion()), v1) << "went through setViewport";
-    ugr->setTimeframe(int(minute));
+    EXPECT_EQ(switchTf(minute), 1u) << "5m -> 1m";
     EXPECT_EQ(view->getVisibleTimeEnd(), viewHi);
     EXPECT_EQ(view->getVisibleTimeEnd() - view->getVisibleTimeStart(), 40 * minute) << "40 columns of 1m again";
     // The clamp still rules: 640 px cannot show more than 640 columns.
     ugr->setViewport(viewHi - 600 * minute, viewHi, 99'900, 100'300);
-    ugr->setTimeframe(int(5 * minute));
+    EXPECT_EQ(switchTf(5 * minute), 1u);
     EXPECT_LE(view->getVisibleTimeEnd() - view->getVisibleTimeStart(), 640 * 5 * minute);
     EXPECT_EQ(view->getVisibleTimeEnd(), viewHi);
     // Shorter timeframe from a view wider than its 1 column/px limit: the old span is read
-    // before the new limit re-clamps it (S6d run 2: 72 h of 1h became 30.8 min of 1m).
+    // before the new limit re-clamps it (S6d run 2: 72 h of 1h became 30.8 min of 1m), and
+    // the limit is not published on its own first (it would clamp 72 h to 640 min).
     ugr->setTimeframe(int(60 * minute));
     ugr->setViewport(viewHi - 72 * kHourMs, viewHi, 99'900, 100'300);
     ASSERT_EQ(view->getVisibleTimeEnd() - view->getVisibleTimeStart(), 72 * kHourMs);
-    ugr->setTimeframe(int(minute));
+    EXPECT_EQ(switchTf(minute), 1u) << "72 h at 1h -> 1m";
     EXPECT_EQ(view->getVisibleTimeEnd() - view->getVisibleTimeStart(), 72 * minute) << "72 columns of 1m";
     EXPECT_EQ(view->getVisibleTimeEnd(), viewHi);
     ASSERT_TRUE(pump(30'000, [&] { return layer().settled(); }, [] {})) << error.toStdString();
+}
+
+// Follow-live: the switch lands on the live edge with the new span, still in one
+// viewport change (no separate re-anchor after the scaled view).
+TEST_F(UgrGpu, TimeframeSwitchUnderFollowLiveIsOneViewportChange) {
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ugr->enableAutoScroll(true);
+    const auto *view = ugr->getViewState();
+    const int64_t anchor = layer().liveAnchorMs();
+    ASSERT_GT(anchor, 0);
+    const uint64_t before = view->getViewportVersion();
+    ugr->setTimeframe(int(5 * minute));
+    EXPECT_EQ(view->getViewportVersion() - before, 1u);
+    const int64_t span = view->getVisibleTimeEnd() - view->getVisibleTimeStart();
+    EXPECT_EQ(span, 40 * 5 * minute);
+    const int64_t tf = 5 * minute;
+    const int64_t liveEnd = (anchor + tf - 1) / tf * tf;
+    EXPECT_EQ(view->getVisibleTimeEnd(), liveEnd + std::max<int64_t>(tf, int64_t(double(span) * 0.08)))
+        << "the padding follows the new span";
+    ASSERT_TRUE(pump(30'000, [&] { return layer().settled(); }, [] {})) << error.toStdString();
+}
+
+// Legacy mode is not part of the gpu switch: setTimeframe leaves its viewport alone
+// (its stream service resets the span later, from the new timeframe's data).
+TEST_F(UgrGpu, LegacyTimeframeSwitchLeavesTheViewport) {
+    ugr->setViewport(viewLo, viewHi, 99'900, 100'300);
+    const auto *view = ugr->getViewState();
+    const uint64_t before = view->getViewportVersion();
+    ugr->setTimeframe(int(5 * minute));
+    EXPECT_EQ(view->getViewportVersion(), before);
+    EXPECT_EQ(view->getVisibleTimeStart(), viewLo);
+    EXPECT_EQ(view->getVisibleTimeEnd(), viewHi);
+    EXPECT_EQ(view->maxTimeSpanMs(), 0.0) << "no gpu limits in legacy mode";
 }
 
 // FM-104 on the main chart: the chart moves to a new scene (a new QRhi); the node

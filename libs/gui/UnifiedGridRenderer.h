@@ -145,6 +145,7 @@ private:
     // Agent API) moves the view: the first book top can arrive before layout.
     bool m_gpuViewPristine = false;
     bool m_gpuSelfViewport = false; // the seed or follow-live is setting the viewport
+    bool m_gpuLimitsDeferred = false; // a timeframe switch applies limits and view as one change
     bool m_chartSensitivityApplied = false;
     HeatmapOverlayRenderer m_heatmapOverlay;
     QTimer* m_heatmapRenderTimer = nullptr;
@@ -455,6 +456,9 @@ private:
     // "Return to live" (follow-live activation): the view's right edge goes one
     // padding past the live anchor's bucket, in either direction, span kept.
     void returnGpuToLive();
+    // The view end that puts the live anchor's bucket one padding inside the right
+    // edge for a view of spanMs (0 while no live anchor is known).
+    qint64 gpuLiveEndMs(qint64 spanMs) const;
     // Cold start without a book or trade: a time-only view from the recording's
     // availability (price unknown until decoded data supplies it).
     void bootstrapGpuTimeView();

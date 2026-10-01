@@ -593,22 +593,36 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
     // Spec rule 1: a column is the timeframe, and a longer one is how to see further
     // back. Keep the columns on screen (S6d: keeping the time span gave four 1h columns
     // after 1m, and 1,600 hairline 1m columns after 1h): scale the span by the timeframe
-    // ratio about the view end, inside the GridViewState clamps. The legacy path resets
-    // to initial_column_px columns instead. previousTf >= 1 s skips the 100 ms default
-    // before the server advertises its timeframe. The span is read before the layer's
-    // new limits re-clamp the old view (72 h of 1h is 30.8 h of 1m columns, then /60).
+    // ratio about the view end, inside the new timeframe's 1 column/px limit. The legacy
+    // path resets to initial_column_px columns instead. previousTf >= 1 s skips the 100 ms
+    // default before the server advertises its timeframe. The span is read before the new
+    // limits apply (72 h of 1h is 72 columns of 1m, not 30.8 h of the clamp then /60), and
+    // limits, scaled span and follow-live end are published as ONE viewport change: the
+    // layer's limitsChanged is held back here, so the old view is never re-clamped first.
     const bool keepColumns = m_gpuHeatmap && m_gpuLayer && timeframe_ms > 0 && previousTf >= 1000 && m_viewState &&
                              m_viewState->isTimeWindowValid();
-    const int64_t end = keepColumns ? m_viewState->getVisibleTimeEnd() : 0;
-    const double span = keepColumns ? static_cast<double>(end - m_viewState->getVisibleTimeStart()) *
-                                          static_cast<double>(timeframe_ms) / static_cast<double>(previousTf)
-                                    : 0.0;
-    if (m_gpuLayer && timeframe_ms > 0) m_gpuLayer->setTimeframeMs(timeframe_ms); // limits re-clamp the view
+    const int64_t oldEnd = keepColumns ? m_viewState->getVisibleTimeEnd() : 0;
+    const double scaledSpan = keepColumns ? static_cast<double>(oldEnd - m_viewState->getVisibleTimeStart()) *
+                                                static_cast<double>(timeframe_ms) / static_cast<double>(previousTf)
+                                          : 0.0;
+    if (m_gpuLayer && timeframe_ms > 0) {
+      m_gpuLimitsDeferred = keepColumns;
+      m_gpuLayer->setTimeframeMs(timeframe_ms); // new limits (applied below when keepColumns)
+      m_gpuLimitsDeferred = false;
+    }
     if (keepColumns) {
-      m_viewState->setViewport(end - static_cast<int64_t>(std::llround(span)), end, m_viewState->getMinPrice(),
-                               m_viewState->getMaxPrice());
+      const double maxTime = m_gpuLayer->maxTimeSpanMs();
+      int64_t span = std::max<int64_t>(1, static_cast<int64_t>(std::llround(scaledSpan)));
+      if (maxTime > 0) span = std::min(span, std::max<int64_t>(1, static_cast<int64_t>(std::floor(maxTime))));
+      int64_t end = oldEnd;
+      const bool live = m_viewState->isAutoScrollEnabled();
+      if (live) {
+        if (const int64_t liveEnd = gpuLiveEndMs(span); liveEnd > 0) end = liveEnd; // the padding follows the span
+      }
+      m_viewState->setViewportAndMaxSpans(end - span, end, m_viewState->getMinPrice(), m_viewState->getMaxPrice(),
+                                          maxTime, m_gpuLayer->maxPriceSpan());
       syncGpuView();
-      if (m_viewState->isAutoScrollEnabled()) returnGpuToLive(); // the padding follows the span
+      if (live) emit liveRenderTick();
     }
     if (m_dataProcessor) {
       QMetaObject::invokeMethod(
@@ -950,7 +964,7 @@ void UnifiedGridRenderer::syncGpuSurface() {
 // Spec rules 1, 2 and 9: GridViewState clamps wheel, axis drags and the Agent
 // API identically; legacy mode keeps its unclamped behaviour.
 void UnifiedGridRenderer::applyGpuLimits() {
-  if (!m_viewState) return;
+  if (!m_viewState || m_gpuLimitsDeferred) return;
   if (m_gpuHeatmap && m_gpuLayer) m_viewState->setMaxSpans(m_gpuLayer->maxTimeSpanMs(), m_gpuLayer->maxPriceSpan());
   else m_viewState->setMaxSpans(0, 0);
 }
@@ -1015,16 +1029,21 @@ void UnifiedGridRenderer::seedGpuViewport(double bestBid, double bestAsk) {
   update();
 }
 
+qint64 UnifiedGridRenderer::gpuLiveEndMs(qint64 spanMs) const {
+  const int64_t anchor = m_gpuLayer ? m_gpuLayer->liveAnchorMs() : 0;
+  const int64_t tf = m_currentTimeframe_ms;
+  if (anchor <= 0 || tf <= 0) return 0;
+  const int64_t liveEnd = recording::floorDiv(anchor + tf - 1, tf) * tf;
+  return liveEnd + std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(spanMs) * m_autoScrollPaddingFrac));
+}
+
 void UnifiedGridRenderer::returnGpuToLive() {
   if (!m_gpuHeatmap || !m_gpuLayer || !m_viewState || !m_viewState->isTimeWindowValid()) return;
-  const int64_t anchor = m_gpuLayer->liveAnchorMs();
-  const int64_t tf = m_currentTimeframe_ms;
-  if (anchor <= 0 || tf <= 0) return; // nothing known yet: the next live frame steps forward
   const int64_t span = m_viewState->getVisibleTimeEnd() - m_viewState->getVisibleTimeStart();
-  const int64_t liveEnd = recording::floorDiv(anchor + tf - 1, tf) * tf;
-  const int64_t pad = std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(span) * m_autoScrollPaddingFrac));
-  sLog_Render("GPU heatmap returns to live: anchor=" << anchor << " end=" << liveEnd + pad);
-  m_viewState->setViewport(liveEnd + pad - span, liveEnd + pad, m_viewState->getMinPrice(), m_viewState->getMaxPrice());
+  const int64_t end = gpuLiveEndMs(span);
+  if (end <= 0) return; // nothing known yet: the next live frame steps forward
+  sLog_Render("GPU heatmap returns to live: anchor=" << m_gpuLayer->liveAnchorMs() << " end=" << end);
+  m_viewState->setViewport(end - span, end, m_viewState->getMinPrice(), m_viewState->getMaxPrice());
   syncGpuView(); // publishes the view even when it was already there
   emit liveRenderTick();
 }

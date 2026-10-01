@@ -77,6 +77,13 @@ void GridViewState::setMaxSpans(double maxTimeSpanMs, double maxPriceSpan) {
     if (m_timeWindowValid) setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
 }
 
+void GridViewState::setViewportAndMaxSpans(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax,
+                                           double maxTimeSpanMs, double maxPriceSpan) {
+    m_maxTimeSpanMs = std::isfinite(maxTimeSpanMs) && maxTimeSpanMs > 0 ? maxTimeSpanMs : 0.0;
+    m_maxPriceSpan = std::isfinite(maxPriceSpan) && maxPriceSpan > 0 ? maxPriceSpan : 0.0;
+    setViewport(timeStart, timeEnd, priceMin, priceMax); // clamps to the new limits
+}
+
 void GridViewState::setViewportSize(double width, double height) {
     if (width > 0 && height > 0) {
         m_viewportWidth = width;

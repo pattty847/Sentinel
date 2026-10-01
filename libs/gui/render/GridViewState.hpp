@@ -29,6 +29,10 @@ public:
     // setViewport and every zoom handler apply them, so wheel, axis drags and the
     // Agent API clamp the same way; setting them re-clamps the current viewport.
     void setMaxSpans(double maxTimeSpanMs, double maxPriceSpan);
+    // New limits and a new viewport as one change (one viewportVersion step): the
+    // limits are not applied to the old viewport first. A timeframe switch uses it.
+    void setViewportAndMaxSpans(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax,
+                                double maxTimeSpanMs, double maxPriceSpan);
     double maxTimeSpanMs() const { return m_maxTimeSpanMs; }
     double maxPriceSpan() const { return m_maxPriceSpan; }
     void setViewportSize(double width, double height);
