@@ -30,6 +30,7 @@
 #include "SyntheticHmc2Fixture.hpp"
 #include "marketdata/model/TradeData.h"
 #include <QElapsedTimer>
+#include <QEventLoop>
 #include <QGuiApplication>
 #include <QQmlContext>
 #include <QQmlEngine>
@@ -37,12 +38,17 @@
 #include <QQuickWindow>
 #include <QSGOpacityNode>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QtQml/qqml.h>
 #include <gtest/gtest.h>
 #include <private/qquickitem_p.h>
+#include <atomic>
 #include <climits>
 #include <cmath>
+#include <functional>
 #include <iostream>
+#include <optional>
+#include <stdexcept>
 
 namespace {
 using namespace synthetic_hmc2;
@@ -1593,6 +1599,75 @@ TEST(UgrInput, CandlesFollowTheActiveSymbol) {
     EXPECT_EQ(paper->symbol(), QString("ETH-USD"));
     scene.updateSymbolInContext("BTC-USD");
     EXPECT_EQ(candles->symbol(), QString("BTC-USD"));
+}
+
+// A std::runtime_error from a chunk build or an availability scan must become a
+// failed request (the fetcher retries it), never leave the transport's Qt slot.
+// This executable links vcpkg's libskia.a, whose private `typeinfo for
+// std::exception` makes `catch (const std::exception &)` miss a libc++-thrown
+// std::runtime_error: before the fix this test aborted in std::terminate (the
+// ctest aborts seen at teardown were the same defect). Binaries without skia,
+// such as test_chunk_fetcher, cannot show it.
+TEST(LocalChunkTransportFaults, ARuntimeErrorBecomesAFailedReplyAndTheWorkerSurvives) {
+    ASSERT_NE(fixtureDir, nullptr);
+    std::atomic<int> builds{0}, scans{0};
+    heatmap::LocalChunkTransport::TestHooks hooks;
+    hooks.pollIntervalMs = 0;
+    hooks.beforeAvailability = [&](recording::Hmc2Reader &, std::stop_token) {
+        if (++scans == 2) throw std::runtime_error("scripted availability failure");
+    };
+    hooks.beforeBuild = [&](recording::Hmc2Reader &, std::stop_token) {
+        if (++builds == 1) throw std::runtime_error("scripted build failure");
+    };
+    heatmap::LocalChunkTransport local(fixtureDir->path().toStdString(), hooks);
+    QEventLoop loop;
+    std::optional<heatmap::ChunkAvailability> available;
+    std::vector<quint64> received;
+    std::vector<std::pair<quint64, QString>> failures;
+    int availabilityCount = 0;
+    QObject::connect(&local, &heatmap::ChunkTransport::availability, &loop, [&](heatmap::ChunkAvailability a) {
+        available = std::move(a); ++availabilityCount; loop.quit();
+    }, Qt::QueuedConnection);
+    QObject::connect(&local, &heatmap::ChunkTransport::received, &loop, [&](quint64 id, heatmap::ChunkFramePtr) {
+        received.push_back(id); loop.quit();
+    }, Qt::QueuedConnection);
+    QObject::connect(&local, &heatmap::ChunkTransport::failed, &loop,
+                     [&](quint64 id, heatmap::OptionalChunkKey, QString code, QString) {
+        failures.emplace_back(id, code); loop.quit();
+    }, Qt::QueuedConnection);
+    auto await = [&](const std::function<bool()> &done) {
+        QTimer watchdog;
+        watchdog.setSingleShot(true);
+        QObject::connect(&watchdog, &QTimer::timeout, &loop, &QEventLoop::quit);
+        watchdog.start(10'000);
+        while (!done() && watchdog.isActive()) loop.exec();
+        return done();
+    };
+    local.start({lab::kSymbol});
+    ASSERT_TRUE(await([&] { return available.has_value(); }));
+    ASSERT_FALSE(available->sources.empty());
+    const std::string source = available->sources.front().id;
+
+    // The first build throws: an error reply for that request, and the process lives.
+    const auto bad = local.request(lab::kSymbol, source, minute, {epoch}, {});
+    ASSERT_TRUE(await([&] { return !failures.empty(); }));
+    EXPECT_EQ(failures.front().first, bad);
+    EXPECT_EQ(failures.front().second, QStringLiteral("build_failed"));
+    EXPECT_TRUE(received.empty());
+
+    // The worker is still serving: a later request for a valid key succeeds.
+    const auto good = local.request(lab::kSymbol, source, minute, {epoch}, {});
+    ASSERT_TRUE(await([&] { return !received.empty(); }));
+    EXPECT_EQ(received.front(), good);
+
+    // A throwing availability scan keeps the last snapshot (it has no request to fail)
+    // and does not stop the worker: the next request is still answered.
+    local.refreshAvailability(lab::kSymbol); // scan 2 throws
+    const auto after = local.request(lab::kSymbol, source, minute, {epoch + kHourMs}, {});
+    ASSERT_TRUE(await([&] { return received.size() == 2; }));
+    EXPECT_EQ(received.back(), after);
+    EXPECT_EQ(availabilityCount, 1);
+    EXPECT_EQ(failures.size(), 1u);
 }
 } // namespace
 
