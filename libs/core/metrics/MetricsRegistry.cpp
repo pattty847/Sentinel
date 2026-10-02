@@ -1,7 +1,6 @@
 #include "MetricsRegistry.hpp"
+#include <charconv>
 #include <cmath>
-#include <cstdio>
-#include <cstdlib>
 #include <stdexcept>
 
 namespace sentinel::metrics {
@@ -68,11 +67,11 @@ std::string MetricsRegistry::escapeHelp(std::string_view help) {
 std::string MetricsRegistry::formatValue(double value) {
     if (std::isnan(value)) return "NaN";
     if (std::isinf(value)) return value > 0 ? "+Inf" : "-Inf";
-    // Shortest of %.15g / %.17g that reads back exactly.
+    // std::to_chars: shortest round-trip text and independent of the C locale
+    // (snprintf would print "1,5" after QCoreApplication under de_DE).
     char buf[32];
-    std::snprintf(buf, sizeof buf, "%.15g", value);
-    if (std::strtod(buf, nullptr) != value) std::snprintf(buf, sizeof buf, "%.17g", value);
-    return buf;
+    const auto [end, ec] = std::to_chars(buf, buf + sizeof buf, value);
+    return ec == std::errc() ? std::string(buf, end) : std::string("NaN");
 }
 
 std::string MetricsRegistry::renderLabels(const Labels& labels) {
@@ -167,7 +166,9 @@ std::string MetricsRegistry::render() const {
         for (const auto& s : f->series) {
             std::string value;
             if (s.counter) {
-                value = std::to_string(s.counter->value());
+                char buf[24];
+                const auto [end, ec] = std::to_chars(buf, buf + sizeof buf, s.counter->value());
+                value.assign(buf, ec == std::errc() ? end : buf);
             } else if (s.gauge) {
                 value = formatValue(s.gauge->value());
             } else {

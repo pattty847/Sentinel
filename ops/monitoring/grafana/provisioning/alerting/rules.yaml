@@ -97,21 +97,31 @@ groups:
                   query: { params: [C] }
                   reducer: { type: last, params: [] }
 
-      # A3a: a scrape target is down: process dead, crash loop (exit 75 when T7
-      # is unmounted), or a main thread frozen so hard it cannot answer /metrics.
-      # No series at all (scrape config broken, VM empty) also pages.
+      # A3a: a required scrape target is down or missing: process dead, crash
+      # loop (exit 75 when T7 is unmounted), a main thread frozen so hard it
+      # cannot answer /metrics, or the job gone from the scrape config.
+      # One sample per required job, so a single missing job still fires:
+      #   healthy            -> up = 1 for both jobs               -> OK
+      #   failed scrape      -> up{job} = 0                        -> fires for that job
+      #   one job missing    -> its up series is absent; absent(up{job="x"}) = 1
+      #                         (labels job="x" from the matcher), minus 1 = 0 -> fires for job x
+      #   empty datasource   -> both absent() terms = 0            -> fires for both jobs
+      #   VictoriaMetrics down -> query error -> execErrState Error -> Grafana's
+      #                         DatasourceError notification through the same policy
+      # absent() is empty for a job that has an up series, so a healthy job yields
+      # only its up sample. Add a job here when it becomes required.
       - uid: sentinel-a3-target-down
         title: A3 service down
         condition: C
         for: 2m
-        noDataState: Alerting
+        noDataState: Alerting # cannot happen with the absent() terms; kept as a backstop
         execErrState: Error
         labels:
           severity: page
         annotations:
           summary: "Service down: {{ .Labels.job }}"
           description: >-
-            Scrape of {{ .Labels.job }} ({{ .Labels.instance }}) failing for 2 minutes. For
+            Scrape of {{ .Labels.job }} failing or missing for 2 minutes. For
             sentinel-server read ~/Library/Logs/Sentinel/launchd-recorder.err and the latest run
             log; exit 75 means the recording directory (T7) is not usable.
         data:
@@ -120,7 +130,10 @@ groups:
             datasourceUid: sentinel-vm
             model:
               refId: A
-              expr: up{job=~"sentinel-server|node"}
+              expr: >-
+                up{job=~"sentinel-server|node"}
+                or (absent(up{job="sentinel-server"}) - 1)
+                or (absent(up{job="node"}) - 1)
               instant: true
               range: false
               intervalMs: 15000

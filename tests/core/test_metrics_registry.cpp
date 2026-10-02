@@ -4,9 +4,13 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QTcpSocket>
+#include <QTimer>
 #include <gtest/gtest.h>
+#include <clocale>
 #include <cmath>
+#include <cstdio>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -57,6 +61,29 @@ TEST(MetricsRegistry, FormatsSpecialAndLargeValues) {
     EXPECT_EQ(std::strtod(MetricsRegistry::formatValue(third).c_str(), nullptr), third); // round-trips
 }
 
+// Qt's QCoreApplication calls setlocale(LC_ALL, ""), so a de_DE user locale
+// reaches the C library; Prometheus text must still use '.' as the decimal point.
+TEST(MetricsRegistry, NumbersIgnoreTheProcessLocale) {
+    const std::string saved = std::setlocale(LC_NUMERIC, nullptr);
+    const char* commaLocale = nullptr;
+    for (const char* name : {"de_DE.UTF-8", "de_DE.utf8", "de_DE", "fr_FR.UTF-8", "fr_FR.utf8"})
+        if (std::setlocale(LC_NUMERIC, name)) {
+            commaLocale = name;
+            break;
+        }
+    if (!commaLocale) GTEST_SKIP() << "no comma-decimal locale installed";
+    char probe[16];
+    std::snprintf(probe, sizeof probe, "%.1f", 1.5);
+    EXPECT_STREQ(probe, "1,5") << "locale " << commaLocale << " does not use a decimal comma";
+    MetricsRegistry r;
+    r.gauge("sentinel_test_locale", "x").set(1.5);
+    r.gaugeFn("sentinel_test_locale_fn", "x", {}, [] { return std::optional<double>(1759363200.25); });
+    const std::string text = r.render();
+    std::setlocale(LC_NUMERIC, saved.c_str());
+    EXPECT_NE(text.find("\nsentinel_test_locale 1.5\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("\nsentinel_test_locale_fn 1759363200.25\n"), std::string::npos) << text;
+}
+
 TEST(MetricsRegistry, RejectsInvalidNamesAndConflicts) {
     MetricsRegistry r;
     EXPECT_THROW(r.counter("1bad", "x"), std::invalid_argument);
@@ -96,12 +123,17 @@ TEST(MetricsRegistry, ProcessMetricsReportThisProcess) {
     MetricsRegistry r;
     sentinel::metrics::registerProcessMetrics(r);
     const std::string text = r.render();
-    EXPECT_NE(text.find("# TYPE process_cpu_seconds_total counter\nprocess_cpu_seconds_total "), std::string::npos);
     EXPECT_NE(text.find("sentinel_build_info{version=\""), std::string::npos);
+    EXPECT_NE(text.find("\nprocess_start_time_seconds "), std::string::npos);
 #if defined(__APPLE__) || defined(__linux__)
+    EXPECT_NE(text.find("# TYPE process_cpu_seconds_total counter\nprocess_cpu_seconds_total "), std::string::npos);
     const auto pos = text.find("\nprocess_resident_memory_bytes ");
     ASSERT_NE(pos, std::string::npos);
     EXPECT_GT(std::strtod(text.c_str() + pos + 31, nullptr), 1e6); // a live process holds > 1 MB
+#else
+    // No sampler on this platform: the family is declared and the sample omitted.
+    EXPECT_NE(text.find("# TYPE process_cpu_seconds_total counter\n# HELP"), std::string::npos);
+    EXPECT_EQ(text.find("\nprocess_resident_memory_bytes "), std::string::npos);
 #endif
 }
 
@@ -159,7 +191,8 @@ TEST(MetricsHttpServer, ServesPingMetricsAndErrors) {
     const QByteArray head = httpExchange(server.port(), "HEAD /metrics HTTP/1.1\r\n\r\n");
     EXPECT_TRUE(head.startsWith("HTTP/1.1 200 OK\r\n"));
     EXPECT_TRUE(body(head).isEmpty());
-    EXPECT_TRUE(httpExchange(server.port(), QByteArray(MetricsHttpServer::kMaxRequestBytes, 'a'))
+    // One byte over the limit with no header end: rejected without waiting for more.
+    EXPECT_TRUE(httpExchange(server.port(), QByteArray(MetricsHttpServer::kMaxRequestBytes + 1, 'a'))
                     .startsWith("HTTP/1.1 400"));
 }
 
@@ -196,4 +229,70 @@ TEST(MetricsHttpServer, WaitsForTheWholeRequestHeader) {
     }
     response += client.readAll();
     EXPECT_EQ(body(response).toStdString(), r.render());
+}
+
+namespace {
+void pumpFor(int ms) {
+    QElapsedTimer t;
+    t.start();
+    while (t.elapsed() < ms) QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+}
+} // namespace
+
+// A header terminator after the limit must not let an oversized request through.
+TEST(MetricsHttpServer, RejectsOversizedCompleteRequest) {
+    int argc = 1;
+    char name[] = "metrics-http-oversized";
+    char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    MetricsRegistry r;
+    MetricsHttpServer server(r);
+    ASSERT_TRUE(server.listen(0));
+    const QByteArray request = "GET /metrics HTTP/1.1\r\nX-Pad: " +
+                               QByteArray(MetricsHttpServer::kMaxRequestBytes + 4096, 'a') + "\r\n\r\n";
+    const QByteArray response = httpExchange(server.port(), request);
+    // The answer is a 400, or nothing when the close resets the unread rest.
+    EXPECT_FALSE(response.startsWith("HTTP/1.1 200")) << response.left(64).toStdString();
+    if (!response.isEmpty()) EXPECT_TRUE(response.startsWith("HTTP/1.1 400")) << response.left(64).toStdString();
+    pumpFor(50);
+    EXPECT_EQ(server.activeConnections(), 0);
+}
+
+// Many clients that never finish a request: the cap holds, the main loop keeps
+// running, the absolute timeout frees every socket and the endpoint recovers.
+TEST(MetricsHttpServer, CapsConnectionsAndTimesOutIncompleteRequests) {
+    int argc = 1;
+    char name[] = "metrics-http-flood";
+    char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    MetricsRegistry r;
+    MetricsHttpServer server(r);
+    server.setRequestTimeoutMs(400);
+    ASSERT_TRUE(server.listen(0));
+    int ticks = 0;
+    QTimer heartbeat;
+    QObject::connect(&heartbeat, &QTimer::timeout, [&] { ++ticks; });
+    heartbeat.start(10);
+
+    constexpr int kClients = 20;
+    std::vector<std::unique_ptr<QTcpSocket>> clients;
+    for (int i = 0; i < kClients; ++i) {
+        clients.push_back(std::make_unique<QTcpSocket>());
+        clients.back()->connectToHost(QHostAddress::LocalHost, server.port());
+    }
+    pumpFor(150);
+    for (auto& c : clients)
+        if (c->state() == QAbstractSocket::ConnectedState) c->write("GET /metrics HTTP/1.1\r\n");
+    pumpFor(100);
+    EXPECT_EQ(server.activeConnections(), MetricsHttpServer::kMaxConnections);
+    EXPECT_EQ(server.refusedConnections(), uint64_t(kClients - MetricsHttpServer::kMaxConnections));
+    EXPECT_GT(ticks, 10) << "main loop stalled under the flood";
+
+    pumpFor(600); // past the 400 ms deadline
+    EXPECT_EQ(server.activeConnections(), 0);
+    int open = 0;
+    for (auto& c : clients) open += c->state() == QAbstractSocket::ConnectedState;
+    EXPECT_EQ(open, 0) << "server kept sockets past the timeout";
+    EXPECT_GT(ticks, 50);
+    EXPECT_EQ(body(httpExchange(server.port(), "GET /ping HTTP/1.1\r\n\r\n")), "OK");
 }

@@ -5,7 +5,7 @@
 #
 #   ops/monitoring/install.sh                 # brew install, render, load, verify
 #   ops/monitoring/install.sh --no-brew       # same, formulae already installed
-#   ops/monitoring/install.sh --dry-run <dir> # render plists + grafana.ini into <dir> and lint; nothing else
+#   ops/monitoring/install.sh --dry-run <dir> # render with a dummy topic into <dir> and lint; nothing else
 #   ops/monitoring/install.sh --uninstall     # unload and remove the three plists; data is kept
 #
 # ntfy topic (the only secret): SENTINEL_NTFY_TOPIC in the environment, or a
@@ -16,8 +16,9 @@
 # (com.sentinel.recorder) or the capture (com.sentinel.capture).
 set -euo pipefail
 
-HERE=$(cd "$(dirname "$0")" && pwd)
-REPO=$(cd "$HERE/../.." && pwd)
+# Physical paths: a symlink must not hide a checkout or runtime dir on T7.
+HERE=$(cd "$(dirname "$0")" && pwd -P)
+REPO=$(cd "$HERE/../.." && pwd -P)
 RT="$HOME/Sentinel-runtime/monitoring"
 LOGS="$HOME/Library/Logs/Sentinel"
 AGENTS="$HOME/Library/LaunchAgents"
@@ -43,24 +44,43 @@ if [[ $mode == uninstall ]]; then
     exit 0
 fi
 
+# True when <path> (or, if it does not exist yet, its nearest existing parent)
+# is on the internal disk: physically outside /Volumes and on a non-/Volumes mount.
+on_internal_disk() {
+    local p=$1
+    while [[ ! -e "$p" ]]; do p=$(dirname "$p"); done
+    local phys mount
+    phys=$(cd "$p" && pwd -P)
+    mount=$(df -P "$phys" | awk 'NR == 2 {print $6}')
+    [[ "$phys" != /Volumes/* && -n "$mount" && "$mount" != /Volumes/* ]]
+}
+
 # The services read prometheus.yml and the Grafana provisioning from this
-# checkout for as long as they run: it must be the main checkout on the internal
-# disk, never an agent worktree on T7 (the monitor must outlive a T7 failure).
-if [[ $mode != dry-run && "$REPO" == /Volumes/* ]]; then
-    echo "error: run install.sh from the main checkout on the internal disk, not $REPO" >&2
-    exit 1
+# checkout and keep their data in ~/Sentinel-runtime/monitoring for as long as
+# they run: both must be on the internal disk, never on T7 (an agent worktree
+# lives there), because the monitor must outlive a T7 failure.
+if [[ $mode != dry-run ]]; then
+    for path in "$REPO" "$RT"; do
+        if ! on_internal_disk "$path"; then
+            echo "error: $path is not on the internal disk; run install.sh from the main checkout" >&2
+            echo "       and keep ~/Sentinel-runtime on the internal disk" >&2
+            exit 1
+        fi
+    done
 fi
 
-topic=${SENTINEL_NTFY_TOPIC:-}
-if [[ -z "$topic" && -f "$HERE/ntfy.env" ]]; then
-    if ! git -C "$REPO" check-ignore -q "$HERE/ntfy.env"; then
-        echo "error: $HERE/ntfy.env is not gitignored; refusing to read a secret that could be committed" >&2
-        exit 1
-    fi
-    topic=$(sed -n 's/^SENTINEL_NTFY_TOPIC=//p' "$HERE/ntfy.env" | tail -1 | tr -d "\"' \r")
-fi
-if [[ $mode == dry-run && -z "$topic" ]]; then
+if [[ $mode == dry-run ]]; then
+    # Never the real topic: dry-run output may land in an unignored place.
     topic=dry-run-topic
+else
+    topic=${SENTINEL_NTFY_TOPIC:-}
+    if [[ -z "$topic" && -f "$HERE/ntfy.env" ]]; then
+        if ! git -C "$REPO" check-ignore -q "$HERE/ntfy.env"; then
+            echo "error: $HERE/ntfy.env is not gitignored; refusing to read a secret that could be committed" >&2
+            exit 1
+        fi
+        topic=$(sed -n 's/^SENTINEL_NTFY_TOPIC=//p' "$HERE/ntfy.env" | tail -1 | tr -d "\"' \r")
+    fi
 fi
 if [[ ! "$topic" =~ ^[A-Za-z0-9_-]{8,64}$ ]]; then
     echo "error: set SENTINEL_NTFY_TOPIC (8-64 chars of A-Z a-z 0-9 _ -), or put" >&2
@@ -81,6 +101,11 @@ for bin in "$BREW/opt/victoriametrics/bin/victoria-metrics" "$BREW/opt/grafana/b
         exit 1
     fi
 done
+
+# Everything rendered from here on is private (brew above keeps its own umask):
+# the Grafana plist carries the ntfy URL and must not exist world-readable even
+# briefly before a chmod.
+umask 077
 
 render() { # template output
     local esc_url=${ntfy_url//&/\\&}
@@ -109,7 +134,7 @@ for label in "${LABELS[@]}"; do
     dst="$AGENTS/$label.plist"
     render "$HERE/launchd/$label.plist.in" "$dst.new"
     plutil -lint "$dst.new" >/dev/null
-    chmod 600 "$dst.new" # the Grafana plist carries the ntfy URL
+    chmod 600 "$dst.new" # already 600 under umask 077; explicit for clarity
     mv "$dst.new" "$dst"
     launchctl bootout "$DOMAIN/$label" 2>/dev/null || true
     launchctl bootstrap "$DOMAIN" "$dst"

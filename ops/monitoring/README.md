@@ -43,17 +43,19 @@ capture.
      script refuses the file if git does not ignore it), or
    - set `SENTINEL_NTFY_TOPIC=<topic>` in the environment of the install command.
 4. Run `ops/monitoring/install.sh` from the main checkout on the internal disk. The script
-   refuses a worktree under `/Volumes`. The script does these steps:
+   resolves physical paths and refuses a checkout or a `~/Sentinel-runtime` that is on
+   `/Volumes` (for example an agent worktree on T7). The script does these steps:
    - It runs `brew install victoriametrics grafana node_exporter`.
-   - It renders the plists into `~/Library/LaunchAgents` (mode 600, because the Grafana
-     plist holds the ntfy URL).
+   - It renders the plists into `~/Library/LaunchAgents` with umask 077 (mode 600 from
+     creation, because the Grafana plist holds the ntfy URL).
    - It renders `grafana.ini` into `~/Sentinel-runtime/monitoring/grafana/`.
    - It runs `launchctl bootstrap` for each of the three agents.
    - It waits until all four checks pass: VictoriaMetrics health, node_exporter, Grafana
      health and `up{job="sentinel-server"} == 1`.
 
    Use `--no-brew` when the formulae are already installed. Use `--dry-run <dir>` to render
-   and lint the plists without installing anything.
+   and lint the plists without installing anything. A dry run always uses a dummy topic
+   and never reads the real one.
 5. Open http://127.0.0.1:3000. The home page is "Sentinel health". To edit, log in as
    admin/admin; Grafana asks for a new password at the first login.
 6. Test the alert path. In Grafana, open Alerting > Contact points > ntfy > Test. The phone
@@ -126,7 +128,7 @@ signal is on a hot path.
 |---|---|---|
 | A1 recorder stalled | `max by (product,layer) (sentinel_recorder_column_overdue_seconds) > 60` (only while connected) | 1 m |
 | A1b recorder upstream disconnected | `sentinel_mdc_connected < 1`. A1 is silent by design while disconnected, so this alert covers that gap. | 5 m |
-| A3 service down | `up{job=~"sentinel-server\|node"} < 1`. Also fires when the query has no data or VictoriaMetrics does not answer. | 2 m |
+| A3 service down | `up{job=~"sentinel-server\|node"} or (absent(up{job="sentinel-server"}) - 1) or (absent(up{job="node"}) - 1)` is below 1. This gives one sample per required job: a failed scrape (up 0) and a job whose `up` series is missing (absent - 1 = 0) both fire for that job. When VictoriaMetrics does not answer, Grafana sends its DatasourceError notification. | 2 m |
 | A3b T7 absent | `absent(node_filesystem_avail_bytes{mountpoint="/Volumes/T7"})` | 5 m |
 
 The rules are in `grafana/provisioning/alerting/rules.yaml`. The contact point and policy

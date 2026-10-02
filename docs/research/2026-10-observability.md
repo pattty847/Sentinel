@@ -223,6 +223,10 @@ The branch differs from items 1-5 above in these points:
   - A1b "upstream disconnected 5 min". A1 is silent while disconnected, so this alert
     covers that gap.
   - A3b "T7 absent".
+  - A3 evaluates `up{job=~"sentinel-server|node"} or (absent(up{job="sentinel-server"}) - 1)
+    or (absent(up{job="node"}) - 1)`, so a job whose `up` series is missing fires on its
+    own. A plain `up{...}` query still returns data for the other job, so its no-data
+    state would never trigger.
   - All four go to one ntfy webhook. The topic comes from `SENTINEL_NTFY_TOPIC` or the
     gitignored `ops/monitoring/ntfy.env`.
 - Runtime layout:
