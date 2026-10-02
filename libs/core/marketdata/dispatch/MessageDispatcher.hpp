@@ -1,5 +1,6 @@
 #pragma once
 #include <variant>
+#include <optional>
 #include <vector>
 #include <string>
 #include <nlohmann/json.hpp>
@@ -9,7 +10,11 @@
 struct TradeEvent { Trade trade; };
 struct BookSnapshotEvent { std::string productId; };
 struct BookUpdateEvent { std::string productId; };
-struct SubscriptionAckEvent { std::vector<std::string> productIds; };
+struct SubscriptionAckEvent {
+    std::vector<std::string> productIds;
+    // Absent means this ack makes no statement about L2 (e.g. trades-only).
+    std::optional<std::vector<std::string>> level2ProductIds;
+};
 struct ProviderErrorEvent { std::string message; };
 
 using Event = std::variant<TradeEvent, BookSnapshotEvent, BookUpdateEvent, SubscriptionAckEvent, ProviderErrorEvent>;
@@ -54,40 +59,44 @@ public:
                 }
             }
         } else if (channel == "subscriptions" || type == "subscriptions") {
-            std::vector<std::string> ids;
-            if (j.contains("product_ids") && j["product_ids"].is_array()) {
-                for (const auto& id : j["product_ids"]) ids.emplace_back(id.get<std::string>());
-            }
-            const nlohmann::json* channels = nullptr;
-            if (j.contains("subscriptions") && j["subscriptions"].contains("channels")) {
-                channels = &j["subscriptions"]["channels"];
-            } else if (j.contains("channels")) {
-                channels = &j["channels"];
-            }
-            if (channels && channels->is_array()) {
-                for (const auto& ch : *channels) {
-                    if (ch.contains("product_ids") && ch["product_ids"].is_array()) {
-                        for (const auto& id : ch["product_ids"]) ids.emplace_back(id.get<std::string>());
-                    }
+            SubscriptionAckEvent ack;
+            const auto append = [&ack](const nlohmann::json& ids, bool level2) {
+                if (!ids.is_array()) return;
+                if (level2 && !ack.level2ProductIds) ack.level2ProductIds.emplace();
+                for (const auto& id : ids) {
+                    if (!id.is_string() || id == "heartbeats") continue;
+                    ack.productIds.push_back(id.get<std::string>());
+                    if (level2) ack.level2ProductIds->push_back(id.get<std::string>());
                 }
-            }
-            if (j.contains("subscriptions") && j["subscriptions"].is_object()) {
-                const auto& subs = j["subscriptions"];
-                for (auto it = subs.begin(); it != subs.end(); ++it) {
-                    if (it.value().is_array()) {
-                        for (const auto& id : it.value()) {
-                            if (id.is_string()) ids.emplace_back(id.get<std::string>());
-                        }
-                    }
+            };
+            const auto parseChannels = [&append](const nlohmann::json& channels) {
+                if (!channels.is_array()) return;
+                for (const auto& entry : channels) {
+                    if (!entry.is_object() || !entry.contains("product_ids")) continue;
+                    const auto name = entry.value("name", entry.value("channel", ""));
+                    if (name != "heartbeats") append(entry["product_ids"], name == "level2" || name == "l2_data");
                 }
-            } else if (j.contains("subscriptions") && j["subscriptions"].is_array()) {
-                for (const auto& sub : j["subscriptions"]) {
-                    if (sub.contains("product_ids") && sub["product_ids"].is_array()) {
-                        for (const auto& id : sub["product_ids"]) ids.emplace_back(id.get<std::string>());
+            };
+            const auto parseState = [&](const nlohmann::json& state) {
+                if (!state.is_object()) return;
+                if (state.contains("product_ids")) append(state["product_ids"], false);
+                if (state.contains("channels")) parseChannels(state["channels"]);
+                if (!state.contains("subscriptions")) return;
+                const auto& subs = state["subscriptions"];
+                if (subs.is_object()) {
+                    for (auto it = subs.begin(); it != subs.end(); ++it) {
+                        if (it.key() == "channels") parseChannels(it.value());
+                        else if (it.key() != "heartbeats") append(it.value(), it.key() == "level2" || it.key() == "l2_data");
                     }
+                } else {
+                    parseChannels(subs);
                 }
-            }
-            out.events.emplace_back(SubscriptionAckEvent{std::move(ids)});
+            };
+            parseState(j);
+            // Advanced Trade acks nest channel -> products under each event.
+            if (j.contains("events") && j["events"].is_array())
+                for (const auto& event : j["events"]) parseState(event);
+            out.events.emplace_back(std::move(ack));
         } else if (type == "error") {
             const std::string msg = j.value("message", "provider error");
             out.events.emplace_back(ProviderErrorEvent{msg});

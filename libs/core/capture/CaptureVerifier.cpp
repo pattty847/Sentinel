@@ -556,8 +556,20 @@ struct Replay {
         }
         if (record.kind == Kind::EngineError) { ++engineErrors; return; }
         if (record.kind == Kind::TransportDown) { endConnection(); ++downs; active = false; invalidate(); return; }
-        if (record.kind == Kind::BookInvalidated) { ++invalidations; invalidate(); return; }
-        if (record.kind == Kind::ResyncRequested) { ++resyncs; invalidate(); return; }
+        if (record.kind == Kind::BookInvalidated || record.kind == Kind::ResyncRequested) {
+            if (record.kind == Kind::BookInvalidated) ++invalidations;
+            else ++resyncs;
+            // Lifecycle markers are copied to every product stream. A scoped
+            // L2 recovery must not invalidate the other products' replay books.
+            try {
+                const auto product = nlohmann::json::parse(record.payload).value("product", std::string());
+                if (product.empty() || product == symbol) invalidate();
+            } catch (const std::exception& e) {
+                error(std::string("invalid recovery marker: ") + e.what());
+                invalidate();
+            }
+            return;
+        }
         ++frames; ++secondFrames; bytes += record.payload.size();
         ++connectionFrames;
         const auto receivedBytes = record.payload.size();

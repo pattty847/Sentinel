@@ -151,7 +151,10 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
                     int64_t zero = 0; disconnectedSince.compare_exchange_strong(zero, observation.steadyNs); break;
                 }
                 case Ingest::BookInvalidated: kind = Kind::BookInvalidated; break;
-                case Ingest::ResyncRequested: kind = Kind::ResyncRequested; transportReason = observation.reason; break;
+                case Ingest::ResyncRequested:
+                    kind = Kind::ResyncRequested;
+                    if (observation.product.empty()) transportReason = observation.reason;
+                    break;
                 }
                 auto reason = observation.reason;
                 if (kind == Kind::TransportUp) reason = "websocket connected";

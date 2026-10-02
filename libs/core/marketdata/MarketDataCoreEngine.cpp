@@ -6,6 +6,7 @@
 #include "Cpp20Utils.hpp"
 #include <thread>
 #include <cmath>
+#include <bit>
 #include <limits>
 #include <chrono>
 #include <algorithm>
@@ -45,6 +46,8 @@ MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth, const ServerMdcC
 {
     if (policy.initialDelay.count() <= 0 || policy.maximumDelay < policy.initialDelay ||
         policy.watchdogInterval.count() <= 0 || policy.heartbeatStale < policy.watchdogInterval ||
+        policy.level2Stale < policy.watchdogInterval ||
+        policy.level2RetryMaximum < policy.level2Stale || policy.level2QuietMaximum < policy.level2Stale ||
         policy.staleHeartbeatDelay < policy.initialDelay || policy.staleHeartbeatDelay > policy.maximumDelay)
         throw std::invalid_argument("invalid market-data reconnect policy");
     const char* defaultCaBundle = "resources/certs/ca-bundle.crt";
@@ -73,6 +76,8 @@ MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth, const ServerMdcC
         m_transport = std::make_unique<BeastWsTransport>(m_ioc, m_sslCtx, std::move(options));
     }
     if (!m_transport) throw std::invalid_argument("market-data transport factory returned null");
+    // Transport callbacks and m_strand handlers share the single m_ioc thread.
+    // Keep callbacks inline: ordered ingestion, no extra per-frame posting/allocation.
     m_transport->onStatus([this](bool up){
         if (m_ingestObserver) observeIngest(up ? IngestKind::TransportUp : IngestKind::TransportDown);
         if (!m_running.load()) return;
@@ -84,7 +89,15 @@ MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth, const ServerMdcC
             m_reconnectTimer.cancel();
             m_reconnectScheduled = false;
             m_backoffDuration = m_reconnectPolicy.initialDelay;
-            m_lastHeartbeatMs.store(steadyClockMs());
+            const auto nowMs = steadyClockMs();
+            m_lastHeartbeatMs.store(nowMs);
+            for (auto& [product, state] : m_productLiveness) {
+                state.lastLevel2Ms = nowMs;
+                // A replay is another snapshot attempt, not proof of recovery.
+                state.resubscribeMs = state.failures ? nowMs : -1;
+                state.lastRecoveryUnsubscribeMs = -1;
+                state.snapshotAccepted = state.comparableSnapshot = false;
+            }
             {
                 std::lock_guard<std::mutex> lock(m_seqMutex);
                 m_lastSeqByProduct.clear();
@@ -161,38 +174,39 @@ inline void MarketDataCoreEngine::emitConnectionStatus(bool connected) {
 }
 
 void MarketDataCoreEngine::subscribeToSymbols(const std::vector<std::string>& symbols) {
-    std::vector<std::string> new_symbols;
-    for (const auto& s : symbols) {
-        if (std::find(m_products.begin(), m_products.end(), s) == m_products.end()) {
-            m_products.push_back(s);
-            new_symbols.push_back(s);
+    net::post(m_strand, [this, symbols] {
+        std::vector<std::string> added;
+        for (const auto& s : symbols) {
+            if (std::find(m_products.begin(), m_products.end(), s) == m_products.end()) {
+                m_products.push_back(s);
+                auto& state = m_productLiveness.emplace(s, ProductLiveness{steadyClockMs()}).first->second;
+                state.retryMs = state.quietMs = m_reconnectPolicy.level2Stale.count();
+                added.push_back(s);
+            }
         }
-    }
-    if (!new_symbols.empty()) {
+        if (added.empty()) return;
         m_subscriptions.setDesiredProducts(m_products);
-        sLog_Data("subscribeToSymbols: new=" << joinSymbols(new_symbols)
-                  << " totalProducts=" << m_products.size());
-    }
-    if (!new_symbols.empty()) {
-        sendSubscriptionMessage("subscribe", new_symbols);
-    }
+        sLog_Data("subscribeToSymbols: new=" << joinSymbols(added) << " totalProducts=" << m_products.size());
+        sendSubscriptionMessage("subscribe", added);
+    });
 }
 
 void MarketDataCoreEngine::unsubscribeFromSymbols(const std::vector<std::string>& symbols) {
-    std::vector<std::string> removed_symbols;
-    for (const auto& s : symbols) {
-        auto it = std::find(m_products.begin(), m_products.end(), s);
-        if (it != m_products.end()) {
-            m_products.erase(it);
-            removed_symbols.push_back(s);
+    net::post(m_strand, [this, symbols] {
+        std::vector<std::string> removed;
+        for (const auto& s : symbols) {
+            auto it = std::find(m_products.begin(), m_products.end(), s);
+            if (it != m_products.end()) {
+                m_products.erase(it);
+                m_productLiveness.erase(s);
+                removed.push_back(s);
+            }
         }
-    }
-    if (!removed_symbols.empty()) {
+        if (removed.empty()) return;
         m_subscriptions.setDesiredProducts(m_products);
-        sLog_Data("unsubscribeFromSymbols: removed=" << joinSymbols(removed_symbols)
-                  << " totalProducts=" << m_products.size());
-        sendSubscriptionMessage("unsubscribe", removed_symbols);
-    }
+        sLog_Data("unsubscribeFromSymbols: removed=" << joinSymbols(removed) << " totalProducts=" << m_products.size());
+        sendSubscriptionMessage("unsubscribe", removed);
+    });
 }
 
 void MarketDataCoreEngine::start() {
@@ -271,64 +285,40 @@ void MarketDataCoreEngine::scheduleReconnect() {
     });
 }
 
-void MarketDataCoreEngine::sendSubscriptionMessage(const std::string& type, const std::vector<std::string>& symbols) {
-    if (symbols.empty()) {
-        return;
-    }
-
-    auto symbolsCopy = symbols;
-    net::post(m_strand, [this, type, symbolsCopy]() {
-        if (!m_connected.load()) {
-            // Routine before the first connect: the request replays on connect.
-            sLog_Data("Transport not connected, staging " << type << " for replay on connect: symbols="
-                      << joinSymbols(symbolsCopy));
-            if (type == "subscribe") {
-                for (const auto& s : symbolsCopy) {
-                    if (std::find(m_products.begin(), m_products.end(), s) == m_products.end()) {
-                        m_products.push_back(s);
-                    }
-                }
-            } else if (type == "unsubscribe") {
-                for (const auto& s : symbolsCopy) {
-                    auto it = std::find(m_products.begin(), m_products.end(), s);
-                    if (it != m_products.end()) m_products.erase(it);
-                }
-            }
+void MarketDataCoreEngine::sendSubscriptionMessage(const std::string& type,
+                                                    const std::vector<std::string>& symbols,
+                                                    bool level2Only) {
+    if (symbols.empty() || !m_connected.load()) return; // desired state replays on connect
+    std::string jwt;
+    if (m_useJwt) {
+        try {
+            jwt = m_auth.createJwt();
+        } catch (const std::exception& e) {
+            sLog_Error("JWT creation failed in subscription handler: type=" << type
+                       << " symbols=" << joinSymbols(symbols) << " error=" << e.what());
+            emitError(std::string("Failed to create JWT for subscription: ") + e.what());
             return;
         }
-        m_subscriptions.setDesiredProducts(m_products);
-        std::string jwt;
-        if (m_useJwt) {
-            try {
-                jwt = m_auth.createJwt();
-            } catch (const std::exception& e) {
-                sLog_Error("JWT creation failed in subscription handler: type=" << type
-                           << " symbols=" << joinSymbols(symbolsCopy) << " error=" << e.what());
-                emitError(std::string("Failed to create JWT for subscription: ") + e.what());
-                return;
-            }
+    }
+    const auto frames = (type == "subscribe") ? m_subscriptions.buildSubscribeMsgs(symbols, jwt, level2Only)
+                                               : m_subscriptions.buildUnsubscribeMsgs(symbols, jwt, level2Only);
+    for (const auto& frame : frames) {
+        auto redacted = nlohmann::json::parse(frame);
+        if (redacted.contains("jwt")) redacted["jwt"] = "<redacted>";
+        sLog_Data("WS " << type << " frame: " << redacted.dump());
+        if (level2Only && type == "unsubscribe") {
+            const auto nowMs = steadyClockMs();
+            for (const auto& product : symbols)
+                if (auto it = m_productLiveness.find(product); it != m_productLiveness.end())
+                    it->second.lastRecoveryUnsubscribeMs = nowMs;
         }
-        const auto frames = (type == "subscribe") ? m_subscriptions.buildSubscribeMsgs(jwt)
-                                                   : m_subscriptions.buildUnsubscribeMsgs(jwt);
-        
-        if (m_transport && m_connected.load()) {
-            for (const auto& frame : frames) {
-                try {
-                    auto j = nlohmann::json::parse(frame);
-                    if (j.contains("jwt")) {
-                        j["jwt"] = "<redacted>";
-                    }
-                    sLog_Data("WS " << type << " frame: " << j.dump());
-                } catch (const std::exception&) {
-                    sLog_Data("WS " << type << " frame (raw): " << frame);
-                }
-                m_transport->send(frame);
-            }
-        }
-    });
+        m_transport->send(frame);
+    }
 }
 
 void MarketDataCoreEngine::emitBookInvalidated(const std::string& productId, const std::string& reason) {
+    for (auto& [product, state] : m_productLiveness)
+        if (productId.empty() || productId == product) state.snapshotAccepted = false;
     if (m_ingestObserver) observeIngest(IngestKind::BookInvalidated, {}, productId, reason);
     sLog_Warning("Order book invalidated: product=" << (productId.empty() ? std::string("*") : productId)
                  << " reason=" << reason);
@@ -373,9 +363,28 @@ void MarketDataCoreEngine::dispatch(const nlohmann::json& message) {
             std::visit([this, &message](auto&& ev) {
                 using T = std::decay_t<decltype(ev)>;
                 if constexpr (std::is_same_v<T, ProviderErrorEvent>) {
+                    const auto nowMs = steadyClockMs();
+                    for (const auto& [product, state] : m_productLiveness) {
+                        const auto sentMs = state.lastRecoveryUnsubscribeMs;
+                        if (sentMs >= 0 && nowMs - sentMs <= 5000)
+                            sLog_Warning("Provider error after scoped recovery frame: product=" << product
+                                         << " frameType=unsubscribe channel=level2 elapsedMs=" << (nowMs - sentMs)
+                                         << " error=" << ev.message);
+                    }
                     sLog_Error("Provider error: " << ev.message << " | raw=" << message.dump());
                     emitError(ev.message);
                 } else if constexpr (std::is_same_v<T, SubscriptionAckEvent>) {
+                    if (ev.level2ProductIds) {
+                        for (const auto& product : m_products) {
+                            const auto state = m_productLiveness.find(product);
+                            if (state != m_productLiveness.end() && state->second.resubscribeMs >= 0) continue;
+                            const auto& ids = *ev.level2ProductIds;
+                            if (std::find(ids.begin(), ids.end(), product) == ids.end()) {
+                                sLog_Warning("Subscription ack missing desired level2 product: product=" << product
+                                             << " acknowledged=" << joinSymbols(ids));
+                            }
+                        }
+                    }
                     if (!ev.productIds.empty()) {
                         sLog_Data("Subscription confirmed: symbols=" << joinSymbols(ev.productIds));
                     } else if (!m_loggedEmptySubscriptionAck) {
@@ -476,6 +485,10 @@ void MarketDataCoreEngine::handleOrderBookData(const nlohmann::json& message,
     for (const auto& event : message["events"]) {
         std::string eventType = event.value("type", "");
         std::string product_id = event.value("product_id", "");
+        if (eventType == "snapshot" || eventType == "update") {
+            auto it = m_productLiveness.find(product_id);
+            if (it != m_productLiveness.end()) it->second.lastLevel2Ms = steadyClockMs();
+        }
         if (eventType == "snapshot") {
             handleOrderBookSnapshot(event, product_id, exchange_timestamp);
         } else if (eventType == "update") {
@@ -485,6 +498,13 @@ void MarketDataCoreEngine::handleOrderBookData(const nlohmann::json& message,
 }
 
 namespace {
+// Order-independent snapshot fingerprints only influence the quiet polling
+// interval, never book validity. Two independent accumulators avoid cancellation.
+uint64_t mixSnapshotBits(uint64_t value) {
+    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31);
+}
 // One L2 level: side, positive finite price, finite non-negative quantity (0 = remove).
 bool parseLevel(const nlohmann::json& update, bool& isBid, double& price, double& quantity) {
     if (!update.is_object()) return false;
@@ -512,6 +532,8 @@ void MarketDataCoreEngine::handleOrderBookSnapshot(const nlohmann::json& event,
     std::vector<OrderBookLevel> sparse_bids;
     std::vector<OrderBookLevel> sparse_asks;
     int malformed = 0;
+    uint64_t snapshotHash = 0, snapshotHash2 = 0;
+    size_t snapshotLevels = 0;
     for (const auto& update : event["updates"]) {
         bool isBid = false;
         double price = 0.0;
@@ -522,12 +544,32 @@ void MarketDataCoreEngine::handleOrderBookSnapshot(const nlohmann::json& event,
         }
         if (quantity > 0.0) {
             (isBid ? sparse_bids : sparse_asks).push_back(OrderBookLevel{price, quantity});
+            const auto hash = mixSnapshotBits(std::bit_cast<uint64_t>(price)) ^
+                mixSnapshotBits(std::bit_cast<uint64_t>(quantity) + (isBid ? 1 : 2));
+            snapshotHash += hash;
+            snapshotHash2 += mixSnapshotBits(hash);
+            ++snapshotLevels;
         }
     }
     if (malformed > 0) {
         emitBookInvalidated(product_id, "malformed snapshot entries=" + std::to_string(malformed));
         triggerImmediateReconnect("malformed l2");
         return;
+    }
+    if (auto it = m_productLiveness.find(product_id); it != m_productLiveness.end()) {
+        auto& state = it->second;
+        if (state.resubscribeMs >= 0 && state.comparableSnapshot &&
+            state.snapshotHash == snapshotHash && state.snapshotHash2 == snapshotHash2 &&
+            state.snapshotLevels == snapshotLevels) {
+            state.quietMs = std::min(state.quietMs * 2, m_reconnectPolicy.level2QuietMaximum.count());
+            sLog_Data("Unchanged recovery snapshot: product=" << product_id << " silenceThresholdMs=" << state.quietMs);
+        }
+        state.snapshotHash = snapshotHash;
+        state.snapshotHash2 = snapshotHash2;
+        state.snapshotLevels = snapshotLevels;
+        state.snapshotAccepted = state.comparableSnapshot = true;
+        state.everAccepted = true;
+        state.resubscribeMs = -1;
     }
     const int64_t envelopeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         exchange_timestamp.time_since_epoch()).count();
@@ -565,6 +607,15 @@ void MarketDataCoreEngine::handleOrderBookUpdate(const nlohmann::json& event,
     }
 
     if (!levelUpdates.empty()) {
+        if (auto it = m_productLiveness.find(product_id); it != m_productLiveness.end()) {
+            auto& state = it->second;
+            state.comparableSnapshot = false;
+            state.quietMs = m_reconnectPolicy.level2Stale.count();
+            if (state.snapshotAccepted) {
+                state.failures = state.reconnectEscalations = 0;
+                state.retryMs = m_reconnectPolicy.level2Stale.count();
+            }
+        }
         const int64_t exchangeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             exchange_timestamp.time_since_epoch()).count();
         std::vector<BookLevelUpdate> updatesPayload(levelUpdates.begin(), levelUpdates.end());
@@ -581,8 +632,7 @@ void MarketDataCoreEngine::handleOrderBookUpdate(const nlohmann::json& event,
 
 void MarketDataCoreEngine::replaySubscriptionsOnConnect() {
     if (m_products.empty()) return;
-    auto symbols = m_products;
-    sendSubscriptionMessage("subscribe", symbols);
+    sendSubscriptionMessage("subscribe", m_subscriptions.desired());
 }
 
 void MarketDataCoreEngine::handleHeartbeats(const nlohmann::json& message) {
@@ -603,10 +653,49 @@ void MarketDataCoreEngine::startHeartbeatWatchdog() {
                          << " thresholdMs=" << m_reconnectPolicy.heartbeatStale.count()
                          << " host=" << m_host);
             triggerImmediateReconnect("stale heartbeat");
+        } else if (m_connected.load() && !m_closePending) {
+            checkLevel2Silence(nowMs);
         }
         // Keep the watchdog alive across outages and repeated failed attempts.
         startHeartbeatWatchdog();
     });
+}
+
+void MarketDataCoreEngine::checkLevel2Silence(int64_t nowMs) {
+    for (auto& [product, state] : m_productLiveness) {
+        const bool recovering = state.resubscribeMs >= 0;
+        const auto sinceMs = recovering ? state.resubscribeMs : state.lastLevel2Ms;
+        const auto intervalMs = recovering ? state.retryMs : state.quietMs;
+        if (nowMs - sinceMs <= intervalMs) continue;
+        if (recovering) {
+            if (state.failures < 32) ++state.failures;
+            state.retryMs = std::min(state.retryMs * 2, m_reconnectPolicy.level2RetryMaximum.count());
+            const bool healthyPeer = std::any_of(m_productLiveness.begin(), m_productLiveness.end(),
+                [&](const auto& peer) {
+                    return peer.first != product && peer.second.snapshotAccepted;
+                });
+            const bool reconnect = state.reconnectEscalations < 2 && (!healthyPeer || state.everAccepted);
+            // One error per backed-off attempt, never one per watchdog tick.
+            sLog_Error("Level2 snapshot still missing: product=" << product << " failures=" << state.failures
+                       << " retryMs=" << state.retryMs << " reconnect=" << reconnect);
+            if (reconnect) {
+                ++state.reconnectEscalations;
+                m_lastResnapshotMs = nowMs;
+                emitBookInvalidated(product, "level2 resubscribe timed out " + product);
+                reconnectNow("level2 resubscribe timed out " + product);
+                return;
+            }
+        } else {
+            sLog_Warning("Level2 silent, resubscribing: product=" << product
+                         << " silenceMs=" << (nowMs - state.lastLevel2Ms) << " thresholdMs=" << state.quietMs);
+            emitBookInvalidated(product, "level2 silent");
+        }
+        state.resubscribeMs = nowMs;
+        if (m_ingestObserver) observeIngest(IngestKind::ResyncRequested, {}, product, "level2 silent");
+        // Preserve all other product/channel subscriptions, including heartbeats.
+        sendSubscriptionMessage("unsubscribe", {product}, true);
+        sendSubscriptionMessage("subscribe", {product}, true);
+    }
 }
 
 void MarketDataCoreEngine::requestResnapshot(const std::string& productId) {

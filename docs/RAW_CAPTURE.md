@@ -457,9 +457,11 @@ and verifier implementation. These are integrity hashes, not signatures.
 Each product checks range continuity/counts, its raw sequence order and its own
 snapshot/metadata anchors. Receipts never supply snapshots or book updates. A
 capture-observed connection sequence discontinuity inserts an invalidation in
-all product streams before the affected raw frame; engine invalidation/resync
-markers remain connection-wide as well. This capture-only behavior does not
-change the server's engine or recorder semantics.
+all product streams before the affected raw frame. Engine invalidation/resync
+markers are copied to all streams for lifecycle accounting, but the verifier
+invalidates only the named product's book. An empty or absent `product` means
+connection-wide invalidation. Product-scoped recovery never supplies a snapshot
+or invalidates another product's replay book.
 
 Whole-root verification requires every declared stream. It incrementally merges
 raw identities by sequence for one proof group at a time, checks all expected raw

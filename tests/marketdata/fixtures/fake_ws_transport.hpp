@@ -82,6 +82,7 @@ public:
     void fail() { m_error("fixture failed connect"); down(); }
     // Completes a held close (closeDelay set long) from any thread.
     void downFromAnyThread() { boost::asio::post(m_io, [this] { down(); }); }
+    void upFromAnyThread() { boost::asio::post(m_io, [this] { up(); }); }
     void frame(std::string bytes) {
         if (m_scenario->onFrame) {
             size_t sends;
@@ -94,6 +95,14 @@ public:
     void later(std::chrono::milliseconds delay, std::function<void()> action) {
         auto timer = std::make_shared<boost::asio::steady_timer>(m_io, delay);
         timer->async_wait([timer, action = std::move(action)](auto ec) { if (!ec) action(); });
+    }
+    void repeatingFrame(std::chrono::milliseconds interval, std::string bytes) {
+        const auto generation = m_generation;
+        later(interval, [this, generation, interval, bytes = std::move(bytes)] {
+            if (generation != m_generation) return;
+            frame(bytes);
+            repeatingFrame(interval, bytes);
+        });
     }
     void heartbeats(std::chrono::milliseconds interval, uint64_t sequence = 0) {
         const auto generation = m_generation;
