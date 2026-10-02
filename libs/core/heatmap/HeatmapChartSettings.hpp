@@ -25,6 +25,12 @@ struct HeatmapChartSettings {
     uint64_t gpuCapBytes = 320ull << 20, uploadBudgetBytes = 8ull << 20;
     int prefetchTiles = 1, liveMinIntervalMs = 500;
     bool showTelemetry = false;
+    // Liquidity labels (S7b, owner decision 1/2): on every coloured cell where the
+    // text fits at labelMinPx plus padding, growing to at most labelMaxPx; USD
+    // (price x size) or the asset amount ("usd" or "asset").
+    bool showLabels = true;
+    std::string labelCurrency = "usd";
+    double labelMinPx = 12, labelMaxPx = 15;
     bool operator==(const HeatmapChartSettings &) const = default;
 };
 } // namespace heatmap

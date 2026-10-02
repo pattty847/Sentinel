@@ -116,6 +116,8 @@ set(GRID_CORE_SOURCES
     render/ChartTextNode.cpp
     render/ChartTextRenderer.hpp
     render/ChartTextRenderer.cpp
+    render/heatmap/HeatmapLabelLayout.hpp
+    render/heatmap/HeatmapLabelLayout.cpp
     render/HeatmapOverlayRenderer.hpp
     render/HeatmapOverlayRenderer.cpp
     render/CandlestickBatched.hpp

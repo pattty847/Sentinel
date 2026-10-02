@@ -16,6 +16,7 @@
 #include "../servermodel/FakeChunkTransport.hpp"
 #include "heatmap/TimeComposer.hpp"
 #include "lab/RhiBackend.hpp"
+#include "render/heatmap/HeatmapCellQuery.hpp"
 #include <QEvent>
 #include <QGuiApplication>
 #include <gtest/gtest.h>
@@ -90,6 +91,7 @@ struct Spans {
     Recording rec;
     FakeSpans fake; // assembles SpanSets; availability set per step
     std::map<std::tuple<int64_t, int64_t, std::string, int64_t>, SpanSourceBuildPtr> builds;
+    HeldChunks held; // the chunks of the builds (S7b: the label oracle reads them)
     SpanSourceBuildPtr build(int64_t tf, int64_t tile, const std::string &source, int64_t cutoff) {
         auto &slot = builds[{tf, tile, source, cutoff}];
         if (slot) return slot;
@@ -112,6 +114,7 @@ struct Spans {
             chunk->contentHash = chunk->generation;
             chunk->bytes = sparseBytes(*chunk->columns);
             input.key.generations.push_back({kSymbol, source, kMinuteMs, h, chunk->generation, chunk->sealed});
+            held[chunk->key] = chunk;
             input.chunks.push_back(std::move(chunk));
         }
         std::sort(input.key.generations.begin(), input.key.generations.end());
@@ -347,6 +350,130 @@ TEST_F(LiveNode, DrawClipCoversEachBucketOnceAndMatchesTheComposedOracle) {
             EXPECT_EQ(stats().errors.load(), 0u);
         }
     }
+}
+
+// S7b (plan section 6 item 2): the label words (HeatmapCellQuery's oracle on the
+// drawn picture: the same SpanSet, live snapshot, timeframe and tick) equal the
+// cells the node draws, read back from the GPU, for every bucket of the current
+// picture: span bins with the fine source's fill pass, the live bin with its
+// forming bucket, the current picture during a crossfade, and a picture held
+// across a timeframe switch (labels follow the drawn picture, not the target).
+struct LabelParity {
+    size_t cells = 0, liveCells = 0, valid = 0, mismatches = 0;
+    std::string first;
+};
+LabelParity compareLabels(const LabelCells &labels, const HeatmapCellCapture &capture, const std::vector<Segment> &segments,
+                          int64_t tf) {
+    LabelParity out;
+    const auto &k = labels.key;
+    for (const auto &segment : segments) {
+        if (segment.kind == Segment::Loading) continue;
+        for (int64_t b = ceilTo(segment.loMs, tf); b < segment.hiMs; b += tf) {
+            const int64_t bucket = b / tf;
+            if (bucket < k.firstBucket || bucket >= k.firstBucket + int64_t(k.columns)) continue;
+            for (const auto &block : capture.blocks) {
+                if (block.bin != segment.bin || bucket < block.grid.firstBucket ||
+                    bucket >= block.grid.firstBucket + int64_t(block.grid.columns))
+                    continue;
+                const auto *gpu = reinterpret_cast<const uint32_t *>(block.result->data.constData());
+                if (block.result->data.size() != qsizetype(uint64_t(block.grid.columns) * block.grid.rows * 4)) {
+                    ++out.mismatches;
+                    out.first = "readback size";
+                    continue;
+                }
+                for (uint32_t r = 0; r < block.grid.rows; ++r) {
+                    const int64_t bin = block.grid.firstBin + int64_t(block.grid.rows - 1 - r); // row 0 is the top
+                    if (bin < k.firstBin || bin >= k.firstBin + int64_t(k.rows)) continue;
+                    const uint32_t g = gpu[size_t(r) * block.grid.columns + size_t(bucket - block.grid.firstBucket)];
+                    const uint32_t l = labels.cells[size_t(k.firstBin + k.rows - 1 - bin) * k.columns +
+                                                    size_t(bucket - k.firstBucket)].word;
+                    const bool bad = tiles::cellState(g) != tiles::cellState(l) ||
+                                     (tiles::cellState(l) == tiles::kCellValid && (g & 0xffffu) != (l & 0xffffu));
+                    if (bad && out.first.empty())
+                        out.first = std::string(block.live ? "live" : "span") + " bucket " + std::to_string(bucket) +
+                                    " bin " + std::to_string(bin) + " gpu " + std::to_string(g) + " label " + std::to_string(l);
+                    out.mismatches += bad;
+                    ++out.cells;
+                    out.liveCells += block.live;
+                    out.valid += tiles::cellState(l) == tiles::kCellValid;
+                }
+            }
+        }
+    }
+    return out;
+}
+
+TEST_F(LiveNode, LabelWordsEqualTheDrawnBins) {
+    const int64_t tf = minute, T = kEpoch + 2 * tiles::kTileColumns * tf;
+    const int64_t E = T - 3 * minute, L = T - 6 * minute, open = T + minute;
+    const int64_t viewLo = T - 24 * tf, viewHi = T + 8 * tf, liveEnd = ceilTo(open + minute, tf);
+    const int64_t tileBefore = tiles::tileOfBucket(T / tf) - 1;
+    frame().view.timeLoMs = double(viewLo);
+    frame().view.timeHiMs = double(viewHi);
+    auto labelsFor = [&](int64_t tick, const SpanSet &set, const LiveSnapshot *live) {
+        LabelRequest q;
+        q.serial = 1;
+        q.tfMs = set.tfMs;
+        q.tickUnits = tick;
+        q.priceScale = 100;
+        q.firstBucket = viewLo / set.tfMs;
+        q.columns = uint32_t((liveEnd - viewLo) / set.tfMs);
+        q.firstBin = int64_t(std::floor(frame().view.priceLo * 100 / double(tick)));
+        q.rows = uint32_t(std::ceil(frame().view.priceHi * 100 / double(tick))) - uint32_t(q.firstBin);
+        q.asset = "BTC";
+        ChunkStore store;
+        LabelWindowBuilder builder;
+        auto out = builder.build(q, set, live, store, spans.held);
+        EXPECT_TRUE(out->missing.empty());
+        return out;
+    };
+    auto capture = [&] {
+        frame().capture = std::make_shared<HeatmapCellCapture>();
+        EXPECT_TRUE(render());
+        auto out = frame().capture;
+        frame().capture.reset();
+        return out;
+    };
+    show(tf, {tileBefore, tileBefore + 1}, E, L, open, 25'000, 1);
+    // $5 (the coarse source draws, the fine one fills its veil) and $1.
+    for (const int64_t tick : {500, 100}) {
+        SCOPED_TRACE("tick " + std::to_string(tick));
+        frame().tickUnits = tick;
+        frame().crossfadeMs = 0;
+        ASSERT_TRUE(render(3));
+        const auto cap = capture();
+        const auto parity = compareLabels(*labelsFor(tick, *frame().spans, frame().live.get()), *cap, layer0(stats()), tf);
+        EXPECT_EQ(parity.mismatches, 0u) << parity.first;
+        EXPECT_GT(parity.valid, 500u);
+        EXPECT_GT(parity.liveCells, 0u) << "the live bin (forming bucket) is compared";
+        EXPECT_GT(stats().fillPasses.load(), 0u);
+    }
+    // A crossfade: the current picture (layer 0, the new tick) is what labels follow.
+    frame().crossfadeMs = 5000;
+    frame().tickUnits = 500;
+    const auto fading = capture();
+    ASSERT_TRUE(stats().crossfading.load());
+    ASSERT_EQ(stats().drawnTickUnits.load(), 500);
+    auto parity = compareLabels(*labelsFor(500, *frame().spans, frame().live.get()), *fading, layer0(stats()), tf);
+    EXPECT_EQ(parity.mismatches, 0u) << parity.first;
+    EXPECT_GT(parity.valid, 500u);
+    frame().crossfadeMs = 0;
+    ASSERT_TRUE(render(2));
+    // A hold across a timeframe switch: the 5m spans cannot upload (no budget), so
+    // the 1m picture stays drawn; labels of the drawn (1m) picture equal it.
+    const auto drawnSet = frame().spans;
+    const auto drawnLive = frame().live;
+    frame().uploadBudgetBytes = 1;
+    show(5 * minute, {tiles::tileOfBucket(T / (5 * minute)) - 1, tiles::tileOfBucket(T / (5 * minute))}, E,
+         L / (5 * minute) * (5 * minute), open, 25'000, 2);
+    frame().live.reset(); // the 5m live window is not uploaded either
+    const auto held = capture();
+    ASSERT_TRUE(stats().holding.load());
+    ASSERT_EQ(stats().drawnTfMs.load(), tf);
+    parity = compareLabels(*labelsFor(500, *drawnSet, drawnLive.get()), *held, layer0(stats()), tf);
+    EXPECT_EQ(parity.mismatches, 0u) << parity.first;
+    EXPECT_GT(parity.valid, 500u);
+    EXPECT_EQ(stats().errors.load(), 0u);
 }
 
 // The partial column (spec rule 5): the forming minute is the time-weighted

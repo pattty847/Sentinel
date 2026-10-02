@@ -26,6 +26,7 @@
 #include "render/ChartTextAtlas.hpp"
 #include "render/ChartTextRenderer.hpp"
 #include "render/HeatmapLabelRenderer.hpp"
+#include "render/heatmap/HeatmapLabelLayout.hpp"
 #include "render/TimeAxisMapping.hpp"
 #include "render/ITimeAxisMappingProvider.hpp"
 // ── Extracted services ───────────────────────────────────────────────────────
@@ -185,6 +186,8 @@ private:
     bool m_chartTextAtlasBuilt = false;
     ChartTextRenderer m_chartTextRenderer;
     std::vector<ChartGlyphInstance> m_heatmapLabelGlyphs;
+    heatmap::gpu::HeatmapLabelLayout m_gpuLabels; // S7b: render thread (updatePaintNode)
+    uint64_t m_gpuLabelSerial = 0;
     int m_labelRingGridWidth = 0;
     int m_labelRingGridHeight = 0;
     std::vector<uint16_t> m_labelLiquidityRing;
@@ -302,6 +305,10 @@ public:
     void setHeatmapChartSettings(const heatmap::HeatmapChartSettings& settings, bool explicitManualTick = false);
     void setHeatmapTickMemory(const heatmap::ManualTickMemory& memory);
     heatmap::gpu::HeatmapGpuLayer* gpuHeatmapLayer() const { return m_gpuLayer.get(); }
+    // Tests: the S7b label layout of the last gpu frame and its glyphs.
+    const heatmap::gpu::HeatmapLabelLayout& gpuLabelLayout() const { return m_gpuLabels; }
+    const std::vector<ChartGlyphInstance>& gpuLabelGlyphs() const { return m_heatmapLabelGlyphs; }
+    uint64_t gpuLabelSerial() const { return m_gpuLabelSerial; } // the LabelCells serial drawn (0: none)
 
     // ── Auto price scale and fits (gpu renderer; legacy: no-op, returns false) ──
     // docs/research/2026-10-viewport-autoscale.md. Auto price scale (default on in
@@ -501,6 +508,7 @@ private:
     // overlays and text follow it as later children (drawn on top).
     QSGNode* ensureGpuRootNode(QSGNode* oldNode, heatmap::gpu::HeatmapTileNode** tile);
     QSGNode* updateGpuPaintNode(QSGNode* oldNode, FrameContext& frame, bool profile);
+    void updateGpuLabels(const FrameContext& frame, bool prepared);
     // gpu mode: TimeAxisMapping from the viewport only (plan section 2 "Mapping").
     void computeGpuFrameMapping(FrameContext& frame, heatmap::gpu::ViewWindow& view, double tickSize);
     void renderTradeOverlays(QSGNode* parent, const FrameContext& frame, bool drawFootprint, bool drawTpo,

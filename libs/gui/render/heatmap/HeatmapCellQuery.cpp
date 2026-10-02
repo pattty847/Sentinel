@@ -7,22 +7,20 @@
 #include <stdexcept>
 
 namespace heatmap {
-namespace {
-void formatAmount(std::array<char, 48>& out, double value, bool usd, const std::string& asset) {
+void formatLabelAmount(std::array<char, 48>& out, double value, bool usd, const std::string& asset) {
     if (!(value > 0) || !std::isfinite(value)) return;
     constexpr const char* suffix[] = {"", "k", "M", "B", "T"};
     int unit = 0;
     while (value >= 999.5 && unit < 4) { value /= 1000; ++unit; }
-    const int decimals = std::clamp(2 - int(std::floor(std::log10(value))), 0, 15);
+    // Exactly three significant digits, trailing zeros kept ($11.0k, $1.00M: S7b
+    // chose a fixed width over trimming, so a column of labels reads evenly).
+    int decimals = std::clamp(2 - int(std::floor(std::log10(value))), 0, 15);
+    if (decimals > 0 && std::round(value * std::pow(10.0, decimals)) >= 1000) --decimals; // 9.996 -> "10.0"
     char* at = out.data();
     if (usd) *at++ = '$';
     const auto result = std::to_chars(at, out.data() + 28, value, std::chars_format::fixed, decimals);
     if (result.ec != std::errc{}) { out[0] = 0; return; }
     char* end = result.ptr;
-    if (decimals) {
-        while (end > at && end[-1] == '0') --end;
-        if (end > at && end[-1] == '.') --end;
-    }
     if (unit) *end++ = *suffix[unit];
     if (!usd && !asset.empty()) {
         *end++ = ' ';
@@ -31,7 +29,6 @@ void formatAmount(std::array<char, 48>& out, double value, bool usd, const std::
         end += n;
     }
     *end = 0;
-}
 }
 
 std::shared_ptr<const SparseColumns> LabelWindowBuilder::composeWindow(const SpanSourceKey& key,
@@ -206,8 +203,8 @@ std::shared_ptr<const LabelCells> LabelWindowBuilder::build(const LabelRequest& 
             if (reused[x]) continue;
             auto& cell = out->cells[size_t(y) * request.columns + x];
             if (tiles::cellState(cell.word) != tiles::kCellValid || !(cell.word & 0x7fff)) continue;
-            formatAmount(cell.usd, cell.value * mid, true, request.asset);
-            formatAmount(cell.asset, cell.value, false, request.asset);
+            formatLabelAmount(cell.usd, cell.value * mid, true, request.asset);
+            formatLabelAmount(cell.asset, cell.value, false, request.asset);
         }
     }
     if (out->missing.empty()) { previous_ = out; previousPieces_ = pieces; }

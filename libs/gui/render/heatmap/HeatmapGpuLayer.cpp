@@ -47,6 +47,9 @@ double medianRecentMid(const SparseColumns &data) {
 HeatmapGpuLayer::HeatmapGpuLayer(QObject *parent) : QObject(parent) {
     refreshStyle();
     palette_ = makePalette(gradientsFor(settings_), tone_);
+    labelRetry_ = new QTimer(this);
+    labelRetry_->setSingleShot(true);
+    connect(labelRetry_, &QTimer::timeout, this, &HeatmapGpuLayer::onLabelRetry);
 }
 
 HeatmapGpuLayer::~HeatmapGpuLayer() { setService(nullptr); }
@@ -71,6 +74,7 @@ void HeatmapGpuLayer::forgetService() {
     snapshot_.reset();
     live_.reset();
     resolution_.reset();
+    resetLabels(false);
     service_ = nullptr;
     serviceHook_ = 0;
     sLog_App("Heatmap GPU layer: data service shut down first; controller forgotten");
@@ -97,6 +101,14 @@ void HeatmapGpuLayer::createController() {
     connect(controller_, &HeatmapSourceController::liveChanged, this, [this] { onLive(); }, Qt::QueuedConnection);
     connect(controller_, &HeatmapSourceController::buildFailed, this,
             [this](const QString &message) { emit buildFailed(message); }, Qt::QueuedConnection);
+    if (auto *query = controller_->cellQuery()) {
+        connect(query, &HeatmapCellQuery::labelsChanged, this, [this] { onLabels(); }, Qt::QueuedConnection);
+        connect(query, &HeatmapCellQuery::queryFailed, this, [this](const QString &message) {
+            ++labelCounters_.failures;
+            sLog_Probe("heatmap.labels.failed", "message=" << message);
+            if (!labelRetry_->isActive()) labelRetry_->start(labelRetryMs_);
+        }, Qt::QueuedConnection);
+    }
     postedTickUnits_ = -1;
     postLiveInterval();
     sLog_App("Heatmap GPU layer attached symbol=" << QString::fromStdString(symbol_) << " tfMs=" << tfMs_
@@ -117,6 +129,7 @@ void HeatmapGpuLayer::destroyController() {
     postedTickUnits_ = -1;
     tickKey_ = {};
     lastLiveVersion_ = 0;
+    resetLabels(false);
     sLog_App("Heatmap GPU layer detached");
 }
 
@@ -124,6 +137,7 @@ void HeatmapGpuLayer::setSymbol(const std::string &symbol) {
     if (symbol_ == symbol) return;
     symbol_ = symbol;
     lastLiveEndMs_ = 0;
+    resetLabels(true); // the old symbol's labels never draw on the new picture
     autoUnits_ = 0; // Auto evaluates fresh on the new symbol's data
     restoreTick();
     noteLimits();
@@ -381,8 +395,170 @@ bool HeatmapGpuLayer::prepareFrame(HeatmapTileNode::Frame &frame, const QRectF &
     frame.palette = palette_;
     frame.crossfadeMs = settings_.crossfadeMs;
     frame.live = live_;
+    frame.capture = capture_;
     renderedSerial_ = viewSerial_;
+    postLabels(view);
     return true;
+}
+
+// ------------------------------------------------------------------ labels
+void HeatmapGpuLayer::resetLabels(bool newEpoch) {
+    labelsPosted_ = false;
+    labelResultSeen_ = labelDropNoticed_ = false;
+    postedLabels_ = {};
+    notifiedLabels_.reset();
+    labelRetryMs_ = kLabelRetryMs;
+    if (labelRetry_) labelRetry_->stop();
+    if (newEpoch) {
+        labelEpoch_ = labelSerial_ + 1;
+        labelCounters_.epoch = labelEpoch_;
+        if (liquidityRange_.valid) {
+            liquidityRange_ = {};
+            emit liquidityRangeChanged();
+        }
+    }
+}
+
+// Render thread, GUI thread blocked (prepareFrame). The key is the picture this
+// frame targets (plan section 3): the chart's timeframe and the tick chosen for
+// this frame, the current SpanSet and live snapshot. During a transition (hold or
+// crossfade) that is the picture about to be drawn, so its labels are ready when
+// the transition ends; labelsForFrame() draws them only once it is drawn.
+void HeatmapGpuLayer::postLabels(const ViewWindow &view) {
+    if (!controller_ || !controller_->cellQuery() || !snapshot_ || !priceKnown_) return;
+    // The posted request's result was dropped without a signal (HeatmapCellQuery::
+    // cancel: CPU shedding, a failed re-want): ask again after the backoff.
+    const bool dropped = !controller_->cellQuery()->latestLabels();
+    if (dropped) notifiedLabels_.reset(); // this frame draws none: the next result must redraw
+    if (labelsPosted_ && labelResultSeen_ && !labelDropNoticed_ && dropped) {
+        labelDropNoticed_ = true;
+        QMetaObject::invokeMethod(this, [this] { labelRetry_->start(labelRetryMs_); }, Qt::QueuedConnection);
+    }
+    const int64_t tf = tfMs_, tick = tickUnits_;
+    if (snapshot_->tfMs != tf || snapshot_->symbol != symbol_ || tick <= 0 || tf < kMinuteMs) return;
+    const double price = fromUnits(tick, snapshot_->priceScale);
+    if (!(price > 0) || !std::isfinite(view.timeLoMs) || !std::isfinite(view.timeHiMs) || !std::isfinite(view.priceLo) ||
+        !std::isfinite(view.priceHi) || !(view.timeHiMs > view.timeLoMs) || !(view.priceHi > view.priceLo))
+        return;
+    const double c0 = std::floor(view.timeLoMs / double(tf)), c1 = std::ceil(view.timeHiMs / double(tf));
+    const double r0 = std::max(0.0, std::floor(view.priceLo / price)), r1 = std::ceil(view.priceHi / price);
+    if (!(c1 > c0) || !(r1 > r0) || c0 < 0 || (c1 - c0) * (r1 - r0) > double(kMaxLabelCells)) return; // gate closed
+    const bool live = live_ && live_->tfMs == tf && live_->symbol == symbol_;
+    const auto &p = postedLabels_;
+    if (labelsPosted_ && p.tfMs == tf && p.tickUnits == tick && p.priceScale == snapshot_->priceScale &&
+        p.spanVersion == snapshot_->version && p.liveVersion == (live ? live_->version : 0) &&
+        double(p.firstBucket) <= c0 && double(p.firstBucket + p.columns) >= c1 && double(p.firstBin) <= r0 &&
+        double(p.firstBin + p.rows) >= r1)
+        return; // the requested window still covers the view of the same picture
+    // The view plus a margin on each side (pans inside it are layout only), at
+    // most kMaxLabelCells cells.
+    const double cols = c1 - c0, rows = r1 - r0;
+    const double margin = std::clamp((std::sqrt(double(kMaxLabelCells) / (cols * rows)) - 1) / 2, 0.0, 0.5);
+    LabelRequest request;
+    request.serial = ++labelSerial_;
+    request.spanVersion = snapshot_->version;
+    request.liveVersion = live ? live_->version : 0;
+    request.tfMs = tf;
+    request.tickUnits = tick;
+    request.priceScale = snapshot_->priceScale;
+    request.firstBucket = int64_t(c0 - std::floor(cols * margin));
+    request.columns = uint32_t(c1 + std::floor(cols * margin) - double(request.firstBucket));
+    request.firstBin = int64_t(std::max(0.0, r0 - std::floor(rows * margin)));
+    request.rows = uint32_t(r1 + std::floor(rows * margin) - double(request.firstBin));
+    while (uint64_t(request.columns) * request.rows > kMaxLabelCells && request.rows > uint32_t(rows)) --request.rows;
+    while (uint64_t(request.columns) * request.rows > kMaxLabelCells && request.columns > uint32_t(cols)) --request.columns;
+    request.asset = symbol_.substr(0, symbol_.find('-'));
+    request.formatText = true;
+    postedLabels_ = request;
+    labelsPosted_ = true;
+    labelResultSeen_ = labelDropNoticed_ = false;
+    ++labelCounters_.posted;
+    labelCounters_.lastPostedSerial = request.serial;
+    sLog_Probe("heatmap.labels.request", "serial=" << request.serial << " tf=" << tf << " tick=" << tick
+               << " firstBucket=" << request.firstBucket << " columns=" << request.columns << " firstBin="
+               << request.firstBin << " rows=" << request.rows << " span=" << request.spanVersion
+               << " live=" << request.liveVersion);
+    QMetaObject::invokeMethod(controller_, [c = controller_, request, spans = snapshot_,
+                                            live = live ? live_ : std::shared_ptr<const LiveSnapshot>{}] {
+        if (auto *query = c->cellQuery()) query->requestLabels(request, spans, live);
+    }, Qt::QueuedConnection);
+    // A result that never comes (a cancelled or shed query publishes nothing): the
+    // retry reposts with backoff. Armed on the GUI thread, once per post.
+    QMetaObject::invokeMethod(this, [this] { labelRetry_->start(labelRetryMs_); }, Qt::QueuedConnection);
+}
+
+std::shared_ptr<const LabelCells> HeatmapGpuLayer::labelsForFrame() const {
+    if (!controller_ || !settings_.showLabels || !controller_->cellQuery()) return {};
+    // Re-read per frame: HeatmapCellQuery::cancel() drops its result without a
+    // signal, so a held copy could outlive its picture.
+    auto labels = controller_->cellQuery()->latestLabels();
+    if (!labels) return {};
+    // The node's drawn picture (its last prepare) and this frame's target must
+    // both be the labels' timeframe and tick, with no crossfade: a transition
+    // (hold or crossfade, which the node may start in this very frame) draws none.
+    const auto &s = *tileStats_;
+    if (labels->key.serial < labelEpoch_ || labels->key.tfMs != tfMs_ || s.drawnTfMs.load() != tfMs_ ||
+        labels->key.tickUnits != tickUnits_ || s.drawnTickUnits.load() != tickUnits_ || s.crossfading.load())
+        return {};
+    return labels;
+}
+
+void HeatmapGpuLayer::onLabels() {
+    if (!controller_ || !controller_->cellQuery()) return;
+    const auto labels = controller_->cellQuery()->latestLabels();
+    if (!labels || labels->key.serial < labelEpoch_) return;
+    ++labelCounters_.results;
+    if (labelsPosted_ && labels->key.serial == postedLabels_.serial) {
+        labelRetry_->stop();
+        labelRetryMs_ = kLabelRetryMs;
+        labelResultSeen_ = true;
+        labelDropNoticed_ = false;
+    }
+    // The slider's ends: the window's largest cell, and its 5th percentile at the
+    // low end (dust far below anything visible would waste most of the track).
+    LiquidityRange range;
+    liquidityScratch_.clear();
+    for (const auto &cell : labels->cells)
+        if (tiles::cellState(cell.word) == tiles::kCellValid && cell.value > 0 && std::isfinite(cell.value))
+            liquidityScratch_.push_back(cell.value);
+    if (liquidityScratch_.size() >= 2) {
+        auto lo = liquidityScratch_.begin() + ptrdiff_t(liquidityScratch_.size() / 20);
+        std::nth_element(liquidityScratch_.begin(), lo, liquidityScratch_.end());
+        range.lo = *lo;
+        range.hi = *std::max_element(liquidityScratch_.begin(), liquidityScratch_.end());
+        range.valid = range.hi > range.lo;
+    }
+    // Ends move only by more than ~10% (live revisions nudge them every second).
+    const auto moved = [](double a, double b) { return std::abs(std::log(a / b)) > 0.1; };
+    if (range.valid && (!liquidityRange_.valid || moved(range.lo, liquidityRange_.lo) || moved(range.hi, liquidityRange_.hi))) {
+        liquidityRange_ = range;
+        emit liquidityRangeChanged();
+    }
+    // A republished picture with the same cells (an upload acknowledgement bumps
+    // the SpanSet version) changes nothing on screen: no frame for it.
+    const auto sameCells = [](const LabelCells &a, const LabelCells &b) {
+        if (!(a.grid == b.grid) || a.cells.size() != b.cells.size()) return false;
+        for (size_t i = 0; i < a.cells.size(); ++i)
+            if (a.cells[i].word != b.cells[i].word || a.cells[i].value != b.cells[i].value) return false;
+        return true;
+    };
+    if (notifiedLabels_ && sameCells(*notifiedLabels_, *labels)) return;
+    notifiedLabels_ = labels;
+    emit labelsChanged();
+}
+
+// No result for the posted request: forget it so the next frame posts again, and
+// back off (2 s doubling to 30 s) until one arrives.
+void HeatmapGpuLayer::onLabelRetry() {
+    if (!labelsPosted_ || !controller_ || !controller_->cellQuery()) return;
+    const auto labels = controller_->cellQuery()->latestLabels();
+    if (labels && labels->key.serial >= postedLabels_.serial) return;
+    ++labelCounters_.retries;
+    sLog_Probe("heatmap.labels.retry", "serial=" << postedLabels_.serial << " nextMs=" << labelRetryMs_ * 2);
+    labelsPosted_ = false;
+    labelResultSeen_ = labelDropNoticed_ = false;
+    labelRetryMs_ = std::min(labelRetryMs_ * 2, kMaxLabelRetryMs);
+    emit labelsChanged(); // a frame, which posts again
 }
 
 bool HeatmapGpuLayer::settled() const {
@@ -478,6 +654,13 @@ QJsonObject HeatmapGpuLayer::state() const {
                     {"errors", qint64(s.errors.load())},
                     {"missingDraws", qint64(s.missingDraws.load())},
                     {"tickChanges", qint64(tickChanges_)},
+                    {"labels", QJsonObject{{"posted", qint64(labelCounters_.posted)},
+                                           {"results", qint64(labelCounters_.results)},
+                                           {"retries", qint64(labelCounters_.retries)},
+                                           {"failures", qint64(labelCounters_.failures)},
+                                           {"drawing", bool(labelsForFrame())},
+                                           {"liquidityLo", liquidityRange_.valid ? liquidityRange_.lo : 0.0},
+                                           {"liquidityHi", liquidityRange_.valid ? liquidityRange_.hi : 0.0}}},
                     {"snapshotVersion", qint64(snapshot_ ? snapshot_->version : 0)}};
     if (controllerStats_->valid) {
         const auto &c = controllerStats_->stats;

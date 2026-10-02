@@ -281,3 +281,10 @@ target_include_directories(test_heatmap_plumbing PRIVATE ${CMAKE_SOURCE_DIR}/lib
 target_link_libraries(test_heatmap_plumbing PRIVATE sentinel_lab_lib GTest::gtest_main Qt6::Core)
 add_test(NAME HeatmapPlumbingTests COMMAND test_heatmap_plumbing)
 set_tests_properties(HeatmapPlumbingTests PROPERTIES LABELS "render;heatmap" TIMEOUT 30)
+
+# S7b: liquidity label layout (pure CPU, the bundled MSDF font) and label text.
+add_executable(test_heatmap_label_layout test_heatmap_label_layout.cpp)
+target_include_directories(test_heatmap_label_layout PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_heatmap_label_layout PRIVATE sentinel_gui_lib GTest::gtest Qt6::Gui)
+add_test(NAME HeatmapLabelLayoutTests COMMAND test_heatmap_label_layout)
+set_tests_properties(HeatmapLabelLayoutTests PROPERTIES LABELS "render;heatmap")

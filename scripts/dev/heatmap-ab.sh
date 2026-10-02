@@ -321,6 +321,21 @@ PMIN=$(( MID * 985 / 1000 / 100 * 100 )); PMAX=$(( MID * 1015 / 1000 / 100 * 100
 echo "viewport_1h	start=$START end=$END priceMin=$PMIN priceMax=$PMAX mid=$MID" >>"$OUT/summary.tsv"
 step 05-viewport /api/v1/viewport "{\"startMs\":$START,\"endMs\":$END,\"priceMin\":$PMIN,\"priceMax\":$PMAX}" 3600000
 
+# S7 walls diff (plan section 6 item 6): the same explicit period and price band on
+# both, gpu at the legacy band tick, saved as JSON; the summary lists each legacy
+# top-10 wall and the gpu wall of the same side whose price cell overlaps it.
+WQ="from_ms=$START&to_ms=$END&priceMin=$PMIN&priceMax=$PMAX&limit=20"
+api legacy "/api/v1/heatmap/walls?$WQ" >"$OUT/legacy-walls.json" || true
+BAND=$(jq -r '.data.bandTick // empty' "$OUT/legacy-walls.json" 2>/dev/null || true)
+api gpu "/api/v1/heatmap/walls?$WQ${BAND:+&tick=$BAND}" >"$OUT/gpu-walls.json" || true
+jq -r --slurpfile g "$OUT/gpu-walls.json" '
+    (.data.walls // [])[:10][] as $l
+    | ([$g[0].data.walls // [] | .[] | select(.side == $l.side and .priceLow < $l.priceHigh and .priceHigh > $l.priceLow)] | first) as $m
+    | ["walls", $l.side, ($l.priceLow|tostring), ($l.qty|tostring),
+       (if $m then ($m.priceLow|tostring) else "-" end), (if $m then ($m.qty|tostring) else "-" end),
+       (if $m then ($m.rank|tostring) else "-" end)] | @tsv' "$OUT/legacy-walls.json" >>"$OUT/summary.tsv" 2>/dev/null ||
+    log "walls diff: no comparable JSON (see $OUT/*-walls.json)"
+
 # Wheel x5 at the chart centre (one notch each, zoom in); per-wheel render time is logged.
 W=$(api gpu /api/v1/viewport | jq -r '.data.widthPx'); H=$(api gpu /api/v1/viewport | jq -r '.data.heightPx')
 CX=$(( W / 2 )); CY=$(( H / 2 ))
@@ -358,6 +373,13 @@ MID=$(api gpu '/api/v1/book?levels=1' | jq -r '((.data.bestBid + .data.bestAsk) 
 PMIN=$(( MID - 60 )); PMAX=$(( MID + 60 ))
 echo "viewport_1m	start=$START end=$END priceMin=$PMIN priceMax=$PMAX mid=$MID" >>"$OUT/summary.tsv"
 step 11-viewport1m /api/v1/viewport "{\"startMs\":$START,\"endMs\":$END,\"priceMin\":$PMIN,\"priceMax\":$PMAX}" 60000
+# S7b liquidity labels (plan section 6 item 6): 25 minutes x $90 at 1m, cells wide
+# enough for 12 px text on a 1080p chart; USD, then the asset amount, then back.
+# Both renderers draw labels (legacy from its label ring); settings are persist:false.
+step 11b-labels-usd /api/v1/viewport "{\"startMs\":$(( END - 25 * MIN )),\"endMs\":$END,\"priceMin\":$(( MID - 45 )),\"priceMax\":$(( MID + 45 ))}" 60000
+step 11c-labels-asset /api/v1/heatmap/settings '{"labelCurrency":"asset","persist":false}' 60000
+post gpu /api/v1/heatmap/settings '{"labelCurrency":"usd","persist":false}' >/dev/null
+post legacy /api/v1/heatmap/settings '{"labelCurrency":"usd","persist":false}' >/dev/null
 step 12-followlive1m /api/v1/viewport '{"followLive":true}' 60000
 
 # 60 s of follow-live at 1m on both: live data age samples (gpu) and frame p95 (both).

@@ -21,6 +21,9 @@ struct LabelRequest {
     bool formatText = true;
     bool operator==(const LabelRequest &) const = default;
 };
+// Label text: three significant digits with k/M/B/T, "$" for USD, " <asset>" for
+// the asset amount ("$11.0k", "$1.24M", "12.5 BTC"). Empty for a value <= 0 or not finite.
+void formatLabelAmount(std::array<char, 48> &out, double value, bool usd, const std::string &asset);
 struct LabelCell {
     uint32_t word = tiles::cellWord(tiles::kCellNoData);
     double value = 0; // exact dominant-side value of the winning source
