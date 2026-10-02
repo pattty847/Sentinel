@@ -12,7 +12,7 @@ struct GradientStop {
     bool operator==(const GradientStop &) const = default;
 };
 struct HeatmapChartSettings {
-    std::string renderer = "legacy";
+    std::string renderer = "gpu";
     TickMode tickMode = TickMode::Auto;
     int64_t manualTick = 100;
     double minRowPx = 2, hysteresis = 0.25;

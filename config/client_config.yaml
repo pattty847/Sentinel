@@ -3,7 +3,7 @@
 # User-specific overrides go in config/.client_config.yaml (not tracked in git).
 
 heatmap:
-  renderer: legacy # S6a persists gpu selection; drawing switches in S6b
+  renderer: gpu # gpu (default) or legacy; legacy stays selectable until S8 removes it
   source: recording # recording requires server recording.available
   # Visual settings (client only)
   gamma: 1.05

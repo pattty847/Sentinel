@@ -261,7 +261,7 @@ void parseClientConfig(const std::string& filePath, ClientConfig& cfg) {
         readScalar(heatmapNode, "live_min_interval_ms", cfg.heatmap.liveMinIntervalMs);
         readScalar(heatmapNode, "show_telemetry", cfg.heatmap.showTelemetry);
         if (cfg.heatmap.renderer != "legacy" && cfg.heatmap.renderer != "gpu")
-            cfg.heatmap.renderer = "legacy";
+            cfg.heatmap.renderer = "gpu";
         readScalar(heatmapNode, "source", cfg.heatmap.source);
         if (cfg.heatmap.source != "legacy" && cfg.heatmap.source != "recording")
             cfg.heatmap.source = "legacy";

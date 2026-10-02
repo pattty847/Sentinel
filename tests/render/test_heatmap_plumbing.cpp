@@ -124,7 +124,7 @@ TEST_F(HeatmapPlumbing, SettingsRoundTripWorkspaceAndSharedTickMemory) {
     QSettings ini(dir.filePath("test.ini"), QSettings::IniFormat);
     HeatmapSettingsStore store(ini);
     auto s = chartDefaults({});
-    ASSERT_TRUE(applySettingsPatch(s, {{"renderer", "gpu"}, {"tickMode", "manual"}, {"manualTick", 250},
+    ASSERT_TRUE(applySettingsPatch(s, {{"renderer", "legacy"}, {"tickMode", "manual"}, {"manualTick", 250},
         {"minRowPx", 3.5}, {"hysteresis", 0.4}, {"crossfadeMs", 0}, {"showBandEdges", true},
         {"palettePreset", "Custom"}, {"bidGradient", QJsonArray{QJsonObject{{"position", 0}, {"color", "#112233"}}, QJsonObject{{"position", 1}, {"color", "#aabbccdd"}}}},
         {"sensitivityMin", 100}, {"sensitivityMax", 1000}, {"opacity", 0.6},
@@ -150,21 +150,21 @@ TEST_F(HeatmapPlumbing, DefaultsComeFromYamlAndEveryNumericFieldClamps) {
     QTemporaryDir dir;
     QFile yaml(dir.filePath("client.yaml"));
     ASSERT_TRUE(yaml.open(QIODevice::WriteOnly));
-    yaml.write("heatmap:\n  renderer: gpu\n  tick_mode: manual\n  manual_tick: 250\n  min_row_px: 4\n  hysteresis: 0.6\n  crossfade_ms: 350\n  show_band_edges: true\n  palette_preset: Fire\n  bid_gradient: [{position: 0, color: \"#123456\"}, {position: 1, color: \"#abcdef\"}]\n  opacity: 0.7\n  sensitivity_min: 1\n  sensitivity_max: 100\n  gpu_cap_bytes: 67108864\n  upload_budget_bytes: 2097152\n  prefetch_tiles: 3\n  live_min_interval_ms: 800\n  show_telemetry: true\n  decoded_chunk_bytes: 33554432\n  span_source_bytes: 16777216\n  cpu_ceiling_bytes: 67108864\n");
+    yaml.write("heatmap:\n  renderer: legacy\n  tick_mode: manual\n  manual_tick: 250\n  min_row_px: 4\n  hysteresis: 0.6\n  crossfade_ms: 350\n  show_band_edges: true\n  palette_preset: Fire\n  bid_gradient: [{position: 0, color: \"#123456\"}, {position: 1, color: \"#abcdef\"}]\n  opacity: 0.7\n  sensitivity_min: 1\n  sensitivity_max: 100\n  gpu_cap_bytes: 67108864\n  upload_budget_bytes: 2097152\n  prefetch_tiles: 3\n  live_min_interval_ms: 800\n  show_telemetry: true\n  decoded_chunk_bytes: 33554432\n  span_source_bytes: 16777216\n  cpu_ceiling_bytes: 67108864\n");
     yaml.close();
     ClientConfig config;
     ASSERT_TRUE(ConfigLoader::loadClientConfig(yaml.fileName().toStdString(), &config));
     QSettings ini(dir.filePath("test.ini"), QSettings::IniFormat);
     HeatmapSettingsStore store(ini);
     auto s = store.load("main", config.heatmap);
-    EXPECT_EQ(s.renderer, "gpu"); EXPECT_EQ(s.tickMode, TickMode::Manual); EXPECT_EQ(s.manualTick, 250);
+    EXPECT_EQ(s.renderer, "legacy"); EXPECT_EQ(s.tickMode, TickMode::Manual); EXPECT_EQ(s.manualTick, 250);
     EXPECT_EQ(s.minRowPx, 4); EXPECT_EQ(s.hysteresis, 0.6); EXPECT_EQ(s.crossfadeMs, 350);
     EXPECT_TRUE(s.showBandEdges); EXPECT_EQ(s.palettePreset, "Fire"); EXPECT_EQ(s.opacity, 0.7);
     EXPECT_EQ(s.sensitivityMin, 1); EXPECT_EQ(s.sensitivityMax, 100); EXPECT_EQ(s.gpuCapBytes, 64ull << 20);
     EXPECT_EQ(s.uploadBudgetBytes, 2ull << 20); EXPECT_EQ(s.prefetchTiles, 3); EXPECT_EQ(s.liveMinIntervalMs, 800);
     EXPECT_TRUE(s.showTelemetry); EXPECT_EQ(store.loadBudgets(config.heatmap).cpuCeiling, 64ull << 20);
     EXPECT_EQ(s.bidGradient.front().color, "#123456"); EXPECT_EQ(s.bidGradient.back().color, "#abcdef");
-    EXPECT_EQ(chartDefaults(ClientHeatmapConfig{}).renderer, "legacy");
+    EXPECT_EQ(chartDefaults(ClientHeatmapConfig{}).renderer, "gpu");
     ASSERT_TRUE(applySettingsPatch(s, {{"manualTick", 37}, {"minRowPx", -1}, {"hysteresis", 7},
         {"crossfadeMs", -10}, {"sensitivityMin", -5}, {"sensitivityMax", -6}, {"opacity", 2},
         {"gpuCapBytes", -1}, {"uploadBudgetBytes", 999999999}, {"prefetchTiles", 99}, {"liveMinIntervalMs", 0}}).isEmpty());
@@ -173,7 +173,7 @@ TEST_F(HeatmapPlumbing, DefaultsComeFromYamlAndEveryNumericFieldClamps) {
     EXPECT_EQ(s.opacity, 1); EXPECT_EQ(s.gpuCapBytes, 1ull << 20); EXPECT_EQ(s.uploadBudgetBytes, s.gpuCapBytes);
     EXPECT_EQ(s.prefetchTiles, 16); EXPECT_EQ(s.liveMinIntervalMs, 100);
     const auto before = s;
-    EXPECT_FALSE(applySettingsPatch(s, {{"opacity", "wrong"}, {"renderer", "gpu"}}).isEmpty());
+    EXPECT_FALSE(applySettingsPatch(s, {{"opacity", "wrong"}, {"renderer", "gpu"}}).isEmpty()); // s is legacy here: a real change
     EXPECT_EQ(s, before);
     s.opacity = std::numeric_limits<double>::quiet_NaN();
     s.minRowPx = std::numeric_limits<double>::infinity();
@@ -182,9 +182,28 @@ TEST_F(HeatmapPlumbing, DefaultsComeFromYamlAndEveryNumericFieldClamps) {
     ini.setValue("heatmap/main/opacity", "bad");
     ini.setValue("heatmap/main/renderer", "unknown");
     EXPECT_EQ(store.load("main", config.heatmap).opacity, 0.7);
-    EXPECT_EQ(store.load("main", config.heatmap).renderer, "gpu");
+    EXPECT_EQ(store.load("main", config.heatmap).renderer, "legacy"); // the YAML default
     ini.setValue("heatmap/budgets/cpuCeiling", 1);
     EXPECT_TRUE(store.loadBudgets(config.heatmap).valid());
+}
+TEST_F(HeatmapPlumbing, RendererDefaultsToGpuAndUnknownYamlFallsBackToGpu) {
+    QTemporaryDir dir;
+    for (const char *body : {"heatmap:\n  gamma: 1\n", "heatmap:\n  renderer: bogus\n"}) {
+        QFile yaml(dir.filePath("client.yaml"));
+        ASSERT_TRUE(yaml.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        yaml.write(body);
+        yaml.close();
+        ClientConfig config;
+        ASSERT_TRUE(ConfigLoader::loadClientConfig(yaml.fileName().toStdString(), &config));
+        EXPECT_EQ(config.heatmap.renderer, "gpu") << body;
+    }
+    QFile yaml(dir.filePath("client.yaml"));
+    ASSERT_TRUE(yaml.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    yaml.write("heatmap:\n  renderer: legacy\n");
+    yaml.close();
+    ClientConfig config;
+    ASSERT_TRUE(ConfigLoader::loadClientConfig(yaml.fileName().toStdString(), &config));
+    EXPECT_EQ(config.heatmap.renderer, "legacy"); // legacy stays selectable
 }
 TEST_F(HeatmapPlumbing, LastSessionNeverOverwritesLiveSettingsOrSnapshotsOverrides) {
     QTemporaryDir dir;
@@ -214,22 +233,22 @@ TEST_F(HeatmapPlumbing, ProcessOnlyRendererNeverLeaksIntoOtherPatchesOrWorkspace
     QSettings ini(dir.filePath("test.ini"), QSettings::IniFormat);
     HeatmapSettingsStore store(ini);
     auto current = store.load("main", {});
-    ASSERT_TRUE(store.applyChartPatch("main", current, {{"renderer", "gpu"}}, false, {}, "BTC-USD", kMinuteMs).isEmpty());
-    EXPECT_EQ(current.renderer, "gpu");
+    ASSERT_TRUE(store.applyChartPatch("main", current, {{"renderer", "legacy"}}, false, {}, "BTC-USD", kMinuteMs).isEmpty());
+    EXPECT_EQ(current.renderer, "legacy");
     EXPECT_TRUE(ini.allKeys().isEmpty());
     // Automatic session restore cannot erase a process override, either.
     store.restoreLayoutInto("_last_session", "main", current, {});
-    EXPECT_EQ(current.renderer, "gpu");
+    EXPECT_EQ(current.renderer, "legacy");
     ASSERT_TRUE(store.applyChartPatch("main", current, {{"opacity", 0.4}}, true, {}, "BTC-USD", kMinuteMs).isEmpty());
-    EXPECT_EQ(current.renderer, "gpu");
-    EXPECT_EQ(store.load("main", {}).renderer, "legacy");
+    EXPECT_EQ(current.renderer, "legacy");
+    EXPECT_EQ(store.load("main", {}).renderer, "gpu");
     EXPECT_EQ(store.load("main", {}).opacity, 0.4);
     store.saveLayout("ab", "main", {});
-    EXPECT_EQ(ini.value("layouts/ab/heatmap/main/renderer").toString(), "legacy");
+    EXPECT_EQ(ini.value("layouts/ab/heatmap/main/renderer").toString(), "gpu");
     ini.sync();
     QSettings peerIni(dir.filePath("test.ini"), QSettings::IniFormat);
     HeatmapSettingsStore peer(peerIni);
-    EXPECT_EQ(peer.load("main", {}).renderer, "legacy");
+    EXPECT_EQ(peer.load("main", {}).renderer, "gpu");
     // Bad patches are still atomic even when no persistence was requested.
     const auto before = current;
     EXPECT_FALSE(store.applyChartPatch("main", current, {{"renderer", "bad"}}, false, {}, "BTC-USD", kMinuteMs).isEmpty());

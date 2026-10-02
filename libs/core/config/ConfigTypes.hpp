@@ -146,7 +146,7 @@ inline std::vector<std::string> normalizedDefaultSymbols(const std::vector<std::
 }
 
 struct ClientHeatmapConfig {
-    std::string renderer = "legacy";
+    std::string renderer = "gpu";
     std::string tickMode = "auto";
     int64_t manualTick = 100;
     double minRowPx = 2, hysteresis = 0.25;

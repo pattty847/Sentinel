@@ -95,18 +95,18 @@ TEST(HeatmapSettingsModelTest, PersistsPerChartAndASessionRendererIsNotSaved) {
     QSignalSpy changed(&main, &HeatmapSettingsModel::changed);
     ASSERT_TRUE(main.apply({{"palettePreset", "Ocean"}, {"crossfadeMs", 0}, {"minRowPx", 3.0}}).isEmpty());
     EXPECT_EQ(changed.count(), 1);
-    ASSERT_TRUE(main.apply({{"renderer", "gpu"}}, false).isEmpty()); // this session only
-    EXPECT_EQ(main.settings().renderer, "gpu");
-    EXPECT_EQ(main.savedRenderer(), "legacy");
+    ASSERT_TRUE(main.apply({{"renderer", "legacy"}}, false).isEmpty()); // this session only (gpu is the default)
+    EXPECT_EQ(main.settings().renderer, "legacy");
+    EXPECT_EQ(main.savedRenderer(), "gpu");
     const auto saved = t.reload();
     EXPECT_EQ(saved.palettePreset, "Ocean");
     EXPECT_EQ(saved.crossfadeMs, 0);
     EXPECT_EQ(saved.minRowPx, 3.0);
-    EXPECT_EQ(saved.renderer, "legacy");
+    EXPECT_EQ(saved.renderer, "gpu");
     EXPECT_EQ(t.reload("other"), other.defaultSettings()); // per chart
     // A later persisted patch saves its own fields only, never the session renderer.
     ASSERT_TRUE(main.apply({{"opacity", 0.5}}).isEmpty());
-    EXPECT_EQ(t.reload().renderer, "legacy");
+    EXPECT_EQ(t.reload().renderer, "gpu");
     EXPECT_EQ(t.reload().opacity, 0.5);
     // An invalid patch changes nothing and emits nothing.
     changed.clear();
@@ -133,9 +133,9 @@ TEST(HeatmapSettingsModelTest, NamedWorkspacesRestoreButLastSessionNever) {
     EXPECT_EQ(model.settings().liveMinIntervalMs, 900);
     EXPECT_EQ(t.reload().palettePreset, "Fire"); // the restored workspace is the chart's settings now
     // A session-only renderer survives a workspace restore.
-    ASSERT_TRUE(model.apply({{"renderer", "gpu"}}, false).isEmpty());
+    ASSERT_TRUE(model.apply({{"renderer", "legacy"}}, false).isEmpty());
     model.restoreLayout("Scalping");
-    EXPECT_EQ(model.settings().renderer, "gpu");
+    EXPECT_EQ(model.settings().renderer, "legacy");
 }
 
 TEST(HeatmapSettingsModelTest, ProcessBudgetsValidateApplyAndPersist) {
@@ -186,7 +186,7 @@ HeatmapChartSettings nonDefaults() {
     s.uploadBudgetBytes = 4 * MiB;
     s.prefetchTiles = 3;
     s.liveMinIntervalMs = 1200;
-    s.renderer = "gpu";
+    s.renderer = "legacy"; // gpu is the default
     s.showTelemetry = true;
     return s;
 }
@@ -227,8 +227,8 @@ TEST(HeatmapSettingsDialogTest, EveryTabShowsTheModel) {
     EXPECT_EQ(child<QSpinBox>(dialog, "spanSources")->value(), 256);
     EXPECT_EQ(child<QSpinBox>(dialog, "cpuCeiling")->value(), 1024);
     EXPECT_EQ(child<QSpinBox>(dialog, "liveMinIntervalMs")->value(), 1200);
-    EXPECT_EQ(child<QComboBox>(dialog, "renderer")->currentData().toString(), "gpu");
-    EXPECT_EQ(child<QLabel>(dialog, "savedRenderer")->text(), "gpu");
+    EXPECT_EQ(child<QComboBox>(dialog, "renderer")->currentData().toString(), "legacy");
+    EXPECT_EQ(child<QLabel>(dialog, "savedRenderer")->text(), "legacy");
     EXPECT_TRUE(child<QCheckBox>(dialog, "showTelemetry")->isChecked());
 }
 
@@ -293,15 +293,15 @@ TEST(HeatmapSettingsDialogTest, SavingTheSessionRendererUpdatesSavedDefault) {
     TempStore t;
     HeatmapSettingsModel model(t.store, "main", t.config);
     HeatmapSettingsDialog dialog(&model, nullptr);
-    ASSERT_TRUE(model.apply({{"renderer", "gpu"}}, false).isEmpty());
-    EXPECT_EQ(child<QLabel>(dialog, "savedRenderer")->text(), "legacy");
+    ASSERT_TRUE(model.apply({{"renderer", "legacy"}}, false).isEmpty());
+    EXPECT_EQ(child<QLabel>(dialog, "savedRenderer")->text(), "gpu");
     QSignalSpy changed(&model, &HeatmapSettingsModel::changed);
     QSignalSpy saved(&model, &HeatmapSettingsModel::savedRendererChanged);
-    ASSERT_TRUE(model.apply({{"renderer", "gpu"}}, true).isEmpty()); // e.g. the API, persist:true
+    ASSERT_TRUE(model.apply({{"renderer", "legacy"}}, true).isEmpty()); // e.g. the API, persist:true
     EXPECT_EQ(changed.count(), 0); // the effective settings did not change
     EXPECT_EQ(saved.count(), 1);
-    EXPECT_EQ(child<QLabel>(dialog, "savedRenderer")->text(), "gpu");
-    EXPECT_EQ(t.reload().renderer, "gpu");
+    EXPECT_EQ(child<QLabel>(dialog, "savedRenderer")->text(), "legacy");
+    EXPECT_EQ(t.reload().renderer, "legacy");
 }
 
 // Item 5 of the review: Look reset includes the renderer's tone controls; TPO has
@@ -405,13 +405,15 @@ TEST(HeatmapSettingsDialogTest, EveryWidgetWritesItsSettingLiveAndSaved) {
     EXPECT_EQ(model.settings().crossfadeMs, 400);
 
     // Renderer: this session only unless "Make default" is ticked.
-    child<QComboBox>(dialog, "renderer")->setCurrentIndex(1);
-    EXPECT_EQ(model.settings().renderer, "gpu");
-    EXPECT_EQ(t.reload().renderer, "legacy");
-    EXPECT_EQ(child<QLabel>(dialog, "savedRenderer")->text(), "legacy");
-    child<QCheckBox>(dialog, "makeDefault")->setChecked(true);
+    auto *rendererCombo = child<QComboBox>(dialog, "renderer");
+    EXPECT_EQ(rendererCombo->itemData(0).toString(), "gpu"); // GPU reads as the default
+    rendererCombo->setCurrentIndex(rendererCombo->findData("legacy"));
+    EXPECT_EQ(model.settings().renderer, "legacy");
     EXPECT_EQ(t.reload().renderer, "gpu");
     EXPECT_EQ(child<QLabel>(dialog, "savedRenderer")->text(), "gpu");
+    child<QCheckBox>(dialog, "makeDefault")->setChecked(true);
+    EXPECT_EQ(t.reload().renderer, "legacy");
+    EXPECT_EQ(child<QLabel>(dialog, "savedRenderer")->text(), "legacy");
 }
 
 TEST(HeatmapSettingsDialogTest, ValidationUsesTheModelClampsAndRejectsBadInput) {
@@ -485,7 +487,7 @@ TEST(HeatmapSettingsDialogTest, ResetRestoresOnlyItsTab) {
 
     click("resetLive");
     EXPECT_EQ(model.settings().liveMinIntervalMs, d.liveMinIntervalMs);
-    EXPECT_EQ(model.settings().renderer, "gpu");
+    EXPECT_EQ(model.settings().renderer, "legacy");
 
     click("resetDebug");
     EXPECT_EQ(model.settings().renderer, d.renderer);
@@ -638,6 +640,8 @@ protected:
         ugr->setTimeframe(int(minute));
         temp = std::make_unique<TempStore>();
         model = std::make_unique<HeatmapSettingsModel>(temp->store, "main", temp->config);
+        // gpu is the default; these cases start from the legacy renderer and flip with gpuOn().
+        ASSERT_TRUE(model->apply({{"renderer", "legacy"}}, false).isEmpty());
         controls = std::make_unique<HeatmapChartControls>(model.get());
         toolbar = std::make_unique<TopToolbar>();
         controls->setToolbar(toolbar.get());
