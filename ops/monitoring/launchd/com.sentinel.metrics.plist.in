@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- VictoriaMetrics single node. Rendered by ops/monitoring/install.sh (placeholders replaced). -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.sentinel.metrics</string>
+  <key>ProgramArguments</key><array>
+    <string>@BREW@/opt/victoriametrics/bin/victoria-metrics</string>
+    <string>-httpListenAddr=127.0.0.1:8428</string>
+    <string>-storageDataPath=@RT@/vmdata</string>
+    <string>-retentionPeriod=1y</string>
+    <string>-promscrape.config=@REPO@/ops/monitoring/prometheus.yml</string>
+    <string>-promscrape.configCheckInterval=60s</string>
+  </array>
+  <key>WorkingDirectory</key><string>@RT@</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>@LOGS@/monitoring-victoriametrics.out</string>
+  <key>StandardErrorPath</key><string>@LOGS@/monitoring-victoriametrics.err</string>
+</dict></plist>

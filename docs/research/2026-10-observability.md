@@ -1,6 +1,7 @@
 # Observability: metrics, Grafana and alerts for the always-on services
 
-Status: research and plan, 2026-10-02. Read-only on code; nothing here is implemented.
+Status: research and plan, 2026-10-02. Slice 1 is implemented on branch
+`lt-claude/metrics-s1`; section 4a lists what changed against this plan.
 Owner ask: quick-check Grafana visuals for server performance over time, dropped
 messages and "something went wrong"; logs stay the agents' detail view.
 
@@ -193,6 +194,56 @@ recorder half of the health screen plus alerts A1 and A3.
    2026-10-01). One restart = one short recording gap; bundle it with the next planned deploy.
 5. Verify: `curl 127.0.0.1:8090/metrics`, `up` is 1 in vmui, dashboard renders, A3 fires when
    the owner stops VM's target (not the recorder) in a test.
+
+### 4a. Slice 1 as built (2026-10-02, branch `lt-claude/metrics-s1`)
+
+The branch differs from items 1-5 above in these points:
+- Code: `libs/core/metrics/` contains these parts:
+  - `MetricsRegistry`: plain C++. A counter or gauge update is one relaxed atomic.
+    Scrape-time samplers run in `render()`. No histogram yet, because no slice-1 metric
+    needs one.
+  - `MetricsHttpServer`: QtNetwork, 127.0.0.1 only, `/ping` and `/metrics`. It is the
+    helper that the capture reuses in slice 2. `sentinel_core` now links `Qt6::Network`
+    PRIVATE. This is not a GUI module, so the core rule holds.
+  - `ProcessMetrics`.
+- `SentinelServerApp`: the inline `/ping` handler is replaced by `MetricsHttpServer` on the
+  same port (`SENTINEL_HEALTH_PORT`, default 8090). There is no new config key.
+- Metric names that changed:
+  - Row 1 also exports `sentinel_recorder_column_overdue_seconds{product,layer}`. This is
+    the stall monitor's own deadline: last column bucket or connect minute, + 2 min +
+    lateness. A1 uses it (`> 60` for 1 m) instead of `time() - last_column > 240`. The
+    reason: the raw age misfires after a long disconnect and before the first column.
+  - `last_column_timestamp_seconds` is absent until the first column.
+  - Row 9 is `sentinel_mdc_transport_up_total` / `_down_total`. These are counted from the
+    connection-status callback in `ServerDataModel`, because `libs/core/marketdata/` was
+    not changed (feeds-core owns it). Reconnects = up - 1. There is no per-product label
+    yet.
+  - Free extras: `sentinel_recorder_running` and `sentinel_stream_sessions`.
+- Alerts: A1, A3 and two additions:
+  - A1b "upstream disconnected 5 min". A1 is silent while disconnected, so this alert
+    covers that gap.
+  - A3b "T7 absent".
+  - A3 evaluates `up{job=~"sentinel-server|node"} or (absent(up{job="sentinel-server"}) - 1)
+    or (absent(up{job="node"}) - 1)`, so a job whose `up` series is missing fires on its
+    own. A plain `up{...}` query still returns data for the other job, so its no-data
+    state would never trigger.
+  - All four go to one ntfy webhook. The topic comes from `SENTINEL_NTFY_TOPIC` or the
+    gitignored `ops/monitoring/ntfy.env`.
+- Runtime layout:
+  - The VictoriaMetrics data directory is `~/Sentinel-runtime/monitoring/vmdata`, not
+    `~/Library/Application Support/sentinel-metrics/`.
+  - Grafana runs from its own launchd plist (`com.sentinel.grafana`), not
+    `brew services`. It needs `SENTINEL_REPO` and `SENTINEL_NTFY_URL` in its environment.
+  - node_exporter is `com.sentinel.node-exporter`.
+  - `ops/monitoring/install.sh` loads all three. The orchestrator runs it.
+- TODO (with the per-symbol connections / feeds-core branch): row 7
+  `sentinel_mdc_last_l2_timestamp_seconds{product}` from an atomic mirror of
+  `ProductLiveness.lastLevel2Ms`. Make rows 8-11 per product. Then add alert A2 and its
+  health panel.
+- Slice 2: capture `/metrics` on `127.0.0.1:8091` (rows 13, 15-18) with
+  `MetricsHttpServer`. It was not done in slice 1 because the per-symbol branch rewrites
+  `CaptureApp` stats (R1). After it lands, enable the scrape job in
+  `ops/monitoring/prometheus.yml` and the capture queue panel.
 
 Later, in order: (b) capture `/metrics` with per-product rows 13, 15-18 (with or after the
 per-symbol branch); (c) A2 and A4; (d) nightly verify push (row 19) via a launchd script;

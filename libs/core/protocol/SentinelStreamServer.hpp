@@ -71,6 +71,8 @@ public:
     trading::LiveTradingSession* tradingSessionPtr() const { return m_tradingSession.get(); }
     uint64_t registerLatencySender(std::function<void(int)> sendFn);
     void unregisterLatencySender(uint64_t id);
+    // Open client sessions; takes the sessions mutex briefly (metrics scrape).
+    size_t sessionCount();
 
 private:
     friend class Session;

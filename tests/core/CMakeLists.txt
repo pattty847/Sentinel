@@ -25,3 +25,18 @@ target_link_libraries(test_log_sink PRIVATE
 )
 add_test(NAME LogSinkTests COMMAND test_log_sink)
 set_tests_properties(LogSinkTests PROPERTIES LABELS "core")
+
+# Test Target: test_metrics_registry (registry text format + the /metrics HTTP route)
+find_package(Qt6 REQUIRED COMPONENTS Network)
+add_executable(test_metrics_registry test_metrics_registry.cpp)
+target_include_directories(test_metrics_registry PRIVATE
+    ${CMAKE_SOURCE_DIR}/libs/core
+)
+target_link_libraries(test_metrics_registry PRIVATE
+    sentinel_core
+    GTest::gtest_main
+    Qt6::Core
+    Qt6::Network
+)
+add_test(NAME MetricsRegistryTests COMMAND test_metrics_registry)
+set_tests_properties(MetricsRegistryTests PROPERTIES LABELS "core")

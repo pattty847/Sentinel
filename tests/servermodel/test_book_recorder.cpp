@@ -999,6 +999,26 @@ TEST(RecorderStallMonitor, ReconnectRestartsDeadlineAndDisconnectedTimeIsSilent)
     ASSERT_EQ(stalls.size(), 1);
     EXPECT_EQ(stalls[0].lastColumnMs, kT + 240'000);
 }
+// The /metrics overdue gauge reads the same deadline the warning uses: absent
+// while disconnected, 0 until due, and exactly the grace when check() warns.
+TEST(RecorderStallMonitor, OverdueMatchesTheWarningDeadline) {
+    RecorderStallMonitor m(2000);
+    const int64_t lastColumn = kT + 240'000;
+    std::vector<RecorderStallMonitor::Series> s{{"BTC-USD", "deep", lastColumn}};
+    EXPECT_FALSE(m.overdueMs(kT + 300'000, lastColumn).has_value());
+    m.setConnected(true, kT);
+    EXPECT_EQ(m.overdueMs(kT + 300'000, lastColumn), 0);
+    // due = last column bucket + 2 min + lateness = kT + 362 s; warned 60 s later.
+    EXPECT_EQ(m.overdueMs(kT + 400'000, lastColumn), 38'000);
+    EXPECT_TRUE(m.check(kT + 421'999, s).empty());
+    EXPECT_EQ(m.overdueMs(kT + 422'000, lastColumn), 60'000);
+    EXPECT_EQ(m.check(kT + 422'000, s).size(), 1);
+    m.setConnected(false, kT + 430'000);
+    EXPECT_FALSE(m.overdueMs(kT + 430'000, lastColumn).has_value());
+    m.setConnected(true, kT + 1'000'500); // reconnect minute kT + 960 s restarts the deadline
+    EXPECT_EQ(m.overdueMs(kT + 1'082'000, lastColumn), 0);
+    EXPECT_EQ(m.overdueMs(kT + 1'083'000, lastColumn), 1'000);
+}
 TEST(DefaultSymbols, NormalizedAsSubscribed) {
     EXPECT_EQ(normalizedDefaultSymbols({"btc-usd", "", "BTC-USD", "Eth-Usd"}),
               (std::vector<std::string>{"BTC-USD", "ETH-USD"}));

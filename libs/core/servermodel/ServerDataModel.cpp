@@ -1,6 +1,7 @@
 #include "ServerDataModel.hpp"
 #include "SentinelLogging.hpp"
 #include "RecordingDir.hpp"
+#include "metrics/MetricsRegistry.hpp"
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -179,9 +180,11 @@ void ServerDataModel::startRecorder() {
     m_stallMonitor.emplace(rc.latenessMs);
     try {
         m_recordingLive = std::make_shared<recording::LiveService>(dir, recording::liveCadenceMs(rc.livePublishMs));
-        cfg.publisher = [live = m_recordingLive](recording::RecordPtr record) {
-            if (!live->publish(std::move(record)))
+        cfg.publisher = [live = m_recordingLive, drops = &m_livePublishDrops](recording::RecordPtr record) {
+            if (!live->publish(std::move(record))) {
+                drops->fetch_add(1, std::memory_order_relaxed);
                 sLog_Probe("recording.live.drop", "publication exceeds series limit or is stale");
+            }
         };
         cfg.onSelfInvalidated = [this](const std::string& symbol, const std::string& reason) {
             // Recorder worker thread: hand off only.
@@ -232,7 +235,56 @@ void ServerDataModel::checkRecorderProgress(int64_t nowMs) {
 }
 
 void ServerDataModel::onMarketDataConnectionChanged(bool connected) {
+    if (m_mdConnected.exchange(connected, std::memory_order_relaxed) != connected)
+        (connected ? m_mdTransportUps : m_mdTransportDowns).fetch_add(1, std::memory_order_relaxed);
     if (m_stallMonitor) m_stallMonitor->setConnected(connected, localNowMs());
+}
+
+void ServerDataModel::registerMetrics(sentinel::metrics::MetricsRegistry& r) {
+    using Value = std::optional<double>;
+    const auto load = [](const std::atomic<uint64_t>& a) { return [&a]() -> Value { return double(a.load(std::memory_order_relaxed)); }; };
+    r.gaugeFn("sentinel_mdc_connected", "1 while the upstream market-data transport is up.", {},
+              [this]() -> Value { return m_mdConnected.load(std::memory_order_relaxed) ? 1.0 : 0.0; });
+    r.counterFn("sentinel_mdc_transport_up_total", "Upstream transport up transitions (reconnects = this - 1).", {},
+                load(m_mdTransportUps));
+    r.counterFn("sentinel_mdc_transport_down_total", "Upstream transport down transitions.", {},
+                load(m_mdTransportDowns));
+    r.gaugeFn("sentinel_exchange_clock_offset_ms", "Smoothed local minus exchange clock in ms (0 = not yet measured).", {},
+              [this]() -> Value { return double(m_exchangeOffsetMs.load(std::memory_order_relaxed)); });
+    r.gaugeFn("sentinel_recorder_running", "1 when recording v2 started in this process.", {},
+              [this]() -> Value { return m_recorder ? 1.0 : 0.0; });
+    if (!m_recorder) return;
+
+    // BookRecorder::stats() is relaxed atomics; one call per series per scrape.
+    using Stats = recording::BookRecorder::Stats;
+    const auto stat = [this](uint64_t Stats::*field) { return [this, field]() -> Value { return double(m_recorder->stats().*field); }; };
+    r.counterFn("sentinel_recorder_columns_written_total", "Minute columns the recorder committed.", {}, stat(&Stats::columnsWritten));
+    r.counterFn("sentinel_recorder_late_events_total", "Book messages timestamped before the already-closed minutes.", {}, stat(&Stats::lateEvents));
+    r.counterFn("sentinel_recorder_backward_steps_total", "Book messages whose timestamp stepped backwards.", {}, stat(&Stats::backwardSteps));
+    r.counterFn("sentinel_recorder_queue_drops_total", "Book messages dropped (or turned into an invalidation) on recorder queue overflow.", {}, stat(&Stats::queueDrops));
+    r.counterFn("sentinel_recorder_invalidations_total", "Recorder book invalidations (upstream and self).", {}, stat(&Stats::invalidations));
+    r.counterFn("sentinel_recorder_disk_errors_total", "Recorder disk write failures.", {}, stat(&Stats::diskErrors));
+    r.counterFn("sentinel_recorder_live_publish_drops_total", "Live publications refused (series limit or stale).", {},
+                load(m_livePublishDrops));
+
+    // Pinned symbol x layer, the series the stall monitor watches (main thread).
+    for (const auto& series : m_stallSeries) {
+        const sentinel::metrics::Labels labels{{"product", series.symbol}, {"layer", series.layer}};
+        r.gaugeFn("sentinel_recorder_last_column_timestamp_seconds",
+                  "Start of the newest committed minute column (absent until the first column).", labels,
+                  [this, symbol = series.symbol, layer = series.layer]() -> Value {
+                      const int64_t ms = m_recorder->watermarks(symbol, layer).lastColumnMs;
+                      return ms > 0 ? Value(ms / 1000.0) : std::nullopt;
+                  });
+        r.gaugeFn("sentinel_recorder_column_overdue_seconds",
+                  "Seconds the next column is past due (stall monitor; absent while disconnected). "
+                  "The log warns 'Recording v2 stalled' at 60.", labels,
+                  [this, symbol = series.symbol, layer = series.layer]() -> Value {
+                      const auto overdue = m_stallMonitor->overdueMs(
+                          localNowMs(), m_recorder->watermarks(symbol, layer).lastColumnMs);
+                      return overdue ? Value(*overdue / 1000.0) : std::nullopt;
+                  });
+    }
 }
 
 SymbolHotData& ServerDataModel::ensureSymbol(const std::string& symbol) {

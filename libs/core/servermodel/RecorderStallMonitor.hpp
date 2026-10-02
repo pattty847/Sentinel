@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -37,7 +38,7 @@ class RecorderStallMonitor {
             return out;
         for (const auto &s : series) {
             auto &warned = lastWarnMs_[{s.symbol, s.layer}];
-            const int64_t due = std::max(connectMinute_, floorMinute(s.lastColumnMs)) + 2 * kMinute + lateness_;
+            const int64_t due = dueMs(s.lastColumnMs);
             if (nowMs - due < grace_) {
                 warned = kNever;
                 continue;
@@ -50,7 +51,18 @@ class RecorderStallMonitor {
         return out;
     }
 
+    // How far past due the series' next column is (>= 0), or nullopt while
+    // disconnected. Stalled (and warned by check) once this reaches graceMs.
+    std::optional<int64_t> overdueMs(int64_t nowMs, int64_t lastColumnMs) const {
+        if (!connected_)
+            return std::nullopt;
+        return std::max<int64_t>(0, nowMs - dueMs(lastColumnMs));
+    }
+
   private:
+    int64_t dueMs(int64_t lastColumnMs) const {
+        return std::max(connectMinute_, floorMinute(lastColumnMs)) + 2 * kMinute + lateness_;
+    }
     static constexpr int64_t kNever = INT64_MIN;
     static int64_t floorMinute(int64_t ms) { return ms / kMinute * kMinute - (ms % kMinute < 0 ? kMinute : 0); }
     int64_t lateness_, grace_, repeat_;

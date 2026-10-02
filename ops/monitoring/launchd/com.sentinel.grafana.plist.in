@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Grafana. Rendered by ops/monitoring/install.sh; the installed copy holds the
+     ntfy URL (the topic is a secret), so install.sh makes it mode 600. -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.sentinel.grafana</string>
+  <key>ProgramArguments</key><array>
+    <string>@BREW@/opt/grafana/bin/grafana</string>
+    <string>server</string>
+    <string>--config</string><string>@RT@/grafana/grafana.ini</string>
+    <string>--homepath</string><string>@BREW@/opt/grafana/share/grafana</string>
+    <string>--packaging=brew</string>
+  </array>
+  <key>EnvironmentVariables</key><dict>
+    <key>SENTINEL_REPO</key><string>@REPO@</string>
+    <key>SENTINEL_NTFY_URL</key><string>@NTFY_URL@</string>
+  </dict>
+  <key>WorkingDirectory</key><string>@RT@/grafana</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>@LOGS@/monitoring-grafana.out</string>
+  <key>StandardErrorPath</key><string>@LOGS@/monitoring-grafana.err</string>
+</dict></plist>
