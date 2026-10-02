@@ -13,8 +13,34 @@
 #include <optional>
 #include <stdexcept>
 #include <tuple>
+#include <charconv>
+#include <boost/multiprecision/cpp_dec_float.hpp>
 
 namespace sentinel::capture {
+bool TradeIdWindow::observe(uint64_t value) {
+    m_high = std::max(m_high.value_or(value), value);
+    const auto floor = *m_high > Window ? *m_high - Window : 0;
+    while (!m_seen.empty() && m_seen.begin()->second < floor) {
+        m_seen.erase(m_seen.begin()); ++m_evictions;
+    }
+    auto next = m_seen.upper_bound(value);
+    if (next != m_seen.begin() && std::prev(next)->second >= value) return false;
+    if (value < floor) { ++m_outOfWindow; return true; }
+    auto previous = next == m_seen.begin() ? m_seen.end() : std::prev(next);
+    if (previous != m_seen.end() && previous->second != UINT64_MAX && previous->second + 1 == value) {
+        previous->second = value;
+        if (next != m_seen.end() && value != UINT64_MAX && value + 1 == next->first) {
+            previous->second = next->second; m_seen.erase(next);
+        }
+    } else if (next != m_seen.end() && value != UINT64_MAX && value + 1 == next->first) {
+        const auto last = next->second; m_seen.erase(next); m_seen.emplace(value, last);
+    } else {
+        m_seen.emplace(value, value);
+    }
+    m_peak = std::max(m_peak, m_seen.size());
+    return true;
+}
+
 DecimalGrid::Decimal DecimalGrid::parse(const std::string& value) {
     if (value.empty() || value.size() > 80) throw std::runtime_error("invalid decimal length");
     const auto dot = value.find('.');
@@ -159,7 +185,143 @@ void addDaily(nlohmann::json& days, const std::string& day, const char* key, uin
     if (value.is_null()) value = {{"frames", 0}, {"received_bytes", 0}, {"file_bytes", 0}, {"l2_events", 0}};
     value[key] = value.value(key, uint64_t(0)) + amount;
 }
+// Dedup history is window-bounded; unresolved gap ranges remain available for backfill.
+struct TradeAudit {
+    using Volume = boost::multiprecision::cpp_dec_float_50;
+    TradeIdWindow ids;
+    std::optional<uint64_t> connectionHigh, beforeConnection;
+    bool updated = false;
+    uint64_t trades = 0, duplicates = 0, buys = 0, sells = 0;
+    uint64_t snapshots = 0, resnapshots = 0;
+    Volume buyVolume = 0, sellVolume = 0;
+    std::string firstTime, lastTime;
+    void newConnection() { connectionHigh.reset(); beforeConnection = ids.high(); updated = false; captureDamaged = std::make_shared<bool>(false); }
+    static uint64_t id(const std::string& text) {
+        uint64_t value = 0;
+        const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
+        if (text.empty() || ec != std::errc{} || end != text.data() + text.size())
+            throw std::runtime_error("invalid trade_id: " + text);
+        return value;
+    }
+    static std::string time(const std::string& text) {
+        // Coinbase UTC RFC3339 with variable fractional precision. Normalize to
+        // nanoseconds before comparing, preserving more than Qt's milliseconds.
+        if (text.size() < 20 || text.back() != 'Z' ||
+            !QDateTime::fromString(QString::fromStdString(text.substr(0, 19) + "Z"), Qt::ISODate).isValid())
+            throw std::runtime_error("invalid trade time: " + text);
+        std::string fraction;
+        if (text.size() > 20) {
+            if (text[19] != '.') throw std::runtime_error("invalid trade time fraction");
+            fraction = text.substr(20, text.size() - 21);
+            if (fraction.empty() || fraction.size() > 9 || fraction.find_first_not_of("0123456789") != std::string::npos)
+                throw std::runtime_error("invalid trade time fraction");
+        }
+        fraction.resize(9, '0');
+        return text.substr(0, 19) + "." + fraction + "Z";
+    }
+    enum class GapKind { Connected, Reconnect, Snapshot };
+    struct Candidate {
+        uint64_t first, last, remaining;
+        GapKind kind;
+        nlohmann::json detail;
+        std::shared_ptr<bool> damaged;
+    };
+    struct Missing { uint64_t last; size_t candidate; };
+    // This ledger scales with requested backfill output, not trade count. It is
+    // independent of dedup eviction, so very late fills still reconcile exactly.
+    std::map<size_t, Candidate> candidates;
+    size_t candidateCount = 0;
+    std::map<uint64_t, Missing> pending;
+    std::shared_ptr<bool> captureDamaged = std::make_shared<bool>(false);
+    uint64_t filledLater = 0;
+    void candidate(uint64_t first, uint64_t last, GapKind kind, nlohmann::json detail) {
+        pending.emplace(first, Missing{last, candidateCount});
+        candidates.emplace(candidateCount++, Candidate{first, last, last - first + 1, kind, std::move(detail), captureDamaged});
+    }
+    bool observe(uint64_t value) {
+        auto it = pending.upper_bound(value);
+        if (it != pending.begin()) {
+            --it;
+            if (value <= it->second.last) {
+                const auto first = it->first;
+                const auto range = it->second;
+                pending.erase(it);
+                if (first < value) pending.emplace(first, Missing{value - 1, range.candidate});
+                if (value < range.last) pending.emplace(value + 1, Missing{range.last, range.candidate});
+                if (--candidates.at(range.candidate).remaining == 0) candidates.erase(range.candidate);
+                ++filledLater;
+            }
+        }
+        return ids.observe(value);
+    }
+    static void validateSize(const std::string& value) {
+        if (value.empty() || value.size() > 80) throw std::runtime_error("invalid trade size");
+        bool dot = false, positive = false;
+        for (const auto c : value) {
+            if (c == '.' && !dot) { dot = true; continue; }
+            if (c < '0' || c > '9') throw std::runtime_error("invalid trade size");
+            positive = positive || c != '0';
+        }
+        if (!positive || value.front() == '.' || value.back() == '.') throw std::runtime_error("invalid trade size");
+    }
+    nlohmann::json gapReport() const {
+        nlohmann::json out = {{"trade_gap_candidates", candidateCount}, {"still_missing", 0}, {"filled_later", filledLater},
+            {"upstream_trade_gaps", 0}, {"upstream_missing_trades", 0},
+            {"integrity_trade_gaps", 0}, {"integrity_missing_trades", 0},
+            {"reconnect_trade_gaps", 0}, {"reconnect_missing_trades", 0},
+            {"snapshot_trade_gaps", 0}, {"snapshot_missing_trades", 0},
+            {"upstream_trade_gap_details", nlohmann::json::array()},
+            {"integrity_trade_gap_details", nlohmann::json::array()},
+            {"reconnect_trade_gap_details", nlohmann::json::array()},
+            {"snapshot_trade_gap_details", nlohmann::json::array()},
+            {"missing_trade_ranges", nlohmann::json::array()}};
+        const auto category = [](const Candidate& c) -> std::string {
+            if (*c.damaged) return "integrity";
+            return c.kind == GapKind::Reconnect ? "reconnect" : c.kind == GapKind::Snapshot ? "snapshot" : "upstream";
+        };
+        for (const auto& [index, c] : candidates) if (c.remaining) {
+            const auto prefix = category(c);
+            out[prefix + "_trade_gaps"] = out[prefix + "_trade_gaps"].get<uint64_t>() + 1;
+            out[prefix + "_missing_trades"] = out[prefix + "_missing_trades"].get<uint64_t>() + c.remaining;
+            out["still_missing"] = out["still_missing"].get<uint64_t>() + c.remaining;
+        }
+        for (const auto& [first, range] : pending) {
+            const auto& c = candidates.at(range.candidate);
+            auto detail = c.detail;
+            detail["category"] = category(c);
+            detail["first_id"] = std::to_string(first);
+            detail["last_id"] = std::to_string(range.last);
+            detail["count"] = range.last - first + 1;
+            out["missing_trade_ranges"].push_back(detail);
+            auto& details = out[category(c) + "_trade_gap_details"];
+            if (details.size() < 30) details.push_back(std::move(detail));
+        }
+        out["reconnect_overlap_check"] = "previously detected candidates only; no new holes inferred at or below previous connection high";
+        out["trade_tape_complete"] = out["still_missing"] == 0;
+        return out;
+    }
+    nlohmann::json report() const {
+        const auto volume = [](const Volume& v) {
+            auto text = v.str(std::numeric_limits<Volume>::digits10, std::ios_base::fixed);
+            if (text.find('.') != std::string::npos) {
+                while (text.back() == '0') text.pop_back();
+                if (text.back() == '.') text.pop_back();
+            }
+            return text;
+        };
+        return {{"trades", trades}, {"duplicate_trades", duplicates},
+            {"first_trade_time", firstTime.empty() ? nlohmann::json(nullptr) : nlohmann::json(firstTime)},
+            {"last_trade_time", lastTime.empty() ? nlohmann::json(nullptr) : nlohmann::json(lastTime)},
+            {"buy_trades", buys}, {"sell_trades", sells}, {"buy_volume", volume(buyVolume)}, {"sell_volume", volume(sellVolume)},
+            {"trade_side", "aggressor; Coinbase market_trades wire side is maker (SELL -> buy, BUY -> sell)"},
+            {"trade_volume_unit", "base currency; decimal strings; unique observed IDs including snapshots"},
+            {"trade_snapshots", snapshots}, {"trade_resnapshots", resnapshots},
+            {"dedup_window_evictions", ids.evictions()}, {"dedup_out_of_window_trades", ids.outOfWindow()},
+            {"dedup_retained_intervals", ids.retainedIntervals()}, {"dedup_peak_intervals", ids.peakIntervals()}};
+    }
+};
 struct Replay {
+    TradeAudit tradeAudit;
     std::optional<DecimalGrid> prices, quantities;
     std::string symbol, run;
     std::vector<std::string> products;
@@ -168,6 +330,9 @@ struct Replay {
     std::optional<uint64_t> batchFirst, batchLast;
     uint64_t connectionFrames = 0, connectionBytes = 0, references = 0, missingSnapshots = 0, l2Events = 0;
     uint64_t openRuns = 0, truncatedRuns = 0, badTails = 0;
+    uint64_t emptyConnections = 0, connectionL2Begin = 0, runL2Begin = 0;
+    std::optional<Stamp> connectionStart;
+    nlohmann::json emptyConnectionDetails = nlohmann::json::array();
     bool lastIndexed = false;
     bool closedOk = true;
     nlohmann::json days = nlohmann::json::object(), connectionDays = nlohmann::json::object();
@@ -208,27 +373,38 @@ struct Replay {
             {"sequence_gaps", gaps}, {"unsequenced_frames", unsequenced}, {"explicit_capture_gaps", explicitGaps},
             {"invalidations", invalidations}, {"resync_requests", resyncs}, {"engine_errors", engineErrors},
             {"capture_stops", captureStops}, {"errors", errors}, {"unanchored_l2_events", unanchored},
-            {"missing_snapshot_connections", missingSnapshots}, {"bad_tails", badTails}};
+            {"missing_snapshot_connections", missingSnapshots}, {"empty_connections", emptyConnections}, {"bad_tails", badTails}};
     }
     void endConnection() {
-        if (snapshotPending) ++missingSnapshots;
-        snapshotPending = false;
+        if (!connectionStart) return; // Down, stop, next up and EOF must count once.
+        if (l2Events == connectionL2Begin) {
+            ++emptyConnections;
+            if (emptyConnectionDetails.size() < 30) emptyConnectionDetails.push_back({
+                {"product", symbol}, {"run_id", run}, {"connection", connection},
+                {"start_system_ns", connectionStart->systemNs},
+                {"start_time", QDateTime::fromMSecsSinceEpoch(connectionStart->systemNs / 1000000, QTimeZone::UTC)
+                    .toString(Qt::ISODateWithMs).toStdString()},
+                {"duration_seconds", std::max(0.0, double(lastSteady - connectionStart->steadyNs) / 1e9)}});
+        } else if (snapshotPending) ++missingSnapshots;
+        connectionStart.reset(); snapshotPending = false;
     }
     void finishRun() {
         if (run.empty()) return;
+        endConnection(); // Classify the observed prefix of an open connection too.
+        const bool needsSnapshot = l2Events != runL2Begin;
         finishSecond();
         const bool scopeTail = !sawStop && truncated;
         const bool interrupted = sawStart && !sawStop && !newest && !scopeTail;
         if (interrupted) { ++interruptedRuns; error("interrupted run superseded by a newer run=" + run); }
         const bool open = sawStart && !sawStop && newest && !scopeTail;
         if (scopeTail) ++truncatedRuns;
-        if (!sawStart || !sawStop || !sawSnapshot) ++incompleteRuns;
+        if (!sawStart || !sawStop || (needsSnapshot && !sawSnapshot)) ++incompleteRuns;
         if (open) ++openRuns;
         const auto span = firstSteady < 0 ? 0 : std::max(1e-9, double(lastSteady - firstSteady) / 1e9);
         duration += span;
         auto metrics = connectionMetrics();
         for (auto& [key, value] : metrics.items()) value = value.get<uint64_t>() - baseline.value(key, uint64_t(0));
-        const bool valid = sawStart && (open || sawSnapshot) && metrics["errors"] == 0 &&
+        const bool valid = sawStart && (open || sawSnapshot || !needsSnapshot) && metrics["errors"] == 0 &&
             metrics["sequence_gaps"] == 0 && metrics["unsequenced_frames"] == 0 && metrics["explicit_capture_gaps"] == 0 &&
             metrics["unanchored_l2_events"] == 0 && metrics["missing_snapshot_connections"] == 0 &&
             metrics["bad_tails"] == 0 && (!sawStop || lastIndexed);
@@ -239,14 +415,14 @@ struct Replay {
         metrics["ok"] = valid;
         metrics["interrupted"] = interrupted;
         metrics["truncated_by_scope"] = scopeTail;
-        metrics["incomplete"] = !sawStart || !sawStop || !sawSnapshot;
+        metrics["incomplete"] = !sawStart || !sawStop || (needsSnapshot && !sawSnapshot);
         metrics["open"] = open;
         metrics["closed"] = sawStop;
         metrics["duration_seconds"] = span;
         metrics["pending_routing_frames"] = multi ? batchFrames : 0;
         runReports.push_back(std::move(metrics));
         if (!open && !valid) closedOk = false;
-        baseline = connectionMetrics();
+        baseline = connectionMetrics(); runL2Begin = l2Events;
         sawStart = sawStop = sawSnapshot = snapshotPending = false;
         firstSteady = lastSteady = second = previousSystem = -1;
         secondFrames = 0;
@@ -255,7 +431,53 @@ struct Replay {
         batchFrames = batchBytes = 0; batchFirst.reset(); batchLast.reset();
         invalidate();
     }
+    void trades(const Record& record, std::vector<CapturedTradeEvent> events) {
+        for (auto& event : events) {
+            struct Trade { uint64_t id; std::string time; const CapturedTrade* raw; };
+            std::vector<Trade> ordered;
+            for (const auto& t : event.trades) {
+                if (t.side != "BUY" && t.side != "SELL") throw std::runtime_error("invalid trade side");
+                TradeAudit::validateSize(t.size);
+                ordered.push_back({TradeAudit::id(t.id), TradeAudit::time(t.time), &t});
+            }
+            std::stable_sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+            if (ordered.empty()) continue; // Foreign-product events cannot change this product's anchor.
+            auto& a = tradeAudit;
+            const bool snapshot = event.type == "snapshot";
+            if (snapshot) { ++a.snapshots; if (a.updated) ++a.resnapshots; }
+            for (const auto& t : ordered) {
+                const bool fresh = a.observe(t.id);
+                if (!fresh) ++a.duplicates;
+                // A snapshot is recent history, not replay since the disconnect.
+                // The first newly observed ID above the old high watermark exposes
+                // the uncovered reconnect interval, even after overlapping history.
+                auto base = a.connectionHigh;
+                bool reconnect = false;
+                if (!a.updated && a.beforeConnection && (!base || *base <= *a.beforeConnection)) {
+                    base = a.beforeConnection; reconnect = true;
+                }
+                if (base && t.id > *base && t.id - *base > 1) {
+                    nlohmann::json detail = {{"product", symbol}, {"run_id", run}, {"connection", record.connection},
+                        {"approx_time", t.time}, {"received_system_ns", record.time.systemNs}};
+                    a.candidate(*base + 1, t.id - 1, reconnect ? TradeAudit::GapKind::Reconnect :
+                        (!snapshot || a.updated) ? TradeAudit::GapKind::Connected : TradeAudit::GapKind::Snapshot,
+                        std::move(detail));
+                }
+                a.connectionHigh = std::max(a.connectionHigh.value_or(t.id), t.id);
+                if (!fresh) continue;
+                ++a.trades;
+                if (a.firstTime.empty() || t.time < a.firstTime) a.firstTime = t.time;
+                if (a.lastTime.empty() || t.time > a.lastTime) a.lastTime = t.time;
+                // Coinbase documents the wire side as maker, so invert for CVD.
+                if (t.raw->side == "SELL") { ++a.buys; a.buyVolume += TradeAudit::Volume(t.raw->size); }
+                else { ++a.sells; a.sellVolume += TradeAudit::Volume(t.raw->size); }
+            }
+            if (!snapshot && !ordered.empty() && (!a.beforeConnection || *a.connectionHigh > *a.beforeConnection))
+                a.updated = true;
+        }
+    }
     void record(const Record& record) {
+        nlohmann::json identity;
         const bool reference = record.kind == Kind::FrameReference;
         if (reference) {
             try {
@@ -266,7 +488,7 @@ struct Replay {
                 if (record.connection != connection || !active) error("range outside its transport lifetime");
                 if ((haveSequence && first != expectedSequence) || range.at("sequence_gaps") != 0 ||
                     last < first || last == UINT64_MAX || last - first + 1 != count) {
-                    ++gaps; invalidate();
+                    ++gaps; *tradeAudit.captureDamaged = true; invalidate();
                 }
                 if (batchFrames + range.at("foreign_count").get<uint64_t>() != count ||
                     batchBytes + range.at("foreign_bytes").get<uint64_t>() != received ||
@@ -284,7 +506,7 @@ struct Replay {
             // Range clocks name the last original frame, including foreign ones.
         } else if (multi && record.kind == Kind::Frame) {
             try {
-                const auto identity = frameReceipt(record.payload, products);
+                identity = frameReceipt(record.payload, products);
                 const auto targets = identity.at("products").get<std::vector<std::string>>();
                 if (!std::binary_search(targets.begin(), targets.end(), symbol)) error("raw frame routed to wrong product");
                 ++batchFrames; batchBytes += record.payload.size();
@@ -310,6 +532,8 @@ struct Replay {
         if (reference) return;
         if (record.kind == Kind::TransportUp) {
             endConnection(); snapshotPending = true;
+            connectionStart = record.time; connectionL2Begin = l2Events;
+            tradeAudit.newConnection();
             if (haveConnection && record.connection != connection + 1) error("non-contiguous connection id");
             if (record.connection == 0) error("zero connection id on transport up");
             if (connections && haveConnection) ++reconnects;
@@ -324,7 +548,7 @@ struct Replay {
             try {
                 const auto stop = nlohmann::json::parse(record.payload);
                 if (stop.value("gap", false)) {
-                    ++explicitGaps;
+                    ++explicitGaps; *tradeAudit.captureDamaged = true;
                     if (gapDetails.size() < 30) gapDetails.push_back(stop);
                 }
             } catch (const std::exception& e) { error(std::string("invalid stop marker: ") + e.what()); }
@@ -352,19 +576,34 @@ struct Replay {
         }
         bool channelCounted = false;
         try {
-            const auto json = nlohmann::json::parse(record.payload);
-            const auto channel = json.value("channel", std::string("<unclassified>"));
+            nlohmann::json json;
+            std::vector<CapturedTradeEvent> tradeEvents;
+            if (!multi) {
+                if (peekFrameChannel(record.payload) == "market_trades")
+                    tradeEvents = parseTradeEvents(record.payload, products, symbol, &identity);
+                else {
+                    json = nlohmann::json::parse(record.payload);
+                    // Restore v1 DOM envelope semantics; L2 reuses this same parse.
+                    identity = {{"channel", json.value("channel", std::string("<unclassified>"))},
+                        {"sequence_num", json.value("sequence_num", nlohmann::json(nullptr))}};
+                }
+            } else if (identity.is_null()) identity = frameReceipt(record.payload, products);
+            if (multi && identity.at("channel") == "" && !peekFrameChannel(record.payload))
+                identity["channel"] = "<unclassified>";
+            if (identity.at("channel") == "<invalid-envelope>") throw std::runtime_error("invalid JSON envelope");
+            const auto& envelope = identity;
+            const auto channel = envelope.value("channel", std::string("<unclassified>"));
             if (channel.size() > 128) throw std::runtime_error("channel name too long");
             if (channels.size() >= 1024 && !channels.contains(channel)) throw std::runtime_error("too many channels");
             ++channels[channel].frames; channels[channel].bytes += record.payload.size();
             channelCounted = true;
             bool gap = false;
-            if (json.contains("sequence_num") && json["sequence_num"].is_number_integer() &&
-                (!json["sequence_num"].is_number_unsigned() ? json["sequence_num"].get<int64_t>() >= 0 : true)) {
-                const auto sequence = json["sequence_num"].get<uint64_t>();
+            if (envelope["sequence_num"].is_number_integer() &&
+                (!envelope["sequence_num"].is_number_unsigned() ? envelope["sequence_num"].get<int64_t>() >= 0 : true)) {
+                const auto sequence = envelope["sequence_num"].get<uint64_t>();
                 if ((!multi && haveSequence && sequence != expectedSequence) ||
                     (multi && batchLast && sequence <= *batchLast)) {
-                    ++gaps; invalidate(); gap = true;
+                    ++gaps; *tradeAudit.captureDamaged = true; invalidate(); gap = true;
                     if (details.size() < 30) details.push_back("sequence gap connection=" + std::to_string(connection) +
                         " expected=" + std::to_string(expectedSequence) + " got=" + std::to_string(sequence));
                 }
@@ -375,7 +614,12 @@ struct Replay {
                 ++unsequenced; invalidate();
             }
             if (channel == "subscriptions") ++acks; // exact ack remains a frame, not reconstructed JSON
+            if (channel == "market_trades") {
+                if (multi) tradeEvents = parseTradeEvents(record.payload, products, symbol);
+                trades(record, std::move(tradeEvents)); return;
+            }
             if (channel != "l2_data") return;
+            if (json.is_null()) json = nlohmann::json::parse(record.payload);
             bool snapshotFrame = false;
             if (!json.at("events").is_array()) throw std::runtime_error("L2 events must be an array");
             for (const auto& event : json.at("events")) {
@@ -636,8 +880,11 @@ VerificationReport verifyFiles(const FileRange& files, const std::map<std::strin
             const auto result = scan(file.path, [&](const Record& record) { replay.record(record); });
             ++scanned;
             replay.lastIndexed = result.indexed;
-            if ((!result.indexed || result.tornTail) && ((haveNext && next.run == run) || replay.truncated))
-                ++replay.badTails;
+            if (!result.indexed || result.tornTail) {
+                const bool nonterminal = (haveNext && next.run == run) || replay.truncated;
+                if (nonterminal) ++replay.badTails;
+                if (nonterminal || replay.sawStop || !replay.newest) *replay.tradeAudit.captureDamaged = true;
+            }
             fileBytes += result.fileBytes;
             addDaily(replay.days, utcDay(header.at("opened_system_ns").get<int64_t>()), "file_bytes", result.fileBytes);
             tornTails += result.tornTail;
@@ -650,6 +897,7 @@ VerificationReport verifyFiles(const FileRange& files, const std::map<std::strin
             nextSegment = segment + 1;
             if (result.tornTail) replay.invalidate();
         } catch (const std::exception& e) {
+            *replay.tradeAudit.captureDamaged = true;
             replay.error(file.path.toStdString() + ": " + e.what()); replay.invalidate();
         }
     }
@@ -664,13 +912,16 @@ VerificationReport verifyFiles(const FileRange& files, const std::map<std::strin
     nlohmann::json channels = nlohmann::json::object();
     for (const auto& [name, value] : replay.channels)
         channels[name] = {{"frames", value.frames}, {"received_bytes", value.bytes}, {"received_bytes_per_day", perDay(value.bytes)}};
+    const auto tradeGaps = replay.tradeAudit.gapReport();
+    if (tradeGaps.at("integrity_trade_gaps") != 0) replay.error("unfilled trade gaps coincide with capture damage");
     report.ok = replay.errors == 0 && !replay.runReports.empty() &&
         std::all_of(replay.runReports.begin(), replay.runReports.end(), [](const auto& run) { return run.at("ok") == true; });
     report.json = {{"ok", report.ok}, {"ok_closed_runs", replay.closedOk && scanned != 0},
         {"complete", report.ok && replay.openRuns == 0}, {"open_runs", replay.openRuns},
         {"truncated_by_scope_runs", replay.truncatedRuns}, {"interrupted_runs", replay.interruptedRuns}, {"range_receipts", replay.rangeReceipts},
         {"days", replay.days}, {"frame_references", replay.references}, {"l2_events", replay.l2Events},
-        {"missing_snapshot_connections", replay.missingSnapshots}, {"run_reports", replay.runReports}, {"files", scanned}, {"runs", runs}, {"blocks", blocks},
+        {"missing_snapshot_connections", replay.missingSnapshots},
+        {"empty_connections", replay.emptyConnections}, {"empty_connection_details", replay.emptyConnectionDetails}, {"run_reports", replay.runReports}, {"files", scanned}, {"runs", runs}, {"blocks", blocks},
         {"frames", replay.frames}, {"duration_seconds", replay.duration}, {"fps_mean", replay.duration > 0 ? replay.frames / replay.duration : 0},
         {"fps_p99_one_second_buckets", p99}, {"fps_bucket_count_including_idle", replay.seconds},
         {"received_bytes", replay.bytes}, {"received_bytes_per_day", perDay(replay.bytes)},
@@ -688,6 +939,8 @@ VerificationReport verifyFiles(const FileRange& files, const std::map<std::strin
         {"unanchored_l2_events", replay.unanchored}, {"system_clock_regressions", replay.systemClockRegressions},
         {"torn_tails", tornTails}, {"unindexed_files", unindexed}, {"errors", replay.errors}, {"details", replay.details}, {"channels", channels},
         {"rate_basis", "sum of per-run steady-clock spans; p99 includes idle and partial end seconds; compressed bytes mix channels"}};
+    report.json.update(replay.tradeAudit.report());
+    report.json.update(tradeGaps);
     return report;
 }
 } // namespace
@@ -847,8 +1100,13 @@ VerificationReport verify(const QString& path, const std::function<void()>& afte
         total["duration_seconds"] = total["duration_seconds"].get<double>() + run.at("duration_seconds").get<double>();
     }
     for (const char* key : {"files", "blocks", "file_bytes", "zstd_bytes", "uncompressed_record_bytes", "l2_events",
-                           "snapshots", "replayed_l2_events", "unanchored_l2_events", "missing_snapshot_connections",
-                           "frame_references", "range_receipts", "errors", "torn_tails", "unindexed_files"}) {
+                           "snapshots", "replayed_l2_events", "unanchored_l2_events", "missing_snapshot_connections", "empty_connections",
+                           "frame_references", "range_receipts", "errors", "torn_tails", "unindexed_files",
+                           "trades", "duplicate_trades", "buy_trades", "sell_trades",
+                           "upstream_trade_gaps", "upstream_missing_trades", "integrity_trade_gaps", "integrity_missing_trades",
+                           "still_missing", "filled_later", "trade_gap_candidates", "dedup_window_evictions", "dedup_out_of_window_trades",
+                           "reconnect_trade_gaps", "reconnect_missing_trades", "snapshot_trade_gaps", "snapshot_missing_trades",
+                           "trade_snapshots", "trade_resnapshots"}) {
         uint64_t sum = 0;
         for (const auto& product : products) sum += product.at(key).get<uint64_t>();
         total[key] = sum;
@@ -867,6 +1125,11 @@ VerificationReport verify(const QString& path, const std::function<void()>& afte
         addDaily(totalDays, day, "file_bytes", counts.at("file_bytes").get<uint64_t>());
         addDaily(totalDays, day, "l2_events", counts.at("l2_events").get<uint64_t>());
     }
+    total["empty_connection_details"] = nlohmann::json::array();
+    for (const auto& product : products) for (const auto& detail : product.at("empty_connection_details"))
+        if (total["empty_connection_details"].size() < 30) total["empty_connection_details"].push_back(detail);
+    total["trade_tape_complete"] = std::all_of(products.begin(), products.end(),
+        [](const auto& product) { return product.at("trade_tape_complete") == true; });
     total["days"] = std::move(totalDays);
     total["counts_in_progress"] = total["open_runs"] != 0;
     total["stored_frames"] = storedFrames;

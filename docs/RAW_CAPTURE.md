@@ -74,9 +74,11 @@ but cannot check the raw bytes referenced in other product directories:
 `--verify` also accepts one `.rawl2` file. It is offline and read-only; stdout is a
 JSON report. Exit 0 means no observed integrity failures or open runs within
 the supplied scope (including tails excluded by scope); **3** means `ok && !complete` (only the newest run remains open/in progress);
-2 means gaps, corruption, interrupted older runs, missing snapshot anchors,
+2 means capture gaps, corruption, interrupted older runs, missing snapshot anchors,
 missing streams/segments or other failed invariants, and 1 is a fatal invocation error. Existing files are
-never repaired or rewritten by verification.
+never repaired or rewritten by verification. Add `--strict-trades` to also return
+2 for unfilled trade-id gaps; by default upstream/reconnect trade omissions are
+reported separately and do not fail archive integrity.
 
 `ok` is integrity of the supplied scope, while `complete` additionally requires
 closed runs or a tail explicitly excluded by the query. `truncated_by_scope`
@@ -105,8 +107,20 @@ high-water mark (merge cursors use two additional paths). An open or interrupted
 run's last file may have no index or a partial terminal
 block/index without failing prefix integrity; complete CRC failures and interior
 damage still fail. An open run awaiting its first snapshot is pending, not an
-anchor failure, unless it already received unanchored updates. Closed connections
-must have received that product's snapshot. A single middle hour generally fails
+anchor failure, unless it already received unanchored updates. A connection with
+**no L2 events for a product** increments `empty_connections`, not
+`missing_snapshot_connections`, even if it carried heartbeats, trades or foreign
+product frames. Connections with L2 events and no snapshot remain integrity
+failures (`missing_snapshot_connections` and `unanchored_l2_events`).
+`empty_connections` totals sum product/connection pairs: one silent WebSocket
+connection across seven products counts as seven. Per-product and aggregate
+`empty_connection_details` are independently capped at 30 entries and include
+product, run, connection ID, UTC `start_time`, exact `start_system_ns`, and
+`duration_seconds` measured with the monotonic clock. End-of-scope connections
+use their observed prefix duration; an open run still exits 3 when otherwise
+valid. Down/stop/reconnect/EOF boundaries count each connection once. Empty
+connections do not enter the shared integrity diagnostic list.
+A single middle hour generally fails
 because the start/snapshot context is missing.
 
 **Open does not prove the process is alive.** A crashed newest run is still
@@ -189,6 +203,126 @@ and physical-disk rules. Existing single-product top-level verification keys and
 closed-run meanings remain; `products`, `totals` and status fields are additive.
 Multi-product top-level counters mirror totals; detailed snapshot-size and p99
 statistics remain in each product report.
+
+## Trade continuity and CVD sanity totals
+
+The offline verifier checks `market_trades` independently of WebSocket sequence
+and archive integrity. RAWL2 v1/v2 bytes are unchanged. Coinbase's captured
+snapshots and update batches contain descending IDs, so each selected-product
+event is sorted numerically. IDs are unsigned 64-bit decimal strings, including
+`UINT64_MAX`. Trade sizes are plain positive decimals, independently of the L2
+`base_increment` grid. Signs, exponents, zero and empty decimal parts are invalid.
+
+A forward jump creates a **candidate**, not an immediate error. The verifier
+retains exact missing ranges and removes IDs as they arrive later, including
+sparse old updates, out-of-order frames, mid-connection snapshots and later
+connections/process runs. Final classification happens at the end of the archive
+scan. `filled_later` counts recovered candidate IDs; `still_missing` counts IDs
+still absent. Filled candidates are discarded. Partial fills split the exact
+backfill ranges; they do not clear an entire candidate. Category gap counters
+count candidates still containing at least one missing ID, not split fragments.
+
+* `upstream_trade_gaps` / `upstream_missing_trades`: unfilled connected gaps with
+  no evidence of capture damage in their originating connection. These never
+  change `ok`, `ok_closed_runs`, normal exit status, `errors` or shared `details`.
+* `integrity_trade_gaps` / `integrity_missing_trades`: unfilled gaps whose same
+  originating connection has a WS sequence gap, explicit capture-gap marker or
+  bad tail/read failure. Damage arriving after the trade gap is included. These
+  remain archive-integrity errors. Damage in another connection does not
+  reclassify a clean connection's candidates. A damaged tail is attributed to
+  its last observed connection when no later identity is readable. An unsealed
+  newest live prefix alone is not damage; an unsealed superseded run is.
+* `reconnect_trade_gaps` / `reconnect_missing_trades`: the uncovered interval
+  from the previous connection's highest ID to the first new higher ID. This
+  includes downtime between process runs; it does not fail archive integrity.
+* `snapshot_trade_gaps` / `snapshot_missing_trades`: internal gaps in initial
+  recent-history snapshots. Mid-connection snapshots after updates contribute
+  trades and cannot conceal a forward hole. Snapshot overlap is deduplicated.
+
+Each category has its own `*_trade_gap_details`, capped at 30 entries. Each
+product's **uncapped** `missing_trade_ranges` contains every remaining fragment:
+`product`, string `first_id` / `last_id` (inclusive), `count`, `category`,
+`approx_time` (the following observed trade's exchange time), receive nanoseconds,
+run UUID and connection ID. This list is suitable for exact-ID backfill requests.
+It scales with unfilled holes, not trade history; unlike bounded diagnostics it
+is never silently truncated. Pending bookkeeping likewise scales with the
+required backfill output; fully filled candidates release their storage.
+
+`trade_tape_complete`, per product and overall, means no detected candidate IDs
+remain missing in the selected scope. It does not alter archive `complete` or
+`ok`. `--verify <path> --strict-trades` changes exit status to **2** for any
+unfilled category; its JSON integrity fields remain unchanged. Normal verification
+still returns 0 for clean closed archives or 3 for a clean open newest run.
+`--strict-trades` without `--verify` is rejected. Malformed trade data still fails
+integrity; this policy exception applies to missing IDs, not invalid JSON/scalars.
+
+**Coverage boundary:** no completeness claim precedes the first observed anchor
+or extends beyond the scanned prefix. Reconnect snapshot IDs at or below the
+previous high watermark only fill already detected candidates; the verifier does
+not infer new holes inside this sparse old-history region. `reconnect_overlap_check`
+states that scope in each product report. Initial-snapshot holes and forward jumps
+above the previous high are checked. This distinction prevents sparse historical
+update batches from manufacturing gaps in previously captured history.
+
+Exact ID deduplication uses compressed intervals. Intervals ending more than
+**10,000,000 IDs** below the high watermark are evicted; there is no run-duration
+or 65,536-interval failure limit. The numeric window bounds retained disjoint
+intervals (at most about 5,000,002), and `dedup_window_evictions`,
+`dedup_retained_intervals` and `dedup_peak_intervals` expose its behavior. A retained
+interval may still prove an older duplicate. Otherwise an older observation is
+counted again and increments `dedup_out_of_window_trades`: unique-trade/volume
+claims must account for that uncertainty. Eviction never discards missing-range
+bookkeeping; even a very old fill reconciles a candidate exactly.
+
+Products report deduplicated `trades`, `duplicate_trades`, normalized UTC
+`first_trade_time` / `last_trade_time`, `buy_trades`, `sell_trades`, and decimal
+`buy_volume` / `sell_volume` in base currency (snapshots included). Volumes use
+50-digit decimal arithmetic. Totals sum product counts, not unlike currencies.
+Coinbase's [`MarketTrade` schema](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/advanced-trade-asyncapi.json)
+defines wire `side` as **maker** side. Report buy/sell is **aggressor** side:
+wire `SELL` adds buy volume, wire `BUY` adds sell volume; CVD is buy minus sell.
+
+Trade extraction uses the routing SAX parser, retaining selected-product scalars
+for the current bounded frame. V1 does no routing SHA-256 or destination sorting:
+a cheap channel peek selects the trade SAX path or one reusable DOM parse for L2
+and other envelopes. Missing channels retain `<unclassified>`; malformed JSON
+fails before sequence accounting and does not increment `unsequenced_frames`.
+
+### Observed feed omissions (archive audit, 2026-10-02 UTC)
+
+The real archive does **not** prove an unbroken trade tape. Independent
+read-only decompression and ID search found none of these 16 IDs anywhere in
+the selected products' archived frames, while Coinbase's public REST history
+returns them as executed trades:
+
+| Product | Missing IDs (inclusive) | Count | Exchange time (UTC, 2026-10-01) |
+|---|---|---:|---|
+| BTC-USD | 1100950971..1100950974 | 4 | 14:55:31.878671..14:55:32.106460 |
+| ETH-USD | 846432842 | 1 | 14:55:31.789758 |
+| DOGE-USD | 175259062 | 1 | 14:55:31.808308 |
+| BTC-USD | 1101035040..1101035049 | 10 | 17:28:59.845871..17:29:00.059361 |
+
+Reproduce the external checks with public, credential-free REST requests:
+[BTC first interval](https://api.exchange.coinbase.com/products/BTC-USD/trades?after=1100950976&limit=10),
+[ETH](https://api.exchange.coinbase.com/products/ETH-USD/trades?after=846432844&limit=4),
+[DOGE](https://api.exchange.coinbase.com/products/DOGE-USD/trades?after=175259064&limit=4),
+[BTC second interval](https://api.exchange.coinbase.com/products/BTC-USD/trades?after=1101035051&limit=14).
+The archive has no WebSocket sequence discontinuity or routing-proof failure at
+these points. The simultaneous first three omissions and intact envelope
+sequence are evidence of an upstream feed omission, not dropped capture files;
+the verifier cannot identify Coinbase's internal cause. Do not infer trade
+completeness from envelope continuity alone. A future backfill consumer must
+reconcile these IDs before claiming exact CVD for the affected intervals.
+
+An initial audit also exposed an incorrect verifier assumption: Coinbase sends
+snapshots mid-connection, sometimes followed by sparse historical `update`
+batches. For example, BTC connection 5 in run
+`61fdb803-bedb-4812-88ff-a288de87ea71` updates through ID `1100439303`, then
+sequence `140975` is a snapshot containing `1100439304..1100439314`, and
+sequence `140978` updates with `1100439315..1100439316`. Discarding that snapshot
+would invent an 11-trade gap. The verifier includes those snapshot trades and
+counts historical overlap as duplicates; deterministic fixtures cover this
+pattern and ensure a snapshot cannot hide a real forward hole.
 
 ## Configuration and limits
 
@@ -446,7 +580,20 @@ and missing streams or altered raw/reference bytes/clocks. Review regressions ad
 frozen routing/digest vectors, snapshot allocation bounds, superseded interrupted
 runs, crash-tail raw loss, isolated writer failures, shared queue saturation with
 individually fitting frames, live exit 3 and event-driven application readiness.
-Targeted mutation checks disable these behaviors and must fail their regressions.
+Trade regressions cover descending contiguous batches, connected holes,
+reconnect loss, exact snapshot/update deduplication, aggressor volumes and time
+precision, product isolation in mixed envelopes, v1/v2, hourly/process boundaries,
+invalid scalars and overflowing IDs, and real mid-connection snapshots followed
+by sparse historical updates. A mid-connection snapshot cannot hide a forward
+hole. Review regressions cover upstream versus capture-correlated failures,
+late and partial fills across frames/connections, exact backfill fragments,
+independent bounded diagnostics, strict CLI exit status, numeric-window eviction,
+fills older than that window, the reconnect old-history coverage boundary,
+sub-grid sizes and 18-place sums, interval bridging at `UINT64_MAX`, and legacy
+missing-channel/malformed-envelope accounting. A routing allocation test checks
+that the v1 header peek stops before the L2 body. Targeted mutation checks disable
+these behaviors and must fail their regressions; every restored source is touched
+and rebuilt before proceeding.
 
 ## launchd arguments (review/deploy separately)
 

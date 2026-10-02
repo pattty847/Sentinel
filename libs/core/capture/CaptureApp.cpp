@@ -42,6 +42,7 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
         {"root", "Mounted storage root (never the server recording directory).", "directory", "/Volumes/T7/sentinel-data/raw-l2"},
         {"symbol", "Coinbase product; repeat for several (default BTC-USD).", "product"},
         {"symbols", "Comma-separated Coinbase products on one connection.", "A,B,C"},
+        {"strict-trades", "With --verify, exit 2 for any unfilled trade-id gap; archive integrity is unchanged."},
         {"verify", "Offline verify one file or a directory; JSON report, exit 2 for integrity failures, 3 for valid incomplete/open captures.", "path"},
         {"block-ms", "Maximum target block latency in milliseconds.", "ms", "1000"},
         {"block-bytes", "Target uncompressed block bytes (large frames remain whole).", "bytes", "1048576"},
@@ -54,10 +55,11 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
         {"ca-bundle", "TLS CA bundle for the existing REST/WS clients.", "path", "resources/certs/ca-bundle.crt"}
     });
     parser.process(app);
+    if (parser.isSet("strict-trades") && !parser.isSet("verify")) throw std::runtime_error("--strict-trades requires --verify");
     if (parser.isSet("verify")) {
         const auto report = verify(parser.value("verify"));
         std::cout << report.json.dump(2) << '\n';
-        return !report.ok ? 2 : report.json.at("complete") == true ? 0 : 3;
+        return report.exitCode(parser.isSet("strict-trades"));
     }
     WriterConfig config;
     config.root = validateRoot(parser.value("root"));

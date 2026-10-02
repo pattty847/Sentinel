@@ -51,3 +51,13 @@ TEST(CaptureRouting, MultiMegabyteSnapshotDoesNotMaterializeUpdates) {
     EXPECT_EQ(identity.at("products"), nlohmann::json::array({"BTC-USD"}));
     EXPECT_LT(allocated, 64 * 1024) << "routing allocations=" << allocated;
 }
+TEST(CaptureRouting, HeaderPeekDoesNotParseOrHashTheL2Body) {
+    // An incomplete body cannot pass a full routing/DOM parse. The header peek
+    // intentionally stops before it: v1 L2 replay does the one validating DOM parse.
+    const std::string payload = R"({"channel":"l2_data","padding":")" +
+        std::string(1024 * 1024, 'x') + R"(","events":[)";
+    allocated = 0; measuring = true;
+    const auto channel = peekFrameChannel(payload);
+    measuring = false;
+    ASSERT_TRUE(channel); EXPECT_EQ(*channel, "l2_data"); EXPECT_LT(allocated, 4096);
+}

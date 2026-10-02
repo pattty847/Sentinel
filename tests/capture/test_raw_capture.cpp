@@ -13,6 +13,8 @@
 #include <algorithm>
 #include <chrono>
 #include <csignal>
+#include <QProcess>
+#include <QProcessEnvironment>
 
 using namespace sentinel::capture;
 namespace {
@@ -49,7 +51,7 @@ std::vector<Record> fixture() {
     auto trades = nlohmann::json::parse(R"({
       "channel":"market_trades","timestamp":"2026-09-29T00:00:00.000000001Z",
       "events":[{"type":"update","trades":[{"product_id":"BTC-USD","price":"100.01",
-      "size":"0.00000001","side":"BUY","trade_id":"123"}]}]})");
+      "size":"0.00000001","side":"BUY","trade_id":"123","time":"2026-09-29T00:00:00.000000001Z"}]}]})");
     return {
         record(Kind::CaptureStarted, 0, "{}", 0), record(Kind::TransportUp, 1),
         frame(fixtures::coinbaseSubscriptionAck({"BTC-USD"}), 0, 100),
@@ -484,6 +486,90 @@ TEST_F(CaptureTest, MultiGapAcrossProductsInvalidatesEveryBookIncludingReceiptOn
         EXPECT_EQ(product["sequence_gaps"], 1);
         EXPECT_EQ(product["unanchored_l2_events"], 1);
     }
+}
+TEST_F(CaptureTest, EmptyConnectionsPassButUpdatesWithoutSnapshotStillFailV1V2) {
+    for (const bool multi : {false, true}) for (const bool updates : {false, true}) {
+        SCOPED_TRACE(multi);
+        SCOPED_TRACE(updates);
+        QTemporaryDir temp; auto cfg = config; cfg.root = temp.path();
+        std::vector<Record> input{record(Kind::CaptureStarted, 0, "{}", 0), record(Kind::TransportUp, 1)};
+        if (updates) input.push_back(frame(fixtures::coinbaseL2Update("BTC-USD", {{"bid", 100, 1}}), 0, 1000000000));
+        input.push_back(record(Kind::TransportDown, 21000000000LL));
+        input.push_back(record(Kind::TransportUp, 22000000000LL, "{}", 2));
+        input.push_back(frame(fixtures::coinbaseL2Snapshot("BTC-USD", {{100, 1}}, {{101, 1}}), 0, 23000000000LL, 2));
+        if (multi) input.push_back(frame(fixtures::coinbaseL2Snapshot("ETH-USD", {{10, 1}}, {{11, 1}}), 1, 24000000000LL, 2));
+        input.push_back(record(Kind::CaptureStopped, 25000000000LL, "{}", 2));
+        if (multi) writeMulti(cfg, input);
+        else { Writer writer(cfg, metadata()); for (const auto& value : input) writer.append(value); writer.close(); }
+        const auto r = verify(cfg.root);
+        EXPECT_EQ(r.ok, !updates) << r.json.dump(2); EXPECT_EQ(r.exitCode(), updates ? 2 : 0);
+        EXPECT_EQ(r.json["ok_closed_runs"], !updates);
+        const auto& btc = r.json["products"]["BTC-USD"];
+        EXPECT_EQ(btc["empty_connections"], updates ? 0 : 1);
+        EXPECT_EQ(btc["missing_snapshot_connections"], updates ? 1 : 0);
+        EXPECT_EQ(btc["unanchored_l2_events"], updates ? 1 : 0);
+        EXPECT_EQ(r.json["totals"]["empty_connections"], (updates ? 0 : 1) + (multi ? 1 : 0));
+        if (!updates) {
+            ASSERT_EQ(btc["empty_connection_details"].size(), 1);
+            const auto& detail = btc["empty_connection_details"][0];
+            EXPECT_EQ(detail["connection"], 1); EXPECT_EQ(detail["product"], "BTC-USD");
+            EXPECT_EQ(detail["start_system_ns"], Epoch + 1); EXPECT_EQ(detail["start_time"], "2026-09-30T00:00:00.000Z");
+            EXPECT_DOUBLE_EQ(detail["duration_seconds"].get<double>(), 20.999999999);
+            EXPECT_EQ(btc["run_reports"][0]["empty_connections"], 1);
+        }
+        if (multi) {
+            // A BTC update must not make the receipt-only ETH connection nonempty.
+            const auto& eth = r.json["products"]["ETH-USD"];
+            EXPECT_TRUE(eth["ok"]); EXPECT_EQ(eth["empty_connections"], 1);
+            EXPECT_EQ(eth["missing_snapshot_connections"], 0);
+        }
+    }
+}
+TEST_F(CaptureTest, EmptyConnectionsWithForeignFramesNeedNoProductSnapshot) {
+    std::vector<Record> input{record(Kind::CaptureStarted, 0, "{}", 0), record(Kind::TransportUp, 1),
+        frame(fixtures::coinbaseL2Snapshot("BTC-USD", {{100, 1}}, {{101, 1}}), 0, 1000000000),
+        record(Kind::CaptureStopped, 2000000000)};
+    writeMulti(config, input);
+    const auto r = verify(config.root);
+    ASSERT_TRUE(r.ok) << r.json.dump(2); EXPECT_EQ(r.exitCode(), 0);
+    EXPECT_EQ(r.json["products"]["BTC-USD"]["empty_connections"], 0);
+    EXPECT_EQ(r.json["products"]["ETH-USD"]["empty_connections"], 1);
+    EXPECT_EQ(r.json["products"]["ETH-USD"]["l2_events"], 0);
+    EXPECT_EQ(r.json["empty_connections"], 1); EXPECT_EQ(r.json["empty_connection_details"].size(), 1);
+    EXPECT_EQ(r.json["empty_connection_details"][0]["product"], "ETH-USD");
+}
+TEST_F(CaptureTest, EmptyConnectionsDetailsBoundedAndCountedOnce) {
+    Writer writer(config, metadata()); writer.append(record(Kind::CaptureStarted, 0, "{}", 0));
+    for (uint64_t id = 1; id <= 40; ++id) {
+        writer.append(record(Kind::TransportUp, id * 1000000000LL, "{}", id));
+        writer.append(record(Kind::TransportDown, id * 1000000000LL + 100, "{}", id));
+    }
+    writer.append(record(Kind::TransportUp, 41000000000LL, "{}", 41));
+    writer.append(frame(fixtures::coinbaseL2Snapshot("BTC-USD", {{100, 1}}, {{101, 1}}), 0, 42000000000LL, 41));
+    writer.append(record(Kind::CaptureStopped, 43000000000LL, "{}", 41)); writer.close();
+    const auto r = verify(config.root);
+    ASSERT_TRUE(r.ok) << r.json.dump(2);
+    EXPECT_EQ(r.json["empty_connections"], 40); EXPECT_EQ(r.json["missing_snapshot_connections"], 0);
+    EXPECT_EQ(r.json["empty_connection_details"].size(), 30);
+    EXPECT_EQ(r.json["totals"]["empty_connection_details"].size(), 30);
+    EXPECT_EQ(r.json["empty_connection_details"][29]["connection"], 30);
+    EXPECT_TRUE(r.json["details"].empty());
+}
+TEST_F(CaptureTest, EmptyConnectionsOpenPrefixUsesObservedDurationAndKeepsExitThree) {
+    {
+        Writer writer(config, metadata());
+        writer.append(record(Kind::CaptureStarted, 0, "{}", 0)); writer.append(record(Kind::TransportUp, 1));
+        writer.append(frame(fixtures::coinbaseL2Snapshot("BTC-USD", {{100, 1}}, {{101, 1}}), 0, 1000000000));
+        writer.append(record(Kind::TransportDown, 2000000000));
+        writer.append(record(Kind::TransportUp, 3000000000, "{}", 2));
+        writer.append(frame({{"channel", "heartbeats"}}, 0, 6000000000, 2)); writer.flush();
+    }
+    const auto r = verify(config.root);
+    ASSERT_TRUE(r.ok) << r.json.dump(2); EXPECT_EQ(r.exitCode(), 3);
+    EXPECT_EQ(r.json["empty_connections"], 1); EXPECT_EQ(r.json["missing_snapshot_connections"], 0);
+    ASSERT_EQ(r.json["empty_connection_details"].size(), 1);
+    EXPECT_EQ(r.json["empty_connection_details"][0]["connection"], 2);
+    EXPECT_DOUBLE_EQ(r.json["empty_connection_details"][0]["duration_seconds"].get<double>(), 3.0);
 }
 TEST_F(CaptureTest, MultiSnapshotAnchorsAreIndependentOnEveryConnection) {
     for (const auto mode : {0, 1, 2}) {
@@ -1180,3 +1266,430 @@ TEST(DecimalGrid, ExactAtomsWithoutFloatingPointOrSilentRounding) {
     EXPECT_THROW(DecimalGrid("0.0000000000000000001"), std::runtime_error);
 }
 } // namespace
+
+namespace {
+nlohmann::json tradeEvent(const char* type, const char* product, std::initializer_list<uint64_t> ids) {
+    nlohmann::json trades = nlohmann::json::array();
+    for (const auto id : ids) trades.push_back({{"product_id", product}, {"trade_id", std::to_string(id)},
+        {"size", id % 2 ? "0.25" : "0.50"}, {"price", "100.00"}, {"side", id % 2 ? "BUY" : "SELL"},
+        {"time", id % 2 ? "2026-09-29T00:00:00.1Z" : "2026-09-29T00:00:00.09Z"}});
+    return {{"type", type}, {"trades", trades}};
+}
+struct TradeFixture {
+    std::vector<Record> records{record(Kind::CaptureStarted, 0, "{}", 0)};
+    uint64_t sequence = 0, connection = 0;
+    void append(Kind kind, std::string payload = "{}") {
+        records.push_back(record(kind, records.size() * 100, std::move(payload), connection));
+    }
+    void json(nlohmann::json value) {
+        value["sequence_num"] = sequence++;
+        append(Kind::Frame, value.dump());
+    }
+    void up(bool multi = false) {
+        if (connection) append(Kind::TransportDown);
+        ++connection; sequence = 0; append(Kind::TransportUp);
+        json(fixtures::coinbaseL2Snapshot("BTC-USD", {{100, 1}}, {{101, 1}}));
+        if (multi) json(fixtures::coinbaseL2Snapshot("ETH-USD", {{10, 1}}, {{11, 1}}));
+    }
+    void trades(std::initializer_list<nlohmann::json> events) {
+        json({{"channel", "market_trades"}, {"events", events}});
+    }
+    VerificationReport verifyAt(const WriterConfig& config, bool multi = false) {
+        append(Kind::CaptureStopped);
+        if (multi) writeMulti(config, records);
+        else {
+            Writer writer(config, metadata());
+            for (const auto& value : records) writer.append(value);
+            writer.close();
+        }
+        return verify(config.root);
+    }
+};
+}
+TEST_F(CaptureTest, TradeContiguousDescendingUpdatesAndAggressorTotalsV1) {
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("snapshot", "BTC-USD", {101, 100})});
+    f.trades({tradeEvent("update", "BTC-USD", {104, 103, 102})});
+    f.trades({tradeEvent("update", "BTC-USD", {105})});
+    const auto r = f.verifyAt(config);
+    ASSERT_TRUE(r.ok) << r.json.dump(2);
+    EXPECT_EQ(r.json["trades"], 6);
+    EXPECT_EQ(r.json["upstream_trade_gaps"], 0);
+    EXPECT_EQ(r.json["reconnect_trade_gaps"], 0);
+    EXPECT_EQ(r.json["duplicate_trades"], 0);
+    EXPECT_EQ(r.json["buy_trades"], 3); EXPECT_EQ(r.json["sell_trades"], 3);
+    EXPECT_EQ(r.json["buy_volume"], "1.5"); EXPECT_EQ(r.json["sell_volume"], "0.75");
+    EXPECT_EQ(r.json["first_trade_time"], "2026-09-29T00:00:00.090000000Z");
+    EXPECT_EQ(r.json["last_trade_time"], "2026-09-29T00:00:00.100000000Z");
+    EXPECT_EQ(readHeader(paths(config.root).front())["format_version"], 1);
+}
+TEST_F(CaptureTest, TradeWithinConnectionGapDoesNotFailIntegrity) {
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("snapshot", "BTC-USD", {100})});
+    f.trades({tradeEvent("update", "BTC-USD", {103, 102})});
+    f.trades({tradeEvent("update", "BTC-USD", {106})});
+    const auto r = f.verifyAt(config);
+    ASSERT_TRUE(r.ok) << r.json.dump(2); EXPECT_TRUE(r.json["ok_closed_runs"]);
+    EXPECT_FALSE(r.json["trade_tape_complete"]);
+    EXPECT_EQ(r.exitCode(), 0); EXPECT_EQ(r.exitCode(true), 2);
+    EXPECT_TRUE(r.json["details"].empty()); EXPECT_EQ(r.json["errors"], 0);
+    EXPECT_EQ(r.json["upstream_trade_gaps"], 2);
+    EXPECT_EQ(r.json["upstream_missing_trades"], 3);
+    EXPECT_EQ(r.json["reconnect_trade_gaps"], 0);
+    const auto& detail = r.json["upstream_trade_gap_details"][0];
+    EXPECT_EQ(detail["product"], "BTC-USD"); EXPECT_EQ(detail["connection"], 1);
+    EXPECT_EQ(detail["first_id"], "101"); EXPECT_EQ(detail["count"], 1);
+    EXPECT_EQ(detail["approx_time"], "2026-09-29T00:00:00.090000000Z");
+}
+TEST_F(CaptureTest, TradeSnapshotOverlapAndUpdateDuplicatesCountOnce) {
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("snapshot", "BTC-USD", {101, 100})});
+    f.trades({tradeEvent("update", "BTC-USD", {102})});
+    f.up();
+    f.trades({tradeEvent("snapshot", "BTC-USD", {103, 102, 101, 100, 99})});
+    f.trades({tradeEvent("update", "BTC-USD", {104, 103, 103})});
+    const auto r = f.verifyAt(config);
+    ASSERT_TRUE(r.ok) << r.json.dump(2);
+    EXPECT_EQ(r.json["trades"], 6); EXPECT_EQ(r.json["duplicate_trades"], 5);
+    EXPECT_EQ(r.json["buy_volume"], "1.5"); EXPECT_EQ(r.json["sell_volume"], "0.75");
+    EXPECT_EQ(r.json["upstream_trade_gaps"], 0); EXPECT_EQ(r.json["reconnect_trade_gaps"], 0);
+}
+TEST_F(CaptureTest, TradeReconnectMissingCountIsNotCorruption) {
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("update", "BTC-USD", {100})});
+    f.up();
+    f.trades({tradeEvent("snapshot", "BTC-USD", {106, 105})});
+    f.trades({tradeEvent("update", "BTC-USD", {107})});
+    f.up();
+    f.trades({tradeEvent("update", "BTC-USD", {110})});
+    const auto r = f.verifyAt(config);
+    ASSERT_TRUE(r.ok) << r.json.dump(2);
+    EXPECT_EQ(r.json["trades"], 5); EXPECT_EQ(r.json["reconnect_trade_gaps"], 2);
+    EXPECT_EQ(r.json["reconnect_missing_trades"], 6);
+    EXPECT_EQ(r.json["upstream_trade_gaps"], 0);
+    EXPECT_EQ(r.json["reconnect_trade_gap_details"][0]["first_id"], "101");
+    EXPECT_EQ(r.json["reconnect_trade_gap_details"][0]["count"], 4);
+    EXPECT_EQ(r.json["reconnect_trade_gap_details"][0]["connection"], 2);
+}
+TEST_F(CaptureTest, TradeMultiProductIsolationV2MixedEnvelopeAndGap) {
+    TradeFixture f; f.up(true);
+    f.trades({tradeEvent("snapshot", "BTC-USD", {101, 100}), tradeEvent("snapshot", "ETH-USD", {501, 500})});
+    f.trades({tradeEvent("update", "BTC-USD", {102}), tradeEvent("update", "ETH-USD", {503})});
+    const auto r = f.verifyAt(config, true);
+    ASSERT_TRUE(r.ok);
+    EXPECT_FALSE(r.json["trade_tape_complete"]);
+    const auto& btc = r.json["products"]["BTC-USD"];
+    const auto& eth = r.json["products"]["ETH-USD"];
+    EXPECT_EQ(btc["ok"], true); EXPECT_EQ(btc["trades"], 3); EXPECT_EQ(btc["upstream_trade_gaps"], 0);
+    EXPECT_EQ(eth["ok"], true); EXPECT_EQ(eth["trade_tape_complete"], false); EXPECT_EQ(eth["trades"], 3); EXPECT_EQ(eth["upstream_trade_gaps"], 1);
+    EXPECT_EQ(eth["upstream_trade_gap_details"][0]["first_id"], "502");
+    EXPECT_EQ(r.json["totals"]["trades"], 6);
+    EXPECT_EQ(btc["buy_volume"], "1"); EXPECT_EQ(eth["sell_volume"], "0.5");
+    EXPECT_EQ(readHeader(paths(config.root).front())["format_version"], 2);
+}
+TEST_F(CaptureTest, TradeSnapshotHolesAreSeparateAndPreviouslyMissingIdIsNotDuplicate) {
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("snapshot", "BTC-USD", {102, 100})});
+    f.up();
+    f.trades({tradeEvent("snapshot", "BTC-USD", {102, 101, 100})});
+    f.trades({tradeEvent("update", "BTC-USD", {103})});
+    const auto r = f.verifyAt(config);
+    ASSERT_TRUE(r.ok) << r.json.dump(2);
+    EXPECT_EQ(r.json["trades"], 4); EXPECT_EQ(r.json["duplicate_trades"], 2);
+    EXPECT_EQ(r.json["snapshot_trade_gaps"], 0); EXPECT_EQ(r.json["snapshot_missing_trades"], 0);
+    EXPECT_EQ(r.json["filled_later"], 1); EXPECT_EQ(r.json["trade_tape_complete"], true);
+    EXPECT_EQ(r.json["upstream_trade_gaps"], 0);
+}
+TEST_F(CaptureTest, TradeMalformedScalarsFailRatherThanSilentlySkipping) {
+    for (const auto* key : {"trade_id", "time", "size", "side", "product_id"}) {
+        QTemporaryDir temp; auto cfg = config; cfg.root = temp.path();
+        TradeFixture f; f.up();
+        auto event = tradeEvent("update", "BTC-USD", {100});
+        event["trades"][0][key] = "invalid";
+        f.trades({event});
+        const auto r = f.verifyAt(cfg);
+        EXPECT_FALSE(r.ok) << key << r.json.dump(2);
+        EXPECT_EQ(r.json["trades"], 0);
+    }
+}
+TEST_F(CaptureTest, TradeV2ReconnectOverlapRemainsContiguousAfterDuplicateOnlyUpdate) {
+    TradeFixture f; f.up(true);
+    f.trades({tradeEvent("snapshot", "BTC-USD", {100, 99}), tradeEvent("snapshot", "ETH-USD", {9007199254740993ULL})});
+    f.trades({tradeEvent("update", "BTC-USD", {103, 102, 101}), tradeEvent("update", "ETH-USD", {9007199254740994ULL})});
+    f.up(true);
+    f.trades({tradeEvent("snapshot", "BTC-USD", {100, 99}), tradeEvent("snapshot", "ETH-USD", {9007199254740994ULL})});
+    f.trades({tradeEvent("update", "BTC-USD", {101})});
+    f.trades({tradeEvent("update", "BTC-USD", {105, 104}), tradeEvent("update", "ETH-USD", {9007199254740995ULL})});
+    const auto r = f.verifyAt(config, true);
+    ASSERT_TRUE(r.ok) << r.json.dump(2);
+    EXPECT_EQ(r.json["totals"]["trades"], 10);
+    EXPECT_EQ(r.json["products"]["BTC-USD"]["duplicate_trades"], 3);
+    EXPECT_EQ(r.json["products"]["ETH-USD"]["duplicate_trades"], 1);
+    EXPECT_EQ(r.json["totals"]["upstream_trade_gaps"], 0);
+    EXPECT_EQ(r.json["totals"]["reconnect_trade_gaps"], 0);
+}
+TEST_F(CaptureTest, TradeContinuitySurvivesHourlySegmentsAndProcessRuns) {
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("snapshot", "BTC-USD", {100})});
+    f.trades({tradeEvent("update", "BTC-USD", {101})});
+    f.records.back().time.systemNs += Hour;
+    f.records.back().time.steadyNs += Hour;
+    f.append(Kind::CaptureStopped);
+    f.records.back().time.systemNs += Hour;
+    f.records.back().time.steadyNs += Hour;
+    {
+        Writer writer(config, metadata());
+        for (const auto& value : f.records) writer.append(value);
+        writer.close();
+    }
+    TradeFixture next; next.up();
+    next.trades({tradeEvent("snapshot", "BTC-USD", {105, 104})});
+    next.trades({tradeEvent("update", "BTC-USD", {106})});
+    const auto r = next.verifyAt(config);
+    ASSERT_TRUE(r.ok) << r.json.dump(2);
+    EXPECT_EQ(r.json["files"], 3); EXPECT_EQ(r.json["runs"], 2);
+    EXPECT_EQ(r.json["trades"], 5); EXPECT_EQ(r.json["upstream_trade_gaps"], 0);
+    EXPECT_EQ(r.json["reconnect_trade_gaps"], 1); EXPECT_EQ(r.json["reconnect_missing_trades"], 2);
+}
+TEST_F(CaptureTest, TradeIdOverflowFails) {
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("update", "BTC-USD", {100})});
+    auto event = tradeEvent("update", "BTC-USD", {101});
+    event["trades"][0]["trade_id"] = "18446744073709551616";
+    f.trades({event});
+    const auto r = f.verifyAt(config);
+    EXPECT_FALSE(r.ok); EXPECT_EQ(r.json["trades"], 1);
+}
+TEST_F(CaptureTest, TradeMidConnectionSnapshotBridgesNewIdsAndOldSparseUpdateIsDuplicate) {
+    // Real Coinbase pattern: update 100, recent snapshot 102..99, sparse old
+    // update 100/99, then fresh update 103. No transport-up between them.
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("update", "BTC-USD", {100, 99})});
+    f.trades({tradeEvent("snapshot", "BTC-USD", {102, 101, 100, 99})});
+    f.trades({tradeEvent("update", "BTC-USD", {100, 99})});
+    f.trades({tradeEvent("update", "BTC-USD", {103})});
+    const auto r = f.verifyAt(config);
+    ASSERT_TRUE(r.ok) << r.json.dump(2);
+    EXPECT_EQ(r.json["trades"], 5); EXPECT_EQ(r.json["duplicate_trades"], 4);
+    EXPECT_EQ(r.json["trade_resnapshots"], 1); EXPECT_EQ(r.json["upstream_trade_gaps"], 0);
+}
+TEST_F(CaptureTest, TradeMidConnectionSnapshotCannotHideMissingIds) {
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("update", "BTC-USD", {100})});
+    f.trades({tradeEvent("snapshot", "BTC-USD", {104, 103})});
+    f.trades({tradeEvent("update", "BTC-USD", {105})});
+    const auto r = f.verifyAt(config);
+    EXPECT_TRUE(r.ok); EXPECT_FALSE(r.json["trade_tape_complete"]);
+    EXPECT_EQ(r.json["upstream_trade_gaps"], 1);
+    EXPECT_EQ(r.json["upstream_missing_trades"], 2);
+    EXPECT_EQ(r.json["reconnect_trade_gaps"], 0);
+}
+TEST_F(CaptureTest, TradeForeignSnapshotInMixedEnvelopeDoesNotResetOrRejectActiveProduct) {
+    TradeFixture f; f.up(true);
+    f.trades({tradeEvent("update", "BTC-USD", {100})});
+    f.trades({tradeEvent("update", "BTC-USD", {101}), tradeEvent("snapshot", "ETH-USD", {501, 500})});
+    f.trades({tradeEvent("update", "BTC-USD", {102}), tradeEvent("update", "ETH-USD", {502})});
+    const auto r = f.verifyAt(config, true);
+    ASSERT_TRUE(r.ok) << r.json.dump(2);
+    EXPECT_EQ(r.json["products"]["BTC-USD"]["trades"], 3);
+    EXPECT_EQ(r.json["products"]["ETH-USD"]["trades"], 3);
+    EXPECT_EQ(r.json["products"]["BTC-USD"]["trade_snapshots"], 0);
+    EXPECT_EQ(r.json["products"]["ETH-USD"]["trade_snapshots"], 1);
+    EXPECT_EQ(r.json["totals"]["upstream_trade_gaps"], 0);
+}
+
+TEST(TradeWindow, BridgeTwoIntervalsAndUint64Max) {
+    TradeIdWindow ids;
+    EXPECT_TRUE(ids.observe(10)); EXPECT_TRUE(ids.observe(12));
+    ASSERT_EQ(ids.retainedIntervals(), 2);
+    EXPECT_TRUE(ids.observe(11)); EXPECT_EQ(ids.retainedIntervals(), 1);
+    EXPECT_FALSE(ids.observe(10)); EXPECT_FALSE(ids.observe(11)); EXPECT_FALSE(ids.observe(12));
+    EXPECT_TRUE(ids.observe(UINT64_MAX - 2)); EXPECT_TRUE(ids.observe(UINT64_MAX));
+    EXPECT_EQ(ids.retainedIntervals(), 2);
+    EXPECT_TRUE(ids.observe(UINT64_MAX - 1)); EXPECT_EQ(ids.retainedIntervals(), 1);
+    EXPECT_FALSE(ids.observe(UINT64_MAX)); EXPECT_EQ(ids.high(), UINT64_MAX);
+}
+TEST(TradeWindow, ManyHolesOverLongSpanEvictWithoutFailure) {
+    TradeIdWindow ids;
+    for (uint64_t i = 0; i < 150000; ++i) ASSERT_TRUE(ids.observe(i * 200));
+    EXPECT_GT(ids.evictions(), 90000);
+    EXPECT_LE(ids.retainedIntervals(), 50001);
+    EXPECT_LE(ids.peakIntervals(), 50002);
+    EXPECT_TRUE(ids.observe(0)); EXPECT_EQ(ids.outOfWindow(), 1);
+    EXPECT_LE(ids.retainedIntervals(), 50001);
+}
+TEST_F(CaptureTest, TradeSnapshotJumpAndCrossFrameReorderingFillCandidatesLate) {
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("update", "BTC-USD", {100})});
+    f.trades({tradeEvent("snapshot", "BTC-USD", {105, 104})});
+    f.trades({tradeEvent("update", "BTC-USD", {103, 101})});
+    f.trades({tradeEvent("update", "BTC-USD", {102})});
+    f.trades({tradeEvent("update", "BTC-USD", {108})});
+    f.trades({tradeEvent("update", "BTC-USD", {107, 106})});
+    const auto r = f.verifyAt(config);
+    ASSERT_TRUE(r.ok) << r.json.dump(2);
+    EXPECT_TRUE(r.json["trade_tape_complete"]); EXPECT_EQ(r.exitCode(true), 0);
+    EXPECT_EQ(r.json["trade_gap_candidates"], 2); EXPECT_EQ(r.json["filled_later"], 5);
+    EXPECT_EQ(r.json["still_missing"], 0); EXPECT_EQ(r.json["upstream_trade_gaps"], 0);
+    EXPECT_TRUE(r.json["missing_trade_ranges"].empty()); EXPECT_EQ(r.json["trades"], 9);
+}
+TEST_F(CaptureTest, TradePartialLateFillSplitsExactBackfillRangesAcrossReconnect) {
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("update", "BTC-USD", {100, 99})});
+    f.trades({tradeEvent("update", "BTC-USD", {105})});
+    f.up();
+    f.trades({tradeEvent("snapshot", "BTC-USD", {105, 102, 100, 99})});
+    const auto r = f.verifyAt(config);
+    ASSERT_TRUE(r.ok) << r.json.dump(2);
+    EXPECT_EQ(r.json["filled_later"], 1); EXPECT_EQ(r.json["still_missing"], 3);
+    EXPECT_EQ(r.json["upstream_trade_gaps"], 1); EXPECT_EQ(r.json["reconnect_trade_gaps"], 0);
+    const auto& ranges = r.json["missing_trade_ranges"];
+    ASSERT_EQ(ranges.size(), 2);
+    EXPECT_EQ(ranges[0]["product"], "BTC-USD"); EXPECT_EQ(ranges[0]["first_id"], "101");
+    EXPECT_EQ(ranges[0]["last_id"], "101"); EXPECT_EQ(ranges[1]["first_id"], "103");
+    EXPECT_EQ(ranges[1]["last_id"], "104"); EXPECT_TRUE(ranges[0].contains("approx_time"));
+}
+TEST_F(CaptureTest, TradeReconnectOldHistoryScopeIsExplicit) {
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("update", "BTC-USD", {100})});
+    f.up();
+    // No coverage before the original 100 anchor; this sparse old history must
+    // not claim to prove 91..98 were captured or manufacture a forward gap.
+    f.trades({tradeEvent("snapshot", "BTC-USD", {100, 99, 90})});
+    f.trades({tradeEvent("update", "BTC-USD", {101})});
+    const auto r = f.verifyAt(config);
+    ASSERT_TRUE(r.ok) << r.json.dump(2);
+    EXPECT_EQ(r.json["reconnect_overlap_check"],
+        "previously detected candidates only; no new holes inferred at or below previous connection high");
+    EXPECT_EQ(r.json["still_missing"], 0); EXPECT_EQ(r.json["duplicate_trades"], 1);
+}
+TEST_F(CaptureTest, TradeVeryLateFillSurvivesDedupWindowEviction) {
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("update", "BTC-USD", {100, 102})});
+    f.trades({tradeEvent("update", "BTC-USD", {TradeIdWindow::Window + 200})});
+    f.trades({tradeEvent("update", "BTC-USD", {101})});
+    const auto r = f.verifyAt(config);
+    ASSERT_TRUE(r.ok) << r.json.dump(2);
+    EXPECT_GT(r.json["dedup_window_evictions"].get<uint64_t>(), 0);
+    EXPECT_EQ(r.json["filled_later"], 1);
+    const auto& ranges = r.json["missing_trade_ranges"];
+    ASSERT_EQ(ranges.size(), 1); EXPECT_EQ(ranges[0]["first_id"], "103");
+    EXPECT_EQ(ranges[0]["last_id"], std::to_string(TradeIdWindow::Window + 199));
+}
+TEST_F(CaptureTest, TradeGapWithSameConnectionCaptureDamageRemainsIntegrityFailure) {
+    for (const auto damage : {"sequence", "explicit", "tail"}) {
+        QTemporaryDir temp; auto cfg = config; cfg.root = temp.path();
+        TradeFixture f; f.up();
+        f.trades({tradeEvent("update", "BTC-USD", {100})});
+        f.trades({tradeEvent("update", "BTC-USD", {102})});
+        // Damage arrives AFTER the candidate, exercising deferred classification.
+        if (std::string(damage) == "sequence") {
+            ++f.sequence; f.json({{"channel", "heartbeats"}});
+        }
+        f.append(Kind::CaptureStopped, std::string(damage) == "explicit" ? R"({"gap":true})" : "{}");
+        {
+            Writer writer(cfg, metadata());
+            for (const auto& value : f.records) writer.append(value);
+            writer.close();
+        }
+        if (std::string(damage) == "tail") {
+            QFile file(paths(cfg.root).front()); ASSERT_TRUE(file.open(QIODevice::ReadWrite));
+            ASSERT_TRUE(file.resize(file.size() - 1)); file.close();
+        }
+        const auto r = verify(cfg.root);
+        EXPECT_FALSE(r.ok) << damage; EXPECT_FALSE(r.json["ok_closed_runs"]) << damage;
+        EXPECT_EQ(r.json["integrity_trade_gaps"], 1) << damage << r.json.dump(2);
+        EXPECT_EQ(r.json["integrity_missing_trades"], 1); EXPECT_EQ(r.json["upstream_trade_gaps"], 0);
+        EXPECT_EQ(r.json["missing_trade_ranges"][0]["category"], "integrity");
+        EXPECT_GT(r.json["errors"].get<uint64_t>(), 0);
+    }
+}
+TEST_F(CaptureTest, TradeOpenTailBecomesCaptureDamageWhenSuperseded) {
+    TradeFixture f; f.up(); f.trades({tradeEvent("update", "BTC-USD", {100, 102})});
+    {
+        Writer old(config, metadata());
+        for (const auto& value : f.records) old.append(value);
+        old.flush(); // No stop/index: a legitimate live prefix until superseded.
+    }
+    const auto live = verify(config.root);
+    ASSERT_TRUE(live.ok); EXPECT_EQ(live.json["upstream_trade_gaps"], 1);
+    EXPECT_EQ(live.json["integrity_trade_gaps"], 0); EXPECT_EQ(live.exitCode(), 3);
+    TradeFixture next; next.up(); next.trades({tradeEvent("update", "BTC-USD", {103})});
+    const auto r = next.verifyAt(config);
+    EXPECT_FALSE(r.ok); EXPECT_EQ(r.json["interrupted_runs"], 1);
+    EXPECT_EQ(r.json["integrity_trade_gaps"], 1); EXPECT_EQ(r.json["upstream_trade_gaps"], 0);
+}
+TEST_F(CaptureTest, TradeDamageInAnotherConnectionDoesNotReclassifyUpstreamGap) {
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("update", "BTC-USD", {100})});
+    f.trades({tradeEvent("update", "BTC-USD", {102})});
+    f.up(); ++f.sequence; f.json({{"channel", "heartbeats"}});
+    const auto r = f.verifyAt(config);
+    EXPECT_FALSE(r.ok); EXPECT_EQ(r.json["upstream_trade_gaps"], 1);
+    EXPECT_EQ(r.json["integrity_trade_gaps"], 0);
+}
+TEST_F(CaptureTest, TradeUpstreamDetailsAreBoundedAndSeparateFromIntegrityDetails) {
+    TradeFixture f; f.up();
+    for (uint64_t id = 100; id <= 180; id += 2) f.trades({tradeEvent("update", "BTC-USD", {id})});
+    const auto r = f.verifyAt(config);
+    ASSERT_TRUE(r.ok); EXPECT_TRUE(r.json["ok_closed_runs"]);
+    EXPECT_EQ(r.json["upstream_trade_gaps"], 40); EXPECT_EQ(r.json["still_missing"], 40);
+    EXPECT_EQ(r.json["upstream_trade_gap_details"].size(), 30);
+    EXPECT_EQ(r.json["missing_trade_ranges"].size(), 40);
+    EXPECT_TRUE(r.json["details"].empty()); EXPECT_EQ(r.json["errors"], 0);
+}
+TEST_F(CaptureTest, TradeFineDecimalSizesAndEighteenPlaceSumsAtMaxId) {
+    TradeFixture f; f.up();
+    auto event = tradeEvent("update", "BTC-USD", {UINT64_MAX, UINT64_MAX - 1, UINT64_MAX - 2});
+    event["trades"][0]["size"] = "0.000000000000000001";
+    event["trades"][1]["size"] = "0.123456789012345678";
+    event["trades"][2]["size"] = "0.000000000000000009";
+    for (auto& t : event["trades"]) t["side"] = "SELL";
+    f.trades({event}); f.trades({event});
+    const auto r = f.verifyAt(config);
+    ASSERT_TRUE(r.ok) << r.json.dump(2);
+    EXPECT_EQ(r.json["buy_volume"], "0.123456789012345688"); EXPECT_EQ(r.json["sell_volume"], "0");
+    EXPECT_EQ(r.json["trades"], 3); EXPECT_EQ(r.json["duplicate_trades"], 3);
+    EXPECT_TRUE(r.json["trade_tape_complete"]);
+}
+TEST_F(CaptureTest, TradePlainDecimalGrammarRejectsZeroSignExponentAndEmptyParts) {
+    for (const auto* size : {"0", "-1", "+1", "1e-8", ".1", "1.", "1.2.3"}) {
+        QTemporaryDir temp; auto cfg = config; cfg.root = temp.path();
+        TradeFixture f; f.up(); auto event = tradeEvent("update", "BTC-USD", {100});
+        event["trades"][0]["size"] = size; f.trades({event});
+        EXPECT_FALSE(f.verifyAt(cfg).ok) << size;
+    }
+}
+TEST_F(CaptureTest, TradeStrictCliChangesExitOnlyAndDefaultOpenStatusSurvives) {
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("update", "BTC-USD", {100})});
+    f.trades({tradeEvent("update", "BTC-USD", {102})});
+    ASSERT_TRUE(f.verifyAt(config).ok);
+    for (const bool strict : {false, true}) {
+        QProcess child; QStringList args{"--verify", config.root};
+        auto env = QProcessEnvironment::systemEnvironment(); env.insert("SENTINEL_LOG_DIR", config.root + "/logs");
+        child.setProcessEnvironment(env);
+        if (strict) args << "--strict-trades";
+        child.start(CAPTURE_APP_FIXTURE, args);
+        ASSERT_TRUE(child.waitForFinished(5000)); EXPECT_EQ(child.exitCode(), strict ? 2 : 0);
+        const auto report = nlohmann::json::parse(child.readAllStandardOutput().toStdString());
+        EXPECT_EQ(report["ok"], true); EXPECT_EQ(report["ok_closed_runs"], true);
+        EXPECT_EQ(report["trade_tape_complete"], false);
+    }
+    auto r = verify(config.root); r.json["complete"] = false;
+    EXPECT_EQ(r.exitCode(), 3); EXPECT_EQ(r.exitCode(true), 2);
+}
+TEST_F(CaptureTest, V1EnvelopeMissingChannelAndMalformedJsonKeepLegacyCounters) {
+    for (const bool malformed : {false, true}) {
+        QTemporaryDir temp; auto cfg = config; cfg.root = temp.path();
+        TradeFixture f; f.up();
+        if (malformed) f.append(Kind::Frame, R"({"channel":"heartbeats","sequence_num":1,)");
+        else f.json({{"events", nlohmann::json::array()}});
+        const auto r = f.verifyAt(cfg);
+        EXPECT_EQ(r.json["unsequenced_frames"], 0);
+        EXPECT_EQ(r.json["sequence_gaps"], 0);
+        EXPECT_EQ(r.json["channels"][malformed ? "<invalid-envelope>" : "<unclassified>"]["frames"], 1);
+        EXPECT_EQ(r.ok, !malformed);
+        EXPECT_EQ(r.json["errors"], malformed ? 1 : 0);
+    }
+}

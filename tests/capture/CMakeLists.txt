@@ -23,3 +23,6 @@ target_link_libraries(test_capture_routing PRIVATE sentinel_core GTest::gtest_ma
 target_compile_definitions(test_capture_routing PRIVATE CAPTURE_ROUTING_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/routing_golden.json")
 add_test(NAME CaptureRoutingTests COMMAND test_capture_routing)
 set_tests_properties(CaptureRoutingTests PROPERTIES LABELS "capture" TIMEOUT 30)
+
+add_dependencies(test_raw_capture capture_app_fixture)
+target_compile_definitions(test_raw_capture PRIVATE CAPTURE_APP_FIXTURE="$<TARGET_FILE:capture_app_fixture>")
