@@ -106,7 +106,7 @@ void HeatmapGpuLayer::createController() {
         connect(query, &HeatmapCellQuery::queryFailed, this, [this](const QString &message) {
             ++labelCounters_.failures;
             sLog_Probe("heatmap.labels.failed", "message=" << message);
-            if (!labelRetry_->isActive()) labelRetry_->start(labelRetryMs_);
+            if (!labelRetry_->isActive()) labelRetry_->start(retry_.delayMs());
         }, Qt::QueuedConnection);
     }
     postedTickUnits_ = -1;
@@ -407,7 +407,7 @@ void HeatmapGpuLayer::resetLabels(bool newEpoch) {
     labelResultSeen_ = labelDropNoticed_ = false;
     postedLabels_ = {};
     notifiedLabels_.reset();
-    labelRetryMs_ = kLabelRetryMs;
+    retry_.succeeded();
     if (labelRetry_) labelRetry_->stop();
     if (newEpoch) {
         labelEpoch_ = labelSerial_ + 1;
@@ -432,7 +432,7 @@ void HeatmapGpuLayer::postLabels(const ViewWindow &view) {
     if (dropped) notifiedLabels_.reset(); // this frame draws none: the next result must redraw
     if (labelsPosted_ && labelResultSeen_ && !labelDropNoticed_ && dropped) {
         labelDropNoticed_ = true;
-        QMetaObject::invokeMethod(this, [this] { labelRetry_->start(labelRetryMs_); }, Qt::QueuedConnection);
+        QMetaObject::invokeMethod(this, [this] { labelRetry_->start(retry_.delayMs()); }, Qt::QueuedConnection);
     }
     const int64_t tf = tfMs_, tick = tickUnits_;
     if (snapshot_->tfMs != tf || snapshot_->symbol != symbol_ || tick <= 0 || tf < kMinuteMs) return;
@@ -484,7 +484,7 @@ void HeatmapGpuLayer::postLabels(const ViewWindow &view) {
     }, Qt::QueuedConnection);
     // A result that never comes (a cancelled or shed query publishes nothing): the
     // retry reposts with backoff. Armed on the GUI thread, once per post.
-    QMetaObject::invokeMethod(this, [this] { labelRetry_->start(labelRetryMs_); }, Qt::QueuedConnection);
+    QMetaObject::invokeMethod(this, [this] { labelRetry_->start(retry_.delayMs()); }, Qt::QueuedConnection);
 }
 
 std::shared_ptr<const LabelCells> HeatmapGpuLayer::labelsForFrame() const {
@@ -503,6 +503,35 @@ std::shared_ptr<const LabelCells> HeatmapGpuLayer::labelsForFrame() const {
     return labels;
 }
 
+size_t HeatmapGpuLayer::matchLabelColumns(const LabelCells &labels, std::vector<uint8_t> &out) const {
+    if (segmentScratch_.capacity() < 256) segmentScratch_.reserve(256);
+    tileStats_->copySegments(segmentScratch_);
+    return gpu::matchLabelColumns(labels, segmentScratch_, snapshot_.get(), live_.get(), out);
+}
+
+bool HeatmapGpuLayer::labelsPending() const {
+    if (!controller_ || !settings_.showLabels || !controller_->cellQuery()) return false;
+    const auto labels = controller_->cellQuery()->latestLabels();
+    return labels && labels->key.serial >= labelEpoch_ && labels->key.tfMs == tfMs_ &&
+           labels->key.tickUnits == tickUnits_ && !labelsForFrame();
+}
+
+uint64_t HeatmapGpuLayer::labelSignature() const {
+    const auto labels = labelsForFrame();
+    if (!labels) return 0;
+    if (signatureColumns_.capacity() < kMaxLabelCells) signatureColumns_.reserve(kMaxLabelCells);
+    const size_t matched = matchLabelColumns(*labels, signatureColumns_);
+    return labelSignature(labels.get(), signatureColumns_, matched);
+}
+
+uint64_t HeatmapGpuLayer::labelSignature(const LabelCells *labels, const std::vector<uint8_t> &columns, size_t matched) {
+    if (!labels) return 0;
+    uint64_t h = uint64_t(reinterpret_cast<uintptr_t>(labels)) * 1099511628211ull ^ labels->key.serial;
+    for (size_t i = 0; i < columns.size(); ++i)
+        if (columns[i]) h = h * 1099511628211ull + i;
+    return (h ^ matched) | 1; // nonzero for a drawable result
+}
+
 void HeatmapGpuLayer::onLabels() {
     if (!controller_ || !controller_->cellQuery()) return;
     const auto labels = controller_->cellQuery()->latestLabels();
@@ -510,7 +539,7 @@ void HeatmapGpuLayer::onLabels() {
     ++labelCounters_.results;
     if (labelsPosted_ && labels->key.serial == postedLabels_.serial) {
         labelRetry_->stop();
-        labelRetryMs_ = kLabelRetryMs;
+        retry_.succeeded();
         labelResultSeen_ = true;
         labelDropNoticed_ = false;
     }
@@ -537,7 +566,9 @@ void HeatmapGpuLayer::onLabels() {
     // A republished picture with the same cells (an upload acknowledgement bumps
     // the SpanSet version) changes nothing on screen: no frame for it.
     const auto sameCells = [](const LabelCells &a, const LabelCells &b) {
-        if (!(a.grid == b.grid) || a.cells.size() != b.cells.size()) return false;
+        if (!(a.grid == b.grid) || a.cells.size() != b.cells.size() || a.key.liveVersion != b.key.liveVersion ||
+            a.spanContent != b.spanContent || a.liveColumns != b.liveColumns)
+            return false;
         for (size_t i = 0; i < a.cells.size(); ++i)
             if (a.cells[i].word != b.cells[i].word || a.cells[i].value != b.cells[i].value) return false;
         return true;
@@ -554,10 +585,10 @@ void HeatmapGpuLayer::onLabelRetry() {
     const auto labels = controller_->cellQuery()->latestLabels();
     if (labels && labels->key.serial >= postedLabels_.serial) return;
     ++labelCounters_.retries;
-    sLog_Probe("heatmap.labels.retry", "serial=" << postedLabels_.serial << " nextMs=" << labelRetryMs_ * 2);
+    retry_.failed();
+    sLog_Probe("heatmap.labels.retry", "serial=" << postedLabels_.serial << " nextMs=" << retry_.delayMs());
     labelsPosted_ = false;
     labelResultSeen_ = labelDropNoticed_ = false;
-    labelRetryMs_ = std::min(labelRetryMs_ * 2, kMaxLabelRetryMs);
     emit labelsChanged(); // a frame, which posts again
 }
 

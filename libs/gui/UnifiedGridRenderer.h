@@ -188,6 +188,9 @@ private:
     std::vector<ChartGlyphInstance> m_heatmapLabelGlyphs;
     heatmap::gpu::HeatmapLabelLayout m_gpuLabels; // S7b: render thread (updatePaintNode)
     uint64_t m_gpuLabelSerial = 0;
+    std::vector<uint8_t> m_gpuLabelColumns;          // render thread: matched label columns (reused)
+    std::atomic<uint64_t> m_gpuLabelSignature{0};    // what the last frame's labels drew
+    std::atomic<bool> m_gpuLabelsIncomplete{false};  // ...while some were held back (transition)
     int m_labelRingGridWidth = 0;
     int m_labelRingGridHeight = 0;
     std::vector<uint16_t> m_labelLiquidityRing;
@@ -474,6 +477,8 @@ signals:
     void primaryFieldChanged();
     void layerVisibilityChanged();
     void tpoConfigChanged();
+    // TPO layout or theme changed (look only: no history request, unlike tpoConfigChanged).
+    void tpoStyleChanged();
     void viewportChanged();
     void timeframeChanged();
     void panVisualOffsetChanged();

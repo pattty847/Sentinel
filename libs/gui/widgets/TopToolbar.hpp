@@ -57,8 +57,8 @@ public:
     // The toolbar adapts to the chart's active layers (owner request 2026-10-02).
     // controlVisibility() is the ONE place the rules live:
     // - heatmap-only (tick selector, palette, liquidity labels and range): the
-    //   heatmap layer is on; the range slider in gpu mode, the legacy threshold
-    //   slider in legacy mode;
+    //   heatmap layer is on; the range slider and the Labels toggle in gpu mode,
+    //   the legacy threshold slider in legacy mode (the currency combo in both);
     // - candle style: candles are on;
     // - TPO session: TPO or volume profile is on (the profile follows the TPO
     //   session); TPO layout: TPO is on.
@@ -69,6 +69,7 @@ public:
     struct ControlVisibility {
         bool tickSelector = false, palette = false, liquidity = false, rangeSlider = false, thresholdSlider = false;
         bool candleStyle = false, tpoSession = false, tpoLayout = false;
+        bool labelsToggle = false; // gpu heatmap only (legacy draws its own labels, always)
         bool operator==(const ControlVisibility &) const = default;
     };
     static ControlVisibility controlVisibility(const ModeState &mode);

@@ -204,7 +204,7 @@ void HeatmapGradientEditor::paintEvent(QPaintEvent *event) {
 // ------------------------------------------------------------------- dialog
 HeatmapSettingsDialog::HeatmapSettingsDialog(heatmap::HeatmapSettingsModel *model, UnifiedGridRenderer *renderer,
                                              QWidget *parent)
-    : QDialog(parent), m_model(model), m_renderer(renderer) {
+    : QDialog(parent), m_model(model) {
     setObjectName("heatmapSettingsDialog");
     setWindowTitle("Chart Settings");
     setModal(false);
@@ -218,11 +218,27 @@ HeatmapSettingsDialog::HeatmapSettingsDialog(heatmap::HeatmapSettingsModel *mode
             m_savedRenderer->setText(QString::fromStdString(m_model->savedRenderer()));
         });
     refreshFromModel();
-    refreshFromRenderer();
+    setRenderer(renderer); // binds its signals and refreshes the renderer-backed controls
 }
 
 void HeatmapSettingsDialog::setRenderer(UnifiedGridRenderer *renderer) {
+    if (m_renderer) disconnect(m_renderer, nullptr, this, nullptr); // reopening rebinds: no duplicates
     m_renderer = renderer;
+    if (renderer) {
+        // Renderer-backed controls follow changes made elsewhere (toolbar, chart
+        // menu, Agent API) without echoing them back.
+        connect(renderer, &UnifiedGridRenderer::candleStyleChanged, this, [this] {
+            if (!m_renderer) return;
+            const QSignalBlocker block(m_candleStyle);
+            m_candleStyle->setCurrentIndex(std::clamp(m_renderer->candleStyle(), 0, 2));
+        });
+        connect(renderer, &UnifiedGridRenderer::tpoStyleChanged, this, [this] {
+            if (!m_renderer) return;
+            const QSignalBlocker a(m_tpoLayoutCombo), b(m_tpoThemeCombo);
+            m_tpoLayoutCombo->setCurrentIndex(std::max(0, m_tpoLayoutCombo->findData(m_renderer->tpoLayout())));
+            m_tpoThemeCombo->setCurrentIndex(std::max(0, m_tpoThemeCombo->findData(m_renderer->tpoTheme())));
+        });
+    }
     refreshFromRenderer();
 }
 
@@ -300,7 +316,7 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     m_labelCurrency = new QComboBox(page);
     m_labelCurrency->setObjectName("labelCurrency");
     m_labelCurrency->addItem("USD ($1.24M)", "usd");
-    m_labelCurrency->addItem("Asset (12.5 BTC)", "asset");
+    m_labelCurrency->addItem("Asset (12.5)", "asset");
     form->addRow("Label currency", m_labelCurrency);
     m_labelMinPx = doubleSpin(page, "labelMinPx", 8, 24, 0.5, 1);
     m_labelMinPx->setSuffix(" px");
@@ -562,10 +578,12 @@ QWidget *HeatmapSettingsDialog::buildTpoTab() {
         m_tpoSessionCombo->addItem(name, id);
     form->addRow("TPO Session", m_tpoSessionCombo);
     m_tpoLayoutCombo = new QComboBox(page);
+    m_tpoLayoutCombo->setObjectName("tpoLayout");
     m_tpoLayoutCombo->addItem("Collapsed", "collapsed");
     m_tpoLayoutCombo->addItem("Split", "split");
     form->addRow("TPO Layout", m_tpoLayoutCombo);
     m_tpoThemeCombo = new QComboBox(page);
+    m_tpoThemeCombo->setObjectName("tpoTheme");
     m_tpoThemeCombo->addItem("Rainbow", "rainbow");
     m_tpoThemeCombo->addItem("Calm", "calm");
     m_tpoThemeCombo->addItem("Sage", "sage");

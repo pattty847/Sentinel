@@ -47,6 +47,7 @@ void HeatmapChartControls::setRenderer(UnifiedGridRenderer *renderer) {
     connect(renderer, &UnifiedGridRenderer::layerVisibilityChanged, this, &HeatmapChartControls::scheduleSync);
     connect(renderer, &UnifiedGridRenderer::heatmapRendererChanged, this, &HeatmapChartControls::scheduleSync);
     connect(renderer, &UnifiedGridRenderer::tpoConfigChanged, this, &HeatmapChartControls::scheduleSync);
+    connect(renderer, &UnifiedGridRenderer::tpoStyleChanged, this, &HeatmapChartControls::scheduleSync);
     connect(renderer, &UnifiedGridRenderer::candleStyleChanged, this, &HeatmapChartControls::scheduleSync);
     if (auto *layer = renderer->gpuHeatmapLayer()) {
         using Layer = heatmap::gpu::HeatmapGpuLayer;
@@ -168,7 +169,7 @@ void HeatmapChartControls::buildChartMenu() {
     QMenu *currency = menu->addMenu("Label currency");
     currency->setObjectName("chartMenuCurrency");
     auto *currencyGroup = new QActionGroup(currency);
-    for (const auto &[text, usd] : {std::pair{"USD ($1.24M)", true}, std::pair{"Asset (12.5 BTC)", false}}) {
+    for (const auto &[text, usd] : {std::pair{"USD ($1.24M)", true}, std::pair{"Asset (12.5)", false}}) {
         QAction *a = add(currency, text, usd ? "chartMenuCurrencyUsd" : "chartMenuCurrencyAsset",
                          [this, usd = usd] { requestLabelCurrency(usd); });
         a->setCheckable(true);
@@ -211,7 +212,10 @@ void HeatmapChartControls::refreshChartMenu() {
     const auto &s = m_model->settings();
     for (QAction *a : menu->findChildren<QAction *>()) {
         const QString name = a->objectName();
-        if (name == "chartMenuLabels") a->setChecked(s.showLabels);
+        if (name == "chartMenuLabels") {
+            a->setChecked(s.showLabels);
+            a->setEnabled(modeState().gpu); // the legacy renderer always draws its own labels
+        }
         else if (name == "chartMenuCurrencyUsd") a->setChecked(s.labelCurrency == "usd");
         else if (name == "chartMenuCurrencyAsset") a->setChecked(s.labelCurrency == "asset");
         else if (name == "chartMenuLabelSizePreset") {
@@ -367,7 +371,8 @@ QJsonObject HeatmapChartControls::uiState() const {
         toolbar["shown"] = QJsonObject{{"tickSelector", shown.tickSelector}, {"palette", shown.palette},
                                        {"liquidity", shown.liquidity}, {"rangeSlider", shown.rangeSlider},
                                        {"thresholdSlider", shown.thresholdSlider}, {"candleStyle", shown.candleStyle},
-                                       {"tpoSession", shown.tpoSession}, {"tpoLayout", shown.tpoLayout}};
+                                       {"tpoSession", shown.tpoSession}, {"tpoLayout", shown.tpoLayout},
+                                       {"labelsToggle", shown.labelsToggle}};
         toolbar["liquidityRange"] = QJsonObject{{"low", m_toolbar->rangeSlider()->low()},
                                                 {"high", m_toolbar->rangeSlider()->high()},
                                                 {"endLo", m_toolbar->rangeSlider()->endLo()},

@@ -44,6 +44,7 @@ struct LabelLayoutStats {
     size_t labels = 0, glyphs = 0;
     size_t tooNarrow = 0;    // coloured cells whose text does not fit at minPx
     size_t droppedBudget = 0; // labels left out by maxGlyphs
+    size_t unmatched = 0;     // labels of columns that do not match the drawn picture (matchLabelColumns)
     double sizePx = 0;        // font size this frame (0: none drawn)
     uint64_t rebuilds = 0;    // glyph run rebuilds (once per LabelCells/currency/atlas)
 };
@@ -56,9 +57,11 @@ public:
 
     // Clears `out` and fills it with this frame's glyphs. `out` keeps its capacity
     // (reserve kMaxGlyphs once); nothing else allocates after the first rebuild.
+    // `columns` (optional): one byte per label column, 0 = the column does not
+    // show the picture the labels describe (matchLabelColumns): no label there.
     void layout(const std::shared_ptr<const LabelCells> &cells, const ChartTextAtlas &atlas,
                 const TimeAxisMapping &mapping, double dpr, const LabelStyle &style,
-                std::vector<ChartGlyphInstance> &out);
+                std::vector<ChartGlyphInstance> &out, const std::vector<uint8_t> *columns = nullptr);
     // Forget the cached runs (a new atlas, a new scene graph root).
     void reset();
     const LabelLayoutStats &stats() const { return stats_; }

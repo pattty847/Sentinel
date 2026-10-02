@@ -69,7 +69,7 @@ void HeatmapLabelLayout::rebuild(const LabelCells &cells, const ChartTextAtlas &
 
 void HeatmapLabelLayout::layout(const std::shared_ptr<const LabelCells> &cells, const ChartTextAtlas &atlas,
                                 const TimeAxisMapping &mapping, double dpr, const LabelStyle &style,
-                                std::vector<ChartGlyphInstance> &out) {
+                                std::vector<ChartGlyphInstance> &out, const std::vector<uint8_t> *columns) {
     out.clear();
     const uint64_t rebuilds = stats_.rebuilds;
     stats_ = {};
@@ -137,6 +137,10 @@ void HeatmapLabelLayout::layout(const std::shared_ptr<const LabelCells> &cells, 
             const uint32_t word = cells->cells[index].word;
             // Coloured exactly as heatmap_display.frag: (code - codeFloor) / range > 0.
             if (!(float(word & 0x7fffu) - style.window.floor > 0.0f)) continue;
+            if (columns && (columns->size() != grid.columns || !(*columns)[size_t(c - firstBucket)])) {
+                ++stats_.unmatched;
+                continue;
+            }
             const Run &run = runs_[size_t(runIndex)];
             if (!everyLabelFits && double(run.inkWidth) * scale + 2 * style.padX > cellW) {
                 ++stats_.tooNarrow;

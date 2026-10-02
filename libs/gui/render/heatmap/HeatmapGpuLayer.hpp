@@ -17,6 +17,7 @@
 #include "HeatmapDataService.hpp"
 #include "HeatmapPalette.hpp"
 #include "HeatmapTileNode.hpp"
+#include "HeatmapLabelMatch.hpp"
 #include "heatmap/HeatmapChartSettings.hpp"
 #include "heatmap/HeatmapResolution.hpp"
 #include <QJsonObject>
@@ -28,6 +29,18 @@
 #include <vector>
 
 namespace heatmap::gpu {
+// The label request retry (S7b): a posted request that got no result (or lost
+// it to HeatmapCellQuery::cancel()) is asked again after delayMs(), which doubles
+// per failure up to kMaxMs and returns to kFirstMs after a result.
+struct LabelRetryPolicy {
+    static constexpr int kFirstMs = 2000, kMaxMs = 30000;
+    int delayMs() const { return delay_; }
+    void failed() { delay_ = std::min(delay_ * 2, kMaxMs); }
+    void succeeded() { delay_ = kFirstMs; }
+private:
+    int delay_ = kFirstMs;
+};
+
 // Median best-bid/best-ask midpoint over the newest columns (the price a fresh
 // view centres on). 0 when none.
 double medianRecentMid(const SparseColumns &data);
@@ -136,9 +149,22 @@ public:
     // frame) and this frame's target; none during a crossfade or a hold (the node
     // may start a transition in the frame being prepared).
     static constexpr uint32_t kMaxLabelCells = 16000;
-    static constexpr int kLabelRetryMs = 2000, kMaxLabelRetryMs = 30000;
+    static constexpr int kLabelRetryMs = LabelRetryPolicy::kFirstMs, kMaxLabelRetryMs = LabelRetryPolicy::kMaxMs;
     // Render thread (updatePaintNode, after prepareFrame), or GUI thread.
     std::shared_ptr<const LabelCells> labelsForFrame() const;
+    // Which columns of `labels` show exactly the picture on screen and this
+    // frame's target (matchLabelColumns over the node's last drawn segments, the
+    // current SpanSet and live snapshot). Returns the matched count.
+    size_t matchLabelColumns(const LabelCells &labels, std::vector<uint8_t> &out) const;
+    // A result of this symbol, timeframe and target tick exists but the gate holds
+    // it back for now (a crossfade, a hold, the node not yet on the target tick).
+    bool labelsPending() const;
+    // What the next label layout would draw (0: nothing): the result and its
+    // matched columns. The chart compares it after a frame to redraw labels once a
+    // transition ends on an otherwise idle chart (S7b review).
+    uint64_t labelSignature() const;
+    static uint64_t labelSignature(const LabelCells *labels, const std::vector<uint8_t> &columns, size_t matched);
+    int labelRetryMs() const { return retry_.delayMs(); }
     const DrawStyle &drawStyle() const { return style_; }
     std::shared_ptr<const HeatmapPalette> palette() const { return palette_; }
     // The liquidity (base-asset quantity, as sensitivityMin/Max) of the valid cells
@@ -225,7 +251,9 @@ private:
     bool labelDropNoticed_ = false;  // ...and a later frame found it dropped (cancel/shed)
     std::shared_ptr<const LabelCells> notifiedLabels_; // the last result that requested a frame
     QTimer *labelRetry_ = nullptr;
-    int labelRetryMs_ = kLabelRetryMs;
+    LabelRetryPolicy retry_;
+    mutable std::vector<HeatmapTileStats::Segment> segmentScratch_; // reused (matchLabelColumns)
+    mutable std::vector<uint8_t> signatureColumns_;                 // reused (labelSignature)
     LiquidityRange liquidityRange_;
     std::vector<double> liquidityScratch_;
     LabelCounters labelCounters_;

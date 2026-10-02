@@ -97,6 +97,13 @@ void UnifiedGridRenderer::bindWindow(QQuickWindow* w) {
     // live paging): ask for the next frame; an idle node stops asking.
     if (tileStats && tileStats->wantsFrame.exchange(false))
       QMetaObject::invokeMethod(this, [this] { update(); }, Qt::QueuedConnection);
+    // Labels held back by a transition (a crossfade's last frame, a picture not
+    // yet matched): once this frame's prepare() has moved the node on, redraw
+    // only if the labels would now draw differently (transition-driven, S7b).
+    if (m_gpuLabelsIncomplete.exchange(false))
+      QMetaObject::invokeMethod(this, [this] {
+        if (m_gpuHeatmap && m_gpuLayer && m_gpuLayer->labelSignature() != m_gpuLabelSignature.load()) update();
+      }, Qt::QueuedConnection);
   }, Qt::DirectConnection);
 }
 
@@ -545,6 +552,7 @@ void UnifiedGridRenderer::setTpoLayout(const QString& layout) {
   m_tpoOverlay.setStyle(style);
   sLog_Render("TPO layout=" << tpo::layoutName(next));
   update();
+  emit tpoStyleChanged();
 }
 
 void UnifiedGridRenderer::setTpoTheme(const QString& theme) {
@@ -555,6 +563,7 @@ void UnifiedGridRenderer::setTpoTheme(const QString& theme) {
   m_tpoOverlay.setStyle(style);
   sLog_Render("TPO theme=" << tpo::themeName(next));
   update();
+  emit tpoStyleChanged();
 }
 
 QString UnifiedGridRenderer::tpoLayout() const {

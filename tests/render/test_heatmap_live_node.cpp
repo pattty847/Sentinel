@@ -17,6 +17,7 @@
 #include "heatmap/TimeComposer.hpp"
 #include "lab/RhiBackend.hpp"
 #include "render/heatmap/HeatmapCellQuery.hpp"
+#include "render/heatmap/HeatmapLabelMatch.hpp"
 #include <QEvent>
 #include <QGuiApplication>
 #include <gtest/gtest.h>
@@ -65,9 +66,10 @@ void makePartial(SparseColumn &column, uint64_t observed, int64_t partialFromPri
 struct Recording {
     Shape shape;
     int64_t partialFromPrice = 100'040; // rows of the open minute above this are partly covered
+    uint64_t revision = 1;               // minute sizes (a later revision changes every value)
     // [from, open + 1 min): full minutes, then the open minute observed `observed` ms.
     SparseColumns minutes(const std::string &source, int64_t from, int64_t open, uint64_t observed) const {
-        auto out = minuteColumns(source, from, open + minute, 1, shape);
+        auto out = minuteColumns(source, from, open + minute, revision, shape);
         if (observed < uint64_t(minute) && !out.columns.empty() && out.columns.back().bucketStartMs == open)
             makePartial(out.columns.back(), observed, partialFromPrice);
         validate(out);
@@ -105,12 +107,12 @@ struct Spans {
             const int64_t through = std::min(h + kHourMs, cutoff);
             auto chunk = std::make_shared<StoredChunk>();
             chunk->key = {kSymbol, source, kMinuteMs, h};
-            auto columns = minuteColumns(source, h, through, 1, rec.shape);
+            auto columns = minuteColumns(source, h, through, rec.revision, rec.shape);
             columns.endMs = h + kHourMs; // the chunk's extent; scanned only through the cutoff
             chunk->columns = std::make_shared<const SparseColumns>(std::move(columns));
             chunk->sealed = through == h + kHourMs;
             chunk->committedThroughMs = through;
-            chunk->generation = uint64_t(through / minute);
+            chunk->generation = uint64_t(through / minute) + (rec.revision - 1) * 1'000'000'000; // new values, new generation
             chunk->contentHash = chunk->generation;
             chunk->bytes = sparseBytes(*chunk->columns);
             input.key.generations.push_back({kSymbol, source, kMinuteMs, h, chunk->generation, chunk->sealed});
@@ -473,6 +475,133 @@ TEST_F(LiveNode, LabelWordsEqualTheDrawnBins) {
     parity = compareLabels(*labelsFor(500, *drawnSet, drawnLive.get()), *held, layer0(stats()), tf);
     EXPECT_EQ(parity.mismatches, 0u) << parity.first;
     EXPECT_GT(parity.valid, 500u);
+    EXPECT_EQ(stats().errors.load(), 0u);
+}
+
+// S7b review: labels must describe the picture on screen. A new live version
+// pages in over several frames (a small upload budget) while the node keeps
+// drawing the previous one, and then a span revision (a later complete end) does
+// the same through slot fallback. Each frame, as the chart does, the matched
+// columns are computed BEFORE the frame (from the last frame's drawn segments and
+// this frame's target); after it, every matched column's label words equal the
+// cells the node drew in that frame, through every handover frame.
+TEST_F(LiveNode, MatchedLabelColumnsEqualTheDrawnCellsThroughHandovers) {
+    const int64_t tf = minute, T = kEpoch + 2 * tiles::kTileColumns * tf;
+    const int64_t E = T - 3 * minute, L = T - 6 * minute, open = T + minute;
+    const int64_t viewLo = T - 24 * tf, viewHi = T + 8 * tf;
+    const int64_t tileBefore = tiles::tileOfBucket(T / tf) - 1;
+    frame().view.timeLoMs = double(viewLo);
+    frame().view.timeHiMs = double(viewHi);
+    frame().tickUnits = 500;
+    frame().crossfadeMs = 0;
+    auto labelsFor = [&](const SpanSet &set, const LiveSnapshot *live) {
+        LabelRequest q;
+        q.serial = 1;
+        q.tfMs = tf;
+        q.tickUnits = 500;
+        q.priceScale = 100;
+        q.firstBucket = viewLo / tf;
+        q.columns = uint32_t((viewHi + 4 * tf - viewLo) / tf);
+        q.firstBin = int64_t(std::floor(frame().view.priceLo / 5));
+        q.rows = uint32_t(std::ceil(frame().view.priceHi / 5)) - uint32_t(q.firstBin);
+        q.liveVersion = live ? live->version : 0;
+        ChunkStore store;
+        LabelWindowBuilder builder;
+        return builder.build(q, set, live, store, spans.held);
+    };
+    show(tf, {tileBefore, tileBefore + 1}, E, L, open, 25'000, 1);
+    ASSERT_TRUE(render(3));
+    std::vector<std::shared_ptr<const LabelCells>> labels{labelsFor(*frame().spans, frame().live.get())};
+    std::vector<Segment> drawn;
+    std::vector<uint8_t> ok;
+    size_t compared = 0, liveCompared = 0, mismatches = 0, framesOnOldLive = 0, framesOnFallback = 0;
+    std::string first;
+    // One frame as the chart draws it: match first, then render and compare.
+    auto frameAndCompare = [&] {
+        stats().copySegments(drawn);
+        std::vector<std::vector<uint8_t>> masks;
+        for (const auto &l : labels) {
+            matchLabelColumns(*l, drawn, frame().spans.get(), frame().live.get(), ok);
+            masks.push_back(ok);
+        }
+        frame().capture = std::make_shared<HeatmapCellCapture>();
+        EXPECT_TRUE(render());
+        const auto capture = frame().capture;
+        frame().capture.reset();
+        const auto segments = layer0(stats());
+        for (size_t i = 0; i < labels.size(); ++i) {
+            const auto &k = labels[i]->key;
+            for (uint32_t x = 0; x < k.columns; ++x) {
+                if (!masks[i][x]) continue;
+                // The cells drawn for that bucket this frame.
+                const int64_t bucket = k.firstBucket + x;
+                const Segment *seg = nullptr;
+                for (const auto &sg : segments)
+                    if (sg.kind != Segment::Loading && sg.loMs <= bucket * tf && bucket * tf < sg.hiMs) seg = &sg;
+                if (!seg) { ++mismatches; if (first.empty()) first = "matched column not drawn"; continue; }
+                for (const auto &block : capture->blocks) {
+                    if (block.bin != seg->bin || bucket < block.grid.firstBucket ||
+                        bucket >= block.grid.firstBucket + int64_t(block.grid.columns))
+                        continue;
+                    const auto *gpu = reinterpret_cast<const uint32_t *>(block.result->data.constData());
+                    for (uint32_t r = 0; r < block.grid.rows; ++r) {
+                        const int64_t bin = block.grid.firstBin + int64_t(block.grid.rows - 1 - r);
+                        if (bin < k.firstBin || bin >= k.firstBin + int64_t(k.rows)) continue;
+                        const uint32_t g = gpu[size_t(r) * block.grid.columns + size_t(bucket - block.grid.firstBucket)];
+                        const uint32_t w = labels[i]->cells[size_t(k.firstBin + k.rows - 1 - bin) * k.columns + x].word;
+                        const bool bad = tiles::cellState(g) != tiles::cellState(w) ||
+                                         (tiles::cellState(w) == tiles::kCellValid && (g & 0xffffu) != (w & 0xffffu));
+                        if (bad && first.empty())
+                            first = "labels v" + std::to_string(k.liveVersion) + " bucket " + std::to_string(bucket) +
+                                    (block.live ? " live" : " span") + " bin " + std::to_string(bin);
+                        mismatches += bad;
+                        ++compared;
+                        liveCompared += block.live;
+                    }
+                }
+            }
+        }
+    };
+    // 1. A new live version: the open minute completes and the next one opens.
+    frame().uploadBudgetBytes = 2048;
+    frame().live = spans.live(tf, L, open + minute, 25'000, 2);
+    labels.push_back(labelsFor(*frame().spans, frame().live.get()));
+    for (int i = 0; i < 3000 && (stats().liveVersion.load() != 2 || i < 3); ++i) {
+        frameAndCompare();
+        framesOnOldLive += stats().liveVersion.load() == 1;
+    }
+    frameAndCompare(); // one more frame on the new version
+    ASSERT_EQ(stats().liveVersion.load(), 2u) << "the new live version paged in";
+    EXPECT_GT(framesOnOldLive, 0u) << "the node drew the old version while the new one paged in";
+    // Labels of the new version match the live columns now; the old ones never do.
+    stats().copySegments(drawn);
+    EXPECT_GT(matchLabelColumns(*labels[1], drawn, frame().spans.get(), frame().live.get(), ok), 0u);
+    size_t liveMatched = 0;
+    for (uint32_t x = 0; x < labels[1]->key.columns; ++x) liveMatched += ok[x] && labels[1]->liveColumns[x];
+    EXPECT_GT(liveMatched, 0u);
+    matchLabelColumns(*labels[0], drawn, frame().spans.get(), frame().live.get(), ok);
+    for (uint32_t x = 0; x < labels[0]->key.columns; ++x) EXPECT_FALSE(ok[x] && labels[0]->liveColumns[x]);
+    // 2. A span revision: both tiles are rebuilt through a later complete end with
+    //    new values (new generations). They upload in small steps: slot fallback
+    //    (the previous values) meanwhile.
+    labels.clear();
+    labels.push_back(labelsFor(*frame().spans, frame().live.get())); // the picture drawn now
+    spans.rec.revision = 2;
+    show(tf, {tileBefore, tileBefore + 1}, E + 2 * minute, L, open + minute, 25'000, 3);
+    labels.push_back(labelsFor(*frame().spans, frame().live.get()));  // the revision's
+    frame().uploadBudgetBytes = 16384;
+    for (int i = 0; i < 3000 && (stats().fallbackSlots.load() > 0 || i < 3); ++i) {
+        frameAndCompare();
+        framesOnFallback += stats().fallbackSlots.load() > 0;
+    }
+    frameAndCompare();
+    EXPECT_GT(framesOnFallback, 0u) << "the revision drew its previous content (slot fallback) first";
+    EXPECT_EQ(stats().fallbackSlots.load(), 0u);
+    stats().copySegments(drawn);
+    EXPECT_GT(matchLabelColumns(*labels[1], drawn, frame().spans.get(), frame().live.get(), ok), 20u);
+    EXPECT_EQ(mismatches, 0u) << first;
+    EXPECT_GT(compared, 5000u);
+    EXPECT_GT(liveCompared, 0u);
     EXPECT_EQ(stats().errors.load(), 0u);
 }
 

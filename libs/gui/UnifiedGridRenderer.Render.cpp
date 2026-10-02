@@ -551,8 +551,16 @@ void UnifiedGridRenderer::updateGpuLabels(const FrameContext& frame, bool prepar
     m_gpuLabelSerial = labels ? labels->key.serial : 0;
     if (!labels) {
         m_heatmapLabelGlyphs.clear();
+        m_gpuLabelSignature.store(0);
+        // Held back by a transition: after the frame, check whether they can draw.
+        m_gpuLabelsIncomplete.store(prepared && m_gpuLayer->labelsPending());
         return;
     }
+    // Only the columns showing the picture the labels describe (drawn last frame
+    // and this frame's target: the node prepares after this layout).
+    if (m_gpuLabelColumns.capacity() < heatmap::gpu::HeatmapGpuLayer::kMaxLabelCells)
+        m_gpuLabelColumns.reserve(heatmap::gpu::HeatmapGpuLayer::kMaxLabelCells);
+    const size_t matched = m_gpuLayer->matchLabelColumns(*labels, m_gpuLabelColumns);
     const auto& settings = m_gpuLayer->settings();
     heatmap::gpu::LabelStyle style;
     style.usd = settings.labelCurrency != "asset";
@@ -561,11 +569,13 @@ void UnifiedGridRenderer::updateGpuLabels(const FrameContext& frame, bool prepar
     style.window = {m_gpuLayer->drawStyle().codeFloor, m_gpuLayer->drawStyle().codeRange};
     style.palette = m_gpuLayer->palette();
     m_gpuLabels.layout(labels, m_chartTextAtlas, frame.mapping, window()->effectiveDevicePixelRatio(), style,
-                       m_heatmapLabelGlyphs);
+                       m_heatmapLabelGlyphs, &m_gpuLabelColumns);
     const auto& st = m_gpuLabels.stats();
+    m_gpuLabelSignature.store(heatmap::gpu::HeatmapGpuLayer::labelSignature(labels.get(), m_gpuLabelColumns, matched));
+    m_gpuLabelsIncomplete.store(st.unmatched > 0);
     sLog_Probe("heatmap.labels.layout", "serial=" << labels->key.serial << " labels=" << st.labels
                << " glyphs=" << st.glyphs << " sizePx=" << st.sizePx << " narrow=" << st.tooNarrow
-               << " dropped=" << st.droppedBudget);
+               << " dropped=" << st.droppedBudget << " unmatched=" << st.unmatched << " matchedColumns=" << matched);
     m_chartTextRenderer.submitGlyphs(m_heatmapLabelGlyphs, ChartTextRenderer::Priority::Low);
 }
 

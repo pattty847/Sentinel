@@ -1,5 +1,7 @@
 #include "ChartTextNode.hpp"
 
+#include <algorithm>
+
 #include <QMatrix4x4>
 #include <QQuickWindow>
 #include <cstring>
@@ -192,8 +194,11 @@ void ChartTextNode::setSprFloor(float sprFloor) {
 void ChartTextNode::updateGeometry(const std::vector<ChartGlyphInstance>& glyphs) {
     const int glyphCount = static_cast<int>(glyphs.size());
     if (glyphCount > m_capacityGlyphs) {
-        m_capacityGlyphs = glyphCount;
+        // Grow 1.5x (from 256), not to the exact count: a rising glyph count
+        // reallocates the geometry O(log n) times instead of every new maximum.
+        m_capacityGlyphs = std::max({glyphCount, m_capacityGlyphs + m_capacityGlyphs / 2, 256});
         m_geometry.allocate(m_capacityGlyphs * 6);
+        m_lastGlyphs = m_capacityGlyphs;
     }
 
     auto* vertices = m_geometry.vertexDataAsTexturedPoint2D();
@@ -217,11 +222,13 @@ void ChartTextNode::updateGeometry(const std::vector<ChartGlyphInstance>& glyphs
         vertices[dst + 5].set(x1, y1, u1, v1);
         dst += 6;
     }
-    const int totalVertices = m_capacityGlyphs * 6;
-    if (dst < totalVertices) {
-        std::memset(vertices + dst, 0,
-                    sizeof(QSGGeometry::TexturedPoint2D) * (totalVertices - dst));
+    // Degenerate (zero) quads after the used ones: only what the last frame used
+    // beyond this frame's count needs clearing (the rest is still zero).
+    const int clearTo = std::max(m_lastGlyphs, glyphCount) * 6;
+    if (dst < clearTo) {
+        std::memset(vertices + dst, 0, sizeof(QSGGeometry::TexturedPoint2D) * (clearTo - dst));
     }
+    m_lastGlyphs = glyphCount;
 
     markDirty(QSGNode::DirtyGeometry);
 }

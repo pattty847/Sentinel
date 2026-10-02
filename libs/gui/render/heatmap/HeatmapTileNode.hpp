@@ -119,6 +119,10 @@ struct HeatmapTileStats {
         uint8_t layer = 0; // 0: the current (or held) picture; k: fading layer k
         float opacity = 1;
         uint64_t liveVersion = 0; // live bins: the version they hold
+        // Span pieces: spanContentId of the snapshot span whose complete bin this
+        // is (a slot fallback keeps the id of the content it shows); 0 for a
+        // partial bin. Labels match it (S7b).
+        uint64_t content = 0;
     };
     // Bin ids drawn in the last frame (current, held, fading) and resident bin ids.
     std::vector<uint64_t> drawnIds() const {
@@ -133,6 +137,11 @@ struct HeatmapTileStats {
     std::vector<Segment> segments() const {
         std::scoped_lock lock(mutex);
         return drawnSegments;
+    }
+    // The same into a caller's vector (no allocation once it has the capacity).
+    void copySegments(std::vector<Segment> &out) const {
+        std::scoped_lock lock(mutex);
+        out.assign(drawnSegments.begin(), drawnSegments.end());
     }
     // (publish-to-draw ms, data age ms) per drawn live version, oldest first (bounded).
     std::vector<std::pair<double, double>> liveSamples() const {
@@ -210,11 +219,13 @@ private:
         uint64_t bin = 0;
         int64_t tile = 0, tfMs = 0;
         bool live = false;
+        uint64_t content = 0; // span draws: Segment::content
     };
     struct Piece { // one draw of a picture, clipped in time
         Bin *bin = nullptr;
         int64_t loMs = 0, hiMs = 0;
         bool live = false;
+        uint64_t content = 0;
     };
     struct Layer {
         std::vector<Draw> draws;
@@ -230,6 +241,7 @@ private:
         int64_t tile = 0;
         bool expected = false, refused = false, ready = false, complete = false;
         Bin *bin = nullptr; // the target's bin (ready or partial)
+        uint64_t content = 0; // spanContentId of the target span
     };
     std::shared_ptr<HeatmapTileStats> stats_;
     Frame frame_;

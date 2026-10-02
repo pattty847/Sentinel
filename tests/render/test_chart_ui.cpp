@@ -29,6 +29,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QThread>
+#include <QSignalSpy>
 #include <QPushButton>
 #include <gtest/gtest.h>
 #include <iostream>
@@ -71,16 +72,16 @@ TEST(ChartToolbar, ControlVisibilityRulesPerMode) {
     };
     const std::vector<Case> cases{
         {"heatmap gpu + candles", {true, false, false, false, true, true},
-         {true, true, true, true, false, true, false, false}},
-        {"heatmap legacy", {true, false, false, false, true, false},
-         {true, true, true, false, true, true, false, false}},
-        {"tpo", {false, false, true, false, true, true}, {false, false, false, false, false, true, true, true}},
+         {true, true, true, true, false, true, false, false, true}},
+        {"heatmap legacy (no Labels toggle: legacy always labels)", {true, false, false, false, true, false},
+         {true, true, true, false, true, true, false, false, false}},
+        {"tpo", {false, false, true, false, true, true}, {false, false, false, false, false, true, true, true, false}},
         {"volume profile", {false, false, false, true, false, true},
-         {false, false, false, false, false, false, true, false}},
+         {false, false, false, false, false, false, true, false, false}},
         {"footprint only", {false, true, false, false, false, true},
          {false, false, false, false, false, false, false, false}},
         {"heatmap + footprint, no candles", {true, true, false, false, false, true},
-         {true, true, true, true, false, false, false, false}},
+         {true, true, true, true, false, false, false, false, true}},
     };
     TopToolbar toolbar;
     for (const auto &c : cases) {
@@ -91,8 +92,26 @@ TEST(ChartToolbar, ControlVisibilityRulesPerMode) {
         EXPECT_EQ(toolbar.tpoSessionCombo()->isVisibleTo(&toolbar), c.shown.tpoSession);
         EXPECT_EQ(toolbar.rangeSlider()->isVisibleTo(&toolbar), c.shown.rangeSlider);
         EXPECT_EQ(toolbar.tickModeCombo()->isVisibleTo(&toolbar), c.shown.tickSelector);
+        EXPECT_EQ(toolbar.labelsButton()->isVisibleTo(&toolbar), c.shown.labelsToggle);
+        EXPECT_EQ(toolbar.liquidityModeCombo()->isVisibleTo(&toolbar), c.shown.liquidity);
         EXPECT_EQ(toolbar.candlesChecked(), c.mode.candles);
     }
+}
+
+// The label request retry (S7b review): repeated no-result failures double the
+// delay up to 30 s; a result resets it.
+TEST(ChartLabelRetry, BackoffDoublesToTheCapAndResetsAfterAResult) {
+    heatmap::gpu::LabelRetryPolicy retry;
+    std::vector<int> delays{retry.delayMs()};
+    for (int i = 0; i < 7; ++i) {
+        retry.failed();
+        delays.push_back(retry.delayMs());
+    }
+    EXPECT_EQ(delays, (std::vector<int>{2000, 4000, 8000, 16000, 30000, 30000, 30000, 30000}));
+    retry.succeeded();
+    EXPECT_EQ(retry.delayMs(), 2000);
+    retry.failed();
+    EXPECT_EQ(retry.delayMs(), 4000);
 }
 
 // --------------------------------------------------- range slider and menu
@@ -425,6 +444,7 @@ TEST_F(ChartLabels, ACancelledQueryDrawsNoStaleLabelsAndRetries) {
         if (layer().labelCounters().posted == posted + 1 && !retried) continue; // a version change re-posted
         if (retried) {
             EXPECT_EQ(layer().labelCounters().retries, retries + 1);
+            EXPECT_EQ(layer().labelRetryMs(), heatmap::gpu::HeatmapGpuLayer::kLabelRetryMs) << "reset after a result";
             return; // the retry path ran
         }
     }
@@ -501,8 +521,8 @@ TEST_F(ChartLabels, ToolbarFollowsTheChartsLayers) {
     toolbar->tpoLayoutCombo()->setCurrentIndex(split);
     emit toolbar->tpoLayoutCombo()->activated(split);
     EXPECT_EQ(ugr->tpoLayout().toStdString(), "split");
-    ugr->setTpoLayout("collapsed"); // the dialog or the API (no renderer signal: the next sync shows it)
-    controls->syncNow();
+    ugr->setTpoLayout("collapsed"); // the dialog or the API: tpoStyleChanged, normal event processing
+    pump(100, [] { return false; });
     EXPECT_EQ(toolbar->tpoLayoutCombo()->currentData().toString(), "collapsed");
     ugr->setHeatmapLayerEnabled(true);
     pump(300, [] { return false; });
@@ -516,6 +536,8 @@ TEST_F(ChartLabels, ToolbarFollowsTheChartsLayers) {
     shown = toolbar->shownControls();
     EXPECT_FALSE(shown.rangeSlider);
     EXPECT_TRUE(shown.thresholdSlider);
+    EXPECT_FALSE(shown.labelsToggle) << "legacy always draws its labels: no toggle";
+    EXPECT_TRUE(shown.liquidity) << "the currency stays";
     // Currency: model, toolbar and the legacy label mode agree.
     toolbar->liquidityModeCombo()->setCurrentIndex(0);
     emit toolbar->liquidityModeCombo()->activated(0);
@@ -523,6 +545,67 @@ TEST_F(ChartLabels, ToolbarFollowsTheChartsLayers) {
     EXPECT_EQ(ugr->liquidityLabelMode(), 0);
     ASSERT_TRUE(model->apply({{"labelCurrency", "usd"}}, false).isEmpty());
     EXPECT_EQ(ugr->liquidityLabelMode(), 1);
+}
+
+// Renderer state changed elsewhere (Agent API, another surface) shows in the
+// toolbar and the dialog through normal event processing (no explicit sync),
+// without echoing back to the renderer.
+TEST_F(ChartLabels, RendererBackedControlsFollowTheRendererThroughEvents) {
+    HeatmapSettingsDialog dialog(model.get(), ugr);
+    controls->setDialog(&dialog);
+    pump(100, [] { return false; });
+    QSignalSpy styleSignals(ugr, &UnifiedGridRenderer::candleStyleChanged);
+    ugr->setCandleStyle(2);
+    ugr->setTpoLayout("split");
+    pump(200, [] { return false; });
+    EXPECT_EQ(dialog.findChild<QComboBox *>("candleStyle")->currentIndex(), 2);
+    EXPECT_EQ(toolbar->chartTypeCombo()->currentIndex(), 2);
+    EXPECT_EQ(toolbar->tpoLayoutCombo()->currentData().toString(), "split");
+    EXPECT_EQ(dialog.findChild<QComboBox *>("tpoLayout")->currentData().toString(), "split");
+    EXPECT_EQ(styleSignals.count(), 1) << "no echo from the controls back to the renderer";
+    ugr->setCandleStyle(0);
+    pump(200, [] { return false; });
+    EXPECT_EQ(dialog.findChild<QComboBox *>("candleStyle")->currentIndex(), 0);
+    EXPECT_EQ(toolbar->chartTypeCombo()->currentIndex(), 0);
+}
+
+// The crossfade's last frame lays labels out with the previous frame's
+// "crossfading" flag (the node prepares after the layout), so it draws none; the
+// node then stops asking for frames. The chart must request one more frame on its
+// own (frames render ONLY when the scene asks: no update() from the test).
+TEST_F(ChartLabels, LabelsReturnAfterACrossfadeOnAnIdleChart) {
+    ASSERT_TRUE(model->apply({{"crossfadeMs", 300}}, false).isEmpty());
+    zoomIn();
+    ASSERT_TRUE(waitForLabels()) << error.toStdString();
+    auto pumpOnRequest = [&](int ms, auto done) {
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < ms) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+            if (scene->frameRequested()) {
+                image = scene->renderFrame(&error);
+                if (image.isNull()) return false;
+                checkFrame();
+            }
+            if (done()) return true;
+        }
+        return false;
+    };
+    // Idle first: no frames are asked for.
+    pumpOnRequest(500, [] { return false; });
+    ASSERT_TRUE(model->apply({{"tickMode", "manual"}, {"manualTick", 200}}, false).isEmpty());
+    bool faded = false;
+    ASSERT_TRUE(pumpOnRequest(5000, [&] {
+        faded = faded || layer().tileStats().crossfading.load();
+        return faded && !layer().tileStats().crossfading.load();
+    })) << "the crossfade ended";
+    // After the fade's last frame, labels of the new tick appear with no outside
+    // redraw, at once (an unrelated periodic frame about 2 s later must not be what
+    // brings them back).
+    ASSERT_TRUE(pumpOnRequest(1000, [&] {
+        const auto labels = layer().labelsForFrame();
+        return labels && labels->key.tickUnits == 200 && labelsDrawn() && ugr->gpuLabelSerial() == labels->key.serial;
+    })) << "labels stayed hidden after the crossfade on an idle chart";
 }
 
 // Lifecycle: the settings dialog, the chart menu and the toolbar stay usable when

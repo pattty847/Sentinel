@@ -292,6 +292,7 @@ TopToolbar::ControlVisibility TopToolbar::controlVisibility(const ModeState &mod
     v.candleStyle = mode.candles;
     v.tpoSession = mode.tpo || mode.volumeProfile;
     v.tpoLayout = mode.tpo;
+    v.labelsToggle = mode.heatmap && mode.gpu;
     return v;
 }
 
@@ -317,7 +318,8 @@ void TopToolbar::applyVisibility() {
     show(m_tickPresetAction, v.tickSelector);
     show(m_tickVeilAction, v.tickSelector && m_tickState.enabled && !m_tickState.indicator.isEmpty());
     show(m_paletteAction, v.palette);
-    for (auto *a : {m_liqLabelAction, m_labelsAction, m_modeLabelAction, m_modeComboAction}) show(a, v.liquidity);
+    for (auto *a : {m_liqLabelAction, m_modeLabelAction, m_modeComboAction}) show(a, v.liquidity);
+    show(m_labelsAction, v.labelsToggle);
     show(m_rangeAction, v.rangeSlider);
     show(m_rangeLabelAction, v.rangeSlider);
     show(m_thresholdAction, v.thresholdSlider);
@@ -331,7 +333,8 @@ TopToolbar::ControlVisibility TopToolbar::shownControls() const {
     ControlVisibility v;
     v.tickSelector = on(m_tickModeAction) && on(m_tickPresetAction);
     v.palette = on(m_paletteAction);
-    v.liquidity = on(m_labelsAction) && on(m_modeComboAction);
+    v.liquidity = on(m_modeComboAction);
+    v.labelsToggle = on(m_labelsAction);
     v.rangeSlider = on(m_rangeAction);
     v.thresholdSlider = on(m_thresholdAction);
     v.candleStyle = on(m_chartTypeAction);

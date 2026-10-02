@@ -3,6 +3,8 @@
 // plan section 6 item 5: no capacity growth over 120 frames, no glyph outside
 // drawRect, device-pixel snapping at 1x/1.5x/2x, the label gate and the budget.
 #include "render/ChartTextAtlas.hpp"
+#include "render/ChartTextNode.hpp"
+#include "render/ChartTextRenderer.hpp"
 #include "render/heatmap/HeatmapLabelLayout.hpp"
 #include <QGuiApplication>
 #include <gtest/gtest.h>
@@ -33,7 +35,7 @@ const ChartTextAtlas &atlas() {
 
 std::string text(double value, bool usd) {
     std::array<char, 48> out{};
-    formatLabelAmount(out, value, usd, "BTC");
+    formatLabelAmount(out, value, usd);
     return out.data();
 }
 
@@ -56,8 +58,8 @@ std::shared_ptr<LabelCells> window(uint32_t columns, uint32_t rows, uint16_t cod
             auto &cell = out->cells[size_t(y) * columns + x];
             cell.word = word ? word(x, y) : tiles::cellWord(tiles::kCellValid, code);
             cell.value = 0.5 + 0.37 * double(x + 3 * y);
-            formatLabelAmount(cell.usd, cell.value * 100'000, true, "BTC");
-            formatLabelAmount(cell.asset, cell.value, false, "BTC");
+            formatLabelAmount(cell.usd, cell.value * 100'000, true);
+            formatLabelAmount(cell.asset, cell.value, false);
         }
     return out;
 }
@@ -99,17 +101,21 @@ std::map<std::pair<double, double>, int> labels(const std::vector<ChartGlyphInst
     return out;
 }
 
-TEST(HeatmapLabelFormat, ThreeSignificantDigitsWithTrailingZerosKept) {
+TEST(HeatmapLabelFormat, AtMostThreeSignificantDigitsTrailingZerosDropped) {
+    // Owner 2026-10-02: $11k not $11.0k, $1.2M not $1.20M; asset text is the number only.
     EXPECT_EQ(text(1'240'000, true), "$1.24M");
+    EXPECT_EQ(text(1'200'000, true), "$1.2M");
     EXPECT_EQ(text(847'000, true), "$847k");
-    EXPECT_EQ(text(11'000, true), "$11.0k");
-    EXPECT_EQ(text(1'000'000, true), "$1.00M");
-    EXPECT_EQ(text(999.6, true), "$1.00k");
-    EXPECT_EQ(text(9.996, true), "$10.0");
+    EXPECT_EQ(text(11'000, true), "$11k");
+    EXPECT_EQ(text(1'000'000, true), "$1M");
+    EXPECT_EQ(text(999.6, true), "$1k");
+    EXPECT_EQ(text(9.996, true), "$10");
     EXPECT_EQ(text(99.96, true), "$100");
-    EXPECT_EQ(text(12.5, false), "12.5 BTC");
-    EXPECT_EQ(text(0.000123, false), "0.000123 BTC");
-    EXPECT_EQ(text(2.5e12, true), "$2.50T");
+    EXPECT_EQ(text(1'236, true), "$1.24k");
+    EXPECT_EQ(text(12.5, false), "12.5");
+    EXPECT_EQ(text(0.358, false), "0.358");
+    EXPECT_EQ(text(0.000123, false), "0.000123");
+    EXPECT_EQ(text(2.5e12, true), "$2.5T");
     EXPECT_EQ(text(0, true), "");
     EXPECT_EQ(text(std::nan(""), true), "");
 }
@@ -167,7 +173,7 @@ TEST_F(LabelLayout, SizeGrowsFrom12To15AndNeverShrinksBelow12) {
                          Case{120, 14, 12, 12, true},    // exactly fits 12 px
                          Case{120, 15.5, 13.5, 13.5, true},
                          Case{200, 80, 15, 15, true},    // large cells: capped at 15
-                         Case{42, 80, 12, 12, true}}) {  // narrow: 12 px, only the labels that fit
+                         Case{36, 80, 12, 12, true}}) {  // narrow: 12 px, only the labels that fit
         SCOPED_TRACE(std::to_string(c.cellW) + "x" + std::to_string(c.cellH));
         const QRectF rect(0, 0, 6 * c.cellW, 4 * c.cellH);
         layout.layout(cells, atlas(), fit(rect, 6, 4), 1.0, style(), glyphs);
@@ -180,15 +186,15 @@ TEST_F(LabelLayout, SizeGrowsFrom12To15AndNeverShrinksBelow12) {
         for (const auto &g : glyphs) EXPECT_LE(g.rect.height(), layout.stats().sizePx * 1.6);
     }
     // Narrow cells: every drawn label's ink fits its cell; the rest are counted.
-    const QRectF narrow(0, 0, 6 * 42, 4 * 80);
+    const QRectF narrow(0, 0, 6 * 36, 4 * 80);
     layout.layout(cells, atlas(), fit(narrow, 6, 4), 1.0, style(), glyphs);
     EXPECT_GT(layout.stats().tooNarrow, 0u);
     for (const auto &[anchor, n] : labels(glyphs)) {
         double right = 0;
         for (const auto &g : glyphs)
             if (g.debugAnchor == QPointF(anchor.first, anchor.second)) right = std::max(right, g.rect.right());
-        const double cellLeft = std::floor(anchor.first / 42) * 42;
-        EXPECT_LE(right, cellLeft + 42 + 0.5) << "ink plus the atlas padding stays in the cell";
+        const double cellLeft = std::floor(anchor.first / 36) * 36;
+        EXPECT_LE(right, cellLeft + 36 + 0.5) << "ink plus the atlas padding stays in the cell";
     }
 }
 
@@ -288,7 +294,7 @@ TEST_F(LabelLayout, CurrencyToggleDrawsTheOtherBuffer) {
     layout.layout(cells, atlas(), fit(rect, 4, 3), 1.0, s, glyphs);
     EXPECT_EQ(layout.stats().rebuilds, 2u);
     EXPECT_EQ(layout.stats().labels, 12u);
-    EXPECT_NE(glyphs.size(), usdGlyphs); // " BTC" vs "$"
+    EXPECT_NE(glyphs.size(), usdGlyphs); // "$" and k/M vs the plain number
 }
 
 // Text colour follows the cell's palette colour: dark on bright cells.
@@ -307,6 +313,67 @@ TEST_F(LabelLayout, DarkTextOnBrightCells) {
     for (const auto &g : glyphs) (g.debugAnchor.x() < 200 ? left : right).insert(g.color.rgba());
     EXPECT_EQ(left, std::set<QRgb>{HeatmapLabelLayout::kLightText});
     EXPECT_EQ(right, std::set<QRgb>{HeatmapLabelLayout::kDarkText});
+}
+// The submit path (S7b review): ChartTextRenderer counts glyphs per colour with
+// no per-call container and grows its colour buckets geometrically; ChartTextNode
+// grows its geometry geometrically. Rising glyph counts reallocate O(log n) times,
+// steady counts never.
+TEST_F(LabelLayout, TextSubmissionAndGeometryGrowGeometrically) {
+    std::vector<ChartGlyphInstance> batch;
+    batch.reserve(40'000);
+    auto fill = [&](size_t n) {
+        batch.clear();
+        for (size_t i = 0; i < n; ++i) {
+            ChartGlyphInstance g;
+            g.rect = QRectF(double(i % 900), double(i / 900), 6, 9);
+            g.uv = QRectF(0, 0, 0.01, 0.5);
+            g.color = QColor::fromRgba(i % 3 ? HeatmapLabelLayout::kLightText : HeatmapLabelLayout::kDarkText);
+            batch.push_back(g);
+        }
+    };
+    QSGNode root;
+    ChartTextRenderer renderer;
+    ChartTextNode node;
+    size_t rendererGrowths = 0, nodeGrowths = 0, lastBytes = 0;
+    int lastCapacity = 0;
+    for (int frame = 0; frame < 120; ++frame) { // 250 .. 30,000 glyphs, rising every frame
+        fill(250 + size_t(frame) * 250);
+        renderer.beginFrame(&root, nullptr, atlas());
+        renderer.submitGlyphs(batch, ChartTextRenderer::Priority::High);
+        node.updateGeometry(batch);
+        rendererGrowths += renderer.capacityBytes() != lastBytes;
+        nodeGrowths += node.capacityGlyphs() != lastCapacity;
+        lastBytes = renderer.capacityBytes();
+        lastCapacity = node.capacityGlyphs();
+    }
+    EXPECT_LE(rendererGrowths, 30u) << "buckets grow geometrically, not to every new maximum";
+    EXPECT_LE(nodeGrowths, 16u) << "geometry grows geometrically, not to every new maximum";
+    // Exact-size growth would reallocate on all 120 rising frames.
+    // Steady and falling counts: nothing grows.
+    for (int frame = 0; frame < 120; ++frame) {
+        fill(frame % 2 ? 30'000 : 12'000);
+        renderer.beginFrame(&root, nullptr, atlas());
+        renderer.submitGlyphs(batch, ChartTextRenderer::Priority::High);
+        node.updateGeometry(batch);
+        EXPECT_EQ(renderer.capacityBytes(), lastBytes);
+        EXPECT_EQ(node.capacityGlyphs(), lastCapacity);
+    }
+    // Unused vertices after the drawn glyphs are degenerate (zero), so a shorter
+    // frame draws nothing stale.
+    fill(10);
+    node.updateGeometry(batch);
+    const auto *v = node.geometry()->vertexDataAsTexturedPoint2D();
+    for (int i = 10 * 6; i < 30'000 * 6; i += 997) EXPECT_EQ(v[i].x, 0.0f) << i;
+    // More colours than the counter tracks still submit every glyph.
+    batch.clear();
+    for (int i = 0; i < 40; ++i) {
+        ChartGlyphInstance g;
+        g.color = QColor::fromRgb(i * 5, 0, 0);
+        batch.push_back(g);
+    }
+    renderer.beginFrame(&root, nullptr, atlas());
+    renderer.submitGlyphs(batch, ChartTextRenderer::Priority::High);
+    EXPECT_EQ(renderer.droppedGlyphs(), 0);
 }
 } // namespace
 

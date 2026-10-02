@@ -27,6 +27,8 @@ public:
     int droppedGlyphs() const { return m_droppedGlyphs; }
     int droppedHighGlyphs() const { return m_droppedHighGlyphs; }
     int droppedLowGlyphs() const { return m_droppedLowGlyphs; }
+    // Bytes held by the colour buckets (tests: no growth in steady state).
+    size_t capacityBytes() const;
 
 private:
     struct Bucket {

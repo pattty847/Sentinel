@@ -51,6 +51,17 @@ bool HeatmapBudgets::valid() const {
            spanSources <= cpuCeiling - decodedChunks;
 }
 
+uint64_t spanContentId(const SpanSnapshot &span) {
+    size_t h = 0x9e3779b97f4a7c15ull;
+    bool any = false;
+    for (const auto &source : span.sources) {
+        if (!source.build) continue;
+        mix(h, SpanSourceKeyHash{}(source.build->key));
+        any = true;
+    }
+    return any ? (uint64_t(h) | 1u) : 0;
+}
+
 size_t SpanSourceKeyHash::operator()(const SpanSourceKey &key) const {
     size_t h = std::hash<std::string>{}(key.span.symbol);
     mix(h, key.span.tfMs);
