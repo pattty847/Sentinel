@@ -676,6 +676,8 @@ TEST_F(UgrGpu, PriceAxisFitUnderTheManualClampCentresTheCurrentPrice) {
     manual.manualTick = 1000;
     ugr->setHeatmapChartSettings(manual, true);
     const auto *view = ugr->getViewState();
+    // The limits need BTC's price scale (its first snapshot).
+    ASSERT_TRUE(pump(30'000, [&] { return layer().priceScaleCurrent() && view->maxPriceSpan() > 0; }));
     ASSERT_DOUBLE_EQ(view->maxPriceSpan(), 3200);
     const double row = 10;
     CandleSeriesBuffer buffer;
@@ -1192,6 +1194,96 @@ TEST_F(UgrGpu, SymbolSwitchCarryAcrossPriceScalesAndUnpricedSwitches) {
     EXPECT_GT(std::abs((view->getMaxPrice() - view->getMinPrice()) - 2'000), 100) << "the default seed, no carry";
     EXPECT_NEAR((view->getMaxPrice() + view->getMinPrice()) / 2, 100'000, 1e-6);
     ugr->setCandleBuffer(nullptr);
+}
+
+// Review round 3: a fit is all or nothing. Before any snapshot (no book, trade or
+// candle: no price) the time part fits but the price part cannot, so "both" changes
+// nothing and reports the failure; "time" alone still works.
+TEST_F(UgrGpu, FitRequestsAreAllOrNothing) {
+    gpuOn();
+    auto *view = ugr->getViewState();
+    ASSERT_GT(layer().liveAnchorMs(), 0) << "the time part can fit";
+    ASSERT_FALSE(layer().snapshot());
+    const int64_t t0 = view->getVisibleTimeStart(), t1 = view->getVisibleTimeEnd();
+    const uint64_t v = view->getViewportVersion();
+    UnifiedGridRenderer::ViewportRequest both;
+    both.fit = "both";
+    EXPECT_EQ(ugr->applyViewportRequest(both), QString("fit_unavailable"));
+    EXPECT_EQ(view->getViewportVersion(), v) << "nothing changed";
+    EXPECT_EQ(view->getVisibleTimeStart(), t0);
+    EXPECT_EQ(view->getVisibleTimeEnd(), t1);
+    EXPECT_FALSE(ugr->autoPriceScale());
+    UnifiedGridRenderer::ViewportRequest time;
+    time.fit = "time";
+    EXPECT_EQ(ugr->applyViewportRequest(time), QString());
+    EXPECT_NE(view->getVisibleTimeStart(), t0);
+}
+
+// Review round 3: a switch before any snapshot exists. The fallback scale (100) is
+// nobody's: the carry stays pending and is applied again from the then current price
+// once the new symbol's recorded scale arrives.
+TEST_F(UgrGpu, CarryWaitsForTheScaleWhenNoSnapshotExistsYet) {
+    gpuOn();
+    auto manual = brightSettings();
+    manual.tickMode = heatmap::TickMode::Manual;
+    manual.manualTick = 1000;
+    ugr->setHeatmapChartSettings(manual, true);
+    auto *view = ugr->getViewState();
+    ASSERT_FALSE(layer().snapshot());
+    EXPECT_FALSE(layer().priceScaleCurrent());
+    EXPECT_EQ(view->maxPriceSpan(), 0.0) << "no snapshot: the limits are unknown";
+    const int64_t t0 = view->getVisibleTimeStart(), t1 = view->getVisibleTimeEnd();
+    ugr->setViewport(t0, t1, 99'500, 101'500);
+    ugr->setLiveBookTop(99'999, 100'001);
+    ugr->setActiveSymbol("TINY-USD");
+    ugr->setLiveBookTop(0.0000099, 0.0000101);
+    auto expectCarried = [&](double mid, const char *what) {
+        const double span = mid * 0.02;
+        EXPECT_NEAR(view->getMaxPrice() - view->getMinPrice(), span, span * 1e-6) << what;
+        EXPECT_NEAR(view->getMinPrice(), mid - 0.25 * span, span * 1e-6) << what;
+    };
+    expectCarried(0.00001, "at the first price");
+    ugr->setLiveBookTop(0.0000109, 0.0000111); // the price moves before the scale is known
+    ASSERT_TRUE(pump(30'000, [&] { return layer().priceScaleCurrent() && view->maxPriceSpan() > 0; }));
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    expectCarried(0.000011, "applied again once TINY's scale is known");
+}
+
+// Review round 3: a live-only symbol (no recorded availability) never gets a price
+// scale. kCarryLiveOnlyWaitMs after its first price the carry is applied from the live
+// price and consumed, with no Manual max span.
+TEST_F(UgrGpu, LiveOnlySymbolCarryAppliesAfterTheWait) {
+    gpuOn();
+    auto manual = brightSettings();
+    manual.tickMode = heatmap::TickMode::Manual;
+    manual.manualTick = 1000;
+    ugr->setHeatmapChartSettings(manual, true);
+    auto *view = ugr->getViewState();
+    const int64_t t0 = view->getVisibleTimeStart(), t1 = view->getVisibleTimeEnd();
+    ugr->setViewport(t0, t1, 99'500, 101'500);
+    ugr->setLiveBookTop(99'999, 100'001);
+    ugr->setActiveSymbol("ETH-USD"); // not recorded
+    ugr->setLiveBookTop(2'999, 3'001);
+    auto expectCarried = [&](double mid, const char *what) {
+        const double span = mid * 0.02;
+        EXPECT_NEAR(view->getMaxPrice() - view->getMinPrice(), span, span * 1e-6) << what;
+        EXPECT_NEAR(view->getMinPrice(), mid - 0.25 * span, span * 1e-6) << what;
+    };
+    expectCarried(3'000, "at the first price (pending)");
+    ugr->setLiveBookTop(3'099, 3'101);
+    auto wait = [&](int ms) {
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < ms) QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    };
+    wait(UnifiedGridRenderer::kCarryLiveOnlyWaitMs + 600);
+    EXPECT_FALSE(layer().priceScaleCurrent()) << "no recorded scale for ETH-USD";
+    expectCarried(3'100, "applied from the live price after the wait");
+    EXPECT_EQ(view->maxPriceSpan(), 0.0) << "no Manual max span without a scale";
+    // Consumed: later prices do not move the view.
+    ugr->setLiveBookTop(3'199, 3'201);
+    wait(UnifiedGridRenderer::kCarryLiveOnlyWaitMs + 600);
+    expectCarried(3'100, "consumed");
 }
 
 // The Now column (the live bucket) keeps its screen x and the bar width stays across

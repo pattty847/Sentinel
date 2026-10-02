@@ -247,8 +247,13 @@ void GridViewState::handlePanMove(const QPointF& position) {
     emit panVisualOffsetChanged();
     // Auto price scale: the price follows the candles the drag reveals (TradingView),
     // a viewport change only when the fit for the displayed window changed.
-    if (m_autoPriceScale && m_priceFit && m_timeWindowValid && delta.x() != 0.0)
+    if (m_autoPriceScale && m_priceFit && m_timeWindowValid && delta.x() != 0.0) {
+        QElapsedTimer cost;
+        cost.start();
+        const uint64_t version = m_viewportVersion;
         setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
+        sLog_Probe("viewport.dragfit", "us=" << cost.nsecsElapsed() / 1000.0 << " bumped=" << (m_viewportVersion != version));
+    }
 }
 
 void GridViewState::handlePanEnd(bool applyViewport) {

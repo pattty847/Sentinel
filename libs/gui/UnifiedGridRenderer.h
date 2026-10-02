@@ -333,6 +333,10 @@ public:
     // bucket, price fitted. One viewport change; false while no live anchor is known.
     Q_INVOKABLE bool resetView();
     static constexpr double kFitPriceMargin = 0.06;
+    // A pending auto-off symbol carry waits this long after the new symbol's first
+    // usable price for its recorded price scale; then (live-only symbol) it is applied
+    // from the live price with no Manual max span.
+    static constexpr int kCarryLiveOnlyWaitMs = 2000;
     // POST /api/v1/viewport (validated by AgentApiCodec). The flags and the final
     // window are resolved first and committed as ONE viewport change. Explicit price
     // bounds (even equal to the current ones) turn auto price scale and follow-live
@@ -535,7 +539,9 @@ private:
     std::optional<PriceCarry> m_priceCarry;
     // The carry onto price `now`, one viewport change; kept pending until the layer's
     // price scale is the new symbol's. False (nothing applied) for an unusable price.
-    bool applyPriceCarry(double now);
+    // liveOnly: the live-only fallback (consume without a recorded price scale).
+    bool applyPriceCarry(double now, bool liveOnly = false);
+    QTimer* m_carryWaitTimer = nullptr;
     double m_gpuBookMid = 0.0;   // gpu mode: newest book-top mid of the active symbol
     double m_gpuLastTrade = 0.0; // gpu mode: newest trade price of the active symbol
     qint64 gpuInitialSpanMs(double widthPx) const;

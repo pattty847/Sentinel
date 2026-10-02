@@ -475,6 +475,7 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
   // gpu mode: the controller serial switches the heatmap (the node holds the old
   // picture until the new spans are ready); clearData() resets only the legacy
   // stream and the trade overlays. The next book top centres the new price.
+  if (m_carryWaitTimer) m_carryWaitTimer->stop(); // the live-only wait is per symbol
   // Reseed first: the layer's limitsChanged (setSymbol) must not apply a pending carry
   // before the new symbol has a price of its own.
   if (m_gpuHeatmap) m_gpuReseedPrice = true;
@@ -1094,7 +1095,7 @@ void UnifiedGridRenderer::seedGpuViewport(double bestBid, double bestAsk) {
   update();
 }
 
-bool UnifiedGridRenderer::applyPriceCarry(double now) {
+bool UnifiedGridRenderer::applyPriceCarry(double now, bool liveOnly) {
   if (!m_priceCarry || !m_viewState || !(now > 0) || !std::isfinite(now)) return false;
   const double span = m_priceCarry->spanRatio * now;
   const double lo = now - m_priceCarry->heightFrac * span, hi = lo + span;
@@ -1104,10 +1105,27 @@ bool UnifiedGridRenderer::applyPriceCarry(double now) {
   }
   // Consumed once the layer's price scale (and so its limits) is the new symbol's;
   // before that the limits are unknown (no clamp) and the carry is applied again
-  // from the then current price when they arrive (limitsChanged).
-  const bool confirmed = m_gpuLayer && m_gpuLayer->priceScaleCurrent();
-  sLog_Render("price carry applied: now=" << now << " price=[" << lo << ".." << hi << "] confirmed=" << confirmed);
-  if (confirmed) m_priceCarry.reset();
+  // from the then current price when they arrive (limitsChanged). A live-only symbol
+  // (no recorded availability) never gets one: kCarryLiveOnlyWaitMs after the first
+  // pending apply, the carry is applied from the live price and consumed, with no
+  // Manual max span (the limits stay unknown).
+  const bool confirmed = liveOnly || (m_gpuLayer && m_gpuLayer->priceScaleCurrent());
+  sLog_Render("price carry applied: now=" << now << " price=[" << lo << ".." << hi << "] confirmed=" << confirmed
+              << " liveOnly=" << liveOnly);
+  if (confirmed) {
+    m_priceCarry.reset();
+    if (m_carryWaitTimer) m_carryWaitTimer->stop();
+  } else {
+    if (!m_carryWaitTimer) {
+      m_carryWaitTimer = new QTimer(this);
+      m_carryWaitTimer->setSingleShot(true);
+      connect(m_carryWaitTimer, &QTimer::timeout, this, [this] {
+        if (m_gpuHeatmap && m_gpuLayer && m_priceCarry && !m_gpuReseedPrice && !m_gpuLayer->priceScaleCurrent())
+          applyPriceCarry(gpuLivePrice(), true);
+      });
+    }
+    if (!m_carryWaitTimer->isActive()) m_carryWaitTimer->start(kCarryLiveOnlyWaitMs);
+  }
   setGpuViewportSelf(m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd(), lo, hi);
   return true;
 }
@@ -1349,25 +1367,22 @@ bool UnifiedGridRenderer::fitView(bool time, bool price) {
   }
   qint64 start = m_viewState->getVisibleTimeStart(), end = m_viewState->getVisibleTimeEnd();
   double lo = m_viewState->getMinPrice(), hi = m_viewState->getMaxPrice();
-  bool any = false;
+  // All or nothing: every requested part must fit, else nothing changes (a failed fit
+  // leaves the view, follow-live and the auto price scale as they were).
+  bool ok = true;
   if (time) {
-    if (const auto window = gpuFitTimeWindow()) {
-      std::tie(start, end) = *window;
-      any = true;
-    }
+    if (const auto window = gpuFitTimeWindow()) std::tie(start, end) = *window;
+    else ok = false;
   }
-  bool priceFitted = false;
-  if (price) {
+  if (price && ok) {
     // Candles, else the live price (setViewport's auto fit takes the candles first).
-    if (const auto window = gpuFitPriceWindow(start, end, false)) {
-      std::tie(lo, hi) = *window;
-      priceFitted = any = true;
-    }
+    if (const auto window = gpuFitPriceWindow(start, end, false)) std::tie(lo, hi) = *window;
+    else ok = false;
   }
-  sLog_Render("view fit time=" << time << " price=" << price << " applied=" << any << " time=[" << start << ".."
+  sLog_Render("view fit time=" << time << " price=" << price << " applied=" << ok << " time=[" << start << ".."
               << end << "] price=[" << lo << ".." << hi << "]");
-  if (!any) return false; // nothing changes (a failed fit leaves the auto price scale as it was)
-  if (priceFitted) {
+  if (!ok) return false;
+  if (price) {
     m_gpuPriceKnown = true;
     m_gpuReseedPrice = false;
     m_viewState->setAutoPriceScale(true); // a price fit is the auto price scale

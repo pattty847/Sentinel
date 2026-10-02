@@ -217,7 +217,8 @@ double HeatmapGpuLayer::maxTimeSpanMs() const {
 }
 
 bool HeatmapGpuLayer::priceScaleCurrent() const {
-    return !snapshot_ || (snapshot_->symbol == symbol_ && snapshot_->priceScaleKnown);
+    // No snapshot yet: unknown (the 100 fallback is nobody's scale).
+    return snapshot_ && snapshot_->symbol == symbol_ && snapshot_->priceScaleKnown;
 }
 
 double HeatmapGpuLayer::maxPriceSpan() const {

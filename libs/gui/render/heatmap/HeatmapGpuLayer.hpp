@@ -72,7 +72,8 @@ public:
     double maxTimeSpanMs() const;
     double maxPriceSpan() const;
     // The price scale is the active symbol's: false while the previous symbol's
-    // snapshot is still the newest after a switch. The price-span limits are unknown
+    // snapshot is still the newest after a switch, or no snapshot exists yet, or the
+    // symbol has no recorded availability (live only). The price-span limits are unknown
     // (0) until then: another symbol's scale must not size them.
     bool priceScaleCurrent() const;
     // Zoom-in floors: kMinZoomColumns columns of the timeframe; kMinZoomRows rows of
