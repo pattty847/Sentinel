@@ -66,10 +66,12 @@ inline NativeRows aggregateRows(std::span<const NativeColumn* const> sources, De
                 cells[static_cast<size_t>(high - lo)].delta[side] -= static_cast<int64_t>(run.coveredMs);
             }
             const auto* decoded = n->composed ? nullptr : &tables.get(n->sizeScale);
-            for (size_t i = 0; i < n->entries.size(); ++i) {
+            const auto first = std::lower_bound(n->entries.begin(), n->entries.end(), lo,
+                [&](const auto& entry, int64_t row) { return n->baseRow + entry.row() < row; });
+            for (size_t i = size_t(first - n->entries.begin()); i < n->entries.size(); ++i) {
                 const auto& entry = n->entries[i];
                 const auto row = n->baseRow + entry.row();
-                if (row < lo || row >= end) continue;
+                if (row >= end) break;
                 const auto value = n->composed ? entryNumerator(*n, i) :
                     static_cast<long double>((*decoded)[entry.code]) * entryCoveredMs(*n, i);
                 cells[static_cast<size_t>(row - lo)].numerator[entry.isAsk()] += value;
@@ -112,8 +114,12 @@ inline NativeRows aggregateRows(std::span<const NativeColumn* const> sources, De
     };
     auto later = [&](const Cursor& a, const Cursor& b) { return key(a) > key(b); };
     std::priority_queue<Cursor, std::vector<Cursor>, decltype(later)> queue(later);
-    for (size_t source = 0; source < sources.size(); ++source)
-        if (!sources[source]->entries.empty()) queue.push({source, 0});
+    for (size_t source = 0; source < sources.size(); ++source) {
+        const auto* n = sources[source];
+        const auto first = std::lower_bound(n->entries.begin(), n->entries.end(), lo,
+            [&](const auto& entry, int64_t row) { return n->baseRow + entry.row() < row; });
+        if (first != n->entries.end()) queue.push({source, size_t(first - n->entries.begin())});
+    }
     while (!queue.empty()) {
         auto cursor = queue.top(); queue.pop();
         const auto* n = sources[cursor.source];

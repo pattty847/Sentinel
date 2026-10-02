@@ -249,12 +249,25 @@ target_link_libraries(test_TpoProfileModel PRIVATE sentinel_gui_lib GTest::gtest
 add_test(NAME TpoProfileModelTests COMMAND test_TpoProfileModel)
 set_tests_properties(TpoProfileModelTests PROPERTIES LABELS "render")
 
+# S7a cell oracle and local-recording benchmark (QCoreApplication, no GPU runs).
+add_executable(test_heatmap_cell_query test_heatmap_cell_query.cpp
+    ${CMAKE_SOURCE_DIR}/libs/gui/render/HeatmapColumnWindow.cpp
+    ${CMAKE_SOURCE_DIR}/libs/gui/render/HeatmapStreamState.cpp)
+target_link_libraries(test_heatmap_cell_query PRIVATE sentinel_heatmap_gpu GTest::gtest_main)
+add_test(NAME HeatmapCellQueryTests COMMAND test_heatmap_cell_query)
+set_tests_properties(HeatmapCellQueryTests PROPERTIES LABELS "render;heatmap")
+
+add_executable(heatmap_cell_query_bench heatmap_cell_query_bench.cpp)
+target_link_libraries(heatmap_cell_query_bench PRIVATE sentinel_heatmap_gpu)
+
 # S5b CPU controller: compile only CPU sources, link QtCore (no GPU required).
 add_executable(test_heatmap_source_controller
     test_heatmap_source_controller.cpp
     test_heatmap_live_client.cpp
     ${CMAKE_SOURCE_DIR}/libs/gui/render/heatmap/HeatmapSourceController.cpp
     ${CMAKE_SOURCE_DIR}/libs/gui/render/heatmap/HeatmapSourceController.hpp
+    ${CMAKE_SOURCE_DIR}/libs/gui/render/heatmap/HeatmapCellQuery.cpp
+    ${CMAKE_SOURCE_DIR}/libs/gui/render/heatmap/HeatmapCellQuery.hpp
     ${CMAKE_SOURCE_DIR}/libs/gui/render/heatmap/HeatmapGpuSource.cpp
 )
 target_include_directories(test_heatmap_source_controller PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)

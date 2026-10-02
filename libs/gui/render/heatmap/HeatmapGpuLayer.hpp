@@ -1,4 +1,5 @@
 #pragma once
+#include "HeatmapCellQuery.hpp"
 // The main chart's GPU heatmap layer (S6b, docs/research/2026-10-s6-plan.md
 // section 2): LabItem without view ownership. UnifiedGridRenderer owns one per
 // chart (GUI thread) and gives it the symbol, timeframe, the committed view of
@@ -99,6 +100,8 @@ public:
     // The stats every node of this layer writes (one object for the layer's life).
     std::shared_ptr<HeatmapTileStats> tileStatsPtr() const { return tileStats_; }
     HeatmapSourceController *controller() const { return controller_; }
+    void scanWalls(const heatmap_window::WallQuery &query,
+                   std::function<void(heatmap_window::WallsSnapshot)> completion);
     // Agent API heatmap state (plan section 5); refreshes the controller stats
     // asynchronously for the next call.
     QJsonObject state() const;

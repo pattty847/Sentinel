@@ -17,10 +17,11 @@ namespace heatmap {
 // ------------------------------------------------------------------ spans
 // Lower rank wins (fetch, build and admission order; eviction takes the highest).
 // Visible: tiles the view touches. Fallback: the previous tf's visible spans while
-// the current tf's visible spans are still building (never evicted). Prefetch:
+// the current tf's visible spans are still building (never evicted). Label:
+// optional cell-query reloads, below the drawn picture. Prefetch:
 // ordered by tile distance from the view. RecentTf: the previous tf's visible
 // spans once the current view is complete (evicted first).
-enum class SpanTier : uint8_t { Visible, Fallback, Prefetch, RecentTf };
+enum class SpanTier : uint8_t { Visible, Fallback, Label, Prefetch, RecentTf };
 const char *spanTierName(SpanTier tier);
 struct SpanRank {
     SpanTier tier = SpanTier::Visible;

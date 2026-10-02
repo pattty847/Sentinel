@@ -11,8 +11,17 @@ Identity identity(const NativeColumn& n) {
     return {n.grid.rowTickUnits, n.grid.priceScale, n.grid.configHash,
             n.sizeScale.floor, n.sizeScale.codesPerOctave};
 }
-NativeColumn combine(std::span<const NativeColumn* const> sources, detail::DecodeTables& tables) {
-    auto rows = detail::aggregateRows(sources, tables);
+NativeColumn combine(std::span<const NativeColumn* const> sources, detail::DecodeTables& tables,
+                     const std::optional<ComposeOptions::PriceClip>& price) {
+    int64_t lo = INT64_MIN, end = INT64_MAX;
+    if (price) {
+        const auto& grid = sources.front()->grid;
+        const double tick = double(grid.rowTickUnits) / grid.priceScale;
+        if (price->end / tick > 0x1p52) throw std::invalid_argument("heatmap compose price overflow");
+        lo = static_cast<int64_t>(std::floor(price->lo / tick));
+        end = static_cast<int64_t>(std::ceil(price->end / tick));
+    }
+    auto rows = detail::aggregateRows(sources, tables, lo, end);
     NativeColumn out;
     out.grid = sources.front()->grid;
     out.sizeScale = sources.front()->sizeScale;
@@ -42,7 +51,8 @@ NativeColumn combine(std::span<const NativeColumn* const> sources, detail::Decod
     return out;
 }
 SparseColumn composeColumnWithTables(std::span<const SparseColumn* const> sources, int64_t startMs, int64_t tfMs,
-                                     detail::DecodeTables &tables) {
+                                     detail::DecodeTables &tables,
+                                     const std::optional<ComposeOptions::PriceClip>& price = {}) {
     SparseColumn column;
     column.bucketStartMs = startMs;
     struct Group { Identity key; std::vector<const NativeColumn*> sources; };
@@ -60,7 +70,7 @@ SparseColumn composeColumnWithTables(std::span<const SparseColumn* const> source
     column.flags &= ~recording::kPartial;
     if (column.observedMs < uint64_t(tfMs)) column.flags |= recording::kPartial;
     std::sort(groups.begin(), groups.end(), [](const auto& a, const auto& b) { return a.key < b.key; });
-    for (const auto& group : groups) column.native.push_back(combine(group.sources, tables));
+    for (const auto& group : groups) column.native.push_back(combine(group.sources, tables, price));
     return column;
 }
 } // namespace
@@ -87,6 +97,9 @@ SparseColumns compose(std::span<const SparseColumns* const> levels, int64_t tfMs
     if (options.startMs.has_value() != options.endMs.has_value() ||
         (options.startMs && (*options.startMs % tfMs || *options.endMs % tfMs || *options.endMs <= *options.startMs)))
         throw std::invalid_argument("invalid heatmap compose clip");
+    if (options.price && (!std::isfinite(options.price->lo) || !std::isfinite(options.price->end) ||
+                          options.price->lo < 0 || options.price->end <= options.price->lo))
+        throw std::invalid_argument("invalid heatmap compose price clip");
     SparseColumns out;
     out.symbol = levels.front()->symbol;
     out.layer = levels.front()->layer;
@@ -172,7 +185,8 @@ SparseColumns compose(std::span<const SparseColumns* const> levels, int64_t tfMs
         const auto begin = i;
         const auto bucket = recording::floorDiv(sourceColumns[i]->bucketStartMs, tfMs) * tfMs;
         while (i < sourceColumns.size() && sourceColumns[i]->bucketStartMs < bucket + tfMs) ++i;
-        out.columns.push_back(composeColumnWithTables(std::span(sourceColumns).subspan(begin, i - begin), bucket, tfMs, tables));
+        out.columns.push_back(composeColumnWithTables(std::span(sourceColumns).subspan(begin, i - begin), bucket, tfMs,
+                                                     tables, options.price));
     }
     if (!options.trustedInputs) validate(out);
     return out;

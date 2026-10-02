@@ -1,4 +1,5 @@
 #include "HeatmapSourceController.hpp"
+#include "HeatmapCellQuery.hpp"
 #include "SentinelLogging.hpp"
 #include <QPointer>
 #include <QThread>
@@ -158,7 +159,7 @@ struct SpanSourceCache::State {
         std::vector<ChunkBytes> keys;
         size_t reservation = 0;
     };
-    std::unordered_map<const HeatmapSourceController *, Commitment> commitments;
+    std::unordered_map<const void *, Commitment> commitments;
     size_t chartReservations = 0;
     void addRefs(const std::vector<ChunkBytes> &keys) {
         for (const auto &in : keys) {
@@ -201,7 +202,7 @@ void SpanSourceCache::setCpuCeiling(size_t bytes) {
     emit budgetsChanged();
 }
 size_t SpanSourceCache::committedCpuBytes() const { return state_->total(); }
-size_t SpanSourceCache::projectedCpuBytes(const HeatmapSourceController *self, const std::vector<ChunkBytes> &keys,
+size_t SpanSourceCache::projectedCpuBytes(const void *self, const std::vector<ChunkBytes> &keys,
                                           size_t reservation) const {
     const auto &s = *state_;
     const auto it = s.commitments.find(self);
@@ -227,7 +228,7 @@ size_t SpanSourceCache::projectedCpuBytes(const HeatmapSourceController *self, c
     }
     return size_t(std::max<int64_t>(bytes, 0));
 }
-void SpanSourceCache::commitCpu(const HeatmapSourceController *self, std::vector<ChunkBytes> keys, size_t reservation,
+void SpanSourceCache::commitCpu(const void *self, std::vector<ChunkBytes> keys, size_t reservation,
                                 bool atKeeper) {
     auto &s = *state_;
     auto &commitment = s.commitments[self];
@@ -441,7 +442,7 @@ bool SpanSourceCache::request(SpanSourceInput input, int priority, size_t reserv
 }
 
 bool SpanSourceCache::requestLive(std::vector<ChunkBytes> chunks, size_t reserveBytes, QObject *context,
-                                  std::function<void()> work, std::function<void(QString)> completion) {
+                                  std::function<void()> work, std::function<void(QString)> completion, int priority) {
     auto &s = *state_;
     if (s.pending.size() + s.liveJobs >= s.options.maxJobs) return false;
     ++s.liveJobs;
@@ -461,9 +462,25 @@ bool SpanSourceCache::requestLive(std::vector<ChunkBytes> chunks, size_t reserve
             emit settled();
         }, Qt::QueuedConnection);
     };
-    if (s.options.executor) s.options.executor(std::move(run), 1'000'000);
-    else pool_.start(std::move(run), 1'000'000);
+    if (s.options.executor) s.options.executor(std::move(run), priority);
+    else pool_.start(std::move(run), priority);
     return true;
+}
+
+bool SpanSourceCache::tryCommitQuery(const QObject *owner, std::vector<ChunkBytes> keys, size_t bytes) {
+    if (projectedCpuBytes(owner, keys, bytes) > cpuCeiling()) return false;
+    commitCpu(owner, std::move(keys), bytes, false);
+    return true;
+}
+void SpanSourceCache::releaseQuery(const QObject *owner) {
+    commitCpu(owner, {}, 0, false);
+    state_->commitments.erase(owner);
+}
+bool SpanSourceCache::requestQuery(std::vector<ChunkBytes> chunks, size_t reserveBytes, QObject *context,
+                                  std::function<void()> work, std::function<void(QString)> completion) {
+    if (projectedCpuBytes(nullptr, chunks, reserveBytes) > cpuCeiling()) return false;
+    return requestLive(std::move(chunks), reserveBytes, context, std::move(work), std::move(completion),
+                       SpanRank{SpanTier::Label, 0}.fetchPriority());
 }
 
 struct HeatmapSourceController::LiveWork {
@@ -478,6 +495,7 @@ HeatmapSourceController::HeatmapSourceController(ChunkStore &store, ChunkFetcher
                                                  Options options, QObject *parent)
     : QObject(parent), store_(store), fetcher_(fetcher), cache_(cache), options_(options),
       chart_(nextChart.fetch_add(1)), reportedFree_(options.gpuBytes), capacity_(std::make_shared<HeatmapCapacity>()) {
+    cellQuery_ = new HeatmapCellQuery(store_, fetcher_, cache_, nextChart.fetch_add(1), this);
     if (!options_.nowMs) options_.nowMs = [] {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -551,6 +569,7 @@ HeatmapSourceController::HeatmapSourceController(ChunkStore &store, ChunkFetcher
     }
 }
 HeatmapSourceController::~HeatmapSourceController() {
+    delete cellQuery_;
     cache_.detach(this);
     slots_.clear(); // releases claims while the cache is alive
     fetcher_.release(chart_);
@@ -591,6 +610,7 @@ bool HeatmapSourceController::applyBudgets(const HeatmapBudgets &budgets, ChunkS
 }
 
 void HeatmapSourceController::reset() {
+    cellQuery_->cancel();
     liveInterested_ = false;
     liveReleaseMs_.reset();
     liveReleaseTimer_->stop();
@@ -618,6 +638,7 @@ void HeatmapSourceController::setView(const std::string &symbol, int64_t tfMs, d
         reset();
         ++serial_;
     } else if (tfMs != tfMs_) {
+        cellQuery_->cancel();
         resetLive();
         // The previous tf's built visible spans stay as fallback until the new
         // tf's visible spans are built, then as the recent-tf tier.

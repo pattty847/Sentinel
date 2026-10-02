@@ -254,9 +254,6 @@ void GuiApiServer::handleRequest(QTcpSocket* socket) {
                 if (server->m_stateSnapshot().meta.selectionEpoch != meta.selectionEpoch) {
                     server->respond(peer, 409, AgentApi::jsonBytes(AgentApi::error(
                         "selection_changed", "Symbol or timeframe changed while reading walls")), "application/json");
-                } else if (data.status == 409 && data.gpuRenderer) {
-                    server->respond(peer, 409, AgentApi::jsonBytes(AgentApi::error(
-                        "gpu_renderer", "Walls read the legacy heatmap; the chart draws the GPU heatmap (walls return in S7)")), "application/json");
                 } else if (data.status == 409) {
                     server->respond(peer, 409, AgentApi::jsonBytes(AgentApi::error(
                         "recording_required", "Legacy liquidity is absolute, but its intensity side can disagree and rows lack validity")), "application/json");
