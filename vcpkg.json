@@ -9,7 +9,13 @@
     "nlohmann-json",
     "openssl",
     "jwt-cpp",
-    "msdfgen",
+    {
+      "name": "msdfgen",
+      "default-features": false,
+      "features": [
+        "extensions"
+      ]
+    },
     "yaml-cpp",
     "zstd"
   ]

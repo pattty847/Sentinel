@@ -1603,11 +1603,11 @@ TEST(UgrInput, CandlesFollowTheActiveSymbol) {
 
 // A std::runtime_error from a chunk build or an availability scan must become a
 // failed request (the fetcher retries it), never leave the transport's Qt slot.
-// This executable links vcpkg's libskia.a, whose private `typeinfo for
-// std::exception` makes `catch (const std::exception &)` miss a libc++-thrown
-// std::runtime_error: before the fix this test aborted in std::terminate (the
-// ctest aborts seen at teardown were the same defect). Binaries without skia,
-// such as test_chunk_fetcher, cannot show it.
+// This executable used to link vcpkg's libskia.a, whose private `typeinfo for
+// std::exception` made `catch (const std::exception &)` miss a libc++-thrown
+// std::runtime_error: before the catch (...) fix this test aborted in
+// std::terminate (FM-145). skia is gone now (tests/link guards that); the test
+// still pins the transport's own no-throw-out-of-slot behaviour.
 TEST(LocalChunkTransportFaults, ARuntimeErrorBecomesAFailedReplyAndTheWorkerSurvives) {
     ASSERT_NE(fixtureDir, nullptr);
     std::atomic<int> builds{0}, scans{0};

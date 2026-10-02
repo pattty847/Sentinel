@@ -23,12 +23,13 @@ struct LocalChunkTransport::Worker : QObject {
 };
 namespace {
 // Text of the exception being handled; call only inside a catch block.
-// Worker lambdas must catch (...) and use this, never rely on `catch (const std::exception &)`:
-// executables that link vcpkg's libskia.a (sentinel-gui, sentinel-lab and their tests)
-// carry skia's private copy of `typeinfo for std::exception`, and a libc++-thrown
-// std::runtime_error does not derive from that copy. The base-class handler then
-// misses it, the exception leaves the Qt slot and std::terminate aborts the process.
-// Concrete types resolve to libc++'s own typeinfo and still match.
+// Worker lambdas catch (...) and use this, so no exception can leave a Qt slot
+// (std::terminate) whatever its type. Defence in depth for FM-145: binaries that
+// linked vcpkg's libskia.a (via msdfgen's geometry-preprocessing feature) carried a
+// private copy of `typeinfo for std::exception`, and `catch (const std::exception &)`
+// missed libc++-thrown std::runtime_error. The real fix drops skia from vcpkg.json;
+// tests/link (NoLocalStdTypeinfo, ExceptionTypeinfoTests) keeps it from coming back.
+// The concrete-type handlers below are kept: they match even if it ever does.
 std::string currentExceptionMessage() {
     try {
         throw;
