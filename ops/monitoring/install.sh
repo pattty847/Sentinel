@@ -88,7 +88,8 @@ if [[ ! "$topic" =~ ^[A-Za-z0-9_-]{8,64}$ ]]; then
     echo "       Pick a random topic: it is the only secret on ntfy.sh." >&2
     exit 1
 fi
-ntfy_url="https://ntfy.sh/$topic?template=grafana&priority=high"
+# ntfy's built-in template=grafana drops the priority; an inline template keeps it (iOS hides default-priority pushes).
+ntfy_url="https://ntfy.sh/$topic?template=yes&title=%7B%7B.title%7D%7D&message=%7B%7B.message%7D%7D&priority=high"
 
 if [[ $mode == install ]]; then
     brew install victoriametrics grafana node_exporter
