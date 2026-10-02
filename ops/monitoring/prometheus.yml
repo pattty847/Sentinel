@@ -1,0 +1,30 @@
+# VictoriaMetrics scrape config (-promscrape.config). Prometheus syntax.
+# Every target is on 127.0.0.1; job names are what alerts and dashboards select on.
+global:
+  scrape_interval: 15s
+  scrape_timeout: 5s
+
+scrape_configs:
+  # sentinel-server (launchd com.sentinel.recorder): GET /metrics beside /ping.
+  - job_name: sentinel-server
+    static_configs:
+      - targets: ["127.0.0.1:8090"]
+
+  # Slice 2: sentinel-capture on 127.0.0.1:8091. Do not enable before the
+  # capture serves /metrics, or alert A3 fires for a target that never existed.
+  # - job_name: sentinel-capture
+  #   static_configs:
+  #     - targets: ["127.0.0.1:8091"]
+
+  # node_exporter (com.sentinel.node-exporter): cpu, memory, filesystems (T7), disk I/O, load.
+  - job_name: node
+    static_configs:
+      - targets: ["127.0.0.1:9100"]
+
+  # The monitors themselves, for the detail dashboard.
+  - job_name: victoriametrics
+    static_configs:
+      - targets: ["127.0.0.1:8428"]
+  - job_name: grafana
+    static_configs:
+      - targets: ["127.0.0.1:3000"]

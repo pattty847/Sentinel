@@ -1,0 +1,35 @@
+; Grafana for Sentinel monitoring. Rendered by ops/monitoring/install.sh into
+; ~/Sentinel-runtime/monitoring/grafana/grafana.ini. Provisioning (datasource,
+; dashboards, alerts) is read from the repo, so edits land through git.
+[paths]
+data = @RT@/grafana/data
+logs = @RT@/grafana/logs
+plugins = @RT@/grafana/plugins
+provisioning = @REPO@/ops/monitoring/grafana/provisioning
+
+[server]
+http_addr = 127.0.0.1
+http_port = 3000
+
+[analytics]
+reporting_enabled = false
+check_for_updates = false
+check_for_plugin_updates = false
+feedback_links_enabled = false
+
+[news]
+news_feed_enabled = false
+
+; Localhost only: anyone on this Mac may view; editing needs the admin login.
+[auth.anonymous]
+enabled = true
+org_role = Viewer
+
+[users]
+allow_sign_up = false
+
+[dashboards]
+default_home_dashboard_path = @REPO@/ops/monitoring/grafana/dashboards/sentinel-health.json
+
+[unified_alerting]
+enabled = true

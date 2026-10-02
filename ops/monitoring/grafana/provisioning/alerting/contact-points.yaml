@@ -1,0 +1,24 @@
+# Every alert goes to one ntfy topic (owner decision 2026-10-02: hosted ntfy.sh,
+# phone only). SENTINEL_NTFY_URL = https://ntfy.sh/<topic>?template=grafana is set
+# in the installed Grafana plist by install.sh from SENTINEL_NTFY_TOPIC or the
+# gitignored ops/monitoring/ntfy.env. The topic never appears in git.
+apiVersion: 1
+contactPoints:
+  - orgId: 1
+    name: ntfy
+    receivers:
+      - uid: sentinel-ntfy
+        type: webhook
+        settings:
+          url: ${SENTINEL_NTFY_URL}
+          httpMethod: POST
+        disableResolveMessage: false
+
+# Replaces the whole default policy tree: one receiver for everything.
+policies:
+  - orgId: 1
+    receiver: ntfy
+    group_by: ["grafana_folder", "alertname"]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h

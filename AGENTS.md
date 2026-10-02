@@ -117,6 +117,12 @@ Look before you claim a visual or performance result.
 - Frame cost: `SENTINEL_FRAME_PROFILE=1` prints per-stage `updatePaintNode` timings once per second into the run log (section 4a).
 - CPU: `sample <pid> <seconds> -file <out>` (macOS). Work that happens outside `updatePaintNode` (Qt texture uploads, QML, other threads) only shows up here.
 
+## 4c) Metrics (after `ops/monitoring/install.sh` has run)
+
+- Instant: `curl -s 127.0.0.1:8090/metrics` (sentinel-server). History: `curl -s 127.0.0.1:8428/api/v1/query --data-urlencode 'query=<promql>'` (VictoriaMetrics, 1 y). Dashboards: http://127.0.0.1:3000.
+- Examples: `up`, `max by (product,layer) (sentinel_recorder_column_overdue_seconds)`, `increase(sentinel_recorder_invalidations_total[1h])`.
+- Metric list, alerts, install and how to add a metric or panel: `ops/monitoring/README.md`. Hot paths only touch `Counter`/`Gauge` (one relaxed atomic); samplers run on the main thread at scrape.
+
 ## 5) Hot Paths (Treat Like Live Wires)
 
 Changes here require performance caution and small diffs:

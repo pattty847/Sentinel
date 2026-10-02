@@ -1,0 +1,13 @@
+# Dashboards are files in the repo (SENTINEL_REPO comes from the launchd plist).
+# UI edits are not saved back: export the JSON into grafana/dashboards/ and commit.
+apiVersion: 1
+providers:
+  - name: sentinel
+    orgId: 1
+    folder: Sentinel
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: ${SENTINEL_REPO}/ops/monitoring/grafana/dashboards

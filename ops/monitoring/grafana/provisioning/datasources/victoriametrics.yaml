@@ -1,0 +1,14 @@
+# VictoriaMetrics answers the Prometheus query API, so Grafana uses the plain
+# Prometheus datasource type. uid sentinel-vm is what dashboards and alerts name.
+apiVersion: 1
+datasources:
+  - name: VictoriaMetrics
+    uid: sentinel-vm
+    type: prometheus
+    access: proxy
+    url: http://127.0.0.1:8428
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
+      httpMethod: POST
