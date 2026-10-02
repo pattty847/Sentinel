@@ -67,6 +67,7 @@ void QmlSceneController::loadQmlSource() {
     }
 
     applyChartModeControllerToRoot();
+    applySymbolToRoot();
 }
 
 void QmlSceneController::verifyGpuAcceleration() {
@@ -102,9 +103,18 @@ void QmlSceneController::setDataSource(QObject* source) {
 }
 
 void QmlSceneController::updateSymbolInContext(const QString& symbol) {
+    m_symbol = symbol;
     if (m_qquickView) {
         m_qquickView->rootContext()->setContextProperty("symbol", symbol);
     }
+    applySymbolToRoot();
+}
+
+// DepthChartView's own `symbol` property (the candle overlay and the paper-trade model
+// bind to it) shadows the context property of the same name: set it on the root.
+void QmlSceneController::applySymbolToRoot() {
+    if (m_symbol.isEmpty() || !m_qquickView || !m_qquickView->rootObject()) return;
+    m_qquickView->rootObject()->setProperty("symbol", m_symbol);
 }
 
 UnifiedGridRenderer* QmlSceneController::getUnifiedGridRenderer() const {

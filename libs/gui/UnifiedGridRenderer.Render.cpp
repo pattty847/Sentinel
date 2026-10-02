@@ -526,6 +526,7 @@ void UnifiedGridRenderer::computeGpuFrameMapping(FrameContext& frame, heatmap::g
     m.dataEndMs = std::ceil(vs.timeEnd / tf) * tf;
     m.actualDataStartMs = vs.timeStart;
     m.actualDataEndMs = vs.timeEnd;
+    m.viewportColumns = true;
     m.dataMinPrice = vs.minPrice;
     m.dataMaxPrice = vs.maxPrice;
     m.appendMs = tf;

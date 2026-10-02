@@ -35,6 +35,17 @@ void GridViewState::setViewport(qint64 timeStart, qint64 timeEnd, double priceMi
         timeStart = static_cast<qint64>(std::llround(centre - static_cast<double>(timeLimit) * 0.5));
         timeEnd = timeStart + timeLimit;
     }
+    if (m_autoPriceScale && m_priceFit) {
+        // Auto price scale: the price range follows the new time range, in this change
+        // (during a drag, the range on screen).
+        double lo = priceMin, hi = priceMax;
+        const qint64 shift = dragShiftMs(timeEnd - timeStart);
+        if (m_priceFit(timeStart + shift, timeEnd + shift, lo, hi) && std::isfinite(lo) && std::isfinite(hi) &&
+            hi > lo) {
+            priceMin = lo;
+            priceMax = hi;
+        }
+    }
     if (m_maxPriceSpan > 0 && priceMax - priceMin > m_maxPriceSpan) {
         const double centre = (priceMin + priceMax) * 0.5;
         priceMin = centre - m_maxPriceSpan * 0.5;
@@ -92,6 +103,22 @@ void GridViewState::setViewportAndMaxSpans(qint64 timeStart, qint64 timeEnd, dou
     setViewport(timeStart, timeEnd, priceMin, priceMax); // clamps to the new limits
 }
 
+qint64 GridViewState::dragShiftMs(qint64 spanMs) const {
+    if (!m_isDragging || m_viewportWidth <= 0 || m_panVisualOffset.x() == 0.0) return 0;
+    return static_cast<qint64>(std::floor(-m_panVisualOffset.x() * static_cast<double>(spanMs) / m_viewportWidth));
+}
+
+std::pair<qint64, qint64> GridViewState::displayedTimeWindow() const {
+    const qint64 shift = dragShiftMs(m_visibleTimeEnd_ms - m_visibleTimeStart_ms);
+    return {m_visibleTimeStart_ms + shift, m_visibleTimeEnd_ms + shift};
+}
+
+void GridViewState::setAutoPriceScale(bool enabled) {
+    if (m_autoPriceScale == enabled) return;
+    m_autoPriceScale = enabled;
+    emit autoPriceScaleChanged();
+}
+
 void GridViewState::setViewportSize(double width, double height) {
     if (width > 0 && height > 0) {
         m_viewportWidth = width;
@@ -139,8 +166,9 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
     const double currentPriceRange = m_maxPrice > m_minPrice ? m_maxPrice - m_minPrice : 1.0;
     // Spec rules 1, 2 and 9: the spans themselves are zoomed and clamped (no relative
     // zoom factor: an axis zoom that widened the view cannot leave the wheel stuck).
+    // Auto price scale: the wheel zooms time only (the price fit follows the candles).
     const int64_t newTimeRange = zoomedTimeSpan(currentTimeRange, zoomMultiplier);
-    const double newPriceRange = zoomedPriceSpan(currentPriceRange, zoomMultiplier);
+    const double newPriceRange = m_autoPriceScale ? currentPriceRange : zoomedPriceSpan(currentPriceRange, zoomMultiplier);
     if (newTimeRange == currentTimeRange && newPriceRange == currentPriceRange) return; // at the limits
 
     double centerTimeRatio = center.x() / viewportSize.width();
@@ -169,7 +197,7 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
         return;
     }
     setViewport(newTimeStart, newTimeEnd, newMinPrice, newMaxPrice);
-    emit priceInteracted();
+    if (!m_autoPriceScale) emit priceInteracted();
     if (m_autoScrollEnabled) {
         m_autoScrollEnabled = false;
         emit autoScrollEnabledChanged();
@@ -212,10 +240,20 @@ void GridViewState::handlePanMove(const QPointF& position) {
     if (!m_isDragging) return;
     
     QPointF delta = position - m_lastMousePos;
+    if (m_autoPriceScale) delta.setY(0.0); // auto price scale: no vertical pan
     m_panVisualOffset += delta;
     m_lastMousePos = position;
     
     emit panVisualOffsetChanged();
+    // Auto price scale: the price follows the candles the drag reveals (TradingView),
+    // a viewport change only when the fit for the displayed window changed.
+    if (m_autoPriceScale && m_priceFit && m_timeWindowValid && delta.x() != 0.0) {
+        QElapsedTimer cost;
+        cost.start();
+        const uint64_t version = m_viewportVersion;
+        setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
+        sLog_Probe("viewport.dragfit", "us=" << cost.nsecsElapsed() / 1000.0 << " bumped=" << (m_viewportVersion != version));
+    }
 }
 
 void GridViewState::handlePanEnd(bool applyViewport) {
@@ -223,6 +261,9 @@ void GridViewState::handlePanEnd(bool applyViewport) {
 
     m_isDragging = false;
     if (!applyViewport) {
+        // A cancelled drag: the time stays, so the price fits the committed window again.
+        if (m_autoPriceScale && m_priceFit && m_timeWindowValid)
+            setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
         return;
     }
     const double threshold = 1.0;
@@ -299,6 +340,9 @@ void GridViewState::handlePriceZoomWithSensitivity(double rawDelta, double cente
         return;
     }
 
+    // A price zoom takes price over: auto price scale off before the viewport moves
+    // (else the refit in setViewport would undo the zoom).
+    setAutoPriceScale(false);
     const double currentPriceRange = m_maxPrice > m_minPrice ? m_maxPrice - m_minPrice : 1.0;
     const double newPriceRange = zoomedPriceSpan(currentPriceRange, zoomMultiplier);
     if (newPriceRange == currentPriceRange) return; // at the limit
@@ -371,7 +415,7 @@ void GridViewState::panRight() {
 }
 
 void GridViewState::panUp() {
-    if (!m_timeWindowValid) return;
+    if (!m_timeWindowValid || m_autoPriceScale) return; // auto price scale: no vertical pan
     // Fixed 10% steps keep keyboard pan predictable across zoom levels.
     double priceRange = m_maxPrice - m_minPrice;
     double panAmount = priceRange * 0.1;
@@ -385,7 +429,7 @@ void GridViewState::panUp() {
 }
 
 void GridViewState::panDown() {
-    if (!m_timeWindowValid) return;
+    if (!m_timeWindowValid || m_autoPriceScale) return; // auto price scale: no vertical pan
     // Fixed 10% steps keep keyboard pan predictable across zoom levels.
     double priceRange = m_maxPrice - m_minPrice;
     double panAmount = priceRange * 0.1;

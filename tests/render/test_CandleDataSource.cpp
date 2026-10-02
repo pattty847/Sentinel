@@ -172,3 +172,34 @@ TEST_F(CandleDataSourceTest, WideRefreshPagesNewestFirstThenResumesOlderBackfill
     reply(backfill, Json::array({candle(500, 5)}));
     EXPECT_TRUE(takeRequest(120).is_null());
 }
+
+// Review item 8 (pre-existing): on a re-subscription the replica kept from the earlier
+// subscription had stopped updating; the first L2 update landed on its stale levels and
+// the chart seeded from a top ~$600 off before the fresh snapshot. The replica is
+// cleared on subscribe: nothing derives a top from it until the new snapshot.
+TEST_F(CandleDataSourceTest, ResubscribeDropsTheRetainedBookUntilTheFreshSnapshot) {
+    std::vector<std::pair<uint32_t, double>> bids, asks;
+    auto top = [&](double& bid, double& ask) {
+        const auto view = source.getDirectLiveOrderBook("BTC-USD").captureDenseNonZero(bids, asks, 1);
+        bid = view.bidLevels.empty() ? 0.0 : view.minPrice + view.bidLevels.front().first * view.tickSize;
+        ask = view.askLevels.empty() ? 0.0 : view.minPrice + view.askLevels.front().first * view.tickSize;
+    };
+    source.subscribe("BTC-USD");
+    emit client().snapshotReceived("BTC-USD", {{86'597.0, 1.0}}, {{86'598.0, 1.0}});
+    deliver();
+    double bid = 0, ask = 0;
+    top(bid, ask);
+    ASSERT_NEAR(bid, 86'597.0, 0.11); // the $0.10 book grid
+    source.subscribe("BTC-USD"); // e.g. back from ETH-USD
+    emit client().l2UpdateReceived("BTC-USD", {{true, 86'010.0, 2.0}});
+    deliver();
+    top(bid, ask);
+    EXPECT_EQ(bid, 0.0) << "no top from the retained book before the fresh snapshot";
+    EXPECT_EQ(ask, 0.0);
+    EXPECT_TRUE(source.getDirectLiveOrderBook("BTC-USD").isEmpty());
+    emit client().snapshotReceived("BTC-USD", {{86'009.0, 1.0}}, {{86'011.0, 1.0}});
+    deliver();
+    top(bid, ask);
+    EXPECT_NEAR(bid, 86'009.0, 0.11); // the $0.10 book grid
+    EXPECT_NEAR(ask, 86'011.0, 0.11); // the $0.10 book grid
+}

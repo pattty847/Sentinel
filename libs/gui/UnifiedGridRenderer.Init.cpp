@@ -58,10 +58,19 @@ void UnifiedGridRenderer::init() {
     });
     connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::tickChanged, this, [this] {
         applyGpuLimits();
+        refitAutoPrice(); // the fit's min/max price spans follow the tick
         if (m_gpuHeatmap) emit heatmapTickSizeChanged();
         update();
     });
-    connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::limitsChanged, this, [this] { applyGpuLimits(); });
+    connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::limitsChanged, this, [this] {
+        applyGpuLimits();
+        // A carry applied before the new symbol's price scale was known: again, now
+        // that its limits are.
+        if (m_gpuHeatmap && m_priceCarry && !m_gpuReseedPrice && !m_gpuLimitsDeferred &&
+            m_gpuLayer->priceScaleCurrent())
+            applyPriceCarry(gpuLivePrice());
+        refitAutoPrice(); // e.g. a new symbol's tick: its min/max price spans
+    });
     connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::buildFailed, this, [](const QString& message) {
         sLog_Warning("GPU heatmap span build failed: " << message);
     });
@@ -106,15 +115,18 @@ void UnifiedGridRenderer::init() {
     connect(m_viewState.get(), &GridViewState::viewportChanged, this, &UnifiedGridRenderer::onViewportChanged);
     connect(m_viewState.get(), &GridViewState::panVisualOffsetChanged, this, &UnifiedGridRenderer::panVisualOffsetChanged);
     connect(m_viewState.get(), &GridViewState::autoScrollEnabledChanged, this, &UnifiedGridRenderer::autoScrollEnabledChanged);
-    // A drag that moves price owns it from its first move (priceInteracted only comes
-    // at release): a pending timeframe-switch fit must not land under it.
-    connect(m_viewState.get(), &GridViewState::panVisualOffsetChanged, this, [this]() {
-        if (m_pendingPriceFit && m_viewState->isDragging() && m_viewState->getPanVisualOffset().y() != 0.0)
-            cancelPriceFit();
+    connect(m_viewState.get(), &GridViewState::autoPriceScaleChanged, this, [this]() {
+        sLog_Render("auto price scale=" << m_viewState->autoPriceScale());
+        if (m_viewState->autoPriceScale()) m_priceCarry.reset(); // on: the candles fit
+        emit autoPriceScaleChanged();
+    });
+    // Auto price scale (gpu): every setViewport takes its price from the visible candles.
+    m_viewState->setPriceFit([this](qint64 start, qint64 end, double& priceMin, double& priceMax) {
+        return autoPriceFit(start, end, priceMin, priceMax);
     });
     connect(m_viewState.get(), &GridViewState::priceInteracted, this, [this]() {
         if (m_heatmapStreamService) m_heatmapStreamService->cancelPriceCenter();
-        cancelPriceFit(); // the user moved price: a pending timeframe-switch fit must not override it
+        m_priceCarry.reset(); // the user owns price now: no pending carry replaces it
     });
     
     QMetaObject::invokeMethod(

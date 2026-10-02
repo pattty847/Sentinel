@@ -1442,6 +1442,7 @@ AgentApi::ViewportSnapshot MainWindowGPU::agentApiViewportSnapshot() const {
         s.candleTimeframeMs = tf; // v1 QML links candle cadence to renderer cadence.
     }
     s.followLive = renderer->autoScrollEnabled();
+    s.autoScale = renderer->autoPriceScale();
     auto* view = renderer->getViewState();
     if (!view || !view->isTimeWindowValid()) return s;
     const qint64 start = view->getVisibleTimeStart();
@@ -1526,26 +1527,24 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
             out.status = 503; out.code = "viewport_unavailable"; out.message = "Chart viewport is not ready";
             return out;
         }
-        if (!body.fit.isEmpty()) {
-            // Auto-fit: the axis double-click action, one viewport change.
-            const bool time = body.fit != "price", price = body.fit != "time";
-            if (!renderer->fitView(time, price)) {
-                out.status = 409; out.code = "fit_unavailable";
-                out.message = "Auto-fit needs the gpu renderer and known data (live anchor or price)";
-                return out;
-            }
-            out.data["fit"] = body.fit;
+        const QString error = renderer->applyViewportRequest(
+            {body.startMs, body.endMs, body.priceMin, body.priceMax, body.followLive, body.autoScale, body.fit});
+        if (error == "fit_unavailable") {
+            out.status = 409; out.code = "fit_unavailable";
+            out.message = "Auto-fit needs the gpu renderer and known data (live anchor or price)";
+            return out;
         }
-        if (body.startMs || body.priceMin) renderer->enableAutoScroll(false);
-        if (body.startMs || body.priceMin) {
-            renderer->setViewport(body.startMs.value_or(*current.startMs), body.endMs.value_or(*current.endMs),
-                                  body.priceMin.value_or(*current.priceMin), body.priceMax.value_or(*current.priceMax));
+        if (error == "auto_scale_unavailable") {
+            out.status = 409; out.code = "auto_scale_unavailable";
+            out.message = "The auto price scale needs the gpu renderer";
+            return out;
         }
-        if (!body.startMs && body.followLive) renderer->enableAutoScroll(*body.followLive);
+        if (!body.fit.isEmpty()) out.data["fit"] = body.fit;
         const auto after = agentApiViewportSnapshot();
         out.viewportVersion = after.viewportVersion.value_or(0);
         out.data["viewportVersion"] = QString::number(out.viewportVersion);
         out.data["followLive"] = after.followLive.value_or(false);
+        out.data["autoScale"] = after.autoScale.value_or(false);
     } else if (kind == "layers") {
         auto* toolbar = m_heatmapDock ? m_heatmapDock->toolbar() : nullptr;
         for (auto it = body.layers.begin(); it != body.layers.end(); ++it) {

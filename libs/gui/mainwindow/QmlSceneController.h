@@ -35,9 +35,11 @@ public:
     
 private:
     void applyChartModeControllerToRoot();
+    void applySymbolToRoot();
     QString graphicsApiName(QSGRendererInterface::GraphicsApi api) const;
     
     QQuickView* m_qquickView = nullptr;
     ChartModeController* m_chartModeController = nullptr;
+    QString m_symbol; // the active symbol (empty until the first switch)
 };
 

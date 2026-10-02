@@ -3,6 +3,8 @@
 #include <QPointF>
 #include <QMatrix4x4>
 #include <QElapsedTimer>
+#include <functional>
+#include <utility>
 
 class GridViewState : public QObject {
     Q_OBJECT
@@ -41,6 +43,21 @@ public:
     double minTimeSpanMs() const { return m_minTimeSpanMs; }
     double minPriceSpan() const { return m_minPriceSpan; }
     void setViewportSize(double width, double height);
+    // Auto price scale (docs/research/2026-10-viewport-autoscale.md; off by default,
+    // the gpu renderer turns it on). While on, setViewport takes its price range from
+    // the price fit for the new time range (so a time change and its refit are ONE
+    // viewport change), chart drags and keyboard pans move time only, and the chart
+    // wheel zooms time only. A price zoom (axis drag or wheel) turns it off first.
+    // The fit returns false when it has nothing to fit (the given price is kept).
+    using PriceFit = std::function<bool(qint64 timeStart, qint64 timeEnd, double& priceMin, double& priceMax)>;
+    void setPriceFit(PriceFit fit) { m_priceFit = std::move(fit); }
+    bool autoPriceScale() const { return m_autoPriceScale; }
+    // The time window on screen: the committed one shifted by an active drag's visual
+    // offset (a drag commits only at release). The auto price fit and its candle
+    // checks use it, so newly revealed candles fit during the drag.
+    std::pair<qint64, qint64> displayedTimeWindow() const;
+    // Does not touch the viewport (the caller refits through setViewport).
+    void setAutoPriceScale(bool enabled);
     QMatrix4x4 calculateViewportTransform(const QRectF& itemBounds) const;
     
     void handleZoom(double delta, const QPointF& center);
@@ -67,9 +84,12 @@ signals:
     void viewportChanged();
     void panVisualOffsetChanged();
     void autoScrollEnabledChanged();
+    void autoPriceScaleChanged();
     void priceInteracted();
 
 private:
+    // A drag's time shift for a window of spanMs (0 when not dragging).
+    qint64 dragShiftMs(qint64 spanMs) const;
     // One zoom step of a span (multiplier > 1 zooms in) inside the limits: a
     // zoom-out never narrows and a zoom-in never widens the current span.
     int64_t zoomedTimeSpan(int64_t current, double zoomMultiplier) const;
@@ -85,6 +105,8 @@ private:
     double m_viewportHeight = 600.0;
     
     bool m_autoScrollEnabled = true;
+    bool m_autoPriceScale = false;
+    PriceFit m_priceFit;
     
     static constexpr double ZOOM_SENSITIVITY = 0.0005;
     static constexpr double MAX_ZOOM_DELTA = 0.4;

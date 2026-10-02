@@ -656,7 +656,7 @@ Rectangle {
                 unifiedGridRenderer.zoomPriceAt(-deltaY * 24.0, p.y,
                                                 unifiedGridRenderer.height)
             }
-            // Fit price to the visible candles (live price when none).
+            // Auto price scale on: fit the visible candles (live price when none).
             onDoubleClicked: unifiedGridRenderer.fitPriceToData()
             onReleased: {}
             onCanceled: {}
@@ -720,8 +720,8 @@ Rectangle {
                 unifiedGridRenderer.zoomTimeAt(deltaX * 24.0, p.x,
                                                unifiedGridRenderer.width)
             }
-            // Fit time to the data's available range (live edge kept when following).
-            onDoubleClicked: unifiedGridRenderer.fitTimeToData()
+            // The default view: initial span at the live edge, follow-live, auto price scale.
+            onDoubleClicked: unifiedGridRenderer.resetView()
             onReleased: {}
             onCanceled: {}
         }
@@ -748,6 +748,39 @@ Rectangle {
         border.color: Qt.rgba(1, 1, 1, 0.3)
         border.width: 1
         z: 0
+    }
+
+    // Auto price scale toggle (TradingView's "A"): lit while the price range follows
+    // the visible candles; a price-axis drag or zoom turns it off.
+    Rectangle {
+        id: autoPriceScaleButton
+        objectName: "autoPriceScaleButton"
+        anchors.centerIn: axisCorner
+        width: Math.min(22, axisCorner.height - 6)
+        height: width
+        radius: 3
+        visible: unifiedGridRenderer.gpuHeatmapActive
+        color: unifiedGridRenderer.autoPriceScale ? "#2962ff" : "transparent"
+        border.width: 1
+        border.color: unifiedGridRenderer.autoPriceScale ? "#2962ff"
+                      : (autoPriceScaleMouse.containsMouse ? "#9aa4b2" : "#5a6370")
+        z: 6
+
+        Text {
+            anchors.centerIn: parent
+            text: "A"
+            font.pixelSize: 12
+            font.bold: true
+            color: unifiedGridRenderer.autoPriceScale ? "#ffffff" : "#9aa4b2"
+        }
+
+        MouseArea {
+            id: autoPriceScaleMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: unifiedGridRenderer.autoPriceScale = !unifiedGridRenderer.autoPriceScale
+        }
     }
 
     Rectangle {

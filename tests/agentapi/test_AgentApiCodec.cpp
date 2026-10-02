@@ -32,6 +32,14 @@ TEST(AgentApiControls, BodiesAndBounds) {
     EXPECT_EQ(check("/api/v1/viewport", R"({"fit":true})").code, "invalid_fit");
     EXPECT_EQ(check("/api/v1/viewport", R"({"fit":"price","followLive":true})").code, "invalid_fit");
     EXPECT_EQ(check("/api/v1/viewport", R"({"fit":"time","startMs":1,"endMs":10})").code, "invalid_fit");
+    EXPECT_EQ(check("/api/v1/viewport", R"({"fit":"default"})").body.fit, "default");
+    // The auto price scale toggle: a boolean; on cannot come with price bounds or fit.
+    EXPECT_EQ(check("/api/v1/viewport", R"({"autoScale":true})").body.autoScale, std::optional<bool>(true));
+    EXPECT_EQ(check("/api/v1/viewport", R"({"autoScale":false,"priceMin":1,"priceMax":2})").status, 200);
+    EXPECT_EQ(check("/api/v1/viewport", R"({"autoScale":true,"startMs":1,"endMs":10})").status, 200);
+    EXPECT_EQ(check("/api/v1/viewport", R"({"autoScale":1})").code, "invalid_auto_scale");
+    EXPECT_EQ(check("/api/v1/viewport", R"({"autoScale":true,"priceMin":1,"priceMax":2})").code, "invalid_auto_scale");
+    EXPECT_EQ(check("/api/v1/viewport", R"({"autoScale":true,"fit":"price"})").code, "invalid_fit");
     EXPECT_EQ(check("/api/v1/layers", R"({"heatmap":true,"candles":false,"tpo":true})").body.layers.size(), 3);
     EXPECT_EQ(check("/api/v1/layers", R"({"tpo":1})").status, 422);
     EXPECT_EQ(check("/api/v1/layers", R"({"unknown":true})").status, 422);
@@ -219,11 +227,13 @@ TEST(AgentApiCodec, ViewportFixtureAndNullZoom) {
     s.heatmapTimeframeMs = 60000;
     s.candleTimeframeMs = 60000;
     s.followLive = false;
+    s.autoScale = true;
     s.viewportVersion = 42;
     s.widthPx = 1200;
     s.heightPx = 600;
     auto data = viewportJson(s).value("data").toObject();
     EXPECT_EQ(data.value("viewportVersion").toString(), "42");
+    EXPECT_TRUE(data.value("autoScale").toBool());
     EXPECT_DOUBLE_EQ(data.value("zoom").toObject().value("msPerPx").toDouble(), 3000);
     EXPECT_NEAR(data.value("zoom").toObject().value("pricePerPx").toDouble(), 1.6666667, 1e-6);
     s.widthPx.reset();

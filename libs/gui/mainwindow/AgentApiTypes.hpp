@@ -117,6 +117,7 @@ struct ViewportSnapshot {
     std::optional<qint64> heatmapTimeframeMs;
     std::optional<qint64> candleTimeframeMs;
     std::optional<bool> followLive;
+    std::optional<bool> autoScale; // auto price scale (price follows the visible candles)
     std::optional<quint64> viewportVersion;
     std::optional<double> widthPx;
     std::optional<double> heightPx;

@@ -163,10 +163,14 @@ void RemoteGridDataSource::connectToServer() {
 void RemoteGridDataSource::subscribe(const QString& symbol) {
     m_client.subscribe(symbol.toStdString());
 
-    // Initialize replica on snapshot for authoritative range.
+    // Initialize replica on snapshot for authoritative range. A replica kept from an
+    // earlier subscription stopped updating: cleared, so no book top derives from its
+    // stale levels before the new snapshot (it seeded the chart ~$600 off, 2026-10-02).
     std::string s = symbol.toStdString();
-    if (m_replicaBooks.find(s) == m_replicaBooks.end()) {
+    if (auto it = m_replicaBooks.find(s); it == m_replicaBooks.end()) {
         m_replicaBooks.emplace(s, std::make_unique<LiveOrderBook>(s));
+    } else if (it->second) {
+        it->second->clear();
     }
 }
 
