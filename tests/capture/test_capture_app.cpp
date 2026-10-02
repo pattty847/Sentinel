@@ -91,7 +91,7 @@ TEST(CaptureApplication, SigtermDrainsAndSealsAfterReconnectWithRealConnectionId
 #endif
 }
 
-TEST(CaptureApplication, SeveralCliFormsSubscribeAllSevenOnOneEngineAndVerifyTheLivePrefix) {
+TEST(CaptureApplication, SeveralCliFormsUseSevenConnectionsAndVerifyIndependentLiveRuns) {
 #ifdef _WIN32
     GTEST_SKIP() << "POSIX SIGTERM integration test";
 #else
@@ -123,7 +123,7 @@ TEST(CaptureApplication, SeveralCliFormsSubscribeAllSevenOnOneEngineAndVerifyThe
         }
         ASSERT_TRUE(output.contains("FIXTURE_READY\n")) << child.readAllStandardError().toStdString();
         EXPECT_FALSE(output.contains("FIXTURE_EARLY_FRAME\n"));
-        EXPECT_EQ(output.count("FIXTURE_ENGINE\n"), 1);
+        EXPECT_EQ(output.count("FIXTURE_ENGINE\n"), 7);
         const auto lineStart = output.indexOf("FIXTURE_SENDS ") + 14;
         const auto lineEnd = output.indexOf('\n', lineStart);
         const auto sends = nlohmann::json::parse(output.mid(lineStart, lineEnd - lineStart).toStdString());
@@ -137,7 +137,10 @@ TEST(CaptureApplication, SeveralCliFormsSubscribeAllSevenOnOneEngineAndVerifyThe
             const auto channel = message["channel"].get<std::string>();
             ++channels[channel];
             if (channel == "heartbeats") EXPECT_FALSE(message.contains("product_ids"));
-            else EXPECT_EQ(message["product_ids"].get<std::set<std::string>>(), expected);
+            else {
+                EXPECT_EQ(message["product_ids"].size(), 1u);
+                EXPECT_TRUE(expected.contains(message["product_ids"][0].get<std::string>()));
+            }
         }
         EXPECT_EQ(channels, (std::map<std::string, int>{{"heartbeats", 2}, {"level2", 2}, {"market_trades", 2}}));
         // Wait for the disk thread to publish a readable block (read-only).
@@ -153,10 +156,10 @@ TEST(CaptureApplication, SeveralCliFormsSubscribeAllSevenOnOneEngineAndVerifyThe
         }
         const auto live = verify(dir.path() + "/raw");
         EXPECT_TRUE(live.ok) << live.json.dump(2);
-        EXPECT_EQ(live.json["complete"], false); EXPECT_EQ(live.json["totals"]["open_runs"], 1);
-        EXPECT_EQ(live.json["totals"]["incomplete_runs"], 1);
+        EXPECT_EQ(live.json["complete"], false); EXPECT_EQ(live.json["totals"]["open_runs"], 7);
+        EXPECT_EQ(live.json["totals"]["incomplete_runs"], 7);
         EXPECT_EQ(live.json["totals"]["closed_runs"], 0);
-        EXPECT_EQ(live.json["routing_checks_deferred"], 1);
+        EXPECT_EQ(live.json["routing_checks_deferred"], 0);
         EXPECT_EQ(live.json["products"].size(), 7);
         QProcess liveVerifier;
         liveVerifier.setProcessEnvironment(environment);
@@ -168,7 +171,7 @@ TEST(CaptureApplication, SeveralCliFormsSubscribeAllSevenOnOneEngineAndVerifyThe
         ASSERT_EQ(child.exitCode(), 0) << child.readAllStandardError().toStdString();
         const auto report = verify(dir.path() + "/raw");
         EXPECT_TRUE(report.ok) << report.json.dump(2);
-        EXPECT_EQ(report.json["totals"]["connections"], 2);
+        EXPECT_EQ(report.json["totals"]["connections"], 14);
         EXPECT_EQ(report.json["totals"]["snapshots"], 14);
         EXPECT_EQ(report.json["routing_checks_deferred"], 0);
         for (const auto& product : report.json["products"]) {
@@ -183,49 +186,5 @@ TEST(CaptureApplication, SeveralCliFormsSubscribeAllSevenOnOneEngineAndVerifyThe
         EXPECT_EQ(verifier.exitCode(), 0);
         EXPECT_EQ(nlohmann::json::parse(verifier.readAllStandardOutput().toStdString())["totals"]["snapshots"], 14);
     }
-#endif
-}
-
-TEST(CaptureApplication, ScopedRecoveryDoesNotMislabelLaterTransportDown) {
-#ifdef _WIN32
-    GTEST_SKIP() << "POSIX SIGTERM integration test";
-#else
-    QTemporaryDir dir;
-    QProcess child;
-    struct Cleanup {
-        QProcess& child;
-        ~Cleanup() { if (child.state() != QProcess::NotRunning) { child.kill(); child.waitForFinished(5000); } }
-    } cleanup{child};
-    auto environment = QProcessEnvironment::systemEnvironment();
-    environment.insert("SENTINEL_LOG_DIR", dir.path() + "/logs");
-    environment.insert("SENTINEL_TEST_SCOPED_RESYNC", "1");
-    child.setProcessEnvironment(environment);
-    child.start(CAPTURE_APP_FIXTURE, {"--root", dir.path() + "/raw", "--symbol", "BTC-USD",
-        "--ca-bundle", SENTINEL_TEST_CA, "--key-file", dir.path() + "/absent-key.json"});
-    ASSERT_TRUE(child.waitForStarted(5000));
-    QByteArray output;
-    QElapsedTimer deadline; deadline.start();
-    while (!output.contains("FIXTURE_READY\n") && deadline.elapsed() < 10000 && child.state() != QProcess::NotRunning) {
-        child.waitForReadyRead(100);
-        output += child.readAllStandardOutput();
-    }
-    ASSERT_TRUE(output.contains("FIXTURE_READY\n")) << child.readAllStandardError().toStdString();
-    ASSERT_EQ(::kill(static_cast<pid_t>(child.processId()), SIGTERM), 0);
-    ASSERT_TRUE(child.waitForFinished(5000));
-    ASSERT_EQ(child.exitCode(), 0);
-    int down = 0, scoped = 0;
-    QDirIterator files(dir.path() + "/raw", {"*.rawl2"}, QDir::Files, QDirIterator::Subdirectories);
-    while (files.hasNext()) scan(files.next(), [&](const Record& record) {
-        if (record.kind == Kind::ResyncRequested) {
-            ++scoped;
-            EXPECT_EQ(nlohmann::json::parse(record.payload)["product"], "BTC-USD");
-        }
-        if (record.kind == Kind::TransportDown) {
-            ++down;
-            EXPECT_EQ(nlohmann::json::parse(record.payload)["reason"], "transport closed");
-        }
-    });
-    EXPECT_EQ(scoped, 1);
-    EXPECT_EQ(down, 1);
 #endif
 }

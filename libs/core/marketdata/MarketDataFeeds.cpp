@@ -1,0 +1,162 @@
+#include "MarketDataFeeds.hpp"
+#include "SentinelLogging.hpp"
+#include <sstream>
+
+namespace {
+int64_t nowUs() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+std::shared_ptr<FeedConnectLimiter> processLimiter() {
+    static auto limiter = std::make_shared<FeedConnectLimiter>();
+    return limiter;
+}
+}
+MarketDataFeeds::MarketDataFeeds(Authenticator& auth, const ServerMdcConfig& config)
+    : MarketDataFeeds(auth, config, Options{}) {}
+MarketDataFeeds::MarketDataFeeds(Authenticator& auth, const ServerMdcConfig& config, Options options)
+    : m_auth(auth), m_config(config), m_options(std::move(options)) {
+    if (!m_options.clock) m_options.clock = nowUs;
+    if (!m_options.limiter) m_options.limiter = processLimiter();
+    if (!m_options.jitter) {
+        auto rng = std::make_shared<std::mt19937>(std::random_device{}());
+        m_options.jitter = [rng] { return std::chrono::milliseconds(std::uniform_int_distribution<int>(0, 1000)(*rng)); };
+    }
+    try {
+        m_tls.load_verify_file(config.sslCaBundle.empty() ? "resources/certs/ca-bundle.crt" : config.sslCaBundle);
+    } catch (const std::exception& e) {
+        sLog_Error("Feeds CA bundle failed, using system paths: error=" << e.what());
+        m_tls.set_default_verify_paths();
+    }
+    m_tls.set_verify_mode(ssl::verify_peer);
+    if (!m_options.manualPump) m_thread = std::thread([this] {
+        sentinel::logging::setCurrentThreadName("mdc-io");
+        for (;;) {
+            try { m_io.run(); break; }
+            catch (const std::exception& e) { sLog_Error("Feeds I/O handler exception: " << e.what()); }
+            catch (...) { sLog_Error("Feeds I/O handler exception (unknown)"); }
+        }
+    });
+}
+MarketDataFeeds::~MarketDataFeeds() { stop(); }
+MarketDataFeeds::AddResult MarketDataFeeds::add(const std::string& product, bool pinned) {
+    if (m_stopped) throw std::logic_error("feeds stopped");
+    return call([&, this] {
+        if (product.empty()) return AddResult::InvalidProduct;
+        if (auto it = m_engines.find(product); it != m_engines.end()) {
+            it->second.pinned |= pinned;
+            return AddResult::AlreadyPresent;
+        }
+        const auto count = std::count_if(m_engines.begin(), m_engines.end(), [](const auto& e) { return !e.second.pinned; });
+        if (!pinned && m_options.maxConnections && size_t(count) >= m_options.maxConnections) {
+            sLog_Error("Feed refused: symbol=" << product << " cap=" << m_options.maxConnections << " code=capacity_exceeded");
+            return AddResult::CapacityExceeded;
+        }
+        auto engine = std::make_shared<Engine>(m_auth, m_config, product, m_io, m_tls,
+            m_options.transportFactory, m_options.reconnect, m_options.clock,
+            [limiter = m_options.limiter, ticket = std::make_shared<FeedConnectLimiter::Ticket>()](int64_t now) { return limiter->acquire(now, ticket); }, m_options.jitter);
+        engine->onTrade(m_trade); engine->onLiveOrderBookLevelUpdates(m_updates);
+        engine->onLiveOrderBookInitialized(m_snapshot); engine->onLiveOrderBookInvalidated(m_invalid);
+        engine->onConnectionStatus(m_status); engine->onError(m_error);
+        engine->onLatency(m_latency); engine->onIngest(m_ingest);
+        m_engines.emplace(product, Entry{engine, pinned});
+        if (m_started) engine->start();
+        return AddResult::Added;
+    });
+}
+void MarketDataFeeds::wait(std::future<void>& done) {
+    if (m_options.manualPump) {
+        while (done.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            m_io.restart(); m_io.run_one();
+        }
+    }
+    done.get();
+}
+bool MarketDataFeeds::remove(const std::string& product) {
+    if (m_stopped) return false;
+    auto done = std::make_shared<std::promise<void>>();
+    auto future = done->get_future();
+    const bool removed = call([&, this] {
+        auto it = m_engines.find(product);
+        if (it == m_engines.end() || it->second.pinned) return false;
+        auto engine = it->second.engine;
+        m_engines.erase(it);
+        if (!m_started) done->set_value();
+        else engine->stop([engine, done] { done->set_value(); });
+        return true;
+    });
+    if (removed) wait(future);
+    return removed;
+}
+void MarketDataFeeds::start() {
+    if (m_stopped) throw std::logic_error("feeds stopped");
+    call([this] {
+        if (m_started) return;
+        m_started = true;
+        m_nextStats = m_options.clock() + 60'000'000;
+        for (auto& [_, entry] : m_engines) entry.engine->start();
+        if (!m_options.manualPump) armTimer();
+    });
+}
+void MarketDataFeeds::stop() {
+    if (m_stopped) return;
+    auto futures = call([this] {
+        m_timer.cancel();
+        std::vector<std::future<void>> futures;
+        if (m_started) for (auto& [_, entry] : m_engines) {
+            auto done = std::make_shared<std::promise<void>>();
+            futures.push_back(done->get_future());
+            entry.engine->stop([done] { done->set_value(); });
+        }
+        m_started = false;
+        return futures;
+    });
+    for (auto& future : futures) wait(future);
+    call([this] { m_engines.clear(); });
+    m_stopped = true;
+    m_work.reset();
+    m_io.stop();
+    if (m_thread.joinable()) m_thread.join();
+}
+void MarketDataFeeds::requestResnapshot(const std::string& product) {
+    net::post(m_io, [this, product] {
+        if (auto it = m_engines.find(product); it != m_engines.end()) it->second.engine->requestResnapshot();
+    });
+}
+std::vector<MarketDataFeeds::Engine::Stats> MarketDataFeeds::stats() {
+    if (m_stopped) return {};
+    return call([this] {
+        std::vector<Engine::Stats> out;
+        for (auto& [_, entry] : m_engines) out.push_back(entry.engine->stats());
+        return out;
+    });
+}
+void MarketDataFeeds::tick() {
+    for (auto& [_, entry] : m_engines) entry.engine->tick();
+    const auto now = m_options.clock();
+    if (now < m_nextStats) return;
+    m_nextStats = now + 60'000'000;
+    size_t up = 0;
+    std::ostringstream line;
+    for (auto& [product, entry] : m_engines) {
+        const auto s = entry.engine->stats();
+        up += s.up;
+        line << " | product=" << product << " conn=" << s.connection << " up=" << s.up
+             << " seq=" << s.sequence << " l2AgeMs=" << s.level2AgeMs
+             << " messageAgeMs=" << s.lastMessageAgeMs << " reconnects=" << s.reconnects;
+    }
+    sLog_Data("Feeds: engines=" << m_engines.size() << " up=" << up << line.str());
+}
+void MarketDataFeeds::armTimer() {
+    m_timer.expires_after(std::chrono::milliseconds(10));
+    m_timer.async_wait([this](beast::error_code ec) {
+        if (ec || !m_started) return;
+        tick(); armTimer();
+    });
+}
+void MarketDataFeeds::poll() {
+    if (!m_options.manualPump) throw std::logic_error("poll requires manualPump");
+    m_io.restart(); m_io.poll();
+    if (m_started) tick();
+    m_io.restart(); m_io.poll();
+}

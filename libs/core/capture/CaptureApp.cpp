@@ -3,7 +3,7 @@
 #include "CaptureVerifier.hpp"
 #include "SentinelLogging.hpp"
 #include "Version.hpp"
-#include "marketdata/MarketDataCoreEngine.hpp"
+#include "marketdata/MarketDataFeeds.hpp"
 #include "marketdata/rest/CoinbaseRestClient.hpp"
 #include <QCommandLineParser>
 #include <QCoreApplication>
@@ -11,6 +11,7 @@
 #include <QLockFile>
 #include <QTimer>
 #include <atomic>
+#include <map>
 #include <algorithm>
 #include <csignal>
 #include <iostream>
@@ -41,7 +42,7 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
     parser.addOptions({
         {"root", "Mounted storage root (never the server recording directory).", "directory", "/Volumes/T7/sentinel-data/raw-l2"},
         {"symbol", "Coinbase product; repeat for several (default BTC-USD).", "product"},
-        {"symbols", "Comma-separated Coinbase products on one connection.", "A,B,C"},
+        {"symbols", "Comma-separated Coinbase products, one connection each.", "A,B,C"},
         {"strict-trades", "With --verify, exit 2 for any unfilled trade-id gap; archive integrity is unchanged."},
         {"verify", "Offline verify one file or a directory; JSON report, exit 2 for integrity failures, 3 for valid incomplete/open captures.", "path"},
         {"block-ms", "Maximum target block latency in milliseconds.", "ms", "1000"},
@@ -123,59 +124,76 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
         productConfig.symbol = symbol;
         products.push_back({std::move(productConfig), std::move(header)});
     }
-    const auto fetched = Stamp::now();
-    Session session(std::move(products), queueBytes);
-    std::atomic<uint64_t> connection{0};
-    std::string transportReason; // accessed only by the current engine I/O thread
-    std::atomic<int64_t> disconnectedSince{fetched.steadyNs};
-    const auto event = [&](Kind kind, const std::string& reason) noexcept {
-        try { session.submit({kind, Stamp::now(), connection.load(), nlohmann::json({{"reason", reason}}).dump()}); }
-        catch (const std::exception& e) { session.fail(e.what()); }
+    // Single-product sessions already exist. Independent sequence streams cannot
+    // be sent through the old multi-product routing batch (one expectedSequence).
+    // Slice 2 replaces the writer/queue implementation; keep this bridge in the app.
+    struct ProductState {
+        std::unique_ptr<Session> session;
+        uint64_t connection = 0;
+        std::string transportReason;
     };
-    event(Kind::CaptureStarted, "capture started");
-    std::unique_ptr<MarketDataCoreEngine> engine;
-    const auto startEngine = [&] {
-        engine = dependencies.makeEngine ? dependencies.makeEngine(auth, mdc) :
-                                           std::make_unique<MarketDataCoreEngine>(auth, mdc);
-        if (!engine) throw std::runtime_error("capture engine factory returned null");
-        engine->onIngest([&](const MarketDataCoreEngine::IngestObservation& observation) noexcept {
-            try {
-                using Ingest = MarketDataCoreEngine::IngestKind;
-                Kind kind = Kind::Frame;
-                switch (observation.kind) {
-                case Ingest::Frame: kind = Kind::Frame; break;
-                case Ingest::TransportUp:
-                    kind = Kind::TransportUp; ++connection; disconnectedSince = 0; transportReason.clear(); break;
-                case Ingest::TransportDown: {
-                    kind = Kind::TransportDown;
-                    int64_t zero = 0; disconnectedSince.compare_exchange_strong(zero, observation.steadyNs); break;
-                }
-                case Ingest::BookInvalidated: kind = Kind::BookInvalidated; break;
-                case Ingest::ResyncRequested:
-                    kind = Kind::ResyncRequested;
-                    if (observation.product.empty()) transportReason = observation.reason;
-                    break;
-                }
-                auto reason = observation.reason;
-                if (kind == Kind::TransportUp) reason = "websocket connected";
-                if (kind == Kind::TransportDown) reason = transportReason.empty() ? std::string_view("transport closed") : transportReason;
-                auto payload = kind == Kind::Frame ? std::string(observation.payload) :
-                    nlohmann::json({{"product", observation.product}, {"reason", reason}}).dump();
-                session.submit({kind, {observation.systemNs, observation.steadyNs}, connection.load(), std::move(payload)});
-            } catch (const std::exception& e) {
-                session.fail(e.what(), RecordLocation{{observation.systemNs, observation.steadyNs}, connection.load(),
-                    observation.kind == MarketDataCoreEngine::IngestKind::Frame ? Kind::Frame : Kind::EngineError});
+    std::map<std::string, ProductState> states;
+    for (auto& product : products) {
+        auto symbol = product.config.symbol;
+        auto& state = states[symbol];
+        state.session = std::make_unique<Session>(std::move(product.config), std::move(product.metadata), queueBytes);
+        state.session->submit({Kind::CaptureStarted, Stamp::now(), 0, R"({"reason":"capture started"})"});
+    }
+    const auto error = [&]() -> std::string {
+        for (const auto& [symbol, state] : states)
+            if (auto e = state.session->error(); !e.empty()) return symbol + ": " + e;
+        return {};
+    };
+    const auto queuedBytes = [&] {
+        size_t total = 0;
+        for (const auto& [_, state] : states) total += state.session->queuedBytes();
+        return total;
+    };
+    const auto submit = [&](ProductState& state, Record record) {
+        // One producer; other threads only drain. Summing queues can overestimate
+        // their occupancy, but cannot undercount bytes that remain queued.
+        if (queuedBytes() + record.payload.capacity() + sizeof(Record) + 64 > queueBytes - states.size() * 4096)
+            state.session->fail("capture process queue limit exceeded", RecordLocation{record.time, record.connection, record.kind});
+        else state.session->submit(std::move(record));
+    };
+    auto feeds = dependencies.makeFeeds ? dependencies.makeFeeds(auth, mdc) : std::make_unique<MarketDataFeeds>(auth, mdc);
+    if (!feeds) throw std::runtime_error("capture feeds factory returned null");
+    feeds->onIngest([&](const MarketDataCoreEngine::IngestObservation& observation) noexcept {
+        auto& state = states.at(std::string(observation.product));
+        auto& session = *state.session;
+        try {
+            using Ingest = MarketDataCoreEngine::IngestKind;
+            Kind kind = Kind::Frame;
+            state.connection = observation.connection;
+            switch (observation.kind) {
+            case Ingest::Frame: kind = Kind::Frame; break;
+            case Ingest::TransportUp: kind = Kind::TransportUp; state.transportReason.clear(); break;
+            case Ingest::TransportDown: kind = Kind::TransportDown; break;
+            case Ingest::BookInvalidated: kind = Kind::BookInvalidated; break;
+            case Ingest::ResyncRequested: kind = Kind::ResyncRequested; state.transportReason = observation.reason; break;
             }
-        });
-        engine->onError([&](const std::string& error) noexcept {
-            try { transportReason = error; event(Kind::EngineError, error); }
-            catch (const std::exception& e) { session.fail(e.what()); }
-        });
-        // Stage products before starting the I/O thread (no cross-thread mutation).
-        engine->subscribeToSymbols(symbols);
-        engine->start();
-    };
-    startEngine();
+            auto reason = observation.reason;
+            if (kind == Kind::TransportUp) reason = "websocket connected";
+            if (kind == Kind::TransportDown) reason = state.transportReason.empty() ? std::string_view("transport closed") : state.transportReason;
+            auto payload = kind == Kind::Frame ? std::string(observation.payload) :
+                nlohmann::json({{"product", observation.product}, {"reason", reason}}).dump();
+            Record record{kind, {observation.systemNs, observation.steadyNs}, state.connection, std::move(payload)};
+            submit(state, std::move(record));
+        } catch (const std::exception& e) {
+            session.fail(e.what(), RecordLocation{{observation.systemNs, observation.steadyNs}, state.connection,
+                observation.kind == MarketDataCoreEngine::IngestKind::Frame ? Kind::Frame : Kind::EngineError});
+        }
+    });
+    feeds->onError([&](const std::string& product, const std::string& message) noexcept {
+        auto& state = states.at(product);
+        try {
+            state.transportReason = message;
+            submit(state, {Kind::EngineError, Stamp::now(), state.connection,
+                nlohmann::json({{"product", product}, {"reason", message}}).dump()});
+        } catch (const std::exception& e) { state.session->fail(e.what()); }
+    });
+    for (const auto& symbol : symbols) feeds->add(symbol);
+    feeds->start();
     const auto started = Stamp::now().steadyNs;
     auto lastStats = started;
     bool stopped = false;
@@ -184,28 +202,18 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
     timer.setInterval(100);
     QObject::connect(&timer, &QTimer::timeout, &app, [&] {
         const auto now = Stamp::now().steadyNs;
-        if (stopSignal || !session.error().empty() || (duration && now - started >= int64_t(duration) * 1000000000)) {
+        if (stopSignal || !error().empty() || (duration && now - started >= int64_t(duration) * 1000000000)) {
             stopReason = stopSignal ? "signal=" + std::to_string(stopSignal) :
-                         !session.error().empty() ? "capture failure" : "duration elapsed";
+                         !error().empty() ? "capture failure" : "duration elapsed";
             stopped = true; app.quit(); return;
         }
-        // The shared engine retries every failed connection with bounded backoff.
-        // Retain this independent safety net for a transport that never completes
-        // its connect/close callback; every supervisor restart is recorded.
-        const auto down = disconnectedSince.load();
-        if (down && now - down > 60LL * 1000000000) {
-            engine->stop(); engine.reset();
-            event(Kind::ResyncRequested, "capture supervisor: transport unavailable for 60 seconds");
-            disconnectedSince = now;
-            try { startEngine(); }
-            catch (const std::exception& e) { session.fail(e.what()); app.quit(); return; }
-        }
         if (now - lastStats >= 60LL * 1000000000) {
-            const auto stats = session.stats();
-            sLog_App("Capture stats: products=" << symbolList << " storedFrames=" << stats.frames
-                << " storedFrameBytes=" << stats.frameBytes << " fileBytes=" << stats.fileBytes
-                << " blocks=" << stats.blocks << " connections=" << connection.load()
-                << " queuedBytes=" << session.queuedBytes());
+            for (const auto& feed : feeds->stats()) {
+                const auto stats = states.at(feed.product).session->stats();
+                sLog_App("Capture stats: product=" << feed.product << " conn=" << feed.connection
+                    << " up=" << feed.up << " storedFrames=" << stats.frames << " fileBytes=" << stats.fileBytes
+                    << " queuedBytes=" << states.at(feed.product).session->queuedBytes());
+            }
             lastStats = now;
         }
     }, Qt::QueuedConnection);
@@ -213,14 +221,13 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
     sLog_App("Capture running: products=" << symbolList << " root=" << config.root << " pid=" << QCoreApplication::applicationPid());
     app.exec();
     timer.stop();
-    if (engine) { engine->stop(); engine.reset(); } // join the producer before draining the writer
+    feeds->stop(); feeds.reset(); // join the producer before draining the writers
     if (!stopped) stopReason = "application exit";
-    session.close(stopReason);
-    if (const auto error = session.error(); !error.empty()) {
-        sLog_Error("Capture incomplete: error=" << error); return 1;
+    for (auto& [_, state] : states) state.session->close(stopReason);
+    if (const auto failure = error(); !failure.empty()) {
+        sLog_Error("Capture incomplete: error=" << failure); return 1;
     }
-    const auto stats = session.stats();
-    sLog_App("Capture closed: reason=" << stopReason << " storedFrames=" << stats.frames << " fileBytes=" << stats.fileBytes);
+    sLog_App("Capture closed: reason=" << stopReason << " products=" << symbolList);
     return 0;
 }
 } // namespace sentinel::capture

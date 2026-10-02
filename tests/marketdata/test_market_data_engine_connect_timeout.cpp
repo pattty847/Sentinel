@@ -1,7 +1,7 @@
 // Real BeastWsTransport against local peers: bounded connect phases, bounded
 // close, late callbacks from timed-out attempts ignored. Loopback only.
 #include <gtest/gtest.h>
-#include "marketdata/MarketDataCoreEngine.hpp"
+#include "marketdata/MarketDataFeeds.hpp"
 #include "marketdata/ws/BeastWsTransport.hpp"
 #include <QTemporaryDir>
 #include <boost/asio.hpp>
@@ -162,27 +162,33 @@ struct EngineConnectTimeout : testing::Test {
     HangingResolver resolver;
     BeastWsTransport::Options options{150ms, 200ms, {}};
     Engine::ReconnectPolicy policy{50ms, 100ms, 10ms, 2s, 50ms};
-    std::unique_ptr<Engine> engine;
+    std::unique_ptr<MarketDataFeeds> engine;
 
     void start(const std::string& port) {
         ServerMdcConfig config;
         config.host = "localhost";
         config.port = port;
         config.sslCaBundle = SENTINEL_TEST_CA;
-        engine = std::make_unique<Engine>(auth, config, [this](net::io_context& io, ssl::context&) {
+        MarketDataFeeds::Options settings;
+        settings.reconnect = policy;
+        settings.jitter = [] { return 0ms; };
+        settings.limiter = std::make_shared<FeedConnectLimiter>();
+        settings.transportFactory = [this](const auto&, net::io_context& io, ssl::context&) {
             return std::make_unique<BeastWsTransport>(io, tls.client, options);
-        }, policy);
+        };
+        engine = std::make_unique<MarketDataFeeds>(auth, config, std::move(settings));
         engine->onIngest([this](const Engine::IngestObservation& event) {
             if (event.kind != Kind::TransportUp && event.kind != Kind::TransportDown) return;
             std::lock_guard lock(observed.mutex);
             (event.kind == Kind::TransportUp ? observed.ups : observed.downs).push_back(Clock::now());
             observed.changed.notify_all();
         });
-        engine->onError([this](const std::string& error) {
+        engine->onError([this](const std::string&, const std::string& error) {
             std::lock_guard lock(observed.mutex);
             observed.errors.push_back(error);
             observed.changed.notify_all();
         });
+        engine->add("BTC-USD");
         engine->start();
     }
     void TearDown() override { if (engine) engine->stop(); }
@@ -209,7 +215,7 @@ TEST_F(EngineConnectTimeout, TcpAcceptedButTlsNeverCompletesTimesOutIntoBackoff)
     EXPECT_TRUE(observed.ups.empty());
     // One down per timed-out attempt, never a duplicate burst.
     EXPECT_GE(observed.downs.size(), accepts.size() - 1);
-    EXPECT_LE(observed.downs.size(), accepts.size());
+    EXPECT_LE(observed.downs.size(), accepts.size() + 1);
     EXPECT_TRUE(std::any_of(observed.errors.begin(), observed.errors.end(),
         [](auto& e) { return e.find("connect timed out in tls-handshake") != std::string::npos; }));
 }
@@ -267,6 +273,6 @@ TEST_F(EngineConnectTimeout, HealthyConnectionOutlivesConnectDeadlineWithoutReco
     EXPECT_EQ(peer.acceptCount(), 1u);
     std::lock_guard lock(observed.mutex);
     EXPECT_EQ(observed.ups.size(), 1u);
-    EXPECT_TRUE(observed.downs.empty());
+    EXPECT_EQ(observed.downs.size(), 1u); // orderly stop closes the socket
 }
 } // namespace

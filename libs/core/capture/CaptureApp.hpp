@@ -6,7 +6,7 @@
 class QCoreApplication;
 class Authenticator;
 class CoinbaseRestClient;
-class MarketDataCoreEngine;
+class MarketDataFeeds;
 struct ProductMetadataResult;
 struct ServerMdcConfig;
 
@@ -16,7 +16,7 @@ namespace sentinel::capture {
 // Empty hooks use the production REST client and engine; no test CLI switches.
 struct ApplicationDependencies {
     std::function<ProductMetadataResult(CoinbaseRestClient&, const std::string&)> fetchMetadata;
-    std::function<std::unique_ptr<MarketDataCoreEngine>(Authenticator&, const ServerMdcConfig&)> makeEngine;
+    std::function<std::unique_ptr<MarketDataFeeds>(Authenticator&, const ServerMdcConfig&)> makeFeeds;
 };
 
 int runApplication(QCoreApplication& application);

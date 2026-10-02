@@ -1,9 +1,10 @@
 #pragma once
 #include <functional>
+#include <memory>
 #include <string>
 
 // Pure transport interface (no provider logic)
-class WsTransport {
+class WsTransport : public std::enable_shared_from_this<WsTransport> {
 public:
     using MessageCb = std::function<void(std::string)>; // own the data to avoid dangling views
     using StatusCb  = std::function<void(bool)>;

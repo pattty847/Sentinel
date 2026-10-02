@@ -37,7 +37,7 @@ public:
     FakeWsTransport(boost::asio::io_context& io, std::shared_ptr<WsScenario> scenario)
         : m_io(io), m_scenario(std::move(scenario)) {}
     void connect(std::string, std::string, std::string) override {
-        boost::asio::post(m_io, [this] {
+        boost::asio::post(m_io, [keep = shared_from_this(), this] {
             {
                 std::lock_guard lock(m_scenario->mutex);
                 m_scenario->attempts.push_back(WsScenario::Clock::now());
@@ -48,14 +48,14 @@ public:
         });
     }
     void close() override {
-        boost::asio::post(m_io, [this] {
+        boost::asio::post(m_io, [keep = shared_from_this(), this] {
             { std::lock_guard lock(m_scenario->mutex); ++m_scenario->closes; m_scenario->changed.notify_all(); }
             ++m_generation;
-            later(m_scenario->closeDelay, [this] { down(); });
+            later(m_scenario->closeDelay, [keep = shared_from_this(), this] { down(); });
         });
     }
     void send(std::string message) override {
-        boost::asio::post(m_io, [this, message = std::move(message)] {
+        boost::asio::post(m_io, [keep = shared_from_this(), this, message = std::move(message)] {
             size_t count;
             {
                 std::lock_guard lock(m_scenario->mutex);
@@ -81,8 +81,8 @@ public:
     }
     void fail() { m_error("fixture failed connect"); down(); }
     // Completes a held close (closeDelay set long) from any thread.
-    void downFromAnyThread() { boost::asio::post(m_io, [this] { down(); }); }
-    void upFromAnyThread() { boost::asio::post(m_io, [this] { up(); }); }
+    void downFromAnyThread() { boost::asio::post(m_io, [keep = shared_from_this(), this] { down(); }); }
+    void upFromAnyThread() { boost::asio::post(m_io, [keep = shared_from_this(), this] { up(); }); }
     void frame(std::string bytes) {
         if (m_scenario->onFrame) {
             size_t sends;
@@ -94,11 +94,11 @@ public:
     }
     void later(std::chrono::milliseconds delay, std::function<void()> action) {
         auto timer = std::make_shared<boost::asio::steady_timer>(m_io, delay);
-        timer->async_wait([timer, action = std::move(action)](auto ec) { if (!ec) action(); });
+        timer->async_wait([keep = shared_from_this(), timer, action = std::move(action)](auto ec) { if (!ec) action(); });
     }
     void repeatingFrame(std::chrono::milliseconds interval, std::string bytes) {
         const auto generation = m_generation;
-        later(interval, [this, generation, interval, bytes = std::move(bytes)] {
+        later(interval, [keep = shared_from_this(), this, generation, interval, bytes = std::move(bytes)] {
             if (generation != m_generation) return;
             frame(bytes);
             repeatingFrame(interval, bytes);
@@ -106,7 +106,7 @@ public:
     }
     void heartbeats(std::chrono::milliseconds interval, uint64_t sequence = 0) {
         const auto generation = m_generation;
-        later(interval, [this, generation, interval, sequence] {
+        later(interval, [keep = shared_from_this(), this, generation, interval, sequence] {
             if (generation != m_generation) return;
             frame(nlohmann::json({{"channel", "heartbeats"}, {"sequence_num", sequence}, {"events", nlohmann::json::array()}}).dump());
             heartbeats(interval, sequence + 1);
