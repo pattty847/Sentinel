@@ -11,7 +11,7 @@ struct LocalChunkTransport::Worker : QObject {
     Worker(std::filesystem::path path, TestHooks h) : hooks(std::move(h)), root(std::move(path)) {}
     TestHooks hooks;
     std::map<std::string, ChunkAvailability> availability;
-    sentinel::log_throttle::Site warnings;
+    sentinel::log_throttle::Site warnings, requestWarnings;
     std::filesystem::path root;
     std::unique_ptr<recording::Hmc2Reader> session;
     recording::Hmc2Reader &reader() {
@@ -22,6 +22,28 @@ struct LocalChunkTransport::Worker : QObject {
     }
 };
 namespace {
+// Text of the exception being handled; call only inside a catch block.
+// Worker lambdas must catch (...) and use this, never rely on `catch (const std::exception &)`:
+// executables that link vcpkg's libskia.a (sentinel-gui, sentinel-lab and their tests)
+// carry skia's private copy of `typeinfo for std::exception`, and a libc++-thrown
+// std::runtime_error does not derive from that copy. The base-class handler then
+// misses it, the exception leaves the Qt slot and std::terminate aborts the process.
+// Concrete types resolve to libc++'s own typeinfo and still match.
+std::string currentExceptionMessage() {
+    try {
+        throw;
+    } catch (const std::runtime_error &e) {
+        return e.what();
+    } catch (const std::invalid_argument &e) {
+        return e.what();
+    } catch (const std::out_of_range &e) {
+        return e.what();
+    } catch (const std::exception &e) {
+        return e.what();
+    } catch (...) {
+        return "unknown exception";
+    }
+}
 ChunkAvailability readAvailability(recording::Hmc2Reader &reader, const std::string &symbol, std::stop_token stop,
                                    int64_t pinnedEndMs) {
     ChunkAvailability out;
@@ -130,11 +152,12 @@ void LocalChunkTransport::refreshAvailability(const std::string &symbol, bool fo
             worker_->availability[symbol] = next;
             // A new connection always needs a fresh message, even if unchanged.
             if (force || changed) emit availability(std::move(next));
-        } catch (const std::exception &e) {
+        } catch (...) {
             if (stop.stop_requested()) return;
             uint32_t suppressed = 0;
             if (worker_->warnings.admit(5000, sentinel::log_throttle::nowMs(), suppressed))
-                sLog_Warning("Local chunk availability failed symbol=" << symbol << " error=" << e.what()
+                sLog_Warning("Local chunk availability failed symbol=" << symbol
+                             << " error=" << currentExceptionMessage()
                              << sentinel::log_throttle::Suppressed{suppressed});
             // This scan has no request identity. Keep the last good snapshot;
             // request failures are reserved for work admitted by request().
@@ -192,14 +215,22 @@ quint64 LocalChunkTransport::request(const std::string &symbol, const std::strin
                 } catch (const std::invalid_argument &e) {
                     if (stop.stop_requested()) return;
                     emit failed(id, key, QStringLiteral("invalid_request"), QString::fromUtf8(e.what()));
-                } catch (const std::exception &e) {
+                } catch (...) { // nothing may leave this slot: the fetcher retries a failed key
                     if (stop.stop_requested()) return;
-                    emit failed(id, key, QStringLiteral("build_failed"), QString::fromUtf8(e.what()));
+                    const auto message = currentExceptionMessage();
+                    uint32_t suppressed = 0;
+                    if (worker_->requestWarnings.admit(5000, sentinel::log_throttle::nowMs(), suppressed))
+                        sLog_Warning("Local chunk build failed symbol=" << symbol << " source=" << source
+                                     << " level=" << levelMs << " start=" << key.startMs << " error=" << message
+                                     << sentinel::log_throttle::Suppressed{suppressed});
+                    emit failed(id, key, QStringLiteral("build_failed"), QString::fromStdString(message));
                 }
             }
-        } catch (const std::exception &e) {
+        } catch (...) {
             if (stop.stop_requested()) return;
-            emit failed(id, {}, QStringLiteral("build_failed"), QString::fromUtf8(e.what()));
+            const auto message = currentExceptionMessage();
+            sLog_Warning("Local chunk request failed req=" << id << " error=" << message);
+            emit failed(id, {}, QStringLiteral("build_failed"), QString::fromStdString(message));
         }
     }, Qt::QueuedConnection);
     return id;
