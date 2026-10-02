@@ -81,6 +81,14 @@ ControlApply InputDispatcher::apply(QQuickView *view, const QRectF &chart, const
     } else if (c.kind == "click") {
         mouse(QEvent::MouseButtonPress, Qt::LeftButton, Qt::LeftButton);
         mouse(QEvent::MouseButtonRelease, Qt::LeftButton, Qt::NoButton);
+    } else if (c.kind == "doubleClick") {
+        // The sequence Qt 6 delivers: press, release, press, double-click, release
+        // (the double-click goes to the item that grabbed the second press).
+        mouse(QEvent::MouseButtonPress, Qt::LeftButton, Qt::LeftButton);
+        mouse(QEvent::MouseButtonRelease, Qt::LeftButton, Qt::NoButton);
+        mouse(QEvent::MouseButtonPress, Qt::LeftButton, Qt::LeftButton);
+        mouse(QEvent::MouseButtonDblClick, Qt::LeftButton, Qt::LeftButton);
+        mouse(QEvent::MouseButtonRelease, Qt::LeftButton, Qt::NoButton);
     } else return fail(422, "invalid_kind", "Unknown input kind");
     ControlApply out;
     out.data = {{"kind", c.kind}, {"target", c.target}};

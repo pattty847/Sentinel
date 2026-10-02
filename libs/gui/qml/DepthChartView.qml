@@ -82,6 +82,7 @@ Rectangle {
         heatmapBackgroundColor: "black"
         priceAxisSource: priceAxisModel
         timeAxisSource: timeAxisModel
+        candleBuffer: dataSource ? dataSource.candleBuffer : null
         z: 1
         
         onTimeframeChanged: {
@@ -655,6 +656,8 @@ Rectangle {
                 unifiedGridRenderer.zoomPriceAt(-deltaY * 24.0, p.y,
                                                 unifiedGridRenderer.height)
             }
+            // Fit price to the visible candles (live price when none).
+            onDoubleClicked: unifiedGridRenderer.fitPriceToData()
             onReleased: {}
             onCanceled: {}
         }
@@ -717,6 +720,8 @@ Rectangle {
                 unifiedGridRenderer.zoomTimeAt(deltaX * 24.0, p.x,
                                                unifiedGridRenderer.width)
             }
+            // Fit time to the data's available range (live edge kept when following).
+            onDoubleClicked: unifiedGridRenderer.fitTimeToData()
             onReleased: {}
             onCanceled: {}
         }
@@ -784,15 +789,13 @@ Rectangle {
             running: fpsOverlay.visible
             onTriggered: {
                 fpsText.text = unifiedGridRenderer.getPerformanceStats();
-                var zoom = unifiedGridRenderer.getZoomFactor();
                 var t0 = unifiedGridRenderer.getVisibleTimeStart();
                 var t1 = unifiedGridRenderer.getVisibleTimeEnd();
                 var p0 = unifiedGridRenderer.getMinPrice();
                 var p1 = unifiedGridRenderer.getMaxPrice();
                 var pan = unifiedGridRenderer.getPanVisualOffset();
                 debugText.text =
-                    "Zoom: " + zoom.toFixed(2) +
-                    "  Time: " + t0 + "→" + t1 +
+                    "Time: " + t0 + "→" + t1 +
                     "  Price: " + p0.toFixed(2) + "→" + p1.toFixed(2) +
                     "  Pan: (" + pan.x.toFixed(1) + "," + pan.y.toFixed(1) + ")";
             }

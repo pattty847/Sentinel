@@ -106,8 +106,15 @@ void UnifiedGridRenderer::init() {
     connect(m_viewState.get(), &GridViewState::viewportChanged, this, &UnifiedGridRenderer::onViewportChanged);
     connect(m_viewState.get(), &GridViewState::panVisualOffsetChanged, this, &UnifiedGridRenderer::panVisualOffsetChanged);
     connect(m_viewState.get(), &GridViewState::autoScrollEnabledChanged, this, &UnifiedGridRenderer::autoScrollEnabledChanged);
+    // A drag that moves price owns it from its first move (priceInteracted only comes
+    // at release): a pending timeframe-switch fit must not land under it.
+    connect(m_viewState.get(), &GridViewState::panVisualOffsetChanged, this, [this]() {
+        if (m_pendingPriceFit && m_viewState->isDragging() && m_viewState->getPanVisualOffset().y() != 0.0)
+            cancelPriceFit();
+    });
     connect(m_viewState.get(), &GridViewState::priceInteracted, this, [this]() {
         if (m_heatmapStreamService) m_heatmapStreamService->cancelPriceCenter();
+        cancelPriceFit(); // the user moved price: a pending timeframe-switch fit must not override it
     });
     
     QMetaObject::invokeMethod(

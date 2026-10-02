@@ -1526,6 +1526,16 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
             out.status = 503; out.code = "viewport_unavailable"; out.message = "Chart viewport is not ready";
             return out;
         }
+        if (!body.fit.isEmpty()) {
+            // Auto-fit: the axis double-click action, one viewport change.
+            const bool time = body.fit != "price", price = body.fit != "time";
+            if (!renderer->fitView(time, price)) {
+                out.status = 409; out.code = "fit_unavailable";
+                out.message = "Auto-fit needs the gpu renderer and known data (live anchor or price)";
+                return out;
+            }
+            out.data["fit"] = body.fit;
+        }
         if (body.startMs || body.priceMin) renderer->enableAutoScroll(false);
         if (body.startMs || body.priceMin) {
             renderer->setViewport(body.startMs.value_or(*current.startMs), body.endMs.value_or(*current.endMs),

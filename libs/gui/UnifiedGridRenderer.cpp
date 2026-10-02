@@ -4,6 +4,7 @@
 #include "CoordinateSystem.h"
 #include "SentinelLogging.hpp"
 #include "config/GuiConfigStore.hpp"
+#include "datasources/CandleSeriesBuffer.hpp"
 #include "render/DataProcessor.hpp"
 #include "render/GridViewState.hpp"
 #include "render/HeatmapIntensityNode.hpp"
@@ -17,6 +18,7 @@
 #include "servermodel/RecordingCodec.hpp"
 #include "../core/servermodel/SessionManager.hpp"
 #include <QDateTime>
+#include <tuple>
 #include <QMetaObject>
 #include <algorithm>
 #include <cmath>
@@ -125,6 +127,10 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
 }
 
 void UnifiedGridRenderer::onTradeReceived(const Trade &trade) {
+  // The live price for auto-fit (no allocation per trade: product ids are ASCII).
+  if (m_gpuHeatmap && std::isfinite(trade.price) && trade.price > 0 &&
+      m_activeSymbol == QLatin1String(trade.product_id.data(), static_cast<qsizetype>(trade.product_id.size())))
+    m_gpuLastTrade = trade.price;
   if (m_gpuHeatmap) {
     // gpu mode: the legacy price centring must not move the GPU chart's price
     // window; a trade seeds it only when no book top has (yet) for this symbol.
@@ -141,6 +147,8 @@ void UnifiedGridRenderer::setLiveBookTop(double bestBid, double bestAsk) {
   if (m_gpuHeatmap) {
     // gpu mode: the book top seeds the first viewport (and the price window after
     // a symbol switch); the legacy stream's price centring stays out of it.
+    if (std::isfinite(bestBid) && std::isfinite(bestAsk) && bestBid > 0 && bestAsk >= bestBid)
+      m_gpuBookMid = (bestBid + bestAsk) * 0.5;
     seedGpuViewport(bestBid, bestAsk);
     return;
   }
@@ -440,6 +448,8 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
   sLog_Render("active symbol changed, clearing chart data: prev=" << m_activeSymbol
               << " symbol=" << normalized);
   m_activeSymbol = normalized;
+  m_gpuBookMid = m_gpuLastTrade = 0.0;
+  cancelPriceFit();
   resetLivePriceCenter();
   // gpu mode: the controller serial switches the heatmap (the node holds the old
   // picture until the new spans are ready); clearData() resets only the legacy
@@ -619,8 +629,24 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
       if (live) {
         if (const int64_t liveEnd = gpuLiveEndMs(span); liveEnd > 0) end = liveEnd; // the padding follows the span
       }
-      m_viewState->setViewportAndMaxSpans(end - span, end, m_viewState->getMinPrice(), m_viewState->getMaxPrice(),
-                                          maxTime, m_gpuLayer->maxPriceSpan());
+      // Owner decision: the view lands on the new timeframe's candles (price fit to
+      // their high/low) in the same viewport change when they are already held;
+      // otherwise the fit waits for them (resolvePriceFit), with the live price as the
+      // fallback when none arrive. setViewport applies the new max price span.
+      m_viewState->setMinSpans(m_gpuLayer->minTimeSpanMs(), m_gpuLayer->minPriceSpan());
+      cancelPriceFit();
+      double priceMin = m_viewState->getMinPrice(), priceMax = m_viewState->getMaxPrice();
+      const auto fit = m_viewState->isDragging()
+                           ? std::nullopt
+                           : gpuFitPriceWindow(end - span, end, true, true, m_gpuLayer->maxPriceSpan());
+      if (fit) {
+        std::tie(priceMin, priceMax) = *fit;
+        m_gpuPriceKnown = true;
+        m_gpuReseedPrice = false;
+      } else {
+        armPriceFit();
+      }
+      m_viewState->setViewportAndMaxSpans(end - span, end, priceMin, priceMax, maxTime, m_gpuLayer->maxPriceSpan());
       syncGpuView();
       if (live) emit liveRenderTick();
     }
@@ -912,7 +938,11 @@ void UnifiedGridRenderer::setHeatmapRenderer(const QString& renderer) {
     followGpuLive();
     bootstrapGpuTimeView();
   } else {
-    if (m_viewState) m_viewState->setMaxSpans(0, 0);
+    cancelPriceFit();
+    if (m_viewState) {
+      m_viewState->setMinSpans(0, 0);
+      m_viewState->setMaxSpans(0, 0);
+    }
     // Legacy resume adopts the current view before the stream unmutes: pending
     // bootstrap/initial centring (from startup or a gpu-mode symbol or tf
     // change) must not replace it on the next book, trade or window update.
@@ -965,8 +995,13 @@ void UnifiedGridRenderer::syncGpuSurface() {
 // API identically; legacy mode keeps its unclamped behaviour.
 void UnifiedGridRenderer::applyGpuLimits() {
   if (!m_viewState || m_gpuLimitsDeferred) return;
-  if (m_gpuHeatmap && m_gpuLayer) m_viewState->setMaxSpans(m_gpuLayer->maxTimeSpanMs(), m_gpuLayer->maxPriceSpan());
-  else m_viewState->setMaxSpans(0, 0);
+  if (m_gpuHeatmap && m_gpuLayer) {
+    m_viewState->setMinSpans(m_gpuLayer->minTimeSpanMs(), m_gpuLayer->minPriceSpan());
+    m_viewState->setMaxSpans(m_gpuLayer->maxTimeSpanMs(), m_gpuLayer->maxPriceSpan());
+  } else {
+    m_viewState->setMinSpans(0, 0);
+    m_viewState->setMaxSpans(0, 0);
+  }
 }
 
 void UnifiedGridRenderer::syncGpuView() {
@@ -1090,6 +1125,247 @@ void UnifiedGridRenderer::setGpuViewportSelf(qint64 start, qint64 end, double pr
   m_gpuSelfViewport = true;
   m_viewState->setViewport(start, end, priceMin, priceMax);
   m_gpuSelfViewport = false;
+}
+
+// ── Auto-fit ────────────────────────────────────────────────────────────────
+QObject* UnifiedGridRenderer::candleBuffer() const { return m_candleBuffer.data(); }
+
+void UnifiedGridRenderer::setCandleBuffer(QObject* buffer) {
+  auto* candles = qobject_cast<CandleSeriesBuffer*>(buffer);
+  if (m_candleBuffer == candles) return;
+  if (m_candleDirtyConn) disconnect(m_candleDirtyConn);
+  m_candleBuffer = candles;
+  if (candles) {
+    // Only a pending timeframe-switch fit listens: one bool test per candle update.
+    m_candleDirtyConn = connect(candles, &CandleSeriesBuffer::candlesDirty, this,
+                                [this](const QString& symbol, int64_t timeframeSec, qint64 dirtyStart,
+                                       qint64 dirtyEnd) {
+                                  if (!m_pendingPriceFit || symbol != m_activeSymbol ||
+                                      timeframeSec != std::max<int64_t>(1, (m_currentTimeframe_ms + 500) / 1000))
+                                    return;
+                                  resolvePriceFit(false);
+                                  // A history page (a live update dirties one bar): wait for
+                                  // the next page, or fit from what is there once paging stops
+                                  // (never past the absolute deadline).
+                                  if (m_pendingPriceFit && dirtyEnd - dirtyStart > 2 * timeframeSec * 1000)
+                                    rearmPriceFit(m_priceFitQuietMs);
+                                });
+  }
+  emit candleBufferChanged();
+}
+
+double UnifiedGridRenderer::gpuLivePrice() const {
+  if (m_gpuBookMid > 0) return m_gpuBookMid;
+  if (m_gpuLastTrade > 0) return m_gpuLastTrade;
+  return m_gpuLayer ? m_gpuLayer->recentMidPrice() : 0.0;
+}
+
+std::optional<std::pair<qint64, qint64>> UnifiedGridRenderer::gpuFitTimeWindow() const {
+  const int64_t tf = std::max<int64_t>(1, m_currentTimeframe_ms);
+  const int64_t anchor = m_gpuLayer->liveAnchorMs();
+  if (anchor <= 0) return std::nullopt;
+  int64_t oldest = m_gpuLayer->oldestAvailableMs();
+  if (oldest <= 0 && m_candleBuffer)
+    oldest = m_candleBuffer->oldestTimeMs(m_activeSymbol, std::max<int64_t>(1, (tf + 500) / 1000));
+  const int64_t dataEnd = recording::floorDiv(anchor + tf - 1, tf) * tf; // the live bucket's end
+  const int64_t dataStart = oldest > 0 ? recording::floorDiv(oldest, tf) * tf : 0;
+  const double maxTime = m_viewState->maxTimeSpanMs();
+  const int64_t maxSpan = maxTime > 0 ? std::max<int64_t>(1, static_cast<int64_t>(std::floor(maxTime))) : INT64_MAX / 4;
+  const int64_t minSpan = std::max<int64_t>(tf, static_cast<int64_t>(std::ceil(m_viewState->minTimeSpanMs())));
+  const double pad = m_autoScrollPaddingFrac;
+  // The span that shows [dataStart, dataEnd] plus the follow-live padding
+  // (max(tf, span * pad)) after it.
+  int64_t span = maxSpan;
+  bool fits = false;
+  if (dataStart > 0 && dataEnd > dataStart) {
+    const double dataSpan = static_cast<double>(dataEnd - dataStart);
+    const double padded = pad > 0 && pad < 1 && dataSpan / (1 - pad) * pad >= double(tf) ? dataSpan / (1 - pad)
+                                                                                          : dataSpan + double(tf);
+    const int64_t wanted = static_cast<int64_t>(std::ceil(padded));
+    fits = wanted <= maxSpan;
+    span = std::min(wanted, maxSpan);
+  }
+  span = std::max(span, std::min(minSpan, maxSpan));
+  const bool following = m_viewState->isAutoScrollEnabled();
+  if (fits || following || dataStart <= 0) {
+    const int64_t end = gpuLiveEndMs(span);
+    if (end <= 0) return std::nullopt;
+    return std::make_pair<qint64, qint64>(end - span, qint64(end));
+  }
+  // History that does not fit: keep the view centre, inside the data.
+  const int64_t centre = m_viewState->getVisibleTimeStart() +
+                         (m_viewState->getVisibleTimeEnd() - m_viewState->getVisibleTimeStart()) / 2;
+  const int64_t lastStart = gpuLiveEndMs(span) - span;
+  const int64_t start = std::clamp<int64_t>(centre - span / 2, dataStart, std::max(dataStart, lastStart));
+  return std::make_pair<qint64, qint64>(qint64(start), start + span);
+}
+
+std::optional<std::pair<double, double>> UnifiedGridRenderer::gpuFitPriceWindow(qint64 start, qint64 end,
+                                                                                bool candlesOnly,
+                                                                                bool requireCoverage,
+                                                                                double maxPriceSpan) const {
+  const int64_t tf = std::max<int64_t>(1, m_currentTimeframe_ms);
+  double lo = 0, hi = 0, centre = 0, span = 0;
+  // From the bucket that contains the view start: getVisibleSlice selects by bar
+  // start, and the candle that starts before the view and ends inside it counts.
+  const int64_t alignedStart = recording::floorDiv(start, tf) * tf;
+  auto& bars = m_fitBars; // reused: a pending fit runs this on every candle update
+  bars.clear();
+  if (m_candleBuffer && end > start)
+    m_candleBuffer->getVisibleSlice(m_activeSymbol, std::max<int64_t>(1, (tf + 500) / 1000), alignedStart, end, bars);
+  size_t used = 0;
+  double newestClose = 0;
+  qint64 newestStart = 0;
+  for (const auto& bar : bars) {
+    const qint64 barEnd = bar.timeEndMs > bar.timeStartMs ? bar.timeEndMs : bar.timeStartMs + tf;
+    if (bar.timeStartMs >= end || barEnd <= start || !std::isfinite(bar.high) || !std::isfinite(bar.low) ||
+        !(bar.low > 0) || bar.high < bar.low)
+      continue;
+    lo = used ? std::min(lo, bar.low) : bar.low;
+    hi = used ? std::max(hi, bar.high) : bar.high;
+    if (!used || bar.timeStartMs >= newestStart) {
+      newestStart = bar.timeStartMs;
+      newestClose = std::isfinite(bar.close) && bar.close > 0 ? bar.close : (bar.low + bar.high) * 0.5;
+    }
+    ++used;
+  }
+  if (requireCoverage && used) {
+    // Buckets the view holds up to the live edge (a view into the future expects none there).
+    const int64_t anchor = m_gpuLayer ? m_gpuLayer->liveAnchorMs() : 0;
+    const int64_t last = anchor > 0 ? std::min<int64_t>(end, recording::floorDiv(anchor + tf - 1, tf) * tf) : end;
+    const int64_t expected = last > start ? (last - alignedStart + tf - 1) / tf : 0; // buckets overlapping [start, last)
+    if (double(used) < kPriceFitCoverage * double(expected)) used = 0;
+  }
+  const double current = m_viewState->getMaxPrice() - m_viewState->getMinPrice();
+  if (used) {
+    centre = (lo + hi) * 0.5;
+    span = hi > lo ? (hi - lo) * (1.0 + 2.0 * kFitPriceMargin) : current;
+  } else {
+    if (candlesOnly) return std::nullopt;
+    centre = gpuLivePrice();
+    span = current;
+  }
+  if (!(centre > 0) || !std::isfinite(centre)) return std::nullopt;
+  if (!(span > 0) || !std::isfinite(span)) span = centre * 0.01;
+  span = std::max(span, m_viewState->minPriceSpan());
+  const double maxSpan = maxPriceSpan >= 0 ? maxPriceSpan : m_viewState->maxPriceSpan();
+  if (maxSpan > 0 && span > maxSpan) {
+    // Manual tick (owner decision 2026-10-02): the user's tick stays (never Auto,
+    // never coarsened); the candles need more than one row per pixel, so show what
+    // the limit can, centred on the current price: book mid, last trade, newest close.
+    span = maxSpan;
+    if (used) {
+      const double now = m_gpuBookMid > 0 ? m_gpuBookMid : m_gpuLastTrade > 0 ? m_gpuLastTrade : newestClose;
+      if (now > 0) centre = now;
+    }
+  }
+  return std::make_pair(centre - span * 0.5, centre + span * 0.5);
+}
+
+bool UnifiedGridRenderer::fitView(bool time, bool price) {
+  if (!m_gpuHeatmap || !m_gpuLayer || !m_viewState || !m_viewState->isTimeWindowValid() || (!time && !price) ||
+      m_viewState->isDragging()) {
+    sLog_Render("view fit skipped: renderer=" << (m_gpuHeatmap ? "gpu" : "legacy") << " time=" << time
+                << " price=" << price);
+    return false;
+  }
+  qint64 start = m_viewState->getVisibleTimeStart(), end = m_viewState->getVisibleTimeEnd();
+  double lo = m_viewState->getMinPrice(), hi = m_viewState->getMaxPrice();
+  bool any = false;
+  if (time) {
+    if (const auto window = gpuFitTimeWindow()) {
+      std::tie(start, end) = *window;
+      any = true;
+    }
+  }
+  if (price) {
+    if (const auto window = gpuFitPriceWindow(start, end, false, false)) {
+      std::tie(lo, hi) = *window;
+      m_gpuPriceKnown = true;
+      m_gpuReseedPrice = false;
+      cancelPriceFit();
+      any = true;
+    }
+  }
+  sLog_Render("view fit time=" << time << " price=" << price << " applied=" << any << " time=[" << start << ".."
+              << end << "] price=[" << lo << ".." << hi << "]");
+  if (!any) return false;
+  m_viewState->setViewport(start, end, lo, hi); // one change; follow-live is kept
+  syncGpuView();
+  update();
+  return true;
+}
+
+void UnifiedGridRenderer::armPriceFit() {
+  m_pendingPriceFit = true;
+  if (!m_priceFitTimer) {
+    m_priceFitTimer = new QTimer(this);
+    m_priceFitTimer->setSingleShot(true);
+    connect(m_priceFitTimer, &QTimer::timeout, this, [this] { resolvePriceFit(true); });
+  }
+  m_priceFitClock.start();
+  rearmPriceFit(m_priceFitFirstWaitMs);
+}
+
+// The next settle attempt in ms, never past the absolute deadline (kPriceFitMaxWaitMs
+// after the switch, whatever pages arrive).
+void UnifiedGridRenderer::rearmPriceFit(int ms) {
+  if (!m_pendingPriceFit || !m_priceFitTimer) return;
+  const qint64 left = std::max<qint64>(0, m_priceFitMaxWaitMs - m_priceFitClock.elapsed());
+  m_priceFitTimer->start(static_cast<int>(std::min<qint64>(std::max(0, ms), left)));
+}
+
+void UnifiedGridRenderer::cancelPriceFit() {
+  m_pendingPriceFit = false;
+  if (m_priceFitTimer) m_priceFitTimer->stop();
+}
+
+void UnifiedGridRenderer::setPriceFitTimings(int firstWaitMs, int quietMs, int maxWaitMs) {
+  m_priceFitFirstWaitMs = std::max(0, firstWaitMs);
+  m_priceFitQuietMs = std::max(0, quietMs);
+  m_priceFitMaxWaitMs = std::max(0, maxWaitMs);
+}
+
+// The timeframe switch's price fit: once the new timeframe's candles cover the view,
+// or (settle: history paging quiet) from whatever candles are visible, else the live
+// price. Never under a drag. At the deadline it fits if it can and ends either way.
+void UnifiedGridRenderer::resolvePriceFit(bool settle) {
+  if (!m_pendingPriceFit) return;
+  if (!m_gpuHeatmap || !m_gpuLayer || !m_viewState || !m_viewState->isTimeWindowValid()) {
+    cancelPriceFit();
+    return;
+  }
+  const bool terminal = m_priceFitClock.elapsed() >= m_priceFitMaxWaitMs;
+  if (m_viewState->isDragging()) {
+    // A drag owns the view (a price drag already cancelled the fit): retry after it.
+    if (terminal) {
+      cancelPriceFit();
+      sLog_Render("timeframe switch price fit dropped: deadline reached during a drag");
+    } else {
+      rearmPriceFit(m_priceFitQuietMs);
+    }
+    return;
+  }
+  settle = settle || terminal;
+  const qint64 start = m_viewState->getVisibleTimeStart(), end = m_viewState->getVisibleTimeEnd();
+  const auto window = gpuFitPriceWindow(start, end, !settle, !settle);
+  if (!window) {
+    if (terminal) {
+      cancelPriceFit();
+      sLog_Render("timeframe switch price fit dropped: no candles and no live price by the deadline");
+    } else if (settle) {
+      rearmPriceFit(m_priceFitMaxWaitMs); // nothing to fit from yet: candles may still come, else the deadline
+    }
+    return; // not yet: more candles (or the timer) will come
+  }
+  cancelPriceFit();
+  sLog_Render("timeframe switch price fit: settle=" << settle << " price=[" << window->first << ".."
+              << window->second << "]");
+  m_gpuPriceKnown = true;
+  m_gpuReseedPrice = false;
+  m_viewState->setViewport(start, end, window->first, window->second);
+  syncGpuView();
+  update();
 }
 
 //  COORDINATE SYSTEM INTEGRATION: Expose CoordinateSystem to QML
@@ -1403,9 +1679,6 @@ double UnifiedGridRenderer::getCurrentPriceResolution() const {
 }
 double UnifiedGridRenderer::getScreenWidth() const { return width(); }
 double UnifiedGridRenderer::getScreenHeight() const { return height(); }
-double UnifiedGridRenderer::getZoomFactor() const {
-  return m_viewState ? m_viewState->getZoomFactor() : 1.0;
-}
 qint64 UnifiedGridRenderer::getVisibleTimeStart() const {
   return m_viewState ? m_viewState->getVisibleTimeStart() : 0;
 }
@@ -1667,9 +1940,10 @@ void UnifiedGridRenderer::setViewport(qint64 timeStart, qint64 timeEnd,
                                       double priceMin, double priceMax) {
   if (m_gpuHeatmap && priceMax > priceMin) {
     // An explicit viewport (Agent API, QML) is a real price window: no book-top
-    // seed replaces it.
+    // seed (and no pending timeframe-switch fit) replaces it.
     m_gpuPriceKnown = true;
     m_gpuReseedPrice = false;
+    cancelPriceFit();
   }
   if (m_viewState && (priceMin != m_viewState->getMinPrice() ||
                       priceMax != m_viewState->getMaxPrice())) {
