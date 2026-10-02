@@ -9,6 +9,8 @@
 #include <deque>
 
 namespace heatmap {
+using HeldChunks = std::unordered_map<ChunkKey, std::shared_ptr<const StoredChunk>, ChunkKeyHash>;
+
 struct LabelRequest {
     uint64_t serial = 0, spanVersion = 0, liveVersion = 0;
     int64_t tfMs = 0, tickUnits = 0;
@@ -42,7 +44,7 @@ class LabelWindowBuilder {
 public:
     explicit LabelWindowBuilder(size_t maxBytes = 32ull << 20) : maxBytes_(maxBytes) {}
     std::shared_ptr<const LabelCells> build(const LabelRequest &request, const SpanSet &spans,
-                                           const LiveSnapshot *live, ChunkStore &store);
+                                           const LiveSnapshot *live, ChunkStore &store, const HeldChunks &held = {});
     void clear() { windows_.clear(); bytes_ = 0; previous_.reset(); previousPieces_.clear(); }
     size_t bytes() const { return bytes_ + (previous_ ? previous_->cells.capacity() * sizeof(LabelCell) : 0); }
 private:
@@ -58,7 +60,7 @@ private:
     std::shared_ptr<const LabelCells> previous_;
     std::vector<DrawPiece> previousPieces_;
     std::shared_ptr<const SparseColumns> composeWindow(const SpanSourceKey &, int64_t fromMs, int64_t toMs,
-        ComposeOptions::PriceClip price, ChunkStore &, LabelCells &);
+        ComposeOptions::PriceClip price, ChunkStore &, LabelCells &, const HeldChunks &);
 };
 
 struct WallScanRequest {
@@ -69,7 +71,7 @@ struct WallScanRequest {
 };
 // Same cell oracle and fill pass as labels; bounded batches, no text formatting.
 heatmap_window::WallsSnapshot scanWalls(const WallScanRequest &, const SpanSet &, const LiveSnapshot *,
-                                        ChunkStore &, LabelWindowBuilder &);
+                                        ChunkStore &, LabelWindowBuilder &, const HeldChunks &held = {});
 
 // Per controller; lives on heatmap-data, uses the cache's bounded worker pool.
 // Callers pass the immutable *drawn* picture, including held sources. Only the

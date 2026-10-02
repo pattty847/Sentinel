@@ -289,6 +289,72 @@ TEST(HeatmapCellQuery, EvictedSealedChunksAreRewantedAtTheLabelRankAndReloadTheS
     EXPECT_TRUE(query.latestLabels()->missing.empty());
     EXPECT_GT(query.latestLabels()->cells.front().value, 0);
 }
+TEST(HeatmapCellQuery, HeldLabelGenerationSurvivesARevisionBeforeTheWorkerRuns) {
+    queryApp(); Fixture f;
+    FakeChunkTransport transport; ChunkFetcher fetcher(f.store, transport);
+    std::deque<std::function<void()>> jobs;
+    SpanSourceCache::Options options; options.executor = [&](auto job, int) { jobs.push_back(std::move(job)); };
+    SpanSourceCache cache(options); HeatmapCellQuery query(f.store, fetcher, cache, 96);
+    const auto picture = std::make_shared<const SpanSet>(f.spans(kMinuteMs));
+    query.requestLabels({1, 1, 0, kMinuteMs, 100, 100, start/kMinuteMs, 99980, 10, 60, "BTC"}, picture);
+    ASSERT_EQ(jobs.size(), 1u);
+    const auto old = f.chunks[nodefx::kCoarse].front();
+    const auto newer = f.store.put(old->key, old->columns, {true, start+kHourMs, 2}, old->contentHash+1);
+    ASSERT_NE(newer->generation, old->generation);
+    { auto job = std::move(jobs.front()); jobs.pop_front(); job(); drainQueries(); }
+    const auto labels = query.latestLabels();
+    ASSERT_NE(labels, nullptr);
+    EXPECT_TRUE(labels->missing.empty());
+    EXPECT_EQ(labels->key.serial, 1u);
+    EXPECT_TRUE(jobs.empty());
+}
+TEST(HeatmapCellQuery, SupersededReloadReleasesWantsAndHintsWithoutAnotherRequest) {
+    queryApp(); Fixture f;
+    FakeChunkTransport transport; ChunkFetcher fetcher(f.store, transport);
+    std::deque<std::function<void()>> jobs;
+    SpanSourceCache::Options options; options.executor = [&](auto job, int) { jobs.push_back(std::move(job)); };
+    SpanSourceCache cache(options); HeatmapCellQuery query(f.store, fetcher, cache, 94);
+    const auto spans = std::make_shared<const SpanSet>(f.spans(kMinuteMs));
+    f.store.setMaxBytes(1);
+    query.requestLabels({1, 1, 0, kMinuteMs, 100, 100, start/kMinuteMs, 99980, 10, 60, "BTC"}, spans);
+    ASSERT_EQ(jobs.size(), 1u);
+    { auto job = std::move(jobs.front()); jobs.pop_front(); job(); drainQueries(); }
+    ASSERT_GT(cache.committedCpuBytes(), 0u); // waiting, with hint bytes admitted
+    const auto old = f.chunks[nodefx::kCoarse].front();
+    const auto newer = f.store.put(old->key, old->columns, {true, start+kHourMs, 2}, old->contentHash+1);
+    ASSERT_NE(newer->generation, old->generation);
+    EXPECT_GT(f.store.stats().wantedBytes, 0u);
+    emit fetcher.chunkStored(old->key, newer->generation);
+    drainQueries();
+    EXPECT_EQ(cache.committedCpuBytes(), 0u);
+    EXPECT_EQ(f.store.stats().wantedBytes, 0u);
+    EXPECT_FALSE(f.store.contains(old->key)); // release let the one-byte LRU evict it
+    EXPECT_EQ(query.latestLabels(), nullptr);
+    EXPECT_TRUE(jobs.empty());
+}
+TEST(HeatmapWalls, HeldChunksSurviveLruEvictionBeforeTheWorkerScans) {
+    queryApp(); Fixture f;
+    FakeChunkTransport transport; ChunkFetcher fetcher(f.store, transport);
+    std::deque<std::function<void()>> jobs;
+    SpanSourceCache::Options options; options.executor = [&](auto job, int) { jobs.push_back(std::move(job)); };
+    SpanSourceCache cache(options); HeatmapCellQuery query(f.store, fetcher, cache, 95);
+    const auto picture = std::make_shared<const SpanSet>(f.spans(kMinuteMs));
+    WallScanRequest q{{}, kMinuteMs, 1000, 100, double(start+kHourMs), double(end), 99990, 100010};
+    std::optional<heatmap_window::WallsSnapshot> answer;
+    query.scanWalls(q, picture, {}, &query, [&](auto result) { answer = std::move(result); });
+    ASSERT_EQ(jobs.size(), 1u);
+    EXPECT_EQ(f.store.stats().wantedBytes, 0u); // walls never pin via fetch wants
+    f.store.setMaxBytes(1); // another builder may cause this eviction while the job is queued
+    ASSERT_EQ(f.store.stats().entries, 0u);
+    { auto job = std::move(jobs.front()); jobs.pop_front(); job(); drainQueries(); }
+    ASSERT_TRUE(answer);
+    EXPECT_EQ(answer->status, 200);
+    EXPECT_EQ(answer->recordedColumns, 60);
+    EXPECT_EQ(answer->missingColumns, 0);
+    EXPECT_FALSE(answer->unknownRows);
+    EXPECT_FALSE(answer->walls.empty());
+    EXPECT_TRUE(transport.requests.empty());
+}
 TEST(HeatmapCellQuery, LabelsUseTheSharedLiveClipAtEveryTimeframeAndTick) {
     Fixture f;
     for (const auto tf : {kMinuteMs, 5*kMinuteMs, kHourMs}) for (const int64_t tick : {100, 500, 1000}) {
@@ -348,7 +414,9 @@ TEST(HeatmapWalls, ViewportMarginExplicitPeriodTickBudgetAndMissingColumns) {
     walls = scanWalls(q, spans, nullptr, f.store, builder);
     EXPECT_EQ(walls.status, 200); EXPECT_EQ(walls.bandTick, 1); EXPECT_EQ(walls.missingColumns, 5);
     q.query.tick = 1.234;
-    EXPECT_EQ(scanWalls(q, spans, nullptr, f.store, builder).status, 422);
+    const auto badTick = scanWalls(q, spans, nullptr, f.store, builder);
+    EXPECT_EQ(badTick.status, 422);
+    EXPECT_EQ(badTick.error, heatmap_window::WallError::BadTick);
     q.query.tick = .01; q.query.endMs = start + 1000000*kMinuteMs;
     EXPECT_EQ(scanWalls(q, spans, nullptr, f.store, builder).status, 422);
 }

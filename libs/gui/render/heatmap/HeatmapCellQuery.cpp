@@ -35,7 +35,7 @@ void formatAmount(std::array<char, 48>& out, double value, bool usd, const std::
 }
 
 std::shared_ptr<const SparseColumns> LabelWindowBuilder::composeWindow(const SpanSourceKey& key,
-    int64_t fromMs, int64_t toMs, ComposeOptions::PriceClip price, ChunkStore& store, LabelCells& result) {
+    int64_t fromMs, int64_t toMs, ComposeOptions::PriceClip price, ChunkStore& store, LabelCells& result, const HeldChunks& held) {
     for (auto it = windows_.begin(); it != windows_.end(); ++it) {
         if (it->key == key && it->fromMs <= fromMs && it->toMs >= toMs &&
             it->price.lo <= price.lo && it->price.end >= price.end) {
@@ -52,7 +52,8 @@ std::shared_ptr<const SparseColumns> LabelWindowBuilder::composeWindow(const Spa
         const ChunkKey chunkKey{generation.symbol, generation.source, generation.levelMs, generation.startMs};
         const auto spanMs = generation.levelMs == kHourMs ? kDayMs : kHourMs;
         if (generation.startMs >= toMs || generation.startMs + spanMs <= fromMs) continue;
-        auto chunk = store.peek(chunkKey);
+        const auto found = held.find(chunkKey);
+        auto chunk = found != held.end() ? found->second : store.peek(chunkKey);
         if (!chunk || chunk->generation != generation.generation) {
             result.missing.push_back(generation);
             missing = true;
@@ -84,7 +85,7 @@ std::shared_ptr<const SparseColumns> LabelWindowBuilder::composeWindow(const Spa
 }
 
 std::shared_ptr<const LabelCells> LabelWindowBuilder::build(const LabelRequest& request, const SpanSet& spans,
-                                                          const LiveSnapshot* live, ChunkStore& store) {
+                                                          const LiveSnapshot* live, ChunkStore& store, const HeldChunks& held) {
     const double tick = fromUnits(request.tickUnits, request.priceScale);
     if (request.tfMs < kMinuteMs || request.tfMs > kDayMs || request.tfMs % kMinuteMs ||
         request.firstBucket < 0 || request.firstBucket > INT64_MAX / request.tfMs - request.columns ||
@@ -194,7 +195,7 @@ std::shared_ptr<const LabelCells> LabelWindowBuilder::build(const LabelRequest& 
             for (const auto& s : spans.spans[piece.token].sources) {
                 if (!s.build) continue;
                 if (fill && !hasVeil()) break;
-                auto columns = composeWindow(s.build->key, first * request.tfMs, end * request.tfMs, price, store, *out);
+                auto columns = composeWindow(s.build->key, first * request.tfMs, end * request.tfMs, price, store, *out, held);
                 apply(columns.get(), s.build->key.availableStartMs, s.build->key.availableEndMs);
             }
         }
@@ -218,7 +219,9 @@ struct WallWindow {
     int64_t from = 0, to = 0, firstBucket = 0, endBucket = 0, firstBin = 0, endBin = 0, units = 0;
     double lo = 0, hi = 0, tick = 0;
 };
-std::optional<WallWindow> wallWindow(const WallScanRequest& r) {
+std::optional<WallWindow> wallWindow(const WallScanRequest& r, heatmap_window::WallError* error = nullptr) {
+    using Error = heatmap_window::WallError;
+    if (error) *error = Error::InvalidRange;
     const auto& q = r.query;
     if (r.tfMs < kMinuteMs || r.tfMs > kDayMs || r.tfMs % kMinuteMs ||
         q.limit < 1 || q.limit > 100 || !std::isfinite(q.minQty) || q.minQty < 0 ||
@@ -231,11 +234,13 @@ std::optional<WallWindow> wallWindow(const WallScanRequest& r) {
     w.hi = q.priceMax.value_or(r.priceHi + height);
     w.tick = q.tick.value_or(fromUnits(r.drawnTickUnits, r.priceScale));
     if (!std::isfinite(from) || !std::isfinite(to) || from < 0 || to <= from || to >= 0x1p52 ||
-        !std::isfinite(w.lo) || !std::isfinite(w.hi) || w.lo < 0 || w.hi <= w.lo ||
-        !std::isfinite(w.tick) || w.tick <= 0 || w.tick * r.priceScale >= 0x1p52) return {};
+        !std::isfinite(w.lo) || !std::isfinite(w.hi) || w.lo < 0 || w.hi <= w.lo) return {};
+    if (error) *error = Error::BadTick;
+    if (!std::isfinite(w.tick) || w.tick <= 0 || w.tick * r.priceScale >= 0x1p52) return {};
     w.units = toUnits(w.tick, r.priceScale);
-    if (w.units <= 0 || std::abs(fromUnits(w.units, r.priceScale) - w.tick) > w.tick * 1e-9 ||
-        w.hi / w.tick >= 0x1p52) return {};
+    if (w.units <= 0 || std::abs(fromUnits(w.units, r.priceScale) - w.tick) > w.tick * 1e-9) return {};
+    if (error) *error = Error::ScanLimit;
+    if (w.hi / w.tick >= 0x1p52) return {};
     w.from = int64_t(std::ceil(from)); w.to = int64_t(std::ceil(to));
     w.firstBucket = recording::floorDiv(w.from + r.tfMs - 1, r.tfMs);
     w.endBucket = recording::floorDiv(w.to + r.tfMs - 1, r.tfMs);
@@ -243,6 +248,7 @@ std::optional<WallWindow> wallWindow(const WallScanRequest& r) {
     if (w.endBin <= w.firstBin || w.endBucket < w.firstBucket ||
         uint64_t(w.endBin - w.firstBin) > 16'000'000 ||
         uint64_t(w.endBucket - w.firstBucket) > 16'000'000 / uint64_t(w.endBin - w.firstBin)) return {};
+    if (error) *error = Error::None;
     return w;
 }
 // Existing drawn builds keep their exact generations. Other requested spans
@@ -293,9 +299,9 @@ std::shared_ptr<const SpanSet> wallsPicture(const WallScanRequest& r, const Span
 }
 
 heatmap_window::WallsSnapshot scanWalls(const WallScanRequest& request, const SpanSet& picture,
-    const LiveSnapshot* live, ChunkStore& store, LabelWindowBuilder& builder) {
+    const LiveSnapshot* live, ChunkStore& store, LabelWindowBuilder& builder, const HeldChunks& held) {
     heatmap_window::WallsSnapshot out; out.gpuRenderer = true;
-    const auto window = wallWindow(request);
+    const auto window = wallWindow(request, &out.error);
     if (!window) { out.status = 422; return out; }
     const auto& w = *window;
     out.bandTick = w.tick; out.rangeStartMs = w.from; out.rangeEndMs = w.to;
@@ -317,7 +323,7 @@ heatmap_window::WallsSnapshot scanWalls(const WallScanRequest& request, const Sp
             const auto columns = uint32_t(std::min<int64_t>(64, w.endBucket - bucket));
             LabelRequest q{0, picture.version, live ? live->version : 0, request.tfMs, w.units, request.priceScale,
                            bucket, bin, columns, count, {}, false};
-            const auto labels = builder.build(q, picture, live, store);
+            const auto labels = builder.build(q, picture, live, store, held);
             for (uint32_t x = 0; x < columns; ++x) recorded[size_t(bucket - w.firstBucket) + x] = recorded[size_t(bucket - w.firstBucket) + x] ||
                 labels->columnStates[x] == BucketState::Present;
             for (uint32_t y = 0; y < count; ++y) for (uint32_t x = 0; x < columns; ++x) {
@@ -416,10 +422,13 @@ void HeatmapCellQuery::scanWalls(WallScanRequest request, std::shared_ptr<const 
     std::function<void(heatmap_window::WallsSnapshot)> completion) {
     Q_ASSERT(QThread::currentThread() == thread());
     if (!context) return;
-    if (!spans || !wallWindow(request) || walls_.size() >= 8) {
+    heatmap_window::WallError error;
+    const auto window = wallWindow(request, &error);
+    if (!spans || !window || walls_.size() >= 8) {
         heatmap_window::WallsSnapshot result;
         result.gpuRenderer = true;
-        result.status = !wallWindow(request) ? 422 : 503;
+        result.status = !window ? 422 : 503;
+        result.error = error;
         QMetaObject::invokeMethod(context, [completion = std::move(completion), result] { completion(result); }, Qt::QueuedConnection);
         return;
     }
@@ -439,10 +448,19 @@ void HeatmapCellQuery::pump() {
         fetcher_.release(chart_);
     }
     if (!wall && waiting_) {
+        bool allHeld = true;
         for (const auto& g : rewant_) {
-            const auto c = store_.cached({g.symbol, g.source, g.levelMs, g.startMs});
-            if (!c || c->generation != g.generation) return;
+            const ChunkKey key{g.symbol, g.source, g.levelMs, g.startMs};
+            if (const auto generation = store_.generationOf(key); generation != g.generation) {
+                sLog_Probe("heatmap.labels.superseded", "chart=" << chart_ << " symbol=" << g.symbol
+                           << " source=" << g.source << " startMs=" << g.startMs
+                           << " expected=" << g.generation << " actual=" << generation);
+                cancel(); // no later request can make this drawn generation current again
+                return;
+            }
+            allHeld = allHeld && bool(store_.cached(key));
         }
+        if (!allHeld) return;
         waiting_ = false;
     }
     const auto picture = wall ? walls_.front().spans : pending_->spans;
@@ -455,13 +473,13 @@ void HeatmapCellQuery::pump() {
     std::unordered_set<ChunkKey, ChunkKeyHash> seen;
     std::vector<ChunkBytes> keys;
     std::vector<ChunkKey> wants;
-    std::vector<std::shared_ptr<const StoredChunk>> held;
+    HeldChunks held;
     for (const auto& span : picture->spans) for (const auto& source : span.sources) if (source.build)
         for (const auto& g : source.build->key.generations) {
             const ChunkKey key{g.symbol, g.source, g.levelMs, g.startMs};
             if (g.startMs >= to || g.startMs + chunkSpanMs(g.source, g.levelMs) <= from || !seen.insert(key).second) continue;
             if (auto c = store_.peek(key); c && c->generation == g.generation) {
-                keys.push_back({key, c->bytes, true}); held.push_back(c);
+                keys.push_back({key, c->bytes, true}); held.emplace(key, c);
                 if (!wall) wants.push_back(key);
             }
         }
@@ -492,8 +510,8 @@ void HeatmapCellQuery::pump() {
     constexpr size_t scratchReservation = 64ull << 20;
     auto job = [work, result, picture, live, request, task, wall, held = std::move(held), store = &store_] {
         try {
-            if (wall) result->walls = heatmap::scanWalls(task.query, *picture, live.get(), *store, work->builder);
-            else result->labels = work->builder.build(request.labels, *picture, live.get(), *store);
+            if (wall) result->walls = heatmap::scanWalls(task.query, *picture, live.get(), *store, work->builder, held);
+            else result->labels = work->builder.build(request.labels, *picture, live.get(), *store, held);
         } catch (...) {
             // A rejected window still leaves the worker's previous cache alive.
             result->bytes = work->builder.bytes();

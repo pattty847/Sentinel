@@ -1578,6 +1578,7 @@ void HeatmapSourceController::reconcile() {
     };
     std::vector<SpanId> refusedSpans;
     size_t refusedBytes = 0;
+    bool labelsConsidered = false;
     while (total > ceiling) {
         auto victim = slots_.end();
         for (auto it = slots_.begin(); it != slots_.end(); ++it) {
@@ -1587,6 +1588,13 @@ void HeatmapSourceController::reconcile() {
             const auto &worst = victim->second.plan.rank;
             if (std::pair(lossOrder(rank.tier), -rank.distance) < std::pair(lossOrder(worst.tier), -worst.distance))
                 victim = it;
+        }
+        if (!labelsConsidered && (victim == slots_.end() ||
+            victim->second.plan.rank.tier == SpanTier::Fallback || victim->second.plan.rank.tier == SpanTier::Visible)) {
+            labelsConsidered = true;
+            cellQuery_->cancel(); // label tier sheds before the drawn picture, on this same thread
+            total = commitment(); // running jobs retain their own keys and reservation
+            continue;
         }
         if (victim == slots_.end()) break;
         const auto id = victim->first;

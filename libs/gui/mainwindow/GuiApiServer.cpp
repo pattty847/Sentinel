@@ -258,8 +258,13 @@ void GuiApiServer::handleRequest(QTcpSocket* socket) {
                     server->respond(peer, 409, AgentApi::jsonBytes(AgentApi::error(
                         "recording_required", "Legacy liquidity is absolute, but its intensity side can disagree and rows lack validity")), "application/json");
                 } else if (data.status == 422) {
+                    const bool badTick = data.error == heatmap_window::WallError::BadTick;
+                    const bool badRange = data.error == heatmap_window::WallError::InvalidRange;
                     server->respond(peer, 422, AgentApi::jsonBytes(AgentApi::error(
-                        "scan_limit", "Request exceeds the 16000000-cell scan budget; narrow the time range")), "application/json");
+                        badTick ? "bad_tick" : badRange ? "invalid_range" : "scan_limit",
+                        badTick ? "Tick must be positive and representable in integer source price units" :
+                        badRange ? "Invalid wall time or price range" :
+                        "Request exceeds the 16000000-cell scan budget; narrow the time or price range")), "application/json");
                 } else if (data.status != 200) {
                     server->respond(peer, 503, AgentApi::jsonBytes(AgentApi::error(
                         "heatmap_unavailable", "Heatmap processor is unavailable")), "application/json");

@@ -99,6 +99,8 @@ struct Wall {
     int columns = 0;             // recorded columns where the cell held this side
 };
 
+enum class WallError { None, BadTick, InvalidRange, ScanLimit };
+
 struct WallsSnapshot {
     int status = 200;
     bool gpuRenderer = false;
@@ -109,6 +111,7 @@ struct WallsSnapshot {
     std::vector<Wall> walls;
     int64_t rangeStartMs = 0, rangeEndMs = 0;
     double rangePriceMin = 0, rangePriceMax = 0;
+    WallError error = WallError::None;
 };
 
 // Signed heatmap intensity magnitude: bids are v, asks are v - 0x8000 (u16),

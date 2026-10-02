@@ -1,5 +1,6 @@
 #include "protocol/SentinelStreamClient.hpp" // shared-frame metatype
 #include "render/heatmap/HeatmapSourceController.hpp"
+#include "render/heatmap/HeatmapCellQuery.hpp"
 #include "../servermodel/FakeChunkTransport.hpp"
 #include <QCoreApplication>
 #include <QEvent>
@@ -1006,6 +1007,39 @@ TEST_F(SourceController, CpuCeilingRefusesTheFarthestVisibleSpansAcrossCharts) {
     EXPECT_GE(visible, 1u);
     EXPECT_EQ(visible + snapshot->refused.size(), 8u);
     for (const auto &id : snapshot->refused) EXPECT_GE(std::abs(id.tile - centre), farthestAdmitted) << id.tile;
+}
+
+TEST_F(SourceController, LabelTierCancelsActiveQueryBeforeRefusingVisibleSpans) {
+    auto &a = chart();
+    a.setView("BTC-USD", kMinuteMs, double(epoch), double(epoch + 3*tileMs));
+    settle();
+    const auto picture = a.latestSnapshot();
+    ASSERT_TRUE(visibleComplete(*picture));
+    auto *query = a.cellQuery();
+    LabelRequest request{1, picture->version, 0, kMinuteMs, 500, 100, epoch/kMinuteMs, 0, 64, 40, "BTC"};
+    query->requestLabels(request, picture);
+    settle();
+    ASSERT_NE(query->latestLabels(), nullptr);
+    ++request.serial;
+    query->requestLabels(request, picture); // a queued/running job retains its own scratch charge
+    ASSERT_EQ(jobs.size(), 1u);
+    const auto before = cache->committedCpuBytes();
+    size_t optionalBytes = 0;
+    for (const auto *build : builds(*picture, SpanTier::Prefetch)) optionalBytes += build->bytes;
+    for (const auto *build : builds(*picture, SpanTier::RecentTf)) optionalBytes += build->bytes;
+    // Queue the plan before budgetsChanged's queued optional-query handler:
+    // otherwise that handler masks incorrect refusal ordering in the controller.
+    a.setView("BTC-USD", kMinuteMs, double(epoch)+1, double(epoch+3*tileMs)-1);
+    cache->setCpuCeiling(before - optionalBytes - 1);
+    QCoreApplication::sendPostedEvents(&a, QEvent::MetaCall);
+    EXPECT_EQ(query->latestLabels(), nullptr) << "the controller must synchronously cancel the label tier";
+    const auto after = a.latestSnapshot();
+    EXPECT_TRUE(after->refused.empty());
+    EXPECT_EQ(builds(*after, SpanTier::Visible), builds(*picture, SpanTier::Visible));
+    EXPECT_LE(cache->committedCpuBytes(), cache->cpuCeiling());
+    EXPECT_GE(cache->committedCpuBytes(), 64ull << 20) << "do not uncharge the still-running job";
+    settle();
+    EXPECT_EQ(query->latestLabels(), nullptr) << "the cancelled completion cannot publish";
 }
 
 TEST_F(SourceController, ASpanLargerThanTheWholeCeilingIsAdmittedAlone) {
