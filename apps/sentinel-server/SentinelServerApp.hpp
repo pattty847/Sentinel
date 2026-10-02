@@ -2,7 +2,7 @@
 #include <QObject>
 #include <memory>
 #include <unordered_set>
-#include "../../libs/core/marketdata/MarketDataCoreEngine.hpp"
+#include "../../libs/core/marketdata/MarketDataFeeds.hpp"
 #include "../../libs/core/marketdata/auth/Authenticator.hpp"
 #include "../../libs/core/servermodel/ServerDataModel.hpp"
 #include "../../libs/core/protocol/SentinelStreamServer.hpp"
@@ -26,7 +26,7 @@ private:
     sentinel::metrics::MetricsRegistry m_metrics;
     sentinel::metrics::Gauge* m_wsLatencyMs = nullptr;
     std::unique_ptr<Authenticator> m_authenticator;
-    std::unique_ptr<MarketDataCoreEngine> m_marketDataCore;
+    std::unique_ptr<MarketDataFeeds> m_marketDataCore;
     std::unique_ptr<ServerDataModel> m_serverModel;
     std::unique_ptr<SentinelStreamServer> m_server;
     // Declared last: destroyed first, so no scrape renders a destroyed component.

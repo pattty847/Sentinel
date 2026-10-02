@@ -302,3 +302,106 @@ gets the extra Fable review (always-on recorder rule).
 5. Delete the unreferenced GUI `MarketDataCoreQt` in the cleanup slice.
 6. Rollout: capture first, then server (FM-139 is already fixed by lt-astra/unsub-scope).
 7. Capture queue: ONE shared pool across products (no static split) with a configurable per-product floor, default 2 MiB, the rest globally available. Owner allows more memory: total default raised from 64 MiB to 512 MiB (measured 2026-10-01: ~98 KB/s average raw frame rate for 7 products, so 64 MiB covered ~11 min of disk stall vs the 39-min TCC freeze, FM-127; 512 MiB covers ~90 min). The queue must allocate only as frames are queued (steady state is ~0 bytes queued), never reserve the pool up front. Both values configurable (`--queue-mib`, `--queue-floor-mib`).
+
+
+## 13. Slice 1 implementation notes and deviations (2026-10-02)
+
+- The owner uses one 10 ms timer to drive per-engine reconnect/watchdog deadlines,
+  rather than two timers per engine. Engine state still enters its own strand.
+  This permits deterministic injected-clock testing of the complete scheduler,
+  including transport attempts, without wall-clock waits. Deadline quantization
+  is at most one owner tick plus event-loop load.
+- The process-shared 3/s token bucket has capacity one (333334 us spacing),
+  preventing accumulated burst credit from violating the intended IP rate bound.
+- Engines are constructed and retired on the shared I/O thread through synchronous
+  owner lifecycle calls, rather than constructed on the main thread.
+  Engines/transports use shared lifetime while asynchronous handlers retire.
+  `remove()` waits for socket down, and cancellation handlers retain transport
+  ownership; this closes a raw-this lifetime hole exposed by per-feed removal.
+- The unreferenced GUI adapter and its service-locator entries were deleted in
+  slice 1 (owner decision 5), because the new API otherwise requires porting dead
+  code or retaining the explicitly forbidden compatibility layer.
+- Capture's app adaptation already invokes the existing single-product Session
+  constructor per feed. Retaining one v2 multi-product Session would conflate
+  independent sequence streams in its `expectedSequence`/routing receipt state.
+  New capture output is therefore v1 with independent run IDs and local attempt
+  IDs; the v2 writer and reader code are untouched. An app-level aggregate queue
+  check preserves the current process --queue-mib bound (64 MiB default), without
+  a static split. Slice 2 still owns writer removal, shared queue/floor abstraction,
+  the approved defaults and RAW_CAPTURE documentation. The obsolete whole-process
+  engine-restart supervisor is removed; bounded per-transport deadlines and
+  retries are now the recovery mechanism.
+- Slice 3 still owns per-symbol server connection/stall-monitor state, the default
+  cap of 8, and client/status refusal surfacing. The core refusal hook is complete;
+  this slice's server leaves its cap unlimited and retains the legacy health bool.
+
+Validation spot checks: one mutant build restored global (empty-product)
+invalidation, bypassed cap admission, and removed bucket spacing. Each of the
+three targeted regressions failed for its intended reason: the peer recorder lost
+its second full minute; the refused symbol acquired a transport; eight connects
+shared one timestamp. All three source files were restored and touched (FM-132)
+before rebuilding the final suite.
+
+Final slice-1 validation: `cmake --build --preset mac-clang -j 4` succeeded after
+restoration. Every build waited until all worktree `.ninja_log` files were older
+than 60 s. The sandbox configure used the already-installed dependencies with
+`VCPKG_MANIFEST_INSTALL=OFF` and a writable temporary ccache directory. Full
+`ctest --test-dir build/mac-clang`: 71/72 passed (253.07 s); the sole failure was
+the known UgrGpuTests teardown abort, `local chunk availability scan incomplete`,
+after Metal cases skipped (`no MTLDevice`). All nine marketdata suites and all
+four capture suites passed, including 16 core feed regressions and four real
+Beast deadline tests. No live services were run or deployed.
+
+Git staging was denied at `.git/worktrees/lt-astra-feeds-core/index.lock` by the
+sandbox. Changes remain uncommitted for the orchestrator; rebase could not run.
+The checked main delta from base 53860b3 to 9ec853e was only the unrelated
+`docs/research/2026-10-observability.md` addition.
+
+
+## 14. Slice 1 review fixes (supersedes affected section 13 notes)
+
+- Connection IDs now count successful transport-up events; a separate attempt
+  counter drives diagnostic correlation. Reconnect stats exclude failed attempts.
+  Backoff resets at the first accepted snapshot, retaining 1, 2, 4, ... 30 second
+  delays for persistent provider/parse errors immediately after handshake.
+- The original three connects/s allowance ignored three unauthenticated subscribe
+  frames per socket. Both connects and subscription batches now have independent
+  process-wide capacity-one buckets, each spaced at least one second apart. The
+  subscription bucket also covers delayed handshakes completing together. Two
+  Sentinel processes therefore send at most six subscribe frames/s combined.
+- The owner tick is 100 ms. remove() queues asynchronous close and returns without
+  waiting for the peer; stop() drains active and retired engines before joining.
+  Destroyed stop promises are logged and do not escape teardown as exceptions.
+  Callback setters explicitly reject calls after the first successful add.
+- Server per-symbol connection/stall-monitor state moved forward from slice 3:
+  deploying this commit must not let a failing GUI symbol mute a pinned recorder
+  warning. Slice 3 still owns max_connections=8 and client refusal surfacing.
+- Capture's existing per-product v1 sessions retain their current format and run
+  layout, now with established-connection IDs. A shared atomic queue reservation
+  replaces the per-frame sum of all session mutex-protected queue sizes. The
+  64 MiB default remains; slice 2 owns floors, 512 MiB default and writer cleanup.
+- A feed down for two minutes logs an error, throttled to one per minute/product.
+
+Review-round targeted validation: all 13 marketdata/capture suites passed
+(161.98 s); all three RecorderStallMonitor cases passed. Ten mutation checks
+failed as intended after restoring eight reviewed defects: attempt-based IDs
+(core stats and capture CLI, which returned 2), handshake-reset backoff,
+333334 us admission, blocking remove (801.5 ms against the 300 ms assertion),
+global recorder status, bypassed shared queue budget, silent late callback
+setters and disabled down alarms. All five mutated source files were restored,
+explicitly touched, and compared byte-for-byte with their fixed backups (FM-132).
+The subsequent gated rebuild and full ctest results follow.
+
+
+Final review-round rebuild: `cmake --build --preset mac-clang -j 4` succeeded
+with restored sources; all three builds obeyed the 60 s all-worktree ninja-log
+gate. Full `ctest --test-dir build/mac-clang --output-on-failure`: 71/72 passed
+in 341.45 s. The sole failure was the unchanged
+`LiveComposeCost.TheDefaultClockIsTheWorkersCpuTime`: its 50 ms wall-clock spin
+received 18,175,541 ns of thread CPU time against a 20,000,000 ns lower bound.
+The complete HeatmapSourceControllerTests suite passed immediately on an
+isolated rerun (1/1, 0.41 s), without source or binary changes. UgrGpuTests passed
+in this run. All 13 marketdata/capture suites, BookRecorderTests, 21 feed cases
+and six real Beast lifecycle/deadline cases passed. No live services were run,
+stopped, restarted or deployed. Review fixes remain uncommitted atop 63573dc,
+as requested; no git-index or shared _agent writes were attempted.

@@ -99,6 +99,9 @@ ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
     , m_aggregator(std::make_unique<TimeframeAggregator>(m_serverConfig.heatmap.timeframesMs))
     , m_heatmapStreamer(std::make_unique<HeatmapTwapStreamer>(*this, m_serverConfig.heatmap))
 {
+    for (const auto& symbol : normalizedDefaultSymbols(m_serverConfig.defaultSymbols))
+        m_pinnedUp.emplace(symbol, false);
+    m_mdConnected.store(pinnedAllUp(), std::memory_order_relaxed);
     int64_t maxTfMs = std::max<int64_t>(1000, m_serverConfig.heatmap.activeTimeframeMs);
     for (const int64_t tf : m_serverConfig.heatmap.timeframesMs) {
         if (tf > maxTfMs) {
@@ -234,20 +237,33 @@ void ServerDataModel::checkRecorderProgress(int64_t nowMs) {
                      << " invalidations=" << m_recorder->stats().invalidations);
 }
 
-void ServerDataModel::onMarketDataConnectionChanged(bool connected) {
-    if (m_mdConnected.exchange(connected, std::memory_order_relaxed) != connected)
-        (connected ? m_mdTransportUps : m_mdTransportDowns).fetch_add(1, std::memory_order_relaxed);
-    if (m_stallMonitor) m_stallMonitor->setConnected(connected, localNowMs());
+// One call per product connection transition (pinned recorder symbols and GUI
+// symbols alike). The stall monitor tracks every symbol by its own state. The
+// health series (sentinel_mdc_connected and the up/down counters) follow only the
+// pinned symbols: a GUI chart closing its product must not page, and a pinned
+// product down must not hide behind a GUI product that is still up.
+void ServerDataModel::onMarketDataConnectionChanged(const std::string& symbol, bool connected) {
+    if (m_stallMonitor) m_stallMonitor->setConnected(symbol, connected, localNowMs());
+    const auto pinned = m_pinnedUp.find(symbol);
+    if (pinned == m_pinnedUp.end() || pinned->second == connected) return;
+    pinned->second = connected;
+    (connected ? m_mdTransportUps : m_mdTransportDowns).fetch_add(1, std::memory_order_relaxed);
+    m_mdConnected.store(pinnedAllUp(), std::memory_order_relaxed);
+}
+
+// AND over the pinned symbols; vacuously true when nothing is pinned (nothing to record).
+bool ServerDataModel::pinnedAllUp() const {
+    return std::all_of(m_pinnedUp.begin(), m_pinnedUp.end(), [](const auto& entry) { return entry.second; });
 }
 
 void ServerDataModel::registerMetrics(sentinel::metrics::MetricsRegistry& r) {
     using Value = std::optional<double>;
     const auto load = [](const std::atomic<uint64_t>& a) { return [&a]() -> Value { return double(a.load(std::memory_order_relaxed)); }; };
-    r.gaugeFn("sentinel_mdc_connected", "1 while the upstream market-data transport is up.", {},
+    r.gaugeFn("sentinel_mdc_connected", "1 while every pinned (recorder) product's upstream connection is up.", {},
               [this]() -> Value { return m_mdConnected.load(std::memory_order_relaxed) ? 1.0 : 0.0; });
-    r.counterFn("sentinel_mdc_transport_up_total", "Upstream transport up transitions (reconnects = this - 1).", {},
+    r.counterFn("sentinel_mdc_transport_up_total", "Pinned products' upstream connection up transitions (reconnects = this - pinned products).", {},
                 load(m_mdTransportUps));
-    r.counterFn("sentinel_mdc_transport_down_total", "Upstream transport down transitions.", {},
+    r.counterFn("sentinel_mdc_transport_down_total", "Pinned products' upstream connection down transitions.", {},
                 load(m_mdTransportDowns));
     r.gaugeFn("sentinel_exchange_clock_offset_ms", "Smoothed local minus exchange clock in ms (0 = not yet measured).", {},
               [this]() -> Value { return double(m_exchangeOffsetMs.load(std::memory_order_relaxed)); });
@@ -277,11 +293,11 @@ void ServerDataModel::registerMetrics(sentinel::metrics::MetricsRegistry& r) {
                       return ms > 0 ? Value(ms / 1000.0) : std::nullopt;
                   });
         r.gaugeFn("sentinel_recorder_column_overdue_seconds",
-                  "Seconds the next column is past due (stall monitor; absent while disconnected). "
+                  "Seconds the next column is past due (stall monitor; absent while this product is disconnected). "
                   "The log warns 'Recording v2 stalled' at 60.", labels,
                   [this, symbol = series.symbol, layer = series.layer]() -> Value {
                       const auto overdue = m_stallMonitor->overdueMs(
-                          localNowMs(), m_recorder->watermarks(symbol, layer).lastColumnMs);
+                          symbol, localNowMs(), m_recorder->watermarks(symbol, layer).lastColumnMs);
                       return overdue ? Value(*overdue / 1000.0) : std::nullopt;
                   });
     }

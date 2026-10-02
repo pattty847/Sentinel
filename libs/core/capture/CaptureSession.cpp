@@ -6,10 +6,10 @@
 #include <stdexcept>
 
 namespace sentinel::capture {
-Session::Session(WriterConfig config, nlohmann::json metadata, size_t queueBytes)
-    : Session(std::vector<ProductCapture>{{std::move(config), std::move(metadata)}}, queueBytes) {}
-Session::Session(std::vector<ProductCapture> products, size_t queueBytes, SessionHooks hooks)
-    : m_limit(queueBytes), m_hooks(std::move(hooks)) {
+Session::Session(WriterConfig config, nlohmann::json metadata, size_t queueBytes, std::shared_ptr<QueueBudget> budget)
+    : Session(std::vector<ProductCapture>{{std::move(config), std::move(metadata)}}, queueBytes, {}, std::move(budget)) {}
+Session::Session(std::vector<ProductCapture> products, size_t queueBytes, SessionHooks hooks, std::shared_ptr<QueueBudget> budget)
+    : m_limit(queueBytes), m_hooks(std::move(hooks)), m_budget(std::move(budget)) {
     if (queueBytes < 2 * FinalRecordReserve || queueBytes > 1024ULL * 1024 * 1024)
         throw std::runtime_error("invalid queue capacity");
     if (products.empty() || products.size() > MaxProducts) throw std::runtime_error("invalid product count");
@@ -73,7 +73,14 @@ bool Session::submit(Record record) noexcept {
                 m_wake.notify_one();
                 return false;
             }
-            m_queue.push_back(std::move(record)); m_bytes += size;
+            if (m_budget && !m_budget->reserve(size)) {
+                failLocked("capture process queue limit exceeded", location);
+                m_wake.notify_one();
+                return false;
+            }
+            try { m_queue.push_back(std::move(record)); }
+            catch (...) { if (m_budget) m_budget->release(size); throw; }
+            m_bytes += size;
         }
         m_wake.notify_one(); return true;
     } catch (const std::exception& e) { fail(e.what(), location); return false; }
@@ -186,7 +193,9 @@ void Session::run(std::vector<ProductCapture> products) {
                 m_wake.wait_for(lock, std::chrono::milliseconds(25), [&] { return m_stopping || !m_queue.empty(); });
                 if (!m_queue.empty()) {
                     next.emplace(std::move(m_queue.front())); m_queue.pop_front();
-                    m_bytes -= next->payload.capacity() + sizeof(Record) + 64;
+                    const auto bytes = next->payload.capacity() + sizeof(Record) + 64;
+                    m_bytes -= bytes;
+                    if (m_budget) m_budget->release(bytes);
                 } else if (m_stopping) break;
             }
             if (next) {
@@ -218,6 +227,7 @@ void Session::run(std::vector<ProductCapture> products) {
             std::unique_lock lock(m_mutex);
             m_wake.wait(lock, [&] { return m_stopping; });
             for (const auto& queued : m_queue) failLocked(m_error, {queued.time, queued.connection, queued.kind});
+            if (m_budget) m_budget->release(m_bytes);
             m_queue.clear(); m_bytes = 0;
             m_stopRecord.kind = Kind::CaptureStopped;
             // Keep an explicitly submitted deterministic stop stamp when possible.

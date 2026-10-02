@@ -80,8 +80,8 @@ TEST(ServerMetrics, RecorderAndConnectionSeriesOverHttp) {
     EXPECT_FALSE(hasSeries(text, "sentinel_recorder_last_column_timestamp_seconds{"));
     EXPECT_FALSE(hasSeries(text, "sentinel_recorder_column_overdue_seconds{"));
 
-    model.onMarketDataConnectionChanged(true);
-    model.onMarketDataConnectionChanged(true); // repeated status is not a transition
+    model.onMarketDataConnectionChanged("BTC-USD", true);
+    model.onMarketDataConnectionChanged("BTC-USD", true); // repeated status is not a transition
     text = scrape(server.port());
     EXPECT_TRUE(has(text, "sentinel_mdc_connected 1"));
     EXPECT_TRUE(has(text, "sentinel_mdc_transport_up_total 1"));
@@ -90,7 +90,7 @@ TEST(ServerMetrics, RecorderAndConnectionSeriesOverHttp) {
     EXPECT_TRUE(has(text, "sentinel_recorder_column_overdue_seconds{product=\"BTC-USD\",layer=\"near\"} 0"));
     EXPECT_TRUE(has(text, "sentinel_recorder_column_overdue_seconds{product=\"BTC-USD\",layer=\"deep\"} 0"));
 
-    model.onMarketDataConnectionChanged(false);
+    model.onMarketDataConnectionChanged("BTC-USD", false);
     text = scrape(server.port());
     EXPECT_TRUE(has(text, "sentinel_mdc_connected 0"));
     EXPECT_TRUE(has(text, "sentinel_mdc_transport_down_total 1"));
@@ -104,6 +104,55 @@ TEST(ServerMetrics, RecorderAndConnectionSeriesOverHttp) {
     while (!has(text, "sentinel_recorder_invalidations_total 1") && timer.elapsed() < 3000)
         text = scrape(server.port());
     EXPECT_TRUE(has(text, "sentinel_recorder_invalidations_total 1")) << text;
+}
+
+// Per-product connections: only pinned (recorder) symbols drive the health series.
+// A GUI chart's product going down must not page A1b or hide BTC's overdue
+// deadline, and a pinned product down must show even while a GUI product is up.
+TEST(ServerMetrics, GuiProductConnectionCannotMoveThePinnedHealthSeries) {
+    int argc = 1;
+    char name[] = "server-metrics-gui";
+    char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    ServerConfig config = recordingConfig(dir);
+    config.defaultSymbols = {"btc-usd", "sol-usd"};
+    ServerDataModel model(config);
+    ASSERT_TRUE(model.recordingAvailable());
+    MetricsRegistry registry;
+    model.registerMetrics(registry);
+    const std::string btcOverdue = "sentinel_recorder_column_overdue_seconds{product=\"BTC-USD\",layer=\"near\"}";
+    const std::string ethOverdue = "sentinel_recorder_column_overdue_seconds{product=\"ETH-USD\"";
+
+    model.onMarketDataConnectionChanged("BTC-USD", true);
+    std::string text = registry.render();
+    EXPECT_TRUE(has(text, "sentinel_mdc_connected 0")) << "SOL-USD (pinned) is still down";
+    model.onMarketDataConnectionChanged("SOL-USD", true);
+    text = registry.render();
+    EXPECT_TRUE(has(text, "sentinel_mdc_connected 1"));
+    EXPECT_TRUE(has(text, "sentinel_mdc_transport_up_total 2"));
+    EXPECT_TRUE(has(text, btcOverdue + " 0"));
+
+    // A GUI chart opens and closes ETH-USD: nothing pinned moves.
+    for (const bool up : {true, false, true, false}) {
+        model.onMarketDataConnectionChanged("ETH-USD", up);
+        text = registry.render();
+        EXPECT_TRUE(has(text, "sentinel_mdc_connected 1")) << "ETH up=" << up;
+        EXPECT_TRUE(has(text, "sentinel_mdc_transport_up_total 2"));
+        EXPECT_TRUE(has(text, "sentinel_mdc_transport_down_total 0"));
+        EXPECT_TRUE(has(text, btcOverdue + " 0")) << "ETH up=" << up;
+        EXPECT_FALSE(hasSeries(text, ethOverdue)) << "only pinned symbols have recorder series";
+    }
+
+    // BTC alone down while the GUI's ETH is up: the gauge drops, BTC's overdue goes absent.
+    model.onMarketDataConnectionChanged("ETH-USD", true);
+    model.onMarketDataConnectionChanged("BTC-USD", false);
+    text = registry.render();
+    EXPECT_TRUE(has(text, "sentinel_mdc_connected 0"));
+    EXPECT_TRUE(has(text, "sentinel_mdc_transport_down_total 1"));
+    EXPECT_FALSE(hasSeries(text, btcOverdue));
+    EXPECT_TRUE(hasSeries(text, "sentinel_recorder_column_overdue_seconds{product=\"SOL-USD\",layer=\"near\"}"));
 }
 
 TEST(ServerMetrics, RecorderOffExportsOnlyItsState) {

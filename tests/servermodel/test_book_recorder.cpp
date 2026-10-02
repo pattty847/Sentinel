@@ -943,7 +943,7 @@ TEST_F(RecorderTest, LayerWatermarksTrackOwnPersistenceAndStallFlagsFailedLayer)
     EXPECT_EQ(r->watermarks("BTC-USD", "near").lastColumnMs, 0);
     EXPECT_EQ(r->watermarks("BTC-USD", "deep").lastColumnMs, kEpoch + 60000);
     RecorderStallMonitor monitor(0);
-    monitor.setConnected(true, kEpoch);
+    monitor.setConnected("BTC-USD", true, kEpoch);
     std::vector<RecorderStallMonitor::Series> series;
     for (const auto *layer : {"near", "deep"})
         series.push_back({"BTC-USD", layer, r->watermarks("BTC-USD", layer).lastColumnMs});
@@ -972,14 +972,14 @@ std::vector<int64_t> stallTimes(RecorderStallMonitor &m, std::vector<RecorderSta
 TEST(RecorderStallMonitor, StartupDeadlineIncludesFirstMinuteAndLateness) {
     RecorderStallMonitor m(90'000);
     std::vector<RecorderStallMonitor::Series> s{{"BTC-USD", "near", 0}};
-    m.setConnected(true, kT + 1000);
+    m.setConnected("BTC-USD", true, kT + 1000);
     auto onSchedule = [](int64_t now) {
         const int64_t committed = now - 60'000 - 90'000; // bucket b commits at b + 150 s
         return committed < kT ? 0 : committed / 60'000 * 60'000;
     };
     EXPECT_TRUE(stallTimes(m, s, kT + 1000, kT + 900'000, onSchedule).empty());
     RecorderStallMonitor missing(90'000);
-    missing.setConnected(true, kT + 1000);
+    missing.setConnected("BTC-USD", true, kT + 1000);
     std::vector<RecorderStallMonitor::Series> none{{"BTC-USD", "near", 0}};
     EXPECT_EQ(stallTimes(missing, none, kT + 1000, kT + 340'000, [](int64_t) { return 0; }),
               (std::vector<int64_t>{kT + 270'000, kT + 330'000}));
@@ -989,11 +989,11 @@ TEST(RecorderStallMonitor, StartupDeadlineIncludesFirstMinuteAndLateness) {
 TEST(RecorderStallMonitor, ReconnectRestartsDeadlineAndDisconnectedTimeIsSilent) {
     RecorderStallMonitor m(2000);
     std::vector<RecorderStallMonitor::Series> s{{"BTC-USD", "deep", kT + 240'000}};
-    m.setConnected(true, kT);
+    m.setConnected("BTC-USD", true, kT);
     EXPECT_TRUE(m.check(kT + 300'000, s).empty());
-    m.setConnected(false, kT + 310'000);
+    m.setConnected("BTC-USD", false, kT + 310'000);
     EXPECT_TRUE(m.check(kT + 1'000'000, s).empty());
-    m.setConnected(true, kT + 1'000'500); // connect minute kT + 960 s
+    m.setConnected("BTC-USD", true, kT + 1'000'500); // connect minute kT + 960 s
     EXPECT_TRUE(m.check(kT + 1'141'999, s).empty());
     const auto stalls = m.check(kT + 1'142'000, s);
     ASSERT_EQ(stalls.size(), 1);
@@ -1005,21 +1005,40 @@ TEST(RecorderStallMonitor, OverdueMatchesTheWarningDeadline) {
     RecorderStallMonitor m(2000);
     const int64_t lastColumn = kT + 240'000;
     std::vector<RecorderStallMonitor::Series> s{{"BTC-USD", "deep", lastColumn}};
-    EXPECT_FALSE(m.overdueMs(kT + 300'000, lastColumn).has_value());
-    m.setConnected(true, kT);
-    EXPECT_EQ(m.overdueMs(kT + 300'000, lastColumn), 0);
+    EXPECT_FALSE(m.overdueMs("BTC-USD", kT + 300'000, lastColumn).has_value());
+    m.setConnected("BTC-USD", true, kT);
+    EXPECT_EQ(m.overdueMs("BTC-USD", kT + 300'000, lastColumn), 0);
     // due = last column bucket + 2 min + lateness = kT + 362 s; warned 60 s later.
-    EXPECT_EQ(m.overdueMs(kT + 400'000, lastColumn), 38'000);
+    EXPECT_EQ(m.overdueMs("BTC-USD", kT + 400'000, lastColumn), 38'000);
     EXPECT_TRUE(m.check(kT + 421'999, s).empty());
-    EXPECT_EQ(m.overdueMs(kT + 422'000, lastColumn), 60'000);
+    EXPECT_EQ(m.overdueMs("BTC-USD", kT + 422'000, lastColumn), 60'000);
     EXPECT_EQ(m.check(kT + 422'000, s).size(), 1);
-    m.setConnected(false, kT + 430'000);
-    EXPECT_FALSE(m.overdueMs(kT + 430'000, lastColumn).has_value());
-    m.setConnected(true, kT + 1'000'500); // reconnect minute kT + 960 s restarts the deadline
-    EXPECT_EQ(m.overdueMs(kT + 1'082'000, lastColumn), 0);
-    EXPECT_EQ(m.overdueMs(kT + 1'083'000, lastColumn), 1'000);
+    m.setConnected("BTC-USD", false, kT + 430'000);
+    EXPECT_FALSE(m.overdueMs("BTC-USD", kT + 430'000, lastColumn).has_value());
+    m.setConnected("BTC-USD", true, kT + 1'000'500); // reconnect minute kT + 960 s restarts the deadline
+    EXPECT_EQ(m.overdueMs("BTC-USD", kT + 1'082'000, lastColumn), 0);
+    EXPECT_EQ(m.overdueMs("BTC-USD", kT + 1'083'000, lastColumn), 1'000);
 }
 TEST(DefaultSymbols, NormalizedAsSubscribed) {
     EXPECT_EQ(normalizedDefaultSymbols({"btc-usd", "", "BTC-USD", "Eth-Usd"}),
               (std::vector<std::string>{"BTC-USD", "ETH-USD"}));
+}
+
+TEST(RecorderStallMonitor, GuiProductOutageCannotMuteOrResetPinnedRecorderDeadline) {
+    RecorderStallMonitor monitor(0);
+    monitor.setConnected("BTC-USD", true, kT);
+    monitor.setConnected("ETH-USD", true, kT + 60'000);
+    monitor.setConnected("ETH-USD", false, kT + 120'000);
+    std::vector<RecorderStallMonitor::Series> series{{"BTC-USD", "near", 0}, {"ETH-USD", "near", 0}};
+    auto stalls = monitor.check(kT + 180'000, series);
+    ASSERT_EQ(stalls.size(), 1u);
+    EXPECT_EQ(stalls[0].symbol, "BTC-USD");
+    monitor.setConnected("ETH-USD", true, kT + 240'000);
+    stalls = monitor.check(kT + 240'000, series);
+    ASSERT_EQ(stalls.size(), 1u);
+    EXPECT_EQ(stalls[0].symbol, "BTC-USD");
+    // The /metrics overdue gauge follows the same per-symbol state.
+    EXPECT_EQ(monitor.overdueMs("BTC-USD", kT + 240'000, 0), 120'000); // due kT + 120 s
+    EXPECT_EQ(monitor.overdueMs("ETH-USD", kT + 240'000, 0), 0); // reconnect restarted ETH's deadline
+    EXPECT_FALSE(monitor.overdueMs("SOL-USD", kT + 240'000, 0).has_value()); // never reported
 }

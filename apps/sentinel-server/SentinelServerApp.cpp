@@ -64,9 +64,9 @@ bool SentinelServerApp::initialize() {
 
         // 2. Market Data Core
         try {
-            m_marketDataCore = std::make_unique<MarketDataCoreEngine>(*m_authenticator, m_serverConfig.mdc);
+            m_marketDataCore = std::make_unique<MarketDataFeeds>(*m_authenticator, m_serverConfig.mdc);
         } catch (const std::exception& e) {
-            sLog_Error("MarketDataCoreEngine init failed: " << e.what());
+            sLog_Error("MarketDataFeeds init failed: " << e.what());
             return false;
         }
         
@@ -91,7 +91,7 @@ bool SentinelServerApp::initialize() {
         m_metrics.gaugeFn("sentinel_stream_sessions", "Open client stream sessions.", {},
                           [this]() -> std::optional<double> { return double(m_server->sessionCount()); });
         
-        // Connect MarketDataCoreEngine -> ServerDataModel via queued invocations
+        // Connect MarketDataFeeds -> ServerDataModel via queued invocations
         QPointer<ServerDataModel> modelPtr(m_serverModel.get());
         m_marketDataCore->onTrade([modelPtr](const Trade& trade) {
             Trade tradeCopy = trade;
@@ -130,9 +130,9 @@ bool SentinelServerApp::initialize() {
         });
         
         // Wire up callbacks for logging
-        m_marketDataCore->onConnectionStatus([modelPtr](bool connected){
-            sLog_App("MarketDataCore Connection: " << (connected ? "CONNECTED" : "DISCONNECTED"));
-            safeInvoke(modelPtr, [connected](ServerDataModel& model) { model.onMarketDataConnectionChanged(connected); });
+        m_marketDataCore->onConnectionStatus([modelPtr](const std::string& product, bool connected){
+            sLog_App("MarketDataCore Connection: product=" << product << " " << (connected ? "CONNECTED" : "DISCONNECTED"));
+            safeInvoke(modelPtr, [product, connected](ServerDataModel& model) { model.onMarketDataConnectionChanged(product, connected); });
         });
         // The recorder dropped a book on its own: only a fresh snapshot resumes it.
         connect(m_serverModel.get(), &ServerDataModel::recordingResnapshotRequested, this,
@@ -141,8 +141,8 @@ bool SentinelServerApp::initialize() {
                     if (m_marketDataCore) m_marketDataCore->requestResnapshot(symbol.toStdString());
                 });
         
-        m_marketDataCore->onError([](const std::string& error){
-            sLog_Error("MarketDataCore Error: " << error);
+        m_marketDataCore->onError([](const std::string& product, const std::string& error){
+            sLog_Error("MarketDataCore Error: product=" << product << " " << error);
         });
 
         m_marketDataCore->onLatency([this](int latencyMs) {
@@ -170,7 +170,7 @@ bool SentinelServerApp::initialize() {
                                  return;
                              }
                              sLog_Data("First client subscribed, acquiring upstream: symbol=" << symbol);
-                             m_marketDataCore->subscribeToSymbols({symbol.toStdString()});
+                             m_marketDataCore->add(symbol.toStdString());
                          }, Qt::QueuedConnection);
 
         QObject::connect(m_server.get(), &SentinelStreamServer::clientUnsubscribed, this,
@@ -185,7 +185,7 @@ bool SentinelServerApp::initialize() {
                                  return;
                              }
                              sLog_Data("Last client unsubscribed, releasing upstream: symbol=" << symbol);
-                             m_marketDataCore->unsubscribeFromSymbols({native});
+                             m_marketDataCore->remove(native);
                          }, Qt::QueuedConnection);
 
         // Start connection
@@ -210,7 +210,7 @@ bool SentinelServerApp::initialize() {
                     names << QString::fromStdString(sym);
                 }
                 sLog_Data("Server default subscribe: symbols=" << names.join(','));
-                m_marketDataCore->subscribeToSymbols(symbolList);
+                for (const auto& symbol : symbolList) m_marketDataCore->add(symbol, true);
             });
         }
 

@@ -7,12 +7,7 @@
 #include <boost/asio/executor_work_guard.hpp>
 #include <nlohmann/json.hpp>
 #include <cstdint>
-#include <atomic>
-#include <thread>
 #include <chrono>
-#include <optional>
-#include <unordered_map>
-#include <mutex>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -27,7 +22,7 @@ namespace net = boost::asio;
 namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
 
-class MarketDataCoreEngine {
+class MarketDataCoreEngine : public std::enable_shared_from_this<MarketDataCoreEngine> {
 public:
     using TradeCb = std::function<void(const Trade&)>;
     using OrderBookLevelUpdatesCb = std::function<void(const std::string&,
@@ -37,13 +32,13 @@ public:
                                                       const std::vector<OrderBookLevel>&,
                                                       const std::vector<OrderBookLevel>&,
                                                       int64_t envelopeMs)>;
-    // The book for productId (empty = every product) is no longer trustworthy:
+    // The book for this connection's product is no longer trustworthy:
     // disconnect, sequence gap or malformed L2. It becomes valid again only at
     // the next snapshot for that product.
     using OrderBookInvalidatedCb = std::function<void(const std::string& productId,
                                                       const std::string& reason)>;
-    using ConnectionStatusCb = std::function<void(bool)>;
-    using ErrorCb = std::function<void(const std::string&)>;
+    using ConnectionStatusCb = std::function<void(const std::string&, bool)>;
+    using ErrorCb = std::function<void(const std::string&, const std::string&)>;
     using LatencyCb = std::function<void(int)>;
 
     // Optional pre-parse capture tap. Views are valid only for the callback; set
@@ -51,6 +46,7 @@ public:
     enum class IngestKind { Frame, TransportUp, TransportDown, BookInvalidated, ResyncRequested };
     struct IngestObservation {
         IngestKind kind;
+        uint64_t connection;
         int64_t systemNs;
         int64_t steadyNs;
         std::string_view payload;
@@ -66,34 +62,31 @@ public:
         std::chrono::milliseconds watchdogInterval{2000};
         std::chrono::milliseconds heartbeatStale{20000};
         std::chrono::milliseconds staleHeartbeatDelay{5000};
-        // requestResnapshot() ignores requests this soon after its last reconnect,
-        // whichever product asked: one stuck consumer must not keep gapping the rest.
         std::chrono::milliseconds resnapshotCooldown{20000};
         // Per-product silence/recovery intervals; constructor-only test overrides.
         std::chrono::milliseconds level2Stale{30000};
         std::chrono::milliseconds level2RetryMaximum{600000};
-        std::chrono::milliseconds level2QuietMaximum{300000};
     };
-    // Alternate transport/timings support deterministic offline tests. All
-    // transport callbacks must run on the supplied I/O context's single thread.
-    using TransportFactory = std::function<std::unique_ptr<WsTransport>(net::io_context&, ssl::context&)>;
-    explicit MarketDataCoreEngine(Authenticator& auth, const ServerMdcConfig& config);
-    MarketDataCoreEngine(Authenticator& auth, const ServerMdcConfig& config,
-                         TransportFactory transportFactory, ReconnectPolicy policy);
-
-
+    using TransportFactory = std::function<std::unique_ptr<WsTransport>(const std::string&, net::io_context&, ssl::context&)>;
+    using Clock = std::function<int64_t()>; // monotonic microseconds
+    using ConnectPermit = std::function<bool(int64_t)>;
+    using Jitter = std::function<std::chrono::milliseconds()>;
+    struct Stats {
+        std::string product;
+        bool up = false;
+        uint64_t connection = 0, reconnects = 0;
+        int64_t sequence = -1, lastMessageAgeMs = -1, level2AgeMs = -1;
+    };
+    MarketDataCoreEngine(Authenticator&, const ServerMdcConfig&, std::string product,
+                         net::io_context&, ssl::context&, TransportFactory, ReconnectPolicy,
+                         Clock, ConnectPermit, ConnectPermit, std::function<void()>, Jitter);
     ~MarketDataCoreEngine();
+    // Owner calls these on the shared I/O thread. Each mutation enters this engine's strand.
     void start();
-    void stop();
-
-    // Subscription Management
-    void subscribeToSymbols(const std::vector<std::string>& symbols);
-    void unsubscribeFromSymbols(const std::vector<std::string>& symbols);
-    // A consumer lost its book for productId on its own (not via onLiveOrderBookInvalidated)
-    // and needs a fresh snapshot: invalidate every book (ordered with accepted frames),
-    // then reconnect, which resubscribes every product. Thread-safe; ignored while
-    // disconnected or reconnecting, and within resnapshotCooldown of the last one.
-    void requestResnapshot(const std::string& productId);
+    void stop(std::function<void()> completion);
+    void tick();
+    void requestResnapshot();
+    Stats stats() const; // shared I/O thread only
 
     MarketDataCoreEngine(const MarketDataCoreEngine&) = delete;
     MarketDataCoreEngine& operator=(const MarketDataCoreEngine&) = delete;
@@ -110,13 +103,12 @@ public:
 
 private:
     void observeIngest(IngestKind kind, std::string_view payload = {},
-                       std::string_view product = {}, std::string_view reason = {}) noexcept;
-    void run();
-    void scheduleReconnect();
+                       std::string_view reason = {}) noexcept;
+    void scheduleReconnect(bool initial = false);
+    void transportStatus(bool up);
+    void receive(std::string payload);
 
-    // Strand only; public subscription changes post the entire mutation here.
-    void sendSubscriptionMessage(const std::string& type, const std::vector<std::string>& symbols,
-                                 bool level2Only = false);
+    void sendSubscriptions();
     void checkLevel2Silence(int64_t nowMs);
     void dispatch(const nlohmann::json&);
 
@@ -136,69 +128,39 @@ private:
                              const std::chrono::system_clock::time_point& exchange_timestamp);
 
     void handleHeartbeats(const nlohmann::json& message);
-    void startHeartbeatWatchdog();
-    void triggerImmediateReconnect(const char* reason);
     void reconnectNow(const std::string& reason); // strand only
 
     void emitError(std::string msg);
     void emitConnectionStatus(bool connected);
-    void emitBookInvalidated(const std::string& productId, const std::string& reason);
+    void emitBookInvalidated(const std::string& reason);
 
-    void replaySubscriptionsOnConnect();
     std::string                     m_host;
     std::string                     m_port;
     std::string                     m_target;
     bool                            m_useJwt = false;
-    std::string                     m_sslCaBundle;
-    std::vector<std::string>        m_products;
-
-    Authenticator&                  m_auth;
-    SubscriptionManager             m_subscriptions;
-
-    net::io_context                 m_ioc;
-    ssl::context                    m_sslCtx{ssl::context::tlsv12_client};
-    net::strand<net::io_context::executor_type> m_strand{m_ioc.get_executor()};
-    net::steady_timer               m_reconnectTimer{m_strand};
-    net::steady_timer               m_heartbeatTimer{m_strand};
-    std::optional<net::executor_work_guard<net::io_context::executor_type>> m_workGuard;
-    std::unique_ptr<WsTransport>      m_transport;
-    
-    std::atomic<bool>               m_running{false};
-    std::atomic<bool>               m_connected{false};
-    ReconnectPolicy                m_reconnectPolicy;
-    std::chrono::milliseconds       m_backoffDuration{1000};
-    // I/O-thread-owned. Duplicate down/close callbacks share one pending retry.
-    bool                            m_reconnectScheduled = false;
-    bool                            m_closePending = false;
-    std::thread                     m_ioThread;
-    
-    std::atomic<int>                m_tradeLogCount{0};
-    std::atomic<int>                m_orderBookLogCount{0};
-    std::unordered_map<std::string, uint64_t> m_lastSeqByProduct;
-    std::mutex                      m_seqMutex;
-    std::atomic<int64_t>            m_lastHeartbeatMs{0};
-    // Coinbase sequence_num is per connection and contiguous across every
-    // channel, starting at 0 (measured 2026-09-28). Only touched on the io strand.
-    int64_t                         m_lastSequenceNum = -1;
-    int64_t                         m_lastResnapshotMs = -1; // steady ms; io strand only
-    bool                            m_loggedEmptySubscriptionAck = false;
+    const std::string m_product;
+    Authenticator& m_auth;
+    net::strand<net::io_context::executor_type> m_strand;
+    std::shared_ptr<WsTransport> m_transport;
+    ReconnectPolicy m_reconnectPolicy;
+    Clock m_clock;
+    ConnectPermit m_connectPermit, m_subscribePermit;
+    std::function<void()> m_cancelPermits;
+    Jitter m_jitter;
+    bool m_running = false, m_connected = false;
+    bool m_reconnectScheduled = false, m_closePending = false, m_subscriptionsPending = false;
+    std::chrono::milliseconds m_backoffDuration;
+    int64_t m_connectAt = 0, m_watchdogAt = 0;
+    int64_t m_lastHeartbeatMs = -1, m_lastSequenceNum = -1, m_lastResnapshotMs = -1;
+    uint64_t m_connection = 0, m_attempt = 0;
+    int64_t m_downSince = -1, m_nextDownAlarm = 0;
+    bool m_loggedEmptySubscriptionAck = false, m_warnedMissingLevel2 = false;
     struct ProductLiveness {
-        int64_t lastLevel2Ms;
-        int64_t resubscribeMs = -1; // cleared only by a valid snapshot
-        int64_t lastRecoveryUnsubscribeMs = -1; // diagnostic, current connection only
-        int64_t retryMs = 0, quietMs = 0;
-        unsigned failures = 0, reconnectEscalations = 0;
+        int64_t lastLevel2Ms = 0, retryMs = 0;
         bool snapshotAccepted = false;
-        bool everAccepted = false; // survives reconnects; a known product may need shared recovery
-        // Bounded snapshot evidence, not a shadow book. An update invalidates
-        // the comparison baseline; only consecutive quiet snapshots compare.
-        bool comparableSnapshot = false;
-        uint64_t snapshotHash = 0, snapshotHash2 = 0;
-        size_t snapshotLevels = 0;
-    };
-    // Allocated on subscription changes only; find/update on each L2 event.
-    // Desired products and liveness are owned by the I/O strand.
-    std::unordered_map<std::string, ProductLiveness> m_productLiveness;
+    } m_liveness;
+    std::vector<BookLevelUpdate> m_levelUpdates;
+    std::function<void()> m_stopCompletion;
 
     TradeCb                          m_onTrade;
     OrderBookLevelUpdatesCb          m_onLiveOrderBookLevelUpdates;

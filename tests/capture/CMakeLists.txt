@@ -16,7 +16,7 @@ target_compile_definitions(test_capture_app PRIVATE
     SENTINEL_TEST_CA="${CMAKE_SOURCE_DIR}/resources/certs/ca-bundle.crt")
 add_dependencies(test_capture_app capture_app_fixture)
 add_test(NAME CaptureApplicationTests COMMAND test_capture_app)
-set_tests_properties(CaptureApplicationTests PROPERTIES LABELS "capture" TIMEOUT 30)
+set_tests_properties(CaptureApplicationTests PROPERTIES LABELS "capture" TIMEOUT 120)
 
 add_executable(test_capture_routing test_capture_routing.cpp)
 target_link_libraries(test_capture_routing PRIVATE sentinel_core GTest::gtest_main Qt6::Core)

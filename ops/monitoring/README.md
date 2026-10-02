@@ -108,8 +108,8 @@ scrape. VictoriaMetrics adds `job` and `instance` to every series.
 | `sentinel_recorder_late_events_total` | counter | - | Book messages timestamped before the minutes that are already closed. |
 | `sentinel_recorder_backward_steps_total` | counter | - | Book messages whose timestamp went backwards. |
 | `sentinel_recorder_live_publish_drops_total` | counter | - | Live publications that were refused (series limit or stale). |
-| `sentinel_mdc_connected` | gauge | - | 1 while the upstream market-data transport is up. |
-| `sentinel_mdc_transport_up_total` / `_down_total` | counter | - | Upstream up and down transitions. Reconnects = up - 1. |
+| `sentinel_mdc_connected` | gauge | - | 1 while every pinned (`default_symbols`) product's upstream connection is up. GUI-only products never move it. |
+| `sentinel_mdc_transport_up_total` / `_down_total` | counter | - | Pinned products' upstream up and down transitions (one connection per product). Reconnects = up - pinned products. |
 | `sentinel_mdc_ws_latency_ms` | gauge | - | Latest Coinbase WebSocket latency (server time minus exchange timestamp). |
 | `sentinel_exchange_clock_offset_ms` | gauge | - | Smoothed local clock minus exchange clock. 0 means not yet measured. |
 | `sentinel_stream_sessions` | gauge | - | Open client stream sessions (GUIs). |
@@ -130,7 +130,7 @@ signal is on a hot path.
 
 | Alert | Fires when | For |
 |---|---|---|
-| A1 recorder stalled | `max by (product,layer) (sentinel_recorder_column_overdue_seconds) > 60` (only while connected) | 1 m |
+| A1 recorder stalled | `max by (product,layer) (sentinel_recorder_column_overdue_seconds) > 60` (only while that product is connected) | 1 m |
 | A1b recorder upstream disconnected | `sentinel_mdc_connected < 1`. A1 is silent by design while disconnected, so this alert covers that gap. | 5 m |
 | A3 service down | `up{job=~"sentinel-server\|node"} or (absent(up{job="sentinel-server"}) - 1) or (absent(up{job="node"}) - 1)` is below 1. This gives one sample per required job: a failed scrape (up 0) and a job whose `up` series is missing (absent - 1 = 0) both fire for that job. When VictoriaMetrics does not answer, Grafana sends its DatasourceError notification. | 2 m |
 | A3b T7 absent | `absent(node_filesystem_avail_bytes{mountpoint="/Volumes/T7"})` | 5 m |

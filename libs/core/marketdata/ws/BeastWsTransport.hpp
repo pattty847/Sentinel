@@ -35,6 +35,7 @@ public:
         std::chrono::milliseconds connectTimeout{20000}; // resolve + TCP + TLS + WS handshake
         std::chrono::milliseconds closeTimeout{3000};    // WS close handshake with the peer
         ResolveFn resolve;
+        std::string product; // log identity, assigned by the single-product engine
     };
 
     BeastWsTransport(net::io_context& ioc, ssl::context& sslCtx);
@@ -84,6 +85,7 @@ private:
     bool sawInboundFrame_ = false;
     // Strand-owned. Bumped by connect(), close() and every terminal outcome.
     uint64_t attempt_ = 0;
+    uint64_t connection_ = 0, connectAttempts_ = 0;
     Phase phase_ = Phase::Idle;
 
     void cancelTimers();

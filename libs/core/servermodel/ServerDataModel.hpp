@@ -1,5 +1,6 @@
 #pragma once
 #include "RecordingLive.hpp"
+#include <map>
 #include <unordered_map>
 #include <vector>
 #include <deque>
@@ -89,8 +90,9 @@ public slots:
     void onLiveOrderBookInitialized(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks, qint64 envelopeMs = 0);
     // Empty productId = every symbol. The book stays invalid until its next snapshot.
     void onLiveOrderBookInvalidated(const QString& productId, const QString& reason);
-    // Market-data transport up/down; gates the recorder stall warning.
-    void onMarketDataConnectionChanged(bool connected);
+    // One product's market-data connection up/down. Gates that symbol's recorder
+    // stall warning; only pinned (default) symbols drive the health metrics.
+    void onMarketDataConnectionChanged(const std::string& symbol, bool connected);
 
 signals:
     // Rebroadcast signals for streaming clients
@@ -120,8 +122,11 @@ private:
     std::atomic<int64_t> m_exchangeOffsetMs{0};
     // Metrics mirrors. Written on the main thread, except live publish drops
     // (recorder worker); declared before m_recorder so they outlive its worker.
+    // m_mdConnected = every pinned symbol's connection is up (m_pinnedUp, main thread).
     std::atomic<bool> m_mdConnected{false};
     std::atomic<uint64_t> m_mdTransportUps{0}, m_mdTransportDowns{0}, m_livePublishDrops{0};
+    std::map<std::string, bool> m_pinnedUp;
+    bool pinnedAllUp() const;
     mutable std::mutex m_footprintTradeMutex;
     std::unordered_map<std::string, std::deque<FootprintTradeSample>> m_recentFootprintTrades;
     int64_t m_footprintTradeRetentionMs = 300'000;

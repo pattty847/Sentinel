@@ -2,76 +2,126 @@
 
 ## Overview
 
-The market data stack is a thread-safe pipeline for real-time WebSocket feeds. The core is pure C++; Qt is used only in a thin GUI adapter.
-
-- **MarketDataCoreEngine** — Pure C++ orchestrator: WebSocket connection, authentication, message parsing, and dispatch. Runs on a dedicated worker thread and uses `std::function` callbacks so it can be used from GUI, server, or CLI.
-- **MarketDataCoreQt** — Thin Qt adapter around the engine. Receives callbacks on the worker thread and re-emits Qt signals on the GUI thread via `Qt::QueuedConnection`.
-
-## High-level architecture
-
-I/O runs on the worker thread; GUI runs on the Qt thread.
+`MarketDataFeeds` owns one shared Boost.Asio `io_context`, one `mdc-io` thread,
+one TLS context (CA loading once), and one `MarketDataCoreEngine` per product.
+Each engine owns one transport and strand, a single connection sequence counter,
+its own heartbeat/L2 liveness and reconnect state. Core depends on QtCore logging,
+never GUI Qt. Consumers retain history and books; engines only dispatch data.
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  MarketDataCoreQt (GUI thread)     MarketDataCoreEngine (worker thread)  │
-│  Signals: tradeReceived(),         Callbacks: onTrade(),                 │
-│  bookUpdates(), connectionStatus()  onLiveOrderBook...(), onError()      │
-│         ◀────────── Qt::QueuedConnection ──────────                      │
-└─────────────────────────────────────────────────────────────────────────┘
+MarketDataFeeds (one I/O thread, shared TLS and connect limiter)
+  BTC-USD engine/strand -> BTC-USD WebSocket -> callbacks(product=BTC-USD)
+  ETH-USD engine/strand -> ETH-USD WebSocket -> callbacks(product=ETH-USD)
+                                         -> queued ServerDataModel handoff
 ```
 
-The engine is stateless with respect to history; consumers are responsible for caching and state.
+## Connection ownership and isolation
 
-## Pipeline layers
+`add(product, pinned=false)` returns `Added`, `AlreadyPresent`,
+`CapacityExceeded`, or `InvalidProduct`. A duplicate add opens no connection.
+`remove(product)` removes admission state and queues only that socket for close,
+returning without waiting for transport-down. Completion is logged; owner stop
+drains retired sockets too. No unsubscribe frame is sent. Pinned feeds cannot be removed. Engines send exactly three
+subscribe frames after transport-up: level2 and market_trades with their one product,
+and connection-scoped heartbeats without product_ids. Subscribe batches have their own process-wide admission deadline, so delayed
+handshakes completing together cannot bypass message pacing.
 
-Three layers inside `MarketDataCoreEngine`:
+Sequence gaps, malformed messages/L2, provider errors, transport failure, inbound
+silence, and consumer resnapshot requests invalidate/reconnect only the affected
+product. Invalidation is ordered before later data callbacks; updates are withheld
+until a fresh snapshot is accepted. Unexpected product IDs are protocol errors,
+never forwarded to another product's consumer. Invalidation callbacks always name
+a product. Acks warn when an explicit level2 list omits that product; a trades-only
+ack makes no level2 claim. Acks never establish book validity.
 
-```
-Exchange WebSocket → Transport → Auth (optional) → Dispatch → Callbacks (std::function)
-```
+Each failed connection retries with exponential 1 s..30 s backoff, reset by
+the first accepted L2 snapshot, not a successful handshake. Persistent provider
+errors and malformed first messages therefore retain exponential backoff. Duplicate down notifications share one pending retry. A connected
+stream with no inbound message for 20 s reconnects with at least 5 s backoff.
+L2 silence initially triggers at 30 s, even while heartbeats/trades flow. It
+invalidates and reconnects that product directly. Its silence threshold doubles
+to 10 min across reconnects and quiet snapshots, resetting only after a snapshot
+followed by a nonempty valid update. There is no resubscribe dance, peer-health
+heuristic, escalation cap, or snapshot fingerprint. Consumer resnapshot requests
+have a separate per-engine 20 s cooldown.
 
-### 1. Transport (`ws/`)
+The owner drives connection and watchdog deadlines with one 100 ms Asio timer;
+each engine applies its own deadlines on its strand. A monotonic clock and jitter
+source are injectable, with manual pumping for deterministic offline tests.
+No additional thread or per-frame timer is created. Beast enforces separate
+connect/close deadlines (`server.mdc.connect_timeout_ms`, default 20 s;
+`close_timeout_ms`, default 3 s). Pending transport operations retain the
+transport through cancellation, so removing a feed cannot leave dangling handlers.
+Owner shutdown closes every socket before joining the producer thread.
 
-- **WsTransport** — Abstract interface: connection lifecycle, send/receive, status/error callbacks.
-- **BeastWsTransport** — Boost.Beast over SSL on a Boost.Asio `io_context`. All operations run on a single strand (serialized, no mutex). Supports async I/O and keep-alive ping.
-- **MarketDataCoreEngine recovery** — Every transport-down notification, including a failed initial handshake, schedules one retry. Backoff starts at 1 s, doubles to a 30 s cap, and resets on transport-up. Duplicate down notifications share the pending retry. The watchdog keeps rearming through outages; a connected stream with no inbound message for 20 s requests one close, waits for transport-down, then retries with at least 5 s backoff. A healthy connection keeps its existing subscriptions and message handling.
-- **Subscription frame scope** — Subscribe frames name exactly the added products; unsubscribe frames name exactly the removed products, never the remaining desired set. Desired-state mutations run on the engine's I/O strand. Reconnect replays all desired products. Heartbeats are connection-scoped (no `product_ids`) and are never unsubscribed while any product remains desired; removing the last product sends its L2/trade unsubscriptions plus the heartbeat unsubscribe.
-- **Per-product L2 silence** — `ReconnectPolicy::level2Stale` defaults to 30 s and is checked by the 2 s watchdog using steady time, independently for each desired product. Silence invalidates only that product via `onLiveOrderBookInvalidated` and sends only its L2 unsubscribe/subscribe pair; other products, trades and heartbeats stay subscribed. A missing recovery snapshot doubles that product's retry interval up to `level2RetryMaximum` (10 min), with one error per attempt. Failure counts and retry intervals survive reconnect/replay; only a valid snapshot followed by updates resets them. Shared reconnect escalation is limited to two attempts per failing product. A product that has never supplied an accepted snapshot cannot reconnect a healthy peer; a previously accepted product (`everAccepted`, retained across reconnects) can escalate even while peers remain healthy. Such a reconnect records the resnapshot cooldown before closing; actual transport loss still invalidates every book. After the limit, the product stays invalid and retries only its own L2 subscription at the backed-off rate. Duplicate subscribe alone is not assumed to supply a snapshot; [Coinbase documents product/channel unsubscribe](https://docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/websocket/websocket-overview).
-- **Quiet products** — Matching recovery snapshot fingerprints, with no intervening updates, double that product's silence threshold up to `level2QuietMaximum` (5 min). Updates reset the threshold to 30 s. This uses bounded snapshot evidence rather than a second order book: updates invalidate the comparison baseline, and the next snapshot establishes a new baseline. Fingerprints affect polling frequency only, never book validity. Timestamp/flag updates allocate nothing per L2 event. All policy fields are constructor-only, not YAML settings. Raw-capture replay honors the product on invalidation/resync markers; empty or absent product means every book.
-- **Subscription acknowledgement reconciliation** — Parse Advanced Trade `events[].subscriptions.level2` (and channel-list forms) separately from other channel products; heartbeats never appear as products. Warn for desired products missing from an explicit cumulative L2 list, except products currently awaiting a recovery snapshot (unsubscribe acknowledgement is expected during recovery). A trades-only ack makes no L2 claim. Acks are diagnostic, not proof of book freshness. Provider errors within 5 s of a scoped recovery unsubscribe additionally warn with the product, frame type and elapsed time; this is temporal correlation, not proof that the frame caused the error, and does not change error handling.
+## Connect pacing, capacity and diagnostics
 
-- **BeastWsTransport deadlines** — One connect attempt (DNS resolve, TCP connect, TLS handshake, WS handshake) must finish within `server.mdc.connect_timeout_ms` (default 20 s); the timeout is reported as `onError("connect timed out in <phase> ...")` plus one `onStatus(false)`, so it enters the backoff above. A close (including the stale-heartbeat close to a dead peer) reports down within `server.mdc.close_timeout_ms` (default 3 s) instead of Beast's 30 s close timeout. Each attempt has an id; `connect()`, `close()` and any terminal outcome retire it, so a late resolve/connect/handshake callback from a timed-out attempt is ignored. No deadline runs while connected.
+Every initial/reconnect attempt draws 0..1000 ms jitter in addition to its
+backoff. Two process-shared capacity-one token buckets independently admit one
+connect attempt and one three-frame subscription batch per second. Neither
+accumulates burst credit. Subscription batches are at least 1,000,000 microseconds
+apart even if delayed handshakes complete together; failed handshakes consume only
+connect admission. FIFO tickets prevent a failing product from starving peers;
+closing a feed cancels its pending tickets. Server and capture together send at
+most six unauthenticated subscribe frames per second, below Coinbase's eight
+messages/s/IP budget, and at most two connects/s. Scheduling adds up to 100 ms
+polling quantization plus event-loop work to deadlines. These budgets cover the
+two Sentinel processes; unrelated programs sharing the IP need their own allowance.
 
-### 2. Authentication (`auth/`)
+`MarketDataFeeds::Options::maxConnections` caps non-pinned feeds; zero means
+unlimited. Pinned recorder products never consume that allowance. Exceeding it
+creates no engine/transport, evicts nothing, returns `CapacityExceeded`, and
+logs `sLog_Error` with `symbol`, `cap`, and `code=capacity_exceeded`. Slice 3
+will configure the server default of 8 and surface refusals to clients/status;
+this core slice leaves the server unlimited.
 
-- **Authenticator** — Loads CDP API keys from `key.json` (optional) and builds signed JWTs (ES256) for authenticated channels. **Public channels** (level2, market_trades, heartbeats, candles) do not require auth; subscribe messages are sent without a `jwt` field when no key is present. Only channels such as `user` and `futures_balance_summary` need auth. Use `hasCredentials()` before `createJwt()` when keys are optional. Stateless and thread-safe.
+Engine and production transport diagnostics carry `product=` and `conn=`.
+Connection IDs increment only on transport-up, independently per engine. Failed
+attempts do not consume IDs or count as reconnects. A separate `attempt=` counter
+identifies all attempts in logs and the `feeds.connect` probe.
+`stats()` returns each product's up/down state, connection ID, reconnect count,
+sequence, last-message age and L2 age. The owner logs aggregate/per-product stats
+every 60 s; `ws.rx` identifies raw frames and `feeds.connect` reports bucket wait.
+A product continuously down for two minutes emits `sLog_Error`, repeating at
+most once per minute until up. The pre-parse ingest observer includes product and connection on every event.
 
-### 3. Dispatch (`dispatch/`)
+## API and threading
 
-- **MessageDispatcher** — Parses JSON from the WebSocket into typed events (`Event` variant containing `TradeEvent`, `BookSnapshotEvent`, `BookUpdateEvent`, etc.). Stateless `parse` entry point. It handles DTO transformations such as fast string-to-double parsing (`Cpp20Utils::fastStringToDouble`) and ISO8601 timestamp conversion.
+Lifecycle calls and callback setters belong to the owner's non-I/O thread.
+Set callbacks before the first successful add; later setters throw `logic_error`
+instead of silently leaving existing engines unchanged. `requestResnapshot(product)` is thread-safe,
+including from recorder callbacks. Lifecycle operations synchronize with the I/O
+thread; consumers must not call blocking lifecycle/stats methods from callbacks.
+All engine state changes enter its strand. Transport callbacks, JSON parsing and
+DTO callbacks run on the single I/O thread; server/model notifications cross to
+Qt with `Qt::QueuedConnection`. `MarketDataCoreQt` and its unused service-locator
+entry points have been deleted rather than preserving a second upstream API.
 
-**Flow:** `channel=market_trades` → array of `TradeEvent`; `channel=l2_data` + `type=snapshot` → `BookSnapshotEvent`; `type=update` → `BookUpdateEvent`.
+The per-engine update vector is reused; snapshots allocate their own level arrays.
+`MessageDispatcher` parses provider errors and subscription acknowledgements.
+L2 parsing validates side, positive finite price and nonnegative finite quantity.
+`Authenticator` supplies optional JWTs; public market-data channels need no key.
+`LiveOrderBook`/recording consumers own book storage, caching and persistence.
 
-### 4. Callbacks
+## Slice-1 integration boundary
 
-The engine exposes `std::function` callbacks (e.g. `TradeCb`, `OrderBookLevelUpdatesCb`, `OrderBookInitializedCb`, `ConnectionStatusCb`, `ErrorCb`). The owner (e.g. `MarketDataCoreQt`) supplies implementations and forwards to the GUI thread via `QMetaObject::invokeMethod(..., Qt::QueuedConnection)`.
+The server adds pinned defaults and GUI symbols as independent feeds and retains
+its queued book/trade/invalidation handoff. Connection state and the recorder
+stall monitor are scoped by symbol: a GUI product outage cannot mute or reset
+a pinned product's flat-column warning. There is no shared last-status boolean.
 
-### 5. Data models (`model/`)
-
-- **Trade** — `product_id`, `price`, `size`, `side` (`AggressorSide` enum), `timestamp`.
-- **BookLevelUpdate**, **BookDelta** — Incremental update structures.
-- **LiveOrderBook** — Dense, fixed-range order book for visualization and GPU. Maps a continuous price range to pre-allocated `std::vector<double>` arrays for `O(1)` updates using `price_to_index`. It uses `std::mutex` to ensure thread-safety on aggregations and structural mutations. The engine does **not** own `LiveOrderBook` instances; it only delivers snapshot and update data. The consumer creates and updates the book.
-
-## Threading & Pure C++ Boundary
-
-- **Worker thread (Boost.Asio)** — `MarketDataCoreEngine` runs `m_ioc.run()` on a dedicated thread. All network I/O, parsing, and `std::function` callback invocation happen there. A `while (m_running)` loop with try/catch keeps the thread and `io_context` resilient to handler exceptions.
-- **GUI thread Boundary (Qt)** — `MarketDataCoreQt` acts as the pure C++ boundary buffer. It lives on the GUI thread and registers C++ DTOs with Qt's MetaObject system (`qRegisterMetaType`). When a callback fires on the worker thread, the adapter uses `QMetaObject::invokeMethod` with `Qt::QueuedConnection` to safely copy DTO payloads (e.g., `std::move(updatesCopy)`) and emit signals on the GUI thread, protecting the core from Qt object leaks and keeping UI updates safe.
-
-## Message flow
-
-**Trades:** WebSocket → BeastWsTransport::onRead() → engine → MessageDispatcher::parse() → Trade → `m_onTrade(trade)` → adapter queues signal → GUI thread emits `tradeReceived(trade)`.
-
-**Order book:** WebSocket → parse → `BookSnapshotEvent` or `BookUpdateEvent` → `handleOrderBookSnapshot()` or `handleOrderBookUpdate()` → `m_onLiveOrderBookInitialized()` or `m_onLiveOrderBookLevelUpdates()` → adapter queues signals → GUI updates.
+Capture adds all configured products (seven in deployment) to one feed owner.
+Independent sequence streams cannot share the old multi-product writer's one
+sequence tracker. The app therefore uses the already-existing single-product
+`Session` constructor per product: new runs are RAWL2 v1, independent run IDs,
+product-local established-connection IDs, and no routing receipts. The v2 writer/reader remain
+available to existing fixtures until slice 2 removes only the writer. The process
+queue budget remains `--queue-mib` (64 MiB default), enforced across sessions
+by a shared atomic running total; ingest takes only its own session mutex. There
+is no static split or up-front allocation. Reservation is released on drain,
+queue disposal and failed insertion. Slice 2 still owns the per-product floors, 512 MiB default, writer cleanup and RAW_CAPTURE docs.
+The obsolete whole-capture 60 s engine-restart supervisor is removed; each
+transport already guarantees bounded connect/close completion and per-feed retry.
 
 ## Heatmap timeframes
 
@@ -107,21 +157,18 @@ Page fields `scanned_start` and `scanned_end` bound the proven half-open scanned
 
 ```
 libs/core/marketdata/
+├── MarketDataFeeds.hpp / .cpp
 ├── MarketDataCoreEngine.hpp / .cpp
 ├── ws/           WsTransport, BeastWsTransport, SubscriptionManager
 ├── auth/         Authenticator
 ├── dispatch/     MessageDispatcher, Channels
 └── model/        TradeData.h, LiveOrderBook.cpp
-
-libs/gui/marketdata/
-├── MarketDataCoreQt.hpp
-└── MarketDataCoreQt.cpp
 ```
 
 ## Design decisions
 
 - **No cache in the engine** — Cache was removed so the engine stays a stateless processor. Consumers (GUI, server) implement their own caching. Same engine can drive both.
-- **Separate Qt adapter** — Keeps `libs/core` free of Qt. The engine is reusable in any C++ context; the adapter handles thread crossing and signals.
+- **Queued consumer handoff** — Keeps GUI objects out of core; owners queue DTO callbacks to the appropriate Qt thread.
 - **Strand instead of mutex in transport** — The strand serializes async operations on the `io_context` without blocking the I/O thread; a mutex would introduce blocking and complicate the async model.
 
 ---

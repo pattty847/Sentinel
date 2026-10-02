@@ -152,7 +152,6 @@ set(WIDGET_SOURCES
     "widgets/FontSettingsDialog.cpp"
     "widgets/ChartDock.cpp"
     "widgets/LayoutManager.cpp"
-    "marketdata/MarketDataCoreQt.cpp"
     "widgets/OrderBookDock.cpp"
     "widgets/SecApiClient.cpp"
     "widgets/SecFilingDock.cpp"

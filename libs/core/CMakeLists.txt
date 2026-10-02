@@ -17,6 +17,8 @@ add_library(sentinel_core
     metrics/ProcessMetrics.hpp
     ConfigLoader.cpp
     ConfigLoader.hpp
+    marketdata/MarketDataFeeds.cpp
+    marketdata/MarketDataFeeds.hpp
     marketdata/MarketDataCoreEngine.cpp
     marketdata/MarketDataCoreEngine.hpp
     marketdata/auth/Authenticator.cpp
