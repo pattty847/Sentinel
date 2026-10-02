@@ -8,9 +8,12 @@
 #include <cstdint>
 
 namespace {
-// Largest whole-ms time span allowed by maxSpan (<= 0: no limit).
+// Without a maximum (legacy renderer) a zoom-out still stops somewhere finite:
+// 50 years keeps every ms computation far from int64 overflow.
+constexpr int64_t kSaneTimeSpanMs = 50LL * 365 * 24 * 3600 * 1000;
+// Largest whole-ms time span allowed by maxSpan (<= 0: no limit but the sane one).
 int64_t timeSpanLimit(double maxSpan) {
-    return maxSpan > 0 ? std::max<int64_t>(1, static_cast<int64_t>(std::floor(maxSpan))) : INT64_MAX;
+    return maxSpan > 0 ? std::max<int64_t>(1, static_cast<int64_t>(std::floor(maxSpan))) : kSaneTimeSpanMs;
 }
 double clampProcessedZoomDelta(double rawDelta, double sensitivity, double maxDelta) {
     const double processed = rawDelta * sensitivity;
@@ -77,6 +80,11 @@ void GridViewState::setMaxSpans(double maxTimeSpanMs, double maxPriceSpan) {
     if (m_timeWindowValid) setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
 }
 
+void GridViewState::setMinSpans(double minTimeSpanMs, double minPriceSpan) {
+    m_minTimeSpanMs = std::isfinite(minTimeSpanMs) && minTimeSpanMs > 0 ? minTimeSpanMs : 0.0;
+    m_minPriceSpan = std::isfinite(minPriceSpan) && minPriceSpan > 0 ? minPriceSpan : 0.0;
+}
+
 void GridViewState::setViewportAndMaxSpans(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax,
                                            double maxTimeSpanMs, double maxPriceSpan) {
     m_maxTimeSpanMs = std::isfinite(maxTimeSpanMs) && maxTimeSpanMs > 0 ? maxTimeSpanMs : 0.0;
@@ -122,82 +130,74 @@ void GridViewState::handleZoom(double delta, const QPointF& center) {
 
 void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, const QSizeF& viewportSize) {
     if (!m_timeWindowValid || viewportSize.isEmpty()) return;
+    if (center.x() < 0 || center.y() < 0) return;
 
-    double clampedDelta = std::max(-MAX_ZOOM_DELTA, std::min(MAX_ZOOM_DELTA, delta));
-    double zoomMultiplier = 1.0 + clampedDelta;
-    double newZoom = m_zoomFactor * zoomMultiplier;
-    newZoom = std::max(0.1, std::min(MAX_ZOOM_FACTOR, newZoom));
-    bool clamped = false;
-    if (newZoom != m_zoomFactor) {
-        if (center.x() >= 0 && center.y() >= 0) {
-            int64_t currentTimeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
-            double currentPriceRange = m_maxPrice - m_minPrice;
-            if (currentTimeRange <= 0) {
-                currentTimeRange = 1;
-            }
-            if (currentPriceRange <= 0.0) {
-                currentPriceRange = 1.0;
-            }
-            const double timeRangeD = static_cast<double>(currentTimeRange) * (m_zoomFactor / newZoom);
-            const bool zoomingOut = (newZoom < m_zoomFactor);
-            const int64_t wantedTimeRange = std::max<int64_t>(
-                1,
-                static_cast<int64_t>(zoomingOut ? std::ceil(timeRangeD) : std::floor(timeRangeD))
-            );
-            const double wantedPriceRange = std::max(1e-6, currentPriceRange * (m_zoomFactor / newZoom));
-            // Spec rules 1, 2 and 9: the clamps hold about the anchor.
-            const int64_t newTimeRange = std::min(wantedTimeRange, timeSpanLimit(m_maxTimeSpanMs));
-            const double newPriceRange = m_maxPriceSpan > 0 ? std::min(wantedPriceRange, m_maxPriceSpan)
-                                                            : wantedPriceRange;
-            clamped = newTimeRange < wantedTimeRange || newPriceRange < wantedPriceRange;
-            if (newTimeRange <= 0 || newPriceRange <= 0.0) {
-                sLog_Warning("Zoom aborted: invalid range timeRange=" << newTimeRange
-                             << " priceRange=" << newPriceRange << " zoom=" << m_zoomFactor << "->" << newZoom);
-                return;
-            }
-            double centerTimeRatio = center.x() / viewportSize.width();
-            double centerPriceRatio = 1.0 - (center.y() / viewportSize.height());
-            centerTimeRatio = std::max(0.0, std::min(1.0, centerTimeRatio));
-            centerPriceRatio = std::max(0.0, std::min(1.0, centerPriceRatio));
+    const double clampedDelta = std::max(-MAX_ZOOM_DELTA, std::min(MAX_ZOOM_DELTA, delta));
+    const double zoomMultiplier = 1.0 + clampedDelta;
+    if (zoomMultiplier <= 0.0 || zoomMultiplier == 1.0) return;
+    const int64_t currentTimeRange = std::max<int64_t>(1, m_visibleTimeEnd_ms - m_visibleTimeStart_ms);
+    const double currentPriceRange = m_maxPrice > m_minPrice ? m_maxPrice - m_minPrice : 1.0;
+    // Spec rules 1, 2 and 9: the spans themselves are zoomed and clamped (no relative
+    // zoom factor: an axis zoom that widened the view cannot leave the wheel stuck).
+    const int64_t newTimeRange = zoomedTimeSpan(currentTimeRange, zoomMultiplier);
+    const double newPriceRange = zoomedPriceSpan(currentPriceRange, zoomMultiplier);
+    if (newTimeRange == currentTimeRange && newPriceRange == currentPriceRange) return; // at the limits
 
-            int64_t currentCenterTime = m_visibleTimeStart_ms + static_cast<int64_t>(currentTimeRange * centerTimeRatio);
-            double currentCenterPrice = m_minPrice + (currentPriceRange * centerPriceRatio);
-            const double newTimeRangeD = static_cast<double>(newTimeRange);
-            const double newTimeStartD = static_cast<double>(currentCenterTime) - (newTimeRangeD * centerTimeRatio);
-            const double newTimeEndD = newTimeStartD + newTimeRangeD;
+    double centerTimeRatio = center.x() / viewportSize.width();
+    double centerPriceRatio = 1.0 - (center.y() / viewportSize.height());
+    centerTimeRatio = std::max(0.0, std::min(1.0, centerTimeRatio));
+    centerPriceRatio = std::max(0.0, std::min(1.0, centerPriceRatio));
 
-            int64_t newTimeStart = static_cast<int64_t>(std::floor(newTimeStartD));
-            int64_t newTimeEnd = static_cast<int64_t>(std::ceil(newTimeEndD));
-            if (newTimeEnd <= newTimeStart) {
-                newTimeEnd = newTimeStart + 1;
-            }
+    const int64_t currentCenterTime = m_visibleTimeStart_ms + static_cast<int64_t>(currentTimeRange * centerTimeRatio);
+    const double currentCenterPrice = m_minPrice + (currentPriceRange * centerPriceRatio);
+    const int64_t newTimeStart = static_cast<int64_t>(
+        std::floor(static_cast<double>(currentCenterTime) - static_cast<double>(newTimeRange) * centerTimeRatio));
+    const int64_t newTimeEnd = newTimeStart + newTimeRange;
+    const double newMinPrice = currentCenterPrice - (newPriceRange * centerPriceRatio);
+    const double newMaxPrice = currentCenterPrice + (newPriceRange * (1.0 - centerPriceRatio));
 
-            double newMinPrice = currentCenterPrice - (newPriceRange * centerPriceRatio);
-            double newMaxPrice = currentCenterPrice + (newPriceRange * (1.0 - centerPriceRatio));
-
-            sLog_Probe("viewport.zoom", "delta=" << delta << "->" << clampedDelta
-                       << " zoom=" << m_zoomFactor << "->" << newZoom
-                       << " mouse=(" << center.x() << "," << center.y() << ")"
-                       << " centerRatio=(" << centerTimeRatio << "," << centerPriceRatio << ")"
-                       << " time=[" << m_visibleTimeStart_ms << ".." << m_visibleTimeEnd_ms << "]->["
-                       << newTimeStart << ".." << newTimeEnd << "]"
-                       << " price=[" << m_minPrice << ".." << m_maxPrice << "]->["
-                       << newMinPrice << ".." << newMaxPrice << "]");
-            if (newTimeEnd <= newTimeStart || newMaxPrice <= newMinPrice) {
-                sLog_Warning("Zoom aborted: invalid final bounds time=[" << newTimeStart << ".." << newTimeEnd
-                             << "] price=[" << newMinPrice << ".." << newMaxPrice << "]");
-                return;
-            }
-            setViewport(newTimeStart, newTimeEnd, newMinPrice, newMaxPrice);
-            emit priceInteracted();
-        }
-        // A zoom-out the clamps stopped does not use up the zoom factor range.
-        if (!(clamped && newZoom < m_zoomFactor)) m_zoomFactor = newZoom;
-        if (m_autoScrollEnabled) {
-            m_autoScrollEnabled = false;
-            emit autoScrollEnabledChanged();
-        }
+    sLog_Probe("viewport.zoom", "delta=" << delta << "->" << clampedDelta
+               << " mouse=(" << center.x() << "," << center.y() << ")"
+               << " centerRatio=(" << centerTimeRatio << "," << centerPriceRatio << ")"
+               << " time=[" << m_visibleTimeStart_ms << ".." << m_visibleTimeEnd_ms << "]->["
+               << newTimeStart << ".." << newTimeEnd << "]"
+               << " price=[" << m_minPrice << ".." << m_maxPrice << "]->["
+               << newMinPrice << ".." << newMaxPrice << "]");
+    if (newTimeEnd <= newTimeStart || !(newMaxPrice > newMinPrice)) {
+        sLog_Warning("Zoom aborted: invalid final bounds time=[" << newTimeStart << ".." << newTimeEnd
+                     << "] price=[" << newMinPrice << ".." << newMaxPrice << "]");
+        return;
     }
+    setViewport(newTimeStart, newTimeEnd, newMinPrice, newMaxPrice);
+    emit priceInteracted();
+    if (m_autoScrollEnabled) {
+        m_autoScrollEnabled = false;
+        emit autoScrollEnabledChanged();
+    }
+}
+
+int64_t GridViewState::zoomedTimeSpan(int64_t current, double zoomMultiplier) const {
+    const double wanted = static_cast<double>(current) / zoomMultiplier;
+    const bool zoomingOut = zoomMultiplier < 1.0;
+    int64_t span = std::max<int64_t>(1, static_cast<int64_t>(zoomingOut ? std::ceil(wanted) : std::floor(wanted)));
+    if (zoomingOut) {
+        span = std::min(span, std::max(current, timeSpanLimit(m_maxTimeSpanMs)));
+    } else if (m_minTimeSpanMs > 0) {
+        // A zoom-in stops at the floor; a view already below it is not widened.
+        const int64_t floorSpan = std::max<int64_t>(1, static_cast<int64_t>(std::ceil(m_minTimeSpanMs)));
+        span = std::max(span, std::min(current, floorSpan));
+    }
+    return span;
+}
+
+double GridViewState::zoomedPriceSpan(double current, double zoomMultiplier) const {
+    double span = std::max(1e-6, current / zoomMultiplier);
+    if (zoomMultiplier < 1.0) {
+        if (m_maxPriceSpan > 0) span = std::min(span, std::max(current, m_maxPriceSpan));
+    } else if (m_minPriceSpan > 0) {
+        span = std::max(span, std::min(current, m_minPriceSpan));
+    }
+    return span;
 }
 
 void GridViewState::handlePanStart(const QPointF& position) {
@@ -261,39 +261,26 @@ void GridViewState::handleTimeZoomWithSensitivity(double rawDelta, double center
     const double processedDelta =
         clampProcessedZoomDelta(rawDelta, ZOOM_SENSITIVITY, MAX_ZOOM_DELTA);
     const double zoomMultiplier = 1.0 + processedDelta;
-    if (zoomMultiplier <= 0.0) {
+    if (zoomMultiplier <= 0.0 || zoomMultiplier == 1.0) {
         return;
     }
 
-    int64_t currentTimeRange = m_visibleTimeEnd_ms - m_visibleTimeStart_ms;
-    if (currentTimeRange <= 0) {
-        currentTimeRange = 1;
-    }
+    const int64_t currentTimeRange = std::max<int64_t>(1, m_visibleTimeEnd_ms - m_visibleTimeStart_ms);
+    const int64_t newTimeRange = zoomedTimeSpan(currentTimeRange, zoomMultiplier);
+    if (newTimeRange == currentTimeRange) return; // at the limit
 
     double centerRatio = centerX / viewportWidth;
     centerRatio = std::max(0.0, std::min(1.0, centerRatio));
-
-    const double timeRangeD = static_cast<double>(currentTimeRange) / zoomMultiplier;
-    const bool zoomingOut = (processedDelta < 0.0);
-    const int64_t newTimeRange = std::min(
-        std::max<int64_t>(1, static_cast<int64_t>(zoomingOut ? std::ceil(timeRangeD)
-                                                              : std::floor(timeRangeD))),
-        timeSpanLimit(m_maxTimeSpanMs));
     const int64_t currentCenterTime =
         m_visibleTimeStart_ms +
         static_cast<int64_t>(static_cast<double>(currentTimeRange) * centerRatio);
     const double newTimeStartD =
         static_cast<double>(currentCenterTime) -
         static_cast<double>(newTimeRange) * centerRatio;
-    int64_t newTimeStart = static_cast<int64_t>(std::floor(newTimeStartD));
-    int64_t newTimeEnd = newTimeStart + newTimeRange;
-    if (newTimeEnd <= newTimeStart) {
-        newTimeEnd = newTimeStart + 1;
-    }
+    const int64_t newTimeStart = static_cast<int64_t>(std::floor(newTimeStartD));
+    const int64_t newTimeEnd = newTimeStart + newTimeRange;
 
     setViewport(newTimeStart, newTimeEnd, m_minPrice, m_maxPrice);
-    if (!(zoomingOut && newTimeRange <= currentTimeRange))
-        m_zoomFactor = std::max(0.1, std::min(MAX_ZOOM_FACTOR, m_zoomFactor * zoomMultiplier));
     if (m_autoScrollEnabled) {
         m_autoScrollEnabled = false;
         emit autoScrollEnabledChanged();
@@ -308,20 +295,16 @@ void GridViewState::handlePriceZoomWithSensitivity(double rawDelta, double cente
     const double processedDelta =
         clampProcessedZoomDelta(rawDelta, ZOOM_SENSITIVITY, MAX_ZOOM_DELTA);
     const double zoomMultiplier = 1.0 + processedDelta;
-    if (zoomMultiplier <= 0.0) {
+    if (zoomMultiplier <= 0.0 || zoomMultiplier == 1.0) {
         return;
     }
 
-    double currentPriceRange = m_maxPrice - m_minPrice;
-    if (currentPriceRange <= 0.0) {
-        currentPriceRange = 1.0;
-    }
+    const double currentPriceRange = m_maxPrice > m_minPrice ? m_maxPrice - m_minPrice : 1.0;
+    const double newPriceRange = zoomedPriceSpan(currentPriceRange, zoomMultiplier);
+    if (newPriceRange == currentPriceRange) return; // at the limit
 
     double centerRatio = 1.0 - (centerY / viewportHeight);
     centerRatio = std::max(0.0, std::min(1.0, centerRatio));
-
-    double newPriceRange = std::max(1e-6, currentPriceRange / zoomMultiplier);
-    if (m_maxPriceSpan > 0) newPriceRange = std::min(newPriceRange, m_maxPriceSpan);
     const double currentCenterPrice = m_minPrice + currentPriceRange * centerRatio;
     const double newMinPrice = currentCenterPrice - newPriceRange * centerRatio;
     const double newMaxPrice =
@@ -332,8 +315,6 @@ void GridViewState::handlePriceZoomWithSensitivity(double rawDelta, double cente
 
     setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, newMinPrice, newMaxPrice);
     emit priceInteracted();
-    if (!(processedDelta < 0.0 && newPriceRange <= currentPriceRange))
-        m_zoomFactor = std::max(0.1, std::min(MAX_ZOOM_FACTOR, m_zoomFactor * zoomMultiplier));
     if (m_autoScrollEnabled) {
         m_autoScrollEnabled = false;
         emit autoScrollEnabledChanged();
@@ -348,9 +329,8 @@ void GridViewState::enableAutoScroll(bool enabled) {
 }
 
 void GridViewState::resetZoom() {
-    m_zoomFactor = 1.0;
-    m_panOffsetTime_ms = 0.0;
-    m_panOffsetPrice = 0.0;
+    // Zoom is the viewport's spans (no relative factor to reset): this only drops a
+    // pending drag offset.
     m_panVisualOffset = QPointF(0, 0);
     
     emit viewportChanged();

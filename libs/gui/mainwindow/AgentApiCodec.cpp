@@ -342,7 +342,7 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
         const QStringList keys{"kind", "target", "x", "y", "deltaY", "modifiers"};
         for (auto it = obj.begin(); it != obj.end(); ++it)
             if (!keys.contains(it.key())) return reject("invalid_field", "Unknown input field");
-        const QStringList kinds{"wheel", "dragStart", "dragMove", "dragEnd", "click"};
+        const QStringList kinds{"wheel", "dragStart", "dragMove", "dragEnd", "click", "doubleClick"};
         const QStringList targets{"chart", "priceAxis", "timeAxis"};
         if (!obj["kind"].isString() || !kinds.contains(obj["kind"].toString())) return reject("invalid_kind", "Unknown input kind");
         if (!obj["target"].isString() || !targets.contains(obj["target"].toString())) return reject("invalid_target", "Unknown input target");
@@ -392,6 +392,10 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
             if (key == "followLive") {
                 if (!v.isBool()) return reject("invalid_follow", "followLive must be boolean");
                 result.body.followLive = v.toBool();
+            } else if (key == "fit") {
+                if (!v.isString() || (v.toString() != "time" && v.toString() != "price" && v.toString() != "both"))
+                    return reject("invalid_fit", "fit must be time, price or both");
+                result.body.fit = v.toString();
             } else if (key == "startMs" || key == "endMs") {
                 if (!v.isDouble() || v.toDouble() < 0 || v.toDouble() > 9007199254740991.0 || std::floor(v.toDouble()) != v.toDouble())
                     return reject("invalid_range", "Time bounds must be nonnegative safe integers");
@@ -432,6 +436,8 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
             return reject("invalid_range", "Price bounds must increase");
         if (b.followLive.value_or(false) && (b.startMs || b.priceMin))
             return reject("invalid_range", "Bounds cannot enable followLive");
+        if (!b.fit.isEmpty() && (b.startMs || b.priceMin || b.followLive))
+            return reject("invalid_fit", "fit cannot be combined with bounds or followLive");
     }
     return result;
 }

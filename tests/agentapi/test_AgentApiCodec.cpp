@@ -24,6 +24,14 @@ TEST(AgentApiControls, BodiesAndBounds) {
     EXPECT_EQ(check("/api/v1/viewport", R"({"startMs":1,"endMs":10,"followLive":true})").status, 422);
     EXPECT_EQ(check("/api/v1/viewport", R"({"priceMin":1,"priceMax":2,"followLive":true})").status, 422);
     EXPECT_EQ(check("/api/v1/viewport", R"({"priceMin":2,"priceMax":1})").status, 422);
+    // Auto-fit (the axis double-click action): one of time/price/both, alone.
+    EXPECT_EQ(check("/api/v1/viewport", R"({"fit":"price"})").body.fit, "price");
+    EXPECT_EQ(check("/api/v1/viewport", R"({"fit":"time"})").status, 200);
+    EXPECT_EQ(check("/api/v1/viewport", R"({"fit":"both"})").status, 200);
+    EXPECT_EQ(check("/api/v1/viewport", R"({"fit":"all"})").code, "invalid_fit");
+    EXPECT_EQ(check("/api/v1/viewport", R"({"fit":true})").code, "invalid_fit");
+    EXPECT_EQ(check("/api/v1/viewport", R"({"fit":"price","followLive":true})").code, "invalid_fit");
+    EXPECT_EQ(check("/api/v1/viewport", R"({"fit":"time","startMs":1,"endMs":10})").code, "invalid_fit");
     EXPECT_EQ(check("/api/v1/layers", R"({"heatmap":true,"candles":false,"tpo":true})").body.layers.size(), 3);
     EXPECT_EQ(check("/api/v1/layers", R"({"tpo":1})").status, 422);
     EXPECT_EQ(check("/api/v1/layers", R"({"unknown":true})").status, 422);
@@ -385,7 +393,7 @@ TEST(AgentApiHeatmap, NewRoutesAndStrictInputKinds) {
     EXPECT_EQ(parser.feed("GET /api/v1/heatmap/state HTTP/1.1\r\nHost: localhost\r\n\r\n").kind, ParseResult::Kind::Complete);
     EXPECT_EQ(validateQuery({"GET", "/api/v1/heatmap/state", "symbol=ETH-USD", {}}, "BTC-USD").status, 409);
     EXPECT_EQ(validateQuery({"GET", "/api/v1/heatmap/state", "bad=1", {}}, "BTC-USD").status, 400);
-    for (const char *kind : {"wheel", "dragStart", "dragMove", "dragEnd", "click"}) {
+    for (const char *kind : {"wheel", "dragStart", "dragMove", "dragEnd", "click", "doubleClick"}) {
         for (const char *target : {"chart", "priceAxis", "timeAxis"}) {
             QJsonObject body{{"kind", kind}, {"target", target}, {"x", 10.5}, {"y", 20}, {"modifiers", QJsonArray{"shift", "alt"}}};
             if (QString(kind) == "wheel") body["deltaY"] = -120;

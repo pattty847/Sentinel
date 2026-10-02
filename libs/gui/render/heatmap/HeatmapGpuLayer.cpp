@@ -221,11 +221,21 @@ double HeatmapGpuLayer::maxPriceSpan() const {
     return maxManualPriceSpan(heightPx_ * dpr_, fromUnits(manualUnits_, priceScale()));
 }
 
+double HeatmapGpuLayer::minTimeSpanMs() const { return active_ && tfMs_ > 0 ? double(kMinZoomColumns) * double(tfMs_) : 0.0; }
+
+double HeatmapGpuLayer::minPriceSpan() const {
+    if (!active_) return 0.0;
+    const int64_t units = manualMode_ && isPresetUnits(manualUnits_) ? manualUnits_ : (offered_.empty() ? 0 : offered_.front());
+    return units > 0 ? kMinZoomRows * fromUnits(units, priceScale()) : 0.0;
+}
+
 void HeatmapGpuLayer::noteLimits() {
-    const double time = maxTimeSpanMs(), price = maxPriceSpan();
-    if (time == lastMaxTime_ && price == lastMaxPrice_) return;
+    const double time = maxTimeSpanMs(), price = maxPriceSpan(), minTime = minTimeSpanMs(), minPrice = minPriceSpan();
+    if (time == lastMaxTime_ && price == lastMaxPrice_ && minTime == lastMinTime_ && minPrice == lastMinPrice_) return;
     lastMaxTime_ = time;
     lastMaxPrice_ = price;
+    lastMinTime_ = minTime;
+    lastMinPrice_ = minPrice;
     emit limitsChanged();
 }
 
@@ -289,6 +299,16 @@ int64_t HeatmapGpuLayer::liveAnchorMs() const {
             for (const auto &source : available->sources)
                 for (const auto &level : source.levels) anchor = std::max(anchor, level.committedThroughMs);
     return anchor;
+}
+
+int64_t HeatmapGpuLayer::oldestAvailableMs() const {
+    int64_t oldest = 0;
+    if (service_ && !symbol_.empty())
+        if (const auto available = service_->availability(symbol_))
+            for (const auto &source : available->sources)
+                for (const auto &level : source.levels)
+                    if (level.oldestMs > 0) oldest = oldest ? std::min(oldest, level.oldestMs) : level.oldestMs;
+    return oldest;
 }
 
 void HeatmapGpuLayer::refreshPresets() {

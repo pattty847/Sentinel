@@ -108,6 +108,7 @@ void UnifiedGridRenderer::init() {
     connect(m_viewState.get(), &GridViewState::autoScrollEnabledChanged, this, &UnifiedGridRenderer::autoScrollEnabledChanged);
     connect(m_viewState.get(), &GridViewState::priceInteracted, this, [this]() {
         if (m_heatmapStreamService) m_heatmapStreamService->cancelPriceCenter();
+        cancelPriceFit(); // the user moved price: a pending timeframe-switch fit must not override it
     });
     
     QMetaObject::invokeMethod(

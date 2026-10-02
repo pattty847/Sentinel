@@ -9,7 +9,10 @@
 #include <QWheelEvent>
 #include <QElapsedTimer>
 #include <QColor>
+#include <QPointer>
 #include <cstdint>
+#include <optional>
+#include <utility>
 #include <vector>
 #include <memory>
 #include <atomic>
@@ -38,6 +41,7 @@
 
 class DataProcessor;
 class HeatmapIntensityNode;
+class CandleSeriesBuffer;
 namespace heatmap {
 class HeatmapDataService;
 class ManualTickMemory;
@@ -107,6 +111,8 @@ class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     Q_PROPERTY(double effectiveAxisLabelPx READ effectiveAxisLabelPx NOTIFY axisLayoutChanged)
     Q_PROPERTY(int priceAxisWidthPx READ priceAxisWidthPx NOTIFY axisLayoutChanged)
     Q_PROPERTY(int timeAxisHeightPx READ timeAxisHeightPx NOTIFY axisLayoutChanged)
+    // The chart's candle series (auto-fit reads the visible candles' high/low).
+    Q_PROPERTY(QObject* candleBuffer READ candleBuffer WRITE setCandleBuffer NOTIFY candleBufferChanged)
 
 private:
     double m_intensityScale = 1.0;
@@ -296,6 +302,33 @@ public:
     void setHeatmapTickMemory(const heatmap::ManualTickMemory& memory);
     heatmap::gpu::HeatmapGpuLayer* gpuHeatmapLayer() const { return m_gpuLayer.get(); }
 
+    // ── Auto-fit (gpu renderer; legacy: no-op, returns false) ─────────────────
+    // One viewport change (one viewportVersion step) per call; follow-live is kept.
+    // Time: the data's available range (recording availability, else the candle
+    // series), at most maxTimeSpanMs; following live (or when it all fits) it ends
+    // one padding past the live bucket, else it keeps the view centre inside the data.
+    // Price: the visible candles' high/low plus a kFitPriceMargin margin each side,
+    // inside the min/max price spans (when the Manual max cuts it, the window stays as
+    // close to their middle as it can with the newest close inside); no visible candle:
+    // the span kept, centred on the live price (book mid, last trade, decoded data).
+    Q_INVOKABLE bool fitView(bool time, bool price);
+    Q_INVOKABLE bool fitTimeToData() { return fitView(true, false); }
+    Q_INVOKABLE bool fitPriceToData() { return fitView(false, true); }
+    static constexpr double kFitPriceMargin = 0.06;
+    // A gpu timeframe switch fits price to the new timeframe's candles. History
+    // arrives newest page first (pages of a few bars at 1h), so a pending fit lands
+    // once the candles cover kPriceFitCoverage of the view's buckets up to the live
+    // edge, or when history paging goes quiet (kPriceFitQuietMs after the last page,
+    // kPriceFitFirstWaitMs when no page comes, kPriceFitMaxWaitMs at most) from the
+    // visible candles, else the live price.
+    static constexpr double kPriceFitCoverage = 0.9;
+    static constexpr int kPriceFitFirstWaitMs = 2000;
+    static constexpr int kPriceFitQuietMs = 500;
+    static constexpr int kPriceFitMaxWaitMs = 10000;
+    bool priceFitPending() const { return m_pendingPriceFit; }
+    QObject* candleBuffer() const;
+    void setCandleBuffer(QObject* buffer);
+
     bool heatmapDataPriceRange(double& outMin, double& outMax) const;
     bool heatmapDataTimeRange(qint64& outStart, qint64& outEnd) const;
     
@@ -370,7 +403,6 @@ public:
     Q_INVOKABLE QPointF screenToWorld(double screenX, double screenY) const;
     Q_INVOKABLE double getScreenWidth() const;
     Q_INVOKABLE double getScreenHeight() const;
-    Q_INVOKABLE double getZoomFactor() const;
     void setHeatmapGamma(double gamma);
     void setHeatmapContrast(double contrast);
     void setHeatmapShaderFloor(double floor);
@@ -419,6 +451,7 @@ signals:
     void heatmapRendererChanged();
     void axisSourcesChanged();
     void axisLayoutChanged();
+    void candleBufferChanged();
     void liveRenderTick();
     // Emitted when the viewport has scrolled past the oldest cached heatmap data.
     // Receiver should call IGridDataSource::requestHeatmapHistory with these params.
@@ -463,6 +496,24 @@ private:
     // availability (price unknown until decoded data supplies it).
     void bootstrapGpuTimeView();
     QTimer* m_gpuBootstrapTimer = nullptr;
+    // Auto-fit (fitView). Window pieces return nullopt when nothing is known.
+    std::optional<std::pair<qint64, qint64>> gpuFitTimeWindow() const;
+    // candlesOnly: no live-price fallback; requireCoverage: the visible candles must
+    // cover kPriceFitCoverage of the view's buckets up to the live edge.
+    // maxPriceSpan >= 0 replaces the view's limit (a timeframe switch applies new ones).
+    std::optional<std::pair<double, double>> gpuFitPriceWindow(qint64 start, qint64 end, bool candlesOnly,
+                                                               bool requireCoverage, double maxPriceSpan = -1) const;
+    double gpuLivePrice() const;
+    void armPriceFit();
+    void cancelPriceFit();
+    void resolvePriceFit(bool timedOut);
+    QPointer<CandleSeriesBuffer> m_candleBuffer;
+    QMetaObject::Connection m_candleDirtyConn;
+    bool m_pendingPriceFit = false;
+    QTimer* m_priceFitTimer = nullptr;
+    QElapsedTimer m_priceFitClock;
+    double m_gpuBookMid = 0.0;   // gpu mode: newest book-top mid of the active symbol
+    double m_gpuLastTrade = 0.0; // gpu mode: newest trade price of the active symbol
     qint64 gpuInitialSpanMs(double widthPx) const;
     void syncGpuSurface();
     void syncGpuTone();

@@ -71,6 +71,11 @@ public:
     // per physical pixel; Manual: one row per physical pixel.
     double maxTimeSpanMs() const;
     double maxPriceSpan() const;
+    // Zoom-in floors: kMinZoomColumns columns of the timeframe; kMinZoomRows rows of
+    // the Manual tick, or of the finest offered preset in Auto (0 = none yet).
+    static constexpr int kMinZoomColumns = 4, kMinZoomRows = 4;
+    double minTimeSpanMs() const;
+    double minPriceSpan() const;
     int64_t tfMs() const { return tfMs_; }
     const std::string &symbol() const { return symbol_; }
     bool manualMode() const { return manualMode_; }
@@ -89,6 +94,9 @@ public:
     // historical view drops it): the newest live open end seen, or the recording's
     // committed end from the service's availability. 0: unknown yet.
     int64_t liveAnchorMs() const;
+    // Oldest recorded bucket start of this symbol from the service's availability
+    // (any source and level; 0: unknown yet).
+    int64_t oldestAvailableMs() const;
     // Wall-clock receive time of the newest live version (ms since epoch; 0: none).
     int64_t liveReceivedAtMs() const { return liveReceivedAtMs_; }
     // The price a fresh view centres on, from the decoded chunks of the newest
@@ -115,7 +123,7 @@ signals:
     void liveChanged();
     void tickChanged();     // the drawn tick or the mode changed
     void presetsChanged();
-    void limitsChanged();   // maxTimeSpanMs / maxPriceSpan changed
+    void limitsChanged();   // max/min time or price span changed
     void buildFailed(QString message);
 
 private:
@@ -158,7 +166,7 @@ private:
     } tickKey_;
     uint64_t tickChanges_ = 0;
     uint64_t viewSerial_ = 0, renderedSerial_ = 0;
-    double lastMaxTime_ = -1, lastMaxPrice_ = -1;
+    double lastMaxTime_ = -1, lastMaxPrice_ = -1, lastMinTime_ = -1, lastMinPrice_ = -1;
     struct ControllerStats {
         HeatmapSourceController::Stats stats;
         bool valid = false;
