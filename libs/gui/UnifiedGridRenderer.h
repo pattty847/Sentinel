@@ -308,8 +308,8 @@ public:
     // series), at most maxTimeSpanMs; following live (or when it all fits) it ends
     // one padding past the live bucket, else it keeps the view centre inside the data.
     // Price: the visible candles' high/low plus a kFitPriceMargin margin each side,
-    // inside the min/max price spans (when the Manual max cuts it, the window stays as
-    // close to their middle as it can with the newest close inside); no visible candle:
+    // inside the min/max price spans (when the Manual max cuts it, the max span centred
+    // on the current price: book mid, last trade, newest close); no visible candle:
     // the span kept, centred on the live price (book mid, last trade, decoded data).
     Q_INVOKABLE bool fitView(bool time, bool price);
     Q_INVOKABLE bool fitTimeToData() { return fitView(true, false); }

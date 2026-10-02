@@ -1250,12 +1250,13 @@ std::optional<std::pair<double, double>> UnifiedGridRenderer::gpuFitPriceWindow(
   span = std::max(span, m_viewState->minPriceSpan());
   const double maxSpan = maxPriceSpan >= 0 ? maxPriceSpan : m_viewState->maxPriceSpan();
   if (maxSpan > 0 && span > maxSpan) {
-    // Manual tick: the candles need more than one row per pixel. As close to their
-    // middle as the limit allows, with the newest close (where price is now) inside.
+    // Manual tick (owner decision 2026-10-02): the user's tick stays (never Auto,
+    // never coarsened); the candles need more than one row per pixel, so show what
+    // the limit can, centred on the current price: book mid, last trade, newest close.
     span = maxSpan;
     if (used) {
-      const double inset = span * (0.5 - kFitPriceMargin);
-      centre = std::clamp(centre, newestClose - inset, newestClose + inset);
+      const double now = m_gpuBookMid > 0 ? m_gpuBookMid : m_gpuLastTrade > 0 ? m_gpuLastTrade : newestClose;
+      if (now > 0) centre = now;
     }
   }
   return std::make_pair(centre - span * 0.5, centre + span * 0.5);

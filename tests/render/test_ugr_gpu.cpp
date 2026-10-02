@@ -539,7 +539,7 @@ TEST_F(UgrGpu, FlipToLegacyKeepsABookSeededView) {
     ASSERT_TRUE(frames(3)) << error.toStdString();
     ugr->setHeatmapRenderer("legacy");
     ugr->setLiveBookTop(100'120, 100'121);
-    Trade trade;
+    Trade trade{};
     trade.product_id = "BTC-USD";
     trade.price = 100'125;
     ugr->onTradeReceived(trade);
@@ -650,10 +650,10 @@ TEST_F(UgrGpu, PriceAxisFitLandsTheVisibleCandlesInView) {
     ugr->setCandleBuffer(nullptr);
 }
 
-// Manual tick ($10 over 320 px: at most $3200) cannot hold candles spanning $5000:
-// the fit takes the max span, as close to their middle as it can with the newest
-// close (where price is now) inside the margin (live A/B 2026-10-02: 5m fit missed it).
-TEST_F(UgrGpu, PriceAxisFitUnderTheManualClampKeepsTheNewestCloseInView) {
+// Manual tick ($10 over 320 px: at most $3200) cannot hold candles spanning $5000.
+// Owner decision 2026-10-02: keep the Manual tick and show the max span centred on the
+// current price (book mid, then last trade, then the newest close), within one row.
+TEST_F(UgrGpu, PriceAxisFitUnderTheManualClampCentresTheCurrentPrice) {
     gpuOn();
     auto manual = brightSettings();
     manual.tickMode = heatmap::TickMode::Manual;
@@ -661,6 +661,7 @@ TEST_F(UgrGpu, PriceAxisFitUnderTheManualClampKeepsTheNewestCloseInView) {
     ugr->setHeatmapChartSettings(manual, true);
     const auto *view = ugr->getViewState();
     ASSERT_DOUBLE_EQ(view->maxPriceSpan(), 3200);
+    const double row = 10;
     CandleSeriesBuffer buffer;
     std::vector<CandleSeriesBuffer::CandleBar> bars;
     for (int i = 0; i < 40; ++i) { // 100,000 rising to 105,000
@@ -670,10 +671,25 @@ TEST_F(UgrGpu, PriceAxisFitUnderTheManualClampKeepsTheNewestCloseInView) {
     }
     buffer.applyHistory("BTC-USD", 60, bars);
     ugr->setCandleBuffer(&buffer);
+    auto centre = [&] { return (view->getMinPrice() + view->getMaxPrice()) / 2; };
+    // No book or trade yet: the newest close.
     ASSERT_TRUE(ugr->fitPriceToData());
+    EXPECT_DOUBLE_EQ(view->getMaxPrice() - view->getMinPrice(), 3200) << "the Manual max span, tick kept";
+    EXPECT_NEAR(centre(), 105'000, row) << "centred on the newest close";
+    // A trade: the last trade price.
+    Trade trade{};
+    trade.product_id = "BTC-USD";
+    trade.price = 104'200;
+    ugr->addTrade(trade);
+    ASSERT_TRUE(ugr->fitPriceToData());
+    EXPECT_NEAR(centre(), 104'200, row) << "centred on the last trade";
+    // A book: its mid wins.
+    ugr->setLiveBookTop(103'499, 103'501);
+    ASSERT_TRUE(ugr->fitPriceToData());
+    EXPECT_NEAR(centre(), 103'500, row) << "centred on the book mid";
     EXPECT_DOUBLE_EQ(view->getMaxPrice() - view->getMinPrice(), 3200);
-    EXPECT_NEAR(view->getMaxPrice(), 105'000 + 3200 * UnifiedGridRenderer::kFitPriceMargin, 1e-6)
-        << "the newest close one margin below the top";
+    EXPECT_EQ(layer().manualMode(), true) << "never switched to Auto";
+    EXPECT_EQ(layer().manualTickUnits(), 1000) << "never coarsened";
     ugr->setCandleBuffer(nullptr);
 }
 
