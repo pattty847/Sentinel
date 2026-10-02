@@ -113,6 +113,7 @@ class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     Q_PROPERTY(int timeAxisHeightPx READ timeAxisHeightPx NOTIFY axisLayoutChanged)
     // The chart's candle series (auto-fit reads the visible candles' high/low).
     Q_PROPERTY(QObject* candleBuffer READ candleBuffer WRITE setCandleBuffer NOTIFY candleBufferChanged)
+    Q_PROPERTY(bool autoPriceScale READ autoPriceScale WRITE setAutoPriceScale NOTIFY autoPriceScaleChanged)
 
 private:
     double m_intensityScale = 1.0;
@@ -302,33 +303,36 @@ public:
     void setHeatmapTickMemory(const heatmap::ManualTickMemory& memory);
     heatmap::gpu::HeatmapGpuLayer* gpuHeatmapLayer() const { return m_gpuLayer.get(); }
 
-    // ── Auto-fit (gpu renderer; legacy: no-op, returns false) ─────────────────
+    // ── Auto price scale and fits (gpu renderer; legacy: no-op, returns false) ──
+    // docs/research/2026-10-viewport-autoscale.md. Auto price scale (default on in
+    // gpu mode): the price range follows the visible candles' high/low (plus
+    // kFitPriceMargin each side) on every viewport change and on candle updates in
+    // view, inside the same setViewport (one viewportVersion step, none when the fit
+    // is unchanged); no vertical pan; the wheel zooms time. A price zoom turns it off;
+    // off, the price range stays where the user left it (also across timeframe
+    // switches). A symbol switch keeps the state: on fits the new symbol's candles,
+    // off carries the span as a fraction of the price with the current price at the
+    // same screen height.
+    bool autoPriceScale() const { return m_viewState && m_viewState->autoPriceScale(); }
+    // On: the price-axis double-click (fitPriceToData). Off: price stays put.
+    void setAutoPriceScale(bool enabled);
     // One viewport change (one viewportVersion step) per call; follow-live is kept.
     // Time: the data's available range (recording availability, else the candle
     // series), at most maxTimeSpanMs; following live (or when it all fits) it ends
     // one padding past the live bucket, else it keeps the view centre inside the data.
-    // Price: the visible candles' high/low plus a kFitPriceMargin margin each side,
-    // inside the min/max price spans (when the Manual max cuts it, the max span centred
-    // on the current price: book mid, last trade, newest close); no visible candle:
-    // the span kept, centred on the live price (book mid, last trade, decoded data).
+    // Price (turns auto price scale on): the visible candles' high/low plus a
+    // kFitPriceMargin margin each side, inside the min/max price spans (when the Manual
+    // max cuts it, the max span centred on the current price: book mid, last trade,
+    // newest close); no visible candle: the span kept, centred on the live price (book
+    // mid, last trade, decoded data).
     Q_INVOKABLE bool fitView(bool time, bool price);
     Q_INVOKABLE bool fitTimeToData() { return fitView(true, false); }
     Q_INVOKABLE bool fitPriceToData() { return fitView(false, true); }
+    // The default view (time-axis double-click): auto price scale on, follow-live on,
+    // the initial span (initial_column_px per bar) ending one padding past the live
+    // bucket, price fitted. One viewport change; false while no live anchor is known.
+    Q_INVOKABLE bool resetView();
     static constexpr double kFitPriceMargin = 0.06;
-    // A gpu timeframe switch fits price to the new timeframe's candles. History
-    // arrives newest page first (pages of a few bars at 1h), so a pending fit lands
-    // once the candles cover kPriceFitCoverage of the view's buckets up to the live
-    // edge, or when history paging goes quiet (kPriceFitQuietMs after the last page,
-    // kPriceFitFirstWaitMs when no page comes) from the visible candles, else the live
-    // price. kPriceFitMaxWaitMs after the switch it ends either way. A drag that moves
-    // price cancels it; no fit lands while any drag is active.
-    static constexpr double kPriceFitCoverage = 0.9;
-    static constexpr int kPriceFitFirstWaitMs = 2000;
-    static constexpr int kPriceFitQuietMs = 500;
-    static constexpr int kPriceFitMaxWaitMs = 10000;
-    bool priceFitPending() const { return m_pendingPriceFit; }
-    // Tests: shorter waits (defaults: the kPriceFit* constants).
-    void setPriceFitTimings(int firstWaitMs, int quietMs, int maxWaitMs);
     QObject* candleBuffer() const;
     void setCandleBuffer(QObject* buffer);
 
@@ -455,6 +459,7 @@ signals:
     void axisSourcesChanged();
     void axisLayoutChanged();
     void candleBufferChanged();
+    void autoPriceScaleChanged();
     void liveRenderTick();
     // Emitted when the viewport has scrolled past the oldest cached heatmap data.
     // Receiver should call IGridDataSource::requestHeatmapHistory with these params.
@@ -501,25 +506,21 @@ private:
     QTimer* m_gpuBootstrapTimer = nullptr;
     // Auto-fit (fitView). Window pieces return nullopt when nothing is known.
     std::optional<std::pair<qint64, qint64>> gpuFitTimeWindow() const;
-    // candlesOnly: no live-price fallback; requireCoverage: the visible candles must
-    // cover kPriceFitCoverage of the view's buckets up to the live edge.
-    // maxPriceSpan >= 0 replaces the view's limit (a timeframe switch applies new ones).
-    std::optional<std::pair<double, double>> gpuFitPriceWindow(qint64 start, qint64 end, bool candlesOnly,
-                                                               bool requireCoverage, double maxPriceSpan = -1) const;
+    // candlesOnly: no live-price fallback (the auto price scale's fit).
+    std::optional<std::pair<double, double>> gpuFitPriceWindow(qint64 start, qint64 end, bool candlesOnly) const;
+    // GridViewState's price fit while auto price scale is on (gpu mode only).
+    bool autoPriceFit(qint64 start, qint64 end, double& priceMin, double& priceMax);
+    // Auto price scale on: the current time range through setViewport (a bump only
+    // when the fitted range changed). Candle updates in view and new limits use it.
+    void refitAutoPrice();
     double gpuLivePrice() const;
-    void armPriceFit();
-    void cancelPriceFit();
-    void resolvePriceFit(bool settle);
-    void rearmPriceFit(int ms);
     QPointer<CandleSeriesBuffer> m_candleBuffer;
     QMetaObject::Connection m_candleDirtyConn;
-    bool m_pendingPriceFit = false;
-    QTimer* m_priceFitTimer = nullptr;
-    QElapsedTimer m_priceFitClock;
-    int m_priceFitFirstWaitMs = kPriceFitFirstWaitMs;
-    int m_priceFitQuietMs = kPriceFitQuietMs;
-    int m_priceFitMaxWaitMs = kPriceFitMaxWaitMs;
     mutable std::vector<CandleSeriesBuffer::CandleBar> m_fitBars; // gpuFitPriceWindow scratch
+    // Symbol switch with auto price scale off: the old span / price and the current
+    // price's height in the view (0 = bottom), applied when the new price is known.
+    struct PriceCarry { double spanRatio = 0.0, heightFrac = 0.0; };
+    std::optional<PriceCarry> m_priceCarry;
     double m_gpuBookMid = 0.0;   // gpu mode: newest book-top mid of the active symbol
     double m_gpuLastTrade = 0.0; // gpu mode: newest trade price of the active symbol
     qint64 gpuInitialSpanMs(double widthPx) const;

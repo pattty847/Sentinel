@@ -3,6 +3,7 @@
 #include <QPointF>
 #include <QMatrix4x4>
 #include <QElapsedTimer>
+#include <functional>
 
 class GridViewState : public QObject {
     Q_OBJECT
@@ -41,6 +42,17 @@ public:
     double minTimeSpanMs() const { return m_minTimeSpanMs; }
     double minPriceSpan() const { return m_minPriceSpan; }
     void setViewportSize(double width, double height);
+    // Auto price scale (docs/research/2026-10-viewport-autoscale.md; off by default,
+    // the gpu renderer turns it on). While on, setViewport takes its price range from
+    // the price fit for the new time range (so a time change and its refit are ONE
+    // viewport change), chart drags and keyboard pans move time only, and the chart
+    // wheel zooms time only. A price zoom (axis drag or wheel) turns it off first.
+    // The fit returns false when it has nothing to fit (the given price is kept).
+    using PriceFit = std::function<bool(qint64 timeStart, qint64 timeEnd, double& priceMin, double& priceMax)>;
+    void setPriceFit(PriceFit fit) { m_priceFit = std::move(fit); }
+    bool autoPriceScale() const { return m_autoPriceScale; }
+    // Does not touch the viewport (the caller refits through setViewport).
+    void setAutoPriceScale(bool enabled);
     QMatrix4x4 calculateViewportTransform(const QRectF& itemBounds) const;
     
     void handleZoom(double delta, const QPointF& center);
@@ -67,6 +79,7 @@ signals:
     void viewportChanged();
     void panVisualOffsetChanged();
     void autoScrollEnabledChanged();
+    void autoPriceScaleChanged();
     void priceInteracted();
 
 private:
@@ -85,6 +98,8 @@ private:
     double m_viewportHeight = 600.0;
     
     bool m_autoScrollEnabled = true;
+    bool m_autoPriceScale = false;
+    PriceFit m_priceFit;
     
     static constexpr double ZOOM_SENSITIVITY = 0.0005;
     static constexpr double MAX_ZOOM_DELTA = 0.4;

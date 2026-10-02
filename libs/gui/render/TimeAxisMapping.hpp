@@ -44,6 +44,9 @@ struct TimeAxisMapping {
     float timeOffset = 0.0f;
 
     bool valid = false;
+    // gpu renderer: the columns are the view's epoch buckets (no ring): every bucket
+    // that overlaps [viewStartMs, viewEndMs) is data, including the one cut by the left edge.
+    bool viewportColumns = false;
 
     // --- World → Screen helpers ---
 

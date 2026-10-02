@@ -21,7 +21,8 @@ struct ControlBody {
     std::optional<qint64> startMs, endMs;
     std::optional<double> priceMin, priceMax;
     std::optional<bool> followLive;
-    QString fit; // viewport: "time" | "price" | "both" (auto-fit), exclusive with bounds/followLive
+    std::optional<bool> autoScale; // viewport: the auto price scale toggle
+    QString fit; // viewport: "time" | "price" | "both" | "default", exclusive with bounds/followLive/autoScale
     QJsonObject layers;
     QJsonObject heatmapSettings;
     bool persistHeatmapSettings = true;

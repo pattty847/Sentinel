@@ -364,10 +364,19 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     m_visibleCandles.clear();
     if (m_candleBuffer && !m_symbol.isEmpty() && m_timeframeSec > 0) {
         std::vector<CandleSeriesBuffer::CandleBar> bufferSlice;
+        // gpu renderer: from the bucket under the (drag-panned) left edge, so the candle
+        // that starts before the view and ends inside it is drawn (the slice selects by
+        // bar start). Legacy keeps the viewport bounds.
+        qint64 sliceStart = timeStart, sliceEnd = timeEnd;
+        if (mapping.viewportColumns && mapping.appendMs > 0) {
+            const double tf = mapping.appendMs;
+            sliceStart = static_cast<qint64>(std::floor(mapping.viewStartMs / tf) * tf);
+            sliceEnd = static_cast<qint64>(std::ceil(mapping.viewEndMs));
+        }
         hasData = m_candleBuffer->getVisibleSlice(m_symbol,
                                                   m_timeframeSec,
-                                                  timeStart,
-                                                  timeEnd,
+                                                  sliceStart,
+                                                  sliceEnd,
                                                   bufferSlice);
         if (hasData) {
             m_visibleCandles.reserve(bufferSlice.size());
@@ -401,7 +410,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     std::vector<CandleOverlayBar> filtered;
     filtered.reserve(m_visibleCandles.size());
     for (const auto& c : m_visibleCandles) {
-        if (haveActualRange) {
+        if (haveActualRange && !mapping.viewportColumns) {
             if (c.timeStartMs < static_cast<qint64>(mapping.actualDataStartMs) ||
                 c.timeStartMs >= static_cast<qint64>(mapping.actualDataEndMs)) {
                 continue;

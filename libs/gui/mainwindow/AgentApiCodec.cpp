@@ -392,9 +392,13 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
             if (key == "followLive") {
                 if (!v.isBool()) return reject("invalid_follow", "followLive must be boolean");
                 result.body.followLive = v.toBool();
+            } else if (key == "autoScale") {
+                if (!v.isBool()) return reject("invalid_auto_scale", "autoScale must be boolean");
+                result.body.autoScale = v.toBool();
             } else if (key == "fit") {
-                if (!v.isString() || (v.toString() != "time" && v.toString() != "price" && v.toString() != "both"))
-                    return reject("invalid_fit", "fit must be time, price or both");
+                static const QStringList kFits{"time", "price", "both", "default"};
+                if (!v.isString() || !kFits.contains(v.toString()))
+                    return reject("invalid_fit", "fit must be time, price, both or default");
                 result.body.fit = v.toString();
             } else if (key == "startMs" || key == "endMs") {
                 if (!v.isDouble() || v.toDouble() < 0 || v.toDouble() > 9007199254740991.0 || std::floor(v.toDouble()) != v.toDouble())
@@ -436,8 +440,10 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
             return reject("invalid_range", "Price bounds must increase");
         if (b.followLive.value_or(false) && (b.startMs || b.priceMin))
             return reject("invalid_range", "Bounds cannot enable followLive");
-        if (!b.fit.isEmpty() && (b.startMs || b.priceMin || b.followLive))
-            return reject("invalid_fit", "fit cannot be combined with bounds or followLive");
+        if (!b.fit.isEmpty() && (b.startMs || b.priceMin || b.followLive || b.autoScale))
+            return reject("invalid_fit", "fit cannot be combined with bounds, followLive or autoScale");
+        if (b.autoScale.value_or(false) && b.priceMin)
+            return reject("invalid_auto_scale", "Price bounds cannot enable autoScale");
     }
     return result;
 }
@@ -527,7 +533,7 @@ QJsonObject viewportJson(const ViewportSnapshot& s) {
     return envelope(s.meta, {{"startMs", integer(s.startMs)}, {"endMs", integer(s.endMs)},
         {"priceMin", number(s.priceMin)}, {"priceMax", number(s.priceMax)},
         {"heatmapTimeframeMs", integer(s.heatmapTimeframeMs)}, {"candleTimeframeMs", integer(s.candleTimeframeMs)},
-        {"followLive", boolean(s.followLive)},
+        {"followLive", boolean(s.followLive)}, {"autoScale", boolean(s.autoScale)},
         {"viewportVersion", s.viewportVersion ? QJsonValue(QString::number(*s.viewportVersion)) : QJsonValue(QJsonValue::Null)},
         {"widthPx", number(s.widthPx)}, {"heightPx", number(s.heightPx)},
         {"zoom", QJsonObject{{"msPerPx", number(msPerPx)}, {"pricePerPx", number(pricePerPx)}}}});

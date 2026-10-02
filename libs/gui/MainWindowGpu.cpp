@@ -1442,6 +1442,7 @@ AgentApi::ViewportSnapshot MainWindowGPU::agentApiViewportSnapshot() const {
         s.candleTimeframeMs = tf; // v1 QML links candle cadence to renderer cadence.
     }
     s.followLive = renderer->autoScrollEnabled();
+    s.autoScale = renderer->autoPriceScale();
     auto* view = renderer->getViewState();
     if (!view || !view->isTimeWindowValid()) return s;
     const qint64 start = view->getVisibleTimeStart();
@@ -1527,14 +1528,25 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
             return out;
         }
         if (!body.fit.isEmpty()) {
-            // Auto-fit: the axis double-click action, one viewport change.
+            // The axis double-click actions, one viewport change each: price = auto price
+            // scale on and fitted, default = the time axis's reset to the default view.
             const bool time = body.fit != "price", price = body.fit != "time";
-            if (!renderer->fitView(time, price)) {
+            if (!(body.fit == "default" ? renderer->resetView() : renderer->fitView(time, price))) {
                 out.status = 409; out.code = "fit_unavailable";
                 out.message = "Auto-fit needs the gpu renderer and known data (live anchor or price)";
                 return out;
             }
             out.data["fit"] = body.fit;
+        }
+        if (body.autoScale) {
+            // The "A" toggle. Applied before the bounds: on, time bounds land fitted.
+            if (*body.autoScale && !renderer->gpuHeatmapActive()) {
+                out.status = 409; out.code = "auto_scale_unavailable";
+                out.message = "The auto price scale needs the gpu renderer";
+                return out;
+            }
+            if (*body.autoScale && body.startMs) renderer->getViewState()->setAutoPriceScale(true);
+            else renderer->setAutoPriceScale(*body.autoScale); // on: fits now (one viewport change)
         }
         if (body.startMs || body.priceMin) renderer->enableAutoScroll(false);
         if (body.startMs || body.priceMin) {
@@ -1546,6 +1558,7 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
         out.viewportVersion = after.viewportVersion.value_or(0);
         out.data["viewportVersion"] = QString::number(out.viewportVersion);
         out.data["followLive"] = after.followLive.value_or(false);
+        out.data["autoScale"] = after.autoScale.value_or(false);
     } else if (kind == "layers") {
         auto* toolbar = m_heatmapDock ? m_heatmapDock->toolbar() : nullptr;
         for (auto it = body.layers.begin(); it != body.layers.end(); ++it) {

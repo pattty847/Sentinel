@@ -168,6 +168,96 @@ TEST(GridViewStateClamps, OneViewportChangePerWheel) {
     v.state.handlePriceZoomWithSensitivity(120, 250, 500);
     EXPECT_EQ(changed.count(), 3);
 }
+
+// Auto price scale (docs/research/2026-10-viewport-autoscale.md): the fit replaces the
+// price inside setViewport (one change), drags and keyboard pans are time only, the
+// wheel zooms time only, a price zoom turns it off before the viewport moves.
+struct AutoView : View {
+    int fits = 0;
+    bool haveFit = true;
+    AutoView() {
+        // A fit that depends on the time range: [start / 1e6, start / 1e6 + 100).
+        state.setPriceFit([this](qint64 start, qint64, double &lo, double &hi) {
+            ++fits;
+            if (!haveFit) return false;
+            lo = double(start) / 1e6;
+            hi = lo + 100;
+            return true;
+        });
+        state.setAutoPriceScale(true);
+    }
+};
+
+TEST(GridViewStateAutoPrice, SetViewportTakesThePriceFromTheFitInOneChange) {
+    AutoView v;
+    Counter changed(v.state);
+    v.state.setViewport(60 * kMinute, 600 * kMinute, 1, 2);
+    EXPECT_EQ(changed.count(), 1);
+    EXPECT_DOUBLE_EQ(v.state.getMinPrice(), 3.6);
+    EXPECT_DOUBLE_EQ(v.state.getMaxPrice(), 103.6);
+    v.state.setViewport(60 * kMinute, 600 * kMinute, 7, 8);
+    EXPECT_EQ(changed.count(), 1) << "the fit unchanged: no change";
+    v.haveFit = false; // nothing to fit: the given price stays
+    v.state.setViewport(60 * kMinute, 600 * kMinute, 7, 8);
+    EXPECT_DOUBLE_EQ(v.state.getMinPrice(), 7);
+    v.state.setAutoPriceScale(false);
+    v.haveFit = true;
+    const int fits = v.fits;
+    v.state.setViewport(0, 600 * kMinute, 9, 10);
+    EXPECT_EQ(v.fits, fits) << "off: no fit";
+    EXPECT_DOUBLE_EQ(v.state.getMinPrice(), 9);
+}
+
+TEST(GridViewStateAutoPrice, DragsAndKeyboardPansMoveTimeOnly) {
+    AutoView v;
+    v.state.setViewport(0, 600 * kMinute, 0, 1); // fitted: 0..100
+    int priceSignals = 0;
+    QObject::connect(&v.state, &GridViewState::priceInteracted, &v.state, [&] { ++priceSignals; });
+    v.state.handlePanStart(QPointF(500, 250));
+    v.state.handlePanMove(QPointF(400, 400));
+    EXPECT_EQ(v.state.getPanVisualOffset(), QPointF(-100, 0)) << "no vertical offset";
+    v.state.handlePanEnd(true);
+    EXPECT_EQ(v.state.getVisibleTimeStart(), 60 * kMinute);
+    EXPECT_DOUBLE_EQ(v.state.getMinPrice(), 3.6) << "the fit for the new time range";
+    const uint64_t version = v.state.getViewportVersion();
+    v.state.panUp();
+    v.state.panDown();
+    EXPECT_EQ(v.state.getViewportVersion(), version) << "no keyboard vertical pan";
+    EXPECT_EQ(priceSignals, 0);
+    EXPECT_TRUE(v.state.autoPriceScale());
+}
+
+TEST(GridViewStateAutoPrice, TheWheelZoomsTimeOnlyAndKeepsItOn) {
+    AutoView v;
+    v.haveFit = false; // the zoom's own price math shows
+    v.state.setViewport(0, 600 * kMinute, 100'000, 100'500);
+    int priceSignals = 0;
+    QObject::connect(&v.state, &GridViewState::priceInteracted, &v.state, [&] { ++priceSignals; });
+    v.state.handleZoomWithSensitivity(120, QPointF(250, 100), QSizeF(1000, 500));
+    EXPECT_LT(v.time(), 600.0 * kMinute);
+    EXPECT_DOUBLE_EQ(v.state.getMinPrice(), 100'000) << "price untouched by the wheel";
+    EXPECT_DOUBLE_EQ(v.state.getMaxPrice(), 100'500);
+    EXPECT_EQ(priceSignals, 0);
+    EXPECT_TRUE(v.state.autoPriceScale());
+}
+
+TEST(GridViewStateAutoPrice, APriceZoomTurnsItOffBeforeTheViewportMoves) {
+    AutoView v;
+    v.state.setViewport(0, 600 * kMinute, 1, 2); // fitted: 0..100
+    int offSignals = 0;
+    QObject::connect(&v.state, &GridViewState::autoPriceScaleChanged, &v.state, [&] { ++offSignals; });
+    Counter changed(v.state);
+    v.state.handlePriceZoomWithSensitivity(240, 250, 500);
+    EXPECT_FALSE(v.state.autoPriceScale());
+    EXPECT_EQ(offSignals, 1);
+    EXPECT_EQ(changed.count(), 1);
+    EXPECT_LT(v.price(), 100) << "the zoom stands (the fit did not undo it)";
+    // Off: drags pan price again.
+    v.state.handlePanStart(QPointF(500, 250));
+    v.state.handlePanMove(QPointF(500, 300));
+    EXPECT_EQ(v.state.getPanVisualOffset(), QPointF(0, 50));
+    v.state.handlePanEnd(true);
+}
 } // namespace
 
 int main(int argc, char **argv) {

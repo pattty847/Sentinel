@@ -744,211 +744,6 @@ TEST_F(UgrGpu, TimeAxisFitShowsTheAvailableRange) {
     ugr->setSize(QSizeF(640, 320));
 }
 
-// Owner decision: after a timeframe switch the price fits the new timeframe's
-// candles. Held already: in the switch's single viewport change. Not held yet: the
-// switch keeps the price and the fit lands when they arrive (one more change).
-TEST_F(UgrGpu, TimeframeSwitchFitsPriceToTheCandles) {
-    gpuOn(); // 40 one-minute columns ending at viewHi
-    const auto *view = ugr->getViewState();
-    const int64_t tf5 = 5 * minute;
-    auto fiveMinuteBars = [&](double base) {
-        std::vector<CandleSeriesBuffer::CandleBar> bars;
-        for (int64_t t = viewHi - 40 * tf5; t < viewHi; t += tf5) bars.push_back({t, t + tf5, base, base + 100, base - 100, base, 1.0, true, 0, false});
-        return bars;
-    };
-    CandleSeriesBuffer buffer;
-    buffer.applyHistory("BTC-USD", 300, fiveMinuteBars(105'000));
-    ugr->setCandleBuffer(&buffer);
-    uint64_t before = view->getViewportVersion();
-    ugr->setTimeframe(int(tf5));
-    EXPECT_EQ(view->getViewportVersion() - before, 1u) << "scaled span and fitted price: one change";
-    EXPECT_EQ(view->getVisibleTimeEnd() - view->getVisibleTimeStart(), 40 * tf5);
-    EXPECT_LE(view->getMinPrice(), 104'900);
-    EXPECT_GE(view->getMaxPrice(), 105'100);
-    EXPECT_LT(view->getMaxPrice() - view->getMinPrice(), 300) << "fitted, not just widened";
-    EXPECT_FALSE(ugr->priceFitPending());
-    // 15m candles are not held yet: the switch keeps the price, the fit waits for them.
-    const double p0 = view->getMinPrice(), p1 = view->getMaxPrice();
-    before = view->getViewportVersion();
-    ugr->setTimeframe(int(15 * minute));
-    EXPECT_EQ(view->getViewportVersion() - before, 1u);
-    EXPECT_EQ(view->getMinPrice(), p0);
-    EXPECT_EQ(view->getMaxPrice(), p1);
-    EXPECT_TRUE(ugr->priceFitPending());
-    // A forming live candle alone is not the history: still pending.
-    const int64_t tf15 = 15 * minute, end = view->getVisibleTimeEnd(), start = view->getVisibleTimeStart();
-    CandleSeriesBuffer::CandleBar live{(end / tf15 - 1) * tf15, end / tf15 * tf15, 98'000, 98'050, 97'950, 98'000, 1, false, 0, false};
-    buffer.applyUpdate("BTC-USD", 900, live, 1, false);
-    EXPECT_TRUE(ugr->priceFitPending());
-    std::vector<CandleSeriesBuffer::CandleBar> bars;
-    for (int64_t t = (start / tf15) * tf15; t < end; t += tf15) bars.push_back({t, t + tf15, 98'000, 98'200, 97'800, 98'000, 1.0, true, 0, false});
-    before = view->getViewportVersion();
-    buffer.applyHistory("BTC-USD", 900, bars);
-    EXPECT_FALSE(ugr->priceFitPending());
-    EXPECT_EQ(view->getViewportVersion() - before, 1u) << "the deferred fit is one change";
-    EXPECT_LE(view->getMinPrice(), 97'800);
-    EXPECT_GE(view->getMaxPrice(), 98'200);
-    EXPECT_LT(view->getMaxPrice() - view->getMinPrice(), 600);
-    ugr->setCandleBuffer(nullptr);
-}
-
-// Live 2026-10-02: 1h history arrives in pages of five bars every ~150 ms, newest
-// first; a fixed 2 s wait fitted the first pages only. While pages keep coming the
-// fit waits (quiet period), then uses every visible candle, including the oldest page.
-TEST_F(UgrGpu, TimeframeSwitchFitWaitsForHistoryPaging) {
-    gpuOn(); // 40 columns: 200 minutes of 5m after the switch
-    CandleSeriesBuffer buffer;
-    ugr->setCandleBuffer(&buffer);
-    const auto *view = ugr->getViewState();
-    const int64_t tf5 = 5 * minute;
-    ugr->setTimeframe(int(tf5));
-    ASSERT_TRUE(ugr->priceFitPending());
-    const int64_t newest = (view->getVisibleTimeEnd() - 1) / tf5 * tf5;
-    // 8 pages of 4 bars (32 of 40 buckets: under the coverage bar), 400 ms apart: 3.2 s.
-    for (int page = 0; page < 8; ++page) {
-        std::vector<CandleSeriesBuffer::CandleBar> bars;
-        for (int i = 0; i < 4; ++i) {
-            const int64_t t = newest - int64_t(page * 4 + i) * tf5;
-            const double low = page == 7 ? 95'000 : 100'000; // the oldest page holds the low
-            bars.push_back({t, t + tf5, 100'100, 100'200, low, 100'150, 1.0, true, 0, false});
-        }
-        buffer.applyHistory("BTC-USD", 300, bars);
-        EXPECT_TRUE(ugr->priceFitPending()) << "page " << page << ": more history is coming";
-        QElapsedTimer gap;
-        gap.start();
-        while (gap.elapsed() < 400) QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
-    }
-    QElapsedTimer timer;
-    timer.start();
-    while (ugr->priceFitPending() && timer.elapsed() < 3000) QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
-    EXPECT_FALSE(ugr->priceFitPending());
-    EXPECT_LE(view->getMinPrice(), 95'000) << "the oldest page's low is in view";
-    EXPECT_GE(view->getMaxPrice(), 100'200);
-    ugr->setCandleBuffer(nullptr);
-}
-
-// Review major 1: a chart drag only moves the visual offset until release
-// (priceInteracted comes at handlePanEnd). A drag that moves price cancels a pending
-// fit at its first move, on both the native mouse path and the beginPanAt/updatePanAt
-// API path, and no fit lands under any drag.
-TEST_F(UgrGpu, PendingFitNeverLandsUnderADrag) {
-    gpuOn();
-    CandleSeriesBuffer buffer;
-    ugr->setCandleBuffer(&buffer);
-    const auto *view = ugr->getViewState();
-    const int64_t tf5 = 5 * minute;
-    auto fullHistory = [&](double base, int64_t tf) {
-        std::vector<CandleSeriesBuffer::CandleBar> bars;
-        for (int64_t t = (view->getVisibleTimeStart() / tf) * tf; t < view->getVisibleTimeEnd(); t += tf)
-            bars.push_back({t, t + tf, base, base + 100, base - 100, base, 1.0, true, 0, false});
-        return bars;
-    };
-    auto mouse = [&](QEvent::Type type, QPointF at, Qt::MouseButton button, Qt::MouseButtons buttons) {
-        QMouseEvent event(type, at, at, scene->window()->mapToGlobal(at), button, buttons, Qt::NoModifier);
-        QCoreApplication::sendEvent(scene->window(), &event);
-    };
-    // Native mouse: press, a vertical move; the fit is cancelled before release.
-    ugr->setTimeframe(int(tf5));
-    ASSERT_TRUE(ugr->priceFitPending());
-    mouse(QEvent::MouseButtonPress, {320, 160}, Qt::LeftButton, Qt::LeftButton);
-    ASSERT_TRUE(view->isDragging()) << "the press reaches the chart";
-    mouse(QEvent::MouseMove, {320, 200}, Qt::NoButton, Qt::LeftButton);
-    EXPECT_FALSE(ugr->priceFitPending()) << "a price drag cancels the pending fit at once";
-    const double lo0 = view->getMinPrice(), hi0 = view->getMaxPrice();
-    buffer.applyHistory("BTC-USD", 300, fullHistory(103'000, tf5));
-    EXPECT_EQ(view->getMinPrice(), lo0) << "nothing lands under the drag";
-    EXPECT_EQ(view->getMaxPrice(), hi0);
-    mouse(QEvent::MouseButtonRelease, {320, 200}, Qt::LeftButton, Qt::NoButton);
-    EXPECT_NEAR(view->getMaxPrice() - view->getMinPrice(), hi0 - lo0, 1e-6) << "release: the drag only, same span";
-    // API path: beginPanAt/updatePanAt with a vertical move.
-    ugr->setTimeframe(int(15 * minute));
-    ASSERT_TRUE(ugr->priceFitPending());
-    ugr->beginPanAt(320, 160);
-    ugr->updatePanAt(320, 120);
-    EXPECT_FALSE(ugr->priceFitPending());
-    ugr->endPanAt();
-    // A time-only drag keeps the fit pending but defers it until the drag ends (1h:
-    // no 1h candles held yet).
-    const int64_t tf60 = 60 * minute;
-    ugr->setPriceFitTimings(2000, 100, 5000);
-    ugr->setTimeframe(int(tf60));
-    ASSERT_TRUE(ugr->priceFitPending());
-    ugr->beginPanAt(320, 160);
-    ugr->updatePanAt(280, 160);
-    ASSERT_TRUE(ugr->priceFitPending());
-    const double lo1 = view->getMinPrice(), hi1 = view->getMaxPrice();
-    buffer.applyHistory("BTC-USD", 3600, fullHistory(107'000, tf60)); // full coverage while dragging
-    QElapsedTimer held;
-    held.start();
-    while (held.elapsed() < 300) QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
-    EXPECT_EQ(view->getMinPrice(), lo1) << "no fit while the drag is active";
-    EXPECT_EQ(view->getMaxPrice(), hi1);
-    EXPECT_TRUE(ugr->priceFitPending());
-    ugr->endPanAt();
-    QElapsedTimer after;
-    after.start();
-    while (ugr->priceFitPending() && after.elapsed() < 3000) QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
-    EXPECT_FALSE(ugr->priceFitPending());
-    EXPECT_LE(view->getMinPrice(), 106'900) << "the deferred fit lands after the drag";
-    EXPECT_GE(view->getMaxPrice(), 107'100);
-    ugr->setCandleBuffer(nullptr);
-}
-
-// Review minor 2: no candles and no live price at all (a symbol with no data, no
-// book, no trade): the pending fit ends at the absolute deadline without fitting and
-// never lands later. Paging cannot push the settle past the deadline either.
-TEST_F(UgrGpu, PendingFitEndsAtItsDeadline) {
-    gpuOn();
-    CandleSeriesBuffer buffer;
-    ugr->setCandleBuffer(&buffer);
-    const auto *view = ugr->getViewState();
-    ugr->setActiveSymbol("ETH-USD"); // nothing recorded, nothing decoded: no price anywhere
-    ugr->setPriceFitTimings(100, 50, 400);
-    ugr->setTimeframe(int(5 * minute));
-    ASSERT_TRUE(ugr->priceFitPending());
-    const double lo = view->getMinPrice(), hi = view->getMaxPrice();
-    QElapsedTimer timer;
-    timer.start();
-    while (ugr->priceFitPending() && timer.elapsed() < 3000) QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
-    EXPECT_FALSE(ugr->priceFitPending()) << "terminal deadline clears the pending state";
-    EXPECT_LT(timer.elapsed(), 1500);
-    EXPECT_EQ(view->getMinPrice(), lo);
-    EXPECT_EQ(view->getMaxPrice(), hi);
-    // Candles arriving later do not fit out of nowhere.
-    std::vector<CandleSeriesBuffer::CandleBar> bars;
-    const int64_t tf5 = 5 * minute;
-    for (int64_t t = view->getVisibleTimeStart() / tf5 * tf5; t < view->getVisibleTimeEnd(); t += tf5)
-        bars.push_back({t, t + tf5, 3'000, 3'010, 2'990, 3'000, 1.0, true, 0, false});
-    buffer.applyHistory("ETH-USD", 300, bars);
-    EXPECT_EQ(view->getMinPrice(), lo);
-    // Pages keep restarting the quiet wait: the deadline still holds. 1 s cap, 1 s
-    // quiet, pages at 0 and 0.5 s: settle at 1.0 s, not 1.5 s.
-    ugr->setPriceFitTimings(5000, 1000, 1000);
-    ugr->setTimeframe(int(15 * minute));
-    ASSERT_TRUE(ugr->priceFitPending());
-    const int64_t tf15 = 15 * minute;
-    auto page = [&](int64_t from, int n) {
-        std::vector<CandleSeriesBuffer::CandleBar> p;
-        for (int i = 0; i < n; ++i) {
-            const int64_t t = from - i * tf15;
-            p.push_back({t, t + tf15, 3'100, 3'120, 3'080, 3'100, 1.0, true, 0, false});
-        }
-        buffer.applyHistory("ETH-USD", 900, p);
-    };
-    const int64_t newest = (view->getVisibleTimeEnd() - 1) / tf15 * tf15;
-    timer.restart();
-    page(newest, 4);
-    while (timer.elapsed() < 500) QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
-    ASSERT_TRUE(ugr->priceFitPending());
-    page(newest - 4 * tf15, 4);
-    while (ugr->priceFitPending() && timer.elapsed() < 3000) QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
-    EXPECT_FALSE(ugr->priceFitPending());
-    EXPECT_LT(timer.elapsed(), 1300) << "settled at the 1 s deadline, not 1 s after the last page";
-    EXPECT_LE(view->getMinPrice(), 3'080);
-    EXPECT_GE(view->getMaxPrice(), 3'120);
-    ugr->setCandleBuffer(nullptr);
-}
-
 // Review minor 3: a view that starts inside a candle (1m candles, view from :30 s):
 // the first overlapping candle counts for the fit, with the extreme in it.
 TEST_F(UgrGpu, PriceFitCountsTheCandleUnderTheLeftEdge) {
@@ -967,30 +762,303 @@ TEST_F(UgrGpu, PriceFitCountsTheCandleUnderTheLeftEdge) {
     ugr->setCandleBuffer(nullptr);
 }
 
-// No candle for the new timeframe ever arrives: the fit falls back to the live price
-// after kPriceFitFirstWaitMs (the view must not stay where nothing is visible).
-TEST_F(UgrGpu, TimeframeSwitchWithoutCandlesFitsTheLivePrice) {
-    gpuOn();
-    CandleSeriesBuffer buffer; // empty
+// ── Auto price scale (docs/research/2026-10-viewport-autoscale.md) ─────────────
+// Candles every tf over [from, to): bar i has low base + i * step and high low + 50.
+std::vector<CandleSeriesBuffer::CandleBar> risingBars(int64_t from, int64_t to, int64_t tf, double base,
+                                                      double step = 10) {
+    std::vector<CandleSeriesBuffer::CandleBar> bars;
+    int i = 0;
+    for (int64_t t = from / tf * tf; t < to; t += tf, ++i) {
+        const double low = base + step * i;
+        bars.push_back({t, t + tf, low + 10, low + 50, low, low + 40, 1.0, true, 0, false});
+    }
+    return bars;
+}
+// The fitted range for the candles overlapping [start, end): high/low plus the margin.
+std::pair<double, double> expectedFit(const std::vector<CandleSeriesBuffer::CandleBar> &bars, int64_t start,
+                                      int64_t end) {
+    double lo = 1e300, hi = -1e300;
+    for (const auto &b : bars)
+        if (b.timeStartMs < end && b.timeEndMs > start) lo = std::min(lo, b.low), hi = std::max(hi, b.high);
+    const double margin = (hi - lo) * UnifiedGridRenderer::kFitPriceMargin;
+    return {lo - margin, hi + margin};
+}
+
+// While on, the price follows the visible candles as the view moves in time (keyboard
+// pan, drag, chart wheel, time axis zoom), each in ONE viewport change; drags and
+// keyboard pans move time only; the wheel zooms time and keeps it on.
+TEST_F(UgrGpu, AutoScaleFollowsTheVisibleCandlesAcrossTimeChanges) {
+    gpuOn(); // explicit price: auto price scale off
+    ASSERT_FALSE(ugr->autoPriceScale()) << "an explicit price range turns it off";
+    CandleSeriesBuffer buffer;
+    const auto bars = risingBars(viewLo - 4 * kHourMs, viewHi + kHourMs, minute, 90'000);
+    buffer.applyHistory("BTC-USD", 60, bars);
     ugr->setCandleBuffer(&buffer);
-    ugr->setLiveBookTop(109'999, 110'001);
     const auto *view = ugr->getViewState();
-    const double span = priceSpan();
-    ugr->setTimeframe(int(5 * minute));
-    ASSERT_TRUE(ugr->priceFitPending());
-    QElapsedTimer timer;
-    timer.start();
-    while (ugr->priceFitPending() && timer.elapsed() < UnifiedGridRenderer::kPriceFitFirstWaitMs + 2000)
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
-    EXPECT_FALSE(ugr->priceFitPending());
-    EXPECT_NEAR(view->getMinPrice(), 110'000 - span / 2, 1e-6);
-    EXPECT_NEAR(view->getMaxPrice(), 110'000 + span / 2, 1e-6);
-    // A user price interaction cancels a pending fit.
-    ugr->setTimeframe(int(15 * minute));
-    ASSERT_TRUE(ugr->priceFitPending());
-    ugr->zoomPriceAt(120, 100, 320);
-    EXPECT_FALSE(ugr->priceFitPending());
+    auto expectFitted = [&](const char *what) {
+        const auto [lo, hi] = expectedFit(bars, view->getVisibleTimeStart(), view->getVisibleTimeEnd());
+        EXPECT_NEAR(view->getMinPrice(), lo, 1e-6) << what;
+        EXPECT_NEAR(view->getMaxPrice(), hi, 1e-6) << what;
+    };
+    uint64_t v = view->getViewportVersion();
+    ugr->setAutoPriceScale(true);
+    EXPECT_TRUE(ugr->autoPriceScale());
+    EXPECT_EQ(view->getViewportVersion() - v, 1u);
+    expectFitted("on");
+    v = view->getViewportVersion();
+    ugr->panLeft();
+    EXPECT_EQ(view->getViewportVersion() - v, 1u) << "a time pan and its refit: one change";
+    expectFitted("keyboard pan");
+    // A drag with vertical motion moves time only.
+    const int64_t t0 = view->getVisibleTimeStart();
+    ugr->beginPanAt(320, 160);
+    ugr->updatePanAt(160, 40);
+    EXPECT_EQ(view->getPanVisualOffset().y(), 0.0) << "no vertical pan while on";
+    v = view->getViewportVersion();
+    ugr->endPanAt();
+    EXPECT_EQ(view->getViewportVersion() - v, 1u);
+    EXPECT_GT(view->getVisibleTimeStart(), t0) << "dragged left: later times";
+    expectFitted("drag");
+    v = view->getViewportVersion();
+    ugr->panUp();
+    EXPECT_EQ(view->getViewportVersion(), v) << "keyboard vertical pan ignored";
+    // The chart wheel zooms time only and keeps it on.
+    const double span0 = timeSpan();
+    v = view->getViewportVersion();
+    ugr->zoomAt(-240, 320, 160);
+    EXPECT_EQ(view->getViewportVersion() - v, 1u);
+    EXPECT_GT(timeSpan(), span0);
+    EXPECT_TRUE(ugr->autoPriceScale()) << "the wheel keeps it on";
+    expectFitted("wheel zoom out");
+    v = view->getViewportVersion();
+    ugr->zoomTimeAt(240, 320);
+    EXPECT_EQ(view->getViewportVersion() - v, 1u);
+    expectFitted("time axis zoom");
     ugr->setCandleBuffer(nullptr);
+}
+
+// Candle updates refit only when they are in view and change the fit: one change, or none.
+TEST_F(UgrGpu, AutoScaleRefitsOnCandleUpdatesOnlyWhenTheFitChanges) {
+    gpuOn();
+    CandleSeriesBuffer buffer;
+    auto bars = risingBars(viewLo, viewHi, minute, 100'000);
+    buffer.applyHistory("BTC-USD", 60, bars);
+    ugr->setCandleBuffer(&buffer);
+    ugr->setAutoPriceScale(true);
+    const auto *view = ugr->getViewState();
+    const double lo0 = view->getMinPrice(), hi0 = view->getMaxPrice();
+    uint64_t v = view->getViewportVersion();
+    auto update = [&](int64_t t, double low, double high, uint64_t seq, const char *symbol = "BTC-USD") {
+        buffer.applyUpdate(symbol, 60, {t, t + minute, low, high, low, high, 1.0, false, 0, false}, seq, false);
+    };
+    update(viewLo + 10 * minute, 100'120, 100'140, 1); // inside the range
+    EXPECT_EQ(view->getViewportVersion(), v) << "no new extreme: no viewport change";
+    update(viewLo + 20 * minute, 100'200, 101'000, 2); // a new high in view
+    EXPECT_EQ(view->getViewportVersion() - v, 1u);
+    EXPECT_GT(view->getMaxPrice(), 101'000) << "the new high is in view";
+    EXPECT_NEAR(view->getMinPrice(), 100'000 - 1'000 * UnifiedGridRenderer::kFitPriceMargin, 1e-6) << "refitted";
+    EXPECT_LT(view->getMinPrice(), lo0);
+    EXPECT_GT(view->getMaxPrice(), hi0);
+    v = view->getViewportVersion();
+    update(viewHi + 30 * minute, 50'000, 150'000, 3); // out of view
+    update(viewLo + 5 * minute, 50'000, 150'000, 4, "ETH-USD"); // another symbol
+    EXPECT_EQ(view->getViewportVersion(), v) << "nothing in view changed";
+    // Off: a new extreme in view leaves the range alone.
+    ugr->setAutoPriceScale(false);
+    update(viewLo + 21 * minute, 99'000, 102'000, 5);
+    EXPECT_EQ(view->getViewportVersion(), v);
+    ugr->setCandleBuffer(nullptr);
+}
+
+// A price zoom (axis drag/wheel) turns it off; off, the range stays where the user left
+// it across time pans and timeframe switches, and drags pan price again. On, a
+// timeframe switch lands on the new timeframe's candles in its single viewport change,
+// and history arriving later refits.
+TEST_F(UgrGpu, PriceZoomTurnsAutoScaleOffAndTheRangeSurvivesATimeframeSwitch) {
+    gpuOn();
+    CandleSeriesBuffer buffer;
+    const int64_t tf5 = 5 * minute, tf15 = 15 * minute;
+    buffer.applyHistory("BTC-USD", 60, risingBars(viewLo - kHourMs, viewHi + kHourMs, minute, 100'000));
+    const auto bars5 = risingBars(viewHi - 60 * tf5, viewHi + 10 * tf5, tf5, 105'000, 20);
+    buffer.applyHistory("BTC-USD", 300, bars5);
+    ugr->setCandleBuffer(&buffer);
+    ugr->setAutoPriceScale(true);
+    const auto *view = ugr->getViewState();
+    ugr->zoomPriceAt(120, 100, 320);
+    EXPECT_FALSE(ugr->autoPriceScale()) << "a price zoom turns it off";
+    const double lo = view->getMinPrice(), hi = view->getMaxPrice();
+    ugr->setTimeframe(int(tf5));
+    EXPECT_EQ(view->getMinPrice(), lo) << "off: the range survives the switch";
+    EXPECT_EQ(view->getMaxPrice(), hi);
+    ugr->panLeft();
+    EXPECT_EQ(view->getMinPrice(), lo) << "and a time pan";
+    ugr->beginPanAt(320, 160);
+    ugr->updatePanAt(320, 200);
+    EXPECT_EQ(view->getPanVisualOffset().y(), 40.0) << "off: vertical pan again";
+    ugr->endPanAt();
+    EXPECT_GT(view->getMinPrice(), lo);
+    // On again (the price-axis double-click), back to 1m, then 5m: fitted in one change.
+    ugr->setTimeframe(int(minute));
+    ASSERT_TRUE(ugr->fitPriceToData());
+    EXPECT_TRUE(ugr->autoPriceScale());
+    uint64_t v = view->getViewportVersion();
+    ugr->setTimeframe(int(tf5));
+    EXPECT_EQ(view->getViewportVersion() - v, 1u) << "scaled span and fitted price: one change";
+    {
+        const auto [flo, fhi] = expectedFit(bars5, view->getVisibleTimeStart(), view->getVisibleTimeEnd());
+        EXPECT_NEAR(view->getMinPrice(), flo, 1e-6);
+        EXPECT_NEAR(view->getMaxPrice(), fhi, 1e-6);
+    }
+    // 15m not held yet: the switch keeps the price; the history page refits (one change).
+    const double plo = view->getMinPrice();
+    v = view->getViewportVersion();
+    ugr->setTimeframe(int(tf15));
+    EXPECT_EQ(view->getViewportVersion() - v, 1u);
+    EXPECT_EQ(view->getMinPrice(), plo);
+    const auto bars15 = risingBars(view->getVisibleTimeStart(), view->getVisibleTimeEnd(), tf15, 98'000, 0);
+    v = view->getViewportVersion();
+    buffer.applyHistory("BTC-USD", 900, bars15);
+    EXPECT_EQ(view->getViewportVersion() - v, 1u);
+    const auto [flo, fhi] = expectedFit(bars15, view->getVisibleTimeStart(), view->getVisibleTimeEnd());
+    EXPECT_NEAR(view->getMinPrice(), flo, 1e-6);
+    EXPECT_NEAR(view->getMaxPrice(), fhi, 1e-6);
+    ugr->setCandleBuffer(nullptr);
+}
+
+// A symbol switch keeps the state. On: the new symbol's candles fit. Off: the zoom is
+// carried as a percentage (span / price) with the current price at the same height,
+// here from BTC ~86k to a 0.00001 symbol. The time window (Now column, bar width) stays.
+TEST_F(UgrGpu, SymbolSwitchKeepsTheAutoScaleState) {
+    gpuOn();
+    CandleSeriesBuffer buffer;
+    const auto btc = risingBars(viewLo - kHourMs, viewHi + kHourMs, minute, 85'500);
+    std::vector<CandleSeriesBuffer::CandleBar> tiny;
+    for (int64_t t = viewLo - kHourMs; t < viewHi + kHourMs; t += minute)
+        tiny.push_back({t, t + minute, 0.0000100, 0.0000104, 0.0000097, 0.0000101, 1.0, true, 0, false});
+    buffer.applyHistory("BTC-USD", 60, btc);
+    buffer.applyHistory("TINY-USD", 60, tiny);
+    ugr->setCandleBuffer(&buffer);
+    const auto *view = ugr->getViewState();
+    const int64_t t0 = view->getVisibleTimeStart(), t1 = view->getVisibleTimeEnd();
+    // On.
+    ugr->setAutoPriceScale(true);
+    ugr->setActiveSymbol("TINY-USD");
+    EXPECT_TRUE(ugr->autoPriceScale());
+    {
+        const auto [lo, hi] = expectedFit(tiny, t0, t1);
+        EXPECT_NEAR(view->getMinPrice(), lo, 1e-15) << "the new symbol's candles fit";
+        EXPECT_NEAR(view->getMaxPrice(), hi, 1e-15);
+    }
+    EXPECT_EQ(view->getVisibleTimeStart(), t0) << "the time window stays";
+    EXPECT_EQ(view->getVisibleTimeEnd(), t1);
+    ugr->setActiveSymbol("BTC-USD");
+    {
+        const auto [lo, hi] = expectedFit(btc, t0, t1);
+        EXPECT_NEAR(view->getMinPrice(), lo, 1e-6);
+        EXPECT_NEAR(view->getMaxPrice(), hi, 1e-6);
+    }
+    // Off: 85,500..87,500 with the book at 86,000 (a quarter up the view).
+    ugr->setViewport(t0, t1, 85'500, 87'500);
+    ASSERT_FALSE(ugr->autoPriceScale());
+    ugr->setLiveBookTop(85'999, 86'001);
+    ugr->setActiveSymbol("TINY-USD");
+    EXPECT_FALSE(ugr->autoPriceScale());
+    ugr->setLiveBookTop(0.0000099, 0.0000101);
+    const double mid = 0.00001, span = mid * 2'000 / 86'000;
+    EXPECT_NEAR(view->getMaxPrice() - view->getMinPrice(), span, span * 1e-9) << "the same span / price";
+    EXPECT_NEAR(view->getMinPrice(), mid - 0.25 * span, span * 1e-9) << "the price at the same height";
+    EXPECT_EQ(view->getVisibleTimeStart(), t0);
+    EXPECT_EQ(view->getVisibleTimeEnd(), t1);
+    // And back: the carry works both ways.
+    ugr->setActiveSymbol("BTC-USD");
+    ugr->setLiveBookTop(85'999, 86'001);
+    EXPECT_NEAR(view->getMinPrice(), 85'500, 1e-6);
+    EXPECT_NEAR(view->getMaxPrice(), 87'500, 1e-6);
+    ugr->setCandleBuffer(nullptr);
+}
+
+// The Now column (the live bucket) keeps its screen x and the bar width stays across
+// timeframe and symbol switches (a view that is not following live, Now in view).
+TEST_F(UgrGpu, NowColumnStaysPutAcrossTimeframeAndSymbolSwitches) {
+    gpuOn();
+    const auto *view = ugr->getViewState();
+    const int64_t anchor = layer().liveAnchorMs();
+    ASSERT_EQ(anchor, epoch + 4 * kHourMs);
+    // 40 one-minute bars with the Now centre at 70% of the width.
+    const int64_t start = anchor - minute / 2 - 28 * minute;
+    ugr->setViewport(start, start + 40 * minute, 99'900, 100'300);
+    ASSERT_FALSE(ugr->autoScrollEnabled());
+    auto nowX = [&](int64_t tf) {
+        const double centre = double((anchor + tf - 1) / tf * tf) - double(tf) / 2;
+        return (centre - double(view->getVisibleTimeStart())) / timeSpan() * ugr->width();
+    };
+    auto barPx = [&](int64_t tf) { return ugr->width() * double(tf) / timeSpan(); };
+    const double x0 = nowX(minute), bar0 = barPx(minute);
+    EXPECT_NEAR(x0, 0.7 * 640, 1e-6);
+    for (const int64_t tf : {5 * minute, 15 * minute, 60 * minute, minute}) {
+        ugr->setTimeframe(int(tf));
+        EXPECT_NEAR(nowX(tf), x0, 0.5) << "Now column at tf " << tf;
+        EXPECT_NEAR(barPx(tf), bar0, 1e-6) << "bar width at tf " << tf;
+    }
+    const int64_t s0 = view->getVisibleTimeStart(), e0 = view->getVisibleTimeEnd();
+    ugr->setActiveSymbol("ETH-USD");
+    EXPECT_EQ(view->getVisibleTimeStart(), s0) << "a symbol switch keeps the time window";
+    EXPECT_EQ(view->getVisibleTimeEnd(), e0);
+    ugr->setActiveSymbol("BTC-USD");
+    EXPECT_EQ(view->getVisibleTimeStart(), s0);
+}
+
+// The time-axis double-click: the default view (initial span ending one padding past
+// the live bucket, follow-live and auto price scale on) in one viewport change, from
+// anywhere.
+TEST_F(UgrGpu, TimeAxisResetGoesToTheDefaultView) {
+    gpuOn(); // history, auto price scale off
+    const auto *view = ugr->getViewState();
+    const int64_t anchor = layer().liveAnchorMs();
+    ASSERT_GT(anchor, 0);
+    uint64_t v = view->getViewportVersion();
+    ASSERT_TRUE(ugr->resetView());
+    EXPECT_EQ(view->getViewportVersion() - v, 1u);
+    EXPECT_TRUE(ugr->autoScrollEnabled());
+    EXPECT_TRUE(ugr->autoPriceScale());
+    const double span = timeSpan();
+    EXPECT_EQ(view->getVisibleTimeEnd(), anchor + std::max<int64_t>(minute, int64_t(span * 0.08)));
+    // From a different zoom in the future: the same default view.
+    ugr->setViewport(epoch + 10 * kHourMs, epoch + 10 * kHourMs + 300 * minute, 99'000, 99'100);
+    ASSERT_TRUE(ugr->resetView());
+    EXPECT_EQ(timeSpan(), span);
+    EXPECT_EQ(view->getVisibleTimeEnd(), anchor + std::max<int64_t>(minute, int64_t(span * 0.08)));
+}
+
+// FM-141 (left-over of the auto-fit slice): in gpu mode the candle that starts before
+// the view start and ends inside it is drawn (it was dropped: the slice selected by bar
+// start, and the filter cut at the view start).
+TEST_F(UgrGpu, CandleUnderTheLeftEdgeIsDrawn) {
+    ugr->setHeatmapRenderer("gpu");
+    ugr->setHeatmapLayerEnabled(false); // black background: only the candles draw
+    // 40 columns of 16 px from the middle of a candle: half of the first is visible.
+    const int64_t lo = viewLo + minute / 2;
+    ugr->setViewport(lo, lo + 40 * minute, 99'900, 100'300);
+    CandleSeriesBuffer buffer;
+    std::vector<CandleSeriesBuffer::CandleBar> bars;
+    for (int64_t t = viewLo; t < lo + 41 * minute; t += minute)
+        bars.push_back({t, t + minute, 99'800, 100'400, 99'800, 100'400, 1.0, true, 0, false});
+    buffer.applyHistory("BTC-USD", 60, bars);
+    ASSERT_TRUE(frames(3)) << error.toStdString(); // the chart publishes its mapping first
+    auto *candles = new CandlestickOverlayItem(scene->window()->contentItem());
+    candles->setSize(ugr->size());
+    candles->setMappingProvider(ugr);
+    candles->setCandleBuffer(&buffer);
+    candles->setSymbol("BTC-USD");
+    candles->setTimeframeSec(60);
+    ASSERT_TRUE(frames(5)) << error.toStdString();
+    int lit = 0;
+    for (int x = 0; x < 4; ++x) lit += image.pixel(x, 160) != qRgb(0, 0, 0);
+    EXPECT_EQ(lit, 4) << "the left-edge candle's visible half is drawn";
+    int second = 0;
+    for (int x = 12; x < 20; ++x) second += image.pixel(x, 160) != qRgb(0, 0, 0);
+    EXPECT_GT(second, 0) << "the next candle too (sanity)";
+    delete candles;
 }
 
 // Review major 5: recording availability only (no book, no trade, no API
@@ -1135,21 +1203,51 @@ TEST(UgrInput, InputRouteReachesTheChartAndAxisAreasOncePerWheel) {
     EXPECT_GT(changes, 2);
     const double dpr = view.effectiveDevicePixelRatio();
     EXPECT_DOUBLE_EQ(timeSpan(), std::floor(ugr->width() * dpr * double(minute))) << "spec rule 9: the axis drag clamps";
-    // Auto-fit: a double-click on either axis (QML MouseArea onDoubleClicked) is one
-    // viewport change. Price: the visible candles; time: the 4 h recording.
+    const double timeSpanBefore = timeSpan();
+    // A double-click on either axis (QML MouseArea onDoubleClicked) is one viewport
+    // change. Price: auto price scale on, the visible candles fitted.
     CandleSeriesBuffer buffer;
     std::vector<CandleSeriesBuffer::CandleBar> bars;
-    for (int64_t t = state->getVisibleTimeStart() / minute * minute; t < state->getVisibleTimeEnd(); t += minute)
+    for (int64_t t = epoch; t < epoch + 4 * kHourMs; t += minute)
         bars.push_back({t, t + minute, 101'000, 101'200, 100'800, 101'000, 1.0, true, 0, false});
     buffer.applyHistory("BTC-USD", 60, bars);
     ugr->setCandleBuffer(&buffer);
+    ASSERT_FALSE(ugr->autoPriceScale()) << "the axis zooms turned it off";
     int before = changes;
     ASSERT_EQ(apply("doubleClick", "priceAxis", 20, 200), 200);
     EXPECT_EQ(changes - before, 1) << "price axis double-click: one change";
+    EXPECT_TRUE(ugr->autoPriceScale()) << "the price-axis double-click turns it on";
     EXPECT_NEAR(state->getMinPrice(), 100'800 - 400 * UnifiedGridRenderer::kFitPriceMargin, 1e-6);
     EXPECT_NEAR(state->getMaxPrice(), 101'200 + 400 * UnifiedGridRenderer::kFitPriceMargin, 1e-6);
-    const double fittedLo = state->getMinPrice();
-    QElapsedTimer waited; // the time fit needs the recording's availability (data thread)
+    // A price-axis drag turns it off.
+    ASSERT_EQ(apply("dragStart", "priceAxis", 20, 200), 200);
+    ASSERT_EQ(apply("dragMove", "priceAxis", 20, 260), 200);
+    ASSERT_EQ(apply("dragEnd", "priceAxis", 20, 260), 200);
+    EXPECT_FALSE(ugr->autoPriceScale()) << "a price-axis drag turns it off";
+    // The "A" toggle in the axis corner: a click turns it on (fitted), another off.
+    auto *button = view.rootObject()->findChild<QQuickItem *>("autoPriceScaleButton");
+    ASSERT_TRUE(button);
+    EXPECT_TRUE(button->isVisible()) << "shown with the gpu renderer";
+    auto click = [&] {
+        const QPointF at = button->mapToScene(QPointF(button->width() / 2, button->height() / 2));
+        for (auto type : {QEvent::MouseButtonPress, QEvent::MouseButtonRelease}) {
+            QMouseEvent event(type, at, at, view.mapToGlobal(at), Qt::LeftButton,
+                              type == QEvent::MouseButtonPress ? Qt::LeftButton : Qt::NoButton, Qt::NoModifier);
+            QCoreApplication::sendEvent(&view, &event);
+        }
+    };
+    before = changes;
+    click();
+    EXPECT_TRUE(ugr->autoPriceScale()) << "the A toggle turns it on";
+    EXPECT_EQ(changes - before, 1);
+    EXPECT_NEAR(state->getMinPrice(), 100'800 - 400 * UnifiedGridRenderer::kFitPriceMargin, 1e-6);
+    QElapsedTimer pause; // not a double-click
+    pause.start();
+    while (pause.elapsed() < 600) QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    click();
+    EXPECT_FALSE(ugr->autoPriceScale()) << "and off";
+    // Time: the default view (follow-live and auto price scale on).
+    QElapsedTimer waited; // the reset needs the recording's availability (data thread)
     waited.start();
     while (ugr->gpuHeatmapLayer()->liveAnchorMs() <= 0 && waited.elapsed() < 10'000)
         QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
@@ -1157,9 +1255,12 @@ TEST(UgrInput, InputRouteReachesTheChartAndAxisAreasOncePerWheel) {
     before = changes;
     ASSERT_EQ(apply("doubleClick", "timeAxis", 500, 10), 200);
     EXPECT_EQ(changes - before, 1) << "time axis double-click: one change";
-    EXPECT_NEAR(double(state->getVisibleTimeStart()), double(epoch), double(2 * minute)) << "the recording's start";
-    EXPECT_GT(state->getVisibleTimeEnd(), epoch + 4 * kHourMs) << "and its live end";
-    EXPECT_EQ(state->getMinPrice(), fittedLo) << "time only";
+    EXPECT_TRUE(ugr->autoScrollEnabled());
+    EXPECT_TRUE(ugr->autoPriceScale());
+    const double span = double(state->getVisibleTimeEnd() - state->getVisibleTimeStart());
+    EXPECT_EQ(state->getVisibleTimeEnd(),
+              epoch + 4 * kHourMs + std::max<int64_t>(minute, int64_t(span * 0.08))) << "the live edge, padded";
+    EXPECT_LT(span, 0.5 * timeSpanBefore) << "the default span, not the clamped zoom-out";
     ugr->setCandleBuffer(nullptr);
     ugr->setHeatmapRenderer("legacy"); // its controller goes now
 }
