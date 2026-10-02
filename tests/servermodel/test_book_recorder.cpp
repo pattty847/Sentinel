@@ -641,6 +641,87 @@ TEST_F(RecorderTest, PublisherFailureDoesNotLoseCommittedMinuteOrHourRollup) {
     EXPECT_EQ(read(3600000).size(), 1);
 }
 
+// Fable review 2026-10-01: an invalid book's clock moves but nothing integrates.
+// Republishing the same open-minute record every interval bumped the live
+// revision at 2 Hz, so the live worker re-sent and every GUI recomposed it.
+TEST_F(RecorderTest, InvalidBookPublishesUnchangedOpenMinuteOnlyOnce) {
+    std::vector<std::shared_ptr<const Hmc2Record>> pubs;
+    auto c = config();
+    c.publisher = [&](auto record) { pubs.push_back(std::move(record)); };
+    auto r = make(c);
+    const auto invalidAt = [&](int64_t t) {
+        local = t;
+        r->onInvalid("BTC-USD", kEpoch + t, "test outage");
+        r->drainForTest();
+    };
+    snap(*r, 0);
+    tick(*r, 10'000);
+    ASSERT_EQ(pubs.size(), 1);
+    invalidAt(15'000); // the closing state of the valid interval still goes out
+    ASSERT_EQ(pubs.size(), 2);
+    EXPECT_EQ(pubs.back()->observedMs, 15'000);
+    value(*pubs.back(), 99, false, 2, 2);
+    for (int64_t t = 15'500; t < 25'000; t += 500) tick(*r, t);
+    EXPECT_EQ(pubs.size(), 2) << "nothing changed while invalid";
+    snap(*r, 25'000, {{true, 99, 100}}); // rejected snapshot (minute already kResynced)
+    for (int64_t t = 25'500; t < 40'000; t += 500) tick(*r, t);
+    EXPECT_EQ(pubs.size(), 2);
+    snap(*r, 40'000); // validity regained: publish at once, not one interval later
+    ASSERT_EQ(pubs.size(), 3);
+    EXPECT_EQ(pubs.back()->observedMs, 15'000);
+    tick(*r, 40'500);
+    ASSERT_EQ(pubs.size(), 4);
+    EXPECT_EQ(pubs.back()->observedMs, 15'500);
+    invalidAt(45'000);
+    ASSERT_EQ(pubs.size(), 5);
+    EXPECT_EQ(pubs.back()->observedMs, 20'000);
+    for (int64_t t = 45'500; t < 60'000; t += 500) tick(*r, t);
+    EXPECT_EQ(pubs.size(), 5);
+    tick(*r, 60'000); // rollover: the closed minute still publishes pending, then committed
+    ASSERT_EQ(pubs.size(), 7);
+    EXPECT_EQ(pubs[5]->bucketStartMs, kEpoch);
+    EXPECT_TRUE(pubs[5]->flags & kProvisional);
+    EXPECT_EQ(pubs[5]->observedMs, 20'000);
+    EXPECT_FALSE(pubs[6]->flags & kProvisional);
+    EXPECT_EQ(pubs[6]->observedMs, 20'000);
+    for (int64_t t = 60'500; t < 70'000; t += 500) tick(*r, t);
+    EXPECT_EQ(pubs.size(), 7) << "an unobserved invalid minute publishes nothing";
+    snap(*r, 70'000);
+    tick(*r, 70'500);
+    ASSERT_EQ(pubs.size(), 8);
+    EXPECT_EQ(pubs.back()->bucketStartMs, kEpoch + 60'000);
+    EXPECT_EQ(pubs.back()->observedMs, 500);
+}
+
+// Fable review 2026-10-01: a bad_alloc while building an open-minute record
+// reached run(), counted a disk error and invalidated every symbol's book.
+TEST_F(RecorderTest, OpenPublicationAllocationFailureInvalidatesNoBook) {
+    size_t opens = 0, finals = 0;
+    bool failOpen = true;
+    auto c = config();
+    c.publisher = [&](auto record) { ++((record->flags & kProvisional) ? opens : finals); };
+    c.beforePublicationForTest = [&](bool provisional) { if (provisional && failOpen) throw std::bad_alloc(); };
+    auto r = make(c);
+    local = 0;
+    r->onSnapshot("ETH-USD", kEpoch, {{true, 9, 1}, {false, 11, 1}});
+    snap(*r, 0);
+    for (int64_t t = 500; t < 60'000; t += 500) tick(*r, t);
+    EXPECT_EQ(opens, 0);
+    EXPECT_EQ(r->stats().invalidations, 0);
+    EXPECT_EQ(r->stats().diskErrors, 0);
+    tick(*r, 60'000);
+    EXPECT_EQ(r->stats().columnsWritten, 2);
+    EXPECT_EQ(finals, 2);
+    auto rows = read();
+    ASSERT_EQ(rows.size(), 1);
+    EXPECT_EQ(rows[0].observedMs, 60'000);
+    value(rows[0], 99, false, 2, 2);
+    failOpen = false;
+    tick(*r, 60'500);
+    EXPECT_EQ(opens, 2) << "both symbols publish again once allocation succeeds";
+    EXPECT_EQ(r->stats().invalidations, 0);
+}
+
 // 2026-09-30 incident: an update batch left the ask side empty at 23:59:28.559 UTC.
 // The recorder invalidated itself, ignored every later update, and wrote nothing
 // for 22 minutes (no next-day file) because no snapshot ever came.

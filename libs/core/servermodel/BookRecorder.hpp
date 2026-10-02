@@ -22,12 +22,14 @@ struct RecorderConfig {
     int64_t latenessMs = 2000;
     size_t maxQueuedLevels = 2'000'000;
     // Open-minute publication interval (integration clock): at most one
-    // provisional record per layer per interval. Server config
+    // provisional record per layer per interval, and none while an invalid
+    // book's record is unchanged. Server config
     // recording.live_publish_ms (default 500, clamped to [250, 5000]).
     int64_t livePublishMs = 500;
     // Worker callback: bounded handoff only; no I/O or projection. Installed before start.
     std::function<void(std::shared_ptr<const Hmc2Record>)> publisher;
-    // Deterministic allocation-failure seam, before making a publication copy.
+    // Deterministic allocation-failure seam, before building any publication
+    // (open-minute records and pending/committed copies). Tests only.
     std::function<void(bool provisional)> beforePublicationForTest;
     // Worker callback: the recorder invalidated a symbol on its own (not via
     // onInvalid), or dropped its first snapshot, so only a fresh upstream snapshot

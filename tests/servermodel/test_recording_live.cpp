@@ -636,11 +636,12 @@ TEST(RecordingRawTail, FinalsOncePerSubscriberAndSinceResubscribeResends) {
 
 // 2026-10-01 (owner: live rate 500 ms): the recorder publishes every 500 ms and
 // the worker turns about every 105 ms (100 ms wait plus work; S6d measured
-// frames 1.057 s apart at the former 1 s). Each publication must go out at the
-// first turn after it. A worker cadence equal to the publish interval rounds up
-// to 525 ms here, falls behind the recorder, skips publications and lets the
-// age walk through a whole interval.
-TEST(RecordingRawTail, EachPublicationGoesOutWithinOneWorkerTurn) {
+// frames 1.057 s apart at the former 1 s). In steady state (open-minute
+// provisionals only: no finals to deliver, no byte-budget refusal) each
+// publication must go out at the first turn after it. A worker cadence equal to
+// the publish interval rounds up to 525 ms here, falls behind the recorder,
+// skips publications and lets the age walk through a whole interval.
+TEST(RecordingRawTail, SteadyStatePublicationGoesOutWithinOneWorkerTurn) {
     QTemporaryDir dir;
     LiveService service(dir.path().toStdString(), liveCadenceMs(kLivePublishDefaultMs));
     std::atomic<int64_t> now{-1};

@@ -7,6 +7,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <limits>
 #include <map>
 #include <memory_resource>
 #include <mutex>
@@ -51,6 +52,13 @@ struct Layer {
     bool hourWatermarkBlocked = false;
     int64_t publishedMinuteMs = -1, publishedHourMs = -1, publishedColumnMs = -1; // last values handed to readers
     int64_t lastColumnMs = 0; // newest minute bucket this layer appended successfully
+    // Inputs of the last open-minute publication. While the book is invalid
+    // nothing integrates, so equal inputs mean a byte-identical record.
+    struct OpenKey {
+        int64_t minute = -1, through = -1;
+        uint32_t observed = 0, flags = 0;
+        bool operator==(const OpenKey &) const = default;
+    } publishedOpen;
     explicit Layer(std::pmr::memory_resource *pool) : rows(pool) {
         rows.reserve(8192);
         touched.reserve(4096);
@@ -142,6 +150,9 @@ struct BookRecorder::Impl {
     std::thread worker;
     std::map<std::string, std::unique_ptr<Symbol>> symbols;
     int64_t workerLocal = 0; // local time of the newest accepted message; worker only
+    static constexpr int64_t kOpenFailureLogMs = 5'000;
+    int64_t openFailureLogLocal = std::numeric_limits<int64_t>::min() / 2; // worker only
+    uint64_t openFailuresSuppressed = 0;                                   // worker only
     mutable std::mutex watermarksMutex;
     std::map<std::pair<std::string, std::string>, BookRecorder::Watermarks> watermarksBySeries;
     std::atomic<uint64_t> columnsWritten{0}, lateEvents{0}, backwardSteps{0}, queueDrops{0}, invalidations{0},
@@ -358,33 +369,57 @@ struct BookRecorder::Impl {
     }
     void publishOpen(Symbol &s) {
         if (!cfg.publisher || !s.observed || s.clock - s.lastPublish < cfg.livePublishMs) return;
-        s.lastPublish = s.clock;
+        // An invalid book (resnapshot loop, expired one-sided grace, upstream
+        // outage) integrates nothing while its clock moves: republishing would
+        // bump the live revision every interval for an unchanged frame. Publish
+        // again once an input changes (validity, observation, flags, cutoff, minute).
+        const Layer::OpenKey key{s.minute, s.closedThrough, s.observed, s.flags};
+        bool attempted = false;
         for (size_t li = 0; li < s.layers.size(); ++li) {
-            const auto &layer = s.layers[li];
-            auto r = std::make_shared<Hmc2Record>();
-            r->header = layer.header;
-            r->bucketStartMs = s.minute;
-            r->committedThroughMs = s.closedThrough;
-            r->observedMs = s.observed;
-            r->flags = s.flags | kProvisional | (s.observed < kMinute ? kPartial : 0);
-            r->midOpen = s.midOpen; r->midClose = s.midClose;
-            r->midMin = s.midMin; r->midMax = s.midMax;
-            const auto [lo, hi] = bounds(s.midMin, s.midMax, cfg.layers[li], cfg.priceScale);
-            r->bidRowLo = r->askRowLo = lo;
-            r->bidRowHi = r->askRowHi = hi;
-            r->entries.reserve(layer.rows.size());
-            for (const auto &[key, row] : layer.rows) {
-                const auto integral = row.integral + (s.valid ? row.size * (s.clock - row.last) : 0);
-                if (key.first >= lo && key.first <= hi && (integral > 0 || row.peak > 0))
-                    r->entries.push_back({key.first, key.second,
-                        encode(integral / r->observedMs, cfg.sizeScale, r->flags),
-                        encode(row.peak, cfg.sizeScale, r->flags)});
+            auto &layer = s.layers[li];
+            if (!s.valid && layer.publishedOpen == key) continue;
+            attempted = true;
+            // Same contract as publishCopy: a failed publication is skipped and
+            // retried next interval; it must never reach run() and invalidate books.
+            try {
+                if (cfg.beforePublicationForTest) cfg.beforePublicationForTest(true);
+                auto r = std::make_shared<Hmc2Record>();
+                r->header = layer.header;
+                r->bucketStartMs = s.minute;
+                r->committedThroughMs = s.closedThrough;
+                r->observedMs = s.observed;
+                r->flags = s.flags | kProvisional | (s.observed < kMinute ? kPartial : 0);
+                r->midOpen = s.midOpen; r->midClose = s.midClose;
+                r->midMin = s.midMin; r->midMax = s.midMax;
+                const auto [lo, hi] = bounds(s.midMin, s.midMax, cfg.layers[li], cfg.priceScale);
+                r->bidRowLo = r->askRowLo = lo;
+                r->bidRowHi = r->askRowHi = hi;
+                r->entries.reserve(layer.rows.size());
+                for (const auto &[k, row] : layer.rows) {
+                    const auto integral = row.integral + (s.valid ? row.size * (s.clock - row.last) : 0);
+                    if (k.first >= lo && k.first <= hi && (integral > 0 || row.peak > 0))
+                        r->entries.push_back({k.first, k.second,
+                            encode(integral / r->observedMs, cfg.sizeScale, r->flags),
+                            encode(row.peak, cfg.sizeScale, r->flags)});
+                }
+                sLog_Probe("recording.publish", "symbol=" << r->header.symbol << " layer=" << r->header.layer
+                    << " bucket=" << r->bucketStartMs << " observed=" << r->observedMs
+                    << " entries=" << r->entries.size() << " provisional=1");
+                publish(std::move(r));
+                layer.publishedOpen = key;
+            } catch (const std::exception &e) {
+                // Throttled on the worker's local clock: at 2 Hz a lasting failure would flood.
+                ++openFailuresSuppressed;
+                if (workerLocal - openFailureLogLocal >= kOpenFailureLogMs) {
+                    sLog_Error("BookRecorder: open publication skipped symbol=" << layer.header.symbol
+                               << " layer=" << layer.header.layer << " bucket=" << s.minute
+                               << " failures=" << openFailuresSuppressed << " error=" << e.what());
+                    openFailureLogLocal = workerLocal;
+                    openFailuresSuppressed = 0;
+                }
             }
-            sLog_Probe("recording.publish", "symbol=" << r->header.symbol << " layer=" << r->header.layer
-                << " bucket=" << r->bucketStartMs << " observed=" << r->observedMs
-                << " entries=" << r->entries.size() << " provisional=1");
-            publish(std::move(r));
         }
+        if (attempted) s.lastPublish = s.clock;
     }
     void finishMinute(Symbol &s) {
         for (size_t li = 0; li < s.layers.size(); ++li) {
