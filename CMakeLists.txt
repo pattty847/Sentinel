@@ -129,6 +129,7 @@ add_subdirectory(tests/render)
 add_subdirectory(tests/agentapi)
 add_subdirectory(tests/trading)
 add_subdirectory(tests/servermodel)
+add_subdirectory(tests/link)  # keep last: its guard scans every executable target (FM-145)
 
 # ────────────────────────────────────────────────────────────────
 # LOG
