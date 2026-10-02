@@ -16,6 +16,10 @@ recording, and did anything drop.
 
 - Every service listens on 127.0.0.1 only and has no auth. Do not put secrets, peer
   addresses or paths in labels.
+- The server endpoint accepts at most 8 open connections. A local flood of unfinished
+  requests can hold all 8 sockets, so a scrape is refused while the flood lasts (each
+  socket is closed 5 s after accept). This is accepted, because the endpoint is
+  loopback-only and A3 pages on a failed scrape.
 - The data is on the internal disk, never on T7. The monitor must keep running when T7 is
   the component that failed.
 - VictoriaMetrics reads `ops/monitoring/prometheus.yml`. Grafana reads

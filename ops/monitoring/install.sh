@@ -107,24 +107,39 @@ done
 # briefly before a chmod.
 umask 077
 
+# Renders <template> into a fresh mktemp file (mode 600, created by mktemp in
+# the destination directory, so never a pre-existing file with old permissions),
+# checks it (placeholders; plutil for a .plist) and renames it over <output>.
 render() { # template output
-    local esc_url=${ntfy_url//&/\\&}
-    sed -e "s|@BREW@|$BREW|g" -e "s|@RT@|$RT|g" -e "s|@REPO@|$REPO|g" -e "s|@LOGS@|$LOGS|g" \
-        -e "s|@NTFY_URL@|$esc_url|g" "$1" > "$2"
-    if grep -q '@[A-Z_]*@' "$2"; then
-        echo "error: unrendered placeholder in $2" >&2
+    local esc_url=${ntfy_url//&/\\&} tmp
+    tmp=$(mktemp "$(dirname "$2")/.$(basename "$2").XXXXXX")
+    if ! sed -e "s|@BREW@|$BREW|g" -e "s|@RT@|$RT|g" -e "s|@REPO@|$REPO|g" -e "s|@LOGS@|$LOGS|g" \
+            -e "s|@NTFY_URL@|$esc_url|g" "$1" > "$tmp"; then
+        rm -f "$tmp"
+        echo "error: rendering $1 failed" >&2
         exit 1
     fi
+    if grep -q '@[A-Z_]*@' "$tmp"; then
+        rm -f "$tmp"
+        echo "error: unrendered placeholder in $2 (from $1)" >&2
+        exit 1
+    fi
+    if [[ "$2" == *.plist ]] && ! plutil -lint "$tmp" >/dev/null; then
+        plutil -lint "$tmp" >&2 || true
+        rm -f "$tmp"
+        echo "error: $2 is not a valid plist" >&2
+        exit 1
+    fi
+    mv -f "$tmp" "$2"
 }
 
 if [[ $mode == dry-run ]]; then
     mkdir -p "$out"
     for label in "${LABELS[@]}"; do
         render "$HERE/launchd/$label.plist.in" "$out/$label.plist"
-        plutil -lint "$out/$label.plist"
     done
     render "$HERE/grafana/grafana.ini.in" "$out/grafana.ini"
-    echo "rendered into $out (nothing installed or loaded)"
+    echo "rendered and linted into $out (nothing installed or loaded)"
     exit 0
 fi
 
@@ -132,10 +147,8 @@ mkdir -p "$RT/vmdata" "$RT/grafana/data" "$RT/grafana/logs" "$RT/grafana/plugins
 render "$HERE/grafana/grafana.ini.in" "$RT/grafana/grafana.ini"
 for label in "${LABELS[@]}"; do
     dst="$AGENTS/$label.plist"
-    render "$HERE/launchd/$label.plist.in" "$dst.new"
-    plutil -lint "$dst.new" >/dev/null
-    chmod 600 "$dst.new" # already 600 under umask 077; explicit for clarity
-    mv "$dst.new" "$dst"
+    rm -f "$dst.new" # left by an older version of this script; may hold the topic
+    render "$HERE/launchd/$label.plist.in" "$dst"
     launchctl bootout "$DOMAIN/$label" 2>/dev/null || true
     launchctl bootstrap "$DOMAIN" "$dst"
     echo "loaded $label"
