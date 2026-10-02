@@ -190,6 +190,108 @@ closed-run meanings remain; `products`, `totals` and status fields are additive.
 Multi-product top-level counters mirror totals; detailed snapshot-size and p99
 statistics remain in each product report.
 
+## Trade continuity and CVD sanity totals
+
+Verification checks `market_trades` independently of WebSocket `sequence_num`,
+without changing either RAWL2 format. The September 30 / October 1, 2026 archive
+contains **descending** IDs inside both subscription snapshots and update
+batches. The verifier sorts each event's selected-product trades by numeric
+`trade_id` before checking continuity; JSON member order does not matter.
+IDs must be unsigned 64-bit decimal strings. A product's state survives hourly
+files and capture process runs; transport-up resets only its connection anchor.
+
+* The subscribe `snapshot` is recent history, not replay since disconnect. Its
+  IDs may overlap previously observed history. Internal snapshot holes are
+  reported as `snapshot_trade_gaps` / `snapshot_missing_trades`, not integrity
+  errors; these counters describe observed discontinuities, not remaining holes
+  after possible later backfill.
+* An update must continue the latest snapshot/update ID by one, after duplicate
+  removal and numeric batch ordering. With no trade snapshot, the first update
+  establishes the anchor; earlier coverage cannot be certified. The real archive
+  also contains mid-connection snapshots followed by sparse old update batches.
+  These snapshots contribute newly observed IDs and never rewind the anchor;
+  old repeated IDs are duplicates. Once updates have begun, a snapshot cannot
+  hide a hole ahead of the anchor: such a hole is a connected integrity error.
+  `trade_snapshots` / `trade_resnapshots` count snapshots / those after updates.
+  Empty and foreign-product events do not reset anchors.
+* `within_connection_trade_gaps` counts gap intervals and
+  `within_connection_missing_trades` sums missing IDs. Each is an integrity
+  failure (`ok: false`, exit 2). `trade_gap_details` retains the first 30 with
+  product, run UUID, connection ID, first missing ID, missing count, exchange
+  trade time and receive system nanoseconds.
+* The interval between the previous connection's highest ID and the first new
+  ID after reconnect is counted separately in `reconnect_trade_gaps` and
+  `reconnect_missing_trades`, with the first 30 `reconnect_trade_gap_details`.
+  Overlapping snapshot history reduces or eliminates that interval. This also
+  covers downtime between capture process runs. It does not fail file integrity:
+  a clean capture can contain an incomplete trade tape because Coinbase did not
+  replay disconnected trades. Missing counts describe each observed gap when
+  encountered, not a later reconciliation ledger.
+* `duplicate_trades` counts repeated IDs exactly, including reconnect snapshot
+  overlap and duplicate updates. They do not fail verification or contribute
+  again to totals. Seen IDs are compressed into intervals, capped at 65,536 per
+  product; exceeding the cap fails explicitly instead of silently losing dedup
+  accuracy. Ordinary contiguous data uses one interval, regardless of duration.
+
+Each product reports `trades` (unique observed IDs, snapshots included),
+`first_trade_time` / `last_trade_time` (UTC normalized to nanoseconds; null with
+no trades), `buy_trades`, `sell_trades`, `buy_volume` and `sell_volume`.
+Volumes are decimal strings in **base currency**, accumulated with 50-digit
+precision; no binary floating point is used. Invalid IDs, times, sizes, sides,
+event shapes or unexpected product IDs fail verification. Trade frames use the
+routing SAX parser and retain only selected-product scalar fields for the
+current bounded frame, with no full trade-frame DOM. L2 replay is unchanged.
+Totals sum product counts; volumes stay per product because base currencies differ.
+
+**Side correction for CVD:** Coinbase's [`MarketTrade` schema](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/advanced-trade-asyncapi.json)
+defines wire `side` as the **maker's side**, not the aggressor's. The verifier's
+buy/sell totals are **aggressor** totals: wire `SELL` adds buy volume, wire `BUY`
+adds sell volume. Thus aggressor CVD is `buy_volume - sell_volume`; treating raw
+`BUY` as an aggressive buy reverses its sign. `trade_side` states this mapping
+in the report. The source bytes are never changed.
+
+Zero connected-update gaps is evidence of contiguous IDs over the observed
+connected intervals, not proof of full coverage before the first anchor, after
+the last flushed frame, during downtime, or inside a sparse recent snapshot.
+Check reconnect/snapshot missing counts and the existing open/interrupted/scope
+status before treating the tape as complete.
+
+### Observed feed omissions (archive audit, 2026-10-02 UTC)
+
+The real archive does **not** prove an unbroken trade tape. Independent
+read-only decompression and ID search found none of these 16 IDs anywhere in
+the selected products' archived frames, while Coinbase's public REST history
+returns them as executed trades:
+
+| Product | Missing IDs (inclusive) | Count | Exchange time (UTC, 2026-10-01) |
+|---|---|---:|---|
+| BTC-USD | 1100950971..1100950974 | 4 | 14:55:31.878671..14:55:32.106460 |
+| ETH-USD | 846432842 | 1 | 14:55:31.789758 |
+| DOGE-USD | 175259062 | 1 | 14:55:31.808308 |
+| BTC-USD | 1101035040..1101035049 | 10 | 17:28:59.845871..17:29:00.059361 |
+
+Reproduce the external checks with public, credential-free REST requests:
+[BTC first interval](https://api.exchange.coinbase.com/products/BTC-USD/trades?after=1100950976&limit=10),
+[ETH](https://api.exchange.coinbase.com/products/ETH-USD/trades?after=846432844&limit=4),
+[DOGE](https://api.exchange.coinbase.com/products/DOGE-USD/trades?after=175259064&limit=4),
+[BTC second interval](https://api.exchange.coinbase.com/products/BTC-USD/trades?after=1101035051&limit=14).
+The archive has no WebSocket sequence discontinuity or routing-proof failure at
+these points. The simultaneous first three omissions and intact envelope
+sequence are evidence of an upstream feed omission, not dropped capture files;
+the verifier cannot identify Coinbase's internal cause. Do not infer trade
+completeness from envelope continuity alone. A future backfill consumer must
+reconcile these IDs before claiming exact CVD for the affected intervals.
+
+An initial audit also exposed an incorrect verifier assumption: Coinbase sends
+snapshots mid-connection, sometimes followed by sparse historical `update`
+batches. For example, BTC connection 5 in run
+`61fdb803-bedb-4812-88ff-a288de87ea71` updates through ID `1100439303`, then
+sequence `140975` is a snapshot containing `1100439304..1100439314`, and
+sequence `140978` updates with `1100439315..1100439316`. Discarding that snapshot
+would invent an 11-trade gap. The verifier includes those snapshot trades and
+counts historical overlap as duplicates; deterministic fixtures cover this
+pattern and ensure a snapshot cannot hide a real forward hole.
+
 ## Configuration and limits
 
 The capture has CLI options only; it does not load or modify server/client YAML.
@@ -446,7 +548,13 @@ and missing streams or altered raw/reference bytes/clocks. Review regressions ad
 frozen routing/digest vectors, snapshot allocation bounds, superseded interrupted
 runs, crash-tail raw loss, isolated writer failures, shared queue saturation with
 individually fitting frames, live exit 3 and event-driven application readiness.
-Targeted mutation checks disable these behaviors and must fail their regressions.
+Trade regressions cover descending contiguous batches, connected holes,
+reconnect loss, exact snapshot/update deduplication, aggressor volumes and time
+precision, product isolation in mixed envelopes, v1/v2, hourly/process boundaries,
+invalid scalars and overflowing IDs, and real mid-connection snapshots followed
+by sparse historical updates. A mid-connection snapshot cannot hide a forward
+hole. Targeted mutation checks disable these behaviors and must fail their
+regressions; every restored source is touched and rebuilt before proceeding.
 
 ## launchd arguments (review/deploy separately)
 

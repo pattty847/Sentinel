@@ -24,6 +24,12 @@ private:
     std::map<std::string, Counts> own, destinations;
     QCryptographicHash digest{QCryptographicHash::Sha256};
 };
+// Optional verifier extraction uses the routing SAX state machine, retaining only
+// this product's trade scalars from one bounded raw frame (never an L2 DOM).
+struct CapturedTrade { std::string id, size, side, time; };
+struct CapturedTradeEvent { std::string type; std::vector<CapturedTrade> trades; };
+std::vector<CapturedTradeEvent> parseTradeEvents(std::string_view payload,
+    const std::vector<std::string>& products, const std::string& symbol);
 // Exact frozen identity line for hashing (golden vectors cover this contract).
 std::string frameIdentityLine(const Record& record, const nlohmann::json& identity);
 void validateRange(const nlohmann::json& receipt, const std::vector<std::string>& products);

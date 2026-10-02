@@ -49,7 +49,7 @@ std::vector<Record> fixture() {
     auto trades = nlohmann::json::parse(R"({
       "channel":"market_trades","timestamp":"2026-09-29T00:00:00.000000001Z",
       "events":[{"type":"update","trades":[{"product_id":"BTC-USD","price":"100.01",
-      "size":"0.00000001","side":"BUY","trade_id":"123"}]}]})");
+      "size":"0.00000001","side":"BUY","trade_id":"123","time":"2026-09-29T00:00:00.000000001Z"}]}]})");
     return {
         record(Kind::CaptureStarted, 0, "{}", 0), record(Kind::TransportUp, 1),
         frame(fixtures::coinbaseSubscriptionAck({"BTC-USD"}), 0, 100),
@@ -1180,3 +1180,229 @@ TEST(DecimalGrid, ExactAtomsWithoutFloatingPointOrSilentRounding) {
     EXPECT_THROW(DecimalGrid("0.0000000000000000001"), std::runtime_error);
 }
 } // namespace
+
+namespace {
+nlohmann::json tradeEvent(const char* type, const char* product, std::initializer_list<uint64_t> ids) {
+    nlohmann::json trades = nlohmann::json::array();
+    for (const auto id : ids) trades.push_back({{"product_id", product}, {"trade_id", std::to_string(id)},
+        {"size", id % 2 ? "0.25" : "0.50"}, {"price", "100.00"}, {"side", id % 2 ? "BUY" : "SELL"},
+        {"time", id % 2 ? "2026-09-29T00:00:00.1Z" : "2026-09-29T00:00:00.09Z"}});
+    return {{"type", type}, {"trades", trades}};
+}
+struct TradeFixture {
+    std::vector<Record> records{record(Kind::CaptureStarted, 0, "{}", 0)};
+    uint64_t sequence = 0, connection = 0;
+    void append(Kind kind, std::string payload = "{}") {
+        records.push_back(record(kind, records.size() * 100, std::move(payload), connection));
+    }
+    void json(nlohmann::json value) {
+        value["sequence_num"] = sequence++;
+        append(Kind::Frame, value.dump());
+    }
+    void up(bool multi = false) {
+        if (connection) append(Kind::TransportDown);
+        ++connection; sequence = 0; append(Kind::TransportUp);
+        json(fixtures::coinbaseL2Snapshot("BTC-USD", {{100, 1}}, {{101, 1}}));
+        if (multi) json(fixtures::coinbaseL2Snapshot("ETH-USD", {{10, 1}}, {{11, 1}}));
+    }
+    void trades(std::initializer_list<nlohmann::json> events) {
+        json({{"channel", "market_trades"}, {"events", events}});
+    }
+    VerificationReport verifyAt(const WriterConfig& config, bool multi = false) {
+        append(Kind::CaptureStopped);
+        if (multi) writeMulti(config, records);
+        else {
+            Writer writer(config, metadata());
+            for (const auto& value : records) writer.append(value);
+            writer.close();
+        }
+        return verify(config.root);
+    }
+};
+}
+TEST_F(CaptureTest, TradeContiguousDescendingUpdatesAndAggressorTotalsV1) {
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("snapshot", "BTC-USD", {101, 100})});
+    f.trades({tradeEvent("update", "BTC-USD", {104, 103, 102})});
+    f.trades({tradeEvent("update", "BTC-USD", {105})});
+    const auto r = f.verifyAt(config);
+    ASSERT_TRUE(r.ok) << r.json.dump(2);
+    EXPECT_EQ(r.json["trades"], 6);
+    EXPECT_EQ(r.json["within_connection_trade_gaps"], 0);
+    EXPECT_EQ(r.json["reconnect_trade_gaps"], 0);
+    EXPECT_EQ(r.json["duplicate_trades"], 0);
+    EXPECT_EQ(r.json["buy_trades"], 3); EXPECT_EQ(r.json["sell_trades"], 3);
+    EXPECT_EQ(r.json["buy_volume"], "1.5"); EXPECT_EQ(r.json["sell_volume"], "0.75");
+    EXPECT_EQ(r.json["first_trade_time"], "2026-09-29T00:00:00.090000000Z");
+    EXPECT_EQ(r.json["last_trade_time"], "2026-09-29T00:00:00.100000000Z");
+    EXPECT_EQ(readHeader(paths(config.root).front())["format_version"], 1);
+}
+TEST_F(CaptureTest, TradeWithinConnectionGapFailsIncludingSnapshotToUpdate) {
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("snapshot", "BTC-USD", {100})});
+    f.trades({tradeEvent("update", "BTC-USD", {103, 102})});
+    f.trades({tradeEvent("update", "BTC-USD", {106})});
+    const auto r = f.verifyAt(config);
+    EXPECT_FALSE(r.ok); EXPECT_FALSE(r.json["ok_closed_runs"]);
+    EXPECT_EQ(r.json["within_connection_trade_gaps"], 2);
+    EXPECT_EQ(r.json["within_connection_missing_trades"], 3);
+    EXPECT_EQ(r.json["reconnect_trade_gaps"], 0);
+    const auto& detail = r.json["trade_gap_details"][0];
+    EXPECT_EQ(detail["product"], "BTC-USD"); EXPECT_EQ(detail["connection"], 1);
+    EXPECT_EQ(detail["first_missing_id"], "101"); EXPECT_EQ(detail["count"], 1);
+    EXPECT_EQ(detail["time"], "2026-09-29T00:00:00.090000000Z");
+}
+TEST_F(CaptureTest, TradeSnapshotOverlapAndUpdateDuplicatesCountOnce) {
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("snapshot", "BTC-USD", {101, 100})});
+    f.trades({tradeEvent("update", "BTC-USD", {102})});
+    f.up();
+    f.trades({tradeEvent("snapshot", "BTC-USD", {103, 102, 101, 100, 99})});
+    f.trades({tradeEvent("update", "BTC-USD", {104, 103, 103})});
+    const auto r = f.verifyAt(config);
+    ASSERT_TRUE(r.ok) << r.json.dump(2);
+    EXPECT_EQ(r.json["trades"], 6); EXPECT_EQ(r.json["duplicate_trades"], 5);
+    EXPECT_EQ(r.json["buy_volume"], "1.5"); EXPECT_EQ(r.json["sell_volume"], "0.75");
+    EXPECT_EQ(r.json["within_connection_trade_gaps"], 0); EXPECT_EQ(r.json["reconnect_trade_gaps"], 0);
+}
+TEST_F(CaptureTest, TradeReconnectMissingCountIsNotCorruption) {
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("update", "BTC-USD", {100})});
+    f.up();
+    f.trades({tradeEvent("snapshot", "BTC-USD", {106, 105})});
+    f.trades({tradeEvent("update", "BTC-USD", {107})});
+    f.up();
+    f.trades({tradeEvent("update", "BTC-USD", {110})});
+    const auto r = f.verifyAt(config);
+    ASSERT_TRUE(r.ok) << r.json.dump(2);
+    EXPECT_EQ(r.json["trades"], 5); EXPECT_EQ(r.json["reconnect_trade_gaps"], 2);
+    EXPECT_EQ(r.json["reconnect_missing_trades"], 6);
+    EXPECT_EQ(r.json["within_connection_trade_gaps"], 0);
+    EXPECT_EQ(r.json["reconnect_trade_gap_details"][0]["first_missing_id"], "101");
+    EXPECT_EQ(r.json["reconnect_trade_gap_details"][0]["count"], 4);
+    EXPECT_EQ(r.json["reconnect_trade_gap_details"][0]["connection"], 2);
+}
+TEST_F(CaptureTest, TradeMultiProductIsolationV2MixedEnvelopeAndGap) {
+    TradeFixture f; f.up(true);
+    f.trades({tradeEvent("snapshot", "BTC-USD", {101, 100}), tradeEvent("snapshot", "ETH-USD", {501, 500})});
+    f.trades({tradeEvent("update", "BTC-USD", {102}), tradeEvent("update", "ETH-USD", {503})});
+    const auto r = f.verifyAt(config, true);
+    ASSERT_FALSE(r.ok);
+    const auto& btc = r.json["products"]["BTC-USD"];
+    const auto& eth = r.json["products"]["ETH-USD"];
+    EXPECT_EQ(btc["ok"], true); EXPECT_EQ(btc["trades"], 3); EXPECT_EQ(btc["within_connection_trade_gaps"], 0);
+    EXPECT_EQ(eth["ok"], false); EXPECT_EQ(eth["trades"], 3); EXPECT_EQ(eth["within_connection_trade_gaps"], 1);
+    EXPECT_EQ(eth["trade_gap_details"][0]["first_missing_id"], "502");
+    EXPECT_EQ(r.json["totals"]["trades"], 6);
+    EXPECT_EQ(btc["buy_volume"], "1"); EXPECT_EQ(eth["sell_volume"], "0.5");
+    EXPECT_EQ(readHeader(paths(config.root).front())["format_version"], 2);
+}
+TEST_F(CaptureTest, TradeSnapshotHolesAreSeparateAndPreviouslyMissingIdIsNotDuplicate) {
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("snapshot", "BTC-USD", {102, 100})});
+    f.up();
+    f.trades({tradeEvent("snapshot", "BTC-USD", {102, 101, 100})});
+    f.trades({tradeEvent("update", "BTC-USD", {103})});
+    const auto r = f.verifyAt(config);
+    ASSERT_TRUE(r.ok) << r.json.dump(2);
+    EXPECT_EQ(r.json["trades"], 4); EXPECT_EQ(r.json["duplicate_trades"], 2);
+    EXPECT_EQ(r.json["snapshot_trade_gaps"], 1); EXPECT_EQ(r.json["snapshot_missing_trades"], 1);
+    EXPECT_EQ(r.json["within_connection_trade_gaps"], 0);
+}
+TEST_F(CaptureTest, TradeMalformedScalarsFailRatherThanSilentlySkipping) {
+    for (const auto* key : {"trade_id", "time", "size", "side", "product_id"}) {
+        QTemporaryDir temp; auto cfg = config; cfg.root = temp.path();
+        TradeFixture f; f.up();
+        auto event = tradeEvent("update", "BTC-USD", {100});
+        event["trades"][0][key] = "invalid";
+        f.trades({event});
+        const auto r = f.verifyAt(cfg);
+        EXPECT_FALSE(r.ok) << key << r.json.dump(2);
+        EXPECT_EQ(r.json["trades"], 0);
+    }
+}
+TEST_F(CaptureTest, TradeV2ReconnectOverlapRemainsContiguousAfterDuplicateOnlyUpdate) {
+    TradeFixture f; f.up(true);
+    f.trades({tradeEvent("snapshot", "BTC-USD", {100, 99}), tradeEvent("snapshot", "ETH-USD", {9007199254740993ULL})});
+    f.trades({tradeEvent("update", "BTC-USD", {103, 102, 101}), tradeEvent("update", "ETH-USD", {9007199254740994ULL})});
+    f.up(true);
+    f.trades({tradeEvent("snapshot", "BTC-USD", {100, 99}), tradeEvent("snapshot", "ETH-USD", {9007199254740994ULL})});
+    f.trades({tradeEvent("update", "BTC-USD", {101})});
+    f.trades({tradeEvent("update", "BTC-USD", {105, 104}), tradeEvent("update", "ETH-USD", {9007199254740995ULL})});
+    const auto r = f.verifyAt(config, true);
+    ASSERT_TRUE(r.ok) << r.json.dump(2);
+    EXPECT_EQ(r.json["totals"]["trades"], 10);
+    EXPECT_EQ(r.json["products"]["BTC-USD"]["duplicate_trades"], 3);
+    EXPECT_EQ(r.json["products"]["ETH-USD"]["duplicate_trades"], 1);
+    EXPECT_EQ(r.json["totals"]["within_connection_trade_gaps"], 0);
+    EXPECT_EQ(r.json["totals"]["reconnect_trade_gaps"], 0);
+}
+TEST_F(CaptureTest, TradeContinuitySurvivesHourlySegmentsAndProcessRuns) {
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("snapshot", "BTC-USD", {100})});
+    f.trades({tradeEvent("update", "BTC-USD", {101})});
+    f.records.back().time.systemNs += Hour;
+    f.records.back().time.steadyNs += Hour;
+    f.append(Kind::CaptureStopped);
+    f.records.back().time.systemNs += Hour;
+    f.records.back().time.steadyNs += Hour;
+    {
+        Writer writer(config, metadata());
+        for (const auto& value : f.records) writer.append(value);
+        writer.close();
+    }
+    TradeFixture next; next.up();
+    next.trades({tradeEvent("snapshot", "BTC-USD", {105, 104})});
+    next.trades({tradeEvent("update", "BTC-USD", {106})});
+    const auto r = next.verifyAt(config);
+    ASSERT_TRUE(r.ok) << r.json.dump(2);
+    EXPECT_EQ(r.json["files"], 3); EXPECT_EQ(r.json["runs"], 2);
+    EXPECT_EQ(r.json["trades"], 5); EXPECT_EQ(r.json["within_connection_trade_gaps"], 0);
+    EXPECT_EQ(r.json["reconnect_trade_gaps"], 1); EXPECT_EQ(r.json["reconnect_missing_trades"], 2);
+}
+TEST_F(CaptureTest, TradeIdOverflowFails) {
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("update", "BTC-USD", {100})});
+    auto event = tradeEvent("update", "BTC-USD", {101});
+    event["trades"][0]["trade_id"] = "18446744073709551616";
+    f.trades({event});
+    const auto r = f.verifyAt(config);
+    EXPECT_FALSE(r.ok); EXPECT_EQ(r.json["trades"], 1);
+}
+TEST_F(CaptureTest, TradeMidConnectionSnapshotBridgesNewIdsAndOldSparseUpdateIsDuplicate) {
+    // Real Coinbase pattern: update 100, recent snapshot 102..99, sparse old
+    // update 100/99, then fresh update 103. No transport-up between them.
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("update", "BTC-USD", {100, 99})});
+    f.trades({tradeEvent("snapshot", "BTC-USD", {102, 101, 100, 99})});
+    f.trades({tradeEvent("update", "BTC-USD", {100, 99})});
+    f.trades({tradeEvent("update", "BTC-USD", {103})});
+    const auto r = f.verifyAt(config);
+    ASSERT_TRUE(r.ok) << r.json.dump(2);
+    EXPECT_EQ(r.json["trades"], 5); EXPECT_EQ(r.json["duplicate_trades"], 4);
+    EXPECT_EQ(r.json["trade_resnapshots"], 1); EXPECT_EQ(r.json["within_connection_trade_gaps"], 0);
+}
+TEST_F(CaptureTest, TradeMidConnectionSnapshotCannotHideMissingIds) {
+    TradeFixture f; f.up();
+    f.trades({tradeEvent("update", "BTC-USD", {100})});
+    f.trades({tradeEvent("snapshot", "BTC-USD", {104, 103})});
+    f.trades({tradeEvent("update", "BTC-USD", {105})});
+    const auto r = f.verifyAt(config);
+    EXPECT_FALSE(r.ok);
+    EXPECT_EQ(r.json["within_connection_trade_gaps"], 1);
+    EXPECT_EQ(r.json["within_connection_missing_trades"], 2);
+    EXPECT_EQ(r.json["reconnect_trade_gaps"], 0);
+}
+TEST_F(CaptureTest, TradeForeignSnapshotInMixedEnvelopeDoesNotResetOrRejectActiveProduct) {
+    TradeFixture f; f.up(true);
+    f.trades({tradeEvent("update", "BTC-USD", {100})});
+    f.trades({tradeEvent("update", "BTC-USD", {101}), tradeEvent("snapshot", "ETH-USD", {501, 500})});
+    f.trades({tradeEvent("update", "BTC-USD", {102}), tradeEvent("update", "ETH-USD", {502})});
+    const auto r = f.verifyAt(config, true);
+    ASSERT_TRUE(r.ok) << r.json.dump(2);
+    EXPECT_EQ(r.json["products"]["BTC-USD"]["trades"], 3);
+    EXPECT_EQ(r.json["products"]["ETH-USD"]["trades"], 3);
+    EXPECT_EQ(r.json["products"]["BTC-USD"]["trade_snapshots"], 0);
+    EXPECT_EQ(r.json["products"]["ETH-USD"]["trade_snapshots"], 1);
+    EXPECT_EQ(r.json["totals"]["within_connection_trade_gaps"], 0);
+}

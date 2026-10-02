@@ -1,6 +1,7 @@
 #include "CaptureRouting.hpp"
 #include <algorithm>
 #include <stdexcept>
+#include <set>
 
 namespace sentinel::capture {
 namespace {
@@ -16,10 +17,30 @@ struct RouteSax : nlohmann::json_sax<nlohmann::json> {
     nlohmann::json sequence = nullptr;
     bool valid = true, events = false, sawChannel = false, sawSequence = false;
     bool l2Valid = true, tradesValid = true;
+    const std::string* tradeSymbol = nullptr;
+    std::vector<CapturedTradeEvent> tradeEvents;
+    CapturedTradeEvent tradeEvent;
+    CapturedTrade trade;
+    std::string tradeProduct;
+    std::set<std::string> tradeKeys, eventKeys;
+    bool extractionValid = true;
     explicit RouteSax(const std::vector<std::string>& p) : products(p) { stack.reserve(16); }
     bool scalar(const nlohmann::json& value) {
         if (stack.empty()) { valid = false; return true; }
         auto& scope = stack.back();
+        if (tradeSymbol && scope.role == Event && scope.key == "type") {
+            if (!value.is_string()) extractionValid = false;
+            else tradeEvent.type = value.get<std::string>();
+        }
+        if (tradeSymbol && scope.role == Trade) {
+            std::string* field = scope.key == "trade_id" ? &trade.id : scope.key == "size" ? &trade.size :
+                scope.key == "side" ? &trade.side : scope.key == "time" ? &trade.time :
+                scope.key == "product_id" ? &tradeProduct : nullptr;
+            if (field) {
+                if (!value.is_string()) extractionValid = false;
+                else *field = value.get<std::string>();
+            }
+        }
         if (scope.role == Events || scope.role == Trades) valid = false;
         if (scope.role == Root && scope.key == "channel") {
             if (sawChannel || !value.is_string()) valid = false;
@@ -54,6 +75,11 @@ struct RouteSax : nlohmann::json_sax<nlohmann::json> {
     }
     bool binary(binary_t&) override { valid = false; return true; }
     bool key(string_t& v) override {
+        if (tradeSymbol && !stack.empty()) {
+            const auto role = stack.back().role;
+            if (role == Trade && !tradeKeys.insert(v).second) extractionValid = false;
+            if (role == Event && !eventKeys.insert(v).second) extractionValid = false;
+        }
         if (!stack.empty() && stack.back().role != Ignore) stack.back().key = v;
         return true;
     }
@@ -75,6 +101,11 @@ struct RouteSax : nlohmann::json_sax<nlohmann::json> {
             else if ((parent.role == Root && (parent.key == "channel" || parent.key == "sequence_num")) ||
                      ((parent.role == Event || parent.role == Trade) && parent.key == "product_id")) valid = false;
         }
+        if (tradeSymbol) {
+            if (role == Event) { tradeEvent = {}; eventKeys.clear(); }
+            if (role == Trade) { trade = {}; tradeProduct.clear(); tradeKeys.clear(); }
+            if (!stack.empty() && stack.back().role == Trade) extractionValid = false;
+        }
         stack.push_back({role, {}}); return true;
     }
     bool start_object(std::size_t) override { return start(true); }
@@ -83,12 +114,29 @@ struct RouteSax : nlohmann::json_sax<nlohmann::json> {
         if (stack.back().role == Event && !stack.back().product) l2Valid = false;
         if (stack.back().role == Event && !stack.back().hasTrades) tradesValid = false;
         if (stack.back().role == Trade && !stack.back().product) tradesValid = false;
+        if (tradeSymbol && stack.back().role == Trade) {
+            if (trade.id.empty() || trade.size.empty() || trade.side.empty() || trade.time.empty()) extractionValid = false;
+            if (tradeProduct == *tradeSymbol) tradeEvent.trades.push_back(std::move(trade));
+        }
+        if (tradeSymbol && stack.back().role == Event) {
+            if (tradeEvent.type != "snapshot" && tradeEvent.type != "update") extractionValid = false;
+            tradeEvents.push_back(std::move(tradeEvent));
+        }
         stack.pop_back(); return true;
     }
     bool end_object() override { return end(); }
     bool end_array() override { return end(); }
     bool parse_error(std::size_t, const std::string&, const nlohmann::detail::exception&) override { return false; }
 };
+}
+std::vector<CapturedTradeEvent> parseTradeEvents(std::string_view payload,
+    const std::vector<std::string>& products, const std::string& symbol) {
+    RouteSax sax(products);
+    sax.tradeSymbol = &symbol;
+    if (!nlohmann::json::sax_parse(payload.begin(), payload.end(), &sax) || !sax.valid ||
+        !sax.events || !sax.tradesValid || !sax.extractionValid || sax.channel != "market_trades")
+        throw std::runtime_error("invalid market_trades envelope");
+    return std::move(sax.tradeEvents);
 }
 nlohmann::json frameReceipt(std::string_view payload, const std::vector<std::string>& products) {
     RouteSax sax(products);
