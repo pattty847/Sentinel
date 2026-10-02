@@ -9,6 +9,7 @@ namespace {
 
 bool g_active = false;
 QString g_screenshotDir;
+QStringList g_symbols;
 
 bool underOrEqual(const QString& path, const QString& root) {
     return path == root || path.startsWith(root.endsWith('/') ? root : root + '/');
@@ -70,7 +71,9 @@ bool activate(const QString& dir, const QStringList& forbiddenRoots, QString* er
 
 bool active() { return g_active; }
 QString screenshotDir() { return g_active ? g_screenshotDir : QString(); }
-bool embeddedQmlOnly() { return g_active; }
+bool tradingAllowed() { return !g_active; }
+void setSymbolAllowlist(const QStringList& symbols) { g_symbols = symbols; }
+bool symbolAllowed(const QString& symbol) { return !g_active || g_symbols.contains(symbol); }
 
 bool screenshotTargetAllowed(const QString& target) {
     if (!g_active) return true;
@@ -87,13 +90,10 @@ bool screenshotTargetAllowed(const QString& target) {
     return false;
 }
 
-QString embeddedQmlUrl(const QString& file) {
-    return QStringLiteral("qrc:/qt/qml/Sentinel/Charts/qml/") + file;
-}
-
 void resetForTests() {
     g_active = false;
     g_screenshotDir.clear();
+    g_symbols.clear();
     QSettings::setDefaultFormat(QSettings::NativeFormat);
 }
 

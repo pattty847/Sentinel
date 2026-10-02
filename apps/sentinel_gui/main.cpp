@@ -134,6 +134,8 @@ int main(int argc, char *argv[])
                 return 2;
             }
             sLog_App("agent-host mode: dir=" << value);
+        } else if (flag == "--agent-host-symbols") { // comma list; with --agent-host, the only symbols it may switch to
+            AgentHostMode::setSymbolAllowlist(QString::fromLocal8Bit(value).split(',', Qt::SkipEmptyParts));
         } else if (flag == "--api-port") {
             bool ok = false;
             const int port = value.toInt(&ok);

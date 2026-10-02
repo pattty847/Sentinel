@@ -1,51 +1,48 @@
 #!/usr/bin/env python3
-"""gui-host.py: run a sentinel-gui for sandboxed agents and hand back screenshots.
+"""gui-host.py: run the main checkout's sentinel-gui for sandboxed agents and hand back screenshots.
 
 A sandboxed Codex run cannot start the GUI (no window server, no Metal) but it can reach
 localhost and read files. This host runs OUTSIDE any sandbox, in a login session with the screen
 unlocked; agents call it through scripts/dev/gui-shot.sh.
 
-TRUST MODEL. Everything an agent can write (its worktree, its build) is untrusted, and the host
-executes code with the owner's privileges. So the host never runs a path the agent names:
-  - `main`    the main checkout's build (agents cannot write it), or
-  - `<id>`    a copy the ORCHESTRATOR blessed after a cross-vendor review of that branch:
-              `gui-host.py bless <worktree>` copies the binary into a read-only directory under
-              ~/Sentinel-runtime/gui-host/blessed/ (outside every agent's writable roots) and
-              records its sha256; launch re-checks the hash and the permissions each time.
-Blessed means reviewed, not trusted. The host never builds (CMake runs code). The GUI is started
-with --agent-host (AgentHostMode.hpp), so it refuses screen-pixel screenshots, keeps screenshots
-and settings in its session directory, and loads QML only from its embedded resources. A binary
-that lacks that flag is refused.
+TRUST MODEL. The host executes code with the owner's privileges, and an agent can write its own
+worktree and build output. So the host runs exactly one thing: the main checkout's build
+(build/mac-clang/apps/sentinel-gui/sentinel-gui), which agents cannot write and the orchestrator
+builds from landed main. It never runs a path an agent names, never runs a worktree build, and never
+builds (CMake runs code). A branch's own change is therefore not visible through this host until it
+has landed and main is rebuilt; Claude subagents can run their own GUI for branch visuals.
+Second-review note (2026-10-02): a per-branch "bless the worktree build" design was tried and
+dropped, because a blessed copy is not bound to the reviewed source. The safe form is the
+orchestrator building the reviewed commit in a checkout agents cannot write; not built.
 
-    scripts/dev/gui-host.py                 serve on 127.0.0.1:17190 (GUI_HOST_PORT)
-    scripts/dev/gui-host.py bless <worktree>    orchestrator only, after review
-    scripts/dev/gui-host.py blessed | unbless <id>
+The GUI is started with --agent-host (AgentHostMode.hpp): it refuses screen-pixel screenshots,
+keeps screenshots and settings in its session directory, sends no trade commands, and switches only
+to allowlisted symbols. A build without that flag is refused (a stale main must not run uncontained).
+The child gets a minimal environment (no DYLD_*, QT_*, QML_* from this process's env).
 
-Start it detached: `nohup scripts/dev/gui-host.py >/dev/null 2>&1 & disown`. nohup keeps it alive
-after the session that started it ends, so it must be stopped on purpose (`pkill -TERM -f
-gui-host.py`; SIGTERM ends the GUI too). If it is SIGKILLed, the GUI it started stays up until the
-next host start, which ends it (pidfile). The GUI also has an idle timeout in the host
-(GUI_HOST_TTL_S, default 1800).
+    nohup scripts/dev/gui-host.py >/dev/null 2>&1 & disown     # 127.0.0.1:17190 (GUI_HOST_PORT)
+
+nohup keeps it alive after the session that started it ends, so stop it on purpose (`pkill -TERM
+-f gui-host.py`; SIGTERM ends the GUI too). If it is SIGKILLed, its GUI stays up until the next host
+start, which ends it (pidfile). Idle timeout GUI_HOST_TTL_S (default 1800). Known gap: the GUI has no
+parent-liveness lease, so a host that is killed and never restarted leaves one GUI running.
 
 API (JSON; every POST needs the header `X-Gui-Host: 1`, which a browser page cannot send
 cross-origin without a preflight this server never answers; the Host header must be loopback):
-    GET  /status      the live session or null
-    GET  /binaries    what launch accepts: main + blessed ids
-    POST /launch {binary?:"main"|<id>, renderer?:"gpu"|"legacy", replace?:bool}
+    GET  /status      the live session or null, and whether main is launchable
+    POST /launch {renderer?:"gpu"|"legacy", replace?:bool}
     POST /shot   {name, afterOperation?, target?:"heatmap"|"lab"|"telemetry"|"toolbar"|"settings[:Tab]", settle?:bool}
     POST /stop
 
-Other rules (AGENTS.md 4a/4b): never starts a server (refuses when the recorder :8080 is down),
-one session at a time (16 GB Mac), SIGTERM stop (no closeEvent, so no _last_session layout write),
-and the owner's real QSettings plist is compared before and after as a check.
+Other rules (AGENTS.md 4a/4b): never starts a server (refuses when the recorder :8080 is down), one
+session at a time (16 GB Mac), SIGTERM stop (no closeEvent, so no _last_session layout write), and
+the owner's real QSettings plist is compared before and after as a check.
 """
 import glob
-import hashlib
 import json
 import os
 import re
 import secrets
-import shutil
 import signal
 import socket
 import stat
@@ -63,12 +60,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.realpath(subprocess.run(
     ["git", "-C", HERE, "rev-parse", "--path-format=absolute", "--git-common-dir"],
     capture_output=True, text=True, check=True).stdout.strip()))
-WORKTREE_ROOTS = [os.path.realpath(p) for p in (
-    os.environ.get("SENTINEL_WORKTREE_ROOT", "/Volumes/T7/sentinel-worktrees"),
-    os.path.join(REPO, ".claude", "worktrees"))]
-RUNTIME_DIR = os.path.expanduser(os.environ.get("GUI_HOST_RUNTIME", "~/Sentinel-runtime/gui-host"))
-BLESSED_DIR = os.path.join(RUNTIME_DIR, "blessed")
-REGISTRY = os.path.join(RUNTIME_DIR, "registry.json")
 SESSIONS_DIR = os.path.expanduser(os.environ.get("GUI_HOST_SESSIONS", "~/Library/Logs/Sentinel/gui-host"))
 PIDFILE = os.path.join(SESSIONS_DIR, "session.json")
 HOST_PORT = int(os.environ.get("GUI_HOST_PORT", "17190"))
@@ -79,10 +70,13 @@ OWNER_PORTS = (17100, 17200)
 PLIST_DOMAIN = "com.sentinel.SentinelTerminal"
 GUI_REL = os.path.join("build", "mac-clang", "apps", "sentinel-gui", "sentinel-gui")
 FLAG = b"--agent-host"
-ID_RE = re.compile(r"^[0-9a-f]{12}$")
+# The products the recorder already captures; a GUI symbol change subscribes the recorder upstream.
+SYMBOLS = os.environ.get("GUI_HOST_SYMBOLS", "BTC-USD,ETH-USD,SOL-USD,FARTCOIN-USD,PEPE-USD,DOGE-USD,AVAX-USD")
 SHOT_TARGETS = re.compile(r"^(heatmap|lab|telemetry|toolbar|settings(:[A-Za-z]+)?)$")
 NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
-SCRUB_ENV = ("SENTINEL_QML_PATH", "SENTINEL_GUI_SCREENSHOT_DIR", "QML_IMPORT_PATH", "QML2_IMPORT_PATH")
+# Environment the GUI child may inherit. Nothing else (no DYLD_*, QT_*, QSG_*, QML*, SENTINEL_*).
+ENV_ALLOW = ("HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "__CF_USER_TEXT_ENCODING")
+SAFE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 
 lock = threading.Lock()
 session = None  # dict while a GUI is live
@@ -111,127 +105,42 @@ def settings_dump():
     return subprocess.run(["defaults", "export", PLIST_DOMAIN, "-"], capture_output=True).stdout
 
 
-def sha256_file(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def has_flag(path):
     with open(path, "rb") as f:
         return FLAG in f.read()
 
 
-def check_file_safe(path):
-    """Executable, ours, and writable by nobody but (possibly) the owner of this account."""
+def child_env(environ=None):
+    environ = os.environ if environ is None else environ
+    env = {k: environ[k] for k in ENV_ALLOW if k in environ}
+    env["PATH"] = SAFE_PATH
+    return env
+
+
+def gui_argv(binary, session_dir, renderer, port):
+    """The only command line the host ever builds: fixed flags, no caller-supplied arguments."""
+    return [binary, "--agent-host", session_dir, "--agent-host-symbols", SYMBOLS,
+            "--heatmap-renderer", renderer, "--api-port", str(port), "--no-screener"]
+
+
+# ------------------------------------------------------------------ trust: which binary may run
+def resolve_binary(which="main"):
+    """The ONLY executable a launch can pick: the main checkout's build. `which` exists so a request
+    that names anything else gets a clear refusal instead of being ignored."""
+    if which not in (None, "main"):
+        raise HostError(400, "main_only", 'this host runs only the main checkout build (binary must be "main" or omitted)')
+    path = os.path.realpath(os.path.join(REPO, GUI_REL))
+    if not os.path.isfile(path) or not os.access(path, os.X_OK):
+        raise HostError(412, "no_main_binary", f"no main-checkout build at {GUI_REL} (the orchestrator builds landed main)")
     st = os.stat(path)
-    if not stat.S_ISREG(st.st_mode) or not os.access(path, os.X_OK):
-        raise HostError(412, "not_executable", f"{path} is not an executable file")
     if st.st_uid != os.getuid():
         raise HostError(412, "bad_owner", f"{path} is not owned by this user")
     if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         raise HostError(412, "writable_binary", f"{path} is group/world writable")
-
-
-def worktree_binary(raw):
-    wt = os.path.realpath(raw)
-    if wt != REPO and os.path.dirname(wt) not in WORKTREE_ROOTS:
-        raise HostError(400, "bad_worktree", f"{wt} is not the main checkout or a child of {WORKTREE_ROOTS}")
-    gui = os.path.realpath(os.path.join(wt, GUI_REL))
-    if not gui.startswith(wt + os.sep) or not os.path.isfile(gui) or not os.access(gui, os.X_OK):
-        raise HostError(400, "no_binary", f"no executable {GUI_REL} in {wt} (build it: cmake --build --preset mac-clang)")
-    return wt, gui
-
-
-def load_registry():
-    try:
-        with open(REGISTRY) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
-
-
-def save_registry(reg):
-    os.makedirs(RUNTIME_DIR, exist_ok=True)
-    tmp = REGISTRY + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(reg, f, indent=1, sort_keys=True)
-    os.replace(tmp, REGISTRY)
-
-
-# ------------------------------------------------------------------ trust: which binary may run
-def resolve_binary(which):
-    """The ONLY way a launch picks an executable. `which` is "main" or a blessed id, never a path."""
-    which = str(which or "main")
-    if which == "main":
-        path = os.path.realpath(os.path.join(REPO, GUI_REL))
-        if not os.path.isfile(path):
-            raise HostError(412, "no_main_binary", f"no main-checkout build at {GUI_REL}")
-        check_file_safe(path)
-        if not has_flag(path):
-            raise HostError(412, "no_agent_host_flag",
-                            "the main-checkout build predates --agent-host (rebuild main after the gui-host branch lands)")
-        return path, "main"
-    if not ID_RE.match(which):
-        raise HostError(400, "bad_binary", 'binary must be "main" or a blessed id (see GET /binaries)')
-    entry = load_registry().get(which)
-    if not entry:
-        raise HostError(404, "unknown_binary", f"{which} is not blessed (the orchestrator runs `gui-host.py bless <worktree>`)")
-    path = os.path.join(BLESSED_DIR, which, "sentinel-gui")
-    if os.path.realpath(path) != path or not os.path.isfile(path):
-        raise HostError(412, "bad_blessed_path", f"blessed binary {which} is missing or a link")
-    check_file_safe(path)
-    if os.stat(path).st_mode & stat.S_IWUSR:
-        raise HostError(412, "writable_binary", f"blessed binary {which} is writable (must be read-only)")
-    if sha256_file(path) != entry["sha256"]:
-        raise HostError(412, "hash_mismatch", f"blessed binary {which} no longer matches its recorded sha256")
     if not has_flag(path):
-        raise HostError(412, "no_agent_host_flag", f"blessed binary {which} lacks --agent-host")
-    return path, which
-
-
-def bless(worktree):
-    wt, gui = worktree_binary(worktree)
-    if not has_flag(gui):
-        raise HostError(412, "no_agent_host_flag", f"{gui} lacks --agent-host (rebase onto the gui-host branch and rebuild)")
-    digest = sha256_file(gui)
-    bid = digest[:12]
-    dest_dir = os.path.join(BLESSED_DIR, bid)
-    dest = os.path.join(dest_dir, "sentinel-gui")
-    os.makedirs(BLESSED_DIR, exist_ok=True)
-    if os.path.isdir(dest_dir):
-        os.chmod(dest_dir, 0o755)
-        if os.path.exists(dest):
-            os.chmod(dest, 0o755)
-    os.makedirs(dest_dir, exist_ok=True)
-    shutil.copyfile(gui, dest)
-    os.chmod(dest, 0o555)          # read-only file
-    os.chmod(dest_dir, 0o555)      # and a read-only directory: no rename/replace
-    if sha256_file(dest) != digest:
-        raise HostError(500, "copy_mismatch", "blessed copy differs from the source binary")
-
-    def git(*a):
-        return subprocess.run(["git", "-C", wt, *a], capture_output=True, text=True).stdout.strip()
-    reg = load_registry()
-    reg[bid] = dict(sha256=digest, worktree=wt, branch=git("rev-parse", "--abbrev-ref", "HEAD"),
-                    commit=git("rev-parse", "--short", "HEAD"), dirty=bool(git("status", "--porcelain")),
-                    blessedAt=int(time.time()))
-    save_registry(reg)
-    return bid, reg[bid]
-
-
-def unbless(bid):
-    if not ID_RE.match(bid):
-        raise HostError(400, "bad_binary", "not a blessed id")
-    reg = load_registry()
-    d = os.path.join(BLESSED_DIR, bid)
-    if os.path.isdir(d):
-        os.chmod(d, 0o755)
-        shutil.rmtree(d)
-    reg.pop(bid, None)
-    save_registry(reg)
+        raise HostError(412, "no_agent_host_flag",
+                        "the main-checkout build predates --agent-host (rebuild main after the gui-host branch lands)")
+    return path
 
 
 # ------------------------------------------------------------------ GUI sessions
@@ -251,7 +160,7 @@ def gui_get(port, path, timeout=10):
 def public(s):
     if not s:
         return None
-    return {k: s[k] for k in ("id", "pid", "port", "binary", "renderer", "shotDir", "log", "runLog", "startedAt")}
+    return {k: s[k] for k in ("id", "pid", "port", "renderer", "shotDir", "log", "runLog", "startedAt")}
 
 
 def kill_group(pid, wait_s=3.0):
@@ -317,9 +226,10 @@ def launch(body):
     renderer = body.get("renderer", "gpu")
     if renderer not in ("gpu", "legacy"):
         raise HostError(400, "bad_renderer", "renderer must be gpu or legacy")
-    if "worktree" in body:
-        raise HostError(400, "no_worktree_launch", "launch takes binary=main|<blessed id>, never a worktree or path")
-    binary, label = resolve_binary(body.get("binary", "main"))
+    for forbidden in ("worktree", "path"):
+        if forbidden in body:
+            raise HostError(400, "main_only", "launch takes no worktree or path: the host runs only the main checkout build")
+    binary = resolve_binary(body.get("binary", "main"))
     with lock:
         if session and session["proc"].poll() is not None:
             stop_session("exited")
@@ -340,13 +250,12 @@ def launch(body):
         sdir = os.path.join(SESSIONS_DIR, sid)
         os.makedirs(sdir)
         log = os.path.join(sdir, "gui.out")
-        env = {k: v for k, v in os.environ.items() if k not in SCRUB_ENV}
         before = settings_dump()
         with open(log, "wb") as out:
-            proc = subprocess.Popen(
-                [binary, "--agent-host", sdir, "--heatmap-renderer", renderer, "--api-port", str(port), "--no-screener"],
-                cwd=REPO, env=env, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
-        session = dict(id=sid, pid=proc.pid, port=port, binary=label, renderer=renderer, proc=proc, log=log,
+            proc = subprocess.Popen(gui_argv(binary, sdir, renderer, port), cwd=REPO, env=child_env(),
+                                    stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                    start_new_session=True)
+        session = dict(id=sid, pid=proc.pid, port=port, renderer=renderer, proc=proc, log=log,
                        shotDir=os.path.join(sdir, "screenshots"), runLog=None, settingsBefore=before,
                        startedAt=int(time.time()), lastUsed=time.time(), lastShot=0.0)
         with open(PIDFILE, "w") as f:
@@ -371,14 +280,9 @@ def launch(body):
     settled = wait_settled(port, 30) if renderer == "gpu" else None
     found = sorted(glob.glob(os.path.expanduser(f"~/Library/Logs/Sentinel/sentinel-gui-*-{s['pid']}.log")))
     s["runLog"] = found[-1] if found else None
-    if s["runLog"] and b"QML failed to load" in open(s["runLog"], "rb").read():
-        with lock:  # --agent-host loads only embedded QML; a chart that cannot load is a failed launch
-            if session is s:
-                stop_session("qml failed")
-        raise HostError(500, "qml_failed", "the GUI could not load its embedded QML (see runLog)", runLog=s["runLog"])
     out = public(s)
     out.update(ready=True, settled=settled, screenLocked=screen_locked(), coldStartMs=int((time.time() - t0) * 1000))
-    print(f"[gui-host] launched {s['id']} pid {s['pid']} api :{port} {renderer} binary={label}", flush=True)
+    print(f"[gui-host] launched {s['id']} pid {s['pid']} api :{port} {renderer}", flush=True)
     return out
 
 
@@ -428,21 +332,17 @@ def shot(body):
     return r
 
 
-def binaries():
-    out = []
-    for bid, e in sorted(load_registry().items()):
-        out.append(dict(id=bid, branch=e.get("branch"), commit=e.get("commit"), dirty=e.get("dirty"),
-                        blessedAt=e.get("blessedAt")))
+def main_status():
     try:
-        main_ok, main_why = bool(resolve_binary("main")), None
+        resolve_binary("main")
+        return {"usable": True, "why": None}
     except HostError as e:
-        main_ok, main_why = False, str(e)
-    return {"main": {"usable": main_ok, "why": main_why}, "blessed": out}
+        return {"usable": False, "why": str(e)}
 
 
 # ------------------------------------------------------------------ HTTP
 class Handler(BaseHTTPRequestHandler):
-    server_version = "gui-host/2"
+    server_version = "gui-host/3"
 
     def log_message(self, fmt, *args):
         pass
@@ -470,10 +370,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.command == "GET" and self.path == "/status":
                 with lock:
                     live = session and session["proc"].poll() is None
-                    return self.reply(200, {"ok": True, "session": public(session) if live else None,
-                                            "idleTtlS": TTL_S})
-            if self.command == "GET" and self.path == "/binaries":
-                return self.reply(200, {"ok": True, **binaries()})
+                    sess = public(session) if live else None
+                return self.reply(200, {"ok": True, "session": sess, "idleTtlS": TTL_S, "main": main_status()})
             if self.command == "POST" and self.path == "/launch":
                 return self.reply(200, {"ok": True, "session": launch(body)})
             if self.command == "POST" and self.path == "/shot":
@@ -512,32 +410,12 @@ def serve():
     os.makedirs(SESSIONS_DIR, exist_ok=True)
     cleanup_stale()
     threading.Thread(target=reaper, daemon=True).start()
-    print(f"[gui-host] http://127.0.0.1:{HOST_PORT} repo={REPO} roots={WORKTREE_ROOTS} blessed={RUNTIME_DIR}", flush=True)
+    print(f"[gui-host] http://127.0.0.1:{HOST_PORT} repo={REPO} main={main_status()}", flush=True)
     ThreadingHTTPServer(("127.0.0.1", HOST_PORT), Handler).serve_forever()
 
 
-def main(argv):
-    cmd = argv[1] if len(argv) > 1 else "serve"
-    try:
-        if cmd == "serve":
-            serve()
-        elif cmd == "bless" and len(argv) == 3:
-            bid, entry = bless(argv[2])
-            print(f"blessed {bid}  {entry['branch']}@{entry['commit']}{' (DIRTY worktree)' if entry['dirty'] else ''}")
-            print("Blessed means reviewed. Bless only after the branch's cross-vendor review of the exact commit.")
-        elif cmd == "blessed":
-            print(json.dumps(binaries(), indent=1))
-        elif cmd == "unbless" and len(argv) == 3:
-            unbless(argv[2])
-            print(f"unblessed {argv[2]}")
-        else:
-            print(__doc__.split("API (JSON")[0])
-            return 2
-    except HostError as e:
-        print(f"gui-host: {e.code}: {e}", file=sys.stderr)
-        return 1
-    return 0
-
-
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    if len(sys.argv) > 1 and sys.argv[1] != "serve":
+        print(__doc__.split("API (JSON")[0])
+        sys.exit(2)
+    serve()

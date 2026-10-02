@@ -2,6 +2,7 @@
 #include "SentinelLogging.hpp"
 #include <algorithm>
 #include <QDateTime>
+#include "../config/AgentHostMode.hpp"
 #include "../config/GuiConfigStore.hpp"
 
 namespace {
@@ -267,6 +268,13 @@ void RemoteGridDataSource::cancelTpoHistory(const QString& symbol, const QString
 
 
 void RemoteGridDataSource::sendTradeCommand(const trading::TradeCommand& command) {
+    // --agent-host: the one place every TradeCommand passes (dock buttons, shortcuts, the chart's
+    // TP/SL controls that /api/v1/input can reach). An agent-run GUI never trades.
+    if (!AgentHostMode::tradingAllowed()) {
+        sLog_Warning("agent-host: trade command dropped: action=" << static_cast<int>(command.action)
+                     << " symbol=" << command.symbol);
+        return;
+    }
     m_client.sendTradeCommand(command);
 }
 const LiveOrderBook& RemoteGridDataSource::getDirectLiveOrderBook(const std::string& productId) const {

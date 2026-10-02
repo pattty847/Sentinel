@@ -8,8 +8,11 @@
 //   - refuses screenshots that grab screen pixels (target=main; FM-120) and every unknown target,
 //   - writes screenshots only to <dir>/screenshots (config and SENTINEL_GUI_SCREENSHOT_DIR ignored),
 //   - keeps QSettings in <dir>/settings (INI), never the owner's preferences domain,
-//   - loads QML only from the binary's embedded resources (QML runs JavaScript; the build-time
-//     source directory and the import path next to the build are agent-writable in a worktree).
+//   - sends no trade commands (/api/v1/input can drive the chart's TP/SL controls into the server's
+//     trading session) and only switches to allowlisted symbols (a symbol change makes the recorder
+//     subscribe upstream).
+// The host runs only the main checkout's build (never a build an agent can write), so QML, scripts
+// and plugins are the reviewed ones; this mode contains what an agent can do through the API.
 // QtCore only: core code and tests can use it without a window.
 namespace AgentHostMode {
 
@@ -20,15 +23,14 @@ bool activate(const QString& dir, const QStringList& forbiddenRoots, QString* er
 
 bool active();
 QString screenshotDir();          // <dir>/screenshots (canonical); empty when inactive
-bool embeddedQmlOnly();           // true when active
+bool tradingAllowed();            // false when active: drop every TradeCommand at the data source
+// Symbols a GUI in this mode may switch to (set from --agent-host-symbols). Active with an empty
+// list means no symbol changes at all. Exact, case-sensitive match. True when inactive.
+void setSymbolAllowlist(const QStringList& symbols);
+bool symbolAllowed(const QString& symbol);
 // True when inactive. When active: only chart and widget grabs (heatmap, lab, telemetry, toolbar,
 // settings, settings:<Tab>), never screen pixels.
 bool screenshotTargetAllowed(const QString& target);
-
-// URL of a Sentinel.Charts QML file inside the binary. qt6_add_qml_module keeps the `qml/` directory
-// of QML_FILES in the resource path; the loaders' older "qrc:/Sentinel/Charts/X.qml" and
-// ":/qt/qml/Sentinel/Charts/X.qml" never existed, which is why every normal run loads QML from disk.
-QString embeddedQmlUrl(const QString& file);
 
 void resetForTests();
 

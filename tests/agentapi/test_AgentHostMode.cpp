@@ -23,7 +23,8 @@ TEST_F(AgentHostModeTest, InactiveByDefaultAndAllowsEveryTarget) {
     EXPECT_FALSE(AgentHostMode::active());
     EXPECT_TRUE(AgentHostMode::screenshotTargetAllowed("main"));
     EXPECT_TRUE(AgentHostMode::screenshotTargetAllowed("anything"));
-    EXPECT_FALSE(AgentHostMode::embeddedQmlOnly());
+    EXPECT_TRUE(AgentHostMode::tradingAllowed());
+    EXPECT_TRUE(AgentHostMode::symbolAllowed("ANYTHING-USD"));
 }
 
 TEST_F(AgentHostModeTest, ActiveModeRefusesScreenPixelTargets) {
@@ -38,7 +39,25 @@ TEST_F(AgentHostModeTest, ActiveModeRefusesScreenPixelTargets) {
         EXPECT_FALSE(AgentHostMode::screenshotTargetAllowed(bad)) << bad;
     for (const char* ok : {"heatmap", "lab", "telemetry", "toolbar", "settings", "settings:Tick", "settings:TPO"})
         EXPECT_TRUE(AgentHostMode::screenshotTargetAllowed(ok)) << ok;
-    EXPECT_TRUE(AgentHostMode::embeddedQmlOnly());
+}
+
+TEST_F(AgentHostModeTest, ActiveModeBlocksTradingAndRestrictsSymbolsToTheAllowlist) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    QString error;
+    ASSERT_TRUE(AgentHostMode::activate(dir.path(), {}, &error)) << qPrintable(error);
+    // /api/v1/input can drive the chart's TP/SL controls into the server's trading session, and a
+    // symbol change makes the recorder subscribe upstream: both are off limits for an agent-run GUI.
+    EXPECT_FALSE(AgentHostMode::tradingAllowed());
+    EXPECT_FALSE(AgentHostMode::symbolAllowed("BTC-USD")) << "no allowlist means no symbol changes";
+    AgentHostMode::setSymbolAllowlist({"BTC-USD", "ETH-USD"});
+    EXPECT_TRUE(AgentHostMode::symbolAllowed("BTC-USD"));
+    EXPECT_TRUE(AgentHostMode::symbolAllowed("ETH-USD"));
+    for (const char* bad : {"btc-usd", "BTC-USD ", "SOL-USD", "", "BTC-USD,ETH-USD", "BTC", "ETH-USD\n"})
+        EXPECT_FALSE(AgentHostMode::symbolAllowed(bad)) << bad;
+    AgentHostMode::resetForTests();
+    EXPECT_TRUE(AgentHostMode::tradingAllowed());
+    EXPECT_TRUE(AgentHostMode::symbolAllowed("SOL-USD"));
 }
 
 TEST_F(AgentHostModeTest, ScreenshotDirIsFixedInsideTheSessionDirAndCreated) {
@@ -144,4 +163,47 @@ TEST(AgentHostModeSources, NoNativeFormatQSettingsInTheGui) {
         }
     }
     EXPECT_TRUE(offenders.isEmpty()) << "native-format QSettings (see comment): " << qPrintable(offenders.join(", "));
+}
+
+// Regression guard: an agent-run GUI (--agent-host) must never send a TradeCommand. Every trade path
+// (dock buttons, shortcuts, the chart's TP/SL controls that /api/v1/input can reach) ends in
+// IGridDataSource::sendTradeCommand -> RemoteGridDataSource -> SentinelStreamClient. The guard sits in
+// RemoteGridDataSource; this fails if a second place starts talking to the stream client directly, or
+// if the guard is removed or moved after the send.
+TEST(AgentHostModeSources, TradeCommandsHaveOneChokePointAndItIsGuarded) {
+    const QRegularExpression directSend(R"(\bm_client\s*\.\s*sendTradeCommand\s*\()");
+    const QRegularExpression anyClientSend(R"((\w+)\s*(\.|->)\s*sendTradeCommand\s*\()");
+    QStringList viaInterface, directSenders;
+    QString chokeFile;
+    for (const QString& sub : {QStringLiteral("libs/gui"), QStringLiteral("apps/sentinel_gui")}) {
+        QDirIterator it(QString(SENTINEL_SOURCE_DIR) + "/" + sub, {"*.cpp", "*.hpp", "*.h"}, QDir::Files,
+                        QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            const QString path = it.next();
+            QFile file(path);
+            ASSERT_TRUE(file.open(QIODevice::ReadOnly)) << qPrintable(path);
+            const QString text = QString::fromUtf8(file.readAll());
+            if (directSend.match(text).hasMatch()) {
+                directSenders << path;
+                chokeFile = path;
+            }
+            auto matches = anyClientSend.globalMatch(text);
+            while (matches.hasNext()) {
+                const QString receiver = matches.next().captured(1);
+                if (receiver != "m_dataSource" && receiver != "m_client") viaInterface << path + " (" + receiver + ")";
+            }
+        }
+    }
+    ASSERT_EQ(directSenders.size(), 1) << "exactly one file may call the stream client's sendTradeCommand: "
+                                       << qPrintable(directSenders.join(", "));
+    EXPECT_TRUE(directSenders.first().endsWith("/datasources/RemoteGridDataSource.cpp")) << qPrintable(directSenders.first());
+    EXPECT_TRUE(viaInterface.isEmpty()) << "trade commands must go through m_dataSource->sendTradeCommand: "
+                                        << qPrintable(viaInterface.join(", "));
+    QFile choke(chokeFile);
+    ASSERT_TRUE(choke.open(QIODevice::ReadOnly));
+    const QString text = QString::fromUtf8(choke.readAll());
+    const int guard = text.indexOf("AgentHostMode::tradingAllowed()");
+    const int send = text.indexOf(QRegularExpression(R"(m_client\s*\.\s*sendTradeCommand\s*\()"));
+    EXPECT_GE(guard, 0) << "the agent-host guard is missing";
+    EXPECT_LT(guard, send) << "the guard must come before the send";
 }

@@ -753,6 +753,10 @@ void MainWindowGPU::onSubscribe() {
 bool MainWindowGPU::subscribeSymbol(const QString& symbol) {
     static const QRegularExpression pattern("^[A-Z0-9]{2,20}-[A-Z0-9]{2,20}$");
     if (!pattern.match(symbol).hasMatch()) return false;
+    if (!AgentHostMode::symbolAllowed(symbol)) { // --agent-host: no upstream subscriptions beyond the allowlist
+        sLog_Warning("agent-host: symbol refused: symbol=" << symbol);
+        return false;
+    }
     sLog_App("ui: subscribe symbol=" << symbol << " prev=" << m_currentSymbol
              << " connected=" << m_connected);
     m_userSubscribed = true;

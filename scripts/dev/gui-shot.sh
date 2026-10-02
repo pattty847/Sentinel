@@ -2,15 +2,15 @@
 # gui-shot.sh: client for scripts/dev/gui-host.py. Lets a sandboxed agent (no window server)
 # start the GUI, drive the Agent API and read screenshots.
 #
-#   scripts/dev/gui-shot.sh binaries                                  # what launch accepts
-#   scripts/dev/gui-shot.sh launch [--binary main|<id>] [--renderer gpu|legacy] [--replace]
+#   scripts/dev/gui-shot.sh launch [--renderer gpu|legacy] [--replace]
 #   scripts/dev/gui-shot.sh shot <name> [--after <operationId>] [--settle] [--target heatmap|lab|telemetry|toolbar|settings[:Tab]]
 #   scripts/dev/gui-shot.sh api GET|POST </api/v1/...> [json]       # state, viewport, heatmap/settings ...
 #   scripts/dev/gui-shot.sh status | stop
 #
-# The host never runs a path you name: `main` is the main checkout's build, and an <id> is a build
-# of a branch the orchestrator blessed after review (`gui-host.py bless <worktree>`). So your own
-# unreviewed worktree build cannot be launched; ask the orchestrator to bless it after review.
+# The host runs only the MAIN checkout's build (the orchestrator builds landed main), never a path
+# you name and never your worktree build, because it executes with the owner's privileges. So you
+# see landed work, not your branch's uncommitted-to-main change; the GUI it starts cannot trade,
+# switches only to the recorded products, and refuses screen grabs.
 # launch prints the session JSON with `port` (that GUI's Agent API) and `shotDir`. shot prints the
 # absolute PNG path: read it directly (Codex and Claude both open local images). If the host is
 # not running, ask the orchestrator to start it (scripts/dev/gui-host.py); nothing here starts it.
@@ -37,18 +37,15 @@ session_port() {
 cmd=${1:-}; shift || true
 case "$cmd" in
     launch)
-        binary=main; renderer=gpu; replace=false
+        renderer=gpu; replace=false
         while (( $# )); do
             case "$1" in
-                --binary) binary=${2:?--binary needs main|<id>}; shift 2 ;;
                 --renderer) renderer=${2:?--renderer needs gpu|legacy}; shift 2 ;;
                 --replace) replace=true; shift ;;
-                *) die "unknown argument $1 (launch takes --binary main|<id>, never a path)" ;;
+                *) die "unknown argument $1 (launch takes --renderer and --replace; the host runs only main)" ;;
             esac
         done
-        host POST /launch "$(jq -n --arg b "$binary" --arg r "$renderer" --argjson p "$replace" \
-            '{binary:$b, renderer:$r, replace:$p}')" ;;
-    binaries) host GET /binaries ;;
+        host POST /launch "$(jq -n --arg r "$renderer" --argjson p "$replace" '{renderer:$r, replace:$p}')" ;;
     shot)
         name=${1:?usage: shot <name> [--after <op>] [--settle] [--target T]}; shift
         body=$(jq -n --arg n "$name" '{name:$n}')
