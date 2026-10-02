@@ -233,8 +233,16 @@ re-bands and tick changes do not change this grid.
 `sentinel-capture` uses CLI options only and does not read or edit these YAML
 files. Its default root is `/Volumes/T7/sentinel-data/raw-l2`; it refuses an
 unmounted external volume and the server's recording directory. Defaults are
-1-second/1-MiB zstd blocks, a 64-MiB disk queue and fsync after every block.
-Use `--root`, `--symbol`, `--block-ms`, `--block-bytes`, `--fsync-blocks`,
-`--zstd-level`, `--queue-mib`, `--duration`, `--key-file`, `--jwt` and `--ca-bundle`
-to override them. See [the capture runbook](RAW_CAPTURE.md) for detached startup,
+1-second/1-MiB zstd blocks, fsync after every block, one connection and one RAWL2
+v1 stream per product, and one shared disk queue pool:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--queue-mib` | `512` | Pool for all products (1..4096 MiB). Allocated only as frames queue; about 0 bytes in steady state. |
+| `--queue-floor-mib` | `2` | Per-product share no other product can take (0..256 MiB). Products x floor must not exceed `--queue-mib`, else the capture refuses to start. |
+| `--metrics-port` | `8091` | Prometheus `/metrics` and `/ping` on 127.0.0.1; 0 = no listener. |
+
+Use `--root`, `--symbol`, `--symbols`, `--block-ms`, `--block-bytes`, `--fsync-blocks`,
+`--zstd-level`, `--duration`, `--key-file`, `--jwt` and `--ca-bundle` to override
+the other defaults. The launchd plist passes none of the queue or metrics options. See [the capture runbook](RAW_CAPTURE.md) for detached startup,
 SIGTERM shutdown, offline verification and the RAWL2 format.

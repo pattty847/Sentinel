@@ -1,6 +1,7 @@
-# Alerts A1 and A3 of docs/research/2026-10-observability.md section 3 (slice 1).
+# Alerts A1 and A3 of docs/research/2026-10-observability.md section 3 (slice 1),
+# and the capture alerts A4/A4b (per-symbol connections slice 2).
 # A2 (product L2 silent while connected) waits for the per-product L2 age metric;
-# A4 (capture queue, T7 full, disk errors) for the capture /metrics (slice 2).
+# the rest of A4 (T7 below 50 GB, recorder disk errors) is not built yet.
 #
 # Shape: query A (instant PromQL on VictoriaMetrics) -> threshold C. Annotation
 # templates use {{ .Labels.x }} (no '$': Grafana expands environment variables
@@ -102,7 +103,7 @@ groups:
       # loop (exit 75 when T7 is unmounted), a main thread frozen so hard it
       # cannot answer /metrics, or the job gone from the scrape config.
       # One sample per required job, so a single missing job still fires:
-      #   healthy            -> up = 1 for both jobs               -> OK
+      #   healthy            -> up = 1 for every required job      -> OK
       #   failed scrape      -> up{job} = 0                        -> fires for that job
       #   one job missing    -> its up series is absent; absent(up{job="x"}) = 1
       #                         (labels job="x" from the matcher), minus 1 = 0 -> fires for job x
@@ -124,7 +125,8 @@ groups:
           description: >-
             Scrape of {{ .Labels.job }} failing or missing for 2 minutes. For
             sentinel-server read ~/Library/Logs/Sentinel/launchd-recorder.err and the latest run
-            log; exit 75 means the recording directory (T7) is not usable.
+            log; exit 75 means the recording directory (T7) is not usable. For sentinel-capture
+            read launchd-capture.err and sentinel-capture-latest.log.
         data:
           - refId: A
             relativeTimeRange: { from: 300, to: 0 }
@@ -132,8 +134,9 @@ groups:
             model:
               refId: A
               expr: >-
-                up{job=~"sentinel-server|node"}
+                up{job=~"sentinel-server|sentinel-capture|node"}
                 or (absent(up{job="sentinel-server"}) - 1)
+                or (absent(up{job="sentinel-capture"}) - 1)
                 or (absent(up{job="node"}) - 1)
               instant: true
               range: false
@@ -189,6 +192,92 @@ groups:
               conditions:
                 - type: query
                   evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [C] }
+                  reducer: { type: last, params: [] }
+
+      # A4: a capture product's WebSocket has been down more than 2 minutes (one
+      # connection per product, so the other products keep recording). The gauge is
+      # the down time itself, so no pending period is needed.
+      - uid: sentinel-a4-capture-feed-down
+        title: A4 capture product down
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: page
+        annotations:
+          summary: "Capture feed down: {{ .Labels.product }}"
+          description: >-
+            sentinel-capture has had no WebSocket for {{ .Labels.product }} for
+            {{ printf "%.0f" .Values.A.Value }} s; that product's raw archive has a gap. Read
+            sentinel-capture-latest.log (rg 'product={{ .Labels.product }}') for Transport down,
+            reconnect and HTTP 429 lines.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: sentinel-vm
+            model:
+              refId: A
+              expr: max by (product) (sentinel_capture_feed_down_seconds{job="sentinel-capture"})
+              instant: true
+              range: false
+              intervalMs: 15000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              datasource: { type: __expr__, uid: __expr__ }
+              conditions:
+                - type: query
+                  evaluator: { type: gt, params: [120] }
+                  operator: { type: and }
+                  query: { params: [C] }
+                  reducer: { type: last, params: [] }
+
+      # A4b: the capture's shared disk queue pool is more than half full: the disk
+      # worker is behind (FM-127, T7 I/O frozen) and the capture exits when the pool
+      # is full.
+      - uid: sentinel-a4b-capture-queue
+        title: A4b capture queue backing up
+        condition: C
+        for: 2m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: page
+        annotations:
+          summary: "Capture queue above 50 % of the pool"
+          description: >-
+            sentinel-capture has {{ printf "%.0f" .Values.A.Value }} % of its queue pool
+            (--queue-mib) in use. The disk worker is not keeping up; check T7
+            (FM-127: Full Disk Access after a binary change) before the pool fills and the
+            capture exits.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: sentinel-vm
+            model:
+              refId: A
+              expr: 100 * sum(sentinel_capture_queue_used_bytes{job="sentinel-capture"}) / max(sentinel_capture_queue_pool_bytes{job="sentinel-capture"})
+              instant: true
+              range: false
+              intervalMs: 15000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              datasource: { type: __expr__, uid: __expr__ }
+              conditions:
+                - type: query
+                  evaluator: { type: gt, params: [50] }
                   operator: { type: and }
                   query: { params: [C] }
                   reducer: { type: last, params: [] }

@@ -1,8 +1,10 @@
 # Pristine Coinbase capture
 
-`sentinel-capture` opens its own Coinbase Advanced Trade WebSocket through
-`MarketDataCoreEngine`. It subscribes to `level2`, `market_trades` and `heartbeats`.
-One engine/transport subscribes all requested products on that connection.
+`sentinel-capture` opens its own Coinbase Advanced Trade WebSockets through
+`MarketDataFeeds`. Each requested product has its own connection, engine and RAWL2
+v1 stream (`docs/research/2026-10-per-symbol-connections.md`). Each connection
+subscribes `level2`, `market_trades` and `heartbeats` for its one product. One
+process holds all products; they share one I/O thread and one disk queue pool.
 It has no connection to sentinel-server, its recorder, the GUI or the local wire
 protocol. It uses QtCore only. Future server rollups can consume these files;
 this tool does not send raw L2 to clients.
@@ -20,7 +22,7 @@ capture_pid=$!
 echo "$capture_pid"
 ```
 
-For the owner's seven products on one connection:
+For the owner's seven products (seven connections, one process):
 
 ```sh
 ./build/mac-clang/apps/sentinel-capture/sentinel-capture \
@@ -30,9 +32,16 @@ For the owner's seven products on one connection:
 
 `--symbol` is repeatable; it can also be combined with `--symbols`. Inputs are
 trimmed, validated, deduplicated and sorted. With neither option, the default is
-BTC-USD. A single distinct product uses the unchanged RAWL2 v1 layout and bytes.
-Up to 32 distinct products are accepted. Heartbeats remain connection-scoped
-(the outgoing heartbeat subscription intentionally has no `product_ids`).
+BTC-USD. Every product is written as RAWL2 v1 with its own `run_id`, its own
+connection ids and no routing receipts. Up to 32 distinct products are accepted.
+Connects and subscribe batches are paced at one per second each, per process, so
+seven products are all subscribed about 7 s after start. Heartbeats remain
+connection-scoped (the outgoing heartbeat subscription has no `product_ids`).
+
+RAWL2 v2 (several products on one connection, with routing receipts) was written
+from 2026-09-30 to 2026-10-02 only. The writer is removed; `--verify` still reads
+and checks that archive, and a root that holds both layouts verifies as one
+archive (see "RAWL2 v2 archive (read-only)").
 
 Omit `--duration` for continuous capture. Keep the Mac awake for the measurement
 (e.g. `caffeinate -i -w "$capture_pid"` in another terminal). The process exits
@@ -50,11 +59,15 @@ The duration starts after metadata retrieval and engine startup; inspect the
 report for actual frames, disconnections and gaps before accepting the 24-hour run.
 
 Every run logs through SentinelLogging to
-`~/Library/Logs/Sentinel/sentinel-capture-latest.log`, including a cumulative stats
-line once a minute. `SENTINEL_LOG_DIR`, `SENTINEL_LOG_KEEP` and
+`~/Library/Logs/Sentinel/sentinel-capture-latest.log`, including one cumulative
+`Capture stats: product=... conn=... up=... storedFrames=... fileBytes=... queuedBytes=...`
+line per product and one `Capture queue: usedBytes=... poolBytes=... floorBytes=...`
+line once a minute. Live values are on `GET 127.0.0.1:8091/metrics`
+(`ops/monitoring/README.md`). `SENTINEL_LOG_DIR`, `SENTINEL_LOG_KEEP` and
 `SENTINEL_LOG_STDERR` work as for sentinel-server. No secondary diagnostic log is
-created. A disk error, queue overflow or oversized frame makes the process exit
-nonzero with `Capture incomplete`. The queue reserves 4 KiB for a final stop/gap
+created. A disk error, queue overflow or oversized frame in any product makes the
+process exit nonzero with `Capture incomplete`, naming the product. Each product
+session reserves 4 KiB, outside the pool, for a final stop/gap
 record containing the reason and the first dropped frame's system/steady receive
 times and connection ID. Accepted data drains before this marker on overflow.
 After an I/O failure the damaged segment is left untouched and a fresh segment
@@ -112,7 +125,8 @@ anchor failure, unless it already received unanchored updates. A connection with
 `missing_snapshot_connections`, even if it carried heartbeats, trades or foreign
 product frames. Connections with L2 events and no snapshot remain integrity
 failures (`missing_snapshot_connections` and `unanchored_l2_events`).
-`empty_connections` totals sum product/connection pairs: one silent WebSocket
+`empty_connections` totals sum product/connection pairs. With one connection per
+product (v1) each pair is one real socket. In the v2 archive one silent WebSocket
 connection across seven products counts as seven. Per-product and aggregate
 `empty_connection_details` are independently capped at 30 entries and include
 product, run, connection ID, UTC `start_time`, exact `start_system_ns`, and
@@ -337,7 +351,9 @@ The capture has CLI options only; it does not load or modify server/client YAML.
 | `--block-bytes` | `1048576` | Uncompressed byte target; an individual frame remains whole |
 | `--fsync-blocks` | `1` | Sync every N blocks; 0 syncs at file close only |
 | `--zstd-level` | `3` | 1..19 |
-| `--queue-mib` | `64` | Total connection disk queue budget including record overhead; 1..1024 MiB |
+| `--queue-mib` | `512` | Shared disk queue pool for all products, including record overhead; 1..4096 MiB. Accounting only: bytes are allocated as frames queue, never up front |
+| `--queue-floor-mib` | `2` | Per-product part of the pool that no other product can take; 0..256 MiB. Products x floor must not exceed `--queue-mib` (startup error) |
+| `--metrics-port` | `8091` | Prometheus `/metrics` and `/ping` on 127.0.0.1; 0 = no listener. A bind failure logs a warning and the capture continues |
 | `--duration` | `0` | Seconds until clean stop; 0 waits for a signal |
 | `--key-file` | `key.json` | Existing optional Coinbase credentials |
 | `--jwt` | off | Enable existing engine JWT auth; public channels need no credentials |
@@ -353,35 +369,55 @@ startup; no WebSocket is opened with guessed increments. Credentials/JWTs are
 never placed in the capture header.
 
 The ingest observer is called before parsing and only stamps/copies records into
-the bounded queue. One disk worker routes frames after queue admission, reuses
-one zstd compression context per product and handles writes and sync. The queue holds each original
-record once and has one total budget, not a separate allowance per product.
-Overflow still stops the entire capture and attempts the same connection-wide
-gap marker in every product. On disk failure only writers that threw abandon their damaged segment. Healthy
-writers flush and seal their buffered data before appending a gap marker in a new
-segment. A writer already closed successfully is left closed: a later peer's
-close failure never adds a duplicate stop. Each remaining stream independently
-attempts its failure marker; an unwritable stream may reject it.
+that product's bounded queue. Each product has its own disk worker
+(`capture-disk` thread), one zstd compression context, and handles its own writes
+and sync. All queues account to one shared pool (owner decision 7, 2026-10-02):
+
+- The pool is accounting only. A record is allocated when it is queued and freed
+  when it is written, so a healthy capture holds about 0 queued bytes. Nothing is
+  reserved up front. At the measured ~98 KB/s for seven products, the 512 MiB
+  default covers about 90 minutes of stalled disk I/O (FM-127 was 39 minutes).
+- Each product may always use its floor (`--queue-floor-mib`). Bytes above the
+  floor come from the shared remainder, total - products x floor, first come first
+  served. A product that floods the remainder fails itself; it cannot refuse
+  another product's frames below that product's floor.
+- A full pool fails the product that asked (`capture queue pool limit exceeded`)
+  and the process exits nonzero (launchd restarts it). That product's accepted
+  data drains before its gap marker. Other products close normally.
+- When a disk worker fails, its queued records are counted as lost (the gap
+  marker keeps the first one) and their bytes return to the pool at once, not at
+  close, so a failed product never makes a healthy one fail for "pool limit".
+- After a disk failure the damaged segment is abandoned and the gap marker goes
+  into a new segment. A failure outside a writer operation flushes and seals the
+  healthy buffer first.
 Sync uses the shared persistence primitive: `F_FULLFSYNC` on Darwin with `fsync` fallback where full sync is unsupported. A record
 is limited to 16 MiB (the existing Beast transport's default message limit), a
 block to that record plus framing, and an index to 65,536 entries; a new segment
-starts if that index limit is reached. Peak capture memory includes the queue,
-one in-flight record and its routing parse, per-product raw/compressed block
-buffers and indexes (bounded by 32 products), and the existing
+starts if that index limit is reached. Peak capture memory includes the queued
+records (at most the pool), one in-flight record per product, per-product
+raw/compressed block buffers and indexes (bounded by 32 products), and the existing
 engine's transport/JSON parser buffers. Writer failure or queue saturation ends
 the capture with an explicit error. Fsync cannot recover bytes still in the
 queue or current block; with defaults, block flush is targeted at one second or
 1 MiB, plus disk scheduling delay.
 
-The shared engine retries transport failures (including initial handshakes) with
-1 s exponential backoff capped at 30 s, resetting on a successful connection.
-Its heartbeat watchdog stays armed across failed retries; the existing 20 s
-stale threshold and 5 s minimum stale-heartbeat backoff remain. This recovery fix
-also applies to the server. A capture-only supervisor still recreates an engine
-disconnected for 60 seconds as an independent safety net for a transport whose
-connect/close callback never completes. The restart reason is recorded.
+Each product's engine retries its own transport failures (including initial
+handshakes) with 1 s exponential backoff capped at 30 s, plus 0..1 s jitter,
+resetting at the first accepted snapshot. A sequence gap, 20 s without any frame,
+30 s without L2 while heartbeats flow, malformed L2 or a provider error reconnects
+only that product. Connect and close have bounded deadlines in the transport, so
+the old whole-process 60 s restart supervisor is removed. A feed down for 2
+minutes logs `Feed down: downMs=...` once a minute, and alert A4 pages
+(`sentinel_capture_feed_down_seconds > 120`).
 
-## Routing and RAWL2 v2 for multiple products
+## RAWL2 v2 archive (read-only)
+
+This section describes the layout written 2026-09-30..2026-10-02, when one
+connection carried all products. The writer is removed; the verifier keeps this
+reader so the archive stays verifiable. Tests build v2 files with a test-only
+writer (`tests/capture/legacy_v2_fixture.cpp`). New captures never contain kind 9
+records, `connection_products` or `routing`, and the production writer refuses
+that metadata.
 
 Files retain `<root>/<product>/YYYY/MM/DD/HH.rawl2` and exclusive-create collision
 segments. Multi-product writers share a run UUID and run-start timestamp, but
@@ -428,7 +464,7 @@ snapshots into the product's book.
 V2 changes only the magic's last byte (`RAWL2\r\n\x02`), `format_version: 2`,
 additional header fields, and permission for kind 9. Block, record, index and CRC
 framing are identical to v1. Old readers reject v2 instead of silently losing
-sequence proof. Single-product captures still write v1, with no new header fields
+sequence proof. All captures since 2026-10-02 write v1, with no v2 header fields
 or record kinds. V2 retains the file's own `product_metadata` and single-entry
 `products`; `connection_products` is the sorted, unique full subscription set.
 The routing identifier is frozen as **`"product-ranges-v2"`**. The experimental
@@ -479,31 +515,8 @@ products' payloads. `connection_runs[].routing_checked` reports actual whole-set
 comparison; open runs defer it. Reconstruct the exact connection by merging the
 raw copies by connection/sequence, retaining the original clocks and bytes.
 
-The deterministic seven-product measurement uses five minutes of interleaved
-BTC 22, ETH 10, SOL 5, FARTCOIN 2, PEPE 2, DOGE 1 and AVAX 1 frames/s, plus one
-heartbeat/s and initial snapshots: 13,207 incoming frames. Each update contains
-12 levels with deterministic varying quantities. Defaults are zstd level 3,
-one-second/1 MiB blocks; fsync is disabled only for test speed. The baseline
-rewrites the same per-product raw frames and lifecycle markers without receipts,
-using the same header and block settings. Thus the delta includes compression,
-extra framing and indexes, not just JSON sizes:
-
-| Product | Own baseline bytes | With receipts | Overhead bytes | Overhead / own |
-|---|---:|---:|---:|---:|
-| BTC-USD | 723,605 | 725,121 | 1,516 | 0.21% |
-| ETH-USD | 402,730 | 404,199 | 1,469 | 0.36% |
-| SOL-USD | 262,758 | 264,136 | 1,378 | 0.52% |
-| FARTCOIN-USD | 182,079 | 183,416 | 1,337 | 0.73% |
-| PEPE-USD | 179,674 | 181,042 | 1,368 | 0.76% |
-| DOGE-USD | 150,571 | 151,877 | 1,306 | 0.87% |
-| AVAX-USD | 150,553 | 151,854 | 1,301 | 0.86% |
-| Total | 2,051,970 | 2,061,645 | 9,675 | 0.47% |
-
-That is about 2.8 MB/day of receipt overhead at this synthetic mix, with six
-receipts per product. The regression asserts **under 5% for every product** and a
-bounded receipt count. Compression sizes vary slightly with run UUID/header
-values. This is a reproducible synthetic budget, not a promise about every live
-payload distribution or a measured live-data rate.
+The writer kept receipt overhead under 0.5% of each product's file bytes in its
+seven-product benchmark (removed with the writer, 2026-10-02).
 
 ## RAWL2 v1 framing (also used by v2)
 
@@ -572,16 +585,20 @@ sends POSIX SIGTERM during an unfinished block after a reconnect, and verifies
 the drained data, connection IDs, stop reason, final index and run log. No test
 contacts Coinbase.
 
-Multi-product regressions additionally check the actual outgoing subscriptions
-for all seven products through repeated/comma-separated/mixed CLI forms; exact
-routing and receive clocks; a mixed-product L2 envelope; independent metadata
-increments and snapshots on reconnect; connection-wide gaps/invalidations;
-shared-budget overflow; unique totals and daily accounting; v1 layout/report
-compatibility; active open-prefix verification; mixed v1/v2 runs and hour rotation;
-and missing streams or altered raw/reference bytes/clocks. Review regressions add
-frozen routing/digest vectors, snapshot allocation bounds, superseded interrupted
-runs, crash-tail raw loss, isolated writer failures, shared queue saturation with
-individually fitting frames, live exit 3 and event-driven application readiness.
+Multi-product regressions check the actual outgoing subscriptions for all seven
+products (one connection each) through repeated/comma-separated/mixed CLI forms;
+uneven reconnects per product; independent v1 runs beside a v2 run; and the
+capture `/metrics` endpoint of a running application. Queue-pool regressions
+check that floors admit every product under a flood from one, the total cap, that
+a failed session returns its bytes at failure, that a 512 MiB pool for seven
+products allocates nothing up front, and that products x floor above the pool
+refuses to start. V2 verifier regressions (built with the test-only writer) keep
+exact routing and receive clocks, a mixed-product L2 envelope, connection-wide
+gaps/invalidations, unique totals and daily accounting, mixed v1/v2 runs and hour
+rotation, missing streams or altered raw/reference bytes/clocks, frozen
+routing/digest vectors, snapshot allocation bounds, superseded interrupted runs
+and crash-tail raw loss. Other regressions cover live exit 3 and event-driven
+application readiness.
 Trade regressions cover descending contiguous batches, connected holes,
 reconnect loss, exact snapshot/update deduplication, aggressor volumes and time
 precision, product isolation in mixed envelopes, v1/v2, hourly/process boundaries,
@@ -598,6 +615,10 @@ these behaviors and must fail their regressions; every restored source is touche
 and rebuilt before proceeding.
 
 ## launchd arguments (review/deploy separately)
+
+The arguments did not change for per-product connections: the new defaults
+(512 MiB pool, 2 MiB floors, `/metrics` on 8091) apply without a plist edit.
+Deploy only with `scripts/dev/deploy-runtime.sh capture`.
 
 The following is the exact `ProgramArguments` array for the seven-product service
 retaining the current service's runtime executable, working directory and defaults. No service operation is
@@ -618,6 +639,7 @@ Do not launch this over a currently locked BTC-USD directory.
 </array>
 ```
 
-The 64 MiB queue is shared by all seven products. Overflow retains the existing
-nonzero exit/restart contract; queue size is a memory budget, not a loss guarantee.
+The 512 MiB pool is shared by all seven products, each with a 2 MiB floor. Overflow
+retains the existing nonzero exit/restart contract; the pool is a memory budget,
+not a loss guarantee.
 No exchange credentials are required for these public channels.

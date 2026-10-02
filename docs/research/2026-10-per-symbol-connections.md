@@ -405,3 +405,30 @@ in this run. All 13 marketdata/capture suites, BookRecorderTests, 21 feed cases
 and six real Beast lifecycle/deadline cases passed. No live services were run,
 stopped, restarted or deployed. Review fixes remain uncommitted atop 63573dc,
 as requested; no git-index or shared _agent writes were attempted.
+
+## 15. Slice 2 (capture) as built, 2026-10-02 (`lt-claude/feeds-capture`)
+
+- Queue (decision 7): `QueuePool` in `CaptureSession.hpp`. One pool for the process
+  (`--queue-mib`, default 512), a floor per product (`--queue-floor-mib`, default 2).
+  The pool is accounting only; each session's deque allocates per record. A product
+  may always use its floor; above it, bytes come from the shared remainder
+  (total - products x floor). Products x floor above the pool is a startup error.
+  The pool mutex guards arithmetic only; `used()` reads atomic mirrors.
+- RAWL2 v2 writer removed (decision 3): `Session` is single-product only, the
+  routing batch and receipts are gone from production, and `Writer`/`Session`
+  refuse `connection_products`/`routing` metadata. `RoutingBatch` (receipt
+  rebuild) and `frameReceipt` stay for the verifier. Tests write v2 files with a
+  test-only writer (`tests/capture/legacy_v2_fixture.cpp`, friend of `Writer`).
+  The seven-product receipt benchmark and the multi-writer failure-isolation
+  tests were deleted with the writer.
+- Capture `/metrics` on `127.0.0.1:8091` (`--metrics-port`, 0 = off), reusing
+  `MetricsHttpServer`: per-product feed up, down seconds, connection id, queued
+  bytes, stored frames and file bytes; pool used/total/floor; process metrics. The
+  ingest observer writes `FeedMetrics` atomics; the per-minute stats line reads the
+  same atomics instead of calling into the I/O thread.
+- Review minors: N1 `reconnectNow` cancels this engine's waiting tickets; N2 a
+  stopped engine's errors skip the callback and log `retiredProduct=`, and the
+  Beast transport relabels its lines `product=retired:<id>` (`WsTransport::retire`);
+  N3 a failed disk worker releases its queued bytes before waiting for close.
+- Ops: scrape job `sentinel-capture`, A3 requires it, A4 (product down > 120 s)
+  and A4b (pool > 50 % for 2 min), two health-dashboard panels.
