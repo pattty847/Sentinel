@@ -563,6 +563,76 @@ TEST_F(EngineReconnect, DeadIsolatedProductHasOnlyTwoReconnectEscalationsAndSets
         expectFrame(scenario->sends[i], i % 2 ? "unsubscribe" : "subscribe", "level2", {"BTC-USD"});
 }
 
+TEST_F(EngineReconnect, PreviouslyAcceptedSilentProductEscalatesDespiteHealthyPeerAndKeepsCap) {
+    policy.level2Stale = 40ms;
+    policy.level2RetryMaximum = 160ms;
+    for (bool recoversOnReplay : {true, false}) {
+        SCOPED_TRACE(recoversOnReplay);
+        scenario = std::make_shared<fixtures::WsScenario>();
+        scenario->onAttempt = [recoversOnReplay](auto& transport, int attempt) {
+            transport.up();
+            transport.frame(unsequenced(fixtures::coinbaseL2Snapshot("ETH-USD", {{99, 2}}, {{101, 4}})));
+            transport.repeatingFrame(5ms, unsequenced(fixtures::coinbaseL2Update("ETH-USD", {{"bid", 99, 3}})));
+            if (attempt == 1 || recoversOnReplay) {
+                transport.frame(unsequenced(fixtures::coinbaseL2Snapshot("BTC-USD", {{99, 2}}, {{101, 4}})));
+                if (attempt > 1)
+                    transport.repeatingFrame(5ms, unsequenced(fixtures::coinbaseL2Update("BTC-USD", {{"bid", 99, 3}})));
+            }
+        };
+        create(); engine->subscribeToSymbols({"ETH-USD"});
+        engine->start();
+        const int expectedCloses = recoversOnReplay ? 1 : 2;
+        ASSERT_TRUE(scenario->wait([&](auto& s) {
+            return s.ups == expectedCloses + 1 && s.sends.size() >= (recoversOnReplay ? 8u : 15u);
+        }, 5s));
+        // Several more recovery intervals: a recovered book stays healthy,
+        // and a still-wedged book cannot spend more than two shared reconnects.
+        EXPECT_FALSE(scenario->wait([&](auto& s) { return s.closes > expectedCloses; }, 400ms));
+        engine->stop();
+        EXPECT_EQ(scenario->closes, expectedCloses);
+        EXPECT_EQ(scenario->attempts.size(), expectedCloses + 1);
+    }
+}
+
+TEST_F(EngineReconnect, ProviderErrorLogsRecentScopedUnsubscribeWithoutChangingHandling) {
+    policy.level2Stale = 40ms;
+    scenario->onAttempt = [](auto& transport, int) {
+        transport.up();
+        transport.frame(R"({"type":"error","message":"before recovery"})");
+    };
+    std::atomic<bool> completed{false};
+    scenario->onSend = [&](auto& transport, size_t count) {
+        if (count == 4)
+            transport.frame(R"({"type":"error","message":"unsubscribe rejected"})");
+        if (count == 5) {
+            transport.frame(unsequenced(fixtures::coinbaseL2Snapshot("BTC-USD", {{99, 2}}, {{101, 4}})));
+            transport.frame(R"({"type":"error","message":"after snapshot"})");
+            completed = true;
+            transport.frame(R"({"channel":"heartbeats"})");
+        }
+    };
+    create();
+    std::vector<std::string> errors;
+    StopEngine stop{engine.get()};
+    engine->onError([&](const auto& error) { errors.push_back(error); });
+    testing::internal::CaptureStderr();
+    engine->start();
+    const bool done = scenario->wait([&](auto&) { return completed.load(); }, 5s);
+    engine->stop();
+    const auto output = testing::internal::GetCapturedStderr();
+    ASSERT_TRUE(done);
+    EXPECT_EQ(scenario->closes, 0);
+    EXPECT_EQ(errors, (std::vector<std::string>{"before recovery", "unsubscribe rejected", "after snapshot"}));
+    const std::string prefix = "Provider error after scoped recovery frame: product=BTC-USD frameType=unsubscribe channel=level2";
+    const auto first = output.find(prefix);
+    ASSERT_NE(first, std::string::npos);
+    EXPECT_NE(output.substr(first, output.find('\n', first) - first).find("error=unsubscribe rejected"), std::string::npos);
+    const auto second = output.find(prefix, first + 1);
+    ASSERT_NE(second, std::string::npos);
+    EXPECT_NE(output.substr(second, output.find('\n', second) - second).find("error=after snapshot"), std::string::npos);
+    EXPECT_EQ(output.find(prefix, second + 1), std::string::npos);
+}
+
 TEST_F(EngineReconnect, FailureBudgetResetsOnlyAfterSnapshotFollowedByUpdates) {
     policy.level2Stale = 30ms;
     policy.level2RetryMaximum = 120ms;

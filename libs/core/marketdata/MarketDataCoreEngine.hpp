@@ -185,9 +185,11 @@ private:
     struct ProductLiveness {
         int64_t lastLevel2Ms;
         int64_t resubscribeMs = -1; // cleared only by a valid snapshot
+        int64_t lastRecoveryUnsubscribeMs = -1; // diagnostic, current connection only
         int64_t retryMs = 0, quietMs = 0;
         unsigned failures = 0, reconnectEscalations = 0;
         bool snapshotAccepted = false;
+        bool everAccepted = false; // survives reconnects; a known product may need shared recovery
         // Bounded snapshot evidence, not a shadow book. An update invalidates
         // the comparison baseline; only consecutive quiet snapshots compare.
         bool comparableSnapshot = false;

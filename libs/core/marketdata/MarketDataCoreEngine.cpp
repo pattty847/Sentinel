@@ -95,6 +95,7 @@ MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth, const ServerMdcC
                 state.lastLevel2Ms = nowMs;
                 // A replay is another snapshot attempt, not proof of recovery.
                 state.resubscribeMs = state.failures ? nowMs : -1;
+                state.lastRecoveryUnsubscribeMs = -1;
                 state.snapshotAccepted = state.comparableSnapshot = false;
             }
             {
@@ -305,6 +306,12 @@ void MarketDataCoreEngine::sendSubscriptionMessage(const std::string& type,
         auto redacted = nlohmann::json::parse(frame);
         if (redacted.contains("jwt")) redacted["jwt"] = "<redacted>";
         sLog_Data("WS " << type << " frame: " << redacted.dump());
+        if (level2Only && type == "unsubscribe") {
+            const auto nowMs = steadyClockMs();
+            for (const auto& product : symbols)
+                if (auto it = m_productLiveness.find(product); it != m_productLiveness.end())
+                    it->second.lastRecoveryUnsubscribeMs = nowMs;
+        }
         m_transport->send(frame);
     }
 }
@@ -356,6 +363,14 @@ void MarketDataCoreEngine::dispatch(const nlohmann::json& message) {
             std::visit([this, &message](auto&& ev) {
                 using T = std::decay_t<decltype(ev)>;
                 if constexpr (std::is_same_v<T, ProviderErrorEvent>) {
+                    const auto nowMs = steadyClockMs();
+                    for (const auto& [product, state] : m_productLiveness) {
+                        const auto sentMs = state.lastRecoveryUnsubscribeMs;
+                        if (sentMs >= 0 && nowMs - sentMs <= 5000)
+                            sLog_Warning("Provider error after scoped recovery frame: product=" << product
+                                         << " frameType=unsubscribe channel=level2 elapsedMs=" << (nowMs - sentMs)
+                                         << " error=" << ev.message);
+                    }
                     sLog_Error("Provider error: " << ev.message << " | raw=" << message.dump());
                     emitError(ev.message);
                 } else if constexpr (std::is_same_v<T, SubscriptionAckEvent>) {
@@ -553,6 +568,7 @@ void MarketDataCoreEngine::handleOrderBookSnapshot(const nlohmann::json& event,
         state.snapshotHash2 = snapshotHash2;
         state.snapshotLevels = snapshotLevels;
         state.snapshotAccepted = state.comparableSnapshot = true;
+        state.everAccepted = true;
         state.resubscribeMs = -1;
     }
     const int64_t envelopeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -658,7 +674,7 @@ void MarketDataCoreEngine::checkLevel2Silence(int64_t nowMs) {
                 [&](const auto& peer) {
                     return peer.first != product && peer.second.snapshotAccepted;
                 });
-            const bool reconnect = state.reconnectEscalations < 2 && !healthyPeer;
+            const bool reconnect = state.reconnectEscalations < 2 && (!healthyPeer || state.everAccepted);
             // One error per backed-off attempt, never one per watchdog tick.
             sLog_Error("Level2 snapshot still missing: product=" << product << " failures=" << state.failures
                        << " retryMs=" << state.retryMs << " reconnect=" << reconnect);
