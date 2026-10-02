@@ -2,6 +2,7 @@
 #include "../UnifiedGridRenderer.h"
 #include "../ChartModeController.h"
 #include "../themes/ThemeBridge.hpp"
+#include "../config/AgentHostMode.hpp"
 #include "../../core/SentinelLogging.hpp"
 #include <QQmlContext>
 #include <QSettings>
@@ -29,6 +30,8 @@ static void addSentinelChartsImportPath(QQmlEngine* engine) {
     }
 
     engine->addImportPath("qrc:/qt/qml");
+    // --agent-host: QML is code; the import path next to the build is agent-writable in a worktree.
+    if (AgentHostMode::embeddedQmlOnly()) return;
 
     const QString appDir = QCoreApplication::applicationDirPath();
     const QString candidate = QDir(appDir).absoluteFilePath("../../libs/gui");
@@ -53,10 +56,12 @@ void QmlSceneController::loadQmlSource() {
 
     addSentinelChartsImportPath(m_qquickView->engine());
     
-    if (QFile::exists(qmlPath)) {
+    // --agent-host: never load QML from disk (the build-time source dir and SENTINEL_QML_PATH are
+    // agent-writable for a worktree build); the embedded copy is the reviewed code.
+    if (!AgentHostMode::embeddedQmlOnly() && QFile::exists(qmlPath)) {
         m_qquickView->setSource(QUrl::fromLocalFile(qmlPath));
     } else {
-        m_qquickView->setSource(QUrl("qrc:/Sentinel/Charts/DepthChartView.qml"));
+        m_qquickView->setSource(QUrl(AgentHostMode::embeddedQmlUrl("DepthChartView.qml")));
     }
     sLog_App("QML source: url=" << m_qquickView->source().toString()
              << " localPathTried=" << qmlPath << " status=" << static_cast<int>(m_qquickView->status()));

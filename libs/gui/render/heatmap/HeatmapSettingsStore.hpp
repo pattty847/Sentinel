@@ -34,7 +34,7 @@ public:
 private:
     HeatmapChartSettings loadAt(const QString &prefix, HeatmapChartSettings defaults) const;
     void saveAt(const QString &prefix, HeatmapChartSettings value);
-    QSettings owned_{"Sentinel", "SentinelTerminal"};
+    QSettings owned_{QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal"}; // process default format: INI under --agent-host
     QSettings *settings_ = &owned_;
 };
 } // namespace heatmap

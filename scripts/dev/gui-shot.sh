@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 # gui-shot.sh: client for scripts/dev/gui-host.py. Lets a sandboxed agent (no window server)
-# start the GUI from its own worktree build, drive the Agent API and read screenshots.
+# start the GUI, drive the Agent API and read screenshots.
 #
-#   scripts/dev/gui-shot.sh launch [worktree] [--renderer gpu|legacy] [--replace]
-#   scripts/dev/gui-shot.sh shot <name> [--after <operationId>] [--settle] [--target heatmap|telemetry|toolbar|settings[:Tab]]
+#   scripts/dev/gui-shot.sh binaries                                  # what launch accepts
+#   scripts/dev/gui-shot.sh launch [--binary main|<id>] [--renderer gpu|legacy] [--replace]
+#   scripts/dev/gui-shot.sh shot <name> [--after <operationId>] [--settle] [--target heatmap|lab|telemetry|toolbar|settings[:Tab]]
 #   scripts/dev/gui-shot.sh api GET|POST </api/v1/...> [json]       # state, viewport, heatmap/settings ...
 #   scripts/dev/gui-shot.sh status | stop
 #
-# launch defaults to the current worktree (build it first). It prints the session JSON, with
-# `port` (the Agent API of that GUI) and `shotDir`. shot prints the absolute PNG path: read it
-# directly (Codex and Claude both open local images). If the host is not running, ask the
-# orchestrator to start it (scripts/dev/gui-host.py); nothing here starts it.
-# Needs curl and jq. Privacy: never target=main (the host refuses it).
+# The host never runs a path you name: `main` is the main checkout's build, and an <id> is a build
+# of a branch the orchestrator blessed after review (`gui-host.py bless <worktree>`). So your own
+# unreviewed worktree build cannot be launched; ask the orchestrator to bless it after review.
+# launch prints the session JSON with `port` (that GUI's Agent API) and `shotDir`. shot prints the
+# absolute PNG path: read it directly (Codex and Claude both open local images). If the host is
+# not running, ask the orchestrator to start it (scripts/dev/gui-host.py); nothing here starts it.
+# Needs curl and jq. Screen grabs (target=main) are refused by the GUI itself in this mode.
 set -euo pipefail
 
 HOST=${GUI_HOST_URL:-http://127.0.0.1:${GUI_HOST_PORT:-17190}}
@@ -34,18 +37,18 @@ session_port() {
 cmd=${1:-}; shift || true
 case "$cmd" in
     launch)
-        wt=$(git rev-parse --show-toplevel 2>/dev/null || pwd); renderer=gpu; replace=false
+        binary=main; renderer=gpu; replace=false
         while (( $# )); do
             case "$1" in
+                --binary) binary=${2:?--binary needs main|<id>}; shift 2 ;;
                 --renderer) renderer=${2:?--renderer needs gpu|legacy}; shift 2 ;;
                 --replace) replace=true; shift ;;
-                -*) die "unknown flag $1" ;;
-                *) wt=$1; shift ;;
+                *) die "unknown argument $1 (launch takes --binary main|<id>, never a path)" ;;
             esac
         done
-        wt=$(cd "$wt" && pwd -P) || die "no such worktree: $wt" # the host resolves paths from its own cwd
-        host POST /launch "$(jq -n --arg w "$wt" --arg r "$renderer" --argjson p "$replace" \
-            '{worktree:$w, renderer:$r, replace:$p}')" ;;
+        host POST /launch "$(jq -n --arg b "$binary" --arg r "$renderer" --argjson p "$replace" \
+            '{binary:$b, renderer:$r, replace:$p}')" ;;
+    binaries) host GET /binaries ;;
     shot)
         name=${1:?usage: shot <name> [--after <op>] [--settle] [--target T]}; shift
         body=$(jq -n --arg n "$name" '{name:$n}')

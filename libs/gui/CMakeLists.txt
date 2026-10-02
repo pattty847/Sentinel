@@ -8,6 +8,8 @@ set(GRID_CORE_SOURCES
     PerformanceMonitor.hpp
     TradeInputManager.hpp
     TradeInputManager.cpp
+    config/AgentHostMode.cpp
+    config/AgentHostMode.hpp
     config/GuiConfigStore.cpp
     config/GuiConfigStore.hpp
 

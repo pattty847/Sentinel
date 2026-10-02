@@ -1,5 +1,6 @@
 // Sentinel — StockChartDock
 #include "StockChartDock.hpp"
+#include "../config/AgentHostMode.hpp"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -109,11 +110,13 @@ void StockChartDock::buildUi() {
 
     const QString appDir = QCoreApplication::applicationDirPath();
     const QString modPath = QDir(appDir).absoluteFilePath("../../libs/gui");
-    if (QFile::exists(QDir(modPath).filePath("qmldir")))
+    if (!AgentHostMode::embeddedQmlOnly() && QFile::exists(QDir(modPath).filePath("qmldir"))) // --agent-host: no QML from disk
         m_quickView->engine()->addImportPath(modPath);
 
     // Try QRC first, fall back to source dir in dev builds
-    if (QFile::exists(":/Sentinel/Charts/StockChartView.qml"))
+    if (AgentHostMode::embeddedQmlOnly())
+        m_quickView->setSource(QUrl(AgentHostMode::embeddedQmlUrl("StockChartView.qml")));
+    else if (QFile::exists(":/Sentinel/Charts/StockChartView.qml"))
         m_quickView->setSource(QUrl("qrc:/Sentinel/Charts/StockChartView.qml"));
     else if (QFile::exists(":/qt/qml/Sentinel/Charts/StockChartView.qml"))
         m_quickView->setSource(QUrl("qrc:/qt/qml/Sentinel/Charts/StockChartView.qml"));

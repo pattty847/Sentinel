@@ -2,6 +2,7 @@
 Sentinel — LabDock
 */
 #include "LabDock.hpp"
+#include "../config/AgentHostMode.hpp"
 #include <QVBoxLayout>
 #include <QQuickView>
 #include <QQuickWindow>
@@ -37,10 +38,12 @@ void LabDock::buildUi() {
     // Fallback: add build directory path for development
     const QString appDir = QCoreApplication::applicationDirPath();
     const QString qmlModulePath = QDir(appDir).absoluteFilePath("../../libs/gui");
-    if (QFile::exists(QDir(qmlModulePath).filePath("qmldir"))) {
+    if (!AgentHostMode::embeddedQmlOnly() && QFile::exists(QDir(qmlModulePath).filePath("qmldir"))) { // --agent-host: no QML from disk
         m_qquickView->engine()->addImportPath(qmlModulePath);
     }
-    if (QFile::exists(":/Sentinel/Charts/LabView.qml")) {
+    if (AgentHostMode::embeddedQmlOnly()) {
+        m_qquickView->setSource(QUrl(AgentHostMode::embeddedQmlUrl("LabView.qml")));
+    } else if (QFile::exists(":/Sentinel/Charts/LabView.qml")) {
         m_qquickView->setSource(QUrl("qrc:/Sentinel/Charts/LabView.qml"));
     } else if (QFile::exists(":/qt/qml/Sentinel/Charts/LabView.qml")) {
         m_qquickView->setSource(QUrl("qrc:/qt/qml/Sentinel/Charts/LabView.qml"));

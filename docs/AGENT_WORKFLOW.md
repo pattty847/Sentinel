@@ -66,7 +66,9 @@ orchestrator's Claude Code memory (`sentinel-roadmap`, `codex-delegation`,
   `-m <model>` and `-c sandbox_workspace_write.writable_roots=[...]`; never put backticks
   in a double-quoted prompt (the shell eats them). Its sandbox cannot start the GUI, but it
   can take screenshots through the GUI host (`scripts/dev/gui-shot.sh`, AGENTS.md section 4b):
-  the orchestrator keeps `scripts/dev/gui-host.py` running outside the sandbox.
+  the orchestrator keeps `scripts/dev/gui-host.py` running outside the sandbox and blesses a
+  branch's build (`gui-host.py bless <worktree>`) only after its cross-vendor review, because the
+  host runs the blessed copy with the owner's privileges. Until then Codex can screenshot `main`.
 - Claude subagents: can launch the GUI on a separate `--api-port` with `--no-screener`;
   screenshots `target=heatmap` only; never run the GUI binary with `--help` (it starts a
   full GUI).

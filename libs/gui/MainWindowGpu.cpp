@@ -46,6 +46,7 @@
 #include "widgets/ServiceLocator.hpp"
 #include "PerformanceMonitor.hpp"
 #include "mainwindow/DockFactory.h"
+#include "config/AgentHostMode.hpp"
 #include "mainwindow/QmlSceneController.h"
 #include "mainwindow/LayoutOrchestrator.h"
 #include "mainwindow/MenuBuilder.h"
@@ -532,6 +533,8 @@ void MainWindowGPU::setupGuiApiServer() {
     if (screenshotDir.isEmpty()) {
         screenshotDir = QDir::currentPath() + "/screenshots";
     }
+    // --agent-host: the host owns this directory; config and the env var must not redirect it.
+    if (AgentHostMode::active()) screenshotDir = AgentHostMode::screenshotDir();
 
     m_guiApiServer = std::make_unique<GuiApiServer>(this,
                                                     m_heatmapDock ? m_heatmapDock->qquickView() : nullptr,
