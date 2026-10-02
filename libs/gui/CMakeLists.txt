@@ -162,6 +162,7 @@ set(WIDGET_SOURCES
     "widgets/HeatmapSettingsDialog.cpp"
     "widgets/HeatmapTelemetryDock.cpp"
     "widgets/TopToolbar.cpp"
+    "widgets/LiquidityRangeSlider.cpp"
     "widgets/WatchlistDock.cpp"
     "widgets/StockChartDock.cpp"
     "widgets/TradeBlotterDock.cpp"

@@ -200,7 +200,7 @@ TEST(HeatmapSettingsDialogTest, EveryTabShowsTheModel) {
     controls.setDialog(&dialog);
     QStringList tabs;
     for (int i = 0; i < dialog.tabs()->count(); ++i) tabs << dialog.tabs()->tabText(i);
-    EXPECT_EQ(tabs, (QStringList{"Tick", "Look", "Budgets", "Live", "Debug", "TPO"}));
+    EXPECT_EQ(tabs, (QStringList{"Chart", "Tick", "Look", "Budgets", "Live", "Debug", "TPO"}));
     EXPECT_EQ(child<QComboBox>(dialog, "tickMode")->currentData().toString(), "manual");
     // No chart, so nothing offered: the locked $5 shows, marked unavailable, and
     // nothing is selectable.

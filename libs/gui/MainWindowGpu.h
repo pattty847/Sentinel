@@ -122,6 +122,7 @@ private:
     void onOpenSecFilingViewer();
     void onOpenFontSettings();
     HeatmapSettingsDialog* openHeatmapSettingsDialog();
+    QString saveChartScreenshot();
 
     std::unique_ptr<IGridDataSource> m_dataSource;
     // Declared after the source: the adapter/data thread dies before the client.

@@ -380,31 +380,36 @@ void MainWindowGPU::setupUI() {
             }
             renderer->setProperty("heatmapLiquidityThreshold", threshold);
         });
-        connect(m_heatmapDock->toolbar(), &TopToolbar::liquidityLabelModeChanged, this, [this](int mode) {
-            if (!m_qmlController) return;
-            auto* renderer = m_qmlController->getUnifiedGridRenderer();
-            if (renderer) {
-                renderer->setProperty("liquidityLabelMode", mode);
-            }
-        });
+        // Label currency, labels on/off and the GPU range slider go through the
+        // chart settings model (HeatmapChartControls::setToolbar).
         connect(m_heatmapDock->toolbar(), &TopToolbar::colorPresetSelected, this, [this](const QString& preset) {
             // The chart palette is a persisted chart setting both renderers draw (S6b).
             if (const auto error = m_heatmapSettings->apply({{"palettePreset", preset}}); !error.isEmpty())
                 sLog_Warning("Palette preset rejected: " << preset << " " << error);
         });
-        connect(m_heatmapDock->toolbar(), &TopToolbar::chartTypeSelected, this, [this](const QString& type) {
-            if (!m_qmlController) return;
-            auto* renderer = m_qmlController->getUnifiedGridRenderer();
-            if (!renderer) return;
-            const int style = (type == "Hollow") ? 1 : (type == "Line") ? 2 : 0;
-            renderer->setCandleStyle(style);
-        });
+        // Candle style: HeatmapChartControls (the toolbar combo and the chart menu).
         connect(m_heatmapDock->toolbar(), &TopToolbar::subscribeRequested, this, &MainWindowGPU::onSubscribe);
         // The tick selector (S6c) reads and writes the chart settings model.
         m_heatmapControls->setToolbar(m_heatmapDock->toolbar());
         connect(m_heatmapDock->toolbar(), &TopToolbar::settingsRequested, this, [this]() {
             if (auto* dialog = openHeatmapSettingsDialog()) dialog->activateWindow();
         });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::screenshotRequested, this, [this]() { saveChartScreenshot(); });
+        // The chart settings menu (gear): the actions this window owns.
+        HeatmapChartControls::MenuHooks hooks;
+        hooks.openSettings = [this](const QString& tab) {
+            if (auto* dialog = openHeatmapSettingsDialog()) {
+                for (int i = 0; i < dialog->tabs()->count(); ++i)
+                    if (dialog->tabs()->tabText(i) == tab) dialog->tabs()->setCurrentIndex(i);
+                dialog->activateWindow();
+            }
+        };
+        hooks.screenshot = [this]() { saveChartScreenshot(); };
+        hooks.saveLayout = [this]() { onSaveLayout(); };
+        hooks.restoreLayout = [this]() { onRestoreLayout(); };
+        hooks.resetLayout = [this]() { onResetLayout(); };
+        hooks.fontSettings = [this]() { onOpenFontSettings(); };
+        m_heatmapControls->setMenuHooks(std::move(hooks));
         connect(m_heatmapDock->toolbar(), &TopToolbar::timeframeSelected, this, [this](const QString& label) {
             const int ms = timeframeMsFromLabel(label);
             if (ms <= 0) {
@@ -416,6 +421,31 @@ void MainWindowGPU::setupUI() {
     }
     
     setUpdatesEnabled(true);
+}
+
+// The toolbar camera and the chart menu: the chart's own scene-graph grab (never
+// screen pixels) into the configured screenshot directory.
+QString MainWindowGPU::saveChartScreenshot() {
+    QQuickView* view = m_heatmapDock ? m_heatmapDock->qquickView() : nullptr;
+    if (!view || !view->isVisible()) {
+        sLog_Warning("Chart screenshot skipped: the chart is not visible");
+        return {};
+    }
+    const auto& clientConfig = GuiConfigStore::instance().clientConfig();
+    QString dirPath = qEnvironmentVariable("SENTINEL_GUI_SCREENSHOT_DIR");
+    if (dirPath.isEmpty()) dirPath = QString::fromStdString(clientConfig.gui.screenshotDir);
+    if (dirPath.isEmpty()) dirPath = QDir::currentPath() + "/screenshots";
+    QDir dir(dirPath);
+    const QImage image = view->grabWindow();
+    const QString path = dir.filePath(QDateTime::currentDateTimeUtc().toString("yyyyMMdd_HHmmss_zzz") + "_chart_" +
+                                      m_currentSymbol + ".png");
+    if (image.isNull() || !dir.mkpath(".") || !image.save(path, "PNG")) {
+        sLog_Warning("Chart screenshot failed: path=" << path);
+        return {};
+    }
+    sLog_App("Saved chart screenshot to " << path);
+    statusBar()->showMessage("Screenshot saved: " + path, 5000);
+    return path;
 }
 
 HeatmapSettingsDialog* MainWindowGPU::openHeatmapSettingsDialog() {
@@ -592,6 +622,17 @@ void MainWindowGPU::setupGuiApiServer() {
             }
             m_heatmapTelemetryDock->refresh();
             return m_heatmapTelemetryDock->grab().toImage();
+        }
+        if (target == "chartmenu") {
+            auto* toolbar = m_heatmapDock ? m_heatmapDock->toolbar() : nullptr;
+            if (!toolbar || !toolbar->chartMenu()) {
+                if (error) *error = "toolbar_not_visible";
+                return {};
+            }
+            m_heatmapControls->refreshChartMenu();
+            toolbar->chartMenu()->ensurePolished();
+            toolbar->chartMenu()->adjustSize();
+            return toolbar->chartMenu()->grab().toImage();
         }
         if (target == "toolbar") {
             auto* toolbar = m_heatmapDock ? m_heatmapDock->toolbar() : nullptr;
@@ -1085,6 +1126,11 @@ void MainWindowGPU::connectMarketDataSignals() {
                 Qt::QueuedConnection);
     }
 
+    if (m_modeController && m_heatmapDock && m_heatmapDock->toolbar()) {
+        // Candles toggled elsewhere (the Agent API layers route) show on the toolbar too.
+        connect(m_modeController, &ChartModeController::candlesEnabledChanged, m_heatmapDock->toolbar(),
+                &TopToolbar::setCandlesChecked);
+    }
     if (m_modeController) {
         connect(m_modeController,
                 &ChartModeController::primaryFieldChanged,
