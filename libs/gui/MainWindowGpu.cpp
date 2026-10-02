@@ -158,7 +158,8 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
                 }
             }
         }
-        if (!config.defaultSymbols.empty() && !m_userSubscribed) {
+        if (!config.defaultSymbols.empty() && !m_userSubscribed
+            && AgentHostMode::symbolAllowed(QString::fromStdString(config.defaultSymbols.front()))) {
             const QString defaultSymbol = QString::fromStdString(config.defaultSymbols.front());
             sLog_App("Default symbol from server config: symbol=" << defaultSymbol
                      << " prev=" << m_currentSymbol);
@@ -195,7 +196,8 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     m_modeController = new ChartModeController(this);
     if (m_qmlController) {
         m_qmlController->setChartModeController(m_modeController);
-        const QString defaultSymbol = QStringLiteral("BTC-USD");
+        // --agent-host: start on an allowlisted symbol, or on none (stay unsubscribed).
+        const QString defaultSymbol = AgentHostMode::startupSymbol(QStringLiteral("BTC-USD"));
         m_qmlController->updateSymbolInContext(defaultSymbol);  // Default symbol
         m_currentSymbol = defaultSymbol;
     }

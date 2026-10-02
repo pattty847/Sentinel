@@ -74,6 +74,10 @@ QString screenshotDir() { return g_active ? g_screenshotDir : QString(); }
 bool tradingAllowed() { return !g_active; }
 void setSymbolAllowlist(const QStringList& symbols) { g_symbols = symbols; }
 bool symbolAllowed(const QString& symbol) { return !g_active || g_symbols.contains(symbol); }
+QString startupSymbol(const QString& preferred) {
+    if (!g_active || g_symbols.contains(preferred)) return preferred;
+    return g_symbols.isEmpty() ? QString() : g_symbols.first();
+}
 
 bool screenshotTargetAllowed(const QString& target) {
     if (!g_active) return true;

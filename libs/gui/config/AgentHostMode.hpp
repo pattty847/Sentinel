@@ -28,6 +28,10 @@ bool tradingAllowed();            // false when active: drop every TradeCommand 
 // list means no symbol changes at all. Exact, case-sensitive match. True when inactive.
 void setSymbolAllowlist(const QStringList& symbols);
 bool symbolAllowed(const QString& symbol);
+// The symbol a GUI should start on: `preferred` when inactive or allowed, else the first allowlisted
+// symbol, else empty (stay unsubscribed). The GUI's hard-coded BTC-USD and the server's default symbol
+// both go through this, and RemoteGridDataSource refuses the rest at the send boundary.
+QString startupSymbol(const QString& preferred);
 // True when inactive. When active: only chart and widget grabs (heatmap, lab, telemetry, toolbar,
 // settings, settings:<Tab>), never screen pixels.
 bool screenshotTargetAllowed(const QString& target);

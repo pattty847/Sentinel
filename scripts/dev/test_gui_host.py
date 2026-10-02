@@ -72,15 +72,15 @@ class HostTrust(unittest.TestCase):
             self.binary(mode=mode)
             self.assertRefused("writable_binary", gh.resolve_binary, "main")
 
-    def test_main_symlink_is_resolved_not_trusted_blindly(self):
+    def test_main_symlink_out_of_the_checkout_is_refused_even_with_the_flag(self):
         elsewhere = os.path.join(os.path.realpath(self.tmp.name), "agent-build")
         with open(elsewhere, "wb") as f:
-            f.write(UNFLAGGED)
+            f.write(FLAGGED)  # carries the flag, owned by us, not writable by others: only containment can refuse it
         os.chmod(elsewhere, 0o755)
         link = os.path.join(self.repo, gh.GUI_REL)
         os.makedirs(os.path.dirname(link))
-        os.symlink(elsewhere, link)  # the flag check runs on the real file, so it still refuses
-        self.assertRefused("no_agent_host_flag", gh.resolve_binary, "main")
+        os.symlink(elsewhere, link)
+        self.assertRefused("outside_main", gh.resolve_binary, "main")
 
     def test_any_other_binary_name_or_path_is_refused(self):
         self.binary()

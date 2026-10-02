@@ -24,8 +24,9 @@ The child gets a minimal environment (no DYLD_*, QT_*, QML_* from this process's
 
 nohup keeps it alive after the session that started it ends, so stop it on purpose (`pkill -TERM
 -f gui-host.py`; SIGTERM ends the GUI too). If it is SIGKILLed, its GUI stays up until the next host
-start, which ends it (pidfile). Idle timeout GUI_HOST_TTL_S (default 1800). Known gap: the GUI has no
-parent-liveness lease, so a host that is killed and never restarted leaves one GUI running.
+start, which ends it (pidfile). Idle timeout GUI_HOST_TTL_S (default 1800) is enforced BY the host, so
+it does not bound an orphan: the GUI has no parent-liveness lease, and a host that is SIGKILLed and
+never restarted leaves one GUI running until someone ends it (`pkill -f 'sentinel-gui.*--agent-host'`).
 
 API (JSON; every POST needs the header `X-Gui-Host: 1`, which a browser page cannot send
 cross-origin without a preflight this server never answers; the Host header must be loopback):
@@ -132,6 +133,8 @@ def resolve_binary(which="main"):
     path = os.path.realpath(os.path.join(REPO, GUI_REL))
     if not os.path.isfile(path) or not os.access(path, os.X_OK):
         raise HostError(412, "no_main_binary", f"no main-checkout build at {GUI_REL} (the orchestrator builds landed main)")
+    if not path.startswith(os.path.realpath(REPO) + os.sep):  # a symlink must not lead out of the main checkout
+        raise HostError(412, "outside_main", f"{path} is not inside the main checkout {REPO}")
     st = os.stat(path)
     if st.st_uid != os.getuid():
         raise HostError(412, "bad_owner", f"{path} is not owned by this user")

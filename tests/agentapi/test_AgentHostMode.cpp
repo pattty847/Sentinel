@@ -125,6 +125,22 @@ TEST_F(AgentHostModeTest, ANewNestedDirectoryOutsideTheForbiddenRootsIsCreatedAn
     EXPECT_EQ(AgentHostMode::screenshotDir(), QFileInfo(dir.path()).canonicalFilePath() + "/a/b/c/screenshots");
 }
 
+TEST_F(AgentHostModeTest, StartupSymbolIsAnAllowlistedOneOrNoneAtAll) {
+    EXPECT_EQ(AgentHostMode::startupSymbol("BTC-USD"), "BTC-USD") << "inactive: the caller's choice stands";
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    QString error;
+    ASSERT_TRUE(AgentHostMode::activate(dir.path(), {}, &error)) << qPrintable(error);
+    // The GUI starts on a hard-coded BTC-USD and on the server's default symbol, then resubscribes it
+    // on every reconnect; none of that may reach the recorder for a symbol outside the allowlist.
+    EXPECT_EQ(AgentHostMode::startupSymbol("BTC-USD"), "") << "empty allowlist: stay unsubscribed";
+    AgentHostMode::setSymbolAllowlist({"ETH-USD", "SOL-USD"});
+    EXPECT_EQ(AgentHostMode::startupSymbol("BTC-USD"), "ETH-USD") << "allowlist excludes BTC: first allowed symbol";
+    EXPECT_EQ(AgentHostMode::startupSymbol("SOL-USD"), "SOL-USD") << "an allowed preference stands";
+    AgentHostMode::setSymbolAllowlist({"BTC-USD"});
+    EXPECT_EQ(AgentHostMode::startupSymbol("BTC-USD"), "BTC-USD");
+}
+
 TEST_F(AgentHostModeTest, SymlinkIntoAForbiddenRootIsResolvedBeforeTheCheck) {
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
@@ -165,45 +181,77 @@ TEST(AgentHostModeSources, NoNativeFormatQSettingsInTheGui) {
     EXPECT_TRUE(offenders.isEmpty()) << "native-format QSettings (see comment): " << qPrintable(offenders.join(", "));
 }
 
-// Regression guard: an agent-run GUI (--agent-host) must never send a TradeCommand. Every trade path
-// (dock buttons, shortcuts, the chart's TP/SL controls that /api/v1/input can reach) ends in
-// IGridDataSource::sendTradeCommand -> RemoteGridDataSource -> SentinelStreamClient. The guard sits in
-// RemoteGridDataSource; this fails if a second place starts talking to the stream client directly, or
-// if the guard is removed or moved after the send.
-TEST(AgentHostModeSources, TradeCommandsHaveOneChokePointAndItIsGuarded) {
-    const QRegularExpression directSend(R"(\bm_client\s*\.\s*sendTradeCommand\s*\()");
-    const QRegularExpression anyClientSend(R"((\w+)\s*(\.|->)\s*sendTradeCommand\s*\()");
-    QStringList viaInterface, directSenders;
-    QString chokeFile;
+// Regression guard: an agent-run GUI (--agent-host) must not send a TradeCommand or an algo start/stop,
+// and no outbound request may name a symbol outside the allowlist (a subscribe makes the recorder
+// subscribe upstream). Every such message leaves the GUI through RemoteGridDataSource -> the stream
+// client, so the guard lives there. This fails if (a) a second place talks to the stream client's
+// trade/algo senders, (b) a sender in the data source loses its guard or the guard comes after the send,
+// or (c) a new outbound method appears that nobody has classified.
+TEST(AgentHostModeSources, EveryOutboundRequestInTheDataSourceIsGuarded) {
+    const QSet<QString> guarded{"subscribe", "requestHeatmapHistory", "registerRecordingView",
+                                "requestRecordingHeatmapHistory", "requestFootprintHistory",
+                                "requestCandleHistory", "requestTpoHistory", "sendTradeCommand", "sendAlgoCommand"};
+    // Connection management, releases and cancels: they name no symbol the server has not already seen
+    // or carry no request.
+    const QSet<QString> exempt{"connectToServer", "unsubscribe", "releaseRecordingView", "cancelTpoHistory",
+                               "setCandleDeliveryGeneration"};
+    QFile file(QString(SENTINEL_SOURCE_DIR) + "/libs/gui/datasources/RemoteGridDataSource.cpp");
+    ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+    const QString text = QString::fromUtf8(file.readAll());
+
+    const QRegularExpression definition(R"(^[\w:<>&\* ]*\bRemoteGridDataSource::(\w+)\s*\()",
+                                        QRegularExpression::MultilineOption);
+    const QRegularExpression send(R"(\bm_client\s*\.\s*(\w+)\s*\()");
+    QList<QRegularExpressionMatch> defs;
+    for (auto it = definition.globalMatch(text); it.hasNext();) defs << it.next();
+    ASSERT_GT(defs.size(), 20) << "the definition scan found too little";
+
+    QSet<QString> seen;
+    for (int i = 0; i < defs.size(); ++i) {
+        const int begin = defs[i].capturedStart();
+        const int end = i + 1 < defs.size() ? defs[i + 1].capturedStart() : text.size();
+        const QString body = text.mid(begin, end - begin);
+        for (auto it = send.globalMatch(body); it.hasNext();) {
+            const auto m = it.next();
+            const QString name = m.captured(1);
+            if (guarded.contains(name)) {
+                seen << name;
+                // Either the policy directly (trade/algo) or the symbol helper that wraps it.
+                const int guard = body.indexOf(QRegularExpression(R"(AgentHostMode::|\bsymbolPermitted\s*\()"));
+                EXPECT_TRUE(guard >= 0 && guard < m.capturedStart())
+                    << qPrintable(defs[i].captured(1)) << " sends " << qPrintable(name) << " without the agent-host guard before it";
+            } else if (!exempt.contains(name)) {
+                ADD_FAILURE() << qPrintable(defs[i].captured(1)) << " sends m_client." << qPrintable(name)
+                              << ": classify it as guarded or exempt in this test (does it name a symbol or trade?)";
+            }
+        }
+    }
+    EXPECT_EQ(seen, guarded) << "every guarded sender must actually be found, or the scan is vacuous";
+    // The helper the symbol guards call must itself consult the allowlist.
+    const int helper = text.indexOf("bool symbolPermitted(");
+    ASSERT_GE(helper, 0) << "symbolPermitted helper not found";
+    const int helperEnd = text.indexOf("\n}\n", helper);
+    EXPECT_TRUE(text.mid(helper, helperEnd - helper).contains("AgentHostMode::symbolAllowed"))
+        << "symbolPermitted must call AgentHostMode::symbolAllowed";
+
+    // Nobody else may reach the trade/algo senders; callers go through m_dataSource->.
+    const QRegularExpression tradeSend(R"((\w+)\s*(\.|->)\s*(sendTradeCommand|sendAlgoCommand)\s*\()");
+    QStringList offenders;
     for (const QString& sub : {QStringLiteral("libs/gui"), QStringLiteral("apps/sentinel_gui")}) {
         QDirIterator it(QString(SENTINEL_SOURCE_DIR) + "/" + sub, {"*.cpp", "*.hpp", "*.h"}, QDir::Files,
                         QDirIterator::Subdirectories);
         while (it.hasNext()) {
             const QString path = it.next();
-            QFile file(path);
-            ASSERT_TRUE(file.open(QIODevice::ReadOnly)) << qPrintable(path);
-            const QString text = QString::fromUtf8(file.readAll());
-            if (directSend.match(text).hasMatch()) {
-                directSenders << path;
-                chokeFile = path;
-            }
-            auto matches = anyClientSend.globalMatch(text);
-            while (matches.hasNext()) {
-                const QString receiver = matches.next().captured(1);
-                if (receiver != "m_dataSource" && receiver != "m_client") viaInterface << path + " (" + receiver + ")";
+            QFile f(path);
+            ASSERT_TRUE(f.open(QIODevice::ReadOnly)) << qPrintable(path);
+            const QString t = QString::fromUtf8(f.readAll());
+            for (auto m = tradeSend.globalMatch(t); m.hasNext();) {
+                const QString receiver = m.next().captured(1);
+                const bool viaDataSource = receiver == "m_dataSource";
+                const bool theGuardedSender = receiver == "m_client" && path.endsWith("/datasources/RemoteGridDataSource.cpp");
+                if (!viaDataSource && !theGuardedSender) offenders << path + " (" + receiver + ")";
             }
         }
     }
-    ASSERT_EQ(directSenders.size(), 1) << "exactly one file may call the stream client's sendTradeCommand: "
-                                       << qPrintable(directSenders.join(", "));
-    EXPECT_TRUE(directSenders.first().endsWith("/datasources/RemoteGridDataSource.cpp")) << qPrintable(directSenders.first());
-    EXPECT_TRUE(viaInterface.isEmpty()) << "trade commands must go through m_dataSource->sendTradeCommand: "
-                                        << qPrintable(viaInterface.join(", "));
-    QFile choke(chokeFile);
-    ASSERT_TRUE(choke.open(QIODevice::ReadOnly));
-    const QString text = QString::fromUtf8(choke.readAll());
-    const int guard = text.indexOf("AgentHostMode::tradingAllowed()");
-    const int send = text.indexOf(QRegularExpression(R"(m_client\s*\.\s*sendTradeCommand\s*\()"));
-    EXPECT_GE(guard, 0) << "the agent-host guard is missing";
-    EXPECT_LT(guard, send) << "the guard must come before the send";
+    EXPECT_TRUE(offenders.isEmpty()) << "trade/algo commands must go through m_dataSource->: " << qPrintable(offenders.join(", "));
 }
