@@ -24,6 +24,8 @@
 #include "../protocol/HeatmapSlice.hpp"
 #include "../config/ConfigTypes.hpp"
 
+namespace sentinel::metrics { class MetricsRegistry; }
+
 class ServerDataModel : public QObject, public IHeatmapDataSource {
     Q_OBJECT
     friend struct TradeOverlayModelTest;
@@ -75,6 +77,10 @@ public:
         return m_recorder ? m_recorder->watermarks(symbol, layer) : recording::BookRecorder::Watermarks{};
     }
 
+    // Recorder and upstream-connection series for GET /metrics. Call once on the
+    // main thread; the samplers read main-thread state, so render on that thread.
+    void registerMetrics(sentinel::metrics::MetricsRegistry& registry);
+
 public slots:
     void onTrade(const Trade& trade);
     void onLiveOrderBookLevelUpdates(const QString& productId,
@@ -112,6 +118,10 @@ private:
     std::unique_ptr<TimeframeAggregator> m_aggregator;
     std::unique_ptr<HeatmapTwapStreamer> m_heatmapStreamer;
     std::atomic<int64_t> m_exchangeOffsetMs{0};
+    // Metrics mirrors. Written on the main thread, except live publish drops
+    // (recorder worker); declared before m_recorder so they outlive its worker.
+    std::atomic<bool> m_mdConnected{false};
+    std::atomic<uint64_t> m_mdTransportUps{0}, m_mdTransportDowns{0}, m_livePublishDrops{0};
     mutable std::mutex m_footprintTradeMutex;
     std::unordered_map<std::string, std::deque<FootprintTradeSample>> m_recentFootprintTrades;
     int64_t m_footprintTradeRetentionMs = 300'000;

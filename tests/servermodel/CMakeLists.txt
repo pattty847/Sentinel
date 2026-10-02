@@ -216,3 +216,12 @@ target_link_libraries(test_heatmap_span_planner PRIVATE sentinel_core GTest::gte
 add_test(NAME HeatmapSpanPlannerTests COMMAND test_heatmap_span_planner)
 set_tests_properties(HeatmapSpanPlannerTests PROPERTIES LABELS "servermodel;heatmap")
 add_dependencies(servermodel_tests test_heatmap_span_planner)
+
+# /metrics wiring of ServerDataModel over the real HTTP route; records into a temp dir.
+find_package(Qt6 REQUIRED COMPONENTS Network)
+add_executable(test_server_metrics test_server_metrics.cpp)
+target_include_directories(test_server_metrics PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_server_metrics PRIVATE sentinel_core GTest::gtest_main Qt6::Core Qt6::Network)
+add_test(NAME ServerMetricsTests COMMAND test_server_metrics)
+set_tests_properties(ServerMetricsTests PROPERTIES LABELS "servermodel")
+add_dependencies(servermodel_tests test_server_metrics)

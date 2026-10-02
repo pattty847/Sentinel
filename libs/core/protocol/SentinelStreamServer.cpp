@@ -2117,6 +2117,11 @@ void SentinelStreamServer::doAccept() {
         });
 }
 
+size_t SentinelStreamServer::sessionCount() {
+    std::lock_guard<std::mutex> lock(m_sessionsMutex);
+    return m_sessions.size();
+}
+
 void SentinelStreamServer::registerSession(const std::shared_ptr<Session>& session) {
     std::lock_guard<std::mutex> lock(m_sessionsMutex);
     m_sessions.insert(session);

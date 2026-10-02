@@ -9,6 +9,12 @@ add_library(sentinel_core
     capture/CaptureApp.cpp
     Version.cpp
     Version.hpp
+    metrics/MetricsRegistry.cpp
+    metrics/MetricsRegistry.hpp
+    metrics/MetricsHttpServer.cpp
+    metrics/MetricsHttpServer.hpp
+    metrics/ProcessMetrics.cpp
+    metrics/ProcessMetrics.hpp
     ConfigLoader.cpp
     ConfigLoader.hpp
     marketdata/MarketDataCoreEngine.cpp
@@ -123,7 +129,8 @@ add_library(sentinel_core
 )
 
 # Find required packages
-find_package(Qt6 REQUIRED COMPONENTS Core)
+# Network: the 127.0.0.1 /ping + /metrics listener (metrics/MetricsHttpServer). No GUI modules.
+find_package(Qt6 REQUIRED COMPONENTS Core Network)
 find_package(yaml-cpp CONFIG REQUIRED)
 find_package(zstd CONFIG REQUIRED)
 # Dependencies found in root CMakeLists.txt via vcpkg
@@ -146,6 +153,7 @@ target_link_libraries(sentinel_core
         OpenSSL::Crypto
         yaml-cpp::yaml-cpp
     PRIVATE
+        Qt6::Network
         nlohmann_json::nlohmann_json
         jwt-cpp::jwt-cpp
         $<IF:$<TARGET_EXISTS:zstd::libzstd_shared>,zstd::libzstd_shared,zstd::libzstd_static>

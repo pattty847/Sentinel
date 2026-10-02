@@ -4,9 +4,8 @@
 #include <QPointer>
 #include <QString>
 #include <QTimer>
-#include <QTcpSocket>
-#include <QHostAddress>
 #include <QStringList>
+#include "metrics/ProcessMetrics.hpp"
 #include <algorithm>
 #include <cctype>
 
@@ -40,39 +39,20 @@ bool SentinelServerApp::initialize() {
                  << " mdcHost=" << m_serverConfig.mdc.host
                  << " defaultSymbols=" << m_serverConfig.defaultSymbols.size());
 
-        // Health endpoint (HTTP over TCP)
-        m_healthServer = new QTcpServer(this);
+        // GET /ping and GET /metrics on 127.0.0.1 (ops/monitoring/README.md).
+        sentinel::metrics::registerProcessMetrics(m_metrics);
+        m_wsLatencyMs = &m_metrics.gauge("sentinel_mdc_ws_latency_ms",
+                                         "Latest Coinbase WebSocket latency (server time minus exchange timestamp).");
+        m_httpServer = std::make_unique<sentinel::metrics::MetricsHttpServer>(m_metrics);
         const QByteArray portEnv = qgetenv("SENTINEL_HEALTH_PORT");
         bool ok = false;
         const int port = portEnv.toInt(&ok);
         const quint16 healthPort = (ok && port > 0) ? static_cast<quint16>(port) : 8090;
-        if (m_healthServer->listen(QHostAddress::LocalHost, healthPort)) {
-            sLog_App("Health endpoint listening on 127.0.0.1:" << healthPort);
-            connect(m_healthServer, &QTcpServer::newConnection, this, [this]() {
-                while (m_healthServer->hasPendingConnections()) {
-                    QTcpSocket* socket = m_healthServer->nextPendingConnection();
-                    connect(socket, &QTcpSocket::readyRead, this, [socket]() {
-                        const QByteArray request = socket->readAll();
-                        const QByteArray firstLine = request.left(request.indexOf('\n')).trimmed();
-                        const bool isPing = firstLine.startsWith("GET /ping");
-                        const QByteArray body = isPing ? QByteArray("OK") : QByteArray("Not Found");
-                        const QByteArray status = isPing ? QByteArray("200 OK") : QByteArray("404 Not Found");
-                        QByteArray response;
-                        response += "HTTP/1.1 " + status + "\r\n";
-                        response += "Content-Type: text/plain\r\n";
-                        response += "Content-Length: " + QByteArray::number(body.size()) + "\r\n";
-                        response += "Connection: close\r\n\r\n";
-                        response += body;
-                        socket->write(response);
-                        socket->flush();
-                        socket->disconnectFromHost();
-                    });
-                    connect(socket, &QTcpSocket::disconnected, socket, &QTcpSocket::deleteLater);
-                }
-            });
+        if (m_httpServer->listen(healthPort)) {
+            sLog_App("Health and metrics endpoint listening on 127.0.0.1:" << healthPort << " (/ping, /metrics)");
         } else {
             sLog_Warning("Health endpoint failed to bind on 127.0.0.1:" << healthPort
-                         << " error=" << m_healthServer->errorString());
+                         << " error=" << m_httpServer->errorString());
         }
 
         // 1. Authenticator (optional: public channels work without key.json)
@@ -107,6 +87,9 @@ bool SentinelServerApp::initialize() {
             sLog_Error("SentinelStreamServer init failed: " << e.what());
             return false;
         }
+        m_serverModel->registerMetrics(m_metrics);
+        m_metrics.gaugeFn("sentinel_stream_sessions", "Open client stream sessions.", {},
+                          [this]() -> std::optional<double> { return double(m_server->sessionCount()); });
         
         // Connect MarketDataCoreEngine -> ServerDataModel via queued invocations
         QPointer<ServerDataModel> modelPtr(m_serverModel.get());
@@ -167,6 +150,7 @@ bool SentinelServerApp::initialize() {
             // per book message: one always-on line per 10 s, every sample as a probe.
             sLog_DataN(10000, "Coinbase WebSocket latency: ms=" << latencyMs);
             sLog_Probe("ws.latency", "ms=" << latencyMs);
+            m_wsLatencyMs->set(latencyMs);
             const auto now = std::chrono::steady_clock::now();
             if (m_server) {
                 static int lastBroadcastMs = -1;
