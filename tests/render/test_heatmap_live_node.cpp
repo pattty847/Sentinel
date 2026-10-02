@@ -599,6 +599,33 @@ TEST_F(LiveNode, MatchedLabelColumnsEqualTheDrawnCellsThroughHandovers) {
     EXPECT_EQ(stats().fallbackSlots.load(), 0u);
     stats().copySegments(drawn);
     EXPECT_GT(matchLabelColumns(*labels[1], drawn, frame().spans.get(), frame().live.get(), ok), 20u);
+    // 3. The same live version, a revised span (new values) whose complete end
+    //    moves INTO the drawn live window: when it is ready the node draws those
+    //    buckets from the span, not from the unchanged live bin.
+    const auto liveBefore = frame().live;
+    const uint64_t liveVersion = stats().liveVersion.load();
+    labels.clear();
+    labels.push_back(labelsFor(*frame().spans, frame().live.get()));
+    spans.rec.revision = 3;
+    {
+        std::vector<FakeSpans::Span> list;
+        for (const int64_t t : {tileBefore, tileBefore + 1}) list.push_back(spans.span(tf, t, T + minute));
+        frame().spans = spans.fake.set(tf, std::move(list)); // the live snapshot stays
+    }
+    labels.push_back(labelsFor(*frame().spans, frame().live.get()));
+    size_t liveLabelColumnsNowSpan = 0;
+    for (uint32_t x = 0; x < labels[0]->key.columns; ++x)
+        liveLabelColumnsNowSpan += labels[0]->liveColumns[x] && !labels[1]->liveColumns[x];
+    ASSERT_GT(liveLabelColumnsNowSpan, 0u) << "the revision takes buckets from the live window";
+    framesOnFallback = 0;
+    for (int i = 0; i < 3000 && (stats().fallbackSlots.load() > 0 || i < 3); ++i) {
+        frameAndCompare();
+        framesOnFallback += stats().fallbackSlots.load() > 0;
+    }
+    frameAndCompare();
+    EXPECT_GT(framesOnFallback, 0u);
+    EXPECT_EQ(frame().live, liveBefore);
+    EXPECT_EQ(stats().liveVersion.load(), liveVersion) << "the live version never changed";
     EXPECT_EQ(mismatches, 0u) << first;
     EXPECT_GT(compared, 5000u);
     EXPECT_GT(liveCompared, 0u);

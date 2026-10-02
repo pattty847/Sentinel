@@ -7,9 +7,11 @@
 //   a span piece whose spanContentId equals the one the labels were built from
 //   (0 = a partial bin: never), or the live bin with the labels' live version,
 //   and the labels took that bucket from the same kind (span or live);
-// - and this frame's target picture still has that content: the node's prepare()
-//   runs after the label layout and may switch to the target in this very frame
-//   (a new live version paged in, a span's new revision ready).
+// - and this frame's target picture draws that bucket from the same kind of bin
+//   (the draw clip over the target SpanSet and live window) with that content:
+//   the node's prepare() runs after the label layout and may switch to the target
+//   in this very frame (a new live version paged in, a span's new revision ready,
+//   a revised span extending into the drawn live window).
 // Unmatched columns draw no labels until both sides agree.
 #include "HeatmapCellQuery.hpp"
 #include "HeatmapTileNode.hpp"

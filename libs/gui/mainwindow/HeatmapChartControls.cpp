@@ -214,7 +214,7 @@ void HeatmapChartControls::refreshChartMenu() {
         const QString name = a->objectName();
         if (name == "chartMenuLabels") {
             a->setChecked(s.showLabels);
-            a->setEnabled(modeState().gpu); // the legacy renderer always draws its own labels
+            a->setVisible(modeState().gpu); // hidden in legacy (it always draws its own labels), as the toolbar
         }
         else if (name == "chartMenuCurrencyUsd") a->setChecked(s.labelCurrency == "usd");
         else if (name == "chartMenuCurrencyAsset") a->setChecked(s.labelCurrency == "asset");

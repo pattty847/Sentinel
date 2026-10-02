@@ -537,6 +537,8 @@ TEST_F(ChartLabels, ToolbarFollowsTheChartsLayers) {
     EXPECT_FALSE(shown.rangeSlider);
     EXPECT_TRUE(shown.thresholdSlider);
     EXPECT_FALSE(shown.labelsToggle) << "legacy always draws its labels: no toggle";
+    emit toolbar->chartMenu()->aboutToShow();
+    EXPECT_FALSE(menuAction(toolbar->chartMenu(), "chartMenuLabels")->isVisible()) << "hidden in legacy, as the toolbar";
     EXPECT_TRUE(shown.liquidity) << "the currency stays";
     // Currency: model, toolbar and the legacy label mode agree.
     toolbar->liquidityModeCombo()->setCurrentIndex(0);

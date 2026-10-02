@@ -1102,17 +1102,17 @@ void HeatmapTileNode::layout(const std::vector<Draw> &draws) {
     pieces_.clear();
     clipSpans_.clear();
     clipLive_.clear();
-    for (const auto& d : draws) {
+    // Tokens are draw indices: each piece finds its draw (bin, content) directly.
+    for (size_t i = 0; i < draws.size(); ++i) {
+        const auto &d = draws[i];
         const auto* bin = findBin(d.bin);
         if (!bin) continue;
-        if (d.live) clipLive_.push_back({d.bin, d.tfMs, bin->liveStartMs, bin->liveEndMs});
-        else clipSpans_.push_back({d.bin, d.tile, d.tfMs, bin->completeEndMs});
+        if (d.live) clipLive_.push_back({i, d.tfMs, bin->liveStartMs, bin->liveEndMs});
+        else clipSpans_.push_back({i, d.tile, d.tfMs, bin->completeEndMs});
     }
     drawPieces(clipSpans_, clipLive_, 0, [&](DrawPiece p) {
-        uint64_t content = 0;
-        for (const auto &d : draws)
-            if (d.bin == p.token) { content = d.content; break; }
-        pieces_.push_back({findBin(p.token), p.loMs, p.hiMs, p.live, content});
+        const auto &d = draws[size_t(p.token)];
+        pieces_.push_back({findBin(d.bin), p.loMs, p.hiMs, p.live, d.content});
     });
 }
 
