@@ -133,10 +133,11 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
         std::string transportReason;
     };
     std::map<std::string, ProductState> states;
+    auto budget = std::make_shared<QueueBudget>(queueBytes - products.size() * 4096);
     for (auto& product : products) {
         auto symbol = product.config.symbol;
         auto& state = states[symbol];
-        state.session = std::make_unique<Session>(std::move(product.config), std::move(product.metadata), queueBytes);
+        state.session = std::make_unique<Session>(std::move(product.config), std::move(product.metadata), queueBytes, budget);
         state.session->submit({Kind::CaptureStarted, Stamp::now(), 0, R"({"reason":"capture started"})"});
     }
     const auto error = [&]() -> std::string {
@@ -144,17 +145,8 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
             if (auto e = state.session->error(); !e.empty()) return symbol + ": " + e;
         return {};
     };
-    const auto queuedBytes = [&] {
-        size_t total = 0;
-        for (const auto& [_, state] : states) total += state.session->queuedBytes();
-        return total;
-    };
-    const auto submit = [&](ProductState& state, Record record) {
-        // One producer; other threads only drain. Summing queues can overestimate
-        // their occupancy, but cannot undercount bytes that remain queued.
-        if (queuedBytes() + record.payload.capacity() + sizeof(Record) + 64 > queueBytes - states.size() * 4096)
-            state.session->fail("capture process queue limit exceeded", RecordLocation{record.time, record.connection, record.kind});
-        else state.session->submit(std::move(record));
+    const auto submit = [](ProductState& state, Record record) {
+        state.session->submit(std::move(record));
     };
     auto feeds = dependencies.makeFeeds ? dependencies.makeFeeds(auth, mdc) : std::make_unique<MarketDataFeeds>(auth, mdc);
     if (!feeds) throw std::runtime_error("capture feeds factory returned null");

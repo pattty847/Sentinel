@@ -65,7 +65,7 @@ struct FeedsTest : testing::Test {
     void snapshot(const std::string& p) { send(p, coinbaseL2Snapshot(p, {{99, 2}}, {{101, 4}})); }
     void update(const std::string& p) { send(p, coinbaseL2Update(p, {{"bid", 99, 3}})); }
     void twoBooks() {
-        create(); advance(333334); snapshot("BTC-USD"); snapshot("ETH-USD");
+        create(); snapshot("BTC-USD"); advanceKeepingPeer(1'000'000); snapshot("BTC-USD"); snapshot("ETH-USD");
         ASSERT_TRUE(valid["BTC-USD"]); ASSERT_TRUE(valid["ETH-USD"]);
     }
     void peerUntouched() {
@@ -88,7 +88,7 @@ TEST_F(FeedsTest, SequenceGapInvalidatesAndReconnectsOnlyItsProduct) {
     heartbeat["sequence_num"] = 12;
     transports["ETH-USD"]->frame(heartbeat.dump()); feeds->poll();
     EXPECT_FALSE(valid["ETH-USD"]); EXPECT_EQ(scenarios["ETH-USD"]->closes, 1);
-    advance(333334); EXPECT_EQ(scenarios["ETH-USD"]->attempts.size(), 2u);
+    advance(1'000'000); EXPECT_EQ(scenarios["ETH-USD"]->attempts.size(), 2u);
     peerUntouched();
 }
 TEST_F(FeedsTest, MalformedMessagesAndProviderErrorsAreIsolated) {
@@ -98,19 +98,19 @@ TEST_F(FeedsTest, MalformedMessagesAndProviderErrorsAreIsolated) {
         auto closes = scenarios["ETH-USD"]->closes;
         transports["ETH-USD"]->frame(bytes); feeds->poll();
         EXPECT_FALSE(valid["ETH-USD"]); EXPECT_EQ(scenarios["ETH-USD"]->closes, closes + 1);
-        advance(333334); peerUntouched();
+        advance(1'000'000); peerUntouched();
     }
 }
 TEST_F(FeedsTest, TransportDownIsIsolatedAndUpdatesWaitForSnapshot) {
     twoBooks(); transports["ETH-USD"]->down(); feeds->poll();
-    EXPECT_FALSE(valid["ETH-USD"]); advance(333334);
+    EXPECT_FALSE(valid["ETH-USD"]); advance(1'000'000);
     update("ETH-USD"); EXPECT_EQ(updates["ETH-USD"], 0);
     snapshot("ETH-USD"); update("ETH-USD"); EXPECT_EQ(updates["ETH-USD"], 1);
     peerUntouched();
 }
 TEST_F(FeedsTest, RemoveClosesOnlyItsSocketAndNeverSendsUnsubscribe) {
     twoBooks(); auto eth = scenarios["ETH-USD"];
-    EXPECT_TRUE(feeds->remove("ETH-USD"));
+    EXPECT_TRUE(feeds->remove("ETH-USD")); feeds->poll();
     EXPECT_EQ(eth->closes, 1); EXPECT_EQ(eth->sends.size(), 3u);
     EXPECT_FALSE(feeds->remove("ETH-USD"));
     advance(1'000'000); EXPECT_EQ(eth->attempts.size(), 1u);
@@ -119,7 +119,7 @@ TEST_F(FeedsTest, RemoveClosesOnlyItsSocketAndNeverSendsUnsubscribe) {
 TEST_F(FeedsTest, HeartbeatSilenceReconnectsOnlySilentProduct) {
     twoBooks(); advance(19'000'000); update("BTC-USD"); advance(1'000'000);
     EXPECT_FALSE(valid["ETH-USD"]); EXPECT_EQ(scenarios["ETH-USD"]->closes, 1);
-    peerUntouched(); advance(333334); EXPECT_EQ(scenarios["ETH-USD"]->attempts.size(), 2u);
+    peerUntouched(); advance(1'000'000); EXPECT_EQ(scenarios["ETH-USD"]->attempts.size(), 2u);
 }
 TEST_F(FeedsTest, Level2SilenceReconnectsWithDoublingRetryResetOnlyBySnapshotThenUpdate) {
     options.reconnect.level2Stale = 1s; options.reconnect.level2RetryMaximum = 4s;
@@ -131,14 +131,14 @@ TEST_F(FeedsTest, Level2SilenceReconnectsWithDoublingRetryResetOnlyBySnapshotThe
         EXPECT_EQ(scenarios["ETH-USD"]->closes, closes);
         advance(10'000); EXPECT_EQ(scenarios["ETH-USD"]->closes, closes + 1);
         EXPECT_FALSE(valid["ETH-USD"]); peerUntouched();
-        advance(333334); snapshot("ETH-USD"); // snapshot alone must not reset retry
+        advanceKeepingPeer(1'000'000); snapshot("ETH-USD"); // snapshot alone must not reset retry
     }
     update("ETH-USD"); update("BTC-USD");
     advance(990'000); update("BTC-USD"); advance(10'000);
     EXPECT_EQ(scenarios["ETH-USD"]->closes, 4); peerUntouched();
 }
 TEST_F(FeedsTest, ResnapshotCooldownIsPerProduct) {
-    twoBooks(); feeds->requestResnapshot("ETH-USD"); feeds->poll(); advance(333334); snapshot("ETH-USD");
+    twoBooks(); feeds->requestResnapshot("ETH-USD"); feeds->poll(); advance(1'000'000); snapshot("ETH-USD");
     feeds->requestResnapshot("ETH-USD"); feeds->poll();
     EXPECT_EQ(scenarios["ETH-USD"]->closes, 1); peerUntouched();
     feeds->requestResnapshot("BTC-USD"); feeds->poll();
@@ -162,23 +162,23 @@ TEST_F(FeedsTest, JitterAndProcessBucketBoundSimultaneousInitialAndReconnectAtte
     for (int i = 0; i < 8; ++i) products.push_back("P" + std::to_string(i));
     create(products);
     advance(999'999); EXPECT_TRUE(attempts.empty()); advance(1);
-    for (int i = 1; i < 8; ++i) { advance(333333); EXPECT_EQ(attempts.size(), size_t(i)); advance(1); }
+    for (int i = 1; i < 8; ++i) { advance(999'999); EXPECT_EQ(attempts.size(), size_t(i)); advance(1); }
     EXPECT_EQ(draws, 8);
     for (const auto& p : products) transports[p]->down(); feeds->poll();
     const auto base = now;
     advance(1'099'999);
     for (const auto& p : products) EXPECT_EQ(attempts[p].size(), 1u);
     advance(1);
-    for (int i = 1; i < 8; ++i) advance(333334);
+    for (int i = 1; i < 8; ++i) advance(1'000'000);
     EXPECT_EQ(draws, 16);
     std::vector<int64_t> times;
     for (const auto& p : products) {
         ASSERT_EQ(attempts[p].size(), 2u);
-        EXPECT_LE(attempts[p][1], base + 1'100'000 + 7 * 333334);
+        EXPECT_LE(attempts[p][1], base + 1'100'000 + 7 * 1'000'000);
         times.insert(times.end(), attempts[p].begin(), attempts[p].end());
     }
     std::sort(times.begin(), times.end());
-    for (size_t i = 1; i < times.size(); ++i) EXPECT_GE(times[i] - times[i - 1], 333334);
+    for (size_t i = 1; i < times.size(); ++i) EXPECT_GE(times[i] - times[i - 1], 1'000'000);
 }
 TEST_F(FeedsTest, PendingJitterIsCancelledByRemoveAndStatsExposeAgeAndReconnects) {
     options.jitter = [] { return 1000ms; }; create({"ETH-USD"});
@@ -210,7 +210,7 @@ TEST_F(FeedsTest, IngestTapKeepsProductConnectionAndRawBytesBeforeDispatch) {
     EXPECT_EQ(events, (std::vector<std::string>{"up", "raw", "snapshot"}));
 }
 
-TEST_F(FeedsTest, FailedAttemptsBackOffDeduplicateDownAndResetAfterUp) {
+TEST_F(FeedsTest, FailedAttemptsBackOffDeduplicateDownAndResetAfterSnapshot) {
     options.reconnect.initialDelay = 1s;
     options.reconnect.maximumDelay = 4s;
     options.reconnect.staleHeartbeatDelay = 1s;
@@ -226,6 +226,7 @@ TEST_F(FeedsTest, FailedAttemptsBackOffDeduplicateDownAndResetAfterUp) {
         advance(delay - 1); EXPECT_EQ(attempts["BTC-USD"].size(), count);
         advance(1); EXPECT_EQ(attempts["BTC-USD"].size(), count + 1);
     }
+    snapshot("BTC-USD");
     transports["BTC-USD"]->down(); feeds->poll();
     advance(999'999); EXPECT_EQ(attempts["BTC-USD"].size(), 5u);
     advance(1); EXPECT_EQ(attempts["BTC-USD"].size(), 6u);
@@ -236,9 +237,9 @@ TEST_F(FeedsTest, FailingProductCannotStarveQueuedPeersAndRemovedTicketDoesNotBl
     state->onAttempt = [this](auto& t, int) { attempts["A"].push_back(now); t.fail(); };
     create({"A", "B", "C", "D"});
     EXPECT_TRUE(feeds->remove("B"));
-    advance(333334); EXPECT_EQ(attempts["C"].size(), 1u);
-    advance(333334); EXPECT_EQ(attempts["D"].size(), 1u);
-    advance(333334); EXPECT_EQ(attempts["A"].size(), 2u);
+    advance(1'000'000); EXPECT_EQ(attempts["C"].size(), 1u);
+    advance(1'000'000); EXPECT_EQ(attempts["D"].size(), 1u);
+    advance(1'000'000); EXPECT_EQ(attempts["A"].size(), 2u);
 }
 TEST_F(FeedsTest, MalformedBatchCannotAcceptLaterSnapshotOnClosingSocket) {
     twoBooks();
@@ -319,7 +320,7 @@ TEST_F(FeedsTest, RecorderSelfInvalidationResnapshotsAndRecordingResumes) {
     RecorderFeed feed(*feeds, 6);
     struct Stop { MarketDataFeeds& feeds; ~Stop() { feeds.stop(); } } stop{*feeds};
     feeds->add("BTC-USD"); feeds->start(); feeds->poll();
-    feed.recorder->drainForTest(); feeds->poll(); advance(333334);
+    feed.recorder->drainForTest(); feeds->poll(); advance(1'000'000);
     feeds->stop();
     const auto rows = feed.rows("BTC-USD");
     EXPECT_EQ(state->attempts.size(), 2u);
@@ -335,7 +336,7 @@ TEST_F(FeedsTest, RecorderInvalidationKeepsPeerFullyObserved) {
     feeds = std::make_unique<MarketDataFeeds>(auth, config, options);
     RecorderFeed feed(*feeds, 100);
     struct Stop { MarketDataFeeds& feeds; ~Stop() { feeds.stop(); } } stop{*feeds};
-    feeds->add("BTC-USD"); feeds->add("ETH-USD"); feeds->start(); feeds->poll(); advance(333334);
+    feeds->add("BTC-USD"); feeds->add("ETH-USD"); feeds->start(); feeds->poll(); advance(1'000'000);
     const auto push = [&](const std::string& product, nlohmann::json message, int sequence, int64_t ms) {
         feed.local = RecorderFeed::kT0 + ms;
         transports[product]->frame(frame(std::move(message), sequence)); feeds->poll();
@@ -344,7 +345,7 @@ TEST_F(FeedsTest, RecorderInvalidationKeepsPeerFullyObserved) {
     for (const std::string p : {"BTC-USD", "ETH-USD"})
         push(p, coinbaseL2Snapshot(p, {{99, 2}}, {{101, 4}}, "2026-01-01T00:00:00Z"), 0, 0);
     push("ETH-USD", coinbaseL2Update("ETH-USD", {{"bid", 99, 3}}, "2026-01-01T00:00:20Z"), 2, 20000);
-    advance(333334);
+    advance(1'000'000);
     push("ETH-USD", coinbaseL2Snapshot("ETH-USD", {{99, 2}}, {{101, 4}}, "2026-01-01T00:00:30Z"), 0, 30000);
     for (const std::string p : {"BTC-USD", "ETH-USD"}) {
         push(p, coinbaseL2Update(p, {{"bid", 99, 3}}, "2026-01-01T00:01:10Z"), 1, 70000);
@@ -359,3 +360,74 @@ TEST_F(FeedsTest, RecorderInvalidationKeepsPeerFullyObserved) {
     EXPECT_EQ(scenarios["ETH-USD"]->attempts.size(), 2u);
 }
 } // namespace
+
+TEST_F(FeedsTest, FailedAttemptDoesNotConsumeConnectionIdOrCountAsReconnect) {
+    auto state = scenarios["BTC-USD"] = std::make_shared<fixtures::WsScenario>();
+    state->onAttempt = [](auto& t, int attempt) { if (attempt == 2) t.fail(); else t.up(); };
+    create({"BTC-USD"}); snapshot("BTC-USD");
+    transports["BTC-USD"]->down(); feeds->poll(); advance(1'000'000);
+    auto stats = feeds->stats().at(0);
+    EXPECT_FALSE(stats.up); EXPECT_EQ(stats.connection, 1u); EXPECT_EQ(stats.reconnects, 0u);
+    advance(1'000'000);
+    stats = feeds->stats().at(0);
+    EXPECT_TRUE(stats.up); EXPECT_EQ(stats.connection, 2u); EXPECT_EQ(stats.reconnects, 1u);
+}
+TEST_F(FeedsTest, ProviderErrorOnEveryUpRetainsExponentialBackoffUntilSnapshot) {
+    options.reconnect.initialDelay = 1s; options.reconnect.maximumDelay = 30s;
+    options.reconnect.staleHeartbeatDelay = 1s;
+    auto state = scenarios["BTC-USD"] = std::make_shared<fixtures::WsScenario>();
+    state->onAttempt = [this](auto& t, int) {
+        attempts["BTC-USD"].push_back(now); t.up();
+        t.frame(R"({"type":"error","message":"persistent provider error"})");
+    };
+    create({"BTC-USD"});
+    for (const int64_t seconds : {1, 2, 4, 8, 16, 30, 30}) {
+        const auto count = attempts["BTC-USD"].size();
+        advance(seconds * 1'000'000 - 1); EXPECT_EQ(attempts["BTC-USD"].size(), count);
+        advance(1); EXPECT_EQ(attempts["BTC-USD"].size(), count + 1);
+    }
+}
+TEST_F(FeedsTest, SubscriptionBatchesStayPacedWhenDelayedHandshakesCompleteTogether) {
+    for (const auto* p : {"A", "B", "C"}) {
+        auto state = scenarios[p] = std::make_shared<fixtures::WsScenario>();
+        state->onAttempt = [](auto&, int) {}; // handshake held
+    }
+    create({"A", "B", "C"}); advance(1'000'000); advance(1'000'000);
+    for (const auto* p : {"A", "B", "C"}) transports[p]->up();
+    feeds->poll();
+    const auto sent = [&] { size_t n = 0; for (const auto& [_, s] : scenarios) n += s->sends.size(); return n; };
+    EXPECT_EQ(sent(), 3u); advance(999'999); EXPECT_EQ(sent(), 3u);
+    advance(1); EXPECT_EQ(sent(), 6u);
+    advance(999'999); EXPECT_EQ(sent(), 6u); advance(1); EXPECT_EQ(sent(), 9u);
+}
+TEST_F(FeedsTest, LateCallbackSettersFailExplicitly) {
+    create({"BTC-USD"});
+    EXPECT_THROW(feeds->onTrade({}), std::logic_error);
+    EXPECT_THROW(feeds->onLiveOrderBookLevelUpdates({}), std::logic_error);
+    EXPECT_THROW(feeds->onLiveOrderBookInitialized({}), std::logic_error);
+    EXPECT_THROW(feeds->onLiveOrderBookInvalidated({}), std::logic_error);
+    EXPECT_THROW(feeds->onConnectionStatus({}), std::logic_error);
+    EXPECT_THROW(feeds->onError({}), std::logic_error);
+    EXPECT_THROW(feeds->onLatency({}), std::logic_error);
+    EXPECT_THROW(feeds->onIngest({}), std::logic_error);
+}
+
+namespace { std::vector<QString>* downAlarmMessages = nullptr; }
+TEST_F(FeedsTest, DownOverTwoMinutesLogsPerProductErrorOncePerMinute) {
+    std::vector<QString> messages;
+    downAlarmMessages = &messages;
+    const auto previous = qInstallMessageHandler([](QtMsgType type, const QMessageLogContext&, const QString& message) {
+        if (type == QtCriticalMsg && message.contains("Feed down:")) downAlarmMessages->push_back(message);
+    });
+    struct Restore { QtMessageHandler previous; ~Restore() { qInstallMessageHandler(previous); downAlarmMessages = nullptr; } } restore{previous};
+    auto state = scenarios["BTC-USD"] = std::make_shared<fixtures::WsScenario>();
+    state->onAttempt = [](auto& t, int) { t.fail(); };
+    create({"BTC-USD"});
+    advance(119'999'999); EXPECT_TRUE(messages.empty());
+    advance(1); ASSERT_EQ(messages.size(), 1u);
+    EXPECT_TRUE(messages[0].contains("product=BTC-USD")); EXPECT_TRUE(messages[0].contains("conn=0"));
+    advance(59'999'999); EXPECT_EQ(messages.size(), 1u);
+    advance(1); EXPECT_EQ(messages.size(), 2u);
+    transports["BTC-USD"]->up(); feeds->poll(); snapshot("BTC-USD");
+    advance(60'000'000); EXPECT_EQ(messages.size(), 2u);
+}

@@ -26,11 +26,11 @@ namespace {
 
 MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth, const ServerMdcConfig& config,
     std::string product, net::io_context& io, ssl::context& tls, TransportFactory factory,
-    ReconnectPolicy policy, Clock clock, ConnectPermit permit, Jitter jitter)
+    ReconnectPolicy policy, Clock clock, ConnectPermit permit, ConnectPermit subscribePermit, std::function<void()> cancelPermits, Jitter jitter)
     : m_host(config.host), m_port(config.port), m_target(config.target), m_useJwt(config.useJwt),
       m_product(std::move(product)), m_auth(auth), m_strand(io.get_executor()),
-      m_reconnectPolicy(policy), m_clock(std::move(clock)), m_connectPermit(std::move(permit)),
-      m_jitter(std::move(jitter)), m_backoffDuration(policy.initialDelay) {
+      m_reconnectPolicy(policy), m_clock(std::move(clock)), m_connectPermit(std::move(permit)), m_subscribePermit(std::move(subscribePermit)),
+      m_cancelPermits(std::move(cancelPermits)), m_jitter(std::move(jitter)), m_backoffDuration(policy.initialDelay) {
     if (m_product.empty() || policy.initialDelay.count() <= 0 || policy.maximumDelay < policy.initialDelay ||
         policy.watchdogInterval.count() <= 0 || policy.heartbeatStale < policy.watchdogInterval ||
         policy.level2Stale < policy.watchdogInterval || policy.level2RetryMaximum < policy.level2Stale ||
@@ -67,6 +67,8 @@ void MarketDataCoreEngine::start() {
     net::dispatch(m_strand, [self = shared_from_this()] {
         self->m_running = true;
         self->m_watchdogAt = self->m_clock();
+        self->m_downSince = self->m_clock();
+        self->m_nextDownAlarm = self->m_downSince + 120'000'000;
         self->scheduleReconnect(true);
     });
 }
@@ -74,6 +76,7 @@ void MarketDataCoreEngine::start() {
 void MarketDataCoreEngine::stop(std::function<void()> completion) {
     net::dispatch(m_strand, [self = shared_from_this(), completion = std::move(completion)]() mutable {
         self->m_running = false;
+        self->m_cancelPermits();
         self->m_reconnectScheduled = false;
         self->m_stopCompletion = std::move(completion);
         if (!self->m_closePending) {
@@ -84,6 +87,14 @@ void MarketDataCoreEngine::stop(std::function<void()> completion) {
 }
 
 void MarketDataCoreEngine::transportStatus(bool up) {
+    if (!up) m_cancelPermits();
+    if (up) ++m_connection;
+    if (up) m_downSince = -1;
+    else if (m_downSince < 0) {
+        m_downSince = m_clock();
+        m_nextDownAlarm = m_downSince + 120'000'000;
+    }
+    m_subscriptionsPending = false;
     if (m_ingestObserver) observeIngest(up ? IngestKind::TransportUp : IngestKind::TransportDown);
     m_closePending = false;
     m_connected = up && m_running;
@@ -94,15 +105,15 @@ void MarketDataCoreEngine::transportStatus(bool up) {
         }
         return;
     }
-    sLog_Data("product=" << m_product << " conn=" << m_connection << " Transport status=" << (up ? "UP" : "DOWN"));
+    sLog_Data("product=" << m_product << " conn=" << m_connection << " attempt=" << m_attempt << " Transport status=" << (up ? "UP" : "DOWN"));
     if (up) {
         m_reconnectScheduled = false;
-        m_backoffDuration = m_reconnectPolicy.initialDelay;
         m_lastHeartbeatMs = m_clock() / 1000;
         m_liveness.lastLevel2Ms = m_lastHeartbeatMs;
         m_liveness.snapshotAccepted = false;
         emitConnectionStatus(true);
-        sendSubscriptions();
+        m_subscriptionsPending = true;
+        if (m_subscribePermit(m_clock())) { m_subscriptionsPending = false; sendSubscriptions(); }
     } else {
         emitConnectionStatus(false);
         scheduleReconnect();
@@ -128,10 +139,19 @@ void MarketDataCoreEngine::tick() {
         const auto now = e.m_clock();
         if (e.m_reconnectScheduled && now >= e.m_connectAt && e.m_connectPermit(now)) {
             e.m_reconnectScheduled = false;
-            ++e.m_connection;
-            sLog_Probe("feeds.connect", "product=" << e.m_product << " conn=" << e.m_connection
+            ++e.m_attempt;
+            sLog_Probe("feeds.connect", "product=" << e.m_product << " conn=" << e.m_connection << " attempt=" << e.m_attempt
                        << " bucketWaitUs=" << now - e.m_connectAt);
             e.m_transport->connect(e.m_host, e.m_port, e.m_target);
+        }
+        if (e.m_connected && !e.m_closePending && e.m_subscriptionsPending && e.m_subscribePermit(now)) {
+            e.m_subscriptionsPending = false;
+            e.sendSubscriptions();
+        }
+        if (e.m_downSince >= 0 && now >= e.m_nextDownAlarm) {
+            sLog_Error("product=" << e.m_product << " conn=" << e.m_connection << " attempt=" << e.m_attempt
+                       << " Feed down: downMs=" << (now - e.m_downSince) / 1000);
+            e.m_nextDownAlarm = now + 60'000'000;
         }
         if (now < e.m_watchdogAt) return;
         e.m_watchdogAt = now + e.m_reconnectPolicy.watchdogInterval.count() * 1000;
@@ -158,19 +178,19 @@ void MarketDataCoreEngine::observeIngest(IngestKind kind, std::string_view paylo
     try {
         m_ingestObserver({kind, m_connection, systemNs, steadyNs, payload, m_product, reason});
     } catch (const std::exception& e) {
-        sLog_Error("product=" << m_product << " conn=" << m_connection << " Ingest observer exception: " << e.what());
+        sLog_Error("product=" << m_product << " conn=" << m_connection << " attempt=" << m_attempt << " Ingest observer exception: " << e.what());
     } catch (...) {
-        sLog_Error("product=" << m_product << " conn=" << m_connection << " Ingest observer exception (unknown)");
+        sLog_Error("product=" << m_product << " conn=" << m_connection << " attempt=" << m_attempt << " Ingest observer exception (unknown)");
     }
 }
 
 inline void MarketDataCoreEngine::emitError(std::string msg) {
-    sLog_Error("product=" << m_product << " conn=" << m_connection << " error=" << msg);
+    sLog_Error("product=" << m_product << " conn=" << m_connection << " attempt=" << m_attempt << " error=" << msg);
     if (m_onError) {
         try {
             m_onError(m_product, msg);
         } catch (const std::exception& e) {
-            sLog_Error("product=" << m_product << " conn=" << m_connection << " " << std::string("Error callback exception: ") + e.what());
+            sLog_Error("product=" << m_product << " conn=" << m_connection << " attempt=" << m_attempt << " " << std::string("Error callback exception: ") + e.what());
         }
     }
 }
@@ -186,7 +206,7 @@ inline void MarketDataCoreEngine::emitConnectionStatus(bool connected) {
         try {
             m_onConnectionStatus(m_product, connected);
         } catch (const std::exception& e) {
-            sLog_Error("product=" << m_product << " conn=" << m_connection << " " << std::string("Connection status callback exception: ") + e.what());
+            sLog_Error("product=" << m_product << " conn=" << m_connection << " attempt=" << m_attempt << " " << std::string("Connection status callback exception: ") + e.what());
         }
     }
 }
@@ -198,7 +218,7 @@ void MarketDataCoreEngine::scheduleReconnect(bool initial) {
     if (!initial) m_backoffDuration = std::min(m_backoffDuration * 2, m_reconnectPolicy.maximumDelay);
     const auto jitter = std::clamp(m_jitter(), std::chrono::milliseconds(0), std::chrono::milliseconds(1000));
     m_connectAt = m_clock() + (delay + jitter).count() * 1000;
-    sLog_Data("product=" << m_product << " conn=" << m_connection << " Scheduling connect: backoffMs=" << delay.count() << " jitterMs=" << jitter.count());
+    sLog_Data("product=" << m_product << " conn=" << m_connection << " attempt=" << m_attempt << " Scheduling connect: backoffMs=" << delay.count() << " jitterMs=" << jitter.count());
 }
 
 void MarketDataCoreEngine::sendSubscriptions() {
@@ -217,12 +237,12 @@ void MarketDataCoreEngine::sendSubscriptions() {
 void MarketDataCoreEngine::emitBookInvalidated(const std::string& reason) {
     m_liveness.snapshotAccepted = false;
     if (m_ingestObserver) observeIngest(IngestKind::BookInvalidated, {}, reason);
-    sLog_Warning("product=" << m_product << " conn=" << m_connection << " Order book invalidated: reason=" << reason);
+    sLog_Warning("product=" << m_product << " conn=" << m_connection << " attempt=" << m_attempt << " Order book invalidated: reason=" << reason);
     if (m_onLiveOrderBookInvalidated) {
         try {
             m_onLiveOrderBookInvalidated(m_product, reason);
         } catch (const std::exception& e) {
-            sLog_Error("product=" << m_product << " conn=" << m_connection << " Order book invalidated callback exception: " << e.what());
+            sLog_Error("product=" << m_product << " conn=" << m_connection << " attempt=" << m_attempt << " Order book invalidated callback exception: " << e.what());
         }
     }
 }
@@ -242,7 +262,7 @@ void MarketDataCoreEngine::dispatch(const nlohmann::json& message) {
         m_lastSequenceNum = seq;
     }
     
-    sLog_Probe("ws.rx", "product=" << m_product << " conn=" << m_connection << " " << message.dump());
+    sLog_Probe("ws.rx", "product=" << m_product << " conn=" << m_connection << " attempt=" << m_attempt << " " << message.dump());
 
     std::string channel = message.value("channel", "");
     m_lastHeartbeatMs = m_clock() / 1000;
@@ -256,7 +276,7 @@ void MarketDataCoreEngine::dispatch(const nlohmann::json& message) {
             std::visit([this, &message](auto&& ev) {
                 using T = std::decay_t<decltype(ev)>;
                 if constexpr (std::is_same_v<T, ProviderErrorEvent>) {
-                    sLog_Error("product=" << m_product << " conn=" << m_connection << " Provider error: " << ev.message << " | raw=" << message.dump());
+                    sLog_Error("product=" << m_product << " conn=" << m_connection << " attempt=" << m_attempt << " Provider error: " << ev.message << " | raw=" << message.dump());
                     emitError(ev.message);
                     reconnectNow("provider error");
                 } else if constexpr (std::is_same_v<T, SubscriptionAckEvent>) {
@@ -264,21 +284,21 @@ void MarketDataCoreEngine::dispatch(const nlohmann::json& message) {
                         const auto& ids = *ev.level2ProductIds;
                         if (!m_warnedMissingLevel2 && std::find(ids.begin(), ids.end(), m_product) == ids.end()) {
                             m_warnedMissingLevel2 = true;
-                            sLog_Warning("product=" << m_product << " conn=" << m_connection << " Subscription ack missing level2 product; acknowledged=" << joinSymbols(ids));
+                            sLog_Warning("product=" << m_product << " conn=" << m_connection << " attempt=" << m_attempt << " Subscription ack missing level2 product; acknowledged=" << joinSymbols(ids));
                         }
                     }
                     if (!ev.productIds.empty()) {
-                        sLog_Data("product=" << m_product << " conn=" << m_connection << " Subscription confirmed: symbols=" << joinSymbols(ev.productIds));
+                        sLog_Data("product=" << m_product << " conn=" << m_connection << " attempt=" << m_attempt << " Subscription confirmed: symbols=" << joinSymbols(ev.productIds));
                     } else if (!m_loggedEmptySubscriptionAck) {
                         m_loggedEmptySubscriptionAck = true;
-                        sLog_Data("product=" << m_product << " conn=" << m_connection << " Subscription confirmed with empty product list; raw payload: "
+                        sLog_Data("product=" << m_product << " conn=" << m_connection << " attempt=" << m_attempt << " Subscription confirmed with empty product list; raw payload: "
                                   << message.dump());
                     }
                 }
             }, evt);
         }
         if (channel.empty() && result.events.empty()) {
-            sLog_Data("product=" << m_product << " conn=" << m_connection << " MDC unclassified message: " << message.dump());
+            sLog_Data("product=" << m_product << " conn=" << m_connection << " attempt=" << m_attempt << " MDC unclassified message: " << message.dump());
         }
     }
     
@@ -311,7 +331,7 @@ void MarketDataCoreEngine::processTrades(const nlohmann::json& trades,
             try {
                 m_onTrade(trade);
             } catch (const std::exception& e) {
-                sLog_Error("product=" << m_product << " conn=" << m_connection << " " << std::string("Trade callback exception: ") + e.what());
+                sLog_Error("product=" << m_product << " conn=" << m_connection << " attempt=" << m_attempt << " " << std::string("Trade callback exception: ") + e.what());
             }
         }
         
@@ -415,6 +435,7 @@ void MarketDataCoreEngine::handleOrderBookSnapshot(const nlohmann::json& event,
         return;
     }
     m_liveness.snapshotAccepted = true;
+    m_backoffDuration = m_reconnectPolicy.initialDelay;
     m_liveness.lastLevel2Ms = m_clock() / 1000;
     const int64_t envelopeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         exchange_timestamp.time_since_epoch()).count();
@@ -422,7 +443,7 @@ void MarketDataCoreEngine::handleOrderBookSnapshot(const nlohmann::json& event,
         try {
             m_onLiveOrderBookInitialized(product_id, sparse_bids, sparse_asks, envelopeMs);
         } catch (const std::exception& e) {
-            sLog_Error("product=" << m_product << " conn=" << m_connection << " Order book init callback exception: product=" << product_id
+            sLog_Error("product=" << m_product << " conn=" << m_connection << " attempt=" << m_attempt << " Order book init callback exception: product=" << product_id
                        << " error=" << e.what());
         }
     }
@@ -459,7 +480,7 @@ void MarketDataCoreEngine::handleOrderBookUpdate(const nlohmann::json& event,
             try {
                 m_onLiveOrderBookLevelUpdates(product_id, updatesPayload, exchangeMs);
             } catch (const std::exception& e) {
-                sLog_Error("product=" << m_product << " conn=" << m_connection << " Order book level updates callback exception: product=" << product_id
+                sLog_Error("product=" << m_product << " conn=" << m_connection << " attempt=" << m_attempt << " Order book level updates callback exception: product=" << product_id
                            << " updates=" << updatesPayload.size() << " error=" << e.what());
             }
         }
@@ -472,7 +493,7 @@ void MarketDataCoreEngine::handleHeartbeats(const nlohmann::json&) {
 
 void MarketDataCoreEngine::checkLevel2Silence(int64_t nowMs) {
     if (nowMs - m_liveness.lastLevel2Ms < m_liveness.retryMs) return;
-    sLog_Warning("product=" << m_product << " conn=" << m_connection << " Level2 silent: silenceMs=" << nowMs - m_liveness.lastLevel2Ms
+    sLog_Warning("product=" << m_product << " conn=" << m_connection << " attempt=" << m_attempt << " Level2 silent: silenceMs=" << nowMs - m_liveness.lastLevel2Ms
                  << " retryMs=" << m_liveness.retryMs);
     m_liveness.retryMs = std::min(m_liveness.retryMs * 2, m_reconnectPolicy.level2RetryMaximum.count());
     reconnectNow("level2 silent");
@@ -493,7 +514,7 @@ void MarketDataCoreEngine::reconnectNow(const std::string& reason) {
     if (!m_running || !m_connected || m_closePending || m_reconnectScheduled) return;
     emitBookInvalidated(reason);
     if (m_ingestObserver) observeIngest(IngestKind::ResyncRequested, {}, reason);
-    sLog_Data("product=" << m_product << " conn=" << m_connection << " Reconnecting: reason=" << reason);
+    sLog_Data("product=" << m_product << " conn=" << m_connection << " attempt=" << m_attempt << " Reconnecting: reason=" << reason);
     if (reason == "stale heartbeat")
         m_backoffDuration = std::max(m_backoffDuration, m_reconnectPolicy.staleHeartbeatDelay);
     m_closePending = true;

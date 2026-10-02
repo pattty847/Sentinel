@@ -79,7 +79,7 @@ public:
     };
     MarketDataCoreEngine(Authenticator&, const ServerMdcConfig&, std::string product,
                          net::io_context&, ssl::context&, TransportFactory, ReconnectPolicy,
-                         Clock, ConnectPermit, Jitter);
+                         Clock, ConnectPermit, ConnectPermit, std::function<void()>, Jitter);
     ~MarketDataCoreEngine();
     // Owner calls these on the shared I/O thread. Each mutation enters this engine's strand.
     void start();
@@ -144,14 +144,16 @@ private:
     std::shared_ptr<WsTransport> m_transport;
     ReconnectPolicy m_reconnectPolicy;
     Clock m_clock;
-    ConnectPermit m_connectPermit;
+    ConnectPermit m_connectPermit, m_subscribePermit;
+    std::function<void()> m_cancelPermits;
     Jitter m_jitter;
     bool m_running = false, m_connected = false;
-    bool m_reconnectScheduled = false, m_closePending = false;
+    bool m_reconnectScheduled = false, m_closePending = false, m_subscriptionsPending = false;
     std::chrono::milliseconds m_backoffDuration;
     int64_t m_connectAt = 0, m_watchdogAt = 0;
     int64_t m_lastHeartbeatMs = -1, m_lastSequenceNum = -1, m_lastResnapshotMs = -1;
-    uint64_t m_connection = 0;
+    uint64_t m_connection = 0, m_attempt = 0;
+    int64_t m_downSince = -1, m_nextDownAlarm = 0;
     bool m_loggedEmptySubscriptionAck = false, m_warnedMissingLevel2 = false;
     struct ProductLiveness {
         int64_t lastLevel2Ms = 0, retryMs = 0;

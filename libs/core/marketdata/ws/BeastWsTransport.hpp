@@ -85,7 +85,7 @@ private:
     bool sawInboundFrame_ = false;
     // Strand-owned. Bumped by connect(), close() and every terminal outcome.
     uint64_t attempt_ = 0;
-    uint64_t connection_ = 0;
+    uint64_t connection_ = 0, connectAttempts_ = 0;
     Phase phase_ = Phase::Idle;
 
     void cancelTimers();

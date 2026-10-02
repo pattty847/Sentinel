@@ -69,9 +69,10 @@ groups:
         annotations:
           summary: "Recorder upstream disconnected for 5 min"
           description: >-
-            sentinel-server reports the market-data transport down (sentinel_mdc_connected == 0)
-            for 5 minutes; nothing is being recorded. Check Transport down / reconnect lines in
-            the server log.
+            sentinel-server reports a pinned (recorded) product's market-data connection down
+            (sentinel_mdc_connected == 0) for 5 minutes; that product is not being recorded. GUI
+            chart products never move this gauge. Check Transport down / reconnect lines with
+            product= in the server log.
         data:
           - refId: A
             relativeTimeRange: { from: 300, to: 0 }

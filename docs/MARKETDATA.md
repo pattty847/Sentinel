@@ -19,11 +19,12 @@ MarketDataFeeds (one I/O thread, shared TLS and connect limiter)
 
 `add(product, pinned=false)` returns `Added`, `AlreadyPresent`,
 `CapacityExceeded`, or `InvalidProduct`. A duplicate add opens no connection.
-`remove(product)` closes only that socket and waits for transport-down; it sends
-no unsubscribe frame. Pinned feeds cannot be removed. Engines send exactly three
-subscribe frames on transport-up: level2 and market_trades with their one product,
-and connection-scoped heartbeats without product_ids. Subscribe follows the
-handshake immediately, independent of connect scheduling.
+`remove(product)` removes admission state and queues only that socket for close,
+returning without waiting for transport-down. Completion is logged; owner stop
+drains retired sockets too. No unsubscribe frame is sent. Pinned feeds cannot be removed. Engines send exactly three
+subscribe frames after transport-up: level2 and market_trades with their one product,
+and connection-scoped heartbeats without product_ids. Subscribe batches have their own process-wide admission deadline, so delayed
+handshakes completing together cannot bypass message pacing.
 
 Sequence gaps, malformed messages/L2, provider errors, transport failure, inbound
 silence, and consumer resnapshot requests invalidate/reconnect only the affected
@@ -34,7 +35,8 @@ a product. Acks warn when an explicit level2 list omits that product; a trades-o
 ack makes no level2 claim. Acks never establish book validity.
 
 Each failed connection retries with exponential 1 s..30 s backoff, reset by
-transport-up. Duplicate down notifications share one pending retry. A connected
+the first accepted L2 snapshot, not a successful handshake. Persistent provider
+errors and malformed first messages therefore retain exponential backoff. Duplicate down notifications share one pending retry. A connected
 stream with no inbound message for 20 s reconnects with at least 5 s backoff.
 L2 silence initially triggers at 30 s, even while heartbeats/trades flow. It
 invalidates and reconnects that product directly. Its silence threshold doubles
@@ -43,7 +45,7 @@ followed by a nonempty valid update. There is no resubscribe dance, peer-health
 heuristic, escalation cap, or snapshot fingerprint. Consumer resnapshot requests
 have a separate per-engine 20 s cooldown.
 
-The owner drives connection and watchdog deadlines with one 10 ms Asio timer;
+The owner drives connection and watchdog deadlines with one 100 ms Asio timer;
 each engine applies its own deadlines on its strand. A monotonic clock and jitter
 source are injectable, with manual pumping for deterministic offline tests.
 No additional thread or per-frame timer is created. Beast enforces separate
@@ -55,12 +57,16 @@ Owner shutdown closes every socket before joining the producer thread.
 ## Connect pacing, capacity and diagnostics
 
 Every initial/reconnect attempt draws 0..1000 ms jitter in addition to its
-backoff. A process-shared token bucket then admits at most 3 connects/s. Its
-capacity is one token: unused time cannot accumulate burst credit. Admissions
-are spaced by at least 333334 microseconds, including failed handshakes. Capture
-and server have independent process buckets; this bounds their combined connect
-rate below the documented 8 connections/s/IP limit. Scheduling can add the
-10 ms polling quantization and event-loop work to the calculated deadlines.
+backoff. Two process-shared capacity-one token buckets independently admit one
+connect attempt and one three-frame subscription batch per second. Neither
+accumulates burst credit. Subscription batches are at least 1,000,000 microseconds
+apart even if delayed handshakes complete together; failed handshakes consume only
+connect admission. FIFO tickets prevent a failing product from starving peers;
+closing a feed cancels its pending tickets. Server and capture together send at
+most six unauthenticated subscribe frames per second, below Coinbase's eight
+messages/s/IP budget, and at most two connects/s. Scheduling adds up to 100 ms
+polling quantization plus event-loop work to deadlines. These budgets cover the
+two Sentinel processes; unrelated programs sharing the IP need their own allowance.
 
 `MarketDataFeeds::Options::maxConnections` caps non-pinned feeds; zero means
 unlimited. Pinned recorder products never consume that allowance. Exceeding it
@@ -70,16 +76,20 @@ will configure the server default of 8 and surface refusals to clients/status;
 this core slice leaves the server unlimited.
 
 Engine and production transport diagnostics carry `product=` and `conn=`.
-Connection IDs count actual transport connect attempts independently per engine.
+Connection IDs increment only on transport-up, independently per engine. Failed
+attempts do not consume IDs or count as reconnects. A separate `attempt=` counter
+identifies all attempts in logs and the `feeds.connect` probe.
 `stats()` returns each product's up/down state, connection ID, reconnect count,
 sequence, last-message age and L2 age. The owner logs aggregate/per-product stats
 every 60 s; `ws.rx` identifies raw frames and `feeds.connect` reports bucket wait.
-The pre-parse ingest observer includes product and connection on every event.
+A product continuously down for two minutes emits `sLog_Error`, repeating at
+most once per minute until up. The pre-parse ingest observer includes product and connection on every event.
 
 ## API and threading
 
 Lifecycle calls and callback setters belong to the owner's non-I/O thread.
-Set callbacks before adding feeds. `requestResnapshot(product)` is thread-safe,
+Set callbacks before the first successful add; later setters throw `logic_error`
+instead of silently leaving existing engines unchanged. `requestResnapshot(product)` is thread-safe,
 including from recorder callbacks. Lifecycle operations synchronize with the I/O
 thread; consumers must not call blocking lifecycle/stats methods from callbacks.
 All engine state changes enter its strand. Transport callbacks, JSON parsing and
@@ -96,18 +106,20 @@ L2 parsing validates side, positive finite price and nonnegative finite quantity
 ## Slice-1 integration boundary
 
 The server adds pinned defaults and GUI symbols as independent feeds and retains
-its queued book/trade/invalidation handoff. Its legacy connection boolean/stall
-monitor remains unchanged until slice 3; it is not yet a per-symbol health view.
+its queued book/trade/invalidation handoff. Connection state and the recorder
+stall monitor are scoped by symbol: a GUI product outage cannot mute or reset
+a pinned product's flat-column warning. There is no shared last-status boolean.
 
 Capture adds all configured products (seven in deployment) to one feed owner.
 Independent sequence streams cannot share the old multi-product writer's one
 sequence tracker. The app therefore uses the already-existing single-product
 `Session` constructor per product: new runs are RAWL2 v1, independent run IDs,
-product-local attempt IDs, and no routing receipts. The v2 writer/reader remain
+product-local established-connection IDs, and no routing receipts. The v2 writer/reader remain
 available to existing fixtures until slice 2 removes only the writer. The process
 queue budget remains `--queue-mib` (64 MiB default), enforced across sessions
-without a static split or up-front allocation. Slice 2 still owns the shared
-queue/floor abstraction, 512 MiB default, writer cleanup and RAW_CAPTURE docs.
+by a shared atomic running total; ingest takes only its own session mutex. There
+is no static split or up-front allocation. Reservation is released on drain,
+queue disposal and failed insertion. Slice 2 still owns the per-product floors, 512 MiB default, writer cleanup and RAW_CAPTURE docs.
 The obsolete whole-capture 60 s engine-restart supervisor is removed; each
 transport already guarantees bounded connect/close completion and per-feed retry.
 

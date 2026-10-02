@@ -1715,3 +1715,35 @@ TEST_F(CaptureTest, ProductScopedRecoveryMarkersPreserveOtherReplayBooks) {
         }
     }
 }
+
+TEST_F(CaptureTest, SharedAtomicQueueBudgetAccountsAcrossSessionsAndReleasesOnDrainAndFailure) {
+    auto budget = std::make_shared<QueueBudget>(2048);
+    std::promise<void> release;
+    auto ready = release.get_future().share();
+    auto btc = multiProducts(config).front(), eth = multiProducts(config).back();
+    Session first({btc}, 16384, {.beforeDrain = [ready] { ready.wait(); }}, budget);
+    Session second({eth}, 16384, {.beforeDrain = [ready] { ready.wait(); }}, budget);
+    // Always release blocked workers even if an assertion below returns early.
+    struct Release { std::promise<void>& promise; bool done = false; ~Release() { if (!done) promise.set_value(); } } guard{release};
+    auto item = record(Kind::EngineError, 1, std::string(600, 'x'));
+    const auto cost = item.payload.capacity() + sizeof(Record) + 64;
+    EXPECT_TRUE(first.submit(item)); EXPECT_EQ(budget->used(), cost);
+    EXPECT_TRUE(second.submit(item)); EXPECT_EQ(budget->used(), 2 * cost);
+    EXPECT_FALSE(second.submit(item)); EXPECT_EQ(budget->used(), 2 * cost);
+    EXPECT_NE(second.error().find("process queue limit"), std::string::npos);
+    release.set_value(); guard.done = true;
+    first.close(); second.close();
+    EXPECT_EQ(budget->used(), 0u);
+
+    std::promise<void> releaseFailure;
+    auto readyFailure = releaseFailure.get_future().share();
+    btc.config.root = config.root + "/failure";
+    Session failed({btc}, 16384, {.beforeDrain = [readyFailure] { readyFailure.wait(); },
+        .beforeWriterOperation = [](auto&, auto operation, auto*) {
+            if (operation == "append") throw std::runtime_error("injected disk failure");
+        }}, budget);
+    EXPECT_TRUE(failed.submit(item)); EXPECT_TRUE(failed.submit(item));
+    EXPECT_EQ(budget->used(), 2 * cost);
+    releaseFailure.set_value(); failed.close();
+    EXPECT_FALSE(failed.error().empty()); EXPECT_EQ(budget->used(), 0u);
+}

@@ -55,7 +55,7 @@ void BeastWsTransport::armDeadline(uint64_t id, std::chrono::milliseconds timeou
     deadlineTimer_.async_wait([keep = shared_from_this(), this, id, timeout](beast::error_code ec) {
         if (ec || id != attempt_) return;
         if (phase_ == Phase::Closing) {
-            sLog_Warning("product=" << options_.product << " conn=" << connection_ << " " << "MDC transport close timed out, dropping socket: timeoutMs=" << timeout.count()
+            sLog_Warning("product=" << options_.product << " conn=" << connection_ << " attempt=" << connectAttempts_ << " " << "MDC transport close timed out, dropping socket: timeoutMs=" << timeout.count()
                          << " host=" << host_);
             // Explicit text: net::error::timed_out's message is platform prose
             // (WSAETIMEDOUT on Windows never says "timed out").
@@ -66,7 +66,7 @@ void BeastWsTransport::armDeadline(uint64_t id, std::chrono::milliseconds timeou
         // The handshake can succeed while this expiry is already queued; cancel()
         // cannot retract it, and the success path keeps the attempt id.
         if (phase_ == Phase::Open || phase_ == Phase::Idle) return;
-        sLog_Warning("product=" << options_.product << " conn=" << connection_ << " " << "MDC transport connect timed out: phase=" << phaseName(phase_)
+        sLog_Warning("product=" << options_.product << " conn=" << connection_ << " attempt=" << connectAttempts_ << " " << "MDC transport connect timed out: phase=" << phaseName(phase_)
                      << " timeoutMs=" << timeout.count() << " host=" << host_);
         fail(id, std::string("connect timed out in ") + phaseName(phase_) + " after "
                  + std::to_string(timeout.count()) + "ms");
@@ -96,7 +96,7 @@ void BeastWsTransport::finishClose(uint64_t id, beast::error_code ec, const std:
 
 void BeastWsTransport::connect(std::string host, std::string port, std::string target) {
     net::post(strand_, [keep = shared_from_this(), this, h = std::move(host), p = std::move(port), t = std::move(target)]() mutable {
-        ++connection_;
+        ++connectAttempts_;
         host_ = std::move(h);
         port_ = std::move(p);
         target_ = std::move(t);
@@ -107,8 +107,8 @@ void BeastWsTransport::connect(std::string host, std::string port, std::string t
         sawInboundFrame_ = false;
         phase_ = Phase::Resolve;
         armDeadline(id, options_.connectTimeout);
-        sLog_Data("product=" << options_.product << " conn=" << connection_ << " " << "MDC transport connecting: host=" << host_ << " port=" << port_
-                  << " target=" << target_ << " attempt=" << id
+        sLog_Data("product=" << options_.product << " conn=" << connection_ << " attempt=" << connectAttempts_ << " " << "MDC transport connecting: host=" << host_ << " port=" << port_
+                  << " target=" << target_ << " generation=" << id
                   << " timeoutMs=" << options_.connectTimeout.count());
 
         if (options_.resolve) {
@@ -149,7 +149,7 @@ void BeastWsTransport::close() {
 void BeastWsTransport::send(std::string msg) {
     net::post(strand_, [keep = shared_from_this(), this, m = std::move(msg)]() mutable {
         if (phase_ != Phase::Open) {
-            sLog_Data("product=" << options_.product << " conn=" << connection_ << " " << "MDC transport dropping send while not open: phase=" << phaseName(phase_)
+            sLog_Data("product=" << options_.product << " conn=" << connection_ << " attempt=" << connectAttempts_ << " " << "MDC transport dropping send while not open: phase=" << phaseName(phase_)
                       << " bytes=" << m.size());
             return;
         }
@@ -230,13 +230,14 @@ void BeastWsTransport::onWsHandshake(uint64_t id, beast::error_code ec) {
             onError_(std::string("WS close: ") + ws->reason().reason.c_str());
         }
     });
-    sLog_Data("product=" << options_.product << " conn=" << connection_ << " " << "MDC transport WS handshake ok: host=" << host_ << " target=" << target_
-              << " status=" << response.result_int() << " attempt=" << id);
+    ++connection_;
+    sLog_Data("product=" << options_.product << " conn=" << connection_ << " attempt=" << connectAttempts_ << " " << "MDC transport WS handshake ok: host=" << host_ << " target=" << target_
+              << " status=" << response.result_int() << " generation=" << id);
     firstFrameTimer_.expires_after(std::chrono::seconds(5));
     firstFrameTimer_.async_wait([keep = shared_from_this(), this, id](beast::error_code ec) {
         if (ec || id != attempt_) return;
         if (!sawInboundFrame_) {
-            sLog_Warning("product=" << options_.product << " conn=" << connection_ << " " << "MDC transport: no inbound WS frames within 5s of handshake: host=" << host_
+            sLog_Warning("product=" << options_.product << " conn=" << connection_ << " attempt=" << connectAttempts_ << " " << "MDC transport: no inbound WS frames within 5s of handshake: host=" << host_
                          << " target=" << target_);
         }
     });
@@ -272,7 +273,7 @@ void BeastWsTransport::onRead(uint64_t id, beast::error_code ec) {
         const int logged = s_loggedFrames.fetch_add(1, std::memory_order_relaxed);
         if (logged < 5) {
             const size_t previewLen = std::min<size_t>(payload.size(), 400);
-            sLog_Data("product=" << options_.product << " conn=" << connection_ << " " << std::string("MDC RX raw bytes=") +
+            sLog_Data("product=" << options_.product << " conn=" << connection_ << " attempt=" << connectAttempts_ << " " << std::string("MDC RX raw bytes=") +
                       std::to_string(payload.size()) +
                       " preview=" + payload.substr(0, previewLen));
         }

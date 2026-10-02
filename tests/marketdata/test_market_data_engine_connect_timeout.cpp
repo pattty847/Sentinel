@@ -275,4 +275,37 @@ TEST_F(EngineConnectTimeout, HealthyConnectionOutlivesConnectDeadlineWithoutReco
     EXPECT_EQ(observed.ups.size(), 1u);
     EXPECT_EQ(observed.downs.size(), 1u); // orderly stop closes the socket
 }
+
+TEST_F(EngineConnectTimeout, RemoveReturnsBeforeDeadPeerCloseAndStopDrainsRetiredSocket) {
+    Peer peer(tls.server, Peer::Mode::WsSilent);
+    options.closeTimeout = 800ms;
+    start(peer.port());
+    ASSERT_TRUE(observed.wait([](auto& o) { return !o.ups.empty(); }));
+    const auto before = Clock::now();
+    EXPECT_TRUE(engine->remove("BTC-USD"));
+    EXPECT_LT(Clock::now() - before, 300ms);
+    EXPECT_TRUE(engine->stats().empty());
+    engine->stop(); // retired engines must drain before callback consumers die
+    EXPECT_GE(Clock::now() - before, 750ms);
+    std::lock_guard lock(observed.mutex);
+    EXPECT_EQ(observed.downs.size(), 1u);
+    EXPECT_EQ(peer.acceptCount(), 1u);
+}
+TEST_F(EngineConnectTimeout, RemoveAndStopCancelRealTlsHandshakeWithoutWaitingForConnectDeadline) {
+    for (const bool removeFirst : {true, false}) {
+        Peer peer(tls.server, Peer::Mode::AcceptTcpOnly);
+        options.connectTimeout = 10s;
+        start(peer.port());
+        const auto deadline = Clock::now() + 3s;
+        while (peer.acceptCount() == 0 && Clock::now() < deadline) std::this_thread::sleep_for(5ms);
+        ASSERT_EQ(peer.acceptCount(), 1u);
+        const auto before = Clock::now();
+        if (removeFirst) EXPECT_TRUE(engine->remove("BTC-USD"));
+        engine->stop();
+        EXPECT_LT(Clock::now() - before, 500ms);
+        std::lock_guard lock(observed.mutex);
+        EXPECT_TRUE(observed.ups.empty()); EXPECT_EQ(observed.downs.size(), 1u);
+        observed.downs.clear();
+    }
+}
 } // namespace

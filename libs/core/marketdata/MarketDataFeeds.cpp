@@ -52,14 +52,18 @@ MarketDataFeeds::AddResult MarketDataFeeds::add(const std::string& product, bool
             sLog_Error("Feed refused: symbol=" << product << " cap=" << m_options.maxConnections << " code=capacity_exceeded");
             return AddResult::CapacityExceeded;
         }
+        auto ticket = std::make_shared<FeedConnectLimiter::Ticket>();
         auto engine = std::make_shared<Engine>(m_auth, m_config, product, m_io, m_tls,
             m_options.transportFactory, m_options.reconnect, m_options.clock,
-            [limiter = m_options.limiter, ticket = std::make_shared<FeedConnectLimiter::Ticket>()](int64_t now) { return limiter->acquire(now, ticket); }, m_options.jitter);
+            [limiter = m_options.limiter, ticket](int64_t now) { return limiter->acquire(now, ticket); },
+            [limiter = m_options.limiter, ticket](int64_t now) { return limiter->acquire(now, ticket, true); },
+            [limiter = m_options.limiter, ticket] { limiter->cancel(ticket); }, m_options.jitter);
         engine->onTrade(m_trade); engine->onLiveOrderBookLevelUpdates(m_updates);
         engine->onLiveOrderBookInitialized(m_snapshot); engine->onLiveOrderBookInvalidated(m_invalid);
         engine->onConnectionStatus(m_status); engine->onError(m_error);
         engine->onLatency(m_latency); engine->onIngest(m_ingest);
         m_engines.emplace(product, Entry{engine, pinned});
+        m_callbacksFrozen = true;
         if (m_started) engine->start();
         return AddResult::Added;
     });
@@ -70,23 +74,30 @@ void MarketDataFeeds::wait(std::future<void>& done) {
             m_io.restart(); m_io.run_one();
         }
     }
-    done.get();
+    try { done.get(); }
+    catch (const std::future_error& e) {
+        // A transport may discard its completion during cancellation. Teardown
+        // must still release work and join; destructors cannot throw.
+        sLog_Error("Feeds stop completion lost: error=" << e.what());
+    }
 }
 bool MarketDataFeeds::remove(const std::string& product) {
     if (m_stopped) return false;
-    auto done = std::make_shared<std::promise<void>>();
-    auto future = done->get_future();
-    const bool removed = call([&, this] {
+    return call([&, this] {
         auto it = m_engines.find(product);
         if (it == m_engines.end() || it->second.pinned) return false;
         auto engine = it->second.engine;
         m_engines.erase(it);
-        if (!m_started) done->set_value();
-        else engine->stop([engine, done] { done->set_value(); });
+        if (m_started) {
+            auto done = std::make_shared<std::promise<void>>();
+            m_retiring.push_back(done->get_future());
+            engine->stop([engine, done, product] {
+                sLog_Data("Feed removed: product=" << product << " conn=" << engine->stats().connection);
+                done->set_value();
+            });
+        }
         return true;
     });
-    if (removed) wait(future);
-    return removed;
 }
 void MarketDataFeeds::start() {
     if (m_stopped) throw std::logic_error("feeds stopped");
@@ -102,7 +113,7 @@ void MarketDataFeeds::stop() {
     if (m_stopped) return;
     auto futures = call([this] {
         m_timer.cancel();
-        std::vector<std::future<void>> futures;
+        auto futures = std::move(m_retiring);
         if (m_started) for (auto& [_, entry] : m_engines) {
             auto done = std::make_shared<std::promise<void>>();
             futures.push_back(done->get_future());
@@ -132,6 +143,10 @@ std::vector<MarketDataFeeds::Engine::Stats> MarketDataFeeds::stats() {
     });
 }
 void MarketDataFeeds::tick() {
+    std::erase_if(m_retiring, [this](auto& future) {
+        if (future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+        wait(future); return true;
+    });
     for (auto& [_, entry] : m_engines) entry.engine->tick();
     const auto now = m_options.clock();
     if (now < m_nextStats) return;
@@ -148,7 +163,7 @@ void MarketDataFeeds::tick() {
     sLog_Data("Feeds: engines=" << m_engines.size() << " up=" << up << line.str());
 }
 void MarketDataFeeds::armTimer() {
-    m_timer.expires_after(std::chrono::milliseconds(10));
+    m_timer.expires_after(std::chrono::milliseconds(100));
     m_timer.async_wait([this](beast::error_code ec) {
         if (ec || !m_started) return;
         tick(); armTimer();

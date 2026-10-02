@@ -132,7 +132,7 @@ bool SentinelServerApp::initialize() {
         // Wire up callbacks for logging
         m_marketDataCore->onConnectionStatus([modelPtr](const std::string& product, bool connected){
             sLog_App("MarketDataCore Connection: product=" << product << " " << (connected ? "CONNECTED" : "DISCONNECTED"));
-            safeInvoke(modelPtr, [connected](ServerDataModel& model) { model.onMarketDataConnectionChanged(connected); });
+            safeInvoke(modelPtr, [product, connected](ServerDataModel& model) { model.onMarketDataConnectionChanged(product, connected); });
         });
         // The recorder dropped a book on its own: only a fresh snapshot resumes it.
         connect(m_serverModel.get(), &ServerDataModel::recordingResnapshotRequested, this,
