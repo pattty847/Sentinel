@@ -88,7 +88,7 @@ if [[ ! "$topic" =~ ^[A-Za-z0-9_-]{8,64}$ ]]; then
     echo "       Pick a random topic: it is the only secret on ntfy.sh." >&2
     exit 1
 fi
-ntfy_url="https://ntfy.sh/$topic?template=grafana"
+ntfy_url="https://ntfy.sh/$topic?template=grafana&priority=high"
 
 if [[ $mode == install ]]; then
     brew install victoriametrics grafana node_exporter
@@ -111,7 +111,10 @@ umask 077
 # the destination directory, so never a pre-existing file with old permissions),
 # checks it (placeholders; plutil for a .plist) and renames it over <output>.
 render() { # template output
-    local esc_url=${ntfy_url//&/\\&} tmp
+    # sed replacement escapes '&'; a plist additionally needs XML '&amp;'.
+    local url=$ntfy_url esc_url tmp
+    [[ "$2" == *.plist ]] && url=${url//&/&amp;}
+    esc_url=${url//&/\\&}
     tmp=$(mktemp "$(dirname "$2")/.$(basename "$2").XXXXXX")
     if ! sed -e "s|@BREW@|$BREW|g" -e "s|@RT@|$RT|g" -e "s|@REPO@|$REPO|g" -e "s|@LOGS@|$LOGS|g" \
             -e "s|@NTFY_URL@|$esc_url|g" "$1" > "$tmp"; then
@@ -150,6 +153,8 @@ for label in "${LABELS[@]}"; do
     rm -f "$dst.new" # left by an older version of this script; may hold the topic
     render "$HERE/launchd/$label.plist.in" "$dst"
     launchctl bootout "$DOMAIN/$label" 2>/dev/null || true
+    # bootout returns before launchd has removed the job; bootstrapping too early fails with EIO.
+    for _ in $(seq 1 50); do launchctl print "$DOMAIN/$label" >/dev/null 2>&1 || break; sleep 0.2; done
     launchctl bootstrap "$DOMAIN" "$dst"
     echo "loaded $label"
 done

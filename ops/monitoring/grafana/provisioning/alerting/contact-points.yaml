@@ -1,5 +1,5 @@
 # Every alert goes to one ntfy topic (owner decision 2026-10-02: hosted ntfy.sh,
-# phone only). SENTINEL_NTFY_URL = https://ntfy.sh/<topic>?template=grafana is set
+# phone only). SENTINEL_NTFY_URL = https://ntfy.sh/<topic>?template=grafana&priority=high is set
 # in the installed Grafana plist by install.sh from SENTINEL_NTFY_TOPIC or the
 # gitignored ops/monitoring/ntfy.env. The topic never appears in git.
 apiVersion: 1

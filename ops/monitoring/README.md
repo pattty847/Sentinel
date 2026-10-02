@@ -136,7 +136,7 @@ signal is on a hot path.
 | A3b T7 absent | `absent(node_filesystem_avail_bytes{mountpoint="/Volumes/T7"})` | 5 m |
 
 The rules are in `grafana/provisioning/alerting/rules.yaml`. The contact point and policy
-are in `contact-points.yaml`: one ntfy webhook, `?template=grafana`, grouped by alert
+are in `contact-points.yaml`: one ntfy webhook, `?template=grafana&priority=high` (iOS shows high-priority pushes reliably), grouped by alert
 name, repeated every 4 h while an alert fires. Grafana expands environment variables in
 provisioning files. For this reason the annotation templates use `{{ .Labels.x }}` and do
 not use `$labels`.
