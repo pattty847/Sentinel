@@ -27,7 +27,10 @@ This version modularizes startup logic for maintainability and clarity.
 #include "themes/ThemeManager.hpp"
 #include "themes/FontManager.hpp"
 #include "ConfigLoader.hpp"
+#include "config/AgentHostMode.hpp"
 #include "config/GuiConfigStore.hpp"
+#include <QFileInfo>
+#include <cstdio>
 #include <QQuickWindow>
 #include <QResource>
 #include <QCoreApplication>
@@ -119,6 +122,20 @@ int main(int argc, char *argv[])
         if (flag == "--heatmap-renderer") {
             if (value == "legacy" || value == "gpu") GuiConfigStore::instance().setHeatmapRendererOverride(QString::fromLatin1(value));
             else sLog_Warning("Ignored --heatmap-renderer " << value << " (legacy|gpu)");
+        } else if (flag == "--agent-host") {
+            // Launched by scripts/dev/gui-host.py for sandboxed agents (see AgentHostMode.hpp).
+            // Must run before any QSettings use. The checkout (cwd) and the build tree are
+            // agent-writable, so the session directory may not live in them.
+            QString why;
+            const QString binDir = QFileInfo(QString::fromLocal8Bit(argv[0])).absolutePath();
+            if (!AgentHostMode::activate(QString::fromLocal8Bit(value), {QDir::currentPath(), binDir}, &why)) {
+                sLog_Error("--agent-host refused: " << why);
+                fprintf(stderr, "sentinel-gui: --agent-host refused: %s\n", qPrintable(why));
+                return 2;
+            }
+            sLog_App("agent-host mode: dir=" << value);
+        } else if (flag == "--agent-host-symbols") { // comma list; with --agent-host, the only symbols it may switch to
+            AgentHostMode::setSymbolAllowlist(QString::fromLocal8Bit(value).split(',', Qt::SkipEmptyParts));
         } else if (flag == "--api-port") {
             bool ok = false;
             const int port = value.toInt(&ok);

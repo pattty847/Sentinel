@@ -6,7 +6,7 @@
 void LayoutManager::saveLayout(QMainWindow* window, const QString& layoutName) {
     if (!window) return;
     
-    QSettings settings("Sentinel", "SentinelTerminal");
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
     settings.beginGroup("layouts");
     settings.beginGroup(layoutName);
     
@@ -23,7 +23,7 @@ void LayoutManager::saveLayout(QMainWindow* window, const QString& layoutName) {
 bool LayoutManager::restoreLayout(QMainWindow* window, const QString& layoutName) {
     if (!window) return false;
     
-    QSettings settings("Sentinel", "SentinelTerminal");
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
     settings.beginGroup("layouts");
     settings.beginGroup(layoutName);
     
@@ -60,7 +60,7 @@ bool LayoutManager::restoreLayout(QMainWindow* window, const QString& layoutName
 }
 
 QStringList LayoutManager::availableLayouts() {
-    QSettings settings("Sentinel", "SentinelTerminal");
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
     settings.beginGroup("layouts");
     QStringList layouts = settings.childGroups();
     settings.endGroup();
@@ -68,7 +68,7 @@ QStringList LayoutManager::availableLayouts() {
 }
 
 void LayoutManager::deleteLayout(const QString& layoutName) {
-    QSettings settings("Sentinel", "SentinelTerminal");
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
     settings.beginGroup("layouts");
     settings.remove(layoutName);
     settings.endGroup();

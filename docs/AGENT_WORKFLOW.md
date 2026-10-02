@@ -62,10 +62,14 @@ orchestrator's Claude Code memory (`sentinel-roadmap`, `codex-delegation`,
 
 ## Known agent quirks
 
-- Codex: always `< /dev/null`; pass `--add-dir <git-common-dir>`; resume needs
+- Codex: always `< /dev/null`; pass `--add-dir <repo>/_agent` (it can then append to `_agent/` itself; verified 2026-10-02) but know that `.git` stays read-only in the sandbox even with `--add-dir <git-common-dir>`, so the orchestrator commits and rebases for it; resume needs
   `-m <model>` and `-c sandbox_workspace_write.writable_roots=[...]`; never put backticks
-  in a double-quoted prompt (the shell eats them); `_agent/` is outside its sandbox, so
-  it proposes entries and the orchestrator appends them.
+  in a double-quoted prompt (the shell eats them). Its sandbox cannot start the GUI, but it
+  can take screenshots of landed work through the GUI host
+  (`scripts/dev/gui-shot.sh`, AGENTS.md section 4b): the orchestrator keeps
+  `scripts/dev/gui-host.py` running outside the sandbox and rebuilds main after a GUI change lands.
+  The host runs only main's build, never a worktree build, because it executes with the owner's
+  privileges; a Codex branch's own visuals come from a Claude subagent or after landing.
 - Claude subagents: can launch the GUI on a separate `--api-port` with `--no-screener`;
   screenshots `target=heatmap` only; never run the GUI binary with `--help` (it starts a
   full GUI).

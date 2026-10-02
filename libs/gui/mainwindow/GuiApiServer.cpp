@@ -1,5 +1,6 @@
 #include "GuiApiServer.h"
 #include "SentinelLogging.hpp"
+#include "../config/AgentHostMode.hpp"
 
 #include <QApplication>
 #include <QDateTime>
@@ -289,6 +290,11 @@ void GuiApiServer::handleRequest(QTcpSocket* socket) {
     if (!name.isEmpty()) name = QFileInfo(name).fileName();
     QString targetName = path == "/screenshot" ? legacyQuery.queryItemValue("target") : check.screenshotTarget;
     if (targetName.isEmpty()) targetName = "main";
+    if (!AgentHostMode::screenshotTargetAllowed(targetName)) { // legacy /screenshot skips the codec's target check
+        respond(socket, 403, AgentApi::jsonBytes(AgentApi::error("forbidden_in_agent_host",
+                "Screenshot target is not allowed in --agent-host mode (chart and widget grabs only)")), "application/json");
+        return;
+    }
     if (path == "/api/v1/screenshot" && !check.afterOperation.isEmpty()) {
         if (auto* deadline = socket->findChild<QTimer*>()) deadline->start(10000);
         waitForOperation(socket, check.afterOperation,

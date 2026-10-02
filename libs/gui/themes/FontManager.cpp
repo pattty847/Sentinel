@@ -14,7 +14,7 @@ void FontManager::initialize(QApplication* app) {
     if (m_initialized || !app) return;
     m_resourceFonts = loadResourceFonts();
 
-    QSettings settings("Sentinel", "SentinelGUI");
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelGUI");
     const QString saved = settings.value("ui/fontFamily").toString();
     if (!saved.isEmpty()) {
         applyFontFamily(saved, app);
@@ -50,7 +50,7 @@ bool FontManager::applyFontFamily(const QString& family, QApplication* app) {
 
     sLog_App("Font applied: " << m_currentFontFamily);
 
-    QSettings settings("Sentinel", "SentinelGUI");
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelGUI");
     settings.setValue("ui/fontFamily", m_currentFontFamily);
     return true;
 }

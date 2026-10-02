@@ -46,6 +46,7 @@
 #include "widgets/ServiceLocator.hpp"
 #include "PerformanceMonitor.hpp"
 #include "mainwindow/DockFactory.h"
+#include "config/AgentHostMode.hpp"
 #include "mainwindow/QmlSceneController.h"
 #include "mainwindow/LayoutOrchestrator.h"
 #include "mainwindow/MenuBuilder.h"
@@ -157,7 +158,8 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
                 }
             }
         }
-        if (!config.defaultSymbols.empty() && !m_userSubscribed) {
+        if (!config.defaultSymbols.empty() && !m_userSubscribed
+            && AgentHostMode::symbolAllowed(QString::fromStdString(config.defaultSymbols.front()))) {
             const QString defaultSymbol = QString::fromStdString(config.defaultSymbols.front());
             sLog_App("Default symbol from server config: symbol=" << defaultSymbol
                      << " prev=" << m_currentSymbol);
@@ -194,7 +196,8 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     m_modeController = new ChartModeController(this);
     if (m_qmlController) {
         m_qmlController->setChartModeController(m_modeController);
-        const QString defaultSymbol = QStringLiteral("BTC-USD");
+        // --agent-host: start on an allowlisted symbol, or on none (stay unsubscribed).
+        const QString defaultSymbol = AgentHostMode::startupSymbol(QStringLiteral("BTC-USD"));
         m_qmlController->updateSymbolInContext(defaultSymbol);  // Default symbol
         m_currentSymbol = defaultSymbol;
     }
@@ -532,6 +535,8 @@ void MainWindowGPU::setupGuiApiServer() {
     if (screenshotDir.isEmpty()) {
         screenshotDir = QDir::currentPath() + "/screenshots";
     }
+    // --agent-host: the host owns this directory; config and the env var must not redirect it.
+    if (AgentHostMode::active()) screenshotDir = AgentHostMode::screenshotDir();
 
     m_guiApiServer = std::make_unique<GuiApiServer>(this,
                                                     m_heatmapDock ? m_heatmapDock->qquickView() : nullptr,
@@ -750,6 +755,10 @@ void MainWindowGPU::onSubscribe() {
 bool MainWindowGPU::subscribeSymbol(const QString& symbol) {
     static const QRegularExpression pattern("^[A-Z0-9]{2,20}-[A-Z0-9]{2,20}$");
     if (!pattern.match(symbol).hasMatch()) return false;
+    if (!AgentHostMode::symbolAllowed(symbol)) { // --agent-host: no upstream subscriptions beyond the allowlist
+        sLog_Warning("agent-host: symbol refused: symbol=" << symbol);
+        return false;
+    }
     sLog_App("ui: subscribe symbol=" << symbol << " prev=" << m_currentSymbol
              << " connected=" << m_connected);
     m_userSubscribed = true;

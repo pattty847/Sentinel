@@ -2,6 +2,7 @@
 #include "SentinelLogging.hpp"
 #include <algorithm>
 #include <QDateTime>
+#include "../config/AgentHostMode.hpp"
 #include "../config/GuiConfigStore.hpp"
 
 namespace {
@@ -156,11 +157,24 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             this, &IGridDataSource::riskOrderUpdated, Qt::QueuedConnection);
 }
 
+namespace {
+// --agent-host: no outbound request may name a symbol outside the allowlist (a subscribe makes the
+// recorder subscribe upstream). Startup, the server's default symbol and every reconnect resubscribe
+// all end here, so this is the one place that holds the line. Inactive: always true.
+bool symbolPermitted(const std::string& symbol, const char* what) {
+    const QString q = QString::fromStdString(symbol);
+    if (AgentHostMode::symbolAllowed(q)) return true;
+    sLog_Warning("agent-host: " << what << " refused: symbol=" << q);
+    return false;
+}
+}  // namespace
+
 void RemoteGridDataSource::connectToServer() {
     m_client.connectToServer();
 }
 
 void RemoteGridDataSource::subscribe(const QString& symbol) {
+    if (!symbolPermitted(symbol.toStdString(), "subscribe")) return;
     m_client.subscribe(symbol.toStdString());
 
     // Initialize replica on snapshot for authoritative range. A replica kept from an
@@ -183,10 +197,12 @@ void RemoteGridDataSource::requestHeatmapHistory(const QString& symbol,
                                                  int64_t timeframeMs,
                                                  int64_t endTimeMs,
                                                  int count) {
+    if (!symbolPermitted(symbol.toStdString(), "heatmap history")) return;
     m_client.requestHeatmapHistory(symbol.toStdString(), timeframeMs, endTimeMs, count);
 }
 
 void RemoteGridDataSource::registerRecordingView(const recording::LiveView& view) {
+    if (!symbolPermitted(view.symbol, "recording view")) return;
     m_client.registerRecordingView(view);
 }
 
@@ -196,6 +212,7 @@ void RemoteGridDataSource::releaseRecordingView(const recording::LiveView& view)
 
 void RemoteGridDataSource::requestRecordingHeatmapHistory(
     const protocol::recordingwire::Request& request) {
+    if (!symbolPermitted(request.symbol, "recording history")) return;
     m_client.requestRecordingHeatmapHistory(request);
 }
 
@@ -203,6 +220,7 @@ void RemoteGridDataSource::requestFootprintHistory(const QString& symbol,
                                                    int64_t timeframeMs,
                                                    int64_t endTimeMs,
                                                    int count) {
+    if (!symbolPermitted(symbol.toStdString(), "footprint history")) return;
     m_client.requestFootprintHistory(symbol.toStdString(), timeframeMs, endTimeMs, count);
 }
 
@@ -247,6 +265,7 @@ void RemoteGridDataSource::requestNextCandlePage() {
     const auto request = m_candleBackfill.next(oldest, full, now);
     if (!request) return;
     m_candleBackfillTimer.stop();
+    if (!symbolPermitted(request->symbol.toStdString(), "candle history")) return;
     m_client.requestCandleHistory(request->symbol.toStdString(), request->timeframeSec,
                                  request->endSec, request->limit);
 }
@@ -257,6 +276,7 @@ void RemoteGridDataSource::requestTpoHistory(const QString& symbol,
                                              int64_t endTimeMs,
                                              int count,
                                              const QString& requestId) {
+    if (!symbolPermitted(symbol.toStdString(), "tpo history")) return;
     m_client.requestTpoHistory(symbol.toStdString(), timeframeMs, sessionType, endTimeMs, count,
                                requestId.toStdString());
 }
@@ -267,6 +287,13 @@ void RemoteGridDataSource::cancelTpoHistory(const QString& symbol, const QString
 
 
 void RemoteGridDataSource::sendTradeCommand(const trading::TradeCommand& command) {
+    // --agent-host: the one place every TradeCommand passes (dock buttons, shortcuts, the chart's
+    // TP/SL controls that /api/v1/input can reach). An agent-run GUI never trades.
+    if (!AgentHostMode::tradingAllowed()) {
+        sLog_Warning("agent-host: trade command dropped: action=" << static_cast<int>(command.action)
+                     << " symbol=" << command.symbol);
+        return;
+    }
     m_client.sendTradeCommand(command);
 }
 const LiveOrderBook& RemoteGridDataSource::getDirectLiveOrderBook(const std::string& productId) const {
@@ -485,6 +512,11 @@ void RemoteGridDataSource::sendAlgoCommand(const std::string& algoId,
                                             const std::string& action,
                                             const std::string& symbol,
                                             const trading::AlgoParams& params) {
+    // --agent-host: the dock's Start/Stop buttons reach the server's algo runner; an agent-run GUI never does.
+    if (!AgentHostMode::tradingAllowed()) {
+        sLog_Warning("agent-host: algo command dropped: algo=" << algoId << " action=" << action << " symbol=" << symbol);
+        return;
+    }
     m_client.sendAlgoCommand(algoId, action, symbol, params);
 }
 
