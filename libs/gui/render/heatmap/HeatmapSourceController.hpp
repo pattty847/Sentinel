@@ -278,6 +278,11 @@ struct SpanSnapshot {
     std::vector<SpanSourceSnapshot> sources;
     bool complete = false; // every source built at its latest generation
 };
+// The content a span draws: its sources' builds in pass order (the keys carry the
+// chunk generations). 0 when no source is built. The node tags the span pieces it
+// draws with it and label windows record it, so labels match the picture on
+// screen (S7b); an upload acknowledgement (same keys) keeps it.
+uint64_t spanContentId(const SpanSnapshot &span);
 // Immutable and tick-free: the GUI thread picks the tick (Auto from `resolution`).
 struct SpanSet {
     uint64_t version = 0; // per controller, increments on every publication

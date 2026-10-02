@@ -71,6 +71,7 @@ void UnifiedGridRenderer::init() {
             applyPriceCarry(gpuLivePrice());
         refitAutoPrice(); // e.g. a new symbol's tick: its min/max price spans
     });
+    connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::labelsChanged, this, [this] { update(); });
     connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::buildFailed, this, [](const QString& message) {
         sLog_Warning("GPU heatmap span build failed: " << message);
     });

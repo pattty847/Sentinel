@@ -5,6 +5,8 @@
 #include <QComboBox>
 #include <QSlider>
 #include <QLabel>
+#include <QMenu>
+#include "LiquidityRangeSlider.hpp"
 #include <cstdint>
 #include <vector>
 
@@ -52,6 +54,50 @@ public:
                               bool tpoEnabled,
                               bool volumeProfileEnabled = false);
 
+    // The toolbar adapts to the chart's active layers (owner request 2026-10-02).
+    // controlVisibility() is the ONE place the rules live:
+    // - heatmap-only (tick selector, palette, liquidity labels and range): the
+    //   heatmap layer is on; the range slider and the Labels toggle in gpu mode,
+    //   the legacy threshold slider in legacy mode (the currency combo in both);
+    // - candle style: candles are on;
+    // - TPO session: TPO or volume profile is on (the profile follows the TPO
+    //   session); TPO layout: TPO is on.
+    struct ModeState {
+        bool heatmap = true, footprint = false, tpo = false, volumeProfile = false, candles = true, gpu = true;
+        bool operator==(const ModeState &) const = default;
+    };
+    struct ControlVisibility {
+        bool tickSelector = false, palette = false, liquidity = false, rangeSlider = false, thresholdSlider = false;
+        bool candleStyle = false, tpoSession = false, tpoLayout = false;
+        bool labelsToggle = false; // gpu heatmap only (legacy draws its own labels, always)
+        bool operator==(const ControlVisibility &) const = default;
+    };
+    static ControlVisibility controlVisibility(const ModeState &mode);
+    void setModeState(const ModeState &mode);
+    const ModeState &modeState() const { return m_mode; }
+    // What the toolbar shows now (from its actions; tests and the Agent API).
+    ControlVisibility shownControls() const;
+    bool candlesChecked() const;
+    void setCandlesChecked(bool checked); // no signal
+
+    // Liquidity labels and the range filter (S7b). The model drives them; user
+    // edits come back as signals. Values are base-asset sizes.
+    LiquidityRangeSlider *rangeSlider() const { return m_rangeSlider; }
+    QLabel *rangeLabel() const { return m_rangeLabel; }
+    QToolButton *labelsButton() const { return m_labelsButton; }
+    void setLiquidityRange(double domainLo, double domainHi, double low, double high);
+    void setLabelOptions(bool show, bool usd);
+
+    // TPO controls (renderer state): session type id and layout ("collapsed", "split").
+    QComboBox *tpoSessionCombo() const { return m_tpoSessionCombo; }
+    QComboBox *tpoLayoutCombo() const { return m_tpoLayoutCombo; }
+    void setTpoState(int sessionType, const QString &layout);
+
+    // The chart settings menu (gear): one entry point for chart-level settings.
+    QToolButton *chartMenuButton() const { return m_chartMenuButton; }
+    QMenu *chartMenu() const { return m_chartMenu; }
+    QComboBox *chartTypeCombo() const { return m_chartTypeCombo; }
+
 signals:
     void subscribeRequested();
     void primaryFieldRequested(int field);
@@ -73,10 +119,15 @@ signals:
     void colorPresetSelected(const QString& preset);
     void tickModeRequested(bool manual);    // user changed Auto/Manual
     void tickPresetRequested(qint64 units); // user picked a preset (locks Manual)
+    void liquidityRangeEdited(double low, double high, bool final);
+    void labelsToggled(bool show);
+    void tpoSessionSelected(int sessionType);
+    void tpoLayoutSelected(const QString &layout);
 
 private:
     QAction* addIconAction(const QString& iconPath, const QString& text, const QString& tooltip);
     QToolButton* addIconButton(const QString& iconPath, const QString& tooltip);
+    void applyVisibility();
 
     QLineEdit* m_symbolSearch = nullptr;
     QComboBox* m_timeframeCombo = nullptr;
@@ -94,4 +145,19 @@ private:
     QToolButton* m_footprintButton = nullptr;
     QToolButton* m_tpoButton = nullptr;
     QToolButton* m_volumeProfileButton = nullptr;
+    QAction* m_candleAction = nullptr;
+    LiquidityRangeSlider* m_rangeSlider = nullptr;
+    QLabel* m_rangeLabel = nullptr;
+    QToolButton* m_labelsButton = nullptr;
+    QComboBox* m_tpoSessionCombo = nullptr;
+    QComboBox* m_tpoLayoutCombo = nullptr;
+    QToolButton* m_chartMenuButton = nullptr;
+    QMenu* m_chartMenu = nullptr;
+    ModeState m_mode;
+    // Toolbar actions of the widgets above (a toolbar widget hides with its action).
+    QAction *m_tickModeAction = nullptr, *m_tickPresetAction = nullptr, *m_tickVeilAction = nullptr;
+    QAction *m_chartTypeAction = nullptr, *m_paletteAction = nullptr;
+    QAction *m_liqLabelAction = nullptr, *m_modeLabelAction = nullptr, *m_modeComboAction = nullptr;
+    QAction *m_labelsAction = nullptr, *m_rangeAction = nullptr, *m_rangeLabelAction = nullptr;
+    QAction *m_thresholdAction = nullptr, *m_tpoSessionAction = nullptr, *m_tpoLayoutAction = nullptr;
 };

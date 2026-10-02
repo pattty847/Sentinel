@@ -3,7 +3,16 @@
 
 #include <QtGlobal>
 
+#include <algorithm>
+#include <array>
+
 namespace {
+// Capacity grows at least 1.5x (from 256), never to the exact size: a rising
+// glyph count reallocates O(log n) times, not every frame.
+void reserveGrowing(std::vector<ChartGlyphInstance>& v, size_t required) {
+    if (v.capacity() >= required) return;
+    v.reserve(std::max({required, v.capacity() + v.capacity() / 2, size_t(256)}));
+}
 float envFloatOrDefault(const char* name, float fallback) {
     const QByteArray value = qgetenv(name);
     if (value.isEmpty()) {
@@ -71,17 +80,27 @@ void ChartTextRenderer::submitGlyphs(const std::vector<ChartGlyphInstance>& glyp
         }
     }
 
-    QHash<QRgb, int> pendingCounts;
+    // Glyphs per colour without a per-call container: chart text uses a handful of
+    // colours (axis text, light and dark labels). Buckets grow geometrically and
+    // keep their capacity across frames (no allocation in steady state).
+    std::array<std::pair<QRgb, int>, 8> counts{};
+    size_t distinct = 0;
+    bool overflow = false;
     for (const ChartGlyphInstance& glyph : glyphs) {
-        pendingCounts[glyph.color.rgba()] += 1;
-    }
-    for (auto it = pendingCounts.constBegin(); it != pendingCounts.constEnd(); ++it) {
-        Bucket* bucket = findOrCreateBucket(QColor::fromRgba(it.key()));
-        const size_t required = bucket->glyphs.size() + static_cast<size_t>(it.value());
-        if (bucket->glyphs.capacity() < required) {
-            bucket->glyphs.reserve(required);
+        const QRgb rgba = glyph.color.rgba();
+        size_t i = 0;
+        while (i < distinct && counts[i].first != rgba) ++i;
+        if (i == distinct) {
+            if (distinct == counts.size()) { overflow = true; continue; }
+            counts[distinct++] = {rgba, 0};
         }
+        ++counts[i].second;
     }
+    for (size_t i = 0; i < distinct; ++i) {
+        Bucket* bucket = findOrCreateBucket(QColor::fromRgba(counts[i].first));
+        reserveGrowing(bucket->glyphs, bucket->glyphs.size() + static_cast<size_t>(counts[i].second));
+    }
+    Q_UNUSED(overflow); // more colours than counted: push_back still grows geometrically
 
     for (const ChartGlyphInstance& glyph : glyphs) {
         Bucket* bucket = findOrCreateBucket(glyph.color);
@@ -141,12 +160,19 @@ void ChartTextRenderer::endFrame() {
     }
 }
 
+size_t ChartTextRenderer::capacityBytes() const {
+    size_t bytes = m_buckets.capacity() * sizeof(Bucket);
+    for (const Bucket& bucket : m_buckets) bytes += bucket.glyphs.capacity() * sizeof(ChartGlyphInstance);
+    return bytes;
+}
+
 ChartTextRenderer::Bucket* ChartTextRenderer::findOrCreateBucket(const QColor& color) {
     for (Bucket& bucket : m_buckets) {
         if (bucket.color == color) {
             return &bucket;
         }
     }
+    if (m_buckets.capacity() < 8) m_buckets.reserve(8);
     m_buckets.push_back(Bucket{color, {}, nullptr, false});
     return &m_buckets.back();
 }

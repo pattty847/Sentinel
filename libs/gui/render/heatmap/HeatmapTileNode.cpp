@@ -1102,14 +1102,17 @@ void HeatmapTileNode::layout(const std::vector<Draw> &draws) {
     pieces_.clear();
     clipSpans_.clear();
     clipLive_.clear();
-    for (const auto& d : draws) {
+    // Tokens are draw indices: each piece finds its draw (bin, content) directly.
+    for (size_t i = 0; i < draws.size(); ++i) {
+        const auto &d = draws[i];
         const auto* bin = findBin(d.bin);
         if (!bin) continue;
-        if (d.live) clipLive_.push_back({d.bin, d.tfMs, bin->liveStartMs, bin->liveEndMs});
-        else clipSpans_.push_back({d.bin, d.tile, d.tfMs, bin->completeEndMs});
+        if (d.live) clipLive_.push_back({i, d.tfMs, bin->liveStartMs, bin->liveEndMs});
+        else clipSpans_.push_back({i, d.tile, d.tfMs, bin->completeEndMs});
     }
     drawPieces(clipSpans_, clipLive_, 0, [&](DrawPiece p) {
-        pieces_.push_back({findBin(p.token), p.loMs, p.hiMs, p.live});
+        const auto &d = draws[size_t(p.token)];
+        pieces_.push_back({findBin(d.bin), p.loMs, p.hiMs, p.live, d.content});
     });
 }
 
@@ -1213,6 +1216,7 @@ void HeatmapTileNode::prepare() {
             if (const SpanRef *ref = spanAt(tf, t); ref && tick > 0) {
                 bool complete = false;
                 s.bin = binFor(*ref, tick, cb, &complete);
+                s.content = spanContentId(*ref->span);
                 // Complete without a bin: every source failed terminally. That is
                 // resolved (it draws loading), not pending: it must not hold a
                 // transition forever.
@@ -1290,7 +1294,7 @@ void HeatmapTileNode::prepare() {
             if (addBinDraw(updates, bin, opacity, piece.loMs, piece.hiMs))
                 segments.push_back({piece.loMs, piece.hiMs, bin.id,
                                     piece.live ? HeatmapTileStats::Segment::Live : HeatmapTileStats::Segment::Span,
-                                    layer, opacity, piece.live ? bin.liveVersion : 0});
+                                    layer, opacity, piece.live ? bin.liveVersion : 0, piece.live ? 0 : piece.content});
             if (layer == 0) {
                 covered.emplace_back(piece.loMs, piece.hiMs);
                 if (piece.live) noteLiveDrawn(bin);
@@ -1327,17 +1331,17 @@ void HeatmapTileNode::prepare() {
                 for (const auto &d : held_)
                     if (!d.live && d.tile == s.tile && d.tfMs == tf) { previous = &d; break; }
             if (s.ready && s.bin) {
-                now_.push_back({s.bin->id, s.tile, tf, false});
+                now_.push_back({s.bin->id, s.tile, tf, false, s.content});
                 ++ready;
             } else if (previous) {
                 now_.push_back(*previous); // slot fallback: the previous content until the new one is ready
                 ++fallback;
             } else if (s.bin) {
-                now_.push_back({s.bin->id, s.tile, tf, false}); // what is resident so far
+                now_.push_back({s.bin->id, s.tile, tf, false, 0}); // what is resident so far (unmatchable)
                 ++partial;
             }
         }
-        if (liveBin) now_.push_back({liveBin->id, 0, tf, true});
+        if (liveBin) now_.push_back({liveBin->id, 0, tf, true, liveBin->liveVersion});
     }
     drawPicture(now_, 1.0f, 0);
     std::sort(covered.begin(), covered.end());

@@ -69,6 +69,9 @@ void clampSettings(HeatmapChartSettings &s) {
     s.uploadBudgetBytes = std::clamp<uint64_t>(s.uploadBudgetBytes, 1, std::min<uint64_t>(128 * MiB, s.gpuCapBytes));
     s.prefetchTiles = std::clamp(s.prefetchTiles, 0, 16);
     s.liveMinIntervalMs = std::clamp(s.liveMinIntervalMs, 100, 5000);
+    if (s.labelCurrency != "usd" && s.labelCurrency != "asset") s.labelCurrency = d.labelCurrency;
+    s.labelMinPx = finiteClamp(s.labelMinPx, 8, 24, d.labelMinPx);
+    s.labelMaxPx = finiteClamp(s.labelMaxPx, s.labelMinPx, 32, std::max(d.labelMaxPx, s.labelMinPx));
 }
 HeatmapChartSettings chartDefaults(const ClientHeatmapConfig &c) {
     HeatmapChartSettings s;
@@ -111,6 +114,10 @@ QJsonObject settingsJson(const HeatmapChartSettings &s) {
         {"prefetchTiles", s.prefetchTiles},
         {"liveMinIntervalMs", s.liveMinIntervalMs},
         {"showTelemetry", s.showTelemetry},
+        {"showLabels", s.showLabels},
+        {"labelCurrency", QString::fromStdString(s.labelCurrency)},
+        {"labelMinPx", s.labelMinPx},
+        {"labelMaxPx", s.labelMaxPx},
         {"tickMode", s.tickMode == TickMode::Auto ? "auto" : "manual"},
         {"bidGradient", gradientJson(s.bidGradient)}, {"askGradient", gradientJson(s.askGradient)}
     };
@@ -130,6 +137,7 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
         if (key == "renderer" && v != "legacy" && v != "gpu") return "renderer must be legacy or gpu";
         if (key == "tickMode" && v != "auto" && v != "manual") return "tickMode must be auto or manual";
         if (key == "palettePreset" && !palettes.contains(v.toString())) return "Unknown palettePreset";
+        if (key == "labelCurrency" && v != "usd" && v != "asset") return "labelCurrency must be usd or asset";
         if ((key == "bidGradient" || key == "askGradient") && !validGradient(v)) return "Invalid gradient (2..16 ordered stops, endpoints 0 and 1, hex colors)";
         merged[key] = v;
     }
@@ -149,6 +157,10 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     out.prefetchTiles = int(std::clamp(merged["prefetchTiles"].toDouble(), -2147483647.0, 2147483647.0));
     out.liveMinIntervalMs = int(std::clamp(merged["liveMinIntervalMs"].toDouble(), -2147483647.0, 2147483647.0));
     out.showTelemetry = merged["showTelemetry"].toBool();
+    out.showLabels = merged["showLabels"].toBool();
+    out.labelCurrency = merged["labelCurrency"].toString().toStdString();
+    out.labelMinPx = merged["labelMinPx"].toDouble();
+    out.labelMaxPx = merged["labelMaxPx"].toDouble();
     out.tickMode = merged["tickMode"] == "manual" ? TickMode::Manual : TickMode::Auto;
     out.bidGradient = gradient(merged["bidGradient"]);
     out.askGradient = gradient(merged["askGradient"]);

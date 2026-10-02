@@ -21,6 +21,10 @@ struct LabelRequest {
     bool formatText = true;
     bool operator==(const LabelRequest &) const = default;
 };
+// Label text: at most three significant digits with k/M/B/T, trailing zeros
+// dropped, "$" for USD; the asset amount is the number only ("$11k", "$1.24M",
+// "$1.2M", "12.5"; owner 2026-10-02). Empty for a value <= 0 or not finite.
+void formatLabelAmount(std::array<char, 48> &out, double value, bool usd);
 struct LabelCell {
     uint32_t word = tiles::cellWord(tiles::kCellNoData);
     double value = 0; // exact dominant-side value of the winning source
@@ -32,6 +36,10 @@ struct LabelCells {
     std::vector<LabelCell> cells; // row-major, highest price first
     std::vector<BucketState> columnStates;
     std::vector<bool> formingColumns;
+    // S7b drawn-picture identity: per column, whether the live window (not a span)
+    // supplied it, and each span's spanContentId (tile, id).
+    std::vector<bool> liveColumns;
+    std::vector<std::pair<int64_t, uint64_t>> spanContent;
     std::vector<ChunkGeneration> missing; // never substituted with newer generations
     uint64_t composedWindows = 0, cacheHits = 0;
     uint64_t reusedHistoryColumns = 0;

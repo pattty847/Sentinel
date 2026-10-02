@@ -1,6 +1,7 @@
 #pragma once
-// Heatmap chart settings (S6c): every HeatmapChartSettings field in five tabs
-// (Tick, Look, Budgets, Live, Debug) plus the chart's TPO controls. Changes apply
+// Chart settings (S6c, S7b): every HeatmapChartSettings field in six tabs
+// (Chart, Tick, Look, Budgets, Live, Debug) plus the chart's TPO controls. The
+// Chart tab holds the liquidity labels and the candle style. Changes apply
 // live through HeatmapSettingsModel::apply (persisted per chart; the Debug
 // renderer only for this session unless "Make default" is ticked) and the dialog
 // follows the model's changed() signal, so Agent API and toolbar changes show here.
@@ -77,6 +78,7 @@ signals:
 
 private:
     void buildUi();
+    QWidget *buildChartTab();
     QWidget *buildTickTab();
     QWidget *buildLookTab();
     QWidget *buildBudgetsTab();
@@ -97,6 +99,12 @@ private:
 
     QTabWidget *m_tabs = nullptr;
     QLabel *m_status = nullptr;
+    // Chart (S7b labels: chart settings; candle style: renderer state)
+    QCheckBox *m_showLabels = nullptr;
+    QComboBox *m_labelCurrency = nullptr;
+    QDoubleSpinBox *m_labelMinPx = nullptr;
+    QDoubleSpinBox *m_labelMaxPx = nullptr;
+    QComboBox *m_candleStyle = nullptr;
     // Tick
     QComboBox *m_tickMode = nullptr;
     QComboBox *m_manualTick = nullptr;

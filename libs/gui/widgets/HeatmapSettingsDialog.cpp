@@ -204,9 +204,9 @@ void HeatmapGradientEditor::paintEvent(QPaintEvent *event) {
 // ------------------------------------------------------------------- dialog
 HeatmapSettingsDialog::HeatmapSettingsDialog(heatmap::HeatmapSettingsModel *model, UnifiedGridRenderer *renderer,
                                              QWidget *parent)
-    : QDialog(parent), m_model(model), m_renderer(renderer) {
+    : QDialog(parent), m_model(model) {
     setObjectName("heatmapSettingsDialog");
-    setWindowTitle("Heatmap Settings");
+    setWindowTitle("Chart Settings");
     setModal(false);
     resize(520, 560);
     setStyleSheet("QDialog { background-color: #1B1F24; } QLabel, QCheckBox { color: #C9D4DD; }");
@@ -218,15 +218,32 @@ HeatmapSettingsDialog::HeatmapSettingsDialog(heatmap::HeatmapSettingsModel *mode
             m_savedRenderer->setText(QString::fromStdString(m_model->savedRenderer()));
         });
     refreshFromModel();
-    refreshFromRenderer();
+    setRenderer(renderer); // binds its signals and refreshes the renderer-backed controls
 }
 
 void HeatmapSettingsDialog::setRenderer(UnifiedGridRenderer *renderer) {
+    if (m_renderer) disconnect(m_renderer, nullptr, this, nullptr); // reopening rebinds: no duplicates
     m_renderer = renderer;
+    if (renderer) {
+        // Renderer-backed controls follow changes made elsewhere (toolbar, chart
+        // menu, Agent API) without echoing them back.
+        connect(renderer, &UnifiedGridRenderer::candleStyleChanged, this, [this] {
+            if (!m_renderer) return;
+            const QSignalBlocker block(m_candleStyle);
+            m_candleStyle->setCurrentIndex(std::clamp(m_renderer->candleStyle(), 0, 2));
+        });
+        connect(renderer, &UnifiedGridRenderer::tpoStyleChanged, this, [this] {
+            if (!m_renderer) return;
+            const QSignalBlocker a(m_tpoLayoutCombo), b(m_tpoThemeCombo);
+            m_tpoLayoutCombo->setCurrentIndex(std::max(0, m_tpoLayoutCombo->findData(m_renderer->tpoLayout())));
+            m_tpoThemeCombo->setCurrentIndex(std::max(0, m_tpoThemeCombo->findData(m_renderer->tpoTheme())));
+        });
+    }
     refreshFromRenderer();
 }
 
 QStringList HeatmapSettingsDialog::tabKeys(const QString &tab) {
+    if (tab == "Chart") return {"showLabels", "labelCurrency", "labelMinPx", "labelMaxPx"};
     if (tab == "Tick") return {"tickMode", "manualTick", "minRowPx", "hysteresis"};
     if (tab == "Look")
         return {"palettePreset", "bidGradient", "askGradient", "sensitivityMin", "sensitivityMax", "opacity",
@@ -241,6 +258,7 @@ void HeatmapSettingsDialog::buildUi() {
     auto *layout = new QVBoxLayout(this);
     m_tabs = new QTabWidget(this);
     m_tabs->setObjectName("heatmapSettingsTabs");
+    m_tabs->addTab(buildChartTab(), "Chart");
     m_tabs->addTab(buildTickTab(), "Tick");
     m_tabs->addTab(buildLookTab(), "Look");
     m_tabs->addTab(buildBudgetsTab(), "Budgets");
@@ -287,6 +305,48 @@ QPushButton *HeatmapSettingsDialog::resetButton(const QString &tab, QWidget *par
         refreshFromModel();
     });
     return button;
+}
+
+QWidget *HeatmapSettingsDialog::buildChartTab() {
+    auto *page = new QWidget(this);
+    auto *form = new QFormLayout(page);
+    m_showLabels = new QCheckBox("Show liquidity labels on heatmap cells", page);
+    m_showLabels->setObjectName("showLabels");
+    form->addRow("Labels", m_showLabels);
+    m_labelCurrency = new QComboBox(page);
+    m_labelCurrency->setObjectName("labelCurrency");
+    m_labelCurrency->addItem("USD ($1.24M)", "usd");
+    m_labelCurrency->addItem("Asset (12.5)", "asset");
+    form->addRow("Label currency", m_labelCurrency);
+    m_labelMinPx = doubleSpin(page, "labelMinPx", 8, 24, 0.5, 1);
+    m_labelMinPx->setSuffix(" px");
+    m_labelMaxPx = doubleSpin(page, "labelMaxPx", 8, 32, 0.5, 1);
+    m_labelMaxPx->setSuffix(" px");
+    form->addRow("Label size, smallest", m_labelMinPx);
+    form->addRow("Label size, largest", m_labelMaxPx);
+    form->addRow(note("A label shows on every coloured cell (above the liquidity range's low handle) where its text "
+                      "fits at the smallest size plus padding; it grows with the cells up to the largest size. "
+                      "GPU renderer.",
+                      page));
+    m_candleStyle = new QComboBox(page);
+    m_candleStyle->setObjectName("candleStyle");
+    m_candleStyle->addItems({"Candle", "Hollow", "Line"});
+    form->addRow("Candle style (this session)", m_candleStyle);
+    form->addRow(resetButton("Chart", page));
+    connect(m_showLabels, &QCheckBox::toggled, this, [this](bool on) { apply({{"showLabels", on}}); });
+    connect(m_labelCurrency, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
+        if (index >= 0) apply({{"labelCurrency", m_labelCurrency->itemData(index).toString()}});
+    });
+    connect(m_labelMinPx, &QDoubleSpinBox::valueChanged, this, [this](double v) {
+        apply({{"labelMinPx", v}, {"labelMaxPx", std::max(v, m_labelMaxPx->value())}});
+    });
+    connect(m_labelMaxPx, &QDoubleSpinBox::valueChanged, this, [this](double v) {
+        apply({{"labelMinPx", std::min(v, m_labelMinPx->value())}, {"labelMaxPx", v}});
+    });
+    connect(m_candleStyle, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
+        if (m_renderer && index >= 0 && !m_loading) m_renderer->setCandleStyle(index);
+    });
+    return page;
 }
 
 QWidget *HeatmapSettingsDialog::buildTickTab() {
@@ -342,8 +402,10 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     form->addRow("Ask gradient (Custom)", m_askGradient);
     m_sensitivityMin = doubleSpin(page, "sensitivityMin", 0.0001, 1e12, 0.01, 4);
     m_sensitivityMax = doubleSpin(page, "sensitivityMax", 0.0001, 1e15, 1, 4);
-    form->addRow("Sensitivity min (size)", m_sensitivityMin);
-    form->addRow("Sensitivity max (size)", m_sensitivityMax);
+    m_sensitivityMin->setToolTip("The liquidity range's low handle (toolbar): smaller cells get no colour and no label.");
+    m_sensitivityMax->setToolTip("The liquidity range's high handle (toolbar): colour saturates at and above it.");
+    form->addRow("Liquidity range low (size)", m_sensitivityMin);
+    form->addRow("Liquidity range high (size)", m_sensitivityMax);
     m_opacity = doubleSpin(page, "opacity", 0, 1, 0.05, 2);
     form->addRow("Opacity", m_opacity);
     auto *fadeRow = new QHBoxLayout;
@@ -516,10 +578,12 @@ QWidget *HeatmapSettingsDialog::buildTpoTab() {
         m_tpoSessionCombo->addItem(name, id);
     form->addRow("TPO Session", m_tpoSessionCombo);
     m_tpoLayoutCombo = new QComboBox(page);
+    m_tpoLayoutCombo->setObjectName("tpoLayout");
     m_tpoLayoutCombo->addItem("Collapsed", "collapsed");
     m_tpoLayoutCombo->addItem("Split", "split");
     form->addRow("TPO Layout", m_tpoLayoutCombo);
     m_tpoThemeCombo = new QComboBox(page);
+    m_tpoThemeCombo->setObjectName("tpoTheme");
     m_tpoThemeCombo->addItem("Rainbow", "rainbow");
     m_tpoThemeCombo->addItem("Calm", "calm");
     m_tpoThemeCombo->addItem("Sage", "sage");
@@ -592,6 +656,13 @@ void HeatmapSettingsDialog::refreshFromModel() {
     set(m_minRowPx, s.minRowPx);
     set(m_hysteresis, s.hysteresis);
     {
+        const QSignalBlocker a(m_showLabels), b(m_labelCurrency);
+        m_showLabels->setChecked(s.showLabels);
+        m_labelCurrency->setCurrentIndex(std::max(0, m_labelCurrency->findData(QString::fromStdString(s.labelCurrency))));
+    }
+    set(m_labelMinPx, s.labelMinPx);
+    set(m_labelMaxPx, s.labelMaxPx);
+    {
         const QSignalBlocker block(m_palette);
         m_palette->setCurrentIndex(std::max<qsizetype>(0, kPalettes.indexOf(QString::fromStdString(s.palettePreset))));
     }
@@ -640,6 +711,7 @@ void HeatmapSettingsDialog::refreshFromRenderer() {
     m_gammaLabel->setText(QString::number(m_renderer->heatmapGamma(), 'f', 2));
     m_contrastLabel->setText(QString::number(m_renderer->heatmapContrast(), 'f', 2));
     m_floorLabel->setText(QString::number(m_renderer->heatmapShaderFloor(), 'f', 3));
+    m_candleStyle->setCurrentIndex(std::clamp(m_renderer->candleStyle(), 0, 2));
     if (const int i = m_tpoTimeframeCombo->findData(m_renderer->tpoTimeframeMs()); i >= 0) m_tpoTimeframeCombo->setCurrentIndex(i);
     if (const int i = m_tpoSessionCombo->findData(m_renderer->tpoSessionType()); i >= 0) m_tpoSessionCombo->setCurrentIndex(i);
     m_tpoLayoutCombo->setCurrentIndex(std::max(0, m_tpoLayoutCombo->findData(m_renderer->tpoLayout())));

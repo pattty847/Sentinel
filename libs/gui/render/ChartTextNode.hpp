@@ -58,6 +58,7 @@ public:
     void setDistanceSign(float distanceSign);
     void setSprFloor(float sprFloor);
     void updateGeometry(const std::vector<ChartGlyphInstance>& glyphs);
+    int capacityGlyphs() const { return m_capacityGlyphs; } // tests
 
 private:
     void updateMaterial();
@@ -67,6 +68,7 @@ private:
     QSGTexture* m_texture = nullptr;
     bool m_ownsTexture = true;
     int m_capacityGlyphs = 0;
+    int m_lastGlyphs = 0;  // glyphs written last update (the zeroed tail starts there)
     QSize m_atlasSize;
     QRectF m_texSubRect{0.0, 0.0, 1.0, 1.0};
 };

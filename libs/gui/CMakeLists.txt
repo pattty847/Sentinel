@@ -116,6 +116,8 @@ set(GRID_CORE_SOURCES
     render/ChartTextNode.cpp
     render/ChartTextRenderer.hpp
     render/ChartTextRenderer.cpp
+    render/heatmap/HeatmapLabelLayout.hpp
+    render/heatmap/HeatmapLabelLayout.cpp
     render/HeatmapOverlayRenderer.hpp
     render/HeatmapOverlayRenderer.cpp
     render/CandlestickBatched.hpp
@@ -160,6 +162,7 @@ set(WIDGET_SOURCES
     "widgets/HeatmapSettingsDialog.cpp"
     "widgets/HeatmapTelemetryDock.cpp"
     "widgets/TopToolbar.cpp"
+    "widgets/LiquidityRangeSlider.cpp"
     "widgets/WatchlistDock.cpp"
     "widgets/StockChartDock.cpp"
     "widgets/TradeBlotterDock.cpp"
@@ -200,6 +203,8 @@ add_library(sentinel_heatmap_gpu STATIC
     render/heatmap/HeatmapSourceController.cpp
     render/heatmap/HeatmapCellQuery.hpp
     render/heatmap/HeatmapCellQuery.cpp
+    render/heatmap/HeatmapLabelMatch.hpp
+    render/heatmap/HeatmapLabelMatch.cpp
     render/heatmap/HeatmapGpuSelfTest.hpp
     render/heatmap/HeatmapGpuSelfTest.cpp
     render/heatmap/HeatmapGpuBinner.hpp

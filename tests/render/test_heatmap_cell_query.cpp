@@ -134,7 +134,7 @@ TEST(HeatmapCellQuery, LabelsEqualTheFillOracleAndExactValuesAfterUploadImagesAr
                 if (tiles::cellState(c.word) == tiles::kCellValid) {
                     EXPECT_DOUBLE_EQ(c.value, exact[i]);
                     EXPECT_EQ(recording::encodeSize(c.value), c.word & 0x7fff);
-                    if (c.value > 0) { ++nonzero; EXPECT_EQ(c.usd[0], '$'); EXPECT_NE(std::string(c.asset.data()).find(" BTC"), std::string::npos); }
+                    if (c.value > 0) { ++nonzero; EXPECT_EQ(c.usd[0], '$'); EXPECT_EQ(std::string(c.asset.data()).find(' '), std::string::npos); } // number only
                 } else EXPECT_EQ(c.usd[0], 0);
             }
             EXPECT_GT(nonzero, 0u);

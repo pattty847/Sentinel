@@ -7,13 +7,16 @@
 #include <stdexcept>
 
 namespace heatmap {
-namespace {
-void formatAmount(std::array<char, 48>& out, double value, bool usd, const std::string& asset) {
+void formatLabelAmount(std::array<char, 48>& out, double value, bool usd) {
+    out[0] = 0;
     if (!(value > 0) || !std::isfinite(value)) return;
     constexpr const char* suffix[] = {"", "k", "M", "B", "T"};
     int unit = 0;
     while (value >= 999.5 && unit < 4) { value /= 1000; ++unit; }
-    const int decimals = std::clamp(2 - int(std::floor(std::log10(value))), 0, 15);
+    // At most three significant digits, trailing zeros dropped ($11k, $1.2M,
+    // 0.36): the owner's choice (2026-10-02), over a fixed width.
+    int decimals = std::clamp(2 - int(std::floor(std::log10(value))), 0, 15);
+    if (decimals > 0 && std::round(value * std::pow(10.0, decimals)) >= 1000) --decimals; // 9.996 -> "10"
     char* at = out.data();
     if (usd) *at++ = '$';
     const auto result = std::to_chars(at, out.data() + 28, value, std::chars_format::fixed, decimals);
@@ -24,14 +27,7 @@ void formatAmount(std::array<char, 48>& out, double value, bool usd, const std::
         if (end > at && end[-1] == '.') --end;
     }
     if (unit) *end++ = *suffix[unit];
-    if (!usd && !asset.empty()) {
-        *end++ = ' ';
-        const auto n = std::min<size_t>(asset.size(), size_t(out.data() + out.size() - 1 - end));
-        std::memcpy(end, asset.data(), n);
-        end += n;
-    }
     *end = 0;
-}
 }
 
 std::shared_ptr<const SparseColumns> LabelWindowBuilder::composeWindow(const SpanSourceKey& key,
@@ -102,6 +98,7 @@ std::shared_ptr<const LabelCells> LabelWindowBuilder::build(const LabelRequest& 
     out->cells.resize(size_t(request.columns) * request.rows);
     out->columnStates.resize(request.columns, BucketState::NotLoaded);
     out->formingColumns.resize(request.columns, false);
+    out->liveColumns.resize(request.columns, false);
     const auto fromMs = request.firstBucket * request.tfMs;
     const ComposeOptions::PriceClip price{request.firstBin * tick, (request.firstBin + request.rows) * tick};
     for (uint32_t x = 0; x < request.columns; ++x) {
@@ -117,6 +114,9 @@ std::shared_ptr<const LabelCells> LabelWindowBuilder::build(const LabelRequest& 
         int64_t completeEnd = INT64_MAX;
         for (const auto& s : span.sources) if (s.build) completeEnd = std::min(completeEnd, s.build->completeEndMs);
         if (completeEnd != INT64_MAX) drawn.push_back({i, span.id.tile, span.id.tfMs, completeEnd});
+        if (tiles::tileEndMs(span.id.tile, request.tfMs) > fromMs &&
+            tiles::tileStartMs(span.id.tile, request.tfMs) < fromMs + int64_t(request.columns) * request.tfMs)
+            out->spanContent.emplace_back(span.id.tile, spanContentId(span));
     }
     std::vector<DrawLive> liveDraws;
     if (live && live->tfMs == request.tfMs && live->symbol == spans.symbol && !live->sources.empty()) {
@@ -142,6 +142,7 @@ std::shared_ptr<const LabelCells> LabelWindowBuilder::build(const LabelRequest& 
                                  recording::floorDiv(piece.hiMs + request.tfMs - 1, request.tfMs));
         if (end <= first) continue;
         const auto x0 = uint32_t(first - request.firstBucket), x1 = uint32_t(end - request.firstBucket);
+        for (uint32_t x = x0; x < x1; ++x) out->liveColumns[x] = piece.live;
         if (!piece.live && sameHistory() && std::find(previousPieces_.begin(), previousPieces_.end(), piece) != previousPieces_.end()) {
             for (uint32_t x = x0; x < x1; ++x) {
                 out->columnStates[x] = previous_->columnStates[x]; reused[x] = true;
@@ -206,8 +207,8 @@ std::shared_ptr<const LabelCells> LabelWindowBuilder::build(const LabelRequest& 
             if (reused[x]) continue;
             auto& cell = out->cells[size_t(y) * request.columns + x];
             if (tiles::cellState(cell.word) != tiles::kCellValid || !(cell.word & 0x7fff)) continue;
-            formatAmount(cell.usd, cell.value * mid, true, request.asset);
-            formatAmount(cell.asset, cell.value, false, request.asset);
+            formatLabelAmount(cell.usd, cell.value * mid, true);
+            formatLabelAmount(cell.asset, cell.value, false); // the number only (owner 2026-10-02)
         }
     }
     if (out->missing.empty()) { previous_ = out; previousPieces_ = pieces; }

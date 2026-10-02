@@ -143,8 +143,8 @@ ParseResult RequestParser::feed(const QByteArray& bytes) {
 }
 
 bool isWidgetScreenshotTarget(const QString& target) {
-    static const QStringList tabs{"Tick", "Look", "Budgets", "Live", "Debug", "TPO"};
-    return target == "telemetry" || target == "toolbar" || target == "settings" ||
+    static const QStringList tabs{"Chart", "Tick", "Look", "Budgets", "Live", "Debug", "TPO"};
+    return target == "telemetry" || target == "toolbar" || target == "chartmenu" || target == "settings" ||
            (target.startsWith("settings:") && tabs.contains(target.mid(9)));
 }
 

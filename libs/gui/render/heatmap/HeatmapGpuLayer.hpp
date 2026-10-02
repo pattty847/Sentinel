@@ -17,16 +17,30 @@
 #include "HeatmapDataService.hpp"
 #include "HeatmapPalette.hpp"
 #include "HeatmapTileNode.hpp"
+#include "HeatmapLabelMatch.hpp"
 #include "heatmap/HeatmapChartSettings.hpp"
 #include "heatmap/HeatmapResolution.hpp"
 #include <QJsonObject>
 #include <QVariantMap>
 #include <QObject>
+#include <QTimer>
 #include <memory>
 #include <optional>
 #include <vector>
 
 namespace heatmap::gpu {
+// The label request retry (S7b): a posted request that got no result (or lost
+// it to HeatmapCellQuery::cancel()) is asked again after delayMs(), which doubles
+// per failure up to kMaxMs and returns to kFirstMs after a result.
+struct LabelRetryPolicy {
+    static constexpr int kFirstMs = 2000, kMaxMs = 30000;
+    int delayMs() const { return delay_; }
+    void failed() { delay_ = std::min(delay_ * 2, kMaxMs); }
+    void succeeded() { delay_ = kFirstMs; }
+private:
+    int delay_ = kFirstMs;
+};
+
 // Median best-bid/best-ask midpoint over the newest columns (the price a fresh
 // view centres on). 0 when none.
 double medianRecentMid(const SparseColumns &data);
@@ -123,6 +137,56 @@ public:
     // atomics and shared pointers only, plus the asynchronous controller stats.
     QVariantMap metrics() const;
 
+    // Liquidity labels (S7b, plan sections 3-5). prepareFrame posts a LabelRequest
+    // for the frame's picture (the chart's timeframe and the tick chosen for the
+    // frame, the current SpanSet and live snapshot) only when its key changes: the
+    // view leaves the requested window (the view plus a margin, at most
+    // kMaxLabelCells cells) or a version changes. With more than kMaxLabelCells
+    // visible cells the gate is closed: nothing is posted. Labels are drawn only
+    // from the query's CURRENT result (re-read every frame: a cancelled query has
+    // none) whose request belongs to this symbol (serial at or after the symbol
+    // epoch) and whose timeframe and tick are both the drawn ones (the node's last
+    // frame) and this frame's target; none during a crossfade or a hold (the node
+    // may start a transition in the frame being prepared).
+    static constexpr uint32_t kMaxLabelCells = 16000;
+    static constexpr int kLabelRetryMs = LabelRetryPolicy::kFirstMs, kMaxLabelRetryMs = LabelRetryPolicy::kMaxMs;
+    // Render thread (updatePaintNode, after prepareFrame), or GUI thread.
+    std::shared_ptr<const LabelCells> labelsForFrame() const;
+    // Which columns of `labels` show exactly the picture on screen and this
+    // frame's target (matchLabelColumns over the node's last drawn segments, the
+    // current SpanSet and live snapshot). Returns the matched count.
+    size_t matchLabelColumns(const LabelCells &labels, std::vector<uint8_t> &out) const;
+    // A result of this symbol, timeframe and target tick exists but the gate holds
+    // it back for now (a crossfade, a hold, the node not yet on the target tick).
+    bool labelsPending() const;
+    // What the next label layout would draw (0: nothing): the result and its
+    // matched columns. The chart compares it after a frame to redraw labels once a
+    // transition ends on an otherwise idle chart (S7b review).
+    uint64_t labelSignature() const;
+    static uint64_t labelSignature(const LabelCells *labels, const std::vector<uint8_t> &columns, size_t matched);
+    int labelRetryMs() const { return retry_.delayMs(); }
+    const DrawStyle &drawStyle() const { return style_; }
+    std::shared_ptr<const HeatmapPalette> palette() const { return palette_; }
+    // The liquidity (base-asset quantity, as sensitivityMin/Max) of the valid cells
+    // in the last label window of this symbol (5th percentile to maximum): the
+    // range slider's ends. valid false until one arrived; kept while the label
+    // gate is closed (zoomed out past kMaxLabelCells).
+    struct LiquidityRange {
+        double lo = 0, hi = 0;
+        bool valid = false;
+        bool operator==(const LiquidityRange &) const = default;
+    };
+    LiquidityRange liquidityRange() const { return liquidityRange_; }
+    struct LabelCounters {
+        uint64_t posted = 0, results = 0, retries = 0, failures = 0;
+        uint64_t lastPostedSerial = 0, epoch = 0;
+    };
+    const LabelCounters &labelCounters() const { return labelCounters_; }
+    // Tests: the request posted last (serial 0: none).
+    LabelRequest postedLabelRequest() const { return labelsPosted_ ? postedLabels_ : LabelRequest{}; }
+    // Tests: Frame::capture for the next frames (nullptr: none).
+    void setCaptureForTest(std::shared_ptr<HeatmapCellCapture> capture) { capture_ = std::move(capture); }
+
 signals:
     void snapshotChanged();
     void liveChanged();
@@ -130,6 +194,8 @@ signals:
     void presetsChanged();
     void limitsChanged();   // max/min time or price span changed
     void buildFailed(QString message);
+    void labelsChanged();         // a new label result (or a retry): the chart redraws
+    void liquidityRangeChanged(); // liquidityRange() changed
 
 private:
     HeatmapDataService *service_ = nullptr;
@@ -177,6 +243,21 @@ private:
         bool valid = false;
     };
     std::shared_ptr<ControllerStats> controllerStats_ = std::make_shared<ControllerStats>();
+    // Labels (GUI thread, or the render thread while the GUI thread is blocked).
+    uint64_t labelSerial_ = 0, labelEpoch_ = 1;
+    LabelRequest postedLabels_;
+    bool labelsPosted_ = false;
+    bool labelResultSeen_ = false;   // the posted request's result arrived (GUI)
+    bool labelDropNoticed_ = false;  // ...and a later frame found it dropped (cancel/shed)
+    std::shared_ptr<const LabelCells> notifiedLabels_; // the last result that requested a frame
+    QTimer *labelRetry_ = nullptr;
+    LabelRetryPolicy retry_;
+    mutable std::vector<HeatmapTileStats::Segment> segmentScratch_; // reused (matchLabelColumns)
+    mutable std::vector<uint8_t> signatureColumns_;                 // reused (labelSignature)
+    LiquidityRange liquidityRange_;
+    std::vector<double> liquidityScratch_;
+    LabelCounters labelCounters_;
+    std::shared_ptr<HeatmapCellCapture> capture_;
 
     void createController();
     void destroyController();
@@ -187,6 +268,10 @@ private:
     void postBudget();
     void postLiveInterval();
     void refreshControllerStats() const;
+    void postLabels(const ViewWindow &view);
+    void onLabels();
+    void onLabelRetry();
+    void resetLabels(bool newEpoch);
     int64_t chooseTick(const ViewWindow &view);
     void restoreTick();
     void refreshPresets();
