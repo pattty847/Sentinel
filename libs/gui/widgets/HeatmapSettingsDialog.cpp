@@ -476,8 +476,8 @@ QWidget *HeatmapSettingsDialog::buildDebugTab() {
     auto *form = new QFormLayout(page);
     m_rendererCombo = new QComboBox(page);
     m_rendererCombo->setObjectName("renderer");
+    m_rendererCombo->addItem("GPU (default)", "gpu");
     m_rendererCombo->addItem("Legacy", "legacy");
-    m_rendererCombo->addItem("GPU", "gpu");
     form->addRow("Renderer", m_rendererCombo);
     m_makeDefault = new QCheckBox("Make default (saved; otherwise this session only)", page);
     m_makeDefault->setObjectName("makeDefault");
@@ -620,7 +620,7 @@ void HeatmapSettingsDialog::refreshFromModel() {
     set(m_liveMinInterval, s.liveMinIntervalMs);
     {
         const QSignalBlocker block(m_rendererCombo);
-        m_rendererCombo->setCurrentIndex(s.renderer == "gpu" ? 1 : 0);
+        m_rendererCombo->setCurrentIndex(std::max(0, m_rendererCombo->findData(QString::fromStdString(s.renderer))));
     }
     m_savedRenderer->setText(QString::fromStdString(m_model->savedRenderer()));
     {

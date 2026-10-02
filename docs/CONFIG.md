@@ -121,7 +121,7 @@ Shader/label support for these codes and validity bits is a separate S3b change.
 
 ### Heatmap chart settings (S6)
 
-`heatmap.renderer: legacy|gpu` defaults to `legacy`; unknown config values fall back to `legacy`. This is independent of `heatmap.source` (the legacy projection's data source). With `gpu` (S6b) the main chart draws the heatmap through `HeatmapGpuLayer`/`HeatmapTileNode`, the legacy band stream is muted (`DataProcessor::setHeatmapEnabled(false)`; liquidity labels are off and walls return `409 gpu_renderer` until S7), and the chart's GridViewState clamps zoom-out at one column per pixel (and one row per pixel in Manual). A timeframe change keeps the columns on screen: the time span scales by the timeframe ratio about the view end (1m -> 1h shows 60x more history), inside the clamps (S6d, FM-134); the legacy renderer resets to `initial_column_px` columns instead. The renderer flips at runtime both ways through the settings route.
+`heatmap.renderer: legacy|gpu` defaults to `gpu` (the owner flipped the default on 2026-10-01); unknown config values fall back to `gpu`. `legacy` stays selectable (Settings > Debug, `--heatmap-renderer legacy`, the settings route) until S8 deletes it. This is independent of `heatmap.source` (the legacy projection's data source). With `gpu` (S6b) the main chart draws the heatmap through `HeatmapGpuLayer`/`HeatmapTileNode`, the legacy band stream is muted (`DataProcessor::setHeatmapEnabled(false)`; liquidity labels are off and walls return `409 gpu_renderer` until S7), and the chart's GridViewState clamps zoom-out at one column per pixel (and one row per pixel in Manual). A timeframe change keeps the columns on screen: the time span scales by the timeframe ratio about the view end (1m -> 1h shows 60x more history), inside the clamps (S6d, FM-134); the legacy renderer resets to `initial_column_px` columns instead. The renderer flips at runtime both ways through the settings route.
 
 Process-only overrides on the `sentinel-gui` command line (never persisted): `--heatmap-renderer legacy|gpu` selects the renderer for this process, `--api-port N` moves the Agent API off `gui.api_port` (two processes on one server for A/B runs), and `--no-screener` skips the `screener_server.py` child (it binds port 17200 and the GUI kills any port-17200 holder before it starts one, so extra processes such as `scripts/dev/heatmap-ab.sh` pass it).
 
@@ -131,7 +131,7 @@ On first use, per-chart defaults come from the client YAML keys below (also supp
 
 | YAML key | Default | Validation / meaning |
 |---|---|---|
-| `renderer` | `legacy` | `legacy`, `gpu` |
+| `renderer` | `gpu` | `gpu`, `legacy` (legacy is removed in S8) |
 | `tick_mode` | `auto` | `auto`, `manual` |
 | `manual_tick` | 100 | Integer price units, clamped 1..10^12 then rounded up to a `{1,2,2.5,5} x 10^k` preset |
 | `min_row_px` | 2 | 0.5..32; GPU policy, separate from legacy `target_row_px` |
@@ -155,7 +155,7 @@ Non-finite stored/config numbers fall back to model defaults. The API requires f
 
 ```yaml
 heatmap:
-  renderer: legacy
+  renderer: gpu
   palette_preset: Custom
   bid_gradient: [{position: 0, color: "#000000"}, {position: 1, color: "#00ffff"}]
   ask_gradient: [{position: 0, color: "#000000"}, {position: 1, color: "#ffc800"}]
