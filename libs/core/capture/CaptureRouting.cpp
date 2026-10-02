@@ -23,7 +23,7 @@ struct RouteSax : nlohmann::json_sax<nlohmann::json> {
     CapturedTrade trade;
     std::string tradeProduct;
     std::set<std::string> tradeKeys, eventKeys;
-    bool extractionValid = true;
+    bool extractionValid = true, stopAtChannel = false;
     explicit RouteSax(const std::vector<std::string>& p) : products(p) { stack.reserve(16); }
     bool scalar(const nlohmann::json& value) {
         if (stack.empty()) { valid = false; return true; }
@@ -46,6 +46,7 @@ struct RouteSax : nlohmann::json_sax<nlohmann::json> {
             if (sawChannel || !value.is_string()) valid = false;
             else channel = value.get<std::string>();
             sawChannel = true;
+            if (stopAtChannel) return false;
         } else if (scope.role == Root && scope.key == "sequence_num") {
             if (sawSequence) valid = false;
             sequence = value; sawSequence = true;
@@ -130,13 +131,22 @@ struct RouteSax : nlohmann::json_sax<nlohmann::json> {
 };
 }
 std::vector<CapturedTradeEvent> parseTradeEvents(std::string_view payload,
-    const std::vector<std::string>& products, const std::string& symbol) {
+    const std::vector<std::string>& products, const std::string& symbol, nlohmann::json* envelope) {
     RouteSax sax(products);
     sax.tradeSymbol = &symbol;
     if (!nlohmann::json::sax_parse(payload.begin(), payload.end(), &sax) || !sax.valid ||
         !sax.events || !sax.tradesValid || !sax.extractionValid || sax.channel != "market_trades")
         throw std::runtime_error("invalid market_trades envelope");
+    if (envelope) *envelope = {{"channel", sax.channel}, {"sequence_num", sax.sequence}};
     return std::move(sax.tradeEvents);
+}
+std::optional<std::string> peekFrameChannel(std::string_view payload) {
+    const std::vector<std::string> products;
+    RouteSax sax(products);
+    sax.stopAtChannel = true;
+    nlohmann::json::sax_parse(payload.begin(), payload.end(), &sax);
+    if (sax.sawChannel && sax.valid) return sax.channel;
+    return std::nullopt;
 }
 nlohmann::json frameReceipt(std::string_view payload, const std::vector<std::string>& products) {
     RouteSax sax(products);
