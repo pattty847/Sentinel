@@ -811,6 +811,146 @@ TEST_F(UgrGpu, TimeframeSwitchFitWaitsForHistoryPaging) {
     ugr->setCandleBuffer(nullptr);
 }
 
+// Review major 1: a chart drag only moves the visual offset until release
+// (priceInteracted comes at handlePanEnd). A drag that moves price cancels a pending
+// fit at its first move, on both the native mouse path and the beginPanAt/updatePanAt
+// API path, and no fit lands under any drag.
+TEST_F(UgrGpu, PendingFitNeverLandsUnderADrag) {
+    gpuOn();
+    CandleSeriesBuffer buffer;
+    ugr->setCandleBuffer(&buffer);
+    const auto *view = ugr->getViewState();
+    const int64_t tf5 = 5 * minute;
+    auto fullHistory = [&](double base, int64_t tf) {
+        std::vector<CandleSeriesBuffer::CandleBar> bars;
+        for (int64_t t = (view->getVisibleTimeStart() / tf) * tf; t < view->getVisibleTimeEnd(); t += tf)
+            bars.push_back({t, t + tf, base, base + 100, base - 100, base, 1.0, true, 0, false});
+        return bars;
+    };
+    auto mouse = [&](QEvent::Type type, QPointF at, Qt::MouseButton button, Qt::MouseButtons buttons) {
+        QMouseEvent event(type, at, at, scene->window()->mapToGlobal(at), button, buttons, Qt::NoModifier);
+        QCoreApplication::sendEvent(scene->window(), &event);
+    };
+    // Native mouse: press, a vertical move; the fit is cancelled before release.
+    ugr->setTimeframe(int(tf5));
+    ASSERT_TRUE(ugr->priceFitPending());
+    mouse(QEvent::MouseButtonPress, {320, 160}, Qt::LeftButton, Qt::LeftButton);
+    ASSERT_TRUE(view->isDragging()) << "the press reaches the chart";
+    mouse(QEvent::MouseMove, {320, 200}, Qt::NoButton, Qt::LeftButton);
+    EXPECT_FALSE(ugr->priceFitPending()) << "a price drag cancels the pending fit at once";
+    const double lo0 = view->getMinPrice(), hi0 = view->getMaxPrice();
+    buffer.applyHistory("BTC-USD", 300, fullHistory(103'000, tf5));
+    EXPECT_EQ(view->getMinPrice(), lo0) << "nothing lands under the drag";
+    EXPECT_EQ(view->getMaxPrice(), hi0);
+    mouse(QEvent::MouseButtonRelease, {320, 200}, Qt::LeftButton, Qt::NoButton);
+    EXPECT_NEAR(view->getMaxPrice() - view->getMinPrice(), hi0 - lo0, 1e-6) << "release: the drag only, same span";
+    // API path: beginPanAt/updatePanAt with a vertical move.
+    ugr->setTimeframe(int(15 * minute));
+    ASSERT_TRUE(ugr->priceFitPending());
+    ugr->beginPanAt(320, 160);
+    ugr->updatePanAt(320, 120);
+    EXPECT_FALSE(ugr->priceFitPending());
+    ugr->endPanAt();
+    // A time-only drag keeps the fit pending but defers it until the drag ends (1h:
+    // no 1h candles held yet).
+    const int64_t tf60 = 60 * minute;
+    ugr->setPriceFitTimings(2000, 100, 5000);
+    ugr->setTimeframe(int(tf60));
+    ASSERT_TRUE(ugr->priceFitPending());
+    ugr->beginPanAt(320, 160);
+    ugr->updatePanAt(280, 160);
+    ASSERT_TRUE(ugr->priceFitPending());
+    const double lo1 = view->getMinPrice(), hi1 = view->getMaxPrice();
+    buffer.applyHistory("BTC-USD", 3600, fullHistory(107'000, tf60)); // full coverage while dragging
+    QElapsedTimer held;
+    held.start();
+    while (held.elapsed() < 300) QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    EXPECT_EQ(view->getMinPrice(), lo1) << "no fit while the drag is active";
+    EXPECT_EQ(view->getMaxPrice(), hi1);
+    EXPECT_TRUE(ugr->priceFitPending());
+    ugr->endPanAt();
+    QElapsedTimer after;
+    after.start();
+    while (ugr->priceFitPending() && after.elapsed() < 3000) QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    EXPECT_FALSE(ugr->priceFitPending());
+    EXPECT_LE(view->getMinPrice(), 106'900) << "the deferred fit lands after the drag";
+    EXPECT_GE(view->getMaxPrice(), 107'100);
+    ugr->setCandleBuffer(nullptr);
+}
+
+// Review minor 2: no candles and no live price at all (a symbol with no data, no
+// book, no trade): the pending fit ends at the absolute deadline without fitting and
+// never lands later. Paging cannot push the settle past the deadline either.
+TEST_F(UgrGpu, PendingFitEndsAtItsDeadline) {
+    gpuOn();
+    CandleSeriesBuffer buffer;
+    ugr->setCandleBuffer(&buffer);
+    const auto *view = ugr->getViewState();
+    ugr->setActiveSymbol("ETH-USD"); // nothing recorded, nothing decoded: no price anywhere
+    ugr->setPriceFitTimings(100, 50, 400);
+    ugr->setTimeframe(int(5 * minute));
+    ASSERT_TRUE(ugr->priceFitPending());
+    const double lo = view->getMinPrice(), hi = view->getMaxPrice();
+    QElapsedTimer timer;
+    timer.start();
+    while (ugr->priceFitPending() && timer.elapsed() < 3000) QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    EXPECT_FALSE(ugr->priceFitPending()) << "terminal deadline clears the pending state";
+    EXPECT_LT(timer.elapsed(), 1500);
+    EXPECT_EQ(view->getMinPrice(), lo);
+    EXPECT_EQ(view->getMaxPrice(), hi);
+    // Candles arriving later do not fit out of nowhere.
+    std::vector<CandleSeriesBuffer::CandleBar> bars;
+    const int64_t tf5 = 5 * minute;
+    for (int64_t t = view->getVisibleTimeStart() / tf5 * tf5; t < view->getVisibleTimeEnd(); t += tf5)
+        bars.push_back({t, t + tf5, 3'000, 3'010, 2'990, 3'000, 1.0, true, 0, false});
+    buffer.applyHistory("ETH-USD", 300, bars);
+    EXPECT_EQ(view->getMinPrice(), lo);
+    // Pages keep restarting the quiet wait: the deadline still holds. 1 s cap, 1 s
+    // quiet, pages at 0 and 0.5 s: settle at 1.0 s, not 1.5 s.
+    ugr->setPriceFitTimings(5000, 1000, 1000);
+    ugr->setTimeframe(int(15 * minute));
+    ASSERT_TRUE(ugr->priceFitPending());
+    const int64_t tf15 = 15 * minute;
+    auto page = [&](int64_t from, int n) {
+        std::vector<CandleSeriesBuffer::CandleBar> p;
+        for (int i = 0; i < n; ++i) {
+            const int64_t t = from - i * tf15;
+            p.push_back({t, t + tf15, 3'100, 3'120, 3'080, 3'100, 1.0, true, 0, false});
+        }
+        buffer.applyHistory("ETH-USD", 900, p);
+    };
+    const int64_t newest = (view->getVisibleTimeEnd() - 1) / tf15 * tf15;
+    timer.restart();
+    page(newest, 4);
+    while (timer.elapsed() < 500) QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    ASSERT_TRUE(ugr->priceFitPending());
+    page(newest - 4 * tf15, 4);
+    while (ugr->priceFitPending() && timer.elapsed() < 3000) QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    EXPECT_FALSE(ugr->priceFitPending());
+    EXPECT_LT(timer.elapsed(), 1300) << "settled at the 1 s deadline, not 1 s after the last page";
+    EXPECT_LE(view->getMinPrice(), 3'080);
+    EXPECT_GE(view->getMaxPrice(), 3'120);
+    ugr->setCandleBuffer(nullptr);
+}
+
+// Review minor 3: a view that starts inside a candle (1m candles, view from :30 s):
+// the first overlapping candle counts for the fit, with the extreme in it.
+TEST_F(UgrGpu, PriceFitCountsTheCandleUnderTheLeftEdge) {
+    gpuOn();
+    CandleSeriesBuffer buffer;
+    std::vector<CandleSeriesBuffer::CandleBar> bars;
+    for (int64_t t = viewLo; t < viewLo + 40 * minute; t += minute) {
+        const double low = t == viewLo ? 95'000 : 100'000; // the extreme in the first candle
+        bars.push_back({t, t + minute, 100'100, 100'200, low, 100'150, 1.0, true, 0, false});
+    }
+    buffer.applyHistory("BTC-USD", 60, bars);
+    ugr->setCandleBuffer(&buffer);
+    ugr->setViewport(viewLo + 30'000, viewLo + 30'000 + 39 * minute, 99'900, 100'300);
+    ASSERT_TRUE(ugr->fitPriceToData());
+    EXPECT_LE(ugr->getViewState()->getMinPrice(), 95'000) << "the candle that straddles the left edge counts";
+    ugr->setCandleBuffer(nullptr);
+}
+
 // No candle for the new timeframe ever arrives: the fit falls back to the live price
 // after kPriceFitFirstWaitMs (the view must not stay where nothing is visible).
 TEST_F(UgrGpu, TimeframeSwitchWithoutCandlesFitsTheLivePrice) {

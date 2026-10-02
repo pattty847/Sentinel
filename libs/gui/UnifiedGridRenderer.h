@@ -19,6 +19,7 @@
 #include <mutex>
 #include "../core/config/ConfigTypes.hpp"
 #include "../core/marketdata/model/TradeData.h"
+#include "datasources/CandleSeriesBuffer.hpp"
 // ── Core rendering types (needed by inline members) ──────────────────────────
 #include "render/GridViewState.hpp"
 #include "render/AxisLayout.hpp"
@@ -41,7 +42,6 @@
 
 class DataProcessor;
 class HeatmapIntensityNode;
-class CandleSeriesBuffer;
 namespace heatmap {
 class HeatmapDataService;
 class ManualTickMemory;
@@ -319,13 +319,16 @@ public:
     // arrives newest page first (pages of a few bars at 1h), so a pending fit lands
     // once the candles cover kPriceFitCoverage of the view's buckets up to the live
     // edge, or when history paging goes quiet (kPriceFitQuietMs after the last page,
-    // kPriceFitFirstWaitMs when no page comes, kPriceFitMaxWaitMs at most) from the
-    // visible candles, else the live price.
+    // kPriceFitFirstWaitMs when no page comes) from the visible candles, else the live
+    // price. kPriceFitMaxWaitMs after the switch it ends either way. A drag that moves
+    // price cancels it; no fit lands while any drag is active.
     static constexpr double kPriceFitCoverage = 0.9;
     static constexpr int kPriceFitFirstWaitMs = 2000;
     static constexpr int kPriceFitQuietMs = 500;
     static constexpr int kPriceFitMaxWaitMs = 10000;
     bool priceFitPending() const { return m_pendingPriceFit; }
+    // Tests: shorter waits (defaults: the kPriceFit* constants).
+    void setPriceFitTimings(int firstWaitMs, int quietMs, int maxWaitMs);
     QObject* candleBuffer() const;
     void setCandleBuffer(QObject* buffer);
 
@@ -506,12 +509,17 @@ private:
     double gpuLivePrice() const;
     void armPriceFit();
     void cancelPriceFit();
-    void resolvePriceFit(bool timedOut);
+    void resolvePriceFit(bool settle);
+    void rearmPriceFit(int ms);
     QPointer<CandleSeriesBuffer> m_candleBuffer;
     QMetaObject::Connection m_candleDirtyConn;
     bool m_pendingPriceFit = false;
     QTimer* m_priceFitTimer = nullptr;
     QElapsedTimer m_priceFitClock;
+    int m_priceFitFirstWaitMs = kPriceFitFirstWaitMs;
+    int m_priceFitQuietMs = kPriceFitQuietMs;
+    int m_priceFitMaxWaitMs = kPriceFitMaxWaitMs;
+    mutable std::vector<CandleSeriesBuffer::CandleBar> m_fitBars; // gpuFitPriceWindow scratch
     double m_gpuBookMid = 0.0;   // gpu mode: newest book-top mid of the active symbol
     double m_gpuLastTrade = 0.0; // gpu mode: newest trade price of the active symbol
     qint64 gpuInitialSpanMs(double widthPx) const;
