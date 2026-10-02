@@ -188,6 +188,7 @@ Read these only if the task actually needs them.
 ## 10) Cross-Agent Delegation (Codex CLI)
 
 This is the single agent-instructions file: Claude Code and Codex both read it (`CLAUDE.md` only imports it). Edit rules here, never in a copy.
+The orchestration loop around these rules (roles, plan -> dispatch -> cross-vendor review -> land -> deploy) is described in `docs/AGENT_WORKFLOW.md`.
 
 Routing (starting defaults; the orchestrator recalibrates them as results come in):
 - **Orchestrator (Claude Code session the owner is talking to):** direction, cross-cutting design, audits, merges, anything touching hot paths or several subsystems at once.
