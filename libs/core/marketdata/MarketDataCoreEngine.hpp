@@ -69,6 +69,9 @@ public:
         // requestResnapshot() ignores requests this soon after its last reconnect,
         // whichever product asked: one stuck consumer must not keep gapping the rest.
         std::chrono::milliseconds resnapshotCooldown{20000};
+        // Per desired product: first interval resubscribes L2, second reconnects
+        // if no fresh snapshot arrived. Checked at watchdogInterval granularity.
+        std::chrono::milliseconds level2Stale{30000};
     };
     // Alternate transport/timings support deterministic offline tests. All
     // transport callbacks must run on the supplied I/O context's single thread.
@@ -110,7 +113,10 @@ private:
     void run();
     void scheduleReconnect();
 
-    void sendSubscriptionMessage(const std::string& type, const std::vector<std::string>& symbols);
+    // Strand only; public subscription changes post the entire mutation here.
+    void sendSubscriptionMessage(const std::string& type, const std::vector<std::string>& symbols,
+                                 bool level2Only = false);
+    void checkLevel2Silence(int64_t nowMs);
     void dispatch(const nlohmann::json&);
 
     void handleMarketTrades(const nlohmann::json& message, 
@@ -175,6 +181,13 @@ private:
     int64_t                         m_lastSequenceNum = -1;
     int64_t                         m_lastResnapshotMs = -1; // steady ms; io strand only
     bool                            m_loggedEmptySubscriptionAck = false;
+    struct ProductLiveness {
+        int64_t lastLevel2Ms;
+        int64_t resubscribeMs = -1; // cleared only by a valid snapshot
+    };
+    // Allocated on subscription changes only; find/update on each L2 event.
+    // Desired products and liveness are owned by the I/O strand.
+    std::unordered_map<std::string, ProductLiveness> m_productLiveness;
 
     TradeCb                          m_onTrade;
     OrderBookLevelUpdatesCb          m_onLiveOrderBookLevelUpdates;

@@ -333,3 +333,20 @@ TEST(MessageDispatcher, ParseIsStateless) {
     EXPECT_EQ(trade1->trade.product_id, "BTC-USD");
     EXPECT_EQ(trade2->trade.product_id, "ETH-USD");
 }
+
+TEST(MessageDispatcher, AdvancedTradeAckKeepsLevel2SeparateFromOtherChannels) {
+    const auto message = nlohmann::json::parse(R"({"channel":"subscriptions","events":[
+        {"subscriptions":{"level2":["ETH-USD"],"market_trades":["BTC-USD","ETH-USD"],"heartbeats":[]}}]})");
+    const auto result = MessageDispatcher::parse(message);
+    ASSERT_EQ(result.events.size(), 1);
+    const auto& ack = std::get<SubscriptionAckEvent>(result.events[0]);
+    ASSERT_TRUE(ack.level2ProductIds);
+    EXPECT_EQ(*ack.level2ProductIds, (std::vector<std::string>{"ETH-USD"}));
+    auto empty = MessageDispatcher::parse(nlohmann::json::parse(
+        R"({"channel":"subscriptions","events":[{"subscriptions":{"level2":[]}}]})"));
+    ASSERT_TRUE(std::get<SubscriptionAckEvent>(empty.events[0]).level2ProductIds);
+    EXPECT_TRUE(std::get<SubscriptionAckEvent>(empty.events[0]).level2ProductIds->empty());
+    auto trades = MessageDispatcher::parse(nlohmann::json::parse(
+        R"({"channel":"subscriptions","events":[{"subscriptions":{"market_trades":["BTC-USD"]}}]})"));
+    EXPECT_FALSE(std::get<SubscriptionAckEvent>(trades.events[0]).level2ProductIds);
+}

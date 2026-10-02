@@ -602,7 +602,7 @@ TEST_F(CaptureTest, MultiSnapshotAnchorsAreIndependentOnEveryConnection) {
 }
 TEST_F(CaptureTest, MultiConnectionInvalidationClearsAllAnchors) {
     auto input = multiFixture();
-    input.insert(input.begin() + 6, record(Kind::BookInvalidated, 1200000000, R"({"product":"BTC-USD","reason":"malformed"})"));
+    input.insert(input.begin() + 6, record(Kind::BookInvalidated, 1200000000, R"({"product":"","reason":"sequence gap"})"));
     writeMulti(config, input);
     const auto report = verify(config.root);
     EXPECT_FALSE(report.ok);
@@ -1691,5 +1691,27 @@ TEST_F(CaptureTest, V1EnvelopeMissingChannelAndMalformedJsonKeepLegacyCounters) 
         EXPECT_EQ(r.json["channels"][malformed ? "<invalid-envelope>" : "<unclassified>"]["frames"], 1);
         EXPECT_EQ(r.ok, !malformed);
         EXPECT_EQ(r.json["errors"], malformed ? 1 : 0);
+    }
+}
+
+TEST_F(CaptureTest, ProductScopedRecoveryMarkersPreserveOtherReplayBooks) {
+    for (const auto& product : {"ETH-USD", "BTC-USD", ""}) {
+        for (const auto kind : {Kind::BookInvalidated, Kind::ResyncRequested}) {
+            QTemporaryDir output;
+            auto cfg = config;
+            cfg.root = output.path();
+            auto records = fixture();
+            records.insert(records.end() - 2, record(kind, 1500000000,
+                nlohmann::json{{"product", product}, {"reason", "level2 silent"}}.dump()));
+            Writer writer(cfg, metadata());
+            for (const auto& r : records) writer.append(r);
+            writer.close();
+            const auto report = verify(cfg.root);
+            const bool foreign = std::string_view(product) == "ETH-USD";
+            EXPECT_EQ(report.ok, foreign) << report.json.dump(2);
+            EXPECT_EQ(report.json["replayed_l2_events"], foreign ? 2 : 1);
+            EXPECT_EQ(report.json["unanchored_l2_events"], foreign ? 0 : 1);
+            EXPECT_EQ(report.json["errors"], 0);
+        }
     }
 }

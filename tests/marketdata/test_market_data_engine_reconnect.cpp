@@ -326,3 +326,190 @@ TEST_F(EngineReconnect, ResnapshotRequestsWithinCooldownAreIgnored) {
     EXPECT_EQ(scenario->closes, 1);
 }
 } // namespace
+
+namespace {
+void expectFrame(const std::string& bytes, const char* type, const char* channel,
+                 const std::vector<std::string>& products) {
+    const auto message = nlohmann::json::parse(bytes);
+    EXPECT_EQ(message["type"], type);
+    EXPECT_EQ(message["channel"], channel);
+    if (std::string_view(channel) == "heartbeats") EXPECT_FALSE(message.contains("product_ids"));
+    else EXPECT_EQ(message["product_ids"], products);
+}
+std::string unsequenced(nlohmann::json message) {
+    message.erase("sequence_num");
+    return message.dump();
+}
+// Bounded traffic, all from ETH, keeps the connection alive beyond both BTC
+// watchdog intervals. No sequence numbers: these tests isolate liveness.
+void ethTraffic(fixtures::FakeWsTransport& transport) {
+    for (int i = 1; i <= 60; ++i) {
+        transport.later(i * 10ms, [&transport] {
+            transport.frame(unsequenced(fixtures::coinbaseL2Update("ETH-USD", {{"bid", 99, 3}},
+                                                                 "2026-01-01T00:00:10Z")));
+        });
+    }
+}
+}
+
+TEST_F(EngineReconnect, UnsubscribeDeltaNamesOnlyRemovedProductAndKeepsHeartbeats) {
+    scenario->onAttempt = [](auto& transport, int) { transport.up(); };
+    create(); engine->subscribeToSymbols({"ETH-USD"}); engine->start();
+    ASSERT_TRUE(scenario->wait([](auto& s) { return s.sends.size() == 3; }));
+    engine->unsubscribeFromSymbols({"ETH-USD", "ETH-USD", "UNKNOWN"});
+    ASSERT_TRUE(scenario->wait([](auto& s) { return s.sends.size() >= 5; }));
+    engine->stop();
+    ASSERT_EQ(scenario->sends.size(), 5);
+    expectFrame(scenario->sends[3], "unsubscribe", "level2", {"ETH-USD"});
+    expectFrame(scenario->sends[4], "unsubscribe", "market_trades", {"ETH-USD"});
+}
+
+TEST_F(EngineReconnect, LastProductUnsubscribeIncludesHeartbeatsAndRetiresWatchdog) {
+    policy.level2Stale = 50ms;
+    scenario->onAttempt = [](auto& transport, int) { transport.up(); };
+    create(); engine->start();
+    ASSERT_TRUE(scenario->wait([](auto& s) { return s.sends.size() == 3; }));
+    engine->unsubscribeFromSymbols({"BTC-USD"});
+    ASSERT_TRUE(scenario->wait([](auto& s) { return s.sends.size() >= 6; }));
+    // A bounded wait verifies removed products do not trigger recovery frames.
+    EXPECT_FALSE(scenario->wait([](auto& s) { return s.sends.size() > 6 || s.closes; }, 150ms));
+    engine->stop();
+    ASSERT_EQ(scenario->sends.size(), 6);
+    expectFrame(scenario->sends[3], "unsubscribe", "level2", {"BTC-USD"});
+    expectFrame(scenario->sends[4], "unsubscribe", "market_trades", {"BTC-USD"});
+    expectFrame(scenario->sends[5], "unsubscribe", "heartbeats", {});
+}
+
+TEST_F(EngineReconnect, AddedProductDeltaIsScopedButReconnectReplaysEveryDesiredProduct) {
+    scenario->onAttempt = [](auto& transport, int) { transport.up(); };
+    scenario->onSend = [](auto& transport, size_t count) { if (count == 6) transport.down(); };
+    create(); engine->start();
+    ASSERT_TRUE(scenario->wait([](auto& s) { return s.sends.size() == 3; }));
+    engine->subscribeToSymbols({"ETH-USD", "BTC-USD", "ETH-USD"});
+    ASSERT_TRUE(scenario->wait([](auto& s) { return s.ups == 2 && s.sends.size() >= 9; }));
+    engine->stop();
+    ASSERT_EQ(scenario->sends.size(), 9);
+    expectFrame(scenario->sends[3], "subscribe", "level2", {"ETH-USD"});
+    expectFrame(scenario->sends[4], "subscribe", "market_trades", {"ETH-USD"});
+    expectFrame(scenario->sends[6], "subscribe", "level2", {"BTC-USD", "ETH-USD"});
+    expectFrame(scenario->sends[7], "subscribe", "market_trades", {"BTC-USD", "ETH-USD"});
+    expectFrame(scenario->sends[8], "subscribe", "heartbeats", {});
+}
+
+TEST_F(EngineReconnect, SilentProductResubscribesAndRecorderStaysInvalidUntilFreshSnapshot) {
+    using fixtures::coinbaseL2Snapshot; using fixtures::coinbaseL2Update;
+    policy.level2Stale = 100ms;
+    scenario->onAttempt = [](auto& transport, int) { transport.up(); };
+    create(); engine->subscribeToSymbols({"ETH-USD"});
+    RecorderFeed feed(*engine, 1000);
+    std::vector<std::pair<std::string, std::string>> invalidations;
+    std::chrono::steady_clock::time_point firstSnapshot, invalidated;
+    std::atomic<bool> recovered{false};
+    StopEngine stop{engine.get()};
+    engine->onIngest([&](const auto& event) {
+        if (event.kind == Kind::BookInvalidated) {
+            invalidations.emplace_back(event.product, event.reason);
+            invalidated = std::chrono::steady_clock::now();
+        }
+    });
+    scenario->onSend = [&](auto& transport, size_t count) {
+        if (count == 3) {
+            firstSnapshot = std::chrono::steady_clock::now();
+            transport.frame(unsequenced(coinbaseL2Snapshot("BTC-USD", {{99, 2}}, {{101, 4}}, "2026-01-01T00:00:00Z")));
+            transport.frame(unsequenced(coinbaseL2Snapshot("ETH-USD", {{99, 2}}, {{101, 4}}, "2026-01-01T00:00:00Z")));
+            feed.local = RecorderFeed::kT0 + 10'000;
+            ethTraffic(transport);
+        } else if (count == 5) {
+            // The invalidation must precede recovery sends. Updates cannot make
+            // this book healthy again; only the snapshot at 01:30 can do so.
+            feed.recorder->onTick(RecorderFeed::kT0 + 70'000);
+            transport.frame(unsequenced(coinbaseL2Update("BTC-USD", {{"bid", 99, 8}}, "2026-01-01T00:01:20Z")));
+            feed.local = RecorderFeed::kT0 + 90'000;
+            transport.frame(unsequenced(coinbaseL2Snapshot("BTC-USD", {{99, 2}}, {{101, 4}}, "2026-01-01T00:01:30Z")));
+            transport.frame(unsequenced(coinbaseL2Update("BTC-USD", {{"bid", 99, 3}}, "2026-01-01T00:02:10Z")));
+            recovered = true;
+            transport.frame(R"({"channel":"heartbeats"})"); // wake test after callbacks
+        }
+    };
+    engine->start();
+    ASSERT_TRUE(scenario->wait([&](auto&) { return recovered.load(); }, 1s));
+    engine->stop();
+    ASSERT_EQ(scenario->sends.size(), 5);
+    expectFrame(scenario->sends[3], "unsubscribe", "level2", {"BTC-USD"});
+    expectFrame(scenario->sends[4], "subscribe", "level2", {"BTC-USD"});
+    EXPECT_EQ(invalidations, (std::vector<std::pair<std::string, std::string>>{{"BTC-USD", "level2 silent"}}));
+    EXPECT_GE(invalidated - firstSnapshot, policy.level2Stale - 5ms);
+    EXPECT_LT(invalidated - firstSnapshot, policy.level2Stale + 100ms);
+    EXPECT_EQ(scenario->closes, 0);
+    const auto rows = feed.rows("BTC-USD");
+    ASSERT_EQ(rows.size(), 2);
+    EXPECT_EQ(rows[0].observedMs, 10'000);
+    EXPECT_EQ(rows[1].observedMs, 30'000);
+    EXPECT_NE(rows[1].flags & recording::kResynced, 0u);
+    EXPECT_NEAR(twap(rows[1], 99, false), 2, 0.01); // not the invalid update's 8
+}
+
+TEST_F(EngineReconnect, MissingSnapshotAfterProductResubscribeReconnectsEvenWithUpdates) {
+    policy.level2Stale = 80ms;
+    scenario->onAttempt = [](auto& transport, int) { transport.up(); };
+    scenario->onSend = [](auto& transport, size_t count) {
+        if (count == 3) ethTraffic(transport); // BTC never sends an initial snapshot
+        if (count == 5) {
+            // An update alone must not cancel the outstanding snapshot deadline.
+            transport.frame(unsequenced(fixtures::coinbaseL2Update("BTC-USD", {{"bid", 99, 3}})));
+        }
+    };
+    create(); engine->subscribeToSymbols({"ETH-USD"});
+    std::vector<std::pair<std::string, std::string>> invalidations;
+    StopEngine stop{engine.get()};
+    engine->onLiveOrderBookInvalidated([&](const auto& product, const auto& reason) {
+        invalidations.emplace_back(product, reason);
+    });
+    engine->start();
+    ASSERT_TRUE(scenario->wait([](auto& s) { return s.ups == 2 && s.sends.size() >= 8; }, 1s));
+    engine->stop();
+    EXPECT_EQ(scenario->closes, 1);
+    ASSERT_GE(invalidations.size(), 2);
+    EXPECT_EQ(invalidations[0], (std::pair<std::string, std::string>{"BTC-USD", "level2 silent"}));
+    EXPECT_EQ(invalidations[1], (std::pair<std::string, std::string>{"", "level2 resubscribe timed out BTC-USD"}));
+    expectFrame(scenario->sends[5], "subscribe", "level2", {"BTC-USD", "ETH-USD"});
+}
+
+TEST_F(EngineReconnect, FreshSnapshotClearsRecoveryDeadline) {
+    policy.level2Stale = 80ms;
+    scenario->onAttempt = [](auto& transport, int) { transport.up(); };
+    scenario->onSend = [](auto& transport, size_t count) {
+        if (count == 3) ethTraffic(transport);
+        if (count == 5) {
+            transport.frame(unsequenced(fixtures::coinbaseL2Snapshot("BTC-USD", {{99, 2}}, {{101, 4}})));
+            for (int i = 1; i <= 40; ++i) transport.later(i * 10ms, [&transport] {
+                transport.frame(unsequenced(fixtures::coinbaseL2Update("BTC-USD", {{"bid", 99, 3}})));
+            });
+        }
+    };
+    create(); engine->subscribeToSymbols({"ETH-USD"}); engine->start();
+    ASSERT_TRUE(scenario->wait([](auto& s) { return s.sends.size() >= 5; }, 1s));
+    EXPECT_FALSE(scenario->wait([](auto& s) { return s.sends.size() > 5 || s.closes; }, 220ms));
+    engine->stop();
+    EXPECT_EQ(scenario->attempts.size(), 1);
+}
+
+TEST_F(EngineReconnect, AckWarnsAboutMissingLevel2EvenWhenTradesContainDesiredProduct) {
+    scenario->onAttempt = [](auto& transport, int) { transport.up(); };
+    scenario->onSend = [](auto& transport, size_t count) {
+        if (count == 3) {
+            transport.frame(R"({"channel":"subscriptions","events":[{"subscriptions":{
+                "level2":["ETH-USD"],"market_trades":["BTC-USD","ETH-USD"]}}]})");
+        }
+    };
+    create(); engine->subscribeToSymbols({"ETH-USD"});
+    testing::internal::CaptureStderr();
+    engine->start();
+    const bool received = scenario->wait([](auto& s) { return s.frames == 1; });
+    engine->stop();
+    const auto output = testing::internal::GetCapturedStderr();
+    ASSERT_TRUE(received);
+    EXPECT_NE(output.find("Subscription ack missing desired level2 product: product=BTC-USD"), std::string::npos);
+    EXPECT_EQ(output.find("Subscription ack missing desired level2 product: product=ETH-USD"), std::string::npos);
+    EXPECT_EQ(output.find("Order book invalidated"), std::string::npos);
+}

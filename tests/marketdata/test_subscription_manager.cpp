@@ -79,9 +79,7 @@ TEST(SubscriptionManager, SubscribeToMultipleProducts) {
 
 TEST(SubscriptionManager, UnsubscribeFromProducts) {
     SubscriptionManager mgr;
-    mgr.setDesiredProducts({"BTC-USD", "ETH-USD"});
-
-    auto frames = mgr.buildUnsubscribeMsgs("test_jwt");
+    auto frames = mgr.buildUnsubscribeMsgs({"BTC-USD", "ETH-USD"}, "test_jwt");
 
     ASSERT_EQ(frames.size(), 3);
 
@@ -100,7 +98,7 @@ TEST(SubscriptionManager, UnsubscribeFromProducts) {
 
 TEST(SubscriptionManager, EmptyUnsubscribe) {
     SubscriptionManager mgr;
-    auto frames = mgr.buildUnsubscribeMsgs("test_jwt");
+    auto frames = mgr.buildUnsubscribeMsgs({}, "test_jwt");
 
     EXPECT_TRUE(frames.empty());
 }
@@ -331,4 +329,21 @@ TEST(SubscriptionManager, DesiredSetAccessor) {
     const auto& desired = mgr.desired();
     ASSERT_EQ(desired.size(), 3);
     EXPECT_EQ(desired, products);
+}
+
+TEST(SubscriptionManager, DeltaFramesAndLevel2RecoveryPreserveOtherProductsAndHeartbeats) {
+    SubscriptionManager mgr;
+    mgr.setDesiredProducts({"BTC-USD"});
+    const auto removed = mgr.buildUnsubscribeMsgs({"ETH-USD"}, "");
+    ASSERT_EQ(removed.size(), 2);
+    for (const auto& bytes : removed) {
+        const auto msg = nlohmann::json::parse(bytes);
+        EXPECT_NE(msg["channel"], "heartbeats");
+        EXPECT_EQ(msg["product_ids"], nlohmann::json::array({"ETH-USD"}));
+    }
+    const auto added = mgr.buildSubscribeMsgs({"ETH-USD"}, "");
+    EXPECT_EQ(nlohmann::json::parse(added[0])["product_ids"], nlohmann::json::array({"ETH-USD"}));
+    EXPECT_EQ(mgr.buildUnsubscribeMsgs({"BTC-USD"}, "", true).size(), 1);
+    EXPECT_EQ(mgr.buildSubscribeMsgs({"BTC-USD"}, "", true).size(), 1);
+    EXPECT_EQ(mgr.desired(), (std::vector<std::string>{"BTC-USD"}));
 }
