@@ -146,6 +146,13 @@ void BeastWsTransport::close() {
     });
 }
 
+void BeastWsTransport::retire() {
+    // options_.product is read only by strand handlers; relabel on the strand.
+    net::post(strand_, [keep = shared_from_this(), this]() {
+        if (!options_.product.starts_with("retired:")) options_.product = "retired:" + options_.product;
+    });
+}
+
 void BeastWsTransport::send(std::string msg) {
     net::post(strand_, [keep = shared_from_this(), this, m = std::move(msg)]() mutable {
         if (phase_ != Phase::Open) {

@@ -17,6 +17,9 @@ public:
     virtual void connect(std::string host, std::string port, std::string target) = 0;
     virtual void close() = 0;
     virtual void send(std::string msg) = 0; // serialized by implementation
+    // The owning engine stopped: log lines from this (still closing) socket must
+    // not carry the live product name, which a new engine may already own.
+    virtual void retire() {}
 
     virtual void onMessage(MessageCb) = 0;
     virtual void onStatus(StatusCb) = 0;

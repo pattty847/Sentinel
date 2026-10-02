@@ -173,8 +173,10 @@ struct EngineConnectTimeout : testing::Test {
         settings.reconnect = policy;
         settings.jitter = [] { return 0ms; };
         settings.limiter = std::make_shared<FeedConnectLimiter>();
-        settings.transportFactory = [this](const auto&, net::io_context& io, ssl::context&) {
-            return std::make_unique<BeastWsTransport>(io, tls.client, options);
+        settings.transportFactory = [this](const std::string& product, net::io_context& io, ssl::context&) {
+            auto labelled = options;
+            labelled.product = product;
+            return std::make_unique<BeastWsTransport>(io, tls.client, labelled);
         };
         engine = std::make_unique<MarketDataFeeds>(auth, config, std::move(settings));
         engine->onIngest([this](const Engine::IngestObservation& event) {
@@ -276,7 +278,18 @@ TEST_F(EngineConnectTimeout, HealthyConnectionOutlivesConnectDeadlineWithoutReco
     EXPECT_EQ(observed.downs.size(), 1u); // orderly stop closes the socket
 }
 
+namespace { std::mutex retiredLogMutex; std::vector<QString>* retiredLog = nullptr; }
 TEST_F(EngineConnectTimeout, RemoveReturnsBeforeDeadPeerCloseAndStopDrainsRetiredSocket) {
+    std::vector<QString> log;
+    { std::lock_guard lock(retiredLogMutex); retiredLog = &log; }
+    const auto previous = qInstallMessageHandler([](QtMsgType, const QMessageLogContext&, const QString& message) {
+        std::lock_guard lock(retiredLogMutex);
+        if (retiredLog) retiredLog->push_back(message);
+    });
+    struct Restore {
+        QtMessageHandler previous;
+        ~Restore() { qInstallMessageHandler(previous); std::lock_guard lock(retiredLogMutex); retiredLog = nullptr; }
+    } restore{previous};
     Peer peer(tls.server, Peer::Mode::WsSilent);
     options.closeTimeout = 800ms;
     start(peer.port());
@@ -287,9 +300,24 @@ TEST_F(EngineConnectTimeout, RemoveReturnsBeforeDeadPeerCloseAndStopDrainsRetire
     EXPECT_TRUE(engine->stats().empty());
     engine->stop(); // retired engines must drain before callback consumers die
     EXPECT_GE(Clock::now() - before, 750ms);
-    std::lock_guard lock(observed.mutex);
-    EXPECT_EQ(observed.downs.size(), 1u);
-    EXPECT_EQ(peer.acceptCount(), 1u);
+    {
+        std::lock_guard lock(observed.mutex);
+        EXPECT_EQ(observed.downs.size(), 1u);
+        EXPECT_EQ(peer.acceptCount(), 1u);
+        // N2: the retired socket's close timeout is not the product's error.
+        EXPECT_FALSE(std::any_of(observed.errors.begin(), observed.errors.end(),
+            [](const auto& e) { return e.find("close timed out") != std::string::npos; }));
+    }
+    std::lock_guard lock(retiredLogMutex);
+    bool sawRetiredTimeout = false;
+    for (const auto& line : log) {
+        if (line.contains("close timed out")) {
+            sawRetiredTimeout = true;
+            EXPECT_FALSE(line.contains("product=BTC-USD")) << line.toStdString();
+            EXPECT_TRUE(line.contains("product=retired:BTC-USD") || line.contains("retiredProduct=BTC-USD")) << line.toStdString();
+        }
+    }
+    EXPECT_TRUE(sawRetiredTimeout);
 }
 TEST_F(EngineConnectTimeout, RemoveAndStopCancelRealTlsHandshakeWithoutWaitingForConnectDeadline) {
     for (const bool removeFirst : {true, false}) {

@@ -166,11 +166,6 @@ nlohmann::json frameReceipt(std::string_view payload, const std::vector<std::str
 std::string frameIdentityLine(const Record& r, const nlohmann::json& identity) {
     return nlohmann::json::array({r.time.systemNs, r.time.steadyNs, r.connection, identity}).dump() + "\n";
 }
-bool RoutingBatch::due(const Record& r) const {
-    return count && (count >= MaxRoutingFrames || r.connection != connection ||
-        r.time.steadyNs - first.steadyNs >= RoutingIntervalNs ||
-        r.time.systemNs / 3600000000000LL != first.systemNs / 3600000000000LL);
-}
 void RoutingBatch::add(const Record& r, const nlohmann::json& identity) {
     const auto& seq = identity.at("sequence_num");
     const bool sequenced = seq.is_number_unsigned() || (seq.is_number_integer() && seq.get<int64_t>() >= 0);

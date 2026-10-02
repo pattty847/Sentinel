@@ -78,6 +78,7 @@ void MarketDataCoreEngine::stop(std::function<void()> completion) {
         self->m_running = false;
         self->m_cancelPermits();
         self->m_reconnectScheduled = false;
+        self->m_transport->retire();
         self->m_stopCompletion = std::move(completion);
         if (!self->m_closePending) {
             self->m_closePending = true;
@@ -185,6 +186,14 @@ void MarketDataCoreEngine::observeIngest(IngestKind kind, std::string_view paylo
 }
 
 inline void MarketDataCoreEngine::emitError(std::string msg) {
+    if (!m_running) {
+        // A stopped (removed or shutting down) engine's socket is still closing.
+        // Its errors must not read as the live product: after remove + re-add a
+        // new engine owns this product name. No callback, no product= key.
+        sLog_Data("Retired feed socket error ignored: retiredProduct=" << m_product << " conn=" << m_connection
+                  << " attempt=" << m_attempt << " error=" << msg);
+        return;
+    }
     sLog_Error("product=" << m_product << " conn=" << m_connection << " attempt=" << m_attempt << " error=" << msg);
     if (m_onError) {
         try {
@@ -517,6 +526,12 @@ void MarketDataCoreEngine::reconnectNow(const std::string& reason) {
     sLog_Data("product=" << m_product << " conn=" << m_connection << " attempt=" << m_attempt << " Reconnecting: reason=" << reason);
     if (reason == "stale heartbeat")
         m_backoffDuration = std::max(m_backoffDuration, m_reconnectPolicy.staleHeartbeatDelay);
+    // A subscribe batch still waiting for the process bucket must leave the
+    // queue now: its ticket would otherwise hold every other product's
+    // subscribe until this socket's close completes (Coinbase drops a socket
+    // that has not subscribed within 5 s).
+    m_subscriptionsPending = false;
+    m_cancelPermits();
     m_closePending = true;
     m_connected = false;
     m_transport->close();

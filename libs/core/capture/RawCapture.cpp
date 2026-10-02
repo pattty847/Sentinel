@@ -236,15 +236,18 @@ QString prepareDirectory(const QString& directory) {
     return canonical;
 }
 
-Writer::Writer(WriterConfig config, nlohmann::json metadata)
+Writer::Writer(WriterConfig config, nlohmann::json metadata) : Writer(std::move(config), std::move(metadata), false) {}
+Writer::Writer(WriterConfig config, nlohmann::json metadata, bool legacyV2)
     : m_config(std::move(config)), m_metadata(std::move(metadata)) {
+    const bool multi = m_metadata.contains("connection_products") || m_metadata.contains("routing");
+    if (multi != legacyV2) fail(legacyV2 ? "v2 fixture needs connection products" :
+                                           "multi-product (RAWL2 v2) capture writing was removed");
     validateSymbol(m_config.symbol);
     m_config.root = validateRoot(m_config.root);
     if (m_config.blockBytes == 0 || m_config.blockBytes > MaxRecordBytes || m_config.blockInterval.count() < 1 ||
         m_config.blockInterval > std::chrono::seconds(60) || m_config.compressionLevel < 1 || m_config.compressionLevel > 19)
         fail("invalid block configuration");
     const auto now = Stamp::now();
-    const bool multi = m_metadata.contains("connection_products");
     m_metadata["format_version"] = multi ? 2 : 1;
     if (!multi) {
         m_metadata["run_id"] = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
