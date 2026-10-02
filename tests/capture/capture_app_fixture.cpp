@@ -23,6 +23,23 @@ int main(int argc, char** argv) {
     dependencies.makeEngine = [products](auto& auth, const auto& config) {
         std::cout << "FIXTURE_ENGINE\n" << std::flush;
         auto state = std::make_shared<fixtures::WsScenario>();
+        if (qEnvironmentVariableIsSet("SENTINEL_TEST_SCOPED_RESYNC")) {
+            state->onAttempt = [](auto& transport, int) { transport.up(); };
+            state->onSend = [](auto& transport, size_t sends) {
+                if (sends == 5) {
+                    // A product recovery was just sent; the peer then closes
+                    // independently, before any shared reconnect escalation.
+                    transport.down();
+                    std::cout << "FIXTURE_READY\n" << std::flush;
+                }
+            };
+            MarketDataCoreEngine::ReconnectPolicy policy;
+            policy.watchdogInterval = 5ms;
+            policy.level2Stale = 40ms;
+            return std::make_unique<MarketDataCoreEngine>(auth, config, [state](auto& io, auto&) {
+                return std::make_unique<fixtures::FakeWsTransport>(io, state);
+            }, policy);
+        }
         state->onFrame = [](size_t sends, int attempt) {
             if (sends < size_t(attempt) * 3) std::cout << "FIXTURE_EARLY_FRAME\n" << std::flush;
         };

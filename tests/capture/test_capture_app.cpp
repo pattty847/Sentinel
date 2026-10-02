@@ -185,3 +185,47 @@ TEST(CaptureApplication, SeveralCliFormsSubscribeAllSevenOnOneEngineAndVerifyThe
     }
 #endif
 }
+
+TEST(CaptureApplication, ScopedRecoveryDoesNotMislabelLaterTransportDown) {
+#ifdef _WIN32
+    GTEST_SKIP() << "POSIX SIGTERM integration test";
+#else
+    QTemporaryDir dir;
+    QProcess child;
+    struct Cleanup {
+        QProcess& child;
+        ~Cleanup() { if (child.state() != QProcess::NotRunning) { child.kill(); child.waitForFinished(5000); } }
+    } cleanup{child};
+    auto environment = QProcessEnvironment::systemEnvironment();
+    environment.insert("SENTINEL_LOG_DIR", dir.path() + "/logs");
+    environment.insert("SENTINEL_TEST_SCOPED_RESYNC", "1");
+    child.setProcessEnvironment(environment);
+    child.start(CAPTURE_APP_FIXTURE, {"--root", dir.path() + "/raw", "--symbol", "BTC-USD",
+        "--ca-bundle", SENTINEL_TEST_CA, "--key-file", dir.path() + "/absent-key.json"});
+    ASSERT_TRUE(child.waitForStarted(5000));
+    QByteArray output;
+    QElapsedTimer deadline; deadline.start();
+    while (!output.contains("FIXTURE_READY\n") && deadline.elapsed() < 10000 && child.state() != QProcess::NotRunning) {
+        child.waitForReadyRead(100);
+        output += child.readAllStandardOutput();
+    }
+    ASSERT_TRUE(output.contains("FIXTURE_READY\n")) << child.readAllStandardError().toStdString();
+    ASSERT_EQ(::kill(static_cast<pid_t>(child.processId()), SIGTERM), 0);
+    ASSERT_TRUE(child.waitForFinished(5000));
+    ASSERT_EQ(child.exitCode(), 0);
+    int down = 0, scoped = 0;
+    QDirIterator files(dir.path() + "/raw", {"*.rawl2"}, QDir::Files, QDirIterator::Subdirectories);
+    while (files.hasNext()) scan(files.next(), [&](const Record& record) {
+        if (record.kind == Kind::ResyncRequested) {
+            ++scoped;
+            EXPECT_EQ(nlohmann::json::parse(record.payload)["product"], "BTC-USD");
+        }
+        if (record.kind == Kind::TransportDown) {
+            ++down;
+            EXPECT_EQ(nlohmann::json::parse(record.payload)["reason"], "transport closed");
+        }
+    });
+    EXPECT_EQ(scoped, 1);
+    EXPECT_EQ(down, 1);
+#endif
+}

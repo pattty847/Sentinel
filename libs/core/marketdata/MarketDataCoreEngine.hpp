@@ -69,9 +69,10 @@ public:
         // requestResnapshot() ignores requests this soon after its last reconnect,
         // whichever product asked: one stuck consumer must not keep gapping the rest.
         std::chrono::milliseconds resnapshotCooldown{20000};
-        // Per desired product: first interval resubscribes L2, second reconnects
-        // if no fresh snapshot arrived. Checked at watchdogInterval granularity.
+        // Per-product silence/recovery intervals; constructor-only test overrides.
         std::chrono::milliseconds level2Stale{30000};
+        std::chrono::milliseconds level2RetryMaximum{600000};
+        std::chrono::milliseconds level2QuietMaximum{300000};
     };
     // Alternate transport/timings support deterministic offline tests. All
     // transport callbacks must run on the supplied I/O context's single thread.
@@ -184,6 +185,14 @@ private:
     struct ProductLiveness {
         int64_t lastLevel2Ms;
         int64_t resubscribeMs = -1; // cleared only by a valid snapshot
+        int64_t retryMs = 0, quietMs = 0;
+        unsigned failures = 0, reconnectEscalations = 0;
+        bool snapshotAccepted = false;
+        // Bounded snapshot evidence, not a shadow book. An update invalidates
+        // the comparison baseline; only consecutive quiet snapshots compare.
+        bool comparableSnapshot = false;
+        uint64_t snapshotHash = 0, snapshotHash2 = 0;
+        size_t snapshotLevels = 0;
     };
     // Allocated on subscription changes only; find/update on each L2 event.
     // Desired products and liveness are owned by the I/O strand.

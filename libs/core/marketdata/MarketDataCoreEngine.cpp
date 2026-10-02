@@ -6,6 +6,7 @@
 #include "Cpp20Utils.hpp"
 #include <thread>
 #include <cmath>
+#include <bit>
 #include <limits>
 #include <chrono>
 #include <algorithm>
@@ -46,6 +47,7 @@ MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth, const ServerMdcC
     if (policy.initialDelay.count() <= 0 || policy.maximumDelay < policy.initialDelay ||
         policy.watchdogInterval.count() <= 0 || policy.heartbeatStale < policy.watchdogInterval ||
         policy.level2Stale < policy.watchdogInterval ||
+        policy.level2RetryMaximum < policy.level2Stale || policy.level2QuietMaximum < policy.level2Stale ||
         policy.staleHeartbeatDelay < policy.initialDelay || policy.staleHeartbeatDelay > policy.maximumDelay)
         throw std::invalid_argument("invalid market-data reconnect policy");
     const char* defaultCaBundle = "resources/certs/ca-bundle.crt";
@@ -89,7 +91,12 @@ MarketDataCoreEngine::MarketDataCoreEngine(Authenticator& auth, const ServerMdcC
             m_backoffDuration = m_reconnectPolicy.initialDelay;
             const auto nowMs = steadyClockMs();
             m_lastHeartbeatMs.store(nowMs);
-            for (auto& [product, state] : m_productLiveness) state = {nowMs};
+            for (auto& [product, state] : m_productLiveness) {
+                state.lastLevel2Ms = nowMs;
+                // A replay is another snapshot attempt, not proof of recovery.
+                state.resubscribeMs = state.failures ? nowMs : -1;
+                state.snapshotAccepted = state.comparableSnapshot = false;
+            }
             {
                 std::lock_guard<std::mutex> lock(m_seqMutex);
                 m_lastSeqByProduct.clear();
@@ -171,7 +178,8 @@ void MarketDataCoreEngine::subscribeToSymbols(const std::vector<std::string>& sy
         for (const auto& s : symbols) {
             if (std::find(m_products.begin(), m_products.end(), s) == m_products.end()) {
                 m_products.push_back(s);
-                m_productLiveness.emplace(s, ProductLiveness{steadyClockMs()});
+                auto& state = m_productLiveness.emplace(s, ProductLiveness{steadyClockMs()}).first->second;
+                state.retryMs = state.quietMs = m_reconnectPolicy.level2Stale.count();
                 added.push_back(s);
             }
         }
@@ -302,6 +310,8 @@ void MarketDataCoreEngine::sendSubscriptionMessage(const std::string& type,
 }
 
 void MarketDataCoreEngine::emitBookInvalidated(const std::string& productId, const std::string& reason) {
+    for (auto& [product, state] : m_productLiveness)
+        if (productId.empty() || productId == product) state.snapshotAccepted = false;
     if (m_ingestObserver) observeIngest(IngestKind::BookInvalidated, {}, productId, reason);
     sLog_Warning("Order book invalidated: product=" << (productId.empty() ? std::string("*") : productId)
                  << " reason=" << reason);
@@ -351,6 +361,8 @@ void MarketDataCoreEngine::dispatch(const nlohmann::json& message) {
                 } else if constexpr (std::is_same_v<T, SubscriptionAckEvent>) {
                     if (ev.level2ProductIds) {
                         for (const auto& product : m_products) {
+                            const auto state = m_productLiveness.find(product);
+                            if (state != m_productLiveness.end() && state->second.resubscribeMs >= 0) continue;
                             const auto& ids = *ev.level2ProductIds;
                             if (std::find(ids.begin(), ids.end(), product) == ids.end()) {
                                 sLog_Warning("Subscription ack missing desired level2 product: product=" << product
@@ -471,6 +483,13 @@ void MarketDataCoreEngine::handleOrderBookData(const nlohmann::json& message,
 }
 
 namespace {
+// Order-independent snapshot fingerprints only influence the quiet polling
+// interval, never book validity. Two independent accumulators avoid cancellation.
+uint64_t mixSnapshotBits(uint64_t value) {
+    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31);
+}
 // One L2 level: side, positive finite price, finite non-negative quantity (0 = remove).
 bool parseLevel(const nlohmann::json& update, bool& isBid, double& price, double& quantity) {
     if (!update.is_object()) return false;
@@ -498,6 +517,8 @@ void MarketDataCoreEngine::handleOrderBookSnapshot(const nlohmann::json& event,
     std::vector<OrderBookLevel> sparse_bids;
     std::vector<OrderBookLevel> sparse_asks;
     int malformed = 0;
+    uint64_t snapshotHash = 0, snapshotHash2 = 0;
+    size_t snapshotLevels = 0;
     for (const auto& update : event["updates"]) {
         bool isBid = false;
         double price = 0.0;
@@ -508,6 +529,11 @@ void MarketDataCoreEngine::handleOrderBookSnapshot(const nlohmann::json& event,
         }
         if (quantity > 0.0) {
             (isBid ? sparse_bids : sparse_asks).push_back(OrderBookLevel{price, quantity});
+            const auto hash = mixSnapshotBits(std::bit_cast<uint64_t>(price)) ^
+                mixSnapshotBits(std::bit_cast<uint64_t>(quantity) + (isBid ? 1 : 2));
+            snapshotHash += hash;
+            snapshotHash2 += mixSnapshotBits(hash);
+            ++snapshotLevels;
         }
     }
     if (malformed > 0) {
@@ -515,8 +541,20 @@ void MarketDataCoreEngine::handleOrderBookSnapshot(const nlohmann::json& event,
         triggerImmediateReconnect("malformed l2");
         return;
     }
-    if (auto it = m_productLiveness.find(product_id); it != m_productLiveness.end())
-        it->second.resubscribeMs = -1;
+    if (auto it = m_productLiveness.find(product_id); it != m_productLiveness.end()) {
+        auto& state = it->second;
+        if (state.resubscribeMs >= 0 && state.comparableSnapshot &&
+            state.snapshotHash == snapshotHash && state.snapshotHash2 == snapshotHash2 &&
+            state.snapshotLevels == snapshotLevels) {
+            state.quietMs = std::min(state.quietMs * 2, m_reconnectPolicy.level2QuietMaximum.count());
+            sLog_Data("Unchanged recovery snapshot: product=" << product_id << " silenceThresholdMs=" << state.quietMs);
+        }
+        state.snapshotHash = snapshotHash;
+        state.snapshotHash2 = snapshotHash2;
+        state.snapshotLevels = snapshotLevels;
+        state.snapshotAccepted = state.comparableSnapshot = true;
+        state.resubscribeMs = -1;
+    }
     const int64_t envelopeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         exchange_timestamp.time_since_epoch()).count();
     if (m_onLiveOrderBookInitialized) {
@@ -553,6 +591,15 @@ void MarketDataCoreEngine::handleOrderBookUpdate(const nlohmann::json& event,
     }
 
     if (!levelUpdates.empty()) {
+        if (auto it = m_productLiveness.find(product_id); it != m_productLiveness.end()) {
+            auto& state = it->second;
+            state.comparableSnapshot = false;
+            state.quietMs = m_reconnectPolicy.level2Stale.count();
+            if (state.snapshotAccepted) {
+                state.failures = state.reconnectEscalations = 0;
+                state.retryMs = m_reconnectPolicy.level2Stale.count();
+            }
+        }
         const int64_t exchangeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             exchange_timestamp.time_since_epoch()).count();
         std::vector<BookLevelUpdate> updatesPayload(levelUpdates.begin(), levelUpdates.end());
@@ -600,24 +647,36 @@ void MarketDataCoreEngine::startHeartbeatWatchdog() {
 
 void MarketDataCoreEngine::checkLevel2Silence(int64_t nowMs) {
     for (auto& [product, state] : m_productLiveness) {
-        const auto sinceMs = state.resubscribeMs >= 0 ? state.resubscribeMs : state.lastLevel2Ms;
-        if (nowMs - sinceMs <= m_reconnectPolicy.level2Stale.count()) continue;
-        if (state.resubscribeMs >= 0) {
-            sLog_Warning("Level2 snapshot still missing after resubscribe, reconnecting: product=" << product
-                         << " elapsedMs=" << (nowMs - sinceMs));
-            // Like requestResnapshot: every book becomes unknown before close completes.
-            emitBookInvalidated({}, "level2 resubscribe timed out " + product);
-            reconnectNow("level2 resubscribe timed out " + product);
-            return;
+        const bool recovering = state.resubscribeMs >= 0;
+        const auto sinceMs = recovering ? state.resubscribeMs : state.lastLevel2Ms;
+        const auto intervalMs = recovering ? state.retryMs : state.quietMs;
+        if (nowMs - sinceMs <= intervalMs) continue;
+        if (recovering) {
+            if (state.failures < 32) ++state.failures;
+            state.retryMs = std::min(state.retryMs * 2, m_reconnectPolicy.level2RetryMaximum.count());
+            const bool healthyPeer = std::any_of(m_productLiveness.begin(), m_productLiveness.end(),
+                [&](const auto& peer) {
+                    return peer.first != product && peer.second.snapshotAccepted;
+                });
+            const bool reconnect = state.reconnectEscalations < 2 && !healthyPeer;
+            // One error per backed-off attempt, never one per watchdog tick.
+            sLog_Error("Level2 snapshot still missing: product=" << product << " failures=" << state.failures
+                       << " retryMs=" << state.retryMs << " reconnect=" << reconnect);
+            if (reconnect) {
+                ++state.reconnectEscalations;
+                m_lastResnapshotMs = nowMs;
+                emitBookInvalidated(product, "level2 resubscribe timed out " + product);
+                reconnectNow("level2 resubscribe timed out " + product);
+                return;
+            }
+        } else {
+            sLog_Warning("Level2 silent, resubscribing: product=" << product
+                         << " silenceMs=" << (nowMs - state.lastLevel2Ms) << " thresholdMs=" << state.quietMs);
+            emitBookInvalidated(product, "level2 silent");
         }
-        sLog_Warning("Level2 silent, resubscribing: product=" << product
-                     << " silenceMs=" << (nowMs - state.lastLevel2Ms)
-                     << " thresholdMs=" << m_reconnectPolicy.level2Stale.count());
         state.resubscribeMs = nowMs;
-        emitBookInvalidated(product, "level2 silent");
         if (m_ingestObserver) observeIngest(IngestKind::ResyncRequested, {}, product, "level2 silent");
-        // Duplicate subscribe is not guaranteed to deliver a snapshot. Keep the
-        // desired set, other products, trades and connection heartbeats intact.
+        // Preserve all other product/channel subscriptions, including heartbeats.
         sendSubscriptionMessage("unsubscribe", {product}, true);
         sendSubscriptionMessage("subscribe", {product}, true);
     }

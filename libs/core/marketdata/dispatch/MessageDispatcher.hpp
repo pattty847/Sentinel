@@ -64,7 +64,7 @@ public:
                 if (!ids.is_array()) return;
                 if (level2 && !ack.level2ProductIds) ack.level2ProductIds.emplace();
                 for (const auto& id : ids) {
-                    if (!id.is_string()) continue;
+                    if (!id.is_string() || id == "heartbeats") continue;
                     ack.productIds.push_back(id.get<std::string>());
                     if (level2) ack.level2ProductIds->push_back(id.get<std::string>());
                 }
@@ -74,7 +74,7 @@ public:
                 for (const auto& entry : channels) {
                     if (!entry.is_object() || !entry.contains("product_ids")) continue;
                     const auto name = entry.value("name", entry.value("channel", ""));
-                    append(entry["product_ids"], name == "level2" || name == "l2_data");
+                    if (name != "heartbeats") append(entry["product_ids"], name == "level2" || name == "l2_data");
                 }
             };
             const auto parseState = [&](const nlohmann::json& state) {
@@ -86,7 +86,7 @@ public:
                 if (subs.is_object()) {
                     for (auto it = subs.begin(); it != subs.end(); ++it) {
                         if (it.key() == "channels") parseChannels(it.value());
-                        else append(it.value(), it.key() == "level2" || it.key() == "l2_data");
+                        else if (it.key() != "heartbeats") append(it.value(), it.key() == "level2" || it.key() == "l2_data");
                     }
                 } else {
                     parseChannels(subs);

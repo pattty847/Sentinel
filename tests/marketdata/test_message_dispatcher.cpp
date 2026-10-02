@@ -350,3 +350,13 @@ TEST(MessageDispatcher, AdvancedTradeAckKeepsLevel2SeparateFromOtherChannels) {
         R"({"channel":"subscriptions","events":[{"subscriptions":{"market_trades":["BTC-USD"]}}]})"));
     EXPECT_FALSE(std::get<SubscriptionAckEvent>(trades.events[0]).level2ProductIds);
 }
+
+TEST(MessageDispatcher, HeartbeatsAreNeverProductsInSubscriptionAcks) {
+    for (const auto* bytes : {
+        R"({"channel":"subscriptions","product_ids":["BTC-USD","heartbeats"]})",
+        R"({"channel":"subscriptions","events":[{"subscriptions":{"level2":["BTC-USD"],"heartbeats":["heartbeats","connection"]}}]})",
+        R"({"channel":"subscriptions","channels":[{"name":"level2","product_ids":["BTC-USD"]},{"name":"heartbeats","product_ids":["connection"]}]})"}) {
+        const auto result = MessageDispatcher::parse(nlohmann::json::parse(bytes));
+        EXPECT_EQ(std::get<SubscriptionAckEvent>(result.events[0]).productIds, (std::vector<std::string>{"BTC-USD"}));
+    }
+}
