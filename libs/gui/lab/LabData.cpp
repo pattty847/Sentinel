@@ -14,6 +14,7 @@ namespace {
 std::mutex instanceMutex;
 std::unique_ptr<LabData> current;
 std::string configuredRoot;
+std::vector<std::string> localSymbols{kSymbol};
 int64_t configuredPin = 0;
 heatmap::HeatmapBudgets configuredBudgets;
 std::optional<LabData::Server> configuredServer;
@@ -45,6 +46,8 @@ LabData &LabData::instance() {
     }
     return *current;
 }
+
+void LabData::setLocalSymbolsForTest(std::vector<std::string> symbols) { localSymbols = std::move(symbols); }
 
 void LabData::configure(const std::string &root, int64_t pinnedEndMs, heatmap::HeatmapBudgets budgets) {
     std::unique_ptr<LabData> old;
@@ -104,7 +107,7 @@ void LabData::start() {
         hooks.pinnedEndMs = pinnedEndMs_;
         return new heatmap::LocalChunkTransport(root_, hooks);
     }, budgets_, [this](heatmap::ChunkTransport &transport) {
-        if (auto *local = qobject_cast<heatmap::LocalChunkTransport *>(&transport)) local->start({kSymbol});
+        if (auto *local = qobject_cast<heatmap::LocalChunkTransport *>(&transport)) local->start(localSymbols);
         else {
             connection_ = Connection::Connecting;
             static_cast<SentinelStreamClient *>(client_)->connectToServer();

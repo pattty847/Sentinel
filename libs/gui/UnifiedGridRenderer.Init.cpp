@@ -64,6 +64,11 @@ void UnifiedGridRenderer::init() {
     });
     connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::limitsChanged, this, [this] {
         applyGpuLimits();
+        // A carry applied before the new symbol's price scale was known: again, now
+        // that its limits are.
+        if (m_gpuHeatmap && m_priceCarry && !m_gpuReseedPrice && !m_gpuLimitsDeferred &&
+            m_gpuLayer->priceScaleCurrent())
+            applyPriceCarry(gpuLivePrice());
         refitAutoPrice(); // e.g. a new symbol's tick: its min/max price spans
     });
     connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::buildFailed, this, [](const QString& message) {
@@ -112,6 +117,7 @@ void UnifiedGridRenderer::init() {
     connect(m_viewState.get(), &GridViewState::autoScrollEnabledChanged, this, &UnifiedGridRenderer::autoScrollEnabledChanged);
     connect(m_viewState.get(), &GridViewState::autoPriceScaleChanged, this, [this]() {
         sLog_Render("auto price scale=" << m_viewState->autoPriceScale());
+        if (m_viewState->autoPriceScale()) m_priceCarry.reset(); // on: the candles fit
         emit autoPriceScaleChanged();
     });
     // Auto price scale (gpu): every setViewport takes its price from the visible candles.
@@ -120,6 +126,7 @@ void UnifiedGridRenderer::init() {
     });
     connect(m_viewState.get(), &GridViewState::priceInteracted, this, [this]() {
         if (m_heatmapStreamService) m_heatmapStreamService->cancelPriceCenter();
+        m_priceCarry.reset(); // the user owns price now: no pending carry replaces it
     });
     
     QMetaObject::invokeMethod(

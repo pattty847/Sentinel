@@ -658,6 +658,7 @@ void HeatmapSourceController::setView(const std::string &symbol, int64_t tfMs, d
     if (symbol != symbol_ || tfMs != tfMs_)
         sLog_Data("Heatmap controller view chart=" << chart_ << " symbol=" << symbol << " tf=" << tfMs
                   << " serial=" << serial_ << " retained=" << retained_.size());
+    if (symbol != symbol_) priceScaleKnown_ = false; // priceScale_ is the previous symbol's until sources()
     symbol_ = symbol;
     tfMs_ = tfMs;
     timeLoMs_ = timeLoMs;
@@ -1213,6 +1214,7 @@ std::vector<SourceAvailability> HeatmapSourceController::sources() {
     for (const auto &source : available->sources)
         if (source.latestGrid && source.latestGrid->priceScale > 0) {
             priceScale_ = source.latestGrid->priceScale;
+            priceScaleKnown_ = true;
             break;
         }
     // Keep each level's interval: hour chunks only where hour rollups exist.
@@ -1765,6 +1767,7 @@ void HeatmapSourceController::publish() {
     set->symbol = symbol_;
     set->tfMs = tfMs_;
     set->priceScale = priceScale_;
+    set->priceScaleKnown = priceScaleKnown_;
     set->resolution.tfMs = tfMs_;
     set->resolution.priceScale = priceScale_;
     set->refused = cpuRefused_;

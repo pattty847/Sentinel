@@ -10,6 +10,7 @@
 #include "lab/OffscreenQuick.hpp"
 #include "lab/RhiBackend.hpp"
 #include "mainwindow/AgentApiInput.hpp"
+#include "mainwindow/QmlSceneController.h"
 #include "models/PriceAxisModel.hpp"
 #include "models/TimeAxisModel.hpp"
 #include "render/AlgoOverlayRenderer.hpp"
@@ -51,9 +52,24 @@ QSGNode *paintRoot(QQuickItem *item) { return QQuickItemPrivate::get(item)->pain
 // once in main() and never reconfigured (a reconfigure with local chunk reads in
 // flight is lab-only teardown territory, not the main chart's).
 QTemporaryDir *fixtureDir = nullptr;
+// A second recorded symbol at ~$0.00001 (price scale 1e10): a different price scale
+// for the symbol-switch carry (its rows are 1e-8 near and 1e-7 deep).
+recording::Hmc2Record tinyMinute(const std::string &layer, int64_t i) {
+    auto r = syntheticMinute(layer, i);
+    r.header.symbol = "TINY-USD";
+    r.header.priceScale = 1e10;
+    r.midOpen = r.midClose = r.midMin = r.midMax = r.midOpen * 100 / 1e10;
+    return r;
+}
 void configureFixture() {
     fixtureDir = new QTemporaryDir;
     writeRecording(*fixtureDir, 4 * 60);
+    lab::LabData::setLocalSymbolsForTest({"BTC-USD", "TINY-USD"});
+    {
+        recording::Hmc2Store writer(fixtureDir->path().toStdString());
+        for (int64_t i = 0; i < 4 * 60; ++i)
+            for (const char *layer : {"deep", "near"}) writer.append(tinyMinute(layer, i));
+    }
     lab::LabData::configure(fixtureDir->path().toStdString(), epoch + 4 * kHourMs);
 }
 
@@ -977,6 +993,207 @@ TEST_F(UgrGpu, SymbolSwitchKeepsTheAutoScaleState) {
     ugr->setCandleBuffer(nullptr);
 }
 
+// Review item 2: a drag commits only at release, so the fit and the candle checks use
+// the window on screen (the committed one shifted by the drag): revealed candles fit
+// during the drag, updates beyond the committed end refit, a cancelled drag refits back.
+TEST_F(UgrGpu, AutoScaleFitsTheDisplayedWindowDuringADrag) {
+    gpuOn();
+    CandleSeriesBuffer buffer;
+    const auto bars = risingBars(viewLo - 4 * kHourMs, viewHi + kHourMs, minute, 90'000);
+    buffer.applyHistory("BTC-USD", 60, bars);
+    ugr->setCandleBuffer(&buffer);
+    ugr->setAutoPriceScale(true);
+    auto *view = ugr->getViewState();
+    const int64_t t0 = view->getVisibleTimeStart(), t1 = view->getVisibleTimeEnd();
+    ugr->beginPanAt(320, 160);
+    ugr->updatePanAt(160, 160); // a quarter of the width left: 10 minutes later
+    const auto [s, e] = view->displayedTimeWindow();
+    EXPECT_EQ(s, t0 + 10 * minute);
+    EXPECT_EQ(e, t1 + 10 * minute);
+    EXPECT_EQ(view->getVisibleTimeStart(), t0) << "nothing committed before release";
+    {
+        const auto [lo, hi] = expectedFit(bars, s, e);
+        EXPECT_NEAR(view->getMinPrice(), lo, 1e-6) << "fitted to the displayed window during the drag";
+        EXPECT_NEAR(view->getMaxPrice(), hi, 1e-6);
+    }
+    auto update = [&](int64_t t, double low, double high, uint64_t seq) {
+        buffer.applyUpdate("BTC-USD", 60, {t, t + minute, low, high, low, high, 1.0, false, 0, false}, seq, false);
+    };
+    uint64_t v = view->getViewportVersion();
+    update(t0 + 2 * minute, 50'000, 150'000, 1); // committed, no longer on screen
+    EXPECT_EQ(view->getViewportVersion(), v) << "an off-screen candle does not refit";
+    update(t1 + 5 * minute, 90'500, 99'000, 2); // revealed by the drag (after the committed end)
+    EXPECT_EQ(view->getViewportVersion() - v, 1u) << "a revealed candle refits";
+    EXPECT_GT(view->getMaxPrice(), 99'000);
+    ugr->endPanAt();
+    EXPECT_EQ(view->getVisibleTimeStart(), t0 + 10 * minute);
+    EXPECT_GT(view->getMaxPrice(), 99'000);
+    // A cancelled drag keeps the time: the price fits the committed window again.
+    const double lo1 = view->getMinPrice(), hi1 = view->getMaxPrice();
+    ugr->beginPanAt(320, 160);
+    ugr->updatePanAt(600, 160); // reveals older, lower candles
+    EXPECT_LT(view->getMinPrice(), lo1);
+    view->handlePanEnd(false);
+    EXPECT_DOUBLE_EQ(view->getMinPrice(), lo1);
+    EXPECT_DOUBLE_EQ(view->getMaxPrice(), hi1);
+    ugr->setCandleBuffer(nullptr);
+}
+
+// Review items 3-5: POST /api/v1/viewport resolves its flags and final window first
+// and commits once; explicit price bounds (even the current ones) turn the auto price
+// scale off; a fit that cannot happen changes nothing (the A toggle still arms).
+TEST_F(UgrGpu, ViewportRequestsResolveFlagsAndCommitOnce) {
+    gpuOn();
+    CandleSeriesBuffer buffer;
+    const auto bars = risingBars(viewLo - 4 * kHourMs, epoch + 5 * kHourMs, minute, 90'000);
+    buffer.applyHistory("BTC-USD", 60, bars);
+    ugr->setCandleBuffer(&buffer);
+    auto *view = ugr->getViewState();
+    using Request = UnifiedGridRenderer::ViewportRequest;
+    ugr->setAutoPriceScale(true);
+    Request equal;
+    equal.priceMin = view->getMinPrice();
+    equal.priceMax = view->getMaxPrice();
+    uint64_t v = view->getViewportVersion();
+    EXPECT_EQ(ugr->applyViewportRequest(equal), QString());
+    EXPECT_FALSE(ugr->autoPriceScale()) << "explicit bounds equal to the current ones still turn it off";
+    EXPECT_EQ(view->getViewportVersion(), v);
+    // autoScale + followLive: one change at the live edge, fitted.
+    Request both;
+    both.autoScale = true;
+    both.followLive = true;
+    v = view->getViewportVersion();
+    EXPECT_EQ(ugr->applyViewportRequest(both), QString());
+    EXPECT_EQ(view->getViewportVersion() - v, 1u) << "flags resolved first, one commit";
+    EXPECT_TRUE(ugr->autoPriceScale());
+    EXPECT_TRUE(ugr->autoScrollEnabled());
+    const int64_t anchor = layer().liveAnchorMs();
+    EXPECT_EQ(view->getVisibleTimeEnd(), anchor + std::max<int64_t>(minute, int64_t(timeSpan() * 0.08)));
+    {
+        const auto [lo, hi] = expectedFit(bars, view->getVisibleTimeStart(), view->getVisibleTimeEnd());
+        EXPECT_NEAR(view->getMinPrice(), lo, 1e-6);
+        EXPECT_NEAR(view->getMaxPrice(), hi, 1e-6);
+    }
+    // Time bounds with autoScale: one change, landed fitted, follow off.
+    Request time;
+    time.startMs = viewLo;
+    time.endMs = viewHi;
+    time.autoScale = true;
+    v = view->getViewportVersion();
+    EXPECT_EQ(ugr->applyViewportRequest(time), QString());
+    EXPECT_EQ(view->getViewportVersion() - v, 1u);
+    EXPECT_FALSE(ugr->autoScrollEnabled());
+    {
+        const auto [lo, hi] = expectedFit(bars, viewLo, viewHi);
+        EXPECT_NEAR(view->getMinPrice(), lo, 1e-6);
+    }
+    // A symbol with nothing known (no data, book, trade or candle): fits fail and
+    // change nothing; the A toggle still arms (on, waiting for candles).
+    Request off;
+    off.autoScale = false;
+    ugr->applyViewportRequest(off);
+    ugr->setActiveSymbol("ETH-USD");
+    const double lo0 = view->getMinPrice();
+    Request fitPrice;
+    fitPrice.fit = "price";
+    v = view->getViewportVersion();
+    EXPECT_EQ(ugr->applyViewportRequest(fitPrice), QString("fit_unavailable"));
+    EXPECT_FALSE(ugr->autoPriceScale()) << "a failed fit leaves the auto price scale off";
+    Request reset;
+    reset.fit = "default";
+    EXPECT_EQ(ugr->applyViewportRequest(reset), QString("fit_unavailable")) << "no live anchor for ETH-USD";
+    EXPECT_FALSE(ugr->autoScrollEnabled());
+    EXPECT_FALSE(ugr->autoPriceScale());
+    EXPECT_EQ(view->getViewportVersion(), v);
+    EXPECT_EQ(view->getMinPrice(), lo0);
+    ugr->setAutoPriceScale(true);
+    EXPECT_TRUE(ugr->autoPriceScale()) << "the toggle arms while there is nothing to fit";
+    // The legacy renderer has no auto price scale.
+    ugr->setActiveSymbol("BTC-USD");
+    ugr->setHeatmapRenderer("legacy");
+    Request on;
+    on.autoScale = true;
+    EXPECT_EQ(ugr->applyViewportRequest(on), QString("auto_scale_unavailable"));
+    EXPECT_FALSE(ugr->autoPriceScale());
+    ugr->setCandleBuffer(nullptr);
+}
+
+// Review item 1: the auto-off carry across price scales and unpriced switches. The
+// previous symbol's snapshot (price scale) must not size the new symbol's limits (a
+// Manual tick on a $0.00001 symbol would clamp a $2,000 BTC span to $0.000032); a symbol
+// that never got a price keeps the earlier symbol's carry; unusable prices and a user
+// price action before the price arrives are handled.
+TEST_F(UgrGpu, SymbolSwitchCarryAcrossPriceScalesAndUnpricedSwitches) {
+    gpuOn();
+    auto manual = brightSettings();
+    manual.tickMode = heatmap::TickMode::Manual;
+    manual.manualTick = 1000; // $10 on BTC: at most $3200 over 320 px
+    ugr->setHeatmapChartSettings(manual, true);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    ASSERT_DOUBLE_EQ(view->maxPriceSpan(), 3200);
+    const int64_t t0 = view->getVisibleTimeStart(), t1 = view->getVisibleTimeEnd();
+    auto expectCarried = [&](double mid, const char *what) {
+        const double span = mid * 0.02; // 2,000 / 100,000
+        EXPECT_NEAR(view->getMaxPrice() - view->getMinPrice(), span, span * 1e-6) << what;
+        EXPECT_NEAR(view->getMinPrice(), mid - 0.25 * span, span * 1e-6) << what;
+        EXPECT_EQ(view->getVisibleTimeStart(), t0) << what;
+        EXPECT_EQ(view->getVisibleTimeEnd(), t1) << what;
+    };
+    ugr->setViewport(t0, t1, 99'500, 101'500); // auto off; the book a quarter up
+    ugr->setLiveBookTop(99'999, 100'001);
+    // BTC -> TINY (price scale 1e10, recorded).
+    ugr->setActiveSymbol("TINY-USD");
+    EXPECT_FALSE(layer().priceScaleCurrent());
+    EXPECT_EQ(view->maxPriceSpan(), 0.0) << "TINY's limits are unknown, not BTC's";
+    ugr->setLiveBookTop(0, 0);             // unusable tops do not consume the carry
+    ugr->setLiveBookTop(std::nan(""), 1);
+    ugr->setLiveBookTop(0.0000099, 0.0000101);
+    expectCarried(0.00001, "TINY before its snapshot");
+    ASSERT_TRUE(pump(30'000, [&] { return layer().priceScaleCurrent() && view->maxPriceSpan() > 0; }))
+        << "TINY's snapshot never arrived: current=" << layer().priceScaleCurrent() << " max=" << view->maxPriceSpan()
+        << " avail=" << bool(lab::LabData::instance().service().availability("TINY-USD")) << " scale=" << layer().priceScale();
+    EXPECT_NEAR(view->maxPriceSpan(), 3.2e-5, 1e-12) << "TINY's own Manual limit";
+    expectCarried(0.00001, "TINY after its snapshot");
+    // TINY -> ETH (not recorded): the controller publishes ETH snapshots before any ETH
+    // availability, still at TINY's price scale; they must not size ETH's limits (a
+    // $0.000032 Manual limit would clamp the carried $60).
+    ugr->setActiveSymbol("ETH-USD");
+    ugr->setLiveBookTop(2'999, 3'001);
+    expectCarried(3'000, "ETH before its first snapshot");
+    ASSERT_TRUE(pump(30'000, [&] {
+        const auto snapshot = layer().snapshot();
+        return snapshot && snapshot->symbol == "ETH-USD";
+    }));
+    ASSERT_TRUE(frames(3)) << error.toStdString(); // its limitsChanged delivered
+    EXPECT_FALSE(layer().priceScaleCurrent()) << "ETH's price scale is unknown";
+    EXPECT_EQ(view->maxPriceSpan(), 0.0);
+    expectCarried(3'000, "ETH after its first snapshot");
+    // ETH -> BTC: ETH's snapshot is still the newest; no limit from it clamps BTC.
+    ugr->setActiveSymbol("BTC-USD");
+    EXPECT_EQ(view->maxPriceSpan(), 0.0);
+    ugr->setLiveBookTop(99'999, 100'001);
+    expectCarried(100'000, "BTC before its snapshot");
+    ASSERT_TRUE(pump(30'000, [&] { return layer().priceScaleCurrent() && view->maxPriceSpan() == 3200; }));
+    expectCarried(100'000, "BTC after its snapshot");
+    // BTC -> ETH (no price this time; candles at $3,000 held) -> TINY: BTC's carry, not
+    // one computed from ETH's candles against BTC-priced bounds.
+    CandleSeriesBuffer buffer;
+    buffer.applyHistory("ETH-USD", 60, risingBars(t0, t1, minute, 3'000, 0));
+    ugr->setCandleBuffer(&buffer);
+    ugr->setActiveSymbol("ETH-USD");
+    ugr->setActiveSymbol("TINY-USD");
+    ugr->setLiveBookTop(0.0000099, 0.0000101);
+    expectCarried(0.00001, "TINY after an unpriced ETH");
+    // A user price action before the new symbol's price cancels the pending carry.
+    ugr->setActiveSymbol("BTC-USD");
+    ugr->zoomPriceAt(120, 160, 320);
+    ugr->setLiveBookTop(99'999, 100'001);
+    EXPECT_GT(std::abs((view->getMaxPrice() - view->getMinPrice()) - 2'000), 100) << "the default seed, no carry";
+    EXPECT_NEAR((view->getMaxPrice() + view->getMinPrice()) / 2, 100'000, 1e-6);
+    ugr->setCandleBuffer(nullptr);
+}
+
 // The Now column (the live bucket) keeps its screen x and the bar width stays across
 // timeframe and symbol switches (a view that is not following live, Now in view).
 TEST_F(UgrGpu, NowColumnStaysPutAcrossTimeframeAndSymbolSwitches) {
@@ -1263,6 +1480,27 @@ TEST(UgrInput, InputRouteReachesTheChartAndAxisAreasOncePerWheel) {
     EXPECT_LT(span, 0.5 * timeSpanBefore) << "the default span, not the clamped zoom-out";
     ugr->setCandleBuffer(nullptr);
     ugr->setHeatmapRenderer("legacy"); // its controller goes now
+}
+// Review item 7 (pre-existing): DepthChartView's root `symbol` property shadowed the
+// context property QmlSceneController set, so the candle overlay and the paper-trade
+// model stayed on BTC-USD after a symbol switch.
+TEST(UgrInput, CandlesFollowTheActiveSymbol) {
+    QQuickView view;
+    view.rootContext()->setContextProperty("uiTheme", nullptr);
+    view.rootContext()->setContextProperty("dataSource", nullptr);
+    view.rootContext()->setContextProperty("chartModeController", nullptr);
+    view.setSource(QUrl::fromLocalFile(QStringLiteral(SENTINEL_SOURCE_DIR "/libs/gui/qml/DepthChartView.qml")));
+    ASSERT_EQ(view.status(), QQuickView::Ready) << view.errors().value(0).toString().toStdString();
+    auto *candles = view.rootObject()->findChild<CandlestickOverlayItem *>();
+    auto *paper = view.rootObject()->findChild<PaperTradeOverlayModel *>("paperTradeOverlayModel");
+    ASSERT_TRUE(candles);
+    ASSERT_TRUE(paper);
+    QmlSceneController scene(&view);
+    scene.updateSymbolInContext("ETH-USD");
+    EXPECT_EQ(candles->symbol(), QString("ETH-USD")) << "the candles follow the active symbol";
+    EXPECT_EQ(paper->symbol(), QString("ETH-USD"));
+    scene.updateSymbolInContext("BTC-USD");
+    EXPECT_EQ(candles->symbol(), QString("BTC-USD"));
 }
 } // namespace
 

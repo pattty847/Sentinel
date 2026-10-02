@@ -57,6 +57,9 @@ public:
     explicit LiveOrderBook(const std::string& product_id) : m_productId(product_id) {}
 
     void initialize(double min_price, double max_price, double tick_size);
+    // Empty and unconfigured (tick 0: updates are dropped) until the next initialize:
+    // a re-subscription's levels must not land on a book that stopped updating.
+    void clear();
     void applyUpdates(std::span<const BookLevelUpdate> updates,
                       std::chrono::system_clock::time_point exchange_timestamp,
                       std::vector<BookDelta>* outDeltas);

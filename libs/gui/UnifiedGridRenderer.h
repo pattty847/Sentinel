@@ -333,6 +333,18 @@ public:
     // bucket, price fitted. One viewport change; false while no live anchor is known.
     Q_INVOKABLE bool resetView();
     static constexpr double kFitPriceMargin = 0.06;
+    // POST /api/v1/viewport (validated by AgentApiCodec). The flags and the final
+    // window are resolved first and committed as ONE viewport change. Explicit price
+    // bounds (even equal to the current ones) turn auto price scale and follow-live
+    // off; autoScale:true fits (candles, else the live price); fit stands alone.
+    // Returns an empty string, or the error code (fit_unavailable, auto_scale_unavailable).
+    struct ViewportRequest {
+        std::optional<qint64> startMs, endMs;
+        std::optional<double> priceMin, priceMax;
+        std::optional<bool> followLive, autoScale;
+        QString fit;
+    };
+    QString applyViewportRequest(const ViewportRequest& request);
     QObject* candleBuffer() const;
     void setCandleBuffer(QObject* buffer);
 
@@ -521,6 +533,9 @@ private:
     // price's height in the view (0 = bottom), applied when the new price is known.
     struct PriceCarry { double spanRatio = 0.0, heightFrac = 0.0; };
     std::optional<PriceCarry> m_priceCarry;
+    // The carry onto price `now`, one viewport change; kept pending until the layer's
+    // price scale is the new symbol's. False (nothing applied) for an unusable price.
+    bool applyPriceCarry(double now);
     double m_gpuBookMid = 0.0;   // gpu mode: newest book-top mid of the active symbol
     double m_gpuLastTrade = 0.0; // gpu mode: newest trade price of the active symbol
     qint64 gpuInitialSpanMs(double widthPx) const;

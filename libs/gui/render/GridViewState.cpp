@@ -36,9 +36,12 @@ void GridViewState::setViewport(qint64 timeStart, qint64 timeEnd, double priceMi
         timeEnd = timeStart + timeLimit;
     }
     if (m_autoPriceScale && m_priceFit) {
-        // Auto price scale: the price range follows the new time range, in this change.
+        // Auto price scale: the price range follows the new time range, in this change
+        // (during a drag, the range on screen).
         double lo = priceMin, hi = priceMax;
-        if (m_priceFit(timeStart, timeEnd, lo, hi) && std::isfinite(lo) && std::isfinite(hi) && hi > lo) {
+        const qint64 shift = dragShiftMs(timeEnd - timeStart);
+        if (m_priceFit(timeStart + shift, timeEnd + shift, lo, hi) && std::isfinite(lo) && std::isfinite(hi) &&
+            hi > lo) {
             priceMin = lo;
             priceMax = hi;
         }
@@ -98,6 +101,16 @@ void GridViewState::setViewportAndMaxSpans(qint64 timeStart, qint64 timeEnd, dou
     m_maxTimeSpanMs = std::isfinite(maxTimeSpanMs) && maxTimeSpanMs > 0 ? maxTimeSpanMs : 0.0;
     m_maxPriceSpan = std::isfinite(maxPriceSpan) && maxPriceSpan > 0 ? maxPriceSpan : 0.0;
     setViewport(timeStart, timeEnd, priceMin, priceMax); // clamps to the new limits
+}
+
+qint64 GridViewState::dragShiftMs(qint64 spanMs) const {
+    if (!m_isDragging || m_viewportWidth <= 0 || m_panVisualOffset.x() == 0.0) return 0;
+    return static_cast<qint64>(std::floor(-m_panVisualOffset.x() * static_cast<double>(spanMs) / m_viewportWidth));
+}
+
+std::pair<qint64, qint64> GridViewState::displayedTimeWindow() const {
+    const qint64 shift = dragShiftMs(m_visibleTimeEnd_ms - m_visibleTimeStart_ms);
+    return {m_visibleTimeStart_ms + shift, m_visibleTimeEnd_ms + shift};
 }
 
 void GridViewState::setAutoPriceScale(bool enabled) {
@@ -232,6 +245,10 @@ void GridViewState::handlePanMove(const QPointF& position) {
     m_lastMousePos = position;
     
     emit panVisualOffsetChanged();
+    // Auto price scale: the price follows the candles the drag reveals (TradingView),
+    // a viewport change only when the fit for the displayed window changed.
+    if (m_autoPriceScale && m_priceFit && m_timeWindowValid && delta.x() != 0.0)
+        setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
 }
 
 void GridViewState::handlePanEnd(bool applyViewport) {
@@ -239,6 +256,9 @@ void GridViewState::handlePanEnd(bool applyViewport) {
 
     m_isDragging = false;
     if (!applyViewport) {
+        // A cancelled drag: the time stays, so the price fits the committed window again.
+        if (m_autoPriceScale && m_priceFit && m_timeWindowValid)
+            setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
         return;
     }
     const double threshold = 1.0;

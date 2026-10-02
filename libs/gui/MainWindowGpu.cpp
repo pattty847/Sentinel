@@ -1527,33 +1527,19 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
             out.status = 503; out.code = "viewport_unavailable"; out.message = "Chart viewport is not ready";
             return out;
         }
-        if (!body.fit.isEmpty()) {
-            // The axis double-click actions, one viewport change each: price = auto price
-            // scale on and fitted, default = the time axis's reset to the default view.
-            const bool time = body.fit != "price", price = body.fit != "time";
-            if (!(body.fit == "default" ? renderer->resetView() : renderer->fitView(time, price))) {
-                out.status = 409; out.code = "fit_unavailable";
-                out.message = "Auto-fit needs the gpu renderer and known data (live anchor or price)";
-                return out;
-            }
-            out.data["fit"] = body.fit;
+        const QString error = renderer->applyViewportRequest(
+            {body.startMs, body.endMs, body.priceMin, body.priceMax, body.followLive, body.autoScale, body.fit});
+        if (error == "fit_unavailable") {
+            out.status = 409; out.code = "fit_unavailable";
+            out.message = "Auto-fit needs the gpu renderer and known data (live anchor or price)";
+            return out;
         }
-        if (body.autoScale) {
-            // The "A" toggle. Applied before the bounds: on, time bounds land fitted.
-            if (*body.autoScale && !renderer->gpuHeatmapActive()) {
-                out.status = 409; out.code = "auto_scale_unavailable";
-                out.message = "The auto price scale needs the gpu renderer";
-                return out;
-            }
-            if (*body.autoScale && body.startMs) renderer->getViewState()->setAutoPriceScale(true);
-            else renderer->setAutoPriceScale(*body.autoScale); // on: fits now (one viewport change)
+        if (error == "auto_scale_unavailable") {
+            out.status = 409; out.code = "auto_scale_unavailable";
+            out.message = "The auto price scale needs the gpu renderer";
+            return out;
         }
-        if (body.startMs || body.priceMin) renderer->enableAutoScroll(false);
-        if (body.startMs || body.priceMin) {
-            renderer->setViewport(body.startMs.value_or(*current.startMs), body.endMs.value_or(*current.endMs),
-                                  body.priceMin.value_or(*current.priceMin), body.priceMax.value_or(*current.priceMax));
-        }
-        if (!body.startMs && body.followLive) renderer->enableAutoScroll(*body.followLive);
+        if (!body.fit.isEmpty()) out.data["fit"] = body.fit;
         const auto after = agentApiViewportSnapshot();
         out.viewportVersion = after.viewportVersion.value_or(0);
         out.data["viewportVersion"] = QString::number(out.viewportVersion);

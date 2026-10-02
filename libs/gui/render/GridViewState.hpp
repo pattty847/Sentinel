@@ -4,6 +4,7 @@
 #include <QMatrix4x4>
 #include <QElapsedTimer>
 #include <functional>
+#include <utility>
 
 class GridViewState : public QObject {
     Q_OBJECT
@@ -51,6 +52,10 @@ public:
     using PriceFit = std::function<bool(qint64 timeStart, qint64 timeEnd, double& priceMin, double& priceMax)>;
     void setPriceFit(PriceFit fit) { m_priceFit = std::move(fit); }
     bool autoPriceScale() const { return m_autoPriceScale; }
+    // The time window on screen: the committed one shifted by an active drag's visual
+    // offset (a drag commits only at release). The auto price fit and its candle
+    // checks use it, so newly revealed candles fit during the drag.
+    std::pair<qint64, qint64> displayedTimeWindow() const;
     // Does not touch the viewport (the caller refits through setViewport).
     void setAutoPriceScale(bool enabled);
     QMatrix4x4 calculateViewportTransform(const QRectF& itemBounds) const;
@@ -83,6 +88,8 @@ signals:
     void priceInteracted();
 
 private:
+    // A drag's time shift for a window of spanMs (0 when not dragging).
+    qint64 dragShiftMs(qint64 spanMs) const;
     // One zoom step of a span (multiplier > 1 zooms in) inside the limits: a
     // zoom-out never narrows and a zoom-in never widens the current span.
     int64_t zoomedTimeSpan(int64_t current, double zoomMultiplier) const;

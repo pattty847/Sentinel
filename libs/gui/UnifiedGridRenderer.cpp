@@ -449,8 +449,10 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
               << " symbol=" << normalized);
   // Auto price scale off: carry the zoom as a fraction of the price, with the current
   // price at the same height, onto the new symbol's first price (seedGpuViewport).
-  m_priceCarry.reset();
-  if (m_gpuHeatmap && m_gpuPriceKnown && m_viewState && m_viewState->isTimeWindowValid() &&
+  // A symbol that never got its own price (m_gpuReseedPrice) still shows an earlier
+  // symbol's bounds: its pending carry is kept, not recomputed against them.
+  if (!m_gpuHeatmap || !m_viewState || m_viewState->autoPriceScale() || !m_gpuReseedPrice) m_priceCarry.reset();
+  if (m_gpuHeatmap && m_gpuPriceKnown && !m_gpuReseedPrice && m_viewState && m_viewState->isTimeWindowValid() &&
       !m_viewState->autoPriceScale()) {
     double now = gpuLivePrice();
     if (!(now > 0) && m_candleBuffer) {
@@ -463,7 +465,9 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
         if (std::isfinite(it->close) && it->close > 0) now = it->close;
     }
     const double lo = m_viewState->getMinPrice(), span = m_viewState->getMaxPrice() - lo;
-    if (now > 0 && span > 0 && std::isfinite(now)) m_priceCarry = PriceCarry{span / now, (now - lo) / span};
+    const PriceCarry carry{span / now, (now - lo) / span};
+    if (now > 0 && span > 0 && std::isfinite(carry.spanRatio) && carry.spanRatio > 0 && std::isfinite(carry.heightFrac))
+      m_priceCarry = carry;
   }
   m_activeSymbol = normalized;
   m_gpuBookMid = m_gpuLastTrade = 0.0;
@@ -471,8 +475,10 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
   // gpu mode: the controller serial switches the heatmap (the node holds the old
   // picture until the new spans are ready); clearData() resets only the legacy
   // stream and the trade overlays. The next book top centres the new price.
-  if (m_gpuLayer) m_gpuLayer->setSymbol(normalized.toStdString());
+  // Reseed first: the layer's limitsChanged (setSymbol) must not apply a pending carry
+  // before the new symbol has a price of its own.
   if (m_gpuHeatmap) m_gpuReseedPrice = true;
+  if (m_gpuLayer) m_gpuLayer->setSymbol(normalized.toStdString());
   clearData();
   refitAutoPrice(); // auto price scale on: the new symbol's candles when already held
   if (m_dataProcessor) {
@@ -1074,22 +1080,36 @@ void UnifiedGridRenderer::seedGpuViewport(double bestBid, double bestAsk) {
   const double full = recording_view::kFinestNativeTick * recording_view::kRows;
   const double span = pct > 0 && pct < 100 ? full * pct / 100.0 : full;
   const double mid = (bestBid + bestAsk) * 0.5;
-  double lo = mid - span * 0.5, hi = mid + span * 0.5;
-  if (m_priceCarry && timeValid && m_gpuReseedPrice) {
-    // A symbol switch with auto price scale off: the same span / price, the current
-    // price at the same height as before.
-    const double carried = m_priceCarry->spanRatio * mid;
-    lo = mid - m_priceCarry->heightFrac * carried;
-    hi = lo + carried;
-  }
-  m_priceCarry.reset();
+  const double lo = mid - span * 0.5, hi = mid + span * 0.5;
+  const bool carry = m_priceCarry && timeValid && m_gpuReseedPrice;
+  if (!carry) m_priceCarry.reset();
   m_gpuPriceKnown = true;
   m_gpuReseedPrice = false;
   sLog_Render("GPU heatmap viewport seeded from the book top: mid=" << mid << " time=[" << start << ".." << end
-              << "] price=[" << lo << ".." << hi << "] autoPriceScale=" << autoPriceScale());
-  setGpuViewportSelf(start, end, lo, hi); // auto price scale on: the visible candles win
+              << "] carry=" << carry << " autoPriceScale=" << autoPriceScale());
+  // A symbol switch with auto price scale off: the carried zoom; else the default band
+  // (auto price scale on: the visible candles win inside setViewport).
+  if (!carry || !applyPriceCarry(mid)) setGpuViewportSelf(start, end, lo, hi);
   syncGpuView(); // also when the viewport did not change (priceKnown flips)
   update();
+}
+
+bool UnifiedGridRenderer::applyPriceCarry(double now) {
+  if (!m_priceCarry || !m_viewState || !(now > 0) || !std::isfinite(now)) return false;
+  const double span = m_priceCarry->spanRatio * now;
+  const double lo = now - m_priceCarry->heightFrac * span, hi = lo + span;
+  if (!std::isfinite(span) || !(span > 0) || !std::isfinite(lo) || !std::isfinite(hi) || !(hi > lo)) {
+    m_priceCarry.reset();
+    return false;
+  }
+  // Consumed once the layer's price scale (and so its limits) is the new symbol's;
+  // before that the limits are unknown (no clamp) and the carry is applied again
+  // from the then current price when they arrive (limitsChanged).
+  const bool confirmed = m_gpuLayer && m_gpuLayer->priceScaleCurrent();
+  sLog_Render("price carry applied: now=" << now << " price=[" << lo << ".." << hi << "] confirmed=" << confirmed);
+  if (confirmed) m_priceCarry.reset();
+  setGpuViewportSelf(m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd(), lo, hi);
+  return true;
 }
 
 qint64 UnifiedGridRenderer::gpuLiveEndMs(qint64 spanMs) const {
@@ -1174,9 +1194,10 @@ void UnifiedGridRenderer::setCandleBuffer(QObject* buffer) {
                                     return;
                                   const int64_t tf = std::max<int64_t>(1, m_currentTimeframe_ms);
                                   if (timeframeSec != std::max<int64_t>(1, (tf + 500) / 1000)) return;
-                                  const qint64 viewStart = recording::floorDiv(m_viewState->getVisibleTimeStart(), tf) * tf;
-                                  if (std::max(dirtyEnd, dirtyStart + tf) <= viewStart ||
-                                      dirtyStart >= m_viewState->getVisibleTimeEnd())
+                                  // The window on screen (a drag commits only at release).
+                                  const auto [shownStart, shownEnd] = m_viewState->displayedTimeWindow();
+                                  const qint64 viewStart = recording::floorDiv(shownStart, tf) * tf;
+                                  if (std::max(dirtyEnd, dirtyStart + tf) <= viewStart || dirtyStart >= shownEnd)
                                     return;
                                   refitAutoPrice();
                                 });
@@ -1326,7 +1347,6 @@ bool UnifiedGridRenderer::fitView(bool time, bool price) {
                 << " price=" << price);
     return false;
   }
-  if (price) m_viewState->setAutoPriceScale(true); // a price fit is the auto price scale
   qint64 start = m_viewState->getVisibleTimeStart(), end = m_viewState->getVisibleTimeEnd();
   double lo = m_viewState->getMinPrice(), hi = m_viewState->getMaxPrice();
   bool any = false;
@@ -1336,22 +1356,89 @@ bool UnifiedGridRenderer::fitView(bool time, bool price) {
       any = true;
     }
   }
+  bool priceFitted = false;
   if (price) {
     // Candles, else the live price (setViewport's auto fit takes the candles first).
     if (const auto window = gpuFitPriceWindow(start, end, false)) {
       std::tie(lo, hi) = *window;
-      m_gpuPriceKnown = true;
-      m_gpuReseedPrice = false;
-      any = true;
+      priceFitted = any = true;
     }
   }
   sLog_Render("view fit time=" << time << " price=" << price << " applied=" << any << " time=[" << start << ".."
               << end << "] price=[" << lo << ".." << hi << "]");
-  if (!any) return false;
+  if (!any) return false; // nothing changes (a failed fit leaves the auto price scale as it was)
+  if (priceFitted) {
+    m_gpuPriceKnown = true;
+    m_gpuReseedPrice = false;
+    m_viewState->setAutoPriceScale(true); // a price fit is the auto price scale
+  }
   m_viewState->setViewport(start, end, lo, hi); // one change; follow-live is kept
   syncGpuView();
   update();
   return true;
+}
+
+QString UnifiedGridRenderer::applyViewportRequest(const ViewportRequest& request) {
+  if (!m_viewState) return QStringLiteral("viewport_unavailable");
+  if (!request.fit.isEmpty()) {
+    const bool time = request.fit != "price", price = request.fit != "time";
+    const bool ok = request.fit == "default" ? resetView() : fitView(time, price);
+    return ok ? QString() : QStringLiteral("fit_unavailable");
+  }
+  if (request.autoScale.value_or(false) && !m_gpuHeatmap) return QStringLiteral("auto_scale_unavailable");
+  const bool explicitPrice = request.priceMin && request.priceMax;
+  const bool explicitTime = request.startMs && request.endMs;
+  const qint64 start0 = m_viewState->getVisibleTimeStart(), end0 = m_viewState->getVisibleTimeEnd();
+  if (!m_gpuHeatmap) {
+    // Legacy: its follow mode and price centring live in enableAutoScroll.
+    if (explicitTime || explicitPrice) {
+      enableAutoScroll(false);
+      setViewport(request.startMs.value_or(start0), request.endMs.value_or(end0),
+                  request.priceMin.value_or(m_viewState->getMinPrice()),
+                  request.priceMax.value_or(m_viewState->getMaxPrice()));
+    } else if (request.followLive) {
+      enableAutoScroll(*request.followLive);
+    }
+    return {};
+  }
+  // gpu: the flags first (no viewport change of their own), then one commit.
+  if (explicitPrice) {
+    m_viewState->setAutoPriceScale(false); // explicit bounds are the user's price, equal or not
+    m_priceCarry.reset();
+  } else if (request.autoScale) {
+    m_viewState->setAutoPriceScale(*request.autoScale);
+  }
+  const bool follow = (explicitTime || explicitPrice) ? false : request.followLive.value_or(autoScrollEnabled());
+  m_viewState->enableAutoScroll(follow);
+  qint64 start = request.startMs.value_or(start0), end = request.endMs.value_or(end0);
+  if (follow && !explicitTime) {
+    // Follow-live on: the live edge one padding inside, span kept (returnGpuToLive).
+    const qint64 span = end - start;
+    if (const qint64 liveEnd = gpuLiveEndMs(span); liveEnd > 0) {
+      end = liveEnd;
+      start = liveEnd - span;
+    }
+  }
+  double lo = request.priceMin.value_or(m_viewState->getMinPrice());
+  double hi = request.priceMax.value_or(m_viewState->getMaxPrice());
+  if (explicitPrice) {
+    m_gpuPriceKnown = true;
+    m_gpuReseedPrice = false;
+  } else if (request.autoScale.value_or(false)) {
+    // On: the price-axis double-click (candles; with none, the live price centred).
+    if (const auto window = gpuFitPriceWindow(start, end, false)) {
+      std::tie(lo, hi) = *window;
+      m_gpuPriceKnown = true;
+      m_gpuReseedPrice = false;
+    }
+  }
+  sLog_Render("viewport request: time=[" << start << ".." << end << "] price=[" << lo << ".." << hi
+              << "] follow=" << follow << " autoPriceScale=" << m_viewState->autoPriceScale());
+  m_viewState->setViewport(start, end, lo, hi); // one change (the auto fit applies inside)
+  syncGpuView();
+  if (follow) emit liveRenderTick();
+  update();
+  return {};
 }
 
 bool UnifiedGridRenderer::resetView() {

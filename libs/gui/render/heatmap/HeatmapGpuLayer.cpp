@@ -216,15 +216,19 @@ double HeatmapGpuLayer::maxTimeSpanMs() const {
     return active_ ? heatmap::maxTimeSpanMs(widthPx_ * dpr_, tfMs_) : 0.0;
 }
 
+bool HeatmapGpuLayer::priceScaleCurrent() const {
+    return !snapshot_ || (snapshot_->symbol == symbol_ && snapshot_->priceScaleKnown);
+}
+
 double HeatmapGpuLayer::maxPriceSpan() const {
-    if (!active_ || !manualMode_ || !isPresetUnits(manualUnits_)) return 0.0;
+    if (!active_ || !manualMode_ || !isPresetUnits(manualUnits_) || !priceScaleCurrent()) return 0.0;
     return maxManualPriceSpan(heightPx_ * dpr_, fromUnits(manualUnits_, priceScale()));
 }
 
 double HeatmapGpuLayer::minTimeSpanMs() const { return active_ && tfMs_ > 0 ? double(kMinZoomColumns) * double(tfMs_) : 0.0; }
 
 double HeatmapGpuLayer::minPriceSpan() const {
-    if (!active_) return 0.0;
+    if (!active_ || !priceScaleCurrent()) return 0.0;
     const int64_t units = manualMode_ && isPresetUnits(manualUnits_) ? manualUnits_ : (offered_.empty() ? 0 : offered_.front());
     return units > 0 ? kMinZoomRows * fromUnits(units, priceScale()) : 0.0;
 }

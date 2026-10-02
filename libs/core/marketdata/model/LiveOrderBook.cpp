@@ -34,6 +34,17 @@ void LiveOrderBook::initialize(double min_price, double max_price, double tick_s
     m_totalAskVolume = 0.0;
 }
 
+void LiveOrderBook::clear() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_bids.clear();
+    m_asks.clear();
+    m_bidPresent.clear();
+    m_askPresent.clear();
+    m_min_price = m_max_price = m_tick_size = 0.0;
+    m_nonZeroBidCount = m_nonZeroAskCount = 0;
+    m_totalBidVolume = m_totalAskVolume = 0.0;
+}
+
 void LiveOrderBook::applyUpdates(std::span<const BookLevelUpdate> updates,
                                  std::chrono::system_clock::time_point exchange_timestamp,
                                  std::vector<BookDelta>* outDeltas) {

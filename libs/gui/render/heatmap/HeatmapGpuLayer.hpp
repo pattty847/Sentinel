@@ -71,6 +71,10 @@ public:
     // per physical pixel; Manual: one row per physical pixel.
     double maxTimeSpanMs() const;
     double maxPriceSpan() const;
+    // The price scale is the active symbol's: false while the previous symbol's
+    // snapshot is still the newest after a switch. The price-span limits are unknown
+    // (0) until then: another symbol's scale must not size them.
+    bool priceScaleCurrent() const;
     // Zoom-in floors: kMinZoomColumns columns of the timeframe; kMinZoomRows rows of
     // the Manual tick, or of the finest offered preset in Auto (0 = none yet).
     static constexpr int kMinZoomColumns = 4, kMinZoomRows = 4;

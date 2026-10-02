@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace lab {
 inline constexpr const char *kSymbol = "BTC-USD";
@@ -41,6 +42,8 @@ public:
     // the data path is deleted (its queued delivery must never reach a dead client);
     // and the connection callbacks that ran after the teardown had started.
     static void queueConnectedOnShutdownForTest(bool queue);
+    // Tests: the local recording's symbols (default: kSymbol). Set before configure.
+    static void setLocalSymbolsForTest(std::vector<std::string> symbols);
     static int lateConnectionCallbacksForTest();
     static std::optional<Server> server();
     enum class Connection { Local, Connecting, Connected, Disconnected };

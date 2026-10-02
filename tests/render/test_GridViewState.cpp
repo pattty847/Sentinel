@@ -258,6 +258,22 @@ TEST(GridViewStateAutoPrice, APriceZoomTurnsItOffBeforeTheViewportMoves) {
     EXPECT_EQ(v.state.getPanVisualOffset(), QPointF(0, 50));
     v.state.handlePanEnd(true);
 }
+TEST(GridViewStateAutoPrice, TheFitFollowsTheDisplayedWindowDuringADrag) {
+    AutoView v;
+    v.state.setViewport(0, 600 * kMinute, 0, 1); // fitted: 0..100
+    Counter changed(v.state);
+    v.state.handlePanStart(QPointF(500, 250));
+    v.state.handlePanMove(QPointF(400, 250)); // 100 px of 1000: 60 minutes later on screen
+    EXPECT_EQ(v.state.displayedTimeWindow(), std::make_pair(qint64(60 * kMinute), qint64(660 * kMinute)));
+    EXPECT_EQ(v.state.getVisibleTimeStart(), 0) << "committed only at release";
+    EXPECT_DOUBLE_EQ(v.state.getMinPrice(), 3.6) << "fitted to the window on screen, before release";
+    EXPECT_EQ(changed.count(), 1);
+    v.state.handlePanMove(QPointF(400, 300)); // vertical only: no refit
+    EXPECT_EQ(changed.count(), 1);
+    v.state.handlePanEnd(false); // cancelled: the committed window's fit again
+    EXPECT_DOUBLE_EQ(v.state.getMinPrice(), 0);
+    EXPECT_EQ(v.state.displayedTimeWindow(), std::make_pair(qint64(0), qint64(600 * kMinute)));
+}
 } // namespace
 
 int main(int argc, char **argv) {
