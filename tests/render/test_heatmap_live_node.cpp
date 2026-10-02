@@ -311,6 +311,23 @@ TEST_F(LiveNode, DrawClipCoversEachBucketOnceAndMatchesTheComposedOracle) {
             frame().capture.reset();
             const auto segments = layer0(stats());
             const int64_t liveEnd = ceilTo(open + minute, tf);
+            // S7a: the pure clip consumed by labels equals the actual node's
+            // pieces, including its timeframe-rounded live end.
+            std::vector<DrawSpan> clipSpans;
+            for (const auto& span : frame().spans->spans) {
+                int64_t complete = INT64_MAX;
+                for (const auto& source : span.sources) if (source.build)
+                    complete = std::min(complete, source.build->completeEndMs);
+                if (complete != INT64_MAX) clipSpans.push_back({uint64_t(span.id.tile), span.id.tile, tf, complete});
+            }
+            const std::vector<DrawLive> clipLive{{0, tf, L, liveEnd}};
+            for (const auto& piece : drawPieces(clipSpans, clipLive, tf)) {
+                if (piece.hiMs <= piece.loMs) continue;
+                EXPECT_EQ(std::count_if(segments.begin(), segments.end(), [&](const auto& s) {
+                    return s.kind == (piece.live ? Segment::Live : Segment::Span) &&
+                           s.loMs == piece.loMs && s.hiMs == piece.hiMs;
+                }), 1);
+            }
             const auto notOnce = bucketsNotOnce(segments, tf, viewLo, liveEnd);
             EXPECT_TRUE(notOnce.empty()) << notOnce.size() << " buckets, first: " << (notOnce.empty() ? "" : notOnce[0]);
             // The live bin starts at max(L, E); a gap [E, L) is loading.

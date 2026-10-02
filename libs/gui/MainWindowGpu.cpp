@@ -546,10 +546,7 @@ void MainWindowGPU::setupGuiApiServer() {
                                                         auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
                                                         auto* processor = renderer ? renderer->getDataProcessor() : nullptr;
                                                         if (renderer && renderer->gpuHeatmapActive()) {
-                                                            heatmap_window::WallsSnapshot unavailable;
-                                                            unavailable.status = 409; // labels/walls are dark until S7
-                                                            unavailable.gpuRenderer = true;
-                                                            complete(std::move(unavailable));
+                                                            renderer->gpuHeatmapLayer()->scanWalls(query, std::move(complete));
                                                             return;
                                                         }
                                                         if (!processor) {

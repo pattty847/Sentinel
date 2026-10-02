@@ -141,6 +141,30 @@ TEST(AgentApiWalls, QueryLimitsAndJson) {
     EXPECT_EQ(json.value("data").toObject().value("walls").toArray().first().toObject().value("side").toString(), "ask");
     EXPECT_EQ(json.value("meta").toObject().value("coverage").toString(), "partial");
 }
+TEST(AgentApiWalls, GpuPeriodTickAndPersistenceMetadata) {
+    auto parse = [](QString query) { return validateQuery({"GET", "/api/v1/heatmap/walls", query}, "BTC-USD"); };
+    const auto q = parse("from_ms=100&to_ms=200&tick=5");
+    EXPECT_EQ(q.status, 200); EXPECT_EQ(q.walls.startMs, 100); EXPECT_EQ(q.walls.endMs, 200); EXPECT_EQ(q.walls.tick, 5);
+    for (const auto* bad : {"from_ms=100", "to_ms=200", "from_ms=200&to_ms=100", "from_ms=-1&to_ms=200",
+                           "from_ms=1.5&to_ms=200", "tick=0", "tick=-1", "tick=nan", "tick=inf"})
+        EXPECT_EQ(parse(bad).status, 422) << bad;
+    EXPECT_EQ(parse("from_ms=100&startMs=100&to_ms=200").status, 400);
+    WallsSnapshot snapshot;
+    snapshot.data.gpuRenderer = true; snapshot.data.bandTick = 5;
+    snapshot.data.rangeStartMs = 100; snapshot.data.rangeEndMs = 200;
+    snapshot.data.rangePriceMin = 90; snapshot.data.rangePriceMax = 110;
+    snapshot.data.unknownRows = true;
+    snapshot.data.walls.push_back({100, 95, 100, false, 2, 195, true, 1.5, 100, 150, 2});
+    const auto data = wallsJson(snapshot)["data"].toObject();
+    EXPECT_EQ(data["renderer"], "gpu"); EXPECT_EQ(data["tick"], 5);
+    EXPECT_EQ(data["range"].toObject()["from_ms"].toDouble(), 100);
+    EXPECT_TRUE(data["unknownRows"].toBool());
+    const auto wall = data["walls"].toArray().first().toObject();
+    EXPECT_EQ(wall["rank"], 1); EXPECT_EQ(wall["columns"], 2); EXPECT_EQ(wall["meanQty"], 1.5);
+    EXPECT_TRUE(wall["forming"].toBool());
+    snapshot.data.gpuRenderer = false;
+    EXPECT_FALSE(wallsJson(snapshot)["data"].toObject().contains("renderer"));
+}
 TEST(AgentApiCodec, EnvelopeAndUnknowns) {
     StateSnapshot s;
     s.meta = {"session", "BTC-USD", 7, 1790596800000, true, "unknown", false};

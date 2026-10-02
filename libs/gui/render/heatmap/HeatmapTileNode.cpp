@@ -1100,51 +1100,17 @@ void HeatmapTileNode::trimLiveSets() {
 // pass), including a gap [E, L).
 void HeatmapTileNode::layout(const std::vector<Draw> &draws) {
     pieces_.clear();
-    struct Live { int64_t tfMs = 0, fromMs = 0, endMs = 0; Bin *bin = nullptr; };
-    std::array<Live, 4> lives{};
-    size_t liveCount = 0;
-    auto spanEnd = [](const Bin &bin, int64_t ts, int64_t te) { return std::clamp(bin.completeEndMs, ts, te); };
-    for (const auto &d : draws) {
-        if (!d.live || liveCount == lives.size()) continue;
-        Bin *bin = findBin(d.bin);
+    clipSpans_.clear();
+    clipLive_.clear();
+    for (const auto& d : draws) {
+        const auto* bin = findBin(d.bin);
         if (!bin) continue;
-        const int64_t tf = d.tfMs, L = bin->liveStartMs, end = bin->liveEndMs;
-        int64_t from = end;
-        const int64_t first = tiles::tileOfBucket(recording::floorDiv(L, tf));
-        for (int64_t t = first; tiles::tileStartMs(t, tf) < end && t < first + 1024; ++t) {
-            const int64_t ts = tiles::tileStartMs(t, tf), te = tiles::tileEndMs(t, tf);
-            const Bin *span = nullptr;
-            for (const auto &o : draws)
-                if (!o.live && o.tfMs == tf && o.tile == t) { span = findBin(o.bin); break; }
-            const int64_t e = span ? spanEnd(*span, ts, te) : ts;
-            if (e < te) {
-                from = std::max(L, e);
-                break;
-            }
-        }
-        if (from >= end) continue; // history covers the whole live window
-        // A later span complete past the live end: the live bin stops at it.
-        int64_t stop = end;
-        for (const auto &o : draws) {
-            if (o.live || o.tfMs != tf) continue;
-            const int64_t ts = tiles::tileStartMs(o.tile, tf), te = tiles::tileEndMs(o.tile, tf);
-            if (const Bin *span = findBin(o.bin); span && ts >= from && spanEnd(*span, ts, te) > end)
-                stop = std::min(stop, ts);
-        }
-        lives[liveCount++] = {tf, from, stop, bin};
+        if (d.live) clipLive_.push_back({d.bin, d.tfMs, bin->liveStartMs, bin->liveEndMs});
+        else clipSpans_.push_back({d.bin, d.tile, d.tfMs, bin->completeEndMs});
     }
-    for (size_t i = 0; i < liveCount; ++i)
-        if (lives[i].endMs > lives[i].fromMs) pieces_.push_back({lives[i].bin, lives[i].fromMs, lives[i].endMs, true});
-    for (const auto &d : draws) {
-        if (d.live) continue;
-        Bin *bin = findBin(d.bin);
-        if (!bin) continue;
-        const int64_t ts = tiles::tileStartMs(d.tile, d.tfMs), te = tiles::tileEndMs(d.tile, d.tfMs);
-        int64_t hi = spanEnd(*bin, ts, te);
-        for (size_t i = 0; i < liveCount; ++i)
-            if (lives[i].tfMs == d.tfMs && ts < lives[i].endMs) hi = std::min(hi, std::max(ts, lives[i].fromMs));
-        pieces_.push_back({bin, ts, hi, false});
-    }
+    drawPieces(clipSpans_, clipLive_, 0, [&](DrawPiece p) {
+        pieces_.push_back({findBin(p.token), p.loMs, p.hiMs, p.live});
+    });
 }
 
 // The first frame that draws a live version: latency telemetry (heatmap.live).

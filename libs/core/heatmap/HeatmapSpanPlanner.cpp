@@ -10,13 +10,14 @@ const char *spanTierName(SpanTier tier) {
     switch (tier) {
     case SpanTier::Visible: return "visible";
     case SpanTier::Fallback: return "fallback";
+    case SpanTier::Label: return "label";
     case SpanTier::Prefetch: return "prefetch";
     case SpanTier::RecentTf: return "recent-tf";
     }
     return "?";
 }
 int SpanRank::fetchPriority() const {
-    return (4 - int(tier)) * 1'000'000 - int(std::clamp<int64_t>(distance, 0, 999'999));
+    return (5 - int(tier)) * 1'000'000 - int(std::clamp<int64_t>(distance, 0, 999'999));
 }
 
 int64_t prefetchTiles(double timeLoMs, double timeHiMs, int64_t tfMs) {

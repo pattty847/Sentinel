@@ -20,6 +20,15 @@ struct ComposeOptions {
     // it are composed and proven scanned (B1 tiles compose a tile span out of the
     // chunks that overlap it). Unset: the union of the inputs.
     std::optional<int64_t> startMs, endMs;
+    // Physical price window [lo, end). Retain the native rows intersecting it,
+    // including coverage of zero rows and empty/incompatible native grids.
+    // Binning cells wholly inside this window is identical to an unclipped
+    // compose. Tick independent: several display ticks can reuse the result.
+    struct PriceClip {
+        double lo = 0, end = 0;
+        bool operator==(const PriceClip &) const = default;
+    };
+    std::optional<PriceClip> price;
     // Skip validate() of inputs and output. Only for inputs that were validated
     // once already (ChunkStore validates every chunk it loads).
     bool trustedInputs = false;

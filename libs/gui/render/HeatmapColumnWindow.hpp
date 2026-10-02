@@ -83,6 +83,7 @@ struct WallQuery {
     std::optional<double> priceMin, priceMax;
     double minQty = 0.0;
     int limit = 20;
+    std::optional<double> tick; // GPU only; unset uses the drawn tick
 };
 
 // One price cell and side over the scanned time range: a wall is a level, not a
@@ -98,14 +99,19 @@ struct Wall {
     int columns = 0;             // recorded columns where the cell held this side
 };
 
+enum class WallError { None, BadTick, InvalidRange, ScanLimit };
+
 struct WallsSnapshot {
     int status = 200;
-    bool gpuRenderer = false; // 409: the chart draws the GPU heatmap (walls return in S7)
+    bool gpuRenderer = false;
     int64_t loadedStartMs = 0, loadedEndMs = 0;
     double bandTick = 0;
     int recordedColumns = 0, missingColumns = 0;
     bool unknownRows = false;
     std::vector<Wall> walls;
+    int64_t rangeStartMs = 0, rangeEndMs = 0;
+    double rangePriceMin = 0, rangePriceMax = 0;
+    WallError error = WallError::None;
 };
 
 // Signed heatmap intensity magnitude: bids are v, asks are v - 0x8000 (u16),

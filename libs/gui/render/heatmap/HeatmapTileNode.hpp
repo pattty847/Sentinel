@@ -1,4 +1,5 @@
 #pragma once
+#include "heatmap/DrawPieces.hpp"
 // Production heatmap scene-graph node (slice S5c, docs/research/2026-09-s5-plan.md).
 // Render thread only. It consumes the controller's immutable, tick-free SpanSet
 // (HeatmapSourceController) and owns every piece of GPU content it draws:
@@ -279,6 +280,8 @@ private:
     bool uploadPending_ = false;   // upload(): wanted sources left for later frames
     std::vector<std::pair<int64_t, int64_t>> covered_;
     std::vector<uint64_t> drawnScratch_;
+    std::vector<DrawSpan> clipSpans_;
+    std::vector<DrawLive> clipLive_;
     std::vector<Piece> pieces_;                                // reused per picture
     std::vector<HeatmapTileStats::Segment> segmentScratch_;    // reused per frame
     QString lastError_;

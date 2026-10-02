@@ -84,6 +84,7 @@ SpanSourceBuildPtr buildSpanSource(const SpanSourceInput &input,
                                    std::shared_ptr<std::atomic<int64_t>> liveBytes = {});
 
 class HeatmapSourceController;
+class HeatmapCellQuery;
 // A chunk an owner references in the CPU ledger. `measured`: the store holds
 // the body and `bytes` is its size; otherwise `bytes` is a hint.
 struct ChunkBytes {
@@ -161,7 +162,13 @@ public:
     // Same bounded build pool and input-chunk ledger as span jobs. One live job
     // per chart may run; the controller coalesces further updates, latest wins.
     bool requestLive(std::vector<ChunkBytes> chunks, size_t reserveBytes, QObject *context,
-                     std::function<void()> work, std::function<void(QString)> completion);
+                     std::function<void()> work, std::function<void(QString)> completion, int priority = 1'000'000);
+    // Optional CPU queries never displace the nearest visible span or exceed
+    // the process ledger. Includes retained compositions and label results.
+    bool tryCommitQuery(const QObject *owner, std::vector<ChunkBytes> keys, size_t bytes);
+    void releaseQuery(const QObject *owner);
+    bool requestQuery(std::vector<ChunkBytes>, size_t reserveBytes, QObject *context,
+                      std::function<void()> work, std::function<void(QString)> completion);
     // Sizes of the last build of (span, source) at any generation; 0 unknown.
     struct Hint { size_t bytes = 0, uploadBytes = 0; };
     Hint hint(const SpanId &span, const std::string &source) const;
@@ -197,11 +204,11 @@ private:
     // A chart's commitment: the chunk keys it references (with their sizes) and
     // the reservation of builds it still has to request. atKeeper: nothing left
     // to shed; over the ceiling, that emits overCeiling().
-    void commitCpu(const HeatmapSourceController *self, std::vector<ChunkBytes> keys, size_t reservation,
+    void commitCpu(const void *self, std::vector<ChunkBytes> keys, size_t reservation,
                    bool atKeeper);
     void resizeLiveReservation(const HeatmapSourceController *self, size_t before, size_t after, bool atKeeper);
     // The ledger total if `self` committed `keys` and `reservation` instead.
-    size_t projectedCpuBytes(const HeatmapSourceController *self, const std::vector<ChunkBytes> &keys,
+    size_t projectedCpuBytes(const void *self, const std::vector<ChunkBytes> &keys,
                              size_t reservation) const;
 };
 
@@ -379,6 +386,7 @@ public:
     std::shared_ptr<const LiveSnapshot> latestLive() const;
     std::shared_ptr<const ResolutionSummary> latestResolution() const; // Auto: history + live
     std::shared_ptr<HeatmapCapacity> capacity() const { return capacity_; }
+    HeatmapCellQuery *cellQuery() const { return cellQuery_; } // owner-thread requests; latestLabels is thread-safe
 
     // Owner thread only; normally timer-driven, tests advance Options::nowMs.
     void pollLive();
@@ -425,6 +433,7 @@ private:
     ChunkStore &store_;
     ChunkFetcher &fetcher_;
     SpanSourceCache &cache_;
+    HeatmapCellQuery *cellQuery_ = nullptr;
     Options options_;
     ChunkFetcher::ChartId chart_;
     std::string symbol_;

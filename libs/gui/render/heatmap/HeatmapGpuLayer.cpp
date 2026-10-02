@@ -473,6 +473,23 @@ QJsonObject HeatmapGpuLayer::state() const {
 }
 
 // Refreshes the controller's stats for the next read (they belong to its thread).
+void HeatmapGpuLayer::scanWalls(const heatmap_window::WallQuery& query,
+    std::function<void(heatmap_window::WallsSnapshot)> completion) {
+    if (!controller_ || !snapshot_ || !priceKnown_ || snapshot_->tfMs != tfMs_ || snapshot_->symbol != symbol_) {
+        heatmap_window::WallsSnapshot out; out.status = 503; out.gpuRenderer = true;
+        completion(std::move(out));
+        return;
+    }
+    const auto drawn = tileStats_->drawnTickUnits.load();
+    WallScanRequest request{query, tfMs_, drawn > 0 ? drawn : tickUnits_, priceScale(),
+                            view_.timeLoMs, view_.timeHiMs, view_.priceLo, view_.priceHi};
+    QPointer<HeatmapGpuLayer> context(this);
+    QMetaObject::invokeMethod(controller_, [c = controller_, request, spans = snapshot_, live = live_, context,
+                                          completion = std::move(completion)]() mutable {
+        if (context) c->cellQuery()->scanWalls(request, std::move(spans), std::move(live), context, std::move(completion));
+    }, Qt::QueuedConnection);
+}
+
 void HeatmapGpuLayer::refreshControllerStats() const {
     if (!controller_) return;
     QMetaObject::invokeMethod(controller_, [c = controller_, stats = controllerStats_] {

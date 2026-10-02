@@ -165,29 +165,38 @@ ValidationResult validateQuery(const Request& request, const QString& activeSymb
             if (seen.contains(key)) return reject(400, "invalid_parameter", "Duplicate query parameter");
             seen.insert(key);
             if (key == "symbol") continue;
-            if (key == "startMs" || key == "endMs" || key == "limit") {
+            if (key == "startMs" || key == "endMs" || key == "from_ms" || key == "to_ms" || key == "limit") {
                 bool ok = false;
                 const qint64 value = item.second.toLongLong(&ok);
                 if (!ok || value < 0 || value > 9007199254740991LL || (key == "limit" && value == 0))
                     return reject(422, "invalid_parameter", "Time must be a nonnegative safe integer; limit must be positive");
-                if (key == "startMs") result.walls.startMs = value;
-                else if (key == "endMs") result.walls.endMs = value;
+                if (key == "startMs" || key == "from_ms") {
+                    if (result.walls.startMs) return reject(400, "invalid_parameter", "Duplicate range start");
+                    result.walls.startMs = value;
+                } else if (key == "endMs" || key == "to_ms") {
+                    if (result.walls.endMs) return reject(400, "invalid_parameter", "Duplicate range end");
+                    result.walls.endMs = value;
+                }
                 else {
                     if (value > 100) return reject(422, "invalid_limit", "limit exceeds 100");
                     result.walls.limit = static_cast<int>(value);
                 }
-            } else if (key == "priceMin" || key == "priceMax" || key == "minQty") {
+            } else if (key == "priceMin" || key == "priceMax" || key == "minQty" || key == "tick") {
                 bool ok = false;
                 const double value = item.second.toDouble(&ok);
                 if (!ok || !std::isfinite(value) || value < 0 || (key != "minQty" && value == 0))
                     return reject(422, "invalid_parameter", "Price must be finite and positive; minQty must be nonnegative");
                 if (key == "priceMin") result.walls.priceMin = value;
                 else if (key == "priceMax") result.walls.priceMax = value;
+                else if (key == "tick") result.walls.tick = value;
                 else result.walls.minQty = value;
             } else return reject(400, "invalid_parameter", "Unknown query parameter");
         }
         if (seen.contains("symbol") && query.queryItemValue("symbol") != activeSymbol)
             return reject(409, "symbol_mismatch", "Only the active symbol is available");
+        if ((seen.contains("from_ms") || seen.contains("to_ms")) &&
+            !(result.walls.startMs && result.walls.endMs))
+            return reject(422, "invalid_range", "from_ms and to_ms must specify a complete period");
         if (result.walls.startMs && result.walls.endMs && *result.walls.startMs >= *result.walls.endMs)
             return reject(422, "invalid_range", "startMs must precede endMs");
         if (result.walls.priceMin && result.walls.priceMax && *result.walls.priceMin >= *result.walls.priceMax)
@@ -552,17 +561,31 @@ QJsonObject tradesJson(const TradesSnapshot& s) {
 
 QJsonObject wallsJson(const WallsSnapshot& s) {
     QJsonArray rows;
-    for (const auto& w : s.data.walls) rows.append(QJsonObject{
+    for (const auto& w : s.data.walls) {
+        QJsonObject row{
         {"bucketStartMs", qint64(w.bucketStartMs)}, {"priceLow", w.priceLow},
         {"priceHigh", w.priceHigh}, {"side", w.ask ? "ask" : "bid"},
         {"qty", w.qty}, {"notional", w.notional}, {"forming", w.forming},
         {"meanQty", w.meanQty}, {"firstSeenMs", qint64(w.firstSeenMs)}, {"lastSeenMs", qint64(w.lastSeenMs)},
-        {"columns", qint64(w.columns)}});
-    return envelope(s.meta, {{"basis", "recording-twap-sum"},
+        {"columns", qint64(w.columns)}};
+        if (s.data.gpuRenderer) row.insert("rank", rows.size() + 1);
+        rows.append(row);
+    }
+    auto out = envelope(s.meta, {{"basis", "recording-twap-sum"},
         {"bandTick", s.data.bandTick > 0 ? QJsonValue(s.data.bandTick) : QJsonValue(QJsonValue::Null)},
         {"loadedRange", QJsonArray{qint64(s.data.loadedStartMs), qint64(s.data.loadedEndMs)}},
         {"recordedColumns", qint64(s.data.recordedColumns)}, {"missingColumns", qint64(s.data.missingColumns)},
         {"note", "Aggregated resting size per cell, not individual orders"}, {"walls", rows}});
+    if (s.data.gpuRenderer) {
+        auto data = out.value("data").toObject();
+        data.insert("renderer", "gpu");
+        data.insert("tick", s.data.bandTick);
+        data.insert("unknownRows", s.data.unknownRows);
+        data.insert("range", QJsonObject{{"from_ms", qint64(s.data.rangeStartMs)}, {"to_ms", qint64(s.data.rangeEndMs)},
+                                      {"priceMin", s.data.rangePriceMin}, {"priceMax", s.data.rangePriceMax}});
+        out.insert("data", data);
+    }
+    return out;
 }
 
 void TradeTape::append(TradeRow row) {

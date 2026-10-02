@@ -124,6 +124,64 @@ TEST(AgentApiInput, AnAbandonedDragIsReleasedAfterTheTimeout) {
     EXPECT_EQ(dispatcher.apply(&view, {0, 0, 600, 450}, c).status, 200);
     EXPECT_EQ(events.releases, 2);
 }
+TEST(AgentApiWallsRoute, GpuReturns200ValidatesPeriodAndKeepsSelectionEpoch409) {
+    AgentApi::StateSnapshot state; state.meta.symbol = "BTC-USD"; state.meta.selectionEpoch = 1;
+    bool changeSelection = false;
+    auto wallError = heatmap_window::WallError::None;
+    double expectedTick = 5;
+    int scans = 0;
+    QObject context;
+    GuiApiServer server(nullptr, nullptr, nullptr, [&] { return state; }, [] { return AgentApi::ViewportSnapshot{}; },
+        [](const auto&) { return std::optional<AgentApi::CandleSnapshot>{}; },
+        [](int) { return AgentApi::BookSnapshot{}; }, [](qint64, int) { return AgentApi::TradesSnapshot{}; },
+        [&](const heatmap_window::WallQuery& q, auto complete) {
+            ++scans;
+            EXPECT_EQ(q.startMs, 100); EXPECT_EQ(q.endMs, 200); EXPECT_EQ(q.tick, expectedTick);
+            QMetaObject::invokeMethod(&context, [&, complete = std::move(complete)] {
+                if (changeSelection) ++state.meta.selectionEpoch;
+                heatmap_window::WallsSnapshot result; result.gpuRenderer = true; result.bandTick = 5;
+                result.recordedColumns = 1; result.rangeStartMs = 100; result.rangeEndMs = 200;
+                result.error = wallError;
+                if (wallError != heatmap_window::WallError::None) result.status = 422;
+                complete(result);
+            }, Qt::QueuedConnection);
+        }, [](const QString&, const AgentApi::ControlBody&) { return AgentApi::ControlApply{}; },
+        [] { return std::pair<quint64, quint64>{0, 0}; }, [](quint64) {});
+    ASSERT_TRUE(server.start(0, "."));
+    auto get = [&](QByteArray query) {
+        QTcpSocket socket; QEventLoop loop; QTimer timeout; timeout.setSingleShot(true);
+        QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+        QObject::connect(&socket, &QTcpSocket::disconnected, &loop, &QEventLoop::quit);
+        QObject::connect(&socket, &QTcpSocket::connected, &socket, [&] {
+            socket.write("GET /api/v1/heatmap/walls?" + query + " HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        });
+        socket.connectToHost("127.0.0.1", server.port()); timeout.start(3000); loop.exec();
+        return socket.readAll();
+    };
+    const auto ok = get("from_ms=100&to_ms=200&tick=5");
+    EXPECT_TRUE(ok.startsWith("HTTP/1.1 200")) << ok.toStdString();
+    EXPECT_TRUE(ok.contains("\"renderer\":\"gpu\"")); EXPECT_EQ(scans, 1);
+    for (const auto* bad : {"from_ms=100", "from_ms=200&to_ms=100", "tick=0", "tick=nan"}) {
+        const auto rejected = get(bad);
+        EXPECT_TRUE(rejected.startsWith("HTTP/1.1 422")) << rejected.toStdString();
+    }
+    EXPECT_EQ(scans, 1);
+    wallError = heatmap_window::WallError::BadTick; expectedTick = 1.234;
+    const auto badTick = get("from_ms=100&to_ms=200&tick=1.234");
+    EXPECT_TRUE(badTick.startsWith("HTTP/1.1 422"));
+    EXPECT_TRUE(badTick.contains("bad_tick"));
+    EXPECT_FALSE(badTick.contains("scan_limit"));
+    wallError = heatmap_window::WallError::ScanLimit; expectedTick = 5;
+    const auto limited = get("from_ms=100&to_ms=200&tick=5");
+    EXPECT_TRUE(limited.startsWith("HTTP/1.1 422"));
+    EXPECT_TRUE(limited.contains("scan_limit"));
+    wallError = heatmap_window::WallError::None;
+    changeSelection = true;
+    const auto changed = get("from_ms=100&to_ms=200&tick=5");
+    EXPECT_TRUE(changed.startsWith("HTTP/1.1 409")) << changed.toStdString();
+    EXPECT_TRUE(changed.contains("selection_changed"));
+}
+
 }
 int main(int argc, char **argv) {
     qputenv("QT_QPA_PLATFORM", "offscreen");
