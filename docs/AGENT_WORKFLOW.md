@@ -73,3 +73,17 @@ orchestrator's Claude Code memory (`sentinel-roadmap`, `codex-delegation`,
 - Claude subagents: can launch the GUI on a separate `--api-port` with `--no-screener`;
   screenshots `target=heatmap` only; never run the GUI binary with `--help` (it starts a
   full GUI).
+
+## Retro notes (folded from WORKFLOW: lines)
+
+- 2026-10-02: two GUI-running agents were given the same Agent API port (17110) and the same scratchpad file names; one agent's calls drove the other's GUI. Give every GUI-running agent its own `--api-port` (17110 + n) and its own `scratchpad/<branch>/` directory in the dispatch prompt.
+- 2026-10-02: `pgrep -x ninja` before a build is check-then-act; agents sometimes start builds together. Acceptable for now (owner declined a build lock).
+- 2026-10-02: for anything that executes outside a sandbox, review prompts must ask about every runtime load of agent-writable code or config (QML from source dirs, plugin paths, config files, caches), not only the diff.
+- 2026-10-02: freeze UX specs before dispatching UI work; zoom-autofit got two review rounds and was then replaced by the auto-scale spec.
+
+## Owner decisions on the loop (2026-10-02)
+
+- Decision split: the owner decides behaviour, data and how things look; everything else the orchestrator decides with a stated default the owner can override.
+- One batched digest instead of a ping per slice; at most 2-3 slices wait on the owner at once, and the orchestrator stops dispatching owner-gated work at the cap.
+- Every lieutenant report ends with a `WORKFLOW:` line; the orchestrator folds them into the retro notes above and runs a short retro every few days.
+- The orchestrator pushes `main` itself after clean landings (secret scan, never force).
