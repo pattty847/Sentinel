@@ -264,6 +264,8 @@ turning it on. Existing per-day `roller.json` checkpoints retain the replay
 policy/range and select the first incomplete day. No primary path or client
 wire capability changes. The output must be disjoint from the journal and
 all actual/configured primary/fallback roots, including symlink aliases.
+`fault_min_duration_ms` defaults to 120000 and must be positive. It is the
+minimum elapsed time for an identical-failure streak before slow probes begin.
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
@@ -271,7 +273,7 @@ all actual/configured primary/fallback roots, including symlink aliases.
 | `sentinel_roller_shadow_lag_seconds` | gauge | product | Scrape-time age of last applied durable record, -1 before the first record. |
 | `sentinel_roller_shadow_records_applied_total` | counter | product | Applied durable records, including deterministic restart/day warmup replay. |
 | `sentinel_roller_shadow_setup_failures_total` | counter | product | Setup, socket framing, continuity or write failures that trigger backoff. Malformed journal payloads invalidate and continue like batch. |
-| `sentinel_roller_shadow_fault_cooldown` | gauge | product | 1 after three identical consecutive faults without new committed progress; 0 after new durable checkpoint progress or a different fault. |
+| `sentinel_roller_shadow_fault_cooldown` | gauge | product | 1 after at least three identical consecutive faults spanning `fault_min_duration_ms` without new committed progress; 0 after new durable checkpoint progress or a different fault. |
 | `sentinel_roller_shadow_fault_cooldowns_total` | counter | product | Entries into the persistent-fault slow probe loop. |
 | `sentinel_roller_shadow_start_failures_total` | counter | - | Supervisor construction failure, such as inability to create worker threads. |
 | `sentinel_roller_shadow_mismatch_total` | counter | product, layer | Persisted count of strict same-journal mismatching buckets, including one-sided missing and partial buckets. Series absent until checkpoint restore completes; restart does not re-count old hours. |
@@ -291,10 +293,11 @@ Grafana provisions `sentinel-roller-shadow-mismatch` (increase over 2 h) and
 `sentinel-roller-shadow-down` (product down for 5 min); absence is OK while
 shadow is disabled. Existing primary health rules remain authoritative.
 Read `Shadow roller retry` for the error and 1 s to 60 s exponential backoff.
-After **three identical consecutive failures without a newer committed
-watermark**, that product probes once every **ten minutes**, including storage
-faults and unavailable journal volumes. `sentinel-roller-shadow-fault-cooldown`
-pages on that gauge immediately. Replaying the old checkpoint does not reset
+After **three identical consecutive failures spanning at least two minutes by
+default without a newer committed watermark**, that product probes once every
+**ten minutes**, including storage faults and unavailable journal volumes.
+`sentinel-roller-shadow-fault-cooldown` pages after the gauge remains set for
+another **two minutes**. Replaying the old checkpoint does not reset
 the streak. Socket/retract/EOF recovery keeps the applied durable book in memory
 and resumes the journal at its exclusive applied cursor. Recorder failures and
 process restarts reconstruct from the first incomplete day's anchor with the

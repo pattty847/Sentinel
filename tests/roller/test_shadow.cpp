@@ -537,6 +537,7 @@ TEST_F(ShadowTest, StopWakesCheckerAcrossPredicateWaitTransition) {
 }
 TEST_F(ShadowTest, PersistentWriteFaultEntersCooldownAndRecovers) {
   initial(125);
+  cfg.failureMinDuration = 40ms;
   cfg.failureCooldown = 900ms;
   fs::create_directories(root / "shadow");
   {
@@ -563,6 +564,7 @@ TEST_F(ShadowTest, PersistentWriteFaultEntersCooldownAndRecovers) {
 }
 TEST_F(ShadowTest, JournalUnavailableResumesAppliedCursorWithoutReplay) {
   initial();
+  cfg.failureMinDuration = 40ms;
   cfg.failureCooldown = 900ms;
   start();
   ASSERT_TRUE(eventually([&] { return count() == 64; }));
@@ -599,6 +601,38 @@ TEST_F(ShadowTest, JournalUnavailableResumesAppliedCursorWithoutReplay) {
   shadow.reset();
   writer->close();
   parity(120000);
+}
+TEST_F(ShadowTest, ThirtySecondOutageNeverEntersCooldown) {
+  initial(125);
+  cfg.failureCooldown = 900ms;
+  std::atomic<int64_t> elapsedMs{0};
+  const auto base = std::chrono::steady_clock::now();
+  cfg.nowForTest = [&] { return base + std::chrono::milliseconds(elapsedMs.load()); };
+  fs::create_directories(root / "shadow");
+  { std::ofstream out(root / "shadow" / Product); out << "blocked"; }
+  start();
+  ASSERT_TRUE(eventually([&] { return has("sentinel_roller_shadow_setup_failures_total{product=\"BTC-USD\"} 3"); }));
+  elapsedMs = 30000;
+  ASSERT_TRUE(eventually([&] { return has("sentinel_roller_shadow_setup_failures_total{product=\"BTC-USD\"} 4"); }));
+  EXPECT_TRUE(has("sentinel_roller_shadow_fault_cooldown{product=\"BTC-USD\"} 0"));
+  EXPECT_TRUE(has("sentinel_roller_shadow_fault_cooldowns_total{product=\"BTC-USD\"} 0"));
+  fs::remove(root / "shadow" / Product);
+  ASSERT_TRUE(eventually([&] { return count() == 126; }));
+}
+TEST_F(ShadowTest, PersistentFaultWaitsForMinimumElapsedTime) {
+  initial(125);
+  std::atomic<int64_t> elapsedMs{0};
+  const auto base = std::chrono::steady_clock::now();
+  cfg.nowForTest = [&] { return base + std::chrono::milliseconds(elapsedMs.load()); };
+  cfg.failureCooldown = 900ms;
+  fs::create_directories(root / "shadow");
+  { std::ofstream out(root / "shadow" / Product); out << "blocked"; }
+  start();
+  ASSERT_TRUE(eventually([&] { return has("sentinel_roller_shadow_setup_failures_total{product=\"BTC-USD\"} 3"); }));
+  EXPECT_TRUE(has("sentinel_roller_shadow_fault_cooldown{product=\"BTC-USD\"} 0"));
+  elapsedMs = 120000;
+  ASSERT_TRUE(eventually([&] { return has("sentinel_roller_shadow_fault_cooldown{product=\"BTC-USD\"} 1"); }));
+  EXPECT_TRUE(has("sentinel_roller_shadow_fault_cooldowns_total{product=\"BTC-USD\"} 1"));
 }
 TEST_F(ShadowTest, ComparisonWatermarkAndMismatchTotalsSurviveRestart) {
   initial(3661);
@@ -773,13 +807,14 @@ TEST_F(ShadowTest, HandoffLatencyBenchmark) {
 }
 TEST(ShadowConfig, DefaultOffAndExplicitKeys) {
   EXPECT_FALSE(ServerConfig{}.rollerShadow.enabled);
+  EXPECT_EQ(ServerConfig{}.rollerShadow.failureMinDuration, 120000ms);
   QTemporaryDir tmp;
   const auto p = fs::path(tmp.path().toStdString()) / "config.yaml";
   {
     std::ofstream out(p);
     out << "roller_shadow:\n  enabled: true\n  journal_dir: /tmp/raw\n  dir: "
            "/tmp/shadow\n  socket: /tmp/feed.sock\n  from: "
-           "'2026-10-01T00:00:00Z'\n";
+           "'2026-10-01T00:00:00Z'\n  fault_min_duration_ms: 45000\n";
   }
   ServerConfig c;
   ASSERT_TRUE(ConfigLoader::loadServerConfig(p.string(), &c));
@@ -787,5 +822,6 @@ TEST(ShadowConfig, DefaultOffAndExplicitKeys) {
   EXPECT_EQ(c.rollerShadow.outputRoot, "/tmp/shadow");
   EXPECT_EQ(c.rollerShadow.journalRoot, "/tmp/raw");
   EXPECT_EQ(c.rollerShadow.socketPath, "/tmp/feed.sock");
+  EXPECT_EQ(c.rollerShadow.failureMinDuration, 45000ms);
 }
 } // namespace

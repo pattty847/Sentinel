@@ -54,3 +54,4 @@ roller_shadow:
   dir: /Volumes/T7/sentinel-data/hmc2
   socket: "" # ~/Sentinel-runtime/run/capture.sock
   from: "2026-10-03T00:00:00Z"
+  fault_min_duration_ms: 120000 # identical failures must span two minutes before slow probes

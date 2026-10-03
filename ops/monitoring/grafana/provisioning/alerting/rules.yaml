@@ -400,7 +400,7 @@ groups:
       - uid: sentinel-roller-shadow-fault-cooldown
         title: Shadow roller persistent fault
         condition: C
-        for: 0s
+        for: 2m
         noDataState: OK
         execErrState: Error
         labels:
@@ -408,7 +408,7 @@ groups:
         annotations:
           summary: "Shadow roller persistent fault"
           description: >-
-            Three identical shadow failures without new durable progress have entered a ten-minute probe cadence. Repair the logged storage/journal/socket fault; primary recording and clients remain authoritative. A successful new checkpoint clears cooldown. Do not restart capture to repair a shadow consumer.
+            Identical shadow failures persisted for at least two minutes without new durable progress and entered a ten-minute probe cadence. Repair the logged storage/journal/socket fault; primary recording and clients remain authoritative. A successful new checkpoint clears cooldown. Do not restart capture to repair a shadow consumer.
         data:
           - refId: A
             relativeTimeRange: { from: 7200, to: 0 }

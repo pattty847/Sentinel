@@ -77,6 +77,28 @@ struct Fixture : testing::Test {
         server->publish(product,{JournalEventKind::Record,"run",block,0,true,framed(r)});
     }
     bool metric(const std::string& line) { return metrics.render().find(line+"\n")!=std::string::npos; }
+    void socketFailurePreservesRing(bool listenerFailure) {
+        auto trip = std::make_shared<std::atomic<bool>>(false);
+        const auto fail = [trip] { return trip->exchange(false); };
+        if (listenerFailure) cfg.failListenerForTest = fail;
+        else cfg.failPollForTest = fail;
+        start();
+        Peer first(server->path()); first.hello(); EXPECT_EQ(first.next().first["type"],"tip");
+        put(0); EXPECT_EQ(first.next().first["pos"]["block"],0);
+        *trip = true;
+        put(1);
+        ASSERT_TRUE(eventually([&]{return metric("sentinel_fanout_setup_failures_total 1");}));
+        EXPECT_TRUE(metric("sentinel_fanout_clients 0"));
+        now += 30'000'000'000LL;
+        put(2);
+        ASSERT_TRUE(eventually([&]{return metric("sentinel_fanout_running 1");}));
+        Peer resumed(server->path());
+        resumed.hello(JournalPosition{"BTC-USD","run",0,0});
+        EXPECT_EQ(resumed.next().first["type"],"tip");
+        EXPECT_EQ(resumed.next().first["pos"]["block"],1);
+        EXPECT_EQ(resumed.next().first["pos"]["block"],2);
+        EXPECT_TRUE(metric("sentinel_fanout_resume_hits_total{product=\"BTC-USD\"} 1"));
+    }
 };
 TEST_F(Fixture, WriterBytesPositionsRotationAndShutdown) {
     start(); Peer peer(server->path()); peer.hello(); ASSERT_EQ(peer.next().first["type"],"tip");
@@ -259,6 +281,12 @@ TEST_F(Fixture, SetupRetryPreservesRingForExclusiveResume) {
     EXPECT_EQ(peer.next().first["type"],"tip");
     EXPECT_EQ(peer.next().first["pos"]["block"],1);
     EXPECT_TRUE(metric("sentinel_fanout_resume_hits_total{product=\"BTC-USD\"} 1"));
+}
+TEST_F(Fixture, PollFailurePreservesRingForExclusiveResume) {
+    socketFailurePreservesRing(false);
+}
+TEST_F(Fixture, ListenerFailurePreservesRingForExclusiveResume) {
+    socketFailurePreservesRing(true);
 }
 TEST_F(Fixture, SetupRetryBackoffCapsAtTenMinutesAndStopsWhileDown) {
     ASSERT_TRUE(QDir().mkdir(dir.path()+"/socket"));
