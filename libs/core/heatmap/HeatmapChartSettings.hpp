@@ -31,6 +31,10 @@ struct HeatmapChartSettings {
     bool showLabels = true;
     std::string labelCurrency = "usd";
     double labelMinPx = 12, labelMaxPx = 15;
+    std::string candleUpColor = "#2EBD85", candleDownColor = "#F6465D";
+    std::string candleWickColor = "auto"; // auto follows each candle's body color
+    double candleBodyOpacity = 1;
+    int candleWickWidth = 1; // device pixels
     bool operator==(const HeatmapChartSettings &) const = default;
 };
 } // namespace heatmap

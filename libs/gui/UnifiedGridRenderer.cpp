@@ -784,6 +784,20 @@ void UnifiedGridRenderer::setCandleStyle(int style) {
     emit candleStyleChanged();
 }
 
+void UnifiedGridRenderer::setCandleAppearance(const heatmap::HeatmapChartSettings& settings) {
+    const QColor up(QString::fromStdString(settings.candleUpColor));
+    const QColor down(QString::fromStdString(settings.candleDownColor));
+    const QString wick = QString::fromStdString(settings.candleWickColor);
+    if (m_candleUpColor == up && m_candleDownColor == down && m_candleWickColor == wick &&
+        m_candleBodyOpacity == settings.candleBodyOpacity && m_candleWickWidth == settings.candleWickWidth) return;
+    m_candleUpColor = up;
+    m_candleDownColor = down;
+    m_candleWickColor = wick;
+    m_candleBodyOpacity = settings.candleBodyOpacity;
+    m_candleWickWidth = settings.candleWickWidth;
+    emit candleAppearanceChanged();
+}
+
 void UnifiedGridRenderer::setHeatmapColorPreset(const QString& preset) {
     // The five legacy presets live in HeatmapPalette (shared with the GPU path).
     const auto gradients = heatmap::gpu::presetGradients(preset.toStdString());

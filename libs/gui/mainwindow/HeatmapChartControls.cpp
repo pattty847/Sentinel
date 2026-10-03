@@ -40,6 +40,7 @@ void HeatmapChartControls::setRenderer(UnifiedGridRenderer *renderer) {
     if (!renderer) return;
     renderer->setHeatmapTickMemory(m_model->manualTicks());
     renderer->setHeatmapChartSettings(m_model->settings());
+    renderer->setCandleAppearance(m_model->settings());
     renderer->setHeatmapRenderer(QString::fromStdString(m_model->settings().renderer));
     renderer->setLiquidityLabelMode(m_model->settings().labelCurrency == "usd" ? 1 : 0);
     connect(renderer, &UnifiedGridRenderer::timeframeChanged, this, &HeatmapChartControls::scheduleSync);
@@ -281,6 +282,7 @@ void HeatmapChartControls::onModelChanged(bool explicitManualTick) {
     const auto &s = m_model->settings();
     if (m_renderer) {
         m_renderer->setHeatmapChartSettings(s, explicitManualTick);
+        m_renderer->setCandleAppearance(s);
         m_renderer->setHeatmapRenderer(QString::fromStdString(s.renderer));
         m_renderer->setLiquidityLabelMode(s.labelCurrency == "usd" ? 1 : 0); // legacy labels follow the model too
     }

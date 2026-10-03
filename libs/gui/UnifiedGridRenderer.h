@@ -104,6 +104,11 @@ class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     Q_PROPERTY(int liquidityLabelMode READ liquidityLabelMode WRITE setLiquidityLabelMode NOTIFY liquidityLabelModeChanged)
     Q_PROPERTY(double heatmapLiquidityThreshold READ heatmapLiquidityThreshold WRITE setHeatmapLiquidityThreshold NOTIFY heatmapLiquidityThresholdChanged)
     Q_PROPERTY(int candleStyle READ candleStyle WRITE setCandleStyle NOTIFY candleStyleChanged)
+    Q_PROPERTY(QColor candleUpColor READ candleUpColor NOTIFY candleAppearanceChanged)
+    Q_PROPERTY(QColor candleDownColor READ candleDownColor NOTIFY candleAppearanceChanged)
+    Q_PROPERTY(QString candleWickColor READ candleWickColor NOTIFY candleAppearanceChanged)
+    Q_PROPERTY(double candleBodyOpacity READ candleBodyOpacity NOTIFY candleAppearanceChanged)
+    Q_PROPERTY(int candleWickWidth READ candleWickWidth NOTIFY candleAppearanceChanged)
     Q_PROPERTY(double heatmapMaxObservedLiquidity READ heatmapMaxObservedLiquidity NOTIFY heatmapMaxObservedLiquidityChanged)
     Q_PROPERTY(double heatmapMinObservedLiquidity READ heatmapMinObservedLiquidity NOTIFY heatmapMinObservedLiquidityChanged)
     Q_PROPERTY(QObject* viewState READ viewState CONSTANT)
@@ -131,6 +136,10 @@ private:
     int m_liquidityLabelMode = 0;
     double m_heatmapLiquidityThreshold = 0.0;
     int m_candleStyle = 0;
+    QColor m_candleUpColor{"#2EBD85"}, m_candleDownColor{"#F6465D"};
+    QString m_candleWickColor = "auto"; // each wick follows its body
+    double m_candleBodyOpacity = 1;
+    int m_candleWickWidth = 1;
     QTimer* m_thresholdRebuildTimer = nullptr;
 
     bool m_manualTimeframeSet = false;
@@ -246,6 +255,12 @@ public:
     double heatmapLiquidityThreshold() const { return m_heatmapLiquidityThreshold; }
     int candleStyle() const { return m_candleStyle; }
     void setCandleStyle(int style);
+    QColor candleUpColor() const { return m_candleUpColor; }
+    QColor candleDownColor() const { return m_candleDownColor; }
+    QString candleWickColor() const { return m_candleWickColor; }
+    double candleBodyOpacity() const { return m_candleBodyOpacity; }
+    int candleWickWidth() const { return m_candleWickWidth; }
+    void setCandleAppearance(const heatmap::HeatmapChartSettings& settings);
     double heatmapMaxObservedLiquidity() const { return m_heatmapStreamService ? m_heatmapStreamService->maxObservedLiquidity() : 0.0; }
     double heatmapMinObservedLiquidity() const { return m_heatmapStreamService ? m_heatmapStreamService->minObservedLiquidity() : 0.0; }
     QColor heatmapBackgroundColor() const { return m_heatmapBackgroundColor; }
@@ -468,6 +483,7 @@ signals:
     void liquidityLabelModeChanged();
     void heatmapLiquidityThresholdChanged();
     void candleStyleChanged();
+    void candleAppearanceChanged();
     void heatmapMaxObservedLiquidityChanged();
     void heatmapMinObservedLiquidityChanged();
     void heatmapBackgroundColorChanged();

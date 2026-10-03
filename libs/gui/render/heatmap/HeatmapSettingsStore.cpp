@@ -9,6 +9,7 @@ namespace heatmap {
 namespace {
 constexpr uint64_t MiB = 1ull << 20;
 const QStringList palettes{"Electric", "Fire", "Ocean", "Monochrome", "Matrix", "Custom"};
+const QRegularExpression candleColor("^#[0-9a-fA-F]{6}$");
 double finiteClamp(double v, double lo, double hi, double fallback) {
     return std::isfinite(v) ? std::clamp(v, lo, hi) : fallback;
 }
@@ -72,6 +73,11 @@ void clampSettings(HeatmapChartSettings &s) {
     if (s.labelCurrency != "usd" && s.labelCurrency != "asset") s.labelCurrency = d.labelCurrency;
     s.labelMinPx = finiteClamp(s.labelMinPx, 8, 24, d.labelMinPx);
     s.labelMaxPx = finiteClamp(s.labelMaxPx, s.labelMinPx, 32, std::max(d.labelMaxPx, s.labelMinPx));
+    if (!candleColor.match(QString::fromStdString(s.candleUpColor)).hasMatch()) s.candleUpColor = d.candleUpColor;
+    if (!candleColor.match(QString::fromStdString(s.candleDownColor)).hasMatch()) s.candleDownColor = d.candleDownColor;
+    if (s.candleWickColor != "auto" && !candleColor.match(QString::fromStdString(s.candleWickColor)).hasMatch()) s.candleWickColor = d.candleWickColor;
+    s.candleBodyOpacity = finiteClamp(s.candleBodyOpacity, 0, 1, d.candleBodyOpacity);
+    s.candleWickWidth = std::clamp(s.candleWickWidth, 1, 3);
 }
 HeatmapChartSettings chartDefaults(const ClientHeatmapConfig &c) {
     HeatmapChartSettings s;
@@ -118,6 +124,11 @@ QJsonObject settingsJson(const HeatmapChartSettings &s) {
         {"labelCurrency", QString::fromStdString(s.labelCurrency)},
         {"labelMinPx", s.labelMinPx},
         {"labelMaxPx", s.labelMaxPx},
+        {"candleUpColor", QString::fromStdString(s.candleUpColor)},
+        {"candleDownColor", QString::fromStdString(s.candleDownColor)},
+        {"candleWickColor", QString::fromStdString(s.candleWickColor)},
+        {"candleBodyOpacity", s.candleBodyOpacity},
+        {"candleWickWidth", s.candleWickWidth},
         {"tickMode", s.tickMode == TickMode::Auto ? "auto" : "manual"},
         {"bidGradient", gradientJson(s.bidGradient)}, {"askGradient", gradientJson(s.askGradient)}
     };
@@ -125,7 +136,7 @@ QJsonObject settingsJson(const HeatmapChartSettings &s) {
 QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     const auto schema = settingsJson(HeatmapChartSettings{});
     auto merged = settingsJson(s);
-    const QStringList integers{"manualTick", "crossfadeMs", "gpuCapBytes", "uploadBudgetBytes", "prefetchTiles", "liveMinIntervalMs"};
+    const QStringList integers{"manualTick", "crossfadeMs", "gpuCapBytes", "uploadBudgetBytes", "prefetchTiles", "liveMinIntervalMs", "candleWickWidth"};
     for (auto it = patch.begin(); it != patch.end(); ++it) {
         const auto &key = it.key();
         const auto v = it.value();
@@ -138,6 +149,10 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
         if (key == "tickMode" && v != "auto" && v != "manual") return "tickMode must be auto or manual";
         if (key == "palettePreset" && !palettes.contains(v.toString())) return "Unknown palettePreset";
         if (key == "labelCurrency" && v != "usd" && v != "asset") return "labelCurrency must be usd or asset";
+        if ((key == "candleUpColor" || key == "candleDownColor" || key == "candleWickColor") &&
+            !(key == "candleWickColor" && v == "auto") && !candleColor.match(v.toString()).hasMatch())
+            return "Candle colors must be #RRGGBB (wick also accepts auto)";
+        if (key == "candleWickWidth" && (v.toInt() < 1 || v.toInt() > 3)) return "candleWickWidth must be 1..3 device pixels";
         if ((key == "bidGradient" || key == "askGradient") && !validGradient(v)) return "Invalid gradient (2..16 ordered stops, endpoints 0 and 1, hex colors)";
         merged[key] = v;
     }
@@ -161,6 +176,11 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     out.labelCurrency = merged["labelCurrency"].toString().toStdString();
     out.labelMinPx = merged["labelMinPx"].toDouble();
     out.labelMaxPx = merged["labelMaxPx"].toDouble();
+    out.candleUpColor = merged["candleUpColor"].toString().toStdString();
+    out.candleDownColor = merged["candleDownColor"].toString().toStdString();
+    out.candleWickColor = merged["candleWickColor"].toString().toStdString();
+    out.candleBodyOpacity = merged["candleBodyOpacity"].toDouble();
+    out.candleWickWidth = merged["candleWickWidth"].toInt();
     out.tickMode = merged["tickMode"] == "manual" ? TickMode::Manual : TickMode::Auto;
     out.bidGradient = gradient(merged["bidGradient"]);
     out.askGradient = gradient(merged["askGradient"]);

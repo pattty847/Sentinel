@@ -7,14 +7,15 @@ Threading: Update on GUI thread; rendering on render thread.
 
 #include <QQuickItem>
 #include <QPointer>
+#include <QColor>
 #include <vector>
 #include <cstdint>
 #include <limits>
 #include <QtQml/qqmlregistration.h>
 #include "TimeAxisMapping.hpp"
 #include "ITimeAxisMappingProvider.hpp"
+#include "../datasources/CandleSeriesBuffer.hpp"
 
-class CandleSeriesBuffer;
 
 struct CandleOverlayBar {
     qint64 timeStartMs = 0;
@@ -35,6 +36,11 @@ class CandlestickOverlayItem : public QQuickItem {
     Q_PROPERTY(int timeframeSec READ timeframeSec WRITE setTimeframeSec NOTIFY timeframeSecChanged)
     // 0=Candle, 1=Hollow, 2=Line
     Q_PROPERTY(int candleStyle READ candleStyle WRITE setCandleStyle NOTIFY candleStyleChanged)
+    Q_PROPERTY(QColor upColor READ upColor WRITE setUpColor NOTIFY appearanceChanged)
+    Q_PROPERTY(QColor downColor READ downColor WRITE setDownColor NOTIFY appearanceChanged)
+    Q_PROPERTY(QString wickColor READ wickColor WRITE setWickColor NOTIFY appearanceChanged)
+    Q_PROPERTY(double bodyOpacity READ bodyOpacity WRITE setBodyOpacity NOTIFY appearanceChanged)
+    Q_PROPERTY(int wickWidth READ wickWidth WRITE setWickWidth NOTIFY appearanceChanged)
 
 public:
     explicit CandlestickOverlayItem(QQuickItem* parent = nullptr);
@@ -49,6 +55,16 @@ public:
     void setTimeframeSec(int sec);
     int candleStyle() const { return m_candleStyle; }
     void setCandleStyle(int style);
+    QColor upColor() const { return m_upColor; }
+    QColor downColor() const { return m_downColor; }
+    QString wickColor() const { return m_wickColor; }
+    double bodyOpacity() const { return m_bodyOpacity; }
+    int wickWidth() const { return m_wickWidth; }
+    void setUpColor(const QColor& value);
+    void setDownColor(const QColor& value);
+    void setWickColor(const QString& value);
+    void setBodyOpacity(double value);
+    void setWickWidth(int value);
 
 signals:
     void candleBufferChanged();
@@ -56,6 +72,7 @@ signals:
     void symbolChanged();
     void timeframeSecChanged();
     void candleStyleChanged();
+    void appearanceChanged();
 
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) override;
@@ -86,5 +103,15 @@ private:
     QString m_symbol;
     int m_timeframeSec = 1;
     int m_candleStyle = 0; // 0=Candle, 1=Hollow, 2=Line
+    QColor m_upColor{"#2EBD85"}, m_downColor{"#F6465D"};
+    QString m_wickColor = "auto";
+    QColor m_customWickColor;
+    double m_bodyOpacity = 1;
+    int m_wickWidth = 1;
     std::vector<CandleOverlayBar> m_visibleCandles;
+    std::vector<CandleOverlayBar> m_filteredCandles;
+    std::vector<CandleOverlayBar> m_continuousCandles;
+    std::vector<CandleSeriesBuffer::CandleBar> m_bufferSlice;
+    struct ClosePoint { float cx, cy; uchar r, g, b, a; };
+    std::vector<ClosePoint> m_closePoints;
 };

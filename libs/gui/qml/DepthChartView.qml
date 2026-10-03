@@ -151,6 +151,11 @@ Rectangle {
         symbol: root.symbol
         timeframeSec: Math.max(1, Math.round(unifiedGridRenderer.timeframeMs / 1000))
         candleStyle: unifiedGridRenderer.candleStyle
+        upColor: unifiedGridRenderer.candleUpColor
+        downColor: unifiedGridRenderer.candleDownColor
+        wickColor: unifiedGridRenderer.candleWickColor
+        bodyOpacity: unifiedGridRenderer.candleBodyOpacity
+        wickWidth: unifiedGridRenderer.candleWickWidth
         z: 2
     }
 
