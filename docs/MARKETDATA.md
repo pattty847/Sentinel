@@ -442,6 +442,55 @@ actual live final can still correct it. Attempt state is bounded by the column c
 reset with the projection generation. This repairs finals missed through prolonged transport
 congestion without an unbounded server replay queue or a permanent oldest-bucket retry loop.
 
+## Live trade rows and chart bubbles
+
+Coinbase `market_trades` -> `MarketDataCoreEngine::processTrades` -> queued
+`ServerDataModel::onTrade` -> `tradeBroadcast` -> stream Session `on_trade` ->
+Sentinel wire `type:"trade"` -> `SentinelStreamClient::tradeReceived` -> queued
+`RemoteGridDataSource` -> queued `UnifiedGridRenderer::onTradeReceived`.
+The existing live wire carries `product_id`, `price`, `size`, `side`, and RFC3339
+`time`; it now also carries `trade_id` and `side_basis:"maker"`. These additive
+fields do not require a server upgrade for bubbles: older servers already send time.
+The client now preserves exchange time and ID instead of discarding them.
+Invalid/missing time stays zero and cannot produce a bubble.
+
+**Side contract:** the current engine forwards Coinbase's maker side even though
+its enum is named `AggressorSide`. Coinbase's [MarketTrade schema](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/advanced-trade-asyncapi.json)
+defines `side` as maker. Live client decoding converts maker sell to aggressor buy
+and maker buy to aggressor sell. Missing `side_basis` means legacy maker;
+`side_basis:"aggressor"` is accepted without inversion for a future normalized
+producer; unknown side/basis stays unknown. A future engine normalization must also
+change the server marker to `aggressor`. Existing server footprint/VP side aggregation
+still consumes the engine's maker-valued enum; correcting that is outside the bubble slice.
+
+The GPU chart retains 100,000 valid event-time trade samples in a fixed ring for
+its selected symbol, including while Trades is off. It filters individual quote
+notionals before binning by screen time/price and side into at most 4,096 SDF-circle
+quads. QSG geometry is allocated once, reused and rebuilt only when tape, viewport,
+visibility, threshold or palette changes. Session history survives timeframe/renderer
+changes and same-symbol reconnects; symbol switches clear it. This is partial
+observed-session coverage, not a raw trade-history service. Upstream replay can
+repeat trades; the current bubble tape does not deduplicate exchange snapshots.
+
+History sources today:
+- `ServerDataModel::m_recentFootprintTrades`: server-global RAM, retention
+  `clamp(2 * maxConfiguredTimeframe * max(1024, gridWidth), 5 min, 24 h)`;
+  `collectOverlayTrades` copies bounded windows for aggregate publishers only.
+- `TradeOverlayPublisher`: footprint/VP aggregates and TPO letters; TPO's older
+  REST-candle range fallback contains no individual executions, sizes or sides.
+  `trade_overlay` is also the error context, not a raw-row response family.
+- `TickBinaryLogger`: hourly binary trades under `data/market`, but no existing
+  stream-server reader/serving endpoint uses them for trade history.
+- RAWL2 capture under `/Volumes/T7/sentinel-data/raw-l2`: durable raw trade source;
+  the one-world roller slices B-D own its serving path. This feature neither reads
+  those files from the GUI nor starts another history service.
+
+Cheapest durable extension: page event-time executions (ID, price, base size,
+normalized aggressor, symbol/selection identity and explicit coverage) from the
+roller's trade store on the existing bounded history workers. Feed the bounded
+chart tape/aggregation input, deduplicate by trade ID across live/history and report
+coverage/evictions. Do not reconstruct executions from footprint or candle data.
+
 ## Independent trade-overlay publication
 
 Footprint, TPO and volume profile no longer run from `heatmap_slice` callbacks.

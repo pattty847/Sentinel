@@ -3,6 +3,7 @@
 
 #include "SentinelLogging.hpp"
 #include "render/FrameContextBuilder.hpp"
+#include "render/TradeBubbleNode.hpp"
 #include "render/HeatmapIntensityNode.hpp"
 #include "render/HeatmapRowGrouping.hpp"
 #include "servermodel/RecordingCodec.hpp"
@@ -486,6 +487,7 @@ QSGNode* UnifiedGridRenderer::ensureGpuRootNode(QSGNode* oldNode, heatmap::gpu::
         auto* gate = new QSGOpacityNode();
         gate->appendChildNode(new heatmap::gpu::HeatmapTileNode(m_gpuLayer->tileStatsPtr()));
         root->appendChildNode(gate);
+        root->appendChildNode(new TradeBubbleNode);
         for (auto* overlay : m_overlays)
             overlay->onRootRebuilt();
         m_chartTextRenderer.onRootRebuilt();
@@ -601,6 +603,11 @@ QSGNode* UnifiedGridRenderer::updateGpuPaintNode(QSGNode* oldNode, FrameContext&
     std::vector<FootprintOverlayRenderer::PendingUpload> footprintUploads;
     m_footprintOverlay.drainPending(footprintUploads);
     if (profile) m_frameProfiler.mark(FrameProfiler::Uploads);
+    // Qt blocks the GUI thread here: snapshot chart-owned POD/settings only,
+    // never traverse the QObject graph from the node or its shader.
+    auto* bubbles = static_cast<TradeBubbleNode*>(root->firstChild()->nextSibling());
+    bubbles->sync(*m_tradeBubbleTape, frame.mapping, m_showTrades, m_tradeMinNotional,
+                  m_tradeBuyColor, m_tradeSellColor);
     renderTradeOverlays(root, frame, frame.overlays.footprint, frame.overlays.tpo, footprintUploads);
     if (profile) m_frameProfiler.mark(FrameProfiler::Overlays);
 

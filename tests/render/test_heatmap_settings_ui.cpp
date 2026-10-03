@@ -42,6 +42,13 @@
 #include <gtest/gtest.h>
 #include <iostream>
 
+struct TradeBubbleRendererTest {
+    static size_t count(const UnifiedGridRenderer& r) { return r.m_tradeBubbleTape->samples().size(); }
+    static int64_t firstTime(const UnifiedGridRenderer& r) { return r.m_tradeBubbleTape->samples().front().timeMs; }
+    static bool enabled(const UnifiedGridRenderer& r) { return r.m_showTrades; }
+    static double threshold(const UnifiedGridRenderer& r) { return r.m_tradeMinNotional; }
+};
+
 namespace {
 using namespace synthetic_hmc2;
 using heatmap::HeatmapChartSettings;
@@ -640,6 +647,67 @@ TEST(HeatmapSettingsDialogTest, ApiChangesReachTheDialogAndToolbar) {
     EXPECT_EQ(toolbar.tickModeCombo()->currentIndex(), 1); // Manual, shown though disabled (no GPU chart)
     EXPECT_EQ(toolbar.tickPresetCombo()->currentData().toLongLong(), 1000);
     EXPECT_EQ(t.reload().palettePreset, "Electric"); // persist:false
+}
+
+TEST(TradeBubbleControls, GuiIngestionKeepsHiddenSessionTradesAndIsolatesSymbols) {
+    UnifiedGridRenderer renderer;
+    renderer.setActiveSymbol("BTC-USD");
+    Trade t{};
+    t.product_id = "BTC-USD"; t.price = 100; t.size = 2; t.side = AggressorSide::Buy;
+    t.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(1791030896789LL));
+    EXPECT_FALSE(TradeBubbleRendererTest::enabled(renderer));
+    renderer.onTradeReceived(t);
+    ASSERT_EQ(TradeBubbleRendererTest::count(renderer), 1);
+    EXPECT_EQ(TradeBubbleRendererTest::firstTime(renderer), 1791030896789LL);
+    heatmap::HeatmapChartSettings settings;
+    settings.showTrades = true; settings.tradeMinNotional = 1000;
+    renderer.setHeatmapChartSettings(settings);
+    EXPECT_TRUE(TradeBubbleRendererTest::enabled(renderer));
+    EXPECT_EQ(TradeBubbleRendererTest::threshold(renderer), 1000);
+    EXPECT_EQ(TradeBubbleRendererTest::count(renderer), 1);
+    renderer.setTimeframe(300000);
+    EXPECT_EQ(TradeBubbleRendererTest::count(renderer), 1);
+    t.product_id = "ETH-USD";
+    renderer.onTradeReceived(t);
+    EXPECT_EQ(TradeBubbleRendererTest::count(renderer), 1);
+    renderer.setActiveSymbol("ETH-USD");
+    EXPECT_EQ(TradeBubbleRendererTest::count(renderer), 0);
+    renderer.onTradeReceived(t);
+    EXPECT_EQ(TradeBubbleRendererTest::count(renderer), 1);
+}
+
+TEST(TradeBubbleControls, GearTogglePresetsAndApiSharePersistedChartSettings) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    TopToolbar toolbar;
+    HeatmapChartControls controls(&model);
+    controls.setToolbar(&toolbar);
+    auto* toggle = toolbar.chartMenu()->findChild<QAction*>("chartMenuTrades");
+    ASSERT_NE(toggle, nullptr);
+    EXPECT_FALSE(toggle->isChecked());
+    toggle->trigger();
+    EXPECT_TRUE(model.settings().showTrades);
+    EXPECT_TRUE(t.reload().showTrades);
+    auto* sizes = toolbar.chartMenu()->findChild<QMenu*>("chartMenuTradeSize");
+    ASSERT_NE(sizes, nullptr);
+    auto actions = sizes->actions();
+    ASSERT_EQ(actions.size(), 5);
+    actions[2]->trigger();
+    EXPECT_EQ(model.settings().tradeMinNotional, 1000);
+    EXPECT_EQ(t.reload().tradeMinNotional, 1000);
+    AgentApi::Request request{"POST", "/api/v1/heatmap/settings", {},
+        R"({"showTrades":false,"tradeMinNotional":10000,"persist":false})"};
+    const auto validated = AgentApi::validateControl(request, std::nullopt);
+    ASSERT_EQ(validated.status, 200);
+    ASSERT_TRUE(model.apply(validated.body.heatmapSettings, validated.body.persistHeatmapSettings).isEmpty());
+    controls.refreshChartMenu();
+    EXPECT_FALSE(toggle->isChecked());
+    EXPECT_TRUE(actions[3]->isChecked());
+    EXPECT_TRUE(t.reload().showTrades);
+    EXPECT_EQ(t.reload().tradeMinNotional, 1000);
+    ASSERT_TRUE(model.apply({{"renderer", "legacy"}}, false).isEmpty());
+    controls.refreshChartMenu();
+    EXPECT_FALSE(toggle->isEnabled());
 }
 
 // ----------------------------------------------------------- telemetry dock

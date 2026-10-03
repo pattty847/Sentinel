@@ -134,6 +134,11 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
 }
 
 void UnifiedGridRenderer::onTradeReceived(const Trade &trade) {
+  if (m_activeSymbol == QLatin1String(trade.product_id.data(), qsizetype(trade.product_id.size()))) {
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(trade.timestamp.time_since_epoch()).count();
+    if (m_tradeBubbleTape->append({ms, trade.price, trade.size, trade.side}) && m_showTrades && m_gpuHeatmap)
+      update(); // Qt coalesces trade bursts into one scene synchronization
+  }
   // The live price for auto-fit (no allocation per trade: product ids are ASCII).
   if (m_gpuHeatmap && std::isfinite(trade.price) && trade.price > 0 &&
       m_activeSymbol == QLatin1String(trade.product_id.data(), static_cast<qsizetype>(trade.product_id.size())))
@@ -397,6 +402,7 @@ void UnifiedGridRenderer::setShowModeFlagsOverlay(bool show) {
 }
 
 void UnifiedGridRenderer::clearData() {
+  m_tradeBubbleTape->clear();
   resetHeatmapHistoryStatus();
   setOldestHeatmapAvailableMs(0);
   if (m_viewState) {
@@ -1010,6 +1016,12 @@ void UnifiedGridRenderer::setHeatmapChartSettings(const heatmap::HeatmapChartSet
   m_gpuLayer->setSettings(settings, explicitManualTick);
   // Both renderers draw the chart's palette and colour range (A/B parity).
   const auto gradients = heatmap::gpu::gradientsFor(settings);
+  m_showTrades = settings.showTrades;
+  m_tradeMinNotional = settings.tradeMinNotional;
+  const auto& bid = gradients.bid.back();
+  const auto& ask = gradients.ask.back();
+  m_tradeBuyColor = QColor(bid.r, bid.g, bid.b);
+  m_tradeSellColor = QColor(ask.r, ask.g, ask.b);
   m_heatmapOverlay.setBidGradient(HeatmapOverlayRenderer::toColorStops(gradients.bid));
   m_heatmapOverlay.setAskGradient(HeatmapOverlayRenderer::toColorStops(gradients.ask));
   m_heatmapOverlay.setPaletteGamma(gradients.gamma);

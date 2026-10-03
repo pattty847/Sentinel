@@ -38,6 +38,7 @@
 #include "render/IOverlayRenderer.hpp"
 #include "render/HeatmapOverlayRenderer.hpp"
 #include "render/FootprintOverlayRenderer.hpp"
+#include "render/TradeBubbleData.hpp"
 #include "render/TpoOverlayRenderer.hpp"
 #include "render/VolumeProfileRenderer.hpp"
 
@@ -57,6 +58,7 @@ class QQuickWindow;
 class QScreen;
 
 class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
+    friend struct TradeBubbleRendererTest;
     Q_OBJECT
     Q_INTERFACES(ITimeAxisMappingProvider)
     QML_ELEMENT
@@ -206,6 +208,10 @@ private:
     std::vector<uint16_t> m_labelIntensityRing;
     std::vector<double> m_labelLiquidityScales;
     std::unique_ptr<AxisTextService> m_axisTextService;
+    std::unique_ptr<trade_bubbles::Tape> m_tradeBubbleTape = std::make_unique<trade_bubbles::Tape>();
+    bool m_showTrades = false;
+    double m_tradeMinNotional = 0;
+    QColor m_tradeBuyColor, m_tradeSellColor;
     FootprintOverlayRenderer m_footprintOverlay;
     TpoOverlayRenderer m_tpoOverlay;
     VolumeProfileRenderer m_vpRenderer;

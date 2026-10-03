@@ -1,7 +1,28 @@
 #include "SentinelStreamClientParseHelpers.hpp"
 #include <utility>
+#include <QDateTime>
 
 namespace protocol::clientparse {
+
+Trade parseTrade(const nlohmann::json& msg) {
+    Trade t{};
+    t.product_id = msg.value("product_id", "");
+    t.trade_id = msg.value("trade_id", "");
+    t.price = msg.value("price", 0.0);
+    t.size = msg.value("size", 0.0);
+    // Existing servers forward Coinbase's maker side despite the DTO enum name.
+    // Explicit basis lets a future normalized source avoid a second inversion.
+    const auto side = msg.value("side", "");
+    const auto basis = msg.value("side_basis", "maker");
+    t.side = AggressorSide::Unknown;
+    if (basis == "maker" || basis == "aggressor") {
+        if (side == "buy") t.side = basis == "maker" ? AggressorSide::Sell : AggressorSide::Buy;
+        if (side == "sell") t.side = basis == "maker" ? AggressorSide::Buy : AggressorSide::Sell;
+    }
+    const auto time = QDateTime::fromString(QString::fromStdString(msg.value("time", "")), Qt::ISODateWithMs);
+    if (time.isValid()) t.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(time.toMSecsSinceEpoch()));
+    return t; // missing/invalid time stays zero; never invent an exchange timestamp
+}
 
 ServerConfig parseServerConfig(const nlohmann::json& msg) {
     ServerConfig cfg;

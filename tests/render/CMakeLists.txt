@@ -296,3 +296,8 @@ target_include_directories(test_chart_ui PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${
 target_link_libraries(test_chart_ui PRIVATE sentinel_gui_lib sentinel_lab_lib GTest::gtest Qt6::Test Qt6::Widgets Qt6::Quick)
 add_test(NAME ChartUiTests COMMAND test_chart_ui)
 set_tests_properties(ChartUiTests PROPERTIES LABELS "render;heatmap;ui" TIMEOUT 300)
+
+add_executable(test_TradeBubbles test_TradeBubbles.cpp)
+target_link_libraries(test_TradeBubbles PRIVATE sentinel_gui_lib GTest::gtest_main)
+add_test(NAME TradeBubbleTests COMMAND test_TradeBubbles)
+set_tests_properties(TradeBubbleTests PROPERTIES LABELS "render")

@@ -142,6 +142,10 @@ set(GRID_CORE_SOURCES
     render/PaperTradeOverlayRenderer.cpp
     render/PaperTradeOverlayModel.hpp
     render/PaperTradeOverlayModel.cpp
+    render/TradeBubbleData.cpp
+    render/TradeBubbleNode.cpp
+    render/TradeBubbleNode.hpp
+    render/TradeBubbleData.hpp
     render/PnlCurveItem.hpp
     render/PnlCurveItem.cpp
 )
@@ -388,6 +392,8 @@ qt_add_shaders(sentinel_gui_lib heatmap_shaders
         render/shaders/heatmap_msdf.frag
         render/shaders/footprint_intensity.vert
         render/shaders/footprint_intensity.frag
+        render/shaders/trade_bubble.vert
+        render/shaders/trade_bubble.frag
 )
 
 target_include_directories(sentinel_gui_lib

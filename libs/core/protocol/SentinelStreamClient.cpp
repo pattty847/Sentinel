@@ -986,13 +986,7 @@ void SentinelStreamClient::handleL2UpdateMessage(const nlohmann::json& msg) {
 }
 
 void SentinelStreamClient::handleTradeMessage(const nlohmann::json& msg) {
-    Trade t;
-    t.product_id = msg.value("product_id", "");
-    t.price = msg.value("price", 0.0);
-    t.size = msg.value("size", 0.0);
-    const std::string side = msg.value("side", "");
-    t.side = (side == "buy") ? AggressorSide::Buy : AggressorSide::Sell;
-    emit tradeReceived(t);
+    emit tradeReceived(protocol::clientparse::parseTrade(msg));
 }
 
 void SentinelStreamClient::handleHeatmapSliceMessage(const nlohmann::json& msg) {

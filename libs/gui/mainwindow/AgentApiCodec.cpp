@@ -608,7 +608,7 @@ QJsonObject bookJson(const BookSnapshot& s) {
 QJsonObject tradesJson(const TradesSnapshot& s) {
     QJsonArray rows;
     for (const auto& t : s.trades) rows.append(QJsonObject{
-        {"receivedAtMs", t.receivedAtMs}, {"eventTimeMs", QJsonValue(QJsonValue::Null)},
+        {"receivedAtMs", t.receivedAtMs}, {"eventTimeMs", t.eventTimeMs ? QJsonValue(*t.eventTimeMs) : QJsonValue(QJsonValue::Null)},
         {"id", t.id.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(t.id)},
         {"side", t.side}, {"price", t.price}, {"qty", t.qty}});
     const auto& a = s.summary;

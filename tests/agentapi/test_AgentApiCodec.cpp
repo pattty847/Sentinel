@@ -503,3 +503,13 @@ TEST(AgentApiHeatmap, ProcessOnlySettingsFlagIsStrictAndRemovedFromThePatch) {
     for (const auto *body : {R"({"persist":false})", R"({"renderer":"gpu","persist":0})", R"({"renderer":"gpu","persist":"false"})"})
         EXPECT_EQ(check(body).status, 422);
 }
+
+TEST(AgentApiCodec, TradeEvidencePreservesEventTimeSeparatelyFromReceiveWindow) {
+    TradeTape tape;
+    tape.append({3000, 1, "123", "buy", 10, 2, 1000});
+    const auto s = tape.snapshot({"s", "BTC-USD", 1, 3000, false, "unknown", false}, 1000, 100);
+    const auto data = tradesJson(s).value("data").toObject();
+    ASSERT_EQ(s.trades.size(), 1);
+    EXPECT_EQ(data["timeBasis"].toString(), "received");
+    EXPECT_EQ(data["trades"].toArray()[0].toObject()["eventTimeMs"].toInteger(), 1000);
+}

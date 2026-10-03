@@ -65,6 +65,7 @@ void clampSettings(HeatmapChartSettings &s) {
     s.sensitivityMin = finiteClamp(s.sensitivityMin, 1e-9, 1e12, d.sensitivityMin);
     s.sensitivityMax = finiteClamp(s.sensitivityMax, 1e-9, 1e15, d.sensitivityMax);
     if (s.sensitivityMax <= s.sensitivityMin) s.sensitivityMax = s.sensitivityMin * 2;
+    s.tradeMinNotional = finiteClamp(s.tradeMinNotional, 0, 1e12, d.tradeMinNotional);
     s.opacity = finiteClamp(s.opacity, 0, 1, d.opacity);
     s.gpuCapBytes = std::clamp<uint64_t>(s.gpuCapBytes, MiB, 4096 * MiB);
     s.uploadBudgetBytes = std::clamp<uint64_t>(s.uploadBudgetBytes, 1, std::min<uint64_t>(128 * MiB, s.gpuCapBytes));
@@ -120,6 +121,8 @@ QJsonObject settingsJson(const HeatmapChartSettings &s) {
         {"prefetchTiles", s.prefetchTiles},
         {"liveMinIntervalMs", s.liveMinIntervalMs},
         {"showTelemetry", s.showTelemetry},
+        {"showTrades", s.showTrades},
+        {"tradeMinNotional", s.tradeMinNotional},
         {"showLabels", s.showLabels},
         {"labelCurrency", QString::fromStdString(s.labelCurrency)},
         {"labelMinPx", s.labelMinPx},
@@ -172,6 +175,8 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     out.prefetchTiles = int(std::clamp(merged["prefetchTiles"].toDouble(), -2147483647.0, 2147483647.0));
     out.liveMinIntervalMs = int(std::clamp(merged["liveMinIntervalMs"].toDouble(), -2147483647.0, 2147483647.0));
     out.showTelemetry = merged["showTelemetry"].toBool();
+    out.showTrades = merged["showTrades"].toBool();
+    out.tradeMinNotional = merged["tradeMinNotional"].toDouble();
     out.showLabels = merged["showLabels"].toBool();
     out.labelCurrency = merged["labelCurrency"].toString().toStdString();
     out.labelMinPx = merged["labelMinPx"].toDouble();
