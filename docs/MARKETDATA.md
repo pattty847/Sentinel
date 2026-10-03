@@ -449,19 +449,17 @@ Coinbase `market_trades` -> `MarketDataCoreEngine::processTrades` -> queued
 Sentinel wire `type:"trade"` -> `SentinelStreamClient::tradeReceived` -> queued
 `RemoteGridDataSource` -> queued `UnifiedGridRenderer::onTradeReceived`.
 The existing live wire carries `product_id`, `price`, `size`, `side`, and RFC3339
-`time`; it now also carries `trade_id` and `side_basis:"maker"`. These additive
+`time`; it now also carries `trade_id` and `side_basis:"aggressor"`. These additive
 fields do not require a server upgrade for bubbles: older servers already send time.
 The client now preserves exchange time and ID instead of discarding them.
 Invalid/missing time stays zero and cannot produce a bubble.
 
-**Side contract:** the current engine forwards Coinbase's maker side even though
-its enum is named `AggressorSide`. Coinbase's [MarketTrade schema](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/advanced-trade-asyncapi.json)
-defines `side` as maker. Live client decoding converts maker sell to aggressor buy
-and maker buy to aggressor sell. Missing `side_basis` means legacy maker;
-`side_basis:"aggressor"` is accepted without inversion for a future normalized
-producer; unknown side/basis stays unknown. A future engine normalization must also
-change the server marker to `aggressor`. Existing server footprint/VP side aggregation
-still consumes the engine's maker-valued enum; correcting that is outside the bubble slice.
+**Side contract:** since the trade-side fix the engine converts Coinbase's maker `side` to
+the aggressor side once at ingest, and trade frames carry `side_basis:"aggressor"` (see the
+trade side section at the top of this file). The client uses `side` as-is when
+`side_basis` is `"aggressor"`; an unmarked frame from an older server is treated as maker and
+flipped (maker sell -> aggressor buy, maker buy -> aggressor sell); unknown side/basis stays
+unknown. Server footprint delta is aggressor-based.
 
 The GPU chart retains the newest 100,000 valid executions by event time in a fixed,
 time-ordered ring for its selected symbol, including while Trades is off. Normal
