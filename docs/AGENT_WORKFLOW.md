@@ -87,3 +87,4 @@ orchestrator's Claude Code memory (`sentinel-roadmap`, `codex-delegation`,
 - One batched digest instead of a ping per slice; at most 2-3 slices wait on the owner at once, and the orchestrator stops dispatching owner-gated work at the cap.
 - Every lieutenant report ends with a `WORKFLOW:` line; the orchestrator folds them into the retro notes above and runs a short retro every few days.
 - The orchestrator pushes `main` itself after clean landings (secret scan, never force).
+- 2026-10-03: a review agent ran a branch GUI without `--agent-host`, so it used the owner's QSettings (window/layout state may be saved on exit). Reviewers running their own GUI must pass `--agent-host <scratch dir>` (isolated settings) or use the GUI host.
