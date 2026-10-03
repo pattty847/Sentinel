@@ -105,6 +105,13 @@ private:
     QDoubleSpinBox *m_labelMinPx = nullptr;
     QDoubleSpinBox *m_labelMaxPx = nullptr;
     QComboBox *m_candleStyle = nullptr;
+    QPushButton *m_candleUpColor = nullptr;
+    QPushButton *m_candleDownColor = nullptr;
+    QPushButton *m_candleWickColor = nullptr;
+    QPushButton *m_candleWickAuto = nullptr;
+    QSpinBox *m_candleBodyOpacity = nullptr;
+    QSpinBox *m_candleWickWidth = nullptr;
+    QWidget *m_candlePreview = nullptr;
     // Tick
     QComboBox *m_tickMode = nullptr;
     QComboBox *m_manualTick = nullptr;

@@ -24,6 +24,7 @@
 #include <QTableWidget>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <cmath>
 
 namespace {
 constexpr uint64_t MiB = 1ull << 20, KiB = 1ull << 10;
@@ -83,6 +84,35 @@ QString swatchStyle(const QString &color) {
     const double luma = 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue();
     return QStringLiteral("QPushButton { background: %1; color: %2; }").arg(color.left(7), luma > 140 ? "#000000" : "#FFFFFF");
 }
+
+class CandlePreview final : public QWidget {
+public:
+    CandlePreview(heatmap::HeatmapSettingsModel *model, QWidget *parent) : QWidget(parent), model_(model) {
+        setObjectName("candlePreview");
+        setFixedHeight(54);
+    }
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter p(this);
+        p.fillRect(rect(), QColor("#151B21"));
+        if (!model_) return;
+        const auto &s = model_->settings();
+        const QColor up(QString::fromStdString(s.candleUpColor));
+        const QColor down(QString::fromStdString(s.candleDownColor));
+        const QColor wick(s.candleWickColor == "auto" ? QString{} : QString::fromStdString(s.candleWickColor));
+        const int mid = width() / 2;
+        const int wickWidth = s.candleWickWidth;
+        auto draw = [&](int x, QColor body, int top, int bottom) {
+            p.fillRect(QRect(x - wickWidth / 2, 5, wickWidth, 44), wick.isValid() ? wick : body);
+            body.setAlphaF(s.candleBodyOpacity);
+            p.fillRect(QRect(x - 9, top, 18, bottom - top), body);
+        };
+        draw(mid - 27, up, 14, 31);
+        draw(mid + 27, down, 24, 42);
+    }
+private:
+    heatmap::HeatmapSettingsModel *model_ = nullptr;
+};
 } // namespace
 
 // ------------------------------------------------------------ gradient editor
@@ -243,7 +273,8 @@ void HeatmapSettingsDialog::setRenderer(UnifiedGridRenderer *renderer) {
 }
 
 QStringList HeatmapSettingsDialog::tabKeys(const QString &tab) {
-    if (tab == "Chart") return {"showLabels", "labelCurrency", "labelMinPx", "labelMaxPx"};
+    if (tab == "Chart") return {"showLabels", "labelCurrency", "labelMinPx", "labelMaxPx",
+                                "candleUpColor", "candleDownColor", "candleWickColor", "candleBodyOpacity", "candleWickWidth"};
     if (tab == "Tick") return {"tickMode", "manualTick", "minRowPx", "hysteresis"};
     if (tab == "Look")
         return {"palettePreset", "bidGradient", "askGradient", "sensitivityMin", "sensitivityMax", "opacity",
@@ -328,10 +359,35 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
                       "fits at the smallest size plus padding; it grows with the cells up to the largest size. "
                       "GPU renderer.",
                       page));
-    m_candleStyle = new QComboBox(page);
+    auto *candles = new QGroupBox("Candles", page);
+    auto *candleForm = new QFormLayout(candles);
+    m_candleStyle = new QComboBox(candles);
     m_candleStyle->setObjectName("candleStyle");
     m_candleStyle->addItems({"Candle", "Hollow", "Line"});
-    form->addRow("Candle style (this session)", m_candleStyle);
+    candleForm->addRow("Style (this session)", m_candleStyle);
+    m_candleUpColor = new QPushButton(candles);
+    m_candleUpColor->setObjectName("candleUpColor");
+    m_candleDownColor = new QPushButton(candles);
+    m_candleDownColor->setObjectName("candleDownColor");
+    m_candleWickColor = new QPushButton(candles);
+    m_candleWickColor->setObjectName("candleWickColor");
+    m_candleWickAuto = new QPushButton("Use body colour", candles);
+    m_candleWickAuto->setObjectName("candleWickAuto");
+    auto *wickRow = new QWidget(candles);
+    auto *wickLayout = new QHBoxLayout(wickRow);
+    wickLayout->setContentsMargins(0, 0, 0, 0);
+    wickLayout->addWidget(m_candleWickColor);
+    wickLayout->addWidget(m_candleWickAuto);
+    candleForm->addRow("Up colour", m_candleUpColor);
+    candleForm->addRow("Down colour", m_candleDownColor);
+    candleForm->addRow("Wick colour", wickRow);
+    m_candleBodyOpacity = intSpin(candles, "candleBodyOpacity", 0, 100, 5, "%");
+    m_candleWickWidth = intSpin(candles, "candleWickWidth", 1, 3, 1, " px");
+    candleForm->addRow("Body opacity", m_candleBodyOpacity);
+    candleForm->addRow("Wick width (device pixels)", m_candleWickWidth);
+    m_candlePreview = new CandlePreview(m_model, candles);
+    candleForm->addRow("Preview", m_candlePreview);
+    form->addRow(candles);
     form->addRow(resetButton("Chart", page));
     connect(m_showLabels, &QCheckBox::toggled, this, [this](bool on) { apply({{"showLabels", on}}); });
     connect(m_labelCurrency, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
@@ -345,6 +401,24 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     });
     connect(m_candleStyle, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
         if (m_renderer && index >= 0 && !m_loading) m_renderer->setCandleStyle(index);
+    });
+    auto pick = [this](QPushButton *button, const char *key) {
+        connect(button, &QPushButton::clicked, this, [this, key] {
+            const auto current = m_model ? heatmap::settingsJson(m_model->settings())[key].toString() : QString{};
+            const QColor picked = QColorDialog::getColor(QColor(current == "auto" ? "#E6EDF3" : current), this,
+                "Candle colour", QColorDialog::DontUseNativeDialog);
+            if (picked.isValid()) apply({{key, picked.name(QColor::HexRgb).toUpper()}});
+        });
+    };
+    pick(m_candleUpColor, "candleUpColor");
+    pick(m_candleDownColor, "candleDownColor");
+    pick(m_candleWickColor, "candleWickColor");
+    connect(m_candleWickAuto, &QPushButton::clicked, this, [this] { apply({{"candleWickColor", "auto"}}); });
+    connect(m_candleBodyOpacity, &QSpinBox::valueChanged, this, [this](int value) {
+        apply({{"candleBodyOpacity", value / 100.0}});
+    });
+    connect(m_candleWickWidth, &QSpinBox::valueChanged, this, [this](int value) {
+        apply({{"candleWickWidth", value}});
     });
     return page;
 }
@@ -662,6 +736,18 @@ void HeatmapSettingsDialog::refreshFromModel() {
     }
     set(m_labelMinPx, s.labelMinPx);
     set(m_labelMaxPx, s.labelMaxPx);
+    auto swatch = [](QPushButton *button, const std::string &value) {
+        const QString color = QString::fromStdString(value);
+        button->setText(color == "auto" ? "Body colour" : color);
+        button->setStyleSheet(color == "auto" ? QString{} : swatchStyle(color));
+    };
+    swatch(m_candleUpColor, s.candleUpColor);
+    swatch(m_candleDownColor, s.candleDownColor);
+    swatch(m_candleWickColor, s.candleWickColor);
+    m_candleWickAuto->setEnabled(s.candleWickColor != "auto");
+    set(m_candleBodyOpacity, int(std::lround(s.candleBodyOpacity * 100)));
+    set(m_candleWickWidth, s.candleWickWidth);
+    m_candlePreview->update();
     {
         const QSignalBlocker block(m_palette);
         m_palette->setCurrentIndex(std::max<qsizetype>(0, kPalettes.indexOf(QString::fromStdString(s.palettePreset))));

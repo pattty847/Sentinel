@@ -5,6 +5,8 @@
 // owner's). GPU cases (a UnifiedGridRenderer over the synthetic HMC2 recording,
 // as test_ugr_gpu) skip with the reason when no QRhi can be created.
 #include "UnifiedGridRenderer.h"
+#include "render/CandlestickOverlayItem.hpp"
+#include "render/CandlePixelGeometry.hpp"
 #include "CoordinateSystem.h"
 #include "lab/LabData.hpp"
 #include "lab/OffscreenQuick.hpp"
@@ -30,6 +32,7 @@
 #include <QPushButton>
 #include <QQuickWindow>
 #include <QSettings>
+#include <QSGGeometry>
 #include <QSignalSpy>
 #include <QSpinBox>
 #include <QTabWidget>
@@ -113,6 +116,123 @@ TEST(HeatmapSettingsModelTest, PersistsPerChartAndASessionRendererIsNotSaved) {
     EXPECT_FALSE(main.apply({{"palettePreset", "Nope"}}).isEmpty());
     EXPECT_EQ(changed.count(), 0);
     EXPECT_EQ(main.settings().palettePreset, "Ocean");
+}
+
+TEST(CandleStyleTest, PhysicalWicksSnapAndDojiIsOnePixel) {
+    for (double dpr : {1.0, 1.5, 2.0}) {
+        for (double zoom : {0.8, 3.0, 17.0, 64.0}) {
+            const double centre = 7.25 + zoom * 0.37;
+            for (int width = 1; width <= 3; ++width) {
+                const auto span = candle_pixels::stroke(centre, width, dpr);
+                QSGGeometry geometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), 6);
+                auto *v = geometry.vertexDataAsColoredPoint2D();
+                v[0].set(span.lo, 0, 1, 2, 3, 255);
+                v[1].set(span.hi, 10, 1, 2, 3, 255);
+                EXPECT_NEAR((v[1].x - v[0].x) * dpr, width, 1e-5);
+                EXPECT_NEAR(v[0].x * dpr, std::round(v[0].x * dpr), 1e-5);
+                EXPECT_NEAR(v[1].x * dpr, std::round(v[1].x * dpr), 1e-5);
+                if (width == 1) EXPECT_NEAR((v[0].x + v[1].x) * dpr * 0.5 - 0.5,
+                                             std::round((v[0].x + v[1].x) * dpr * 0.5 - 0.5), 1e-5);
+            }
+            const auto doji = candle_pixels::doji(12.37 + zoom, dpr);
+            EXPECT_NEAR((doji.hi - doji.lo) * dpr, 1.0, 1e-5);
+            EXPECT_NEAR(doji.lo * dpr, std::round(doji.lo * dpr), 1e-5);
+        }
+    }
+}
+
+TEST(CandleStyleTest, DefaultColoursOpacityAndGeometryCapacity) {
+    CandlestickOverlayItem item;
+    EXPECT_EQ(item.upColor().name(), "#2ebd85");
+    EXPECT_EQ(item.downColor().name(), "#f6465d");
+    EXPECT_EQ(item.wickColor(), "auto");
+    EXPECT_EQ(item.bodyOpacity(), 1.0);
+    EXPECT_EQ(candle_pixels::bodyAlpha(item.bodyOpacity()), 255);
+    EXPECT_EQ(item.wickWidth(), 1);
+    int capacity = 0;
+    QSGGeometry geometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), 0);
+    for (int frame = 0; frame < 100; ++frame) {
+        const int previous = capacity;
+        candle_pixels::setGeometryCount(geometry, capacity, 6 * (frame % 17 + 1));
+        EXPECT_GE(capacity, previous);
+        EXPECT_EQ(geometry.vertexCount(), 6 * (frame % 17 + 1));
+    }
+    const int warmed = capacity;
+    const void *data = geometry.vertexData();
+    for (int frame = 0; frame < 100; ++frame) {
+        candle_pixels::setGeometryCount(geometry, capacity, 6 * (frame % 17 + 1));
+        EXPECT_EQ(capacity, warmed);
+        EXPECT_EQ(geometry.vertexData(), data);
+    }
+}
+
+TEST(CandleStyleTest, SettingsValidateAndRoundTripPerChart) {
+    TempStore t;
+    HeatmapSettingsModel main(t.store, "main", t.config), other(t.store, "other", t.config);
+    const auto defaults = main.settings();
+    EXPECT_EQ(defaults.candleUpColor, "#2EBD85");
+    EXPECT_EQ(defaults.candleDownColor, "#F6465D");
+    EXPECT_EQ(defaults.candleWickColor, "auto");
+    EXPECT_EQ(defaults.candleBodyOpacity, 1);
+    EXPECT_EQ(defaults.candleWickWidth, 1);
+    ASSERT_TRUE(main.apply({{"candleUpColor", "#123ABC"}, {"candleDownColor", "#E45678"},
+                            {"candleWickColor", "#F0F0F0"}, {"candleBodyOpacity", 0.65},
+                            {"candleWickWidth", 3}}).isEmpty());
+    EXPECT_EQ(main.settings().candleUpColor, "#123ABC");
+    EXPECT_EQ(main.settings().candleDownColor, "#E45678");
+    EXPECT_EQ(main.settings().candleWickColor, "#F0F0F0");
+    EXPECT_DOUBLE_EQ(main.settings().candleBodyOpacity, 0.65);
+    EXPECT_EQ(main.settings().candleWickWidth, 3);
+    EXPECT_EQ(t.reload(), main.settings());
+    EXPECT_EQ(t.reload("other"), other.settings());
+    const auto before = main.settings();
+    for (const QJsonObject bad : {QJsonObject{{"candleUpColor", "cyan"}},
+                                  QJsonObject{{"candleWickColor", "#12"}},
+                                  QJsonObject{{"candleWickWidth", 0}},
+                                  QJsonObject{{"candleWickWidth", 1.5}},
+                                  QJsonObject{{"candleBodyOpacity", "opaque"}}}) {
+        EXPECT_FALSE(main.apply(bad).isEmpty());
+        EXPECT_EQ(main.settings(), before);
+    }
+    ASSERT_TRUE(main.apply({{"candleWickColor", "auto"}}).isEmpty());
+    EXPECT_EQ(t.reload().candleWickColor, "auto");
+}
+
+TEST(CandleStyleTest, ChartControlsApplyLiveAndReset) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    auto *opacity = child<QSpinBox>(dialog, "candleBodyOpacity");
+    auto *width = child<QSpinBox>(dialog, "candleWickWidth");
+    EXPECT_EQ(opacity->value(), 100);
+    EXPECT_EQ(width->value(), 1);
+    EXPECT_NE(child<QWidget>(dialog, "candlePreview"), nullptr);
+    width->setValue(3);
+    opacity->setValue(65);
+    EXPECT_EQ(model.settings().candleWickWidth, 3);
+    EXPECT_DOUBLE_EQ(model.settings().candleBodyOpacity, 0.65);
+    EXPECT_EQ(t.reload().candleWickWidth, 3);
+    EXPECT_EQ(t.reload().candleBodyOpacity, 0.65);
+    ASSERT_TRUE(model.apply({{"candleUpColor", "#ABCDEF"}}).isEmpty());
+    EXPECT_EQ(child<QPushButton>(dialog, "candleUpColor")->text(), "#ABCDEF");
+    child<QPushButton>(dialog, "resetChart")->click();
+    EXPECT_EQ(model.settings().candleUpColor, "#2EBD85");
+    EXPECT_EQ(width->value(), 1);
+    EXPECT_EQ(opacity->value(), 100);
+}
+
+TEST(CandleStyleTest, ModelChangesReachTheChartProperties) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    UnifiedGridRenderer renderer;
+    HeatmapChartControls controls(&model);
+    controls.setRenderer(&renderer);
+    ASSERT_TRUE(model.apply({{"candleUpColor", "#123ABC"}, {"candleWickColor", "#FEDCBA"},
+                             {"candleBodyOpacity", 0.4}, {"candleWickWidth", 2}}).isEmpty());
+    EXPECT_EQ(renderer.candleUpColor().name(), "#123abc");
+    EXPECT_EQ(renderer.candleWickColor(), "#FEDCBA");
+    EXPECT_DOUBLE_EQ(renderer.candleBodyOpacity(), 0.4);
+    EXPECT_EQ(renderer.candleWickWidth(), 2);
 }
 
 TEST(HeatmapSettingsModelTest, NamedWorkspacesRestoreButLastSessionNever) {

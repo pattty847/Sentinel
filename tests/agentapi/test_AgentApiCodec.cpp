@@ -479,6 +479,18 @@ TEST(AgentApiHeatmap, SettingsPartialTypesAndGradientValidation) {
         R"({"bidGradient":[]})"}) EXPECT_EQ(check(bad).status, 422) << bad;
 }
 
+TEST(AgentApiHeatmap, CandleSettingsAreExposedAndValidated) {
+    const auto check = [](const char *json) { return validateControl({"POST", "/api/v1/heatmap/settings", {}, json}, {}); };
+    const auto valid = check(R"({"candleUpColor":"#2EBD85","candleDownColor":"#F6465D","candleWickColor":"auto","candleBodyOpacity":1,"candleWickWidth":1})");
+    ASSERT_EQ(valid.status, 200);
+    EXPECT_EQ(valid.body.heatmapSettings.size(), 5);
+    for (const char *bad : {R"({"candleUpColor":"green"})", R"({"candleDownColor":"#1234"})",
+                            R"({"candleWickColor":"transparent"})", R"({"candleWickWidth":0})",
+                            R"({"candleWickWidth":4})", R"({"candleWickWidth":1.5})",
+                            R"({"candleBodyOpacity":"100%"})"})
+        EXPECT_EQ(check(bad).status, 422) << bad;
+}
+
 TEST(AgentApiHeatmap, ProcessOnlySettingsFlagIsStrictAndRemovedFromThePatch) {
     const auto check = [](const char *json) { return validateControl({"POST", "/api/v1/heatmap/settings", {}, json}, {}); };
     auto c = check(R"({"renderer":"gpu","persist":false})");
