@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("gui_host", os.path.join(HERE, "gui-host.py"))
@@ -110,10 +111,53 @@ class HostTrust(unittest.TestCase):
         argv = gh.gui_argv("/bin/gui", "/sess", "gpu", 17130)
         self.assertEqual(argv[0], "/bin/gui")
         self.assertEqual(argv[1:3], ["--agent-host", "/sess"])
-        self.assertEqual(argv[3:5], ["--agent-host-symbols", gh.SYMBOLS])
-        self.assertEqual(argv[5:], ["--heatmap-renderer", "gpu", "--api-port", "17130", "--no-screener"])
+        self.assertEqual(argv[3:5], ["--agent-host-profile", gh.profile_dir()])
+        self.assertEqual(argv[5:7], ["--agent-host-symbols", gh.SYMBOLS])
+        self.assertEqual(argv[7:], ["--heatmap-renderer", "gpu", "--api-port", "17130", "--no-screener"])
         self.assertIn("BTC-USD", gh.SYMBOLS.split(","))
         self.assertTrue(all(re.fullmatch(r"[A-Z0-9]{2,20}-[A-Z0-9]{2,20}", x) for x in gh.SYMBOLS.split(",")))
+
+    def test_only_dock_file_persists_across_sessions_and_reset_keeps_session_data(self):
+        first = gh.gui_argv("/bin/gui", os.path.join(gh.SESSIONS_DIR, "one"), "gpu", 17130)
+        second = gh.gui_argv("/bin/gui", os.path.join(gh.SESSIONS_DIR, "two"), "gpu", 17131)
+        self.assertNotEqual(first[2], second[2])
+        self.assertEqual(first[4], second[4])
+        self.assertEqual(os.path.basename(first[4]), "docks.ini")
+        os.makedirs(os.path.dirname(first[4]))
+        with open(first[4], "w") as f:
+            f.write("dock=heatmap")
+        self.assertEqual(gh.prepare_profile(), first[4])
+        self.assertTrue(os.path.isfile(first[4]))
+        first_settings = os.path.join(first[2], "settings")
+        second_settings = os.path.join(second[2], "settings")
+        self.assertNotEqual(first_settings, second_settings)
+        os.makedirs(first_settings)
+        with open(os.path.join(first_settings, "Sentinel.ini"), "w") as f:
+            f.write("heatmap=changed")
+        self.assertFalse(os.path.exists(second_settings))
+        self.assertEqual(gh.prepare_profile(fresh=True), first[4])  # launch --fresh-profile
+        self.assertFalse(os.path.exists(first[4]))
+        with open(first[4], "w") as f:
+            f.write("dock=watchlist")
+        shot = os.path.join(first[2], "screenshots")
+        os.makedirs(shot)
+        self.assertEqual(gh.reset_profile(), {"ok": True, "profileReset": True})
+        self.assertFalse(os.path.exists(first[4]))
+        self.assertTrue(os.path.exists(os.path.join(first_settings, "Sentinel.ini")))
+        self.assertTrue(os.path.isdir(shot))
+
+    def test_profile_refuses_forbidden_roots_and_symlink_escape(self):
+        original = gh.SESSIONS_DIR
+        try:
+            gh.SESSIONS_DIR = os.path.join(self.repo, "sessions")
+            self.assertRefused("unsafe_profile", gh.profile_dir)
+            gh.SESSIONS_DIR = "/Volumes/T7/agent-profile"
+            self.assertRefused("unsafe_profile", gh.profile_dir)
+            gh.SESSIONS_DIR = original
+            os.symlink(self.repo, os.path.join(original, "profile"))
+            self.assertRefused("unsafe_profile", gh.profile_dir)
+        finally:
+            gh.SESSIONS_DIR = original
 
     # ---- screenshots
     def test_shot_refuses_screen_grabs_and_bad_names(self):
@@ -128,13 +172,21 @@ class HostTrust(unittest.TestCase):
                                  start_new_session=True)
         other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
         try:
-            with open(gh.PIDFILE, "w") as f:
-                json.dump({"pid": stale.pid}, f)
-            gh.cleanup_stale()
-            self.assertIsNotNone(stale.wait(10), "the stale agent-host GUI must be ended")
-            with open(gh.PIDFILE, "w") as f:
-                json.dump({"pid": other.pid}, f)  # a recycled pid: some unrelated process
-            gh.cleanup_stale()
+            actual_run = gh.subprocess.run
+            def fake_ps(argv, **kwargs):
+                if argv[:3] == ["ps", "-o", "command="]:
+                    pid = int(argv[-1])
+                    return subprocess.CompletedProcess(argv, 0,
+                        "sentinel-gui --agent-host x" if pid == stale.pid else "unrelated app")
+                return actual_run(argv, **kwargs)
+            with patch.object(gh.subprocess, "run", side_effect=fake_ps):
+                with open(gh.PIDFILE, "w") as f:
+                    json.dump({"pid": stale.pid}, f)
+                gh.cleanup_stale()
+                self.assertIsNotNone(stale.wait(10), "the stale agent-host GUI must be ended")
+                with open(gh.PIDFILE, "w") as f:
+                    json.dump({"pid": other.pid}, f)  # a recycled pid: some unrelated process
+                gh.cleanup_stale()
             time.sleep(0.3)
             self.assertIsNone(other.poll(), "an unrelated process must not be killed")
         finally:

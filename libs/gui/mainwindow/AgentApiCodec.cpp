@@ -121,16 +121,16 @@ ParseResult RequestParser::feed(const QByteArray& bytes) {
     const bool operation = path.startsWith("/api/v1/operations/") && path.size() > 19;
     const bool control = path == "/api/v1/symbol" || path == "/api/v1/timeframe" ||
                          path == "/api/v1/viewport" || path == "/api/v1/layers" ||
-                         path == "/api/v1/heatmap/settings" || path == "/api/v1/input";
+                         path == "/api/v1/heatmap/settings" || path == "/api/v1/input" || path == "/api/v1/docks";
     const bool known = operation || control || path == "/api/v1/state" ||
                        path == "/api/v1/candles" || path == "/api/v1/book" ||
                        path == "/api/v1/trades" || path == "/api/v1/heatmap/walls" || path == "/api/v1/heatmap/state" ||
-                       path == "/api/v1/screenshot" || path == "/screenshot";
+                       path == "/api/v1/screenshot" || path == "/screenshot" || path == "/api/v1/docks";
     if (!known) return fail(404, "not_found", "Unknown route");
     const bool readable = operation || path == "/api/v1/state" || path == "/api/v1/viewport" ||
                           path == "/api/v1/candles" || path == "/api/v1/book" ||
                           path == "/api/v1/trades" || path == "/api/v1/heatmap/walls" || path == "/api/v1/heatmap/state" ||
-                          path == "/api/v1/screenshot" || path == "/screenshot";
+                          path == "/api/v1/screenshot" || path == "/screenshot" || path == "/api/v1/docks";
     if (!((parts[0] == "GET" && readable) || (parts[0] == "POST" && control)))
         return fail(405, "method_not_allowed", "Method not allowed");
     if (parts[0] == "GET" && contentLength != 0) return fail(400, "bad_request", "GET body is unsupported");
@@ -157,6 +157,10 @@ ValidationResult validateQuery(const Request& request, const QString& activeSymb
         result.message = QString::fromLatin1(message);
         return result;
     };
+    if (request.path == "/api/v1/docks") {
+        if (!query.isEmpty()) return reject(400, "invalid_parameter", "Docks do not accept query parameters");
+        return {};
+    }
     if (request.path == "/api/v1/heatmap/walls") {
         ValidationResult result;
         QSet<QString> seen;
@@ -312,7 +316,8 @@ ValidationResult validateQuery(const Request& request, const QString& activeSymb
     return {};
 }
 
-ControlValidation validateControl(const Request& request, const std::optional<QList<qint64>>& served) {
+ControlValidation validateControl(const Request& request, const std::optional<QList<qint64>>& served,
+                                  const QJsonObject& currentDocks) {
     auto reject = [](const char* code, const char* message) {
         ControlValidation r; r.status = 422; r.code = code; r.message = message; return r;
     };
@@ -324,6 +329,48 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
     if (obj.isEmpty()) return reject("invalid_body", "Body must contain a control");
     const QString kind = request.path.mid(QStringLiteral("/api/v1/").size());
     ControlValidation result;
+    if (kind == "docks") {
+        QStringList ids = currentDocks.keys();
+        const QString validIds = ids.join(", ");
+        for (auto it = obj.constBegin(); it != obj.constEnd(); ++it)
+            if (it.key() != "visible" && it.key() != "focus" && it.key() != "persist")
+                return reject("invalid_field", "Unknown dock control field");
+        if (obj.contains("persist")) {
+            if (!obj.value("persist").isBool()) return reject("invalid_docks", "persist must be boolean");
+            result.body.persistDocks = obj.value("persist").toBool();
+        }
+        if (obj.contains("focus") == obj.contains("visible"))
+            return reject("invalid_docks", "Supply exactly one of focus or visible");
+        QJsonObject desired = currentDocks;
+        if (obj.contains("focus")) {
+            if (!obj.value("focus").isString() || !currentDocks.contains(obj.value("focus").toString())) {
+                result.status = 422; result.code = "unknown_dock";
+                result.message = "Unknown dock id; valid ids: " + validIds;
+                return result;
+            }
+            result.body.dockFocus = obj.value("focus").toString();
+            for (auto it = desired.begin(); it != desired.end(); ++it)
+                it.value() = it.key() == result.body.dockFocus;
+        } else {
+            const auto value = obj.value("visible");
+            if (!value.isObject() || value.toObject().isEmpty())
+                return reject("invalid_docks", "visible must be a nonempty object");
+            result.body.dockVisible = value.toObject();
+            for (auto it = result.body.dockVisible.constBegin(); it != result.body.dockVisible.constEnd(); ++it) {
+                if (!currentDocks.contains(it.key())) {
+                    result.status = 422; result.code = "unknown_dock";
+                    result.message = "Unknown dock id " + it.key() + "; valid ids: " + validIds;
+                    return result;
+                }
+                if (!it.value().isBool()) return reject("invalid_docks", "Dock visibility must be boolean");
+                desired.insert(it.key(), it.value());
+            }
+        }
+        bool any = false;
+        for (auto it = desired.constBegin(); it != desired.constEnd(); ++it) any |= it.value().toBool();
+        if (!any) return reject("hide_all_docks", "At least one dock must remain visible");
+        return result;
+    }
     if (kind == "heatmap/settings") {
         auto patch = obj;
         if (patch.contains("persist")) {

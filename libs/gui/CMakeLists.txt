@@ -22,6 +22,8 @@ set(GRID_CORE_SOURCES
     mainwindow/QmlSceneController.h
     mainwindow/LayoutOrchestrator.cpp
     mainwindow/LayoutOrchestrator.h
+    mainwindow/DockVisibilityController.cpp
+    mainwindow/DockVisibilityController.hpp
     mainwindow/MenuBuilder.cpp
     mainwindow/MenuBuilder.h
     mainwindow/ShortcutBinder.cpp

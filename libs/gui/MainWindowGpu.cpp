@@ -49,6 +49,7 @@
 #include "config/AgentHostMode.hpp"
 #include "mainwindow/QmlSceneController.h"
 #include "mainwindow/LayoutOrchestrator.h"
+#include "mainwindow/DockVisibilityController.hpp"
 #include "mainwindow/MenuBuilder.h"
 #include "mainwindow/ShortcutBinder.h"
 #include "mainwindow/GuiApiServer.h"
@@ -204,6 +205,9 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     m_modeController->setPrimaryField(ChartModeController::PrimaryField::Heatmap);
     m_modeController->setCandlesEnabled(true);
     m_layoutOrchestrator = std::make_unique<LayoutOrchestrator>(this);
+    m_dockVisibility = std::make_unique<DockVisibilityController>(this);
+    for (const auto& [id, dock] : LayoutOrchestrator::apiDocks(getDockWidgets()))
+        m_dockVisibility->add(id, dock);
     m_layoutOrchestrator->setHeatmapHooks(
         // Named workspaces only; the model ignores _last_session (INV-088). A
         // restore emits changed(): the chart, toolbar, dialog and dock follow.
@@ -612,6 +616,7 @@ void MainWindowGPU::setupGuiApiServer() {
                                                     },
                                                     this);
     m_guiApiServer->setHeatmapSnapshot([this] { return agentApiHeatmapSnapshot(); });
+    m_guiApiServer->setDocksSnapshot([this] { return m_dockVisibility->snapshot(); });
     // S6c widget targets: the settings dialog (opened on demand, a given tab) and
     // the telemetry dock, grabbed from their own painting (never screen pixels).
     m_guiApiServer->setWidgetGrab([this](const QString& target, QString* error) -> QImage {
@@ -1013,6 +1018,7 @@ void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
 
 void MainWindowGPU::closeEvent(QCloseEvent* event) {
     stopScreenerServer();
+    m_dockVisibility->restoreBeforeSessionSave();
     m_layoutOrchestrator->saveLayout("_last_session");
     QMainWindow::closeEvent(event);
 }
@@ -1037,6 +1043,7 @@ void MainWindowGPU::showEvent(QShowEvent* event) {
             if (!m_layoutOrchestrator->restoreLayout(getDockWidgets(), "_last_session")) {
                 m_layoutOrchestrator->arrangeDefaultLayout(getDockWidgets());
             }
+            m_dockVisibility->restore();
         });
     }
 }
@@ -1551,6 +1558,13 @@ QJsonObject MainWindowGPU::agentApiHeatmapSnapshot() const {
 
 AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, const AgentApi::ControlBody& body) {
     AgentApi::ControlApply out;
+    if (kind == "docks") {
+        const bool persist = AgentHostMode::dockChangesPersist(body.persistDocks);
+        out.data["visible"] = m_dockVisibility->apply(body.dockVisible, body.dockFocus, persist);
+        out.data["persist"] = persist;
+        out.viewportVersion = agentApiViewportSnapshot().viewportVersion.value_or(0);
+        return out;
+    }
     auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
     if (!renderer) {
         out.status = 503; out.code = "chart_unavailable"; out.message = "Chart renderer is unavailable";

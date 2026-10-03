@@ -166,7 +166,8 @@ void GuiApiServer::handleRequest(QTcpSocket* socket) {
             return;
         }
         const auto capability = m_stateSnapshot().servedTimeframesMs;
-        const auto valid = AgentApi::validateControl(parsed.request, capability);
+        const auto valid = AgentApi::validateControl(parsed.request, capability,
+            path == "/api/v1/docks" && m_docksSnapshot ? m_docksSnapshot() : QJsonObject{});
         if (valid.status != 200) {
             respond(socket, valid.status, AgentApi::jsonBytes(AgentApi::error(valid.code, valid.message)), "application/json");
             return;
@@ -204,6 +205,18 @@ void GuiApiServer::handleRequest(QTcpSocket* socket) {
             return;
         }
         respond(socket, 200, AgentApi::jsonBytes(AgentApi::stateJson(snapshot)), "application/json");
+        return;
+    }
+    if (path == "/api/v1/docks") {
+        const auto check = AgentApi::validateQuery(parsed.request);
+        if (check.status != 200) {
+            respond(socket, check.status, AgentApi::jsonBytes(AgentApi::error(check.code, check.message)), "application/json");
+        } else if (!m_docksSnapshot) {
+            respond(socket, 503, AgentApi::jsonBytes(AgentApi::error("docks_unavailable", "Docks are unavailable")), "application/json");
+        } else {
+            respond(socket, 200, AgentApi::jsonBytes(AgentApi::envelope(m_stateSnapshot().meta,
+                QJsonObject{{"visible", m_docksSnapshot()}})), "application/json");
+        }
         return;
     }
     if (path == "/api/v1/heatmap/state") {

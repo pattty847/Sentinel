@@ -21,6 +21,15 @@ LayoutOrchestrator::LayoutOrchestrator(QMainWindow* mainWindow)
     : m_mainWindow(mainWindow) {
 }
 
+QList<QPair<QString, QDockWidget*>> LayoutOrchestrator::apiDocks(const DockWidgets& docks) {
+    return {{"heatmap", docks.heatmapDock}, {"orderBook", docks.orderBookDock},
+            {"watchlist", docks.watchlistDock}, {"sec", docks.secDock},
+            {"copenet", docks.copenetDock}, {"aiCommentary", docks.aiCommentaryDock},
+            {"lab", docks.labDock}, {"screener", docks.screenerDock},
+            {"stockChart", docks.stockChartDock}, {"paperTrading", docks.paperTradingDock},
+            {"telemetry", docks.heatmapTelemetryDock}};
+}
+
 void LayoutOrchestrator::arrangeDefaultLayout(const DockWidgets& docks) {
     const QMainWindow::DockOptions previousOptions = m_mainWindow->dockOptions();
     m_mainWindow->setUpdatesEnabled(false);
@@ -214,4 +223,3 @@ void LayoutOrchestrator::showAllDocks(const DockWidgets& docks) {
         if (docks.heatmapTelemetryVisible) docks.heatmapTelemetryDock->raise();
     }
 }
-

@@ -17,6 +17,12 @@ target_link_libraries(test_AgentApiInput PRIVATE sentinel_gui_lib GTest::gtest Q
 add_test(NAME AgentApiInputTests COMMAND test_AgentApiInput)
 set_tests_properties(AgentApiInputTests PROPERTIES LABELS "agentapi" ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+add_executable(test_AgentApiDocks test_AgentApiDocks.cpp)
+target_include_directories(test_AgentApiDocks PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_AgentApiDocks PRIVATE sentinel_gui_lib GTest::gtest Qt6::Widgets Qt6::Network)
+add_test(NAME AgentApiDocksTests COMMAND test_AgentApiDocks)
+set_tests_properties(AgentApiDocksTests PROPERTIES LABELS "agentapi" ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_executable(test_AgentHostMode
     test_AgentHostMode.cpp
     ${CMAKE_SOURCE_DIR}/libs/gui/config/AgentHostMode.cpp

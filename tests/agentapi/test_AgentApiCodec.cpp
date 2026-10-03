@@ -64,6 +64,27 @@ TEST(AgentApiControls, PostParserAndWaitValidation) {
     EXPECT_EQ(validateQuery({"GET", "/api/v1/screenshot", "afterOperation=o1&waitMs=5000"}).status, 200);
 }
 
+TEST(AgentApiControls, DocksValidateIdsFocusAndHideAll) {
+    const QJsonObject current{{"heatmap", true}, {"orderBook", true}, {"watchlist", false}};
+    auto check = [&](const char* body) {
+        return validateControl({"POST", "/api/v1/docks", {}, body}, std::nullopt, current);
+    };
+    EXPECT_EQ(check(R"({"focus":"heatmap"})").body.dockFocus, "heatmap");
+    EXPECT_EQ(check(R"({"visible":{"orderBook":false}})").status, 200);
+    EXPECT_EQ(check(R"({"visible":{"heatmap":false,"orderBook":false}})").code, "hide_all_docks");
+    const auto unknown = check(R"({"visible":{"missing":false}})");
+    EXPECT_EQ(unknown.status, 422);
+    EXPECT_EQ(unknown.code, "unknown_dock");
+    EXPECT_TRUE(unknown.message.contains("heatmap"));
+    EXPECT_EQ(check(R"({"focus":"missing"})").code, "unknown_dock");
+    EXPECT_EQ(check(R"({"focus":"heatmap","visible":{"orderBook":false}})").status, 422);
+    EXPECT_EQ(check(R"({"visible":{"orderBook":0}})").status, 422);
+    EXPECT_EQ(check(R"({"focus":"heatmap","persist":true})").body.persistDocks, true);
+    EXPECT_EQ(check(R"({"focus":"heatmap"})").body.persistDocks, false);
+    RequestParser get;
+    EXPECT_EQ(get.feed("GET /api/v1/docks HTTP/1.1\r\nHost: localhost\r\n\r\n").kind, ParseResult::Kind::Complete);
+}
+
 TEST(AgentApiControls, OperationStateWithFakeFrameAck) {
     Operations ops;
     const auto first = ops.apply("viewport", 42);
