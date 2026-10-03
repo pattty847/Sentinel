@@ -182,19 +182,15 @@ bool SentinelServerApp::initialize() {
         });
 
         m_server->setFeedAdmissionHandler([this](const std::string& symbol) {
-            QPointer<ServerDataModel> modelPtr(m_serverModel.get());
-            safeInvoke(modelPtr, [symbol](ServerDataModel& model) { model.acquireGuiFeed(symbol); });
             MarketDataFeeds::AddResult result;
             try {
                 result = m_marketDataCore->add(symbol);
             } catch (const std::exception& e) {
-                safeInvoke(modelPtr, [symbol](ServerDataModel& model) { model.releaseGuiFeed(symbol); });
                 sLog_Error("Upstream feed admission threw: symbol=" << symbol << " error=" << e.what());
                 return SentinelStreamServer::FeedAdmission::UpstreamUnavailable;
             }
             if (result == MarketDataFeeds::AddResult::CapacityExceeded ||
                 result == MarketDataFeeds::AddResult::InvalidProduct) {
-                safeInvoke(modelPtr, [symbol](ServerDataModel& model) { model.releaseGuiFeed(symbol); });
                 sLog_Error("Upstream feed admission failed: symbol=" << symbol
                            << " result=" << (result == MarketDataFeeds::AddResult::CapacityExceeded
                                ? "CapacityExceeded" : "InvalidProduct"));

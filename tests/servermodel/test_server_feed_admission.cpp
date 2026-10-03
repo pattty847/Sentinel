@@ -15,8 +15,18 @@
 
 struct FeedClockModel : ServerDataModel {
     int64_t& clock;
+    std::map<std::string, int> acquireCalls;
+    std::map<std::string, int> releaseCalls;
     FeedClockModel(const ServerConfig& c, int64_t& now) : ServerDataModel(c), clock(now) {}
     int64_t exchangeNowMs() const override { return clock; }
+    void acquireGuiFeed(const std::string& symbol) {
+        ++acquireCalls[symbol];
+        ServerDataModel::acquireGuiFeed(symbol);
+    }
+    void releaseGuiFeed(const std::string& symbol, int64_t localMs = 0) {
+        ++releaseCalls[symbol];
+        ServerDataModel::releaseGuiFeed(symbol, localMs);
+    }
 };
 
 struct ServerFeedAdmissionTest : testing::Test {
@@ -27,7 +37,7 @@ struct ServerFeedAdmissionTest : testing::Test {
     QTemporaryDir dir;
     Authenticator auth{"/nonexistent-sentinel-test-credentials"};
     ServerConfig config;
-    std::unique_ptr<ServerDataModel> model;
+    std::unique_ptr<FeedClockModel> model;
     std::unique_ptr<SentinelStreamServer> server;
     std::unique_ptr<MarketDataFeeds> feeds;
     sentinel::metrics::MetricsRegistry metrics;
@@ -72,32 +82,20 @@ struct ServerFeedAdmissionTest : testing::Test {
                 model->onMarketDataConnectionChanged(symbol, up);
             }, Qt::QueuedConnection);
         });
-        QObject::connect(server.get(), &SentinelStreamServer::clientSubscribed, model.get(), [this](const QString& symbol) {
-            const auto result = feeds->add(symbol.toStdString());
-            EXPECT_TRUE(result == MarketDataFeeds::AddResult::Added || result == MarketDataFeeds::AddResult::AlreadyPresent);
-        }, Qt::QueuedConnection);
         server->setFeedAdmissionHandler([this](const std::string& symbol) {
-            QMetaObject::invokeMethod(model.get(), [this, symbol] { model->acquireGuiFeed(symbol); },
-                                      Qt::QueuedConnection);
             const auto result = feeds->add(symbol);
             if (result == MarketDataFeeds::AddResult::CapacityExceeded) {
-                QMetaObject::invokeMethod(model.get(), [this, symbol] { model->releaseGuiFeed(symbol); },
-                                          Qt::QueuedConnection);
                 return SentinelStreamServer::FeedAdmission::CapacityExceeded;
             }
             if (result == MarketDataFeeds::AddResult::InvalidProduct) {
-                QMetaObject::invokeMethod(model.get(), [this, symbol] { model->releaseGuiFeed(symbol); },
-                                          Qt::QueuedConnection);
                 return SentinelStreamServer::FeedAdmission::InvalidProduct;
             }
             return SentinelStreamServer::FeedAdmission::Accepted;
         });
         QObject::connect(server.get(), &SentinelStreamServer::clientUnsubscribed, model.get(), [this](const QString& symbol) {
-            feeds->remove(symbol.toStdString());
             const auto native = symbol.toStdString();
             server->releaseIfNoSubscribers(native, [this, &native] {
                 feeds->remove(native);
-                model->releaseGuiFeed(native);
             });
         }, Qt::QueuedConnection);
         for (const auto& symbol : normalizedDefaultSymbols(config.defaultSymbols)) feeds->add(symbol, true);
@@ -144,6 +142,9 @@ struct ServerFeedAdmissionTest : testing::Test {
     }
     bool slotHeld(const std::string& symbol) const {
         return server->m_symbolSubscriptions.contains(symbol);
+    }
+    bool modelHasFeed(const std::string& symbol) const {
+        return model->m_feeds.contains(symbol);
     }
     static void deliver(SentinelStreamClient& client, const std::string& message) { client.handleMessage(message); }
 };
@@ -324,6 +325,21 @@ TEST_F(ServerFeedAdmissionTest, UpstreamCapacityFailureReleasesReservedSlotBefor
     EXPECT_EQ(reply.value("symbol", ""), "ETH-USD");
     EXPECT_FALSE(sessionHas(gui, "ETH-USD"));
     EXPECT_FALSE(slotHeld("ETH-USD"));
+    EXPECT_EQ(model->acquireCalls["ETH-USD"], 0);
+    EXPECT_EQ(model->releaseCalls["ETH-USD"], 0);
+}
+
+TEST_F(ServerFeedAdmissionTest, OneGuiFeedLifecycleAcquireAndRelease) {
+    auto gui = session();
+    EXPECT_FALSE(modelHasFeed("ETH-USD"));
+    request(gui, "ETH-USD");
+    EXPECT_EQ(model->acquireCalls["ETH-USD"], 1);
+    EXPECT_EQ(model->releaseCalls["ETH-USD"], 0);
+    EXPECT_TRUE(modelHasFeed("ETH-USD"));
+    request(gui, "ETH-USD", "unsubscribe");
+    EXPECT_EQ(model->acquireCalls["ETH-USD"], 1);
+    EXPECT_EQ(model->releaseCalls["ETH-USD"], 1);
+    EXPECT_FALSE(modelHasFeed("ETH-USD"));
 }
 
 TEST_F(ServerFeedAdmissionTest, FastFlipKeepsResubscribedUpstreamFeed) {
@@ -366,6 +382,8 @@ TEST(ServerFeedAdmissionSource, AppChecksUpstreamResultBeforeAcknowledgement) {
     EXPECT_NE(admission.find("m_marketDataCore->add(symbol)"), std::string::npos);
     EXPECT_NE(admission.find("AddResult::CapacityExceeded"), std::string::npos);
     EXPECT_NE(admission.find("AddResult::InvalidProduct"), std::string::npos);
+    EXPECT_EQ(admission.find("acquireGuiFeed"), std::string::npos);
+    EXPECT_EQ(admission.find("releaseGuiFeed"), std::string::npos);
     EXPECT_NE(text.find("m_server->releaseIfNoSubscribers(native"), std::string::npos);
 }
 
