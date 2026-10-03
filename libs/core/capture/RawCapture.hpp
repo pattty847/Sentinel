@@ -41,6 +41,7 @@ struct RecordLocation {
     uint64_t connection = 0;
     Kind kind = Kind::Frame;
 };
+using BlockObserver = std::function<void(std::string_view runId, uint64_t block, uint32_t records, std::string_view bytes)>;
 struct WriterConfig {
     QString root = "/Volumes/T7/sentinel-data/raw-l2";
     std::string symbol = "BTC-USD";
@@ -48,6 +49,7 @@ struct WriterConfig {
     std::chrono::milliseconds blockInterval{1000};
     uint32_t fsyncBlocks = 1; // 0 = only on file close
     int compressionLevel = 3;
+    BlockObserver onBlock; // successful block flush; observer must not throw or block
 };
 struct BlockIndex {
     uint64_t offset = 0;

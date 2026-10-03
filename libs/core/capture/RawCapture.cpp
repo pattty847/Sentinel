@@ -355,6 +355,7 @@ void Writer::flush() {
     ++m_stats.blocks;
     if (m_config.fsyncBlocks && m_stats.blocks % m_config.fsyncBlocks == 0) sync();
     m_index.push_back(entry);
+    if (m_config.onBlock) m_config.onBlock(m_metadata.at("run_id").get_ref<const std::string&>(), entry.ordinal, m_count, m_block);
     m_block.clear(); m_count = 0;
 }
 void Writer::seal() {

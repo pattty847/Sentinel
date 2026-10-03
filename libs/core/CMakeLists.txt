@@ -14,6 +14,7 @@ add_library(sentinel_core
     capture/CaptureSession.cpp
     capture/CaptureApp.cpp
     capture/CaptureMetrics.cpp
+    capture/CaptureFanout.cpp
     Version.cpp
     Version.hpp
     metrics/MetricsRegistry.cpp

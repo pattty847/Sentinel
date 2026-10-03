@@ -8,6 +8,7 @@
 #include <QDirIterator>
 #include <QElapsedTimer>
 #include <QProcess>
+#include <QLocalSocket>
 #include <QProcessEnvironment>
 #include <QTcpServer>
 #include <QTcpSocket>
@@ -52,13 +53,13 @@ std::string scrape(uint16_t port) {
 } // namespace
 
 TEST(CaptureApplication, FloorsLargerThanThePoolRefuseToStart) {
-    QTemporaryDir dir;
+    QTemporaryDir dir(QDir::tempPath() + "/sca-XXXXXX");
     QProcess child;
     auto environment = QProcessEnvironment::systemEnvironment();
     environment.insert("SENTINEL_LOG_DIR", dir.path() + "/logs");
     environment.insert("SENTINEL_LOG_STDERR", "1");
     child.setProcessEnvironment(environment);
-    child.start(CAPTURE_APP_FIXTURE, {"--root", dir.path() + "/raw", "--symbols", "BTC-USD,ETH-USD",
+    child.start(CAPTURE_APP_FIXTURE, {"--fanout-socket", dir.path() + "/capture.sock", "--root", dir.path() + "/raw", "--symbols", "BTC-USD,ETH-USD",
         "--queue-mib", "3", "--queue-floor-mib", "2", "--ca-bundle", SENTINEL_TEST_CA});
     ASSERT_TRUE(child.waitForFinished(10000));
     EXPECT_EQ(child.exitCode(), 1);
@@ -70,7 +71,7 @@ TEST(CaptureApplication, SigtermDrainsAndSealsAfterReconnectWithRealConnectionId
 #ifdef _WIN32
     GTEST_SKIP() << "POSIX SIGTERM integration test";
 #else
-    QTemporaryDir dir;
+    QTemporaryDir dir(QDir::tempPath() + "/sca-XXXXXX");
     ASSERT_TRUE(dir.isValid());
     QProcess child;
     struct Cleanup {
@@ -84,7 +85,7 @@ TEST(CaptureApplication, SigtermDrainsAndSealsAfterReconnectWithRealConnectionId
     child.setProcessEnvironment(environment);
     const auto metricsPort = freePort();
     ASSERT_NE(metricsPort, 0);
-    child.start(CAPTURE_APP_FIXTURE, {"--root", dir.path() + "/raw", "--symbol", "BTC-USD",
+    child.start(CAPTURE_APP_FIXTURE, {"--fanout-socket", dir.path() + "/capture.sock", "--root", dir.path() + "/raw", "--symbol", "BTC-USD",
         "--ca-bundle", SENTINEL_TEST_CA, "--key-file", dir.path() + "/absent-key.json",
         "--block-ms", "60000", // SIGTERM must flush the unfinished block
         "--metrics-port", QString::number(metricsPort)});
@@ -106,6 +107,12 @@ TEST(CaptureApplication, SigtermDrainsAndSealsAfterReconnectWithRealConnectionId
     EXPECT_NE(metrics.find("\nsentinel_capture_queue_floor_bytes 2097152\n"), std::string::npos) << metrics;
     EXPECT_NE(metrics.find("\nsentinel_capture_stored_frames_total{product=\"BTC-USD\"} "), std::string::npos) << metrics;
     EXPECT_NE(metrics.find("\nprocess_resident_memory_bytes "), std::string::npos) << metrics;
+    QLocalSocket fanout; fanout.connectToServer(dir.path() + "/capture.sock");
+    ASSERT_TRUE(fanout.waitForConnected(3000));
+    fanout.write("{\"type\":\"hello\",\"version\":1,\"product\":\"BTC-USD\"}\n");
+    fanout.waitForBytesWritten(1000);
+    ASSERT_TRUE(fanout.waitForReadyRead(3000));
+    EXPECT_NE(scrape(metricsPort).find("sentinel_fanout_clients 1\n"), std::string::npos);
     ASSERT_EQ(::kill(static_cast<pid_t>(child.processId()), SIGTERM), 0);
     ASSERT_TRUE(child.waitForFinished(5000));
     ASSERT_EQ(child.exitStatus(), QProcess::NormalExit) << child.readAllStandardError().toStdString();
@@ -166,7 +173,7 @@ TEST(CaptureApplication, SeveralCliFormsUseSevenConnectionsAndVerifyIndependentL
     const std::vector<QStringList> forms{repeated, {"--symbols", symbols.join(',')},
         {"--symbol", "BTC-USD", "--symbols", symbols.join(',')}}; // duplicate is subscribed only once
     for (const auto& form : forms) {
-        QTemporaryDir dir;
+        QTemporaryDir dir(QDir::tempPath() + "/sca-XXXXXX");
         QProcess child;
         struct Cleanup {
             QProcess& child;
@@ -177,7 +184,7 @@ TEST(CaptureApplication, SeveralCliFormsUseSevenConnectionsAndVerifyIndependentL
         environment.insert("SENTINEL_LOG_STDERR", "0");
         child.setProcessEnvironment(environment);
         auto args = form;
-        args << "--root" << dir.path() + "/raw" << "--ca-bundle" << SENTINEL_TEST_CA
+        args << "--fanout-socket" << dir.path() + "/capture.sock" << "--root" << dir.path() + "/raw" << "--ca-bundle" << SENTINEL_TEST_CA
              << "--key-file" << dir.path() + "/absent.json" << "--block-ms" << "1" << "--fsync-blocks" << "0";
         child.start(CAPTURE_APP_FIXTURE, args);
         ASSERT_TRUE(child.waitForStarted(5000));
@@ -258,7 +265,7 @@ TEST(CaptureApplication, UnevenReconnectsFailedAttemptAndAuditsVerifyAlongsideLe
 #ifdef _WIN32
     GTEST_SKIP() << "POSIX SIGTERM integration test";
 #else
-    QTemporaryDir dir;
+    QTemporaryDir dir(QDir::tempPath() + "/sca-XXXXXX");
     QProcess child;
     struct Cleanup { QProcess& p; ~Cleanup() { if (p.state() != QProcess::NotRunning) { p.kill(); p.waitForFinished(5000); } } } cleanup{child};
     auto environment = QProcessEnvironment::systemEnvironment();
@@ -266,7 +273,7 @@ TEST(CaptureApplication, UnevenReconnectsFailedAttemptAndAuditsVerifyAlongsideLe
     environment.insert("SENTINEL_FIXTURE_UNEVEN", "1");
     child.setProcessEnvironment(environment);
     const auto root = dir.path() + "/raw";
-    child.start(CAPTURE_APP_FIXTURE, {"--root", root, "--symbols", "BTC-USD,ETH-USD",
+    child.start(CAPTURE_APP_FIXTURE, {"--fanout-socket", dir.path() + "/capture.sock", "--root", root, "--symbols", "BTC-USD,ETH-USD",
         "--ca-bundle", SENTINEL_TEST_CA, "--key-file", dir.path() + "/absent.json"});
     ASSERT_TRUE(child.waitForStarted(5000));
     QByteArray output;
@@ -321,5 +328,39 @@ TEST(CaptureApplication, UnevenReconnectsFailedAttemptAndAuditsVerifyAlongsideLe
     while (allFiles.hasNext()) versions.insert(readHeader(allFiles.next())["format_version"].get<int>());
     EXPECT_EQ(versions, (std::set<int>{1, 2}));
     verifyCli();
+#endif
+}
+
+TEST(CaptureApplication, FanoutResnapshotReachesOnlyRequestedEngine) {
+#ifdef _WIN32
+    GTEST_SKIP() << "Unix fanout";
+#else
+    QTemporaryDir dir(QDir::tempPath() + "/sca-XXXXXX");
+    QProcess child;
+    struct Cleanup { QProcess& p; ~Cleanup() { if (p.state() != QProcess::NotRunning) { p.kill(); p.waitForFinished(5000); } } } cleanup{child};
+    auto environment = QProcessEnvironment::systemEnvironment();
+    environment.insert("SENTINEL_LOG_DIR", dir.path() + "/logs");
+    child.setProcessEnvironment(environment);
+    const auto port = freePort();
+    child.start(CAPTURE_APP_FIXTURE, {"--fanout-socket", dir.path()+"/capture.sock", "--root", dir.path()+"/raw",
+        "--symbols", "BTC-USD,ETH-USD", "--ca-bundle", SENTINEL_TEST_CA, "--metrics-port", QString::number(port)});
+    ASSERT_TRUE(child.waitForStarted(5000));
+    QByteArray output; QElapsedTimer deadline; deadline.start();
+    while (!output.contains("FIXTURE_READY\n") && deadline.elapsed() < 20000 && child.state()!=QProcess::NotRunning) {
+        child.waitForReadyRead(50); output += child.readAllStandardOutput();
+    }
+    ASSERT_TRUE(output.contains("FIXTURE_READY\n")) << child.readAllStandardError().toStdString();
+    QLocalSocket socket; socket.connectToServer(dir.path()+"/capture.sock"); ASSERT_TRUE(socket.waitForConnected(3000));
+    socket.write("{\"type\":\"hello\",\"version\":1,\"product\":\"BTC-USD\"}\n{\"type\":\"resnapshot\",\"product\":\"BTC-USD\"}\n");
+    socket.waitForBytesWritten(1000);
+    deadline.restart(); std::string text;
+    do { text=scrape(port); if(text.find("sentinel_capture_connection{product=\"BTC-USD\"} 3\n")!=std::string::npos) break;
+        child.waitForReadyRead(50); } while(deadline.elapsed()<5000);
+    EXPECT_NE(text.find("sentinel_capture_connection{product=\"BTC-USD\"} 3\n"),std::string::npos) << text;
+    EXPECT_NE(text.find("sentinel_capture_connection{product=\"ETH-USD\"} 2\n"),std::string::npos) << text;
+    ASSERT_EQ(::kill(static_cast<pid_t>(child.processId()),SIGTERM),0); ASSERT_TRUE(child.waitForFinished(5000)); EXPECT_EQ(child.exitCode(),0);
+    bool resync=false; QDirIterator files(dir.path()+"/raw/BTC-USD",{"*.rawl2"},QDir::Files,QDirIterator::Subdirectories);
+    while(files.hasNext()) scan(files.next(),[&](const Record& r){ if(r.kind==Kind::ResyncRequested) resync=true; });
+    EXPECT_TRUE(resync);
 #endif
 }

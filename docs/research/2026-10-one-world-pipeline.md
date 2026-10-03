@@ -7,6 +7,8 @@ delete the redundancy that keeps two worlds. Builds on
 product, shared queue pool; slices 1-3 in flight). Line numbers refer to `main` at 30f17d4.
 Original read-only study; see "Slice A as built" below for implementation and the measured parity difference and review acceptance bands.
 
+Implementation status and refinements are recorded in the "as built" sections below.
+
 ## 0. Today, measured (two worlds)
 
 | | sentinel-capture (`com.sentinel.capture`) | sentinel-server recorder (`com.sentinel.recorder`) |
@@ -479,3 +481,107 @@ review-specific fail-without-fix checks passed after restoration and rebuild.
 Controlled comparison worst cases: 0.523218% differing entries, 23-code maximum
 absolute delta, and 0.000140795% maximum absolute total-TWAP delta per side;
 mids/bounds/peaks/row sets exact. See docs/ROLLER.md for per-minute results.
+
+## Slice B as built (uncommitted lieutenant hand-off)
+
+`capture/CaptureFanout` serves the default-enabled Unix socket, a 60 s / 32 MiB
+per-product ring, exclusive-cursor resume with explicit journal-gap boundaries,
+and product-scoped resnapshot control (10 s rate limit). A consumer opens one
+socket per product. Eight bounded client slots, each 16 MiB, and separate bounded
+SPSC ingress queues keep socket backpressure out of the capture QueuePool and
+writer locks. All fanout accounting appears on the existing capture endpoint;
+the Prometheus capture job already exists. `scripts/dev/fanout-tail.py` is the
+orchestrator's position/control probe. Full protocol: `docs/RAW_CAPTURE.md`.
+
+The position type is `capture::JournalPosition {product, runId, block, record}`.
+It intentionally has no dependency on unlanded slice A. Slice C should map it to
+`roller::JournalPos` (or consolidate the plain DTO at that merge point); RAWL2
+framing and coordinates are unchanged.
+
+**Publication refinement and latency limitation:** actual block/record positions
+are assigned by the writer, including size/time/hour rotation and failure-marker
+recovery. The handoff observes the exact block after successful flush, including
+sync when due. This avoids publishing records that never reached the journal,
+but adds up to `--block-ms` (default 1 s) plus disk scheduling to live latency.
+It does not meet section 6's proposed sub-millisecond pre-parse handoff. Slice C
+must measure/resolve that tradeoff before claiming the original +50 ms GUI-age
+gate. Publishing ahead of durability would require an explicit provisional
+position/durability-watermark protocol; this slice does not silently assume one.
+
+The required ring retains bytes with zero clients, so literal zero memory
+overhead is impossible. Capacity is not preallocated. Benchmark and validation
+results are recorded below after queued validation. No service was deployed,
+restarted or stopped; production data was not written.
+
+Validation details: eleven standalone fanout cases pass, plus the production
+application fixture (including the new real `MarketDataFeeds` resnapshot route
+and a connected socket at SIGTERM). Thirteen fail-without checks pass:
+publication, exclusive resume, explicit gap, time retention, byte retention,
+client backpressure, ingress loss, resnapshot rate limit, routing callback,
+private-directory enforcement, client shutdown, retention with zero clients,
+and the application's engine wiring. Each mutation is restored, its source
+explicitly touched, rebuilt, and the same regression passes again.
+`tests/capture/fanout_mutations.py` reproduces the checks under the build queue.
+
+Overhead method: `capture_fanout_benchmark baseline|idle|client 65`, separate
+process for each mode, 100 records/s x 1,500 payload bytes, real Session/Writer
+with default fsync cadence and temporary internal-disk output. `idle` means
+fanout enabled with zero clients; `client` drains every record in a local reader
+thread, so its CPU/RSS numbers conservatively include the consumer too. The run
+lasts longer than the 60 s retention window. This measures the fanout addition
+to disk capture; it does not include Coinbase, TLS or engine JSON parsing and
+is not a deployed-service CPU claim. Literal zero-client zero-memory overhead
+cannot coexist with retaining a replay ring.
+
+Measured on the owner's Mac, 2026-10-03, sequential queued 65 s runs:
+
+| Mode | CPU seconds | Average CPU (one core) | Peak RSS bytes | Received records |
+|---|---:|---:|---:|---:|
+| Writer-only baseline | 0.387004 | 0.595391% | 17,580,032 | n/a |
+| Fanout, zero clients | 0.422495 | 0.649992% | 30,507,008 | n/a |
+| Fanout, one draining client (reader included) | 0.719459 | 1.10686% | 31,260,672 | 6,501/6,501 |
+
+Each run wrote 6,500 frames plus the terminal stop record. Zero-client overhead
+was +0.054601 percentage points CPU and +12,926,976 peak RSS bytes (12.33 MiB).
+That is small, but it is measurable; the literal "no measurable overhead" test
+is not claimed. Both fanout runs retained 10,898,055/10,898,054 accounted ring
+bytes (~10.39 MiB), oldest age 59.99/59.98 s. All client queue gauges, ingress
+bytes, ingress-drop counters and disk-pool bytes were zero at the final sample;
+there were no unintended disconnects. These are single-run measurements, not
+confidence intervals or live-service results.
+
+Final validation: full queued mac-clang build passed; **84/84 CTest suites
+passed, 0 failures, 354.21 s**. Metal-dependent cases explicitly skipped because
+the sandbox has no MTLDevice; no visual or GPU verification is claimed. The 11
+fanout tests passed in 1.32 s in the full run; application tests passed in 77.23 s.
+All 13 fail-without checks passed with restore/touch/rebuild. Source diff checks
+are clean. Base remains `7c252d3` (also current main at hand-off); changes are
+uncommitted for the orchestrator, with no rebase/staging/commit attempted.
+
+Deploy watch list (orchestrator only):
+
+1. Review and land, build main, then use `scripts/dev/deploy-runtime.sh capture`
+   with the owner present. Verify private runtime/run directory, socket ownership,
+   `sentinel_fanout_running 1`, all seven feed gauges, and continued RAWL2 writes
+   inside the deploy script's 60 s window. A bad/occupied socket path refuses
+   startup rather than silently disabling fanout.
+2. Tail positions with `fanout-tail.py`; reconnect inside and beyond retention,
+   checking hit/miss counters and the explicit journal boundary. A full seven-
+   product consumer uses seven sockets, leaving one of eight slots for a probe.
+3. Stall a disposable consumer: check a `slow_client` disconnect, flat ingress-
+   drop counters, and uninterrupted writer/other-consumer progress. Watch ring
+   RSS at the actual seven-product rate; fanout memory is additional to QueuePool.
+4. Intentionally request one resnapshot and verify that only that product changes
+   connection, the journal contains its resync/snapshot, and a second request
+   within 10 s is rate-limited. This is an explicit operator action, not a passive
+   health check.
+5. Include the block-flush latency in slice C's live-age measurements and resolve
+   section 6's acceptance gate before cutover. No deployment/live feed check was
+   performed by this branch.
+
+Workflow notes: CMake regeneration initially tried to lock the read-only shared
+vcpkg checkout; configured this build with `VCPKG_MANIFEST_INSTALL=OFF` using the
+already installed dependencies. Shared ccache writes are also sandbox-blocked;
+builds used `CCACHE_READONLY=1 CCACHE_TEMPDIR=/tmp`. The shared FIFO queue was the
+largest wall-time cost. This branch's plan lacked "Slice A as built"; that section
+was read from the `lt-astra/roller-a` branch without depending on its code.

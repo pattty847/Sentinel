@@ -5,9 +5,9 @@
 v1 stream (`docs/research/2026-10-per-symbol-connections.md`). Each connection
 subscribes `level2`, `market_trades` and `heartbeats` for its one product. One
 process holds all products; they share one I/O thread and one disk queue pool.
-It has no connection to sentinel-server, its recorder, the GUI or the local wire
-protocol. It uses QtCore only. Future server rollups can consume these files;
-this tool does not send raw L2 to clients.
+It has no dependency on sentinel-server, its recorder or the GUI. Its local Unix
+fan-out streams journal records to consumers (see "Live fan-out" below); rollups
+remain outside capture. Core uses no GUI Qt.
 
 ## Start, stop and verify
 
@@ -676,3 +676,121 @@ resume, idempotent reruns, dry-run reports and decoded `hmc2_diff` comparisons.
 See [roller commands, recovery rules, measurements and the controlled tick-schedule
 comparison](ROLLER.md). Production backfill and service cutover remain separate
 orchestrator operations. This slice's outputs are under the agent's `roll-out/`.
+
+## Live fan-out (slice B)
+
+Capture serves a Unix domain stream socket by default at
+`~/Sentinel-runtime/run/capture.sock`. Override with `--fanout-socket PATH`.
+The socket directory must be owned by the current user and mode 0700; newly
+created directories are 0700, the socket is 0600. Paths under `/Volumes`, any
+Git checkout (including worktrees), and socket/parent symlinks are refused after
+canonicalization. A lock prevents two owners; a stale socket is removed only
+under that lock, after a connection probe reports no listener. Regular files
+are never removed. Listener startup failure refuses capture startup.
+
+`--fanout-ring-mib` defaults to 32 MiB **per product** and
+`--fanout-client-mib` defaults to 16 MiB per connection (both 1..256).
+Retention is 60 seconds of monotonic publication age, bounded by ring bytes,
+whichever comes first. There are at most eight clients, one product per socket.
+A consumer of all seven products opens seven sockets. Ring, ingress and socket
+queue accounting is separate from `QueuePool`; no capacity is taken from disk
+capture. Each product has a fixed 64-slot SPSC ingress queue, also capped at
+32 MiB. Payloads are allocated as they arrive, never at capacity up front.
+
+**Publication point:** the writer hands off the exact decoded block bytes after
+successful block flush (after sync when the configured sync cadence requires
+it). The fanout worker splits those bytes into records; it never reconstructs or
+parses the payload. Positions are `(product, run_id, block, record)`, using the
+writer's actual run UUID, run-wide block ordinal and zero-based record index.
+This includes lifecycle, invalidation, resync and terminal stop records. There
+is no speculative position assigned on the ingest thread. Compared with the
+plan's proposed immediate ingest fanout, this deliberately adds the block flush
+latency (default up to 1 s, plus disk scheduling); slice C must include that in
+its live-age acceptance. With `--fsync-blocks` other than 1, flushed records may
+still be lost after an OS/power failure according to that durability setting.
+
+Client commands are UTF-8 JSON followed by LF (8 KiB maximum buffered input;
+initial handshake deadline 5 s). One hello/resume per socket:
+
+```json
+{"type":"hello","version":1,"product":"BTC-USD"}
+{"type":"resume","version":1,"product":"BTC-USD","pos":{"product":"BTC-USD","run_id":"UUID","block":123,"record":4}}
+{"type":"resnapshot","product":"BTC-USD"}
+```
+
+`hello` also accepts `pos`. A position names the **last applied** record: a hit
+streams strictly after it, with no duplicate. A fresh hello without a position
+streams the retained ring followed by live records; it does not promise a book
+snapshot or full history. Resnapshot requires a subscription to that product.
+It routes to `MarketDataFeeds::requestResnapshot(product)` and is limited to one
+accepted request per product per 10 seconds across all clients. Reply status is
+`accepted`, `rate_limited`, or `unavailable` during startup/shutdown; the engine's existing resnapshot path journals the
+result normally. Unknown products, malformed commands and repeat handshakes
+close the connection with `protocol`.
+
+Server packets have little-endian lengths, independent of TCP/socket reads:
+
+```
+u32 body_bytes | u32 json_bytes | JSON[json_bytes] | optional RAWL2 record
+```
+
+`body_bytes` counts everything after its own four bytes. JSON record headers
+are `{"type":"record","pos":{...}}`; the remaining bytes are exactly the
+RAWL2 `len | kind | systemNs | steadyNs | connection | payload` record, including
+its four-byte length. Control packets have no raw suffix. JSON integer positions
+are uint64 block / uint32 record; consumers must preserve integer precision.
+No RAWL2 file header is sent: obtain product metadata by run ID from the journal.
+
+Handshake replies:
+
+- `tip`: `version:1`, `product`, and `pos` (last fanout record, or null before any).
+- Resume hit: `tip`, then every successor in the ring, then live records.
+- Resume miss: `gap` with `reason:"resume_not_retained"`, the requested
+  `resume_after`, `journal_until`, and `until_inclusive:false`; then `tip` and
+  the ring/live records. Read the journal **after** the requested cursor and
+  **before** `journal_until`, then apply the buffered socket stream. If the ring
+  is empty, `journal_until` is null: the first subsequent socket record supplies
+  that exclusive boundary. Tail the journal while waiting. Do not infer
+  continuity from `tip` or silently skip an unavailable cursor/run.
+
+The worker serializes replay and subscription registration, so there is no
+replay-to-live race. Resume requires the cursor itself still in the ring;
+expiration, unknown run, future cursor, and fanout ingress loss all give an
+explicit miss. Ingress loss clears that product's ring and disconnects its
+existing subscribers; the journal remains authoritative. Capture writes never
+wait on fanout locks or socket writes. Each client is serviced with a bounded
+write budget; an overflowing client is disconnected without blocking others.
+
+A best-effort `disconnect` packet carries `reason` and `resume:"journal"`.
+It cannot be delivered reliably to an already full socket, and is never inserted
+inside a partial record. **Every unexpected EOF requires resume from the last
+fully applied position**, including EOF midway through a packet. Disconnect
+reason counters remain available on `/metrics`. Shutdown drains the disk
+sessions first, makes one bounded send attempt and closes all clients; any
+unsent suffix must be read from the journal. It never waits for a client to drain.
+
+Probe (no exchange connection or journal writes):
+
+```sh
+python3 scripts/dev/fanout-tail.py BTC-USD
+python3 scripts/dev/fanout-tail.py BTC-USD --resume '{"product":"BTC-USD","run_id":"UUID","block":123,"record":4}'
+```
+
+The probe prints positions and control messages, not raw payloads. Add
+`--resnapshot` only for an intentional upstream resnapshot check; this affects
+that product's capture. `--socket PATH` selects a fixture socket.
+
+`CaptureFanoutTests` uses temporary roots and local sockets. It covers exact
+writer bytes and positions across blocks/hour rotation, cursor-exclusive resume,
+age/byte eviction, slow-client isolation, ingress loss, resnapshot isolation and
+rate limiting, safe paths/ownership, malformed/idle clients and shutdown. The
+application fixture additionally checks the default-enabled socket and metrics
+with a client connected at SIGTERM. No test uses production data or Coinbase.
+
+Measured overhead and the full validation/deploy watch list are in
+[Slice B as built](research/2026-10-one-world-pipeline.md#slice-b-as-built-uncommitted-lieutenant-hand-off).
+At synthetic 100 records/s x 1,500 bytes for 65 s, zero-client fanout added
+0.055 percentage points of one CPU core and 12.33 MiB peak RSS; the ring itself
+accounted for 10.39 MiB. One draining client received all 6,501 records (including
+stop), with zero ingress drops or unintended disconnects. These are fixture
+measurements; the consumer thread is included in the one-client CPU/RSS result.
