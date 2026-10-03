@@ -1042,3 +1042,135 @@ TEST(RecorderStallMonitor, GuiProductOutageCannotMuteOrResetPinnedRecorderDeadli
     EXPECT_EQ(monitor.overdueMs("ETH-USD", kT + 240'000, 0), 0); // reconnect restarted ETH's deadline
     EXPECT_FALSE(monitor.overdueMs("SOL-USD", kT + 240'000, 0).has_value()); // never reported
 }
+
+TEST_F(RecorderTest, ReleaseCommitsObservedTailAndStopsAllLaterBuckets) {
+    auto c = config(); c.latenessMs = 2000;
+    c.layers.push_back({"deep", 100, .5, 2, true});
+    size_t published = 0, released = 0;
+    c.publisher = [&](RecordPtr) { ++published; };
+    c.onReleased = [&](const std::string&) { ++released; };
+    auto r = make(c);
+    snap(*r, 10000);
+    tick(*r, 61000); // preceding minute is still inside lateness
+    r->releaseSymbol("BTC-USD", kEpoch + 65000);
+    r->drainForTest();
+    auto rows = read();
+    ASSERT_EQ(rows.size(), 2u);
+    EXPECT_EQ(rows[0].observedMs, 50000u);
+    EXPECT_EQ(rows[1].observedMs, 5000u);
+    for (const auto& row : rows) {
+        EXPECT_TRUE(row.flags & kPartial);
+        EXPECT_FALSE(row.flags & kProvisional);
+        value(row, 99, false, 2, 2);
+    }
+    auto hours = read(3600000, "deep");
+    ASSERT_EQ(hours.size(), 1u);
+    EXPECT_EQ(hours[0].observedMs, 55000u);
+    const auto publicationsAtRelease = published;
+    tick(*r, 7200000);
+    update(*r, 7201000, {{true, 99, 200}});
+    tick(*r, 7260000);
+    EXPECT_EQ(read().size(), 2u);
+    EXPECT_EQ(published, publicationsAtRelease);
+    EXPECT_EQ(released, 1u);
+    EXPECT_EQ(r->watermarks("BTC-USD", "near").minuteThroughMs, 0);
+    snap(*r, 7320000, {{true, 199, 3}, {false, 201, 5}});
+    r->releaseSymbol("BTC-USD", kEpoch + 7330000);
+    r->drainForTest();
+    rows = read();
+    ASSERT_EQ(rows.size(), 3u);
+    EXPECT_EQ(rows.back().observedMs, 10000u);
+    EXPECT_EQ(rows.back().midOpen, 200);
+    EXPECT_TRUE(rows.back().flags & kResynced);
+    EXPECT_EQ(r->stats().diskErrors, 0u);
+}
+
+TEST_F(RecorderTest, ReleaseCyclesReclaimLiveSeriesAndDoNotRequestResnapshots) {
+    auto c = config();
+    LiveCache cache;
+    size_t requests = 0;
+    c.publisher = [&](RecordPtr r) { EXPECT_TRUE(cache.publish(std::move(r))); };
+    c.onReleased = [&](const std::string& symbol) { cache.releaseSymbol(symbol); };
+    c.onSelfInvalidated = [&](const auto&, const auto&) { ++requests; };
+    auto r = make(c);
+    for (size_t i = 0; i < LiveCache::kMaxSeries + 2; ++i) {
+        const auto symbol = "CYCLE" + std::to_string(i) + "-USD";
+        local = i * 60000;
+        r->onSnapshot(symbol, kEpoch + local, {{true, 99, 2}, {false, 101, 4}});
+        r->releaseSymbol(symbol, kEpoch + local + 1000);
+        r->releaseSymbol(symbol, kEpoch + local + 1000); // idempotent
+        r->drainForTest();
+        EXPECT_EQ(cache.snapshot(symbol, "near").revision, 0u);
+        EXPECT_EQ(r->retainedSymbolStatesForTest(), 0u);
+        EXPECT_EQ(r->watermarks(symbol, "near").lastColumnMs, 0);
+    }
+    const auto columns = r->stats().columnsWritten;
+    tick(*r, 24 * 3600000);
+    EXPECT_EQ(r->stats().columnsWritten, columns);
+    EXPECT_EQ(columns, LiveCache::kMaxSeries + 2);
+    EXPECT_EQ(requests, 0u);
+    EXPECT_EQ(r->stats().diskErrors, 0u);
+}
+
+TEST_F(RecorderTest, ReleaseCleanupSurvivesDiskFailure) {
+    auto c = config();
+    size_t released = 0;
+    c.onReleased = [&](const auto&) { ++released; };
+    auto r = make(c);
+    snap(*r, 0);
+    // Force mkdir failure in this temp product tree, without global fault hooks.
+    std::ofstream blocker(c.root / "BTC-USD"); blocker << "not a directory"; blocker.close();
+    r->releaseSymbol("BTC-USD", kEpoch + 20000);
+    r->drainForTest();
+    EXPECT_GT(r->stats().diskErrors, 0u);
+    EXPECT_EQ(released, 1u);
+    const auto failures = r->stats().diskErrors;
+    tick(*r, 600000);
+    EXPECT_EQ(r->stats().diskErrors, failures);
+    EXPECT_EQ(r->stats().columnsWritten, 0u);
+    EXPECT_EQ(r->watermarks("BTC-USD", "near").minuteThroughMs, 0);
+}
+
+TEST_F(RecorderTest, ReleaseIsNotLostWhenControlQueueIsFull) {
+    auto c = config();
+    std::promise<void> entered, unblock;
+    auto wait = unblock.get_future().share();
+    bool first = true;
+    c.publisher = [&](RecordPtr) {
+        if (first) { first = false; entered.set_value(); wait.wait(); }
+    };
+    auto r = make(c);
+    r->onSnapshot("BTC-USD", kEpoch, {{true, 99, 2}, {false, 101, 4}});
+    r->onTick(kEpoch + 500);
+    entered.get_future().wait();
+    for (int i = 0; i < 4200; ++i) r->onTick(kEpoch + 1000);
+    auto releasing = std::async(std::launch::async, [&] { r->releaseSymbol("BTC-USD", kEpoch + 2000); });
+    unblock.set_value();
+    releasing.get();
+    r->drainForTest();
+    ASSERT_GT(r->stats().queueDrops, 0u);
+    const auto rows = read();
+    ASSERT_EQ(rows.size(), 1u);
+    EXPECT_LE(rows[0].observedMs, 2000u);
+    EXPECT_TRUE(rows[0].flags & kPartial);
+    EXPECT_EQ(r->watermarks("BTC-USD", "near").lastColumnMs, 0);
+    const auto columns = r->stats().columnsWritten;
+    tick(*r, 600000);
+    EXPECT_EQ(r->stats().columnsWritten, columns);
+}
+
+TEST_F(RecorderTest, ReleaseUsesLocalOffsetAndDoesNotObserveInvalidTime) {
+    auto r = make(config());
+    local = 700;
+    r->onSnapshot("BTC-USD", kEpoch, {{true, 99, 2}, {false, 101, 4}});
+    r->onInvalid("BTC-USD", kEpoch + 10700, "disconnect before release");
+    r->releaseSymbol("BTC-USD", kEpoch + 20700);
+    r->drainForTest();
+    auto rows = read();
+    ASSERT_EQ(rows.size(), 1u);
+    EXPECT_EQ(rows[0].observedMs, 10000u);
+    EXPECT_TRUE(rows[0].flags & kPartial);
+    value(rows[0], 99, false, 2, 2);
+    tick(*r, 600000);
+    EXPECT_EQ(read().size(), 1u);
+}

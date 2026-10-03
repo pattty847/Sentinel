@@ -432,21 +432,26 @@ void HeatmapTwapStreamer::applyBandRange(SymbolState& state, double midPrice, in
     state.lastRecenterMid = midPrice;
 }
 
+void HeatmapTwapStreamer::releaseSymbol(const std::string& symbol) {
+    std::lock_guard<std::mutex> lock(m_historyMutex);
+    m_symbols.erase(symbol);
+    if (m_columnStore) m_columnStore->releaseSymbol(symbol);
+}
+
 void HeatmapTwapStreamer::onSample() {
     const int64_t nowMs = m_model.exchangeNowMs();
 
     const auto symbols = m_model.getSymbolsSnapshot();
     sLog_Probe("heatmap.sample", "symbols=" << symbols.size() << " t=" << nowMs);
     for (const auto& symbol : symbols) {
-        auto& state = m_symbols[symbol];
-
         const auto& hotData = m_model.ensureSymbol(symbol);
         if (!hotData.bookValid.load(std::memory_order_relaxed)) {
             // Unknown book (disconnect, sequence gap): not observed time. The next
             // valid sample restarts integration, so the gap is never filled (FM-044).
-            state.bookGap = true;
+            if (auto it = m_symbols.find(symbol); it != m_symbols.end()) it->second.bookGap = true;
             continue;
         }
+        auto& state = m_symbols[symbol];
         const double lastTrade = hotData.lastTradePrice;
 
         double bestBid = 0.0;

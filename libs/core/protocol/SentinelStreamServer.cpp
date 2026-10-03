@@ -1346,6 +1346,14 @@ public:
                  std::transform(symbol.begin(), symbol.end(), symbol.begin(),
                                 [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
                  const bool removed = !symbol.empty() && subscriptions_.erase(symbol) > 0;
+                 if (recordingView_ && recordingView_->view.symbol == symbol) {
+                     recordingView_->active.store(false);
+                     recordingView_.reset();
+                 }
+                 if (const auto it = rawViews_.find(symbol); it != rawViews_.end()) {
+                     it->second->active.store(false);
+                     rawViews_.erase(it);
+                 }
                  if (const auto it = overlays_.find(symbol); it != overlays_.end())
                      it->second.cancelled->store(true);
                  overlays_.erase(symbol);

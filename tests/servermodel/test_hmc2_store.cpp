@@ -1385,3 +1385,19 @@ TEST_F(StoreTest, ReaderAssertsWorkerOwnershipInDebugBuilds) {
     GTEST_SKIP() << "Ownership assertion is debug-only";
 #endif
 }
+
+TEST_F(StoreTest, ReleasedSymbolReopensWithKeyframeAndKeepsPeerDeltaBase) {
+    Hmc2Store store(root());
+    auto a = record(60000), peer = a;
+    peer.header.symbol = "ETH-USD";
+    store.append(a); store.append(peer);
+    a.bucketStartMs += 60000; peer.bucketStartMs += 60000;
+    store.releaseSymbol("BTC-USD");
+    store.append(a); store.append(peer);
+    const auto own = frames(Hmc2Store::filePath(root(), a.header, kEpoch));
+    const auto other = frames(Hmc2Store::filePath(root(), peer.header, kEpoch));
+    ASSERT_EQ(own.size(), 2u); ASSERT_EQ(other.size(), 2u);
+    EXPECT_EQ(rawPayload(own.back())[84], 0); // a fresh writer lifetime/keyframe
+    EXPECT_EQ(rawPayload(other.back())[84], 1); // peer's delta base is unaffected
+    EXPECT_EQ(read().size(), 2u);
+}

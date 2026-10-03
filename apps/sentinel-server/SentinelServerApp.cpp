@@ -97,6 +97,16 @@ bool SentinelServerApp::initialize() {
         
         // Connect MarketDataFeeds -> ServerDataModel via queued invocations
         QPointer<ServerDataModel> modelPtr(m_serverModel.get());
+        // Lifecycle and data callbacks originate on the same I/O executor;
+        // enqueue them to the model in that order, including rapid re-acquire.
+        m_marketDataCore->onFeedLifecycle([modelPtr](const std::string& symbol, bool acquired) {
+            const auto localMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            safeInvoke(modelPtr, [symbol, acquired, localMs](ServerDataModel& model) {
+                if (acquired) model.acquireGuiFeed(symbol);
+                else model.releaseGuiFeed(symbol, localMs);
+            });
+        });
         m_marketDataCore->onTrade([modelPtr](const Trade& trade) {
             Trade tradeCopy = trade;
             safeInvoke(modelPtr, [tradeCopy](ServerDataModel& model) mutable {
@@ -174,7 +184,6 @@ bool SentinelServerApp::initialize() {
                                  return;
                              }
                              sLog_Data("First client subscribed, acquiring upstream: symbol=" << symbol);
-                             m_serverModel->acquireGuiFeed(symbol.toStdString());
                              m_marketDataCore->add(symbol.toStdString());
                          }, Qt::QueuedConnection);
 
@@ -191,7 +200,6 @@ bool SentinelServerApp::initialize() {
                              }
                              sLog_Data("Last client unsubscribed, releasing upstream: symbol=" << symbol);
                              m_marketDataCore->remove(native);
-                             m_serverModel->releaseGuiFeed(native);
                          }, Qt::QueuedConnection);
 
         // Start connection

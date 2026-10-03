@@ -457,6 +457,7 @@ TEST(CandleHistoryPaging, OneSecondPagesReachOlderRetainedBars) {
         trade.size = 1;
         model.onTrade(trade);
     }
+    model.acquireGuiFeed("ETH-USD");
     for (const int second : {1, 10, 20, 30}) {
         Trade trade{};
         trade.product_id = "ETH-USD";

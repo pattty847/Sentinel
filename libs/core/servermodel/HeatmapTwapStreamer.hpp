@@ -16,6 +16,7 @@
 
 class HeatmapTwapStreamer : public QObject {
     Q_OBJECT
+    friend struct ServerFeedAdmissionTest;
 public:
     explicit HeatmapTwapStreamer(IHeatmapDataSource& model,
                                  const ServerHeatmapConfig& config,
@@ -23,6 +24,7 @@ public:
 
     void start();
     void stop();
+    void releaseSymbol(const std::string& symbol);
 
     // Phase 2: prime the in-RAM HistoryRing for `symbol` on the active timeframe
     // from the most recent disk-resident records. Must be called BEFORE start().

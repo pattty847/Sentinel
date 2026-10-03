@@ -30,6 +30,7 @@ namespace sentinel::metrics { class MetricsRegistry; }
 class ServerDataModel : public QObject, public IHeatmapDataSource {
     Q_OBJECT
     friend struct TradeOverlayModelTest;
+    friend struct ServerFeedAdmissionTest;
 public:
     struct FootprintTradeSample {
         int64_t timestampMs = 0;
@@ -82,7 +83,7 @@ public:
     // main thread; the samplers read main-thread state, so render on that thread.
     void registerMetrics(sentinel::metrics::MetricsRegistry& registry);
     void acquireGuiFeed(const std::string& symbol);
-    void releaseGuiFeed(const std::string& symbol);
+    void releaseGuiFeed(const std::string& symbol, int64_t releaseLocalMs = 0);
 
 public slots:
     void onTrade(const Trade& trade);

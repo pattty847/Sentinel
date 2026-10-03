@@ -116,6 +116,20 @@ its queued book/trade/invalidation handoff. Connection state and the recorder
 stall monitor are scoped by symbol: a GUI product outage cannot mute or reset
 a pinned product's flat-column warning. There is no shared last-status boolean.
 
+Feed acquire/release events share the I/O-to-model queue with book data. Removing
+an unpinned feed closes its observation at the release timestamp: HMC2 commits the
+observed partial minute (`kPartial`, with the actual `observedMs`) and pending
+lateness tail, then releases the book, writer delta bases, watermarks and live
+cache. Session unsubscribe retires its own live views immediately, so draining an
+old recorder tail cannot retire a newly acquired view. No later minute is synthesized. Legacy heatmap sampling is
+invalidated and its per-symbol state and writers are closed too. Removed feeds
+have no connection metrics or stall deadlines; pinned feeds are unchanged.
+Retired transport callbacks cannot reach a newly acquired lifetime. A later
+subscription requires a fresh snapshot and records `kResynced` as usual. Release
+control cannot be dropped by recorder queue overflow, and cleanup still runs if
+the final disk write fails (the error is logged and counted).
+
+
 Capture adds all configured products (seven in deployment) to one feed owner,
 with one single-product `Session` and one RAWL2 v1 stream per product: independent
 run IDs, product-local established-connection IDs, no routing receipts. The RAWL2

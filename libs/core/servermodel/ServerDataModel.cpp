@@ -188,11 +188,12 @@ void ServerDataModel::startRecorder() {
                 sLog_Probe("recording.live.drop", "publication exceeds series limit or is stale");
             }
         };
+        cfg.onReleased = [live = m_recordingLive](const std::string& symbol) { live->releaseSymbol(symbol); };
         cfg.onSelfInvalidated = [this](const std::string& symbol, const std::string& reason) {
             // Recorder worker thread: hand off only.
             QMetaObject::invokeMethod(this, [this, s = QString::fromStdString(symbol),
                                              r = QString::fromStdString(reason)] {
-                emit recordingResnapshotRequested(s, r);
+                if (m_feeds.contains(s.toStdString())) emit recordingResnapshotRequested(s, r);
             }, Qt::QueuedConnection);
         };
         m_recorder = std::make_unique<recording::BookRecorder>(std::move(cfg));
@@ -240,9 +241,22 @@ void ServerDataModel::checkRecorderProgress(int64_t nowMs) {
 void ServerDataModel::acquireGuiFeed(const std::string& symbol) {
     m_feeds.try_emplace(symbol);
 }
-void ServerDataModel::releaseGuiFeed(const std::string& symbol) {
+void ServerDataModel::releaseGuiFeed(const std::string& symbol, int64_t releaseLocalMs) {
     const auto it = m_feeds.find(symbol);
-    if (it != m_feeds.end() && !it->second.pinned) m_feeds.erase(it);
+    if (it == m_feeds.end() || it->second.pinned) return;
+    m_feeds.erase(it);
+    {
+        std::shared_lock lock(m_mutex);
+        if (const auto data = m_symbols.find(symbol); data != m_symbols.end()) {
+            data->second->bookValid = false;
+            data->second->liveBook.clear();
+            data->second->lastTradePrice = 0;
+        }
+    }
+    if (m_heatmapStreamer) m_heatmapStreamer->releaseSymbol(symbol);
+    if (m_recorder) m_recorder->releaseSymbol(symbol, releaseLocalMs ? releaseLocalMs : localNowMs());
+    else if (m_recordingLive) m_recordingLive->releaseSymbol(symbol);
+    sLog_Data("ServerDataModel: feed released, recording stopped: symbol=" << symbol);
 }
 void ServerDataModel::onMarketDataConnectionChanged(const std::string& symbol, bool connected) {
     const auto it = m_feeds.find(symbol);
@@ -426,6 +440,7 @@ bool ServerDataModel::collectFootprintTrades(const std::string& symbol,
 }
 
 void ServerDataModel::onTrade(const Trade& trade) {
+    if (!m_feeds.contains(trade.product_id)) return;
     if (m_logger) {
         m_logger->logTrade(trade);
     }
@@ -458,6 +473,7 @@ void ServerDataModel::onLiveOrderBookLevelUpdates(const QString& productId,
                                                   const std::vector<BookLevelUpdate>& updates,
                                                   qint64 exchangeMs) {
     std::string symbol = productId.toStdString();
+    if (!m_feeds.contains(symbol)) return;
     SymbolHotData& data = ensureSymbol(symbol);
 
     updateExchangeOffsetMs(static_cast<int64_t>(exchangeMs));
@@ -469,7 +485,7 @@ void ServerDataModel::onLiveOrderBookLevelUpdates(const QString& productId,
         m_recorder->onUpdates(symbol, static_cast<int64_t>(exchangeMs), std::move(levels));
     }
 
-    if (data.liveBook.getTickSize() <= 0.0) {
+    if (!data.bookValid || data.liveBook.getTickSize() <= 0.0) {
         // Can repeat per message until the snapshot arrives; rate limited.
         sLog_DataN(1000, "Order book update ignored, book not initialized: symbol=" << symbol
                    << " updates=" << updates.size());
@@ -510,6 +526,7 @@ void ServerDataModel::onLiveOrderBookInvalidated(const QString& productId, const
 
 void ServerDataModel::onLiveOrderBookInitialized(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks, qint64 envelopeMs) {
     std::string symbol = productId.toStdString();
+    if (!m_feeds.contains(symbol)) return;
     SymbolHotData& data = ensureSymbol(symbol);
     
     if (m_recorder) {

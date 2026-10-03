@@ -715,6 +715,16 @@ int64_t HeatmapColumnStore::oldestPersistedMs(const std::string& symbol,
     return 0;
 }
 
+void HeatmapColumnStore::releaseSymbol(const std::string& symbol) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (auto it = m_writers.begin(); it != m_writers.end();) {
+        if (it->first.symbol != symbol) { ++it; continue; }
+        if (!syncWriter(it->second)) ++m_stats.ioErrors;
+        it->second.stream.close();
+        it = m_writers.erase(it);
+    }
+}
+
 void HeatmapColumnStore::flush() {
     std::lock_guard<std::mutex> lock(m_mutex);
     for (auto& [key, w] : m_writers) {

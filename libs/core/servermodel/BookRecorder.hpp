@@ -38,6 +38,8 @@ struct RecorderConfig {
     // resnapshotMaxIntervalMs, and resets once a snapshot has stayed valid for
     // resnapshotStableMs. Must only hand off (queue); no I/O. Installed before start.
     std::function<void(const std::string &symbol, const std::string &reason)> onSelfInvalidated;
+    // After all final publications/writes, on the recorder worker.
+    std::function<void(const std::string &)> onReleased;
     int64_t resnapshotIntervalMs = 30'000;
     int64_t resnapshotMaxIntervalMs = 600'000;
     int64_t resnapshotStableMs = 60'000;
@@ -80,6 +82,8 @@ class BookRecorder {
     void requestStop();
     void drain(); // production fence: all preceding calls and durable writes completed
     void onInvalid(const std::string &symbol, int64_t localMs, std::string reason);
+    // Ordered, lossless lifecycle control: commit observed tail and forget the symbol.
+    void releaseSymbol(const std::string &symbol, int64_t localMs);
     void onTick(int64_t localNowMs);
     struct Stats {
         uint64_t columnsWritten, lateEvents, backwardSteps, queueDrops, invalidations, diskErrors;
@@ -89,6 +93,7 @@ class BookRecorder {
     Watermarks watermarks(const std::string &symbol, const std::string &layer) const;
     // Waits for all preceding enqueues and disk writes, without advancing time.
     void drainForTest();
+    size_t retainedSymbolStatesForTest(); // producer + worker symbol entries after drain
 
   private:
     struct Impl;

@@ -484,3 +484,33 @@ TEST_F(FeedsTest, RetiredSocketErrorsDoNotSpeakForTheLiveProduct) {
     EXPECT_TRUE(valid["ETH-USD"]); // the live engine is untouched
     update("ETH-USD"); EXPECT_EQ(updates["ETH-USD"], 1);
 }
+
+
+TEST_F(FeedsTest, LifecycleEventsBracketDataAndPinnedRemovalEmitsNothing) {
+    create({}); // setters remain mutable until the first successful add
+    std::vector<std::string> events;
+    feeds->onFeedLifecycle([&](const std::string& p, bool acquired) {
+        events.push_back((acquired ? "acquire:" : "release:") + p);
+    });
+    feeds->onLiveOrderBookInitialized([&](const auto& p, const auto&, const auto&, auto) {
+        events.push_back("snapshot:" + p);
+    });
+    feeds->onConnectionStatus([&](const auto& p, bool up) {
+        events.push_back((up ? "up:" : "down:") + p);
+    });
+    struct Stop { MarketDataFeeds& feeds; ~Stop() { feeds.stop(); } } stop{*feeds};
+    feeds->add("BTC-USD", true); feeds->poll();
+    feeds->add("ETH-USD"); advance(1000000); snapshot("ETH-USD");
+    EXPECT_LT(std::find(events.begin(), events.end(), "acquire:ETH-USD"),
+              std::find(events.begin(), events.end(), "snapshot:ETH-USD"));
+    events.clear();
+    EXPECT_FALSE(feeds->remove("BTC-USD"));
+    EXPECT_TRUE(events.empty());
+    EXPECT_TRUE(feeds->remove("ETH-USD"));
+    feeds->add("ETH-USD"); advance(1000000); snapshot("ETH-USD");
+    ASSERT_GE(events.size(), 3u);
+    EXPECT_EQ(events[0], "release:ETH-USD");
+    EXPECT_EQ(events[1], "acquire:ETH-USD");
+    EXPECT_EQ(std::count(events.begin(), events.end(), "down:ETH-USD"), 0);
+    EXPECT_EQ(events.back(), "snapshot:ETH-USD");
+}
