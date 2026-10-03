@@ -188,7 +188,7 @@ TEST(AgentApiSymbol, OperationWaitsForActivationAndReportsRefusalOrTimeout) {
 
     const auto refused = post("SOL-USD");
     const QString refusedId = responseData(refused).value("operationId").toString();
-    server.failSymbolSwitch("SOL-USD", "Cap of 8 reached");
+    server.failSymbolSwitch("SOL-USD", "connection_cap", "Cap of 8 reached");
     const auto refusedReply = get(refusedId, 5000);
     EXPECT_TRUE(refusedReply.startsWith("HTTP/1.1 409"));
     EXPECT_EQ(responseError(refusedReply).value("code"), "connection_cap");
@@ -196,8 +196,16 @@ TEST(AgentApiSymbol, OperationWaitsForActivationAndReportsRefusalOrTimeout) {
 
     const auto timedOut = post("ADA-USD");
     const QString timeoutId = responseData(timedOut).value("operationId").toString();
-    server.failSymbolSwitch("ADA-USD", "Switch to ADA-USD timed out");
+    server.failSymbolSwitch("ADA-USD", "switch_timeout", "Switch to ADA-USD timed out");
+    EXPECT_EQ(responseError(get(timeoutId)).value("code"), "switch_timeout");
     EXPECT_EQ(responseError(get(timeoutId)).value("message"), "Switch to ADA-USD timed out");
+
+    const auto disconnected = post("DOT-USD");
+    const QString disconnectedId = responseData(disconnected).value("operationId").toString();
+    server.failSymbolSwitch("DOT-USD", "disconnected", "Switch to DOT-USD interrupted by disconnection");
+    EXPECT_EQ(responseError(get(disconnectedId)).value("code"), "disconnected");
+    EXPECT_EQ(responseError(get(disconnectedId)).value("message"),
+              "Switch to DOT-USD interrupted by disconnection");
 
     const auto waiting = post("XRP-USD");
     const QString waitingId = responseData(waiting).value("operationId").toString();

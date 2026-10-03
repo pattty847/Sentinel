@@ -42,7 +42,7 @@ public:
     quint16 port() const { return m_server.serverPort(); }
     QString errorString() const;
     void completeSymbolSwitch(const QString& symbol);
-    void failSymbolSwitch(const QString& symbol, const QString& message);
+    void failSymbolSwitch(const QString& symbol, const QString& code, const QString& message);
     void supersedePendingSymbolSwitch();
 
 private slots:

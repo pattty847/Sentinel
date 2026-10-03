@@ -374,9 +374,9 @@ void GuiApiServer::completeSymbolSwitch(const QString& symbol) {
     if (op) m_publishRevision(op->revision);
 }
 
-void GuiApiServer::failSymbolSwitch(const QString& symbol, const QString& message) {
+void GuiApiServer::failSymbolSwitch(const QString& symbol, const QString& code, const QString& message) {
     if (m_pendingSymbol != symbol.trimmed().toUpper()) return;
-    m_operations.fail(m_pendingSymbolOperation, "connection_cap", message);
+    m_operations.fail(m_pendingSymbolOperation, code, message);
     m_pendingSymbol.clear();
     m_pendingSymbolOperation.clear();
 }

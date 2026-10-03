@@ -63,7 +63,7 @@ class MainWindowGPU : public QMainWindow {
     Q_OBJECT
 
 public:
-    explicit MainWindowGPU(QWidget* parent = nullptr);
+    explicit MainWindowGPU(QWidget* parent = nullptr, int symbolSwitchTimeoutMs = 4800);
     ~MainWindowGPU();
     // S6b creates per-chart controllers here, after GUI construction. A view can
     // precede availability: HeatmapSourceController replans on its arrival.
@@ -99,9 +99,11 @@ private:
     void setWindowProperties();
     void setupGuiApiServer();
     bool subscribeSymbol(const QString& symbol);
+    void requestMainSymbol(const QString& symbol);
     void applySubscriptionActions(const QVector<SymbolSubscriptionManager::Action>& actions);
     void startPendingSymbolSwitch(const QString& symbol);
-    void abandonPendingSymbolSwitch(const QString& message);
+    void abandonPendingSymbolSwitch(const QString& code, const QString& message);
+    bool armHeldRetry(const QString& message);
     void retryHeldSymbol();
     void selectTimeframe(int ms);
     AgentApi::ControlApply agentApiApplyControl(const QString& kind, const AgentApi::ControlBody& body);
@@ -173,6 +175,7 @@ private:
     bool m_symbolSelectionRequested = false;
     QString m_pendingSymbolSwitch;
     QTimer* m_symbolSwitchTimer = nullptr;
+    int m_symbolSwitchTimeoutMs = 4800;
     QTimer* m_heldRetryTimer = nullptr;
     int m_heldRetryAttempt = 0;
     QString m_agentApiSessionId;
