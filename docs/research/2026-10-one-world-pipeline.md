@@ -384,3 +384,14 @@ The recorder stall alert A1 keeps its meaning: last column age > 240 s while
 3. Per-product grids are derived automatically: tick = about 1 basis point of price, rounded to a 1-2-5 step, never below the product's quote increment, fixed per recording day; `recording.products.<id>` may override (BTC keeps its explicit near $1 / deep $5).
 4. Rebuilt history goes to a new root `/Volumes/T7/sentinel-data/hmc2` (the 09-28/29 BTC days copied in).
 5. Parity = run-to-run byte identity of the roller plus decoded-record parity with the recorder on qualifying minutes (observedMs == 60000, no kResynced, kLateEvents masked); not whole-file byte parity.
+
+## Owner decisions, round 2 (2026-10-03): acceptance after slice A
+
+Supersedes decision 5 (parity). Exact decoded parity with the live recorder is not achievable (independent Coinbase connections; 250 ms timer ticks vs record-time ticks) and is not a goal.
+
+1. **Strict, same journal:** the roller is byte-identical run to run and after a crash-resume on a real-sized journal; in slice C the live roller equals the batch roller per bucket (mismatch metric 0 for 48 h).
+2. **Strict, identical input, legacy timer ticks vs record-time ticks** (pinned fixture test): mids, bounds, peaks and row sets exact; per cell |delta TWAP code| <= 32 codes (one code = 0.085% of size, so 32 codes ~= 2.7% of that cell's size; observed max 23); at most 1% of cells may differ at all; total TWAP per side within 0.01%.
+3. **Informational only, cross-connection** (daily report, never a gate): per qualifying minute total TWAP per side within 0.5%, |delta mid| <= 0.02% of price, entry count within 1%, row-set overlap >= 99%.
+4. **Deep grid:** for products without an override, deep tick = two 1-2-5 steps above the near tick (e.g. ETH 0.5 -> 2, SOL 0.02 -> 0.1); BTC keeps near $1 / deep $5.
+5. Slice A is accepted only after the midnight column-loss fix and the live-recorder-root refusal land with tests.
+6. No additional snapshot/state-checkpoint machinery for this (no hourly roller state snapshots); the existing journal-snapshot replay and checkpoint stay as built.
