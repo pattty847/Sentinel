@@ -116,6 +116,7 @@ struct ServerFeedAdmissionTest : testing::Test {
     void checkGuiRefusal();
     void checkRecorderRelease();
     void checkLegacyRelease();
+    void checkTradeWire();
     static void deliver(SentinelStreamClient& client, const std::string& message) { client.handleMessage(message); }
 };
 
@@ -157,6 +158,27 @@ void ServerFeedAdmissionTest::checkCap() {
 
 
 }
+
+void ServerFeedAdmissionTest::checkTradeWire() {
+    auto s = session();
+    request(s, "BTC-USD");
+    Trade trade{};
+    trade.product_id = "BTC-USD";
+    trade.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(1000));
+    trade.price = 100;
+    trade.size = 2;
+    trade.side = AggressorSide::Buy;
+    const auto before = s->write_queue_.size();
+    s->on_trade(trade);
+    drain(); // do_write posts to the session's Asio executor
+    ASSERT_EQ(s->write_queue_.size(), before + 1);
+    const auto message = nlohmann::json::parse(s->write_queue_.back().payload);
+    EXPECT_EQ(message.at("type"), "trade");
+    EXPECT_EQ(message.at("side"), "buy");
+    EXPECT_EQ(message.at("side_basis"), "aggressor");
+}
+
+TEST_F(ServerFeedAdmissionTest, TradeWireDeclaresAggressorBasis) { checkTradeWire(); }
 
 void ServerFeedAdmissionTest::checkMetrics() {
     auto s = session();

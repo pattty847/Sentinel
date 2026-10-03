@@ -10,7 +10,8 @@
 // Simple binary format constants
 namespace LogFormat {
     constexpr uint32_t MAGIC = 0x53454E54; // "SENT"
-    constexpr uint16_t VERSION = 1;
+    constexpr uint16_t LEGACY_VERSION = 1; // trade side is Coinbase maker side
+    constexpr uint16_t VERSION = 2;        // trade side is aggressor side
     
     enum class RecordType : uint8_t {
         Trade = 1,
@@ -35,7 +36,7 @@ namespace LogFormat {
     struct TradePayload {
         double price;
         double size;
-        uint8_t side; // 1=Buy, 2=Sell
+        uint8_t side; // 0=Unknown, 1=Buy, 2=Sell; basis set by FileHeader::version
         // trade_id is variable length string, stored after fixed payload
     };
     

@@ -1481,7 +1481,9 @@ public:
         j["product_id"] = trade.product_id;
         j["price"] = trade.price;
         j["size"] = trade.size;
-        j["side"] = (trade.side == AggressorSide::Buy) ? "buy" : "sell";
+        j["side"] = trade.side == AggressorSide::Buy ? "buy"
+                    : trade.side == AggressorSide::Sell ? "sell" : "unknown";
+        j["side_basis"] = "aggressor";
         j["time"] = Cpp20Utils::formatExchangeTimestamp(trade.timestamp);
         
         do_write(j.dump());
