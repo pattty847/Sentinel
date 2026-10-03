@@ -36,8 +36,7 @@ public:
     CaptureFanout& operator=(const CaptureFanout&) = delete;
     // One disk producer per product. Never waits on worker/client locks, never
     // throws into the writer. Overflow invalidates this product's socket stream.
-    void publish(size_t product, std::string_view runId, uint64_t block,
-                 uint32_t records, std::string_view framedRecords) noexcept;
+    void publish(size_t product, const JournalEvent&) noexcept;
     void stop(); // after joining writers; bounded even with blocked clients
     QString path() const;
 private:

@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <sys/resource.h>
 #include <iostream>
+#include <csignal>
 using namespace sentinel::capture;
 using Json = nlohmann::json;
 using namespace std::chrono_literals;
@@ -26,6 +27,9 @@ struct Peer {
     QByteArray buffer;
     explicit Peer(const QString& path) { socket.connectToServer(path); if(!socket.waitForConnected(3000)) throw std::runtime_error("connect failed"); }
     void send(Json j) { const auto s=j.dump()+"\n"; socket.write(s.data(),s.size()); socket.waitForBytesWritten(1000); }
+    std::pair<Json,std::string> nextNonDurable() {
+        auto event = next(); while (event.first["type"] == "durable") event = next(); return event;
+    }
     void hello(std::optional<JournalPosition> p={}, std::string product="BTC-USD") {
         Json j={{"type","hello"},{"version",1},{"product",product}}; if(p) j["pos"]=positionJson(*p); send(j);
     }
@@ -68,14 +72,14 @@ struct Fixture : testing::Test {
     }
     void put(uint64_t block, std::string payload="raw", size_t product=0) {
         Record r{Kind::Frame,{1700000000000000000LL+int64_t(block),int64_t(block)+1},7,std::move(payload)};
-        server->publish(product,"run",block,1,framed(r));
+        server->publish(product,{JournalEventKind::Record,"run",block,0,true,framed(r)});
     }
     bool metric(const std::string& line) { return metrics.render().find(line+"\n")!=std::string::npos; }
 };
 TEST_F(Fixture, WriterBytesPositionsRotationAndShutdown) {
     start(); Peer peer(server->path()); peer.hello(); ASSERT_EQ(peer.next().first["type"],"tip");
     WriterConfig wc; wc.root=dir.path()+"/raw"; wc.blockBytes=160; wc.fsyncBlocks=1;
-    wc.onBlock=[&](auto run,auto block,auto count,auto bytes){server->publish(0,run,block,count,bytes);};
+    wc.onJournal=[&](const JournalEvent& e){server->publish(0,e);};
     std::vector<Record> expected;
     {
         Session session(wc,{{"product_metadata",{{"product_id","BTC-USD"},{"quote_increment","0.01"},{"base_increment","0.00000001"}}}});
@@ -89,7 +93,7 @@ TEST_F(Fixture, WriterBytesPositionsRotationAndShutdown) {
     }
     std::vector<JournalPosition> positions;
     for(const auto& r:expected) {
-        auto [j,raw]=peer.next(); ASSERT_EQ(j["type"],"record"); EXPECT_EQ(raw,framed(r)); positions.push_back(parsePosition(j["pos"]));
+        auto [j,raw]=peer.nextNonDurable(); ASSERT_EQ(j["type"],"record"); EXPECT_EQ(raw,framed(r)); positions.push_back(parsePosition(j["pos"]));
     }
     std::map<uint64_t,std::vector<Record>> blocks;
     QDirIterator files(wc.root,{"*.rawl2"},QDir::Files,QDirIterator::Subdirectories);
@@ -105,7 +109,7 @@ TEST_F(Fixture, WriterBytesPositionsRotationAndShutdown) {
         EXPECT_EQ(blocks.at(positions[i].block).at(positions[i].record),expected[i]);
         if(i) EXPECT_TRUE(positions[i].block>positions[i-1].block || (positions[i].block==positions[i-1].block && positions[i].record==positions[i-1].record+1));
     }
-    server->stop(); EXPECT_EQ(peer.next().first["reason"],"shutdown");
+    server->stop(); EXPECT_EQ(peer.nextNonDurable().first["reason"],"shutdown");
     EXPECT_TRUE(metric("sentinel_fanout_clients 0")); server.reset(); EXPECT_FALSE(QFileInfo::exists(cfg.socketPath));
 }
 TEST_F(Fixture, ResumeExcludesCursorAndIncludesEverySuccessor) {
@@ -136,12 +140,12 @@ TEST_F(Fixture, SlowClientCannotBlockWriterOrHealthyClient) {
     Peer slow(server->path()); slow.hello(); slow.next();
     Peer healthy(server->path()); healthy.hello(); healthy.next();
     WriterConfig wc; wc.root=dir.path()+"/raw"; wc.blockBytes=1; wc.fsyncBlocks=0;
-    wc.onBlock=[&](auto run,auto block,auto count,auto bytes){server->publish(0,run,block,count,bytes);};
+    wc.onJournal=[&](const JournalEvent& e){server->publish(0,e);};
     Writer writer(wc,Json::object());
     auto begin=std::chrono::steady_clock::now();
     for(int i=0;i<40;++i) {
         writer.append({Kind::Frame,{1700000000000000000LL+i,i+1},1,std::string(65536,'x')});
-        auto r=healthy.next(); ASSERT_EQ(r.first["type"],"record"); EXPECT_EQ(r.first["pos"]["block"],i);
+        auto r=healthy.nextNonDurable(); ASSERT_EQ(r.first["type"],"record"); EXPECT_EQ(r.first["pos"]["block"],i);
     }
     writer.close(); EXPECT_EQ(writer.stats().records,40);
     EXPECT_LT(std::chrono::steady_clock::now()-begin,3s);
@@ -207,14 +211,136 @@ TEST_F(Fixture, ClientCapAndUnavailableControlHaveBoundedLifetimes) {
     auto begin=std::chrono::steady_clock::now(); server->stop(); EXPECT_LT(std::chrono::steady_clock::now()-begin,1s);
     for(auto& p:peers) EXPECT_EQ(p->next().first["reason"],"shutdown");
 }
-TEST_F(Fixture, FailedOrUnflushedBlocksAreNotPublished) {
+TEST_F(Fixture, ProvisionalArrivesBeforeFlushAndDurableFollows) {
     start(); Peer peer(server->path()); peer.hello(); peer.next();
+    WriterConfig wc; wc.root=dir.path()+"/raw"; wc.blockInterval=60s;
+    std::vector<JournalEventKind> events;
+    wc.onJournal=[&](const JournalEvent& e){
+        events.push_back(e.kind);
+        QDirIterator files(wc.root,{"*.rawl2"},QDir::Files,QDirIterator::Subdirectories);
+        if(e.kind==JournalEventKind::Record) EXPECT_FALSE(files.hasNext()); // before even initial header I/O
+        if(e.kind==JournalEventKind::Durable) {
+            ASSERT_TRUE(files.hasNext());
+            auto disk=scan(files.next()); ASSERT_EQ(disk.index.size(),1);
+            EXPECT_EQ(disk.index.front().ordinal,e.block); EXPECT_EQ(disk.index.front().records,e.record+1);
+        }
+        server->publish(0,e);
+    };
+    Writer writer(wc,{{"product_metadata",{{"product_id","BTC-USD"},{"quote_increment","0.01"},{"base_increment","0.00000001"}}}});
+    Record record{Kind::Frame,Stamp::now(),1,"first"}; writer.append(record);
+    auto provisional=peer.next(); ASSERT_EQ(provisional.first["type"],"record");
+    EXPECT_TRUE(provisional.first["provisional"].get<bool>()); EXPECT_EQ(provisional.second,framed(record));
+    EXPECT_EQ(writer.stats().blocks,0); EXPECT_EQ(events,(std::vector{JournalEventKind::Record}));
+    const auto pos=provisional.first["pos"];
+    // Reconnect while still unflushed: the cursor is in the ring, but not durable.
+    Peer resumed(server->path()); resumed.hello(parsePosition(pos));
+    auto tip=resumed.next().first; EXPECT_EQ(tip["type"],"tip"); EXPECT_TRUE(tip["durable"].is_null());
+    writer.flush();
+    auto durable=peer.next(); ASSERT_EQ(durable.first["type"],"durable");
+    EXPECT_EQ(durable.first["through"],pos); EXPECT_EQ(durable.first["product"],"BTC-USD"); EXPECT_TRUE(durable.second.empty());
+    EXPECT_EQ(resumed.next().first["through"],pos); EXPECT_EQ(writer.stats().blocks,1);
+    EXPECT_EQ(events,(std::vector{JournalEventKind::Record,JournalEventKind::Durable}));
+}
+TEST_F(Fixture, DurableProvisionalOrderAndResumeWatermark) {
+    start(); Peer peer(server->path()); peer.hello(); peer.next();
+    WriterConfig wc; wc.root=dir.path()+"/raw"; wc.blockBytes=64;
+    wc.onJournal=[&](const JournalEvent& e){server->publish(0,e);};
+    Writer writer(wc,Json::object());
+    writer.append({Kind::Frame,Stamp::now(),1,"first"});
+    auto first=peer.next().first; ASSERT_EQ(first["type"],"record");
+    // The next provisional record arrives before the preceding block does disk I/O.
+    writer.append({Kind::Frame,Stamp::now(),1,"second"});
+    auto second=peer.next().first; ASSERT_EQ(second["type"],"record"); EXPECT_TRUE(second["provisional"].get<bool>());
+    auto durable=peer.next().first; ASSERT_EQ(durable["type"],"durable"); EXPECT_EQ(durable["through"],first["pos"]);
+    EXPECT_EQ(second["pos"]["block"],1); EXPECT_EQ(second["pos"]["record"],0);
+    writer.flush(); EXPECT_EQ(peer.next().first["through"],second["pos"]);
+    Peer resumed(server->path()); resumed.hello(parsePosition(first["pos"]));
+    auto tip=resumed.next().first; EXPECT_EQ(tip["durable"],second["pos"]);
+    EXPECT_EQ(resumed.next().first["pos"],second["pos"]);
+}
+// Tiny consumer model: display provisional entries, checkpoint only an applied
+// durable prefix, and pause for journal recovery immediately after retraction.
+struct Consumer {
+    std::vector<JournalPosition> displayed;
+    std::optional<JournalPosition> checkpoint;
+    bool needsJournal=false;
+    void accept(const Json& j) {
+        if(j["type"]=="retract") {
+            std::optional<JournalPosition> after;
+            if(!j["after"].is_null()) after=parsePosition(j["after"]);
+            std::erase_if(displayed,[&](const auto& p){return !after || p.runId!=after->runId ||
+                std::pair{p.block,p.record}>std::pair{after->block,after->record};});
+            needsJournal=true;
+        } else if(!needsJournal && j["type"]=="record") displayed.push_back(parsePosition(j["pos"]));
+        else if(!needsJournal && j["type"]=="durable") {
+            auto through=parsePosition(j["through"]);
+            EXPECT_NE(std::find(displayed.begin(),displayed.end(),through),displayed.end());
+            checkpoint=through;
+        }
+    }
+};
+TEST_F(Fixture, WriteFailureRetractsAndConsumerDiscardsSuffix) {
+    start(); Peer peer(server->path()); peer.hello(); peer.next(); Consumer consumer;
     WriterConfig wc; wc.root=dir.path()+"/raw";
-    std::atomic<int> calls{0};
-    wc.onBlock=[&](auto run,auto block,auto count,auto bytes){++calls; server->publish(0,run,block,count,bytes);};
-    Writer writer(wc,Json::object()); writer.append({Kind::Frame,Stamp::now(),1,"first"});
-    EXPECT_EQ(calls,0); writer.flush(); EXPECT_EQ(calls,1); EXPECT_EQ(peer.next().first["type"],"record");
-    writer.append({Kind::Frame,Stamp::now(),1,"abandoned"}); writer.abandonSegment(); writer.close();
-    EXPECT_EQ(calls,1);
+    wc.onJournal=[&](const JournalEvent& e){server->publish(0,e);};
+    Writer writer(wc,Json::object());
+    writer.append({Kind::Frame,Stamp::now(),1,"durable prefix"});
+    const auto first=peer.next().first; consumer.accept(first); EXPECT_FALSE(consumer.checkpoint);
+    writer.flush(); consumer.accept(peer.next().first); ASSERT_TRUE(consumer.checkpoint);
+    const auto checkpoint=*consumer.checkpoint;
+    std::string random(32768,' '); uint32_t state=123;
+    for(auto& c:random) {state=state*1664525u+1013904223u; c=char(state>>24);}
+    writer.append({Kind::Frame,Stamp::now(),1,random});
+    auto provisional=peer.next().first; consumer.accept(provisional);
+    EXPECT_EQ(consumer.displayed.size(),2); EXPECT_EQ(*consumer.checkpoint,checkpoint);
+    // Real short write without filling a volume; only this scoped file-size
+    // limit is changed, and both limit and signal disposition are restored.
+    {
+        struct Limit {
+            rlimit previous{}; decltype(std::signal(SIGXFSZ,SIG_IGN)) handler;
+            Limit():handler(std::signal(SIGXFSZ,SIG_IGN)) {
+                if(getrlimit(RLIMIT_FSIZE,&previous)) throw std::runtime_error("getrlimit");
+                auto limited=previous; limited.rlim_cur=8192;
+                if(setrlimit(RLIMIT_FSIZE,&limited)) throw std::runtime_error("setrlimit");
+            }
+            ~Limit(){setrlimit(RLIMIT_FSIZE,&previous); std::signal(SIGXFSZ,handler);}
+        } limit;
+        EXPECT_THROW(writer.flush(),std::exception);
+    }
+    auto retract=peer.next().first; ASSERT_EQ(retract["type"],"retract"); EXPECT_EQ(retract["after"],first["pos"]);
+    consumer.accept(retract); EXPECT_TRUE(consumer.needsJournal);
+    ASSERT_EQ(consumer.displayed.size(),1); EXPECT_EQ(consumer.displayed.front(),checkpoint); EXPECT_EQ(*consumer.checkpoint,checkpoint);
+    // Retracted records cannot be replayed from the ring.
+    Peer stale(server->path()); stale.hello(parsePosition(provisional["pos"])); EXPECT_EQ(stale.next().first["type"],"gap");
+    writer.abandonSegment(); writer.append({Kind::CaptureStopped,Stamp::now(),1,R"({"gap":true})"}); writer.close();
+    auto marker=peer.next().first; ASSERT_EQ(marker["type"],"record");
+    EXPECT_GT(marker["pos"]["block"].get<uint64_t>(),provisional["pos"]["block"].get<uint64_t>());
+    consumer.accept(marker); consumer.accept(peer.next().first); EXPECT_EQ(*consumer.checkpoint,checkpoint); // paused until journal recovery
+}
+TEST_F(Fixture, RetractionBeforeFirstFlushIsNullAndPositionsAreNotReused) {
+    start(); Peer peer(server->path()); peer.hello(); peer.next(); Consumer consumer;
+    WriterConfig wc; wc.root=dir.path()+"/raw";
+    wc.onJournal=[&](const JournalEvent& e){server->publish(0,e);};
+    Writer writer(wc,Json::object()); writer.append({Kind::Frame,Stamp::now(),1,"abandoned"});
+    auto first=peer.next().first; consumer.accept(first);
+    writer.abandonSegment(); auto retract=peer.next().first;
+    ASSERT_EQ(retract["type"],"retract"); EXPECT_TRUE(retract["after"].is_null()); consumer.accept(retract);
+    EXPECT_TRUE(consumer.displayed.empty()); EXPECT_FALSE(consumer.checkpoint);
+    Peer resumed(server->path()); resumed.hello(parsePosition(first["pos"]));
+    EXPECT_EQ(resumed.next().first["type"],"gap"); EXPECT_TRUE(resumed.next().first["durable"].is_null());
+    writer.append({Kind::CaptureStopped,Stamp::now(),1,R"({"gap":true})"});
+    auto marker=peer.next().first; EXPECT_GT(marker["pos"]["block"].get<uint64_t>(),first["pos"]["block"].get<uint64_t>());
+    writer.close(); EXPECT_EQ(peer.next().first["type"],"durable");
+}
+TEST_F(Fixture, SessionFaultRetractsBeforeWaitingForClose) {
+    start(); Peer peer(server->path()); peer.hello(); peer.next();
+    WriterConfig wc; wc.root=dir.path()+"/raw"; wc.blockInterval=60s;
+    wc.onJournal=[&](const JournalEvent& e){server->publish(0,e);};
+    std::atomic<bool> fail{false}; SessionHooks hooks;
+    hooks.beforeWriterOperation=[&](const auto&,auto op,const auto*){if(op=="flush" && fail.exchange(false)) throw std::runtime_error("injected write failure");};
+    Session session(wc,Json::object(),65536,hooks); ASSERT_TRUE(session.submit({Kind::Frame,Stamp::now(),1,"pending"}));
+    EXPECT_EQ(peer.next().first["type"],"record"); fail=true;
+    auto retract=peer.next().first; EXPECT_EQ(retract["type"],"retract"); EXPECT_TRUE(retract["after"].is_null());
+    EXPECT_TRUE(eventually([&]{return !session.error().empty();})); session.close(); EXPECT_FALSE(session.error().empty());
 }
 } // namespace

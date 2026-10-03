@@ -41,7 +41,19 @@ struct RecordLocation {
     uint64_t connection = 0;
     Kind kind = Kind::Frame;
 };
-using BlockObserver = std::function<void(std::string_view runId, uint64_t block, uint32_t records, std::string_view bytes)>;
+enum class JournalEventKind { Record, Durable, Retract };
+// Views are valid only during the callback. Record bytes include RAWL2 framing.
+// Durable/Retraction use the last record of the successful prefix; hasPosition
+// false on a retraction means this run has no durable prefix at all.
+struct JournalEvent {
+    JournalEventKind kind;
+    std::string_view runId;
+    uint64_t block = 0;
+    uint32_t record = 0;
+    bool hasPosition = true;
+    std::string_view bytes;
+};
+using JournalObserver = std::function<void(const JournalEvent&)>;
 struct WriterConfig {
     QString root = "/Volumes/T7/sentinel-data/raw-l2";
     std::string symbol = "BTC-USD";
@@ -49,7 +61,7 @@ struct WriterConfig {
     std::chrono::milliseconds blockInterval{1000};
     uint32_t fsyncBlocks = 1; // 0 = only on file close
     int compressionLevel = 3;
-    BlockObserver onBlock; // successful block flush; observer must not throw or block
+    JournalObserver onJournal; // append + flush + failure; observer must not throw or block
 };
 struct BlockIndex {
     uint64_t offset = 0;
@@ -77,7 +89,8 @@ nlohmann::json frameReceipt(std::string_view payload, const std::vector<std::str
 
 
 // Single-thread owner. Append-only, exclusive-create segments; never opens an old
-// file for writing. Destructor only closes the fd: call close() to commit/index.
+// file for writing. Destructor retracts pending records and closes the fd;
+// call close() to commit/index.
 // Writes RAWL2 v1 only (one product per file and per connection). RAWL2 v2
 // (one connection, several products, routing receipts) is read-only since
 // 2026-10-02: metadata naming connection_products/routing is refused.
@@ -95,6 +108,7 @@ public:
     // Used only after an I/O failure: leave the damaged segment untouched and
     // create a fresh segment for the reserved failure marker.
     void abandonSegment();
+    void retract() noexcept; // idempotent failure notification (also used by Session fault hooks)
     std::optional<RecordLocation> firstUncommitted() const;
     const WriterStats& stats() const { return m_stats; }
     const QString& currentPath() const { return m_path; }
@@ -119,6 +133,9 @@ private:
     bool m_closed = false;
     std::vector<BlockIndex> m_index;
     WriterStats m_stats;
+    std::optional<std::pair<uint64_t, uint32_t>> m_durable;
+    std::optional<uint64_t> m_appendedBlock;
+    bool m_retracted = false;
     std::optional<RecordLocation> m_uncommittedRecord, m_uncommittedFrame;
     struct CompressionState;
     std::unique_ptr<CompressionState> m_compression;

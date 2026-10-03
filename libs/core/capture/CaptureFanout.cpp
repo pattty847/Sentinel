@@ -93,18 +93,18 @@ ssize_t sendBytes(int fd, const char* p, size_t n) {
 }
 }
 struct CaptureFanout::Impl {
-    struct Batch { std::string run, raw; uint64_t block, epoch; uint32_t records; size_t cost() const { return raw.size() + run.size() + sizeof(Batch); } };
+    struct Batch { std::string run, raw; uint64_t block, epoch; uint32_t record; JournalEventKind kind; bool hasPosition; size_t cost() const { return raw.size() + run.size() + sizeof(Batch); } };
     struct Entry { JournalPosition pos; std::shared_ptr<const std::string> wire; int64_t time; size_t cost() const { return wire->size() + sizeof(Entry) + pos.product.size() + pos.runId.size(); } };
     struct Product {
         std::string name;
         // Single producer/consumer fixed slots. Payload allocated only at publish.
-        std::array<std::unique_ptr<Batch>, 64> pending;
+        std::array<std::unique_ptr<Batch>, 1024> pending;
         std::atomic<uint64_t> head{0}, tail{0}, epoch{0};
         std::shared_ptr<std::atomic<size_t>> pendingBytes = std::make_shared<std::atomic<size_t>>(0);
         std::deque<Entry> ring;
         size_t ringBytes = 0;
         uint64_t seenEpoch = 0;
-        std::optional<JournalPosition> tip;
+        std::optional<JournalPosition> tip, durable;
         std::optional<int64_t> lastResnapshot;
         metrics::Gauge *ringGauge = nullptr, *oldest = nullptr;
         metrics::Counter *hits = nullptr, *misses = nullptr, *drops = nullptr;
@@ -148,10 +148,10 @@ struct CaptureFanout::Impl {
             const metrics::Labels label{{"product", name}};
             p->ringGauge = &r.gauge("sentinel_fanout_ring_bytes", "Ring bytes including entry accounting.", label);
             p->oldest = &r.gauge("sentinel_fanout_ring_oldest_age_seconds", "Oldest retained publication age.", label);
-            p->drops = &r.counter("sentinel_fanout_ingress_drops_total", "Blocks refused by bounded fanout ingress; journal unaffected.", label);
+            p->drops = &r.counter("sentinel_fanout_ingress_drops_total", "Journal events refused by bounded fanout ingress; journal unaffected.", label);
             p->hits = &r.counter("sentinel_fanout_resume_hits_total", "Resume cursors found in ring.", label);
             p->misses = &r.counter("sentinel_fanout_resume_misses_total", "Resume cursors requiring journal catch-up.", label);
-            r.gaugeFn("sentinel_fanout_ingress_bytes", "Disk-to-fanout pending bytes, outside QueuePool.", label,
+            r.gaugeFn("sentinel_fanout_ingress_bytes", "Writer-to-fanout pending bytes, outside QueuePool.", label,
                 [bytes = p->pendingBytes]() -> std::optional<double> { return double(bytes->load(std::memory_order_relaxed)); });
             products.push_back(std::move(p));
         }
@@ -239,19 +239,35 @@ struct CaptureFanout::Impl {
                 p.pendingBytes->fetch_sub(batch->cost(), std::memory_order_relaxed);
                 p.tail.store(++tail, std::memory_order_release);
                 if (batch->epoch != p.seenEpoch) continue;
-                size_t offset = 0;
-                for (uint32_t n = 0; n < batch->records; ++n) {
-                    if (offset + 32 > batch->raw.size()) throw std::runtime_error("invalid fanout block");
-                    size_t size = size_t(get32(batch->raw.data() + offset)) + 4;
-                    if (size < 32 || size > batch->raw.size() - offset) throw std::runtime_error("invalid fanout record");
-                    JournalPosition pos{p.name, batch->run, batch->block, n};
-                    auto wire = std::make_shared<const std::string>(packet({{"type", "record"}, {"pos", positionJson(pos)}}, std::string_view(batch->raw).substr(offset, size)));
+                JournalPosition pos{p.name, batch->run, batch->block, batch->record};
+                if (batch->kind == JournalEventKind::Record) {
+                    if (batch->raw.size() < 32 || size_t(get32(batch->raw.data())) + 4 != batch->raw.size())
+                        throw std::runtime_error("invalid fanout record");
+                    auto wire = std::make_shared<const std::string>(packet(
+                        {{"type", "record"}, {"pos", positionJson(pos)}, {"provisional", true}}, batch->raw));
                     Entry e{pos, wire, now}; p.tip = pos;
                     p.ringBytes += e.cost(); p.ring.push_back(std::move(e)); prune(p, now);
                     for (auto& c : clients) if (c.product == int(i)) enqueue(c, wire);
-                    offset += size;
+                } else {
+                    Json message;
+                    if (batch->kind == JournalEventKind::Durable) {
+                        p.durable = pos;
+                        message = {{"type", "durable"}, {"product", p.name}, {"through", positionJson(pos)}};
+                    } else {
+                        p.durable = batch->hasPosition ? std::optional(pos) : std::nullopt;
+                        // Remove the suffix permanently: a reconnect must never replay
+                        // records withdrawn by a failed flush/abandoned segment.
+                        while (!p.ring.empty() && (!p.durable || p.ring.back().pos.runId != p.durable->runId ||
+                            std::pair{p.ring.back().pos.block, p.ring.back().pos.record} > std::pair{p.durable->block, p.durable->record})) {
+                            p.ringBytes -= p.ring.back().cost(); p.ring.pop_back();
+                        }
+                        p.tip = p.durable;
+                        message = {{"type", "retract"}, {"product", p.name},
+                            {"after", p.durable ? positionJson(*p.durable) : Json(nullptr)}};
+                    }
+                    auto wire = std::make_shared<const std::string>(packet(message));
+                    for (auto& c : clients) if (c.product == int(i)) enqueue(c, wire);
                 }
-                if (offset != batch->raw.size()) throw std::runtime_error("invalid fanout block count");
             }
             prune(p, now);
         }
@@ -279,7 +295,8 @@ struct CaptureFanout::Impl {
                         {"until_inclusive", false}})) return;
                 }
             } else begin = p.ring.begin();
-            if (!control(c, {{"type", "tip"}, {"version", 1}, {"product", product}, {"pos", p.tip ? positionJson(*p.tip) : Json(nullptr)}})) return;
+            if (!control(c, {{"type", "tip"}, {"version", 1}, {"product", product}, {"pos", p.tip ? positionJson(*p.tip) : Json(nullptr)},
+                {"durable", p.durable ? positionJson(*p.durable) : Json(nullptr)}})) return;
             for (auto entry = begin; entry != p.ring.end(); ++entry) if (!enqueue(c, entry->wire)) return;
             c.product = index; // same worker: replay -> live is atomic
         } else if (type == "resnapshot") {
@@ -373,7 +390,8 @@ CaptureFanout::CaptureFanout(FanoutConfig c, const std::vector<std::string>& pro
                            std::function<void(const std::string&)> callback)
     : m(std::make_unique<Impl>(std::move(c), products, registry, std::move(callback))) {}
 CaptureFanout::~CaptureFanout() = default;
-void CaptureFanout::publish(size_t index, std::string_view run, uint64_t block, uint32_t records, std::string_view raw) noexcept {
+void CaptureFanout::publish(size_t index, const JournalEvent& event) noexcept {
+    const auto run = event.runId, raw = event.bytes;
     if (m->stopping.load(std::memory_order_acquire) || index >= m->products.size()) return;
     auto& p = *m->products[index];
     const auto head = p.head.load(std::memory_order_relaxed);
@@ -381,7 +399,7 @@ void CaptureFanout::publish(size_t index, std::string_view run, uint64_t block, 
     try {
         if (cost > m->config.ingressBytes || p.pendingBytes->load(std::memory_order_relaxed) > m->config.ingressBytes - cost ||
             head - p.tail.load(std::memory_order_acquire) == p.pending.size()) throw std::runtime_error("fanout ingress full");
-        auto batch = std::make_unique<Impl::Batch>(Impl::Batch{std::string(run), std::string(raw), block, p.epoch.load(std::memory_order_relaxed), records});
+        auto batch = std::make_unique<Impl::Batch>(Impl::Batch{std::string(run), std::string(raw), event.block, p.epoch.load(std::memory_order_relaxed), event.record, event.kind, event.hasPosition});
         p.pendingBytes->fetch_add(cost, std::memory_order_relaxed);
         p.pending[head % p.pending.size()] = std::move(batch);
         p.head.store(head + 1, std::memory_order_release);
@@ -395,7 +413,7 @@ QString prepareFanoutPath(const QString&) { throw std::runtime_error("capture fa
 struct CaptureFanout::Impl {};
 CaptureFanout::CaptureFanout(FanoutConfig, const std::vector<std::string>&, metrics::MetricsRegistry&, std::function<void(const std::string&)>) { throw std::runtime_error("capture fanout requires Unix"); }
 CaptureFanout::~CaptureFanout() = default;
-void CaptureFanout::publish(size_t, std::string_view, uint64_t, uint32_t, std::string_view) noexcept {}
+void CaptureFanout::publish(size_t, const JournalEvent&) noexcept {}
 void CaptureFanout::stop() {}
 QString CaptureFanout::path() const { return {}; }
 #endif

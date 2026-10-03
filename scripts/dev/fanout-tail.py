@@ -9,7 +9,7 @@ import struct
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('product')
 parser.add_argument('--socket', default=os.path.expanduser('~/Sentinel-runtime/run/capture.sock'))
-parser.add_argument('--resume', type=json.loads, help='last applied position JSON')
+parser.add_argument('--resume', type=json.loads, help='last applied durable position JSON')
 parser.add_argument('--resnapshot', action='store_true', help='explicitly request a new upstream snapshot')
 args = parser.parse_args()
 
@@ -18,7 +18,7 @@ def exact(stream, size):
     while len(out) < size:
         part = stream.recv(size - len(out))
         if not part:
-            raise SystemExit('EOF: resume from last applied journal position; never assume continuity')
+            raise SystemExit('EOF: discard provisional suffix; resume from last applied durable journal position; never assume continuity')
         out.extend(part)
     return bytes(out)
 

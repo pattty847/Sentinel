@@ -11,8 +11,17 @@ os.chdir(root)
 fanout = Path('libs/core/capture/CaptureFanout.cpp')
 writer = Path('libs/core/capture/RawCapture.cpp')
 app = Path('libs/core/capture/CaptureApp.cpp')
+durable_notification = '    m_durable = std::pair{entry.ordinal, m_count - 1};\n    if (m_config.onJournal) m_config.onJournal({JournalEventKind::Durable,\n        m_metadata.at("run_id").get_ref<const std::string&>(), entry.ordinal, m_count - 1, true, {}});\n'
+flush_io = '    write(header); write(compressed);\n    if (!m_file.flush()) fail("block flush failed");\n    ++m_stats.blocks;\n    if (m_config.fsyncBlocks && m_stats.blocks % m_config.fsyncBlocks == 0) sync();\n    m_index.push_back(entry);\n'
 checks = [
-    ('writer publication', writer, 'if (m_config.onBlock)', 'if (false && m_config.onBlock)', 'Fixture.WriterBytesPositionsRotationAndShutdown'),
+    ('durable after physical flush', writer, flush_io + durable_notification, durable_notification + flush_io, 'Fixture.ProvisionalArrivesBeforeFlushAndDurableFollows'),
+    ('writer publication', writer, '        m_config.onJournal({JournalEventKind::Record,', '        if (false) m_config.onJournal({JournalEventKind::Record,', 'Fixture.WriterBytesPositionsRotationAndShutdown'),
+    ('provisional before flush', writer, '        m_config.onJournal({JournalEventKind::Record,', '        if (false) m_config.onJournal({JournalEventKind::Record,', 'Fixture.ProvisionalArrivesBeforeFlushAndDurableFollows'),
+    ('durable notification', writer, 'if (m_config.onJournal) m_config.onJournal({JournalEventKind::Durable,', 'if (false && m_config.onJournal) m_config.onJournal({JournalEventKind::Durable,', 'Fixture.DurableProvisionalOrderAndResumeWatermark'),
+    ('flush failure retract', writer, '} catch (...) { retract(); throw; }\nvoid Writer::seal()', '} catch (...) { throw; }\nvoid Writer::seal()', 'Fixture.WriteFailureRetractsAndConsumerDiscardsSuffix'),
+    ('retract ring suffix', fanout, 'while (!p.ring.empty() && (!p.durable ||', 'while (false && !p.ring.empty() && (!p.durable ||', 'Fixture.WriteFailureRetractsAndConsumerDiscardsSuffix'),
+    ('position non-reuse', writer, 'if (m_appendedBlock) m_ordinal =', 'if (false && m_appendedBlock) m_ordinal =', 'Fixture.RetractionBeforeFirstFlushIsNullAndPositionsAreNotReused'),
+    ('session fault retract', Path('libs/core/capture/CaptureSession.cpp'), 'if (writer) writer->retract(); failed = true;', 'failed = true;', 'Fixture.SessionFaultRetractsBeforeWaitingForClose'),
     ('exclusive resume', fanout, 'begin = std::next(found)', 'begin = found', 'Fixture.ResumeExcludesCursorAndIncludesEverySuccessor'),
     ('explicit gap', fanout, '{"type", "gap"}', '{"type", "tip"}', 'Fixture.TimeAndByteEvictionReturnExplicitJournalBoundary'),
     ('time retention', fanout, 'now - p.ring.front().time >= config.retention.count() * 1000000', 'false', 'Fixture.TimeAndByteEvictionReturnExplicitJournalBoundary'),

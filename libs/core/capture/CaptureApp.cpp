@@ -172,8 +172,8 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
         auto symbol = product.config.symbol;
         auto& state = states[symbol];
         state.feed = std::make_unique<FeedMetrics>(startedSteady);
-        product.config.onBlock = [&, slot = states.size() - 1](std::string_view run, uint64_t block, uint32_t count, std::string_view bytes) noexcept {
-            fanout.publish(slot, run, block, count, bytes);
+        product.config.onJournal = [&, slot = states.size() - 1](const JournalEvent& event) noexcept {
+            fanout.publish(slot, event);
         };
         state.session = std::make_unique<Session>(std::move(product.config), std::move(product.metadata), pool, states.size() - 1);
         state.session->submit({Kind::CaptureStarted, Stamp::now(), 0, R"({"reason":"capture started"})"});

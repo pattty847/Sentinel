@@ -498,30 +498,37 @@ It intentionally has no dependency on unlanded slice A. Slice C should map it to
 `roller::JournalPos` (or consolidate the plain DTO at that merge point); RAWL2
 framing and coordinates are unchanged.
 
-**Publication refinement and latency limitation:** actual block/record positions
-are assigned by the writer, including size/time/hour rotation and failure-marker
-recovery. The handoff observes the exact block after successful flush, including
-sync when due. This avoids publishing records that never reached the journal,
-but adds up to `--block-ms` (default 1 s) plus disk scheduling to live latency.
-It does not meet section 6's proposed sub-millisecond pre-parse handoff. Slice C
-must measure/resolve that tradeoff before claiming the original +50 ms GUI-age
-gate. Publishing ahead of durability would require an explicit provisional
-position/durability-watermark protocol; this slice does not silently assume one.
+**Append-time publication (orchestrator follow-up to a616ffe):** the writer assigns
+final positions and publishes exact framed records as provisional before any
+append-related disk I/O, including the previous block's flush at a boundary.
+Successful flushes send inclusive `durable{product,through}` watermarks; failures
+send `retract{product,after}` (null before the first successful flush) before the
+existing recovery path. Recovery segments do not reuse published positions.
+Rings retain provisional records and remove retracted suffixes. Record/control
+ordering is preserved, but a watermark can cover a prefix of already delivered
+provisional records. Consumers checkpoint only fully applied durable positions,
+discard withdrawn provisional state, and resume from the journal after retract
+or EOF. The handshake tip includes the current durability ceiling for replay.
+Default fsync remains one per block; custom weaker durability settings retain
+their power-loss exposure. This replaces the earlier after-flush limitation;
+live handoff no longer waits for the appended record's disk operation. The
+existing disk-worker queue can delay entry to append, so slice C must still
+measure full feed-to-GUI age before claiming the +50 ms acceptance gate.
 
 The required ring retains bytes with zero clients, so literal zero memory
-overhead is impossible. Capacity is not preallocated. Benchmark and validation
-results are recorded below after queued validation. No service was deployed,
+overhead is impossible. Payload capacity is not preallocated. Benchmark and
+validation results are recorded below. No service was deployed,
 restarted or stopped; production data was not written.
 
-Validation details: eleven standalone fanout cases pass, plus the production
-application fixture (including the new real `MarketDataFeeds` resnapshot route
-and a connected socket at SIGTERM). Thirteen fail-without checks pass:
-publication, exclusive resume, explicit gap, time retention, byte retention,
-client backpressure, ingress loss, resnapshot rate limit, routing callback,
-private-directory enforcement, client shutdown, retention with zero clients,
-and the application's engine wiring. Each mutation is restored, its source
-explicitly touched, rebuilt, and the same regression passes again.
-`tests/capture/fanout_mutations.py` reproduces the checks under the build queue.
+Fifteen fanout cases pass, alongside RAWL2 and capture application/lifecycle
+suites. The five new cases cover provisional delivery before initial disk I/O,
+durable visibility and cross-block ordering/replay, real short-write retraction
+with consumer rollback, null retraction/position non-reuse, and immediate Session
+fault notification before close. All 20 fail-without checks pass, including the
+original 13 and seven new checks: premature durability, missing provisional or
+durable notification, missing writer/Session retraction, stale ring suffix and
+position reuse. `tests/capture/fanout_mutations.py` restores, explicitly touches,
+rebuilds and re-passes each regression after every mutation.
 
 Overhead method: `capture_fanout_benchmark baseline|idle|client 65`, separate
 process for each mode, 100 records/s x 1,500 payload bytes, real Session/Writer
@@ -533,30 +540,36 @@ to disk capture; it does not include Coinbase, TLS or engine JSON parsing and
 is not a deployed-service CPU claim. Literal zero-client zero-memory overhead
 cannot coexist with retaining a replay ring.
 
-Measured on the owner's Mac, 2026-10-03, sequential queued 65 s runs:
+Full queued mac-clang build passed; **84/84 CTest suites passed, zero failures,
+351.10 s**. The fanout suite passed all 15 cases in 1.45 s. Metal cases explicitly
+skipped because the sandbox has no MTLDevice; no GPU/visual verification is claimed.
+All 20 mutation checks restored, touched, rebuilt and passed. Validation uses
+branch base `a616ffe`; main had advanced to `9da1845` at hand-off. Fixes remain
+uncommitted, with commit/rebase/integration left to the orchestrator (Git metadata
+is read-only in this worktree's sandbox).
+
+Append-time measurements on the owner's Mac, 2026-10-03, sequential queued
+65 s runs (6,500 frames plus one terminal stop per run):
 
 | Mode | CPU seconds | Average CPU (one core) | Peak RSS bytes | Received records |
 |---|---:|---:|---:|---:|
-| Writer-only baseline | 0.387004 | 0.595391% | 17,580,032 | n/a |
-| Fanout, zero clients | 0.422495 | 0.649992% | 30,507,008 | n/a |
-| Fanout, one draining client (reader included) | 0.719459 | 1.10686% | 31,260,672 | 6,501/6,501 |
+| Writer-only baseline | 0.368127 | 0.566349% | 17,678,336 | n/a |
+| Fanout, zero clients | 0.747469 | 1.14995% | 29,999,104 | n/a |
+| Fanout, one draining client (reader included) | 1.26058 | 1.93935% | 30,720,000 | 6,501/6,501 |
 
-Each run wrote 6,500 frames plus the terminal stop record. Zero-client overhead
-was +0.054601 percentage points CPU and +12,926,976 peak RSS bytes (12.33 MiB).
-That is small, but it is measurable; the literal "no measurable overhead" test
-is not claimed. Both fanout runs retained 10,898,055/10,898,054 accounted ring
-bytes (~10.39 MiB), oldest age 59.99/59.98 s. All client queue gauges, ingress
-bytes, ingress-drop counters and disk-pool bytes were zero at the final sample;
-there were no unintended disconnects. These are single-run measurements, not
-confidence intervals or live-service results.
+**Append -> client receive: p50 117.958 us, p95 254.709 us, max 3,072.67 us**,
+6,501 samples. The benchmark timestamps entry to Writer append through complete
+socket packet receipt, before consumer JSON parsing; it excludes earlier Session
+queue dwell. This meets sub-millisecond p95 handoff in this fixture; it does not
+measure full exchange-to-GUI age or the deployed seven-product workload.
 
-Final validation: full queued mac-clang build passed; **84/84 CTest suites
-passed, 0 failures, 354.21 s**. Metal-dependent cases explicitly skipped because
-the sandbox has no MTLDevice; no visual or GPU verification is claimed. The 11
-fanout tests passed in 1.32 s in the full run; application tests passed in 77.23 s.
-All 13 fail-without checks passed with restore/touch/rebuild. Source diff checks
-are clean. Base remains `7c252d3` (also current main at hand-off); changes are
-uncommitted for the orchestrator, with no rebase/staging/commit attempted.
+Zero-client overhead is +0.583603 percentage points CPU and +12,320,768 peak RSS
+bytes (11.75 MiB). This is measurable: the literal "no measurable overhead" claim
+is not made. Ring accounting was 10,833,462/10,833,464 bytes (~10.33 MiB), oldest
+age 59.994/59.993 s. Both fanout runs ended with zero ingress bytes, ingress drops,
+client-queue bytes and disk-pool bytes; no unintended disconnects occurred.
+These replace the earlier after-flush measurements. They are single-run results,
+not confidence intervals, and one-client CPU/RSS includes the reader thread.
 
 Deploy watch list (orchestrator only):
 
@@ -575,9 +588,12 @@ Deploy watch list (orchestrator only):
    connection, the journal contains its resync/snapshot, and a second request
    within 10 s is rate-limited. This is an explicit operator action, not a passive
    health check.
-5. Include the block-flush latency in slice C's live-age measurements and resolve
-   section 6's acceptance gate before cutover. No deployment/live feed check was
-   performed by this branch.
+5. Verify provisional records arrive between flushes and durable watermarks
+   advance after flush. Monitor p50/p95 handoff and full feed-to-GUI age in slice C.
+   Exercise failure/retraction only on an isolated fixture, never by faulting the
+   always-on capture. A consumer must discard its provisional suffix on retract
+   or EOF and recover from its durable checkpoint. No deployment/live feed check
+   was performed by this branch.
 
 Workflow notes: CMake regeneration initially tried to lock the read-only shared
 vcpkg checkout; configured this build with `VCPKG_MANIFEST_INSTALL=OFF` using the

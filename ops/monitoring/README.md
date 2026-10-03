@@ -235,8 +235,8 @@ no new listener, scrape job or monitoring service restart is required.
 | `sentinel_fanout_disconnects_total` | counter | reason | `slow_client`, `ingress_overflow`, `peer_closed`, `protocol`, `shutdown`, `capacity`, `internal_error`, `handshake_timeout` |
 | `sentinel_fanout_ring_bytes` | gauge | product | Retained wire bytes plus entry accounting; independent of disk QueuePool |
 | `sentinel_fanout_ring_oldest_age_seconds` | gauge | product | Monotonic age of oldest retained publication; 0 when empty; sampled at least once per second |
-| `sentinel_fanout_ingress_bytes` | gauge | product | Pending disk-to-fanout block bytes and object accounting; separate 32 MiB/product cap |
-| `sentinel_fanout_ingress_drops_total` | counter | product | Blocks refused by fanout ingress; forces socket resume, does not drop journal records |
+| `sentinel_fanout_ingress_bytes` | gauge | product | Pending writer-to-fanout record/control bytes and object accounting; separate 32 MiB/product cap |
+| `sentinel_fanout_ingress_drops_total` | counter | product | Record/control events refused by fanout ingress; forces socket resume, does not drop journal records |
 | `sentinel_fanout_resume_hits_total` / `_misses_total` | counter | product | Retained cursor versus explicit journal catch-up |
 
 All scrape reads are atomic. Client labels reuse bounded slots; they are not
