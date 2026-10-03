@@ -7,6 +7,7 @@ add_library(sentinel_core
     capture/CaptureVerifier.cpp
     capture/CaptureSession.cpp
     capture/CaptureApp.cpp
+    capture/CaptureMetrics.cpp
     Version.cpp
     Version.hpp
     metrics/MetricsRegistry.cpp

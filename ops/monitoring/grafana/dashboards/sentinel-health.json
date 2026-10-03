@@ -493,6 +493,144 @@
         "orientation": "auto",
         "justifyMode": "auto"
       }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Capture feeds down",
+      "description": "Seconds each sentinel-capture product's WebSocket has been down (0 = up). Alert A4 above 120 s.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sentinel-vm"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 14,
+        "x": 0,
+        "y": 14
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sentinel-vm"
+          },
+          "expr": "sentinel_capture_feed_down_seconds{job=\"sentinel-capture\"}",
+          "legendFormat": "{{product}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 120
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "orientation": "auto",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Capture queue",
+      "description": "Share of the capture's shared disk queue pool in use (0 in steady state). Alert A4b above 50 % for 2 min (FM-127: the queue grows when T7 I/O stalls).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sentinel-vm"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 10,
+        "x": 14,
+        "y": 14
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sentinel-vm"
+          },
+          "expr": "sentinel_capture_queue_used_bytes{job=\"sentinel-capture\"} / sentinel_capture_queue_pool_bytes{job=\"sentinel-capture\"}",
+          "legendFormat": "pool used",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.1
+              },
+              {
+                "color": "red",
+                "value": 0.5
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "orientation": "auto",
+        "justifyMode": "auto"
+      }
     }
   ]
 }

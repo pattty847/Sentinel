@@ -21,10 +21,16 @@ MarketDataFeeds (one I/O thread, shared TLS and connect limiter)
 `CapacityExceeded`, or `InvalidProduct`. A duplicate add opens no connection.
 `remove(product)` removes admission state and queues only that socket for close,
 returning without waiting for transport-down. Completion is logged; owner stop
-drains retired sockets too. No unsubscribe frame is sent. Pinned feeds cannot be removed. Engines send exactly three
+drains retired sockets too. A retired socket's errors never reach the error
+callback, and its log lines read `retiredProduct=<id>` (engine) or
+`product=retired:<id>` (transport), because a re-added engine may already own
+`product=<id>`. No unsubscribe frame is sent. Pinned feeds cannot be removed. Engines send exactly three
 subscribe frames after transport-up: level2 and market_trades with their one product,
 and connection-scoped heartbeats without product_ids. Subscribe batches have their own process-wide admission deadline, so delayed
-handshakes completing together cannot bypass message pacing.
+handshakes completing together cannot bypass message pacing. A product that is
+reconnected while its subscribe batch waits in that queue leaves the queue at
+once, so it cannot hold other products' subscribes behind its closing socket
+(Coinbase drops a socket with no subscribe within 5 s).
 
 Sequence gaps, malformed messages/L2, provider errors, transport failure, inbound
 silence, and consumer resnapshot requests invalidate/reconnect only the affected
@@ -110,16 +116,14 @@ its queued book/trade/invalidation handoff. Connection state and the recorder
 stall monitor are scoped by symbol: a GUI product outage cannot mute or reset
 a pinned product's flat-column warning. There is no shared last-status boolean.
 
-Capture adds all configured products (seven in deployment) to one feed owner.
-Independent sequence streams cannot share the old multi-product writer's one
-sequence tracker. The app therefore uses the already-existing single-product
-`Session` constructor per product: new runs are RAWL2 v1, independent run IDs,
-product-local established-connection IDs, and no routing receipts. The v2 writer/reader remain
-available to existing fixtures until slice 2 removes only the writer. The process
-queue budget remains `--queue-mib` (64 MiB default), enforced across sessions
-by a shared atomic running total; ingest takes only its own session mutex. There
-is no static split or up-front allocation. Reservation is released on drain,
-queue disposal and failed insertion. Slice 2 still owns the per-product floors, 512 MiB default, writer cleanup and RAW_CAPTURE docs.
+Capture adds all configured products (seven in deployment) to one feed owner,
+with one single-product `Session` and one RAWL2 v1 stream per product: independent
+run IDs, product-local established-connection IDs, no routing receipts. The RAWL2
+v2 writer is removed (slice 2); the verifier keeps the v2 reader for the
+2026-09-30..10-02 archive. All sessions account to one `QueuePool` (`--queue-mib`,
+default 512 MiB, with a `--queue-floor-mib` floor per product, default 2 MiB). The
+pool is accounting only (no up-front allocation); its mutex guards arithmetic,
+never I/O. A failed session returns its queued bytes at failure.
 The obsolete whole-capture 60 s engine-restart supervisor is removed; each
 transport already guarantees bounded connect/close completion and per-feed retry.
 

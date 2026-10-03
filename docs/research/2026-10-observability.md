@@ -240,6 +240,10 @@ The branch differs from items 1-5 above in these points:
   `sentinel_mdc_last_l2_timestamp_seconds{product}` from an atomic mirror of
   `ProductLiveness.lastLevel2Ms`. Make rows 8-11 per product. Then add alert A2 and its
   health panel.
+- Slice 2 (built 2026-10-02 with per-symbol capture, `lt-claude/feeds-capture`):
+  capture `/metrics` on `127.0.0.1:8091`, scrape job enabled, A3 requires
+  `sentinel-capture`, alerts A4 (capture product down > 120 s) and A4b (queue pool
+  > 50 % for 2 min). Series names: `ops/monitoring/README.md`. Planned text follows.
 - Slice 2: capture `/metrics` on `127.0.0.1:8091` (rows 13, 15-18) with
   `MetricsHttpServer`. It was not done in slice 1 because the per-symbol branch rewrites
   `CaptureApp` stats (R1). After it lands, enable the scrape job in

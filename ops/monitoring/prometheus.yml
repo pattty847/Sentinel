@@ -10,11 +10,12 @@ scrape_configs:
     static_configs:
       - targets: ["127.0.0.1:8090"]
 
-  # Slice 2: sentinel-capture on 127.0.0.1:8091. Do not enable before the
-  # capture serves /metrics, or alert A3 fires for a target that never existed.
-  # - job_name: sentinel-capture
-  #   static_configs:
-  #     - targets: ["127.0.0.1:8091"]
+  # sentinel-capture (launchd com.sentinel.capture): GET /metrics on --metrics-port
+  # (default 8091). A required job of alert A3: deploy the capture build that
+  # serves it before Grafana reloads the A3 rule (README "Capture metrics").
+  - job_name: sentinel-capture
+    static_configs:
+      - targets: ["127.0.0.1:8091"]
 
   # node_exporter (com.sentinel.node-exporter): cpu, memory, filesystems (T7), disk I/O, load.
   - job_name: node

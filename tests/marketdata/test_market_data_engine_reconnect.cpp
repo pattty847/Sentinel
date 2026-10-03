@@ -20,7 +20,7 @@ struct FeedsTest : testing::Test {
     std::map<std::string, std::shared_ptr<fixtures::WsScenario>> scenarios;
     std::map<std::string, fixtures::FakeWsTransport*> transports;
     std::map<std::string, bool> valid;
-    std::map<std::string, int> snapshots, updates, invalidations, statuses;
+    std::map<std::string, int> snapshots, updates, invalidations, statuses, errors;
     std::map<std::string, std::vector<int64_t>> attempts;
     std::vector<std::pair<std::string, bool>> statusEvents;
         void SetUp() override {
@@ -47,6 +47,7 @@ struct FeedsTest : testing::Test {
         feeds->onLiveOrderBookLevelUpdates([this](const auto& p, const auto&, auto) { ++updates[p]; });
         feeds->onLiveOrderBookInvalidated([this](const auto& p, const auto&) { valid[p] = false; ++invalidations[p]; });
         feeds->onConnectionStatus([this](const auto& p, bool up) { ++statuses[p]; statusEvents.emplace_back(p, up); });
+        feeds->onError([this](const auto& p, const auto&) { ++errors[p]; });
         for (const auto& p : products) EXPECT_EQ(feeds->add(p), MarketDataFeeds::AddResult::Added);
         feeds->start(); feeds->poll();
     }
@@ -430,4 +431,56 @@ TEST_F(FeedsTest, DownOverTwoMinutesLogsPerProductErrorOncePerMinute) {
     advance(1); EXPECT_EQ(messages.size(), 2u);
     transports["BTC-USD"]->up(); feeds->poll(); snapshot("BTC-USD");
     advance(60'000'000); EXPECT_EQ(messages.size(), 2u);
+}
+
+// N1: a product whose subscribe batch waits in the process bucket and is then
+// reconnected must leave the queue at once. Its stale ticket would otherwise
+// hold every other product's subscribe until its close completes (up to the 3 s
+// close timeout, against Coinbase's 5 s subscribe deadline).
+TEST_F(FeedsTest, ReconnectWhileWaitingToSubscribeReleasesTheSubscribeQueue) {
+    for (const auto* p : {"A", "B", "C"}) {
+        auto state = scenarios[p] = std::make_shared<fixtures::WsScenario>();
+        state->onAttempt = [](auto&, int) {}; // handshake held
+    }
+    scenarios["B"]->closeDelay = 3s; // B's close stays pending through the test (real timer)
+    create({"A", "B", "C"}); advance(1'000'000); advance(1'000'000);
+    for (const auto* p : {"A", "B", "C"}) transports[p]->up();
+    feeds->poll();
+    ASSERT_EQ(scenarios["A"]->sends.size(), 3u); // A took the token; B, then C, wait
+    ASSERT_EQ(scenarios["B"]->sends.size(), 0u);
+    feeds->requestResnapshot("B"); feeds->poll();
+    ASSERT_EQ(scenarios["B"]->closes, 1);
+    advance(1'000'000);
+    EXPECT_EQ(scenarios["C"]->sends.size(), 3u) << "C must not wait behind B's closing socket";
+    EXPECT_EQ(scenarios["B"]->sends.size(), 0u);
+}
+
+// N2: after remove + re-add, errors from the retired (still closing) socket must
+// not reach the product's error callback or log as that product: a new engine
+// owns the name.
+namespace { std::vector<QString>* retiredMessages = nullptr; }
+TEST_F(FeedsTest, RetiredSocketErrorsDoNotSpeakForTheLiveProduct) {
+    std::vector<QString> messages;
+    retiredMessages = &messages;
+    const auto previous = qInstallMessageHandler([](QtMsgType, const QMessageLogContext&, const QString& message) {
+        retiredMessages->push_back(message);
+    });
+    struct Restore { QtMessageHandler previous; ~Restore() { qInstallMessageHandler(previous); retiredMessages = nullptr; } } restore{previous};
+    twoBooks();
+    scenarios["ETH-USD"]->closeDelay = 3s; // the retired socket keeps closing (real timer)
+    auto* retired = transports["ETH-USD"];
+    EXPECT_TRUE(feeds->remove("ETH-USD")); feeds->poll();
+    EXPECT_EQ(feeds->add("ETH-USD"), MarketDataFeeds::AddResult::Added);
+    advance(1'000'000); snapshot("ETH-USD");
+    ASSERT_NE(transports["ETH-USD"], retired);
+    ASSERT_TRUE(valid["ETH-USD"]);
+    messages.clear();
+    retired->fail(); feeds->poll(); // e.g. "close timed out" on the old socket
+    EXPECT_EQ(errors["ETH-USD"], 0);
+    for (const auto& message : messages)
+        EXPECT_FALSE(message.contains("product=ETH-USD") && message.contains("error=")) << message.toStdString();
+    EXPECT_TRUE(std::any_of(messages.begin(), messages.end(), [](const QString& m) {
+        return m.contains("Retired feed socket error ignored: retiredProduct=ETH-USD"); }));
+    EXPECT_TRUE(valid["ETH-USD"]); // the live engine is untouched
+    update("ETH-USD"); EXPECT_EQ(updates["ETH-USD"], 1);
 }

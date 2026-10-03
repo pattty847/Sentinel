@@ -6,14 +6,16 @@
 namespace sentinel::capture {
 inline constexpr const char* RoutingId = "product-ranges-v2";
 inline constexpr uint64_t MaxRoutingFrames = 65536;
+// The v2 writer closed a range at most this long after its first frame
+// (historic contract of the 2026-09-30..10-02 archive; the writer is removed).
 inline constexpr int64_t RoutingIntervalNs = 60LL * 1000000000;
 
-// A proof group can span ordinary storage blocks; raw-data flush/fsync cadence
-// remains independent. No payload history is retained while accumulating it.
+// RAWL2 v2 is read-only: the verifier rebuilds a range receipt from recovered
+// raw frames with this and compares it to the stored one. A proof group can span
+// ordinary storage blocks. No payload history is retained while accumulating it.
 class RoutingBatch {
 public:
     bool empty() const { return count == 0; }
-    bool due(const Record& next) const;
     void add(const Record& record, const nlohmann::json& identity);
     nlohmann::json receipt(const std::string& symbol) const;
     void clear();

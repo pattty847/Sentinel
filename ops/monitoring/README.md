@@ -10,6 +10,7 @@ recording, and did anything drop.
 | Service | launchd label | Listens | Data | Logs |
 |---|---|---|---|---|
 | sentinel-server `/metrics`, `/ping` | `com.sentinel.recorder` (already there) | `127.0.0.1:8090` | - | `~/Library/Logs/Sentinel/sentinel-server-latest.log` |
+| sentinel-capture `/metrics`, `/ping` | `com.sentinel.capture` (already there) | `127.0.0.1:8091` | - | `~/Library/Logs/Sentinel/sentinel-capture-latest.log` |
 | VictoriaMetrics (scrapes every 15 s, keeps 1 year) | `com.sentinel.metrics` | `127.0.0.1:8428` | `~/Sentinel-runtime/monitoring/vmdata` | `~/Library/Logs/Sentinel/monitoring-victoriametrics.err` |
 | Grafana (dashboards, alerting) | `com.sentinel.grafana` | `127.0.0.1:3000` | `~/Sentinel-runtime/monitoring/grafana/` | `~/Library/Logs/Sentinel/monitoring-grafana.err` |
 | node_exporter (CPU, memory, filesystems, disk I/O, load) | `com.sentinel.node-exporter` | `127.0.0.1:9100` | - | `~/Library/Logs/Sentinel/monitoring-node-exporter.err` |
@@ -26,10 +27,15 @@ recording, and did anything drop.
   `ops/monitoring/grafana/provisioning/` (datasource, dashboards, alerts) from the main
   checkout. A change in git takes effect after 60 s (scrape config), after 30 s
   (dashboards), or when Grafana restarts (alerts and datasource).
-- sentinel-capture `/metrics` on `127.0.0.1:8091` comes in slice 2. Its scrape job is
-  commented out in `prometheus.yml` until then.
-- The `/metrics` port follows `SENTINEL_HEALTH_PORT` (default 8090), the same as `/ping`.
-  There is no config key.
+- The server's `/metrics` port follows `SENTINEL_HEALTH_PORT` (default 8090), the same as
+  `/ping`. There is no config key. The capture's port is `sentinel-capture --metrics-port`
+  (default 8091, 0 = no listener); the launchd plist does not pass it.
+- `sentinel-capture` is a required A3 job. Its scrape job is active in `prometheus.yml`,
+  so landing the change makes VictoriaMetrics scrape 8091 within 60 s. Deploy the capture
+  build that serves `/metrics` right after landing, and only then restart Grafana so it
+  loads the new rules (see "Capture metrics: first deploy" below). Until the deploy,
+  `up{job="sentinel-capture"}` is 0 on the dashboard; it pages only after Grafana has
+  loaded the new A3 rule.
 
 ## Install (orchestrator, with the owner's OK)
 
@@ -79,6 +85,7 @@ To remove the three agents: `ops/monitoring/install.sh --uninstall`. The data in
 ```sh
 # The instant value, straight from the process:
 curl -s 127.0.0.1:8090/metrics | rg '^sentinel_recorder'
+curl -s 127.0.0.1:8091/metrics | rg '^sentinel_capture'
 # PromQL over history (VictoriaMetrics, Prometheus API):
 curl -s 'http://127.0.0.1:8428/api/v1/query' --data-urlencode 'query=up'
 curl -s 'http://127.0.0.1:8428/api/v1/query' \
@@ -126,14 +133,50 @@ That thread already reads `BookRecorder::stats()` and `watermarks()`. The record
 and the market-data I/O thread only do relaxed atomic stores. No new lock, allocation or
 signal is on a hot path.
 
+## sentinel-capture metrics (`GET 127.0.0.1:8091/metrics`)
+
+One upstream connection and one RAWL2 stream per product; one shared disk queue pool
+(`--queue-mib`, default 512 MiB) with a per-product floor (`--queue-floor-mib`, default
+2 MiB). The pool is accounting only: bytes are allocated as frames queue, so the steady
+state is about 0 bytes.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `sentinel_capture_feed_up` | gauge | product | 1 while the product's WebSocket is up. |
+| `sentinel_capture_feed_down_seconds` | gauge | product | Seconds the product's WebSocket has been down. 0 while up. Counts from process start for a product that never connected. |
+| `sentinel_capture_connection` | gauge | product | Established connection id, the same number as the RAWL2 record `connection`. Reconnects = id - 1. |
+| `sentinel_capture_queue_bytes` | gauge | product | Bytes this product has queued for its disk worker. |
+| `sentinel_capture_queue_used_bytes` | gauge | - | Bytes queued across all products. |
+| `sentinel_capture_queue_pool_bytes` / `_floor_bytes` | gauge | - | The pool total and the per-product floor. |
+| `sentinel_capture_stored_frames_total` | counter | product | WebSocket frames written to the product's RAWL2 files. A silent product is a flat line. |
+| `sentinel_capture_file_bytes_total` | counter | product | Bytes written to the product's RAWL2 files. |
+| `process_resident_memory_bytes`, `process_cpu_seconds_total`, `process_start_time_seconds`, `sentinel_build_info` | | | As for the server. |
+
+Threading: the listener and the samplers run on the capture's main thread and read only
+relaxed atomics. The ingest observer (mdc-io thread) writes the feed state; each disk
+worker publishes its stored frames and bytes. A scrape never takes a session mutex and
+never waits on the I/O thread, so it answers while T7 I/O is frozen (FM-127).
+
+### Capture metrics: first deploy
+
+1. Land the branch and build `main`.
+2. Deploy the capture: `scripts/dev/deploy-runtime.sh capture` (owner at the Mac, FM-127).
+3. Check: `curl -s 127.0.0.1:8091/metrics | rg '^sentinel_capture_feed_up'` shows one line
+   per product, all 1 within about 10 s (connects are paced at 1/s).
+4. Check VictoriaMetrics: `up{job="sentinel-capture"}` is 1 in vmui.
+5. Restart Grafana to load the A3 change and the A4/A4b rules:
+   `launchctl kickstart -k gui/$(id -u)/com.sentinel.grafana`.
+
 ## Alerts (Grafana, to ntfy)
 
 | Alert | Fires when | For |
 |---|---|---|
 | A1 recorder stalled | `max by (product,layer) (sentinel_recorder_column_overdue_seconds) > 60` (only while that product is connected) | 1 m |
 | A1b recorder upstream disconnected | `sentinel_mdc_connected < 1`. A1 is silent by design while disconnected, so this alert covers that gap. | 5 m |
-| A3 service down | `up{job=~"sentinel-server\|node"} or (absent(up{job="sentinel-server"}) - 1) or (absent(up{job="node"}) - 1)` is below 1. This gives one sample per required job: a failed scrape (up 0) and a job whose `up` series is missing (absent - 1 = 0) both fire for that job. When VictoriaMetrics does not answer, Grafana sends its DatasourceError notification. | 2 m |
+| A3 service down | `up{job=~"sentinel-server\|sentinel-capture\|node"} or (absent(up{job="sentinel-server"}) - 1) or (absent(up{job="sentinel-capture"}) - 1) or (absent(up{job="node"}) - 1)` is below 1. This gives one sample per required job: a failed scrape (up 0) and a job whose `up` series is missing (absent - 1 = 0) both fire for that job. When VictoriaMetrics does not answer, Grafana sends its DatasourceError notification. | 2 m |
 | A3b T7 absent | `absent(node_filesystem_avail_bytes{mountpoint="/Volumes/T7"})` | 5 m |
+| A4 capture product down | `max by (product) (sentinel_capture_feed_down_seconds) > 120`. The gauge is the down time, so there is no pending period. | 0 s |
+| A4b capture queue backing up | `100 * sum(sentinel_capture_queue_used_bytes) / max(sentinel_capture_queue_pool_bytes) > 50`. The disk worker is behind (FM-127); the capture exits when the pool is full. | 2 m |
 
 The rules are in `grafana/provisioning/alerting/rules.yaml`. The contact point and policy
 are in `contact-points.yaml`: one ntfy webhook, an inline ntfy template (`template=yes&title={{.title}}&message={{.message}}&priority=high`; the built-in `template=grafana` drops the priority, and iOS hides default-priority pushes), grouped by alert
@@ -141,7 +184,7 @@ name, repeated every 4 h while an alert fires. Grafana expands environment varia
 provisioning files. For this reason the annotation templates use `{{ .Labels.x }}` and do
 not use `$labels`.
 
-A2 (per-product L2 silence) and A4 (capture queue, T7 below 50 GB, disk errors) come
+A2 (per-product L2 silence) and the rest of A4 (T7 below 50 GB, recorder disk errors) come
 later. See the plan, section 4.
 
 ## Add a panel or a metric

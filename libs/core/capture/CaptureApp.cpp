@@ -1,10 +1,14 @@
 #include "CaptureApp.hpp"
+#include "CaptureMetrics.hpp"
 #include "CaptureSession.hpp"
 #include "CaptureVerifier.hpp"
 #include "SentinelLogging.hpp"
 #include "Version.hpp"
 #include "marketdata/MarketDataFeeds.hpp"
 #include "marketdata/rest/CoinbaseRestClient.hpp"
+#include "metrics/MetricsHttpServer.hpp"
+#include "metrics/MetricsRegistry.hpp"
+#include "metrics/ProcessMetrics.hpp"
 #include <QCommandLineParser>
 #include <QCoreApplication>
 #include <QDir>
@@ -49,7 +53,9 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
         {"block-bytes", "Target uncompressed block bytes (large frames remain whole).", "bytes", "1048576"},
         {"fsync-blocks", "Fsync every N blocks; 0 only syncs at close.", "N", "1"},
         {"zstd-level", "Compression level 1..19.", "level", "3"},
-        {"queue-mib", "Bounded disk queue; overflow exits with an error.", "MiB", "64"},
+        {"queue-mib", "Shared disk queue pool for all products, allocated only as frames queue; overflow exits with an error.", "MiB", "512"},
+        {"queue-floor-mib", "Per-product share of the pool that no other product can take; products x floor <= pool.", "MiB", "2"},
+        {"metrics-port", "Prometheus /metrics and /ping on 127.0.0.1 (0: no listener).", "port", "8091"},
         {"duration", "Stop cleanly after N seconds (0: until SIGTERM/SIGINT).", "seconds", "0"},
         {"key-file", "Optional existing Coinbase credentials; public channels need no key.", "path", "key.json"},
         {"jwt", "Use existing Coinbase JWT auth (requires --key-file)."},
@@ -81,7 +87,11 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
     config.blockInterval = std::chrono::milliseconds(number(parser, "block-ms", 1, 60000));
     config.fsyncBlocks = number(parser, "fsync-blocks", 0, 1000000);
     config.compressionLevel = number(parser, "zstd-level", 1, 19);
-    const auto queueBytes = size_t(number(parser, "queue-mib", 1, 1024)) * 1024 * 1024;
+    const auto queueBytes = size_t(number(parser, "queue-mib", 1, 4096)) * 1024 * 1024;
+    const auto floorBytes = size_t(number(parser, "queue-floor-mib", 0, 256)) * 1024 * 1024;
+    if (floorBytes * symbols.size() > queueBytes)
+        throw std::runtime_error("--queue-floor-mib x products exceeds --queue-mib");
+    const auto metricsPort = static_cast<uint16_t>(number(parser, "metrics-port", 0, 65535));
     const auto duration = number(parser, "duration", 0, 365 * 86400);
     std::vector<std::unique_ptr<QLockFile>> locks;
     for (const auto& symbol : symbols) {
@@ -116,7 +126,7 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
         nlohmann::json header = {{"tool", "sentinel-capture"}, {"tool_version", Sentinel::getFullVersionString()},
             {"build", Sentinel::getBuildInfo()}, {"product_metadata", metadata.metadata},
             {"metadata_source", "https://api.coinbase.com" + metadata.sourcePath},
-            {"metadata_fetched_system_ns", fetched.systemNs}, {"queue_bytes", queueBytes},
+            {"metadata_fetched_system_ns", fetched.systemNs}, {"queue_bytes", queueBytes}, {"queue_floor_bytes", floorBytes},
             {"duration_seconds", duration}, {"ca_bundle", mdc.sslCaBundle},
             {"ws", {{"host", mdc.host}, {"port", mdc.port}, {"target", mdc.target}, {"use_jwt", mdc.useJwt}}},
             {"clock", "nanoseconds since system_clock/steady_clock epoch; sampled at engine pre-parse ingest seam"}};
@@ -124,21 +134,39 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
         productConfig.symbol = symbol;
         products.push_back({std::move(productConfig), std::move(header)});
     }
-    // Single-product sessions already exist. Independent sequence streams cannot
-    // be sent through the old multi-product routing batch (one expectedSequence).
-    // Slice 2 replaces the writer/queue implementation; keep this bridge in the app.
+    // One connection, one session and one RAWL2 v1 stream per product, all
+    // accounting to one shared queue pool (per-symbol connections, decision 7).
     struct ProductState {
         std::unique_ptr<Session> session;
+        std::unique_ptr<FeedMetrics> feed;
         uint64_t connection = 0;
         std::string transportReason;
     };
+    // Declared before the states: samplers point into them, and the listener
+    // (declared after them) is destroyed first, so no scrape renders a dead session.
+    sentinel::metrics::MetricsRegistry registry;
     std::map<std::string, ProductState> states;
-    auto budget = std::make_shared<QueueBudget>(queueBytes - products.size() * 4096);
+    auto pool = std::make_shared<QueuePool>(queueBytes, floorBytes, products.size());
+    const auto startedSteady = Stamp::now().steadyNs;
+    std::vector<CaptureMetricsSource> metricSources;
     for (auto& product : products) {
         auto symbol = product.config.symbol;
         auto& state = states[symbol];
-        state.session = std::make_unique<Session>(std::move(product.config), std::move(product.metadata), queueBytes, budget);
+        state.feed = std::make_unique<FeedMetrics>(startedSteady);
+        state.session = std::make_unique<Session>(std::move(product.config), std::move(product.metadata), pool, states.size() - 1);
         state.session->submit({Kind::CaptureStarted, Stamp::now(), 0, R"({"reason":"capture started"})"});
+        metricSources.push_back({symbol, state.feed.get(), state.session.get()});
+    }
+    sentinel::metrics::registerProcessMetrics(registry);
+    registerCaptureMetrics(registry, pool, std::move(metricSources));
+    std::unique_ptr<sentinel::metrics::MetricsHttpServer> metricsServer;
+    if (metricsPort) {
+        metricsServer = std::make_unique<sentinel::metrics::MetricsHttpServer>(registry);
+        if (metricsServer->listen(metricsPort))
+            sLog_App("Capture metrics endpoint listening on 127.0.0.1:" << metricsPort << " (/ping, /metrics)");
+        else
+            sLog_Warning("Capture metrics endpoint failed to bind on 127.0.0.1:" << metricsPort
+                         << " error=" << metricsServer->errorString());
     }
     const auto error = [&]() -> std::string {
         for (const auto& [symbol, state] : states)
@@ -159,8 +187,10 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
             state.connection = observation.connection;
             switch (observation.kind) {
             case Ingest::Frame: kind = Kind::Frame; break;
-            case Ingest::TransportUp: kind = Kind::TransportUp; state.transportReason.clear(); break;
-            case Ingest::TransportDown: kind = Kind::TransportDown; break;
+            case Ingest::TransportUp: kind = Kind::TransportUp; state.transportReason.clear();
+                state.feed->transport(true, observation.connection, observation.steadyNs); break;
+            case Ingest::TransportDown: kind = Kind::TransportDown;
+                state.feed->transport(false, observation.connection, observation.steadyNs); break;
             case Ingest::BookInvalidated: kind = Kind::BookInvalidated; break;
             case Ingest::ResyncRequested: kind = Kind::ResyncRequested; state.transportReason = observation.reason; break;
             }
@@ -194,23 +224,32 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
     timer.setInterval(100);
     QObject::connect(&timer, &QTimer::timeout, &app, [&] {
         const auto now = Stamp::now().steadyNs;
-        if (stopSignal || !error().empty() || (duration && now - started >= int64_t(duration) * 1000000000)) {
+        const auto failure = error();
+        if (stopSignal || !failure.empty() || (duration && now - started >= int64_t(duration) * 1000000000)) {
             stopReason = stopSignal ? "signal=" + std::to_string(stopSignal) :
-                         !error().empty() ? "capture failure" : "duration elapsed";
+                         !failure.empty() ? "capture failure" : "duration elapsed";
+            // Before the drain/join, which frozen disk I/O can block (FM-127).
+            if (!failure.empty())
+                sLog_Error("Capture stopping every product after a failure: error=" << failure
+                           << " poolUsedBytes=" << pool->used() << " (exit 1 after the drain; launchd restarts)");
             stopped = true; app.quit(); return;
         }
         if (now - lastStats >= 60LL * 1000000000) {
-            for (const auto& feed : feeds->stats()) {
-                const auto stats = states.at(feed.product).session->stats();
-                sLog_App("Capture stats: product=" << feed.product << " conn=" << feed.connection
-                    << " up=" << feed.up << " storedFrames=" << stats.frames << " fileBytes=" << stats.fileBytes
-                    << " queuedBytes=" << states.at(feed.product).session->queuedBytes());
+            // Atomics only: the main thread never waits on the I/O or disk threads.
+            for (const auto& [symbol, state] : states) {
+                const auto& feed = *state.feed;
+                sLog_App("Capture stats: product=" << symbol << " conn=" << feed.connection.load(std::memory_order_relaxed)
+                    << " up=" << feed.up() << " storedFrames=" << state.session->storedFrames()
+                    << " fileBytes=" << state.session->storedFileBytes() << " queuedBytes=" << state.session->queuedBytes());
             }
+            sLog_App("Capture queue: usedBytes=" << pool->used() << " poolBytes=" << pool->total()
+                << " floorBytes=" << pool->floor() << " products=" << states.size());
             lastStats = now;
         }
     }, Qt::QueuedConnection);
     timer.start();
-    sLog_App("Capture running: products=" << symbolList << " root=" << config.root << " pid=" << QCoreApplication::applicationPid());
+    sLog_App("Capture running: products=" << symbolList << " root=" << config.root << " pid=" << QCoreApplication::applicationPid()
+             << " queuePoolBytes=" << queueBytes << " queueFloorBytes=" << floorBytes);
     app.exec();
     timer.stop();
     feeds->stop(); feeds.reset(); // join the producer before draining the writers

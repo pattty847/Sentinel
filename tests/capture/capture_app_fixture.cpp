@@ -6,10 +6,21 @@
 #include "SentinelLogging.hpp"
 #include "SentinelLogSink.hpp"
 #include <QCoreApplication>
+#include <algorithm>
 #include <iostream>
+#include <string_view>
+#include <vector>
 
 using namespace std::chrono_literals;
 int main(int argc, char** argv) {
+    // Tests never bind the production 127.0.0.1:8091 unless they ask for a port.
+    std::vector<char*> args(argv, argv + argc);
+    static char metricsFlag[] = "--metrics-port", metricsOff[] = "0";
+    if (std::none_of(args.begin(), args.end(), [](const char* a) { return std::string_view(a) == "--metrics-port"; })) {
+        args.push_back(metricsFlag); args.push_back(metricsOff);
+    }
+    args.push_back(nullptr);
+    argc = int(args.size()) - 1; argv = args.data();
     sentinel::logging::installLogSink("sentinel-capture", argc, argv);
     QCoreApplication app(argc, argv);
     sentinel::capture::ApplicationDependencies dependencies;

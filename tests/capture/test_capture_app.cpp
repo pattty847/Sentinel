@@ -3,10 +3,14 @@
 #include "capture/CaptureSession.hpp"
 #include "../marketdata/fixtures/coinbase_messages.hpp"
 #include "capture/CaptureVerifier.hpp"
+#include "legacy_v2_fixture.hpp"
+#include <QCoreApplication>
 #include <QDirIterator>
 #include <QElapsedTimer>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QTemporaryDir>
 #include <map>
 #include <set>
@@ -16,6 +20,52 @@
 #endif
 
 using namespace sentinel::capture;
+namespace {
+void ensureApplication() {
+    static int argc = 1;
+    static char name[] = "test_capture_app";
+    static char* argv[] = {name, nullptr};
+    if (!QCoreApplication::instance()) static QCoreApplication app(argc, argv);
+}
+uint16_t freePort() {
+    ensureApplication();
+    QTcpServer probe;
+    if (!probe.listen(QHostAddress::LocalHost, 0)) return 0;
+    return probe.serverPort();
+}
+std::string scrape(uint16_t port) {
+    ensureApplication();
+    QTcpSocket client;
+    client.connectToHost(QHostAddress::LocalHost, port);
+    if (!client.waitForConnected(3000)) return "connect failed: " + client.errorString().toStdString();
+    client.write("GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+    QByteArray response;
+    QElapsedTimer timer; timer.start();
+    while (timer.elapsed() < 3000 && client.state() != QAbstractSocket::UnconnectedState) {
+        client.waitForReadyRead(50);
+        response += client.readAll();
+    }
+    response += client.readAll();
+    if (!response.startsWith("HTTP/1.1 200 OK\r\n")) return "bad response: " + response.toStdString();
+    return response.mid(response.indexOf("\r\n\r\n") + 3).toStdString(); // keep the leading '\n'
+}
+} // namespace
+
+TEST(CaptureApplication, FloorsLargerThanThePoolRefuseToStart) {
+    QTemporaryDir dir;
+    QProcess child;
+    auto environment = QProcessEnvironment::systemEnvironment();
+    environment.insert("SENTINEL_LOG_DIR", dir.path() + "/logs");
+    environment.insert("SENTINEL_LOG_STDERR", "1");
+    child.setProcessEnvironment(environment);
+    child.start(CAPTURE_APP_FIXTURE, {"--root", dir.path() + "/raw", "--symbols", "BTC-USD,ETH-USD",
+        "--queue-mib", "3", "--queue-floor-mib", "2", "--ca-bundle", SENTINEL_TEST_CA});
+    ASSERT_TRUE(child.waitForFinished(10000));
+    EXPECT_EQ(child.exitCode(), 1);
+    EXPECT_TRUE(child.readAllStandardError().contains("--queue-floor-mib x products exceeds --queue-mib"));
+    EXPECT_FALSE(QFileInfo::exists(dir.path() + "/raw/BTC-USD")); // refused before any directory or connection
+}
+
 TEST(CaptureApplication, SigtermDrainsAndSealsAfterReconnectWithRealConnectionIds) {
 #ifdef _WIN32
     GTEST_SKIP() << "POSIX SIGTERM integration test";
@@ -32,9 +82,12 @@ TEST(CaptureApplication, SigtermDrainsAndSealsAfterReconnectWithRealConnectionId
     environment.insert("SENTINEL_LOG_FILE", "1");
     environment.insert("SENTINEL_LOG_STDERR", "0");
     child.setProcessEnvironment(environment);
+    const auto metricsPort = freePort();
+    ASSERT_NE(metricsPort, 0);
     child.start(CAPTURE_APP_FIXTURE, {"--root", dir.path() + "/raw", "--symbol", "BTC-USD",
         "--ca-bundle", SENTINEL_TEST_CA, "--key-file", dir.path() + "/absent-key.json",
-        "--block-ms", "60000"}); // SIGTERM must flush the unfinished block
+        "--block-ms", "60000", // SIGTERM must flush the unfinished block
+        "--metrics-port", QString::number(metricsPort)});
     ASSERT_TRUE(child.waitForStarted(5000)) << child.errorString().toStdString();
     QByteArray output;
     QElapsedTimer deadline; deadline.start();
@@ -44,6 +97,15 @@ TEST(CaptureApplication, SigtermDrainsAndSealsAfterReconnectWithRealConnectionId
     }
     ASSERT_TRUE(output.contains("FIXTURE_READY\n")) << child.readAllStandardError().toStdString();
     EXPECT_FALSE(output.contains("FIXTURE_EARLY_FRAME\n"));
+    // The running capture serves its own /metrics on 127.0.0.1 (slice 2 scrape target).
+    const auto metrics = scrape(metricsPort);
+    EXPECT_NE(metrics.find("\nsentinel_capture_feed_up{product=\"BTC-USD\"} 1\n"), std::string::npos) << metrics;
+    EXPECT_NE(metrics.find("\nsentinel_capture_connection{product=\"BTC-USD\"} 2\n"), std::string::npos) << metrics;
+    EXPECT_NE(metrics.find("\nsentinel_capture_feed_down_seconds{product=\"BTC-USD\"} 0\n"), std::string::npos) << metrics;
+    EXPECT_NE(metrics.find("\nsentinel_capture_queue_pool_bytes 536870912\n"), std::string::npos) << metrics; // 512 MiB default
+    EXPECT_NE(metrics.find("\nsentinel_capture_queue_floor_bytes 2097152\n"), std::string::npos) << metrics;
+    EXPECT_NE(metrics.find("\nsentinel_capture_stored_frames_total{product=\"BTC-USD\"} "), std::string::npos) << metrics;
+    EXPECT_NE(metrics.find("\nprocess_resident_memory_bytes "), std::string::npos) << metrics;
     ASSERT_EQ(::kill(static_cast<pid_t>(child.processId()), SIGTERM), 0);
     ASSERT_TRUE(child.waitForFinished(5000));
     ASSERT_EQ(child.exitStatus(), QProcess::NormalExit) << child.readAllStandardError().toStdString();
@@ -242,16 +304,16 @@ TEST(CaptureApplication, UnevenReconnectsFailedAttemptAndAuditsVerifyAlongsideLe
         products.push_back({config, {{"product_metadata", {{"product_id", symbol},
             {"quote_increment", "0.01"}, {"base_increment", "0.00000001"}}}}});
     }
-    Session legacy(std::move(products));
-    EXPECT_TRUE(legacy.submit({Kind::CaptureStarted, Stamp::now(), 0, "{}"}));
-    EXPECT_TRUE(legacy.submit({Kind::TransportUp, Stamp::now(), 1, "{}"}));
+    // Written by the test-only v2 writer: production writes v1 only.
+    std::vector<Record> legacy{{Kind::CaptureStarted, Stamp::now(), 0, "{}"}, {Kind::TransportUp, Stamp::now(), 1, "{}"}};
     uint64_t sequence = 0;
     for (const auto* symbol : {"BTC-USD", "ETH-USD"}) {
         auto snapshot = fixtures::coinbaseL2Snapshot(symbol, {{100, 1}}, {{101, 2}});
         snapshot["sequence_num"] = sequence++;
-        EXPECT_TRUE(legacy.submit({Kind::Frame, Stamp::now(), 1, snapshot.dump()}));
+        legacy.push_back({Kind::Frame, Stamp::now(), 1, snapshot.dump()});
     }
-    legacy.close(); ASSERT_TRUE(legacy.error().empty()) << legacy.error();
+    legacy.push_back({Kind::CaptureStopped, Stamp::now(), 1, R"({"reason":"session closed"})"});
+    ASSERT_NO_THROW(writeLegacyV2(std::move(products), legacy));
     const auto mixed = verify(root); EXPECT_TRUE(mixed.ok) << mixed.json.dump(2);
     EXPECT_TRUE(mixed.json["complete"]); EXPECT_EQ(mixed.json["products"].size(), 2u);
     std::set<int> versions;

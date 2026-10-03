@@ -3,12 +3,20 @@
 #include "capture/CaptureVerifier.hpp"
 #include "capture/CaptureSession.hpp"
 #include "capture/CaptureRouting.hpp"
+#include "capture/CaptureMetrics.hpp"
+#include "legacy_v2_fixture.hpp"
+#include "metrics/MetricsRegistry.hpp"
+#include "metrics/ProcessMetrics.hpp"
+#include <deque>
+#include <mutex>
+#include <thread>
 #include <future>
 #include <filesystem>
 #include <iostream>
 #include "servermodel/HmcolFormat.hpp"
 #include "marketdata/fixtures/coinbase_messages.hpp"
 #include <QDirIterator>
+#include <QElapsedTimer>
 #include <QTemporaryDir>
 #include <algorithm>
 #include <chrono>
@@ -397,11 +405,16 @@ std::vector<Record> multiFixture() {
     records.insert(records.end() - 1, frame(nlohmann::json{{"channel", "heartbeats"}, {"events", nlohmann::json::array()}}, 5, 2100000000));
     return records;
 }
+// Rewrites an existing file's stream (tamper/crash fixtures): a v2 header goes
+// through the test-only v2 writer, a v1 header through the production writer.
+std::unique_ptr<Writer> rewriteWriter(const WriterConfig& cfg, const nlohmann::json& header) {
+    if (header.contains("connection_products")) return LegacyV2FixtureWriter::make(cfg, header);
+    return std::make_unique<Writer>(cfg, header);
+}
+// RAWL2 v2 (one connection, several products) through the test-only writer:
+// production writes v1 only; these files exercise the verifier's v2 reader.
 void writeMulti(const WriterConfig& config, const std::vector<Record>& records) {
-    Session session(multiProducts(config));
-    for (const auto& value : records) ASSERT_TRUE(session.submit(value));
-    session.close();
-    ASSERT_TRUE(session.error().empty()) << session.error();
+    ASSERT_NO_THROW(writeLegacyV2(multiProducts(config), records));
 }
 TEST_F(CaptureTest, MultiRoutesExactFramesAndClocksWithReceiptsAndMixedProductEnvelope) {
     const auto input = multiFixture();
@@ -622,28 +635,6 @@ TEST_F(CaptureTest, MultiBroadcastsUnclassifiedAndMalformedFramesWithoutChanging
     }
     EXPECT_FALSE(verify(config.root).ok); // preservation does not bless malformed JSON
 }
-TEST_F(CaptureTest, MultiOverflowUsesOneTotalBudgetAndPersistsGapToEveryProduct) {
-    std::promise<void> release;
-    auto ready = release.get_future().share();
-    Session session(multiProducts(config), 16384, {.beforeDrain = [ready] { ready.wait(); }});
-    auto input = multiFixture();
-    for (size_t i = 0; i + 1 < input.size(); ++i) EXPECT_TRUE(session.submit(input[i]));
-    // Each extra frame fits the 12 KiB data allowance, but their SUM cannot.
-    // Hold the disk consumer so scheduling cannot turn this into a timing test.
-    const auto accepted = record(Kind::Frame, 2150000000, std::string(6000, 'a'));
-    const auto dropped = record(Kind::Frame, 2200000000, std::string(6000, 'b'));
-    EXPECT_TRUE(session.submit(accepted));
-    EXPECT_FALSE(session.submit(dropped));
-    EXPECT_TRUE(session.submit(input.back())); release.set_value(); session.close();
-    ASSERT_FALSE(session.error().empty());
-    const auto report = verify(config.root);
-    EXPECT_FALSE(report.ok);
-    EXPECT_EQ(report.json["totals"]["explicit_capture_gaps"], 1);
-    for (const auto& symbol : {"BTC-USD", "ETH-USD"}) {
-        EXPECT_EQ(report.json["products"][symbol]["explicit_capture_gaps"], 1);
-        EXPECT_EQ(report.json["products"][symbol]["capture_gap_details"][0]["first_dropped_system_ns"], dropped.time.systemNs);
-    }
-}
 TEST_F(CaptureTest, OpenPrefixAcceptsOnlyTerminalUnfinishedDataAndStillRejectsActualGaps) {
     auto input = fixture(); input.pop_back();
     Writer writer(config, metadata());
@@ -695,7 +686,7 @@ TEST_F(CaptureTest, MultiWholeRootRejectsMissingStreamsAndReceiptsThatDoNotMatch
             const auto symbol = header["product_metadata"]["product_id"].get<std::string>();
             if (mutation == 3 && symbol == "ETH-USD") continue;
             auto cfg = config; cfg.root = altered.path(); cfg.symbol = symbol;
-            Writer writer(cfg, header);
+            auto writerHolder = rewriteWriter(cfg, header); auto& writer = *writerHolder;
             scan(path, [&](const Record& original) {
                 auto r = original;
                 if (symbol == "BTC-USD" && r.kind == Kind::Frame) {
@@ -785,7 +776,7 @@ TEST_F(CaptureTest, InterruptedRunChecksReceiptAgainstLostRawAtCommonPrefix) {
     for (const auto& path : paths(src.root)) {
         const auto header = readHeader(path);
         auto cfg = config; cfg.symbol = header["product_metadata"]["product_id"].get<std::string>();
-        Writer crashed(cfg, header);
+        auto crashedHolder = rewriteWriter(cfg, header); auto& crashed = *crashedHolder;
         bool lost = false;
         scan(path, [&](const Record& r) {
             if (r.kind == Kind::CaptureStopped) return;
@@ -874,7 +865,7 @@ TEST_F(CaptureTest, AnotherProductsLaterSegmentDoesNotTruncateSelectedRun) {
     for (const auto& path : paths(src.root)) {
         const auto header = readHeader(path);
         auto cfg = config; cfg.symbol = header["product_metadata"]["product_id"].get<std::string>();
-        Writer writer(cfg, header);
+        auto writerHolder = rewriteWriter(cfg, header); auto& writer = *writerHolder;
         scan(path, [&](Record r) {
             if (cfg.symbol == "ETH-USD") r.time.systemNs += 24 * Hour;
             if (r.kind != Kind::CaptureStopped) writer.append(r);
@@ -915,7 +906,7 @@ TEST_F(CaptureTest, MultiProductRotationAfterSelectionComparesOnlyScopedCommonPr
     for (const auto& path : paths(src.root)) {
         const auto header = readHeader(path);
         auto cfg = config; cfg.symbol = header["product_metadata"]["product_id"].get<std::string>();
-        auto writer = std::make_unique<Writer>(cfg, header);
+        auto writer = rewriteWriter(cfg, header);
         scan(path, [&](const Record& r) { if (r.kind != Kind::CaptureStopped) writer->append(r); });
         // Product writers can have different observed end positions during
         // rotation. This marker has not reached ETH's selected segment yet.
@@ -953,7 +944,7 @@ TEST_F(CaptureTest, InterruptedComparisonStopsAfterFirstPeersFinalGroup) {
     for (const auto& path : paths(src.root)) {
         const auto header = readHeader(path);
         auto cfg = config; cfg.symbol = header["product_metadata"]["product_id"].get<std::string>();
-        Writer writer(cfg, header);
+        auto writerHolder = rewriteWriter(cfg, header); auto& writer = *writerHolder;
         bool ended = false;
         scan(path, [&](const Record& r) {
             if (ended || r.kind == Kind::CaptureStopped) return;
@@ -1028,7 +1019,7 @@ TEST_F(CaptureTest, RoutingChecksContinueAfterEveryBadGroupWithBoundedDetails) {
     for (const auto& path : paths(src.root)) {
         const auto header = readHeader(path);
         auto cfg = config; cfg.symbol = header["product_metadata"]["product_id"].get<std::string>();
-        Writer writer(cfg, header);
+        auto writerHolder = rewriteWriter(cfg, header); auto& writer = *writerHolder;
         scan(path, [&](const Record& r) {
             if (cfg.symbol == "BTC-USD" && r.kind == Kind::Frame &&
                 nlohmann::json::parse(r.payload).at("sequence_num").get<uint64_t>() >= 6) return;
@@ -1070,7 +1061,7 @@ TEST_F(CaptureTest, InterruptedUnreceiptedMergedTailChecksSequenceContinuity) {
     for (const auto& path : paths(src.root)) {
         const auto header = readHeader(path);
         auto cfg = config; cfg.symbol = header["product_metadata"]["product_id"].get<std::string>();
-        Writer writer(cfg, header);
+        auto writerHolder = rewriteWriter(cfg, header); auto& writer = *writerHolder;
         scan(path, [&](const Record& r) {
             if (r.kind == Kind::FrameReference || r.kind == Kind::CaptureStopped) return;
             if (r.kind == Kind::Frame && nlohmann::json::parse(r.payload).at("sequence_num") == 2) return;
@@ -1092,7 +1083,7 @@ TEST_F(CaptureTest, InterruptedMergedTailChecksFirstSequenceAfterDurableReceipt)
     for (const auto& path : paths(src.root)) {
         const auto header = readHeader(path);
         auto cfg = config; cfg.symbol = header["product_metadata"]["product_id"].get<std::string>();
-        Writer writer(cfg, header);
+        auto writerHolder = rewriteWriter(cfg, header); auto& writer = *writerHolder;
         scan(path, [&](const Record& r) { if (r.kind != Kind::CaptureStopped) writer.append(r); });
         writer.append(frame(nlohmann::json{{"channel", "heartbeats"}}, 8, 4000000000));
         writer.flush();
@@ -1138,122 +1129,6 @@ TEST_F(CaptureTest, InventoryOver100000FilesHasBoundedBuffersAtEveryScope) {
         }
     }
 }
-TEST_F(CaptureTest, OneWriterAppendFailurePreservesHealthyBufferedFramesAndSealsThem) {
-    auto input = multiFixture();
-    bool injected = false;
-    Session session(multiProducts(config), 64 * 1024 * 1024, {.beforeWriterOperation =
-        [&](const auto& symbol, auto operation, const Record* r) {
-            if (!injected && symbol == "ETH-USD" && operation == "append" && r && r->kind == Kind::Frame &&
-                nlohmann::json::parse(r->payload).at("sequence_num") == 4) {
-                injected = true; throw std::runtime_error("injected ETH disk write failure");
-            }
-        }});
-    for (const auto& r : input) session.submit(r);
-    session.close(); ASSERT_TRUE(injected); EXPECT_FALSE(session.error().empty());
-    std::vector<Record> btc;
-    for (const auto& path : paths(config.root + "/BTC-USD")) {
-        const auto result = scan(path, [&](const Record& r) { btc.push_back(r); });
-        EXPECT_TRUE(result.indexed);
-    }
-    for (const auto i : {2, 3, 6}) EXPECT_EQ(std::count(btc.begin(), btc.end(), input[i]), 1) << i;
-    EXPECT_EQ(std::count_if(btc.begin(), btc.end(), [](const auto& r) { return r.kind == Kind::CaptureStopped; }), 1);
-    EXPECT_EQ(verify(config.root).json["products"]["BTC-USD"]["explicit_capture_gaps"], 1);
-}
-TEST_F(CaptureTest, FailedNormalCloseDoesNotReopenAlreadyClosedWritersOrDuplicateStop) {
-    bool injected = false;
-    Session session(multiProducts(config), 64 * 1024 * 1024, {.beforeWriterOperation =
-        [&](const auto& symbol, auto operation, const Record*) {
-            if (!injected && symbol == "ETH-USD" && operation == "close") {
-                injected = true; throw std::runtime_error("injected close failure");
-            }
-        }});
-    const auto input = multiFixture();
-    for (const auto& r : input) EXPECT_TRUE(session.submit(r));
-    session.close(); ASSERT_TRUE(injected); EXPECT_FALSE(session.error().empty());
-    EXPECT_EQ(paths(config.root + "/BTC-USD").size(), 1);
-    int stops = 0;
-    for (const auto& path : paths(config.root + "/BTC-USD")) {
-        EXPECT_TRUE(scan(path, [&](const Record& r) {
-            if (r.kind == Kind::CaptureStopped) { ++stops; EXPECT_EQ(r, input.back()); }
-        }).indexed);
-    }
-    EXPECT_EQ(stops, 1);
-    const auto btc = verify(config.root + "/BTC-USD");
-    EXPECT_TRUE(btc.ok) << btc.json.dump(2);
-}
-
-TEST_F(CaptureTest, SevenProductRangeReceiptOverheadStaysBelowFivePercentPerStream) {
-    const std::map<std::string, int> rates{{"BTC-USD",22}, {"ETH-USD",10}, {"SOL-USD",5},
-        {"FARTCOIN-USD",2}, {"PEPE-USD",2}, {"DOGE-USD",1}, {"AVAX-USD",1}};
-    std::vector<ProductCapture> products;
-    for (const auto& [symbol, rate] : rates) {
-        auto cfg = config; cfg.symbol = symbol;
-        auto meta = metadata(); meta["product_metadata"]["product_id"] = symbol;
-        products.push_back({cfg, meta});
-    }
-    std::promise<void> release;
-    auto ready = release.get_future().share();
-    Session session(std::move(products), 64 * 1024 * 1024, {.beforeDrain = [ready] { ready.wait(); }});
-    bool admitted = session.submit(record(Kind::CaptureStarted, 0, "{}", 0));
-    admitted = session.submit(record(Kind::TransportUp, 1)) && admitted;
-    uint64_t seq = 0, random = 0xdeadbeef;
-    int64_t offset = 2;
-    for (const auto& [symbol, rate] : rates)
-        admitted = session.submit(frame(fixtures::coinbaseL2Snapshot(symbol, {{100,1}}, {{101,1}}), seq++, offset++)) && admitted;
-    // Five minutes at 43 product frames/s, plus one heartbeat/s. Interleave the
-    // products every second: adjacent-only coalescing cannot meet this budget.
-    for (int second = 0; second < 300; ++second) {
-        std::vector<std::pair<int, std::string>> schedule;
-        for (const auto& [symbol, rate] : rates) for (int i = 0; i < rate; ++i) schedule.emplace_back(i * 1000 / rate, symbol);
-        std::sort(schedule.begin(), schedule.end());
-        for (const auto& [ms, symbol] : schedule) {
-            auto update = fixtures::coinbaseL2Update(symbol, {});
-            for (int i = 0; i < 12; ++i) {
-                random ^= random << 13; random ^= random >> 7; random ^= random << 17;
-                update["events"][0]["updates"].push_back({{"side", "bid"}, {"price_level", std::to_string(70+i) + ".00"},
-                    {"new_quantity", "0." + std::to_string(10000000 + random % 89999999)},
-                    {"event_time", "2026-09-30T00:00:00.000000000Z"}});
-            }
-            offset = 1000000000LL + int64_t(second) * 1000000000 + ms * 1000000;
-            admitted = session.submit(frame(update, seq++, offset)) && admitted;
-        }
-        offset = 1000000000LL + int64_t(second) * 1000000000 + 999000000;
-        admitted = session.submit(frame(nlohmann::json{{"channel", "heartbeats"}, {"events", nlohmann::json::array()}}, seq++, offset)) && admitted;
-    }
-    admitted = session.submit(record(Kind::CaptureStopped, offset + 1)) && admitted;
-    release.set_value(); session.close();
-    ASSERT_TRUE(admitted); ASSERT_TRUE(session.error().empty()) << session.error();
-    QTemporaryDir baselineRoot;
-    nlohmann::json measurements = nlohmann::json::object();
-    uint64_t overheadTotal = 0, fileTotal = 0;
-    for (const auto& path : paths(config.root)) {
-        const auto header = readHeader(path);
-        const auto symbol = header["product_metadata"]["product_id"].get<std::string>();
-        auto cfg = config; cfg.symbol = symbol; cfg.root = baselineRoot.path();
-        Writer baseline(cfg, header);
-        uint64_t receipts = 0;
-        scan(path, [&](const Record& r) {
-            if (r.kind == Kind::FrameReference) ++receipts;
-            else baseline.append(r);
-        });
-        baseline.close();
-        const auto actual = uint64_t(QFileInfo(path).size());
-        const auto own = uint64_t(QFileInfo(baseline.currentPath()).size());
-        ASSERT_GE(actual, own);
-        const auto overhead = actual - own;
-        EXPECT_LE(receipts, 6) << symbol; // formerly thousands of receipts
-        EXPECT_LT(double(overhead) / double(own), 0.05) << symbol;
-        measurements[symbol] = {{"file_bytes", actual}, {"own_baseline_bytes", own},
-            {"receipt_overhead_bytes", overhead}, {"receipts", receipts}};
-        overheadTotal += overhead; fileTotal += actual;
-    }
-    measurements["total"] = {{"frames", seq}, {"seconds", 300}, {"file_bytes", fileTotal}, {"receipt_overhead_bytes", overheadTotal}};
-    std::cout << "RECEIPT_MEASUREMENT " << measurements.dump() << '\n';
-    const auto report = verify(config.root);
-    EXPECT_TRUE(report.ok) << report.json.dump(2);
-    EXPECT_EQ(report.json["totals"]["frames"], seq);
-}
-
 TEST(DecimalGrid, ExactAtomsWithoutFloatingPointOrSilentRounding) {
     DecimalGrid prices("0.01"), quantities("0.00000001");
     EXPECT_EQ(prices.atoms("123456.78000000000000000000"), 12345678);
@@ -1716,34 +1591,362 @@ TEST_F(CaptureTest, ProductScopedRecoveryMarkersPreserveOtherReplayBooks) {
     }
 }
 
-TEST_F(CaptureTest, SharedAtomicQueueBudgetAccountsAcrossSessionsAndReleasesOnDrainAndFailure) {
-    auto budget = std::make_shared<QueueBudget>(2048);
-    std::promise<void> release;
-    auto ready = release.get_future().share();
-    auto btc = multiProducts(config).front(), eth = multiProducts(config).back();
-    Session first({btc}, 16384, {.beforeDrain = [ready] { ready.wait(); }}, budget);
-    Session second({eth}, 16384, {.beforeDrain = [ready] { ready.wait(); }}, budget);
-    // Always release blocked workers even if an assertion below returns early.
-    struct Release { std::promise<void>& promise; bool done = false; ~Release() { if (!done) promise.set_value(); } } guard{release};
-    auto item = record(Kind::EngineError, 1, std::string(600, 'x'));
-    const auto cost = item.payload.capacity() + sizeof(Record) + 64;
-    EXPECT_TRUE(first.submit(item)); EXPECT_EQ(budget->used(), cost);
-    EXPECT_TRUE(second.submit(item)); EXPECT_EQ(budget->used(), 2 * cost);
-    EXPECT_FALSE(second.submit(item)); EXPECT_EQ(budget->used(), 2 * cost);
-    EXPECT_NE(second.error().find("process queue limit"), std::string::npos);
-    release.set_value(); guard.done = true;
-    first.close(); second.close();
-    EXPECT_EQ(budget->used(), 0u);
 
-    std::promise<void> releaseFailure;
-    auto readyFailure = releaseFailure.get_future().share();
-    btc.config.root = config.root + "/failure";
-    Session failed({btc}, 16384, {.beforeDrain = [readyFailure] { readyFailure.wait(); },
-        .beforeWriterOperation = [](auto&, auto operation, auto*) {
+// ---- Shared capture queue pool (per-symbol connections, owner decision 7) ----
+namespace {
+size_t queuedCost(const Record& r) { return r.payload.capacity() + sizeof(Record) + 64; }
+WriterConfig productConfig(WriterConfig config, const std::string& symbol) { config.symbol = symbol; return config; }
+nlohmann::json productMetadata(const std::string& symbol) {
+    auto meta = metadata(); meta["product_metadata"]["product_id"] = symbol; return meta;
+}
+// Holds a session's disk worker before its first drain, so queued bytes stay
+// queued. Declare `auto opener = gate.releaser();` AFTER the sessions: it is then
+// destroyed first, so an early ASSERT return opens the gate before a session
+// destructor joins its (otherwise still blocked) disk worker.
+struct Gate {
+    std::promise<void> promise;
+    std::shared_future<void> future = promise.get_future().share();
+    bool open = false;
+    std::function<void()> hook() { return [f = future] { f.wait(); }; }
+    void release() { if (!open) { open = true; promise.set_value(); } }
+    struct Releaser { Gate& gate; ~Releaser() { gate.release(); } };
+    Releaser releaser() { return {*this}; }
+    ~Gate() { release(); }
+};
+std::optional<double> residentBytes() {
+    sentinel::metrics::MetricsRegistry registry;
+    sentinel::metrics::registerProcessMetrics(registry);
+    const auto text = registry.render();
+    const std::string key = "\nprocess_resident_memory_bytes ";
+    const auto at = text.find(key);
+    if (at == std::string::npos) return std::nullopt;
+    return std::stod(text.substr(at + key.size(), text.find('\n', at + key.size()) - at - key.size()));
+}
+} // namespace
+
+TEST(CaptureQueuePool, FloorsGuaranteeEveryProductAdmissionUnderAFloodFromOne) {
+    QueuePool pool(1000, 100, 3); // shared remainder: 700
+    size_t flooded = 0;
+    while (pool.reserve(0, 10)) flooded += 10;
+    EXPECT_EQ(flooded, 800u); // its own floor plus the whole shared remainder
+    EXPECT_EQ(pool.used(0), 800u);
+    // The flood cannot take the other products' floors.
+    EXPECT_TRUE(pool.reserve(1, 100)); EXPECT_FALSE(pool.reserve(1, 1));
+    EXPECT_TRUE(pool.reserve(2, 60)); EXPECT_TRUE(pool.reserve(2, 40)); EXPECT_FALSE(pool.reserve(2, 1));
+    EXPECT_EQ(pool.used(), 1000u);
+    // Draining the flooding product returns shared capacity to whoever asks first.
+    pool.release(0, 50);
+    EXPECT_TRUE(pool.reserve(1, 50)); EXPECT_FALSE(pool.reserve(2, 1));
+    EXPECT_EQ(pool.used(1), 150u); EXPECT_EQ(pool.used(), 1000u);
+}
+TEST(CaptureQueuePool, TotalCapHoldsAcrossProductsAndConfigurationIsChecked) {
+    QueuePool pool(1000, 0, 2); // no floors: everything is shared
+    EXPECT_TRUE(pool.reserve(0, 600)); EXPECT_TRUE(pool.reserve(1, 400));
+    EXPECT_FALSE(pool.reserve(0, 1)); EXPECT_FALSE(pool.reserve(1, 1));
+    EXPECT_FALSE(pool.reserve(0, SIZE_MAX)); // no wrap-around
+    EXPECT_EQ(pool.used(), 1000u);
+    pool.release(1, 400); pool.release(1, 1); // over-release clamps, never underflows
+    EXPECT_EQ(pool.used(1), 0u); EXPECT_EQ(pool.used(), 600u);
+    EXPECT_TRUE(pool.reserve(1, 400)); EXPECT_FALSE(pool.reserve(1, 1));
+    EXPECT_THROW(QueuePool(1000, 501, 2), std::runtime_error); // floors exceed the pool
+    EXPECT_NO_THROW(QueuePool(1000, 500, 2));
+    EXPECT_THROW(QueuePool(1000, 0, 0), std::runtime_error);
+    EXPECT_THROW(QueuePool(1000, 0, MaxProducts + 1), std::runtime_error);
+}
+TEST_F(CaptureTest, FloodedProductFailsAloneWhileItsPeerKeepsItsFloor) {
+    auto pool = std::make_shared<QueuePool>(64 * 1024, 16 * 1024, 2);
+    Gate gate;
+    Session btc(productConfig(config, "BTC-USD"), productMetadata("BTC-USD"), pool, 0, {.beforeDrain = gate.hook()});
+    Session eth(productConfig(config, "ETH-USD"), productMetadata("ETH-USD"), pool, 1, {.beforeDrain = gate.hook()});
+    auto opener = gate.releaser();
+    size_t btcAccepted = 0;
+    for (int i = 0; i < 1000 && btc.submit(record(Kind::Frame, i, std::string(1024, 'b'))); ++i) ++btcAccepted;
+    EXPECT_GT(btcAccepted, 30u); // floor + shared remainder (48 KiB)
+    EXPECT_NE(btc.error().find("pool limit"), std::string::npos) << btc.error();
+    EXPECT_LE(pool->used(), pool->total());
+    size_t ethAccepted = 0;
+    for (int i = 0; i < 10; ++i) ethAccepted += eth.submit(record(Kind::Frame, i, std::string(1024, 'e')));
+    EXPECT_EQ(ethAccepted, 10u); // ~11 KiB, inside ETH's 16 KiB floor
+    EXPECT_TRUE(eth.error().empty()) << eth.error();
+    gate.release();
+    btc.close(); eth.close();
+    EXPECT_EQ(eth.stats().frames, 10u);
+    EXPECT_EQ(btc.stats().frames, btcAccepted);
+    EXPECT_EQ(pool->used(), 0u);
+}
+TEST_F(CaptureTest, FailedSessionReturnsItsReservationAtFailureNotAtClose) {
+    auto pool = std::make_shared<QueuePool>(64 * 1024, 0, 2);
+    Gate gate;
+    Session failing(productConfig(config, "BTC-USD"), productMetadata("BTC-USD"), pool, 0,
+        {.beforeDrain = gate.hook(), .beforeWriterOperation = [](auto&, auto operation, auto*) {
             if (operation == "append") throw std::runtime_error("injected disk failure");
-        }}, budget);
-    EXPECT_TRUE(failed.submit(item)); EXPECT_TRUE(failed.submit(item));
-    EXPECT_EQ(budget->used(), 2 * cost);
-    releaseFailure.set_value(); failed.close();
-    EXPECT_FALSE(failed.error().empty()); EXPECT_EQ(budget->used(), 0u);
+        }});
+    Session healthy(productConfig(config, "ETH-USD"), productMetadata("ETH-USD"), pool, 1);
+    auto opener = gate.releaser();
+    const auto item = record(Kind::Frame, 1, std::string(8000, 'x'));
+    for (int i = 0; i < 3; ++i) ASSERT_TRUE(failing.submit(item));
+    EXPECT_EQ(pool->used(0), 3 * queuedCost(item));
+    gate.release();
+    QElapsedTimer waited; waited.start();
+    while ((pool->used(0) || failing.error().empty()) && waited.elapsed() < 3000)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    // Released while the failed session is still open (the process only quits on
+    // its next 100 ms supervisor tick): the healthy peer can use the whole pool.
+    EXPECT_FALSE(failing.error().empty());
+    EXPECT_EQ(pool->used(0), 0u);
+    EXPECT_FALSE(failing.submit(item)); EXPECT_EQ(pool->used(0), 0u); // refused, nothing reserved
+    const auto large = record(Kind::Frame, 2, std::string(60 * 1024 - sizeof(Record) - 64 - 64, 'y'));
+    EXPECT_TRUE(healthy.submit(large)) << healthy.error();
+    failing.close(); healthy.close();
+    EXPECT_TRUE(healthy.error().empty()) << healthy.error();
+    const auto report = verify(config.root + "/BTC-USD");
+    EXPECT_EQ(report.json["explicit_capture_gaps"], 1); // the loss is still recorded
+    EXPECT_EQ(pool->used(), 0u);
+}
+TEST_F(CaptureTest, PoolAllocatesOnlyAsFramesQueue) {
+    // 512 MiB pool for seven products, as in production: an idle capture must
+    // hold ~0 queued bytes and the pool must never be allocated up front.
+    const auto before = residentBytes();
+    if (!before) GTEST_SKIP() << "no RSS sampler on this platform";
+    auto pool = std::make_shared<QueuePool>(512ULL * 1024 * 1024, 2ULL * 1024 * 1024, 7);
+    std::vector<std::unique_ptr<Session>> sessions;
+    for (const auto* symbol : {"BTC-USD", "ETH-USD", "SOL-USD", "FARTCOIN-USD", "PEPE-USD", "DOGE-USD", "AVAX-USD"})
+        sessions.push_back(std::make_unique<Session>(productConfig(config, symbol), productMetadata(symbol), pool, sessions.size()));
+    for (auto& session : sessions) ASSERT_TRUE(session->submit(record(Kind::Frame, 1, "frame")));
+    QElapsedTimer waited; waited.start();
+    while (pool->used() && waited.elapsed() < 3000) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    EXPECT_EQ(pool->used(), 0u); // drained: steady state queues nothing
+    const auto after = residentBytes();
+    ASSERT_TRUE(after);
+    EXPECT_LT(*after - *before, 64.0 * 1024 * 1024) << "before=" << *before << " after=" << *after;
+    for (auto& session : sessions) session->close();
+}
+TEST_F(CaptureTest, WriterIsV1OnlyAndNewRunsVerifyBesideTheLegacyV2Archive) {
+    // The 2026-09-30..10-02 archive: one v2 run (BTC + ETH on one connection).
+    writeMulti(config, multiFixture());
+    // Production can no longer write v2.
+    auto v2Metadata = productMetadata("BTC-USD");
+    v2Metadata["connection_products"] = {"BTC-USD", "ETH-USD"};
+    v2Metadata["routing"] = RoutingId;
+    EXPECT_THROW(Writer(config, v2Metadata), std::runtime_error);
+    EXPECT_THROW(Session(config, v2Metadata), std::runtime_error);
+    // After the switch: one v1 session per product, two hours later.
+    for (const std::string symbol : {"BTC-USD", "ETH-USD"}) {
+        Session session(productConfig(config, symbol), productMetadata(symbol));
+        auto records = fixture();
+        if (symbol == "ETH-USD") {
+            records[2] = frame(fixtures::coinbaseSubscriptionAck({"ETH-USD"}), 0, 100);
+            records[3] = frame(fixtures::coinbaseL2Snapshot("ETH-USD", {{10, 1}}, {{11, 1}}), 1, 200);
+            auto trade = nlohmann::json::parse(records[5].payload);
+            trade["events"][0]["trades"][0]["product_id"] = "ETH-USD";
+            records[5] = frame(trade, 3, 1100000000);
+            records[6] = frame(fixtures::coinbaseL2Update("ETH-USD", {{"bid", 10, 2}}), 4, 2000000000);
+        }
+        for (auto& r : records) { r.time.systemNs += 2 * Hour; r.time.steadyNs += 2 * Hour; ASSERT_TRUE(session.submit(r)); }
+        session.close();
+        ASSERT_TRUE(session.error().empty()) << session.error();
+    }
+    int v1 = 0, v2 = 0;
+    for (const auto& path : paths(config.root)) {
+        const auto header = readHeader(path);
+        if (header.at("format_version") == 1) {
+            ++v1;
+            EXPECT_FALSE(header.contains("connection_products")) << path.toStdString();
+            EXPECT_FALSE(header.contains("routing"));
+            EXPECT_EQ(contents(path).left(8), QByteArray("RAWL2\r\n\1", 8));
+            scan(path, [](const Record& r) { EXPECT_NE(r.kind, Kind::FrameReference); }); // no routing receipts
+        } else ++v2;
+    }
+    EXPECT_EQ(v1, 2); EXPECT_EQ(v2, 2);
+    const auto report = verify(config.root);
+    EXPECT_TRUE(report.ok) << report.json.dump(2);
+    EXPECT_EQ(report.json["products"]["BTC-USD"]["connections"], 2);
+    EXPECT_EQ(report.json["products"]["ETH-USD"]["connections"], 2);
+    EXPECT_EQ(report.json["routing_errors"], 0);
+}
+TEST_F(CaptureTest, CaptureMetricsExposePerProductFeedQueueAndStoredFrames) {
+    auto pool = std::make_shared<QueuePool>(1024 * 1024, 64 * 1024, 2);
+    Gate gate;
+    Session btc(productConfig(config, "BTC-USD"), productMetadata("BTC-USD"), pool, 0, {.beforeDrain = gate.hook()});
+    Session eth(productConfig(config, "ETH-USD"), productMetadata("ETH-USD"), pool, 1);
+    auto opener = gate.releaser();
+    int64_t now = 1'000'000'000'000;
+    FeedMetrics btcFeed(now), ethFeed(now);
+    sentinel::metrics::MetricsRegistry registry;
+    registerCaptureMetrics(registry, pool, {{"BTC-USD", &btcFeed, &btc}, {"ETH-USD", &ethFeed, &eth}}, [&] { return now; });
+    const auto has = [&](const std::string& line) {
+        const auto text = registry.render();
+        return text.find("\n" + line + "\n") != std::string::npos;
+    };
+    EXPECT_TRUE(has("sentinel_capture_queue_pool_bytes 1048576"));
+    EXPECT_TRUE(has("sentinel_capture_queue_floor_bytes 65536"));
+    EXPECT_TRUE(has("# TYPE sentinel_capture_stored_frames_total counter"));
+    now += 30'000'000'000; // never connected: down since start
+    EXPECT_TRUE(has("sentinel_capture_feed_up{product=\"BTC-USD\"} 0"));
+    EXPECT_TRUE(has("sentinel_capture_feed_down_seconds{product=\"BTC-USD\"} 30"));
+    btcFeed.transport(true, 3, now); ethFeed.transport(true, 1, now);
+    ethFeed.transport(false, 1, now + 5'000'000'000);
+    ethFeed.transport(false, 1, now + 9'000'000'000); // duplicate down keeps the first time
+    now += 155'000'000'000;
+    EXPECT_TRUE(has("sentinel_capture_feed_up{product=\"BTC-USD\"} 1"));
+    EXPECT_TRUE(has("sentinel_capture_feed_down_seconds{product=\"BTC-USD\"} 0"));
+    EXPECT_TRUE(has("sentinel_capture_connection{product=\"BTC-USD\"} 3"));
+    EXPECT_TRUE(has("sentinel_capture_feed_up{product=\"ETH-USD\"} 0"));
+    EXPECT_TRUE(has("sentinel_capture_feed_down_seconds{product=\"ETH-USD\"} 150"));
+    const auto item = record(Kind::Frame, 1, std::string(1000, 'q'));
+    ASSERT_TRUE(btc.submit(item)); ASSERT_TRUE(btc.submit(item));
+    const auto queued = std::to_string(2 * queuedCost(item));
+    EXPECT_TRUE(has("sentinel_capture_queue_bytes{product=\"BTC-USD\"} " + queued));
+    EXPECT_TRUE(has("sentinel_capture_queue_used_bytes " + queued));
+    EXPECT_TRUE(has("sentinel_capture_stored_frames_total{product=\"BTC-USD\"} 0"));
+    gate.release(); btc.close(); eth.close();
+    EXPECT_TRUE(has("sentinel_capture_queue_bytes{product=\"BTC-USD\"} 0"));
+    EXPECT_TRUE(has("sentinel_capture_stored_frames_total{product=\"BTC-USD\"} 2"));
+    EXPECT_FALSE(has("sentinel_capture_file_bytes_total{product=\"BTC-USD\"} 0"));
+}
+// A scrape racing a down transition must read either "up" or the NEW down time,
+// never "down since <startup or an old outage>": A4 pages on one sample.
+TEST(CaptureFeedMetrics, ConcurrentDownTransitionNeverReportsAStaleOutage) {
+    constexpr int64_t hour = 3600LL * 1000000000;
+    const int64_t now = 100 * hour;
+    constexpr size_t count = 1'000'000;
+    std::deque<FeedMetrics> feeds;
+    for (size_t i = 0; i < count; ++i) {
+        feeds.emplace_back(now - 10 * hour); // "down since startup", 10 h ago
+        feeds.back().transport(true, 1, now - hour);
+    }
+    std::atomic<size_t> current{0};
+    std::atomic<bool> done{false};
+    std::atomic<uint64_t> stale{0}, samples{0};
+    std::thread scraper([&] {
+        while (!done.load(std::memory_order_acquire)) {
+            const auto i = current.load(std::memory_order_acquire);
+            const auto seconds = feeds[i].downSeconds(now);
+            samples.fetch_add(1, std::memory_order_relaxed);
+            if (seconds > 60) stale.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+    for (size_t i = 0; i < count; ++i) {
+        current.store(i, std::memory_order_release);
+        feeds[i].transport(false, 1, now);
+    }
+    done.store(true, std::memory_order_release);
+    scraper.join();
+    EXPECT_GT(samples.load(), 1000u);
+    EXPECT_EQ(stale.load(), 0u) << "samples=" << samples.load();
+    for (const auto& feed : {std::cref(feeds.front()), std::cref(feeds.back())}) {
+        EXPECT_FALSE(feed.get().up());
+        EXPECT_EQ(feed.get().downSeconds(now + 5 * 1000000000LL), 5.0);
+    }
+}
+
+// The one market-data I/O thread feeds every product. A failed product's cleanup
+// of a large backlog must not hold that product's session mutex: the next
+// submit() for it would stall the I/O thread and every healthy product with it.
+// The backlogDetached hook marks the cleanup phase itself; inside it the "I/O
+// thread" (alternating the failed and the healthy product, as the ingest
+// observer does) must keep making progress.
+TEST_F(CaptureTest, LargeFailedBacklogCleanupNeverStallsTheSharedIngestThread) {
+    auto pool = std::make_shared<QueuePool>(1024ULL * 1024 * 1024, 0, 2);
+    Gate gate;
+    std::atomic<uint64_t> peerAccepted{0}, failingCalls{0};
+    std::atomic<bool> cleanupStarted{false};
+    size_t detached = 0;
+    uint64_t peerInWindow = 0, failingInWindow = 0;
+    Session failing(productConfig(config, "BTC-USD"), productMetadata("BTC-USD"), pool, 0,
+        {.beforeDrain = gate.hook(),
+         .beforeWriterOperation = [](auto&, auto operation, auto*) {
+             if (operation == "append") throw std::runtime_error("injected disk failure");
+         },
+         .backlogDetached = [&](size_t records) {
+             detached = records;
+             cleanupStarted.store(true, std::memory_order_release);
+             const auto peer0 = peerAccepted.load(), failing0 = failingCalls.load();
+             QElapsedTimer window; window.start();
+             while ((peerAccepted.load() - peer0 < 200 || failingCalls.load() - failing0 < 200) && window.elapsed() < 3000)
+                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
+             peerInWindow = peerAccepted.load() - peer0;
+             failingInWindow = failingCalls.load() - failing0;
+         }});
+    Session peer(productConfig(config, "ETH-USD"), productMetadata("ETH-USD"), pool, 1);
+    auto opener = gate.releaser();
+    constexpr size_t backlog = 50'000;
+    for (size_t i = 0; i < backlog; ++i)
+        ASSERT_TRUE(failing.submit(record(Kind::Frame, int64_t(i), std::string(120, 'b'))));
+    std::atomic<bool> stop{false};
+    std::thread ingest([&] {
+        int64_t offset = 0;
+        while (!stop.load(std::memory_order_acquire)) {
+            failing.submit(record(Kind::Frame, int64_t(backlog) + ++offset, "late"));
+            failingCalls.fetch_add(1);
+            if (peer.submit(record(Kind::Frame, offset, "peer frame"))) peerAccepted.fetch_add(1);
+        }
+    });
+    gate.release();
+    QElapsedTimer waited; waited.start();
+    while ((!cleanupStarted.load() || pool->used(0)) && waited.elapsed() < 20000)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    stop.store(true, std::memory_order_release);
+    ingest.join();
+    failing.close(); peer.close(); // joins the disk worker: the window values are final
+    EXPECT_TRUE(cleanupStarted.load());
+    EXPECT_GE(detached, backlog);
+    EXPECT_GE(peerInWindow, 200u) << "the healthy product stalled during the failed product's cleanup";
+    EXPECT_GE(failingInWindow, 200u) << "submit() for the failed product blocked during its cleanup";
+    EXPECT_EQ(pool->used(0), 0u);
+    EXPECT_FALSE(failing.error().empty());
+    EXPECT_TRUE(peer.error().empty()) << peer.error();
+    // The gap marker still names the earliest lost frame of the detached backlog.
+    const auto report = verify(config.root + "/BTC-USD");
+    ASSERT_EQ(report.json["explicit_capture_gaps"], 1) << report.json.dump(2);
+    EXPECT_EQ(report.json["capture_gap_details"][0]["first_dropped_steady_ns"], record(Kind::Frame, 0).time.steadyNs);
+}
+// The app logs "Capture incomplete" only after it has stopped every feed and
+// joined every writer, which frozen disk I/O can block forever (FM-127). The
+// first failure must be in the run log the moment it happens.
+namespace {
+std::mutex failureLogMutex;
+std::vector<QString>* failureLog = nullptr;
+const Session* failureLogSession = nullptr;
+std::atomic<int> failureLoggedWithSessionLockFree{-1}; // -1 not checked, 0 lock held, 1 free
+}
+TEST_F(CaptureTest, FirstFailureIsLoggedAtOnceBeforeAnyDrainOrJoin) {
+    std::vector<QString> log;
+    { std::lock_guard lock(failureLogMutex); failureLog = &log; }
+    const auto previous = qInstallMessageHandler([](QtMsgType type, const QMessageLogContext&, const QString& message) {
+        std::lock_guard lock(failureLogMutex);
+        if (!failureLog || type != QtCriticalMsg) return;
+        failureLog->push_back(message);
+        // The sink can stall: the session mutex must already be released here,
+        // or the ingest thread would wait on this product's submit(). Probe it
+        // from another thread (a detached one: if the mutex is held by this
+        // thread, joining would deadlock; it finishes once the mutex is free).
+        if (failureLogSession && message.contains("Capture failed:")) {
+            auto done = std::make_shared<std::promise<void>>();
+            auto ready = done->get_future();
+            std::thread([session = failureLogSession, done] { (void)session->stats(); done->set_value(); }).detach();
+            failureLoggedWithSessionLockFree = ready.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready ? 1 : 0;
+        }
+    });
+    struct Restore {
+        QtMessageHandler previous;
+        ~Restore() { qInstallMessageHandler(previous); std::lock_guard lock(failureLogMutex); failureLog = nullptr; }
+    } restore{previous};
+    auto pool = std::make_shared<QueuePool>(64 * 1024, 16 * 1024, 2);
+    Gate gate; // the disk worker never drains while we look: as if T7 were frozen
+    Session btc(productConfig(config, "BTC-USD"), productMetadata("BTC-USD"), pool, 0, {.beforeDrain = gate.hook()});
+    auto opener = gate.releaser();
+    { std::lock_guard lock(failureLogMutex); failureLogSession = &btc; }
+    while (btc.submit(record(Kind::Frame, 1, std::string(4096, 'f')))) {}
+    { std::lock_guard lock(failureLogMutex); failureLogSession = nullptr; }
+    EXPECT_EQ(failureLoggedWithSessionLockFree.load(), 1) << "logged while holding the session mutex";
+    EXPECT_FALSE(btc.submit(record(Kind::Frame, 2, "later"))); // refused again: logged once
+    {
+        std::lock_guard lock(failureLogMutex);
+        ASSERT_EQ(log.size(), 1u);
+        EXPECT_TRUE(log[0].contains("Capture failed: product=BTC-USD error=capture queue pool limit exceeded")) << log[0].toStdString();
+        EXPECT_TRUE(log[0].contains("poolBytes=65536")) << log[0].toStdString();
+        EXPECT_TRUE(log[0].contains("floorBytes=16384")) << log[0].toStdString();
+    }
+    gate.release(); btc.close();
 }

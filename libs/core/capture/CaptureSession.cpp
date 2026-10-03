@@ -1,53 +1,131 @@
 #include "CaptureSession.hpp"
-#include "CaptureRouting.hpp"
 #include "SentinelLogging.hpp"
-#include <algorithm>
-#include <QUuid>
 #include <stdexcept>
 
 namespace sentinel::capture {
-Session::Session(WriterConfig config, nlohmann::json metadata, size_t queueBytes, std::shared_ptr<QueueBudget> budget)
-    : Session(std::vector<ProductCapture>{{std::move(config), std::move(metadata)}}, queueBytes, {}, std::move(budget)) {}
-Session::Session(std::vector<ProductCapture> products, size_t queueBytes, SessionHooks hooks, std::shared_ptr<QueueBudget> budget)
-    : m_limit(queueBytes), m_hooks(std::move(hooks)), m_budget(std::move(budget)) {
-    if (queueBytes < 2 * FinalRecordReserve || queueBytes > 1024ULL * 1024 * 1024)
-        throw std::runtime_error("invalid queue capacity");
-    if (products.empty() || products.size() > MaxProducts) throw std::runtime_error("invalid product count");
-    std::sort(products.begin(), products.end(), [](const auto& a, const auto& b) { return a.config.symbol < b.config.symbol; });
-    std::vector<std::string> symbols;
-    for (const auto& product : products) {
-        validateSymbol(product.config.symbol);
-        if (!symbols.empty() && symbols.back() == product.config.symbol) throw std::runtime_error("duplicate capture product");
-        symbols.push_back(product.config.symbol);
-    }
-    if (products.size() > 1) {
-        const auto run = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
-        const auto started = Stamp::now().systemNs;
-        for (auto& product : products) {
-            product.metadata["run_id"] = run;
-            product.metadata["run_started_system_ns"] = started;
-            product.metadata["connection_products"] = symbols;
-            product.metadata["routing"] = RoutingId;
-        }
-    }
+namespace {
+// Accounting size of one queued record (payload buffer, record, deque slot).
+size_t queuedSize(const Record& record) noexcept { return record.payload.capacity() + sizeof(Record) + 64; }
+// Which lost position the gap marker names: a frame beats a lifecycle record;
+// within one kind, the earliest receive time.
+bool preferLost(const RecordLocation& candidate, const std::optional<RecordLocation>& current) {
+    return !current || (candidate.kind == Kind::Frame && current->kind != Kind::Frame) ||
+        (candidate.kind == current->kind && candidate.time.steadyNs < current->time.steadyNs);
+}
+} // namespace
+
+QueuePool::QueuePool(size_t totalBytes, size_t floorBytes, size_t products)
+    : m_total(totalBytes), m_floor(floorBytes),
+      m_sharedLimit(products && floorBytes <= totalBytes / products ? totalBytes - products * floorBytes : 0),
+      m_used(products, 0), m_productUsed(products) {
+    if (products == 0 || products > MaxProducts) throw std::runtime_error("invalid capture queue product count");
+    if (totalBytes == 0) throw std::runtime_error("invalid capture queue total");
+    if (floorBytes > totalBytes / products)
+        throw std::runtime_error("capture queue floors exceed the pool: products x floor > total");
+}
+bool QueuePool::reserve(size_t product, size_t bytes) noexcept {
+    std::lock_guard lock(m_mutex);
+    auto& used = m_used[product];
+    if (bytes > m_total - used) return false; // also guards the addition below
+    const auto extra = above(used + bytes) - above(used);
+    if (extra > m_sharedLimit - m_sharedUsed) return false;
+    m_sharedUsed += extra;
+    used += bytes;
+    m_productUsed[product].store(used, std::memory_order_relaxed);
+    m_totalUsed.fetch_add(bytes, std::memory_order_relaxed);
+    return true;
+}
+void QueuePool::release(size_t product, size_t bytes) noexcept {
+    std::lock_guard lock(m_mutex);
+    auto& used = m_used[product];
+    bytes = std::min(bytes, used);
+    m_sharedUsed -= above(used) - above(used - bytes);
+    used -= bytes;
+    m_productUsed[product].store(used, std::memory_order_relaxed);
+    m_totalUsed.fetch_sub(bytes, std::memory_order_relaxed);
+}
+
+Session::Session(WriterConfig config, nlohmann::json metadata, size_t queueBytes, SessionHooks hooks)
+    : Session(std::move(config), std::move(metadata),
+              queueBytes < 2 * FinalRecordReserve || queueBytes > 4096ULL * 1024 * 1024 ?
+                  throw std::runtime_error("invalid queue capacity") :
+                  std::make_shared<QueuePool>(queueBytes - FinalRecordReserve, 0, 1),
+              0, std::move(hooks)) {}
+Session::Session(WriterConfig config, nlohmann::json metadata, std::shared_ptr<QueuePool> pool, size_t product, SessionHooks hooks)
+    : m_symbol(config.symbol), m_hooks(std::move(hooks)), m_pool(std::move(pool)), m_slot(product) {
+    if (!m_pool || product >= m_pool->products()) throw std::runtime_error("invalid capture queue pool slot");
+    validateSymbol(m_symbol);
+    // RAWL2 v2 (one connection, several products) is read-only: never written.
+    if (metadata.contains("connection_products") || metadata.contains("routing"))
+        throw std::runtime_error("multi-product (RAWL2 v2) capture writing was removed");
     m_error.reserve(512);
     m_stopRecord.kind = Kind::CaptureStopped;
     m_stopRecord.payload.reserve(FinalRecordReserve);
-    m_thread = std::thread([this, products = std::move(products)]() mutable { run(std::move(products)); });
+    m_thread = std::thread([this, config = std::move(config), metadata = std::move(metadata)]() mutable {
+        run(std::move(config), std::move(metadata));
+    });
 }
 Session::~Session() { close(); }
 void Session::failLocked(std::string_view error, RecordLocation dropped) {
-    if (m_error.empty()) m_error.assign(error.substr(0, 512));
+    if (m_error.empty()) {
+        m_error.assign(error.substr(0, 512));
+        // Logged as soon as this mutex is released (logFirstFailure), not after
+        // the app's stop/drain/join, which frozen disk I/O can block (FM-127).
+        // Never logged under the mutex: the sink can stall and the ingest
+        // thread would wait on this product's submit().
+        m_unloggedFailure = FailureNote{m_error, dropped, m_pool->used(m_slot), m_pool->used()};
+        m_failureLogPending.store(true, std::memory_order_release);
+    }
     // A write failure can reveal an older uncommitted frame after the producer
     // has already reported queue overflow. Preserve the earliest lost position.
-    if (!m_firstDropped || (dropped.kind == Kind::Frame && m_firstDropped->kind != Kind::Frame) ||
-        (dropped.kind == m_firstDropped->kind && dropped.time.steadyNs < m_firstDropped->time.steadyNs))
-        m_firstDropped = dropped;
+    if (preferLost(dropped, m_firstDropped)) m_firstDropped = dropped;
+}
+// Once per session, outside m_mutex; goes through the normal log sink.
+void Session::logFirstFailure() noexcept {
+    if (!m_failureLogPending.load(std::memory_order_acquire)) return;
+    std::optional<FailureNote> note;
+    {
+        std::lock_guard lock(m_mutex);
+        note.swap(m_unloggedFailure);
+        m_failureLogPending.store(false, std::memory_order_relaxed);
+    }
+    if (!note) return;
+    try {
+        sLog_Error("Capture failed: product=" << m_symbol << " error=" << note->error
+                   << " firstLostKind=" << static_cast<uint32_t>(note->dropped.kind) << " firstLostConn=" << note->dropped.connection
+                   << " queuedBytes=" << note->queued << " poolUsedBytes=" << note->poolUsed
+                   << " poolBytes=" << m_pool->total() << " floorBytes=" << m_pool->floor());
+    } catch (...) {}
+}
+// Disk worker failed: every queued record is lost. Detach the backlog under a
+// short lock, then scan and free it and return its bytes to the pool outside
+// the lock: one I/O thread feeds every product, so a submit() for this product
+// must never wait behind a large cleanup. The bytes go back now, not at close,
+// so a failed product never holds shared capacity (or makes a healthy product
+// fail for "pool limit").
+void Session::dropQueue() {
+    std::deque<Record> lost;
+    { std::lock_guard lock(m_mutex); lost.swap(m_queue); }
+    if (lost.empty()) return;
+    if (m_hooks.backlogDetached) m_hooks.backlogDetached(lost.size());
+    size_t bytes = 0;
+    std::optional<RecordLocation> first;
+    for (const auto& queued : lost) {
+        bytes += queuedSize(queued);
+        const RecordLocation at{queued.time, queued.connection, queued.kind};
+        if (preferLost(at, first)) first = at;
+    }
+    lost = {}; // free the payloads before returning their bytes
+    m_pool->release(m_slot, bytes);
+    { std::lock_guard lock(m_mutex); failLocked(m_error, *first); }
+    logFirstFailure();
 }
 bool Session::submit(Record record) noexcept {
     const RecordLocation location{record.time, record.connection, record.kind};
+    // Runs after the lock below is released (declared first, destroyed last).
+    struct LogAfterUnlock { Session& session; ~LogAfterUnlock() { session.logFirstFailure(); } } logAfterUnlock{*this};
     try {
-        const auto size = record.payload.capacity() + sizeof(Record) + 64;
+        const auto size = queuedSize(record);
         {
             std::lock_guard lock(m_mutex);
             if (m_stopping) return false;
@@ -68,31 +146,27 @@ bool Session::submit(Record record) noexcept {
                 failLocked(m_error, location);
                 return false;
             }
-            if (record.payload.size() > MaxRecordBytes || size > m_limit - FinalRecordReserve - m_bytes) {
-                failLocked("capture queue/record limit exceeded", location);
-                m_wake.notify_one();
-                return false;
-            }
-            if (m_budget && !m_budget->reserve(size)) {
-                failLocked("capture process queue limit exceeded", location);
+            if (record.payload.size() > MaxRecordBytes || !m_pool->reserve(m_slot, size)) {
+                failLocked(m_pool->products() > 1 ? "capture queue pool limit exceeded" : "capture queue limit exceeded", location);
                 m_wake.notify_one();
                 return false;
             }
             try { m_queue.push_back(std::move(record)); }
-            catch (...) { if (m_budget) m_budget->release(size); throw; }
-            m_bytes += size;
+            catch (...) { m_pool->release(m_slot, size); throw; }
         }
         m_wake.notify_one(); return true;
     } catch (const std::exception& e) { fail(e.what(), location); return false; }
 }
 void Session::fail(std::string_view error, std::optional<RecordLocation> dropped) noexcept {
-    std::lock_guard lock(m_mutex);
-    failLocked(error, dropped.value_or(RecordLocation{Stamp::now(), m_lastConnection, Kind::EngineError}));
-    m_wake.notify_one();
+    {
+        std::lock_guard lock(m_mutex);
+        failLocked(error, dropped.value_or(RecordLocation{Stamp::now(), m_lastConnection, Kind::EngineError}));
+        m_wake.notify_one();
+    }
+    logFirstFailure();
 }
 std::string Session::error() const { std::lock_guard lock(m_mutex); return m_error; }
 WriterStats Session::stats() const { std::lock_guard lock(m_mutex); return m_stats; }
-size_t Session::queuedBytes() const { std::lock_guard lock(m_mutex); return m_bytes; }
 void Session::close(std::string_view reason) {
     {
         std::lock_guard lock(m_mutex);
@@ -117,74 +191,26 @@ Record Session::finalRecord() {
     }
     return std::move(m_stopRecord);
 }
-void Session::run(std::vector<ProductCapture> products) {
+void Session::run(WriterConfig config, nlohmann::json metadata) {
     sentinel::logging::setCurrentThreadName("capture-disk");
-    std::vector<std::unique_ptr<Writer>> writers;
-    std::vector<std::string> symbols;
-    for (const auto& product : products) symbols.push_back(product.config.symbol);
+    std::unique_ptr<Writer> writer;
+    bool failed = false, closed = false;
     const auto publishStats = [&] {
-        WriterStats total;
-        for (const auto& writer : writers) {
-            const auto& stats = writer->stats();
-            total.records += stats.records; total.frames += stats.frames; total.frameBytes += stats.frameBytes;
-            total.blocks += stats.blocks; total.fileBytes += stats.fileBytes; total.files += stats.files;
-        }
-        std::lock_guard lock(m_mutex); m_stats = total;
+        if (!writer) return;
+        const auto stats = writer->stats();
+        m_storedFrames.store(stats.frames, std::memory_order_relaxed);
+        m_storedFileBytes.store(stats.fileBytes, std::memory_order_relaxed);
+        std::lock_guard lock(m_mutex); m_stats = stats;
     };
-    std::vector<bool> failed(products.size(), false), closed(products.size(), false), proofWritten(products.size(), false);
-    std::optional<RecordLocation> current;
-    RoutingBatch batch;
-    std::optional<uint64_t> expectedSequence;
-    const auto operation = [&](size_t i, std::string_view name, const Record* record, auto action) {
+    const auto operation = [&](std::string_view name, const Record* record, auto action) {
         try {
-            if (m_hooks.beforeWriterOperation) m_hooks.beforeWriterOperation(symbols[i], name, record);
+            if (m_hooks.beforeWriterOperation) m_hooks.beforeWriterOperation(m_symbol, name, record);
             action();
-        } catch (...) { failed[i] = true; throw; }
+        } catch (...) { failed = true; throw; }
     };
-    const auto each = [&](auto action) {
-        std::exception_ptr first;
-        for (size_t i = 0; i < writers.size(); ++i) if (!failed[i] && !closed[i]) {
-            try { action(i); } catch (...) { if (!first) first = std::current_exception(); }
-        }
-        if (first) std::rethrow_exception(first);
-    };
-    const auto finishBatch = [&] {
-        if (batch.empty()) return;
-        each([&](size_t i) {
-            const Record proof{Kind::FrameReference, batch.last, batch.connection, batch.receipt(symbols[i]).dump()};
-            operation(i, "append", &proof, [&] { writers[i]->append(proof); });
-            proofWritten[i] = true;
-        });
-        batch.clear(); std::fill(proofWritten.begin(), proofWritten.end(), false);
-    };
-    const auto append = [&](const Record& record) {
-        if (record.kind == Kind::TransportUp) expectedSequence = 0;
-        if (writers.size() == 1 || record.kind != Kind::Frame) {
-            finishBatch();
-            each([&](size_t i) { operation(i, "append", &record, [&] { writers[i]->append(record); }); });
-            return;
-        }
-        if (batch.due(record)) finishBatch();
-        const auto identity = frameReceipt(record.payload, symbols);
-        const auto& sequence = identity.at("sequence_num");
-        if (!sequence.is_number_unsigned() || (expectedSequence && sequence.get<uint64_t>() != *expectedSequence)) {
-            finishBatch();
-            const Record invalidated{Kind::BookInvalidated, record.time, record.connection,
-                R"({"reason":"capture connection sequence gap"})"};
-            each([&](size_t i) { operation(i, "append", &invalidated, [&] { writers[i]->append(invalidated); }); });
-        }
-        expectedSequence = sequence.is_number_unsigned() && sequence.get<uint64_t>() != UINT64_MAX ?
-            std::optional<uint64_t>(sequence.get<uint64_t>() + 1) : std::nullopt;
-        const auto targets = identity.at("products").get<std::vector<std::string>>();
-        batch.add(record, identity);
-        each([&](size_t i) {
-            if (std::binary_search(targets.begin(), targets.end(), symbols[i]))
-                operation(i, "append", &record, [&] { writers[i]->append(record); });
-        });
-    };
+    std::optional<RecordLocation> current;
     try {
-        for (auto& product : products)
-            writers.push_back(std::make_unique<Writer>(std::move(product.config), std::move(product.metadata)));
+        writer = std::make_unique<Writer>(std::move(config), std::move(metadata));
         if (m_hooks.beforeDrain) m_hooks.beforeDrain();
         while (true) {
             std::optional<Record> next;
@@ -193,72 +219,63 @@ void Session::run(std::vector<ProductCapture> products) {
                 m_wake.wait_for(lock, std::chrono::milliseconds(25), [&] { return m_stopping || !m_queue.empty(); });
                 if (!m_queue.empty()) {
                     next.emplace(std::move(m_queue.front())); m_queue.pop_front();
-                    const auto bytes = next->payload.capacity() + sizeof(Record) + 64;
-                    m_bytes -= bytes;
-                    if (m_budget) m_budget->release(bytes);
+                    m_pool->release(m_slot, queuedSize(*next));
                 } else if (m_stopping) break;
             }
             if (next) {
                 current = RecordLocation{next->time, next->connection, next->kind};
-                append(*next);
+                operation("append", &*next, [&] { writer->append(*next); });
             } else {
-                if (!batch.empty() && Stamp::now().steadyNs - batch.first.steadyNs >= RoutingIntervalNs) finishBatch();
-                each([&](size_t i) { operation(i, "flush", nullptr, [&] { writers[i]->flushDue(Stamp::now().steadyNs); }); });
+                operation("flush", nullptr, [&] { writer->flushDue(Stamp::now().steadyNs); });
             }
             publishStats();
         }
-        finishBatch();
         const auto terminal = finalRecord();
         current = RecordLocation{terminal.time, terminal.connection, terminal.kind};
-        // Complete each writer independently. A later close failure must not
-        // reopen a successfully closed writer or duplicate its stop marker.
-        for (size_t i = 0; i < writers.size(); ++i) {
-            operation(i, "append", &terminal, [&] { writers[i]->append(terminal); });
-            operation(i, "close", nullptr, [&] { writers[i]->close(); });
-            closed[i] = true;
-        }
+        operation("append", &terminal, [&] { writer->append(terminal); });
+        operation("close", nullptr, [&] { writer->close(); });
+        closed = true;
         publishStats();
     } catch (const std::exception& e) {
-        sLog_Error("Capture disk worker failed: error=" << e.what());
+        sLog_Error("Capture disk worker failed: product=" << m_symbol << " error=" << e.what());
         fail(e.what(), current);
-        for (size_t i = 0; i < writers.size(); ++i) if (failed[i])
-            if (auto uncommitted = writers[i]->firstUncommitted()) fail(e.what(), uncommitted);
+        if (writer && failed)
+            if (auto uncommitted = writer->firstUncommitted()) fail(e.what(), uncommitted);
+        // m_error is set: producers are refused from here on (recorded as
+        // dropped, never queued) until the app stops and calls close().
+        dropQueue();
+        { std::unique_lock lock(m_mutex); m_wake.wait(lock, [&] { return m_stopping; }); }
+        dropQueue();
         {
-            std::unique_lock lock(m_mutex);
-            m_wake.wait(lock, [&] { return m_stopping; });
-            for (const auto& queued : m_queue) failLocked(m_error, {queued.time, queued.connection, queued.kind});
-            if (m_budget) m_budget->release(m_bytes);
-            m_queue.clear(); m_bytes = 0;
+            std::lock_guard lock(m_mutex);
             m_stopRecord.kind = Kind::CaptureStopped;
             // Keep an explicitly submitted deterministic stop stamp when possible.
             if (!m_stopRecord.time.systemNs) m_stopRecord.time = Stamp::now();
             m_stopRecord.connection = m_lastConnection;
         }
         const auto terminal = finalRecord();
-        for (size_t i = 0; i < writers.size(); ++i) {
-            if (closed[i]) continue;
+        if (!writer) {
+            sLog_Error("Capture failure marker unavailable: product=" << m_symbol << " writer was not created");
+        } else if (!closed) {
             try {
-                if (failed[i]) writers[i]->abandonSegment();
+                if (failed) writer->abandonSegment();
                 else {
                     try {
-                        if (!batch.empty() && !proofWritten[i])
-                            writers[i]->append({Kind::FrameReference, batch.last, batch.connection, batch.receipt(symbols[i]).dump()});
                         // Preserve healthy buffers before starting a marker segment.
-                        writers[i]->flush();
-                        writers[i]->sealSegment();
+                        writer->flush();
+                        writer->sealSegment();
                     } catch (const std::exception& recoveryError) {
-                        sLog_Error("Capture recovery seal failed: product=" << symbols[i] << " error=" << recoveryError.what());
-                        writers[i]->abandonSegment(); // this writer also failed; peers remain sealed
+                        sLog_Error("Capture recovery seal failed: product=" << m_symbol << " error=" << recoveryError.what());
+                        writer->abandonSegment();
                     }
                 }
-                writers[i]->append(terminal);
-                writers[i]->close();
-                sLog_Warning("Capture failure marker persisted: product=" << symbols[i]);
+                writer->append(terminal);
+                writer->close();
+                sLog_Warning("Capture failure marker persisted: product=" << m_symbol);
             } catch (const std::exception& markerError) {
-                sLog_Error("Capture failure marker could not be persisted: product=" << symbols[i] << " error=" << markerError.what());
+                sLog_Error("Capture failure marker could not be persisted: product=" << m_symbol << " error=" << markerError.what());
             }
         }
-        if (writers.size() != products.size()) sLog_Error("Capture failure marker unavailable for uninitialized writers");
         publishStats();
     }
 }

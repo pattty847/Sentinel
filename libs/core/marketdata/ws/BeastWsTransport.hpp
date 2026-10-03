@@ -44,6 +44,7 @@ public:
     void connect(std::string host, std::string port, std::string target) override;
     void close() override;
     void send(std::string msg) override;
+    void retire() override; // relabels this socket's log lines retired:<product>
 
     void onMessage(MessageCb cb) override { onMessage_ = std::move(cb); }
     void onStatus(StatusCb cb) override { onStatus_ = std::move(cb); }

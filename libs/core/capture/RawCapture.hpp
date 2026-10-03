@@ -68,13 +68,17 @@ struct WriterStats {
 QString validateRoot(const QString& root);
 QString prepareDirectory(const QString& directory); // validate, create, fsync new directory entries
 void validateSymbol(const std::string& symbol);
-// Frozen v2 frame identity used for routing and range digests; not an on-disk record.
+// Frozen v2 frame identity used for routing and range digests (v2 verification
+// and the test-only v2 fixture writer); not an on-disk record.
 // Unknown/control/malformed envelopes are broadcast, never discarded.
 nlohmann::json frameReceipt(std::string_view payload, const std::vector<std::string>& products);
 
 
 // Single-thread owner. Append-only, exclusive-create segments; never opens an old
 // file for writing. Destructor only closes the fd: call close() to commit/index.
+// Writes RAWL2 v1 only (one product per file and per connection). RAWL2 v2
+// (one connection, several products, routing receipts) is read-only since
+// 2026-10-02: metadata naming connection_products/routing is refused.
 class Writer {
 public:
     Writer(WriterConfig config, nlohmann::json metadata);
@@ -93,6 +97,10 @@ public:
     const WriterStats& stats() const { return m_stats; }
     const QString& currentPath() const { return m_path; }
 private:
+    // Test-only: tests/capture/legacy_v2_fixture.cpp builds v2 files so the
+    // verifier's v2 reader stays covered. No production code defines this.
+    friend struct LegacyV2FixtureWriter;
+    Writer(WriterConfig config, nlohmann::json metadata, bool legacyV2);
     void open(Stamp time);
     void seal();
     void write(const std::string& bytes);
