@@ -3,7 +3,7 @@
 Live state for whoever conducts the agents next (Claude or Codex). Update it when something
 lands, deploys or changes priority. Rules: `AGENTS.md`; loop: `docs/AGENT_WORKFLOW.md`.
 
-Last updated: 2026-10-03 00:55 EDT.
+Last updated: 2026-10-03 02:00 EDT. Landed since: agent docks (d5161c7), GUI unsubscribe (3c66beb).
 
 ## Running services (owner's Mac, launchd)
 
@@ -23,8 +23,7 @@ Last updated: 2026-10-03 00:55 EDT.
 
 | Branch | Agent | What | Next step |
 |---|---|---|---|
-| `lt-sol/gui-unsubscribe` | Codex sol (thread 01a0ffeb-c2f1-7533-8935-d08d266e4dfa) | GUI releases symbols it no longer watches (server cap 8); review fixes: switch timeout + pending status, agent API completes on activation | review (astra), land, rebuild main GUI |
-| `lt-astra/roller-a` | Codex astra (thread 01a10008-1d77-7fb1-9a4d-8fdb9b039b93) | One-world slice A: roller library, `sentinel-roll`, per-product 1 bp 1-2-5 grids, `hmc2_diff`, parity + throughput | review, land, then the orchestrator runs the 7-product backfill into `/Volumes/T7/sentinel-data/hmc2` |
+| `lt-astra/roller-a` (11dee5c) | Codex astra (thread 01a10008-1d77-7fb1-9a4d-8fdb9b039b93) | One-world slice A built; BLOCKED on the parity gate (0/58 exact decoded matches vs live recorder: independent feeds + 250 ms vs record-time ticks change TWAP) | Fable review + parity quantification, then owner decision on the acceptance criterion, then land + backfill |
 
 ## Next (priority order)
 
