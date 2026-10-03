@@ -7,6 +7,8 @@
 #include "legacy_v2_fixture.hpp"
 #include "metrics/MetricsRegistry.hpp"
 #include "metrics/ProcessMetrics.hpp"
+#include <deque>
+#include <mutex>
 #include <thread>
 #include <future>
 #include <filesystem>
@@ -1598,13 +1600,17 @@ nlohmann::json productMetadata(const std::string& symbol) {
     auto meta = metadata(); meta["product_metadata"]["product_id"] = symbol; return meta;
 }
 // Holds a session's disk worker before its first drain, so queued bytes stay
-// queued; released on scope exit even when an assertion returns early.
+// queued. Declare `auto opener = gate.releaser();` AFTER the sessions: it is then
+// destroyed first, so an early ASSERT return opens the gate before a session
+// destructor joins its (otherwise still blocked) disk worker.
 struct Gate {
     std::promise<void> promise;
     std::shared_future<void> future = promise.get_future().share();
     bool open = false;
     std::function<void()> hook() { return [f = future] { f.wait(); }; }
     void release() { if (!open) { open = true; promise.set_value(); } }
+    struct Releaser { Gate& gate; ~Releaser() { gate.release(); } };
+    Releaser releaser() { return {*this}; }
     ~Gate() { release(); }
 };
 std::optional<double> residentBytes() {
@@ -1652,6 +1658,7 @@ TEST_F(CaptureTest, FloodedProductFailsAloneWhileItsPeerKeepsItsFloor) {
     Gate gate;
     Session btc(productConfig(config, "BTC-USD"), productMetadata("BTC-USD"), pool, 0, {.beforeDrain = gate.hook()});
     Session eth(productConfig(config, "ETH-USD"), productMetadata("ETH-USD"), pool, 1, {.beforeDrain = gate.hook()});
+    auto opener = gate.releaser();
     size_t btcAccepted = 0;
     for (int i = 0; i < 1000 && btc.submit(record(Kind::Frame, i, std::string(1024, 'b'))); ++i) ++btcAccepted;
     EXPECT_GT(btcAccepted, 30u); // floor + shared remainder (48 KiB)
@@ -1675,6 +1682,7 @@ TEST_F(CaptureTest, FailedSessionReturnsItsReservationAtFailureNotAtClose) {
             if (operation == "append") throw std::runtime_error("injected disk failure");
         }});
     Session healthy(productConfig(config, "ETH-USD"), productMetadata("ETH-USD"), pool, 1);
+    auto opener = gate.releaser();
     const auto item = record(Kind::Frame, 1, std::string(8000, 'x'));
     for (int i = 0; i < 3; ++i) ASSERT_TRUE(failing.submit(item));
     EXPECT_EQ(pool->used(0), 3 * queuedCost(item));
@@ -1761,6 +1769,7 @@ TEST_F(CaptureTest, CaptureMetricsExposePerProductFeedQueueAndStoredFrames) {
     Gate gate;
     Session btc(productConfig(config, "BTC-USD"), productMetadata("BTC-USD"), pool, 0, {.beforeDrain = gate.hook()});
     Session eth(productConfig(config, "ETH-USD"), productMetadata("ETH-USD"), pool, 1);
+    auto opener = gate.releaser();
     int64_t now = 1'000'000'000'000;
     FeedMetrics btcFeed(now), ethFeed(now);
     sentinel::metrics::MetricsRegistry registry;
@@ -1794,4 +1803,120 @@ TEST_F(CaptureTest, CaptureMetricsExposePerProductFeedQueueAndStoredFrames) {
     EXPECT_TRUE(has("sentinel_capture_queue_bytes{product=\"BTC-USD\"} 0"));
     EXPECT_TRUE(has("sentinel_capture_stored_frames_total{product=\"BTC-USD\"} 2"));
     EXPECT_FALSE(has("sentinel_capture_file_bytes_total{product=\"BTC-USD\"} 0"));
+}
+// A scrape racing a down transition must read either "up" or the NEW down time,
+// never "down since <startup or an old outage>": A4 pages on one sample.
+TEST(CaptureFeedMetrics, ConcurrentDownTransitionNeverReportsAStaleOutage) {
+    constexpr int64_t hour = 3600LL * 1000000000;
+    const int64_t now = 100 * hour;
+    constexpr size_t count = 1'000'000;
+    std::deque<FeedMetrics> feeds;
+    for (size_t i = 0; i < count; ++i) {
+        feeds.emplace_back(now - 10 * hour); // "down since startup", 10 h ago
+        feeds.back().transport(true, 1, now - hour);
+    }
+    std::atomic<size_t> current{0};
+    std::atomic<bool> done{false};
+    std::atomic<uint64_t> stale{0}, samples{0};
+    std::thread scraper([&] {
+        while (!done.load(std::memory_order_acquire)) {
+            const auto i = current.load(std::memory_order_acquire);
+            const auto seconds = feeds[i].downSeconds(now);
+            samples.fetch_add(1, std::memory_order_relaxed);
+            if (seconds > 60) stale.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+    for (size_t i = 0; i < count; ++i) {
+        current.store(i, std::memory_order_release);
+        feeds[i].transport(false, 1, now);
+    }
+    done.store(true, std::memory_order_release);
+    scraper.join();
+    EXPECT_GT(samples.load(), 1000u);
+    EXPECT_EQ(stale.load(), 0u) << "samples=" << samples.load();
+    for (const auto& feed : {std::cref(feeds.front()), std::cref(feeds.back())}) {
+        EXPECT_FALSE(feed.get().up());
+        EXPECT_EQ(feed.get().downSeconds(now + 5 * 1000000000LL), 5.0);
+    }
+}
+
+// The one market-data I/O thread feeds every product. A failed product's cleanup
+// of a large backlog must not hold that product's session mutex: the next
+// submit() for it would stall the I/O thread and every healthy product with it.
+TEST_F(CaptureTest, LargeFailedBacklogCleanupNeverStallsTheSharedIngestThread) {
+    auto pool = std::make_shared<QueuePool>(1024ULL * 1024 * 1024, 0, 2);
+    Gate gate;
+    Session failing(productConfig(config, "BTC-USD"), productMetadata("BTC-USD"), pool, 0,
+        {.beforeDrain = gate.hook(), .beforeWriterOperation = [](auto&, auto operation, auto*) {
+            if (operation == "append") throw std::runtime_error("injected disk failure");
+        }});
+    Session peer(productConfig(config, "ETH-USD"), productMetadata("ETH-USD"), pool, 1);
+    auto opener = gate.releaser();
+    constexpr size_t backlog = 400'000;
+    for (size_t i = 0; i < backlog; ++i)
+        ASSERT_TRUE(failing.submit(record(Kind::Frame, int64_t(i), std::string(120, 'b'))));
+    const auto backlogBytes = pool->used(0);
+    ASSERT_GT(backlogBytes, 0u);
+    // The "I/O thread": alternate the failed and the healthy product, as the
+    // ingest observer does, and count the peer's frames while the backlog of
+    // the failed product is still being cleaned up.
+    std::atomic<bool> stop{false};
+    uint64_t peerDuringCleanup = 0, peerTotal = 0;
+    bool sawRefusal = false;
+    std::thread ingest([&] {
+        int64_t offset = 0;
+        while (!stop.load(std::memory_order_acquire)) {
+            const bool accepted = failing.submit(record(Kind::Frame, ++offset, "late"));
+            if (!accepted) sawRefusal = true;
+            if (peer.submit(record(Kind::Frame, offset, "peer frame"))) {
+                ++peerTotal;
+                if (sawRefusal && pool->used(0) >= backlogBytes) ++peerDuringCleanup;
+            }
+        }
+    });
+    gate.release();
+    QElapsedTimer waited; waited.start();
+    while (pool->used(0) && waited.elapsed() < 20000) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    stop.store(true, std::memory_order_release);
+    ingest.join();
+    EXPECT_EQ(pool->used(0), 0u);
+    EXPECT_FALSE(failing.error().empty());
+    EXPECT_GT(peerDuringCleanup, 100u) << "peerTotal=" << peerTotal;
+    failing.close(); peer.close();
+    EXPECT_TRUE(peer.error().empty()) << peer.error();
+    // The gap marker still names the earliest lost frame of the detached backlog.
+    const auto report = verify(config.root + "/BTC-USD");
+    ASSERT_EQ(report.json["explicit_capture_gaps"], 1) << report.json.dump(2);
+    EXPECT_EQ(report.json["capture_gap_details"][0]["first_dropped_steady_ns"], record(Kind::Frame, 0).time.steadyNs);
+}
+// The app logs "Capture incomplete" only after it has stopped every feed and
+// joined every writer, which frozen disk I/O can block forever (FM-127). The
+// first failure must be in the run log the moment it happens.
+namespace { std::mutex failureLogMutex; std::vector<QString>* failureLog = nullptr; }
+TEST_F(CaptureTest, FirstFailureIsLoggedAtOnceBeforeAnyDrainOrJoin) {
+    std::vector<QString> log;
+    { std::lock_guard lock(failureLogMutex); failureLog = &log; }
+    const auto previous = qInstallMessageHandler([](QtMsgType type, const QMessageLogContext&, const QString& message) {
+        std::lock_guard lock(failureLogMutex);
+        if (failureLog && type == QtCriticalMsg) failureLog->push_back(message);
+    });
+    struct Restore {
+        QtMessageHandler previous;
+        ~Restore() { qInstallMessageHandler(previous); std::lock_guard lock(failureLogMutex); failureLog = nullptr; }
+    } restore{previous};
+    auto pool = std::make_shared<QueuePool>(64 * 1024, 16 * 1024, 2);
+    Gate gate; // the disk worker never drains while we look: as if T7 were frozen
+    Session btc(productConfig(config, "BTC-USD"), productMetadata("BTC-USD"), pool, 0, {.beforeDrain = gate.hook()});
+    auto opener = gate.releaser();
+    while (btc.submit(record(Kind::Frame, 1, std::string(4096, 'f')))) {}
+    EXPECT_FALSE(btc.submit(record(Kind::Frame, 2, "later"))); // refused again: logged once
+    {
+        std::lock_guard lock(failureLogMutex);
+        ASSERT_EQ(log.size(), 1u);
+        EXPECT_TRUE(log[0].contains("Capture failed: product=BTC-USD error=capture queue pool limit exceeded")) << log[0].toStdString();
+        EXPECT_TRUE(log[0].contains("poolBytes=65536")) << log[0].toStdString();
+        EXPECT_TRUE(log[0].contains("floorBytes=16384")) << log[0].toStdString();
+    }
+    gate.release(); btc.close();
 }

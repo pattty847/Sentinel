@@ -21,14 +21,10 @@ void registerCaptureMetrics(metrics::MetricsRegistry& r, std::shared_ptr<const Q
         const auto* feed = source.feed;
         const auto* session = source.session;
         r.gaugeFn("sentinel_capture_feed_up", "1 while this product's upstream WebSocket is up.", labels,
-                  [feed]() -> Value { return feed->up.load(std::memory_order_relaxed) ? 1.0 : 0.0; });
+                  [feed]() -> Value { return feed->up() ? 1.0 : 0.0; });
         r.gaugeFn("sentinel_capture_feed_down_seconds",
                   "Seconds this product's feed has been down (0 while up; since process start if never up).", labels,
-                  [feed, steadyNowNs]() -> Value {
-                      if (feed->up.load(std::memory_order_relaxed)) return 0.0;
-                      const auto since = feed->downSinceSteadyNs.load(std::memory_order_relaxed);
-                      return std::max<double>(0.0, double(steadyNowNs() - since) / 1e9);
-                  });
+                  [feed, steadyNowNs]() -> Value { return feed->downSeconds(steadyNowNs()); });
         r.gaugeFn("sentinel_capture_connection", "Established connection id of this product (reconnects = id - 1).", labels,
                   [feed]() -> Value { return double(feed->connection.load(std::memory_order_relaxed)); });
         r.gaugeFn("sentinel_capture_queue_bytes", "Bytes this product has queued for the disk worker.", labels,

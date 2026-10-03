@@ -69,7 +69,7 @@ public:
     static constexpr size_t FinalRecordReserve = 4096;
 private:
     void failLocked(std::string_view error, RecordLocation dropped);
-    void dropQueueLocked();
+    void dropQueue(); // m_mutex NOT held
     Record finalRecord();
     void run(WriterConfig config, nlohmann::json metadata);
     mutable std::mutex m_mutex;

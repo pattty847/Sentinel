@@ -13,17 +13,27 @@ class QueuePool;
 class Session;
 
 // One product's feed state for /metrics, written by the ingest observer on the
-// mdc-io thread and read by samplers on the main thread (relaxed atomics only).
+// mdc-io thread and read by samplers on the main thread. Up/down and the down
+// time are ONE atomic (kUp, or the steady ns the feed went down), so a sample
+// can never pair "down" with a stale timestamp from an older outage.
 struct FeedMetrics {
-    std::atomic<bool> up{false};
+    static constexpr int64_t kUp = INT64_MIN;
     std::atomic<uint64_t> connection{0};
-    std::atomic<int64_t> downSinceSteadyNs{0}; // meaningful while !up
+    std::atomic<int64_t> downSinceSteadyNs; // kUp while up
     explicit FeedMetrics(int64_t startedSteadyNs) : downSinceSteadyNs(startedSteadyNs) {}
-    // Transport up/down as observed by the capture (duplicates are harmless).
+    // Transport up/down as observed by the capture. A repeated down keeps the
+    // first down time; a down while already down changes nothing.
     void transport(bool isUp, uint64_t connectionId, int64_t steadyNs) noexcept {
         connection.store(connectionId, std::memory_order_relaxed);
-        if (isUp) up.store(true, std::memory_order_relaxed);
-        else if (up.exchange(false, std::memory_order_relaxed)) downSinceSteadyNs.store(steadyNs, std::memory_order_relaxed);
+        if (isUp) { downSinceSteadyNs.store(kUp, std::memory_order_relaxed); return; }
+        int64_t expected = kUp;
+        downSinceSteadyNs.compare_exchange_strong(expected, steadyNs, std::memory_order_relaxed);
+    }
+    bool up() const noexcept { return downSinceSteadyNs.load(std::memory_order_relaxed) == kUp; }
+    // Seconds down at nowSteadyNs (0 while up), from one load.
+    double downSeconds(int64_t nowSteadyNs) const noexcept {
+        const auto since = downSinceSteadyNs.load(std::memory_order_relaxed);
+        return since == kUp || nowSteadyNs <= since ? 0.0 : double(nowSteadyNs - since) / 1e9;
     }
 };
 struct CaptureMetricsSource {

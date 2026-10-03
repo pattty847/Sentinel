@@ -6,6 +6,12 @@ namespace sentinel::capture {
 namespace {
 // Accounting size of one queued record (payload buffer, record, deque slot).
 size_t queuedSize(const Record& record) noexcept { return record.payload.capacity() + sizeof(Record) + 64; }
+// Which lost position the gap marker names: a frame beats a lifecycle record;
+// within one kind, the earliest receive time.
+bool preferLost(const RecordLocation& candidate, const std::optional<RecordLocation>& current) {
+    return !current || (candidate.kind == Kind::Frame && current->kind != Kind::Frame) ||
+        (candidate.kind == current->kind && candidate.time.steadyNs < current->time.steadyNs);
+}
 } // namespace
 
 QueuePool::QueuePool(size_t totalBytes, size_t floorBytes, size_t products)
@@ -61,22 +67,41 @@ Session::Session(WriterConfig config, nlohmann::json metadata, std::shared_ptr<Q
 }
 Session::~Session() { close(); }
 void Session::failLocked(std::string_view error, RecordLocation dropped) {
-    if (m_error.empty()) m_error.assign(error.substr(0, 512));
+    if (m_error.empty()) {
+        m_error.assign(error.substr(0, 512));
+        // Logged at once: the app stops every feed and joins every writer before
+        // it logs "Capture incomplete", and that join can block on frozen disk
+        // I/O (FM-127). One line per session; reads atomics only.
+        sLog_Error("Capture failed: product=" << m_symbol << " error=" << m_error
+                   << " firstLostKind=" << static_cast<uint32_t>(dropped.kind) << " firstLostConn=" << dropped.connection
+                   << " queuedBytes=" << m_pool->used(m_slot) << " poolUsedBytes=" << m_pool->used()
+                   << " poolBytes=" << m_pool->total() << " floorBytes=" << m_pool->floor());
+    }
     // A write failure can reveal an older uncommitted frame after the producer
     // has already reported queue overflow. Preserve the earliest lost position.
-    if (!m_firstDropped || (dropped.kind == Kind::Frame && m_firstDropped->kind != Kind::Frame) ||
-        (dropped.kind == m_firstDropped->kind && dropped.time.steadyNs < m_firstDropped->time.steadyNs))
-        m_firstDropped = dropped;
+    if (preferLost(dropped, m_firstDropped)) m_firstDropped = dropped;
 }
-// Disk worker failed: every queued record is lost. Record the loss and return
-// the reservation to the pool now, not at close, so a failed product never
-// holds shared capacity (or makes a healthy product fail for "pool limit").
-void Session::dropQueueLocked() {
-    for (const auto& queued : m_queue) {
-        failLocked(m_error, {queued.time, queued.connection, queued.kind});
-        m_pool->release(m_slot, queuedSize(queued));
+// Disk worker failed: every queued record is lost. Detach the backlog under a
+// short lock, then scan and free it and return its bytes to the pool outside
+// the lock: one I/O thread feeds every product, so a submit() for this product
+// must never wait behind a large cleanup. The bytes go back now, not at close,
+// so a failed product never holds shared capacity (or makes a healthy product
+// fail for "pool limit").
+void Session::dropQueue() {
+    std::deque<Record> lost;
+    { std::lock_guard lock(m_mutex); lost.swap(m_queue); }
+    if (lost.empty()) return;
+    size_t bytes = 0;
+    std::optional<RecordLocation> first;
+    for (const auto& queued : lost) {
+        bytes += queuedSize(queued);
+        const RecordLocation at{queued.time, queued.connection, queued.kind};
+        if (preferLost(at, first)) first = at;
     }
-    m_queue.clear();
+    lost = {}; // free the payloads before returning their bytes
+    m_pool->release(m_slot, bytes);
+    std::lock_guard lock(m_mutex);
+    failLocked(m_error, *first);
 }
 bool Session::submit(Record record) noexcept {
     const RecordLocation location{record.time, record.connection, record.kind};
@@ -194,13 +219,13 @@ void Session::run(WriterConfig config, nlohmann::json metadata) {
         fail(e.what(), current);
         if (writer && failed)
             if (auto uncommitted = writer->firstUncommitted()) fail(e.what(), uncommitted);
+        // m_error is set: producers are refused from here on (recorded as
+        // dropped, never queued) until the app stops and calls close().
+        dropQueue();
+        { std::unique_lock lock(m_mutex); m_wake.wait(lock, [&] { return m_stopping; }); }
+        dropQueue();
         {
-            std::unique_lock lock(m_mutex);
-            dropQueueLocked();
-            // Producers keep submitting until the app stops: refused (m_error set),
-            // recorded as dropped, never queued. Wait for close().
-            m_wake.wait(lock, [&] { return m_stopping; });
-            dropQueueLocked();
+            std::lock_guard lock(m_mutex);
             m_stopRecord.kind = Kind::CaptureStopped;
             // Keep an explicitly submitted deterministic stop stamp when possible.
             if (!m_stopRecord.time.systemNs) m_stopRecord.time = Stamp::now();

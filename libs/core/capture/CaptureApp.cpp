@@ -224,9 +224,14 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
     timer.setInterval(100);
     QObject::connect(&timer, &QTimer::timeout, &app, [&] {
         const auto now = Stamp::now().steadyNs;
-        if (stopSignal || !error().empty() || (duration && now - started >= int64_t(duration) * 1000000000)) {
+        const auto failure = error();
+        if (stopSignal || !failure.empty() || (duration && now - started >= int64_t(duration) * 1000000000)) {
             stopReason = stopSignal ? "signal=" + std::to_string(stopSignal) :
-                         !error().empty() ? "capture failure" : "duration elapsed";
+                         !failure.empty() ? "capture failure" : "duration elapsed";
+            // Before the drain/join, which frozen disk I/O can block (FM-127).
+            if (!failure.empty())
+                sLog_Error("Capture stopping every product after a failure: error=" << failure
+                           << " poolUsedBytes=" << pool->used() << " (exit 1 after the drain; launchd restarts)");
             stopped = true; app.quit(); return;
         }
         if (now - lastStats >= 60LL * 1000000000) {
@@ -234,7 +239,7 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
             for (const auto& [symbol, state] : states) {
                 const auto& feed = *state.feed;
                 sLog_App("Capture stats: product=" << symbol << " conn=" << feed.connection.load(std::memory_order_relaxed)
-                    << " up=" << feed.up.load(std::memory_order_relaxed) << " storedFrames=" << state.session->storedFrames()
+                    << " up=" << feed.up() << " storedFrames=" << state.session->storedFrames()
                     << " fileBytes=" << state.session->storedFileBytes() << " queuedBytes=" << state.session->queuedBytes());
             }
             sLog_App("Capture queue: usedBytes=" << pool->used() << " poolBytes=" << pool->total()

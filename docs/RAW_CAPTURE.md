@@ -381,12 +381,31 @@ and sync. All queues account to one shared pool (owner decision 7, 2026-10-02):
   floor come from the shared remainder, total - products x floor, first come first
   served. A product that floods the remainder fails itself; it cannot refuse
   another product's frames below that product's floor.
-- A full pool fails the product that asked (`capture queue pool limit exceeded`)
-  and the process exits nonzero (launchd restarts it). That product's accepted
-  data drains before its gap marker. Other products close normally.
 - When a disk worker fails, its queued records are counted as lost (the gap
   marker keeps the first one) and their bytes return to the pool at once, not at
-  close, so a failed product never makes a healthy one fail for "pool limit".
+  close, so a failed product never makes a healthy one fail for "pool limit". The
+  backlog is detached under a short lock and freed outside it, so the shared
+  market-data I/O thread never waits on that cleanup.
+
+**One failure stops the whole process.** This is the restart contract for every
+product failure (pool full, record over 16 MiB, disk error, ingest exception):
+
+1. The failing product logs `Capture failed: product=<id> error=<reason> ...
+   queuedBytes=... poolUsedBytes=... poolBytes=... floorBytes=...` at once, in
+   the thread that saw the failure. Later records of that product are refused
+   and counted as lost; its accepted data still drains first on a pool overflow.
+2. Within 100 ms the supervisor logs `Capture stopping every product after a
+   failure: error=...` and stops all feeds. Every other product closes its run
+   with stop reason `capture failure`, so all products have a gap until restart.
+3. After the drain, `Capture incomplete: error=...` is logged and the process
+   exits 1. launchd restarts it after `ThrottleInterval` (30 s); each product
+   starts a new run.
+4. If disk I/O is frozen (FM-127), step 3 can block in the drain/join: there is no
+   exit and `/metrics` stops answering (the main thread is in the join), so alert
+   A3 pages for `sentinel-capture`. The lines from steps 1 and 2 are already in
+   the run log on the internal disk.
+
+The pool is a memory budget that delays this stop, not a loss guarantee.
 - After a disk failure the damaged segment is abandoned and the gap marker goes
   into a new segment. A failure outside a writer operation flushes and seals the
   healthy buffer first.
