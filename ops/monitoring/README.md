@@ -270,9 +270,11 @@ all actual/configured primary/fallback roots, including symlink aliases.
 | `sentinel_roller_shadow_running` | gauge | product | 1 while applying durable records; 0 during setup/retry/stop. Present only when enabled. |
 | `sentinel_roller_shadow_lag_seconds` | gauge | product | Scrape-time age of last applied durable record, -1 before the first record. |
 | `sentinel_roller_shadow_records_applied_total` | counter | product | Applied durable records, including deterministic restart/day warmup replay. |
-| `sentinel_roller_shadow_setup_failures_total` | counter | product | Setup, malformed input, socket, continuity or write failures that trigger backoff. |
+| `sentinel_roller_shadow_setup_failures_total` | counter | product | Setup, socket framing, continuity or write failures that trigger backoff. Malformed journal payloads invalidate and continue like batch. |
+| `sentinel_roller_shadow_fault_cooldown` | gauge | product | 1 after three identical consecutive faults without new committed progress; 0 after new durable checkpoint progress or a different fault. |
+| `sentinel_roller_shadow_fault_cooldowns_total` | counter | product | Entries into the persistent-fault slow probe loop. |
 | `sentinel_roller_shadow_start_failures_total` | counter | - | Supervisor construction failure, such as inability to create worker threads. |
-| `sentinel_roller_shadow_mismatch_total` | counter | product, layer | Strict same-journal mismatching bucket observations against a fresh batch oracle, including one-sided missing and partial buckets. |
+| `sentinel_roller_shadow_mismatch_total` | counter | product, layer | Persisted count of strict same-journal mismatching buckets, including one-sided missing and partial buckets. Series absent until checkpoint restore completes; restart does not re-count old hours. |
 | `sentinel_roller_shadow_last_comparison_timestamp_seconds` | gauge | product | Completion time of last successful hourly report; 0 before the first. |
 | `sentinel_roller_shadow_comparison_failures_total` | counter | product | Hourly oracle/report failures; failed hours retry at the next pass. |
 
@@ -289,6 +291,35 @@ Grafana provisions `sentinel-roller-shadow-mismatch` (increase over 2 h) and
 `sentinel-roller-shadow-down` (product down for 5 min); absence is OK while
 shadow is disabled. Existing primary health rules remain authoritative.
 Read `Shadow roller retry` for the error and 1 s to 60 s exponential backoff.
+After **three identical consecutive failures without a newer committed
+watermark**, that product probes once every **ten minutes**, including storage
+faults and unavailable journal volumes. `sentinel-roller-shadow-fault-cooldown`
+pages on that gauge immediately. Replaying the old checkpoint does not reset
+the streak. Socket/retract/EOF recovery keeps the applied durable book in memory
+and resumes the journal at its exclusive applied cursor. Recorder failures and
+process restarts reconstruct from the first incomplete day's anchor with the
+persisted commit floor; resuming a stateless book at a position alone is invalid.
+No additional book-state snapshot format is introduced.
+
+`<shadow>/<product>/comparison.json` atomically persists the exclusive compared
+hour, both mismatch totals, start-day identity and report completion time. Both
+layers must finish before that transaction; metrics publish only after it is
+durable. Restarts restore totals without exposing a transient zero. Already
+compared hours are skipped even if a later run changes those historical files;
+use a fresh shadow root for an intentional full re-audit. Do not delete this
+checkpoint to silence alerts. If a previously observed comparison checkpoint
+disappears, the checker retains its totals and reports a comparison failure
+until the checkpoint is restored; it does not start a fresh audit.
+
+The hourly oracle remains a fresh deterministic batch from the day's anchor:
+24 hourly comparisons scan roughly **12.5 complete days of records per product
+per day** (1 + 2 + ... + 24 hours), plus any pre-midnight anchor warmup. With
+seven products this is roughly 87.5 product-day scans/day. Product comparisons
+are sequential on their own thread, but CPU and storage bandwidth still compete
+with other processes. Incremental oracle state is deferred: the current batch
+checkpoint stores output progress, not the reconstructed book/TWAP state, so
+keeping only its checkpoint would not remove the daily warmup cost.
+
 The startup line is `Roller started ... mode=shadow`. Deployment verification
 continues to require `Recording v2 started` and primary writes: the old marker
 is emitted by both old and new shadow-mode binaries. No deploy script change

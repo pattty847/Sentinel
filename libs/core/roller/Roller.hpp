@@ -21,6 +21,8 @@ struct RollOptions {
     std::function<void(const std::string&)> onInvalid;
     std::function<void(const JournalRecord&)> onApplied;
 };
+// Atomically replace and fsync a checkpoint in an already durable parent.
+void writeCheckpoint(const std::filesystem::path&, const nlohmann::json&);
 void validateOutputProduct(const std::filesystem::path& root, const std::string& product);
 nlohmann::json roll(const RollOptions& options);
 nlohmann::json diff(const std::filesystem::path& a, const std::filesystem::path& b,

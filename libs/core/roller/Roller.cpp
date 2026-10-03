@@ -13,7 +13,8 @@ namespace fs = std::filesystem;
 namespace {
 constexpr int64_t Minute = 60'000, Day = 86'400'000;
 constexpr int Version = 1;
-void checkpoint(const fs::path& path, const json& j) {
+}
+void writeCheckpoint(const fs::path& path, const json& j) {
     // Hmc2Store has already durably created this product's parent and files.
     QSaveFile out(QString::fromStdString(path.string()));
     out.setDirectWriteFallback(false);
@@ -29,6 +30,7 @@ void checkpoint(const fs::path& path, const json& j) {
     if (!persistence::syncFilePath(path, error2) || !persistence::syncDirectory(path.parent_path(), error2))
         throw std::runtime_error("checkpoint durable rename failed");
 }
+namespace {
 uint64_t configHash(const recording::RecorderConfig& c) {
     // Stable semantic hash, with the complete policy/version in the checkpoint.
     json j = {{"version",Version},{"scale",c.priceScale},{"floor",c.sizeScale.floor},
@@ -129,7 +131,7 @@ json roll(const RollOptions& o) {
                     int error = 0;
                     if (!persistence::syncDirectory(o.outputRoot, error))
                         throw std::runtime_error("shadow product directory sync failed");
-                    checkpoint(cpPath, cp);
+                    writeCheckpoint(cpPath, cp);
                 }
             }
             if (recorder) recorder->onSnapshotAt(o.product,exchange,local,std::move(levels));
@@ -153,7 +155,7 @@ json roll(const RollOptions& o) {
             cp["days"][key] = {{"pos",applied},{"committedThroughMs",through},{"configHash",hash},{"fromMs",from}};
             // Also expose the newest checkpoint in the plan's flat schema.
             cp["pos"] = applied; cp["committedThroughMs"] = through; cp["configHash"] = hash;
-            checkpoint(cpPath,cp);
+            writeCheckpoint(cpPath,cp);
             savedThrough = through; checkpointColumns = stats.columnsWritten;
             if (o.onCommitted) o.onCommitted(through);
         };

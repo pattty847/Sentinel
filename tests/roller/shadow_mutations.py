@@ -2,6 +2,7 @@
 """Run inside build-queue; mutations restore, touch, rebuild and re-pass (FM-132)."""
 import os
 import re
+import sys
 import subprocess
 from pathlib import Path
 
@@ -39,7 +40,32 @@ mutations = [
     ('primary root isolation', 'libs/core/roller/ShadowRoller.cpp',
      'overlaps(cfg.outputRoot,primary) || overlaps(cfg.outputRoot,cfg.journalRoot)',
      'false', 'ShadowTest.RefusesAliasedPrimaryRoot'),
+    ('stop wait synchronization', 'libs/core/roller/ShadowRoller.cpp',
+     'std::lock_guard lock(mutex); stopping = true;', 'stopping = true;',
+     'ShadowTest.StopWakesCheckerAcrossPredicateWaitTransition'),
+    ('comparison watermark restore', 'libs/core/roller/ShadowRoller.cpp',
+     'p->compared = saved.at("comparedThroughMs").get<int64_t>();', 'p->compared = first;',
+     'ShadowTest.ComparisonWatermarkAndMismatchTotalsSurviveRestart'),
+    ('malformed journal invalidation', 'libs/core/roller/ShadowRoller.cpp',
+     'o.onInvalid = [&](const std::string &reason) {',
+     'o.onInvalid = [&](const std::string &reason) { if (reason.starts_with("malformed")) throw std::logic_error(reason);',
+     'ShadowTest.MalformedRecordInvalidatesAndContinuesLikeBatch'),
+    ('persistent fault cooldown', 'libs/core/roller/ShadowRoller.cpp',
+     'consecutive >= cfg.failureThreshold ? cfg.failureCooldown : backoff', 'backoff',
+     'ShadowTest.PersistentWriteFaultEntersCooldownAndRecovers'),
+    ('transport retains applied book state', 'libs/core/roller/ShadowRoller.cpp',
+     'if (!applied) throw;', 'throw;',
+     'ShadowTest.JournalUnavailableResumesAppliedCursorWithoutReplay'),
+    ('server shadow startup independence', 'apps/sentinel-server/SentinelServerApp.cpp',
+     'm_serverModel->recordingDir().value_or(m_serverConfig.recording.dir), m_metrics);',
+     'm_serverModel->recordingDir().value_or(m_serverConfig.recording.dir), m_metrics); m_shadowRoller->stop();',
+     'ShadowTest.StalledAndFailingShadowDoesNotDelayServerPrimary'),
+    ('missing comparison checkpoint is not a fresh audit', 'libs/core/roller/ShadowRoller.cpp',
+     'if (p->comparisonCheckpointSeen)', 'if (false)',
+     'ShadowTest.ComparisonWatermarkAndMismatchTotalsSurviveRestart'),
 ]
+if "--round1" in sys.argv:
+    mutations = mutations[5:]
 for name, path, before, after, case in mutations:
     p = ROOT / path
     original = p.read_text()

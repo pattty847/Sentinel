@@ -16,6 +16,13 @@ struct ShadowConfig {
   std::vector<std::string> protectedRoots; // configured primary/fallback roots
   std::chrono::milliseconds retryMin{1000}, retryMax{60000};
   std::chrono::milliseconds compareInterval{3600000};
+  // Three identical faults without new durable progress enter a slow probe
+  // loop.
+  unsigned failureThreshold = 3;
+  std::chrono::milliseconds failureCooldown{600000};
+  // Synchronization seam: called under the wait mutex after reading the
+  // predicate.
+  std::function<void()> beforeCompareWaitForTest;
   size_t pendingBytes = 32 * 1024 * 1024;
   // Receive/apply instrumentation, shadow thread only; no primary hook.
   std::function<void(const JournalRecord &, bool applied)> observeForTest;

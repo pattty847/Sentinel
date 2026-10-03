@@ -396,3 +396,40 @@ groups:
                   operator: { type: and }
                   query: { params: [C] }
                   reducer: { type: last, params: [] }
+
+      - uid: sentinel-roller-shadow-fault-cooldown
+        title: Shadow roller persistent fault
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: page
+        annotations:
+          summary: "Shadow roller persistent fault"
+          description: >-
+            Three identical shadow failures without new durable progress have entered a ten-minute probe cadence. Repair the logged storage/journal/socket fault; primary recording and clients remain authoritative. A successful new checkpoint clears cooldown. Do not restart capture to repair a shadow consumer.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 7200, to: 0 }
+            datasourceUid: sentinel-vm
+            model:
+              refId: A
+              expr: max by (product) (sentinel_roller_shadow_fault_cooldown{job="sentinel-server"})
+              instant: true
+              range: false
+              intervalMs: 15000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              datasource: { type: __expr__, uid: __expr__ }
+              conditions:
+                - type: query
+                  evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [C] }
+                  reducer: { type: last, params: [] }

@@ -49,7 +49,8 @@ class LiveSource {
   std::deque<JournalRecord> pending;
   size_t pendingSize = 0;
   std::optional<JournalPos> ceiling, diskTarget, applied, received;
-  bool diskDone = false, initialDetached = true;
+  bool diskDone = false, initialDetached = true, recovering = false;
+  std::function<void(const std::string &)> retry;
   std::unique_ptr<JournalReader> catchup;
   std::map<std::string, json> metadata;
   std::map<std::string, size_t> runOrder;
@@ -149,8 +150,8 @@ class LiveSource {
           throw std::runtime_error("durability regression");
         ceiling = p;
       } else if (type == "retract" || type == "disconnect") {
-        // The queue contains all provisional state: destroying this
-        // source discards it. roll() unwinds without a new checkpoint.
+        // Recovery discards provisional state and retains the fully applied
+        // durable prefix in the existing JournalFeed/BookRecorder.
         throw std::runtime_error("fanout " + type + "; resume journal");
       } else
         throw std::runtime_error("unexpected fanout control: " + type);
@@ -199,8 +200,10 @@ class LiveSource {
 public:
   LiveSource(const ShadowConfig &c, std::string p,
              const std::atomic<bool> &stop,
-             const std::optional<JournalPos> &checkpoint)
-      : cfg(c), product(std::move(p)), stopping(stop) {
+             const std::optional<JournalPos> &checkpoint,
+             std::function<void(const std::string &)> onRetry)
+      : cfg(c), product(std::move(p)), stopping(stop),
+        retry(std::move(onRetry)) {
     handshake(checkpoint);
     // A day-anchor rebuild can exceed the bounded server backlog. Hold no
     // socket during that replay; reconnect at the fully applied durable tip.
@@ -211,11 +214,43 @@ public:
     received.reset();
   }
   bool next(JournalReader &disk, JournalRecord &out) {
-    try {
-      return nextImpl(disk, out);
-    } catch (const ShadowStopped &) {
-      return false;
+    while (!stopping) {
+      try {
+        if (recovering) {
+          handshake(applied);
+          if (!older(*applied, *ceiling))
+            throw std::runtime_error("durable tip precedes applied cursor");
+          catchup.reset();
+          diskDone = *ceiling == *applied;
+          if (!diskDone) {
+            catchup = std::make_unique<JournalReader>(cfg.journalRoot, product,
+                                                      applied);
+            JournalRecord cursor;
+            if (!catchup->next(cursor) || cursor.pos != *applied)
+              throw std::runtime_error("resume cursor unavailable in journal");
+          }
+          initialDetached = false;
+          recovering = false;
+        }
+        if (!nextImpl(disk, out))
+          return false;
+        // next() is called again only after JournalFeed applied this record.
+        // Retaining that state allows transport recovery without anchor replay.
+        applied = out.pos;
+        return true;
+      } catch (const ShadowStopped &) {
+        return false;
+      } catch (const std::exception &e) {
+        if (!applied)
+          throw;
+        socket.abort();
+        pending.clear();
+        pendingSize = 0;
+        recovering = true;
+        retry(e.what());
+      }
     }
+    return false;
   }
 
 private:
@@ -282,13 +317,19 @@ bool overlaps(const fs::path &a, const fs::path &b) {
 struct ShadowRoller::Impl {
   struct Product {
     std::string name;
-    metrics::Gauge *running, *lastComparison;
-    metrics::Counter *records, *failures, *compareFailures, *nearMismatch,
-        *deepMismatch;
+    metrics::Gauge *running, *lastComparison, *cooldown;
+    metrics::Counter *records, *failures, *compareFailures, *cooldowns;
+    struct ComparisonMetrics {
+      std::atomic<bool> ready{false};
+      std::atomic<uint64_t> near{0}, deep{0};
+    };
+    std::shared_ptr<ComparisonMetrics> comparison =
+        std::make_shared<ComparisonMetrics>();
     std::shared_ptr<std::atomic<int64_t>> last =
         std::make_shared<std::atomic<int64_t>>(0);
     std::atomic<int64_t> committed{0};
     int64_t compared = 0;
+    bool comparisonCheckpointSeen = false; // checker thread only
     std::thread worker;
   };
   ShadowConfig cfg;
@@ -319,17 +360,29 @@ struct ShadowRoller::Impl {
       p->failures = &registry.counter(
           "sentinel_roller_shadow_setup_failures_total",
           "Shadow setup/stream/write failures requiring retry.", labels);
+      p->cooldown = &registry.gauge(
+          "sentinel_roller_shadow_fault_cooldown",
+          "Product is probing a persistent fault at slow cadence.", labels);
+      p->cooldowns =
+          &registry.counter("sentinel_roller_shadow_fault_cooldowns_total",
+                            "Entries into persistent-fault cooldown.", labels);
       p->compareFailures = &registry.counter(
           "sentinel_roller_shadow_comparison_failures_total",
           "Hourly parity checks that could not complete.", labels);
-      p->nearMismatch =
-          &registry.counter("sentinel_roller_shadow_mismatch_total",
-                            "Strict same-journal mismatching buckets.",
-                            {{"product", p->name}, {"layer", "near"}});
-      p->deepMismatch =
-          &registry.counter("sentinel_roller_shadow_mismatch_total",
-                            "Strict same-journal mismatching buckets.",
-                            {{"product", p->name}, {"layer", "deep"}});
+      for (const auto *layer : {"near", "deep"}) {
+        registry.counterFn(
+            "sentinel_roller_shadow_mismatch_total",
+            "Strict same-journal mismatching buckets, persisted across "
+            "restarts.",
+            {{"product", p->name}, {"layer", layer}},
+            [state = p->comparison, near = std::string_view(layer) ==
+                                           "near"]() -> std::optional<double> {
+              // Do not expose zero during restore and manufacture an increase.
+              if (!state->ready.load())
+                return std::nullopt;
+              return near ? state->near.load() : state->deep.load();
+            });
+      }
       registry.gaugeFn(
           "sentinel_roller_shadow_lag_seconds",
           "Age of last applied durable record; -1 before first record.", labels,
@@ -351,7 +404,13 @@ struct ShadowRoller::Impl {
   }
   ~Impl() { stop(); }
   void stop() {
-    stopping = true;
+    {
+      // The predicate and wait transition share this mutex: never lose a stop
+      // between a false predicate and the condition variable releasing the
+      // lock.
+      std::lock_guard lock(mutex);
+      stopping = true;
+    }
     wake.notify_all();
     for (auto &p : products)
       if (p->worker.joinable())
@@ -359,9 +418,14 @@ struct ShadowRoller::Impl {
     if (checker.joinable())
       checker.join();
   }
-  void wait(std::chrono::milliseconds delay) {
+  void wait(std::chrono::milliseconds delay, bool comparison = false) {
     std::unique_lock lock(mutex);
-    wake.wait_for(lock, delay, [&] { return stopping.load(); });
+    wake.wait_for(lock, delay, [&] {
+      const bool stopped = stopping.load();
+      if (!stopped && comparison && cfg.beforeCompareWaitForTest)
+        cfg.beforeCompareWaitForTest();
+      return stopped;
+    });
   }
   void validate() {
     if (cfg.outputRoot.empty() || primary.empty() || cfg.journalRoot.empty() ||
@@ -374,11 +438,37 @@ struct ShadowRoller::Impl {
         throw std::runtime_error(
             "shadow output aliases a configured recorder root");
     if (cfg.retryMin.count() <= 0 || cfg.retryMax < cfg.retryMin ||
-        cfg.compareInterval.count() <= 0)
+        cfg.compareInterval.count() <= 0 || cfg.failureThreshold == 0 ||
+        cfg.failureCooldown < cfg.retryMax)
       throw std::runtime_error("invalid shadow retry/comparison interval");
   }
   void run(Product &p) noexcept {
     auto backoff = cfg.retryMin;
+    std::string lastFailure;
+    unsigned consecutive = 0;
+    int64_t furthestCommitted = 0;
+    const auto retry = [&](const std::string &reason) {
+      if (stopping)
+        return;
+      p.running->set(0);
+      p.failures->inc();
+      if (reason != lastFailure) {
+        lastFailure = reason;
+        consecutive = 0;
+        p.cooldown->set(0);
+      }
+      if (++consecutive == cfg.failureThreshold) {
+        p.cooldown->set(1);
+        p.cooldowns->inc();
+      }
+      const auto delay =
+          consecutive >= cfg.failureThreshold ? cfg.failureCooldown : backoff;
+      sLog_Warning("Shadow roller retry product="
+                   << p.name << " error=" << reason << " consecutive="
+                   << consecutive << " retryMs=" << delay.count());
+      wait(delay);
+      backoff = std::min(cfg.retryMax, backoff * 2);
+    };
     while (!stopping) {
       try {
         validate();
@@ -393,6 +483,9 @@ struct ShadowRoller::Impl {
           json cp;
           std::ifstream in(cpPath);
           in >> cp;
+          const auto committed = cp.value("committedThroughMs", int64_t{0});
+          p.committed = committed;
+          furthestCommitted = std::max(furthestCommitted, committed);
           if (cp.contains("pos"))
             checkpoint = cp.at("pos").get<JournalPos>();
           while (cp.at("days").contains(std::to_string(day)) &&
@@ -401,13 +494,15 @@ struct ShadowRoller::Impl {
                          .get<int64_t>() >= day + Day)
             day += Day;
         }
-        LiveSource source(cfg, p.name, stopping, checkpoint);
+        LiveSource source(cfg, p.name, stopping, checkpoint, retry);
         RollOptions o{cfg.journalRoot, cfg.outputRoot, p.name, day, day + Day};
         o.cancelled = [&] { return stopping.load(); };
         o.productWriterLease = true;
-        o.onInvalid = [](const std::string &reason) {
-          if (reason.starts_with("malformed"))
-            throw std::logic_error(reason);
+        o.onInvalid = [&](const std::string &reason) {
+          // Match batch: invalidate the book, then continue to the next
+          // snapshot.
+          sLog_Warning("Shadow journal invalidated product="
+                       << p.name << " reason=" << reason);
         };
         o.nextRecord = [&](JournalReader &reader, JournalRecord &input) {
           if (!source.next(reader, input))
@@ -423,7 +518,15 @@ struct ShadowRoller::Impl {
         };
         o.onCommitted = [&](int64_t through) {
           p.committed = through;
-          backoff = cfg.retryMin;
+          // Replaying the old checkpoint is not recovery from a persistent
+          // fault.
+          if (through > furthestCommitted) {
+            furthestCommitted = through;
+            backoff = cfg.retryMin;
+            consecutive = 0;
+            lastFailure.clear();
+            p.cooldown->set(0);
+          }
         };
         sLog_App("Roller started product=" << p.name
                                            << " mode=shadow day=" << day
@@ -431,36 +534,53 @@ struct ShadowRoller::Impl {
         roll(o);
         // Midnight rotates through the same anchor/replay path as batch.
       } catch (const std::exception &e) {
-        if (!stopping) {
-          p.failures->inc();
-          sLog_Warning("Shadow roller retry product="
-                       << p.name << " error=" << e.what()
-                       << " retryMs=" << backoff.count());
-        }
+        retry(e.what());
       } catch (...) {
-        if (!stopping) {
-          p.failures->inc();
-          sLog_Error("Shadow roller unknown failure product=" << p.name);
-        }
+        retry("unknown shadow failure");
       }
       p.running->set(0);
-      if (!stopping) {
-        wait(backoff);
-        backoff = std::min(cfg.retryMax, backoff * 2);
-      }
     }
   }
   void check() noexcept {
     while (!stopping) {
-      wait(cfg.compareInterval);
       for (auto &p : products) {
         if (stopping)
           break;
         try {
           validate();
           const auto first = parseTime(cfg.from);
-          if (!p->compared)
-            p->compared = first;
+          const auto progressPath =
+              fs::path(cfg.outputRoot) / p->name / "comparison.json";
+          p->compared = first;
+          uint64_t nearTotal = 0, deepTotal = 0;
+          if (fs::exists(progressPath)) {
+            json saved;
+            std::ifstream in(progressPath);
+            in >> saved;
+            if (saved.at("version") != 1 || saved.at("product") != p->name ||
+                saved.at("fromMs") != first)
+              throw std::runtime_error(
+                  "comparison checkpoint identity mismatch");
+            p->compared = saved.at("comparedThroughMs").get<int64_t>();
+            if (p->compared < first || p->compared % Hour)
+              throw std::runtime_error("invalid comparison watermark");
+            nearTotal = saved.at("nearMismatch").get<uint64_t>();
+            deepTotal = saved.at("deepMismatch").get<uint64_t>();
+            p->lastComparison->set(
+                saved.at("completedAtSeconds").get<double>());
+            p->comparisonCheckpointSeen = true;
+          } else {
+            if (p->comparisonCheckpointSeen)
+              throw std::runtime_error("comparison checkpoint disappeared");
+            // An unavailable volume is not evidence of a new output root.
+            // Wait for recorder provenance before exposing initial zero totals.
+            if (!fs::exists(progressPath.parent_path() / "roller.json"))
+              continue;
+          }
+          // Reload also covers an interrupted publication after atomic rename.
+          p->comparison->near = nearTotal;
+          p->comparison->deep = deepTotal;
+          p->comparison->ready = true;
           const auto end =
               std::min(p->committed.load(), nowMs() - 2000) / Hour * Hour;
           // One hour at a time, sequential across products; no work on
@@ -478,16 +598,33 @@ struct ShadowRoller::Impl {
             if (stopping)
               break;
             while (p->compared < batchEnd && !stopping) {
+              metrics::Counter nearDelta, deepDelta;
               for (const auto *layer : {"near", "deep"}) {
                 auto report = compareShadow(
                     cfg.outputRoot, o.outputRoot, primary, p->name, layer,
                     p->compared, p->compared + Hour,
-                    std::string_view(layer) == "near" ? *p->nearMismatch
-                                                      : *p->deepMismatch);
+                    std::string_view(layer) == "near" ? nearDelta : deepDelta);
                 sLog_Data("Shadow roller comparison " << report.dump());
               }
+              const auto completed = nowMs() / 1000.;
+              // Commit both layers and the exclusive hour watermark together,
+              // before publishing metrics. Failed comparisons never count
+              // twice.
+              writeCheckpoint(progressPath,
+                              {{"version", 1},
+                               {"product", p->name},
+                               {"fromMs", first},
+                               {"comparedThroughMs", p->compared + Hour},
+                               {"nearMismatch", nearTotal + nearDelta.value()},
+                               {"deepMismatch", deepTotal + deepDelta.value()},
+                               {"completedAtSeconds", completed}});
+              p->comparisonCheckpointSeen = true;
+              nearTotal += nearDelta.value();
+              deepTotal += deepDelta.value();
+              p->comparison->near = nearTotal;
+              p->comparison->deep = deepTotal;
               p->compared += Hour;
-              p->lastComparison->set(nowMs() / 1000.);
+              p->lastComparison->set(completed);
             }
           }
         } catch (const std::exception &e) {
@@ -499,6 +636,7 @@ struct ShadowRoller::Impl {
           sLog_Error("Shadow comparison unknown failure product=" << p->name);
         }
       }
+      wait(cfg.compareInterval, true);
     }
   }
 };

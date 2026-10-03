@@ -245,22 +245,26 @@ bool SentinelServerApp::initialize() {
                   << " guiConnectionCap=" << m_serverConfig.mdc.maxConnections);
         m_server->start();
 
-        // Optional independent consumer; no primary callbacks or recorder queue.
-        try {
-            m_serverConfig.rollerShadow.protectedRoots = {m_serverConfig.recording.dir};
-            if (!m_serverConfig.recording.fallbackDir.empty())
-                m_serverConfig.rollerShadow.protectedRoots.push_back(m_serverConfig.recording.fallbackDir);
-            m_shadowRoller = std::make_unique<sentinel::roller::ShadowRoller>(
-                m_serverConfig.rollerShadow, symbolList,
-                m_serverModel->recordingDir().value_or(m_serverConfig.recording.dir), m_metrics);
-        } catch (const std::exception& e) {
-            m_metrics.counter("sentinel_roller_shadow_start_failures_total",
-                              "Shadow supervisor construction failures.").inc();
-            sLog_Error("Shadow roller supervisor failed: " << e.what());
-        }
+        startShadow(symbolList);
         return true;
     } catch (const std::exception& e) {
         sLog_Error("Exception during initialization: " << e.what());
         return false;
+    }
+}
+
+void SentinelServerApp::startShadow(const std::vector<std::string>& symbols) {
+    // Optional independent consumer; no primary callbacks or recorder queue.
+    try {
+        m_serverConfig.rollerShadow.protectedRoots = {m_serverConfig.recording.dir};
+        if (!m_serverConfig.recording.fallbackDir.empty())
+            m_serverConfig.rollerShadow.protectedRoots.push_back(m_serverConfig.recording.fallbackDir);
+        m_shadowRoller = std::make_unique<sentinel::roller::ShadowRoller>(
+            m_serverConfig.rollerShadow, symbols,
+            m_serverModel->recordingDir().value_or(m_serverConfig.recording.dir), m_metrics);
+    } catch (const std::exception& e) {
+        m_metrics.counter("sentinel_roller_shadow_start_failures_total",
+                          "Shadow supervisor construction failures.").inc();
+        sLog_Error("Shadow roller supervisor failed: " << e.what());
     }
 }

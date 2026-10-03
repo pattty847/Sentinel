@@ -13,6 +13,7 @@
 
 class SentinelServerApp : public QObject {
     Q_OBJECT
+    friend struct ShadowServerTestAccess;
 public:
     explicit SentinelServerApp(const ServerConfig& config, QObject* parent = nullptr);
     ~SentinelServerApp();
@@ -22,6 +23,7 @@ public:
     bool recording() const { return m_serverModel && m_serverModel->recordingDir().has_value(); }
 
 private:
+    void startShadow(const std::vector<std::string>& symbols);
     ServerConfig m_serverConfig;
     // Declared first: outlives every component whose samplers it holds.
     sentinel::metrics::MetricsRegistry m_metrics;

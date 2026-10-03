@@ -31,6 +31,7 @@ class ServerDataModel : public QObject, public IHeatmapDataSource {
     Q_OBJECT
     friend struct TradeOverlayModelTest;
     friend struct ServerFeedAdmissionTest;
+    friend struct ShadowServerTestAccess;
 public:
     struct FootprintTradeSample {
         int64_t timestampMs = 0;

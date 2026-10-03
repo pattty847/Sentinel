@@ -1,10 +1,14 @@
+#include "../../apps/sentinel-server/SentinelServerApp.hpp"
 #include "ConfigLoader.hpp"
 #include "capture/CaptureFanout.hpp"
 #include "capture/CaptureSession.hpp"
 #include "roller/ShadowRoller.hpp"
 #include <QCoreApplication>
+#include <QDateTime>
+#include <QDir>
 #include <QTemporaryDir>
 #include <fstream>
+#include <future>
 #include <gtest/gtest.h>
 #include <iostream>
 #include <map>
@@ -16,6 +20,30 @@ using namespace sentinel::roller;
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
+// Assemble the production process ownership graph without sockets, credentials,
+// upstream feeds, metrics HTTP listener, or a bare server executable.
+struct ShadowServerTestAccess {
+  static void prepare(SentinelServerApp &app, const fs::path &temp) {
+    app.m_serverModel = std::make_unique<ServerDataModel>(app.m_serverConfig);
+    app.m_serverModel->registerMetrics(app.m_metrics);
+    app.m_authenticator =
+        std::make_unique<Authenticator>((temp / "no-credentials").string());
+    app.m_server = std::make_unique<SentinelStreamServer>(
+        *app.m_serverModel, *app.m_authenticator, app.m_serverConfig, 0);
+    app.m_serverModel->m_recorderTimer
+        .stop(); // explicit deterministic ticks below
+  }
+  static void start(SentinelServerApp &app) { app.startShadow({"BTC-USD"}); }
+  static ServerDataModel &model(SentinelServerApp &app) {
+    return *app.m_serverModel;
+  }
+  static void tick(SentinelServerApp &app, int64_t ms) {
+    app.m_serverModel->m_recorder->onTick(ms);
+  }
+  static std::string metrics(SentinelServerApp &app) {
+    return app.m_metrics.render();
+  }
+};
 namespace {
 const int64_t Epoch = parseTime("2026-10-01T00:00:00Z");
 const std::string Product = "BTC-USD";
@@ -381,31 +409,135 @@ TEST_F(ShadowTest, EofDiscardsProvisionalAndRecoversJournal) {
   writer->flush();
   ASSERT_TRUE(eventually([&] {
     return has("sentinel_roller_shadow_running{product=\"BTC-USD\"} 1") &&
-           count() > 64;
+           count() == 127;
   }));
   std::this_thread::sleep_for(100ms);
+  EXPECT_EQ(count(), 127);
   shadow.reset();
   writer->close();
   parity(120000);
 }
-TEST_F(ShadowTest, SocketAndWriteFailureDoNotBlockPrimaryRecorder) {
-  initial();
-  cfg.socketPath = (root / "absent.sock").string();
-  start();
+TEST_F(ShadowTest, StalledAndFailingShadowDoesNotDelayServerPrimary) {
+  initial(125);
+  // TickBinaryLogger has a relative default; contain it in this temporary cwd.
+  struct Cwd {
+    QString old = QDir::currentPath();
+    ~Cwd() { QDir::setCurrent(old); }
+  } cwd;
+  ASSERT_TRUE(QDir::setCurrent(temp.path()));
+  std::atomic<bool> entered{false}, stalled{false};
+  cfg.observeForTest = [&](const auto &, bool applied) {
+    if (applied && !entered.exchange(true)) {
+      stalled = true;
+      std::this_thread::sleep_for(1500ms);
+      stalled = false;
+    }
+  };
+  ServerConfig config;
+  config.defaultSymbols = {Product};
+  config.recording.enabled = true;
+  config.recording.dir = (root / "primary").string();
+  config.recording.fallbackDir.clear();
+  config.heatmap.persistenceEnabled = false;
+  config.rollerShadow = cfg;
+  SentinelServerApp app(config);
+  ShadowServerTestAccess::prepare(app, root);
+  auto &model = ShadowServerTestAccess::model(app);
+  ASSERT_TRUE(model.recordingAvailable());
+  std::atomic<int> deliveries{0};
+  auto subscription = model.recordingLive()->subscribe(
+      {Product, "near", 60000, {99990, 1, 20}, 1},
+      [&](const auto &, const auto &) {
+        ++deliveries;
+        return true;
+      });
+  ASSERT_TRUE(subscription);
+  const auto start = std::chrono::steady_clock::now();
+  ShadowServerTestAccess::start(app);
+  EXPECT_LT(std::chrono::steady_clock::now() - start, 1s);
+  ASSERT_TRUE(eventually([&] { return entered.load(); }));
+  ASSERT_TRUE(stalled.load());
+  const auto now = QDateTime::currentMSecsSinceEpoch();
+  model.onLiveOrderBookInitialized("BTC-USD", {{99999, 2}}, {{100001, 3}}, now);
+  const auto boundary = now / 60000 * 60000 + 120000;
+  const auto append = [&](int64_t through) {
+    const auto began = std::chrono::steady_clock::now();
+    ShadowServerTestAccess::tick(app, through + 3000);
+    EXPECT_TRUE(eventually([&] {
+      return model.recordingWatermarks(Product, "near").minuteThroughMs >=
+             through;
+    }));
+    EXPECT_LT(std::chrono::steady_clock::now() - began, 1s);
+    EXPECT_FALSE(recording::Hmc2Store::readRange(root / "primary", Product,
+                                                 "near", 60000, through - 60000,
+                                                 through)
+                     .empty());
+  };
+  append(boundary);
+  EXPECT_TRUE(stalled.load());
+  EXPECT_TRUE(eventually([&] { return deliveries.load() > 0; }));
+  // A checkpoint write fault in the same running shadow and ownership graph.
+  // The first snapshot already created provenance before the instrumentation.
+  const auto checkpoint = root / "shadow" / Product / "roller.json";
+  ASSERT_TRUE(fs::remove(checkpoint));
+  fs::create_directory(checkpoint); // QSaveFile cannot rename over a directory
+  {
+    std::ofstream blocker(checkpoint / "blocker");
+    blocker << "blocked";
+  }
   ASSERT_TRUE(eventually([&] {
-    return !has(
-        "sentinel_roller_shadow_setup_failures_total{product=\"BTC-USD\"} 0");
+    return ShadowServerTestAccess::metrics(app).find(
+               "sentinel_roller_shadow_setup_failures_total{product=\"BTC-"
+               "USD\"} 0\n") == std::string::npos;
   }));
-  auto c =
-      deriveGrid(meta()["product_metadata"], 100000).config(root / "primary");
-  recording::BookRecorder primary(c);
-  primary.onSnapshotAt(Product, Epoch, Epoch,
-                       {{true, 99999, 2}, {false, 100001, 3}});
-  primary.onTick(Epoch + 63000);
-  primary.drain();
-  EXPECT_EQ(primary.stats().columnsWritten, 2);
+  append(boundary + 60000);
+}
+TEST_F(ShadowTest, MalformedRecordInvalidatesAndContinuesLikeBatch) {
+  initial();
+  start();
+  ASSERT_TRUE(eventually([&] { return count() == 64; }));
+  writer->append(record(64000, "not JSON"));
+  writer->append(record(
+      65000,
+      R"({"channel":"l2_data","events":[{"type":"snapshot","product_id":"BTC-USD","updates":"bad"}]})"));
+  writer->append(record(66000, snapshot()));
+  for (int t = 67; t <= 185; ++t)
+    writer->append(record(t * 1000));
+  writer->flush();
+  ASSERT_TRUE(eventually([&] { return count() == 186; }));
+  EXPECT_TRUE(has(
+      "sentinel_roller_shadow_setup_failures_total{product=\"BTC-USD\"} 0"));
   shadow.reset();
-  cfg.socketPath = (root / "capture.sock").string();
+  writer->close();
+  parity(180000);
+  EXPECT_FALSE(fs::exists(root / "primary"));
+}
+TEST_F(ShadowTest, StopWakesCheckerAcrossPredicateWaitTransition) {
+  std::atomic<bool> entered{false}, stopping{false};
+  cfg.compareInterval = 2s; // a lost wake exceeds the one-second stop budget
+  cfg.beforeCompareWaitForTest = [&] {
+    entered = true;
+    while (!stopping.load())
+      std::this_thread::yield();
+    // stop is now contending for the wait mutex. The broken version sets the
+    // predicate and notifies here, before wait_for has actually gone to sleep.
+    std::this_thread::sleep_for(100ms);
+  };
+  shadow = std::make_unique<ShadowRoller>(cfg, std::vector<std::string>{},
+                                          root / "primary", *metrics);
+  ASSERT_TRUE(eventually([&] { return entered.load(); }));
+  const auto began = std::chrono::steady_clock::now();
+  auto done = std::async(std::launch::async, [&] {
+    stopping = true;
+    shadow->stop();
+  });
+  EXPECT_EQ(done.wait_for(1s), std::future_status::ready);
+  done.get();
+  EXPECT_LT(std::chrono::steady_clock::now() - began, 1s);
+}
+TEST_F(ShadowTest, PersistentWriteFaultEntersCooldownAndRecovers) {
+  initial(125);
+  cfg.failureCooldown = 900ms;
   fs::create_directories(root / "shadow");
   {
     std::ofstream out(root / "shadow" / Product);
@@ -413,32 +545,112 @@ TEST_F(ShadowTest, SocketAndWriteFailureDoNotBlockPrimaryRecorder) {
   }
   start();
   ASSERT_TRUE(eventually([&] {
-    return !has(
-        "sentinel_roller_shadow_setup_failures_total{product=\"BTC-USD\"} 0");
+    return has("sentinel_roller_shadow_fault_cooldown{product=\"BTC-USD\"} 1");
   }));
-  primary.onTick(Epoch + 125000);
-  primary.drain();
-  EXPECT_EQ(primary.stats().columnsWritten, 4);
-  EXPECT_EQ(primary.stats().diskErrors, 0);
-  shadow.reset();
+  EXPECT_TRUE(has(
+      "sentinel_roller_shadow_fault_cooldowns_total{product=\"BTC-USD\"} 1"));
+  EXPECT_TRUE(has(
+      "sentinel_roller_shadow_setup_failures_total{product=\"BTC-USD\"} 3"));
+  std::this_thread::sleep_for(250ms);
+  EXPECT_TRUE(has(
+      "sentinel_roller_shadow_setup_failures_total{product=\"BTC-USD\"} 3"));
+  EXPECT_EQ(count(), 0);
   fs::remove(root / "shadow" / Product);
-  start();
+  ASSERT_TRUE(eventually([&] { return count() == 126; }));
   ASSERT_TRUE(eventually([&] {
-    return has("sentinel_roller_shadow_running{product=\"BTC-USD\"} 1");
+    return has("sentinel_roller_shadow_fault_cooldown{product=\"BTC-USD\"} 0");
   }));
 }
-TEST_F(ShadowTest, MalformedRecordRetriesAndNeverAffectsPrimaryRoot) {
+TEST_F(ShadowTest, JournalUnavailableResumesAppliedCursorWithoutReplay) {
   initial();
+  cfg.failureCooldown = 900ms;
   start();
   ASSERT_TRUE(eventually([&] { return count() == 64; }));
-  writer->append(record(64000, "not JSON"));
+  // Keep capture's durable tip ahead while its files are unavailable.
+  publish = false;
+  for (int t = 64; t <= 125; ++t)
+    writer->append(record(t * 1000));
   writer->flush();
+  fs::rename(root / "raw", root / "unmounted");
+  fanout->publish(0, {capture::JournalEventKind::Durable,
+                      durable.runId,
+                      durable.block,
+                      durable.record,
+                      true,
+                      {}});
+  fanout->publish(0, {capture::JournalEventKind::Retract,
+                      durable.runId,
+                      durable.block,
+                      durable.record,
+                      true,
+                      {}});
   ASSERT_TRUE(eventually([&] {
-    return !has(
-        "sentinel_roller_shadow_setup_failures_total{product=\"BTC-USD\"} 0");
+    return has("sentinel_roller_shadow_fault_cooldown{product=\"BTC-USD\"} 1");
+  }));
+  EXPECT_EQ(count(), 64); // no day-anchor reapplication on each transport retry
+  std::this_thread::sleep_for(250ms);
+  EXPECT_EQ(count(), 64);
+  fs::rename(root / "unmounted", root / "raw");
+  publish = true;
+  ASSERT_TRUE(eventually([&] { return count() == 126; }));
+  EXPECT_TRUE(eventually([&] {
+    return has("sentinel_roller_shadow_fault_cooldown{product=\"BTC-USD\"} 0");
   }));
   shadow.reset();
-  EXPECT_FALSE(fs::exists(root / "primary"));
+  writer->close();
+  parity(120000);
+}
+TEST_F(ShadowTest, ComparisonWatermarkAndMismatchTotalsSurviveRestart) {
+  initial(3661);
+  start();
+  ASSERT_TRUE(eventually([&] { return count() == 3662; }));
+  shadow.reset();
+  auto rows = recording::Hmc2Store::readRange(root / "shadow", Product, "near",
+                                              60000, Epoch, Epoch + 3600000);
+  ASSERT_FALSE(rows.empty());
+  ASSERT_FALSE(rows.front().entries.empty());
+  ++rows.front().entries.front().twapCode;
+  {
+    recording::Hmc2Store divergent(root / "shadow");
+    divergent.append(rows.front());
+  }
+  cfg.compareInterval = 50ms;
+  start();
+  ASSERT_TRUE(eventually([&] {
+    return has("sentinel_roller_shadow_mismatch_total{product=\"BTC-USD\","
+               "layer=\"near\"} 1");
+  }));
+  shadow.reset();
+  const auto checkpointPath = root / "shadow" / Product / "comparison.json";
+  const auto saved = load(checkpointPath);
+  EXPECT_EQ(saved.at("comparedThroughMs"), Epoch + 3600000);
+  auto waits = std::make_shared<std::atomic<unsigned>>(0);
+  cfg.beforeCompareWaitForTest = [waits] { ++*waits; };
+  const auto previous = count();
+  start();
+  ASSERT_TRUE(eventually([&] { return count() == previous + 3662; }));
+  const auto pass = waits->load();
+  // Observe completed checker passes after warmup, not a short sleep that
+  // could cancel a wrongly restarted oracle before it publishes its result.
+  ASSERT_TRUE(eventually([&] { return waits->load() >= pass + 4; }));
+  const auto hidden = checkpointPath.string() + ".unavailable";
+  fs::rename(checkpointPath, hidden);
+  const auto beforeMissing = waits->load();
+  ASSERT_TRUE(eventually([&] { return waits->load() >= beforeMissing + 4; }));
+  EXPECT_FALSE(
+      fs::exists(checkpointPath)); // no fresh audit/rewrite of old hours
+  EXPECT_TRUE(has("sentinel_roller_shadow_mismatch_total{product=\"BTC-USD\","
+                  "layer=\"near\"} 1"));
+  EXPECT_FALSE(has("sentinel_roller_shadow_comparison_failures_total{product="
+                   "\"BTC-USD\"} 0"));
+  fs::rename(hidden, checkpointPath);
+  const auto afterRestore = waits->load();
+  ASSERT_TRUE(eventually([&] { return waits->load() >= afterRestore + 4; }));
+  shadow.reset();
+  EXPECT_EQ(load(checkpointPath),
+            saved); // not even the completion time rewrites
+  EXPECT_TRUE(has("sentinel_roller_shadow_mismatch_total{product=\"BTC-USD\","
+                  "layer=\"near\"} 1"));
 }
 TEST_F(ShadowTest, RefusesAliasedPrimaryRoot) {
   initial();
