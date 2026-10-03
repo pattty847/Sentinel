@@ -18,18 +18,28 @@ public:
     QVector<Action> request(const QString& consumer, const QString& symbol) {
         const QString normalized = symbol.trimmed().toUpper();
         if (consumer.isEmpty() || normalized.isEmpty()) return {};
+        QVector<Action> actions;
+        if (m_pending.value(consumer) != normalized) actions = abandon(consumer);
         if (m_held.value(consumer) == normalized) {
             m_pending.remove(consumer);
-            if (m_confirmed.contains(normalized)) return {{Action::Activate, consumer, normalized}};
-            if (m_requested.contains(normalized)) return {};
+            if (m_confirmed.contains(normalized)) {
+                actions.push_back({Action::Activate, consumer, normalized});
+                return actions;
+            }
+            if (m_requested.contains(normalized)) return actions;
             m_requested.insert(normalized);
-            return {{Action::Subscribe, {}, normalized}};
+            actions.push_back({Action::Subscribe, {}, normalized});
+            return actions;
         }
         m_pending.insert(consumer, normalized);
-        if (m_confirmed.contains(normalized)) return activate(normalized);
-        if (m_requested.contains(normalized)) return {};
+        if (m_confirmed.contains(normalized)) {
+            actions.append(activate(normalized));
+            return actions;
+        }
+        if (m_requested.contains(normalized)) return actions;
         m_requested.insert(normalized);
-        return {{Action::Subscribe, {}, normalized}};
+        actions.push_back({Action::Subscribe, {}, normalized});
+        return actions;
     }
 
     QVector<Action> acknowledged(const QString& symbol) {
@@ -40,7 +50,10 @@ public:
     }
 
     QVector<Action> refused(const QString& symbol) {
-        const QString normalized = symbol.trimmed().toUpper();
+        QString normalized = symbol.trimmed().toUpper();
+        if (normalized.isEmpty() && m_pending.size() == 1)
+            normalized = m_pending.cbegin().value();
+        if (normalized.isEmpty()) return {};
         m_requested.remove(normalized);
         QVector<Action> actions;
         for (auto it = m_pending.begin(); it != m_pending.end();) {
@@ -50,6 +63,17 @@ public:
             } else ++it;
         }
         return actions;
+    }
+
+    // Cancel an unacknowledged switch. An unsubscribe follows its subscribe on
+    // the stream, even if the acknowledgement was lost.
+    QVector<Action> abandon(const QString& consumer) {
+        const QString symbol = m_pending.take(consumer);
+        if (symbol.isEmpty() || m_pending.values().contains(symbol)
+            || m_held.values().contains(symbol)) return {};
+        m_requested.remove(symbol);
+        m_confirmed.remove(symbol);
+        return {{Action::Unsubscribe, {}, symbol}};
     }
 
     // The server discarded this connection's subscriptions. Reacquire only
@@ -68,21 +92,9 @@ public:
         return actions;
     }
 
-    QVector<Action> release(const QString& consumer) {
-        m_pending.remove(consumer);
-        const QString old = m_held.take(consumer);
-        if (old.isEmpty() || m_held.values().contains(old)) return {};
-        m_confirmed.remove(old);
-        m_requested.remove(old);
-        return {{Action::Unsubscribe, {}, old}};
-    }
-
     QString held(const QString& consumer) const { return m_held.value(consumer); }
-    QSet<QString> heldSymbols() const {
-        QSet<QString> result;
-        for (const auto& symbol : m_held) result.insert(symbol);
-        return result;
-    }
+    QString pending(const QString& consumer) const { return m_pending.value(consumer); }
+    bool requested(const QString& symbol) const { return m_requested.contains(symbol.trimmed().toUpper()); }
 
 private:
     QVector<Action> activate(const QString& symbol) {
@@ -113,6 +125,7 @@ private:
     }
 
     QHash<QString, QString> m_held;
+    // A second chart joins by calling request() with its own consumer ID.
     QHash<QString, QString> m_pending;
     QSet<QString> m_requested;
     QSet<QString> m_confirmed;

@@ -38,3 +38,9 @@ target_include_directories(test_SymbolSubscriptionManager PRIVATE ${CMAKE_SOURCE
 target_link_libraries(test_SymbolSubscriptionManager PRIVATE GTest::gtest_main Qt6::Core)
 add_test(NAME SymbolSubscriptionManagerTests COMMAND test_SymbolSubscriptionManager)
 set_tests_properties(SymbolSubscriptionManagerTests PROPERTIES LABELS "agentapi")
+
+add_executable(test_MainWindowSymbolLifecycle test_MainWindowSymbolLifecycle.cpp)
+target_include_directories(test_MainWindowSymbolLifecycle PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_MainWindowSymbolLifecycle PRIVATE sentinel_gui_lib GTest::gtest Qt6::Widgets Qt6::Test)
+add_test(NAME MainWindowSymbolLifecycleTests COMMAND test_MainWindowSymbolLifecycle)
+set_tests_properties(MainWindowSymbolLifecycleTests PROPERTIES LABELS "agentapi" ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

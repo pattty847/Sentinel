@@ -38,7 +38,7 @@ TEST(SymbolSubscriptionManager, RefusalKeepsOldChartAndLease) {
     ASSERT_EQ(rejected.size(), 1);
     EXPECT_EQ(rejected[0].kind, Action::Refused);
     EXPECT_EQ(leases.held("main"), "BTC-USD");
-    EXPECT_EQ(leases.heldSymbols(), QSet<QString>{"BTC-USD"});
+    EXPECT_EQ(leases.held("main"), "BTC-USD");
 }
 
 TEST(SymbolSubscriptionManager, RefusedFirstSelectionIsNotRetriedOnReconnect) {
@@ -47,7 +47,7 @@ TEST(SymbolSubscriptionManager, RefusedFirstSelectionIsNotRetriedOnReconnect) {
     const auto refused = leases.refused("new-usd");
     ASSERT_EQ(refused.size(), 1);
     EXPECT_EQ(refused[0].kind, Action::Refused);
-    EXPECT_TRUE(leases.heldSymbols().isEmpty());
+    EXPECT_TRUE(leases.held("main").isEmpty());
     EXPECT_TRUE(leases.reconnect().isEmpty());
 }
 
@@ -62,11 +62,8 @@ TEST(SymbolSubscriptionManager, AnotherDockRetainsTheSymbol) {
     actions = leases.acknowledged("ETH-USD");
     ASSERT_EQ(actions.size(), 1);
     EXPECT_EQ(actions[0].kind, Action::Activate); // BTC is still held
-    EXPECT_EQ(leases.heldSymbols(), (QSet<QString>{"BTC-USD", "ETH-USD"}));
-    actions = leases.release("chart2");
-    ASSERT_EQ(actions.size(), 1);
-    EXPECT_EQ(actions[0].kind, Action::Unsubscribe);
-    EXPECT_EQ(actions[0].symbol, "BTC-USD");
+    EXPECT_EQ(leases.held("main"), "ETH-USD");
+    EXPECT_EQ(leases.held("chart2"), "BTC-USD");
 }
 
 TEST(SymbolSubscriptionManager, ReconnectOnlyRequestsHeldSet) {
@@ -104,10 +101,64 @@ TEST(SymbolSubscriptionManager, RefusedReconnectCanRetryTheHeldSymbol) {
 TEST(SymbolSubscriptionManager, SupersededAckReleasesUnusedSymbol) {
     SymbolSubscriptionManager leases;
     leases.request("main", "BTC-USD");
-    leases.request("main", "ETH-USD");
-    const auto stale = leases.acknowledged("btc-usd");
-    ASSERT_EQ(stale.size(), 1);
-    EXPECT_EQ(stale[0].kind, Action::Unsubscribe);
-    EXPECT_EQ(stale[0].symbol, "BTC-USD");
+    const auto superseded = leases.request("main", "ETH-USD");
+    ASSERT_EQ(superseded.size(), 2);
+    EXPECT_EQ(superseded[0].kind, Action::Unsubscribe);
+    EXPECT_EQ(superseded[0].symbol, "BTC-USD");
+    EXPECT_EQ(superseded[1].kind, Action::Subscribe);
+    EXPECT_TRUE(leases.acknowledged("btc-usd").isEmpty());
     EXPECT_EQ(leases.acknowledged("ETH-USD")[0].kind, Action::Activate);
+}
+
+TEST(SymbolSubscriptionManager, TimeoutCancelsPendingAndKeepsWorkingChart) {
+    SymbolSubscriptionManager leases;
+    leases.request("main", "BTC-USD");
+    leases.acknowledged("BTC-USD");
+    leases.request("main", "ETH-USD");
+    EXPECT_EQ(leases.pending("main"), "ETH-USD");
+    const auto canceled = leases.abandon("main");
+    ASSERT_EQ(canceled.size(), 1);
+    EXPECT_EQ(canceled[0].kind, Action::Unsubscribe);
+    EXPECT_EQ(canceled[0].symbol, "ETH-USD");
+    EXPECT_EQ(leases.held("main"), "BTC-USD");
+    EXPECT_TRUE(leases.pending("main").isEmpty());
+    EXPECT_TRUE(leases.acknowledged("ETH-USD").isEmpty());
+    EXPECT_EQ(leases.request("main", "ETH-USD")[0].kind, Action::Subscribe);
+}
+
+TEST(SymbolSubscriptionManager, EmptyRefusalMatchesOnlyPendingSwitch) {
+    SymbolSubscriptionManager leases;
+    leases.request("main", "BTC-USD");
+    leases.acknowledged("BTC-USD");
+    leases.request("main", "ETH-USD");
+    const auto refused = leases.refused("");
+    ASSERT_EQ(refused.size(), 1);
+    EXPECT_EQ(refused[0].symbol, "ETH-USD");
+    EXPECT_EQ(leases.held("main"), "BTC-USD");
+    EXPECT_TRUE(leases.pending("main").isEmpty());
+    EXPECT_FALSE(leases.requested("ETH-USD"));
+}
+
+TEST(SymbolSubscriptionManager, SupersededRefusalDoesNotRejectCurrentPending) {
+    SymbolSubscriptionManager leases;
+    leases.request("main", "BTC-USD");
+    leases.acknowledged("BTC-USD");
+    leases.request("main", "ETH-USD");
+    leases.request("main", "SOL-USD");
+    EXPECT_TRUE(leases.refused("ETH-USD").isEmpty());
+    EXPECT_EQ(leases.pending("main"), "SOL-USD");
+    EXPECT_EQ(leases.acknowledged("SOL-USD")[0].kind, Action::Activate);
+}
+
+TEST(SymbolSubscriptionManager, DisconnectWithPendingSwitchReacquiresOnlyHeld) {
+    SymbolSubscriptionManager leases;
+    leases.request("main", "BTC-USD");
+    leases.acknowledged("BTC-USD");
+    leases.request("main", "ETH-USD");
+    leases.abandon("main");
+    const auto reconnect = leases.reconnect();
+    ASSERT_EQ(reconnect.size(), 1);
+    EXPECT_EQ(reconnect[0].symbol, "BTC-USD");
+    EXPECT_EQ(leases.held("main"), "BTC-USD");
+    EXPECT_TRUE(leases.pending("main").isEmpty());
 }

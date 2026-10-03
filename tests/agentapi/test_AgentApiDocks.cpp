@@ -14,7 +14,7 @@
 #include <gtest/gtest.h>
 
 namespace {
-QByteArray request(quint16 port, const QByteArray& method, const QByteArray& body = {}) {
+QByteArray requestPath(quint16 port, const QByteArray& method, const QByteArray& path, const QByteArray& body = {}) {
     QTcpSocket socket;
     QEventLoop loop;
     QTimer timer;
@@ -22,7 +22,7 @@ QByteArray request(quint16 port, const QByteArray& method, const QByteArray& bod
     QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
     QObject::connect(&socket, &QTcpSocket::disconnected, &loop, &QEventLoop::quit);
     QObject::connect(&socket, &QTcpSocket::connected, &socket, [&] {
-        QByteArray head = method + " /api/v1/docks HTTP/1.1\r\nHost: localhost\r\n";
+        QByteArray head = method + " " + path + " HTTP/1.1\r\nHost: localhost\r\n";
         if (method == "POST")
             head += "Content-Type: application/json\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\n";
         socket.write(head + "\r\n" + body);
@@ -33,8 +33,16 @@ QByteArray request(quint16 port, const QByteArray& method, const QByteArray& bod
     return socket.readAll();
 }
 
+QByteArray request(quint16 port, const QByteArray& method, const QByteArray& body = {}) {
+    return requestPath(port, method, "/api/v1/docks", body);
+}
+
 QJsonObject responseData(const QByteArray& reply) {
     return QJsonDocument::fromJson(reply.mid(reply.indexOf("\r\n\r\n") + 4)).object().value("data").toObject();
+}
+
+QJsonObject responseError(const QByteArray& reply) {
+    return QJsonDocument::fromJson(reply.mid(reply.indexOf("\r\n\r\n") + 4)).object().value("error").toObject();
 }
 
 struct Window {
@@ -127,6 +135,79 @@ TEST(AgentApiDocks, HostedDockProfileRestoresWithoutSharingOtherSettings) {
         EXPECT_FALSE(settings.contains("heatmap/changed"));
     }
     AgentHostMode::resetForTests();
+}
+
+TEST(AgentApiSymbol, OperationWaitsForActivationAndReportsRefusalOrTimeout) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    QWidget window;
+    window.resize(100, 100);
+    window.show();
+    AgentApi::StateSnapshot state;
+    state.meta.symbol = "BTC-USD";
+    quint64 renderedRevision = 0;
+    quint64 publishedRevision = 0;
+    GuiApiServer server(&window, nullptr, nullptr, [&] { return state; }, [] { return AgentApi::ViewportSnapshot{}; },
+        [](const auto&) { return std::optional<AgentApi::CandleSnapshot>{}; },
+        [](int) { return AgentApi::BookSnapshot{}; }, [](qint64, int) { return AgentApi::TradesSnapshot{}; },
+        [](const auto&, auto complete) { complete(heatmap_window::WallsSnapshot{}); },
+        [](const QString& kind, const AgentApi::ControlBody& body) {
+            EXPECT_EQ(kind, "symbol");
+            AgentApi::ControlApply result;
+            result.pendingSymbol = body.symbol;
+            result.data["symbol"] = body.symbol;
+            return result;
+        }, [&] { return std::pair<quint64, quint64>{renderedRevision, 77}; },
+        [&](quint64 revision) { publishedRevision = revision; });
+    ASSERT_TRUE(server.start(0, dir.path()));
+
+    const auto post = [&](const char* symbol) {
+        return requestPath(server.port(), "POST", "/api/v1/symbol",
+                           QByteArray("{\"symbol\":\"") + symbol + "\"}");
+    };
+    const auto get = [&](const QString& id, int waitMs = 0) {
+        return requestPath(server.port(), "GET", "/api/v1/operations/" + id.toUtf8()
+                           + "?waitMs=" + QByteArray::number(waitMs));
+    };
+
+    const auto first = post("ETH-USD");
+    ASSERT_TRUE(first.startsWith("HTTP/1.1 200")) << first.toStdString();
+    const QString firstId = responseData(first).value("operationId").toString();
+    EXPECT_EQ(responseData(first).value("status"), "pending");
+    EXPECT_EQ(publishedRevision, 0u);
+    renderedRevision = 100; // even a later frame cannot render an unactivated switch
+    EXPECT_EQ(responseData(get(firstId)).value("status"), "pending");
+    EXPECT_TRUE(requestPath(server.port(), "GET", "/api/v1/screenshot?name=before&target=main&afterOperation="
+        + firstId.toUtf8() + "&waitMs=0").startsWith("HTTP/1.1 408"));
+    renderedRevision = 0;
+    server.completeSymbolSwitch("eth-usd");
+    EXPECT_EQ(publishedRevision, 2u);
+    EXPECT_EQ(responseData(get(firstId)).value("status"), "applied");
+    renderedRevision = publishedRevision;
+    EXPECT_EQ(responseData(get(firstId)).value("status"), "rendered");
+
+    const auto refused = post("SOL-USD");
+    const QString refusedId = responseData(refused).value("operationId").toString();
+    server.failSymbolSwitch("SOL-USD", "Cap of 8 reached");
+    const auto refusedReply = get(refusedId, 5000);
+    EXPECT_TRUE(refusedReply.startsWith("HTTP/1.1 409"));
+    EXPECT_EQ(responseError(refusedReply).value("code"), "connection_cap");
+    EXPECT_EQ(responseError(refusedReply).value("message"), "Cap of 8 reached");
+
+    const auto timedOut = post("ADA-USD");
+    const QString timeoutId = responseData(timedOut).value("operationId").toString();
+    server.failSymbolSwitch("ADA-USD", "Switch to ADA-USD timed out");
+    EXPECT_EQ(responseError(get(timeoutId)).value("message"), "Switch to ADA-USD timed out");
+
+    const auto waiting = post("XRP-USD");
+    const QString waitingId = responseData(waiting).value("operationId").toString();
+    QTimer::singleShot(50, &server, [&] {
+        server.completeSymbolSwitch("XRP-USD");
+        renderedRevision = publishedRevision;
+    });
+    const auto waited = get(waitingId, 1000);
+    EXPECT_TRUE(waited.startsWith("HTTP/1.1 200")) << waited.toStdString();
+    EXPECT_EQ(responseData(waited).value("status"), "rendered");
 }
 
 TEST(AgentApiDocks, OwnerManualToggleAfterApiChangeSurvivesClose) {

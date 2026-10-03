@@ -135,6 +135,16 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
     m_dataSource = std::move(remote);
     ServiceLocator::registerDataSource(m_dataSource.get());
     setupUI();
+    m_symbolSwitchTimer = new QTimer(this);
+    m_symbolSwitchTimer->setSingleShot(true);
+    m_symbolSwitchTimer->setTimerType(Qt::PreciseTimer);
+    connect(m_symbolSwitchTimer, &QTimer::timeout, this, [this] {
+        const QString symbol = m_pendingSymbolSwitch;
+        if (!symbol.isEmpty()) abandonPendingSymbolSwitch(QStringLiteral("Switch to %1 timed out").arg(symbol));
+    });
+    m_heldRetryTimer = new QTimer(this);
+    m_heldRetryTimer->setSingleShot(true);
+    connect(m_heldRetryTimer, &QTimer::timeout, this, &MainWindowGPU::retryHeldSymbol);
     if (m_qquickView) {
         m_qmlController = std::make_unique<QmlSceneController>(m_qquickView);
     }
@@ -159,7 +169,7 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
                 }
             }
         }
-        if (!config.defaultSymbols.empty() && !m_userSubscribed && !m_symbolSelectionRequested
+        if (!config.defaultSymbols.empty() && !m_symbolSelectionRequested
             && m_refusedSymbol.isEmpty()
             && AgentHostMode::symbolAllowed(QString::fromStdString(config.defaultSymbols.front()).trimmed().toUpper())) {
             const QString defaultSymbol = QString::fromStdString(config.defaultSymbols.front()).trimmed().toUpper();
@@ -172,6 +182,8 @@ MainWindowGPU::MainWindowGPU(QWidget* parent) : QMainWindow(parent) {
                 if (m_connected) {
                     m_initialSubscriptionAttempted = true;
                     applySubscriptionActions(m_symbolSubscriptions.request("main", defaultSymbol));
+                    if (m_symbolSubscriptions.pending("main") == defaultSymbol)
+                        startPendingSymbolSwitch(defaultSymbol);
                 }
                 else m_currentSymbol = defaultSymbol;
             }
@@ -814,11 +826,46 @@ bool MainWindowGPU::subscribeSymbol(const QString& symbol) {
     m_symbolSelectionRequested = true;
     m_initialSubscriptionAttempted = true;
     m_refusedSymbol.clear();
+    if (m_guiApiServer) m_guiApiServer->supersedePendingSymbolSwitch();
+    m_heldRetryTimer->stop();
+    m_heldRetryAttempt = 0;
     statusBar()->clearMessage();
     if (m_connected) applySubscriptionActions(m_symbolSubscriptions.request("main", symbol));
     else m_offlineRequestedSymbol = symbol;
+    if (m_symbolSubscriptions.pending("main") == symbol || !m_connected)
+        startPendingSymbolSwitch(symbol);
+    else {
+        m_pendingSymbolSwitch.clear();
+        m_symbolSwitchTimer->stop();
+    }
     if (m_symbolInput) m_symbolInput->setText(symbol);
     return true;
+}
+
+void MainWindowGPU::startPendingSymbolSwitch(const QString& symbol) {
+    m_pendingSymbolSwitch = symbol;
+    m_symbolSwitchTimer->start(4800);
+    statusBar()->showMessage(QStringLiteral("Switching to %1...").arg(symbol));
+}
+
+void MainWindowGPU::abandonPendingSymbolSwitch(const QString& message) {
+    const QString symbol = m_pendingSymbolSwitch;
+    if (symbol.isEmpty()) return;
+    m_pendingSymbolSwitch.clear();
+    m_symbolSwitchTimer->stop();
+    if (m_connected) applySubscriptionActions(m_symbolSubscriptions.abandon("main"));
+    else m_symbolSubscriptions.abandon("main");
+    if (m_offlineRequestedSymbol == symbol) m_offlineRequestedSymbol.clear();
+    if (m_symbolInput) m_symbolInput->setText(m_currentSymbol);
+    if (m_guiApiServer) m_guiApiServer->failSymbolSwitch(symbol, message);
+    statusBar()->showMessage(message);
+}
+
+void MainWindowGPU::retryHeldSymbol() {
+    const QString symbol = m_symbolSubscriptions.held("main");
+    if (!m_connected || symbol.isEmpty() || !m_pendingSymbolSwitch.isEmpty()) return;
+    statusBar()->showMessage(QStringLiteral("Reconnecting %1...").arg(symbol));
+    applySubscriptionActions(m_symbolSubscriptions.request("main", symbol));
 }
 
 void MainWindowGPU::applySubscriptionActions(const QVector<SymbolSubscriptionManager::Action>& actions) {
@@ -832,6 +879,13 @@ void MainWindowGPU::applySubscriptionActions(const QVector<SymbolSubscriptionMan
             break;
         case SymbolSubscriptionManager::Action::Activate:
             if (action.consumer != QLatin1String("main")) break;
+            if (m_pendingSymbolSwitch == action.symbol) {
+                m_pendingSymbolSwitch.clear();
+                m_symbolSwitchTimer->stop();
+                statusBar()->clearMessage();
+            }
+            m_heldRetryTimer->stop();
+            m_heldRetryAttempt = 0;
             m_userSubscribed = true;
             m_refusedSymbol.clear();
             if (m_qmlController) m_qmlController->updateSymbolInContext(action.symbol);
@@ -841,10 +895,13 @@ void MainWindowGPU::applySubscriptionActions(const QVector<SymbolSubscriptionMan
                 requestConfiguredHistoryForSymbol(action.symbol);
                 requestTpoHistoryForSymbol(action.symbol);
             }
+            if (m_guiApiServer) m_guiApiServer->completeSymbolSwitch(action.symbol);
             break;
         case SymbolSubscriptionManager::Action::Refused:
             if (action.consumer == QLatin1String("main")) {
                 m_refusedSymbol = action.symbol;
+                m_pendingSymbolSwitch.clear();
+                m_symbolSwitchTimer->stop();
                 if (m_symbolInput) m_symbolInput->setText(m_currentSymbol);
             }
             break;
@@ -1337,20 +1394,43 @@ void MainWindowGPU::connectMarketDataSignals() {
                 });
                 applySubscriptionActions(actions);
                 // An existing lease has no Activate action on reconnect.
-                if (!activatedMain && symbol.trimmed().toUpper() == m_currentSymbol.trimmed().toUpper()
+                if (!activatedMain && !m_userSubscribed
+                    && symbol.trimmed().toUpper() == m_currentSymbol.trimmed().toUpper()
                     && m_symbolSubscriptions.held("main") == m_currentSymbol) {
+                    m_userSubscribed = true;
+                    m_heldRetryTimer->stop();
+                    m_heldRetryAttempt = 0;
+                    if (m_pendingSymbolSwitch.isEmpty() && m_refusedSymbol.isEmpty())
+                        statusBar()->clearMessage();
                     requestConfiguredHistoryForSymbol(m_currentSymbol);
                     requestTpoHistoryForSymbol(m_currentSymbol);
                 }
             });
     connect(m_dataSource.get(), &IGridDataSource::subscriptionRefused, this,
             [this](const QString& symbol, int cap, const QString& message) {
-                m_lastSubscriptionRefusal = {{"symbol", symbol}, {"maxConnections", cap}, {"message", message}};
-                applySubscriptionActions(m_symbolSubscriptions.refused(symbol));
-                if (symbol.trimmed().toUpper() == m_currentSymbol.trimmed().toUpper()
-                    && m_symbolSubscriptions.held("main").isEmpty())
-                    m_refusedSymbol = symbol.trimmed().toUpper();
-                statusBar()->showMessage(message);
+                const QString normalized = symbol.trimmed().toUpper();
+                const bool heldReconnect = normalized == m_symbolSubscriptions.held("main")
+                    && !m_userSubscribed && m_symbolSubscriptions.requested(normalized);
+                const auto actions = m_symbolSubscriptions.refused(symbol);
+                const bool pendingRefused = std::any_of(actions.begin(), actions.end(), [](const auto& action) {
+                    return action.kind == SymbolSubscriptionManager::Action::Refused
+                        && action.consumer == QLatin1String("main");
+                });
+                m_lastSubscriptionRefusal = {{"symbol", pendingRefused ? actions.front().symbol : normalized},
+                                             {"maxConnections", cap}, {"message", message}};
+                applySubscriptionActions(actions);
+                if (pendingRefused) {
+                    const QString refusedSymbol = actions.front().symbol;
+                    if (m_guiApiServer) m_guiApiServer->failSymbolSwitch(refusedSymbol, message);
+                    statusBar()->showMessage(message);
+                } else if (heldReconnect && m_pendingSymbolSwitch.isEmpty()) {
+                    constexpr int delays[] = {5000, 15000, 60000};
+                    const int delay = delays[std::min(m_heldRetryAttempt, 2)];
+                    ++m_heldRetryAttempt;
+                    statusBar()->showMessage(QStringLiteral("%1 Retrying %2 in %3 s...")
+                        .arg(message, normalized).arg(delay / 1000));
+                    m_heldRetryTimer->start(delay);
+                }
             });
     connect(m_dataSource.get(), &IGridDataSource::errorOccurred,
             this, [this](const QString& error) {
@@ -1384,6 +1464,12 @@ void MainWindowGPU::onConnectionStatusChanged(bool connected) {
     m_connected = connected;
     if (!connected) {
         m_serverConfigReady = false;
+        m_userSubscribed = false;
+        m_heldRetryTimer->stop();
+        m_heldRetryAttempt = 0;
+        if (wasConnected && !m_pendingSymbolSwitch.isEmpty())
+            abandonPendingSymbolSwitch(QStringLiteral("Switch to %1 interrupted by disconnection")
+                .arg(m_pendingSymbolSwitch));
     }
 
     if (m_subscribeButton) {
@@ -1402,10 +1488,13 @@ void MainWindowGPU::onConnectionStatusChanged(bool connected) {
             const QString requested = m_offlineRequestedSymbol;
             m_offlineRequestedSymbol.clear();
             applySubscriptionActions(m_symbolSubscriptions.request("main", requested));
+            if (m_symbolSubscriptions.pending("main") == requested) startPendingSymbolSwitch(requested);
         } else if (!m_initialSubscriptionAttempted && !m_currentSymbol.isEmpty()
                    && m_symbolSubscriptions.held("main").isEmpty()) {
             m_initialSubscriptionAttempted = true;
             applySubscriptionActions(m_symbolSubscriptions.request("main", m_currentSymbol));
+            if (m_symbolSubscriptions.pending("main") == m_currentSymbol)
+                startPendingSymbolSwitch(m_currentSymbol);
         }
     }
 }
@@ -1635,6 +1724,7 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
             return out;
         }
         out.data["symbol"] = body.symbol;
+        if (m_pendingSymbolSwitch == body.symbol) out.pendingSymbol = body.symbol;
     } else if (kind == "timeframe") {
         selectTimeframe(static_cast<int>(body.timeframeMs));
         out.data["linked"] = true;

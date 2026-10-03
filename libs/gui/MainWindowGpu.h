@@ -89,6 +89,7 @@ protected:
     void showEvent(QShowEvent* event) override;
 
 private:
+    friend struct MainWindowSymbolLifecyclePeer;
     void setupUI();
     void setupMenuBar();
     void setupShortcuts();
@@ -99,6 +100,9 @@ private:
     void setupGuiApiServer();
     bool subscribeSymbol(const QString& symbol);
     void applySubscriptionActions(const QVector<SymbolSubscriptionManager::Action>& actions);
+    void startPendingSymbolSwitch(const QString& symbol);
+    void abandonPendingSymbolSwitch(const QString& message);
+    void retryHeldSymbol();
     void selectTimeframe(int ms);
     AgentApi::ControlApply agentApiApplyControl(const QString& kind, const AgentApi::ControlBody& body);
     QJsonObject agentApiHeatmapSnapshot() const;
@@ -167,6 +171,10 @@ private:
     QString m_offlineRequestedSymbol;
     bool m_initialSubscriptionAttempted = false;
     bool m_symbolSelectionRequested = false;
+    QString m_pendingSymbolSwitch;
+    QTimer* m_symbolSwitchTimer = nullptr;
+    QTimer* m_heldRetryTimer = nullptr;
+    int m_heldRetryAttempt = 0;
     QString m_agentApiSessionId;
     quint64 m_agentApiSelectionEpoch = 1;
     std::optional<qint64> m_heatmapReceivedAtMs;
