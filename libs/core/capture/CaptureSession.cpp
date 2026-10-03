@@ -206,7 +206,7 @@ void Session::run(WriterConfig config, nlohmann::json metadata) {
         try {
             if (m_hooks.beforeWriterOperation) m_hooks.beforeWriterOperation(m_symbol, name, record);
             action();
-        } catch (...) { failed = true; throw; }
+        } catch (...) { if (writer) writer->retract(); failed = true; throw; }
     };
     std::optional<RecordLocation> current;
     try {

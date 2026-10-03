@@ -5,9 +5,9 @@
 v1 stream (`docs/research/2026-10-per-symbol-connections.md`). Each connection
 subscribes `level2`, `market_trades` and `heartbeats` for its one product. One
 process holds all products; they share one I/O thread and one disk queue pool.
-It has no connection to sentinel-server, its recorder, the GUI or the local wire
-protocol. It uses QtCore only. Future server rollups can consume these files;
-this tool does not send raw L2 to clients.
+It has no dependency on sentinel-server, its recorder or the GUI. Its local Unix
+fan-out streams journal records to consumers (see "Live fan-out" below); rollups
+remain outside capture. Core uses no GUI Qt.
 
 ## Start, stop and verify
 
@@ -71,7 +71,11 @@ session reserves 4 KiB, outside the pool, for a final stop/gap
 record containing the reason and the first dropped frame's system/steady receive
 times and connection ID. Accepted data drains before this marker on overflow.
 After an I/O failure the damaged segment is left untouched and a fresh segment
-is attempted for the marker. If the volume is still unwritable, even that marker
+is attempted for the marker. Reserved provisional positions are never reused, so
+block-ordinal holes immediately after an abandoned segment are expected. The
+verifier's missing-block diagnostic describes that already-counted damage
+(bad tail/explicit gap), not a separate loss event; it does not make the run clean.
+If the volume is still unwritable, even that marker
 cannot be persisted: the run log explicitly says so and exit remains nonzero.
 Check the exit status and the run log.
 
@@ -676,3 +680,163 @@ resume, idempotent reruns, dry-run reports and decoded `hmc2_diff` comparisons.
 See [roller commands, recovery rules, measurements and the controlled tick-schedule
 comparison](ROLLER.md). Production backfill and service cutover remain separate
 orchestrator operations. This slice's outputs are under the agent's `roll-out/`.
+
+## Live fan-out (slice B)
+
+Capture serves a Unix domain stream socket by default at
+`~/Sentinel-runtime/run/capture.sock`. Override with `--fanout-socket PATH`.
+The socket directory must be owned by the current user and mode 0700; newly
+created directories are 0700, the socket is 0600. Paths under `/Volumes`, any
+Git checkout (including worktrees), and socket/parent symlinks are refused after
+canonicalization. A lock prevents two owners; a stale socket is removed only
+under that lock, after a connection probe reports no listener. Regular files
+are never removed. A fanout setup failure logs its reason with `sLog_Error`, sets
+`sentinel_fanout_running` to 0, and leaves journal capture running for all products.
+Setup retries after 30 s, doubling to a 10 min maximum; success resets the delay.
+Fixing a directory's mode/ownership or clearing a conflicting listener permits
+a later retry to recover without restarting capture. The ring remains bounded
+while unavailable; clients recover from the journal if their cursor is absent.
+Grafana's **Capture fan-out down** alert fires after the gauge stays below 1 for
+five minutes; the existing service-down alert covers a missing capture scrape.
+
+`--fanout-ring-mib` defaults to 32 MiB **per product** and
+`--fanout-client-mib` defaults to 16 MiB per connection (both 1..256).
+Retention is 60 seconds of monotonic publication age, bounded by ring bytes,
+whichever comes first. There are at most eight clients, one product per socket.
+A consumer of all seven products opens seven sockets. Ring, ingress and socket
+queue accounting is separate from `QueuePool`; no capacity is taken from disk
+capture. Each product has a fixed 1,024-slot SPSC ingress queue, also capped at
+32 MiB. Payloads are allocated as they arrive, never at capacity up front.
+
+**Publication point:** at append, before disk I/O (including a preceding block's
+flush or a new segment's header), the writer hands off each exact framed record
+with its final `(product, run_id, block, record)` position and `provisional:true`.
+The run UUID, run-wide block ordinal and zero-based record index include size,
+time and hour rotation, lifecycle, invalidation, resync and terminal stop records.
+The fanout worker never reconstructs or parses the raw payload. Live delivery
+of the appended record does not wait for flush. Capture's existing disk-worker
+queue can still delay reaching append; this is not an end-to-end feed-age claim.
+
+Each successful block flush emits `durable{product,through:pos}`. On write/flush
+failure the writer emits `retract{product,after:pos}` before following the existing
+capture failure path. `after` is the last successful durable watermark, or null
+if none exists in this run. Recovery segments never reuse published positions.
+The ring retains provisional records and removes a retracted suffix. These
+controls and records share the same ordered channel. A boundary can produce
+`record(block 0), record(block 1), durable(through block 0), durable(through block 1)`:
+a watermark covers only its prefix, not every record previously received.
+
+**Consumers checkpoint only durable, fully applied positions.** Provisional
+records may drive live display, but must be discardable. Persisted derived output
+must also wait for durability or support rollback; a checkpoint alone does not
+undo provisional output. On retract, discard all
+provisional state after `after` (all of this run's provisional state if null),
+pause application and resume from the journal using the last applied durable
+checkpoint. Do not checkpoint a later recovery marker across an unresolved gap.
+A watermark follows the configured flush/fsync policy: default `--fsync-blocks 1`
+syncs every block before notification; weaker settings retain their documented
+OS/power-loss exposure. No fanout protocol can strengthen that disk policy.
+
+Client commands are UTF-8 JSON followed by LF (8 KiB maximum buffered input;
+initial handshake deadline 5 s). One hello/resume per socket:
+
+```json
+{"type":"hello","version":1,"product":"BTC-USD"}
+{"type":"resume","version":1,"product":"BTC-USD","pos":{"product":"BTC-USD","run_id":"UUID","block":123,"record":4}}
+{"type":"resnapshot","product":"BTC-USD"}
+```
+
+`hello` also accepts `pos`. A position names the **last applied** record (normally the durable checkpoint
+after reconnection): a hit
+streams strictly after it, with no duplicate. A fresh hello without a position
+streams the retained ring followed by live records; it does not promise a book
+snapshot or full history. Resnapshot requires a subscription to that product.
+It routes to `MarketDataFeeds::requestResnapshot(product)` and is limited to one
+forwarded request per product per 20 seconds across all clients, matching the
+engine's cooldown. A global rolling-window cap allows at most three forwards
+per 60 seconds across products. Reply status is `forwarded`, `rate_limited`,
+`global_rate_limited`, or `unavailable` during startup/shutdown. `forwarded` means
+sent to the engine, which may still ignore it when disconnected/reconnecting;
+it is not an acknowledgement of a new snapshot. Actual resnapshots are journaled
+through the engine's existing path. Unknown products, malformed commands and repeat handshakes
+close the connection with `protocol`.
+
+Server packets have little-endian lengths, independent of TCP/socket reads:
+
+```
+u32 body_bytes | u32 json_bytes | JSON[json_bytes] | optional RAWL2 record
+```
+
+`body_bytes` counts everything after its own four bytes. JSON record headers
+are `{"type":"record","pos":{...},"provisional":true}`; the remaining bytes are exactly the
+RAWL2 `len | kind | systemNs | steadyNs | connection | payload` record, including
+its four-byte length. Control packets have no raw suffix. JSON integer positions
+are uint64 block / uint32 record; consumers must preserve integer precision.
+No RAWL2 file header is sent: obtain product metadata by run ID from the journal.
+
+Handshake replies:
+
+- `tip`: `version:1`, `product`, `pos` (last fanout record, or null before any),
+  and `durable` (last successful watermark, or null). This is a durability ceiling,
+  not proof the consumer has applied that prefix; checkpoint only after replay
+  and any journal gap have actually been applied. Replayed record headers remain
+  provisional; the tip watermark qualifies their durability.
+- `durable`: `product` and `through` (inclusive durable position).
+- `retract`: `product` and `after` (last durable position, or null).
+- Resume hit: `tip`, then every successor in the ring, then live records.
+- Resume miss: `gap` with `reason:"resume_not_retained"`, the requested
+  `resume_after`, `journal_until`, and `until_inclusive:false`; then `tip` and
+  the ring/live records. Read the journal **after** the requested cursor and
+  **before** `journal_until`, then apply the buffered socket stream. If the ring
+  is empty, `journal_until` is null: the first subsequent socket record supplies
+  that exclusive boundary. Tail the journal while waiting. Do not infer
+  continuity from `tip` or silently skip an unavailable cursor/run. The exclusive
+  boundary can still be provisional: journal EOF alone does not finish catch-up.
+  Wait until the required prefix is durable/visible before joining socket replay.
+
+The worker serializes replay and subscription registration, so there is no
+replay-to-live race. Resume requires the cursor itself still in the ring;
+expiration, unknown run, future cursor, and fanout ingress loss all give an
+explicit miss. Ingress loss clears that product's ring and disconnects its
+existing subscribers; the journal remains authoritative. Malformed ingress
+similarly clears only the affected product's ring and disconnects its clients
+with `malformed_ingress`, logging once per product while other products continue.
+Capture writes never
+wait on fanout locks or socket writes. Each client is serviced with a bounded
+write budget; an overflowing client is disconnected without blocking others.
+
+A best-effort `disconnect` packet carries `reason` and `resume:"journal"`.
+It cannot be delivered reliably to an already full socket, and is never inserted
+inside a partial record. **Every EOF requires discarding provisional state above the last fully applied
+durable checkpoint and resuming from that checkpoint**, including EOF midway
+through a packet. A full socket or ingress loss can also lose a retract/watermark;
+absence of a retract is never evidence of durability. Disconnect
+reason counters remain available on `/metrics`. Shutdown drains the disk
+sessions first, makes one bounded send attempt and closes all clients; any
+unsent suffix must be read from the journal. It never waits for a client to drain.
+
+Probe (no exchange connection or journal writes):
+
+```sh
+python3 scripts/dev/fanout-tail.py BTC-USD
+python3 scripts/dev/fanout-tail.py BTC-USD --resume '{"product":"BTC-USD","run_id":"UUID","block":123,"record":4}'
+```
+
+The probe prints positions and control messages, not raw payloads. Add
+`--resnapshot` only for an intentional upstream resnapshot check; this affects
+that product's capture. `--socket PATH` selects a fixture socket.
+
+`CaptureFanoutTests` uses temporary roots and local sockets. It covers exact
+writer bytes and positions across blocks/hour rotation, cursor-exclusive resume,
+age/byte eviction, slow-client isolation, ingress loss, resnapshot isolation and
+per-product/global rate limiting, safe paths/ownership, setup retry/backoff,
+malformed-product isolation, idle clients and shutdown. It also
+checks provisional delivery before flush, watermark ordering/replay, real short
+write retraction, consumer rollback, null retraction before any durability,
+position non-reuse, and Session failure before shutdown. The
+application fixture additionally checks the default-enabled socket and metrics
+with a client connected at SIGTERM, and journal continuity/recovery while an
+unusable socket directory is repaired. No test uses production data or Coinbase.
+
+Measurements (including append-to-receive p50/p95), validation and the deploy
+watch list are in [Slice B as built](research/2026-10-one-world-pipeline.md#slice-b-as-built).

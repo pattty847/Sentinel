@@ -7,6 +7,8 @@ delete the redundancy that keeps two worlds. Builds on
 product, shared queue pool; slices 1-3 in flight). Line numbers refer to `main` at 30f17d4.
 Original read-only study; see "Slice A as built" below for implementation and the measured parity difference and review acceptance bands.
 
+Implementation status and refinements are recorded in the "as built" sections below.
+
 ## 0. Today, measured (two worlds)
 
 | | sentinel-capture (`com.sentinel.capture`) | sentinel-server recorder (`com.sentinel.recorder`) |
@@ -307,7 +309,7 @@ Capture deploys now also affect the live view (section 11), so bundle capture ch
 |---|---|---|
 | Ingest (capture :8091) | `sentinel_mdc_connected{product}`, `sentinel_mdc_last_l2_timestamp_seconds{product}`, `sentinel_capture_frames_total{product}`, `sentinel_mdc_ws_latency_ms{product}` (observability rows 7, 8, 12, 13 move here) | A2 per product |
 | Journal | `sentinel_journal_flushed_ordinal{product}`, `sentinel_journal_tail_age_seconds{product}` = now minus last fsynced record, `sentinel_capture_queued_bytes` (row 15), `sentinel_capture_failure_markers_total` (row 18) | tail age > 5 s while connected |
-| Fan-out | `sentinel_fanout_subscribers`, `sentinel_fanout_disconnects_total{reason}`, `sentinel_fanout_backlog_bytes{subscriber}` | any slow-subscriber disconnect |
+| Fan-out | `sentinel_fanout_running`, `sentinel_fanout_clients`, `sentinel_fanout_disconnects_total{reason}`, `sentinel_fanout_queue_bytes{client}`, `sentinel_fanout_ring_bytes{product}`, `sentinel_fanout_ring_oldest_age_seconds{product}`, `sentinel_fanout_resume_hits_total{product}` / `sentinel_fanout_resume_misses_total{product}` | running < 1 for 5 m; any slow-client disconnect |
 | Roller (server :8090) | existing `sentinel_recorder_*` (`ServerDataModel.cpp:243-287`) kept; `sentinel_roller_lag_records{product}` = tip minus applied, `sentinel_roller_lag_seconds{product}` = now minus receive time of the last applied record, `sentinel_roller_source{product}` 1 = socket / 0 = files, `sentinel_roller_checkpoint_age_seconds{product}`, `sentinel_roller_shadow_mismatch_total{product,layer}` during shadow | lag > 5 s while journal tail is fresh; mismatch > 0 |
 | Serving | existing `sentinel_recorder_last_column_timestamp_seconds` (A1), `sentinel_stream_sessions`; GUI `liveDataAgeMs` via Agent API (row 25) | A1 unchanged |
 
@@ -479,3 +481,139 @@ review-specific fail-without-fix checks passed after restoration and rebuild.
 Controlled comparison worst cases: 0.523218% differing entries, 23-code maximum
 absolute delta, and 0.000140795% maximum absolute total-TWAP delta per side;
 mids/bounds/peaks/row sets exact. See docs/ROLLER.md for per-minute results.
+
+## Slice B as built
+
+`capture/CaptureFanout` serves the default-enabled Unix socket, a 60 s / 32 MiB
+per-product ring, exclusive-cursor resume with explicit journal-gap boundaries,
+and product-scoped resnapshot control (20 s cooldown, three forwards per minute
+globally). A consumer opens one
+socket per product. Eight bounded client slots, each 16 MiB, and separate bounded
+SPSC ingress queues keep socket backpressure out of the capture QueuePool and
+writer locks. All fanout accounting appears on the existing capture endpoint;
+the Prometheus capture job already exists. `scripts/dev/fanout-tail.py` is the
+orchestrator's position/control probe. Full protocol: `docs/RAW_CAPTURE.md`.
+
+Socket setup failure is nonfatal to journaling: errors are logged with reason and
+retry delay, the running gauge stays zero, and setup retries after 30 s, doubling
+to 10 min. Success resets the backoff. The five-minute fanout-down Grafana alert
+covers prolonged unavailability. Malformed ingress invalidates only that product's
+ring and subscribers, with one product-labelled error; other products keep serving.
+Resnapshot replies say `forwarded`, not that the engine accepted or acted on them.
+
+The position type is `capture::JournalPosition {product, runId, block, record}`.
+It lives in capture with no roller dependency. Slice C should map it to
+`roller::JournalPos` (or consolidate the plain DTO at that merge point); RAWL2
+framing and coordinates are unchanged.
+
+**Append-time publication:** the writer assigns
+final positions and publishes exact framed records as provisional before any
+append-related disk I/O, including the previous block's flush at a boundary.
+Successful flushes send inclusive `durable{product,through}` watermarks; failures
+send `retract{product,after}` (null before the first successful flush) before the
+existing recovery path. Recovery segments do not reuse published positions.
+Rings retain provisional records and remove retracted suffixes. Record/control
+ordering is preserved, but a watermark can cover a prefix of already delivered
+provisional records. Consumers checkpoint only fully applied durable positions,
+discard withdrawn provisional state, and resume from the journal after retract
+or EOF. The handshake tip includes the current durability ceiling for replay.
+Default fsync remains one per block; custom weaker durability settings retain
+their power-loss exposure. This replaces the earlier after-flush limitation;
+live handoff no longer waits for the appended record's disk operation. The
+existing disk-worker queue can delay entry to append, so slice C must still
+measure full feed-to-GUI age before claiming the +50 ms acceptance gate.
+
+The required ring retains bytes with zero clients, so literal zero memory
+overhead is impossible. Payload capacity is not preallocated. Benchmark and
+validation results are recorded below. No service was deployed,
+restarted or stopped; production data was not written.
+
+The append-time baseline passed fifteen fanout cases, alongside RAWL2 and capture
+application/lifecycle suites. Its five new cases cover provisional delivery before initial disk I/O,
+durable visibility and cross-block ordering/replay, real short-write retraction
+with consumer rollback, null retraction/position non-reuse, and immediate Session
+fault notification before close. All 20 fail-without checks pass, including the
+original 13 and seven new checks: premature durability, missing provisional or
+durable notification, missing writer/Session retraction, stale ring suffix and
+position reuse. `tests/capture/fanout_mutations.py` restores, explicitly touches,
+rebuilds and re-passes each regression after every mutation.
+
+Overhead method: `capture_fanout_benchmark baseline|idle|client 65`, separate
+process for each mode, 100 records/s x 1,500 payload bytes, real Session/Writer
+with default fsync cadence and temporary internal-disk output. `idle` means
+fanout enabled with zero clients; `client` drains every record in a local reader
+thread, so its CPU/RSS numbers conservatively include the consumer too. The run
+lasts longer than the 60 s retention window. This measures the fanout addition
+to disk capture; it does not include Coinbase, TLS or engine JSON parsing and
+is not a deployed-service CPU claim. Literal zero-client zero-memory overhead
+cannot coexist with retaining a replay ring.
+
+Append-time baseline: full queued mac-clang build passed; **84/84 CTest suites passed, zero failures,
+351.10 s**. The fanout suite passed all 15 cases in 1.45 s. Metal cases explicitly
+skipped because the sandbox has no MTLDevice; no GPU/visual verification is claimed.
+All 20 append-time mutation checks restored, touched, rebuilt and passed.
+Review-round validation: full queued mac-clang build passed; **86/86 CTest suites
+passed, zero failures, 390.57 s**. The fanout/alert suite passed all 20 cases in
+2.28 s; application/lifecycle tests passed in 108.18 s. The application fixture
+keeps writing BTC and ETH journals with an unusable socket directory, observes
+running=0, repairs the directory, and connects after the real 30 s retry without
+restarting capture. Fake-clock cases cover exponential backoff, the ten-minute
+ceiling, global/per-product resnapshot limits and malformed-product isolation.
+All **31 fail-without checks** passed (20 prior plus 11 review-specific), each
+restored, touched, rebuilt and re-passed. The alert YAML is parsed and its query,
+threshold and five-minute hold checked. Metal-dependent cases skipped in the
+sandbox. No runtime deployment or monitoring reload was performed.
+
+Append-time baseline measurements on the owner's Mac, 2026-10-03, sequential queued
+65 s runs (6,500 frames plus one terminal stop per run):
+
+| Mode | CPU seconds | Average CPU (one core) | Peak RSS bytes | Received records |
+|---|---:|---:|---:|---:|
+| Writer-only baseline | 0.368127 | 0.566349% | 17,678,336 | n/a |
+| Fanout, zero clients | 0.747469 | 1.14995% | 29,999,104 | n/a |
+| Fanout, one draining client (reader included) | 1.26058 | 1.93935% | 30,720,000 | 6,501/6,501 |
+
+**Append -> client receive: p50 117.958 us, p95 254.709 us, max 3,072.67 us**,
+6,501 samples. The benchmark timestamps entry to Writer append through complete
+socket packet receipt, before consumer JSON parsing; it excludes earlier Session
+queue dwell. This meets sub-millisecond p95 handoff in this fixture; it does not
+measure full exchange-to-GUI age or the deployed seven-product workload.
+
+Zero-client overhead is +0.583603 percentage points CPU and +12,320,768 peak RSS
+bytes (11.75 MiB). This is measurable: the literal "no measurable overhead" claim
+is not made. Ring accounting was 10,833,462/10,833,464 bytes (~10.33 MiB), oldest
+age 59.994/59.993 s. Both fanout runs ended with zero ingress bytes, ingress drops,
+client-queue bytes and disk-pool bytes; no unintended disconnects occurred.
+These replace the earlier after-flush measurements. They are single-run results,
+not confidence intervals, and one-client CPU/RSS includes the reader thread.
+
+Deploy watch list (orchestrator only):
+
+1. Review and land, build main, then use `scripts/dev/deploy-runtime.sh capture`
+   with the owner present. Verify private runtime/run directory, socket ownership,
+   `sentinel_fanout_running 1`, all seven feed gauges, and continued RAWL2 writes
+   inside the deploy script's 60 s window. A bad/occupied socket path keeps capture
+   running with fanout gauge 0, logs an error and retries with bounded backoff.
+   Provision the Capture fan-out down alert and check recovery without a restart.
+2. Tail positions with `fanout-tail.py`; reconnect inside and beyond retention,
+   checking hit/miss counters and the explicit journal boundary. A full seven-
+   product consumer uses seven sockets, leaving one of eight slots for a probe.
+3. Stall a disposable consumer: check a `slow_client` disconnect, flat ingress-
+   drop counters, and uninterrupted writer/other-consumer progress. Watch ring
+   RSS at the actual seven-product rate; fanout memory is additional to QueuePool.
+4. Intentionally request one resnapshot and verify that only that product changes
+   connection, the journal contains its resync/snapshot, and a second request
+   within 20 s is rate-limited; verify the global three-per-minute cap. This is an explicit operator action, not a passive
+   health check.
+5. Verify provisional records arrive between flushes and durable watermarks
+   advance after flush. Monitor p50/p95 handoff and full feed-to-GUI age in slice C.
+   Exercise failure/retraction only on an isolated fixture, never by faulting the
+   always-on capture. A consumer must discard its provisional suffix on retract
+   or EOF and recover from its durable checkpoint. No deployment/live feed check
+   was performed by this branch.
+
+Workflow notes: CMake regeneration initially tried to lock the read-only shared
+vcpkg checkout; configured this build with `VCPKG_MANIFEST_INSTALL=OFF` using the
+already installed dependencies. Shared ccache writes are also sandbox-blocked;
+builds used `CCACHE_READONLY=1 CCACHE_TEMPDIR=/tmp`. The shared FIFO queue was the
+largest wall-time cost.

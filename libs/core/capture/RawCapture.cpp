@@ -261,7 +261,7 @@ Writer::Writer(WriterConfig config, nlohmann::json metadata, bool legacyV2)
     m_block.reserve(m_config.blockBytes);
     m_compression = std::make_unique<CompressionState>();
 }
-Writer::~Writer() = default;
+Writer::~Writer() { if (m_count) retract(); }
 void Writer::write(const std::string& bytes) {
     if (m_file.write(bytes.data(), bytes.size()) != qint64(bytes.size()))
         fail("write failed: " + m_file.errorString().toStdString());
@@ -307,36 +307,52 @@ void Writer::open(Stamp time) {
     ++m_stats.files;
     sLog_App("Capture segment opened: path=" << m_path << " segment=" << m_segment - 1);
 }
-void Writer::append(const Record& record) {
+void Writer::append(const Record& record) try {
     if (m_closed) fail("append after close");
     if (record.payload.size() > MaxRecordBytes || record.time.systemNs < 0 || record.time.steadyNs < 0)
         fail("record exceeds limits");
     if (record.kind < Kind::Frame || record.kind > (m_metadata.at("format_version") == 2 ? Kind::FrameReference : Kind::EngineError)) fail("unknown record kind");
-    if (m_file.isOpen() && (record.time.systemNs / HourNs != m_hour || m_index.size() >= MaxIndexEntries)) seal();
-    if (!m_file.isOpen()) open(record.time);
     const auto size = 32 + record.payload.size();
-    if (m_count && (m_block.size() + size > m_config.blockBytes ||
-                   record.time.steadyNs - m_first.steadyNs >= m_config.blockInterval.count() * 1000000)) flush();
+    const bool rotate = m_file.isOpen() && (record.time.systemNs / HourNs != m_hour || m_index.size() >= MaxIndexEntries);
+    const bool closeBlock = m_count && (rotate || m_block.size() + size > m_config.blockBytes ||
+        record.time.steadyNs - m_first.steadyNs >= m_config.blockInterval.count() * 1000000);
+    const auto encode = [&](std::string& out) {
+        put32(out, static_cast<uint32_t>(28 + record.payload.size()));
+        put32(out, static_cast<uint32_t>(record.kind));
+        put64(out, record.time.systemNs); put64(out, record.time.steadyNs); put64(out, record.connection);
+        out += record.payload;
+    };
+    // Reserve the FINAL position and publish BEFORE even the preceding block's
+    // flush, hour seal, or new-file header I/O. A failed boundary retracts both
+    // the preceding uncommitted suffix and this newly published record.
+    m_appendedBlock = m_ordinal + (closeBlock ? 1 : 0);
+    m_retracted = false;
+    std::string framed;
+    if (m_config.onJournal) {
+        framed.reserve(size); encode(framed);
+        m_config.onJournal({JournalEventKind::Record,
+            m_metadata.at("run_id").get_ref<const std::string&>(), *m_appendedBlock,
+            closeBlock ? 0 : m_count, true, framed});
+    }
+    if (rotate) seal();
+    if (!m_file.isOpen()) open(record.time);
+    if (closeBlock) flush();
     if (m_index.size() >= MaxIndexEntries) { seal(); open(record.time); }
     const RecordLocation location{record.time, record.connection, record.kind};
     if (!m_uncommittedRecord) m_uncommittedRecord = location;
     if ((record.kind == Kind::Frame || record.kind == Kind::FrameReference) && !m_uncommittedFrame) m_uncommittedFrame = location;
     if (!m_count) m_first = record.time;
     m_last = record.time;
-    put32(m_block, static_cast<uint32_t>(28 + record.payload.size()));
-    put32(m_block, static_cast<uint32_t>(record.kind));
-    put64(m_block, record.time.systemNs);
-    put64(m_block, record.time.steadyNs);
-    put64(m_block, record.connection);
-    m_block += record.payload;
+    if (m_config.onJournal) m_block += framed;
+    else encode(m_block);
     ++m_count; ++m_stats.records;
     if (record.kind == Kind::Frame) { ++m_stats.frames; m_stats.frameBytes += record.payload.size(); }
     if (m_block.size() >= m_config.blockBytes) flush();
-}
+} catch (...) { retract(); throw; }
 void Writer::flushDue(int64_t steadyNs) {
     if (m_count && steadyNs - m_first.steadyNs >= m_config.blockInterval.count() * 1000000) flush();
 }
-void Writer::flush() {
+void Writer::flush() try {
     if (!m_count) return;
     auto& compressed = m_compression->buffer;
     compressed.resize(ZSTD_compressBound(m_block.size()));
@@ -355,9 +371,12 @@ void Writer::flush() {
     ++m_stats.blocks;
     if (m_config.fsyncBlocks && m_stats.blocks % m_config.fsyncBlocks == 0) sync();
     m_index.push_back(entry);
+    m_durable = std::pair{entry.ordinal, m_count - 1};
+    if (m_config.onJournal) m_config.onJournal({JournalEventKind::Durable,
+        m_metadata.at("run_id").get_ref<const std::string&>(), entry.ordinal, m_count - 1, true, {}});
     m_block.clear(); m_count = 0;
-}
-void Writer::seal() {
+} catch (...) { retract(); throw; }
+void Writer::seal() try {
     if (!m_file.isOpen()) return;
     flush();
     const auto index = encodeIndex(m_index);
@@ -366,7 +385,7 @@ void Writer::seal() {
     footer += index;
     put32(footer, crc(index));
     write(footer); sync(); m_file.close();
-}
+} catch (...) { retract(); throw; }
 void Writer::sealSegment() { seal(); }
 void Writer::close() {
     if (m_closed) return;
@@ -376,7 +395,18 @@ void Writer::close() {
 std::optional<RecordLocation> Writer::firstUncommitted() const {
     return m_uncommittedFrame ? m_uncommittedFrame : m_uncommittedRecord;
 }
+void Writer::retract() noexcept {
+    if (m_retracted) return;
+    m_retracted = true;
+    if (m_config.onJournal) m_config.onJournal({JournalEventKind::Retract,
+        m_metadata.at("run_id").get_ref<const std::string&>(),
+        m_durable ? m_durable->first : 0, m_durable ? m_durable->second : 0, bool(m_durable), {}});
+}
 void Writer::abandonSegment() {
+    retract();
+    // An unflushed block may already have been observed by clients. Never reuse
+    // its position for the recovery marker, even when compression/write failed.
+    if (m_appendedBlock) m_ordinal = std::max(m_ordinal, *m_appendedBlock + 1);
     m_file.close();
     m_block.clear(); m_count = 0; m_index.clear();
     m_uncommittedRecord.reset(); m_uncommittedFrame.reset();

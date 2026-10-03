@@ -221,3 +221,34 @@ counts. A1 is unchanged. Test a GUI-only open/close: its three connection series
 pinned counters stay unchanged, and the recorder keeps committing. At capacity, check the
 `Feed refused` error, client status text, Agent API refusal object and refused counter.
 No monitoring or recorder service is restarted by the agent implementing this change.
+
+### Capture fan-out metrics (slice B)
+
+The existing capture endpoint and scrape job expose these additional series;
+no new listener, scrape job or monitoring service restart is required.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `sentinel_fanout_running` | gauge | - | 1 while serving; 0 during setup backoff, stop or service failure |
+| `sentinel_fanout_setup_failures_total` | counter | - | Setup/service failures; retries back off 30 s to 10 min while journaling continues |
+| `sentinel_fanout_clients` | gauge | - | Connected sockets, at most 8 (includes pending handshakes) |
+| `sentinel_fanout_queue_bytes` | gauge | client | Bounded pending wire bytes, including partial record and queue pointer; stable slot 0..7, zero when unused |
+| `sentinel_fanout_disconnects_total` | counter | reason | `slow_client`, `ingress_overflow`, `peer_closed`, `protocol`, `shutdown`, `capacity`, `internal_error`, `handshake_timeout`, `malformed_ingress` |
+| `sentinel_fanout_ring_bytes` | gauge | product | Retained wire bytes plus entry accounting; independent of disk QueuePool |
+| `sentinel_fanout_ring_oldest_age_seconds` | gauge | product | Monotonic age of oldest retained publication; 0 when empty; sampled at least once per second |
+| `sentinel_fanout_ingress_bytes` | gauge | product | Pending writer-to-fanout record/control bytes and object accounting; separate 32 MiB/product cap |
+| `sentinel_fanout_ingress_drops_total` | counter | product | Record/control events refused by fanout ingress; forces socket resume, does not drop journal records |
+| `sentinel_fanout_resume_hits_total` / `_misses_total` | counter | product | Retained cursor versus explicit journal catch-up |
+
+All scrape reads are atomic. Client labels reuse bounded slots; they are not
+permanent consumer identities and never contain peer addresses, paths or secrets.
+Memory budgets charge shared wire records in each referring client queue, so
+summing these metrics is a conservative accounting bound, not process RSS.
+Watch any increase in `slow_client`, `ingress_overflow`, `internal_error` or ingress
+drops during deploy. A resnapshot or an ordinary reconnect should not affect
+another product's feed gauge or disk queue.
+
+Grafana **Capture fan-out down** alerts when `sentinel_fanout_running < 1` for
+5 minutes. Missing series do not trigger this rule: the service-down rule covers
+capture scrape failure. Inspect the logged setup reason and repair the socket
+path/permissions or listener conflict; capture retries without a service restart.

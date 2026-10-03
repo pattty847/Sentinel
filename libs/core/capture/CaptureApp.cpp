@@ -1,5 +1,6 @@
 #include "CaptureApp.hpp"
 #include "CaptureMetrics.hpp"
+#include "CaptureFanout.hpp"
 #include "CaptureSession.hpp"
 #include "CaptureVerifier.hpp"
 #include "SentinelLogging.hpp"
@@ -55,6 +56,9 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
         {"zstd-level", "Compression level 1..19.", "level", "3"},
         {"queue-mib", "Shared disk queue pool for all products, allocated only as frames queue; overflow exits with an error.", "MiB", "512"},
         {"queue-floor-mib", "Per-product share of the pool that no other product can take; products x floor <= pool.", "MiB", "2"},
+        {"fanout-socket", "Local fanout Unix socket (private internal-disk directory).", "path", QDir::homePath() + "/Sentinel-runtime/run/capture.sock"},
+        {"fanout-ring-mib", "Per-product fanout ring cap, outside disk QueuePool (60 s retention).", "MiB", "32"},
+        {"fanout-client-mib", "Per-client bounded wire queue.", "MiB", "16"},
         {"metrics-port", "Prometheus /metrics and /ping on 127.0.0.1 (0: no listener).", "port", "8091"},
         {"duration", "Stop cleanly after N seconds (0: until SIGTERM/SIGINT).", "seconds", "0"},
         {"key-file", "Optional existing Coinbase credentials; public channels need no key.", "path", "key.json"},
@@ -145,7 +149,21 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
     // Declared before the states: samplers point into them, and the listener
     // (declared after them) is destroyed first, so no scrape renders a dead session.
     sentinel::metrics::MetricsRegistry registry;
+    auto feeds = dependencies.makeFeeds ? dependencies.makeFeeds(auth, mdc) : std::make_unique<MarketDataFeeds>(auth, mdc);
+    if (!feeds) throw std::runtime_error("capture feeds factory returned null");
+    std::atomic<bool> feedControlReady{false};
+    FanoutConfig fanoutConfig;
+    fanoutConfig.controlReady = [&] { return feedControlReady.load(std::memory_order_acquire); };
+    fanoutConfig.socketPath = parser.value("fanout-socket");
+    fanoutConfig.ringBytes = size_t(number(parser, "fanout-ring-mib", 1, 256)) * 1024 * 1024;
+    fanoutConfig.clientBytes = size_t(number(parser, "fanout-client-mib", 1, 256)) * 1024 * 1024;
+    CaptureFanout fanout(fanoutConfig, symbols, registry, [&](const std::string& product) { feeds->requestResnapshot(product); });
     std::map<std::string, ProductState> states;
+    // Exceptional exits must also join ingest before destroying its captured states.
+    // Feeds itself outlives fanout so resnapshot posts stay safe during teardown.
+    struct StopFeeds { MarketDataFeeds& feeds; std::atomic<bool>& ready;
+        ~StopFeeds() { ready.store(false, std::memory_order_release); feeds.stop(); }
+    } stopFeeds{*feeds, feedControlReady};
     auto pool = std::make_shared<QueuePool>(queueBytes, floorBytes, products.size());
     const auto startedSteady = Stamp::now().steadyNs;
     std::vector<CaptureMetricsSource> metricSources;
@@ -153,6 +171,9 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
         auto symbol = product.config.symbol;
         auto& state = states[symbol];
         state.feed = std::make_unique<FeedMetrics>(startedSteady);
+        product.config.onJournal = [&, slot = states.size() - 1](const JournalEvent& event) noexcept {
+            fanout.publish(slot, event);
+        };
         state.session = std::make_unique<Session>(std::move(product.config), std::move(product.metadata), pool, states.size() - 1);
         state.session->submit({Kind::CaptureStarted, Stamp::now(), 0, R"({"reason":"capture started"})"});
         metricSources.push_back({symbol, state.feed.get(), state.session.get()});
@@ -176,8 +197,6 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
     const auto submit = [](ProductState& state, Record record) {
         state.session->submit(std::move(record));
     };
-    auto feeds = dependencies.makeFeeds ? dependencies.makeFeeds(auth, mdc) : std::make_unique<MarketDataFeeds>(auth, mdc);
-    if (!feeds) throw std::runtime_error("capture feeds factory returned null");
     feeds->onIngest([&](const MarketDataCoreEngine::IngestObservation& observation) noexcept {
         auto& state = states.at(std::string(observation.product));
         auto& session = *state.session;
@@ -216,6 +235,7 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
     });
     for (const auto& symbol : symbols) feeds->add(symbol);
     feeds->start();
+    feedControlReady.store(true, std::memory_order_release);
     const auto started = Stamp::now().steadyNs;
     auto lastStats = started;
     bool stopped = false;
@@ -252,9 +272,11 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
              << " queuePoolBytes=" << queueBytes << " queueFloorBytes=" << floorBytes);
     app.exec();
     timer.stop();
-    feeds->stop(); feeds.reset(); // join the producer before draining the writers
+    feedControlReady.store(false, std::memory_order_release);
+    feeds->stop(); // join the producer before draining the writers; owner survives fanout callbacks
     if (!stopped) stopReason = "application exit";
     for (auto& [_, state] : states) state.session->close(stopReason);
+    fanout.stop();
     if (const auto failure = error(); !failure.empty()) {
         sLog_Error("Capture incomplete: error=" << failure); return 1;
     }

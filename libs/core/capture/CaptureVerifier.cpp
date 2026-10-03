@@ -881,6 +881,9 @@ VerificationReport verifyFiles(const FileRange& files, const std::map<std::strin
                 replay.prices = nextPrices;
                 replay.quantities = nextQuantities;
             }
+            // An abandoned segment can leave reserved provisional block ordinals
+            // unused. Its following hole diagnoses the same damage as the bad
+            // tail/explicit gap marker, not an additional independent loss event.
             if (segment != nextSegment || firstBlock != nextBlock) {
                 replay.error("missing/duplicate segment or block in run=" + run);
                 replay.invalidate();
