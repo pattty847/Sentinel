@@ -1843,47 +1843,58 @@ TEST(CaptureFeedMetrics, ConcurrentDownTransitionNeverReportsAStaleOutage) {
 // The one market-data I/O thread feeds every product. A failed product's cleanup
 // of a large backlog must not hold that product's session mutex: the next
 // submit() for it would stall the I/O thread and every healthy product with it.
+// The backlogDetached hook marks the cleanup phase itself; inside it the "I/O
+// thread" (alternating the failed and the healthy product, as the ingest
+// observer does) must keep making progress.
 TEST_F(CaptureTest, LargeFailedBacklogCleanupNeverStallsTheSharedIngestThread) {
     auto pool = std::make_shared<QueuePool>(1024ULL * 1024 * 1024, 0, 2);
     Gate gate;
+    std::atomic<uint64_t> peerAccepted{0}, failingCalls{0};
+    std::atomic<bool> cleanupStarted{false};
+    size_t detached = 0;
+    uint64_t peerInWindow = 0, failingInWindow = 0;
     Session failing(productConfig(config, "BTC-USD"), productMetadata("BTC-USD"), pool, 0,
-        {.beforeDrain = gate.hook(), .beforeWriterOperation = [](auto&, auto operation, auto*) {
-            if (operation == "append") throw std::runtime_error("injected disk failure");
-        }});
+        {.beforeDrain = gate.hook(),
+         .beforeWriterOperation = [](auto&, auto operation, auto*) {
+             if (operation == "append") throw std::runtime_error("injected disk failure");
+         },
+         .backlogDetached = [&](size_t records) {
+             detached = records;
+             cleanupStarted.store(true, std::memory_order_release);
+             const auto peer0 = peerAccepted.load(), failing0 = failingCalls.load();
+             QElapsedTimer window; window.start();
+             while ((peerAccepted.load() - peer0 < 200 || failingCalls.load() - failing0 < 200) && window.elapsed() < 3000)
+                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
+             peerInWindow = peerAccepted.load() - peer0;
+             failingInWindow = failingCalls.load() - failing0;
+         }});
     Session peer(productConfig(config, "ETH-USD"), productMetadata("ETH-USD"), pool, 1);
     auto opener = gate.releaser();
-    constexpr size_t backlog = 400'000;
+    constexpr size_t backlog = 50'000;
     for (size_t i = 0; i < backlog; ++i)
         ASSERT_TRUE(failing.submit(record(Kind::Frame, int64_t(i), std::string(120, 'b'))));
-    const auto backlogBytes = pool->used(0);
-    ASSERT_GT(backlogBytes, 0u);
-    // The "I/O thread": alternate the failed and the healthy product, as the
-    // ingest observer does, and count the peer's frames while the backlog of
-    // the failed product is still being cleaned up.
     std::atomic<bool> stop{false};
-    uint64_t peerDuringCleanup = 0, peerTotal = 0;
-    bool sawRefusal = false;
     std::thread ingest([&] {
         int64_t offset = 0;
         while (!stop.load(std::memory_order_acquire)) {
-            const bool accepted = failing.submit(record(Kind::Frame, ++offset, "late"));
-            if (!accepted) sawRefusal = true;
-            if (peer.submit(record(Kind::Frame, offset, "peer frame"))) {
-                ++peerTotal;
-                if (sawRefusal && pool->used(0) >= backlogBytes) ++peerDuringCleanup;
-            }
+            failing.submit(record(Kind::Frame, int64_t(backlog) + ++offset, "late"));
+            failingCalls.fetch_add(1);
+            if (peer.submit(record(Kind::Frame, offset, "peer frame"))) peerAccepted.fetch_add(1);
         }
     });
     gate.release();
     QElapsedTimer waited; waited.start();
-    while (pool->used(0) && waited.elapsed() < 20000) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    while ((!cleanupStarted.load() || pool->used(0)) && waited.elapsed() < 20000)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     stop.store(true, std::memory_order_release);
     ingest.join();
+    failing.close(); peer.close(); // joins the disk worker: the window values are final
+    EXPECT_TRUE(cleanupStarted.load());
+    EXPECT_GE(detached, backlog);
+    EXPECT_GE(peerInWindow, 200u) << "the healthy product stalled during the failed product's cleanup";
+    EXPECT_GE(failingInWindow, 200u) << "submit() for the failed product blocked during its cleanup";
     EXPECT_EQ(pool->used(0), 0u);
     EXPECT_FALSE(failing.error().empty());
-    EXPECT_GT(peerDuringCleanup, 100u) << "peerTotal=" << peerTotal;
-    failing.close(); peer.close();
     EXPECT_TRUE(peer.error().empty()) << peer.error();
     // The gap marker still names the earliest lost frame of the detached backlog.
     const auto report = verify(config.root + "/BTC-USD");
@@ -1893,13 +1904,29 @@ TEST_F(CaptureTest, LargeFailedBacklogCleanupNeverStallsTheSharedIngestThread) {
 // The app logs "Capture incomplete" only after it has stopped every feed and
 // joined every writer, which frozen disk I/O can block forever (FM-127). The
 // first failure must be in the run log the moment it happens.
-namespace { std::mutex failureLogMutex; std::vector<QString>* failureLog = nullptr; }
+namespace {
+std::mutex failureLogMutex;
+std::vector<QString>* failureLog = nullptr;
+const Session* failureLogSession = nullptr;
+std::atomic<int> failureLoggedWithSessionLockFree{-1}; // -1 not checked, 0 lock held, 1 free
+}
 TEST_F(CaptureTest, FirstFailureIsLoggedAtOnceBeforeAnyDrainOrJoin) {
     std::vector<QString> log;
     { std::lock_guard lock(failureLogMutex); failureLog = &log; }
     const auto previous = qInstallMessageHandler([](QtMsgType type, const QMessageLogContext&, const QString& message) {
         std::lock_guard lock(failureLogMutex);
-        if (failureLog && type == QtCriticalMsg) failureLog->push_back(message);
+        if (!failureLog || type != QtCriticalMsg) return;
+        failureLog->push_back(message);
+        // The sink can stall: the session mutex must already be released here,
+        // or the ingest thread would wait on this product's submit(). Probe it
+        // from another thread (a detached one: if the mutex is held by this
+        // thread, joining would deadlock; it finishes once the mutex is free).
+        if (failureLogSession && message.contains("Capture failed:")) {
+            auto done = std::make_shared<std::promise<void>>();
+            auto ready = done->get_future();
+            std::thread([session = failureLogSession, done] { (void)session->stats(); done->set_value(); }).detach();
+            failureLoggedWithSessionLockFree = ready.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready ? 1 : 0;
+        }
     });
     struct Restore {
         QtMessageHandler previous;
@@ -1909,7 +1936,10 @@ TEST_F(CaptureTest, FirstFailureIsLoggedAtOnceBeforeAnyDrainOrJoin) {
     Gate gate; // the disk worker never drains while we look: as if T7 were frozen
     Session btc(productConfig(config, "BTC-USD"), productMetadata("BTC-USD"), pool, 0, {.beforeDrain = gate.hook()});
     auto opener = gate.releaser();
+    { std::lock_guard lock(failureLogMutex); failureLogSession = &btc; }
     while (btc.submit(record(Kind::Frame, 1, std::string(4096, 'f')))) {}
+    { std::lock_guard lock(failureLogMutex); failureLogSession = nullptr; }
+    EXPECT_EQ(failureLoggedWithSessionLockFree.load(), 1) << "logged while holding the session mutex";
     EXPECT_FALSE(btc.submit(record(Kind::Frame, 2, "later"))); // refused again: logged once
     {
         std::lock_guard lock(failureLogMutex);

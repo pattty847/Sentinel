@@ -15,6 +15,9 @@ namespace sentinel::capture {
 struct SessionHooks {
     std::function<void()> beforeDrain;
     std::function<void(const std::string&, std::string_view, const Record*)> beforeWriterOperation;
+    // After a failed worker detached its backlog (session mutex released), before
+    // the scan/free/release. Argument: detached record count.
+    std::function<void(size_t)> backlogDetached;
 };
 struct ProductCapture { WriterConfig config; nlohmann::json metadata; };
 
@@ -69,6 +72,7 @@ public:
     static constexpr size_t FinalRecordReserve = 4096;
 private:
     void failLocked(std::string_view error, RecordLocation dropped);
+    void logFirstFailure() noexcept; // call with m_mutex NOT held
     void dropQueue(); // m_mutex NOT held
     Record finalRecord();
     void run(WriterConfig config, nlohmann::json metadata);
@@ -81,6 +85,11 @@ private:
     bool m_haveStop = false;
     uint64_t m_lastConnection = 0;
     std::optional<RecordLocation> m_firstDropped;
+    // The first failure, captured under m_mutex by failLocked and logged by
+    // logFirstFailure after the mutex is released (the log sink can block).
+    struct FailureNote { std::string error; RecordLocation dropped; size_t queued, poolUsed; };
+    std::optional<FailureNote> m_unloggedFailure;
+    std::atomic<bool> m_failureLogPending{false};
     WriterStats m_stats;
     std::atomic<uint64_t> m_storedFrames{0}, m_storedFileBytes{0};
     std::string m_symbol;

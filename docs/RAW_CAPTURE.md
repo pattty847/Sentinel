@@ -391,8 +391,11 @@ and sync. All queues account to one shared pool (owner decision 7, 2026-10-02):
 product failure (pool full, record over 16 MiB, disk error, ingest exception):
 
 1. The failing product logs `Capture failed: product=<id> error=<reason> ...
-   queuedBytes=... poolUsedBytes=... poolBytes=... floorBytes=...` at once, in
-   the thread that saw the failure. Later records of that product are refused
+   queuedBytes=... poolUsedBytes=... poolBytes=... floorBytes=...` once, right
+   after the session lock is released, in the thread that saw the failure. It
+   goes through the normal log sink, which writes to the internal disk and can
+   itself block; it never runs under the session lock, so a slow sink cannot
+   stall the ingest thread's submits. Later records of that product are refused
    and counted as lost; its accepted data still drains first on a pool overflow.
 2. Within 100 ms the supervisor logs `Capture stopping every product after a
    failure: error=...` and stops all feeds. Every other product closes its run

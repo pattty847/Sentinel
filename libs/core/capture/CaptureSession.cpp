@@ -69,17 +69,33 @@ Session::~Session() { close(); }
 void Session::failLocked(std::string_view error, RecordLocation dropped) {
     if (m_error.empty()) {
         m_error.assign(error.substr(0, 512));
-        // Logged at once: the app stops every feed and joins every writer before
-        // it logs "Capture incomplete", and that join can block on frozen disk
-        // I/O (FM-127). One line per session; reads atomics only.
-        sLog_Error("Capture failed: product=" << m_symbol << " error=" << m_error
-                   << " firstLostKind=" << static_cast<uint32_t>(dropped.kind) << " firstLostConn=" << dropped.connection
-                   << " queuedBytes=" << m_pool->used(m_slot) << " poolUsedBytes=" << m_pool->used()
-                   << " poolBytes=" << m_pool->total() << " floorBytes=" << m_pool->floor());
+        // Logged as soon as this mutex is released (logFirstFailure), not after
+        // the app's stop/drain/join, which frozen disk I/O can block (FM-127).
+        // Never logged under the mutex: the sink can stall and the ingest
+        // thread would wait on this product's submit().
+        m_unloggedFailure = FailureNote{m_error, dropped, m_pool->used(m_slot), m_pool->used()};
+        m_failureLogPending.store(true, std::memory_order_release);
     }
     // A write failure can reveal an older uncommitted frame after the producer
     // has already reported queue overflow. Preserve the earliest lost position.
     if (preferLost(dropped, m_firstDropped)) m_firstDropped = dropped;
+}
+// Once per session, outside m_mutex; goes through the normal log sink.
+void Session::logFirstFailure() noexcept {
+    if (!m_failureLogPending.load(std::memory_order_acquire)) return;
+    std::optional<FailureNote> note;
+    {
+        std::lock_guard lock(m_mutex);
+        note.swap(m_unloggedFailure);
+        m_failureLogPending.store(false, std::memory_order_relaxed);
+    }
+    if (!note) return;
+    try {
+        sLog_Error("Capture failed: product=" << m_symbol << " error=" << note->error
+                   << " firstLostKind=" << static_cast<uint32_t>(note->dropped.kind) << " firstLostConn=" << note->dropped.connection
+                   << " queuedBytes=" << note->queued << " poolUsedBytes=" << note->poolUsed
+                   << " poolBytes=" << m_pool->total() << " floorBytes=" << m_pool->floor());
+    } catch (...) {}
 }
 // Disk worker failed: every queued record is lost. Detach the backlog under a
 // short lock, then scan and free it and return its bytes to the pool outside
@@ -91,6 +107,7 @@ void Session::dropQueue() {
     std::deque<Record> lost;
     { std::lock_guard lock(m_mutex); lost.swap(m_queue); }
     if (lost.empty()) return;
+    if (m_hooks.backlogDetached) m_hooks.backlogDetached(lost.size());
     size_t bytes = 0;
     std::optional<RecordLocation> first;
     for (const auto& queued : lost) {
@@ -100,11 +117,13 @@ void Session::dropQueue() {
     }
     lost = {}; // free the payloads before returning their bytes
     m_pool->release(m_slot, bytes);
-    std::lock_guard lock(m_mutex);
-    failLocked(m_error, *first);
+    { std::lock_guard lock(m_mutex); failLocked(m_error, *first); }
+    logFirstFailure();
 }
 bool Session::submit(Record record) noexcept {
     const RecordLocation location{record.time, record.connection, record.kind};
+    // Runs after the lock below is released (declared first, destroyed last).
+    struct LogAfterUnlock { Session& session; ~LogAfterUnlock() { session.logFirstFailure(); } } logAfterUnlock{*this};
     try {
         const auto size = queuedSize(record);
         {
@@ -139,9 +158,12 @@ bool Session::submit(Record record) noexcept {
     } catch (const std::exception& e) { fail(e.what(), location); return false; }
 }
 void Session::fail(std::string_view error, std::optional<RecordLocation> dropped) noexcept {
-    std::lock_guard lock(m_mutex);
-    failLocked(error, dropped.value_or(RecordLocation{Stamp::now(), m_lastConnection, Kind::EngineError}));
-    m_wake.notify_one();
+    {
+        std::lock_guard lock(m_mutex);
+        failLocked(error, dropped.value_or(RecordLocation{Stamp::now(), m_lastConnection, Kind::EngineError}));
+        m_wake.notify_one();
+    }
+    logFirstFailure();
 }
 std::string Session::error() const { std::lock_guard lock(m_mutex); return m_error; }
 WriterStats Session::stats() const { std::lock_guard lock(m_mutex); return m_stats; }
