@@ -2,7 +2,7 @@
 
 `sentinel-roll` reads RAWL2 v1/v2 and writes the existing HMC2 minute near/deep
 and deep-hour series. It neither opens an exchange connection nor changes the
-running server/capture. The live recorder API, timer, queue-overflow behavior,
+running server/capture. The existing live recorder API behavior, timer, queue-overflow policy,
 writer defaults and server configuration are unchanged. Cutover remains slice D.
 
 Build and invoke through the machine queue:
@@ -26,7 +26,15 @@ bytes, wall seconds, records/s, JSON MB/s, output bytes and daily commit cutoffs
 
 The agent's measurements use only `roll-out/`; production backfill into the new
 `/Volumes/T7/sentinel-data/hmc2` root is an orchestrator operation after review.
-Never point this slice at the live recorder's `recording/` root.
+The CLI refuses the configured live `recording.dir` and `fallback_dir`, including
+canonical aliases and overlapping roots. It reads `config/server_config.yaml`
+and the server's optional `config/.server_config.yaml` from the working directory;
+`--config` cannot bypass those exclusions. Outside a checkout, supply a config
+containing `recording.dir`. Every selected product is checked before starting:
+existing `.hmc2` files without `<output>/<product>/roller.json` are refused by
+both the CLI and library, including dry runs. An interrupted first write before
+any checkpoint therefore requires a fresh output root, not an unsafe adoption
+of unowned files.
 
 ## Library and replay semantics
 
@@ -47,6 +55,8 @@ Never point this slice at the live recorder's `recording/` root.
   gap ends validity at the previous complete record's receive time. Only a new
   accepted snapshot restores it. V2 foreign events are filtered; kind-9 receipts
   do not provide book updates. Receipts with sequence gaps invalidate the book.
+  A bad frame sequence invalidates that frame and re-anchors sequence tracking;
+  a subsequent consecutive snapshot can restore the book without TransportUp.
 - `JournalFeed` shares snapshot/update/zero-size filtering in
   `marketdata/dispatch/BookParser.hpp`, and trade parsing in `MessageDispatcher`.
   Missing or parser-rejected timestamps use journal receive time. Live callers
@@ -54,9 +64,14 @@ Never point this slice at the live recorder's `recording/` root.
 - The driver supplies receive milliseconds explicitly and emits one tick per
   journal record, including heartbeats, lifecycle markers and receipts. EOF is
   never a tick. No elapsed wall time or producer speed determines a column.
+  At a day/range boundary, apply the first record at or beyond `end + latenessMs`
+  before stopping. It can finalize a pre-outage partial minute and deep hour;
+  the output ceiling suppresses buckets beyond the requested end.
 - Offline queue admission blocks; a snapshot larger than the configured level
   budget is admitted alone rather than split or invalidated. RAWL2's record cap
   bounds its size. Default live admission still has its existing overflow policy.
+  `requestStop()` wakes all blocked offline producers; callers join them before
+  destroying the recorder. The destructor uses the same stop/broadcast path.
 - Each day replays from its newest snapshot at/before UTC day start, or the first
   available later snapshot. This keeps the floating-point integration history and
   grid reference identical on restart. `commitFloorMs` suppresses already committed
@@ -85,7 +100,8 @@ Representative table (prices are test inputs, increments are archive metadata):
 | FARTCOIN-USD | 1 | 0.00001 | 100000 | 0.0001 | 0.0001 |
 | AVAX-USD | 30 | 0.001 | 1000 | 0.002 | 0.002 |
 
-`--config <yaml>` reads only the roller's `recording.products.<id>` overrides:
+`--config <yaml>` reads the roller's `recording.products.<id>` overrides
+(and live-root exclusions described above):
 `near_tick`, `deep_tick`, `price_scale`, `size_floor`. Tick overrides are also
 clamped/rounded to native increments. This does not change ServerDataModel's
 live/global config interpretation. To change an already checkpointed policy or
@@ -120,7 +136,7 @@ CRC rejection, torn-terminal-frame recovery and fsync use the existing primitive
 The separate mode is necessary for physical byte identity after resume; generic
 last-record-wins appends alone only provide decoded idempotence.
 
-## Decoded comparison and the legacy-parity blocker
+## Decoded comparison and controlled tick-schedule tolerance
 
 ```sh
 scripts/dev/build-queue.sh --label lt-astra/roller-a -- \
@@ -132,7 +148,12 @@ Optional final argument `3600000` compares deep hours. A qualifying minute exist
 on both sides, has `observedMs == 60000`, and has no `kResynced`. `kLateEvents` is
 masked. Header grid/size scale, metadata, bounds, sparse TWAP/peak codes and
 coverage are compared exactly. Hours require all 60 constituents to qualify.
-JSON lists every minute, exclusion reasons, and mismatch diagnostics. Exit 2
+JSON lists every minute, exclusion reasons, and diagnostics for every qualifying
+minute. `difference.twapCodeDeltaHistogram` counts signed **B minus A** code
+deltas for common `(row, side)` entries, including zero. `onlyA`/`onlyB` count
+unmatched entries separately. `difference.totalTwap.bid/ask` contains decoded
+base-unit totals `a`, `b`, `delta = b - a`, and `relativeDelta = delta / a`
+(null when `a == 0`); totals include unmatched entries. Exit 2
 means qualifying mismatches; exit 1 means a fatal invocation error. The existing
 HMC2 range reader logs unreadable files and excludes their missing buckets; a
 zero-qualifying result is not a parity pass.
@@ -150,9 +171,12 @@ The real independent-feed hour 2026-10-01 16:00-17:00 UTC has **58 qualifying,
 0 matching, 58 mismatching, 2 nonqualifying minutes per layer**. Those differences
 also include mids and peaks. Independent subscriptions and their batching are an
 additional possible cause, not isolated by that comparison. No legacy-parity pass
-is claimed. Exact legacy parity, unchanged live behavior and the specified new
-tick rule cannot all be asserted; the acceptance decision belongs to the owner.
-The same-journal two-roller byte-identity test remains strict.
+is claimed. The orchestrator's review round accepted this finding and replaced
+an exact cross-connection gate with a controlled same-input regression: mids,
+bounds, peaks and row sets match exactly; at most 1% of entries differ in TWAP
+code, maximum absolute delta is 32 codes, and decoded total TWAP per side differs
+by at most 0.01%, checked per qualifying minute on both layers. The checked-in
+fixture passes those bands. The same-journal byte-identity gate remains strict.
 The corresponding deep hour has zero qualifying hours and one nonqualifying
 hour, because two constituent minutes fail qualification.
 
@@ -210,3 +234,41 @@ mutations failed as expected and passed after restore/touch/rebuild (the first
 twelve as a batch, the daily dry-run reference and superseding-run mutations
 separately). The superseded-tail test was strengthened after the full run;
 both roller suites passed again after that test-only change.
+
+
+## Slice A review fixes (2026-10-03)
+
+The follow-up to `11dee5c` adds day/range-boundary silence coverage, live-root
+refusal, sequence recovery and blocked-producer shutdown regressions. The real
+BTC prefix now also exercises crash resume with thousands of entries and a
+durable minute ahead of its checkpoint; resumed HMC2 files match the clean run
+byte for byte. All roller tests use auto-cleaned `QTemporaryDir` directories
+beneath the CMake build directory, with no source-tree output dependency.
+The 16 roller cases pass, including the unchanged legacy fixture hash. All nine
+review-specific mutations failed with the behavior disabled and passed after
+source restoration, touch and rebuild: boundary finalization, unowned-root
+refusal, configured-root refusal, sequence recovery, stop broadcast, large delta
+resume, histogram sign, total-TWAP delta sign and controlled-fixture bands.
+Run `tests/roller/check_mutations.py --review` through the build queue to repeat
+those checks. The prospective two-step-deeper grid
+policy has not been implemented; the grid table above remains the policy.
+
+
+Review validation: full queued mac-clang build passed; CTest reported
+`100% tests passed, 0 tests failed out of 83` in 340.82 seconds. The 16 roller
+cases passed; all nine review mutations failed as intended and passed after
+restoration/touch/rebuild. Metal-dependent cases skipped in the sandbox.
+No HMC2/RAWL2/checkpoint files remained in the build-directory test scratch area.
+
+The new diagnostics on the retained identical-input fixture outputs report:
+
+| Layer/minute UTC | Entries | Differing TWAP codes | Differing fraction | Max code delta | Max absolute side-total delta |
+|---|---:|---:|---:|---:|---:|
+| near 04:54 | 4587 | 24 | 0.523218% | 11 | 0.000140795% |
+| near 04:55 | 4781 | 4 | 0.083665% | 23 | 0.000000139% |
+| deep 04:54 | 18369 | 3 | 0.016332% | 3 | 0.000001514% |
+| deep 04:55 | 18398 | 0 | 0% | 0 | 0% |
+
+Mids, bounds, peaks and row sets are exact. Full histograms/totals are in the
+local `roll-out/review-controlled-stats.json`; tests regenerate both outputs
+from the checked-in fixture and enforce the requested bands independently.

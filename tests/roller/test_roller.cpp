@@ -206,4 +206,141 @@ TEST(Roller, DiffQualifiesMasksLateAndDetectsContent) {
     EXPECT_EQ(report["qualifying"],3);EXPECT_EQ(report["matching"],3);EXPECT_EQ(report["nonqualifying"],1);
     { recording::Hmc2Store s(root/"b");++rows[2].entries[0].twapCode;s.append(rows[2]); }
     report=diff(root/"a",root/"b","BTC-USD","near",Epoch,Epoch+240'000);EXPECT_EQ(report["mismatching"],1);
+    const auto& d=report["minutes"][2]["difference"];
+    EXPECT_EQ(d["twapCodeDeltaHistogram"]["1"],1);
+    EXPECT_EQ(d["twapCodeDeltaHistogram"]["0"],rows[2].entries.size()-1);
+    for(bool ask:{false,true}) {
+        long double before=0,after=0;
+        for(size_t i=0;i<rows[2].entries.size();++i) {
+            const auto& e=rows[2].entries[i];if(e.isAsk!=ask)continue;
+            before+=recording::decodeSize(e.twapCode-(i==0),rows[2].header.sizeScale);
+            after+=recording::decodeSize(e.twapCode,rows[2].header.sizeScale);
+        }
+        const auto& total=d["totalTwap"][ask?"ask":"bid"];
+        EXPECT_DOUBLE_EQ(total["a"].get<double>(),double(before));
+        EXPECT_DOUBLE_EQ(total["b"].get<double>(),double(after));
+        EXPECT_DOUBLE_EQ(total["delta"].get<double>(),double(after-before));
+        EXPECT_DOUBLE_EQ(total["relativeDelta"].get<double>(),double((after-before)/before));
+    }
+}
+
+TEST(Roller, SilenceAcrossMidnightCommitsMinuteAndHour) {
+    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/boundary-XXXXXX"));
+    ASSERT_TRUE(temp.isValid()); const fs::path root=temp.path().toStdString();
+    constexpr int64_t day=86'400'000;
+    capture::WriterConfig cfg; cfg.root=QString::fromStdString((root/"raw").string()); cfg.fsyncBlocks=0;
+    capture::Writer writer(cfg,metadata());
+    writer.append(record(day-120'000,capture::Kind::Frame,snapshot()));
+    writer.append(record(day-30'000,capture::Kind::BookInvalidated,"{\"product\":\"BTC-USD\"}"));
+    writer.append(record(day+120'000,capture::Kind::Frame,snapshot()));
+    writer.append(record(day+182'000,capture::Kind::Frame,"{\"channel\":\"heartbeats\"}"));
+    writer.close();
+    RollOptions o{root/"raw",root/"two-days","BTC-USD",Epoch+day-120'000,Epoch+day+180'000};
+    roll(o);
+    const auto check = [&](const fs::path& output) {
+        for (const auto* layer:{"near","deep"}) {
+            const auto minutes=recording::Hmc2Store::readRange(output,"BTC-USD",layer,60'000,Epoch+day-120'000,Epoch+day);
+            ASSERT_EQ(minutes.size(),2); EXPECT_EQ(minutes.back().bucketStartMs,Epoch+day-60'000);
+            EXPECT_EQ(minutes.back().observedMs,30'000);
+        }
+        const auto hours=recording::Hmc2Store::readRange(output,"BTC-USD","deep",3'600'000,Epoch+day-3'600'000,Epoch+day);
+        ASSERT_EQ(hours.size(),1); EXPECT_EQ(hours[0].observedMs,90'000);
+    };
+    check(o.outputRoot);
+    o.outputRoot=root/"to-midnight"; o.toMs=Epoch+day; roll(o); check(o.outputRoot);
+    // A non-day --to boundary must retain the same partial minute too.
+    o.outputRoot=root/"to-minute";o.toMs=Epoch+day-60'000; roll(o);
+    const auto rows=recording::Hmc2Store::readRange(o.outputRoot,"BTC-USD","near",60'000,o.fromMs,o.toMs);
+    ASSERT_EQ(rows.size(),1); EXPECT_EQ(rows[0].observedMs,60'000);
+}
+
+TEST(Roller, SequenceErrorAllowsFollowingSnapshotWithoutTransportUp) {
+    for (const uint64_t bad : {uint64_t{13},uint64_t{9},uint64_t{10}}) {
+        JournalFeed feed("BTC-USD");int snapshots=0,updates=0;
+        feed.onSnapshot=[&](int64_t,int64_t,std::vector<recording::Level>){++snapshots;};
+        feed.onUpdates=[&](int64_t,int64_t,std::vector<recording::Level>){++updates;};
+        const auto apply=[&](uint64_t seq,const std::string& payload) {
+            auto j=json::parse(payload); j["sequence_num"]=seq;
+            feed.apply({record(0,capture::Kind::Frame,j.dump()),{"BTC-USD","run",0,0},{},false,1});
+        };
+        apply(10,snapshot()); apply(bad,update(1));
+        apply(bad+1,snapshot()); apply(bad+2,update(2));
+        EXPECT_EQ(snapshots,2); EXPECT_EQ(updates,1);
+    }
+}
+
+TEST(Roller, StopWakesBlockedProducerBeforeWorkerDrains) {
+    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/shutdown-XXXXXX")); ASSERT_TRUE(temp.isValid());
+    auto cfg=deriveGrid(metadata()["product_metadata"],100000).config(temp.path().toStdString());
+    cfg.maxQueuedLevels=1;
+    std::promise<void> workerEntered,releaseWorker,producerWaiting;
+    auto release=releaseWorker.get_future().share();std::atomic<bool> first{true};int waiting=0;
+    cfg.publisher=[](auto){};
+    cfg.beforePublicationForTest=[&](bool){if(first.exchange(false)){workerEntered.set_value();release.wait();}};
+    cfg.beforeQueueWaitForTest=[&]{if(++waiting==2)producerWaiting.set_value();};
+    recording::BookRecorder recorder(cfg);
+    recorder.onSnapshotAt("BTC-USD",Epoch,Epoch,{{true,99999.99,2},{false,100000.01,3}});recorder.drain();
+    recorder.onTick(Epoch+1000);
+    workerEntered.get_future().wait();
+    recorder.onUpdatesAt("BTC-USD",Epoch+1001,Epoch+1001,{{true,99999.99,4}});
+    const auto enqueue=[&]{
+        try {recorder.onUpdatesAt("BTC-USD",Epoch+1002,Epoch+1002,{{true,99999.99,5}});return false;}
+        catch(const std::runtime_error& e){return std::string(e.what())=="recorder stopped";}
+    };
+    auto producer=std::async(std::launch::async,enqueue);
+    auto secondProducer=std::async(std::launch::async,enqueue);
+    producerWaiting.get_future().wait();
+    recorder.requestStop();
+    const auto status=producer.wait_for(std::chrono::seconds(2));
+    const auto secondStatus=secondProducer.wait_for(std::chrono::seconds(2));
+    // Release on failure too: the mutation test must fail rather than deadlock.
+    releaseWorker.set_value();
+    EXPECT_EQ(status,std::future_status::ready);EXPECT_EQ(secondStatus,std::future_status::ready);
+    EXPECT_TRUE(producer.get());EXPECT_TRUE(secondProducer.get());
+}
+
+TEST(Roller, RefusesUnownedHmc2AndConfiguredRecorderRoots) {
+    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/roots-XXXXXX"));ASSERT_TRUE(temp.isValid());
+    const fs::path root=temp.path().toStdString(); fixture(root/"raw");
+    fs::create_directories(root/"unowned"/"BTC-USD"/"near");
+    const auto marker=root/"unowned"/"BTC-USD"/"near"/"existing.hmc2";save(marker,"do not touch");
+    auto o=options(root/"raw",root/"unowned");
+    EXPECT_THROW(roll(o),std::runtime_error);EXPECT_EQ(contents(marker),"do not touch");
+    // Exercise the real CLI config discovery from a temporary working directory.
+    const auto previous=fs::current_path();
+    struct Restore {fs::path path;~Restore(){fs::current_path(path);}} restore{previous};
+    fs::create_directories(root/"config");
+    save(root/"config"/"server_config.yaml","recording:\n  dir: '"+(root/"live").string()+"'\n");
+    fs::current_path(root);
+    auto invoke=[&](const fs::path& output) {
+        std::vector<std::string> args={"sentinel-roll",(root/"raw").string(),output.string(),"--products","BTC-USD",
+            "--from","2027-01-01","--to","2027-01-02"};
+        std::vector<char*> argv;for(auto& a:args)argv.push_back(a.data());
+        return rollMain(int(argv.size()),argv.data());
+    };
+    EXPECT_EQ(invoke(root/"live"),1); EXPECT_FALSE(fs::exists(root/"live"));
+    fs::create_directory(root/"live");
+    fs::create_directory_symlink(root/"live",root/"live-alias");
+    EXPECT_EQ(invoke(root/"live-alias"),1);
+    EXPECT_EQ(invoke(root/"unowned"),1);EXPECT_EQ(contents(marker),"do not touch");
+}
+
+TEST(Roller, RealJournalCrashResumeRestoresLargeDeltaBase) {
+    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/real-resume-XXXXXX"));ASSERT_TRUE(temp.isValid());
+    const fs::path root=temp.path().toStdString();fs::create_directories(root/"raw");
+    fs::copy_file(ROLLER_FIXTURE,root/"raw"/"btc.rawl2");
+    const auto from=parseTime("2026-10-01T04:53:00Z"),to=from+180'000;
+    RollOptions o{root/"raw",root/"clean","BTC-USD",from,to};roll(o);
+    JournalReader reader(root/"raw","BTC-USD");JournalRecord item;uint64_t crashAt=0;
+    while(reader.next(item)){++crashAt;if(item.record.time.systemNs/1'000'000>=from+130'000)break;}
+    auto resumed=o;resumed.outputRoot=root/"resumed";
+    resumed.afterRecordForTest=[&](uint64_t n){if(n==crashAt)throw std::runtime_error("simulated crash");};
+    EXPECT_THROW(roll(resumed),std::runtime_error);
+    const auto cp=json::parse(contents(resumed.outputRoot/"BTC-USD"/"roller.json"));
+    const auto persisted=recording::Hmc2Store::readRange(resumed.outputRoot,"BTC-USD","deep",60'000,from,to);
+    ASSERT_GE(persisted.size(),2);EXPECT_GT(persisted.back().entries.size(),1000);
+    EXPECT_GT(persisted.back().bucketStartMs+60'000,cp["committedThroughMs"].get<int64_t>());
+    resumed.afterRecordForTest={};roll(resumed);
+    EXPECT_EQ(files(o.outputRoot),files(resumed.outputRoot));
+    const auto before=files(resumed.outputRoot);roll(resumed);EXPECT_EQ(files(resumed.outputRoot),before);
 }

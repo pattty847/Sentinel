@@ -13,6 +13,7 @@ struct RollOptions {
     // checkpoint fence. Throw to interrupt; the next run must recover identically.
     std::function<void(uint64_t)> afterRecordForTest;
 };
+void validateOutputProduct(const std::filesystem::path& root, const std::string& product);
 nlohmann::json roll(const RollOptions& options);
 nlohmann::json diff(const std::filesystem::path& a, const std::filesystem::path& b,
                     const std::string& product, const std::string& layer, int64_t from, int64_t to,

@@ -54,7 +54,16 @@ int64_t parseTime(const std::string& text) {
     if (ms < recording::kHmc2MinMs || ms >= recording::kHmc2EndMs) throw std::runtime_error("time out of range");
     return ms;
 }
+void validateOutputProduct(const fs::path& root, const std::string& product) {
+    capture::validateSymbol(product);
+    const auto dir = root/product;
+    if (fs::exists(dir) && !fs::is_regular_file(dir/"roller.json"))
+        for (const auto& entry : fs::recursive_directory_iterator(dir))
+            if (entry.is_regular_file() && entry.path().extension() == ".hmc2")
+                throw std::runtime_error("refusing HMC2 product without roller.json: " + dir.string());
+}
 json roll(const RollOptions& o) {
+    validateOutputProduct(o.outputRoot, o.product);
     if (o.fromMs < recording::kHmc2MinMs || o.toMs <= o.fromMs || o.toMs >= recording::kHmc2EndMs ||
         o.fromMs % Minute || o.toMs % Minute) throw std::runtime_error("roll range must contain complete UTC minutes");
     capture::validateSymbol(o.product);
@@ -83,6 +92,7 @@ json roll(const RollOptions& o) {
         std::unique_ptr<recording::BookRecorder> recorder;
         uint64_t hash = 0, checkpointColumns = 0;
         bool gridReady = false;
+        int64_t latenessMs = recording::RecorderConfig{}.latenessMs;
         int64_t savedThrough = from, lastFence = -1;
         json dayReport = {{"day",QDateTime::fromMSecsSinceEpoch(day,QTimeZone::UTC).toString("yyyy-MM-dd").toStdString()}};
         JournalRecord input;
@@ -97,6 +107,7 @@ json roll(const RollOptions& o) {
                 const auto grid = deriveGrid(input.metadata,std::midpoint(bid,ask),o.overrides);
                 auto cfg = grid.config(o.outputRoot);
                 hash = configHash(cfg);
+                latenessMs = cfg.latenessMs;
                 cfg.commitFloorMs = from; cfg.commitCeilingMs = end;
                 if (cp["days"].contains(key)) {
                     const auto& saved = cp["days"][key];
@@ -137,13 +148,14 @@ json roll(const RollOptions& o) {
         while (reader.next(input)) {
             // No synthetic EOF tick: only actual journal records prove elapsed time.
             // Warmup is read in journal order; receipt clock need not be monotonic.
-            if (input.record.time.systemNs / 1'000'000 >= end + 60'000) break;
             feed.apply(input); applied = input.pos; ++records;
             if (input.record.kind == capture::Kind::Frame) bytes += input.record.payload.size();
             if (o.afterRecordForTest) o.afterRecordForTest(records);
             const auto minute = input.record.time.systemNs / 1'000'000 / Minute;
             if (minute != lastFence) { fence(); lastFence = minute; }
-            if (recorder && savedThrough >= end) break;
+            // Apply the first post-range record: it proves the final pending
+            // minute/hour can commit even when capture was silent across end.
+            if (input.record.time.systemNs / 1'000'000 >= end + latenessMs) break;
         }
         fence();
         if (recorder) columns += recorder->stats().columnsWritten;

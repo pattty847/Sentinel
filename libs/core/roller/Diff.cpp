@@ -52,20 +52,32 @@ nlohmann::json diff(const std::filesystem::path& a,const std::filesystem::path& 
         else ++excluded;
         details.push_back({{"bucketMs",t},{"qualifies",qualifiesHere},{"result",reason},
             {"observedA",l.contains(t)?l[t]->observedMs:0},{"observedB",r.contains(t)?r[t]->observedMs:0}});
-        if (qualifiesHere && reason == "mismatch") {
+        if (qualifiesHere) {
             const auto& a=*l[t]; const auto& b=*r[t];
             std::map<std::pair<int64_t,bool>,std::pair<int,int>> codesA,codesB;
             for(const auto& e:a.entries) codesA[{e.row,e.isAsk}]={e.twapCode,e.peakCode};
             for(const auto& e:b.entries) codesB[{e.row,e.isAsk}]={e.twapCode,e.peakCode};
+            nlohmann::json histogram=nlohmann::json::object(), totals=nlohmann::json::object();
+            for (bool ask : {false,true}) {
+                long double totalA=0,totalB=0;
+                for (const auto& e:a.entries) if (e.isAsk==ask) totalA+=recording::decodeSize(e.twapCode,a.header.sizeScale);
+                for (const auto& e:b.entries) if (e.isAsk==ask) totalB+=recording::decodeSize(e.twapCode,b.header.sizeScale);
+                const auto delta=totalB-totalA;
+                totals[ask ? "ask" : "bid"]={{"a",double(totalA)},{"b",double(totalB)},{"delta",double(delta)},
+                    {"relativeDelta",totalA ? nlohmann::json(double(delta/totalA)) : nlohmann::json(nullptr)}};
+            }
             uint64_t onlyA=0,onlyB=0,twap=0,peak=0;int maxTwap=0;
             for(const auto& [key,value]:codesA) {
                 const auto it=codesB.find(key);
                 if(it==codesB.end()) {++onlyA;continue;}
+                const auto delta=std::to_string(it->second.first-value.first);
+                histogram[delta]=histogram.value(delta,uint64_t{0})+1;
                 twap+=value.first!=it->second.first;peak+=value.second!=it->second.second;
                 maxTwap=std::max(maxTwap,std::abs(value.first-it->second.first));
             }
             for(const auto& [key,value]:codesB) if(!codesA.contains(key))++onlyB;
             details.back()["difference"]={{"entriesA",a.entries.size()},{"entriesB",b.entries.size()},
+                {"twapCodeDeltaHistogram",histogram},{"totalTwap",totals},
                 {"onlyA",onlyA},{"onlyB",onlyB},{"twapCodes",twap},{"peakCodes",peak},{"maxTwapCodeDelta",maxTwap},
                 {"midsA",{a.midOpen,a.midClose,a.midMin,a.midMax}},{"midsB",{b.midOpen,b.midClose,b.midMin,b.midMax}},
                 {"midsEqual",std::tie(a.midOpen,a.midClose,a.midMin,a.midMax)==std::tie(b.midOpen,b.midClose,b.midMin,b.midMax)},

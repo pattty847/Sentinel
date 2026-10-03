@@ -184,12 +184,16 @@ struct BookRecorder::Impl {
             throw std::invalid_argument("BookRecorder: missing local clock");
         worker = std::thread([this] { run(); });
     }
-    ~Impl() {
+    void requestStop() {
         {
             std::lock_guard lock(mutex);
             stopping = true;
         }
         wake.notify_one();
+        if (cfg.blockingQueue) space.notify_all();
+    }
+    ~Impl() {
+        requestStop();
         worker.join();
         sLog_Data("BookRecorder: stopped; open minutes and uncommitted lateness tail dropped");
     }
@@ -198,12 +202,14 @@ struct BookRecorder::Impl {
         if (cfg.blockingQueue) {
             // An oversized atomic snapshot is admitted alone, bounded by RAWL2's
             // record cap. Splitting it would change atomic peak semantics.
-            space.wait(lock, [&] {
+            const auto ready = [&] {
                 return stopping || (count < kQueueSlots - 1 &&
                     (m.levels.size() <= cfg.maxQueuedLevels
                         ? queuedLevels <= cfg.maxQueuedLevels - m.levels.size()
                         : queuedLevels == 0));
-            });
+            };
+            if (!ready() && cfg.beforeQueueWaitForTest) cfg.beforeQueueWaitForTest();
+            space.wait(lock, ready);
             if (stopping) throw std::runtime_error("recorder stopped");
         }
         if (emergency || count == kQueueSlots) {
@@ -885,6 +891,7 @@ BookRecorder::BookRecorder(RecorderConfig cfg) : BookRecorder(std::move(cfg), sy
 BookRecorder::BookRecorder(RecorderConfig cfg, std::function<int64_t()> clock)
     : impl_(std::make_unique<Impl>(std::move(cfg), std::move(clock))) {}
 BookRecorder::~BookRecorder() = default;
+void BookRecorder::requestStop() { impl_->requestStop(); }
 void BookRecorder::onSnapshot(const std::string &symbol, int64_t time, std::vector<Level> levels) {
     impl_->enqueue(
         {Impl::Kind::Snapshot, impl_->internSymbol(symbol), {}, time, impl_->localClock(), std::move(levels)});

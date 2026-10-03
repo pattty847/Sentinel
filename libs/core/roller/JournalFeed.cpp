@@ -39,9 +39,10 @@ void JournalFeed::apply(const JournalRecord& input) {
                 if (!value.is_number_integer() || value.get<int64_t>() < 0 || value.get<int64_t>() == INT64_MAX)
                     throw std::runtime_error("invalid journal sequence number");
                 const auto seq = value.get<uint64_t>();
-                if (sequence_ && (seq <= *sequence_ || (input.version == 1 && seq != *sequence_ + 1)))
-                    throw std::runtime_error("journal sequence gap/regression");
-                sequence_ = seq;
+                const bool discontinuity = sequence_ &&
+                    (seq <= *sequence_ || (input.version == 1 && seq != *sequence_ + 1));
+                sequence_ = seq; // Re-anchor sequence tracking, but require a fresh book snapshot.
+                if (discontinuity) throw std::runtime_error("journal sequence gap/regression");
             }
             const auto channel = j.value("channel", "");
             if (channel == "l2_data") {

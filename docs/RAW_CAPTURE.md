@@ -673,6 +673,6 @@ recorder. It shares the engine's floating-point L2/trade parsers, derives daily
 product grids from journal metadata, and drives BookRecorder with one receive-time
 tick per record. It supports bounded blocking admission, durable checkpoints,
 resume, idempotent reruns, dry-run reports and decoded `hmc2_diff` comparisons.
-See [roller commands, recovery rules, measurements and the legacy-parity
-blocker](ROLLER.md). Production backfill and service cutover remain separate
+See [roller commands, recovery rules, measurements and the controlled tick-schedule
+comparison](ROLLER.md). Production backfill and service cutover remain separate
 orchestrator operations. This slice's outputs are under the agent's `roll-out/`.

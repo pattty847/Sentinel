@@ -28,6 +28,36 @@ def test(name, expect_failure=False):
     if expect_failure and '[  FAILED  ]' not in output:
         raise RuntimeError('mutation failed outside the assertion harness')
 
+review_mutations = [
+ ('range boundary', 'libs/core/roller/Roller.cpp',
+  'feed.apply(input); applied = input.pos;',
+  "if (input.record.time.systemNs / 1'000'000 >= end + 60'000) break; feed.apply(input); applied = input.pos;",
+  'Roller.SilenceAcrossMidnightCommitsMinuteAndHour'),
+ ('unowned HMC2 root', 'libs/core/roller/Roller.cpp',
+  'if (fs::exists(dir) && !fs::is_regular_file(dir/"roller.json"))', 'if (false)',
+  'Roller.RefusesUnownedHmc2AndConfiguredRecorderRoots'),
+ ('configured live root', 'libs/core/roller/RollCli.cpp',
+  'if (dest.starts_with(live) || live.starts_with(dest))', 'if (false)',
+  'Roller.RefusesUnownedHmc2AndConfiguredRecorderRoots'),
+ ('sequence recovery', 'libs/core/roller/JournalFeed.cpp',
+  'sequence_ = seq; // Re-anchor sequence tracking', 'if (!discontinuity) sequence_ = seq; // Re-anchor sequence tracking',
+  'Roller.SequenceErrorAllowsFollowingSnapshotWithoutTransportUp'),
+ ('stop broadcast', 'libs/core/servermodel/BookRecorder.cpp',
+  'if (cfg.blockingQueue) space.notify_all();', 'if (cfg.blockingQueue) space.notify_one();',
+  'Roller.StopWakesBlockedProducerBeforeWorkerDrains'),
+ ('large delta resume', 'libs/core/roller/Grid.cpp',
+  'c.blockingQueue = c.deterministicResume = true;', 'c.blockingQueue = true; c.deterministicResume = false;',
+  'Roller.RealJournalCrashResumeRestoresLargeDeltaBase'),
+ ('delta histogram', 'libs/core/roller/Diff.cpp',
+  'std::to_string(it->second.first-value.first)', 'std::to_string(value.first-it->second.first)',
+  'Roller.DiffQualifiesMasksLateAndDetectsContent'),
+ ('total TWAP delta', 'libs/core/roller/Diff.cpp',
+  'const auto delta=totalB-totalA;', 'const auto delta=totalA-totalB;',
+  'Roller.DiffQualifiesMasksLateAndDetectsContent'),
+ ('controlled fixture bands', 'libs/core/roller/JournalFeed.cpp',
+  'levels.push_back({l.isBid,l.price,l.quantity});', 'levels.push_back({l.isBid,l.price,l.quantity*1.01});',
+  'RollerLiveFixture.ControlledTickScheduleStaysWithinBands'),
+]
 mutations = [
  ('superseding run', 'libs/core/roller/JournalReader.cpp',
   'files_[i].superseded = i + 1 < files_.size();', 'files_[i].superseded = false;', 'Roller.PendingFramingDeferredUntilSealedOrSuperseded'),
@@ -59,8 +89,9 @@ mutations = [
   'return fallback ? *fallback : std::chrono::system_clock::now();',
   'return std::chrono::system_clock::now();', 'Roller.FeedFiltersProductsClocksAndLifecycle'),
 ]
+mutations += review_mutations
 if len(sys.argv) > 1:
-    mutations = [m for m in mutations if m[0] == sys.argv[1]]
+    mutations = review_mutations if sys.argv[1] == '--review' else [m for m in mutations if m[0] == sys.argv[1]]
     if not mutations: raise RuntimeError('unknown mutation')
 build()
 command(['ctest','--test-dir','build/mac-clang','-R','^Roller','--output-on-failure'])

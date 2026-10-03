@@ -5,7 +5,7 @@ Status: decision plan, 2026-10-02. Owner direction (approved): one stream per as
 delete the redundancy that keeps two worlds. Builds on
 `docs/research/2026-10-per-symbol-connections.md` (per-product connections, RAWL2 v1 per
 product, shared queue pool; slices 1-3 in flight). Line numbers refer to `main` at 30f17d4.
-Original read-only study; see "Slice A as built" below for implementation and the measured parity blocker.
+Original read-only study; see "Slice A as built" below for implementation and the measured parity difference and review acceptance bands.
 
 ## 0. Today, measured (two worlds)
 
@@ -385,18 +385,7 @@ The recorder stall alert A1 keeps its meaning: last column age > 240 s while
 4. Rebuilt history goes to a new root `/Volumes/T7/sentinel-data/hmc2` (the 09-28/29 BTC days copied in).
 5. Parity = run-to-run byte identity of the roller plus decoded-record parity with the recorder on qualifying minutes (observedMs == 60000, no kResynced, kLateEvents masked); not whole-file byte parity.
 
-## Owner decisions, round 2 (2026-10-03): acceptance after slice A
-
-Supersedes decision 5 (parity). Exact decoded parity with the live recorder is not achievable (independent Coinbase connections; 250 ms timer ticks vs record-time ticks) and is not a goal.
-
-1. **Strict, same journal:** the roller is byte-identical run to run and after a crash-resume on a real-sized journal; in slice C the live roller equals the batch roller per bucket (mismatch metric 0 for 48 h).
-2. **Strict, identical input, legacy timer ticks vs record-time ticks** (pinned fixture test): mids, bounds, peaks and row sets exact; per cell |delta TWAP code| <= 32 codes (one code = 0.085% of size, so 32 codes ~= 2.7% of that cell's size; observed max 23); at most 1% of cells may differ at all; total TWAP per side within 0.01%.
-3. **Informational only, cross-connection** (daily report, never a gate): per qualifying minute total TWAP per side within 0.5%, |delta mid| <= 0.02% of price, entry count within 1%, row-set overlap >= 99%.
-4. **Deep grid:** for products without an override, deep tick = two 1-2-5 steps above the near tick (e.g. ETH 0.5 -> 2, SOL 0.02 -> 0.1); BTC keeps near $1 / deep $5.
-5. Slice A is accepted only after the midnight column-loss fix and the live-recorder-root refusal land with tests.
-6. No additional snapshot/state-checkpoint machinery for this (no hourly roller state snapshots); the existing journal-snapshot replay and checkpoint stay as built.
-
-## Slice A as built (2026-10-03; uncommitted, parity gate unresolved)
+## Slice A as built (2026-10-03; baseline 11dee5c, review fixes uncommitted)
 
 Implementation and measurements: [docs/ROLLER.md](../ROLLER.md). Added the
 `libs/core/roller` library, thin `sentinel-roll` / `hmc2_diff` bootstraps, shared
@@ -444,15 +433,36 @@ need not have identical batch timing, mids or peaks.
 Measured real BTC hour 2026-10-01 16:00-17:00 UTC, both layers: 58 qualifying,
 0 matching, 58 mismatching, 2 nonqualifying minutes. Legacy parity is **not
 passed**. The prescribed tick semantics and unchanged live behavior conflict
-with asserting exact legacy decoded parity. Owner acceptance is needed to replace
-that gate with same-journal roller determinism plus reported legacy differences;
-until then slice A is blocked on its parity criterion, not ready for cutover.
+with asserting exact legacy decoded parity. The orchestrator's review follow-up
+accepted this finding and requested a pinned same-input tolerance test: exact
+mids/bounds/peaks/row sets, <=1% differing TWAP entries, maximum code delta 32,
+and <=0.01% decoded total-TWAP delta per side, per qualifying minute. This test
+passes for both layers; same-journal byte determinism remains strict. Slice A
+still does not authorize service cutover.
 The deep hour is nonqualifying because two constituent minutes fail the gate.
 A second full BTC day on the final code took 52.348 seconds and reproduced all
 three HMC2 files and the checkpoint byte for byte.
 
-Validation: full queued mac-clang build passed; final CTest reported 83/83 suites
+Baseline validation: full queued mac-clang build passed; CTest reported 83/83 suites
 passed (353.73 s), with Metal-dependent cases explicitly skipped in the sandbox.
 All ten new cases pass; fourteen fail-without-behavior mutations were verified
 with source restoration, touch and rebuild between runs. No GPU/visual result is
-claimed. The work remains uncommitted for orchestrator review and rebase.
+claimed. Baseline was committed by the orchestrator as `11dee5c`.
+
+Review fixes apply the first record reaching end+lateness before stopping a day
+or range, preserving pre-outage partial minutes and hour rollups. CLI preflight
+refuses configured live roots and product trees containing HMC2 without a roller
+checkpoint. Sequence tracking recovers after discontinuities; stop broadcasts
+wake blocked offline producers. Real-fixture crash resume verifies restored
+large delta bases. Diff JSON adds signed code-delta histograms and decoded TWAP
+totals/deltas by side. Tests use build-directory temporary output and clean up.
+The pending deep-grid change is deliberately not implemented. Review fixes
+remain uncommitted for the orchestrator.
+
+
+Review-fix validation: full queued build passed; 83/83 CTest suites passed in
+340.82 seconds (Metal-dependent cases skipped). All 16 roller cases and nine
+review-specific fail-without-fix checks passed after restoration and rebuild.
+Controlled comparison worst cases: 0.523218% differing entries, 23-code maximum
+absolute delta, and 0.000140795% maximum absolute total-TWAP delta per side;
+mids/bounds/peaks/row sets exact. See docs/ROLLER.md for per-minute results.
