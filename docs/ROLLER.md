@@ -64,9 +64,12 @@ of unowned files.
 - The driver supplies receive milliseconds explicitly and emits one tick per
   journal record, including heartbeats, lifecycle markers and receipts. EOF is
   never a tick. No elapsed wall time or producer speed determines a column.
-  At a day/range boundary, apply the first record at or beyond `end + latenessMs`
-  before stopping. It can finalize a pre-outage partial minute and deep hour;
-  the output ceiling suppresses buckets beyond the requested end.
+  At a day/range boundary, keep applying records until a drained checkpoint
+  fence confirms the recorder committed through `end`, or until journal EOF.
+  Receive time can lead the envelope-based integration clock, so a receive-time
+  cutoff cannot prove that the final minute/hour committed. The output ceiling
+  suppresses later buckets. Dry runs retain a receive-time scan bound for their
+  input report and never claim committed progress.
 - Offline queue admission blocks; a snapshot larger than the configured level
   budget is admitted alone rather than split or invalidated. RAWL2's record cap
   bounds its size. Default live admission still has its existing overflow policy.
@@ -279,3 +282,43 @@ The new diagnostics on the retained identical-input fixture outputs report:
 Mids, bounds, peaks and row sets are exact. Full histograms/totals are in the
 local `roll-out/review-controlled-stats.json`; tests regenerate both outputs
 from the checked-in fixture and enforce the requested bands independently.
+
+
+## Envelope-clock boundary regression (2026-10-03)
+
+The initial boundary fix still stopped too early when receive time led the
+recorder's integration clock. A writing roller now stops only when a drained
+fence has persisted a checkpoint through the requested end, or at journal EOF.
+The new captured 16:00 boundary fixture retains original records/timestamps;
+restoring the receive-time cutoff fails its last-minute/hour assertion. The
+fixture's provenance and compression-only reblocking are documented in
+`tests/roller/fixtures/README.md`.
+
+Re-rolling the complete BTC archive for 2026-10-01 15:00-16:00 UTC into
+`roll-out/review-boundary-watermark` produced:
+
+| Series | Records | Last bucket UTC | observedMs | Entries |
+|---|---:|---|---:|---:|
+| near 1m | 60 | 15:59 | 60000 | 4754 |
+| deep 1m | 60 | 15:59 | 60000 | 18388 |
+| deep 1h | 1 | 15:00 | 3526561 | 18607 |
+
+The hour is partial/resynced according to the captured intervals; it is persisted
+without inventing observation. `committedThroughMs` is 1790870400000 (16:00 UTC).
+The rerun wrote zero columns and preserved all three HMC2 files and checkpoint
+bytes. Evidence: `roll-out/review-boundary-watermark-evidence.json`. The initial
+roll took 33.836 seconds including day-anchor warmup; no production root was
+written and no service was changed.
+
+
+Boundary-fix validation: the new captured-hour assertion failed with the old
+receive-time cutoff restored and passed after source restoration, touch and
+rebuild. Both roller suites passed (17 cases). The full queued mac-clang build
+passed. Full CTest passed 84/85 suites in 352.78 seconds; the untouched
+`RecordingServerStop.ActualServerStartStopStartRestoresLiveDelivery` test failed
+its listener check at line 324 with repeated Bad file descriptor accept errors.
+The queued `RecordingServerStopTests` rerun passed unchanged (1/1 suite, 8.99 s).
+This intermittent server lifecycle failure is recorded separately as FM-154;
+no server lifecycle source was changed for the boundary fix. Metal-dependent
+cases explicitly skipped in the sandbox. Both real-roll logs had zero W/E/F
+lines, and the final diff passes whitespace checks.

@@ -29,6 +29,10 @@ def test(name, expect_failure=False):
         raise RuntimeError('mutation failed outside the assertion harness')
 
 review_mutations = [
+ ('envelope boundary', 'libs/core/roller/Roller.cpp',
+  'if (recorder && savedThrough >= end) break;',
+  "if (recorder && input.record.time.systemNs / 1'000'000 >= end + latenessMs) break;",
+  'Roller.CapturedHourBoundaryWaitsForCommittedWatermark'),
  ('range boundary', 'libs/core/roller/Roller.cpp',
   'feed.apply(input); applied = input.pos;',
   "if (input.record.time.systemNs / 1'000'000 >= end + 60'000) break; feed.apply(input); applied = input.pos;",

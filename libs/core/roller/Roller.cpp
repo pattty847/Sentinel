@@ -153,9 +153,11 @@ json roll(const RollOptions& o) {
             if (o.afterRecordForTest) o.afterRecordForTest(records);
             const auto minute = input.record.time.systemNs / 1'000'000 / Minute;
             if (minute != lastFence) { fence(); lastFence = minute; }
-            // Apply the first post-range record: it proves the final pending
-            // minute/hour can commit even when capture was silent across end.
-            if (input.record.time.systemNs / 1'000'000 >= end + latenessMs) break;
+            // Receive time can lead the recorder's envelope-based integration
+            // clock. Only a drained, committed watermark proves range completion.
+            if (recorder && savedThrough >= end) break;
+            // Dry runs retain their receive-time scan bound, without claiming commits.
+            if (o.dryRun && input.record.time.systemNs / 1'000'000 >= end + latenessMs) break;
         }
         fence();
         if (recorder) columns += recorder->stats().columnsWritten;

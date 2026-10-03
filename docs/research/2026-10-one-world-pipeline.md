@@ -460,8 +460,10 @@ All ten new cases pass; fourteen fail-without-behavior mutations were verified
 with source restoration, touch and rebuild between runs. No GPU/visual result is
 claimed. Baseline was committed by the orchestrator as `11dee5c`.
 
-Review fixes apply the first record reaching end+lateness before stopping a day
-or range, preserving pre-outage partial minutes and hour rollups. CLI preflight
+Review fixes keep applying journal records until a drained fence confirms the
+recorder committed through the day/range end (or EOF). Receive time can lead its
+envelope-based integration clock, so reaching end+lateness in receive time is
+not a commit proof; stopping there drops the last pending minute/hour. CLI preflight
 refuses configured live roots and product trees containing HMC2 without a roller
 checkpoint. Sequence tracking recovers after discontinuities; stop broadcasts
 wake blocked offline producers. Real-fixture crash resume verifies restored

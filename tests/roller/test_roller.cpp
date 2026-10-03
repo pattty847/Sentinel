@@ -353,3 +353,28 @@ TEST(Roller, RealJournalCrashResumeRestoresLargeDeltaBase) {
     EXPECT_EQ(files(o.outputRoot),files(resumed.outputRoot));
     const auto before=files(resumed.outputRoot);roll(resumed);EXPECT_EQ(files(resumed.outputRoot),before);
 }
+
+TEST(Roller, CapturedHourBoundaryWaitsForCommittedWatermark) {
+    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/real-boundary-XXXXXX"));ASSERT_TRUE(temp.isValid());
+    const fs::path root=temp.path().toStdString(),fixtures=fs::path(ROLLER_FIXTURE).parent_path();
+    fs::create_directories(root/"raw");
+    // Original captured records around the reported 16:00 boundary, reblocked
+    // for compression only. No timestamp shifts, omitted records or synthetic ticks.
+    fs::copy_file(fixtures/"btc-hour-boundary.rawl2",root/"raw"/"btc.rawl2");
+    const auto from=parseTime("2026-10-01T15:00:00Z"),end=from+3'600'000;
+    RollOptions o{root/"raw",root/"out","BTC-USD",from,end};
+    const auto report=roll(o);
+    EXPECT_EQ(report["days"][0]["committedThroughMs"],end);
+    for(const auto* layer:{"near","deep"}) {
+        const auto minutes=recording::Hmc2Store::readRange(o.outputRoot,"BTC-USD",layer,60'000,from,end);
+        ASSERT_EQ(minutes.size(),36); // Snapshot starts at 15:24; earlier minutes are unknown.
+        EXPECT_EQ(minutes.back().bucketStartMs,end-60'000);EXPECT_EQ(minutes.back().observedMs,60'000);
+    }
+    const auto hours=recording::Hmc2Store::readRange(o.outputRoot,"BTC-USD","deep",3'600'000,from,end);
+    ASSERT_EQ(hours.size(),1);EXPECT_EQ(hours[0].bucketStartMs,from);
+    EXPECT_GT(hours[0].observedMs,35*60'000);EXPECT_LT(hours[0].observedMs,36*60'000);
+    const auto before=files(o.outputRoot);
+    const auto checkpoint=contents(o.outputRoot/"BTC-USD"/"roller.json");
+    EXPECT_EQ(roll(o)["columnsWritten"],0);
+    EXPECT_EQ(files(o.outputRoot),before);EXPECT_EQ(contents(o.outputRoot/"BTC-USD"/"roller.json"),checkpoint);
+}
