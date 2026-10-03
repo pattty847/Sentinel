@@ -36,7 +36,7 @@ Last updated: 2026-10-03 00:55 EDT.
 
 - Owner decides behaviour, data and looks; the orchestrator decides the rest with stated defaults. One digest,
   at most 2-3 items waiting on the owner.
-- Routing (2026-10-03): Claude budget is nearly spent, so Codex writes AND reviews (sol <-> astra); Claude
-  only conducts. Fable only for a must-have recorder/GPU-core gate.
+- Routing (2026-10-03): Codex writes; Claude Fable (separate usage limit) reviews Codex work; avoid Claude
+  opus/sonnet subagents until the owner says the Claude weekly has reset.
 - No sounds while the owner is away; loud ping only when the owner is needed.
 - Builds and tests go through `scripts/dev/build-queue.sh`.
