@@ -3,7 +3,7 @@
 Live state for whoever conducts the agents next (Claude or Codex). Update it when something
 lands, deploys or changes priority. Rules: `AGENTS.md`; loop: `docs/AGENT_WORKFLOW.md`.
 
-Last updated: 2026-10-03 06:20 EDT (orchestrator hit its usage limit; resume from here).
+Last updated: 2026-10-03 08:40 EDT. Trade bubbles landed; main GUI rebuilt.
 
 ## Running services (owner's Mac, launchd)
 
@@ -16,11 +16,11 @@ Last updated: 2026-10-03 06:20 EDT (orchestrator hit its usage limit; resume fro
 
 | Branch | State | Next step |
 |---|---|---|
-| `lt-astra/trade-bubbles` | land gate failed 2 GPU test groups (HeatmapChartUi OffscreenQuick init order; UgrGpu idle redraw 3>2); Claude Fable fixing in the worktree | Codex review of the fix, land, rebuild main GUI |
+| (none) | | |
 
 ## Next (priority order)
 
-1. Morning with owner: capture deploy (slice B); look at candles (landed `db7aa70`), bubbles, S7c screenshots (`screenshots/s7c/`, S8 = GO); footprint colour check.
+1. Morning with owner: capture deploy (slice B); look at candles (landed `db7aa70`), bubbles (landed; gear menu Trades toggle), S7c screenshots (`screenshots/s7c/`, S8 = GO); footprint colour check.
 2. One-world slices C (shadow live roller), D (cutover), E (delete old path).
 3. S8: delete the legacy heatmap (Fable verdict GO).
 4. Backlog: owner GUI Agent API (17100) unauthenticated; GUI RSS ~1.5 GB after 10 min; stale-book status not cleared on disconnect (RemoteGridDataSource.cpp:146); fan-out retry clears rings each attempt; AGENTS.md 4b: `--agent-host` needs `--agent-host-symbols` explicitly; TPO v2; cosmetics; compression lab; Parquet + DuckDB; Pi / cloud node.
