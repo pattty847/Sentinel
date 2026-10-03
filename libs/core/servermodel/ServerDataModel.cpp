@@ -100,8 +100,7 @@ ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
     , m_heatmapStreamer(std::make_unique<HeatmapTwapStreamer>(*this, m_serverConfig.heatmap))
 {
     for (const auto& symbol : normalizedDefaultSymbols(m_serverConfig.defaultSymbols))
-        m_pinnedUp.emplace(symbol, false);
-    m_mdConnected.store(pinnedAllUp(), std::memory_order_relaxed);
+        m_feeds.emplace(symbol, FeedState{true});
     int64_t maxTfMs = std::max<int64_t>(1000, m_serverConfig.heatmap.activeTimeframeMs);
     for (const int64_t tf : m_serverConfig.heatmap.timeframesMs) {
         if (tf > maxTfMs) {
@@ -237,34 +236,43 @@ void ServerDataModel::checkRecorderProgress(int64_t nowMs) {
                      << " invalidations=" << m_recorder->stats().invalidations);
 }
 
-// One call per product connection transition (pinned recorder symbols and GUI
-// symbols alike). The stall monitor tracks every symbol by its own state. The
-// health series (sentinel_mdc_connected and the up/down counters) follow only the
-// pinned symbols: a GUI chart closing its product must not page, and a pinned
-// product down must not hide behind a GUI product that is still up.
-void ServerDataModel::onMarketDataConnectionChanged(const std::string& symbol, bool connected) {
-    if (m_stallMonitor) m_stallMonitor->setConnected(symbol, connected, localNowMs());
-    const auto pinned = m_pinnedUp.find(symbol);
-    if (pinned == m_pinnedUp.end() || pinned->second == connected) return;
-    pinned->second = connected;
-    (connected ? m_mdTransportUps : m_mdTransportDowns).fetch_add(1, std::memory_order_relaxed);
-    m_mdConnected.store(pinnedAllUp(), std::memory_order_relaxed);
+// Active feed membership is managed before queued transport statuses are delivered.
+void ServerDataModel::acquireGuiFeed(const std::string& symbol) {
+    m_feeds.try_emplace(symbol);
 }
-
-// AND over the pinned symbols; vacuously true when nothing is pinned (nothing to record).
-bool ServerDataModel::pinnedAllUp() const {
-    return std::all_of(m_pinnedUp.begin(), m_pinnedUp.end(), [](const auto& entry) { return entry.second; });
+void ServerDataModel::releaseGuiFeed(const std::string& symbol) {
+    const auto it = m_feeds.find(symbol);
+    if (it != m_feeds.end() && !it->second.pinned) m_feeds.erase(it);
+}
+void ServerDataModel::onMarketDataConnectionChanged(const std::string& symbol, bool connected) {
+    const auto it = m_feeds.find(symbol);
+    if (it == m_feeds.end()) return; // retired GUI socket: never recreate a series
+    // Only recorded products need deadlines; do not retain closed GUI products here.
+    if (m_stallMonitor && it->second.pinned) m_stallMonitor->setConnected(symbol, connected, localNowMs());
+    auto& feed = it->second;
+    if (feed.connected == connected) return;
+    feed.connected = connected;
+    ++(connected ? feed.ups : feed.downs);
 }
 
 void ServerDataModel::registerMetrics(sentinel::metrics::MetricsRegistry& r) {
     using Value = std::optional<double>;
     const auto load = [](const std::atomic<uint64_t>& a) { return [&a]() -> Value { return double(a.load(std::memory_order_relaxed)); }; };
-    r.gaugeFn("sentinel_mdc_connected", "1 while every pinned (recorder) product's upstream connection is up.", {},
-              [this]() -> Value { return m_mdConnected.load(std::memory_order_relaxed) ? 1.0 : 0.0; });
-    r.counterFn("sentinel_mdc_transport_up_total", "Pinned products' upstream connection up transitions (reconnects = this - pinned products).", {},
-                load(m_mdTransportUps));
-    r.counterFn("sentinel_mdc_transport_down_total", "Pinned products' upstream connection down transitions.", {},
-                load(m_mdTransportDowns));
+    using Registry = sentinel::metrics::MetricsRegistry;
+    const auto sampleFeeds = [this](auto value) {
+        return [this, value] {
+            std::vector<Registry::Sample> samples;
+            for (const auto& [symbol, feed] : m_feeds)
+                samples.push_back({{{"product", symbol}, {"pinned", feed.pinned ? "1" : "0"}}, double(value(feed))});
+            return samples;
+        };
+    };
+    r.familyFn("sentinel_mdc_connected", "1 while this product's upstream connection is up.", Registry::Type::Gauge,
+               sampleFeeds([](const FeedState& f) { return f.connected; }));
+    r.familyFn("sentinel_mdc_transport_up_total", "Product upstream up transitions in this feed lifetime.", Registry::Type::Counter,
+               sampleFeeds([](const FeedState& f) { return f.ups; }));
+    r.familyFn("sentinel_mdc_transport_down_total", "Product upstream down transitions in this feed lifetime.", Registry::Type::Counter,
+               sampleFeeds([](const FeedState& f) { return f.downs; }));
     r.gaugeFn("sentinel_exchange_clock_offset_ms", "Smoothed local minus exchange clock in ms (0 = not yet measured).", {},
               [this]() -> Value { return double(m_exchangeOffsetMs.load(std::memory_order_relaxed)); });
     r.gaugeFn("sentinel_recorder_running", "1 when recording v2 started in this process.", {},

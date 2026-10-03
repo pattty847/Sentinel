@@ -41,3 +41,7 @@ candles:
   update_volume_slow: 0
   update_tick_size: 0
 default_symbols: [BTC-USD]
+
+# Pinned default_symbols are exempt; refuse new GUI products beyond this cap.
+mdc:
+  max_connections: 8

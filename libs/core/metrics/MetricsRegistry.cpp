@@ -15,6 +15,7 @@ struct MetricsRegistry::Series {
 struct MetricsRegistry::Family {
     std::string name, help;
     Type type;
+    FamilySampler sampler;
     std::deque<Series> series; // deque: stable addresses for returned references
 };
 
@@ -105,6 +106,7 @@ MetricsRegistry::Family& MetricsRegistry::family(std::string_view name, std::str
 }
 
 MetricsRegistry::Series* MetricsRegistry::find(Family& f, const std::string& labelText) {
+    if (f.sampler) throw std::logic_error("dynamic metric family already registered: " + f.name);
     for (auto& s : f.series)
         if (s.labelText == labelText) return &s;
     return nullptr;
@@ -151,6 +153,13 @@ void MetricsRegistry::addSampler(std::string_view name, std::string_view help, T
     f.series.push_back({std::move(labelText), nullptr, nullptr, std::move(sampler)});
 }
 
+void MetricsRegistry::familyFn(std::string_view name, std::string_view help, Type type, FamilySampler sampler) {
+    std::lock_guard lock(mutex_);
+    Family& f = family(name, help, type);
+    if (f.sampler || !f.series.empty()) throw std::logic_error("metric family already registered: " + f.name);
+    f.sampler = std::move(sampler);
+}
+
 std::string MetricsRegistry::render() const {
     std::string out;
     out.reserve(4096);
@@ -163,6 +172,10 @@ std::string MetricsRegistry::render() const {
         out += "\n# TYPE ";
         out += f->name;
         out += f->type == Type::Counter ? " counter\n" : " gauge\n";
+        if (f->sampler) {
+            for (const auto& sample : f->sampler())
+                out += f->name + renderLabels(sample.labels) + " " + formatValue(sample.value) + "\n";
+        }
         for (const auto& s : f->series) {
             std::string value;
             if (s.counter) {

@@ -432,3 +432,43 @@ as requested; no git-index or shared _agent writes were attempted.
   N3 a failed disk worker releases its queued bytes before waiting for close.
 - Ops: scrape job `sentinel-capture`, A3 requires it, A4 (product down > 120 s)
   and A4b (pool > 50 % for 2 min), two health-dashboard panels.
+
+
+## 16. Slice 3 (server) as built, 2026-10-02 (`lt-astra/feeds-server`)
+
+- `server.mdc.max_connections` defaults to 8 (minimum 1), GUI-only distinct products;
+  pinned defaults never count. Stream admission reserves a slot before Session state,
+  ack or model creation; first/last subscriber events acquire/release feeds in order.
+  Multiple clients share slots. Both unsubscribe and client close free the final slot.
+- Refusals log symbol/cap and send `error/context=subscribe/code=connection_cap` with
+  `symbol`, `max_connections`, `message`. The GUI displays status-bar text and retains
+  `data.lastSubscriptionRefusal` in its Agent API state. Nothing is evicted.
+- Connection metrics are per `{product,pinned}`, bounded by active feed membership;
+  removed GUI products disappear. The legacy server-wide health bool is removed.
+  Admission count/cap gauges and a refusal counter are exported; refusal diagnostics
+  retain eight recent products (LRU, counter resets after eviction), bounding bad-name
+  churn independently of active feeds. Dynamic metric families sample membership only
+  at scrape time, without persistent series registration for retired GUI products.
+- A1b is per pinned product for 5 minutes; A1 retains its per-symbol stall deadlines.
+  Dashboards and monitoring docs use pinned labels. Pinned startup precedes stream start.
+- Section 13's retained legacy health bool/unlimited cap note is now superseded;
+  section 14's per-symbol stall monitor remains intact. No services were deployed.
+
+
+Slice-3 validation: `cmake --build --preset mac-clang -j 4` passed; every build
+waited for all worktree Ninja logs to be older than 60 seconds. Configuration used
+installed dependencies (`VCPKG_MANIFEST_INSTALL=OFF`) and writable temporary ccache
+storage. After the initial build, main gained the FIFO build queue; this task reserved
+that slot for its remaining builds/tests while retaining the Ninja-log gate.
+The seven targeted suites passed after restoration (18.73 s). Full
+`ctest --test-dir build/mac-clang --output-on-failure`: **80/80 passed**, zero failures,
+340.26 s. Metal cases skip in the sandbox; UgrGpuTests passed without its known abort.
+
+Fail-without-fix checks disabled stream cap admission, GUI metric removal, config
+parsing, client refusal delivery, the Agent API refusal field and the pinned-product
+A1b selector. All five new admission/client/config/alert tests failed, as did the
+existing ServerMetrics GUI-lifecycle and AgentApiCodec envelope tests. All six mutated
+files were restored byte-for-byte, explicitly touched, and rebuilt before the green
+targeted/full runs (FM-132). Alert YAML and dashboard JSON also parsed successfully.
+No live services were started, stopped, restarted or deployed. GUI refusal text and
+live rollout remain for orchestrator verification. Changes are uncommitted as requested.

@@ -68,11 +68,14 @@ server:
     ssl_ca_bundle: resources/certs/ca-bundle.crt
     connect_timeout_ms: 20000  # resolve + TCP + TLS + WS handshake; timeout -> backoff retry
     close_timeout_ms: 3000     # WS close to an unresponsive peer
+    max_connections: 8        # GUI-only products; pinned default_symbols do not count (minimum 1)
 ```
 
 `recording.live_publish_ms` (default 500, clamped to [250, 5000]) is how often the recorder publishes each layer's open minute to live subscribers (owner decision 2026-10-01: 500 ms, 2 Hz). The live worker paces subscriptions at half of it, so each publication is sent at the next worker turn; refused sends back off from there up to 5 s. It does not change what is recorded on disk. Recorder-thread cost: about 0.4 ms per publication for a BTC-USD book (~23,500 near+deep entries), 0.08% of a core at 2 Hz (`recording_live_bench --publish`).
 
 Changing `recording.deep_tick` from $10 to $5 changes the recording config hash and starts a new HMC2 generation; existing files stay in the same series. Display ticks use `{1,2,2.5,5} x 10^k` restricted to native-tick multiples, so the $5 layer supports $25 rows. Pages spanning old $10 and new $5 generations serve both at common multiples (for example $50); at $25, output buckets containing $10 records are unknown while compatible buckets still serve. History and live projection use the same rule.
+
+`server.mdc.max_connections` limits distinct active GUI-only products, including feeds still connecting. The default is 8; values below 1 are rejected. Multiple clients watching the same product share a slot. Pinned `default_symbols` are exempt. At capacity, a new symbol is refused with a stream error (symbol and cap), a GUI status-bar message and `data.lastSubscriptionRefusal` in `/api/v1/state`; existing watched products are never evicted. Unsubscribing or disconnecting the final watcher frees the slot.
 
 Public market data (level2, market_trades, candles) does not require a key; the server runs without `key.json` by default.
 

@@ -75,6 +75,7 @@ struct StateSnapshot {
     std::optional<double> renderRateHz;
     std::optional<bool> frameIdle;
     bool connected = false;
+    QJsonObject lastSubscriptionRefusal;
     bool serverConfigReady = false;
     QString serverHost;
     std::optional<int> serverPort;

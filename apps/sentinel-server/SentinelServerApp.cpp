@@ -64,7 +64,10 @@ bool SentinelServerApp::initialize() {
 
         // 2. Market Data Core
         try {
-            m_marketDataCore = std::make_unique<MarketDataFeeds>(*m_authenticator, m_serverConfig.mdc);
+            if (m_serverConfig.mdc.maxConnections < 1) throw std::invalid_argument("max_connections must be at least 1");
+            MarketDataFeeds::Options options;
+            options.maxConnections = size_t(m_serverConfig.mdc.maxConnections);
+            m_marketDataCore = std::make_unique<MarketDataFeeds>(*m_authenticator, m_serverConfig.mdc, options);
         } catch (const std::exception& e) {
             sLog_Error("MarketDataFeeds init failed: " << e.what());
             return false;
@@ -82,12 +85,13 @@ bool SentinelServerApp::initialize() {
         try {
             quint16 streamPort = m_serverConfig.streamPort;
             m_server = std::make_unique<SentinelStreamServer>(*m_serverModel, *m_authenticator, m_serverConfig, streamPort);
-            m_server->start();
+            // Start only after callbacks and pinned feeds are installed below.
         } catch (const std::exception& e) {
             sLog_Error("SentinelStreamServer init failed: " << e.what());
             return false;
         }
         m_serverModel->registerMetrics(m_metrics);
+        m_server->registerMetrics(m_metrics);
         m_metrics.gaugeFn("sentinel_stream_sessions", "Open client stream sessions.", {},
                           [this]() -> std::optional<double> { return double(m_server->sessionCount()); });
         
@@ -170,6 +174,7 @@ bool SentinelServerApp::initialize() {
                                  return;
                              }
                              sLog_Data("First client subscribed, acquiring upstream: symbol=" << symbol);
+                             m_serverModel->acquireGuiFeed(symbol.toStdString());
                              m_marketDataCore->add(symbol.toStdString());
                          }, Qt::QueuedConnection);
 
@@ -186,6 +191,7 @@ bool SentinelServerApp::initialize() {
                              }
                              sLog_Data("Last client unsubscribed, releasing upstream: symbol=" << symbol);
                              m_marketDataCore->remove(native);
+                             m_serverModel->releaseGuiFeed(native);
                          }, Qt::QueuedConnection);
 
         // Start connection
@@ -200,19 +206,10 @@ bool SentinelServerApp::initialize() {
             }
         }
 
-        if (!symbolList.empty()) {
-            QTimer::singleShot(0, this, [this, symbolList]() mutable {
-                if (!m_marketDataCore) {
-                    return;
-                }
-                QStringList names;
-                for (const auto& sym : symbolList) {
-                    names << QString::fromStdString(sym);
-                }
-                sLog_Data("Server default subscribe: symbols=" << names.join(','));
-                for (const auto& symbol : symbolList) m_marketDataCore->add(symbol, true);
-            });
-        }
+        for (const auto& symbol : symbolList) m_marketDataCore->add(symbol, true);
+        sLog_Data("Server default subscribe: count=" << symbolList.size()
+                  << " guiConnectionCap=" << m_serverConfig.mdc.maxConnections);
+        m_server->start();
 
         return true;
     } catch (const std::exception& e) {

@@ -203,6 +203,9 @@ TEST(AgentApiCodec, EnvelopeAndUnknowns) {
     EXPECT_TRUE(data.value("lastReceivedAtMs").toObject().value("trades").isNull());
     EXPECT_TRUE(data.value("layers").toObject().value("heatmap").isNull());
     EXPECT_TRUE(data.value("render").toObject().value("frameP50Ms").isNull());
+    EXPECT_TRUE(data.value("lastSubscriptionRefusal").isNull());
+    s.lastSubscriptionRefusal = {{"symbol", "ETH-USD"}, {"maxConnections", 8}, {"message", "cap reached"}};
+    EXPECT_EQ(stateJson(s).value("data").toObject().value("lastSubscriptionRefusal").toObject(), s.lastSubscriptionRefusal);
     s.frameP50Ms = 4.5;
     s.frameP95Ms = 7.25;
     s.renderRateHz = 20.0;

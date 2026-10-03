@@ -483,3 +483,31 @@ onto the same independent overlay grid, anchored from a candle close when no
 trade is available. This preserves session history without introducing persisted
 trade-history storage. Footprint and VP still have no observations outside the
 retained tape; an empty profile does not establish complete historical coverage.
+
+
+### Server feed admission and lifecycle (slice 3)
+
+The server starts one pinned feed for each normalized `default_symbols` product before
+accepting GUI sessions. A distinct GUI-only symbol reserves a connection slot on its first
+subscriber; other clients share that feed. The final unsubscribe or session close releases
+it. Pinned feeds are never removed by clients and never count against
+`server.mdc.max_connections` (default 8, minimum 1). Connecting feeds count against the cap.
+
+Admission happens before the Session stores a subscription, creates model/availability
+state, acknowledges it or queues upstream acquisition. At capacity the server logs
+`Feed refused: symbol=<product> cap=<N> code=connection_cap` and sends only:
+
+```json
+{"type":"error","context":"subscribe","code":"connection_cap","symbol":"ETH-USD","max_connections":8,"message":"Cannot subscribe to ETH-USD: GUI connection cap (8) reached. Close another symbol and retry."}
+```
+
+No watched chart is evicted. The client emits `subscriptionRefused`, delivered across the
+queued data-source boundary to the GUI status bar and `/api/v1/state` diagnostics. The
+stream reservation and queued first/last subscriber events preserve lifecycle order.
+The feed owner also enforces the same cap. Subscribe/unsubscribe symbols are normalized
+uppercase, matching pinned products.
+
+Connection metrics carry `{product,pinned}`; pinned series persist, GUI series exist only
+while their feeds are acquired (transition counters restart for a new feed lifetime).
+Recorder deadlines remain per symbol. A1 watches connected recorder deadlines; A1b watches
+each pinned product independently, so a healthy GUI feed cannot mask a BTC outage.

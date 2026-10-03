@@ -497,6 +497,7 @@ QJsonObject stateJson(const StateSnapshot& s) {
     if (s.defaultSymbols) for (const QString& symbol : *s.defaultSymbols) symbols.append(symbol);
     QJsonObject data{
         {"connected", s.connected}, {"serverConfigReady", s.serverConfigReady},
+        {"lastSubscriptionRefusal", s.lastSubscriptionRefusal.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(s.lastSubscriptionRefusal)},
         {"render", QJsonObject{{"frameP50Ms", number(s.frameP50Ms)},
             {"frameP95Ms", number(s.frameP95Ms)}, {"rateHz", number(s.renderRateHz)},
             {"idle", boolean(s.frameIdle)}}},

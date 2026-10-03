@@ -54,7 +54,8 @@ signals:
     void pnlSnapshotBroadcast(const trading::PnlSnapshot& snapshot);
 
 public:
-    void notifyClientSubscribed(const std::string& symbol);
+    bool notifyClientSubscribed(const std::string& symbol);
+    void registerMetrics(sentinel::metrics::MetricsRegistry& registry);
     void notifyClientUnsubscribed(const std::string& symbol);
     CoinbaseRestClient& restClient();
     const ServerConfig& serverConfig() const { return m_serverConfig; }
@@ -78,6 +79,7 @@ private:
     friend class Session;
     friend struct RecordingServerStopTest;
     friend struct HeatmapChunkWireTest;
+    friend struct ServerFeedAdmissionTest;
 
     void doAccept();
     void registerSession(const std::shared_ptr<Session>& session);
@@ -116,6 +118,8 @@ private:
 
     std::mutex m_symbolSubscriptionsMutex;
     std::unordered_map<std::string, size_t> m_symbolSubscriptions;
+    // Refusal diagnostics retain at most eight recent products (LRU, resets on eviction).
+    std::vector<std::pair<std::string, uint64_t>> m_refusals;
 
     std::mutex m_latencySendersMutex;
     std::vector<std::pair<uint64_t, std::function<void(int)>>> m_latencySenders;

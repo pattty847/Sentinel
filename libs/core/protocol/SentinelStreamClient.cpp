@@ -873,6 +873,10 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                 handlePnlSnapshotMessage(msg);
                 return;
             case protocol::MessageType::Error:
+                if (msg.value("context", "") == "subscribe" && msg.value("code", "") == "connection_cap") {
+                    emit subscriptionRefused(QString::fromStdString(msg.value("symbol", "")),
+                        msg.value("max_connections", 0), QString::fromStdString(msg.value("message", "")));
+                }
                 if (msg.value("context", "") == "heatmap_recording_view") {
                     emit recordingViewError(QString::fromStdString(msg.value("symbol", "")),
                         msg.value("band_generation", uint64_t{0}), QString::fromStdString(msg.value("code", "")),

@@ -1,0 +1,208 @@
+// Actual Session admission/close/write paths, injected upstream transports, no sockets/services.
+#include "protocol/SentinelStreamServer.cpp"
+#include "protocol/SentinelStreamClient.hpp"
+#include "marketdata/MarketDataFeeds.hpp"
+#include "marketdata/auth/Authenticator.hpp"
+#include "marketdata/fixtures/fake_ws_transport.hpp"
+#include "ConfigLoader.hpp"
+#include <QCoreApplication>
+#include <QTemporaryDir>
+#include <QFile>
+#include <gtest/gtest.h>
+#include <fstream>
+
+struct ServerFeedAdmissionTest : testing::Test {
+    int argc = 1;
+    char name[20] = "feed-admission";
+    char* argv[2] = {name, nullptr};
+    QCoreApplication app{argc, argv};
+    QTemporaryDir dir;
+    Authenticator auth{"/nonexistent-sentinel-test-credentials"};
+    ServerConfig config;
+    std::unique_ptr<ServerDataModel> model;
+    std::unique_ptr<SentinelStreamServer> server;
+    std::unique_ptr<MarketDataFeeds> feeds;
+    sentinel::metrics::MetricsRegistry metrics;
+    net::io_context io;
+    ssl::context tls{ssl::context::tls_server};
+    std::vector<std::shared_ptr<Session>> sessions;
+    std::map<std::string, std::shared_ptr<fixtures::WsScenario>> transports;
+    int64_t now = 1'000'000;
+
+    void SetUp() override {
+        config.recording.enabled = false;
+        config.heatmap.persistenceEnabled = false;
+        config.defaultSymbols = {"btc-usd", "SOL-USD"};
+        config.mdc.maxConnections = 2;
+        config.mdc.sslCaBundle = std::string(SENTINEL_SOURCE_DIR) + "/resources/certs/ca-bundle.crt";
+        model = std::make_unique<ServerDataModel>(config);
+        server = std::make_unique<SentinelStreamServer>(*model, auth, config, 0);
+        model->registerMetrics(metrics);
+        server->registerMetrics(metrics);
+        MarketDataFeeds::Options options;
+        options.manualPump = true;
+        options.maxConnections = config.mdc.maxConnections;
+        options.clock = [this] { return now; };
+        options.limiter = std::make_shared<FeedConnectLimiter>();
+        options.transportFactory = [this](const auto& symbol, auto& io, auto&) {
+            auto scenario = std::make_shared<fixtures::WsScenario>();
+            scenario->onAttempt = [](auto& t, int) { t.up(); };
+            transports[symbol] = scenario;
+            return std::make_unique<fixtures::FakeWsTransport>(io, scenario);
+        };
+        feeds = std::make_unique<MarketDataFeeds>(auth, config.mdc, options);
+        feeds->onConnectionStatus([this](const auto& symbol, bool up) {
+            QMetaObject::invokeMethod(model.get(), [this, symbol, up] {
+                model->onMarketDataConnectionChanged(symbol, up);
+            }, Qt::QueuedConnection);
+        });
+        QObject::connect(server.get(), &SentinelStreamServer::clientSubscribed, model.get(), [this](const QString& symbol) {
+            model->acquireGuiFeed(symbol.toStdString());
+            const auto result = feeds->add(symbol.toStdString());
+            EXPECT_TRUE(result == MarketDataFeeds::AddResult::Added || result == MarketDataFeeds::AddResult::AlreadyPresent);
+        }, Qt::QueuedConnection);
+        QObject::connect(server.get(), &SentinelStreamServer::clientUnsubscribed, model.get(), [this](const QString& symbol) {
+            feeds->remove(symbol.toStdString());
+            model->releaseGuiFeed(symbol.toStdString());
+        }, Qt::QueuedConnection);
+        for (const auto& symbol : normalizedDefaultSymbols(config.defaultSymbols)) feeds->add(symbol, true);
+        feeds->start();
+        drain();
+    }
+    void drain() {
+        for (int i = 0; i < 4; ++i) {
+            QCoreApplication::sendPostedEvents();
+            feeds->poll();
+            io.restart(); io.poll();
+        }
+    }
+    std::shared_ptr<Session> session() {
+        auto s = std::make_shared<Session>(tcp::socket(io), tls, *model, server.get());
+        // A sentinel in-flight write holds outgoing frames for inspection without TLS.
+        s->write_queue_.push_back({"in-flight", false});
+        s->pendingWriteBytes_ = 9;
+        sessions.push_back(s);
+        return s;
+    }
+    nlohmann::json request(const std::shared_ptr<Session>& s, const std::string& symbol, const char* type = "subscribe") {
+        s->handle_message(nlohmann::json{{"type", type}, {"symbol", symbol}}.dump());
+        drain();
+        return s->write_queue_.size() > 1 ? nlohmann::json::parse(s->write_queue_.back().payload) : nlohmann::json{};
+    }
+    void TearDown() override {
+        for (auto& s : sessions) s->beginClose("fixture cleanup");
+        drain();
+        sessions.clear();
+        feeds->stop();
+        QCoreApplication::sendPostedEvents();
+    }
+    void checkCap();
+    void checkMetrics();
+    static void deliver(SentinelStreamClient& client, const std::string& message) { client.handleMessage(message); }
+};
+
+void ServerFeedAdmissionTest::checkCap() {
+    auto a = session(), b = session();
+    request(a, "btc-usd");
+    request(a, "ETH-USD"); request(a, "DOGE-USD");
+    for (int i = 0; i < 3; ++i) { now += 1'000'000; drain(); }
+    request(a, "SOL-USD"); // a newly watched pinned product is admitted even at the cap
+    request(b, "ETH-USD"); // shared product consumes one slot
+    const auto before = b->write_queue_.size();
+    const auto reply = request(b, "XRP-USD");
+    EXPECT_EQ(b->write_queue_.size(), before + 1); // error only: no ack or snapshot
+    ASSERT_EQ(reply.value("type", ""), "error");
+    EXPECT_EQ(reply.value("context", ""), "subscribe");
+    EXPECT_EQ(reply.value("code", ""), "connection_cap");
+    EXPECT_EQ(reply.value("symbol", ""), "XRP-USD");
+    EXPECT_EQ(reply.value("max_connections", 0), 2);
+    EXPECT_NE(reply.value("message", "").find("XRP-USD"), std::string::npos);
+    EXPECT_FALSE(b->subscriptions_.contains("XRP-USD"));
+    EXPECT_FALSE(b->availability_.contains("XRP-USD"));
+    EXPECT_FALSE(server->m_symbolSubscriptions.contains("XRP-USD"));
+    EXPECT_FALSE(transports.contains("XRP-USD"));
+    EXPECT_EQ(model->getSymbolsSnapshot().size(), 4u);
+    EXPECT_EQ(feeds->stats().size(), 4u); // two pinned + two GUI
+    request(a, "ETH-USD", "unsubscribe");
+    EXPECT_EQ(request(b, "XRP-USD").value("type", ""), "error"); // b still watches ETH
+    request(b, "ETH-USD", "unsubscribe");
+    request(b, "XRP-USD");
+    EXPECT_TRUE(b->subscriptions_.contains("XRP-USD"));
+    EXPECT_TRUE(transports.contains("XRP-USD"));
+    EXPECT_EQ(transports.at("ETH-USD")->closes, 1);
+    b->beginClose("client gone"); drain();
+    EXPECT_FALSE(server->m_symbolSubscriptions.contains("XRP-USD"));
+    request(a, "ADA-USD");
+    EXPECT_TRUE(a->subscriptions_.contains("ADA-USD"));
+    EXPECT_EQ(transports.at("BTC-USD")->closes, 0);
+    EXPECT_EQ(transports.at("SOL-USD")->closes, 0);
+
+
+}
+
+void ServerFeedAdmissionTest::checkMetrics() {
+    auto s = session();
+    request(s, "ETH-USD"); request(s, "DOGE-USD");
+    for (int i = 0; i < 3; ++i) { now += 1'000'000; drain(); }
+    auto text = metrics.render();
+    EXPECT_NE(text.find("sentinel_mdc_connected{product=\"ETH-USD\",pinned=\"0\"} 1\n"), std::string::npos);
+    EXPECT_NE(text.find("sentinel_mdc_transport_up_total{product=\"ETH-USD\",pinned=\"0\"} 1\n"), std::string::npos);
+    EXPECT_NE(text.find("sentinel_mdc_max_connections 2\n"), std::string::npos);
+    EXPECT_NE(text.find("sentinel_mdc_connections{pinned=\"0\"} 2\n"), std::string::npos);
+    EXPECT_NE(text.find("sentinel_mdc_connections{pinned=\"1\"} 2\n"), std::string::npos);
+    model->onMarketDataConnectionChanged("ETH-USD", false);
+    EXPECT_NE(metrics.render().find("sentinel_mdc_transport_down_total{product=\"ETH-USD\",pinned=\"0\"} 1\n"), std::string::npos);
+    request(s, "ETH-USD", "unsubscribe");
+    model->onMarketDataConnectionChanged("ETH-USD", true); // late retired callback
+    text = metrics.render();
+    EXPECT_EQ(text.find("product=\"ETH-USD\""), std::string::npos);
+    EXPECT_NE(text.find("sentinel_mdc_connected{product=\"BTC-USD\",pinned=\"1\"} 1\n"), std::string::npos);
+    EXPECT_NE(text.find("sentinel_mdc_connections{pinned=\"0\"} 1\n"), std::string::npos);
+    request(s, "ETH-USD");
+    for (int i = 0; i < 10; ++i) request(s, "REFUSED" + std::to_string(i) + "-USD");
+    request(s, "REFUSED9-USD");
+    text = metrics.render();
+    EXPECT_EQ(text.find("product=\"REFUSED0-USD\""), std::string::npos);
+    EXPECT_EQ(server->m_refusals.size(), 8u);
+    EXPECT_NE(text.find("sentinel_mdc_refused_total{product=\"REFUSED9-USD\"} 2\n"), std::string::npos);
+    EXPECT_EQ(feeds->stats().size(), 4u);
+}
+
+TEST_F(ServerFeedAdmissionTest, CapRefusalIsAtomicAndReleaseOrCloseFreesOneSlot) { checkCap(); }
+TEST_F(ServerFeedAdmissionTest, MetricsFollowActiveProductsAndBoundRefusalHistory) { checkMetrics(); }
+
+TEST_F(ServerFeedAdmissionTest, ClientReceivesStructuredRefusal) {
+    const nlohmann::json reply = {{"type", "error"}, {"context", "subscribe"}, {"code", "connection_cap"},
+        {"symbol", "XRP-USD"}, {"max_connections", 2}, {"message", "Cannot subscribe to XRP-USD: cap 2 reached"}};
+    SentinelStreamClient client("127.0.0.1", "0", config.mdc.sslCaBundle);
+    QString symbol, message;
+    int cap = 0;
+    QObject::connect(&client, &SentinelStreamClient::subscriptionRefused,
+        [&](const QString& s, int c, const QString& m) { symbol = s; cap = c; message = m; });
+    deliver(client, reply.dump());
+    EXPECT_EQ(symbol, "XRP-USD"); EXPECT_EQ(cap, 2); EXPECT_FALSE(message.isEmpty());
+}
+
+TEST(ServerFeedConfig, DefaultOverrideAndInvalidCap) {
+    EXPECT_EQ(ServerMdcConfig{}.maxConnections, 8);
+    QTemporaryDir dir;
+    const auto path = dir.filePath("server.yaml");
+    for (const auto [value, valid] : {std::pair{3, true}, {0, false}, {-1, false}}) {
+        QFile file(path); ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+        file.write("server:\n  mdc:\n    max_connections: " + QByteArray::number(value) + "\n"); file.close();
+        ServerConfig config;
+        EXPECT_EQ(ConfigLoader::loadServerConfig(path.toStdString(), &config), valid);
+        if (valid) EXPECT_EQ(config.mdc.maxConnections, value);
+    }
+}
+
+TEST(ServerFeedAlerts, A1bSelectsEachPinnedProductForFiveMinutes) {
+    std::ifstream file(std::string(SENTINEL_SOURCE_DIR) + "/ops/monitoring/grafana/provisioning/alerting/rules.yaml");
+    const std::string text((std::istreambuf_iterator<char>(file)), {});
+    const auto start = text.find("uid: sentinel-a1b");
+    ASSERT_NE(start, std::string::npos);
+    const auto rule = text.substr(start, text.find("# A3a", start) - start);
+    EXPECT_NE(rule.find("min by (product) (sentinel_mdc_connected{pinned=\"1\"})"), std::string::npos);
+    EXPECT_NE(rule.find("for: 5m"), std::string::npos);
+    EXPECT_NE(rule.find("evaluator: { type: lt, params: [1] }"), std::string::npos);
+}
