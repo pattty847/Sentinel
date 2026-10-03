@@ -1,0 +1,209 @@
+#include "roller/Roller.hpp"
+#include "marketdata/dispatch/BookParser.hpp"
+#include "legacy_v2_fixture.hpp"
+#include <gtest/gtest.h>
+#include <QTemporaryDir>
+#include <QFile>
+#include <QCryptographicHash>
+#include <fstream>
+#include <future>
+
+using namespace sentinel;
+using namespace sentinel::roller;
+using nlohmann::json;
+namespace fs = std::filesystem;
+namespace {
+constexpr int64_t Epoch=1'798'761'600'000; // 2027-01-01 UTC, aligned day
+json metadata(std::string product="BTC-USD") {
+    return {{"product_metadata",{{"product_id",product},{"quote_increment","0.01"},{"base_increment","0.00000001"}}}};
+}
+capture::Record record(int64_t ms,capture::Kind kind,std::string payload,uint64_t conn=1) {
+    return {kind,{(Epoch+ms)*1'000'000,(ms+1)*1'000'000},conn,std::move(payload)};
+}
+std::string snapshot(std::string product="BTC-USD") {
+    return json({{"channel","l2_data"},{"events",json::array({{{"type","snapshot"},{"product_id",product},
+        {"updates",json::array({{{"side","bid"},{"price_level","99999.99"},{"new_quantity","2"}},
+                               {{"side","offer"},{"price_level","100000.01"},{"new_quantity","3"}},
+                               {{"side","bid"},{"price_level","99998"},{"new_quantity","0"}}})}}})}}).dump();
+}
+std::string update(int i) {
+    return json({{"channel","l2_data"},{"events",json::array({{{"type","update"},{"product_id","BTC-USD"},
+        {"updates",json::array({{{"side","bid"},{"price_level","99999.99"},{"new_quantity",std::to_string(2+i%7)}}})}}})}}).dump();
+}
+std::vector<fs::path> paths(const fs::path& root,std::string extension) {
+    std::vector<fs::path> out;
+    for(const auto& e:fs::recursive_directory_iterator(root)) if(e.path().extension()==extension) out.push_back(e.path());
+    std::sort(out.begin(),out.end()); return out;
+}
+std::string contents(const fs::path& path) { std::ifstream in(path,std::ios::binary); return {std::istreambuf_iterator<char>(in),{}}; }
+void save(const fs::path& path,const std::string& bytes) { std::ofstream out(path,std::ios::binary); out<<bytes; }
+std::map<std::string,std::string> files(const fs::path& root) {
+    std::map<std::string,std::string> out;
+    for(const auto& p:paths(root,".hmc2")) out[fs::relative(p,root).string()]=contents(p);
+    return out;
+}
+void fixture(const fs::path& root,int seconds=245,bool seal=true) {
+    capture::WriterConfig c; c.root=QString::fromStdString(root.string()); c.fsyncBlocks=0;
+    capture::Writer w(c,metadata());
+    w.append(record(0,capture::Kind::TransportUp,"{}"));
+    w.append(record(0,capture::Kind::Frame,snapshot()));
+    for(int t=1;t<=seconds;++t) w.append(record(t*1000,capture::Kind::Frame,t%5==0?update(t):"{\"channel\":\"heartbeats\"}"));
+    if(seal) w.close(); else w.flush();
+}
+RollOptions options(const fs::path& raw,const fs::path& out) { return {raw,out,"BTC-USD",Epoch,Epoch+240'000}; }
+}
+TEST(Roller, GridsAndClamping) {
+    struct Case {const char* p;double price;const char* quote;double scale,near,deep;};
+    for(const auto& c:std::vector<Case>{{"BTC-USD",100000,"0.01",100,1,5},{"ETH-USD",4000,"0.01",100,.5,.5},
+        {"SOL-USD",200,"0.01",100,.02,.02},{"DOGE-USD",.2,"0.00001",1e5,.00002,.00002},
+        {"PEPE-USD",.00001,"0.00000001",1e8,1e-8,1e-8},{"FARTCOIN-USD",1,"0.00001",1e5,.0001,.0001},
+        {"AVAX-USD",30,"0.001",1000,.002,.002}}) {
+        auto m=metadata(c.p)["product_metadata"]; m["quote_increment"]=c.quote;
+        m["base_increment"] = std::string(c.p)=="DOGE-USD" ? "0.1" :
+            std::string(c.p)=="PEPE-USD" ? "1" : std::string(c.p)=="FARTCOIN-USD" ? "0.01" : "0.00000001";
+        const auto g=deriveGrid(m,c.price);
+        EXPECT_DOUBLE_EQ(g.priceScale,c.scale)<<c.p;
+        EXPECT_DOUBLE_EQ(g.nearTick,c.near)<<c.p;
+        EXPECT_DOUBLE_EQ(g.deepTick,c.deep)<<c.p;
+        EXPECT_DOUBLE_EQ(g.sizeFloor,std::stod(m["base_increment"].get<std::string>()));
+    }
+    auto m=metadata("ETH-USD")["product_metadata"];
+    EXPECT_DOUBLE_EQ(deriveGrid(m,100,{{"near_tick",.001}}).nearTick,.01);
+    EXPECT_THROW(deriveGrid(m,0),std::runtime_error);
+    EXPECT_THROW(deriveGrid(m,100,{{"price_scale",1}}),std::runtime_error);
+    EXPECT_THROW(deriveGrid(m,100,{{"deep_tick",-1}}),std::runtime_error);
+    m["quote_increment"]="bad"; EXPECT_THROW(deriveGrid(m,100),std::runtime_error);
+}
+TEST(Roller, ReaderVersionsPositionsAndOpenPolling) {
+    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); fs::path root=temp.path().toStdString();
+    fixture(root/"v1",2,false);
+    JournalReader reader(root/"v1","BTC-USD"); JournalRecord r;
+    std::vector<JournalRecord> records;
+    while(reader.next(r)) records.push_back(r);
+    ASSERT_EQ(records.size(),4); EXPECT_TRUE(reader.pending()); EXPECT_EQ(records[1].record.payload,snapshot());
+    JournalReader resume(root/"v1","BTC-USD",records[1].pos);
+    ASSERT_TRUE(resume.next(r)); EXPECT_EQ(r.pos,records[1].pos); EXPECT_EQ(r.record.payload,snapshot());
+    auto invalid=records[1].pos; invalid.record=999;
+    EXPECT_THROW({JournalReader bad(root/"v1","BTC-USD",invalid); while(bad.next(r)) {}},std::runtime_error);
+    capture::WriterConfig c; c.root=QString::fromStdString((root/"v2").string()); c.fsyncBlocks=0;
+    auto m=metadata(); m["connection_products"]={"BTC-USD","ETH-USD"}; m["routing"]="product-ranges-v2"; m["run_id"]="v2-fixture";m["run_started_system_ns"]=Epoch*1'000'000;
+    auto w=capture::LegacyV2FixtureWriter::make(c,m);
+    w->append(record(0,capture::Kind::Frame,snapshot()));
+    w->append(record(1000,capture::Kind::FrameReference,"{\"sequence_gaps\":0}")); w->close();
+    JournalReader v2(root/"v2","BTC-USD"); ASSERT_TRUE(v2.next(r)); EXPECT_EQ(r.version,2);
+    ASSERT_TRUE(v2.next(r)); EXPECT_EQ(r.record.kind,capture::Kind::FrameReference);
+    EXPECT_FALSE(v2.next(r)); EXPECT_FALSE(v2.pending());
+}
+TEST(Roller, PendingFramingDeferredUntilSealedOrSuperseded) {
+    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); fs::path root=temp.path().toStdString(); fixture(root,3);
+    const auto path=paths(root,".rawl2")[0]; const auto original=contents(path);
+    const auto scan=capture::scan(QString::fromStdString(path.string()));
+    ASSERT_GE(scan.index.size(),2);
+    auto broken=original;
+    broken[scan.index[0].offset]='X';
+    // Sealed file: later valid framing is interior damage even in tailing mode.
+    save(path,broken);
+    EXPECT_THROW({capture::RecordReader reader(QString::fromStdString(path.string()),true); capture::Record r; while(reader.next(r)){}},std::runtime_error);
+    // Open file with the same bytes: defer the interior-framing judgment.
+    broken.resize(original.find("IDX1",scan.index.back().offset)); save(path,broken);
+    capture::RecordReader open(QString::fromStdString(path.string()),true); capture::Record r;
+    EXPECT_FALSE(open.next(r)); EXPECT_TRUE(open.result().pendingTail); EXPECT_FALSE(open.result().tornTail);
+    { JournalReader pending(root,"BTC-USD"); JournalRecord item; EXPECT_FALSE(pending.next(item)); EXPECT_TRUE(pending.pending()); }
+    // A newer run's header, independent of filenames/mtime, seals the old tail's fate.
+    capture::WriterConfig cfg;cfg.root=QString::fromStdString(root.string());cfg.fsyncBlocks=0;
+    auto meta=metadata();meta["run_id"]="superseding-run";
+    meta["run_started_system_ns"]=scan.header.at("run_started_system_ns").get<int64_t>()+1;
+    meta["connection_products"]={"BTC-USD","ETH-USD"};meta["routing"]="product-ranges-v2";
+    auto newer=capture::LegacyV2FixtureWriter::make(cfg,meta);
+    newer->append(record(5000,capture::Kind::Frame,snapshot()));newer->close();
+    EXPECT_THROW({JournalReader superseded(root,"BTC-USD");JournalRecord item;while(superseded.next(item)){}},std::runtime_error);
+    EXPECT_THROW(capture::scan(QString::fromStdString(path.string())),std::runtime_error);
+    // Complete CRC errors are never pending.
+    broken=original; broken[scan.index[0].offset+44]^=1; save(path,broken);
+    EXPECT_THROW({capture::RecordReader bad(QString::fromStdString(path.string()),true); while(bad.next(r)){}},std::runtime_error);
+    // Genuine terminal partial block remains recoverable when superseded.
+    broken=original.substr(0,scan.index.back().offset+8); save(path,broken);
+    EXPECT_TRUE(capture::scan(QString::fromStdString(path.string())).tornTail);
+}
+TEST(Roller, FeedFiltersProductsClocksAndLifecycle) {
+    JournalFeed feed("BTC-USD"); int ticks=0,snaps=0,updates=0,invalid=0,trades=0;
+    int64_t time=0;
+    feed.onTick=[&](int64_t t){++ticks;time=t;};
+    feed.onSnapshot=[&](int64_t t,int64_t local,std::vector<recording::Level> levels){++snaps;EXPECT_EQ(t,local);EXPECT_EQ(levels.size(),2);};
+    feed.onUpdates=[&](int64_t,int64_t,std::vector<recording::Level>){++updates;};
+    feed.onInvalid=[&](int64_t,const std::string&){++invalid;};
+    feed.onTrade=[&](const Trade& t){++trades;EXPECT_EQ(t.timestamp.time_since_epoch(),std::chrono::milliseconds(Epoch+6000));};
+    const auto apply=[&](int64_t ms,capture::Kind kind,std::string p){feed.apply({record(ms,kind,std::move(p)),{"BTC-USD","run",0,0},{},false,2});};
+    auto withBadTime=json::parse(snapshot());withBadTime["timestamp"]="";
+    apply(0,capture::Kind::Frame,withBadTime.dump());
+    apply(1000,capture::Kind::Frame,snapshot("ETH-USD"));
+    apply(2000,capture::Kind::BookInvalidated,"{\"product\":\"ETH-USD\"}");
+    apply(3000,capture::Kind::Frame,update(0)); EXPECT_EQ(updates,1);
+    apply(4000,capture::Kind::BookInvalidated,"{\"product\":\"BTC-USD\"}");
+    apply(5000,capture::Kind::Frame,update(0)); EXPECT_EQ(updates,1);
+    apply(6000,capture::Kind::Frame,"{\"channel\":\"market_trades\",\"events\":[{\"trades\":[{\"product_id\":\"BTC-USD\",\"price\":\"100\",\"size\":\"1\"}]}]}");
+    apply(7000,capture::Kind::FrameReference,"{\"sequence_gaps\":0}");
+    EXPECT_EQ(ticks,8);EXPECT_EQ(snaps,1);EXPECT_EQ(invalid,2);EXPECT_EQ(trades,1);EXPECT_EQ(time,Epoch+7000);
+}
+TEST(Roller, RunIdentityCrashResumeAndIdempotence) {
+    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); fs::path root=temp.path().toStdString(); fixture(root/"raw",3665);
+    auto a=options(root/"raw",root/"a"); a.toMs=Epoch+3'660'000; const auto report=roll(a);
+    EXPECT_EQ(report["days"][0]["committedThroughMs"],Epoch+3'660'000);
+    auto b=a; b.outputRoot=root/"b"; roll(b); EXPECT_EQ(files(a.outputRoot),files(b.outputRoot));
+    auto c=a; c.outputRoot=root/"crash";
+    c.afterRecordForTest=[](uint64_t n){if(n==128)throw std::runtime_error("simulated crash");};
+    EXPECT_THROW(roll(c),std::runtime_error);
+    ASSERT_TRUE(fs::exists(c.outputRoot/"BTC-USD"/"roller.json"));
+    const auto checkpoint = json::parse(contents(c.outputRoot/"BTC-USD"/"roller.json"));
+    EXPECT_LT(checkpoint.at("committedThroughMs").get<int64_t>(), Epoch+128'000);
+    c.afterRecordForTest={}; roll(c); EXPECT_EQ(files(a.outputRoot),files(c.outputRoot));
+    const auto before=files(c.outputRoot); roll(c); EXPECT_EQ(files(c.outputRoot),before);
+    c.overrides={{"near_tick",2}}; EXPECT_THROW(roll(c),std::logic_error);
+}
+TEST(Roller, DryRunAndEofDoNotInventTime) {
+    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); fs::path root=temp.path().toStdString(); fixture(root/"raw",59,false);
+    auto o=options(root/"raw",root/"out"); o.dryRun=true;
+    const auto report=roll(o); EXPECT_FALSE(fs::exists(o.outputRoot)); EXPECT_EQ(report["records"],60);
+    o.dryRun=false; roll(o); EXPECT_TRUE(files(o.outputRoot).empty());
+    // A later snapshot must not change the dry-run day's initially derived grid.
+    capture::WriterConfig cfg; cfg.root=QString::fromStdString((root/"eth").string());cfg.symbol="ETH-USD";cfg.fsyncBlocks=0;
+    capture::Writer writer(cfg,metadata("ETH-USD"));
+    auto snap=json::parse(snapshot("ETH-USD"));
+    snap["events"][0]["updates"][0]["price_level"]="100";
+    snap["events"][0]["updates"][1]["price_level"]="102";
+    writer.append(record(0,capture::Kind::Frame,snap.dump()));
+    snap["events"][0]["updates"][0]["price_level"]="200";
+    snap["events"][0]["updates"][1]["price_level"]="202";
+    writer.append(record(30'000,capture::Kind::Frame,snap.dump()));writer.close();
+    o.journalRoot=root/"eth";o.product="ETH-USD";o.dryRun=true;
+    EXPECT_EQ(roll(o)["days"][0]["grid"]["nearTick"],.01);
+}
+TEST(Roller, BlockingQueueAdmitsAtomicOversizedSnapshot) {
+    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); auto c=deriveGrid(metadata()["product_metadata"],100000).config(temp.path().toStdString());
+    c.maxQueuedLevels=1; c.latenessMs=0;
+    recording::BookRecorder r(c);
+    r.onSnapshotAt("BTC-USD",Epoch,Epoch,{{true,99999.99,2},{false,100000.01,3}});
+    for(int t=1;t<=10000;++t) r.onUpdatesAt("BTC-USD",Epoch+t,Epoch+t,{{true,99999.99,double(2+t%3)}});
+    r.onTick(Epoch+60'000); r.drain(); EXPECT_EQ(r.stats().queueDrops,0);EXPECT_EQ(r.stats().invalidations,0);
+    EXPECT_EQ(r.stats().columnsWritten,2);
+}
+TEST(Roller, CommitFloorAndCeiling) {
+    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); auto c=deriveGrid(metadata()["product_metadata"],100000).config(temp.path().toStdString());
+    c.commitFloorMs=Epoch+60'000;c.commitCeilingMs=Epoch+120'000;c.latenessMs=0;
+    recording::BookRecorder r(c);r.onSnapshotAt("BTC-USD",Epoch,Epoch,{{true,99999.99,2},{false,100000.01,3}});
+    r.onTick(Epoch+180'000);r.drain();
+    auto rows=recording::Hmc2Store::readRange(c.root,"BTC-USD","near",60'000,Epoch,Epoch+180'000);
+    ASSERT_EQ(rows.size(),1);EXPECT_EQ(rows[0].bucketStartMs,Epoch+60'000);
+}
+TEST(Roller, DiffQualifiesMasksLateAndDetectsContent) {
+    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); fs::path root=temp.path().toStdString();fixture(root/"raw");
+    auto a=options(root/"raw",root/"a");roll(a);
+    fs::copy(a.outputRoot,root/"b",fs::copy_options::recursive);
+    auto rows=recording::Hmc2Store::readRange(root/"b","BTC-USD","near",60'000,Epoch,Epoch+240'000);
+    ASSERT_EQ(rows.size(),4);
+    { recording::Hmc2Store s(root/"b");rows[1].flags|=recording::kLateEvents;s.append(rows[1]); }
+    auto report=diff(root/"a",root/"b","BTC-USD","near",Epoch,Epoch+240'000);
+    EXPECT_EQ(report["qualifying"],3);EXPECT_EQ(report["matching"],3);EXPECT_EQ(report["nonqualifying"],1);
+    { recording::Hmc2Store s(root/"b");++rows[2].entries[0].twapCode;s.append(rows[2]); }
+    report=diff(root/"a",root/"b","BTC-USD","near",Epoch,Epoch+240'000);EXPECT_EQ(report["mismatching"],1);
+}

@@ -1,4 +1,5 @@
 #pragma once
+#include <optional>
 #include <string>
 #include <string_view>
 #include <format>
@@ -129,9 +130,10 @@ inline std::string formatThroughput(const std::string& operationName,
         operationName, count, timeMs, opsPerSec);
 }
 
-inline std::chrono::system_clock::time_point parseISO8601(std::string_view iso8601_str) {
+inline std::chrono::system_clock::time_point parseISO8601(std::string_view iso8601_str,
+    std::optional<std::chrono::system_clock::time_point> fallback = {}) {
     if (iso8601_str.empty() || iso8601_str.size() < 19) {
-        return std::chrono::system_clock::now();
+        return fallback ? *fallback : std::chrono::system_clock::now();
     }
     try {
         const int yearValue = fastStringToInt(iso8601_str.substr(0, 4));
@@ -194,7 +196,7 @@ inline std::chrono::system_clock::time_point parseISO8601(std::string_view iso86
         const auto d = day{dayValue};
 
         if (!y.ok() || !m.ok() || !d.ok()) {
-            return std::chrono::system_clock::now();
+            return fallback ? *fallback : std::chrono::system_clock::now();
         }
 
         sys_days days_since_epoch{y / m / d};
@@ -211,7 +213,7 @@ inline std::chrono::system_clock::time_point parseISO8601(std::string_view iso86
 
         return time_point;
     } catch (...) {
-        return std::chrono::system_clock::now();
+        return fallback ? *fallback : std::chrono::system_clock::now();
     }
 }
 

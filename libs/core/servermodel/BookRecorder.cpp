@@ -143,7 +143,7 @@ struct BookRecorder::Impl {
     static constexpr size_t kQueueSlots = 4096;
     std::array<Message, kQueueSlots> queue;
     std::mutex mutex;
-    std::condition_variable wake, drained;
+    std::condition_variable wake, drained, space;
     size_t head = 0, count = 0, queuedLevels = 0;
     bool stopping = false, busy = false, emergency = false;
     int64_t emergencyLocal = 0;
@@ -163,7 +163,8 @@ struct BookRecorder::Impl {
             c.sizeScale.floor <= 0 || !std::isfinite(c.sizeScale.codesPerOctave) || c.sizeScale.codesPerOctave <= 0 ||
             c.latenessMs < 0 || c.latenessMs > kHour || c.maxQueuedLevels == 0 || c.layers.empty() ||
             c.resnapshotIntervalMs <= 0 || c.resnapshotMaxIntervalMs < c.resnapshotIntervalMs ||
-            c.resnapshotStableMs < 0 || c.oneSidedGraceMs < 0 || c.livePublishMs <= 0)
+            c.resnapshotStableMs < 0 || c.oneSidedGraceMs < 0 || c.livePublishMs <= 0 ||
+            c.commitFloorMs < 0 || c.commitFloorMs > c.commitCeilingMs || c.commitCeilingMs > kHmc2EndMs)
             throw std::invalid_argument("BookRecorder: invalid config");
         std::set<std::string> names;
         for (const auto &l : c.layers) {
@@ -178,7 +179,7 @@ struct BookRecorder::Impl {
         return c;
     }
     Impl(RecorderConfig c, std::function<int64_t()> clock)
-        : cfg(validateConfig(std::move(c))), localClock(std::move(clock)), store(cfg.root) {
+        : cfg(validateConfig(std::move(c))), localClock(std::move(clock)), store(cfg.root, cfg.deterministicResume) {
         if (!localClock)
             throw std::invalid_argument("BookRecorder: missing local clock");
         worker = std::thread([this] { run(); });
@@ -193,7 +194,18 @@ struct BookRecorder::Impl {
         sLog_Data("BookRecorder: stopped; open minutes and uncommitted lateness tail dropped");
     }
     void enqueue(Message m) {
-        std::lock_guard lock(mutex);
+        std::unique_lock lock(mutex);
+        if (cfg.blockingQueue) {
+            // An oversized atomic snapshot is admitted alone, bounded by RAWL2's
+            // record cap. Splitting it would change atomic peak semantics.
+            space.wait(lock, [&] {
+                return stopping || (count < kQueueSlots - 1 &&
+                    (m.levels.size() <= cfg.maxQueuedLevels
+                        ? queuedLevels <= cfg.maxQueuedLevels - m.levels.size()
+                        : queuedLevels == 0));
+            });
+            if (stopping) throw std::runtime_error("recorder stopped");
+        }
         if (emergency || count == kQueueSlots) {
             ++queueDrops;
             if (!emergency) {
@@ -204,7 +216,7 @@ struct BookRecorder::Impl {
             return;
         }
         const bool data = m.kind == Kind::Snapshot || m.kind == Kind::Updates;
-        if (data && (m.levels.size() > cfg.maxQueuedLevels - queuedLevels || count >= kQueueSlots - 1)) {
+        if (!cfg.blockingQueue && data && (m.levels.size() > cfg.maxQueuedLevels - queuedLevels || count >= kQueueSlots - 1)) {
             ++queueDrops;
             m.droppedSnapshot = m.kind == Kind::Snapshot;
             m.kind = Kind::InvalidEnvelope;
@@ -231,6 +243,7 @@ struct BookRecorder::Impl {
                     head = (head + 1) % kQueueSlots;
                     --count;
                     queuedLevels -= m.levels.size();
+                    if (cfg.blockingQueue) space.notify_one();
                 } else {
                     m.kind = Kind::Invalid;
                     m.time = emergencyLocal;
@@ -486,6 +499,8 @@ struct BookRecorder::Impl {
         commit(s);
     }
     void write(const Hmc2Record &r) {
+        if (r.bucketStartMs + r.header.tfMs <= cfg.commitFloorMs ||
+            r.bucketStartMs + r.header.tfMs > cfg.commitCeilingMs) return;
         store.append(r);
         ++columnsWritten;
         sLog_Probe("recording.close", "symbol=" << r.header.symbol << " layer=" << r.header.layer
@@ -621,6 +636,8 @@ struct BookRecorder::Impl {
         while (!s.pending.empty() && s.pending.front().bucketStartMs + kMinute + cfg.latenessMs <= s.clock) {
             auto r = std::move(s.pending.front());
             s.pending.pop_front();
+            if (r.bucketStartMs + kMinute <= cfg.commitFloorMs ||
+                r.bucketStartMs + kMinute > cfg.commitCeilingMs) continue;
             try {
                 write(r);
             } catch (const std::exception &e) {
@@ -876,6 +893,12 @@ void BookRecorder::onUpdates(const std::string &symbol, int64_t time, std::vecto
     impl_->enqueue(
         {Impl::Kind::Updates, impl_->internSymbol(symbol), {}, time, impl_->localClock(), std::move(levels)});
 }
+void BookRecorder::onSnapshotAt(const std::string &symbol, int64_t time, int64_t local, std::vector<Level> levels) {
+    impl_->enqueue({Impl::Kind::Snapshot, impl_->internSymbol(symbol), {}, time, local, std::move(levels)});
+}
+void BookRecorder::onUpdatesAt(const std::string &symbol, int64_t time, int64_t local, std::vector<Level> levels) {
+    impl_->enqueue({Impl::Kind::Updates, impl_->internSymbol(symbol), {}, time, local, std::move(levels)});
+}
 void BookRecorder::onInvalid(const std::string &symbol, int64_t local, std::string reason) {
     impl_->enqueue({Impl::Kind::Invalid, impl_->internSymbol(symbol), std::move(reason), local, local, {}, true});
 }
@@ -892,7 +915,8 @@ BookRecorder::Watermarks BookRecorder::watermarks(const std::string &symbol, con
     const auto it = impl_->watermarksBySeries.find({symbol, layer});
     return it == impl_->watermarksBySeries.end() ? Watermarks{} : it->second;
 }
-void BookRecorder::drainForTest() {
+void BookRecorder::drainForTest() { drain(); }
+void BookRecorder::drain() {
     std::unique_lock lock(impl_->mutex);
     impl_->drained.wait(lock, [&] { return !impl_->count && !impl_->emergency && !impl_->busy; });
 }

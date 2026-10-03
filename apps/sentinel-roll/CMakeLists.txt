@@ -1,0 +1,5 @@
+add_executable(sentinel_roll main.cpp)
+target_link_libraries(sentinel_roll PRIVATE sentinel_core Qt6::Core)
+set_target_properties(sentinel_roll PROPERTIES OUTPUT_NAME sentinel-roll)
+add_executable(hmc2_diff hmc2_diff.cpp)
+target_link_libraries(hmc2_diff PRIVATE sentinel_core Qt6::Core)

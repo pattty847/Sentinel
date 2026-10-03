@@ -106,14 +106,14 @@ std::string encodeIndex(const std::vector<BlockIndex>& index) {
 // An unframed suffix is recoverable only if no valid block/index framing
 // follows it. Scan in bounded chunks, so interior corruption cannot masquerade
 // as a torn tail just because the damaged block's magic was overwritten.
-bool hasFollowingFraming(QFile& file, qint64 start, qint64 end) {
+bool hasFollowingFraming(QFile& file, qint64 start, qint64 end, bool closingIndexOnly = false) {
     for (auto offset = start; offset < end; offset += 65533) {
         if (!file.seek(offset)) fail("tail scan seek failed");
         const auto bytes = read(file, std::min<qint64>(65536, end - offset));
         for (size_t i = 0; i + 4 <= bytes.size(); ++i) {
             const auto magic = std::string_view(bytes).substr(i, 4);
             const auto candidate = offset + qint64(i);
-            if (magic == "BLK1" && end - candidate >= BlockHeaderBytes) {
+            if (!closingIndexOnly && magic == "BLK1" && end - candidate >= BlockHeaderBytes) {
                 if (!file.seek(candidate)) fail("tail scan seek failed");
                 const auto header = read(file, BlockHeaderBytes);
                 size_t pos = 44;
@@ -127,7 +127,7 @@ bool hasFollowingFraming(QFile& file, qint64 start, qint64 end) {
                     size + 4 > uint64_t(end - file.pos())) continue;
                 const auto body = read(file, size);
                 const auto checksum = read(file, 4); pos = 0;
-                if (crc(body) == get(checksum, pos, 4)) return true;
+                if ((!closingIndexOnly || candidate + 12 + qint64(size) == end) && crc(body) == get(checksum, pos, 4)) return true;
             }
         }
     }
@@ -406,7 +406,7 @@ struct RecordGenerator {
     RecordGenerator& operator=(const RecordGenerator&) = delete;
     ~RecordGenerator() { if (handle) handle.destroy(); }
 };
-RecordGenerator readRecords(const QString path, ScanResult& result) {
+RecordGenerator readRecords(const QString path, ScanResult& result, bool pendingTailAllowed) {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) fail("cannot read " + path.toStdString());
     result.header = headerFrom(file);
@@ -414,6 +414,13 @@ RecordGenerator readRecords(const QString path, ScanResult& result) {
     const auto end = file.size();
     result.fileBytes = end;
     result.validBytes = file.pos();
+    if (pendingTailAllowed) {
+        const auto begin = file.pos();
+        // A valid terminal IDX1 proves sealing even behind damaged framing.
+        pendingTailAllowed = !hasFollowingFraming(file,
+            std::max<qint64>(begin, end - qint64(16 + uint64_t(MaxIndexEntries) * IndexEntryBytes)), end, true);
+        if (!file.seek(begin)) fail("header seek failed");
+    }
     uint64_t nextOrdinal = result.header.at("first_block_ordinal").get<uint64_t>();
     while (file.pos() < end) {
         const auto offset = file.pos();
@@ -436,7 +443,7 @@ RecordGenerator readRecords(const QString path, ScanResult& result) {
             break;
         }
         if (magic != "BLK1") {
-            if (hasFollowingFraming(file, offset + 1, end))
+            if (!pendingTailAllowed && hasFollowingFraming(file, offset + 1, end))
                 fail("interior corruption at offset=" + std::to_string(offset));
             result.tornTail = true;
             break;
@@ -487,11 +494,17 @@ RecordGenerator readRecords(const QString path, ScanResult& result) {
                 record.time.systemNs = get(raw, pos, 8); record.time.steadyNs = get(raw, pos, 8);
                 record.connection = get(raw, pos, 8);
                 record.payload = raw.substr(pos, length - 28); pos += length - 28;
+                result.recordOrdinal = entry.ordinal;
+                result.recordIndex = i;
                 co_yield std::move(record);
             }
         }
         result.index.push_back(entry); ++nextOrdinal;
         result.validBytes = file.pos();
+    }
+    if (pendingTailAllowed && !result.indexed && result.tornTail) {
+        result.pendingTail = true;
+        result.tornTail = false;
     }
     co_return;
 }
@@ -499,9 +512,9 @@ RecordGenerator readRecords(const QString path, ScanResult& result) {
 struct RecordReader::Impl {
     ScanResult result;
     RecordGenerator generator;
-    explicit Impl(const QString& path) : generator(readRecords(path, result)) {}
+    explicit Impl(const QString& path, bool pending) : generator(readRecords(path, result, pending)) {}
 };
-RecordReader::RecordReader(const QString& path) : m_impl(std::make_unique<Impl>(path)) {}
+RecordReader::RecordReader(const QString& path, bool pending) : m_impl(std::make_unique<Impl>(path, pending)) {}
 RecordReader::~RecordReader() = default;
 const ScanResult& RecordReader::result() const { return m_impl->result; }
 bool RecordReader::next(Record& record) {

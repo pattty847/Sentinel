@@ -1124,6 +1124,7 @@ fs::path directoryKey(const fs::path &dir) {
 struct Hmc2Store::Impl {
     fs::path root;
     LockHandle lock = noLock;
+    bool deterministicResume = false;
     struct Writer {
         Hmc2Header header;
         fs::path path;
@@ -1193,7 +1194,10 @@ struct Hmc2Store::Impl {
         releaseFileLock(lock);
     }
 };
-Hmc2Store::Hmc2Store(fs::path root) : impl_(std::make_unique<Impl>(std::move(root))) {}
+Hmc2Store::Hmc2Store(fs::path root, bool deterministicResume)
+    : impl_(std::make_unique<Impl>(std::move(root))) {
+    impl_->deterministicResume = deterministicResume;
+}
 Hmc2Store::~Hmc2Store() = default;
 fs::path Hmc2Store::filePath(const fs::path &root, const Hmc2Header &h, int64_t ms, uint32_t gen) {
     validate(h);
@@ -1239,8 +1243,11 @@ void Hmc2Store::append(const Hmc2Record &r) {
             }
             path = reuse ? latest : filePath(i.root, r.header, r.bucketStartMs, generation(latest) + 1);
         }
+        std::optional<Hmc2Record> previous;
         if (reuse)
-            scan(path, true, [](Hmc2Record &&) {});
+            scan(path, true, [&](Hmc2Record &&record) {
+                if (i.deterministicResume) previous = std::move(record);
+            });
         else {
             const auto bytes = encodeHeader(r.header);
             int error = 0;
@@ -1254,9 +1261,20 @@ void Hmc2Store::append(const Hmc2Record &r) {
         sync(path.parent_path(), true);
         if (i.writers.size() >= kMaxWriters && found == i.writers.end())
             i.writers.erase(i.writers.begin());
-        found = i.writers.insert_or_assign(base, Impl::Writer{r.header, path, {}}).first;
+        found = i.writers.insert_or_assign(base, Impl::Writer{r.header, path, std::move(previous)}).first;
     }
     auto &w = found->second;
+    if (i.deterministicResume && w.previous && r.bucketStartMs <= w.previous->bucketStartMs) {
+        const auto existing = readRange(i.root, r.header.symbol, r.header.layer, r.header.tfMs,
+                                        r.bucketStartMs, r.bucketStartMs + r.header.tfMs);
+        check(existing.size() == 1, "journal replay missing committed bucket");
+        std::vector<uint8_t> a, b;
+        encodeRecord(r, a, nullptr);
+        encodeRecord(existing.front(), b, nullptr);
+        check(headerBody(existing.front().header) == headerBody(r.header) && a == b,
+              "journal replay differs from committed bucket=" + std::to_string(r.bucketStartMs));
+        return;
+    }
     check(std::isfinite(r.midOpen) && std::isfinite(r.midClose) && std::isfinite(r.midMin) && std::isfinite(r.midMax),
           "nonfinite mid metadata");
     validateEntries(r.entries);

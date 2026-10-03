@@ -127,13 +127,16 @@ struct ScanResult {
     std::vector<BlockIndex> index; // always rebuilt by scanning, compared with footer
     bool indexed = false;
     bool tornTail = false;
+    bool pendingTail = false;
+    uint64_t recordOrdinal = 0;
+    uint32_t recordIndex = 0;
     uint64_t fileBytes = 0;
     uint64_t validBytes = 0;
 };
 // Incremental, bounded reader used for cross-stream crash-prefix verification.
 class RecordReader {
 public:
-    explicit RecordReader(const QString& path);
+    explicit RecordReader(const QString& path, bool pendingTailAllowed = false);
     ~RecordReader();
     bool next(Record& record);
     const ScanResult& result() const;

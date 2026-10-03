@@ -665,3 +665,14 @@ The 512 MiB pool is shared by all seven products, each with a 2 MiB floor. Overf
 retains the existing nonzero exit/restart contract; the pool is a memory budget,
 not a loss guarantee.
 No exchange credentials are required for these public channels.
+
+## Offline HMC2 conversion (slice A)
+
+`sentinel-roll` consumes the v1/v2 archive without changing capture or the running
+recorder. It shares the engine's floating-point L2/trade parsers, derives daily
+product grids from journal metadata, and drives BookRecorder with one receive-time
+tick per record. It supports bounded blocking admission, durable checkpoints,
+resume, idempotent reruns, dry-run reports and decoded `hmc2_diff` comparisons.
+See [roller commands, recovery rules, measurements and the legacy-parity
+blocker](ROLLER.md). Production backfill and service cutover remain separate
+orchestrator operations. This slice's outputs are under the agent's `roll-out/`.

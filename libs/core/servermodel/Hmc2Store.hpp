@@ -133,7 +133,9 @@ class Hmc2Reader {
 // readable as absolute records. Returned entries are always reconstructed.
 class Hmc2Store {
   public:
-    explicit Hmc2Store(std::filesystem::path root);
+    // deterministicResume is opt-in for journal replay only: validate duplicate
+    // buckets and restore the validated last delta base on reopen.
+    explicit Hmc2Store(std::filesystem::path root, bool deterministicResume = false);
     ~Hmc2Store();
     Hmc2Store(const Hmc2Store &) = delete;
     Hmc2Store &operator=(const Hmc2Store &) = delete;

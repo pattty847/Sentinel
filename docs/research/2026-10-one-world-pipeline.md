@@ -5,7 +5,7 @@ Status: decision plan, 2026-10-02. Owner direction (approved): one stream per as
 delete the redundancy that keeps two worlds. Builds on
 `docs/research/2026-10-per-symbol-connections.md` (per-product connections, RAWL2 v1 per
 product, shared queue pool; slices 1-3 in flight). Line numbers refer to `main` at 30f17d4.
-Read-only study; nothing here is implemented.
+Original read-only study; see "Slice A as built" below for implementation and the measured parity blocker.
 
 ## 0. Today, measured (two worlds)
 
@@ -395,3 +395,64 @@ Supersedes decision 5 (parity). Exact decoded parity with the live recorder is n
 4. **Deep grid:** for products without an override, deep tick = two 1-2-5 steps above the near tick (e.g. ETH 0.5 -> 2, SOL 0.02 -> 0.1); BTC keeps near $1 / deep $5.
 5. Slice A is accepted only after the midnight column-loss fix and the live-recorder-root refusal land with tests.
 6. No additional snapshot/state-checkpoint machinery for this (no hourly roller state snapshots); the existing journal-snapshot replay and checkpoint stay as built.
+
+## Slice A as built (2026-10-03; uncommitted, parity gate unresolved)
+
+Implementation and measurements: [docs/ROLLER.md](../ROLLER.md). Added the
+`libs/core/roller` library, thin `sentinel-roll` / `hmc2_diff` bootstraps, shared
+L2/trade parsing, per-product daily grids, explicit journal receive clocks,
+blocking admission, commit bounds, durable checkpoints and offline regressions.
+The always-on services, GUI and live recorder defaults are untouched.
+
+Deviations/refinements from the proposed mechanics:
+
+- The live APIs, injected clock and overflow behavior remain until cutover. New
+  explicit-clock overloads and opt-in offline queue/writer modes preserve live
+  compatibility; a real captured fixture matches the pre-change recorder/store.
+- Deterministic HMC2 resume restores a validated delta base and suppresses exact
+  duplicate buckets. The original last-record-wins recovery only guaranteed
+  decoded identity; resetting the delta base changes physical bytes after reopen.
+- Resume replays the same day-anchor snapshot, preserving floating-point history
+  and the fixed daily grid, rather than picking a potentially different later
+  snapshot at the checkpoint. Checkpoints retain daily states and are fenced at
+  receive-minute changes/EOF, after durable writes; positions are validated.
+- Tick rounding uses nearest arithmetic-distance 1-2-5, ties upward, clamped to
+  quote-increment multiples. Near/deep share the derived tick outside BTC unless
+  explicitly overridden. Reference is the latest snapshot at/before day start,
+  otherwise the first available snapshot in the day. These unspecified details
+  are deterministic and documented, not inferred from the GUI's display ladder.
+- Malformed timestamp fallbacks also receive explicit journal time; otherwise the
+  old utility's host-clock fallback would leak into deterministic replay.
+- No seven-product backfill into production storage was performed. The requested
+  real-day benchmarks wrote only to the worktree's `roll-out/`.
+
+BTC 2026-10-01: 1,816,917 records, 53.745 s, 33,806 records/s, 18,287,442 output
+bytes. PEPE 2026-10-02: 458,571 records, 14.646 s, 31,311 records/s, 1,157,235 bytes.
+The 17.15-million-record seven-product inventory extrapolates to 9.1 minutes;
+budget 10-15 minutes. A measured BTC day replays in under a minute, so an hourly
+serialized state checkpoint was not added.
+
+**Correction to sections 4.1 and 7:** minute contents are not unchanged by the
+tick schedule. A controlled comparison using the exact same recorded BTC input
+and unchanged live API with 250 ms ticks versus the specified record-time ticks
+produced two qualifying minutes with 24/4 different TWAP codes (max deltas 11/23),
+while mids, bounds, entries and peaks matched. Monotone `advance()` clamps later
+backward envelopes to the clock already advanced by idle ticks. `kLateEvents`
+masking cannot remove that difference. Independent legacy and capture feeds also
+need not have identical batch timing, mids or peaks.
+
+Measured real BTC hour 2026-10-01 16:00-17:00 UTC, both layers: 58 qualifying,
+0 matching, 58 mismatching, 2 nonqualifying minutes. Legacy parity is **not
+passed**. The prescribed tick semantics and unchanged live behavior conflict
+with asserting exact legacy decoded parity. Owner acceptance is needed to replace
+that gate with same-journal roller determinism plus reported legacy differences;
+until then slice A is blocked on its parity criterion, not ready for cutover.
+The deep hour is nonqualifying because two constituent minutes fail the gate.
+A second full BTC day on the final code took 52.348 seconds and reproduced all
+three HMC2 files and the checkpoint byte for byte.
+
+Validation: full queued mac-clang build passed; final CTest reported 83/83 suites
+passed (353.73 s), with Metal-dependent cases explicitly skipped in the sandbox.
+All ten new cases pass; fourteen fail-without-behavior mutations were verified
+with source restoration, touch and rebuild between runs. No GPU/visual result is
+claimed. The work remains uncommitted for orchestrator review and rebase.

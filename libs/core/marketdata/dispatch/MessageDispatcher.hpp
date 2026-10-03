@@ -23,7 +23,24 @@ struct DispatchResult { std::vector<Event> events; };
 
 class MessageDispatcher {
 public:
-    static DispatchResult parse(const nlohmann::json& j) {
+    static Trade parseTrade(const nlohmann::json& t,
+        std::optional<std::chrono::system_clock::time_point> fallback = {}) {
+    Trade trade;
+    trade.product_id = t.value("product_id", "");
+    trade.trade_id   = t.value("trade_id", "");
+    trade.price      = Cpp20Utils::fastStringToDouble(t.value("price", "0"));
+    trade.size       = Cpp20Utils::fastStringToDouble(t.value("size", "0"));
+    const std::string side = t.value("side", "");
+    trade.side = Cpp20Utils::fastSideDetection(side);
+    if (t.contains("time")) {
+        trade.timestamp = Cpp20Utils::parseISO8601(t["time"].get<std::string>(), fallback);
+    } else {
+        trade.timestamp = fallback ? *fallback : std::chrono::system_clock::now();
+    }
+        return trade;
+    }
+    static DispatchResult parse(const nlohmann::json& j,
+        std::optional<std::chrono::system_clock::time_point> fallback = {}) {
         DispatchResult out;
         if (!j.is_object()) return out;
 
@@ -33,18 +50,7 @@ public:
         if (channel == "market_trades") {
             if (j.contains("trades") && j["trades"].is_array()) {
                 for (const auto& t : j["trades"]) {
-                    Trade trade;
-                    trade.product_id = t.value("product_id", "");
-                    trade.trade_id   = t.value("trade_id", "");
-                    trade.price      = Cpp20Utils::fastStringToDouble(t.value("price", "0"));
-                    trade.size       = Cpp20Utils::fastStringToDouble(t.value("size", "0"));
-                    const std::string side = t.value("side", "");
-                    trade.side = Cpp20Utils::fastSideDetection(side);
-                    if (t.contains("time")) {
-                        trade.timestamp = Cpp20Utils::parseISO8601(t["time"].get<std::string>());
-                    } else {
-                        trade.timestamp = std::chrono::system_clock::now();
-                    }
+                    auto trade = parseTrade(t, fallback);
                     out.events.emplace_back(TradeEvent{std::move(trade)});
                 }
             }
