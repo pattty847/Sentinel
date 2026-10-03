@@ -19,7 +19,7 @@ struct FanoutConfig {
     size_t ringBytes = 32 * 1024 * 1024;
     size_t clientBytes = 16 * 1024 * 1024;
     size_t ingressBytes = 32 * 1024 * 1024; // each product, outside QueuePool
-    std::chrono::milliseconds retention{60000}, resnapshotInterval{10000};
+    std::chrono::milliseconds retention{60000}, resnapshotInterval{20000};
     std::function<bool()> controlReady; // false during capture startup/shutdown
     std::function<int64_t()> nowNs; // deterministic monotonic-clock seam
 };

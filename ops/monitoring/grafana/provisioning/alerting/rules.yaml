@@ -281,3 +281,44 @@ groups:
                   operator: { type: and }
                   query: { params: [C] }
                   reducer: { type: last, params: [] }
+
+      # Capture remains authoritative even when the optional live socket is down.
+      - uid: sentinel-capture-fanout-down
+        title: Capture fan-out down
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: page
+        annotations:
+          summary: "Capture fan-out down"
+          description: >-
+            Capture's live socket has been unavailable for five minutes. Journaling
+            continues. Read sentinel-capture-latest.log for the setup error and retry
+            delay; repair the socket directory/ownership or conflicting listener.
+            Do not restart the always-on capture merely to repair fan-out.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: sentinel-vm
+            model:
+              refId: A
+              expr: min(sentinel_fanout_running{job="sentinel-capture"})
+              instant: true
+              range: false
+              intervalMs: 15000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              datasource: { type: __expr__, uid: __expr__ }
+              conditions:
+                - type: query
+                  evaluator: { type: lt, params: [1] }
+                  operator: { type: and }
+                  query: { params: [C] }
+                  reducer: { type: last, params: [] }

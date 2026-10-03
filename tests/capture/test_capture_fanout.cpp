@@ -2,6 +2,7 @@
 #include "capture/CaptureSession.hpp"
 #include "metrics/MetricsRegistry.hpp"
 #include <gtest/gtest.h>
+#include <yaml-cpp/yaml.h>
 #include <QTemporaryDir>
 #include <QCoreApplication>
 #include <QLocalSocket>
@@ -61,13 +62,14 @@ struct Fixture : testing::Test {
     sentinel::metrics::MetricsRegistry metrics;
     FanoutConfig cfg;
     std::atomic<int64_t> now{1000000000};
+    std::atomic<unsigned> clockReads{0};
     std::mutex requestsMutex;
     std::vector<std::string> requests;
     std::unique_ptr<CaptureFanout> server;
     void start(std::vector<std::string> products={"BTC-USD"}) {
         static int argc = 1; static char name[] = "test_capture_fanout"; static char* argv[] = {name, nullptr};
         if (!QCoreApplication::instance()) { static QCoreApplication app(argc, argv); }
-        ASSERT_TRUE(dir.isValid()); cfg.socketPath=dir.path()+"/f.sock"; cfg.nowNs=[&]{return now.load();};
+        ASSERT_TRUE(dir.isValid()); if(cfg.socketPath.isEmpty()) cfg.socketPath=dir.path()+"/f.sock"; cfg.nowNs=[&]{++clockReads;return now.load();};
         server=std::make_unique<CaptureFanout>(cfg,products,metrics,[&](const auto& p){std::lock_guard lock(requestsMutex);requests.push_back(p);});
     }
     void put(uint64_t block, std::string payload="raw", size_t product=0) {
@@ -165,8 +167,8 @@ TEST_F(Fixture, ResnapshotRoutesAndRateLimitsAcrossClientsPerProduct) {
     start({"BTC-USD","ETH-USD"}); Peer a(server->path()), b(server->path()), eth(server->path());
     a.hello(); a.next(); b.hello(); b.next(); eth.hello({},"ETH-USD"); eth.next();
     auto request=[](Peer& p,std::string product="BTC-USD") {p.send({{"type","resnapshot"},{"product",product}});return p.next().first["status"];};
-    EXPECT_EQ(request(a),"accepted"); EXPECT_EQ(request(b),"rate_limited"); EXPECT_EQ(request(eth,"ETH-USD"),"accepted");
-    now+=10000000000LL; EXPECT_EQ(request(b),"accepted");
+    EXPECT_EQ(request(a),"forwarded"); EXPECT_EQ(request(b),"rate_limited"); EXPECT_EQ(request(eth,"ETH-USD"),"forwarded");
+    now+=20000000000LL; EXPECT_EQ(request(b),"forwarded");
     std::lock_guard lock(requestsMutex); EXPECT_EQ(requests,(std::vector<std::string>{"BTC-USD","ETH-USD","BTC-USD"}));
 }
 TEST_F(Fixture, SocketSafetyOwnershipAndFailedStartupNeverDeletesFiles) {
@@ -179,11 +181,12 @@ TEST_F(Fixture, SocketSafetyOwnershipAndFailedStartupNeverDeletesFiles) {
     EXPECT_THROW(prepareFanoutPath(dir.path()+"/repo/f.sock"),std::exception);
     start(); struct stat st{}; ASSERT_EQ(::stat(dir.path().toStdString().c_str(),&st),0); EXPECT_EQ(st.st_mode&0777,0700);
     sentinel::metrics::MetricsRegistry other;
-    EXPECT_THROW(CaptureFanout(cfg,{"BTC-USD"},other,{}),std::exception);
+    { CaptureFanout blocked(cfg,{"BTC-USD"},other,{}); EXPECT_NE(other.render().find("sentinel_fanout_running 0\n"),std::string::npos); }
     Peer still(server->path()); still.hello(); EXPECT_EQ(still.next().first["type"],"tip");
     server.reset(); QFile file(cfg.socketPath); ASSERT_TRUE(file.open(QIODevice::WriteOnly)); file.write("preserve"); file.close();
     sentinel::metrics::MetricsRegistry third;
-    EXPECT_THROW(CaptureFanout(cfg,{"BTC-USD"},third,{}),std::exception); ASSERT_TRUE(file.open(QIODevice::ReadOnly)); EXPECT_EQ(file.readAll(),"preserve");
+    CaptureFanout blocked(cfg,{"BTC-USD"},third,{});
+    EXPECT_NE(third.render().find("sentinel_fanout_running 0\n"),std::string::npos); ASSERT_TRUE(file.open(QIODevice::ReadOnly)); EXPECT_EQ(file.readAll(),"preserve");
 }
 TEST_F(Fixture, MalformedOversizedUnknownAndIdleClientsAreBounded) {
     start(); Peer malformed(server->path()); malformed.send({{"type","hello"},{"version",1},{"product","NOPE-USD"}});
@@ -207,9 +210,87 @@ TEST_F(Fixture, ClientCapAndUnavailableControlHaveBoundedLifetimes) {
     Peer extra(server->path()); EXPECT_EQ(extra.next().first["reason"],"capacity");
     peers[0]->send({{"type","resnapshot"},{"product","BTC-USD"}}); EXPECT_EQ(peers[0]->next().first["status"],"unavailable");
     controlReady=true;
-    peers[0]->send({{"type","resnapshot"},{"product","BTC-USD"}}); EXPECT_EQ(peers[0]->next().first["status"],"accepted");
+    peers[0]->send({{"type","resnapshot"},{"product","BTC-USD"}}); EXPECT_EQ(peers[0]->next().first["status"],"forwarded");
     auto begin=std::chrono::steady_clock::now(); server->stop(); EXPECT_LT(std::chrono::steady_clock::now()-begin,1s);
     for(auto& p:peers) EXPECT_EQ(p->next().first["reason"],"shutdown");
+}
+TEST_F(Fixture, SetupFailureRetriesWithBackoffWhileWriterContinues) {
+    ASSERT_TRUE(QDir().mkdir(dir.path()+"/socket"));
+    ASSERT_EQ(::chmod((dir.path()+"/socket").toStdString().c_str(),0755),0);
+    cfg.socketPath=dir.path()+"/socket/f.sock"; start();
+    EXPECT_TRUE(metric("sentinel_fanout_running 0")); EXPECT_TRUE(metric("sentinel_fanout_setup_failures_total 1"));
+    WriterConfig wc; wc.root=dir.path()+"/raw";
+    wc.onJournal=[&](const JournalEvent& e){server->publish(0,e);};
+    Writer writer(wc,Json::object()); writer.append({Kind::Frame,Stamp::now(),1,"kept"}); writer.flush();
+    EXPECT_EQ(writer.stats().blocks,1); EXPECT_GT(QFileInfo(writer.currentPath()).size(),0);
+    now+=30'000'000'000LL; put(10);
+    ASSERT_TRUE(eventually([&]{return metric("sentinel_fanout_setup_failures_total 2");}));
+    ASSERT_EQ(::chmod((dir.path()+"/socket").toStdString().c_str(),0700),0);
+    now+=59'000'000'000LL; const auto reads=clockReads.load(); put(11); // second delay is 60 s
+    // Two worker turns at the advanced fake clock prove it checked the deadline.
+    ASSERT_TRUE(eventually([&]{return clockReads.load()>=reads+6;}));
+    EXPECT_TRUE(metric("sentinel_fanout_running 0"));
+    now+=1'000'000'000LL; put(12);
+    ASSERT_TRUE(eventually([&]{return metric("sentinel_fanout_running 1");}));
+    Peer peer(server->path()); peer.hello(); EXPECT_EQ(peer.next().first["type"],"tip");
+    EXPECT_TRUE(metric("sentinel_fanout_setup_failures_total 2"));
+    writer.close();
+}
+TEST_F(Fixture, SetupRetryBackoffCapsAtTenMinutesAndStopsWhileDown) {
+    ASSERT_TRUE(QDir().mkdir(dir.path()+"/socket"));
+    ASSERT_EQ(::chmod((dir.path()+"/socket").toStdString().c_str(),0755),0);
+    cfg.socketPath=dir.path()+"/socket/f.sock"; start();
+    int attempts=1;
+    for(int seconds:{30,60,120,240,480,600,600}) {
+        now+=int64_t(seconds)*1'000'000'000LL; put(attempts); ++attempts;
+        ASSERT_TRUE(eventually([&]{return metric("sentinel_fanout_setup_failures_total "+std::to_string(attempts));}));
+    }
+    EXPECT_TRUE(metric("sentinel_fanout_running 0"));
+    auto begin=std::chrono::steady_clock::now(); server->stop();
+    EXPECT_LT(std::chrono::steady_clock::now()-begin,2s); EXPECT_FALSE(QFileInfo::exists(cfg.socketPath));
+}
+TEST_F(Fixture, ResnapshotCooldownAndGlobalCapReportForwarding) {
+    start({"BTC-USD","ETH-USD","SOL-USD","XRP-USD"});
+    Peer btc(server->path()),eth(server->path()),sol(server->path()),xrp(server->path());
+    const auto request=[](Peer& p,const char* product) {p.send({{"type","resnapshot"},{"product",product}}); return p.next().first["status"];};
+    btc.hello();btc.next();eth.hello({},"ETH-USD");eth.next();sol.hello({},"SOL-USD");sol.next();xrp.hello({},"XRP-USD");xrp.next();
+    EXPECT_EQ(request(btc,"BTC-USD"),"forwarded");
+    now+=10'000'000'000LL; EXPECT_EQ(request(btc,"BTC-USD"),"rate_limited");
+    now+=10'000'000'000LL; EXPECT_EQ(request(btc,"BTC-USD"),"forwarded");
+    EXPECT_EQ(request(eth,"ETH-USD"),"forwarded");
+    EXPECT_EQ(request(sol,"SOL-USD"),"global_rate_limited");
+    EXPECT_EQ(request(xrp,"XRP-USD"),"global_rate_limited");
+    now+=39'000'000'000LL; EXPECT_EQ(request(sol,"SOL-USD"),"global_rate_limited");
+    now+=1'000'000'000LL; EXPECT_EQ(request(sol,"SOL-USD"),"forwarded");
+    EXPECT_EQ(request(xrp,"XRP-USD"),"global_rate_limited");
+    std::lock_guard lock(requestsMutex); EXPECT_EQ(requests,(std::vector<std::string>{"BTC-USD","BTC-USD","ETH-USD","SOL-USD"}));
+}
+std::atomic<int> malformedLogs{0};
+TEST_F(Fixture, MalformedIngressIsolatesOnlyItsProduct) {
+    malformedLogs=0;
+    struct LogScope {
+        QtMessageHandler old=qInstallMessageHandler([](QtMsgType,const QMessageLogContext&,const QString& text){
+            if(text.contains("Capture fanout malformed ingress: product=BTC-USD")) ++malformedLogs;
+        });
+        ~LogScope(){qInstallMessageHandler(old);}
+    } logs;
+    start({"BTC-USD","ETH-USD"}); Peer btc(server->path()),eth(server->path());
+    btc.hello();btc.next();eth.hello({},"ETH-USD");eth.next();
+    put(0); btc.next(); put(0,"healthy",1); eth.next();
+    server->publish(0,{JournalEventKind::Record,"run",1,0,true,"bad"});
+    EXPECT_EQ(btc.next().first["reason"],"malformed_ingress");
+    EXPECT_TRUE(metric("sentinel_fanout_running 1")); EXPECT_TRUE(metric("sentinel_fanout_clients 1"));
+    EXPECT_TRUE(eventually([&]{return metric("sentinel_fanout_ring_bytes{product=\"BTC-USD\"} 0");}));
+    put(1,"still healthy",1); EXPECT_EQ(eth.next().first["pos"]["block"],1);
+    Peer resumed(server->path()); resumed.hello(JournalPosition{"BTC-USD","run",0,0});
+    EXPECT_EQ(resumed.next().first["type"],"gap"); resumed.next();
+    // Reject inconsistent length too, without poisoning other products or resume.
+    Record r{Kind::Frame,Stamp::now(),1,"x"}; auto bad=framed(r); bad[0]=0;
+    server->publish(0,{JournalEventKind::Record,"run",2,0,true,bad});
+    EXPECT_EQ(resumed.next().first["reason"],"malformed_ingress");
+    put(2,"uninterrupted",1); EXPECT_EQ(eth.next().first["pos"]["block"],2);
+    EXPECT_TRUE(metric("sentinel_fanout_running 1"));
+    server->stop(); EXPECT_EQ(malformedLogs.load(),1);
 }
 TEST_F(Fixture, ProvisionalArrivesBeforeFlushAndDurableFollows) {
     start(); Peer peer(server->path()); peer.hello(); peer.next();
@@ -344,3 +425,21 @@ TEST_F(Fixture, SessionFaultRetractsBeforeWaitingForClose) {
     EXPECT_TRUE(eventually([&]{return !session.error().empty();})); session.close(); EXPECT_FALSE(session.error().empty());
 }
 } // namespace
+
+TEST(CaptureFanoutAlert, UnavailableForFiveMinutesAlertsWithoutPagingOnAbsence) {
+    const auto root=YAML::LoadFile(std::string(SENTINEL_SOURCE_ROOT)+"/ops/monitoring/grafana/provisioning/alerting/rules.yaml");
+    YAML::Node alert;
+    for(size_t g=0;g<root["groups"].size();++g) {
+        const auto rules=root["groups"][g]["rules"];
+        for(size_t i=0;i<rules.size();++i) {
+            const auto rule=rules[i];
+            if(rule["uid"].as<std::string>()=="sentinel-capture-fanout-down") alert=rule;
+        }
+    }
+    ASSERT_TRUE(alert.IsMap());
+    EXPECT_EQ(alert["for"].as<std::string>(),"5m"); EXPECT_EQ(alert["noDataState"].as<std::string>(),"OK");
+    EXPECT_EQ(alert["condition"].as<std::string>(),"C");
+    EXPECT_EQ(alert["data"][0]["model"]["expr"].as<std::string>(),"min(sentinel_fanout_running{job=\"sentinel-capture\"})");
+    const auto evaluator=alert["data"][1]["model"]["conditions"][0]["evaluator"];
+    EXPECT_EQ(evaluator["type"].as<std::string>(),"lt"); EXPECT_EQ(evaluator["params"][0].as<int>(),1);
+}

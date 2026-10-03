@@ -71,7 +71,11 @@ session reserves 4 KiB, outside the pool, for a final stop/gap
 record containing the reason and the first dropped frame's system/steady receive
 times and connection ID. Accepted data drains before this marker on overflow.
 After an I/O failure the damaged segment is left untouched and a fresh segment
-is attempted for the marker. If the volume is still unwritable, even that marker
+is attempted for the marker. Reserved provisional positions are never reused, so
+block-ordinal holes immediately after an abandoned segment are expected. The
+verifier's missing-block diagnostic describes that already-counted damage
+(bad tail/explicit gap), not a separate loss event; it does not make the run clean.
+If the volume is still unwritable, even that marker
 cannot be persisted: the run log explicitly says so and exit remains nonzero.
 Check the exit status and the run log.
 
@@ -686,7 +690,14 @@ created directories are 0700, the socket is 0600. Paths under `/Volumes`, any
 Git checkout (including worktrees), and socket/parent symlinks are refused after
 canonicalization. A lock prevents two owners; a stale socket is removed only
 under that lock, after a connection probe reports no listener. Regular files
-are never removed. Listener startup failure refuses capture startup.
+are never removed. A fanout setup failure logs its reason with `sLog_Error`, sets
+`sentinel_fanout_running` to 0, and leaves journal capture running for all products.
+Setup retries after 30 s, doubling to a 10 min maximum; success resets the delay.
+Fixing a directory's mode/ownership or clearing a conflicting listener permits
+a later retry to recover without restarting capture. The ring remains bounded
+while unavailable; clients recover from the journal if their cursor is absent.
+Grafana's **Capture fan-out down** alert fires after the gauge stays below 1 for
+five minutes; the existing service-down alert covers a missing capture scrape.
 
 `--fanout-ring-mib` defaults to 32 MiB **per product** and
 `--fanout-client-mib` defaults to 16 MiB per connection (both 1..256).
@@ -741,9 +752,13 @@ streams strictly after it, with no duplicate. A fresh hello without a position
 streams the retained ring followed by live records; it does not promise a book
 snapshot or full history. Resnapshot requires a subscription to that product.
 It routes to `MarketDataFeeds::requestResnapshot(product)` and is limited to one
-accepted request per product per 10 seconds across all clients. Reply status is
-`accepted`, `rate_limited`, or `unavailable` during startup/shutdown; the engine's existing resnapshot path journals the
-result normally. Unknown products, malformed commands and repeat handshakes
+forwarded request per product per 20 seconds across all clients, matching the
+engine's cooldown. A global rolling-window cap allows at most three forwards
+per 60 seconds across products. Reply status is `forwarded`, `rate_limited`,
+`global_rate_limited`, or `unavailable` during startup/shutdown. `forwarded` means
+sent to the engine, which may still ignore it when disconnected/reconnecting;
+it is not an acknowledgement of a new snapshot. Actual resnapshots are journaled
+through the engine's existing path. Unknown products, malformed commands and repeat handshakes
 close the connection with `protocol`.
 
 Server packets have little-endian lengths, independent of TCP/socket reads:
@@ -783,7 +798,10 @@ The worker serializes replay and subscription registration, so there is no
 replay-to-live race. Resume requires the cursor itself still in the ring;
 expiration, unknown run, future cursor, and fanout ingress loss all give an
 explicit miss. Ingress loss clears that product's ring and disconnects its
-existing subscribers; the journal remains authoritative. Capture writes never
+existing subscribers; the journal remains authoritative. Malformed ingress
+similarly clears only the affected product's ring and disconnects its clients
+with `malformed_ingress`, logging once per product while other products continue.
+Capture writes never
 wait on fanout locks or socket writes. Each client is serviced with a bounded
 write budget; an overflowing client is disconnected without blocking others.
 
@@ -811,23 +829,14 @@ that product's capture. `--socket PATH` selects a fixture socket.
 `CaptureFanoutTests` uses temporary roots and local sockets. It covers exact
 writer bytes and positions across blocks/hour rotation, cursor-exclusive resume,
 age/byte eviction, slow-client isolation, ingress loss, resnapshot isolation and
-rate limiting, safe paths/ownership, malformed/idle clients and shutdown. It also
+per-product/global rate limiting, safe paths/ownership, setup retry/backoff,
+malformed-product isolation, idle clients and shutdown. It also
 checks provisional delivery before flush, watermark ordering/replay, real short
 write retraction, consumer rollback, null retraction before any durability,
 position non-reuse, and Session failure before shutdown. The
 application fixture additionally checks the default-enabled socket and metrics
-with a client connected at SIGTERM. No test uses production data or Coinbase.
+with a client connected at SIGTERM, and journal continuity/recovery while an
+unusable socket directory is repaired. No test uses production data or Coinbase.
 
-Measured overhead and the full validation/deploy watch list are in
-[Slice B as built](research/2026-10-one-world-pipeline.md#slice-b-as-built-uncommitted-lieutenant-hand-off).
-The benchmark reports append-to-complete-packet receive p50/p95 for one draining
-client, plus CPU/RSS with no client and one client. It timestamps entry to the
-actual Writer append operation, excludes earlier Session queue dwell, and
-includes the reader thread in process CPU/RSS. See the plan for current results.
-
-The append-time 65 s fixture (100 records/s x 1,500 payload bytes) delivered all
-6,501 records with p50 **0.118 ms** / p95 **0.255 ms** append-to-receive latency
-(max 3.073 ms). Zero-client overhead was +0.584 percentage points of one CPU core
-and +11.75 MiB peak RSS, including a 10.33 MiB retained ring; it is measurable.
-No ingress drops or unintended disconnects occurred. These are local synthetic
-results, not deployed end-to-end GUI latency.
+Measurements (including append-to-receive p50/p95), validation and the deploy
+watch list are in [Slice B as built](research/2026-10-one-world-pipeline.md#slice-b-as-built).

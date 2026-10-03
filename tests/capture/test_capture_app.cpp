@@ -18,6 +18,7 @@
 #ifndef _WIN32
 #include <csignal>
 #include <unistd.h>
+#include <sys/stat.h>
 #endif
 
 using namespace sentinel::capture;
@@ -362,5 +363,48 @@ TEST(CaptureApplication, FanoutResnapshotReachesOnlyRequestedEngine) {
     bool resync=false; QDirIterator files(dir.path()+"/raw/BTC-USD",{"*.rawl2"},QDir::Files,QDirIterator::Subdirectories);
     while(files.hasNext()) scan(files.next(),[&](const Record& r){ if(r.kind==Kind::ResyncRequested) resync=true; });
     EXPECT_TRUE(resync);
+#endif
+}
+
+TEST(CaptureApplication, FanoutUnavailableKeepsJournalingAndRecovers) {
+#ifdef _WIN32
+    GTEST_SKIP() << "Unix fanout";
+#else
+    QTemporaryDir dir(QDir::tempPath()+"/sca-XXXXXX");
+    ASSERT_TRUE(QDir().mkdir(dir.path()+"/socket"));
+    ASSERT_EQ(::chmod((dir.path()+"/socket").toStdString().c_str(),0755),0);
+    QProcess child;
+    struct Cleanup { QProcess& p; ~Cleanup(){if(p.state()!=QProcess::NotRunning){p.kill();p.waitForFinished(5000);}} } cleanup{child};
+    auto environment=QProcessEnvironment::systemEnvironment();
+    environment.insert("SENTINEL_LOG_DIR",dir.path()+"/logs"); environment.insert("SENTINEL_LOG_STDERR","1");
+    child.setProcessEnvironment(environment);
+    const auto port=freePort();
+    child.start(CAPTURE_APP_FIXTURE,{"--fanout-socket",dir.path()+"/socket/capture.sock","--root",dir.path()+"/raw",
+        "--symbols","BTC-USD,ETH-USD","--ca-bundle",SENTINEL_TEST_CA,"--metrics-port",QString::number(port)});
+    ASSERT_TRUE(child.waitForStarted(5000));
+    QByteArray output; QElapsedTimer deadline; deadline.start();
+    while(!output.contains("FIXTURE_READY\n") && deadline.elapsed()<20000 && child.state()!=QProcess::NotRunning) {
+        child.waitForReadyRead(50); output+=child.readAllStandardOutput();
+    }
+    ASSERT_TRUE(output.contains("FIXTURE_READY\n")) << child.readAllStandardError().toStdString();
+    EXPECT_NE(scrape(port).find("sentinel_fanout_running 0\n"),std::string::npos);
+    EXPECT_TRUE(child.readAllStandardError().contains("Capture fanout unavailable; journal continues:"));
+    // Inspect completed blocks while capture is still running and the socket is down.
+    for(const auto* product:{"BTC-USD","ETH-USD"}) {
+        size_t frames=0; QDirIterator files(dir.path()+"/raw/"+product,{"*.rawl2"},QDir::Files,QDirIterator::Subdirectories);
+        while(files.hasNext()) scan(files.next(),[&](const Record& r){if(r.kind==Kind::Frame)++frames;});
+        EXPECT_GT(frames,0) << product;
+    }
+    ASSERT_EQ(::chmod((dir.path()+"/socket").toStdString().c_str(),0700),0);
+    deadline.restart(); std::string metrics;
+    do { metrics=scrape(port); if(metrics.find("sentinel_fanout_running 1\n")!=std::string::npos) break;
+        child.waitForReadyRead(100); } while(deadline.elapsed()<35000 && child.state()!=QProcess::NotRunning);
+    ASSERT_NE(metrics.find("sentinel_fanout_running 1\n"),std::string::npos) << metrics;
+    QLocalSocket socket; socket.connectToServer(dir.path()+"/socket/capture.sock"); ASSERT_TRUE(socket.waitForConnected(3000));
+    socket.write("{\"type\":\"hello\",\"version\":1,\"product\":\"BTC-USD\"}\n");socket.waitForBytesWritten(1000);
+    EXPECT_TRUE(socket.waitForReadyRead(3000));
+    ASSERT_EQ(::kill(static_cast<pid_t>(child.processId()),SIGTERM),0);
+    ASSERT_TRUE(child.waitForFinished(5000)); EXPECT_EQ(child.exitCode(),0);
+    for(const auto* product:{"BTC-USD","ETH-USD"}) {auto report=verify(dir.path()+"/raw/"+product); EXPECT_TRUE(report.ok)<<report.json.dump();}
 #endif
 }

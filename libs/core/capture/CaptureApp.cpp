@@ -158,7 +158,6 @@ int runApplication(QCoreApplication& app, const ApplicationDependencies& depende
     fanoutConfig.ringBytes = size_t(number(parser, "fanout-ring-mib", 1, 256)) * 1024 * 1024;
     fanoutConfig.clientBytes = size_t(number(parser, "fanout-client-mib", 1, 256)) * 1024 * 1024;
     CaptureFanout fanout(fanoutConfig, symbols, registry, [&](const std::string& product) { feeds->requestResnapshot(product); });
-    sLog_App("Capture fanout listening: path=" << fanout.path());
     std::map<std::string, ProductState> states;
     // Exceptional exits must also join ingest before destroying its captured states.
     // Feeds itself outlives fanout so resnapshot posts stay safe during teardown.

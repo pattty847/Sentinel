@@ -34,6 +34,18 @@ checks = [
     ('client shutdown', fanout, 'drop(c, "shutdown");', '(void)c;', 'Fixture.WriterBytesPositionsRotationAndShutdown'),
     ('no-client retention', fanout, 'auto& p = *products[i];\n            const auto epoch', 'auto& p = *products[i];\n            if (connected->value() == 0) continue;\n            const auto epoch', 'Fixture.IdleAllocatesNoPayloadAndRetentionIsIndependentOfClients'),
     ('application route', app, 'feeds->requestResnapshot(product);', '(void)product;', 'CaptureApplication.FanoutResnapshotReachesOnlyRequestedEngine'),
+    ('setup failure keeps application alive', fanout, 'catch (const std::exception& e) { unavailable(e); }', 'catch (const std::exception& e) { throw; }', 'CaptureApplication.FanoutUnavailableKeepsJournalingAndRecovers'),
+    ('setup retry', fanout, 'if (listener < 0 && config.nowNs() >= nextRetry) setup();', 'if (false && listener < 0 && config.nowNs() >= nextRetry) setup();', 'Fixture.SetupFailureRetriesWithBackoffWhileWriterContinues'),
+    ('exponential retry delay', fanout, 'retryMs = std::min<int64_t>(retryMs * 2, 600000);', 'retryMs = 30000;', 'Fixture.SetupFailureRetriesWithBackoffWhileWriterContinues'),
+    ('retry delay ceiling', fanout, 'retryMs = std::min<int64_t>(retryMs * 2, 600000);', 'retryMs *= 2;', 'Fixture.SetupRetryBackoffCapsAtTenMinutesAndStopsWhileDown'),
+    ('engine cooldown alignment', fanout, 'now - *p.lastResnapshot < config.resnapshotInterval.count() * 1000000', 'now - *p.lastResnapshot < 10000000000LL', 'Fixture.ResnapshotCooldownAndGlobalCapReportForwarding'),
+    ('global resnapshot cap', fanout, 'globalResnapshots.size() >= 3', 'false', 'Fixture.ResnapshotCooldownAndGlobalCapReportForwarding'),
+    ('forwarded reply semantics', fanout, ': "forwarded"', ': "accepted"', 'Fixture.ResnapshotCooldownAndGlobalCapReportForwarding'),
+    ('malformed ingress product isolation', fanout, 'invalidate(i, p, "malformed_ingress");', 'throw std::runtime_error("invalid fanout record");', 'Fixture.MalformedIngressIsolatesOnlyItsProduct'),
+    ('malformed ingress clears ring', fanout, 'invalidate(i, p, "malformed_ingress");', 'for (auto& c : clients) if (c.product == int(i)) drop(c, "malformed_ingress");', 'Fixture.MalformedIngressIsolatesOnlyItsProduct'),
+    ('malformed ingress logs once', fanout, 'if (!p.malformedLogged)', 'if (true)', 'Fixture.MalformedIngressIsolatesOnlyItsProduct'),
+    ('fanout down alert enabled', Path('ops/monitoring/grafana/provisioning/alerting/rules.yaml'), 'uid: sentinel-capture-fanout-down', 'uid: disabled-capture-fanout-down', 'CaptureFanoutAlert.UnavailableForFiveMinutesAlertsWithoutPagingOnAbsence'),
+
 ]
 
 def build(target):
@@ -50,14 +62,14 @@ for label, path, old, new, case in checks:
     try:
         path.write_text(original.replace(old, new)); path.touch()
         build(target)
-        result = subprocess.run([f'build/mac-clang/tests/capture/{target}', f'--gtest_filter={case}'], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=45)
+        result = subprocess.run([f'build/mac-clang/tests/capture/{target}', f'--gtest_filter={case}'], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=90)
         if result.returncode == 0 or '[  FAILED  ]' not in result.stdout:
             print(result.stdout, flush=True)
             raise RuntimeError(f'{label}: mutation did not fail its regression')
         print(f'FAIL-WITHOUT confirmed: {label} ({case})', flush=True)
     finally:
         path.write_text(original); path.touch(); build(target)
-    result = subprocess.run([f'build/mac-clang/tests/capture/{target}', f'--gtest_filter={case}'], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=45)
+    result = subprocess.run([f'build/mac-clang/tests/capture/{target}', f'--gtest_filter={case}'], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=90)
     if result.returncode:
         print(result.stdout, flush=True)
         raise RuntimeError(f'{label}: restored regression failed')

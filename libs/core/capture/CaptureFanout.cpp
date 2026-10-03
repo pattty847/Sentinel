@@ -106,6 +106,7 @@ struct CaptureFanout::Impl {
         uint64_t seenEpoch = 0;
         std::optional<JournalPosition> tip, durable;
         std::optional<int64_t> lastResnapshot;
+        bool malformedLogged = false;
         metrics::Gauge *ringGauge = nullptr, *oldest = nullptr;
         metrics::Counter *hits = nullptr, *misses = nullptr, *drops = nullptr;
     };
@@ -119,25 +120,31 @@ struct CaptureFanout::Impl {
         metrics::Gauge* gauge = nullptr;
     };
     FanoutConfig config;
-    QString socketPath;
+    QString socketPath, boundPath;
     std::unique_ptr<QLockFile> lock;
     std::vector<std::unique_ptr<Product>> products;
     std::array<Client, MaxClients> clients;
     std::function<void(const std::string&)> resnapshot;
     std::atomic<bool> stopping{false};
     int listener = -1, wake[2]{-1,-1};
+    // Published once when pipe creation succeeds; closed only after writers stop.
+    std::atomic<int> wakeWriter{-1};
+    int64_t nextRetry = 0, retryMs = 30000;
+    std::deque<int64_t> globalResnapshots;
     bool bound = false;
     std::thread thread;
     metrics::Gauge *connected = nullptr, *running = nullptr;
+    metrics::Counter* setupFailures = nullptr;
     std::map<std::string, metrics::Counter*, std::less<>> disconnects;
     Impl(FanoutConfig c, const std::vector<std::string>& names, metrics::MetricsRegistry& r,
          std::function<void(const std::string&)> callback) : config(std::move(c)), resnapshot(std::move(callback)) {
         if (!config.nowNs) config.nowNs = nowNs;
         if (names.empty() || names.size() > MaxProducts || !config.ringBytes || !config.clientBytes || !config.ingressBytes ||
-            config.retention.count() <= 0 || config.resnapshotInterval.count() <= 0) throw std::runtime_error("invalid fanout limits");
+            config.retention.count() <= 0 || config.resnapshotInterval.count() < 20000) throw std::runtime_error("invalid fanout limits");
         running = &r.gauge("sentinel_fanout_running", "1 while the fanout worker is serving.");
+        setupFailures = &r.counter("sentinel_fanout_setup_failures_total", "Fanout setup/service failures; journal capture continues.");
         connected = &r.gauge("sentinel_fanout_clients", "Connected local fanout clients.");
-        for (const auto* reason : {"slow_client", "ingress_overflow", "peer_closed", "protocol", "shutdown", "capacity", "internal_error", "handshake_timeout"})
+        for (const auto* reason : {"slow_client", "ingress_overflow", "peer_closed", "protocol", "shutdown", "capacity", "internal_error", "handshake_timeout", "malformed_ingress"})
             disconnects[reason] = &r.counter("sentinel_fanout_disconnects_total", "Fanout disconnects by reason.", {{"reason", reason}});
         for (size_t i = 0; i < clients.size(); ++i)
             clients[i].gauge = &r.gauge("sentinel_fanout_queue_bytes", "Pending wire bytes including a partially sent record.", {{"client", std::to_string(i)}});
@@ -155,45 +162,72 @@ struct CaptureFanout::Impl {
                 [bytes = p->pendingBytes]() -> std::optional<double> { return double(bytes->load(std::memory_order_relaxed)); });
             products.push_back(std::move(p));
         }
-        try {
-            socketPath = prepareFanoutPath(config.socketPath);
-            lock = std::make_unique<QLockFile>(socketPath + ".lock"); lock->setStaleLockTime(0);
-            if (!lock->tryLock()) throw std::runtime_error("fanout socket already owned");
-            const auto path = socketPath.toStdString();
-            struct stat st{};
-            if (!::lstat(path.c_str(), &st)) {
-                if (!S_ISSOCK(st.st_mode) || st.st_uid != ::geteuid()) throw std::runtime_error("refusing non-socket fanout path");
-                // Also refuse a live listener that does not use our lock protocol.
-                int probe = ::socket(AF_UNIX, SOCK_STREAM, 0);
-                if (probe < 0) throw std::runtime_error("cannot probe existing fanout socket");
-                sockaddr_un old{}; old.sun_family = AF_UNIX; std::strcpy(old.sun_path, path.c_str());
-                try { nonblock(probe); } catch (...) { ::close(probe); throw; }
-                int result = ::connect(probe, reinterpret_cast<sockaddr*>(&old), sizeof(old));
-                int error = errno; ::close(probe);
-                if (result == 0 || error != ECONNREFUSED) throw std::runtime_error("refusing active or inaccessible fanout socket");
-                // Lock ownership is mandatory even for recovery of a stale socket.
-                if (::unlink(path.c_str())) throw std::runtime_error("cannot remove stale fanout socket");
-            }
-            listener = ::socket(AF_UNIX, SOCK_STREAM, 0);
-            if (listener < 0) throw std::runtime_error("fanout socket failed");
-            nonblock(listener);
-            sockaddr_un address{}; address.sun_family = AF_UNIX; std::strcpy(address.sun_path, path.c_str());
-            if (::bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address))) throw std::runtime_error("fanout socket bind failed");
-            bound = true;
-            if (::chmod(path.c_str(), 0600) || ::listen(listener, MaxClients)) throw std::runtime_error("fanout listen failed");
-            if (::pipe(wake)) throw std::runtime_error("fanout wake pipe failed");
-            nonblock(wake[0]); nonblock(wake[1]);
-            thread = std::thread([this] { run(); });
-        } catch (...) { cleanup(); throw; }
+        socketPath = config.socketPath.isEmpty() ? QDir::homePath() + "/Sentinel-runtime/run/capture.sock" : config.socketPath;
+        try { setup(); } catch (const std::exception& e) { unavailable(e); }
+        try { thread = std::thread([this] { run(); }); } catch (...) { cleanup(); throw; }
+    }
+    void setup() {
+        if (wake[0] < 0) {
+            int pipeFds[2];
+            if (::pipe(pipeFds)) throw std::runtime_error("fanout wake pipe failed");
+            try { nonblock(pipeFds[0]); nonblock(pipeFds[1]); }
+            catch (...) { ::close(pipeFds[0]); ::close(pipeFds[1]); throw; }
+            wake[0] = pipeFds[0]; wake[1] = pipeFds[1];
+            wakeWriter.store(wake[1], std::memory_order_release);
+        }
+        const auto checkedPath = prepareFanoutPath(socketPath);
+        lock = std::make_unique<QLockFile>(checkedPath + ".lock"); lock->setStaleLockTime(0);
+        if (!lock->tryLock()) throw std::runtime_error("fanout socket already owned");
+        const auto path = checkedPath.toStdString();
+        struct stat st{};
+        if (!::lstat(path.c_str(), &st)) {
+            if (!S_ISSOCK(st.st_mode) || st.st_uid != ::geteuid()) throw std::runtime_error("refusing non-socket fanout path");
+            // Also refuse a live listener that does not use our lock protocol.
+            int probe = ::socket(AF_UNIX, SOCK_STREAM, 0);
+            if (probe < 0) throw std::runtime_error("cannot probe existing fanout socket");
+            sockaddr_un old{}; old.sun_family = AF_UNIX; std::strcpy(old.sun_path, path.c_str());
+            try { nonblock(probe); } catch (...) { ::close(probe); throw; }
+            int result = ::connect(probe, reinterpret_cast<sockaddr*>(&old), sizeof(old));
+            int error = errno; ::close(probe);
+            if (result == 0 || error != ECONNREFUSED) throw std::runtime_error("refusing active or inaccessible fanout socket");
+            // Lock ownership is mandatory even for recovery of a stale socket.
+            if (::unlink(path.c_str())) throw std::runtime_error("cannot remove stale fanout socket");
+        }
+        listener = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        if (listener < 0) throw std::runtime_error("fanout socket failed");
+        nonblock(listener);
+        sockaddr_un address{}; address.sun_family = AF_UNIX; std::strcpy(address.sun_path, path.c_str());
+        if (::bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address))) throw std::runtime_error("fanout socket bind failed");
+        boundPath = checkedPath; bound = true;
+        if (::chmod(path.c_str(), 0600) || ::listen(listener, MaxClients)) throw std::runtime_error("fanout listen failed");
+        running->set(1); retryMs = 30000;
+        sLog_App("Capture fanout listening: path=" << checkedPath);
+    }
+    void cleanupSocket() {
+        if (listener >= 0) ::close(listener);
+        listener = -1;
+        if (bound) { ::unlink(boundPath.toStdString().c_str()); bound = false; }
+        if (lock && lock->isLocked()) lock->unlock();
+        lock.reset();
+    }
+    void unavailable(const std::exception& e) {
+        running->set(0);
+        cleanupSocket();
+        nextRetry = config.nowNs() + retryMs * 1000000;
+        sLog_Error("Capture fanout unavailable; journal continues: error=" << e.what() << " retry_ms=" << retryMs);
+        retryMs = std::min<int64_t>(retryMs * 2, 600000);
+        setupFailures->inc();
     }
     void cleanup() {
-        for (int fd : {listener, wake[0], wake[1]}) if (fd >= 0) ::close(fd);
-        listener = wake[0] = wake[1] = -1;
-        if (bound) { ::unlink(socketPath.toStdString().c_str()); bound = false; }
-        if (lock && lock->isLocked()) lock->unlock();
+        cleanupSocket();
+        for (int fd : wake) if (fd >= 0) ::close(fd);
+        wake[0] = wake[1] = -1; wakeWriter.store(-1);
     }
     ~Impl() { stop(); cleanup(); }
-    void signal() noexcept { const char b = 0; const auto ignored = ::write(wake[1], &b, 1); (void)ignored; }
+    void signal() noexcept {
+        const int fd = wakeWriter.load(std::memory_order_acquire);
+        if (fd >= 0) { const char b = 0; const auto ignored = ::write(fd, &b, 1); (void)ignored; }
+    }
     void stop() { if (!stopping.exchange(true)) signal(); if (thread.joinable()) thread.join(); }
     void drop(Client& c, std::string_view reason) noexcept {
         if (c.fd < 0) return;
@@ -221,9 +255,9 @@ struct CaptureFanout::Impl {
         p.ringGauge->set(double(p.ringBytes));
         p.oldest->set(p.ring.empty() ? 0 : std::max(0.0, double(now - p.ring.front().time) / 1e9));
     }
-    void invalidate(size_t index, Product& p) {
+    void invalidate(size_t index, Product& p, std::string_view reason = "ingress_overflow") {
         p.ring.clear(); p.ringBytes = 0;
-        for (auto& c : clients) if (c.product == int(index)) drop(c, "ingress_overflow");
+        for (auto& c : clients) if (c.product == int(index)) drop(c, reason);
     }
     void drain() {
         const auto now = config.nowNs();
@@ -241,8 +275,15 @@ struct CaptureFanout::Impl {
                 if (batch->epoch != p.seenEpoch) continue;
                 JournalPosition pos{p.name, batch->run, batch->block, batch->record};
                 if (batch->kind == JournalEventKind::Record) {
-                    if (batch->raw.size() < 32 || size_t(get32(batch->raw.data())) + 4 != batch->raw.size())
-                        throw std::runtime_error("invalid fanout record");
+                    if (batch->raw.size() < 32 || size_t(get32(batch->raw.data())) + 4 != batch->raw.size()) {
+                        invalidate(i, p, "malformed_ingress");
+                        p.tip.reset(); p.durable.reset();
+                        if (!p.malformedLogged) {
+                            sLog_Error("Capture fanout malformed ingress: product=" << p.name << "; journal resume required");
+                            p.malformedLogged = true;
+                        }
+                        continue;
+                    }
                     auto wire = std::make_shared<const std::string>(packet(
                         {{"type", "record"}, {"pos", positionJson(pos)}, {"provisional", true}}, batch->raw));
                     Entry e{pos, wire, now}; p.tip = pos;
@@ -306,8 +347,14 @@ struct CaptureFanout::Impl {
             }
             const auto now = config.nowNs();
             const bool limited = p.lastResnapshot && now - *p.lastResnapshot < config.resnapshotInterval.count() * 1000000;
-            if (!limited) { p.lastResnapshot = now; if (resnapshot) resnapshot(product); }
-            control(c, {{"type", "resnapshot"}, {"product", product}, {"status", limited ? "rate_limited" : "accepted"}});
+            while (!globalResnapshots.empty() && now - globalResnapshots.front() >= 60'000'000'000LL) globalResnapshots.pop_front();
+            const bool globalLimited = globalResnapshots.size() >= 3;
+            if (!limited && !globalLimited) {
+                p.lastResnapshot = now; globalResnapshots.push_back(now);
+                if (resnapshot) resnapshot(product);
+            }
+            control(c, {{"type", "resnapshot"}, {"product", product},
+                {"status", limited ? "rate_limited" : globalLimited ? "global_rate_limited" : "forwarded"}});
         } else throw std::runtime_error("unknown command");
     }
     void read(Client& c) {
@@ -351,9 +398,9 @@ struct CaptureFanout::Impl {
     }
     void run() noexcept {
         sentinel::logging::setCurrentThreadName("capture-fanout");
-        running->set(1);
-        try {
-            while (!stopping.load(std::memory_order_acquire)) {
+        while (!stopping.load(std::memory_order_acquire)) {
+            try {
+                if (listener < 0 && config.nowNs() >= nextRetry) setup();
                 drain();
                 std::array<pollfd, MaxClients + 2> fds{};
                 fds[0] = {listener, POLLIN, 0}; fds[1] = {wake[0], POLLIN, 0};
@@ -373,16 +420,17 @@ struct CaptureFanout::Impl {
                     if (c.fd >= 0 && flags & POLLOUT) write(c);
                     if (c.fd >= 0 && flags & (POLLHUP | POLLERR | POLLNVAL)) drop(c, "peer_closed");
                 }
+                if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) throw std::runtime_error("fanout listener failed");
                 if (fds[0].revents & POLLIN) accept();
             }
-            drain();
-            for (auto& c : clients) { if (c.fd >= 0) write(c); drop(c, "shutdown"); }
-        } catch (const std::exception& e) {
-            sLog_Error("Capture fanout stopped: error=" << e.what());
-            stopping.store(true);
-            ::close(listener); listener = -1;
-            for (auto& c : clients) drop(c, "internal_error");
+            catch (const std::exception& e) {
+                for (size_t i = 0; i < products.size(); ++i) invalidate(i, *products[i], "internal_error");
+                for (auto& c : clients) drop(c, "internal_error");
+                unavailable(e);
+            }
         }
+        try { drain(); } catch (const std::exception& e) { sLog_Error("Capture fanout shutdown drain: " << e.what()); }
+        for (auto& c : clients) { if (c.fd >= 0) write(c); drop(c, "shutdown"); }
         running->set(0);
     }
 };
