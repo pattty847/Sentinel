@@ -376,3 +376,11 @@ The recorder stall alert A1 keeps its meaning: last column age > 240 s while
 4. Whether the capture should also journal its own outgoing subscribe frames and acks
    as kind 1 records (they are today only as incoming acks); useful for audits, not
    needed for rollups.
+
+## Owner decisions (2026-10-02, approved: all defaults)
+
+1. Roller is a library hosted in `sentinel-server` (live) plus the batch CLI `sentinel-roll`; no separate roller service.
+2. The product set is fixed by the capture's arguments; the server refuses others.
+3. Per-product grids are derived automatically: tick = about 1 basis point of price, rounded to a 1-2-5 step, never below the product's quote increment, fixed per recording day; `recording.products.<id>` may override (BTC keeps its explicit near $1 / deep $5).
+4. Rebuilt history goes to a new root `/Volumes/T7/sentinel-data/hmc2` (the 09-28/29 BTC days copied in).
+5. Parity = run-to-run byte identity of the roller plus decoded-record parity with the recorder on qualifying minutes (observedMs == 60000, no kResynced, kLateEvents masked); not whole-file byte parity.
