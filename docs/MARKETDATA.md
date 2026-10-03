@@ -8,6 +8,21 @@ Each engine owns one transport and strand, a single connection sequence counter,
 its own heartbeat/L2 liveness and reconnect state. Core depends on QtCore logging,
 never GUI Qt. Consumers retain history and books; engines only dispatch data.
 
+Coinbase Advanced Trade `market_trades.side` names the resting maker. The
+`MarketDataCoreEngine` flips BUY to sell aggressor and SELL to buy aggressor
+once, before delivering a `Trade` to server consumers. Unknown stays unknown.
+Server footprint delta is positive for buy aggressors and negative for sell
+aggressors; candle, TPO, and volume profile calculations ignore side. Live
+stream `trade` messages carry `side_basis: "aggressor"` so clients use `side`
+without another flip. An unmarked older stream carries Coinbase maker side.
+
+Hourly tick files use the same 1=buy, 2=sell side codes with a versioned basis:
+v1 `HH.bin` records are maker based; v2 `HH.v2.bin` records are aggressor based
+(0 also represents unknown). The reader accepts both versions. The distinct
+v2 filename prevents a resumed logger from appending new semantics to a v1
+file for the same hour. Historical v1 side codes must be inverted when used
+as aggressor direction; the current backtest tick reader ignores side.
+
 ```
 MarketDataFeeds (one I/O thread, shared TLS and connect limiter)
   BTC-USD engine/strand -> BTC-USD WebSocket -> callbacks(product=BTC-USD)

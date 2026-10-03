@@ -350,7 +350,12 @@ void MarketDataCoreEngine::processTrades(const nlohmann::json& trades,
 
 Trade MarketDataCoreEngine::createTradeFromJson(const nlohmann::json& trade_data,
                                                 const std::chrono::system_clock::time_point& arrival_time) {
-    return MessageDispatcher::parseTrade(trade_data);
+    Trade trade = MessageDispatcher::parseTrade(trade_data, arrival_time);
+    // Coinbase market_trades reports the resting maker. All server consumers
+    // receive the initiating aggressor side from this boundary onward.
+    if (trade.side == AggressorSide::Buy) trade.side = AggressorSide::Sell;
+    else if (trade.side == AggressorSide::Sell) trade.side = AggressorSide::Buy;
+    return trade;
 }
 
 void MarketDataCoreEngine::handleOrderBookData(const nlohmann::json& message,

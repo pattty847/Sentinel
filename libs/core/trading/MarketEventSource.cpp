@@ -144,7 +144,8 @@ bool TickBinaryTradeEventSource::openNextFile() {
 
         LogFormat::FileHeader header{};
         m_currentFile.read(reinterpret_cast<char*>(&header), sizeof(header));
-        if (!m_currentFile.good() || header.magic != LogFormat::MAGIC || header.version != LogFormat::VERSION) {
+        if (!m_currentFile.good() || header.magic != LogFormat::MAGIC ||
+            (header.version != LogFormat::LEGACY_VERSION && header.version != LogFormat::VERSION)) {
             closeCurrentFile();
             continue;
         }

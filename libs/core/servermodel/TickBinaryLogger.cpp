@@ -41,7 +41,8 @@ void TickBinaryLogger::logTrade(const Trade& trade) {
     LogFormat::TradePayload payload;
     payload.price = trade.price;
     payload.size = trade.size;
-    payload.side = (trade.side == AggressorSide::Buy) ? 1 : 2;
+    payload.side = trade.side == AggressorSide::Buy ? 1
+                   : trade.side == AggressorSide::Sell ? 2 : 0;
     
     // Header
     LogFormat::RecordHeader header;
@@ -122,7 +123,8 @@ void TickBinaryLogger::rotateFile(LogFile& file, const std::string& symbol, uint
     int hourOfDay = (timestamp_ms / 1000 / 3600) % 24;
     
     std::stringstream fileName;
-    fileName << std::setfill('0') << std::setw(2) << hourOfDay << ".bin";
+    // Versioned name prevents appending aggressor records to a legacy maker file.
+    fileName << std::setfill('0') << std::setw(2) << hourOfDay << ".v2.bin";
     
     fs::path filePath = dayDir / fileName.str();
     

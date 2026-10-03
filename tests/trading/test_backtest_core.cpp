@@ -280,13 +280,13 @@ TEST(BacktestCore, TickBinaryTradeEventSourceParsesTradeFiles) {
     namespace fs = std::filesystem;
     const fs::path tempDir = fs::temp_directory_path() / "sentinel_tick_reader_test";
     fs::create_directories(tempDir);
-    const fs::path filePath = tempDir / "00.bin";
-
-    {
+    for (const auto version : {LogFormat::LEGACY_VERSION, LogFormat::VERSION}) {
+        const fs::path filePath = tempDir / (std::to_string(version) + ".bin");
         std::ofstream out(filePath, std::ios::binary | std::ios::trunc);
         ASSERT_TRUE(out.is_open());
 
         LogFormat::FileHeader fileHeader;
+        fileHeader.version = version;
         fileHeader.created_at_ms = 1000;
         std::memcpy(fileHeader.symbol, "BTC-USD", 7);
         out.write(reinterpret_cast<const char*>(&fileHeader), sizeof(fileHeader));
@@ -307,15 +307,53 @@ TEST(BacktestCore, TickBinaryTradeEventSourceParsesTradeFiles) {
 
     { // the reader keeps 00.bin open until EOF: close it before removing the directory (Windows)
         trading::TickBinaryTradeEventSource source(tempDir, "BTC-USD");
-        auto event = source.next();
-        ASSERT_TRUE(event.has_value());
-        ASSERT_TRUE(event->trade.has_value());
-        EXPECT_EQ(event->trade->symbol, "BTC-USD");
-        EXPECT_EQ(event->trade->timestampMs, 2000);
-        EXPECT_DOUBLE_EQ(event->trade->price, 123.45);
-        EXPECT_DOUBLE_EQ(event->trade->qty, 0.75);
+        for (int version = 1; version <= 2; ++version) {
+            auto event = source.next();
+            ASSERT_TRUE(event.has_value());
+            ASSERT_TRUE(event->trade.has_value());
+            EXPECT_EQ(event->trade->symbol, "BTC-USD");
+            EXPECT_EQ(event->trade->timestampMs, 2000);
+            EXPECT_DOUBLE_EQ(event->trade->price, 123.45);
+            EXPECT_DOUBLE_EQ(event->trade->qty, 0.75);
+        }
+        EXPECT_FALSE(source.next().has_value());
     }
 
+    fs::remove_all(tempDir);
+}
+
+TEST(BacktestCore, TickLoggerWritesAggressorBasisInVersionedFile) {
+    namespace fs = std::filesystem;
+    const fs::path tempDir = fs::temp_directory_path() / "sentinel_tick_logger_basis_test";
+    fs::remove_all(tempDir);
+    Trade trade{};
+    trade.product_id = "BTC-USD";
+    trade.trade_id = "basis";
+    trade.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(1000));
+    trade.price = 100;
+    trade.size = 1;
+    trade.side = AggressorSide::Sell;
+    {
+        TickBinaryLogger logger(tempDir.string());
+        logger.logTrade(trade);
+        logger.flush();
+    }
+    std::vector<fs::path> files;
+    for (const auto& entry : fs::recursive_directory_iterator(tempDir))
+        if (entry.is_regular_file()) files.push_back(entry.path());
+    ASSERT_EQ(files.size(), 1u);
+    EXPECT_EQ(files[0].filename(), "00.v2.bin");
+    std::ifstream in(files[0], std::ios::binary);
+    LogFormat::FileHeader header{};
+    LogFormat::RecordHeader record{};
+    LogFormat::TradePayload payload{};
+    in.read(reinterpret_cast<char*>(&header), sizeof(header));
+    in.read(reinterpret_cast<char*>(&record), sizeof(record));
+    in.read(reinterpret_cast<char*>(&payload), sizeof(payload));
+    ASSERT_TRUE(in.good());
+    EXPECT_EQ(header.version, 2); // independent of the writer's version constant
+    EXPECT_EQ(record.type, LogFormat::RecordType::Trade);
+    EXPECT_EQ(payload.side, 2); // sell aggressor
     fs::remove_all(tempDir);
 }
 
