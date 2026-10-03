@@ -1017,6 +1017,10 @@ void UnifiedGridRenderer::setHeatmapChartSettings(const heatmap::HeatmapChartSet
   // Both renderers draw the chart's palette and colour range (A/B parity).
   const auto gradients = heatmap::gpu::gradientsFor(settings);
   m_showTrades = settings.showTrades;
+  if (m_tradesAboveCandles != settings.tradesAboveCandles) {
+    m_tradesAboveCandles = settings.tradesAboveCandles;
+    emit tradeBubbleSettingsChanged();
+  }
   m_tradeMinNotional = settings.tradeMinNotional;
   const auto& bid = gradients.bid.back();
   const auto& ask = gradients.ask.back();

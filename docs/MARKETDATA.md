@@ -471,8 +471,27 @@ filtered before layout: up to 4,096 qualifying trades draw separately; overflow
 uses side-specific 6 px bins, widening only if occupied bins exceed the circle cap
 (see [bubble display semantics](AGENT_API.md#trade-bubbles-gpu-chart)). Larger
 circles draw before smaller ones. Layout scratch and QSG vertices are preallocated.
+Normal screen-sized fine grids use direct indexing; larger grids use avalanched
+integer cell keys (never masked `std::hash<double>` mantissa bits). Fine occupancy
+is built once; coarser sizes operate only on occupied cells and stop at the first
+fitting 6 px multiple. Tests bound hash probes/cell visits and verify the smallest
+supported grid against an independent raw-row occupancy oracle.
+
+A full chart tape, ID index, layout scratch and bubble geometry use roughly
+**16–18 MB per chart** with short exchange IDs (about 18 MB with the current fine
+cell index); longer IDs and allocator overhead can increase this. The tape is
+retained while Trades is off. Scratch/geometry is allocated once per scene-graph
+root, with one bubble mesh regardless of layer order.
+
+`TradeBubbleOverlayItem` is a sibling of UGR and the candle item: z=2.5 by default,
+or z=1.5 when `tradesAboveCandles=false` (heatmap z=1, candles z=2). UGR publishes
+plain C++ frame values; the sibling consumes them via a direct
+[`afterSynchronizing`](https://doc.qt.io/qt-6/qquickwindow.html#afterSynchronizing)
+callback after all item updates, while the GUI thread is blocked. Render callbacks
+retain shared C++ data and typed node links, never traverse GUI QObject graphs;
+root destruction clears its node link, and moving windows creates a separate link.
 An unchanged visible set at unchanged scale reuses the mesh, with a clipped QSG
-translation for follow-live pan; out-of-window appends do not rebuild it.
+translation for horizontal follow-live pan (price changes rebuild); out-of-window appends do not rebuild it.
 
 Session history survives timeframe/renderer changes and same-symbol reconnects;
 symbol switches clear it. This is partial observed-session coverage, not a raw

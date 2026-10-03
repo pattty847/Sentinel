@@ -5,6 +5,10 @@
 #include <QSettings>
 #include <cmath>
 #include <memory>
+#include <unordered_set>
+#include <vector>
+#include <chrono>
+#include <iostream>
 
 using namespace trade_bubbles;
 namespace {
@@ -117,6 +121,59 @@ TEST(TradeBubbles, SpatialOverflowCoarsensOnlyAsNeededAndKeepsAllVolume) {
     for (const auto& circle:b) actual+=circle.radius*circle.radius*1000/9;
     EXPECT_NEAR(actual,expected,0.001);
 }
+TEST(TradeBubbles, OverflowHashAndSizingHaveBoundedWorkAndChooseFirstFittingGrid) {
+    auto m=mapping(1847,901); m.viewEndMs=1001000; m.srcRect.setWidth(10000);
+    for (const auto rect : {QRectF(0,0,1847,901), QRectF(0,0,12000,6000)})
+    for (size_t n : {5000u,20000u,100000u}) {
+        m.drawRect=rect;
+        std::vector<Sample> rows; rows.reserve(n);
+        uint32_t seed=1234567;
+        auto random=[&] { seed^=seed<<13; seed^=seed>>17; seed^=seed<<5; return seed; };
+        for (size_t i=0;i<n;++i)
+            rows.push_back({1000+int64_t(random()%1000000),100.0+(random()%1000000)/10000.0,.01,
+                            i%2 ? AggressorSide::Buy : AggressorSide::Sell});
+        Layout layout;
+        const bool normalPlot=rect.width()<2000;
+        std::span<const Bubble> bubbles;
+        std::array<double,9> timings{};
+        for (int trial=0; trial<(normalPlot ? 11 : 1); ++trial) {
+            const auto start=std::chrono::steady_clock::now();
+            bubbles=layout.build(std::span<const Sample>(rows),m,0);
+            const auto end=std::chrono::steady_clock::now();
+            if (trial>=2) timings[size_t(trial-2)]=std::chrono::duration<double,std::milli>(end-start).count();
+        }
+        if (normalPlot) {
+            std::sort(timings.begin(),timings.end());
+            std::cout << "BUBBLE_LAYOUT rows=" << n << " median_ms=" << timings[4]
+                      << " max_ms=" << timings.back() << " probes=" << layout.hashProbes()
+                      << " cell_visits=" << layout.coarseCellVisits() << " bin_px=" << layout.binSizePx()
+                      << " bubbles=" << bubbles.size() << '\n';
+        }
+        ASSERT_LE(bubbles.size(),Layout::MaxBubbles);
+        ASSERT_LE(layout.hashProbes(),(normalPlot ? 8 : 32)*n) << "integer grid keys must not collapse to one probe run";
+        EXPECT_LE(layout.coarseCellVisits(),(normalPlot ? 3 : 24)*n) << "size from occupied fine cells, not repeated trade scans";
+        EXPECT_EQ(layout.scannedRows(),n);
+        EXPECT_LE(layout.fineCellCount(),n);
+        EXPECT_EQ(std::fmod(layout.binSizePx(),6),0);
+        // Independent oracle over raw executions: every smaller supported bin
+        // width must exceed the cap; the selected width must fit exactly.
+        for (int width=6; width<=int(layout.binSizePx()); width+=6) {
+            std::unordered_set<uint64_t> occupied;
+            for (const auto& row:rows) {
+                const auto x=uint32_t((m.timeToScreenX(row.timeMs)-m.drawRect.x())/width);
+                const auto y=uint32_t((m.priceToScreenY(row.price)-m.drawRect.y())/width);
+                occupied.insert((uint64_t(x)<<33)|(uint64_t(y)<<1)|(row.side==AggressorSide::Sell));
+            }
+            if (width<int(layout.binSizePx())) EXPECT_GT(occupied.size(),Layout::MaxBubbles);
+            else EXPECT_EQ(occupied.size(),bubbles.size());
+        }
+        double expected=0,actual=0;
+        for(const auto& row:rows) expected+=row.price*row.size;
+        for(const auto& bubble:bubbles) actual+=bubble.radius*bubble.radius*1000/9;
+        EXPECT_NEAR(actual,expected,0.03); // sizes avoid the radius cap
+    }
+}
+
 TEST(TradeBubbles, LargerCirclesDrawFirstAcrossSidesAndNeighbouringCells) {
     Layout layout;
     const Sample rows[]={{1500,150,1,AggressorSide::Buy}, {1500,150,4,AggressorSide::Sell},

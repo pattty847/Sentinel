@@ -101,6 +101,7 @@ private:
     QLabel *m_status = nullptr;
     // Chart (S7b labels: chart settings; candle style: renderer state)
     QCheckBox *m_showLabels = nullptr;
+    QCheckBox *m_tradesAboveCandles = nullptr;
     QComboBox *m_labelCurrency = nullptr;
     QDoubleSpinBox *m_labelMinPx = nullptr;
     QDoubleSpinBox *m_labelMaxPx = nullptr;

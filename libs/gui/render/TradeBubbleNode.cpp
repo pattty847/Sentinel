@@ -69,19 +69,20 @@ void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMappin
     // Endpoint identities + count identify an unchanged range: the tape only
     // inserts rows and evicts its oldest row, never edits existing executions.
     // This also ignores updates outside the viewport and duplicate replay rows.
-    if (rebuildCount_ && key == windowKey_ && enabled_ == enabled && minNotional_ == minNotional &&
+    if (tape_ == &tape && rebuildCount_ && key == windowKey_ && enabled_ == enabled && minNotional_ == minNotional &&
         buy_ == buy && sell_ == sell && mapping_.valid == m.valid && mapping_.drawRect == m.drawRect &&
         scaleX(mapping_) == scaleX(m) && scaleY(mapping_) == scaleY(m) &&
+        mapping_.priceToScreenY(m.viewMinPrice) == m.priceToScreenY(m.viewMinPrice) &&
         mapping_.viewMinPrice == m.viewMinPrice && mapping_.viewMaxPrice == m.viewMaxPrice) {
         QMatrix4x4 translation;
         if (!window.rows.empty()) {
             const double anchor = double(window.rows.front().timeMs);
-            translation.translate(float(m.timeToScreenX(anchor)-mapping_.timeToScreenX(anchor)),
-                                  float(m.priceToScreenY(m.viewMinPrice)-mapping_.priceToScreenY(m.viewMinPrice)));
+            translation.translate(float(m.timeToScreenX(anchor)-mapping_.timeToScreenX(anchor)), 0.0f);
         }
         if (translation != transform_.matrix()) transform_.setMatrix(translation);
         return;
     }
+    tape_ = &tape;
     windowKey_ = key; enabled_ = enabled; minNotional_ = minNotional;
     mapping_ = m; buy_ = buy; sell_ = sell;
     transform_.setMatrix(QMatrix4x4{});
@@ -112,6 +113,20 @@ void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMappin
         std::fill(v + count, v + usedVertexCount_, Vertex{});
 #endif
     usedVertexCount_ = int(count);
+    geometry_.markVertexDataDirty();
+    mesh_.markDirty(DirtyGeometry);
+}
+
+void TradeBubbleNode::clear() {
+    enabled_ = false;
+    tape_ = nullptr;
+    if (!usedVertexCount_) return;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+    geometry_.setVertexCount(0);
+#else
+    std::fill_n(static_cast<Vertex*>(geometry_.vertexData()), usedVertexCount_, Vertex{});
+#endif
+    usedVertexCount_ = 0;
     geometry_.markVertexDataDirty();
     mesh_.markDirty(DirtyGeometry);
 }

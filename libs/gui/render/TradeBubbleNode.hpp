@@ -12,6 +12,7 @@ public:
     TradeBubbleNode();
     QSGGeometry* geometry() { return &geometry_; }
     const QSGGeometry* geometry() const { return &geometry_; }
+    void clear();
     int usedVertexCount() const { return usedVertexCount_; }
     uint64_t rebuildCount() const { return rebuildCount_; }
     size_t lastScanRows() const { return lastScanRows_; }
@@ -26,6 +27,7 @@ private:
     QSGTransformNode transform_;
     QSGGeometryNode mesh_;
     trade_bubbles::WindowKey windowKey_;
+    const trade_bubbles::Tape* tape_ = nullptr;
     uint64_t rebuildCount_ = 0;
     size_t lastScanRows_ = 0, rangeComparisons_ = 0;
     TimeAxisMapping mapping_;

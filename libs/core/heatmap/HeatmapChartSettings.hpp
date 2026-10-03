@@ -26,6 +26,7 @@ struct HeatmapChartSettings {
     int prefetchTiles = 1, liveMinIntervalMs = 500;
     bool showTelemetry = false;
     bool showTrades = false;
+    bool tradesAboveCandles = true;
     double tradeMinNotional = 0; // quote units (USD for BASE-USD), before aggregation
     // Liquidity labels (S7b, owner decision 1/2): on every coloured cell where the
     // text fits at labelMinPx plus padding, growing to at most labelMaxPx; USD

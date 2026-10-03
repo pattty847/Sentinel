@@ -273,7 +273,7 @@ void HeatmapSettingsDialog::setRenderer(UnifiedGridRenderer *renderer) {
 }
 
 QStringList HeatmapSettingsDialog::tabKeys(const QString &tab) {
-    if (tab == "Chart") return {"showLabels", "labelCurrency", "labelMinPx", "labelMaxPx",
+    if (tab == "Chart") return {"tradesAboveCandles", "showLabels", "labelCurrency", "labelMinPx", "labelMaxPx",
                                 "candleUpColor", "candleDownColor", "candleWickColor", "candleBodyOpacity", "candleWickWidth"};
     if (tab == "Tick") return {"tickMode", "manualTick", "minRowPx", "hysteresis"};
     if (tab == "Look")
@@ -359,6 +359,11 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
                       "fits at the smallest size plus padding; it grows with the cells up to the largest size. "
                       "GPU renderer.",
                       page));
+    m_tradesAboveCandles = new QCheckBox("Trades above candles", page);
+    m_tradesAboveCandles->setObjectName("tradesAboveCandles");
+    m_tradesAboveCandles->setToolTip("Keep translucent executions visible over opaque candle bodies (GPU renderer).");
+    form->addRow("Trades", m_tradesAboveCandles);
+    connect(m_tradesAboveCandles, &QCheckBox::toggled, this, [this](bool on) { apply({{"tradesAboveCandles", on}}); });
     auto *candles = new QGroupBox("Candles", page);
     auto *candleForm = new QFormLayout(candles);
     m_candleStyle = new QComboBox(candles);
@@ -732,6 +737,9 @@ void HeatmapSettingsDialog::refreshFromModel() {
     {
         const QSignalBlocker a(m_showLabels), b(m_labelCurrency);
         m_showLabels->setChecked(s.showLabels);
+        const QSignalBlocker trades(m_tradesAboveCandles);
+        m_tradesAboveCandles->setChecked(s.tradesAboveCandles);
+        m_tradesAboveCandles->setEnabled(s.renderer == "gpu");
         m_labelCurrency->setCurrentIndex(std::max(0, m_labelCurrency->findData(QString::fromStdString(s.labelCurrency))));
     }
     set(m_labelMinPx, s.labelMinPx);

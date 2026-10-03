@@ -34,6 +34,7 @@
 #include <QGuiApplication>
 #include <QQmlContext>
 #include <QQmlEngine>
+#include "render/TradeBubbleOverlayItem.hpp"
 #include <QQuickView>
 #include <QQuickWindow>
 #include <QSGOpacityNode>
@@ -1686,6 +1687,7 @@ int main(int argc, char **argv) {
     qmlRegisterModule("Sentinel.Charts", 1, 0);
     qmlRegisterType<LabTextItem>("Sentinel.Charts", 1, 0, "LabTextItem");
     qmlRegisterType<CandlestickBatched>("Sentinel.Charts", 1, 0, "CandlestickBatched");
+    qmlRegisterType<TradeBubbleOverlayItem>("Sentinel.Charts", 1, 0, "TradeBubbleOverlayItem");
     qmlRegisterType<CandlestickOverlayItem>("Sentinel.Charts", 1, 0, "CandlestickOverlayItem");
     ::testing::InitGoogleTest(&argc, argv);
     std::cout << "[sentinel] " << lab::describeRhi().toStdString() << std::endl;

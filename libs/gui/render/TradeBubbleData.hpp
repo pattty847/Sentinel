@@ -68,14 +68,24 @@ public:
         return build(Samples{trades, {}}, map, minNotional);
     }
     size_t scannedRows() const { return scannedRows_; }
+    size_t hashProbes() const { return hashProbes_; }
+    size_t coarseCellVisits() const { return coarseCellVisits_; }
+    size_t fineCellCount() const { return fineCellCount_; }
     double binSizePx() const { return binSize_; } // 0 means individual executions.
 private:
-    struct Point { double x = 0, y = 0, notional = 0; AggressorSide side = AggressorSide::Unknown; };
-    struct Bin { Point point; double cellX = 0, cellY = 0; };
-    std::unique_ptr<Point[]> points_;
-    std::array<Bin, MaxBubbles * 2> bins_{};
+    struct Point {
+        double x = 0, y = 0, notional = 0;
+        AggressorSide side = AggressorSide::Unknown;
+        uint32_t cellX = 0, cellY = 0;
+    };
+    static constexpr size_t FineSlots = 1u << 18; // <=100k cells, load <0.39
+    std::unique_ptr<Point[]> points_; // raw projected rows, compacted in place to 6 px cells
+    std::unique_ptr<uint32_t[]> fineSlots_;
+    std::array<uint16_t, MaxBubbles * 2> coarseSlots_{};
+    std::array<Point, MaxBubbles> bins_{};
     std::array<Bubble, MaxBubbles> bubbles_{};
     size_t count_ = 0, scannedRows_ = 0;
     double binSize_ = 0;
+    size_t hashProbes_ = 0, coarseCellVisits_ = 0, fineCellCount_ = 0;
 };
 } // namespace trade_bubbles

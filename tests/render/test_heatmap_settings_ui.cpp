@@ -41,17 +41,25 @@
 #include <QTest>
 #include <gtest/gtest.h>
 #include "render/TradeBubbleNode.hpp"
+#include "render/TradeBubbleOverlayItem.hpp"
+#include <QFile>
+#include <QQmlEngine>
+#include <QQmlContext>
+#include <QQmlComponent>
+#include <QQuickWindow>
 #include <iostream>
 
 struct TradeBubbleRendererTest {
-    static QSGNode* root(UnifiedGridRenderer& r, QSGNode* old, TradeBubbleNode** bubbles) {
-        heatmap::gpu::HeatmapTileNode* tile=nullptr;
-        return r.ensureGpuRootNode(old,&tile,bubbles);
-    }
+    static void publish(UnifiedGridRenderer& r, const TimeAxisMapping& m) { r.publishTradeBubbleFrame(m); }
     static size_t count(const UnifiedGridRenderer& r) { return r.m_tradeBubbleTape->samples().size(); }
     static int64_t firstTime(const UnifiedGridRenderer& r) { return r.m_tradeBubbleTape->samples().front().timeMs; }
     static bool enabled(const UnifiedGridRenderer& r) { return r.m_showTrades; }
     static double threshold(const UnifiedGridRenderer& r) { return r.m_tradeMinNotional; }
+};
+
+struct TradeBubbleOverlayTest {
+    static QSGNode* root(TradeBubbleOverlayItem& item, QSGNode* old) { return item.updatePaintNode(old,nullptr); }
+    static auto link(TradeBubbleOverlayItem& item) { return item.m_link; }
 };
 
 namespace {
@@ -654,22 +662,107 @@ TEST(HeatmapSettingsDialogTest, ApiChangesReachTheDialogAndToolbar) {
     EXPECT_EQ(t.reload().palettePreset, "Electric"); // persist:false
 }
 
-TEST(TradeBubbleControls, TypedBubblePointerSurvivesSiblingInsertionAndRootRecreation) {
+TEST(TradeBubbleControls, SiblingOverlayConsumesLatestFrameAndOwnsTypedNode) {
     UnifiedGridRenderer renderer;
-    TradeBubbleNode* bubbles=nullptr;
-    auto* root=TradeBubbleRendererTest::root(renderer,nullptr,&bubbles);
-    ASSERT_NE(bubbles,nullptr);
-    auto* original=bubbles;
-    // A new layer between heatmap and trades must not change which node is synced.
-    auto* sibling=new QSGNode;
-    root->insertChildNodeAfter(sibling,root->firstChild());
-    EXPECT_EQ(TradeBubbleRendererTest::root(renderer,root,&bubbles),root);
-    EXPECT_EQ(bubbles,original);
-    delete root; // Scene graph invalidation: no renderer-owned dangling pointer.
-    root=TradeBubbleRendererTest::root(renderer,nullptr,&bubbles);
-    ASSERT_NE(bubbles,nullptr);
-    EXPECT_EQ(static_cast<QSGNode*>(bubbles)->parent(),root);
+    renderer.setActiveSymbol("BTC-USD");
+    HeatmapChartSettings settings; settings.showTrades=true;
+    renderer.setHeatmapChartSettings(settings);
+    Trade trade{}; trade.product_id="BTC-USD"; trade.price=150; trade.size=1; trade.side=AggressorSide::Buy;
+    trade.timestamp=std::chrono::system_clock::time_point(std::chrono::milliseconds(1500));
+    renderer.onTradeReceived(trade);
+    QQuickWindow window, secondWindow; // No showing, rendering, Metal or GPU needed.
+    TradeBubbleOverlayItem overlay;
+    overlay.setParentItem(window.contentItem());
+    overlay.setRenderer(&renderer);
+    auto link=TradeBubbleOverlayTest::link(overlay);
+    auto* root=TradeBubbleOverlayTest::root(overlay,nullptr); // Item synchronized first.
+    ASSERT_NE(link->node,nullptr);
+    auto* original=link->node;
+    root->prependChildNode(new QSGNode); // Sibling order is irrelevant.
+    TimeAxisMapping m; m.valid=true; m.drawRect={0,0,640,320}; m.srcRect={0,0,10,100};
+    m.viewStartMs=m.dataStartMs=1000; m.viewEndMs=2000; m.appendMs=100;
+    m.viewMinPrice=100; m.viewMaxPrice=m.dataMaxPrice=200; m.tickSize=1;
+    TradeBubbleRendererTest::publish(renderer,m); // UGR synchronized afterwards.
+    ASSERT_TRUE(QMetaObject::invokeMethod(&window,"afterSynchronizing",Qt::DirectConnection));
+    EXPECT_EQ(link->node,original);
+    ASSERT_EQ(original->usedVertexCount(),6);
+    EXPECT_NEAR(static_cast<const float*>(original->geometry()->vertexData())[0],320-trade_bubbles::Layout::radius(150),1e-4);
+    m.srcRect.translate(1,0); m.viewStartMs+=100; m.viewEndMs+=100;
+    TradeBubbleRendererTest::publish(renderer,m);
+    ASSERT_TRUE(QMetaObject::invokeMethod(&window,"afterSynchronizing",Qt::DirectConnection));
+    EXPECT_FLOAT_EQ(original->translation()(0,3),-64);
+    EXPECT_EQ(original->rebuildCount(),1);
+    EXPECT_EQ(TradeBubbleOverlayTest::root(overlay,root),root);
     delete root;
+    EXPECT_EQ(link->node,nullptr);
+    ASSERT_TRUE(QMetaObject::invokeMethod(&window,"afterSynchronizing",Qt::DirectConnection));
+    root=TradeBubbleOverlayTest::root(overlay,nullptr);
+    ASSERT_TRUE(QMetaObject::invokeMethod(&window,"afterSynchronizing",Qt::DirectConnection));
+    EXPECT_EQ(link->node->usedVertexCount(),6);
+    overlay.setParentItem(secondWindow.contentItem());
+    auto secondLink=TradeBubbleOverlayTest::link(overlay);
+    EXPECT_NE(secondLink,link);
+    root=TradeBubbleOverlayTest::root(overlay,root);
+    EXPECT_EQ(link->node,nullptr);
+    ASSERT_NE(secondLink->node,nullptr);
+    ASSERT_TRUE(QMetaObject::invokeMethod(&secondWindow,"afterSynchronizing",Qt::DirectConnection));
+    EXPECT_EQ(secondLink->node->usedVertexCount(),6);
+    link=secondLink;
+    overlay.setRenderer(nullptr);
+    ASSERT_TRUE(QMetaObject::invokeMethod(&secondWindow,"afterSynchronizing",Qt::DirectConnection));
+    EXPECT_EQ(link->node->usedVertexCount(),0);
+    delete root;
+    overlay.setParentItem(nullptr);
+}
+
+TEST(TradeBubbleControls, LayerOrderUsesRealQmlBindingAndPersistedChartApiSetting) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store,"main",t.config);
+    UnifiedGridRenderer renderer;
+    HeatmapChartControls controls(&model); controls.setRenderer(&renderer);
+    HeatmapSettingsDialog dialog(&model,&renderer);
+    auto* check=child<QCheckBox>(dialog,"tradesAboveCandles");
+    ASSERT_NE(check,nullptr);
+    EXPECT_TRUE(check->isChecked());
+    EXPECT_TRUE(renderer.tradesAboveCandles());
+    QFile source(QStringLiteral(SENTINEL_SOURCE_DIR "/libs/gui/qml/DepthChartView.qml"));
+    ASSERT_TRUE(source.open(QIODevice::ReadOnly));
+    const auto qml=source.readAll();
+    const auto start=qml.indexOf("    TradeBubbleOverlayItem {");
+    ASSERT_GE(start,0);
+    const auto end=qml.indexOf("\n    }",start);
+    ASSERT_GT(end,start);
+    // Execute the actual item's bindings, without loading unrelated chart services.
+    qmlRegisterType<TradeBubbleOverlayItem>("Sentinel.Charts",1,0,"TradeBubbleOverlayItem");
+    QQmlEngine engine; engine.rootContext()->setContextProperty("unifiedGridRenderer",&renderer);
+    QQmlComponent component(&engine);
+    component.setData("import QtQuick\nimport Sentinel.Charts 1.0\nItem {\n"+qml.mid(start,end-start+6)+"\n}",QUrl());
+    std::unique_ptr<QObject> root(component.create());
+    ASSERT_NE(root,nullptr) << component.errorString().toStdString();
+    auto* overlay=root->findChild<TradeBubbleOverlayItem*>("tradeBubbleOverlay");
+    ASSERT_NE(overlay,nullptr);
+    EXPECT_DOUBLE_EQ(overlay->z(),2.5);
+    check->setChecked(false);
+    EXPECT_FALSE(model.settings().tradesAboveCandles);
+    EXPECT_FALSE(t.reload().tradesAboveCandles);
+    EXPECT_FALSE(renderer.tradesAboveCandles());
+    EXPECT_DOUBLE_EQ(overlay->z(),1.5);
+    const AgentApi::Request request{"POST","/api/v1/heatmap/settings",{},
+        R"({"tradesAboveCandles":true,"persist":false})"};
+    const auto validated=AgentApi::validateControl(request,std::nullopt);
+    ASSERT_EQ(validated.status,200);
+    ASSERT_TRUE(model.apply(validated.body.heatmapSettings,validated.body.persistHeatmapSettings).isEmpty());
+    EXPECT_TRUE(check->isChecked());
+    EXPECT_DOUBLE_EQ(overlay->z(),2.5);
+    EXPECT_FALSE(t.reload().tradesAboveCandles); // transient API patch
+    EXPECT_TRUE(t.reload("other").tradesAboveCandles);
+    EXPECT_FALSE(model.apply({{"tradesAboveCandles","yes"}}).isEmpty());
+    check->setChecked(false);
+    child<QPushButton>(dialog,"resetChart")->click();
+    EXPECT_TRUE(check->isChecked());
+    EXPECT_TRUE(t.reload().tradesAboveCandles);
+    ASSERT_TRUE(model.apply({{"renderer","legacy"}},false).isEmpty());
+    EXPECT_FALSE(check->isEnabled());
 }
 
 TEST(TradeBubbleControls, GuiIngestionKeepsHiddenSessionTradesAndIsolatesSymbols) {

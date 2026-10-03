@@ -122,6 +122,7 @@ QJsonObject settingsJson(const HeatmapChartSettings &s) {
         {"liveMinIntervalMs", s.liveMinIntervalMs},
         {"showTelemetry", s.showTelemetry},
         {"showTrades", s.showTrades},
+        {"tradesAboveCandles", s.tradesAboveCandles},
         {"tradeMinNotional", s.tradeMinNotional},
         {"showLabels", s.showLabels},
         {"labelCurrency", QString::fromStdString(s.labelCurrency)},
@@ -176,6 +177,7 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     out.liveMinIntervalMs = int(std::clamp(merged["liveMinIntervalMs"].toDouble(), -2147483647.0, 2147483647.0));
     out.showTelemetry = merged["showTelemetry"].toBool();
     out.showTrades = merged["showTrades"].toBool();
+    out.tradesAboveCandles = merged["tradesAboveCandles"].toBool();
     out.tradeMinNotional = merged["tradeMinNotional"].toDouble();
     out.showLabels = merged["showLabels"].toBool();
     out.labelCurrency = merged["labelCurrency"].toString().toStdString();

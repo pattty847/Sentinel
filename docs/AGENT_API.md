@@ -107,7 +107,12 @@ operation/render acknowledgement applies. `showTrades` is boolean;
 are available through the API; the menu checks a preset only for an exact match.
 Controls are disabled in legacy mode, and their settings survive a renderer switch.
 
-Bubbles use exchange time and execution price, above the heatmap but below candles.
+Bubbles use exchange time and execution price. **Trades above candles** in the
+Chart tab defaults on (`settings.tradesAboveCandles: true`): translucent executions
+remain visible over opaque candle bodies. Set `tradesAboveCandles` to `false` in
+`POST /api/v1/heatmap/settings` for the previous order below candles. This boolean
+persists per chart/named layout, supports `persist:false`, and resets with the Chart
+tab. Both orders remain above the heatmap and below algo/order overlays.
 Buy uses the bid palette endpoint; sell uses the ask endpoint, both at 60% opacity,
 with a one-screen-pixel darker ring for contrast over same-colour walls.
 Area scales with summed quote notional: radius = min(18, 3 * sqrt(notional/1000))
@@ -115,8 +120,10 @@ logical pixels. The threshold filters **individual trades before aggregation**.
 Up to 4,096 qualifying executions draw individually, even at identical coordinates.
 Above that count, each side aggregates independently into initially 6 px square bins,
 with a notional-weighted centre. If more than 4,096 side/bin pairs remain occupied,
-bin width grows by 4/3 until the output fits. Thus 6–8 px is the fine-grid target,
-not a guaranteed maximum: widely spread overflow requires coarser bins to preserve
+the renderer compacts the 6 px cells once, then selects the smallest **6 px
+multiple** (6, 12, 18, …) that fits. Impossible sizes are skipped using the fine-cell
+occupancy bound; candidates inspect cells rather than rescanning all executions.
+Thus 6 px is the fine-grid target, not a guaranteed maximum: widely spread overflow requires coarser bins to preserve
 all qualifying volume within the hard cap. Larger circles draw first so smaller
 executions stay on top, regardless of side or bin. Tiny trades can be subpixel.
 
