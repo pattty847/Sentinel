@@ -216,18 +216,20 @@ TEST(CaptureApplication, SeveralCliFormsUseSevenConnectionsAndVerifyIndependentL
             }
         }
         EXPECT_EQ(channels, (std::map<std::string, int>{{"heartbeats", 2}, {"level2", 2}, {"market_trades", 2}}));
-        // Wait for the disk thread to publish a readable block (read-only).
+        // An open run is enough for live verification; a quiet product need
+        // not have a sealed/indexed data block yet.
         QElapsedTimer flushDeadline; flushDeadline.start();
-        while (flushDeadline.elapsed() < 10000) {
-            QDirIterator files(dir.path() + "/raw", {"*.rawl2"}, QDir::Files, QDirIterator::Subdirectories);
-            int readable = 0;
-            while (files.hasNext()) {
-                try { if (!scan(files.next()).index.empty()) ++readable; } catch (...) { }
-            }
-            if (readable >= 7) break;
-            child.waitForReadyRead(50);
+        const auto sevenOpen = [](const auto& report) {
+            return report.ok && report.json.contains("totals") &&
+                report.json["totals"]["open_runs"] == 7 && report.json["products"].size() == 7;
+        };
+        auto live = verify(dir.path() + "/raw");
+        while (flushDeadline.elapsed() < 30000 && !sevenOpen(live)) {
+            child.waitForReadyRead(100);
+            live = verify(dir.path() + "/raw");
         }
-        const auto live = verify(dir.path() + "/raw");
+        ASSERT_TRUE(sevenOpen(live))
+            << "seven independent open runs were not visible within 30 s: " << live.json.dump(2);
         EXPECT_TRUE(live.ok) << live.json.dump(2);
         EXPECT_EQ(live.json["complete"], false); EXPECT_EQ(live.json["totals"]["open_runs"], 7);
         EXPECT_EQ(live.json["totals"]["incomplete_runs"], 7);

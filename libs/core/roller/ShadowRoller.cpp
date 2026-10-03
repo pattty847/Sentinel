@@ -439,6 +439,7 @@ struct ShadowRoller::Impl {
             "shadow output aliases a configured recorder root");
     if (cfg.retryMin.count() <= 0 || cfg.retryMax < cfg.retryMin ||
         cfg.compareInterval.count() <= 0 || cfg.failureThreshold == 0 ||
+        cfg.failureMinDuration.count() <= 0 ||
         cfg.failureCooldown < cfg.retryMax)
       throw std::runtime_error("invalid shadow retry/comparison interval");
   }
@@ -446,23 +447,31 @@ struct ShadowRoller::Impl {
     auto backoff = cfg.retryMin;
     std::string lastFailure;
     unsigned consecutive = 0;
+    std::optional<std::chrono::steady_clock::time_point> failureSince;
+    bool coolingDown = false;
     int64_t furthestCommitted = 0;
     const auto retry = [&](const std::string &reason) {
       if (stopping)
         return;
       p.running->set(0);
       p.failures->inc();
-      if (reason != lastFailure) {
+      const auto now = cfg.nowForTest ? cfg.nowForTest()
+                                      : std::chrono::steady_clock::now();
+      if (!failureSince || reason != lastFailure) {
         lastFailure = reason;
         consecutive = 0;
+        failureSince = now;
+        coolingDown = false;
         p.cooldown->set(0);
       }
-      if (++consecutive == cfg.failureThreshold) {
+      ++consecutive;
+      if (!coolingDown && consecutive >= cfg.failureThreshold &&
+          now - *failureSince >= cfg.failureMinDuration) {
+        coolingDown = true;
         p.cooldown->set(1);
         p.cooldowns->inc();
       }
-      const auto delay =
-          consecutive >= cfg.failureThreshold ? cfg.failureCooldown : backoff;
+      const auto delay = coolingDown ? cfg.failureCooldown : backoff;
       sLog_Warning("Shadow roller retry product="
                    << p.name << " error=" << reason << " consecutive="
                    << consecutive << " retryMs=" << delay.count());
@@ -525,6 +534,8 @@ struct ShadowRoller::Impl {
             backoff = cfg.retryMin;
             consecutive = 0;
             lastFailure.clear();
+            failureSince.reset();
+            coolingDown = false;
             p.cooldown->set(0);
           }
         };

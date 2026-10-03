@@ -22,6 +22,7 @@ struct FanoutConfig {
     std::chrono::milliseconds retention{60000}, resnapshotInterval{20000};
     std::function<bool()> controlReady; // false during capture startup/shutdown
     std::function<int64_t()> nowNs; // deterministic monotonic-clock seam
+    std::function<bool()> failPollForTest, failListenerForTest;
 };
 // Canonicalizes before creation; refuses volumes, checkout trees, symlink
 // socket/parent, non-private existing parent and live/stale non-socket files.

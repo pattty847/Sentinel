@@ -163,6 +163,9 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
             readScalar(shadow, "dir", cfg.rollerShadow.outputRoot);
             readScalar(shadow, "socket", cfg.rollerShadow.socketPath);
             readScalar(shadow, "from", cfg.rollerShadow.from);
+            int64_t faultMinDurationMs = cfg.rollerShadow.failureMinDuration.count();
+            if (readScalar(shadow, "fault_min_duration_ms", faultMinDurationMs))
+                cfg.rollerShadow.failureMinDuration = std::chrono::milliseconds(faultMinDurationMs);
         }
         if (serverRoot["recording"]) {
             auto rec = serverRoot["recording"];

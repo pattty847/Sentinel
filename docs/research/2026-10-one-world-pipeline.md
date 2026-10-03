@@ -504,6 +504,11 @@ retry delay, the running gauge stays zero, and setup retries after 30 s, doublin
 to 10 min. Success resets the backoff. The five-minute fanout-down Grafana alert
 covers prolonged unavailability. Malformed ingress invalidates only that product's
 ring and subscribers, with one product-labelled error; other products keep serving.
+Poll and listener failures disconnect socket clients and retry setup without
+invalidating retained journal rings; only a journal ingress fault invalidates a
+product ring. The capture application fixture waits for seven verified open
+runs rather than seven indexed blocks, so a quiet product does not make the
+live-run assertion depend on block publication timing.
 Resnapshot replies say `forwarded`, not that the engine accepted or acted on them.
 
 The position type is `capture::JournalPosition {product, runId, block, record}`.
@@ -735,9 +740,12 @@ would need discardable provisional state to avoid that wait.
   up from the last applied durable cursor, avoiding day replay. Process restart
   and recorder/write failures still use the persisted output floor and the first
   incomplete day's anchor: checkpoints do not serialize book/TWAP state.
-  Three identical consecutive failures without a new committed watermark enter
-  a ten-minute probe loop, with dedicated cooldown gauge/counter and Grafana
-  alert. Replay of an old checkpoint does not count as recovery.
+  Three identical consecutive failures spanning at least the configured
+  `fault_min_duration_ms` (120000 by default) without a new committed
+  watermark enter a ten-minute probe loop, with dedicated cooldown
+  gauge/counter and a two-minute Grafana alert hold. Replay of an old
+  checkpoint does not count as recovery. Socket poll/listener failures now
+  drop clients while retaining fanout rings; they are not journal invalidations.
 - The server isolation fixture now owns the actual SentinelServerApp model,
   stream server, registry, primary recorder and shadow. It drives primary
   snapshots/ticks and live publication while the shadow is stalled, then while
@@ -764,6 +772,14 @@ Review-round validation (all builds/tests through the FIFO queue, `-j 4`):
   failed under mutation and passed after restoration during this round.
 - Formatting and `git diff --check` passed; alert YAML parses with ten unique
   rule UIDs. `_agent/` records FM-172, FM-173 and INV-116.
+
+Pre-enable validation in `lt-sol/pre-enable` (no service or monitoring reload):
+the 30-second fake-clock outage and two socket-failure resume tests failed on
+the original cooldown/ring behavior, then passed with the fixes. The complete
+queued `mac-clang` build passed; targeted CTest passed **3/3** suites and final
+full CTest passed **89/89** suites, zero failures, in 144.83 s (`-j 4`). The
+capture application uses `FakeWsTransport`, so this does not verify live
+Coinbase traffic. The alert YAML parsed with its new two-minute hold.
 
 The comparison restart mutation initially survived a sleep-based assertion:
 shutdown cancelled the erroneous oracle before it published. The fixture now

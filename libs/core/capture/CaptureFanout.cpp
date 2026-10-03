@@ -91,6 +91,7 @@ ssize_t sendBytes(int fd, const char* p, size_t n) {
     return ::send(fd, p, n, 0);
 #endif
 }
+struct SocketFailure : std::runtime_error { using std::runtime_error::runtime_error; };
 }
 struct CaptureFanout::Impl {
     struct Batch { std::string run, raw; uint64_t block, epoch; uint32_t record; JournalEventKind kind; bool hasPosition; size_t cost() const { return raw.size() + run.size() + sizeof(Batch); } };
@@ -413,7 +414,9 @@ struct CaptureFanout::Impl {
                     if (c.fd >= 0 && c.product < 0 && config.nowNs() - c.accepted >= 5'000'000'000LL) drop(c, "handshake_timeout");
                     fds[i + 2] = {c.fd, short(POLLIN | (c.queue.empty() ? 0 : POLLOUT)), 0};
                 }
-                if (::poll(fds.data(), fds.size(), 1000) < 0 && errno != EINTR) throw std::runtime_error("fanout poll failed");
+                if ((config.failPollForTest && config.failPollForTest()) ||
+                    (::poll(fds.data(), fds.size(), 1000) < 0 && errno != EINTR))
+                    throw SocketFailure("fanout poll failed");
                 if (fds[1].revents & POLLIN) { char bytes[1024]; while (::read(wake[0], bytes, sizeof(bytes)) > 0) {} }
                 // Drain before handshakes so resume sees the latest published prefix.
                 drain();
@@ -424,8 +427,14 @@ struct CaptureFanout::Impl {
                     if (c.fd >= 0 && flags & POLLOUT) write(c);
                     if (c.fd >= 0 && flags & (POLLHUP | POLLERR | POLLNVAL)) drop(c, "peer_closed");
                 }
-                if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) throw std::runtime_error("fanout listener failed");
+                if ((config.failListenerForTest && config.failListenerForTest()) ||
+                    (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)))
+                    throw SocketFailure("fanout listener failed");
                 if (fds[0].revents & POLLIN) accept();
+            }
+            catch (const SocketFailure& e) {
+                for (auto& c : clients) drop(c, "internal_error");
+                unavailable(e);
             }
             catch (const std::exception& e) {
                 for (size_t i = 0; i < products.size(); ++i) invalidate(i, *products[i], "internal_error");

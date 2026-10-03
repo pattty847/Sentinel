@@ -19,7 +19,10 @@ struct ShadowConfig {
   // Three identical faults without new durable progress enter a slow probe
   // loop.
   unsigned failureThreshold = 3;
+  std::chrono::milliseconds failureMinDuration{120000};
   std::chrono::milliseconds failureCooldown{600000};
+  // Deterministic monotonic clock for retry tests.
+  std::function<std::chrono::steady_clock::time_point()> nowForTest;
   // Synchronization seam: called under the wait mutex after reading the
   // predicate.
   std::function<void()> beforeCompareWaitForTest;
