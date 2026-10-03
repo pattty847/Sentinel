@@ -153,3 +153,14 @@ Book prices are dense-book bucket starts on `orderbook.tickSize` (see `/state`),
 Control (`POST`) and `GET /api/v1/operations/<id>` responses use the standard envelope: read `operationId`, `status`, `viewportVersion` and `frameId` under `data`. The screenshot response keeps its legacy flat shape.
 
 Walls are price levels, not minutes: each (price cell, side) appears once with `qty` = its peak aggregated resting size in the range (`bucketStartMs` = when it peaked), `meanQty` = mean over recorded columns in the range (absent = 0), `firstSeenMs`/`lastSeenMs`, and `columns` = recorded minutes it was present. Use `priceMin`/`priceMax` to look away from the mid, where coarse cells otherwise sum the dense book near the price. The scan budget counts recorded columns only.
+
+
+### Subscription refusal diagnostics
+
+`GET /api/v1/state` adds `data.lastSubscriptionRefusal`: `null` until this GUI receives a
+server connection-cap refusal, then `{ "symbol": "ETH-USD", "maxConnections": 8,
+"message": "Cannot subscribe ..." }`. This is the most recent refusal in this GUI
+session, retained across retries/reconnects as a diagnostic, not the current connection
+state. `connected` still describes the GUI-to-server socket. The same server-provided
+message appears in the status bar. Free another GUI-only product slot and retry the
+subscription; pinned products do not consume these slots.

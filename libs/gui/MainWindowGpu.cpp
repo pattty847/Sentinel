@@ -803,6 +803,7 @@ bool MainWindowGPU::subscribeSymbol(const QString& symbol) {
     sLog_App("ui: subscribe symbol=" << symbol << " prev=" << m_currentSymbol
              << " connected=" << m_connected);
     m_userSubscribed = true;
+    statusBar()->clearMessage();
     if (m_qmlController) {
         m_qmlController->updateSymbolInContext(symbol);
     }
@@ -1292,6 +1293,12 @@ void MainWindowGPU::connectMarketDataSignals() {
                                                       QDateTime::currentMSecsSinceEpoch()));
             });
 
+    connect(m_dataSource.get(), &IGridDataSource::subscriptionRefused, this,
+            [this](const QString& symbol, int cap, const QString& message) {
+                m_lastSubscriptionRefusal = {{"symbol", symbol}, {"maxConnections", cap}, {"message", message}};
+                if (symbol == m_currentSymbol) m_userSubscribed = false;
+                statusBar()->showMessage(message);
+            });
     connect(m_dataSource.get(), &IGridDataSource::errorOccurred,
             this, [this](const QString& error) {
                 sLog_Warning("DataSource error: error=" << error << " symbol=" << m_currentSymbol
@@ -1453,6 +1460,7 @@ AgentApi::StateSnapshot MainWindowGPU::agentApiStateSnapshot() const {
         s.frameP95Ms = frameStats.window.p95Ms;
     }
     s.connected = m_connected;
+    s.lastSubscriptionRefusal = m_lastSubscriptionRefusal;
     s.serverConfigReady = m_serverConfigReady;
     const auto& client = GuiConfigStore::instance().clientConfig();
     s.serverHost = QString::fromStdString(client.server.host);

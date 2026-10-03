@@ -107,7 +107,7 @@ scrape. VictoriaMetrics adds `job` and `instance` to every series.
 |---|---|---|---|
 | `sentinel_recorder_running` | gauge | - | 1 when recording v2 started in this process. The `sentinel_recorder_*` series below exist only when it is 1. |
 | `sentinel_recorder_last_column_timestamp_seconds` | gauge | product, layer | Start of the newest committed minute column. Absent until the first column. Age = `time() - x`; normal age is 60-125 s. |
-| `sentinel_recorder_column_overdue_seconds` | gauge | product, layer | Seconds that the next column is past due, by the stall monitor's deadline: last column bucket (or the connect minute) + 2 min + lateness. 0 means on time. 60 is when the log warns `Recording v2 stalled`. Absent while the upstream is disconnected. |
+| `sentinel_recorder_column_overdue_seconds` | gauge | product, layer | Seconds that the next column is past due, by the stall monitor's deadline: last column bucket (or the connect minute) + 2 min + lateness. 0 means on time. 60 is when the log warns `Recording v2 stalled`. Absent while that product's upstream is disconnected. |
 | `sentinel_recorder_columns_written_total` | counter | - | Committed minute columns, all series. |
 | `sentinel_recorder_invalidations_total` | counter | - | Recorder book invalidations (from upstream and from the recorder itself). |
 | `sentinel_recorder_queue_drops_total` | counter | - | Book messages dropped (or turned into an invalidation) when the recorder queue overflowed. |
@@ -115,8 +115,11 @@ scrape. VictoriaMetrics adds `job` and `instance` to every series.
 | `sentinel_recorder_late_events_total` | counter | - | Book messages timestamped before the minutes that are already closed. |
 | `sentinel_recorder_backward_steps_total` | counter | - | Book messages whose timestamp went backwards. |
 | `sentinel_recorder_live_publish_drops_total` | counter | - | Live publications that were refused (series limit or stale). |
-| `sentinel_mdc_connected` | gauge | - | 1 while every pinned (`default_symbols`) product's upstream connection is up. GUI-only products never move it. |
-| `sentinel_mdc_transport_up_total` / `_down_total` | counter | - | Pinned products' upstream up and down transitions (one connection per product). Reconnects = up - pinned products. |
+| `sentinel_mdc_connected` | gauge | product, pinned | 1 while this product connection is up; pinned=`1` for recorder defaults, `0` for GUI-only feeds. |
+| `sentinel_mdc_transport_up_total` / `_down_total` | counter | product, pinned | Transitions in this feed lifetime. Reconnects = up - 1 per product. |
+| `sentinel_mdc_connections` | gauge | pinned | Admitted distinct products, including connecting feeds; pinned defaults and GUI-only products counted separately. |
+| `sentinel_mdc_max_connections` | gauge | - | GUI-only connection cap (default 8); pinned products are exempt. |
+| `sentinel_mdc_refused_total` | counter | product | Admission refusals; bounded LRU of eight most recently refused products. Counts reset after eviction. |
 | `sentinel_mdc_ws_latency_ms` | gauge | - | Latest Coinbase WebSocket latency (server time minus exchange timestamp). |
 | `sentinel_exchange_clock_offset_ms` | gauge | - | Smoothed local clock minus exchange clock. 0 means not yet measured. |
 | `sentinel_stream_sessions` | gauge | - | Open client stream sessions (GUIs). |
@@ -125,8 +128,11 @@ scrape. VictoriaMetrics adds `job` and `instance` to every series.
 | `process_start_time_seconds` | gauge | - | Time when the metrics were set up at startup. Restarts = `changes(x[1h])`. |
 | `sentinel_build_info` | gauge | version | Always 1. |
 
-Product label values are the pinned default symbols as the server subscribes them
-(upper case). Layers are `near` and `deep`.
+Connection product labels are pinned defaults plus currently active GUI products (upper case).
+GUI connection series disappear on final unsubscribe/close, including their counters; a new
+feed lifetime starts at zero. Refusal series retain only eight recent products, independently
+of active feeds, so arbitrary refused names cannot grow registry memory. Recorder series
+still name pinned products only. Layers are `near` and `deep`.
 
 Threading: the HTTP listener and the scrape-time samplers run on the server's main thread.
 That thread already reads `BookRecorder::stats()` and `watermarks()`. The recorder worker
@@ -172,7 +178,7 @@ never waits on the I/O thread, so it answers while T7 I/O is frozen (FM-127).
 | Alert | Fires when | For |
 |---|---|---|
 | A1 recorder stalled | `max by (product,layer) (sentinel_recorder_column_overdue_seconds) > 60` (only while that product is connected) | 1 m |
-| A1b recorder upstream disconnected | `sentinel_mdc_connected < 1`. A1 is silent by design while disconnected, so this alert covers that gap. | 5 m |
+| A1b recorder upstream disconnected | `min by (product) (sentinel_mdc_connected{pinned="1"}) < 1`. A1 is silent by design while disconnected, so this alert covers that gap. | 5 m |
 | A3 service down | `up{job=~"sentinel-server\|sentinel-capture\|node"} or (absent(up{job="sentinel-server"}) - 1) or (absent(up{job="sentinel-capture"}) - 1) or (absent(up{job="node"}) - 1)` is below 1. This gives one sample per required job: a failed scrape (up 0) and a job whose `up` series is missing (absent - 1 = 0) both fire for that job. When VictoriaMetrics does not answer, Grafana sends its DatasourceError notification. | 2 m |
 | A3b T7 absent | `absent(node_filesystem_avail_bytes{mountpoint="/Volumes/T7"})` | 5 m |
 | A4 capture product down | `max by (product) (sentinel_capture_feed_down_seconds) > 120`. The gauge is the down time, so there is no pending period. | 0 s |
@@ -203,3 +209,15 @@ later. See the plan, section 4.
   - Add the metric to the table above, and to a dashboard if it matters.
 - Scrape target: add a job to `prometheus.yml`. VictoriaMetrics reloads the file within
   60 s.
+
+
+### Server per-product metrics deploy
+
+Deploy the server via `scripts/dev/deploy-runtime.sh server` before the orchestrator reloads
+Grafana alert provisioning. The old unlabeled `sentinel_mdc_connected` disappears; dashboards
+and A1b now select `pinned="1"` and keep the product label. Check one connected gauge per
+pinned product, `sentinel_mdc_max_connections 8`, and separate `sentinel_mdc_connections`
+counts. A1 is unchanged. Test a GUI-only open/close: its three connection series disappear,
+pinned counters stay unchanged, and the recorder keeps committing. At capacity, check the
+`Feed refused` error, client status text, Agent API refusal object and refused counter.
+No monitoring or recorder service is restarted by the agent implementing this change.

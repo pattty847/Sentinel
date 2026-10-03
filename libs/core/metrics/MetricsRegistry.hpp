@@ -73,6 +73,12 @@ class MetricsRegistry {
     void counterFn(std::string_view name, std::string_view help, const Labels& labels, Sampler sampler);
     void gaugeFn(std::string_view name, std::string_view help, const Labels& labels, Sampler sampler);
 
+    struct Sample { Labels labels; double value; };
+    using FamilySampler = std::function<std::vector<Sample>()>;
+    // Dynamic membership sampled at scrape time; same threading rules as ...Fn.
+    // A family registered here cannot also contain individually registered series.
+    void familyFn(std::string_view name, std::string_view help, Type type, FamilySampler sampler);
+
     // Families and series in registration order: deterministic output.
     std::string render() const;
 

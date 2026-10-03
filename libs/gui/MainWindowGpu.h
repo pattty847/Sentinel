@@ -156,6 +156,7 @@ private:
     QToolButton* m_subscribeButton = nullptr;
     QString m_currentSymbol;
     bool m_connected = false;
+    QJsonObject m_lastSubscriptionRefusal;
     bool m_serverConfigReady = false;
     bool m_userSubscribed = false;
     QString m_agentApiSessionId;

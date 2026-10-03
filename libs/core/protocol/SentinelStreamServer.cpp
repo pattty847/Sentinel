@@ -1,3 +1,4 @@
+#include "metrics/MetricsRegistry.hpp"
 #include "SentinelStreamServer.hpp"
 #include "HeatmapSlice.hpp"
 #include "../servermodel/TradeOverlayPublisher.hpp"
@@ -216,6 +217,7 @@ double resolveMidPrice(const LiveOrderBook& book) {
 class Session : public std::enable_shared_from_this<Session> {
     friend struct RecordingServerStopTest;
     friend struct HeatmapChunkWireTest;
+    friend struct ServerFeedAdmissionTest;
     websocket::stream<beast::ssl_stream<beast::tcp_stream>> ws_;
     beast::flat_buffer buffer_;
     ServerDataModel& model_;
@@ -907,10 +909,18 @@ public:
             if (type == "subscribe") {
                 std::string symbol = j.value("symbol", "");
                 if (!symbol.empty()) {
-                    const bool inserted = subscriptions_.insert(symbol).second;
-                    if (inserted && owner_) {
-                        owner_->notifyClientSubscribed(symbol);
+                    std::transform(symbol.begin(), symbol.end(), symbol.begin(),
+                                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+                    if (!subscriptions_.contains(symbol) && owner_ && !owner_->notifyClientSubscribed(symbol)) {
+                        const int cap = owner_->serverConfig().mdc.maxConnections;
+                        const std::string message = "Cannot subscribe to " + symbol + ": GUI connection cap (" +
+                            std::to_string(cap) + ") reached. Close another symbol and retry.";
+                        do_write(nlohmann::json{{"type", "error"}, {"context", "subscribe"},
+                            {"code", "connection_cap"}, {"symbol", symbol}, {"max_connections", cap},
+                            {"message", message}}.dump());
+                        return;
                     }
+                    const bool inserted = subscriptions_.insert(symbol).second;
                     sLog_Data("Client subscribe: peer=" << peer_ << " symbol=" << symbol
                               << " new=" << inserted << " subscriptions=" << subscriptions_.size());
 
@@ -1333,6 +1343,8 @@ public:
                 }
             } else if (type == "unsubscribe") {
                  std::string symbol = j.value("symbol", "");
+                 std::transform(symbol.begin(), symbol.end(), symbol.begin(),
+                                [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
                  const bool removed = !symbol.empty() && subscriptions_.erase(symbol) > 0;
                  if (const auto it = overlays_.find(symbol); it != overlays_.end())
                      it->second.cancelled->store(true);
@@ -2137,17 +2149,54 @@ void SentinelStreamServer::unregisterSession(const Session* session) {
     m_sessionsDrained.notify_all();
 }
 
-void SentinelStreamServer::notifyClientSubscribed(const std::string& symbol) {
+bool SentinelStreamServer::notifyClientSubscribed(const std::string& symbol) {
     bool firstSubscriber = false;
     {
         std::lock_guard<std::mutex> lock(m_symbolSubscriptionsMutex);
+        const auto pinned = normalizedDefaultSymbols(m_serverConfig.defaultSymbols);
+        const auto isPinned = [&](const auto& name) { return std::find(pinned.begin(), pinned.end(), name) != pinned.end(); };
+        if (!m_symbolSubscriptions.contains(symbol) && !isPinned(symbol)) {
+            const auto count = std::count_if(m_symbolSubscriptions.begin(), m_symbolSubscriptions.end(),
+                [&](const auto& entry) { return !isPinned(entry.first); });
+            if (count >= m_serverConfig.mdc.maxConnections) {
+                uint64_t refusals = 1;
+                const auto found = std::find_if(m_refusals.begin(), m_refusals.end(),
+                    [&](const auto& entry) { return entry.first == symbol; });
+                if (found != m_refusals.end()) { refusals += found->second; m_refusals.erase(found); }
+                if (m_refusals.size() == 8) m_refusals.erase(m_refusals.begin());
+                m_refusals.emplace_back(symbol, refusals);
+                sLog_Error("Feed refused: symbol=" << symbol << " cap=" << m_serverConfig.mdc.maxConnections
+                           << " code=connection_cap");
+                return false;
+            }
+        }
         auto& count = m_symbolSubscriptions[symbol];
-        firstSubscriber = count == 0;
-        ++count;
+        firstSubscriber = count++ == 0;
     }
-    if (firstSubscriber) {
-        emit clientSubscribed(QString::fromStdString(symbol));
-    }
+    if (firstSubscriber) emit clientSubscribed(QString::fromStdString(symbol));
+    return true;
+}
+
+void SentinelStreamServer::registerMetrics(sentinel::metrics::MetricsRegistry& r) {
+    using Registry = sentinel::metrics::MetricsRegistry;
+    r.gaugeFn("sentinel_mdc_max_connections", "Maximum GUI-only product connections (pinned exempt).", {},
+        [this]() -> std::optional<double> { return m_serverConfig.mdc.maxConnections; });
+    r.familyFn("sentinel_mdc_connections", "Admitted product connections, including connecting feeds.", Registry::Type::Gauge,
+        [this] {
+            std::lock_guard lock(m_symbolSubscriptionsMutex);
+            const auto pinned = normalizedDefaultSymbols(m_serverConfig.defaultSymbols);
+            const auto gui = std::count_if(m_symbolSubscriptions.begin(), m_symbolSubscriptions.end(), [&](const auto& entry) {
+                return std::find(pinned.begin(), pinned.end(), entry.first) == pinned.end();
+            });
+            return std::vector<Registry::Sample>{{{{"pinned", "1"}}, double(pinned.size())}, {{{"pinned", "0"}}, double(gui)}};
+        });
+    r.familyFn("sentinel_mdc_refused_total", "Refusals per product; eight most recently refused products, resets on eviction.",
+        Registry::Type::Counter, [this] {
+            std::lock_guard lock(m_symbolSubscriptionsMutex);
+            std::vector<Registry::Sample> samples;
+            for (const auto& [symbol, count] : m_refusals) samples.push_back({{{"product", symbol}}, double(count)});
+            return samples;
+        });
 }
 
 void SentinelStreamServer::notifyClientUnsubscribed(const std::string& symbol) {

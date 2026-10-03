@@ -77,6 +77,7 @@ struct ServerMdcConfig {
     // WS close handshake; a timeout counts as a failed attempt and backs off.
     int connectTimeoutMs = 20000;
     int closeTimeoutMs = 3000;
+    int maxConnections = 8; // GUI-only products; pinned products are exempt (minimum 1).
 };
 
 struct ServerTradingConfig {

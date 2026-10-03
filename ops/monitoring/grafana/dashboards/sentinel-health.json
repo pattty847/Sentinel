@@ -51,8 +51,8 @@
             "type": "prometheus",
             "uid": "sentinel-vm"
           },
-          "expr": "sentinel_mdc_connected{job=\"sentinel-server\"}",
-          "legendFormat": "recorder",
+          "expr": "min by (product) (sentinel_mdc_connected{pinned=\"1\"})",
+          "legendFormat": "{{product}}",
           "range": false,
           "instant": true
         }

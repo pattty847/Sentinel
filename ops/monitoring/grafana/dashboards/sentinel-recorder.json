@@ -227,8 +227,8 @@
             "type": "prometheus",
             "uid": "sentinel-vm"
           },
-          "expr": "sentinel_mdc_connected",
-          "legendFormat": "connected",
+          "expr": "sentinel_mdc_connected{pinned=\"1\"}",
+          "legendFormat": "{{product}} connected",
           "range": true,
           "instant": false
         },
@@ -238,8 +238,8 @@
             "type": "prometheus",
             "uid": "sentinel-vm"
           },
-          "expr": "increase(sentinel_mdc_transport_down_total[1h])",
-          "legendFormat": "downs in last hour",
+          "expr": "increase(sentinel_mdc_transport_down_total{pinned=\"1\"}[1h])",
+          "legendFormat": "{{product}} downs in last hour",
           "range": true,
           "instant": false
         }

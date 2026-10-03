@@ -198,6 +198,9 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
         readScalar(mdc, "ssl_ca_bundle", cfg.mdc.sslCaBundle);
         readScalar(mdc, "connect_timeout_ms", cfg.mdc.connectTimeoutMs);
         readScalar(mdc, "close_timeout_ms", cfg.mdc.closeTimeoutMs);
+        readScalar(mdc, "max_connections", cfg.mdc.maxConnections);
+        if (cfg.mdc.maxConnections < 1)
+            throw std::runtime_error("server.mdc.max_connections must be at least 1");
     } else if (serverRoot) {
         readScalar(serverRoot, "host", cfg.mdc.host);
         readScalar(serverRoot, "port", cfg.mdc.port);

@@ -81,6 +81,8 @@ public:
     // Recorder and upstream-connection series for GET /metrics. Call once on the
     // main thread; the samplers read main-thread state, so render on that thread.
     void registerMetrics(sentinel::metrics::MetricsRegistry& registry);
+    void acquireGuiFeed(const std::string& symbol);
+    void releaseGuiFeed(const std::string& symbol);
 
 public slots:
     void onTrade(const Trade& trade);
@@ -91,7 +93,7 @@ public slots:
     // Empty productId = every symbol. The book stays invalid until its next snapshot.
     void onLiveOrderBookInvalidated(const QString& productId, const QString& reason);
     // One product's market-data connection up/down. Gates that symbol's recorder
-    // stall warning; only pinned (default) symbols drive the health metrics.
+    // stall warning; recorder alerts select only pinned (default) symbols.
     void onMarketDataConnectionChanged(const std::string& symbol, bool connected);
 
 signals:
@@ -122,11 +124,9 @@ private:
     std::atomic<int64_t> m_exchangeOffsetMs{0};
     // Metrics mirrors. Written on the main thread, except live publish drops
     // (recorder worker); declared before m_recorder so they outlive its worker.
-    // m_mdConnected = every pinned symbol's connection is up (m_pinnedUp, main thread).
-    std::atomic<bool> m_mdConnected{false};
-    std::atomic<uint64_t> m_mdTransportUps{0}, m_mdTransportDowns{0}, m_livePublishDrops{0};
-    std::map<std::string, bool> m_pinnedUp;
-    bool pinnedAllUp() const;
+    std::atomic<uint64_t> m_livePublishDrops{0};
+    struct FeedState { bool pinned = false, connected = false; uint64_t ups = 0, downs = 0; };
+    std::map<std::string, FeedState> m_feeds; // main thread, pinned + active GUI feeds only
     mutable std::mutex m_footprintTradeMutex;
     std::unordered_map<std::string, std::deque<FootprintTradeSample>> m_recentFootprintTrades;
     int64_t m_footprintTradeRetentionMs = 300'000;
