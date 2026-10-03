@@ -5,6 +5,7 @@ add_library(sentinel_core
     roller/JournalFeed.cpp
     roller/Grid.cpp
     roller/Roller.cpp
+    roller/ShadowRoller.cpp
     roller/Diff.cpp
     roller/RollCli.cpp
     Cpp20Utils.hpp

@@ -179,7 +179,7 @@ struct BookRecorder::Impl {
         return c;
     }
     Impl(RecorderConfig c, std::function<int64_t()> clock)
-        : cfg(validateConfig(std::move(c))), localClock(std::move(clock)), store(cfg.root, cfg.deterministicResume) {
+        : cfg(validateConfig(std::move(c))), localClock(std::move(clock)), store(cfg.root, cfg.deterministicResume, cfg.writerProduct) {
         if (!localClock)
             throw std::invalid_argument("BookRecorder: missing local clock");
         worker = std::thread([this] { run(); });

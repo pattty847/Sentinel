@@ -45,3 +45,12 @@ default_symbols: [BTC-USD]
 # Pinned default_symbols are exempt; refuse new GUI products beyond this cap.
 mdc:
   max_connections: 8
+
+# Shadow pipeline: primary recording/ and client stream remain authoritative.
+# Enable only in deployed config after choosing a UTC-midnight journal start.
+roller_shadow:
+  enabled: false
+  journal_dir: /Volumes/T7/sentinel-data/raw-l2
+  dir: /Volumes/T7/sentinel-data/hmc2
+  socket: "" # ~/Sentinel-runtime/run/capture.sock
+  from: "2026-10-03T00:00:00Z"

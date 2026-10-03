@@ -1,14 +1,14 @@
-#include "Roller.hpp"
+#include "ShadowRoller.hpp"
 #include <map>
 #include <set>
 #include <tuple>
 namespace sentinel::roller {
 using recording::Hmc2Record;
 namespace {
-bool same(const Hmc2Record& a,const Hmc2Record& b) {
-    const auto key = [](const Hmc2Record& r) {
+bool same(const Hmc2Record& a,const Hmc2Record& b,bool strictJournal) {
+    const auto key = [strictJournal](const Hmc2Record& r) {
         return std::tuple(r.header.priceScale,r.header.rowTickUnits,r.header.sizeScale.floor,r.header.sizeScale.codesPerOctave,
-            r.observedMs,r.flags & ~recording::kLateEvents,r.bidRowLo,r.bidRowHi,r.askRowLo,r.askRowHi,
+            r.observedMs,strictJournal ? r.flags : r.flags & ~recording::kLateEvents,r.bidRowLo,r.bidRowHi,r.askRowLo,r.askRowHi,
             r.midOpen,r.midClose,r.midMin,r.midMax);
     };
     if (key(a) != key(b) || a.entries.size() != b.entries.size() || a.coverage.size() != b.coverage.size()) return false;
@@ -24,7 +24,7 @@ bool same(const Hmc2Record& a,const Hmc2Record& b) {
 }
 }
 nlohmann::json diff(const std::filesystem::path& a,const std::filesystem::path& b,
-                    const std::string& product,const std::string& layer,int64_t from,int64_t to,int64_t tf) {
+                    const std::string& product,const std::string& layer,int64_t from,int64_t to,int64_t tf,bool strictJournal) {
     if (tf != 60'000 && tf != 3'600'000) throw std::runtime_error("diff supports minute/hour levels");
     const auto left = recording::Hmc2Store::readRange(a,product,layer,tf,from,to);
     const auto right = recording::Hmc2Store::readRange(b,product,layer,tf,from,to);
@@ -34,7 +34,7 @@ nlohmann::json diff(const std::filesystem::path& a,const std::filesystem::path& 
     uint64_t qualifies=0,matches=0,mismatches=0,excluded=0;
     nlohmann::json details=nlohmann::json::array();
     std::set<int64_t> qualifyingMinutes;
-    if (tf == 3'600'000) {
+    if (tf == 3'600'000 && !strictJournal) {
         // An hour's observation sum alone cannot prove every constituent exists
         // on both sides. Reuse the minute qualification list (including mismatch).
         const auto minutes = diff(a,b,product,layer,from,to,60'000);
@@ -43,12 +43,13 @@ nlohmann::json diff(const std::filesystem::path& a,const std::filesystem::path& 
     for (auto t=from; t<to; t+=tf) {
         std::string reason;
         if (!l.contains(t) || !r.contains(t)) reason="missing";
-        else if (l[t]->observedMs != tf || r[t]->observedMs != tf) reason="partial observation";
-        else if ((l[t]->flags | r[t]->flags) & recording::kResynced) reason="resynced";
-        if (reason.empty() && tf == 3'600'000)
+        else if (!strictJournal && (l[t]->observedMs != tf || r[t]->observedMs != tf)) reason="partial observation";
+        else if (!strictJournal && ((l[t]->flags | r[t]->flags) & recording::kResynced)) reason="resynced";
+        if (reason.empty() && tf == 3'600'000 && !strictJournal)
             for (auto m=t;m<t+tf;m+=60'000) if (!qualifyingMinutes.contains(m)) { reason="nonqualifying constituent"; break; }
         const bool qualifiesHere=reason.empty();
-        if (qualifiesHere) { ++qualifies; if (same(*l[t],*r[t])) { ++matches; reason="match"; } else { ++mismatches; reason="mismatch"; } }
+        if (qualifiesHere) { ++qualifies; if (same(*l[t],*r[t],strictJournal)) { ++matches; reason="match"; } else { ++mismatches; reason="mismatch"; } }
+        else if (strictJournal && (l.contains(t) != r.contains(t))) { ++mismatches; reason="missing counterpart"; }
         else ++excluded;
         details.push_back({{"bucketMs",t},{"qualifies",qualifiesHere},{"result",reason},
             {"observedA",l.contains(t)?l[t]->observedMs:0},{"observedB",r.contains(t)?r[t]->observedMs:0}});
@@ -86,5 +87,36 @@ nlohmann::json diff(const std::filesystem::path& a,const std::filesystem::path& 
     }
     return {{"product",product},{"layer",layer},{"tfMs",tf},{"qualifying",qualifies},{"matching",matches},
             {"mismatching",mismatches},{"nonqualifying",excluded},{"minutes",details}};
+}
+nlohmann::json compareShadow(const std::filesystem::path& shadow,const std::filesystem::path& batch,
+                            const std::filesystem::path& primary,const std::string& product,
+                            const std::string& layer,int64_t from,int64_t to,metrics::Counter& mismatch) {
+    const auto strict=diff(shadow,batch,product,layer,from,to,60'000,true);
+    uint64_t hourMismatching=0;
+    if(layer=="deep" && from%3600000==0 && to%3600000==0)
+        hourMismatching=diff(shadow,batch,product,layer,from,to,3600000,true).at("mismatching").get<uint64_t>();
+    mismatch.inc(strict.at("mismatching").get<uint64_t>()+hourMismatching);
+    const auto cross=diff(primary,shadow,product,layer,from,to);
+    uint64_t within=0;
+    for(const auto& minute:cross["minutes"]) if(minute["qualifies"].get<bool>()) {
+        const auto& d=minute["difference"];
+        bool pass=true;
+        for(const auto* side:{"bid","ask"}) {
+            const auto& v=d["totalTwap"][side]["relativeDelta"];
+            pass=pass && !v.is_null() && std::abs(v.get<double>())<=.005;
+        }
+        for(size_t i=0;i<4;++i) {
+            const auto a=d["midsA"][i].get<double>(),b=d["midsB"][i].get<double>();
+            pass=pass && a>0 && std::abs(b-a)/a<=.0002;
+        }
+        const auto a=d["entriesA"].get<double>(),b=d["entriesB"].get<double>();
+        const auto onlyA=d["onlyA"].get<double>(),onlyB=d["onlyB"].get<double>();
+        pass=pass && a>0 && std::abs(b-a)/a<=.01 && (a-onlyA)/(a+onlyB)>=.99;
+        within+=pass;
+    }
+    return {{"product",product},{"layer",layer},{"fromMs",from},{"toMs",to},
+        {"strictHourMismatching",hourMismatching},{"strictMismatching",strict["mismatching"]},{"strictMatching",strict["matching"]},
+        {"crossConnectionQualifying",cross["qualifying"]},{"crossConnectionWithinBands",within},
+        {"crossConnectionInformational",true}};
 }
 } // namespace sentinel::roller

@@ -271,10 +271,15 @@ journal, not by HMC2 continuity. Order:
 3. Slice B: capture fan-out socket, ring, control channel, `/metrics` on 8091 (the
    observability plan's slice 2). Deploy capture (`deploy-runtime.sh capture`).
 4. Slice C: live roller in the server in **shadow mode**: the server keeps its own engine
-   and recorder on `recording/`; a second `BookRecorder` fed by `JournalFeed` writes the
-   new root; `hmc2_diff` runs hourly on both roots and the metric
-   `sentinel_roller_shadow_mismatch_total{product,layer}` must stay 0 for 48 h. Deploy
-   server (verify marker in `deploy-runtime.sh:36` changes to the new "Roller started" line).
+   and recorder on `recording/`; the shadow `BookRecorder` pipeline fed by `JournalFeed`
+   writes the new root. Implementation ready on `lt-astra/roller-c`, not landed or
+   deployed; see the validation notes below. Hourly `hmc2_diff` checks use the round-2
+   acceptance: strict against a same-journal batch oracle, informational against the
+   independent primary connection. `sentinel_roller_shadow_mismatch_total{product,layer}`
+   must stay 0 for 48 h after deployment. The new "Roller started" line identifies
+   shadow workers; deployment still verifies "Recording v2 started" and primary
+   writes, which both old and new shadow binaries emit. Marker replacement waits
+   until the primary recorder is removed in slice D.
 5. Slice D cutover: `feed.source: journal` and `recording.dir: .../hmc2`; the engine,
    the old recorder instance and the engine bridge are compiled out; deploy server. The
    restart is a few seconds; the roller resumes from its checkpoint and catches up from
@@ -617,3 +622,154 @@ vcpkg checkout; configured this build with `VCPKG_MANIFEST_INSTALL=OFF` using th
 already installed dependencies. Shared ccache writes are also sandbox-blocked;
 builds used `CCACHE_READONLY=1 CCACHE_TEMPDIR=/tmp`. The shared FIFO queue was the
 largest wall-time cost.
+
+## Slice C implementation (2026-10-03, `lt-astra/roller-c`)
+
+Implemented behind `roller_shadow.enabled: false` in repository configuration.
+The settings `journal_dir`, `dir`, `socket`, and explicit UTC-midnight `from`
+are documented in `ops/monitoring/README.md`. Primary engine, recorder and client
+stream remain authoritative. No runtime configuration or launchd service was
+changed by this slice.
+
+- Core-owned `roller::ShadowRoller` uses one independent source/recorder worker
+  per recorded product, needed for the existing per-product daily grid policy.
+  Source callbacks never enter the primary recorder, GUI, or client stream.
+  All blocking parsing, admission, storage, retries and comparison work stays on
+  shadow workers. The primary hot path has no added per-message allocation,
+  signal or queue operation.
+- `capture::JournalPosition` maps explicitly to `JournalPos` without changing
+  RAWL2 or fan-out framing. The initial handshake supplies the inclusive durable
+  ceiling; the socket is released during day-anchor file replay, then resumed
+  at that applied cursor with another bounded catch-up to its new durable tip.
+  File replay may not cross that ceiling, even if newer complete blocks are
+  already visible. Socket overlap is skipped only through the applied prefix;
+  sequence discontinuities, retract and every EOF force journal recovery.
+- A bounded 32 MiB per-product pending queue retains provisional socket records.
+  Only records covered by a durable watermark reach `JournalFeed`/`BookRecorder`.
+  A withdrawn suffix therefore has no derived disk output to undo. This slice
+  measures provisional receive and durable JournalFeed admission separately; it does **not**
+  claim the +50 ms feed-to-GUI acceptance gate or change the GUI source.
+- Daily anchor replay, grid choice, deterministic HMC2 resume and checkpoint
+  format are shared with `sentinel-roll`. Checkpoints follow a drained recorder
+  and applied durable positions. A shadow creates its initial provenance marker
+  before queuing any book input, allowing first-write failures to retry safely.
+  Checkpoint fences also advance through proven recorder gaps with no new
+  columns; no synthetic EOF tick is introduced.
+- To support independent product grids in a shared root, opt-in HMC2 product
+  writers take a shared root lease plus an exclusive product lease. Primary and
+  batch owners still take the original exclusive root lease. A product writer
+  refuses every append for a different product. Shadow output is checked against
+  journal, actual primary, and configured primary/fallback roots via canonical
+  paths before creation.
+- Setup/socket/write failures log and increment per-product counters,
+  lower the running gauge, and retry with 1 s to 60 s backoff. Malformed journal
+  payloads invalidate and continue, exactly as in the batch oracle. Scrapes sample
+  atomic values only. The hourly comparison worker is separate, sequentially
+  checks completed hours against temporary same-journal batch output, and uses
+  the `hmc2_diff` implementation. Strict comparisons include partial and missing
+  buckets and deep hourly rollups. Independent-connection primary comparisons
+  report the round-2 informational bands; the pinned legacy-timer fixture still
+  enforces tier 2. Grafana provisions mismatch-increase and shadow-down rules.
+- The worker logs `Roller started ... mode=shadow`. `deploy-runtime.sh` retains
+  its `Recording v2 started` marker: both old and new shadow binaries still
+  run the authoritative primary recorder, whose writes remain the deployment
+  verification target. No marker relaxation is needed before slice D.
+
+Initial slice validation: queued full `mac-clang -j 4` build passed; **89/89 CTest suites
+passed, zero failures, 131.56 s**. After formatting and strengthening the
+content-divergence fixture, the server rebuilt and **3/3 targeted CTest suites
+passed, zero failures, 7.41 s** (16 shadow cases, 15 roller cases, two pinned
+legacy fixtures). All builds/tests/benchmarks ran through the FIFO build queue.
+Metal cases explicitly skipped for no MTLDevice; no GPU/visual claim is made.
+
+`tests/roller/shadow_mutations.py`: **5/5 fail-without and restored checks
+passed**: provisional admission, durable file ceiling, missing strict buckets,
+duplicate overlap and primary-root isolation. Each restoration touches and
+rebuilds source before re-passing. The suite also covers restart byte identity,
+ring miss, null/durable retract, EOF recovery, malformed input, socket/write
+failure isolation, concurrent product grids, completed-hour checks, config,
+and deliberately changed TWAP content. New files pass clang-format; both
+changed YAML files parse, shadow defaults off, and alert UIDs are unique.
+
+The orchestrator committed the initial slice as `093d39d`, rebased on main.
+Review-round corrections remain uncommitted in `lt-astra/roller-c`; landing
+remains with the orchestrator. Deployment, the 48 h zero-mismatch soak, production CPU/RSS on
+seven products and full feed-to-GUI age remain owner/orchestrator checks after
+review and landing. No launchd service or production data was changed.
+
+Build environment: CMake regeneration needed local
+`-DVCPKG_MANIFEST_INSTALL=OFF` to reuse installed dependencies without locking
+the read-only shared vcpkg root, and `CCACHE_DIR=/tmp/sentinel-ccache` to keep
+cache writes inside the sandbox. These are worktree build settings, not tracked
+project configuration changes.
+
+Latest review-round handoff measurement (queued `ShadowTest.HandoffLatencyBenchmark`, synthetic
+100 records/s, 200 samples, default Session queue + 1 s RAWL2 block/flush policy,
+real fan-out socket, temporary internal-disk journal and HMC2 roots):
+
+| Interval | p50 | p95 |
+| --- | ---: | ---: |
+| Feed submission timestamp to provisional shadow receipt | 0.194 ms | 0.264 ms |
+| Feed submission timestamp to durable `JournalFeed` admission | 518.754 ms | 967.554 ms |
+
+The second measurement ends after parsing/enqueue to the shadow BookRecorder;
+it is not final-minute HMC2 commit latency. The test uses small heartbeat
+records after book warmup, includes the capture disk-worker queue, and is not a
+seven-product production-load or network/GUI latency claim. Waiting for durable
+input explains the near-one-second p95; a future live publication consumer
+would need discardable provisional state to avoid that wait.
+
+### Slice C review round 1 (2026-10-03)
+
+- Stop publishes its wait predicate under the condition-variable mutex. This
+  covers both checker and retry waits; a controlled predicate-to-wait race test
+  enforces the one-second stop budget.
+- Per-product `comparison.json` durably commits the exclusive compared-hour
+  watermark and both mismatch totals together before metric publication. Restore
+  omits the mismatch series until totals load, skips old hours and preserves the
+  cumulative count across process restarts. A divergent-hour restart fixture
+  verifies that neither the report timestamp nor the count changes. A missing
+  previously observed checkpoint fails comparison without resetting totals or
+  starting a new audit; restoration resumes the stored watermark.
+- Socket, retract and EOF retries retain the JournalFeed/BookRecorder and catch
+  up from the last applied durable cursor, avoiding day replay. Process restart
+  and recorder/write failures still use the persisted output floor and the first
+  incomplete day's anchor: checkpoints do not serialize book/TWAP state.
+  Three identical consecutive failures without a new committed watermark enter
+  a ten-minute probe loop, with dedicated cooldown gauge/counter and Grafana
+  alert. Replay of an old checkpoint does not count as recovery.
+- The server isolation fixture now owns the actual SentinelServerApp model,
+  stream server, registry, primary recorder and shadow. It drives primary
+  snapshots/ticks and live publication while the shadow is stalled, then while
+  its checkpoint writes fail. No upstream or service is started.
+- Oracle incrementality is deferred. Fresh hourly batch output scans from the
+  day anchor: about 12.5 full day-replays/product/day (87.5 product-days/day for
+  seven products), plus any anchor warmup before midnight. The comparison thread
+  is separate and products run sequentially, but it consumes shared CPU/storage
+  bandwidth. Keeping only a batch checkpoint would still reconstruct the book
+  from the anchor, so would not solve this cost. Persistent in-memory oracle
+  state or a deterministic state snapshot requires a separate design.
+
+Review-round validation (all builds/tests through the FIFO queue, `-j 4`):
+
+- Full `mac-clang` build: exit 0.
+- Targeted `ShadowRollerTests|RollerTests|RollerLiveFixtureTests`: **100% tests
+  passed, 0 tests failed out of 3**, 14.34 s; 20 shadow cases, 15 batch cases,
+  two pinned legacy fixtures. The forced shutdown race completed in 116 ms.
+- Final full CTest: **100% tests passed, 0 tests failed out of 89**, 135.24 s.
+- `shadow_mutations.py --round1`: **7/7 fail-without and restored checks
+  passed** (wait mutex, watermark restore, malformed invalidation, cooldown,
+  state-preserving recovery, server startup independence, missing checkpoint).
+  The original five admission/ceiling/strict-diff/overlap/root guards also
+  failed under mutation and passed after restoration during this round.
+- Formatting and `git diff --check` passed; alert YAML parses with ten unique
+  rule UIDs. `_agent/` records FM-172, FM-173 and INV-116.
+
+The comparison restart mutation initially survived a sleep-based assertion:
+shutdown cancelled the erroneous oracle before it published. The fixture now
+observes completed checker passes after source warmup, and the mutation fails.
+Metal-dependent cases report no MTLDevice and skip. No production deployment,
+48-hour soak, seven-product resource measurement, real ENOSPC, or power-loss
+fault injection was performed. Filesystem faults and journal disappearance are
+simulated only in temporary roots. Wire semantics and deploy marker logic are
+unchanged. Corrections remain uncommitted atop `093d39d`; main is its ancestor.

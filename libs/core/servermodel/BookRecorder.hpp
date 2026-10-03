@@ -51,6 +51,7 @@ struct RecorderConfig {
     // Test synchronization only, called under the queue mutex before blocking.
     std::function<void()> beforeQueueWaitForTest;
     bool deterministicResume = false;
+    std::string writerProduct; // opt-in product lease for independent shadow grids
     int64_t commitFloorMs = 0; // exclusive end <= floor: rebuild, do not append
     int64_t commitCeilingMs = kHmc2EndMs; // only complete buckets below this end
 

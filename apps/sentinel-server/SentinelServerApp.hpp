@@ -1,5 +1,6 @@
 #pragma once
 #include <QObject>
+#include "roller/ShadowRoller.hpp"
 #include <memory>
 #include <unordered_set>
 #include "../../libs/core/marketdata/MarketDataFeeds.hpp"
@@ -12,6 +13,7 @@
 
 class SentinelServerApp : public QObject {
     Q_OBJECT
+    friend struct ShadowServerTestAccess;
 public:
     explicit SentinelServerApp(const ServerConfig& config, QObject* parent = nullptr);
     ~SentinelServerApp();
@@ -21,6 +23,7 @@ public:
     bool recording() const { return m_serverModel && m_serverModel->recordingDir().has_value(); }
 
 private:
+    void startShadow(const std::vector<std::string>& symbols);
     ServerConfig m_serverConfig;
     // Declared first: outlives every component whose samplers it holds.
     sentinel::metrics::MetricsRegistry m_metrics;
@@ -29,6 +32,7 @@ private:
     std::unique_ptr<MarketDataFeeds> m_marketDataCore;
     std::unique_ptr<ServerDataModel> m_serverModel;
     std::unique_ptr<SentinelStreamServer> m_server;
+    std::unique_ptr<sentinel::roller::ShadowRoller> m_shadowRoller;
     // Declared last: destroyed first, so no scrape renders a destroyed component.
     std::unique_ptr<sentinel::metrics::MetricsHttpServer> m_httpServer;
     std::unordered_set<std::string> m_defaultSymbols;
