@@ -48,6 +48,10 @@ only (`StoreTest.ReaderAssertsWorkerOwnershipInDebugBuilds`), opt-in real data o
 `sentinel-lab`:
 
 - `SENTINEL_RHI_BACKEND=d3d11|d3d12|vulkan|opengl|metal` selects the backend.
+- Qt fixes the scene graph backend at the first `QQuickWindow` of the process (shown or
+  not). A test binary that constructs any `QQuickWindow` or `QQuickView` outside
+  `OffscreenQuick` calls `lab::selectQuickSceneGraph()` in `main()` first; otherwise every
+  later `OffscreenQuick::create` fails ("Scenegraph already initialized, setBackend() request ignored").
 - Unset: the platform default, `d3d12` on Windows, `metal` on macOS, `opengl` elsewhere.
 - The backend must create a QRhi with compute support. Otherwise every GPU case prints
   `GPU case skipped: <backend> backend: <reason>`. A skipped gtest case still makes ctest report

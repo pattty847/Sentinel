@@ -662,6 +662,19 @@ TEST(HeatmapSettingsDialogTest, ApiChangesReachTheDialogAndToolbar) {
     EXPECT_EQ(t.reload().palettePreset, "Electric"); // persist:false
 }
 
+// Qt fixes the scene graph backend at the first QQuickWindow of the process,
+// shown or not. The tests below construct plain windows, so main() selects the
+// rhi backend first; otherwise every OffscreenQuick after them fails with
+// "Scenegraph already initialized, setBackend() request ignored".
+TEST(OffscreenQuickTest, CreatesAfterAPlainQuickWindowBecauseMainSelectedTheBackend) {
+    if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty())
+        GTEST_SKIP() << "GPU case skipped: " << why.toStdString();
+    QQuickWindow plain; // never shown; still initializes the scene graph adaptation
+    lab::OffscreenQuick scene;
+    QString error;
+    EXPECT_TRUE(scene.create(QSize(64, 64), &error)) << error.toStdString();
+}
+
 TEST(TradeBubbleControls, SiblingOverlayConsumesLatestFrameAndOwnsTypedNode) {
     UnifiedGridRenderer renderer;
     renderer.setActiveSymbol("BTC-USD");
@@ -1198,6 +1211,7 @@ TEST_F(HeatmapChartUi, LiveMinIntervalReachesTheController) {
 int main(int argc, char **argv) {
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication app(argc, argv);
+    lab::selectQuickSceneGraph(); // before any QQuickWindow: Qt fixes the backend at the first one
     ::testing::InitGoogleTest(&argc, argv);
     std::cout << "[sentinel] " << lab::describeRhi().toStdString() << std::endl;
     fixtureDir = new QTemporaryDir;

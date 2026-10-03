@@ -28,9 +28,10 @@ bool OffscreenQuick::create(QSize pixelSize, QString *error) {
     if (!device_.create(true)) return fail(device_.error);
     QRhi *rhi = device_.rhi.get();
     const QString name = device_.backend.name;
-    // The offscreen QPA would otherwise select the software adaptation.
-    QQuickWindow::setSceneGraphBackend(QStringLiteral("rhi"));
-    QQuickWindow::setGraphicsApi(device_.backend.graphicsApi);
+    // The offscreen QPA would otherwise select the software adaptation. Qt fixes
+    // the backend at the first QQuickWindow of the process: a binary that makes
+    // one before this point selects it in main() (lab::selectQuickSceneGraph).
+    if (QString why; !selectQuickSceneGraph(&why)) return fail(why);
     control_ = std::make_unique<QQuickRenderControl>();
     QObject::connect(control_.get(), &QQuickRenderControl::renderRequested, [this] { requested_ = true; });
     QObject::connect(control_.get(), &QQuickRenderControl::sceneChanged, [this] { requested_ = true; });
@@ -39,7 +40,10 @@ bool OffscreenQuick::create(QSize pixelSize, QString *error) {
     if (device_.vulkan) window_->setVulkanInstance(device_.vulkan.get());
 #endif
     window_->setGraphicsDevice(QQuickGraphicsDevice::fromRhi(rhi));
-    if (!control_->initialize()) return fail(name + QStringLiteral(" backend: QQuickRenderControl::initialize failed"));
+    if (!control_->initialize())
+        return fail(name + QStringLiteral(" backend: QQuickRenderControl::initialize failed (a QQuickWindow created "
+                                          "earlier in this process may have fixed another scene graph backend; "
+                                          "call lab::selectQuickSceneGraph() in main() before any QQuickWindow)"));
     size_ = pixelSize;
     color_.reset(rhi->newTexture(QRhiTexture::RGBA8, size_, 1,
                                   QRhiTexture::RenderTarget | QRhiTexture::UsedAsTransferSource));

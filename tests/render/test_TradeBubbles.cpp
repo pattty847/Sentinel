@@ -309,6 +309,28 @@ TEST(TradeBubbles, TapeAndQsgCapacityNeverGrowAcrossFramesAndToggleClearsGeometr
     expectDrawCount(node);
     EXPECT_EQ(node.geometry()->vertexData(),vertices);
 }
+TEST(TradeBubbles, UnchangedFramesAndEmptyMeshesLeaveTheSceneGraphAlone) {
+    // A dirty mark after synchronization asks the window for another frame, so
+    // an idle chart must get none from the bubble node (UgrGpu idle test).
+    auto tape=std::make_unique<Tape>();
+    TradeBubbleNode node;
+    auto m=mapping();
+    node.sync(*tape,m,false,0,Qt::cyan,Qt::yellow); // off, empty: nothing to draw
+    node.sync(*tape,m,true,0,Qt::cyan,Qt::yellow);  // on, empty: still nothing
+    EXPECT_EQ(node.dirtyMarks(),0u);
+    ASSERT_TRUE(tape->append({1500,150,1,AggressorSide::Buy}));
+    node.sync(*tape,m,true,0,Qt::cyan,Qt::yellow);
+    EXPECT_EQ(node.dirtyMarks(),1u);
+    node.sync(*tape,m,true,0,Qt::cyan,Qt::yellow); // identical frame
+    m.viewStartMs+=.1; m.viewEndMs+=.1; m.srcRect.translate(.001,0);
+    node.sync(*tape,m,true,0,Qt::cyan,Qt::yellow); // follow-live pan: translation only
+    EXPECT_EQ(node.dirtyMarks(),1u);
+    node.sync(*tape,m,false,0,Qt::cyan,Qt::yellow); // off: the drawn mesh is removed
+    EXPECT_EQ(node.dirtyMarks(),2u);
+    node.sync(*tape,m,false,0,Qt::cyan,Qt::yellow);
+    node.clear();                                     // nothing drawn: no mark
+    EXPECT_EQ(node.dirtyMarks(),2u);
+}
 TEST(TradeBubbles, SettingsRoundTripPerChartAndTransientPatchesStayTransient) {
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());

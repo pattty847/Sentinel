@@ -51,6 +51,14 @@ struct HeadlessRhi {
     std::string skipReason() const;
 };
 
+// Selects this process's Qt Quick scene graph: the "rhi" backend on the chosen
+// graphics API. Qt fixes the backend when the first QQuickWindow is constructed
+// (shown or not), after which OffscreenQuick::create cannot change it. A binary
+// that creates any QQuickWindow or QQuickView outside OffscreenQuick calls this
+// in main(), after the QGuiApplication and before that window. Idempotent: a
+// repeated call with the same selection sets nothing (Qt would only warn).
+// Returns false, with `error`, when the selected backend is not in this build.
+bool selectQuickSceneGraph(QString *error = nullptr);
 // Empty when the selected backend can create a QRhi with compute here; otherwise
 // why not (names the backend). Probed once per process.
 QString gpuUnavailableReason();

@@ -997,6 +997,7 @@ int main(int argc, char **argv) {
     // Offscreen unless set: Vulkan needs a real platform plugin (QT_QPA_PLATFORM=windows|xcb).
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "offscreen");
     QGuiApplication app(argc, argv);
+    lab::selectQuickSceneGraph(); // before any QQuickWindow: Qt fixes the backend at the first one
     ::testing::InitGoogleTest(&argc, argv);
     std::cout << "[sentinel] " << lab::describeRhi().toStdString() << std::endl;
     return RUN_ALL_TESTS();

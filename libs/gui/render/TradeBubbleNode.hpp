@@ -15,6 +15,7 @@ public:
     void clear();
     int usedVertexCount() const { return usedVertexCount_; }
     uint64_t rebuildCount() const { return rebuildCount_; }
+    uint64_t dirtyMarks() const { return dirtyMarks_; } // scene graph changes this node made
     size_t lastScanRows() const { return lastScanRows_; }
     size_t rangeComparisons() const { return rangeComparisons_; }
     const QMatrix4x4& translation() const { return transform_.matrix(); }
@@ -28,7 +29,7 @@ private:
     QSGGeometryNode mesh_;
     trade_bubbles::WindowKey windowKey_;
     const trade_bubbles::Tape* tape_ = nullptr;
-    uint64_t rebuildCount_ = 0;
+    uint64_t rebuildCount_ = 0, dirtyMarks_ = 0;
     size_t lastScanRows_ = 0, rangeComparisons_ = 0;
     TimeAxisMapping mapping_;
     double minNotional_ = -1;

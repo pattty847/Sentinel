@@ -112,7 +112,12 @@ void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMappin
     if (int(count) < usedVertexCount_)
         std::fill(v + count, v + usedVertexCount_, Vertex{});
 #endif
+    const bool drawn = count || usedVertexCount_;
     usedVertexCount_ = int(count);
+    // A dirty mark after synchronization asks the window for another frame:
+    // nothing drawn before or now leaves the scene graph untouched.
+    if (!drawn) return;
+    ++dirtyMarks_;
     geometry_.markVertexDataDirty();
     mesh_.markDirty(DirtyGeometry);
 }
@@ -127,6 +132,7 @@ void TradeBubbleNode::clear() {
     std::fill_n(static_cast<Vertex*>(geometry_.vertexData()), usedVertexCount_, Vertex{});
 #endif
     usedVertexCount_ = 0;
+    ++dirtyMarks_;
     geometry_.markVertexDataDirty();
     mesh_.markDirty(DirtyGeometry);
 }
