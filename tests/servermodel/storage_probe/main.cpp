@@ -192,7 +192,7 @@ int main(int argc, char** argv) {
             QObject::connect(&client, &SentinelStreamClient::connected, &app,
                 [&] { client.subscribe("BTC-USD"); }, Qt::QueuedConnection);
             QObject::connect(&client, &SentinelStreamClient::snapshotReceived, &app,
-                [&](const QString& symbol, const auto& bids, const auto& asks) {
+                [&](const QString& symbol, const auto& bids, const auto& asks, quint64) {
                     if (symbol != "BTC-USD") return;
                     if (bids.empty() || asks.empty()) {
                         error = "server snapshot is not two-sided; warm the server book and rerun";
@@ -205,7 +205,7 @@ int main(int argc, char** argv) {
                     accept(Kind::Snapshot, std::move(levels));
                 }, Qt::QueuedConnection);
             QObject::connect(&client, &SentinelStreamClient::l2UpdateReceived, &app,
-                [&](const QString& symbol, const auto& updates) {
+                [&](const QString& symbol, const auto& updates, quint64) {
                     if (symbol != "BTC-USD") return;
                     std::vector<Level> levels; levels.reserve(updates.size());
                     for (auto l : updates) levels.push_back({l.isBid, l.price, l.quantity});

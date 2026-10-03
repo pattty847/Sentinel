@@ -1462,6 +1462,13 @@ void MainWindowGPU::connectMarketDataSignals() {
                 sLog_Warning("DataSource error: error=" << error << " symbol=" << m_currentSymbol
                              << " connected=" << m_connected);
             });
+    connect(m_dataSource.get(), &IGridDataSource::bookSnapshotStaleChanged,
+            this, [this](const QString& symbol, bool stale) {
+                if (symbol != m_currentSymbol) return;
+                const QString message = QStringLiteral("Order book stale: %1 (waiting for a fresh snapshot)").arg(symbol);
+                if (stale) statusBar()->showMessage(message);
+                else if (statusBar()->currentMessage() == message) statusBar()->clearMessage();
+            });
 }
 
 void MainWindowGPU::onConnectionStatusChanged(bool connected) {

@@ -246,10 +246,10 @@ TEST(AgentHostModeSources, EveryOutboundRequestInTheDataSourceIsGuarded) {
     const QSet<QString> guarded{"subscribe", "requestHeatmapHistory", "registerRecordingView",
                                 "requestRecordingHeatmapHistory", "requestFootprintHistory",
                                 "requestCandleHistory", "requestTpoHistory", "sendTradeCommand", "sendAlgoCommand"};
-    // Connection management, releases and cancels: they name no symbol the server has not already seen
-    // or carry no request.
+    // Connection management, releases, cancels and the local generation lookup:
+    // they name no new symbol to the server or carry no request.
     const QSet<QString> exempt{"connectToServer", "unsubscribe", "releaseRecordingView", "cancelTpoHistory",
-                               "setCandleDeliveryGeneration"};
+                               "setCandleDeliveryGeneration", "bookDeliveryGeneration"};
     QFile file(QString(SENTINEL_SOURCE_DIR) + "/libs/gui/datasources/RemoteGridDataSource.cpp");
     ASSERT_TRUE(file.open(QIODevice::ReadOnly));
     const QString text = QString::fromUtf8(file.readAll());

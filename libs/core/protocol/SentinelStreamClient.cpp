@@ -286,6 +286,10 @@ void SentinelStreamClient::disconnectFromServer() {
 }
 
 void SentinelStreamClient::subscribe(const std::string& symbol) {
+    {
+        std::lock_guard lock(m_bookDeliveryMutex);
+        ++m_bookDeliveryGenerations[symbol];
+    }
     sLog_Data("Client subscribe: symbol=" << symbol);
     nlohmann::json msg = {
         {"type", "subscribe"},
@@ -301,7 +305,17 @@ void SentinelStreamClient::subscribe(const std::string& symbol) {
     });
 }
 
+quint64 SentinelStreamClient::bookDeliveryGeneration(const std::string& symbol) const {
+    std::lock_guard lock(m_bookDeliveryMutex);
+    const auto it = m_bookDeliveryGenerations.find(symbol);
+    return it == m_bookDeliveryGenerations.end() ? 0 : it->second;
+}
+
 void SentinelStreamClient::unsubscribe(const std::string& symbol) {
+    {
+        std::lock_guard lock(m_bookDeliveryMutex);
+        ++m_bookDeliveryGenerations[symbol];
+    }
     sLog_Data("Client unsubscribe: symbol=" << symbol);
     nlohmann::json msg = {
         {"type", "unsubscribe"},
@@ -873,7 +887,9 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                 handlePnlSnapshotMessage(msg);
                 return;
             case protocol::MessageType::Error:
-                if (msg.value("context", "") == "subscribe" && msg.value("code", "") == "connection_cap") {
+                if (msg.value("context", "") == "subscribe" &&
+                    (msg.value("code", "") == "connection_cap" || msg.value("code", "") == "invalid_product" ||
+                     msg.value("code", "") == "upstream_unavailable")) {
                     emit subscriptionRefused(QString::fromStdString(msg.value("symbol", "")),
                         msg.value("max_connections", 0), QString::fromStdString(msg.value("message", "")));
                 }
@@ -955,7 +971,8 @@ void SentinelStreamClient::handleSnapshotMessage(const nlohmann::json& msg) {
     }
     const auto bids = protocol::clientparse::parseOrderBookLevels(msg.value("bids", nlohmann::json::array()));
     const auto asks = protocol::clientparse::parseOrderBookLevels(msg.value("asks", nlohmann::json::array()));
-    emit snapshotReceived(QString::fromStdString(symbol), bids, asks);
+    const auto generation = bookDeliveryGeneration(symbol);
+    emit snapshotReceived(QString::fromStdString(symbol), bids, asks, generation);
 }
 
 void SentinelStreamClient::handleL2UpdateMessage(const nlohmann::json& msg) {
@@ -964,7 +981,8 @@ void SentinelStreamClient::handleL2UpdateMessage(const nlohmann::json& msg) {
         return;
     }
     const auto updates = protocol::clientparse::parseL2Updates(msg["deltas"]);
-    emit l2UpdateReceived(QString::fromStdString(symbol), updates);
+    const auto generation = bookDeliveryGeneration(symbol);
+    emit l2UpdateReceived(QString::fromStdString(symbol), updates, generation);
 }
 
 void SentinelStreamClient::handleTradeMessage(const nlohmann::json& msg) {

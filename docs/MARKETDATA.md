@@ -522,8 +522,12 @@ subscriber; other clients share that feed. The final unsubscribe or session clos
 it. Pinned feeds are never removed by clients and never count against
 `server.mdc.max_connections` (default 8, minimum 1). Connecting feeds count against the cap.
 
-Admission happens before the Session stores a subscription, creates model/availability
-state, acknowledges it or queues upstream acquisition. At capacity the server logs
+Admission reserves the stream slot and synchronously checks the upstream feed before the
+Session stores a subscription, creates model/availability state, or acknowledges it.
+An upstream `CapacityExceeded` releases the reserved slot and takes the same refusal path
+as the stream cap. An upstream `InvalidProduct` also releases the slot and sends the same
+structured error with `code: "invalid_product"`. An upstream admission exception also
+releases the slot and reports `upstream_unavailable`. At capacity the server logs
 `Feed refused: symbol=<product> cap=<N> code=connection_cap` and sends only:
 
 ```json

@@ -77,6 +77,8 @@ Changing `recording.deep_tick` from $10 to $5 changes the recording config hash 
 
 `server.mdc.max_connections` limits distinct active GUI-only products, including feeds still connecting. The default is 8; values below 1 are rejected. Multiple clients watching the same product share a slot. Pinned `default_symbols` are exempt. At capacity, a new symbol is refused with a stream error (symbol and cap), a GUI status-bar message and `data.lastSubscriptionRefusal` in `/api/v1/state`; existing watched products are never evicted. Unsubscribing or disconnecting the final watcher frees the slot.
 
+Market data connection keys may appear beside `mdc` (the older form) or inside it, either under `server` or at the YAML root. The loader reads sibling keys first, then applies `mdc` per key; an `mdc:` block containing only `max_connections` therefore retains sibling `host`, `port`, and `ssl_ca_bundle`. The startup log prints each effective MDC value with its file and source (`root`/`mdc`, `server`/`server.mdc`, or `retained` when this file has no override).
+
 Public market data (level2, market_trades, candles) does not require a key; the server runs without `key.json` by default.
 
 **Client (`config/client_config.yaml` or `.client_config.yaml`):**
