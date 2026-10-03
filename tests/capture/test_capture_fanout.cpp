@@ -236,6 +236,30 @@ TEST_F(Fixture, SetupFailureRetriesWithBackoffWhileWriterContinues) {
     EXPECT_TRUE(metric("sentinel_fanout_setup_failures_total 2"));
     writer.close();
 }
+TEST_F(Fixture, SetupRetryPreservesRingForExclusiveResume) {
+    ASSERT_TRUE(QDir().mkdir(dir.path()+"/socket"));
+    ASSERT_EQ(::chmod((dir.path()+"/socket").toStdString().c_str(),0755),0);
+    cfg.socketPath=dir.path()+"/socket/f.sock";
+    cfg.retention=5min; // Keep the original cursor beyond the 30 s + 60 s retries.
+    start();
+    ASSERT_TRUE(metric("sentinel_fanout_setup_failures_total 1"));
+    put(0);
+    ASSERT_TRUE(eventually([&]{return !metric("sentinel_fanout_ring_bytes{product=\"BTC-USD\"} 0");}));
+
+    now+=30'000'000'000LL;
+    ASSERT_TRUE(eventually([&]{return metric("sentinel_fanout_setup_failures_total 2");}));
+    EXPECT_FALSE(metric("sentinel_fanout_ring_bytes{product=\"BTC-USD\"} 0"));
+    put(1);
+    ASSERT_EQ(::chmod((dir.path()+"/socket").toStdString().c_str(),0700),0);
+    now+=60'000'000'000LL;
+    ASSERT_TRUE(eventually([&]{return metric("sentinel_fanout_running 1");}));
+
+    Peer peer(server->path());
+    peer.hello(JournalPosition{"BTC-USD","run",0,0});
+    EXPECT_EQ(peer.next().first["type"],"tip");
+    EXPECT_EQ(peer.next().first["pos"]["block"],1);
+    EXPECT_TRUE(metric("sentinel_fanout_resume_hits_total{product=\"BTC-USD\"} 1"));
+}
 TEST_F(Fixture, SetupRetryBackoffCapsAtTenMinutesAndStopsWhileDown) {
     ASSERT_TRUE(QDir().mkdir(dir.path()+"/socket"));
     ASSERT_EQ(::chmod((dir.path()+"/socket").toStdString().c_str(),0755),0);

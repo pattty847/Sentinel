@@ -144,6 +144,9 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
                 m_candleHistoryReady = false;
                 m_candleBackfillTimer.stop();
                 m_bookSnapshotTimer.stop();
+                for (const auto& [symbol, pending] : m_pendingBookSnapshots) {
+                    if (pending.stale) emit bookSnapshotStaleChanged(QString::fromStdString(symbol), false);
+                }
                 m_pendingBookSnapshots.clear();
                 m_candleBackfill.disconnect();
                 emit connectionStatusChanged(false);

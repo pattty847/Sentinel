@@ -400,7 +400,11 @@ struct CaptureFanout::Impl {
         sentinel::logging::setCurrentThreadName("capture-fanout");
         while (!stopping.load(std::memory_order_acquire)) {
             try {
-                if (listener < 0 && config.nowNs() >= nextRetry) setup();
+                if (listener < 0 && config.nowNs() >= nextRetry) {
+                    // Socket setup does not invalidate journal records already in the rings.
+                    // Keep service failures below on the product invalidation path.
+                    try { setup(); } catch (const std::exception& e) { unavailable(e); }
+                }
                 drain();
                 std::array<pollfd, MaxClients + 2> fds{};
                 fds[0] = {listener, POLLIN, 0}; fds[1] = {wake[0], POLLIN, 0};
