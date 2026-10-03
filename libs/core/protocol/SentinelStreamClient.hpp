@@ -23,6 +23,7 @@
 #include <mutex>
 #include <tuple>
 #include <functional>
+#include <unordered_map>
 #include "HeatmapSlice.hpp"
 #include "FootprintSlice.hpp"
 #include "TpoSlice.hpp"
@@ -103,6 +104,7 @@ public:
     
     void subscribe(const std::string& symbol);
     void unsubscribe(const std::string& symbol);
+    quint64 bookDeliveryGeneration(const std::string& symbol) const;
     void requestHeatmapHistory(const std::string& symbol,
                                int64_t timeframeMs,
                                int64_t endTimeMs,
@@ -159,10 +161,12 @@ signals:
     
     void tradeReceived(const Trade& trade);
     // This signal is strictly for internal use by DataSource which converts prices -> indices
-    void l2UpdateReceived(const QString& productId, const std::vector<BookLevelUpdate>& updates);
+    void l2UpdateReceived(const QString& productId, const std::vector<BookLevelUpdate>& updates,
+                          quint64 deliveryGeneration);
     
     void liveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas);
-    void snapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks);
+    void snapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids,
+                          const std::vector<OrderBookLevel>& asks, quint64 deliveryGeneration);
     // Other signals as needed for aggregated slices
     void heatmapSliceReceived(const HeatmapSlice& slice);
     void footprintSliceReceived(const FootprintSlice& slice);
@@ -280,6 +284,8 @@ private:
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_isConnected{false};
     std::atomic<quint64> m_candleDeliveryGeneration{0};
+    mutable std::mutex m_bookDeliveryMutex;
+    std::unordered_map<std::string, quint64> m_bookDeliveryGenerations;
 
     std::atomic<quint64> m_nextChunkRequestId{0};
     // Replies from an older connection are dropped after reconnect.

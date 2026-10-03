@@ -3,6 +3,7 @@
 #include "CandleSeriesBuffer.hpp"
 #include "CandleBackfillState.hpp"
 #include <QTimer>
+#include <unordered_set>
 #include "../../core/protocol/SentinelStreamClient.hpp"
 #include "../config/GuiConfigStore.hpp"
 
@@ -42,10 +43,13 @@ public:
     void connectToServer();
     QObject* candleBuffer() const { return m_candleBuffer.get(); }
     SentinelStreamClient* streamClient() { return &m_client; }
+    Q_INVOKABLE bool isBookSnapshotStale(const QString& symbol) const;
 
 private slots:
-    void onSnapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks);
-    void onL2UpdateReceived(const QString& productId, const std::vector<BookLevelUpdate>& updates);
+    void onSnapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids,
+                            const std::vector<OrderBookLevel>& asks, quint64 deliveryGeneration);
+    void onL2UpdateReceived(const QString& productId, const std::vector<BookLevelUpdate>& updates,
+                            quint64 deliveryGeneration);
     void onHeatmapSliceReceived(const HeatmapSlice& slice);
     void onFootprintSliceReceived(const FootprintSlice& slice);
     void onTpoSliceReceived(const TpoSlice& slice);
@@ -77,12 +81,22 @@ private slots:
     void onPnlSnapshotReceived(const trading::PnlSnapshot& snapshot);
 
 private:
+    friend struct CandleDataSourceTest;
+    void processBookSnapshotDeadlines(qint64 nowMs);
     void requestNextCandlePage();
     void advanceCandleDeliveryGeneration();
     SentinelStreamClient m_client;
     std::unique_ptr<CandleSeriesBuffer> m_candleBuffer;
     CandleBackfillState m_candleBackfill;
     QTimer m_candleBackfillTimer;
+    QTimer m_bookSnapshotTimer;
+    struct PendingBookSnapshot {
+        qint64 deadlineMs = 0;
+        bool retried = false;
+        bool stale = false;
+    };
+    std::unordered_map<std::string, PendingBookSnapshot> m_pendingBookSnapshots;
+    std::unordered_set<std::string> m_activeBookSymbols;
     QString m_candleSymbol;
     int64_t m_candleTimeframeSec = 0;
     bool m_candleHistoryReady = false;

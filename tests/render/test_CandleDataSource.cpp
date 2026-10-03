@@ -19,6 +19,27 @@ struct CandleDataSourceTest : testing::Test {
 
     SentinelStreamClient& client() { return *source.streamClient(); }
     void deliver() { QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall); }
+    size_t pendingBookCount() const { return source.m_pendingBookSnapshots.size(); }
+    qint64 bookDeadline(const std::string& symbol) const {
+        return source.m_pendingBookSnapshots.at(symbol).deadlineMs;
+    }
+    void advanceBookDeadline(qint64 nowMs) { source.processBookSnapshotDeadlines(nowMs); }
+    void bookSnapshot(double bid, double ask) {
+        client().handleSnapshotMessage({{"symbol", "BTC-USD"},
+            {"bids", {{{"p", bid}, {"q", 1.0}}}},
+            {"asks", {{{"p", ask}, {"q", 1.0}}}}});
+    }
+    void emptyBookSnapshot() {
+        client().handleSnapshotMessage({{"symbol", "BTC-USD"},
+            {"bids", Json::array()}, {"asks", Json::array()}});
+    }
+    void bookL2(double bid, double size) {
+        client().handleL2UpdateMessage({{"product_id", "BTC-USD"},
+            {"deltas", {{{"side", "bid"}, {"price", bid}, {"size", size}}}}});
+    }
+    void deliverBookL2(const std::vector<BookLevelUpdate>& updates, quint64 generation) {
+        source.onL2UpdateReceived("BTC-USD", updates, generation);
+    }
     Json takeRequest(int timeoutMs = 1000) {
         const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
         do {
@@ -185,21 +206,72 @@ TEST_F(CandleDataSourceTest, ResubscribeDropsTheRetainedBookUntilTheFreshSnapsho
         ask = view.askLevels.empty() ? 0.0 : view.minPrice + view.askLevels.front().first * view.tickSize;
     };
     source.subscribe("BTC-USD");
-    emit client().snapshotReceived("BTC-USD", {{86'597.0, 1.0}}, {{86'598.0, 1.0}});
+    emit client().snapshotReceived("BTC-USD", {{86'597.0, 1.0}}, {{86'598.0, 1.0}},
+                                         client().bookDeliveryGeneration("BTC-USD"));
     deliver();
     double bid = 0, ask = 0;
     top(bid, ask);
     ASSERT_NEAR(bid, 86'597.0, 0.11); // the $0.10 book grid
     source.subscribe("BTC-USD"); // e.g. back from ETH-USD
-    emit client().l2UpdateReceived("BTC-USD", {{true, 86'010.0, 2.0}});
+    emit client().l2UpdateReceived("BTC-USD", {{true, 86'010.0, 2.0}},
+                                         client().bookDeliveryGeneration("BTC-USD"));
     deliver();
     top(bid, ask);
     EXPECT_EQ(bid, 0.0) << "no top from the retained book before the fresh snapshot";
     EXPECT_EQ(ask, 0.0);
     EXPECT_TRUE(source.getDirectLiveOrderBook("BTC-USD").isEmpty());
-    emit client().snapshotReceived("BTC-USD", {{86'009.0, 1.0}}, {{86'011.0, 1.0}});
+    emit client().snapshotReceived("BTC-USD", {{86'009.0, 1.0}}, {{86'011.0, 1.0}},
+                                         client().bookDeliveryGeneration("BTC-USD"));
     deliver();
     top(bid, ask);
     EXPECT_NEAR(bid, 86'009.0, 0.11); // the $0.10 book grid
     EXPECT_NEAR(ask, 86'011.0, 0.11); // the $0.10 book grid
+}
+
+TEST_F(CandleDataSourceTest, QueuedOldBookMessagesCannotRefillResubscribedReplica) {
+    source.subscribe("BTC-USD");
+    const auto oldGeneration = client().bookDeliveryGeneration("BTC-USD");
+    bookSnapshot(100.0, 101.0);
+    bookL2(100.0, 9.0);
+    EXPECT_EQ(oldGeneration, client().bookDeliveryGeneration("BTC-USD"));
+    source.subscribe("BTC-USD");
+    deliver();
+    EXPECT_TRUE(source.getDirectLiveOrderBook("BTC-USD").isEmpty());
+    EXPECT_EQ(pendingBookCount(), 1u);
+    emit client().snapshotReceived("BTC-USD", {{200.0, 1.0}}, {{201.0, 1.0}},
+                                         client().bookDeliveryGeneration("BTC-USD"));
+    deliver();
+    EXPECT_FALSE(source.getDirectLiveOrderBook("BTC-USD").isEmpty());
+    EXPECT_EQ(pendingBookCount(), 0u);
+    std::vector<std::pair<uint32_t, double>> bids, asks;
+    source.getDirectLiveOrderBook("BTC-USD").captureDenseNonZero(bids, asks, 1);
+    const auto freshBids = bids;
+    deliverBookL2({{true, 200.0, 9.0}}, oldGeneration);
+    source.getDirectLiveOrderBook("BTC-USD").captureDenseNonZero(bids, asks, 1);
+    EXPECT_EQ(bids, freshBids);
+}
+
+TEST_F(CandleDataSourceTest, MissingBookSnapshotRetriesOnceThenReportsStale) {
+    source.subscribe("BTC-USD");
+    ASSERT_EQ(takeRequest().at("type"), "subscribe");
+    emptyBookSnapshot();
+    deliver();
+    EXPECT_EQ(pendingBookCount(), 1u);
+    int staleErrors = 0;
+    QObject::connect(&source, &IGridDataSource::errorOccurred, &source,
+        [&](const QString& message) { if (message.contains("snapshot stale")) ++staleErrors; });
+    const auto firstDeadline = bookDeadline("BTC-USD");
+    advanceBookDeadline(firstDeadline);
+    EXPECT_EQ(takeRequest().at("type"), "subscribe");
+    EXPECT_FALSE(source.isBookSnapshotStale("BTC-USD"));
+    advanceBookDeadline(firstDeadline + 5000);
+    EXPECT_TRUE(source.isBookSnapshotStale("BTC-USD"));
+    EXPECT_EQ(staleErrors, 1);
+    advanceBookDeadline(firstDeadline + 10000);
+    EXPECT_EQ(staleErrors, 1);
+    EXPECT_TRUE(takeRequest(30).is_null());
+    bookSnapshot(300.0, 301.0);
+    deliver();
+    EXPECT_FALSE(source.isBookSnapshotStale("BTC-USD"));
+    EXPECT_EQ(pendingBookCount(), 0u);
 }

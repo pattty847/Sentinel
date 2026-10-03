@@ -1,5 +1,10 @@
 find_package(Qt6 REQUIRED COMPONENTS Core)
 
+add_test(NAME DeployRuntimeDryRun
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_deploy_runtime_dry_run.sh
+            ${CMAKE_SOURCE_DIR}/scripts/dev/deploy-runtime.sh)
+set_tests_properties(DeployRuntimeDryRun PROPERTIES LABELS "core")
+
 # Test Target: test_log_throttle
 add_executable(test_log_throttle test_log_throttle.cpp)
 target_include_directories(test_log_throttle PRIVATE

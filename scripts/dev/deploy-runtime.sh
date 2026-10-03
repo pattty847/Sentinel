@@ -1,57 +1,88 @@
 #!/bin/bash
-# Deploy sentinel-server and/or sentinel-capture from build/mac-clang into
-# ~/Sentinel-runtime/bin, sign them with the local "Sentinel Local Code Signing"
-# identity (so macOS Full Disk Access keyed to identifier + certificate survives
-# the new binary), restart the launchd service and verify it writes within 60 s.
-#
-#   scripts/dev/deploy-runtime.sh server|capture|both
-#
-# Never run a bare sentinel-server binary to smoke-test it: from the repo root it
-# would contend for the recorder's data locks. On a failed verification the
-# script restores the previous binary and restarts it.
+# Deploy signed runtime binaries or restore the last deployed binary. Never run
+# sentinel-server directly: it would contend with the launchd recorder's locks.
 set -euo pipefail
+
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 RT="$HOME/Sentinel-runtime/bin"
 IDENTITY="Sentinel Local Code Signing"
 LOGS="$HOME/Library/Logs/Sentinel"
-which=${1:?usage: deploy-runtime.sh server|capture|both}
+DRY_RUN=0
+args=()
+for arg in "$@"; do
+    if [[ $arg == --dry-run ]]; then DRY_RUN=1; else args+=("$arg"); fi
+done
+set -- "${args[@]}"
+ACTION=deploy
+if [[ ${1:-} == rollback ]]; then ACTION=rollback; shift; fi
+WHICH=${1:-}
+if [[ $# != 1 || ! $WHICH =~ ^(server|capture|both)$ || ( $ACTION == rollback && $WHICH == both ) ]]; then
+    echo "usage: deploy-runtime.sh [--dry-run] server|capture|both | [--dry-run] rollback server|capture" >&2
+    exit 1
+fi
 
-deploy() { # name label binary marker-pattern
-    local name=$1 label=$2 bin=$3
-    local src="$REPO/build/mac-clang/apps/$bin/$bin" dst="$RT/$bin"
-    [ -x "$src" ] || { echo "missing $src (build first)"; exit 1; }
-    cp "$dst" "$dst.prev"
-    cp "$src" "$dst.new"
-    codesign -f -s "$IDENTITY" --identifier "com.sentinel.$name" "$dst.new" >/dev/null
-    codesign --verify --strict "$dst.new"
-    mv "$dst.new" "$dst"
-    echo "$(git -C "$REPO" rev-parse --short HEAD) $(date '+%F %T') $bin" >> "$RT/DEPLOYED"
-    local before
-    before=$(ls -t "$LOGS"/"$bin"-2*.log 2>/dev/null | head -1 || true)
+verify_writes() { # name label binary previous-log
+    local name=$1 label=$2 bin=$3 before=$4 log
     launchctl kickstart -k "gui/$(id -u)/$label"
-    local ok=0
     for _ in $(seq 1 30); do
         sleep 2
-        local log
         log=$(ls -t "$LOGS"/"$bin"-2*.log 2>/dev/null | head -1 || true)
-        [ -n "$log" ] && [ "$log" != "$before" ] || continue
-        if [ "$name" = server ] && grep -q "Recording v2 started" "$log"; then ok=1; break; fi
-        if [ "$name" = capture ] && grep -q "Capture stats\|storedFrames\|Subscription confirmed" "$log"; then ok=1; break; fi
+        [[ -n $log && $log != "$before" ]] || continue
+        if [[ $name == server ]] && grep -q "Recording v2 started" "$log"; then
+            echo "$bin: writing (log $(basename "$log"))"; return 0
+        fi
+        if [[ $name == capture ]] && grep -q "Capture stats\|storedFrames\|Subscription confirmed" "$log"; then
+            echo "$bin: writing (log $(basename "$log"))"; return 0
+        fi
     done
-    if [ $ok = 1 ]; then
-        echo "deployed $bin: writing (log $(basename "$log"))"
-        rm -f "$dst.prev"
+    return 1
+}
+
+change_binary() { # name label binary
+    local name=$1 label=$2 bin=$3
+    local src="$REPO/build/mac-clang/apps/$bin/$bin" dst="$RT/$bin"
+    local rollback="$dst.rollback" before
+    if (( DRY_RUN )); then
+        if [[ $ACTION == deploy ]]; then
+            echo "DRY RUN: copy $dst to $rollback; copy $src to $dst.new; sign and verify $dst.new"
+        else
+            echo "DRY RUN: copy $rollback to $dst.new; verify signature on $dst.new"
+        fi
+        echo "DRY RUN: replace $dst; restart $label; verify writes within 60 s; restore previous binary on failure"
+        echo "DRY RUN: rollback command: $0 rollback $name"
+        return
+    fi
+    [[ -x $dst ]] || { echo "missing deployed $dst" >&2; exit 1; }
+    if [[ $ACTION == deploy ]]; then
+        [[ -x $src ]] || { echo "missing $src (build first)" >&2; exit 1; }
+        # Preserve the signed deployed binary across a successful deployment.
+        cp -p "$dst" "$rollback.new"
+        mv "$rollback.new" "$rollback"
+        cp "$src" "$dst.new"
+        codesign -f -s "$IDENTITY" --identifier "com.sentinel.$name" "$dst.new" >/dev/null
     else
-        echo "DEPLOY FAILED for $bin: no write within 60 s; restoring previous binary" >&2
+        [[ -x $rollback ]] || { echo "missing rollback $rollback" >&2; exit 1; }
+        cp -p "$rollback" "$dst.new"
+    fi
+    codesign --verify --strict "$dst.new"
+    cp -p "$dst" "$dst.prev"
+    before=$(ls -t "$LOGS"/"$bin"-2*.log 2>/dev/null | head -1 || true)
+    mv "$dst.new" "$dst"
+    if verify_writes "$name" "$label" "$bin" "$before"; then
+        [[ $ACTION == deploy ]] && echo "$(git -C "$REPO" rev-parse --short HEAD) $(date '+%F %T') $bin" >> "$RT/DEPLOYED"
+        rm -f "$dst.prev"
+        echo "$ACTION complete for $bin; rollback command: $0 rollback $name"
+    else
+        echo "$ACTION FAILED for $bin: no write within 60 s; restoring previous binary" >&2
         mv "$dst.prev" "$dst"
         launchctl kickstart -k "gui/$(id -u)/$label"
         exit 2
     fi
 }
 
-case $which in
-    server) deploy server com.sentinel.recorder sentinel-server ;;
-    capture) deploy capture com.sentinel.capture sentinel-capture ;;
-    both) deploy server com.sentinel.recorder sentinel-server; deploy capture com.sentinel.capture sentinel-capture ;;
-    *) echo "usage: deploy-runtime.sh server|capture|both"; exit 1 ;;
+case $WHICH in
+    server) change_binary server com.sentinel.recorder sentinel-server ;;
+    capture) change_binary capture com.sentinel.capture sentinel-capture ;;
+    both) change_binary server com.sentinel.recorder sentinel-server
+          change_binary capture com.sentinel.capture sentinel-capture ;;
 esac

@@ -911,12 +911,23 @@ public:
                 if (!symbol.empty()) {
                     std::transform(symbol.begin(), symbol.end(), symbol.begin(),
                                    [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-                    if (!subscriptions_.contains(symbol) && owner_ && !owner_->notifyClientSubscribed(symbol)) {
+                    const auto admission = !subscriptions_.contains(symbol) && owner_
+                        ? owner_->notifyClientSubscribed(symbol) : SentinelStreamServer::FeedAdmission::Accepted;
+                    if (admission != SentinelStreamServer::FeedAdmission::Accepted) {
                         const int cap = owner_->serverConfig().mdc.maxConnections;
-                        const std::string message = "Cannot subscribe to " + symbol + ": GUI connection cap (" +
-                            std::to_string(cap) + ") reached. Close another symbol and retry.";
+                        const bool capacity = admission == SentinelStreamServer::FeedAdmission::CapacityExceeded;
+                        const std::string message = capacity
+                            ? "Cannot subscribe to " + symbol + ": GUI connection cap (" +
+                                std::to_string(cap) + ") reached. Close another symbol and retry."
+                            : admission == SentinelStreamServer::FeedAdmission::InvalidProduct
+                                ? "Cannot subscribe to " + symbol + ": invalid product."
+                                : "Cannot subscribe to " + symbol + ": upstream feed unavailable.";
+                        const char* code = capacity ? "connection_cap"
+                            : admission == SentinelStreamServer::FeedAdmission::InvalidProduct
+                                ? "invalid_product" : "upstream_unavailable";
                         do_write(nlohmann::json{{"type", "error"}, {"context", "subscribe"},
-                            {"code", "connection_cap"}, {"symbol", symbol}, {"max_connections", cap},
+                            {"code", code},
+                            {"symbol", symbol}, {"max_connections", cap},
                             {"message", message}}.dump());
                         return;
                     }
@@ -2159,7 +2170,7 @@ void SentinelStreamServer::unregisterSession(const Session* session) {
     m_sessionsDrained.notify_all();
 }
 
-bool SentinelStreamServer::notifyClientSubscribed(const std::string& symbol) {
+SentinelStreamServer::FeedAdmission SentinelStreamServer::notifyClientSubscribed(const std::string& symbol) {
     bool firstSubscriber = false;
     {
         std::lock_guard<std::mutex> lock(m_symbolSubscriptionsMutex);
@@ -2177,14 +2188,32 @@ bool SentinelStreamServer::notifyClientSubscribed(const std::string& symbol) {
                 m_refusals.emplace_back(symbol, refusals);
                 sLog_Error("Feed refused: symbol=" << symbol << " cap=" << m_serverConfig.mdc.maxConnections
                            << " code=connection_cap");
-                return false;
+                return FeedAdmission::CapacityExceeded;
             }
         }
         auto& count = m_symbolSubscriptions[symbol];
         firstSubscriber = count++ == 0;
     }
+    if (firstSubscriber && m_feedAdmissionHandler) {
+        const auto result = m_feedAdmissionHandler(symbol);
+        if (result != FeedAdmission::Accepted) {
+            std::lock_guard lock(m_symbolSubscriptionsMutex);
+            m_symbolSubscriptions.erase(symbol);
+            uint64_t refusals = 1;
+            const auto found = std::find_if(m_refusals.begin(), m_refusals.end(),
+                [&](const auto& entry) { return entry.first == symbol; });
+            if (found != m_refusals.end()) { refusals += found->second; m_refusals.erase(found); }
+            if (m_refusals.size() == 8) m_refusals.erase(m_refusals.begin());
+            m_refusals.emplace_back(symbol, refusals);
+            const char* code = result == FeedAdmission::CapacityExceeded ? "connection_cap"
+                : result == FeedAdmission::InvalidProduct ? "invalid_product" : "upstream_unavailable";
+            sLog_Error("Feed refused: symbol=" << symbol << " cap=" << m_serverConfig.mdc.maxConnections
+                       << " code=" << code);
+            return result;
+        }
+    }
     if (firstSubscriber) emit clientSubscribed(QString::fromStdString(symbol));
-    return true;
+    return FeedAdmission::Accepted;
 }
 
 void SentinelStreamServer::registerMetrics(sentinel::metrics::MetricsRegistry& r) {

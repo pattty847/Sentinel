@@ -28,6 +28,9 @@ SentinelServerApp::SentinelServerApp(const ServerConfig& config, QObject* parent
 }
 
 SentinelServerApp::~SentinelServerApp() {
+    if (m_server) {
+        m_server->stop(); // admission callback uses m_marketDataCore
+    }
     if (m_marketDataCore) {
         m_marketDataCore->stop();
     }
@@ -178,13 +181,35 @@ bool SentinelServerApp::initialize() {
             }
         });
 
+        m_server->setFeedAdmissionHandler([this](const std::string& symbol) {
+            QPointer<ServerDataModel> modelPtr(m_serverModel.get());
+            safeInvoke(modelPtr, [symbol](ServerDataModel& model) { model.acquireGuiFeed(symbol); });
+            MarketDataFeeds::AddResult result;
+            try {
+                result = m_marketDataCore->add(symbol);
+            } catch (const std::exception& e) {
+                safeInvoke(modelPtr, [symbol](ServerDataModel& model) { model.releaseGuiFeed(symbol); });
+                sLog_Error("Upstream feed admission threw: symbol=" << symbol << " error=" << e.what());
+                return SentinelStreamServer::FeedAdmission::UpstreamUnavailable;
+            }
+            if (result == MarketDataFeeds::AddResult::CapacityExceeded ||
+                result == MarketDataFeeds::AddResult::InvalidProduct) {
+                safeInvoke(modelPtr, [symbol](ServerDataModel& model) { model.releaseGuiFeed(symbol); });
+                sLog_Error("Upstream feed admission failed: symbol=" << symbol
+                           << " result=" << (result == MarketDataFeeds::AddResult::CapacityExceeded
+                               ? "CapacityExceeded" : "InvalidProduct"));
+                return result == MarketDataFeeds::AddResult::CapacityExceeded
+                    ? SentinelStreamServer::FeedAdmission::CapacityExceeded
+                    : SentinelStreamServer::FeedAdmission::InvalidProduct;
+            }
+            return SentinelStreamServer::FeedAdmission::Accepted;
+        });
         QObject::connect(m_server.get(), &SentinelStreamServer::clientSubscribed, this,
                          [this](const QString& symbol) {
                              if (!m_marketDataCore) {
                                  return;
                              }
-                             sLog_Data("First client subscribed, acquiring upstream: symbol=" << symbol);
-                             m_marketDataCore->add(symbol.toStdString());
+                             sLog_Data("First client subscribed with upstream feed: symbol=" << symbol);
                          }, Qt::QueuedConnection);
 
         QObject::connect(m_server.get(), &SentinelStreamServer::clientUnsubscribed, this,

@@ -22,6 +22,16 @@ bool readScalar(const YAML::Node& node, const char* key, T& out) {
     return true;
 }
 
+template <typename T>
+void readMdcScalar(const YAML::Node& root, const YAML::Node& mdc,
+                   const std::string& filePath, bool wrapped, const char* key, T& out) {
+    const char* source = "retained";
+    if (readScalar(root, key, out)) source = wrapped ? "server" : "root";
+    if (readScalar(mdc, key, out)) source = wrapped ? "server.mdc" : "mdc";
+    sLog_App("Effective MDC config: file=" << filePath << " key=" << key
+             << " source=" << source << " value=" << out);
+}
+
 std::vector<std::string> parseSymbolList(const std::string& spec) {
     std::string normalized = spec;
     std::replace(normalized.begin(), normalized.end(), ',', ' ');
@@ -189,25 +199,18 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
         }
     }
 
-    if (serverRoot && serverRoot["mdc"]) {
-        auto mdc = serverRoot["mdc"];
-        readScalar(mdc, "host", cfg.mdc.host);
-        readScalar(mdc, "port", cfg.mdc.port);
-        readScalar(mdc, "target", cfg.mdc.target);
-        readScalar(mdc, "use_jwt", cfg.mdc.useJwt);
-        readScalar(mdc, "ssl_ca_bundle", cfg.mdc.sslCaBundle);
-        readScalar(mdc, "connect_timeout_ms", cfg.mdc.connectTimeoutMs);
-        readScalar(mdc, "close_timeout_ms", cfg.mdc.closeTimeoutMs);
-        readScalar(mdc, "max_connections", cfg.mdc.maxConnections);
-        if (cfg.mdc.maxConnections < 1)
-            throw std::runtime_error("server.mdc.max_connections must be at least 1");
-    } else if (serverRoot) {
-        readScalar(serverRoot, "host", cfg.mdc.host);
-        readScalar(serverRoot, "port", cfg.mdc.port);
-        readScalar(serverRoot, "target", cfg.mdc.target);
-        readScalar(serverRoot, "use_jwt", cfg.mdc.useJwt);
-        readScalar(serverRoot, "ssl_ca_bundle", cfg.mdc.sslCaBundle);
-    }
+    const YAML::Node mdc = serverRoot ? serverRoot["mdc"] : YAML::Node{};
+    const bool wrapped = bool(serverNode);
+    readMdcScalar(serverRoot, mdc, filePath, wrapped, "host", cfg.mdc.host);
+    readMdcScalar(serverRoot, mdc, filePath, wrapped, "port", cfg.mdc.port);
+    readMdcScalar(serverRoot, mdc, filePath, wrapped, "target", cfg.mdc.target);
+    readMdcScalar(serverRoot, mdc, filePath, wrapped, "use_jwt", cfg.mdc.useJwt);
+    readMdcScalar(serverRoot, mdc, filePath, wrapped, "ssl_ca_bundle", cfg.mdc.sslCaBundle);
+    readMdcScalar(serverRoot, mdc, filePath, wrapped, "connect_timeout_ms", cfg.mdc.connectTimeoutMs);
+    readMdcScalar(serverRoot, mdc, filePath, wrapped, "close_timeout_ms", cfg.mdc.closeTimeoutMs);
+    readMdcScalar(serverRoot, mdc, filePath, wrapped, "max_connections", cfg.mdc.maxConnections);
+    if (cfg.mdc.maxConnections < 1)
+        throw std::runtime_error("server.mdc.max_connections must be at least 1");
 }
 
 void parseClientConfig(const std::string& filePath, ClientConfig& cfg) {

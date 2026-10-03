@@ -90,6 +90,10 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             this, &RemoteGridDataSource::onSnapshotReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::l2UpdateReceived,
             this, &RemoteGridDataSource::onL2UpdateReceived, Qt::QueuedConnection);
+    m_bookSnapshotTimer.setInterval(250);
+    connect(&m_bookSnapshotTimer, &QTimer::timeout, this, [this] {
+        processBookSnapshotDeadlines(QDateTime::currentMSecsSinceEpoch());
+    });
     connect(&m_client, &SentinelStreamClient::heatmapSliceReceived,
             this, &RemoteGridDataSource::onHeatmapSliceReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::footprintSliceReceived,
@@ -139,6 +143,8 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
                 advanceCandleDeliveryGeneration();
                 m_candleHistoryReady = false;
                 m_candleBackfillTimer.stop();
+                m_bookSnapshotTimer.stop();
+                m_pendingBookSnapshots.clear();
                 m_candleBackfill.disconnect();
                 emit connectionStatusChanged(false);
             },
@@ -180,6 +186,9 @@ void RemoteGridDataSource::connectToServer() {
 void RemoteGridDataSource::subscribe(const QString& symbol) {
     if (!symbolPermitted(symbol.toStdString(), "subscribe")) return;
     m_client.subscribe(symbol.toStdString());
+    m_activeBookSymbols.insert(symbol.toStdString());
+    m_pendingBookSnapshots[symbol.toStdString()] = {QDateTime::currentMSecsSinceEpoch() + 5000, false, false};
+    if (!m_bookSnapshotTimer.isActive()) m_bookSnapshotTimer.start();
 
     // Initialize replica on snapshot for authoritative range. A replica kept from an
     // earlier subscription stopped updating: cleared, so no book top derives from its
@@ -195,6 +204,36 @@ void RemoteGridDataSource::subscribe(const QString& symbol) {
 
 void RemoteGridDataSource::unsubscribe(const QString& symbol) {
     m_client.unsubscribe(symbol.toStdString());
+    m_activeBookSymbols.erase(symbol.toStdString());
+    m_pendingBookSnapshots.erase(symbol.toStdString());
+    if (m_pendingBookSnapshots.empty()) m_bookSnapshotTimer.stop();
+}
+
+bool RemoteGridDataSource::isBookSnapshotStale(const QString& symbol) const {
+    const auto it = m_pendingBookSnapshots.find(symbol.toStdString());
+    return it != m_pendingBookSnapshots.end() && it->second.stale;
+}
+
+void RemoteGridDataSource::processBookSnapshotDeadlines(qint64 nowMs) {
+    for (auto& [symbol, pending] : m_pendingBookSnapshots) {
+        if (pending.stale || nowMs < pending.deadlineMs) continue;
+        if (!pending.retried) {
+            if (!symbolPermitted(symbol, "book snapshot retry")) {
+                pending.stale = true;
+                continue;
+            }
+            sLog_Warning("Book snapshot timeout: symbol=" << symbol << " retry=1");
+            m_client.subscribe(symbol);
+            pending.retried = true;
+            pending.deadlineMs = nowMs + 5000;
+        } else {
+            pending.stale = true;
+            sLog_Error("Book snapshot stale: symbol=" << symbol << " retry=1");
+            emit errorOccurred(QString("Order book snapshot stale: %1").arg(QString::fromStdString(symbol)));
+        }
+    }
+    if (std::all_of(m_pendingBookSnapshots.begin(), m_pendingBookSnapshots.end(),
+        [](const auto& entry) { return entry.second.stale; })) m_bookSnapshotTimer.stop();
 }
 
 void RemoteGridDataSource::requestHeatmapHistory(const QString& symbol,
@@ -309,8 +348,16 @@ const LiveOrderBook& RemoteGridDataSource::getDirectLiveOrderBook(const std::str
     return empty;
 }
 
-void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks) {
+void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids,
+                                               const std::vector<OrderBookLevel>& asks, quint64 deliveryGeneration) {
     std::string symbol = productId.toStdString();
+    if (!m_activeBookSymbols.contains(symbol) ||
+        deliveryGeneration != m_client.bookDeliveryGeneration(symbol)) return;
+    // The stream server can send its still-empty local book immediately after
+    // admission; only a two-sided upstream snapshot makes this replica ready.
+    if (bids.empty() || asks.empty()) return;
+    m_pendingBookSnapshots.erase(symbol);
+    if (m_pendingBookSnapshots.empty()) m_bookSnapshotTimer.stop();
 
     // Create or reset replica
     if (m_replicaBooks.find(symbol) == m_replicaBooks.end()) {
@@ -353,8 +400,12 @@ void RemoteGridDataSource::onServerConfigReceived(const ServerConfig& config) {
     GuiConfigStore::instance().setServerConfig(config);
 }
 
-void RemoteGridDataSource::onL2UpdateReceived(const QString& productId, const std::vector<BookLevelUpdate>& updates) {
+void RemoteGridDataSource::onL2UpdateReceived(const QString& productId, const std::vector<BookLevelUpdate>& updates,
+                                               quint64 deliveryGeneration) {
     std::string symbol = productId.toStdString();
+    if (!m_activeBookSymbols.contains(symbol) ||
+        deliveryGeneration != m_client.bookDeliveryGeneration(symbol) ||
+        m_pendingBookSnapshots.contains(symbol)) return;
     auto it = m_replicaBooks.find(symbol);
     if (it == m_replicaBooks.end()) {
         sLog_DataN(5000, "L2 update dropped, no replica book: symbol=" << productId
