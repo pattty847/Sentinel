@@ -83,6 +83,8 @@ private slots:
 private:
     friend struct CandleDataSourceTest;
     void processBookSnapshotDeadlines(qint64 nowMs);
+    void onL2UpdateReceivedAt(const QString& productId, const std::vector<BookLevelUpdate>& updates,
+                              quint64 deliveryGeneration, qint64 nowMs);
     void requestNextCandlePage();
     void advanceCandleDeliveryGeneration();
     SentinelStreamClient m_client;
@@ -94,6 +96,8 @@ private:
         qint64 deadlineMs = 0;
         bool retried = false;
         bool stale = false;
+        qint64 nextStaleRetryMs = 0;
+        qint64 staleRetryBackoffMs = 5000;
     };
     std::unordered_map<std::string, PendingBookSnapshot> m_pendingBookSnapshots;
     std::unordered_set<std::string> m_activeBookSymbols;

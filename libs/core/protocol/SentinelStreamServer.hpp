@@ -62,6 +62,8 @@ public:
     FeedAdmission notifyClientSubscribed(const std::string& symbol);
     void registerMetrics(sentinel::metrics::MetricsRegistry& registry);
     void notifyClientUnsubscribed(const std::string& symbol);
+    // Serialize a queued upstream release with admission on the server thread.
+    bool releaseIfNoSubscribers(const std::string& symbol, const std::function<void()>& release);
     CoinbaseRestClient& restClient();
     const ServerConfig& serverConfig() const { return m_serverConfig; }
     void processTradeCommand(const trading::TradeCommand& command);
@@ -126,6 +128,7 @@ private:
     std::function<FeedAdmission(const std::string&)> m_feedAdmissionHandler;
     // Refusal diagnostics retain at most eight recent products (LRU, resets on eviction).
     std::vector<std::pair<std::string, uint64_t>> m_refusals;
+    void recordRefusalLocked(const std::string& symbol, const char* code);
 
     std::mutex m_latencySendersMutex;
     std::vector<std::pair<uint64_t, std::function<void(int)>>> m_latencySenders;

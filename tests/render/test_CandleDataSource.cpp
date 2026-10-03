@@ -40,6 +40,10 @@ struct CandleDataSourceTest : testing::Test {
     void deliverBookL2(const std::vector<BookLevelUpdate>& updates, quint64 generation) {
         source.onL2UpdateReceived("BTC-USD", updates, generation);
     }
+    void deliverBookL2At(qint64 nowMs) {
+        source.onL2UpdateReceivedAt("BTC-USD", {{true, 300.0, 1.0}},
+                                     client().bookDeliveryGeneration("BTC-USD"), nowMs);
+    }
     Json takeRequest(int timeoutMs = 1000) {
         const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
         do {
@@ -273,5 +277,42 @@ TEST_F(CandleDataSourceTest, MissingBookSnapshotRetriesOnceThenReportsStale) {
     bookSnapshot(300.0, 301.0);
     deliver();
     EXPECT_FALSE(source.isBookSnapshotStale("BTC-USD"));
+    EXPECT_EQ(pendingBookCount(), 0u);
+}
+
+TEST_F(CandleDataSourceTest, StaleL2RequestsFreshSnapshotsWithBoundedBackoff) {
+    source.subscribe("BTC-USD");
+    ASSERT_EQ(takeRequest().at("type"), "subscribe");
+    int staleOn = 0, staleOff = 0;
+    QObject::connect(&source, &IGridDataSource::bookSnapshotStaleChanged, &source,
+        [&](const QString& symbol, bool stale) {
+            if (symbol == "BTC-USD") (stale ? staleOn : staleOff)++;
+        });
+    const auto deadline = bookDeadline("BTC-USD");
+    advanceBookDeadline(deadline);
+    ASSERT_EQ(takeRequest().at("type"), "subscribe");
+    advanceBookDeadline(deadline + 5000);
+    ASSERT_TRUE(source.isBookSnapshotStale("BTC-USD"));
+    EXPECT_EQ(staleOn, 1);
+    const auto staleAt = deadline + 5000;
+    deliverBookL2At(staleAt + 4999);
+    EXPECT_TRUE(takeRequest(20).is_null());
+    const auto firstGeneration = client().bookDeliveryGeneration("BTC-USD");
+    deliverBookL2At(staleAt + 5000);
+    EXPECT_EQ(takeRequest().at("type"), "subscribe");
+    EXPECT_GT(client().bookDeliveryGeneration("BTC-USD"), firstGeneration);
+    deliverBookL2At(staleAt + 5000 + 14999);
+    EXPECT_TRUE(takeRequest(20).is_null());
+    deliverBookL2At(staleAt + 5000 + 15000);
+    EXPECT_EQ(takeRequest().at("type"), "subscribe");
+    deliverBookL2At(staleAt + 5000 + 15000 + 59999);
+    EXPECT_TRUE(takeRequest(20).is_null());
+    deliverBookL2At(staleAt + 5000 + 15000 + 60000);
+    EXPECT_EQ(takeRequest().at("type"), "subscribe");
+    EXPECT_EQ(staleOn, 1);
+    bookSnapshot(300.0, 301.0);
+    deliver();
+    EXPECT_FALSE(source.isBookSnapshotStale("BTC-USD"));
+    EXPECT_EQ(staleOff, 1);
     EXPECT_EQ(pendingBookCount(), 0u);
 }

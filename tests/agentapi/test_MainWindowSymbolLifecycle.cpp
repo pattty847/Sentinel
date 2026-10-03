@@ -121,6 +121,12 @@ TEST(MainWindowSymbolLifecycle, AcknowledgementRefusalTimeoutAndReconnect) {
     connected(window);
     emit source->subscriptionAcknowledged("BTC-USD");
     ASSERT_EQ(changes.size(), 1);
+    emit source->bookSnapshotStaleChanged("BTC-USD", true);
+    EXPECT_TRUE(window.statusBar()->currentMessage().contains("Order book stale: BTC-USD"));
+    emit source->bookSnapshotStaleChanged("ETH-USD", false);
+    EXPECT_TRUE(window.statusBar()->currentMessage().contains("Order book stale: BTC-USD"));
+    emit source->bookSnapshotStaleChanged("BTC-USD", false);
+    EXPECT_TRUE(window.statusBar()->currentMessage().isEmpty());
 
     select(window, input, "ETH-USD");
     EXPECT_EQ(changes.size(), 1);

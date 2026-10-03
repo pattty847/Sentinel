@@ -223,8 +223,13 @@ bool SentinelServerApp::initialize() {
                                            << symbol);
                                  return;
                              }
-                             sLog_Data("Last client unsubscribed, releasing upstream: symbol=" << symbol);
-                             m_marketDataCore->remove(native);
+                             if (!m_server->releaseIfNoSubscribers(native, [this, &native] {
+                                     m_marketDataCore->remove(native);
+                                 })) {
+                                 sLog_Data("Queued upstream release skipped; subscribers returned: symbol=" << symbol);
+                                 return;
+                             }
+                             sLog_Data("Last client unsubscribed, released upstream: symbol=" << symbol);
                          }, Qt::QueuedConnection);
 
         // Start connection

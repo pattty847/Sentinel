@@ -2170,6 +2170,17 @@ void SentinelStreamServer::unregisterSession(const Session* session) {
     m_sessionsDrained.notify_all();
 }
 
+void SentinelStreamServer::recordRefusalLocked(const std::string& symbol, const char* code) {
+    uint64_t refusals = 1;
+    const auto found = std::find_if(m_refusals.begin(), m_refusals.end(),
+        [&](const auto& entry) { return entry.first == symbol; });
+    if (found != m_refusals.end()) { refusals += found->second; m_refusals.erase(found); }
+    if (m_refusals.size() == 8) m_refusals.erase(m_refusals.begin());
+    m_refusals.emplace_back(symbol, refusals);
+    sLog_Error("Feed refused: symbol=" << symbol << " cap=" << m_serverConfig.mdc.maxConnections
+               << " code=" << code);
+}
+
 SentinelStreamServer::FeedAdmission SentinelStreamServer::notifyClientSubscribed(const std::string& symbol) {
     bool firstSubscriber = false;
     {
@@ -2180,14 +2191,7 @@ SentinelStreamServer::FeedAdmission SentinelStreamServer::notifyClientSubscribed
             const auto count = std::count_if(m_symbolSubscriptions.begin(), m_symbolSubscriptions.end(),
                 [&](const auto& entry) { return !isPinned(entry.first); });
             if (count >= m_serverConfig.mdc.maxConnections) {
-                uint64_t refusals = 1;
-                const auto found = std::find_if(m_refusals.begin(), m_refusals.end(),
-                    [&](const auto& entry) { return entry.first == symbol; });
-                if (found != m_refusals.end()) { refusals += found->second; m_refusals.erase(found); }
-                if (m_refusals.size() == 8) m_refusals.erase(m_refusals.begin());
-                m_refusals.emplace_back(symbol, refusals);
-                sLog_Error("Feed refused: symbol=" << symbol << " cap=" << m_serverConfig.mdc.maxConnections
-                           << " code=connection_cap");
+                recordRefusalLocked(symbol, "connection_cap");
                 return FeedAdmission::CapacityExceeded;
             }
         }
@@ -2199,16 +2203,9 @@ SentinelStreamServer::FeedAdmission SentinelStreamServer::notifyClientSubscribed
         if (result != FeedAdmission::Accepted) {
             std::lock_guard lock(m_symbolSubscriptionsMutex);
             m_symbolSubscriptions.erase(symbol);
-            uint64_t refusals = 1;
-            const auto found = std::find_if(m_refusals.begin(), m_refusals.end(),
-                [&](const auto& entry) { return entry.first == symbol; });
-            if (found != m_refusals.end()) { refusals += found->second; m_refusals.erase(found); }
-            if (m_refusals.size() == 8) m_refusals.erase(m_refusals.begin());
-            m_refusals.emplace_back(symbol, refusals);
             const char* code = result == FeedAdmission::CapacityExceeded ? "connection_cap"
                 : result == FeedAdmission::InvalidProduct ? "invalid_product" : "upstream_unavailable";
-            sLog_Error("Feed refused: symbol=" << symbol << " cap=" << m_serverConfig.mdc.maxConnections
-                       << " code=" << code);
+            recordRefusalLocked(symbol, code);
             return result;
         }
     }
@@ -2254,6 +2251,14 @@ void SentinelStreamServer::notifyClientUnsubscribed(const std::string& symbol) {
     if (lastSubscriber) {
         emit clientUnsubscribed(QString::fromStdString(symbol));
     }
+}
+
+bool SentinelStreamServer::releaseIfNoSubscribers(const std::string& symbol,
+                                                   const std::function<void()>& release) {
+    std::lock_guard lock(m_symbolSubscriptionsMutex);
+    if (m_symbolSubscriptions.contains(symbol)) return false;
+    release();
+    return true;
 }
 
 CoinbaseRestClient& SentinelStreamServer::restClient() {

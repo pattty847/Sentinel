@@ -12,7 +12,7 @@ args=()
 for arg in "$@"; do
     if [[ $arg == --dry-run ]]; then DRY_RUN=1; else args+=("$arg"); fi
 done
-set -- "${args[@]}"
+set -- ${args[@]+"${args[@]}"}
 ACTION=deploy
 if [[ ${1:-} == rollback ]]; then ACTION=rollback; shift; fi
 WHICH=${1:-}
@@ -42,26 +42,27 @@ change_binary() { # name label binary
     local name=$1 label=$2 bin=$3
     local src="$REPO/build/mac-clang/apps/$bin/$bin" dst="$RT/$bin"
     local rollback="$dst.rollback" before
+    [[ -x $dst ]] || { echo "missing deployed $dst" >&2; exit 1; }
+    if [[ $ACTION == deploy ]]; then
+        [[ -x $src ]] || { echo "missing $src (build first)" >&2; exit 1; }
+    else
+        [[ -x $rollback ]] || { echo "missing rollback $rollback" >&2; exit 1; }
+    fi
     if (( DRY_RUN )); then
         if [[ $ACTION == deploy ]]; then
-            echo "DRY RUN: copy $dst to $rollback; copy $src to $dst.new; sign and verify $dst.new"
+            echo "DRY RUN: copy $src to $dst.new; sign and verify $dst.new"
         else
             echo "DRY RUN: copy $rollback to $dst.new; verify signature on $dst.new"
         fi
         echo "DRY RUN: replace $dst; restart $label; verify writes within 60 s; restore previous binary on failure"
+        [[ $ACTION == deploy ]] && echo "DRY RUN: on success move $dst.prev to $rollback"
         echo "DRY RUN: rollback command: $0 rollback $name"
         return
     fi
-    [[ -x $dst ]] || { echo "missing deployed $dst" >&2; exit 1; }
     if [[ $ACTION == deploy ]]; then
-        [[ -x $src ]] || { echo "missing $src (build first)" >&2; exit 1; }
-        # Preserve the signed deployed binary across a successful deployment.
-        cp -p "$dst" "$rollback.new"
-        mv "$rollback.new" "$rollback"
         cp "$src" "$dst.new"
         codesign -f -s "$IDENTITY" --identifier "com.sentinel.$name" "$dst.new" >/dev/null
     else
-        [[ -x $rollback ]] || { echo "missing rollback $rollback" >&2; exit 1; }
         cp -p "$rollback" "$dst.new"
     fi
     codesign --verify --strict "$dst.new"
@@ -69,8 +70,12 @@ change_binary() { # name label binary
     before=$(ls -t "$LOGS"/"$bin"-2*.log 2>/dev/null | head -1 || true)
     mv "$dst.new" "$dst"
     if verify_writes "$name" "$label" "$bin" "$before"; then
-        [[ $ACTION == deploy ]] && echo "$(git -C "$REPO" rev-parse --short HEAD) $(date '+%F %T') $bin" >> "$RT/DEPLOYED"
-        rm -f "$dst.prev"
+        if [[ $ACTION == deploy ]]; then
+            mv "$dst.prev" "$rollback"
+        else
+            rm -f "$dst.prev"
+        fi
+        echo "$(git -C "$REPO" rev-parse --short HEAD) $(date '+%F %T') $ACTION $bin" >> "$RT/DEPLOYED"
         echo "$ACTION complete for $bin; rollback command: $0 rollback $name"
     else
         echo "$ACTION FAILED for $bin: no write within 60 s; restoring previous binary" >&2

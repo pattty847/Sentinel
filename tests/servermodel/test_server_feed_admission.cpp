@@ -94,6 +94,11 @@ struct ServerFeedAdmissionTest : testing::Test {
         });
         QObject::connect(server.get(), &SentinelStreamServer::clientUnsubscribed, model.get(), [this](const QString& symbol) {
             feeds->remove(symbol.toStdString());
+            const auto native = symbol.toStdString();
+            server->releaseIfNoSubscribers(native, [this, &native] {
+                feeds->remove(native);
+                model->releaseGuiFeed(native);
+            });
         }, Qt::QueuedConnection);
         for (const auto& symbol : normalizedDefaultSymbols(config.defaultSymbols)) feeds->add(symbol, true);
         feeds->start();
@@ -321,6 +326,21 @@ TEST_F(ServerFeedAdmissionTest, UpstreamCapacityFailureReleasesReservedSlotBefor
     EXPECT_FALSE(slotHeld("ETH-USD"));
 }
 
+TEST_F(ServerFeedAdmissionTest, FastFlipKeepsResubscribedUpstreamFeed) {
+    auto gui = session();
+    request(gui, "ETH-USD");
+    ASSERT_TRUE(transports.contains("ETH-USD"));
+    const auto transport = transports.at("ETH-USD");
+    gui->handle_message(R"({"type":"unsubscribe","symbol":"ETH-USD"})");
+    gui->handle_message(R"({"type":"subscribe","symbol":"BTC-USD"})");
+    gui->handle_message(R"({"type":"subscribe","symbol":"ETH-USD"})");
+    ASSERT_TRUE(sessionHas(gui, "ETH-USD"));
+    drain(); // queued release from the first unsubscribe runs only now
+    EXPECT_TRUE(slotHeld("ETH-USD"));
+    EXPECT_EQ(transport->closes, 0);
+    EXPECT_EQ(feeds->stats().size(), 3u); // two pinned plus ETH
+}
+
 TEST_F(ServerFeedAdmissionTest, InvalidUpstreamProductGetsStructuredRefusal) {
     server->setFeedAdmissionHandler([](const std::string&) {
         return SentinelStreamServer::FeedAdmission::InvalidProduct;
@@ -346,6 +366,7 @@ TEST(ServerFeedAdmissionSource, AppChecksUpstreamResultBeforeAcknowledgement) {
     EXPECT_NE(admission.find("m_marketDataCore->add(symbol)"), std::string::npos);
     EXPECT_NE(admission.find("AddResult::CapacityExceeded"), std::string::npos);
     EXPECT_NE(admission.find("AddResult::InvalidProduct"), std::string::npos);
+    EXPECT_NE(text.find("m_server->releaseIfNoSubscribers(native"), std::string::npos);
 }
 
 TEST(ServerFeedConfig, DefaultOverrideAndInvalidCap) {

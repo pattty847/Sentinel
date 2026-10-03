@@ -88,6 +88,7 @@ signals:
     
     void connectionStatusChanged(bool connected);
     void errorOccurred(const QString& error);
+    void bookSnapshotStaleChanged(const QString& symbol, bool stale);
     void subscriptionRefused(const QString& symbol, int maxConnections, const QString& message);
     void subscriptionAcknowledged(const QString& symbol);
     void orderUpdated(const trading::OrderUpdate& update);

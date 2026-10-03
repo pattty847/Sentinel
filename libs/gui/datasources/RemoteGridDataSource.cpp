@@ -185,10 +185,12 @@ void RemoteGridDataSource::connectToServer() {
 
 void RemoteGridDataSource::subscribe(const QString& symbol) {
     if (!symbolPermitted(symbol.toStdString(), "subscribe")) return;
+    const bool wasStale = isBookSnapshotStale(symbol);
     m_client.subscribe(symbol.toStdString());
     m_activeBookSymbols.insert(symbol.toStdString());
     m_pendingBookSnapshots[symbol.toStdString()] = {QDateTime::currentMSecsSinceEpoch() + 5000, false, false};
     if (!m_bookSnapshotTimer.isActive()) m_bookSnapshotTimer.start();
+    if (wasStale) emit bookSnapshotStaleChanged(symbol, false);
 
     // Initialize replica on snapshot for authoritative range. A replica kept from an
     // earlier subscription stopped updating: cleared, so no book top derives from its
@@ -203,10 +205,12 @@ void RemoteGridDataSource::subscribe(const QString& symbol) {
 
 
 void RemoteGridDataSource::unsubscribe(const QString& symbol) {
+    const bool wasStale = isBookSnapshotStale(symbol);
     m_client.unsubscribe(symbol.toStdString());
     m_activeBookSymbols.erase(symbol.toStdString());
     m_pendingBookSnapshots.erase(symbol.toStdString());
     if (m_pendingBookSnapshots.empty()) m_bookSnapshotTimer.stop();
+    if (wasStale) emit bookSnapshotStaleChanged(symbol, false);
 }
 
 bool RemoteGridDataSource::isBookSnapshotStale(const QString& symbol) const {
@@ -215,22 +219,34 @@ bool RemoteGridDataSource::isBookSnapshotStale(const QString& symbol) const {
 }
 
 void RemoteGridDataSource::processBookSnapshotDeadlines(qint64 nowMs) {
+    std::vector<std::string> retrySymbols;
+    std::vector<QString> staleSymbols;
     for (auto& [symbol, pending] : m_pendingBookSnapshots) {
         if (pending.stale || nowMs < pending.deadlineMs) continue;
         if (!pending.retried) {
             if (!symbolPermitted(symbol, "book snapshot retry")) {
                 pending.stale = true;
+                pending.nextStaleRetryMs = nowMs + pending.staleRetryBackoffMs;
+                staleSymbols.push_back(QString::fromStdString(symbol));
                 continue;
             }
-            sLog_Warning("Book snapshot timeout: symbol=" << symbol << " retry=1");
-            m_client.subscribe(symbol);
             pending.retried = true;
             pending.deadlineMs = nowMs + 5000;
+            retrySymbols.push_back(symbol);
         } else {
             pending.stale = true;
+            pending.nextStaleRetryMs = nowMs + pending.staleRetryBackoffMs;
             sLog_Error("Book snapshot stale: symbol=" << symbol << " retry=1");
-            emit errorOccurred(QString("Order book snapshot stale: %1").arg(QString::fromStdString(symbol)));
+            staleSymbols.push_back(QString::fromStdString(symbol));
         }
+    }
+    for (const auto& symbol : retrySymbols) {
+        sLog_Warning("Book snapshot timeout: symbol=" << symbol << " retry=1");
+        m_client.subscribe(symbol);
+    }
+    for (const auto& symbol : staleSymbols) {
+        emit bookSnapshotStaleChanged(symbol, true);
+        emit errorOccurred(QString("Order book snapshot stale: %1").arg(symbol));
     }
     if (std::all_of(m_pendingBookSnapshots.begin(), m_pendingBookSnapshots.end(),
         [](const auto& entry) { return entry.second.stale; })) m_bookSnapshotTimer.stop();
@@ -356,6 +372,7 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
     // The stream server can send its still-empty local book immediately after
     // admission; only a two-sided upstream snapshot makes this replica ready.
     if (bids.empty() || asks.empty()) return;
+    const bool wasStale = isBookSnapshotStale(productId);
     m_pendingBookSnapshots.erase(symbol);
     if (m_pendingBookSnapshots.empty()) m_bookSnapshotTimer.stop();
 
@@ -393,6 +410,7 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
               << " bids=" << bids.size() << " asks=" << asks.size()
               << " band=[" << minPrice << ".." << maxPrice << "]"
               << " tick=" << tickSize << " deltas=" << deltas.size());
+    if (wasStale) emit bookSnapshotStaleChanged(productId, false);
 }
 
 void RemoteGridDataSource::onServerConfigReceived(const ServerConfig& config) {
@@ -402,10 +420,27 @@ void RemoteGridDataSource::onServerConfigReceived(const ServerConfig& config) {
 
 void RemoteGridDataSource::onL2UpdateReceived(const QString& productId, const std::vector<BookLevelUpdate>& updates,
                                                quint64 deliveryGeneration) {
+    onL2UpdateReceivedAt(productId, updates, deliveryGeneration, QDateTime::currentMSecsSinceEpoch());
+}
+
+void RemoteGridDataSource::onL2UpdateReceivedAt(const QString& productId,
+                                                const std::vector<BookLevelUpdate>& updates,
+                                                quint64 deliveryGeneration, qint64 nowMs) {
     std::string symbol = productId.toStdString();
     if (!m_activeBookSymbols.contains(symbol) ||
-        deliveryGeneration != m_client.bookDeliveryGeneration(symbol) ||
-        m_pendingBookSnapshots.contains(symbol)) return;
+        deliveryGeneration != m_client.bookDeliveryGeneration(symbol)) return;
+    if (auto pending = m_pendingBookSnapshots.find(symbol); pending != m_pendingBookSnapshots.end()) {
+        if (pending->second.stale && nowMs >= pending->second.nextStaleRetryMs
+            && symbolPermitted(symbol, "stale book snapshot retry")) {
+            const qint64 delayMs = pending->second.staleRetryBackoffMs;
+            pending->second.staleRetryBackoffMs = delayMs == 5000 ? 15000 : 60000;
+            pending->second.nextStaleRetryMs = nowMs + pending->second.staleRetryBackoffMs;
+            sLog_Warning("Stale book snapshot re-requested: symbol=" << productId
+                         << " nextRetryMs=" << pending->second.staleRetryBackoffMs);
+            m_client.subscribe(symbol);
+        }
+        return;
+    }
     auto it = m_replicaBooks.find(symbol);
     if (it == m_replicaBooks.end()) {
         sLog_DataN(5000, "L2 update dropped, no replica book: symbol=" << productId
