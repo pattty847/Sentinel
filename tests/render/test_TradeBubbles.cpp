@@ -68,28 +68,146 @@ TEST(TradeBubbles, FilterAppliesPerTradeBeforeAggregationAndIncludesThreshold) {
     EXPECT_NEAR(b[0].radius,3*std::sqrt(.6),1e-6);
     EXPECT_TRUE(layout.build(t,mapping(),601).empty());
 }
-TEST(TradeBubbles, ZoomedOutAggregationIsBoundedAndPreservesSideAndCentroid) {
+TEST(TradeBubbles, IndividualExecutionsThroughCapNeverMerge) {
     auto tape = std::make_unique<Tape>();
-    // More trades than display capacity, filling all bins (both sides).
-    for (int pass=0; pass<5; ++pass)
-        for (int y=0; y<32; ++y) for (int x=0; x<128; ++x) for (int side=0; side<2; ++side)
-            ASSERT_TRUE(tape->append({1000+x*7+3, 199.0-y*3, 1,
-                                     side ? AggressorSide::Sell : AggressorSide::Buy}));
+    for (size_t i = 0; i < Layout::MaxBubbles; ++i)
+        ASSERT_TRUE(tape->append({1500,150,1,AggressorSide::Buy}));
     Layout layout;
-    auto b=layout.build(tape->samples(),mapping(),0);
-    EXPECT_LE(b.size(),4096u);
+    const auto b = layout.build(tape->samples(),mapping(1847,901),0);
+    ASSERT_EQ(b.size(), Layout::MaxBubbles);
+    EXPECT_EQ(layout.binSizePx(), 0);
+    for (const auto& circle : b) EXPECT_NEAR(circle.radius, Layout::radius(150), 1e-6);
+}
+TEST(TradeBubbles, OverflowStartsWithFineBinsAndPreservesCentroids) {
+    auto tape = std::make_unique<Tape>();
+    // Five thousand executions at two prices only 7 px apart: the old 64x32
+    // grid collapsed them into a false intermediate execution price.
+    auto m = mapping(1847,901);
+    for (int i = 0; i < 5000; ++i)
+        ASSERT_TRUE(tape->append({1500,m.screenYToPrice(22 + (i%2)*7),1,AggressorSide::Buy}));
+    Layout layout;
+    auto b = layout.build(tape->samples(),m,0);
+    ASSERT_EQ(b.size(),2);
+    EXPECT_GE(layout.binSizePx(),6);
+    EXPECT_LE(layout.binSizePx(),8);
+    EXPECT_NEAR(std::min(b[0].y,b[1].y),22,1e-4);
+    EXPECT_NEAR(std::max(b[0].y,b[1].y),29,1e-4);
+    // Actual same-cell aggregation keeps the notional-weighted centroid.
+    tape->clear();
+    for (int i=0; i<5000; ++i)
+        tape->append({1500+i%2,150,i%2 ? 3.0 : 1.0,AggressorSide::Buy});
+    b = layout.build(tape->samples(),mapping(6,6),0);
+    ASSERT_EQ(b.size(),1);
+    EXPECT_NEAR(b[0].x,13.0045,1e-5);
+    EXPECT_EQ(b[0].radius,18);
+}
+TEST(TradeBubbles, SpatialOverflowCoarsensOnlyAsNeededAndKeepsAllVolume) {
+    auto tape = std::make_unique<Tape>();
+    const auto m = mapping(1847,901);
+    for (int x=0; x<128; ++x) for (int y=0; y<64; ++y)
+        tape->append({1000+x*7+3,199.0-y*1.5,0.001,AggressorSide::Buy});
+    Layout layout;
+    const auto b = layout.build(tape->samples(),m,0);
+    EXPECT_LE(b.size(),Layout::MaxBubbles);
     EXPECT_GT(b.size(),1000);
-    auto small=layout.build(tape->samples(),mapping(6,6),0);
-    ASSERT_EQ(small.size(),2);
-    EXPECT_EQ(small[0].side,AggressorSide::Buy);
-    EXPECT_EQ(small[1].side,AggressorSide::Sell);
-    EXPECT_FLOAT_EQ(small[0].x,small[1].x);
-    EXPECT_FLOAT_EQ(small[0].y,small[1].y);
-    const Sample pair[]={{1500,150,1,AggressorSide::Buy},{1501,150,3,AggressorSide::Buy}};
-    const auto centroid=layout.build(pair,mapping(6,6),0);
-    ASSERT_EQ(centroid.size(),1);
-    EXPECT_NEAR(centroid[0].x,13.0045,1e-5);
-    EXPECT_NEAR(centroid[0].radius,Layout::radius(600),1e-6);
+    EXPECT_GT(layout.binSizePx(),8); // Explicit, necessary fallback for >4096 occupied fine cells.
+    double expected=0, actual=0;
+    const auto rows=tape->samples();
+    for (size_t i=0;i<rows.size();++i) expected+=rows[i].price*rows[i].size;
+    for (const auto& circle:b) actual+=circle.radius*circle.radius*1000/9;
+    EXPECT_NEAR(actual,expected,0.001);
+}
+TEST(TradeBubbles, LargerCirclesDrawFirstAcrossSidesAndNeighbouringCells) {
+    Layout layout;
+    const Sample rows[]={{1500,150,1,AggressorSide::Buy}, {1500,150,4,AggressorSide::Sell},
+                         {1501,150,2,AggressorSide::Buy}};
+    auto b=layout.build(rows,mapping(),0);
+    ASSERT_EQ(b.size(),3);
+    EXPECT_EQ(b[0].side,AggressorSide::Sell);
+    EXPECT_GT(b[0].radius,b[1].radius);
+    EXPECT_GT(b[1].radius,b[2].radius);
+    auto tape=std::make_unique<Tape>();
+    for (int i=0;i<5000;++i) { auto row=rows[i%3]; row.size/=1000; tape->append(row); }
+    b=layout.build(tape->samples(),mapping(),0);
+    ASSERT_EQ(b.size(),2);
+    EXPECT_EQ(b[0].side,AggressorSide::Sell);
+    EXPECT_GT(b[0].radius,b[1].radius);
+    TradeBubbleNode node;
+    node.sync(*tape,mapping(),true,0,Qt::cyan,Qt::yellow);
+    const auto* v=static_cast<const float*>(node.geometry()->vertexData());
+    EXPECT_FLOAT_EQ(v[4],0.6f); // First mesh is the larger yellow sell.
+    EXPECT_FLOAT_EQ(v[6],0);
+}
+TEST(TradeBubbles, OrderedRingBinarySearchBoundsScanAndPanReusesGeometry) {
+    auto tape=std::make_unique<Tape>();
+    for (int64_t i=1;i<=int64_t(Tape::Capacity)+10;++i)
+        tape->append({i,150,1,AggressorSide::Buy});
+    const auto window=tape->visible(1500,1503);
+    ASSERT_EQ(window.rows.size(),3);
+    EXPECT_EQ(window.rows.front().timeMs,1500);
+    EXPECT_EQ(window.rows.back().timeMs,1502);
+    EXPECT_LE(window.comparisons,34);
+    const auto wrapped=tape->visible(99998,100009);
+    ASSERT_EQ(wrapped.rows.size(),11);
+    EXPECT_FALSE(wrapped.rows.first.empty());
+    EXPECT_FALSE(wrapped.rows.second.empty());
+    for (size_t i=0;i<wrapped.rows.size();++i) EXPECT_EQ(wrapped.rows[i].timeMs,99998+int64_t(i));
+    EXPECT_LE(wrapped.comparisons,34);
+    // Use sub-ms pan with no membership changes, as in smooth follow-live.
+    auto m=mapping(); m.viewStartMs=1499.1; m.viewEndMs=1502.1;
+    m.srcRect={4.991,0,.03,100};
+    TradeBubbleNode node;
+    node.sync(*tape,m,true,0,Qt::cyan,Qt::yellow);
+    ASSERT_EQ(node.lastScanRows(),3);
+    const auto builds=node.rebuildCount();
+    node.sync(*tape,m,true,0,Qt::cyan,Qt::yellow);
+    EXPECT_EQ(node.rebuildCount(),builds);
+    EXPECT_EQ(node.lastScanRows(),0);
+    const auto* vertices=static_cast<const float*>(node.geometry()->vertexData());
+    const float x=vertices[0];
+    for (int i=0;i<5;++i) {
+        m.viewStartMs+=.1; m.viewEndMs+=.1; m.srcRect.translate(.001,0);
+        tape->append({100100+i,150,1,AggressorSide::Buy}); // Outside view; ring eviction also outside.
+        node.sync(*tape,m,true,0,Qt::cyan,Qt::yellow);
+        EXPECT_EQ(node.rebuildCount(),builds);
+        EXPECT_EQ(node.lastScanRows(),0);
+        EXPECT_LE(node.rangeComparisons(),34);
+        EXPECT_FLOAT_EQ(vertices[0],x);
+        EXPECT_NEAR(node.translation()(0,3),-(i+1)*.1*640/3,0.001);
+    }
+    // Late insertion inside the view must invalidate the cached mesh.
+    ASSERT_TRUE(tape->append({1501,151,1,AggressorSide::Sell}));
+    node.sync(*tape,m,true,0,Qt::cyan,Qt::yellow);
+    EXPECT_EQ(node.rebuildCount(),builds+1);
+    EXPECT_EQ(node.lastScanRows(),4);
+    EXPECT_EQ(node.usedVertexCount(),24);
+    // Moving across a boundary drops a row and forces another rebuild.
+    m.viewStartMs=1500.1; m.viewEndMs=1503.1; m.srcRect.translate(.005,0);
+    node.sync(*tape,m,true,0,Qt::cyan,Qt::yellow);
+    EXPECT_EQ(node.rebuildCount(),builds+2);
+}
+TEST(TradeBubbles, DeduplicatesRetainedIdsButPreservesUnidentifiedExecutions) {
+    auto tape=std::make_unique<Tape>();
+    Sample row{1500,150,1,AggressorSide::Buy,"exchange/123"};
+    ASSERT_TRUE(tape->append(row));
+    const auto revision=tape->revision();
+    EXPECT_FALSE(tape->append(row));
+    row.timeMs=1501; row.size=2;
+    EXPECT_FALSE(tape->append(row)); // ID, not payload identity.
+    EXPECT_EQ(tape->revision(),revision);
+    row.tradeId="exchange/124";
+    EXPECT_TRUE(tape->append(row));
+    row.tradeId.clear();
+    EXPECT_TRUE(tape->append(row));
+    EXPECT_TRUE(tape->append(row));
+    EXPECT_EQ(tape->samples().size(),4);
+    tape->clear();
+    row.tradeId="exchange/123";
+    EXPECT_TRUE(tape->append(row)); // Symbol/clear resets the ID namespace.
+    for (size_t i=0;i<Tape::Capacity;++i)
+        tape->append({2000+int64_t(i),150,1,AggressorSide::Buy});
+    row.timeMs=200000;
+    EXPECT_TRUE(tape->append(row)); // Expired IDs do not accumulate forever.
 }
 TEST(TradeBubbles, InvalidAndOffscreenRowsCannotReachGeometry) {
     auto tape=std::make_unique<Tape>();
@@ -105,10 +223,10 @@ TEST(TradeBubbles, InvalidAndOffscreenRowsCannotReachGeometry) {
 }
 TEST(TradeBubbles, TapeAndQsgCapacityNeverGrowAcrossFramesAndToggleClearsGeometry) {
     auto tape=std::make_unique<Tape>();
-    const auto* storage=tape->samples().data();
+    const auto* storage=tape->storage();
     for (size_t i=0;i<Tape::Capacity+10;++i) tape->append({1500,150,1,AggressorSide::Buy});
     ASSERT_EQ(tape->samples().size(),Tape::Capacity);
-    EXPECT_EQ(tape->samples().data(),storage);
+    EXPECT_EQ(tape->storage(),storage);
     TradeBubbleNode node;
     auto* vertices=node.geometry()->vertexData();
     auto m=mapping();

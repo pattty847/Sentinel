@@ -37,7 +37,8 @@ public:
 };
 }
 TradeBubbleNode::TradeBubbleNode()
-    : geometry_(attributes(), int(trade_bubbles::Layout::MaxBubbles * 6)) {
+    : geometry_(attributes(), int(trade_bubbles::Layout::MaxBubbles * 6)),
+      clipGeometry_(QSGGeometry::defaultAttributes_Point2D(), 4) {
     geometry_.setDrawingMode(QSGGeometry::DrawTriangles);
     geometry_.setVertexDataPattern(QSGGeometry::DynamicPattern);
     // Qt 6.10 can change the draw count without changing capacity. Qt 6.9
@@ -47,22 +48,49 @@ TradeBubbleNode::TradeBubbleNode()
 #else
     std::memset(geometry_.vertexData(), 0, trade_bubbles::Layout::MaxBubbles * 6 * sizeof(Vertex));
 #endif
-    setGeometry(&geometry_);
-    setMaterial(new Material);
-    setFlag(OwnsMaterial);
+    clipGeometry_.setDrawingMode(QSGGeometry::DrawTriangleStrip);
+    clip_.setGeometry(&clipGeometry_);
+    clip_.setIsRectangular(true);
+    appendChildNode(&clip_);
+    clip_.appendChildNode(&transform_);
+    transform_.appendChildNode(&mesh_);
+    mesh_.setGeometry(&geometry_);
+    mesh_.setMaterial(new Material);
+    mesh_.setFlag(OwnsMaterial);
 }
 void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMapping& m,
                           bool enabled, double minNotional, QColor buy, QColor sell) {
-    if (revision_ == tape.revision() && enabled_ == enabled && minNotional_ == minNotional &&
+    lastScanRows_ = rangeComparisons_ = 0;
+    const auto window = enabled && m.valid ? tape.visible(m.viewStartMs, m.viewEndMs) : trade_bubbles::Window{};
+    rangeComparisons_ = window.comparisons;
+    const auto key = window.key();
+    const auto scaleX = [](const TimeAxisMapping& map) { return map.drawRect.width() / (map.appendMs * map.srcRect.width()); };
+    const auto scaleY = [](const TimeAxisMapping& map) { return map.drawRect.height() / (map.tickSize * map.srcRect.height()); };
+    // Endpoint identities + count identify an unchanged range: the tape only
+    // inserts rows and evicts its oldest row, never edits existing executions.
+    // This also ignores updates outside the viewport and duplicate replay rows.
+    if (rebuildCount_ && key == windowKey_ && enabled_ == enabled && minNotional_ == minNotional &&
         buy_ == buy && sell_ == sell && mapping_.valid == m.valid && mapping_.drawRect == m.drawRect &&
-        mapping_.srcRect == m.srcRect && mapping_.dataStartMs == m.dataStartMs &&
-        mapping_.dataMaxPrice == m.dataMaxPrice && mapping_.appendMs == m.appendMs &&
-        mapping_.tickSize == m.tickSize && mapping_.viewStartMs == m.viewStartMs &&
-        mapping_.viewEndMs == m.viewEndMs && mapping_.viewMinPrice == m.viewMinPrice &&
-        mapping_.viewMaxPrice == m.viewMaxPrice) return;
-    revision_ = tape.revision(); enabled_ = enabled; minNotional_ = minNotional;
+        scaleX(mapping_) == scaleX(m) && scaleY(mapping_) == scaleY(m) &&
+        mapping_.viewMinPrice == m.viewMinPrice && mapping_.viewMaxPrice == m.viewMaxPrice) {
+        QMatrix4x4 translation;
+        if (!window.rows.empty()) {
+            const double anchor = double(window.rows.front().timeMs);
+            translation.translate(float(m.timeToScreenX(anchor)-mapping_.timeToScreenX(anchor)),
+                                  float(m.priceToScreenY(m.viewMinPrice)-mapping_.priceToScreenY(m.viewMinPrice)));
+        }
+        if (translation != transform_.matrix()) transform_.setMatrix(translation);
+        return;
+    }
+    windowKey_ = key; enabled_ = enabled; minNotional_ = minNotional;
     mapping_ = m; buy_ = buy; sell_ = sell;
-    const auto bubbles = enabled ? layout_.build(tape.samples(), m, minNotional) : std::span<const trade_bubbles::Bubble>{};
+    transform_.setMatrix(QMatrix4x4{});
+    clip_.setClipRect(m.drawRect);
+    QSGGeometry::updateRectGeometry(&clipGeometry_, m.drawRect);
+    clip_.markDirty(DirtyGeometry);
+    const auto bubbles = enabled ? layout_.build(window.rows, m, minNotional) : std::span<const trade_bubbles::Bubble>{};
+    lastScanRows_ = enabled ? layout_.scannedRows() : 0;
+    ++rebuildCount_;
     auto* v = static_cast<Vertex*>(geometry_.vertexData());
     size_t count = 0;
     constexpr float corners[6][2] = {{-1,-1},{1,-1},{-1,1},{-1,1},{1,-1},{1,1}};
@@ -71,10 +99,9 @@ void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMappin
         const auto c = b.side == AggressorSide::Buy ? buy : sell;
         constexpr float alpha = 0.60f;
         for (const auto& uv : corners) {
-            // Clip quads to the plot without moving the circle's centre/UV.
-            const float x = float(std::clamp(double(b.x + uv[0] * b.radius), m.drawRect.left(), m.drawRect.right()));
-            const float y = float(std::clamp(double(b.y + uv[1] * b.radius), m.drawRect.top(), m.drawRect.bottom()));
-            v[count++] = {x, y, (x-b.x)/b.radius, (y-b.y)/b.radius,
+            const float x = b.x + uv[0] * b.radius;
+            const float y = b.y + uv[1] * b.radius;
+            v[count++] = {x, y, uv[0], uv[1],
                           float(c.redF())*alpha, float(c.greenF())*alpha, float(c.blueF())*alpha, alpha};
         }
     }
@@ -86,5 +113,5 @@ void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMappin
 #endif
     usedVertexCount_ = int(count);
     geometry_.markVertexDataDirty();
-    markDirty(DirtyGeometry);
+    mesh_.markDirty(DirtyGeometry);
 }

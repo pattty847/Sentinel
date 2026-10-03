@@ -463,14 +463,26 @@ producer; unknown side/basis stays unknown. A future engine normalization must a
 change the server marker to `aggressor`. Existing server footprint/VP side aggregation
 still consumes the engine's maker-valued enum; correcting that is outside the bubble slice.
 
-The GPU chart retains 100,000 valid event-time trade samples in a fixed ring for
-its selected symbol, including while Trades is off. It filters individual quote
-notionals before binning by screen time/price and side into at most 4,096 SDF-circle
-quads. QSG geometry is allocated once, reused and rebuilt only when tape, viewport,
-visibility, threshold or palette changes. Session history survives timeframe/renderer
-changes and same-symbol reconnects; symbol switches clear it. This is partial
-observed-session coverage, not a raw trade-history service. Upstream replay can
-repeat trades; the current bubble tape does not deduplicate exchange snapshots.
+The GPU chart retains the newest 100,000 valid executions by event time in a fixed,
+time-ordered ring for its selected symbol, including while Trades is off. Normal
+append is O(1); late executions use ordered insertion. Binary searches bound the
+render scan to the visible half-open time window. Individual quote notionals are
+filtered before layout: up to 4,096 qualifying trades draw separately; overflow
+uses side-specific 6 px bins, widening only if occupied bins exceed the circle cap
+(see [bubble display semantics](AGENT_API.md#trade-bubbles-gpu-chart)). Larger
+circles draw before smaller ones. Layout scratch and QSG vertices are preallocated.
+An unchanged visible set at unchanged scale reuses the mesh, with a clipped QSG
+translation for follow-live pan; out-of-window appends do not rebuild it.
+
+Session history survives timeframe/renderer changes and same-symbol reconnects;
+symbol switches clear it. This is partial observed-session coverage, not a raw
+trade-history service. Coinbase subscribe snapshots/reconnects can replay recent
+executions. The chart deduplicates nonempty `trade_id` values against IDs in its
+retained ring, independent of payload differences. Eviction also expires the ID;
+clear/symbol switch resets the ID namespace. The ID set is bounded to 100,000 rows
+and allocates only at GUI ingestion, never during rendering. Missing IDs remain
+separate rows (time/price/size equality cannot establish execution identity), so
+legacy producers can still cause duplicate bubbles on reconnect.
 
 History sources today:
 - `ServerDataModel::m_recentFootprintTrades`: server-global RAM, retention

@@ -40,9 +40,14 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <gtest/gtest.h>
+#include "render/TradeBubbleNode.hpp"
 #include <iostream>
 
 struct TradeBubbleRendererTest {
+    static QSGNode* root(UnifiedGridRenderer& r, QSGNode* old, TradeBubbleNode** bubbles) {
+        heatmap::gpu::HeatmapTileNode* tile=nullptr;
+        return r.ensureGpuRootNode(old,&tile,bubbles);
+    }
     static size_t count(const UnifiedGridRenderer& r) { return r.m_tradeBubbleTape->samples().size(); }
     static int64_t firstTime(const UnifiedGridRenderer& r) { return r.m_tradeBubbleTape->samples().front().timeMs; }
     static bool enabled(const UnifiedGridRenderer& r) { return r.m_showTrades; }
@@ -649,14 +654,34 @@ TEST(HeatmapSettingsDialogTest, ApiChangesReachTheDialogAndToolbar) {
     EXPECT_EQ(t.reload().palettePreset, "Electric"); // persist:false
 }
 
+TEST(TradeBubbleControls, TypedBubblePointerSurvivesSiblingInsertionAndRootRecreation) {
+    UnifiedGridRenderer renderer;
+    TradeBubbleNode* bubbles=nullptr;
+    auto* root=TradeBubbleRendererTest::root(renderer,nullptr,&bubbles);
+    ASSERT_NE(bubbles,nullptr);
+    auto* original=bubbles;
+    // A new layer between heatmap and trades must not change which node is synced.
+    auto* sibling=new QSGNode;
+    root->insertChildNodeAfter(sibling,root->firstChild());
+    EXPECT_EQ(TradeBubbleRendererTest::root(renderer,root,&bubbles),root);
+    EXPECT_EQ(bubbles,original);
+    delete root; // Scene graph invalidation: no renderer-owned dangling pointer.
+    root=TradeBubbleRendererTest::root(renderer,nullptr,&bubbles);
+    ASSERT_NE(bubbles,nullptr);
+    EXPECT_EQ(static_cast<QSGNode*>(bubbles)->parent(),root);
+    delete root;
+}
+
 TEST(TradeBubbleControls, GuiIngestionKeepsHiddenSessionTradesAndIsolatesSymbols) {
     UnifiedGridRenderer renderer;
     renderer.setActiveSymbol("BTC-USD");
     Trade t{};
     t.product_id = "BTC-USD"; t.price = 100; t.size = 2; t.side = AggressorSide::Buy;
+    t.trade_id = "live-123";
     t.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(1791030896789LL));
     EXPECT_FALSE(TradeBubbleRendererTest::enabled(renderer));
     renderer.onTradeReceived(t);
+    renderer.onTradeReceived(t); // Subscribe/reconnect snapshot replay of same ID.
     ASSERT_EQ(TradeBubbleRendererTest::count(renderer), 1);
     EXPECT_EQ(TradeBubbleRendererTest::firstTime(renderer), 1791030896789LL);
     heatmap::HeatmapChartSettings settings;
@@ -708,6 +733,10 @@ TEST(TradeBubbleControls, GearTogglePresetsAndApiSharePersistedChartSettings) {
     ASSERT_TRUE(model.apply({{"renderer", "legacy"}}, false).isEmpty());
     controls.refreshChartMenu();
     EXPECT_FALSE(toggle->isEnabled());
+    EXPECT_FALSE(sizes->menuAction()->isEnabled());
+    ASSERT_TRUE(model.apply({{"renderer", "gpu"}}, false).isEmpty());
+    controls.refreshChartMenu();
+    EXPECT_TRUE(sizes->menuAction()->isEnabled());
 }
 
 // ----------------------------------------------------------- telemetry dock

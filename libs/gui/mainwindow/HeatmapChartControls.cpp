@@ -230,6 +230,8 @@ void HeatmapChartControls::refreshChartMenu() {
     QMenu *menu = m_toolbar ? m_toolbar->chartMenu() : nullptr;
     if (!menu) return;
     const auto &s = m_model->settings();
+    if (auto* sizes = menu->findChild<QMenu*>("chartMenuTradeSize"))
+        sizes->menuAction()->setEnabled(modeState().gpu);
     for (QAction *a : menu->findChildren<QAction *>()) {
         const QString name = a->objectName();
         if (name == "chartMenuTrades") {

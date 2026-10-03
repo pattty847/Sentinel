@@ -108,16 +108,25 @@ are available through the API; the menu checks a preset only for an exact match.
 Controls are disabled in legacy mode, and their settings survive a renderer switch.
 
 Bubbles use exchange time and execution price, above the heatmap but below candles.
-Buy uses the bid palette endpoint; sell uses the ask endpoint, both at 60% opacity.
+Buy uses the bid palette endpoint; sell uses the ask endpoint, both at 60% opacity,
+with a one-screen-pixel darker ring for contrast over same-colour walls.
 Area scales with summed quote notional: radius = min(18, 3 * sqrt(notional/1000))
 logical pixels. The threshold filters **individual trades before aggregation**.
-Each side aggregates independently into screen bins (at least 6 px, at most 64 x 32),
-with a notional-weighted centre and at most 4,096 circles. Tiny trades can be subpixel.
+Up to 4,096 qualifying executions draw individually, even at identical coordinates.
+Above that count, each side aggregates independently into initially 6 px square bins,
+with a notional-weighted centre. If more than 4,096 side/bin pairs remain occupied,
+bin width grows by 4/3 until the output fits. Thus 6–8 px is the fine-grid target,
+not a guaranteed maximum: widely spread overflow requires coarser bins to preserve
+all qualifying volume within the hard cap. Larger circles draw first so smaller
+executions stay on top, regardless of side or bin. Tiny trades can be subpixel.
 
 Coverage is **live chart-session history only**, retained even with Trades off:
 the latest 100,000 valid trades for the active symbol, surviving timeframe and
 renderer changes and same-symbol reconnects. Switching symbols/clearing the chart
-resets this tape. No request for durable or pre-subscription raw history exists;
+resets this tape. Subscribe/reconnect snapshots can replay recent trades: nonempty
+`trade_id` values are deduplicated against the retained tape. IDs expire with their
+rows; rows from older servers without IDs cannot be reliably deduplicated and may
+repeat. No request for durable or pre-subscription raw history exists;
 empty bubbles do not establish zero traded volume. The `/trades` evidence endpoint
 uses its separate 10,000-row/15-minute tape, so it is not the full bubble cache.
 

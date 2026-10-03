@@ -136,7 +136,7 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
 void UnifiedGridRenderer::onTradeReceived(const Trade &trade) {
   if (m_activeSymbol == QLatin1String(trade.product_id.data(), qsizetype(trade.product_id.size()))) {
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(trade.timestamp.time_since_epoch()).count();
-    if (m_tradeBubbleTape->append({ms, trade.price, trade.size, trade.side}) && m_showTrades && m_gpuHeatmap)
+    if (m_tradeBubbleTape->append({ms, trade.price, trade.size, trade.side, trade.trade_id}) && m_showTrades && m_gpuHeatmap)
       update(); // Qt coalesces trade bursts into one scene synchronization
   }
   // The live price for auto-fit (no allocation per trade: product ids are ASCII).

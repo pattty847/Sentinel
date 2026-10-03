@@ -476,22 +476,30 @@ void UnifiedGridRenderer::clearLabelGeometry() {
 
 
 // ── GPU heatmap (S6b) ─────────────────────────────────────────────────────────
-QSGNode* UnifiedGridRenderer::ensureGpuRootNode(QSGNode* oldNode, heatmap::gpu::HeatmapTileNode** tile) {
+namespace {
+struct GpuChartRootNode final : QSGNode {
+    TradeBubbleNode* bubbles = nullptr; // Owned by this root, independent of sibling order.
+};
+}
+QSGNode* UnifiedGridRenderer::ensureGpuRootNode(QSGNode* oldNode, heatmap::gpu::HeatmapTileNode** tile,
+                                              TradeBubbleNode** bubbles) {
     if (oldNode && oldNode->type() != QSGNode::BasicNodeType) {
         delete oldNode; // the legacy HeatmapIntensityNode root and its children
         oldNode = nullptr;
     }
-    QSGNode* root = oldNode;
+    auto* root = static_cast<GpuChartRootNode*>(oldNode);
     if (!root) {
-        root = new QSGNode();
+        root = new GpuChartRootNode();
         auto* gate = new QSGOpacityNode();
         gate->appendChildNode(new heatmap::gpu::HeatmapTileNode(m_gpuLayer->tileStatsPtr()));
         root->appendChildNode(gate);
-        root->appendChildNode(new TradeBubbleNode);
+        root->bubbles = new TradeBubbleNode;
+        root->appendChildNode(root->bubbles);
         for (auto* overlay : m_overlays)
             overlay->onRootRebuilt();
         m_chartTextRenderer.onRootRebuilt();
     }
+    *bubbles = root->bubbles;
     *tile = static_cast<heatmap::gpu::HeatmapTileNode*>(root->firstChild()->firstChild());
     return root;
 }
@@ -583,7 +591,8 @@ void UnifiedGridRenderer::updateGpuLabels(const FrameContext& frame, bool prepar
 
 QSGNode* UnifiedGridRenderer::updateGpuPaintNode(QSGNode* oldNode, FrameContext& frame, bool profile) {
     heatmap::gpu::HeatmapTileNode* tile = nullptr;
-    QSGNode* root = ensureGpuRootNode(oldNode, &tile);
+    TradeBubbleNode* bubbles = nullptr;
+    QSGNode* root = ensureGpuRootNode(oldNode, &tile, &bubbles);
     heatmap::gpu::ViewWindow view;
     computeGpuFrameMapping(frame, view, 0.0);
     const bool drawHeatmap = frame.overlays.heatmap && frame.mapping.valid;
@@ -603,9 +612,8 @@ QSGNode* UnifiedGridRenderer::updateGpuPaintNode(QSGNode* oldNode, FrameContext&
     std::vector<FootprintOverlayRenderer::PendingUpload> footprintUploads;
     m_footprintOverlay.drainPending(footprintUploads);
     if (profile) m_frameProfiler.mark(FrameProfiler::Uploads);
-    // Qt blocks the GUI thread here: snapshot chart-owned POD/settings only,
+    // Qt blocks the GUI thread here: read chart-owned tape/settings only,
     // never traverse the QObject graph from the node or its shader.
-    auto* bubbles = static_cast<TradeBubbleNode*>(root->firstChild()->nextSibling());
     bubbles->sync(*m_tradeBubbleTape, frame.mapping, m_showTrades, m_tradeMinNotional,
                   m_tradeBuyColor, m_tradeSellColor);
     renderTradeOverlays(root, frame, frame.overlays.footprint, frame.overlays.tpo, footprintUploads);

@@ -57,6 +57,8 @@ struct ViewWindow;
 class QQuickWindow;
 class QScreen;
 
+class TradeBubbleNode;
+
 class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     friend struct TradeBubbleRendererTest;
     Q_OBJECT
@@ -533,7 +535,7 @@ private:
     // gpu mode: a plain QSGNode root whose first child is an opacity node holding
     // the HeatmapTileNode (opacity 0 blocks it while the heatmap layer is off);
     // overlays and text follow it as later children (drawn on top).
-    QSGNode* ensureGpuRootNode(QSGNode* oldNode, heatmap::gpu::HeatmapTileNode** tile);
+    QSGNode* ensureGpuRootNode(QSGNode* oldNode, heatmap::gpu::HeatmapTileNode** tile, TradeBubbleNode** bubbles);
     QSGNode* updateGpuPaintNode(QSGNode* oldNode, FrameContext& frame, bool profile);
     void updateGpuLabels(const FrameContext& frame, bool prepared);
     // gpu mode: TimeAxisMapping from the viewport only (plan section 2 "Mapping").
