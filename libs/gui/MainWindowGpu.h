@@ -22,6 +22,7 @@
 #include "render/heatmap/HeatmapSettingsModel.hpp"
 #include "mainwindow/LayoutOrchestrator.h"
 #include "datasources/IGridDataSource.hpp"
+#include "mainwindow/SymbolSubscriptionManager.hpp"
 #include "render/TpoHistoryPager.hpp"
 #include "../core/trading/TradingTypes.hpp"
 
@@ -62,7 +63,7 @@ class MainWindowGPU : public QMainWindow {
     Q_OBJECT
 
 public:
-    explicit MainWindowGPU(QWidget* parent = nullptr);
+    explicit MainWindowGPU(QWidget* parent = nullptr, int symbolSwitchTimeoutMs = 4800);
     ~MainWindowGPU();
     // S6b creates per-chart controllers here, after GUI construction. A view can
     // precede availability: HeatmapSourceController replans on its arrival.
@@ -88,6 +89,7 @@ protected:
     void showEvent(QShowEvent* event) override;
 
 private:
+    friend struct MainWindowSymbolLifecyclePeer;
     void setupUI();
     void setupMenuBar();
     void setupShortcuts();
@@ -97,6 +99,12 @@ private:
     void setWindowProperties();
     void setupGuiApiServer();
     bool subscribeSymbol(const QString& symbol);
+    void requestMainSymbol(const QString& symbol);
+    void applySubscriptionActions(const QVector<SymbolSubscriptionManager::Action>& actions);
+    void startPendingSymbolSwitch(const QString& symbol);
+    void abandonPendingSymbolSwitch(const QString& code, const QString& message);
+    bool armHeldRetry(const QString& message);
+    void retryHeldSymbol();
     void selectTimeframe(int ms);
     AgentApi::ControlApply agentApiApplyControl(const QString& kind, const AgentApi::ControlBody& body);
     QJsonObject agentApiHeatmapSnapshot() const;
@@ -160,6 +168,16 @@ private:
     QJsonObject m_lastSubscriptionRefusal;
     bool m_serverConfigReady = false;
     bool m_userSubscribed = false;
+    SymbolSubscriptionManager m_symbolSubscriptions;
+    QString m_refusedSymbol;
+    QString m_offlineRequestedSymbol;
+    bool m_initialSubscriptionAttempted = false;
+    bool m_symbolSelectionRequested = false;
+    QString m_pendingSymbolSwitch;
+    QTimer* m_symbolSwitchTimer = nullptr;
+    int m_symbolSwitchTimeoutMs = 4800;
+    QTimer* m_heldRetryTimer = nullptr;
+    int m_heldRetryAttempt = 0;
     QString m_agentApiSessionId;
     quint64 m_agentApiSelectionEpoch = 1;
     std::optional<qint64> m_heatmapReceivedAtMs;

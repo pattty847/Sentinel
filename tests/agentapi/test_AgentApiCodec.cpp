@@ -105,6 +105,22 @@ TEST(AgentApiControls, OperationStateWithFakeFrameAck) {
     EXPECT_FALSE(ops.find("o99999").has_value());
 }
 
+TEST(AgentApiControls, PendingSymbolRequiresANewFrameAfterActivation) {
+    Operations ops;
+    const auto symbol = ops.apply("symbol", 10, true);
+    const auto other = ops.apply("timeframe", 11);
+    ops.poll(other.revision, 42);
+    EXPECT_EQ(ops.find(symbol.id)->status, "pending");
+    const auto activated = ops.activate(symbol.id);
+    ASSERT_TRUE(activated.has_value());
+    EXPECT_GT(activated->revision, other.revision);
+    ops.poll(other.revision, 43);
+    EXPECT_EQ(ops.find(symbol.id)->status, "applied");
+    ops.poll(activated->revision, 44);
+    EXPECT_EQ(ops.find(symbol.id)->status, "rendered");
+    EXPECT_EQ(ops.find(symbol.id)->frameId, 44u);
+}
+
 namespace {
 QByteArray request(const QByteArray& path, const QByteArray& extra = {}) {
     return "GET " + path + " HTTP/1.1\r\nHost: 127.0.0.1:17100\r\n" + extra + "\r\n";

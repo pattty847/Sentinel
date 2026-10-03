@@ -41,6 +41,9 @@ public:
     void stop();
     quint16 port() const { return m_server.serverPort(); }
     QString errorString() const;
+    void completeSymbolSwitch(const QString& symbol);
+    void failSymbolSwitch(const QString& symbol, const QString& code, const QString& message);
+    void supersedePendingSymbolSwitch();
 
 private slots:
     void handleNewConnection();
@@ -74,6 +77,7 @@ private:
     std::function<std::pair<quint64, quint64>()> m_frameAck;
     std::function<void(quint64)> m_publishRevision;
     AgentApi::Operations m_operations;
+    QString m_pendingSymbol, m_pendingSymbolOperation;
     qint64 m_lastScreenshotMs = 0;
     QHash<QTcpSocket*, AgentApi::RequestParser> m_requests;
     QSet<QTcpSocket*> m_openConnections;

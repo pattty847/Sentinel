@@ -923,6 +923,8 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
         }
         if (typeStr == "ack") {
             sLog_Data("Server ack: symbol=" << msg.value("symbol", ""));
+            if (msg.contains("symbol") && msg["symbol"].is_string())
+                emit subscriptionAcknowledged(QString::fromStdString(msg["symbol"].get<std::string>()));
             return;
         }
         logDroppedMessage(DropReason::UnknownType,

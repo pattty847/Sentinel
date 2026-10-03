@@ -178,8 +178,11 @@ void GuiApiServer::handleRequest(QTcpSocket* socket) {
             respond(socket, applied.status, AgentApi::jsonBytes(AgentApi::error(applied.code, applied.message)), "application/json");
             return;
         }
-        auto op = m_operations.apply(kind, applied.viewportVersion);
-        m_publishRevision(op.revision);
+        auto op = m_operations.apply(kind, applied.viewportVersion, !applied.pendingSymbol.isEmpty());
+        if (op.status == "pending") {
+            m_pendingSymbol = applied.pendingSymbol;
+            m_pendingSymbolOperation = op.id;
+        } else m_publishRevision(op.revision);
         QJsonObject data = applied.data;
         data["operationId"] = op.id;
         data["status"] = op.status;
@@ -335,6 +338,10 @@ void GuiApiServer::waitForOperation(QTcpSocket* socket, const QString& id, qint6
         respond(socket, 404, AgentApi::jsonBytes(AgentApi::error("unknown_operation", "Unknown operation ID")), "application/json");
         return;
     }
+    if (op->status == "failed" && !op->errorCode.isEmpty()) {
+        respond(socket, 409, AgentApi::jsonBytes(AgentApi::error(op->errorCode, op->errorMessage)), "application/json");
+        return;
+    }
     if (screenshot && op->status == "rendered") {
         sendScreenshot(socket, name, target, op);
         return;
@@ -346,7 +353,7 @@ void GuiApiServer::waitForOperation(QTcpSocket* socket, const QString& id, qint6
         return;
     }
     if (screenshot) {
-        const bool pending = op->status == "applied";
+        const bool pending = op->status == "applied" || op->status == "pending";
         respond(socket, pending ? 408 : 409,
                 AgentApi::jsonBytes(AgentApi::error(pending ? "render_timeout" : "operation_not_rendered",
                                                     pending ? "Operation did not render before deadline" : "Operation is no longer renderable")),
@@ -357,6 +364,28 @@ void GuiApiServer::waitForOperation(QTcpSocket* socket, const QString& id, qint6
                         {"viewportVersion", QString::number(op->viewportVersion)}};
     if (op->status == "rendered") payload["frameId"] = QString::number(op->frameId);
     respond(socket, 200, AgentApi::jsonBytes(AgentApi::envelope(m_stateSnapshot().meta, payload)), "application/json");
+}
+
+void GuiApiServer::completeSymbolSwitch(const QString& symbol) {
+    if (m_pendingSymbol != symbol.trimmed().toUpper()) return;
+    const auto op = m_operations.activate(m_pendingSymbolOperation);
+    m_pendingSymbol.clear();
+    m_pendingSymbolOperation.clear();
+    if (op) m_publishRevision(op->revision);
+}
+
+void GuiApiServer::failSymbolSwitch(const QString& symbol, const QString& code, const QString& message) {
+    if (m_pendingSymbol != symbol.trimmed().toUpper()) return;
+    m_operations.fail(m_pendingSymbolOperation, code, message);
+    m_pendingSymbol.clear();
+    m_pendingSymbolOperation.clear();
+}
+
+void GuiApiServer::supersedePendingSymbolSwitch() {
+    if (m_pendingSymbolOperation.isEmpty()) return;
+    m_operations.supersede(m_pendingSymbolOperation);
+    m_pendingSymbol.clear();
+    m_pendingSymbolOperation.clear();
 }
 
 void GuiApiServer::sendScreenshot(QTcpSocket* socket, const QString& name, const QString& targetName,

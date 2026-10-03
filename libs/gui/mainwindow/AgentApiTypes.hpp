@@ -56,6 +56,7 @@ struct ControlApply {
     QString code, message;
     QJsonObject data;
     quint64 viewportVersion = 0;
+    QString pendingSymbol;
 };
 
 struct Metadata {

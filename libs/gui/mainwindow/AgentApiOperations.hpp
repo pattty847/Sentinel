@@ -7,6 +7,7 @@
 namespace AgentApi {
 struct Operation {
     QString id, kind, status = "applied";
+    QString errorCode, errorMessage;
     quint64 revision = 0, frameId = 0, viewportVersion = 0;
 };
 
@@ -14,9 +15,11 @@ struct Operation {
 // render callback and consumed by poll(); no QObject is read on the render thread.
 class Operations {
 public:
-    Operation apply(const QString& kind, quint64 viewportVersion);
+    Operation apply(const QString& kind, quint64 viewportVersion, bool pending = false);
+    std::optional<Operation> activate(const QString& id);
     void poll(quint64 renderedRevision, quint64 frameId);
-    void fail(const QString& id);
+    void fail(const QString& id, const QString& code = {}, const QString& message = {});
+    void supersede(const QString& id);
     std::optional<Operation> find(const QString& id) const;
 private:
     quint64 m_nextRevision = 0;
