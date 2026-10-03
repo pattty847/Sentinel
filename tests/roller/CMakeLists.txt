@@ -12,3 +12,7 @@ target_compile_definitions(test_roller_live_fixture PRIVATE ROLLER_TEST_ROOT="${
     ROLLER_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/btc-prefix.rawl2")
 add_test(NAME RollerLiveFixtureTests COMMAND test_roller_live_fixture)
 
+add_executable(test_shadow_roller test_shadow.cpp)
+target_link_libraries(test_shadow_roller PRIVATE sentinel_core GTest::gtest_main Qt6::Core Qt6::Network)
+add_test(NAME ShadowRollerTests COMMAND test_shadow_roller)
+set_tests_properties(ShadowRollerTests PROPERTIES LABELS "roller" TIMEOUT 120)

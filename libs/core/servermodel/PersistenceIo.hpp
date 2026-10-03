@@ -65,16 +65,16 @@ inline constexpr LockHandle noLock = nullptr;
 using LockHandle = int;
 inline constexpr LockHandle noLock = -1;
 #endif
-inline LockHandle acquireFileLock(const std::filesystem::path &path, int &error) {
+inline LockHandle acquireFileLock(const std::filesystem::path &path, int &error, bool shared = false) {
 #ifdef _WIN32
-    HANDLE fd = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_ALWAYS,
+    HANDLE fd = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | (shared ? FILE_SHARE_WRITE : 0), nullptr, OPEN_ALWAYS,
                             FILE_ATTRIBUTE_NORMAL, nullptr);
     if (fd == INVALID_HANDLE_VALUE) {
         error = static_cast<int>(GetLastError());
         return noLock;
     }
     OVERLAPPED ov{};
-    if (!LockFileEx(fd, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, MAXDWORD, MAXDWORD, &ov)) {
+    if (!LockFileEx(fd, (shared ? 0 : LOCKFILE_EXCLUSIVE_LOCK) | LOCKFILE_FAIL_IMMEDIATELY, 0, MAXDWORD, MAXDWORD, &ov)) {
         error = static_cast<int>(GetLastError());
         CloseHandle(fd);
         return noLock;
@@ -85,7 +85,7 @@ inline LockHandle acquireFileLock(const std::filesystem::path &path, int &error)
         error = errno;
         return noLock;
     }
-    if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+    if (::flock(fd, (shared ? LOCK_SH : LOCK_EX) | LOCK_NB) != 0) {
         error = errno;
         ::close(fd);
         return noLock;

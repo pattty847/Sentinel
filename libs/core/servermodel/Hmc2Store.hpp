@@ -135,7 +135,10 @@ class Hmc2Store {
   public:
     // deterministicResume is opt-in for journal replay only: validate duplicate
     // buckets and restore the validated last delta base on reopen.
-    explicit Hmc2Store(std::filesystem::path root, bool deterministicResume = false);
+    // Optional product scope: shared root lease plus exclusive product lease.
+    // Unscoped (primary/batch) owners remain exclusive across the entire root.
+    explicit Hmc2Store(std::filesystem::path root, bool deterministicResume = false,
+                       std::string writerProduct = {});
     ~Hmc2Store();
     Hmc2Store(const Hmc2Store &) = delete;
     Hmc2Store &operator=(const Hmc2Store &) = delete;

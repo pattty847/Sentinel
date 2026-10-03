@@ -393,3 +393,20 @@ coordinates. Footprint inserts neutral missing time slots and resets on changes
 to its own grid; TPO clears its old band when its own price metadata changes.
 Volume profile also uses the full surface and its own price metadata. Recording
 re-bands do not reset these overlays or stretch them to the heatmap overlap rect.
+
+### Optional journal shadow recorder
+
+`libs/core/roller/ShadowRoller` owns the optional server shadow pipeline;
+`SentinelServerApp` only wires configuration, pinned products, metrics and
+lifetime. Each product has independent journal/socket and recorder workers
+because daily grids differ. A separate sequential comparison worker produces
+same-journal batch oracles in temporary storage. There are no callbacks into
+the primary engine/recorder or client stream. Config and monitoring are in
+`ops/monitoring/README.md` under Shadow roller.
+
+HMC2's default writer lease remains exclusive for the entire root. An opt-in
+`writerProduct` uses a shared root lock and an exclusive `.writer-<product>.lock`,
+and refuses appends for any other symbol. Thus different shadow products can
+write distinct files concurrently, while primary/batch owners and another
+writer for the same product are excluded. This does not change file paths,
+wire payloads, codecs or the primary recorder's per-message behavior.

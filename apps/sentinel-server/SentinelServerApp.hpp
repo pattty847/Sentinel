@@ -1,5 +1,6 @@
 #pragma once
 #include <QObject>
+#include "roller/ShadowRoller.hpp"
 #include <memory>
 #include <unordered_set>
 #include "../../libs/core/marketdata/MarketDataFeeds.hpp"
@@ -29,6 +30,7 @@ private:
     std::unique_ptr<MarketDataFeeds> m_marketDataCore;
     std::unique_ptr<ServerDataModel> m_serverModel;
     std::unique_ptr<SentinelStreamServer> m_server;
+    std::unique_ptr<sentinel::roller::ShadowRoller> m_shadowRoller;
     // Declared last: destroyed first, so no scrape renders a destroyed component.
     std::unique_ptr<sentinel::metrics::MetricsHttpServer> m_httpServer;
     std::unordered_set<std::string> m_defaultSymbols;

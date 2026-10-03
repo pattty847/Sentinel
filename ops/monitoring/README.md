@@ -252,3 +252,44 @@ Grafana **Capture fan-out down** alerts when `sentinel_fanout_running < 1` for
 5 minutes. Missing series do not trigger this rule: the service-down rule covers
 capture scrape failure. Inspect the logged setup reason and repair the socket
 path/permissions or listener conflict; capture retries without a service restart.
+
+## Shadow roller (server :8090)
+
+Opt in with `roller_shadow.enabled` in the server YAML. Defaults are off;
+`journal_dir` is the RAWL2 root, `dir` is the separate HMC2 shadow root
+(deployment: `/Volumes/T7/sentinel-data/hmc2`), `socket` defaults to
+`~/Sentinel-runtime/run/capture.sock`, and `from` is a required UTC-midnight
+ISO timestamp for the first journal day. Set the start deliberately before
+turning it on. Existing per-day `roller.json` checkpoints retain the replay
+policy/range and select the first incomplete day. No primary path or client
+wire capability changes. The output must be disjoint from the journal and
+all actual/configured primary/fallback roots, including symlink aliases.
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `sentinel_roller_shadow_running` | gauge | product | 1 while applying durable records; 0 during setup/retry/stop. Present only when enabled. |
+| `sentinel_roller_shadow_lag_seconds` | gauge | product | Scrape-time age of last applied durable record, -1 before the first record. |
+| `sentinel_roller_shadow_records_applied_total` | counter | product | Applied durable records, including deterministic restart/day warmup replay. |
+| `sentinel_roller_shadow_setup_failures_total` | counter | product | Setup, malformed input, socket, continuity or write failures that trigger backoff. |
+| `sentinel_roller_shadow_start_failures_total` | counter | - | Supervisor construction failure, such as inability to create worker threads. |
+| `sentinel_roller_shadow_mismatch_total` | counter | product, layer | Strict same-journal mismatching bucket observations against a fresh batch oracle, including one-sided missing and partial buckets. |
+| `sentinel_roller_shadow_last_comparison_timestamp_seconds` | gauge | product | Completion time of last successful hourly report; 0 before the first. |
+| `sentinel_roller_shadow_comparison_failures_total` | counter | product | Hourly oracle/report failures; failed hours retry at the next pass. |
+
+The independent comparison worker runs hourly over fully committed completed
+UTC hours, with temporary batch output and sequential product/hour processing.
+It calls the same diff implementation as `hmc2_diff`. Strict live-vs-batch
+mismatches increment the gate metric; comparing the independent primary
+connection with shadow is an informational log report with the round-2 bands
+(0.5% per-side total TWAP, 0.02% mids, 1% entry counts, 99% row overlap).
+The pinned identical-input legacy timer fixture separately enforces the tier-2
+32-code/1%-cells/0.01%-totals bounds. No cross-connection difference pages.
+
+Grafana provisions `sentinel-roller-shadow-mismatch` (increase over 2 h) and
+`sentinel-roller-shadow-down` (product down for 5 min); absence is OK while
+shadow is disabled. Existing primary health rules remain authoritative.
+Read `Shadow roller retry` for the error and 1 s to 60 s exponential backoff.
+The startup line is `Roller started ... mode=shadow`. Deployment verification
+continues to require `Recording v2 started` and primary writes: the old marker
+is emitted by both old and new shadow-mode binaries. No deploy script change
+is necessary for slice C.

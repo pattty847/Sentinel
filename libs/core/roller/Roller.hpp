@@ -12,12 +12,20 @@ struct RollOptions {
     // Crash/lifecycle seam: invoked after a processed record, before a possible
     // checkpoint fence. Throw to interrupt; the next run must recover identically.
     std::function<void(uint64_t)> afterRecordForTest;
+    // Shadow-only source: returns durable journal records, including warmup.
+    // A false return is cancellation/EOF, never a synthetic tick.
+    std::function<bool(JournalReader&, JournalRecord&)> nextRecord;
+    std::function<void(int64_t)> onCommitted;
+    std::function<bool()> cancelled;
+    bool productWriterLease = false;
+    std::function<void(const std::string&)> onInvalid;
+    std::function<void(const JournalRecord&)> onApplied;
 };
 void validateOutputProduct(const std::filesystem::path& root, const std::string& product);
 nlohmann::json roll(const RollOptions& options);
 nlohmann::json diff(const std::filesystem::path& a, const std::filesystem::path& b,
                     const std::string& product, const std::string& layer, int64_t from, int64_t to,
-                    int64_t tfMs = 60'000);
+                    int64_t tfMs = 60'000, bool strictJournal = false);
 int64_t parseTime(const std::string& text);
 int rollMain(int argc, char** argv);
 int diffMain(int argc, char** argv);

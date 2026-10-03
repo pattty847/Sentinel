@@ -106,6 +106,7 @@ json roll(const RollOptions& o) {
                 if (!(bid > 0) || !std::isfinite(ask)) return;
                 const auto grid = deriveGrid(input.metadata,std::midpoint(bid,ask),o.overrides);
                 auto cfg = grid.config(o.outputRoot);
+                if (o.productWriterLease) cfg.writerProduct = o.product;
                 hash = configHash(cfg);
                 latenessMs = cfg.latenessMs;
                 cfg.commitFloorMs = from; cfg.commitCeilingMs = end;
@@ -121,34 +122,47 @@ json roll(const RollOptions& o) {
                 gridReady = true;
                 if (o.dryRun) return;
                 recorder = std::make_unique<recording::BookRecorder>(std::move(cfg));
+                if (o.productWriterLease && !fs::exists(cpPath)) {
+                    // Claim provenance before the first asynchronous write, so
+                    // a first-minute crash can retry this shadow product safely.
+                    fs::create_directories(cpPath.parent_path());
+                    int error = 0;
+                    if (!persistence::syncDirectory(o.outputRoot, error))
+                        throw std::runtime_error("shadow product directory sync failed");
+                    checkpoint(cpPath, cp);
+                }
             }
             if (recorder) recorder->onSnapshotAt(o.product,exchange,local,std::move(levels));
         };
         feed.onUpdates = [&](int64_t t,int64_t local,std::vector<recording::Level> levels) {
             if (recorder) recorder->onUpdatesAt(o.product,t,local,std::move(levels));
         };
-        feed.onInvalid = [&](int64_t t,const std::string& reason) { if (recorder) recorder->onInvalid(o.product,t,reason); };
+        feed.onInvalid = [&](int64_t t,const std::string& reason) { if (o.onInvalid) o.onInvalid(reason); if (recorder) recorder->onInvalid(o.product,t,reason); };
         feed.onTick = [&](int64_t t) { if (recorder) recorder->onTick(t); };
         const auto fence = [&] {
             if (!recorder) return;
             recorder->drain();
             const auto stats = recorder->stats();
             if (stats.diskErrors || stats.queueDrops) throw std::runtime_error("roller recorder failed; checkpoint not advanced");
-            if (stats.columnsWritten == checkpointColumns) return;
+            if (!o.productWriterLease && stats.columnsWritten == checkpointColumns) return;
             auto through = end;
             for (const auto* layer : {"near","deep"})
                 through = std::min(through,recorder->watermarks(o.product,layer).minuteThroughMs);
-            if (through < savedThrough) return;
+            if (through < savedThrough ||
+                (through == savedThrough && stats.columnsWritten == checkpointColumns)) return;
             cp["days"][key] = {{"pos",applied},{"committedThroughMs",through},{"configHash",hash},{"fromMs",from}};
             // Also expose the newest checkpoint in the plan's flat schema.
             cp["pos"] = applied; cp["committedThroughMs"] = through; cp["configHash"] = hash;
             checkpoint(cpPath,cp);
             savedThrough = through; checkpointColumns = stats.columnsWritten;
+            if (o.onCommitted) o.onCommitted(through);
         };
-        while (reader.next(input)) {
+        while ((!o.cancelled || !o.cancelled()) &&
+               (o.nextRecord ? o.nextRecord(reader, input) : reader.next(input))) {
             // No synthetic EOF tick: only actual journal records prove elapsed time.
             // Warmup is read in journal order; receipt clock need not be monotonic.
             feed.apply(input); applied = input.pos; ++records;
+            if (o.onApplied) o.onApplied(input);
             if (input.record.kind == capture::Kind::Frame) bytes += input.record.payload.size();
             if (o.afterRecordForTest) o.afterRecordForTest(records);
             const auto minute = input.record.time.systemNs / 1'000'000 / Minute;

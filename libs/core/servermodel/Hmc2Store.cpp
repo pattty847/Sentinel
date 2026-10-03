@@ -1123,7 +1123,8 @@ fs::path directoryKey(const fs::path &dir) {
 }
 struct Hmc2Store::Impl {
     fs::path root;
-    LockHandle lock = noLock;
+    LockHandle lock = noLock, productLock = noLock;
+    std::string writerProduct;
     bool deterministicResume = false;
     struct Writer {
         Hmc2Header header;
@@ -1175,27 +1176,37 @@ struct Hmc2Store::Impl {
         syncDirectory(parent);
         durableDirectories.insert(path);
     }
-    explicit Impl(fs::path p) : root(std::move(p)), rootDir(directoryKey(root)) {
+    explicit Impl(fs::path p, std::string product) : root(std::move(p)), writerProduct(std::move(product)), rootDir(directoryKey(root)) {
+        if (!writerProduct.empty()) {
+            Hmc2Header header; header.symbol = writerProduct; header.layer = "near";
+            (void)Hmc2Store::filePath(root, header, kHmc2MinMs);
+        }
         raw.reserve(256 * 1024);
         compressed.reserve(256 * 1024);
         makeRootDurable();
         int error = 0;
-        lock = acquireFileLock(root / ".lock", error);
+        lock = acquireFileLock(root / ".lock", error, !writerProduct.empty());
         check(lock != noLock, "root lock unavailable path=" + root.string() + " error=" + std::to_string(error));
         try {
+            if (!writerProduct.empty()) {
+                productLock = acquireFileLock(root / (".writer-" + writerProduct + ".lock"), error);
+                check(productLock != noLock, "product writer lock unavailable: " + writerProduct);
+            }
             sync(root, true);
         } catch (...) {
+            releaseFileLock(productLock);
             releaseFileLock(lock);
             throw;
         }
         sLog_Data("Hmc2Store: writer lock acquired root=" << root.string());
     }
     ~Impl() {
+        releaseFileLock(productLock);
         releaseFileLock(lock);
     }
 };
-Hmc2Store::Hmc2Store(fs::path root, bool deterministicResume)
-    : impl_(std::make_unique<Impl>(std::move(root))) {
+Hmc2Store::Hmc2Store(fs::path root, bool deterministicResume, std::string writerProduct)
+    : impl_(std::make_unique<Impl>(std::move(root), std::move(writerProduct))) {
     impl_->deterministicResume = deterministicResume;
 }
 Hmc2Store::~Hmc2Store() = default;
@@ -1229,6 +1240,8 @@ void Hmc2Store::releaseSymbol(const std::string &symbol) {
     });
 }
 void Hmc2Store::append(const Hmc2Record &r) {
+    if (!impl_->writerProduct.empty())
+        check(impl_->writerProduct == r.header.symbol, "writer product scope mismatch");
     validate(r.header);
     check(r.bucketStartMs >= kHmc2MinMs && r.bucketStartMs < kHmc2EndMs, "bucket outside UTC years 2000-2200");
     check(r.observedMs > 0 && r.observedMs <= r.header.tfMs && r.bucketStartMs % r.header.tfMs == 0,

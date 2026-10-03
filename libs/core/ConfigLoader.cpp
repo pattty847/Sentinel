@@ -157,6 +157,13 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
             readScalar(ob, "tick_size", cfg.orderbook.tickSize);
             readScalar(ob, "band_pct", cfg.orderbook.bandPct);
         }
+        if (const auto shadow = serverRoot["roller_shadow"]) {
+            readScalar(shadow, "enabled", cfg.rollerShadow.enabled);
+            readScalar(shadow, "journal_dir", cfg.rollerShadow.journalRoot);
+            readScalar(shadow, "dir", cfg.rollerShadow.outputRoot);
+            readScalar(shadow, "socket", cfg.rollerShadow.socketPath);
+            readScalar(shadow, "from", cfg.rollerShadow.from);
+        }
         if (serverRoot["recording"]) {
             auto rec = serverRoot["recording"];
             readScalar(rec, "enabled", cfg.recording.enabled);

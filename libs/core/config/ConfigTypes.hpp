@@ -1,4 +1,5 @@
 #pragma once
+#include "roller/ShadowConfig.hpp"
 #include <utility>
 
 #include <algorithm>
@@ -129,6 +130,7 @@ struct ServerConfig {
     ServerTradingConfig trading;
     ServerTlsConfig tls;
     ServerRecordingConfig recording;
+    sentinel::roller::ShadowConfig rollerShadow;
     uint16_t streamPort = 8080;
     std::vector<std::string> defaultSymbols{"BTC-USD"};
 };
