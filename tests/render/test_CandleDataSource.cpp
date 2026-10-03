@@ -280,6 +280,38 @@ TEST_F(CandleDataSourceTest, MissingBookSnapshotRetriesOnceThenReportsStale) {
     EXPECT_EQ(pendingBookCount(), 0u);
 }
 
+TEST_F(CandleDataSourceTest, DisconnectClearsStaleBookStatusBeforeFreshSnapshot) {
+    source.subscribe("BTC-USD");
+    ASSERT_EQ(takeRequest().at("type"), "subscribe");
+    std::vector<bool> staleChanges;
+    QObject::connect(&source, &IGridDataSource::bookSnapshotStaleChanged, &source,
+        [&](const QString& symbol, bool stale) {
+            if (symbol == "BTC-USD") staleChanges.push_back(stale);
+        });
+    const auto deadline = bookDeadline("BTC-USD");
+    advanceBookDeadline(deadline);
+    ASSERT_EQ(takeRequest().at("type"), "subscribe");
+    advanceBookDeadline(deadline + 5000);
+    ASSERT_TRUE(source.isBookSnapshotStale("BTC-USD"));
+    ASSERT_EQ(staleChanges, (std::vector<bool>{true}));
+
+    client().disconnected();
+    deliver();
+    EXPECT_FALSE(source.isBookSnapshotStale("BTC-USD"));
+    EXPECT_EQ(pendingBookCount(), 0u);
+    EXPECT_EQ(staleChanges, (std::vector<bool>{true, false}));
+
+    client().connected();
+    deliver();
+    source.subscribe("BTC-USD");
+    ASSERT_EQ(takeRequest().at("type"), "subscribe");
+    bookSnapshot(300.0, 301.0);
+    deliver();
+    EXPECT_FALSE(source.isBookSnapshotStale("BTC-USD"));
+    EXPECT_EQ(pendingBookCount(), 0u);
+    EXPECT_EQ(staleChanges, (std::vector<bool>{true, false}));
+}
+
 TEST_F(CandleDataSourceTest, StaleL2RequestsFreshSnapshotsWithBoundedBackoff) {
     source.subscribe("BTC-USD");
     ASSERT_EQ(takeRequest().at("type"), "subscribe");
