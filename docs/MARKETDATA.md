@@ -442,6 +442,84 @@ actual live final can still correct it. Attempt state is bounded by the column c
 reset with the projection generation. This repairs finals missed through prolonged transport
 congestion without an unbounded server replay queue or a permanent oldest-bucket retry loop.
 
+## Live trade rows and chart bubbles
+
+Coinbase `market_trades` -> `MarketDataCoreEngine::processTrades` -> queued
+`ServerDataModel::onTrade` -> `tradeBroadcast` -> stream Session `on_trade` ->
+Sentinel wire `type:"trade"` -> `SentinelStreamClient::tradeReceived` -> queued
+`RemoteGridDataSource` -> queued `UnifiedGridRenderer::onTradeReceived`.
+The existing live wire carries `product_id`, `price`, `size`, `side`, and RFC3339
+`time`; it now also carries `trade_id` and `side_basis:"aggressor"`. These additive
+fields do not require a server upgrade for bubbles: older servers already send time.
+The client now preserves exchange time and ID instead of discarding them.
+Invalid/missing time stays zero and cannot produce a bubble.
+
+**Side contract:** since the trade-side fix the engine converts Coinbase's maker `side` to
+the aggressor side once at ingest, and trade frames carry `side_basis:"aggressor"` (see the
+trade side section at the top of this file). The client uses `side` as-is when
+`side_basis` is `"aggressor"`; an unmarked frame from an older server is treated as maker and
+flipped (maker sell -> aggressor buy, maker buy -> aggressor sell); unknown side/basis stays
+unknown. Server footprint delta is aggressor-based.
+
+The GPU chart retains the newest 100,000 valid executions by event time in a fixed,
+time-ordered ring for its selected symbol, including while Trades is off. Normal
+append is O(1); late executions use ordered insertion. Binary searches bound the
+render scan to the visible half-open time window. Individual quote notionals are
+filtered before layout: up to 4,096 qualifying trades draw separately; overflow
+uses side-specific 6 px bins, widening only if occupied bins exceed the circle cap
+(see [bubble display semantics](AGENT_API.md#trade-bubbles-gpu-chart)). Larger
+circles draw before smaller ones. Layout scratch and QSG vertices are preallocated.
+Normal screen-sized fine grids use direct indexing; larger grids use avalanched
+integer cell keys (never masked `std::hash<double>` mantissa bits). Fine occupancy
+is built once; coarser sizes operate only on occupied cells and stop at the first
+fitting 6 px multiple. Tests bound hash probes/cell visits and verify the smallest
+supported grid against an independent raw-row occupancy oracle.
+
+A full chart tape, ID index, layout scratch and bubble geometry use roughly
+**16–18 MB per chart** with short exchange IDs (about 18 MB with the current fine
+cell index); longer IDs and allocator overhead can increase this. The tape is
+retained while Trades is off. Scratch/geometry is allocated once per scene-graph
+root, with one bubble mesh regardless of layer order.
+
+`TradeBubbleOverlayItem` is a sibling of UGR and the candle item: z=2.5 by default,
+or z=1.5 when `tradesAboveCandles=false` (heatmap z=1, candles z=2). UGR publishes
+plain C++ frame values; the sibling consumes them via a direct
+[`afterSynchronizing`](https://doc.qt.io/qt-6/qquickwindow.html#afterSynchronizing)
+callback after all item updates, while the GUI thread is blocked. Render callbacks
+retain shared C++ data and typed node links, never traverse GUI QObject graphs;
+root destruction clears its node link, and moving windows creates a separate link.
+An unchanged visible set at unchanged scale reuses the mesh, with a clipped QSG
+translation for horizontal follow-live pan (price changes rebuild); out-of-window appends do not rebuild it.
+
+Session history survives timeframe/renderer changes and same-symbol reconnects;
+symbol switches clear it. This is partial observed-session coverage, not a raw
+trade-history service. Coinbase subscribe snapshots/reconnects can replay recent
+executions. The chart deduplicates nonempty `trade_id` values against IDs in its
+retained ring, independent of payload differences. Eviction also expires the ID;
+clear/symbol switch resets the ID namespace. The ID set is bounded to 100,000 rows
+and allocates only at GUI ingestion, never during rendering. Missing IDs remain
+separate rows (time/price/size equality cannot establish execution identity), so
+legacy producers can still cause duplicate bubbles on reconnect.
+
+History sources today:
+- `ServerDataModel::m_recentFootprintTrades`: server-global RAM, retention
+  `clamp(2 * maxConfiguredTimeframe * max(1024, gridWidth), 5 min, 24 h)`;
+  `collectOverlayTrades` copies bounded windows for aggregate publishers only.
+- `TradeOverlayPublisher`: footprint/VP aggregates and TPO letters; TPO's older
+  REST-candle range fallback contains no individual executions, sizes or sides.
+  `trade_overlay` is also the error context, not a raw-row response family.
+- `TickBinaryLogger`: hourly binary trades under `data/market`, but no existing
+  stream-server reader/serving endpoint uses them for trade history.
+- RAWL2 capture under `/Volumes/T7/sentinel-data/raw-l2`: durable raw trade source;
+  the one-world roller slices B-D own its serving path. This feature neither reads
+  those files from the GUI nor starts another history service.
+
+Cheapest durable extension: page event-time executions (ID, price, base size,
+normalized aggressor, symbol/selection identity and explicit coverage) from the
+roller's trade store on the existing bounded history workers. Feed the bounded
+chart tape/aggregation input, deduplicate by trade ID across live/history and report
+coverage/evictions. Do not reconstruct executions from footprint or candle data.
+
 ## Independent trade-overlay publication
 
 Footprint, TPO and volume profile no longer run from `heatmap_slice` callbacks.

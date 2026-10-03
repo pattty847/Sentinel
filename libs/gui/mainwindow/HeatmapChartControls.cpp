@@ -163,6 +163,25 @@ void HeatmapChartControls::buildChartMenu() {
     add(menu, "Heatmap settings...", "chartMenuHeatmapSettings",
         m_hooks.openSettings ? std::function<void()>([this] { m_hooks.openSettings("Look"); }) : nullptr);
     menu->addSeparator();
+    QAction *trades = add(menu, "Trades", "chartMenuTrades", [this] {
+        const auto error = m_model->apply({{"showTrades", !m_model->settings().showTrades}});
+        if (!error.isEmpty()) sLog_Warning("Trades toggle rejected: " << error);
+    });
+    trades->setCheckable(true);
+    trades->setToolTip("Live session trades; buy uses the bid colour, sell the ask colour. No backfill.");
+    QMenu *tradeSize = menu->addMenu("Minimum trade notional (quote)");
+    tradeSize->setObjectName("chartMenuTradeSize");
+    auto *tradeGroup = new QActionGroup(tradeSize);
+    for (double value : {0., 100., 1000., 10000., 100000.}) {
+        QAction *a = add(tradeSize, value == 0 ? "All sizes" : QString::number(value, 'f', 0),
+                         "chartMenuTradeSizePreset", [this, value] {
+            const auto error = m_model->apply({{"tradeMinNotional", value}});
+            if (!error.isEmpty()) sLog_Warning("Trade size rejected: " << error);
+        });
+        a->setCheckable(true);
+        a->setData(value);
+        tradeGroup->addAction(a);
+    }
     QAction *labels = add(menu, "Liquidity labels", "chartMenuLabels", [this] {
         requestLabels(!m_model->settings().showLabels);
     });
@@ -211,9 +230,17 @@ void HeatmapChartControls::refreshChartMenu() {
     QMenu *menu = m_toolbar ? m_toolbar->chartMenu() : nullptr;
     if (!menu) return;
     const auto &s = m_model->settings();
+    if (auto* sizes = menu->findChild<QMenu*>("chartMenuTradeSize"))
+        sizes->menuAction()->setEnabled(modeState().gpu);
     for (QAction *a : menu->findChildren<QAction *>()) {
         const QString name = a->objectName();
-        if (name == "chartMenuLabels") {
+        if (name == "chartMenuTrades") {
+            a->setChecked(s.showTrades);
+            a->setEnabled(modeState().gpu);
+        } else if (name == "chartMenuTradeSizePreset") {
+            a->setChecked(s.tradeMinNotional == a->data().toDouble());
+            a->setEnabled(modeState().gpu);
+        } else if (name == "chartMenuLabels") {
             a->setChecked(s.showLabels);
             a->setVisible(modeState().gpu); // hidden in legacy (it always draws its own labels), as the toolbar
         }

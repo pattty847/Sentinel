@@ -34,6 +34,7 @@
 #include <QGuiApplication>
 #include <QQmlContext>
 #include <QQmlEngine>
+#include "render/TradeBubbleOverlayItem.hpp"
 #include <QQuickView>
 #include <QQuickWindow>
 #include <QSGOpacityNode>
@@ -149,6 +150,24 @@ protected:
                 if (rendered) ++*rendered;
             }
             if (done()) return true;
+        }
+        return false;
+    }
+    // True once no frame was requested for quietMs (within maxMs): the scene
+    // went idle. Frames rendered meanwhile are counted in *rendered.
+    bool pumpUntilQuiet(int quietMs, int maxMs, int *rendered = nullptr) {
+        QElapsedTimer total, quiet;
+        total.start();
+        quiet.start();
+        while (total.elapsed() < maxMs) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+            if (scene->frameRequested()) {
+                image = scene->renderFrame(&error);
+                if (image.isNull()) return false;
+                if (rendered) ++*rendered;
+                quiet.restart();
+            }
+            if (quiet.elapsed() >= quietMs) return true;
         }
         return false;
     }
@@ -613,10 +632,15 @@ TEST_F(UgrGpu, NodeWorkGetsItsFramesWithoutOutsideRedraws) {
     ASSERT_TRUE(pumpOnRequest(15'000, [&] { return layer().settled(); }, &rendered))
         << "uploads stalled (frames rendered: " << rendered << ")";
     EXPECT_GE(rendered, 2) << "budgeted uploads took more than one frame";
-    // Idle: no more frame requests.
+    // Idle: frame requests stop. Settle leaves bounded one-shot stragglers whose
+    // timing depends on the machine (the afterRendering wantsFrame hand-off, its
+    // sceneChanged echo under QQuickRenderControl, the final picture's label
+    // signature redraw), so the check is a quiet window, not a count inside a
+    // fixed 500 ms: a chart that keeps asking never goes quiet.
     rendered = 0;
-    pumpOnRequest(500, [] { return false; }, &rendered);
-    EXPECT_LE(rendered, 2) << "an idle chart stops asking for frames";
+    EXPECT_TRUE(pumpUntilQuiet(400, 3000, &rendered))
+        << "the idle chart kept asking for frames (" << rendered << " in 3 s)";
+    EXPECT_LE(rendered, 3) << "an idle chart stops asking for frames";
 }
 
 // Review major 4: follow-live activation returns to the live anchor (the
@@ -1674,6 +1698,7 @@ TEST(LocalChunkTransportFaults, ARuntimeErrorBecomesAFailedReplyAndTheWorkerSurv
 int main(int argc, char **argv) {
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "offscreen");
     QGuiApplication app(argc, argv);
+    lab::selectQuickSceneGraph(); // before any QQuickWindow: Qt fixes the backend at the first one
     Q_INIT_RESOURCE(sentinel_ui_fonts);
     qmlRegisterModule("Sentinel", 1, 0);
     qmlRegisterType<UnifiedGridRenderer>("Sentinel", 1, 0, "UnifiedGridRenderer");
@@ -1686,6 +1711,7 @@ int main(int argc, char **argv) {
     qmlRegisterModule("Sentinel.Charts", 1, 0);
     qmlRegisterType<LabTextItem>("Sentinel.Charts", 1, 0, "LabTextItem");
     qmlRegisterType<CandlestickBatched>("Sentinel.Charts", 1, 0, "CandlestickBatched");
+    qmlRegisterType<TradeBubbleOverlayItem>("Sentinel.Charts", 1, 0, "TradeBubbleOverlayItem");
     qmlRegisterType<CandlestickOverlayItem>("Sentinel.Charts", 1, 0, "CandlestickOverlayItem");
     ::testing::InitGoogleTest(&argc, argv);
     std::cout << "[sentinel] " << lab::describeRhi().toStdString() << std::endl;

@@ -159,6 +159,13 @@ Rectangle {
         z: 2
     }
 
+    TradeBubbleOverlayItem {
+        objectName: "tradeBubbleOverlay"
+        anchors.fill: unifiedGridRenderer
+        renderer: unifiedGridRenderer
+        z: unifiedGridRenderer.tradesAboveCandles ? 2.5 : 1.5
+    }
+
     AlgoOverlayRenderer {
         id: algoOverlayRenderer
         objectName: "algoOverlayRenderer"

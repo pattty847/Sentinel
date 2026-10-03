@@ -154,6 +154,7 @@ struct TradeRow {
     QString id;
     QString side = "unknown";
     double price = 0, qty = 0;
+    std::optional<qint64> eventTimeMs;
 };
 struct TradeSummary {
     quint64 count = 0;

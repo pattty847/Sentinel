@@ -1,5 +1,6 @@
 #include "RhiBackend.hpp"
 #include <QOffscreenSurface>
+#include <QQuickWindow>
 #include <rhi/qrhi.h>
 #include <rhi/qrhi_platform.h>
 #include <cstdio>
@@ -209,6 +210,22 @@ bool HeadlessRhi::create(bool timestamps) {
 
 std::string HeadlessRhi::skipReason() const {
     return ("GPU case skipped: " + error).toStdString();
+}
+
+bool selectQuickSceneGraph(QString *error) {
+    // Once per process: Qt keeps the request globally, and a repeat after the
+    // first QQuickWindow would only warn ("Scenegraph already initialized").
+    static bool selected = false;
+    if (selected) return true;
+    const RhiSelection selection = selectedRhiBackend();
+    if (!selection.valid) {
+        if (error) *error = selection.error;
+        return false;
+    }
+    QQuickWindow::setSceneGraphBackend(QStringLiteral("rhi"));
+    QQuickWindow::setGraphicsApi(selection.backend.graphicsApi);
+    selected = true;
+    return true;
 }
 
 QString gpuUnavailableReason() {

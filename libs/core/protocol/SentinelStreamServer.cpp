@@ -1496,6 +1496,7 @@ public:
                     : trade.side == AggressorSide::Sell ? "sell" : "unknown";
         j["side_basis"] = "aggressor";
         j["time"] = Cpp20Utils::formatExchangeTimestamp(trade.timestamp);
+        j["trade_id"] = trade.trade_id;
         
         do_write(j.dump());
     }

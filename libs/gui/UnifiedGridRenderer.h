@@ -38,6 +38,7 @@
 #include "render/IOverlayRenderer.hpp"
 #include "render/HeatmapOverlayRenderer.hpp"
 #include "render/FootprintOverlayRenderer.hpp"
+#include "render/TradeBubbleFrame.hpp"
 #include "render/TpoOverlayRenderer.hpp"
 #include "render/VolumeProfileRenderer.hpp"
 
@@ -57,6 +58,7 @@ class QQuickWindow;
 class QScreen;
 
 class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
+    friend struct TradeBubbleRendererTest;
     Q_OBJECT
     Q_INTERFACES(ITimeAxisMappingProvider)
     QML_ELEMENT
@@ -96,6 +98,7 @@ class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     Q_PROPERTY(double minPrice READ getMinPrice NOTIFY viewportChanged)
     Q_PROPERTY(double maxPrice READ getMaxPrice NOTIFY viewportChanged)
     Q_PROPERTY(double heatmapTickSize READ heatmapTickSize NOTIFY heatmapTickSizeChanged)
+    Q_PROPERTY(bool tradesAboveCandles READ tradesAboveCandles NOTIFY tradeBubbleSettingsChanged)
     Q_PROPERTY(bool gpuHeatmapActive READ gpuHeatmapActive NOTIFY heatmapRendererChanged)
 
     Q_PROPERTY(int timeframeMs READ getCurrentTimeframe WRITE setTimeframe NOTIFY timeframeChanged)
@@ -206,6 +209,12 @@ private:
     std::vector<uint16_t> m_labelIntensityRing;
     std::vector<double> m_labelLiquidityScales;
     std::unique_ptr<AxisTextService> m_axisTextService;
+    std::shared_ptr<trade_bubbles::Tape> m_tradeBubbleTape = std::make_shared<trade_bubbles::Tape>();
+    std::shared_ptr<trade_bubbles::RenderFrame> m_tradeBubbleFrame = std::make_shared<trade_bubbles::RenderFrame>(m_tradeBubbleTape);
+    bool m_tradesAboveCandles = true;
+    bool m_showTrades = false;
+    double m_tradeMinNotional = 0;
+    QColor m_tradeBuyColor, m_tradeSellColor;
     FootprintOverlayRenderer m_footprintOverlay;
     TpoOverlayRenderer m_tpoOverlay;
     VolumeProfileRenderer m_vpRenderer;
@@ -317,6 +326,9 @@ public:
     // (DataProcessor::setHeatmapEnabled(false)) and draws HeatmapTileNode; legacy
     // unmutes it and re-publishes the viewport.
     void setHeatmapRenderer(const QString& renderer);
+    bool tradesAboveCandles() const { return m_tradesAboveCandles; }
+    // GUI-thread binding only; render callbacks retain the plain C++ state.
+    std::shared_ptr<trade_bubbles::RenderFrame> tradeBubbleRenderFrame() const { return m_tradeBubbleFrame; }
     bool gpuHeatmapActive() const { return m_gpuHeatmap; }
     // Chart settings (tick policy, palette, sensitivity, budgets). The palette and
     // sensitivity also apply to the legacy renderer so A/B colours match.
@@ -500,6 +512,7 @@ signals:
     void panVisualOffsetChanged();
     void heatmapTickSizeChanged();
     void heatmapRendererChanged();
+    void tradeBubbleSettingsChanged();
     void axisSourcesChanged();
     void axisLayoutChanged();
     void candleBufferChanged();
@@ -527,6 +540,7 @@ private:
     // gpu mode: a plain QSGNode root whose first child is an opacity node holding
     // the HeatmapTileNode (opacity 0 blocks it while the heatmap layer is off);
     // overlays and text follow it as later children (drawn on top).
+    void publishTradeBubbleFrame(const TimeAxisMapping& mapping);
     QSGNode* ensureGpuRootNode(QSGNode* oldNode, heatmap::gpu::HeatmapTileNode** tile);
     QSGNode* updateGpuPaintNode(QSGNode* oldNode, FrameContext& frame, bool profile);
     void updateGpuLabels(const FrameContext& frame, bool prepared);

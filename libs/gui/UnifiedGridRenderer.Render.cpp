@@ -480,7 +480,7 @@ QSGNode* UnifiedGridRenderer::ensureGpuRootNode(QSGNode* oldNode, heatmap::gpu::
         delete oldNode; // the legacy HeatmapIntensityNode root and its children
         oldNode = nullptr;
     }
-    QSGNode* root = oldNode;
+    auto* root = oldNode;
     if (!root) {
         root = new QSGNode();
         auto* gate = new QSGOpacityNode();
@@ -601,6 +601,9 @@ QSGNode* UnifiedGridRenderer::updateGpuPaintNode(QSGNode* oldNode, FrameContext&
     std::vector<FootprintOverlayRenderer::PendingUpload> footprintUploads;
     m_footprintOverlay.drainPending(footprintUploads);
     if (profile) m_frameProfiler.mark(FrameProfiler::Uploads);
+    // Qt blocks the GUI thread here: read chart-owned tape/settings only,
+    // never traverse the QObject graph from the node or its shader.
+    publishTradeBubbleFrame(frame.mapping);
     renderTradeOverlays(root, frame, frame.overlays.footprint, frame.overlays.tpo, footprintUploads);
     if (profile) m_frameProfiler.mark(FrameProfiler::Overlays);
 
@@ -620,8 +623,17 @@ QSGNode* UnifiedGridRenderer::updateGpuPaintNode(QSGNode* oldNode, FrameContext&
     return root;
 }
 
+void UnifiedGridRenderer::publishTradeBubbleFrame(const TimeAxisMapping& mapping) {
+    m_tradeBubbleFrame->mapping = mapping;
+    m_tradeBubbleFrame->enabled = m_showTrades;
+    m_tradeBubbleFrame->minNotional = m_tradeMinNotional;
+    m_tradeBubbleFrame->buy = m_tradeBuyColor;
+    m_tradeBubbleFrame->sell = m_tradeSellColor;
+}
+
 QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) {
     Q_UNUSED(data)
+    m_tradeBubbleFrame->enabled = false; // Also covers legacy/invalid surfaces.
     if (width() <= 0 || height() <= 0 || !m_useGpuHeatmap) {
         return oldNode;
     }

@@ -89,13 +89,61 @@ curl -s -H 'Content-Type: application/json' -d '{"kind":"wheel","target":"chart"
 curl -s 'http://127.0.0.1:17100/api/v1/screenshot?name=wheel&target=heatmap&afterOperation=o3&waitMs=5000'
 ```
 
+## Trade bubbles (GPU chart)
+
+The toolbar gear menu has **Trades** (off by default) and **Minimum trade notional
+(quote)** presets: all sizes, 100, 1,000, 10,000 and 100,000. Notional is price times
+asset size, in the pair's quote currency (USD for BTC-USD, ETH-USD, etc.).
+The same per-chart/named-layout settings are exposed in `heatmap/state` under
+`settings.showTrades` and `settings.tradeMinNotional`. Set them through:
+
+```json
+{"showTrades":true,"tradeMinNotional":1000,"persist":false}
+```
+
+POST this to `/api/v1/heatmap/settings`; `persist` defaults to true, and the normal
+operation/render acknowledgement applies. `showTrades` is boolean;
+`tradeMinNotional` accepts finite numbers clamped to 0..1e12. Arbitrary thresholds
+are available through the API; the menu checks a preset only for an exact match.
+Controls are disabled in legacy mode, and their settings survive a renderer switch.
+
+Bubbles use exchange time and execution price. **Trades above candles** in the
+Chart tab defaults on (`settings.tradesAboveCandles: true`): translucent executions
+remain visible over opaque candle bodies. Set `tradesAboveCandles` to `false` in
+`POST /api/v1/heatmap/settings` for the previous order below candles. This boolean
+persists per chart/named layout, supports `persist:false`, and resets with the Chart
+tab. Both orders remain above the heatmap and below algo/order overlays.
+Buy uses the bid palette endpoint; sell uses the ask endpoint, both at 60% opacity,
+with a one-screen-pixel darker ring for contrast over same-colour walls.
+Area scales with summed quote notional: radius = min(18, 3 * sqrt(notional/1000))
+logical pixels. The threshold filters **individual trades before aggregation**.
+Up to 4,096 qualifying executions draw individually, even at identical coordinates.
+Above that count, each side aggregates independently into initially 6 px square bins,
+with a notional-weighted centre. If more than 4,096 side/bin pairs remain occupied,
+the renderer compacts the 6 px cells once, then selects the smallest **6 px
+multiple** (6, 12, 18, …) that fits. Impossible sizes are skipped using the fine-cell
+occupancy bound; candidates inspect cells rather than rescanning all executions.
+Thus 6 px is the fine-grid target, not a guaranteed maximum: widely spread overflow requires coarser bins to preserve
+all qualifying volume within the hard cap. Larger circles draw first so smaller
+executions stay on top, regardless of side or bin. Tiny trades can be subpixel.
+
+Coverage is **live chart-session history only**, retained even with Trades off:
+the latest 100,000 valid trades for the active symbol, surviving timeframe and
+renderer changes and same-symbol reconnects. Switching symbols/clearing the chart
+resets this tape. Subscribe/reconnect snapshots can replay recent trades: nonempty
+`trade_id` values are deduplicated against the retained tape. IDs expire with their
+rows; rows from older servers without IDs cannot be reliably deduplicated and may
+repeat. No request for durable or pre-subscription raw history exists;
+empty bubbles do not establish zero traded volume. The `/trades` evidence endpoint
+uses its separate 10,000-row/15-minute tape, so it is not the full bubble cache.
+
 ## Local evidence reads
 
 All three reads use the same `ok/meta/data` envelope as state and viewport, with UTC epoch milliseconds. `startMs,endMs` is half-open: a candle whose start equals `endMs` is excluded. Candles are copied from the GUI's local series only; a timeframe without a local series returns `422 timeframe_unavailable` and no history request is sent. `nextStartMs` is the actual start of the next retained bar, or `null`. Gaps in locally held history mean candle coverage remains `partial` when bars exist.
 
 Book levels are price/quantity pairs, bids descending and asks ascending. Missing best prices and spread are `null`. `bandLimited` is true because the replica only covers its configured band; `band` is null until it is initialized. A preallocated occupancy bitmap finds populated levels; the read examines at most 16,384 bitmap words (covering 1,048,576 price slots) per side under the book lock. If it cannot reach all requested levels, `scanLimited` and `meta.truncated` are true; a null best price in that case does not prove the full band side is empty. `receivedAtMs` is the GUI's most recent book receive time.
 
-Trades are held in a preallocated GUI ring, capped at 10,000 rows and 15 minutes. Each row has `receivedAtMs`, `eventTimeMs:null`, `id`, `side`, `price` and `qty`; `timeBasis` is `received` because wire event time is currently discarded. The summary counts and sums every retained trade in the requested window, even when `limit` returns fewer rows. `meta.truncated` marks that row limit; `retentionLimited` marks a capacity eviction inside the requested window. A symbol, timeframe or reconnect epoch change excludes prior epoch rows.
+Trades are held in a preallocated GUI ring, capped at 10,000 rows and 15 minutes. Each row has `receivedAtMs`, `eventTimeMs` (null when the server omits or sends an invalid exchange time), `id`, `side`, `price` and `qty`; `timeBasis` remains `received` for this endpoint's window and summary; `eventTimeMs` now preserves the exchange timestamp separately. Side is normalized to aggressor (buy/sell) at live-wire decode. The summary counts and sums every retained trade in the requested window, even when `limit` returns fewer rows. `meta.truncated` marks that row limit; `retentionLimited` marks a capacity eviction inside the requested window. A symbol, timeframe or reconnect epoch change excludes prior epoch rows.
 
 ## Heatmap walls
 

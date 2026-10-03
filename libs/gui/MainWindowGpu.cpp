@@ -1361,6 +1361,8 @@ void MainWindowGPU::connectMarketDataSignals() {
                 m_tradesReceivedAtMs = now;
                 AgentApi::TradeRow row;
                 row.receivedAtMs = now;
+                const auto eventMs = std::chrono::duration_cast<std::chrono::milliseconds>(trade.timestamp.time_since_epoch()).count();
+                if (eventMs > 0) row.eventTimeMs = eventMs;
                 row.selectionEpoch = m_agentApiSelectionEpoch;
                 row.id = QString::fromStdString(trade.trade_id);
                 row.side = trade.side == AggressorSide::Buy ? "buy" :

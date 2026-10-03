@@ -216,6 +216,7 @@ endif()
 # settings, the synthetic HMC2 recording for the GPU chart cases).
 find_package(Qt6 REQUIRED COMPONENTS Test Widgets)
 add_executable(test_heatmap_settings_ui test_heatmap_settings_ui.cpp)
+target_compile_definitions(test_heatmap_settings_ui PRIVATE SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_include_directories(test_heatmap_settings_ui PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_heatmap_settings_ui PRIVATE sentinel_gui_lib sentinel_lab_lib GTest::gtest Qt6::Test Qt6::Widgets Qt6::Quick)
 add_test(NAME HeatmapSettingsUiTests COMMAND test_heatmap_settings_ui)
@@ -296,3 +297,8 @@ target_include_directories(test_chart_ui PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${
 target_link_libraries(test_chart_ui PRIVATE sentinel_gui_lib sentinel_lab_lib GTest::gtest Qt6::Test Qt6::Widgets Qt6::Quick)
 add_test(NAME ChartUiTests COMMAND test_chart_ui)
 set_tests_properties(ChartUiTests PROPERTIES LABELS "render;heatmap;ui" TIMEOUT 300)
+
+add_executable(test_TradeBubbles test_TradeBubbles.cpp)
+target_link_libraries(test_TradeBubbles PRIVATE sentinel_gui_lib GTest::gtest_main)
+add_test(NAME TradeBubbleTests COMMAND test_TradeBubbles)
+set_tests_properties(TradeBubbleTests PROPERTIES LABELS "render")

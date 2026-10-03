@@ -14,7 +14,8 @@
 struct TradeOverlayWireTest {
     static void receive(SentinelStreamClient& client, const nlohmann::json& msg) {
         const auto type = msg.at("type");
-        if (type == "footprint_slice") client.handleFootprintSliceMessage(msg);
+        if (type == "trade") client.handleTradeMessage(msg);
+        else if (type == "footprint_slice") client.handleFootprintSliceMessage(msg);
         else if (type == "footprint_history_chunk") client.handleFootprintHistoryChunkMessage(msg);
         else if (type == "tpo_slice") client.handleTpoSliceMessage(msg);
         else if (type == "tpo_history_chunk") client.handleTpoHistoryChunkMessage(msg);
@@ -489,4 +490,31 @@ TEST_F(TradeOverlay, TpoHistoryChunkWithoutTheInFlightRequestIdIsDroppedBeforeAn
     EXPECT_EQ(slices, 2); EXPECT_EQ(replies, QStringList{"tpo-3-1"});
     TradeOverlayWireTest::receive(client, chunk);           // a duplicate is no longer expected
     EXPECT_EQ(slices, 2);
+}
+
+TEST_F(TradeOverlay, LiveTradeWirePreservesExchangeTimeAndNormalizesMakerSide) {
+    SentinelStreamClient client("127.0.0.1", "0");
+    Trade received{};
+    int count = 0;
+    QObject::connect(&client, &SentinelStreamClient::tradeReceived, &client,
+                     [&](const Trade& t) { received = t; ++count; });
+    nlohmann::json message{{"type","trade"},{"product_id","BTC-USD"},{"price",100.0},
+        {"size",2.0},{"side","sell"},{"time","2026-10-03T12:34:56.789123Z"},{"trade_id","123"}};
+    TradeOverlayWireTest::receive(client,message);
+    ASSERT_EQ(count,1);
+    EXPECT_EQ(received.product_id,"BTC-USD");
+    EXPECT_EQ(received.trade_id,"123");
+    EXPECT_EQ(received.price,100); EXPECT_EQ(received.size,2);
+    EXPECT_EQ(std::chrono::duration_cast<std::chrono::milliseconds>(received.timestamp.time_since_epoch()).count(),1791030896789LL);
+    EXPECT_EQ(received.side,AggressorSide::Buy);
+    message["side"]="buy";
+    TradeOverlayWireTest::receive(client,message);
+    EXPECT_EQ(received.side,AggressorSide::Sell);
+    message["side_basis"]="aggressor";
+    TradeOverlayWireTest::receive(client,message);
+    EXPECT_EQ(received.side,AggressorSide::Buy);
+    message["side"]="unknown"; message["time"]="bad";
+    TradeOverlayWireTest::receive(client,message);
+    EXPECT_EQ(received.side,AggressorSide::Unknown);
+    EXPECT_EQ(received.timestamp.time_since_epoch().count(),0);
 }

@@ -643,6 +643,7 @@ TEST_F(ChartLabels, DialogAndMenuSurviveTheRendererBeingDestroyed) {
 int main(int argc, char **argv) {
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication app(argc, argv);
+    lab::selectQuickSceneGraph(); // before any QQuickWindow: Qt fixes the backend at the first one
     Q_INIT_RESOURCE(sentinel_ui_fonts);
     ::testing::InitGoogleTest(&argc, argv);
     std::cout << "[sentinel] " << lab::describeRhi().toStdString() << std::endl;
