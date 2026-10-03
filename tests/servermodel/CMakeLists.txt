@@ -227,7 +227,7 @@ set_tests_properties(ServerMetricsTests PROPERTIES LABELS "servermodel")
 add_dependencies(servermodel_tests test_server_metrics)
 
 add_executable(test_server_feed_admission test_server_feed_admission.cpp)
-target_include_directories(test_server_feed_admission PRIVATE ${CMAKE_SOURCE_DIR}/libs/core ${CMAKE_SOURCE_DIR}/tests)
+target_include_directories(test_server_feed_admission PRIVATE ${CMAKE_SOURCE_DIR}/libs/core ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(test_server_feed_admission PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
 target_compile_definitions(test_server_feed_admission PRIVATE SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME ServerFeedAdmissionTests COMMAND test_server_feed_admission)

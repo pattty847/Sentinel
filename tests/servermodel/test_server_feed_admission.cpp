@@ -5,6 +5,7 @@
 #include "marketdata/auth/Authenticator.hpp"
 #include "marketdata/fixtures/fake_ws_transport.hpp"
 #include "ConfigLoader.hpp"
+#include "mainwindow/SymbolSubscriptionManager.hpp"
 #include <QCoreApplication>
 #include <QTemporaryDir>
 #include <QFile>
@@ -98,6 +99,8 @@ struct ServerFeedAdmissionTest : testing::Test {
     }
     void checkCap();
     void checkMetrics();
+    void checkGuiTenSwitches();
+    void checkGuiRefusal();
     static void deliver(SentinelStreamClient& client, const std::string& message) { client.handleMessage(message); }
 };
 
@@ -181,7 +184,64 @@ TEST_F(ServerFeedAdmissionTest, ClientReceivesStructuredRefusal) {
         [&](const QString& s, int c, const QString& m) { symbol = s; cap = c; message = m; });
     deliver(client, reply.dump());
     EXPECT_EQ(symbol, "XRP-USD"); EXPECT_EQ(cap, 2); EXPECT_FALSE(message.isEmpty());
+    QString acknowledged;
+    QObject::connect(&client, &SentinelStreamClient::subscriptionAcknowledged,
+        [&](const QString& s) { acknowledged = s; });
+    deliver(client, R"({"type":"ack","symbol":"ETH-USD"})");
+    EXPECT_EQ(acknowledged, "ETH-USD");
 }
+
+void ServerFeedAdmissionTest::checkGuiTenSwitches() {
+    // The fixture's cap is two. This exercises the same cap protocol with a
+    // tighter limit than production's eight and checks the real Session count.
+    auto s = session();
+    SymbolSubscriptionManager leases;
+    QString current;
+    for (int i = 0; i < 10; ++i) {
+        const QString next = QString("SYM%1-USD").arg(i);
+        const auto subscribe = leases.request("main", next);
+        ASSERT_EQ(subscribe.size(), 1);
+        ASSERT_EQ(subscribe[0].kind, SymbolSubscriptionManager::Action::Subscribe);
+        request(s, next.toStdString());
+        ASSERT_TRUE(s->subscriptions_.contains(next.toStdString()));
+        EXPECT_LE(server->m_symbolSubscriptions.size(), 2u);
+        if (!current.isEmpty()) EXPECT_TRUE(s->subscriptions_.contains(current.toStdString()));
+
+        const auto accepted = leases.acknowledged(next);
+        ASSERT_EQ(accepted.size(), i ? 2 : 1);
+        EXPECT_EQ(accepted[0].kind, SymbolSubscriptionManager::Action::Activate);
+        current = accepted[0].symbol;
+        if (i) {
+            EXPECT_EQ(accepted[1].kind, SymbolSubscriptionManager::Action::Unsubscribe);
+            request(s, accepted[1].symbol.toStdString(), "unsubscribe");
+        }
+        EXPECT_EQ(server->m_symbolSubscriptions.size(), 1u);
+        EXPECT_EQ(feeds->stats().size(), 3u); // two pinned plus one GUI feed
+    }
+}
+
+void ServerFeedAdmissionTest::checkGuiRefusal() {
+    auto gui = session(), other = session();
+    SymbolSubscriptionManager leases;
+    leases.request("main", "BTC2-USD");
+    request(gui, "BTC2-USD");
+    leases.acknowledged("BTC2-USD");
+    request(other, "OTHER-USD"); // fill the two GUI slots
+    const auto pending = leases.request("main", "NEW-USD");
+    ASSERT_EQ(pending.size(), 1);
+    const auto reply = request(gui, "NEW-USD");
+    EXPECT_EQ(reply.value("code", ""), "connection_cap");
+    const auto refused = leases.refused("new-usd");
+    ASSERT_EQ(refused.size(), 1);
+    EXPECT_EQ(refused[0].kind, SymbolSubscriptionManager::Action::Refused);
+    EXPECT_EQ(leases.held("main"), "BTC2-USD");
+    EXPECT_TRUE(gui->subscriptions_.contains("BTC2-USD"));
+    EXPECT_FALSE(gui->subscriptions_.contains("NEW-USD"));
+    EXPECT_EQ(server->m_symbolSubscriptions.size(), 2u);
+}
+
+TEST_F(ServerFeedAdmissionTest, GuiSwitchesTenSymbolsWithoutLeakingUpstreamSlots) { checkGuiTenSwitches(); }
+TEST_F(ServerFeedAdmissionTest, GuiRefusalLeavesOldServerSubscriptionAndChartLease) { checkGuiRefusal(); }
 
 TEST(ServerFeedConfig, DefaultOverrideAndInvalidCap) {
     EXPECT_EQ(ServerMdcConfig{}.maxConnections, 8);

@@ -154,6 +154,7 @@ signals:
     void disconnected();
     void errorOccurred(const QString& error);
     void subscriptionRefused(const QString& symbol, int maxConnections, const QString& message);
+    void subscriptionAcknowledged(const QString& symbol);
     void serverConfigReceived(const ServerConfig& config);
     
     void tradeReceived(const Trade& trade);

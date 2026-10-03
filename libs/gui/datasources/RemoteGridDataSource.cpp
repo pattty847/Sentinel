@@ -145,6 +145,8 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::subscriptionRefused,
             this, &IGridDataSource::subscriptionRefused, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::subscriptionAcknowledged,
+            this, &IGridDataSource::subscriptionAcknowledged, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::errorOccurred,
             this, &IGridDataSource::errorOccurred, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::orderUpdated,

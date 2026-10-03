@@ -32,3 +32,9 @@ target_compile_definitions(test_AgentHostMode PRIVATE SENTINEL_SOURCE_DIR="${CMA
 target_link_libraries(test_AgentHostMode PRIVATE GTest::gtest_main Qt6::Core)
 add_test(NAME AgentHostModeTests COMMAND test_AgentHostMode)
 set_tests_properties(AgentHostModeTests PROPERTIES LABELS "agentapi")
+
+add_executable(test_SymbolSubscriptionManager test_SymbolSubscriptionManager.cpp)
+target_include_directories(test_SymbolSubscriptionManager PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_SymbolSubscriptionManager PRIVATE GTest::gtest_main Qt6::Core)
+add_test(NAME SymbolSubscriptionManagerTests COMMAND test_SymbolSubscriptionManager)
+set_tests_properties(SymbolSubscriptionManagerTests PROPERTIES LABELS "agentapi")

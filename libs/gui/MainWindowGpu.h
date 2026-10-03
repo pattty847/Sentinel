@@ -22,6 +22,7 @@
 #include "render/heatmap/HeatmapSettingsModel.hpp"
 #include "mainwindow/LayoutOrchestrator.h"
 #include "datasources/IGridDataSource.hpp"
+#include "mainwindow/SymbolSubscriptionManager.hpp"
 #include "render/TpoHistoryPager.hpp"
 #include "../core/trading/TradingTypes.hpp"
 
@@ -97,6 +98,7 @@ private:
     void setWindowProperties();
     void setupGuiApiServer();
     bool subscribeSymbol(const QString& symbol);
+    void applySubscriptionActions(const QVector<SymbolSubscriptionManager::Action>& actions);
     void selectTimeframe(int ms);
     AgentApi::ControlApply agentApiApplyControl(const QString& kind, const AgentApi::ControlBody& body);
     QJsonObject agentApiHeatmapSnapshot() const;
@@ -160,6 +162,11 @@ private:
     QJsonObject m_lastSubscriptionRefusal;
     bool m_serverConfigReady = false;
     bool m_userSubscribed = false;
+    SymbolSubscriptionManager m_symbolSubscriptions;
+    QString m_refusedSymbol;
+    QString m_offlineRequestedSymbol;
+    bool m_initialSubscriptionAttempted = false;
+    bool m_symbolSelectionRequested = false;
     QString m_agentApiSessionId;
     quint64 m_agentApiSelectionEpoch = 1;
     std::optional<qint64> m_heatmapReceivedAtMs;
