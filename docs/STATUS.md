@@ -3,7 +3,7 @@
 Live state for whoever conducts the agents next (Claude or Codex). Update it when something
 lands, deploys or changes priority. Rules: `AGENTS.md`; loop: `docs/AGENT_WORKFLOW.md`.
 
-Last updated: 2026-10-03 ~13:30 EDT. Slice C (shadow roller, default off) and backlog fixes landed; widget audit written.
+Last updated: 2026-10-03 ~14:30 EDT. Slice C (shadow roller, default off), backlog fixes and pre-enable fixes landed; widget audit written.
 
 ## Running services (owner's Mac, launchd)
 
@@ -21,9 +21,9 @@ Last updated: 2026-10-03 ~13:30 EDT. Slice C (shadow roller, default off) and ba
 ## Next (priority order)
 
 1. Owner (Oct 4): pick from `docs/research/2026-10-widget-audit.md` (top 5 + deletion candidates); S8 = GO pending owner.
-2. Slice C landed `0a2e0bc` (`roller_shadow`, default off). BEFORE enabling: the 3-identical-failure cooldown trips on a transient capture outage (~7 s of 1-2-4 s backoff), so a capture redeploy pauses all products 10 min and pages; require a minimum streak wall time (~2 min) or `for: 10m` on `sentinel-roller-shadow-fault-cooldown`. Then deploy capture (carries the backlog ring-retry fix) and server with shadow on, soak 48 h at mismatch 0, then D (cutover), E (deletions).
+2. Slice C landed `0a2e0bc` (`roller_shadow`, default off). Pre-enable fixes landed `98e5b49` (cooldown needs a 2 min streak; fan-out poll/listener failures keep rings). Next, with the owner at the Mac: deploy capture (carries the backlog ring-retry fix) and server with shadow on, soak 48 h at mismatch 0, then D (cutover), E (deletions).
 3. S8: delete the legacy heatmap (Fable verdict GO).
-4. Backlog: owner GUI Agent API (17100) unauthenticated; GUI RSS ~1.5 GB after 10 min; fan-out poll/listener failures still clear all rings (CaptureFanout.cpp:429, Fable); flaky live test CaptureApplication.SeveralCliFormsUseSevenConnections... (6/7 products within 60 s); add safe dock screenshot targets to the GUI host before widget visual work; git remote moved to github.com/pattty847/Sentinel.git; TPO v2; cosmetics; compression lab; Parquet + DuckDB; Pi / cloud node.
+4. Backlog: owner GUI Agent API (17100) unauthenticated; GUI RSS ~1.5 GB after 10 min; persistent fan-out poll() error loops without sleeping (CaptureFanout.cpp:417, pre-existing, low); add safe dock screenshot targets to the GUI host before widget visual work; git remote moved to github.com/pattty847/Sentinel.git; TPO v2; cosmetics; compression lab; Parquet + DuckDB; Pi / cloud node.
 
 ## Owner preferences that shape the work
 
