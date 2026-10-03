@@ -117,9 +117,9 @@ int main(int argc, char *argv[])
     //                                   kills its holder at start, so a second process must not)
     for (int i = 1; i < argc; ++i)
         if (QByteArray(argv[i]) == "--no-screener") clientConfig.gui.startScreener = false;
-    QString agentProfileSettings;
+    QString agentDockProfileFile;
     for (int i = 1; i + 1 < argc; ++i)
-        if (QByteArray(argv[i]) == "--agent-host-profile") agentProfileSettings = QString::fromLocal8Bit(argv[i + 1]);
+        if (QByteArray(argv[i]) == "--agent-host-profile") agentDockProfileFile = QString::fromLocal8Bit(argv[i + 1]);
     for (int i = 1; i + 1 < argc; ++i) {
         const QByteArray flag(argv[i]), value(argv[i + 1]);
         if (flag == "--heatmap-renderer") {
@@ -132,7 +132,7 @@ int main(int argc, char *argv[])
             QString why;
             const QString binDir = QFileInfo(QString::fromLocal8Bit(argv[0])).absolutePath();
             if (!AgentHostMode::activate(QString::fromLocal8Bit(value), {QDir::currentPath(), binDir}, &why,
-                                         agentProfileSettings)) {
+                                         agentDockProfileFile)) {
                 sLog_Error("--agent-host refused: " << why);
                 fprintf(stderr, "sentinel-gui: --agent-host refused: %s\n", qPrintable(why));
                 return 2;

@@ -117,19 +117,33 @@ class HostTrust(unittest.TestCase):
         self.assertIn("BTC-USD", gh.SYMBOLS.split(","))
         self.assertTrue(all(re.fullmatch(r"[A-Z0-9]{2,20}-[A-Z0-9]{2,20}", x) for x in gh.SYMBOLS.split(",")))
 
-    def test_profile_persists_across_sessions_and_reset_clears_only_settings(self):
+    def test_only_dock_file_persists_across_sessions_and_reset_keeps_session_data(self):
         first = gh.gui_argv("/bin/gui", os.path.join(gh.SESSIONS_DIR, "one"), "gpu", 17130)
         second = gh.gui_argv("/bin/gui", os.path.join(gh.SESSIONS_DIR, "two"), "gpu", 17131)
         self.assertNotEqual(first[2], second[2])
         self.assertEqual(first[4], second[4])
-        os.makedirs(first[4])
-        saved = os.path.join(first[4], "Sentinel.ini")
-        with open(saved, "w") as f:
+        self.assertEqual(os.path.basename(first[4]), "docks.ini")
+        os.makedirs(os.path.dirname(first[4]))
+        with open(first[4], "w") as f:
             f.write("dock=heatmap")
-        shot = os.path.join(gh.SESSIONS_DIR, "one", "screenshots")
+        self.assertEqual(gh.prepare_profile(), first[4])
+        self.assertTrue(os.path.isfile(first[4]))
+        first_settings = os.path.join(first[2], "settings")
+        second_settings = os.path.join(second[2], "settings")
+        self.assertNotEqual(first_settings, second_settings)
+        os.makedirs(first_settings)
+        with open(os.path.join(first_settings, "Sentinel.ini"), "w") as f:
+            f.write("heatmap=changed")
+        self.assertFalse(os.path.exists(second_settings))
+        self.assertEqual(gh.prepare_profile(fresh=True), first[4])  # launch --fresh-profile
+        self.assertFalse(os.path.exists(first[4]))
+        with open(first[4], "w") as f:
+            f.write("dock=watchlist")
+        shot = os.path.join(first[2], "screenshots")
         os.makedirs(shot)
         self.assertEqual(gh.reset_profile(), {"ok": True, "profileReset": True})
-        self.assertFalse(os.path.exists(saved))
+        self.assertFalse(os.path.exists(first[4]))
+        self.assertTrue(os.path.exists(os.path.join(first_settings, "Sentinel.ini")))
         self.assertTrue(os.path.isdir(shot))
 
     def test_profile_refuses_forbidden_roots_and_symlink_escape(self):

@@ -10,7 +10,7 @@
 #include <gtest/gtest.h>
 
 // --agent-host: the GUI run by scripts/dev/gui-host.py for sandboxed agents. It must not capture
-// screen pixels, must keep screenshots in its session and QSettings in its isolated profile, and must not
+// screen pixels, must keep screenshots and general QSettings in its session, and must not
 // load code (QML) from agent-writable paths. These are the policy pieces that need no window.
 
 class AgentHostModeTest : public ::testing::Test {
@@ -87,20 +87,29 @@ TEST_F(AgentHostModeTest, SettingsAreIsolatedIntoTheSessionDirNotTheOwnersDomain
     EXPECT_FALSE(QFile::exists(QDir::homePath() + "/Library/Preferences/com.sentinel.AgentHostModeTestDomain.plist"));
 }
 
-TEST_F(AgentHostModeTest, ProfileSettingsSurviveDifferentSessionDirectories) {
+TEST_F(AgentHostModeTest, OnlyDockProfileSurvivesDifferentSessionDirectories) {
     QTemporaryDir dir;
-    const QString profile = dir.path() + "/profile/settings";
+    const QString profile = dir.path() + "/profile/docks.ini";
     QString error;
     ASSERT_TRUE(AgentHostMode::activate(dir.path() + "/first", {}, &error, profile)) << qPrintable(error);
     {
         QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "AgentHostProfileTest");
-        settings.setValue("docks/heatmap", true);
+        settings.setValue("heatmap/changed", true);
         settings.sync();
+    }
+    {
+        QSettings docks(profile, QSettings::IniFormat);
+        docks.setValue("agentApi/docks/visible", QVariantMap{{"heatmap", true}});
+        docks.sync();
     }
     AgentHostMode::resetForTests();
     ASSERT_TRUE(AgentHostMode::activate(dir.path() + "/second", {}, &error, profile)) << qPrintable(error);
     QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "AgentHostProfileTest");
-    EXPECT_TRUE(settings.value("docks/heatmap").toBool());
+    EXPECT_FALSE(settings.contains("heatmap/changed"));
+    EXPECT_TRUE(settings.fileName().startsWith(QFileInfo(dir.path()).canonicalFilePath() + "/second/settings/"))
+        << qPrintable(settings.fileName());
+    QSettings docks(profile, QSettings::IniFormat);
+    EXPECT_TRUE(docks.value("agentApi/docks/visible").toMap().value("heatmap").toBool());
     EXPECT_NE(AgentHostMode::screenshotDir(), dir.path() + "/first/screenshots");
 }
 
@@ -109,9 +118,28 @@ TEST_F(AgentHostModeTest, ProfileDirGetsSameForbiddenRootChecksAsSessionDir) {
     ASSERT_TRUE(QDir().mkpath(dir.path() + "/repo"));
     QString error;
     EXPECT_FALSE(AgentHostMode::activate(dir.path() + "/session", {dir.path() + "/repo"}, &error,
-                                          dir.path() + "/repo/settings"));
+                                          dir.path() + "/repo/docks.ini"));
     EXPECT_FALSE(QFileInfo::exists(dir.path() + "/session"));
-    EXPECT_FALSE(AgentHostMode::activate(dir.path() + "/session", {}, &error, "/Volumes/T7/profile/settings"));
+    EXPECT_FALSE(AgentHostMode::activate(dir.path() + "/session", {}, &error, "/Volumes/T7/profile/docks.ini"));
+    EXPECT_FALSE(AgentHostMode::activate(dir.path() + "/session", {}, &error,
+                                         QDir::homePath() + "/Library/Preferences/docks.ini"));
+}
+
+TEST_F(AgentHostModeTest, DockPersistencePolicyHonorsHostAndOwnerFlag) {
+    EXPECT_FALSE(AgentHostMode::dockChangesPersist(false));
+    EXPECT_TRUE(AgentHostMode::dockChangesPersist(true));
+    QTemporaryDir dir;
+    QString error;
+    ASSERT_TRUE(AgentHostMode::activate(dir.path(), {}, &error)) << qPrintable(error);
+    EXPECT_TRUE(AgentHostMode::dockChangesPersist(false));
+    EXPECT_TRUE(AgentHostMode::dockChangesPersist(true));
+}
+
+TEST(AgentHostModeSources, DockRouteUsesHostAwarePersistencePolicy) {
+    QFile file(QString(SENTINEL_SOURCE_DIR) + "/libs/gui/MainWindowGpu.cpp");
+    ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+    const QString source = QString::fromUtf8(file.readAll());
+    EXPECT_TRUE(source.contains("AgentHostMode::dockChangesPersist(body.persistDocks)"));
 }
 
 TEST_F(AgentHostModeTest, RefusesDirectoriesThatAreNotSafeAndLeavesModeInactive) {

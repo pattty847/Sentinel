@@ -1,11 +1,13 @@
 #include "mainwindow/DockVisibilityController.hpp"
 #include "mainwindow/GuiApiServer.h"
+#include "config/AgentHostMode.hpp"
 
 #include <QApplication>
 #include <QDockWidget>
 #include <QEventLoop>
 #include <QJsonDocument>
 #include <QSettings>
+#include <QTabBar>
 #include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -98,24 +100,22 @@ TEST(AgentApiDocks, RouteListsAndFocusesARealDockWindow) {
     QSettings::setDefaultFormat(previousFormat);
 }
 
-TEST(AgentApiDocks, IsolatedProfileRestoresAndTransientOwnerChangeDoesNotSave) {
+TEST(AgentApiDocks, HostedDockProfileRestoresWithoutSharingOtherSettings) {
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
-    const auto previousFormat = QSettings::defaultFormat();
-    QSettings::setDefaultFormat(QSettings::IniFormat);
-    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, dir.path());
-    QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, dir.path());
-    {
-        QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
-        settings.remove("agentApi/docks");
-        settings.sync();
-    }
+    const QString profile = dir.path() + "/profile/docks.ini";
+    QString error;
+    ASSERT_TRUE(AgentHostMode::activate(dir.path() + "/first", {}, &error, profile)) << qPrintable(error);
     {
         Window first;
-        first.docks.apply({}, "heatmap", true); // hosted mode always persists immediately
+        first.docks.apply({}, "heatmap", AgentHostMode::dockChangesPersist(false));
         QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
-        EXPECT_TRUE(settings.contains("agentApi/docks/visible"));
+        settings.setValue("heatmap/changed", true);
+        settings.sync();
+        EXPECT_FALSE(settings.contains("agentApi/docks/visible"));
     }
+    AgentHostMode::resetForTests();
+    ASSERT_TRUE(AgentHostMode::activate(dir.path() + "/second", {}, &error, profile)) << qPrintable(error);
     {
         Window next;
         next.docks.restore();
@@ -123,16 +123,97 @@ TEST(AgentApiDocks, IsolatedProfileRestoresAndTransientOwnerChangeDoesNotSave) {
         EXPECT_TRUE(visible.value("heatmap").toBool());
         EXPECT_FALSE(visible.value("orderBook").toBool());
         EXPECT_FALSE(visible.value("watchlist").toBool());
-        next.docks.apply(QJsonObject{{"orderBook", true}}, {}, false); // owner request without persist
-        next.docks.restoreBeforeSessionSave();
-        EXPECT_FALSE(next.docks.snapshot().value("orderBook").toBool());
+        QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
+        EXPECT_FALSE(settings.contains("heatmap/changed"));
     }
+    AgentHostMode::resetForTests();
+}
+
+TEST(AgentApiDocks, OwnerManualToggleAfterApiChangeSurvivesClose) {
+    QTemporaryDir dir;
+    const auto previousFormat = QSettings::defaultFormat();
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, dir.path());
+    QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, dir.path());
     {
-        Window last;
-        last.docks.restore();
-        EXPECT_FALSE(last.docks.snapshot().value("orderBook").toBool());
+        Window w;
+        w.docks.apply({}, "heatmap", false);
+        w.orderBook.toggleViewAction()->trigger(); // owner opens it by hand
+        w.orderBook.toggleViewAction()->trigger(); // then decides to leave it hidden
+        QApplication::processEvents();
+        w.docks.restoreBeforeSessionSave();
+        EXPECT_FALSE(w.docks.snapshot().value("orderBook").toBool());
+        EXPECT_TRUE(w.docks.snapshot().value("watchlist").toBool()); // untouched baseline restored
+        QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
+        EXPECT_FALSE(settings.contains("agentApi/docks/visible"));
     }
     QSettings::setDefaultFormat(previousFormat);
+}
+
+TEST(AgentApiDocks, FocusRedocksFloatingTargetAndRaisesTabbedTarget) {
+    Window w;
+    w.watchlist.setFloating(true);
+    QApplication::processEvents();
+    ASSERT_TRUE(w.watchlist.isFloating());
+    w.docks.apply({}, "watchlist", false);
+    QApplication::processEvents();
+    EXPECT_FALSE(w.watchlist.isFloating());
+    EXPECT_NE(w.main.dockWidgetArea(&w.watchlist), Qt::NoDockWidgetArea);
+    EXPECT_TRUE(w.docks.snapshot().value("watchlist").toBool());
+    EXPECT_FALSE(w.docks.snapshot().value("heatmap").toBool());
+    w.heatmap.show();
+    w.main.tabifyDockWidget(&w.watchlist, &w.heatmap);
+    w.watchlist.raise();
+    QApplication::processEvents();
+    QTabBar* dockTabs = nullptr;
+    for (auto* tabs : w.main.findChildren<QTabBar*>()) {
+        if (tabs->count() == 2 && tabs->tabText(0) == "Watchlist" && tabs->tabText(1) == "Heatmap") {
+            dockTabs = tabs;
+            break;
+        }
+    }
+    ASSERT_NE(dockTabs, nullptr);
+    EXPECT_EQ(dockTabs->tabText(dockTabs->currentIndex()), "Watchlist");
+    EXPECT_TRUE(w.docks.snapshot().value("heatmap").toBool()) << "an inactive tab remains shown";
+    w.docks.apply({}, "heatmap", false);
+    QApplication::processEvents();
+    EXPECT_EQ(dockTabs->tabText(dockTabs->currentIndex()), "Heatmap");
+    EXPECT_TRUE(w.docks.snapshot().value("heatmap").toBool());
+    EXPECT_FALSE(w.docks.snapshot().value("watchlist").toBool());
+    EXPECT_GE(w.heatmap.width(), 850);
+}
+
+TEST(AgentApiDocks, RestoreIgnoresStaleIdsAndMalformedValues) {
+    QTemporaryDir dir;
+    QString error;
+    const QString profile = dir.path() + "/profile/docks.ini";
+    ASSERT_TRUE(AgentHostMode::activate(dir.path() + "/session", {}, &error, profile)) << qPrintable(error);
+    {
+        QSettings saved(profile, QSettings::IniFormat);
+        saved.setValue("agentApi/docks/visible", QVariantMap{{"heatmap", true}, {"watchlist", false},
+                                                               {"retiredDock", false}, {"orderBook", "bad"}});
+        saved.sync();
+    }
+    Window w;
+    w.docks.restore();
+    const auto visible = w.docks.snapshot();
+    EXPECT_EQ(visible.size(), 3);
+    EXPECT_FALSE(visible.contains("retiredDock"));
+    EXPECT_FALSE(visible.value("watchlist").toBool());
+    EXPECT_TRUE(visible.value("orderBook").toBool());
+    {
+        QSettings saved(profile, QSettings::IniFormat);
+        saved.setValue("agentApi/docks/visible", QVariantMap{{"heatmap", false}, {"watchlist", false},
+                                                               {"orderBook", false}, {"retiredDock", true}});
+        saved.sync();
+    }
+    Window another;
+    another.docks.restore();
+    const auto afterStaleOnly = another.docks.snapshot();
+    EXPECT_TRUE(afterStaleOnly.value("heatmap").toBool());
+    EXPECT_TRUE(afterStaleOnly.value("orderBook").toBool());
+    EXPECT_TRUE(afterStaleOnly.value("watchlist").toBool());
+    AgentHostMode::resetForTests();
 }
 } // namespace
 

@@ -1559,7 +1559,7 @@ QJsonObject MainWindowGPU::agentApiHeatmapSnapshot() const {
 AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, const AgentApi::ControlBody& body) {
     AgentApi::ControlApply out;
     if (kind == "docks") {
-        const bool persist = AgentHostMode::active() || body.persistDocks;
+        const bool persist = AgentHostMode::dockChangesPersist(body.persistDocks);
         out.data["visible"] = m_dockVisibility->apply(body.dockVisible, body.dockFocus, persist);
         out.data["persist"] = persist;
         out.viewportVersion = agentApiViewportSnapshot().viewportVersion.value_or(0);

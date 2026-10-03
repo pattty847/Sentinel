@@ -3,7 +3,9 @@
 #include <QJsonObject>
 #include <QMainWindow>
 #include <QMap>
+#include <QMetaObject>
 #include <QString>
+#include <QVector>
 #include <optional>
 
 class QDockWidget;
@@ -12,6 +14,7 @@ class QDockWidget;
 class DockVisibilityController {
 public:
     explicit DockVisibilityController(QMainWindow* window) : m_window(window) {}
+    ~DockVisibilityController();
     void add(const QString& id, QDockWidget* dock);
     QJsonObject snapshot() const;
     QJsonObject apply(const QJsonObject& changes, const QString& focus, bool persist);
@@ -22,5 +25,8 @@ private:
     void save() const;
     QMainWindow* m_window;
     QMap<QString, QDockWidget*> m_docks;
+    QVector<QMetaObject::Connection> m_connections;
     std::optional<QJsonObject> m_unpersistedBaseline;
+    QJsonObject m_apiState;
+    bool m_applying = false;
 };
