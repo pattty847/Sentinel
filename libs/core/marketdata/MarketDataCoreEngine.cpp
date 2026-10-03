@@ -2,6 +2,7 @@
 #include "MarketDataCoreEngine.hpp"
 #include "SentinelLogging.hpp"
 #include "dispatch/MessageDispatcher.hpp"
+#include "dispatch/BookParser.hpp"
 #include "dispatch/Channels.hpp"
 #include "Cpp20Utils.hpp"
 #include <cmath>
@@ -349,21 +350,7 @@ void MarketDataCoreEngine::processTrades(const nlohmann::json& trades,
 
 Trade MarketDataCoreEngine::createTradeFromJson(const nlohmann::json& trade_data,
                                                 const std::chrono::system_clock::time_point& arrival_time) {
-    Trade trade;
-    trade.product_id = trade_data.value("product_id", "");
-    trade.trade_id = trade_data.value("trade_id", "");
-    trade.price = Cpp20Utils::fastStringToDouble(trade_data.value("price", "0"));
-    trade.size = Cpp20Utils::fastStringToDouble(trade_data.value("size", "0"));
-    const std::string side = trade_data.value("side", "");
-    trade.side = Cpp20Utils::fastSideDetection(side);
-    if (trade_data.contains("time")) {
-        std::string trade_timestamp_str = trade_data["time"];
-        trade.timestamp = Cpp20Utils::parseISO8601(trade_timestamp_str);
-    } else {
-        trade.timestamp = std::chrono::system_clock::now();
-    }
-    
-    return trade;
+    return MessageDispatcher::parseTrade(trade_data);
 }
 
 void MarketDataCoreEngine::handleOrderBookData(const nlohmann::json& message,
@@ -399,46 +386,11 @@ void MarketDataCoreEngine::handleOrderBookData(const nlohmann::json& message,
     }
 }
 
-namespace {
-// One L2 level: side, positive finite price, finite non-negative quantity (0 = remove).
-bool parseLevel(const nlohmann::json& update, bool& isBid, double& price, double& quantity) {
-    if (!update.is_object()) return false;
-    const auto side = update.find("side");
-    const auto priceIt = update.find("price_level");
-    const auto qtyIt = update.find("new_quantity");
-    if (side == update.end() || priceIt == update.end() || qtyIt == update.end() ||
-        !side->is_string() || !priceIt->is_string() || !qtyIt->is_string()) {
-        return false;
-    }
-    const std::string normalized = side_norm::normalize(side->get<std::string>());
-    if (normalized != "bid" && normalized != "ask") return false;
-    isBid = (normalized == "bid");
-    constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
-    price = Cpp20Utils::fastStringToDouble(priceIt->get_ref<const std::string&>(), kNaN);
-    quantity = Cpp20Utils::fastStringToDouble(qtyIt->get_ref<const std::string&>(), kNaN);
-    return std::isfinite(price) && price > 0.0 && std::isfinite(quantity) && quantity >= 0.0;
-}
-} // namespace
-
 void MarketDataCoreEngine::handleOrderBookSnapshot(const nlohmann::json& event,
                                                    const std::string& product_id,
                                                    const std::chrono::system_clock::time_point& exchange_timestamp) {
-    if (!event.contains("updates") || !event["updates"].is_array()) throw std::runtime_error("missing L2 updates");
-    std::vector<OrderBookLevel> sparse_bids;
-    std::vector<OrderBookLevel> sparse_asks;
-    int malformed = 0;
-    for (const auto& update : event["updates"]) {
-        bool isBid = false;
-        double price = 0.0;
-        double quantity = 0.0;
-        if (!parseLevel(update, isBid, price, quantity)) {
-            ++malformed;
-            continue;
-        }
-        if (quantity > 0.0) {
-            (isBid ? sparse_bids : sparse_asks).push_back(OrderBookLevel{price, quantity});
-        }
-    }
+    std::vector<OrderBookLevel> sparse_bids, sparse_asks;
+    const int malformed = sentinel::dispatch::parseSnapshot(event, sparse_bids, sparse_asks);
     if (malformed > 0) {
         reconnectNow("malformed snapshot entries=" + std::to_string(malformed));
         return;
@@ -461,21 +413,10 @@ void MarketDataCoreEngine::handleOrderBookSnapshot(const nlohmann::json& event,
 void MarketDataCoreEngine::handleOrderBookUpdate(const nlohmann::json& event,
                                                  const std::string& product_id,
                                                  const std::chrono::system_clock::time_point& exchange_timestamp) {
-    if (!event.contains("updates") || !event["updates"].is_array()) throw std::runtime_error("missing L2 updates");
     auto& levelUpdates = m_levelUpdates;
-    levelUpdates.clear();
-    levelUpdates.reserve(event["updates"].size());
-
-    for (const auto& update : event["updates"]) {
-        bool isBid = false;
-        double price = 0.0;
-        double quantity = 0.0;
-        if (!parseLevel(update, isBid, price, quantity)) {
-            // A level we cannot apply leaves the book in an unknown state.
-            reconnectNow("malformed update level");
-            return;
-        }
-        levelUpdates.push_back(BookLevelUpdate{isBid, price, quantity});
+    if (!sentinel::dispatch::parseUpdates(event, levelUpdates)) {
+        reconnectNow("malformed update level");
+        return;
     }
 
     if (!levelUpdates.empty()) {

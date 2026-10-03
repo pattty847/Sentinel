@@ -21,6 +21,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 - The Core may use QtCore (QObject/signals, QTimer, QByteArray, QString). It cannot have any Qt GUI, Quick, QML or scene-graph dependencies.
 - **`marketdata` / `coinbase`:** Owns the exchange connections and feed parsing (`MarketDataCoreEngine`).
 - **`servermodel`:** Owns the central state of the server. It aggregates high-frequency market data into GPU-ready heatmap slices and TWAP streams via the `TimeframeAggregator` and `HeatmapTwapStreamer`.
+- **`roller`:** Offline RAWL2 v1/v2 reading, shared journal feed parsing, daily product grids and deterministic BookRecorder driving/checkpoints. The batch converter owns no exchange connection; the live server path is unchanged in slice A. See [ROLLER.md](ROLLER.md).
 - **`heatmap`:** GUI-independent sparse heatmap model (`SparseColumns`, `TimeComposer`, `binCell`/`binColumn` CPU reference, `ChunkCodec`, `HeatmapResolution`); see "Sparse heatmap core model" below.
 - **`network` / `protocol`:** Owns the client-server websocket communication (`SentinelStreamClient`, `SentinelStreamServer`). See `docs/SENTINEL_STREAM_CLIENT.md` for the stream client’s role in prepping render objects.
 - **`trading`:** Owns simulated order execution, local order storage, position tracking, and the shared replay/paper-trading backtest core.
@@ -39,6 +40,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 **Ownership & Boundaries:**
 - **`sentinel-server`:** Minimal footprint CLI bootstrap that instantiates the Core data daemon.
 - **`sentinel_gui`:** Minimal footprint UI bootstrap that instantiates the Qt `QApplication` and connects to the server daemon.
+- **`sentinel-roll` / `hmc2_diff`:** Thin QtCore bootstraps for the core roller and decoded recording comparison; output policy and conversion logic live in `libs/core/roller`.
 - **`sentinel-backtest`:** Minimal CLI bootstrap that replays historical trade files through the shared trading simulation core.
 - **`sentinel-lab`:** Benchmark and inspection harness for the production heatmap GPU path (S5c): `LocalChunkTransport` -> `ChunkFetcher` -> `HeatmapSourceController` on a heatmap-data thread (`lab/LabData`) -> `HeatmapTileNode` in a plain `QQuickItem` (`lab/LabItem`). Headless `--screenshot`, `--window-screenshot`, `--tick-sweep`, `--tick-change-frames`, `--s5-bench` (vs the B1 hybrid) and the binner compute `--bench`; tick controls (Auto/Manual, `--hysteresis`, `--min-row-px`, `--tick`, `--zoom-rows-px`, `--no-crossfade`), `--end-utc` (a pinned closed range), `--band-edges` (E4) and `--charts`.
 

@@ -1,6 +1,12 @@
 project(sentinel_core)
 
 add_library(sentinel_core
+    roller/JournalReader.cpp
+    roller/JournalFeed.cpp
+    roller/Grid.cpp
+    roller/Roller.cpp
+    roller/Diff.cpp
+    roller/RollCli.cpp
     Cpp20Utils.hpp
     capture/RawCapture.cpp
     capture/CaptureRouting.cpp

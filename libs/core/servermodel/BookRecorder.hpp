@@ -44,6 +44,14 @@ struct RecorderConfig {
     // A valid book may stay one-sided this long (integration clock) before it is
     // invalidated as "one-sided book": a lasting empty side freezes the mid window.
     int64_t oneSidedGraceMs = 5'000;
+    // Offline journal mode only. Live defaults and overloads are unchanged.
+    bool blockingQueue = false;
+    // Test synchronization only, called under the queue mutex before blocking.
+    std::function<void()> beforeQueueWaitForTest;
+    bool deterministicResume = false;
+    int64_t commitFloorMs = 0; // exclusive end <= floor: rebuild, do not append
+    int64_t commitCeilingMs = kHmc2EndMs; // only complete buckets below this end
+
 };
 struct Level {
     bool isBid;
@@ -65,6 +73,12 @@ class BookRecorder {
     BookRecorder &operator=(const BookRecorder &) = delete;
     void onSnapshot(const std::string &symbol, int64_t envelopeMs, std::vector<Level> levels);
     void onUpdates(const std::string &symbol, int64_t envelopeMs, std::vector<Level> levels);
+    void onSnapshotAt(const std::string &symbol, int64_t envelopeMs, int64_t localMs, std::vector<Level> levels);
+    void onUpdatesAt(const std::string &symbol, int64_t envelopeMs, int64_t localMs, std::vector<Level> levels);
+    // Cancel blocked offline admission before joining producers and destroying.
+    // The destructor also requests stop; callers must not race object destruction.
+    void requestStop();
+    void drain(); // production fence: all preceding calls and durable writes completed
     void onInvalid(const std::string &symbol, int64_t localMs, std::string reason);
     void onTick(int64_t localNowMs);
     struct Stats {

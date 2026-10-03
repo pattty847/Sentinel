@@ -156,3 +156,6 @@ screenshots/
 # Local config overrides (loaded after config/*_config.yaml)
 config/.server_config.yaml
 config/.client_config.yaml
+
+# Offline roller outputs and reports (never source recordings)
+/roll-out/
