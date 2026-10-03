@@ -27,12 +27,14 @@ public:
         uint64_t revision = 0;
     };
     bool publish(RecordPtr record);
+    void releaseSymbol(const std::string &symbol);
     Snapshot snapshot(const std::string &symbol, const std::string &layer) const;
     std::optional<std::pair<std::string, std::string>> takeCapacityWarning();
     static constexpr size_t kMaxSeries = 128, kMaxRecords = 16, kMaxEntries = 262144;
 private:
     mutable std::mutex mutex_;
     std::map<std::pair<std::string, std::string>, Snapshot> series_;
+    uint64_t revisionFloor_ = 0; // Fresh lifetimes exceed retired revisions without retaining symbol names.
     bool warnedSeriesLimit_ = false;
     std::optional<std::pair<std::string, std::string>> capacityWarning_;
 };
@@ -170,6 +172,8 @@ public:
     };
     Diagnostics diagnostics() const;
     bool publish(RecordPtr record);
+    // Recorder-ordered cache cleanup; Session owns subscription retirement.
+    void releaseSymbol(const std::string &symbol);
     std::shared_ptr<Subscription> subscribe(LiveView view, Deliver deliver);
     std::shared_ptr<RawSubscription> subscribeRaw(RawTailView view, RawDeliver deliver);
 private:

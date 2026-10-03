@@ -58,11 +58,23 @@ MarketDataFeeds::AddResult MarketDataFeeds::add(const std::string& product, bool
             [limiter = m_options.limiter, ticket](int64_t now) { return limiter->acquire(now, ticket); },
             [limiter = m_options.limiter, ticket](int64_t now) { return limiter->acquire(now, ticket, true); },
             [limiter = m_options.limiter, ticket] { limiter->cancel(ticket); }, m_options.jitter);
-        engine->onTrade(m_trade); engine->onLiveOrderBookLevelUpdates(m_updates);
-        engine->onLiveOrderBookInitialized(m_snapshot); engine->onLiveOrderBookInvalidated(m_invalid);
-        engine->onConnectionStatus(m_status); engine->onError(m_error);
-        engine->onLatency(m_latency); engine->onIngest(m_ingest);
-        m_engines.emplace(product, Entry{engine, pinned});
+        // All callbacks run on the one I/O thread. Retired transport completions
+        // must not enter a later lifetime of the same product.
+        auto active = std::make_shared<bool>(true);
+        const auto guarded = [active](auto cb) {
+            return [active, cb = std::move(cb)](auto&&... args) {
+                if (*active && cb) cb(std::forward<decltype(args)>(args)...);
+            };
+        };
+        engine->onTrade(guarded(m_trade)); engine->onLiveOrderBookLevelUpdates(guarded(m_updates));
+        engine->onLiveOrderBookInitialized(guarded(m_snapshot)); engine->onLiveOrderBookInvalidated(guarded(m_invalid));
+        engine->onConnectionStatus(guarded(m_status)); engine->onError(guarded(m_error));
+        engine->onLatency(guarded(m_latency));
+        // Raw ingestion is an audit tap, including the retired socket's final
+        // transport-down marker. It is not a book/model consumer callback.
+        engine->onIngest(m_ingest);
+        m_engines.emplace(product, Entry{engine, pinned, active});
+        if (m_lifecycle) m_lifecycle(product, true);
         m_callbacksFrozen = true;
         if (m_started) engine->start();
         return AddResult::Added;
@@ -87,7 +99,9 @@ bool MarketDataFeeds::remove(const std::string& product) {
         auto it = m_engines.find(product);
         if (it == m_engines.end() || it->second.pinned) return false;
         auto engine = it->second.engine;
+        *it->second.active = false;
         m_engines.erase(it);
+        if (m_lifecycle) m_lifecycle(product, false);
         if (m_started) {
             auto done = std::make_shared<std::promise<void>>();
             m_retiring.push_back(done->get_future());

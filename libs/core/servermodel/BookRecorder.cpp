@@ -117,10 +117,10 @@ struct BookRecorder::Impl {
     RecorderConfig cfg;
     std::function<int64_t()> localClock;
     Hmc2Store store;
-    enum class Kind { Snapshot, Updates, Invalid, InvalidEnvelope, Tick };
+    enum class Kind { Snapshot, Updates, Invalid, InvalidEnvelope, Tick, Release };
     struct Message {
         Kind kind = Kind::Tick;
-        const std::string *symbolName = nullptr;
+        std::shared_ptr<const std::string> symbolName;
         std::string reason;
         const std::string &symbol() const {
             static const std::string allSymbols;
@@ -131,21 +131,21 @@ struct BookRecorder::Impl {
         bool upstream = false;        // Invalid from onInvalid(), not the recorder's own overflow control
         bool droppedSnapshot = false; // InvalidEnvelope that replaced a snapshot
     };
-    // Only the producer accesses this set. Its immutable strings have stable
-    // addresses, so even long symbols require no allocation on repeated enqueues.
-    std::set<std::string, std::less<>> producerSymbols;
-    const std::string *internSymbol(const std::string &name) {
+    // Only the producer accesses this map. Queued messages keep names alive
+    // across release; repeated data enqueues do not allocate symbol strings.
+    std::map<std::string, std::shared_ptr<const std::string>, std::less<>> producerSymbols;
+    std::shared_ptr<const std::string> internSymbol(const std::string &name) {
         auto it = producerSymbols.find(name);
         if (it == producerSymbols.end())
-            it = producerSymbols.emplace(name).first;
-        return &*it;
+            it = producerSymbols.emplace(name, std::make_shared<const std::string>(name)).first;
+        return it->second;
     }
     static constexpr size_t kQueueSlots = 4096;
     std::array<Message, kQueueSlots> queue;
     std::mutex mutex;
     std::condition_variable wake, drained, space;
     size_t head = 0, count = 0, queuedLevels = 0;
-    bool stopping = false, busy = false, emergency = false;
+    bool stopping = false, busy = false, emergency = false, releaseWaiting = false;
     int64_t emergencyLocal = 0;
     std::thread worker;
     std::map<std::string, std::unique_ptr<Symbol>> symbols;
@@ -211,6 +211,12 @@ struct BookRecorder::Impl {
             if (!ready() && cfg.beforeQueueWaitForTest) cfg.beforeQueueWaitForTest();
             space.wait(lock, ready);
             if (stopping) throw std::runtime_error("recorder stopped");
+        } else if (m.kind == Kind::Release && (count == kQueueSlots || emergency)) {
+            // A release must never turn into an overflow invalidation: that would
+            // retain the symbol forever. Only lifecycle control can backpressure.
+            releaseWaiting = true;
+            space.wait(lock, [&] { return count < kQueueSlots && !emergency; });
+            releaseWaiting = false;
         }
         if (emergency || count == kQueueSlots) {
             ++queueDrops;
@@ -270,6 +276,7 @@ struct BookRecorder::Impl {
             {
                 std::lock_guard lock(mutex);
                 busy = false;
+                if (releaseWaiting && !emergency) space.notify_one();
                 if (!count && !emergency)
                     drained.notify_all();
             }
@@ -638,8 +645,8 @@ struct BookRecorder::Impl {
             }
         }
     }
-    void commit(Symbol &s) {
-        while (!s.pending.empty() && s.pending.front().bucketStartMs + kMinute + cfg.latenessMs <= s.clock) {
+    void commit(Symbol &s, bool releasing = false) {
+        while (!s.pending.empty() && (releasing || s.pending.front().bucketStartMs + kMinute + cfg.latenessMs <= s.clock)) {
             auto r = std::move(s.pending.front());
             s.pending.pop_front();
             if (r.bucketStartMs + kMinute <= cfg.commitFloorMs ||
@@ -812,7 +819,44 @@ struct BookRecorder::Impl {
                                                        << " levels=" << m.levels.size());
         }
     }
+    void release(const Message &m) {
+        const auto it = symbols.find(m.symbol());
+        if (it != symbols.end()) {
+            auto &s = *it->second;
+            try {
+                if (s.initialized) {
+                    const auto t = std::clamp(m.time - s.offset, int64_t{0}, kMaxTime);
+                    expireOneSided(m.symbol(), s, t);
+                    advance(s, t);
+                    invalidate(m.symbol(), s, "feed released", true);
+                    // No future event belongs to this lifetime. Commit the tail
+                    // now without advancing observation or waiting for lateness.
+                    finishMinute(s);
+                    commit(s, true);
+                    for (size_t li = 0; li < s.layers.size(); ++li)
+                        if (cfg.layers[li].hourlyRollup && !s.layers[li].hourMinutes.empty())
+                            writeHour(s.layers[li]);
+                }
+            } catch (const std::exception &e) {
+                ++diskErrors;
+                sLog_Error("BookRecorder: release failed symbol=" << m.symbol() << " error=" << e.what());
+            }
+            // Cleanup also on persistence/publication failure; never resume a
+            // released frozen book on the next timer tick.
+            symbols.erase(it);
+        }
+        store.releaseSymbol(m.symbol());
+        {
+            std::lock_guard lock(watermarksMutex);
+            std::erase_if(watermarksBySeries, [&](const auto &entry) { return entry.first.first == m.symbol(); });
+        }
+        if (cfg.onReleased) cfg.onReleased(m.symbol());
+    }
     void process(const Message &m) {
+        if (m.kind == Kind::Release) {
+            release(m);
+            return;
+        }
         if (m.time < kHmc2MinMs || m.time > kMaxTime || m.local < kHmc2MinMs || m.local > kMaxTime) {
             sLog_Warning("BookRecorder: rejected timestamp time=" << m.time);
             for (auto &[name, s] : symbols)
@@ -844,6 +888,7 @@ struct BookRecorder::Impl {
             }
             return;
         }
+        if (m.kind != Kind::Snapshot && !m.droppedSnapshot && !symbols.contains(m.symbol())) return;
         auto &s = getSymbol(m.symbol());
         if (!s.initialized) {
             if (m.kind == Kind::InvalidEnvelope && m.droppedSnapshot) {
@@ -909,6 +954,10 @@ void BookRecorder::onUpdatesAt(const std::string &symbol, int64_t time, int64_t 
 void BookRecorder::onInvalid(const std::string &symbol, int64_t local, std::string reason) {
     impl_->enqueue({Impl::Kind::Invalid, impl_->internSymbol(symbol), std::move(reason), local, local, {}, true});
 }
+void BookRecorder::releaseSymbol(const std::string &symbol, int64_t local) {
+    impl_->enqueue({Impl::Kind::Release, impl_->internSymbol(symbol), {}, local, local, {}});
+    impl_->producerSymbols.erase(symbol);
+}
 void BookRecorder::onTick(int64_t local) {
     impl_->enqueue({Impl::Kind::Tick, {}, {}, local, local, {}});
 }
@@ -921,6 +970,10 @@ BookRecorder::Watermarks BookRecorder::watermarks(const std::string &symbol, con
     std::lock_guard lock(impl_->watermarksMutex);
     const auto it = impl_->watermarksBySeries.find({symbol, layer});
     return it == impl_->watermarksBySeries.end() ? Watermarks{} : it->second;
+}
+size_t BookRecorder::retainedSymbolStatesForTest() {
+    drainForTest();
+    return impl_->symbols.size() + impl_->producerSymbols.size();
 }
 void BookRecorder::drainForTest() { drain(); }
 void BookRecorder::drain() {

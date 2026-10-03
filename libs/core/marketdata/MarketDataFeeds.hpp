@@ -65,6 +65,10 @@ public:
 
     // Set before the first successful add(); later setters throw logic_error.
     // Callbacks are immutable for the lifetime of this owner.
+    // I/O-thread add/remove boundary, ordered with accepted data callbacks.
+    // Duplicate adds, refused adds and pinned removals emit nothing.
+    using FeedLifecycleCb = std::function<void(const std::string&, bool acquired)>;
+    void onFeedLifecycle(FeedLifecycleCb cb) { checkCallbacksMutable(); m_lifecycle = std::move(cb); }
     void onTrade(Engine::TradeCb cb) { checkCallbacksMutable(); m_trade = std::move(cb); }
     void onLiveOrderBookLevelUpdates(Engine::OrderBookLevelUpdatesCb cb) { checkCallbacksMutable(); m_updates = std::move(cb); }
     void onLiveOrderBookInitialized(Engine::OrderBookInitializedCb cb) { checkCallbacksMutable(); m_snapshot = std::move(cb); }
@@ -99,9 +103,10 @@ private:
     std::thread m_thread;
     bool m_started = false, m_stopped = false, m_callbacksFrozen = false;
     int64_t m_nextStats = 0;
-    struct Entry { std::shared_ptr<Engine> engine; bool pinned; };
+    struct Entry { std::shared_ptr<Engine> engine; bool pinned; std::shared_ptr<bool> active; };
     std::map<std::string, Entry> m_engines;
     std::vector<std::future<void>> m_retiring;
+    FeedLifecycleCb m_lifecycle;
     Engine::TradeCb m_trade;
     Engine::OrderBookLevelUpdatesCb m_updates;
     Engine::OrderBookInitializedCb m_snapshot;

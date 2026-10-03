@@ -1217,6 +1217,17 @@ uint64_t Hmc2Store::configHash(const Hmc2Header &h, double low, double high) {
     }
     return hash;
 }
+void Hmc2Store::releaseSymbol(const std::string &symbol) {
+    std::erase_if(impl_->writers, [&](const auto &entry) { return entry.second.header.symbol == symbol; });
+    // Directory durability is only a writer optimization; do not retain every
+    // GUI product ever opened. Re-acquire will synchronize these paths again.
+    const auto productDir = impl_->rootDir / symbol;
+    std::erase_if(impl_->durableDirectories, [&](const auto &dir) {
+        for (auto at = dir; at != impl_->rootDir && at != at.parent_path(); at = at.parent_path())
+            if (at == productDir) return true;
+        return false;
+    });
+}
 void Hmc2Store::append(const Hmc2Record &r) {
     validate(r.header);
     check(r.bucketStartMs >= kHmc2MinMs && r.bucketStartMs < kHmc2EndMs, "bucket outside UTC years 2000-2200");

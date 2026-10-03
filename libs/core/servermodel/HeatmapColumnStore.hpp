@@ -118,6 +118,7 @@ public:
 
     // Force fsync on every open day-writer.
     void flush();
+    void releaseSymbol(const std::string& symbol);
 
     // Phase 5 retention. Delete every day file under <baseDir> whose UTC date
     // is strictly older than (today UTC midnight - retentionDays * 1 day). Pass

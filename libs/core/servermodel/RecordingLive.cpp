@@ -6,6 +6,14 @@
 #include <tuple>
 
 namespace recording {
+void LiveCache::releaseSymbol(const std::string &symbol) {
+    std::lock_guard lock(mutex_);
+    std::erase_if(series_, [&](const auto &entry) {
+        if (entry.first.first != symbol) return false;
+        revisionFloor_ = std::max(revisionFloor_, entry.second.revision);
+        return true;
+    });
+}
 bool LiveCache::publish(RecordPtr r) {
     if (!r || r->header.tfMs != 60'000 || !r->observedMs) return false;
     std::lock_guard lock(mutex_);
@@ -17,7 +25,9 @@ bool LiveCache::publish(RecordPtr r) {
         }
         return false;
     }
-    auto &s = series_[key];
+    const auto [it, inserted] = series_.try_emplace(key);
+    auto &s = it->second;
+    if (inserted) s.revision = revisionFloor_;
     const auto through = std::max(r->committedThroughMs,
         (r->flags & kProvisional) ? int64_t{0} : r->bucketStartMs + 60'000);
     s.committedThroughMs = std::max(s.committedThroughMs, through);
@@ -482,6 +492,11 @@ LiveService::Diagnostics LiveService::diagnostics() const {
     return {impl_->builds.load(), impl_->buildMicros.load(), impl_->deliveries.load(), impl_->deliveryMicros.load(),
             impl_->rawEncodings.load(), impl_->rawBuildMicros.load(), impl_->rawDeliveries.load(),
             impl_->rawBuilds.load(), impl_->rawFailures.load()};
+}
+void LiveService::releaseSymbol(const std::string &symbol) {
+    // Called in recorder order. Subscription ownership stays with Session:
+    // a newly acquired view can already exist while this old tail is draining.
+    impl_->cache.releaseSymbol(symbol);
 }
 bool LiveService::publish(RecordPtr record) { return impl_->cache.publish(std::move(record)); }
 std::shared_ptr<LiveService::Subscription> LiveService::subscribe(LiveView view, Deliver deliver) {

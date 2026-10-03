@@ -994,3 +994,49 @@ TEST(RecordingRawTail, AllocationFailureAcrossRawWorkerBacksOffAndRecovers) {
     EXPECT_TRUE(logs.contains("Raw heatmap live worker retry:"));
     EXPECT_TRUE(logs.contains(QString("delayMs=%1").arg(4 * kLiveCadenceDefaultMs)));
 }
+
+TEST(RecordingLive, ReleaseReclaimsSeriesAndFreshLifetimeCannotAliasRevision) {
+    LiveCache cache;
+    ASSERT_TRUE(cache.publish(record(0, 2)));
+    const auto old = cache.snapshot("BTC-USD", "near").revision;
+    cache.releaseSymbol("BTC-USD");
+    EXPECT_EQ(cache.snapshot("BTC-USD", "near").revision, 0u);
+    ASSERT_TRUE(cache.publish(record(3, 7, 1000, true)));
+    const auto fresh = cache.snapshot("BTC-USD", "near");
+    EXPECT_GT(fresh.revision, old);
+    EXPECT_TRUE(fresh.committed.empty());
+    ASSERT_EQ(fresh.provisional.size(), 1u);
+    EXPECT_EQ(fresh.provisional.begin()->first, epoch + 180000);
+}
+
+TEST(RecordingLive, ReleaseStopsPublicationWithoutRetiringNewlyAcquiredViews) {
+    QTemporaryDir dir;
+    LiveService service(dir.path().toStdString());
+    std::atomic<int64_t> now{-1};
+    RecordingLiveTest::clock(service, [&] { return now.load(); });
+    int oldDelivered = 0, freshDelivered = 0;
+    auto old = service.subscribe(view(), [&](auto&, auto&) { ++oldDelivered; return true; });
+    auto raw = service.subscribeRaw({"BTC-USD", {"hmc2.near"}, 1, 0},
+        [&](auto&, auto&, auto&) { ++oldDelivered; return true; });
+    service.publish(record(0, 2));
+    now = 0; RecordingLiveTest::poll(service);
+    EXPECT_GT(oldDelivered, 0);
+    // Session retires the old views before its feed-release signal. The new
+    // view may already exist by the time the recorder processes that signal.
+    old->active.store(false); raw->active.store(false);
+    const int deliveredAtRelease = oldDelivered;
+    auto fresh = service.subscribe(view(), [&](auto&, const BuildResult& page) {
+        ++freshDelivered;
+        EXPECT_EQ(page.columns.back().bucketStartMs, epoch + 180000);
+        return true;
+    });
+    service.releaseSymbol("BTC-USD");
+    EXPECT_TRUE(fresh->active.load());
+    now = 5000; RecordingLiveTest::poll(service);
+    EXPECT_EQ(freshDelivered, 0);
+    service.publish(record(3, 7, 1000, true));
+    now = 10000; RecordingLiveTest::poll(service);
+    EXPECT_EQ(oldDelivered, deliveredAtRelease);
+    EXPECT_GT(freshDelivered, 0);
+    service.shutdown();
+}
