@@ -83,8 +83,13 @@ of unowned files.
 Reference price is the two-sided mid of that day's replay-anchor snapshot. The
 nearest arithmetic-distance `{1,2,5} * 10^k` step to one basis point is selected
 (ties round upward), then rounded up to a multiple of the quote increment. It
-never falls below that increment. Both layers use this tick unless overridden;
-BTC retains near $1 / deep $5. The grid stays fixed for the entire recording day.
+never falls below that increment. This remains the default near tick. The default
+deep tick is two strictly higher 1-2-5 ladder steps above that near tick, then
+rounded up to a quote-increment multiple. If near lies between rungs, count the
+next higher rung as step one (e.g. native increment 0.03 gives near 0.03, then
+0.05 -> 0.1, rounded to deep 0.12). Explicit near/deep overrides remain independent
+and take precedence over these defaults; BTC retains near $1 / deep $5. The grid
+stays fixed for the entire recording day.
 Price scale is the power of ten needed to represent the quote-increment decimal;
 size floor is `base_increment`. Unsupported precision/overflow is rejected.
 
@@ -93,12 +98,12 @@ Representative table (prices are test inputs, increments are archive metadata):
 | Product | Reference price | Quote increment | Price scale | Near tick | Deep tick |
 |---|---:|---:|---:|---:|---:|
 | BTC-USD | 100000 | 0.01 | 100 | 1 | 5 |
-| ETH-USD | 4000 | 0.01 | 100 | 0.5 | 0.5 |
-| SOL-USD | 200 | 0.01 | 100 | 0.02 | 0.02 |
-| DOGE-USD | 0.2 | 0.00001 | 100000 | 0.00002 | 0.00002 |
-| PEPE-USD | 0.00001 | 0.00000001 | 100000000 | 0.00000001 | 0.00000001 |
-| FARTCOIN-USD | 1 | 0.00001 | 100000 | 0.0001 | 0.0001 |
-| AVAX-USD | 30 | 0.001 | 1000 | 0.002 | 0.002 |
+| ETH-USD | 4000 | 0.01 | 100 | 0.5 | 2 |
+| SOL-USD | 200 | 0.01 | 100 | 0.02 | 0.1 |
+| DOGE-USD | 0.2 | 0.00001 | 100000 | 0.00002 | 0.0001 |
+| PEPE-USD | 0.00001 | 0.00000001 | 100000000 | 0.00000001 | 0.00000005 |
+| FARTCOIN-USD | 1 | 0.00001 | 100000 | 0.0001 | 0.0005 |
+| AVAX-USD | 30 | 0.001 | 1000 | 0.002 | 0.01 |
 
 `--config <yaml>` reads the roller's `recording.products.<id>` overrides
 (and live-root exclusions described above):
@@ -190,8 +195,10 @@ Serial queued runs, raw input read-only, output under `roll-out/`:
 | PEPE 2026-10-02 | 458,571 | 185,745,175 | 14.646 | 31,311 | 1,157,235 |
 
 These include snapshot warmup and durable file/checkpoint writes; queue wait is
-excluded. The day cutoffs reached the requested exclusive end. PEPE uses scale
-100000000, both ticks 1e-8 and size floor 1. No service was restarted or deployed.
+excluded. The day cutoffs reached the requested exclusive end. These measurements
+predate the owner's deep-grid decision: PEPE used scale 100000000, both ticks
+1e-8 and size floor 1; the current default deep tick is 5e-8. No service was
+restarted or deployed.
 One measured BTC day replays in under a minute, so hourly serialized book-state
 checkpoints are not added in this slice; this is a measured threshold, not a
 future throughput guarantee.
@@ -250,8 +257,8 @@ source restoration, touch and rebuild: boundary finalization, unowned-root
 refusal, configured-root refusal, sequence recovery, stop broadcast, large delta
 resume, histogram sign, total-TWAP delta sign and controlled-fixture bands.
 Run `tests/roller/check_mutations.py --review` through the build queue to repeat
-those checks. The prospective two-step-deeper grid
-policy has not been implemented; the grid table above remains the policy.
+those checks. The subsequent owner decision (round 2, item 4) is implemented in
+the daily grid derivation and table above; the near 1 bp rule is unchanged.
 
 
 Review validation: full queued mac-clang build passed; CTest reported

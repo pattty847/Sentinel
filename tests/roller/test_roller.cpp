@@ -54,10 +54,10 @@ RollOptions options(const fs::path& raw,const fs::path& out) { return {raw,out,"
 }
 TEST(Roller, GridsAndClamping) {
     struct Case {const char* p;double price;const char* quote;double scale,near,deep;};
-    for(const auto& c:std::vector<Case>{{"BTC-USD",100000,"0.01",100,1,5},{"ETH-USD",4000,"0.01",100,.5,.5},
-        {"SOL-USD",200,"0.01",100,.02,.02},{"DOGE-USD",.2,"0.00001",1e5,.00002,.00002},
-        {"PEPE-USD",.00001,"0.00000001",1e8,1e-8,1e-8},{"FARTCOIN-USD",1,"0.00001",1e5,.0001,.0001},
-        {"AVAX-USD",30,"0.001",1000,.002,.002}}) {
+    for(const auto& c:std::vector<Case>{{"BTC-USD",100000,"0.01",100,1,5},{"ETH-USD",4000,"0.01",100,.5,2},
+        {"SOL-USD",200,"0.01",100,.02,.1},{"DOGE-USD",.2,"0.00001",1e5,.00002,.0001},
+        {"PEPE-USD",.00001,"0.00000001",1e8,1e-8,5e-8},{"FARTCOIN-USD",1,"0.00001",1e5,.0001,.0005},
+        {"AVAX-USD",30,"0.001",1000,.002,.01}}) {
         auto m=metadata(c.p)["product_metadata"]; m["quote_increment"]=c.quote;
         m["base_increment"] = std::string(c.p)=="DOGE-USD" ? "0.1" :
             std::string(c.p)=="PEPE-USD" ? "1" : std::string(c.p)=="FARTCOIN-USD" ? "0.01" : "0.00000001";
@@ -72,6 +72,15 @@ TEST(Roller, GridsAndClamping) {
     EXPECT_THROW(deriveGrid(m,0),std::runtime_error);
     EXPECT_THROW(deriveGrid(m,100,{{"price_scale",1}}),std::runtime_error);
     EXPECT_THROW(deriveGrid(m,100,{{"deep_tick",-1}}),std::runtime_error);
+    // Explicit ticks still win independently of the default ladder policy.
+    const auto explicitDeep=deriveGrid(m,4000,{{"deep_tick",3}});
+    EXPECT_DOUBLE_EQ(explicitDeep.nearTick,.5); EXPECT_DOUBLE_EQ(explicitDeep.deepTick,3);
+    const auto explicitBoth=deriveGrid(m,4000,{{"near_tick",.02},{"deep_tick",.07}});
+    EXPECT_DOUBLE_EQ(explicitBoth.nearTick,.02); EXPECT_DOUBLE_EQ(explicitBoth.deepTick,.07);
+    // A native increment between rungs: .03 -> .05 -> .1, then round deep to .12.
+    m["quote_increment"]="0.03";
+    const auto native=deriveGrid(m,100);
+    EXPECT_DOUBLE_EQ(native.nearTick,.03); EXPECT_DOUBLE_EQ(native.deepTick,.12);
     m["quote_increment"]="bad"; EXPECT_THROW(deriveGrid(m,100),std::runtime_error);
 }
 TEST(Roller, ReaderVersionsPositionsAndOpenPolling) {

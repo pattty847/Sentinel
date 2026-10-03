@@ -12,6 +12,16 @@ double decimal(const std::string& text) {
     if (used != text.size() || !std::isfinite(value) || value <= 0) throw std::runtime_error("invalid increment");
     return value;
 }
+double next125(double tick) {
+    const auto decade = std::pow(10.0, std::floor(std::log10(tick)));
+    // Native-increment rounding can put near between ladder rungs. Count the
+    // next strictly higher rung; tolerate floating-point noise at an exact rung.
+    for (double m : {1.,2.,5.,10.,20.}) {
+        const auto next = m * decade;
+        if (next > tick * (1.0 + 1e-12)) return next;
+    }
+    throw std::runtime_error("unrepresentable deep tick");
+}
 double scaleFor(std::string text) {
     const auto dot = text.find('.');
     if (dot == std::string::npos) return 1;
@@ -32,7 +42,7 @@ Grid deriveGrid(const nlohmann::json& metadata, double price, const nlohmann::js
     for (double m : {2.,5.,10.}) if (std::abs(m * decade - target) <= std::abs(tick - target)) tick = m * decade;
     // Keep a native-increment multiple, including non power-of-ten increments.
     tick = std::ceil(std::max(tick, quote) / quote - 1e-9) * quote;
-    Grid grid{scaleFor(quoteText),tick,tick,base};
+    Grid grid{scaleFor(quoteText),tick,next125(next125(tick)),base};
     if (metadata.at("product_id") == "BTC-USD") { grid.nearTick = 1; grid.deepTick = 5; }
     grid.priceScale = overrides.value("price_scale", grid.priceScale);
     grid.nearTick = overrides.value("near_tick", grid.nearTick);
