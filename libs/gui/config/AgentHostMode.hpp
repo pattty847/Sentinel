@@ -7,7 +7,7 @@
 // reach the GUI's API port and can write its own worktree, so in this mode the GUI
 //   - refuses screenshots that grab screen pixels (target=main; FM-120) and every unknown target,
 //   - writes screenshots only to <dir>/screenshots (config and SENTINEL_GUI_SCREENSHOT_DIR ignored),
-//   - keeps QSettings in <dir>/settings (INI), never the owner's preferences domain,
+//   - keeps QSettings in the host's persistent profile/settings (INI), never the owner's preferences domain,
 //   - sends no trade commands (/api/v1/input can drive the chart's TP/SL controls into the server's
 //     trading session) and only switches to allowlisted symbols (a symbol change makes the recorder
 //     subscribe upstream).
@@ -19,7 +19,8 @@ namespace AgentHostMode {
 // Validate `dir` and switch the mode on. Refuses (returns false, mode stays off) when `dir` is not
 // absolute, is under /Volumes (the recording drive and the agent worktrees), or resolves into or
 // onto one of `forbiddenRoots` (the repo checkout, the build tree) after symlinks are resolved.
-bool activate(const QString& dir, const QStringList& forbiddenRoots, QString* error);
+bool activate(const QString& dir, const QStringList& forbiddenRoots, QString* error,
+              const QString& profileSettingsDir = {});
 
 bool active();
 QString screenshotDir();          // <dir>/screenshots (canonical); empty when inactive

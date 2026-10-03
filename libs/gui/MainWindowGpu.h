@@ -53,6 +53,7 @@ class LayoutOrchestrator;
 class MenuBuilder;
 class ShortcutBinder;
 class GuiApiServer;
+class DockVisibilityController;
 class QDoubleSpinBox;
 namespace AgentApi { struct ControlBody; }
 namespace heatmap { class HeatmapDataService; }
@@ -174,6 +175,7 @@ private:
     ThemeBridge* m_themeBridge = nullptr;
     std::unique_ptr<QmlSceneController> m_qmlController;
     std::unique_ptr<LayoutOrchestrator> m_layoutOrchestrator;
+    std::unique_ptr<DockVisibilityController> m_dockVisibility;
     std::unique_ptr<MenuBuilder> m_menuBuilder;
     std::unique_ptr<ShortcutBinder> m_shortcutBinder;
     std::unique_ptr<GuiApiServer> m_guiApiServer;

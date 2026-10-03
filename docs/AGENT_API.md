@@ -6,6 +6,7 @@ The GUI listens on `127.0.0.1` at `gui.api_port` (default `17100`). `api_port=0`
 |---|---|---|
 | GET | `/api/v1/state` | Connection, advertised server configuration, active layers, receive times and chart render statistics. |
 | GET | `/api/v1/viewport` | Active chart bounds, linked heatmap/candle timeframe, follow mode, auto price scale (`autoScale`), dimensions, zoom and viewport version. |
+| GET | `/api/v1/docks` | Every available dock ID and its visible boolean. |
 | GET | `/api/v1/candles?startMs=...&endMs=...&timeframeMs=...&limit=500` | Locally held candle bars and `nextStartMs` for pagination. `limit` maximum 2,000. |
 | GET | `/api/v1/book?levels=20` | Best prices, spread, up to 200 levels per side, band and receive time. |
 | GET | `/api/v1/trades?windowMs=60000&limit=100` | Receive-time tape, newest first, and summary of all retained matches. Window maximum 900,000 ms; limit maximum 1,000. |
@@ -18,6 +19,7 @@ The GUI listens on `127.0.0.1` at `gui.api_port` (default `17100`). `api_port=0`
 | POST | `/api/v1/timeframe` | JSON with `heatmapTimeframeMs` and/or `candleTimeframeMs`; v1 links them and requires an advertised served timeframe. |
 | POST | `/api/v1/viewport` | JSON with paired `startMs,endMs`, paired `priceMin,priceMax`, `followLive` and/or `autoScale` (the auto price scale, the "A" toggle); or `{"fit":"time"|"price"|"both"|"default"}` (the axis double-click actions). |
 | POST | `/api/v1/layers` | Partial boolean map for `heatmap`, `candles`, `footprint`, `tpo`, `volumeProfile`; optional TPO look strings `tpoLayout` (`split`, `collapsed`) and `tpoTheme` (`rainbow`, `calm`, `sage`). State `layers` reports both. |
+| POST | `/api/v1/docks` | `{"visible":{"orderBook":false,"watchlist":false}}` or `{"focus":"heatmap"}`; optional `persist` boolean. |
 | GET | `/api/v1/operations/<id>?waitMs=5000` | Current operation state; waits at most five seconds for a rendered frame. |
 | GET | `/screenshot?name=review&target=main` | Legacy screenshot route and response, retained for existing agents. |
 
@@ -30,6 +32,18 @@ Successful state and viewport responses have `{"ok":true,"meta":{"sessionId":"..
 Requests must use HTTP/1.1 and a `Host` of `localhost` or `127.0.0.1`, with an optional port. A browser `Origin` is rejected. Headers are capped at 8 KiB and bodies at 16 KiB; POST controls require `Content-Type: application/json`. GET requests do not accept bodies. The server allows eight concurrent connections and closes stalled requests. Sockets and handlers currently run on the GUI thread; operation waits use short timer callbacks and do not block the event loop. PNG encoding/writing remains synchronous and can pause the GUI.
 
 ## Controls and render ordering
+
+### Dock visibility
+
+`GET /api/v1/docks` returns `data.visible`, a map of stable IDs to booleans. The IDs are `heatmap`, `orderBook`, `watchlist`, `sec`, `copenet`, `aiCommentary`, `lab`, `screener`, `stockChart`, `paperTrading`, and `telemetry` (only docks created in this window are listed). `visible` means the dock is shown, including a dock behind another tab. `POST` accepts either a nonempty partial `visible` map or one `focus` ID; focus hides every other dock and raises its target. Unknown IDs return `422 unknown_dock` with valid IDs, and hiding all docks returns `422 hide_all_docks` without changing the window. The response contains the resulting `visible` map, `persist`, and the usual operation ID; `/operations/<id>?waitMs=5000` provides the same frame acknowledgement as other controls. A focused heatmap claims the space freed by the other docks.
+
+Under `--agent-host`, every successful dock change is written to the isolated agent profile immediately and restored after the next hosted window installs its layout. The host uses a persistent `gui-host/profile/settings` directory for QSettings; screenshots remain in each session directory. `scripts/dev/gui-shot.sh profile-reset` clears that profile while the GUI is stopped, or `launch --fresh-profile` clears it before starting. In the owner's normal GUI, dock API changes affect the current session; QSettings changes only when the request includes `"persist":true`. A transient dock API change is also excluded from the normal `_last_session` layout saved at close.
+
+```sh
+scripts/dev/gui-shot.sh docks list
+scripts/dev/gui-shot.sh docks focus heatmap
+scripts/dev/gui-shot.sh docks show orderBook
+```
 
 Every successful POST returns an `operationId` and `status:"applied"`, plus the changed state. GET `/operations/<id>` returns `applied`, `rendered`, `superseded`, or `failed`; it includes `viewportVersion`, and a rendered operation includes `frameId`. A later control of the same kind supersedes a pending one. `waitMs` expires with the current state (usually `applied`) and does not imply failure. Unknown IDs return 404. Operations are retained for the newest 256 IDs.
 

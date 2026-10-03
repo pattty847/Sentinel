@@ -48,6 +48,7 @@ public:
     };
 
     explicit LayoutOrchestrator(QMainWindow* mainWindow);
+    static QList<QPair<QString, QDockWidget*>> apiDocks(const DockWidgets& docks);
     
     void arrangeDefaultLayout(const DockWidgets& docks);
     void resetLayoutToDefault(const DockWidgets& docks);
@@ -68,4 +69,3 @@ private:
     QMainWindow* m_mainWindow;
     std::function<void(const QString &)> m_saveHeatmap, m_restoreHeatmap;
 };
-

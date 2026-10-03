@@ -16,7 +16,7 @@ dropped, because a blessed copy is not bound to the reviewed source. The safe fo
 orchestrator building the reviewed commit in a checkout agents cannot write; not built.
 
 The GUI is started with --agent-host (AgentHostMode.hpp): it refuses screen-pixel screenshots,
-keeps screenshots and settings in its session directory, sends no trade commands, and switches only
+keeps screenshots per session and settings in a persistent host profile, sends no trade commands, and switches only
 to allowlisted symbols. A build without that flag is refused (a stale main must not run uncontained).
 The child gets a minimal environment (no DYLD_*, QT_*, QML_* from this process's env).
 
@@ -31,9 +31,10 @@ never restarted leaves one GUI running until someone ends it (`pkill -f 'sentine
 API (JSON; every POST needs the header `X-Gui-Host: 1`, which a browser page cannot send
 cross-origin without a preflight this server never answers; the Host header must be loopback):
     GET  /status      the live session or null, and whether main is launchable
-    POST /launch {renderer?:"gpu"|"legacy", replace?:bool}
+    POST /launch {renderer?:"gpu"|"legacy", replace?:bool, freshProfile?:bool}
     POST /shot   {name, afterOperation?, target?:"heatmap"|"lab"|"telemetry"|"toolbar"|"settings[:Tab]", settle?:bool}
     POST /stop
+    POST /profile-reset    clears the persistent agent settings while no GUI is running
 
 Other rules (AGENTS.md 4a/4b): never starts a server (refuses when the recorder :8080 is down), one
 session at a time (16 GB Mac), SIGTERM stop (no closeEvent, so no _last_session layout write), and
@@ -44,6 +45,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import signal
 import socket
 import stat
@@ -118,10 +120,38 @@ def child_env(environ=None):
     return env
 
 
-def gui_argv(binary, session_dir, renderer, port):
+def gui_argv(binary, session_dir, renderer, port, profile_settings=None):
     """The only command line the host ever builds: fixed flags, no caller-supplied arguments."""
-    return [binary, "--agent-host", session_dir, "--agent-host-symbols", SYMBOLS,
+    return [binary, "--agent-host", session_dir, "--agent-host-profile", profile_settings or profile_dir(),
+            "--agent-host-symbols", SYMBOLS,
             "--heatmap-renderer", renderer, "--api-port", str(port), "--no-screener"]
+
+
+def profile_dir():
+    """Fixed path only; reject symlinks and forbidden roots before any write or deletion."""
+    base = os.path.realpath(SESSIONS_DIR)
+    candidate = os.path.join(SESSIONS_DIR, "profile", "settings")
+    resolved = os.path.realpath(candidate)
+    forbidden = (os.path.realpath(REPO), os.path.realpath(os.path.join(REPO, "build")), "/Volumes")
+    if any(os.path.commonpath((base, root)) == root or os.path.commonpath((resolved, root)) == root
+           for root in forbidden):
+        raise HostError(412, "unsafe_profile", "agent profile resolves inside a forbidden root")
+    if os.path.commonpath((resolved, base)) != base or resolved == base:
+        raise HostError(412, "unsafe_profile", "agent profile resolves outside the sessions directory")
+    if any(os.path.islink(p) for p in (SESSIONS_DIR, os.path.join(SESSIONS_DIR, "profile"), candidate)):
+        raise HostError(412, "unsafe_profile", "agent profile path must not use symlinks")
+    return candidate
+
+
+def reset_profile():
+    with lock:
+        if session and session["proc"].poll() is None:
+            raise HostError(409, "busy", "stop the GUI before resetting its profile")
+        settings = profile_dir()
+        if os.path.lexists(settings):
+            shutil.rmtree(settings)
+        os.makedirs(settings, exist_ok=True)
+        return {"ok": True, "profileReset": True}
 
 
 # ------------------------------------------------------------------ trust: which binary may run
@@ -229,6 +259,8 @@ def launch(body):
     renderer = body.get("renderer", "gpu")
     if renderer not in ("gpu", "legacy"):
         raise HostError(400, "bad_renderer", "renderer must be gpu or legacy")
+    if "freshProfile" in body and not isinstance(body["freshProfile"], bool):
+        raise HostError(400, "bad_profile", "freshProfile must be boolean")
     for forbidden in ("worktree", "path"):
         if forbidden in body:
             raise HostError(400, "main_only", "launch takes no worktree or path: the host runs only the main checkout build")
@@ -241,6 +273,11 @@ def launch(body):
                 raise HostError(409, "busy", "a GUI session is already running (send replace:true or POST /stop)",
                                 session=public(session))
             stop_session("replaced")
+        profile_settings = profile_dir()
+        if body.get("freshProfile"):
+            if os.path.lexists(profile_settings):
+                shutil.rmtree(profile_settings)
+        os.makedirs(profile_settings, exist_ok=True)
         if not listening(SERVER_PORT):
             raise HostError(412, "no_recorder", f"no server on :{SERVER_PORT}; the recorder must be up (never started here)")
         for p in OWNER_PORTS:  # courtesy: settings are isolated, but two GUIs on one screen are confusing
@@ -255,7 +292,7 @@ def launch(body):
         log = os.path.join(sdir, "gui.out")
         before = settings_dump()
         with open(log, "wb") as out:
-            proc = subprocess.Popen(gui_argv(binary, sdir, renderer, port), cwd=REPO, env=child_env(),
+            proc = subprocess.Popen(gui_argv(binary, sdir, renderer, port, profile_settings), cwd=REPO, env=child_env(),
                                     stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                     start_new_session=True)
         session = dict(id=sid, pid=proc.pid, port=port, renderer=renderer, proc=proc, log=log,
@@ -382,6 +419,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.command == "POST" and self.path == "/stop":
                 with lock:
                     return self.reply(200, {"ok": True, "stopped": stop_session("requested")})
+            if self.command == "POST" and self.path == "/profile-reset":
+                return self.reply(200, reset_profile())
             raise HostError(404, "not_found", "unknown route")
         except HostError as e:
             self.reply(e.status, {"ok": False, "error": {"code": e.code, "message": str(e), **e.extra}})

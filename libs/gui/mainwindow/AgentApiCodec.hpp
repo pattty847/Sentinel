@@ -24,6 +24,9 @@ struct ControlBody {
     std::optional<bool> autoScale; // viewport: the auto price scale toggle
     QString fit; // viewport: "time" | "price" | "both" | "default", exclusive with bounds/followLive/autoScale
     QJsonObject layers;
+    QJsonObject dockVisible;
+    QString dockFocus;
+    bool persistDocks = false;
     QJsonObject heatmapSettings;
     bool persistHeatmapSettings = true;
     InputCommand input;
@@ -33,7 +36,8 @@ struct ControlValidation {
     QString code, message;
     ControlBody body;
 };
-ControlValidation validateControl(const Request& request, const std::optional<QList<qint64>>& servedTimeframes);
+ControlValidation validateControl(const Request& request, const std::optional<QList<qint64>>& servedTimeframes,
+                                  const QJsonObject& currentDocks = {});
 void applyAdvertisedServerConfig(StateSnapshot& snapshot, const ServerConfig& config);
 
 QJsonObject envelope(const Metadata& meta, const QJsonObject& data);

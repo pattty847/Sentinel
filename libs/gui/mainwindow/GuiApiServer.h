@@ -32,6 +32,7 @@ public:
                           QObject* parent = nullptr);
 
     void setHeatmapSnapshot(std::function<QJsonObject()> snapshot) { m_heatmapSnapshot = std::move(snapshot); }
+    void setDocksSnapshot(std::function<QJsonObject()> snapshot) { m_docksSnapshot = std::move(snapshot); }
     bool start(quint16 port, const QString& screenshotDir);
     // Widget screenshot targets (S6c): "settings[:<Tab>]", "telemetry" and "toolbar" grab the
     // widget itself (QWidget::grab: its own painting, never screen pixels).
@@ -56,6 +57,7 @@ private:
     QImage grabTargetImage(const QString& target, QString* error) const;
 
     std::function<QJsonObject()> m_heatmapSnapshot;
+    std::function<QJsonObject()> m_docksSnapshot;
     QTcpServer m_server;
     QWidget* m_targetWindow = nullptr;
     QQuickView* m_heatmapView = nullptr;

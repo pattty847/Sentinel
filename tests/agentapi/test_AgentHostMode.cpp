@@ -10,7 +10,7 @@
 #include <gtest/gtest.h>
 
 // --agent-host: the GUI run by scripts/dev/gui-host.py for sandboxed agents. It must not capture
-// screen pixels, must keep every file it writes inside the host's session directory, and must not
+// screen pixels, must keep screenshots in its session and QSettings in its isolated profile, and must not
 // load code (QML) from agent-writable paths. These are the policy pieces that need no window.
 
 class AgentHostModeTest : public ::testing::Test {
@@ -85,6 +85,33 @@ TEST_F(AgentHostModeTest, SettingsAreIsolatedIntoTheSessionDirNotTheOwnersDomain
             << qPrintable(settings.fileName());
     }
     EXPECT_FALSE(QFile::exists(QDir::homePath() + "/Library/Preferences/com.sentinel.AgentHostModeTestDomain.plist"));
+}
+
+TEST_F(AgentHostModeTest, ProfileSettingsSurviveDifferentSessionDirectories) {
+    QTemporaryDir dir;
+    const QString profile = dir.path() + "/profile/settings";
+    QString error;
+    ASSERT_TRUE(AgentHostMode::activate(dir.path() + "/first", {}, &error, profile)) << qPrintable(error);
+    {
+        QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "AgentHostProfileTest");
+        settings.setValue("docks/heatmap", true);
+        settings.sync();
+    }
+    AgentHostMode::resetForTests();
+    ASSERT_TRUE(AgentHostMode::activate(dir.path() + "/second", {}, &error, profile)) << qPrintable(error);
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "AgentHostProfileTest");
+    EXPECT_TRUE(settings.value("docks/heatmap").toBool());
+    EXPECT_NE(AgentHostMode::screenshotDir(), dir.path() + "/first/screenshots");
+}
+
+TEST_F(AgentHostModeTest, ProfileDirGetsSameForbiddenRootChecksAsSessionDir) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(QDir().mkpath(dir.path() + "/repo"));
+    QString error;
+    EXPECT_FALSE(AgentHostMode::activate(dir.path() + "/session", {dir.path() + "/repo"}, &error,
+                                          dir.path() + "/repo/settings"));
+    EXPECT_FALSE(QFileInfo::exists(dir.path() + "/session"));
+    EXPECT_FALSE(AgentHostMode::activate(dir.path() + "/session", {}, &error, "/Volumes/T7/profile/settings"));
 }
 
 TEST_F(AgentHostModeTest, RefusesDirectoriesThatAreNotSafeAndLeavesModeInactive) {

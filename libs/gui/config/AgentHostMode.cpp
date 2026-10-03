@@ -31,35 +31,44 @@ QString resolveMaybeMissing(const QString& path) {
 
 }  // namespace
 
-bool activate(const QString& dir, const QStringList& forbiddenRoots, QString* error) {
+bool activate(const QString& dir, const QStringList& forbiddenRoots, QString* error,
+              const QString& profileSettingsDir) {
     auto fail = [&](const QString& why) {
         if (error) *error = why;
         return false;
     };
-    if (!QDir::isAbsolutePath(dir)) return fail("--agent-host needs an absolute directory: " + dir);
-    if (underOrEqual(QDir::cleanPath(dir), "/Volumes"))
-        return fail("--agent-host directory must not be under /Volumes (recordings, agent worktrees): " + dir);
-    // Resolve symlinks BEFORE the root checks, or a link into the repo would pass, and check BEFORE
-    // creating anything, or a refused directory would still be left behind (in the repo). The
-    // directory may not exist yet: resolve its nearest existing ancestor and append the rest.
-    const QString canonical = resolveMaybeMissing(dir);
-    if (canonical.isEmpty()) return fail("cannot resolve --agent-host directory: " + dir);
-    if (underOrEqual(canonical, "/Volumes"))
-        return fail("--agent-host directory resolves under /Volumes: " + canonical);
-    for (const QString& root : forbiddenRoots) {
-        if (root.isEmpty()) continue;
-        const QString canonicalRoot = resolveMaybeMissing(root);
-        if (!canonicalRoot.isEmpty() && underOrEqual(canonical, canonicalRoot))
-            return fail("--agent-host directory is inside " + canonicalRoot + " (agent-writable): " + canonical);
-    }
+    auto safePath = [&](const QString& path) -> QString {
+        if (!QDir::isAbsolutePath(path)) { fail("--agent-host needs an absolute directory: " + path); return {}; }
+        if (underOrEqual(QDir::cleanPath(path), "/Volumes")) {
+            fail("--agent-host directory must not be under /Volumes: " + path); return {};
+        }
+        // Resolve symlinks before checking roots and before creating either directory.
+        const QString resolved = resolveMaybeMissing(path);
+        if (resolved.isEmpty()) { fail("cannot resolve --agent-host directory: " + path); return {}; }
+        if (underOrEqual(resolved, "/Volumes")) {
+            fail("--agent-host directory resolves under /Volumes: " + resolved); return {};
+        }
+        for (const QString& root : forbiddenRoots) {
+            if (root.isEmpty()) continue;
+            const QString canonicalRoot = resolveMaybeMissing(root);
+            if (!canonicalRoot.isEmpty() && underOrEqual(resolved, canonicalRoot)) {
+                fail("--agent-host directory is inside " + canonicalRoot + " (agent-writable): " + resolved);
+                return {};
+            }
+        }
+        return resolved;
+    };
+    const QString canonical = safePath(dir);
+    if (canonical.isEmpty()) return false;
+    const QString settings = safePath(profileSettingsDir.isEmpty() ? canonical + "/settings" : profileSettingsDir);
+    if (settings.isEmpty()) return false;
     if (!QDir().mkpath(canonical)) return fail("cannot create --agent-host directory: " + canonical);
     const QString shots = canonical + "/screenshots";
-    const QString settings = canonical + "/settings";
     if (!QDir().mkpath(shots) || !QDir().mkpath(settings))
-        return fail("cannot create screenshots/settings under " + canonical);
+        return fail("cannot create screenshots/settings for " + canonical);
 
     // Every QSettings("org", "app") in the GUI uses the process default format; point it at INI
-    // files under the session directory so no run touches the owner's preferences plist.
+    // files under the host's isolated profile so no run touches the owner's preferences plist.
     QSettings::setDefaultFormat(QSettings::IniFormat);
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings);
     QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, settings);
