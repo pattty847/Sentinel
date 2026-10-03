@@ -3,33 +3,27 @@
 Live state for whoever conducts the agents next (Claude or Codex). Update it when something
 lands, deploys or changes priority. Rules: `AGENTS.md`; loop: `docs/AGENT_WORKFLOW.md`.
 
-Last updated: 2026-10-03 02:00 EDT. Landed since: agent docks (d5161c7), GUI unsubscribe (3c66beb).
+Last updated: 2026-10-03 06:20 EDT (orchestrator hit its usage limit; resume from here).
 
 ## Running services (owner's Mac, launchd)
 
-- **Recorder** `com.sentinel.recorder` (`sentinel-server`, deployed 2026-10-02 23:59 from `9bf460d`):
-  one Coinbase connection per product, pinned BTC-USD, GUI connection cap 8, `/metrics` on 127.0.0.1:8090.
-  Rollback copy: `~/Sentinel-runtime/bin/sentinel-server.rollback`.
-- **Capture** `com.sentinel.capture` (deployed 2026-10-02 22:11 from `bddb61a`): 7 products, one
-  connection each, 512 MiB shared queue (2 MiB floors), `/metrics` on 127.0.0.1:8091.
-  Backup: `~/Sentinel-runtime/bin/sentinel-capture.v2-backup`. First verify: ok, 0 sequence gaps, 0 missing trades.
-- **Monitoring**: VictoriaMetrics :8428, Grafana :3000, node_exporter; ntfy phone alerts at high priority
-  (topic only in gitignored `ops/monitoring/ntfy.env`). Re-render with `ops/monitoring/install.sh`.
-- **GUI host** `scripts/dev/gui-host.py` on 127.0.0.1:17190 (started by hand with nohup; runs only main's
-  GUI build; rebuild `sentinel-gui` on main after GUI changes land).
-- Deploy ONLY with `scripts/dev/deploy-runtime.sh server|capture|both`; the orchestrator may restart them.
+- **Recorder** `com.sentinel.recorder` deployed 2026-10-03 06:09 from `2b84256`: one connection per product, cap 8, recorder stops recording released GUI symbols (verified live), trade side = aggressor (footprint colours look swapped). Rollback: `bash scripts/dev/deploy-runtime.sh rollback server`.
+- **Capture** `com.sentinel.capture` deployed 2026-10-02 22:11 (`bddb61a`). Slice B fan-out LANDED (`2f45fff`) but NOT deployed: deploy with the owner present (`deploy-runtime.sh capture`; watch `~/Sentinel-runtime/run` 0700, `sentinel_fanout_running 1`, journals keep writing, reload Grafana for the new rule).
+- **Monitoring**: VictoriaMetrics :8428, Grafana :3000, ntfy high priority. **GUI host** :17190 (main build).
+- **Backfill** done: `/Volumes/T7/sentinel-data/hmc2` (7 products, ~122 MB). Not served yet (slices C/D).
 
 ## In flight
 
-| Branch | Agent | What | Next step |
-|---|---|---|---|
-| `lt-astra/roller-a` (11dee5c) | Codex astra (thread 01a10008-1d77-7fb1-9a4d-8fdb9b039b93) | One-world slice A built; BLOCKED on the parity gate (0/58 exact decoded matches vs live recorder: independent feeds + 250 ms vs record-time ticks change TWAP) | Fable review + parity quantification, then owner decision on the acceptance criterion, then land + backfill |
+| Branch | State | Next step |
+|---|---|---|
+| `lt-astra/trade-bubbles` | land gate failed 2 GPU test groups (HeatmapChartUi OffscreenQuick init order; UgrGpu idle redraw 3>2); Claude Fable fixing in the worktree | Codex review of the fix, land, rebuild main GUI |
 
 ## Next (priority order)
 
-1. One-world slices B-E (`docs/research/2026-10-one-world-pipeline.md`; owner decisions approved).
-2. Capture 24 h verify (`sentinel-capture --verify /Volumes/T7/sentinel-data/raw-l2`, ~5-10 min; run detached).
-3. Backlog: owner GUI Agent API (17100) has no auth; autoscale follow-ups (queued snapshot generation, re-subscribe snapshot timeout, 1h viewport change 2-3 ms); slice 3 minors (`SentinelServerApp` ignores `MarketDataFeeds::add` result; ConfigLoader `mdc:` block trap; deploy-runtime.sh should keep its own rollback copy); TPO and profiles v2; cosmetics; compression lab; Parquet + DuckDB research layer; Pi / cloud node.
+1. Morning with owner: capture deploy (slice B); look at candles (landed `db7aa70`), bubbles, S7c screenshots (`screenshots/s7c/`, S8 = GO); footprint colour check.
+2. One-world slices C (shadow live roller), D (cutover), E (delete old path).
+3. S8: delete the legacy heatmap (Fable verdict GO).
+4. Backlog: owner GUI Agent API (17100) unauthenticated; GUI RSS ~1.5 GB after 10 min; stale-book status not cleared on disconnect (RemoteGridDataSource.cpp:146); fan-out retry clears rings each attempt; AGENTS.md 4b: `--agent-host` needs `--agent-host-symbols` explicitly; TPO v2; cosmetics; compression lab; Parquet + DuckDB; Pi / cloud node.
 
 ## Owner preferences that shape the work
 
