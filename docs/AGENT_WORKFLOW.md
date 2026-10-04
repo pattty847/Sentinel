@@ -51,10 +51,12 @@ orchestrator's Claude Code memory (`sentinel-roadmap`, `codex-delegation`,
 
 ## Constraints that shape it
 
-- 16 GB Mac: one agent builds at a time (`while pgrep -x ninja ...` before each build);
+- 16 GB Mac: builds, tests and benchmarks go through `scripts/dev/build-queue.sh`;
   read-only reviews and planning overlap freely.
-- Usage is spread across both subscriptions: Codex and Claude lieutenants alternate;
-  when one subscription is near its reset the other takes more work.
+- Usage is spread across both subscriptions. Before dispatching, the orchestrator runs
+  `scripts/dev/budget.sh` (CodexBar CLI: % left and reset per window) and routes work to the
+  subscription with room; when one is near its limit the other takes more work. Fable has its
+  own weekly limit (shown in the CodexBar app, not the CLI).
 - Hot files (`MainWindowGpu.cpp`, `DataProcessor.cpp`, `MarketDataCoreEngine.cpp`,
   `UnifiedGridRenderer.cpp`) are never edited by two branches at once.
 - Visual changes the owner has not seen do not become the default.
