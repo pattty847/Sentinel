@@ -15,9 +15,26 @@
 #include <QTableView>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <cmath>
 
 DomBarDelegate::DomBarDelegate(DomModel* model, QObject* parent)
     : QStyledItemDelegate(parent), m_model(model) {}
+
+QString DomBarDelegate::fittedQuantity(double value, const QFontMetrics& metrics, int width)
+{
+    QString full = QString::number(value, 'g', 8);
+    if (metrics.horizontalAdvance(full) <= width) return full;
+    double scaled = value;
+    QString suffix;
+    if (std::abs(value) >= 1e9) { scaled /= 1e9; suffix = "b"; }
+    else if (std::abs(value) >= 1e6) { scaled /= 1e6; suffix = "m"; }
+    else if (std::abs(value) >= 1e3) { scaled /= 1e3; suffix = "k"; }
+    for (int precision = 3; precision >= 1; --precision) {
+        const auto text = QString::number(scaled, 'g', precision) + suffix;
+        if (metrics.horizontalAdvance(text) <= width) return text;
+    }
+    return QString::number(value, 'e', 1); // Complete number; paint scales only this last fallback.
+}
 
 void DomBarDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option,
                            const QModelIndex& index) const
@@ -25,7 +42,7 @@ void DomBarDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option
     // Paint native background/selection, then the liquidity bar, then native text.
     QStyleOptionViewItem opt(option);
     initStyleOption(&opt, index);
-    const QString text = opt.text;
+    QString text = opt.text;
     opt.text.clear();
     const auto* style = opt.widget ? opt.widget->style() : QApplication::style();
     style->drawControl(QStyle::CE_ItemViewItem, &opt, painter, opt.widget);
@@ -39,10 +56,16 @@ void DomBarDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option
         else bar.setWidth(width);
         painter->fillRect(bar, bid ? QColor(40, 125, 135, 100) : QColor(160, 115, 40, 100));
     }
+    const int textWidth = std::max(1, opt.rect.width() - 6);
+    if (qty > 0) text = fittedQuantity(qty, opt.fontMetrics, textWidth);
+    if (index.column() >= DomModel::Buys && index.data().toInt() == 0) text.clear();
+    // Price and count digits stay intact. Only exceptional long values need a smaller font.
+    const int measured = opt.fontMetrics.horizontalAdvance(text);
+    if (measured > textWidth) opt.font.setPixelSize(std::max(1, int(opt.fontMetrics.height() * 0.8 * textWidth / measured)));
     painter->save();
     painter->setFont(opt.font);
     painter->setPen(opt.palette.color(QPalette::Text));
-    painter->drawText(opt.rect.adjusted(4, 0, -4, 0), Qt::AlignRight | Qt::AlignVCenter, text);
+    painter->drawText(opt.rect.adjusted(3, 0, -3, 0), Qt::AlignRight | Qt::AlignVCenter, text);
     painter->restore();
 }
 
@@ -82,16 +105,19 @@ void OrderBookDock::buildUi()
 {
     if (m_table) return;
     auto* layout = new QVBoxLayout(m_contentWidget);
-    layout->setContentsMargins(6, 6, 6, 6);
-    layout->setSpacing(4);
+    layout->setContentsMargins(4, 4, 4, 4);
+    setMinimumWidth(180);
+    layout->setSpacing(2);
     auto* heading = new QHBoxLayout;
     m_symbolLabel = new QLabel("No symbol", m_contentWidget);
     QFont font = m_symbolLabel->font();
     font.setBold(true);
     m_symbolLabel->setFont(font);
     m_symbolLabel->setMinimumWidth(0);
-    m_recenter = new QPushButton("Recenter / follow", m_contentWidget);
+    m_recenter = new QPushButton("Recenter", m_contentWidget);
     m_recenter->setObjectName("domRecenter");
+    m_recenter->setAccessibleName("Recenter and follow the market");
+    m_recenter->setCheckable(true);
     m_recenter->setToolTip("Follow the market. Scrolling pauses follow and pins the price ladder.");
     connect(m_recenter, &QPushButton::clicked, this, &OrderBookDock::recenter);
     heading->addWidget(m_symbolLabel, 1);
@@ -100,15 +126,22 @@ void OrderBookDock::buildUi()
     auto label = [&](const char* name) {
         auto* result = new QLabel(m_contentWidget);
         result->setObjectName(name);
-        result->setWordWrap(true);
+        result->setWordWrap(false);
+        result->setMinimumWidth(0);
+        result->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
         result->setTextFormat(Qt::PlainText);
-        layout->addWidget(result);
         return result;
     };
     m_aggregation = label("domAggregation");
     m_summary = label("domBookSummary");
     m_status = label("domFreshness");
-    m_executions = label("domExecutions");
+    layout->addWidget(m_aggregation);
+    auto* summaryLine = new QHBoxLayout;
+    summaryLine->setSpacing(4);
+    summaryLine->addWidget(m_summary, 1);
+    summaryLine->addWidget(m_status, 2);
+    m_status->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    layout->addLayout(summaryLine);
     m_status->setText("Waiting for book");
     m_model = new DomModel(this);
     m_table = new QTableView(m_contentWidget);
@@ -118,21 +151,18 @@ void OrderBookDock::buildUi()
     m_table->setToolTip("2,001 contiguous price buckets. Scroll to inspect; Recenter / follow moves the window to the market.");
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setSelectionMode(QAbstractItemView::NoSelection);
+    m_table->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_table->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+    m_table->setTextElideMode(Qt::ElideNone);
     m_table->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     m_table->verticalHeader()->hide();
     m_table->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
     m_table->verticalHeader()->setDefaultSectionSize(22);
     m_table->verticalHeader()->setMinimumSectionSize(22);
-    m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+    m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Fixed);
     m_table->horizontalHeader()->setDefaultAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    m_table->horizontalHeader()->setMinimumSectionSize(72);
-    m_table->setColumnWidth(DomModel::Bid, 100);
-    m_table->setColumnWidth(DomModel::Price, 124);
-    m_table->setColumnWidth(DomModel::Ask, 100);
-    for (int c = DomModel::Buys; c < DomModel::Columns; ++c) m_table->setColumnWidth(c, 88);
-    auto* delegate = new DomBarDelegate(m_model, m_table);
-    m_table->setItemDelegateForColumn(DomModel::Bid, delegate);
-    m_table->setItemDelegateForColumn(DomModel::Ask, delegate);
+    m_table->horizontalHeader()->setMinimumSectionSize(20);
+    m_table->setItemDelegate(new DomBarDelegate(m_model, m_table));
     m_table->viewport()->installEventFilter(this);
     m_table->installEventFilter(this);
     m_table->verticalScrollBar()->installEventFilter(this);
@@ -215,7 +245,8 @@ void OrderBookDock::stopFollowing()
 {
     if (m_programmaticScroll || !m_follow) return;
     m_follow = false;
-    m_recenter->setText("Recenter / follow");
+    m_recenter->setText("Recenter");
+    m_recenter->setChecked(false);
 }
 
 bool OrderBookDock::eventFilter(QObject* watched, QEvent* event)
@@ -223,6 +254,10 @@ bool OrderBookDock::eventFilter(QObject* watched, QEvent* event)
     if (watched == this || watched == m_hostWindow) {
         if (event->type() == QEvent::WindowStateChange) updateDisplayTimer();
         return DockablePanel::eventFilter(watched, event);
+    }
+    if (watched == m_table->viewport() && event->type() == QEvent::Resize && m_displayActive) {
+        fitColumns();
+        updateSummary();
     }
     const bool ladderInput = watched == m_table || watched == m_table->viewport() || watched == m_table->verticalScrollBar();
     if (!ladderInput) return DockablePanel::eventFilter(watched, event);
@@ -267,12 +302,12 @@ void OrderBookDock::refreshDisplay()
         if (m_dirty) m_model->publish(book, m_trades, m_follow);
     }
     if (m_dirty) {
-        m_recenter->setText(m_follow ? "Following · recenter" : "Recenter / follow");
-        m_aggregation->setText(m_model->aggregation());
-        m_summary->setText(m_model->summary());
-        m_executions->setText(m_model->executionSummary());
-        // New rows and wrapping header labels must establish the scroll range
-        // before the first follow operation; regular ticks reuse that layout.
+        m_recenter->setText(m_follow ? "Following" : "Recenter");
+        m_recenter->setChecked(m_follow);
+        m_table->horizontalHeader()->setToolTip(m_model->executionSummary());
+        fitColumns();
+        // New rows must establish the scroll range before the first follow
+        // operation; regular ticks reuse that layout.
         if (needsLayout) {
             m_contentWidget->layout()->activate();
             m_table->doItemsLayout();
@@ -280,6 +315,55 @@ void OrderBookDock::refreshDisplay()
         if (m_follow && m_model->centerRow() >= 0) m_table->scrollTo(m_model->index(m_model->centerRow(), DomModel::Price), QAbstractItemView::PositionAtCenter);
         m_dirty = false;
     }
-    m_status->setText(m_freshness.text(QDateTime::currentMSecsSinceEpoch()));
+    updateSummary();
     m_programmaticScroll = false;
+}
+
+void OrderBookDock::fitColumns()
+{
+    const int width = m_table->viewport()->width();
+    const QFontMetrics fm(m_table->font());
+    const int priceWidth = std::max(54, fm.horizontalAdvance(m_model->index(0, DomModel::Price).data().toString()) + 8);
+    const int sizeWidth = fm.horizontalAdvance("0.0353") + 8;
+    const int countWidth = fm.horizontalAdvance("Sell #") + 10;
+    const bool counts = width >= priceWidth + sizeWidth * 2 + countWidth * 3;
+    const bool delta = width >= priceWidth + sizeWidth * 2 + countWidth;
+    for (int col = DomModel::Buys; col < DomModel::Columns; ++col) {
+        const bool visible = col == DomModel::Delta ? delta : counts;
+        m_table->setColumnHidden(col, !visible);
+        if (visible) m_table->setColumnWidth(col, countWidth);
+    }
+    const int core = width - (counts ? countWidth * 3 : delta ? countWidth : 0);
+    const int price = std::min(priceWidth, core / 2);
+    const int side = (core - price) / 2;
+    m_table->setColumnWidth(DomModel::Bid, side);
+    m_table->setColumnWidth(DomModel::Price, price);
+    m_table->setColumnWidth(DomModel::Ask, core - price - side);
+    m_table->horizontalScrollBar()->setValue(0);
+}
+
+void OrderBookDock::updateSummary()
+{
+    const bool wide = m_contentWidget->width() >= 720;
+    const auto fullStatus = m_freshness.text(QDateTime::currentMSecsSinceEpoch());
+    QString status;
+    if (m_freshness.connected == false) status = "Offline";
+    else if (m_freshness.snapshotStale) status = "Stale";
+    else if (m_freshness.awaitingBook || m_freshness.lastChangeMs <= 0) status = "Waiting";
+    else if (m_freshness.connected == true) status = "Live";
+    else status = "Unknown";
+    if (m_freshness.lastChangeMs > 0) {
+        const double seconds = std::max<qint64>(0, QDateTime::currentMSecsSinceEpoch() - m_freshness.lastChangeMs) / 1000.0;
+        const auto age = seconds < 60 ? QString::number(seconds, 'f', 1) + "s"
+            : seconds < 3600 ? QString::number(seconds / 60, 'f', 0) + "m"
+                             : QString::number(seconds / 3600, 'g', 2) + "h";
+        status += QString(" chg %1").arg(age);
+    }
+    m_status->setText(wide ? fullStatus : status);
+    m_status->setToolTip(fullStatus + "\nAge is time since the last book change, not feed silence.");
+    m_status->setMaximumWidth(m_status->fontMetrics().horizontalAdvance(m_status->text()) + 2);
+    m_aggregation->setText(m_model->aggregation(true));
+    m_aggregation->setToolTip(m_model->aggregation() + "\n" + m_model->executionSummary());
+    m_summary->setText(m_model->summary(!wide));
+    m_summary->setToolTip(m_model->summary() + "\n" + m_model->executionSummary());
 }

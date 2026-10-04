@@ -24,10 +24,13 @@ every book event; the visible timer samples that complete replica. Hide, tab-vis
 timer; events keep entering ingestion state. A show catches up on the next timer tick. Explicit recenter is
 an immediate user action. Normal updates do not reset the model or construct table items.
 
-The header names the symbol, aggregation tick, base size units, quote price units, bucketed spread, and
-execution count window. Numeric cells align right; rows are 22 px. Resting bid/ask use cyan/amber, executed
-buy/sell use green/red, and side is also encoded by column labels/position. Columns retain readable widths
-and use horizontal scrolling in narrow docks.
+The header names the symbol; two single-line metadata rows show aggregation/units and bucketed spread/feed
+state/last-change age. Bid / Price / Ask fit a 180 px dock with no horizontal scrollbar. Buy # / Sell # / Δ #
+columns return automatically when space permits: intermediate widths show only the slim signed Δ # column, and the narrowest widths show only the three-column ladder. The default layout requests 260 px for the DOM; Qt adjusts this for adjacent dock constraints. Their last-1,000-trades
+window and unknown-aggressor policy remain in tooltips; each price tooltip includes that row's counts.
+Numeric cells align right; rows are 22 px. Sizes use complete shorter formats (0.0353, 1.23k, scientific
+notation for very small values), with full values in tooltips. Prices retain tick precision. Resting bid/ask
+use cyan/amber, executed buy/sell use green/red, and side is encoded by column labels/position.
 
 `DomFreshness` is intentionally replaceable by W2a: it uses `LiveOrderBook::getLastUpdate()` (the local receive
 time supplied by RemoteGridDataSource) only to display last-change age after change notifications. Feed
@@ -75,9 +78,9 @@ coalescing under sustained events, reconnect/stale snapshot, and hidden symbol c
   against the 1,000-event capacity. The timer cadence is separately exercised by the behavior suite;
   the benchmark invokes publication/paint at 67 ms deadlines for isolated frame-cost measurement.
 
-Native macOS pixels, dock layouts and native paint latency cannot be verified in
-this branch's sandbox (no window server). Offscreen QWidget raster timing is reported separately from native
-visual/GPU verification. No owner GUI or running service is used.
+At the initial implementation, native visuals were unavailable inside the sandbox. Round 5 below uses
+the newly authorized own-branch GUI host for native screenshots. Offscreen QWidget raster timing remains
+separate from native compositor/GPU latency; no recorder or capture service is changed.
 
 ## Initial implementation scope
 
@@ -187,3 +190,88 @@ MTLDevice is available; a passing CTest entry does not verify skipped GPU cases.
 All validation runs through the FIFO build queue, with builds/ctest at `-j 4`.
 Native visuals/GPU behavior remain unverified; the initial-implementation raster benchmark has not been
 rerun this round. No services or deployments.
+
+
+## Round 5: native layout verification (base 6d346d7)
+
+The original native window screenshot exposed fixed columns wider than the default dock, a nonzero
+horizontal scroll offset, clipped bid numbers, hidden asks/counts and seven wrapped metadata lines.
+The responsive core now fits Bid / Price / Ask to the viewport, with a 180 px dock minimum, an always-off
+horizontal scrollbar and a zero horizontal scroll range. Optional count columns appear only when all six
+fit. Unit headers are short; the two metadata rows never wrap. Follow/recenter is a compact checked button.
+A price tooltip exposes per-row execution counts even while their columns are hidden. Narrow book-top
+prices remain on the ladder and in the spread tooltip; wide summaries show the full bid/ask/spread text.
+
+Native GUI host verification used this worktree's queued build. Dock API focus/show actions exercised
+expanded/restored layouts; a fresh hosted profile restored the default 1920 x 1018 window, whose order-book
+dock is exactly 180 x 991 px. BTC and ETH were both inspected live at that width: all three columns, complete
+prices and size numbers, two metadata lines, no horizontal scrollbar. Expanded ETH (617 x 991 px) shows
+all six columns, with green/red nonzero execution counts. ETH initially waited for a snapshot; the existing
+5-second retry populated it, confirmed in the GUI run log before final captures. The host was stopped after
+capture; it reported `ownerSettingsUnchanged: true`.
+
+Final native PNGs (opened and inspected):
+
+- `/Users/copeharder/Library/Logs/Sentinel/gui-host/242152f4/screenshots/dom-r5-btc-default-window.png`
+- `/Users/copeharder/Library/Logs/Sentinel/gui-host/242152f4/screenshots/dom-r5-btc-180.png`
+- `/Users/copeharder/Library/Logs/Sentinel/gui-host/242152f4/screenshots/dom-r5-eth-default-window.png`
+- `/Users/copeharder/Library/Logs/Sentinel/gui-host/242152f4/screenshots/dom-r5-eth-180.png`
+- `/Users/copeharder/Library/Logs/Sentinel/gui-host/f24dfe34/screenshots/dom-r5-final-eth-expanded.png`
+
+Regression coverage resizes 650 -> 200 -> 180 -> 650 px, checks every core column is in the viewport,
+checks zero horizontal range/offset, count-column restoration, metadata layout and complete compact numeric
+formats. The preexisting ingestion, ring, freshness, follow, hidden/minimized and precision tests remain.
+Targeted DOM: **21/21 passed**, CTest **1/1 passed (2.54 s)**. Fail-without-fix: **14/14 mutations
+compiled and failed their behavior checks**, including restoring fixed widths and unshortened sizes;
+restored DOM suite **21/21 passed**. Full build **passed**. Full ctest: **100% tests passed, 0 tests
+failed out of 91**, **150.43 s**; DOM CTest time **2.18 s**. Metal-dependent test cases skipped inside
+the sandbox; the native branch screenshots above were captured through the GUI host. No changes outside
+DOM model/widget/tests and canonical documentation.
+
+Updated sustained benchmark: **passed**, Qt offscreen, 650 x 600 dock, production dark stylesheet,
+**49,980 book events + 49,980 trades over 5.000 s**, **74 frames** (~14.8 Hz). Combined model publication
+and full-dock raster painting: **mean 5.54986 ms**, **p50 5.65079 ms**, **p95 6.50625 ms**, **max 7.39267 ms**.
+This is synthetic QImage raster timing, not native compositor/GPU latency. All builds, mutation checks,
+benchmark and ctest use the FIFO build queue, with builds/ctest at `-j 4`. Native screenshots confirm layout;
+GPU test execution inside the sandbox remains subject to Metal availability.
+
+
+## Round 5 owner-note refinement: compact default with secondary delta
+
+Chosen layout: Bid / Price / Ask plus a slim signed Δ # at intermediate widths. Buy # and Sell # join
+only when the full group fits; at 180 px delta collapses too. Per-row buy/sell/delta counts, the explicit
+last-1,000-trades window and unknown policy stay available in tooltips at every width. Inline resting-size
+bars, complete numeric formats, 22 px rows and the two-line metadata block remain unchanged.
+
+Declared ownership exception: `libs/gui/mainwindow/LayoutOrchestrator.cpp` only changes default sizing.
+It shows the default docks before sizing and submits the heatmap, DOM and right-stack pixel hints together,
+allowing for visible tabs' minimum widths. This avoids competing resize calls stretching the DOM. The DOM
+hint is 260 px; the native 1920 x 1018 window resolves it to **234 x 991 px**, preserving most space for the
+chart. Saved layouts and the 180 px manual minimum are unchanged.
+
+Own-branch native BTC and ETH captures were opened and inspected at the final default width. The three
+core columns and signed delta are fully visible, prices retain 0.1 precision, quantities are whole numbers
+or complete compact formats, and neither horizontal scrolling nor wrapped metadata occurs. The earlier
+180 px native BTC/ETH captures above verify the narrow presentation; the final resize regression now
+covers 650 -> 260 -> 200 -> 180 -> 650, including the intermediate delta state. The dock API supports
+visibility/focus, not a pixel resize; the narrow native captures predate only the default-width and
+intermediate-delta refinement. No claim is made that those older PNGs came from the final binary.
+
+Final default-width native PNGs (opened and inspected):
+
+- `/Users/copeharder/Library/Logs/Sentinel/gui-host/9ea62881/screenshots/dom-final-btc-window.png`
+- `/Users/copeharder/Library/Logs/Sentinel/gui-host/9ea62881/screenshots/dom-final-btc-default.png`
+- `/Users/copeharder/Library/Logs/Sentinel/gui-host/9ea62881/screenshots/dom-final-eth-window.png`
+- `/Users/copeharder/Library/Logs/Sentinel/gui-host/9ea62881/screenshots/dom-final-eth-default.png`
+
+The host was stopped and reported `ownerSettingsUnchanged: true`. The run log confirms the own-worktree
+binary; ETH again populated after the existing snapshot retry. The screenshots validate the DOM layout,
+not the ETH heatmap's historical coverage. No recorder/capture service changes or deployments.
+
+Final owner-note validation: full build **passed**; targeted DOM **21/21 passed**, CTest **1/1 passed
+(2.12 s)**. Fail-without-fix **14/14 mutations compiled and were rejected**, restored DOM **21/21 passed**.
+Full ctest: **100% tests passed, 0 tests failed out of 91**, **125.70 s**; DOM entry **2.16 s**.
+All runs used the FIFO build queue and build/ctest `-j 4`. Metal-dependent cases still skip in the sandbox;
+passing CTest entries do not verify those cases. The Round 5 raster benchmark above predates only the
+intermediate-delta and default-width refinement (its 650 px full-column presentation is unchanged).
+Changes are left uncommitted for orchestrator review; no rebase/commit was attempted in the protected index.

@@ -50,9 +50,9 @@ public:
     double tick() const { return m_tick; }
     double maxBid() const { return m_maxBid; }
     double maxAsk() const { return m_maxAsk; }
-    QString summary() const;
+    QString summary(bool compact = false) const;
     QString executionSummary() const;
-    QString aggregation() const;
+    QString aggregation(bool compact = false) const;
     static QString priceText(double price, double tick);
 private:
     struct Row {

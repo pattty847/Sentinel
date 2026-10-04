@@ -16,6 +16,7 @@ public:
     explicit DomBarDelegate(DomModel* model, QObject* parent = nullptr);
     void paint(QPainter* painter, const QStyleOptionViewItem& option,
                const QModelIndex& index) const override;
+    static QString fittedQuantity(double value, const QFontMetrics& metrics, int width);
 private:
     DomModel* m_model;
 };
@@ -44,6 +45,8 @@ private:
     void watchWindow();
     void updateDisplayTimer();
     bool minimized() const;
+    void fitColumns();
+    void updateSummary();
     QPointer<IGridDataSource> m_source;
     QString m_symbol;
     std::string m_symbolId;
@@ -55,7 +58,6 @@ private:
     QLabel* m_symbolLabel = nullptr;
     QLabel* m_aggregation = nullptr;
     QLabel* m_summary = nullptr;
-    QLabel* m_executions = nullptr;
     QLabel* m_status = nullptr;
     QPushButton* m_recenter = nullptr;
     QTimer m_timer;

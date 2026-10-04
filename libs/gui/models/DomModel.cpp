@@ -57,14 +57,19 @@ QVariant DomModel::headerData(int section, Qt::Orientation orientation, int role
 {
     if (orientation != Qt::Horizontal || section < 0 || section >= Columns) return {};
     if (role == Qt::TextAlignmentRole) return int(Qt::AlignRight | Qt::AlignVCenter);
+    if (role == Qt::ToolTipRole) {
+        if (section >= Buys) return executionSummary();
+        return section == Price ? QString("Price in %1; aggregation %2").arg(m_quote, priceText(m_tick, m_tick))
+            : QString("Resting %1 size in %2").arg(section == Bid ? "bid" : "ask", m_base);
+    }
     if (role != Qt::DisplayRole) return {};
     switch (section) {
-    case Bid: return QStringLiteral("Bid (%1)").arg(m_base);
-    case Price: return QStringLiteral("Price (%1)").arg(m_quote);
-    case Ask: return QStringLiteral("Ask (%1)").arg(m_base);
-    case Buys: return QStringLiteral("Buy count");
-    case Sells: return QStringLiteral("Sell count");
-    default: return QStringLiteral("Δ count");
+    case Bid: return QStringLiteral("Bid");
+    case Price: return QStringLiteral("Price");
+    case Ask: return QStringLiteral("Ask");
+    case Buys: return QStringLiteral("Buy #");
+    case Sells: return QStringLiteral("Sell #");
+    default: return QStringLiteral("Δ #");
     }
 }
 
@@ -87,8 +92,9 @@ QVariant DomModel::data(const QModelIndex& index, int role) const
     if (role == Qt::BackgroundRole && (row.bestBid || row.bestAsk)) return bestColor;
     if (role == Qt::ToolTipRole) {
         if (col >= Buys) return QStringLiteral("Execution counts in the last 1,000 trades; unknown aggressors excluded from buy, sell and delta.");
-        return col == Price ? QStringLiteral("%1 · aggregated price bucket, not an exchange spread").arg(data(index, BestSideRole).toString())
-                            : QStringLiteral("Resting %1 quantity in %2").arg(col == Bid ? "bid" : "ask", m_base);
+        return col == Price ? QStringLiteral("%1 · aggregated price bucket, not an exchange spread\nBuy %2 · Sell %3 · Δ %4\n%5")
+            .arg(data(index, BestSideRole).toString()).arg(row.buys).arg(row.sells).arg(row.buys - row.sells).arg(executionSummary())
+                            : QStringLiteral("%1 %2 resting %3\n%4").arg(QString::number(col == Bid ? row.bid : row.ask, 'g', 12), m_base, col == Bid ? "bid" : "ask", executionSummary());
     }
     if (role != Qt::DisplayRole) return {};
     switch (col) {
@@ -210,20 +216,24 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
 }
 
 int DomModel::centerRow() const { return m_ready ? int(std::clamp<qint64>(m_top - m_center, 0, Rows - 1)) : -1; }
-QString DomModel::aggregation() const
+QString DomModel::aggregation(bool compact) const
 {
-    if (!m_aggregationIssue.isEmpty()) return m_aggregationIssue;
+    if (!m_aggregationIssue.isEmpty()) return compact
+        ? (m_tick > 0 ? QString("Coarse: %1 %2").arg(priceText(m_tick, m_tick), m_quote) : QString("No aggregation"))
+        : m_aggregationIssue;
+    if (compact) return QString("Tick %1 %2 · %3 size").arg(m_tick > 0 ? priceText(m_tick, m_tick) : "—", m_quote, m_base);
     return QStringLiteral("Aggregation: %1 %2 · resting size: %3").arg(m_tick > 0 ? priceText(m_tick, m_tick) : "—", m_quote, m_base);
 }
 QString DomModel::executionSummary() const
 {
-    return QStringLiteral("Execution counts · last 1,000 trades (%1 received) · unknown: %2 (excluded from Δ)").arg(m_trades).arg(m_unknown);
+    return QStringLiteral("Execution counts · last 1,000 trades (%1 received) · unknown: %2 (excluded from buy/sell/Δ)").arg(m_trades).arg(m_unknown);
 }
-QString DomModel::summary() const
+QString DomModel::summary(bool compact) const
 {
     if (!m_aggregationIssue.isEmpty()) return {};
     const QString bid = m_bestBid > 0 ? priceText(m_bestBid, m_tick) : "—";
     const QString ask = m_bestAsk > 0 ? priceText(m_bestAsk, m_tick) : "—";
     const QString spread = m_bestBid > 0 && m_bestAsk > 0 ? priceText(m_bestAsk - m_bestBid, m_tick) : "—";
+    if (compact) return QString("Spr %1").arg(spread);
     return QStringLiteral("Bid %1 · Ask %2 · Bucketed spread %3 %4").arg(bid, ask, spread, m_quote);
 }

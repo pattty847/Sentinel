@@ -11,6 +11,7 @@
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QImage>
+#include <QHeaderView>
 #include <QLabel>
 #include <QPainter>
 #include <QPushButton>
@@ -68,7 +69,7 @@ TEST(DomModel, SameBucketUniqueBestAskStableEmptyRowsAndAlignment) {
     EXPECT_EQ(reset.count(), 0);
     EXPECT_TRUE(model.summary().contains("Bucketed spread 0.0 USD"));
     EXPECT_TRUE(model.aggregation().contains("0.1 USD"));
-    EXPECT_TRUE(model.headerData(DomModel::Bid, Qt::Horizontal, Qt::DisplayRole).toString().contains("BTC"));
+    EXPECT_TRUE(model.headerData(DomModel::Bid, Qt::Horizontal, Qt::ToolTipRole).toString().contains("BTC"));
 }
 
 TEST(DomModel, EmptyBookAndUnchangedPublicationDoNotInventRowsOrChurn) {
@@ -112,7 +113,7 @@ TEST(DomModel, RingCountsEveryEventUnknownNeverSellsAndCountsAreNotVolume) {
     EXPECT_TRUE(model.executionSummary().contains("last 1,000 trades (1000 received)"));
     EXPECT_TRUE(model.executionSummary().contains("unknown: 50"));
     for (int c = DomModel::Buys; c < DomModel::Columns; ++c) {
-        EXPECT_TRUE(model.headerData(c, Qt::Horizontal, Qt::DisplayRole).toString().contains("count"));
+        EXPECT_TRUE(model.headerData(c, Qt::Horizontal, Qt::ToolTipRole).toString().contains("counts"));
         EXPECT_FALSE(model.headerData(c, Qt::Horizontal, Qt::DisplayRole).toString().contains("volume"));
     }
 }
@@ -204,8 +205,8 @@ TEST(DomModel, ServerQuantisedSnapshotsNeverAdvertiseFalsePrecision) {
         EXPECT_DOUBLE_EQ(book.getBidVolume(), 7);
         EXPECT_DOUBLE_EQ(book.getAskVolume(), 9);
         ASSERT_TRUE(QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection));
-        const auto aggregation = dock.findChild<QLabel*>("domAggregation")->text();
-        const auto summary = dock.findChild<QLabel*>("domBookSummary")->text();
+        const auto aggregation = dock.findChild<QLabel*>("domAggregation")->toolTip().section('\n', 0, 0);
+        const auto summary = dock.findChild<QLabel*>("domBookSummary")->toolTip().section('\n', 0, 0);
         if (c.coarse) {
             EXPECT_EQ(model->rowCount(), 0);
             EXPECT_EQ(aggregation, QString("Server aggregation 0.1 USD is too coarse for %1").arg(symbol));
@@ -388,8 +389,53 @@ struct DomDock : testing::Test {
     void SetUp() override { dock.resize(650, 600); dock.onSymbolChanged("BTC-USD"); }
     void show() { dock.show(); QTest::qWait(90); }
     void flushEvents() { QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall); }
-    QString label(const char* name) { return dock.findChild<QLabel*>(name)->text(); }
+    QString label(const char* name) { auto* label = dock.findChild<QLabel*>(name); return QString(name) == "domFreshness" ? label->toolTip().section('\n', 0, 0) : label->text(); }
 };
+
+TEST_F(DomDock, NarrowLadderFitsWithoutScrollingAndRestoresExecutionColumns) {
+    show();
+    for (int width : {650, 260, 200, 180, 650}) {
+        dock.resize(width, 600);
+        QCoreApplication::processEvents();
+        ASSERT_TRUE(QMetaObject::invokeMethod(&dock, "refreshDisplay", Qt::DirectConnection));
+        EXPECT_EQ(dock.width(), width);
+        EXPECT_EQ(table->horizontalScrollBarPolicy(), Qt::ScrollBarAlwaysOff);
+        EXPECT_EQ(table->horizontalScrollBar()->maximum(), 0);
+        EXPECT_EQ(table->horizontalScrollBar()->value(), 0);
+        EXPECT_LE(table->horizontalHeader()->length(), table->viewport()->width());
+        for (int col : {DomModel::Bid, DomModel::Price, DomModel::Ask}) {
+            EXPECT_FALSE(table->isColumnHidden(col));
+            EXPECT_GE(table->columnViewportPosition(col), 0);
+            EXPECT_LE(table->columnViewportPosition(col) + table->columnWidth(col), table->viewport()->width());
+        }
+        EXPECT_EQ(table->isColumnHidden(DomModel::Buys), width < 300);
+        EXPECT_EQ(table->isColumnHidden(DomModel::Delta), width <= 200);
+        const auto* aggregation = dock.findChild<QLabel*>("domAggregation");
+        const auto* summary = dock.findChild<QLabel*>("domBookSummary");
+        const auto* freshness = dock.findChild<QLabel*>("domFreshness");
+        EXPECT_FALSE(aggregation->wordWrap());
+        EXPECT_EQ(summary->y(), freshness->y());
+        EXPECT_LT(table->y(), 110); // heading + two metadata lines, not a seven-line paragraph.
+        EXPECT_TRUE(aggregation->text().contains("USD"));
+        EXPECT_TRUE(aggregation->text().contains("BTC"));
+        EXPECT_TRUE(table->horizontalHeader()->toolTip().contains("last 1,000 trades"));
+        EXPECT_TRUE(table->horizontalHeader()->toolTip().contains("unknown"));
+    }
+}
+
+TEST(DomDelegate, CompactNumbersAreWholeValuesAndPricesKeepTheirPrecision) {
+    QFont font = QApplication::font();
+    QFontMetrics fm(font);
+    const int width = fm.horizontalAdvance("0.0353");
+    EXPECT_EQ(DomBarDelegate::fittedQuantity(.035294567, fm, width), "0.0353");
+    EXPECT_EQ(DomBarDelegate::fittedQuantity(1234.567, fm, fm.horizontalAdvance("1.23k")), "1.23k");
+    for (double value : {0.000000034567, 12.345678, 12345678.9}) {
+        const auto text = DomBarDelegate::fittedQuantity(value, fm, width);
+        EXPECT_FALSE(text.contains(QChar(0x2026)));
+        EXPECT_LE(fm.horizontalAdvance(text), width);
+        EXPECT_NE(text, "0");
+    }
+}
 
 TEST_F(DomDock, HiddenIngestsAllTradesButDoesNoModelOrReplicaReadWork) {
     QSignalSpy changed(model, &QAbstractItemModel::dataChanged);
@@ -404,7 +450,7 @@ TEST_F(DomDock, HiddenIngestsAllTradesButDoesNoModelOrReplicaReadWork) {
     EXPECT_EQ(changed.count() + reset.count() + inserted.count(), 0);
     show();
     EXPECT_EQ(count(*model, rowAt(*model, 2000), DomModel::Buys), 900);
-    EXPECT_TRUE(label("domExecutions").contains("unknown: 100"));
+    EXPECT_TRUE(table->horizontalHeader()->toolTip().contains("unknown: 100"));
     const int reads = source.reads;
     dock.hide();
     const int notifications = changed.count() + reset.count() + inserted.count();
@@ -568,7 +614,7 @@ TEST_F(DomDock, SymbolChangeWhileHiddenClearsOldRowsAndCountsOnShow) {
     EXPECT_EQ(reset.count(), 0);
     show();
     EXPECT_EQ(count(*model, rowAt(*model, 2000), DomModel::Buys), 0);
-    EXPECT_TRUE(model->headerData(DomModel::Bid, Qt::Horizontal, Qt::DisplayRole).toString().contains("ETH"));
+    EXPECT_TRUE(model->headerData(DomModel::Bid, Qt::Horizontal, Qt::ToolTipRole).toString().contains("ETH"));
 }
 
 // Opt-in measurement: sustained wall-clock 10,000 books + 10,000 trades/s,

@@ -16,6 +16,12 @@ dock = root / 'libs/gui/widgets/OrderBookDock.cpp'
 replica = root / 'libs/gui/datasources/RemoteGridDataSource.cpp'
 original = {p: p.read_text() for p in (model, dock, replica)}
 mutants = [
+    ('fixed_dom_columns', dock,
+     [('const int core = width - (counts ? countWidth * 3 : delta ? countWidth : 0);', 'const int core = 600;')],
+     'DomDock.NarrowLadderFitsWithoutScrollingAndRestoresExecutionColumns'),
+    ('unshortened_quantities', dock,
+     [('if (metrics.horizontalAdvance(full) <= width) return full;', 'return full;')],
+     'DomDelegate.CompactNumbersAreWholeValuesAndPricesKeepTheirPrecision'),
     ('duplicate_bucket', model,
      [('return m_top - index.row();', 'return m_top - (index.row() == 1001 ? 1000 : index.row());')],
      'DomModel.SameBucketUniqueBestAskStableEmptyRowsAndAlignment'),
