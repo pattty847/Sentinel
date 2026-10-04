@@ -30,7 +30,6 @@
 #include "widgets/SecFilingDock.hpp"
 #include "widgets/ScreenerDock.hpp"
 #include "widgets/CopenetFeedDock.hpp"
-#include "widgets/AICommentaryFeedDock.hpp"
 #include "widgets/TopToolbar.hpp"
 #include "widgets/HeatmapSettingsDialog.hpp"
 #include "widgets/HeatmapTelemetryDock.hpp"
@@ -293,7 +292,6 @@ void MainWindowGPU::setupUI() {
     }
     m_secDock = docks.secDock;
     m_copenetDock = docks.copenetDock;
-    m_aiCommentaryDock = docks.aiCommentaryDock;
     m_watchlistDock = docks.watchlistDock;
     m_screenerDock = docks.screenerDock;
     m_stockChartDock = docks.stockChartDock;
@@ -631,9 +629,34 @@ void MainWindowGPU::setupGuiApiServer() {
                                                     this);
     m_guiApiServer->setHeatmapSnapshot([this] { return agentApiHeatmapSnapshot(); });
     m_guiApiServer->setDocksSnapshot([this] { return m_dockVisibility->snapshot(); });
-    // Grab only the requested dock or control. QQuickView content needs its own
-    // image because QWidget::grab does not paint native window containers.
+    // Grab only Sentinel widgets. QQuickView content needs its own image because
+    // QWidget::grab does not paint native window containers.
     m_guiApiServer->setWidgetGrab([this](const QString& target, QString* error) -> QImage {
+        if (target == "window") {
+            if (!isVisible()) {
+                if (error) *error = "window_not_visible";
+                return {};
+            }
+            QImage image = grab().toImage();
+            if (image.isNull()) {
+                if (error) *error = "window_grab_failed";
+                return {};
+            }
+            QPainter painter(&image);
+            const auto drawQuick = [&](QWidget* container, QQuickView* view) {
+                if (!container || !container->isVisible() || !view || !view->isVisible()) return true;
+                const QImage quickImage = view->grabWindow();
+                if (quickImage.isNull()) return false;
+                painter.drawImage(QRect(container->mapTo(this, QPoint{}), container->size()), quickImage);
+                return true;
+            };
+            if (!drawQuick(m_qmlContainer, m_qquickView) ||
+                (m_stockChartDock && !drawQuick(m_stockChartDock->qmlContainer(), m_stockChartDock->qquickView()))) {
+                if (error) *error = "window_quick_grab_failed";
+                return {};
+            }
+            return image;
+        }
         if (target == "statusBar") {
             if (!m_statusBar || !m_statusBar->isVisible()) {
                 if (error) *error = "statusBar_not_visible";
@@ -1194,7 +1217,6 @@ void MainWindowGPU::setupMenuBar() {
     docks.heatmapDock = m_heatmapDock;
     docks.secDock = m_secDock;
     docks.copenetDock = m_copenetDock;
-    docks.aiCommentaryDock = m_aiCommentaryDock;
     docks.watchlistDock = m_watchlistDock;
     docks.screenerDock = m_screenerDock;
     docks.stockChartDock = m_stockChartDock;
@@ -1621,7 +1643,6 @@ LayoutOrchestrator::DockWidgets MainWindowGPU::getDockWidgets() const {
     docks.heatmapDock = m_heatmapDock;
     docks.secDock = m_secDock;
     docks.copenetDock = m_copenetDock;
-    docks.aiCommentaryDock = m_aiCommentaryDock;
     docks.watchlistDock = m_watchlistDock;
     docks.screenerDock = m_screenerDock;
     docks.stockChartDock = m_stockChartDock;

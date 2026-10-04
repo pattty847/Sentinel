@@ -149,7 +149,6 @@ set(GRID_CORE_SOURCES
 )
 
 set(WIDGET_SOURCES
-    "widgets/AICommentaryFeedDock.cpp"
     "widgets/CommentaryFeedDock.cpp"
     "widgets/CopenetFeedDock.cpp"
     "widgets/DockablePanel.cpp"

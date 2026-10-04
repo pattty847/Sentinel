@@ -33,7 +33,6 @@ class ChartDock;
 class StatusBar;
 class SecFilingDock;
 class CopenetFeedDock;
-class AICommentaryFeedDock;
 class WatchlistDock;
 class ScreenerDock;
 class StockChartDock;
@@ -149,7 +148,6 @@ private:
     StatusBar* m_statusBar = nullptr;
     SecFilingDock* m_secDock = nullptr;
     CopenetFeedDock* m_copenetDock = nullptr;
-    AICommentaryFeedDock* m_aiCommentaryDock = nullptr;
     WatchlistDock* m_watchlistDock = nullptr;
     ScreenerDock* m_screenerDock = nullptr;
     StockChartDock* m_stockChartDock = nullptr;

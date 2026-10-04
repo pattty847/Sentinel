@@ -3,7 +3,6 @@
 #include "../widgets/StatusBar.hpp"
 #include "../widgets/SecFilingDock.hpp"
 #include "../widgets/CopenetFeedDock.hpp"
-#include "../widgets/AICommentaryFeedDock.hpp"
 #include "../widgets/WatchlistDock.hpp"
 #include "../widgets/ScreenerDock.hpp"
 #include "../widgets/StockChartDock.hpp"
@@ -22,7 +21,6 @@ DockFactory::DockWidgets DockFactory::createDocks() {
     // Create all other docks
     m_docks.secDock = new SecFilingDock(m_parent);
     m_docks.copenetDock = new CopenetFeedDock(m_parent);
-    m_docks.aiCommentaryDock = new AICommentaryFeedDock(m_parent);
     m_docks.watchlistDock = new WatchlistDock(m_parent);
     m_docks.screenerDock   = new ScreenerDock(m_parent);
     m_docks.stockChartDock = new StockChartDock(m_parent);

@@ -145,8 +145,8 @@ ParseResult RequestParser::feed(const QByteArray& bytes) {
 bool isWidgetScreenshotTarget(const QString& target) {
     static const QStringList tabs{"Chart", "Tick", "Look", "Budgets", "Live", "Debug", "TPO"};
     static const QStringList docks{"orderBook", "watchlist", "screener", "stockChart", "paperTrading",
-                                   "sec", "copenet", "aiCommentary", "telemetry", "statusBar"};
-    return docks.contains(target) || target == "toolbar" || target == "chartmenu" || target == "settings" ||
+                                   "sec", "copenet", "telemetry", "statusBar"};
+    return docks.contains(target) || target == "window" || target == "toolbar" || target == "chartmenu" || target == "settings" ||
            (target.startsWith("settings:") && tabs.contains(target.mid(9)));
 }
 

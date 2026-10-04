@@ -35,10 +35,10 @@ TEST_F(AgentHostModeTest, ActiveModeRefusesScreenPixelTargets) {
     EXPECT_TRUE(AgentHostMode::active());
     // "main" grabs screen pixels (FM-120); the legacy /screenshot route does not validate target
     // strings, so unknown and empty names must be refused too, not only "main".
-    for (const char* bad : {"main", "lab", "", "MAIN", "window", "screen", "../main", "settings:../x", "settings:", "settings:Nope"})
+    for (const char* bad : {"main", "lab", "aiCommentary", "", "MAIN", "screen", "../main", "settings:../x", "settings:", "settings:Nope"})
         EXPECT_FALSE(AgentHostMode::screenshotTargetAllowed(bad)) << bad;
-    for (const char* ok : {"heatmap", "orderBook", "watchlist", "screener", "stockChart", "paperTrading",
-                           "sec", "copenet", "aiCommentary", "telemetry", "statusBar", "toolbar", "chartmenu",
+    for (const char* ok : {"window", "heatmap", "orderBook", "watchlist", "screener", "stockChart", "paperTrading",
+                           "sec", "copenet", "telemetry", "statusBar", "toolbar", "chartmenu",
                            "settings", "settings:Tick", "settings:TPO"})
         EXPECT_TRUE(AgentHostMode::screenshotTargetAllowed(ok)) << ok;
 }

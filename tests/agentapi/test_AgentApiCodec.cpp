@@ -295,9 +295,10 @@ TEST(AgentApiCodec, QueryValidation) {
     EXPECT_EQ(validateQuery({"GET", "/api/v1/screenshot", "target=unknown"}).status, 422);
     for (const char *target : {"settings", "settings:Look", "settings:Budgets", "telemetry", "toolbar", "chartmenu",
                                "orderBook", "watchlist", "screener", "stockChart", "paperTrading", "sec",
-                               "copenet", "aiCommentary", "statusBar"})
+                               "copenet", "statusBar", "window"})
         EXPECT_EQ(validateQuery({"GET", "/api/v1/screenshot", QString("target=") + target}).status, 200) << target;
     EXPECT_EQ(validateQuery({"GET", "/api/v1/screenshot", "target=lab"}).status, 422);
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/screenshot", "target=aiCommentary"}).status, 422);
     EXPECT_EQ(validateQuery({"GET", "/api/v1/screenshot", "target=settings:Nope"}).status, 422);
     EXPECT_EQ(validateQuery({"GET", "/api/v1/screenshot", "afterOperation=o1"}).status, 200);
 }

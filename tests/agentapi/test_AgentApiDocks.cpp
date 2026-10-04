@@ -140,7 +140,7 @@ TEST(AgentApiDocks, HostedDockProfileRestoresWithoutSharingOtherSettings) {
     AgentHostMode::resetForTests();
 }
 
-TEST(AgentApiDocks, SavedLayoutWithRetiredLabKeepsSurvivingDocks) {
+TEST(AgentApiDocks, SavedLayoutWithRetiredDocksKeepsSurvivingDocks) {
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
     const auto previousFormat = QSettings::defaultFormat();
@@ -150,16 +150,20 @@ TEST(AgentApiDocks, SavedLayoutWithRetiredLabKeepsSurvivingDocks) {
     QByteArray oldState;
     {
         QMainWindow old;
-        QDockWidget heatmap("Heatmap", &old), watchlist("Watchlist", &old), lab("Lab", &old), screener("Screener", &old);
+        QDockWidget heatmap("Heatmap", &old), watchlist("Watchlist", &old), lab("Lab", &old),
+                    aiCommentary("AI Commentary", &old), screener("Screener", &old);
         heatmap.setObjectName("ChartDock");
         watchlist.setObjectName("WatchlistDock");
         lab.setObjectName("LabDock");
+        aiCommentary.setObjectName("AICommentaryFeedDock");
         screener.setObjectName("ScreenerDock");
         old.addDockWidget(Qt::LeftDockWidgetArea, &heatmap);
         old.addDockWidget(Qt::RightDockWidgetArea, &watchlist);
         old.addDockWidget(Qt::RightDockWidgetArea, &lab);
+        old.addDockWidget(Qt::RightDockWidgetArea, &aiCommentary);
         old.addDockWidget(Qt::RightDockWidgetArea, &screener);
         old.tabifyDockWidget(&watchlist, &lab);
+        old.tabifyDockWidget(&watchlist, &aiCommentary);
         old.tabifyDockWidget(&watchlist, &screener);
         oldState = old.saveState();
     }
@@ -182,6 +186,7 @@ TEST(AgentApiDocks, SavedLayoutWithRetiredLabKeepsSurvivingDocks) {
     EXPECT_EQ(current.dockWidgetArea(&screener), Qt::RightDockWidgetArea);
     EXPECT_TRUE(current.tabifiedDockWidgets(&watchlist).contains(&screener));
     EXPECT_TRUE(current.findChildren<QDockWidget*>("LabDock").isEmpty());
+    EXPECT_TRUE(current.findChildren<QDockWidget*>("AICommentaryFeedDock").isEmpty());
     QByteArray migrated;
     {
         QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
@@ -190,11 +195,13 @@ TEST(AgentApiDocks, SavedLayoutWithRetiredLabKeepsSurvivingDocks) {
     }
     QMainWindow nextSession;
     QDockWidget nextHeatmap("Heatmap", &nextSession), nextWatchlist("Watchlist", &nextSession),
-                nextScreener("Screener", &nextSession), retiredProbe("Retired Lab", &nextSession);
+                nextScreener("Screener", &nextSession), retiredProbe("Retired Lab", &nextSession),
+                retiredAIProbe("Retired AI", &nextSession);
     nextHeatmap.setObjectName("ChartDock");
     nextWatchlist.setObjectName("WatchlistDock");
     nextScreener.setObjectName("ScreenerDock");
     retiredProbe.setObjectName("LabDock");
+    retiredAIProbe.setObjectName("AICommentaryFeedDock");
     nextSession.addDockWidget(Qt::LeftDockWidgetArea, &nextHeatmap);
     nextSession.addDockWidget(Qt::RightDockWidgetArea, &nextWatchlist);
     nextSession.addDockWidget(Qt::RightDockWidgetArea, &nextScreener);
@@ -202,6 +209,7 @@ TEST(AgentApiDocks, SavedLayoutWithRetiredLabKeepsSurvivingDocks) {
     EXPECT_EQ(nextSession.dockWidgetArea(&nextWatchlist), Qt::RightDockWidgetArea);
     EXPECT_TRUE(nextSession.tabifiedDockWidgets(&nextWatchlist).contains(&nextScreener));
     EXPECT_FALSE(nextSession.restoreDockWidget(&retiredProbe)); // no saved Lab placeholder
+    EXPECT_FALSE(nextSession.restoreDockWidget(&retiredAIProbe)); // no saved AI placeholder
     EXPECT_TRUE(LayoutManager::restoreLayout(&current, "old"));
     EXPECT_EQ(current.dockWidgetArea(&watchlist), Qt::RightDockWidgetArea);
     QSettings::setDefaultFormat(previousFormat);
@@ -219,6 +227,7 @@ TEST(AgentApiDocks, DockScreenshotGrabsWidgetAndReportsHiddenDock) {
         [](const auto&, const auto&) { return AgentApi::ControlApply{}; },
         [] { return std::pair<quint64, quint64>{0, 0}; }, [](quint64) {});
     server.setWidgetGrab([&](const QString& target, QString* error) {
+        if (target == "window") return w.main.grab().toImage();
         if (target != "orderBook" || !w.orderBook.isVisible()) {
             *error = "orderBook_not_visible";
             return QImage{};
@@ -242,6 +251,20 @@ TEST(AgentApiDocks, DockScreenshotGrabsWidgetAndReportsHiddenDock) {
     EXPECT_TRUE(hidden.startsWith("HTTP/1.1 500")) << hidden.toStdString();
     EXPECT_EQ(responseError(hidden).value("message"), "orderBook_not_visible");
     EXPECT_FALSE(QFile::exists(dir.path() + "/hidden.png"));
+    QString hostError;
+    ASSERT_TRUE(AgentHostMode::activate(dir.path() + "/host", {}, &hostError)) << qPrintable(hostError);
+    const auto refusedMain = requestPath(server.port(), "GET", "/api/v1/screenshot?name=screen&target=main");
+    EXPECT_TRUE(refusedMain.startsWith("HTTP/1.1 403")) << refusedMain.toStdString();
+    QEventLoop nextShot;
+    QTimer::singleShot(1100, &nextShot, &QEventLoop::quit);
+    nextShot.exec();
+    const auto wholeWindow = requestPath(server.port(), "GET", "/api/v1/screenshot?name=window&target=window");
+    EXPECT_TRUE(wholeWindow.startsWith("HTTP/1.1 200")) << wholeWindow.toStdString();
+    QImage windowImage(dir.path() + "/window.png");
+    EXPECT_FALSE(windowImage.isNull());
+    EXPECT_GE(windowImage.width(), w.main.width());
+    EXPECT_GE(windowImage.height(), w.main.height());
+    AgentHostMode::resetForTests();
 }
 
 TEST(AgentApiSymbol, OperationWaitsForActivationAndReportsRefusalOrTimeout) {

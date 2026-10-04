@@ -20,7 +20,6 @@ Related: MainWindowGpu.cpp, LayoutManager.hpp.
 class ChartDock;
 class SecFilingDock;
 class CopenetFeedDock;
-class AICommentaryFeedDock;
 class WatchlistDock;
 class ScreenerDock;
 class StockChartDock;
@@ -33,7 +32,6 @@ public:
         ChartDock* heatmapDock = nullptr;
         SecFilingDock* secDock = nullptr;
         CopenetFeedDock* copenetDock = nullptr;
-        AICommentaryFeedDock* aiCommentaryDock = nullptr;
         WatchlistDock* watchlistDock = nullptr;
         ScreenerDock* screenerDock = nullptr;
         StockChartDock* stockChartDock = nullptr;

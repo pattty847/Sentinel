@@ -99,9 +99,9 @@ QString startupSymbol(const QString& preferred) {
 
 bool screenshotTargetAllowed(const QString& target) {
     if (!g_active) return true;
-    if (target == "heatmap" || target == "orderBook" || target == "watchlist" || target == "screener" ||
+    if (target == "window" || target == "heatmap" || target == "orderBook" || target == "watchlist" || target == "screener" ||
         target == "stockChart" || target == "paperTrading" || target == "sec" || target == "copenet" ||
-        target == "aiCommentary" || target == "telemetry" || target == "statusBar" ||
+        target == "telemetry" || target == "statusBar" ||
         target == "toolbar" || target == "chartmenu" || target == "settings")
         return true;
     // The legacy /screenshot route skips codec validation; keep this list exact too.
