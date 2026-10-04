@@ -161,10 +161,27 @@ class HostTrust(unittest.TestCase):
 
     # ---- screenshots
     def test_shot_refuses_screen_grabs_and_bad_names(self):
-        for target in ("main", "screen", "heatmap/../x", "settings:", "MAIN"):
+        for target in ("main", "lab", "screen", "heatmap/../x", "settings:", "settings:Nope", "heatmap\n", "MAIN"):
             self.assertRefused("bad_target", gh.shot, {"name": "a", "target": target})
+        for target in ("heatmap", "orderBook", "watchlist", "screener", "stockChart", "paperTrading",
+                       "sec", "copenet", "aiCommentary", "telemetry", "statusBar", "toolbar", "chartmenu",
+                       "settings", "settings:TPO"):
+            self.assertIsNotNone(gh.SHOT_TARGETS.fullmatch(target), target)
         for name in ("", "../x", "a/b", "x" * 65, "a b"):
             self.assertRefused("bad_name", gh.shot, {"name": name})
+
+    def test_hidden_dock_shot_explains_how_to_show_it(self):
+        class Running:
+            def poll(self):
+                return None
+        active = {"proc": Running(), "lastUsed": 0, "lastShot": time.time() - 5,
+                  "port": 17130, "shotDir": self.tmp.name, "renderer": "gpu"}
+        with patch.object(gh, "session", active), patch.object(gh, "gui_get", return_value=(
+                500, {"ok": False, "error": {"message": "orderBook_not_visible"}})):
+            with self.assertRaises(gh.HostError) as cm:
+                gh.shot({"name": "dock", "target": "orderBook"})
+            self.assertEqual(cm.exception.code, "dock_not_visible")
+            self.assertIn("focus", str(cm.exception))
 
     # ---- stale GUI after a host SIGKILL
     def test_cleanup_ends_a_stale_agent_host_gui_but_not_a_recycled_pid(self):

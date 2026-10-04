@@ -38,7 +38,7 @@ TEST(AgentApiInput, HttpHandlerDeliversOneWheelToTheViewAndReturnsAnOperation) {
     AgentApi::StateSnapshot state;
     state.meta.symbol = "BTC-USD";
     quint64 revision = 0;
-    GuiApiServer server(nullptr, &view, nullptr, [&] { return state; }, [] { return AgentApi::ViewportSnapshot{}; },
+    GuiApiServer server(nullptr, &view, [&] { return state; }, [] { return AgentApi::ViewportSnapshot{}; },
         [](const auto &) { return std::optional<AgentApi::CandleSnapshot>{}; },
         [](int) { return AgentApi::BookSnapshot{}; }, [](qint64, int) { return AgentApi::TradesSnapshot{}; },
         [](const auto &, auto complete) { complete(heatmap_window::WallsSnapshot{}); },
@@ -131,7 +131,7 @@ TEST(AgentApiWallsRoute, GpuReturns200ValidatesPeriodAndKeepsSelectionEpoch409) 
     double expectedTick = 5;
     int scans = 0;
     QObject context;
-    GuiApiServer server(nullptr, nullptr, nullptr, [&] { return state; }, [] { return AgentApi::ViewportSnapshot{}; },
+    GuiApiServer server(nullptr, nullptr, [&] { return state; }, [] { return AgentApi::ViewportSnapshot{}; },
         [](const auto&) { return std::optional<AgentApi::CandleSnapshot>{}; },
         [](int) { return AgentApi::BookSnapshot{}; }, [](qint64, int) { return AgentApi::TradesSnapshot{}; },
         [&](const heatmap_window::WallQuery& q, auto complete) {

@@ -1,10 +1,13 @@
 #include "mainwindow/DockVisibilityController.hpp"
 #include "mainwindow/GuiApiServer.h"
 #include "config/AgentHostMode.hpp"
+#include "widgets/LayoutManager.hpp"
 
 #include <QApplication>
 #include <QDockWidget>
 #include <QEventLoop>
+#include <QFile>
+#include <QImage>
 #include <QJsonDocument>
 #include <QSettings>
 #include <QTabBar>
@@ -76,7 +79,7 @@ TEST(AgentApiDocks, RouteListsAndFocusesARealDockWindow) {
     Window w;
     AgentApi::StateSnapshot state;
     state.meta.symbol = "BTC-USD";
-    GuiApiServer server(&w.main, nullptr, nullptr, [&] { return state; }, [] { return AgentApi::ViewportSnapshot{}; },
+    GuiApiServer server(&w.main, nullptr, [&] { return state; }, [] { return AgentApi::ViewportSnapshot{}; },
         [](const auto&) { return std::optional<AgentApi::CandleSnapshot>{}; },
         [](int) { return AgentApi::BookSnapshot{}; }, [](qint64, int) { return AgentApi::TradesSnapshot{}; },
         [](const auto&, auto complete) { complete(heatmap_window::WallsSnapshot{}); },
@@ -137,6 +140,110 @@ TEST(AgentApiDocks, HostedDockProfileRestoresWithoutSharingOtherSettings) {
     AgentHostMode::resetForTests();
 }
 
+TEST(AgentApiDocks, SavedLayoutWithRetiredLabKeepsSurvivingDocks) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const auto previousFormat = QSettings::defaultFormat();
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, dir.path());
+    QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, dir.path());
+    QByteArray oldState;
+    {
+        QMainWindow old;
+        QDockWidget heatmap("Heatmap", &old), watchlist("Watchlist", &old), lab("Lab", &old), screener("Screener", &old);
+        heatmap.setObjectName("ChartDock");
+        watchlist.setObjectName("WatchlistDock");
+        lab.setObjectName("LabDock");
+        screener.setObjectName("ScreenerDock");
+        old.addDockWidget(Qt::LeftDockWidgetArea, &heatmap);
+        old.addDockWidget(Qt::RightDockWidgetArea, &watchlist);
+        old.addDockWidget(Qt::RightDockWidgetArea, &lab);
+        old.addDockWidget(Qt::RightDockWidgetArea, &screener);
+        old.tabifyDockWidget(&watchlist, &lab);
+        old.tabifyDockWidget(&watchlist, &screener);
+        oldState = old.saveState();
+    }
+    {
+        QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
+        settings.setValue("layouts/old/version", LayoutManager::APP_LAYOUT_VERSION);
+        settings.setValue("layouts/old/state", oldState);
+    }
+    QMainWindow current;
+    QDockWidget heatmap("Heatmap", &current), watchlist("Watchlist", &current), screener("Screener", &current);
+    heatmap.setObjectName("ChartDock");
+    watchlist.setObjectName("WatchlistDock");
+    screener.setObjectName("ScreenerDock");
+    current.addDockWidget(Qt::LeftDockWidgetArea, &heatmap);
+    current.addDockWidget(Qt::RightDockWidgetArea, &watchlist);
+    current.addDockWidget(Qt::RightDockWidgetArea, &screener);
+    ASSERT_TRUE(LayoutManager::restoreLayout(&current, "old"));
+    EXPECT_EQ(current.dockWidgetArea(&heatmap), Qt::LeftDockWidgetArea);
+    EXPECT_EQ(current.dockWidgetArea(&watchlist), Qt::RightDockWidgetArea);
+    EXPECT_EQ(current.dockWidgetArea(&screener), Qt::RightDockWidgetArea);
+    EXPECT_TRUE(current.tabifiedDockWidgets(&watchlist).contains(&screener));
+    EXPECT_TRUE(current.findChildren<QDockWidget*>("LabDock").isEmpty());
+    QByteArray migrated;
+    {
+        QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
+        migrated = settings.value("layouts/old/state").toByteArray();
+        EXPECT_NE(migrated, oldState);
+    }
+    QMainWindow nextSession;
+    QDockWidget nextHeatmap("Heatmap", &nextSession), nextWatchlist("Watchlist", &nextSession),
+                nextScreener("Screener", &nextSession), retiredProbe("Retired Lab", &nextSession);
+    nextHeatmap.setObjectName("ChartDock");
+    nextWatchlist.setObjectName("WatchlistDock");
+    nextScreener.setObjectName("ScreenerDock");
+    retiredProbe.setObjectName("LabDock");
+    nextSession.addDockWidget(Qt::LeftDockWidgetArea, &nextHeatmap);
+    nextSession.addDockWidget(Qt::RightDockWidgetArea, &nextWatchlist);
+    nextSession.addDockWidget(Qt::RightDockWidgetArea, &nextScreener);
+    ASSERT_TRUE(nextSession.restoreState(migrated));
+    EXPECT_EQ(nextSession.dockWidgetArea(&nextWatchlist), Qt::RightDockWidgetArea);
+    EXPECT_TRUE(nextSession.tabifiedDockWidgets(&nextWatchlist).contains(&nextScreener));
+    EXPECT_FALSE(nextSession.restoreDockWidget(&retiredProbe)); // no saved Lab placeholder
+    EXPECT_TRUE(LayoutManager::restoreLayout(&current, "old"));
+    EXPECT_EQ(current.dockWidgetArea(&watchlist), Qt::RightDockWidgetArea);
+    QSettings::setDefaultFormat(previousFormat);
+}
+
+TEST(AgentApiDocks, DockScreenshotGrabsWidgetAndReportsHiddenDock) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    Window w;
+    AgentApi::StateSnapshot state;
+    GuiApiServer server(&w.main, nullptr, [&] { return state; }, [] { return AgentApi::ViewportSnapshot{}; },
+        [](const auto&) { return std::optional<AgentApi::CandleSnapshot>{}; },
+        [](int) { return AgentApi::BookSnapshot{}; }, [](qint64, int) { return AgentApi::TradesSnapshot{}; },
+        [](const auto&, auto complete) { complete(heatmap_window::WallsSnapshot{}); },
+        [](const auto&, const auto&) { return AgentApi::ControlApply{}; },
+        [] { return std::pair<quint64, quint64>{0, 0}; }, [](quint64) {});
+    server.setWidgetGrab([&](const QString& target, QString* error) {
+        if (target != "orderBook" || !w.orderBook.isVisible()) {
+            *error = "orderBook_not_visible";
+            return QImage{};
+        }
+        return w.orderBook.grab().toImage();
+    });
+    ASSERT_TRUE(server.start(0, dir.path()));
+    EXPECT_TRUE(requestPath(server.port(), "GET", "/screenshot?name=retired&target=lab").startsWith("HTTP/1.1 422"));
+    EXPECT_FALSE(QFile::exists(dir.path() + "/retired.png"));
+    const auto shot = requestPath(server.port(), "GET", "/api/v1/screenshot?name=dock&target=orderBook");
+    EXPECT_TRUE(shot.startsWith("HTTP/1.1 200")) << shot.toStdString();
+    QImage image(dir.path() + "/dock.png");
+    EXPECT_FALSE(image.isNull());
+    EXPECT_GE(image.width(), w.orderBook.width());
+    EXPECT_GE(image.height(), w.orderBook.height());
+    w.orderBook.hide();
+    QEventLoop wait;
+    QTimer::singleShot(1100, &wait, &QEventLoop::quit);
+    wait.exec();
+    const auto hidden = requestPath(server.port(), "GET", "/api/v1/screenshot?name=hidden&target=orderBook");
+    EXPECT_TRUE(hidden.startsWith("HTTP/1.1 500")) << hidden.toStdString();
+    EXPECT_EQ(responseError(hidden).value("message"), "orderBook_not_visible");
+    EXPECT_FALSE(QFile::exists(dir.path() + "/hidden.png"));
+}
+
 TEST(AgentApiSymbol, OperationWaitsForActivationAndReportsRefusalOrTimeout) {
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
@@ -147,7 +254,7 @@ TEST(AgentApiSymbol, OperationWaitsForActivationAndReportsRefusalOrTimeout) {
     state.meta.symbol = "BTC-USD";
     quint64 renderedRevision = 0;
     quint64 publishedRevision = 0;
-    GuiApiServer server(&window, nullptr, nullptr, [&] { return state; }, [] { return AgentApi::ViewportSnapshot{}; },
+    GuiApiServer server(&window, nullptr, [&] { return state; }, [] { return AgentApi::ViewportSnapshot{}; },
         [](const auto&) { return std::optional<AgentApi::CandleSnapshot>{}; },
         [](int) { return AgentApi::BookSnapshot{}; }, [](qint64, int) { return AgentApi::TradesSnapshot{}; },
         [](const auto&, auto complete) { complete(heatmap_window::WallsSnapshot{}); },

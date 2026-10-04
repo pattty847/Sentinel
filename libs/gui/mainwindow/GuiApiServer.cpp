@@ -48,7 +48,6 @@ QByteArray jsonBody(const QJsonObject& obj) {
 
 GuiApiServer::GuiApiServer(QWidget* targetWindow,
                            QQuickView* heatmapView,
-                           QQuickView* labView,
                            std::function<AgentApi::StateSnapshot()> stateSnapshot,
                            std::function<AgentApi::ViewportSnapshot()> viewportSnapshot,
                            std::function<std::optional<AgentApi::CandleSnapshot>(const AgentApi::ValidationResult&)> candlesSnapshot,
@@ -63,7 +62,6 @@ GuiApiServer::GuiApiServer(QWidget* targetWindow,
     : QObject(parent),
       m_targetWindow(targetWindow),
       m_heatmapView(heatmapView),
-      m_labView(labView),
       m_stateSnapshot(std::move(stateSnapshot)),
       m_viewportSnapshot(std::move(viewportSnapshot)),
       m_candlesSnapshot(std::move(candlesSnapshot)),
@@ -311,6 +309,10 @@ void GuiApiServer::handleRequest(QTcpSocket* socket) {
                 "Screenshot target is not allowed in --agent-host mode (chart and widget grabs only)")), "application/json");
         return;
     }
+    if (targetName != "main" && targetName != "heatmap" && !AgentApi::isWidgetScreenshotTarget(targetName)) {
+        respond(socket, 422, AgentApi::jsonBytes(AgentApi::error("invalid_target", "Unknown screenshot target")), "application/json");
+        return;
+    }
     if (path == "/api/v1/screenshot" && !check.afterOperation.isEmpty()) {
         if (auto* deadline = socket->findChild<QTimer*>()) deadline->start(10000);
         waitForOperation(socket, check.afterOperation,
@@ -501,16 +503,6 @@ QImage GuiApiServer::grabTargetImage(const QString& target, QString* error) cons
             return {};
         }
         return m_heatmapView->grabWindow();
-    }
-
-    if (target == "lab") {
-        if (!m_labView || !m_labView->isVisible()) {
-            if (error) {
-                *error = "lab_not_visible";
-            }
-            return {};
-        }
-        return m_labView->grabWindow();
     }
 
     if (!m_targetWindow) {

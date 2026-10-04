@@ -18,7 +18,6 @@ class GuiApiServer : public QObject {
 public:
     explicit GuiApiServer(QWidget* targetWindow,
                           QQuickView* heatmapView,
-                          QQuickView* labView,
                           std::function<AgentApi::StateSnapshot()> stateSnapshot,
                           std::function<AgentApi::ViewportSnapshot()> viewportSnapshot,
                           std::function<std::optional<AgentApi::CandleSnapshot>(const AgentApi::ValidationResult&)> candlesSnapshot,
@@ -34,8 +33,7 @@ public:
     void setHeatmapSnapshot(std::function<QJsonObject()> snapshot) { m_heatmapSnapshot = std::move(snapshot); }
     void setDocksSnapshot(std::function<QJsonObject()> snapshot) { m_docksSnapshot = std::move(snapshot); }
     bool start(quint16 port, const QString& screenshotDir);
-    // Widget screenshot targets (S6c): "settings[:<Tab>]", "telemetry" and "toolbar" grab the
-    // widget itself (QWidget::grab: its own painting, never screen pixels).
+    // Widget screenshot targets grab a dock or control's own painting, never screen pixels.
     using WidgetGrab = std::function<QImage(const QString& target, QString* error)>;
     void setWidgetGrab(WidgetGrab grab) { m_widgetGrab = std::move(grab); }
     void stop();
@@ -64,7 +62,6 @@ private:
     QTcpServer m_server;
     QWidget* m_targetWindow = nullptr;
     QQuickView* m_heatmapView = nullptr;
-    QQuickView* m_labView = nullptr;
     QString m_screenshotDir;
     std::function<AgentApi::StateSnapshot()> m_stateSnapshot;
     std::function<AgentApi::ViewportSnapshot()> m_viewportSnapshot;

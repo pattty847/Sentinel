@@ -99,16 +99,14 @@ QString startupSymbol(const QString& preferred) {
 
 bool screenshotTargetAllowed(const QString& target) {
     if (!g_active) return true;
-    if (target == "heatmap" || target == "lab" || target == "telemetry" || target == "toolbar" || target == "settings")
+    if (target == "heatmap" || target == "orderBook" || target == "watchlist" || target == "screener" ||
+        target == "stockChart" || target == "paperTrading" || target == "sec" || target == "copenet" ||
+        target == "aiCommentary" || target == "telemetry" || target == "statusBar" ||
+        target == "toolbar" || target == "chartmenu" || target == "settings")
         return true;
-    // settings:<Tab>, a plain word (the codec validates the tab name; reject path-like text here)
-    if (target.startsWith("settings:")) {
-        const QString tab = target.mid(9);
-        if (tab.isEmpty()) return false;
-        for (const QChar c : tab)
-            if (!c.isLetter()) return false;
-        return true;
-    }
+    // The legacy /screenshot route skips codec validation; keep this list exact too.
+    if (target.startsWith("settings:"))
+        return QStringList{"Chart", "Tick", "Look", "Budgets", "Live", "Debug", "TPO"}.contains(target.mid(9));
     return false;
 }
 

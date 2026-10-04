@@ -32,7 +32,7 @@ API (JSON; every POST needs the header `X-Gui-Host: 1`, which a browser page can
 cross-origin without a preflight this server never answers; the Host header must be loopback):
     GET  /status      the live session or null, and whether main is launchable
     POST /launch {renderer?:"gpu"|"legacy", replace?:bool, freshProfile?:bool}
-    POST /shot   {name, afterOperation?, target?:"heatmap"|"lab"|"telemetry"|"toolbar"|"settings[:Tab]", settle?:bool}
+    POST /shot   {name, afterOperation?, target?: retained dock id | "toolbar" | "chartmenu" | "settings[:Tab]", settle?:bool}
     POST /stop
     POST /profile-reset    clears the persistent dock state while no GUI is running
 
@@ -74,7 +74,7 @@ GUI_REL = os.path.join("build", "mac-clang", "apps", "sentinel-gui", "sentinel-g
 FLAG = b"--agent-host"
 # The products the recorder already captures; a GUI symbol change subscribes the recorder upstream.
 SYMBOLS = os.environ.get("GUI_HOST_SYMBOLS", "BTC-USD,ETH-USD,SOL-USD,FARTCOIN-USD,PEPE-USD,DOGE-USD,AVAX-USD")
-SHOT_TARGETS = re.compile(r"^(heatmap|lab|telemetry|toolbar|settings(:[A-Za-z]+)?)$")
+SHOT_TARGETS = re.compile(r"^(heatmap|orderBook|watchlist|screener|stockChart|paperTrading|sec|copenet|aiCommentary|telemetry|statusBar|toolbar|chartmenu|settings(:(Chart|Tick|Look|Budgets|Live|Debug|TPO))?)$")
 NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 # Environment the GUI child may inherit. Nothing else (no DYLD_*, QT_*, QSG_*, QML*, SENTINEL_*).
 ENV_ALLOW = ("HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "__CF_USER_TEXT_ENCODING")
@@ -342,8 +342,8 @@ def shot(body):
     target = str(body.get("target", "heatmap"))
     if not NAME_RE.match(name):
         raise HostError(400, "bad_name", "name must match [A-Za-z0-9_.-]{1,64}")
-    if not SHOT_TARGETS.match(target):
-        raise HostError(400, "bad_target", "target must be heatmap, lab, telemetry, toolbar or settings[:Tab] (screen grabs are refused)")
+    if not SHOT_TARGETS.fullmatch(target):
+        raise HostError(400, "bad_target", "target must be a retained dock, toolbar, chartmenu or settings[:Tab] (screen grabs are refused)")
     with lock:
         s = session
         if not s or s["proc"].poll() is not None:
@@ -365,6 +365,9 @@ def shot(body):
         time.sleep(1.2)
         status, r = gui_get(port, url, 15)
     if status != 200 or not r.get("ok"):
+        reason = r.get("error", {}).get("message", "")
+        if reason.endswith("_not_visible"):
+            raise HostError(409, "dock_not_visible", f"{target} is hidden; show or focus it with the docks API", gui=r)
         raise HostError(502, "shot_failed", f"screenshot failed (HTTP {status})", gui=r, screenLocked=screen_locked())
     path = os.path.join(shot_dir, name if name.lower().endswith(".png") else name + ".png")
     if not os.path.exists(path):  # the GUI writes only to the fixed directory; its reply path is not trusted

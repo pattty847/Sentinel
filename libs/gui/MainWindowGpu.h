@@ -34,7 +34,6 @@ class StatusBar;
 class SecFilingDock;
 class CopenetFeedDock;
 class AICommentaryFeedDock;
-class LabDock;
 class WatchlistDock;
 class ScreenerDock;
 class StockChartDock;
@@ -46,7 +45,6 @@ class HeatmapSettingsDialog;
 class HeatmapTelemetryDock;
 class HeatmapChartControls;
 class TradeInputManager;
-class TradeBlotterDock;
 
 class DockFactory;
 class QmlSceneController;
@@ -152,7 +150,6 @@ private:
     SecFilingDock* m_secDock = nullptr;
     CopenetFeedDock* m_copenetDock = nullptr;
     AICommentaryFeedDock* m_aiCommentaryDock = nullptr;
-    LabDock* m_labDock = nullptr;
     WatchlistDock* m_watchlistDock = nullptr;
     ScreenerDock* m_screenerDock = nullptr;
     StockChartDock* m_stockChartDock = nullptr;
@@ -200,7 +197,6 @@ private:
     QPointer<class FontSettingsDialog> m_fontDialog;
     QPointer<HeatmapSettingsDialog> m_heatmapSettingsDialog;
     std::unique_ptr<TradeInputManager> m_tradeInputManager;
-    TradeBlotterDock* m_tradeBlotterDock = nullptr;
     QLabel* m_positionOverlayLabel = nullptr;
     QDoubleSpinBox* m_orderQtyInput = nullptr;
 

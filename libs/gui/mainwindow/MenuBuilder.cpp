@@ -6,7 +6,6 @@
 #include "../widgets/SecFilingDock.hpp"
 #include "../widgets/CopenetFeedDock.hpp"
 #include "../widgets/AICommentaryFeedDock.hpp"
-#include "../widgets/LabDock.hpp"
 #include "../widgets/WatchlistDock.hpp"
 #include "../widgets/ScreenerDock.hpp"
 #include "../widgets/StockChartDock.hpp"
@@ -44,9 +43,6 @@ void MenuBuilder::buildViewMenu(const DockWidgets& docks, const Callbacks& callb
     }
     if (docks.aiCommentaryDock) {
         m_viewMenu->addAction(docks.aiCommentaryDock->toggleViewAction());
-    }
-    if (docks.labDock) {
-        m_viewMenu->addAction(docks.labDock->toggleViewAction());
     }
     if (docks.screenerDock) {
         m_viewMenu->addAction(docks.screenerDock->toggleViewAction());

@@ -3,7 +3,7 @@
 # start the GUI, drive the Agent API and read screenshots.
 #
 #   scripts/dev/gui-shot.sh launch [--renderer gpu|legacy] [--replace] [--fresh-profile]
-#   scripts/dev/gui-shot.sh shot <name> [--after <operationId>] [--settle] [--target heatmap|lab|telemetry|toolbar|settings[:Tab]]
+#   scripts/dev/gui-shot.sh shot <name> [--after <operationId>] [--settle] [--target <dock-id>|toolbar|chartmenu|settings[:Tab]]
 #   scripts/dev/gui-shot.sh api GET|POST </api/v1/...> [json]       # state, viewport, heatmap/settings ...
 #   scripts/dev/gui-shot.sh docks [list|focus <id>|show <id>|hide <id>]
 #   scripts/dev/gui-shot.sh status | stop | profile-reset

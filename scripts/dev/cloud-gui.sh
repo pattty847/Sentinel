@@ -3,7 +3,7 @@
 # through the GUI API. For Claude Code on the web / any Linux box without a display.
 #
 #   scripts/dev/cloud-gui.sh start            # Xvfb + server + gui, waits for the API port
-#   scripts/dev/cloud-gui.sh shot <name> [target]   # -> screenshots/<name>.png (target: main|heatmap|lab)
+#   scripts/dev/cloud-gui.sh shot <name> [target]   # -> screenshots/<name>.png (target: main|heatmap|retained dock ID)
 #   scripts/dev/cloud-gui.sh status
 #   scripts/dev/cloud-gui.sh logs             # warnings/errors from both run logs
 #   scripts/dev/cloud-gui.sh stop

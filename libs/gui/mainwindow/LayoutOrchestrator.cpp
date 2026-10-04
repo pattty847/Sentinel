@@ -3,7 +3,6 @@
 #include "../widgets/SecFilingDock.hpp"
 #include "../widgets/CopenetFeedDock.hpp"
 #include "../widgets/AICommentaryFeedDock.hpp"
-#include "../widgets/LabDock.hpp"
 #include "../widgets/WatchlistDock.hpp"
 #include "../widgets/ScreenerDock.hpp"
 #include "../widgets/StockChartDock.hpp"
@@ -25,7 +24,7 @@ QList<QPair<QString, QDockWidget*>> LayoutOrchestrator::apiDocks(const DockWidge
     return {{"heatmap", docks.heatmapDock}, {"orderBook", docks.orderBookDock},
             {"watchlist", docks.watchlistDock}, {"sec", docks.secDock},
             {"copenet", docks.copenetDock}, {"aiCommentary", docks.aiCommentaryDock},
-            {"lab", docks.labDock}, {"screener", docks.screenerDock},
+            {"screener", docks.screenerDock},
             {"stockChart", docks.stockChartDock}, {"paperTrading", docks.paperTradingDock},
             {"telemetry", docks.heatmapTelemetryDock}};
 }
@@ -93,7 +92,6 @@ void LayoutOrchestrator::removeAllDocks(const DockWidgets& docks) {
     remove(docks.orderBookDock);
     remove(docks.watchlistDock);
     remove(docks.secDock);
-    remove(docks.labDock);
     remove(docks.screenerDock);
     remove(docks.stockChartDock);
     remove(docks.paperTradingDock);
@@ -134,13 +132,12 @@ void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
         rightAnchor = docks.secDock;
     }
 
-    // Remaining right-column tabs: Lab, Screener, StockChart, PaperTrading
+    // Remaining right-column tabs: Screener, StockChart, PaperTrading
     auto tabifyRight = [&](QDockWidget* dock) {
         if (!dock) return;
         m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, dock);
         m_mainWindow->tabifyDockWidget(rightAnchor, dock);
     };
-    tabifyRight(docks.labDock);
     tabifyRight(docks.screenerDock);
     tabifyRight(docks.stockChartDock);
     tabifyRight(docks.paperTradingDock);
@@ -176,7 +173,6 @@ void LayoutOrchestrator::applyDockConstraints(const DockWidgets& docks) {
     applyMinimum(docks.orderBookDock,    QSize(280, 360));
     applyMinimum(docks.watchlistDock,    QSize(320, 360));
     applyMinimum(docks.secDock,          QSize(440, 380));
-    applyMinimum(docks.labDock,          QSize(360, 240));
     applyMinimum(docks.screenerDock,     QSize(360, 280));
     applyMinimum(docks.stockChartDock,   QSize(360, 280));
     applyMinimum(docks.paperTradingDock, QSize(360, 280));
@@ -209,7 +205,6 @@ void LayoutOrchestrator::showAllDocks(const DockWidgets& docks) {
     if (docks.orderBookDock)    docks.orderBookDock->show();
     if (docks.watchlistDock)    docks.watchlistDock->show();
     if (docks.secDock)          docks.secDock->show();
-    if (docks.labDock)          docks.labDock->show();
     if (docks.screenerDock)     docks.screenerDock->show();
     if (docks.stockChartDock)   docks.stockChartDock->show();
     if (docks.paperTradingDock) docks.paperTradingDock->show();

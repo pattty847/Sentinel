@@ -14,7 +14,6 @@ This version modularizes startup logic for maintainability and clarity.
 #include "CoordinateSystem.h"
 #include "models/TimeAxisModel.hpp"
 #include "models/PriceAxisModel.hpp"
-#include "render/LabTextItem.hpp"
 #include "render/CandlestickBatched.hpp"
 #include "render/CandlestickOverlayItem.hpp"
 #include "render/AlgoOverlayRenderer.hpp"
@@ -92,9 +91,8 @@ void registerMetaTypesAndQml() {
     qmlRegisterType<PaperTradeOverlayModel>("Sentinel", 1, 0, "PaperTradeOverlayModel");
     qmlRegisterType<PaperTradeOverlayRenderer>("Sentinel", 1, 0, "PaperTradeOverlayRenderer");
 
-    // Register Sentinel.Charts module types for LabView
+    // Shared candle QML types used by production charts.
     qmlRegisterModule("Sentinel.Charts", 1, 0);
-    qmlRegisterType<LabTextItem>("Sentinel.Charts", 1, 0, "LabTextItem");
     qmlRegisterType<CandlestickBatched>("Sentinel.Charts", 1, 0, "CandlestickBatched");
     qmlRegisterType<CandlestickOverlayItem>("Sentinel.Charts", 1, 0, "CandlestickOverlayItem");
 }
