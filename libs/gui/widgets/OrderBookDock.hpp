@@ -1,89 +1,59 @@
-#ifndef ORDERBOOKDOCK_HPP
-#define ORDERBOOKDOCK_HPP
+#pragma once
 
 #include "DockablePanel.hpp"
-#include "../../core/marketdata/model/TradeData.h"
-#include <QLabel>
-#include <QVBoxLayout>
-#include <QHBoxLayout>
-#include <QFrame>
-#include <QTableWidget>
+#include "../models/DomModel.hpp"
+#include <QPointer>
 #include <QStyledItemDelegate>
-#include <vector>
-#include <unordered_map>
+#include <QTimer>
 
-struct BookDelta;
+class IGridDataSource;
+class QLabel;
+class QPushButton;
+class QTableView;
 
 class DomBarDelegate : public QStyledItemDelegate {
-    Q_OBJECT
 public:
-    enum BarSide { BarBid, BarAsk };
-    explicit DomBarDelegate(BarSide side, QObject* parent = nullptr);
-    void setMaxQty(double maxQty) { m_maxQty = maxQty; }
+    explicit DomBarDelegate(DomModel* model, QObject* parent = nullptr);
     void paint(QPainter* painter, const QStyleOptionViewItem& option,
                const QModelIndex& index) const override;
-
 private:
-    BarSide m_side;
-    double m_maxQty = 1.0;
+    DomModel* m_model;
 };
 
 class OrderBookDock : public DockablePanel {
     Q_OBJECT
-
 public:
-    explicit OrderBookDock(QWidget* parent = nullptr);
-    ~OrderBookDock() override = default;
-
+    explicit OrderBookDock(QWidget* parent = nullptr, IGridDataSource* source = nullptr);
     void buildUi() override;
     void onSymbolChanged(const QString& symbol) override;
+
+protected:
+    void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private slots:
     void onOrderBookUpdated(const QString& symbol, const std::vector<BookDelta>& deltas);
     void onTradeReceived(const Trade& trade);
+    void refreshDisplay();
+    void recenter();
 
 private:
-    void connectToMarketData();
-    void updateSpreadDisplay(double bidPrice, double bidSize, double askPrice, double askSize);
-    void setupSpreadLayout();
-    void refreshDomTable();
-    double priceToTick(double price) const;
-    int priceToRow(double price) const;
-
-    static constexpr int kDomLevelsPerSide = 12;
-    static constexpr int kTradeCountCap = 1000;
-
-    // UI
-    QFrame* m_spreadFrame = nullptr;
+    void setDisplayActive(bool active);
+    void stopFollowing();
+    QPointer<IGridDataSource> m_source;
+    QString m_symbol;
+    DomTradeWindow m_trades;
+    DomFreshness m_freshness;
+    DomModel* m_model = nullptr;
+    QTableView* m_table = nullptr;
     QLabel* m_symbolLabel = nullptr;
-    QLabel* m_bidPriceLabel = nullptr;
-    QLabel* m_bidSizeLabel = nullptr;
-    QFrame* m_bidFrame = nullptr;
-    QLabel* m_askPriceLabel = nullptr;
-    QLabel* m_askSizeLabel = nullptr;
-    QFrame* m_askFrame = nullptr;
-    QLabel* m_spreadLabel = nullptr;
-    QLabel* m_midLabel = nullptr;
-    QTableWidget* m_domTable = nullptr;
-    DomBarDelegate* m_bidBarDelegate = nullptr;
-    DomBarDelegate* m_askBarDelegate = nullptr;
-
-    QString m_currentSymbol;
-    double m_lastBidPrice = 0.0;
-    double m_lastBidSize = 0.0;
-    double m_lastAskPrice = 0.0;
-    double m_lastAskSize = 0.0;
-    double m_tickSize = 0.0;
-    double m_minPrice = 0.0;
-
-    // Per-price trade counts for BUYS/SELLS/DELTA (price key = tick-rounded)
-    struct PriceCounts {
-        int buys = 0;
-        int sells = 0;
-        int delta() const { return buys - sells; }
-    };
-    std::unordered_map<double, PriceCounts> m_tradeCountsByPrice;
-    std::vector<std::pair<double, bool>> m_tradeHistory;
+    QLabel* m_aggregation = nullptr;
+    QLabel* m_summary = nullptr;
+    QLabel* m_executions = nullptr;
+    QLabel* m_status = nullptr;
+    QPushButton* m_recenter = nullptr;
+    QTimer m_timer;
+    bool m_dirty = true, m_symbolDirty = true;
+    bool m_displayActive = false, m_follow = true, m_programmaticScroll = false;
 };
-
-#endif // ORDERBOOKDOCK_HPP
