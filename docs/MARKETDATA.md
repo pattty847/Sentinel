@@ -237,7 +237,9 @@ running only after observing an algo order event. `trade_command` carries a
 `command_id`, but `order_update` does not echo it, so manual command acceptance
 cannot be correlated reliably (and cancel/flatten may emit no order update).
 The stream also does not publish base/quote increments; ticket precision preserves
-eight decimal places and displays small prices without truncation, but the server
+eight decimal places, rounds submitted limits to the editor's displayed decimals,
+and displays small prices without truncation. A symbol switch clears the ticket's
+limit until a new trade initializes it or the user enters a price. The server
 remains responsible for validating executable increments.
 
 The server runs paper execution (no real broker); fills use last trade price plus optional `trading.slippage_bps` from `server_config.yaml`. For setup and usage, see **`docs/PAPER_TRADING_QUICKSTART.md`**.

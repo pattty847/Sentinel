@@ -14,6 +14,7 @@
 namespace {
 class Source final : public IGridDataSource {
 public:
+    bool connected = true;
     std::vector<trading::TradeCommand> trades;
     std::vector<std::string> algoActions;
     LiveOrderBook book;
@@ -29,6 +30,7 @@ public:
     void sendTradeCommand(const trading::TradeCommand& cmd) override { trades.push_back(cmd); }
     void sendAlgoCommand(const std::string&, const std::string& action,
                          const std::string&, const trading::AlgoParams&) override { algoActions.push_back(action); }
+    bool isConnectionActive() const override { return connected; }
     const LiveOrderBook& getDirectLiveOrderBook(const std::string&) const override { return book; }
 };
 
@@ -59,7 +61,16 @@ TEST(PaperTicket, EditedLimitSurvivesTradesFocusQuantityAndButtons) {
     dock.findChild<QPushButton*>("paperUseLast")->click();
     EXPECT_DOUBLE_EQ(price->value(), 0.399);
     dock.setSymbol("PEPE-USD");
-    EXPECT_DOUBLE_EQ(price->value(), 0.399);
+    EXPECT_DOUBLE_EQ(price->value(), 0.0);
+    ASSERT_TRUE(QMetaObject::invokeMethod(&dock, "onBuyLimitClicked"));
+    ASSERT_TRUE(QMetaObject::invokeMethod(&dock, "onSellLimitClicked"));
+    EXPECT_EQ(source.trades.size(), 2u) << "a cleared limit must not send the previous symbol's price";
+    dock.onTradeReceived(tick("PEPE-USD", 0.00000971));
+    EXPECT_DOUBLE_EQ(price->value(), 0.00000971);
+    ASSERT_TRUE(QMetaObject::invokeMethod(&dock, "onBuyLimitClicked"));
+    ASSERT_EQ(source.trades.size(), 3u);
+    EXPECT_EQ(source.trades.back().symbol, "PEPE-USD");
+    EXPECT_DOUBLE_EQ(source.trades.back().price, 0.00000971);
 }
 
 TEST(PaperTicket, LowPriceAndLogFollow) {
@@ -114,6 +125,24 @@ TEST(PaperTicket, LowPriceAndLogFollow) {
     EXPECT_TRUE(five->isChecked());
 }
 
+TEST(PaperTicket, SubmittedPriceUsesDisplayedPrecision) {
+    Source source;
+    PaperTradingDock dock;
+    dock.setDataSource(&source);
+    dock.setSymbol("BTC-USD");
+    auto* price = dock.findChild<QDoubleSpinBox*>("paperLimitPrice");
+    ASSERT_NE(price, nullptr);
+    price->setValue(84000.123);
+    ASSERT_TRUE(QMetaObject::invokeMethod(&dock, "onBuyLimitClicked"));
+    ASSERT_EQ(source.trades.size(), 1u);
+    EXPECT_NEAR(source.trades.back().price, 84000.123, 0.00000001);
+    dock.setSymbol("PEPE-USD");
+    price->setValue(0.00000971);
+    ASSERT_TRUE(QMetaObject::invokeMethod(&dock, "onSellLimitClicked"));
+    ASSERT_EQ(source.trades.size(), 2u);
+    EXPECT_NEAR(source.trades.back().price, 0.00000971, 0.000000001);
+}
+
 TEST(PaperTicket, AlgoActivityIsEvidenceButNoAckTimesOut) {
     Source source;
     PaperTradingDock dock;
@@ -144,14 +173,42 @@ TEST(PaperTicket, AlgoActivityIsEvidenceButNoAckTimesOut) {
     EXPECT_TRUE(status->toolTip().contains("rejected order"));
     dock.findChild<QPushButton*>("paperAlgoStop")->click();
     EXPECT_EQ(status->text(), "STOPPING / UNCONFIRMED");
+    dock.onAlgoOrderEvent(rejectedOrder);
+    EXPECT_EQ(status->text(), "STOPPING / UNCONFIRMED");
     timer->start(1);
     QTest::qWait(20);
     EXPECT_EQ(status->text(), "UNCONFIRMED");
+    dock.onAlgoOrderEvent(rejectedOrder);
+    EXPECT_EQ(status->text(), "UNCONFIRMED");
+    dock.findChild<QPushButton*>("paperAlgoStart")->click();
+    EXPECT_EQ(status->text(), "START PENDING");
+    dock.onAlgoOrderEvent(rejectedOrder);
+    EXPECT_EQ(status->text(), "RUNNING / ACTIVITY OBSERVED");
+    source.connected = false;
     emit source.connectionStatusChanged(false);
     QTest::qWait(10);
     EXPECT_EQ(status->text(), "UNAVAILABLE");
     dock.setSymbol("PEPE-USD");
     EXPECT_EQ(status->text(), "UNAVAILABLE");
+}
+
+TEST(PaperTicket, AttachingToDisconnectedSourceStartsUnavailable) {
+    Source source;
+    source.connected = false;
+    PaperTradingDock dock;
+    dock.setSymbol("DOGE-USD");
+    dock.setDataSource(&source);
+    auto* status = dock.findChild<QLabel*>("paperAlgoStatus");
+    auto* start = dock.findChild<QPushButton*>("paperAlgoStart");
+    ASSERT_NE(status, nullptr);
+    ASSERT_NE(start, nullptr);
+    EXPECT_EQ(status->text(), "UNAVAILABLE");
+    EXPECT_FALSE(start->isEnabled());
+    source.connected = true;
+    emit source.connectionStatusChanged(true);
+    QTest::qWait(10);
+    EXPECT_EQ(status->text(), "UNCONFIRMED");
+    EXPECT_TRUE(start->isEnabled());
 }
 } // namespace
 

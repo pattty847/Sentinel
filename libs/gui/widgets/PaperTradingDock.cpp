@@ -47,6 +47,11 @@ int priceDecimals(double price) {
     // Keep small crypto prices visible even when no product increment is published.
     return std::clamp(2 - static_cast<int>(std::floor(std::log10(price))), 2, 8);
 }
+
+double roundedDisplayedPrice(double price, int decimals) {
+    const long double scale = std::pow(10.0L, decimals);
+    return static_cast<double>(std::round(static_cast<long double>(price) * scale) / scale);
+}
 }
 
 PaperTradingDock::PaperTradingDock(QWidget* parent)
@@ -59,11 +64,13 @@ PaperTradingDock::PaperTradingDock(QWidget* parent)
 void PaperTradingDock::setDataSource(IGridDataSource* source) {
     if (m_dataSource) disconnect(m_dataSource, nullptr, this, nullptr);
     m_dataSource = source;
-    m_streamAvailable = source != nullptr;
+    m_streamAvailable = source && source->isConnectionActive();
+    m_algoActivityEligible = false;
     if (source) {
         connect(source, &IGridDataSource::connectionStatusChanged, this,
                 [this](bool connected) {
                     m_streamAvailable = connected;
+                    m_algoActivityEligible = false;
                     if (m_algoCommandTimer) m_algoCommandTimer->stop();
                     m_pendingAlgoAction.clear();
                     setAlgoState(connected ? QStringLiteral("UNCONFIRMED")
@@ -73,10 +80,11 @@ void PaperTradingDock::setDataSource(IGridDataSource* source) {
                                  connected && !m_symbol.isEmpty(), false);
                 }, Qt::QueuedConnection);
     }
-    setAlgoState(source ? QStringLiteral("UNCONFIRMED") : QStringLiteral("UNAVAILABLE"),
-                 source ? QStringLiteral("No lifecycle snapshot is provided by the server")
-                        : QStringLiteral("No data source"),
-                 source && !m_symbol.isEmpty(), false);
+    setAlgoState(m_streamAvailable ? QStringLiteral("UNCONFIRMED") : QStringLiteral("UNAVAILABLE"),
+                 !source ? QStringLiteral("No data source")
+                         : m_streamAvailable ? QStringLiteral("No lifecycle snapshot is provided by the server")
+                                             : QStringLiteral("Trading stream disconnected"),
+                 m_streamAvailable && !m_symbol.isEmpty(), false);
 }
 
 void PaperTradingDock::setSymbol(const QString& symbol) {
@@ -508,6 +516,13 @@ void PaperTradingDock::buildPnlPanel(QWidget* parent) {
 
 void PaperTradingDock::resetForSymbolChange() {
     m_lastPrice = 0.0;
+    // A limit belongs to one product. A new symbol requires its own price or a new tick.
+    if (m_limitPriceSpin) {
+        QSignalBlocker blocker(m_limitPriceSpin);
+        m_limitPriceSpin->setValue(0.0);
+    }
+    m_limitUserOwned = false;
+    m_algoActivityEligible = false;
     if (m_symbolLabel) m_symbolLabel->setText(QStringLiteral("PAPER  |  %1").arg(m_symbol.isEmpty() ? QStringLiteral("No symbol") : m_symbol));
     updateNotional();
     if (m_lastPriceLabel) {
@@ -702,6 +717,7 @@ void PaperTradingDock::onAlgoOrderEvent(const trading::AlgoOrderEvent& event) {
         return;
     }
     if (event.algoId != "AvendellaMM") return;
+    if (!m_algoActivityEligible) return;
     // An order event proves algo execution, including an order rejection. It does not
     // acknowledge the command or confirm a stop request.
     if (m_pendingAlgoAction == QStringLiteral("stop")) return;
@@ -765,6 +781,7 @@ void PaperTradingDock::onStartAlgoClicked() {
     params.maxPositionQty = m_maxPosSpin ? m_maxPosSpin->value() : 0.1;
 
     m_dataSource->sendAlgoCommand("AvendellaMM", "start", m_symbol.toStdString(), params);
+    m_algoActivityEligible = true;
     m_pendingAlgoAction = QStringLiteral("start");
     setAlgoState(QStringLiteral("START PENDING"),
                  QStringLiteral("Awaiting observable algo activity; no command acknowledgement exists"),
@@ -781,6 +798,7 @@ void PaperTradingDock::onStopAlgoClicked() {
     if (!m_dataSource || !m_streamAvailable || m_symbol.isEmpty()) return;
     trading::AlgoParams params{};
     m_dataSource->sendAlgoCommand("AvendellaMM", "stop", m_symbol.toStdString(), params);
+    m_algoActivityEligible = false;
 
     m_pendingAlgoAction = QStringLiteral("stop");
     setAlgoState(QStringLiteral("STOPPING / UNCONFIRMED"),
@@ -796,6 +814,7 @@ void PaperTradingDock::sendManualCommand(trading::TradeAction action,
     if (!m_dataSource || !m_streamAvailable || m_symbol.isEmpty()) {
         return;
     }
+    if (hasPrice && (!std::isfinite(price) || price <= 0.0 || !m_limitPriceSpin)) return;
     trading::TradeCommand cmd;
     cmd.commandId = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
     cmd.action = action;
@@ -806,7 +825,7 @@ void PaperTradingDock::sendManualCommand(trading::TradeAction action,
     cmd.timestamp = QDateTime::currentMSecsSinceEpoch();
     if (hasPrice) {
         cmd.hasPrice = true;
-        cmd.price = price;
+        cmd.price = roundedDisplayedPrice(price, m_limitPriceSpin->decimals());
     }
     m_dataSource->sendTradeCommand(cmd);
 }

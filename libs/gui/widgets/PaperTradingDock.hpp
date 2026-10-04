@@ -79,6 +79,7 @@ private:
     QString m_symbol;
     IGridDataSource* m_dataSource = nullptr;
     bool m_streamAvailable = false;
+    bool m_algoActivityEligible = false;
 
     // Manual tab
     QLabel* m_lastPriceLabel = nullptr;

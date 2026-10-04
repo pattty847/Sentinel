@@ -56,6 +56,8 @@ public:
                                          qint64 startMs, qint64 endMs) = 0;
     virtual void sendTradeCommand(const trading::TradeCommand& command) = 0;
     virtual void sendAlgoCommand(const std::string& algoId, const std::string& action, const std::string& symbol, const trading::AlgoParams& params) = 0;
+    // GUI-thread snapshot for widgets attached after the last connection signal.
+    virtual bool isConnectionActive() const { return false; }
 
     // GUI-thread only: returns dense live order book for high-performance rendering/ingestion.
     virtual const LiveOrderBook& getDirectLiveOrderBook(const std::string& productId) const = 0;
