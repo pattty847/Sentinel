@@ -34,17 +34,13 @@ after a secret scan (never force), keep `docs/STATUS.md` current after every lan
 ## In flight at hand-off
 
 1. `lt-astra/dom` (W1a), worktree `/Volumes/T7/sentinel-worktrees/lt-astra-dom`, Codex thread
-   `01a104bb-9a13-74c3-bb45-e24e7968e396`. Round 4 running: use the server tick for every product (round 3's
-   `max(server, derived)` coarsened ETH for the book-top line and Agent API), keep the 1% "too coarse" message,
-   revert `libs/core/roller/Grid.*` if unused. Next: commit its changes, Claude Fable confirms round 4, land.
-   Done markers: `/private/tmp/claude-501/-Users-copeharder-Programming-Sentinel/2aedf6e1-a9df-4ef2-9ff7-eee9dcaf6d58/scratchpad/w1a-fix3.{done,last}`.
-2. `lt-sol/dock-infra` (W1c): Fable LAND; `land` was running at hand-off. If it is not in `git log`, rerun
-   `scripts/dev/agent-worktree.sh land lt-sol/dock-infra`. After it lands: (a) add one sentence to AGENTS.md 4b:
-   for `--build` runs the in-GUI guardrails (AgentHostMode, RemoteGridDataSource send checks) live in the
-   agent-compiled binary and are not host guarantees; the host-enforced boundary is path containment, fixed argv,
-   allowlisted env, one session, idle timeout; (b) rebuild main through the build queue; (c) restart the host
-   (`pkill -TERM -f gui-host.py; nohup scripts/dev/gui-host.py >/dev/null 2>&1 & disown`); (d) live-check
-   `launch --build` on a worktree and a `target=window` shot.
+   `01a104bb-9a13-74c3-bb45-e24e7968e396`. Rounds 1-4 committed and rebased on main (`6d346d7`); Fable cleared the
+   data semantics. A live `--build` window grab showed the LAYOUT broken at default dock width (horizontal scroll,
+   bid column cut, 7-line summary; `scratchpad/dom-round4-window.png`). Round 5 running: fit without horizontal
+   scroll down to ~180 px, compact summary, verified by the agent through `gui-shot.sh launch --build`. Next: look
+   at its final PNGs yourself, commit, Claude Fable quick check if logic changed, land.
+   Done markers: `/private/tmp/claude-501/-Users-copeharder-Programming-Sentinel/2aedf6e1-a9df-4ef2-9ff7-eee9dcaf6d58/scratchpad/w1a-fix4.{done,last}`.
+2. `lt-sol/dock-infra` (W1c): LANDED `af09b9f`, trust note added, main rebuilt, host restarted; `--build` and `target=window` verified live 2026-10-04.
 3. Shadow roller soak (slice C): running since 2026-10-03 22:14. First comparison covered 27 h with 0 mismatches.
    Check `curl -s 127.0.0.1:8090/metrics | rg sentinel_roller_shadow` daily. At ~2026-10-05 22:15, if
    `sentinel_roller_shadow_mismatch_total` is still 0: propose slice D (cutover) to the owner; D must widen the
