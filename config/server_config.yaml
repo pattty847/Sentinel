@@ -49,9 +49,9 @@ mdc:
 # Shadow pipeline: primary recording/ and client stream remain authoritative.
 # Enable only in deployed config after choosing a UTC-midnight journal start.
 roller_shadow:
-  enabled: false
+  enabled: true
   journal_dir: /Volumes/T7/sentinel-data/raw-l2
   dir: /Volumes/T7/sentinel-data/hmc2
-  socket: "" # ~/Sentinel-runtime/run/capture.sock
+  socket: "" # empty = ~/Sentinel-runtime/run/capture.sock
   from: "2026-10-03T00:00:00Z"
   fault_min_duration_ms: 120000 # identical failures must span two minutes before slow probes
