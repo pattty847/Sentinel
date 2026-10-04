@@ -85,7 +85,7 @@ No hubs, renderer, core or RemoteGridDataSource implementation changes. The only
 DOM implementation/tests are two source entries in `libs/gui/CMakeLists.txt` and the `DomTests` target in
 `tests/render/CMakeLists.txt`. Canonical architecture documentation and shared agent invariants describe the
 new contract. That implementation was committed by the orchestrator as `bce9c8e` after testing on base
-`9aff385`. The review-round changes below remain uncommitted.
+`9aff385`. Review round 1 was committed by the orchestrator as `089f113`; review round 2 below remains uncommitted.
 
 ## Review round 1
 
@@ -126,4 +126,36 @@ getter as an interface override; added read-only connection-state retention and 
 An upstream limitation was found during the production-path audit:
 `ServerDataModel::onLiveOrderBookInitialized` still quantizes its stream book at the global tick, and the server
 serializes that already-bucketed book. A client cannot reconstruct prices already reduced to zero there;
-the server tick-selection scope extension is awaiting the orchestrator's decision.
+review round 2 resolves the client presentation with the owner-directed server-tick floor and explicit
+coarse state below. Per-product server precision remains a separate slice.
+
+
+## Review round 2 (base 089f113)
+
+- Non-BTC replicas now use `max(server tick, derived near tick)`; BTC retains its configured tick. The
+  client never advertises precision finer than the already-quantised wire book. A helper exception retains
+  the valid server tick and completes snapshot ingestion normally, without clearing the replica or emitting
+  an empty book. Pending snapshot state is erased only after ingestion; an invalid server tick preserves it.
+- The DOM suppresses the ladder and the entire bid/ask/spread summary when the effective tick exceeds 1%
+  of the midpoint or a populated best level collapses to zero. Copy names tick, quote unit and symbol:
+  `Server aggregation 0.1 USD is too coarse for DOGE-USD`. A received coarse book is not labelled waiting.
+- Production signal-path tests use server-quantised wire prices: DOGE 0.1/0.1, FARTCOIN 0.7/0.8,
+  PEPE 0/0; BTC 84000/84001 and ETH 2500/2500.5 continue to render. Resubscriptions recompute the tick.
+  The tests also check replica side quantities, nonempty notifications and subsequent L2 updates, plus
+  same-product transitions across the strict 1% threshold and helper-exception fallback.
+- Quote increment remains unknown in the current stream. Without metadata the helper derives a 1e-9 tick
+  around PEPE's 1e-5 raw price, below its 1e-8 exchange increment. This round intentionally does not change
+  that helper policy; the server's 0.1 floor bounds the current replica. A subsequent server slice will
+  publish per-product ticks/increments.
+- Scope: replica snapshot tick selection/state completion, DOM model/copy, tests and documentation only.
+  No server, protocol, algo/trade-command, services or deployment changes.
+
+Targeted validation: **19/19 DOM tests**, **9/9 datasource tests**; CTest **100% tests passed, 0 tests failed
+out of 2**, **2.76 s**. Fail-without-fix: **12/12 mutations compiled and were rejected by behavior tests**;
+restored DOM suite **19/19 passed**. Finding 1 is guarded independently by `false_replica_precision` and
+`coarse_positive_prices_rendered`; finding 2 by `discard_replica_on_derived_tick_failure`.
+Full `mac-clang` rebuild: **passed**. Full ctest: **100% tests passed, 0 tests failed out of 90**,
+**136.94 s**; DOM CTest time **2.09 s**. All validation used the FIFO build queue and `-j 4` for builds/ctest.
+The full log contains Metal-unavailable GPU skips; passing CTest entries do not verify those skipped cases.
+Native visuals/GPU behavior remain unverified in this sandbox; the initial-implementation raster benchmark
+above has not been rerun this round.

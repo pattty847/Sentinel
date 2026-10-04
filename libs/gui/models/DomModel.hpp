@@ -62,7 +62,7 @@ private:
         bool operator==(const Row&) const = default;
     };
     static std::optional<qint64> bucket(double price, double tick);
-    QString m_base = "base", m_quote = "quote";
+    QString m_base = "base", m_quote = "quote", m_symbol = "this product";
     double m_tick = 0;
     qint64 m_top = 0, m_center = 0;
     bool m_ready = false;

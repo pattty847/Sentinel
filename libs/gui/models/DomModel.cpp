@@ -104,6 +104,7 @@ QVariant DomModel::data(const QModelIndex& index, int role) const
 void DomModel::clear(const QString& symbol)
 {
     beginResetModel();
+    m_symbol = symbol;
     const auto parts = symbol.split('-');
     m_base = parts.size() == 2 ? parts[0] : QStringLiteral("base");
     m_quote = parts.size() == 2 ? parts[1] : QStringLiteral("quote");
@@ -128,12 +129,12 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
     const double tick = view.tickSize;
     const auto origin = bucket(view.minPrice, tick);
     m_aggregationIssue.clear();
-    if (!origin) {
-        m_aggregationIssue = QStringLiteral("Aggregation unavailable for this product");
-        return;
-    }
-    if ((!view.bidLevels.empty() && view.minPrice + view.bidLevels.front().first * tick <= 0) ||
-        (!view.askLevels.empty() && view.minPrice + view.askLevels.front().first * tick <= 0)) {
+    m_bestBid = view.bidLevels.empty() ? 0 : view.minPrice + view.bidLevels.front().first * tick;
+    m_bestAsk = view.askLevels.empty() ? 0 : view.minPrice + view.askLevels.front().first * tick;
+    const double mid = m_bestBid > 0 && m_bestAsk > 0 ? (m_bestBid + m_bestAsk) / 2 : m_bestBid + m_bestAsk;
+    const bool coarse = (!view.bidLevels.empty() && m_bestBid <= 0) ||
+        (!view.askLevels.empty() && m_bestAsk <= 0) || (mid > 0 && tick > mid * 0.01);
+    if (!origin || coarse) {
         if (m_ready) {
             beginRemoveRows({}, 0, Rows - 1);
             m_ready = false;
@@ -141,12 +142,10 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
         }
         m_bestBid = m_bestAsk = 0;
         m_tick = tick;
-        m_aggregationIssue = QStringLiteral("Aggregation too coarse for this product");
+        m_aggregationIssue = !origin ? QStringLiteral("Aggregation unavailable for %1").arg(m_symbol)
+            : QStringLiteral("Server aggregation %1 %2 is too coarse for %3").arg(priceText(tick, tick), m_quote, m_symbol);
         return;
     }
-    m_bestBid = view.bidLevels.empty() ? 0 : view.minPrice + view.bidLevels.front().first * tick;
-    m_bestAsk = view.askLevels.empty() ? 0 : view.minPrice + view.askLevels.front().first * tick;
-    const double mid = m_bestBid > 0 && m_bestAsk > 0 ? (m_bestBid + m_bestAsk) / 2 : m_bestBid + m_bestAsk;
     const auto center = bucket(mid, tick);
     if ((!center || mid <= 0) && !m_ready) {
         m_tick = tick;
@@ -222,6 +221,7 @@ QString DomModel::executionSummary() const
 }
 QString DomModel::summary() const
 {
+    if (!m_aggregationIssue.isEmpty()) return {};
     const QString bid = m_bestBid > 0 ? priceText(m_bestBid, m_tick) : "—";
     const QString ask = m_bestAsk > 0 ? priceText(m_bestAsk, m_tick) : "—";
     const QString spread = m_bestBid > 0 && m_bestAsk > 0 ? priceText(m_bestAsk - m_bestBid, m_tick) : "—";

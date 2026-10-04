@@ -30,9 +30,12 @@ Copy the defaults to the override names to customize; override values take prece
 
 GUI order-book replicas retain `orderbook.tick_size` for BTC-USD. Other products derive their replica tick
 from the accepted snapshot's reference price using the roller's shared near-grid rule (about 1 bp, nearest
-1-2-5 step); a supplied quote increment is a lower bound and multiple constraint. The current stream does
-not carry quote-increment metadata. The band percent remains server-configured. This client-side policy
-cannot recover levels already collapsed by a coarser server stream book; see the W1a validation notes.
+1-2-5 step), with `orderbook.tick_size` as a lower bound because wire prices are already quantised. If
+derivation fails, the valid server tick is retained. The current stream does not carry product ticks or
+quote-increment metadata. The band percent remains server-configured. A DOM whose effective tick exceeds
+1% of its midpoint, or whose best levels collapse to zero, shows an explicit server-aggregation explanation
+instead of a ladder or spread. Recovering the missing precision requires the upcoming server slice; see
+the W1a validation notes.
 
 ## Example snippets
 

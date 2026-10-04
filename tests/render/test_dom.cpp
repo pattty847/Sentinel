@@ -143,6 +143,8 @@ TEST(DomModel, ExecutionsUseContainingBucketAndGridChangesRebucketTheRawRing) {
     DomTradeWindow trades;
     trades.ingest(trade(200.09, AggressorSide::Buy));
     trades.ingest(trade(200.19, AggressorSide::Sell));
+    trades.ingest(trade(std::numeric_limits<double>::infinity(), AggressorSide::Sell));
+    trades.ingest(trade(std::numeric_limits<double>::quiet_NaN(), AggressorSide::Buy));
     DomModel model;
     model.publish(book, trades, true);
     EXPECT_EQ(count(model, rowAt(model, 2000), DomModel::Buys), 1);
@@ -152,61 +154,133 @@ TEST(DomModel, ExecutionsUseContainingBucketAndGridChangesRebucketTheRawRing) {
     model.publish(book, trades, false);
     EXPECT_EQ(count(model, rowAt(model, 1000), DomModel::Buys), 1);
     EXPECT_EQ(count(model, rowAt(model, 1000), DomModel::Sells), 1);
+    int buyCount = 0, sellCount = 0;
+    for (int r = 0; r < model.rowCount(); ++r) {
+        buyCount += count(model, r, DomModel::Buys);
+        sellCount += count(model, r, DomModel::Sells);
+    }
+    EXPECT_EQ(buyCount, 1);
+    EXPECT_EQ(sellCount, 1);
 }
 
-TEST(DomModel, ProductionReplicaTicksRenderLowPriceProductsOnEverySubscription) {
-    RemoteGridDataSource source{"127.0.0.1", "1"}; // No connectToServer; deliver real snapshot signals.
-    struct Case { const char* symbol; double bid, ask; };
-    for (const auto& c : {Case{"PEPE-USD", .00001001, .00001002},
-                          Case{"FARTCOIN-USD", .789, .7891}, Case{"DOGE-USD", .12345, .12347},
-                          Case{"BTC-USD", 84000, 84001}, Case{"PEPE-USD", .00002001, .00002003}}) {
+TEST(DomModel, ServerQuantisedSnapshotsNeverAdvertiseFalsePrecision) {
+    RemoteGridDataSource source{"127.0.0.1", "1"}; // No network: real production snapshot/delta slots.
+    OrderBookDock dock(nullptr, &source);
+    dock.resize(650, 600);
+    dock.show();
+    auto* timer = dock.findChild<QTimer*>("domPublishTimer");
+    ASSERT_NE(timer, nullptr);
+    timer->stop();
+    QSignalSpy updates(&source, &IGridDataSource::liveOrderBookUpdated);
+    auto* model = static_cast<DomModel*>(dock.findChild<QTableView*>()->model());
+    QAbstractItemModelTester tester(model, QAbstractItemModelTester::FailureReportingMode::Fatal);
+    struct Case { const char* symbol; double bid, ask, tick; bool coarse; };
+    // Wire prices after the server's 0.1 aggregation, including its zero-price PEPE levels.
+    // Alternate valid/coarse products to prove old rows and spread disappear and recover.
+    for (const auto& c : {Case{"BTC-USD", 84000, 84001, .1, false},
+                          Case{"DOGE-USD", .1, .1, .1, true},
+                          Case{"ETH-USD", 2500, 2500.5, .2, false},
+                          Case{"FARTCOIN-USD", .7, .8, .1, true},
+                          Case{"PEPE-USD", 0, 0, .1, true},
+                          Case{"ETH-USD", 6000, 6001, .5, false},
+                          Case{"DOGE-USD", .2, .2, .1, true}}) {
+        SCOPED_TRACE(c.symbol);
         const QString symbol = c.symbol;
         source.subscribe(symbol);
+        dock.onSymbolChanged(symbol);
+        updates.clear();
         emit source.streamClient()->snapshotReceived(symbol, {{c.bid, 7}}, {{c.ask, 9}},
             source.streamClient()->bookDeliveryGeneration(c.symbol));
         QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
         const auto& book = source.getDirectLiveOrderBook(c.symbol);
-        ASSERT_GT(book.getTickSize(), 0) << c.symbol;
-        if (symbol == "BTC-USD") EXPECT_DOUBLE_EQ(book.getTickSize(), .1);
-        else EXPECT_DOUBLE_EQ(book.getTickSize(), sentinel::roller::deriveNearTick((c.bid + c.ask) / 2));
-        DomModel model;
-        DomTradeWindow trades;
-        model.clear(symbol);
-        trades.ingest(trade(c.bid, AggressorSide::Buy));
-        trades.ingest(trade(std::numeric_limits<double>::infinity(), AggressorSide::Sell));
-        trades.ingest(trade(std::numeric_limits<double>::quiet_NaN(), AggressorSide::Buy));
-        model.publish(book, trades, true);
-        ASSERT_EQ(model.rowCount(), DomModel::Rows) << c.symbol << ": " << model.aggregation().toStdString();
-        int bidRows = 0, buyCount = 0;
-        for (int r = 0; r < model.rowCount(); ++r) {
-            if (model.index(r, DomModel::Bid).data(DomModel::QuantityRole).toDouble() > 0) {
-                ++bidRows;
-                EXPECT_GT(model.index(r, DomModel::Price).data().toDouble(), 0);
-                EXPECT_EQ(count(model, r, DomModel::Buys), 1);
-            }
-            buyCount += count(model, r, DomModel::Buys);
+        EXPECT_DOUBLE_EQ(book.getTickSize(), c.tick);
+        // Other consumers still receive a usable replica and nonempty deltas, even for PEPE.
+        ASSERT_EQ(updates.count(), 1);
+        EXPECT_FALSE(qvariant_cast<std::vector<BookDelta>>(updates[0][1]).empty());
+        EXPECT_FALSE(source.isBookSnapshotStale(symbol));
+        EXPECT_EQ(book.getBidCount(), 1u);
+        EXPECT_EQ(book.getAskCount(), 1u);
+        EXPECT_DOUBLE_EQ(book.getBidVolume(), 7);
+        EXPECT_DOUBLE_EQ(book.getAskVolume(), 9);
+        ASSERT_TRUE(QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection));
+        const auto aggregation = dock.findChild<QLabel*>("domAggregation")->text();
+        const auto summary = dock.findChild<QLabel*>("domBookSummary")->text();
+        if (c.coarse) {
+            EXPECT_EQ(model->rowCount(), 0);
+            EXPECT_EQ(aggregation, QString("Server aggregation 0.1 USD is too coarse for %1").arg(symbol));
+            EXPECT_TRUE(summary.isEmpty());
+            EXPECT_FALSE(dock.findChild<QLabel*>("domFreshness")->text().contains("Waiting for book"));
+        } else {
+            EXPECT_EQ(model->rowCount(), DomModel::Rows);
+            EXPECT_TRUE(aggregation.startsWith("Aggregation:"));
+            EXPECT_TRUE(summary.contains("Bucketed spread"));
         }
-        EXPECT_EQ(bidRows, 1);
-        EXPECT_EQ(buyCount, 1);
+        // A subsequent level update keeps using the same replica, without a new snapshot/retry.
+        emit source.streamClient()->l2UpdateReceived(symbol, {{true, c.bid, 11}},
+            source.streamClient()->bookDeliveryGeneration(c.symbol));
+        QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+        EXPECT_DOUBLE_EQ(book.getBidVolume(), 11);
+        EXPECT_DOUBLE_EQ(book.getAskVolume(), 9);
+        EXPECT_DOUBLE_EQ(book.getTickSize(), c.tick);
         source.unsubscribe(symbol);
     }
-    // Same shared rule respects known quote increments, including non-decimal rungs.
+    // Shared helper honors known increments; stream metadata does not supply them yet.
     EXPECT_DOUBLE_EQ(sentinel::roller::deriveNearTick(.12345, .001), .001);
     EXPECT_DOUBLE_EQ(sentinel::roller::deriveNearTick(100, .03), .03);
 }
 
 TEST(DomModel, CoarseOrUnavailableAggregationExplainsWhyThereIsNoLadder) {
     LiveOrderBook book;
-    book.initialize(0, .1, .1);
-    apply(book, {{true, .00001001, 7}, {false, .00001002, 9}});
     DomModel model;
+    model.clear("TEST-USD");
+    QAbstractItemModelTester tester(&model, QAbstractItemModelTester::FailureReportingMode::Fatal);
     DomTradeWindow trades;
+    book.initialize(0, 200, 1);
+    apply(book, {{true, 100, 7}, {false, 100, 9}});
+    model.publish(book, trades, true);
+    EXPECT_EQ(model.rowCount(), DomModel::Rows); // Exactly 1% remains permitted.
+    apply(book, {{true, 100, 0}, {false, 100, 0}, {true, 99, 7}, {false, 99, 9}});
+    model.publish(book, trades, true);
+    EXPECT_EQ(model.rowCount(), 0); // Same product loses rows when its tick becomes too coarse.
+    EXPECT_TRUE(model.aggregation().contains("too coarse for TEST-USD"));
+    EXPECT_TRUE(model.summary().isEmpty());
+    book.initialize(0, .1, .1);
+    apply(book, {{true, 0, 7}, {false, 0, 9}});
     model.publish(book, trades, true);
     EXPECT_EQ(model.rowCount(), 0);
-    EXPECT_TRUE(model.aggregation().contains("too coarse"));
+    EXPECT_TRUE(model.aggregation().contains("Server aggregation 0.1 USD"));
     book.clear();
     model.publish(book, trades, true);
     EXPECT_TRUE(model.aggregation().contains("unavailable"));
+    EXPECT_TRUE(model.summary().isEmpty());
+    book.initialize(0, 200, 1);
+    apply(book, {{true, 100, 7}, {false, 101, 9}});
+    model.publish(book, trades, true);
+    EXPECT_EQ(model.rowCount(), DomModel::Rows);
+    EXPECT_TRUE(model.summary().contains("Bucketed spread"));
+}
+
+TEST(DomModel, UnrepresentableDerivedTickFallsBackWithoutDiscardingReplica) {
+    RemoteGridDataSource source{"127.0.0.1", "1"};
+    source.subscribe("TEST-USD");
+    QSignalSpy updates(&source, &IGridDataSource::liveOrderBookUpdated);
+    const auto generation = source.streamClient()->bookDeliveryGeneration("TEST-USD");
+    // Deliberate arithmetic underflow exercises the helper's exception path.
+    // Real server-quantised assets are covered separately above.
+    emit source.streamClient()->snapshotReceived("TEST-USD", {{1e-320, 7}}, {{2e-320, 9}}, generation);
+    QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
+    const auto& book = source.getDirectLiveOrderBook("TEST-USD");
+    EXPECT_DOUBLE_EQ(book.getTickSize(), .1);
+    EXPECT_DOUBLE_EQ(book.getBidVolume(), 7);
+    EXPECT_DOUBLE_EQ(book.getAskVolume(), 9);
+    ASSERT_EQ(updates.count(), 1);
+    EXPECT_FALSE(qvariant_cast<std::vector<BookDelta>>(updates[0][1]).empty());
+    emit source.streamClient()->l2UpdateReceived("TEST-USD", {{true, 0, 11}}, generation);
+    QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
+    EXPECT_DOUBLE_EQ(book.getBidVolume(), 11); // Pending snapshot was resolved normally.
+    EXPECT_DOUBLE_EQ(book.getTickSize(), .1);
 }
 
 TEST(DomModel, ExecutionsMatchReplicaTruncationAtDecimalBoundariesWithNonzeroOrigin) {

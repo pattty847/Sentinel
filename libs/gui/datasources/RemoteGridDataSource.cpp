@@ -380,9 +380,12 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
     // The stream server can send its still-empty local book immediately after
     // admission; only a two-sided upstream snapshot makes this replica ready.
     if (bids.empty() || asks.empty()) return;
+    const double serverTick = m_serverConfig.orderbook.tickSize;
+    if (!std::isfinite(serverTick) || serverTick <= 0) {
+        sLog_Warning("Replica snapshot needs a valid server tick: symbol=" << productId);
+        return; // Preserve the previous replica and pending snapshot/retry state.
+    }
     const bool wasStale = isBookSnapshotStale(productId);
-    m_pendingBookSnapshots.erase(symbol);
-    if (m_pendingBookSnapshots.empty()) m_bookSnapshotTimer.stop();
 
     // Create or reset replica
     if (m_replicaBooks.find(symbol) == m_replicaBooks.end()) {
@@ -394,19 +397,14 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
     // Re-initialize using banded range around best bid/ask.
     const double bandPct = m_serverConfig.orderbook.bandPct;
     const auto [minPrice, maxPrice] = computeBandRange(bids, asks, bandPct);
-    // Same near-grid policy as the roller. Stream snapshots currently carry no
-    // quote-increment metadata, so use the helper's unknown-increment policy.
-    // BTC is the roller's explicit override product: keep its configured tick.
-    double tickSize = 0;
+    // The stream has already quantized prices: never advertise finer resolution.
+    // Quote-increment metadata is not yet available. BTC keeps its configured tick.
+    double tickSize = serverTick;
     try {
-        tickSize = symbol == "BTC-USD" ? m_serverConfig.orderbook.tickSize
-            : sentinel::roller::deriveNearTick(std::midpoint(minPrice, maxPrice));
-        if (!std::isfinite(tickSize) || tickSize <= 0) throw std::runtime_error("invalid replica tick");
+        if (symbol != "BTC-USD")
+            tickSize = std::max(serverTick, sentinel::roller::deriveNearTick(std::midpoint(minPrice, maxPrice)));
     } catch (const std::exception& error) {
-        sLog_Warning("Replica aggregation unavailable: symbol=" << productId << " reason=" << error.what());
-        book.clear();
-        emit liveOrderBookUpdated(productId, {});
-        return;
+        sLog_Warning("Replica using server aggregation: symbol=" << productId << " reason=" << error.what());
     }
     book.initialize(minPrice, maxPrice, tickSize);
 
@@ -423,6 +421,8 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
     auto now = std::chrono::system_clock::now();
     std::vector<BookDelta> deltas;
     book.applyUpdates(updates, now, &deltas);
+    m_pendingBookSnapshots.erase(symbol);
+    if (m_pendingBookSnapshots.empty()) m_bookSnapshotTimer.stop();
     if (!deltas.empty()) {
         emit liveOrderBookUpdated(productId, deltas);
     }
