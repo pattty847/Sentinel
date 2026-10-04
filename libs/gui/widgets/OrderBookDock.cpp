@@ -1,517 +1,369 @@
 #include "OrderBookDock.hpp"
 #include "ServiceLocator.hpp"
 #include "../datasources/IGridDataSource.hpp"
-#include "../../core/marketdata/model/TradeData.h"
-#include <QGridLayout>
-#include <QFont>
+#include <QApplication>
+#include <QDateTime>
 #include <QHeaderView>
+#include <QHideEvent>
+#include <QKeyEvent>
+#include <QMouseEvent>
+#include <QLabel>
 #include <QPainter>
+#include <QPushButton>
 #include <QScrollBar>
+#include <QShowEvent>
+#include <QTableView>
+#include <QVBoxLayout>
+#include <algorithm>
 #include <cmath>
-#include <vector>
 
-namespace {
+DomBarDelegate::DomBarDelegate(DomModel* model, QObject* parent)
+    : QStyledItemDelegate(parent), m_model(model) {}
 
-int priceDecimalsForTick(double tickSize)
+QString DomBarDelegate::fittedQuantity(double value, const QFontMetrics& metrics, int width)
 {
-    if (tickSize <= 0.0) {
-        return 2;
+    QString full = QString::number(value, 'g', 8);
+    if (metrics.horizontalAdvance(full) <= width) return full;
+    double scaled = value;
+    QString suffix;
+    if (std::abs(value) >= 1e9) { scaled /= 1e9; suffix = "b"; }
+    else if (std::abs(value) >= 1e6) { scaled /= 1e6; suffix = "m"; }
+    else if (std::abs(value) >= 1e3) { scaled /= 1e3; suffix = "k"; }
+    for (int precision = 3; precision >= 1; --precision) {
+        const auto text = QString::number(scaled, 'g', precision) + suffix;
+        if (metrics.horizontalAdvance(text) <= width) return text;
     }
-
-    int decimals = 0;
-    double scaledTick = tickSize;
-    while (decimals < 8 && std::abs(scaledTick - std::round(scaledTick)) > 1e-9) {
-        scaledTick *= 10.0;
-        ++decimals;
-    }
-    return std::max(2, decimals);
-}
-
-QString formatBookQty(double qty)
-{
-    if (qty <= 0.0) {
-        return QString();
-    }
-    if (qty >= 1000.0) {
-        return QString::number(qty, 'f', 0);
-    }
-    if (qty >= 100.0) {
-        return QString::number(qty, 'f', 1);
-    }
-    if (qty >= 1.0) {
-        return QString::number(qty, 'f', 2);
-    }
-    if (qty >= 0.01) {
-        return QString::number(qty, 'f', 4);
-    }
-    return QString::number(qty, 'f', 6);
-}
-
-QString formatTopBookQty(double qty)
-{
-    const QString formatted = formatBookQty(qty);
-    return formatted.isEmpty() ? QStringLiteral("---") : formatted;
-}
-
-} // namespace
-
-// --- DomBarDelegate ---
-
-DomBarDelegate::DomBarDelegate(BarSide side, QObject* parent)
-    : QStyledItemDelegate(parent)
-    , m_side(side)
-{
+    return QString::number(value, 'e', 1); // Complete number; paint scales only this last fallback.
 }
 
 void DomBarDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option,
                            const QModelIndex& index) const
 {
-    QStyleOptionViewItem opt = option;
+    // Paint native background/selection, then the liquidity bar, then native text.
+    QStyleOptionViewItem opt(option);
     initStyleOption(&opt, index);
-
-    const QRect r = opt.rect;
-    bool ok = false;
-    double qty = index.data(Qt::UserRole).toDouble(&ok);
-    if (!ok) {
-        const QString text = index.data(Qt::DisplayRole).toString();
-        qty = text.toDouble(&ok);
+    QString text = opt.text;
+    opt.text.clear();
+    const auto* style = opt.widget ? opt.widget->style() : QApplication::style();
+    style->drawControl(QStyle::CE_ItemViewItem, &opt, painter, opt.widget);
+    const bool bid = index.column() == DomModel::Bid;
+    const double maximum = bid ? m_model->maxBid() : m_model->maxAsk();
+    const double qty = index.data(DomModel::QuantityRole).toDouble();
+    if (maximum > 0 && qty > 0) {
+        const int width = int(std::min(1.0, qty / maximum) * std::max(0, opt.rect.width() - 8));
+        QRect bar = opt.rect.adjusted(4, 3, -4, -3);
+        if (bid) bar.setLeft(bar.right() - width + 1);
+        else bar.setWidth(width);
+        painter->fillRect(bar, bid ? QColor(40, 125, 135, 100) : QColor(160, 115, 40, 100));
     }
-    if (!ok || qty <= 0.0 || m_maxQty <= 0.0) {
-        QStyledItemDelegate::paint(painter, opt, index);
-        return;
-    }
-
-    const double ratio = std::min(1.0, qty / m_maxQty);
-    const int barWidth = static_cast<int>(ratio * (r.width() - 8));
-    if (barWidth <= 0) {
-        QStyledItemDelegate::paint(painter, opt, index);
-        return;
-    }
-
-    QRect barRect;
-    if (m_side == BarBid) {
-        barRect = QRect(r.right() - barWidth - 4, r.y() + 2, barWidth, r.height() - 4);
-    } else {
-        barRect = QRect(r.x() + 4, r.y() + 2, barWidth, r.height() - 4);
-    }
-
+    const int textWidth = std::max(1, opt.rect.width() - 6);
+    if (qty > 0) text = fittedQuantity(qty, opt.fontMetrics, textWidth);
+    if (index.column() >= DomModel::Buys && index.data().toInt() == 0) text.clear();
+    // Price and count digits stay intact. Only exceptional long values need a smaller font.
+    const int measured = opt.fontMetrics.horizontalAdvance(text);
+    if (measured > textWidth) opt.font.setPixelSize(std::max(1, int(opt.fontMetrics.height() * 0.8 * textWidth / measured)));
     painter->save();
-    painter->setPen(Qt::NoPen);
-    if (m_side == BarBid) {
-        painter->setBrush(QColor(26, 77, 26));
-    } else {
-        painter->setBrush(QColor(77, 26, 26));
-    }
-    painter->drawRoundedRect(barRect, 2, 2);
+    painter->setFont(opt.font);
+    painter->setPen(opt.palette.color(QPalette::Text));
+    painter->drawText(opt.rect.adjusted(3, 0, -3, 0), Qt::AlignRight | Qt::AlignVCenter, text);
     painter->restore();
-
-    opt.rect = r;
-    opt.palette.setColor(QPalette::Text, m_side == BarBid ? QColor(0x4c, 0xaf, 0x50) : QColor(0xf4, 0x43, 0x36));
-    QStyledItemDelegate::paint(painter, opt, index);
 }
 
-// --- OrderBookDock ---
-
-OrderBookDock::OrderBookDock(QWidget* parent)
-    : DockablePanel("orderbook", "Order Book", parent)
+OrderBookDock::OrderBookDock(QWidget* parent, IGridDataSource* source)
+    : DockablePanel("orderbook", "Order Book", parent), m_source(source ? source : ServiceLocator::dataSource())
 {
     buildUi();
+    m_timer.setParent(this);
+    m_timer.setObjectName("domPublishTimer");
+    m_timer.setInterval(67); // ~15 Hz; events only update ingestion state/dirty flags.
+    m_timer.setTimerType(Qt::PreciseTimer);
+    connect(&m_timer, &QTimer::timeout, this, &OrderBookDock::refreshDisplay);
+    connect(this, &QDockWidget::visibilityChanged, this, &OrderBookDock::setDisplayActive);
+    installEventFilter(this);
+    connect(this, &QDockWidget::topLevelChanged, this, [this] { watchWindow(); updateDisplayTimer(); });
+    if (!m_source) return;
+    m_freshness.connected = m_source->connectionState();
+    connect(m_source, &IGridDataSource::liveOrderBookUpdated, this, &OrderBookDock::onOrderBookUpdated, Qt::QueuedConnection);
+    connect(m_source, &IGridDataSource::tradeReceived, this, &OrderBookDock::onTradeReceived, Qt::QueuedConnection);
+    connect(m_source, &IGridDataSource::connectionStatusChanged, this, [this](bool connected) {
+        m_freshness.connected = connected;
+        m_freshness.awaitingBook = true; // A reconnect alone does not freshen retained data.
+        m_dirty = true;
+    }, Qt::QueuedConnection);
+    connect(m_source, &IGridDataSource::bookSnapshotStaleChanged, this, [this](const QString& symbol, bool stale) {
+        if (symbol != m_symbol) return;
+        m_freshness.snapshotStale = stale;
+        m_dirty = true;
+    }, Qt::QueuedConnection);
+    connect(m_source, &QObject::destroyed, this, [this] {
+        m_freshness.connected = false;
+        m_dirty = true;
+    });
 }
 
 void OrderBookDock::buildUi()
 {
-    if (m_domTable) {
-        return;
-    }
-
-    auto* mainLayout = new QVBoxLayout(m_contentWidget);
-    mainLayout->setContentsMargins(8, 8, 8, 8);
-    mainLayout->setSpacing(4);
-
-    m_symbolLabel = new QLabel("No Symbol", m_contentWidget);
-    m_symbolLabel->setAlignment(Qt::AlignCenter);
-    m_symbolLabel->setStyleSheet("QLabel { font-weight: bold; font-size: 14px; color: #ffffff; padding: 4px; }");
-    mainLayout->addWidget(m_symbolLabel);
-
-    setupSpreadLayout();
-    mainLayout->addWidget(m_spreadFrame);
-
-    // DOM table: BIDS | PRICE | ASKS | BUYS | SELLS | DELTA
-    m_domTable = new QTableWidget(m_contentWidget);
-    m_domTable->setColumnCount(6);
-    m_domTable->setHorizontalHeaderLabels(
-        { QStringLiteral("BIDS"), QStringLiteral("PRICE"), QStringLiteral("ASKS"),
-          QStringLiteral("BUYS"), QStringLiteral("SELLS"), QStringLiteral("DELTA") });
-    m_domTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_domTable->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_domTable->setSelectionMode(QAbstractItemView::NoSelection);
-    m_domTable->setShowGrid(true);
-    m_domTable->verticalHeader()->setVisible(false);
-    m_domTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-    m_domTable->setAlternatingRowColors(false);
-    m_domTable->setStyleSheet(
-        "QTableWidget { background-color: #1a1a1a; color: #e0e0e0; gridline-color: #2a2a2a; font-size: 12px; }"
-        "QHeaderView::section { background-color: #252525; color: #b0b0b0; padding: 6px; font-weight: bold; }");
-    m_domTable->setMinimumHeight(320);
-    m_domTable->setRowCount(0);
-
-    m_bidBarDelegate = new DomBarDelegate(DomBarDelegate::BarBid, this);
-    m_askBarDelegate = new DomBarDelegate(DomBarDelegate::BarAsk, this);
-    m_domTable->setItemDelegateForColumn(0, m_bidBarDelegate);
-    m_domTable->setItemDelegateForColumn(2, m_askBarDelegate);
-
-    mainLayout->addWidget(m_domTable, 1);
-    connectToMarketData();
-}
-
-void OrderBookDock::setupSpreadLayout()
-{
-    m_spreadFrame = new QFrame(m_contentWidget);
-    m_spreadFrame->setFrameStyle(QFrame::Box);
-    m_spreadFrame->setStyleSheet("QFrame { border: 1px solid #444; background-color: #2a2a2a; }");
-
-    auto* gridLayout = new QGridLayout(m_spreadFrame);
-    gridLayout->setContentsMargins(8, 8, 8, 8);
-    gridLayout->setSpacing(4);
-
-    m_bidFrame = new QFrame(m_spreadFrame);
-    m_bidFrame->setStyleSheet("QFrame { background-color: #1a4d1a; border: 1px solid #2d7d32; border-radius: 4px; padding: 4px; }");
-    auto* bidLayout = new QVBoxLayout(m_bidFrame);
-    bidLayout->setContentsMargins(4, 4, 4, 4);
-
-    auto* bidHeaderLabel = new QLabel("BID", m_bidFrame);
-    bidHeaderLabel->setAlignment(Qt::AlignCenter);
-    bidHeaderLabel->setStyleSheet("QLabel { font-weight: bold; color: #4caf50; font-size: 10px; }");
-
-    m_bidPriceLabel = new QLabel("---.--", m_bidFrame);
-    m_bidPriceLabel->setAlignment(Qt::AlignCenter);
-    m_bidPriceLabel->setStyleSheet("QLabel { font-weight: bold; color: #4caf50; font-size: 16px; }");
-
-    m_bidSizeLabel = new QLabel("(---)", m_bidFrame);
-    m_bidSizeLabel->setAlignment(Qt::AlignCenter);
-    m_bidSizeLabel->setStyleSheet("QLabel { color: #81c784; font-size: 12px; }");
-
-    bidLayout->addWidget(bidHeaderLabel);
-    bidLayout->addWidget(m_bidPriceLabel);
-    bidLayout->addWidget(m_bidSizeLabel);
-
-    auto* centerLayout = new QVBoxLayout();
-
-    m_spreadLabel = new QLabel("Spread: ---.--", m_spreadFrame);
-    m_spreadLabel->setAlignment(Qt::AlignCenter);
-    m_spreadLabel->setStyleSheet("QLabel { color: #ffffff; font-size: 10px; }");
-
-    m_midLabel = new QLabel("Mid: ---.--", m_spreadFrame);
-    m_midLabel->setAlignment(Qt::AlignCenter);
-    m_midLabel->setStyleSheet("QLabel { color: #ffeb3b; font-size: 12px; font-weight: bold; }");
-
-    centerLayout->addWidget(m_spreadLabel);
-    centerLayout->addWidget(m_midLabel);
-
-    m_askFrame = new QFrame(m_spreadFrame);
-    m_askFrame->setStyleSheet("QFrame { background-color: #4d1a1a; border: 1px solid #d32f2f; border-radius: 4px; padding: 4px; }");
-    auto* askLayout = new QVBoxLayout(m_askFrame);
-    askLayout->setContentsMargins(4, 4, 4, 4);
-
-    auto* askHeaderLabel = new QLabel("ASK", m_askFrame);
-    askHeaderLabel->setAlignment(Qt::AlignCenter);
-    askHeaderLabel->setStyleSheet("QLabel { font-weight: bold; color: #f44336; font-size: 10px; }");
-
-    m_askPriceLabel = new QLabel("---.--", m_askFrame);
-    m_askPriceLabel->setAlignment(Qt::AlignCenter);
-    m_askPriceLabel->setStyleSheet("QLabel { font-weight: bold; color: #f44336; font-size: 16px; }");
-
-    m_askSizeLabel = new QLabel("(---)", m_askFrame);
-    m_askSizeLabel->setAlignment(Qt::AlignCenter);
-    m_askSizeLabel->setStyleSheet("QLabel { color: #ef5350; font-size: 12px; }");
-
-    askLayout->addWidget(askHeaderLabel);
-    askLayout->addWidget(m_askPriceLabel);
-    askLayout->addWidget(m_askSizeLabel);
-
-    gridLayout->addWidget(m_bidFrame, 0, 0);
-    gridLayout->addLayout(centerLayout, 0, 1);
-    gridLayout->addWidget(m_askFrame, 0, 2);
-
-    gridLayout->setColumnStretch(0, 1);
-    gridLayout->setColumnStretch(1, 1);
-    gridLayout->setColumnStretch(2, 1);
-}
-
-double OrderBookDock::priceToTick(double price) const
-{
-    if (m_tickSize <= 0.0) return price;
-    return std::round(price / m_tickSize) * m_tickSize;
-}
-
-int OrderBookDock::priceToRow(double price) const
-{
-    if (m_tickSize <= 0.0 || price < m_minPrice) return -1;
-    return static_cast<int>(std::round((price - m_minPrice) / m_tickSize));
-}
-
-void OrderBookDock::refreshDomTable()
-{
-    if (!m_domTable) return;
-
-    auto* dataSource = ServiceLocator::dataSource();
-    if (!dataSource) return;
-
-    const LiveOrderBook& liveBook = dataSource->getDirectLiveOrderBook(m_currentSymbol.toStdString());
-    if (liveBook.isEmpty()) {
-        m_domTable->setRowCount(0);
-        return;
-    }
-
-    m_tickSize = liveBook.getTickSize();
-    m_minPrice = liveBook.getMinPrice();
-    if (m_tickSize <= 0.0) return;
-
-    std::vector<std::pair<uint32_t, double>> bidBuffer;
-    std::vector<std::pair<uint32_t, double>> askBuffer;
-    auto view = liveBook.captureDenseNonZero(bidBuffer, askBuffer, static_cast<size_t>(kDomLevelsPerSide));
-
-    double bestBid = 0.0;
-    double bestAsk = 0.0;
-    if (!view.bidLevels.empty()) {
-        bestBid = view.minPrice + static_cast<double>(view.bidLevels.front().first) * view.tickSize;
-    }
-    if (!view.askLevels.empty()) {
-        bestAsk = view.minPrice + static_cast<double>(view.askLevels.front().first) * view.tickSize;
-    }
-
-    struct DomRow {
-        double price = 0.0;
-        double bidQty = 0.0;
-        double askQty = 0.0;
-        bool isMid = false;
+    if (m_table) return;
+    auto* layout = new QVBoxLayout(m_contentWidget);
+    layout->setContentsMargins(4, 4, 4, 4);
+    setMinimumWidth(180);
+    layout->setSpacing(2);
+    auto* heading = new QHBoxLayout;
+    m_symbolLabel = new QLabel("No symbol", m_contentWidget);
+    QFont font = m_symbolLabel->font();
+    font.setBold(true);
+    m_symbolLabel->setFont(font);
+    m_symbolLabel->setMinimumWidth(0);
+    m_recenter = new QPushButton("Recenter", m_contentWidget);
+    m_recenter->setObjectName("domRecenter");
+    m_recenter->setAccessibleName("Recenter and follow the market");
+    m_recenter->setCheckable(true);
+    m_recenter->setToolTip("Follow the market. Scrolling pauses follow and pins the price ladder.");
+    connect(m_recenter, &QPushButton::clicked, this, &OrderBookDock::recenter);
+    heading->addWidget(m_symbolLabel, 1);
+    heading->addWidget(m_recenter);
+    layout->addLayout(heading);
+    auto label = [&](const char* name) {
+        auto* result = new QLabel(m_contentWidget);
+        result->setObjectName(name);
+        result->setWordWrap(false);
+        result->setMinimumWidth(0);
+        result->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+        result->setTextFormat(Qt::PlainText);
+        return result;
     };
-    std::vector<DomRow> rows;
-
-    // Asks: display high to low (reverse of askLevels: askLevels[0]=best ask, so iterate backward)
-    for (size_t i = view.askLevels.size(); i-- > 0; ) {
-        DomRow r;
-        r.price = view.minPrice + static_cast<double>(view.askLevels[i].first) * view.tickSize;
-        r.askQty = view.askLevels[i].second;
-        rows.push_back(r);
-    }
-
-    // Mid row (between spread): one row at/near best bid or best ask for the cross
-    const double midPrice = (bestBid > 0.0 && bestAsk > 0.0) ? (bestBid + bestAsk) / 2.0 : (bestBid + bestAsk);
-    const double midTick = priceToTick(midPrice);
-    DomRow midRow;
-    midRow.price = midTick;
-    midRow.isMid = true;
-    for (size_t i = 0; i < view.bidLevels.size(); ++i) {
-        double p = view.minPrice + static_cast<double>(view.bidLevels[i].first) * view.tickSize;
-        if (std::abs(p - midTick) < view.tickSize * 0.5) {
-            midRow.bidQty = view.bidLevels[i].second;
-            break;
-        }
-    }
-    for (size_t i = 0; i < view.askLevels.size(); ++i) {
-        double p = view.minPrice + static_cast<double>(view.askLevels[i].first) * view.tickSize;
-        if (std::abs(p - midTick) < view.tickSize * 0.5) {
-            midRow.askQty = view.askLevels[i].second;
-            break;
-        }
-    }
-    rows.push_back(midRow);
-
-    // Bids: display best bid first (already high to low from captureDenseNonZero)
-    for (size_t i = 0; i < view.bidLevels.size(); ++i) {
-        double p = view.minPrice + static_cast<double>(view.bidLevels[i].first) * view.tickSize;
-        if (p >= midTick - view.tickSize * 0.5) continue;
-        DomRow r;
-        r.price = p;
-        r.bidQty = view.bidLevels[i].second;
-        rows.push_back(r);
-    }
-
-    double maxBidQty = 0.0;
-    double maxAskQty = 0.0;
-    for (const auto& r : rows) {
-        if (r.bidQty > maxBidQty) maxBidQty = r.bidQty;
-        if (r.askQty > maxAskQty) maxAskQty = r.askQty;
-    }
-    m_bidBarDelegate->setMaxQty(maxBidQty > 0.0 ? maxBidQty : 1.0);
-    m_askBarDelegate->setMaxQty(maxAskQty > 0.0 ? maxAskQty : 1.0);
-
-    m_domTable->setRowCount(static_cast<int>(rows.size()));
-    const int decimals = priceDecimalsForTick(m_tickSize);
-
-    for (int row = 0; row < static_cast<int>(rows.size()); ++row) {
-        const DomRow& r = rows[static_cast<size_t>(row)];
-        const double priceKey = priceToTick(r.price);
-        auto it = m_tradeCountsByPrice.find(priceKey);
-        const int buys = it != m_tradeCountsByPrice.end() ? it->second.buys : 0;
-        const int sells = it != m_tradeCountsByPrice.end() ? it->second.sells : 0;
-        const int delta = buys - sells;
-
-        auto* bidItem = new QTableWidgetItem(formatBookQty(r.bidQty));
-        auto* priceItem = new QTableWidgetItem(QString::number(r.price, 'f', decimals));
-        auto* askItem = new QTableWidgetItem(formatBookQty(r.askQty));
-        auto* buysItem = new QTableWidgetItem(QString::number(buys));
-        auto* sellsItem = new QTableWidgetItem(QString::number(sells));
-        auto* deltaItem = new QTableWidgetItem(QString::number(delta));
-
-        bidItem->setData(Qt::UserRole, r.bidQty);
-        askItem->setData(Qt::UserRole, r.askQty);
-
-        if (r.isMid) {
-            bidItem->setBackground(QColor(30, 60, 30));
-            priceItem->setBackground(QColor(40, 70, 40));
-            askItem->setBackground(QColor(60, 30, 30));
-            buysItem->setBackground(QColor(30, 60, 30));
-            sellsItem->setBackground(QColor(60, 30, 30));
-            deltaItem->setBackground(QColor(30, 60, 30));
-        }
-        bidItem->setForeground(QColor(0x4c, 0xaf, 0x50));
-        priceItem->setForeground(QColor(0xff, 0xff, 0xff));
-        askItem->setForeground(QColor(0xf4, 0x43, 0x36));
-        buysItem->setForeground(QColor(0x4c, 0xaf, 0x50));
-        sellsItem->setForeground(QColor(0xf4, 0x43, 0x36));
-        deltaItem->setForeground(delta >= 0 ? QColor(0x4c, 0xaf, 0x50) : QColor(0xf4, 0x43, 0x36));
-
-        m_domTable->setItem(row, 0, bidItem);
-        m_domTable->setItem(row, 1, priceItem);
-        m_domTable->setItem(row, 2, askItem);
-        m_domTable->setItem(row, 3, buysItem);
-        m_domTable->setItem(row, 4, sellsItem);
-        m_domTable->setItem(row, 5, deltaItem);
-    }
+    m_aggregation = label("domAggregation");
+    m_summary = label("domBookSummary");
+    m_status = label("domFreshness");
+    layout->addWidget(m_aggregation);
+    auto* summaryLine = new QHBoxLayout;
+    summaryLine->setSpacing(4);
+    summaryLine->addWidget(m_summary, 1);
+    summaryLine->addWidget(m_status, 2);
+    m_status->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    layout->addLayout(summaryLine);
+    m_status->setText("Waiting for book");
+    m_model = new DomModel(this);
+    m_table = new QTableView(m_contentWidget);
+    m_table->setObjectName("domLadder");
+    m_table->setModel(m_model);
+    m_table->setAccessibleName("Order book price ladder");
+    m_table->setToolTip("2,001 contiguous price buckets. Scroll to inspect; Recenter / follow moves the window to the market.");
+    m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_table->setSelectionMode(QAbstractItemView::NoSelection);
+    m_table->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_table->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+    m_table->setTextElideMode(Qt::ElideNone);
+    m_table->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    m_table->verticalHeader()->hide();
+    m_table->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
+    m_table->verticalHeader()->setDefaultSectionSize(22);
+    m_table->verticalHeader()->setMinimumSectionSize(22);
+    m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Fixed);
+    m_table->horizontalHeader()->setDefaultAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_table->horizontalHeader()->setMinimumSectionSize(20);
+    m_table->setItemDelegate(new DomBarDelegate(m_model, m_table));
+    m_table->viewport()->installEventFilter(this);
+    m_table->installEventFilter(this);
+    m_table->verticalScrollBar()->installEventFilter(this);
+    layout->addWidget(m_table, 1);
 }
 
 void OrderBookDock::onSymbolChanged(const QString& symbol)
 {
-    m_currentSymbol = symbol;
-    m_tradeCountsByPrice.clear();
-    m_tradeHistory.clear();
-    if (m_symbolLabel) {
-        m_symbolLabel->setText(symbol.isEmpty() ? "No Symbol" : symbol);
-    }
-    updateSpreadDisplay(0.0, 0.0, 0.0, 0.0);
-    refreshDomTable();
+    if (symbol == m_symbol) return;
+    m_symbol = symbol;
+    m_symbolId = symbol.toStdString();
+    m_trades.clear();
+    const auto connected = m_freshness.connected;
+    m_freshness = {};
+    m_freshness.connected = m_source ? m_source->connectionState() : connected;
+    m_freshness.snapshotStale = m_source && m_source->isBookSnapshotStale(symbol);
+    m_dirty = m_symbolDirty = m_bookDirty = true;
+    m_follow = true;
+    // Including symbol/model/header changes: no display work until visible.
 }
 
-void OrderBookDock::connectToMarketData()
-{
-    auto* dataSource = ServiceLocator::dataSource();
-    if (!dataSource) return;
-
-    connect(dataSource, &IGridDataSource::liveOrderBookUpdated,
-            this, &OrderBookDock::onOrderBookUpdated,
-            Qt::QueuedConnection);
-    connect(dataSource, &IGridDataSource::tradeReceived,
-            this, &OrderBookDock::onTradeReceived,
-            Qt::QueuedConnection);
-}
-
-void OrderBookDock::onOrderBookUpdated(const QString& symbol,
-                                       const std::vector<BookDelta>& deltas)
+void OrderBookDock::onOrderBookUpdated(const QString& symbol, const std::vector<BookDelta>& deltas)
 {
     Q_UNUSED(deltas);
-
-    if (symbol != m_currentSymbol) return;
-
-    auto* dataSource = ServiceLocator::dataSource();
-    if (!dataSource) return;
-
-    const LiveOrderBook& liveBook = dataSource->getDirectLiveOrderBook(symbol.toStdString());
-
-    std::vector<std::pair<uint32_t, double>> bidBuffer;
-    std::vector<std::pair<uint32_t, double>> askBuffer;
-    auto view = liveBook.captureDenseNonZero(bidBuffer, askBuffer, 1);
-
-    double bidPrice = 0.0;
-    double bidSize = 0.0;
-    double askPrice = 0.0;
-    double askSize = 0.0;
-
-    if (!view.bidLevels.empty()) {
-        bidPrice = view.minPrice + static_cast<double>(view.bidLevels.front().first) * view.tickSize;
-        bidSize = view.bidLevels.front().second;
-    }
-    if (!view.askLevels.empty()) {
-        askPrice = view.minPrice + static_cast<double>(view.askLevels.front().first) * view.tickSize;
-        askSize = view.askLevels.front().second;
-    }
-
-    updateSpreadDisplay(bidPrice, bidSize, askPrice, askSize);
-    refreshDomTable();
+    if (symbol != m_symbol) return;
+    // The datasource already applied ALL deltas. Do not rescan it per event.
+    m_freshness.awaitingBook = false;
+    m_dirty = m_bookDirty = true;
 }
 
 void OrderBookDock::onTradeReceived(const Trade& trade)
 {
-    if (m_currentSymbol.isEmpty()) return;
-    if (QString::fromStdString(trade.product_id) != m_currentSymbol) return;
-    if (m_tickSize <= 0.0) return;
-
-    const double priceKey = priceToTick(trade.price);
-    const bool isBuy = (trade.side == AggressorSide::Buy);
-
-    m_tradeHistory.push_back({ priceKey, isBuy });
-    if (m_tradeHistory.size() > static_cast<size_t>(kTradeCountCap)) {
-        const auto& old = m_tradeHistory.front();
-        auto it = m_tradeCountsByPrice.find(old.first);
-        if (it != m_tradeCountsByPrice.end()) {
-            if (old.second) {
-                it->second.buys = std::max(0, it->second.buys - 1);
-            } else {
-                it->second.sells = std::max(0, it->second.sells - 1);
-            }
-            if (it->second.buys == 0 && it->second.sells == 0) {
-                m_tradeCountsByPrice.erase(it);
-            }
-        }
-        m_tradeHistory.erase(m_tradeHistory.begin());
-    }
-
-    PriceCounts& c = m_tradeCountsByPrice[priceKey];
-    if (isBuy) {
-        ++c.buys;
-    } else {
-        ++c.sells;
-    }
-
-    refreshDomTable();
+    if (m_symbol.isEmpty() || trade.product_id != m_symbolId) return;
+    m_trades.ingest(trade); // Also before the first book, and while hidden.
+    m_dirty = true;
 }
 
-void OrderBookDock::updateSpreadDisplay(double bidPrice, double bidSize, double askPrice, double askSize)
+void OrderBookDock::setDisplayActive(bool active)
 {
-    m_lastBidPrice = bidPrice;
-    m_lastBidSize = bidSize;
-    m_lastAskPrice = askPrice;
-    m_lastAskSize = askSize;
+    m_exposed = active;
+    updateDisplayTimer();
+}
 
-    if (!m_bidPriceLabel || !m_bidSizeLabel || !m_askPriceLabel || !m_askSizeLabel ||
-        !m_spreadLabel || !m_midLabel) {
-        return;
-    }
+bool OrderBookDock::minimized() const
+{
+    return window()->isMinimized() || (m_hostWindow && m_hostWindow->isMinimized());
+}
 
-    if (bidPrice > 0.0) {
-        m_bidPriceLabel->setText(QString::number(bidPrice, 'f', priceDecimalsForTick(m_tickSize)));
-        m_bidSizeLabel->setText(QString("(%1)").arg(formatTopBookQty(bidSize)));
-    } else {
-        m_bidPriceLabel->setText("---.--");
-        m_bidSizeLabel->setText("(---)");
-    }
+void OrderBookDock::watchWindow()
+{
+    QWidget* host = parentWidget() ? parentWidget()->window() : window();
+    if (host == m_hostWindow) return;
+    if (m_hostWindow && m_hostWindow != this) m_hostWindow->removeEventFilter(this);
+    m_hostWindow = host;
+    if (host && host != this) host->installEventFilter(this);
+}
 
-    if (askPrice > 0.0) {
-        m_askPriceLabel->setText(QString::number(askPrice, 'f', priceDecimalsForTick(m_tickSize)));
-        m_askSizeLabel->setText(QString("(%1)").arg(formatTopBookQty(askSize)));
-    } else {
-        m_askPriceLabel->setText("---.--");
-        m_askSizeLabel->setText("(---)");
-    }
+void OrderBookDock::updateDisplayTimer()
+{
+    m_displayActive = m_exposed && isVisible() && !minimized();
+    if (m_displayActive) {
+        m_dirty = true;
+        m_timer.start();
+    } else m_timer.stop();
+}
 
-    if (bidPrice > 0.0 && askPrice > 0.0) {
-        double spread = askPrice - bidPrice;
-        double mid = (bidPrice + askPrice) / 2.0;
-        m_spreadLabel->setText(QString("Spread: %1").arg(QString::number(spread, 'f', priceDecimalsForTick(m_tickSize))));
-        m_midLabel->setText(QString("Mid: %1").arg(QString::number(mid, 'f', priceDecimalsForTick(m_tickSize))));
-    } else {
-        m_spreadLabel->setText("Spread: ---.--");
-        m_midLabel->setText("Mid: ---.--");
+void OrderBookDock::showEvent(QShowEvent* event)
+{
+    DockablePanel::showEvent(event);
+    watchWindow();
+    setDisplayActive(true);
+}
+void OrderBookDock::hideEvent(QHideEvent* event)
+{
+    setDisplayActive(false);
+    DockablePanel::hideEvent(event);
+}
+
+void OrderBookDock::stopFollowing()
+{
+    if (m_programmaticScroll || !m_follow) return;
+    m_follow = false;
+    m_recenter->setText("Recenter");
+    m_recenter->setChecked(false);
+}
+
+bool OrderBookDock::eventFilter(QObject* watched, QEvent* event)
+{
+    if (watched == this || watched == m_hostWindow) {
+        if (event->type() == QEvent::WindowStateChange) updateDisplayTimer();
+        return DockablePanel::eventFilter(watched, event);
     }
+    if (watched == m_table->viewport() && event->type() == QEvent::Resize && m_displayActive) {
+        fitColumns();
+        updateSummary();
+    }
+    const bool ladderInput = watched == m_table || watched == m_table->viewport() || watched == m_table->verticalScrollBar();
+    if (!ladderInput) return DockablePanel::eventFilter(watched, event);
+    if (event->type() == QEvent::MouseMove && (static_cast<QMouseEvent*>(event)->buttons() & Qt::LeftButton)) stopFollowing();
+    if (event->type() == QEvent::Wheel ||
+        (watched == m_table->verticalScrollBar() && event->type() == QEvent::MouseButtonPress)) stopFollowing();
+    if (event->type() == QEvent::KeyPress) {
+        const int key = static_cast<QKeyEvent*>(event)->key();
+        if (key == Qt::Key_Up || key == Qt::Key_Down || key == Qt::Key_PageUp || key == Qt::Key_PageDown ||
+            key == Qt::Key_Home || key == Qt::Key_End) stopFollowing();
+    }
+    return DockablePanel::eventFilter(watched, event);
+}
+
+void OrderBookDock::recenter()
+{
+    m_follow = true;
+    m_dirty = true;
+    refreshDisplay();
+}
+
+void OrderBookDock::refreshDisplay()
+{
+    if (!m_displayActive || !isVisible() || minimized()) return;
+    m_programmaticScroll = true;
+    const bool needsLayout = m_symbolDirty || m_model->rowCount() == 0;
+    if (m_symbolDirty) {
+        m_model->clear(m_symbol);
+        m_symbolLabel->setText(m_symbol.isEmpty() ? "No symbol" : m_symbol);
+        m_symbolDirty = false;
+    }
+    if (m_source && !m_symbol.isEmpty()) {
+        const auto& book = m_source->getDirectLiveOrderBook(m_symbolId);
+        // Capture the replica timestamp only after a change notification (or
+        // initial symbol hydration). Unchanged L2 messages also touch that
+        // timestamp, but must not keep resetting the displayed last-change age.
+        if (book.getTickSize() > 0 && m_bookDirty) {
+            m_freshness.lastChangeMs = std::chrono::duration_cast<std::chrono::milliseconds>(book.getLastUpdate().time_since_epoch()).count();
+        }
+        if (book.getTickSize() <= 0) m_freshness.awaitingBook = true;
+        m_bookDirty = false;
+        if (m_dirty) m_model->publish(book, m_trades, m_follow);
+    }
+    if (m_dirty) {
+        m_recenter->setText(m_follow ? "Following" : "Recenter");
+        m_recenter->setChecked(m_follow);
+        m_table->horizontalHeader()->setToolTip(m_model->executionSummary());
+        fitColumns();
+        // New rows must establish the scroll range before the first follow
+        // operation; regular ticks reuse that layout.
+        if (needsLayout) {
+            m_contentWidget->layout()->activate();
+            m_table->doItemsLayout();
+        }
+        if (m_follow && m_model->centerRow() >= 0) m_table->scrollTo(m_model->index(m_model->centerRow(), DomModel::Price), QAbstractItemView::PositionAtCenter);
+        m_dirty = false;
+    }
+    updateSummary();
+    m_programmaticScroll = false;
+}
+
+void OrderBookDock::fitColumns()
+{
+    const int width = m_table->viewport()->width();
+    const QFontMetrics fm(m_table->font());
+    const int priceWidth = std::max(54, fm.horizontalAdvance(m_model->index(0, DomModel::Price).data().toString()) + 8);
+    const int sizeWidth = fm.horizontalAdvance("0.0353") + 8;
+    const int countWidth = fm.horizontalAdvance("Sell #") + 10;
+    const bool counts = width >= priceWidth + sizeWidth * 2 + countWidth * 3;
+    const bool delta = width >= priceWidth + sizeWidth * 2 + countWidth;
+    for (int col = DomModel::Buys; col < DomModel::Columns; ++col) {
+        const bool visible = col == DomModel::Delta ? delta : counts;
+        m_table->setColumnHidden(col, !visible);
+        if (visible) m_table->setColumnWidth(col, countWidth);
+    }
+    const int core = width - (counts ? countWidth * 3 : delta ? countWidth : 0);
+    const int price = std::min(priceWidth, core / 2);
+    const int side = (core - price) / 2;
+    m_table->setColumnWidth(DomModel::Bid, side);
+    m_table->setColumnWidth(DomModel::Price, price);
+    m_table->setColumnWidth(DomModel::Ask, core - price - side);
+    m_table->horizontalScrollBar()->setValue(0);
+}
+
+void OrderBookDock::updateSummary()
+{
+    const bool wide = m_contentWidget->width() >= 720;
+    const auto fullStatus = m_freshness.text(QDateTime::currentMSecsSinceEpoch());
+    QString status;
+    if (m_freshness.connected == false) status = "Offline";
+    else if (m_freshness.snapshotStale) status = "Stale";
+    else if (m_freshness.awaitingBook || m_freshness.lastChangeMs <= 0) status = "Waiting";
+    else if (m_freshness.connected == true) status = "Live";
+    else status = "Unknown";
+    if (m_freshness.lastChangeMs > 0) {
+        const double seconds = std::max<qint64>(0, QDateTime::currentMSecsSinceEpoch() - m_freshness.lastChangeMs) / 1000.0;
+        const auto age = seconds < 60 ? QString::number(seconds, 'f', 1) + "s"
+            : seconds < 3600 ? QString::number(seconds / 60, 'f', 0) + "m"
+                             : QString::number(seconds / 3600, 'g', 2) + "h";
+        status += QString(" chg %1").arg(age);
+    }
+    m_status->setText(wide ? fullStatus : status);
+    m_status->setToolTip(fullStatus + "\nAge is time since the last book change, not feed silence.");
+    m_status->setMaximumWidth(m_status->fontMetrics().horizontalAdvance(m_status->text()) + 2);
+    m_aggregation->setText(m_model->aggregation(true));
+    m_aggregation->setToolTip(m_model->aggregation() + "\n" + m_model->executionSummary());
+    m_summary->setText(m_model->summary(!wide));
+    m_summary->setToolTip(m_model->summary() + "\n" + m_model->executionSummary());
 }

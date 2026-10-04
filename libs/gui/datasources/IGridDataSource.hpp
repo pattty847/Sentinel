@@ -2,6 +2,7 @@
 #include <QObject>
 #include <QString>
 #include <memory>
+#include <optional>
 #include <vector>
 #include <QByteArray>
 #include <QVector>
@@ -29,7 +30,13 @@ public:
         double liquidityScale = 1.0;
     };
 
-    explicit IGridDataSource(QObject* parent = nullptr) : QObject(parent) {}
+    explicit IGridDataSource(QObject* parent = nullptr) : QObject(parent) {
+        connect(this, &IGridDataSource::connectionStatusChanged, this,
+                [this](bool connected) { m_connectionState = connected; });
+    }
+    // GUI-thread read-only state for late-created / symbol-switching consumers.
+    std::optional<bool> connectionState() const { return m_connectionState; }
+    virtual bool isBookSnapshotStale(const QString&) const { return false; }
     virtual ~IGridDataSource() = default;
 
     virtual void subscribe(const QString& symbol) = 0;
@@ -61,6 +68,9 @@ public:
 
     // GUI-thread only: returns dense live order book for high-performance rendering/ingestion.
     virtual const LiveOrderBook& getDirectLiveOrderBook(const std::string& productId) const = 0;
+
+private:
+    std::optional<bool> m_connectionState;
 
 signals:
     // Core Signals

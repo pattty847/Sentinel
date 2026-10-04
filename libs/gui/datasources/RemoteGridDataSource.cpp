@@ -1,5 +1,6 @@
 #include "RemoteGridDataSource.hpp"
 #include "SentinelLogging.hpp"
+#include <cmath>
 #include <algorithm>
 #include <QDateTime>
 #include "../config/AgentHostMode.hpp"
@@ -377,9 +378,12 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
     // The stream server can send its still-empty local book immediately after
     // admission; only a two-sided upstream snapshot makes this replica ready.
     if (bids.empty() || asks.empty()) return;
+    const double serverTick = m_serverConfig.orderbook.tickSize;
+    if (!std::isfinite(serverTick) || serverTick <= 0) {
+        sLog_Warning("Replica snapshot needs a valid server tick: symbol=" << productId);
+        return; // Preserve the previous replica and pending snapshot/retry state.
+    }
     const bool wasStale = isBookSnapshotStale(productId);
-    m_pendingBookSnapshots.erase(symbol);
-    if (m_pendingBookSnapshots.empty()) m_bookSnapshotTimer.stop();
 
     // Create or reset replica
     if (m_replicaBooks.find(symbol) == m_replicaBooks.end()) {
@@ -389,9 +393,11 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
     auto& book = *m_replicaBooks[symbol];
 
     // Re-initialize using banded range around best bid/ask.
-    const double tickSize = m_serverConfig.orderbook.tickSize;
     const double bandPct = m_serverConfig.orderbook.bandPct;
     const auto [minPrice, maxPrice] = computeBandRange(bids, asks, bandPct);
+    // All consumers share this replica. Preserve the server's resolution rather
+    // than deriving a display tick that would merge its adjacent price levels.
+    const double tickSize = serverTick;
     book.initialize(minPrice, maxPrice, tickSize);
 
     std::vector<BookLevelUpdate> updates;
@@ -407,6 +413,8 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
     auto now = std::chrono::system_clock::now();
     std::vector<BookDelta> deltas;
     book.applyUpdates(updates, now, &deltas);
+    m_pendingBookSnapshots.erase(symbol);
+    if (m_pendingBookSnapshots.empty()) m_bookSnapshotTimer.stop();
     if (!deltas.empty()) {
         emit liveOrderBookUpdated(productId, deltas);
     }

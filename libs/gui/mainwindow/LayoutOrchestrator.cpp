@@ -14,6 +14,7 @@
 #include <QCoreApplication>
 #include <QEventLoop>
 #include <QTabWidget>
+#include <algorithm>
 
 LayoutOrchestrator::LayoutOrchestrator(QMainWindow* mainWindow) 
     : m_mainWindow(mainWindow) {
@@ -40,8 +41,8 @@ void LayoutOrchestrator::arrangeDefaultLayout(const DockWidgets& docks) {
     removeAllDocks(docks);
     addDocksToLayout(docks);
     applyDockConstraints(docks);
-    setDockSizes(docks);
     showAllDocks(docks);
+    setDockSizes(docks);
     
     m_mainWindow->setDockOptions((m_mainWindow->dockOptions() & ~QMainWindow::AnimatedDocks) |
                                  (previousOptions & QMainWindow::AnimatedDocks));
@@ -176,16 +177,18 @@ void LayoutOrchestrator::applyDockConstraints(const DockWidgets& docks) {
 void LayoutOrchestrator::setDockSizes(const DockWidgets& docks) {
     applyDockConstraints(docks);
 
-    // Horizontal: heatmap takes ~3/4, order book ~1/4 of their combined width.
-    if (docks.orderBookDock) {
-        m_mainWindow->resizeDocks({docks.heatmapDock, docks.orderBookDock}, {75, 25}, Qt::Horizontal);
-    }
-
-    // Give the right-side tab stack a minimal horizontal hint — it auto-fills the remainder.
+    // Size the three columns together: independent hints redistribute the remaining
+    // space and can stretch the DOM. Saved layouts and manual resizing stay untouched.
     QDockWidget* rightAnchor = docks.watchlistDock ? static_cast<QDockWidget*>(docks.watchlistDock)
                                                    : docks.secDock;
-    if (rightAnchor) {
-        m_mainWindow->resizeDocks({rightAnchor}, {1}, Qt::Horizontal);
+    if (docks.heatmapDock && docks.orderBookDock && rightAnchor) {
+        int rightWidth = std::max(320, rightAnchor->minimumWidth());
+        for (auto* tab : m_mainWindow->tabifiedDockWidgets(rightAnchor))
+            if (!tab->isHidden()) rightWidth = std::max(rightWidth, tab->minimumWidth());
+        const int domWidth = 260;
+        const int chartWidth = std::max(420, m_mainWindow->width() - rightWidth - domWidth - 12);
+        m_mainWindow->resizeDocks({docks.heatmapDock, docks.orderBookDock, rightAnchor},
+                                 {chartWidth, domWidth, rightWidth}, Qt::Horizontal);
     }
 }
 

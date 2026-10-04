@@ -308,3 +308,10 @@ add_executable(test_TradeBubbles test_TradeBubbles.cpp)
 target_link_libraries(test_TradeBubbles PRIVATE sentinel_gui_lib GTest::gtest_main)
 add_test(NAME TradeBubbleTests COMMAND test_TradeBubbles)
 set_tests_properties(TradeBubbleTests PROPERTIES LABELS "render")
+
+# W1a: retained DOM buckets, complete ingestion, visibility/follow and freshness.
+add_executable(test_dom test_dom.cpp)
+target_include_directories(test_dom PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_dom PRIVATE sentinel_gui_lib GTest::gtest Qt6::Test Qt6::Widgets)
+add_test(NAME DomTests COMMAND test_dom)
+set_tests_properties(DomTests PROPERTIES LABELS "ui;dom" TIMEOUT 60)
