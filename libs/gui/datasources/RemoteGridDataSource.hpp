@@ -38,6 +38,7 @@ public:
                                  qint64 startMs, qint64 endMs) override;
     void sendTradeCommand(const trading::TradeCommand& command) override;
     void sendAlgoCommand(const std::string& algoId, const std::string& action, const std::string& symbol, const trading::AlgoParams& params) override;
+    bool isConnectionActive() const override { return m_connectionActive; }
 
     const LiveOrderBook& getDirectLiveOrderBook(const std::string& productId) const override;
     void connectToServer();
@@ -104,6 +105,7 @@ private:
     QString m_candleSymbol;
     int64_t m_candleTimeframeSec = 0;
     bool m_candleHistoryReady = false;
+    bool m_connectionActive = false; // GUI-thread mirror of connected/disconnected signals
     quint64 m_candleDeliveryGeneration = 0;
     // We need to maintain a local LiveOrderBook replica if we want to return refs
     // Or we might change the interface to not return references?

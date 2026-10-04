@@ -133,6 +133,7 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
                 advanceCandleDeliveryGeneration();
                 if (m_candleBuffer) m_candleBuffer->resetSequences();
                 m_candleBackfill.requestRefresh();
+                m_connectionActive = true;
                 emit connectionStatusChanged(true);
                 requestNextCandlePage();
             },
@@ -149,6 +150,7 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
                 }
                 m_pendingBookSnapshots.clear();
                 m_candleBackfill.disconnect();
+                m_connectionActive = false;
                 emit connectionStatusChanged(false);
             },
             Qt::QueuedConnection);

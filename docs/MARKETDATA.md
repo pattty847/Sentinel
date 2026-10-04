@@ -227,6 +227,21 @@ The stream protocol includes a paper-trading vertical:
 - **Client → Server:** `trade_command` — `PLACE_ORDER`, `CANCEL_ORDER`, `CANCEL_ALL`, `FLATTEN`.
 - **Server → Client:** `order_update` (order lifecycle), `position_update` (position and unrealized PnL).
 
+`algo_command` (`start`/`stop`) is also accepted, but the server only logs success,
+refusal, or exceptions. It sends no correlated command acknowledgement, rejection,
+stop event, or current running-algo snapshot. `algo_order_event` reports an order
+emitted by an algorithm and can prove activity; an order rejection is **not** a
+start-command rejection. Silence cannot confirm either a successful start or stop.
+The paper ticket therefore labels these commands pending/unconfirmed, and shows
+running only after observing an algo order event. `trade_command` carries a
+`command_id`, but `order_update` does not echo it, so manual command acceptance
+cannot be correlated reliably (and cancel/flatten may emit no order update).
+The stream also does not publish base/quote increments; ticket precision preserves
+eight decimal places, rounds submitted limits to the editor's displayed decimals,
+and displays small prices without truncation. A symbol switch clears the ticket's
+limit until a new trade initializes it or the user enters a price. The server
+remains responsible for validating executable increments.
+
 The server runs paper execution (no real broker); fills use last trade price plus optional `trading.slippage_bps` from `server_config.yaml`. For setup and usage, see **`docs/PAPER_TRADING_QUICKSTART.md`**.
 
 ---

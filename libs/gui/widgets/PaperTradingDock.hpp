@@ -18,6 +18,7 @@ class QGroupBox;
 class QLineEdit;
 class QPlainTextEdit;
 class QProcess;
+class QTimer;
 class PnlCurveItem;
 class IGridDataSource;
 struct Trade;
@@ -66,6 +67,9 @@ private:
     void buildBacktestTab(QWidget* parent);
     void buildPnlPanel(QWidget* parent);
     void resetForSymbolChange();
+    void setAlgoState(const QString& text, const QString& reason, bool canStart, bool canStop);
+    void updateNotional();
+    void updatePricePrecision(double price);
     void sendManualCommand(trading::TradeAction action,
                            trading::OrderSide side,
                            trading::OrderType orderType,
@@ -74,9 +78,13 @@ private:
 
     QString m_symbol;
     IGridDataSource* m_dataSource = nullptr;
+    bool m_streamAvailable = false;
+    bool m_algoActivityEligible = false;
 
     // Manual tab
     QLabel* m_lastPriceLabel = nullptr;
+    QLabel* m_symbolLabel = nullptr;
+    QLabel* m_notionalLabel = nullptr;
     QLabel* m_posLabel = nullptr;
     QLabel* m_avgPriceLabel = nullptr;
     QLabel* m_uPnlLabel = nullptr;
@@ -84,6 +92,9 @@ private:
     QLabel* m_totalPnlLabel = nullptr;
     QDoubleSpinBox* m_manualQtySpin = nullptr;
     QDoubleSpinBox* m_limitPriceSpin = nullptr;
+    QPushButton* m_useLastBtn = nullptr;
+    double m_lastPrice = 0.0;
+    bool m_limitUserOwned = false;
     QPushButton* m_buyMarketBtn = nullptr;
     QPushButton* m_sellMarketBtn = nullptr;
     QPushButton* m_buyLimitBtn = nullptr;
@@ -102,6 +113,8 @@ private:
     QDoubleSpinBox* m_maxPosSpin = nullptr;
     QPushButton* m_startBtn = nullptr;
     QPushButton* m_stopBtn = nullptr;
+    QTimer* m_algoCommandTimer = nullptr;
+    QString m_pendingAlgoAction;
     int m_algoFillCount = 0;
     double m_algoCumPnl = 0.0;
     QSet<QString> m_countedAlgoFillIds;
