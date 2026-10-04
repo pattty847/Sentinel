@@ -16,8 +16,7 @@ Last updated: 2026-10-03 22:20 EDT. Shadow roller soak started (BTC-USD).
 
 | Branch | State | Next step |
 |---|---|---|
-| `lt-astra/dom` | W1a round 4 (server tick for all products) | Fable confirm, land (see docs/HANDOFF.md) |
-| landed | W1c dock infra `af09b9f` (per-dock + window shots, `--build` own-branch launches, TradeBlotter/Lab/AICommentary removed); W1b paper ticket `e301c85`; W1d doc `docs/research/2026-10-copenet-boundary.md` | |
+| landed | W1a DOM `3c9b948` (compact standard ladder, verified via own-branch screenshots); W1c dock infra `af09b9f` (per-dock + window shots, `--build` own-branch launches, TradeBlotter/Lab/AICommentary removed); W1b paper ticket `e301c85`; W1d doc `docs/research/2026-10-copenet-boundary.md` | |
 
 ## Next (priority order)
 

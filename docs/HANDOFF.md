@@ -33,13 +33,7 @@ after a secret scan (never force), keep `docs/STATUS.md` current after every lan
 
 ## In flight at hand-off
 
-1. `lt-astra/dom` (W1a), worktree `/Volumes/T7/sentinel-worktrees/lt-astra-dom`, Codex thread
-   `01a104bb-9a13-74c3-bb45-e24e7968e396`. Rounds 1-4 committed and rebased on main (`6d346d7`); Fable cleared the
-   data semantics. A live `--build` window grab showed the LAYOUT broken at default dock width (horizontal scroll,
-   bid column cut, 7-line summary; `scratchpad/dom-round4-window.png`). Round 5 running: fit without horizontal
-   scroll down to ~180 px, compact summary, verified by the agent through `gui-shot.sh launch --build`. Next: look
-   at its final PNGs yourself, commit, Claude Fable quick check if logic changed, land.
-   Done markers: `/private/tmp/claude-501/-Users-copeharder-Programming-Sentinel/2aedf6e1-a9df-4ef2-9ff7-eee9dcaf6d58/scratchpad/w1a-fix4.{done,last}`.
+1. `lt-astra/dom` (W1a): LANDED `3c9b948`. Wave 1 is complete. Next: the server per-product tick slice, then wave 2 (see "Next work").
 2. `lt-sol/dock-infra` (W1c): LANDED `af09b9f`, trust note added, main rebuilt, host restarted; `--build` and `target=window` verified live 2026-10-04.
 3. Shadow roller soak (slice C): running since 2026-10-03 22:14. First comparison covered 27 h with 0 mismatches.
    Check `curl -s 127.0.0.1:8090/metrics | rg sentinel_roller_shadow` daily. At ~2026-10-05 22:15, if
