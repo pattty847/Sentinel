@@ -21,9 +21,15 @@
 #include <QPushButton>
 #include <QDoubleSpinBox>
 #include <QToolButton>
+#include <QButtonGroup>
+#include <QScrollBar>
+#include <QSignalBlocker>
+#include <QTimer>
 #include <QFrame>
 #include <QSplitter>
 #include <QUuid>
+#include <cmath>
+#include <algorithm>
 
 namespace {
 QString formatDollars(double value) {
@@ -35,16 +41,42 @@ QString pnlStyle(double value, bool emphasize = false) {
         .arg(value >= 0.0 ? "#4caf50" : "#f44336")
         .arg(emphasize ? "font-weight: bold;" : "");
 }
+
+int priceDecimals(double price) {
+    if (!std::isfinite(price) || price <= 0.0) return 2;
+    // Keep small crypto prices visible even when no product increment is published.
+    return std::clamp(2 - static_cast<int>(std::floor(std::log10(price))), 2, 8);
+}
 }
 
 PaperTradingDock::PaperTradingDock(QWidget* parent)
     : QDockWidget(QStringLiteral("Paper Trading"), parent) {
     setObjectName(QStringLiteral("PaperTradingDock"));
     buildUi();
+    setAlgoState(QStringLiteral("UNAVAILABLE"), QStringLiteral("No data source"), false, false);
 }
 
 void PaperTradingDock::setDataSource(IGridDataSource* source) {
+    if (m_dataSource) disconnect(m_dataSource, nullptr, this, nullptr);
     m_dataSource = source;
+    m_streamAvailable = source != nullptr;
+    if (source) {
+        connect(source, &IGridDataSource::connectionStatusChanged, this,
+                [this](bool connected) {
+                    m_streamAvailable = connected;
+                    if (m_algoCommandTimer) m_algoCommandTimer->stop();
+                    m_pendingAlgoAction.clear();
+                    setAlgoState(connected ? QStringLiteral("UNCONFIRMED")
+                                           : QStringLiteral("UNAVAILABLE"),
+                                 connected ? QStringLiteral("No lifecycle snapshot after reconnect")
+                                           : QStringLiteral("Trading stream disconnected"),
+                                 connected && !m_symbol.isEmpty(), false);
+                }, Qt::QueuedConnection);
+    }
+    setAlgoState(source ? QStringLiteral("UNCONFIRMED") : QStringLiteral("UNAVAILABLE"),
+                 source ? QStringLiteral("No lifecycle snapshot is provided by the server")
+                        : QStringLiteral("No data source"),
+                 source && !m_symbol.isEmpty(), false);
 }
 
 void PaperTradingDock::setSymbol(const QString& symbol) {
@@ -93,6 +125,9 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
     layout->setContentsMargins(4, 4, 4, 4);
 
     // Position info grid
+    m_symbolLabel = new QLabel(QStringLiteral("PAPER  |  No symbol"), parent);
+    m_symbolLabel->setStyleSheet("QLabel { color: #ffcc80; font-weight: bold; }");
+    layout->addWidget(m_symbolLabel);
     auto* posFrame = new QFrame(parent);
     posFrame->setFrameStyle(QFrame::Box);
     posFrame->setStyleSheet("QFrame { border: 1px solid #333; background: #161820; }");
@@ -121,19 +156,39 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
     auto* ticketGrid = new QGridLayout(ticketFrame);
     ticketGrid->setSpacing(4);
 
-    ticketGrid->addWidget(new QLabel(QStringLiteral("Qty"), ticketFrame), 0, 0);
+    ticketGrid->addWidget(new QLabel(QStringLiteral("Base qty"), ticketFrame), 0, 0);
     m_manualQtySpin = new QDoubleSpinBox(ticketFrame);
-    m_manualQtySpin->setRange(0.0001, 1000000.0);
-    m_manualQtySpin->setDecimals(4);
+    m_manualQtySpin->setObjectName(QStringLiteral("paperBaseQty"));
+    m_manualQtySpin->setDecimals(8);
+    m_manualQtySpin->setRange(0.00000001, 1000000000.0);
+    m_manualQtySpin->setSingleStep(0.0001);
     m_manualQtySpin->setValue(0.01);
     ticketGrid->addWidget(m_manualQtySpin, 0, 1);
 
-    ticketGrid->addWidget(new QLabel(QStringLiteral("Limit"), ticketFrame), 0, 2);
+    ticketGrid->addWidget(new QLabel(QStringLiteral("Limit / quote"), ticketFrame), 0, 2);
     m_limitPriceSpin = new QDoubleSpinBox(ticketFrame);
+    m_limitPriceSpin->setObjectName(QStringLiteral("paperLimitPrice"));
     m_limitPriceSpin->setRange(0.0, 100000000.0);
-    m_limitPriceSpin->setDecimals(2);
+    m_limitPriceSpin->setDecimals(8);
     m_limitPriceSpin->setValue(0.0);
     ticketGrid->addWidget(m_limitPriceSpin, 0, 3);
+    m_useLastBtn = new QPushButton(QStringLiteral("Use Last"), ticketFrame);
+    m_useLastBtn->setObjectName(QStringLiteral("paperUseLast"));
+    ticketGrid->addWidget(m_useLastBtn, 1, 2, 1, 2);
+    m_notionalLabel = new QLabel(QStringLiteral("Est. quote notional: —"), ticketFrame);
+    ticketGrid->addWidget(m_notionalLabel, 1, 0, 1, 2);
+    connect(m_limitPriceSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this] {
+        m_limitUserOwned = true;
+        updateNotional();
+    });
+    connect(m_manualQtySpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+            &PaperTradingDock::updateNotional);
+    connect(m_useLastBtn, &QPushButton::clicked, this, [this] {
+        if (m_lastPrice > 0.0) {
+            m_limitPriceSpin->setValue(m_lastPrice);
+            m_limitUserOwned = true;
+        }
+    });
 
     m_buyMarketBtn = new QPushButton(QStringLiteral("Buy Mkt"), ticketFrame);
     m_sellMarketBtn = new QPushButton(QStringLiteral("Sell Mkt"), ticketFrame);
@@ -147,12 +202,12 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
     m_buyLimitBtn->setStyleSheet("QPushButton { background: #1a472a; color: #7dff9b; padding: 4px 10px; }");
     m_sellLimitBtn->setStyleSheet("QPushButton { background: #55311a; color: #ffcc80; padding: 4px 10px; }");
 
-    ticketGrid->addWidget(m_buyMarketBtn, 1, 0);
-    ticketGrid->addWidget(m_sellMarketBtn, 1, 1);
-    ticketGrid->addWidget(m_buyLimitBtn, 1, 2);
-    ticketGrid->addWidget(m_sellLimitBtn, 1, 3);
-    ticketGrid->addWidget(m_flattenBtn, 2, 0, 1, 2);
-    ticketGrid->addWidget(m_cancelAllBtn, 2, 2, 1, 2);
+    ticketGrid->addWidget(m_buyMarketBtn, 2, 0);
+    ticketGrid->addWidget(m_sellMarketBtn, 2, 1);
+    ticketGrid->addWidget(m_buyLimitBtn, 2, 2);
+    ticketGrid->addWidget(m_sellLimitBtn, 2, 3);
+    ticketGrid->addWidget(m_flattenBtn, 3, 0, 1, 2);
+    ticketGrid->addWidget(m_cancelAllBtn, 3, 2, 1, 2);
 
     layout->addWidget(ticketFrame);
 
@@ -165,6 +220,7 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
 
     // Order log table
     m_orderLog = new QTableWidget(parent);
+    m_orderLog->setObjectName(QStringLiteral("paperOrderLog"));
     m_orderLog->setColumnCount(6);
     m_orderLog->setHorizontalHeaderLabels({
         QStringLiteral("ID"), QStringLiteral("Side"), QStringLiteral("Qty"),
@@ -172,6 +228,7 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
     m_orderLog->horizontalHeader()->setStretchLastSection(true);
     m_orderLog->horizontalHeader()->setDefaultSectionSize(55);
     m_orderLog->verticalHeader()->setVisible(false);
+    m_orderLog->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_orderLog->setMaximumHeight(120);
     m_orderLog->setStyleSheet("QTableWidget { font-size: 10px; font-family: 'Roboto Mono'; }");
     layout->addWidget(m_orderLog);
@@ -189,6 +246,7 @@ void PaperTradingDock::buildAlgoTab(QWidget* parent) {
     // Status row
     auto* statusRow = new QHBoxLayout();
     m_algoStatusLabel = new QLabel(QStringLiteral("STOPPED"), algoGroup);
+    m_algoStatusLabel->setObjectName(QStringLiteral("paperAlgoStatus"));
     m_algoStatusLabel->setStyleSheet("QLabel { color: #888; font-family: 'Roboto Mono'; font-size: 11px; }");
     m_algoFillCountLabel = new QLabel(QStringLiteral("Fills: 0"), algoGroup);
     m_algoFillCountLabel->setStyleSheet("QLabel { color: #aaa; font-size: 10px; }");
@@ -225,8 +283,10 @@ void PaperTradingDock::buildAlgoTab(QWidget* parent) {
     // Start / Stop buttons
     auto* btnRow = new QHBoxLayout();
     m_startBtn = new QPushButton(QStringLiteral("▶ Start"), algoGroup);
+    m_startBtn->setObjectName(QStringLiteral("paperAlgoStart"));
     m_startBtn->setStyleSheet("QPushButton { background: #1a472a; color: #4caf50; border: 1px solid #4caf50; padding: 3px 8px; }");
     m_stopBtn = new QPushButton(QStringLiteral("■ Stop"), algoGroup);
+    m_stopBtn->setObjectName(QStringLiteral("paperAlgoStop"));
     m_stopBtn->setStyleSheet("QPushButton { background: #4a1a1a; color: #f44336; border: 1px solid #f44336; padding: 3px 8px; }");
     m_stopBtn->setEnabled(false);
     btnRow->addWidget(m_startBtn);
@@ -239,6 +299,18 @@ void PaperTradingDock::buildAlgoTab(QWidget* parent) {
 
     connect(m_startBtn, &QPushButton::clicked, this, &PaperTradingDock::onStartAlgoClicked);
     connect(m_stopBtn, &QPushButton::clicked, this, &PaperTradingDock::onStopAlgoClicked);
+    m_algoCommandTimer = new QTimer(this);
+    m_algoCommandTimer->setObjectName(QStringLiteral("paperAlgoTimeout"));
+    m_algoCommandTimer->setSingleShot(true);
+    connect(m_algoCommandTimer, &QTimer::timeout, this, [this] {
+        if (m_pendingAlgoAction.isEmpty()) return;
+        const bool stopping = m_pendingAlgoAction == QStringLiteral("stop");
+        m_pendingAlgoAction.clear();
+        setAlgoState(QStringLiteral("UNCONFIRMED"),
+                     stopping ? QStringLiteral("No stop acknowledgement; server state unknown")
+                              : QStringLiteral("No start acknowledgement or order activity; server state unknown"),
+                     true, true);
+    });
 }
 
 void PaperTradingDock::buildBacktestTab(QWidget* parent) {
@@ -408,11 +480,15 @@ void PaperTradingDock::buildPnlPanel(QWidget* parent) {
 
     // Window buttons
     auto* windowRow = new QHBoxLayout();
+    auto* windowButtons = new QButtonGroup(parent);
+    windowButtons->setExclusive(true);
     auto addWinBtn = [&](const QString& label, PnlCurveItem::Window w) {
         auto* btn = new QToolButton(parent);
         btn->setText(label);
         btn->setCheckable(true);
         btn->setFixedWidth(32);
+        windowButtons->addButton(btn);
+        if (w == PnlCurveItem::Window::All) btn->setChecked(true);
         connect(btn, &QToolButton::clicked, this, [this, w]() {
             if (m_pnlCurve) m_pnlCurve->setWindow(w);
         });
@@ -431,27 +507,30 @@ void PaperTradingDock::buildPnlPanel(QWidget* parent) {
 }
 
 void PaperTradingDock::resetForSymbolChange() {
+    m_lastPrice = 0.0;
+    if (m_symbolLabel) m_symbolLabel->setText(QStringLiteral("PAPER  |  %1").arg(m_symbol.isEmpty() ? QStringLiteral("No symbol") : m_symbol));
+    updateNotional();
     if (m_lastPriceLabel) {
         m_lastPriceLabel->setStyleSheet("QLabel { color: #e0e0e0; font-family: 'Roboto Mono'; font-size: 11px; }");
         m_lastPriceLabel->setText(QStringLiteral("---"));
     }
     if (m_posLabel) {
-        m_posLabel->setText(QStringLiteral("0.0000"));
+        m_posLabel->setText(QStringLiteral("Awaiting position update"));
     }
     if (m_avgPriceLabel) {
         m_avgPriceLabel->setText(QStringLiteral("---"));
     }
     if (m_uPnlLabel) {
         m_uPnlLabel->setStyleSheet("color: #e0e0e0;");
-        m_uPnlLabel->setText(QStringLiteral("$0.00"));
+        m_uPnlLabel->setText(QStringLiteral("Awaiting update"));
     }
     if (m_rPnlLabel) {
         m_rPnlLabel->setStyleSheet("color: #e0e0e0;");
-        m_rPnlLabel->setText(QStringLiteral("$0.00"));
+        m_rPnlLabel->setText(QStringLiteral("Awaiting update"));
     }
     if (m_totalPnlLabel) {
         m_totalPnlLabel->setStyleSheet("color: #e0e0e0; font-weight: bold;");
-        m_totalPnlLabel->setText(QStringLiteral("$0.00"));
+        m_totalPnlLabel->setText(QStringLiteral("Awaiting update"));
     }
     if (m_orderLog) {
         m_orderLog->setRowCount(0);
@@ -460,31 +539,84 @@ void PaperTradingDock::resetForSymbolChange() {
     if (m_pnlCurve) {
         m_pnlCurve->clear();
     }
+    m_algoFillCount = 0;
+    m_algoCumPnl = 0.0;
+    m_countedAlgoFillIds.clear();
+    if (m_algoFillCountLabel) m_algoFillCountLabel->setText(QStringLiteral("Fills: —"));
+    if (m_algoPnlLabel) m_algoPnlLabel->setText(QStringLiteral("PnL: awaiting update"));
+    if (m_algoCommandTimer) m_algoCommandTimer->stop();
+    m_pendingAlgoAction.clear();
+    setAlgoState(m_streamAvailable ? QStringLiteral("UNCONFIRMED") : QStringLiteral("UNAVAILABLE"),
+                 m_streamAvailable ? QStringLiteral("No lifecycle snapshot for this symbol")
+                                   : QStringLiteral("Trading stream unavailable"),
+                 m_streamAvailable && !m_symbol.isEmpty(), false);
+}
+
+void PaperTradingDock::updateNotional() {
+    if (!m_notionalLabel || !m_manualQtySpin) return;
+    const double price = m_limitPriceSpin && m_limitPriceSpin->value() > 0.0
+        ? m_limitPriceSpin->value() : m_lastPrice;
+    const QString quote = m_symbol.section('-', 1, 1);
+    const double notional = price * m_manualQtySpin->value();
+    m_notionalLabel->setText(price > 0.0
+        ? QStringLiteral("Est. quote notional: %1 %2").arg(
+              QString::number(notional, 'f', priceDecimals(notional)),
+              quote.isEmpty() ? QStringLiteral("quote") : quote)
+        : QStringLiteral("Est. quote notional: —"));
+}
+
+void PaperTradingDock::updatePricePrecision(double price) {
+    if (!m_limitPriceSpin) return;
+    const int decimals = priceDecimals(price);
+    if (decimals > m_limitPriceSpin->decimals()) m_limitPriceSpin->setDecimals(decimals);
+    m_limitPriceSpin->setSingleStep(std::pow(10.0, -decimals));
+}
+
+void PaperTradingDock::setAlgoState(const QString& text, const QString& reason,
+                                    bool canStart, bool canStop) {
+    if (m_algoStatusLabel) {
+        m_algoStatusLabel->setText(text);
+        m_algoStatusLabel->setToolTip(reason);
+        const char* color = text.startsWith(QStringLiteral("RUNNING")) ? "#4caf50"
+                          : text == QStringLiteral("UNAVAILABLE") ? "#f44336" : "#ffcc80";
+        m_algoStatusLabel->setStyleSheet(QStringLiteral("QLabel { color: %1; font-weight: bold; font-size: 11px; }").arg(color));
+    }
+    if (m_startBtn) { m_startBtn->setEnabled(canStart); m_startBtn->setToolTip(reason); }
+    if (m_stopBtn) { m_stopBtn->setEnabled(canStop); m_stopBtn->setToolTip(reason); }
 }
 
 // ─── Slots ──────────────────────────────────────────────────────────────────
 
 void PaperTradingDock::onTradeReceived(const Trade& trade) {
-    if (!m_symbol.isEmpty() && QString::fromStdString(trade.product_id) != m_symbol) {
+    if (m_symbol.isEmpty() || QString::fromStdString(trade.product_id) != m_symbol) {
         return;
     }
+    if (!std::isfinite(trade.price) || trade.price <= 0.0) return;
     if (m_lastPriceLabel) {
         const QString sideColor = trade.side == AggressorSide::Buy ? "#4caf50"
                                 : trade.side == AggressorSide::Sell ? "#f44336"
                                 : "#e0e0e0";
         m_lastPriceLabel->setStyleSheet(QString("QLabel { color: %1; font-family: 'Roboto Mono'; font-size: 11px; }").arg(sideColor));
-        m_lastPriceLabel->setText(formatDollars(trade.price));
+        updatePricePrecision(trade.price);
+        m_lastPriceLabel->setText(QString("$%1").arg(trade.price, 0, 'f', priceDecimals(trade.price)));
     }
-    if (m_limitPriceSpin && !m_limitPriceSpin->hasFocus() && trade.price > 0.0) {
-        m_limitPriceSpin->setValue(trade.price);
+    if (std::isfinite(trade.price) && trade.price > 0.0) {
+        m_lastPrice = trade.price;
+        if (m_limitPriceSpin && !m_limitUserOwned) {
+            QSignalBlocker blocker(m_limitPriceSpin);
+            m_limitPriceSpin->setValue(trade.price);
+        }
+        updateNotional();
     }
 }
 
 void PaperTradingDock::onOrderUpdated(const trading::OrderUpdate& update) {
-    if (!m_symbol.isEmpty() && QString::fromStdString(update.symbol) != m_symbol) {
+    if (m_symbol.isEmpty() || QString::fromStdString(update.symbol) != m_symbol) {
         return;
     }
 
+    const bool follow = m_orderLog->verticalScrollBar()->value()
+        >= m_orderLog->verticalScrollBar()->maximum() - 1;
     const QString oid = QString::fromStdString(update.orderId);
     int row = m_orderIdToRow.value(oid, -1);
     if (row < 0) {
@@ -521,13 +653,13 @@ void PaperTradingDock::onOrderUpdated(const trading::OrderUpdate& update) {
         }
     }
     m_orderLog->item(row, 1)->setText(QString::fromUtf8(trading::toString(update.side)));
-    m_orderLog->item(row, 2)->setText(QString::number(update.qty, 'f', 4));
-    m_orderLog->item(row, 3)->setText(QString::number(update.filledQty, 'f', 4));
+    m_orderLog->item(row, 2)->setText(QString::number(update.qty, 'f', 8));
+    m_orderLog->item(row, 3)->setText(QString::number(update.filledQty, 'f', 8));
     m_orderLog->item(row, 4)->setText(update.limitPrice > 0.0
-        ? formatDollars(update.limitPrice)
-        : formatDollars(update.avgPrice));
+        ? QString("$%1").arg(update.limitPrice, 0, 'f', priceDecimals(update.limitPrice))
+        : QString("$%1").arg(update.avgPrice, 0, 'f', priceDecimals(update.avgPrice)));
     m_orderLog->item(row, 5)->setText(QString::fromUtf8(trading::toString(update.status)));
-    m_orderLog->scrollToBottom();
+    if (follow) m_orderLog->scrollToBottom();
 
     if (!update.algoId.empty() && update.status == trading::OrderStatus::Filled) {
         if (!m_countedAlgoFillIds.contains(oid)) {
@@ -541,14 +673,14 @@ void PaperTradingDock::onOrderUpdated(const trading::OrderUpdate& update) {
 }
 
 void PaperTradingDock::onPositionUpdated(const trading::PositionUpdate& update) {
-    if (!m_symbol.isEmpty() && QString::fromStdString(update.symbol) != m_symbol) {
+    if (m_symbol.isEmpty() || QString::fromStdString(update.symbol) != m_symbol) {
         return;
     }
 
     if (m_posLabel)
-        m_posLabel->setText(QString::number(update.positionQty, 'f', 4));
+        m_posLabel->setText(QString::number(update.positionQty, 'f', 8));
     if (m_avgPriceLabel)
-        m_avgPriceLabel->setText(QString("$%1").arg(update.avgPrice, 0, 'f', 2));
+        m_avgPriceLabel->setText(QString("$%1").arg(update.avgPrice, 0, 'f', priceDecimals(update.avgPrice)));
 
     if (m_uPnlLabel) {
         m_uPnlLabel->setStyleSheet(pnlStyle(update.unrealizedPnl));
@@ -566,14 +698,24 @@ void PaperTradingDock::onPositionUpdated(const trading::PositionUpdate& update) 
 }
 
 void PaperTradingDock::onAlgoOrderEvent(const trading::AlgoOrderEvent& event) {
-    if (!m_symbol.isEmpty() && QString::fromStdString(event.symbol) != m_symbol) {
+    if (m_symbol.isEmpty() || QString::fromStdString(event.symbol) != m_symbol) {
         return;
     }
-
+    if (event.algoId != "AvendellaMM") return;
+    // An order event proves algo execution, including an order rejection. It does not
+    // acknowledge the command or confirm a stop request.
+    if (m_pendingAlgoAction == QStringLiteral("stop")) return;
+    if (m_algoCommandTimer) m_algoCommandTimer->stop();
+    m_pendingAlgoAction.clear();
+    setAlgoState(QStringLiteral("RUNNING / ACTIVITY OBSERVED"),
+                 event.status == trading::OrderStatus::Rejected
+                     ? QStringLiteral("Algo emitted a rejected order; lifecycle has no acknowledgement")
+                     : QStringLiteral("Algo order activity observed; lifecycle has no acknowledgement"),
+                 false, true);
 }
 
 void PaperTradingDock::onPnlSnapshot(const trading::PnlSnapshot& snap) {
-    if (!m_symbol.isEmpty() && QString::fromStdString(snap.symbol) != m_symbol) {
+    if (m_symbol.isEmpty() || QString::fromStdString(snap.symbol) != m_symbol) {
         return;
     }
     if (!m_pnlCurve) return;
@@ -615,7 +757,7 @@ void PaperTradingDock::onCancelAllClicked() {
 }
 
 void PaperTradingDock::onStartAlgoClicked() {
-    if (!m_dataSource || m_symbol.isEmpty()) return;
+    if (!m_dataSource || !m_streamAvailable || m_symbol.isEmpty()) return;
 
     trading::AlgoParams params;
     params.spreadBps = m_spreadSpin ? m_spreadSpin->value() : 10.0;
@@ -623,13 +765,11 @@ void PaperTradingDock::onStartAlgoClicked() {
     params.maxPositionQty = m_maxPosSpin ? m_maxPosSpin->value() : 0.1;
 
     m_dataSource->sendAlgoCommand("AvendellaMM", "start", m_symbol.toStdString(), params);
-
-    if (m_algoStatusLabel) {
-        m_algoStatusLabel->setText(QStringLiteral("RUNNING"));
-        m_algoStatusLabel->setStyleSheet("QLabel { color: #4caf50; font-weight: bold; font-family: 'Roboto Mono'; font-size: 11px; }");
-    }
-    if (m_startBtn) m_startBtn->setEnabled(false);
-    if (m_stopBtn) m_stopBtn->setEnabled(true);
+    m_pendingAlgoAction = QStringLiteral("start");
+    setAlgoState(QStringLiteral("START PENDING"),
+                 QStringLiteral("Awaiting observable algo activity; no command acknowledgement exists"),
+                 false, true);
+    m_algoCommandTimer->start(5000);
     m_algoFillCount = 0;
     m_countedAlgoFillIds.clear();
     if (m_algoFillCountLabel) {
@@ -638,16 +778,14 @@ void PaperTradingDock::onStartAlgoClicked() {
 }
 
 void PaperTradingDock::onStopAlgoClicked() {
-    if (!m_dataSource) return;
+    if (!m_dataSource || !m_streamAvailable || m_symbol.isEmpty()) return;
     trading::AlgoParams params{};
     m_dataSource->sendAlgoCommand("AvendellaMM", "stop", m_symbol.toStdString(), params);
 
-    if (m_algoStatusLabel) {
-        m_algoStatusLabel->setText(QStringLiteral("STOPPED"));
-        m_algoStatusLabel->setStyleSheet("QLabel { color: #888; font-family: 'Roboto Mono'; font-size: 11px; }");
-    }
-    if (m_startBtn) m_startBtn->setEnabled(true);
-    if (m_stopBtn) m_stopBtn->setEnabled(false);
+    m_pendingAlgoAction = QStringLiteral("stop");
+    setAlgoState(QStringLiteral("STOPPING / UNCONFIRMED"),
+                 QStringLiteral("Server sends no stop acknowledgement"), false, false);
+    m_algoCommandTimer->start(5000);
 }
 
 void PaperTradingDock::sendManualCommand(trading::TradeAction action,
@@ -655,7 +793,7 @@ void PaperTradingDock::sendManualCommand(trading::TradeAction action,
                                          trading::OrderType orderType,
                                          bool hasPrice,
                                          double price) {
-    if (!m_dataSource || m_symbol.isEmpty()) {
+    if (!m_dataSource || !m_streamAvailable || m_symbol.isEmpty()) {
         return;
     }
     trading::TradeCommand cmd;
