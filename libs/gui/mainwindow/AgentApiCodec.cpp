@@ -144,7 +144,9 @@ ParseResult RequestParser::feed(const QByteArray& bytes) {
 
 bool isWidgetScreenshotTarget(const QString& target) {
     static const QStringList tabs{"Chart", "Tick", "Look", "Budgets", "Live", "Debug", "TPO"};
-    return target == "telemetry" || target == "toolbar" || target == "chartmenu" || target == "settings" ||
+    static const QStringList docks{"orderBook", "watchlist", "screener", "stockChart", "paperTrading",
+                                   "sec", "copenet", "telemetry", "statusBar"};
+    return docks.contains(target) || target == "window" || target == "toolbar" || target == "chartmenu" || target == "settings" ||
            (target.startsWith("settings:") && tabs.contains(target.mid(9)));
 }
 
@@ -295,7 +297,7 @@ ValidationResult validateQuery(const Request& request, const QString& activeSymb
             }
         }
         if (!validName) return reject(422, "invalid_name", "Invalid screenshot name");
-        if (result.screenshotTarget != "main" && result.screenshotTarget != "heatmap" && result.screenshotTarget != "lab" &&
+        if (result.screenshotTarget != "main" && result.screenshotTarget != "heatmap" &&
             !isWidgetScreenshotTarget(result.screenshotTarget))
             return reject(422, "invalid_target", "Unknown screenshot target");
         return result;

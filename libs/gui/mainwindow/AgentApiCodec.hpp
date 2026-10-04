@@ -12,7 +12,7 @@ private:
     bool m_finished = false;
 };
 
-// S6c widget screenshot targets: settings, settings:<Tab>, telemetry, toolbar.
+// Widget screenshot targets include retained dock ids, settings[:Tab], toolbar and chartmenu.
 bool isWidgetScreenshotTarget(const QString& target);
 ValidationResult validateQuery(const Request& request, const QString& activeSymbol = {});
 struct ControlBody {

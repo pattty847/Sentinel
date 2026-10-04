@@ -25,6 +25,8 @@ public:
 
     // Called externally (e.g. screener stock row click)
     void loadSymbol(const QString& ticker, const QString& companyName = {});
+    QQuickView* qquickView() const { return m_quickView; }
+    QWidget* qmlContainer() const { return m_qmlContainer; }
 
 private slots:
     void onFetchClicked();

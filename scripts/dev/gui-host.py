@@ -1,19 +1,14 @@
 #!/usr/bin/env python3
-"""gui-host.py: run the main checkout's sentinel-gui for sandboxed agents and hand back screenshots.
+"""gui-host.py: run a guarded sentinel-gui build for sandboxed agents and hand back screenshots.
 
 A sandboxed Codex run cannot start the GUI (no window server, no Metal) but it can reach
 localhost and read files. This host runs OUTSIDE any sandbox, in a login session with the screen
 unlocked; agents call it through scripts/dev/gui-shot.sh.
 
-TRUST MODEL. The host executes code with the owner's privileges, and an agent can write its own
-worktree and build output. So the host runs exactly one thing: the main checkout's build
-(build/mac-clang/apps/sentinel-gui/sentinel-gui), which agents cannot write and the orchestrator
-builds from landed main. It never runs a path an agent names, never runs a worktree build, and never
-builds (CMake runs code). A branch's own change is therefore not visible through this host until it
-has landed and main is rebuilt; Claude subagents can run their own GUI for branch visuals.
-Second-review note (2026-10-02): a per-branch "bless the worktree build" design was tried and
-dropped, because a blessed copy is not bound to the reviewed source. The safe form is the
-orchestrator building the reviewed commit in a checkout agents cannot write; not built.
+TRUST MODEL. The owner accepted on 2026-10-03 that an agent's own worktree build runs outside
+the sandbox with the owner's privileges, as Claude subagents' GUI builds do. The host accepts only
+the fixed sentinel-gui build location in an approved worktree root, or defaults to main. It never
+builds or runs CMake. AgentHostMode, the minimal child environment and one-session limit remain.
 
 The GUI is started with --agent-host (AgentHostMode.hpp): it refuses screen-pixel screenshots,
 keeps screenshots and general settings per session and only docks in a persistent host profile, sends no trade commands, and switches only
@@ -31,8 +26,8 @@ never restarted leaves one GUI running until someone ends it (`pkill -f 'sentine
 API (JSON; every POST needs the header `X-Gui-Host: 1`, which a browser page cannot send
 cross-origin without a preflight this server never answers; the Host header must be loopback):
     GET  /status      the live session or null, and whether main is launchable
-    POST /launch {renderer?:"gpu"|"legacy", replace?:bool, freshProfile?:bool}
-    POST /shot   {name, afterOperation?, target?:"heatmap"|"lab"|"telemetry"|"toolbar"|"settings[:Tab]", settle?:bool}
+    POST /launch {renderer?:"gpu"|"legacy", replace?:bool, freshProfile?:bool, build?:worktree path}
+    POST /shot   {name, afterOperation?, target?: retained dock id | "toolbar" | "chartmenu" | "settings[:Tab]", settle?:bool}
     POST /stop
     POST /profile-reset    clears the persistent dock state while no GUI is running
 
@@ -71,10 +66,11 @@ API_PORTS = range(17130, 17170)
 OWNER_PORTS = (17100, 17200)
 PLIST_DOMAIN = "com.sentinel.SentinelTerminal"
 GUI_REL = os.path.join("build", "mac-clang", "apps", "sentinel-gui", "sentinel-gui")
+EXTERNAL_WORKTREES = "/Volumes/T7/sentinel-worktrees"
 FLAG = b"--agent-host"
 # The products the recorder already captures; a GUI symbol change subscribes the recorder upstream.
 SYMBOLS = os.environ.get("GUI_HOST_SYMBOLS", "BTC-USD,ETH-USD,SOL-USD,FARTCOIN-USD,PEPE-USD,DOGE-USD,AVAX-USD")
-SHOT_TARGETS = re.compile(r"^(heatmap|lab|telemetry|toolbar|settings(:[A-Za-z]+)?)$")
+SHOT_TARGETS = re.compile(r"^(window|heatmap|orderBook|watchlist|screener|stockChart|paperTrading|sec|copenet|telemetry|statusBar|toolbar|chartmenu|settings(:(Chart|Tick|Look|Budgets|Live|Debug|TPO))?)$")
 NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 # Environment the GUI child may inherit. Nothing else (no DYLD_*, QT_*, QSG_*, QML*, SENTINEL_*).
 ENV_ALLOW = ("HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "__CF_USER_TEXT_ENCODING")
@@ -110,6 +106,12 @@ def settings_dump():
 def has_flag(path):
     with open(path, "rb") as f:
         return FLAG in f.read()
+
+
+def is_macho(path):
+    with open(path, "rb") as f:
+        return f.read(4) in (b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xca\xfe\xba\xbe",
+                             b"\xbe\xba\xfe\xca", b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca")
 
 
 def child_env(environ=None):
@@ -160,24 +162,42 @@ def reset_profile():
 
 
 # ------------------------------------------------------------------ trust: which binary may run
-def resolve_binary(which="main"):
-    """The ONLY executable a launch can pick: the main checkout's build. `which` exists so a request
-    that names anything else gets a clear refusal instead of being ignored."""
+def resolve_binary(which="main", build=None):
+    """Resolve the fixed GUI build within main or one immediate-child worktree."""
     if which not in (None, "main"):
         raise HostError(400, "main_only", 'this host runs only the main checkout build (binary must be "main" or omitted)')
-    path = os.path.realpath(os.path.join(REPO, GUI_REL))
+    root = os.path.realpath(REPO)
+    if build is not None:
+        if not isinstance(build, str) or not os.path.isabs(build):
+            raise HostError(400, "bad_build", "build must be an absolute worktree directory")
+        root = os.path.realpath(build)
+        allowed_roots = (os.path.realpath(EXTERNAL_WORKTREES),
+                         os.path.realpath(os.path.join(REPO, ".claude", "worktrees")))
+        if not any(os.path.dirname(root) == parent and root != parent for parent in allowed_roots):
+            raise HostError(400, "outside_worktrees", "build must resolve to a direct child of an approved worktree root")
+        # The supplied pathname must itself start in that root; aliases from elsewhere are refused.
+        supplied = os.path.abspath(build)
+        if not any(os.path.dirname(supplied) == parent for parent in allowed_roots):
+            raise HostError(400, "outside_worktrees", "build path must be inside an approved worktree root")
+        if not os.path.isdir(root):
+            raise HostError(412, "no_worktree", "worktree directory does not exist")
+    path = os.path.realpath(os.path.join(root, GUI_REL))
+    if os.path.commonpath((path, root)) != root or path != os.path.join(root, GUI_REL):
+        code = "outside_main" if build is None else "outside_build"
+        raise HostError(412, code, "sentinel-gui build resolves outside its checkout")
     if not os.path.isfile(path) or not os.access(path, os.X_OK):
-        raise HostError(412, "no_main_binary", f"no main-checkout build at {GUI_REL} (the orchestrator builds landed main)")
-    if not path.startswith(os.path.realpath(REPO) + os.sep):  # a symlink must not lead out of the main checkout
-        raise HostError(412, "outside_main", f"{path} is not inside the main checkout {REPO}")
+        code = "no_main_binary" if build is None else "no_worktree_binary"
+        raise HostError(412, code, f"no executable sentinel-gui build at {path}")
     st = os.stat(path)
     if st.st_uid != os.getuid():
         raise HostError(412, "bad_owner", f"{path} is not owned by this user")
     if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         raise HostError(412, "writable_binary", f"{path} is group/world writable")
+    if not is_macho(path):
+        raise HostError(412, "not_gui_binary", f"{path} is not a macOS GUI executable")
     if not has_flag(path):
         raise HostError(412, "no_agent_host_flag",
-                        "the main-checkout build predates --agent-host (rebuild main after the gui-host branch lands)")
+                        "the GUI build does not support --agent-host (rebuild it through the build queue)")
     return path
 
 
@@ -268,8 +288,10 @@ def launch(body):
         raise HostError(400, "bad_profile", "freshProfile must be boolean")
     for forbidden in ("worktree", "path"):
         if forbidden in body:
-            raise HostError(400, "main_only", "launch takes no worktree or path: the host runs only the main checkout build")
-    binary = resolve_binary(body.get("binary", "main"))
+            raise HostError(400, "bad_build", "use build with an approved worktree directory")
+    build = body.get("build")
+    binary = resolve_binary(body.get("binary", "main"), build)
+    cwd = os.path.realpath(build) if build is not None else REPO
     with lock:
         if session and session["proc"].poll() is not None:
             stop_session("exited")
@@ -293,7 +315,7 @@ def launch(body):
         log = os.path.join(sdir, "gui.out")
         before = settings_dump()
         with open(log, "wb") as out:
-            proc = subprocess.Popen(gui_argv(binary, sdir, renderer, port, dock_profile), cwd=REPO, env=child_env(),
+            proc = subprocess.Popen(gui_argv(binary, sdir, renderer, port, dock_profile), cwd=cwd, env=child_env(),
                                     stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                     start_new_session=True)
         session = dict(id=sid, pid=proc.pid, port=port, renderer=renderer, proc=proc, log=log,
@@ -342,8 +364,8 @@ def shot(body):
     target = str(body.get("target", "heatmap"))
     if not NAME_RE.match(name):
         raise HostError(400, "bad_name", "name must match [A-Za-z0-9_.-]{1,64}")
-    if not SHOT_TARGETS.match(target):
-        raise HostError(400, "bad_target", "target must be heatmap, lab, telemetry, toolbar or settings[:Tab] (screen grabs are refused)")
+    if not SHOT_TARGETS.fullmatch(target):
+        raise HostError(400, "bad_target", "target must be window, a retained dock, toolbar, chartmenu or settings[:Tab] (screen grabs are refused)")
     with lock:
         s = session
         if not s or s["proc"].poll() is not None:
@@ -365,6 +387,9 @@ def shot(body):
         time.sleep(1.2)
         status, r = gui_get(port, url, 15)
     if status != 200 or not r.get("ok"):
+        reason = r.get("error", {}).get("message", "")
+        if reason.endswith("_not_visible"):
+            raise HostError(409, "dock_not_visible", f"{target} is hidden; show or focus it with the docks API", gui=r)
         raise HostError(502, "shot_failed", f"screenshot failed (HTTP {status})", gui=r, screenLocked=screen_locked())
     path = os.path.join(shot_dir, name if name.lower().endswith(".png") else name + ".png")
     if not os.path.exists(path):  # the GUI writes only to the fixed directory; its reply path is not trusted

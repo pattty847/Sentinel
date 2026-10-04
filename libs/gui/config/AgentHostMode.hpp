@@ -35,8 +35,8 @@ bool symbolAllowed(const QString& symbol);
 // symbol, else empty (stay unsubscribed). The GUI's hard-coded BTC-USD and the server's default symbol
 // both go through this, and RemoteGridDataSource refuses the rest at the send boundary.
 QString startupSymbol(const QString& preferred);
-// True when inactive. When active: only chart and widget grabs (heatmap, lab, telemetry, toolbar,
-// settings, settings:<Tab>), never screen pixels.
+// True when inactive. When active: only explicit retained dock and widget grabs,
+// never screen pixels or retired targets.
 bool screenshotTargetAllowed(const QString& target);
 
 void resetForTests();

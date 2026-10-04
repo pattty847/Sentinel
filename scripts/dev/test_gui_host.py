@@ -21,8 +21,8 @@ spec = importlib.util.spec_from_file_location("gui_host", os.path.join(HERE, "gu
 gh = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gh)
 
-FLAGGED = b"#!/bin/sh\n# --agent-host\nexit 0\n"
-UNFLAGGED = b"#!/bin/sh\nexit 0\n"
+FLAGGED = b"\xcf\xfa\xed\xfe" + b"\0" * 20 + b"--agent-host\n"
+UNFLAGGED = b"\xcf\xfa\xed\xfe" + b"\0" * 20
 
 
 class HostTrust(unittest.TestCase):
@@ -31,8 +31,9 @@ class HostTrust(unittest.TestCase):
         t = os.path.realpath(self.tmp.name)
         self.repo = os.path.join(t, "repo")
         os.makedirs(self.repo)
-        self.saved = {k: getattr(gh, k) for k in ("REPO", "SESSIONS_DIR", "PIDFILE")}
+        self.saved = {k: getattr(gh, k) for k in ("REPO", "SESSIONS_DIR", "PIDFILE", "EXTERNAL_WORKTREES")}
         gh.REPO = self.repo
+        gh.EXTERNAL_WORKTREES = os.path.join(t, "sentinel-worktrees")
         gh.SESSIONS_DIR = os.path.join(t, "sessions")
         gh.PIDFILE = os.path.join(gh.SESSIONS_DIR, "session.json")
         os.makedirs(gh.SESSIONS_DIR)
@@ -55,7 +56,17 @@ class HostTrust(unittest.TestCase):
             fn(*a)
         self.assertEqual(cm.exception.code, code)
 
-    # ---- which binary may run: only the main checkout's build
+    # ---- which binary may run: main by default, or the fixed binary in an approved worktree
+    def worktree_binary(self, root=None, name="lt-sol-dock-infra", content=FLAGGED, mode=0o755):
+        root = root or gh.EXTERNAL_WORKTREES
+        worktree = os.path.join(root, name)
+        path = os.path.join(worktree, gh.GUI_REL)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(content)
+        os.chmod(path, mode)
+        return worktree, path
+
     def test_main_without_the_flag_is_refused(self):
         self.binary(UNFLAGGED)  # a stale main must not run uncontained
         self.assertRefused("no_agent_host_flag", gh.resolve_binary, "main")
@@ -64,6 +75,40 @@ class HostTrust(unittest.TestCase):
         path = self.binary()
         self.assertEqual(gh.resolve_binary("main"), os.path.realpath(path))
         self.assertEqual(gh.resolve_binary(None), os.path.realpath(path))
+        self.assertEqual(gh.resolve_binary(), os.path.realpath(path))
+
+    def test_worktree_and_non_t7_fallback_fixed_builds_are_accepted(self):
+        for root in (gh.EXTERNAL_WORKTREES, os.path.join(self.repo, ".claude", "worktrees")):
+            worktree, path = self.worktree_binary(root)
+            self.assertEqual(gh.resolve_binary(build=worktree), os.path.realpath(path))
+
+    def test_outside_root_and_nested_worktree_are_refused(self):
+        outside, _ = self.worktree_binary(os.path.join(self.tmp.name, "unapproved"))
+        self.assertRefused("outside_worktrees", gh.resolve_binary, "main", outside)
+        nested, _ = self.worktree_binary(os.path.join(gh.EXTERNAL_WORKTREES, "nested"))
+        self.assertRefused("outside_worktrees", gh.resolve_binary, "main", nested)
+
+    def test_worktree_symlink_escape_is_refused(self):
+        outside, path = self.worktree_binary(os.path.join(self.tmp.name, "unapproved"))
+        os.makedirs(gh.EXTERNAL_WORKTREES)
+        alias = os.path.join(gh.EXTERNAL_WORKTREES, "lt-escape")
+        os.symlink(outside, alias)
+        self.assertRefused("outside_worktrees", gh.resolve_binary, "main", alias)
+        inside, binary = self.worktree_binary(name="lt-binary-link")
+        os.remove(binary)
+        os.symlink(path, binary)
+        self.assertRefused("outside_build", gh.resolve_binary, "main", inside)
+
+    def test_non_binary_worktree_build_is_refused(self):
+        worktree, path = self.worktree_binary(mode=0o644)
+        self.assertRefused("no_worktree_binary", gh.resolve_binary, "main", worktree)
+        os.chmod(path, 0o755)
+        with open(path, "wb") as f:
+            f.write(UNFLAGGED)
+        self.assertRefused("no_agent_host_flag", gh.resolve_binary, "main", worktree)
+        with open(path, "wb") as f:
+            f.write(b"#!/bin/sh\n# --agent-host\n")
+        self.assertRefused("not_gui_binary", gh.resolve_binary, "main", worktree)
 
     def test_missing_main_is_refused(self):
         self.assertRefused("no_main_binary", gh.resolve_binary, "main")
@@ -91,7 +136,7 @@ class HostTrust(unittest.TestCase):
     def test_launch_refuses_worktree_and_path_parameters(self):
         self.binary()
         for key in ("worktree", "path"):
-            self.assertRefused("main_only", gh.launch, {key: "/Volumes/T7/sentinel-worktrees/lt-x"})
+            self.assertRefused("bad_build", gh.launch, {key: "/Volumes/T7/sentinel-worktrees/lt-x"})
         self.assertRefused("main_only", gh.launch, {"binary": "/Volumes/T7/sentinel-worktrees/lt-x/build/gui"})
 
     # ---- the scripts agents run must be executable (a rewrite with a tool that creates a fresh file drops the bit)
@@ -161,10 +206,27 @@ class HostTrust(unittest.TestCase):
 
     # ---- screenshots
     def test_shot_refuses_screen_grabs_and_bad_names(self):
-        for target in ("main", "screen", "heatmap/../x", "settings:", "MAIN"):
+        for target in ("main", "lab", "aiCommentary", "screen", "heatmap/../x", "settings:", "settings:Nope", "heatmap\n", "MAIN"):
             self.assertRefused("bad_target", gh.shot, {"name": "a", "target": target})
+        for target in ("window", "heatmap", "orderBook", "watchlist", "screener", "stockChart", "paperTrading",
+                       "sec", "copenet", "telemetry", "statusBar", "toolbar", "chartmenu",
+                       "settings", "settings:TPO"):
+            self.assertIsNotNone(gh.SHOT_TARGETS.fullmatch(target), target)
         for name in ("", "../x", "a/b", "x" * 65, "a b"):
             self.assertRefused("bad_name", gh.shot, {"name": name})
+
+    def test_hidden_dock_shot_explains_how_to_show_it(self):
+        class Running:
+            def poll(self):
+                return None
+        active = {"proc": Running(), "lastUsed": 0, "lastShot": time.time() - 5,
+                  "port": 17130, "shotDir": self.tmp.name, "renderer": "gpu"}
+        with patch.object(gh, "session", active), patch.object(gh, "gui_get", return_value=(
+                500, {"ok": False, "error": {"message": "orderBook_not_visible"}})):
+            with self.assertRaises(gh.HostError) as cm:
+                gh.shot({"name": "dock", "target": "orderBook"})
+            self.assertEqual(cm.exception.code, "dock_not_visible")
+            self.assertIn("focus", str(cm.exception))
 
     # ---- stale GUI after a host SIGKILL
     def test_cleanup_ends_a_stale_agent_host_gui_but_not_a_recycled_pid(self):

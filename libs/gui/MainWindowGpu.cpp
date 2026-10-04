@@ -12,6 +12,7 @@
 #include <QCloseEvent>
 #include <QShowEvent>
 #include <QStatusBar>
+#include <QPainter>
 #include <QElapsedTimer>
 #include <QThread>
 #include <QDateTime>
@@ -25,12 +26,10 @@
 #include "render/GridViewState.hpp"
 #include "SentinelLogging.hpp"
 #include "widgets/ChartDock.hpp"
-#include "widgets/LabDock.hpp"
 #include "widgets/StatusBar.hpp"
 #include "widgets/SecFilingDock.hpp"
 #include "widgets/ScreenerDock.hpp"
 #include "widgets/CopenetFeedDock.hpp"
-#include "widgets/AICommentaryFeedDock.hpp"
 #include "widgets/TopToolbar.hpp"
 #include "widgets/HeatmapSettingsDialog.hpp"
 #include "widgets/HeatmapTelemetryDock.hpp"
@@ -293,8 +292,6 @@ void MainWindowGPU::setupUI() {
     }
     m_secDock = docks.secDock;
     m_copenetDock = docks.copenetDock;
-    m_aiCommentaryDock = docks.aiCommentaryDock;
-    m_labDock = docks.labDock;
     m_watchlistDock = docks.watchlistDock;
     m_screenerDock = docks.screenerDock;
     m_stockChartDock = docks.stockChartDock;
@@ -590,7 +587,6 @@ void MainWindowGPU::setupGuiApiServer() {
 
     m_guiApiServer = std::make_unique<GuiApiServer>(this,
                                                     m_heatmapDock ? m_heatmapDock->qquickView() : nullptr,
-                                                    m_labDock ? m_labDock->qquickView() : nullptr,
                                                     [this]() { return agentApiStateSnapshot(); },
                                                     [this]() { return agentApiViewportSnapshot(); },
                                                     [this](const AgentApi::ValidationResult& q) { return agentApiCandlesSnapshot(q); },
@@ -633,16 +629,70 @@ void MainWindowGPU::setupGuiApiServer() {
                                                     this);
     m_guiApiServer->setHeatmapSnapshot([this] { return agentApiHeatmapSnapshot(); });
     m_guiApiServer->setDocksSnapshot([this] { return m_dockVisibility->snapshot(); });
-    // S6c widget targets: the settings dialog (opened on demand, a given tab) and
-    // the telemetry dock, grabbed from their own painting (never screen pixels).
+    // Grab only Sentinel widgets. QQuickView content needs its own image because
+    // QWidget::grab does not paint native window containers.
     m_guiApiServer->setWidgetGrab([this](const QString& target, QString* error) -> QImage {
-        if (target == "telemetry") {
-            if (!m_heatmapTelemetryDock || !m_heatmapTelemetryDock->exposed()) {
-                if (error) *error = "telemetry_not_visible";
+        if (target == "window") {
+            if (!isVisible()) {
+                if (error) *error = "window_not_visible";
                 return {};
             }
-            m_heatmapTelemetryDock->refresh();
-            return m_heatmapTelemetryDock->grab().toImage();
+            QImage image = grab().toImage();
+            if (image.isNull()) {
+                if (error) *error = "window_grab_failed";
+                return {};
+            }
+            QPainter painter(&image);
+            const auto drawQuick = [&](QWidget* container, QQuickView* view) {
+                if (!container || !container->isVisible() || !view || !view->isVisible()) return true;
+                const QImage quickImage = view->grabWindow();
+                if (quickImage.isNull()) return false;
+                painter.drawImage(QRect(container->mapTo(this, QPoint{}), container->size()), quickImage);
+                return true;
+            };
+            if (!drawQuick(m_qmlContainer, m_qquickView) ||
+                (m_stockChartDock && !drawQuick(m_stockChartDock->qmlContainer(), m_stockChartDock->qquickView()))) {
+                if (error) *error = "window_quick_grab_failed";
+                return {};
+            }
+            return image;
+        }
+        if (target == "statusBar") {
+            if (!m_statusBar || !m_statusBar->isVisible()) {
+                if (error) *error = "statusBar_not_visible";
+                return {};
+            }
+            return m_statusBar->grab().toImage();
+        }
+        for (const auto& [id, dock] : LayoutOrchestrator::apiDocks(getDockWidgets())) {
+            if (id != target) continue;
+            if (!dock || !dock->isVisible() ||
+                (target == "telemetry" && !m_heatmapTelemetryDock->exposed())) {
+                if (error) *error = target + "_not_visible";
+                return {};
+            }
+            if (target == "telemetry") m_heatmapTelemetryDock->refresh();
+            QImage image = dock->grab().toImage();
+            if (image.isNull()) {
+                if (error) *error = target + "_grab_failed";
+                return {};
+            }
+            if (target == "stockChart") {
+                auto* container = m_stockChartDock->qmlContainer();
+                auto* view = m_stockChartDock->qquickView();
+                if (!container || !container->isVisible() || !view || !view->isVisible()) {
+                    if (error) *error = "stockChart_view_not_visible";
+                    return {};
+                }
+                const QImage quickImage = view->grabWindow();
+                if (quickImage.isNull()) {
+                    if (error) *error = "stockChart_grab_failed";
+                    return {};
+                }
+                QPainter painter(&image);
+                painter.drawImage(QRect(container->mapTo(dock, QPoint{}), container->size()), quickImage);
+            }
+            return image;
         }
         if (target == "chartmenu") {
             auto* toolbar = m_heatmapDock ? m_heatmapDock->toolbar() : nullptr;
@@ -1167,8 +1217,6 @@ void MainWindowGPU::setupMenuBar() {
     docks.heatmapDock = m_heatmapDock;
     docks.secDock = m_secDock;
     docks.copenetDock = m_copenetDock;
-    docks.aiCommentaryDock = m_aiCommentaryDock;
-    docks.labDock = m_labDock;
     docks.watchlistDock = m_watchlistDock;
     docks.screenerDock = m_screenerDock;
     docks.stockChartDock = m_stockChartDock;
@@ -1595,8 +1643,6 @@ LayoutOrchestrator::DockWidgets MainWindowGPU::getDockWidgets() const {
     docks.heatmapDock = m_heatmapDock;
     docks.secDock = m_secDock;
     docks.copenetDock = m_copenetDock;
-    docks.aiCommentaryDock = m_aiCommentaryDock;
-    docks.labDock = m_labDock;
     docks.watchlistDock = m_watchlistDock;
     docks.screenerDock = m_screenerDock;
     docks.stockChartDock = m_stockChartDock;

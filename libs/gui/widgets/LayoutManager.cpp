@@ -1,6 +1,7 @@
 #include "LayoutManager.hpp"
 #include <QSettings>
 #include <QByteArray>
+#include <QDockWidget>
 #include "SentinelLogging.hpp"
 
 void LayoutManager::saveLayout(QMainWindow* window, const QString& layoutName) {
@@ -49,12 +50,36 @@ bool LayoutManager::restoreLayout(QMainWindow* window, const QString& layoutName
         return false;
     }
     
-    if (!window->restoreState(state)) {
+    // Qt preserves a missing dock as a placeholder in saved QMainWindow state.
+    // Supply retired docks during restore, then remove them so surviving tabs
+    // keep their positions and the next save contains only live docks.
+    const auto options = window->dockOptions();
+    const bool updatesEnabled = window->updatesEnabled();
+    window->setUpdatesEnabled(false);
+    window->setDockOptions(options & ~QMainWindow::AnimatedDocks);
+    QDockWidget retiredLab;
+    retiredLab.setObjectName("LabDock");
+    QDockWidget retiredAICommentary;
+    retiredAICommentary.setObjectName("AICommentaryFeedDock");
+    window->addDockWidget(Qt::RightDockWidgetArea, &retiredLab);
+    window->addDockWidget(Qt::BottomDockWidgetArea, &retiredAICommentary);
+    const bool restored = window->restoreState(state);
+    window->removeDockWidget(&retiredLab);
+    window->removeDockWidget(&retiredAICommentary);
+    window->setDockOptions(options);
+    window->setUpdatesEnabled(updatesEnabled);
+    if (!restored) {
         sLog_Warning("Layout restore failed, restoreState() returned false, falling back to default: layout="
                      << layoutName << " stateBytes=" << state.size());
         deleteLayout(layoutName);
         return false;
     }
+    settings.beginGroup("layouts");
+    settings.beginGroup(layoutName);
+    settings.setValue("state", window->saveState());
+    settings.endGroup();
+    settings.endGroup();
+    settings.sync();
     
     return true;
 }
@@ -82,4 +107,3 @@ void LayoutManager::resetToDefault(QMainWindow* window) {
     
     QMetaObject::invokeMethod(window, "resetLayoutToDefault", Qt::QueuedConnection);
 }
-

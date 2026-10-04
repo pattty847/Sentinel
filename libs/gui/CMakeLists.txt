@@ -134,8 +134,6 @@ set(GRID_CORE_SOURCES
     render/HeatmapIntensityNode.cpp
     render/FootprintIntensityNode.hpp
     render/FootprintIntensityNode.cpp
-    widgets/LabDock.hpp
-    widgets/LabDock.cpp
     render/AlgoOverlayRenderer.hpp
     render/AlgoOverlayRenderer.cpp
     render/PaperTradeOverlayRenderer.hpp
@@ -151,7 +149,6 @@ set(GRID_CORE_SOURCES
 )
 
 set(WIDGET_SOURCES
-    "widgets/AICommentaryFeedDock.cpp"
     "widgets/CommentaryFeedDock.cpp"
     "widgets/CopenetFeedDock.cpp"
     "widgets/DockablePanel.cpp"
@@ -170,8 +167,6 @@ set(WIDGET_SOURCES
     "widgets/LiquidityRangeSlider.cpp"
     "widgets/WatchlistDock.cpp"
     "widgets/StockChartDock.cpp"
-    "widgets/TradeBlotterDock.cpp"
-    "widgets/TradeBlotterDock.hpp"
     "widgets/PaperTradingDock.hpp"
     "widgets/PaperTradingDock.cpp"
 )
@@ -284,7 +279,6 @@ qt6_add_qml_module(sentinel_gui_lib
         render/PaperTradeOverlayModel.cpp
     QML_FILES
         qml/DepthChartView.qml
-        qml/LabView.qml
         qml/CandleChartView.qml
         qml/Theme.qml
         qml/controls/VolumeFilter.qml

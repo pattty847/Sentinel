@@ -2,16 +2,15 @@
 # gui-shot.sh: client for scripts/dev/gui-host.py. Lets a sandboxed agent (no window server)
 # start the GUI, drive the Agent API and read screenshots.
 #
-#   scripts/dev/gui-shot.sh launch [--renderer gpu|legacy] [--replace] [--fresh-profile]
-#   scripts/dev/gui-shot.sh shot <name> [--after <operationId>] [--settle] [--target heatmap|lab|telemetry|toolbar|settings[:Tab]]
+#   scripts/dev/gui-shot.sh launch [--renderer gpu|legacy] [--replace] [--fresh-profile] [--build <worktree>]
+#   scripts/dev/gui-shot.sh shot <name> [--after <operationId>] [--settle] [--target window|<dock-id>|toolbar|chartmenu|settings[:Tab]]
 #   scripts/dev/gui-shot.sh api GET|POST </api/v1/...> [json]       # state, viewport, heatmap/settings ...
 #   scripts/dev/gui-shot.sh docks [list|focus <id>|show <id>|hide <id>]
 #   scripts/dev/gui-shot.sh status | stop | profile-reset
 #
-# The host runs only the MAIN checkout's build (the orchestrator builds landed main), never a path
-# you name and never your worktree build, because it executes with the owner's privileges. So you
-# see landed work, not your branch's uncommitted-to-main change; the GUI it starts cannot trade,
-# switches only to the recorded products, and refuses screen grabs.
+# The host defaults to main's build. --build runs only the fixed sentinel-gui binary under an
+# approved worktree root; build it through the queue first. The GUI cannot trade, switches only
+# to recorded products, and refuses screen-region grabs (target=main).
 # launch prints the session JSON with `port` (that GUI's Agent API) and `shotDir`. shot prints the
 # absolute PNG path: read it directly (Codex and Claude both open local images). If the host is
 # not running, ask the orchestrator to start it (scripts/dev/gui-host.py); nothing here starts it.
@@ -38,16 +37,17 @@ session_port() {
 cmd=${1:-}; shift || true
 case "$cmd" in
     launch)
-        renderer=gpu; replace=false; fresh=false
+        renderer=gpu; replace=false; fresh=false; build=
         while (( $# )); do
             case "$1" in
                 --renderer) renderer=${2:?--renderer needs gpu|legacy}; shift 2 ;;
                 --replace) replace=true; shift ;;
                 --fresh-profile) fresh=true; shift ;;
-                *) die "unknown argument $1 (launch takes --renderer, --replace and --fresh-profile; the host runs only main)" ;;
+                --build) build=${2:?--build needs an absolute worktree path}; shift 2 ;;
+                *) die "unknown argument $1 (launch takes --renderer, --replace, --fresh-profile and --build)" ;;
             esac
         done
-        host POST /launch "$(jq -n --arg r "$renderer" --argjson p "$replace" --argjson f "$fresh" '{renderer:$r, replace:$p, freshProfile:$f}')" ;;
+        host POST /launch "$(jq -n --arg r "$renderer" --argjson p "$replace" --argjson f "$fresh" --arg b "$build" '{renderer:$r, replace:$p, freshProfile:$f} + (if $b == "" then {} else {build:$b} end)')" ;;
     shot)
         name=${1:?usage: shot <name> [--after <op>] [--settle] [--target T]}; shift
         body=$(jq -n --arg n "$name" '{name:$n}')
