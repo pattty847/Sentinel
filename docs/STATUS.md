@@ -16,11 +16,14 @@ Last updated: 2026-10-03 22:20 EDT. Shadow roller soak started (BTC-USD).
 
 | Branch | State | Next step |
 |---|---|---|
-| (none) | | |
+| `lt-astra/dom` | W1a writing (Codex astra) | Fable review, land |
+| `lt-sol/paper-ticket` | W1b writing (Codex sol) | Fable review, land |
+| `lt-sol/dock-infra` | W1c writing (Codex sol; owns MainWindowGpu/DockFactory/LayoutOrchestrator/MenuBuilder) | Fable review, land first |
+| (read-only) | W1d CopeNet boundary + commentary map | commit doc to docs/research |
 
 ## Next (priority order)
 
-1. Owner (Oct 4): pick from `docs/research/2026-10-widget-audit.md` (top 5 + deletion candidates); S8 = GO pending owner.
+1. Widget pass: owner directive `docs/research/2026-10-widget-pass-directive.md`, plan `docs/research/2026-10-widget-pass-plan.md`. Wave 1 in flight; wave 2 after the Claude weekly reset (2026-10-06). S8 = GO pending owner.
 2. Slice C landed `0a2e0bc` (`roller_shadow`, default off). Pre-enable fixes landed `98e5b49` (cooldown needs a 2 min streak; fan-out poll/listener failures keep rings). Soak running since 22:14 Oct 3 (BTC only, by design: the comparison needs the primary's nonstop recording). After 48 h at 0: slice D cutover; D must widen the roller to all 7 journal products (continuous history for every coin), then E deletions.
 3. S8: delete the legacy heatmap (Fable verdict GO).
 4. Backlog: owner GUI Agent API (17100) unauthenticated; GUI RSS ~1.5 GB after 10 min; persistent fan-out poll() error loops without sleeping (CaptureFanout.cpp:417, pre-existing, low); add safe dock screenshot targets to the GUI host before widget visual work; git remote moved to github.com/pattty847/Sentinel.git; TPO v2; cosmetics; compression lab; Parquet + DuckDB; Pi / cloud node.
