@@ -44,7 +44,7 @@ public:
     void connectToServer();
     QObject* candleBuffer() const { return m_candleBuffer.get(); }
     SentinelStreamClient* streamClient() { return &m_client; }
-    Q_INVOKABLE bool isBookSnapshotStale(const QString& symbol) const;
+    Q_INVOKABLE bool isBookSnapshotStale(const QString& symbol) const override;
 
 private slots:
     void onSnapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids,

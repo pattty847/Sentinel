@@ -28,6 +28,12 @@ Copy the defaults to the override names to customize; override values take prece
 - GUI settings (API port, screenshot dir, font)
 - Client cache sizing and local UI preferences
 
+GUI order-book replicas retain `orderbook.tick_size` for BTC-USD. Other products derive their replica tick
+from the accepted snapshot's reference price using the roller's shared near-grid rule (about 1 bp, nearest
+1-2-5 step); a supplied quote increment is a lower bound and multiple constraint. The current stream does
+not carry quote-increment metadata. The band percent remains server-configured. This client-side policy
+cannot recover levels already collapsed by a coarser server stream book; see the W1a validation notes.
+
 ## Example snippets
 
 **Server (`config/server_config.yaml` or `.server_config.yaml`):**

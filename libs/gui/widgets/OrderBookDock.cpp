@@ -6,6 +6,7 @@
 #include <QHeaderView>
 #include <QHideEvent>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include <QLabel>
 #include <QPainter>
 #include <QPushButton>
@@ -49,11 +50,16 @@ OrderBookDock::OrderBookDock(QWidget* parent, IGridDataSource* source)
     : DockablePanel("orderbook", "Order Book", parent), m_source(source ? source : ServiceLocator::dataSource())
 {
     buildUi();
+    m_timer.setParent(this);
+    m_timer.setObjectName("domPublishTimer");
     m_timer.setInterval(67); // ~15 Hz; events only update ingestion state/dirty flags.
     m_timer.setTimerType(Qt::PreciseTimer);
     connect(&m_timer, &QTimer::timeout, this, &OrderBookDock::refreshDisplay);
     connect(this, &QDockWidget::visibilityChanged, this, &OrderBookDock::setDisplayActive);
+    installEventFilter(this);
+    connect(this, &QDockWidget::topLevelChanged, this, [this] { watchWindow(); updateDisplayTimer(); });
     if (!m_source) return;
+    m_freshness.connected = m_source->connectionState();
     connect(m_source, &IGridDataSource::liveOrderBookUpdated, this, &OrderBookDock::onOrderBookUpdated, Qt::QueuedConnection);
     connect(m_source, &IGridDataSource::tradeReceived, this, &OrderBookDock::onTradeReceived, Qt::QueuedConnection);
     connect(m_source, &IGridDataSource::connectionStatusChanged, this, [this](bool connected) {
@@ -130,9 +136,6 @@ void OrderBookDock::buildUi()
     m_table->viewport()->installEventFilter(this);
     m_table->installEventFilter(this);
     m_table->verticalScrollBar()->installEventFilter(this);
-    connect(m_table->verticalScrollBar(), &QScrollBar::valueChanged, this, [this] {
-        if (!m_programmaticScroll) stopFollowing();
-    });
     layout->addWidget(m_table, 1);
 }
 
@@ -140,11 +143,13 @@ void OrderBookDock::onSymbolChanged(const QString& symbol)
 {
     if (symbol == m_symbol) return;
     m_symbol = symbol;
+    m_symbolId = symbol.toStdString();
     m_trades.clear();
     const auto connected = m_freshness.connected;
     m_freshness = {};
-    m_freshness.connected = connected;
-    m_dirty = m_symbolDirty = true;
+    m_freshness.connected = m_source ? m_source->connectionState() : connected;
+    m_freshness.snapshotStale = m_source && m_source->isBookSnapshotStale(symbol);
+    m_dirty = m_symbolDirty = m_bookDirty = true;
     m_follow = true;
     // Including symbol/model/header changes: no display work until visible.
 }
@@ -155,19 +160,39 @@ void OrderBookDock::onOrderBookUpdated(const QString& symbol, const std::vector<
     if (symbol != m_symbol) return;
     // The datasource already applied ALL deltas. Do not rescan it per event.
     m_freshness.awaitingBook = false;
-    m_dirty = true;
+    m_dirty = m_bookDirty = true;
 }
 
 void OrderBookDock::onTradeReceived(const Trade& trade)
 {
-    if (m_symbol.isEmpty() || trade.product_id != m_symbol.toStdString()) return;
+    if (m_symbol.isEmpty() || trade.product_id != m_symbolId) return;
     m_trades.ingest(trade); // Also before the first book, and while hidden.
     m_dirty = true;
 }
 
 void OrderBookDock::setDisplayActive(bool active)
 {
-    m_displayActive = active && isVisible();
+    m_exposed = active;
+    updateDisplayTimer();
+}
+
+bool OrderBookDock::minimized() const
+{
+    return window()->isMinimized() || (m_hostWindow && m_hostWindow->isMinimized());
+}
+
+void OrderBookDock::watchWindow()
+{
+    QWidget* host = parentWidget() ? parentWidget()->window() : window();
+    if (host == m_hostWindow) return;
+    if (m_hostWindow && m_hostWindow != this) m_hostWindow->removeEventFilter(this);
+    m_hostWindow = host;
+    if (host && host != this) host->installEventFilter(this);
+}
+
+void OrderBookDock::updateDisplayTimer()
+{
+    m_displayActive = m_exposed && isVisible() && !minimized();
     if (m_displayActive) {
         m_dirty = true;
         m_timer.start();
@@ -177,6 +202,7 @@ void OrderBookDock::setDisplayActive(bool active)
 void OrderBookDock::showEvent(QShowEvent* event)
 {
     DockablePanel::showEvent(event);
+    watchWindow();
     setDisplayActive(true);
 }
 void OrderBookDock::hideEvent(QHideEvent* event)
@@ -194,6 +220,13 @@ void OrderBookDock::stopFollowing()
 
 bool OrderBookDock::eventFilter(QObject* watched, QEvent* event)
 {
+    if (watched == this || watched == m_hostWindow) {
+        if (event->type() == QEvent::WindowStateChange) updateDisplayTimer();
+        return DockablePanel::eventFilter(watched, event);
+    }
+    const bool ladderInput = watched == m_table || watched == m_table->viewport() || watched == m_table->verticalScrollBar();
+    if (!ladderInput) return DockablePanel::eventFilter(watched, event);
+    if (event->type() == QEvent::MouseMove && (static_cast<QMouseEvent*>(event)->buttons() & Qt::LeftButton)) stopFollowing();
     if (event->type() == QEvent::Wheel ||
         (watched == m_table->verticalScrollBar() && event->type() == QEvent::MouseButtonPress)) stopFollowing();
     if (event->type() == QEvent::KeyPress) {
@@ -213,7 +246,7 @@ void OrderBookDock::recenter()
 
 void OrderBookDock::refreshDisplay()
 {
-    if (!m_displayActive || !isVisible()) return;
+    if (!m_displayActive || !isVisible() || minimized()) return;
     m_programmaticScroll = true;
     const bool needsLayout = m_symbolDirty || m_model->rowCount() == 0;
     if (m_symbolDirty) {
@@ -222,12 +255,15 @@ void OrderBookDock::refreshDisplay()
         m_symbolDirty = false;
     }
     if (m_source && !m_symbol.isEmpty()) {
-        const auto& book = m_source->getDirectLiveOrderBook(m_symbol.toStdString());
-        // This is the receive timestamp set by RemoteGridDataSource::applyUpdates.
-        if (book.getTickSize() > 0) {
-            m_freshness.receiveMs = std::chrono::duration_cast<std::chrono::milliseconds>(book.getLastUpdate().time_since_epoch()).count();
+        const auto& book = m_source->getDirectLiveOrderBook(m_symbolId);
+        // Capture the replica timestamp only after a change notification (or
+        // initial symbol hydration). Unchanged L2 messages also touch that
+        // timestamp, but must not keep resetting the displayed last-change age.
+        if (book.getTickSize() > 0 && m_bookDirty) {
+            m_freshness.lastChangeMs = std::chrono::duration_cast<std::chrono::milliseconds>(book.getLastUpdate().time_since_epoch()).count();
         }
-        else m_freshness.awaitingBook = true;
+        if (book.getTickSize() <= 0) m_freshness.awaitingBook = true;
+        m_bookDirty = false;
         if (m_dirty) m_model->publish(book, m_trades, m_follow);
     }
     if (m_dirty) {

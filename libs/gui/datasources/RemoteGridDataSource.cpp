@@ -1,5 +1,8 @@
 #include "RemoteGridDataSource.hpp"
 #include "SentinelLogging.hpp"
+#include "roller/Grid.hpp"
+#include <numeric>
+#include <cmath>
 #include <algorithm>
 #include <QDateTime>
 #include "../config/AgentHostMode.hpp"
@@ -389,9 +392,22 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
     auto& book = *m_replicaBooks[symbol];
 
     // Re-initialize using banded range around best bid/ask.
-    const double tickSize = m_serverConfig.orderbook.tickSize;
     const double bandPct = m_serverConfig.orderbook.bandPct;
     const auto [minPrice, maxPrice] = computeBandRange(bids, asks, bandPct);
+    // Same near-grid policy as the roller. Stream snapshots currently carry no
+    // quote-increment metadata, so use the helper's unknown-increment policy.
+    // BTC is the roller's explicit override product: keep its configured tick.
+    double tickSize = 0;
+    try {
+        tickSize = symbol == "BTC-USD" ? m_serverConfig.orderbook.tickSize
+            : sentinel::roller::deriveNearTick(std::midpoint(minPrice, maxPrice));
+        if (!std::isfinite(tickSize) || tickSize <= 0) throw std::runtime_error("invalid replica tick");
+    } catch (const std::exception& error) {
+        sLog_Warning("Replica aggregation unavailable: symbol=" << productId << " reason=" << error.what());
+        book.clear();
+        emit liveOrderBookUpdated(productId, {});
+        return;
+    }
     book.initialize(minPrice, maxPrice, tickSize);
 
     std::vector<BookLevelUpdate> updates;

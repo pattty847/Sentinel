@@ -21,14 +21,13 @@ private:
     int m_size = 0;
 };
 
-// Small, replaceable W1 freshness policy. Time is the replica's local receive
-// time, not exchange time, paint time or time of a trade. No timer is owned here.
+// Replaceable W1 connection-based freshness policy. Book-change age is separate
+// from transport liveness; a quiet connected market is not a stale feed.
 struct DomFreshness {
-    static constexpr qint64 StaleAfterMs = 3000;
     std::optional<bool> connected;
     bool snapshotStale = false;
     bool awaitingBook = false;
-    qint64 receiveMs = 0;
+    qint64 lastChangeMs = 0;
     QString text(qint64 nowMs) const;
 };
 
@@ -67,6 +66,7 @@ private:
     double m_tick = 0;
     qint64 m_top = 0, m_center = 0;
     bool m_ready = false;
+    QString m_aggregationIssue;
     std::array<Row, Rows> m_rows{};
     std::vector<std::pair<uint32_t, double>> m_bidBuffer, m_askBuffer;
     double m_bestBid = 0, m_bestAsk = 0, m_maxBid = 1, m_maxAsk = 1;

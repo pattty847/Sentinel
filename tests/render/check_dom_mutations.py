@@ -13,14 +13,24 @@ root = Path(__file__).resolve().parents[2]
 build = (root / (sys.argv[1] if len(sys.argv) > 1 else 'build/mac-clang')).resolve()
 model = root / 'libs/gui/models/DomModel.cpp'
 dock = root / 'libs/gui/widgets/OrderBookDock.cpp'
-original = {p: p.read_text() for p in (model, dock)}
+replica = root / 'libs/gui/datasources/RemoteGridDataSource.cpp'
+original = {p: p.read_text() for p in (model, dock, replica)}
 mutants = [
     ('duplicate_bucket', model,
      [('return m_top - index.row();', 'return m_top - (index.row() == 1001 ? 1000 : index.row());')],
      'DomModel.SameBucketUniqueBestAskStableEmptyRowsAndAlignment'),
-    ('nearest_tick_executions', model,
-     [('if (key) *key = static_cast<qint64>(std::floor(std::nextafter(trade.price / tick, std::numeric_limits<double>::infinity())));', '')],
-     'DomModel.ExecutionsUseContainingBucketAndGridChangesRebucketTheRawRing'),
+    ('absolute_trade_buckets', model,
+     [('std::optional<qint64>(*origin + static_cast<qint64>(offset))',
+       'std::optional<qint64>(std::llround(trade.price / tick))')],
+     'DomModel.ExecutionsMatchReplicaTruncationAtDecimalBoundariesWithNonzeroOrigin'),
+    ('global_replica_tick', replica,
+     [('symbol == "BTC-USD" ? m_serverConfig.orderbook.tickSize\n            : sentinel::roller::deriveNearTick(std::midpoint(minPrice, maxPrice))',
+       'm_serverConfig.orderbook.tickSize')],
+     'DomModel.ProductionReplicaTicksRenderLowPriceProductsOnEverySubscription'),
+    ('quiet_book_marked_stale', model,
+     [('if (connected == true) return QStringLiteral("Connected · %1").arg(age);',
+       'if (nowMs - lastChangeMs >= 3000) return QStringLiteral("Stale · %1").arg(age); if (connected == true) return QStringLiteral("Connected · %1").arg(age);')],
+     'DomFreshness.LiveQuietBookHasChangeAgeButDoesNotBecomeStale:DomDock.QuietConnectedBookRetainsLastChangeAgeAndDetectsDisconnect'),
     ('unknown_as_sell', model,
      [('else if (trade.side == AggressorSide::Sell) ++row.sells;', 'else ++row.sells;')],
      'DomModel.RingCountsEveryEventUnknownNeverSellsAndCountsAreNotVolume'),
@@ -32,15 +42,15 @@ mutants = [
      'DomDock.ScrollPinsPriceAndPositionThenButtonRestoresFollow'),
     ('paint_per_event', dock,
      [('m_trades.ingest(trade);', 'm_dirty = true; refreshDisplay(); m_trades.ingest(trade);')],
-     'DomDock.VisibleUpdatesCoalesceAtFifteenHzAndFreshnessUsesReceiveTime'),
+     'DomDock.VisibleUpdatesCoalesceAtFifteenHz'),
     ('hidden_work', dock,
-     [('if (!m_displayActive || !isVisible()) return;', ''),
+     [('if (!m_displayActive || !isVisible() || minimized()) return;', ''),
       ('m_trades.ingest(trade);', 'm_dirty = true; refreshDisplay(); m_trades.ingest(trade);')],
      'DomDock.HiddenIngestsAllTradesButDoesNoModelOrReplicaReadWork'),
     ('paint_time_as_freshness', dock,
      [('std::chrono::duration_cast<std::chrono::milliseconds>(book.getLastUpdate().time_since_epoch()).count()',
        'QDateTime::currentMSecsSinceEpoch()')],
-     'DomDock.VisibleUpdatesCoalesceAtFifteenHzAndFreshnessUsesReceiveTime'),
+     'DomDock.QuietConnectedBookRetainsLastChangeAgeAndDetectsDisconnect'),
 ]
 env = dict(os.environ, CCACHE_READONLY='1', CCACHE_TEMPDIR='/tmp')
 output = build / 'dom-validation'

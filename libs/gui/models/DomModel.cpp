@@ -15,14 +15,14 @@ void DomTradeWindow::ingest(const Trade& trade)
 
 QString DomFreshness::text(qint64 nowMs) const
 {
-    const QString age = receiveMs > 0
-        ? QStringLiteral("book age %1 s").arg(std::max<qint64>(0, nowMs - receiveMs) / 1000.0, 0, 'f', 1)
+    const QString age = lastChangeMs > 0
+        ? QStringLiteral("last change %1 s").arg(std::max<qint64>(0, nowMs - lastChangeMs) / 1000.0, 0, 'f', 1)
         : QStringLiteral("no book received");
     if (connected == false) return QStringLiteral("Disconnected · %1").arg(age);
     if (snapshotStale) return QStringLiteral("Stale snapshot · %1").arg(age);
-    if (awaitingBook || receiveMs <= 0) return QStringLiteral("Waiting for book · %1").arg(age);
-    if (nowMs - receiveMs >= StaleAfterMs) return QStringLiteral("Stale · %1").arg(age);
-    return QStringLiteral("Recent · %1").arg(age);
+    if (awaitingBook || lastChangeMs <= 0) return QStringLiteral("Waiting for book · %1").arg(age);
+    if (connected == true) return QStringLiteral("Connected · %1").arg(age);
+    return QStringLiteral("Connection unknown · %1").arg(age);
 }
 
 DomModel::DomModel(QObject* parent) : QAbstractTableModel(parent)
@@ -77,13 +77,14 @@ QVariant DomModel::data(const QModelIndex& index, int role) const
     if (role == BestSideRole) return row.bestBid && row.bestAsk ? "Bid / Ask" : row.bestBid ? "Bid" : row.bestAsk ? "Ask" : "";
     if (role == Qt::TextAlignmentRole) return int(Qt::AlignRight | Qt::AlignVCenter);
     if (role == QuantityRole) return col == Bid ? row.bid : col == Ask ? row.ask : 0.0;
+    static const QColor bidColor("#56cbd4"), askColor("#e5b65b"), buyColor("#65ce8a"), sellColor("#ee8585"), bestColor("#29323b");
     if (role == Qt::ForegroundRole) {
-        if (col == Bid) return QColor("#56cbd4");
-        if (col == Ask) return QColor("#e5b65b");
-        if (col == Buys || (col == Delta && row.buys > row.sells)) return QColor("#65ce8a");
-        if (col == Sells || (col == Delta && row.buys < row.sells)) return QColor("#ee8585");
+        if (col == Bid) return bidColor;
+        if (col == Ask) return askColor;
+        if (col == Buys || (col == Delta && row.buys > row.sells)) return buyColor;
+        if (col == Sells || (col == Delta && row.buys < row.sells)) return sellColor;
     }
-    if (role == Qt::BackgroundRole && (row.bestBid || row.bestAsk)) return QColor("#29323b");
+    if (role == Qt::BackgroundRole && (row.bestBid || row.bestAsk)) return bestColor;
     if (role == Qt::ToolTipRole) {
         if (col >= Buys) return QStringLiteral("Execution counts in the last 1,000 trades; unknown aggressors excluded from buy, sell and delta.");
         return col == Price ? QStringLiteral("%1 · aggregated price bucket, not an exchange spread").arg(data(index, BestSideRole).toString())
@@ -107,6 +108,7 @@ void DomModel::clear(const QString& symbol)
     m_base = parts.size() == 2 ? parts[0] : QStringLiteral("base");
     m_quote = parts.size() == 2 ? parts[1] : QStringLiteral("quote");
     m_ready = false;
+    m_aggregationIssue.clear();
     m_tick = m_bestBid = m_bestAsk = 0;
     m_trades = m_unknown = 0;
     m_rows.fill({});
@@ -125,7 +127,23 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
     const auto view = book.captureDenseNonZero(m_bidBuffer, m_askBuffer, 1);
     const double tick = view.tickSize;
     const auto origin = bucket(view.minPrice, tick);
-    if (!origin) return;
+    m_aggregationIssue.clear();
+    if (!origin) {
+        m_aggregationIssue = QStringLiteral("Aggregation unavailable for this product");
+        return;
+    }
+    if ((!view.bidLevels.empty() && view.minPrice + view.bidLevels.front().first * tick <= 0) ||
+        (!view.askLevels.empty() && view.minPrice + view.askLevels.front().first * tick <= 0)) {
+        if (m_ready) {
+            beginRemoveRows({}, 0, Rows - 1);
+            m_ready = false;
+            endRemoveRows();
+        }
+        m_bestBid = m_bestAsk = 0;
+        m_tick = tick;
+        m_aggregationIssue = QStringLiteral("Aggregation too coarse for this product");
+        return;
+    }
     m_bestBid = view.bidLevels.empty() ? 0 : view.minPrice + view.bidLevels.front().first * tick;
     m_bestAsk = view.askLevels.empty() ? 0 : view.minPrice + view.askLevels.front().first * tick;
     const double mid = m_bestBid > 0 && m_bestAsk > 0 ? (m_bestBid + m_bestAsk) / 2 : m_bestBid + m_bestAsk;
@@ -166,11 +184,12 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
     }
     for (int i = 0; i < trades.size(); ++i) {
         const auto& trade = trades.entries()[i];
-        auto key = bucket(trade.price, tick);
-        // The replica aggregates liquidity into [price, price + tick) buckets.
-        // Executions inside a bucket use the same interval, not nearest-tick
-        // rounding. One ULP tolerates decimal ticks at exact boundaries.
-        if (key) *key = static_cast<qint64>(std::floor(std::nextafter(trade.price / tick, std::numeric_limits<double>::infinity())));
+        // Mirror LiveOrderBook::price_to_index exactly, including its origin and
+        // floating truncation at decimal boundaries (no absolute-grid epsilon).
+        if (!std::isfinite(trade.price) || trade.price < view.minPrice || trade.price > view.maxPrice) continue;
+        const double offset = (trade.price - view.minPrice) / tick;
+        if (!std::isfinite(offset) || offset >= double(std::numeric_limits<qint64>::max() / 2)) continue;
+        const auto key = std::optional<qint64>(*origin + static_cast<qint64>(offset));
         if (!key || m_top - *key < 0 || m_top - *key >= Rows) continue;
         auto& row = next[m_top - *key];
         if (trade.side == AggressorSide::Buy) ++row.buys;
@@ -194,6 +213,7 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
 int DomModel::centerRow() const { return m_ready ? int(std::clamp<qint64>(m_top - m_center, 0, Rows - 1)) : -1; }
 QString DomModel::aggregation() const
 {
+    if (!m_aggregationIssue.isEmpty()) return m_aggregationIssue;
     return QStringLiteral("Aggregation: %1 %2 · resting size: %3").arg(m_tick > 0 ? priceText(m_tick, m_tick) : "—", m_quote, m_base);
 }
 QString DomModel::executionSummary() const

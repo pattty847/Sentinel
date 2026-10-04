@@ -41,8 +41,13 @@ private slots:
 private:
     void setDisplayActive(bool active);
     void stopFollowing();
+    void watchWindow();
+    void updateDisplayTimer();
+    bool minimized() const;
     QPointer<IGridDataSource> m_source;
     QString m_symbol;
+    std::string m_symbolId;
+    QPointer<QWidget> m_hostWindow;
     DomTradeWindow m_trades;
     DomFreshness m_freshness;
     DomModel* m_model = nullptr;
@@ -54,6 +59,7 @@ private:
     QLabel* m_status = nullptr;
     QPushButton* m_recenter = nullptr;
     QTimer m_timer;
-    bool m_dirty = true, m_symbolDirty = true;
+    bool m_dirty = true, m_symbolDirty = true, m_bookDirty = true;
+    bool m_exposed = false;
     bool m_displayActive = false, m_follow = true, m_programmaticScroll = false;
 };

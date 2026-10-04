@@ -31,17 +31,24 @@ double scaleFor(std::string text) {
     return std::pow(10.0, double(places));
 }
 }
-Grid deriveGrid(const nlohmann::json& metadata, double price, const nlohmann::json& overrides) {
-    if (!std::isfinite(price) || price <= 0) throw std::runtime_error("grid needs a positive reference price");
-    const auto quoteText = metadata.at("quote_increment").get<std::string>();
-    const auto quote = decimal(quoteText);
-    const auto base = decimal(metadata.at("base_increment").get<std::string>());
+double deriveNearTick(double price, double quote) {
+    if (!std::isfinite(price) || price <= 0 || !std::isfinite(quote) || quote < 0)
+        throw std::runtime_error("near grid needs a positive reference price and valid increment");
     const auto target = price * 0.0001;
     const auto decade = std::pow(10.0, std::floor(std::log10(target)));
     double tick = decade;
     for (double m : {2.,5.,10.}) if (std::abs(m * decade - target) <= std::abs(tick - target)) tick = m * decade;
     // Keep a native-increment multiple, including non power-of-ten increments.
-    tick = std::ceil(std::max(tick, quote) / quote - 1e-9) * quote;
+    if (quote > 0) tick = std::ceil(std::max(tick, quote) / quote - 1e-9) * quote;
+    if (!std::isfinite(tick) || tick <= 0) throw std::runtime_error("unrepresentable near tick");
+    return tick;
+}
+Grid deriveGrid(const nlohmann::json& metadata, double price, const nlohmann::json& overrides) {
+    if (!std::isfinite(price) || price <= 0) throw std::runtime_error("grid needs a positive reference price");
+    const auto quoteText = metadata.at("quote_increment").get<std::string>();
+    const auto quote = decimal(quoteText);
+    const auto base = decimal(metadata.at("base_increment").get<std::string>());
+    const double tick = deriveNearTick(price, quote);
     Grid grid{scaleFor(quoteText),tick,next125(next125(tick)),base};
     if (metadata.at("product_id") == "BTC-USD") { grid.nearTick = 1; grid.deepTick = 5; }
     grid.priceScale = overrides.value("price_scale", grid.priceScale);
