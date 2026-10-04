@@ -17,9 +17,8 @@ Last updated: 2026-10-03 22:20 EDT. Shadow roller soak started (BTC-USD).
 | Branch | State | Next step |
 |---|---|---|
 | `lt-astra/dom` | W1a writing (Codex astra) | Fable review, land |
-| `lt-sol/paper-ticket` | W1b writing (Codex sol) | Fable review, land |
 | `lt-sol/dock-infra` | W1c writing (Codex sol; owns MainWindowGpu/DockFactory/LayoutOrchestrator/MenuBuilder) | Fable review, land first |
-| (read-only) | W1d CopeNet boundary + commentary map | commit doc to docs/research |
+| landed | W1b paper ticket `e301c85`; W1d doc `docs/research/2026-10-copenet-boundary.md` | |
 
 ## Next (priority order)
 
