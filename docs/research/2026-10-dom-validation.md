@@ -85,7 +85,7 @@ No hubs, renderer, core or RemoteGridDataSource implementation changes. The only
 DOM implementation/tests are two source entries in `libs/gui/CMakeLists.txt` and the `DomTests` target in
 `tests/render/CMakeLists.txt`. Canonical architecture documentation and shared agent invariants describe the
 new contract. That implementation was committed by the orchestrator as `bce9c8e` after testing on base
-`9aff385`. Review round 1 was committed by the orchestrator as `089f113`; review round 2 below remains uncommitted.
+`9aff385`. Review round 1 was committed by the orchestrator as `089f113`; review round 2 was committed as `b77c16b`. Review round 3 below remains uncommitted.
 
 ## Review round 1
 
@@ -159,3 +159,31 @@ Full `mac-clang` rebuild: **passed**. Full ctest: **100% tests passed, 0 tests f
 The full log contains Metal-unavailable GPU skips; passing CTest entries do not verify those skipped cases.
 Native visuals/GPU behavior remain unverified in this sandbox; the initial-implementation raster benchmark
 above has not been rerun this round.
+
+
+## Review round 3 (base b77c16b)
+
+- Every GUI replica now uses the configured server tick unchanged (currently 0.1), including ETH at both
+  $2,500 and $6,000 and BTC. The replica is shared by chart book-top lines, Agent API `/book`, and the DOM;
+  deriving a coarser display tick there merged server levels and changed prices seen by all consumers.
+- The datasource no longer includes or calls the roller. The unused shared-helper extraction is reverted:
+  `libs/core/roller/Grid.cpp` and `Grid.hpp` are byte-identical to `bce9c8e`, before the DOM review changes.
+- The 1% coarse rule, explicit server-aggregation message, ladder/spread suppression and valid-replica
+  ingestion remain unchanged. No derivation exception path is needed. Invalid server ticks still preserve
+  pending snapshot/retry state and any existing replica.
+- ETH tests now expect 0.1. A regression test delivers adjacent 0.1 levels at both price scales, checking
+  that the dense replica used by the chart preserves each side's level count, quantity and book-top price,
+  the actual Agent API snapshot retains those prices, and subsequent L2 updates stay distinct. The mutation check reinstates 0.2/0.5 ETH ticks.
+- Per-product ticks and exchange quote increments move entirely to the planned server slice. The GUI no
+  longer derives the earlier PEPE 1e-9 candidate; the current 0.1 server resolution and explicit coarse
+  state remain until server metadata/precision changes.
+
+Targeted validation: **19/19 DOM**, **9/9 datasource**, **15/15 roller** tests passed; CTest
+**100% tests passed, 0 tests failed out of 3**, **5.93 s**. Fail-without-fix: **12/12 mutations
+compiled and were rejected by behavior tests**, including reinstating ETH's 0.2/0.5 ticks; restored DOM
+suite **19/19 passed**. Full rebuild **passed**. Full ctest: **100% tests passed, 0 tests failed
+out of 90**, **152.34 s**; DOM CTest time **2.11 s**. Metal-dependent GPU cases skipped because no
+MTLDevice is available; a passing CTest entry does not verify skipped GPU cases.
+All validation runs through the FIFO build queue, with builds/ctest at `-j 4`.
+Native visuals/GPU behavior remain unverified; the initial-implementation raster benchmark has not been
+rerun this round. No services or deployments.

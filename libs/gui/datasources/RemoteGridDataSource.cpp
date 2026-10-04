@@ -1,7 +1,5 @@
 #include "RemoteGridDataSource.hpp"
 #include "SentinelLogging.hpp"
-#include "roller/Grid.hpp"
-#include <numeric>
 #include <cmath>
 #include <algorithm>
 #include <QDateTime>
@@ -397,15 +395,9 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
     // Re-initialize using banded range around best bid/ask.
     const double bandPct = m_serverConfig.orderbook.bandPct;
     const auto [minPrice, maxPrice] = computeBandRange(bids, asks, bandPct);
-    // The stream has already quantized prices: never advertise finer resolution.
-    // Quote-increment metadata is not yet available. BTC keeps its configured tick.
-    double tickSize = serverTick;
-    try {
-        if (symbol != "BTC-USD")
-            tickSize = std::max(serverTick, sentinel::roller::deriveNearTick(std::midpoint(minPrice, maxPrice)));
-    } catch (const std::exception& error) {
-        sLog_Warning("Replica using server aggregation: symbol=" << productId << " reason=" << error.what());
-    }
+    // All consumers share this replica. Preserve the server's resolution rather
+    // than deriving a display tick that would merge its adjacent price levels.
+    const double tickSize = serverTick;
     book.initialize(minPrice, maxPrice, tickSize);
 
     std::vector<BookLevelUpdate> updates;

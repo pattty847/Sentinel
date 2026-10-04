@@ -1,9 +1,9 @@
 #include "models/DomModel.hpp"
+#include "mainwindow/AgentApiSnapshots.hpp"
 #include "themes/DarkTheme.hpp"
 #include "widgets/OrderBookDock.hpp"
 #include "datasources/IGridDataSource.hpp"
 #include "datasources/RemoteGridDataSource.hpp"
-#include "roller/Grid.hpp"
 #include <QMainWindow>
 #include <QWheelEvent>
 #include <QAbstractItemModelTester>
@@ -179,10 +179,10 @@ TEST(DomModel, ServerQuantisedSnapshotsNeverAdvertiseFalsePrecision) {
     // Alternate valid/coarse products to prove old rows and spread disappear and recover.
     for (const auto& c : {Case{"BTC-USD", 84000, 84001, .1, false},
                           Case{"DOGE-USD", .1, .1, .1, true},
-                          Case{"ETH-USD", 2500, 2500.5, .2, false},
+                          Case{"ETH-USD", 2500, 2500.5, .1, false},
                           Case{"FARTCOIN-USD", .7, .8, .1, true},
                           Case{"PEPE-USD", 0, 0, .1, true},
-                          Case{"ETH-USD", 6000, 6001, .5, false},
+                          Case{"ETH-USD", 6000, 6001, .1, false},
                           Case{"DOGE-USD", .2, .2, .1, true}}) {
         SCOPED_TRACE(c.symbol);
         const QString symbol = c.symbol;
@@ -226,9 +226,6 @@ TEST(DomModel, ServerQuantisedSnapshotsNeverAdvertiseFalsePrecision) {
         EXPECT_DOUBLE_EQ(book.getTickSize(), c.tick);
         source.unsubscribe(symbol);
     }
-    // Shared helper honors known increments; stream metadata does not supply them yet.
-    EXPECT_DOUBLE_EQ(sentinel::roller::deriveNearTick(.12345, .001), .001);
-    EXPECT_DOUBLE_EQ(sentinel::roller::deriveNearTick(100, .03), .03);
 }
 
 TEST(DomModel, CoarseOrUnavailableAggregationExplainsWhyThereIsNoLadder) {
@@ -262,25 +259,46 @@ TEST(DomModel, CoarseOrUnavailableAggregationExplainsWhyThereIsNoLadder) {
     EXPECT_TRUE(model.summary().contains("Bucketed spread"));
 }
 
-TEST(DomModel, UnrepresentableDerivedTickFallsBackWithoutDiscardingReplica) {
+TEST(DomModel, EthReplicaPreservesAdjacentServerLevelsAndBookTop) {
     RemoteGridDataSource source{"127.0.0.1", "1"};
-    source.subscribe("TEST-USD");
-    QSignalSpy updates(&source, &IGridDataSource::liveOrderBookUpdated);
-    const auto generation = source.streamClient()->bookDeliveryGeneration("TEST-USD");
-    // Deliberate arithmetic underflow exercises the helper's exception path.
-    // Real server-quantised assets are covered separately above.
-    emit source.streamClient()->snapshotReceived("TEST-USD", {{1e-320, 7}}, {{2e-320, 9}}, generation);
-    QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
-    const auto& book = source.getDirectLiveOrderBook("TEST-USD");
-    EXPECT_DOUBLE_EQ(book.getTickSize(), .1);
-    EXPECT_DOUBLE_EQ(book.getBidVolume(), 7);
-    EXPECT_DOUBLE_EQ(book.getAskVolume(), 9);
-    ASSERT_EQ(updates.count(), 1);
-    EXPECT_FALSE(qvariant_cast<std::vector<BookDelta>>(updates[0][1]).empty());
-    emit source.streamClient()->l2UpdateReceived("TEST-USD", {{true, 0, 11}}, generation);
-    QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
-    EXPECT_DOUBLE_EQ(book.getBidVolume(), 11); // Pending snapshot was resolved normally.
-    EXPECT_DOUBLE_EQ(book.getTickSize(), .1);
+    // Adjacent 0.1 levels on each side must survive at both ETH price scales.
+    // The chart book-top and Agent API consume this same dense replica view.
+    for (const auto& prices : {std::array{2500.3, 2500.4, 2500.8, 2500.9},
+                               std::array{6000.0, 6000.1, 6000.5, 6000.6}}) {
+        SCOPED_TRACE(prices[1]);
+        source.subscribe("ETH-USD");
+        const auto generation = source.streamClient()->bookDeliveryGeneration("ETH-USD");
+        emit source.streamClient()->snapshotReceived("ETH-USD",
+            {{prices[0], 3}, {prices[1], 7}}, {{prices[2], 9}, {prices[3], 5}}, generation);
+        QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
+        const auto& book = source.getDirectLiveOrderBook("ETH-USD");
+        EXPECT_DOUBLE_EQ(book.getTickSize(), .1);
+        std::vector<std::pair<uint32_t, double>> bids, asks;
+        const auto view = book.captureDenseNonZero(bids, asks, 10);
+        ASSERT_EQ(view.bidLevels.size(), 2u);
+        ASSERT_EQ(view.askLevels.size(), 2u);
+        const auto priceAt = [&](uint32_t index) { return view.minPrice + index * view.tickSize; };
+        EXPECT_NEAR(priceAt(bids[0].first), prices[1], 1e-9);
+        EXPECT_NEAR(priceAt(bids[1].first), prices[0], 1e-9);
+        EXPECT_NEAR(priceAt(asks[0].first), prices[2], 1e-9);
+        EXPECT_NEAR(priceAt(asks[1].first), prices[3], 1e-9);
+        EXPECT_DOUBLE_EQ(bids[0].second, 7);
+        EXPECT_DOUBLE_EQ(bids[1].second, 3);
+        EXPECT_DOUBLE_EQ(asks[0].second, 9);
+        EXPECT_DOUBLE_EQ(asks[1].second, 5);
+        const auto api = AgentApi::captureBook(book, 10, 1000, {});
+        ASSERT_EQ(api.bids.size(), 2u);
+        ASSERT_EQ(api.asks.size(), 2u);
+        EXPECT_EQ(api.bestBid, prices[1]);
+        EXPECT_EQ(api.bestAsk, prices[2]);
+        EXPECT_DOUBLE_EQ(api.bids[1].price, prices[0]);
+        EXPECT_DOUBLE_EQ(api.asks[1].price, prices[3]);
+        emit source.streamClient()->l2UpdateReceived("ETH-USD", {{true, prices[0], 4}}, generation);
+        QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
+        EXPECT_EQ(book.getBidCount(), 2u);
+        EXPECT_DOUBLE_EQ(book.getBidVolume(), 11);
+        source.unsubscribe("ETH-USD");
+    }
 }
 
 TEST(DomModel, ExecutionsMatchReplicaTruncationAtDecimalBoundariesWithNonzeroOrigin) {

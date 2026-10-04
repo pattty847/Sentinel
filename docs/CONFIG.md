@@ -28,14 +28,12 @@ Copy the defaults to the override names to customize; override values take prece
 - GUI settings (API port, screenshot dir, font)
 - Client cache sizing and local UI preferences
 
-GUI order-book replicas retain `orderbook.tick_size` for BTC-USD. Other products derive their replica tick
-from the accepted snapshot's reference price using the roller's shared near-grid rule (about 1 bp, nearest
-1-2-5 step), with `orderbook.tick_size` as a lower bound because wire prices are already quantised. If
-derivation fails, the valid server tick is retained. The current stream does not carry product ticks or
-quote-increment metadata. The band percent remains server-configured. A DOM whose effective tick exceeds
-1% of its midpoint, or whose best levels collapse to zero, shows an explicit server-aggregation explanation
-instead of a ladder or spread. Recovering the missing precision requires the upcoming server slice; see
-the W1a validation notes.
+GUI order-book replicas use the server's `orderbook.tick_size` unchanged for every product, including
+BTC-USD. The shared replica must not coarsen or invent precision for chart book-top lines, the Agent API or
+the DOM. The current stream does not carry per-product ticks or quote-increment metadata; those belong to
+the planned server slice. The band percent remains server-configured. A DOM whose tick exceeds 1% of its
+midpoint, or whose best levels collapse to zero, shows an explicit server-aggregation explanation instead
+of a ladder or spread. Recovering missing upstream precision requires that server slice.
 
 ## Example snippets
 
