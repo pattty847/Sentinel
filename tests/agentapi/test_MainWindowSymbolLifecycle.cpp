@@ -1,5 +1,6 @@
 #include "MainWindowGpu.h"
 #include "config/GuiConfigStore.hpp"
+#include "config/AgentHostMode.hpp"
 #include "datasources/IGridDataSource.hpp"
 #include "datasources/RemoteGridDataSource.hpp"
 #include "models/MarketHealth.hpp"
@@ -9,6 +10,7 @@
 #include "mainwindow/QmlSceneController.h"
 #include "render/heatmap/HeatmapDataService.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
+#include "../servermodel/FakeChunkTransport.hpp"
 #include "widgets/ChartDock.hpp"
 #include "widgets/ServiceLocator.hpp"
 #include "mainwindow/GuiApiServer.h"
@@ -66,6 +68,7 @@ struct MainWindowSymbolLifecyclePeer {
 };
 
 namespace {
+QString isolatedSettingsPath;
 void select(MainWindowGPU& window, QLineEdit* input, const QString& symbol);
 void deliver(RemoteGridDataSource* source) { QCoreApplication::sendPostedEvents(source, QEvent::MetaCall); }
 void acknowledge(RemoteGridDataSource* source, const QString& symbol) {
@@ -212,33 +215,24 @@ TEST(MainWindowHealthIntegration, ChartProviderKeepsMissingOldAndUnrenderedFacts
     };
     ASSERT_TRUE(waitSnapshot("BTC-USD", layer->tfMs()));
     auto stats = layer->tileStatsPtr();
-    stats->frames.store(10);
+    // Deliberately inconsistent/retained renderer atoms must never invent
+    // current GUI facts, even when frame counts look successful.
     stats->drawnTfMs.store(layer->tfMs());
     stats->holding.store(true);
     stats->loadingSlots.store(3);
-    health->refreshChartState(); // First observation of this context cannot use retained counters.
-    EXPECT_FALSE(health->snapshot().holding.has_value());
-    stats->frames.store(11);
-    health->refreshChartState();
-    EXPECT_FALSE(health->snapshot().holding.has_value());
-    stats->frames.store(12);
-    health->refreshChartState();
-    EXPECT_EQ(health->snapshot().holding, true);
-    EXPECT_EQ(health->snapshot().loading, true);
-    EXPECT_EQ(health->snapshot().state, MarketHealth::State::WaitingForHistory);
-    EXPECT_TRUE(health->snapshot().coverage.contains("unknown"));
-    EXPECT_FALSE(health->snapshot().heatmapAgeMs); // Render atoms never create a feed receipt.
-    stats->errors.store(1);
-    health->refreshChartState();
-    EXPECT_FALSE(health->snapshot().holding.has_value()) << "a failed prepare invalidates retained tile counters";
-    stats->frames.store(14);
-    stats->holding.store(false);
-    stats->loadingSlots.store(0);
     stats->partialSlots.store(1);
-    health->refreshChartState();
-    EXPECT_EQ(health->snapshot().partial, true);
-    EXPECT_EQ(health->snapshot().state, MarketHealth::State::HistoryPartial);
-    EXPECT_TRUE(health->snapshot().coverage.contains("unknown"));
+    stats->refusedSlots.store(2);
+    for (uint64_t frames : {10, 12, 100}) {
+        stats->frames.store(frames);
+        stats->errors.fetch_add(1);
+        health->refreshChartState();
+        EXPECT_FALSE(health->snapshot().holding.has_value());
+        EXPECT_FALSE(health->snapshot().loading.has_value());
+        EXPECT_FALSE(health->snapshot().partial.has_value());
+        EXPECT_EQ(health->snapshot().state, MarketHealth::State::Live);
+        EXPECT_TRUE(health->snapshot().coverage.contains("unknown"));
+        EXPECT_FALSE(health->snapshot().heatmapAgeMs);
+    }
     renderer->setViewport(1'100'000, 1'700'000, 100, 102);
     health->refreshChartState();
     EXPECT_FALSE(health->snapshot().partial.has_value()) << "the previous viewport cannot describe the new one";
@@ -247,7 +241,7 @@ TEST(MainWindowHealthIntegration, ChartProviderKeepsMissingOldAndUnrenderedFacts
     acknowledge(source, "SOL-USD");
     health->refreshChartState(); // Layer still holds BTC's snapshot until queued data publication.
     EXPECT_EQ(health->snapshot().symbol, "SOL-USD");
-    EXPECT_EQ(health->snapshot().loading, true);
+    EXPECT_FALSE(health->snapshot().loading.has_value());
     EXPECT_FALSE(health->snapshot().holding.has_value());
     ASSERT_TRUE(waitSnapshot("SOL-USD", layer->tfMs()));
     health->refreshChartState();
@@ -255,13 +249,20 @@ TEST(MainWindowHealthIntegration, ChartProviderKeepsMissingOldAndUnrenderedFacts
     const auto oldTf = layer->tfMs();
     renderer->setTimeframe(int(oldTf * 5));
     health->refreshChartState();
-    EXPECT_EQ(health->snapshot().loading, true);
+    EXPECT_FALSE(health->snapshot().loading.has_value());
     EXPECT_FALSE(health->snapshot().holding.has_value());
     ASSERT_TRUE(waitSnapshot("SOL-USD", layer->tfMs()));
     health->refreshChartState();
     stats->frames.fetch_add(2);
     health->refreshChartState();
     EXPECT_FALSE(health->snapshot().holding.has_value()) << "old drawn timeframe cannot label the new one";
+    layer->setActive(false);
+    layer->setActive(true);
+    stats->frames.store(0); // Renderer reset; no completed publication.
+    health->refreshChartState();
+    EXPECT_FALSE(health->snapshot().loading.has_value());
+    EXPECT_FALSE(health->snapshot().holding.has_value());
+    EXPECT_FALSE(health->snapshot().partial.has_value());
     renderer->setHeatmapRenderer("legacy");
     health->refreshChartState();
     EXPECT_FALSE(health->snapshot().loading.has_value());
@@ -274,6 +275,132 @@ TEST(MainWindowHealthIntegration, ChartProviderKeepsMissingOldAndUnrenderedFacts
     health->refreshChartState();
     EXPECT_FALSE(health->snapshot().holding.has_value());
     EXPECT_TRUE(health->snapshot().coverage.isEmpty());
+}
+
+TEST(MainWindowHealthIntegration, NewPublicationAndCapacityRefusalDoNotClaimRendererPreparation) {
+    MainWindowGPU window;
+    auto* source = dynamic_cast<RemoteGridDataSource*>(ServiceLocator::dataSource());
+    ASSERT_TRUE(source);
+    source->streamClient()->disconnectFromServer();
+    source->streamClient()->connected(); deliver(source);
+    acknowledge(source, "BTC-USD");
+    book(source, "BTC-USD");
+    auto* health = source->marketHealth();
+    auto* renderer = MainWindowSymbolLifecyclePeer::renderer(window);
+    FakeChunkTransport* transport = nullptr;
+    heatmap::HeatmapDataService fixture([&](QObject*) {
+        transport = new FakeChunkTransport;
+        return transport;
+    });
+    renderer->setHeatmapService(&fixture);
+    renderer->setTimeframe(int(heatmap::kMinuteMs));
+    constexpr auto tile = heatmap::tiles::kTileColumns * heatmap::kMinuteMs;
+    constexpr auto start = ((recording::kHmc2MinMs / tile) + 3) * tile;
+    renderer->setViewport(start, start + 8 * tile, 100, 102);
+    auto* layer = renderer->gpuHeatmapLayer();
+    const auto publishAvailability = [&](int64_t end) {
+        fixture.onData([&] {
+            heatmap::ChunkAvailability a;
+            a.symbol = "BTC-USD";
+            a.chunkWireVersion = heatmap::kChunkWireVersion;
+            protocol::chunkwire::SourceInfo info;
+            info.id = "deep";
+            info.latestGrid = protocol::chunkwire::GridInfo{};
+            info.latestGrid->priceScale = 100;
+            info.levels.push_back({heatmap::kMinuteMs, heatmap::kHourMs, end, start, end - heatmap::kMinuteMs});
+            a.sources.push_back(std::move(info));
+            transport->goOnline();
+            transport->push(std::move(a));
+        });
+    };
+    const auto waitForSnapshot = [&](auto predicate) {
+        QElapsedTimer timer; timer.start();
+        while (timer.elapsed() < 2000) {
+            const auto snapshot = layer->snapshot();
+            if (snapshot && snapshot->symbol == "BTC-USD" && snapshot->tfMs == heatmap::kMinuteMs
+                && predicate(*snapshot)) return true;
+            QTest::qWait(10);
+        }
+        return false;
+    };
+    publishAvailability(start + 10 * tile);
+    ASSERT_TRUE(waitForSnapshot([](const auto& s) { return !s.spans.empty() && s.refused.empty(); }));
+    const auto previous = layer->snapshot();
+    auto stats = layer->tileStatsPtr();
+    stats->frames.store(100);
+    stats->drawnTfMs.store(layer->tfMs());
+    stats->holding.store(true);
+    stats->loadingSlots.store(9);
+    stats->partialSlots.store(9);
+    health->refreshChartState();
+    EXPECT_FALSE(health->snapshot().loading.has_value());
+    EXPECT_FALSE(health->snapshot().holding.has_value());
+    EXPECT_FALSE(health->snapshot().partial.has_value());
+    publishAvailability(start + 11 * tile); // Ordinary publication, same serial and viewport.
+    ASSERT_TRUE(waitForSnapshot([&](const auto& s) { return s.version > previous->version; }));
+    ASSERT_EQ(layer->snapshot()->serial, previous->serial);
+    health->refreshChartState(); // The corresponding renderer preparation has not occurred.
+    EXPECT_FALSE(health->snapshot().loading.has_value());
+    EXPECT_FALSE(health->snapshot().holding.has_value());
+    EXPECT_FALSE(health->snapshot().partial.has_value());
+
+    // Actual controller capacity rejection, not an injected refusal flag.
+    auto budgets = heatmap::HeatmapBudgets{};
+    budgets.decodedChunks = budgets.spanSources = 64 * 1024;
+    budgets.cpuCeiling = 128 * 1024;
+    ASSERT_TRUE(fixture.setBudgets(budgets));
+    ASSERT_TRUE(waitForSnapshot([](const auto& s) { return !s.refused.empty(); }));
+    stats->loadingSlots.store(0);
+    health->refreshChartState();
+    EXPECT_EQ(health->snapshot().partial, true);
+    EXPECT_EQ(health->snapshot().state, MarketHealth::State::HistoryPartial);
+    EXPECT_TRUE(health->snapshot().reason.contains("CPU capacity limit"));
+    EXPECT_FALSE(health->snapshot().loading.has_value());
+    EXPECT_FALSE(health->snapshot().holding.has_value());
+    EXPECT_FALSE(health->snapshot().heatmapAgeMs);
+    stats->loadingSlots.store(9); // Hatch counters cannot distinguish denied content from work.
+    health->refreshChartState();
+    EXPECT_EQ(health->snapshot().state, MarketHealth::State::HistoryPartial);
+    EXPECT_FALSE(health->snapshot().loading.has_value());
+    renderer->setHeatmapService(window.heatmapDataService());
+}
+
+TEST(MainWindowHealthIntegration, LocalHostPolicyRefusalClearsOptimisticRailPendingWithoutCatalogClaim) {
+    struct HostScope {
+        ~HostScope() {
+            AgentHostMode::resetForTests();
+            QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, isolatedSettingsPath);
+            QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, isolatedSettingsPath);
+        }
+    } restore;
+    QTemporaryDir host("/private/tmp/sentinel-health-host-XXXXXX");
+    QString error;
+    ASSERT_TRUE(AgentHostMode::activate(host.path(), {}, &error)) << error.toStdString();
+    AgentHostMode::setSymbolAllowlist({"BTC-USD"});
+    MainWindowGPU window;
+    auto* source = dynamic_cast<RemoteGridDataSource*>(ServiceLocator::dataSource());
+    ASSERT_TRUE(source);
+    source->streamClient()->disconnectFromServer();
+    source->streamClient()->connected(); deliver(source);
+    acknowledge(source, "BTC-USD");
+    book(source, "BTC-USD");
+    auto* rail = window.findChild<WatchlistDock*>();
+    auto* row = watchItem(rail, "ETH-USD");
+    ASSERT_TRUE(row);
+    QSignalSpy selected(rail, &WatchlistDock::symbolSelected);
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        ASSERT_TRUE(QMetaObject::invokeMethod(rail, "onRowActivated", Qt::DirectConnection,
+                                             Q_ARG(QModelIndex, row->index())));
+        EXPECT_EQ(selected.size(), attempt + 1) << "a rejected row must remain selectable";
+        EXPECT_TRUE(row->text().startsWith("!"));
+        EXPECT_TRUE(row->toolTip().contains("host session's symbol policy"));
+        EXPECT_TRUE(rail->findChild<QLabel*>("watchStatus")->text().contains("excluded"));
+        EXPECT_TRUE(watchItem(rail, "BTC-USD")->text().startsWith("●"));
+        EXPECT_EQ(source->marketHealth()->activeSymbol(), "BTC-USD");
+        EXPECT_EQ(source->marketHealth()->snapshot().state, MarketHealth::State::Live);
+        EXPECT_FALSE(MainWindowSymbolLifecyclePeer::switchTimeoutActive(window));
+        EXPECT_TRUE(watchItem(rail, "SOL-USD")->toolTip().contains("unverified"));
+    }
 }
 
 TEST(MainWindowHealthIntegration, DefaultLayoutPreservesNavigationRailCapAtNarrowAndWideWidths) {
@@ -688,6 +815,7 @@ int main(int argc, char** argv) {
     qmlRegisterType<CandlestickBatched>("Sentinel.Charts", 1, 0, "CandlestickBatched");
     qmlRegisterType<CandlestickOverlayItem>("Sentinel.Charts", 1, 0, "CandlestickOverlayItem");
     QTemporaryDir settingsDir;
+    isolatedSettingsPath = settingsDir.path();
     QSettings::setDefaultFormat(QSettings::IniFormat);
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDir.path());
     QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, settingsDir.path());

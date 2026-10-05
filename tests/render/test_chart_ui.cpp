@@ -17,12 +17,20 @@
 #include "render/heatmap/HeatmapSettingsModel.hpp"
 #include "widgets/HeatmapSettingsDialog.hpp"
 #include "widgets/TopToolbar.hpp"
+#include "themes/ThemeManager.hpp"
+#include "themes/FontManager.hpp"
 #include "SyntheticHmc2Fixture.hpp"
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QDir>
+#include <QLabel>
+#include <QLineEdit>
+#include <QVBoxLayout>
+#include <QToolButton>
+#include <QPainter>
 #include <QElapsedTimer>
 #include <QMenu>
 #include <QQuickWindow>
@@ -232,6 +240,98 @@ TEST(ChartToolbar, NarrowTickMenuRetainsUnavailableValueAndResolutionWarning) {
     EXPECT_TRUE(current->isEnabled());
     EXPECT_TRUE(tickMenu->findChildren<QAction *>("controlsTickIndicator").isEmpty());
     EXPECT_FALSE(tickMenu->menuAction()->toolTip().contains("veiled")); // Qt falls back to the action text.
+}
+
+// Opt-in own-widget captures only. This fixture has synthetic tick availability
+// and no transport/chart feed; production controls/settings supply the behavior.
+TEST(ChartToolbarFixture, NativeSyntheticScreenshots) {
+    const QString output = qEnvironmentVariable("SENTINEL_TOOLBAR_SHOTS");
+    if (output.isEmpty()) GTEST_SKIP() << "Opt-in synthetic fixture requires output path and root's native GUI slot";
+    if (QGuiApplication::platformName() == "offscreen" || QGuiApplication::platformName() == "minimal")
+        GTEST_SKIP() << "Native QWidget platform required for authorized fixture screenshots";
+    ASSERT_TRUE(QDir::isAbsolutePath(output));
+    ASSERT_TRUE(QDir().mkpath(output));
+    TempStore store;
+    HeatmapSettingsModel model(store.store, "synthetic-toolbar-fixture", store.config);
+    UnifiedGridRenderer renderer;
+    HeatmapChartControls controls(&model);
+    QWidget surface;
+    surface.setWindowTitle("Sentinel — synthetic toolbar fixture (no live feed)");
+    auto* layout = new QVBoxLayout(&surface);
+    layout->setContentsMargins(0, 0, 0, 0);
+    auto* label = new QLabel("SYNTHETIC TOOLBAR FIXTURE · no live feed", &surface);
+    layout->addWidget(label);
+    auto* toolbar = new TopToolbar(&surface);
+    layout->addWidget(toolbar);
+    controls.setToolbar(toolbar);
+    controls.setRenderer(&renderer);
+    toolbar->symbolSearch()->setText("ETH-USD");
+    toolbar->setBaseAssetSymbol("ETH-USD");
+    toolbar->setAvailableTimeframes({60'000, 300'000, 900'000});
+    toolbar->setTimeframeMs(300'000);
+    ASSERT_TRUE(model.apply({{"sensitivityMin", 0.125}, {"sensitivityMax", 12.5}, {"labelCurrency", "usd"}}, false).isEmpty());
+    const auto save = [&](const QString& name, QMenu* menu = nullptr) {
+        QTest::qWait(100);
+        const auto own = surface.grab();
+        if (!menu) return own.save(QDir(output).filePath(name + "-synthetic-fixture.png"));
+        const auto popup = menu->grab();
+        QPixmap composed(std::max(own.width(), popup.width()), own.height() + popup.height());
+        composed.setDevicePixelRatio(own.devicePixelRatio());
+        composed.fill(surface.palette().window().color());
+        QPainter painter(&composed);
+        painter.drawPixmap(0, 0, own);
+        painter.drawPixmap(0, int(own.height() / own.devicePixelRatio()), popup);
+        painter.end();
+        return composed.save(QDir(output).filePath(name + "-synthetic-fixture.png"));
+    };
+    for (const QString mode : {QString("heatmap"), QString("tpo"), QString("volume")}) {
+        if (mode == "heatmap") renderer.setHeatmapLayerEnabled(true);
+        else if (mode == "tpo") renderer.setTpoLayerEnabled(true);
+        else renderer.setVolumeProfileLayerEnabled(true);
+        renderer.setTpoSessionType(4);
+        renderer.setTpoLayout("split");
+        QCoreApplication::processEvents();
+        controls.syncNow();
+        for (int width : {420, 960, 1920}) {
+            surface.setFixedWidth(width);
+            surface.adjustSize();
+            surface.show();
+            surface.activateWindow();
+            QTest::qWait(100);
+            // Explicit synthetic availability: current locked $0.15 is retained
+            // but unavailable, while loaded data offers $0.10/$0.20/$0.50.
+            TopToolbar::TickSelectorState tick;
+            tick.enabled = true;
+            tick.manual = true;
+            tick.manualUnits = tick.drawnUnits = 15;
+            tick.offeredUnits = {10, 20, 50};
+            tick.indicator = "Synthetic resolution: locked $0.15 unavailable in loaded columns";
+            toolbar->setTickSelectorState(tick);
+            toolbar->setLiquidityRange(0.01, 100, model.settings().sensitivityMin, model.settings().sensitivityMax);
+            toolbar->symbolSearch()->setFocus(Qt::TabFocusReason);
+            const QString name = QString("toolbar-%1-%2").arg(mode).arg(width);
+            ASSERT_TRUE(save(name));
+            if (width == 420) {
+                auto* menu = toolbar->controlsMenu();
+                menu->popup(toolbar->controlsButton()->mapToGlobal(QPoint(0, toolbar->controlsButton()->height())));
+                menu->setFocus(Qt::TabFocusReason);
+                QTest::keyClick(menu, Qt::Key_Down);
+                ASSERT_TRUE(menu->activeAction());
+                ASSERT_TRUE(save(name + "-controls-keyboard", menu));
+                if (mode == "heatmap") {
+                    auto* ticks = menu->findChild<QMenu*>("controlsTick");
+                    ASSERT_TRUE(ticks);
+                    ticks->popup(menu->mapToGlobal(QPoint(menu->width(), 0)));
+                    ticks->setFocus(Qt::TabFocusReason);
+                    QTest::keyClick(ticks, Qt::Key_Down);
+                    ASSERT_TRUE(ticks->activeAction());
+                    ASSERT_TRUE(save(name + "-tick-keyboard", ticks));
+                    ticks->hide();
+                }
+                menu->hide();
+            }
+        }
+    }
 }
 
 // Load the actual production shell without opening a window or starting a feed.
@@ -485,6 +585,33 @@ TEST_F(ChartControls, ChartMenuRoundTripsTheLabelSettings) {
     EXPECT_FALSE(model->settings().showLabels);
     menuAction(menu, "chartMenuCurrencyAsset")->trigger();
     EXPECT_EQ(model->settings().labelCurrency, "asset");
+}
+
+TEST_F(ChartControls, LegacyCurrencyRemainsAvailableInAppearanceMenu) {
+    ASSERT_TRUE(model->apply({{"renderer", "legacy"}}, false).isEmpty());
+    controls->syncNow();
+    EXPECT_FALSE(toolbar->shownControls().liquidity) << "currency is secondary appearance, not primary-strip chrome";
+    EXPECT_TRUE(toolbar->shownControls().thresholdSlider);
+    emit toolbar->chartMenu()->aboutToShow();
+    auto* currency = toolbar->chartMenu()->findChild<QMenu*>("chartMenuCurrency");
+    ASSERT_TRUE(currency);
+    EXPECT_TRUE(currency->menuAction()->isVisible());
+    EXPECT_TRUE(currency->menuAction()->isEnabled());
+    auto* asset = menuAction(currency, "chartMenuCurrencyAsset");
+    auto* usd = menuAction(currency, "chartMenuCurrencyUsd");
+    ASSERT_TRUE(asset && usd);
+    EXPECT_TRUE(asset->isVisible());
+    EXPECT_TRUE(asset->isEnabled());
+    asset->trigger();
+    EXPECT_EQ(model->settings().labelCurrency, "asset");
+    emit toolbar->chartMenu()->aboutToShow();
+    EXPECT_TRUE(asset->isChecked());
+    EXPECT_FALSE(usd->isChecked());
+    usd->trigger();
+    EXPECT_EQ(model->settings().labelCurrency, "usd");
+    emit toolbar->chartMenu()->aboutToShow();
+    EXPECT_TRUE(usd->isChecked());
+    EXPECT_FALSE(asset->isChecked());
 }
 
 // The dialog's Chart tab edits the same keys, and follows the model.
@@ -760,7 +887,7 @@ TEST_F(ChartLabels, ASymbolSwitchMidRequestDropsTheOldSymbolsLabels) {
 }
 
 // The toolbar follows the chart's layers (TPO hides the heatmap-only controls),
-// and the currency combo drives the model and the legacy label mode.
+// and the appearance menu drives the model and the legacy label currency.
 TEST_F(ChartLabels, ToolbarFollowsTheChartsLayers) {
     pump(300, [] { return false; });
     EXPECT_TRUE(toolbar->shownControls().rangeSlider);
@@ -798,14 +925,23 @@ TEST_F(ChartLabels, ToolbarFollowsTheChartsLayers) {
     EXPECT_FALSE(shown.labelsToggle) << "legacy always draws its labels: no toggle";
     emit toolbar->chartMenu()->aboutToShow();
     EXPECT_FALSE(menuAction(toolbar->chartMenu(), "chartMenuLabels")->isVisible()) << "hidden in legacy, as the toolbar";
-    EXPECT_TRUE(shown.liquidity) << "the currency stays";
-    // Currency: model, toolbar and the legacy label mode agree.
-    toolbar->liquidityModeCombo()->setCurrentIndex(0);
-    emit toolbar->liquidityModeCombo()->activated(0);
+    EXPECT_FALSE(shown.liquidity) << "appearance stays in the gear menu";
+    auto *currency = toolbar->chartMenu()->findChild<QMenu *>("chartMenuCurrency");
+    ASSERT_TRUE(currency);
+    EXPECT_TRUE(currency->menuAction()->isVisible());
+    EXPECT_TRUE(currency->menuAction()->isEnabled());
+    auto *asset = menuAction(currency, "chartMenuCurrencyAsset");
+    ASSERT_TRUE(asset && asset->isVisible() && asset->isEnabled());
+    asset->trigger();
     EXPECT_EQ(model->settings().labelCurrency, "asset");
     EXPECT_EQ(ugr->liquidityLabelMode(), 0);
+    emit toolbar->chartMenu()->aboutToShow();
+    EXPECT_TRUE(asset->isChecked());
     ASSERT_TRUE(model->apply({{"labelCurrency", "usd"}}, false).isEmpty());
     EXPECT_EQ(ugr->liquidityLabelMode(), 1);
+    emit toolbar->chartMenu()->aboutToShow();
+    EXPECT_TRUE(menuAction(currency, "chartMenuCurrencyUsd")->isChecked());
+    EXPECT_FALSE(asset->isChecked());
 }
 
 // Renderer state changed elsewhere (Agent API, another surface) shows in the
@@ -902,6 +1038,10 @@ TEST_F(ChartLabels, DialogAndMenuSurviveTheRendererBeingDestroyed) {
 int main(int argc, char **argv) {
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication app(argc, argv);
+    QTemporaryDir settingsDir;
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDir.path());
+    QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, settingsDir.path());
     qmlRegisterModule("Sentinel", 1, 0);
     qmlRegisterType<UnifiedGridRenderer>("Sentinel", 1, 0, "UnifiedGridRenderer");
     qmlRegisterType<TimeAxisModel>("Sentinel", 1, 0, "TimeAxisModel");
@@ -909,6 +1049,10 @@ int main(int argc, char **argv) {
     qml_register_types_Sentinel_Charts();
     lab::selectQuickSceneGraph(); // before any QQuickWindow: Qt fixes the backend at the first one
     Q_INIT_RESOURCE(sentinel_ui_fonts);
+    Q_INIT_RESOURCE(sentinel_svg_resources);
+    ThemeManager::instance().initializeDefaults();
+    ThemeManager::instance().applyTheme("dark", &app);
+    FontManager::instance().initialize(&app);
     ::testing::InitGoogleTest(&argc, argv);
     std::cout << "[sentinel] " << lab::describeRhi().toStdString() << std::endl;
     fixtureDir = new QTemporaryDir;

@@ -92,58 +92,38 @@ namespace {
 std::function<MarketHealth::ChartFacts()> chartHealthProvider(UnifiedGridRenderer *renderer, MarketHealth *health) {
     QPointer<UnifiedGridRenderer> chart = renderer;
     QPointer<MarketHealth> model = health;
-    return [chart, model, symbol = QString{}, tf = int64_t(0), serial = uint64_t(0),
-            view = uint64_t(0), baseline = uint64_t(0), errors = uint64_t(0)]() mutable {
+    return [chart, model] {
         MarketHealth::ChartFacts facts;
         if (!chart || !model || model->activeSymbol().isEmpty() || !chart->gpuHeatmapActive()
-            || !chart->heatmapLayerEnabled()) {
-            symbol.clear(); // Re-enabling a layer needs fresh render evidence.
-            return facts;
-        }
+            || !chart->heatmapLayerEnabled()) return facts;
         const auto *layer = chart->gpuHeatmapLayer();
-        if (!layer) return facts;
+        if (!layer || !layer->active() || !layer->controller()) return facts;
         facts.symbol = model->activeSymbol();
         facts.coverage = "Viewport history coverage unknown";
         const auto snapshot = layer->snapshot();
-        const auto &stats = layer->tileStats();
-        const auto frames = stats.frames.load();
-        const auto snapshotSerial = snapshot ? snapshot->serial : 0;
-        const auto viewportVersion = chart->getViewState()->getViewportVersion();
-        if (symbol != facts.symbol || tf != layer->tfMs() || serial != snapshotSerial
-            || view != viewportVersion || errors != stats.errors.load()) {
-            symbol = facts.symbol;
-            tf = layer->tfMs();
-            serial = snapshotSerial;
-            view = viewportVersion;
-            baseline = frames;
-            errors = stats.errors.load();
-        }
-        if (QString::fromStdString(layer->symbol()) != facts.symbol) return facts;
-        if (!snapshot || snapshot->symbol.empty()) return facts; // Absence is unknown, not zero coverage/loading.
+        if (QString::fromStdString(layer->symbol()) != facts.symbol || !snapshot
+            || snapshot->symbol.empty()) return facts;
         if (snapshot->symbol != layer->symbol() || snapshot->tfMs != layer->tfMs()) {
-            facts.loading = true;
-            facts.reason = "Waiting for current symbol/timeframe snapshot; previous chart snapshot retained";
+            facts.coverage += "; current symbol/timeframe snapshot unavailable";
             return facts;
         }
+        QStringList reasons;
         const QString indicator = layer->resolutionIndicator();
         if (!indicator.isEmpty()) {
             facts.partial = true;
-            facts.reason = indicator;
+            reasons << indicator;
         }
-        // Tile counters have no symbol/serial tag and frames increments at
-        // prepare entry. Wait two frames after a new context before using them:
-        // even if the second is in progress, the first belongs to this context.
-        // A changed viewport or failed prepare also invalidates that evidence.
-        // An idle chart with no such proof retains unknown renderer facts.
-        if (frames <= baseline || frames - baseline < 2 || stats.drawnTfMs.load() != tf) return facts;
-        facts.holding = stats.holding.load();
-        facts.loading = stats.loadingSlots.load() > 0 || stats.refusedSlots.load() > 0 || !snapshot->refused.empty();
-        facts.partial = facts.partial.value_or(false) || stats.partialSlots.load() > 0 || stats.fallbackSlots.load() > 0;
-        if (facts.holding == true) facts.reason = "Holding previous chart picture while current content is prepared";
-        else if (facts.loading == true) facts.reason = "Preparing viewport heatmap content";
-        else if (facts.partial == true && facts.reason.isEmpty()) facts.reason = "Viewport picture is partially prepared";
-        // Neither complete tiles nor service availability proves full history
-        // coverage. Cumulative error counters do not prove current unavailability.
+        if (!snapshot->refused.empty()) {
+            facts.partial = true;
+            reasons << "Heatmap spans refused by the CPU capacity limit";
+        }
+        facts.reason = reasons.join("; ");
+        // Tile atoms are untagged and stored individually, with frames advancing
+        // at prepare entry. Neither frame delays nor matching snapshot serial/
+        // version can establish a coherent current report. Holding/loading and
+        // renderer partial/unavailable therefore remain unknown, including
+        // loading hatches that can represent denied or terminally failed work.
+        // Snapshot availability and tile completeness do not prove coverage.
         return facts;
     };
 }
@@ -973,6 +953,7 @@ void MainWindowGPU::onAssetSymbolSelected(const QString& symbol, const QString& 
 void MainWindowGPU::onSubscribe() {
     QString symbol = m_symbolInput->text().trimmed().toUpper();
     if (!subscribeSymbol(symbol)) {
+        if (m_chartSwitchFailureSymbol == symbol && !m_chartSwitchFailureReason.isEmpty()) return;
         sLog_App("ui: subscribe rejected, invalid symbol=" << symbol);
         QMessageBox::warning(this, "Invalid Input", "Enter a valid symbol like BTC-USD.");
     }
@@ -983,6 +964,11 @@ bool MainWindowGPU::subscribeSymbol(const QString& symbol) {
     if (!pattern.match(symbol).hasMatch()) return false;
     if (!AgentHostMode::symbolAllowed(symbol)) { // --agent-host: no upstream subscriptions beyond the allowlist
         sLog_Warning("agent-host: symbol refused: symbol=" << symbol);
+        m_chartSwitchFailureSymbol = symbol;
+        m_chartSwitchFailureReason = QStringLiteral("%1 is excluded by this GUI host session's symbol policy; market availability remains unverified").arg(symbol);
+        syncWatchlistChartState();
+        statusBar()->showMessage(m_chartSwitchFailureReason);
+        if (m_symbolInput) m_symbolInput->setText(m_currentSymbol);
         return false;
     }
     sLog_App("ui: subscribe symbol=" << symbol << " prev=" << m_currentSymbol
