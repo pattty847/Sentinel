@@ -31,14 +31,14 @@ Last updated: 2026-10-04 21:40 EDT. Codex acting orchestrator; wave 1 complete, 
 
 - Owner decides behaviour, data and looks; the orchestrator decides the rest with stated defaults. One digest,
   at most 2-3 items waiting on the owner.
-- Routing (2026-10-03): Codex writes; Claude Fable (separate usage limit) reviews Codex work; avoid Claude
+- Routing (2026-10-03): Codex writes; Claude Fable (allowance separation unproven) reviews Codex work; avoid Claude
   opus/sonnet subagents until the owner says the Claude weekly has reset.
 - No sounds while the owner is away; loud ping only when the owner is needed.
 - Builds and tests go through `scripts/dev/build-queue.sh`.
 
 ## Acting-orchestrator checks
 
-- Claude Fable alias verified with `claude -p --model fable` on Oct 4. One small STATUS review passed; before/after Claude weekly 3% left, session 97% -> 96% left. Paper review used model `claude-fable-5-1`; weekly still 3% left afterward, session 96% -> 94% left. Whole-percent precision does not prove a separate Fable allowance. Check around each review; if weekly remaining drops, stop Claude reviews and notify owner before any landing. Codex weekly initially 8%, latest check 5% remaining; use it before owner applies reset credit.
+- Claude Fable alias verified with `claude -p --model fable` on Oct 4. One small STATUS review passed; before/after Claude weekly 3% left, session 97% -> 96% left. Paper review used model `claude-fable-5-1`; weekly still 3% left afterward, session 96% -> 94% left. Whole-percent precision does not prove a separate Fable allowance. Check around each review; if weekly remaining drops, stop Claude reviews and notify owner before any landing. Codex weekly initially 8%, latest check 4% remaining; use it before owner applies reset credit.
 - Wave 2: at most three writing lieutenants; W2b alone owns hubs. Review every branch with Fable only if the budget check permits; no opus/sonnet writers before owner confirmation of the Claude weekly reset.
 - Deployments and slice D require asking the owner first and confirmation that the owner is present.
 - Unrelated `lt-sol/label-style` locked worktree and untracked `.codex/` left untouched.

@@ -12,7 +12,9 @@ after a secret scan (never force), keep `docs/STATUS.md` current after every lan
 
 - **Lieutenants (writers):** your own Codex subagents/threads, one worktree each
   (`scripts/dev/agent-worktree.sh create lt-sol/<name>`). They build/test through `scripts/dev/build-queue.sh`.
-- **Reviewers:** Claude, so review stays cross-vendor. Claude Fable has its own weekly limit. From a shell:
+- **Reviewers:** Claude, so review stays cross-vendor. A separate Fable allowance is unproven: check
+  `scripts/dev/budget.sh` before and after each review; if Claude weekly remaining falls, stop Claude reviews
+  and tell the owner before any further landing. From a shell:
   `cd <worktree> && claude -p --model fable "<read-only review prompt: commit, spec, what to check, VERDICT format>"`.
   Verify the alias with a one-line test call first; if `fable` is not accepted, ask the owner. Never let a Codex
   model be the only review of Codex-written code that touches the recorder, capture or the GPU heatmap.
