@@ -25,6 +25,7 @@
 #include <QHideEvent>
 #include <QHash>
 #include <functional>
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <optional>
@@ -157,6 +158,7 @@ void ScreenerDock::buildUi() {
     m_autoCheck->setChecked(false);
     m_autoCheck->setIcon(QIcon(":/svg/auto-refresh.svg"));
     m_autoCheck->setToolTip("Automatically refresh at the set interval");
+    m_autoCheck->setMinimumWidth(m_autoCheck->sizeHint().width() + 4);
     toolbar->addWidget(m_autoCheck);
 
     m_runBtn = new QToolButton(m_contentWidget);
@@ -173,12 +175,14 @@ void ScreenerDock::buildUi() {
     m_table = new ScreenerTableView(m_contentWidget);
     m_table->setObjectName("screenerRows");
     m_table->setModel(m_model);
+    m_table->viewport()->installEventFilter(this);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setAlternatingRowColors(true);
     m_table->setSortingEnabled(true);
     m_table->sortByColumn(kColSymbol, Qt::AscendingOrder);
+    m_table->setTextElideMode(Qt::ElideRight);
     m_table->verticalHeader()->hide();
     m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
     m_table->horizontalHeader()->setStretchLastSection(true);
@@ -209,6 +213,11 @@ void ScreenerDock::buildUi() {
             this, &ScreenerDock::onRunClicked);
     connect(m_table,          &QTableView::clicked,
             this, &ScreenerDock::onRowClicked);
+    connect(m_table->horizontalHeader(), &QHeaderView::sectionResized, this,
+            [this](int logicalIndex, int, int) {
+        if (logicalIndex == kColName && !m_adjustingColumnWidths)
+            m_nameColumnUserSized = true;
+    });
     static_cast<ScreenerTableView*>(m_table)->keyboardActivate = [this](const QModelIndex& index) {
         onRowClicked(index);
     };
@@ -279,17 +288,18 @@ struct CellView {
     QString text;
     QVariant sort;
     QVariant foreground;
+    QString tooltip;
     bool numeric = false;
 };
 
-static CellView textCell(const QString& text) {
-    return {text.isEmpty() ? QStringLiteral("—") : text, text, {}, false};
+static CellView textCell(const QString& text, const QString& tooltip = {}) {
+    return {text.isEmpty() ? QStringLiteral("—") : text, text, {}, tooltip, false};
 }
 
 static CellView numberCell(const QString& display, std::optional<double> value,
                            const QVariant& foreground = {}) {
     return {value ? display : QStringLiteral("—"),
-            value ? QVariant(*value) : QVariant(), foreground, true};
+            value ? QVariant(*value) : QVariant(), foreground, {}, true};
 }
 
 static bool updateCell(QStandardItem* item, const CellView& cell) {
@@ -303,6 +313,7 @@ static bool updateCell(QStandardItem* item, const CellView& cell) {
         item->setData(cell.foreground, Qt::ForegroundRole);
         changed = true;
     }
+    if (item->toolTip() != cell.tooltip) { item->setToolTip(cell.tooltip); changed = true; }
     const auto alignment = cell.numeric ? Qt::AlignRight | Qt::AlignVCenter : Qt::AlignLeft | Qt::AlignVCenter;
     if (item->textAlignment() != alignment) { item->setTextAlignment(alignment); changed = true; }
     return changed;
@@ -368,7 +379,7 @@ void ScreenerDock::applyRows(const QJsonArray& rows) {
             extra3 = textCell(row["Sector"].toString());
         }
         const std::array<CellView, kColCount> cells = {
-            textCell(symbol), textCell(row["Name"].toString()),
+            textCell(symbol), textCell(row["Name"].toString(), row["Name"].toString()),
             numberCell(price ? fmtPrice(*price) : QString(), price),
             numberCell(changePct ? QString::number(*changePct, 'f', 2) + "%" : QString(), changePct, pctColor),
             numberCell(volume ? fmtVolume(*volume) : QString(), volume),
@@ -415,10 +426,45 @@ void ScreenerDock::applyRows(const QJsonArray& rows) {
     else m_table->verticalScrollBar()->setValue(oldScroll);
 
     if (!m_columnsResized) {
+        const int manualNameWidth = m_table->columnWidth(kColName);
+        m_adjustingColumnWidths = true;
         m_table->resizeColumnsToContents();
+        if (m_nameColumnUserSized) m_table->setColumnWidth(kColName, manualNameWidth);
+        m_adjustingColumnWidths = false;
         m_columnsResized = true;
+        m_nameColumnPreferredWidth = m_nameColumnUserSized
+            ? manualNameWidth : m_table->columnWidth(kColName);
+    } else if (!m_nameColumnUserSized) {
+        // Re-measure only after a changed payload batch, never on each viewport resize.
+        m_nameColumnPreferredWidth = m_table->horizontalHeader()->sectionSizeHint(kColName);
     }
+    adjustDefaultNameColumnWidth();
     m_table->horizontalScrollBar()->setValue(oldHorizontalScroll);
+}
+
+void ScreenerDock::adjustDefaultNameColumnWidth() {
+    if (!m_table || !m_columnsResized || m_nameColumnUserSized || m_model->rowCount() == 0) return;
+    const int viewportWidth = m_table->viewport()->width();
+    if (viewportWidth <= 0) return;
+
+    // Name is secondary context in the compact view. Keep Symbol and Price visible at the
+    // left edge, while allowing more room on wider docks. The full provider name remains in
+    // DisplayRole and ToolTipRole; QTableView elides only its painted text.
+    const int quoteBudget = m_table->columnWidth(kColSymbol) + m_table->columnWidth(kColPrice) +
+                            m_table->columnWidth(kColChangePct) + m_table->columnWidth(kColVolume) + 8;
+    const int compactNameBudget = viewportWidth * 2 / 5;
+    const int availableNameBudget = viewportWidth - quoteBudget;
+    const int nameHeaderWidth = m_table->horizontalHeader()->sectionSizeHint(kColName);
+    const int desired = std::max(nameHeaderWidth,
+        std::min(m_nameColumnPreferredWidth,
+                 std::min(compactNameBudget, availableNameBudget)));
+    if (desired <= 0 || desired == m_table->columnWidth(kColName)) return;
+
+    const int horizontalOffset = m_table->horizontalScrollBar()->value();
+    m_adjustingColumnWidths = true;
+    m_table->setColumnWidth(kColName, desired);
+    m_adjustingColumnWidths = false;
+    m_table->horizontalScrollBar()->setValue(horizontalOffset);
 }
 
 void ScreenerDock::updateColumns() {
@@ -476,6 +522,8 @@ void ScreenerDock::watchWindow() {
 }
 
 bool ScreenerDock::eventFilter(QObject* watched, QEvent* event) {
+    if (m_table && watched == m_table->viewport() && event->type() == QEvent::Resize)
+        adjustDefaultNameColumnWidth();
     if ((watched == this || watched == m_hostWindow) && event->type() == QEvent::WindowStateChange)
         updateAutoTimer();
     return DockablePanel::eventFilter(watched, event);

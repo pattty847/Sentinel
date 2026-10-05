@@ -285,6 +285,73 @@ TEST(Screener, RefreshKeepsScrolledSymbolAndSelectionAcrossNumericReorder) {
     EXPECT_EQ(table->horizontalScrollBar()->value(), horizontalOffset);
 }
 
+TEST(Screener, LongNamesKeepQuoteColumnsVisibleAndManualWidthAcrossRefreshAndResize) {
+    ScreenerDock dock;
+    dock.resize(480, 360);
+    dock.show();
+    QCoreApplication::processEvents();
+    auto* autoCheck = dock.findChild<QCheckBox*>();
+    ASSERT_NE(autoCheck, nullptr);
+    EXPECT_EQ(autoCheck->text(), "Auto");
+    EXPECT_GE(autoCheck->width(), autoCheck->sizeHint().width());
+    auto* table = dock.findChild<QTableView*>("screenerRows");
+    auto* model = qobject_cast<QStandardItemModel*>(table->model());
+    const QString fullName = QStringLiteral("An intentionally long provider name that would hide the quote columns if content sized");
+    const QJsonArray rows{
+        QJsonObject{{"symbol", "ABC-USD"}, {"Name", fullName}, {"Price", 12.34},
+                    {"Change %", 1.25}, {"Volume", 12345.0}, {"Exchange", "COINBASE"}},
+        QJsonObject{{"symbol", "XYZ-USD"}, {"Name", "Another long provider supplied asset name"},
+                    {"Price", 2.34}, {"Change %", -0.5}, {"Volume", 54321.0}, {"Exchange", "COINBASE"}}};
+    updateScreener(dock, "crypto", rows);
+    QCoreApplication::processEvents();
+
+    const int row = rowFor(model, "ABC-USD");
+    ASSERT_GE(row, 0);
+    auto* name = model->item(row, 1);
+    ASSERT_NE(name, nullptr);
+    EXPECT_EQ(name->text(), fullName);
+    EXPECT_EQ(name->toolTip(), fullName);
+    for (int quoteColumn : {2, 3, 4}) {
+        const QRect quoteRect = table->visualRect(model->index(row, quoteColumn));
+        EXPECT_TRUE(quoteRect.isValid());
+        EXPECT_TRUE(table->viewport()->rect().contains(quoteRect))
+            << "Price, Change, and Volume must remain readable beside a long Name at minimum width";
+    }
+
+    const QString longerName = fullName + QStringLiteral(" ") + fullName;
+    updateScreener(dock, "crypto", QJsonArray{
+        QJsonObject{{"symbol", "ABC-USD"}, {"Name", longerName}, {"Price", 12.34},
+                    {"Change %", 1.25}, {"Volume", 12345.0}, {"Exchange", "COINBASE"}},
+        rows.at(1).toObject()});
+    EXPECT_EQ(name->text(), longerName);
+    EXPECT_EQ(name->toolTip(), longerName);
+    for (int quoteColumn : {2, 3, 4})
+        EXPECT_TRUE(table->viewport()->rect().contains(
+            table->visualRect(model->index(rowFor(model, "ABC-USD"), quoteColumn))))
+            << "A later longer name must remain bounded after an earlier payload";
+
+    const int automaticNameWidth = table->columnWidth(1);
+    table->setColumnWidth(1, automaticNameWidth + 12);
+    const int userNameWidth = table->columnWidth(1);
+    ASSERT_GT(userNameWidth, 0);
+    table->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
+    table->selectRow(row);
+    const int horizontalOffset = std::min(17, table->horizontalScrollBar()->maximum());
+    table->horizontalScrollBar()->setValue(horizontalOffset);
+    ASSERT_GT(horizontalOffset, 0);
+    updateScreener(dock, "crypto", QJsonArray{
+        QJsonObject{{"symbol", "ABC-USD"}, {"Name", fullName}, {"Price", 13.34},
+                    {"Change %", 1.35}, {"Volume", 12345.0}, {"Exchange", "COINBASE"}},
+        rows.at(1).toObject()});
+    EXPECT_EQ(table->columnWidth(1), userNameWidth);
+    EXPECT_EQ(table->horizontalScrollBar()->value(), horizontalOffset);
+    EXPECT_EQ(table->currentIndex().siblingAtColumn(0).data().toString(), "ABC-USD");
+
+    dock.resize(640, 360);
+    QCoreApplication::processEvents();
+    EXPECT_EQ(table->columnWidth(1), userNameWidth);
+}
+
 TEST(Screener, HiddenAutoRefreshSuspendsAndResumes) {
     ScreenerDock dock;
     SentinelStreamClient client("127.0.0.1", "1");

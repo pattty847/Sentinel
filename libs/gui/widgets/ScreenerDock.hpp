@@ -62,6 +62,7 @@ private:
     void requestAutomaticFetch();
     void requestFetch();
     void applyRows(const QJsonArray& rows);
+    void adjustDefaultNameColumnWidth();
     void updateColumns();
     void setStatus(const QString& text, bool error = false);
 
@@ -87,6 +88,9 @@ private:
     bool    m_autoEnabled    = false;
     bool    m_exposed        = false;
     bool    m_columnsResized = false;
+    bool    m_adjustingColumnWidths = false;
+    bool    m_nameColumnUserSized = false;
+    int     m_nameColumnPreferredWidth = 0;
     bool    m_fetchPending   = false;
     QString m_currentAsset   = "crypto";
     QString m_lastReceived;
