@@ -6,7 +6,9 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QJsonDocument>
-#include <QProcess>
+#include "ResearchProcess.hpp"
+#include <QDateTime>
+#include <optional>
 
 /**
  * Direct Python SEC API client that runs helper scripts via subprocess.
@@ -16,7 +18,7 @@ class SecApiClient : public QObject {
     Q_OBJECT
 
 public:
-    explicit SecApiClient(QObject* parent = nullptr);
+    explicit SecApiClient(QObject* parent = nullptr, ResearchProcess* runner = nullptr);
     ~SecApiClient();
 
     struct Filing {
@@ -30,8 +32,8 @@ public:
         QString date;
         QString insiderName;
         QString transactionType;
-        double shares;
-        double price;
+        std::optional<double> shares;
+        std::optional<double> price;
     };
 
     struct FinancialMetric {
@@ -40,7 +42,11 @@ public:
         QString unit;
     };
 
-    bool isReady() const { return m_pythonReady; }
+    bool isReady() const { return true; }
+    void cancel();
+    QString requestedTicker() const { return m_ticker; }
+    QDateTime retrievedAt() const { return m_retrievedAt; }
+    quint64 requestId() const { return m_request; }
 
 public slots:
     void fetchFilings(const QString& ticker, const QString& formType = QString());
@@ -56,10 +62,6 @@ signals:
     void apiError(const QString& error);
     void statusUpdate(const QString& message);
 
-private slots:
-    void onPythonFinished(int exitCode, QProcess::ExitStatus exitStatus);
-    void onPythonError(QProcess::ProcessError error);
-
 private:
     void runSecScript(const QString& scriptName, const QStringList& args, const QString& operation);
     QString getScriptsPath() const;
@@ -68,7 +70,10 @@ private:
     void parseInsiderSignalsData(const QString& jsonStr);
     void parseFinancialsData(const QString& jsonStr);
 
-    QProcess* m_pythonProcess;
-    QString m_currentOperation;
-    bool m_pythonReady;
+    void acceptResult(quint64 request, const QByteArray& output, const QString& error);
+    QPointer<ResearchProcess> m_runner;
+    quint64 m_request = 0;
+    bool m_pending = false;
+    QString m_currentOperation, m_ticker;
+    QDateTime m_retrievedAt;
 };

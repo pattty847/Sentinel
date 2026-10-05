@@ -7,7 +7,7 @@
 #include "SecApiClient.hpp"
 
 #include <QQuickView>
-#include <QProcess>
+#include "ResearchProcess.hpp"
 #include <QToolButton>
 #include <QLineEdit>
 #include <QButtonGroup>
@@ -16,7 +16,7 @@ class StockChartDock : public DockablePanel {
     Q_OBJECT
 
 public:
-    explicit StockChartDock(QWidget* parent = nullptr);
+    explicit StockChartDock(QWidget* parent = nullptr, ResearchProcess* candles = nullptr, ResearchProcess* sec = nullptr);
     ~StockChartDock() override;
 
     void buildUi() override;
@@ -31,12 +31,15 @@ public:
 private slots:
     void onFetchClicked();
     void onPeriodChanged(const QString& period);
-    void onProcessFinished(int exitCode, QProcess::ExitStatus status);
-    void onProcessError(QProcess::ProcessError error);
+    void acceptCandles(quint64 request, const QByteArray& output, const QString& error);
     void onSecSignalsReady(const QJsonObject& payload);
     void onSecApiError(const QString& error);
 
+protected:
+    void changeEvent(QEvent* event) override;
+
 private:
+    void clearData();
     void startFetch();
     void startSecFetch();
     int secDaysBackForCurrentPeriod() const;
@@ -53,12 +56,13 @@ private:
     QButtonGroup* m_periodGroup  = nullptr;
 
     // Process
-    QProcess*     m_process      = nullptr;
+    QPointer<ResearchProcess> m_runner;
+    quint64 m_request = 0;
+    bool m_pending = false;
     SecApiClient* m_secApiClient = nullptr;
 
     QString m_currentTicker;
     QString m_currentCompany;
     QString m_currentPeriod = "5y";
 
-    static constexpr const char* kScriptRelPath = "scripts/stocks/fetch_daily_ohlcv.py";
 };

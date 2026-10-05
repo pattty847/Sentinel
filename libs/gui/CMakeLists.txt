@@ -171,6 +171,8 @@ set(WIDGET_SOURCES
     "widgets/LiquidityRangeSlider.cpp"
     "widgets/WatchlistDock.cpp"
     "widgets/StockChartDock.cpp"
+    "widgets/ResearchProcess.cpp"
+    "widgets/ResearchProcess.hpp"
     "widgets/PaperTradingDock.hpp"
     "widgets/PaperTradingDock.cpp"
 )

@@ -6,7 +6,14 @@ import Sentinel.Charts 1.0
 // Stocks only. No demo data. No auto-load.
 Rectangle {
     id: root
-    color: "#0c0f12"
+    color: theme.bg
+    Theme { id: theme }
+    property font uiFont
+    readonly property real fontScale: (uiFont.pixelSize > 0 ? uiFont.pixelSize : uiFont.pointSize * 96 / 72) / 13
+    property string dataSymbol: ""
+    property string asOf: "Unknown"
+    property string retrievedAt: "Unknown"
+    property string secStatus: "SEC insiders idle"
 
     // Set by C++ dock via rootObject()->setProperty(...)
     property string ticker:    ""
@@ -347,52 +354,21 @@ Rectangle {
         Rectangle {
             id:     header
             width:  parent.width
-            height: 38
-            color:  "#111519"
+            height: Math.max(38, 30 * root.fontScale)
+            color:  theme.panel
 
-            Row {
-                anchors.fill:    parent
+            Text {
+                font.family: root.uiFont.family
+                anchors.fill: parent
                 anchors.margins: 10
-                spacing:         14
-
-                Text {
-                    text:                (root.ticker.length > 0 ? root.ticker : "—") + " | " + root.period
-                    color:               "#e0e6ed"
-                    font.pixelSize:      14
-                    font.bold:           true
-                    anchors.verticalCenter: parent.verticalCenter
-                }
-
-                Text {
-                    text:                root.company
-                    color:               "#7a8a99"
-                    font.pixelSize:      12
-                    anchors.verticalCenter: parent.verticalCenter
-                    visible:             root.company.length > 0
-                }
-
-                Rectangle { width: 1; height: 18; color: "#2a3440"; anchors.verticalCenter: parent.verticalCenter; visible: candleChart.candleCount > 0 }
-
-                Text {
-                    text:                candleChart.candleCount + " candles"
-                    color:               "#4a5a6a"
-                    font.pixelSize:      11
-                    anchors.verticalCenter: parent.verticalCenter
-                    visible:             candleChart.candleCount > 0
-                }
-
-                Rectangle {
-                    visible:             root.loading
-                    width: 12; height: 12; radius: 6
-                    color:               "#f0a030"
-                    anchors.verticalCenter: parent.verticalCenter
-                    SequentialAnimation on opacity {
-                        running:  root.loading
-                        loops:    Animation.Infinite
-                        NumberAnimation { to: 0.3; duration: 600 }
-                        NumberAnimation { to: 1.0; duration: 600 }
-                    }
-                }
+                text: (root.ticker || "—") + " | " + root.period
+                    + (root.company ? " · " + root.company : "")
+                    + (root.candleData.length ? " · " + root.candleData.length + " candles" : "")
+                color: theme.text
+                font.pixelSize: 14 * root.fontScale
+                font.bold: true
+                elide: Text.ElideRight
+                verticalAlignment: Text.AlignVCenter
             }
         }
 
@@ -401,15 +377,19 @@ Rectangle {
             id:     chartArea
             width:  parent.width
             height: parent.height - header.height - footer.height
-            color:  "#0f1419"
+            color:  theme.bg
 
             // Empty state
             Text {
+                font.family: root.uiFont.family
                 anchors.centerIn: parent
                 text:             root.statusMsg
-                color:            "#3a4a5a"
-                font.pixelSize:   14
-                visible:          candleChart.candleCount === 0 && !root.loading
+                color:            theme.textDim
+                font.pixelSize:   14 * root.fontScale
+                visible:          candleChart.candleCount === 0
+                width: parent.width - 32
+                wrapMode: Text.Wrap
+                horizontalAlignment: Text.AlignHCenter
             }
 
             // ── Candle chart (leaves room for price axis right, time axis bottom) ──
@@ -451,18 +431,18 @@ Rectangle {
                     anchors.top:    parent.top
                     anchors.bottom: parent.bottom
                     width: 1
-                    color: "#1e2a35"
+                    color: theme.border
                 }
 
                 Repeater {
                     model: root.priceAxisTicks
                     delegate: Text {
+                        font.family: root.uiFont.family
                         x:              6
                         y:              modelData.y
                         text:           modelData.label
-                        color:          "#4a5f70"
-                        font.pixelSize: 10
-                        font.family:    "Roboto Mono"
+                        color:          theme.textDim
+                        font.pixelSize: 10 * root.fontScale
                     }
                 }
             }
@@ -484,19 +464,19 @@ Rectangle {
                     anchors.right: parent.right
                     anchors.top:   parent.top
                     height: 1
-                    color: "#1e2a35"
+                    color: theme.border
                 }
 
                 Repeater {
                     model: root.timeAxisTicks
                     delegate: Text {
+                        font.family: root.uiFont.family
                         // x is in candleChart coordinates; candleChart.x = 6 from chartArea
                         x:              modelData.x - implicitWidth / 2
                         y:              4
                         text:           modelData.label
-                        color:          "#4a5f70"
-                        font.pixelSize: 10
-                        font.family:    "Roboto Mono"
+                        color:          theme.textDim
+                        font.pixelSize: 10 * root.fontScale
                     }
                 }
             }
@@ -540,15 +520,16 @@ Rectangle {
                             height: 18
                             radius: 9
                             color:        root.markerColor(modelData)
-                            border.color: hoveredArea.containsMouse ? "#ffffff" : "#0f1419"
+                            border.color: hoveredArea.containsMouse ? "#ffffff" : theme.bg
                             border.width: hoveredArea.containsMouse ? 2 : 1
                             opacity: 0.92
 
                             Text {
+                                font.family: root.uiFont.family
                                 anchors.centerIn: parent
                                 text:       root.markerLabel(modelData)
-                                color:      "#0f1419"
-                                font.pixelSize: 10
+                                color:      theme.bg
+                                font.pixelSize: 10 * root.fontScale
                                 font.bold:  true
                             }
                         }
@@ -621,9 +602,9 @@ Rectangle {
                 anchors.margins: 10
                 width:           hoverCol.width + 18
                 height:          hoverCol.height + 14
-                color:           "#182028"
+                color:           theme.panelAlt
                 radius:          5
-                border.color:    "#2b4050"
+                border.color:    theme.border
                 border.width:    1
 
                 Column {
@@ -632,9 +613,10 @@ Rectangle {
                     spacing:          3
 
                     Text {
+                        font.family: root.uiFont.family
                         text:           root.hoveredCandle.date || ""
-                        color:          "#c0ccd8"
-                        font.pixelSize: 11
+                        color:          theme.text
+                        font.pixelSize: 11 * root.fontScale
                         font.bold:      true
                     }
 
@@ -648,30 +630,37 @@ Rectangle {
                         Row {
                             spacing: 6
                             Text {
+                                font.family: root.uiFont.family
                                 text:           modelData.label + ":"
-                                color:          "#5a7080"
-                                font.pixelSize: 11
+                                color:          theme.textDim
+                                font.pixelSize: 11 * root.fontScale
                                 width:          14
                             }
                             Text {
+                                font.family: root.uiFont.family
                                 text:           (root.hoveredCandle[modelData.key] || 0).toFixed(modelData.decimals)
                                 color:          modelData.key === "close"
                                                     ? (root.hoveredCandle.bullish ? "#2fdd7a" : "#ef5c55")
-                                                    : "#a0b0bc"
-                                font.pixelSize: 11
-                                font.family:    "Roboto Mono"
+                                                    : theme.text
+                                font.pixelSize: 11 * root.fontScale
                             }
                         }
                     }
 
                     Row {
                         spacing: 6
-                        Text { text: "Vol:"; color: "#5a7080"; font.pixelSize: 11; width: 24 }
                         Text {
+                            font.family: root.uiFont.family
+                            text: "Vol:"
+                            color: theme.textDim
+                            font.pixelSize: 11 * root.fontScale
+                            width: 24
+                        }
+                        Text {
+                            font.family: root.uiFont.family
                             text:           ((root.hoveredCandle.volume || 0) / 1e6).toFixed(2) + "M"
-                            color:          "#a0b0bc"
-                            font.pixelSize: 11
-                            font.family:    "Roboto Mono"
+                            color:          theme.text
+                            font.pixelSize: 11 * root.fontScale
                         }
                     }
                 }
@@ -685,9 +674,9 @@ Rectangle {
                 y:       root.signalTooltipY()
                 width:   320
                 height:  signalInfoCol.implicitHeight + 14
-                color:   "#182028"
+                color:   theme.panelAlt
                 radius:  5
-                border.color: "#2b4050"
+                border.color: theme.border
                 border.width: 1
 
                 Column {
@@ -699,22 +688,25 @@ Rectangle {
                     spacing:          4
 
                     Text {
+                        font.family: root.uiFont.family
                         text:           (root.hoveredSignal.event_anchor_timestamp || "") + "  " + root.markerLabel(root.hoveredSignal)
-                        color:          "#dbe6ef"
-                        font.pixelSize: 11
+                        color:          theme.text
+                        font.pixelSize: 11 * root.fontScale
                         font.bold:      true
                     }
 
                     Text {
+                        font.family: root.uiFont.family
                         text:           root.markerSummary(root.hoveredSignal)
-                        color:          "#9fb2c4"
-                        font.pixelSize: 10
+                        color:          theme.textDim
+                        font.pixelSize: 10 * root.fontScale
                     }
 
                     Text {
+                        font.family: root.uiFont.family
                         text:           root.markerReasons(root.hoveredSignal)
-                        color:          "#6e8599"
-                        font.pixelSize: 10
+                        color:          theme.textDim
+                        font.pixelSize: 10 * root.fontScale
                         wrapMode:       Text.WordWrap
                         width:          parent.width
                         visible:        text.length > 0
@@ -723,9 +715,10 @@ Rectangle {
                     Repeater {
                         model: root.hoveredSignal.key_events || []
                         Text {
+                            font.family: root.uiFont.family
                             text:           "- " + (modelData.owner_name || "Unknown") + " | " + (modelData.signal_class || "other") + " | " + root.formatCurrency(modelData.gross_value || 0)
-                            color:          "#c3d1dd"
-                            font.pixelSize: 10
+                            color:          theme.text
+                            font.pixelSize: 10 * root.fontScale
                             wrapMode:       Text.WordWrap
                             width:          parent.width
                         }
@@ -734,18 +727,20 @@ Rectangle {
                     Repeater {
                         model: root.hoveredSignal.filing_links || []
                         Text {
+                            font.family: root.uiFont.family
                             text:           modelData
-                            color:          "#5f9fd6"
-                            font.pixelSize: 9
+                            color:          theme.accent
+                            font.pixelSize: 9 * root.fontScale
                             wrapMode:       Text.WrapAnywhere
                             width:          parent.width
                         }
                     }
 
                     Text {
+                        font.family: root.uiFont.family
                         text:           root.zeroValueNoteText(root.hoveredSignal)
-                        color:          "#6e8599"
-                        font.pixelSize: 9
+                        color:          theme.textDim
+                        font.pixelSize: 9 * root.fontScale
                         wrapMode:       Text.WordWrap
                         width:          parent.width
                         visible:        text.length > 0
@@ -754,34 +749,38 @@ Rectangle {
             }
         }
 
-        // ── Footer ────────────────────────────────────────────────────────────
+        // Provider and observation times remain visible for loading and errors.
         Rectangle {
-            id:     footer
-            width:  parent.width
-            height: 26
-            color:  "#0d1115"
-
-            Text {
-                anchors.right:          parent.right
-                anchors.rightMargin:    10
-                anchors.verticalCenter: parent.verticalCenter
-                text:                   "Stocks only"
-                color:                  "#2a3a4a"
-                font.pixelSize:         10
-            }
-
-            Text {
-                anchors.left:           parent.left
-                anchors.leftMargin:     10
-                anchors.verticalCenter: parent.verticalCenter
-                text: root.secSignalsLoading
-                    ? "SEC signals loading"
-                    : ((root.secSignalPayload.llm_digest && root.secSignalPayload.llm_digest.summary)
-                        ? ("SEC insiders | filings " + (root.secSignalPayload.llm_digest.summary.total_filings || 0)
-                           + " | insiders " + (root.secSignalPayload.llm_digest.summary.unique_insiders || 0))
-                        : "SEC insiders idle")
-                color:                  "#355066"
-                font.pixelSize:         10
+            id: footer
+            width: parent.width
+            height: 52 * root.fontScale
+            color: theme.panel
+            Column {
+                anchors.fill: parent
+                anchors.margins: 6
+                spacing: 3
+                Text {
+                    font.family: root.uiFont.family
+                    width: parent.width
+                    text: "yfinance · daily adjusted · As of: " + root.asOf + " · Retrieved: " + root.retrievedAt
+                    color: theme.textDim
+                    font.pixelSize: 10 * root.fontScale
+                    elide: Text.ElideRight
+                    ToolTip.visible: sourceHover.containsMouse
+                    ToolTip.text: text
+                    MouseArea { id: sourceHover; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
+                }
+                Text {
+                    font.family: root.uiFont.family
+                    width: parent.width
+                    text: root.secSignalsLoading ? "SEC EDGAR · Loading insiders…" : root.secStatus
+                    color: theme.textDim
+                    font.pixelSize: 10 * root.fontScale
+                    elide: Text.ElideRight
+                    ToolTip.visible: secHover.containsMouse
+                    ToolTip.text: text
+                    MouseArea { id: secHover; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
+                }
             }
         }
     }
