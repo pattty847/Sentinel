@@ -2,6 +2,7 @@
 #include "IGridDataSource.hpp"
 #include "CandleSeriesBuffer.hpp"
 #include "CandleBackfillState.hpp"
+#include "../models/MarketHealth.hpp"
 #include <QTimer>
 #include <unordered_set>
 #include "../../core/protocol/SentinelStreamClient.hpp"
@@ -43,6 +44,7 @@ public:
     const LiveOrderBook& getDirectLiveOrderBook(const std::string& productId) const override;
     void connectToServer();
     QObject* candleBuffer() const { return m_candleBuffer.get(); }
+    MarketHealth* marketHealth() { return &m_marketHealth; }
     SentinelStreamClient* streamClient() { return &m_client; }
     Q_INVOKABLE bool isBookSnapshotStale(const QString& symbol) const override;
 
@@ -90,6 +92,7 @@ private:
                               uint64_t bookVersion = 0);
     void requestNextCandlePage();
     void advanceCandleDeliveryGeneration();
+    MarketHealth m_marketHealth;
     SentinelStreamClient m_client;
     std::unique_ptr<CandleSeriesBuffer> m_candleBuffer;
     CandleBackfillState m_candleBackfill;

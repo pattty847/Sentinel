@@ -4,6 +4,7 @@
 #include <QHash>
 #include <QLabel>
 #include <QSet>
+#include <QPointer>
 #include <QString>
 
 #include "../../core/trading/TradingTypes.hpp"
@@ -21,6 +22,7 @@ class QProcess;
 class QTimer;
 class PnlCurveItem;
 class IGridDataSource;
+class MarketHealth;
 struct Trade;
 
 /**
@@ -62,6 +64,10 @@ private slots:
 
 private:
     void buildUi();
+    void refreshMarketHealth();
+    QPointer<MarketHealth> m_marketHealth;
+    QLabel* m_marketHealthLabel = nullptr;
+    QTimer* m_healthTimer = nullptr;
     void buildManualTab(QWidget* parent);
     void buildAlgoTab(QWidget* parent);
     void buildBacktestTab(QWidget* parent);

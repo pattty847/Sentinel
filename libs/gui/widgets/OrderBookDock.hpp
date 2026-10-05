@@ -7,6 +7,7 @@
 #include <QTimer>
 
 class IGridDataSource;
+class MarketHealth;
 class QLabel;
 class QPushButton;
 class QTableView;
@@ -48,6 +49,7 @@ private:
     void fitColumns();
     void updateSummary();
     QPointer<IGridDataSource> m_source;
+    QPointer<MarketHealth> m_health;
     QString m_symbol;
     std::string m_symbolId;
     QPointer<QWidget> m_hostWindow;

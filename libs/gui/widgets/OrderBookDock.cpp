@@ -1,6 +1,7 @@
 #include "OrderBookDock.hpp"
 #include "ServiceLocator.hpp"
 #include "../datasources/IGridDataSource.hpp"
+#include "../datasources/RemoteGridDataSource.hpp"
 #include <QApplication>
 #include <QDateTime>
 #include <QHeaderView>
@@ -82,6 +83,7 @@ OrderBookDock::OrderBookDock(QWidget* parent, IGridDataSource* source)
     installEventFilter(this);
     connect(this, &QDockWidget::topLevelChanged, this, [this] { watchWindow(); updateDisplayTimer(); });
     if (!m_source) return;
+    if (auto* remote = qobject_cast<RemoteGridDataSource*>(m_source.data())) m_health = remote->marketHealth();
     m_freshness.connected = m_source->connectionState();
     connect(m_source, &IGridDataSource::liveOrderBookUpdated, this, &OrderBookDock::onOrderBookUpdated, Qt::QueuedConnection);
     connect(m_source, &IGridDataSource::tradeReceived, this, &OrderBookDock::onTradeReceived, Qt::QueuedConnection);
@@ -344,22 +346,25 @@ void OrderBookDock::fitColumns()
 void OrderBookDock::updateSummary()
 {
     const bool wide = m_contentWidget->width() >= 720;
-    const auto fullStatus = m_freshness.text(QDateTime::currentMSecsSinceEpoch());
-    QString status;
-    if (m_freshness.connected == false) status = "Offline";
-    else if (m_freshness.snapshotStale) status = "Stale";
-    else if (m_freshness.awaitingBook || m_freshness.lastChangeMs <= 0) status = "Waiting";
-    else if (m_freshness.connected == true) status = "Live";
-    else status = "Unknown";
-    if (m_freshness.lastChangeMs > 0) {
-        const double seconds = std::max<qint64>(0, QDateTime::currentMSecsSinceEpoch() - m_freshness.lastChangeMs) / 1000.0;
-        const auto age = seconds < 60 ? QString::number(seconds, 'f', 1) + "s"
-            : seconds < 3600 ? QString::number(seconds / 60, 'f', 0) + "m"
-                             : QString::number(seconds / 3600, 'g', 2) + "h";
-        status += QString(" chg %1").arg(age);
+    QString fullStatus;
+    if (m_health) {
+        const auto health = m_health->snapshot(m_symbol);
+        fullStatus = health.compact();
+        m_status->setToolTip(health.reason + "\nBook age is time since an accepted book message; quiet is not stale.");
+    } else {
+        // Non-remote sources retain their readiness facts with the shared words.
+        const auto state = m_freshness.connected == false ? MarketHealth::State::Disconnected
+            : m_freshness.snapshotStale ? MarketHealth::State::Stale
+            : m_freshness.awaitingBook || m_freshness.lastChangeMs <= 0 ? MarketHealth::State::WaitingForBook
+            : m_freshness.connected == true ? MarketHealth::State::Live : MarketHealth::State::Initializing;
+        fullStatus = MarketHealth::stateText(state);
+        if (m_freshness.lastChangeMs > 0) {
+            const double seconds = std::max<qint64>(0, QDateTime::currentMSecsSinceEpoch() - m_freshness.lastChangeMs) / 1000.0;
+            fullStatus += " · last change " + QString::number(seconds, 'f', 1) + " s";
+        }
+        m_status->setToolTip(fullStatus);
     }
-    m_status->setText(wide ? fullStatus : status);
-    m_status->setToolTip(fullStatus + "\nAge is time since the last book change, not feed silence.");
+    m_status->setText(fullStatus);
     m_status->setMaximumWidth(m_status->fontMetrics().horizontalAdvance(m_status->text()) + 2);
     m_aggregation->setText(m_model->aggregation(true));
     m_aggregation->setToolTip(m_model->aggregation() + "\n" + m_model->executionSummary());

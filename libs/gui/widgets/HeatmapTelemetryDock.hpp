@@ -8,6 +8,8 @@
 // QQuickWidget scene would add a second QRhi per dock for a table of numbers.
 #include "DockablePanel.hpp"
 #include <QHash>
+#include <QPointer>
+#include "../models/MarketHealth.hpp"
 #include <QVariantMap>
 #include <functional>
 #include <optional>
@@ -26,6 +28,7 @@ public:
     explicit HeatmapTelemetryDock(QWidget *parent = nullptr);
     void buildUi() override;
     void setProvider(Provider provider);
+    void setMarketHealth(MarketHealth* health);
     // One poll now (the timer calls this).
     void refresh();
     uint64_t refreshCount() const { return m_refreshes; }
@@ -56,6 +59,10 @@ private:
     void addRow(const QString &name, const QString &key, std::function<QString(const QVariantMap &)> format);
 
     Provider m_provider;
+    QPointer<MarketHealth> m_health;
+    QLabel* m_healthSummary = nullptr;
+    QLabel* m_healthDetail = nullptr;
+    class QToolButton* m_engineeringToggle = nullptr;
     QTimer *m_timer = nullptr;
     QWidget *m_table = nullptr;
     QLabel *m_disabled = nullptr;

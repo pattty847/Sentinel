@@ -1,3 +1,4 @@
+#include "../datasources/RemoteGridDataSource.hpp"
 #include "PaperTradingDock.hpp"
 #include "../render/PnlCurveItem.hpp"
 #include "../datasources/IGridDataSource.hpp"
@@ -58,11 +59,26 @@ PaperTradingDock::PaperTradingDock(QWidget* parent)
     : QDockWidget(QStringLiteral("Paper Trading"), parent) {
     setObjectName(QStringLiteral("PaperTradingDock"));
     buildUi();
+    m_healthTimer = new QTimer(this);
+    m_healthTimer->setInterval(1000);
+    connect(m_healthTimer, &QTimer::timeout, this, &PaperTradingDock::refreshMarketHealth);
+    connect(this, &QDockWidget::visibilityChanged, this, [this](bool exposed) {
+        if (exposed) { refreshMarketHealth(); if (m_marketHealth) m_healthTimer->start(); }
+        else m_healthTimer->stop();
+    });
     setAlgoState(QStringLiteral("UNAVAILABLE"), QStringLiteral("No data source"), false, false);
 }
 
 void PaperTradingDock::setDataSource(IGridDataSource* source) {
     if (m_dataSource) disconnect(m_dataSource, nullptr, this, nullptr);
+    if (m_marketHealth) disconnect(m_marketHealth, nullptr, this, nullptr);
+    m_marketHealth = nullptr;
+    if (auto* remote = qobject_cast<RemoteGridDataSource*>(source)) m_marketHealth = remote->marketHealth();
+    if (m_marketHealth) connect(m_marketHealth, &MarketHealth::changed, this, [this] {
+        if (m_healthTimer->isActive()) refreshMarketHealth();
+    });
+    if (isVisible() && m_marketHealth) m_healthTimer->start();
+    else m_healthTimer->stop();
     m_dataSource = source;
     m_streamAvailable = source && source->isConnectionActive();
     m_algoActivityEligible = false;
@@ -93,6 +109,7 @@ void PaperTradingDock::setSymbol(const QString& symbol) {
     }
     m_symbol = symbol;
     resetForSymbolChange();
+    if (m_healthTimer->isActive()) refreshMarketHealth();
 }
 
 void PaperTradingDock::buildUi() {
@@ -100,6 +117,12 @@ void PaperTradingDock::buildUi() {
     auto* rootLayout = new QVBoxLayout(root);
     rootLayout->setContentsMargins(4, 4, 4, 4);
     rootLayout->setSpacing(4);
+
+    m_marketHealthLabel = new QLabel("Initializing", root);
+    m_marketHealthLabel->setObjectName("paperMarketHealth");
+    m_marketHealthLabel->setWordWrap(true);
+    m_marketHealthLabel->setStyleSheet("color: #b0b0b0; font-size: 11px;");
+    rootLayout->addWidget(m_marketHealthLabel);
 
     // Tab bar
     auto* tabs = new QTabWidget(root);
@@ -856,4 +879,15 @@ void PaperTradingDock::sendManualCommand(trading::TradeAction action,
         cmd.price = roundedDisplayedPrice(price, m_limitPriceSpin->decimals());
     }
     m_dataSource->sendTradeCommand(cmd);
+}
+
+void PaperTradingDock::refreshMarketHealth() {
+    if (!isVisible() || window()->isMinimized()) return;
+    if (!m_marketHealth) {
+        m_marketHealthLabel->setText(m_streamAvailable ? "Waiting for book" : "Unavailable");
+        return;
+    }
+    const auto health = m_marketHealth->snapshot(m_symbol);
+    m_marketHealthLabel->setText(health.compact());
+    m_marketHealthLabel->setToolTip(health.reason + "\nMarket data state; account and algorithm confirmations are independent.");
 }
