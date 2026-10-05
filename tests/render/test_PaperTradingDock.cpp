@@ -2,13 +2,18 @@
 #include "datasources/IGridDataSource.hpp"
 #include <QApplication>
 #include <QDoubleSpinBox>
+#include <QFocusEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QSignalBlocker>
+#include <QSignalSpy>
 #include <QTableWidget>
 #include <QTest>
 #include <QTimer>
 #include <QToolButton>
+#include <cmath>
 #include <gtest/gtest.h>
 
 namespace {
@@ -71,6 +76,92 @@ TEST(PaperTicket, EditedLimitSurvivesTradesFocusQuantityAndButtons) {
     ASSERT_EQ(source.trades.size(), 3u);
     EXPECT_EQ(source.trades.back().symbol, "PEPE-USD");
     EXPECT_DOUBLE_EQ(source.trades.back().price, 0.00000971);
+}
+
+TEST(PaperTicket, LimitButtonsFollowDisplayedPrice) {
+    PaperTradingDock dock;
+    auto* price = dock.findChild<QDoubleSpinBox*>("paperLimitPrice");
+    auto* buy = dock.findChild<QPushButton*>("paperBuyLimit");
+    auto* sell = dock.findChild<QPushButton*>("paperSellLimit");
+    ASSERT_NE(price, nullptr);
+    ASSERT_NE(buy, nullptr);
+    ASSERT_NE(sell, nullptr);
+    auto expectLimitState = [&](const char* phase, bool enabled) {
+        SCOPED_TRACE(phase);
+        for (auto* button : {buy, sell}) {
+            EXPECT_EQ(button->isEnabled(), enabled);
+            if (enabled) EXPECT_TRUE(button->toolTip().isEmpty());
+            else EXPECT_TRUE(button->toolTip().contains("positive limit price"));
+        }
+    };
+
+    expectLimitState("startup", false); // Startup has no limit price.
+    dock.setSymbol("DOGE-USD");
+    expectLimitState("symbol", false);
+    price->setValue(0.25);
+    expectLimitState("valid", true);
+    price->clear(); // The editor can be empty while its prior numeric value is retained.
+    expectLimitState("clear", false);
+    price->setValue(0.0);
+    expectLimitState("zero", false);
+    price->setValue(0.125);
+    expectLimitState("valid again", true);
+    dock.setSymbol("PEPE-USD"); // Reset uses QSignalBlocker.
+    expectLimitState("reset", false);
+    dock.onTradeReceived(tick("PEPE-USD", 0.00000971)); // Initialization also blocks signals.
+    expectLimitState("trade", true);
+    price->clear();
+    expectLimitState("clear trade price", false);
+    dock.findChild<QPushButton*>("paperUseLast")->click();
+    expectLimitState("use last after clear", true);
+    price->setValue(0.0);
+    expectLimitState("clear for last", false);
+    dock.findChild<QPushButton*>("paperUseLast")->click();
+    expectLimitState("use last", true);
+    dock.setSymbol("DOGE-USD");
+    dock.onTradeReceived(tick("DOGE-USD", 0.123456789123));
+    EXPECT_DOUBLE_EQ(price->value(), 0.12345679);
+    price->clear();
+    expectLimitState("clear rounded trade price", false);
+    dock.findChild<QPushButton*>("paperUseLast")->click();
+    expectLimitState("use rounded last after clear", true);
+}
+
+TEST(PaperTicket, LimitEditorFocusOutReconcilesButtons) {
+    PaperTradingDock dock;
+    dock.setSymbol("DOGE-USD");
+    dock.show();
+    auto* price = dock.findChild<QDoubleSpinBox*>("paperLimitPrice");
+    auto* qty = dock.findChild<QDoubleSpinBox*>("paperBaseQty");
+    auto* buy = dock.findChild<QPushButton*>("paperBuyLimit");
+    ASSERT_NE(price, nullptr);
+    ASSERT_NE(qty, nullptr);
+    ASSERT_NE(buy, nullptr);
+    auto* editor = price->findChild<QLineEdit*>();
+    ASSERT_NE(editor, nullptr);
+    price->setValue(0.25);
+    ASSERT_TRUE(buy->isEnabled());
+    editor->setFocus();
+    QSignalSpy finished(price, &QAbstractSpinBox::editingFinished);
+    editor->selectAll();
+    QTest::keyClick(editor, Qt::Key_Backspace);
+    EXPECT_TRUE(editor->text().isEmpty());
+    EXPECT_FALSE(buy->isEnabled());
+    EXPECT_DOUBLE_EQ(price->value(), 0.25);
+    {
+        QSignalBlocker blocker(editor);
+        editor->setText(price->locale().toString(price->value(), 'f', price->decimals()));
+    }
+    EXPECT_FALSE(buy->isEnabled()); // A blocked editor update needs the focus-out refresh.
+    QFocusEvent focusOut(QEvent::FocusOut, Qt::OtherFocusReason);
+    QCoreApplication::sendEvent(price, &focusOut);
+    qty->setFocus();
+    QCoreApplication::processEvents();
+    EXPECT_GE(finished.count(), 1);
+    bool displayedValid = false;
+    const double displayed = price->locale().toDouble(price->cleanText(), &displayedValid);
+    EXPECT_EQ(buy->isEnabled(), displayedValid && std::isfinite(displayed) && displayed > 0.0);
+    EXPECT_TRUE(buy->isEnabled());
 }
 
 TEST(PaperTicket, LowPriceAndLogFollow) {
