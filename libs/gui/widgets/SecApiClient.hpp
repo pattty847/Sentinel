@@ -40,6 +40,7 @@ public:
         QString name;
         QString value;
         QString unit;
+        QString cadence, period, date;
     };
 
     bool isReady() const { return true; }

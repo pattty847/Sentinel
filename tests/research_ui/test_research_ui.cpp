@@ -19,6 +19,7 @@
 #include <QScopeGuard>
 #include <QPainter>
 #include <QDir>
+#include <QSplitter>
 #include <memory>
 #ifdef Q_OS_UNIX
 #include <signal.h>
@@ -36,6 +37,10 @@ public:
 static QByteArray candles(const QString& symbol, const QString& period = "5y") {
     QJsonObject c{{"date", "2026-09-30"}, {"ts_ms", 1790726400000.0}, {"open", 10}, {"high", 12}, {"low", 9}, {"close", 11}, {"volume", 100}};
     return "OHLCV_DATA:" + QJsonDocument(QJsonObject{{"ticker", symbol}, {"period", period}, {"candles", QJsonArray{c}}}).toJson(QJsonDocument::Compact) + '\n';
+}
+static QByteArray financials() {
+    // get_financial_summary's cleaned histories omit unit, even for currency values.
+    return R"(FINANCIALS_DATA:{"ticker":"AAPL","entityName":"Fixture company","cik":"123","source_form":"10-Q","period_end":"2026-09-30","revenue":{"quarterly":[{"period":"2026Q2","date":"2026-06-30","value":1234,"form":"10-Q"}],"annual":[{"period":"2025","date":"2025-12-31","value":9999,"form":"10-K"}]},"net_income":{"quarterly":[{"period":"2026Q3","date":"2026-09-30","value":0,"form":"10-Q"}],"annual":[]},"assets":{"quarterly":[{"period":"2026Q1","date":"2026-03-31","value":5,"form":"10-Q"}],"annual":[{"period":"2026","date":"2026-09-30","value":20,"form":"10-K"}]},"earnings_per_share":null,"debt":{"quarterly":[],"annual":[]},"shares":{"quarterly":[{"period":"2026Q2","date":"2026-06-30","value":null,"form":"10-Q"}],"annual":[]}})";
 }
 static bool waitUntil(const std::function<bool()>& predicate) {
     QElapsedTimer timer; timer.start();
@@ -116,6 +121,59 @@ TEST(StockResearch, PeriodChangeAndTypedTickerClearAndHiddenResultsRemainCorrect
     dock.resize(480, 320); dock.show(); QCoreApplication::processEvents();
     EXPECT_LE(dock.qmlContainer()->width(), dock.width());
 }
+TEST(StockResearch, RejectsCryptoBeforePythonAndAllowsEquityClassSuffix) {
+    FixtureProvider candlesProvider, secProvider;
+    StockChartDock dock(nullptr, &candlesProvider, &secProvider);
+    auto* root = dock.qquickView()->rootObject(); ASSERT_NE(root, nullptr);
+    for (const auto& ticker : {"BTC-USD", "ETH-USDT", "DOGE/USD"}) {
+        dock.loadSymbol(ticker);
+        EXPECT_TRUE(candlesProvider.requests.isEmpty());
+        EXPECT_TRUE(secProvider.requests.isEmpty());
+        EXPECT_FALSE(root->property("loading").toBool());
+        EXPECT_TRUE(root->property("statusMsg").toString().contains("unsupported"));
+        EXPECT_EQ(count(root), 0);
+    }
+    dock.loadSymbol("BRK-B");
+    ASSERT_EQ(candlesProvider.requests.size(), 1);
+    EXPECT_EQ(candlesProvider.requests[0].args[0], "BRK-B");
+    EXPECT_TRUE(root->property("loading").toBool());
+}
+TEST(StockResearch, HoverUsesDailyDateFromMatchingCandleAndSwitchClearsIt) {
+    FixtureProvider provider, sec;
+    StockChartDock dock(nullptr, &provider, &sec);
+    auto* root = dock.qquickView()->rootObject(); ASSERT_NE(root, nullptr);
+    dock.loadSymbol("AAPL"); provider.reply(0, candles("AAPL"));
+    auto* renderer = root->findChild<CandlestickBatched*>(); ASSERT_NE(renderer, nullptr);
+    auto* date = root->findChild<QObject*>("stockHoverDate"); ASSERT_NE(date, nullptr);
+    emit renderer->hoveredCandleChanged(0);
+    EXPECT_EQ(date->property("text").toString(), "2026-09-30");
+    EXPECT_EQ(renderer->candleCount(), 1);
+    EXPECT_DOUBLE_EQ(root->property("fontScale").toDouble(), 1.0);
+    dock.loadSymbol("MSFT");
+    EXPECT_EQ(date->property("text").toString(), "");
+    EXPECT_EQ(renderer->candleCount(), 0);
+}
+TEST(SecResearch, FinancialHistoriesDisplayActualObservationWithoutInventingUnits) {
+    FixtureProvider provider;
+    SecFilingDock dock(nullptr, &provider);
+    dock.onSymbolChanged("AAPL");
+    QMetaObject::invokeMethod(&dock, "fetchFinancialSummary");
+    provider.reply(0, financials());
+    auto* display = dock.findChild<QTextEdit*>("secFinancials"); ASSERT_NE(display, nullptr);
+    const auto text = display->toPlainText();
+    EXPECT_TRUE(text.contains("revenue: 1234 [quarterly · 2026Q2 · 2026-06-30 · unit: Unknown]"));
+    EXPECT_TRUE(text.contains("net_income: 0 [quarterly · 2026Q3 · 2026-09-30"));
+    EXPECT_TRUE(text.contains("assets: 20 [annual · 2026 · 2026-09-30"));
+    EXPECT_TRUE(text.contains("earnings_per_share: Unknown"));
+    EXPECT_TRUE(text.contains("debt: Unknown"));
+    EXPECT_TRUE(text.contains("shares: Unknown [quarterly · 2026Q2 · 2026-06-30"));
+    EXPECT_FALSE(text.contains("USD")); EXPECT_FALSE(text.contains("$"));
+    EXPECT_TRUE(display->isReadOnly());
+    dock.onSymbolChanged("MSFT");
+    EXPECT_TRUE(display->toPlainText().isEmpty());
+    provider.reply(0, financials());
+    EXPECT_TRUE(display->toPlainText().isEmpty());
+}
 TEST(SecResearch, UnsupportedPairsNeverStartAndStaleSwitchRetryResultsAreRejected) {
     FixtureProvider provider;
     SecApiClient client(nullptr, &provider);
@@ -188,10 +246,22 @@ TEST(ResearchProcess, CancellationDoesNotWaitAndDestructionDoesNotCallBack) {
     EXPECT_TRUE(waitUntil([&] { return !process; }));
     EXPECT_TRUE(waitUntil([&] { return ::kill(pid_t(childPid), 0) != 0; })) << "Python fixture child remained alive";
     EXPECT_TRUE(waitUntil([&] { return ::kill(-pid_t(group), 0) != 0; })) << "uv/Python process group remained alive";
-    runner->run(2, "fixture", {directory.filePath("second-child.pid")}); QTest::qWait(40);
+    runner->run(2, "fixture", {directory.filePath("second-child.pid")});
+    for (auto* child : qApp->findChildren<QProcess*>()) if (child->program() == "uv") process = child;
+    ASSERT_TRUE(process);
+    QFile secondPidFile(directory.filePath("second-child.pid"));
+    ASSERT_TRUE(waitUntil([&] { return secondPidFile.exists() && secondPidFile.size() > 0; }));
+    ASSERT_TRUE(secondPidFile.open(QIODevice::ReadOnly));
+    const auto secondChildPid = secondPidFile.readAll().trimmed().toLongLong(); ASSERT_GT(secondChildPid, 0);
+    const auto secondGroup = process->processId(); ASSERT_GT(secondGroup, 0);
     elapsed.restart(); runner.reset(); EXPECT_LT(elapsed.elapsed(), 100);
-    QTest::qWait(40); EXPECT_EQ(completed.count(), 0);
+    EXPECT_TRUE(waitUntil([&] { return !process; }));
+    EXPECT_TRUE(waitUntil([&] { return ::kill(pid_t(secondChildPid), 0) != 0; }));
+    EXPECT_TRUE(waitUntil([&] { return ::kill(-pid_t(secondGroup), 0) != 0; }));
+    EXPECT_EQ(completed.count(), 0);
     qputenv("PATH", oldPath);
+#else
+    GTEST_SKIP() << "Unix process-tree fixture; Windows job runtime requires a Windows runner";
 #endif
 }
 TEST(ResearchProcess, LauncherExitStillReapsItsChild) {
@@ -210,6 +280,8 @@ TEST(ResearchProcess, LauncherExitStillReapsItsChild) {
     QFile pidFile(directory.filePath("child.pid")); ASSERT_TRUE(pidFile.open(QIODevice::ReadOnly));
     const auto pid = pidFile.readAll().trimmed().toLongLong(); ASSERT_GT(pid, 0);
     EXPECT_TRUE(waitUntil([&] { return ::kill(pid_t(pid), 0) != 0; })) << "Child survived its uv wrapper";
+#else
+    GTEST_SKIP() << "Unix process-tree fixture; Windows job runtime requires a Windows runner";
 #endif
 }
 TEST(ResearchProcess, FailureEmitsOnceAndReentrantReplacementSurvives) {
@@ -241,6 +313,8 @@ TEST(ResearchProcess, FailureEmitsOnceAndReentrantReplacementSurvives) {
     EXPECT_TRUE(completed[1][2].toString().isEmpty());
     EXPECT_TRUE(completed[1][1].toByteArray().contains("fixture success"));
     qputenv("PATH", oldPath);
+#else
+    GTEST_SKIP() << "Unix process-tree fixture; Windows job runtime requires a Windows runner";
 #endif
 }
 TEST(ResearchProcess, OversizedFinalOutputIsAnErrorOnlyOnce) {
@@ -260,6 +334,29 @@ TEST(ResearchProcess, OversizedFinalOutputIsAnErrorOnlyOnce) {
     EXPECT_TRUE(completed[0][2].toString().contains("exceeded"));
     EXPECT_TRUE(completed[0][1].toByteArray().isEmpty());
     qputenv("PATH", oldPath);
+#else
+    GTEST_SKIP() << "Unix process-tree fixture; Windows job runtime requires a Windows runner";
+#endif
+}
+TEST(ResearchProcess, OversizedStderrFailsOnceWithoutReturningPartialData) {
+#ifdef Q_OS_UNIX
+    QTemporaryDir directory;
+    QFile uv(directory.filePath("uv")); ASSERT_TRUE(uv.open(QIODevice::WriteOnly));
+    uv.write("#!/bin/sh\nhead -c 262145 /dev/zero >&2\n"); uv.close();
+    uv.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    const auto oldPath = qgetenv("PATH");
+    const auto restorePath = qScopeGuard([&] { qputenv("PATH", oldPath); });
+    qputenv("PATH", directory.path().toUtf8() + ':' + oldPath);
+    ResearchProcess runner;
+    QSignalSpy completed(&runner, &ResearchProcess::completed);
+    runner.run(1, "fixture", {});
+    ASSERT_TRUE(waitUntil([&] { return completed.count() > 0; }));
+    QTest::qWait(30);
+    ASSERT_EQ(completed.count(), 1);
+    EXPECT_TRUE(completed[0][2].toString().contains("exceeded"));
+    EXPECT_TRUE(completed[0][1].toByteArray().isEmpty());
+#else
+    GTEST_SKIP() << "Unix process-tree fixture; Windows job runtime requires a Windows runner";
 #endif
 }
 TEST(ResearchUi, VisualFixtures) {
@@ -268,8 +365,13 @@ TEST(ResearchUi, VisualFixtures) {
     ASSERT_TRUE(QDir().mkpath(output));
     FixtureProvider candlesProvider, secProvider, filingProvider;
     StockChartDock stock(nullptr, &candlesProvider, &secProvider);
-    auto saveStock = [&](const QString& name) {
+    auto saveStock = [&](const QString& name, bool hover = false) {
+        QTest::mouseMove(stock.qquickView(), QPoint(5, 5));
         QTest::qWait(150);
+        if (hover) {
+            emit stock.qquickView()->rootObject()->findChild<CandlestickBatched*>()->hoveredCandleChanged(0);
+            QTest::qWait(25);
+        }
         auto pixmap = stock.grab();
         const auto chart = stock.qquickView()->grabWindow();
         if (chart.isNull()) return false;
@@ -282,11 +384,14 @@ TEST(ResearchUi, VisualFixtures) {
     candlesProvider.reply(0, candles("AAPL"));
     secProvider.reply(0, "INSIDER_SIGNALS_DATA:{\"symbol\":\"AAPL\",\"daily_aggregates\":[]}\n");
     ASSERT_TRUE(saveStock("stock-populated-fixture"));
+    ASSERT_TRUE(saveStock("stock-hover-date-fixture", true));
     stock.resize(480, 360); stock.loadSymbol("MSFT", "Fixture · Microsoft");
     ASSERT_TRUE(saveStock("stock-switch-loading-narrow-fixture"));
     candlesProvider.reply(1, {}, "Fixture: provider unavailable");
     secProvider.reply(1, {}, "Fixture: SEC unavailable");
     ASSERT_TRUE(saveStock("stock-error-narrow-fixture"));
+    stock.loadSymbol("BTC-USD");
+    ASSERT_TRUE(saveStock("stock-crypto-unavailable-narrow-fixture"));
     stock.hide();
     SecFilingDock sec(nullptr, &filingProvider);
     sec.resize(500, 620); sec.show();
@@ -294,6 +399,10 @@ TEST(ResearchUi, VisualFixtures) {
     filingProvider.reply(0, "TRANSACTIONS_DATA:[{\"date\":\"2026-09-30\",\"filer\":\"Fixture director\",\"type\":\"P\",\"shares\":1250,\"price\":null}]\n");
     QTest::qWait(100);
     ASSERT_TRUE(sec.grab().save(QDir(output).filePath("sec-populated-fixture.png")));
+    QMetaObject::invokeMethod(&sec, "fetchFinancialSummary");
+    filingProvider.reply(1, financials());
+    sec.findChild<QSplitter*>()->setSizes({80, 80, 400}); QTest::qWait(100);
+    ASSERT_TRUE(sec.grab().save(QDir(output).filePath("sec-financial-history-fixture.png")));
     sec.resize(340, 480); sec.onSymbolChanged("BTC-USD"); QTest::qWait(100);
     ASSERT_TRUE(sec.grab().save(QDir(output).filePath("sec-crypto-unavailable-narrow-fixture.png")));
 }

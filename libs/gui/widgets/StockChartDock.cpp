@@ -277,6 +277,10 @@ void StockChartDock::clearData() {
 void StockChartDock::startFetch() {
     clearData();
     if (m_currentTicker.isEmpty()) { setStatus("Enter a ticker to fetch daily candles"); return; }
+    if (!ResearchProcess::isEquityTicker(m_currentTicker)) {
+        setStatus("Stock charts require an equity ticker; crypto pairs are unsupported", true);
+        return;
+    }
     if (!m_runner) { setStatus("yfinance request provider unavailable", true); return; }
     if (auto* root = qmlRoot()) root->setProperty("loading", true);
     setStatus(QString("Loading %1 · %2 daily candles…").arg(m_currentTicker, m_currentPeriod));

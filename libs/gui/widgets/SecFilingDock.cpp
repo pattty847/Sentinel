@@ -87,6 +87,7 @@ void SecFilingDock::buildUi() {
     QGroupBox* financialsGroup = new QGroupBox("Financial Summary", m_contentWidget);
     QVBoxLayout* financialsLayout = new QVBoxLayout();
     m_financialsDisplay = new QTextEdit(financialsGroup);
+    m_financialsDisplay->setObjectName("secFinancials");
     m_financialsDisplay->setReadOnly(true);
     financialsLayout->addWidget(m_financialsDisplay);
     financialsGroup->setLayout(financialsLayout);
@@ -176,6 +177,7 @@ void SecFilingDock::displayFilings(const QList<SecApiClient::Filing>& filings) {
         for (auto* item : row) item->setEditable(false);
         m_filingsModel->appendRow(row);
     }
+    m_filingsTable->resizeColumnsToContents();
 }
 
 void SecFilingDock::displayTransactions(const QList<SecApiClient::Transaction>& transactions) {
@@ -194,14 +196,19 @@ void SecFilingDock::displayTransactions(const QList<SecApiClient::Transaction>& 
         row[4]->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
         m_transactionsModel->appendRow(row);
     }
+    m_transactionsTable->resizeColumnsToContents();
 }
 
 void SecFilingDock::displayFinancials(const QList<SecApiClient::FinancialMetric>& metrics) {
-    QString text = "Financial Summary\n\n";
+    QString text = "Financial Summary · Latest observation per metric\n\n";
     for (const auto& metric : metrics) {
         QString value = metric.value;
         if (!metric.unit.isEmpty()) {
             value += " " + metric.unit;
+        }
+        if (!metric.cadence.isEmpty()) {
+            value += QString(" [%1 · %2 · %3 · unit: %4]").arg(metric.cadence, metric.period, metric.date,
+                metric.unit.isEmpty() ? QStringLiteral("Unknown") : metric.unit);
         }
         text += QString("%1: %2\n").arg(metric.name, value);
     }

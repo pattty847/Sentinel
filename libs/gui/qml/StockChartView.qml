@@ -9,7 +9,7 @@ Rectangle {
     color: theme.bg
     Theme { id: theme }
     property font uiFont
-    readonly property real fontScale: (uiFont.pixelSize > 0 ? uiFont.pixelSize : uiFont.pointSize * 96 / 72) / 13
+    readonly property real fontScale: uiFont.pointSize > 0 ? uiFont.pointSize / 10 : uiFont.pixelSize / 13
     property string dataSymbol: ""
     property string asOf: "Unknown"
     property string retrievedAt: "Unknown"
@@ -614,7 +614,9 @@ Rectangle {
 
                     Text {
                         font.family: root.uiFont.family
-                        text:           root.hoveredCandle.date || ""
+                        objectName: "stockHoverDate"
+                        text: root.hoveredIndex >= 0 && root.hoveredIndex < root.candleData.length
+                            ? (root.candleData[root.hoveredIndex].date || "Unknown") : ""
                         color:          theme.text
                         font.pixelSize: 11 * root.fontScale
                         font.bold:      true

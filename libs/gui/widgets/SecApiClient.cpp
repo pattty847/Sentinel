@@ -156,27 +156,53 @@ void SecApiClient::parseFinancialsData(const QString& jsonStr) {
     }
     
     QList<FinancialMetric> metrics;
-    QJsonObject obj = doc.object();
-    
+    const QJsonObject obj = doc.object();
+    const QString ticker = obj.value("ticker").toString().trimmed().toUpper();
+    if (!ticker.isEmpty() && ticker != m_ticker) {
+        emit apiError("SEC financial response symbol did not match the request");
+        return;
+    }
+    auto displayValue = [](const QJsonValue& value) {
+        if (value.isDouble()) return QString::number(value.toDouble(), 'g', 12);
+        if (value.isString() && !value.toString().isEmpty()) return value.toString();
+        return QStringLiteral("Unknown");
+    };
     for (auto it = obj.begin(); it != obj.end(); ++it) {
         FinancialMetric metric;
         metric.name = it.key();
-        if (it.value().isString()) {
-            metric.value = it.value().toString();
-            metric.unit = "";
-        } else if (it.value().isObject()) {
-            QJsonObject metricObj = it.value().toObject();
-            metric.value = metricObj["value"].isDouble() ? QString::number(metricObj["value"].toDouble(), 'g', 12)
-                : metricObj["value"].isString() ? metricObj["value"].toString() : QStringLiteral("Unknown");
-            metric.unit = metricObj["unit"].toString();
-        } else if (it.value().isDouble()) {
-            metric.value = QString::number(it.value().toDouble(), 'g', 12);
-            metric.unit = "";
+        if (it.value().isObject()) {
+            const auto history = it.value().toObject();
+            if (history.contains("quarterly") || history.contains("annual")) {
+                // The provider returns cleaned histories with period/date/value/form,
+                // without units. Pick the newest observation; prefer quarterly on ties.
+                QJsonObject selected;
+                QDate selectedDate;
+                for (const auto& cadence : {QStringLiteral("quarterly"), QStringLiteral("annual")}) {
+                    for (const auto& value : history.value(cadence).toArray()) {
+                        if (!value.isObject()) continue;
+                        const auto entry = value.toObject();
+                        const auto date = QDate::fromString(entry.value("date").toString(), Qt::ISODate);
+                        if (selected.isEmpty() || (date.isValid() && (!selectedDate.isValid() || date > selectedDate))) {
+                            selected = entry;
+                            selectedDate = date;
+                            metric.cadence = cadence;
+                        }
+                    }
+                }
+                metric.value = displayValue(selected.value("value"));
+                metric.period = selected.value("period").toString("Unknown");
+                metric.date = selectedDate.isValid() ? selectedDate.toString(Qt::ISODate) : QStringLiteral("Unknown");
+                metric.unit = selected.value("unit").toString();
+            } else {
+                metric.value = displayValue(history.value("value"));
+                metric.unit = history.value("unit").toString();
+            }
+        } else {
+            metric.value = displayValue(it.value());
         }
-        if (metric.value.isEmpty()) metric.value = "Unknown";
         metrics.append(metric);
     }
-    
+
     const auto request = m_request;
     emit financialsReady(metrics);
     if (request == m_request) emit statusUpdate("Financial summary loaded");
