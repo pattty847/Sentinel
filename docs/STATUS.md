@@ -3,7 +3,7 @@
 Live state for whoever conducts the agents next (Claude or Codex). Update it when something
 lands, deploys or changes priority. Rules: `AGENTS.md`; loop: `docs/AGENT_WORKFLOW.md`.
 
-Last updated: 2026-10-04 22:17 EDT. Codex acting orchestrator; wave 1 complete, per-product live book tick in progress.
+Last updated: 2026-10-04 22:29 EDT. Codex acting orchestrator; wave 1 complete, per-product live book tick in progress.
 
 ## Running services (owner's Mac, launchd)
 
@@ -16,7 +16,7 @@ Last updated: 2026-10-04 22:17 EDT. Codex acting orchestrator; wave 1 complete, 
 
 | Branch | State | Next step |
 |---|---|---|
-| `lt-sol/product-book-tick` | final `39832ee`, rebased unchanged onto `4ec6ade`; affected build and 6/6 targeted suites passed; Fable round two PASS after recorder-safe raw-state hydration and GUI retry fixes | full queued landing gate; owner notified before landing that Claude weekly fell 3% -> 2%; no more Claude reviews; this already-reviewed branch may land under existing authorization; deployment still requires owner-present approval |
+| `lt-sol/product-book-tick` | final `39832ee`, rebased unchanged onto `4ec6ade`; affected build and 6/6 targeted suites passed; Fable round two PASS after recorder-safe raw-state hydration and GUI retry fixes | first full gate 91/92 targets (two TWAP cases relied on old implicit validity); three-line fixture-only correction passed focused TWAP 1/1 and read-only Astra review; production diff remains Fable-approved; rerun full queued landing gate; Claude reviews stopped after owner notification of weekly 3% -> 2%; deployment requires owner-present approval |
 | landed `lt-sol/paper-limit-guard` | merge `78f5b63`, reviewed patch rebased unchanged as `52bfcb2`; limit buttons require a valid displayed price; focused 7/7 cases and full landing 91/91 targets passed | Fable round two PASS; enabled/disabled own-branch captures inspected; worktree removed; focus-out guard is a defensive simulated case, not naturally reproduced |
 | landed | W1a DOM `3c9b948` (compact standard ladder, verified via own-branch screenshots); W1c dock infra `af09b9f` (per-dock + window shots, `--build` own-branch launches, TradeBlotter/Lab/AICommentary removed); W1b paper ticket `e301c85`; W1d doc `docs/research/2026-10-copenet-boundary.md` | |
 
