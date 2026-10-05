@@ -180,6 +180,60 @@ TEST(ChartToolbar, ControlsMenuReachesLayersTimeframeTickAndSearch) {
     EXPECT_EQ(search.size(), 1);
 }
 
+TEST(ChartToolbar, NarrowTickMenuRetainsUnavailableValueAndResolutionWarning) {
+    TopToolbar toolbar;
+    QSignalSpy requests(&toolbar, &TopToolbar::tickPresetRequested);
+    TopToolbar::TickSelectorState state;
+    state.enabled = true;
+    state.manual = true;
+    state.manualUnits = 15;
+    state.drawnUnits = 15;
+    state.offeredUnits = {10, 20};
+    state.indicator = "Locked tick $0.15: columns are veiled";
+    auto *tickMenu = toolbar.controlsMenu()->findChild<QMenu *>("controlsTick");
+    ASSERT_TRUE(tickMenu);
+    for (bool manual : {true, false}) {
+        SCOPED_TRACE(manual ? "Manual" : "Auto");
+        state.manual = manual;
+        toolbar.setTickSelectorState(state);
+        emit toolbar.controlsMenu()->aboutToShow();
+        auto *unavailable = menuAction(tickMenu, "controlsTickPreset", 1);
+        ASSERT_TRUE(unavailable);
+        EXPECT_EQ(unavailable->text(), "$0.15 (unavailable)");
+        EXPECT_TRUE(unavailable->isChecked());
+        EXPECT_FALSE(unavailable->isEnabled());
+        EXPECT_EQ(unavailable->toolTip(), toolbar.tickPresetCombo()->itemData(1, Qt::ToolTipRole).toString());
+        unavailable->trigger();
+        EXPECT_TRUE(requests.isEmpty());
+        auto *warning = menuAction(tickMenu, "controlsTickIndicator");
+        ASSERT_TRUE(warning);
+        EXPECT_EQ(warning->text(), state.indicator);
+        EXPECT_FALSE(warning->isEnabled());
+        EXPECT_EQ(tickMenu->menuAction()->toolTip(), state.indicator);
+    }
+    auto *offered = menuAction(tickMenu, "controlsTickPreset", 0);
+    ASSERT_TRUE(offered);
+    EXPECT_TRUE(offered->isEnabled());
+    offered->trigger();
+    ASSERT_EQ(requests.size(), 1);
+    EXPECT_EQ(requests.at(0).at(0).toLongLong(), 10);
+
+    // Once loaded data can build the current tick, remove the warning and make
+    // that same value selectable, without duplicating its menu entry.
+    state.offeredUnits = {10, 15, 20};
+    state.indicator.clear();
+    toolbar.setTickSelectorState(state);
+    emit toolbar.controlsMenu()->aboutToShow();
+    EXPECT_EQ(tickMenu->findChildren<QAction *>("controlsTickPreset").size(), 3);
+    auto *current = menuAction(tickMenu, "controlsTickPreset", 1);
+    ASSERT_TRUE(current);
+    EXPECT_EQ(current->text(), "$0.15");
+    EXPECT_TRUE(current->isChecked());
+    EXPECT_TRUE(current->isEnabled());
+    EXPECT_TRUE(tickMenu->findChildren<QAction *>("controlsTickIndicator").isEmpty());
+    EXPECT_FALSE(tickMenu->menuAction()->toolTip().contains("veiled")); // Qt falls back to the action text.
+}
+
 // Load the actual production shell without opening a window or starting a feed.
 // This catches QML/accessibility errors and tests the independent P/A controls.
 TEST(ChartShell, AxisControlsHaveKeyboardActionsAndIndependentFollowStates) {

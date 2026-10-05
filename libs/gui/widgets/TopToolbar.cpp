@@ -396,7 +396,7 @@ void TopToolbar::refreshControlsMenu() {
     for (QAction *a : m_controlsMenu->findChild<QMenu *>("controlsCandleStyles")->actions())
         a->setChecked(a->data().toInt() == m_chartTypeCombo->currentIndex());
     m_tickMenu->menuAction()->setEnabled(m_mode.heatmap && m_tickState.enabled);
-    m_tickMenu->menuAction()->setToolTip(m_tickState.enabled ? QString() : m_tickState.disabledReason);
+    m_tickMenu->menuAction()->setToolTip(m_tickState.enabled ? m_tickState.indicator : m_tickState.disabledReason);
     m_tickMenu->clear();
     QAction *autoTick = m_tickMenu->addAction("Auto tick");
     autoTick->setObjectName("controlsTickAuto");
@@ -409,12 +409,25 @@ void TopToolbar::refreshControlsMenu() {
     manualTick->setChecked(m_tickState.manual);
     connect(manualTick, &QAction::triggered, this, [this] { emit tickModeRequested(true); });
     m_tickMenu->addSeparator();
-    for (const int64_t units : m_tickState.offeredUnits) {
-        QAction *preset = m_tickMenu->addAction(tickText(units, m_tickState.priceScale));
+    // Mirror the wide selector, including a retained current tick that loaded
+    // data cannot build. It remains visible and checked, but cannot be selected.
+    for (int i = 0; i < m_tickPresetCombo->count(); ++i) {
+        const int64_t units = m_tickPresetCombo->itemData(i).toLongLong();
+        QAction *preset = m_tickMenu->addAction(m_tickPresetCombo->itemText(i));
         preset->setObjectName("controlsTickPreset");
+        preset->setData(qlonglong(units));
         preset->setCheckable(true);
-        preset->setChecked(units == (m_tickState.manual ? m_tickState.manualUnits : m_tickState.drawnUnits));
+        preset->setChecked(i == m_tickPresetCombo->currentIndex());
+        preset->setEnabled(m_tickPresetCombo->model()->flags(m_tickPresetCombo->model()->index(i, 0)) & Qt::ItemIsEnabled);
+        preset->setToolTip(m_tickPresetCombo->itemData(i, Qt::ToolTipRole).toString());
         connect(preset, &QAction::triggered, this, [this, units] { emit tickPresetRequested(units); });
+    }
+    if (!m_tickState.indicator.isEmpty()) {
+        m_tickMenu->addSeparator();
+        QAction *indicator = m_tickMenu->addAction(m_tickState.indicator);
+        indicator->setObjectName("controlsTickIndicator");
+        indicator->setToolTip(m_tickState.indicator);
+        indicator->setEnabled(false);
     }
     m_rangeMenuAction->setEnabled(m_mode.heatmap && m_mode.gpu);
     m_rangeMenuAction->setToolTip(m_mode.gpu ? QStringLiteral("Edit base-asset cell sizes in Chart settings")
