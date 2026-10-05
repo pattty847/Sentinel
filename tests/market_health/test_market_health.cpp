@@ -10,6 +10,12 @@
 #include <QTest>
 #include <QTimer>
 #include <QDateTime>
+#include <QDir>
+#include <QTemporaryDir>
+#include <QSettings>
+#include <QToolButton>
+#include "themes/ThemeManager.hpp"
+#include "themes/FontManager.hpp"
 #include "protocol/SentinelStreamClientTransport.hpp"
 #include "heatmap/ChunkFetcher.hpp"
 #include "../servermodel/FakeChunkTransport.hpp"
@@ -318,10 +324,54 @@ TEST(MarketHealthWidgets, StatusAndTelemetryStopPollingWhileHiddenAndKeepUnknown
     dock.refresh(); QTest::qWait(350);
     EXPECT_EQ(polls, hiddenPolls);
 }
+TEST(MarketHealthWidgets, TelemetryVisualFixtures) {
+    const auto output = qEnvironmentVariable("SENTINEL_TELEMETRY_SHOTS");
+    if (output.isEmpty()) GTEST_SKIP() << "Opt-in native widget screenshots require an authorized GUI slot";
+    ASSERT_TRUE(QDir().mkpath(output));
+    ThemeManager::instance().initializeDefaults();
+    ThemeManager::instance().applyTheme("dark", qApp);
+    FontManager::instance().initialize(qApp);
+    MarketHealth health;
+    ready(health);
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    health.bookReceived("BTC-USD", now);
+    health.heatmapReceived("BTC-USD", now);
+    MarketHealth::ChartFacts facts;
+    facts.symbol = "BTC-USD";
+    facts.loading = false; facts.holding = false;
+    facts.coverage = "Viewport history coverage unknown";
+    health.setChartState(facts);
+    HeatmapTelemetryDock dock;
+    dock.setMarketHealth(&health);
+    dock.setProvider([]() -> std::optional<QVariantMap> {
+        return QVariantMap{{"mode", "Auto"}, {"tick", 5.0}, {"connection", "Fixture connected"},
+            {"frameMs", 2.0}, {"frameP95Ms", 3.0}, {"loadingSlots", 0}, {"settled", true}};
+    });
+    auto save = [&](const QString& name) {
+        QTest::qWait(80);
+        return dock.grab().save(QDir(output).filePath(name + ".png"));
+    };
+    dock.resize(1920, 990); dock.show();
+    ASSERT_TRUE(save("telemetry-collapsed-wide-fixture"));
+    auto* toggle = dock.findChild<QToolButton*>(); ASSERT_NE(toggle, nullptr);
+    toggle->setChecked(true);
+    ASSERT_TRUE(save("telemetry-expanded-wide-fixture"));
+    dock.resize(440, 720);
+    ASSERT_TRUE(save("telemetry-expanded-narrow-fixture"));
+    toggle->setChecked(false);
+    ASSERT_TRUE(save("telemetry-collapsed-narrow-fixture"));
+    dock.setProvider({}); dock.setMarketHealth(nullptr);
+    ASSERT_TRUE(save("telemetry-unavailable-narrow-fixture"));
+}
+
 }
 int main(int argc, char** argv) {
-    qputenv("QT_QPA_PLATFORM", "offscreen");
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication app(argc, argv);
+    QTemporaryDir settings;
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
+    Q_INIT_RESOURCE(sentinel_ui_fonts);
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

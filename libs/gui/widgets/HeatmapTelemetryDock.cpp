@@ -131,9 +131,14 @@ void HeatmapTelemetryDock::buildUi() {
     m_grid->setVerticalSpacing(2);
     m_grid->setColumnStretch(1, 1); // labels at their width, values take the rest
     scroll->setWidget(m_table);
-    outer->addWidget(scroll);
+    outer->addWidget(scroll, 1);
+    // Keep health facts together at the top. Only the expanded engineering
+    // panel may consume spare height; collapsed mode leaves it below the facts.
+    outer->addStretch(1);
+    const int collapsedSpace = outer->count() - 1;
     scroll->hide();
-    connect(m_engineeringToggle, &QToolButton::toggled, this, [this, scroll](bool on) {
+    connect(m_engineeringToggle, &QToolButton::toggled, this, [this, scroll, outer, collapsedSpace](bool on) {
+        outer->setStretch(collapsedSpace, on ? 0 : 1);
         scroll->setVisible(on);
         m_engineeringToggle->setArrowType(on ? Qt::DownArrow : Qt::RightArrow);
     });
