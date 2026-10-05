@@ -55,8 +55,10 @@ orchestrator's Claude Code memory (`sentinel-roadmap`, `codex-delegation`,
   read-only reviews and planning overlap freely.
 - Usage is spread across both subscriptions. Before dispatching, the orchestrator runs
   `scripts/dev/budget.sh` (CodexBar CLI: % left and reset per window) and routes work to the
-  subscription with room; when one is near its limit the other takes more work. Fable has its
-  own weekly limit (shown in the CodexBar app, not the CLI).
+  subscription with room; when one is near its limit the other takes more work. A separate Fable
+  allowance has not been verified. On Oct 4 Claude weekly remaining fell from 3% to 2% across
+  a Fable review; Claude reviews are stopped under the owner's budget rule until the owner
+  changes the review policy or the weekly allowance resets.
 - Hot files (`MainWindowGpu.cpp`, `DataProcessor.cpp`, `MarketDataCoreEngine.cpp`,
   `UnifiedGridRenderer.cpp`) are never edited by two branches at once.
 - Visual changes the owner has not seen do not become the default.
