@@ -3,7 +3,7 @@
 Live state for whoever conducts the agents next (Claude or Codex). Update it when something
 lands, deploys or changes priority. Rules: `AGENTS.md`; loop: `docs/AGENT_WORKFLOW.md`.
 
-Last updated: 2026-10-04 21:00 EDT. Codex acting orchestrator; wave 1 complete, per-product live book tick in progress.
+Last updated: 2026-10-04 21:40 EDT. Codex acting orchestrator; wave 1 complete, per-product live book tick in progress.
 
 ## Running services (owner's Mac, launchd)
 
@@ -17,7 +17,7 @@ Last updated: 2026-10-04 21:00 EDT. Codex acting orchestrator; wave 1 complete, 
 | Branch | State | Next step |
 |---|---|---|
 | `lt-sol/product-book-tick` | Codex gpt-6-sol implementing owner-approved server tick slice in `/Volumes/T7/sentinel-worktrees/lt-sol-product-book-tick` | focused validation, Fable review with budget check, queued land; recorder deployment requires explicit owner-present approval |
-| `lt-sol/paper-limit-guard` | Codex gpt-6-sol commit `92625f0`; focused PaperTradingDockTests 1/1 target, 7/7 cases passed; enabled/disabled own-branch captures inspected | Fable round-one findings addressed (focus-out is a defensive simulated case, not naturally reproduced); Fable round two PASS for code and workflow docs; handoff rebase + queued full land checks pending; no hub/core overlap |
+| landed `lt-sol/paper-limit-guard` | merge `78f5b63`, reviewed patch rebased unchanged as `52bfcb2`; limit buttons require a valid displayed price; focused 7/7 cases and full landing 91/91 targets passed | Fable round two PASS; enabled/disabled own-branch captures inspected; worktree removed; focus-out guard is a defensive simulated case, not naturally reproduced |
 | landed | W1a DOM `3c9b948` (compact standard ladder, verified via own-branch screenshots); W1c dock infra `af09b9f` (per-dock + window shots, `--build` own-branch launches, TradeBlotter/Lab/AICommentary removed); W1b paper ticket `e301c85`; W1d doc `docs/research/2026-10-copenet-boundary.md` | |
 
 ## Next (priority order)
@@ -38,7 +38,7 @@ Last updated: 2026-10-04 21:00 EDT. Codex acting orchestrator; wave 1 complete, 
 
 ## Acting-orchestrator checks
 
-- Claude Fable alias verified with `claude -p --model fable` on Oct 4. One small STATUS review passed; before/after Claude weekly 3% left, session 97% -> 96% left. Paper review used model `claude-fable-5-1`; weekly still 3% left afterward, session 96% -> 94% left. Whole-percent precision does not prove a separate Fable allowance. Check around each review; if weekly remaining drops, stop Claude reviews and notify owner before any landing. Codex weekly initially 8%, latest check 6% remaining; use it before owner applies reset credit.
+- Claude Fable alias verified with `claude -p --model fable` on Oct 4. One small STATUS review passed; before/after Claude weekly 3% left, session 97% -> 96% left. Paper review used model `claude-fable-5-1`; weekly still 3% left afterward, session 96% -> 94% left. Whole-percent precision does not prove a separate Fable allowance. Check around each review; if weekly remaining drops, stop Claude reviews and notify owner before any landing. Codex weekly initially 8%, latest check 5% remaining; use it before owner applies reset credit.
 - Wave 2: at most three writing lieutenants; W2b alone owns hubs. Review every branch with Fable only if the budget check permits; no opus/sonnet writers before owner confirmation of the Claude weekly reset.
 - Deployments and slice D require asking the owner first and confirmation that the owner is present.
 - Unrelated `lt-sol/label-style` locked worktree and untracked `.codex/` left untouched.
