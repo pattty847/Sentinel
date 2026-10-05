@@ -70,10 +70,11 @@ orchestrator's Claude Code memory (`sentinel-roadmap`, `codex-delegation`,
   can take screenshots of landed work through the GUI host
   (`scripts/dev/gui-shot.sh`, AGENTS.md section 4b): the orchestrator keeps
   `scripts/dev/gui-host.py` running outside the sandbox and rebuilds main after a GUI change lands.
-  The host runs only main's build, never a worktree build, because it executes with the owner's
-  privileges; a Codex branch's own visuals come from a Claude subagent or after landing.
+  After W1c (2026-10-04), the host also supports `launch --build <worktree>` for fixed binaries under
+  the allowed worktree roots (AGENTS.md section 4b). Lieutenants can validate their branch through safe
+  retained-dock / `window` grabs after a queued build; one hosted GUI session at a time.
 - Claude subagents: can launch the GUI on a separate `--api-port` with `--no-screener`;
-  screenshots `target=heatmap` only; never run the GUI binary with `--help` (it starts a
+  screenshots use safe retained-dock/widget targets, `heatmap`, or `window` (W1c); never `main`; never run the GUI binary with `--help` (it starts a
   full GUI).
 
 ## Retro notes (folded from WORKFLOW: lines)
@@ -90,3 +91,7 @@ orchestrator's Claude Code memory (`sentinel-roadmap`, `codex-delegation`,
 - Every lieutenant report ends with a `WORKFLOW:` line; the orchestrator folds them into the retro notes above and runs a short retro every few days.
 - The orchestrator pushes `main` itself after clean landings (secret scan, never force).
 - 2026-10-03: a review agent ran a branch GUI without `--agent-host`, so it used the owner's QSettings (window/layout state may be saved on exit). Reviewers running their own GUI must pass `--agent-host <scratch dir>` (isolated settings) or use the GUI host.
+
+- 2026-10-04 acting-orchestrator correction: Codex conducts until the owner hands back to Claude. Wave 2 waits for the per-product tick slice and owner-applied Codex reset credit, not a Claude reset date. At most three writing lieutenants; one hub owner per wave. Fable reviewed a small status diff with Claude weekly usage unchanged at the whole-percent precision exposed by CodexBar; this does not prove a separate allowance. Check before/after reviews and stop Claude reviews if weekly remaining drops. Deployments and slice D require asking the owner first and owner presence.
+
+- 2026-10-04: a shell Claude reviewer launched inside a worktree could not read main-checkout docs under its tool permissions. Supply the exact relevant document diff in the review prompt rather than treating a code-only PASS as review of inaccessible documents.

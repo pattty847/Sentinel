@@ -46,7 +46,7 @@ after a secret scan (never force), keep `docs/STATUS.md` current after every lan
    low-price books collapse) using the roller near-grid rule (~1 bp rounded 1-2-5, never below the quote
    increment); publish the tick per product so the GUI replica uses it. Recorder-process change: Fable review,
    deploy with the owner.
-2. Widget pass wave 2 (plan file): W2a health model + StatusBar + telemetry; W2b toolbar + chart shell (owns the
+2. Widget pass wave 2 (plan file; owner correction Oct 4: after tick slice and owner-applied Codex reset credit, not Claude reset; at most three writing lieutenants, W2b alone owns hubs): W2a health model + StatusBar + telemetry; W2b toolbar + chart shell (owns the
    hub files that wave); W2c watch rail + screener; W2d stock chart + SEC. Wave 3: theme/fonts + visual QA.
 3. Owner's strongest product direction: EATEN vs PULLED liquidity and ABSORPTION on the chart. After slice D the
    roller computes per-cell traded buy/sell, pulled (size removed with no trade), added, from the raw journal, as a

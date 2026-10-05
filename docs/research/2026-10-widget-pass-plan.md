@@ -11,11 +11,14 @@ Directive: `docs/research/2026-10-widget-pass-directive.md` (owner decisions win
   hub is unavoidable they declare it in their report and the orchestrator resolves it at land time.
 - **Budget (2026-10-03 22:30).** Claude weekly 7% (resets 2026-10-06 00:00 EDT), Codex weekly 25% plus reset
   credits held by the owner. The orchestrator spends roughly 1% of the Claude week per branch (dispatch, review
-  routing, land). So: wave 1 now, wave 2 after the Claude reset. Codex writes; Claude Fable (separate limit)
-  reviews; no Claude opus/sonnet subagents until the reset.
-- **Visual proof.** Codex cannot see its own unlanded branch (no window server in the sandbox; the GUI host runs
-  only main's build). Wave 1 lands on behaviour tests + Fable review; visual checks happen on main via the new
-  dock grab targets (W1c) and by the owner. No branch claims visual correctness from compilation.
+  routing, land). Historical gate: wave 2 waited on the Claude orchestrator budget. Owner correction 2026-10-04:
+  Codex now orchestrates; wave 2 may start after the per-product tick slice and an owner-applied Codex reset
+  credit. At most three writing lieutenants at once. Codex writes; Claude Fable
+  reviews subject to before/after weekly-budget checks; a separate Fable allowance is not yet proven; no Claude opus/sonnet subagents until the owner confirms the Claude weekly reset.
+- **Visual proof.** Sandboxed Codex uses the GUI host for visual proof. W1c has landed: the host accepts
+  `launch --build <worktree>` and safe retained-dock / `window` grabs, so a lieutenant can validate its
+  unlanded branch after a queued build. One hosted GUI session at a time. Owner visual approval remains
+  required before unseen visual changes become the default. No branch claims visual correctness from compilation.
 - Builds/tests through `scripts/dev/build-queue.sh`. No renderer rewrites. Ingestion untouched by GUI throttling.
 
 ## Wave 1 (dispatched 2026-10-03)
@@ -30,14 +33,18 @@ Directive: `docs/research/2026-10-widget-pass-directive.md` (owner decisions win
 Land order: W1c first if ready (it gives every later branch visual validation), then W1a, W1b; each lands after
 a Fable review and a rebase+retest (merge-queue rule).
 
-## Wave 2 (after the Claude reset; adjusted by wave 1 results)
+## Wave 2 (after tick slice and Codex reset credit; owner correction 2026-10-04)
 
 | Id | Scope | Owns |
 |---|---|---|
 | W2a | P4 shared health model + P6 StatusBar + P5 telemetry; DOM/paper adopt it | new GUI `MarketHealth` model, `RemoteGridDataSource` status signals, `StatusBar`, `HeatmapTelemetryDock` |
 | W2b | P3 toolbar wiring + P9 chart-dock shell + LiquidityRangeSlider | hubs (this wave's owner), `TopToolbar`, `LiquidityRangeSlider`, chart dock shell (not the renderer) |
 | W2c | P7 watch rail + P8 screener | `WatchlistDock`, `ScreenerDock` |
-| W2d | Stock chart + SEC correctness; AICommentary removal if W1d confirms it is dead | `StockChartDock`, `StockChartView.qml`, `SecFilingDock`, `SecApiClient`, AICommentary files |
+| W2d | Stock chart + SEC correctness; AICommentary was already removed by W1c | `StockChartDock`, `StockChartView.qml`, `SecFilingDock`, `SecApiClient`; preserve CopeNet and its commentary base |
+
+W2b remains the sole hub-file owner. Other branches declare any required hub hooks instead of editing the hubs.
+Dispatch at most three writers; start the fourth only after a slot is free. Fable reviews each branch while the
+budget gate permits; stop Claude reviews and notify the owner before landing if Claude weekly remaining drops.
 
 ## Wave 3
 
