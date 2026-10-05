@@ -6,6 +6,9 @@
 #include <QScrollArea>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QToolButton>
+#include <cmath>
+#include <limits>
 
 // The lab's frame-time graph: the last 90 samples (one per poll), 0..33.3 ms.
 class HeatmapFrameGraph : public QWidget {
@@ -18,7 +21,10 @@ public:
 protected:
     void paintEvent(QPaintEvent *) override {
         QPainter p(this);
-        p.fillRect(rect(), QColor("#0A1118"));
+        p.fillRect(rect(), QColor("#1E1E1E"));
+        p.setPen(QColor("#999999"));
+        p.drawText(4, 13, "33.3 ms");
+        p.drawText(4, height() - 4, "0 ms");
         p.setPen(QColor("#263B48"));
         p.drawLine(0, height() / 2, width(), height() / 2);
         if (history_.size() < 2) return;
@@ -34,10 +40,15 @@ private:
 };
 
 namespace {
-double num(const QVariantMap &m, const char *key) { return m.value(key).toDouble(); }
+bool known(const QVariantMap &m, const char *key) { return m.contains(key) && m.value(key).isValid() && !m.value(key).isNull(); }
+double num(const QVariantMap &m, const char *key) {
+    bool ok = false;
+    const double value = m.value(key).toDouble(&ok);
+    return known(m, key) && ok && std::isfinite(value) ? value : std::numeric_limits<double>::quiet_NaN();
+}
 QString money(double v) { return v > 0 ? QStringLiteral("$") + QString::number(v, 'g', 12) : QStringLiteral("-"); }
-QString mb(const QVariantMap &m, const char *key) { return QString::number(num(m, key) / 1048576.0, 'f', 1) + " MB"; }
-QString integer(const QVariantMap &m, const char *key) { return QString::number(m.value(key).toLongLong()); }
+QString mb(const QVariantMap &m, const char *key) { return std::isfinite(num(m, key)) ? QString::number(num(m, key) / 1048576.0, 'f', 1) + " MB" : QStringLiteral("Unknown"); }
+QString integer(const QVariantMap &m, const char *key) { return known(m, key) ? QString::number(m.value(key).toLongLong()) : QStringLiteral("Unknown"); }
 QString ms(const QVariantMap &m, const char *key, int decimals) {
     return QString::number(num(m, key), 'f', decimals) + " ms";
 }
@@ -59,7 +70,7 @@ HeatmapTelemetryDock::HeatmapTelemetryDock(QWidget *parent)
 
 void HeatmapTelemetryDock::addSection(const QString &title) {
     auto *label = new QLabel(title, m_table);
-    label->setStyleSheet("QLabel { color: #A6E7E9; font-weight: 700; font-size: 12px; padding-top: 6px; }");
+    label->setStyleSheet("QLabel { color: #d0d0d0; font-weight: 700; font-size: 12px; padding-top: 6px; }");
     m_grid->addWidget(label, m_grid->rowCount(), 0, 1, 2);
 }
 
@@ -67,12 +78,12 @@ void HeatmapTelemetryDock::addRow(const QString &name, const QString &key,
                                   std::function<QString(const QVariantMap &)> format) {
     const int row = m_grid->rowCount();
     auto *label = new QLabel(name, m_table);
-    label->setStyleSheet("QLabel { color: #9BAFBA; font-size: 12px; }");
+    label->setStyleSheet("QLabel { color: #a0a0a0; font-size: 12px; }");
     auto *value = new QLabel("-", m_table);
     value->setObjectName("telemetry." + key);
     value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     value->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred); // a long value never widens the dock
-    value->setStyleSheet("QLabel { color: #E8F0F2; font-family: Menlo, monospace; font-size: 12px; }");
+    value->setStyleSheet("QLabel { color: #ddd; font-family: Menlo, monospace; font-size: 12px; }");
     m_grid->addWidget(label, row, 0);
     m_grid->addWidget(value, row, 1);
     m_rows.push_back({key, value, std::move(format)});
@@ -82,14 +93,33 @@ void HeatmapTelemetryDock::buildUi() {
     if (m_grid) return;
     auto *outer = new QVBoxLayout(m_contentWidget);
     outer->setContentsMargins(8, 8, 8, 8);
-    m_contentWidget->setStyleSheet("QWidget { background-color: #070B10; }");
+    m_contentWidget->setStyleSheet("QWidget { background-color: #1E1E1E; }");
+    m_healthSummary = new QLabel("Initializing", m_contentWidget);
+    m_healthSummary->setObjectName("telemetry.marketHealth");
+    m_healthSummary->setWordWrap(true);
+    m_healthSummary->setStyleSheet("color: #ddd; font-size: 13px; font-weight: bold;");
+    m_healthSummary->setTextFormat(Qt::PlainText);
+    outer->addWidget(m_healthSummary);
+    m_healthDetail = new QLabel("Market health unavailable", m_contentWidget);
+    m_healthDetail->setObjectName("telemetry.marketDetail");
+    m_healthDetail->setWordWrap(true);
+    m_healthDetail->setTextFormat(Qt::PlainText);
+    m_healthDetail->setStyleSheet("color: #b0b0b0; font-size: 12px;");
+    outer->addWidget(m_healthDetail);
+    m_engineeringToggle = new QToolButton(m_contentWidget);
+    m_engineeringToggle->setText("Engineering details");
+    m_engineeringToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_engineeringToggle->setArrowType(Qt::RightArrow);
+    m_engineeringToggle->setCheckable(true);
+    m_engineeringToggle->setAccessibleName("Show engineering telemetry");
+    outer->addWidget(m_engineeringToggle);
     m_disabled = new QLabel(m_contentWidget);
     m_disabled->setObjectName("telemetryDisabled");
     m_disabled->setWordWrap(true);
     m_disabled->setAlignment(Qt::AlignCenter);
     m_disabled->setStyleSheet("QLabel { color: #8198A6; font-size: 12px; padding: 16px; }");
-    m_disabled->setText("The chart draws with the legacy renderer. Telemetry covers the GPU heatmap renderer: "
-                        "Settings > Debug > Renderer: GPU.");
+    m_disabled->setText("GPU renderer telemetry unavailable. Select the GPU renderer in Settings > Debug "
+                        "and open a chart to inspect rendering metrics.");
     outer->addWidget(m_disabled);
 
     auto *scroll = new QScrollArea(m_contentWidget);
@@ -101,12 +131,22 @@ void HeatmapTelemetryDock::buildUi() {
     m_grid->setVerticalSpacing(2);
     m_grid->setColumnStretch(1, 1); // labels at their width, values take the rest
     scroll->setWidget(m_table);
-    outer->addWidget(scroll);
+    outer->addWidget(scroll, 1);
+    // Keep health facts together at the top. Only the expanded engineering
+    // panel may consume spare height; collapsed mode leaves it below the facts.
+    outer->addStretch(1);
+    const int collapsedSpace = outer->count() - 1;
+    scroll->hide();
+    connect(m_engineeringToggle, &QToolButton::toggled, this, [this, scroll, outer, collapsedSpace](bool on) {
+        outer->setStretch(collapsedSpace, on ? 0 : 1);
+        scroll->setVisible(on);
+        m_engineeringToggle->setArrowType(on ? Qt::DownArrow : Qt::RightArrow);
+    });
 
     auto *title = new QLabel("RENDER TELEMETRY", m_table);
-    title->setStyleSheet("QLabel { color: #A6E7E9; font-weight: 700; font-size: 14px; }");
+    title->setStyleSheet("QLabel { color: #d0d0d0; font-weight: 700; font-size: 14px; }");
     m_grid->addWidget(title, 0, 0, 1, 2);
-    auto *graphLabel = new QLabel("Frame time p50 per poll · last 90 samples", m_table);
+    auto *graphLabel = new QLabel("Frame p50 · 0–33.3 ms · 90 samples / 22.5 s", m_table);
     graphLabel->setStyleSheet("QLabel { color: #AAB7C0; font-size: 12px; }");
     m_grid->addWidget(graphLabel, 1, 0, 1, 2);
     m_graph = new HeatmapFrameGraph(m_frameHistory, m_table);
@@ -136,7 +176,7 @@ void HeatmapTelemetryDock::buildUi() {
 
     addSection("GPU (NODE)");
     addRow("Resident / cap", "residentBytes", [](const QVariantMap &m) {
-        return mb(m, "residentBytes") + " / " + QString::number(num(m, "gpuCapBytes") / 1048576.0, 'f', 0) + " MB";
+        return mb(m, "residentBytes") + " / " + mb(m, "gpuCapBytes");
     });
     addRow("Sources / bins", "sourceBytes", [](const QVariantMap &m) { return mb(m, "sourceBytes") + " / " + mb(m, "binBytes"); });
     addRow("Resident sources", "residentSources", [](const QVariantMap &m) { return integer(m, "residentSources"); });
@@ -214,12 +254,20 @@ void HeatmapTelemetryDock::buildUi() {
 
 void HeatmapTelemetryDock::setProvider(Provider provider) {
     m_provider = std::move(provider);
-    refresh();
+    if (m_exposed) refresh();
+    else m_disabled->setVisible(true);
+}
+
+void HeatmapTelemetryDock::setMarketHealth(MarketHealth* health) {
+    m_health = health;
+    if (m_exposed) refresh();
 }
 
 bool HeatmapTelemetryDock::disabledShown() const { return !m_disabled->isHidden(); }
 
 QString HeatmapTelemetryDock::valueText(const QString &key) const {
+    if (key == QLatin1String("marketHealth")) return m_healthSummary->text();
+    if (key == QLatin1String("marketDetail")) return m_healthDetail->text();
     if (key == QLatin1String("indicator")) return m_indicator->text();
     for (const auto &row : m_rows)
         if (row.key == key) return row.value->text();
@@ -229,16 +277,48 @@ QString HeatmapTelemetryDock::valueText(const QString &key) const {
 // GUI thread, 4 Hz while visible: one provider read (atomics, shared pointers and
 // the service's stats copy) and label texts. No per-frame hook.
 void HeatmapTelemetryDock::refresh() {
+    if (!m_exposed || window()->isMinimized()) return;
     ++m_refreshes;
+    if (m_health) {
+        m_health->refreshChartState();
+        const auto s = m_health->snapshot();
+        m_healthSummary->setText(s.symbol + " · " + s.text());
+        QString transport;
+        switch (s.transport) {
+        case MarketHealth::Transport::Initializing: transport = "Initializing"; break;
+        case MarketHealth::Transport::Connected: transport = "Connected"; break;
+        case MarketHealth::Transport::Reconnecting: transport = "Reconnecting"; break;
+        case MarketHealth::Transport::Disconnected: transport = "Disconnected"; break;
+        }
+        const auto fact = [](std::optional<bool> value) { return value ? (*value ? QStringLiteral("Yes") : QStringLiteral("No")) : QStringLiteral("Unknown"); };
+        m_healthDetail->setText(QStringLiteral("Transport: %1 · Subscription: %2\nBook receive age: %3 · Heatmap live receive age: %4\nHistory: %5\nLoading: %6 · Holding picture: %7%8")
+            .arg(transport, s.acknowledged ? "Acknowledged" : "Waiting for subscription",
+                 MarketHealth::ageText(s.bookAgeMs), MarketHealth::ageText(s.heatmapAgeMs),
+                 s.coverage.isEmpty() ? "Unknown" : s.coverage, fact(s.loading), fact(s.holding),
+                 s.reason.isEmpty() ? QString{} : "\n" + s.reason));
+    } else {
+        m_healthSummary->setText("Unavailable");
+        m_healthDetail->setText("Market health source unavailable");
+    }
     const auto metrics = m_provider ? m_provider() : std::nullopt;
     m_disabled->setVisible(!metrics);
     m_table->setVisible(metrics.has_value());
     if (!metrics) return;
-    for (const auto &row : m_rows) row.value->setText(row.format(*metrics));
+    for (const auto &row : m_rows) {
+        QString value = metrics->contains(row.key) && metrics->value(row.key).isValid() && !metrics->value(row.key).isNull()
+            ? row.format(*metrics) : QStringLiteral("Unknown");
+        if (value.contains("nan", Qt::CaseInsensitive) || value.contains("inf", Qt::CaseInsensitive)) value = "Unknown";
+        // GPU timing and footprint use zero for unsupported/not-yet-sampled.
+        if ((row.key == "gpuFrameMs" || row.key == "footprintBytes") && num(*metrics, qPrintable(row.key)) <= 0) value = "Unavailable";
+        if ((row.key == "liveDataAgeMs" || row.key == "liveAgeP95" || row.key == "livePublishToDrawMs" || row.key == "livePublishP95")
+            && (!known(*metrics, "liveVersion") || num(*metrics, "liveVersion") <= 0)) value = "Unknown";
+        row.value->setText(value);
+        row.value->setToolTip(value);
+    }
     const QString indicator = metrics->value("indicator").toString();
     m_indicator->setText(indicator);
     m_indicator->setVisible(!indicator.isEmpty());
-    m_frameHistory.push_back(metrics->value("frameMs").toDouble());
+    if (std::isfinite(num(*metrics, "frameMs"))) m_frameHistory.push_back(num(*metrics, "frameMs"));
     if (m_frameHistory.size() > 90) m_frameHistory.erase(m_frameHistory.begin());
     m_graph->update();
 }

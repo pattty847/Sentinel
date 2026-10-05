@@ -1,0 +1,5 @@
+add_executable(test_market_health test_market_health.cpp)
+target_include_directories(test_market_health PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_market_health PRIVATE sentinel_gui_lib GTest::gtest Qt6::Widgets Qt6::Test)
+add_test(NAME MarketHealthTests COMMAND test_market_health)
+set_tests_properties(MarketHealthTests PROPERTIES LABELS "ui;health" TIMEOUT 45)

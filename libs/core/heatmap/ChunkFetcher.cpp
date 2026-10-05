@@ -2,6 +2,7 @@
 #include "ChunkFetcher.hpp"
 #include "../SentinelLogging.hpp"
 #include <QThread>
+#include <QDateTime>
 #include <algorithm>
 #include <stdexcept>
 #include <chrono>
@@ -165,7 +166,9 @@ void ChunkFetcher::onLive(quint64 subscription, ChunkFramePtr frame) {
             revalidate(key);
     sLog_Probe("heatmap.live.receive", "symbol=" << frame->key.symbol << " source=" << frame->key.source
                << " revision=" << frame->state.revision << " minutes=" << edge->second.snapshot()->minutes.size());
-    emit liveChanged(QString::fromStdString(frame->key.symbol));
+    const auto symbol = QString::fromStdString(frame->key.symbol);
+    emit liveAccepted(symbol, QDateTime::currentMSecsSinceEpoch());
+    emit liveChanged(symbol);
 }
 void ChunkFetcher::trimLive(const ChunkKey &key) {
     if (key.levelMs != kMinuteMs) return;

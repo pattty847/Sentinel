@@ -134,6 +134,7 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
                 advanceCandleDeliveryGeneration();
                 if (m_candleBuffer) m_candleBuffer->resetSequences();
                 m_candleBackfill.requestRefresh();
+                m_marketHealth.setTransport(MarketHealth::Transport::Connected);
                 m_connectionActive = true;
                 emit connectionStatusChanged(true);
                 requestNextCandlePage();
@@ -152,14 +153,21 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
                 m_pendingBookSnapshots.clear();
                 m_bookVersions.clear();
                 m_candleBackfill.disconnect();
+                m_marketHealth.setTransport(MarketHealth::Transport::Reconnecting);
                 m_connectionActive = false;
                 emit connectionStatusChanged(false);
             },
             Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::subscriptionRefused,
-            this, &IGridDataSource::subscriptionRefused, Qt::QueuedConnection);
+            this, [this](const QString& symbol, int cap, const QString& reason) {
+                m_marketHealth.subscriptionRefused(symbol, reason);
+                emit subscriptionRefused(symbol, cap, reason);
+            }, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::subscriptionAcknowledged,
-            this, &IGridDataSource::subscriptionAcknowledged, Qt::QueuedConnection);
+            this, [this](const QString& symbol) {
+                m_marketHealth.subscriptionAcknowledged(symbol);
+                emit subscriptionAcknowledged(symbol);
+            }, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::errorOccurred,
             this, &IGridDataSource::errorOccurred, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::orderUpdated,
@@ -193,6 +201,7 @@ void RemoteGridDataSource::connectToServer() {
 void RemoteGridDataSource::subscribe(const QString& symbol) {
     if (!symbolPermitted(symbol.toStdString(), "subscribe")) return;
     const bool wasStale = isBookSnapshotStale(symbol);
+    m_marketHealth.subscriptionRequested(symbol);
     m_client.subscribe(symbol.toStdString());
     m_activeBookSymbols.insert(symbol.toStdString());
     m_pendingBookSnapshots[symbol.toStdString()] = {QDateTime::currentMSecsSinceEpoch() + 5000, false, false};
@@ -214,6 +223,7 @@ void RemoteGridDataSource::subscribe(const QString& symbol) {
 
 void RemoteGridDataSource::unsubscribe(const QString& symbol) {
     const bool wasStale = isBookSnapshotStale(symbol);
+    m_marketHealth.subscriptionReleased(symbol);
     m_client.unsubscribe(symbol.toStdString());
     m_activeBookSymbols.erase(symbol.toStdString());
     m_pendingBookSnapshots.erase(symbol.toStdString());
@@ -254,6 +264,7 @@ void RemoteGridDataSource::processBookSnapshotDeadlines(qint64 nowMs) {
         m_client.subscribe(symbol);
     }
     for (const auto& symbol : staleSymbols) {
+        m_marketHealth.bookStale(symbol);
         emit bookSnapshotStaleChanged(symbol, true);
         emit errorOccurred(QString("Order book snapshot stale: %1").arg(symbol));
     }
@@ -388,6 +399,7 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
         (!status.isEmpty() && status != QStringLiteral("ready"))) {
         if (auto it = m_replicaBooks.find(symbol); it != m_replicaBooks.end() && it->second)
             it->second->clear();
+        m_marketHealth.bookUnavailable(productId, status);
         emit liveOrderBookUpdated(productId, {}); // Consumers withdraw cached rows/top.
         const auto pending = m_pendingBookSnapshots.try_emplace(
             symbol, PendingBookSnapshot{QDateTime::currentMSecsSinceEpoch() + 5000, false, false}).first;
@@ -428,6 +440,7 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
     auto now = std::chrono::system_clock::now();
     std::vector<BookDelta> deltas;
     book.applyUpdates(updates, now, &deltas);
+    m_marketHealth.bookReceived(productId, QDateTime::currentMSecsSinceEpoch());
     if (bookVersion > 0) m_bookVersions[symbol] = bookVersion;
     m_pendingBookSnapshots.erase(symbol);
     if (m_pendingBookSnapshots.empty()) m_bookSnapshotTimer.stop();
@@ -491,6 +504,7 @@ void RemoteGridDataSource::onL2UpdateReceivedAt(const QString& productId,
         sLog_Warning("L2 update tick disagrees with snapshot: symbol=" << productId
                      << " snapshotTick=" << book.getTickSize() << " deltaTick=" << tickSize);
         book.clear();
+        m_marketHealth.bookUnavailable(productId, QStringLiteral("Book tick changed; waiting for snapshot"));
         emit liveOrderBookUpdated(productId, {});
         if (bookVersion > 0) m_bookVersions[symbol] = bookVersion;
         const auto pending = m_pendingBookSnapshots.try_emplace(
@@ -505,6 +519,7 @@ void RemoteGridDataSource::onL2UpdateReceivedAt(const QString& productId,
 
     auto now = std::chrono::system_clock::now();
     book.applyUpdates(updates, now, &deltas);
+    m_marketHealth.bookReceived(productId, nowMs, false);
     if (bookVersion > 0) m_bookVersions[symbol] = bookVersion;
 
     if (!deltas.empty()) {
@@ -513,6 +528,7 @@ void RemoteGridDataSource::onL2UpdateReceivedAt(const QString& productId,
 }
 
 void RemoteGridDataSource::onHeatmapSliceReceived(const HeatmapSlice& slice) {
+    m_marketHealth.heatmapReceived(slice.symbol, QDateTime::currentMSecsSinceEpoch());
     emit heatmapSliceReceived(slice);
 }
 

@@ -1,52 +1,34 @@
 #pragma once
-
 #include <QWidget>
-#include <QLabel>
-#include <QHBoxLayout>
+#include <QPointer>
 #include <QTimer>
+#include "../models/MarketHealth.hpp"
+class QLabel;
 
-/**
- * Bottom status bar (dock-like) for Sentinel terminal.
- * Displays connection status, CPU/GPU/Latency metrics, and "Ready" status.
- * Designed to eventually hold minimized dock icons.
- */
+// Primary market context. Engineering metrics belong in telemetry.
 class StatusBar : public QWidget {
     Q_OBJECT
-
 public:
     explicit StatusBar(QWidget* parent = nullptr);
-    ~StatusBar() override = default;
-    
+    void setMarketHealth(MarketHealth* health);
     void setConnectionStatus(bool connected);
     void setConnectionConnecting();
-    void setCpuUsage(int percent);
-    void setGpuUsage(int percent);
-    void setFrameStats(const QString& text);
-    void setLatency(int milliseconds);
-    void setCoinbaseLatency(int milliseconds);
-    void setUploadBandwidth(double mbPerSec);
+    // Compatibility with existing hubs; these measurements are intentionally
+    // omitted from the compact status bar (including unsupported CPU/GPU zeros).
+    void setCpuUsage(int) {}
+    void setGpuUsage(int) {}
+    void setFrameStats(const QString&) {}
+    void setLatency(int) {}
+    void setCoinbaseLatency(int) {}
+    void setUploadBandwidth(double) {}
     void setReadyStatus(const QString& status = "Ready");
     void showVersion();
-
-private slots:
-    void updateMetrics();  // Periodic update slot
-
+protected:
+    void showEvent(QShowEvent*) override;
+    void hideEvent(QHideEvent*) override;
 private:
-    QLabel* m_readyLabel;
-    QLabel* m_connectionLabel;
-    QLabel* m_frameLabel;
-    QLabel* m_cpuLabel;
-    QLabel* m_gpuLabel;
-    QLabel* m_latencyLabel;
-    QLabel* m_uploadLabel;
-    QLabel* m_versionLabel;
-
-    // Metrics storage
-    int m_cpuPercent = 0;
-    int m_gpuPercent = 0;
-    int m_latencyMs = 0;
-    int m_coinbaseLatencyMs = -1;
-    bool m_connected = false;
-    
-    QTimer* m_updateTimer;
+    void refresh();
+    QPointer<MarketHealth> m_health;
+    QLabel *m_symbolLabel, *m_stateLabel, *m_ageLabel, *m_versionLabel;
+    QTimer m_ageTimer;
 };

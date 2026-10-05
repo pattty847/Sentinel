@@ -60,6 +60,8 @@ signals:
     void availabilityChanged(heatmap::ChunkAvailability value);
     void storeCleared();
     void liveChanged(QString symbol);
+    // Accepted publication only (not trim/rebuild); wall-clock receipt on this thread.
+    void liveAccepted(QString symbol, qint64 receivedAtMs);
 private:
     struct Demand {
         std::map<ChartId, int> charts;

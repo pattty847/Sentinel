@@ -590,7 +590,7 @@ TEST_F(DomDock, QuietConnectedBookRetainsLastChangeAgeAndDetectsDisconnect) {
     const qint64 changedAt = QDateTime::currentMSecsSinceEpoch() - 60000;
     source.update({{true, 200, 2}, {false, 200.1, 3}}, changedAt);
     show();
-    EXPECT_TRUE(label("domFreshness").startsWith("Connected · last change "));
+    EXPECT_TRUE(label("domFreshness").startsWith("Live · last change "));
     EXPECT_GE(label("domFreshness").section("last change ", 1).section(" s", 0, 0).toDouble(), 60.0);
     auto* timer = dock.findChild<QTimer*>("domPublishTimer");
     timer->stop();
@@ -600,7 +600,7 @@ TEST_F(DomDock, QuietConnectedBookRetainsLastChangeAgeAndDetectsDisconnect) {
         apply(source.book, {{true, 200, 2}, {false, 200.1, 3}});
         QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection);
     }
-    EXPECT_TRUE(label("domFreshness").startsWith("Connected · last change "));
+    EXPECT_TRUE(label("domFreshness").startsWith("Live · last change "));
     EXPECT_GE(label("domFreshness").section("last change ", 1).section(" s", 0, 0).toDouble(), 60.0);
     emit source.connectionStatusChanged(false);
     flushEvents();
@@ -613,7 +613,7 @@ TEST_F(DomDock, QuietConnectedBookRetainsLastChangeAgeAndDetectsDisconnect) {
     source.update({{true, 200, 3}});
     flushEvents();
     QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection);
-    EXPECT_TRUE(label("domFreshness").startsWith("Connected"));
+    EXPECT_TRUE(label("domFreshness").startsWith("Live"));
 }
 
 TEST_F(DomDock, NonUserScrollDoesNotStopFollowingAndSymbolSwitchRereadsStaleSnapshot) {
@@ -629,7 +629,7 @@ TEST_F(DomDock, NonUserScrollDoesNotStopFollowingAndSymbolSwitchRereadsStaleSnap
     source.staleSymbol = "ETH-USD";
     dock.onSymbolChanged("ETH-USD");
     QMetaObject::invokeMethod(&dock, "refreshDisplay", Qt::DirectConnection);
-    EXPECT_TRUE(label("domFreshness").startsWith("Stale snapshot"));
+    EXPECT_TRUE(label("domFreshness").startsWith("Stale"));
 }
 
 TEST(DomWindow, MinimizedMainWindowStopsTimerAndRetainsTradeIngestion) {

@@ -1,133 +1,64 @@
 #include "StatusBar.hpp"
 #include "Version.hpp"
 #include <QHBoxLayout>
-#include <QTimer>
-#include <QApplication>
-#include <QStyle>
+#include <QLabel>
+#include <QShowEvent>
+#include <QHideEvent>
 
-StatusBar::StatusBar(QWidget* parent)
-    : QWidget(parent)
-{
-    setStyleSheet(
-        "StatusBar { "
-        "  background-color: transparent; "
-        "  border: none; "
-        "}"
-    );
-    
-    QHBoxLayout* layout = new QHBoxLayout(this);
+StatusBar::StatusBar(QWidget* parent) : QWidget(parent) {
+    auto* layout = new QHBoxLayout(this);
     layout->setContentsMargins(8, 2, 8, 2);
-    layout->setSpacing(12);
-    
-    m_readyLabel = new QLabel("Ready", this);
-    m_readyLabel->setStyleSheet("QLabel { color: #888; font-size: 10px; }");
-    layout->addWidget(m_readyLabel);
-    
-    layout->addStretch();
-    
-    m_connectionLabel = new QLabel("🟡 Connecting...", this);
-    m_connectionLabel->setStyleSheet("QLabel { color: #ffaa00; font-size: 10px; }");
-    layout->addWidget(m_connectionLabel);
-
-    m_frameLabel = new QLabel("Frame: -- | idle", this);
-    m_frameLabel->setStyleSheet("QLabel { color: #9ac6d3; font-size: 10px; }");
-    layout->addWidget(m_frameLabel);
-
-    m_cpuLabel = new QLabel("CPU: --%", this);
-    m_cpuLabel->setStyleSheet("QLabel { color: #888; font-size: 10px; }");
-    layout->addWidget(m_cpuLabel);
-    
-    m_gpuLabel = new QLabel("GPU: --%", this);
-    m_gpuLabel->setStyleSheet("QLabel { color: #888; font-size: 10px; }");
-    layout->addWidget(m_gpuLabel);
-
-    m_uploadLabel = new QLabel("UP: -- MB/s", this);
-    m_uploadLabel->setStyleSheet("QLabel { color: #888; font-size: 10px; }");
-    layout->addWidget(m_uploadLabel);
-
-    // Latency area now used for Coinbase websocket latency
-    m_latencyLabel = new QLabel("Latency (CB): -- ms", this);
-    m_latencyLabel->setStyleSheet("QLabel { color: #888; font-size: 10px; }");
-    layout->addWidget(m_latencyLabel);
-    
+    layout->setSpacing(8);
+    m_symbolLabel = new QLabel("No symbol", this);
+    m_symbolLabel->setObjectName("marketSymbol");
+    m_stateLabel = new QLabel("Initializing", this);
+    m_stateLabel->setObjectName("marketState");
+    m_ageLabel = new QLabel("Book age unknown", this);
+    m_ageLabel->setObjectName("marketBookAge");
+    m_ageLabel->setToolTip("Time since the last accepted book message. A quiet market is not necessarily stale.");
     m_versionLabel = new QLabel(QString::fromStdString(Sentinel::getVersionString()), this);
-    m_versionLabel->setStyleSheet("QLabel { color: #666; font-size: 9px; }");
     m_versionLabel->hide();
+    setStyleSheet("StatusBar QLabel { color: #a0a0a0; font-size: 11px; } QLabel#marketSymbol { color: #ddd; font-weight: bold; }");
+    layout->addWidget(m_symbolLabel);
+    layout->addWidget(m_stateLabel);
+    layout->addStretch();
+    layout->addWidget(m_ageLabel);
     layout->addWidget(m_versionLabel);
-    
-    setLayout(layout);
-    
-    m_updateTimer = new QTimer(this);
-    connect(m_updateTimer, &QTimer::timeout, this, &StatusBar::updateMetrics);
-    m_updateTimer->start(1000);
+    m_ageTimer.setInterval(1000);
+    connect(&m_ageTimer, &QTimer::timeout, this, &StatusBar::refresh);
 }
-
-void StatusBar::setConnectionStatus(bool connected) {
-    m_connected = connected;
-    if (connected) {
-        m_connectionLabel->setText("🟢 Connected");
-        m_connectionLabel->setStyleSheet("QLabel { color: #44ff44; font-size: 10px; }");
-    } else {
-        m_connectionLabel->setText("🔴 Disconnected");
-        m_connectionLabel->setStyleSheet("QLabel { color: #ff4444; font-size: 10px; }");
+void StatusBar::setMarketHealth(MarketHealth* health) {
+    if (m_health) disconnect(m_health, nullptr, this, nullptr);
+    m_health = health;
+    if (health) {
+        connect(health, &MarketHealth::changed, this, [this] { if (isVisible()) refresh(); });
+        connect(health, &QObject::destroyed, this, [this] { m_ageTimer.stop(); if (isVisible()) refresh(); });
     }
+    if (isVisible() && health) m_ageTimer.start();
+    else m_ageTimer.stop();
+    if (isVisible()) refresh();
 }
-
-void StatusBar::setConnectionConnecting() {
-    m_connected = false;
-    m_connectionLabel->setText("🟡 Connecting...");
-    m_connectionLabel->setStyleSheet("QLabel { color: #ffaa00; font-size: 10px; }");
+void StatusBar::refresh() {
+    if (!isVisible() || window()->isMinimized()) return;
+    if (!m_health) {
+        m_symbolLabel->setText("No symbol");
+        m_stateLabel->setText("Unavailable");
+        m_ageLabel->setText("Book age unknown");
+        return;
+    }
+    m_health->refreshChartState();
+    const auto s = m_health->snapshot();
+    m_symbolLabel->setText(s.symbol.isEmpty() ? "No symbol" : s.symbol);
+    m_stateLabel->setText(s.text());
+    m_stateLabel->setToolTip(s.reason);
+    const bool degraded = s.state == MarketHealth::State::Stale || s.state == MarketHealth::State::HistoryPartial || s.state == MarketHealth::State::Unavailable;
+    const bool disconnected = s.state == MarketHealth::State::Disconnected || s.state == MarketHealth::State::Reconnecting;
+    m_stateLabel->setStyleSheet(QString("color: %1;").arg(disconnected ? "#e57373" : degraded ? "#ffcc80" : "#b0b0b0"));
+    m_ageLabel->setText(s.bookAgeMs ? "Book " + MarketHealth::ageText(s.bookAgeMs) : "Book age unknown");
 }
-
-void StatusBar::setCpuUsage(int percent) {
-    m_cpuPercent = percent;
-    m_cpuLabel->setText(QString("CPU: %1%").arg(percent));
-    
-    QString color = percent < 50 ? "#44ff44" : (percent < 80 ? "#ffaa00" : "#ff4444");
-    m_cpuLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 10px; }").arg(color));
-}
-
-void StatusBar::setGpuUsage(int percent) {
-    m_gpuPercent = percent;
-    m_gpuLabel->setText(QString("GPU: %1%").arg(percent));
-
-    QString color = percent < 50 ? "#44ff44" : (percent < 80 ? "#ffaa00" : "#ff4444");
-    m_gpuLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 10px; }").arg(color));
-}
-
-void StatusBar::setFrameStats(const QString& text) {
-    m_frameLabel->setText(text);
-}
-
-void StatusBar::setLatency(int milliseconds) {
-    m_latencyMs = milliseconds;
-    m_latencyLabel->setText(QString("Latency: %1 ms").arg(milliseconds));
-    
-    QString color = milliseconds < 50 ? "#44ff44" : (milliseconds < 100 ? "#ffaa00" : "#ff4444");
-    m_latencyLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 10px; }").arg(color));
-}
-
-void StatusBar::setCoinbaseLatency(int milliseconds) {
-    m_coinbaseLatencyMs = milliseconds;
-    m_latencyLabel->setText(QString("Latency (CB): %1 ms").arg(milliseconds));
-    
-    QString color = milliseconds < 50 ? "#44ff44" : (milliseconds < 100 ? "#ffaa00" : "#ff4444");
-    m_latencyLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 10px; }").arg(color));
-}
-
-void StatusBar::setReadyStatus(const QString& status) {
-    m_readyLabel->setText(status);
-}
-
-void StatusBar::setUploadBandwidth(double mbPerSec) {
-    m_uploadLabel->setText(QString("UP: %1 MB/s").arg(mbPerSec, 0, 'f', 2));
-    const QString color = mbPerSec < 10.0 ? "#888" : (mbPerSec < 50.0 ? "#ffaa00" : "#ff4444");
-    m_uploadLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 10px; }").arg(color));
-}
-
-void StatusBar::updateMetrics() {
-}
-
-void StatusBar::showVersion() {
-    m_versionLabel->setVisible(!m_versionLabel->isVisible());
-}
+void StatusBar::showEvent(QShowEvent* event) { QWidget::showEvent(event); refresh(); if (m_health) m_ageTimer.start(); }
+void StatusBar::hideEvent(QHideEvent* event) { m_ageTimer.stop(); QWidget::hideEvent(event); }
+void StatusBar::setConnectionStatus(bool connected) { if (!m_health) m_stateLabel->setText(connected ? "Waiting for subscription" : "Disconnected"); }
+void StatusBar::setConnectionConnecting() { if (!m_health) m_stateLabel->setText("Initializing"); }
+void StatusBar::setReadyStatus(const QString&) { /* A generic Ready string cannot prove market health. */ }
+void StatusBar::showVersion() { m_versionLabel->setVisible(!m_versionLabel->isVisible()); }
