@@ -101,6 +101,7 @@ void PaperTradingDock::setDataSource(IGridDataSource* source) {
                          : m_streamAvailable ? QStringLiteral("No lifecycle snapshot is provided by the server")
                                              : QStringLiteral("Trading stream disconnected"),
                  m_streamAvailable && !m_symbol.isEmpty(), false);
+    refreshMarketHealth();
 }
 
 void PaperTradingDock::setSymbol(const QString& symbol) {
@@ -884,6 +885,7 @@ void PaperTradingDock::sendManualCommand(trading::TradeAction action,
 void PaperTradingDock::refreshMarketHealth() {
     if (!isVisible() || window()->isMinimized()) return;
     if (!m_marketHealth) {
+        m_marketHealthLabel->setToolTip({});
         m_marketHealthLabel->setText(m_streamAvailable ? "Waiting for book" : "Unavailable");
         return;
     }

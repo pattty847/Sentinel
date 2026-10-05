@@ -9,6 +9,10 @@
 #include <QSignalSpy>
 #include <QTest>
 #include <QTimer>
+#include <QDateTime>
+#include "protocol/SentinelStreamClientTransport.hpp"
+#include "heatmap/ChunkFetcher.hpp"
+#include "../servermodel/FakeChunkTransport.hpp"
 
 using State = MarketHealth::State;
 using Transport = MarketHealth::Transport;
@@ -54,9 +58,13 @@ TEST(MarketHealth, PendingOrRefusedSwitchDoesNotRelabelOldData) {
 }
 TEST(MarketHealth, ReconnectRequiresFreshAckAndSnapshot) {
     MarketHealth h; ready(h);
+    h.heatmapReceived("BTC-USD", 1100);
     h.setTransport(Transport::Reconnecting);
     EXPECT_EQ(h.snapshot().state, State::Reconnecting);
     h.setTransport(Transport::Connected);
+    h.subscriptionRequested("BTC-USD");
+    EXPECT_EQ(h.snapshot("BTC-USD", 2000).bookAgeMs, 1000);
+    EXPECT_EQ(h.snapshot("BTC-USD", 2000).heatmapAgeMs, 900);
     EXPECT_EQ(h.snapshot().state, State::WaitingForSubscription);
     h.subscriptionAcknowledged("BTC-USD");
     EXPECT_EQ(h.snapshot().state, State::WaitingForBook);
@@ -83,6 +91,33 @@ TEST(MarketHealth, WithdrawalStaleRecoveryAndNoPerMessageNotifications) {
     h.subscriptionAcknowledged("BTC-USD");
     EXPECT_EQ(h.snapshot().state, State::WaitingForSubscription);
     EXPECT_FALSE(h.snapshot().bookAgeMs);
+}
+TEST(MarketHealth, StaleCannotRecoverFromADeltaEvenWithoutWithdrawal) {
+    MarketHealth h; ready(h);
+    h.bookStale("BTC-USD");
+    h.bookReceived("BTC-USD", 2000, false);
+    EXPECT_EQ(h.snapshot().state, State::Stale);
+    EXPECT_EQ(h.snapshot("BTC-USD", 3000).bookAgeMs, 2000);
+    h.bookReceived("BTC-USD", 2500, true);
+    EXPECT_EQ(h.snapshot().state, State::Live);
+    EXPECT_EQ(h.snapshot("BTC-USD", 3000).bookAgeMs, 500);
+}
+TEST(MarketHealthWidgets, VisiblePaperDetachImmediatelyWithdrawsHealth) {
+    RemoteGridDataSource source("127.0.0.1", "1");
+    source.streamClient()->connected();
+    QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
+    ready(*source.marketHealth());
+    PaperTradingDock dock;
+    dock.setDataSource(&source);
+    dock.setSymbol("BTC-USD");
+    dock.show(); QTest::qWait(20);
+    auto* label = dock.findChild<QLabel*>("paperMarketHealth");
+    ASSERT_TRUE(label);
+    EXPECT_TRUE(label->text().startsWith("Live"));
+    EXPECT_FALSE(label->toolTip().isEmpty());
+    dock.setDataSource(nullptr);
+    EXPECT_EQ(label->text(), "Unavailable");
+    EXPECT_TRUE(label->toolTip().isEmpty());
 }
 TEST(MarketHealth, ChartLoadingPartialHoldAndHistoryOnlyAreDistinct) {
     MarketHealth h; ready(h);
@@ -133,6 +168,127 @@ TEST(MarketHealth, RemoteSourceRejectsOldBookAndWithdrawsUnavailable) {
     EXPECT_EQ(bookSpy.count(), 1); // empty withdrawal event remains intact
     client->snapshotReceived("BTC-USD", bids, asks, 0.1, generation, "ready", 12); deliver();
     EXPECT_EQ(health->snapshot().state, State::Live);
+}
+void drainHealth() {
+    for (int i = 0; i < 12; ++i) QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+}
+heatmap::ChunkFramePtr healthLiveFrame(quint64 revision, const std::string& source = "hmc2.deep") {
+    using namespace heatmap;
+    constexpr qint64 base = 1'800'000'000'000; // aligned hour
+    auto frame = std::make_shared<ChunkFrame>();
+    frame->kind = ChunkKind::LiveColumn;
+    frame->key = {"BTC-USD", source, kMinuteMs, base};
+    frame->state = {false, base, revision};
+    NativeColumn column;
+    column.grid = {1, 100, 100}; column.baseRow = 95; column.observedMs = 1000;
+    column.coverage[0] = {{95, 105, 1000}}; column.coverage[1] = column.coverage[0];
+    column.entries = {{0, 1024}};
+    frame->columns = {"BTC-USD", "deep", kMinuteMs, base, base + kMinuteMs, {}, {}};
+    frame->columns.columns.push_back({base, 1000, recording::kProvisional, {std::move(column)}});
+    frame->columns.scannedRanges = {{base, base + kMinuteMs}};
+    return frame;
+}
+TEST(MarketHealth, AcceptedHeatmapPathRejectsExpiredIdsWrongSourcesAndOldRevisions) {
+    using namespace heatmap;
+    RemoteGridDataSource source("127.0.0.1", "1");
+    auto& client = *source.streamClient();
+    protocol::SentinelStreamClientTransport adapter(client);
+    ChunkStore store;
+    ChunkFetcher fetcher(store, adapter);
+    auto& h = *source.marketHealth();
+    h.observeHeatmapFetcher(&fetcher);
+    h.observeHeatmapFetcher(&fetcher); // repeated hookup must not duplicate delivery
+    client.connected(); drainHealth();
+    ready(h);
+    protocol::chunkwire::Availability availability;
+    availability.symbol = "BTC-USD"; availability.chunkWireVersion = kChunkWireVersion;
+    protocol::chunkwire::SourceInfo info;
+    info.id = "hmc2.deep";
+    constexpr qint64 base = 1'800'000'000'000;
+    info.levels.push_back({kMinuteMs, kHourMs, base, base, base});
+    availability.sources.push_back(info);
+    client.heatmapAvailabilityReceived(availability); drainHealth();
+    fetcher.wantLive(1, "BTC-USD"); // first allocated wire id is 1
+    fetcher.releaseLive(1);
+    fetcher.wantLive(1, "BTC-USD"); // replacement wire id is 2
+    QSignalSpy accepted(&fetcher, &ChunkFetcher::liveAccepted);
+    QSignalSpy healthChanges(&h, &MarketHealth::changed);
+    client.heatmapLiveReceived(1, healthLiveFrame(10)); drainHealth();
+    EXPECT_FALSE(h.snapshot().heatmapAgeMs);
+    client.heatmapLiveReceived(2, healthLiveFrame(10, "hmc2.near")); drainHealth();
+    EXPECT_FALSE(h.snapshot().heatmapAgeMs);
+    client.heatmapLiveReceived(2, healthLiveFrame(10));
+    QCoreApplication::sendPostedEvents(&adapter, QEvent::MetaCall);
+    QCoreApplication::sendPostedEvents(&fetcher, QEvent::MetaCall);
+    ASSERT_EQ(accepted.count(), 1);
+    EXPECT_FALSE(h.snapshot().heatmapAgeMs) << "Worker acceptance must queue GUI delivery";
+    drainHealth();
+    ASSERT_EQ(healthChanges.count(), 1);
+    const auto acceptedAt = accepted.at(0).at(1).toLongLong();
+    const auto sampleAt = acceptedAt + 10'000;
+    EXPECT_EQ(h.snapshot("BTC-USD", sampleAt).heatmapAgeMs, 10'000);
+    client.heatmapLiveReceived(2, healthLiveFrame(10));
+    client.heatmapLiveReceived(2, healthLiveFrame(9)); drainHealth();
+    EXPECT_EQ(accepted.count(), 1);
+    EXPECT_EQ(h.snapshot("BTC-USD", sampleAt).heatmapAgeMs, 10'000);
+    QTest::qWait(5);
+    client.heatmapLiveReceived(2, healthLiveFrame(11)); drainHealth();
+    ASSERT_EQ(accepted.count(), 2);
+    EXPECT_GT(accepted.at(1).at(1).toLongLong(), acceptedAt);
+    EXPECT_LT(*h.snapshot("BTC-USD", sampleAt).heatmapAgeMs, 10'000);
+    fetcher.releaseLive(1);
+    client.heatmapLiveReceived(2, healthLiveFrame(12)); drainHealth();
+    EXPECT_EQ(accepted.count(), 2);
+}
+TEST(MarketHealth, HeatmapObserverReplacementAndDestructionFenceQueuedEvents) {
+    heatmap::ChunkStore store1, store2;
+    FakeChunkTransport transport1, transport2;
+    auto first = std::make_unique<heatmap::ChunkFetcher>(store1, transport1);
+    auto second = std::make_unique<heatmap::ChunkFetcher>(store2, transport2);
+    MarketHealth h; ready(h);
+    h.observeHeatmapFetcher(first.get());
+    first->liveAccepted("BTC-USD", 1000);
+    h.observeHeatmapFetcher(second.get());
+    drainHealth();
+    EXPECT_FALSE(h.snapshot().heatmapAgeMs);
+    second->liveAccepted("BTC-USD", 2000);
+    drainHealth();
+    EXPECT_EQ(h.snapshot("BTC-USD", 3000).heatmapAgeMs, 1000);
+    second->liveAccepted("BTC-USD", 2500);
+    second.reset();
+    drainHealth();
+    EXPECT_EQ(h.snapshot("BTC-USD", 3000).heatmapAgeMs, 1000);
+    h.observeHeatmapFetcher(first.get());
+    first->liveAccepted("BTC-USD", 2600);
+    h.observeHeatmapFetcher(nullptr);
+    drainHealth();
+    EXPECT_EQ(h.snapshot("BTC-USD", 3000).heatmapAgeMs, 1000);
+}
+TEST(MarketHealth, RemoteReconnectRequestRetainsAgesUntilFreshSnapshot) {
+    RemoteGridDataSource source("127.0.0.1", "1");
+    auto* client = source.streamClient();
+    auto& h = *source.marketHealth();
+    client->connected(); drainHealth();
+    source.subscribe("BTC-USD");
+    client->subscriptionAcknowledged("BTC-USD"); drainHealth();
+    const std::vector<OrderBookLevel> bids{{100, 1}}, asks{{101, 1}};
+    client->snapshotReceived("BTC-USD", bids, asks, 0.1,
+        client->bookDeliveryGeneration("BTC-USD"), "ready", 1); drainHealth();
+    h.heatmapReceived("BTC-USD", 1000);
+    const auto sampleAt = QDateTime::currentMSecsSinceEpoch() + 1000;
+    const auto before = h.snapshot("BTC-USD", sampleAt);
+    client->disconnected(); drainHealth();
+    client->connected(); drainHealth();
+    source.subscribe("BTC-USD");
+    auto after = h.snapshot("BTC-USD", sampleAt);
+    EXPECT_EQ(after.state, State::WaitingForSubscription);
+    EXPECT_EQ(after.bookAgeMs, before.bookAgeMs);
+    EXPECT_EQ(after.heatmapAgeMs, before.heatmapAgeMs);
+    client->subscriptionAcknowledged("BTC-USD"); drainHealth();
+    EXPECT_EQ(h.snapshot("BTC-USD").state, State::WaitingForBook);
+    client->snapshotReceived("BTC-USD", bids, asks, 0.1,
+        client->bookDeliveryGeneration("BTC-USD"), "ready", 1); drainHealth();
+    EXPECT_EQ(h.snapshot("BTC-USD").state, State::Live);
 }
 TEST(MarketHealthWidgets, StatusAndTelemetryStopPollingWhileHiddenAndKeepUnknowns) {
     MarketHealth health; ready(health);

@@ -1,4 +1,5 @@
 #include "MarketHealth.hpp"
+#include "heatmap/ChunkFetcher.hpp"
 #include <QDateTime>
 #include <algorithm>
 
@@ -50,8 +51,13 @@ void MarketHealth::setTransport(Transport transport) {
     emit changed();
 }
 void MarketHealth::subscriptionRequested(const QString& symbol) {
-    m_symbols[symbol] = Facts{};
-    m_symbols[symbol].requested = true;
+    auto& facts = m_symbols[symbol];
+    const auto bookMs = facts.bookMs;
+    const auto heatmapMs = facts.heatmapMs;
+    facts = Facts{};
+    facts.requested = true;
+    facts.bookMs = bookMs;
+    facts.heatmapMs = heatmapMs;
     emit changed();
 }
 void MarketHealth::subscriptionAcknowledged(const QString& symbol) {
@@ -97,7 +103,21 @@ void MarketHealth::bookUnavailable(const QString& symbol, const QString& reason)
 void MarketHealth::bookStale(const QString& symbol) {
     auto& f = m_symbols[symbol];
     f.stale = true;
+    f.bookReady = false;
     emit changed();
+}
+void MarketHealth::observeHeatmapFetcher(heatmap::ChunkFetcher* fetcher) {
+    if (m_heatmapFetcher == fetcher) return;
+    disconnect(m_liveAcceptedConnection);
+    const auto generation = ++m_observerGeneration;
+    m_heatmapFetcher = fetcher;
+    if (!fetcher) return;
+    m_liveAcceptedConnection = connect(fetcher, &heatmap::ChunkFetcher::liveAccepted, this,
+        [this, generation](const QString& symbol, qint64 receivedAtMs) {
+            // Disconnect alone does not retract events already queued by the old observer.
+            if (generation == m_observerGeneration && m_heatmapFetcher)
+                heatmapReceived(symbol, receivedAtMs);
+        }, Qt::QueuedConnection);
 }
 void MarketHealth::heatmapReceived(const QString& symbol, qint64 nowMs) {
     auto it = m_symbols.find(symbol);

@@ -76,10 +76,6 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
     qRegisterMetaType<trading::RiskOrderUpdate>("trading::RiskOrderUpdate");
     qRegisterMetaType<trading::AlgoOrderEvent>("trading::AlgoOrderEvent");
     qRegisterMetaType<trading::PnlSnapshot>("trading::PnlSnapshot");
-    connect(&m_client, &SentinelStreamClient::heatmapLiveReceived, this,
-            [this](quint64, SentinelStreamClient::HeatmapChunkPtr frame) {
-                if (frame) m_marketHealth.heatmapReceived(QString::fromStdString(frame->key.symbol), QDateTime::currentMSecsSinceEpoch());
-            }, Qt::QueuedConnection);
     m_candleBuffer = std::make_unique<CandleSeriesBuffer>(this);
     m_candleBackfillTimer.setSingleShot(true);
     m_candleBackfillTimer.setInterval(100);

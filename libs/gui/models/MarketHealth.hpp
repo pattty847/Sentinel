@@ -2,9 +2,12 @@
 
 #include <QObject>
 #include <QHash>
+#include <QPointer>
 #include <QString>
 #include <functional>
 #include <optional>
+
+namespace heatmap { class ChunkFetcher; }
 
 // GUI-thread facts shared by the active chart, DOM and paper ticket. Receive age
 // is descriptive, never a silence timeout: quiet products remain healthy.
@@ -42,6 +45,7 @@ public:
     void bookUnavailable(const QString& symbol, const QString& reason);
     void bookStale(const QString& symbol);
     void heatmapReceived(const QString& symbol, qint64 nowMs);
+    void observeHeatmapFetcher(heatmap::ChunkFetcher* fetcher);
     void setChartState(const ChartFacts& facts);
     // Provider reads GUI-owned snapshots/atomic renderer facts only. Consumers
     // call refreshChartState only while exposed. There is no background timer.
@@ -65,4 +69,7 @@ private:
     ChartFacts m_chart;
     std::function<ChartFacts()> m_chartProvider;
     bool m_refreshing = false;
+    QPointer<heatmap::ChunkFetcher> m_heatmapFetcher;
+    QMetaObject::Connection m_liveAcceptedConnection;
+    quint64 m_observerGeneration = 0;
 };
