@@ -1,56 +1,69 @@
 #pragma once
 #include "DockablePanel.hpp"
-#include <QTreeView>
-#include <QStandardItemModel>
 #include <QComboBox>
-#include <QString>
+#include <QLineEdit>
+#include <QSet>
+#include <QStandardItemModel>
+#include <QStringList>
+#include <QToolButton>
+#include <QTreeView>
 #include <QVector>
-#include <QPair>
+
+class QLabel;
 
 class WatchlistDock : public DockablePanel {
     Q_OBJECT
 public:
-    // Named roles for QStandardItem custom data — replaces magic Qt::UserRole + N numbers.
-    enum WatchlistItemRole {
-        IsSectionRole = Qt::UserRole + 1,
-        TickerRole,
-        AssetTypeRole,
-    };
-
-    // Strongly-typed asset class — prevents typo-prone "crypto"/"stock" string comparisons
-    // inside WatchlistDock. The public signal still uses QString for interface consistency
-    // with ScreenerDock::rowSelected so callers share a single routing slot.
+    enum WatchlistItemRole { TickerRole = Qt::UserRole + 1, AssetTypeRole };
     enum class AssetType { Stock, Crypto };
 
     explicit WatchlistDock(QWidget* parent = nullptr);
-    QSize minimumSizeHint() const override;
+    QSize minimumSizeHint() const override { return {220, 260}; }
+
+    // The hub calls this from its acknowledged chart switch path. A request alone is never active.
+    void setChartSwitchState(const QString& activeSymbol, const QString& pendingSymbol,
+                             const QString& refusedSymbol = {}, const QString& refusalReason = {});
+    // Until a catalog is authoritative, suggestions remain explicitly unverified.
+    void setCryptoAvailability(const QStringList& supportedSymbols, bool authoritative,
+                               const QString& source = {});
 
 signals:
-    // Emitted when the user clicks a watchlist row.
-    // assetType is "crypto" or "stock" — callers route accordingly.
     void symbolSelected(const QString& symbol, const QString& assetType);
 
 private slots:
     void onPresetChanged(int index);
-    void onRowClicked(const QModelIndex& index);
+    void onRowActivated(const QModelIndex& index);
+    void addPinnedSymbol();
+    void toggleSelectedPin();
 
 private:
     struct WatchlistPreset {
-        QString    name;
-        AssetType  assetType;
-        QVector<QPair<QString, QString>> symbols; // (ticker, description)
+        QString name;
+        AssetType assetType;
+        QVector<QPair<QString, QString>> symbols;
     };
-
-    static QString assetTypeString(AssetType t) {
-        return (t == AssetType::Crypto) ? QStringLiteral("crypto") : QStringLiteral("stock");
-    }
-
     void buildUi() override;
     void initPresets();
     void loadPreset(int index);
+    void refreshRowState();
+    void updatePinButton();
+    void savePreferences();
+    QString selectedSymbol() const;
 
-    QComboBox*          m_presetCombo = nullptr;
-    QTreeView*          m_tree        = nullptr;
-    QStandardItemModel* m_model       = nullptr;
+    QComboBox* m_presetCombo = nullptr;
+    QLineEdit* m_symbolEdit = nullptr;
+    QToolButton* m_addButton = nullptr;
+    QToolButton* m_pinButton = nullptr;
+    QTreeView* m_tree = nullptr;
+    QLabel* m_status = nullptr;
+    QStandardItemModel* m_model = nullptr;
     QVector<WatchlistPreset> m_presets;
+    QStringList m_pinned;
+    QSet<QString> m_supported;
+    QString m_activeSymbol;
+    QString m_pendingSymbol;
+    QString m_refusedSymbol;
+    QString m_refusalReason;
+    QString m_catalogSource;
+    bool m_catalogAuthoritative = false;
 };

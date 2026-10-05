@@ -315,3 +315,9 @@ target_include_directories(test_dom PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE
 target_link_libraries(test_dom PRIVATE sentinel_gui_lib GTest::gtest Qt6::Test Qt6::Widgets)
 add_test(NAME DomTests COMMAND test_dom)
 set_tests_properties(DomTests PROPERTIES LABELS "ui;dom" TIMEOUT 60)
+
+add_executable(test_WatchRailScreener test_WatchRailScreener.cpp)
+target_include_directories(test_WatchRailScreener PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_WatchRailScreener PRIVATE sentinel_gui_lib GTest::gtest Qt6::Widgets Qt6::Test)
+add_test(NAME WatchRailScreenerTests COMMAND test_WatchRailScreener)
+set_tests_properties(WatchRailScreenerTests PROPERTIES LABELS "render;ui" TIMEOUT 60)

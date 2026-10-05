@@ -44,6 +44,7 @@ class SentinelStreamClient : public QObject {
     friend struct SentinelStreamClientWriteTest;
     friend struct HeatmapChunkWireTest;
     friend struct ServerFeedAdmissionTest;
+    friend struct ScreenerErrorDispatchTest;
     Q_OBJECT
 public:
     struct HeatmapHistoryColumn {
@@ -155,6 +156,7 @@ signals:
     void connected();
     void disconnected();
     void errorOccurred(const QString& error);
+    void screenerRequestError(const QString& message);
     void subscriptionRefused(const QString& symbol, int maxConnections, const QString& message);
     void subscriptionAcknowledged(const QString& symbol);
     void serverConfigReceived(const ServerConfig& config);

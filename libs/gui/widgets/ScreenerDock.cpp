@@ -9,6 +9,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QDateTime>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QCheckBox>
 #include <QComboBox>
@@ -17,6 +19,16 @@
 #include <QIcon>
 #include <QTableView>
 #include <QTimer>
+#include <QSet>
+#include <QScrollBar>
+#include <QShowEvent>
+#include <QHideEvent>
+#include <QHash>
+#include <functional>
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <optional>
 
 static constexpr int kColSymbol    = 0;
 [[maybe_unused]] static constexpr int kColName      = 1;
@@ -31,33 +43,83 @@ static constexpr int kColMktCap    = 6;
 [[maybe_unused]] static constexpr int kColExchange  = 10;
 static constexpr int kColCount     = 11;
 
+namespace {
+class ScreenerTableView final : public QTableView {
+public:
+    using QTableView::QTableView;
+    std::function<void(const QModelIndex&)> keyboardActivate;
+    int measuredColumnWidth(int column) const { return sizeHintForColumn(column); }
+protected:
+    void keyPressEvent(QKeyEvent* event) override {
+        if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter ||
+             event->key() == Qt::Key_Space) && currentIndex().isValid()) {
+            if (keyboardActivate) keyboardActivate(currentIndex());
+            event->accept();
+            return;
+        }
+        QTableView::keyPressEvent(event);
+    }
+};
+}
+
 ScreenerDock::ScreenerDock(QWidget* parent)
     : DockablePanel("ScreenerDock", "Screener", parent)
     , m_autoTimer(new QTimer(this))
+    , m_fetchTimer(new QTimer(this))
     , m_model(new QStandardItemModel(0, kColCount, this))
 {
     m_model->setHorizontalHeaderLabels({"Symbol", "Name", "Price", "Change %", "Volume", "Rel Vol", "Mkt Cap", "Category", "Sector", "—", "Exchange"});
     m_model->setSortRole(Qt::UserRole + 1);
 
     m_autoTimer->setSingleShot(false);
+    m_autoTimer->setObjectName("screenerAutoTimer");
     connect(m_autoTimer, &QTimer::timeout, this, &ScreenerDock::onAutoTimer);
+    m_fetchTimer->setObjectName("screenerFetchTimeout");
+    m_fetchTimer->setSingleShot(true);
+    m_fetchTimer->setInterval(20000);
+    connect(m_fetchTimer, &QTimer::timeout, this, &ScreenerDock::onFetchTimeout);
 
     buildUi();
+    connect(this, &QDockWidget::visibilityChanged, this, [this](bool exposed) {
+        m_exposed = exposed;
+        updateAutoTimer();
+    });
+    installEventFilter(this);
+    connect(this, &QDockWidget::topLevelChanged, this, [this] {
+        watchWindow();
+        updateAutoTimer();
+    });
 }
 
 ScreenerDock::~ScreenerDock() = default;
 
 void ScreenerDock::setStreamClient(SentinelStreamClient* client) {
     if (m_client == client) return;
-    if (m_client) {
-        disconnect(m_client, &SentinelStreamClient::screenerUpdateReceived,
-                   this, &ScreenerDock::onScreenerUpdate);
-    }
+    if (m_client) disconnect(m_client, nullptr, this, nullptr);
     m_client = client;
+    m_fetchTimer->stop();
+    m_fetchPending = false;
     if (m_client) {
         connect(m_client, &SentinelStreamClient::screenerUpdateReceived,
                 this, &ScreenerDock::onScreenerUpdate, Qt::QueuedConnection);
-        setStatus("Connected — press Refresh to fetch");
+        connect(m_client, &SentinelStreamClient::screenerRequestError,
+                this, &ScreenerDock::showServiceError, Qt::QueuedConnection);
+        connect(m_client, &SentinelStreamClient::disconnected, this, [this] {
+            m_fetchTimer->stop();
+            m_fetchPending = false;
+            setStatus("Stream disconnected · previous screener rows may be stale", true);
+        }, Qt::QueuedConnection);
+        connect(m_client, &SentinelStreamClient::connected, this, [this] {
+            setStatus("Stream connected · press Refresh for TradingView data");
+        }, Qt::QueuedConnection);
+        connect(m_client, &SentinelStreamClient::errorOccurred, this, [this](const QString& error) {
+            if (m_fetchPending) {
+                m_fetchTimer->stop();
+                m_fetchPending = false;
+                setStatus(QStringLiteral("Stream error: %1 · previous rows retained").arg(error), true);
+            }
+        }, Qt::QueuedConnection);
+        setStatus("Stream state unknown · press Refresh to fetch");
     } else {
         setStatus("No stream client", true);
     }
@@ -73,6 +135,7 @@ void ScreenerDock::buildUi() {
     toolbar->setSpacing(6);
 
     m_assetCombo = new QComboBox(m_contentWidget);
+    m_assetCombo->setObjectName("screenerAsset");
     m_assetCombo->addItem("Crypto", "crypto");
     m_assetCombo->addItem("Stocks", "stock");
     m_assetCombo->setFixedWidth(80);
@@ -96,9 +159,11 @@ void ScreenerDock::buildUi() {
     m_autoCheck->setChecked(false);
     m_autoCheck->setIcon(QIcon(":/svg/auto-refresh.svg"));
     m_autoCheck->setToolTip("Automatically refresh at the set interval");
+    m_autoCheck->setMinimumWidth(m_autoCheck->sizeHint().width() + 4);
     toolbar->addWidget(m_autoCheck);
 
     m_runBtn = new QToolButton(m_contentWidget);
+    m_runBtn->setObjectName("screenerRefresh");
     m_runBtn->setIcon(QIcon(":/svg/refresh.svg"));
     m_runBtn->setToolTip("Fetch screener data once");
     m_runBtn->setFixedSize(28, 28);
@@ -108,13 +173,17 @@ void ScreenerDock::buildUi() {
     layout->addLayout(toolbar);
 
     // ── Table ────────────────────────────────────────────────────────────────
-    m_table = new QTableView(m_contentWidget);
+    m_table = new ScreenerTableView(m_contentWidget);
+    m_table->setObjectName("screenerRows");
     m_table->setModel(m_model);
+    m_table->viewport()->installEventFilter(this);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setAlternatingRowColors(true);
     m_table->setSortingEnabled(true);
+    m_table->sortByColumn(kColSymbol, Qt::AscendingOrder);
+    m_table->setTextElideMode(Qt::ElideRight);
     m_table->verticalHeader()->hide();
     m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
     m_table->horizontalHeader()->setStretchLastSection(true);
@@ -127,6 +196,8 @@ void ScreenerDock::buildUi() {
 
     // ── Status bar ───────────────────────────────────────────────────────────
     m_statusLabel = new QLabel("Waiting for stream client...", m_contentWidget);
+    m_statusLabel->setObjectName("screenerStatus");
+    m_statusLabel->setWordWrap(true);
     m_statusLabel->setStyleSheet("color:#888; font-size:11px;");
     layout->addWidget(m_statusLabel);
 
@@ -143,6 +214,15 @@ void ScreenerDock::buildUi() {
             this, &ScreenerDock::onRunClicked);
     connect(m_table,          &QTableView::clicked,
             this, &ScreenerDock::onRowClicked);
+    connect(m_table->horizontalHeader(), &QHeaderView::sectionResized, this,
+            [this](int logicalIndex, int, int) {
+        if (logicalIndex == kColName && !m_adjustingColumnWidths)
+            m_nameColumnUserSized = true;
+    });
+    static_cast<ScreenerTableView*>(m_table)->keyboardActivate = [this](const QModelIndex& index) {
+        onRowClicked(index);
+    };
+    updateColumns();
 }
 
 // ── Fetch ──────────────────────────────────────────────────────────────────────
@@ -152,37 +232,96 @@ void ScreenerDock::requestFetch() {
         setStatus("No stream client — is the server running?", true);
         return;
     }
-    setStatus(QString("Fetching %1...").arg(m_currentAsset));
+    m_fetchPending = true;
+    m_fetchTimer->start();
+    setStatus(QStringLiteral("Fetching %1 from TradingView · previous rows retained").arg(m_currentAsset));
     m_client->requestScreenerData(m_currentAsset.toStdString(), 100, 500000.0);
 }
 
 // ── Incoming messages ─────────────────────────────────────────────────────────
 
-void ScreenerDock::onScreenerUpdate(const QString& asset, int rowCount, const QByteArray& rowsJson) {
+void ScreenerDock::onScreenerUpdate(const QString& asset, int /*rowCount*/, const QByteArray& rowsJson) {
     // Only apply if it matches current asset (may lag if user switched mid-fetch)
     if (asset != m_currentAsset) return;
 
-    const QJsonArray rows = QJsonDocument::fromJson(rowsJson).array();
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(rowsJson, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isArray()) {
+        m_fetchTimer->stop();
+        m_fetchPending = false;
+        showServiceError(QStringLiteral("Invalid screener response"));
+        return;
+    }
+    m_fetchTimer->stop();
+    m_fetchPending = false;
+    const QJsonArray rows = document.array();
     applyRows(rows);
-    setStatus(QString("Updated — %1 rows (%2)").arg(rowCount).arg(asset));
+    m_lastReceived = QDateTime::currentDateTime().toString("HH:mm:ss t");
+    setStatus(QStringLiteral("TradingView via Sentinel · %1 rows · received %2 · vendor as-of unavailable")
+                  .arg(rows.size()).arg(m_lastReceived));
+}
+
+void ScreenerDock::showServiceError(const QString& message) {
+    const QString provenance = m_lastReceived.isEmpty()
+        ? QStringLiteral("no screener rows received")
+        : QStringLiteral("previous rows: TradingView via Sentinel · received %1 · vendor as-of unavailable")
+              .arg(m_lastReceived);
+    setStatus(QStringLiteral("Screener service error (request not identified): %1 · %2")
+                  .arg(message, provenance), true);
+}
+
+void ScreenerDock::onFetchTimeout() {
+    if (!m_fetchPending) return;
+    m_fetchPending = false;
+    setStatus(QStringLiteral("Screener timed out · previous rows retained · TradingView via Sentinel"), true);
 }
 
 // ── Row display ───────────────────────────────────────────────────────────────
 
-static QStandardItem* numItem(const QString& display, double sortVal) {
-    auto* item = new QStandardItem(display);
-    item->setData(sortVal, Qt::UserRole + 1);
-    item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    return item;
+static std::optional<double> number(const QJsonObject& row, const char* key) {
+    const QJsonValue value = row[QLatin1String(key)];
+    if (!value.isDouble()) return std::nullopt;
+    const double result = value.toDouble();
+    return std::isfinite(result) ? std::optional<double>(result) : std::nullopt;
 }
 
-static QStandardItem* strItem(const QString& text) {
-    auto* item = new QStandardItem(text);
-    item->setData(text, Qt::UserRole + 1);
-    return item;
+struct CellView {
+    QString text;
+    QVariant sort;
+    QVariant foreground;
+    QString tooltip;
+    bool numeric = false;
+};
+
+static CellView textCell(const QString& text, const QString& tooltip = {}) {
+    return {text.isEmpty() ? QStringLiteral("—") : text, text, {}, tooltip, false};
+}
+
+static CellView numberCell(const QString& display, std::optional<double> value,
+                           const QVariant& foreground = {}) {
+    return {value ? display : QStringLiteral("—"),
+            value ? QVariant(*value) : QVariant(), foreground, {}, true};
+}
+
+static bool updateCell(QStandardItem* item, const CellView& cell) {
+    bool changed = false;
+    if (item->text() != cell.text) { item->setText(cell.text); changed = true; }
+    if (item->data(Qt::UserRole + 1) != cell.sort) {
+        item->setData(cell.sort, Qt::UserRole + 1);
+        changed = true;
+    }
+    if (item->data(Qt::ForegroundRole) != cell.foreground) {
+        item->setData(cell.foreground, Qt::ForegroundRole);
+        changed = true;
+    }
+    if (item->toolTip() != cell.tooltip) { item->setToolTip(cell.tooltip); changed = true; }
+    const auto alignment = cell.numeric ? Qt::AlignRight | Qt::AlignVCenter : Qt::AlignLeft | Qt::AlignVCenter;
+    if (item->textAlignment() != alignment) { item->setTextAlignment(alignment); changed = true; }
+    return changed;
 }
 
 static QString fmtPrice(double v) {
+    if (v != 0.0 && std::abs(v) < 0.000001) return QString::number(v, 'g', 6);
     if (v >= 1000.0) return QString::number(v, 'f', 2);
     if (v >= 1.0)    return QString::number(v, 'f', 4);
     return QString::number(v, 'f', 6);
@@ -197,70 +336,149 @@ static QString fmtVolume(double v) {
 
 void ScreenerDock::applyRows(const QJsonArray& rows) {
     const bool isCrypto = (m_currentAsset == "crypto");
-
-    QStringList headers = {"Symbol", "Name", "Price", "Change %", "Volume", "Rel Vol", "Mkt Cap"};
-    if (isCrypto)
-        headers << "Category" << "Sector" << "—" << "Exchange";
-    else
-        headers << "P/E" << "Div Yield%" << "Sector" << "Exchange";
-    m_model->setHorizontalHeaderLabels(headers);
-
-    m_table->setSortingEnabled(false);
-    m_model->removeRows(0, m_model->rowCount());
+    const QModelIndex selected = m_table->currentIndex();
+    const QString selectedSymbol = selected.isValid()
+        ? m_model->index(selected.row(), kColSymbol).data().toString() : QString();
+    const QModelIndex top = m_table->indexAt(QPoint(1, 1));
+    const QString topSymbol = top.isValid()
+        ? m_model->index(top.row(), kColSymbol).data().toString() : QString();
+    const int oldScroll = m_table->verticalScrollBar()->value();
+    const int oldHorizontalScroll = m_table->horizontalScrollBar()->value();
+    QSet<QString> seen;
+    QHash<QString, int> existingRows;
+    for (int row = 0; row < m_model->rowCount(); ++row)
+        existingRows.insert(m_model->item(row, kColSymbol)->text(), row);
+    bool changed = false;
 
     const QColor upColor(47, 221, 122);
     const QColor downColor(239, 92, 85);
 
     for (const QJsonValue& val : rows) {
+        if (!val.isObject()) continue;
         const QJsonObject row = val.toObject();
+        const QString symbol = row["symbol"].toString().trimmed();
+        if (symbol.isEmpty() || seen.contains(symbol)) continue;
+        seen.insert(symbol);
+        const auto price = number(row, "Price");
+        const auto changePct = number(row, "Change %");
+        const auto volume = number(row, "Volume");
+        const auto relVol = number(row, "Relative Volume");
+        const auto mktCap = number(row, isCrypto ? "Market Cap" : "Market Capitalization");
 
-        const double price     = row["Price"].toDouble();
-        const double changePct = row["Change %"].toDouble();
-        const double volume    = row["Volume"].toDouble();
-        const double relVol    = row["Relative Volume"].toDouble();
-        const double mktCap    = isCrypto
-                                   ? row["Market Cap"].toDouble()
-                                   : row["Market Capitalization"].toDouble();
-
-        auto* symItem  = strItem(row["symbol"].toString());
-        auto* nameItem = strItem(row["Name"].toString());
-        symItem->setData(m_currentAsset, Qt::UserRole);
-
-        auto* priceItem  = numItem(fmtPrice(price),                       price);
-        auto* pctItem    = numItem(QString::number(changePct, 'f', 2)+"%", changePct);
-        auto* volItem    = numItem(fmtVolume(volume),                      volume);
-        auto* relVolItem = numItem(QString::number(relVol, 'f', 2),        relVol);
-        auto* mktCapItem = numItem(fmtVolume(mktCap),                      mktCap);
-
-        pctItem->setForeground(changePct >= 0 ? upColor : downColor);
-
-        QStandardItem *extra1, *extra2, *extra3;
+        const QVariant pctColor = changePct
+            ? QVariant::fromValue(QBrush(*changePct >= 0 ? upColor : downColor)) : QVariant();
+        CellView extra1, extra2, extra3;
         if (isCrypto) {
-            extra1 = strItem(row["Crypto Categories"].toString());
-            extra2 = strItem(row["Sector"].toString());
-            extra3 = strItem(QString());
+            extra1 = textCell(row["Crypto Categories"].toString());
+            extra2 = textCell(row["Sector"].toString());
+            extra3 = textCell(QString());
         } else {
-            const double pe  = row["Price to Earnings Ratio (TTM)"].toDouble();
-            const double div = row["Dividend Yield % (Current)"].toDouble();
-            extra1 = numItem(pe  > 0 ? QString::number(pe,  'f', 1)       : "—", pe);
-            extra2 = numItem(div > 0 ? QString::number(div, 'f', 2) + "%" : "—", div);
-            extra3 = strItem(row["Sector"].toString());
+            const auto pe = number(row, "Price to Earnings Ratio (TTM)");
+            const auto div = number(row, "Dividend Yield % (Current)");
+            extra1 = numberCell(pe ? QString::number(*pe, 'f', 1) : QString(), pe);
+            extra2 = numberCell(div ? QString::number(*div, 'f', 2) + "%" : QString(), div);
+            extra3 = textCell(row["Sector"].toString());
         }
-
-        auto* exchItem = strItem(row["Exchange"].toString());
-
-        m_model->appendRow({symItem, nameItem, priceItem, pctItem, volItem,
-                            relVolItem, mktCapItem, extra1, extra2, extra3, exchItem});
+        const std::array<CellView, kColCount> cells = {
+            textCell(symbol), textCell(row["Name"].toString(), row["Name"].toString()),
+            numberCell(price ? fmtPrice(*price) : QString(), price),
+            numberCell(changePct ? QString::number(*changePct, 'f', 2) + "%" : QString(), changePct, pctColor),
+            numberCell(volume ? fmtVolume(*volume) : QString(), volume),
+            numberCell(relVol ? QString::number(*relVol, 'f', 2) : QString(), relVol),
+            numberCell(mktCap ? fmtVolume(*mktCap) : QString(), mktCap),
+            extra1, extra2, extra3, textCell(row["Exchange"].toString())};
+        const int existingRow = existingRows.value(symbol, -1);
+        if (existingRow < 0) {
+            QList<QStandardItem*> newItems;
+            for (const CellView& cell : cells) {
+                auto* item = new QStandardItem;
+                updateCell(item, cell);
+                newItems.append(item);
+            }
+            newItems[kColSymbol]->setData(m_currentAsset, Qt::UserRole);
+            m_model->appendRow(newItems);
+            changed = true;
+        } else {
+            for (int col = 0; col < kColCount; ++col)
+                changed = updateCell(m_model->item(existingRow, col), cells[col]) || changed;
+        }
     }
-
-    m_table->setSortingEnabled(true);
-    if (m_table->horizontalHeader()->sortIndicatorSection() < 0)
-        m_table->sortByColumn(kColMktCap, Qt::DescendingOrder);
+    for (int i = m_model->rowCount() - 1; i >= 0; --i) {
+        if (!seen.contains(m_model->item(i, kColSymbol)->text())) {
+            m_model->removeRow(i);
+            changed = true;
+        }
+    }
+    if (!changed) return;
+    const auto* header = m_table->horizontalHeader();
+    const int sortColumn = header->sortIndicatorSection();
+    m_model->sort(sortColumn >= 0 ? sortColumn : kColSymbol, header->sortIndicatorOrder());
+    auto rowForSymbol = [this](const QString& symbol) {
+        for (int row = 0; row < m_model->rowCount(); ++row)
+            if (m_model->item(row, kColSymbol)->text() == symbol) return row;
+        return -1;
+    };
+    if (!selectedSymbol.isEmpty()) {
+        const int row = rowForSymbol(selectedSymbol);
+        if (row >= 0) m_table->selectRow(row);
+    }
+    const int topRow = rowForSymbol(topSymbol);
+    if (topRow >= 0) m_table->scrollTo(m_model->index(topRow, 0), QAbstractItemView::PositionAtTop);
+    else m_table->verticalScrollBar()->setValue(oldScroll);
 
     if (!m_columnsResized) {
+        const int manualNameWidth = m_table->columnWidth(kColName);
+        m_adjustingColumnWidths = true;
         m_table->resizeColumnsToContents();
+        if (m_nameColumnUserSized) m_table->setColumnWidth(kColName, manualNameWidth);
+        m_adjustingColumnWidths = false;
         m_columnsResized = true;
+        m_nameColumnPreferredWidth = m_nameColumnUserSized
+            ? manualNameWidth : m_table->columnWidth(kColName);
+    } else if (!m_nameColumnUserSized) {
+        // Re-measure only after a changed payload batch, never on each viewport resize.
+        m_nameColumnPreferredWidth = static_cast<ScreenerTableView*>(m_table)->measuredColumnWidth(kColName);
     }
+    adjustDefaultNameColumnWidth();
+    m_table->horizontalScrollBar()->setValue(oldHorizontalScroll);
+}
+
+void ScreenerDock::adjustDefaultNameColumnWidth() {
+    if (!m_table || !m_columnsResized || m_nameColumnUserSized || m_model->rowCount() == 0) return;
+    const int viewportWidth = m_table->viewport()->width();
+    if (viewportWidth <= 0) return;
+
+    // Name is secondary context in the compact view. Keep Symbol and Price visible at the
+    // left edge, while allowing more room on wider docks. The full provider name remains in
+    // DisplayRole and ToolTipRole; QTableView elides only its painted text.
+    const int quoteBudget = m_table->columnWidth(kColSymbol) + m_table->columnWidth(kColPrice) +
+                            m_table->columnWidth(kColChangePct) + m_table->columnWidth(kColVolume) + 8;
+    const int compactNameBudget = viewportWidth * 2 / 5;
+    const int availableNameBudget = viewportWidth - quoteBudget;
+    const int nameHeaderWidth = m_table->horizontalHeader()->sectionSizeHint(kColName);
+    const int desired = std::max(nameHeaderWidth,
+        std::min(m_nameColumnPreferredWidth,
+                 std::min(compactNameBudget, availableNameBudget)));
+    if (desired <= 0 || desired == m_table->columnWidth(kColName)) return;
+
+    const int horizontalOffset = m_table->horizontalScrollBar()->value();
+    m_adjustingColumnWidths = true;
+    m_table->setColumnWidth(kColName, desired);
+    m_adjustingColumnWidths = false;
+    m_table->horizontalScrollBar()->setValue(horizontalOffset);
+}
+
+void ScreenerDock::updateColumns() {
+    const bool crypto = m_currentAsset == "crypto";
+    m_model->setHorizontalHeaderLabels(crypto
+        ? QStringList{"Symbol", "Name", "Price", "Change %", "Volume", "Rel Vol", "Mkt Cap",
+                      "Category", "Sector", "—", "Exchange"}
+        : QStringList{"Symbol", "Name", "Price", "Change %", "Volume", "Rel Vol", "Mkt Cap",
+                      "P/E", "Div Yield%", "Sector", "Exchange"});
+    // The default crypto view keeps just the fields that can identify and compare pairs.
+    for (int col = 0; col < kColCount; ++col)
+        m_table->setColumnHidden(col, crypto && (col == kColRelVol || col == kColMktCap ||
+                                col == kColExtra1 || col == kColExtra2 || col == kColSector));
 }
 
 // ── UI slots ──────────────────────────────────────────────────────────────────
@@ -271,23 +489,71 @@ void ScreenerDock::onRunClicked() {
 
 void ScreenerDock::onAutoToggled(bool checked) {
     m_autoEnabled = checked;
-    if (checked) {
-        m_autoTimer->setInterval(m_intervalSec * 1000);
-        m_autoTimer->start();
-        requestFetch();  // immediate fetch on enable
-    } else {
+    updateAutoTimer();
+}
+
+bool ScreenerDock::automaticRefreshAllowed() const {
+    return m_autoEnabled && m_exposed && isVisible() && !window()->isMinimized() &&
+           (!m_hostWindow || !m_hostWindow->isMinimized());
+}
+
+void ScreenerDock::requestAutomaticFetch() {
+    if (automaticRefreshAllowed() && !m_fetchPending) requestFetch();
+}
+
+void ScreenerDock::updateAutoTimer() {
+    if (!automaticRefreshAllowed()) {
         m_autoTimer->stop();
+    } else if (!m_autoTimer->isActive()) {
+        m_autoTimer->start(m_intervalSec * 1000);
+        requestAutomaticFetch();
     }
 }
 
 void ScreenerDock::onAutoTimer() {
-    requestFetch();
+    requestAutomaticFetch();
+}
+
+void ScreenerDock::watchWindow() {
+    QWidget* host = parentWidget() ? parentWidget()->window() : window();
+    if (host == m_hostWindow) return;
+    if (m_hostWindow && m_hostWindow != this) m_hostWindow->removeEventFilter(this);
+    m_hostWindow = host;
+    if (host && host != this) host->installEventFilter(this);
+}
+
+bool ScreenerDock::eventFilter(QObject* watched, QEvent* event) {
+    if (m_table && watched == m_table->viewport() && event->type() == QEvent::Resize)
+        adjustDefaultNameColumnWidth();
+    if ((watched == this || watched == m_hostWindow) && event->type() == QEvent::WindowStateChange)
+        updateAutoTimer();
+    return DockablePanel::eventFilter(watched, event);
+}
+
+void ScreenerDock::showEvent(QShowEvent* event) {
+    DockablePanel::showEvent(event);
+    watchWindow();
+    updateAutoTimer();
+}
+
+void ScreenerDock::hideEvent(QHideEvent* event) {
+    m_exposed = false;
+    updateAutoTimer();
+    DockablePanel::hideEvent(event);
 }
 
 void ScreenerDock::onAssetChanged(int index) {
     m_currentAsset = m_assetCombo->itemData(index).toString();
+    m_fetchTimer->stop();
+    m_fetchPending = false;
+    m_lastReceived.clear();
+    m_model->removeRows(0, m_model->rowCount());
+    m_table->clearSelection();
     m_columnsResized = false;
-    if (m_autoEnabled) requestFetch();
+    updateColumns();
+    if (automaticRefreshAllowed()) requestAutomaticFetch();
+    else setStatus(QStringLiteral("%1 · press Refresh for TradingView data")
+                       .arg(m_currentAsset == "crypto" ? QStringLiteral("Crypto") : QStringLiteral("Stocks")));
 }
 
 void ScreenerDock::onIntervalChanged(int value) {
@@ -299,10 +565,13 @@ void ScreenerDock::onIntervalChanged(int value) {
 }
 
 void ScreenerDock::onRowClicked(const QModelIndex& index) {
+    if (!index.isValid()) return;
     const int     row       = index.row();
-    const QString symbol    = m_model->item(row, kColSymbol)->text();
-    const QString assetType = m_model->item(row, kColSymbol)->data(Qt::UserRole).toString();
-    emit rowSelected(symbol, assetType);
+    const auto* item = m_model->item(row, kColSymbol);
+    if (!item) return;
+    const QString symbol = item->text();
+    const QString assetType = item->data(Qt::UserRole).toString();
+    if (!symbol.isEmpty() && !assetType.isEmpty()) emit rowSelected(symbol, assetType);
 }
 
 void ScreenerDock::onSymbolChanged(const QString& /*symbol*/) {

@@ -13,8 +13,11 @@
 #include <QComboBox>
 #include <QSlider>
 #include <QTimer>
+#include <QPointer>
 
 class SentinelStreamClient;
+class QShowEvent;
+class QHideEvent;
 
 class ScreenerDock : public DockablePanel {
     Q_OBJECT
@@ -29,6 +32,8 @@ public:
 
     // Called by MainWindowGpu after the stream client is created.
     void setStreamClient(SentinelStreamClient* client);
+    // Server errors lack asset/request identity, so this warning preserves any pending fetch.
+    void showServiceError(const QString& message);
 
 signals:
     // Emitted when the user clicks a row.
@@ -45,10 +50,20 @@ private slots:
     void onRowClicked(const QModelIndex& index);
 
     void onAutoTimer();
+    void onFetchTimeout();
 
 private:
+    void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
+    void watchWindow();
+    bool automaticRefreshAllowed() const;
+    void updateAutoTimer();
+    void requestAutomaticFetch();
     void requestFetch();
     void applyRows(const QJsonArray& rows);
+    void adjustDefaultNameColumnWidth();
+    void updateColumns();
     void setStatus(const QString& text, bool error = false);
 
     // Stream client — not owned
@@ -56,6 +71,7 @@ private:
 
     // Auto-refresh timer (client-side; server does one-shot fetches per request)
     QTimer* m_autoTimer = nullptr;
+    QTimer* m_fetchTimer = nullptr;
 
     // UI
     QComboBox*   m_assetCombo     = nullptr;
@@ -67,11 +83,16 @@ private:
     QLabel*      m_statusLabel    = nullptr;
 
     QStandardItemModel* m_model = nullptr;
+    QPointer<QWidget> m_hostWindow;
 
     bool    m_autoEnabled    = false;
+    bool    m_exposed        = false;
     bool    m_columnsResized = false;
+    bool    m_adjustingColumnWidths = false;
+    bool    m_nameColumnUserSized = false;
+    int     m_nameColumnPreferredWidth = 0;
+    bool    m_fetchPending   = false;
     QString m_currentAsset   = "crypto";
+    QString m_lastReceived;
     int     m_intervalSec    = 120;
-
-    static constexpr int kReconnectMs = 5000;
 };
