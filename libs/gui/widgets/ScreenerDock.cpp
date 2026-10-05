@@ -9,6 +9,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QDateTime>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QCheckBox>
 #include <QComboBox>
@@ -17,6 +19,9 @@
 #include <QIcon>
 #include <QTableView>
 #include <QTimer>
+#include <QSet>
+#include <cmath>
+#include <optional>
 
 static constexpr int kColSymbol    = 0;
 [[maybe_unused]] static constexpr int kColName      = 1;
@@ -31,9 +36,27 @@ static constexpr int kColMktCap    = 6;
 [[maybe_unused]] static constexpr int kColExchange  = 10;
 static constexpr int kColCount     = 11;
 
+namespace {
+class ScreenerTableView final : public QTableView {
+public:
+    using QTableView::QTableView;
+protected:
+    void keyPressEvent(QKeyEvent* event) override {
+        if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter ||
+             event->key() == Qt::Key_Space) && currentIndex().isValid()) {
+            emit activated(currentIndex());
+            event->accept();
+            return;
+        }
+        QTableView::keyPressEvent(event);
+    }
+};
+}
+
 ScreenerDock::ScreenerDock(QWidget* parent)
     : DockablePanel("ScreenerDock", "Screener", parent)
     , m_autoTimer(new QTimer(this))
+    , m_fetchTimer(new QTimer(this))
     , m_model(new QStandardItemModel(0, kColCount, this))
 {
     m_model->setHorizontalHeaderLabels({"Symbol", "Name", "Price", "Change %", "Volume", "Rel Vol", "Mkt Cap", "Category", "Sector", "—", "Exchange"});
@@ -41,6 +64,10 @@ ScreenerDock::ScreenerDock(QWidget* parent)
 
     m_autoTimer->setSingleShot(false);
     connect(m_autoTimer, &QTimer::timeout, this, &ScreenerDock::onAutoTimer);
+    m_fetchTimer->setObjectName("screenerFetchTimeout");
+    m_fetchTimer->setSingleShot(true);
+    m_fetchTimer->setInterval(20000);
+    connect(m_fetchTimer, &QTimer::timeout, this, &ScreenerDock::onFetchTimeout);
 
     buildUi();
 }
@@ -49,15 +76,31 @@ ScreenerDock::~ScreenerDock() = default;
 
 void ScreenerDock::setStreamClient(SentinelStreamClient* client) {
     if (m_client == client) return;
-    if (m_client) {
-        disconnect(m_client, &SentinelStreamClient::screenerUpdateReceived,
-                   this, &ScreenerDock::onScreenerUpdate);
-    }
+    if (m_client) disconnect(m_client, nullptr, this, nullptr);
     m_client = client;
+    m_fetchTimer->stop();
+    m_fetchPending = false;
     if (m_client) {
         connect(m_client, &SentinelStreamClient::screenerUpdateReceived,
                 this, &ScreenerDock::onScreenerUpdate, Qt::QueuedConnection);
-        setStatus("Connected — press Refresh to fetch");
+        connect(m_client, &SentinelStreamClient::screenerRequestError,
+                this, &ScreenerDock::showServiceError, Qt::QueuedConnection);
+        connect(m_client, &SentinelStreamClient::disconnected, this, [this] {
+            m_fetchTimer->stop();
+            m_fetchPending = false;
+            setStatus("Stream disconnected · previous screener rows may be stale", true);
+        }, Qt::QueuedConnection);
+        connect(m_client, &SentinelStreamClient::connected, this, [this] {
+            setStatus("Stream connected · press Refresh for TradingView data");
+        }, Qt::QueuedConnection);
+        connect(m_client, &SentinelStreamClient::errorOccurred, this, [this](const QString& error) {
+            if (m_fetchPending) {
+                m_fetchTimer->stop();
+                m_fetchPending = false;
+                setStatus(QStringLiteral("Stream error: %1 · previous rows retained").arg(error), true);
+            }
+        }, Qt::QueuedConnection);
+        setStatus("Stream state unknown · press Refresh to fetch");
     } else {
         setStatus("No stream client", true);
     }
@@ -73,6 +116,7 @@ void ScreenerDock::buildUi() {
     toolbar->setSpacing(6);
 
     m_assetCombo = new QComboBox(m_contentWidget);
+    m_assetCombo->setObjectName("screenerAsset");
     m_assetCombo->addItem("Crypto", "crypto");
     m_assetCombo->addItem("Stocks", "stock");
     m_assetCombo->setFixedWidth(80);
@@ -99,6 +143,7 @@ void ScreenerDock::buildUi() {
     toolbar->addWidget(m_autoCheck);
 
     m_runBtn = new QToolButton(m_contentWidget);
+    m_runBtn->setObjectName("screenerRefresh");
     m_runBtn->setIcon(QIcon(":/svg/refresh.svg"));
     m_runBtn->setToolTip("Fetch screener data once");
     m_runBtn->setFixedSize(28, 28);
@@ -108,13 +153,15 @@ void ScreenerDock::buildUi() {
     layout->addLayout(toolbar);
 
     // ── Table ────────────────────────────────────────────────────────────────
-    m_table = new QTableView(m_contentWidget);
+    m_table = new ScreenerTableView(m_contentWidget);
+    m_table->setObjectName("screenerRows");
     m_table->setModel(m_model);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setAlternatingRowColors(true);
     m_table->setSortingEnabled(true);
+    m_table->sortByColumn(kColSymbol, Qt::AscendingOrder);
     m_table->verticalHeader()->hide();
     m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
     m_table->horizontalHeader()->setStretchLastSection(true);
@@ -127,6 +174,8 @@ void ScreenerDock::buildUi() {
 
     // ── Status bar ───────────────────────────────────────────────────────────
     m_statusLabel = new QLabel("Waiting for stream client...", m_contentWidget);
+    m_statusLabel->setObjectName("screenerStatus");
+    m_statusLabel->setWordWrap(true);
     m_statusLabel->setStyleSheet("color:#888; font-size:11px;");
     layout->addWidget(m_statusLabel);
 
@@ -143,6 +192,9 @@ void ScreenerDock::buildUi() {
             this, &ScreenerDock::onRunClicked);
     connect(m_table,          &QTableView::clicked,
             this, &ScreenerDock::onRowClicked);
+    connect(m_table,          &QTableView::activated,
+            this, &ScreenerDock::onRowClicked);
+    updateColumns();
 }
 
 // ── Fetch ──────────────────────────────────────────────────────────────────────
@@ -152,32 +204,68 @@ void ScreenerDock::requestFetch() {
         setStatus("No stream client — is the server running?", true);
         return;
     }
-    setStatus(QString("Fetching %1...").arg(m_currentAsset));
+    m_fetchPending = true;
+    m_fetchTimer->start();
+    setStatus(QStringLiteral("Fetching %1 from TradingView · previous rows retained").arg(m_currentAsset));
     m_client->requestScreenerData(m_currentAsset.toStdString(), 100, 500000.0);
 }
 
 // ── Incoming messages ─────────────────────────────────────────────────────────
 
-void ScreenerDock::onScreenerUpdate(const QString& asset, int rowCount, const QByteArray& rowsJson) {
+void ScreenerDock::onScreenerUpdate(const QString& asset, int /*rowCount*/, const QByteArray& rowsJson) {
     // Only apply if it matches current asset (may lag if user switched mid-fetch)
     if (asset != m_currentAsset) return;
 
-    const QJsonArray rows = QJsonDocument::fromJson(rowsJson).array();
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(rowsJson, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isArray()) {
+        m_fetchTimer->stop();
+        m_fetchPending = false;
+        showServiceError(QStringLiteral("Invalid screener response"));
+        return;
+    }
+    m_fetchTimer->stop();
+    m_fetchPending = false;
+    const QJsonArray rows = document.array();
     applyRows(rows);
-    setStatus(QString("Updated — %1 rows (%2)").arg(rowCount).arg(asset));
+    m_lastReceived = QDateTime::currentDateTime().toString("HH:mm:ss t");
+    setStatus(QStringLiteral("TradingView via Sentinel · %1 rows · received %2 · vendor as-of unavailable")
+                  .arg(rows.size()).arg(m_lastReceived));
+}
+
+void ScreenerDock::showServiceError(const QString& message) {
+    const QString provenance = m_lastReceived.isEmpty()
+        ? QStringLiteral("no screener rows received")
+        : QStringLiteral("previous rows: TradingView via Sentinel · received %1 · vendor as-of unavailable")
+              .arg(m_lastReceived);
+    setStatus(QStringLiteral("Screener service error (request not identified): %1 · %2")
+                  .arg(message, provenance), true);
+}
+
+void ScreenerDock::onFetchTimeout() {
+    if (!m_fetchPending) return;
+    m_fetchPending = false;
+    setStatus(QStringLiteral("Screener timed out · previous rows retained · TradingView via Sentinel"), true);
 }
 
 // ── Row display ───────────────────────────────────────────────────────────────
 
-static QStandardItem* numItem(const QString& display, double sortVal) {
-    auto* item = new QStandardItem(display);
-    item->setData(sortVal, Qt::UserRole + 1);
+static std::optional<double> number(const QJsonObject& row, const char* key) {
+    const QJsonValue value = row[QLatin1String(key)];
+    if (!value.isDouble()) return std::nullopt;
+    const double result = value.toDouble();
+    return std::isfinite(result) ? std::optional<double>(result) : std::nullopt;
+}
+
+static QStandardItem* numItem(const QString& display, std::optional<double> sortVal) {
+    auto* item = new QStandardItem(sortVal ? display : QStringLiteral("—"));
+    if (sortVal) item->setData(*sortVal, Qt::UserRole + 1);
     item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
     return item;
 }
 
 static QStandardItem* strItem(const QString& text) {
-    auto* item = new QStandardItem(text);
+    auto* item = new QStandardItem(text.isEmpty() ? QStringLiteral("—") : text);
     item->setData(text, Qt::UserRole + 1);
     return item;
 }
@@ -197,42 +285,36 @@ static QString fmtVolume(double v) {
 
 void ScreenerDock::applyRows(const QJsonArray& rows) {
     const bool isCrypto = (m_currentAsset == "crypto");
-
-    QStringList headers = {"Symbol", "Name", "Price", "Change %", "Volume", "Rel Vol", "Mkt Cap"};
-    if (isCrypto)
-        headers << "Category" << "Sector" << "—" << "Exchange";
-    else
-        headers << "P/E" << "Div Yield%" << "Sector" << "Exchange";
-    m_model->setHorizontalHeaderLabels(headers);
-
-    m_table->setSortingEnabled(false);
-    m_model->removeRows(0, m_model->rowCount());
+    const QModelIndex selected = m_table->currentIndex();
+    const QString selectedSymbol = selected.isValid()
+        ? m_model->index(selected.row(), kColSymbol).data().toString() : QString();
+    QSet<QString> seen;
 
     const QColor upColor(47, 221, 122);
     const QColor downColor(239, 92, 85);
 
     for (const QJsonValue& val : rows) {
+        if (!val.isObject()) continue;
         const QJsonObject row = val.toObject();
+        const QString symbol = row["symbol"].toString().trimmed();
+        if (symbol.isEmpty() || seen.contains(symbol)) continue;
+        seen.insert(symbol);
+        const auto price = number(row, "Price");
+        const auto changePct = number(row, "Change %");
+        const auto volume = number(row, "Volume");
+        const auto relVol = number(row, "Relative Volume");
+        const auto mktCap = number(row, isCrypto ? "Market Cap" : "Market Capitalization");
 
-        const double price     = row["Price"].toDouble();
-        const double changePct = row["Change %"].toDouble();
-        const double volume    = row["Volume"].toDouble();
-        const double relVol    = row["Relative Volume"].toDouble();
-        const double mktCap    = isCrypto
-                                   ? row["Market Cap"].toDouble()
-                                   : row["Market Capitalization"].toDouble();
-
-        auto* symItem  = strItem(row["symbol"].toString());
+        auto* symItem  = strItem(symbol);
         auto* nameItem = strItem(row["Name"].toString());
         symItem->setData(m_currentAsset, Qt::UserRole);
 
-        auto* priceItem  = numItem(fmtPrice(price),                       price);
-        auto* pctItem    = numItem(QString::number(changePct, 'f', 2)+"%", changePct);
-        auto* volItem    = numItem(fmtVolume(volume),                      volume);
-        auto* relVolItem = numItem(QString::number(relVol, 'f', 2),        relVol);
-        auto* mktCapItem = numItem(fmtVolume(mktCap),                      mktCap);
-
-        pctItem->setForeground(changePct >= 0 ? upColor : downColor);
+        auto* priceItem = numItem(price ? fmtPrice(*price) : QString(), price);
+        auto* pctItem = numItem(changePct ? QString::number(*changePct, 'f', 2) + "%" : QString(), changePct);
+        auto* volItem = numItem(volume ? fmtVolume(*volume) : QString(), volume);
+        auto* relVolItem = numItem(relVol ? QString::number(*relVol, 'f', 2) : QString(), relVol);
+        auto* mktCapItem = numItem(mktCap ? fmtVolume(*mktCap) : QString(), mktCap);
+        if (changePct) pctItem->setForeground(*changePct >= 0 ? upColor : downColor);
 
         QStandardItem *extra1, *extra2, *extra3;
         if (isCrypto) {
@@ -240,27 +322,53 @@ void ScreenerDock::applyRows(const QJsonArray& rows) {
             extra2 = strItem(row["Sector"].toString());
             extra3 = strItem(QString());
         } else {
-            const double pe  = row["Price to Earnings Ratio (TTM)"].toDouble();
-            const double div = row["Dividend Yield % (Current)"].toDouble();
-            extra1 = numItem(pe  > 0 ? QString::number(pe,  'f', 1)       : "—", pe);
-            extra2 = numItem(div > 0 ? QString::number(div, 'f', 2) + "%" : "—", div);
+            const auto pe = number(row, "Price to Earnings Ratio (TTM)");
+            const auto div = number(row, "Dividend Yield % (Current)");
+            extra1 = numItem(pe ? QString::number(*pe, 'f', 1) : QString(), pe);
+            extra2 = numItem(div ? QString::number(*div, 'f', 2) + "%" : QString(), div);
             extra3 = strItem(row["Sector"].toString());
         }
 
         auto* exchItem = strItem(row["Exchange"].toString());
 
-        m_model->appendRow({symItem, nameItem, priceItem, pctItem, volItem,
-                            relVolItem, mktCapItem, extra1, extra2, extra3, exchItem});
+        QList<QStandardItem*> cells = {symItem, nameItem, priceItem, pctItem, volItem,
+                                       relVolItem, mktCapItem, extra1, extra2, extra3, exchItem};
+        int existingRow = -1;
+        for (int i = 0; i < m_model->rowCount(); ++i) {
+            if (m_model->item(i, kColSymbol)->text() == symbol) { existingRow = i; break; }
+        }
+        if (existingRow < 0) m_model->appendRow(cells);
+        else for (int col = 0; col < kColCount; ++col) m_model->setItem(existingRow, col, cells[col]);
     }
-
-    m_table->setSortingEnabled(true);
-    if (m_table->horizontalHeader()->sortIndicatorSection() < 0)
-        m_table->sortByColumn(kColMktCap, Qt::DescendingOrder);
+    for (int i = m_model->rowCount() - 1; i >= 0; --i) {
+        if (!seen.contains(m_model->item(i, kColSymbol)->text())) m_model->removeRow(i);
+    }
+    if (!selectedSymbol.isEmpty()) {
+        for (int i = 0; i < m_model->rowCount(); ++i) {
+            if (m_model->item(i, kColSymbol)->text() == selectedSymbol) {
+                m_table->selectRow(i);
+                break;
+            }
+        }
+    }
 
     if (!m_columnsResized) {
         m_table->resizeColumnsToContents();
         m_columnsResized = true;
     }
+}
+
+void ScreenerDock::updateColumns() {
+    const bool crypto = m_currentAsset == "crypto";
+    m_model->setHorizontalHeaderLabels(crypto
+        ? QStringList{"Symbol", "Name", "Price", "Change %", "Volume", "Rel Vol", "Mkt Cap",
+                      "Category", "Sector", "—", "Exchange"}
+        : QStringList{"Symbol", "Name", "Price", "Change %", "Volume", "Rel Vol", "Mkt Cap",
+                      "P/E", "Div Yield%", "Sector", "Exchange"});
+    // The default crypto view keeps just the fields that can identify and compare pairs.
+    for (int col = 0; col < kColCount; ++col)
+        m_table->setColumnHidden(col, crypto && (col == kColRelVol || col == kColMktCap ||
+                                col == kColExtra1 || col == kColExtra2 || col == kColSector));
 }
 
 // ── UI slots ──────────────────────────────────────────────────────────────────
@@ -286,8 +394,16 @@ void ScreenerDock::onAutoTimer() {
 
 void ScreenerDock::onAssetChanged(int index) {
     m_currentAsset = m_assetCombo->itemData(index).toString();
+    m_fetchTimer->stop();
+    m_fetchPending = false;
+    m_lastReceived.clear();
+    m_model->removeRows(0, m_model->rowCount());
+    m_table->clearSelection();
     m_columnsResized = false;
+    updateColumns();
     if (m_autoEnabled) requestFetch();
+    else setStatus(QStringLiteral("%1 · press Refresh for TradingView data")
+                       .arg(m_currentAsset == "crypto" ? QStringLiteral("Crypto") : QStringLiteral("Stocks")));
 }
 
 void ScreenerDock::onIntervalChanged(int value) {
@@ -299,10 +415,13 @@ void ScreenerDock::onIntervalChanged(int value) {
 }
 
 void ScreenerDock::onRowClicked(const QModelIndex& index) {
+    if (!index.isValid()) return;
     const int     row       = index.row();
-    const QString symbol    = m_model->item(row, kColSymbol)->text();
-    const QString assetType = m_model->item(row, kColSymbol)->data(Qt::UserRole).toString();
-    emit rowSelected(symbol, assetType);
+    const auto* item = m_model->item(row, kColSymbol);
+    if (!item) return;
+    const QString symbol = item->text();
+    const QString assetType = item->data(Qt::UserRole).toString();
+    if (!symbol.isEmpty() && !assetType.isEmpty()) emit rowSelected(symbol, assetType);
 }
 
 void ScreenerDock::onSymbolChanged(const QString& /*symbol*/) {

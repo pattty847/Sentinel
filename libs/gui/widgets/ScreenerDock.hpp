@@ -29,6 +29,8 @@ public:
 
     // Called by MainWindowGpu after the stream client is created.
     void setStreamClient(SentinelStreamClient* client);
+    // Server errors lack asset/request identity, so this warning preserves any pending fetch.
+    void showServiceError(const QString& message);
 
 signals:
     // Emitted when the user clicks a row.
@@ -45,10 +47,12 @@ private slots:
     void onRowClicked(const QModelIndex& index);
 
     void onAutoTimer();
+    void onFetchTimeout();
 
 private:
     void requestFetch();
     void applyRows(const QJsonArray& rows);
+    void updateColumns();
     void setStatus(const QString& text, bool error = false);
 
     // Stream client — not owned
@@ -56,6 +60,7 @@ private:
 
     // Auto-refresh timer (client-side; server does one-shot fetches per request)
     QTimer* m_autoTimer = nullptr;
+    QTimer* m_fetchTimer = nullptr;
 
     // UI
     QComboBox*   m_assetCombo     = nullptr;
@@ -70,8 +75,8 @@ private:
 
     bool    m_autoEnabled    = false;
     bool    m_columnsResized = false;
+    bool    m_fetchPending   = false;
     QString m_currentAsset   = "crypto";
+    QString m_lastReceived;
     int     m_intervalSec    = 120;
-
-    static constexpr int kReconnectMs = 5000;
 };

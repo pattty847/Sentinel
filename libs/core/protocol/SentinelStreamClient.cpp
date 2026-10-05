@@ -887,6 +887,9 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                 handlePnlSnapshotMessage(msg);
                 return;
             case protocol::MessageType::Error:
+                if (msg.value("context", "") == "screener_request") {
+                    emit screenerRequestError(QString::fromStdString(msg.value("message", "")));
+                }
                 if (msg.value("context", "") == "subscribe" &&
                     (msg.value("code", "") == "connection_cap" || msg.value("code", "") == "invalid_product" ||
                      msg.value("code", "") == "upstream_unavailable")) {
