@@ -28,12 +28,16 @@ Copy the defaults to the override names to customize; override values take prece
 - GUI settings (API port, screenshot dir, font)
 - Client cache sizing and local UI preferences
 
-GUI order-book replicas use the server's `orderbook.tick_size` unchanged for every product, including
-BTC-USD. The shared replica must not coarsen or invent precision for chart book-top lines, the Agent API or
-the DOM. The current stream does not carry per-product ticks or quote-increment metadata; those belong to
-the planned server slice. The band percent remains server-configured. A DOM whose tick exceeds 1% of its
-midpoint, or whose best levels collapse to zero, shows an explicit server-aggregation explanation instead
-of a ladder or spread. Recovering missing upstream precision requires that server slice.
+`orderbook.tick_size` remains the configured BTC-USD live-book tick (default 0.1 USD).
+For other products the server derives a live-book tick at each accepted snapshot from its midpoint:
+about one basis point, rounded to the nearest 1-2-5 step, then rounded up to a multiple of
+Coinbase's exact `quote_increment`. Metadata is fetched on the server worker pool. Until it is valid,
+the live aggregated book is unavailable; no global tick or guessed increment is used. The server
+requests a fresh upstream snapshot after metadata arrives, since intervening deltas were skipped.
+The tick stays fixed until the next snapshot, and both snapshots and deltas publish it. GUI replicas
+use that wire tick unchanged for chart book-top lines, the Agent API and the DOM. `band_pct` remains
+server-configured. The server sums raw price levels in each live tick bucket, including BTC-USD;
+recorded HMC2 grids are independent of this live-book setting.
 
 ## Example snippets
 

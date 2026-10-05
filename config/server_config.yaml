@@ -17,7 +17,7 @@ trade_overlays:
   tick_size: 5
   footprint_timeframe_ms: 60000
 orderbook:
-  tick_size: 0.1
+  tick_size: 0.1  # BTC-USD live book; other products derive from exact Coinbase quote increment
   band_pct: 0.3
 recording:
   enabled: true

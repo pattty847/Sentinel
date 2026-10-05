@@ -65,6 +65,7 @@ public:
     // Serialize a queued upstream release with admission on the server thread.
     bool releaseIfNoSubscribers(const std::string& symbol, const std::function<void()>& release);
     CoinbaseRestClient& restClient();
+    void requestBookProductMetadata(const QString& symbol, uint64_t lifetime);
     const ServerConfig& serverConfig() const { return m_serverConfig; }
     void processTradeCommand(const trading::TradeCommand& command);
     void broadcastOrderUpdate(const trading::OrderUpdate& update);

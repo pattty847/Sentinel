@@ -2,9 +2,12 @@
 #include "SentinelLogging.hpp"
 #include "RecordingDir.hpp"
 #include "metrics/MetricsRegistry.hpp"
+#include "roller/Grid.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
+#include <limits>
 #include <cstdlib>
 
 namespace {
@@ -99,8 +102,24 @@ ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
     , m_aggregator(std::make_unique<TimeframeAggregator>(m_serverConfig.heatmap.timeframesMs))
     , m_heatmapStreamer(std::make_unique<HeatmapTwapStreamer>(*this, m_serverConfig.heatmap))
 {
-    for (const auto& symbol : normalizedDefaultSymbols(m_serverConfig.defaultSymbols))
-        m_feeds.emplace(symbol, FeedState{true});
+    for (const auto& symbol : normalizedDefaultSymbols(m_serverConfig.defaultSymbols)) {
+        auto& feed = m_feeds[symbol];
+        feed.pinned = true;
+        feed.lifetime = ++m_nextFeedLifetime;
+    }
+    m_metadataTimer.setInterval(5000);
+    connect(&m_metadataTimer, &QTimer::timeout, this, [this] {
+        const auto now = localNowMs();
+        for (auto& [symbol, feed] : m_feeds) {
+            if (symbol == "BTC-USD") continue; // Keep the established configured BTC book tick.
+            requestProductMetadataIfNeeded(symbol, feed);
+            if (!feed.metadata.is_null() && feed.waitingForMetadataSnapshot && now >= feed.nextResnapshotMs) {
+                feed.nextResnapshotMs = now + 25'000; // Engine has a 20 s consumer cooldown.
+                emit liveBookResnapshotRequested(QString::fromStdString(symbol));
+            }
+        }
+    });
+    m_metadataTimer.start();
     int64_t maxTfMs = std::max<int64_t>(1000, m_serverConfig.heatmap.activeTimeframeMs);
     for (const int64_t tf : m_serverConfig.heatmap.timeframesMs) {
         if (tf > maxTfMs) {
@@ -239,7 +258,48 @@ void ServerDataModel::checkRecorderProgress(int64_t nowMs) {
 
 // Active feed membership is managed before queued transport statuses are delivered.
 void ServerDataModel::acquireGuiFeed(const std::string& symbol) {
-    m_feeds.try_emplace(symbol);
+    auto [it, inserted] = m_feeds.try_emplace(symbol);
+    if (inserted) {
+        it->second.lifetime = ++m_nextFeedLifetime;
+        requestProductMetadataIfNeeded(symbol, it->second);
+    }
+}
+void ServerDataModel::requestProductMetadataIfNeeded(const std::string& symbol, FeedState& feed) {
+    if (symbol == "BTC-USD" || !feed.metadata.is_null() || feed.metadataPending ||
+        localNowMs() < feed.nextMetadataAttemptMs) return;
+    feed.metadataPending = true;
+    feed.nextMetadataAttemptMs = localNowMs() + 30'000;
+    emit productMetadataRequested(QString::fromStdString(symbol), feed.lifetime);
+}
+void ServerDataModel::onProductMetadata(const std::string& symbol, uint64_t lifetime,
+                                        const nlohmann::json& metadata, const std::string& error) {
+    const auto it = m_feeds.find(symbol);
+    if (it == m_feeds.end() || it->second.lifetime != lifetime || symbol == "BTC-USD") return;
+    auto& feed = it->second;
+    feed.metadataPending = false;
+    try {
+        if (!error.empty()) throw std::runtime_error(error);
+        if (metadata.at("product_id").get<std::string>() != symbol)
+            throw std::runtime_error("product_id mismatch");
+        // Validate exact decimal strings now; derive again from the next fresh snapshot midpoint.
+        sentinel::roller::deriveGrid(metadata, 1.0);
+        feed.metadata = metadata;
+        sLog_Data("Live book metadata ready: symbol=" << symbol
+                  << " quoteIncrement=" << metadata.at("quote_increment").get<std::string>());
+        if (feed.waitingForMetadataSnapshot) {
+            feed.nextResnapshotMs = localNowMs() + 25'000;
+            emit liveBookResnapshotRequested(QString::fromStdString(symbol));
+        }
+    } catch (const std::exception& e) {
+        feed.metadata = nullptr;
+        feed.nextMetadataAttemptMs = localNowMs() + 30'000;
+        auto& data = ensureSymbol(symbol);
+        data.invalidateLiveBook();
+        emit bookSnapshotBroadcast(QString::fromStdString(symbol), {}, {}, 0.0,
+                                   QStringLiteral("metadata_unavailable"),
+                                   data.liveBook.stateVersion());
+        sLog_Warning("Live book metadata unavailable: symbol=" << symbol << " error=" << e.what());
+    }
 }
 void ServerDataModel::releaseGuiFeed(const std::string& symbol, int64_t releaseLocalMs) {
     const auto it = m_feeds.find(symbol);
@@ -248,8 +308,7 @@ void ServerDataModel::releaseGuiFeed(const std::string& symbol, int64_t releaseL
     {
         std::shared_lock lock(m_mutex);
         if (const auto data = m_symbols.find(symbol); data != m_symbols.end()) {
-            data->second->bookValid = false;
-            data->second->liveBook.clear();
+            data->second->invalidateLiveBook();
             data->second->lastTradePrice = 0;
         }
     }
@@ -261,6 +320,7 @@ void ServerDataModel::releaseGuiFeed(const std::string& symbol, int64_t releaseL
 void ServerDataModel::onMarketDataConnectionChanged(const std::string& symbol, bool connected) {
     const auto it = m_feeds.find(symbol);
     if (it == m_feeds.end()) return; // retired GUI socket: never recreate a series
+    if (connected) requestProductMetadataIfNeeded(symbol, it->second);
     // Only recorded products need deadlines; do not retain closed GUI products here.
     if (m_stallMonitor && it->second.pinned) m_stallMonitor->setConnected(symbol, connected, localNowMs());
     auto& feed = it->second;
@@ -497,25 +557,78 @@ void ServerDataModel::onLiveOrderBookLevelUpdates(const QString& productId,
     }
 
     const auto timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(exchangeMs));
-    std::vector<BookDelta> deltas;
-    data.liveBook.applyUpdates(updates, timestamp, &deltas);
-    if (!deltas.empty()) {
-        emit bookUpdateBroadcast(productId, deltas);
+    const double minPrice = data.liveBook.getMinPrice();
+    const double maxPrice = data.liveBook.getMaxPrice();
+    const double tickSize = data.liveBook.getTickSize();
+    thread_local std::vector<BookLevelUpdate> bucketUpdates;
+    bucketUpdates.clear();
+    bucketUpdates.reserve(updates.size());
+    for (const auto& update : updates) {
+        if (!std::isfinite(update.price) || update.price < minPrice || update.price > maxPrice ||
+            !std::isfinite(update.quantity) || update.quantity < 0.0) continue;
+        const auto index = LiveOrderBook::bucketIndex(update.price, minPrice, tickSize);
+        auto& totals = update.isBid ? data.bucketBids : data.bucketAsks;
+        auto& counts = update.isBid ? data.bucketBidCounts : data.bucketAskCounts;
+        if (index >= totals.size()) continue;
+        auto& raw = update.isBid ? data.rawBids : data.rawAsks;
+        const auto it = raw.find(update.price);
+        const double previous = it == raw.end() ? 0.0 : it->second;
+        if (previous == update.quantity) continue;
+        if (update.quantity == 0.0) {
+            if (it != raw.end()) {
+                raw.erase(it);
+                --counts[index];
+            }
+        } else {
+            if (it == raw.end()) {
+                raw.emplace(update.price, update.quantity);
+                ++counts[index];
+            }
+            else it->second = update.quantity;
+        }
+        const double before = totals[index];
+        double after = before + update.quantity - previous;
+        if (counts[index] == 0) {
+            after = 0.0;
+        } else if (after <= 64.0 * std::numeric_limits<double>::epsilon() *
+                            std::max({std::abs(before), std::abs(previous), std::abs(update.quantity)})) {
+            // Cancellation can hide or distort a tiny remaining peer. Rebuild only
+            // this rare exceptional bucket, never scan the side in ordinary updates.
+            after = 0.0;
+            for (const auto& [price, quantity] : raw)
+                if (price >= minPrice && price <= maxPrice &&
+                    LiveOrderBook::bucketIndex(price, minPrice, tickSize) == index)
+                    after += quantity;
+            if (after <= 0.0)
+                sLog_Warning("Live book aggregate underflow: symbol=" << symbol << " price=" << update.price);
+        }
+        totals[index] = after;
+        bucketUpdates.push_back({update.isBid, data.liveBook.index_to_price(index), after});
     }
+    if (bucketUpdates.empty()) return;
+    std::vector<BookDelta> deltas;
+    data.liveBook.applyUpdates(bucketUpdates, timestamp, &deltas);
+    if (!deltas.empty())
+        emit bookUpdateBroadcast(productId, deltas, data.liveBook.getMinPrice(),
+                                 data.liveBook.getTickSize(), data.liveBook.stateVersion());
 }
 
 void ServerDataModel::onLiveOrderBookInvalidated(const QString& productId, const QString& reason) {
     const std::string symbol = productId.toStdString();
     int count = 0;
-    std::shared_lock lock(m_mutex);
-    for (auto& [key, data] : m_symbols) {
-        if (symbol.empty() || key == symbol) {
-            if (data) {
-                data->bookValid = false;
+    std::vector<std::pair<QString, uint64_t>> notifications;
+    {
+        std::shared_lock lock(m_mutex);
+        for (auto& [key, data] : m_symbols) {
+            if ((symbol.empty() || key == symbol) && data) {
+                data->invalidateLiveBook();
+                notifications.emplace_back(QString::fromStdString(key), data->liveBook.stateVersion());
                 ++count;
             }
         }
     }
+    for (const auto& [product, version] : notifications)
+        emit bookSnapshotBroadcast(product, {}, {}, 0.0, QStringLiteral("invalidated"), version);
     if (m_recorder) {
         m_recorder->onInvalid(symbol, localNowMs(), reason.toStdString());
     }
@@ -535,24 +648,115 @@ void ServerDataModel::onLiveOrderBookInitialized(const QString& productId, const
                                toRecorderLevels(bids, asks));
     }
 
-    const double tickSize = m_serverConfig.orderbook.tickSize;
+    const auto validSide = [](const std::vector<OrderBookLevel>& side) {
+        return !side.empty() && std::all_of(side.begin(), side.end(), [](const OrderBookLevel& level) {
+            return std::isfinite(level.price) && level.price > 0.0 &&
+                   std::isfinite(level.size) && level.size > 0.0;
+        });
+    };
+    const bool validLevels = validSide(bids) && validSide(asks);
+    const double bestBid = validLevels ? std::max_element(bids.begin(), bids.end(),
+        [](const auto& a, const auto& b) { return a.price < b.price; })->price : 0.0;
+    const double bestAsk = validLevels ? std::min_element(asks.begin(), asks.end(),
+        [](const auto& a, const auto& b) { return a.price < b.price; })->price : 0.0;
+    if (!validLevels || bestBid >= bestAsk) {
+        data.invalidateLiveBook();
+        emit bookSnapshotBroadcast(productId, {}, {}, 0.0, QStringLiteral("invalid_snapshot"),
+                                   data.liveBook.stateVersion());
+        sLog_Warning("Live book snapshot rejected: symbol=" << symbol << " bids=" << bids.size()
+                     << " asks=" << asks.size());
+        return;
+    }
+
+    auto& feed = m_feeds.at(symbol);
+    double tickSize = m_serverConfig.orderbook.tickSize;
+    if (symbol != "BTC-USD") {
+        if (feed.metadata.is_null()) {
+            data.invalidateLiveBook();
+            feed.waitingForMetadataSnapshot = true;
+            emit bookSnapshotBroadcast(productId, {}, {}, 0.0, QStringLiteral("metadata_unavailable"),
+                                       data.liveBook.stateVersion());
+            sLog_Warning("Live book snapshot waiting for product metadata: symbol=" << symbol);
+            return;
+        }
+        try {
+            tickSize = sentinel::roller::deriveGrid(feed.metadata, (bestBid + bestAsk) * 0.5).nearTick;
+        } catch (const std::exception& e) {
+            data.invalidateLiveBook();
+            emit bookSnapshotBroadcast(productId, {}, {}, 0.0, QStringLiteral("invalid_tick"),
+                                       data.liveBook.stateVersion());
+            sLog_Warning("Live book tick unavailable: symbol=" << symbol << " error=" << e.what());
+            return;
+        }
+    }
+    if (!std::isfinite(tickSize) || tickSize <= 0.0) {
+        data.invalidateLiveBook();
+        emit bookSnapshotBroadcast(productId, {}, {}, 0.0, QStringLiteral("invalid_tick"),
+                                   data.liveBook.stateVersion());
+        sLog_Warning("Live book configured tick invalid: symbol=" << symbol << " tick=" << tickSize);
+        return;
+    }
     const double bandPct = m_serverConfig.orderbook.bandPct;
     const auto [minPrice, maxPrice] = computeBandRange(bids, asks, bandPct);
     data.liveBook.initialize(minPrice, maxPrice, tickSize);
     
     std::vector<BookLevelUpdate> updates;
-    updates.reserve(bids.size() + asks.size());
-    
-    for (const auto& level : bids) {
-        updates.push_back({true, level.price, level.size});
-    }
-    for (const auto& level : asks) {
-        updates.push_back({false, level.price, level.size});
+    data.rawBids.clear(); data.rawAsks.clear();
+    const auto bucketCount = data.liveBook.getBids().size();
+    data.bucketBids.assign(bucketCount, 0.0);
+    data.bucketAsks.assign(bucketCount, 0.0);
+    data.bucketBidCounts.assign(bucketCount, 0);
+    data.bucketAskCounts.assign(bucketCount, 0);
+    const auto ingestSide = [&](const std::vector<OrderBookLevel>& side, bool isBid) {
+        auto& raw = isBid ? data.rawBids : data.rawAsks;
+        auto& totals = isBid ? data.bucketBids : data.bucketAsks;
+        auto& counts = isBid ? data.bucketBidCounts : data.bucketAskCounts;
+        for (const auto& level : side) {
+            if (level.price < data.liveBook.getMinPrice() || level.price > data.liveBook.getMaxPrice()) continue;
+            const auto index = LiveOrderBook::bucketIndex(level.price, data.liveBook.getMinPrice(), tickSize);
+            if (index >= totals.size()) continue;
+            auto [it, inserted] = raw.emplace(level.price, level.size);
+            const double previous = inserted ? 0.0 : it->second;
+            if (inserted) ++counts[index];
+            if (!inserted) it->second = level.size;
+            totals[index] += level.size - previous;
+        }
+    };
+    ingestSide(bids, true);
+    ingestSide(asks, false);
+    updates.reserve(std::min(bucketCount * 2, bids.size() + asks.size()));
+    for (size_t i = 0; i < bucketCount; ++i) {
+        if (data.bucketBids[i] > 0.0)
+            updates.push_back({true, data.liveBook.index_to_price(i), data.bucketBids[i]});
+        if (data.bucketAsks[i] > 0.0)
+            updates.push_back({false, data.liveBook.index_to_price(i), data.bucketAsks[i]});
     }
     
     auto now = std::chrono::system_clock::now();
     data.liveBook.applyUpdates(updates, now, nullptr);
+    if (data.liveBook.getBidCount() == 0 || data.liveBook.getAskCount() == 0) {
+        data.invalidateLiveBook();
+        emit bookSnapshotBroadcast(productId, {}, {}, 0.0,
+                                   QStringLiteral("aggregation_unavailable"),
+                                   data.liveBook.stateVersion());
+        sLog_Warning("Live book aggregation has no two-sided levels: symbol=" << symbol
+                     << " tick=" << tickSize << " bandPct=" << bandPct);
+        return;
+    }
     data.bookValid = true;
+    feed.waitingForMetadataSnapshot = false;
+
+    std::vector<OrderBookLevel> publishedBids, publishedAsks;
+    const auto& bookBids = data.liveBook.getBids();
+    const auto& bookAsks = data.liveBook.getAsks();
+    publishedBids.reserve(data.liveBook.getBidCount());
+    publishedAsks.reserve(data.liveBook.getAskCount());
+    for (size_t i = 0; i < bookBids.size(); ++i)
+        if (bookBids[i] > 0.0) publishedBids.push_back({data.liveBook.index_to_price(i), bookBids[i]});
+    for (size_t i = 0; i < bookAsks.size(); ++i)
+        if (bookAsks[i] > 0.0) publishedAsks.push_back({data.liveBook.index_to_price(i), bookAsks[i]});
+    emit bookSnapshotBroadcast(productId, publishedBids, publishedAsks, tickSize,
+                               QStringLiteral("ready"), data.liveBook.stateVersion());
 
     sLog_Data("ServerDataModel: Initialized book: symbol=" << symbol << " envelopeMs=" << envelopeMs
               << " bids=" << bids.size() << " asks=" << asks.size()

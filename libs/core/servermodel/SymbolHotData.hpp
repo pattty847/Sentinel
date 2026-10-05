@@ -30,6 +30,11 @@ private:
 struct SymbolHotData {
     std::string symbol;
     LiveOrderBook liveBook;
+    // Server-only raw Coinbase levels for all live-book aggregation. GUI replicas
+    // receive bucket totals and never populate these maps.
+    std::unordered_map<double, double> rawBids, rawAsks;
+    std::vector<double> bucketBids, bucketAsks;
+    std::vector<size_t> bucketBidCounts, bucketAskCounts;
     double lastTradePrice = 0.0;
     // False after a disconnect, sequence gap or malformed L2 until the next
     // snapshot. Consumers must not treat an invalid book as observed liquidity.
@@ -42,4 +47,11 @@ struct SymbolHotData {
     // For now, let's keep it simple: just the LiveOrderBook
     
     explicit SymbolHotData(const std::string& s) : symbol(s), liveBook(s) {}
+    void invalidateLiveBook() {
+        bookValid = false;
+        liveBook.clear();
+        rawBids.clear(); rawAsks.clear();
+        bucketBids.clear(); bucketAsks.clear();
+        bucketBidCounts.clear(); bucketAskCounts.clear();
+    }
 };

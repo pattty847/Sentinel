@@ -162,11 +162,13 @@ signals:
     void tradeReceived(const Trade& trade);
     // This signal is strictly for internal use by DataSource which converts prices -> indices
     void l2UpdateReceived(const QString& productId, const std::vector<BookLevelUpdate>& updates,
-                          quint64 deliveryGeneration);
+                          double tickSize, quint64 deliveryGeneration, uint64_t bookVersion = 0);
     
     void liveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas);
     void snapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids,
-                          const std::vector<OrderBookLevel>& asks, quint64 deliveryGeneration);
+                          const std::vector<OrderBookLevel>& asks, double tickSize,
+                          quint64 deliveryGeneration, const QString& status = {},
+                          uint64_t bookVersion = 0);
     // Other signals as needed for aggregated slices
     void heatmapSliceReceived(const HeatmapSlice& slice);
     void footprintSliceReceived(const FootprintSlice& slice);

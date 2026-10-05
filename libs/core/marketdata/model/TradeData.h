@@ -53,6 +53,17 @@ struct BookLevelUpdate {
 
 class LiveOrderBook {
 public:
+    struct LevelsSnapshot {
+        double tickSize = 0.0;
+        uint64_t version = 0;
+        std::vector<OrderBookLevel> bids, asks;
+    };
+    LevelsSnapshot snapshotLevels() const;
+    uint64_t stateVersion() const { std::lock_guard<std::mutex> lock(m_mutex); return m_stateVersion; }
+    static size_t bucketIndex(double price, double minPrice, double tickSize) {
+        // Decimal quote/tick multiples can land just below an integer in binary64.
+        return static_cast<size_t>((price - minPrice) / tickSize + 1e-8);
+    }
     LiveOrderBook() = default;
     explicit LiveOrderBook(const std::string& product_id) : m_productId(product_id) {}
 
@@ -117,10 +128,10 @@ public:
 
 private:
     inline size_t price_to_index(double price) const {
-        return static_cast<size_t>((price - m_min_price) / m_tick_size);
+        return bucketIndex(price, m_min_price, m_tick_size);
     }
 
-    void applyLevelLocked(bool isBid,
+    bool applyLevelLocked(bool isBid,
                            double price,
                            double quantity,
                            std::vector<BookDelta>* outDeltas);
@@ -138,6 +149,7 @@ private:
     double m_min_price = 0.0;
     double m_max_price = 0.0;
     double m_tick_size = 0.0;
+    uint64_t m_stateVersion = 0; // protected by m_mutex; advances on reset and changed batch
 
     size_t m_nonZeroBidCount = 0;
     size_t m_nonZeroAskCount = 0;

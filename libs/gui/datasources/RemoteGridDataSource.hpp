@@ -48,9 +48,10 @@ public:
 
 private slots:
     void onSnapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids,
-                            const std::vector<OrderBookLevel>& asks, quint64 deliveryGeneration);
+                            const std::vector<OrderBookLevel>& asks, double tickSize,
+                            quint64 deliveryGeneration, const QString& status, uint64_t bookVersion);
     void onL2UpdateReceived(const QString& productId, const std::vector<BookLevelUpdate>& updates,
-                            quint64 deliveryGeneration);
+                            double tickSize, quint64 deliveryGeneration, uint64_t bookVersion = 0);
     void onHeatmapSliceReceived(const HeatmapSlice& slice);
     void onFootprintSliceReceived(const FootprintSlice& slice);
     void onTpoSliceReceived(const TpoSlice& slice);
@@ -85,7 +86,8 @@ private:
     friend struct CandleDataSourceTest;
     void processBookSnapshotDeadlines(qint64 nowMs);
     void onL2UpdateReceivedAt(const QString& productId, const std::vector<BookLevelUpdate>& updates,
-                              quint64 deliveryGeneration, qint64 nowMs);
+                              double tickSize, quint64 deliveryGeneration, qint64 nowMs,
+                              uint64_t bookVersion = 0);
     void requestNextCandlePage();
     void advanceCandleDeliveryGeneration();
     SentinelStreamClient m_client;
@@ -101,6 +103,7 @@ private:
         qint64 staleRetryBackoffMs = 5000;
     };
     std::unordered_map<std::string, PendingBookSnapshot> m_pendingBookSnapshots;
+    std::unordered_map<std::string, uint64_t> m_bookVersions;
     std::unordered_set<std::string> m_activeBookSymbols;
     QString m_candleSymbol;
     int64_t m_candleTimeframeSec = 0;

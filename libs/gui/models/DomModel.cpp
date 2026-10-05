@@ -189,11 +189,10 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
     }
     for (int i = 0; i < trades.size(); ++i) {
         const auto& trade = trades.entries()[i];
-        // Mirror LiveOrderBook::price_to_index exactly, including its origin and
-        // floating truncation at decimal boundaries (no absolute-grid epsilon).
+        // Place executions in the same containing bucket as the book replica.
         if (!std::isfinite(trade.price) || trade.price < view.minPrice || trade.price > view.maxPrice) continue;
-        const double offset = (trade.price - view.minPrice) / tick;
-        if (!std::isfinite(offset) || offset >= double(std::numeric_limits<qint64>::max() / 2)) continue;
+        const size_t offset = LiveOrderBook::bucketIndex(trade.price, view.minPrice, tick);
+        if (offset >= static_cast<size_t>(std::numeric_limits<qint64>::max() / 2)) continue;
         const auto key = std::optional<qint64>(*origin + static_cast<qint64>(offset));
         if (!key || m_top - *key < 0 || m_top - *key >= Rows) continue;
         auto& row = next[m_top - *key];

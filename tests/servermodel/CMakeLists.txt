@@ -126,6 +126,13 @@ add_test(NAME HeatmapTickPolicyTests COMMAND test_heatmap_tick_policy)
 set_tests_properties(HeatmapTickPolicyTests PROPERTIES LABELS "servermodel;heatmap")
 add_dependencies(servermodel_tests test_heatmap_tick_policy)
 
+add_executable(test_live_book_tick test_live_book_tick.cpp)
+target_include_directories(test_live_book_tick PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_live_book_tick PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+add_test(NAME LiveBookTickTests COMMAND test_live_book_tick)
+set_tests_properties(LiveBookTickTests PROPERTIES LABELS "servermodel;marketdata")
+add_dependencies(servermodel_tests test_live_book_tick)
+
 add_executable(test_heatmap_tiles test_heatmap_tiles.cpp)
 target_include_directories(test_heatmap_tiles PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_heatmap_tiles PRIVATE sentinel_core GTest::gtest_main)

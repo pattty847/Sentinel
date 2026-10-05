@@ -212,6 +212,28 @@ The internal stream server (`SentinelStreamServer`) defaults to `ws://127.0.0.1:
 
 **Encrypted:** `server_config`, `heatmap_slice`, l2 snapshots/updates, `market_trades`, candle and footprint/TPO history, `trade_command`, `order_update`, `position_update`, and control messages (e.g. `subscribe`).
 
+**Live order-book grid:** Each server `snapshot` carries `tick_size` for that product and
+`book_status` (`ready`, `unavailable`, `metadata_unavailable`, `invalid_tick`,
+`invalid_snapshot`, `aggregation_unavailable`, or `invalidated`).
+`l2update` carries the same `tick_size`; its prices are bucket prices on that grid. Both messages
+carry a per-product monotonic `book_version` advanced on book resets and changed batches. A client
+rebuilds its replica only from a two-sided `ready` snapshot with a finite positive tick, and drops
+older versions or updates whose tick differs from that snapshot. An unavailable snapshot clears a previously ready
+replica. New subscribers receive the current aggregated book and tick; existing subscribers receive
+a fresh snapshot whenever an upstream snapshot resets the server grid, before subsequent deltas.
+During rollout, a new GUI connected to an older server that omits `tick_size` keeps the live book
+unavailable until the server is upgraded; it does not guess a tick from price or global config.
+For non-BTC products the server fetches exact Coinbase quote-increment metadata asynchronously,
+then uses the roller near-grid rule on the snapshot midpoint (~1 bp nearest 1-2-5, rounded up to
+a quote-increment multiple). Missing or invalid metadata leaves the live book unavailable; once
+metadata arrives, the server requests a fresh upstream snapshot rather than replaying an old one
+past skipped deltas. BTC-USD keeps the configured `orderbook.tick_size`. Feed release invalidates
+its metadata lifetime, so a late REST reply cannot initialize a newly acquired feed. Raw recorder
+snapshots and deltas remain independent of this live aggregation gate. For every product, the server
+retains raw price levels only inside the live book's band, sums all quantities in each tick bucket,
+and adjusts the bucket total when one raw level changes or is deleted. The wire carries these bucket
+totals; the GUI replica applies them as absolute quantities.
+
 **Handshake:** TCP connect → TLS 1.3 ClientHello/ServerHello (server uses self-signed EC cert with SANs for localhost/127.0.0.1) → TLS Finished → HTTP WebSocket upgrade → JSON subscribe/server_config/heatmap_slice.
 
 **Certificates:** Generate with `certs/gen-certs.ps1` (Windows) or `certs/gen-certs.sh` (Linux/macOS). Outputs `certs/sentinel-server.crt` and `certs/sentinel-server.key` (gitignored). Configure in `server_config.yaml` under `tls.cert_file` / `tls.key_file` and in `client_config.yaml` under `server.ca_file`. If `ca_file` is missing or invalid, the client falls back to `verify_none` with a log warning (acceptable for local dev only).

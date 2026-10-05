@@ -123,6 +123,13 @@ struct ServerFeedAdmissionTest : testing::Test {
         drain();
         return s->write_queue_.size() > 1 ? nlohmann::json::parse(s->write_queue_.back().payload) : nlohmann::json{};
     }
+    void seedEthMetadata() {
+        const auto it = model->m_feeds.find("ETH-USD");
+        ASSERT_NE(it, model->m_feeds.end());
+        model->onProductMetadata("ETH-USD", it->second.lifetime,
+            nlohmann::json{{"product_id", "ETH-USD"}, {"quote_increment", "0.01"},
+                           {"base_increment", "0.00000001"}}, "");
+    }
     void TearDown() override {
         for (auto& s : sessions) s->beginClose("fixture cleanup");
         drain();
@@ -459,6 +466,7 @@ void ServerFeedAdmissionTest::checkRecorderRelease() {
     };
     auto s = session();
     request(s, "ETH-USD");
+    seedEthMetadata();
     recordingLocal = epoch + 10000;
     snapshot("ETH-USD"); snapshot("BTC-USD");
     model->m_recorder->onTick(epoch + 20000);
@@ -503,6 +511,7 @@ void ServerFeedAdmissionTest::checkRecorderRelease() {
     model->releaseGuiFeed("BTC-USD", recordingLocal);
     EXPECT_TRUE(model->ensureSymbol("BTC-USD").bookValid);
     request(s, "ETH-USD");
+    seedEthMetadata();
     recordingLocal = epoch + 190000;
     snapshot("ETH-USD");
     recordingLocal = epoch + 205000;
@@ -528,6 +537,7 @@ void ServerFeedAdmissionTest::checkLegacyRelease() {
     model->m_heatmapStreamer = std::make_unique<HeatmapTwapStreamer>(*model, legacy);
     auto& streamer = *model->m_heatmapStreamer;
     auto s = session(); request(s, "ETH-USD");
+    seedEthMetadata();
     model->onLiveOrderBookInitialized("ETH-USD", {{99, 2}}, {{101, 4}}, recordingLocal);
     const auto epoch = recording::kHmc2MinMs;
     for (int64_t t = 0; t <= 90000; t += 1000) {
