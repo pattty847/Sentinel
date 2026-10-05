@@ -330,6 +330,28 @@ TEST(Screener, LongNamesKeepQuoteColumnsVisibleAndManualWidthAcrossRefreshAndRes
             table->visualRect(model->index(rowFor(model, "ABC-USD"), quoteColumn))))
             << "A later longer name must remain bounded after an earlier payload";
 
+    dock.resize(1440, 360);
+    QCoreApplication::processEvents();
+    const int wideNameWidth = table->columnWidth(1);
+    ASSERT_GT(wideNameWidth, table->horizontalHeader()->sectionSizeHint(1));
+    const QString refreshedWideName = QStringLiteral("ABC Company with a distinctly refreshed long display name");
+    updateScreener(dock, "crypto", QJsonArray{
+        QJsonObject{{"symbol", "ABC-USD"}, {"Name", refreshedWideName}, {"Price", 12.35},
+                    {"Change %", 1.26}, {"Volume", 12345.0}, {"Exchange", "COINBASE"}},
+        rows.at(1).toObject()});
+    const int refreshedNameWidth = table->columnWidth(1);
+    EXPECT_LT(refreshedNameWidth, wideNameWidth)
+        << "A changed Name cell should update the content measurement on a wide viewport";
+    EXPECT_GT(refreshedNameWidth, table->horizontalHeader()->sectionSizeHint(1));
+    updateScreener(dock, "crypto", QJsonArray{
+        QJsonObject{{"symbol", "ABC-USD"}, {"Name", refreshedWideName}, {"Price", 12.36},
+                    {"Change %", 1.27}, {"Volume", 12345.0}, {"Exchange", "COINBASE"}},
+        rows.at(1).toObject()});
+    EXPECT_EQ(table->columnWidth(1), refreshedNameWidth)
+        << "A price-only refresh must preserve the measured Name width";
+
+    dock.resize(480, 360);
+    QCoreApplication::processEvents();
     const int automaticNameWidth = table->columnWidth(1);
     table->setColumnWidth(1, automaticNameWidth + 12);
     const int userNameWidth = table->columnWidth(1);
@@ -612,6 +634,13 @@ TEST(WatchRailScreener, NativeVisualFixtures) {
     ASSERT_TRUE(saveBoth("crypto-loading"));
     updateScreener(*dock, "crypto", cryptoRows);
     ASSERT_TRUE(saveBoth("crypto-populated"));
+    QJsonArray refreshedCryptoRows = cryptoRows;
+    QJsonObject refreshedPepe = refreshedCryptoRows.at(2).toObject();
+    refreshedPepe.insert("Name", "Pepe · updated synthetic provider payload with extended name");
+    refreshedPepe.insert("Price", 0.00000013);
+    refreshedCryptoRows.replace(2, refreshedPepe);
+    updateScreener(*dock, "crypto", refreshedCryptoRows);
+    ASSERT_TRUE(saveBoth("crypto-populated-refreshed"));
     frame.resize(480, 480);
     QCoreApplication::processEvents();
     auto* model = qobject_cast<QStandardItemModel*>(table->model());
@@ -621,6 +650,13 @@ TEST(WatchRailScreener, NativeVisualFixtures) {
     dock->findChild<QComboBox*>("screenerAsset")->setCurrentIndex(1);
     updateScreener(*dock, "stock", stockRows);
     ASSERT_TRUE(saveBoth("stock-populated"));
+    QJsonArray refreshedStockRows = stockRows;
+    QJsonObject refreshedBerkshire = refreshedStockRows.at(1).toObject();
+    refreshedBerkshire.insert("Name", "Berkshire Hathaway Inc. Class B with an extended refreshed fixture name");
+    refreshedBerkshire.insert("Price", 457.12);
+    refreshedStockRows.replace(1, refreshedBerkshire);
+    updateScreener(*dock, "stock", refreshedStockRows);
+    ASSERT_TRUE(saveBoth("stock-populated-refreshed"));
     frame.resize(480, 480);
     QCoreApplication::processEvents();
     table->scrollTo(model->index(rowFor(model, "AAPL"), 7));

@@ -48,6 +48,7 @@ class ScreenerTableView final : public QTableView {
 public:
     using QTableView::QTableView;
     std::function<void(const QModelIndex&)> keyboardActivate;
+    int measuredColumnWidth(int column) const { return sizeHintForColumn(column); }
 protected:
     void keyPressEvent(QKeyEvent* event) override {
         if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter ||
@@ -436,7 +437,7 @@ void ScreenerDock::applyRows(const QJsonArray& rows) {
             ? manualNameWidth : m_table->columnWidth(kColName);
     } else if (!m_nameColumnUserSized) {
         // Re-measure only after a changed payload batch, never on each viewport resize.
-        m_nameColumnPreferredWidth = m_table->horizontalHeader()->sectionSizeHint(kColName);
+        m_nameColumnPreferredWidth = static_cast<ScreenerTableView*>(m_table)->measuredColumnWidth(kColName);
     }
     adjustDefaultNameColumnWidth();
     m_table->horizontalScrollBar()->setValue(oldHorizontalScroll);
