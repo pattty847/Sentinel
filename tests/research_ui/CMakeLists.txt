@@ -1,0 +1,5 @@
+add_executable(test_research_ui test_research_ui.cpp)
+target_include_directories(test_research_ui PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_research_ui PRIVATE sentinel_gui_lib GTest::gtest Qt6::Widgets Qt6::Test Qt6::Quick)
+add_test(NAME ResearchUiTests COMMAND test_research_ui)
+set_tests_properties(ResearchUiTests PROPERTIES LABELS "ui;research")

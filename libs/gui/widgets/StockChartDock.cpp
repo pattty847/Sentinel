@@ -15,6 +15,10 @@
 #include <QVariantMap>
 #include <QButtonGroup>
 #include <QSurfaceFormat>
+#include <QApplication>
+#include <QDateTime>
+#include <QEvent>
+#include <cmath>
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -22,10 +26,10 @@ static QToolButton* makePeriodBtn(const QString& label, QWidget* parent) {
     auto* btn = new QToolButton(parent);
     btn->setText(label);
     btn->setCheckable(true);
-    btn->setFixedHeight(22);
+    btn->setMinimumHeight(22);
     btn->setStyleSheet(
         "QToolButton { background:#1a2028; color:#6a8090; border:1px solid #253040;"
-        " border-radius:3px; padding:0 6px; font-size:11px; }"
+        " border-radius:3px; padding:0 6px; }"
         "QToolButton:checked { background:#1e3a50; color:#60c0e0; border-color:#2a6080; }"
         "QToolButton:hover { color:#c0d0dc; }");
     return btn;
@@ -33,14 +37,13 @@ static QToolButton* makePeriodBtn(const QString& label, QWidget* parent) {
 
 // ── Construction ─────────────────────────────────────────────────────────────
 
-StockChartDock::StockChartDock(QWidget* parent)
+StockChartDock::StockChartDock(QWidget* parent, ResearchProcess* candles, ResearchProcess* sec)
     : DockablePanel("StockChartDock", "Stock Chart", parent)
     , m_periodGroup(new QButtonGroup(this))
-    , m_process(new QProcess(this))
-    , m_secApiClient(new SecApiClient(this))
+    , m_runner(candles ? candles : new ResearchProcess(this))
+    , m_secApiClient(new SecApiClient(this, sec))
 {
-    connect(m_process, &QProcess::finished,        this, &StockChartDock::onProcessFinished);
-    connect(m_process, &QProcess::errorOccurred,   this, &StockChartDock::onProcessError);
+    connect(m_runner, &ResearchProcess::completed, this, &StockChartDock::acceptCandles);
     connect(m_secApiClient, &SecApiClient::insiderSignalsReady, this, &StockChartDock::onSecSignalsReady);
     connect(m_secApiClient, &SecApiClient::apiError, this, &StockChartDock::onSecApiError);
 
@@ -48,15 +51,9 @@ StockChartDock::StockChartDock(QWidget* parent)
 }
 
 StockChartDock::~StockChartDock() {
-    // Disconnect SecApiClient before QQuickView is destroyed by ~QWidget.
-    // Without this, SecApiClient::~SecApiClient() calls waitForFinished()
-    // which can fire processFinished → onPythonError → apiError → onSecApiError
-    // → qmlRoot() on an already-destroyed QQuickView (dangling pointer crash).
-    if (m_secApiClient) {
-        m_secApiClient->disconnect(this);
-    }
-    if (m_process->state() != QProcess::NotRunning)
-        m_process->kill();
+    m_secApiClient->disconnect(this);
+    m_secApiClient->cancel();
+    if (m_runner) m_runner->cancel();
 }
 
 // ── UI ────────────────────────────────────────────────────────────────────────
@@ -71,12 +68,14 @@ void StockChartDock::buildUi() {
     toolbar->setSpacing(6);
 
     m_tickerInput = new QLineEdit(m_contentWidget);
+    m_tickerInput->setObjectName("stockTicker");
+    m_tickerInput->setAccessibleName("Stock ticker");
     m_tickerInput->setPlaceholderText("Ticker…");
     m_tickerInput->setFixedWidth(80);
     m_tickerInput->setMaxLength(10);
     m_tickerInput->setStyleSheet(
         "QLineEdit { background:#141a20; color:#c0ccd8; border:1px solid #253040;"
-        " border-radius:3px; padding:2px 6px; font-size:12px; }");
+        " border-radius:3px; padding:2px 6px; }");
     toolbar->addWidget(m_tickerInput);
 
     // Period buttons
@@ -93,7 +92,8 @@ void StockChartDock::buildUi() {
 
     m_fetchBtn = new QToolButton(m_contentWidget);
     m_fetchBtn->setIcon(QIcon(":/svg/refresh.svg"));
-    m_fetchBtn->setToolTip("Fetch candles");
+    m_fetchBtn->setToolTip("Fetch daily candles");
+    m_fetchBtn->setAccessibleName("Fetch daily candles");
     m_fetchBtn->setFixedSize(26, 26);
     toolbar->addWidget(m_fetchBtn);
 
@@ -126,6 +126,8 @@ void StockChartDock::buildUi() {
         m_quickView->setSource(QUrl::fromLocalFile(local));
     }
 
+    if (auto* root = qmlRoot()) root->setProperty("uiFont", QApplication::font());
+
     m_qmlContainer = QWidget::createWindowContainer(m_quickView, m_contentWidget);
     m_qmlContainer->setFocusPolicy(Qt::StrongFocus);
     layout->addWidget(m_qmlContainer, 1);
@@ -135,6 +137,16 @@ void StockChartDock::buildUi() {
     // Signals
     connect(m_fetchBtn,    &QToolButton::clicked, this, &StockChartDock::onFetchClicked);
     connect(m_tickerInput, &QLineEdit::returnPressed, this, &StockChartDock::onFetchClicked);
+    connect(m_tickerInput, &QLineEdit::textEdited, this, [this] {
+        clearData();
+        m_currentTicker = m_tickerInput->text().trimmed().toUpper();
+        m_currentCompany.clear();
+        if (auto* root = qmlRoot()) {
+            root->setProperty("ticker", m_currentTicker);
+            root->setProperty("company", "");
+        }
+        setStatus("Press Enter to fetch daily candles");
+    });
     connect(this, &QDockWidget::visibilityChanged, this, [this](bool v) {
         if (m_qmlContainer) m_qmlContainer->setVisible(v);
         if (m_quickView)    m_quickView->setVisible(v);
@@ -163,13 +175,7 @@ void StockChartDock::loadSymbol(const QString& ticker, const QString& companyNam
 void StockChartDock::onFetchClicked() {
     const QString t = m_tickerInput->text().trimmed().toUpper();
     if (t.isEmpty()) return;
-    m_currentTicker = t;
-    if (auto* root = qmlRoot()) {
-        root->setProperty("ticker", m_currentTicker);
-        QMetaObject::invokeMethod(root, "clearSecSignals");
-    }
-    startFetch();
-    startSecFetch();
+    loadSymbol(t);
 }
 
 void StockChartDock::onPeriodChanged(const QString& period) {
@@ -182,58 +188,53 @@ void StockChartDock::onPeriodChanged(const QString& period) {
     }
 }
 
-void StockChartDock::onProcessFinished(int exitCode, QProcess::ExitStatus /*status*/) {
-    const QString output = QString::fromUtf8(m_process->readAllStandardOutput());
-
-    if (auto* root = qmlRoot()) {
-        root->setProperty("loading", false);
+void StockChartDock::acceptCandles(quint64 request, const QByteArray& output, const QString& error) {
+    if (request != m_request || !m_pending) return;
+    m_pending = false;
+    auto* root = qmlRoot();
+    if (!root) return;
+    root->setProperty("loading", false);
+    QByteArray payload, providerError;
+    for (const auto& line : output.split('\n')) {
+        if (line.startsWith("OHLCV_DATA:")) payload = line.mid(11).trimmed();
+        if (line.startsWith("ERROR_DATA:")) providerError = line.mid(11).trimmed();
     }
-
-    // Find our marker line
-    const int idx = output.indexOf("OHLCV_DATA:");
-    const int errIdx = output.indexOf("ERROR_DATA:");
-
-    if (idx != -1) {
-        const QByteArray json = output.mid(idx + 11).trimmed().toUtf8();
-        const QJsonObject obj = QJsonDocument::fromJson(json).object();
-        const QJsonArray candles = obj["candles"].toArray();
-        const int count = candles.size();
-
-        // Convert to QVariantList for QML setCandles()
-        QVariantList list;
-        list.reserve(count);
-        for (const QJsonValue& v : candles) {
-            const QJsonObject c = v.toObject();
-            QVariantMap m;
-            m["date"]      = c["date"].toString();
-            m["timestamp"] = static_cast<qint64>(c["ts_ms"].toDouble());
-            m["open"]      = c["open"].toDouble();
-            m["high"]      = c["high"].toDouble();
-            m["low"]       = c["low"].toDouble();
-            m["close"]     = c["close"].toDouble();
-            m["volume"]    = c["volume"].toDouble();
-            list.append(m);
-        }
-
-        if (auto* root = qmlRoot()) {
-            QMetaObject::invokeMethod(root, "setCandles", Q_ARG(QVariant, QVariant::fromValue(list)));
-            root->setProperty("statusMsg", "");  // Clear; ticker/period/candles live in header only
-        }
-    } else if (errIdx != -1) {
-        const QByteArray json = output.mid(errIdx + 11).trimmed().toUtf8();
-        const QJsonObject obj = QJsonDocument::fromJson(json).object();
-        setStatus(obj["error"].toString(), true);
-    } else {
-        setStatus(exitCode == 0 ? "No data returned" : "Fetch failed", true);
+    if (!providerError.isEmpty()) {
+        setStatus(QJsonDocument::fromJson(providerError).object().value("error").toString("yfinance returned an error"), true);
+        return;
     }
-}
-
-void StockChartDock::onProcessError(QProcess::ProcessError error) {
-    if (auto* root = qmlRoot()) root->setProperty("loading", false);
-    const QString msg = (error == QProcess::FailedToStart)
-        ? "Could not start Python. Is uv in PATH?"
-        : "Process error: " + m_process->errorString();
-    setStatus(msg, true);
+    if (!error.isEmpty()) { setStatus(error, true); return; }
+    const auto document = QJsonDocument::fromJson(payload);
+    const auto obj = document.object();
+    if (!document.isObject() || obj["ticker"].toString() != m_currentTicker || obj["period"].toString() != m_currentPeriod) {
+        setStatus("yfinance response did not match the requested ticker and period", true);
+        return;
+    }
+    QVariantList list;
+    QString asOf;
+    for (const auto& value : obj["candles"].toArray()) {
+        const auto c = value.toObject();
+        bool valid = true;
+        for (const auto* key : {"ts_ms", "open", "high", "low", "close", "volume"})
+            valid = valid && c[key].isDouble() && std::isfinite(c[key].toDouble());
+        if (!valid || c["ts_ms"].toDouble() <= 0 || c["low"].toDouble() <= 0
+            || c["high"].toDouble() < c["low"].toDouble() || c["volume"].toDouble() < 0
+            || c["open"].toDouble() < c["low"].toDouble() || c["open"].toDouble() > c["high"].toDouble()
+            || c["close"].toDouble() < c["low"].toDouble() || c["close"].toDouble() > c["high"].toDouble()) {
+            setStatus("yfinance returned incomplete or invalid candles", true);
+            return;
+        }
+        QVariantMap candle = c.toVariantMap();
+        candle["timestamp"] = static_cast<qint64>(c["ts_ms"].toDouble());
+        list.append(candle);
+        if (c["date"].toString() > asOf) asOf = c["date"].toString();
+    }
+    if (list.isEmpty()) { setStatus("No daily candles returned for " + m_currentTicker, true); return; }
+    root->setProperty("dataSymbol", m_currentTicker);
+    root->setProperty("asOf", asOf.isEmpty() ? "Unknown" : asOf);
+    root->setProperty("retrievedAt", QDateTime::currentDateTimeUtc().toString("yyyy-MM-dd HH:mm:ss 'UTC'"));
+    QMetaObject::invokeMethod(root, "setCandles", Q_ARG(QVariant, QVariant::fromValue(list)));
+    setStatus("");
 }
 
 void StockChartDock::onSecSignalsReady(const QJsonObject& payload) {
@@ -243,6 +244,7 @@ void StockChartDock::onSecSignalsReady(const QJsonObject& payload) {
     }
     if (auto* root = qmlRoot()) {
         root->setProperty("secSignalsLoading", false);
+        root->setProperty("secStatus", "SEC EDGAR · retrieved " + m_secApiClient->retrievedAt().toString("yyyy-MM-dd HH:mm:ss 'UTC'"));
         QMetaObject::invokeMethod(root, "setSecSignals", Q_ARG(QVariant, QVariant::fromValue(payload.toVariantMap())));
     }
 }
@@ -252,51 +254,43 @@ void StockChartDock::onSecApiError(const QString& error) {
         root->setProperty("secSignalsLoading", false);
         QMetaObject::invokeMethod(root, "clearSecSignals");
     }
-    setStatus("SEC signals: " + error, true);
+    if (auto* root = qmlRoot()) root->setProperty("secStatus", "SEC: " + error);
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
+void StockChartDock::clearData() {
+    ++m_request;
+    m_pending = false;
+    if (m_runner) m_runner->cancel();
+    m_secApiClient->cancel();
+    if (auto* root = qmlRoot()) {
+        QMetaObject::invokeMethod(root, "clearChart");
+        root->setProperty("loading", false);
+        root->setProperty("secSignalsLoading", false);
+        root->setProperty("secStatus", "SEC insiders idle");
+        root->setProperty("dataSymbol", "");
+        root->setProperty("asOf", "Unknown");
+        root->setProperty("retrievedAt", "Unknown");
+    }
+}
 void StockChartDock::startFetch() {
-    if (m_currentTicker.isEmpty()) return;
-    if (m_process->state() != QProcess::NotRunning) {
-        m_process->kill();
-        m_process->waitForFinished(500);
-    }
-
-    // Locate the script relative to the app or source dir.
-    // Binary is at build/windows-msvc-vs/apps/sentinel-gui/Debug/ — 5 levels up = repo root.
-    QString scriptPath;
-    const QString appDir = QCoreApplication::applicationDirPath();
-    const QStringList candidates = {
-        QDir(appDir).absoluteFilePath("../../../../../scripts/stocks/fetch_daily_ohlcv.py"), // Debug build (5 up)
-        QDir(appDir).absoluteFilePath("../../../../scripts/stocks/fetch_daily_ohlcv.py"),    // Release/flat (4 up)
-        QDir(appDir).absoluteFilePath("../../../scripts/stocks/fetch_daily_ohlcv.py"),       // 3 up fallback
-#ifdef SENTINEL_SOURCE_DIR
-        QDir(QString::fromUtf8(SENTINEL_SOURCE_DIR)).filePath("scripts/stocks/fetch_daily_ohlcv.py"),
-#endif
-    };
-    for (const auto& c : candidates) {
-        if (QFile::exists(c)) { scriptPath = c; break; }
-    }
-
-    if (scriptPath.isEmpty()) {
-        setStatus("Script not found: scripts/stocks/fetch_daily_ohlcv.py", true);
+    clearData();
+    if (m_currentTicker.isEmpty()) { setStatus("Enter a ticker to fetch daily candles"); return; }
+    if (!ResearchProcess::isEquityTicker(m_currentTicker)) {
+        setStatus("Stock charts require an equity ticker; crypto pairs are unsupported", true);
         return;
     }
-
-    setStatus(QString("Fetching %1 %2…").arg(m_currentTicker, m_currentPeriod));
-    if (auto* root = qmlRoot()) {
-        root->setProperty("loading",   true);
-        root->setProperty("statusMsg", QString("Loading %1…").arg(m_currentTicker));
-    }
-
-    // Run via uv so the venv is activated automatically.
-    // scriptPath = .../scripts/stocks/fetch_daily_ohlcv.py
-    // absolutePath() = .../scripts/stocks/ → one level up = scripts/ where pyproject.toml lives
-    const QString scriptsDir = QFileInfo(scriptPath).absolutePath() + "/..";
-    m_process->setWorkingDirectory(QDir(scriptsDir).absolutePath());
-    m_process->start("uv", {"run", "python", scriptPath, m_currentTicker, m_currentPeriod});
+    if (!m_runner) { setStatus("yfinance request provider unavailable", true); return; }
+    if (auto* root = qmlRoot()) root->setProperty("loading", true);
+    setStatus(QString("Loading %1 · %2 daily candles…").arg(m_currentTicker, m_currentPeriod));
+    m_pending = true;
+    m_runner->run(m_request, QDir(ResearchProcess::scriptsPath()).filePath("stocks/fetch_daily_ohlcv.py"), {m_currentTicker, m_currentPeriod});
+}
+void StockChartDock::changeEvent(QEvent* event) {
+    DockablePanel::changeEvent(event);
+    if (event->type() == QEvent::ApplicationFontChange || event->type() == QEvent::FontChange)
+        if (auto* root = qmlRoot()) root->setProperty("uiFont", QApplication::font());
 }
 
 void StockChartDock::startSecFetch() {
@@ -324,6 +318,5 @@ QObject* StockChartDock::qmlRoot() const {
 
 void StockChartDock::setStatus(const QString& msg, bool error) {
     if (auto* root = qmlRoot())
-        root->setProperty("statusMsg", msg);
-    Q_UNUSED(error);  // QML empty state shows statusMsg; styling can be extended there if needed
+        root->setProperty("statusMsg", error ? "Unavailable: " + msg : msg);
 }

@@ -22,7 +22,7 @@ class SecFilingDock : public DockablePanel {
     Q_OBJECT
 
 public:
-    explicit SecFilingDock(QWidget* parent = nullptr);
+    explicit SecFilingDock(QWidget* parent = nullptr, ResearchProcess* runner = nullptr);
     void buildUi() override;
     void onSymbolChanged(const QString& symbol) override;
     QSize minimumSizeHint() const override;
@@ -38,6 +38,10 @@ private slots:
     void onStatusUpdate(const QString& message);
 
 private:
+    void clearResults();
+    void tickerEdited();
+    void beginRequest();
+    QString provenance() const;
     void updateStatus(const QString& message, bool isError = false);
     void displayFilings(const QList<SecApiClient::Filing>& filings);
     void displayTransactions(const QList<SecApiClient::Transaction>& transactions);
