@@ -15,6 +15,8 @@
 #include <QTimer>
 
 class SentinelStreamClient;
+class QShowEvent;
+class QHideEvent;
 
 class ScreenerDock : public DockablePanel {
     Q_OBJECT
@@ -50,6 +52,8 @@ private slots:
     void onFetchTimeout();
 
 private:
+    void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
     void requestFetch();
     void applyRows(const QJsonArray& rows);
     void updateColumns();

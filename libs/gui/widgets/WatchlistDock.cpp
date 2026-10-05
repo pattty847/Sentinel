@@ -9,6 +9,7 @@
 #include <QRegularExpression>
 #include <QSettings>
 #include <QVBoxLayout>
+#include <functional>
 
 namespace {
 const QRegularExpression kCryptoPair(QStringLiteral("^[A-Z0-9]{2,20}-[A-Z0-9]{2,20}$"));
@@ -17,11 +18,12 @@ const QString kSettingsGroup = QStringLiteral("watchRail");
 class WatchTreeView final : public QTreeView {
 public:
     using QTreeView::QTreeView;
+    std::function<void(const QModelIndex&)> keyboardActivate;
 protected:
     void keyPressEvent(QKeyEvent* event) override {
         if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter ||
              event->key() == Qt::Key_Space) && currentIndex().isValid()) {
-            emit activated(currentIndex());
+            if (keyboardActivate) keyboardActivate(currentIndex());
             event->accept();
             return;
         }
@@ -166,7 +168,9 @@ void WatchlistDock::buildUi() {
     connect(m_presetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &WatchlistDock::onPresetChanged);
     connect(m_tree, &QTreeView::clicked, this, &WatchlistDock::onRowActivated);
-    connect(m_tree, &QTreeView::activated, this, &WatchlistDock::onRowActivated);
+    static_cast<WatchTreeView*>(m_tree)->keyboardActivate = [this](const QModelIndex& index) {
+        onRowActivated(index);
+    };
     connect(m_tree->selectionModel(), &QItemSelectionModel::currentChanged,
             this, [this] { updatePinButton(); });
     connect(m_addButton, &QToolButton::clicked, this, &WatchlistDock::addPinnedSymbol);

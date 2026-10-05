@@ -20,6 +20,12 @@
 #include <QTableView>
 #include <QTimer>
 #include <QSet>
+#include <QScrollBar>
+#include <QShowEvent>
+#include <QHideEvent>
+#include <QHash>
+#include <functional>
+#include <array>
 #include <cmath>
 #include <optional>
 
@@ -40,11 +46,12 @@ namespace {
 class ScreenerTableView final : public QTableView {
 public:
     using QTableView::QTableView;
+    std::function<void(const QModelIndex&)> keyboardActivate;
 protected:
     void keyPressEvent(QKeyEvent* event) override {
         if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter ||
              event->key() == Qt::Key_Space) && currentIndex().isValid()) {
-            emit activated(currentIndex());
+            if (keyboardActivate) keyboardActivate(currentIndex());
             event->accept();
             return;
         }
@@ -63,6 +70,7 @@ ScreenerDock::ScreenerDock(QWidget* parent)
     m_model->setSortRole(Qt::UserRole + 1);
 
     m_autoTimer->setSingleShot(false);
+    m_autoTimer->setObjectName("screenerAutoTimer");
     connect(m_autoTimer, &QTimer::timeout, this, &ScreenerDock::onAutoTimer);
     m_fetchTimer->setObjectName("screenerFetchTimeout");
     m_fetchTimer->setSingleShot(true);
@@ -192,8 +200,9 @@ void ScreenerDock::buildUi() {
             this, &ScreenerDock::onRunClicked);
     connect(m_table,          &QTableView::clicked,
             this, &ScreenerDock::onRowClicked);
-    connect(m_table,          &QTableView::activated,
-            this, &ScreenerDock::onRowClicked);
+    static_cast<ScreenerTableView*>(m_table)->keyboardActivate = [this](const QModelIndex& index) {
+        onRowClicked(index);
+    };
     updateColumns();
 }
 
@@ -257,20 +266,41 @@ static std::optional<double> number(const QJsonObject& row, const char* key) {
     return std::isfinite(result) ? std::optional<double>(result) : std::nullopt;
 }
 
-static QStandardItem* numItem(const QString& display, std::optional<double> sortVal) {
-    auto* item = new QStandardItem(sortVal ? display : QStringLiteral("—"));
-    if (sortVal) item->setData(*sortVal, Qt::UserRole + 1);
-    item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    return item;
+struct CellView {
+    QString text;
+    QVariant sort;
+    QVariant foreground;
+    bool numeric = false;
+};
+
+static CellView textCell(const QString& text) {
+    return {text.isEmpty() ? QStringLiteral("—") : text, text, {}, false};
 }
 
-static QStandardItem* strItem(const QString& text) {
-    auto* item = new QStandardItem(text.isEmpty() ? QStringLiteral("—") : text);
-    item->setData(text, Qt::UserRole + 1);
-    return item;
+static CellView numberCell(const QString& display, std::optional<double> value,
+                           const QVariant& foreground = {}) {
+    return {value ? display : QStringLiteral("—"),
+            value ? QVariant(*value) : QVariant(), foreground, true};
+}
+
+static bool updateCell(QStandardItem* item, const CellView& cell) {
+    bool changed = false;
+    if (item->text() != cell.text) { item->setText(cell.text); changed = true; }
+    if (item->data(Qt::UserRole + 1) != cell.sort) {
+        item->setData(cell.sort, Qt::UserRole + 1);
+        changed = true;
+    }
+    if (item->data(Qt::ForegroundRole) != cell.foreground) {
+        item->setData(cell.foreground, Qt::ForegroundRole);
+        changed = true;
+    }
+    const auto alignment = cell.numeric ? Qt::AlignRight | Qt::AlignVCenter : Qt::AlignLeft | Qt::AlignVCenter;
+    if (item->textAlignment() != alignment) { item->setTextAlignment(alignment); changed = true; }
+    return changed;
 }
 
 static QString fmtPrice(double v) {
+    if (v != 0.0 && std::abs(v) < 0.000001) return QString::number(v, 'g', 6);
     if (v >= 1000.0) return QString::number(v, 'f', 2);
     if (v >= 1.0)    return QString::number(v, 'f', 4);
     return QString::number(v, 'f', 6);
@@ -288,7 +318,15 @@ void ScreenerDock::applyRows(const QJsonArray& rows) {
     const QModelIndex selected = m_table->currentIndex();
     const QString selectedSymbol = selected.isValid()
         ? m_model->index(selected.row(), kColSymbol).data().toString() : QString();
+    const QModelIndex top = m_table->indexAt(QPoint(1, 1));
+    const QString topSymbol = top.isValid()
+        ? m_model->index(top.row(), kColSymbol).data().toString() : QString();
+    const int oldScroll = m_table->verticalScrollBar()->value();
     QSet<QString> seen;
+    QHash<QString, int> existingRows;
+    for (int row = 0; row < m_model->rowCount(); ++row)
+        existingRows.insert(m_model->item(row, kColSymbol)->text(), row);
+    bool changed = false;
 
     const QColor upColor(47, 221, 122);
     const QColor downColor(239, 92, 85);
@@ -305,52 +343,66 @@ void ScreenerDock::applyRows(const QJsonArray& rows) {
         const auto relVol = number(row, "Relative Volume");
         const auto mktCap = number(row, isCrypto ? "Market Cap" : "Market Capitalization");
 
-        auto* symItem  = strItem(symbol);
-        auto* nameItem = strItem(row["Name"].toString());
-        symItem->setData(m_currentAsset, Qt::UserRole);
-
-        auto* priceItem = numItem(price ? fmtPrice(*price) : QString(), price);
-        auto* pctItem = numItem(changePct ? QString::number(*changePct, 'f', 2) + "%" : QString(), changePct);
-        auto* volItem = numItem(volume ? fmtVolume(*volume) : QString(), volume);
-        auto* relVolItem = numItem(relVol ? QString::number(*relVol, 'f', 2) : QString(), relVol);
-        auto* mktCapItem = numItem(mktCap ? fmtVolume(*mktCap) : QString(), mktCap);
-        if (changePct) pctItem->setForeground(*changePct >= 0 ? upColor : downColor);
-
-        QStandardItem *extra1, *extra2, *extra3;
+        const QVariant pctColor = changePct
+            ? QVariant::fromValue(QBrush(*changePct >= 0 ? upColor : downColor)) : QVariant();
+        CellView extra1, extra2, extra3;
         if (isCrypto) {
-            extra1 = strItem(row["Crypto Categories"].toString());
-            extra2 = strItem(row["Sector"].toString());
-            extra3 = strItem(QString());
+            extra1 = textCell(row["Crypto Categories"].toString());
+            extra2 = textCell(row["Sector"].toString());
+            extra3 = textCell(QString());
         } else {
             const auto pe = number(row, "Price to Earnings Ratio (TTM)");
             const auto div = number(row, "Dividend Yield % (Current)");
-            extra1 = numItem(pe ? QString::number(*pe, 'f', 1) : QString(), pe);
-            extra2 = numItem(div ? QString::number(*div, 'f', 2) + "%" : QString(), div);
-            extra3 = strItem(row["Sector"].toString());
+            extra1 = numberCell(pe ? QString::number(*pe, 'f', 1) : QString(), pe);
+            extra2 = numberCell(div ? QString::number(*div, 'f', 2) + "%" : QString(), div);
+            extra3 = textCell(row["Sector"].toString());
         }
-
-        auto* exchItem = strItem(row["Exchange"].toString());
-
-        QList<QStandardItem*> cells = {symItem, nameItem, priceItem, pctItem, volItem,
-                                       relVolItem, mktCapItem, extra1, extra2, extra3, exchItem};
-        int existingRow = -1;
-        for (int i = 0; i < m_model->rowCount(); ++i) {
-            if (m_model->item(i, kColSymbol)->text() == symbol) { existingRow = i; break; }
+        const std::array<CellView, kColCount> cells = {
+            textCell(symbol), textCell(row["Name"].toString()),
+            numberCell(price ? fmtPrice(*price) : QString(), price),
+            numberCell(changePct ? QString::number(*changePct, 'f', 2) + "%" : QString(), changePct, pctColor),
+            numberCell(volume ? fmtVolume(*volume) : QString(), volume),
+            numberCell(relVol ? QString::number(*relVol, 'f', 2) : QString(), relVol),
+            numberCell(mktCap ? fmtVolume(*mktCap) : QString(), mktCap),
+            extra1, extra2, extra3, textCell(row["Exchange"].toString())};
+        const int existingRow = existingRows.value(symbol, -1);
+        if (existingRow < 0) {
+            QList<QStandardItem*> newItems;
+            for (const CellView& cell : cells) {
+                auto* item = new QStandardItem;
+                updateCell(item, cell);
+                newItems.append(item);
+            }
+            newItems[kColSymbol]->setData(m_currentAsset, Qt::UserRole);
+            m_model->appendRow(newItems);
+            changed = true;
+        } else {
+            for (int col = 0; col < kColCount; ++col)
+                changed = updateCell(m_model->item(existingRow, col), cells[col]) || changed;
         }
-        if (existingRow < 0) m_model->appendRow(cells);
-        else for (int col = 0; col < kColCount; ++col) m_model->setItem(existingRow, col, cells[col]);
     }
     for (int i = m_model->rowCount() - 1; i >= 0; --i) {
-        if (!seen.contains(m_model->item(i, kColSymbol)->text())) m_model->removeRow(i);
-    }
-    if (!selectedSymbol.isEmpty()) {
-        for (int i = 0; i < m_model->rowCount(); ++i) {
-            if (m_model->item(i, kColSymbol)->text() == selectedSymbol) {
-                m_table->selectRow(i);
-                break;
-            }
+        if (!seen.contains(m_model->item(i, kColSymbol)->text())) {
+            m_model->removeRow(i);
+            changed = true;
         }
     }
+    if (!changed) return;
+    const auto* header = m_table->horizontalHeader();
+    const int sortColumn = header->sortIndicatorSection();
+    m_model->sort(sortColumn >= 0 ? sortColumn : kColSymbol, header->sortIndicatorOrder());
+    auto rowForSymbol = [this](const QString& symbol) {
+        for (int row = 0; row < m_model->rowCount(); ++row)
+            if (m_model->item(row, kColSymbol)->text() == symbol) return row;
+        return -1;
+    };
+    if (!selectedSymbol.isEmpty()) {
+        const int row = rowForSymbol(selectedSymbol);
+        if (row >= 0) m_table->selectRow(row);
+    }
+    const int topRow = rowForSymbol(topSymbol);
+    if (topRow >= 0) m_table->scrollTo(m_model->index(topRow, 0), QAbstractItemView::PositionAtTop);
+    else m_table->verticalScrollBar()->setValue(oldScroll);
 
     if (!m_columnsResized) {
         m_table->resizeColumnsToContents();
@@ -381,15 +433,30 @@ void ScreenerDock::onAutoToggled(bool checked) {
     m_autoEnabled = checked;
     if (checked) {
         m_autoTimer->setInterval(m_intervalSec * 1000);
-        m_autoTimer->start();
-        requestFetch();  // immediate fetch on enable
+        if (isVisible()) {
+            m_autoTimer->start();
+            requestFetch();
+        }
     } else {
         m_autoTimer->stop();
     }
 }
 
 void ScreenerDock::onAutoTimer() {
-    requestFetch();
+    if (isVisible()) requestFetch();
+}
+
+void ScreenerDock::showEvent(QShowEvent* event) {
+    DockablePanel::showEvent(event);
+    if (m_autoEnabled) {
+        m_autoTimer->start(m_intervalSec * 1000);
+        if (!m_fetchPending) requestFetch();
+    }
+}
+
+void ScreenerDock::hideEvent(QHideEvent* event) {
+    m_autoTimer->stop();
+    DockablePanel::hideEvent(event);
 }
 
 void ScreenerDock::onAssetChanged(int index) {
@@ -401,7 +468,7 @@ void ScreenerDock::onAssetChanged(int index) {
     m_table->clearSelection();
     m_columnsResized = false;
     updateColumns();
-    if (m_autoEnabled) requestFetch();
+    if (m_autoEnabled && isVisible()) requestFetch();
     else setStatus(QStringLiteral("%1 · press Refresh for TradingView data")
                        .arg(m_currentAsset == "crypto" ? QStringLiteral("Crypto") : QStringLiteral("Stocks")));
 }
