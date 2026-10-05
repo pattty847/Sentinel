@@ -13,6 +13,7 @@
 #include <QComboBox>
 #include <QSlider>
 #include <QTimer>
+#include <QPointer>
 
 class SentinelStreamClient;
 class QShowEvent;
@@ -54,6 +55,11 @@ private slots:
 private:
     void showEvent(QShowEvent* event) override;
     void hideEvent(QHideEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
+    void watchWindow();
+    bool automaticRefreshAllowed() const;
+    void updateAutoTimer();
+    void requestAutomaticFetch();
     void requestFetch();
     void applyRows(const QJsonArray& rows);
     void updateColumns();
@@ -76,8 +82,10 @@ private:
     QLabel*      m_statusLabel    = nullptr;
 
     QStandardItemModel* m_model = nullptr;
+    QPointer<QWidget> m_hostWindow;
 
     bool    m_autoEnabled    = false;
+    bool    m_exposed        = false;
     bool    m_columnsResized = false;
     bool    m_fetchPending   = false;
     QString m_currentAsset   = "crypto";

@@ -78,6 +78,15 @@ ScreenerDock::ScreenerDock(QWidget* parent)
     connect(m_fetchTimer, &QTimer::timeout, this, &ScreenerDock::onFetchTimeout);
 
     buildUi();
+    connect(this, &QDockWidget::visibilityChanged, this, [this](bool exposed) {
+        m_exposed = exposed;
+        updateAutoTimer();
+    });
+    installEventFilter(this);
+    connect(this, &QDockWidget::topLevelChanged, this, [this] {
+        watchWindow();
+        updateAutoTimer();
+    });
 }
 
 ScreenerDock::~ScreenerDock() = default;
@@ -322,6 +331,7 @@ void ScreenerDock::applyRows(const QJsonArray& rows) {
     const QString topSymbol = top.isValid()
         ? m_model->index(top.row(), kColSymbol).data().toString() : QString();
     const int oldScroll = m_table->verticalScrollBar()->value();
+    const int oldHorizontalScroll = m_table->horizontalScrollBar()->value();
     QSet<QString> seen;
     QHash<QString, int> existingRows;
     for (int row = 0; row < m_model->rowCount(); ++row)
@@ -408,6 +418,7 @@ void ScreenerDock::applyRows(const QJsonArray& rows) {
         m_table->resizeColumnsToContents();
         m_columnsResized = true;
     }
+    m_table->horizontalScrollBar()->setValue(oldHorizontalScroll);
 }
 
 void ScreenerDock::updateColumns() {
@@ -431,31 +442,54 @@ void ScreenerDock::onRunClicked() {
 
 void ScreenerDock::onAutoToggled(bool checked) {
     m_autoEnabled = checked;
-    if (checked) {
-        m_autoTimer->setInterval(m_intervalSec * 1000);
-        if (isVisible()) {
-            m_autoTimer->start();
-            requestFetch();
-        }
-    } else {
+    updateAutoTimer();
+}
+
+bool ScreenerDock::automaticRefreshAllowed() const {
+    return m_autoEnabled && m_exposed && isVisible() && !window()->isMinimized() &&
+           (!m_hostWindow || !m_hostWindow->isMinimized());
+}
+
+void ScreenerDock::requestAutomaticFetch() {
+    if (automaticRefreshAllowed() && !m_fetchPending) requestFetch();
+}
+
+void ScreenerDock::updateAutoTimer() {
+    if (!automaticRefreshAllowed()) {
         m_autoTimer->stop();
+    } else if (!m_autoTimer->isActive()) {
+        m_autoTimer->start(m_intervalSec * 1000);
+        requestAutomaticFetch();
     }
 }
 
 void ScreenerDock::onAutoTimer() {
-    if (isVisible()) requestFetch();
+    requestAutomaticFetch();
+}
+
+void ScreenerDock::watchWindow() {
+    QWidget* host = parentWidget() ? parentWidget()->window() : window();
+    if (host == m_hostWindow) return;
+    if (m_hostWindow && m_hostWindow != this) m_hostWindow->removeEventFilter(this);
+    m_hostWindow = host;
+    if (host && host != this) host->installEventFilter(this);
+}
+
+bool ScreenerDock::eventFilter(QObject* watched, QEvent* event) {
+    if ((watched == this || watched == m_hostWindow) && event->type() == QEvent::WindowStateChange)
+        updateAutoTimer();
+    return DockablePanel::eventFilter(watched, event);
 }
 
 void ScreenerDock::showEvent(QShowEvent* event) {
     DockablePanel::showEvent(event);
-    if (m_autoEnabled) {
-        m_autoTimer->start(m_intervalSec * 1000);
-        if (!m_fetchPending) requestFetch();
-    }
+    watchWindow();
+    updateAutoTimer();
 }
 
 void ScreenerDock::hideEvent(QHideEvent* event) {
-    m_autoTimer->stop();
+    m_exposed = false;
+    updateAutoTimer();
     DockablePanel::hideEvent(event);
 }
 
@@ -468,7 +502,7 @@ void ScreenerDock::onAssetChanged(int index) {
     m_table->clearSelection();
     m_columnsResized = false;
     updateColumns();
-    if (m_autoEnabled && isVisible()) requestFetch();
+    if (automaticRefreshAllowed()) requestAutomaticFetch();
     else setStatus(QStringLiteral("%1 · press Refresh for TradingView data")
                        .arg(m_currentAsset == "crypto" ? QStringLiteral("Crypto") : QStringLiteral("Stocks")));
 }

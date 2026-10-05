@@ -10,6 +10,7 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMainWindow>
 #include <QHeaderView>
 #include <QSettings>
 #include <QScrollBar>
@@ -262,6 +263,13 @@ TEST(Screener, RefreshKeepsScrolledSymbolAndSelectionAcrossNumericReorder) {
     table->selectRow(rowFor(model, "PAIR40-USD"));
     table->scrollTo(model->index(rowFor(model, "PAIR30-USD"), 0), QAbstractItemView::PositionAtTop);
     QCoreApplication::processEvents();
+    table->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
+    for (int column = 0; column < model->columnCount(); ++column)
+        if (!table->isColumnHidden(column)) table->setColumnWidth(column, 220);
+    QCoreApplication::processEvents();
+    table->horizontalScrollBar()->setValue(137);
+    const int horizontalOffset = table->horizontalScrollBar()->value();
+    ASSERT_GT(horizontalOffset, 0);
     ASSERT_GT(table->verticalScrollBar()->value(), 0);
     const QString topSymbol = table->indexAt(QPoint(1, 1)).siblingAtColumn(0).data().toString();
     ASSERT_EQ(topSymbol, "PAIR30-USD");
@@ -269,6 +277,7 @@ TEST(Screener, RefreshKeepsScrolledSymbolAndSelectionAcrossNumericReorder) {
     EXPECT_EQ(model->item(0, 0)->text(), "PAIR79-USD");
     EXPECT_EQ(table->currentIndex().siblingAtColumn(0).data().toString(), "PAIR40-USD");
     EXPECT_EQ(table->indexAt(QPoint(1, 1)).siblingAtColumn(0).data().toString(), topSymbol);
+    EXPECT_EQ(table->horizontalScrollBar()->value(), horizontalOffset);
 }
 
 TEST(Screener, HiddenAutoRefreshSuspendsAndResumes) {
@@ -296,6 +305,94 @@ TEST(Screener, HiddenAutoRefreshSuspendsAndResumes) {
     QCoreApplication::processEvents();
     EXPECT_TRUE(fetchTimer->isActive());
     EXPECT_TRUE(autoTimer->isActive());
+}
+
+TEST(Screener, TabExposureAndHostMinimizationSuspendAutomaticFetches) {
+    SentinelStreamClient client("127.0.0.1", "1");
+    QMainWindow host;
+    host.resize(800, 500);
+    auto* dock = new ScreenerDock(&host);
+    dock->setStreamClient(&client);
+    auto* other = new QDockWidget("Other", &host);
+    other->setWidget(new QLabel("Other tab", other));
+    host.addDockWidget(Qt::LeftDockWidgetArea, dock);
+    host.addDockWidget(Qt::LeftDockWidgetArea, other);
+    host.tabifyDockWidget(dock, other);
+    QSignalSpy exposure(dock, &QDockWidget::visibilityChanged);
+    host.show();
+    dock->raise();
+    QCoreApplication::processEvents();
+    ASSERT_FALSE(exposure.isEmpty());
+    ASSERT_TRUE(exposure.last().at(0).toBool());
+
+    auto* autoTimer = dock->findChild<QTimer*>("screenerAutoTimer");
+    auto* fetchTimer = dock->findChild<QTimer*>("screenerFetchTimeout");
+    ASSERT_NE(autoTimer, nullptr);
+    ASSERT_NE(fetchTimer, nullptr);
+    dock->findChild<QCheckBox*>()->setChecked(true);
+    ASSERT_TRUE(autoTimer->isActive());
+    ASSERT_TRUE(fetchTimer->isActive());
+    const int pendingTimerId = fetchTimer->timerId();
+    other->raise();
+    QCoreApplication::processEvents();
+    EXPECT_FALSE(exposure.last().at(0).toBool());
+    EXPECT_TRUE(dock->isVisible()); // QWidget-visible, but covered by the other dock tab.
+    EXPECT_FALSE(autoTimer->isActive());
+    dock->raise();
+    QCoreApplication::processEvents();
+    EXPECT_TRUE(exposure.last().at(0).toBool());
+    EXPECT_TRUE(autoTimer->isActive());
+    EXPECT_EQ(fetchTimer->timerId(), pendingTimerId); // Resume must not restart an in-flight request.
+
+    other->raise();
+    QCoreApplication::processEvents();
+    updateScreener(*dock, "crypto", QJsonArray{});
+    auto* autoCheck = dock->findChild<QCheckBox*>();
+    autoCheck->setChecked(false);
+    autoCheck->setChecked(true);
+    EXPECT_FALSE(autoTimer->isActive());
+    EXPECT_FALSE(fetchTimer->isActive());
+    ASSERT_TRUE(QMetaObject::invokeMethod(dock, "onAutoTimer", Qt::DirectConnection));
+    EXPECT_FALSE(fetchTimer->isActive());
+    dock->findChild<QComboBox*>("screenerAsset")->setCurrentIndex(1);
+    EXPECT_FALSE(fetchTimer->isActive()); // Automatic asset refresh is also gated while covered.
+    dock->raise();
+    QCoreApplication::processEvents();
+    EXPECT_TRUE(autoTimer->isActive());
+    EXPECT_TRUE(fetchTimer->isActive());
+    updateScreener(*dock, "stock", QJsonArray{});
+
+    host.showMinimized();
+    QCoreApplication::processEvents();
+    ASSERT_TRUE(host.isMinimized());
+    EXPECT_FALSE(autoTimer->isActive());
+    ASSERT_TRUE(QMetaObject::invokeMethod(dock, "onAutoTimer", Qt::DirectConnection));
+    EXPECT_FALSE(fetchTimer->isActive());
+    host.showNormal();
+    QCoreApplication::processEvents();
+    ASSERT_FALSE(host.isMinimized());
+    EXPECT_TRUE(autoTimer->isActive());
+    EXPECT_TRUE(fetchTimer->isActive());
+    const int restoredTimerId = fetchTimer->timerId();
+    ASSERT_TRUE(QMetaObject::invokeMethod(dock, "onAutoTimer", Qt::DirectConnection));
+    EXPECT_EQ(fetchTimer->timerId(), restoredTimerId);
+
+    updateScreener(*dock, "stock", QJsonArray{});
+    other->raise();
+    QCoreApplication::processEvents();
+    host.showMinimized();
+    QCoreApplication::processEvents();
+    host.showNormal();
+    QCoreApplication::processEvents();
+    EXPECT_FALSE(exposure.last().at(0).toBool());
+    EXPECT_FALSE(autoTimer->isActive());
+    EXPECT_FALSE(fetchTimer->isActive()); // Restoring the host must not fetch for its inactive dock tab.
+    ASSERT_TRUE(QMetaObject::invokeMethod(dock, "onAutoTimer", Qt::DirectConnection));
+    EXPECT_FALSE(fetchTimer->isActive());
+    dock->raise();
+    QCoreApplication::processEvents();
+    EXPECT_TRUE(autoTimer->isActive());
+    EXPECT_TRUE(fetchTimer->isActive());
 }
 
 TEST(Screener, MouseAndKeyboardDispatchOnce) {
