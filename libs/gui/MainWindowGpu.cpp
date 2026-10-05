@@ -1420,9 +1420,9 @@ void MainWindowGPU::connectMarketDataSignals() {
                 m_agentApiTradeTape.append(std::move(row));
             });
     connect(m_dataSource.get(), &IGridDataSource::liveOrderBookUpdated, this,
-            [this](const QString& symbol, const std::vector<BookDelta>&) {
+            [this](const QString& symbol, const std::vector<BookDelta>& deltas) {
                 if (symbol != m_currentSymbol) return;
-                m_bookReceivedAtMs = QDateTime::currentMSecsSinceEpoch();
+                if (!deltas.empty()) m_bookReceivedAtMs = QDateTime::currentMSecsSinceEpoch();
                 auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
                 if (!renderer) return;
                 thread_local std::vector<std::pair<uint32_t, double>> bids, asks;

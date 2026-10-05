@@ -110,7 +110,6 @@ signals:
                                const std::vector<OrderBookLevel>& asks, double tickSize,
                                const QString& status, uint64_t bookVersion);
     void productMetadataRequested(const QString& productId, uint64_t lifetime);
-    void liveBookResnapshotRequested(const QString& productId);
     
     // Aggregation signals (forwarded from aggregator)
     void barClosed(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar);
@@ -140,12 +139,12 @@ private:
         bool pinned = false, connected = false;
         uint64_t ups = 0, downs = 0, lifetime = 0;
         bool metadataPending = false;
-        bool waitingForMetadataSnapshot = false;
         nlohmann::json metadata;
         int64_t nextMetadataAttemptMs = 0;
-        int64_t nextResnapshotMs = 0;
     };
     void requestProductMetadataIfNeeded(const std::string& symbol, FeedState& feed);
+    void publishAggregatedBook(const QString& productId, SymbolHotData& data,
+                               const FeedState& feed, qint64 envelopeMs);
     std::map<std::string, FeedState> m_feeds; // main thread, pinned + active GUI feeds only
     uint64_t m_nextFeedLifetime = 0;
     QTimer m_metadataTimer;

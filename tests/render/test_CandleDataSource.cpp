@@ -23,6 +23,12 @@ struct CandleDataSourceTest : testing::Test {
     qint64 bookDeadline(const std::string& symbol) const {
         return source.m_pendingBookSnapshots.at(symbol).deadlineMs;
     }
+    bool bookRetried(const std::string& symbol) const {
+        return source.m_pendingBookSnapshots.at(symbol).retried;
+    }
+    qint64 nextStaleBookRetry(const std::string& symbol) const {
+        return source.m_pendingBookSnapshots.at(symbol).nextStaleRetryMs;
+    }
     void advanceBookDeadline(qint64 nowMs) { source.processBookSnapshotDeadlines(nowMs); }
     void bookSnapshot(double bid, double ask) {
         client().handleSnapshotMessage({{"symbol", "BTC-USD"},
@@ -33,6 +39,11 @@ struct CandleDataSourceTest : testing::Test {
     void emptyBookSnapshot() {
         client().handleSnapshotMessage({{"symbol", "BTC-USD"},
             {"bids", Json::array()}, {"asks", Json::array()}});
+    }
+    void legacyBookSnapshot() {
+        client().handleSnapshotMessage({{"symbol", "BTC-USD"},
+            {"bids", {{{"p", 300.0}, {"q", 1.0}}}},
+            {"asks", {{{"p", 301.0}, {"q", 1.0}}}}});
     }
     void bookL2(double bid, double size) {
         client().handleL2UpdateMessage({{"product_id", "BTC-USD"},
@@ -280,6 +291,45 @@ TEST_F(CandleDataSourceTest, MissingBookSnapshotRetriesOnceThenReportsStale) {
     deliver();
     EXPECT_FALSE(source.isBookSnapshotStale("BTC-USD"));
     EXPECT_EQ(pendingBookCount(), 0u);
+}
+
+TEST_F(CandleDataSourceTest, RepeatedOldServerUnavailablePreservesRetryAndStaleBackoff) {
+    source.subscribe("BTC-USD");
+    ASSERT_EQ(takeRequest().at("type"), "subscribe");
+    const auto firstDeadline = bookDeadline("BTC-USD");
+    for (int i = 0; i < 3; ++i) {
+        legacyBookSnapshot(); // Old server has levels but no tick_size/book_version.
+        deliver();
+        EXPECT_EQ(bookDeadline("BTC-USD"), firstDeadline);
+        EXPECT_DOUBLE_EQ(source.getDirectLiveOrderBook("BTC-USD").getTickSize(), 0.0);
+    }
+    advanceBookDeadline(firstDeadline);
+    ASSERT_EQ(takeRequest().at("type"), "subscribe");
+    const auto retryDeadline = bookDeadline("BTC-USD");
+    for (int i = 0; i < 3; ++i) {
+        legacyBookSnapshot();
+        deliver();
+        EXPECT_EQ(bookDeadline("BTC-USD"), retryDeadline);
+        EXPECT_TRUE(bookRetried("BTC-USD"));
+    }
+    advanceBookDeadline(retryDeadline);
+    ASSERT_TRUE(source.isBookSnapshotStale("BTC-USD"));
+    const auto staleRetry = nextStaleBookRetry("BTC-USD");
+    legacyBookSnapshot();
+    deliver();
+    EXPECT_TRUE(source.isBookSnapshotStale("BTC-USD"));
+    EXPECT_EQ(nextStaleBookRetry("BTC-USD"), staleRetry);
+    deliverBookL2At(staleRetry);
+    ASSERT_EQ(takeRequest().at("type"), "subscribe");
+    const auto backedOffUntil = nextStaleBookRetry("BTC-USD");
+    legacyBookSnapshot();
+    deliver();
+    EXPECT_EQ(nextStaleBookRetry("BTC-USD"), backedOffUntil);
+    bookSnapshot(300.0, 301.0);
+    deliver();
+    EXPECT_FALSE(source.isBookSnapshotStale("BTC-USD"));
+    EXPECT_EQ(pendingBookCount(), 0u);
+    EXPECT_DOUBLE_EQ(source.getDirectLiveOrderBook("BTC-USD").getTickSize(), 0.1);
 }
 
 TEST_F(CandleDataSourceTest, DisconnectClearsStaleBookStatusBeforeFreshSnapshot) {

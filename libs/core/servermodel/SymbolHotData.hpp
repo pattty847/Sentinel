@@ -33,12 +33,15 @@ struct SymbolHotData {
     // Server-only raw Coinbase levels for all live-book aggregation. GUI replicas
     // receive bucket totals and never populate these maps.
     std::unordered_map<double, double> rawBids, rawAsks;
+    double rawMinPrice = 0.0, rawMaxPrice = 0.0;
+    bool rawValid = false; // Accepted upstream snapshot plus every in-band delta since it.
+    bool awaitingRawBbo = false; // Metadata is ready; one-sided/crossed raw BBO may recover by delta.
     std::vector<double> bucketBids, bucketAsks;
     std::vector<size_t> bucketBidCounts, bucketAskCounts;
     double lastTradePrice = 0.0;
     // False after a disconnect, sequence gap or malformed L2 until the next
     // snapshot. Consumers must not treat an invalid book as observed liquidity.
-    std::atomic<bool> bookValid{true};
+    std::atomic<bool> bookValid{false};
     
     // Recent history for immediate client snapshots
     // RingBuffer<TickSnapshot, N_TICKS> recentTicks; // TODO: Define TickSnapshot
@@ -47,11 +50,17 @@ struct SymbolHotData {
     // For now, let's keep it simple: just the LiveOrderBook
     
     explicit SymbolHotData(const std::string& s) : symbol(s), liveBook(s) {}
-    void invalidateLiveBook() {
+    void clearAggregatedBook() {
         bookValid = false;
         liveBook.clear();
-        rawBids.clear(); rawAsks.clear();
         bucketBids.clear(); bucketAsks.clear();
         bucketBidCounts.clear(); bucketAskCounts.clear();
+    }
+    void invalidateLiveBook() {
+        clearAggregatedBook();
+        rawValid = false;
+        awaitingRawBbo = false;
+        rawMinPrice = rawMaxPrice = 0.0;
+        rawBids.clear(); rawAsks.clear();
     }
 };

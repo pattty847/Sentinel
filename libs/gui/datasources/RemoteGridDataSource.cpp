@@ -389,8 +389,10 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
         if (auto it = m_replicaBooks.find(symbol); it != m_replicaBooks.end() && it->second)
             it->second->clear();
         emit liveOrderBookUpdated(productId, {}); // Consumers withdraw cached rows/top.
-        m_pendingBookSnapshots[symbol] = {QDateTime::currentMSecsSinceEpoch() + 5000, false, false};
-        if (!m_bookSnapshotTimer.isActive()) m_bookSnapshotTimer.start();
+        const auto pending = m_pendingBookSnapshots.try_emplace(
+            symbol, PendingBookSnapshot{QDateTime::currentMSecsSinceEpoch() + 5000, false, false}).first;
+        // Repeated unavailable replies must not restart the bounded retry clock.
+        if (!pending->second.stale && !m_bookSnapshotTimer.isActive()) m_bookSnapshotTimer.start();
         if (bookVersion > 0) m_bookVersions[symbol] = bookVersion;
         sLog_Warning("Replica snapshot unavailable: symbol=" << productId << " status=" << status
                      << " tick=" << tickSize);
@@ -491,8 +493,9 @@ void RemoteGridDataSource::onL2UpdateReceivedAt(const QString& productId,
         book.clear();
         emit liveOrderBookUpdated(productId, {});
         if (bookVersion > 0) m_bookVersions[symbol] = bookVersion;
-        m_pendingBookSnapshots[symbol] = {nowMs + 5000, false, false};
-        if (!m_bookSnapshotTimer.isActive()) m_bookSnapshotTimer.start();
+        const auto pending = m_pendingBookSnapshots.try_emplace(
+            symbol, PendingBookSnapshot{nowMs + 5000, false, false}).first;
+        if (!pending->second.stale && !m_bookSnapshotTimer.isActive()) m_bookSnapshotTimer.start();
         emit errorOccurred(QString("Order book tick mismatch: %1").arg(productId));
         return;
     }

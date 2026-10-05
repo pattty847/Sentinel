@@ -434,8 +434,11 @@ public:
     bool isBookSnapshotStale(const QString& symbol) const override { return symbol == staleSymbol; }
     Source() { book.initialize(0, 500, 0.1); }
     void update(std::initializer_list<BookLevelUpdate> updates, qint64 at = 0) {
-        apply(book, updates, at);
-        emit liveOrderBookUpdated("BTC-USD", {});
+        const auto timestamp = at ? std::chrono::system_clock::time_point(std::chrono::milliseconds(at))
+                                  : std::chrono::system_clock::now();
+        std::vector<BookDelta> deltas;
+        book.applyUpdates(std::span(updates.begin(), updates.size()), timestamp, &deltas);
+        if (!deltas.empty()) emit liveOrderBookUpdated("BTC-USD", deltas);
     }
     void send(const Trade& value) { emit tradeReceived(value); }
     const LiveOrderBook& getDirectLiveOrderBook(const std::string&) const override { ++reads; return book; }

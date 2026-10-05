@@ -224,10 +224,12 @@ a fresh snapshot whenever an upstream snapshot resets the server grid, before su
 During rollout, a new GUI connected to an older server that omits `tick_size` keeps the live book
 unavailable until the server is upgraded; it does not guess a tick from price or global config.
 For non-BTC products the server fetches exact Coinbase quote-increment metadata asynchronously,
-then uses the roller near-grid rule on the snapshot midpoint (~1 bp nearest 1-2-5, rounded up to
-a quote-increment multiple). Missing or invalid metadata leaves the live book unavailable; once
-metadata arrives, the server requests a fresh upstream snapshot rather than replaying an old one
-past skipped deltas. BTC-USD keeps the configured `orderbook.tick_size`. Feed release invalidates
+then uses the roller near-grid rule on the current raw BBO midpoint (~1 bp nearest 1-2-5, rounded up to
+a quote-increment multiple). Missing or invalid metadata leaves the aggregated live book unavailable;
+the server retains the accepted upstream snapshot and every in-band native-price delta meanwhile.
+When metadata arrives it builds an authoritative snapshot from that current raw state without a
+metadata-driven upstream reconnect or recorder invalidation. A real upstream invalidation clears
+the raw state and requires the provider's next snapshot. BTC-USD keeps the configured `orderbook.tick_size`. Feed release invalidates
 its metadata lifetime, so a late REST reply cannot initialize a newly acquired feed. Raw recorder
 snapshots and deltas remain independent of this live aggregation gate. For every product, the server
 retains raw price levels only inside the live book's band, sums all quantities in each tick bucket,

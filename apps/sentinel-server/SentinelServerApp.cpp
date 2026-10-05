@@ -161,10 +161,6 @@ bool SentinelServerApp::initialize() {
                 [this](const QString& symbol, uint64_t lifetime) {
                     if (m_server) m_server->requestBookProductMetadata(symbol, lifetime);
                 });
-        connect(m_serverModel.get(), &ServerDataModel::liveBookResnapshotRequested, this,
-                [this](const QString& symbol) {
-                    if (m_marketDataCore) m_marketDataCore->requestResnapshot(symbol.toStdString());
-                });
         
         m_marketDataCore->onError([](const std::string& product, const std::string& error){
             sLog_Error("MarketDataCore Error: product=" << product << " " << error);

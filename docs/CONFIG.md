@@ -29,12 +29,16 @@ Copy the defaults to the override names to customize; override values take prece
 - Client cache sizing and local UI preferences
 
 `orderbook.tick_size` remains the configured BTC-USD live-book tick (default 0.1 USD).
-For other products the server derives a live-book tick at each accepted snapshot from its midpoint:
+For other products the server derives a live-book tick when metadata and an accepted raw book are
+both available, using the current raw BBO midpoint:
 about one basis point, rounded to the nearest 1-2-5 step, then rounded up to a multiple of
 Coinbase's exact `quote_increment`. Metadata is fetched on the server worker pool. Until it is valid,
 the live aggregated book is unavailable; no global tick or guessed increment is used. The server
-requests a fresh upstream snapshot after metadata arrives, since intervening deltas were skipped.
-The tick stays fixed until the next snapshot, and both snapshots and deltas publish it. GUI replicas
+retains the bounded native-price snapshot and all in-band deltas while metadata is pending. When
+metadata arrives, it builds the live aggregation from that current raw state without reconnecting
+the upstream feed or interrupting recording. Actual upstream invalidation clears the raw state and
+still requires the provider's next snapshot. The tick stays fixed for that aggregated book until
+the next upstream snapshot, and both snapshots and deltas publish it. GUI replicas
 use that wire tick unchanged for chart book-top lines, the Agent API and the DOM. `band_pct` remains
 server-configured. The server sums raw price levels in each live tick bucket, including BTC-USD;
 recorded HMC2 grids are independent of this live-book setting.

@@ -25,16 +25,13 @@ struct LiveBookTickTest : testing::Test {
 };
 }
 
-TEST_F(LiveBookTickTest, MetadataWaitNeverReplaysOldSnapshotAndKeepsAdjacentLowPriceBuckets) {
+TEST_F(LiveBookTickTest, MetadataHydratesCurrentRawBookAndKeepsAdjacentLowPriceBuckets) {
     ServerDataModel model(config);
     uint64_t lifetime = 0;
-    int resnapshots = 0;
     std::vector<double> publishedTicks;
     std::vector<uint64_t> publishedVersions;
     QObject::connect(&model, &ServerDataModel::productMetadataRequested, &model,
         [&](const QString& symbol, uint64_t id) { if (symbol == "DOGE-USD") lifetime = id; });
-    QObject::connect(&model, &ServerDataModel::liveBookResnapshotRequested, &model,
-        [&](const QString& symbol) { if (symbol == "DOGE-USD") ++resnapshots; });
     QObject::connect(&model, &ServerDataModel::bookSnapshotBroadcast, &model,
         [&](const QString& symbol, const auto&, const auto&, double tick, const QString&, uint64_t version) {
             if (symbol == "DOGE-USD") {
@@ -49,30 +46,51 @@ TEST_F(LiveBookTickTest, MetadataWaitNeverReplaysOldSnapshotAndKeepsAdjacentLowP
     model.onLiveOrderBookInitialized("DOGE-USD", bids, asks, 1000);
     EXPECT_EQ(model.ensureSymbol("DOGE-USD").liveBook.getTickSize(), 0.0);
     ASSERT_EQ(publishedTicks, std::vector<double>({0.0}));
-    model.onLiveOrderBookLevelUpdates("DOGE-USD", {{true, .20004, 5}}, 1001);
+    model.onLiveOrderBookLevelUpdates("DOGE-USD", {{true, .20001, 5},
+                                                      {true, .20000, 0},
+                                                      {false, .20006, 0}}, 1001);
     model.onProductMetadata("DOGE-USD", lifetime, metadata("DOGE-USD", "0.00001"), "");
-    EXPECT_EQ(resnapshots, 1);
-    EXPECT_EQ(model.ensureSymbol("DOGE-USD").liveBook.getTickSize(), 0.0);
-    // Only a fresh upstream snapshot may restart the book after skipped deltas.
-    model.onLiveOrderBookInitialized("DOGE-USD", bids, asks, 1002);
     const auto book = model.ensureSymbol("DOGE-USD").liveBook.snapshotLevels();
     EXPECT_NEAR(book.tickSize, .00002, 1e-12);
     ASSERT_EQ(book.bids.size(), 2u);
     ASSERT_EQ(book.asks.size(), 2u);
-    EXPECT_DOUBLE_EQ(book.bids.front().size, 3.0);
-    EXPECT_DOUBLE_EQ(book.asks.front().size, 7.0);
+    EXPECT_DOUBLE_EQ(book.bids.front().size, 5.0);
+    EXPECT_DOUBLE_EQ(book.asks.front().size, 4.0);
     EXPECT_GT(book.bids.front().price, 0.0);
     ASSERT_EQ(publishedTicks.size(), 2u);
     EXPECT_DOUBLE_EQ(publishedTicks.back(), book.tickSize);
     EXPECT_GT(publishedVersions[1], publishedVersions[0]);
 
-    model.onLiveOrderBookLevelUpdates("DOGE-USD", {{true, .20001, 5}}, 1003);
+    model.onLiveOrderBookLevelUpdates("DOGE-USD", {{true, .20001, 6}}, 1003);
     EXPECT_DOUBLE_EQ(model.ensureSymbol("DOGE-USD").liveBook.getBidVolume(), 8.0);
-    model.onLiveOrderBookLevelUpdates("DOGE-USD", {{true, .20000, 0}}, 1004);
+    model.onLiveOrderBookLevelUpdates("DOGE-USD", {{true, .20002, 0}}, 1004);
     const auto afterDelete = model.ensureSymbol("DOGE-USD").liveBook.snapshotLevels();
-    ASSERT_EQ(afterDelete.bids.size(), 2u);
-    EXPECT_DOUBLE_EQ(afterDelete.bids.front().size, 5.0);
-    EXPECT_DOUBLE_EQ(model.ensureSymbol("DOGE-USD").liveBook.getBidVolume(), 7.0);
+    ASSERT_EQ(afterDelete.bids.size(), 1u);
+    EXPECT_DOUBLE_EQ(afterDelete.bids.front().size, 6.0);
+    EXPECT_DOUBLE_EQ(model.ensureSymbol("DOGE-USD").liveBook.getBidVolume(), 6.0);
+}
+
+TEST_F(LiveBookTickTest, OneSidedRawBookCanBecomeReadyByDeltaAfterMetadata) {
+    ServerDataModel model(config);
+    uint64_t lifetime = 0;
+    QString status;
+    QObject::connect(&model, &ServerDataModel::productMetadataRequested, &model,
+        [&](const QString& symbol, uint64_t id) { if (symbol == "DOGE-USD") lifetime = id; });
+    QObject::connect(&model, &ServerDataModel::bookSnapshotBroadcast, &model,
+        [&](const QString& symbol, const auto&, const auto&, double, const QString& next, uint64_t) {
+            if (symbol == "DOGE-USD") status = next;
+        });
+    model.acquireGuiFeed("DOGE-USD");
+    model.onLiveOrderBookInitialized("DOGE-USD", {{.20000, 2}}, {{.20006, 3}}, 1000);
+    model.onLiveOrderBookLevelUpdates("DOGE-USD", {{false, .20006, 0}}, 1001);
+    model.onProductMetadata("DOGE-USD", lifetime, metadata("DOGE-USD", "0.00001"), "");
+    EXPECT_EQ(status, QStringLiteral("aggregation_unavailable"));
+    EXPECT_DOUBLE_EQ(model.ensureSymbol("DOGE-USD").liveBook.getTickSize(), 0.0);
+    model.onLiveOrderBookLevelUpdates("DOGE-USD", {{false, .20007, 4}}, 1002);
+    EXPECT_EQ(status, QStringLiteral("ready"));
+    const auto book = model.ensureSymbol("DOGE-USD").liveBook.snapshotLevels();
+    ASSERT_EQ(book.asks.size(), 1u);
+    EXPECT_DOUBLE_EQ(book.asks.front().size, 4.0);
 }
 
 TEST_F(LiveBookTickTest, QuoteFloorNondecimalMultipleAndBtcConfiguredTick) {
@@ -169,4 +187,7 @@ TEST_F(LiveBookTickTest, StaleAndInvalidMetadataCannotInitializeReacquiredFeed) 
     EXPECT_GT(model.ensureSymbol("ETH-USD").liveBook.getTickSize(), 0.0);
     model.onLiveOrderBookInvalidated("ETH-USD", "test gap");
     EXPECT_EQ(model.ensureSymbol("ETH-USD").liveBook.getTickSize(), 0.0);
+    model.onProductMetadata("ETH-USD", lifetimes[1], metadata("ETH-USD", "0.01"), "");
+    EXPECT_EQ(model.ensureSymbol("ETH-USD").liveBook.getTickSize(), 0.0);
+    EXPECT_FALSE(model.ensureSymbol("ETH-USD").rawValid);
 }

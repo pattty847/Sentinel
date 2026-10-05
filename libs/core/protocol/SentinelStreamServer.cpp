@@ -187,24 +187,12 @@ nlohmann::json buildServerConfigPayload(const ServerConfig& cfg, bool recordingA
 }
 
 double resolveMidPrice(const LiveOrderBook& book) {
-    const auto& bids = book.getBids();
-    const auto& asks = book.getAsks();
-
-    double bestBid = 0.0;
-    for (size_t i = bids.size(); i > 0; --i) {
-        if (bids[i - 1] > 0.0) {
-            bestBid = book.index_to_price(i - 1);
-            break;
-        }
-    }
-
-    double bestAsk = 0.0;
-    for (size_t i = 0; i < asks.size(); ++i) {
-        if (asks[i] > 0.0) {
-            bestAsk = book.index_to_price(i);
-            break;
-        }
-    }
+    thread_local std::vector<std::pair<uint32_t, double>> bids, asks;
+    const auto view = book.captureDenseNonZero(bids, asks, 1);
+    const double bestBid = view.bidLevels.empty() ? 0.0
+        : view.minPrice + double(view.bidLevels.front().first) * view.tickSize;
+    const double bestAsk = view.askLevels.empty() ? 0.0
+        : view.minPrice + double(view.askLevels.front().first) * view.tickSize;
 
     if (bestBid > 0.0 && bestAsk > 0.0) {
         return (bestBid + bestAsk) * 0.5;
