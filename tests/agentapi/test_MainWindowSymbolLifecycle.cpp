@@ -1,6 +1,14 @@
 #include "MainWindowGpu.h"
 #include "config/GuiConfigStore.hpp"
 #include "datasources/IGridDataSource.hpp"
+#include "datasources/RemoteGridDataSource.hpp"
+#include "models/MarketHealth.hpp"
+#include "widgets/StatusBar.hpp"
+#include "widgets/HeatmapTelemetryDock.hpp"
+#include "widgets/WatchlistDock.hpp"
+#include "mainwindow/QmlSceneController.h"
+#include "render/heatmap/HeatmapDataService.hpp"
+#include "render/heatmap/HeatmapGpuLayer.hpp"
 #include "widgets/ChartDock.hpp"
 #include "widgets/ServiceLocator.hpp"
 #include "mainwindow/GuiApiServer.h"
@@ -17,10 +25,14 @@
 
 #include <QApplication>
 #include <QElapsedTimer>
+#include <QDateTime>
 #include <QEventLoop>
 #include <QHostAddress>
 #include <QJsonDocument>
 #include <QLineEdit>
+#include <QLabel>
+#include <QTreeView>
+#include <QStandardItemModel>
 #include <QSettings>
 #include <QSignalSpy>
 #include <QStatusBar>
@@ -29,10 +41,14 @@
 #include <QTcpSocket>
 #include <QTest>
 #include <QTimer>
+#include <QQuickView>
 #include <QtQml/qqml.h>
 #include <gtest/gtest.h>
 
 struct MainWindowSymbolLifecyclePeer {
+    static UnifiedGridRenderer* renderer(const MainWindowGPU& window) { return window.m_qmlController->getUnifiedGridRenderer(); }
+    static void clearChartScene(MainWindowGPU& window) { window.m_qquickView->setSource(QUrl{}); }
+    static void arrange(MainWindowGPU& window) { window.m_layoutOrchestrator->arrangeDefaultLayout(window.getDockWidgets()); }
     static bool subscriptionReady(const MainWindowGPU& window) { return window.m_userSubscribed; }
     static int retryInterval(const MainWindowGPU& window) { return window.m_heldRetryTimer->interval(); }
     static bool retryActive(const MainWindowGPU& window) { return window.m_heldRetryTimer->isActive(); }
@@ -50,6 +66,230 @@ struct MainWindowSymbolLifecyclePeer {
 };
 
 namespace {
+void select(MainWindowGPU& window, QLineEdit* input, const QString& symbol);
+void deliver(RemoteGridDataSource* source) { QCoreApplication::sendPostedEvents(source, QEvent::MetaCall); }
+void acknowledge(RemoteGridDataSource* source, const QString& symbol) {
+    source->streamClient()->subscriptionAcknowledged(symbol);
+    deliver(source);
+}
+void book(RemoteGridDataSource* source, const QString& symbol, uint64_t version = 1) {
+    const auto generation = source->streamClient()->bookDeliveryGeneration(symbol.toStdString());
+    source->streamClient()->snapshotReceived(symbol, {{100, 1}}, {{101, 1}}, 0.1, generation, "ready", version);
+    deliver(source);
+}
+QStandardItem* watchItem(WatchlistDock* rail, const QString& symbol) {
+    auto* tree = rail->findChild<QTreeView*>("watchRows");
+    auto* rows = qobject_cast<QStandardItemModel*>(tree->model());
+    for (int i = 0; i < rows->rowCount(); ++i)
+        if (rows->item(i)->data(WatchlistDock::TickerRole).toString() == symbol) return rows->item(i);
+    return nullptr;
+}
+
+TEST(MainWindowHealthIntegration, AckRefusalSupersedeTimeoutAndReconnectAgreeAcrossConsumers) {
+    MainWindowGPU window;
+    auto* source = dynamic_cast<RemoteGridDataSource*>(ServiceLocator::dataSource());
+    ASSERT_TRUE(source);
+    source->streamClient()->disconnectFromServer(); // Unit client only: no recorder or GUI host.
+    auto* health = source->marketHealth();
+    auto* chart = window.findChild<ChartDock*>();
+    auto* rail = window.findChild<WatchlistDock*>();
+    auto* telemetry = window.findChild<HeatmapTelemetryDock*>();
+    auto* status = window.findChild<StatusBar*>();
+    ASSERT_TRUE(chart && rail && telemetry && status);
+    EXPECT_TRUE(health->activeSymbol().isEmpty());
+    ASSERT_TRUE(watchItem(rail, "BTC-USD"));
+    EXPECT_FALSE(watchItem(rail, "BTC-USD")->text().startsWith("●"));
+    EXPECT_TRUE(watchItem(rail, "ETH-USD")->toolTip().contains("unverified"));
+
+    // Expose only the QWidget consumer in an offscreen test surface; never show
+    // MainWindow/QQuickView or trigger its GUI/service startup path.
+    status->setParent(nullptr);
+    std::unique_ptr<StatusBar> statusOwner(status);
+    status->show();
+    emit telemetry->visibilityChanged(true); // Same exposure signal as a selected dock tab.
+    const auto agreement = [&](const QString& symbol, MarketHealth::State state) {
+        health->refreshChartState();
+        telemetry->refresh();
+        EXPECT_EQ(health->activeSymbol(), symbol);
+        EXPECT_EQ(health->snapshot().state, state);
+        EXPECT_EQ(status->findChild<QLabel*>("marketSymbol")->text(), symbol.isEmpty() ? "No symbol" : symbol);
+        EXPECT_EQ(status->findChild<QLabel*>("marketState")->text(), MarketHealth::stateText(state));
+        EXPECT_EQ(telemetry->valueText("marketHealth"), symbol + " · " + MarketHealth::stateText(state));
+    };
+    source->streamClient()->connected(); deliver(source);
+    agreement({}, MarketHealth::State::Initializing);
+    EXPECT_TRUE(watchItem(rail, "BTC-USD")->text().startsWith("…"));
+    acknowledge(source, "BTC-USD");
+    agreement("BTC-USD", MarketHealth::State::WaitingForBook);
+    book(source, "BTC-USD");
+    agreement("BTC-USD", MarketHealth::State::Live);
+    EXPECT_TRUE(watchItem(rail, "BTC-USD")->text().startsWith("●"));
+    const qint64 observed = QDateTime::currentMSecsSinceEpoch() - 500;
+    window.heatmapDataService()->onData([fetcher = window.heatmapDataService()->fetcher(), observed] {
+        emit fetcher->liveAccepted("BTC-USD", observed);
+    });
+    QCoreApplication::sendPostedEvents(health, QEvent::MetaCall);
+    ASSERT_TRUE(health->snapshot("BTC-USD", observed + 1000).heatmapAgeMs);
+    EXPECT_EQ(*health->snapshot("BTC-USD", observed + 1000).heatmapAgeMs, 1000);
+    const auto bookAge = health->snapshot("BTC-USD", observed + 1000).bookAgeMs;
+
+    select(window, chart->symbolInput(), "ETH-USD");
+    agreement("BTC-USD", MarketHealth::State::Live);
+    EXPECT_TRUE(watchItem(rail, "ETH-USD")->text().startsWith("…"));
+    source->streamClient()->subscriptionRefused("ETH-USD", 8, "Connection cap reached"); deliver(source);
+    agreement("BTC-USD", MarketHealth::State::Live);
+    EXPECT_TRUE(watchItem(rail, "ETH-USD")->text().startsWith("!"));
+    EXPECT_EQ(watchItem(rail, "ETH-USD")->toolTip(), "Connection cap reached");
+
+    select(window, chart->symbolInput(), "ETH-USD");
+    select(window, chart->symbolInput(), "SOL-USD");
+    source->streamClient()->subscriptionRefused("ETH-USD", 8, "Obsolete refusal"); deliver(source);
+    EXPECT_TRUE(watchItem(rail, "SOL-USD")->text().startsWith("…"));
+    EXPECT_FALSE(rail->findChild<QLabel*>("watchStatus")->text().contains("Obsolete"));
+    acknowledge(source, "ETH-USD"); // Superseded acknowledgement cannot activate it either.
+    agreement("BTC-USD", MarketHealth::State::Live);
+    EXPECT_TRUE(watchItem(rail, "SOL-USD")->text().startsWith("…"));
+    MainWindowSymbolLifecyclePeer::fireSwitchTimeout(window);
+    EXPECT_TRUE(watchItem(rail, "SOL-USD")->text().startsWith("!"));
+    EXPECT_TRUE(watchItem(rail, "SOL-USD")->toolTip().contains("timed out"));
+    agreement("BTC-USD", MarketHealth::State::Live);
+
+    select(window, chart->symbolInput(), "DOGE-USD");
+    source->streamClient()->disconnected(); deliver(source);
+    agreement("BTC-USD", MarketHealth::State::Reconnecting);
+    EXPECT_TRUE(watchItem(rail, "DOGE-USD")->toolTip().contains("disconnection"));
+    EXPECT_EQ(health->snapshot("BTC-USD", observed + 1000).bookAgeMs, bookAge);
+    EXPECT_EQ(health->snapshot("BTC-USD", observed + 1000).heatmapAgeMs, 1000);
+    source->streamClient()->connected(); deliver(source);
+    agreement("BTC-USD", MarketHealth::State::WaitingForSubscription);
+    EXPECT_TRUE(watchItem(rail, "BTC-USD")->text().startsWith("…"));
+    EXPECT_FALSE(rail->findChild<QLabel*>("watchStatus")->text().contains("disconnection"));
+    acknowledge(source, "BTC-USD"); // Held lease: no Activate action or symbolChanged.
+    agreement("BTC-USD", MarketHealth::State::WaitingForBook);
+    book(source, "BTC-USD", 2);
+    agreement("BTC-USD", MarketHealth::State::Live);
+    select(window, chart->symbolInput(), "SOL-USD");
+    acknowledge(source, "SOL-USD");
+    agreement("SOL-USD", MarketHealth::State::WaitingForBook);
+    EXPECT_TRUE(watchItem(rail, "SOL-USD")->text().startsWith("●"));
+    EXPECT_FALSE(health->snapshot().heatmapAgeMs);
+    EXPECT_FALSE(health->snapshot().bookAgeMs);
+    emit telemetry->visibilityChanged(false);
+    EXPECT_FALSE(telemetry->timer()->isActive());
+}
+
+TEST(MainWindowHealthIntegration, ChartProviderKeepsMissingOldAndUnrenderedFactsUnknownAndSurvivesDeletion) {
+    MainWindowGPU window;
+    auto* source = dynamic_cast<RemoteGridDataSource*>(ServiceLocator::dataSource());
+    ASSERT_TRUE(source);
+    source->streamClient()->disconnectFromServer();
+    source->streamClient()->connected(); deliver(source);
+    acknowledge(source, "BTC-USD");
+    book(source, "BTC-USD");
+    auto* health = source->marketHealth();
+    auto* renderer = MainWindowSymbolLifecyclePeer::renderer(window);
+    ASSERT_TRUE(renderer);
+    renderer->setHeatmapRenderer("gpu");
+    auto* layer = renderer->gpuHeatmapLayer();
+    ASSERT_TRUE(layer && layer->controller());
+    health->refreshChartState();
+    EXPECT_FALSE(health->snapshot().loading.has_value());
+    EXPECT_FALSE(health->snapshot().holding.has_value());
+    EXPECT_TRUE(health->snapshot().coverage.contains("unknown"));
+
+    // Use the actual asynchronous controller publication, with no recorded
+    // availability. Only the render-thread output atoms are injected; no GPU is
+    // available here, and the test never interprets these as visual proof.
+    renderer->setViewport(1'000'000, 1'600'000, 100, 102);
+    const auto waitSnapshot = [&](const QString& symbol, int64_t tf) {
+        QElapsedTimer timer; timer.start();
+        while (timer.elapsed() < 2000) {
+            const auto snapshot = layer->snapshot();
+            if (snapshot && snapshot->symbol == symbol.toStdString() && snapshot->tfMs == tf) return true;
+            QTest::qWait(10);
+        }
+        return false;
+    };
+    ASSERT_TRUE(waitSnapshot("BTC-USD", layer->tfMs()));
+    auto stats = layer->tileStatsPtr();
+    stats->frames.store(10);
+    stats->drawnTfMs.store(layer->tfMs());
+    stats->holding.store(true);
+    stats->loadingSlots.store(3);
+    health->refreshChartState(); // First observation of this context cannot use retained counters.
+    EXPECT_FALSE(health->snapshot().holding.has_value());
+    stats->frames.store(11);
+    health->refreshChartState();
+    EXPECT_FALSE(health->snapshot().holding.has_value());
+    stats->frames.store(12);
+    health->refreshChartState();
+    EXPECT_EQ(health->snapshot().holding, true);
+    EXPECT_EQ(health->snapshot().loading, true);
+    EXPECT_EQ(health->snapshot().state, MarketHealth::State::WaitingForHistory);
+    EXPECT_TRUE(health->snapshot().coverage.contains("unknown"));
+    EXPECT_FALSE(health->snapshot().heatmapAgeMs); // Render atoms never create a feed receipt.
+    stats->errors.store(1);
+    health->refreshChartState();
+    EXPECT_FALSE(health->snapshot().holding.has_value()) << "a failed prepare invalidates retained tile counters";
+    stats->frames.store(14);
+    stats->holding.store(false);
+    stats->loadingSlots.store(0);
+    stats->partialSlots.store(1);
+    health->refreshChartState();
+    EXPECT_EQ(health->snapshot().partial, true);
+    EXPECT_EQ(health->snapshot().state, MarketHealth::State::HistoryPartial);
+    EXPECT_TRUE(health->snapshot().coverage.contains("unknown"));
+    renderer->setViewport(1'100'000, 1'700'000, 100, 102);
+    health->refreshChartState();
+    EXPECT_FALSE(health->snapshot().partial.has_value()) << "the previous viewport cannot describe the new one";
+
+    select(window, window.findChild<ChartDock*>()->symbolInput(), "SOL-USD");
+    acknowledge(source, "SOL-USD");
+    health->refreshChartState(); // Layer still holds BTC's snapshot until queued data publication.
+    EXPECT_EQ(health->snapshot().symbol, "SOL-USD");
+    EXPECT_EQ(health->snapshot().loading, true);
+    EXPECT_FALSE(health->snapshot().holding.has_value());
+    ASSERT_TRUE(waitSnapshot("SOL-USD", layer->tfMs()));
+    health->refreshChartState();
+    EXPECT_FALSE(health->snapshot().holding.has_value());
+    const auto oldTf = layer->tfMs();
+    renderer->setTimeframe(int(oldTf * 5));
+    health->refreshChartState();
+    EXPECT_EQ(health->snapshot().loading, true);
+    EXPECT_FALSE(health->snapshot().holding.has_value());
+    ASSERT_TRUE(waitSnapshot("SOL-USD", layer->tfMs()));
+    health->refreshChartState();
+    stats->frames.fetch_add(2);
+    health->refreshChartState();
+    EXPECT_FALSE(health->snapshot().holding.has_value()) << "old drawn timeframe cannot label the new one";
+    renderer->setHeatmapRenderer("legacy");
+    health->refreshChartState();
+    EXPECT_FALSE(health->snapshot().loading.has_value());
+    EXPECT_TRUE(health->snapshot().coverage.isEmpty());
+    // Remove the QML scene through its owner; deleting one QML child directly
+    // leaves the scene's sibling bindings pointing at a half-torn-down chart.
+    QPointer<UnifiedGridRenderer> lifetime(renderer);
+    MainWindowSymbolLifecyclePeer::clearChartScene(window);
+    EXPECT_TRUE(lifetime.isNull());
+    health->refreshChartState();
+    EXPECT_FALSE(health->snapshot().holding.has_value());
+    EXPECT_TRUE(health->snapshot().coverage.isEmpty());
+}
+
+TEST(MainWindowHealthIntegration, DefaultLayoutPreservesNavigationRailCapAtNarrowAndWideWidths) {
+    MainWindowGPU window;
+    auto* rail = window.findChild<WatchlistDock*>();
+    ASSERT_TRUE(rail);
+    const int cap = rail->maximumWidth();
+    EXPECT_EQ(cap, 280);
+    for (int width : {960, 1920}) {
+        window.resize(width, 800);
+        MainWindowSymbolLifecyclePeer::arrange(window);
+        EXPECT_EQ(rail->maximumWidth(), cap);
+        EXPECT_GE(window.findChild<ChartDock*>()->minimumWidth(), 480);
+    }
+}
+
 void connected(MainWindowGPU& window) {
     ASSERT_TRUE(QMetaObject::invokeMethod(&window, "onConnectionStatusChanged", Qt::DirectConnection,
                                           Q_ARG(bool, true)));

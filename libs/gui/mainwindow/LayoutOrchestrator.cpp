@@ -168,7 +168,9 @@ void LayoutOrchestrator::applyDockConstraints(const DockWidgets& docks) {
     const QSize fallback(260, 160);
     applyMinimum(docks.heatmapDock,      QSize(480, 300));
     applyMinimum(docks.orderBookDock,    QSize(280, 360));
+    const int railMaximum = docks.watchlistDock ? docks.watchlistDock->maximumWidth() : QWIDGETSIZE_MAX;
     applyMinimum(docks.watchlistDock,    QSize(320, 360));
+    if (docks.watchlistDock) docks.watchlistDock->setMaximumWidth(railMaximum);
     applyMinimum(docks.secDock,          QSize(440, 380));
     applyMinimum(docks.screenerDock,     QSize(360, 280));
     applyMinimum(docks.stockChartDock,   QSize(360, 280));

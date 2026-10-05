@@ -99,6 +99,7 @@ private:
     bool subscribeSymbol(const QString& symbol);
     void requestMainSymbol(const QString& symbol);
     void applySubscriptionActions(const QVector<SymbolSubscriptionManager::Action>& actions);
+    void syncWatchlistChartState();
     void startPendingSymbolSwitch(const QString& symbol);
     void abandonPendingSymbolSwitch(const QString& code, const QString& message);
     bool armHeldRetry(const QString& message);
@@ -167,6 +168,7 @@ private:
     bool m_userSubscribed = false;
     SymbolSubscriptionManager m_symbolSubscriptions;
     QString m_refusedSymbol;
+    QString m_chartSwitchFailureSymbol, m_chartSwitchFailureReason;
     QString m_offlineRequestedSymbol;
     bool m_initialSubscriptionAttempted = false;
     bool m_symbolSelectionRequested = false;
