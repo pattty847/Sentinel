@@ -971,8 +971,12 @@ void SentinelStreamClient::handleSnapshotMessage(const nlohmann::json& msg) {
     }
     const auto bids = protocol::clientparse::parseOrderBookLevels(msg.value("bids", nlohmann::json::array()));
     const auto asks = protocol::clientparse::parseOrderBookLevels(msg.value("asks", nlohmann::json::array()));
+    const double tickSize = msg.value("tick_size", 0.0);
+    const uint64_t bookVersion = msg.value("book_version", uint64_t{0});
     const auto generation = bookDeliveryGeneration(symbol);
-    emit snapshotReceived(QString::fromStdString(symbol), bids, asks, generation);
+    const auto status = msg.value("book_status", std::string(tickSize > 0.0 ? "ready" : "unavailable"));
+    emit snapshotReceived(QString::fromStdString(symbol), bids, asks, tickSize, generation,
+                          QString::fromStdString(status), bookVersion);
 }
 
 void SentinelStreamClient::handleL2UpdateMessage(const nlohmann::json& msg) {
@@ -981,8 +985,10 @@ void SentinelStreamClient::handleL2UpdateMessage(const nlohmann::json& msg) {
         return;
     }
     const auto updates = protocol::clientparse::parseL2Updates(msg["deltas"]);
+    const double tickSize = msg.value("tick_size", 0.0);
+    const uint64_t bookVersion = msg.value("book_version", uint64_t{0});
     const auto generation = bookDeliveryGeneration(symbol);
-    emit l2UpdateReceived(QString::fromStdString(symbol), updates, generation);
+    emit l2UpdateReceived(QString::fromStdString(symbol), updates, tickSize, generation, bookVersion);
 }
 
 void SentinelStreamClient::handleTradeMessage(const nlohmann::json& msg) {

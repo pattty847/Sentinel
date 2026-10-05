@@ -191,7 +191,7 @@ TEST(DomModel, ServerQuantisedSnapshotsNeverAdvertiseFalsePrecision) {
         dock.onSymbolChanged(symbol);
         updates.clear();
         emit source.streamClient()->snapshotReceived(symbol, {{c.bid, 7}}, {{c.ask, 9}},
-            source.streamClient()->bookDeliveryGeneration(c.symbol));
+            c.tick, source.streamClient()->bookDeliveryGeneration(c.symbol));
         QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
         QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
         const auto& book = source.getDirectLiveOrderBook(c.symbol);
@@ -219,7 +219,7 @@ TEST(DomModel, ServerQuantisedSnapshotsNeverAdvertiseFalsePrecision) {
         }
         // A subsequent level update keeps using the same replica, without a new snapshot/retry.
         emit source.streamClient()->l2UpdateReceived(symbol, {{true, c.bid, 11}},
-            source.streamClient()->bookDeliveryGeneration(c.symbol));
+            c.tick, source.streamClient()->bookDeliveryGeneration(c.symbol));
         QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
         QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
         EXPECT_DOUBLE_EQ(book.getBidVolume(), 11);
@@ -270,7 +270,7 @@ TEST(DomModel, EthReplicaPreservesAdjacentServerLevelsAndBookTop) {
         source.subscribe("ETH-USD");
         const auto generation = source.streamClient()->bookDeliveryGeneration("ETH-USD");
         emit source.streamClient()->snapshotReceived("ETH-USD",
-            {{prices[0], 3}, {prices[1], 7}}, {{prices[2], 9}, {prices[3], 5}}, generation);
+            {{prices[0], 3}, {prices[1], 7}}, {{prices[2], 9}, {prices[3], 5}}, .1, generation);
         QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
         const auto& book = source.getDirectLiveOrderBook("ETH-USD");
         EXPECT_DOUBLE_EQ(book.getTickSize(), .1);
@@ -294,12 +294,83 @@ TEST(DomModel, EthReplicaPreservesAdjacentServerLevelsAndBookTop) {
         EXPECT_EQ(api.bestAsk, prices[2]);
         EXPECT_DOUBLE_EQ(api.bids[1].price, prices[0]);
         EXPECT_DOUBLE_EQ(api.asks[1].price, prices[3]);
-        emit source.streamClient()->l2UpdateReceived("ETH-USD", {{true, prices[0], 4}}, generation);
+        emit source.streamClient()->l2UpdateReceived("ETH-USD", {{true, prices[0], 4}}, .1, generation);
         QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
         EXPECT_EQ(book.getBidCount(), 2u);
         EXPECT_DOUBLE_EQ(book.getBidVolume(), 11);
         source.unsubscribe("ETH-USD");
     }
+}
+
+TEST(DomModel, BookWireVersionFencesOlderReadyAndUnavailableEvents) {
+    RemoteGridDataSource source{"127.0.0.1", "1"};
+    source.subscribe("DOGE-USD");
+    const auto generation = source.streamClient()->bookDeliveryGeneration("DOGE-USD");
+    auto snapshot = [&](double bid, double ask, double tick, uint64_t version,
+                        const QString& status = QStringLiteral("ready")) {
+        emit source.streamClient()->snapshotReceived("DOGE-USD", {{bid, 1}}, {{ask, 2}},
+                                                     tick, generation, status, version);
+        QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
+    };
+    emit source.streamClient()->l2UpdateReceived("DOGE-USD", {{true, .20002, 3}},
+                                                 .00002, generation, 8);
+    QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
+    snapshot(.20000, .20006, .00002, 7); // Missing delta forbids an earlier snapshot.
+    EXPECT_EQ(source.getDirectLiveOrderBook("DOGE-USD").getTickSize(), 0.0);
+    snapshot(.20000, .20006, .00002, 8); // Complete snapshot at the fenced version recovers.
+    EXPECT_DOUBLE_EQ(source.getDirectLiveOrderBook("DOGE-USD").getBidVolume(), 1.0);
+    snapshot(.20000, .20006, .00002, 10);
+    const auto& book = source.getDirectLiveOrderBook("DOGE-USD");
+    EXPECT_DOUBLE_EQ(book.getTickSize(), .00002);
+    DomTradeWindow trades;
+    DomModel display;
+    display.publish(book, trades, true);
+    ASSERT_GT(display.rowCount(), 0);
+    int withdrawals = 0;
+    QObject::connect(&source, &IGridDataSource::liveOrderBookUpdated, &source,
+        [&](const QString& symbol, const std::vector<BookDelta>& deltas) {
+            if (symbol != "DOGE-USD") return;
+            display.publish(book, trades, true);
+            if (book.getTickSize() == 0.0) {
+                EXPECT_TRUE(deltas.empty());
+                EXPECT_EQ(display.rowCount(), 0);
+                ++withdrawals;
+            }
+        });
+    snapshot(.1, .2, .1, 9); // Older queued snapshot after the current subscribe snapshot.
+    EXPECT_DOUBLE_EQ(book.getTickSize(), .00002);
+    snapshot(.1, .2, .1, 10); // Duplicate version cannot replace an already ready book.
+    EXPECT_DOUBLE_EQ(book.getTickSize(), .00002);
+    emit source.streamClient()->l2UpdateReceived("DOGE-USD", {{true, .20002, 3}},
+                                                 .00002, generation, 11);
+    QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
+    EXPECT_EQ(book.getBidCount(), 2u);
+    emit source.streamClient()->l2UpdateReceived("DOGE-USD", {{true, .20004, 4}},
+                                                 .00002, generation, 10);
+    QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
+    EXPECT_EQ(book.getBidCount(), 2u);
+    snapshot(0, 0, 0, 12, QStringLiteral("invalidated"));
+    EXPECT_EQ(book.getTickSize(), 0.0);
+    EXPECT_EQ(withdrawals, 1);
+    snapshot(.20000, .20006, .00002, 11); // Cannot repopulate after invalidation.
+    EXPECT_EQ(book.getTickSize(), 0.0);
+    snapshot(.20000, .20006, .00002, 13);
+    EXPECT_DOUBLE_EQ(book.getTickSize(), .00002);
+    emit source.streamClient()->l2UpdateReceived("DOGE-USD", {{true, .20002, 3}},
+                                                 .1, generation, 14);
+    QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
+    EXPECT_EQ(book.getTickSize(), 0.0);
+    EXPECT_EQ(withdrawals, 2);
+    snapshot(.20000, .20006, .00002, 13); // Older ready event cannot restore a cleared book.
+    EXPECT_EQ(book.getTickSize(), 0.0);
+    snapshot(.20000, .20006, .00002, 14); // Retry at the current version is complete.
+    EXPECT_DOUBLE_EQ(book.getBidVolume(), 1.0);
+    EXPECT_GT(display.rowCount(), 0);
+    emit source.streamClient()->l2UpdateReceived("DOGE-USD", {{true, .20002, 3}},
+                                                 .00002, generation, 15);
+    QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
+    EXPECT_EQ(book.getBidCount(), 2u);
+    source.unsubscribe("DOGE-USD");
 }
 
 TEST(DomModel, ExecutionsMatchReplicaTruncationAtDecimalBoundariesWithNonzeroOrigin) {
@@ -363,8 +434,11 @@ public:
     bool isBookSnapshotStale(const QString& symbol) const override { return symbol == staleSymbol; }
     Source() { book.initialize(0, 500, 0.1); }
     void update(std::initializer_list<BookLevelUpdate> updates, qint64 at = 0) {
-        apply(book, updates, at);
-        emit liveOrderBookUpdated("BTC-USD", {});
+        const auto timestamp = at ? std::chrono::system_clock::time_point(std::chrono::milliseconds(at))
+                                  : std::chrono::system_clock::now();
+        std::vector<BookDelta> deltas;
+        book.applyUpdates(std::span(updates.begin(), updates.size()), timestamp, &deltas);
+        if (!deltas.empty()) emit liveOrderBookUpdated("BTC-USD", deltas);
     }
     void send(const Trade& value) { emit tradeReceived(value); }
     const LiveOrderBook& getDirectLiveOrderBook(const std::string&) const override { ++reads; return book; }

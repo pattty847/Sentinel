@@ -41,6 +41,7 @@
 #include <cstdio>
 #include "../marketdata/auth/Authenticator.hpp"
 #include "../marketdata/rest/CoinbaseRestClient.hpp"
+#include <QPointer>
 #include "../marketdata/model/TradeData.h"
 #include "../trading/LiveTradingSession.hpp"
 #include "Cpp20Utils.hpp"
@@ -186,24 +187,12 @@ nlohmann::json buildServerConfigPayload(const ServerConfig& cfg, bool recordingA
 }
 
 double resolveMidPrice(const LiveOrderBook& book) {
-    const auto& bids = book.getBids();
-    const auto& asks = book.getAsks();
-
-    double bestBid = 0.0;
-    for (size_t i = bids.size(); i > 0; --i) {
-        if (bids[i - 1] > 0.0) {
-            bestBid = book.index_to_price(i - 1);
-            break;
-        }
-    }
-
-    double bestAsk = 0.0;
-    for (size_t i = 0; i < asks.size(); ++i) {
-        if (asks[i] > 0.0) {
-            bestAsk = book.index_to_price(i);
-            break;
-        }
-    }
+    thread_local std::vector<std::pair<uint32_t, double>> bids, asks;
+    const auto view = book.captureDenseNonZero(bids, asks, 1);
+    const double bestBid = view.bidLevels.empty() ? 0.0
+        : view.minPrice + double(view.bidLevels.front().first) * view.tickSize;
+    const double bestAsk = view.askLevels.empty() ? 0.0
+        : view.minPrice + double(view.askLevels.front().first) * view.tickSize;
 
     if (bestBid > 0.0 && bestAsk > 0.0) {
         return (bestBid + bestAsk) * 0.5;
@@ -244,6 +233,7 @@ class Session : public std::enable_shared_from_this<Session> {
     
     QMetaObject::Connection tradeConn_;
     QMetaObject::Connection bookConn_;
+    QMetaObject::Connection bookSnapshotConn_;
     QMetaObject::Connection heatmapConn_;
     QMetaObject::Connection barUpdatedConn_;
     QMetaObject::Connection barClosedConn_;
@@ -295,11 +285,13 @@ class Session : public std::enable_shared_from_this<Session> {
     void disconnectModelSignals() {
         QObject::disconnect(tradeConn_);
         QObject::disconnect(bookConn_);
+        QObject::disconnect(bookSnapshotConn_);
         QObject::disconnect(heatmapConn_);
         QObject::disconnect(barUpdatedConn_);
         QObject::disconnect(barClosedConn_);
         tradeConn_ = {};
         bookConn_ = {};
+        bookSnapshotConn_ = {};
         heatmapConn_ = {};
         barUpdatedConn_ = {};
         barClosedConn_ = {};
@@ -801,10 +793,21 @@ public:
             });
             
         bookConn_ = QObject::connect(&model_, &ServerDataModel::bookUpdateBroadcast,
-            [weak](const QString& productId, const std::vector<BookDelta>& deltas) {
+            [weak](const QString& productId, const std::vector<BookDelta>& deltas,
+                   double minPrice, double tickSize, uint64_t bookVersion) {
                 if (auto self = weak.lock()) {
-                    self->postModelEvent([productId, deltas](Session& session) {
-                        session.on_book_update(productId, deltas);
+                    self->postModelEvent([productId, deltas, minPrice, tickSize, bookVersion](Session& session) {
+                        session.on_book_update(productId, deltas, minPrice, tickSize, bookVersion);
+                    });
+                }
+            });
+        bookSnapshotConn_ = QObject::connect(&model_, &ServerDataModel::bookSnapshotBroadcast,
+            [weak](const QString& productId, const std::vector<OrderBookLevel>& bids,
+                   const std::vector<OrderBookLevel>& asks, double tickSize, const QString& status,
+                   uint64_t bookVersion) {
+                if (auto self = weak.lock()) {
+                    self->postModelEvent([productId, bids, asks, tickSize, status, bookVersion](Session& session) {
+                        session.on_book_snapshot(productId, bids, asks, tickSize, status, bookVersion);
                     });
                 }
             });
@@ -941,35 +944,10 @@ public:
                     do_write(ack.dump());
 
                     auto& hotData = model_.ensureSymbol(symbol);
-                    nlohmann::json snapshot;
-                    snapshot["type"] = "snapshot";
-                    snapshot["symbol"] = symbol;
-                    
-                    std::vector<nlohmann::json> bidsJson;
-                    const auto& bids = hotData.liveBook.getBids();
-                    for (size_t i = 0; i < bids.size(); ++i) {
-                        if (bids[i] > 0) {
-                             bidsJson.push_back({
-                                 {"p", hotData.liveBook.index_to_price(i)},
-                                 {"q", bids[i]}
-                             });
-                        }
-                    }
-                    snapshot["bids"] = bidsJson;
-
-                    std::vector<nlohmann::json> asksJson;
-                    const auto& asks = hotData.liveBook.getAsks();
-                    for (size_t i = 0; i < asks.size(); ++i) {
-                        if (asks[i] > 0) {
-                             asksJson.push_back({
-                                 {"p", hotData.liveBook.index_to_price(i)},
-                                 {"q", asks[i]}
-                             });
-                        }
-                    }
-                    snapshot["asks"] = asksJson;
-                    
-                    do_write(snapshot.dump());
+                    const auto book = hotData.liveBook.snapshotLevels();
+                    on_book_snapshot(QString::fromStdString(symbol), book.bids, book.asks,
+                                     book.tickSize, book.tickSize > 0.0 ? QStringLiteral("ready")
+                                                                     : QStringLiteral("unavailable"), book.version);
                     // Availability is (re)sent on every subscribe, then on change.
                     availability_[symbol].sent.clear();
                     pushAvailability(symbol);
@@ -1501,23 +1479,44 @@ public:
         do_write(j.dump());
     }
     
-    void on_book_update(const QString& productId, const std::vector<BookDelta>& deltas) {
+    void on_book_snapshot(const QString& productId, const std::vector<OrderBookLevel>& bids,
+                          const std::vector<OrderBookLevel>& asks, double tickSize,
+                          const QString& status, uint64_t bookVersion) {
+        const auto pid = productId.toStdString();
+        if (subscriptions_.find(pid) == subscriptions_.end()) return;
+        const bool ready = std::isfinite(tickSize) && tickSize > 0.0 && !bids.empty() && !asks.empty() &&
+                           status == QStringLiteral("ready");
+        const auto wireStatus = ready ? std::string("ready")
+                                      : status == QStringLiteral("ready") ? std::string("aggregation_unavailable")
+                                                                           : status.toStdString();
+        nlohmann::json j{{"type", "snapshot"}, {"symbol", pid}, {"tick_size", ready ? tickSize : 0.0},
+                         {"book_status", wireStatus}, {"book_version", bookVersion}};
+        j["bids"] = nlohmann::json::array();
+        j["asks"] = nlohmann::json::array();
+        if (ready) {
+            for (const auto& level : bids) j["bids"].push_back({{"p", level.price}, {"q", level.size}});
+            for (const auto& level : asks) j["asks"].push_back({{"p", level.price}, {"q", level.size}});
+        }
+        do_write(j.dump());
+    }
+
+    void on_book_update(const QString& productId, const std::vector<BookDelta>& deltas,
+                        double minPrice, double tickSize, uint64_t bookVersion) {
         std::string pid = productId.toStdString();
         if (subscriptions_.find(pid) == subscriptions_.end()) return;
-        
-        auto& symbolData = model_.ensureSymbol(pid);
-        const auto& book = symbolData.liveBook;
 
         nlohmann::json j;
         j["type"] = "l2update";
         j["product_id"] = pid;
+        j["tick_size"] = tickSize;
+        j["book_version"] = bookVersion;
         
         std::vector<nlohmann::json> deltaJson;
         deltaJson.reserve(deltas.size());
         for (const auto& d : deltas) {
             deltaJson.push_back({
                 {"side", d.isBid ? "bid" : "ask"},
-                {"price", book.index_to_price(d.idx)},
+                {"price", minPrice + double(d.idx) * tickSize},
                 {"size", d.qty}
             });
         }
@@ -2264,6 +2263,25 @@ bool SentinelStreamServer::releaseIfNoSubscribers(const std::string& symbol,
 
 CoinbaseRestClient& SentinelStreamServer::restClient() {
     return *m_restClient;
+}
+
+void SentinelStreamServer::requestBookProductMetadata(const QString& symbol, uint64_t lifetime) {
+    const auto product = symbol.toStdString();
+    QPointer<ServerDataModel> model(&m_model);
+    const bool accepted = submitHistoryTask([this, model, product, lifetime] {
+        const auto result = m_restClient->fetchProductMetadata(product);
+        if (!model) return;
+        QMetaObject::invokeMethod(model.data(), [model, product, lifetime,
+                                                  metadata = result.metadata, error = result.error]() {
+            if (model) model->onProductMetadata(product, lifetime, metadata, error);
+        }, Qt::QueuedConnection);
+    });
+    if (!accepted) {
+        sLog_Warning("Live book metadata worker unavailable: symbol=" << product);
+        QMetaObject::invokeMethod(model.data(), [model, product, lifetime] {
+            if (model) model->onProductMetadata(product, lifetime, nullptr, "metadata worker unavailable");
+        }, Qt::QueuedConnection);
+    }
 }
 
 uint64_t SentinelStreamServer::registerLatencySender(std::function<void(int)> sendFn) {

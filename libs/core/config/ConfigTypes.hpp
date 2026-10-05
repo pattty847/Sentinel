@@ -52,7 +52,7 @@ struct ServerTradeOverlayConfig {
 };
 
 struct ServerOrderBookConfig {
-    double tickSize = 0.10;
+    double tickSize = 0.10; // BTC-USD live book; other products derive from exact quote increment
     double bandPct = 0.30;
 };
 

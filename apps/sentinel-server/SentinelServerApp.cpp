@@ -157,6 +157,10 @@ bool SentinelServerApp::initialize() {
                     sLog_Warning("Recording resnapshot request: symbol=" << symbol << " reason=" << reason);
                     if (m_marketDataCore) m_marketDataCore->requestResnapshot(symbol.toStdString());
                 });
+        connect(m_serverModel.get(), &ServerDataModel::productMetadataRequested, this,
+                [this](const QString& symbol, uint64_t lifetime) {
+                    if (m_server) m_server->requestBookProductMetadata(symbol, lifetime);
+                });
         
         m_marketDataCore->onError([](const std::string& product, const std::string& error){
             sLog_Error("MarketDataCore Error: product=" << product << " " << error);

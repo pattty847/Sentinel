@@ -74,6 +74,12 @@ TEST(TradingEngineTest, PlaceLifecycleAndInvalidQuantity) {
     EXPECT_DOUBLE_EQ(res.orderUpdates[1].filledQty, 2.0);
 }
 
+TEST(TradingEngineTest, EmptyBookMidRejectsMarketFill) {
+    trading::TradingEngine engine([](const std::string&) { return 0.0; }, 0.0);
+    const auto result = engine.onCommand(marketBuy(1.0));
+    EXPECT_TRUE(result.orderUpdates.empty());
+}
+
 TEST(TradingEngineTest, PartialAndFullFillsAndOutOfOrderProtection) {
     trading::TradingEngine engine([](const std::string&) { return 100.0; }, 0.0);
 

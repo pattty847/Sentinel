@@ -186,10 +186,9 @@ void OrderBookDock::onSymbolChanged(const QString& symbol)
 
 void OrderBookDock::onOrderBookUpdated(const QString& symbol, const std::vector<BookDelta>& deltas)
 {
-    Q_UNUSED(deltas);
     if (symbol != m_symbol) return;
     // The datasource already applied ALL deltas. Do not rescan it per event.
-    m_freshness.awaitingBook = false;
+    m_freshness.awaitingBook = deltas.empty();
     m_dirty = m_bookDirty = true;
 }
 

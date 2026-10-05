@@ -123,6 +123,13 @@ struct ServerFeedAdmissionTest : testing::Test {
         drain();
         return s->write_queue_.size() > 1 ? nlohmann::json::parse(s->write_queue_.back().payload) : nlohmann::json{};
     }
+    void seedEthMetadata() {
+        const auto it = model->m_feeds.find("ETH-USD");
+        ASSERT_NE(it, model->m_feeds.end());
+        model->onProductMetadata("ETH-USD", it->second.lifetime,
+            nlohmann::json{{"product_id", "ETH-USD"}, {"quote_increment", "0.01"},
+                           {"base_increment", "0.00000001"}}, "");
+    }
     void TearDown() override {
         for (auto& s : sessions) s->beginClose("fixture cleanup");
         drain();
@@ -135,6 +142,7 @@ struct ServerFeedAdmissionTest : testing::Test {
     void checkGuiTenSwitches();
     void checkGuiRefusal();
     void checkRecorderRelease();
+    void checkMetadataRecorder();
     void checkLegacyRelease();
     void checkTradeWire();
     bool sessionHas(const std::shared_ptr<Session>& s, const std::string& symbol) const {
@@ -459,6 +467,7 @@ void ServerFeedAdmissionTest::checkRecorderRelease() {
     };
     auto s = session();
     request(s, "ETH-USD");
+    seedEthMetadata();
     recordingLocal = epoch + 10000;
     snapshot("ETH-USD"); snapshot("BTC-USD");
     model->m_recorder->onTick(epoch + 20000);
@@ -503,6 +512,7 @@ void ServerFeedAdmissionTest::checkRecorderRelease() {
     model->releaseGuiFeed("BTC-USD", recordingLocal);
     EXPECT_TRUE(model->ensureSymbol("BTC-USD").bookValid);
     request(s, "ETH-USD");
+    seedEthMetadata();
     recordingLocal = epoch + 190000;
     snapshot("ETH-USD");
     recordingLocal = epoch + 205000;
@@ -518,6 +528,39 @@ void ServerFeedAdmissionTest::checkRecorderRelease() {
 }
 TEST_F(ServerFeedAdmissionTest, ReleasedGuiFeedFinalizesPartialAndReacquiresFresh) { checkRecorderRelease(); }
 
+void ServerFeedAdmissionTest::checkMetadataRecorder() {
+    using namespace recording;
+    const auto epoch = kHmc2MinMs;
+    RecorderConfig rc;
+    rc.root = dir.filePath("metadata-recording").toStdString();
+    rc.layers = {{"near", 100, .5, 2, false}};
+    rc.latenessMs = 2000;
+    model->m_recorder = std::make_unique<BookRecorder>(rc, [&] { return recordingLocal; });
+    auto cleanup = qScopeGuard([&] { model->m_recorder.reset(); });
+    auto s = session();
+    request(s, "ETH-USD"); // No product metadata response yet.
+    recordingLocal = epoch + 10000;
+    model->onLiveOrderBookInitialized("ETH-USD", {{99, 2}}, {{101, 4}}, recordingLocal);
+    EXPECT_FALSE(model->ensureSymbol("ETH-USD").bookValid);
+    recordingLocal = epoch + 15000;
+    model->onLiveOrderBookLevelUpdates("ETH-USD", {{true, 99, 5}}, recordingLocal);
+    recordingLocal = epoch + 70000;
+    model->m_recorder->onTick(recordingLocal);
+    model->m_recorder->drainForTest();
+    EXPECT_EQ(model->m_recorder->stats().invalidations, 0u);
+    const auto rows = Hmc2Store::readRange(rc.root, "ETH-USD", "near", 60000, epoch, epoch + 120000);
+    ASSERT_EQ(rows.size(), 1u);
+    const auto bid = std::find_if(rows[0].entries.begin(), rows[0].entries.end(),
+                                  [](const auto& e) { return !e.isAsk && e.peakCode > 0; });
+    ASSERT_NE(bid, rows[0].entries.end());
+    EXPECT_GT(decodeSize(bid->peakCode), 4.5); // Native 99 level rose from 2 to 5.
+    seedEthMetadata();
+    EXPECT_TRUE(model->ensureSymbol("ETH-USD").bookValid);
+    EXPECT_DOUBLE_EQ(model->ensureSymbol("ETH-USD").liveBook.getBidVolume(), 5.0);
+    EXPECT_EQ(model->m_recorder->stats().invalidations, 0u);
+}
+TEST_F(ServerFeedAdmissionTest, MetadataGateRecordsNativeSnapshotAndDeltasWithoutInvalidation) { checkMetadataRecorder(); }
+
 void ServerFeedAdmissionTest::checkLegacyRelease() {
     model->m_heatmapStreamer->stop();
     auto legacy = config.heatmap;
@@ -528,6 +571,7 @@ void ServerFeedAdmissionTest::checkLegacyRelease() {
     model->m_heatmapStreamer = std::make_unique<HeatmapTwapStreamer>(*model, legacy);
     auto& streamer = *model->m_heatmapStreamer;
     auto s = session(); request(s, "ETH-USD");
+    seedEthMetadata();
     model->onLiveOrderBookInitialized("ETH-USD", {{99, 2}}, {{101, 4}}, recordingLocal);
     const auto epoch = recording::kHmc2MinMs;
     for (int64_t t = 0; t <= 90000; t += 1000) {

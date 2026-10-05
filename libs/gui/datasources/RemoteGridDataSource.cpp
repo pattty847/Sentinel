@@ -150,6 +150,7 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
                     if (pending.stale) emit bookSnapshotStaleChanged(QString::fromStdString(symbol), false);
                 }
                 m_pendingBookSnapshots.clear();
+                m_bookVersions.clear();
                 m_candleBackfill.disconnect();
                 m_connectionActive = false;
                 emit connectionStatusChanged(false);
@@ -195,6 +196,7 @@ void RemoteGridDataSource::subscribe(const QString& symbol) {
     m_client.subscribe(symbol.toStdString());
     m_activeBookSymbols.insert(symbol.toStdString());
     m_pendingBookSnapshots[symbol.toStdString()] = {QDateTime::currentMSecsSinceEpoch() + 5000, false, false};
+    m_bookVersions.erase(symbol.toStdString());
     if (!m_bookSnapshotTimer.isActive()) m_bookSnapshotTimer.start();
     if (wasStale) emit bookSnapshotStaleChanged(symbol, false);
 
@@ -215,6 +217,7 @@ void RemoteGridDataSource::unsubscribe(const QString& symbol) {
     m_client.unsubscribe(symbol.toStdString());
     m_activeBookSymbols.erase(symbol.toStdString());
     m_pendingBookSnapshots.erase(symbol.toStdString());
+    m_bookVersions.erase(symbol.toStdString());
     if (m_pendingBookSnapshots.empty()) m_bookSnapshotTimer.stop();
     if (wasStale) emit bookSnapshotStaleChanged(symbol, false);
 }
@@ -371,17 +374,30 @@ const LiveOrderBook& RemoteGridDataSource::getDirectLiveOrderBook(const std::str
 }
 
 void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const std::vector<OrderBookLevel>& bids,
-                                               const std::vector<OrderBookLevel>& asks, quint64 deliveryGeneration) {
+                                               const std::vector<OrderBookLevel>& asks, double tickSize,
+                                               quint64 deliveryGeneration, const QString& status,
+                                               uint64_t bookVersion) {
     std::string symbol = productId.toStdString();
     if (!m_activeBookSymbols.contains(symbol) ||
         deliveryGeneration != m_client.bookDeliveryGeneration(symbol)) return;
-    // The stream server can send its still-empty local book immediately after
-    // admission; only a two-sided upstream snapshot makes this replica ready.
-    if (bids.empty() || asks.empty()) return;
-    const double serverTick = m_serverConfig.orderbook.tickSize;
-    if (!std::isfinite(serverTick) || serverTick <= 0) {
-        sLog_Warning("Replica snapshot needs a valid server tick: symbol=" << productId);
-        return; // Preserve the previous replica and pending snapshot/retry state.
+    if (auto previous = m_bookVersions.find(symbol); previous != m_bookVersions.end() &&
+        (bookVersion == 0 || bookVersion < previous->second ||
+         (bookVersion == previous->second && !m_pendingBookSnapshots.contains(symbol)))) return;
+    // Any unavailable/one-sided server snapshot withdraws a previous ready book.
+    if (bids.empty() || asks.empty() || !std::isfinite(tickSize) || tickSize <= 0 ||
+        (!status.isEmpty() && status != QStringLiteral("ready"))) {
+        if (auto it = m_replicaBooks.find(symbol); it != m_replicaBooks.end() && it->second)
+            it->second->clear();
+        emit liveOrderBookUpdated(productId, {}); // Consumers withdraw cached rows/top.
+        const auto pending = m_pendingBookSnapshots.try_emplace(
+            symbol, PendingBookSnapshot{QDateTime::currentMSecsSinceEpoch() + 5000, false, false}).first;
+        // Repeated unavailable replies must not restart the bounded retry clock.
+        if (!pending->second.stale && !m_bookSnapshotTimer.isActive()) m_bookSnapshotTimer.start();
+        if (bookVersion > 0) m_bookVersions[symbol] = bookVersion;
+        sLog_Warning("Replica snapshot unavailable: symbol=" << productId << " status=" << status
+                     << " tick=" << tickSize);
+        emit errorOccurred(QString("Order book unavailable: %1 (%2)").arg(productId, status));
+        return;
     }
     const bool wasStale = isBookSnapshotStale(productId);
 
@@ -397,7 +413,6 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
     const auto [minPrice, maxPrice] = computeBandRange(bids, asks, bandPct);
     // All consumers share this replica. Preserve the server's resolution rather
     // than deriving a display tick that would merge its adjacent price levels.
-    const double tickSize = serverTick;
     book.initialize(minPrice, maxPrice, tickSize);
 
     std::vector<BookLevelUpdate> updates;
@@ -413,6 +428,7 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
     auto now = std::chrono::system_clock::now();
     std::vector<BookDelta> deltas;
     book.applyUpdates(updates, now, &deltas);
+    if (bookVersion > 0) m_bookVersions[symbol] = bookVersion;
     m_pendingBookSnapshots.erase(symbol);
     if (m_pendingBookSnapshots.empty()) m_bookSnapshotTimer.stop();
     if (!deltas.empty()) {
@@ -432,17 +448,25 @@ void RemoteGridDataSource::onServerConfigReceived(const ServerConfig& config) {
 }
 
 void RemoteGridDataSource::onL2UpdateReceived(const QString& productId, const std::vector<BookLevelUpdate>& updates,
-                                               quint64 deliveryGeneration) {
-    onL2UpdateReceivedAt(productId, updates, deliveryGeneration, QDateTime::currentMSecsSinceEpoch());
+                                               double tickSize, quint64 deliveryGeneration,
+                                               uint64_t bookVersion) {
+    onL2UpdateReceivedAt(productId, updates, tickSize, deliveryGeneration,
+                         QDateTime::currentMSecsSinceEpoch(), bookVersion);
 }
 
 void RemoteGridDataSource::onL2UpdateReceivedAt(const QString& productId,
                                                 const std::vector<BookLevelUpdate>& updates,
-                                                quint64 deliveryGeneration, qint64 nowMs) {
+                                                double tickSize, quint64 deliveryGeneration, qint64 nowMs,
+                                                uint64_t bookVersion) {
     std::string symbol = productId.toStdString();
     if (!m_activeBookSymbols.contains(symbol) ||
         deliveryGeneration != m_client.bookDeliveryGeneration(symbol)) return;
+    if (auto previous = m_bookVersions.find(symbol); previous != m_bookVersions.end() &&
+        (bookVersion == 0 || bookVersion <= previous->second)) return;
     if (auto pending = m_pendingBookSnapshots.find(symbol); pending != m_pendingBookSnapshots.end()) {
+        // A delta seen before a usable snapshot means any older queued snapshot
+        // cannot restore a complete book.
+        if (bookVersion > 0) m_bookVersions[symbol] = bookVersion;
         if (pending->second.stale && nowMs >= pending->second.nextStaleRetryMs
             && symbolPermitted(symbol, "stale book snapshot retry")) {
             const qint64 delayMs = pending->second.staleRetryBackoffMs;
@@ -456,18 +480,32 @@ void RemoteGridDataSource::onL2UpdateReceivedAt(const QString& productId,
     }
     auto it = m_replicaBooks.find(symbol);
     if (it == m_replicaBooks.end()) {
+        if (bookVersion > 0) m_bookVersions[symbol] = bookVersion;
         sLog_DataN(5000, "L2 update dropped, no replica book: symbol=" << productId
                    << " levels=" << updates.size());
         return;
     }
 
     auto& book = *it->second;
+    if (!std::isfinite(tickSize) || tickSize <= 0.0 || book.getTickSize() != tickSize) {
+        sLog_Warning("L2 update tick disagrees with snapshot: symbol=" << productId
+                     << " snapshotTick=" << book.getTickSize() << " deltaTick=" << tickSize);
+        book.clear();
+        emit liveOrderBookUpdated(productId, {});
+        if (bookVersion > 0) m_bookVersions[symbol] = bookVersion;
+        const auto pending = m_pendingBookSnapshots.try_emplace(
+            symbol, PendingBookSnapshot{nowMs + 5000, false, false}).first;
+        if (!pending->second.stale && !m_bookSnapshotTimer.isActive()) m_bookSnapshotTimer.start();
+        emit errorOccurred(QString("Order book tick mismatch: %1").arg(productId));
+        return;
+    }
 
     thread_local std::vector<BookDelta> deltas;
     deltas.clear();
 
     auto now = std::chrono::system_clock::now();
     book.applyUpdates(updates, now, &deltas);
+    if (bookVersion > 0) m_bookVersions[symbol] = bookVersion;
 
     if (!deltas.empty()) {
         emit liveOrderBookUpdated(productId, deltas);

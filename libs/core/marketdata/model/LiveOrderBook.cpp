@@ -21,7 +21,7 @@ void LiveOrderBook::initialize(double min_price, double max_price, double tick_s
     min_price = m_min_price;
     max_price = m_max_price;
 
-    size_t size = static_cast<size_t>((max_price - min_price) / tick_size) + 1;
+    size_t size = static_cast<size_t>(std::llround((max_price - min_price) / tick_size)) + 1;
 
     m_bids.assign(size, 0.0);
     m_asks.assign(size, 0.0);
@@ -32,6 +32,7 @@ void LiveOrderBook::initialize(double min_price, double max_price, double tick_s
     m_nonZeroAskCount = 0;
     m_totalBidVolume = 0.0;
     m_totalAskVolume = 0.0;
+    ++m_stateVersion;
 }
 
 void LiveOrderBook::clear() {
@@ -43,6 +44,21 @@ void LiveOrderBook::clear() {
     m_min_price = m_max_price = m_tick_size = 0.0;
     m_nonZeroBidCount = m_nonZeroAskCount = 0;
     m_totalBidVolume = m_totalAskVolume = 0.0;
+    ++m_stateVersion;
+}
+
+LiveOrderBook::LevelsSnapshot LiveOrderBook::snapshotLevels() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    LevelsSnapshot out;
+    out.tickSize = m_tick_size;
+    out.version = m_stateVersion;
+    for (size_t i = 0; i < m_bids.size(); ++i) {
+        if (m_bids[i] > 0.0) out.bids.push_back({m_min_price + double(i) * m_tick_size, m_bids[i]});
+    }
+    for (size_t i = 0; i < m_asks.size(); ++i) {
+        if (m_asks[i] > 0.0) out.asks.push_back({m_min_price + double(i) * m_tick_size, m_asks[i]});
+    }
+    return out;
 }
 
 void LiveOrderBook::applyUpdates(std::span<const BookLevelUpdate> updates,
@@ -61,9 +77,10 @@ void LiveOrderBook::applyUpdates(std::span<const BookLevelUpdate> updates,
 
     m_lastUpdate = exchange_timestamp;
 
-    for (const auto& update : updates) {
-        applyLevelLocked(update.isBid, update.price, update.quantity, outDeltas);
-    }
+    bool changed = false;
+    for (const auto& update : updates)
+        changed = applyLevelLocked(update.isBid, update.price, update.quantity, outDeltas) || changed;
+    if (changed) ++m_stateVersion;
 }
 
 size_t LiveOrderBook::getBidCount() const {
@@ -91,18 +108,18 @@ bool LiveOrderBook::isEmpty() const {
     return m_nonZeroBidCount == 0 && m_nonZeroAskCount == 0;
 }
 
-void LiveOrderBook::applyLevelLocked(bool isBid,
+bool LiveOrderBook::applyLevelLocked(bool isBid,
                                      double price,
                                      double quantity,
                                      std::vector<BookDelta>* outDeltas) {
     if (price < m_min_price || price > m_max_price || m_tick_size <= 0.0) {
-        return;
+        return false;
     }
 
     size_t index = price_to_index(price);
     auto& levels = isBid ? m_bids : m_asks;
     if (index >= levels.size()) {
-        return;
+        return false;
     }
 
     double& slot = levels[index];
@@ -110,7 +127,7 @@ void LiveOrderBook::applyLevelLocked(bool isBid,
     const double newValue = quantity > 0.0 ? quantity : 0.0;
 
     if (previous == newValue) {
-        return;
+        return false;
     }
 
     auto& totalVolume = isBid ? m_totalBidVolume : m_totalAskVolume;
@@ -147,6 +164,7 @@ void LiveOrderBook::applyLevelLocked(bool isBid,
     if (outDeltas) {
         outDeltas->push_back({static_cast<uint32_t>(index), static_cast<float>(newValue), isBid});
     }
+    return true;
 }
 
 LiveOrderBook::DenseBookSnapshotView LiveOrderBook::captureDenseNonZero(

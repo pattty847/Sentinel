@@ -11,6 +11,7 @@
 #include <atomic>
 #include <filesystem>
 #include <optional>
+#include <nlohmann/json.hpp>
 #include <QObject>
 #include <QByteArray>
 #include <QTimer>
@@ -85,6 +86,8 @@ public:
     void registerMetrics(sentinel::metrics::MetricsRegistry& registry);
     void acquireGuiFeed(const std::string& symbol);
     void releaseGuiFeed(const std::string& symbol, int64_t releaseLocalMs = 0);
+    void onProductMetadata(const std::string& symbol, uint64_t lifetime,
+                           const nlohmann::json& metadata, const std::string& error);
 
 public slots:
     void onTrade(const Trade& trade);
@@ -101,7 +104,12 @@ public slots:
 signals:
     // Rebroadcast signals for streaming clients
     void tradeBroadcast(const Trade& trade);
-    void bookUpdateBroadcast(const QString& productId, const std::vector<BookDelta>& deltas);
+    void bookUpdateBroadcast(const QString& productId, const std::vector<BookDelta>& deltas,
+                             double minPrice, double tickSize, uint64_t bookVersion);
+    void bookSnapshotBroadcast(const QString& productId, const std::vector<OrderBookLevel>& bids,
+                               const std::vector<OrderBookLevel>& asks, double tickSize,
+                               const QString& status, uint64_t bookVersion);
+    void productMetadataRequested(const QString& productId, uint64_t lifetime);
     
     // Aggregation signals (forwarded from aggregator)
     void barClosed(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar);
@@ -127,8 +135,19 @@ private:
     // Metrics mirrors. Written on the main thread, except live publish drops
     // (recorder worker); declared before m_recorder so they outlive its worker.
     std::atomic<uint64_t> m_livePublishDrops{0};
-    struct FeedState { bool pinned = false, connected = false; uint64_t ups = 0, downs = 0; };
+    struct FeedState {
+        bool pinned = false, connected = false;
+        uint64_t ups = 0, downs = 0, lifetime = 0;
+        bool metadataPending = false;
+        nlohmann::json metadata;
+        int64_t nextMetadataAttemptMs = 0;
+    };
+    void requestProductMetadataIfNeeded(const std::string& symbol, FeedState& feed);
+    void publishAggregatedBook(const QString& productId, SymbolHotData& data,
+                               const FeedState& feed, qint64 envelopeMs);
     std::map<std::string, FeedState> m_feeds; // main thread, pinned + active GUI feeds only
+    uint64_t m_nextFeedLifetime = 0;
+    QTimer m_metadataTimer;
     mutable std::mutex m_footprintTradeMutex;
     std::unordered_map<std::string, std::deque<FootprintTradeSample>> m_recentFootprintTrades;
     int64_t m_footprintTradeRetentionMs = 300'000;
