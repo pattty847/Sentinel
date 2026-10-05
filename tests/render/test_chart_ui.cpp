@@ -292,6 +292,26 @@ TEST(ChartToolbarFixture, NativeSyntheticScreenshots) {
         renderer.setTpoLayout("split");
         QCoreApplication::processEvents();
         controls.syncNow();
+        // MainWindow supplies this synchronization in production whenever the
+        // renderer's mutually exclusive layer state changes.
+        toolbar->setLayerToggleStates(renderer.heatmapLayerEnabled(),
+                                      renderer.footprintLayerEnabled(),
+                                      renderer.tpoLayerEnabled(),
+                                      renderer.volumeProfileLayerEnabled());
+        auto* controlsMenu = toolbar->controlsMenu();
+        emit controlsMenu->aboutToShow();
+        auto* heatmapAction = menuAction(controlsMenu, "controlsHeatmap");
+        auto* footprintAction = menuAction(controlsMenu, "controlsFootprint");
+        auto* tpoAction = menuAction(controlsMenu, "controlsTpo");
+        auto* volumeAction = menuAction(controlsMenu, "controlsVolumeProfile");
+        ASSERT_TRUE(heatmapAction);
+        ASSERT_TRUE(footprintAction);
+        ASSERT_TRUE(tpoAction);
+        ASSERT_TRUE(volumeAction);
+        EXPECT_EQ(heatmapAction->isChecked(), mode == "heatmap");
+        EXPECT_FALSE(footprintAction->isChecked());
+        EXPECT_EQ(tpoAction->isChecked(), mode == "tpo");
+        EXPECT_EQ(volumeAction->isChecked(), mode == "volume");
         for (int width : {420, 960, 1920}) {
             surface.setFixedWidth(width);
             surface.adjustSize();
@@ -312,7 +332,7 @@ TEST(ChartToolbarFixture, NativeSyntheticScreenshots) {
             const QString name = QString("toolbar-%1-%2").arg(mode).arg(width);
             ASSERT_TRUE(save(name));
             if (width == 420) {
-                auto* menu = toolbar->controlsMenu();
+                auto* menu = controlsMenu;
                 menu->popup(toolbar->controlsButton()->mapToGlobal(QPoint(0, toolbar->controlsButton()->height())));
                 menu->setFocus(Qt::TabFocusReason);
                 QTest::keyClick(menu, Qt::Key_Down);

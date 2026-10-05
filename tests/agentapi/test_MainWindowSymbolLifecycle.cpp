@@ -327,15 +327,18 @@ TEST(MainWindowHealthIntegration, NewPublicationAndCapacityRefusalDoNotClaimRend
     ASSERT_TRUE(waitForSnapshot([](const auto& s) { return !s.spans.empty() && s.refused.empty(); }));
     const auto previous = layer->snapshot();
     auto stats = layer->tileStatsPtr();
+    stats->errors.store(7);
     stats->frames.store(100);
     stats->drawnTfMs.store(layer->tfMs());
     stats->holding.store(true);
     stats->loadingSlots.store(9);
     stats->partialSlots.store(9);
+    // Establish, then cross, the retired frame-count fence while its error
+    // count stays stable. The second refresh made the old provider accept the
+    // injected flags as current for this snapshot.
     health->refreshChartState();
-    EXPECT_FALSE(health->snapshot().loading.has_value());
-    EXPECT_FALSE(health->snapshot().holding.has_value());
-    EXPECT_FALSE(health->snapshot().partial.has_value());
+    stats->frames.store(103);
+    health->refreshChartState();
     publishAvailability(start + 11 * tile); // Ordinary publication, same serial and viewport.
     ASSERT_TRUE(waitForSnapshot([&](const auto& s) { return s.version > previous->version; }));
     ASSERT_EQ(layer->snapshot()->serial, previous->serial);
