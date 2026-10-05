@@ -84,6 +84,7 @@ private slots:
 protected:
     void closeEvent(QCloseEvent* event) override;
     void showEvent(QShowEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
 private:
     friend struct MainWindowSymbolLifecyclePeer;
@@ -98,6 +99,7 @@ private:
     bool subscribeSymbol(const QString& symbol);
     void requestMainSymbol(const QString& symbol);
     void applySubscriptionActions(const QVector<SymbolSubscriptionManager::Action>& actions);
+    void syncWatchlistChartState();
     void startPendingSymbolSwitch(const QString& symbol);
     void abandonPendingSymbolSwitch(const QString& code, const QString& message);
     bool armHeldRetry(const QString& message);
@@ -145,6 +147,7 @@ private:
     class QTimer* m_tpoPagerTimer = nullptr;
     void sendTpoHistoryPage(const std::optional<tpo::HistoryPager::Request>& request);
     ChartDock* m_heatmapDock = nullptr;
+    bool m_wasMaximizedBeforeFullscreen = false;
     StatusBar* m_statusBar = nullptr;
     SecFilingDock* m_secDock = nullptr;
     CopenetFeedDock* m_copenetDock = nullptr;
@@ -165,6 +168,7 @@ private:
     bool m_userSubscribed = false;
     SymbolSubscriptionManager m_symbolSubscriptions;
     QString m_refusedSymbol;
+    QString m_chartSwitchFailureSymbol, m_chartSwitchFailureReason;
     QString m_offlineRequestedSymbol;
     bool m_initialSubscriptionAttempted = false;
     bool m_symbolSelectionRequested = false;

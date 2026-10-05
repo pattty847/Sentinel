@@ -636,10 +636,31 @@ Rectangle {
 
     Item {
         id: priceAxis
+        objectName: "priceAxisControl"
         anchors.fill: priceAxisChrome
         enabled: true
         clip: true
         z: 5
+        activeFocusOnTab: true
+        Accessible.role: Accessible.Pane
+        Accessible.name: "Price axis"
+        Accessible.description: "Drag or scroll to zoom price. Up/Down zoom; Home fits visible prices."
+        Keys.onPressed: function(event) {
+            if (event.key === Qt.Key_Up || event.key === Qt.Key_Down) {
+                unifiedGridRenderer.zoomPriceAt(event.key === Qt.Key_Up ? 120 : -120,
+                                               unifiedGridRenderer.height / 2, unifiedGridRenderer.height)
+                event.accepted = true
+            } else if (event.key === Qt.Key_Home) {
+                unifiedGridRenderer.fitPriceToData()
+                event.accepted = true
+            }
+        }
+        Rectangle {
+            anchors.fill: parent
+            color: "transparent"
+            border.color: uiTheme ? uiTheme.accent : "#72b7e8"
+            visible: priceAxis.activeFocus
+        }
 
         PriceAxisModel {
             id: priceAxisModel
@@ -648,6 +669,7 @@ Rectangle {
         }
 
         MouseArea {
+            id: priceAxisMouse
             anchors.fill: parent
             acceptedButtons: Qt.LeftButton
             hoverEnabled: true
@@ -657,6 +679,7 @@ Rectangle {
             property real lastY: 0
 
             onPressed: function(mouse) {
+                priceAxis.forceActiveFocus()
                 lastY = mouse.y
             }
             onPositionChanged: function(mouse) {
@@ -673,6 +696,9 @@ Rectangle {
             onReleased: {}
             onCanceled: {}
         }
+        ToolTip.visible: priceAxisMouse.containsMouse
+        ToolTip.delay: 550
+        ToolTip.text: "Price axis · drag/scroll to zoom; double-click or Home to fit"
 
         WheelHandler {
             target: null
@@ -701,10 +727,31 @@ Rectangle {
 
     Item {
         id: timeAxis
+        objectName: "timeAxisControl"
         anchors.fill: timeAxisChrome
         enabled: true
         clip: true
         z: 5
+        activeFocusOnTab: true
+        Accessible.role: Accessible.Pane
+        Accessible.name: "Time axis"
+        Accessible.description: "Drag or scroll to zoom time. Left/Right zoom; Home resets the live view."
+        Keys.onPressed: function(event) {
+            if (event.key === Qt.Key_Right || event.key === Qt.Key_Left) {
+                unifiedGridRenderer.zoomTimeAt(event.key === Qt.Key_Right ? 120 : -120,
+                                              unifiedGridRenderer.width / 2, unifiedGridRenderer.width)
+                event.accepted = true
+            } else if (event.key === Qt.Key_Home) {
+                unifiedGridRenderer.resetView()
+                event.accepted = true
+            }
+        }
+        Rectangle {
+            anchors.fill: parent
+            color: "transparent"
+            border.color: uiTheme ? uiTheme.accent : "#72b7e8"
+            visible: timeAxis.activeFocus
+        }
 
         TimeAxisModel {
             id: timeAxisModel
@@ -712,6 +759,7 @@ Rectangle {
         }
 
         MouseArea {
+            id: timeAxisMouse
             anchors.fill: parent
             acceptedButtons: Qt.LeftButton
             hoverEnabled: true
@@ -721,6 +769,7 @@ Rectangle {
             property real lastX: 0
 
             onPressed: function(mouse) {
+                timeAxis.forceActiveFocus()
                 lastX = mouse.x
             }
             onPositionChanged: function(mouse) {
@@ -737,6 +786,9 @@ Rectangle {
             onReleased: {}
             onCanceled: {}
         }
+        ToolTip.visible: timeAxisMouse.containsMouse
+        ToolTip.delay: 550
+        ToolTip.text: "Time axis · drag/scroll to zoom; double-click or Home to reset live view"
 
         WheelHandler {
             target: null
@@ -762,36 +814,99 @@ Rectangle {
         z: 0
     }
 
-    // Auto price scale toggle (TradingView's "A"): lit while the price range follows
-    // the visible candles; a price-axis drag or zoom turns it off.
-    Rectangle {
-        id: autoPriceScaleButton
-        objectName: "autoPriceScaleButton"
+    // Price scale and live-time follow are independent viewport controls. A
+    // price-axis drag turns P off; panning away from the right edge turns L off.
+    Row {
         anchors.centerIn: axisCorner
-        width: Math.min(22, axisCorner.height - 6)
-        height: width
-        radius: 3
+        spacing: 3
         visible: unifiedGridRenderer.gpuHeatmapActive
-        color: unifiedGridRenderer.autoPriceScale ? "#2962ff" : "transparent"
-        border.width: 1
-        border.color: unifiedGridRenderer.autoPriceScale ? "#2962ff"
-                      : (autoPriceScaleMouse.containsMouse ? "#9aa4b2" : "#5a6370")
         z: 6
 
-        Text {
-            anchors.centerIn: parent
-            text: "A"
-            font.pixelSize: 12
-            font.bold: true
-            color: unifiedGridRenderer.autoPriceScale ? "#ffffff" : "#9aa4b2"
+        Rectangle {
+            id: autoPriceScaleButton
+            objectName: "autoPriceScaleButton"
+            width: Math.min(21, axisCorner.height - 6)
+            height: width
+            radius: 3
+            activeFocusOnTab: true
+            color: unifiedGridRenderer.autoPriceScale ? "#2962ff" : "transparent"
+            border.width: 1
+            border.color: activeFocus || autoPriceScaleMouse.containsMouse ? "#9cc8ff" : "#5a6370"
+            Accessible.role: Accessible.Button
+            Accessible.checkable: true
+            Accessible.checked: unifiedGridRenderer.autoPriceScale
+            Accessible.name: "Auto price scale"
+            Accessible.description: "Fit price to visible candles. Press P to toggle. Independent of follow live time."
+            Accessible.onPressAction: unifiedGridRenderer.autoPriceScale = !unifiedGridRenderer.autoPriceScale
+            Text {
+                anchors.centerIn: parent
+                text: "P"
+                font.pixelSize: 11
+                font.bold: true
+                color: unifiedGridRenderer.autoPriceScale ? "#ffffff" : "#9aa4b2"
+            }
+            MouseArea {
+                id: autoPriceScaleMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                    autoPriceScaleButton.forceActiveFocus()
+                    unifiedGridRenderer.autoPriceScale = !unifiedGridRenderer.autoPriceScale
+                }
+            }
+            ToolTip.visible: autoPriceScaleMouse.containsMouse
+            ToolTip.delay: 550
+            ToolTip.text: "P · Auto price scale: fit visible candles"
+            Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_Space || event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                    unifiedGridRenderer.autoPriceScale = !unifiedGridRenderer.autoPriceScale
+                    event.accepted = true
+                }
+            }
         }
-
-        MouseArea {
-            id: autoPriceScaleMouse
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: unifiedGridRenderer.autoPriceScale = !unifiedGridRenderer.autoPriceScale
+        Rectangle {
+            id: followLiveButton
+            objectName: "followLiveButton"
+            width: Math.min(21, axisCorner.height - 6)
+            height: width
+            radius: 3
+            activeFocusOnTab: true
+            color: unifiedGridRenderer.autoScrollEnabled ? "#2962ff" : "transparent"
+            border.width: 1
+            border.color: activeFocus || followLiveMouse.containsMouse ? "#9cc8ff" : "#5a6370"
+            Accessible.role: Accessible.Button
+            Accessible.checkable: true
+            Accessible.checked: unifiedGridRenderer.autoScrollEnabled
+            Accessible.name: "Follow live time"
+            Accessible.description: "Keep the newest time at the right edge. Press A to toggle. Independent of auto price scale."
+            Accessible.onPressAction: unifiedGridRenderer.enableAutoScroll(!unifiedGridRenderer.autoScrollEnabled)
+            Text {
+                anchors.centerIn: parent
+                text: "L"
+                font.pixelSize: 11
+                font.bold: true
+                color: unifiedGridRenderer.autoScrollEnabled ? "#ffffff" : "#9aa4b2"
+            }
+            MouseArea {
+                id: followLiveMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                    followLiveButton.forceActiveFocus()
+                    unifiedGridRenderer.enableAutoScroll(!unifiedGridRenderer.autoScrollEnabled)
+                }
+            }
+            ToolTip.visible: followLiveMouse.containsMouse
+            ToolTip.delay: 550
+            ToolTip.text: "A · Follow live time: keep newest data in view"
+            Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_Space || event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                    unifiedGridRenderer.enableAutoScroll(!unifiedGridRenderer.autoScrollEnabled)
+                    event.accepted = true
+                }
+            }
         }
     }
 
@@ -1017,6 +1132,7 @@ Rectangle {
         switch(event.key) {
             case Qt.Key_R: unifiedGridRenderer.resetZoom(); event.accepted = true; break;
             case Qt.Key_A: unifiedGridRenderer.enableAutoScroll(!unifiedGridRenderer.autoScrollEnabled); event.accepted = true; break;
+            case Qt.Key_P: unifiedGridRenderer.autoPriceScale = !unifiedGridRenderer.autoPriceScale; event.accepted = true; break;
             case Qt.Key_Plus:
             case Qt.Key_Equal: unifiedGridRenderer.zoomIn(); event.accepted = true; break;
             case Qt.Key_Minus:

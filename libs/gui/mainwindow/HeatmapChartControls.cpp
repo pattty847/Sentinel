@@ -37,7 +37,10 @@ void HeatmapChartControls::setRenderer(UnifiedGridRenderer *renderer) {
     if (m_renderer == renderer) return;
     if (m_renderer) disconnect(m_renderer, nullptr, this, nullptr);
     m_renderer = renderer;
-    if (!renderer) return;
+    if (!renderer) {
+        syncNow();
+        return;
+    }
     renderer->setHeatmapTickMemory(m_model->manualTicks());
     renderer->setHeatmapChartSettings(m_model->settings());
     renderer->setCandleAppearance(m_model->settings());
@@ -77,8 +80,9 @@ void HeatmapChartControls::setToolbar(TopToolbar *toolbar) {
     connect(toolbar, &TopToolbar::tpoLayoutSelected, this, [this](const QString &layout) {
         if (m_renderer) m_renderer->setTpoLayout(layout);
     });
-    connect(toolbar->chartTypeCombo(), QOverload<int>::of(&QComboBox::activated), this,
-            [this](int index) { requestCandleStyle(index); });
+    connect(toolbar, &TopToolbar::chartTypeSelected, this, [this, toolbar](const QString &style) {
+        requestCandleStyle(toolbar->chartTypeCombo()->findText(style));
+    });
     buildChartMenu();
     syncNow();
 }
@@ -148,6 +152,9 @@ void HeatmapChartControls::buildChartMenu() {
     QMenu *menu = m_toolbar ? m_toolbar->chartMenu() : nullptr;
     if (!menu) return;
     menu->clear();
+    // clear() removes actions but retains submenu QObjects. Rebuilding for host
+    // hooks must not leave findChild() pointing to an old, disabled layout menu.
+    qDeleteAll(menu->findChildren<QMenu *>(QString(), Qt::FindDirectChildrenOnly));
     disconnect(menu, &QMenu::aboutToShow, this, nullptr);
     connect(menu, &QMenu::aboutToShow, this, &HeatmapChartControls::refreshChartMenu);
     auto add = [&](QMenu *parent, const QString &text, const char *name, std::function<void()> fn) {
@@ -162,6 +169,19 @@ void HeatmapChartControls::buildChartMenu() {
         m_hooks.openSettings ? std::function<void()>([this] { m_hooks.openSettings("Chart"); }) : nullptr);
     add(menu, "Heatmap settings...", "chartMenuHeatmapSettings",
         m_hooks.openSettings ? std::function<void()>([this] { m_hooks.openSettings("Look"); }) : nullptr);
+    QMenu *palettes = menu->addMenu("Heatmap palette");
+    palettes->setObjectName("chartMenuPalettes");
+    auto *paletteGroup = new QActionGroup(palettes);
+    for (const QString &preset : {QStringLiteral("Electric"), QStringLiteral("Fire"), QStringLiteral("Ocean"),
+                                  QStringLiteral("Monochrome"), QStringLiteral("Matrix")}) {
+        QAction *a = add(palettes, preset, "chartMenuPalettePreset", [this, preset] {
+            if (const auto error = m_model->apply({{"palettePreset", preset}}); !error.isEmpty())
+                sLog_Warning("Palette preset rejected: " << error);
+        });
+        a->setCheckable(true);
+        a->setData(preset);
+        paletteGroup->addAction(a);
+    }
     menu->addSeparator();
     QAction *trades = add(menu, "Trades", "chartMenuTrades", [this] {
         const auto error = m_model->apply({{"showTrades", !m_model->settings().showTrades}});
@@ -223,6 +243,27 @@ void HeatmapChartControls::buildChartMenu() {
     add(layouts, "Restore layout...", "chartMenuRestoreLayout", hook(m_hooks.restoreLayout));
     add(layouts, "Reset to default layout", "chartMenuResetLayout", hook(m_hooks.resetLayout));
     add(menu, "Font...", "chartMenuFont", hook(m_hooks.fontSettings));
+    QMenu *debug = menu->addMenu("Diagnostics");
+    debug->setObjectName("chartMenuDiagnostics");
+    QAction *telemetry = add(debug, "Heatmap telemetry", "chartMenuTelemetry", [this] {
+        requestTelemetryVisible(!m_model->settings().showTelemetry);
+    });
+    telemetry->setCheckable(true);
+    for (const auto &[text, property] : {
+             std::pair{"Frame and GPU statistics", "showGpuStatsOverlay"},
+             std::pair{"Data pipeline", "showDataPipelineOverlay"},
+             std::pair{"Render strategy", "showRenderStrategyOverlay"},
+             std::pair{"Viewport math", "showViewportMathOverlay"},
+             std::pair{"Memory and cache", "showMemoryCacheOverlay"},
+             std::pair{"Mode flags", "showModeFlagsOverlay"}}) {
+        QAction *overlay = add(debug, text, "chartMenuDebugOverlay", [this, property] {
+            if (m_renderer) m_renderer->setProperty(property, !m_renderer->property(property).toBool());
+        });
+        overlay->setCheckable(true);
+        overlay->setData(property);
+    }
+    add(debug, "Advanced settings...", "chartMenuDebugSettings",
+        m_hooks.openSettings ? std::function<void()>([this] { m_hooks.openSettings("Debug"); }) : nullptr);
     refreshChartMenu();
 }
 
@@ -232,9 +273,21 @@ void HeatmapChartControls::refreshChartMenu() {
     const auto &s = m_model->settings();
     if (auto* sizes = menu->findChild<QMenu*>("chartMenuTradeSize"))
         sizes->menuAction()->setEnabled(modeState().gpu);
+    if (auto *palettes = menu->findChild<QMenu *>("chartMenuPalettes"))
+        palettes->menuAction()->setEnabled(modeState().heatmap);
     for (QAction *a : menu->findChildren<QAction *>()) {
         const QString name = a->objectName();
-        if (name == "chartMenuTrades") {
+        if (name == "chartMenuPalettePreset") {
+            a->setChecked(a->data().toString() == QString::fromStdString(s.palettePreset));
+        } else if (name == "chartMenuTelemetry") {
+            a->setChecked(s.showTelemetry);
+            a->setEnabled(bool(m_dock));
+            a->setToolTip(m_dock ? "Show detailed heatmap diagnostics" : "Heatmap telemetry is unavailable without its dock");
+        } else if (name == "chartMenuDebugOverlay") {
+            a->setChecked(m_renderer && m_renderer->property(a->data().toString().toLatin1().constData()).toBool());
+            a->setEnabled(bool(m_renderer));
+            a->setToolTip(m_renderer ? "Show renderer diagnostics on the chart" : "No chart is attached");
+        } else if (name == "chartMenuTrades") {
             a->setChecked(s.showTrades);
             a->setEnabled(modeState().gpu);
         } else if (name == "chartMenuTradeSizePreset") {
@@ -359,6 +412,10 @@ void HeatmapChartControls::syncNow() {
         m_toolbar->setLiquidityRange(range.valid ? range.lo : 0, range.valid ? range.hi : 0, s.sensitivityMin,
                                      s.sensitivityMax);
         m_toolbar->setLabelOptions(s.showLabels, s.labelCurrency == "usd");
+        m_toolbar->setColorPreset(QString::fromStdString(s.palettePreset));
+        m_toolbar->chartTypeCombo()->setEnabled(bool(m_renderer));
+        m_toolbar->tpoSessionCombo()->setEnabled(bool(m_renderer));
+        m_toolbar->tpoLayoutCombo()->setEnabled(bool(m_renderer));
         if (m_renderer) {
             m_toolbar->setTpoState(m_renderer->tpoSessionType(), m_renderer->tpoLayout());
             if (auto *combo = m_toolbar->chartTypeCombo(); combo && combo->currentIndex() != m_renderer->candleStyle()) {

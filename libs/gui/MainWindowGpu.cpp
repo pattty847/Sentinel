@@ -1,6 +1,7 @@
 #include <QQuickView>
 #include <QTabWidget>
 #include <QLabel>
+#include <QDoubleSpinBox>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QMenuBar>
@@ -11,6 +12,7 @@
 #include <QMessageBox>
 #include <QCloseEvent>
 #include <QShowEvent>
+#include <QWindowStateChangeEvent>
 #include <QStatusBar>
 #include <QPainter>
 #include <QElapsedTimer>
@@ -58,6 +60,7 @@
 #include "protocol/SentinelStreamClientTransport.hpp"
 #include "mainwindow/AgentApiSnapshots.hpp"
 #include "datasources/RemoteGridDataSource.hpp"
+#include "models/MarketHealth.hpp"
 #include "TradeInputManager.hpp"
 #include "config/GuiConfigStore.hpp"
 #include "themes/ThemeBridge.hpp"
@@ -86,6 +89,55 @@
 #include <unordered_map>
 
 namespace {
+std::function<MarketHealth::ChartFacts()> chartHealthProvider(UnifiedGridRenderer *renderer, MarketHealth *health) {
+    QPointer<UnifiedGridRenderer> chart = renderer;
+    QPointer<MarketHealth> model = health;
+    return [chart, model] {
+        MarketHealth::ChartFacts facts;
+        if (!chart || !model || model->activeSymbol().isEmpty() || !chart->gpuHeatmapActive()
+            || !chart->heatmapLayerEnabled()) return facts;
+        const auto *layer = chart->gpuHeatmapLayer();
+        if (!layer || !layer->active() || !layer->controller()) return facts;
+        facts.symbol = model->activeSymbol();
+        facts.coverage = "Viewport history coverage unknown";
+        const auto snapshot = layer->snapshot();
+        if (QString::fromStdString(layer->symbol()) != facts.symbol || !snapshot
+            || snapshot->symbol.empty()) return facts;
+        if (snapshot->symbol != layer->symbol() || snapshot->tfMs != layer->tfMs()) {
+            facts.coverage += "; current symbol/timeframe snapshot unavailable";
+            return facts;
+        }
+        QStringList reasons;
+        const QString indicator = layer->resolutionIndicator();
+        if (!indicator.isEmpty()) {
+            facts.partial = true;
+            reasons << indicator;
+        }
+        if (!snapshot->refused.empty()) {
+            facts.partial = true;
+            reasons << "Heatmap spans refused by the CPU capacity limit";
+        }
+        facts.reason = reasons.join("; ");
+        // Tile atoms are untagged and stored individually, with frames advancing
+        // at prepare entry. Neither frame delays nor matching snapshot serial/
+        // version can establish a coherent current report. Holding/loading and
+        // renderer partial/unavailable therefore remain unknown, including
+        // loading hatches that can represent denied or terminally failed work.
+        // Snapshot availability and tile completeness do not prove coverage.
+        return facts;
+    };
+}
+
+void setLiquidityRangeUnits(HeatmapSettingsDialog *dialog, const QString &symbol) {
+    const QString baseUnit = symbol.section('-', 0, 0);
+    for (const char *name : {"sensitivityMin", "sensitivityMax"}) {
+        if (auto *spin = dialog->findChild<QDoubleSpinBox *>(name)) {
+            spin->setSuffix(QStringLiteral(" %1").arg(baseUnit));
+            spin->setAccessibleDescription(QStringLiteral("Base-asset size per heatmap cell, in %1; independent of label currency").arg(baseUnit));
+        }
+    }
+}
+
 int timeframeMsFromLabel(const QString& label) {
     static const std::unordered_map<std::string, int> map{
         {"1s", 1000},
@@ -128,6 +180,7 @@ MainWindowGPU::MainWindowGPU(QWidget* parent, int symbolSwitchTimeoutMs)
         [client = remote->streamClient()](QObject *) {
             return new protocol::SentinelStreamClientTransport(*client);
         }, m_heatmapSettings->budgets());
+    remote->marketHealth()->observeHeatmapFetcher(m_heatmapDataService->fetcher());
     // Budgets tab: the process tiers apply to the live service at once.
     m_heatmapSettings->setBudgetSink([this](const heatmap::HeatmapBudgets &budgets) {
         return m_heatmapDataService && m_heatmapDataService->setBudgets(budgets);
@@ -270,6 +323,10 @@ MainWindowGPU::MainWindowGPU(QWidget* parent, int symbolSwitchTimeoutMs)
 }
 
 MainWindowGPU::~MainWindowGPU() {
+    if (auto *remote = dynamic_cast<RemoteGridDataSource *>(m_dataSource.get())) {
+        remote->marketHealth()->setChartProvider({});
+        remote->marketHealth()->observeHeatmapFetcher(nullptr);
+    }
     // Members (the heatmap data service) die before the base QWidget deletes the
     // docks and the chart: detach the chart's GPU layer while both are alive.
     if (auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr)
@@ -304,6 +361,12 @@ void MainWindowGPU::setupUI() {
     addDockWidget(Qt::RightDockWidgetArea, m_heatmapTelemetryDock);
     m_heatmapTelemetryDock->hide();
     m_heatmapControls->setTelemetryDock(m_heatmapTelemetryDock);
+    if (auto *remote = dynamic_cast<RemoteGridDataSource *>(m_dataSource.get())) {
+        auto *health = remote->marketHealth();
+        m_statusBar->setMarketHealth(health);
+        m_heatmapTelemetryDock->setMarketHealth(health);
+        connect(this, &MainWindowGPU::symbolChanged, health, &MarketHealth::setActiveSymbol);
+    }
     if (m_screenerDock) {
         if (auto* remote = dynamic_cast<RemoteGridDataSource*>(m_dataSource.get())) {
             m_screenerDock->setStreamClient(remote->streamClient());
@@ -312,6 +375,8 @@ void MainWindowGPU::setupUI() {
                 this, &MainWindowGPU::onAssetSymbolSelected);
     }
     if (m_watchlistDock) {
+        m_watchlistDock->setCryptoAvailability({}, false, "No authoritative runtime market catalog; presets are navigation suggestions");
+        syncWatchlistChartState();
         connect(m_watchlistDock, &WatchlistDock::symbolSelected,
                 this, &MainWindowGPU::onAssetSymbolSelected);
     }
@@ -328,6 +393,7 @@ void MainWindowGPU::setupUI() {
     statusBar()->addPermanentWidget(m_statusBar);
     statusBar()->setStyleSheet("QStatusBar { background-color: #1e1e1e; border-top: 1px solid #333; }");
     connect(this, &MainWindowGPU::symbolChanged, m_secDock, &SecFilingDock::onSymbolChanged);
+    connect(this, &MainWindowGPU::symbolChanged, m_heatmapDock, &ChartDock::onSymbolChanged);
     if (m_orderBookDock) {
         connect(this, &MainWindowGPU::symbolChanged, m_orderBookDock, &OrderBookDock::onSymbolChanged);
     }
@@ -411,6 +477,31 @@ void MainWindowGPU::setupUI() {
         connect(m_heatmapDock->toolbar(), &TopToolbar::settingsRequested, this, [this]() {
             if (auto* dialog = openHeatmapSettingsDialog()) dialog->activateWindow();
         });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::liquidityRangeSettingsRequested, this, [this]() {
+            if (auto* dialog = openHeatmapSettingsDialog()) {
+                for (int i = 0; i < dialog->tabs()->count(); ++i)
+                    if (dialog->tabs()->tabText(i) == QLatin1String("Look")) dialog->tabs()->setCurrentIndex(i);
+                dialog->activateWindow();
+            }
+        });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::quickSearchRequested, this, [this]() {
+            if (!m_symbolInput) return;
+            m_heatmapDock->show();
+            m_heatmapDock->raise();
+            m_symbolInput->setFocus(Qt::ShortcutFocusReason);
+            m_symbolInput->selectAll();
+        });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::layoutsRequested,
+                m_heatmapDock->toolbar(), &TopToolbar::showLayoutsMenu);
+        connect(m_heatmapDock->toolbar(), &TopToolbar::fullscreenToggled, this, [this]() {
+            if (isFullScreen()) {
+                if (m_wasMaximizedBeforeFullscreen) showMaximized();
+                else showNormal();
+            } else {
+                m_wasMaximizedBeforeFullscreen = isMaximized();
+                showFullScreen();
+            }
+        });
         connect(m_heatmapDock->toolbar(), &TopToolbar::screenshotRequested, this, [this]() { saveChartScreenshot(); });
         // The chart settings menu (gear): the actions this window owns.
         HeatmapChartControls::MenuHooks hooks;
@@ -472,11 +563,14 @@ HeatmapSettingsDialog* MainWindowGPU::openHeatmapSettingsDialog() {
         m_heatmapSettingsDialog = new HeatmapSettingsDialog(m_heatmapSettings.get(), renderer, this);
         m_heatmapSettingsDialog->setTpoDefaults(GuiConfigStore::instance().clientConfig().tpo);
         m_heatmapControls->setDialog(m_heatmapSettingsDialog);
+        connect(this, &MainWindowGPU::symbolChanged, m_heatmapSettingsDialog,
+                [dialog = m_heatmapSettingsDialog](const QString &symbol) { setLiquidityRangeUnits(dialog, symbol); });
     } else {
         m_heatmapSettingsDialog->setRenderer(renderer);
         m_heatmapSettingsDialog->refreshFromModel();
     }
     m_heatmapSettingsDialog->show();
+    setLiquidityRangeUnits(m_heatmapSettingsDialog, m_currentSymbol);
     m_heatmapSettingsDialog->raise();
     return m_heatmapSettingsDialog;
 }
@@ -859,6 +953,7 @@ void MainWindowGPU::onAssetSymbolSelected(const QString& symbol, const QString& 
 void MainWindowGPU::onSubscribe() {
     QString symbol = m_symbolInput->text().trimmed().toUpper();
     if (!subscribeSymbol(symbol)) {
+        if (m_chartSwitchFailureSymbol == symbol && !m_chartSwitchFailureReason.isEmpty()) return;
         sLog_App("ui: subscribe rejected, invalid symbol=" << symbol);
         QMessageBox::warning(this, "Invalid Input", "Enter a valid symbol like BTC-USD.");
     }
@@ -869,6 +964,11 @@ bool MainWindowGPU::subscribeSymbol(const QString& symbol) {
     if (!pattern.match(symbol).hasMatch()) return false;
     if (!AgentHostMode::symbolAllowed(symbol)) { // --agent-host: no upstream subscriptions beyond the allowlist
         sLog_Warning("agent-host: symbol refused: symbol=" << symbol);
+        m_chartSwitchFailureSymbol = symbol;
+        m_chartSwitchFailureReason = QStringLiteral("%1 is excluded by this GUI host session's symbol policy; market availability remains unverified").arg(symbol);
+        syncWatchlistChartState();
+        statusBar()->showMessage(m_chartSwitchFailureReason);
+        if (m_symbolInput) m_symbolInput->setText(m_currentSymbol);
         return false;
     }
     sLog_App("ui: subscribe symbol=" << symbol << " prev=" << m_currentSymbol
@@ -876,6 +976,8 @@ bool MainWindowGPU::subscribeSymbol(const QString& symbol) {
     m_symbolSelectionRequested = true;
     m_initialSubscriptionAttempted = true;
     m_refusedSymbol.clear();
+    m_chartSwitchFailureSymbol.clear();
+    m_chartSwitchFailureReason.clear();
     if (m_guiApiServer && m_pendingSymbolSwitch != symbol)
         m_guiApiServer->supersedePendingSymbolSwitch();
     m_heldRetryTimer->stop();
@@ -889,6 +991,7 @@ bool MainWindowGPU::subscribeSymbol(const QString& symbol) {
         statusBar()->showMessage(QStringLiteral("Waiting to connect for %1...").arg(symbol));
     }
     if (m_symbolInput) m_symbolInput->setText(symbol);
+    syncWatchlistChartState();
     return true;
 }
 
@@ -905,17 +1008,30 @@ void MainWindowGPU::requestMainSymbol(const QString& symbol) {
         m_pendingSymbolSwitch.clear();
         m_symbolSwitchTimer->stop();
     }
+    syncWatchlistChartState();
+}
+
+void MainWindowGPU::syncWatchlistChartState() {
+    const QString held = m_symbolSubscriptions.held("main");
+    const QString pending = !m_pendingSymbolSwitch.isEmpty() ? m_pendingSymbolSwitch
+        : m_connected && !m_userSubscribed && m_symbolSubscriptions.requested(held) ? held : QString{};
+    if (m_watchlistDock)
+        m_watchlistDock->setChartSwitchState(held, pending,
+                                             m_chartSwitchFailureSymbol, m_chartSwitchFailureReason);
 }
 
 void MainWindowGPU::startPendingSymbolSwitch(const QString& symbol) {
     m_pendingSymbolSwitch = symbol;
     m_symbolSwitchTimer->start(m_symbolSwitchTimeoutMs);
     statusBar()->showMessage(QStringLiteral("Switching to %1...").arg(symbol));
+    syncWatchlistChartState();
 }
 
 void MainWindowGPU::abandonPendingSymbolSwitch(const QString& code, const QString& message) {
     const QString symbol = m_pendingSymbolSwitch;
     if (symbol.isEmpty()) return;
+    m_chartSwitchFailureSymbol = symbol;
+    m_chartSwitchFailureReason = message;
     m_pendingSymbolSwitch.clear();
     m_symbolSwitchTimer->stop();
     if (m_connected) applySubscriptionActions(m_symbolSubscriptions.abandon("main"));
@@ -924,6 +1040,7 @@ void MainWindowGPU::abandonPendingSymbolSwitch(const QString& code, const QStrin
     if (m_symbolInput) m_symbolInput->setText(m_currentSymbol);
     if (m_guiApiServer) m_guiApiServer->failSymbolSwitch(symbol, code, message);
     if (!armHeldRetry(message)) statusBar()->showMessage(message);
+    syncWatchlistChartState();
 }
 
 bool MainWindowGPU::armHeldRetry(const QString& message) {
@@ -944,6 +1061,8 @@ void MainWindowGPU::retryHeldSymbol() {
     const QString symbol = m_symbolSubscriptions.held("main");
     if (!m_connected || symbol.isEmpty() || !m_pendingSymbolSwitch.isEmpty()) return;
     statusBar()->showMessage(QStringLiteral("Reconnecting %1...").arg(symbol));
+    m_chartSwitchFailureSymbol.clear();
+    m_chartSwitchFailureReason.clear();
     applySubscriptionActions(m_symbolSubscriptions.request("main", symbol));
 }
 
@@ -967,6 +1086,8 @@ void MainWindowGPU::applySubscriptionActions(const QVector<SymbolSubscriptionMan
             m_heldRetryAttempt = 0;
             m_userSubscribed = true;
             m_refusedSymbol.clear();
+            m_chartSwitchFailureSymbol.clear();
+            m_chartSwitchFailureReason.clear();
             if (m_qmlController) m_qmlController->updateSymbolInContext(action.symbol);
             propagateSymbolChange(action.symbol);
             if (m_symbolInput) m_symbolInput->setText(action.symbol);
@@ -986,6 +1107,7 @@ void MainWindowGPU::applySubscriptionActions(const QVector<SymbolSubscriptionMan
             break;
         }
     }
+    syncWatchlistChartState();
 }
 
 void MainWindowGPU::selectTimeframe(int ms) {
@@ -1187,6 +1309,17 @@ void MainWindowGPU::closeEvent(QCloseEvent* event) {
     QMainWindow::closeEvent(event);
 }
 
+void MainWindowGPU::changeEvent(QEvent* event) {
+    QMainWindow::changeEvent(event);
+    if (event->type() == QEvent::WindowStateChange) {
+        const auto oldState = static_cast<QWindowStateChangeEvent *>(event)->oldState();
+        if (isFullScreen() && !(oldState & Qt::WindowFullScreen))
+            m_wasMaximizedBeforeFullscreen = oldState & Qt::WindowMaximized;
+        if (m_heatmapDock && m_heatmapDock->toolbar())
+            m_heatmapDock->toolbar()->setFullscreen(isFullScreen());
+    }
+}
+
 void MainWindowGPU::showEvent(QShowEvent* event) {
     QMainWindow::showEvent(event);
 
@@ -1344,6 +1477,8 @@ void MainWindowGPU::connectMarketDataSignals() {
     // S6b: the GPU heatmap layer shares the process service (attached before the
     // stream client connected, INV-088); the chart settings pick the renderer.
     unifiedGridRenderer->setHeatmapService(m_heatmapDataService.get());
+    if (auto *remote = dynamic_cast<RemoteGridDataSource *>(m_dataSource.get()))
+        remote->marketHealth()->setChartProvider(chartHealthProvider(unifiedGridRenderer, remote->marketHealth()));
     // S6c: the controls apply the tick memory, settings and renderer, then keep the
     // chart, toolbar, dialog and telemetry dock on the settings model.
     m_heatmapControls->setRenderer(unifiedGridRenderer);
@@ -1478,6 +1613,8 @@ void MainWindowGPU::connectMarketDataSignals() {
                     && m_symbolSubscriptions.held("main") == m_currentSymbol) {
                     m_userSubscribed = true;
                     m_refusedSymbol.clear();
+                    m_chartSwitchFailureSymbol.clear();
+                    m_chartSwitchFailureReason.clear();
                     m_heldRetryTimer->stop();
                     m_heldRetryAttempt = 0;
                     if (m_pendingSymbolSwitch.isEmpty() && m_refusedSymbol.isEmpty())
@@ -1485,6 +1622,7 @@ void MainWindowGPU::connectMarketDataSignals() {
                     requestConfiguredHistoryForSymbol(m_currentSymbol);
                     requestTpoHistoryForSymbol(m_currentSymbol);
                 }
+                syncWatchlistChartState();
             });
     connect(m_dataSource.get(), &IGridDataSource::subscriptionRefused, this,
             [this](const QString& symbol, int cap, const QString& message) {
@@ -1501,11 +1639,16 @@ void MainWindowGPU::connectMarketDataSignals() {
                 applySubscriptionActions(actions);
                 if (pendingRefused) {
                     const QString refusedSymbol = actions.front().symbol;
+                    m_chartSwitchFailureSymbol = refusedSymbol;
+                    m_chartSwitchFailureReason = message;
                     if (m_guiApiServer) m_guiApiServer->failSymbolSwitch(refusedSymbol, "connection_cap", message);
                     if (!armHeldRetry(message)) statusBar()->showMessage(message);
                 } else if (heldReconnect && m_pendingSymbolSwitch.isEmpty()) {
+                    m_chartSwitchFailureSymbol = normalized;
+                    m_chartSwitchFailureReason = message;
                     armHeldRetry(message);
                 }
+                syncWatchlistChartState();
             });
     connect(m_dataSource.get(), &IGridDataSource::errorOccurred,
             this, [this](const QString& error) {
@@ -1563,6 +1706,8 @@ void MainWindowGPU::onConnectionStatusChanged(bool connected) {
         m_tpoPager.cancel();  // replies to in-flight pages are gone; reconnect restarts
     }
     if (connected && !wasConnected) {
+        m_chartSwitchFailureSymbol.clear();
+        m_chartSwitchFailureReason.clear();
         applySubscriptionActions(m_symbolSubscriptions.reconnect());
         if (m_offlineRequestedSymbol.isEmpty() && m_symbolInput)
             m_symbolInput->setText(m_currentSymbol);
@@ -1576,6 +1721,7 @@ void MainWindowGPU::onConnectionStatusChanged(bool connected) {
             requestMainSymbol(m_currentSymbol);
         }
     }
+    syncWatchlistChartState();
 }
 
 bool MainWindowGPU::validateComponents() {

@@ -130,6 +130,12 @@ void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
         rightAnchor = docks.secDock;
     }
 
+    // In a compact default workspace, the DOM becomes a side tab so the chart
+    // keeps a usable plot width. Saved layouts and later manual splits are left
+    // alone; this applies only while arranging/resetting the default layout.
+    if (rightAnchor && docks.orderBookDock && m_mainWindow->width() < 1200)
+        m_mainWindow->tabifyDockWidget(rightAnchor, docks.orderBookDock);
+
     // Remaining right-column tabs: Screener, StockChart, PaperTrading
     auto tabifyRight = [&](QDockWidget* dock) {
         if (!dock) return;
@@ -160,9 +166,11 @@ void LayoutOrchestrator::applyDockConstraints(const DockWidgets& docks) {
     };
     
     const QSize fallback(260, 160);
-    applyMinimum(docks.heatmapDock,      QSize(420, 300));
+    applyMinimum(docks.heatmapDock,      QSize(480, 300));
     applyMinimum(docks.orderBookDock,    QSize(280, 360));
+    const int railMaximum = docks.watchlistDock ? docks.watchlistDock->maximumWidth() : QWIDGETSIZE_MAX;
     applyMinimum(docks.watchlistDock,    QSize(320, 360));
+    if (docks.watchlistDock) docks.watchlistDock->setMaximumWidth(railMaximum);
     applyMinimum(docks.secDock,          QSize(440, 380));
     applyMinimum(docks.screenerDock,     QSize(360, 280));
     applyMinimum(docks.stockChartDock,   QSize(360, 280));
@@ -185,8 +193,14 @@ void LayoutOrchestrator::setDockSizes(const DockWidgets& docks) {
         int rightWidth = std::max(320, rightAnchor->minimumWidth());
         for (auto* tab : m_mainWindow->tabifiedDockWidgets(rightAnchor))
             if (!tab->isHidden()) rightWidth = std::max(rightWidth, tab->minimumWidth());
+        if (m_mainWindow->tabifiedDockWidgets(rightAnchor).contains(docks.orderBookDock)) {
+            const int chartWidth = std::max(480, m_mainWindow->width() - rightWidth - 8);
+            m_mainWindow->resizeDocks({docks.heatmapDock, rightAnchor},
+                                     {chartWidth, rightWidth}, Qt::Horizontal);
+            return;
+        }
         const int domWidth = 260;
-        const int chartWidth = std::max(420, m_mainWindow->width() - rightWidth - domWidth - 12);
+        const int chartWidth = std::max(480, m_mainWindow->width() - rightWidth - domWidth - 12);
         m_mainWindow->resizeDocks({docks.heatmapDock, docks.orderBookDock, rightAnchor},
                                  {chartWidth, domWidth, rightWidth}, Qt::Horizontal);
     }

@@ -56,9 +56,9 @@ public:
 
     // The toolbar adapts to the chart's active layers (owner request 2026-10-02).
     // controlVisibility() is the ONE place the rules live:
-    // - heatmap-only (tick selector, palette, liquidity labels and range): the
-    //   heatmap layer is on; the range slider and the Labels toggle in gpu mode,
-    //   the legacy threshold slider in legacy mode (the currency combo in both);
+    // - heatmap-only: tick and range (GPU) or threshold (legacy);
+    // - palette and label appearance: the gear menu, leaving the primary strip
+    //   for navigation and data controls;
     // - candle style: candles are on;
     // - TPO session: TPO or volume profile is on (the profile follows the TPO
     //   session); TPO layout: TPO is on.
@@ -96,7 +96,12 @@ public:
     // The chart settings menu (gear): one entry point for chart-level settings.
     QToolButton *chartMenuButton() const { return m_chartMenuButton; }
     QMenu *chartMenu() const { return m_chartMenu; }
+    QToolButton *controlsButton() const { return m_controlsButton; }
+    QMenu *controlsMenu() const { return m_controlsMenu; }
     QComboBox *chartTypeCombo() const { return m_chartTypeCombo; }
+    void setBaseAssetSymbol(const QString &symbol);
+    void showLayoutsMenu();
+    void setFullscreen(bool fullscreen);
 
 signals:
     void subscribeRequested();
@@ -111,6 +116,7 @@ signals:
     void indicatorsRequested();
     void layoutsRequested();
     void settingsRequested();
+    void liquidityRangeSettingsRequested();
     void quickSearchRequested();
     void fullscreenToggled();
     void screenshotRequested();
@@ -128,6 +134,9 @@ private:
     QAction* addIconAction(const QString& iconPath, const QString& text, const QString& tooltip);
     QToolButton* addIconButton(const QString& iconPath, const QString& tooltip);
     void applyVisibility();
+    void buildControlsMenu();
+    void refreshRangeLabel();
+    void refreshControlsMenu();
 
     QLineEdit* m_symbolSearch = nullptr;
     QComboBox* m_timeframeCombo = nullptr;
@@ -153,9 +162,17 @@ private:
     QComboBox* m_tpoLayoutCombo = nullptr;
     QToolButton* m_chartMenuButton = nullptr;
     QMenu* m_chartMenu = nullptr;
+    QToolButton* m_controlsButton = nullptr;
+    QMenu* m_controlsMenu = nullptr;
+    QMenu* m_tickMenu = nullptr;
+    QAction* m_rangeMenuAction = nullptr;
+    QAction* m_indicatorsAction = nullptr;
+    QAction* m_layoutsAction = nullptr;
+    QAction* m_fullscreenAction = nullptr;
+    QString m_baseAssetSymbol = "BTC";
     ModeState m_mode;
     // Toolbar actions of the widgets above (a toolbar widget hides with its action).
-    QAction *m_tickModeAction = nullptr, *m_tickPresetAction = nullptr, *m_tickVeilAction = nullptr;
+    QAction *m_tickLabelAction = nullptr, *m_tickModeAction = nullptr, *m_tickPresetAction = nullptr, *m_tickVeilAction = nullptr;
     QAction *m_chartTypeAction = nullptr, *m_paletteAction = nullptr;
     QAction *m_liqLabelAction = nullptr, *m_modeLabelAction = nullptr, *m_modeComboAction = nullptr;
     QAction *m_labelsAction = nullptr, *m_rangeAction = nullptr, *m_rangeLabelAction = nullptr;

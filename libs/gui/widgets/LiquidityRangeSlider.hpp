@@ -21,6 +21,7 @@ public:
     void setDomain(double lo, double hi);
     // The handles (no signal). Invalid values are ignored.
     void setValues(double low, double high);
+    void setBaseUnit(const QString &unit);
     double low() const { return low_; }
     double high() const { return high_; }
     // The ends drawn now (the domain widened to the handles).
@@ -43,6 +44,9 @@ protected:
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
+    void focusInEvent(QFocusEvent *event) override;
+    void focusOutEvent(QFocusEvent *event) override;
 
 private:
     enum class Handle { None, Low, High };
@@ -54,5 +58,7 @@ private:
     double domainLo_ = 0, domainHi_ = 0;
     double low_ = 0.05, high_ = 50;
     Handle active_ = Handle::None;
+    Handle focusedHandle_ = Handle::Low;
     double frozenLo_ = 0, frozenHi_ = 0; // the ends at the press
+    QString baseUnit_ = "BTC";
 };

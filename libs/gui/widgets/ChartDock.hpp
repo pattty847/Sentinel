@@ -23,6 +23,7 @@ public:
     explicit ChartDock(QWidget* parent = nullptr);
     void buildUi() override;
     QSize minimumSizeHint() const override;
+    void onSymbolChanged(const QString &symbol) override;
     
     QWidget* qmlContainer() const { return m_qmlContainer; }
     QQuickView* qquickView() const { return m_qquickView; }
@@ -42,4 +43,3 @@ private:
     QLineEdit* m_symbolInput = nullptr;
     QPushButton* m_subscribeButton = nullptr;
 };
-
