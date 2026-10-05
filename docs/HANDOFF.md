@@ -62,3 +62,7 @@ after a secret scan (never force), keep `docs/STATUS.md` current after every lan
 
 When the owner says Claude is back: make sure `docs/STATUS.md` reflects everything, list anything half-done
 here, and stop dispatching.
+
+## Owner interim review override (2026-10-04, after live tick deployment)
+
+Claude weekly fell 3% -> 2% across Fable review; Claude calls are stopped. The owner explicitly authorized different GPT model reviews until Claude returns: Sol reviews Astra-authored branches, Astra reviews Sol-authored branches. Codex reset credit is visible at 100% remaining. Tick server deployed `c5f3dbe`, four live DOM products validated; current details and recording-format limitation are in STATUS.md. First three wave 2 writers are active, W2b alone owns hubs. Preserve queued validation, visual owner approval, serial landings/pushes, and separate owner-present deployment/slice D gates.

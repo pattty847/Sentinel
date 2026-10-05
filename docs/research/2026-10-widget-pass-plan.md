@@ -46,6 +46,8 @@ W2b remains the sole hub-file owner. Other branches declare any required hub hoo
 Dispatch at most three writers; start the fourth only after a slot is free. Fable reviews each branch while the
 budget gate permits; stop Claude reviews and notify the owner before landing if Claude weekly remaining drops.
 
+Owner interim override (2026-10-04 after deployment): Claude weekly remaining fell from 3% to 2% across Fable review, so Claude calls stay stopped; a separate allowance remains unverified. Until Claude returns, use a different GPT model for each review (Sol reviews Astra work, Astra reviews Sol work). Codex reset credit is now visible. W2a/W2b/W2c are writing; visual owner approval and all build/landing gates still apply.
+
 ## Wave 3
 
 Theme/font/settings normalisation across retained widgets (extend DarkTheme/ThemeBridge/Theme.qml/FontManager),
