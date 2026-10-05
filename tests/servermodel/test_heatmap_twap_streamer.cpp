@@ -47,6 +47,9 @@ public:
     explicit FakeSource(std::function<int64_t(int)> clockFn)
         : m_clock(std::move(clockFn)), m_hot(kSymbol) {
         m_hot.lastTradePrice = 50'000.0;
+        // Synthetic sample source starts with an accepted book; the invalid-book
+        // case below explicitly flips this flag for its scripted gap.
+        m_hot.bookValid = true;
     }
 
     int64_t exchangeNowMs() const override { return m_clock(m_calls++); }
