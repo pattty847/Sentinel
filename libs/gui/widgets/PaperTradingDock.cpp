@@ -189,12 +189,20 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
         m_limitUserOwned = true;
         updateNotional();
     });
+    connect(m_limitPriceSpin->findChild<QLineEdit*>(), &QLineEdit::textChanged, this,
+            &PaperTradingDock::updateNotional);
+    connect(m_limitPriceSpin, &QDoubleSpinBox::editingFinished, this,
+            &PaperTradingDock::updateNotional);
     connect(m_manualQtySpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
             &PaperTradingDock::updateNotional);
     connect(m_useLastBtn, &QPushButton::clicked, this, [this] {
         if (m_lastPrice > 0.0) {
+            // setValue(same displayed value) leaves a manually cleared editor blank.
+            if (m_limitPriceSpin->value() == roundedDisplayedPrice(m_lastPrice, m_limitPriceSpin->decimals()))
+                m_limitPriceSpin->setValue(0.0);
             m_limitPriceSpin->setValue(m_lastPrice);
             m_limitUserOwned = true;
+            updateNotional();
         }
     });
 
@@ -202,13 +210,19 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
     m_sellMarketBtn = new QPushButton(QStringLiteral("Sell Mkt"), ticketFrame);
     m_buyLimitBtn = new QPushButton(QStringLiteral("Buy Limit"), ticketFrame);
     m_sellLimitBtn = new QPushButton(QStringLiteral("Sell Limit"), ticketFrame);
+    m_buyLimitBtn->setObjectName(QStringLiteral("paperBuyLimit"));
+    m_sellLimitBtn->setObjectName(QStringLiteral("paperSellLimit"));
     m_flattenBtn = new QPushButton(QStringLiteral("Flatten"), ticketFrame);
     m_cancelAllBtn = new QPushButton(QStringLiteral("Cancel All"), ticketFrame);
 
     m_buyMarketBtn->setStyleSheet("QPushButton { background: #143f8f; color: white; padding: 4px 10px; }");
     m_sellMarketBtn->setStyleSheet("QPushButton { background: #7a2a1f; color: white; padding: 4px 10px; }");
-    m_buyLimitBtn->setStyleSheet("QPushButton { background: #1a472a; color: #7dff9b; padding: 4px 10px; }");
-    m_sellLimitBtn->setStyleSheet("QPushButton { background: #55311a; color: #ffcc80; padding: 4px 10px; }");
+    const QString limitDisabledStyle = QStringLiteral(
+        " QPushButton:disabled { background: #2A2A2A; color: #666; border-color: #333; }");
+    m_buyLimitBtn->setStyleSheet(QStringLiteral(
+        "QPushButton { background: #1a472a; color: #7dff9b; padding: 4px 10px; }") + limitDisabledStyle);
+    m_sellLimitBtn->setStyleSheet(QStringLiteral(
+        "QPushButton { background: #55311a; color: #ffcc80; padding: 4px 10px; }") + limitDisabledStyle);
 
     ticketGrid->addWidget(m_buyMarketBtn, 2, 0);
     ticketGrid->addWidget(m_sellMarketBtn, 2, 1);
@@ -225,6 +239,7 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
     connect(m_sellLimitBtn, &QPushButton::clicked, this, &PaperTradingDock::onSellLimitClicked);
     connect(m_flattenBtn, &QPushButton::clicked, this, &PaperTradingDock::onFlattenClicked);
     connect(m_cancelAllBtn, &QPushButton::clicked, this, &PaperTradingDock::onCancelAllClicked);
+    updateNotional();
 
     // Order log table
     m_orderLog = new QTableWidget(parent);
@@ -569,6 +584,19 @@ void PaperTradingDock::resetForSymbolChange() {
 
 void PaperTradingDock::updateNotional() {
     if (!m_notionalLabel || !m_manualQtySpin) return;
+    bool displayedValid = false;
+    const double displayedPrice = m_limitPriceSpin
+        ? m_limitPriceSpin->locale().toDouble(m_limitPriceSpin->cleanText(), &displayedValid) : 0.0;
+    const double limitPrice = m_limitPriceSpin ? m_limitPriceSpin->value() : 0.0;
+    const bool canPlaceLimit = displayedValid && std::isfinite(displayedPrice) && displayedPrice > 0.0
+        && std::isfinite(limitPrice) && limitPrice > 0.0;
+    for (auto* button : {m_buyLimitBtn, m_sellLimitBtn}) {
+        if (button && button->isEnabled() != canPlaceLimit) {
+            button->setEnabled(canPlaceLimit);
+            button->setToolTip(canPlaceLimit ? QString()
+                : QStringLiteral("Enter a positive limit price to place a limit order."));
+        }
+    }
     const double price = m_limitPriceSpin && m_limitPriceSpin->value() > 0.0
         ? m_limitPriceSpin->value() : m_lastPrice;
     const QString quote = m_symbol.section('-', 1, 1);
