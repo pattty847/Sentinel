@@ -38,15 +38,21 @@ QStringList FontManager::availableFonts() const {
     for (const auto& name : m_resourceFonts) {
         if (!fonts.contains(name)) fonts << name;
     }
+    // Preserve a saved installed family even when it is outside the short curated
+    // list; reopening settings must identify the font that is actually applied.
+    if (!m_currentFontFamily.isEmpty() && !fonts.contains(m_currentFontFamily)) {
+        fonts << m_currentFontFamily;
+    }
     return fonts;
 }
 
 bool FontManager::applyFontFamily(const QString& family, QApplication* app) {
     if (!app || family.isEmpty()) return false;
     QFont font(family, 10);
+    m_currentFontFamily = QFontInfo(font).family();
+    font.setFamily(m_currentFontFamily);
     app->setFont(font);
     app->setStyleSheet(app->styleSheet());  // Force style refresh for existing widgets
-    m_currentFontFamily = QFontInfo(font).family();
 
     sLog_App("Font applied: " << m_currentFontFamily);
 

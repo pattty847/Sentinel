@@ -9,6 +9,9 @@ class FontSettingsDialog : public QDialog {
 public:
     explicit FontSettingsDialog(QWidget* parent = nullptr);
 
+protected:
+    void showEvent(QShowEvent* event) override;
+
 private:
     void buildUi();
     void refreshFonts();

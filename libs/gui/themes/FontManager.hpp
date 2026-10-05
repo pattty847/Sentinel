@@ -7,6 +7,8 @@ class FontManager {
 public:
     static FontManager& instance();
 
+    // Widgets inherit the selected 10pt application font. Keep local styling to
+    // weight/emphasis so visible, hidden and newly created widgets all follow it.
     void initialize(QApplication* app);
     QStringList availableFonts() const;
     QString currentFontFamily() const { return m_currentFontFamily; }

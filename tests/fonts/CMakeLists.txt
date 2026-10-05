@@ -1,0 +1,5 @@
+add_executable(test_fonts test_fonts.cpp)
+target_include_directories(test_fonts PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_fonts PRIVATE sentinel_gui_lib GTest::gtest Qt6::Widgets Qt6::Test)
+add_test(NAME FontWidgetTests COMMAND test_fonts)
+set_tests_properties(FontWidgetTests PROPERTIES LABELS "ui;fonts" TIMEOUT 45)
