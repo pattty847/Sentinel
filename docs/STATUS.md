@@ -3,20 +3,20 @@
 Live state for whoever conducts the agents next (Claude or Codex). Update it when something
 lands, deploys or changes priority. Rules: `AGENTS.md`; loop: `docs/AGENT_WORKFLOW.md`.
 
-Last updated: 2026-10-04 21:52 EDT. Codex acting orchestrator; wave 1 complete, per-product live book tick in progress.
+Last updated: 2026-10-04 22:17 EDT. Codex acting orchestrator; wave 1 complete, per-product live book tick in progress.
 
 ## Running services (owner's Mac, launchd)
 
 - **Recorder** `com.sentinel.recorder` deployed 2026-10-03 22:14 from `958221d`+config: primary recorder unchanged; **shadow roller ON** (BTC-USD, the only nonstop-recorded product) writing `/Volumes/T7/sentinel-data/hmc2`; soak target: `sentinel_roller_shadow_mismatch_total` = 0 until ~2026-10-05 22:15. Rollback: `bash scripts/dev/deploy-runtime.sh rollback server` or set `roller_shadow.enabled: false` + redeploy.
 - **Capture** `com.sentinel.capture` deployed 2026-10-03 22:13 (fan-out keeps rings on socket failures): 7 products, fan-out socket `~/Sentinel-runtime/run/capture.sock`. Rollback: `bash scripts/dev/deploy-runtime.sh rollback capture`.
-- **Monitoring**: VictoriaMetrics :8428, Grafana :3000, ntfy high priority. **GUI host** :17190 responds (main build); paper-limit-guard own-branch enabled/disabled captures inspected this session; tick slice not live-validated.
+- **Monitoring**: VictoriaMetrics :8428, Grafana :3000, ntfy high priority. **GUI host** :17190 responds (main build); paper-limit-guard own-branch enabled/disabled captures inspected this session; tick candidate GUI checked against old server: retry -> stale -> 15/60 s backoff, no invented book prices; test GUI stopped; Mac locked, so pixels unverified; new-server live book not yet validated.
 - **Backfill** done: `/Volumes/T7/sentinel-data/hmc2` (7 products, ~122 MB). Not served yet (slices C/D).
 
 ## In flight
 
 | Branch | State | Next step |
 |---|---|---|
-| `lt-sol/product-book-tick` | frozen/rebased `9ac52e0` passed 5/5 targeted suites; Fable BLOCK, fix round in same worktree | remove metadata-triggered reconnect/recorder invalidation by continuously maintaining raw state before aggregation; preserve GUI unavailable retry/stale/backoff state; regression tests then Fable re-review; no landing/deploy yet |
+| `lt-sol/product-book-tick` | final `39832ee`, rebased unchanged onto `4ec6ade`; affected build and 6/6 targeted suites passed; Fable round two PASS after recorder-safe raw-state hydration and GUI retry fixes | full queued landing gate; owner notified before landing that Claude weekly fell 3% -> 2%; no more Claude reviews; this already-reviewed branch may land under existing authorization; deployment still requires owner-present approval |
 | landed `lt-sol/paper-limit-guard` | merge `78f5b63`, reviewed patch rebased unchanged as `52bfcb2`; limit buttons require a valid displayed price; focused 7/7 cases and full landing 91/91 targets passed | Fable round two PASS; enabled/disabled own-branch captures inspected; worktree removed; focus-out guard is a defensive simulated case, not naturally reproduced |
 | landed | W1a DOM `3c9b948` (compact standard ladder, verified via own-branch screenshots); W1c dock infra `af09b9f` (per-dock + window shots, `--build` own-branch launches, TradeBlotter/Lab/AICommentary removed); W1b paper ticket `e301c85`; W1d doc `docs/research/2026-10-copenet-boundary.md` | |
 
@@ -38,7 +38,7 @@ Last updated: 2026-10-04 21:52 EDT. Codex acting orchestrator; wave 1 complete, 
 
 ## Acting-orchestrator checks
 
-- Claude Fable alias verified with `claude -p --model fable` on Oct 4. One small STATUS review passed; before/after Claude weekly 3% left, session 97% -> 96% left. Paper review used model `claude-fable-5-1`; weekly still 3% left afterward, session 96% -> 94% left. Tick review used `claude-fable-5-1`, BLOCK; weekly remained 3% left, session 94% -> 87% left. Whole-percent precision does not prove a separate Fable allowance. Check around each review; if weekly remaining drops, stop Claude reviews and notify owner before any landing. Codex weekly initially 8%, latest check 4% remaining; use it before owner applies reset credit.
+- Claude Fable alias verified with `claude -p --model fable` on Oct 4. One small STATUS review passed; before/after Claude weekly 3% left, session 97% -> 96% left. Paper review used model `claude-fable-5-1`; weekly still 3% left afterward, session 96% -> 94% left. Tick review round one used `claude-fable-5-1`, BLOCK; weekly remained 3% left, session 94% -> 87% left. Round two PASS for `39832ee`; weekly fell 3% -> 2%, session 87% -> 85%. Owner notified before any further landing and all Claude reviews stopped; awaiting owner decision for future reviews. Whole-percent precision does not prove a separate Fable allowance. Check around each review; if weekly remaining drops, stop Claude reviews and notify owner before any landing. Codex weekly initially 8%, latest check 2% remaining; use it before owner applies reset credit.
 - Wave 2: at most three writing lieutenants; W2b alone owns hubs. Review every branch with Fable only if the budget check permits; no opus/sonnet writers before owner confirmation of the Claude weekly reset.
 - Deployments and slice D require asking the owner first and confirmation that the owner is present.
 - Unrelated `lt-sol/label-style` locked worktree and untracked `.codex/` left untouched.
