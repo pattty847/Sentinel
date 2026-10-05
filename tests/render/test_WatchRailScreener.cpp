@@ -1,16 +1,20 @@
 #include "widgets/ScreenerDock.hpp"
 #include "widgets/WatchlistDock.hpp"
 #include "protocol/SentinelStreamClient.hpp"
+#include "themes/FontManager.hpp"
+#include "themes/ThemeManager.hpp"
 
 #include <QApplication>
 #include <QComboBox>
 #include <QCheckBox>
+#include <QDir>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMainWindow>
+#include <QPixmap>
 #include <QHeaderView>
 #include <QSettings>
 #include <QScrollBar>
@@ -22,6 +26,7 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QTreeView>
+#include <QVBoxLayout>
 #include <gtest/gtest.h>
 
 struct ScreenerErrorDispatchTest {
@@ -454,11 +459,144 @@ TEST(Screener, RequestErrorDispatchAndUncorrelatedRecovery) {
     EXPECT_FALSE(status->text().contains("old request failed"));
     EXPECT_TRUE(received.contains("vendor as-of unavailable"));
 }
+
+TEST(WatchRailScreener, NativeVisualFixtures) {
+    const QString output = qEnvironmentVariable("SENTINEL_WATCH_RAIL_SHOTS");
+    if (output.isEmpty())
+        GTEST_SKIP() << "Opt-in widget fixtures require SENTINEL_WATCH_RAIL_SHOTS and an authorized native GUI slot";
+    const QString platform = QGuiApplication::platformName();
+    if (platform == "offscreen" || platform == "minimal")
+        GTEST_SKIP() << "Native fixture capture requires an explicit native QT_QPA_PLATFORM; no offscreen screenshots";
+    ASSERT_TRUE(QDir().mkpath(output));
+    QTemporaryDir settings;
+    ASSERT_TRUE(settings.isValid());
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
+
+    // Only production widgets receive these deterministic, provider-shaped rows. No provider is contacted.
+    const QJsonArray cryptoRows{
+        QJsonObject{{"symbol", "BTC-USD"}, {"Name", "Bitcoin"}, {"Price", 71023.125},
+                    {"Change %", 2.37}, {"Volume", 18002342.0}, {"Relative Volume", 1.33},
+                    {"Market Cap", 1400000000000.0}, {"Crypto Categories", "Currency"},
+                    {"Sector", "Digital assets"}, {"Exchange", "COINBASE"}},
+        QJsonObject{{"symbol", "ETH-USD"}, {"Name", "Ethereum"}, {"Price", 3456.78},
+                    {"Change %", -1.2}, {"Volume", 0.0}, {"Exchange", "COINBASE"}},
+        QJsonObject{{"symbol", "PEPE-USD"}, {"Name", "Pepe"}, {"Price", 0.00000012},
+                    {"Change %", 0.0}, {"Volume", 12345.0}, {"Exchange", "COINBASE"}},
+        QJsonObject{{"symbol", "SOL-USD"}, {"Name", "Solana"}, {"Price", QJsonValue::Null},
+                    {"Change %", QJsonValue::Null}, {"Exchange", "COINBASE"}},
+        QJsonObject{{"symbol", "FARTCOIN-USD"},
+                    {"Name", "Fartcoin with an intentionally long provider name for layout inspection"},
+                    {"Price", 0.234567}, {"Change %", -4.56}, {"Volume", 987654.0},
+                    {"Exchange", "COINBASE"}}};
+    const QJsonArray stockRows{
+        QJsonObject{{"symbol", "AAPL"}, {"Name", "Apple Inc."}, {"Price", 198.45},
+                    {"Change %", 1.25}, {"Volume", 45678901.0}, {"Relative Volume", 1.42},
+                    {"Market Capitalization", 3000000000000.0}, {"Price to Earnings Ratio (TTM)", 33.6},
+                    {"Dividend Yield % (Current)", 0.5}, {"Sector", "Technology"}, {"Exchange", "NASDAQ"}},
+        QJsonObject{{"symbol", "BRK.B"},
+                    {"Name", "Berkshire Hathaway Inc. Class B with a deliberately long company name"},
+                    {"Price", 456.78}, {"Change %", -0.75}, {"Volume", 0.0},
+                    {"Market Capitalization", 1000000000000.0}, {"Price to Earnings Ratio (TTM)", 11.2},
+                    {"Dividend Yield % (Current)", 0.0}, {"Sector", "Finance"}, {"Exchange", "NYSE"}},
+        QJsonObject{{"symbol", "MSFT"}, {"Name", "Microsoft Corporation"}, {"Price", QJsonValue::Null},
+                    {"Change %", QJsonValue::Null}, {"Volume", 123456.0}, {"Exchange", "NASDAQ"}}};
+
+    auto addFixtureCaption = [](QVBoxLayout& layout, QWidget& frame) {
+        auto* caption = new QLabel("FIXTURE · synthetic data and states · no live-provider validation", &frame);
+        caption->setWordWrap(true);
+        caption->setMargin(6);
+        layout.setContentsMargins(0, 0, 0, 0);
+        layout.setSpacing(0);
+        layout.addWidget(caption);
+    };
+    auto save = [&](QWidget& frame, const QString& name) {
+        frame.show();
+        frame.ensurePolished();
+        frame.layout()->activate();
+        QTest::qWait(100);
+        const QPixmap pixels = frame.grab(); // Widget pixels only; never a screen-region capture.
+        return !pixels.isNull() && pixels.save(QDir(output).filePath(name + "-fixture.png"));
+    };
+
+    SentinelStreamClient client("127.0.0.1", "1"); // Never connect or start a provider/service.
+    QWidget frame;
+    frame.setWindowTitle("W2c Screener visual fixture");
+    QVBoxLayout layout(&frame);
+    addFixtureCaption(layout, frame);
+    auto* dock = new ScreenerDock(&frame);
+    layout.addWidget(dock);
+    dock->setStreamClient(&client);
+    auto* table = dock->findChild<QTableView*>("screenerRows");
+    ASSERT_NE(table, nullptr);
+    auto saveBoth = [&](const QString& state) {
+        frame.resize(480, 480);
+        table->horizontalScrollBar()->setValue(0);
+        if (!save(frame, "screener-" + state + "-narrow")) return false;
+        frame.resize(1440, 560);
+        table->horizontalScrollBar()->setValue(0);
+        return save(frame, "screener-" + state + "-wide");
+    };
+
+    ASSERT_TRUE(saveBoth("stream-unknown"));
+    updateScreener(*dock, "crypto", QJsonArray{});
+    ASSERT_TRUE(saveBoth("crypto-empty"));
+    dock->findChild<QToolButton*>("screenerRefresh")->click();
+    ASSERT_TRUE(saveBoth("crypto-loading"));
+    updateScreener(*dock, "crypto", cryptoRows);
+    ASSERT_TRUE(saveBoth("crypto-populated"));
+    frame.resize(480, 480);
+    QCoreApplication::processEvents();
+    auto* model = qobject_cast<QStandardItemModel*>(table->model());
+    table->scrollTo(model->index(rowFor(model, "PEPE-USD"), 2));
+    ASSERT_TRUE(save(frame, "screener-crypto-populated-narrow-quotes"));
+
+    dock->findChild<QComboBox*>("screenerAsset")->setCurrentIndex(1);
+    updateScreener(*dock, "stock", stockRows);
+    ASSERT_TRUE(saveBoth("stock-populated"));
+    frame.resize(480, 480);
+    QCoreApplication::processEvents();
+    table->scrollTo(model->index(rowFor(model, "AAPL"), 7));
+    ASSERT_TRUE(save(frame, "screener-stock-populated-narrow-extras"));
+    dock->showServiceError("Fixture: provider unavailable; the request was not identified");
+    ASSERT_TRUE(saveBoth("stock-error-retained"));
+    frame.hide();
+
+    QWidget railFrame;
+    railFrame.setWindowTitle("W2c Watch rail visual fixture");
+    QVBoxLayout railLayout(&railFrame);
+    addFixtureCaption(railLayout, railFrame);
+    auto* rail = new WatchlistDock(&railFrame);
+    railLayout.addWidget(rail);
+    railFrame.setFixedWidth(280);
+    railFrame.resize(280, 620);
+    rail->setCryptoAvailability({}, false);
+    ASSERT_TRUE(save(railFrame, "watch-rail-catalog-unknown-280"));
+    EXPECT_EQ(rail->width(), 280);
+    rail->setChartSwitchState("BTC-USD", "");
+    ASSERT_TRUE(save(railFrame, "watch-rail-active-280"));
+    rail->setChartSwitchState("BTC-USD", "PEPE-USD");
+    ASSERT_TRUE(save(railFrame, "watch-rail-pending-280"));
+    rail->setChartSwitchState("BTC-USD", "", "PEPE-USD",
+        "Fixture: PEPE-USD subscription refused; connection cap reached. BTC-USD remains active.");
+    ASSERT_TRUE(save(railFrame, "watch-rail-refused-280"));
+}
 } // namespace
 
 int main(int argc, char** argv) {
-    qputenv("QT_QPA_PLATFORM", "offscreen");
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication app(argc, argv);
+    QTemporaryDir settings;
+    if (!settings.isValid()) return 1;
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
+    if (!qEnvironmentVariableIsEmpty("SENTINEL_WATCH_RAIL_SHOTS")) {
+        Q_INIT_RESOURCE(sentinel_svg_resources);
+        Q_INIT_RESOURCE(sentinel_ui_fonts);
+        ThemeManager::instance().initializeDefaults();
+        ThemeManager::instance().applyTheme("dark", &app);
+        FontManager::instance().initialize(&app);
+    }
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
