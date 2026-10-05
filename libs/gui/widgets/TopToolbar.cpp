@@ -34,21 +34,49 @@ TopToolbar::TopToolbar(QWidget* parent)
     setIconSize(QSize(18, 18));
     setToolButtonStyle(Qt::ToolButtonIconOnly);
 
-    QLabel* chartLabel = new QLabel("Charts", this);
-    chartLabel->setStyleSheet("QLabel { color: #B6C2CF; font-weight: 600; padding-right: 6px; }");
-    addWidget(chartLabel);
-
     m_symbolSearch = new QLineEdit(this);
+    m_symbolSearch->setObjectName("chartSymbolSearch");
+    m_symbolSearch->setAccessibleName("Chart symbol");
     m_symbolSearch->setPlaceholderText("Search Symbol");
     m_symbolSearch->setText("BTC-USD");
-    m_symbolSearch->setFixedWidth(170);
+    m_symbolSearch->setFixedWidth(145);
     addWidget(m_symbolSearch);
 
     m_subscribeButton = new QToolButton(this);
     m_subscribeButton->setIcon(QIcon(":/svg/search.svg"));
-    m_subscribeButton->setToolTip("Subscribe");
+    m_subscribeButton->setObjectName("chartSubscribeButton");
+    m_subscribeButton->setToolTip("Show symbol chart");
+    m_subscribeButton->setAccessibleName("Show symbol chart");
     addWidget(m_subscribeButton);
     connect(m_subscribeButton, &QToolButton::clicked, this, &TopToolbar::subscribeRequested);
+
+    // These two entry points stay before the overflowing controls at narrow dock
+    // widths. The controls menu mirrors the primary controls below; the gear is
+    // chart settings and appearance, filled by HeatmapChartControls.
+    m_controlsButton = new QToolButton(this);
+    m_controlsButton->setObjectName("chartControlsButton");
+    m_controlsButton->setText("Controls");
+    m_controlsButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    m_controlsButton->setToolTip("Chart layers, timeframe, tick and liquidity range");
+    m_controlsButton->setAccessibleName("Chart controls");
+    m_controlsButton->setPopupMode(QToolButton::InstantPopup);
+    m_controlsMenu = new QMenu(m_controlsButton);
+    m_controlsMenu->setObjectName("chartControlsMenu");
+    m_controlsMenu->setToolTipsVisible(true);
+    m_controlsButton->setMenu(m_controlsMenu);
+    addWidget(m_controlsButton);
+
+    m_chartMenuButton = new QToolButton(this);
+    m_chartMenuButton->setObjectName("chartMenuButton");
+    m_chartMenuButton->setIcon(QIcon(":/svg/settings.svg"));
+    m_chartMenuButton->setToolTip("Chart settings and appearance");
+    m_chartMenuButton->setAccessibleName("Chart settings and appearance");
+    m_chartMenuButton->setPopupMode(QToolButton::InstantPopup);
+    m_chartMenu = new QMenu(m_chartMenuButton);
+    m_chartMenu->setObjectName("chartMenu");
+    m_chartMenu->setToolTipsVisible(true);
+    m_chartMenuButton->setMenu(m_chartMenu);
+    addWidget(m_chartMenuButton);
 
     addSeparator();
 
@@ -71,9 +99,11 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_tpoButton->setCheckable(true);
     m_tpoButton->setAutoExclusive(false);
 
-    // No dedicated volume-profile icon exists under resources (searched for
-    // *profile*/*volume*.svg); reuse the TPO icon until one is added.
-    m_volumeProfileButton = addIconButton(":/svg/tpo_chart.svg", "Volume profile");
+    // A text mark distinguishes volume profile from the TPO glyph at a glance.
+    m_volumeProfileButton = addIconButton(QString(), "Volume profile");
+    m_volumeProfileButton->setText("VP");
+    m_volumeProfileButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    m_volumeProfileButton->setAccessibleName("Volume profile layer");
     m_volumeProfileButton->setCheckable(true);
     m_volumeProfileButton->setAutoExclusive(false);
 
@@ -114,6 +144,8 @@ TopToolbar::TopToolbar(QWidget* parent)
     addSeparator();
 
     m_timeframeCombo = new QComboBox(this);
+    m_timeframeCombo->setObjectName("chartTimeframeCombo");
+    m_timeframeCombo->setAccessibleName("Chart timeframe");
     m_timeframeCombo->addItems({"1s", "1m", "5m", "15m", "1h", "4h", "1D"});
     const int64_t timeframesMs[] = {1000, 60000, 300000, 900000, 3600000, 14400000, 86400000};
     for (int i = 0; i < m_timeframeCombo->count(); ++i) {
@@ -124,10 +156,14 @@ TopToolbar::TopToolbar(QWidget* parent)
     connect(m_timeframeCombo, &QComboBox::currentTextChanged, this, &TopToolbar::timeframeSelected);
 
     // Heatmap tick: Auto/Manual and the preset (S6c). Driven by setTickSelectorState.
+    auto *tickLabel = new QLabel("Tick", this);
+    tickLabel->setObjectName("chartTickLabel");
+    m_tickLabelAction = addWidget(tickLabel);
     m_tickModeCombo = new QComboBox(this);
     m_tickModeCombo->setObjectName("tickModeCombo");
     m_tickModeCombo->addItems({"Auto", "Manual"});
     m_tickModeCombo->setFixedWidth(84);
+    m_tickModeCombo->setAccessibleName("Heatmap tick mode");
     m_tickModeAction = addWidget(m_tickModeCombo);
     connect(m_tickModeCombo, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
         sLog_App("ui: toolbar tick mode=" << (index == 1 ? "manual" : "auto"));
@@ -135,6 +171,7 @@ TopToolbar::TopToolbar(QWidget* parent)
     });
     m_tickPresetCombo = new QComboBox(this);
     m_tickPresetCombo->setObjectName("tickPresetCombo");
+    m_tickPresetCombo->setAccessibleName("Heatmap tick size");
     m_tickPresetCombo->setFixedWidth(84);
     m_tickPresetAction = addWidget(m_tickPresetCombo);
     connect(m_tickPresetCombo, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
@@ -152,6 +189,8 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_chartTypeCombo = new QComboBox(this);
     m_chartTypeCombo->addItems({"Candle", "Hollow", "Line"});
     m_chartTypeCombo->setObjectName("chartTypeCombo");
+    m_chartTypeCombo->setAccessibleName("Candle style");
+    m_chartTypeCombo->setToolTip("Candle style");
     m_chartTypeCombo->setFixedWidth(90);
     m_chartTypeAction = addWidget(m_chartTypeCombo);
     connect(m_chartTypeCombo, &QComboBox::currentTextChanged, this, &TopToolbar::chartTypeSelected);
@@ -167,6 +206,7 @@ TopToolbar::TopToolbar(QWidget* parent)
     // TPO-only controls (renderer state; HeatmapChartControls keeps them in sync).
     m_tpoSessionCombo = new QComboBox(this);
     m_tpoSessionCombo->setObjectName("tpoSessionCombo");
+    m_tpoSessionCombo->setAccessibleName("TPO and volume profile session");
     for (const auto &[name, id] : std::initializer_list<std::pair<const char *, int>>{
              {"New York", 0}, {"London", 1}, {"Asia", 2}, {"Australia", 3}, {"24H", 4}, {"1W", 5}, {"1M", 6}})
         m_tpoSessionCombo->addItem(name, id);
@@ -179,6 +219,7 @@ TopToolbar::TopToolbar(QWidget* parent)
     });
     m_tpoLayoutCombo = new QComboBox(this);
     m_tpoLayoutCombo->setObjectName("tpoLayoutCombo");
+    m_tpoLayoutCombo->setAccessibleName("TPO layout");
     m_tpoLayoutCombo->addItem("Collapsed", "collapsed");
     m_tpoLayoutCombo->addItem("Split", "split");
     m_tpoLayoutCombo->setFixedWidth(96);
@@ -232,7 +273,7 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_rangeSlider->setFixedSize(170, 22);
     m_rangeAction = addWidget(m_rangeSlider);
     connect(m_rangeSlider, &LiquidityRangeSlider::rangeEdited, this, [this](double low, double high, bool final) {
-        m_rangeLabel->setText(QString::number(low, 'g', 3) + QStringLiteral(" - ") + QString::number(high, 'g', 3));
+        refreshRangeLabel();
         emit liquidityRangeEdited(low, high, final);
     });
     m_rangeLabel = new QLabel(this);
@@ -254,45 +295,172 @@ TopToolbar::TopToolbar(QWidget* parent)
 
     addSeparator();
 
-    QAction* indicatorsAction = addIconAction(":/svg/indicators.svg", "Indicators", "Indicators");
-    QAction* layoutsAction = addIconAction(":/svg/layout.svg", "Layouts", "Layouts");
+    m_indicatorsAction = addIconAction(":/svg/indicators.svg", "Indicators", "Indicators are not available on this chart yet");
+    m_indicatorsAction->setObjectName("chartIndicatorsAction");
+    m_indicatorsAction->setEnabled(false);
+    if (auto *button = widgetForAction(m_indicatorsAction)) {
+        button->setAccessibleDescription(m_indicatorsAction->toolTip());
+        button->setAttribute(Qt::WA_AlwaysShowToolTips);
+    }
+    m_layoutsAction = addIconAction(":/svg/layout.svg", "Layouts", "Save, restore or reset a workspace layout");
+    m_layoutsAction->setObjectName("chartLayoutsAction");
 
     addSeparator();
 
-    QAction* quickSearchAction = addIconAction(":/svg/search.svg", "Quick Search", "Quick Search");
-    // Chart settings menu (gear): HeatmapChartControls fills it (one entry point).
-    m_chartMenuButton = new QToolButton(this);
-    m_chartMenuButton->setObjectName("chartMenuButton");
-    m_chartMenuButton->setIcon(QIcon(":/svg/settings.svg"));
-    m_chartMenuButton->setToolTip("Chart settings");
-    m_chartMenuButton->setPopupMode(QToolButton::InstantPopup);
-    m_chartMenu = new QMenu(m_chartMenuButton);
-    m_chartMenu->setObjectName("chartMenu");
-    m_chartMenuButton->setMenu(m_chartMenu);
-    addWidget(m_chartMenuButton);
-    QAction* fullscreenAction = addIconAction(":/svg/full_screen.svg", "Fullscreen", "Toggle Fullscreen");
+    QAction* quickSearchAction = addIconAction(":/svg/search.svg", "Quick Search", "Focus symbol search");
+    quickSearchAction->setObjectName("chartQuickSearchAction");
+    m_fullscreenAction = addIconAction(":/svg/full_screen.svg", "Fullscreen", "Toggle fullscreen (F11)");
+    m_fullscreenAction->setObjectName("chartFullscreenAction");
+    m_fullscreenAction->setCheckable(true);
+    // F11 is already registered by ShortcutBinder; adding it here would make
+    // both shortcuts ambiguous. Window-state changes update this action.
     QAction* screenshotAction = addIconAction(":/svg/camera.svg", "Screenshot", "Screenshot");
 
-    connect(indicatorsAction, &QAction::triggered, this, &TopToolbar::indicatorsRequested);
-    connect(layoutsAction, &QAction::triggered, this, &TopToolbar::layoutsRequested);
+    connect(m_layoutsAction, &QAction::triggered, this, &TopToolbar::layoutsRequested);
     connect(quickSearchAction, &QAction::triggered, this, &TopToolbar::quickSearchRequested);
-    connect(fullscreenAction, &QAction::triggered, this, &TopToolbar::fullscreenToggled);
+    connect(m_fullscreenAction, &QAction::triggered, this, &TopToolbar::fullscreenToggled);
     connect(screenshotAction, &QAction::triggered, this, &TopToolbar::screenshotRequested);
+    connect(m_controlsMenu, &QMenu::aboutToShow, this, &TopToolbar::refreshControlsMenu);
+    buildControlsMenu();
     setLiquidityRange(0, 0, m_rangeSlider->low(), m_rangeSlider->high());
     applyVisibility();
+}
+
+void TopToolbar::buildControlsMenu() {
+    auto layer = [this](const char *name, const QString &text, QAbstractButton *button) {
+        QAction *action = m_controlsMenu->addAction(text);
+        action->setObjectName(name);
+        action->setCheckable(true);
+        connect(action, &QAction::triggered, this, [button] { button->click(); });
+    };
+    QAction *candles = m_controlsMenu->addAction("Candles");
+    candles->setObjectName("controlsCandles");
+    candles->setCheckable(true);
+    connect(candles, &QAction::triggered, m_candleAction, &QAction::trigger);
+    layer("controlsHeatmap", "Heatmap", m_heatmapButton);
+    layer("controlsFootprint", "Footprint", m_footprintButton);
+    layer("controlsTpo", "TPO", m_tpoButton);
+    layer("controlsVolumeProfile", "Volume profile", m_volumeProfileButton);
+    m_controlsMenu->addSeparator();
+
+    QMenu *timeframes = m_controlsMenu->addMenu("Timeframe");
+    timeframes->setObjectName("controlsTimeframes");
+    for (int i = 0; i < m_timeframeCombo->count(); ++i) {
+        QAction *action = timeframes->addAction(m_timeframeCombo->itemText(i));
+        action->setObjectName("controlsTimeframe");
+        action->setData(i);
+        action->setCheckable(true);
+        connect(action, &QAction::triggered, this, [this, i] { m_timeframeCombo->setCurrentIndex(i); });
+    }
+    QMenu *styles = m_controlsMenu->addMenu("Candle style");
+    styles->setObjectName("controlsCandleStyles");
+    for (int i = 0; i < m_chartTypeCombo->count(); ++i) {
+        QAction *action = styles->addAction(m_chartTypeCombo->itemText(i));
+        action->setObjectName("controlsCandleStyle");
+        action->setData(i);
+        action->setCheckable(true);
+        connect(action, &QAction::triggered, this, [this, i] { m_chartTypeCombo->setCurrentIndex(i); });
+    }
+    m_tickMenu = m_controlsMenu->addMenu("Heatmap tick");
+    m_tickMenu->setObjectName("controlsTick");
+    m_rangeMenuAction = m_controlsMenu->addAction("Edit liquidity range...");
+    m_rangeMenuAction->setObjectName("controlsLiquidityRange");
+    connect(m_rangeMenuAction, &QAction::triggered, this, &TopToolbar::liquidityRangeSettingsRequested);
+    m_controlsMenu->addSeparator();
+    m_controlsMenu->addAction(m_indicatorsAction);
+    m_controlsMenu->addAction(m_layoutsAction);
+    QAction *search = m_controlsMenu->addAction("Find symbol");
+    search->setObjectName("controlsQuickSearch");
+    connect(search, &QAction::triggered, this, &TopToolbar::quickSearchRequested);
+    m_controlsMenu->addAction(m_fullscreenAction);
+    refreshControlsMenu();
+}
+
+void TopToolbar::refreshControlsMenu() {
+    auto action = [this](const char *name) { return m_controlsMenu->findChild<QAction *>(name); };
+    action("controlsCandles")->setChecked(candlesChecked());
+    action("controlsHeatmap")->setChecked(m_heatmapButton->isChecked());
+    action("controlsFootprint")->setChecked(m_footprintButton->isChecked());
+    action("controlsTpo")->setChecked(m_tpoButton->isChecked());
+    action("controlsVolumeProfile")->setChecked(m_volumeProfileButton->isChecked());
+    for (QAction *a : m_controlsMenu->findChild<QMenu *>("controlsTimeframes")->actions()) {
+        const int i = a->data().toInt();
+        auto *model = qobject_cast<QStandardItemModel *>(m_timeframeCombo->model());
+        const bool enabled = !model || model->item(i)->isEnabled();
+        a->setEnabled(enabled);
+        a->setChecked(i == m_timeframeCombo->currentIndex());
+        a->setToolTip(m_timeframeCombo->itemData(i, Qt::ToolTipRole).toString());
+    }
+    m_controlsMenu->findChild<QMenu *>("controlsCandleStyles")->menuAction()->setEnabled(
+        m_mode.candles && m_chartTypeCombo->isEnabled());
+    for (QAction *a : m_controlsMenu->findChild<QMenu *>("controlsCandleStyles")->actions())
+        a->setChecked(a->data().toInt() == m_chartTypeCombo->currentIndex());
+    m_tickMenu->menuAction()->setEnabled(m_mode.heatmap && m_tickState.enabled);
+    m_tickMenu->menuAction()->setToolTip(m_tickState.enabled ? QString() : m_tickState.disabledReason);
+    m_tickMenu->clear();
+    QAction *autoTick = m_tickMenu->addAction("Auto tick");
+    autoTick->setObjectName("controlsTickAuto");
+    autoTick->setCheckable(true);
+    autoTick->setChecked(!m_tickState.manual);
+    connect(autoTick, &QAction::triggered, this, [this] { emit tickModeRequested(false); });
+    QAction *manualTick = m_tickMenu->addAction("Manual tick");
+    manualTick->setObjectName("controlsTickManual");
+    manualTick->setCheckable(true);
+    manualTick->setChecked(m_tickState.manual);
+    connect(manualTick, &QAction::triggered, this, [this] { emit tickModeRequested(true); });
+    m_tickMenu->addSeparator();
+    for (const int64_t units : m_tickState.offeredUnits) {
+        QAction *preset = m_tickMenu->addAction(tickText(units, m_tickState.priceScale));
+        preset->setObjectName("controlsTickPreset");
+        preset->setCheckable(true);
+        preset->setChecked(units == (m_tickState.manual ? m_tickState.manualUnits : m_tickState.drawnUnits));
+        connect(preset, &QAction::triggered, this, [this, units] { emit tickPresetRequested(units); });
+    }
+    m_rangeMenuAction->setEnabled(m_mode.heatmap && m_mode.gpu);
+    m_rangeMenuAction->setToolTip(m_mode.gpu ? QStringLiteral("Edit base-asset cell sizes in Chart settings")
+                                              : QStringLiteral("Liquidity range is available with the GPU heatmap"));
+}
+
+void TopToolbar::refreshRangeLabel() {
+    if (!m_rangeLabel || !m_rangeSlider) return;
+    const QString range = QString::number(m_rangeSlider->low(), 'g', 3) + QStringLiteral(" - ") +
+                          QString::number(m_rangeSlider->high(), 'g', 3) + QStringLiteral(" ") + m_baseAssetSymbol;
+    m_rangeLabel->setText(range);
+    m_rangeLabel->setToolTip(QStringLiteral("Base-asset size per heatmap cell: %1").arg(range));
+    if (m_rangeMenuAction) m_rangeMenuAction->setText(QStringLiteral("Liquidity range: %1...").arg(range));
+}
+
+void TopToolbar::setBaseAssetSymbol(const QString &symbol) {
+    const QString base = symbol.section('-', 0, 0).trimmed().toUpper();
+    if (base.isEmpty() || base == m_baseAssetSymbol) return;
+    m_baseAssetSymbol = base;
+    m_rangeSlider->setBaseUnit(base);
+    refreshRangeLabel();
+}
+
+void TopToolbar::showLayoutsMenu() {
+    QMenu *layouts = m_chartMenu->findChild<QMenu *>("chartMenuLayouts");
+    if (!layouts) return;
+    const QRect button = actionGeometry(m_layoutsAction);
+    layouts->popup(mapToGlobal(QPoint(button.left(), button.bottom())));
+}
+
+void TopToolbar::setFullscreen(bool fullscreen) {
+    const QSignalBlocker block(m_fullscreenAction);
+    m_fullscreenAction->setChecked(fullscreen);
+    m_fullscreenAction->setToolTip(fullscreen ? "Exit fullscreen (F11)" : "Enter fullscreen (F11)");
 }
 
 TopToolbar::ControlVisibility TopToolbar::controlVisibility(const ModeState &mode) {
     ControlVisibility v;
     v.tickSelector = mode.heatmap;
-    v.palette = mode.heatmap;
-    v.liquidity = mode.heatmap;
+    // Appearance lives in the gear menu. Retain the selectors as model adapters
+    // for existing callers, without consuming primary toolbar width.
     v.rangeSlider = mode.heatmap && mode.gpu;
     v.thresholdSlider = mode.heatmap && !mode.gpu;
     v.candleStyle = mode.candles;
     v.tpoSession = mode.tpo || mode.volumeProfile;
     v.tpoLayout = mode.tpo;
-    v.labelsToggle = mode.heatmap && mode.gpu;
     return v;
 }
 
@@ -315,10 +483,12 @@ void TopToolbar::applyVisibility() {
         if (QWidget *w = widgetForAction(action)) w->setVisible(visible);
     };
     show(m_tickModeAction, v.tickSelector);
+    show(m_tickLabelAction, v.tickSelector);
     show(m_tickPresetAction, v.tickSelector);
     show(m_tickVeilAction, v.tickSelector && m_tickState.enabled && !m_tickState.indicator.isEmpty());
     show(m_paletteAction, v.palette);
-    for (auto *a : {m_liqLabelAction, m_modeLabelAction, m_modeComboAction}) show(a, v.liquidity);
+    show(m_liqLabelAction, v.rangeSlider || v.thresholdSlider);
+    for (auto *a : {m_modeLabelAction, m_modeComboAction}) show(a, v.liquidity);
     show(m_labelsAction, v.labelsToggle);
     show(m_rangeAction, v.rangeSlider);
     show(m_rangeLabelAction, v.rangeSlider);
@@ -355,8 +525,7 @@ void TopToolbar::setLiquidityRange(double domainLo, double domainHi, double low,
     if (m_rangeSlider->dragging()) return; // the user's drag owns the handles
     m_rangeSlider->setDomain(domainLo, domainHi);
     m_rangeSlider->setValues(low, high);
-    m_rangeLabel->setText(QString::number(m_rangeSlider->low(), 'g', 3) + QStringLiteral(" - ") +
-                          QString::number(m_rangeSlider->high(), 'g', 3));
+    refreshRangeLabel();
 }
 
 void TopToolbar::setLabelOptions(bool show, bool usd) {
@@ -387,6 +556,7 @@ QToolButton* TopToolbar::addIconButton(const QString& iconPath, const QString& t
     QToolButton* button = new QToolButton(this);
     button->setIcon(QIcon(iconPath));
     button->setToolTip(tooltip);
+    button->setAccessibleName(tooltip);
     addWidget(button);
     return button;
 }

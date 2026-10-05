@@ -9,13 +9,18 @@
 #include <QFrame>
 
 ChartDock::ChartDock(QWidget* parent)
-    : DockablePanel("ChartDock", "Charts", parent)
+    : DockablePanel("ChartDock", "BTC-USD · Market chart", parent)
 {
     buildUi();
 }
 
 QSize ChartDock::minimumSizeHint() const {
-    return QSize(420, 300);
+    return QSize(480, 300);
+}
+
+void ChartDock::onSymbolChanged(const QString &symbol) {
+    setWindowTitle(QStringLiteral("%1 · Market chart").arg(symbol));
+    if (m_toolbar) m_toolbar->setBaseAssetSymbol(symbol);
 }
 
 void ChartDock::buildUi() {
@@ -66,4 +71,3 @@ QObject* ChartDock::rootObject() const {
     }
     return nullptr;
 }
-

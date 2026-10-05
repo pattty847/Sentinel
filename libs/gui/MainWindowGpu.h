@@ -84,6 +84,7 @@ private slots:
 protected:
     void closeEvent(QCloseEvent* event) override;
     void showEvent(QShowEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
 private:
     friend struct MainWindowSymbolLifecyclePeer;
@@ -145,6 +146,7 @@ private:
     class QTimer* m_tpoPagerTimer = nullptr;
     void sendTpoHistoryPage(const std::optional<tpo::HistoryPager::Request>& request);
     ChartDock* m_heatmapDock = nullptr;
+    bool m_wasMaximizedBeforeFullscreen = false;
     StatusBar* m_statusBar = nullptr;
     SecFilingDock* m_secDock = nullptr;
     CopenetFeedDock* m_copenetDock = nullptr;

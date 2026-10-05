@@ -1,6 +1,8 @@
 #include "LiquidityRangeSlider.hpp"
 #include "SentinelLogging.hpp"
 #include <QMouseEvent>
+#include <QKeyEvent>
+#include <QFocusEvent>
 #include <QPainter>
 #include <algorithm>
 #include <cmath>
@@ -16,6 +18,14 @@ LiquidityRangeSlider::LiquidityRangeSlider(QWidget *parent) : QWidget(parent) {
     setMouseTracking(false);
     setCursor(Qt::PointingHandCursor);
     setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    setFocusPolicy(Qt::StrongFocus);
+    setAccessibleName("Liquidity range, base-asset size per heatmap cell");
+    refreshTip();
+}
+
+void LiquidityRangeSlider::setBaseUnit(const QString &unit) {
+    if (unit.isEmpty() || unit == baseUnit_) return;
+    baseUnit_ = unit;
     refreshTip();
 }
 
@@ -80,8 +90,14 @@ void LiquidityRangeSlider::paintEvent(QPaintEvent *) {
     p.drawRect(QRectF(xh, cy - 2, r - xh, 4));
     for (const auto &[x, handle] : {std::pair{xl, Handle::Low}, std::pair{xh, Handle::High}}) {
         p.setPen(QPen(QColor(0x0E, 0x11, 0x16), 1.5));
-        p.setBrush(active_ == handle ? QColor(0xFF, 0xFF, 0xFF) : QColor(0xC9, 0xD3, 0xDE));
+        p.setBrush(active_ == handle || (hasFocus() && focusedHandle_ == handle)
+                       ? QColor(0xFF, 0xFF, 0xFF) : QColor(0xC9, 0xD3, 0xDE));
         p.drawEllipse(QPointF(x, cy), kHandleRadius, kHandleRadius);
+    }
+    if (hasFocus()) {
+        p.setBrush(Qt::NoBrush);
+        p.setPen(QPen(QColor(0x72, 0xB7, 0xE8), 1));
+        p.drawRoundedRect(rect().adjusted(0, 0, -1, -1), 3, 3);
     }
 }
 
@@ -92,8 +108,61 @@ void LiquidityRangeSlider::mousePressEvent(QMouseEvent *event) {
     frozenHi_ = endHi();
     const double dl = std::abs(x - xOf(low_)), dh = std::abs(x - xOf(high_));
     active_ = dl < dh || (dl == dh && x < xOf(low_)) ? Handle::Low : Handle::High;
+    focusedHandle_ = active_;
+    setFocus(Qt::MouseFocusReason);
     moveActive(x);
     event->accept();
+}
+
+void LiquidityRangeSlider::keyPressEvent(QKeyEvent *event) {
+    if (dragging()) {
+        event->accept();
+        return; // The mouse owns this transaction until release.
+    }
+    if (event->key() == Qt::Key_Home || event->key() == Qt::Key_End || event->key() == Qt::Key_Space) {
+        if (event->key() == Qt::Key_Space)
+            focusedHandle_ = focusedHandle_ == Handle::Low ? Handle::High : Handle::Low;
+        else focusedHandle_ = event->key() == Qt::Key_Home ? Handle::Low : Handle::High;
+        update();
+        event->accept();
+        return;
+    }
+    int direction = 0;
+    if (event->key() == Qt::Key_Right || event->key() == Qt::Key_Up || event->key() == Qt::Key_PageUp)
+        direction = 1;
+    else if (event->key() == Qt::Key_Left || event->key() == Qt::Key_Down || event->key() == Qt::Key_PageDown)
+        direction = -1;
+    if (!direction) return QWidget::keyPressEvent(event);
+    // Move by a fixed fraction of the visible log domain, independently of
+    // quote magnitude. Keyboard edits are complete transactions, unlike drags.
+    const double span = std::log(endHi()) - std::log(endLo());
+    const double step = span / ((event->modifiers() & Qt::ShiftModifier ||
+                                  event->key() == Qt::Key_PageUp || event->key() == Qt::Key_PageDown) ? 10 : 50);
+    const double current = focusedHandle_ == Handle::Low ? low_ : high_;
+    const double candidate = std::exp(std::log(current) + direction * step);
+    const auto round3 = [](double value) { return QString::number(value, 'g', 3).toDouble(); };
+    const double next = round3(std::clamp(candidate, endLo(), endHi()));
+    double low = low_, high = high_;
+    if (focusedHandle_ == Handle::Low) low = std::min(next, high_ / kMinRatio);
+    else high = std::max(next, low_ * kMinRatio);
+    if (low != low_ || high != high_) {
+        low_ = low;
+        high_ = high;
+        refreshTip();
+        update();
+        emit rangeEdited(low_, high_, true);
+    }
+    event->accept();
+}
+
+void LiquidityRangeSlider::focusInEvent(QFocusEvent *event) {
+    QWidget::focusInEvent(event);
+    update();
+}
+
+void LiquidityRangeSlider::focusOutEvent(QFocusEvent *event) {
+    QWidget::focusOutEvent(event);
+    update();
 }
 
 void LiquidityRangeSlider::mouseMoveEvent(QMouseEvent *event) {
@@ -131,8 +200,11 @@ void LiquidityRangeSlider::moveActive(double x) {
 }
 
 void LiquidityRangeSlider::refreshTip() {
-    setToolTip(QStringLiteral("Liquidity range (log scale, base-asset size per cell)\n"
-                              "Low %1: smaller cells get no colour and no label\n"
-                              "High %2: colour saturates at and above it")
-                   .arg(amount(low_), amount(high_)));
+    const QString tip = QStringLiteral("Liquidity range (log scale, %3 per cell)\n"
+                                       "Low %1: smaller cells get no colour and no label\n"
+                                       "High %2: colour saturates at and above it\n"
+                                       "Home/End selects a handle; arrows adjust; Space switches handle")
+                            .arg(amount(low_), amount(high_), baseUnit_);
+    setToolTip(tip);
+    setAccessibleDescription(tip);
 }

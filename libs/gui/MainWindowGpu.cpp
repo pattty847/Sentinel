@@ -1,6 +1,7 @@
 #include <QQuickView>
 #include <QTabWidget>
 #include <QLabel>
+#include <QDoubleSpinBox>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QMenuBar>
@@ -11,6 +12,7 @@
 #include <QMessageBox>
 #include <QCloseEvent>
 #include <QShowEvent>
+#include <QWindowStateChangeEvent>
 #include <QStatusBar>
 #include <QPainter>
 #include <QElapsedTimer>
@@ -86,6 +88,16 @@
 #include <unordered_map>
 
 namespace {
+void setLiquidityRangeUnits(HeatmapSettingsDialog *dialog, const QString &symbol) {
+    const QString baseUnit = symbol.section('-', 0, 0);
+    for (const char *name : {"sensitivityMin", "sensitivityMax"}) {
+        if (auto *spin = dialog->findChild<QDoubleSpinBox *>(name)) {
+            spin->setSuffix(QStringLiteral(" %1").arg(baseUnit));
+            spin->setAccessibleDescription(QStringLiteral("Base-asset size per heatmap cell, in %1; independent of label currency").arg(baseUnit));
+        }
+    }
+}
+
 int timeframeMsFromLabel(const QString& label) {
     static const std::unordered_map<std::string, int> map{
         {"1s", 1000},
@@ -328,6 +340,7 @@ void MainWindowGPU::setupUI() {
     statusBar()->addPermanentWidget(m_statusBar);
     statusBar()->setStyleSheet("QStatusBar { background-color: #1e1e1e; border-top: 1px solid #333; }");
     connect(this, &MainWindowGPU::symbolChanged, m_secDock, &SecFilingDock::onSymbolChanged);
+    connect(this, &MainWindowGPU::symbolChanged, m_heatmapDock, &ChartDock::onSymbolChanged);
     if (m_orderBookDock) {
         connect(this, &MainWindowGPU::symbolChanged, m_orderBookDock, &OrderBookDock::onSymbolChanged);
     }
@@ -411,6 +424,31 @@ void MainWindowGPU::setupUI() {
         connect(m_heatmapDock->toolbar(), &TopToolbar::settingsRequested, this, [this]() {
             if (auto* dialog = openHeatmapSettingsDialog()) dialog->activateWindow();
         });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::liquidityRangeSettingsRequested, this, [this]() {
+            if (auto* dialog = openHeatmapSettingsDialog()) {
+                for (int i = 0; i < dialog->tabs()->count(); ++i)
+                    if (dialog->tabs()->tabText(i) == QLatin1String("Look")) dialog->tabs()->setCurrentIndex(i);
+                dialog->activateWindow();
+            }
+        });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::quickSearchRequested, this, [this]() {
+            if (!m_symbolInput) return;
+            m_heatmapDock->show();
+            m_heatmapDock->raise();
+            m_symbolInput->setFocus(Qt::ShortcutFocusReason);
+            m_symbolInput->selectAll();
+        });
+        connect(m_heatmapDock->toolbar(), &TopToolbar::layoutsRequested,
+                m_heatmapDock->toolbar(), &TopToolbar::showLayoutsMenu);
+        connect(m_heatmapDock->toolbar(), &TopToolbar::fullscreenToggled, this, [this]() {
+            if (isFullScreen()) {
+                if (m_wasMaximizedBeforeFullscreen) showMaximized();
+                else showNormal();
+            } else {
+                m_wasMaximizedBeforeFullscreen = isMaximized();
+                showFullScreen();
+            }
+        });
         connect(m_heatmapDock->toolbar(), &TopToolbar::screenshotRequested, this, [this]() { saveChartScreenshot(); });
         // The chart settings menu (gear): the actions this window owns.
         HeatmapChartControls::MenuHooks hooks;
@@ -472,11 +510,14 @@ HeatmapSettingsDialog* MainWindowGPU::openHeatmapSettingsDialog() {
         m_heatmapSettingsDialog = new HeatmapSettingsDialog(m_heatmapSettings.get(), renderer, this);
         m_heatmapSettingsDialog->setTpoDefaults(GuiConfigStore::instance().clientConfig().tpo);
         m_heatmapControls->setDialog(m_heatmapSettingsDialog);
+        connect(this, &MainWindowGPU::symbolChanged, m_heatmapSettingsDialog,
+                [dialog = m_heatmapSettingsDialog](const QString &symbol) { setLiquidityRangeUnits(dialog, symbol); });
     } else {
         m_heatmapSettingsDialog->setRenderer(renderer);
         m_heatmapSettingsDialog->refreshFromModel();
     }
     m_heatmapSettingsDialog->show();
+    setLiquidityRangeUnits(m_heatmapSettingsDialog, m_currentSymbol);
     m_heatmapSettingsDialog->raise();
     return m_heatmapSettingsDialog;
 }
@@ -1185,6 +1226,17 @@ void MainWindowGPU::closeEvent(QCloseEvent* event) {
     m_dockVisibility->restoreBeforeSessionSave();
     m_layoutOrchestrator->saveLayout("_last_session");
     QMainWindow::closeEvent(event);
+}
+
+void MainWindowGPU::changeEvent(QEvent* event) {
+    QMainWindow::changeEvent(event);
+    if (event->type() == QEvent::WindowStateChange) {
+        const auto oldState = static_cast<QWindowStateChangeEvent *>(event)->oldState();
+        if (isFullScreen() && !(oldState & Qt::WindowFullScreen))
+            m_wasMaximizedBeforeFullscreen = oldState & Qt::WindowMaximized;
+        if (m_heatmapDock && m_heatmapDock->toolbar())
+            m_heatmapDock->toolbar()->setFullscreen(isFullScreen());
+    }
 }
 
 void MainWindowGPU::showEvent(QShowEvent* event) {
