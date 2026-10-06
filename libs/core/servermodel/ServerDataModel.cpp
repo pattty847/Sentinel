@@ -168,6 +168,14 @@ void ServerDataModel::startRecorder() {
         sLog_App("Recording v2 disabled (recording.enabled=false)");
         return;
     }
+    if (rc.source == "roller") {
+        startRollerServing();
+        return;
+    }
+    if (rc.source != "primary") {
+        sLog_Error("Recording v2 not started: unknown recording.source=" << rc.source << " (primary | roller)");
+        return;
+    }
     const auto choice = recording::resolveRecordingDir(rc.dir, rc.fallbackDir); // shared with the lab
     if (choice.dir.empty()) {
         sLog_Warning("Recording v2 not started: volume for " << rc.dir
@@ -239,16 +247,75 @@ void ServerDataModel::startRecorder() {
     m_recorderTimer.start();
 }
 
+// recording.source: roller. No primary BookRecorder: the journal roller writes
+// roller_shadow.dir and publishes into this LiveService (SentinelServerApp
+// installs rollerPublisher() and attachRoller() before the stream server starts).
+void ServerDataModel::startRollerServing() {
+    const auto& rc = m_serverConfig.recording;
+    const auto& shadow = m_serverConfig.rollerShadow;
+    if (!shadow.enabled) {
+        sLog_Error("Recording not served: recording.source=roller requires roller_shadow.enabled=true");
+        return;
+    }
+    if (shadow.outputRoot.empty() || !recording::volumeMounted(shadow.outputRoot)) {
+        sLog_Warning("Recording not served: volume for roller_shadow.dir " << shadow.outputRoot << " is not mounted");
+        return;
+    }
+    const std::filesystem::path dir = shadow.outputRoot;
+    m_stallSeries.clear();
+    for (const auto& symbol : rollerProducts(m_serverConfig))
+        for (const auto* layer : {"near", "deep"})
+            m_stallSeries.push_back({symbol, layer, 0});
+    m_stallMonitor.emplace(recording::RecorderConfig{}.latenessMs);
+    try {
+        m_recordingLive = std::make_shared<recording::LiveService>(dir, recording::liveCadenceMs(rc.livePublishMs));
+    } catch (const std::exception& e) {
+        m_stallMonitor.reset();
+        sLog_Error("Recording not served: dir=" << dir.string() << " error=" << e.what());
+        return;
+    }
+    m_recordingDir = dir;
+    m_servesRoller = true;
+    sLog_App("Recording served by the journal roller: dir=" << dir.string() << " products="
+             << rollerProducts(m_serverConfig).size() << " livePublishMs=" << rc.livePublishMs
+             << " liveCadenceMs=" << recording::liveCadenceMs(rc.livePublishMs));
+    m_recorderTimer.setInterval(1000);
+    connect(&m_recorderTimer, &QTimer::timeout, this, [this]() { checkRecorderProgress(localNowMs()); });
+    m_recorderTimer.start();
+}
+
+std::function<void(recording::RecordPtr)> ServerDataModel::rollerPublisher() {
+    if (!m_servesRoller || !m_recordingLive) return {};
+    // Roller history and lead workers: bounded hand-off only.
+    return [live = m_recordingLive, drops = &m_livePublishDrops](recording::RecordPtr record) {
+        if (!live->publish(std::move(record))) {
+            drops->fetch_add(1, std::memory_order_relaxed);
+            sLog_Probe("recording.live.drop", "publication exceeds series limit or is stale");
+        }
+    };
+}
+
+void ServerDataModel::attachRoller(RollerWatermarks watermarks, std::function<bool(const std::string&)> running) {
+    if (!m_servesRoller || !watermarks || !running) return;
+    m_rollerWatermarks = std::move(watermarks);
+    m_rollerRunning = std::move(running);
+    m_rollerAttached.store(true);
+}
+
 // Warns (throttled per series by the monitor) when a recorded layer stops
-// committing columns while the market-data connection is up.
+// committing columns while the market-data connection (roller: the product's
+// worker) is up.
 void ServerDataModel::checkRecorderProgress(int64_t nowMs) {
-    if (!m_stallMonitor) return;
+    if (!m_stallMonitor || !recordingAvailable()) return;
+    if (m_servesRoller)
+        for (const auto& series : m_stallSeries)
+            m_stallMonitor->setConnected(series.symbol, m_rollerRunning(series.symbol), nowMs);
     for (auto& series : m_stallSeries)
-        series.lastColumnMs = m_recorder->watermarks(series.symbol, series.layer).lastColumnMs;
+        series.lastColumnMs = recordingWatermarks(series.symbol, series.layer).lastColumnMs;
     for (const auto& stall : m_stallMonitor->check(nowMs, m_stallSeries))
         sLog_Warning("Recording v2 stalled: symbol=" << stall.symbol << " layer=" << stall.layer
                      << " lastColumnMs=" << stall.lastColumnMs << " overdueMs=" << stall.overdueMs
-                     << " invalidations=" << m_recorder->stats().invalidations);
+                     << " invalidations=" << (m_recorder ? m_recorder->stats().invalidations : 0));
 }
 
 // Active feed membership is managed before queued transport statuses are delivered.
@@ -308,7 +375,7 @@ void ServerDataModel::releaseGuiFeed(const std::string& symbol, int64_t releaseL
     }
     if (m_heatmapStreamer) m_heatmapStreamer->releaseSymbol(symbol);
     if (m_recorder) m_recorder->releaseSymbol(symbol, releaseLocalMs ? releaseLocalMs : localNowMs());
-    else if (m_recordingLive) m_recordingLive->releaseSymbol(symbol);
+    else if (m_recordingLive && !m_servesRoller) m_recordingLive->releaseSymbol(symbol); // the roller owns its series
     sLog_Data("ServerDataModel: feed released, recording stopped: symbol=" << symbol);
 }
 void ServerDataModel::onMarketDataConnectionChanged(const std::string& symbol, bool connected) {
@@ -316,7 +383,7 @@ void ServerDataModel::onMarketDataConnectionChanged(const std::string& symbol, b
     if (it == m_feeds.end()) return; // retired GUI socket: never recreate a series
     if (connected) requestProductMetadataIfNeeded(symbol, it->second);
     // Only recorded products need deadlines; do not retain closed GUI products here.
-    if (m_stallMonitor && it->second.pinned) m_stallMonitor->setConnected(symbol, connected, localNowMs());
+    if (m_stallMonitor && it->second.pinned && !m_servesRoller) m_stallMonitor->setConnected(symbol, connected, localNowMs());
     auto& feed = it->second;
     if (feed.connected == connected) return;
     feed.connected = connected;
@@ -343,19 +410,21 @@ void ServerDataModel::registerMetrics(sentinel::metrics::MetricsRegistry& r) {
                sampleFeeds([](const FeedState& f) { return f.downs; }));
     r.gaugeFn("sentinel_exchange_clock_offset_ms", "Smoothed local minus exchange clock in ms (0 = not yet measured).", {},
               [this]() -> Value { return double(m_exchangeOffsetMs.load(std::memory_order_relaxed)); });
-    r.gaugeFn("sentinel_recorder_running", "1 when recording v2 started in this process.", {},
-              [this]() -> Value { return m_recorder ? 1.0 : 0.0; });
-    if (!m_recorder) return;
+    r.gaugeFn("sentinel_recorder_running", "1 when recording is served (primary recorder started, or the roller attached).", {},
+              [this]() -> Value { return recordingAvailable() ? 1.0 : 0.0; });
+    if (!m_recorder && !m_servesRoller) return;
 
-    // BookRecorder::stats() is relaxed atomics; one call per series per scrape.
-    using Stats = recording::BookRecorder::Stats;
-    const auto stat = [this](uint64_t Stats::*field) { return [this, field]() -> Value { return double(m_recorder->stats().*field); }; };
-    r.counterFn("sentinel_recorder_columns_written_total", "Minute columns the recorder committed.", {}, stat(&Stats::columnsWritten));
-    r.counterFn("sentinel_recorder_late_events_total", "Book messages timestamped before the already-closed minutes.", {}, stat(&Stats::lateEvents));
-    r.counterFn("sentinel_recorder_backward_steps_total", "Book messages whose timestamp stepped backwards.", {}, stat(&Stats::backwardSteps));
-    r.counterFn("sentinel_recorder_queue_drops_total", "Book messages dropped (or turned into an invalidation) on recorder queue overflow.", {}, stat(&Stats::queueDrops));
-    r.counterFn("sentinel_recorder_invalidations_total", "Recorder book invalidations (upstream and self).", {}, stat(&Stats::invalidations));
-    r.counterFn("sentinel_recorder_disk_errors_total", "Recorder disk write failures.", {}, stat(&Stats::diskErrors));
+    if (m_recorder) {
+        // BookRecorder::stats() is relaxed atomics; one call per series per scrape.
+        using Stats = recording::BookRecorder::Stats;
+        const auto stat = [this](uint64_t Stats::*field) { return [this, field]() -> Value { return double(m_recorder->stats().*field); }; };
+        r.counterFn("sentinel_recorder_columns_written_total", "Minute columns the recorder committed.", {}, stat(&Stats::columnsWritten));
+        r.counterFn("sentinel_recorder_late_events_total", "Book messages timestamped before the already-closed minutes.", {}, stat(&Stats::lateEvents));
+        r.counterFn("sentinel_recorder_backward_steps_total", "Book messages whose timestamp stepped backwards.", {}, stat(&Stats::backwardSteps));
+        r.counterFn("sentinel_recorder_queue_drops_total", "Book messages dropped (or turned into an invalidation) on recorder queue overflow.", {}, stat(&Stats::queueDrops));
+        r.counterFn("sentinel_recorder_invalidations_total", "Recorder book invalidations (upstream and self).", {}, stat(&Stats::invalidations));
+        r.counterFn("sentinel_recorder_disk_errors_total", "Recorder disk write failures.", {}, stat(&Stats::diskErrors));
+    }
     r.counterFn("sentinel_recorder_live_publish_drops_total", "Live publications refused (series limit or stale).", {},
                 load(m_livePublishDrops));
 
@@ -365,15 +434,16 @@ void ServerDataModel::registerMetrics(sentinel::metrics::MetricsRegistry& r) {
         r.gaugeFn("sentinel_recorder_last_column_timestamp_seconds",
                   "Start of the newest committed minute column (absent until the first column).", labels,
                   [this, symbol = series.symbol, layer = series.layer]() -> Value {
-                      const int64_t ms = m_recorder->watermarks(symbol, layer).lastColumnMs;
+                      const int64_t ms = recordingWatermarks(symbol, layer).lastColumnMs;
                       return ms > 0 ? Value(ms / 1000.0) : std::nullopt;
                   });
         r.gaugeFn("sentinel_recorder_column_overdue_seconds",
                   "Seconds the next column is past due (stall monitor; absent while this product is disconnected). "
                   "The log warns 'Recording v2 stalled' at 60.", labels,
                   [this, symbol = series.symbol, layer = series.layer]() -> Value {
+                      if (!m_stallMonitor) return std::nullopt;
                       const auto overdue = m_stallMonitor->overdueMs(
-                          symbol, localNowMs(), m_recorder->watermarks(symbol, layer).lastColumnMs);
+                          symbol, localNowMs(), recordingWatermarks(symbol, layer).lastColumnMs);
                       return overdue ? Value(*overdue / 1000.0) : std::nullopt;
                   });
     }

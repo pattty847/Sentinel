@@ -19,8 +19,12 @@ public:
     ~SentinelServerApp();
 
     bool initialize();
-    // True once the recorder started (recording.enabled and a usable directory).
-    bool recording() const { return m_serverModel && m_serverModel->recordingDir().has_value(); }
+    // True once recording is served: the primary recorder started, or
+    // (recording.source: roller) the roller supervisor attached to the model.
+    bool recording() const { return m_serverModel && m_serverModel->recordingAvailable(); }
+    // --require-recording precheck: the reason the root that this config would
+    // serve is unusable (disabled, unmounted, not a writable directory), or empty.
+    static std::string requiredRecordingProblem(ServerConfig& config);
 
 private:
     void startShadow(const std::vector<std::string>& symbols);

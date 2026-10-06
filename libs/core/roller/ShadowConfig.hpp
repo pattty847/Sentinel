@@ -2,8 +2,12 @@
 #include <chrono>
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
+namespace recording {
+struct Hmc2Record;
+}
 namespace sentinel::roller {
 struct JournalRecord;
 struct ShadowConfig {
@@ -29,5 +33,16 @@ struct ShadowConfig {
   size_t pendingBytes = 32 * 1024 * 1024;
   // Receive/apply instrumentation, shadow thread only; no primary hook.
   std::function<void(const JournalRecord &, bool applied)> observeForTest;
+  // roller_shadow.products; empty = the server's default_symbols. Products
+  // without a matching journal are refused at startup (no worker).
+  std::vector<std::string> products;
+  // Serving path (recording.source: roller), installed by the server, never
+  // read from config. Committed minutes come from the history recorder; the
+  // forming minute from a lead fork that also applies provisional fan-out
+  // records. Empty: shadow only.
+  std::function<void(std::shared_ptr<const recording::Hmc2Record>)> publisher;
+  int64_t livePublishMs = 500;
+  // Wall clock (epoch ms) for lead ticks every 250 ms; tests inject.
+  std::function<int64_t()> liveNowForTest;
 };
 } // namespace sentinel::roller

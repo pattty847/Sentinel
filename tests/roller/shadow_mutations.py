@@ -9,67 +9,147 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 os.chdir(ROOT)
 os.environ['CCACHE_DIR'] = '/tmp/sentinel-ccache'
+SHADOW, ROLLER = 'test_shadow_roller', 'test_roller'
 
 def command(args):
     return subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
-def build():
-    p = command(['cmake', '--build', '--preset', 'mac-clang', '-j', '4', '--target', 'test_shadow_roller'])
+def build(target):
+    if target is None:
+        return
+    # -j 2: the owner's Mac froze under heavier load (AGENTS section 4).
+    p = command(['cmake', '--build', '--preset', 'mac-clang', '-j', '2', '--target', target])
     if p.returncode:
         raise RuntimeError(p.stdout[-10000:])
 
-def test(name, fail=False):
-    p = command(['build/mac-clang/tests/roller/test_shadow_roller', '--gtest_filter=' + name])
+def test(name, target, fail=False):
+    if name.startswith('sh:'):
+        p = command(['bash', name[3:], str(ROOT)])
+        if p.returncode != (1 if fail else 0):
+            raise RuntimeError(p.stdout[-12000:])
+        return
+    p = command([f'build/mac-clang/tests/roller/{target}', '--gtest_filter=' + name])
     if (p.returncode != (1 if fail else 0)) or (fail and '[  FAILED  ]' not in p.stdout):
         raise RuntimeError(p.stdout[-12000:])
 
+SR = 'libs/core/roller/ShadowRoller.cpp'
+BR = 'libs/core/servermodel/BookRecorder.cpp'
+APP = 'apps/sentinel-server/SentinelServerApp.cpp'
 mutations = [
-    ('durable admission', 'libs/core/roller/ShadowRoller.cpp',
+    ('durable admission', SR,
      'if(!pending.empty() && ceiling && older(pending.front().pos,*ceiling))',
      'if(!pending.empty())',
      'ShadowTest.RetractNeverAppliesOrCheckpointsProvisionalSuffix'),
-    ('disk ceiling', 'libs/core/roller/ShadowRoller.cpp',
+    ('disk ceiling', SR,
      'if(!older(out.pos,*diskTarget))', 'if(false)',
      'ShadowTest.NeverCrossesHandshakeDurableCeilingWhenAnchorIsNewer'),
     ('missing strict buckets', 'libs/core/roller/Diff.cpp',
      'else if (strictJournal && (l.contains(t) != r.contains(t)))', 'else if (false)',
      'ShadowTest.MismatchMetricIsStrictAndCrossConnectionInformational'),
-    ('duplicate overlap', 'libs/core/roller/ShadowRoller.cpp',
+    ('duplicate overlap', SR,
      'if(applied && older(p,*applied)) return;', 'if(false) return;',
      'ShadowTest.CatchupJoinsSocketOverlapExactlyOnce'),
-    ('primary root isolation', 'libs/core/roller/ShadowRoller.cpp',
+    ('primary root isolation', SR,
      'overlaps(cfg.outputRoot,primary) || overlaps(cfg.outputRoot,cfg.journalRoot)',
      'false', 'ShadowTest.RefusesAliasedPrimaryRoot'),
-    ('stop wait synchronization', 'libs/core/roller/ShadowRoller.cpp',
+    ('stop wait synchronization', SR,
      'std::lock_guard lock(mutex); stopping = true;', 'stopping = true;',
      'ShadowTest.StopWakesCheckerAcrossPredicateWaitTransition'),
-    ('comparison watermark restore', 'libs/core/roller/ShadowRoller.cpp',
+    ('comparison watermark restore', SR,
      'p->compared = saved.at("comparedThroughMs").get<int64_t>();', 'p->compared = first;',
      'ShadowTest.ComparisonWatermarkAndMismatchTotalsSurviveRestart'),
-    ('malformed journal invalidation', 'libs/core/roller/ShadowRoller.cpp',
+    ('malformed journal invalidation', SR,
      'o.onInvalid = [&](const std::string &reason) {',
      'o.onInvalid = [&](const std::string &reason) { if (reason.starts_with("malformed")) throw std::logic_error(reason);',
      'ShadowTest.MalformedRecordInvalidatesAndContinuesLikeBatch'),
-    ('persistent fault cooldown', 'libs/core/roller/ShadowRoller.cpp',
+    ('persistent fault cooldown', SR,
      'coolingDown ? cfg.failureCooldown : backoff', 'backoff',
      'ShadowTest.PersistentWriteFaultEntersCooldownAndRecovers'),
-    ('cooldown minimum duration', 'libs/core/roller/ShadowRoller.cpp',
+    ('cooldown minimum duration', SR,
      'now - *failureSince >= cfg.failureMinDuration', 'true',
      'ShadowTest.ThirtySecondOutageNeverEntersCooldown'),
-    ('transport retains applied book state', 'libs/core/roller/ShadowRoller.cpp',
+    ('transport retains applied book state', SR,
      'if (!applied) throw;', 'throw;',
      'ShadowTest.JournalUnavailableResumesAppliedCursorWithoutReplay'),
-    ('server shadow startup independence', 'apps/sentinel-server/SentinelServerApp.cpp',
-     'm_serverModel->recordingDir().value_or(m_serverConfig.recording.dir), m_metrics);',
-     'm_serverModel->recordingDir().value_or(m_serverConfig.recording.dir), m_metrics); m_shadowRoller->stop();',
+    ('server shadow startup independence', APP,
+     'm_shadowRoller = std::make_unique<sentinel::roller::ShadowRoller>(shadow, products, primaryRoot, m_metrics);',
+     'm_shadowRoller = std::make_unique<sentinel::roller::ShadowRoller>(shadow, products, primaryRoot, m_metrics); m_shadowRoller->stop();',
      'ShadowTest.StalledAndFailingShadowDoesNotDelayServerPrimary'),
-    ('missing comparison checkpoint is not a fresh audit', 'libs/core/roller/ShadowRoller.cpp',
+    ('missing comparison checkpoint is not a fresh audit', SR,
      'if (p->comparisonCheckpointSeen)', 'if (false)',
      'ShadowTest.ComparisonWatermarkAndMismatchTotalsSurviveRestart'),
+    # Slice D-a (option C live path, recording.source: roller).
+    ('A10 lead applies provisional records on arrival', SR,
+     'pending.push_back(std::move(r)); if (lead) lead->apply(pending.back());',
+     'pending.push_back(std::move(r));',
+     'ShadowTest.LeadPublishesProvisionalRecordBeforeItsDurableMarker'),
+    ('A10 lead claims no committed cutoff', BR,
+     'r->committedThroughMs = lead() ? 0 : s.closedThrough;', 'r->committedThroughMs = s.closedThrough;',
+     'ShadowTest.LeadPublishesProvisionalRecordBeforeItsDurableMarker'),
+    ('A11 retract drops the lead', SR,
+     'pendingSize = 0; if (lead) lead->discard(); }', 'pendingSize = 0; }',
+     'ShadowTest.RetractRebuildsLiveMinuteFromDurableState'),
+    ('A11 disconnect drops the lead', SR,
+     'pendingSize = 0; if (lead) lead->discard(); }', 'pendingSize = 0; }',
+     'ShadowTest.DisconnectRebuildsLiveFromDurableState'),
+    ('A11 rebuilt lead never moves live back', SR,
+     'if (r->bucketStartMs < newest) return;', '',
+     'ShadowTest.RetractAcrossMinuteNeverMovesLiveBack'),
+    ('lead fork copies the minute state', BR,
+     'to->observed = from->observed;', '',
+     'ShadowTest.LeadForkFinishesMinutesExactlyLikeHistory'),
+    ('lead wall ticks while the socket waits', SR,
+     'if (lead) lead->idle();', '',
+     'ShadowTest.LeadWallTicksAdvanceQuietFormingMinute'),
+    ('A1 unjournaled product refused', SR,
+     'if (journalHasProduct(cfg.journalRoot, p->name) == false) {', 'if (false) {',
+     'ShadowTest.ListedProductWithoutJournalIsRefusedWithoutWorker'),
+    ('served watermarks never regress at midnight', SR,
+     's.minuteThroughMs = std::max(s.minuteThroughMs, w.minuteThroughMs);',
+     's.minuteThroughMs = w.minuteThroughMs;',
+     'ShadowTest.MidnightRotationKeepsHistoryAndLiveForTwoProducts'),
+    ('A2/A4 server attaches the serving roller', APP,
+     'if (serving && m_shadowRoller->active()) {', 'if (false) {',
+     'ShadowTest.ServingRollerReplacesPrimaryRecorderForNonDefaultProduct'),
+    ('A5 served root is not a protected primary root', APP,
+     'serving ? std::filesystem::path(m_serverConfig.recording.dir)', 'serving ? *m_serverModel->recordingDir()',
+     'ShadowTest.ServingRollerReplacesPrimaryRecorderForNonDefaultProduct'),
+    ('A3 model watermarks from the roller', 'libs/core/servermodel/ServerDataModel.hpp',
+     'if (m_rollerAttached.load()) return m_rollerWatermarks(symbol, layer);', '',
+     'ShadowTest.ServingRollerReplacesPrimaryRecorderForNonDefaultProduct'),
+    ('stall monitor follows roller workers', 'libs/core/servermodel/ServerDataModel.cpp',
+     'm_stallMonitor->setConnected(series.symbol, m_rollerRunning(series.symbol), nowMs);', ';',
+     'ShadowTest.ServingRollerReplacesPrimaryRecorderForNonDefaultProduct'),
+    ('A8 require-recording checks the served root', APP,
+     'const std::string dir = roller ? config.rollerShadow.outputRoot : rc.dir;', 'const std::string dir = rc.dir;',
+     'ShadowConfig.RequireRecordingChecksTheServedRoot'),
+    ('A1 roller_shadow.products parsed', 'libs/core/ConfigLoader.cpp',
+     'cfg.rollerShadow.products = normalizedDefaultSymbols(parseSymbolList(shadow["products"]));', ';',
+     'ShadowConfig.ProductsAndRecordingSourceKeys'),
+    ('A6 publisher is not checkpoint policy', 'libs/core/roller/Roller.cpp',
+     'hash = configHash(cfg);', 'hash = configHash(cfg) ^ uint64_t(bool(o.publisher));',
+     'Roller.PublisherKeepsSliceACheckpointPolicyHash', ROLLER),
+    ('history publishes finals only', BR,
+     'cfg.publication == RecorderConfig::Publication::Finals ||', '',
+     'Roller.PublisherKeepsSliceACheckpointPolicyHash', ROLLER),
+    ('lead never opens a store', BR,
+     'if (!lead()) store.emplace(', 'store.emplace(',
+     'Roller.LeadForkNeverPersistsAndClaimsNoCommit', ROLLER),
+    ('product lease may write the served root', 'libs/core/roller/RollCli.cpp',
+     '!o.productWriterLease && server["roller_shadow"]', 'server["roller_shadow"]',
+     'Roller.RollCliProductLeaseMayWriteRollerServedRoot', ROLLER),
+    ('A9 deploy marker accepts the serving roller', 'scripts/dev/deploy-runtime.sh',
+     'grep -Eq "Recording v2 started|Roller started product=[^ ]+ mode=live" "$1";',
+     'grep -q "Recording v2 started" "$1";',
+     'sh:tests/roller/deploy_marker_test.sh', None),
 ]
 if "--round1" in sys.argv:
     mutations = mutations[5:]
-for name, path, before, after, case in mutations:
+if "--slice-d" in sys.argv:
+    mutations = mutations[13:]
+for entry in mutations:
+    name, path, before, after, case = entry[:5]
+    target = entry[5] if len(entry) > 5 else SHADOW
     p = ROOT / path
     original = p.read_text()
     # Match tokens across clang-format whitespace, retaining exact operators,
@@ -82,13 +162,13 @@ for name, path, before, after, case in mutations:
     try:
         p.write_text(original[:hit.start()] + after + original[hit.end():])
         os.utime(p, None)
-        build()
-        test(case, fail=True)
+        build(target)
+        test(case, target, fail=True)
         print(f'FAIL-WITHOUT: {name}: expected assertion failure', flush=True)
     finally:
         p.write_text(original)
         os.utime(p, None)
-        build()
-    test(case)
+        build(target)
+    test(case, target)
     print(f'RESTORED: {name}: passed', flush=True)
 print(f'SHADOW_MUTATIONS: {len(mutations)}/{len(mutations)} fail-without and restored checks passed', flush=True)

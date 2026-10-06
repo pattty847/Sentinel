@@ -6,8 +6,15 @@ set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 RT="$HOME/Sentinel-runtime/bin"
 IDENTITY="Sentinel Local Code Signing"
-LOGS="$HOME/Library/Logs/Sentinel"
+LOGS="${SENTINEL_DEPLOY_LOGS:-$HOME/Library/Logs/Sentinel}"
 DRY_RUN=0
+# Server start marker: the primary recorder, or the roller when it serves
+# recording (recording.source: roller logs mode=live, never Recording v2 started).
+server_writing() { grep -Eq "Recording v2 started|Roller started product=[^ ]+ mode=live" "$1"; }
+if [[ ${1:-} == check-server-log ]]; then # check-server-log <log>: tests and the runbook
+    [[ $# == 2 ]] || { echo "usage: deploy-runtime.sh check-server-log <log>" >&2; exit 1; }
+    server_writing "$2"; exit
+fi
 args=()
 for arg in "$@"; do
     if [[ $arg == --dry-run ]]; then DRY_RUN=1; else args+=("$arg"); fi
@@ -28,7 +35,7 @@ verify_writes() { # name label binary previous-log
         sleep 2
         log=$(ls -t "$LOGS"/"$bin"-2*.log 2>/dev/null | head -1 || true)
         [[ -n $log && $log != "$before" ]] || continue
-        if [[ $name == server ]] && grep -q "Recording v2 started" "$log"; then
+        if [[ $name == server ]] && server_writing "$log"; then
             echo "$bin: writing (log $(basename "$log"))"; return 0
         fi
         if [[ $name == capture ]] && grep -q "Capture stats\|storedFrames\|Subscription confirmed" "$log"; then

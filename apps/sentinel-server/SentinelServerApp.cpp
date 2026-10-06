@@ -6,8 +6,12 @@
 #include <QTimer>
 #include <QStringList>
 #include "metrics/ProcessMetrics.hpp"
+#include "servermodel/RecordingDir.hpp"
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
+#include <filesystem>
+#include <unistd.h>
 
 namespace {
 template <typename T, typename Fn>
@@ -247,9 +251,10 @@ bool SentinelServerApp::initialize() {
         for (const auto& symbol : symbolList) m_marketDataCore->add(symbol, true);
         sLog_Data("Server default subscribe: count=" << symbolList.size()
                   << " guiConnectionCap=" << m_serverConfig.mdc.maxConnections);
-        m_server->start();
-
+        // Before the stream server starts: a roller-served recording must be
+        // attached before the first hello reports recording availability.
         startShadow(symbolList);
+        m_server->start();
         return true;
     } catch (const std::exception& e) {
         sLog_Error("Exception during initialization: " << e.what());
@@ -258,17 +263,55 @@ bool SentinelServerApp::initialize() {
 }
 
 void SentinelServerApp::startShadow(const std::vector<std::string>& symbols) {
-    // Optional independent consumer; no primary callbacks or recorder queue.
+    // Shadow: an independent consumer; no primary callbacks or recorder queue.
+    // Serving (recording.source: roller): the model has no primary recorder and
+    // serves roller_shadow.dir; the roller publishes into its LiveService.
     try {
-        m_serverConfig.rollerShadow.protectedRoots = {m_serverConfig.recording.dir};
+        const bool serving = m_serverModel->servesRoller();
+        auto& shadow = m_serverConfig.rollerShadow;
+        // Roots of the primary recorder only: never the served roller root.
+        shadow.protectedRoots = {m_serverConfig.recording.dir};
         if (!m_serverConfig.recording.fallbackDir.empty())
-            m_serverConfig.rollerShadow.protectedRoots.push_back(m_serverConfig.recording.fallbackDir);
-        m_shadowRoller = std::make_unique<sentinel::roller::ShadowRoller>(
-            m_serverConfig.rollerShadow, symbols,
-            m_serverModel->recordingDir().value_or(m_serverConfig.recording.dir), m_metrics);
+            shadow.protectedRoots.push_back(m_serverConfig.recording.fallbackDir);
+        if (serving) {
+            shadow.publisher = m_serverModel->rollerPublisher();
+            shadow.livePublishMs = m_serverConfig.recording.livePublishMs;
+        }
+        const auto products = shadow.products.empty() ? symbols : rollerProducts(m_serverConfig);
+        // Informational cross-connection comparison root: the primary recorder's.
+        const std::filesystem::path primaryRoot =
+            serving ? std::filesystem::path(m_serverConfig.recording.dir)
+                    : m_serverModel->recordingDir().value_or(m_serverConfig.recording.dir);
+        m_shadowRoller = std::make_unique<sentinel::roller::ShadowRoller>(shadow, products, primaryRoot, m_metrics);
+        if (serving && m_shadowRoller->active()) {
+            auto* roller = m_shadowRoller.get();
+            m_serverModel->attachRoller(
+                [roller](const std::string& product, const std::string& layer) {
+                    return roller->watermarks(product, layer);
+                },
+                [roller](const std::string& product) { return roller->running(product); });
+        }
     } catch (const std::exception& e) {
         m_metrics.counter("sentinel_roller_shadow_start_failures_total",
                           "Shadow supervisor construction failures.").inc();
         sLog_Error("Shadow roller supervisor failed: " << e.what());
     }
+}
+
+std::string SentinelServerApp::requiredRecordingProblem(ServerConfig& config) {
+    auto& rc = config.recording;
+    rc.fallbackDir.clear(); // never fall back to the system disk
+    if (!rc.enabled) return "recording.enabled is false";
+    const bool roller = rc.source == "roller";
+    if (!roller && rc.source != "primary") return "unknown recording.source=" + rc.source;
+    if (roller && !config.rollerShadow.enabled) return "recording.source=roller requires roller_shadow.enabled";
+    // The root this process will serve: the primary recorder's or the roller's.
+    const std::string dir = roller ? config.rollerShadow.outputRoot : rc.dir;
+    std::error_code ec;
+    const bool usable = !dir.empty() && !recording::resolveRecordingDir(dir, {}).dir.empty() &&
+                        std::filesystem::is_directory(dir, ec) && !ec &&
+                        ::access(dir.c_str(), R_OK | W_OK | X_OK) == 0;
+    if (!usable)
+        return dir + " is not mounted or accessible (errno=" + std::to_string(errno) + ")";
+    return {};
 }

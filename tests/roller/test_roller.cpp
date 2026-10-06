@@ -334,6 +334,80 @@ TEST(Roller, RefusesUnownedHmc2AndConfiguredRecorderRoots) {
     EXPECT_EQ(invoke(root/"unowned"),1);EXPECT_EQ(contents(marker),"do not touch");
 }
 
+// A6: the history publisher and its publication mode are not checkpoint
+// policy. The slice A..C BTC-USD product root keeps its hash, so existing roots
+// reopen under the serving path (a changed hash throws "checkpoint policy/range mismatch").
+TEST(Roller, PublisherKeepsSliceACheckpointPolicyHash) {
+    constexpr uint64_t SliceABtcHash=18293455670244139256ull; // /Volumes/T7/sentinel-data/hmc2/BTC-USD/roller.json
+    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); fs::path root=temp.path().toStdString(); fixture(root/"raw");
+    auto o=options(root/"raw",root/"out"); o.toMs=Epoch+120'000; o.productWriterLease=true;
+    roll(o);
+    const auto cp=root/"out"/"BTC-USD"/"roller.json";
+    EXPECT_EQ(json::parse(contents(cp)).at("configHash").get<uint64_t>(),SliceABtcHash);
+    std::mutex mutex; std::vector<std::shared_ptr<const recording::Hmc2Record>> finals;
+    o.toMs=Epoch+240'000;
+    o.publisher=[&](std::shared_ptr<const recording::Hmc2Record> r){std::lock_guard lock(mutex);finals.push_back(std::move(r));};
+    EXPECT_NO_THROW(roll(o));
+    EXPECT_EQ(json::parse(contents(cp)).at("configHash").get<uint64_t>(),SliceABtcHash);
+    EXPECT_EQ(json::parse(contents(cp)).at("committedThroughMs").get<int64_t>(),Epoch+240'000);
+    // History publishes committed minutes only (2 and 3, both layers), once each.
+    ASSERT_EQ(finals.size(),4u);
+    for(const auto& r:finals){EXPECT_FALSE(r->flags&recording::kProvisional);EXPECT_EQ(r->committedThroughMs,r->bucketStartMs+60'000);}
+}
+// The lead fork shares no store: it coexists with the history recorder's
+// product lease, never writes, and claims no committed cutoff.
+TEST(Roller, LeadForkNeverPersistsAndClaimsNoCommit) {
+    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX"));
+    auto c=deriveGrid(metadata()["product_metadata"],100000).config(temp.path().toStdString());
+    c.writerProduct="BTC-USD"; c.latenessMs=0;
+    std::vector<std::shared_ptr<const recording::Hmc2Record>> finals,lead;
+    c.publisher=[&](auto r){finals.push_back(std::move(r));};
+    c.publication=recording::RecorderConfig::Publication::Finals;
+    recording::BookRecorder history(c);
+    history.onSnapshotAt("BTC-USD",Epoch,Epoch,{{true,99999.99,2},{false,100000.01,3}});
+    history.onTick(Epoch+30'000);
+    auto fork=history.forkLead([&](auto r){lead.push_back(std::move(r));},500);
+    fork->onUpdatesAt("BTC-USD",Epoch+31'000,Epoch+31'000,{{false,100003,7}});
+    fork->onTick(Epoch+90'000); fork->drain();
+    history.onTick(Epoch+90'000); history.drain();
+    ASSERT_FALSE(lead.empty());
+    bool held=false;
+    for(const auto& r:lead){
+        EXPECT_TRUE(r->flags&recording::kProvisional); EXPECT_EQ(r->committedThroughMs,0);
+        held=held||(r->header.layer=="near"&&r->bucketStartMs==Epoch&&r->observedMs==60'000&&
+            std::any_of(r->entries.begin(),r->entries.end(),[](const auto& e){return e.isAsk&&e.row==100003;}));
+    }
+    EXPECT_TRUE(held);
+    ASSERT_EQ(finals.size(),2u);
+    const auto rows=recording::Hmc2Store::readRange(c.root,"BTC-USD","near",60'000,Epoch,Epoch+120'000);
+    ASSERT_EQ(rows.size(),1u); // history alone persisted minute 0, without the lead-only level
+    EXPECT_TRUE(std::none_of(rows[0].entries.begin(),rows[0].entries.end(),[](const auto& e){return e.row==100003;}));
+    EXPECT_EQ(fork->stats().columnsWritten,0u);
+}
+// After the flip the roller root is live: unscoped batch is refused there, and
+// --product-lease (shared root, exclusive product) may repair beside it.
+TEST(Roller, RollCliProductLeaseMayWriteRollerServedRoot) {
+    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/roots-XXXXXX"));ASSERT_TRUE(temp.isValid());
+    const fs::path root=temp.path().toStdString(); fixture(root/"raw");
+    const auto previous=fs::current_path();
+    struct Restore {fs::path path;~Restore(){fs::current_path(path);}} restore{previous};
+    fs::create_directories(root/"config");
+    save(root/"config"/"server_config.yaml","recording:\n  dir: '"+(root/"primary").string()+"'\n  source: roller\n"
+         "roller_shadow:\n  dir: '"+(root/"hmc2").string()+"'\n");
+    fs::current_path(root);
+    auto invoke=[&](bool lease) {
+        std::vector<std::string> args={"sentinel-roll",(root/"raw").string(),(root/"hmc2").string(),"--products","BTC-USD",
+            "--from","2027-01-01T00:00:00Z","--to","2027-01-01T00:04:00Z"};
+        if(lease) args.push_back("--product-lease");
+        std::vector<char*> argv;for(auto& a:args)argv.push_back(a.data());
+        return rollMain(int(argv.size()),argv.data());
+    };
+    EXPECT_EQ(invoke(false),1); EXPECT_FALSE(fs::exists(root/"hmc2"));
+    EXPECT_EQ(invoke(true),0);
+    EXPECT_TRUE(fs::exists(root/"hmc2"/".writer-BTC-USD.lock"));
+    EXPECT_FALSE(recording::Hmc2Store::readRange(root/"hmc2","BTC-USD","near",60'000,Epoch,Epoch+240'000).empty());
+}
+
 TEST(Roller, RealJournalCrashResumeRestoresLargeDeltaBase) {
     QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/real-resume-XXXXXX"));ASSERT_TRUE(temp.isValid());
     const fs::path root=temp.path().toStdString();fs::create_directories(root/"raw");

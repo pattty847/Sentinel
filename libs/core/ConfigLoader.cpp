@@ -163,6 +163,8 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
             readScalar(shadow, "dir", cfg.rollerShadow.outputRoot);
             readScalar(shadow, "socket", cfg.rollerShadow.socketPath);
             readScalar(shadow, "from", cfg.rollerShadow.from);
+            if (shadow["products"])
+                cfg.rollerShadow.products = normalizedDefaultSymbols(parseSymbolList(shadow["products"]));
             int64_t faultMinDurationMs = cfg.rollerShadow.failureMinDuration.count();
             if (readScalar(shadow, "fault_min_duration_ms", faultMinDurationMs))
                 cfg.rollerShadow.failureMinDuration = std::chrono::milliseconds(faultMinDurationMs);
@@ -181,6 +183,7 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
             readScalar(rec, "deep_low_frac", cfg.recording.deepLowFrac);
             readScalar(rec, "deep_high_mult", cfg.recording.deepHighMult);
             readScalar(rec, "lateness_ms", cfg.recording.latenessMs);
+            readScalar(rec, "source", cfg.recording.source);
             if (readScalar(rec, "live_publish_ms", cfg.recording.livePublishMs))
                 cfg.recording.livePublishMs = std::clamp(cfg.recording.livePublishMs,
                     ServerRecordingConfig::kLivePublishMinMs, ServerRecordingConfig::kLivePublishMaxMs);
