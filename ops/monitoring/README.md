@@ -323,7 +323,52 @@ with other processes. Incremental oracle state is deferred: the current batch
 checkpoint stores output progress, not the reconstructed book/TWAP state, so
 keeping only its checkpoint would not remove the daily warmup cost.
 
-The startup line is `Roller started ... mode=shadow`. Deployment verification
-continues to require `Recording v2 started` and primary writes: the old marker
-is emitted by both old and new shadow-mode binaries. No deploy script change
-is necessary for slice C.
+`roller_shadow.products` lists the rolled products (default: the server's
+`default_symbols`). A listed product with no RAWL2 file whose header
+`product_metadata.product_id` matches under `journal_dir/<product>` is refused
+at startup: an `E` line `Roller refused product=...`, one
+`setup_failures_total` increment, `running 0`, lag -1, and no worker. An
+unmounted `journal_dir` is not a refusal; the worker retries as usual.
+
+### Serving (`recording.source: roller`, slice D-a)
+
+`recording.source` is `primary` (default: this process's BookRecorder writes
+`recording.dir`) or `roller`. With `roller` (requires `recording.enabled` and
+`roller_shadow.enabled`) no primary recorder is created: chunks, availability,
+`recording.available` and the live minute come from `roller_shadow.dir` and
+the roller. Committed minutes are published from the history recorder, which
+still applies only durable fan-out prefixes. The forming minute comes from a
+**live lead**: a non-persisting fork of the day's history state that also
+applies each provisional fan-out record as it arrives and ticks every 250 ms
+like the primary. A retract, disconnect, EOF or socket failure drops the lead;
+the next fork starts from durable history and republishes the forming minute.
+The lead is forked once per start, per UTC day (about 2 s without a forming
+minute at 00:01 UTC while the new day replays from its anchor) and per
+provisional discard.
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `sentinel_roller_shadow_live_lead_forks_total` | counter | product | Live leads forked from durable history (serving only). Steady growth beyond one per day means repeated provisional discards: read `Shadow roller retry`. |
+| `sentinel_recorder_running` | gauge | - | 1 when recording is served: primary started, or the serving roller attached. |
+| `sentinel_recorder_last_column_timestamp_seconds`, `sentinel_recorder_column_overdue_seconds` | gauge | product, layer | Same series, from the roller's committed watermarks for `roller_shadow.products`; overdue is present while that product's worker is running. |
+| `sentinel_recorder_live_publish_drops_total` | counter | - | Roller publications the live cache refused. |
+
+The primary-only `sentinel_recorder_*_total` stats (columns, late, backward,
+queue drops, invalidations, disk errors) are absent while the roller serves.
+The cross-connection comparison still reads `recording.dir` (informational;
+it stops growing after the flip). Served watermarks never move back across
+the daily anchor replay.
+
+`sentinel-roll` refuses a roller-served `roller_shadow.dir` for unscoped
+batch. `--product-lease` takes the shared root lease plus the product's
+exclusive lease (INV-115): it may repair a product the live roller is not
+rolling, and fails on the product lock for one it is rolling.
+
+Startup lines: `Roller started ... mode=shadow`, or `mode=live` when serving.
+`deploy-runtime.sh` treats either `Recording v2 started` or
+`Roller started product=... mode=live` as the server write marker
+(`deploy-runtime.sh check-server-log <log>` runs the same check). A
+shadow-only roller line is not a marker: in shadow mode the primary marker is
+still required. Probe `roller.live` logs every forming-minute publication
+with `ageMs` (now minus bucket start plus observed time) and the lowest
+native price in it.

@@ -45,6 +45,15 @@ struct LeadGuard {
   std::map<std::string, int64_t>
       newestBucket; // by layer; lead workers only, one at a time
 };
+// Probe only (evaluated when roller.live is enabled): lowest native row price.
+double lowestPrice(const recording::Hmc2Record &r) {
+  int64_t low = INT64_MAX;
+  for (const auto &e : r.entries)
+    low = std::min(low, e.row);
+  return r.entries.empty() ? 0.0
+                           : double(low) * double(r.header.rowTickUnits) /
+                                 r.header.priceScale;
+}
 // Option C live path (owner 2026-10-06), roller worker thread only. The lead is
 // a non-persisting fork of the day's history recorder (Publication::Lead) that
 // also applies provisional fan-out records as they arrive. History still
@@ -115,9 +124,11 @@ public:
                               << " bucket=" << r->bucketStartMs
                               << " observed=" << r->observedMs
                               << " entries=" << r->entries.size() << " ageMs="
-                              << nowMs() - (r->bucketStartMs + r->observedMs));
+                              << nowMs() - (r->bucketStartMs + r->observedMs)
+                              << " lowPrice=" << lowestPrice(*r));
         sink(std::move(r));
       };
+      const auto began = std::chrono::steady_clock::now();
       lead = history->forkLead(std::move(publish), cfg.livePublishMs);
       feed = std::make_unique<JournalFeed>(*historyFeed);
       feed->onSnapshot = [this](int64_t e, int64_t l,
@@ -135,8 +146,11 @@ public:
       feed->onTrade = {};
       feed->onConnection = {};
       forks.inc();
-      sLog_Data("Roller live lead forked product=" << product << " provisional="
-                                                   << pending.size());
+      sLog_Data("Roller live lead forked product="
+                << product << " provisional=" << pending.size() << " forkUs="
+                << std::chrono::duration_cast<std::chrono::microseconds>(
+                       std::chrono::steady_clock::now() - began)
+                       .count());
       for (const auto &r : pending)
         feed->apply(r);
       lastTickMs = 0;
