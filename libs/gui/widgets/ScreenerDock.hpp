@@ -14,6 +14,8 @@
 #include <QSlider>
 #include <QTimer>
 #include <QPointer>
+#include <QSet>
+#include <QFont>
 
 class SentinelStreamClient;
 class QShowEvent;
@@ -53,6 +55,7 @@ private slots:
     void onFetchTimeout();
 
 private:
+    void changeEvent(QEvent* event) override;
     void showEvent(QShowEvent* event) override;
     void hideEvent(QHideEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -63,6 +66,7 @@ private:
     void requestFetch();
     void applyRows(const QJsonArray& rows);
     void adjustDefaultNameColumnWidth();
+    void remeasureFontColumns();
     void updateColumns();
     void setStatus(const QString& text, bool error = false);
 
@@ -90,7 +94,10 @@ private:
     bool    m_columnsResized = false;
     bool    m_adjustingColumnWidths = false;
     bool    m_nameColumnUserSized = false;
+    bool    m_fontRefreshPending = false;
     int     m_nameColumnPreferredWidth = 0;
+    QSet<int> m_userSizedColumns;
+    QFont   m_measuredFont;
     bool    m_fetchPending   = false;
     QString m_currentAsset   = "crypto";
     QString m_lastReceived;

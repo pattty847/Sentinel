@@ -10,6 +10,7 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QDateTime>
+#include <QEvent>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QCheckBox>
@@ -198,7 +199,7 @@ void ScreenerDock::buildUi() {
     m_statusLabel = new QLabel("Waiting for stream client...", m_contentWidget);
     m_statusLabel->setObjectName("screenerStatus");
     m_statusLabel->setWordWrap(true);
-    m_statusLabel->setStyleSheet("color:#888; font-size:11px;");
+    m_statusLabel->setStyleSheet("color:#888;");
     layout->addWidget(m_statusLabel);
 
     m_contentWidget->setLayout(layout);
@@ -216,13 +217,15 @@ void ScreenerDock::buildUi() {
             this, &ScreenerDock::onRowClicked);
     connect(m_table->horizontalHeader(), &QHeaderView::sectionResized, this,
             [this](int logicalIndex, int, int) {
-        if (logicalIndex == kColName && !m_adjustingColumnWidths)
-            m_nameColumnUserSized = true;
+        if (m_adjustingColumnWidths || logicalIndex == kColExchange || !m_table->isVisible()) return;
+        m_userSizedColumns.insert(logicalIndex);
+        if (logicalIndex == kColName) m_nameColumnUserSized = true;
     });
     static_cast<ScreenerTableView*>(m_table)->keyboardActivate = [this](const QModelIndex& index) {
         onRowClicked(index);
     };
     updateColumns();
+    m_measuredFont = m_table->font();
 }
 
 // ── Fetch ──────────────────────────────────────────────────────────────────────
@@ -427,14 +430,15 @@ void ScreenerDock::applyRows(const QJsonArray& rows) {
     else m_table->verticalScrollBar()->setValue(oldScroll);
 
     if (!m_columnsResized) {
-        const int manualNameWidth = m_table->columnWidth(kColName);
+        std::array<int, kColCount> manualWidths{};
+        for (int col : m_userSizedColumns) manualWidths[col] = m_table->columnWidth(col);
         m_adjustingColumnWidths = true;
         m_table->resizeColumnsToContents();
-        if (m_nameColumnUserSized) m_table->setColumnWidth(kColName, manualNameWidth);
+        for (int col : m_userSizedColumns) m_table->setColumnWidth(col, manualWidths[col]);
         m_adjustingColumnWidths = false;
         m_columnsResized = true;
         m_nameColumnPreferredWidth = m_nameColumnUserSized
-            ? manualNameWidth : m_table->columnWidth(kColName);
+            ? manualWidths[kColName] : m_table->columnWidth(kColName);
     } else if (!m_nameColumnUserSized) {
         // Re-measure only after a changed payload batch, never on each viewport resize.
         m_nameColumnPreferredWidth = static_cast<ScreenerTableView*>(m_table)->measuredColumnWidth(kColName);
@@ -466,6 +470,26 @@ void ScreenerDock::adjustDefaultNameColumnWidth() {
     m_table->setColumnWidth(kColName, desired);
     m_adjustingColumnWidths = false;
     m_table->horizontalScrollBar()->setValue(horizontalOffset);
+}
+
+void ScreenerDock::remeasureFontColumns() {
+    if (!m_table || m_measuredFont == m_table->font()) return;
+    m_measuredFont = m_table->font();
+    if (!m_columnsResized || m_model->rowCount() == 0) return;
+
+    std::array<int, kColCount> manualWidths{};
+    for (int col : m_userSizedColumns) manualWidths[col] = m_table->columnWidth(col);
+    const int horizontalScroll = m_table->horizontalScrollBar()->value();
+    const int verticalScroll = m_table->verticalScrollBar()->value();
+    m_adjustingColumnWidths = true;
+    m_table->resizeColumnsToContents();
+    for (int col : m_userSizedColumns) m_table->setColumnWidth(col, manualWidths[col]);
+    m_adjustingColumnWidths = false;
+    m_nameColumnPreferredWidth = m_nameColumnUserSized
+        ? manualWidths[kColName] : m_table->columnWidth(kColName);
+    adjustDefaultNameColumnWidth();
+    m_table->horizontalScrollBar()->setValue(horizontalScroll);
+    m_table->verticalScrollBar()->setValue(verticalScroll);
 }
 
 void ScreenerDock::updateColumns() {
@@ -530,6 +554,17 @@ bool ScreenerDock::eventFilter(QObject* watched, QEvent* event) {
     return DockablePanel::eventFilter(watched, event);
 }
 
+void ScreenerDock::changeEvent(QEvent* event) {
+    DockablePanel::changeEvent(event);
+    if (event->type() != QEvent::ApplicationFontChange && event->type() != QEvent::FontChange) return;
+    if (m_fontRefreshPending) return;
+    m_fontRefreshPending = true;
+    QTimer::singleShot(0, this, [this] {
+        m_fontRefreshPending = false;
+        remeasureFontColumns();
+    });
+}
+
 void ScreenerDock::showEvent(QShowEvent* event) {
     DockablePanel::showEvent(event);
     watchWindow();
@@ -582,6 +617,6 @@ void ScreenerDock::setStatus(const QString& text, bool error) {
     if (!m_statusLabel) return;
     m_statusLabel->setText(text);
     m_statusLabel->setStyleSheet(error
-        ? "color:#ef5c55; font-size:11px;"
-        : "color:#888; font-size:11px;");
+        ? "color:#ef5c55;"
+        : "color:#888;");
 }

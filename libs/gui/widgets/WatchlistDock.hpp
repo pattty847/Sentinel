@@ -37,6 +37,7 @@ private slots:
     void toggleSelectedPin();
 
 private:
+    void changeEvent(QEvent* event) override;
     struct WatchlistPreset {
         QString name;
         AssetType assetType;
@@ -66,4 +67,5 @@ private:
     QString m_refusalReason;
     QString m_catalogSource;
     bool m_catalogAuthoritative = false;
+    bool m_fontRefreshPending = false;
 };
