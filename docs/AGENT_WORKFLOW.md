@@ -119,7 +119,7 @@ AGENTS.md. Remove a note here when it stops being true.
 Verified 2026-09-27 with codex-cli 0.158; 0.160 was installed by 2026-10-05. Re-check
 `~/.codex/models_cache.json` before relying on a model.
 
-- Models that answered: `gpt-6-sol` (config default), `gpt-6-astra`. Also listed: `gpt-5.6-sol`, `gpt-5.6-terra`,
+- Models that answered: `gpt-6.1-sol` (2026-10-06; use it for Sol work), `gpt-6-sol` (config default), `gpt-6-astra`. Also listed: `gpt-5.6-sol`, `gpt-5.6-terra`,
   `gpt-5.6-luna`, `gpt-5.5`. Effort `low`..`max`, plus `ultra` on 6-astra and 5.6-sol/terra.
 - Run: `codex exec -C <dir> -s read-only|workspace-write -m gpt-6-sol -c model_reasoning_effort='"high"'
   -c approval_policy='"never"' --json -o <last-message.txt> "<prompt>" < /dev/null`. Without
