@@ -54,6 +54,6 @@ roller_shadow:
   journal_dir: /Volumes/T7/sentinel-data/raw-l2
   dir: /Volumes/T7/sentinel-data/hmc2
   socket: "" # empty = ~/Sentinel-runtime/run/capture.sock
-  from: "2026-10-03T00:00:00Z"
-  # products: [BTC-USD, ...] # default = default_symbols; products without a journal are refused
+  from: "2026-10-06T00:00:00Z" # R1 day (owner decision 3): limits replay; older gap for 6 products is backfilled in slice E
+  products: [BTC-USD, ETH-USD, SOL-USD, FARTCOIN-USD, PEPE-USD, DOGE-USD, AVAX-USD] # the 7 capture symbols (R1); products without a journal are refused
   fault_min_duration_ms: 120000 # identical failures must span two minutes before slow probes
