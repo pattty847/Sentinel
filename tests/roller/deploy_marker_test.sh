@@ -62,6 +62,25 @@ check 1 110 "symlinked log accepted"
 check 1 111 "directory log accepted"
 check 1 112 "missing log accepted"
 check 1 "1*" "PID pattern accepted"
+# A failed or short read must not pass a stale prefix: line 4 is ready, the
+# unread line 5 revokes it. cat is stubbed on PATH for these two checks only.
+write_log "$dir" 113 "$exe" "$ready" "$line Roller serving not ready product=BTC-USD reason=x"
+check 1 113 "revoked readiness accepted"
+# A read error after every byte arrived is still a failed read (pid 102 is a
+# ready log that a clean read accepts).
+stubcat() { # name body
+    mkdir -p "$tmp/cat-$1"
+    printf '#!/bin/bash\n%s\n' "$2" > "$tmp/cat-$1/cat"
+    chmod +x "$tmp/cat-$1/cat"
+}
+stubcat fail 'head -n 4; exit 1'
+stubcat short 'head -n 4; exit 0'
+stubcat error '/bin/cat; printf z; exit 1'
+for entry in fail:113 short:113 error:102; do
+    if PATH="$tmp/cat-${entry%%:*}:$PATH" "$script" check-server-log "$dir" "${entry#*:}" "$exe"; then
+        echo "FAIL: ${entry%%:*} read accepted (pid ${entry#*:})"; fail=1
+    fi
+done
 
 # Part 2: verify_writes with launchctl and sleep stubbed on PATH (test only).
 stubs=$tmp/stubs
@@ -99,4 +118,4 @@ verify 0 "stable replacement PID after a change rejected" "300 301 302" "301:rea
 verify 1 "replaced (old) PID accepted" "300" "300:ready"
 verify 1 "symlinked log of the restarted PID accepted" "300 301" "301:symlink"
 (( fail )) && exit 1
-echo "DEPLOY_MARKER: 3 static logs accepted, 9 rejected; verify_writes 2 accepted, 3 rejected"
+echo "DEPLOY_MARKER: 3 static logs accepted, 13 rejected (incl. failed, short and erroring reads); verify_writes 2 accepted, 3 rejected"

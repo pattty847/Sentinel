@@ -26,18 +26,23 @@ server_ready() {
 }
 capture_ready() { grep -q "Capture stats\|storedFrames\|Subscription confirmed"; }
 # One open of one regular file, never through a symlink: the opened file must
-# still be the inode the (non-symlink) path names after the open.
+# still be the inode the (non-symlink) path names after the open. A failed or
+# short read (fewer bytes than the file held at open; logs only grow) fails.
 read_log() { # path
-    local opened
+    local opened size content status=0 LC_ALL=C
     [[ -f $1 && ! -L $1 ]] || return 1
     exec 3<"$1" || return 1
     opened=$(stat -L -f %i /dev/fd/3 2>/dev/null || true)
-    if [[ -L $1 || -z $opened || $opened != "$(stat -f %i "$1" 2>/dev/null || true)" ]]; then
+    size=$(stat -L -f %z /dev/fd/3 2>/dev/null || true)
+    if [[ -L $1 || -z $opened || $opened != "$(stat -f %i "$1" 2>/dev/null || true)" || ! $size =~ ^[0-9]+$ ]]; then
         exec 3<&-
         return 1
     fi
-    cat <&3
+    content=$(cat <&3 && printf x) || status=1
     exec 3<&-
+    content=${content%x}
+    [[ $status == 0 && ${#content} -ge $size ]] || return 1
+    printf '%s' "$content"
 }
 # The content of exactly that process's log: named for its PID, header PID and
 # exe (the deployed binary) checked in the same single read as the marker.

@@ -189,13 +189,20 @@ mutations = [
     ('r2-3 one read of a regular non-symlink file', 'scripts/dev/deploy-runtime.sh',
      '[[ -f $1 && ! -L $1 ]] || return 1', 'cat -- "$1"; return',
      'sh:tests/roller/deploy_marker_test.sh', None),
+    # Review round 3.
+    ('r3-2 a failed log read fails', 'scripts/dev/deploy-runtime.sh',
+     'content=$(cat <&3 && printf x) || status=1', 'content=$(cat <&3 && printf x)',
+     'sh:tests/roller/deploy_marker_test.sh', None),
+    ('r3-2 a short log read fails', 'scripts/dev/deploy-runtime.sh',
+     '[[ $status == 0 && ${#content} -ge $size ]] || return 1', '[[ $status == 0 ]] || return 1',
+     'sh:tests/roller/deploy_marker_test.sh', None),
 ]
 if "--round1" in sys.argv:
     mutations = mutations[5:]
 if "--slice-d" in sys.argv:
     mutations = mutations[13:]
 if "--r1" in sys.argv:
-    mutations = [m for m in mutations if m[0].startswith(('r1-', 'r2-', 'A9', 'A11'))]
+    mutations = [m for m in mutations if m[0].startswith(('r1-', 'r2-', 'r3-', 'A9', 'A11'))]
 for entry in mutations:
     name, path, before, after, case = entry[:5]
     target = entry[5] if len(entry) > 5 else SHADOW
