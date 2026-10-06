@@ -69,7 +69,7 @@ class LiveLead {
   const JournalFeed *historyFeed = nullptr;
   std::unique_ptr<JournalFeed> feed;
   std::unique_ptr<recording::BookRecorder> lead;
-  int64_t lastTickMs = 0, nextFailureLogMs = 0;
+  int64_t lastTickMs = 0, nextFailureLogMs = 0, nextForkMs = 0;
   int64_t now() const {
     return cfg.liveNowForTest ? cfg.liveNowForTest() : nowMs();
   }
@@ -110,7 +110,7 @@ public:
   // At the socket, after every returned record reached history: fork from the
   // durable state, then apply the provisional suffix received so far.
   void ensure(const std::deque<JournalRecord> &pending) {
-    if (!enabled() || lead || !history || !historyFeed)
+    if (!enabled() || lead || !history || !historyFeed || nowMs() < nextForkMs)
       return;
     try {
       auto publish = [sink = cfg.publisher, guard = guard, name = product](
@@ -157,6 +157,7 @@ public:
       tick();
     } catch (const std::exception &e) {
       failed("fork", e);
+      nextForkMs = nowMs() + 1000; // never a fork per socket read
     }
   }
   void apply(const JournalRecord &r) {
