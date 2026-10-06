@@ -905,3 +905,13 @@ Contradictions with current code: plan 8.5 `feed.source` key (absent); plan 5/9 
 3. `roller_shadow.from` bumped to the R1 day and the 10-02..R1 gap for six products filled by batch later? Default: yes, fill in slice E.
 
 WORKFLOW: the plan's cutover switch and line references were taken on trust in STATUS; `rg` on the config loader and the deploy marker would have surfaced findings 1 and 7 before any slice D dispatch.
+
+### Owner decisions on the slice D packet (2026-10-06)
+
+1. Live path: option C. The roller publishes the forming minute from fan-out records as they arrive and commits history only after the durable marker. Cutover must not slow the live heatmap: gate = GUI live age p95 no worse than today + 50 ms (the 2026-10-03 gate stays). This replaces the packet's question 1 default (+0.5 s accepted).
+   - Correction to finding 3: capture does not publish only after its block flush. `RawCapture.cpp:325-336` sends every record to the fan-out immediately (`provisional: true`); the `durable` control follows the ~1 s block flush (`:373-376`). The delay is the roller holding records in `pending` until `durable` (`ShadowRoller.cpp:103-151`, INV-114). That rule stays for history; the live publisher reads the same records before they are durable. On `retract`/`disconnect` the roller already discards provisional state and recovers from the journal (`ShadowRoller.cpp:152-155`); the live minute then republishes from durable state.
+   - Acceptance adds: live age measured before/after cutover on a hosted GUI against the gate; a retract/disconnect scenario that shows the live minute recovers without a committed-history change.
+2. Split: yes. D-a (roller serves recording and the live minute) now; D-b (engine replaced by the journal feed, ending the server's own Coinbase connection) after the 48 h soak. One world means one Coinbase connection: D-b is required, not optional.
+3. `roller_shadow.from` is bumped to the R1 day; the older gap for the six new products is backfilled later with `sentinel-roll --product-lease` (slice E).
+
+Follow-up slice after D (owner direction, not part of D): replace the fixed live publish timer with change-driven, coalesced publishing ("latest wins", only when something changed), capped by a per-client "Max update rate" setting (Auto default plus a manual value), with per-client queues so a slow or remote client cannot slow others. Flicker of short-lived orders is handled by drawing the time-weighted value (`twapCode`) rather than `peakCode` (`Hmc2Store.hpp:31`), not by delaying updates.

@@ -3,7 +3,7 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-06 (morning)
+- **Updated:** 2026-10-06 13:15 EDT. Wave 3 complete; next conductor session starts at slice D-a.
 - **Conductor:** Claude Opus 5.5. The owner handed conducting back on 2026-10-06; Codex does not dispatch.
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10). No fallback active: the 2026-10-04
   GPT-reviews-GPT override ended when Claude usage reset.
@@ -41,8 +41,7 @@ Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orche
 
 ## Waiting on the owner
 
-1. Slice D live path: conductor recommends option C (forming minute from records as they arrive, history only after durable), so cutover keeps today's live speed; owner deciding. Other two packet defaults pending the same answer.
-2. S8: delete the legacy heatmap (Fable verdict GO).
+1. S8: delete the legacy heatmap (Fable verdict GO).
 
 ## Owner constraints in force
 
@@ -53,9 +52,8 @@ Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orche
 ## Next (priority order)
 
 1. Wave 3 complete (2026-10-06): overflow redesign `66e39b2`, retained fonts `fac62a0`, settings with hover tooltips `542be4d`; each owner-approved, full suite 96/96.
-2. Slice D: draft packet and cutover runbook in `docs/research/2026-10-one-world-pipeline.md` "Slice D task packet" (Fable, 2026-10-06), awaiting the owner's 3 answers in its section 7. Then dispatch, high-risk review: widen roller serving to all 7 journal products. Cutover needs the owner
-   present. Slice E deletions after D.
-3. EATEN vs PULLED liquidity and ABSORPTION (owner's strongest direction): Fable plan after slice D. It crosses
+2. Slice D-a, ready to dispatch (fresh conductor): packet in `docs/research/2026-10-one-world-pipeline.md` "Slice D task packet" plus "Owner decisions on the slice D packet (2026-10-06)" (live path option C: no live-age regression; split D-a/D-b; `from` bump). Writer Claude `opus` (needs native evidence), reviewer `gpt-6-astra` high. Runbook R1 (widen to all 7 products) and R2 (flip) are conductor steps with the owner present. Then D-b (engine replaced by the journal feed: one Coinbase connection) and slice E deletions.
+3. After D: change-driven live publishing with a per-client max update rate (see the owner decisions block). Then EATEN vs PULLED liquidity and ABSORPTION (owner's strongest direction): Fable plan after slice D. It crosses
    roller, HMC2, wire and renderer.
 4. On hold (owner, 2026-10-06): TPO session choices become Session (draws New York, London, Asia and Australia together, like ExoCharts), 24H, 1W, 1M. Changes what the TPO draws; needs its own spec.
 5. Backlog: tick-size combo text clips at its fixed 84 px width ("$0.15 (unavailable)", pre-existing); owner GUI Agent API (17100) is unauthenticated; GUI RSS ~1.5 GB after 10 min; capture fan-out
