@@ -158,11 +158,13 @@ add_dependencies(servermodel_tests test_recording_page)
 target_link_libraries(test_book_recorder PRIVATE
     $<IF:$<TARGET_EXISTS:zstd::libzstd_shared>,zstd::libzstd_shared,zstd::libzstd_static>)
 
+# Suites that start and stop a real SentinelStreamServer carry a TIMEOUT (about 10x
+# their normal runtime, at least 60 s): a broken restart must fail the run, not hang it (FM-202).
 add_executable(test_recording_live test_recording_live.cpp)
 target_include_directories(test_recording_live PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_recording_live PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
 add_test(NAME RecordingLiveTests COMMAND test_recording_live)
-set_tests_properties(RecordingLiveTests PROPERTIES LABELS "servermodel")
+set_tests_properties(RecordingLiveTests PROPERTIES LABELS "servermodel" TIMEOUT 60)
 add_dependencies(servermodel_tests test_recording_live)
 
 # Controlled S4 cost measurement (not a timing-sensitive CTest assertion).
@@ -174,14 +176,14 @@ add_executable(test_recording_server_stop test_recording_server_stop.cpp)
 target_include_directories(test_recording_server_stop PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_recording_server_stop PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
 add_test(NAME RecordingServerStopTests COMMAND test_recording_server_stop)
-set_tests_properties(RecordingServerStopTests PROPERTIES LABELS "servermodel")
+set_tests_properties(RecordingServerStopTests PROPERTIES LABELS "servermodel" TIMEOUT 120)
 add_dependencies(servermodel_tests test_recording_server_stop)
 
 add_executable(test_heatmap_chunk_wire test_heatmap_chunk_wire.cpp)
 target_include_directories(test_heatmap_chunk_wire PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_heatmap_chunk_wire PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
 add_test(NAME HeatmapChunkWireTests COMMAND test_heatmap_chunk_wire)
-set_tests_properties(HeatmapChunkWireTests PROPERTIES LABELS "servermodel;heatmap")
+set_tests_properties(HeatmapChunkWireTests PROPERTIES LABELS "servermodel;heatmap" TIMEOUT 180)
 add_dependencies(servermodel_tests test_heatmap_chunk_wire)
 
 add_executable(test_price_ladder test_price_ladder.cpp)
@@ -230,7 +232,7 @@ add_executable(test_server_metrics test_server_metrics.cpp)
 target_include_directories(test_server_metrics PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_server_metrics PRIVATE sentinel_core GTest::gtest_main Qt6::Core Qt6::Network)
 add_test(NAME ServerMetricsTests COMMAND test_server_metrics)
-set_tests_properties(ServerMetricsTests PROPERTIES LABELS "servermodel")
+set_tests_properties(ServerMetricsTests PROPERTIES LABELS "servermodel" TIMEOUT 60)
 add_dependencies(servermodel_tests test_server_metrics)
 
 add_executable(test_server_feed_admission test_server_feed_admission.cpp)
@@ -238,5 +240,5 @@ target_include_directories(test_server_feed_admission PRIVATE ${CMAKE_SOURCE_DIR
 target_link_libraries(test_server_feed_admission PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
 target_compile_definitions(test_server_feed_admission PRIVATE SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME ServerFeedAdmissionTests COMMAND test_server_feed_admission)
-set_tests_properties(ServerFeedAdmissionTests PROPERTIES LABELS "servermodel" TIMEOUT 30)
+set_tests_properties(ServerFeedAdmissionTests PROPERTIES LABELS "servermodel" TIMEOUT 60)
 add_dependencies(servermodel_tests test_server_feed_admission)

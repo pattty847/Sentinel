@@ -2006,6 +2006,10 @@ void SentinelStreamServer::start() {
         m_sslCtx.use_private_key_file(tls.keyFile, ssl::context::pem);
 
         tcp::endpoint endpoint(tcp::v4(), m_port);
+        // Work still queued from the previous stop() carries the old generation.
+        const uint64_t acceptGeneration = m_acceptGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+        m_acceptRetryTimer = std::make_unique<net::steady_timer>(m_ioc);
+        m_acceptFailures = 0;
         m_acceptor = std::make_unique<tcp::acceptor>(m_ioc);
         m_acceptor->open(endpoint.protocol());
         m_acceptor->set_option(net::socket_base::reuse_address(true));
@@ -2037,7 +2041,7 @@ void SentinelStreamServer::start() {
         }
         m_pendingHistoryTasks.store(0, std::memory_order_release);
 
-        doAccept();
+        doAccept(acceptGeneration);
         sLog_App("SentinelStreamServer listening: port=" << m_port
                  << " cert=" << tls.certFile
                  << " historyWorkers=" << kHistoryWorkerCount);
@@ -2089,11 +2093,14 @@ void SentinelStreamServer::stop() {
         return;
     }
 
-    net::post(m_ioc, [this] {
-        if (m_acceptor) {
-            beast::error_code ignored;
-            m_acceptor->close(ignored);
-        }
+    // Stop accepting while sessions drain. If the I/O thread does not run this before
+    // m_ioc.stop() below, it stays queued until the next start(); the generation check
+    // keeps it from closing that start's listener (FM-154).
+    net::post(m_ioc, [this, generation = m_acceptGeneration.load(std::memory_order_acquire)] {
+        if (generation != m_acceptGeneration.load(std::memory_order_acquire)) return;
+        beast::error_code ignored;
+        if (m_acceptor) m_acceptor->close(ignored);
+        if (m_acceptRetryTimer) m_acceptRetryTimer->cancel();
     });
 
     std::vector<std::shared_ptr<Session>> sessions;
@@ -2130,24 +2137,58 @@ void SentinelStreamServer::stop() {
     if (m_thread.joinable()) {
         m_thread.join();
     }
+    // Pending accept/wait completions are queued as aborted; they carry this generation.
     m_acceptor.reset();
+    m_acceptRetryTimer.reset();
 }
 
-void SentinelStreamServer::doAccept() {
+void SentinelStreamServer::doAccept(uint64_t generation) {
     m_acceptor->async_accept(
         net::make_strand(m_ioc),
-        [this](beast::error_code ec, tcp::socket socket) {
-            if (!ec) {
-                auto session = std::make_shared<Session>(std::move(socket), m_sslCtx, m_model, this);
-                registerSession(session);
-                session->run();
-            } else if (m_running) {
-                sLog_Error("Accept error: " << ec.message().c_str());
+        [this, generation](beast::error_code ec, tcp::socket socket) {
+            // A stale completion (an earlier start()) or one after stop() must not
+            // register a session or restart the chain; the socket closes here.
+            if (generation != m_acceptGeneration.load(std::memory_order_acquire) || !m_running) return;
+            if (ec) {
+                retryAcceptAfterError(generation, ec);
+                return;
             }
-            if (m_running) {
-                doAccept();
-            }
+            m_acceptFailures = 0;
+            auto session = std::make_shared<Session>(std::move(socket), m_sslCtx, m_model, this);
+            registerSession(session);
+            session->run();
+            doAccept(generation);
         });
+}
+
+void SentinelStreamServer::retryAcceptAfterError(uint64_t generation, const beast::error_code& ec) {
+    // One failed connection (on macOS a peer reset before accept returns EINVAL) retries
+    // at once. A failure that repeats (descriptor exhaustion, a closed listener)
+    // completes at once every time, so further retries wait 10 ms doubling to 1 s
+    // instead of spinning the I/O thread (FM-154).
+    ++m_acceptFailures;
+    const auto delay = m_acceptFailures <= 1
+        ? std::chrono::milliseconds{0}
+        : std::min(kAcceptBackoffMax, kAcceptBackoffMin * (1u << std::min<uint32_t>(m_acceptFailures - 2, 7)));
+    static sentinel::log_throttle::Site warnings;
+    std::uint32_t suppressed = 0;
+    if (warnings.admit(5000, sentinel::log_throttle::nowMs(), suppressed)) {
+        sLog_Warning("SentinelStreamServer accept error: port=" << m_port
+                     << " error=" << ec.message()
+                     << " listenerOpen=" << m_acceptor->is_open()
+                     << " consecutive=" << m_acceptFailures
+                     << " retryMs=" << delay.count()
+                     << sentinel::log_throttle::Suppressed{suppressed});
+    }
+    if (delay.count() == 0) {
+        doAccept(generation);
+        return;
+    }
+    m_acceptRetryTimer->expires_after(delay);
+    m_acceptRetryTimer->async_wait([this, generation](beast::error_code waitEc) {
+        if (waitEc || generation != m_acceptGeneration.load(std::memory_order_acquire) || !m_running) return;
+        doAccept(generation);
+    });
 }
 
 size_t SentinelStreamServer::sessionCount() {

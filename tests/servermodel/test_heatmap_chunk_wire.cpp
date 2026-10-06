@@ -38,10 +38,17 @@ struct HeatmapChunkWireTest {
     static void setChunks(SentinelStreamServer& server, std::shared_ptr<recording::ChunkService> chunks) {
         server.m_chunks = std::move(chunks);
     }
+    // 0 when the listener is closed or the I/O thread does not answer; a broken
+    // restart fails the test instead of blocking here forever (FM-202).
     static unsigned short port(SentinelStreamServer& server) {
-        std::promise<unsigned short> result;
-        net::post(server.m_ioc, [&] { result.set_value(server.m_acceptor->local_endpoint().port()); });
-        return result.get_future().get();
+        auto result = std::make_shared<std::promise<unsigned short>>();
+        net::post(server.m_ioc, [&server, result] {
+            beast::error_code ec;
+            const auto endpoint = server.m_acceptor ? server.m_acceptor->local_endpoint(ec) : tcp::endpoint{};
+            result->set_value(ec ? 0 : endpoint.port());
+        });
+        auto ready = result->get_future();
+        return ready.wait_for(5s) == std::future_status::ready ? ready.get() : 0;
     }
     static std::shared_ptr<Session> onlySession(SentinelStreamServer& server) {
         std::lock_guard lock(server.m_sessionsMutex);
@@ -315,6 +322,7 @@ protected:
     void startAndConnect() {
         server->start();
         const auto port = HeatmapChunkWireTest::port(*server);
+        ASSERT_NE(port, 0) << "server is not listening";
         client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(port));
         inbox.attach(*client);
         client->connectToServer();
@@ -687,7 +695,9 @@ TEST(ChunkClientAdmission, EmptyTinyAndSmallFramesHaveAFixedOutstandingBound) {
 
 TEST_F(ChunkWire, InProgressDecodeCannotCrossDisconnectOrReconnect) {
     server->start();
-    client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(HeatmapChunkWireTest::port(*server)));
+    const auto port = HeatmapChunkWireTest::port(*server);
+    ASSERT_NE(port, 0) << "server is not listening";
+    client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(port));
     inbox.attach(*client);
     client->connectToServer();
     ASSERT_TRUE(inbox.waitFor([&] { return inbox.connected; }));
@@ -755,7 +765,9 @@ TEST_F(ChunkWire, SessionTeardownWithRequestsInFlight) {
 
     // Stop with jobs parked: stop() joins workers only after release.
     server->start();
-    client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(HeatmapChunkWireTest::port(*server)));
+    const auto restartedPort = HeatmapChunkWireTest::port(*server);
+    ASSERT_NE(restartedPort, 0) << "restarted server is not listening";
+    client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(restartedPort));
     Inbox second;
     second.attach(*client);
     client->connectToServer();

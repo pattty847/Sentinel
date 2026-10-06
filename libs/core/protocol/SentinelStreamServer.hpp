@@ -4,6 +4,7 @@
 #include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/asio/ssl/context.hpp>
 #include <boost/asio/thread_pool.hpp>
 #include <memory>
@@ -15,6 +16,8 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <cstddef>
 #include <condition_variable>
 #include <unordered_map>
@@ -89,7 +92,9 @@ private:
     friend struct HeatmapChunkWireTest;
     friend struct ServerFeedAdmissionTest;
 
-    void doAccept();
+    // Accept chain of one start(); `generation` fences completions queued by an earlier one.
+    void doAccept(uint64_t generation);
+    void retryAcceptAfterError(uint64_t generation, const boost::system::error_code& ec);
     void registerSession(const std::shared_ptr<Session>& session);
     void unregisterSession(const Session* session);
     bool submitHistoryTask(std::function<void()> task);
@@ -110,6 +115,14 @@ private:
     net::io_context m_ioc;
     ssl::context m_sslCtx{ssl::context::tlsv13_server};
     std::unique_ptr<tcp::acceptor> m_acceptor;
+    // Bumped by every start(). stop() leaves its acceptor close, the aborted accept and
+    // the aborted retry wait queued in m_ioc when the I/O thread has not run them yet;
+    // restart() runs them later, so each one returns unless its generation is current.
+    std::atomic<uint64_t> m_acceptGeneration{0};
+    std::unique_ptr<net::steady_timer> m_acceptRetryTimer; // I/O thread only while running
+    uint32_t m_acceptFailures{0};                          // consecutive; I/O thread only while running
+    static constexpr std::chrono::milliseconds kAcceptBackoffMin{10};
+    static constexpr std::chrono::milliseconds kAcceptBackoffMax{1000};
     std::thread m_thread;
     std::atomic<bool> m_running{false};
     std::unique_ptr<trading::LiveTradingSession> m_tradingSession;

@@ -12,6 +12,7 @@
 #include <future>
 #include <boost/asio/read.hpp>
 #include <openssl/pem.h>
+#include <sys/resource.h>
 
 // Drive the actual stop path without starting sockets or needing TLS credentials.
 struct RecordingServerStopTest {
@@ -21,6 +22,54 @@ struct RecordingServerStopTest {
         net::post(server.m_ioc, [&server, result] { result->set_value(server.m_acceptor && server.m_acceptor->is_open()); });
         auto ready = result->get_future();
         return ready.wait_for(std::chrono::seconds(3)) == std::future_status::ready && ready.get();
+    }
+    // 0 when the listener is closed or the I/O thread does not answer; never hangs.
+    static unsigned short port(SentinelStreamServer& server) {
+        auto result = std::make_shared<std::promise<unsigned short>>();
+        net::post(server.m_ioc, [&server, result] {
+            beast::error_code ec;
+            const auto endpoint = server.m_acceptor ? server.m_acceptor->local_endpoint(ec) : tcp::endpoint{};
+            result->set_value(ec ? 0 : endpoint.port());
+        });
+        auto ready = result->get_future();
+        return ready.wait_for(std::chrono::seconds(3)) == std::future_status::ready ? ready.get() : 0;
+    }
+    static size_t sessionCount(SentinelStreamServer& server) {
+        std::lock_guard lock(server.m_sessionsMutex);
+        return server.m_sessions.size();
+    }
+    // A raw TCP client reaches registerSession(), i.e. the server really accepted it.
+    static bool accepts(SentinelStreamServer& server, unsigned short port) {
+        net::io_context ioc;
+        tcp::socket socket(ioc);
+        beast::error_code ec;
+        socket.connect({net::ip::make_address("127.0.0.1"), port}, ec);
+        if (ec) return false;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (sessionCount(server) == 0 && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        const bool accepted = sessionCount(server) > 0;
+        socket.set_option(net::socket_base::linger(true, 0), ec); // no TIME_WAIT left behind
+        socket.close(ec);
+        return accepted;
+    }
+    // Wait until stop() has stopped the I/O context (its last step before the join).
+    static bool waitIoStopped(SentinelStreamServer& server) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!server.m_ioc.stopped() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        return server.m_ioc.stopped();
+    }
+    static net::io_context& ioContext(SentinelStreamServer& server) { return server.m_ioc; }
+    // Close the current listener on the I/O thread, as an external accept failure would.
+    static bool closeListener(SentinelStreamServer& server) {
+        auto result = std::make_shared<std::promise<void>>();
+        net::post(server.m_ioc, [&server, result] {
+            beast::error_code ignored;
+            server.m_acceptor->close(ignored);
+            result->set_value();
+        });
+        return result->get_future().wait_for(std::chrono::seconds(3)) == std::future_status::ready;
     }
     static void checkRecordingQueue(ServerDataModel& model) {
         net::io_context ioc;
@@ -162,6 +211,38 @@ struct RecordingServerStopTest {
         return server.m_ioc;
     }
 };
+// An ephemeral self-signed fixture avoids external openssl commands/certs.
+bool writeSelfSignedCert(const std::string& certFile, const std::string& keyFile) {
+    std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)> ctx(
+        EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr), EVP_PKEY_CTX_free);
+    if (!ctx) return false;
+    if (EVP_PKEY_keygen_init(ctx.get()) <= 0) return false;
+    if (EVP_PKEY_CTX_set_rsa_keygen_bits(ctx.get(), 2048) <= 0) return false;
+    EVP_PKEY* rawKey = nullptr;
+    if (EVP_PKEY_keygen(ctx.get(), &rawKey) <= 0) return false;
+    std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> key(rawKey, EVP_PKEY_free);
+    std::unique_ptr<X509, decltype(&X509_free)> cert(X509_new(), X509_free);
+    if (!cert) return false;
+    X509_set_version(cert.get(), 2);
+    ASN1_INTEGER_set(X509_get_serialNumber(cert.get()), 1);
+    X509_gmtime_adj(X509_getm_notBefore(cert.get()), 0);
+    X509_gmtime_adj(X509_getm_notAfter(cert.get()), 3600);
+    X509_set_pubkey(cert.get(), key.get());
+    auto* subject = X509_get_subject_name(cert.get());
+    X509_NAME_add_entry_by_txt(subject, "CN", MBSTRING_ASC,
+                               reinterpret_cast<const unsigned char*>("localhost"), -1, -1, 0);
+    X509_set_issuer_name(cert.get(), subject);
+    if (X509_sign(cert.get(), key.get(), EVP_sha256()) <= 0) return false;
+    {
+        std::unique_ptr<BIO, decltype(&BIO_free)> pemKey(BIO_new_file(keyFile.c_str(), "w"), BIO_free);
+        std::unique_ptr<BIO, decltype(&BIO_free)> pemCert(BIO_new_file(certFile.c_str(), "w"), BIO_free);
+        if (!pemKey || !pemCert) return false;
+        if (PEM_write_bio_PrivateKey(pemKey.get(), key.get(), nullptr, nullptr, 0, nullptr, nullptr) != 1) return false;
+        if (PEM_write_bio_X509(pemCert.get(), cert.get()) != 1) return false;
+    }
+    return true;
+}
+
 TEST(RecordingServerStop, ActiveDeliveryIsJoinedBeforeDelayedExecutorDrain) {
     int argc = 1;
     char name[] = "recording-stop";
@@ -288,34 +369,7 @@ TEST(RecordingServerStop, ActualServerStartStopStartRestoresLiveDelivery) {
     config.recording.dir = dir.path().toStdString();
     config.tls.certFile = dir.path().toStdString() + "/cert.pem";
     config.tls.keyFile = dir.path().toStdString() + "/key.pem";
-    // An ephemeral self-signed fixture avoids external openssl commands/certs.
-    std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)> ctx(
-        EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr), EVP_PKEY_CTX_free);
-    ASSERT_TRUE(ctx);
-    ASSERT_GT(EVP_PKEY_keygen_init(ctx.get()), 0);
-    ASSERT_GT(EVP_PKEY_CTX_set_rsa_keygen_bits(ctx.get(), 2048), 0);
-    EVP_PKEY* rawKey = nullptr;
-    ASSERT_GT(EVP_PKEY_keygen(ctx.get(), &rawKey), 0);
-    std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> key(rawKey, EVP_PKEY_free);
-    std::unique_ptr<X509, decltype(&X509_free)> cert(X509_new(), X509_free);
-    ASSERT_TRUE(cert);
-    X509_set_version(cert.get(), 2);
-    ASN1_INTEGER_set(X509_get_serialNumber(cert.get()), 1);
-    X509_gmtime_adj(X509_getm_notBefore(cert.get()), 0);
-    X509_gmtime_adj(X509_getm_notAfter(cert.get()), 3600);
-    X509_set_pubkey(cert.get(), key.get());
-    auto* subject = X509_get_subject_name(cert.get());
-    X509_NAME_add_entry_by_txt(subject, "CN", MBSTRING_ASC,
-                               reinterpret_cast<const unsigned char*>("localhost"), -1, -1, 0);
-    X509_set_issuer_name(cert.get(), subject);
-    ASSERT_GT(X509_sign(cert.get(), key.get(), EVP_sha256()), 0);
-    {
-        std::unique_ptr<BIO, decltype(&BIO_free)> pemKey(BIO_new_file(config.tls.keyFile.c_str(), "w"), BIO_free);
-        std::unique_ptr<BIO, decltype(&BIO_free)> pemCert(BIO_new_file(config.tls.certFile.c_str(), "w"), BIO_free);
-        ASSERT_TRUE(pemKey); ASSERT_TRUE(pemCert);
-        ASSERT_EQ(PEM_write_bio_PrivateKey(pemKey.get(), key.get(), nullptr, nullptr, 0, nullptr, nullptr), 1);
-        ASSERT_EQ(PEM_write_bio_X509(pemCert.get(), cert.get()), 1);
-    }
+    ASSERT_TRUE(writeSelfSignedCert(config.tls.certFile, config.tls.keyFile));
     ServerDataModel model(config);
     Authenticator auth(dir.path().toStdString() + "/no-credentials");
     SentinelStreamServer server(model, auth, config, 0);
@@ -467,4 +521,141 @@ TEST(CandleHistoryPaging, OneSecondPagesReachOlderRetainedBars) {
         model.onTrade(trade);
     }
     RecordingServerStopTest::checkCandlePages(model);
+}
+
+namespace {
+struct ServerFixture {
+    QTemporaryDir dir;
+    ServerConfig config;
+    std::unique_ptr<ServerDataModel> model;
+    std::unique_ptr<Authenticator> auth;
+    std::unique_ptr<SentinelStreamServer> server;
+    bool init() {
+        config.heatmap.persistenceEnabled = false;
+        config.recording.enabled = false;
+        config.tls.certFile = dir.path().toStdString() + "/cert.pem";
+        config.tls.keyFile = dir.path().toStdString() + "/key.pem";
+        if (!dir.isValid() || !writeSelfSignedCert(config.tls.certFile, config.tls.keyFile)) return false;
+        model = std::make_unique<ServerDataModel>(config);
+        auth = std::make_unique<Authenticator>(dir.path().toStdString() + "/no-credentials");
+        server = std::make_unique<SentinelStreamServer>(*model, *auth, config, 0);
+        return true;
+    }
+};
+} // namespace
+
+// FM-154/FM-202: stop() queues the acceptor close on the I/O thread and then stops
+// the I/O context. If that thread is busy, the close (and the aborted accept) stay
+// queued and run after the next start(): the old close then closes the new listener
+// and the accept loop spins on "Bad file descriptor".
+TEST(RecordingServerStop, StaleStopWorkCannotCloseTheNextListener) {
+    int argc = 1; char name[] = "stale-acceptor"; char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    ServerFixture fixture;
+    ASSERT_TRUE(fixture.init());
+    auto& server = *fixture.server;
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        server.start();
+        ASSERT_TRUE(RecordingServerStopTest::listening(server)) << "cycle " << cycle;
+        const auto port = RecordingServerStopTest::port(server);
+        ASSERT_NE(port, 0) << "cycle " << cycle;
+        EXPECT_TRUE(RecordingServerStopTest::accepts(server, port)) << "cycle " << cycle;
+        const auto drained = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (RecordingServerStopTest::sessionCount(server) != 0 && std::chrono::steady_clock::now() < drained)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        // Hold the I/O thread so stop() stops the context before its close can run.
+        std::promise<void> entered, release;
+        auto gate = release.get_future().share();
+        net::post(RecordingServerStopTest::ioContext(server), [&entered, gate] { entered.set_value(); gate.wait(); });
+        ASSERT_EQ(entered.get_future().wait_for(std::chrono::seconds(3)), std::future_status::ready);
+        auto stopped = std::async(std::launch::async, [&] { server.stop(); });
+        const bool ioStopped = RecordingServerStopTest::waitIoStopped(server);
+        release.set_value();
+        ASSERT_TRUE(ioStopped);
+        ASSERT_EQ(stopped.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    }
+    server.start();
+    EXPECT_TRUE(RecordingServerStopTest::listening(server)) << "stale shutdown work closed the new listener";
+    const auto port = RecordingServerStopTest::port(server);
+    ASSERT_NE(port, 0);
+    EXPECT_TRUE(RecordingServerStopTest::accepts(server, port));
+    server.stop();
+}
+
+// The same lifecycle without forcing the order: back-to-back start/stop while
+// background clients keep connecting, so stop() races accepted sessions on the
+// I/O thread. Every start must listen and accept.
+TEST(RecordingServerStop, StartStopLoopUnderClientChurnKeepsAccepting) {
+    int argc = 1; char name[] = "acceptor-churn"; char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    ServerFixture fixture;
+    ASSERT_TRUE(fixture.init());
+    auto& server = *fixture.server;
+    std::atomic<unsigned short> target{0};
+    std::atomic<bool> done{false};
+    std::vector<std::thread> clients;
+    struct JoinClients {
+        std::atomic<bool>& done; std::vector<std::thread>& threads;
+        ~JoinClients() { done = true; for (auto& t : threads) t.join(); }
+    } joinClients{done, clients};
+    for (int i = 0; i < 3; ++i) {
+        clients.emplace_back([&] {
+            net::io_context ioc;
+            while (!done) {
+                const auto port = target.load();
+                if (port == 0) { std::this_thread::sleep_for(std::chrono::microseconds(200)); continue; }
+                tcp::socket socket(ioc);
+                beast::error_code ec;
+                socket.connect({net::ip::make_address("127.0.0.1"), port}, ec);
+                // Reset instead of FIN: thousands of TIME_WAIT sockets would exhaust the
+                // ephemeral ports and fail the next start() with EADDRNOTAVAIL.
+                if (!ec) socket.set_option(net::socket_base::linger(true, 0), ec);
+                socket.close(ec);
+                std::this_thread::sleep_for(std::chrono::microseconds(500));
+            }
+        });
+    }
+    for (int cycle = 0; cycle < 40; ++cycle) {
+        server.start();
+        ASSERT_TRUE(RecordingServerStopTest::listening(server)) << "cycle " << cycle;
+        const auto port = RecordingServerStopTest::port(server);
+        ASSERT_NE(port, 0) << "cycle " << cycle;
+        target = port;
+        EXPECT_TRUE(RecordingServerStopTest::accepts(server, port)) << "cycle " << cycle;
+        server.stop(); // clients keep connecting while the server stops
+    }
+}
+
+// An accept that fails at once (here: a closed listener, which returns EBADF) must
+// not retry in a tight loop on the I/O thread. Before the backoff, this loop used a
+// whole core and logged one error per attempt.
+TEST(RecordingServerStop, FailingAcceptBacksOffInsteadOfSpinning) {
+    int argc = 1; char name[] = "accept-backoff"; char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    ServerFixture fixture;
+    ASSERT_TRUE(fixture.init());
+    auto& server = *fixture.server;
+    server.start();
+    ASSERT_TRUE(RecordingServerStopTest::listening(server));
+    const auto cpuMs = [] {
+        rusage usage{};
+        getrusage(RUSAGE_SELF, &usage);
+        const auto ms = [](const timeval& t) { return int64_t{t.tv_sec} * 1000 + t.tv_usec / 1000; };
+        return ms(usage.ru_utime) + ms(usage.ru_stime);
+    };
+    ASSERT_TRUE(RecordingServerStopTest::closeListener(server));
+    const auto before = cpuMs();
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    const auto used = cpuMs() - before;
+    EXPECT_LT(used, 60) << "I/O thread used " << used << " ms CPU in 600 ms with a failing accept";
+    EXPECT_FALSE(RecordingServerStopTest::listening(server));
+    const auto start = std::chrono::steady_clock::now();
+    server.stop(); // the pending retry wait must not delay shutdown
+    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(1));
+    server.start(); // a closed listener does not poison the next start
+    EXPECT_TRUE(RecordingServerStopTest::listening(server));
+    const auto port = RecordingServerStopTest::port(server);
+    ASSERT_NE(port, 0);
+    EXPECT_TRUE(RecordingServerStopTest::accepts(server, port));
+    server.stop();
 }
