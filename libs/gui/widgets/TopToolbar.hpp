@@ -6,6 +6,8 @@
 #include <QSlider>
 #include <QLabel>
 #include <QMenu>
+#include <QHash>
+#include <QVector>
 #include "LiquidityRangeSlider.hpp"
 #include <cstdint>
 #include <vector>
@@ -75,7 +77,7 @@ public:
     static ControlVisibility controlVisibility(const ModeState &mode);
     void setModeState(const ModeState &mode);
     const ModeState &modeState() const { return m_mode; }
-    // What the toolbar shows now (from its actions; tests and the Agent API).
+    // Controls available for the active mode, including those moved into overflow.
     ControlVisibility shownControls() const;
     bool candlesChecked() const;
     void setCandlesChecked(bool checked); // no signal
@@ -101,6 +103,7 @@ public:
     QComboBox *chartTypeCombo() const { return m_chartTypeCombo; }
     void setBaseAssetSymbol(const QString &symbol);
     void showLayoutsMenu();
+    void showControlsMenu();
     void setFullscreen(bool fullscreen);
 
 signals:
@@ -130,7 +133,14 @@ signals:
     void tpoSessionSelected(int sessionType);
     void tpoLayoutSelected(const QString &layout);
 
+protected:
+    bool event(QEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
+
 private:
+    void scheduleFit();
+    void fitControls();
+    void setInlineVisible(QAction *action, bool visible);
     QAction* addIconAction(const QString& iconPath, const QString& text, const QString& tooltip);
     QToolButton* addIconButton(const QString& iconPath, const QString& tooltip);
     void applyVisibility();
@@ -165,6 +175,19 @@ private:
     QToolButton* m_controlsButton = nullptr;
     QMenu* m_controlsMenu = nullptr;
     QMenu* m_tickMenu = nullptr;
+    QMenu* m_labelsMenu = nullptr;
+    QMenu* m_legacyThresholdMenu = nullptr;
+    QMenu* m_layoutsMenu = nullptr;
+    QAction* m_quickSearchAction = nullptr;
+    QAction* m_screenshotAction = nullptr;
+    QAction* m_overflowAction = nullptr;
+    QAction* m_spacerAction = nullptr;
+    QList<QAction*> m_inlineActions;
+    QVector<QList<QAction*>> m_inlineGroups;
+    QHash<QAction*, bool> m_modeVisibility;
+    QVector<int> m_fitInputs;
+    bool m_fitPending = false;
+    bool m_fitting = false;
     QAction* m_rangeMenuAction = nullptr;
     QAction* m_indicatorsAction = nullptr;
     QAction* m_layoutsAction = nullptr;

@@ -7,6 +7,7 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFrame>
+#include <QShortcut>
 
 ChartDock::ChartDock(QWidget* parent)
     : DockablePanel("ChartDock", "BTC-USD · Market chart", parent)
@@ -31,6 +32,11 @@ void ChartDock::buildUi() {
     m_toolbar = new TopToolbar(m_contentWidget);
     m_toolbar->setObjectName("HeatmapToolbar");
     mainLayout->addWidget(m_toolbar, 0);
+    // Chart-scoped access also works when the full strip fits and » is hidden.
+    auto *controlsShortcut = new QShortcut(QKeySequence(Qt::SHIFT | Qt::Key_F10), m_contentWidget);
+    controlsShortcut->setObjectName("chartControlsShortcut");
+    controlsShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(controlsShortcut, &QShortcut::activated, m_toolbar, &TopToolbar::showControlsMenu);
 
     const QByteArray backend = qgetenv("QSG_RHI_BACKEND").toLower();
     if (backend == "opengl") {

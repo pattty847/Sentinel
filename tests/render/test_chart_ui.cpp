@@ -17,11 +17,13 @@
 #include "render/heatmap/HeatmapSettingsModel.hpp"
 #include "widgets/HeatmapSettingsDialog.hpp"
 #include "widgets/TopToolbar.hpp"
+#include "widgets/ChartDock.hpp"
 #include "themes/ThemeManager.hpp"
 #include "themes/FontManager.hpp"
 #include "SyntheticHmc2Fixture.hpp"
 #include <QAction>
 #include <QApplication>
+#include <QMainWindow>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
@@ -44,6 +46,9 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QThread>
+#include <QTimer>
+#include <QSpinBox>
+#include <QShortcut>
 #include <QSignalSpy>
 #include <QPushButton>
 #include <gtest/gtest.h>
@@ -74,10 +79,45 @@ struct TempStore {
 
 QAction *menuAction(QMenu *menu, const QString &name, int nth = 0) {
     int seen = 0;
-    for (QAction *a : menu->findChildren<QAction *>())
-        if (a->objectName() == name && seen++ == nth) return a;
+    std::function<QAction *(QMenu *)> find = [&](QMenu *parent) -> QAction * {
+        for (QAction *action : parent->actions()) {
+            if (action->objectName() == name && seen++ == nth) return action;
+            if (action->menu()) if (auto *match = find(action->menu())) return match;
+        }
+        return nullptr;
+    };
+    if (auto *action = find(menu)) return action;
     ADD_FAILURE() << "no menu action " << name.toStdString() << " #" << nth;
     return nullptr;
+}
+
+// Exercise the real button, including Qt's InstantPopup event loop. The timer
+// inspects the open popup and always closes it before mouseClick returns.
+void useOverflow(TopToolbar &toolbar, const std::function<void(QMenu *)> &inspect) {
+    ASSERT_TRUE(toolbar.controlsButton()->isVisible());
+    bool entered = false;
+    QTimer::singleShot(30, &toolbar, [&] {
+        entered = true;
+        auto *menu = toolbar.controlsMenu();
+        EXPECT_TRUE(menu->isVisible());
+        if (menu->isVisible()) inspect(menu);
+        for (auto *child : menu->findChildren<QMenu *>()) child->hide();
+        menu->hide();
+    });
+    QTest::mouseClick(toolbar.controlsButton(), Qt::LeftButton);
+    EXPECT_TRUE(entered);
+}
+
+void clickSubmenuEntry(QMenu *root, QMenu *submenu, QAction *entry) {
+    ASSERT_TRUE(submenu);
+    ASSERT_TRUE(entry);
+    ASSERT_TRUE(submenu->menuAction()->isEnabled());
+    root->setActiveAction(submenu->menuAction());
+    QTest::keyClick(root, Qt::Key_Right);
+    QCoreApplication::processEvents();
+    ASSERT_TRUE(submenu->isVisible());
+    submenu->setActiveAction(entry);
+    QTest::keyClick(submenu, Qt::Key_Return);
 }
 
 // ------------------------------------------------------------ toolbar modes
@@ -242,6 +282,205 @@ TEST(ChartToolbar, NarrowTickMenuRetainsUnavailableValueAndResolutionWarning) {
     EXPECT_FALSE(tickMenu->menuAction()->toolTip().contains("veiled")); // Qt falls back to the action text.
 }
 
+TEST(ChartToolbar, RealOverflowRestoresInlineControlsAcrossWidthModeAndFontChanges) {
+    TopToolbar toolbar;
+    toolbar.setTickSelectorState({true, {}, false, 10, 0, {10, 20}, 100, {}});
+    toolbar.show();
+    const QFont original = toolbar.font();
+    for (int fontSize : {11, 18, 11}) {
+        QFont font = original;
+        font.setPointSize(fontSize);
+        toolbar.setFont(font);
+        for (const Mode mode : {Mode{}, Mode{false, false, true, false, true, true},
+                               Mode{false, false, false, true, false, true}}) {
+            toolbar.setModeState(mode);
+            for (int width : {420, 480, 960, 1920, 480, 1920}) {
+                SCOPED_TRACE(::testing::Message() << "font=" << fontSize << " width=" << width << " tpo=" << mode.tpo);
+                toolbar.resize(width, 48);
+                QTest::qWait(20);
+                ASSERT_EQ(toolbar.width(), width);
+                EXPECT_TRUE(toolbar.symbolSearch()->isVisible());
+                EXPECT_TRUE(toolbar.chartMenuButton()->isVisible());
+                auto *native = toolbar.findChild<QToolButton *>("qt_toolbar_ext_button");
+                ASSERT_TRUE(native);
+                EXPECT_FALSE(native->isVisible()) << "only the complete extension may appear";
+                for (auto *button : toolbar.findChildren<QToolButton *>()) EXPECT_NE(button->text(), "Controls");
+                auto *tickLabel = toolbar.findChild<QLabel *>("chartTickLabel");
+                EXPECT_EQ(tickLabel->isVisible(), toolbar.tickModeCombo()->isVisible());
+                EXPECT_EQ(tickLabel->isVisible(), toolbar.tickPresetCombo()->isVisible());
+                EXPECT_EQ(toolbar.rangeSlider()->isVisible(), toolbar.rangeLabel()->isVisible());
+                EXPECT_EQ(toolbar.shownControls(), TopToolbar::controlVisibility(mode)) << "availability includes overflow";
+                if (toolbar.controlsButton()->isVisible()) {
+                    EXPECT_GE(toolbar.controlsButton()->geometry().right(), width - 12);
+                    useOverflow(toolbar, [&](QMenu *menu) {
+                        EXPECT_TRUE(menu->actions().contains(toolbar.findChild<QAction *>("chartScreenshotAction")));
+                        EXPECT_EQ(menu->findChild<QMenu *>("controlsTpoLayout")->menuAction()->isEnabled(), mode.tpo);
+                        EXPECT_EQ(menu->findChild<QMenu *>("controlsTpoSession")->menuAction()->isEnabled(), mode.tpo || mode.volumeProfile);
+                    });
+                } else {
+                    EXPECT_GE(width, 960);
+                    EXPECT_EQ(toolbar.tickModeCombo()->isVisible(), mode.heatmap);
+                    EXPECT_EQ(toolbar.tpoSessionCombo()->isVisible(), mode.tpo || mode.volumeProfile);
+                }
+                const QRect buttonRect = toolbar.controlsButton()->geometry();
+                const bool overflow = toolbar.controlsButton()->isVisible();
+                QTest::qWait(20);
+                EXPECT_EQ(toolbar.controlsButton()->geometry(), buttonRect);
+                EXPECT_EQ(toolbar.controlsButton()->isVisible(), overflow);
+            }
+        }
+    }
+    for (int width = 420; width < 1920; width += 7) toolbar.resize(width, 48);
+    toolbar.resize(1920, 48);
+    QTest::qWait(30);
+    EXPECT_FALSE(toolbar.controlsButton()->isVisible());
+}
+
+TEST(ChartToolbar, RealOverflowRequestsTimeframeTickTpoRangeThresholdAndScreenshotOnce) {
+    TopToolbar toolbar;
+    toolbar.resize(480, 44);
+    toolbar.show();
+    toolbar.setAvailableTimeframes({60000, 300000});
+    toolbar.setTimeframeMs(60000);
+    toolbar.setTickSelectorState({true, {}, true, 15, 15, {10, 20}, 100, "Locked tick is unavailable"});
+    QSignalSpy timeframe(&toolbar, &TopToolbar::timeframeSelected);
+    QSignalSpy tickMode(&toolbar, &TopToolbar::tickModeRequested);
+    QSignalSpy tickPreset(&toolbar, &TopToolbar::tickPresetRequested);
+    QSignalSpy session(&toolbar, &TopToolbar::tpoSessionSelected);
+    QSignalSpy tpoLayout(&toolbar, &TopToolbar::tpoLayoutSelected);
+    QSignalSpy range(&toolbar, &TopToolbar::liquidityRangeSettingsRequested);
+    QSignalSpy threshold(&toolbar, &TopToolbar::liquidityThresholdChanged);
+    QSignalSpy screenshot(&toolbar, &TopToolbar::screenshotRequested);
+    QSignalSpy heatmap(&toolbar, &TopToolbar::heatmapToggled);
+    QTest::qWait(20);
+    useOverflow(toolbar, [&](QMenu *menu) {
+        auto *timeframes = menu->findChild<QMenu *>("controlsTimeframes");
+        EXPECT_FALSE(timeframes->actions()[0]->isEnabled());
+        EXPECT_TRUE(timeframes->actions()[1]->isChecked());
+        clickSubmenuEntry(menu, timeframes, timeframes->actions()[2]);
+    });
+    ASSERT_EQ(timeframe.size(), 1);
+    EXPECT_EQ(timeframe[0][0].toString(), "5m");
+    useOverflow(toolbar, [&](QMenu *menu) {
+        auto *ticks = menu->findChild<QMenu *>("controlsTick");
+        auto *unavailable = menuAction(ticks, "controlsTickPreset", 1);
+        EXPECT_TRUE(unavailable->isChecked());
+        EXPECT_FALSE(unavailable->isEnabled());
+        clickSubmenuEntry(menu, ticks, menuAction(ticks, "controlsTickAuto"));
+    });
+    ASSERT_EQ(tickMode.size(), 1);
+    EXPECT_FALSE(tickMode[0][0].toBool());
+    useOverflow(toolbar, [&](QMenu *menu) {
+        auto *ticks = menu->findChild<QMenu *>("controlsTick");
+        clickSubmenuEntry(menu, ticks, menuAction(ticks, "controlsTickPreset", 2));
+    });
+    ASSERT_EQ(tickPreset.size(), 1);
+    EXPECT_EQ(tickPreset[0][0].toLongLong(), 20);
+    useOverflow(toolbar, [&](QMenu *menu) {
+        auto *entry = menuAction(menu, "controlsLiquidityRange");
+        QTest::mouseClick(menu, Qt::LeftButton, {}, menu->actionGeometry(entry).center());
+    });
+    EXPECT_EQ(range.size(), 1);
+    toolbar.resize(280, 44);
+    QTest::qWait(20);
+    QToolButton *heatmapButton = nullptr;
+    for (auto *button : toolbar.findChildren<QToolButton *>())
+        if (button->toolTip() == QLatin1String("Heatmap")) heatmapButton = button;
+    ASSERT_TRUE(heatmapButton);
+    ASSERT_FALSE(heatmapButton->isVisible());
+    useOverflow(toolbar, [&](QMenu *menu) {
+        auto *entry = menuAction(menu, "controlsHeatmap");
+        QTest::mouseClick(menu, Qt::LeftButton, {}, menu->actionGeometry(entry).center());
+    });
+    EXPECT_EQ(heatmap.size(), 1);
+    EXPECT_FALSE(heatmapButton->isChecked());
+    toolbar.resize(480, 44);
+    toolbar.setModeState({false, false, true, false, true, true});
+    toolbar.setTpoState(4, "split");
+    QTest::qWait(20);
+    ASSERT_FALSE(toolbar.tpoSessionCombo()->isVisible());
+    ASSERT_FALSE(toolbar.tpoLayoutCombo()->isVisible());
+    useOverflow(toolbar, [&](QMenu *menu) {
+        EXPECT_FALSE(menu->findChild<QMenu *>("controlsTick")->menuAction()->isEnabled());
+        auto *sessions = menu->findChild<QMenu *>("controlsTpoSession");
+        EXPECT_TRUE(sessions->actions()[4]->isChecked());
+        clickSubmenuEntry(menu, sessions, sessions->actions()[1]);
+    });
+    EXPECT_EQ(session.size(), 1);
+    EXPECT_EQ(toolbar.tpoSessionCombo()->currentData().toInt(), 1);
+    useOverflow(toolbar, [&](QMenu *menu) {
+        auto *layouts = menu->findChild<QMenu *>("controlsTpoLayout");
+        EXPECT_TRUE(layouts->actions()[1]->isChecked());
+        clickSubmenuEntry(menu, layouts, layouts->actions()[0]);
+    });
+    EXPECT_EQ(tpoLayout.size(), 1);
+    toolbar.setModeState({true, false, false, false, true, false});
+    QTest::qWait(20);
+    useOverflow(toolbar, [&](QMenu *menu) {
+        auto *legacy = menu->findChild<QMenu *>("controlsLegacyThreshold");
+        menu->setActiveAction(legacy->menuAction());
+        QTest::keyClick(menu, Qt::Key_Right);
+        auto *spin = legacy->findChild<QSpinBox *>("controlsThresholdStrength");
+        ASSERT_TRUE(spin);
+        spin->setValue(450);
+        legacy->hide();
+    });
+    EXPECT_EQ(threshold.size(), 1);
+    EXPECT_EQ(toolbar.liquiditySlider()->value(), 450);
+    useOverflow(toolbar, [&](QMenu *menu) {
+        auto *entry = toolbar.findChild<QAction *>("chartScreenshotAction");
+        ASSERT_TRUE(menu->actions().contains(entry));
+        QTest::mouseClick(menu, Qt::LeftButton, {}, menu->actionGeometry(entry).center());
+    });
+    EXPECT_EQ(screenshot.size(), 1);
+}
+
+TEST(ChartToolbar, ChartShortcutOpensCompleteMenuFromWidgetsAndEmbeddedQuickWindow) {
+    QMainWindow window;
+    auto *outside = new QLineEdit(&window);
+    window.setCentralWidget(outside);
+    auto *dock = new ChartDock(&window);
+    window.addDockWidget(Qt::RightDockWidgetArea, dock);
+    window.resize(2100, 500);
+    window.show();
+    window.activateWindow();
+    QTest::qWait(40);
+    auto *toolbar = dock->toolbar();
+    auto *shortcut = dock->findChild<QShortcut *>("chartControlsShortcut");
+    ASSERT_TRUE(shortcut);
+    EXPECT_EQ(shortcut->context(), Qt::WidgetWithChildrenShortcut);
+    for (int width : {480, 1920}) {
+        toolbar->setFixedWidth(width);
+        QTest::qWait(20);
+        for (auto *target : {static_cast<QWidget *>(toolbar->symbolSearch()), static_cast<QWidget *>(toolbar->chartMenuButton())}) {
+            window.activateWindow();
+            SCOPED_TRACE(target->objectName().toStdString());
+            target->setFocus();
+            QTest::qWait(20);
+            EXPECT_TRUE(target->hasFocus());
+            QTest::keyClick(target, Qt::Key_F10, Qt::ShiftModifier);
+            QTest::qWait(10);
+            EXPECT_TRUE(toolbar->controlsMenu()->isVisible());
+            EXPECT_TRUE(toolbar->controlsMenu()->activeAction());
+            toolbar->controlsMenu()->hide();
+            QTest::qWait(20);
+        }
+        dock->qmlContainer()->setFocus();
+        dock->qquickView()->requestActivate();
+        QTest::qWait(20);
+        QTest::keyClick(dock->qquickView(), Qt::Key_F10, Qt::ShiftModifier);
+        QTest::qWait(10);
+        EXPECT_TRUE(toolbar->controlsMenu()->isVisible()) << "embedded QQuickView focus";
+        toolbar->controlsMenu()->hide();
+        QTest::qWait(20);
+    }
+    outside->setFocus();
+    QTest::qWait(20);
+    QTest::keyClick(outside, Qt::Key_F10, Qt::ShiftModifier);
+    QTest::qWait(10);
+    EXPECT_FALSE(toolbar->controlsMenu()->isVisible());
+}
+
 // Opt-in own-widget captures only. This fixture has synthetic tick availability
 // and no transport/chart feed; production controls/settings supply the behavior.
 TEST(ChartToolbarFixture, NativeSyntheticScreenshots) {
@@ -312,7 +551,7 @@ TEST(ChartToolbarFixture, NativeSyntheticScreenshots) {
         EXPECT_FALSE(footprintAction->isChecked());
         EXPECT_EQ(tpoAction->isChecked(), mode == "tpo");
         EXPECT_EQ(volumeAction->isChecked(), mode == "volume");
-        for (int width : {420, 960, 1920}) {
+        for (int width : {420, 480, 960, 1920}) {
             surface.setFixedWidth(width);
             surface.adjustSize();
             surface.show();
@@ -331,9 +570,7 @@ TEST(ChartToolbarFixture, NativeSyntheticScreenshots) {
             toolbar->symbolSearch()->setFocus(Qt::TabFocusReason);
             const QString name = QString("toolbar-%1-%2").arg(mode).arg(width);
             ASSERT_TRUE(save(name));
-            if (width == 420) {
-                auto* menu = controlsMenu;
-                menu->popup(toolbar->controlsButton()->mapToGlobal(QPoint(0, toolbar->controlsButton()->height())));
+            if (toolbar->controlsButton()->isVisible()) useOverflow(*toolbar, [&](QMenu *menu) {
                 menu->setFocus(Qt::TabFocusReason);
                 QTest::keyClick(menu, Qt::Key_Down);
                 ASSERT_TRUE(menu->activeAction());
@@ -341,7 +578,8 @@ TEST(ChartToolbarFixture, NativeSyntheticScreenshots) {
                 if (mode == "heatmap") {
                     auto* ticks = menu->findChild<QMenu*>("controlsTick");
                     ASSERT_TRUE(ticks);
-                    ticks->popup(menu->mapToGlobal(QPoint(menu->width(), 0)));
+                    menu->setActiveAction(ticks->menuAction());
+                    QTest::keyClick(menu, Qt::Key_Right);
                     ticks->setFocus(Qt::TabFocusReason);
                     QTest::keyClick(ticks, Qt::Key_Down);
                     ASSERT_TRUE(ticks->activeAction());
@@ -349,7 +587,7 @@ TEST(ChartToolbarFixture, NativeSyntheticScreenshots) {
                     ticks->hide();
                 }
                 menu->hide();
-            }
+            });
         }
     }
 }
@@ -500,6 +738,65 @@ TEST_F(ChartControls, RangeSliderKeepsItsDragDomainWhileDataChanges) {
     QTest::mouseRelease(slider, Qt::LeftButton, {}, handle + QPoint(8, 0));
     EXPECT_LE(slider->endLo(), 1e-6);
     EXPECT_GE(slider->endHi(), 1e6);
+}
+
+TEST_F(ChartControls, RealOverflowSharesPersistedLabelsAndRebuiltLayoutHooks) {
+    UnifiedGridRenderer renderer;
+    controls->setRenderer(&renderer);
+    toolbar->resize(480, 44);
+    QTest::qWait(20);
+    int saved = 0, restored = 0;
+    for (int pass = 0; pass < 2; ++pass) {
+        HeatmapChartControls::MenuHooks hooks;
+        hooks.saveLayout = [&] { ++saved; };
+        hooks.restoreLayout = [&] { ++restored; };
+        controls->setMenuHooks(hooks); // destroys/rebuilds the gear's owned actions
+        useOverflow(*toolbar, [&](QMenu *menu) {
+            auto *layouts = menu->findChild<QMenu *>("controlsLayouts");
+            auto *save = menuAction(menu, "chartMenuSaveLayout");
+            EXPECT_EQ(save, menuAction(toolbar->chartMenu(), "chartMenuSaveLayout"));
+            clickSubmenuEntry(menu, layouts, save);
+        });
+        EXPECT_EQ(saved, pass + 1);
+        useOverflow(*toolbar, [&](QMenu *menu) {
+            auto *layouts = menu->findChild<QMenu *>("controlsLayouts");
+            clickSubmenuEntry(menu, layouts, menuAction(menu, "chartMenuRestoreLayout"));
+        });
+        EXPECT_EQ(restored, pass + 1);
+        const bool before = model->settings().showLabels;
+        useOverflow(*toolbar, [&](QMenu *menu) {
+            auto *labels = menu->findChild<QMenu *>("controlsLabels");
+            auto *toggle = menuAction(menu, "chartMenuLabels");
+            EXPECT_EQ(toggle, menuAction(toolbar->chartMenu(), "chartMenuLabels"));
+            EXPECT_EQ(toggle->isChecked(), before);
+            clickSubmenuEntry(menu, labels, toggle);
+        });
+        EXPECT_EQ(model->settings().showLabels, !before);
+        EXPECT_EQ(t.reload().showLabels, !before);
+        useOverflow(*toolbar, [&](QMenu *menu) {
+            auto *labels = menu->findChild<QMenu *>("controlsLabels");
+            menu->setActiveAction(labels->menuAction());
+            QTest::keyClick(menu, Qt::Key_Right);
+            auto *currency = toolbar->chartMenu()->findChild<QMenu *>("chartMenuCurrency");
+            clickSubmenuEntry(labels, currency, menuAction(menu, pass ? "chartMenuCurrencyAsset" : "chartMenuCurrencyUsd"));
+        });
+        EXPECT_EQ(model->settings().labelCurrency, pass ? "asset" : "usd");
+        EXPECT_EQ(t.reload().labelCurrency, model->settings().labelCurrency);
+        useOverflow(*toolbar, [&](QMenu *menu) {
+            auto *labels = menu->findChild<QMenu *>("controlsLabels");
+            menu->setActiveAction(labels->menuAction());
+            QTest::keyClick(menu, Qt::Key_Right);
+            auto *sizes = toolbar->chartMenu()->findChild<QMenu *>("chartMenuLabelSize");
+            clickSubmenuEntry(labels, sizes, sizes->actions().last());
+        });
+        EXPECT_EQ(t.reload().labelMinPx, model->settings().labelMinPx);
+        EXPECT_EQ(t.reload().labelMaxPx, model->settings().labelMaxPx);
+    }
+    toolbar->resize(1920, 44);
+    QTest::qWait(20);
+    EXPECT_FALSE(toolbar->controlsButton()->isVisible());
+    EXPECT_EQ(toolbar->labelsButton()->isChecked(), model->settings().showLabels);
+    EXPECT_EQ(toolbar->liquidityModeCombo()->currentIndex(), model->settings().labelCurrency == "usd" ? 1 : 0);
 }
 
 TEST_F(ChartControls, CandleStyleMenuAndComboReachTheExistingRenderer) {
@@ -1072,6 +1369,11 @@ int main(int argc, char **argv) {
     Q_INIT_RESOURCE(sentinel_svg_resources);
     ThemeManager::instance().initializeDefaults();
     ThemeManager::instance().applyTheme("dark", &app);
+    const QString fixtureFont = qEnvironmentVariable("SENTINEL_TOOLBAR_FONT");
+    if (!fixtureFont.isEmpty()) {
+        QSettings fixtureSettings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelGUI");
+        fixtureSettings.setValue("ui/fontFamily", fixtureFont);
+    }
     FontManager::instance().initialize(&app);
     ::testing::InitGoogleTest(&argc, argv);
     std::cout << "[sentinel] " << lab::describeRhi().toStdString() << std::endl;
