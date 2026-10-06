@@ -99,7 +99,7 @@ mutations = [
      'to->observed = from->observed;', '',
      'ShadowTest.LeadForkFinishesMinutesExactlyLikeHistory'),
     ('lead wall ticks while the socket waits', SR,
-     'if (lead) lead->idle();', '',
+     'lead->idle();', '',
      'ShadowTest.LeadWallTicksAdvanceQuietFormingMinute'),
     ('A1 unjournaled product refused', SR,
      'if (journalHasProduct(cfg.journalRoot, p->name) == false) {', 'if (false) {',
@@ -139,8 +139,7 @@ mutations = [
      '!o.productWriterLease && server["roller_shadow"]', 'server["roller_shadow"]',
      'Roller.RollCliProductLeaseMayWriteRollerServedRoot', ROLLER),
     ('A9 deploy marker accepts the serving roller', 'scripts/dev/deploy-runtime.sh',
-     'grep -Eq "Recording v2 started|Roller serving ready products=" "$1";',
-     'grep -q "Recording v2 started" "$1";',
+     '/Roller serving ready products=/ {ready = 1}', '',
      'sh:tests/roller/deploy_marker_test.sh', None),
     # Review round 1.
     ('r1-1 lead drop withdraws its provisional minutes', SR,
@@ -152,29 +151,51 @@ mutations = [
     ('r1-1 withdrawal advances the series revision', 'libs/core/servermodel/RecordingLive.cpp',
      'it->second.withdrawn = true; ++it->second.revision;', 'it->second.withdrawn = true;',
      'ShadowTest.WithdrawnRecoverySnapshotLeavesLiveServiceSubscribers'),
-    ('r1-2 readiness only after a writer opened', SR,
-     'if (h) writerOpened(p);', 'writerOpened(p);',
-     'ShadowTest.ServingReadinessWaitsForEveryProductWriter'),
     ('r1-2 started line is not a deploy marker', 'scripts/dev/deploy-runtime.sh',
-     'grep -Eq "Recording v2 started|Roller serving ready products=" "$1";',
-     'grep -Eq "Recording v2 started|Roller serving ready products=|mode=live" "$1";',
+     '/Recording v2 started/ {primary = 1}', '/Recording v2 started|mode=live/ {primary = 1}',
      'sh:tests/roller/deploy_marker_test.sh', None),
     ('r1-2 deploy log must carry the deployed exe', 'scripts/dev/deploy-runtime.sh',
-     '''head -n 5 "$log" | awk -v exe="exe=$4" '$1 == "#" && $2 == exe {ok = 1} END {exit !ok}' || continue''', '',
+     '''head -n 5 <<<"$content" | awk -v exe="exe=$4" '$1 == "#" && $2 == exe {ok = 1} END {exit !ok}' || continue''', '',
      'sh:tests/roller/deploy_marker_test.sh', None),
     ('r1-2 deploy log must carry the restarted PID', 'scripts/dev/deploy-runtime.sh',
-     '''head -n 1 "$log" | awk -v pid="pid=$3" '$NF == pid {ok = 1} END {exit !ok}' || continue''', '',
+     '''head -n 1 <<<"$content" | awk -v pid="pid=$3" '$NF == pid {ok = 1} END {exit !ok}' || continue''', '',
      'sh:tests/roller/deploy_marker_test.sh', None),
     ('r1-3 merged config names the served root', 'libs/core/roller/RollCli.cpp',
      'effective.recording.source == "roller" &&', 'false &&',
      'Roller.RollCliRefusesRollerRootFromSplitOverride', ROLLER),
+    # Review round 2.
+    ('r2-1 seed the newest persisted minute before publishing', SR,
+     'if (!newest || !cfg.ensureLiveFinal(product, layer, newest)) return false;', 'continue;',
+     'ShadowTest.RestartWithdrawalWithZeroCachedFinalsReachesSubscriber'),
+    ('r2-1 no lead before a committed minute is cached', SR,
+     'if (!cfg.ensureLiveFinal) return true;', 'return true;',
+     'ShadowTest.LeadWaitsForACommittedMinuteOnANewRoot'),
+    ('r2-1 quiet socket retries the deferred fork', SR,
+     'if (atTip) // quiet socket: retry a fork the final-minute gate deferred\n lead->ensure(pending);', '',
+     'ShadowTest.LeadWaitsForACommittedMinuteOnANewRoot'),
+    ('r2-2 healthy only after a durable checkpoint', SR,
+     'sLog_App("Roller writer open product=" << p.name);',
+     'sLog_App("Roller writer open product=" << p.name); healthy(p);',
+     'ShadowTest.ServingReadinessNeedsADurableCheckpointAfterOpen'),
+    ('r2-2 failure or close revokes readiness', SR,
+     'if (!std::exchange(p.healthy, false)) return;', 'return;',
+     'ShadowTest.ServingReadinessNeedsEveryProductHealthyAtOnce'),
+    ('r2-2 deploy check takes the latest readiness transition', 'scripts/dev/deploy-runtime.sh',
+     '/Roller serving not ready product=/ {ready = 0}', '',
+     'sh:tests/roller/deploy_marker_test.sh', None),
+    ('r2-3 accept only if launchd still runs the read PID', 'scripts/dev/deploy-runtime.sh',
+     '[[ $(service_pid "$label") == "$pid" ]] || continue', '',
+     'sh:tests/roller/deploy_marker_test.sh', None),
+    ('r2-3 one read of a regular non-symlink file', 'scripts/dev/deploy-runtime.sh',
+     '[[ -f $1 && ! -L $1 ]] || return 1', 'cat -- "$1"; return',
+     'sh:tests/roller/deploy_marker_test.sh', None),
 ]
 if "--round1" in sys.argv:
     mutations = mutations[5:]
 if "--slice-d" in sys.argv:
     mutations = mutations[13:]
 if "--r1" in sys.argv:
-    mutations = [m for m in mutations if m[0].startswith(('r1-', 'A9', 'A11'))]
+    mutations = [m for m in mutations if m[0].startswith(('r1-', 'r2-', 'A9', 'A11'))]
 for entry in mutations:
     name, path, before, after, case = entry[:5]
     target = entry[5] if len(entry) > 5 else SHADOW

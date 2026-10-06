@@ -34,6 +34,10 @@ public:
     // records and the committed cutoff stay. A series that held any advances its
     // revision, so the next frame omits the withdrawn minutes.
     void retractProvisional(const std::string &symbol);
+    // True when the series holds a committed record; otherwise stores `final`
+    // (a committed minute of that series) and returns whether it did. A
+    // withdrawal frame must resend a final: LiveColumn frames carry >= 1 column.
+    bool ensureFinal(const std::string &symbol, const std::string &layer, RecordPtr final);
     Snapshot snapshot(const std::string &symbol, const std::string &layer) const;
     std::optional<std::pair<std::string, std::string>> takeCapacityWarning();
     static constexpr size_t kMaxSeries = 128, kMaxRecords = 16, kMaxEntries = 262144;
@@ -184,6 +188,9 @@ public:
     // Call after its last publication; subscribers' next frames omit those
     // minutes (raw tails: the client drops omitted provisional minutes).
     void retractProvisional(const std::string &symbol);
+    // See LiveCache::ensureFinal. A publisher that may withdraw provisional
+    // minutes publishes them only while this holds for the series.
+    bool ensureFinal(const std::string &symbol, const std::string &layer, RecordPtr final);
     std::shared_ptr<Subscription> subscribe(LiveView view, Deliver deliver);
     std::shared_ptr<RawSubscription> subscribeRaw(RawTailView view, RawDeliver deliver);
 private:

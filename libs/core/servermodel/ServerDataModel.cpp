@@ -300,6 +300,13 @@ std::function<void(const std::string&)> ServerDataModel::rollerRetract() {
     return [live = m_recordingLive](const std::string& symbol) { live->retractProvisional(symbol); };
 }
 
+std::function<bool(const std::string&, const std::string&, recording::RecordPtr)> ServerDataModel::rollerEnsureFinal() {
+    if (!m_servesRoller || !m_recordingLive) return {};
+    return [live = m_recordingLive](const std::string& symbol, const std::string& layer, recording::RecordPtr final) {
+        return live->ensureFinal(symbol, layer, std::move(final));
+    };
+}
+
 void ServerDataModel::attachRoller(RollerWatermarks watermarks, std::function<bool(const std::string&)> running) {
     if (!m_servesRoller || !watermarks || !running) return;
     m_rollerWatermarks = std::move(watermarks);

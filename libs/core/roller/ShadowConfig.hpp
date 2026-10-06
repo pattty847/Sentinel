@@ -44,6 +44,13 @@ struct ShadowConfig {
   // With publisher: withdraws the product's published provisional minutes
   // (LiveService::retractProvisional) after a lead that published is dropped.
   std::function<void(const std::string &product)> retractLive;
+  // With retractLive: true when the live cache holds a committed minute of
+  // (product, layer), storing the given one if not. The lead publishes only
+  // while both layers hold one (it carries a withdrawal to the client). Empty:
+  // no gate (tests with a recording sink).
+  std::function<bool(const std::string &product, const std::string &layer,
+                     std::shared_ptr<const recording::Hmc2Record>)>
+      ensureLiveFinal;
   int64_t livePublishMs = 500;
   // Wall clock (epoch ms) for lead ticks every 250 ms; tests inject.
   std::function<int64_t()> liveNowForTest;

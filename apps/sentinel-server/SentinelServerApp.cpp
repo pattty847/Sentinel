@@ -276,6 +276,7 @@ void SentinelServerApp::startShadow(const std::vector<std::string>& symbols) {
         if (serving) {
             shadow.publisher = m_serverModel->rollerPublisher();
             shadow.retractLive = m_serverModel->rollerRetract();
+            shadow.ensureLiveFinal = m_serverModel->rollerEnsureFinal();
             shadow.livePublishMs = m_serverConfig.recording.livePublishMs;
         }
         const auto products = shadow.products.empty() ? symbols : rollerProducts(m_serverConfig);

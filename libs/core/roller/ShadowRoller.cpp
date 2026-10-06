@@ -58,6 +58,8 @@ class LiveLead {
   const ShadowConfig &cfg;
   const std::string product;
   metrics::Counter &forks;
+  std::function<int64_t()> committedThrough;
+  bool waitLogged = false;
   bool published = false; // lead worker writes; read after the worker joined
   recording::BookRecorder *history = nullptr;
   const JournalFeed *historyFeed = nullptr;
@@ -83,10 +85,41 @@ class LiveLead {
     lastTickMs = t;
     lead->onTick(t);
   }
+  // A withdrawal reaches a client only with a committed minute to resend.
+  // After a restart history republishes none (replay below the commit floor):
+  // seed the newest persisted minute of each layer, or wait for the first.
+  bool finalsCached() {
+    if (!cfg.ensureLiveFinal)
+      return true;
+    for (const auto *layer : {"near", "deep"}) {
+      if (cfg.ensureLiveFinal(product, layer, nullptr))
+        continue;
+      const auto end = committedThrough();
+      std::shared_ptr<recording::Hmc2Record> newest;
+      for (const auto back : {Hour, Day}) {
+        if (end <= recording::kHmc2MinMs)
+          break;
+        auto rows = recording::Hmc2Store::readRange(
+            cfg.outputRoot, product, layer, 60000,
+            std::max(recording::kHmc2MinMs, end - back), end);
+        if (!rows.empty()) {
+          newest =
+              std::make_shared<recording::Hmc2Record>(std::move(rows.back()));
+          newest->committedThroughMs = newest->bucketStartMs + 60000;
+          break;
+        }
+      }
+      if (!newest || !cfg.ensureLiveFinal(product, layer, newest))
+        return false;
+    }
+    return true;
+  }
 
 public:
-  LiveLead(const ShadowConfig &c, std::string p, metrics::Counter &f)
-      : cfg(c), product(std::move(p)), forks(f) {}
+  LiveLead(const ShadowConfig &c, std::string p, metrics::Counter &f,
+           std::function<int64_t()> committed)
+      : cfg(c), product(std::move(p)), forks(f),
+        committedThrough(std::move(committed)) {}
   ~LiveLead() { discard(); }
   bool enabled() const { return bool(cfg.publisher); }
   void attach(recording::BookRecorder *h, const JournalFeed *f) {
@@ -116,6 +149,13 @@ public:
     if (!enabled() || lead || !history || !historyFeed || nowMs() < nextForkMs)
       return;
     try {
+      if (!finalsCached()) {
+        if (!std::exchange(waitLogged, true))
+          sLog_Data("Roller live lead waits for a committed minute product="
+                    << product);
+        nextForkMs = nowMs() + 1000;
+        return;
+      }
       auto publish = [this, sink = cfg.publisher, name = product](
                          std::shared_ptr<const recording::Hmc2Record> r) {
         published = true;
@@ -194,6 +234,9 @@ class LiveSource {
   size_t pendingSize = 0;
   std::optional<JournalPos> ceiling, diskTarget, applied, received;
   bool diskDone = false, initialDetached = true, recovering = false;
+  // At the socket with every returned record applied by history: the lead
+  // may fork there.
+  bool atTip = false;
   std::function<void(const std::string &)> retry;
   LiveLead *lead;
   std::unique_ptr<JournalReader> catchup;
@@ -239,8 +282,11 @@ class LiveSource {
         throw std::runtime_error("fanout EOF; resume journal");
       if (std::chrono::steady_clock::now() > deadline)
         throw std::runtime_error("fanout idle timeout");
-      if (lead)
+      if (lead) {
+        if (atTip) // quiet socket: retry a fork the final-minute gate deferred
+          lead->ensure(pending);
         lead->idle();
+      }
       if (socket.bytesAvailable() == 0)
         socket.waitForReadyRead(50);
       bytes += socket.read(capture::MaxRecordBytes + 4100 - bytes.size());
@@ -307,6 +353,7 @@ class LiveSource {
     }
   }
   void discardProvisional() {
+    atTip = false;
     pending.clear();
     pendingSize = 0;
     if (lead)
@@ -455,8 +502,10 @@ private:
         applied = out.pos;
         return true;
       }
-      if (lead)
+      if (lead) {
+        atTip = true;
         lead->ensure(pending);
+      }
       controlOrRecord();
     }
     return false;
@@ -503,7 +552,7 @@ struct ShadowRoller::Impl {
     metrics::Counter *records, *failures, *compareFailures, *cooldowns,
         *leadForks;
     bool refused = false;
-    std::atomic<bool> writerOpened{false};
+    bool healthy = false; // readyMutex
     // Served watermarks (chunk workers): the current day's history recorder
     // while it exists, merged into the newest values ever served.
     mutable std::mutex historyMutex;
@@ -527,7 +576,8 @@ struct ShadowRoller::Impl {
   fs::path primary;
   std::vector<std::unique_ptr<Product>> products;
   std::atomic<bool> stopping{false};
-  std::atomic<size_t> writersOpened{0};
+  std::mutex readyMutex;
+  size_t healthyCount = 0; // readyMutex
   std::mutex mutex;
   std::condition_variable wake;
   std::thread checker;
@@ -657,6 +707,7 @@ struct ShadowRoller::Impl {
     bool coolingDown = false;
     int64_t furthestCommitted = 0;
     const auto retry = [&](const std::string &reason) {
+      unhealthy(p, reason);
       if (stopping)
         return;
       p.running->set(0);
@@ -718,7 +769,8 @@ struct ShadowRoller::Impl {
           deep.minuteThroughMs =
               std::max(deep.minuteThroughMs, p.committed.load());
         }
-        LiveLead lead(cfg, p.name, *p.leadForks);
+        LiveLead lead(cfg, p.name, *p.leadForks,
+                      [&p] { return p.committed.load(); });
         LiveSource source(cfg, p.name, stopping, checkpoint, retry,
                           lead.enabled() ? &lead : nullptr);
         RollOptions o{cfg.journalRoot, cfg.outputRoot, p.name, day, day + Day};
@@ -732,8 +784,11 @@ struct ShadowRoller::Impl {
             p.history = h;
             p.historyEndMs = end;
           }
-          if (h)
-            writerOpened(p);
+          if (h) {
+            if (cfg.publisher)
+              sLog_App("Roller writer open product=" << p.name);
+          } else
+            unhealthy(p, "writer closed");
           lead.attach(h, f);
         };
         o.cancelled = [&] { return stopping.load(); };
@@ -758,6 +813,7 @@ struct ShadowRoller::Impl {
         };
         o.onCommitted = [&](int64_t through) {
           p.committed = through;
+          healthy(p);
           // Replaying the old checkpoint is not recovery from a persistent
           // fault.
           if (through > furthestCommitted) {
@@ -783,17 +839,32 @@ struct ShadowRoller::Impl {
       p.running->set(0);
     }
   }
-  // Deploy readiness (deploy-runtime.sh): the serving marker follows the
-  // history writer of EVERY configured product, after its checkpoint policy
-  // check and product/root leases. A refused or failing product keeps it
-  // absent.
-  void writerOpened(Product &p) {
-    if (!cfg.publisher || p.writerOpened.exchange(true))
+  // Deploy readiness (deploy-runtime.sh), serving only: a product is healthy
+  // from the first durable checkpoint of its current writer (after the policy
+  // check, leases and a committed minute) until a failure or the writer
+  // closes (also at day end). "Roller serving ready" is logged when every
+  // configured product is healthy at once, "Roller serving not ready" on each
+  // loss; the deploy check takes the latest of the two.
+  void healthy(Product &p) {
+    if (!cfg.publisher)
       return;
-    sLog_App("Roller writer open product=" << p.name);
-    if (++writersOpened == products.size())
+    std::lock_guard lock(readyMutex);
+    if (std::exchange(p.healthy, true))
+      return;
+    sLog_App("Roller writer healthy product=" << p.name);
+    if (++healthyCount == products.size())
       sLog_App("Roller serving ready products=" << products.size()
                                                 << " root=" << cfg.outputRoot);
+  }
+  void unhealthy(Product &p, const std::string &reason) {
+    if (!cfg.publisher)
+      return;
+    std::lock_guard lock(readyMutex);
+    if (!std::exchange(p.healthy, false))
+      return;
+    --healthyCount;
+    sLog_App("Roller serving not ready product=" << p.name
+                                                 << " reason=" << reason);
   }
   // Under historyMutex. Watermarks never regress: a new day's recorder starts
   // from its anchor, and the old one runs past its commit ceiling.

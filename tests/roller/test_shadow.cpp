@@ -261,6 +261,21 @@ struct ShadowTest : testing::Test {
       retracts.push_back(live.size());
     };
   }
+  // Production wiring into a real LiveService (as SentinelServerApp does).
+  void serveTo(std::shared_ptr<recording::LiveService> service) {
+    cfg.liveNowForTest = [this] { return liveNow.load(); };
+    cfg.publisher = [service](std::shared_ptr<const recording::Hmc2Record> r) {
+      service->publish(std::move(r));
+    };
+    cfg.retractLive = [service](const std::string &p) {
+      service->retractProvisional(p);
+    };
+    cfg.ensureLiveFinal =
+        [service](const std::string &p, const std::string &l,
+                  std::shared_ptr<const recording::Hmc2Record> r) {
+          return service->ensureFinal(p, l, std::move(r));
+        };
+  }
   std::vector<size_t> retracts; // live.size() at each withdrawal
   size_t retractCount() {
     std::lock_guard lock(liveMutex);
@@ -1171,6 +1186,66 @@ TEST_F(ShadowTest, RetractAcrossMinuteWithdrawsBeforeRebuilding) {
   parity(180000);
   EXPECT_EQ(expectFinalsMatch(root / "batch"), 3u * 2u);
 }
+// A raw-tail client: every frame decoded into the client's own LiveEdge.
+struct LiveClient {
+  std::mutex mutex;
+  heatmap::ChunkStore store;
+  heatmap::LiveEdge edge{Product, "hmc2.near"};
+  std::vector<std::shared_ptr<const heatmap::ChunkFrame>> frames;
+};
+using Client = LiveClient;
+std::shared_ptr<recording::LiveService::RawSubscription>
+subscribeClient(recording::LiveService &service,
+                std::shared_ptr<LiveClient> client) {
+  return service.subscribeRaw({Product, {"hmc2.near"}, 1, 0},
+                              [client](const auto &, const std::string &,
+                                       const recording::RawTailFrame &f) {
+                                auto frame =
+                                    std::make_shared<const heatmap::ChunkFrame>(
+                                        heatmap::decodeChunk(*f.bytes));
+                                std::lock_guard lock(client->mutex);
+                                client->edge.accept(frame, client->store);
+                                client->frames.push_back(std::move(frame));
+                                return true;
+                              });
+}
+// Withdrawn input in these tests: the recovery snapshot's ask 100500 and every
+// column from minute 2 on (the durable book is unobserved there).
+bool withdrawnColumn(const heatmap::SparseColumn &c) {
+  if (c.bucketStartMs >= Epoch + 120000)
+    return true;
+  for (const auto &n : c.native)
+    for (const auto &e : n.entries)
+      if (e.isAsk() && (n.baseRow + int64_t(e.row())) * n.grid.rowTickUnits /
+                               n.grid.priceScale ==
+                           100500)
+        return true;
+  return false;
+}
+bool frameShows(const heatmap::ChunkFrame &f) {
+  return std::any_of(f.columns.columns.begin(), f.columns.columns.end(),
+                     withdrawnColumn);
+}
+bool edgeShows(LiveClient &c) {
+  std::lock_guard lock(c.mutex);
+  for (const auto &[bucket, column] : c.edge.snapshot()->minutes)
+    if (withdrawnColumn(*column))
+      return true;
+  return false;
+}
+// Clean baseline frames may come first; after the first frame carrying the
+// withdrawn data, a clearing frame follows and nothing withdrawn reappears.
+void expectShownThenCleared(LiveClient &c) {
+  std::lock_guard lock(c.mutex);
+  const auto shown = std::find_if(c.frames.begin(), c.frames.end(),
+                                  [](const auto &f) { return frameShows(*f); });
+  ASSERT_NE(shown, c.frames.end());
+  const auto cleared = std::find_if(
+      shown, c.frames.end(), [](const auto &f) { return !frameShows(*f); });
+  ASSERT_NE(cleared, c.frames.end());
+  EXPECT_TRUE(std::none_of(cleared, c.frames.end(),
+                           [](const auto &f) { return frameShows(*f); }));
+}
 // Finding 1 (review r1): a withdrawn provisional recovery snapshot, across a
 // minute boundary, on an invalid durable book that no replacement snapshot
 // revalidates. Real LiveService raw subscribers decode every frame into the
@@ -1178,55 +1253,9 @@ TEST_F(ShadowTest, RetractAcrossMinuteWithdrawsBeforeRebuilding) {
 // subscriber that connects after the withdrawal never receives them.
 TEST_F(ShadowTest, WithdrawnRecoverySnapshotLeavesLiveServiceSubscribers) {
   auto service = std::make_shared<recording::LiveService>(cfg.outputRoot);
-  cfg.liveNowForTest = [this] { return liveNow.load(); };
-  cfg.publisher = [service](std::shared_ptr<const recording::Hmc2Record> r) {
-    service->publish(std::move(r));
-  };
-  cfg.retractLive = [service](const std::string &p) {
-    service->retractProvisional(p);
-  };
-  struct Client {
-    std::mutex mutex;
-    heatmap::ChunkStore store;
-    heatmap::LiveEdge edge{Product, "hmc2.near"};
-    std::vector<std::shared_ptr<const heatmap::ChunkFrame>> frames;
-  };
+  serveTo(service);
   const auto subscribe = [&](std::shared_ptr<Client> client) {
-    return service->subscribeRaw(
-        {Product, {"hmc2.near"}, 1, 0},
-        [client](const auto &, const std::string &,
-                 const recording::RawTailFrame &f) {
-          auto frame = std::make_shared<const heatmap::ChunkFrame>(
-              heatmap::decodeChunk(*f.bytes));
-          std::lock_guard lock(client->mutex);
-          client->edge.accept(frame, client->store);
-          client->frames.push_back(std::move(frame));
-          return true;
-        });
-  };
-  // Withdrawn input: the recovery snapshot's ask 100500 and every column from
-  // minute 2 on (the durable book is unobserved there).
-  const auto withdrawn = [](const heatmap::SparseColumn &c) {
-    if (c.bucketStartMs >= Epoch + 120000)
-      return true;
-    for (const auto &n : c.native)
-      for (const auto &e : n.entries)
-        if (e.isAsk() && (n.baseRow + int64_t(e.row())) * n.grid.rowTickUnits /
-                                 n.grid.priceScale ==
-                             100500)
-          return true;
-    return false;
-  };
-  const auto frameShows = [&](const heatmap::ChunkFrame &f) {
-    return std::any_of(f.columns.columns.begin(), f.columns.columns.end(),
-                       withdrawn);
-  };
-  const auto edgeShows = [&](Client &c) {
-    std::lock_guard lock(c.mutex);
-    for (const auto &[bucket, column] : c.edge.snapshot()->minutes)
-      if (withdrawn(*column))
-        return true;
-    return false;
+    return subscribeClient(*service, client);
   };
   auto existing = std::make_shared<Client>();
   auto existingSub = subscribe(existing);
@@ -1274,17 +1303,9 @@ TEST_F(ShadowTest, WithdrawnRecoverySnapshotLeavesLiveServiceSubscribers) {
   shadow.reset();
   EXPECT_FALSE(edgeShows(*existing));
   EXPECT_FALSE(edgeShows(*late));
+  expectShownThenCleared(*existing); // once withdrawn, never shown again
   {
     std::lock_guard lock(existing->mutex);
-    // Once withdrawn, never shown again.
-    const auto cleared =
-        std::find_if(existing->frames.begin(), existing->frames.end(),
-                     [&](const auto &f) { return !frameShows(*f); });
-    ASSERT_NE(cleared, existing->frames.end());
-    EXPECT_TRUE(std::any_of(existing->frames.begin(), cleared,
-                            [&](const auto &f) { return frameShows(*f); }));
-    EXPECT_TRUE(std::none_of(cleared, existing->frames.end(),
-                             [&](const auto &f) { return frameShows(*f); }));
     // The committed minute 1 stays (final, durable observation only).
     EXPECT_TRUE(existing->edge.snapshot()->minutes.contains(Epoch + 60000));
   }
@@ -1328,7 +1349,7 @@ TEST_F(ShadowTest, ServingReadinessWaitsForEveryProductWriter) {
     ~Restore() { qInstallMessageHandler(logcapture::previous); }
   } restore;
   serve();
-  initial();
+  initial(125); // a checkpoint follows the first commit at the next minute
   // Another writer holds the product lease (for example a repair roll).
   auto holder =
       std::make_unique<recording::Hmc2Store>(root / "shadow", true, Product);
@@ -1344,6 +1365,195 @@ TEST_F(ShadowTest, ServingReadinessWaitsForEveryProductWriter) {
   ASSERT_TRUE(eventually(
       [&] { return logcapture::seen("Roller serving ready products=1"); }));
   EXPECT_TRUE(logcapture::seen("Roller writer open product=BTC-USD"));
+  shadow.reset();
+}
+// Review r2 finding 1: zero cached finals. After a restart history replays
+// below its commit floor and republishes no final, so the live cache is empty.
+// An existing subscriber receives a provisional minute that is then withdrawn
+// (invalid durable book, no replacement snapshot): it must drop it. The lead
+// first seeds the newest persisted minute, so the withdrawal frame can resend
+// it.
+TEST_F(ShadowTest, RestartWithdrawalWithZeroCachedFinalsReachesSubscriber) {
+  writer->append(record(0, snapshot()));
+  for (int t = 1; t <= 185; ++t)
+    writer->append(record(t * 1000, t == 64 ? "not JSON"
+                                            : "{\"channel\":\"heartbeats\"}"));
+  writer->flush();
+  serveTo(std::make_shared<recording::LiveService>(cfg.outputRoot));
+  start();
+  ASSERT_TRUE(eventually([&] {
+    return fs::exists(root / "shadow" / Product / "roller.json") &&
+           load(root / "shadow" / Product / "roller.json")
+                   .value("committedThroughMs", int64_t{0}) >= Epoch + 120000;
+  }));
+  shadow.reset();
+  // Restarted process: a new, empty live cache with an existing subscriber.
+  auto service = std::make_shared<recording::LiveService>(cfg.outputRoot);
+  serveTo(service);
+  auto existing = std::make_shared<LiveClient>();
+  auto sub = subscribeClient(*service, existing);
+  ASSERT_TRUE(sub);
+  start();
+  ASSERT_TRUE(eventually([&] { return forks() == 1; }));
+  auto recovery = json::parse(snapshot());
+  recovery["events"][0]["updates"].push_back(
+      {{"side", "offer"}, {"price_level", "100500"}, {"new_quantity", "7"}});
+  fanout->publish(0, {capture::JournalEventKind::Record, durable.runId,
+                      durable.block + 1, 0, true,
+                      frame(record(190000, recovery.dump()))});
+  fanout->publish(0, {capture::JournalEventKind::Record, durable.runId,
+                      durable.block + 1, 1, true, frame(record(195000))});
+  ASSERT_TRUE(eventually([&] { return edgeShows(*existing); }));
+  fanout->publish(0, {capture::JournalEventKind::Retract,
+                      durable.runId,
+                      durable.block,
+                      durable.record,
+                      true,
+                      {}});
+  ASSERT_TRUE(eventually([&] { return forks() == 2; }));
+  ASSERT_TRUE(eventually([&] { return !edgeShows(*existing); }));
+  shadow.reset();
+  expectShownThenCleared(*existing);
+}
+// Review r2 finding 1: on a root with no committed minute yet the lead does not
+// publish (nothing could carry a withdrawal) until history commits one.
+TEST_F(ShadowTest, LeadWaitsForACommittedMinuteOnANewRoot) {
+  auto service = std::make_shared<recording::LiveService>(cfg.outputRoot);
+  serveTo(service);
+  auto client = std::make_shared<LiveClient>();
+  auto sub = subscribeClient(*service, client);
+  ASSERT_TRUE(sub);
+  writer->append(record(0, snapshot()));
+  for (int t = 1; t <= 30; ++t)
+    writer->append(record(t * 1000));
+  writer->flush();
+  start();
+  ASSERT_TRUE(eventually([&] { return count() == 31; }));
+  std::this_thread::sleep_for(1500ms); // past the 1 s gate retry
+  EXPECT_EQ(forks(), 0);
+  {
+    std::lock_guard lock(client->mutex);
+    EXPECT_TRUE(client->frames.empty());
+  }
+  for (int t = 31; t <= 70; ++t)
+    writer->append(record(t * 1000));
+  writer->flush();
+  ASSERT_TRUE(eventually([&] { return forks() == 1; }));
+  ASSERT_TRUE(eventually([&] {
+    std::lock_guard lock(client->mutex);
+    return std::any_of(
+        client->frames.begin(), client->frames.end(), [](const auto &f) {
+          return std::any_of(
+              f->columns.columns.begin(), f->columns.columns.end(),
+              [](const auto &c) { return c.flags & recording::kProvisional; });
+        });
+  }));
+  shadow.reset();
+  std::lock_guard lock(client->mutex);
+  // The first frame already carries a committed minute.
+  const auto &first = client->frames.front()->columns.columns;
+  EXPECT_TRUE(std::any_of(first.begin(), first.end(), [](const auto &c) {
+    return !(c.flags & recording::kProvisional);
+  }));
+}
+// Review r2 finding 2: readiness is current durable health of every product at
+// once. BTC opens, checkpoints, then its checkpoint fails; ETH opens only
+// after that: no ready line until BTC recovers.
+TEST_F(ShadowTest, ServingReadinessNeedsEveryProductHealthyAtOnce) {
+  {
+    std::lock_guard lock(logcapture::mutex);
+    logcapture::lines.clear();
+  }
+  logcapture::previous = qInstallMessageHandler(logcapture::handler);
+  struct Restore {
+    ~Restore() { qInstallMessageHandler(logcapture::previous); }
+  } restore;
+  serve();
+  fanout.reset();
+  fanoutMetrics = std::make_unique<metrics::MetricsRegistry>();
+  capture::FanoutConfig fc;
+  fc.socketPath = QString::fromStdString(cfg.socketPath);
+  fanout = std::make_unique<capture::CaptureFanout>(
+      fc, std::vector<std::string>{Product, "ETH-USD"}, *fanoutMetrics,
+      [](const auto &) {});
+  initial(125);
+  capture::WriterConfig wc;
+  wc.root = QString::fromStdString(cfg.journalRoot);
+  wc.symbol = "ETH-USD";
+  wc.onJournal = [&](const capture::JournalEvent &e) { fanout->publish(1, e); };
+  capture::Writer eth(wc, meta("ETH-USD"));
+  eth.append(record(0, snapshot("ETH-USD")));
+  for (int t = 1; t <= 125; ++t)
+    eth.append(record(t * 1000));
+  eth.flush();
+  auto ethLease =
+      std::make_unique<recording::Hmc2Store>(root / "shadow", true, "ETH-USD");
+  shadow = std::make_unique<ShadowRoller>(
+      cfg, std::vector<std::string>{Product, "ETH-USD"}, root / "primary",
+      *metrics);
+  ASSERT_TRUE(eventually([&] {
+    return logcapture::seen("Roller writer healthy product=BTC-USD");
+  }));
+  // BTC's next durable checkpoint fails (persistence failure after open).
+  const auto checkpoint = root / "shadow" / Product / "roller.json";
+  const auto saved = [&] {
+    std::ifstream in(checkpoint);
+    return std::string(std::istreambuf_iterator<char>(in), {});
+  }();
+  ASSERT_TRUE(fs::remove(checkpoint));
+  fs::create_directory(checkpoint);
+  {
+    std::ofstream(checkpoint / "blocker") << "blocked";
+  }
+  for (int t = 126; t <= 185; ++t)
+    writer->append(record(t * 1000));
+  writer->flush();
+  ASSERT_TRUE(eventually([&] {
+    return logcapture::seen("Roller serving not ready product=BTC-USD");
+  }));
+  ethLease.reset();
+  ASSERT_TRUE(eventually([&] {
+    return logcapture::seen("Roller writer healthy product=ETH-USD");
+  }));
+  std::this_thread::sleep_for(300ms);
+  EXPECT_FALSE(logcapture::seen("Roller serving ready"));
+  fs::remove_all(checkpoint);
+  {
+    std::ofstream(checkpoint) << saved;
+  }
+  ASSERT_TRUE(eventually(
+      [&] { return logcapture::seen("Roller serving ready products=2"); }));
+  shadow.reset();
+  eth.close();
+}
+// Review r2 finding 2: a writer that opens but cannot persist its first
+// checkpoint is not healthy (fresh root, read-only product directory).
+TEST_F(ShadowTest, ServingReadinessNeedsADurableCheckpointAfterOpen) {
+  {
+    std::lock_guard lock(logcapture::mutex);
+    logcapture::lines.clear();
+  }
+  logcapture::previous = qInstallMessageHandler(logcapture::handler);
+  struct Restore {
+    ~Restore() { qInstallMessageHandler(logcapture::previous); }
+  } restore;
+  serve();
+  initial(125);
+  const auto dir = root / "shadow" / Product;
+  fs::create_directories(dir);
+  fs::permissions(dir, fs::perms::owner_read | fs::perms::owner_exec);
+  start();
+  ASSERT_TRUE(eventually(
+      [&] { return logcapture::seen("Roller writer open product=BTC-USD"); }));
+  ASSERT_TRUE(eventually([&] {
+    return !has(
+        "sentinel_roller_shadow_setup_failures_total{product=\"BTC-USD\"} 0");
+  }));
+  EXPECT_FALSE(logcapture::seen("Roller writer healthy product=BTC-USD"));
+  EXPECT_FALSE(logcapture::seen("Roller serving ready"));
+  fs::permissions(dir, fs::perms::owner_all);
+  ASSERT_TRUE(eventually(
+      [&] { return logcapture::seen("Roller serving ready products=1"); }));
   shadow.reset();
 }
 // A11: socket disconnect (capture restart) with a provisional suffix applied

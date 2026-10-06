@@ -61,6 +61,25 @@ void LiveCache::retractProvisional(const std::string &symbol) {
         ++it->second.revision;
     }
 }
+bool LiveCache::ensureFinal(const std::string &symbol, const std::string &layer, RecordPtr final) {
+    std::lock_guard lock(mutex_);
+    const auto key = std::pair{symbol, layer};
+    auto it = series_.find(key);
+    if (it != series_.end() && !it->second.committed.empty()) return true;
+    if (!final || final->header.symbol != symbol || final->header.layer != layer || final->header.tfMs != 60'000 ||
+        !final->observedMs || (final->flags & kProvisional)) return false;
+    if (it == series_.end()) {
+        if (series_.size() >= kMaxSeries) return false;
+        it = series_.try_emplace(key).first;
+        it->second.revision = revisionFloor_;
+    }
+    auto &s = it->second;
+    s.committedThroughMs = std::max(s.committedThroughMs, final->bucketStartMs + 60'000);
+    std::erase_if(s.provisional, [&](const auto &entry) { return entry.first < s.committedThroughMs; });
+    s.committed.push_back(std::move(final));
+    ++s.revision;
+    return true;
+}
 LiveCache::Snapshot LiveCache::snapshot(const std::string &symbol, const std::string &layer) const {
     std::lock_guard lock(mutex_);
     const auto it = series_.find({symbol, layer});
@@ -510,6 +529,9 @@ LiveService::Diagnostics LiveService::diagnostics() const {
             impl_->rawBuilds.load(), impl_->rawFailures.load()};
 }
 void LiveService::retractProvisional(const std::string &symbol) { impl_->cache.retractProvisional(symbol); }
+bool LiveService::ensureFinal(const std::string &symbol, const std::string &layer, RecordPtr final) {
+    return impl_->cache.ensureFinal(symbol, layer, std::move(final));
+}
 void LiveService::releaseSymbol(const std::string &symbol) {
     // Called in recorder order. Subscription ownership stays with Session:
     // a newly acquired view can already exist while this old tail is draining.

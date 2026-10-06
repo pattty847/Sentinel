@@ -345,7 +345,11 @@ the lead and withdraws every provisional minute it published from the live
 cache (`LiveService::retractProvisional`; committed minutes stay). The next
 raw-tail frame omits them, and the client drops omitted provisional minutes
 (`LiveEdge`); when no provisional minute is left the frame resends the newest
-final so it still reaches the client. The next fork republishes the forming
+final so it still reaches the client. A lead therefore publishes only while
+the live cache holds a committed minute of both layers: after a restart (whose
+replay republishes no final) it seeds the newest persisted minute from the
+served root, and on a root with none yet it waits for the first commit
+(`Roller live lead waits for a committed minute`). The next fork republishes the forming
 minute from durable history. The legacy-renderer page path cannot withdraw a
 column a client already holds (only a new subscription is clean).
 The lead is forked once per start, per UTC day (about 2 s without a forming
@@ -374,12 +378,19 @@ rolling, and fails on the product lock for one it is rolling.
 Startup lines: `Roller started ... mode=shadow`, or `mode=live` when serving
 (diagnostic only: it precedes the checkpoint policy check and the leases).
 When serving, `Roller writer open product=...` follows each product's history
-writer, and `Roller serving ready products=N` follows the last one; a refused
-product, a held product lease or a checkpoint policy mismatch keeps it absent.
-`deploy-runtime.sh` accepts `Recording v2 started` or `Roller serving ready`,
-only in the log of the restarted service: the file named for the PID launchd
-reports after the restart (never the replaced PID), whose header carries that
-PID and `exe=` the deployed runtime binary. `deploy-runtime.sh
-check-server-log <log dir> <pid> <exe>` runs the same check. Probe `roller.live` logs every forming-minute publication
+writer (diagnostic). A product is healthy (`Roller writer healthy`) from the
+first durable checkpoint of that writer, which follows a committed minute at
+the next minute boundary, until any failure or the writer closing (also each
+UTC midnight): then `Roller serving not ready product=... reason=...`.
+`Roller serving ready products=N` is logged whenever all N configured products
+are healthy at once; a refused product, a held lease, a policy mismatch or a
+failing checkpoint keeps it absent. `deploy-runtime.sh` accepts `Recording v2
+started`, or a roller log whose latest readiness line is `ready`, read once
+from the regular (non-symlink) log file named for the PID launchd reports
+after the restart (never the replaced PID), headed with that PID and `exe=`
+the deployed binary, and only if launchd still reports that PID after the
+read. The server window is 150 s (capture 60 s): readiness needs the catch-up
+and the next minute boundary after a commit. `deploy-runtime.sh
+check-server-log <log dir> <pid> <exe>` runs the same log check. Probe `roller.live` logs every forming-minute publication
 with `ageMs` (now minus bucket start plus observed time) and the lowest
 native price in it.

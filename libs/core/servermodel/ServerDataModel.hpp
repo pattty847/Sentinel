@@ -90,6 +90,7 @@ public:
     std::function<void(recording::RecordPtr)> rollerPublisher();
     // Roller workers: withdraw a product's provisional live minutes.
     std::function<void(const std::string&)> rollerRetract();
+    std::function<bool(const std::string&, const std::string&, recording::RecordPtr)> rollerEnsureFinal();
     // Main thread, once, before the stream server starts: the roller's
     // thread-safe watermark and running queries.
     using RollerWatermarks = std::function<recording::BookRecorder::Watermarks(const std::string&, const std::string&)>;
