@@ -49,7 +49,7 @@ Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orche
 
 - The owner is hardening `scripts/dev/build-queue.sh` and its tests (FM-195). Agents do not change them or
   sweep the owner's changes into commits.
-- The 2026-10-05 resource hold was released by the owner on 2026-10-06. Builds stay at `-j 2`; no automated GUI windows while the owner is working, except: the owner approved (2026-10-06) the D-a phase 2 isolated GUI run and conductor use of the Mac for it.
+- The 2026-10-05 resource hold was released by the owner on 2026-10-06. Builds stay at `-j 2`; no automated GUI windows while the owner is working, except: the owner approved (2026-10-06) the D-a phase 2 isolated GUI run and conductor use of the Mac for it, and said isolated agent GUIs running in the background do not bother them (they will not close them).
 
 ## Next (priority order)
 
