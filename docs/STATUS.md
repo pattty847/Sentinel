@@ -3,7 +3,7 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-06 02:10 EDT
+- **Updated:** 2026-10-06 03:35 EDT
 - **Conductor:** Claude Opus 5.5. The owner handed conducting back on 2026-10-06; Codex does not dispatch.
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10). No fallback active: the 2026-10-04
   GPT-reviews-GPT override ended when Claude usage reset.
@@ -34,9 +34,8 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 | Branch | Tip | State | Next |
 |---|---|---|---|
-| `lt-astra/complete-overflow` | `754ae6e` on `3aac4d0` | Redesign by gpt-6.1-sol (thread `01a10fe7-aea8-7641-9fe0-4e32077bd01c`): `>>` lists only hidden controls with labelled entries and sliders; Shift+F10 full menu with arrow/WASD keys; gear rightmost; Layouts/Quick Search/Screenshot in the gear. Claude closure review PASS. Native run 40/41: WASD guard fails on Cocoa; fix round in progress | Native rerun, owner preview, land |
-| `lt-sol/retained-font-adoption` (W3b) | `e297743` on `3aac4d0` | Astra round 2 PASS (source only); native and full gates not run (held during the Oct 5 freeze) | Native fixture run (pops windows: only when the owner is not working), owner visual approval, then `land` (runs the full suite). Astra thread `01a10eeb-486c-7812-8c1e-db7f3f1754ce` |
-| `lt-sol/settings-clarity` (W3c) | `b27f37d` on `5129d1c` | Review and full 95/95 PASS; held | After overflow lands: same author removes its toolbar/Controls explanation changes, then owner approves settings appearance. Do not land as-is |
+| `lt-sol/retained-font-adoption` (W3b) | `e297743` on `3aac4d0` | Astra round 2 PASS (source only); native and full gates not run (held during the Oct 5 freeze) | Native fixture run (windows OK while the owner is present and agrees), owner visual approval, then `land` (rebases onto 66e39b2; runs the full suite). Astra thread `01a10eeb-486c-7812-8c1e-db7f3f1754ce` |
+| `lt-sol/settings-clarity` (W3c) | `b27f37d` on `5129d1c` | Review and full 95/95 PASS; held | Overflow landed: same author (Sol) removes its toolbar/Controls explanation changes, then owner approves settings appearance. Do not land as-is |
 | `lt-sol/label-style` | `d52921b` | Unrelated, locked | Leave alone |
 
 Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orchestrator/`. A detached
@@ -44,8 +43,8 @@ Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orche
 
 ## Waiting on the owner
 
-1. Overflow redesign preview, after review (`sentinel /Volumes/T7/sentinel-worktrees/lt-astra-complete-overflow`).
-2. Settings appearance (W3c), after its reconciliation.
+1. Settings appearance (W3c), after its reconciliation.
+2. Retained fonts (W3b) visual approval, after its native fixture run.
 3. S8: delete the legacy heatmap (Fable verdict GO).
 
 ## Owner constraints in force
@@ -56,13 +55,13 @@ Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orche
 
 ## Next (priority order)
 
-1. Finish wave 3: land overflow, then retained fonts, then reconcile settings.
+1. Finish wave 3. The overflow redesign landed as `66e39b2` (2026-10-06: owner approved; native chart UI 42/42; full suite 96/96). Next: retained fonts (native fixture, owner visual, `land`); then settings W3c, whose same author must drop its now-obsolete toolbar/Controls explanation changes and rebase through `land`.
 2. Slice D plan and high-risk review: widen roller serving to all 7 journal products. Cutover needs the owner
    present. Slice E deletions after D.
 3. EATEN vs PULLED liquidity and ABSORPTION (owner's strongest direction): Fable plan after slice D. It crosses
    roller, HMC2, wire and renderer.
 4. On hold (owner, 2026-10-06): TPO session choices become Session (draws New York, London, Asia and Australia together, like ExoCharts), 24H, 1W, 1M. Changes what the TPO draws; needs its own spec.
-5. Backlog: owner GUI Agent API (17100) is unauthenticated; GUI RSS ~1.5 GB after 10 min; capture fan-out
+5. Backlog: tick-size combo text clips at its fixed 84 px width ("$0.15 (unavailable)", pre-existing); owner GUI Agent API (17100) is unauthenticated; GUI RSS ~1.5 GB after 10 min; capture fan-out
    `poll()` error loop without sleep (`CaptureFanout.cpp:417`, low); W2d live GUI display and Windows runtime
    unverified; TPO history budget refusal in the GUI log; nightly backup of `/Volumes/T7/sentinel-data` when the
    owner's new HDD arrives; internal disk space.
