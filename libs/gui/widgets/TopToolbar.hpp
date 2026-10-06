@@ -6,6 +6,9 @@
 #include <QSlider>
 #include <QLabel>
 #include <QMenu>
+#include <QHash>
+#include <QVector>
+#include <QPointer>
 #include "LiquidityRangeSlider.hpp"
 #include <cstdint>
 #include <vector>
@@ -75,7 +78,7 @@ public:
     static ControlVisibility controlVisibility(const ModeState &mode);
     void setModeState(const ModeState &mode);
     const ModeState &modeState() const { return m_mode; }
-    // What the toolbar shows now (from its actions; tests and the Agent API).
+    // Controls available for the active mode, including those moved into overflow.
     ControlVisibility shownControls() const;
     bool candlesChecked() const;
     void setCandlesChecked(bool checked); // no signal
@@ -97,10 +100,13 @@ public:
     QToolButton *chartMenuButton() const { return m_chartMenuButton; }
     QMenu *chartMenu() const { return m_chartMenu; }
     QToolButton *controlsButton() const { return m_controlsButton; }
+    // Full labelled keyboard menu; the visible extension uses overflowMenu().
     QMenu *controlsMenu() const { return m_controlsMenu; }
+    QMenu *overflowMenu() const { return m_overflowMenu; }
     QComboBox *chartTypeCombo() const { return m_chartTypeCombo; }
     void setBaseAssetSymbol(const QString &symbol);
     void showLayoutsMenu();
+    void showControlsMenu();
     void setFullscreen(bool fullscreen);
 
 signals:
@@ -130,7 +136,18 @@ signals:
     void tpoSessionSelected(int sessionType);
     void tpoLayoutSelected(const QString &layout);
 
+protected:
+    bool event(QEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
+
 private:
+    void scheduleFit();
+    void fitControls();
+    void refreshOverflowMenu();
+    void refreshGearCommands();
+    void prepareControlsMenu(QMenu *menu);
+    void prepareControlsEditor(QWidget *editor);
+    void setInlineVisible(QAction *action, bool visible);
     QAction* addIconAction(const QString& iconPath, const QString& text, const QString& tooltip);
     QToolButton* addIconButton(const QString& iconPath, const QString& tooltip);
     void applyVisibility();
@@ -164,7 +181,27 @@ private:
     QMenu* m_chartMenu = nullptr;
     QToolButton* m_controlsButton = nullptr;
     QMenu* m_controlsMenu = nullptr;
+    QMenu* m_overflowMenu = nullptr;
+    QPointer<LiquidityRangeSlider> m_overflowRangeSlider;
+    QPointer<QLabel> m_overflowRangeLabel;
+    bool m_overflowMenuDirty = false;
     QMenu* m_tickMenu = nullptr;
+    QMenu* m_labelsMenu = nullptr;
+    QMenu* m_legacyThresholdMenu = nullptr;
+    QMenu* m_layoutsMenu = nullptr;
+    QAction* m_quickSearchAction = nullptr;
+    QAction* m_screenshotAction = nullptr;
+    QAction* m_overflowAction = nullptr;
+    QAction* m_spacerAction = nullptr;
+    QAction* m_gearAction = nullptr;
+    QList<QAction*> m_inlineActions;
+    QVector<QList<QAction*>> m_inlineGroups;
+    QHash<QAction*, bool> m_modeVisibility;
+    QVector<int> m_fitInputs;
+    bool m_fitPending = false;
+    bool m_fitting = false;
+    bool m_gearRefreshPending = false;
+    bool m_dispatchingEditorKey = false;
     QAction* m_rangeMenuAction = nullptr;
     QAction* m_indicatorsAction = nullptr;
     QAction* m_layoutsAction = nullptr;
