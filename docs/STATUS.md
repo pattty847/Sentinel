@@ -3,7 +3,7 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-06 05:00 EDT
+- **Updated:** 2026-10-06 (morning)
 - **Conductor:** Claude Opus 5.5. The owner handed conducting back on 2026-10-06; Codex does not dispatch.
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10). No fallback active: the 2026-10-04
   GPT-reviews-GPT override ended when Claude usage reset.
@@ -34,8 +34,6 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 | Branch | Tip | State | Next |
 |---|---|---|---|
-| `lt-sol/retained-font-adoption` (W3b) | `e3a6684` on `a489126` | Astra review PASS; native font 10/10 and watch-rail 13/13 on Metal, 83 screenshots checked (2026-10-06) | Owner visual approval, then `land` |
-| `lt-sol/settings-clarity` (W3c) | `2a0b629` on `a489126` | Settings work plus hover tooltips on every control (gpt-6.1-sol, thread `01a1103a-cdfc-7690-884f-f2d41abda7b2`). Claude review PASS after one text-fix round; native settings 35/35 on Metal | Owner reads the tooltip table, then `land` |
 | `lt-sol/label-style` | `d52921b` | Unrelated, locked | Leave alone |
 
 Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orchestrator/`. A detached
@@ -43,10 +41,8 @@ Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orche
 
 ## Waiting on the owner
 
-1. Settings tooltips wording (W3c); the owner already said the settings look good.
-2. Retained fonts (W3b) visual approval.
-3. Slice D: three questions in the draft packet's section 7.
-4. S8: delete the legacy heatmap (Fable verdict GO).
+1. Slice D live path: conductor recommends option C (forming minute from records as they arrive, history only after durable), so cutover keeps today's live speed; owner deciding. Other two packet defaults pending the same answer.
+2. S8: delete the legacy heatmap (Fable verdict GO).
 
 ## Owner constraints in force
 
@@ -56,7 +52,7 @@ Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orche
 
 ## Next (priority order)
 
-1. Finish wave 3. The overflow redesign landed as `66e39b2` (2026-10-06: owner approved; native chart UI 42/42; full suite 96/96). Next: retained fonts (native fixture, owner visual, `land`); then settings W3c, whose same author must drop its now-obsolete toolbar/Controls explanation changes and rebase through `land`.
+1. Wave 3 complete (2026-10-06): overflow redesign `66e39b2`, retained fonts `fac62a0`, settings with hover tooltips `542be4d`; each owner-approved, full suite 96/96.
 2. Slice D: draft packet and cutover runbook in `docs/research/2026-10-one-world-pipeline.md` "Slice D task packet" (Fable, 2026-10-06), awaiting the owner's 3 answers in its section 7. Then dispatch, high-risk review: widen roller serving to all 7 journal products. Cutover needs the owner
    present. Slice E deletions after D.
 3. EATEN vs PULLED liquidity and ABSORPTION (owner's strongest direction): Fable plan after slice D. It crosses
