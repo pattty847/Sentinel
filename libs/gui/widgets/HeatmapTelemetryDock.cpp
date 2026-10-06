@@ -23,7 +23,7 @@ protected:
         QPainter p(this);
         p.fillRect(rect(), QColor("#1E1E1E"));
         p.setPen(QColor("#999999"));
-        p.drawText(4, 13, "33.3 ms");
+        p.drawText(4, p.fontMetrics().ascent() + 2, "33.3 ms");
         p.drawText(4, height() - 4, "0 ms");
         p.setPen(QColor("#263B48"));
         p.drawLine(0, height() / 2, width(), height() / 2);
@@ -70,7 +70,7 @@ HeatmapTelemetryDock::HeatmapTelemetryDock(QWidget *parent)
 
 void HeatmapTelemetryDock::addSection(const QString &title) {
     auto *label = new QLabel(title, m_table);
-    label->setStyleSheet("QLabel { color: #d0d0d0; font-weight: 700; font-size: 12px; padding-top: 6px; }");
+    label->setStyleSheet("QLabel { color: #d0d0d0; font-weight: 700; padding-top: 6px; }");
     m_grid->addWidget(label, m_grid->rowCount(), 0, 1, 2);
 }
 
@@ -78,12 +78,12 @@ void HeatmapTelemetryDock::addRow(const QString &name, const QString &key,
                                   std::function<QString(const QVariantMap &)> format) {
     const int row = m_grid->rowCount();
     auto *label = new QLabel(name, m_table);
-    label->setStyleSheet("QLabel { color: #a0a0a0; font-size: 12px; }");
+    label->setStyleSheet("QLabel { color: #a0a0a0; }");
     auto *value = new QLabel("-", m_table);
     value->setObjectName("telemetry." + key);
     value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     value->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred); // a long value never widens the dock
-    value->setStyleSheet("QLabel { color: #ddd; font-family: Menlo, monospace; font-size: 12px; }");
+    value->setStyleSheet("QLabel { color: #ddd; }");
     m_grid->addWidget(label, row, 0);
     m_grid->addWidget(value, row, 1);
     m_rows.push_back({key, value, std::move(format)});
@@ -97,14 +97,14 @@ void HeatmapTelemetryDock::buildUi() {
     m_healthSummary = new QLabel("Initializing", m_contentWidget);
     m_healthSummary->setObjectName("telemetry.marketHealth");
     m_healthSummary->setWordWrap(true);
-    m_healthSummary->setStyleSheet("color: #ddd; font-size: 13px; font-weight: bold;");
+    m_healthSummary->setStyleSheet("color: #ddd; font-weight: bold;");
     m_healthSummary->setTextFormat(Qt::PlainText);
     outer->addWidget(m_healthSummary);
     m_healthDetail = new QLabel("Market health unavailable", m_contentWidget);
     m_healthDetail->setObjectName("telemetry.marketDetail");
     m_healthDetail->setWordWrap(true);
     m_healthDetail->setTextFormat(Qt::PlainText);
-    m_healthDetail->setStyleSheet("color: #b0b0b0; font-size: 12px;");
+    m_healthDetail->setStyleSheet("color: #b0b0b0;");
     outer->addWidget(m_healthDetail);
     m_engineeringToggle = new QToolButton(m_contentWidget);
     m_engineeringToggle->setText("Engineering details");
@@ -117,7 +117,7 @@ void HeatmapTelemetryDock::buildUi() {
     m_disabled->setObjectName("telemetryDisabled");
     m_disabled->setWordWrap(true);
     m_disabled->setAlignment(Qt::AlignCenter);
-    m_disabled->setStyleSheet("QLabel { color: #8198A6; font-size: 12px; padding: 16px; }");
+    m_disabled->setStyleSheet("QLabel { color: #8198A6; padding: 16px; }");
     m_disabled->setText("GPU renderer telemetry unavailable. Select the GPU renderer in Settings > Debug "
                         "and open a chart to inspect rendering metrics.");
     outer->addWidget(m_disabled);
@@ -144,10 +144,10 @@ void HeatmapTelemetryDock::buildUi() {
     });
 
     auto *title = new QLabel("RENDER TELEMETRY", m_table);
-    title->setStyleSheet("QLabel { color: #d0d0d0; font-weight: 700; font-size: 14px; }");
+    title->setStyleSheet("QLabel { color: #d0d0d0; font-weight: 700; }");
     m_grid->addWidget(title, 0, 0, 1, 2);
     auto *graphLabel = new QLabel("Frame p50 · 0–33.3 ms · 90 samples / 22.5 s", m_table);
-    graphLabel->setStyleSheet("QLabel { color: #AAB7C0; font-size: 12px; }");
+    graphLabel->setStyleSheet("QLabel { color: #AAB7C0; }");
     m_grid->addWidget(graphLabel, 1, 0, 1, 2);
     m_graph = new HeatmapFrameGraph(m_frameHistory, m_table);
     m_grid->addWidget(m_graph, 2, 0, 1, 2);
@@ -170,7 +170,7 @@ void HeatmapTelemetryDock::buildUi() {
     m_indicator = new QLabel(m_table);
     m_indicator->setObjectName("telemetry.indicator");
     m_indicator->setWordWrap(true);
-    m_indicator->setStyleSheet("QLabel { color: #F0B46A; font-size: 11px; }");
+    m_indicator->setStyleSheet("QLabel { color: #F0B46A; }");
     m_indicator->setVisible(false);
     m_grid->addWidget(m_indicator, m_grid->rowCount(), 0, 1, 2);
 
