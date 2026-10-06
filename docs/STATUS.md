@@ -3,11 +3,11 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-06 13:15 EDT. Wave 3 complete; next conductor session starts at slice D-a.
+- **Updated:** 2026-10-06. New conductor session; slice D-a dispatched.
 - **Conductor:** Claude Opus 5.5. The owner handed conducting back on 2026-10-06; Codex does not dispatch.
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10). No fallback active: the 2026-10-04
   GPT-reviews-GPT override ended when Claude usage reset.
-- **Budget (02:00):** Claude weekly 100% left; Codex weekly 60% left, resets in ~6 days.
+- **Budget (D-a dispatch):** Claude weekly 97% left; Codex weekly 58% left, resets in ~5.4 days.
 
 ## Resume (fresh conductor)
 
@@ -34,10 +34,12 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 | Branch | Tip | State | Next |
 |---|---|---|---|
+| `lt-claude/roller-d` | `b181379` (base) | D-a writer (Claude `opus`) working; option C live path | Phase 1 hand-off, then owner OK for the phase 2 hosted GUI, then `gpt-6-astra` high review |
 | `lt-sol/label-style` | `d52921b` | Unrelated, locked | Leave alone |
+| `lt-claude/heatmap-ab-isolation` | `88e7ef4` | Unrelated, locked | Leave alone |
 
-Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orchestrator/`. A detached
-`.claude/worktrees/youthful-ishizaka-b0e889` (`3eca515`) is not part of this work; leave it alone.
+Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orchestrator/`. The
+`.claude/worktrees/youthful-ishizaka-b0e889` (`60caa04`, branch `claude/exciting-hypatia-1c7a34`) is not part of this work; leave it alone.
 
 ## Waiting on the owner
 
@@ -52,7 +54,7 @@ Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orche
 ## Next (priority order)
 
 1. Wave 3 complete (2026-10-06): overflow redesign `66e39b2`, retained fonts `fac62a0`, settings with hover tooltips `542be4d`; each owner-approved, full suite 96/96.
-2. Slice D-a, ready to dispatch (fresh conductor): packet in `docs/research/2026-10-one-world-pipeline.md` "Slice D task packet" plus "Owner decisions on the slice D packet (2026-10-06)" (live path option C: no live-age regression; split D-a/D-b; `from` bump). Writer Claude `opus` (needs native evidence), reviewer `gpt-6-astra` high. Runbook R1 (widen to all 7 products) and R2 (flip) are conductor steps with the owner present. Then D-b (engine replaced by the journal feed: one Coinbase connection) and slice E deletions.
+2. Slice D-a, dispatched 2026-10-06 (see In flight): packet in `docs/research/2026-10-one-world-pipeline.md` "Slice D task packet" plus "Owner decisions on the slice D packet (2026-10-06)" (live path option C: no live-age regression; split D-a/D-b; `from` bump). Writer Claude `opus` (needs native evidence), reviewer `gpt-6-astra` high. Runbook R1 (widen to all 7 products) and R2 (flip) are conductor steps with the owner present. Then D-b (engine replaced by the journal feed: one Coinbase connection) and slice E deletions.
 3. After D: change-driven live publishing with a per-client max update rate (see the owner decisions block). Then EATEN vs PULLED liquidity and ABSORPTION (owner's strongest direction): Fable plan after slice D. It crosses
    roller, HMC2, wire and renderer.
 4. On hold (owner, 2026-10-06): TPO session choices become Session (draws New York, London, Asia and Australia together, like ExoCharts), 24H, 1W, 1M. Changes what the TPO draws; needs its own spec.
