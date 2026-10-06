@@ -134,6 +134,9 @@ Verified 2026-09-27 with codex-cli 0.158; 0.160 was installed by 2026-10-05. Re-
   -c approval_policy='"never"' "<follow-up>"` (or `--last`); add
   `-c sandbox_workspace_write.writable_roots=[...]` when needed.
 - `codex exec review` runs a code review of the current repo.
+- A sub-agent spawned inside an interactive Codex session (multi-agent v2) cannot be resumed with
+  `codex exec resume`: it fails with "cannot resume an unloaded multi-agent v2 sub-agent through its parent"
+  (2026-10-06). For fix rounds a different conductor can reach, launch writers with `codex exec`, not as sub-agents.
 - Never put backticks in a double-quoted prompt (the shell eats them); use a heredoc or a prompt file.
 - Model-capacity errors can interrupt a run mid-draft: keep the draft and resume the same thread with an
   available model; keep a different-provider reviewer.
