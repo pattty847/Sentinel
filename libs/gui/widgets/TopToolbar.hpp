@@ -8,6 +8,7 @@
 #include <QMenu>
 #include <QHash>
 #include <QVector>
+#include <QPointer>
 #include "LiquidityRangeSlider.hpp"
 #include <cstdint>
 #include <vector>
@@ -144,6 +145,7 @@ private:
     void fitControls();
     void refreshOverflowMenu();
     void refreshGearCommands();
+    void prepareControlsMenu(QMenu *menu);
     void setInlineVisible(QAction *action, bool visible);
     QAction* addIconAction(const QString& iconPath, const QString& text, const QString& tooltip);
     QToolButton* addIconButton(const QString& iconPath, const QString& tooltip);
@@ -179,6 +181,9 @@ private:
     QToolButton* m_controlsButton = nullptr;
     QMenu* m_controlsMenu = nullptr;
     QMenu* m_overflowMenu = nullptr;
+    QPointer<LiquidityRangeSlider> m_overflowRangeSlider;
+    QPointer<QLabel> m_overflowRangeLabel;
+    bool m_overflowMenuDirty = false;
     QMenu* m_tickMenu = nullptr;
     QMenu* m_labelsMenu = nullptr;
     QMenu* m_legacyThresholdMenu = nullptr;
@@ -187,6 +192,7 @@ private:
     QAction* m_screenshotAction = nullptr;
     QAction* m_overflowAction = nullptr;
     QAction* m_spacerAction = nullptr;
+    QAction* m_gearAction = nullptr;
     QList<QAction*> m_inlineActions;
     QVector<QList<QAction*>> m_inlineGroups;
     QHash<QAction*, bool> m_modeVisibility;

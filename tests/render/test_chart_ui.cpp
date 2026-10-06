@@ -51,6 +51,9 @@
 #include <QShortcut>
 #include <QSignalSpy>
 #include <QPushButton>
+#include <QStyleOptionSlider>
+#include <QWidgetAction>
+#include <QPointer>
 #include <gtest/gtest.h>
 #include <iostream>
 #include <algorithm>
@@ -175,6 +178,56 @@ void clickSubmenuEntry(QMenu *root, QMenu *submenu, QAction *entry) {
     QTest::keyClick(submenu, Qt::Key_Return);
 }
 
+// Deliver keys to the focused widget, rather than directly to an unfocused
+// QMenu: this catches the embedded QWindow popup focus failure.
+void exerciseMenuKeyboard(QMenu *root) {
+    ASSERT_TRUE(root->isEnabled()) << "popup availability must not depend on the overflow button";
+    ASSERT_TRUE(QTest::qWaitFor([&] { return root->hasFocus(); }, 1000));
+    auto press = [](Qt::Key key) {
+        auto *target = QApplication::focusWidget();
+        ASSERT_TRUE(target);
+        QTest::keyClick(target, key);
+        QTest::qWait(10);
+    };
+    auto *first = root->activeAction();
+    ASSERT_TRUE(first);
+    press(Qt::Key_Down);
+    EXPECT_NE(root->activeAction(), first);
+    press(Qt::Key_Up);
+    EXPECT_EQ(root->activeAction(), first);
+    press(Qt::Key_S);
+    EXPECT_NE(root->activeAction(), first);
+    press(Qt::Key_W);
+    EXPECT_EQ(root->activeAction(), first);
+    auto *submenu = root->findChild<QMenu *>("controlsTimeframes");
+    ASSERT_TRUE(submenu);
+    root->setActiveAction(submenu->menuAction());
+    press(Qt::Key_Right);
+    ASSERT_TRUE(QTest::qWaitFor([&] { return submenu->isVisible() && submenu->hasFocus(); }, 1000));
+    auto *subFirst = submenu->activeAction();
+    ASSERT_TRUE(subFirst);
+    press(Qt::Key_S);
+    EXPECT_NE(submenu->activeAction(), subFirst);
+    press(Qt::Key_W);
+    EXPECT_EQ(submenu->activeAction(), subFirst);
+    press(Qt::Key_A);
+    EXPECT_FALSE(submenu->isVisible());
+    ASSERT_TRUE(QTest::qWaitFor([&] { return root->hasFocus(); }, 1000));
+    press(Qt::Key_D);
+    ASSERT_TRUE(QTest::qWaitFor([&] { return submenu->isVisible() && submenu->hasFocus(); }, 1000));
+    press(Qt::Key_Escape);
+    EXPECT_FALSE(submenu->isVisible());
+    ASSERT_TRUE(QTest::qWaitFor([&] { return root->hasFocus(); }, 1000));
+    press(Qt::Key_Right);
+    ASSERT_TRUE(QTest::qWaitFor([&] { return submenu->isVisible() && submenu->hasFocus(); }, 1000));
+    auto *chosen = submenu->activeAction();
+    ASSERT_TRUE(chosen);
+    QSignalSpy triggered(chosen, &QAction::triggered);
+    press(Qt::Key_Return);
+    EXPECT_EQ(triggered.size(), 1);
+    EXPECT_FALSE(root->isVisible());
+}
+
 // ------------------------------------------------------------ toolbar modes
 // The rules live in one place (TopToolbar::controlVisibility).
 TEST(ChartToolbar, ControlVisibilityRulesPerMode) {
@@ -279,7 +332,7 @@ TEST(ChartToolbar, ControlsMenuReachesLayersTimeframeTickAndSearch) {
     menuAction(menu, "controlsTickManual")->trigger();
     ASSERT_EQ(tick.size(), 1);
     EXPECT_TRUE(tick.at(0).at(0).toBool());
-    menuAction(menu, "controlsQuickSearch")->trigger();
+    menuAction(menu, "chartQuickSearchAction")->trigger();
     EXPECT_EQ(search.size(), 1);
 }
 
@@ -366,7 +419,8 @@ TEST(ChartToolbar, RealOverflowRestoresInlineControlsAcrossWidthModeAndFontChang
                 EXPECT_EQ(toolbar.rangeSlider()->isVisible(), toolbar.rangeLabel()->isVisible());
                 EXPECT_EQ(toolbar.shownControls(), TopToolbar::controlVisibility(mode)) << "availability includes overflow";
                 if (toolbar.controlsButton()->isVisible()) {
-                    EXPECT_GE(toolbar.controlsButton()->geometry().right(), width - 12);
+                    EXPECT_GE(toolbar.chartMenuButton()->geometry().right(), width - 12);
+                    EXPECT_LT(toolbar.controlsButton()->geometry().right(), toolbar.chartMenuButton()->geometry().left());
                     useOverflow(toolbar, [&](QMenu *menu) {
                         EXPECT_NE(menu, toolbar.controlsMenu());
                         EXPECT_FALSE(menu->actions().contains(toolbar.findChild<QAction *>("chartScreenshotAction")));
@@ -391,6 +445,68 @@ TEST(ChartToolbar, RealOverflowRestoresInlineControlsAcrossWidthModeAndFontChang
     EXPECT_FALSE(toolbar.controlsButton()->isVisible());
 }
 
+TEST(ChartToolbar, OverflowAppearsOnlyBelowExactSizeHintBoundary) {
+    TopToolbar toolbar;
+    toolbar.show();
+    for (const Mode mode : {Mode{}, Mode{true, true, true, true, true, true},
+                           Mode{false, true, false, false, false, true}}) {
+        toolbar.setModeState(mode);
+        toolbar.resize(3200, 44);
+        QTest::qWait(20);
+        ASSERT_FALSE(toolbar.controlsButton()->isVisible());
+        const int fullWidth = toolbar.sizeHint().width();
+        SCOPED_TRACE(::testing::Message() << "full width=" << fullWidth);
+        toolbar.resize(fullWidth, 44);
+        QTest::qWait(20);
+        ASSERT_EQ(toolbar.width(), fullWidth);
+        EXPECT_FALSE(toolbar.controlsButton()->isVisible());
+        EXPECT_TRUE(toolbar.controlsButton()->menu()->isEmpty());
+        toolbar.resize(fullWidth - 1, 44);
+        QTest::qWait(20);
+        ASSERT_EQ(toolbar.width(), fullWidth - 1);
+        EXPECT_TRUE(toolbar.controlsButton()->isVisible());
+        EXPECT_FALSE(toolbar.controlsButton()->menu()->isEmpty());
+        toolbar.resize(fullWidth, 44);
+        QTest::qWait(20);
+        EXPECT_FALSE(toolbar.controlsButton()->isVisible());
+    }
+}
+
+TEST(ChartToolbar, OpenOverflowEditorSurvivesFitChangesAndRebuildsAfterHide) {
+    TopToolbar toolbar;
+    toolbar.show();
+    QTest::qWait(20);
+    toolbar.resize(280, 44);
+    QTest::qWait(20);
+    QPointer<QWidget> editor;
+    useOverflow(toolbar, [&](QMenu *menu) {
+        auto *entry = qobject_cast<QWidgetAction *>(menuAction(menu, "overflowLiquidityRange"));
+        ASSERT_TRUE(entry);
+        editor = entry->defaultWidget();
+        ASSERT_TRUE(editor);
+        const auto before = menuEntries(menu);
+        toolbar.setModeState({true, false, false, false, true, false});
+        toolbar.setTickSelectorState({false, "Legacy renderer", false, 0, 0, {}, 100, {}});
+        QFont larger = toolbar.font();
+        larger.setPointSize(larger.pointSize() + 1);
+        toolbar.setFont(larger);
+        QTest::qWait(20); // deliver the queued fit while the popup is open
+        EXPECT_TRUE(menu->isVisible());
+        ASSERT_TRUE(editor) << "fit must not delete the open QWidgetAction editor";
+        EXPECT_EQ(editor.data(), entry->defaultWidget());
+        EXPECT_EQ(menuEntries(menu), before) << "membership changes wait until the popup closes";
+    });
+    QTest::qWait(20); // aboutToHide rebuild happens after Qt marks it hidden
+    EXPECT_FALSE(editor) << "the closed popup must rebuild the old editor";
+    const auto after = menuEntries(toolbar.controlsButton()->menu());
+    EXPECT_FALSE(after.contains("Liquidity range"));
+    EXPECT_TRUE(after.contains("Liquidity threshold"));
+    useOverflow(toolbar, [&](QMenu *menu) {
+        EXPECT_TRUE(menu->findChild<QSlider *>("overflowThresholdSlider"));
+        EXPECT_FALSE(menu->findChild<LiquidityRangeSlider *>("overflowRangeSlider"));
+    });
+}
+
 TEST(ChartToolbar, OneHiddenControlIsTheOnlyOverflowEntry) {
     TopToolbar toolbar;
     ASSERT_GT(widthForOneHiddenControl(toolbar), 0);
@@ -409,7 +525,7 @@ TEST(ChartToolbar, AllHiddenControlsKeepToolbarOrderAndSeparatorGroups) {
     toolbar.setTickSelectorState({true, {}, false, 10, 0, {10, 20}, 100, {}});
     toolbar.show();
     QTest::qWait(20);
-    toolbar.resize(280, 44);
+    toolbar.resize(220, 44);
     QTest::qWait(20);
     const QStringList expected{"Candles", "Heatmap", "Footprint", "TPO", "Volume profile", "|",
         "Timeframe", "Heatmap tick mode", "Heatmap tick size", "Candle style",
@@ -496,21 +612,30 @@ TEST(ChartToolbar, OverflowTickCombosKeepUnavailableValueAndDisabledReason) {
     });
 }
 
-TEST(ChartToolbar, GearIsFirstAndOwnsMovedWorkspaceCommands) {
+TEST(ChartToolbar, GearStaysRightmostAfterOverflowAndOwnsWorkspaceCommands) {
     TopToolbar toolbar;
     toolbar.resize(1920, 44);
     toolbar.show();
     QTest::qWait(20);
     ASSERT_GE(toolbar.actions().size(), 4);
-    EXPECT_EQ(toolbar.widgetForAction(toolbar.actions()[0]), toolbar.chartMenuButton());
-    EXPECT_TRUE(toolbar.actions()[1]->isSeparator());
-    EXPECT_EQ(toolbar.widgetForAction(toolbar.actions()[2]), toolbar.symbolSearch());
-    EXPECT_EQ(toolbar.widgetForAction(toolbar.actions()[3]), toolbar.subscribeButton());
+    EXPECT_EQ(toolbar.widgetForAction(toolbar.actions()[0]), toolbar.symbolSearch());
+    EXPECT_EQ(toolbar.widgetForAction(toolbar.actions()[1]), toolbar.subscribeButton());
+    EXPECT_EQ(toolbar.widgetForAction(toolbar.actions().back()), toolbar.chartMenuButton());
+    for (int width : {220, 420, 960, 1920}) {
+        toolbar.resize(width, 44);
+        QTest::qWait(20);
+        ASSERT_TRUE(toolbar.chartMenuButton()->isVisible());
+        EXPECT_GE(toolbar.chartMenuButton()->geometry().right(), width - 12);
+        if (toolbar.controlsButton()->isVisible()) {
+            EXPECT_EQ(toolbar.widgetForAction(toolbar.actions()[toolbar.actions().size() - 2]), toolbar.controlsButton());
+            EXPECT_LT(toolbar.controlsButton()->geometry().right(), toolbar.chartMenuButton()->geometry().left());
+        }
+    }
     emit toolbar.chartMenu()->aboutToShow();
     QSignalSpy layouts(&toolbar, &TopToolbar::layoutsRequested);
     QSignalSpy search(&toolbar, &TopToolbar::quickSearchRequested);
     QSignalSpy shots(&toolbar, &TopToolbar::screenshotRequested);
-    for (auto *name : {"chartLayoutsAction", "controlsQuickSearch", "chartScreenshotAction"}) {
+    for (auto *name : {"chartLayoutsAction", "chartQuickSearchAction", "chartScreenshotAction"}) {
         auto *entry = menuAction(toolbar.chartMenu(), name);
         ASSERT_TRUE(entry);
         EXPECT_TRUE(entry->isVisible());
@@ -558,7 +683,7 @@ TEST(ChartToolbar, ChartShortcutOpensCompleteMenuFromWidgetsAndEmbeddedQuickWind
             EXPECT_TRUE(toolbar->controlsMenu()->isVisible());
             EXPECT_NE(toolbar->controlsMenu(), toolbar->controlsButton()->menu());
             EXPECT_EQ(menuEntries(toolbar->controlsMenu()).first(), "Candles");
-            EXPECT_TRUE(menuAction(toolbar->controlsMenu(), "controlsQuickSearch"));
+            EXPECT_TRUE(menuAction(toolbar->controlsMenu(), "chartQuickSearchAction"));
             EXPECT_TRUE(menuAction(toolbar->controlsMenu(), "chartScreenshotAction"));
             EXPECT_TRUE(toolbar->controlsMenu()->activeAction());
             toolbar->controlsMenu()->hide();
@@ -570,6 +695,7 @@ TEST(ChartToolbar, ChartShortcutOpensCompleteMenuFromWidgetsAndEmbeddedQuickWind
         QTest::keyClick(dock->qquickView(), Qt::Key_F10, Qt::ShiftModifier);
         QTest::qWait(10);
         EXPECT_TRUE(toolbar->controlsMenu()->isVisible()) << "embedded QQuickView focus";
+        exerciseMenuKeyboard(toolbar->controlsMenu());
         toolbar->controlsMenu()->hide();
         QTest::qWait(20);
     }
@@ -582,6 +708,46 @@ TEST(ChartToolbar, ChartShortcutOpensCompleteMenuFromWidgetsAndEmbeddedQuickWind
     QTest::keyClick(outside, Qt::Key_F10, Qt::ShiftModifier);
     QTest::qWait(10);
     EXPECT_FALSE(toolbar->controlsMenu()->isVisible());
+}
+
+TEST(ChartToolbar, OverflowKeyboardFocusArrowsWasdAndEditorTyping) {
+    TopToolbar toolbar;
+    toolbar.show();
+    QTest::qWait(20);
+    toolbar.resize(220, 44);
+    QTest::qWait(20);
+    useOverflow(toolbar, [&](QMenu *menu) { exerciseMenuKeyboard(menu); });
+    useOverflow(toolbar, [&](QMenu *menu) {
+        ASSERT_TRUE(QTest::qWaitFor([&] { return menu->hasFocus(); }, 1000));
+        auto *entry = new QWidgetAction(menu);
+        auto *editor = new QLineEdit(menu);
+        entry->setDefaultWidget(editor);
+        menu->addAction(entry);
+        menu->setActiveAction(entry);
+        editor->setFocus();
+        ASSERT_TRUE(QTest::qWaitFor([&] { return editor->hasFocus(); }, 1000));
+        QTest::keyClicks(editor, "wasd");
+        EXPECT_EQ(editor->text(), "wasd");
+        EXPECT_TRUE(menu->isVisible());
+        EXPECT_TRUE(editor->hasFocus());
+        auto *slider = menu->findChild<LiquidityRangeSlider *>("overflowRangeSlider");
+        ASSERT_TRUE(slider);
+        slider->setFocus();
+        ASSERT_TRUE(QTest::qWaitFor([&] { return slider->hasFocus(); }, 1000));
+        auto *active = menu->activeAction();
+        QTest::keyClick(slider, Qt::Key_D);
+        EXPECT_TRUE(slider->hasFocus());
+        EXPECT_EQ(menu->activeAction(), active) << "WASD must not redirect an editor's ignored keys";
+        menu->setFocus();
+        ASSERT_TRUE(QTest::qWaitFor([&] { return menu->hasFocus(); }, 1000));
+        menu->setActiveAction(menu->actions().first());
+        active = menu->activeAction();
+        QTest::keyClick(menu, Qt::Key_S, Qt::ControlModifier);
+        EXPECT_EQ(menu->activeAction(), active);
+        ASSERT_TRUE(QApplication::focusWidget());
+        QTest::keyClick(QApplication::focusWidget(), Qt::Key_Escape);
+        EXPECT_FALSE(menu->isVisible());
+    });
 }
 
 // Opt-in own-widget captures only. This fixture has synthetic tick availability
@@ -891,38 +1057,92 @@ TEST_F(ChartControls, HiddenComboSubmenusRoundTripInlineAndChartState) {
     });
 }
 
-TEST_F(ChartControls, OverflowInlineEditorsShareAndPersistRangeAndThreshold) {
+TEST_F(ChartControls, OverflowSlidersDragAndShareInlineAndChartState) {
     toolbar->resize(280, 44);
     QTest::qWait(20);
     QSignalSpy ranges(toolbar.get(), &TopToolbar::liquidityRangeEdited);
     useOverflow(*toolbar, [&](QMenu *menu) {
-        auto *low = menu->findChild<QDoubleSpinBox *>("overflowRangeLow");
-        auto *high = menu->findChild<QDoubleSpinBox *>("overflowRangeHigh");
-        ASSERT_TRUE(low && high);
-        EXPECT_DOUBLE_EQ(low->value(), toolbar->rangeSlider()->low());
-        low->setValue(0.2);
-        high->setValue(20);
-        EXPECT_DOUBLE_EQ(model->settings().sensitivityMin, 0.2);
-        EXPECT_DOUBLE_EQ(model->settings().sensitivityMax, 20);
-        EXPECT_DOUBLE_EQ(t.reload().sensitivityMin, 0.2);
+        QPointer<LiquidityRangeSlider> slider = menu->findChild<LiquidityRangeSlider *>("overflowRangeSlider");
+        auto *label = menu->findChild<QLabel *>("overflowRangeLabel");
+        ASSERT_TRUE(slider && label);
+        EXPECT_TRUE(menu->findChildren<QDoubleSpinBox *>().isEmpty());
+        EXPECT_EQ(slider->size(), toolbar->rangeSlider()->size());
+        EXPECT_EQ(label->text(), toolbar->rangeLabel()->text());
+        EXPECT_DOUBLE_EQ(slider->low(), toolbar->rangeSlider()->low());
+        EXPECT_DOUBLE_EQ(slider->high(), toolbar->rangeSlider()->high());
+        EXPECT_DOUBLE_EQ(slider->endLo(), toolbar->rangeSlider()->endLo());
+        EXPECT_DOUBLE_EQ(slider->endHi(), toolbar->rangeSlider()->endHi());
+        const double persisted = t.reload().sensitivityMin;
+        const QPoint start(int(slider->xOf(slider->low())), slider->height() / 2);
+        const QPoint target = start + QPoint(30, 0);
+        QTest::mousePress(slider, Qt::LeftButton, {}, start);
+        ASSERT_TRUE(slider->dragging());
+        QMouseEvent move(QEvent::MouseMove, QPointF(target), slider->mapToGlobal(QPointF(target)),
+                         Qt::NoButton, Qt::LeftButton, {});
+        QApplication::sendEvent(slider, &move);
+        QTest::qWait(20);
+        ASSERT_TRUE(slider) << "fit updates during a live drag must keep the editor";
+        EXPECT_TRUE(menu->isVisible()) << "the QWidgetAction must allow mouse dragging";
+        EXPECT_GT(model->settings().sensitivityMin, persisted);
+        EXPECT_DOUBLE_EQ(t.reload().sensitivityMin, persisted) << "drag is process-only until release";
+        EXPECT_DOUBLE_EQ(toolbar->rangeSlider()->low(), slider->low());
+        EXPECT_EQ(label->text(), toolbar->rangeLabel()->text());
+        QTest::mouseRelease(slider, Qt::LeftButton, {}, target);
+        EXPECT_FALSE(slider->dragging());
+        EXPECT_TRUE(menu->isVisible());
+        ASSERT_FALSE(ranges.isEmpty());
+        EXPECT_TRUE(ranges.last()[2].toBool());
+        EXPECT_DOUBLE_EQ(t.reload().sensitivityMin, slider->low());
+        const int edits = ranges.size();
         ASSERT_TRUE(model->apply({{"sensitivityMin", 0.3}, {"sensitivityMax", 30.0}}).isEmpty());
-        EXPECT_DOUBLE_EQ(low->value(), 0.3);
-        EXPECT_DOUBLE_EQ(high->value(), 30);
-        EXPECT_DOUBLE_EQ(toolbar->rangeSlider()->low(), 0.3);
+        EXPECT_DOUBLE_EQ(slider->low(), 0.3);
+        EXPECT_DOUBLE_EQ(slider->high(), 30);
+        EXPECT_EQ(label->text(), toolbar->rangeLabel()->text());
+        EXPECT_EQ(ranges.size(), edits) << "model synchronization must not emit user edits";
+        toolbar->rangeSlider()->setValues(0.4, 40);
+        emit toolbar->rangeSlider()->rangeEdited(0.4, 40, true);
+        EXPECT_DOUBLE_EQ(slider->low(), 0.4);
+        EXPECT_DOUBLE_EQ(slider->high(), 40);
+        EXPECT_DOUBLE_EQ(model->settings().sensitivityMin, 0.4);
+        EXPECT_DOUBLE_EQ(t.reload().sensitivityMax, 40);
+        toolbar->setBaseAssetSymbol("ETH-USD");
+        EXPECT_EQ(label->text(), toolbar->rangeLabel()->text());
+        EXPECT_TRUE(label->text().endsWith(" ETH"));
+        EXPECT_TRUE(slider->toolTip().contains("ETH per cell"));
     });
-    EXPECT_EQ(ranges.size(), 2) << "model synchronization must not emit user edits";
     toolbar->setModeState({true, false, false, false, true, false});
     QTest::qWait(20);
     QSignalSpy thresholds(toolbar.get(), &TopToolbar::liquidityThresholdChanged);
     useOverflow(*toolbar, [&](QMenu *menu) {
-        auto *strength = menu->findChild<QSpinBox *>("overflowThresholdStrength");
+        auto *strength = menu->findChild<QSlider *>("overflowThresholdSlider");
         ASSERT_TRUE(strength);
+        EXPECT_EQ(strength->orientation(), Qt::Horizontal);
+        EXPECT_EQ(strength->width(), toolbar->liquiditySlider()->width());
         strength->setValue(450);
         EXPECT_EQ(toolbar->liquiditySlider()->value(), 450);
         toolbar->liquiditySlider()->setValue(600);
         EXPECT_EQ(strength->value(), 600);
+        QStyleOptionSlider option;
+        option.initFrom(strength);
+        option.orientation = Qt::Horizontal;
+        option.minimum = strength->minimum();
+        option.maximum = strength->maximum();
+        option.sliderPosition = option.sliderValue = strength->value();
+        const QRect handle = strength->style()->subControlRect(QStyle::CC_Slider, &option, QStyle::SC_SliderHandle, strength);
+        const QPoint target = handle.center() + QPoint(-25, 0);
+        const int before = strength->value();
+        QTest::mousePress(strength, Qt::LeftButton, {}, handle.center());
+        ASSERT_TRUE(strength->isSliderDown());
+        QMouseEvent move(QEvent::MouseMove, QPointF(target), strength->mapToGlobal(QPointF(target)),
+                         Qt::NoButton, Qt::LeftButton, {});
+        QApplication::sendEvent(strength, &move);
+        QTest::mouseRelease(strength, Qt::LeftButton, {}, target);
+        EXPECT_TRUE(menu->isVisible());
+        EXPECT_LT(strength->value(), before);
+        EXPECT_EQ(strength->value(), toolbar->liquiditySlider()->value());
+        EXPECT_DOUBLE_EQ(thresholds.last()[0].toDouble(), strength->value());
     });
-    EXPECT_EQ(thresholds.size(), 2);
+    EXPECT_GE(thresholds.size(), 3);
 }
 
 TEST_F(ChartControls, GearMovedCommandsSurviveHostRebuildWithoutVisibleDuplicates) {
