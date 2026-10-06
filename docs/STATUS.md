@@ -3,7 +3,7 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-06 03:35 EDT
+- **Updated:** 2026-10-06 03:50 EDT
 - **Conductor:** Claude Opus 5.5. The owner handed conducting back on 2026-10-06; Codex does not dispatch.
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10). No fallback active: the 2026-10-04
   GPT-reviews-GPT override ended when Claude usage reset.
@@ -34,8 +34,8 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 | Branch | Tip | State | Next |
 |---|---|---|---|
-| `lt-sol/retained-font-adoption` (W3b) | `e297743` on `3aac4d0` | Astra round 2 PASS (source only); native and full gates not run (held during the Oct 5 freeze) | Native fixture run (windows OK while the owner is present and agrees), owner visual approval, then `land` (rebases onto 66e39b2; runs the full suite). Astra thread `01a10eeb-486c-7812-8c1e-db7f3f1754ce` |
-| `lt-sol/settings-clarity` (W3c) | `b27f37d` on `5129d1c` | Review and full 95/95 PASS; held | Overflow landed: same author (Sol) removes its toolbar/Controls explanation changes, then owner approves settings appearance. Do not land as-is |
+| `lt-sol/retained-font-adoption` (W3b) | `e3a6684` on `a489126` (rebased by conductor, clean) | Astra round 2 PASS (source only). Overnight: queued build and native font + watch-rail tests with screenshots | Owner visual approval, then `land` |
+| `lt-sol/settings-clarity` (W3c) | `76eb38b` on `a489126` | Reviewed settings work moved onto main; obsolete toolbar/Controls text dropped (overflow redesign replaced it). Owner said settings look good and asked for hover explanations: gpt-6.1-sol adding tooltips, thread `01a1103a-cdfc-7690-884f-f2d41abda7b2` | Claude review, owner reads tooltip table, `land` |
 | `lt-sol/label-style` | `d52921b` | Unrelated, locked | Leave alone |
 
 Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orchestrator/`. A detached
@@ -56,7 +56,7 @@ Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orche
 ## Next (priority order)
 
 1. Finish wave 3. The overflow redesign landed as `66e39b2` (2026-10-06: owner approved; native chart UI 42/42; full suite 96/96). Next: retained fonts (native fixture, owner visual, `land`); then settings W3c, whose same author must drop its now-obsolete toolbar/Controls explanation changes and rebase through `land`.
-2. Slice D plan and high-risk review: widen roller serving to all 7 journal products. Cutover needs the owner
+2. Slice D: Fable drafting the task packet and cutover runbook overnight (read-only). Then high-risk review: widen roller serving to all 7 journal products. Cutover needs the owner
    present. Slice E deletions after D.
 3. EATEN vs PULLED liquidity and ABSORPTION (owner's strongest direction): Fable plan after slice D. It crosses
    roller, HMC2, wire and renderer.
