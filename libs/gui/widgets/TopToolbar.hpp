@@ -146,6 +146,7 @@ private:
     void refreshOverflowMenu();
     void refreshGearCommands();
     void prepareControlsMenu(QMenu *menu);
+    void prepareControlsEditor(QWidget *editor);
     void setInlineVisible(QAction *action, bool visible);
     QAction* addIconAction(const QString& iconPath, const QString& text, const QString& tooltip);
     QToolButton* addIconButton(const QString& iconPath, const QString& tooltip);
@@ -200,6 +201,7 @@ private:
     bool m_fitPending = false;
     bool m_fitting = false;
     bool m_gearRefreshPending = false;
+    bool m_dispatchingEditorKey = false;
     QAction* m_rangeMenuAction = nullptr;
     QAction* m_indicatorsAction = nullptr;
     QAction* m_layoutsAction = nullptr;

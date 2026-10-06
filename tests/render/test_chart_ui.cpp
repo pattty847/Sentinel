@@ -621,11 +621,18 @@ TEST(ChartToolbar, GearStaysRightmostAfterOverflowAndOwnsWorkspaceCommands) {
     EXPECT_EQ(toolbar.widgetForAction(toolbar.actions()[0]), toolbar.symbolSearch());
     EXPECT_EQ(toolbar.widgetForAction(toolbar.actions()[1]), toolbar.subscribeButton());
     EXPECT_EQ(toolbar.widgetForAction(toolbar.actions().back()), toolbar.chartMenuButton());
-    for (int width : {220, 420, 960, 1920}) {
+    for (int width : {120, 220, 420, 960, 1920}) {
         toolbar.resize(width, 44);
         QTest::qWait(20);
-        ASSERT_TRUE(toolbar.chartMenuButton()->isVisible());
-        EXPECT_GE(toolbar.chartMenuButton()->geometry().right(), width - 12);
+        ASSERT_TRUE(toolbar.chartMenuButton()->isVisible())
+            << "requested=" << width << " actual=" << toolbar.width()
+            << " minimum=" << toolbar.minimumWidth() << " hint=" << toolbar.sizeHint().width();
+        if (width == 120) EXPECT_GT(toolbar.width(), width) << "Pinned controls enforce the chart's minimum width";
+        EXPECT_GE(toolbar.chartMenuButton()->geometry().right(), toolbar.width() - 12);
+        EXPECT_TRUE(toolbar.symbolSearch()->isVisible());
+        EXPECT_TRUE(toolbar.subscribeButton()->isVisible());
+        if (auto *extension = toolbar.findChild<QToolButton *>("qt_toolbar_ext_button"))
+            EXPECT_FALSE(extension->isVisible());
         if (toolbar.controlsButton()->isVisible()) {
             EXPECT_EQ(toolbar.widgetForAction(toolbar.actions()[toolbar.actions().size() - 2]), toolbar.controlsButton());
             EXPECT_LT(toolbar.controlsButton()->geometry().right(), toolbar.chartMenuButton()->geometry().left());
@@ -726,7 +733,10 @@ TEST(ChartToolbar, OverflowKeyboardFocusArrowsWasdAndEditorTyping) {
         menu->setActiveAction(entry);
         editor->setFocus();
         ASSERT_TRUE(QTest::qWaitFor([&] { return editor->hasFocus(); }, 1000));
-        QTest::keyClicks(editor, "wasd");
+        // Deliver through the popup window, which routes to its focused editor.
+        // Sending directly to the QLineEdit would bypass that production path.
+        for (int key : {Qt::Key_W, Qt::Key_A, Qt::Key_S, Qt::Key_D})
+            QTest::keyClick(menu->windowHandle(), static_cast<Qt::Key>(key));
         EXPECT_EQ(editor->text(), "wasd");
         EXPECT_TRUE(menu->isVisible());
         EXPECT_TRUE(editor->hasFocus());
@@ -742,12 +752,54 @@ TEST(ChartToolbar, OverflowKeyboardFocusArrowsWasdAndEditorTyping) {
         ASSERT_TRUE(QTest::qWaitFor([&] { return menu->hasFocus(); }, 1000));
         menu->setActiveAction(menu->actions().first());
         active = menu->activeAction();
+        // Reproduce mismatched popup/application focus even offscreen: an
+        // ignored key originating at an editor must not use the menu's focus.
+        QTest::keyClick(slider, Qt::Key_S);
+        EXPECT_EQ(menu->activeAction(), active) << "Use the editor receiver, not platform focus";
         QTest::keyClick(menu, Qt::Key_S, Qt::ControlModifier);
         EXPECT_EQ(menu->activeAction(), active);
         ASSERT_TRUE(QApplication::focusWidget());
         QTest::keyClick(QApplication::focusWidget(), Qt::Key_Escape);
         EXPECT_FALSE(menu->isVisible());
     });
+}
+
+TEST(ChartToolbar, OverflowDownTraversesSliderRowsWithoutEditingAndEscapeCloses) {
+    TopToolbar toolbar;
+    toolbar.show();
+    QTest::qWait(20);
+    toolbar.resize(220, 44);
+    for (bool gpu : {true, false}) {
+        toolbar.setModeState({true, false, false, false, true, gpu});
+        QTest::qWait(20);
+        useOverflow(toolbar, [&](QMenu *menu) {
+            ASSERT_TRUE(QTest::qWaitFor([&] { return menu->hasFocus(); }, 1000));
+            auto *range = menu->findChild<LiquidityRangeSlider *>("overflowRangeSlider");
+            auto *threshold = menu->findChild<QSlider *>("overflowThresholdSlider");
+            ASSERT_EQ(bool(range), gpu);
+            ASSERT_EQ(bool(threshold), !gpu);
+            const double low = range ? range->low() : 0;
+            const double high = range ? range->high() : 0;
+            const int strength = threshold ? threshold->value() : 0;
+            QList<QAction *> entries;
+            for (auto *action : menu->actions())
+                if (action->isVisible() && action->isEnabled() && !action->isSeparator()) entries << action;
+            ASSERT_GT(entries.size(), 2);
+            menu->setActiveAction(entries.first());
+            for (int i = 1; i < entries.size(); ++i) {
+                QTest::keyClick(menu->windowHandle(), Qt::Key_Down);
+                EXPECT_EQ(menu->activeAction(), entries[i]) << "row " << i;
+            }
+            EXPECT_EQ(menu->activeAction(), entries.last());
+            if (range) {
+                EXPECT_DOUBLE_EQ(range->low(), low);
+                EXPECT_DOUBLE_EQ(range->high(), high);
+            }
+            if (threshold) EXPECT_EQ(threshold->value(), strength);
+            QTest::keyClick(menu->windowHandle(), Qt::Key_Escape);
+            EXPECT_FALSE(menu->isVisible());
+        });
+    }
 }
 
 // Opt-in own-widget captures only. This fixture has synthetic tick availability

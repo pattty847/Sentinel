@@ -21,6 +21,7 @@
 #include <QApplication>
 #include <QKeyEvent>
 #include <QWindow>
+#include <QScopedValueRollback>
 
 namespace {
 const char* labelForTimeframeMs(int64_t ms) {
@@ -765,13 +766,46 @@ void TopToolbar::showControlsMenu() {
 void TopToolbar::prepareControlsMenu(QMenu *menu) {
     menu->setFocusPolicy(Qt::StrongFocus);
     menu->installEventFilter(this);
-    for (auto *action : menu->actions())
+    for (auto *action : menu->actions()) {
         if (action->menu()) prepareControlsMenu(action->menu());
+        if (auto *editor = qobject_cast<QWidgetAction *>(action)) prepareControlsEditor(editor->defaultWidget());
+    }
+}
+
+void TopToolbar::prepareControlsEditor(QWidget *editor) {
+    if (!editor) return;
+    editor->installEventFilter(this);
+    for (auto *child : editor->findChildren<QWidget *>()) child->installEventFilter(this);
 }
 
 bool TopToolbar::eventFilter(QObject *watched, QEvent *event) {
+    if (event->type() == QEvent::KeyPress) {
+        auto *key = static_cast<QKeyEvent *>(event);
+        const bool wasd = key->key() == Qt::Key_W || key->key() == Qt::Key_A
+            || key->key() == Qt::Key_S || key->key() == Qt::Key_D;
+        if (wasd && !(key->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier))) {
+            if (qobject_cast<QMenu *>(watched) && m_dispatchingEditorKey) {
+                // Cocoa can bubble ignored editor keys to the popup while
+                // QApplication's focus widget names a different surface.
+                // Consume only that propagation; the editor already handled it.
+                key->accept();
+                return true;
+            }
+            if (!qobject_cast<QMenu *>(watched) && !m_dispatchingEditorKey) {
+                // These filters are installed only on QWidgetAction editors.
+                // Let the actual receiver handle typing/slider input once and
+                // shield its ignored WASD keys for the entire synchronous dispatch.
+                QScopedValueRollback<bool> dispatch(m_dispatchingEditorKey, true);
+                QApplication::sendEvent(watched, event);
+                return true;
+            }
+        }
+    }
     if (auto *menu = qobject_cast<QMenu *>(watched); menu && menu != m_chartMenu) {
-        if (event->type() == QEvent::Show) {
+        if (event->type() == QEvent::ActionAdded) {
+            if (auto *editor = qobject_cast<QWidgetAction *>(static_cast<QActionEvent *>(event)->action()))
+                prepareControlsEditor(editor->defaultWidget());
+        } else if (event->type() == QEvent::Show) {
             // The chart is an embedded QWindow. Explicitly transfer focus after
             // the popup has a native window, including for nested submenus.
             QTimer::singleShot(0, menu, [menu] {
@@ -858,6 +892,16 @@ void TopToolbar::setInlineVisible(QAction *action, bool visible) {
 
 void TopToolbar::fitControls() {
     if (!isVisible() || m_fitting) return;
+    // Even at a dock's narrowest width the four pinned controls must fit.
+    // Otherwise Qt's native extension can swallow the gear after our fitting.
+    const int spacing = style()->pixelMetric(QStyle::PM_ToolBarItemSpacing);
+    const auto margins = layout()->contentsMargins();
+    setMinimumWidth(m_symbolSearch->minimumWidth() + m_subscribeButton->sizeHint().width()
+        + m_controlsButton->sizeHint().width() + m_chartMenuButton->sizeHint().width()
+        + margins.left() + margins.right() + 4 * spacing
+        + 2 * style()->pixelMetric(QStyle::PM_ToolBarItemMargin)
+        + 2 * style()->pixelMetric(QStyle::PM_ToolBarFrameWidth)
+        + style()->pixelMetric(QStyle::PM_ToolBarExtensionExtent));
     // Hidden widgets retain their size hints. Compare those and intended mode
     // visibility, never the result of the previous responsive layout. Our own
     // action changes post LayoutRequest too; unchanged inputs end that cycle.
