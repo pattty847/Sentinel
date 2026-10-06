@@ -20,6 +20,9 @@
 #include "widgets/TopToolbar.hpp"
 #include "SyntheticHmc2Fixture.hpp"
 #include <QAction>
+#include <QAbstractButton>
+#include <QAbstractSlider>
+#include <QAbstractSpinBox>
 #include <QApplication>
 #include <QMainWindow>
 #include <QDockWidget>
@@ -27,6 +30,8 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QDialogButtonBox>
+#include <QFormLayout>
 #include <QElapsedTimer>
 #include <QJsonArray>
 #include <QPushButton>
@@ -372,6 +377,58 @@ TEST(HeatmapSettingsDialogTest, EveryTabShowsTheModel) {
     EXPECT_EQ(child<QComboBox>(dialog, "renderer")->currentData().toString(), "legacy");
     EXPECT_EQ(child<QLabel>(dialog, "savedRenderer")->text(), "legacy");
     EXPECT_TRUE(child<QCheckBox>(dialog, "showTelemetry")->isChecked());
+}
+
+TEST(HeatmapSettingsDialogTest, EveryVisibleEnabledControlHasATooltip) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    UnifiedGridRenderer renderer;
+    HeatmapSettingsDialog dialog(&model, &renderer);
+    // Exercise available presets without requiring a GPU or live provider.
+    TopToolbar::TickSelectorState ticks;
+    ticks.enabled = true;
+    ticks.offeredUnits = {100, 500};
+    ticks.drawnUnits = 100;
+    ticks.priceScale = 100;
+    dialog.setTickSelectorState(ticks);
+    ASSERT_TRUE(model.apply({{"palettePreset", "Custom"}, {"crossfadeMs", 150},
+                             {"candleWickColor", "#FFFFFF"}}).isEmpty());
+    dialog.show();
+    for (int tab = 0; tab < dialog.tabs()->count(); ++tab) {
+        dialog.tabs()->setCurrentIndex(tab);
+        QCoreApplication::processEvents();
+        SCOPED_TRACE(dialog.tabs()->tabText(tab).toStdString());
+        int checked = 0;
+        for (auto *widget : dialog.findChildren<QWidget *>()) {
+            if (!widget->isVisible() || !widget->isEnabled()) continue;
+            if (auto *button = qobject_cast<QAbstractButton *>(widget)) {
+                if (button->objectName().startsWith("reset")) continue;
+                auto *box = qobject_cast<QDialogButtonBox *>(button->parentWidget());
+                if (box && box->standardButton(button) == QDialogButtonBox::Close) continue;
+            } else if (!qobject_cast<QComboBox *>(widget) && !qobject_cast<QAbstractSpinBox *>(widget) &&
+                       !qobject_cast<QAbstractSlider *>(widget)) {
+                continue;
+            }
+            ++checked;
+            EXPECT_FALSE(widget->toolTip().trimmed().isEmpty())
+                << widget->metaObject()->className() << " name=" << widget->objectName().toStdString();
+        }
+        EXPECT_GT(checked, 0);
+        for (auto *form : dialog.tabs()->widget(tab)->findChildren<QFormLayout *>()) {
+            for (int row = 0; row < form->rowCount(); ++row) {
+                auto *labelItem = form->itemAt(row, QFormLayout::LabelRole);
+                auto *fieldItem = form->itemAt(row, QFormLayout::FieldRole);
+                if (!labelItem || !fieldItem) continue;
+                auto *label = labelItem->widget();
+                auto *field = fieldItem->widget();
+                if (!field && fieldItem->layout() && fieldItem->layout()->count())
+                    field = fieldItem->layout()->itemAt(0)->widget();
+                if (!label || !label->isVisible() || !field || field->toolTip().isEmpty()) continue;
+                EXPECT_EQ(label->toolTip(), field->toolTip())
+                    << "row=" << row << " field=" << field->objectName().toStdString();
+            }
+        }
+    }
 }
 
 TEST(HeatmapSettingsDialogTest, ShortDialogScrollsToLookControlsWithoutChangingPersistence) {
