@@ -34,6 +34,7 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 | Branch | Tip | State | Next |
 |---|---|---|---|
+| `lt-claude/acceptor-restart` | `7c7f569` (base) | Writer (Claude `opus` agent): FM-154/202 acceptor restart race, ctest TIMEOUTs | Review `gpt-6-astra`, land; then S8 (both may touch SentinelStreamServer, so serialized) |
 | `lt-sol/label-style` | `d52921b` | Unrelated, locked | Leave alone |
 | `lt-claude/heatmap-ab-isolation` | `88e7ef4` | Unrelated, locked | Leave alone |
 
