@@ -96,6 +96,8 @@ private:
     void doAccept(uint64_t generation);
     void retryAcceptAfterError(uint64_t generation, const boost::system::error_code& ec);
     void registerSession(const std::shared_ptr<Session>& session);
+    // Registers an accepted session only while this start() is current and running.
+    bool admitSession(const std::shared_ptr<Session>& session, uint64_t generation);
     void unregisterSession(const Session* session);
     bool submitHistoryTask(std::function<void()> task);
     std::string buildHeatmapHistoryChunk(const std::string& symbol,
@@ -121,6 +123,8 @@ private:
     std::atomic<uint64_t> m_acceptGeneration{0};
     std::unique_ptr<net::steady_timer> m_acceptRetryTimer; // I/O thread only while running
     uint32_t m_acceptFailures{0};                          // consecutive; I/O thread only while running
+    uint64_t m_acceptAttempts{0};                          // async_accept calls; I/O thread only while running
+    std::function<void()> m_beforeSessionAdmitForTest;     // test seam; set before start()
     static constexpr std::chrono::milliseconds kAcceptBackoffMin{10};
     static constexpr std::chrono::milliseconds kAcceptBackoffMax{1000};
     std::thread m_thread;

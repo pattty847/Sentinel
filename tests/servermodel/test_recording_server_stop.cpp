@@ -12,7 +12,6 @@
 #include <future>
 #include <boost/asio/read.hpp>
 #include <openssl/pem.h>
-#include <sys/resource.h>
 
 // Drive the actual stop path without starting sockets or needing TLS credentials.
 struct RecordingServerStopTest {
@@ -61,6 +60,17 @@ struct RecordingServerStopTest {
         return server.m_ioc.stopped();
     }
     static net::io_context& ioContext(SentinelStreamServer& server) { return server.m_ioc; }
+    // async_accept calls so far, read on the I/O thread; -1 when it does not answer.
+    static int64_t acceptAttempts(SentinelStreamServer& server) {
+        auto result = std::make_shared<std::promise<int64_t>>();
+        net::post(server.m_ioc, [&server, result] { result->set_value(static_cast<int64_t>(server.m_acceptAttempts)); });
+        auto ready = result->get_future();
+        return ready.wait_for(std::chrono::seconds(3)) == std::future_status::ready ? ready.get() : -1;
+    }
+    // Runs on the I/O thread after an accept passed its running check, before admission.
+    static void beforeSessionAdmit(SentinelStreamServer& server, std::function<void()> hook) {
+        server.m_beforeSessionAdmitForTest = std::move(hook);
+    }
     // Close the current listener on the I/O thread, as an external accept failure would.
     static bool closeListener(SentinelStreamServer& server) {
         auto result = std::make_shared<std::promise<void>>();
@@ -627,8 +637,8 @@ TEST(RecordingServerStop, StartStopLoopUnderClientChurnKeepsAccepting) {
 }
 
 // An accept that fails at once (here: a closed listener, which returns EBADF) must
-// not retry in a tight loop on the I/O thread. Before the backoff, this loop used a
-// whole core and logged one error per attempt.
+// not retry in a tight loop on the I/O thread. Before the backoff, this loop made
+// tens of thousands of attempts per second and logged one error per attempt.
 TEST(RecordingServerStop, FailingAcceptBacksOffInsteadOfSpinning) {
     int argc = 1; char name[] = "accept-backoff"; char* argv[] = {name, nullptr};
     QCoreApplication app(argc, argv);
@@ -637,17 +647,14 @@ TEST(RecordingServerStop, FailingAcceptBacksOffInsteadOfSpinning) {
     auto& server = *fixture.server;
     server.start();
     ASSERT_TRUE(RecordingServerStopTest::listening(server));
-    const auto cpuMs = [] {
-        rusage usage{};
-        getrusage(RUSAGE_SELF, &usage);
-        const auto ms = [](const timeval& t) { return int64_t{t.tv_sec} * 1000 + t.tv_usec / 1000; };
-        return ms(usage.ru_utime) + ms(usage.ru_stime);
-    };
     ASSERT_TRUE(RecordingServerStopTest::closeListener(server));
-    const auto before = cpuMs();
+    const auto before = RecordingServerStopTest::acceptAttempts(server);
+    ASSERT_GE(before, 1);
     std::this_thread::sleep_for(std::chrono::milliseconds(600));
-    const auto used = cpuMs() - before;
-    EXPECT_LT(used, 60) << "I/O thread used " << used << " ms CPU in 600 ms with a failing accept";
+    const auto attempts = RecordingServerStopTest::acceptAttempts(server) - before;
+    // Backoff schedule: one immediate retry, then waits of 10, 20, 40, 80, 160, 320 ms,
+    // so at most 7 more attempts fit in the window. Load only delays the timers.
+    EXPECT_LE(attempts, 8) << attempts << " accept attempts in 600 ms on a closed listener";
     EXPECT_FALSE(RecordingServerStopTest::listening(server));
     const auto start = std::chrono::steady_clock::now();
     server.stop(); // the pending retry wait must not delay shutdown
@@ -657,5 +664,57 @@ TEST(RecordingServerStop, FailingAcceptBacksOffInsteadOfSpinning) {
     const auto port = RecordingServerStopTest::port(server);
     ASSERT_NE(port, 0);
     EXPECT_TRUE(RecordingServerStopTest::accepts(server, port));
+    server.stop();
+}
+
+// Review r1: an accept completion passed the running check, then stop() took its
+// session snapshot before the completion registered the session. Nobody stopped that
+// session; its socket and queued handshake survived into the next start().
+TEST(RecordingServerStop, AcceptRacingStopLeavesNoSessionBehind) {
+    int argc = 1; char name[] = "accept-vs-stop"; char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    ServerFixture fixture;
+    ASSERT_TRUE(fixture.init());
+    auto& server = *fixture.server;
+    std::promise<void> entered, release;
+    auto gate = release.get_future().share();
+    std::atomic<bool> armed{true};
+    RecordingServerStopTest::beforeSessionAdmit(server, [&entered, gate, &armed] {
+        if (!armed.exchange(false)) return;
+        entered.set_value();
+        gate.wait();
+    });
+    server.start();
+    const auto port = RecordingServerStopTest::port(server);
+    ASSERT_NE(port, 0);
+    net::io_context ioc;
+    tcp::socket client(ioc); // stays connected and idle, so its session cannot end by itself
+    beast::error_code ec;
+    client.connect({net::ip::make_address("127.0.0.1"), port}, ec);
+    ASSERT_FALSE(ec) << ec.message();
+    ASSERT_EQ(entered.get_future().wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    // stop() snapshots sessions and stops the I/O context while the completion is parked.
+    auto stopped = std::async(std::launch::async, [&] { server.stop(); });
+    const bool ioStopped = RecordingServerStopTest::waitIoStopped(server);
+    release.set_value();
+    ASSERT_TRUE(ioStopped);
+    ASSERT_EQ(stopped.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(RecordingServerStopTest::sessionCount(server), 0u) << "a session admitted after the shutdown snapshot survived stop()";
+    // The refused session closed its socket: the idle client sees EOF or a reset.
+    client.non_blocking(true, ec);
+    char byte = 0;
+    const auto readDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    do {
+        client.read_some(net::buffer(&byte, 1), ec);
+        if (ec == net::error::would_block) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    } while (ec == net::error::would_block && std::chrono::steady_clock::now() < readDeadline);
+    EXPECT_TRUE(ec == net::error::eof || ec == net::error::connection_reset) << ec.message();
+    server.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_EQ(RecordingServerStopTest::sessionCount(server), 0u) << "an old session resumed on restart";
+    const auto restarted = RecordingServerStopTest::port(server);
+    ASSERT_NE(restarted, 0);
+    EXPECT_TRUE(RecordingServerStopTest::accepts(server, restarted));
+    client.close(ec);
     server.stop();
 }

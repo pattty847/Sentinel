@@ -2143,6 +2143,7 @@ void SentinelStreamServer::stop() {
 }
 
 void SentinelStreamServer::doAccept(uint64_t generation) {
+    ++m_acceptAttempts;
     m_acceptor->async_accept(
         net::make_strand(m_ioc),
         [this, generation](beast::error_code ec, tcp::socket socket) {
@@ -2155,7 +2156,10 @@ void SentinelStreamServer::doAccept(uint64_t generation) {
             }
             m_acceptFailures = 0;
             auto session = std::make_shared<Session>(std::move(socket), m_sslCtx, m_model, this);
-            registerSession(session);
+            if (m_beforeSessionAdmitForTest) m_beforeSessionAdmitForTest();
+            // stop() can start between the check above and here; a refused session is
+            // destroyed unrun, which closes its socket.
+            if (!admitSession(session, generation)) return;
             session->run();
             doAccept(generation);
         });
@@ -2199,6 +2203,18 @@ size_t SentinelStreamServer::sessionCount() {
 void SentinelStreamServer::registerSession(const std::shared_ptr<Session>& session) {
     std::lock_guard<std::mutex> lock(m_sessionsMutex);
     m_sessions.insert(session);
+}
+
+bool SentinelStreamServer::admitSession(const std::shared_ptr<Session>& session, uint64_t generation) {
+    // stop() clears m_running before it takes this mutex for its session snapshot, so
+    // a session is either in that snapshot (and gets stop()) or refused here.
+    std::lock_guard<std::mutex> lock(m_sessionsMutex);
+    if (!m_running.load(std::memory_order_acquire) ||
+        generation != m_acceptGeneration.load(std::memory_order_acquire)) {
+        return false;
+    }
+    m_sessions.insert(session);
+    return true;
 }
 
 void SentinelStreamServer::unregisterSession(const Session* session) {
