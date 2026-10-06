@@ -35,6 +35,7 @@ bool LiveCache::publish(RecordPtr r) {
     if (r->flags & kProvisional) {
         if (r->bucketStartMs < s.committedThroughMs) return false;
         s.provisional[r->bucketStartMs] = std::move(r);
+        s.withdrawn = false;
         // Recorder lateness is <=1h: at most 60 pending minutes plus the open one.
         // A malformed external publisher cannot grow the mailbox indefinitely.
         while (s.provisional.size() > 61) s.provisional.erase(s.provisional.begin());
@@ -50,6 +51,15 @@ bool LiveCache::publish(RecordPtr r) {
     }
     ++s.revision;
     return true;
+}
+void LiveCache::retractProvisional(const std::string &symbol) {
+    std::lock_guard lock(mutex_);
+    for (auto it = series_.lower_bound({symbol, std::string()}); it != series_.end() && it->first.first == symbol; ++it) {
+        if (it->second.provisional.empty()) continue;
+        it->second.provisional.clear();
+        it->second.withdrawn = true;
+        ++it->second.revision;
+    }
 }
 LiveCache::Snapshot LiveCache::snapshot(const std::string &symbol, const std::string &layer) const {
     std::lock_guard lock(mutex_);
@@ -118,9 +128,15 @@ RawTailFrame RawTailBuilder::build(const std::string& symbol, const std::string&
         throw std::invalid_argument("invalid raw-tail open minute");
     const auto chunkStart = open / kHourMs * kHourMs;
     const auto earliest = std::max(kHmc2MinMs, chunkStart - kHourMs);
-    const auto first = std::find_if(snapshot.committed.begin(), snapshot.committed.end(), [&](const auto& r) {
+    auto first = std::find_if(snapshot.committed.begin(), snapshot.committed.end(), [&](const auto& r) {
         return r->bucketStartMs >= std::max(sinceMs, earliest);
     });
+    // Provisional minutes withdrawn and every final already delivered: resend
+    // the newest final, so a frame still reaches the client and it drops the
+    // omitted provisional minutes (a LiveColumn frame carries >= 1 column).
+    // Without a withdrawal this is empty work, as before.
+    if (first == snapshot.committed.end() && snapshot.withdrawn && !snapshot.committed.empty())
+        first = std::prev(snapshot.committed.end());
     const auto variant = first == snapshot.committed.end() ? int64_t{0} : (*first)->bucketStartMs;
     if (const auto it = variants_.find(variant); it != variants_.end()) return it->second;
     records_.clear();
@@ -493,6 +509,7 @@ LiveService::Diagnostics LiveService::diagnostics() const {
             impl_->rawEncodings.load(), impl_->rawBuildMicros.load(), impl_->rawDeliveries.load(),
             impl_->rawBuilds.load(), impl_->rawFailures.load()};
 }
+void LiveService::retractProvisional(const std::string &symbol) { impl_->cache.retractProvisional(symbol); }
 void LiveService::releaseSymbol(const std::string &symbol) {
     // Called in recorder order. Subscription ownership stays with Session:
     // a newly acquired view can already exist while this old tail is draining.

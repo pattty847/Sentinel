@@ -295,6 +295,11 @@ std::function<void(recording::RecordPtr)> ServerDataModel::rollerPublisher() {
     };
 }
 
+std::function<void(const std::string&)> ServerDataModel::rollerRetract() {
+    if (!m_servesRoller || !m_recordingLive) return {};
+    return [live = m_recordingLive](const std::string& symbol) { live->retractProvisional(symbol); };
+}
+
 void ServerDataModel::attachRoller(RollerWatermarks watermarks, std::function<bool(const std::string&)> running) {
     if (!m_servesRoller || !watermarks || !running) return;
     m_rollerWatermarks = std::move(watermarks);

@@ -25,9 +25,15 @@ public:
         int64_t committedThroughMs = 0;
         std::deque<RecordPtr> committed;
         uint64_t revision = 0;
+        // Provisional minutes were withdrawn and none was published since.
+        bool withdrawn = false;
     };
     bool publish(RecordPtr record);
     void releaseSymbol(const std::string &symbol);
+    // Withdraws every provisional record of the symbol (both layers); committed
+    // records and the committed cutoff stay. A series that held any advances its
+    // revision, so the next frame omits the withdrawn minutes.
+    void retractProvisional(const std::string &symbol);
     Snapshot snapshot(const std::string &symbol, const std::string &layer) const;
     std::optional<std::pair<std::string, std::string>> takeCapacityWarning();
     static constexpr size_t kMaxSeries = 128, kMaxRecords = 16, kMaxEntries = 262144;
@@ -174,6 +180,10 @@ public:
     bool publish(RecordPtr record);
     // Recorder-ordered cache cleanup; Session owns subscription retirement.
     void releaseSymbol(const std::string &symbol);
+    // The publisher withdrew its provisional input (roller lead discard).
+    // Call after its last publication; subscribers' next frames omit those
+    // minutes (raw tails: the client drops omitted provisional minutes).
+    void retractProvisional(const std::string &symbol);
     std::shared_ptr<Subscription> subscribe(LiveView view, Deliver deliver);
     std::shared_ptr<RawSubscription> subscribeRaw(RawTailView view, RawDeliver deliver);
 private:

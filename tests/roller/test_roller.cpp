@@ -408,6 +408,36 @@ TEST(Roller, RollCliProductLeaseMayWriteRollerServedRoot) {
     EXPECT_FALSE(recording::Hmc2Store::readRange(root/"hmc2","BTC-USD","near",60'000,Epoch,Epoch+240'000).empty());
 }
 
+// Review r1 finding 3: the served root comes from the merged server config
+// (config/server_config.yaml, then the private config/.server_config.yaml).
+TEST(Roller, RollCliRefusesRollerRootFromSplitOverride) {
+    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/roots-XXXXXX"));ASSERT_TRUE(temp.isValid());
+    const fs::path root=temp.path().toStdString(); fixture(root/"raw");
+    const auto previous=fs::current_path();
+    struct Restore {fs::path path;~Restore(){fs::current_path(path);}} restore{previous};
+    fs::create_directories(root/"config");
+    save(root/"config"/"server_config.yaml","recording:\n  dir: '"+(root/"primary").string()+"'\n  source: primary\n"
+         "roller_shadow:\n  dir: '"+(root/"hmc2").string()+"'\n");
+    save(root/"config"/".server_config.yaml","recording:\n  source: roller\n");
+    fs::current_path(root);
+    auto invoke=[&](bool lease) {
+        std::vector<std::string> args={"sentinel-roll",(root/"raw").string(),(root/"hmc2").string(),"--products","BTC-USD",
+            "--from","2027-01-01T00:00:00Z","--to","2027-01-01T00:04:00Z"};
+        if(lease) args.push_back("--product-lease");
+        std::vector<char*> argv;for(auto& a:args)argv.push_back(a.data());
+        return rollMain(int(argv.size()),argv.data());
+    };
+    EXPECT_EQ(invoke(false),1); EXPECT_FALSE(fs::exists(root/"hmc2"));
+    // Per-document checks stay: a public file naming it served still refuses,
+    // even when the override turns serving off.
+    save(root/"config"/".server_config.yaml","recording:\n  source: primary\n");
+    save(root/"config"/"server_config.yaml","recording:\n  dir: '"+(root/"primary").string()+"'\n  source: roller\n"
+         "roller_shadow:\n  dir: '"+(root/"hmc2").string()+"'\n");
+    EXPECT_EQ(invoke(false),1); // conservative: the public file alone still names it served
+    save(root/"config"/".server_config.yaml","recording:\n  source: roller\n");
+    EXPECT_EQ(invoke(true),0);
+}
+
 TEST(Roller, RealJournalCrashResumeRestoresLargeDeltaBase) {
     QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/real-resume-XXXXXX"));ASSERT_TRUE(temp.isValid());
     const fs::path root=temp.path().toStdString();fs::create_directories(root/"raw");

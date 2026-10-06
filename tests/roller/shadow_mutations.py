@@ -92,9 +92,9 @@ mutations = [
     ('A11 disconnect drops the lead', SR,
      'pendingSize = 0; if (lead) lead->discard(); }', 'pendingSize = 0; }',
      'ShadowTest.DisconnectRebuildsLiveFromDurableState'),
-    ('A11 rebuilt lead never moves live back', SR,
-     'if (r->bucketStartMs < newest) return;', '',
-     'ShadowTest.RetractAcrossMinuteNeverMovesLiveBack'),
+    ('A11 dropped lead is withdrawn before the rebuild publishes', SR,
+     'cfg.retractLive(product);', ';',
+     'ShadowTest.RetractAcrossMinuteWithdrawsBeforeRebuilding'),
     ('lead fork copies the minute state', BR,
      'to->observed = from->observed;', '',
      'ShadowTest.LeadForkFinishesMinutesExactlyLikeHistory'),
@@ -139,14 +139,42 @@ mutations = [
      '!o.productWriterLease && server["roller_shadow"]', 'server["roller_shadow"]',
      'Roller.RollCliProductLeaseMayWriteRollerServedRoot', ROLLER),
     ('A9 deploy marker accepts the serving roller', 'scripts/dev/deploy-runtime.sh',
-     'grep -Eq "Recording v2 started|Roller started product=[^ ]+ mode=live" "$1";',
+     'grep -Eq "Recording v2 started|Roller serving ready products=" "$1";',
      'grep -q "Recording v2 started" "$1";',
      'sh:tests/roller/deploy_marker_test.sh', None),
+    # Review round 1.
+    ('r1-1 lead drop withdraws its provisional minutes', SR,
+     'cfg.retractLive(product);', ';',
+     'ShadowTest.WithdrawnRecoverySnapshotLeavesLiveServiceSubscribers'),
+    ('r1-1 withdrawal frame resends the newest final', 'libs/core/servermodel/RecordingLive.cpp',
+     'first = std::prev(snapshot.committed.end());', ';',
+     'ShadowTest.WithdrawnRecoverySnapshotLeavesLiveServiceSubscribers'),
+    ('r1-1 withdrawal advances the series revision', 'libs/core/servermodel/RecordingLive.cpp',
+     'it->second.withdrawn = true; ++it->second.revision;', 'it->second.withdrawn = true;',
+     'ShadowTest.WithdrawnRecoverySnapshotLeavesLiveServiceSubscribers'),
+    ('r1-2 readiness only after a writer opened', SR,
+     'if (h) writerOpened(p);', 'writerOpened(p);',
+     'ShadowTest.ServingReadinessWaitsForEveryProductWriter'),
+    ('r1-2 started line is not a deploy marker', 'scripts/dev/deploy-runtime.sh',
+     'grep -Eq "Recording v2 started|Roller serving ready products=" "$1";',
+     'grep -Eq "Recording v2 started|Roller serving ready products=|mode=live" "$1";',
+     'sh:tests/roller/deploy_marker_test.sh', None),
+    ('r1-2 deploy log must carry the deployed exe', 'scripts/dev/deploy-runtime.sh',
+     '''head -n 5 "$log" | awk -v exe="exe=$4" '$1 == "#" && $2 == exe {ok = 1} END {exit !ok}' || continue''', '',
+     'sh:tests/roller/deploy_marker_test.sh', None),
+    ('r1-2 deploy log must carry the restarted PID', 'scripts/dev/deploy-runtime.sh',
+     '''head -n 1 "$log" | awk -v pid="pid=$3" '$NF == pid {ok = 1} END {exit !ok}' || continue''', '',
+     'sh:tests/roller/deploy_marker_test.sh', None),
+    ('r1-3 merged config names the served root', 'libs/core/roller/RollCli.cpp',
+     'effective.recording.source == "roller" &&', 'false &&',
+     'Roller.RollCliRefusesRollerRootFromSplitOverride', ROLLER),
 ]
 if "--round1" in sys.argv:
     mutations = mutations[5:]
 if "--slice-d" in sys.argv:
     mutations = mutations[13:]
+if "--r1" in sys.argv:
+    mutations = [m for m in mutations if m[0].startswith(('r1-', 'A9', 'A11'))]
 for entry in mutations:
     name, path, before, after, case = entry[:5]
     target = entry[5] if len(entry) > 5 else SHADOW

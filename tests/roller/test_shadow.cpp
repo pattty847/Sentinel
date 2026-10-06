@@ -3,6 +3,7 @@
 #include "capture/CaptureFanout.hpp"
 #include "capture/CaptureSession.hpp"
 #include "heatmap/ChunkCodec.hpp"
+#include "heatmap/LiveEdge.hpp"
 #include "roller/ShadowRoller.hpp"
 #include "servermodel/ChunkService.hpp"
 #include <QCoreApplication>
@@ -255,6 +256,15 @@ struct ShadowTest : testing::Test {
       std::lock_guard lock(liveMutex);
       live.push_back(std::move(r));
     };
+    cfg.retractLive = [this](const std::string &) {
+      std::lock_guard lock(liveMutex);
+      retracts.push_back(live.size());
+    };
+  }
+  std::vector<size_t> retracts; // live.size() at each withdrawal
+  size_t retractCount() {
+    std::lock_guard lock(liveMutex);
+    return retracts.size();
   }
   std::vector<std::shared_ptr<const recording::Hmc2Record>> published() {
     std::lock_guard lock(liveMutex);
@@ -295,11 +305,21 @@ struct ShadowTest : testing::Test {
     return counter("sentinel_roller_shadow_live_lead_forks_total{product=\"" +
                    product + "\"}");
   }
-  // No duplicate or out-of-order live record: per series the forming minute
-  // never moves back, and each committed minute is handed over once, in order.
+  // No duplicate or out-of-order live record: within one lead (between
+  // withdrawals) the forming minute never moves back, and each committed
+  // minute is handed over once, in order.
   void expectOrderedLive() {
     std::map<std::pair<std::string, std::string>, int64_t> forming, finals;
-    for (const auto &r : published()) {
+    const auto all = published();
+    std::set<size_t> cuts;
+    {
+      std::lock_guard lock(liveMutex);
+      cuts.insert(retracts.begin(), retracts.end());
+    }
+    for (size_t i = 0; i < all.size(); ++i) {
+      if (cuts.contains(i))
+        forming.clear();
+      const auto &r = all[i];
       const auto key = std::pair(r->header.symbol, r->header.layer);
       if (provisional(*r)) {
         EXPECT_GE(r->bucketStartMs, forming[key])
@@ -1110,9 +1130,10 @@ TEST_F(ShadowTest, RetractRebuildsLiveMinuteFromDurableState) {
   parity(120000);
   EXPECT_EQ(expectFinalsMatch(root / "batch"), 2u * 2u);
 }
-// A11, withdrawn suffix crossing a minute: the rebuilt lead never shows an
-// older forming minute than the discarded one did (no out-of-order record).
-TEST_F(ShadowTest, RetractAcrossMinuteNeverMovesLiveBack) {
+// A11, withdrawn suffix crossing a minute: the dropped lead's publications are
+// withdrawn before the rebuilt lead publishes, and the rebuilt lead may then
+// correct the earlier minute.
+TEST_F(ShadowTest, RetractAcrossMinuteWithdrawsBeforeRebuilding) {
   serve();
   initial();
   start();
@@ -1130,7 +1151,12 @@ TEST_F(ShadowTest, RetractAcrossMinuteNeverMovesLiveBack) {
                       true,
                       {}});
   ASSERT_TRUE(eventually([&] { return forks() == 2; }));
-  const auto mark = published().size();
+  ASSERT_EQ(retractCount(), 1u);
+  size_t mark = 0; // first publication after the withdrawal
+  {
+    std::lock_guard lock(liveMutex);
+    mark = retracts.front();
+  }
   for (int t = 64; t <= 185; ++t)
     writer->append(record(t * 1000));
   writer->flush();
@@ -1138,10 +1164,187 @@ TEST_F(ShadowTest, RetractAcrossMinuteNeverMovesLiveBack) {
       [&] { return count() == 186 && liveBucket(Epoch + 180000, mark); }));
   shadow.reset();
   writer->close();
+  EXPECT_TRUE(
+      liveBucket(Epoch + 60000, mark)); // the earlier minute is corrected
   EXPECT_FALSE(livePublishedRow(100500, mark));
   expectOrderedLive();
   parity(180000);
   EXPECT_EQ(expectFinalsMatch(root / "batch"), 3u * 2u);
+}
+// Finding 1 (review r1): a withdrawn provisional recovery snapshot, across a
+// minute boundary, on an invalid durable book that no replacement snapshot
+// revalidates. Real LiveService raw subscribers decode every frame into the
+// client's LiveEdge: the existing subscriber drops the withdrawn minutes, a
+// subscriber that connects after the withdrawal never receives them.
+TEST_F(ShadowTest, WithdrawnRecoverySnapshotLeavesLiveServiceSubscribers) {
+  auto service = std::make_shared<recording::LiveService>(cfg.outputRoot);
+  cfg.liveNowForTest = [this] { return liveNow.load(); };
+  cfg.publisher = [service](std::shared_ptr<const recording::Hmc2Record> r) {
+    service->publish(std::move(r));
+  };
+  cfg.retractLive = [service](const std::string &p) {
+    service->retractProvisional(p);
+  };
+  struct Client {
+    std::mutex mutex;
+    heatmap::ChunkStore store;
+    heatmap::LiveEdge edge{Product, "hmc2.near"};
+    std::vector<std::shared_ptr<const heatmap::ChunkFrame>> frames;
+  };
+  const auto subscribe = [&](std::shared_ptr<Client> client) {
+    return service->subscribeRaw(
+        {Product, {"hmc2.near"}, 1, 0},
+        [client](const auto &, const std::string &,
+                 const recording::RawTailFrame &f) {
+          auto frame = std::make_shared<const heatmap::ChunkFrame>(
+              heatmap::decodeChunk(*f.bytes));
+          std::lock_guard lock(client->mutex);
+          client->edge.accept(frame, client->store);
+          client->frames.push_back(std::move(frame));
+          return true;
+        });
+  };
+  // Withdrawn input: the recovery snapshot's ask 100500 and every column from
+  // minute 2 on (the durable book is unobserved there).
+  const auto withdrawn = [](const heatmap::SparseColumn &c) {
+    if (c.bucketStartMs >= Epoch + 120000)
+      return true;
+    for (const auto &n : c.native)
+      for (const auto &e : n.entries)
+        if (e.isAsk() && (n.baseRow + int64_t(e.row())) * n.grid.rowTickUnits /
+                                 n.grid.priceScale ==
+                             100500)
+          return true;
+    return false;
+  };
+  const auto frameShows = [&](const heatmap::ChunkFrame &f) {
+    return std::any_of(f.columns.columns.begin(), f.columns.columns.end(),
+                       withdrawn);
+  };
+  const auto edgeShows = [&](Client &c) {
+    std::lock_guard lock(c.mutex);
+    for (const auto &[bucket, column] : c.edge.snapshot()->minutes)
+      if (withdrawn(*column))
+        return true;
+    return false;
+  };
+  auto existing = std::make_shared<Client>();
+  auto existingSub = subscribe(existing);
+  ASSERT_TRUE(existingSub);
+  // Durable: valid book, invalid from 64 s, heartbeats into minute 2.
+  writer->append(record(0, snapshot()));
+  for (int t = 1; t <= 125; ++t)
+    writer->append(record(t * 1000, t == 64 ? "not JSON"
+                                            : "{\"channel\":\"heartbeats\"}"));
+  writer->flush();
+  start();
+  ASSERT_TRUE(eventually([&] { return count() == 126 && forks() == 1; }));
+  // Provisional recovery snapshot in minute 2, then a record in minute 3.
+  auto recovery = json::parse(snapshot());
+  recovery["events"][0]["updates"].push_back(
+      {{"side", "offer"}, {"price_level", "100500"}, {"new_quantity", "7"}});
+  fanout->publish(0, {capture::JournalEventKind::Record, durable.runId,
+                      durable.block + 1, 0, true,
+                      frame(record(170000, recovery.dump()))});
+  fanout->publish(0, {capture::JournalEventKind::Record, durable.runId,
+                      durable.block + 1, 1, true, frame(record(181000))});
+  ASSERT_TRUE(eventually(
+      [&] { return edgeShows(*existing); })); // option C: shown early
+  fanout->publish(0, {capture::JournalEventKind::Retract,
+                      durable.runId,
+                      durable.block,
+                      durable.record,
+                      true,
+                      {}});
+  ASSERT_TRUE(eventually([&] { return forks() == 2; }));
+  // No replacement snapshot: only durable heartbeats follow.
+  for (int t = 126; t <= 200; ++t)
+    writer->append(record(t * 1000));
+  writer->flush();
+  ASSERT_TRUE(eventually([&] { return count() == 201; }));
+  auto late = std::make_shared<Client>();
+  auto lateSub = subscribe(late);
+  ASSERT_TRUE(lateSub);
+  ASSERT_TRUE(eventually([&] {
+    std::lock_guard lock(late->mutex);
+    return !late->frames.empty();
+  }));
+  ASSERT_TRUE(eventually([&] { return !edgeShows(*existing); }));
+  std::this_thread::sleep_for(500ms); // further worker turns change nothing
+  shadow.reset();
+  EXPECT_FALSE(edgeShows(*existing));
+  EXPECT_FALSE(edgeShows(*late));
+  {
+    std::lock_guard lock(existing->mutex);
+    // Once withdrawn, never shown again.
+    const auto cleared =
+        std::find_if(existing->frames.begin(), existing->frames.end(),
+                     [&](const auto &f) { return !frameShows(*f); });
+    ASSERT_NE(cleared, existing->frames.end());
+    EXPECT_TRUE(std::any_of(existing->frames.begin(), cleared,
+                            [&](const auto &f) { return frameShows(*f); }));
+    EXPECT_TRUE(std::none_of(cleared, existing->frames.end(),
+                             [&](const auto &f) { return frameShows(*f); }));
+    // The committed minute 1 stays (final, durable observation only).
+    EXPECT_TRUE(existing->edge.snapshot()->minutes.contains(Epoch + 60000));
+  }
+  {
+    std::lock_guard lock(late->mutex);
+    for (const auto &f : late->frames)
+      EXPECT_FALSE(frameShows(*f));
+  }
+  writer->close();
+  parity(180000);
+}
+// Review r1 finding 2: the deploy marker follows every product's history writer
+// (leases and checkpoint policy), never just the "Roller started" line.
+namespace logcapture {
+std::mutex mutex;
+std::vector<std::string> lines;
+QtMessageHandler previous = nullptr;
+void handler(QtMsgType type, const QMessageLogContext &context,
+             const QString &message) {
+  {
+    std::lock_guard lock(mutex);
+    lines.push_back(message.toStdString());
+  }
+  if (previous)
+    previous(type, context, message);
+}
+bool seen(const std::string &text) {
+  std::lock_guard lock(mutex);
+  return std::any_of(lines.begin(), lines.end(), [&](const auto &l) {
+    return l.find(text) != std::string::npos;
+  });
+}
+} // namespace logcapture
+TEST_F(ShadowTest, ServingReadinessWaitsForEveryProductWriter) {
+  {
+    std::lock_guard lock(logcapture::mutex);
+    logcapture::lines.clear();
+  }
+  logcapture::previous = qInstallMessageHandler(logcapture::handler);
+  struct Restore {
+    ~Restore() { qInstallMessageHandler(logcapture::previous); }
+  } restore;
+  serve();
+  initial();
+  // Another writer holds the product lease (for example a repair roll).
+  auto holder =
+      std::make_unique<recording::Hmc2Store>(root / "shadow", true, Product);
+  start();
+  ASSERT_TRUE(eventually([&] {
+    return !has(
+        "sentinel_roller_shadow_setup_failures_total{product=\"BTC-USD\"} 0");
+  }));
+  EXPECT_TRUE(logcapture::seen("Roller started product=BTC-USD mode=live"));
+  EXPECT_FALSE(logcapture::seen("Roller writer open product=BTC-USD"));
+  EXPECT_FALSE(logcapture::seen("Roller serving ready"));
+  holder.reset();
+  ASSERT_TRUE(eventually(
+      [&] { return logcapture::seen("Roller serving ready products=1"); }));
+  EXPECT_TRUE(logcapture::seen("Roller writer open product=BTC-USD"));
+  shadow.reset();
 }
 // A11: socket disconnect (capture restart) with a provisional suffix applied
 // live.

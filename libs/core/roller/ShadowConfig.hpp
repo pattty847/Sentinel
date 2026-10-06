@@ -41,6 +41,9 @@ struct ShadowConfig {
   // forming minute from a lead fork that also applies provisional fan-out
   // records. Empty: shadow only.
   std::function<void(std::shared_ptr<const recording::Hmc2Record>)> publisher;
+  // With publisher: withdraws the product's published provisional minutes
+  // (LiveService::retractProvisional) after a lead that published is dropped.
+  std::function<void(const std::string &product)> retractLive;
   int64_t livePublishMs = 500;
   // Wall clock (epoch ms) for lead ticks every 250 ms; tests inject.
   std::function<int64_t()> liveNowForTest;

@@ -38,13 +38,6 @@ uint64_t little(const char *p, size_t n) {
     v |= uint64_t(uint8_t(p[i])) << (8 * i);
   return v;
 }
-// Per product, across lead forks: provisional bucket starts already handed to
-// the sink. A rebuilt lead never republishes an older minute than one already
-// shown (a discarded lead may have reached the next minute on withdrawn data).
-struct LeadGuard {
-  std::map<std::string, int64_t>
-      newestBucket; // by layer; lead workers only, one at a time
-};
 // Probe only (evaluated when roller.live is enabled): lowest native row price.
 double lowestPrice(const recording::Hmc2Record &r) {
   int64_t low = INT64_MAX;
@@ -58,13 +51,14 @@ double lowestPrice(const recording::Hmc2Record &r) {
 // a non-persisting fork of the day's history recorder (Publication::Lead) that
 // also applies provisional fan-out records as they arrive. History still
 // applies only durable prefixes (INV-114) and publishes committed minutes. Any
-// provisional discard (retract, disconnect, EOF, socket failure) drops the
-// lead; the next fork starts again from the durable history state.
+// provisional discard (retract, disconnect, EOF, socket failure) and day end
+// drops the lead and withdraws everything it published from the live cache
+// (committed minutes stay); the next fork republishes from durable history.
 class LiveLead {
   const ShadowConfig &cfg;
   const std::string product;
-  std::shared_ptr<LeadGuard> guard;
   metrics::Counter &forks;
+  bool published = false; // lead worker writes; read after the worker joined
   recording::BookRecorder *history = nullptr;
   const JournalFeed *historyFeed = nullptr;
   std::unique_ptr<JournalFeed> feed;
@@ -91,9 +85,8 @@ class LiveLead {
   }
 
 public:
-  LiveLead(const ShadowConfig &c, std::string p, std::shared_ptr<LeadGuard> g,
-           metrics::Counter &f)
-      : cfg(c), product(std::move(p)), guard(std::move(g)), forks(f) {}
+  LiveLead(const ShadowConfig &c, std::string p, metrics::Counter &f)
+      : cfg(c), product(std::move(p)), forks(f) {}
   ~LiveLead() { discard(); }
   bool enabled() const { return bool(cfg.publisher); }
   void attach(recording::BookRecorder *h, const JournalFeed *f) {
@@ -102,10 +95,20 @@ public:
     if (!h)
       discard();
   }
-  // Joins the lead worker: no publication of withdrawn input after return.
+  // Joins the lead worker first: no publication of withdrawn input follows
+  // the withdrawal.
   void discard() {
     lead.reset();
     feed.reset();
+    if (!std::exchange(published, false) || !cfg.retractLive)
+      return;
+    try {
+      cfg.retractLive(product);
+      sLog_Data("Roller live provisional withdrawn product=" << product);
+    } catch (const std::exception &e) {
+      sLog_Error("Roller live withdrawal failed product="
+                 << product << " error=" << e.what());
+    }
   }
   // At the socket, after every returned record reached history: fork from the
   // durable state, then apply the provisional suffix received so far.
@@ -113,12 +116,9 @@ public:
     if (!enabled() || lead || !history || !historyFeed || nowMs() < nextForkMs)
       return;
     try {
-      auto publish = [sink = cfg.publisher, guard = guard, name = product](
+      auto publish = [this, sink = cfg.publisher, name = product](
                          std::shared_ptr<const recording::Hmc2Record> r) {
-        auto &newest = guard->newestBucket[r->header.layer];
-        if (r->bucketStartMs < newest)
-          return;
-        newest = r->bucketStartMs;
+        published = true;
         sLog_Probe("roller.live",
                    "product=" << name << " layer=" << r->header.layer
                               << " bucket=" << r->bucketStartMs
@@ -503,7 +503,7 @@ struct ShadowRoller::Impl {
     metrics::Counter *records, *failures, *compareFailures, *cooldowns,
         *leadForks;
     bool refused = false;
-    std::shared_ptr<LeadGuard> leadGuard = std::make_shared<LeadGuard>();
+    std::atomic<bool> writerOpened{false};
     // Served watermarks (chunk workers): the current day's history recorder
     // while it exists, merged into the newest values ever served.
     mutable std::mutex historyMutex;
@@ -527,6 +527,7 @@ struct ShadowRoller::Impl {
   fs::path primary;
   std::vector<std::unique_ptr<Product>> products;
   std::atomic<bool> stopping{false};
+  std::atomic<size_t> writersOpened{0};
   std::mutex mutex;
   std::condition_variable wake;
   std::thread checker;
@@ -717,7 +718,7 @@ struct ShadowRoller::Impl {
           deep.minuteThroughMs =
               std::max(deep.minuteThroughMs, p.committed.load());
         }
-        LiveLead lead(cfg, p.name, p.leadGuard, *p.leadForks);
+        LiveLead lead(cfg, p.name, *p.leadForks);
         LiveSource source(cfg, p.name, stopping, checkpoint, retry,
                           lead.enabled() ? &lead : nullptr);
         RollOptions o{cfg.journalRoot, cfg.outputRoot, p.name, day, day + Day};
@@ -731,6 +732,8 @@ struct ShadowRoller::Impl {
             p.history = h;
             p.historyEndMs = end;
           }
+          if (h)
+            writerOpened(p);
           lead.attach(h, f);
         };
         o.cancelled = [&] { return stopping.load(); };
@@ -779,6 +782,18 @@ struct ShadowRoller::Impl {
       }
       p.running->set(0);
     }
+  }
+  // Deploy readiness (deploy-runtime.sh): the serving marker follows the
+  // history writer of EVERY configured product, after its checkpoint policy
+  // check and product/root leases. A refused or failing product keeps it
+  // absent.
+  void writerOpened(Product &p) {
+    if (!cfg.publisher || p.writerOpened.exchange(true))
+      return;
+    sLog_App("Roller writer open product=" << p.name);
+    if (++writersOpened == products.size())
+      sLog_App("Roller serving ready products=" << products.size()
+                                                << " root=" << cfg.outputRoot);
   }
   // Under historyMutex. Watermarks never regress: a new day's recorder starts
   // from its anchor, and the old one runs past its commit ceiling.

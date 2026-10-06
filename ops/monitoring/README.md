@@ -340,8 +340,14 @@ the roller. Committed minutes are published from the history recorder, which
 still applies only durable fan-out prefixes. The forming minute comes from a
 **live lead**: a non-persisting fork of the day's history state that also
 applies each provisional fan-out record as it arrives and ticks every 250 ms
-like the primary. A retract, disconnect, EOF or socket failure drops the lead;
-the next fork starts from durable history and republishes the forming minute.
+like the primary. A retract, disconnect, EOF, socket failure or day end drops
+the lead and withdraws every provisional minute it published from the live
+cache (`LiveService::retractProvisional`; committed minutes stay). The next
+raw-tail frame omits them, and the client drops omitted provisional minutes
+(`LiveEdge`); when no provisional minute is left the frame resends the newest
+final so it still reaches the client. The next fork republishes the forming
+minute from durable history. The legacy-renderer page path cannot withdraw a
+column a client already holds (only a new subscription is clean).
 The lead is forked once per start, per UTC day (about 2 s without a forming
 minute at 00:01 UTC while the new day replays from its anchor) and per
 provisional discard.
@@ -360,15 +366,20 @@ it stops growing after the flip). Served watermarks never move back across
 the daily anchor replay.
 
 `sentinel-roll` refuses a roller-served `roller_shadow.dir` for unscoped
-batch. `--product-lease` takes the shared root lease plus the product's
+batch, judged on each config file and on their merge (the private
+`config/.server_config.yaml` overrides per key, as in the server). `--product-lease` takes the shared root lease plus the product's
 exclusive lease (INV-115): it may repair a product the live roller is not
 rolling, and fails on the product lock for one it is rolling.
 
-Startup lines: `Roller started ... mode=shadow`, or `mode=live` when serving.
-`deploy-runtime.sh` treats either `Recording v2 started` or
-`Roller started product=... mode=live` as the server write marker
-(`deploy-runtime.sh check-server-log <log>` runs the same check). A
-shadow-only roller line is not a marker: in shadow mode the primary marker is
-still required. Probe `roller.live` logs every forming-minute publication
+Startup lines: `Roller started ... mode=shadow`, or `mode=live` when serving
+(diagnostic only: it precedes the checkpoint policy check and the leases).
+When serving, `Roller writer open product=...` follows each product's history
+writer, and `Roller serving ready products=N` follows the last one; a refused
+product, a held product lease or a checkpoint policy mismatch keeps it absent.
+`deploy-runtime.sh` accepts `Recording v2 started` or `Roller serving ready`,
+only in the log of the restarted service: the file named for the PID launchd
+reports after the restart (never the replaced PID), whose header carries that
+PID and `exe=` the deployed runtime binary. `deploy-runtime.sh
+check-server-log <log dir> <pid> <exe>` runs the same check. Probe `roller.live` logs every forming-minute publication
 with `ageMs` (now minus bucket start plus observed time) and the lowest
 native price in it.

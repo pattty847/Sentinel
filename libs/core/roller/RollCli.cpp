@@ -1,4 +1,5 @@
 #include "Roller.hpp"
+#include "ConfigLoader.hpp"
 #include <yaml-cpp/yaml.h>
 #include <iostream>
 #include <sstream>
@@ -43,10 +44,19 @@ int rollMain(int argc,char** argv) {
                 refuse(server["roller_shadow"]["dir"]);
         };
         bool foundServerConfig = false;
+        ServerConfig effective; // the server's own merge: the private override wins per key
         for (const auto* path : {"config/server_config.yaml", "config/.server_config.yaml"})
             if (std::filesystem::exists(path)) {
                 refuseLiveRoot(YAML::LoadFile(path)); foundServerConfig = true;
+                if (!ConfigLoader::loadServerConfig(path, &effective))
+                    throw std::runtime_error(std::string("server config unreadable: ") + path);
             }
+        if (foundServerConfig && effective.recording.source == "roller" && !o.productWriterLease &&
+            !effective.rollerShadow.outputRoot.empty()) {
+            const auto live = std::filesystem::weakly_canonical(effective.rollerShadow.outputRoot).string()+"/";
+            if (dest.starts_with(live) || live.starts_with(dest))
+                throw std::runtime_error("refusing roller-served recording root: " + live);
+        }
         if (!foundServerConfig && !config)
             throw std::runtime_error("server config unavailable; run from the checkout or supply --config with recording.dir");
         if (!foundServerConfig && (!config["recording"] || !config["recording"]["dir"]))
