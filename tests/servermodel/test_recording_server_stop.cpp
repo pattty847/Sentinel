@@ -10,6 +10,8 @@
 #include <QFile>
 #include <gtest/gtest.h>
 #include <future>
+#include <mutex>
+#include <optional>
 #include <boost/asio/read.hpp>
 #include <openssl/pem.h>
 
@@ -60,12 +62,27 @@ struct RecordingServerStopTest {
         return server.m_ioc.stopped();
     }
     static net::io_context& ioContext(SentinelStreamServer& server) { return server.m_ioc; }
-    // async_accept calls so far, read on the I/O thread; -1 when it does not answer.
-    static int64_t acceptAttempts(SentinelStreamServer& server) {
+    // async_accept calls during `window`. Both counts are taken on the I/O thread (the
+    // second by an asio timer), so test-thread scheduling cannot stretch the window.
+    // nullopt when the I/O thread does not answer or the timer is cancelled.
+    static std::optional<int64_t> acceptAttemptsDuring(SentinelStreamServer& server,
+                                                       std::chrono::milliseconds window) {
         auto result = std::make_shared<std::promise<int64_t>>();
-        net::post(server.m_ioc, [&server, result] { result->set_value(static_cast<int64_t>(server.m_acceptAttempts)); });
         auto ready = result->get_future();
-        return ready.wait_for(std::chrono::seconds(3)) == std::future_status::ready ? ready.get() : -1;
+        net::post(server.m_ioc, [&server, result, window] {
+            const auto before = static_cast<int64_t>(server.m_acceptAttempts);
+            auto timer = std::make_shared<net::steady_timer>(server.m_ioc, window);
+            timer->async_wait([&server, result, timer, before](beast::error_code ec) {
+                result->set_value(ec ? -1 : static_cast<int64_t>(server.m_acceptAttempts) - before);
+            });
+        });
+        if (ready.wait_for(window + std::chrono::seconds(3)) != std::future_status::ready) return std::nullopt;
+        try {
+            const auto attempts = ready.get();
+            return attempts < 0 ? std::nullopt : std::optional<int64_t>{attempts};
+        } catch (const std::future_error&) {
+            return std::nullopt; // handler destroyed without running
+        }
     }
     // Runs on the I/O thread after an accept passed its running check, before admission.
     static void beforeSessionAdmit(SentinelStreamServer& server, std::function<void()> hook) {
@@ -648,12 +665,12 @@ TEST(RecordingServerStop, FailingAcceptBacksOffInsteadOfSpinning) {
     server.start();
     ASSERT_TRUE(RecordingServerStopTest::listening(server));
     ASSERT_TRUE(RecordingServerStopTest::closeListener(server));
-    const auto before = RecordingServerStopTest::acceptAttempts(server);
-    ASSERT_GE(before, 1);
-    std::this_thread::sleep_for(std::chrono::milliseconds(600));
-    const auto attempts = RecordingServerStopTest::acceptAttempts(server) - before;
+    const auto sampled = RecordingServerStopTest::acceptAttemptsDuring(server, std::chrono::milliseconds(600));
+    ASSERT_TRUE(sampled.has_value()) << "the I/O thread did not report accept attempts";
+    const auto attempts = *sampled;
     // Backoff schedule: one immediate retry, then waits of 10, 20, 40, 80, 160, 320 ms,
-    // so at most 7 more attempts fit in the window. Load only delays the timers.
+    // so at most 7 attempts fit in 600 ms of I/O-thread time (8 only after 1270 ms).
+    // Load only delays the timers.
     EXPECT_LE(attempts, 8) << attempts << " accept attempts in 600 ms on a closed listener";
     EXPECT_FALSE(RecordingServerStopTest::listening(server));
     const auto start = std::chrono::steady_clock::now();
@@ -676,13 +693,24 @@ TEST(RecordingServerStop, AcceptRacingStopLeavesNoSessionBehind) {
     ServerFixture fixture;
     ASSERT_TRUE(fixture.init());
     auto& server = *fixture.server;
-    std::promise<void> entered, release;
-    auto gate = release.get_future().share();
-    std::atomic<bool> armed{true};
-    RecordingServerStopTest::beforeSessionAdmit(server, [&entered, gate, &armed] {
-        if (!armed.exchange(false)) return;
-        entered.set_value();
-        gate.wait();
+    // The hook owns its state: a late accept during teardown must not touch locals of
+    // this test that an early ASSERT already destroyed.
+    struct HookState {
+        std::promise<void> entered, release;
+        std::shared_future<void> gate = release.get_future().share();
+        std::atomic<bool> armed{true};
+        std::once_flag opened;
+        void open() { std::call_once(opened, [this] { release.set_value(); }); }
+    };
+    auto hook = std::make_shared<HookState>();
+    auto enteredFuture = hook->entered.get_future();
+    // Destroyed before the fixture: every exit path opens the gate before the server's
+    // destructor joins the I/O thread.
+    struct OpenGate { std::shared_ptr<HookState> state; ~OpenGate() { state->open(); } } openGate{hook};
+    RecordingServerStopTest::beforeSessionAdmit(server, [hook] {
+        if (!hook->armed.exchange(false)) return;
+        hook->entered.set_value();
+        hook->gate.wait();
     });
     server.start();
     const auto port = RecordingServerStopTest::port(server);
@@ -692,11 +720,11 @@ TEST(RecordingServerStop, AcceptRacingStopLeavesNoSessionBehind) {
     beast::error_code ec;
     client.connect({net::ip::make_address("127.0.0.1"), port}, ec);
     ASSERT_FALSE(ec) << ec.message();
-    ASSERT_EQ(entered.get_future().wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    ASSERT_EQ(enteredFuture.wait_for(std::chrono::seconds(3)), std::future_status::ready);
     // stop() snapshots sessions and stops the I/O context while the completion is parked.
     auto stopped = std::async(std::launch::async, [&] { server.stop(); });
     const bool ioStopped = RecordingServerStopTest::waitIoStopped(server);
-    release.set_value();
+    hook->open(); // before any ASSERT: the stop() future's destructor waits for the join
     ASSERT_TRUE(ioStopped);
     ASSERT_EQ(stopped.wait_for(std::chrono::seconds(5)), std::future_status::ready);
     EXPECT_EQ(RecordingServerStopTest::sessionCount(server), 0u) << "a session admitted after the shutdown snapshot survived stop()";
