@@ -34,7 +34,7 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 | Branch | Tip | State | Next |
 |---|---|---|---|
-| `lt-claude/roller-d` | `b181379` (base) | D-a writer (Claude `opus`) working; option C live path | Phase 1 hand-off, then owner OK for the phase 2 hosted GUI, then `gpt-6-astra` high review |
+| `lt-claude/roller-d` | `b181379` (base) | D-a writer (Claude `opus`) working; option C live path | Phases 1 and 2 (isolated GUI, owner-approved), then `gpt-6-astra` high review |
 | `lt-sol/label-style` | `d52921b` | Unrelated, locked | Leave alone |
 | `lt-claude/heatmap-ab-isolation` | `88e7ef4` | Unrelated, locked | Leave alone |
 
@@ -49,7 +49,7 @@ Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orche
 
 - The owner is hardening `scripts/dev/build-queue.sh` and its tests (FM-195). Agents do not change them or
   sweep the owner's changes into commits.
-- The 2026-10-05 resource hold was released by the owner on 2026-10-06. Builds stay at `-j 2`; no automated GUI windows while the owner is working.
+- The 2026-10-05 resource hold was released by the owner on 2026-10-06. Builds stay at `-j 2`; no automated GUI windows while the owner is working, except: the owner approved (2026-10-06) the D-a phase 2 isolated GUI run and conductor use of the Mac for it.
 
 ## Next (priority order)
 
