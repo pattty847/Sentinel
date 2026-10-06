@@ -3,7 +3,7 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-06 03:50 EDT
+- **Updated:** 2026-10-06 05:00 EDT
 - **Conductor:** Claude Opus 5.5. The owner handed conducting back on 2026-10-06; Codex does not dispatch.
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10). No fallback active: the 2026-10-04
   GPT-reviews-GPT override ended when Claude usage reset.
@@ -34,8 +34,8 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 | Branch | Tip | State | Next |
 |---|---|---|---|
-| `lt-sol/retained-font-adoption` (W3b) | `e3a6684` on `a489126` (rebased by conductor, clean) | Astra round 2 PASS (source only). Overnight: queued build and native font + watch-rail tests with screenshots | Owner visual approval, then `land` |
-| `lt-sol/settings-clarity` (W3c) | `76eb38b` on `a489126` | Reviewed settings work moved onto main; obsolete toolbar/Controls text dropped (overflow redesign replaced it). Owner said settings look good and asked for hover explanations: gpt-6.1-sol adding tooltips, thread `01a1103a-cdfc-7690-884f-f2d41abda7b2` | Claude review, owner reads tooltip table, `land` |
+| `lt-sol/retained-font-adoption` (W3b) | `e3a6684` on `a489126` | Astra review PASS; native font 10/10 and watch-rail 13/13 on Metal, 83 screenshots checked (2026-10-06) | Owner visual approval, then `land` |
+| `lt-sol/settings-clarity` (W3c) | `2a0b629` on `a489126` | Settings work plus hover tooltips on every control (gpt-6.1-sol, thread `01a1103a-cdfc-7690-884f-f2d41abda7b2`). Claude review PASS after one text-fix round; native settings 35/35 on Metal | Owner reads the tooltip table, then `land` |
 | `lt-sol/label-style` | `d52921b` | Unrelated, locked | Leave alone |
 
 Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orchestrator/`. A detached
@@ -43,9 +43,10 @@ Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orche
 
 ## Waiting on the owner
 
-1. Settings appearance (W3c), after its reconciliation.
-2. Retained fonts (W3b) visual approval, after its native fixture run.
-3. S8: delete the legacy heatmap (Fable verdict GO).
+1. Settings tooltips wording (W3c); the owner already said the settings look good.
+2. Retained fonts (W3b) visual approval.
+3. Slice D: three questions in the draft packet's section 7.
+4. S8: delete the legacy heatmap (Fable verdict GO).
 
 ## Owner constraints in force
 
