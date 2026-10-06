@@ -14,7 +14,7 @@
 #include <QSlider>
 #include <QTimer>
 #include <QPointer>
-#include <QSet>
+#include <QHash>
 #include <QFont>
 
 class SentinelStreamClient;
@@ -93,10 +93,9 @@ private:
     bool    m_exposed        = false;
     bool    m_columnsResized = false;
     bool    m_adjustingColumnWidths = false;
-    bool    m_nameColumnUserSized = false;
     bool    m_fontRefreshPending = false;
     int     m_nameColumnPreferredWidth = 0;
-    QSet<int> m_userSizedColumns;
+    QHash<int, int> m_userColumnWidths;
     QFont   m_measuredFont;
     bool    m_fetchPending   = false;
     QString m_currentAsset   = "crypto";

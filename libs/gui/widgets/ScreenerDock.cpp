@@ -12,6 +12,7 @@
 #include <QDateTime>
 #include <QEvent>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include <QLabel>
 #include <QCheckBox>
 #include <QComboBox>
@@ -45,6 +46,35 @@ static constexpr int kColMktCap    = 6;
 static constexpr int kColCount     = 11;
 
 namespace {
+class ScreenerHeaderView final : public QHeaderView {
+public:
+    using QHeaderView::QHeaderView;
+    bool userResizeActive() const { return m_mousePressed; }
+protected:
+    void mousePressEvent(QMouseEvent* event) override {
+        m_mousePressed = false;
+        const int section = logicalIndexAt(event->pos());
+        if (event->button() == Qt::LeftButton && section >= 0) {
+            const int x = event->pos().x();
+            const int left = sectionViewportPosition(section);
+            const int right = left + sectionSize(section);
+            m_mousePressed = std::abs(x - left) <= 5 || std::abs(x - right) <= 5;
+        }
+        QHeaderView::mousePressEvent(event);
+    }
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        QHeaderView::mouseReleaseEvent(event);
+        m_mousePressed = false;
+    }
+    bool event(QEvent* event) override {
+        if (event->type() == QEvent::UngrabMouse || event->type() == QEvent::Hide)
+            m_mousePressed = false;
+        return QHeaderView::event(event);
+    }
+private:
+    bool m_mousePressed = false;
+};
+
 class ScreenerTableView final : public QTableView {
 public:
     using QTableView::QTableView;
@@ -176,6 +206,7 @@ void ScreenerDock::buildUi() {
     // ── Table ────────────────────────────────────────────────────────────────
     m_table = new ScreenerTableView(m_contentWidget);
     m_table->setObjectName("screenerRows");
+    m_table->setHorizontalHeader(new ScreenerHeaderView(Qt::Horizontal, m_table));
     m_table->setModel(m_model);
     m_table->viewport()->installEventFilter(this);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -216,10 +247,20 @@ void ScreenerDock::buildUi() {
     connect(m_table,          &QTableView::clicked,
             this, &ScreenerDock::onRowClicked);
     connect(m_table->horizontalHeader(), &QHeaderView::sectionResized, this,
-            [this](int logicalIndex, int, int) {
-        if (m_adjustingColumnWidths || logicalIndex == kColExchange || !m_table->isVisible()) return;
-        m_userSizedColumns.insert(logicalIndex);
-        if (logicalIndex == kColName) m_nameColumnUserSized = true;
+            [this](int logicalIndex, int, int newSize) {
+        const auto* header = static_cast<ScreenerHeaderView*>(m_table->horizontalHeader());
+        if (m_adjustingColumnWidths || logicalIndex == kColExchange ||
+            !header->userResizeActive() || m_table->isColumnHidden(logicalIndex)) return;
+        m_userColumnWidths.insert(logicalIndex, newSize);
+    });
+    connect(m_table->horizontalHeader(), &QHeaderView::sectionHandleDoubleClicked, this,
+            [this](int logicalIndex) {
+        // Auto-fit is also an explicit user width. Capture its final size after Qt handles
+        // the double-click so an earlier drag cannot be restored on the next font change.
+        QTimer::singleShot(0, this, [this, logicalIndex] {
+            if (logicalIndex == kColExchange || m_table->isColumnHidden(logicalIndex)) return;
+            m_userColumnWidths.insert(logicalIndex, m_table->columnWidth(logicalIndex));
+        });
     });
     static_cast<ScreenerTableView*>(m_table)->keyboardActivate = [this](const QModelIndex& index) {
         onRowClicked(index);
@@ -430,16 +471,14 @@ void ScreenerDock::applyRows(const QJsonArray& rows) {
     else m_table->verticalScrollBar()->setValue(oldScroll);
 
     if (!m_columnsResized) {
-        std::array<int, kColCount> manualWidths{};
-        for (int col : m_userSizedColumns) manualWidths[col] = m_table->columnWidth(col);
         m_adjustingColumnWidths = true;
         m_table->resizeColumnsToContents();
-        for (int col : m_userSizedColumns) m_table->setColumnWidth(col, manualWidths[col]);
+        for (auto it = m_userColumnWidths.cbegin(); it != m_userColumnWidths.cend(); ++it)
+            if (!m_table->isColumnHidden(it.key())) m_table->setColumnWidth(it.key(), it.value());
         m_adjustingColumnWidths = false;
         m_columnsResized = true;
-        m_nameColumnPreferredWidth = m_nameColumnUserSized
-            ? manualWidths[kColName] : m_table->columnWidth(kColName);
-    } else if (!m_nameColumnUserSized) {
+        m_nameColumnPreferredWidth = m_userColumnWidths.value(kColName, m_table->columnWidth(kColName));
+    } else if (!m_userColumnWidths.contains(kColName)) {
         // Re-measure only after a changed payload batch, never on each viewport resize.
         m_nameColumnPreferredWidth = static_cast<ScreenerTableView*>(m_table)->measuredColumnWidth(kColName);
     }
@@ -448,7 +487,7 @@ void ScreenerDock::applyRows(const QJsonArray& rows) {
 }
 
 void ScreenerDock::adjustDefaultNameColumnWidth() {
-    if (!m_table || !m_columnsResized || m_nameColumnUserSized || m_model->rowCount() == 0) return;
+    if (!m_table || !m_columnsResized || m_userColumnWidths.contains(kColName) || m_model->rowCount() == 0) return;
     const int viewportWidth = m_table->viewport()->width();
     if (viewportWidth <= 0) return;
 
@@ -477,16 +516,14 @@ void ScreenerDock::remeasureFontColumns() {
     m_measuredFont = m_table->font();
     if (!m_columnsResized || m_model->rowCount() == 0) return;
 
-    std::array<int, kColCount> manualWidths{};
-    for (int col : m_userSizedColumns) manualWidths[col] = m_table->columnWidth(col);
     const int horizontalScroll = m_table->horizontalScrollBar()->value();
     const int verticalScroll = m_table->verticalScrollBar()->value();
     m_adjustingColumnWidths = true;
     m_table->resizeColumnsToContents();
-    for (int col : m_userSizedColumns) m_table->setColumnWidth(col, manualWidths[col]);
+    for (auto it = m_userColumnWidths.cbegin(); it != m_userColumnWidths.cend(); ++it)
+        if (!m_table->isColumnHidden(it.key())) m_table->setColumnWidth(it.key(), it.value());
     m_adjustingColumnWidths = false;
-    m_nameColumnPreferredWidth = m_nameColumnUserSized
-        ? manualWidths[kColName] : m_table->columnWidth(kColName);
+    m_nameColumnPreferredWidth = m_userColumnWidths.value(kColName, m_table->columnWidth(kColName));
     adjustDefaultNameColumnWidth();
     m_table->horizontalScrollBar()->setValue(horizontalScroll);
     m_table->verticalScrollBar()->setValue(verticalScroll);
@@ -500,9 +537,13 @@ void ScreenerDock::updateColumns() {
         : QStringList{"Symbol", "Name", "Price", "Change %", "Volume", "Rel Vol", "Mkt Cap",
                       "P/E", "Div Yield%", "Sector", "Exchange"});
     // The default crypto view keeps just the fields that can identify and compare pairs.
+    m_adjustingColumnWidths = true;
     for (int col = 0; col < kColCount; ++col)
         m_table->setColumnHidden(col, crypto && (col == kColRelVol || col == kColMktCap ||
                                 col == kColExtra1 || col == kColExtra2 || col == kColSector));
+    for (auto it = m_userColumnWidths.cbegin(); it != m_userColumnWidths.cend(); ++it)
+        if (!m_table->isColumnHidden(it.key())) m_table->setColumnWidth(it.key(), it.value());
+    m_adjustingColumnWidths = false;
 }
 
 // ── UI slots ──────────────────────────────────────────────────────────────────
