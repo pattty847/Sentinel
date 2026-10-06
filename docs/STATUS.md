@@ -56,7 +56,7 @@ Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orche
 ## Next (priority order)
 
 1. Finish wave 3. The overflow redesign landed as `66e39b2` (2026-10-06: owner approved; native chart UI 42/42; full suite 96/96). Next: retained fonts (native fixture, owner visual, `land`); then settings W3c, whose same author must drop its now-obsolete toolbar/Controls explanation changes and rebase through `land`.
-2. Slice D: Fable drafting the task packet and cutover runbook overnight (read-only). Then high-risk review: widen roller serving to all 7 journal products. Cutover needs the owner
+2. Slice D: draft packet and cutover runbook in `docs/research/2026-10-one-world-pipeline.md` "Slice D task packet" (Fable, 2026-10-06), awaiting the owner's 3 answers in its section 7. Then dispatch, high-risk review: widen roller serving to all 7 journal products. Cutover needs the owner
    present. Slice E deletions after D.
 3. EATEN vs PULLED liquidity and ABSORPTION (owner's strongest direction): Fable plan after slice D. It crosses
    roller, HMC2, wire and renderer.

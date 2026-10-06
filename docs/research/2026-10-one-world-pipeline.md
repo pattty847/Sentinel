@@ -789,3 +789,119 @@ Metal-dependent cases report no MTLDevice and skip. No production deployment,
 fault injection was performed. Filesystem faults and journal disappearance are
 simulated only in temporary roots. Wire semantics and deploy marker logic are
 unchanged. Corrections remain uncommitted atop `093d39d`; main is its ancestor.
+
+
+## Slice D task packet (DRAFT 2026-10-06, Fable, read-only; awaiting owner answers in its section 7)
+
+Read-only planning result. Nothing was edited, built, run or deployed. Facts below were verified in the working tree at `main` = `4cd81c7` (STATUS said `a489126`; one STATUS commit landed since) and in live metrics at 2026-10-06 ~04:30 EDT.
+
+### 0. Findings that change the plan (read first)
+
+1. **The cutover switch in the plan does not exist.** `ConfigLoader.cpp:160-169` parses only `roller_shadow.{enabled,journal_dir,dir,socket,from,fault_min_duration_ms}`. There is no `feed.source`; `ClientHeatmapConfig::source` (`ConfigTypes.hpp:166`) is the GUI heatmap source, not a server feed selector.
+2. **The roller writes HMC2 only; nothing feeds the live view.** `RecorderConfig.publisher` (`BookRecorder.hpp:30`) is never set on the roller path (`Roller.cpp:94-143`, `Grid.cpp:65-68`); `grep publisher libs/core/roller` has no hit. Today the GUI's live open-minute heatmap comes from the primary recorder's publisher into `LiveService` (`ServerDataModel.cpp:198-204`), history from `ChunkService` built on `model.recordingDir()` + `model.recordingWatermarks` (`SentinelStreamServer.cpp:1891-1895`), and `recording.available` on the wire is `m_recorder != nullptr` (`ServerDataModel.hpp:76`, `SentinelStreamServer.cpp:781`). Slice D must re-point those three seams.
+3. **The +50 ms live-age gate is unresolved and is unlikely to hold.** `_agent/DECISIONS.md:104` (2026-10-03): "slice C must resolve the original +50 ms GUI-age gate before cutover". Slice C measured feed-to-durable-admission p50 519 ms / p95 968 ms (plan doc, "Latest review-round handoff measurement") because the roller applies only durable fan-out records (INV-114), and capture publishes after its 1 s block flush. Today's GUI age p50 is ~0.4 s. Serving the open minute from the roller adds roughly +0.5 s p50 / +1 s p95. This needs the owner (Q1).
+4. **Product set.** The shadow starts with `symbolList` = `default_symbols` (`SentinelServerApp.cpp:238-252`), so it is BTC-only by configuration, not by code limit. The server cannot read the capture launchd args (`~/Library/LaunchAgents/com.sentinel.capture.plist`: 7 symbols). It needs its own list.
+5. **The six other product trees already exist in `/Volumes/T7/sentinel-data/hmc2`** from the slice A backfill, each with `roller.json` covering 09-30, 10-01 and a partial 10-02 (committed through ~08:10Z). `roller_shadow.from` is `2026-10-03T00:00:00Z` (`config/server_config.yaml:56`). Widening with that `from` replays 10-03..today (4 days) per product (`ShadowRoller.cpp:485-507`) and leaves a 10-02 08:10Z..10-03 gap that only batch can fill. Batch takes the exclusive root lease (INV-115) and cannot run while the shadow holds the shared root lease (`.lock` present).
+6. **Config is read from the repo checkout.** The recorder runs with `WorkingDirectory=/Users/copeharder/Programming/Sentinel` and loads `config/server_config.yaml` (`main.cpp:19-23`). The config flip is a commit on `main`, not a deploy artefact. `roller_shadow.enabled: true` is live from the repo right now. Any checkout of another branch in the main worktree changes the service's next-start config (AGENTS 4b "runtime load of agent-writable config" applies).
+7. **Deploy marker.** `deploy-runtime.sh:31` greps `Recording v2 started`, which only the primary recorder logs (`ServerDataModel.cpp:221`). A cutover binary that stops the primary recorder is auto-rolled back by the script unless the marker is updated.
+8. **Self-alias refusal.** `startShadow` protects `recording.dir` and the live recording dir (`SentinelServerApp.cpp:263-268`); the shadow refuses an output root that aliases a protected root (`ShadowRoller.cpp:436`, test `RefusesAliasedPrimaryRoot`). If cutover makes `recordingDir()` the hmc2 root, the roller refuses itself unless the protection is conditional.
+9. **Restart cost.** Checkpoints hold no book state (FM-173; `Roller.cpp:94-126` rebuilds from the day's first snapshot). The 10-05 03:11Z restart (`c5f3dbe`) showed one scrape at `lag_seconds` 14 596 s, back under 5 s within one 60 s step: BTC alone catches up in under a minute. Seven products in parallel on the 16 GB Mac are unmeasured. Throughput: ~33 k records/s single-threaded (slice A); a BTC day is ~1.8 M records.
+
+### 1. Base, branch, files
+
+- Base: `main` @ `4cd81c7`. Branch `lt-claude/roller-d`, worktree via `scripts/dev/agent-worktree.sh create lt-claude/roller-d`.
+- Writer: Claude (`opus`), because the hand-off needs native evidence (hosted GUI age measurement). Reviewer: `gpt-6-astra` at high (AGENTS 10, high risk: recorder/roller). Note: the plan table (section 13) says "Claude; Fable review"; AGENTS 10 overrides it (cross-provider).
+- Owned files: `libs/core/roller/ShadowRoller.{cpp,hpp}`, `libs/core/roller/ShadowConfig.hpp`, `libs/core/roller/Roller.{cpp,hpp}`, `libs/core/roller/RollCli.cpp` (product-lease flag only), `apps/sentinel-server/SentinelServerApp.{cpp,hpp}`, `libs/core/servermodel/ServerDataModel.{cpp,hpp}`, `libs/core/ConfigLoader.cpp`, `libs/core/config/ConfigTypes.hpp`, `config/server_config.yaml`, `scripts/dev/deploy-runtime.sh`, `tests/roller/test_shadow.cpp`, `tests/roller/shadow_mutations.py`, `tests/roller/CMakeLists.txt`, `ops/monitoring/README.md`.
+- Do not touch: `libs/core/protocol/SentinelStreamServer.*` (seams are reachable through `ServerDataModel` accessors), hot files (`DataProcessor.cpp`, `HeatmapTwapStreamer.cpp`, `MarketDataCoreEngine.cpp`), `scripts/dev/build-queue.sh` (owner, FM-195), anything under `libs/gui` (W3b/W3c branches own it), `recording/` or `hmc2` data.
+- Other agents: `lt-sol/retained-font-adoption`, `lt-sol/settings-clarity` (GUI only, no overlap).
+
+### 2. Scope
+
+In scope (D-a, "roller serves recording"):
+1. `roller_shadow.products: [..]` (new key; default = `default_symbols`, today's behaviour). Each listed product must have a journal dir with a matching `product_metadata.product_id` header (`JournalReader.cpp:34`); unknown products are refused at startup with an error and a `setup_failures` increment, no worker (owner decision 2).
+2. Roller live publication: `RollOptions` gains a `publisher` passed into `RecorderConfig.publisher` (`Roller.cpp:110-126`); `ShadowRoller` takes an optional `LiveService` publisher sink. `configHash` (`Roller.cpp:34-42`) must stay unchanged (it does not hash callbacks: verify by test on the slice A root fixture).
+3. A roller watermark accessor: `ShadowRoller::watermarks(product, layer)` → `BookRecorder::Watermarks` (thread-safe copy from the product worker).
+4. New server key `recording.source: primary | roller` (default `primary`). With `roller`: `ServerDataModel::startRecorder` creates no primary `BookRecorder`; `recordingDir()` = `roller_shadow.dir`; `recordingAvailable()` = roller supervisor constructed; `recordingWatermarks` → roller; `LiveService` root = `roller_shadow.dir`, fed by the roller publisher; `m_stallSeries` covers the roller products; `protectedRoots` excludes the roller output root. `--require-recording` (`main.cpp:29-43`) must check the root actually in use.
+5. `deploy-runtime.sh:31`: accept `Roller started ... mode=live` or `Recording v2 started`. The roller logs `mode=live` when it is the serving path (`ShadowRoller.cpp:542-544`).
+6. `sentinel-roll --product-lease` (sets the existing `RollOptions::productWriterLease`, `Roller.hpp:20`) so the 10-02 gap and any repair can run beside a live roller.
+7. Docs: `ops/monitoring/README.md` shadow section and the marker note at lines 326-329.
+
+Out of scope: engine removal and `JournalFeed → ServerDataModel` for live book, trades and candles (plan section 5). The live order book (`ServerDataModel.cpp:526-539, 663-670, 726-748`), trades/candles (`:496-507`) and product metadata (REST client, `SentinelStreamServer.cpp:2268-2276`) keep coming from the engine. That is a second, smaller slice (D-b) after the soak. Deletions are slice E. Metric names keep `sentinel_roller_shadow_*` (Grafana rules at `ops/monitoring/grafana/provisioning/alerting/rules.yaml:344,381,418` key on them).
+
+The cutover flip is **not** the writer's: the writer lands the code with `recording.source: primary` and `roller_shadow.products` unchanged (BTC-USD). The conductor performs two owner-present steps (section 5): R1 widen (config products=7 + binary), R2 flip (`recording.source: roller`).
+
+### 3. Interfaces and invariants touched
+
+- `ShadowRoller(ShadowConfig, products, primaryRoot, registry)` (`ShadowRoller.hpp:13-14`); `startShadow` (`SentinelServerApp.cpp:260-274`).
+- `RollOptions` (`Roller.hpp:6-23`), `roll()` recorder build (`Roller.cpp:102-143`), fence/checkpoint (`:144-161`).
+- `RecorderConfig.publisher` (`BookRecorder.hpp:30`), `Watermarks` (`:66-69`), `watermarks()` (`:94`). Roller recorders already use `blockingQueue` + `deterministicResume` + product lease (`Grid.cpp:68`, `Roller.cpp:111`).
+- `LiveService::publish/releaseSymbol/start/shutdown` (`RecordingLive.hpp:161-176`); publish runs on the roller worker thread (hand-off only, as today's recorder worker at `ServerDataModel.cpp:199-204`).
+- `ServerDataModel` accessors `recordingLive/recordingAvailable/recordingDir/recordingWatermarks` (`ServerDataModel.hpp:75-82`); `startRecorder` (`.cpp:165-240`); stall series (`:191-196`, `:244-252`).
+- Wire: `recording.available` (`RecordingHistoryWire.hpp:22`, client `SentinelStreamClientParseHelpers.cpp:90-95`). Unchanged shape.
+- Invariants to keep: INV-105 (batch refuses live recording roots: after R2 `recording.dir`/the served root is hmc2, so repair needs `--product-lease`), INV-114 (durable-only admission), INV-115 (leases), INV-116 (comparison.json), FM-172, FM-173, FM-137 (live cadence = publish/2 holds; `liveCadenceMs(rc.livePublishMs)` stays).
+- Hot-path check: the publisher adds one `shared_ptr` hand-off per provisional record per layer per 500 ms per product, on the roller thread; no main-thread work, no per-record allocation beyond what the primary recorder already does.
+
+### 4. Acceptance checks (each must fail without its fix) and scenario evidence
+
+Unit/fixture (ShadowRollerTests, RollerTests, RecordingLiveTests, RecordingServerStopTests; `shadow_mutations.py` grows one mutation per item):
+- A1 `products: [7]` → 7 `sentinel_roller_shadow_running` series; a listed product with no journal dir → refused, 0 workers for it, error logged.
+- A2 Roller publisher: with `recording.source: roller`, a `LiveService` subscriber receives open-minute records for a non-default product (PEPE fixture); fails today (no publisher).
+- A3 `recordingWatermarks("PEPE-USD","near").minuteThroughMs` advances from the roller; `ChunkService::availability` lists PEPE from the hmc2 root; fails today (zero/absent).
+- A4 `recording.available` is true with no primary recorder; fails today.
+- A5 Self-alias: shadow starts with output root == served root; fails today (`RefusesAliasedPrimaryRoot` path).
+- A6 `configHash` of an existing slice-A/BTC root is unchanged after adding the publisher (reopen fixture; a changed hash throws "checkpoint policy/range mismatch", `Roller.cpp:117-118`).
+- A7 `recording.source: primary` default: all current suites pass unchanged; `ServerFeedAdmission`, `RecordingServerStop` unchanged.
+- A8 `--require-recording` under `roller` checks the hmc2 root; fails today (checks `recording.dir` only).
+- A9 `deploy-runtime.sh --dry-run server` plus a shell check that `verify_writes` matches the new marker in a sample log (the script hard-codes `$LOGS`; parametrise it for the test).
+
+Scenario evidence (required in the hand-off, per AGENTS 10 high-risk):
+- Short outage: extend `ThirtySecondOutageNeverEntersCooldown` to assert live publication resumes and no missing minute (strict `hmc2_diff` vs batch) across a 30 s fake-clock outage.
+- Socket failure: `EofDiscardsProvisionalAndRecoversJournal`, `RingMissCatchesUpToDurableTip`, `JournalUnavailableResumesAppliedCursorWithoutReplay` extended with a live subscriber: no duplicate or out-of-order provisional record reaches `LiveService`.
+- Restart mid-minute: in the `ShadowServerTestAccess` fixture, stop the server 20 s into a minute, restart, and prove the straddled minute commits once and byte-identical to batch; record the cold-start catch-up time for 7 synthetic products.
+- Reconnect: `CatchupJoinsSocketOverlapExactlyOnce` with publisher attached.
+- Low-price product: a real PEPE journal hour (`/Volumes/T7/sentinel-data/raw-l2/PEPE-USD/2026/10/06/`, read-only copy to a temp root) rolled with the derived grid (`Grid.cpp:34-53`): rows below $0.005 present in `hmc2_dump` output and in the published live record; strict diff vs batch 0.
+- Multi-product parity: after R1, 14 mismatch series at 0 for 48 h (section 5).
+- Day boundary: a two-day synthetic journal for 2 products: `roller.json.days` gains the new key, no missing 23:59/00:00 column, `HourlyWorkerChecksOnlyCompletedHours` continues; after R1, one real UTC midnight for 7 products.
+- Native: hosted GUI (own `--api-port`, `--agent-host`, `--no-screener`) with `heatmap.source: recording` (`config/client_config.yaml:7`): screenshots `heatmap` for BTC-USD and PEPE-USD, and `liveDataAgeMs` p50/p95 over 10 min (`HeatmapTileNode.hpp:113`, telemetry via Agent API) before and after R2 on the writer's own server instance (never the owner's recorder).
+
+Validation scope: format touched files; `build-queue.sh --label lt-claude/roller-d -- cmake --build --preset mac-clang -j 2`; targeted ctest `ShadowRollerTests|RollerTests|RollerLiveFixtureTests|RecordingLiveTests|RecordingServerStopTests|ServerFeedAdmission|ServerMetrics`; `tests/roller/shadow_mutations.py` through the queue. Full ctest only in `land`.
+
+### 5. Cutover and rollback runbook (conductor, owner at the Mac)
+
+Common preconditions (all must hold; query VictoriaMetrics at 8428):
+- `increase(sentinel_roller_shadow_mismatch_total[48h]) == 0` for every series; `increase(sentinel_roller_shadow_comparison_failures_total[48h]) == 0`; `sentinel_roller_shadow_fault_cooldown == 0`; `sentinel_roller_shadow_lag_seconds < 5` for every product now and `quantile_over_time(0.99, ...[24h]) < 10`; `time() - sentinel_roller_shadow_last_comparison_timestamp_seconds < 7200`.
+- `sentinel_capture_feed_up == 1` for 7; `sentinel_fanout_clients == 1`; `increase(sentinel_fanout_resume_misses_total[48h]) == 0`; `min(sentinel_fanout_ring_oldest_age_seconds) >= 55` (now 56-60 s: the ring holds 60 s, so a restart must finish in under a minute or fall back to file catch-up, which is tested).
+- `sentinel_recorder_disk_errors_total` and `queue_drops_total` 0 (now 0); T7 free space > 20 GB; screen not locked; build queue idle; no GUI host session; main checkout on `main` at the landed commit with a clean `git status`; `~/Sentinel-runtime/bin/sentinel-server.rollback` present.
+- Baseline captured: `liveDataAgeMs` p50/p95 (10 min) from a hosted GUI, and `hmc2_dump` newest columns for BTC near/deep.
+
+R1 — widen (binary + config, `recording.source: primary`):
+1. Land `lt-claude/roller-d`. In the same landing, set `roller_shadow.products` to the 7 capture symbols and bump `roller_shadow.from` to the UTC midnight of the deploy day (limits replay to ≤ 1 day per product; BTC's checkpoint days carry it forward, `ShadowRoller.cpp:500-504`). The 10-02 08:10Z..`from` gap for 6 products is filled later with `sentinel-roll --product-lease` (slice E or a conductor task; not needed to serve).
+2. `scripts/dev/build-queue.sh --label deploy -- cmake --build --preset mac-clang -j 2 --target sentinel-server`, then `scripts/dev/deploy-runtime.sh server`. Expect `sentinel-server: writing` within 60 s.
+3. Watch 15 min: run log `rg ' [WEF] '`; 7 `Roller started ... mode=shadow` lines; `running == 1` for 7; `lag_seconds` falling to < 5 for every product (record how long); primary `Recording v2 stats` advancing; CPU via `top -l 1` (note the 7 parallel replays); no primary `column_overdue`.
+4. Soak 48 h, all 14 mismatch series 0, one UTC midnight included. Rollback trigger during soak: any mismatch increase, `fault_cooldown == 1`, primary `column_overdue > 120` or `disk_errors > 0`. Rollback command: `scripts/dev/deploy-runtime.sh rollback server` (restores `c5f3dbe`; it ignores the new keys).
+
+R2 — flip (config only; same binary):
+1. Commit `recording.source: roller` on `main` (one-line change, owner approves the commit). Preconditions above re-checked.
+2. `scripts/dev/deploy-runtime.sh server` (redeploys the same build; the script's restart and marker check are the sanctioned path). Expect the new marker within 60 s; the script auto-restores the previous binary otherwise (then also revert the config commit).
+3. Watch: 0-5 min: `rg ' [WEF] '`, `recording.available` true on a hosted GUI, PEPE-USD and BTC-USD `heatmap` screenshots, `sentinel_recorder_live_publish_drops_total` not increasing, `lag_seconds < 5` for 7. 10 min: `liveDataAgeMs` p50/p95 vs baseline (Q1 bound). 60-70 min: first hourly comparison after the flip passes. 24 h: midnight boundary clean. 48 h: soak complete (plan 8.5).
+4. Rollback triggers: marker absent (automatic); mismatch increase; `lag_seconds > 60` for 5 min on any product; `running == 0` for 5 min; GUI age p95 above the owner's bound; live publish drops increasing; any `E` line in `data`/`render` for chunk or live serving. Command: revert the config commit on `main`, then `scripts/dev/deploy-runtime.sh server` (same binary, primary path), verify `Recording v2 started` within 60 s. The primary resumes with a hole in `recording/` since the flip (plan 8.6).
+
+### 6. Risks (ranked) and plan-versus-code contradictions
+
+1. Live-age regression from durable-only admission (finding 3). Owner question.
+2. Config read from the repo checkout (finding 6): a stray checkout or an agent edit of `config/server_config.yaml` on `main` changes the service at its next restart. Candidate FM entry at landing; reviewer must ask about it (AGENTS 4b).
+3. Seven parallel day replays plus the hourly oracle (87.5 product-day scans/day, README line 320) on the 16 GB Mac while the primary recorder is authoritative. Mitigated by the `from` bump; measured in R1 step 3.
+4. Deploy marker and self-alias refusal (findings 7, 8): both produce "no data" rather than bad data; both have acceptance checks.
+5. Lease conflict for gap backfill (finding 5); mitigated by `--product-lease`; INV-105 must be re-read after R2 (the served root is now a "live recording root").
+6. Engine stays a dependency for live book/trades until D-b; not a regression.
+7. `configHash` drift from any `RecorderConfig` default change refuses every existing product root (A6).
+
+Contradictions with current code: plan 8.5 `feed.source` key (absent); plan 5/9 names `MarketDataCoreEngine` and `SentinelServerApp.cpp:65-215` (the server holds `MarketDataFeeds`, `SentinelServerApp.hpp:32`, callbacks at `.cpp:101-186`); plan 8.5 "restart is a few seconds; catches up from the ring" (restart replays the day anchor, FM-173); plan 9 says `BookRecorder::localClock` goes (still at `BookRecorder.hpp:73`); plan 13 reviewer assignment (AGENTS 10 overrides); plan 4.1 "delete queueDrops" (primary live recorder still has the 4096-slot non-blocking queue, `BookRecorder.cpp:143`; the roller path is blocking, `Grid.cpp:68`).
+
+### 7. Owner questions (max 3)
+
+1. Live heatmap age after R2: accept roughly +0.5 s p50 / +1 s p95 for the open minute (history unchanged), with provisional publication as a later slice? Default: accept, gate = measured p95 ≤ 1.5 s over 10 min; the +50 ms gate is retired for the open minute.
+2. Scope split: D-a (this packet) now, engine replacement by `JournalFeed` (D-b) after the 48 h soak? Default: yes.
+3. `roller_shadow.from` bumped to the R1 day and the 10-02..R1 gap for six products filled by batch later? Default: yes, fill in slice E.
+
+WORKFLOW: the plan's cutover switch and line references were taken on trust in STATUS; `rg` on the config loader and the deploy marker would have surfaced findings 1 and 7 before any slice D dispatch.
