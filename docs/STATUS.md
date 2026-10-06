@@ -35,7 +35,7 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 | Branch | Tip | State | Next |
 |---|---|---|---|
 | `lt-astra/complete-overflow` | `665c0ee` on `3aac4d0` | Keeps the inline toolbar and makes the right-edge `>>` a complete menu. Sol review PASS; full 96/96 and native PASS (both fonts, actual Metal) | Owner visual approval, then land |
-| `lt-sol/retained-font-adoption` (W3b) | `e297743` on `3aac4d0` | Astra round 2 PASS (source only); native and full gates not run (held during the Oct 5 freeze) | After the owner releases the resource hold: native + full gate at `-j 2`, owner visual approval, land. Astra thread `01a10eeb-486c-7812-8c1e-db7f3f1754ce` |
+| `lt-sol/retained-font-adoption` (W3b) | `e297743` on `3aac4d0` | Astra round 2 PASS (source only); native and full gates not run (held during the Oct 5 freeze) | Native fixture run (pops windows: only when the owner is not working), owner visual approval, then `land` (runs the full suite). Astra thread `01a10eeb-486c-7812-8c1e-db7f3f1754ce` |
 | `lt-sol/settings-clarity` (W3c) | `b27f37d` on `5129d1c` | Review and full 95/95 PASS; held | After overflow lands: same author removes its toolbar/Controls explanation changes, then owner approves settings appearance. Do not land as-is |
 | `lt-sol/label-style` | `d52921b` | Unrelated, locked | Leave alone |
 
@@ -44,16 +44,15 @@ Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orche
 
 ## Waiting on the owner
 
-1. Overflow visual approval (`665c0ee`).
+1. Overflow visual approval (`665c0ee`): owner checking with `sentinel /Volumes/T7/sentinel-worktrees/lt-astra-complete-overflow`.
 2. Settings appearance (W3c), after its reconciliation.
-3. Release the resource hold (heavy builds, full tests, GUI runs).
-4. S8: delete the legacy heatmap (Fable verdict GO).
+3. S8: delete the legacy heatmap (Fable verdict GO).
 
 ## Owner constraints in force
 
 - The owner is hardening `scripts/dev/build-queue.sh` and its tests (FM-195). Agents do not change them or
   sweep the owner's changes into commits.
-- Resource hold from 2026-10-05 22:15 (desktop freeze) is still in force: no heavy builds, full tests or GUI runs until the owner releases it. The owner set `-j 2` for builds on 2026-10-06; that alone is not a release.
+- The 2026-10-05 resource hold was released by the owner on 2026-10-06. Builds stay at `-j 2`; no automated GUI windows while the owner is working.
 
 ## Next (priority order)
 
