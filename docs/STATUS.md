@@ -3,7 +3,7 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-06 ~18:45 EDT. D-a landed (`e8958cd`, full suite 97/97); next R1 with the owner at the Mac.
+- **Updated:** 2026-10-06 18:45 EDT. R1 deployed; 48 h soak running until 2026-10-08 ~18:40 EDT.
 - **Conductor:** Claude Opus 5.5. The owner handed conducting back on 2026-10-06; Codex does not dispatch.
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10). No fallback active: the 2026-10-04
   GPT-reviews-GPT override ended when Claude usage reset.
@@ -18,7 +18,7 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 ## Services (owner's Mac, launchd)
 
-- **Recorder** deployed 2026-10-04 23:11 from `c5f3dbe` (per-product book tick). Shadow roller ON for BTC-USD,
+- **Recorder** deployed 2026-10-06 18:36 EDT from `08d3bb8` (R1: D-a code, roller shadow on all 7 capture products from 2026-10-06, `recording.source: primary`). All 7 lags < 5 s within 54 s of the deploy; server 4% CPU, 243 MB. BTC `comparison.json` moved aside to `comparison.json.pre-r1` (owner-approved; the `from` bump broke its identity, FM-203), so BTC parity restarts from 2026-10-06 00:00Z. R1 soak gates (plan slice D section 5): all 14 mismatch series 0 for 48 h incl. one UTC midnight; rollback triggers: any mismatch, fault_cooldown 1, primary column_overdue > 120, disk_errors > 0; rollback = `deploy-runtime.sh rollback server` + revert `08d3bb8`. Previous deploy notes: Shadow roller ON for BTC-USD,
   writing `/Volumes/T7/sentinel-data/hmc2`. The 48 h soak passed (2026-10-05 22:17). At 2026-10-06 01:55:
   near/deep mismatches 0, setup/comparison failures 0, lag 0.9 s; primary queue drops and disk errors 0.
   Global invalidations are 30 and cumulative; they are not a parity signal.
@@ -48,7 +48,7 @@ None. (S8 legacy heatmap deletion approved by the owner 2026-10-06; see Next.)
 
 - The owner is hardening `scripts/dev/build-queue.sh` and its tests (FM-195). Agents do not change them or
   sweep the owner's changes into commits.
-- The 2026-10-05 resource hold was released by the owner on 2026-10-06. Builds stay at `-j 2`; no automated GUI windows while the owner is working, except: the owner approved (2026-10-06) the D-a phase 2 isolated GUI run and conductor use of the Mac for it, and said isolated agent GUIs running in the background do not bother them (they will not close them).
+- The 2026-10-05 resource hold was released by the owner on 2026-10-06. Builds stay at `-j 2` while the owner is at the Mac; the owner allows more (`-j 6` used) while away (2026-10-06); no automated GUI windows while the owner is working, except: the owner approved (2026-10-06) the D-a phase 2 isolated GUI run and conductor use of the Mac for it, and said isolated agent GUIs running in the background do not bother them (they will not close them).
 
 ## Next (priority order)
 
