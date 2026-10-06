@@ -129,6 +129,11 @@ Verified 2026-09-27 with codex-cli 0.158; 0.160 was installed by 2026-10-05. Re-
   directory; it only limits writes. No window server or Metal. `.git` stays read-only even inside a writable
   root, so it cannot stage, commit or rebase in a linked worktree (`index.lock: Operation not permitted`);
   `--add-dir <repo>/_agent` does let it append to `_agent/`.
+  Tested 2026-10-06 with `codex sandbox` (no model use): adding `<repo>/.git` to `writable_roots` is still
+  blocked, but a clone made with `git clone --shared --separate-git-dir=<dir not named .git>` commits when that
+  dir is a writable root, and it still cannot write the main repo, push to it or repoint its `.git` file.
+  Not adopted yet (needs `agent-worktree.sh` create/land support; the conductor must only fetch from such a
+  clone, never run git inside it, because its config and hooks are agent-writable).
 - Thread id: the first JSONL event is `{"type":"thread.started","thread_id":"<uuid>"}`. Continue with
   `codex exec resume <uuid> -m <same model> -c model_reasoning_effort='"high"' -c sandbox_mode='"workspace-write"'
   -c approval_policy='"never"' "<follow-up>"` (or `--last`); add
