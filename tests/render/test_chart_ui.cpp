@@ -484,6 +484,10 @@ TEST(ChartToolbar, ChartShortcutOpensCompleteMenuFromWidgetsAndEmbeddedQuickWind
         toolbar->controlsMenu()->hide();
         QTest::qWait(20);
     }
+    window.raise();
+    window.activateWindow();
+    window.windowHandle()->requestActivate();
+    ASSERT_TRUE(QTest::qWaitForWindowActive(&window, 2000));
     outside->setFocus();
     ASSERT_TRUE(QTest::qWaitFor([&] { return outside->hasFocus(); }, 2000));
     QTest::keyClick(outside, Qt::Key_F10, Qt::ShiftModifier);
