@@ -49,6 +49,20 @@ void updateScreener(ScreenerDock& dock, const QString& asset, const QJsonArray& 
         Q_ARG(QByteArray, QJsonDocument(rows).toJson(QJsonDocument::Compact))));
 }
 
+void dragScreenerColumn(QTableView* table, int column, int desiredWidth) {
+    auto* header = table->horizontalHeader();
+    ASSERT_NE(header, nullptr);
+    const int currentWidth = header->sectionSize(column);
+    const QPoint handle(header->sectionViewportPosition(column) + currentWidth - 2, header->height() / 2);
+    ASSERT_GE(handle.x(), 0);
+    ASSERT_LT(handle.x(), header->viewport()->width());
+    const QPoint destination(handle.x() + desiredWidth - currentWidth, handle.y());
+    QTest::mousePress(header->viewport(), Qt::LeftButton, Qt::NoModifier, handle);
+    QTest::mouseMove(header->viewport(), destination);
+    QTest::mouseRelease(header->viewport(), Qt::LeftButton, Qt::NoModifier, destination);
+    QCoreApplication::processEvents();
+}
+
 TEST(WatchRail, PendingAckRefusalKeyboardAndCatalogTruth) {
     QTemporaryDir settingsDir;
     ASSERT_TRUE(settingsDir.isValid());
@@ -353,7 +367,7 @@ TEST(Screener, LongNamesKeepQuoteColumnsVisibleAndManualWidthAcrossRefreshAndRes
     dock.resize(480, 360);
     QCoreApplication::processEvents();
     const int automaticNameWidth = table->columnWidth(1);
-    table->setColumnWidth(1, automaticNameWidth + 12);
+    dragScreenerColumn(table, 1, automaticNameWidth + 12);
     const int userNameWidth = table->columnWidth(1);
     ASSERT_GT(userNameWidth, 0);
     table->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);

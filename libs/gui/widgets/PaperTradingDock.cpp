@@ -122,7 +122,7 @@ void PaperTradingDock::buildUi() {
     m_marketHealthLabel = new QLabel("Initializing", root);
     m_marketHealthLabel->setObjectName("paperMarketHealth");
     m_marketHealthLabel->setWordWrap(true);
-    m_marketHealthLabel->setStyleSheet("color: #b0b0b0; font-size: 11px;");
+    m_marketHealthLabel->setStyleSheet("color: #b0b0b0;");
     rootLayout->addWidget(m_marketHealthLabel);
 
     // Tab bar
@@ -169,7 +169,7 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
     auto addRow = [&](int row, const QString& label, QLabel*& valueLabel) {
         posGrid->addWidget(new QLabel(label, posFrame), row, 0);
         valueLabel = new QLabel(QStringLiteral("---"), posFrame);
-        valueLabel->setStyleSheet("QLabel { color: #e0e0e0; font-family: 'Roboto Mono'; font-size: 11px; }");
+        valueLabel->setStyleSheet("QLabel { color: #e0e0e0; }");
         posGrid->addWidget(valueLabel, row, 1);
     };
 
@@ -277,7 +277,6 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
     m_orderLog->verticalHeader()->setVisible(false);
     m_orderLog->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_orderLog->setMaximumHeight(120);
-    m_orderLog->setStyleSheet("QTableWidget { font-size: 10px; font-family: 'Roboto Mono'; }");
     layout->addWidget(m_orderLog);
 
     layout->addStretch();
@@ -294,11 +293,11 @@ void PaperTradingDock::buildAlgoTab(QWidget* parent) {
     auto* statusRow = new QHBoxLayout();
     m_algoStatusLabel = new QLabel(QStringLiteral("STOPPED"), algoGroup);
     m_algoStatusLabel->setObjectName(QStringLiteral("paperAlgoStatus"));
-    m_algoStatusLabel->setStyleSheet("QLabel { color: #888; font-family: 'Roboto Mono'; font-size: 11px; }");
+    m_algoStatusLabel->setStyleSheet("QLabel { color: #888; font-weight: bold; }");
     m_algoFillCountLabel = new QLabel(QStringLiteral("Fills: 0"), algoGroup);
-    m_algoFillCountLabel->setStyleSheet("QLabel { color: #aaa; font-size: 10px; }");
+    m_algoFillCountLabel->setStyleSheet("QLabel { color: #aaa; }");
     m_algoPnlLabel = new QLabel(QStringLiteral("PnL: $0.00"), algoGroup);
-    m_algoPnlLabel->setStyleSheet("QLabel { color: #aaa; font-size: 10px; }");
+    m_algoPnlLabel->setStyleSheet("QLabel { color: #aaa; }");
     statusRow->addWidget(m_algoStatusLabel);
     statusRow->addWidget(m_algoFillCountLabel);
     statusRow->addWidget(m_algoPnlLabel);
@@ -409,7 +408,7 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
     m_btRunBtn = new QPushButton(QStringLiteral("▶ Run Backtest"), parent);
     m_btRunBtn->setStyleSheet("QPushButton { background: #1a3a6a; color: #82b4ff; border: 1px solid #4478cc; padding: 4px 12px; }");
     m_btStatus = new QLabel(QStringLiteral("Select a trade log and press Run."), parent);
-    m_btStatus->setStyleSheet("QLabel { color: #888; font-size: 10px; }");
+    m_btStatus->setStyleSheet("QLabel { color: #888; }");
     runRow->addWidget(m_btRunBtn);
     runRow->addWidget(m_btStatus, 1);
     layout->addLayout(runRow);
@@ -417,7 +416,6 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
     // ── Output area ─────────────────────────────────────────────────────────
     m_btOutput = new QPlainTextEdit(parent);
     m_btOutput->setReadOnly(true);
-    m_btOutput->setFont(QFont(QStringLiteral("Roboto Mono"), 10));
     m_btOutput->setStyleSheet(
         "QPlainTextEdit { background: #0f1218; color: #c0c8d4; border: 1px solid #222; }");
     m_btOutput->setMinimumHeight(120);
@@ -440,12 +438,12 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
         const QString inputPath = m_btFilePath->text().trimmed();
         if (inputPath.isEmpty()) {
             m_btStatus->setText(QStringLiteral("Error: no trade log selected."));
-            m_btStatus->setStyleSheet("QLabel { color: #f44336; font-size: 10px; }");
+            m_btStatus->setStyleSheet("QLabel { color: #f44336; }");
             return;
         }
         if (!QFileInfo::exists(inputPath)) {
             m_btStatus->setText(QStringLiteral("Error: file not found."));
-            m_btStatus->setStyleSheet("QLabel { color: #f44336; font-size: 10px; }");
+            m_btStatus->setStyleSheet("QLabel { color: #f44336; }");
             return;
         }
 
@@ -472,7 +470,7 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
 
         if (backtestBin.isEmpty()) {
             m_btStatus->setText(QStringLiteral("Error: sentinel_backtest binary not found."));
-            m_btStatus->setStyleSheet("QLabel { color: #f44336; font-size: 10px; }");
+            m_btStatus->setStyleSheet("QLabel { color: #f44336; }");
             return;
         }
 
@@ -484,7 +482,7 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
 
         m_btOutput->clear();
         m_btStatus->setText(QStringLiteral("Running..."));
-        m_btStatus->setStyleSheet("QLabel { color: #ffc107; font-size: 10px; }");
+        m_btStatus->setStyleSheet("QLabel { color: #ffc107; }");
         m_btRunBtn->setEnabled(false);
 
         const QString symbol  = m_btSymbol->text().trimmed().isEmpty()
@@ -508,10 +506,10 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
                 m_btRunBtn->setEnabled(true);
                 if (status == QProcess::CrashExit || code != 0) {
                     m_btStatus->setText(QString("Exited with code %1").arg(code));
-                    m_btStatus->setStyleSheet("QLabel { color: #f44336; font-size: 10px; }");
+                    m_btStatus->setStyleSheet("QLabel { color: #f44336; }");
                 } else {
                     m_btStatus->setText(QStringLiteral("Done."));
-                    m_btStatus->setStyleSheet("QLabel { color: #4caf50; font-size: 10px; }");
+                    m_btStatus->setStyleSheet("QLabel { color: #4caf50; }");
                 }
             });
         }
@@ -565,7 +563,7 @@ void PaperTradingDock::resetForSymbolChange() {
     if (m_symbolLabel) m_symbolLabel->setText(QStringLiteral("PAPER  |  %1").arg(m_symbol.isEmpty() ? QStringLiteral("No symbol") : m_symbol));
     updateNotional();
     if (m_lastPriceLabel) {
-        m_lastPriceLabel->setStyleSheet("QLabel { color: #e0e0e0; font-family: 'Roboto Mono'; font-size: 11px; }");
+        m_lastPriceLabel->setStyleSheet("QLabel { color: #e0e0e0; }");
         m_lastPriceLabel->setText(QStringLiteral("---"));
     }
     if (m_posLabel) {
@@ -646,7 +644,7 @@ void PaperTradingDock::setAlgoState(const QString& text, const QString& reason,
         m_algoStatusLabel->setToolTip(reason);
         const char* color = text.startsWith(QStringLiteral("RUNNING")) ? "#4caf50"
                           : text == QStringLiteral("UNAVAILABLE") ? "#f44336" : "#ffcc80";
-        m_algoStatusLabel->setStyleSheet(QStringLiteral("QLabel { color: %1; font-weight: bold; font-size: 11px; }").arg(color));
+        m_algoStatusLabel->setStyleSheet(QStringLiteral("QLabel { color: %1; font-weight: bold; }").arg(color));
     }
     if (m_startBtn) { m_startBtn->setEnabled(canStart); m_startBtn->setToolTip(reason); }
     if (m_stopBtn) { m_stopBtn->setEnabled(canStop); m_stopBtn->setToolTip(reason); }
@@ -663,7 +661,7 @@ void PaperTradingDock::onTradeReceived(const Trade& trade) {
         const QString sideColor = trade.side == AggressorSide::Buy ? "#4caf50"
                                 : trade.side == AggressorSide::Sell ? "#f44336"
                                 : "#e0e0e0";
-        m_lastPriceLabel->setStyleSheet(QString("QLabel { color: %1; font-family: 'Roboto Mono'; font-size: 11px; }").arg(sideColor));
+        m_lastPriceLabel->setStyleSheet(QString("QLabel { color: %1; }").arg(sideColor));
         updatePricePrecision(trade.price);
         m_lastPriceLabel->setText(QString("$%1").arg(trade.price, 0, 'f', priceDecimals(trade.price)));
     }

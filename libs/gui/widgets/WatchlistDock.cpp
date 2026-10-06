@@ -1,6 +1,7 @@
 #include "WatchlistDock.hpp"
 
 #include <QBrush>
+#include <QEvent>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QItemSelectionModel>
@@ -8,6 +9,8 @@
 #include <QLabel>
 #include <QRegularExpression>
 #include <QSettings>
+#include <QScrollBar>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <functional>
 
@@ -162,7 +165,7 @@ void WatchlistDock::buildUi() {
     m_status = new QLabel(m_contentWidget);
     m_status->setObjectName("watchStatus");
     m_status->setWordWrap(true);
-    m_status->setStyleSheet("color:#aaa; font-size:11px;");
+    m_status->setStyleSheet("color:#aaa;");
     layout->addWidget(m_status);
 
     connect(m_presetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -176,6 +179,22 @@ void WatchlistDock::buildUi() {
     connect(m_addButton, &QToolButton::clicked, this, &WatchlistDock::addPinnedSymbol);
     connect(m_symbolEdit, &QLineEdit::returnPressed, this, &WatchlistDock::addPinnedSymbol);
     connect(m_pinButton, &QToolButton::clicked, this, &WatchlistDock::toggleSelectedPin);
+}
+
+void WatchlistDock::changeEvent(QEvent* event) {
+    DockablePanel::changeEvent(event);
+    if (event->type() != QEvent::ApplicationFontChange && event->type() != QEvent::FontChange) return;
+    if (m_fontRefreshPending) return;
+    m_fontRefreshPending = true;
+    QTimer::singleShot(0, this, [this] {
+        m_fontRefreshPending = false;
+        if (!m_tree) return;
+        const int horizontalScroll = m_tree->horizontalScrollBar()->value();
+        const int verticalScroll = m_tree->verticalScrollBar()->value();
+        m_tree->header()->resizeSections(QHeaderView::ResizeToContents);
+        m_tree->horizontalScrollBar()->setValue(horizontalScroll);
+        m_tree->verticalScrollBar()->setValue(verticalScroll);
+    });
 }
 
 void WatchlistDock::loadPreset(int index) {
