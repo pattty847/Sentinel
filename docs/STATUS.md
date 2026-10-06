@@ -3,11 +3,11 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-06. New conductor session; slice D-a dispatched.
+- **Updated:** 2026-10-06 ~16:00 EDT. D-a READY at `a8ae941`; Astra review round 1 running.
 - **Conductor:** Claude Opus 5.5. The owner handed conducting back on 2026-10-06; Codex does not dispatch.
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10). No fallback active: the 2026-10-04
   GPT-reviews-GPT override ended when Claude usage reset.
-- **Budget (D-a dispatch):** Claude weekly 97% left; Codex weekly 58% left, resets in ~5.4 days.
+- **Budget (D-a review):** Claude weekly 94% left; Codex weekly 58% left but +18% DEFICIT (runs out in ~2.3 d at this pace); owner holds 2 Codex reset credits.
 
 ## Resume (fresh conductor)
 
@@ -34,7 +34,7 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 | Branch | Tip | State | Next |
 |---|---|---|---|
-| `lt-claude/roller-d` | `b181379` (base) | D-a writer (Claude `opus`) working; option C live path | Phases 1 and 2 (isolated GUI, owner-approved), then `gpt-6-astra` high review |
+| `lt-claude/roller-d` | `a8ae941` | READY (writer: Claude `opus` agent, resumable). Review r1: `gpt-6-astra` high, thread `01a112a9-cc76-7262-8878-826364ff2a92`, output `.claude/acting-orchestrator/d-a/review-astra-r1.md` | Review verdict, fix round to the same writer if needed, then land; R1 with the owner |
 | `lt-sol/label-style` | `d52921b` | Unrelated, locked | Leave alone |
 | `lt-claude/heatmap-ab-isolation` | `88e7ef4` | Unrelated, locked | Leave alone |
 
@@ -58,7 +58,7 @@ Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orche
 3. After D: change-driven live publishing with a per-client max update rate (see the owner decisions block). Then EATEN vs PULLED liquidity and ABSORPTION (owner's strongest direction): Fable plan after slice D. It crosses
    roller, HMC2, wire and renderer.
 4. On hold (owner, 2026-10-06): TPO session choices become Session (draws New York, London, Asia and Australia together, like ExoCharts), 24H, 1W, 1M. Changes what the TPO draws; needs its own spec.
-5. Backlog: tick-size combo text clips at its fixed 84 px width ("$0.15 (unavailable)", pre-existing); owner GUI Agent API (17100) is unauthenticated; GUI RSS ~1.5 GB after 10 min; capture fan-out
+5. Backlog: internal disk has ~5 GB free (builds and logs at risk); `config/client_config.yaml` top-level `server:` is ignored (only `client.server` is read; nearly pointed an agent GUI at :8080); PEPE at its native 1e-8 tick draws ~200 px rows and logs "native rows exceed int32" in the GUI; docs name `gpt-6-sol` but `gpt-6.1-sol` exists; Codex writers could commit in the sandbox via a separate-gitdir clone (parked, `docs/AGENT_WORKFLOW.md`); tick-size combo text clips at its fixed 84 px width ("$0.15 (unavailable)", pre-existing); owner GUI Agent API (17100) is unauthenticated; GUI RSS ~1.5 GB after 10 min; capture fan-out
    `poll()` error loop without sleep (`CaptureFanout.cpp:417`, low); W2d live GUI display and Windows runtime
    unverified; TPO history budget refusal in the GUI log; nightly backup of `/Volumes/T7/sentinel-data` when the
    owner's new HDD arrives; internal disk space.
