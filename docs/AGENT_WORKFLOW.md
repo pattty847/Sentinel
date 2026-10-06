@@ -1,103 +1,162 @@
-# Agent Workflow (how Sentinel is built)
+# Agent Workflow Manual (read on demand)
 
-The working loop the owner and the orchestrator use, as practiced since 2026-09-27.
-The rules agents must follow live in `AGENTS.md` section 10; this file explains the loop
-around them. Durable session state (current sprint, open decisions) is in the
-orchestrator's Claude Code memory (`sentinel-roadmap`, `codex-delegation`,
-`role-ceo-orchestrator`), which every Claude session in this repo loads.
+Rules live in `AGENTS.md` (section 10 is the multi-agent protocol); live state lives in `docs/STATUS.md`.
+This file holds the how-to detail that only some tasks need. It describes tools; it does not override
+AGENTS.md. Remove a note here when it stops being true.
 
-## Roles
+## The loop in practice
 
-- **Owner** (solo developer): product direction, visual judgement, every decision that
-  changes behaviour or data, push to GitHub, permission prompts on the Mac.
-- **Orchestrator** (one Claude Code session, "Main Sentinel Work"): plans, dispatches,
-  reviews, commits for sandboxed agents, lands, deploys the always-on services, keeps
-  `_agent/` and the roadmap current. Exactly one orchestrator per repo; forked
-  sessions answer questions only.
-- **Lieutenants** (write tasks, each in its own git worktree and branch):
-  - Codex `gpt-6-astra` / `gpt-6-sol` (ChatGPT subscription): non-visual work: core,
-    recorder, capture, protocol, data paths. Sandboxed: no GPU, no window server, cannot
-    write the git index (the orchestrator commits for it).
-  - Claude subagents `opus` / `sonnet` (Claude subscription): UI and visual work (they can
-    run the GUI and read their own screenshots), plus anything Codex cannot verify.
-- **Reviewers** (read-only): always a different vendor from the author (Claude reviews
-  Codex, Codex reviews Claude).
-- **Claude Fable**: where a miss is expensive: final review for the always-on recorder and
-  the GPU heatmap core, large plans (S6, per-symbol connections, observability), data
-  forensics (FM-139), visual A/B QA.
+1. **Discuss.** The owner raises a goal or problem; the conductor investigates (or dispatches a read-only
+   investigation) and returns the cause and options with a recommended default.
+2. **Plan.** Anything cross-cutting gets a plan in `docs/research/` with the real decisions listed. The owner
+   answers; the answers are appended as "Owner decisions (approved)". No dispatch before agreement on
+   anything that changes behaviour, data or looks.
+3. **Dispatch** one task packet per writer (AGENTS.md section 10).
+4. **Review** the frozen tip (`git diff main...<tip>`). Findings ranked blocker/major/minor, each with a
+   failure scenario. Fixes go to the same writer thread (Codex `exec resume`, Claude `SendMessage`); the same
+   reviewer checks closure.
+5. **Land** with `scripts/dev/agent-worktree.sh land <branch>`, one branch at a time.
+6. **Deploy** services only through `scripts/dev/deploy-runtime.sh` (AGENTS.md section 4b), then watch the run
+   log and metrics against the reviewer's watch list.
+7. **Record.** Failure modes and invariants go to `_agent/`; current state replaces the old state in STATUS;
+   the owner gets one short digest.
 
-## The loop
+## Running and seeing the app
 
-1. **Discuss.** The owner raises a goal or a problem. The orchestrator investigates (or
-   dispatches a read-only investigation) and comes back with the cause and options.
-2. **Plan.** For anything cross-cutting, a plan doc in `docs/research/` (often written by
-   Fable) with the real decisions listed. The owner answers; decisions are appended to the
-   plan as "Owner decisions (approved)" and committed. No dispatch before agreement on
-   anything that changes behaviour, data or UX.
-3. **Dispatch.** A self-contained prompt: read AGENTS.md + the plan, worktree and branch,
-   scope and non-scope, files another agent is touching, acceptance tests (each must fail
-   without its fix), the build rule, the hand-off format (`READY:` / `BLOCKED:`).
-4. **Review.** Cross-vendor review of `git diff main...HEAD`, findings ranked
-   blocker/major/minor with a failure scenario. Fix rounds go back to the SAME agent
-   thread (Codex `exec resume`, Claude `SendMessage`) so context is kept. Recorder and GPU
-   core changes also get Fable's final review.
-5. **Land.** `scripts/dev/agent-worktree.sh land <branch>`: rebase onto main, build, full
-   ctest, range-diff gate, `--no-ff` merge, worktree removal. One branch at a time.
-6. **Deploy** (always-on services only): `scripts/dev/deploy-runtime.sh server|capture|both`
-   (signed copy, restart, verify writes within 60 s, auto-rollback), then watch the run
-   logs against the reviewer's watch list.
-7. **Record.** New failure modes and invariants go to `_agent/`; state goes to the
-   orchestrator's roadmap memory; the owner gets a short report.
+### GUI host (sandboxed agents and isolated runs)
 
-## Constraints that shape it
+- `scripts/dev/gui-host.py` runs OUTSIDE any sandbox on loopback (127.0.0.1:17190). The conductor starts it
+  detached from the main checkout: `nohup scripts/dev/gui-host.py >/dev/null 2>&1 & disown`. Stop it on purpose
+  with `pkill -TERM -f gui-host.py`. The host's 30-minute idle timeout does not bound a GUI orphaned by a
+  SIGKILLed host: end that with `pkill -f 'sentinel-gui.*--agent-host'`. Status: `curl -s 127.0.0.1:17190/status`.
+- Agents use `scripts/dev/gui-shot.sh`:
+  - `launch [--renderer gpu|legacy] [--replace] [--build <worktree path>] [--fresh-profile]` starts the GUI on a
+    spare API port with `--no-screener`.
+  - `api GET|POST /api/v1/...` drives state, viewport and heatmap settings.
+  - `shot <name> [--after <op>] [--settle]` returns the absolute PNG path to open.
+  - `docks focus <id>` shows that dock and hides others. Hosted dock changes persist in
+    `gui-host/profile/docks.ini`; `profile-reset` or `launch --fresh-profile` deletes only that file.
+  - `stop` ends the session.
+- By default the host runs main's build. `launch --build <worktree path>` runs only the fixed `sentinel-gui`
+  binary under a direct child of `/Volumes/T7/sentinel-worktrees` or `<main>/.claude/worktrees`, after realpath
+  containment and executable/`--agent-host` checks. Agents build their own branch through the build queue first;
+  the host never builds or runs CMake. It never starts a server (the recorder must be up).
+- Trust: the owner accepted on 2026-10-03 that unreviewed agent GUI builds run outside the sandbox through this
+  host with the owner's privileges. Host-enforced boundary: path containment, fixed argv, allowlisted
+  environment, one session, idle timeout. The in-GUI guardrails below live in the agent-compiled binary, so for
+  `--build` runs they are not host guarantees, and an agent GUI still talks to the owner's recorder on :8080.
+- `AgentHostMode`: the host passes `--agent-host <session dir>` and `--agent-host-symbols <list>` (default: seven
+  recorded products, override with `GUI_HOST_SYMBOLS`). `--agent-host` without a symbol list means an empty
+  allowlist: startup stays unsubscribed and every symbol-named request is refused. In this mode `target=main`,
+  retired `lab`/`aiCommentary` and unknown targets are refused; screenshots and general QSettings stay in the
+  fresh session dir; no trade command or algo start/stop is sent (choke point `RemoteGridDataSource`:
+  `sendTradeCommand`, `sendAlgoCommand`; note `/api/v1/input` can reach the chart's TP/SL controls); no outbound
+  request names a symbol outside the list (enforced at the `RemoteGridDataSource` send boundary, including
+  startup and reconnect resubscribes; a source-scan test fails when a new `m_client.<sender>` is unguarded).
+- If the host is not running, report the visual check as unverified and ask the conductor.
 
-- 16 GB Mac: builds, tests and benchmarks go through `scripts/dev/build-queue.sh`;
-  read-only reviews and planning overlap freely.
-- Usage is spread across both subscriptions. Before dispatching, the orchestrator runs
-  `scripts/dev/budget.sh` (CodexBar CLI: % left and reset per window) and routes work to the
-  subscription with room; when one is near its limit the other takes more work. A separate Fable
-  allowance has not been verified. On Oct 4 Claude weekly remaining fell from 3% to 2% across
-  a Fable review; Claude reviews are stopped under the owner's budget rule until the owner
-  changes the review policy or the weekly allowance resets.
-- Hot files (`MainWindowGpu.cpp`, `DataProcessor.cpp`, `MarketDataCoreEngine.cpp`,
-  `UnifiedGridRenderer.cpp`) are never edited by two branches at once.
-- Visual changes the owner has not seen do not become the default.
-- Agents never touch the launchd recorder/capture, recordings, signing keys, or push.
+### Agent API, screenshots and input
 
-## Known agent quirks
+- With a GUI running: `curl -s 'http://127.0.0.1:<port>/screenshot?name=<name>&target=window'` returns
+  `{"ok":true,"path":"./screenshots/<name>.png"}` relative to the GUI's cwd. Routes: `docs/AGENT_API.md`.
+- Drive the app through the Agent API: set symbol, timeframe, viewport and layers, wait for the change to render
+  (`/api/v1/operations/<id>?waitMs=`), then screenshot that frame (`afterOperation=`).
+- The standalone lab has its own `--screenshot`.
+- Claude Code reads PNGs directly; Codex opens local images mid-task or takes them with `codex exec -i <png>`.
+- The dev build is a raw binary with no app bundle; computer-use tools have not been verified to drive it. Ask
+  the owner to pan, zoom or click, then read the run log and screenshot.
 
-- Codex: always `< /dev/null`; pass `--add-dir <repo>/_agent` (it can then append to `_agent/` itself; verified 2026-10-02) but know that `.git` stays read-only in the sandbox even with `--add-dir <git-common-dir>`, so the orchestrator commits and rebases for it; resume needs
-  `-m <model>` and `-c sandbox_workspace_write.writable_roots=[...]`; never put backticks
-  in a double-quoted prompt (the shell eats them). Its sandbox cannot start the GUI, but it
-  can take screenshots of landed work through the GUI host
-  (`scripts/dev/gui-shot.sh`, AGENTS.md section 4b): the orchestrator keeps
-  `scripts/dev/gui-host.py` running outside the sandbox and rebuilds main after a GUI change lands.
-  After W1c (2026-10-04), the host also supports `launch --build <worktree>` for fixed binaries under
-  the allowed worktree roots (AGENTS.md section 4b). Lieutenants can validate their branch through safe
-  retained-dock / `window` grabs after a queued build; one hosted GUI session at a time.
-- Claude subagents: can launch the GUI on a separate `--api-port` with `--no-screener`;
-  screenshots use safe retained-dock/widget targets, `heatmap`, or `window` (W1c); never `main`; never run the GUI binary with `--help` (it starts a
-  full GUI).
+### Linux / cloud (no display)
 
-## Retro notes (folded from WORKFLOW: lines)
+- `scripts/dev/cloud-gui.sh start` runs Xvfb + server + GUI; `shot <name> window|heatmap|<dock ID>` saves (always pass a target: the script defaults to `main`, which AGENTS.md forbids)
+  `screenshots/<name>.png`; `logs` shows W/E/F lines; `stop` tears down. Build with
+  `cmake --build --preset linux-cloud` (deps from `scripts/setup/bootstrap-cloud.sh`, run by the SessionStart hook).
+- Mesa llvmpipe: pixels are real, frame timings are not. GPU tests pick the QRhi backend at run time
+  (`SENTINEL_RHI_BACKEND=d3d11|d3d12|vulkan|opengl|metal`) and print `GPU case skipped: <backend>: <reason>` when
+  they cannot create a QRhi with compute. See `docs/WINDOWS_GPU_TESTS.md`.
+- Live data needs `advanced-trade-ws.coinbase.com` and `api.coinbase.com` allowed; never put exchange API keys in
+  a cloud environment.
 
-- 2026-10-02: two GUI-running agents were given the same Agent API port (17110) and the same scratchpad file names; one agent's calls drove the other's GUI. Give every GUI-running agent its own `--api-port` (17110 + n) and its own `scratchpad/<branch>/` directory in the dispatch prompt.
-- 2026-10-02: `pgrep -x ninja` before a build is check-then-act; agents sometimes start builds together. Acceptable for now (owner declined a build lock).
-- 2026-10-02: for anything that executes outside a sandbox, review prompts must ask about every runtime load of agent-writable code or config (QML from source dirs, plugin paths, config files, caches), not only the diff.
-- 2026-10-02: freeze UX specs before dispatching UI work; zoom-autofit got two review rounds and was then replaced by the auto-scale spec.
+### Data and performance
 
-## Owner decisions on the loop (2026-10-02)
+- Recorded book data (recording v2):
+  `build/mac-clang/tests/servermodel/hmc2_dump <recording.dir> BTC-USD deep|near [tfMs] [lastN] [topK]`.
+- Frame cost: `SENTINEL_FRAME_PROFILE=1` prints per-stage `updatePaintNode` timings once per second into the run log.
+- CPU: `sample <pid> <seconds> -file <out>` (macOS) shows work outside `updatePaintNode` (texture uploads, QML,
+  other threads).
+- Services and metrics: `curl -s 127.0.0.1:8090/metrics | rg 'sentinel_roller_shadow|recorder_column_overdue'`,
+  `curl -s 127.0.0.1:8091/metrics | rg capture_feed_up`.
 
-- Decision split: the owner decides behaviour, data and how things look; everything else the orchestrator decides with a stated default the owner can override.
-- One batched digest instead of a ping per slice; at most 2-3 slices wait on the owner at once, and the orchestrator stops dispatching owner-gated work at the cap.
-- Every lieutenant report ends with a `WORKFLOW:` line; the orchestrator folds them into the retro notes above and runs a short retro every few days.
-- The orchestrator pushes `main` itself after clean landings (secret scan, never force).
-- 2026-10-03: a review agent ran a branch GUI without `--agent-host`, so it used the owner's QSettings (window/layout state may be saved on exit). Reviewers running their own GUI must pass `--agent-host <scratch dir>` (isolated settings) or use the GUI host.
+## Services, deploys and pushes
 
-- 2026-10-04 acting-orchestrator correction: Codex conducts until the owner hands back to Claude. Wave 2 waits for the per-product tick slice and owner-applied Codex reset credit, not a Claude reset date. At most three writing lieutenants; one hub owner per wave. Fable reviewed a small status diff with Claude weekly usage unchanged at the whole-percent precision exposed by CodexBar; this does not prove a separate allowance. Check before/after reviews and stop Claude reviews if weekly remaining drops. Deployments and slice D require asking the owner first and owner presence.
+- Recorder `com.sentinel.recorder` (`~/Sentinel-runtime/bin/sentinel-server --require-recording`, working directory =
+  repo root) and capture `com.sentinel.capture` (7 products) run under launchd with KeepAlive. Both should show
+  advancing `Recording v2 stats` / `Capture stats` lines in their run logs.
+- After a deploy: `rg ' [WEF] '` the new run log, check `Recording v2 stats`, and dump the newest columns with
+  `hmc2_dump`. Prefer deploying when the owner can respond: a macOS permission prompt once froze T7 I/O for 39 min
+  before local signing existed (FM-127).
+- Manual `launchctl kickstart -k gui/501/com.sentinel.recorder` or `launchctl bootout ...` only when the owner asks.
+- Before pushing `main`, scan the outgoing range (`git log -p origin/main..main`) for keys, tokens, ntfy topics and
+  PEM blocks.
 
-- 2026-10-04: a shell Claude reviewer launched inside a worktree could not read main-checkout docs under its tool permissions. Supply the exact relevant document diff in the review prompt rather than treating a code-only PASS as review of inaccessible documents.
+## Build queue and worktrees
 
-- 2026-10-04 owner interim review override: Fable appears to consume Claude weekly allowance. Until Claude returns, Codex may continue with a different GPT MODEL reviewing each author (Sol reviews Astra work; Astra reviews Sol work). Claude calls stay stopped. Worktree isolation, tests/merge queue, owner visual approval, deployment and cutover gates remain in force.
+- `scripts/dev/build-queue.sh --label <branch> -- <command>` waits its turn, prints its place
+  (`#2 of 3; running now: <label>`), runs and releases. `build-queue.sh status` shows the line. Tickets live in
+  /tmp (writable from Codex sandboxes); a dead owner's ticket expires after 120 s.
+- `scripts/dev/agent-worktree.sh create <branch>` puts the worktree on the T7 drive when mounted, supplies
+  `VCPKG_ROOT` and ninja, and configures the build; ccache makes the first build fast. `land` uses the queue.
+  `remove <branch>` cleans up.
+- The conductor rebases agent branches (during `land`); nobody merges `main` into them (they are local and short-lived). Stack a dependent task
+  and rebase with `--update-refs`. Merging `main` is right only for long-lived branches others have pulled.
+- Sandboxed CMake regeneration can try to lock the shared vcpkg root even when dependencies are unchanged. After
+  root has installed the manifest dependencies, reuse the worktree's installed tree with
+  `VCPKG_MANIFEST_INSTALL=OFF` and a sandbox-writable ccache path. Dependency changes still need root to
+  configure/install through the queue.
 
-- 2026-10-05: sandboxed CMake regeneration can try to lock the shared vcpkg root even when dependencies are unchanged. After root has installed the manifest dependencies, reuse the worktree installed tree with `VCPKG_MANIFEST_INSTALL=OFF` and a sandbox-writable temporary ccache path (or read-only shared cache). Dependency changes still require root to configure/install through the build queue; disabling installation is not proof that a new dependency exists. Model-capacity errors can also interrupt a successful tool result: preserve the draft and resume the same thread with an available model, then retain a different-model reviewer under the owner override.
+## Codex CLI
+
+Verified 2026-09-27 with codex-cli 0.158; 0.160 was installed by 2026-10-05. Re-check
+`~/.codex/models_cache.json` before relying on a model.
+
+- Models that answered: `gpt-6-sol` (config default), `gpt-6-astra`. Also listed: `gpt-5.6-sol`, `gpt-5.6-terra`,
+  `gpt-5.6-luna`, `gpt-5.5`. Effort `low`..`max`, plus `ultra` on 6-astra and 5.6-sol/terra.
+- Run: `codex exec -C <dir> -s read-only|workspace-write -m gpt-6-sol -c model_reasoning_effort='"high"'
+  -c approval_policy='"never"' --json -o <last-message.txt> "<prompt>" < /dev/null`. Without
+  `approval_policy="never"` the owner's config (`on-request`, `approvals_reviewer="auto_review"`) lets a headless
+  run ask to leave the sandbox and another model may approve.
+- Sandbox: `workspace-write` has network (localhost, HTTPS, Coinbase WebSockets) and can read the whole home
+  directory; it only limits writes. No window server or Metal. `.git` stays read-only even inside a writable
+  root, so it cannot stage, commit or rebase in a linked worktree (`index.lock: Operation not permitted`);
+  `--add-dir <repo>/_agent` does let it append to `_agent/`.
+- Thread id: the first JSONL event is `{"type":"thread.started","thread_id":"<uuid>"}`. Continue with
+  `codex exec resume <uuid> -m <same model> -c model_reasoning_effort='"high"' -c sandbox_mode='"workspace-write"'
+  -c approval_policy='"never"' "<follow-up>"` (or `--last`); add
+  `-c sandbox_workspace_write.writable_roots=[...]` when needed.
+- `codex exec review` runs a code review of the current repo.
+- Never put backticks in a double-quoted prompt (the shell eats them); use a heredoc or a prompt file.
+- Model-capacity errors can interrupt a run mid-draft: keep the draft and resume the same thread with an
+  available model; keep a different-provider reviewer.
+
+## Claude from a shell
+
+- Read-only review: `cd <worktree> && claude -p --model fable "<review prompt: base/tip, spec, what to check,
+  VERDICT format>"`. Verify the alias with a one-line call first.
+- Cloud session from Bash (verified 2026-09-29): `claude --cloud` needs a TTY, so wrap it:
+  `(script -q <log> claude --cloud "<prompt>" </dev/null >/dev/null 2>&1 &)`; it clones the pushed branch.
+- A reviewer launched inside a worktree may not be able to read main-checkout docs under its permissions: put
+  the exact document diff into the prompt rather than treating a code-only PASS as review of the docs.
+
+## Lessons still in force
+
+- Every GUI-running agent gets its own `--api-port` (17110 + n) and its own scratch directory; two agents once
+  shared port 17110 and one drove the other's GUI (2026-10-02).
+- A reviewer that runs a branch GUI without `--agent-host` uses the owner's QSettings (2026-10-03).
+- Freeze UX specs before dispatching UI work; an unfrozen spec cost two review rounds and was replaced
+  (2026-10-02), and an approved settings branch was stranded by a later toolbar change (2026-10-05).
+- A standalone PASS does not approve a later integration patch; review the integration delta.
+- Fix rounds can introduce new bugs: check the changed seam and nearby lifecycle, resize and refresh states.
+- Static review and passing suites missed short-outage, socket-failure and watchdog behaviour in the recorder
+  (slice C, FM-139), and native A/B runs found GPU span and live-source defects after review (FM-134/135). That
+  is why high-risk work carries scenario/native evidence.
+- The build-queue wait/cancel path had a TERM-trap issue (FM-195); the owner is hardening the queue.

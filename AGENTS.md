@@ -1,4 +1,4 @@
-# AGENTS.md — Sentinel Agent Operating Rules (Slim)
+# AGENTS.md — Sentinel Agent Operating Rules
 
 Do not flatter, validate, or agree by default.
 Your job is to be correct, not agreeable.
@@ -8,7 +8,9 @@ If uncertain, state uncertainty instead of guessing.
 Avoid praise unless it is explicitly earned and relevant.
 Optimize for truth, clarity, and usefulness—never for likability.
 
-Source of truth for coding agents working on Sentinel.
+Source of truth for every coding agent on Sentinel. Claude Code and Codex both read this file
+(`CLAUDE.md` only imports it); edit rules here, never in a copy. Live state is in `docs/STATUS.md`.
+How-to detail (GUI host, Codex CLI, lessons) is in `docs/AGENT_WORKFLOW.md`; read it when a task needs it.
 Default goal: make the requested change safely.
 
 ## 0) Fast Start (Read Minimum First)
@@ -16,15 +18,16 @@ Default goal: make the requested change safely.
 Use the smallest context that can solve the task.
 
 Modes:
-- **Lite** (questions, docs, tooling, no code edits): do not preload `_agent/` or `docs/TODO.md`
-- **CodeChange** (implement/refactor): read `_agent/INVARIANTS.md`
-- **Debug/Perf/Regression**: read `_agent/INVARIANTS.md` + `_agent/FAILURE_MODES.md`
+- **Lite** (questions, docs, tooling, read-only review): do not preload `_agent/` or `docs/TODO.md`
+- **CodeChange** (implement/refactor): `rg -n '<area|file|symbol>' _agent/INVARIANTS.md` for what you touch; read the matching entries, not the whole file
+- **Debug/Perf/Regression**: the same search in `_agent/INVARIANTS.md` and `_agent/FAILURE_MODES.md`
 
 Rules:
 - Start with targeted search (`rg -n`, `rg --files`), not broad file reads.
-- Before first concrete action, read at most ~200 lines total unless user asks for deep review.
-- If request is ambiguous, start in Lite mode and escalate only if needed.
-- If you discover a durable invariant/failure mode/decision, update `_agent/` before stopping.
+- Before first concrete action, read at most ~200 lines total unless the user asks for a deep review.
+- If the request is ambiguous, start in Lite mode and escalate only if needed.
+- **Read-only scope** (review, audit, investigation): edit nothing, including `_agent/`, docs and memory. Report durable findings to whoever asked. An explicit owner scope always overrides the write rules in this file.
+- Write tasks: if you discover a durable invariant/failure mode/decision, update `_agent/` before stopping.
 
 ## 1) Sentinel Non-Negotiables (Core Identity)
 
@@ -56,22 +59,26 @@ Prefer simpler/faster designs over preserving weak legacy patterns unless compat
 - `libs/gui`: Qt/QML/QSG, rendering strategies, window/widget behavior
 - `apps/`: thin bootstraps only (no business logic)
 
-If a change crosses these boundaries, stop and justify it before proceeding.
+If a change crosses these boundaries, state why before implementing it. Stop and ask only when it
+changes behaviour, data or looks (owner decisions) or needs an approval listed in this file.
 
-## 4) Commands (Use These First)
+## 4) Commands and Testing
 
-Build:
-- `cmake --build --preset windows-msvc-vs/mac-clang`
+Build (owner's Mac): `scripts/dev/build-queue.sh --label <branch> -- cmake --build --preset mac-clang -j 2`
+- Every build, ctest run or benchmark on the Mac goes through the FIFO build queue, one at a time.
+- Use `-j 2` until the owner raises it (the desktop froze under heavier load on 2026-10-05).
+- Windows: `cmake --build --preset windows-msvc-vs`.
 
-Runtime/testing:
-- Prefer targeted validation for touched area first
-- Full-suite or long-running passes only if requested or clearly necessary
-
-Cheap verification ladder:
+Verification ladder:
 1. Format/lint touched scope only
 2. Build affected target(s)
-3. Run targeted tests / targeted repro
-4. Ask before broad/full runs unless user asked for it
+3. Run targeted tests / targeted repro. Writers stop here unless their task packet says otherwise.
+4. The full `ctest` suite runs in the conductor's landing gate (`agent-worktree.sh land`). It is part of an authorized landing and needs no extra ask. Ask before any other full or long-running pass unless the task requests it.
+
+Reading results:
+- A skipped GPU case still reports Passed. Read the output for `GPU case skipped`; llvmpipe is not GPU verification.
+- Synthetic fixtures are not live-provider proof. Say which one you ran.
+- Check the log header `exe=... built=...` so you do not test a stale binary.
 
 ## 4a) Logs and Probes (Debug What the User Saw)
 
@@ -83,7 +90,7 @@ Where:
 - Windows/Linux: `<GenericDataLocation>/Sentinel/logs`. `SENTINEL_LOG_DIR` overrides. stderr prints `[sentinel] log file: <path>` at startup.
 
 Read:
-- Header lines start with `#`: version, pid, `exe=... built=...` (check the binary is not stale vs your change), args, cwd, `SENTINEL_*`/`QT_*`/`QSG_*` env.
+- Header lines start with `#`: version, pid, `exe=... built=...`, args, cwd, `SENTINEL_*`/`QT_*`/`QSG_*` env.
 - Line format: `<local time> <D/I/W/E/F> <category> <thread> <file:line> | <message>`
 - Categories: `app`, `data`, `render`, `debug`, `probe`, plus Qt's own (`qt.*`, `default` for plain qDebug).
 - Start with `rg ' [WEF] ' <log>`, then narrow by the time the user describes, category, and thread (`main`, `QSGRenderThread`, ...).
@@ -91,7 +98,7 @@ Read:
 Probes (values for a specific behavior, off by default):
 - List them: `rg -o 'sLog_Probe\("[^"]+"' libs apps | sort -u`
 - Enable by name or prefix: `SENTINEL_PROBES=tpo,heatmap.window` (`all` enables every probe). A prefix enables its children (`tpo` -> `tpo.ingest`).
-- If the log lacks the values you need, ask the user to rerun with the probes on, or add a probe and ask them to reproduce. Example: `SENTINEL_PROBES=heatmap ./build/mac-clang/apps/sentinel-gui/sentinel-gui`
+- If the log lacks the values you need, ask the user to rerun with the probes on, or add a probe and ask them to reproduce.
 
 Write logs (`libs/core/SentinelLogging.hpp`):
 - `sLog_App/Data/Render/Debug(...)`: every call prints. State changes and one-off events. Include identifying values as `key=value` (symbol, tf, range, counts).
@@ -101,28 +108,35 @@ Write logs (`libs/core/SentinelLogging.hpp`):
 - Do not gate logging with ad-hoc env vars, and do not write side files (`/tmp/*.log`, `.cursor/debug.log`). Everything goes through Qt logging so it lands in the run log.
 - Too noisy: `QT_LOGGING_RULES="sentinel.render.debug=false"` silences a category.
 
-## 4b) See and Measure the Running App
+## 4b) Running the App, Screenshots and Services (Hard Rules)
 
-Look before you claim a visual or performance result.
+Look before you claim a visual or performance result. Manual (GUI host commands, Agent API, cloud GUI,
+recorded-data dumps, profiling): `docs/AGENT_WORKFLOW.md` "Running and seeing the app", `docs/AGENT_API.md`.
 
-- Screenshot: with `sentinel-gui` running, `curl -s 'http://127.0.0.1:17100/screenshot?name=<name>'` returns `{"ok":true,"path":"./screenshots/<name>.png"}` (relative to the GUI's cwd, normally the repo root). Port is `gui.api_port` in `config/client_config.yaml`.
-- Agent API state, viewport, and screenshot routes: see `docs/AGENT_API.md`.
-- Privacy: agents use `target=window` for Sentinel's main widget, `target=heatmap` or a retained dock ID (`orderBook`, `watchlist`, `screener`, `stockChart`, `paperTrading`, `sec`, `copenet`, `telemetry`), `statusBar`, `toolbar`, `chartmenu`, or `settings[:Tab]` for screenshots; hidden docks must first be shown or focused through the dock API and otherwise return a visibility error. The standalone lab has its own `--screenshot`. `target=main` can capture whatever window covers the GUI on the owner's screen, including other apps' private content; if a shot shows anything that is not Sentinel, delete it at once and tell the orchestrator.
-- Viewing it: Claude Code reads the PNG directly; Codex opens local images mid-task on its own (verified 2026-09-27) or takes them up front with `codex exec -i <png>`. A sandboxed Codex run cannot launch the GUI itself (`Cannot create window: no screens available`), but it can ask the GUI host to (next bullet), so it takes its own screenshots.
-- GUI host (sandboxed agents): `scripts/dev/gui-host.py` runs OUTSIDE any sandbox, loopback only (127.0.0.1:17190). The orchestrator starts it detached from the main checkout (`nohup scripts/dev/gui-host.py >/dev/null 2>&1 & disown`; nohup survives the session, so stop it on purpose with `pkill -TERM -f gui-host.py`; the 30-minute idle timeout is enforced by the host, so it does not bound a GUI orphaned by a SIGKILLed host: end it with `pkill -f 'sentinel-gui.*--agent-host'`). Agents use `scripts/dev/gui-shot.sh`: `launch [--renderer gpu|legacy] [--replace] [--build <worktree path>]` starts the GUI on a spare API port with `--no-screener`; `api GET|POST /api/v1/...` drives state, viewport and heatmap settings; `shot <name> [--after <op>] [--settle]` returns the absolute PNG path to open; `stop` ends it. `docks focus <id>` shows that dock and hides others; hosted dock changes persist in `gui-host/profile/docks.ini` across runs, while general QSettings and screenshots stay fresh per session; `profile-reset` or `launch --fresh-profile` deletes only the dock file. TRUST: the owner accepted on 2026-10-03 that unreviewed agent GUI builds run outside the sandbox through this host with the owner's privileges, the same trust given to Claude subagents that run their own GUI. By default the host runs main's build; `launch --build <worktree path>` runs only the fixed sentinel-gui binary under a direct child of `/Volumes/T7/sentinel-worktrees` or the fallback `<main>/.claude/worktrees`, after realpath containment and executable/`--agent-host` checks. Agents build their own branch through the build queue first; the host never builds or runs CMake. The host still uses a minimal child environment, one session at a time and a 30-minute idle timeout. For `--build` runs the in-GUI guardrails listed below (AgentHostMode, the `RemoteGridDataSource` send checks) live in the agent-compiled binary, so they are not host guarantees; the host-enforced boundary is path containment, a fixed argv, an allowlisted environment, one session and the idle timeout, and an agent GUI still talks to the owner's recorder on :8080. The GUI host passes both `--agent-host <session dir>` and `--agent-host-symbols <comma-separated list>` explicitly (`AgentHostMode`). The GUI CLI has no built-in symbol default: `--agent-host` without `--agent-host-symbols` activates host mode with an empty allowlist, so startup stays unsubscribed and all symbol-named outbound requests are refused. The host script explicitly supplies a list that defaults to seven recorded products and can be overridden with `GUI_HOST_SYMBOLS`. In this mode: screen-region grabs (`target=main`), retired `lab`/`aiCommentary` targets and unknown targets are refused; `target=window` grabs Sentinel's own main widget with QQuick content composited and is allowed by the GUI itself; screenshots and general QSettings (INI) stay in the fresh session dir, while only dock visibility uses the persistent profile file (the owner's preferences are never touched); no trade command and no algo start/stop is sent (the choke point is `RemoteGridDataSource`: `sendTradeCommand`, `sendAlgoCommand`; `/api/v1/input` can reach the chart's TP/SL controls); no outbound request names a symbol outside the explicitly supplied `--agent-host-symbols` list: enforced at the `RemoteGridDataSource` send boundary, so startup (hard-coded BTC-USD, the server's default symbol) and every reconnect resubscribe are covered, and the GUI starts on the first allowed symbol or stays unsubscribed (a source-scan test fails when a new `m_client.<sender>` is unclassified or unguarded); the child gets a minimal environment. Do not add a native-format `QSettings("org","app")` to the GUI: use `QSettings(QSettings::defaultFormat(), QSettings::UserScope, "org", "app")` (a test enforces it). One session at a time; idle timeout 30 min. It never starts a server (the recorder must be up). If the host is not running, report the visual check as unverified and ask the orchestrator. Screenshots still fail with `grab_failed` while the Mac screen is locked. Note: the Agent API of the OWNER's own GUI (`gui.api_port`, 17100) has no authentication and a sandboxed agent can reach it over localhost; do not run agents with a live owner session unless that is intended.
-- Input: the dev build is a raw binary with no app bundle, so computer-use tools cannot drive it. Ask the owner to pan, zoom or click, then read the run log and screenshot.
-- Linux / Claude Code on the web (no display): `scripts/dev/cloud-gui.sh start` runs Xvfb + server + GUI, `scripts/dev/cloud-gui.sh shot <name> [main|heatmap|retained dock ID]` saves `screenshots/<name>.png`, `logs` shows W/E/F lines, `stop` tears down. Build with `cmake --build --preset linux-cloud` (deps from `scripts/setup/bootstrap-cloud.sh`, run by the SessionStart hook). Mesa llvmpipe: pixels are real, frame timings are not. GPU heatmap tests and the lab pick the QRhi backend at run time (`SENTINEL_RHI_BACKEND=d3d11|d3d12|vulkan|opengl|metal`; default opengl on Linux) and print `GPU case skipped: <backend>: <reason>` when it cannot create a QRhi with compute; a skipped case still reports Passed, so read the output. llvmpipe is not GPU verification. See `docs/WINDOWS_GPU_TESTS.md`. Live data needs `advanced-trade-ws.coinbase.com` and `api.coinbase.com` allowed in the environment's network settings; never put exchange API keys in a cloud environment.
-- Always-on services (owner's Mac): the recorder (`com.sentinel.recorder`) and the raw capture (`com.sentinel.capture`) run under launchd from `~/Sentinel-runtime/bin`, signed with the local "Sentinel Local Code Signing" identity so Full Disk Access survives redeploys. Deploy ONLY with `scripts/dev/deploy-runtime.sh server|capture|both` (copy, sign, restart, verify writes within 60 s, auto-rollback). Agents never stop, restart or replace these services, and never run a bare `sentinel-server` from the repo (it contends for the recorder's data locks).
-- Drive the app: the Agent API (`docs/AGENT_API.md`) sets symbol, timeframe, viewport and layers, waits for the change to render (`/api/v1/operations/<id>?waitMs=`), then screenshots that frame (`afterOperation=`). Screenshots fail with `grab_failed` while the Mac screen is locked (`ioreg -n Root -d1 -a | grep -A1 ScreenIsLocked`).
-- Recorded book data (recording v2): `build/mac-clang/tests/servermodel/hmc2_dump <recording.dir> BTC-USD deep|near [tfMs] [lastN] [topK]` prints recorded columns and the biggest walls.
-- Frame cost: `SENTINEL_FRAME_PROFILE=1` prints per-stage `updatePaintNode` timings once per second into the run log (section 4a).
-- CPU: `sample <pid> <seconds> -file <out>` (macOS). Work that happens outside `updatePaintNode` (Qt texture uploads, QML, other threads) only shows up here.
+Screenshots and GUI runs:
+- Allowed targets: `window`, `heatmap`, a retained dock ID (`orderBook`, `watchlist`, `screener`, `stockChart`, `paperTrading`, `sec`, `copenet`, `telemetry`), `statusBar`, `toolbar`, `chartmenu`, `settings[:Tab]`. Show or focus a hidden dock through the dock API first.
+- Never use `target=main`: it captures whatever window covers the GUI, including other apps' private content. If any shot shows something that is not Sentinel, delete it at once and tell the conductor. This includes `scripts/dev/cloud-gui.sh`: pass `window` explicitly, because its `shot` defaults to `main`.
+- Every agent-run GUI is isolated: use the GUI host (`scripts/dev/gui-shot.sh`), or launch with `--agent-host <scratch dir>`, its own `--api-port` (17110 + n), `--no-screener` and its own scratch directory. Never run a GUI against the owner's settings. Exception: `scripts/dev/heatmap-ab.sh` predates this rule (it relies on `persist:false`, SIGTERM and a before/after settings diff); run it only when the owner asks. It logs `owner settings ... CHANGED` but still exits 0, so read the log and treat that line as a failure.
+- Never drive the owner's own GUI: its Agent API (`gui.api_port`, 17100) has no authentication.
+- One hosted GUI session at a time. No automated GUI windows while the owner is working at the Mac unless the owner asks.
+- Never run the GUI binary with `--help` (it starts a full GUI).
+- Do not add a native-format `QSettings("org","app")` to the GUI: use `QSettings(QSettings::defaultFormat(), QSettings::UserScope, "org", "app")` (a test enforces it).
+- Screenshots fail with `grab_failed` while the Mac screen is locked (`ioreg -n Root -d1 -a | grep -A1 ScreenIsLocked`).
+
+Always-on services (recorder `com.sentinel.recorder`, capture `com.sentinel.capture`, launchd, `~/Sentinel-runtime/bin`):
+- Writers and reviewers never stop, restart, replace or deploy them, and never run a bare `sentinel-server` from the repo (it contends for the recorder's data locks).
+- Only the conductor deploys, only with `scripts/dev/deploy-runtime.sh server|capture|both` (copy, sign, restart, verify writes within 60 s, auto-rollback), one service at a time, then reads the run log and metrics.
+- The conductor may redeploy a change that is reviewed and landed on `main`, then tells the owner.
+- Never read, copy, export or change the signing identity ("Sentinel Local Code Signing") or other keys; only `deploy-runtime.sh` uses it.
+- Cutovers (for example roller slice D), recording or on-disk format changes and data deletions need explicit owner approval with the owner present at the Mac.
+- Never delete, move or rewrite recorded data under `data/` or `/Volumes/T7` (recordings, journals, `hmc2`). The only exception is the conductor carrying out an owner-approved deletion or cutover plan with the owner present.
+- Any review of code or config that runs outside a sandbox (GUI host, deploy, runtime scripts) must ask about every runtime load of agent-writable code or config (QML from source dirs, plugin paths, config files, caches), not only the diff.
 
 ## 4c) Metrics (after `ops/monitoring/install.sh` has run)
 
-- Instant: `curl -s 127.0.0.1:8090/metrics` (sentinel-server). History: `curl -s 127.0.0.1:8428/api/v1/query --data-urlencode 'query=<promql>'` (VictoriaMetrics, 1 y). Dashboards: http://127.0.0.1:3000.
+- Instant: `curl -s 127.0.0.1:8090/metrics` (sentinel-server), `127.0.0.1:8091/metrics` (capture). History: `curl -s 127.0.0.1:8428/api/v1/query --data-urlencode 'query=<promql>'` (VictoriaMetrics, 1 y). Dashboards: http://127.0.0.1:3000.
 - Examples: `up`, `max by (product,layer) (sentinel_recorder_column_overdue_seconds)`, `increase(sentinel_recorder_invalidations_total[1h])`.
-- Metric list, alerts, install and how to add a metric or panel: `ops/monitoring/README.md`. Hot paths only touch `Counter`/`Gauge` (one relaxed atomic); samplers run on the main thread at scrape.
+- Metric list, alerts and how to add a metric: `ops/monitoring/README.md`. Hot paths only touch `Counter`/`Gauge` (one relaxed atomic); samplers run on the main thread at scrape.
 
 ## 5) Hot Paths (Treat Like Live Wires)
 
@@ -140,7 +154,7 @@ Before editing hot paths, explicitly check for per-frame risk:
 
 ## 6) Agent Memory (`_agent/`) — Durable, Minimal, One-Line
 
-Path: `_agent/` (gitignored AI scratchpad)
+Path: `_agent/` (gitignored AI scratchpad, shared by every worktree and agent). Write tasks only.
 
 Files:
 - `_agent/INVARIANTS.md` → `- INV-### | <statement>`
@@ -151,8 +165,8 @@ Files:
 Rules:
 - One line per entry, ASCII only
 - Do not add new `_agent` files unless user asks
-- `_agent/` is shared by every worktree and parallel agent: re-read the file tail right before appending and take the next free id (`rg -o '^- FM-[0-9]+' _agent/FAILURE_MODES.md | sort -V | tail -1`)
-- Prefer durable guardrails over session chatter
+- Re-read the file tail right before appending and take the next free id (`rg -o '^- FM-[0-9]+' _agent/FAILURE_MODES.md | sort -V | tail -1`)
+- Prefer durable guardrails over session chatter; when an entry you touch says "open" and the fix has landed, mark it resolved with the commit
 - Qdrant indexing is directory-targeted only (`libs/`, `docs/`, optional source dirs), never repo root, never `build/`
 
 ## 7) Task Tracking (`docs/TODO.md`) — Only When Relevant
@@ -172,61 +186,64 @@ Update only the relevant canonical doc in the same change:
 - Architecture / ownership / dependency direction → `docs/ARCHITECTURE.md`
 - Feature scope/progress → `docs/TODO.md`
 - Config keys/defaults/semantics → config docs (if present)
+- Live state (conductor, services, in-flight branches, waiting decisions) → `docs/STATUS.md` (conductor only)
 - New durable invariant/regression guardrail → `_agent/INVARIANTS.md` or `_agent/FAILURE_MODES.md`
 - Non-trivial design decision → `_agent/DECISIONS.md` (vault detail optional)
 
-## 8a) Commit Checkpoints
+`docs/research/*` files are dated plans and evidence. Owner decisions are appended when a plan is
+approved; after the work lands the file is frozen and nobody maintains it. Current truth is the code,
+this file and `docs/STATUS.md`.
 
-- Prefer manual git commits after a coherent batch of logic lands and verifies cleanly.
-- Group commits by feature or infrastructure slice, not by file type.
-- Default checkpoint rule: if a meaningful feature seam is implemented and targeted validation passed, make a commit unless the user says not to.
-- Do not sweep unrelated modified files into the same commit; leave unrelated worktree changes alone.
-- Commit messages should say what changed and why at the feature level, not just "fix stuff".
+## 8a) Commits and Git
+
+- Commit a coherent, verified feature slice; do not sweep unrelated modified files into it. Messages say what changed and why at the feature level.
+- Writers whose harness can write `.git` may commit on their own branch. Sandboxed writers (Codex `workspace-write` cannot write a linked worktree's index) leave a clean diff and report it; the conductor commits for them.
+- Writers never rebase onto `main`, merge or push. The conductor rebases during landing, lands and pushes.
+- Push `main` only after clean landings and a secret scan; never force.
+- Never commit secrets (the ntfy topic lives only in `ops/monitoring/ntfy.env`), `.codex/`, screenshots, or changes the owner is making in parallel.
 - Line endings: LF everywhere (`.gitattributes` enforces it; `.ps1`/`.bat` check out as CRLF). Never write CRLF into other files.
 
 ## 9) References (Read on Demand Not By Default)
 
-- `docs/ARCHITECTURE.md`
-- `docs/MARKETDATA.md`
-- `docs/TODO.md`
+- `docs/ARCHITECTURE.md`, `docs/MARKETDATA.md`, `docs/TODO.md`
+- `docs/AGENT_WORKFLOW.md` (GUI host, Codex CLI, lessons), `docs/AGENT_API.md`
 
-Read these only if the task actually needs them.
+## 10) Multi-Agent Work
 
-## 10) Cross-Agent Delegation (Codex CLI)
+Roles:
+- **Owner:** decides behaviour, data and looks; picks the conductor; sets or ends policy overrides; approves visual defaults, cutovers, format changes and data deletions. Silence, elapsed time or a preselected option is never approval.
+- **Conductor:** one session per repo at a time, chosen by the owner. Claude Opus 5.5 is the default; Codex conducts when the owner hands over (for example for computer use or work outside a sandbox). Plans, dispatches, decides non-owner questions with a stated default, commits for sandboxed writers, lands, pushes, deploys (section 4b) and keeps `docs/STATUS.md` current. Other sessions answer questions only.
+- **Writers and reviewers:** Claude subagents (`opus`, `sonnet`) or Codex (`gpt-6-sol` for bounded work, `gpt-6-astra` for harder work). Claude Fable (`fable`) for high-risk review and large cross-cutting plans.
+- Route by capability, not vendor. Visual or native-GPU work needs a harness that can run the GUI or Metal: Claude subagents run both; sandboxed Codex sees its own branch through the GUI host but cannot run Metal tests.
 
-This is the single agent-instructions file: Claude Code and Codex both read it (`CLAUDE.md` only imports it). Edit rules here, never in a copy.
-The orchestration loop around these rules (roles, plan -> dispatch -> cross-vendor review -> land -> deploy) is described in `docs/AGENT_WORKFLOW.md`. Current live state (services, in-flight branches, next steps) is in `docs/STATUS.md`; whoever conducts reads it first and keeps it current.
+Per feature, 1 + 1:
+- One writer and one reviewer from the other provider. The conductor is not counted. No second writer or extra reviewer on the same feature; a PASS with no findings is done.
+- Fix rounds go back to the same writer thread. The same reviewer thread checks each fix and any integration delta that the standalone review did not cover.
+- After two substantive fix rounds, stop and diagnose (scope, missing scenario, wrong contract) before another round.
+- **High risk** (recorder, capture, roller, recording format, GPU heatmap core): the reviewer is the other provider's strongest model (Fable for Codex-written work; `gpt-6-astra` at high or above for Claude-written work). The hand-off must also carry scenario or native evidence: realistic outage, retry, restart and reconnect sequences for services; actual-Metal native runs and screenshots for GPU work. Review does not replace that evidence. A writer that cannot produce it (sandboxed Codex has no Metal) reports it as unverified; the conductor or a native-capable agent attaches it before landing.
+- **Fallback** (the other provider is out of usage): a different model of the same provider reviews (Sol and Astra review each other; Opus or Sonnet and Fable review each other). The conductor notes the fallback in STATUS; it ends when the other provider is back. High-risk work waits for a cross-provider review unless the owner waives it.
 
-Routing (starting defaults; the orchestrator recalibrates them as results come in):
-- **Orchestrator (Claude Code session the owner is talking to):** direction, cross-cutting design, audits, merges, anything touching hot paths or several subsystems at once.
-- **Codex `gpt-6-sol`, effort high:** a well-specified bug fix or small feature with clear acceptance checks, in its own worktree.
-- **Codex `gpt-6-astra`, effort high or above:** harder self-contained work: deeper reasoning, larger isolated refactors, second-opinion reviews (`-s read-only`).
-- **Claude subagents (the orchestrator's Agent tool, model `opus` or `sonnet`):** the same kinds of tasks as the Codex lieutenants, used to spread usage across the owner's Claude and ChatGPT subscriptions. Write tasks follow the same hand-off protocol in their own worktree (branch `lt-claude/...`); reviews run read-only.
-- **Claude Fable (Agent tool model `fable`):** reserved for work where a miss is expensive or judgment matters most: an extra final review for changes to the always-on recorder or the GPU heatmap core (alongside, not instead of, the cross-vendor review), plans for large cross-cutting slices (S6), visual A/B QA through the Agent API, and data/trade-off analysis. Not for mechanical slices or routine fix rounds.
-- **UI / visual write tasks go to Claude subagents:** they can launch the GUI or lab and read their own screenshots; a sandboxed Codex run cannot (no window server, no Metal). Codex takes non-visual work and reviews.
-- **Read-only review before merge:** a different model from the one that wrote the change; prefer the other vendor (Claude reviews Codex work, Codex reviews Claude work).
-- A delegated agent does not delegate further unless its prompt explicitly allows it, and never merges its own branch.
+Limits on the 16 GB Mac:
+- At most two active writers across all features; one queued build/test at a time (`-j 2`); one hosted GUI session.
+- Hot files (`MainWindowGpu.cpp`, `DataProcessor.cpp`, `HeatmapTwapStreamer.cpp`, `MarketDataCoreEngine.cpp`, `UnifiedGridRenderer.cpp`) belong to one branch at a time; serialize or split tasks that need the same one.
+- At most 2-3 items wait on the owner at once, sent in one digest.
+- Run `scripts/dev/budget.sh` (CodexBar) before a dispatch batch and route to the subscription with room. Tell the owner when Codex is near 0 (they hold reset credits). No custom usage tracking.
 
-The owner's ChatGPT subscription can run Codex agents headless, to spread work across subscriptions.
-Verified 2026-09-27 with codex-cli 0.158.0-alpha.2.1.
+Task packet (the dispatch prompt, self-contained): base commit; branch and worktree; files owned and files another agent is touching; interfaces; frozen UX spec for UI work; acceptance checks (each must fail without its fix); validation scope; risk class; for GUI runs, its own API port and scratch directory; the hand-off format. Point at this file and only the plan sections that apply. A delegated agent does not delegate further unless the packet allows it.
 
-- Binary: `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`. `codex` is only a zsh alias; use the full path in scripts.
-- Models that answered a live `codex exec` call: `gpt-6-sol` (config default) and `gpt-6-astra`. Also listed for this account: `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`. Reasoning effort: `low`..`max`, plus `ultra` on 6-astra and 5.6-sol/terra. Re-check `~/.codex/models_cache.json` before relying on a model.
-- Run: `codex exec -C <dir> -s read-only|workspace-write -m gpt-6-sol -c model_reasoning_effort='"high"' -c approval_policy='"never"' --json -o <last-message.txt> "<prompt>"`. Always pass `approval_policy="never"` for lieutenants: the owner's config uses `on-request` with `approvals_reviewer="auto_review"`, so without it a headless run can ask to leave the sandbox and another model may approve.
-- Sandbox (verified 2026-09-29): `workspace-write` has network (the config sets `network_access = true`; localhost, HTTPS and Coinbase WebSockets all worked) and can read the whole home directory; it only limits writes. It cannot use the window server or Metal, so no GUI or GPU runs.
-- Thread id: the first JSONL event is `{"type":"thread.started","thread_id":"<uuid>"}`. Continue with `codex exec resume <uuid> -m <same model> -c model_reasoning_effort='"high"' -c sandbox_mode='"workspace-write"' -c approval_policy='"never"' "<follow-up>"` (or `--last`). Resume does not keep the original model or sandbox: without `-m` it falls back to the config default model, and it has no `-s` flag.
-- Reviews: `codex exec review` runs a code review of the current repo.
-- Worktree write tasks: pass `--add-dir <repo>/_agent` and close stdin (`< /dev/null`). A linked worktree keeps its index and refs in the main `.git`; Codex's sandbox protects `.git` paths even inside a writable root, so with or without the flag it cannot stage, commit or rebase (`index.lock: Operation not permitted`, re-verified 2026-10-02): the orchestrator commits and rebases for Codex lieutenants. `--add-dir <repo>/_agent` does work (verified 2026-10-02), so Codex can append to `_agent/` itself. A backgrounded `codex exec` with stdin open can wait forever for input.
-- Isolation: write tasks run in their own git worktree (`--worktree`, or `-C` into a `git worktree add` path) so two agents never edit the same checkout. Audits and reviews use `-s read-only`.
-- Never pass `--dangerously-bypass-approvals-and-sandbox`.
-- Prompts must stand alone: point the agent at `AGENTS.md`, the files, the acceptance checks, and the build/test commands.
-- The delegating agent reviews the resulting diff and runs the verification ladder (section 4) before anything merges.
+Hand-off protocol:
+1. The conductor creates the worktree from current `main`: `scripts/dev/agent-worktree.sh create <branch>` (`lt-sol/...`, `lt-astra/...`, `lt-claude/...`).
+2. The writer works on that base (no rebase, no merging `main`), builds and runs focused checks through the build queue.
+3. The writer finishes with `READY: <branch>` and its tip (or "uncommitted diff" when sandboxed), what changed and why, the checks run with their summary lines, and what it could not verify. Last line: `WORKFLOW: <what cost time, surprised you, or the docs got wrong; or none>`. Use `BLOCKED: <branch>` with the reason if it cannot finish.
+4. After review PASS (and owner approval where required), the conductor lands with `scripts/dev/agent-worktree.sh land <branch>`: rebase onto `main`, build, full ctest, `git range-diff` gate, `--no-ff` merge, worktree removal. One branch at a time; every other READY branch re-runs `land` before it lands. Bisect with `git bisect --first-parent`.
 
-Hand-off protocol (every delegated write task):
-1. Work in your own worktree and branch, created from current `main` with `scripts/dev/agent-worktree.sh create <branch>` (branches: `lt-sol/...` for Codex gpt-6-sol, `lt-astra/...` for gpt-6-astra, `lt-claude/...` for Claude subagents). It puts the worktree on the T7 drive when mounted, supplies `VCPKG_ROOT` and ninja, and configures the build; ccache makes the first build take seconds. Remove it after merge with `... remove <branch>`.
-2. Before reporting ready, rebase onto the latest `main` (`git rebase main`; rerere is enabled for the repo, so a conflict you resolve once is reused), resolve any conflicts yourself, rebuild, and run `ctest` in `build/mac-clang`. Do not merge `main` into agent branches: they are local, single-owner and short-lived, so a rebase keeps history linear. Do not track `main` while you work; rebase once, at hand-off.
-3. Finish with a message whose first line is `READY: <branch>`, followed by: what changed and why, the tests you ran with their summary line, and anything you could not verify (visual checks, live runs). End with one line `WORKFLOW: <what cost time, surprised you, or the docs got wrong; or none>`. Say `BLOCKED: <branch>` with the reason instead if you cannot finish.
-4. The orchestrator reviews the diff with a different model, then lands it with `scripts/dev/agent-worktree.sh land <branch>`: rebase onto the current `main`, build, ctest, a `git range-diff` review gate when the rebase changed commits, a `--no-ff` merge, and worktree removal. Never merge your own branch. Only the orchestrator pushes `main` (after clean landings and a secret scan, never forced); lieutenants never push.
-5. Merge queue rule: land one branch at a time. After each landing, every other READY branch is rebased and retested (run `land` on it) before it can land, even when it touched different files; that is what catches semantic conflicts (a renamed function, a duplicated test name). Bisect with `git bisect --first-parent` so it walks tested landings, not untested commits inside rebased branches.
-6. Machine budget: the owner's Mac has 16 GB of unified memory. Every build, ctest run or benchmark goes through the FIFO queue: `scripts/dev/build-queue.sh --label <branch> -- <command>` (e.g. `-- cmake --build --preset mac-clang -j 4`). It waits for your turn, prints your place in line (`#2 of 3; running now: <label>`), runs, and releases; `build-queue.sh status` shows the line; tickets live in /tmp (writable from Codex sandboxes) and a dead owner's ticket expires after 120 s. `agent-worktree.sh land` uses it too. Read-only reviews and planning need no ticket.
-7. Parallel dispatch: before sending two tasks out at once, check they do not both need the same hot file (`MainWindowGpu.cpp`, `DataProcessor.cpp`, `HeatmapTwapStreamer.cpp`); if they do, serialize them or draw the boundary in both prompts. A task that depends on another is dispatched after the first lands (or stacked, then rebased with `--update-refs`). Merging `main` into a branch instead of rebasing is still right for long-lived or shared branches that others have pulled.
+Codex CLI (hard rules; usage and quirks in `docs/AGENT_WORKFLOW.md`):
+- Binary: `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex` (`codex` is only a zsh alias).
+- Lieutenants always run sandboxed: `-s workspace-write` (writers, with `--add-dir <repo>/_agent`) or `-s read-only` (reviews), always `-c approval_policy='"never"'`, stdin closed (`< /dev/null`). Never pass `--dangerously-bypass-approvals-and-sandbox`.
+- `codex exec resume` keeps neither model nor sandbox: pass `-m` and the sandbox settings again.
+
+Continuity:
+- Start a fresh conductor at a completed wave boundary. It reads this file and `docs/STATUS.md`, then only the plan sections the next task needs.
+- Keep unfinished writer and reviewer threads alive for fix rounds; record their thread IDs and tips in STATUS.
+- STATUS holds current facts only and is replaced, not appended. History is `git log --first-parent` and `_agent/`.
+- Handover: the outgoing conductor stops dispatching and brings STATUS up to date; the owner names the incoming conductor.

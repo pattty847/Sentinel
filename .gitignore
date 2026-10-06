@@ -159,3 +159,6 @@ config/.client_config.yaml
 
 # Offline roller outputs and reports (never source recordings)
 /roll-out/
+
+# Codex local project config (never commit)
+.codex/

@@ -120,7 +120,7 @@ case "$cmd" in
         fi
         new_tip=$(git -C "$dir" rev-parse HEAD)
         echo "building and testing $branch at $new_tip..."
-        (cd "$dir" && "$REPO/scripts/dev/build-queue.sh" --label "land $branch (build)" -- cmake --build --preset mac-clang > "$dir/.land-build.log" 2>&1) ||
+        (cd "$dir" && "$REPO/scripts/dev/build-queue.sh" --label "land $branch (build)" -- cmake --build --preset mac-clang -j 2 > "$dir/.land-build.log" 2>&1) ||
             { echo "error: build failed, see $dir/.land-build.log" >&2; exit 1; }
         (cd "$dir" && "$REPO/scripts/dev/build-queue.sh" --label "land $branch (ctest)" -- ctest --test-dir build/mac-clang --output-on-failure > "$dir/.land-ctest.log" 2>&1) ||
             { tail -20 "$dir/.land-ctest.log" >&2; echo "error: ctest failed, see $dir/.land-ctest.log" >&2; exit 1; }
