@@ -99,7 +99,9 @@ public:
     QToolButton *chartMenuButton() const { return m_chartMenuButton; }
     QMenu *chartMenu() const { return m_chartMenu; }
     QToolButton *controlsButton() const { return m_controlsButton; }
+    // Full labelled keyboard menu; the visible extension uses overflowMenu().
     QMenu *controlsMenu() const { return m_controlsMenu; }
+    QMenu *overflowMenu() const { return m_overflowMenu; }
     QComboBox *chartTypeCombo() const { return m_chartTypeCombo; }
     void setBaseAssetSymbol(const QString &symbol);
     void showLayoutsMenu();
@@ -140,6 +142,8 @@ protected:
 private:
     void scheduleFit();
     void fitControls();
+    void refreshOverflowMenu();
+    void refreshGearCommands();
     void setInlineVisible(QAction *action, bool visible);
     QAction* addIconAction(const QString& iconPath, const QString& text, const QString& tooltip);
     QToolButton* addIconButton(const QString& iconPath, const QString& tooltip);
@@ -174,6 +178,7 @@ private:
     QMenu* m_chartMenu = nullptr;
     QToolButton* m_controlsButton = nullptr;
     QMenu* m_controlsMenu = nullptr;
+    QMenu* m_overflowMenu = nullptr;
     QMenu* m_tickMenu = nullptr;
     QMenu* m_labelsMenu = nullptr;
     QMenu* m_legacyThresholdMenu = nullptr;
@@ -188,6 +193,7 @@ private:
     QVector<int> m_fitInputs;
     bool m_fitPending = false;
     bool m_fitting = false;
+    bool m_gearRefreshPending = false;
     QAction* m_rangeMenuAction = nullptr;
     QAction* m_indicatorsAction = nullptr;
     QAction* m_layoutsAction = nullptr;
