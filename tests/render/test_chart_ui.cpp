@@ -95,8 +95,13 @@ QAction *menuAction(QMenu *menu, const QString &name, int nth = 0) {
 // inspects the open popup and always closes it before mouseClick returns.
 void useOverflow(TopToolbar &toolbar, const std::function<void(QMenu *)> &inspect) {
     ASSERT_TRUE(toolbar.controlsButton()->isVisible());
+    toolbar.window()->raise();
+    toolbar.window()->activateWindow();
+    ASSERT_TRUE(QTest::qWaitForWindowActive(toolbar.window(), 2000));
     bool entered = false;
-    QTimer::singleShot(30, &toolbar, [&] {
+    QTimer inspectTimer;
+    inspectTimer.setSingleShot(true);
+    QObject::connect(&inspectTimer, &QTimer::timeout, &toolbar, [&] {
         entered = true;
         auto *menu = toolbar.controlsMenu();
         EXPECT_TRUE(menu->isVisible());
@@ -104,7 +109,9 @@ void useOverflow(TopToolbar &toolbar, const std::function<void(QMenu *)> &inspec
         for (auto *child : menu->findChildren<QMenu *>()) child->hide();
         menu->hide();
     });
+    inspectTimer.start(30);
     QTest::mouseClick(toolbar.controlsButton(), Qt::LeftButton);
+    if (!entered) QTest::qWait(50);
     EXPECT_TRUE(entered);
 }
 
@@ -443,7 +450,9 @@ TEST(ChartToolbar, ChartShortcutOpensCompleteMenuFromWidgetsAndEmbeddedQuickWind
     window.addDockWidget(Qt::RightDockWidgetArea, dock);
     window.resize(2100, 500);
     window.show();
+    window.raise();
     window.activateWindow();
+    ASSERT_TRUE(QTest::qWaitForWindowActive(&window, 2000));
     QTest::qWait(40);
     auto *toolbar = dock->toolbar();
     auto *shortcut = dock->findChild<QShortcut *>("chartControlsShortcut");
@@ -453,11 +462,12 @@ TEST(ChartToolbar, ChartShortcutOpensCompleteMenuFromWidgetsAndEmbeddedQuickWind
         toolbar->setFixedWidth(width);
         QTest::qWait(20);
         for (auto *target : {static_cast<QWidget *>(toolbar->symbolSearch()), static_cast<QWidget *>(toolbar->chartMenuButton())}) {
+            window.raise();
             window.activateWindow();
+            ASSERT_TRUE(QTest::qWaitForWindowActive(&window, 2000));
             SCOPED_TRACE(target->objectName().toStdString());
             target->setFocus();
-            QTest::qWait(20);
-            EXPECT_TRUE(target->hasFocus());
+            ASSERT_TRUE(QTest::qWaitFor([&] { return target->hasFocus(); }, 2000));
             QTest::keyClick(target, Qt::Key_F10, Qt::ShiftModifier);
             QTest::qWait(10);
             EXPECT_TRUE(toolbar->controlsMenu()->isVisible());
@@ -467,7 +477,7 @@ TEST(ChartToolbar, ChartShortcutOpensCompleteMenuFromWidgetsAndEmbeddedQuickWind
         }
         dock->qmlContainer()->setFocus();
         dock->qquickView()->requestActivate();
-        QTest::qWait(20);
+        ASSERT_TRUE(QTest::qWaitFor([&] { return QGuiApplication::focusWindow() == dock->qquickView(); }, 2000));
         QTest::keyClick(dock->qquickView(), Qt::Key_F10, Qt::ShiftModifier);
         QTest::qWait(10);
         EXPECT_TRUE(toolbar->controlsMenu()->isVisible()) << "embedded QQuickView focus";
@@ -475,7 +485,7 @@ TEST(ChartToolbar, ChartShortcutOpensCompleteMenuFromWidgetsAndEmbeddedQuickWind
         QTest::qWait(20);
     }
     outside->setFocus();
-    QTest::qWait(20);
+    ASSERT_TRUE(QTest::qWaitFor([&] { return outside->hasFocus(); }, 2000));
     QTest::keyClick(outside, Qt::Key_F10, Qt::ShiftModifier);
     QTest::qWait(10);
     EXPECT_FALSE(toolbar->controlsMenu()->isVisible());

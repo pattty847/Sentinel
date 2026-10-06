@@ -70,6 +70,8 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_controlsMenu = new QMenu(m_controlsButton);
     m_controlsMenu->setObjectName("chartControlsMenu");
     m_controlsMenu->setToolTipsVisible(true);
+    // Only this menu tree: preserve the gear menu's existing theme policy.
+    m_controlsMenu->setStyleSheet("QMenu::item:disabled { color: #8FA3B8; }");
     m_controlsButton->setMenu(m_controlsMenu);
 
     m_chartMenuButton = new QToolButton(this);
