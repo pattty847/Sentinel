@@ -3,7 +3,7 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-06 ~16:00 EDT. D-a review r1 FINDINGS (3 major); fix round 1 with the same writer.
+- **Updated:** 2026-10-06 ~16:00 EDT. D-a fix round 1 at `b8321a8`; Astra re-review r2 running.
 - **Conductor:** Claude Opus 5.5. The owner handed conducting back on 2026-10-06; Codex does not dispatch.
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10). No fallback active: the 2026-10-04
   GPT-reviews-GPT override ended when Claude usage reset.
@@ -34,7 +34,7 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 | Branch | Tip | State | Next |
 |---|---|---|---|
-| `lt-claude/roller-d` | `a8ae941` | Fix round 1 (writer: Claude `opus` agent). Review r1 FINDINGS: live retract leaves withdrawn data in LiveCache; deploy marker fires before the writer opens; split YAML bypasses the served-root refusal. Reviewer: `gpt-6-astra` high, thread `01a112a9-cc76-7262-8878-826364ff2a92`, output `.claude/acting-orchestrator/d-a/review-astra-r1.md` | Same Astra thread checks the fixes (`codex exec resume`), then land; R1 with the owner |
+| `lt-claude/roller-d` | `b8321a8` | Fix round 1 done; Astra re-review r2 running (output `.claude/acting-orchestrator/d-a/review-astra-r2.md`). Review r1 FINDINGS: live retract leaves withdrawn data in LiveCache; deploy marker fires before the writer opens; split YAML bypasses the served-root refusal. Reviewer: `gpt-6-astra` high, thread `01a112a9-cc76-7262-8878-826364ff2a92`, output `.claude/acting-orchestrator/d-a/review-astra-r1.md` | Same Astra thread checks the fixes (`codex exec resume`), then land; R1 with the owner |
 | `lt-sol/label-style` | `d52921b` | Unrelated, locked | Leave alone |
 | `lt-claude/heatmap-ab-isolation` | `88e7ef4` | Unrelated, locked | Leave alone |
 
