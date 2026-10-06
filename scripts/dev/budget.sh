@@ -1,5 +1,6 @@
 #!/bin/bash
-# Print AI subscription budget left (Claude, Codex) from the CodexBar CLI, one line per window.
+# Print AI subscription budget left (Claude, Codex) from the CodexBar CLI, one line per window, with
+# CodexBar's pace (+N% DEFICIT means used faster than an even spend; reserve means slower).
 # The orchestrator runs this before dispatching work to route by remaining budget.
 # Usage: scripts/dev/budget.sh [--json]
 set -u
@@ -37,5 +38,21 @@ for p in (data if isinstance(data, list) else [data]):
             except ValueError:
                 pass
         label = labels.get(key) or names[key]
-        print(f"{prov:6} {label:10} {left:3.0f}% left{eta}")
+        pace = (p.get("pace") or {}).get(key) or {}
+        note = ""
+        if "deltaPercent" in pace:
+            d = pace["deltaPercent"]
+            word = "DEFICIT" if d > 0 else "reserve"
+            note = f" | {d:+.0f}% {word}"
+            if not pace.get("willLastToReset", True) and pace.get("etaSeconds"):
+                note += ", runs out in %.1fd" % (pace["etaSeconds"] / 86400)
+        print(f"{prov:6} {label:10} {left:3.0f}% left{eta}{note}")
+    for x in usage.get("extraRateWindows") or []:
+        w = x.get("window") or {}
+        if "usedPercent" in w:
+            title = (x.get("title") or "extra")[:10]
+            print(f"{prov:6} {title:10} {100 - w["usedPercent"]:3.0f}% left")
+    n = (usage.get("codexResetCredits") or {}).get("availableCount")
+    if n:
+        print(f"{prov:6} {"resets":10} {n} credit(s) held by the owner")
 '
