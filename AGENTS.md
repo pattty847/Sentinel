@@ -125,7 +125,7 @@ Screenshots and GUI runs:
 
 Always-on services (recorder `com.sentinel.recorder`, capture `com.sentinel.capture`, launchd, `~/Sentinel-runtime/bin`):
 - Writers and reviewers never stop, restart, replace or deploy them, and never run a bare `sentinel-server` from the repo (it contends for the recorder's data locks).
-- Only the conductor deploys, only with `scripts/dev/deploy-runtime.sh server|capture|both` (copy, sign, restart, verify writes within 60 s, auto-rollback), one service at a time, then reads the run log and metrics.
+- Only the conductor deploys, only with `scripts/dev/deploy-runtime.sh server|capture|both` (copy, sign, restart, verify writes from the restarted PID's log: server 150 s, capture 60 s; auto-rollback; no server deploy 23:55-00:05 UTC), one service at a time, then reads the run log and metrics.
 - The conductor may redeploy a change that is reviewed and landed on `main`, then tells the owner.
 - The recorder reads `config/server_config.yaml` (and `config/.server_config.yaml`) from the main checkout at every start. Keep the main checkout on `main` and clean; never check out another branch there. A server config change is a reviewed commit on `main` and takes effect at the next restart, so treat it like a deploy.
 - Never read, copy, export or change the signing identity ("Sentinel Local Code Signing") or other keys; only `deploy-runtime.sh` uses it.

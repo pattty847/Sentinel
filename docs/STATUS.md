@@ -3,7 +3,7 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-06 ~16:00 EDT. D-a r3: no recording defect; owner-approved scoped integration fix (stale DeployRuntimeDryRun harness, partial log read) with the writer; Astra checks only that delta, then land.
+- **Updated:** 2026-10-06 ~18:45 EDT. D-a landed (`e8958cd`, full suite 97/97); next R1 with the owner at the Mac.
 - **Conductor:** Claude Opus 5.5. The owner handed conducting back on 2026-10-06; Codex does not dispatch.
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10). No fallback active: the 2026-10-04
   GPT-reviews-GPT override ended when Claude usage reset.
@@ -34,7 +34,6 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 | Branch | Tip | State | Next |
 |---|---|---|---|
-| `lt-claude/roller-d` | `3fb916c` | Fix round 2 done (contract changes: lead publishes only with a cached final; readiness = current durable health, server deploy window 150 s). Astra r3 (`review-astra-r3.md`): diagnosis = packet validation-scope gap (DeployRuntimeDryRun not listed), not design. Scoped integration fix in progress. Owner accepted the new-product startup delay; runbook blackout and 150 s window recorded in the plan (owner decisions 5-6). At landing: update AGENTS 4b "verify writes within 60 s". Astra r2: `.claude/acting-orchestrator/d-a/review-astra-r2.md`; legacy-renderer limit accepted for a primary-source landing, must be gone before R2 (S8). Review r1 FINDINGS: live retract leaves withdrawn data in LiveCache; deploy marker fires before the writer opens; split YAML bypasses the served-root refusal. Reviewer: `gpt-6-astra` high, thread `01a112a9-cc76-7262-8878-826364ff2a92`, output `.claude/acting-orchestrator/d-a/review-astra-r1.md` | Same Astra thread checks the fixes (`codex exec resume`), then land; R1 with the owner |
 | `lt-sol/label-style` | `d52921b` | Unrelated, locked | Leave alone |
 | `lt-claude/heatmap-ab-isolation` | `88e7ef4` | Unrelated, locked | Leave alone |
 
@@ -54,7 +53,7 @@ None. (S8 legacy heatmap deletion approved by the owner 2026-10-06; see Next.)
 ## Next (priority order)
 
 1. Wave 3 complete (2026-10-06): overflow redesign `66e39b2`, retained fonts `fac62a0`, settings with hover tooltips `542be4d`; each owner-approved, full suite 96/96.
-2. Slice D-a, dispatched 2026-10-06 (see In flight): packet in `docs/research/2026-10-one-world-pipeline.md` "Slice D task packet" plus "Owner decisions on the slice D packet (2026-10-06)" (live path option C: no live-age regression; split D-a/D-b; `from` bump). Writer Claude `opus` (needs native evidence), reviewer `gpt-6-astra` high. Runbook R1 (widen to all 7 products) and R2 (flip) are conductor steps with the owner present. Then D-b (engine replaced by the journal feed: one Coinbase connection) and slice E deletions.
+2. Slice D-a LANDED 2026-10-06 as `e8958cd` (option C live path, roller serving switch off by default). Next: R1 widen (owner present; runbook in the plan's slice D section 5 plus owner decisions 5-6), then the 48 h soak, during which S8 and the acceptor fix (FM-154/202) are dispatched. Original packet: packet in `docs/research/2026-10-one-world-pipeline.md` "Slice D task packet" plus "Owner decisions on the slice D packet (2026-10-06)" (live path option C: no live-age regression; split D-a/D-b; `from` bump). Writer Claude `opus` (needs native evidence), reviewer `gpt-6-astra` high. Runbook R1 (widen to all 7 products) and R2 (flip) are conductor steps with the owner present. Then D-b (engine replaced by the journal feed: one Coinbase connection) and slice E deletions.
 2a. S8 (delete the legacy heatmap, owner-approved 2026-10-06): dispatch after D-a lands, during the R1 48 h soak (GUI files only; no overlap with roller/server files). First step of the packet: one final legacy-vs-gpu A/B capture with the same steps as `docs/research/2026-10-s6-plan.md` "Sequence and timings", kept as the before/after record. Writer Claude (needs Metal), reviewer `gpt-6-astra` high (GPU heatmap core). Removes the D-a legacy-renderer limit (the legacy page path cannot drop a withdrawn live column). Packet must cite FM-079 (removing legacy heatmap production once stopped live footprint, TPO and volume profile).
 3. After D: change-driven live publishing with a per-client max update rate (see the owner decisions block). Then EATEN vs PULLED liquidity and ABSORPTION (owner's strongest direction): Fable plan after slice D. It crosses
    roller, HMC2, wire and renderer.
