@@ -18,6 +18,7 @@
 #include <QLinearGradient>
 #include <QPainter>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSlider>
 #include <QSpinBox>
 #include <QTabWidget>
@@ -70,8 +71,18 @@ QSpinBox *intSpin(QWidget *parent, const char *name, int lo, int hi, int step, c
 QLabel *note(const QString &text, QWidget *parent) {
     auto *label = new QLabel(text, parent);
     label->setWordWrap(true);
-    label->setStyleSheet("QLabel { color: #8198A6; font-size: 11px; }");
+    label->setStyleSheet("QLabel { color: #AABBC6; }");
     return label;
+}
+QScrollArea *scrollTab(QWidget *content, const char *name) {
+    auto *scroll = new QScrollArea;
+    scroll->setObjectName(name);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
+    scroll->setWidgetResizable(true);
+    scroll->setWidget(content);
+    return scroll;
 }
 QJsonArray gradientJson(const std::vector<heatmap::GradientStop> &stops) {
     QJsonArray out;
@@ -121,7 +132,7 @@ HeatmapGradientEditor::HeatmapGradientEditor(const QString &objectName, QWidget 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 22, 0, 0); // the preview strip is painted above the table
     table_ = new QTableWidget(0, 2, this);
-    table_->setHorizontalHeaderLabels({"Position", "Colour"});
+    table_->setHorizontalHeaderLabels({"Position (0–1)", "Colour"});
     table_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     table_->verticalHeader()->setVisible(false);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -289,13 +300,14 @@ void HeatmapSettingsDialog::buildUi() {
     auto *layout = new QVBoxLayout(this);
     m_tabs = new QTabWidget(this);
     m_tabs->setObjectName("heatmapSettingsTabs");
-    m_tabs->addTab(buildChartTab(), "Chart");
-    m_tabs->addTab(buildTickTab(), "Tick");
-    m_tabs->addTab(buildLookTab(), "Look");
-    m_tabs->addTab(buildBudgetsTab(), "Budgets");
-    m_tabs->addTab(buildLiveTab(), "Live");
-    m_tabs->addTab(buildDebugTab(), "Debug");
-    m_tabs->addTab(buildTpoTab(), "TPO");
+    m_tabs->addTab(scrollTab(buildChartTab(), "chartSettingsScroll"), "Chart");
+    m_tabs->addTab(scrollTab(buildTickTab(), "tickSettingsScroll"), "Tick");
+    m_tabs->addTab(scrollTab(buildLookTab(), "lookSettingsScroll"), "Look");
+    m_tabs->addTab(scrollTab(buildBudgetsTab(), "budgetsSettingsScroll"), "Budgets");
+    m_tabs->addTab(scrollTab(buildLiveTab(), "liveSettingsScroll"), "Live");
+    m_tabs->addTab(scrollTab(buildDebugTab(), "debugSettingsScroll"), "Debug");
+    m_tabs->addTab(scrollTab(buildTpoTab(), "tpoSettingsScroll"), "TPO");
+    layout->addWidget(note("Changes take effect immediately. Close keeps saved chart settings; session-only controls are labelled.", this));
     layout->addWidget(m_tabs);
 
     m_status = new QLabel(this);
@@ -355,9 +367,8 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     m_labelMaxPx->setSuffix(" px");
     form->addRow("Label size, smallest", m_labelMinPx);
     form->addRow("Label size, largest", m_labelMaxPx);
-    form->addRow(note("A label shows on every coloured cell (above the liquidity range's low handle) where its text "
-                      "fits at the smallest size plus padding; it grows with the cells up to the largest size. "
-                      "GPU renderer.",
+    form->addRow(note("GPU labels appear on coloured cells above the range low when the text fits. "
+                      "Their size grows with the cell, up to the largest size.",
                       page));
     m_tradesAboveCandles = new QCheckBox("Trades above candles", page);
     m_tradesAboveCandles->setObjectName("tradesAboveCandles");
@@ -444,12 +455,10 @@ QWidget *HeatmapSettingsDialog::buildTickTab() {
     form->addRow("Min row height (Auto)", m_minRowPx);
     m_hysteresis = doubleSpin(page, "hysteresis", 0, 0.9, 0.05, 2);
     form->addRow("Hysteresis h (Auto)", m_hysteresis);
-    form->addRow(note("Auto: the smallest preset whose rows are at least the minimum height; it steps finer only "
-                      "at min x (1 + h) and coarser below min x (1 - h); the preset shows the drawn tick. Picking a "
-                      "preset locks it (Manual), remembered per symbol and timeframe; entering Manual restores that "
-                      "choice or locks the drawn tick. Presets are the ones some "
-                      "loaded data can build; columns that cannot build a locked preset are veiled, never coarsened. "
-                      "Tick controls drive the GPU renderer.", page));
+    form->addRow(note("GPU heatmap: Auto chooses a tick that keeps rows at least the minimum height; "
+                      "hysteresis limits switching near that height. Picking a preset locks Manual. "
+                      "The choice is remembered per symbol and timeframe; entering Manual restores it or locks the drawn tick. "
+                      "Loaded data offers the presets. Columns that cannot build a locked tick are veiled.", page));
     form->addRow(resetButton("Tick", page));
 
     connect(m_tickMode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
@@ -481,12 +490,12 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     form->addRow("Ask gradient (Custom)", m_askGradient);
     m_sensitivityMin = doubleSpin(page, "sensitivityMin", 0.0001, 1e12, 0.01, 4);
     m_sensitivityMax = doubleSpin(page, "sensitivityMax", 0.0001, 1e15, 1, 4);
-    m_sensitivityMin->setToolTip("The liquidity range's low handle (toolbar): smaller cells get no colour and no label.");
-    m_sensitivityMax->setToolTip("The liquidity range's high handle (toolbar): colour saturates at and above it.");
-    form->addRow("Liquidity range low (size)", m_sensitivityMin);
-    form->addRow("Liquidity range high (size)", m_sensitivityMax);
+    m_sensitivityMin->setToolTip("Base-asset size per heatmap cell. Below the toolbar's low handle, cells have no colour or label.");
+    m_sensitivityMax->setToolTip("Base-asset size per heatmap cell. Colour saturates at the toolbar's high handle.");
+    form->addRow("Range low (base asset)", m_sensitivityMin);
+    form->addRow("Range high (base asset)", m_sensitivityMax);
     m_opacity = doubleSpin(page, "opacity", 0, 1, 0.05, 2);
-    form->addRow("Opacity", m_opacity);
+    form->addRow("Opacity (0–1)", m_opacity);
     auto *fadeRow = new QHBoxLayout;
     m_crossfadeOn = new QCheckBox("Crossfade tick changes", page);
     m_crossfadeOn->setObjectName("crossfadeOn");
@@ -499,7 +508,8 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     m_bandEdges = new QCheckBox("Show near-band edges", page);
     m_bandEdges->setObjectName("showBandEdges");
     m_bandEdges->setToolTip("Saved with the chart. sentinel-lab draws the band edges; the main chart does not yet.");
-    form->addRow("Band edges", m_bandEdges);
+    form->addRow("Band edges (lab only)", m_bandEdges);
+    form->setRowVisible(m_bandEdges, false); // lab-only setting has no main-chart effect
 
     auto *tone = new QGroupBox("Tone mapping (both renderers, this session)", page);
     auto *toneForm = new QFormLayout(tone);
@@ -573,6 +583,7 @@ QWidget *HeatmapSettingsDialog::buildBudgetsTab() {
     m_prefetchTiles->setToolTip("Saved with the chart. The span planner prefetches max(2, view width) tiles and "
                                 "does not read this setting yet.");
     chartForm->addRow("Prefetch tiles (not used yet)", m_prefetchTiles);
+    chartForm->setRowVisible(m_prefetchTiles, false); // retain the saved field without offering an inactive control
     chartForm->addRow(note("The upload budget is at most 128 MiB and at most the GPU cap.", chart));
     layout->addWidget(chart);
 
@@ -629,7 +640,7 @@ QWidget *HeatmapSettingsDialog::buildDebugTab() {
     m_showTelemetry = new QCheckBox("Show the heatmap telemetry dock", page);
     m_showTelemetry->setObjectName("showTelemetry");
     form->addRow("Telemetry", m_showTelemetry);
-    form->addRow(note("Labels and walls read the legacy renderer and stay off with the GPU renderer (S7).", page));
+    form->addRow(note("GPU heatmap cell labels can be toggled in Chart; the legacy renderer draws its own labels.", page));
     form->addRow(resetButton("Debug", page));
     connect(m_rendererCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         apply({{"renderer", m_rendererCombo->currentData().toString()}}, m_makeDefault->isChecked());
@@ -644,6 +655,7 @@ QWidget *HeatmapSettingsDialog::buildDebugTab() {
 QWidget *HeatmapSettingsDialog::buildTpoTab() {
     auto *page = new QWidget(this);
     auto *form = new QFormLayout(page);
+    form->addRow(note("Changes in this tab apply to this session.", page));
     m_tpoTimeframeCombo = new QComboBox(page);
     m_tpoTimeframeCombo->addItem("15m", 900000);
     m_tpoTimeframeCombo->addItem("30m", 1800000);

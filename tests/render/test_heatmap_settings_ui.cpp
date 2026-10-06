@@ -34,6 +34,8 @@
 #include <QSettings>
 #include <QSGGeometry>
 #include <QSignalSpy>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSpinBox>
 #include <QTabWidget>
 #include <QTableWidget>
@@ -370,6 +372,33 @@ TEST(HeatmapSettingsDialogTest, EveryTabShowsTheModel) {
     EXPECT_EQ(child<QComboBox>(dialog, "renderer")->currentData().toString(), "legacy");
     EXPECT_EQ(child<QLabel>(dialog, "savedRenderer")->text(), "legacy");
     EXPECT_TRUE(child<QCheckBox>(dialog, "showTelemetry")->isChecked());
+}
+
+TEST(HeatmapSettingsDialogTest, ShortDialogScrollsToLookControlsWithoutChangingPersistence) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    dialog.resize(520, 480);
+    dialog.tabs()->setCurrentIndex(2); // Look has two gradient editors
+    dialog.show();
+    QCoreApplication::processEvents();
+    EXPECT_LE(dialog.height(), 520);
+    auto *scroll = child<QScrollArea>(dialog, "lookSettingsScroll");
+    auto *opacity = child<QDoubleSpinBox>(dialog, "opacity");
+    ASSERT_TRUE(scroll && opacity);
+    EXPECT_GT(scroll->verticalScrollBar()->maximum(), 0);
+    scroll->ensureWidgetVisible(opacity);
+    EXPECT_GT(scroll->verticalScrollBar()->value(), 0);
+    opacity->setValue(0.6);
+    EXPECT_DOUBLE_EQ(t.reload().opacity, 0.6);
+    auto *reset = child<QPushButton>(dialog, "resetLook");
+    scroll->ensureWidgetVisible(reset);
+    EXPECT_TRUE(reset->isVisible());
+    reset->click();
+    EXPECT_DOUBLE_EQ(t.reload().opacity, model.defaultSettings().opacity);
+    EXPECT_TRUE(child<QCheckBox>(dialog, "showBandEdges")->isHidden());
+    dialog.tabs()->setCurrentIndex(3);
+    EXPECT_TRUE(child<QSpinBox>(dialog, "prefetchTiles")->isHidden());
 }
 
 // Item 2 of the review: only presets loaded data builds are offered; with nothing
