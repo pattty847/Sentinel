@@ -152,7 +152,7 @@ HeatmapGradientEditor::HeatmapGradientEditor(const QString &objectName, QWidget 
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     table_->setMinimumHeight(110);
     table_->setToolTip("Set colours along the liquidity range, from 0 (low) to 1 (high). Editing a stop selects Custom.");
-    table_->horizontalHeaderItem(0)->setToolTip("Place this colour along the liquidity range: 0 = low, 1 = high. Keep stops in increasing order.");
+    table_->horizontalHeaderItem(0)->setToolTip("Where this colour sits between range low (0) and range high (1). The first stop stays at 0 and the last at 1. Keep the others in strictly increasing order.");
     table_->horizontalHeaderItem(1)->setToolTip("Choose the heatmap colour at this stop. Editing a colour selects Custom.");
     table_->verticalScrollBar()->setToolTip("Scroll to gradient stops below or above the visible rows.");
     table_->horizontalScrollBar()->setToolTip("Scroll sideways to see the stop position and colour.");
@@ -331,7 +331,9 @@ void HeatmapSettingsDialog::buildUi() {
     m_tabs->addTab(scrollTab(buildDebugTab(), "debugSettingsScroll"), "Debug");
     m_tabs->addTab(scrollTab(buildTpoTab(), "tpoSettingsScroll"), "TPO");
     for (int i = 0; i < m_tabs->count(); ++i)
-        m_tabs->setTabToolTip(i, "Open " + m_tabs->tabText(i) + " settings for this chart.");
+        m_tabs->setTabToolTip(i, m_tabs->tabText(i) == "Budgets"
+            ? QStringLiteral("Open memory settings. The GPU group is for this chart; the RAM group applies to all charts.")
+            : "Open " + m_tabs->tabText(i) + " settings for this chart.");
     for (auto *button : m_tabs->tabBar()->findChildren<QAbstractButton *>())
         button->setToolTip("Scroll the tab strip to reach more settings tabs.");
     layout->addWidget(note("Changes take effect immediately. Close keeps saved chart settings; session-only controls are labelled.", this));
@@ -345,7 +347,7 @@ void HeatmapSettingsDialog::buildUi() {
     auto *buttons = new QDialogButtonBox(this);
     auto *logButton = buttons->addButton("Log Settings", QDialogButtonBox::ActionRole);
     auto *closeButton = buttons->addButton(QDialogButtonBox::Close);
-    logButton->setToolTip("Write this chart's settings and tone values to the Sentinel run log. Use it when diagnosing the chart.");
+    logButton->setToolTip("Write this chart's settings and gamma, contrast and floor values to the Sentinel run log. Use it when diagnosing the chart.");
     closeButton->setToolTip("Close settings; changes already applied stay in effect. Session-only changes last until the app closes.");
     buttons->setStyleSheet(
         "QDialogButtonBox QPushButton { background-color: #2B5A7A; color: #FFFFFF; border: none; padding: 8px 16px; border-radius: 4px; }"
@@ -358,7 +360,8 @@ void HeatmapSettingsDialog::buildUi() {
 QPushButton *HeatmapSettingsDialog::resetButton(const QString &tab, QWidget *parent) {
     auto *button = new QPushButton("Reset " + tab + " to defaults", parent);
     button->setObjectName("reset" + tab);
-    button->setToolTip("Restore the configured defaults for " + tab + ". Use it to undo changes on this tab.");
+    button->setToolTip("Restore the configured defaults for " + tab + ". Use it to undo changes on this tab."
+                      + (tab == "Chart" ? " Candle style is not reset." : ""));
     connect(button, &QPushButton::clicked, this, [this, tab] {
         if (!m_model) return;
         const auto error = m_model->resetKeys(tabKeys(tab));
@@ -588,7 +591,7 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     describe(form, m_askGradient, "Set the ask-side colours from low to high liquidity. Edit stops to select the Custom palette.");
     describe(form, m_sensitivityMin, m_sensitivityMin->toolTip());
     describe(form, m_sensitivityMax, m_sensitivityMax->toolTip());
-    describe(form, m_opacity, "Heatmap opacity: 0 = transparent, 1 = solid. Lower it to make other chart layers easier to see.");
+    describe(form, m_opacity, "GPU heatmap opacity: 0 = transparent, 1 = solid. Lower it to see other chart layers through the heatmap. The legacy renderer ignores it.");
     describe(form, fadeRow, "Blend old and new GPU heatmap rows over 1-2000 milliseconds when the tick changes. Turn off for an immediate switch, or lower the duration for a quicker blend.");
     describe(form, m_bandEdges, m_bandEdges->toolTip());
     describe(toneForm, gammaRow, "Curve of heatmap colour intensity (0.1-5). Lower it to bring out weaker liquidity; higher values favour stronger liquidity, this session only.");
@@ -658,12 +661,12 @@ QWidget *HeatmapSettingsDialog::buildBudgetsTab() {
     layout->addWidget(process);
     layout->addWidget(resetButton("Budgets", page));
     layout->addStretch();
-    describe(chartForm, m_gpuCapMiB, "GPU heatmap cache budget for this chart, in MiB. Raise it if panning reloads tiles; visible and fallback tiles can keep usage above the cap.");
+    describe(chartForm, m_gpuCapMiB, "GPU heatmap cache budget for this chart, in MiB. Raise it if panning reloads tiles; tiles on screen or kept as a stand-in while detail loads can keep usage above the cap.");
     describe(chartForm, m_uploadKiB, "GPU heatmap upload budget per frame, in KiB; capped at 128 MiB and the GPU memory cap. Lower it to spread uploads across frames, or raise it to load tiles sooner.");
     describe(chartForm, m_prefetchTiles, m_prefetchTiles->toolTip());
-    describe(processForm, m_decodedMiB, "RAM budget for decoded recording chunks across all charts, in MiB (1-4096). Raise it to keep more chunks cached when revisiting history.");
-    describe(processForm, m_spanMiB, "RAM budget for built heatmap span sources across all charts, in MiB (1-4096). Raise it to keep more sources ready for reuse when panning.");
-    describe(processForm, m_ceilingMiB, "CPU-side heatmap memory ceiling across all charts, in MiB (1-4096); must cover decoded chunks plus span sources. Raise it when the memory limit blocks new source builds.");
+    describe(processForm, m_decodedMiB, "Budget for recorded data unpacked in RAM across all charts, in MiB (1-4096). Raise it to keep more history cached when revisiting it.");
+    describe(processForm, m_spanMiB, "RAM budget for ready-to-draw heatmap data built from recordings across all charts, in MiB (1-4096). Raise it to keep more chart data ready for reuse when panning.");
+    describe(processForm, m_ceilingMiB, "Total RAM allowed for both of the above across all charts, in MiB (1-4096); must be at least their combined budgets. Raise it when the memory limit prevents loading more heatmap data.");
 
     connect(m_gpuCapMiB, &QSpinBox::valueChanged, this, [this](int mib) { apply({{"gpuCapBytes", qint64(mib) * qint64(MiB)}}); });
     connect(m_uploadKiB, &QSpinBox::valueChanged, this, [this](int kib) {
@@ -683,7 +686,7 @@ QWidget *HeatmapSettingsDialog::buildLiveTab() {
     form->addRow(note("The shortest spacing of live-edge compositions (the server publishes at 1 Hz). Slow "
                       "compositions back off to at least 5 s.", page));
     form->addRow(resetButton("Live", page));
-    describe(form, m_liveMinInterval, "Minimum spacing of GPU live-edge builds in milliseconds (100-5000); the server publishes at 1 Hz. Raise it to reduce rebuild work; slow builds back off to at least 5 seconds.");
+    describe(form, m_liveMinInterval, "Minimum spacing of GPU refreshes of the newest heatmap columns in milliseconds (100-5000); the server publishes at 1 Hz. Raise it to reduce refresh work; slow refreshes back off to at least 5 seconds.");
     connect(m_liveMinInterval, &QSpinBox::valueChanged, this, [this](int ms) { apply({{"liveMinIntervalMs", ms}}); });
     return page;
 }
@@ -748,7 +751,7 @@ QWidget *HeatmapSettingsDialog::buildTpoTab() {
     m_tpoThemeCombo->addItem("Sage", "sage");
     form->addRow("TPO Theme", m_tpoThemeCombo);
     form->addRow(resetButton("TPO", page));
-    describe(form, m_tpoTimeframeCombo, "Time covered by each TPO letter (15 minutes to 1 day). Use shorter brackets for more detail; brackets that do not fit the session are shortened, this session only.");
+    describe(form, m_tpoTimeframeCombo, "Time covered by each TPO letter (15 minutes to 1 day). Use shorter brackets for more detail. A bracket that does not divide the session evenly, or gives too many columns, is changed to the nearest one that does. This session only.");
     describe(form, m_tpoSessionCombo, "Group TPO letters into a regional session, UTC day, week or month. Change it to compare profiles over that trading window; this session only.");
     describe(form, m_tpoLayoutCombo, "Collapsed packs each price row into a profile; Split keeps brackets in separate time columns. Use Split to follow the session's sequence, this session only.");
     describe(form, m_tpoThemeCombo, "Choose the TPO cell colours, including value-area and point-of-control highlights. Change it for clearer period or profile contrast; this session only.");
