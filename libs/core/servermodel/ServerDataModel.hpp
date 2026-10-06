@@ -73,13 +73,28 @@ public:
                                 std::vector<FootprintTradeSample>& out) const;
     int64_t exchangeNowMs() const override;
     recording::LiveService* recordingLive() const { return m_recordingLive.get(); }
-    bool recordingAvailable() const { return m_recorder != nullptr; }
+    // Primary recorder started, or (recording.source: roller) the roller attached.
+    bool recordingAvailable() const { return m_recorder != nullptr || m_rollerAttached.load(); }
     const std::optional<std::filesystem::path>& recordingDir() const { return m_recordingDir; }
     // Per-level recorder cutoffs; zero when the series is not recorded in this process.
     recording::BookRecorder::Watermarks recordingWatermarks(const std::string& symbol,
                                                             const std::string& layer) const {
-        return m_recorder ? m_recorder->watermarks(symbol, layer) : recording::BookRecorder::Watermarks{};
+        if (m_recorder) return m_recorder->watermarks(symbol, layer);
+        if (m_rollerAttached.load()) return m_rollerWatermarks(symbol, layer);
+        return {};
     }
+    // recording.source: roller. True when the served root and LiveService are
+    // ready for the roller (recording.enabled, roller_shadow.enabled, mounted).
+    bool servesRoller() const { return m_servesRoller; }
+    // Hand-off for the roller workers: publish into this model's LiveService.
+    std::function<void(recording::RecordPtr)> rollerPublisher();
+    // Roller workers: withdraw a product's provisional live minutes.
+    std::function<void(const std::string&)> rollerRetract();
+    std::function<bool(const std::string&, const std::string&, recording::RecordPtr)> rollerEnsureFinal();
+    // Main thread, once, before the stream server starts: the roller's
+    // thread-safe watermark and running queries.
+    using RollerWatermarks = std::function<recording::BookRecorder::Watermarks(const std::string&, const std::string&)>;
+    void attachRoller(RollerWatermarks watermarks, std::function<bool(const std::string&)> running);
 
     // Recorder and upstream-connection series for GET /metrics. Call once on the
     // main thread; the samplers read main-thread state, so render on that thread.
@@ -161,6 +176,11 @@ private:
     // Main thread: every pinned symbol x recorded layer must keep committing columns.
     std::optional<recording::RecorderStallMonitor> m_stallMonitor;
     std::vector<recording::RecorderStallMonitor::Series> m_stallSeries;
+    bool m_servesRoller = false;
+    std::atomic<bool> m_rollerAttached{false};
+    RollerWatermarks m_rollerWatermarks;
+    std::function<bool(const std::string&)> m_rollerRunning;
     void startRecorder();
+    void startRollerServing();
     void checkRecorderProgress(int64_t nowMs);
 };

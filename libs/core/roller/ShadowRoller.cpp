@@ -38,6 +38,190 @@ uint64_t little(const char *p, size_t n) {
     v |= uint64_t(uint8_t(p[i])) << (8 * i);
   return v;
 }
+// Probe only (evaluated when roller.live is enabled): lowest native row price.
+double lowestPrice(const recording::Hmc2Record &r) {
+  int64_t low = INT64_MAX;
+  for (const auto &e : r.entries)
+    low = std::min(low, e.row);
+  return r.entries.empty() ? 0.0
+                           : double(low) * double(r.header.rowTickUnits) /
+                                 r.header.priceScale;
+}
+// Option C live path (owner 2026-10-06), roller worker thread only. The lead is
+// a non-persisting fork of the day's history recorder (Publication::Lead) that
+// also applies provisional fan-out records as they arrive. History still
+// applies only durable prefixes (INV-114) and publishes committed minutes. Any
+// provisional discard (retract, disconnect, EOF, socket failure) and day end
+// drops the lead and withdraws everything it published from the live cache
+// (committed minutes stay); the next fork republishes from durable history.
+class LiveLead {
+  const ShadowConfig &cfg;
+  const std::string product;
+  metrics::Counter &forks;
+  std::function<int64_t()> committedThrough;
+  bool waitLogged = false;
+  bool published = false; // lead worker writes; read after the worker joined
+  recording::BookRecorder *history = nullptr;
+  const JournalFeed *historyFeed = nullptr;
+  std::unique_ptr<JournalFeed> feed;
+  std::unique_ptr<recording::BookRecorder> lead;
+  int64_t lastTickMs = 0, nextFailureLogMs = 0, nextForkMs = 0;
+  int64_t now() const {
+    return cfg.liveNowForTest ? cfg.liveNowForTest() : nowMs();
+  }
+  void failed(const char *where, const std::exception &e) {
+    discard();
+    const auto t = nowMs();
+    if (t >= nextFailureLogMs) {
+      nextFailureLogMs = t + 10000;
+      sLog_Warning("Roller live lead dropped product="
+                   << product << " at=" << where << " error=" << e.what());
+    }
+  }
+  void tick() {
+    const auto t = now();
+    if (t - lastTickMs < 250)
+      return;
+    lastTickMs = t;
+    lead->onTick(t);
+  }
+  // A withdrawal reaches a client only with a committed minute to resend.
+  // After a restart history republishes none (replay below the commit floor):
+  // seed the newest persisted minute of each layer, or wait for the first.
+  bool finalsCached() {
+    if (!cfg.ensureLiveFinal)
+      return true;
+    for (const auto *layer : {"near", "deep"}) {
+      if (cfg.ensureLiveFinal(product, layer, nullptr))
+        continue;
+      const auto end = committedThrough();
+      std::shared_ptr<recording::Hmc2Record> newest;
+      for (const auto back : {Hour, Day}) {
+        if (end <= recording::kHmc2MinMs)
+          break;
+        auto rows = recording::Hmc2Store::readRange(
+            cfg.outputRoot, product, layer, 60000,
+            std::max(recording::kHmc2MinMs, end - back), end);
+        if (!rows.empty()) {
+          newest =
+              std::make_shared<recording::Hmc2Record>(std::move(rows.back()));
+          newest->committedThroughMs = newest->bucketStartMs + 60000;
+          break;
+        }
+      }
+      if (!newest || !cfg.ensureLiveFinal(product, layer, newest))
+        return false;
+    }
+    return true;
+  }
+
+public:
+  LiveLead(const ShadowConfig &c, std::string p, metrics::Counter &f,
+           std::function<int64_t()> committed)
+      : cfg(c), product(std::move(p)), forks(f),
+        committedThrough(std::move(committed)) {}
+  ~LiveLead() { discard(); }
+  bool enabled() const { return bool(cfg.publisher); }
+  void attach(recording::BookRecorder *h, const JournalFeed *f) {
+    history = h;
+    historyFeed = f;
+    if (!h)
+      discard();
+  }
+  // Joins the lead worker first: no publication of withdrawn input follows
+  // the withdrawal.
+  void discard() {
+    lead.reset();
+    feed.reset();
+    if (!std::exchange(published, false) || !cfg.retractLive)
+      return;
+    try {
+      cfg.retractLive(product);
+      sLog_Data("Roller live provisional withdrawn product=" << product);
+    } catch (const std::exception &e) {
+      sLog_Error("Roller live withdrawal failed product="
+                 << product << " error=" << e.what());
+    }
+  }
+  // At the socket, after every returned record reached history: fork from the
+  // durable state, then apply the provisional suffix received so far.
+  void ensure(const std::deque<JournalRecord> &pending) {
+    if (!enabled() || lead || !history || !historyFeed || nowMs() < nextForkMs)
+      return;
+    try {
+      if (!finalsCached()) {
+        if (!std::exchange(waitLogged, true))
+          sLog_Data("Roller live lead waits for a committed minute product="
+                    << product);
+        nextForkMs = nowMs() + 1000;
+        return;
+      }
+      auto publish = [this, sink = cfg.publisher, name = product](
+                         std::shared_ptr<const recording::Hmc2Record> r) {
+        published = true;
+        sLog_Probe("roller.live",
+                   "product=" << name << " layer=" << r->header.layer
+                              << " bucket=" << r->bucketStartMs
+                              << " observed=" << r->observedMs
+                              << " entries=" << r->entries.size() << " ageMs="
+                              << nowMs() - (r->bucketStartMs + r->observedMs)
+                              << " lowPrice=" << lowestPrice(*r));
+        sink(std::move(r));
+      };
+      const auto began = std::chrono::steady_clock::now();
+      lead = history->forkLead(std::move(publish), cfg.livePublishMs);
+      feed = std::make_unique<JournalFeed>(*historyFeed);
+      feed->onSnapshot = [this](int64_t e, int64_t l,
+                                std::vector<recording::Level> v) {
+        lead->onSnapshotAt(product, e, l, std::move(v));
+      };
+      feed->onUpdates = [this](int64_t e, int64_t l,
+                               std::vector<recording::Level> v) {
+        lead->onUpdatesAt(product, e, l, std::move(v));
+      };
+      feed->onInvalid = [this](int64_t t, const std::string &reason) {
+        lead->onInvalid(product, t, reason);
+      };
+      feed->onTick = [this](int64_t t) { lead->onTick(t); };
+      feed->onTrade = {};
+      feed->onConnection = {};
+      forks.inc();
+      sLog_Data("Roller live lead forked product="
+                << product << " provisional=" << pending.size() << " forkUs="
+                << std::chrono::duration_cast<std::chrono::microseconds>(
+                       std::chrono::steady_clock::now() - began)
+                       .count());
+      for (const auto &r : pending)
+        feed->apply(r);
+      lastTickMs = 0;
+      tick();
+    } catch (const std::exception &e) {
+      failed("fork", e);
+      nextForkMs = nowMs() + 1000; // never a fork per socket read
+    }
+  }
+  void apply(const JournalRecord &r) {
+    if (!lead)
+      return;
+    try {
+      feed->apply(r);
+      tick();
+    } catch (const std::exception &e) {
+      failed("apply", e);
+    }
+  }
+  // Socket waits: wall-clock ticks advance the forming minute like the primary
+  // recorder's 250 ms timer.
+  void idle() {
+    if (!lead)
+      return;
+    try {
+      tick();
+    } catch (const std::exception &e) {
+      failed("tick", e);
+    }
+  }
+};
 // A bounded synchronous socket, owned by this product's worker only. Timeouts
 // periodically check cancellation; no Qt event loop or main-thread invocation.
 class LiveSource {
@@ -50,7 +234,11 @@ class LiveSource {
   size_t pendingSize = 0;
   std::optional<JournalPos> ceiling, diskTarget, applied, received;
   bool diskDone = false, initialDetached = true, recovering = false;
+  // At the socket with every returned record applied by history: the lead
+  // may fork there.
+  bool atTip = false;
   std::function<void(const std::string &)> retry;
+  LiveLead *lead;
   std::unique_ptr<JournalReader> catchup;
   std::map<std::string, json> metadata;
   std::map<std::string, size_t> runOrder;
@@ -94,6 +282,11 @@ class LiveSource {
         throw std::runtime_error("fanout EOF; resume journal");
       if (std::chrono::steady_clock::now() > deadline)
         throw std::runtime_error("fanout idle timeout");
+      if (lead) {
+        if (atTip) // quiet socket: retry a fork the final-minute gate deferred
+          lead->ensure(pending);
+        lead->idle();
+      }
       if (socket.bytesAvailable() == 0)
         socket.waitForReadyRead(50);
       bytes += socket.read(capture::MaxRecordBytes + 4100 - bytes.size());
@@ -141,6 +334,8 @@ class LiveSource {
       if (pendingSize > cfg.pendingBytes)
         throw std::runtime_error("shadow pending queue full");
       pending.push_back(std::move(r));
+      if (lead)
+        lead->apply(pending.back());
     } else {
       if (!raw.empty())
         throw std::runtime_error("fanout control with raw suffix");
@@ -157,10 +352,17 @@ class LiveSource {
         throw std::runtime_error("unexpected fanout control: " + type);
     }
   }
+  void discardProvisional() {
+    atTip = false;
+    pending.clear();
+    pendingSize = 0;
+    if (lead)
+      lead->discard();
+  }
   void handshake(const std::optional<JournalPos> &checkpoint) {
     socket.abort();
     bytes.clear();
-    pending.clear();
+    discardProvisional();
     pendingSize = 0;
     ceiling.reset();
     received = applied;
@@ -201,16 +403,16 @@ public:
   LiveSource(const ShadowConfig &c, std::string p,
              const std::atomic<bool> &stop,
              const std::optional<JournalPos> &checkpoint,
-             std::function<void(const std::string &)> onRetry)
+             std::function<void(const std::string &)> onRetry,
+             LiveLead *liveLead = nullptr)
       : cfg(c), product(std::move(p)), stopping(stop),
-        retry(std::move(onRetry)) {
+        retry(std::move(onRetry)), lead(liveLead) {
     handshake(checkpoint);
     // A day-anchor rebuild can exceed the bounded server backlog. Hold no
     // socket during that replay; reconnect at the fully applied durable tip.
     socket.abort();
     bytes.clear();
-    pending.clear();
-    pendingSize = 0;
+    discardProvisional();
     received.reset();
   }
   bool next(JournalReader &disk, JournalRecord &out) {
@@ -244,8 +446,9 @@ public:
         if (!applied)
           throw;
         socket.abort();
-        pending.clear();
-        pendingSize = 0;
+        // Retract/disconnect/EOF: the lead held withdrawn input. History keeps
+        // its applied prefix; the next fork republishes from durable state.
+        discardProvisional();
         recovering = true;
         retry(e.what());
       }
@@ -299,11 +502,39 @@ private:
         applied = out.pos;
         return true;
       }
+      if (lead) {
+        atTip = true;
+        lead->ensure(pending);
+      }
       controlOrRecord();
     }
     return false;
   }
 };
+// Unknown when the journal root itself is unavailable (volume not mounted):
+// that is a retryable fault, not evidence that the product is not captured.
+std::optional<bool> journalHasProduct(const std::string &root,
+                                      const std::string &product) {
+  std::error_code ec;
+  if (!fs::is_directory(root, ec))
+    return std::nullopt;
+  const auto dir = fs::path(root) / product;
+  if (!fs::is_directory(dir, ec))
+    return false;
+  for (auto it = fs::recursive_directory_iterator(dir, ec);
+       !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+    if (!it->is_regular_file() || it->path().extension() != ".rawl2")
+      continue;
+    try {
+      const auto h =
+          capture::readHeader(QString::fromStdString(it->path().string()));
+      if (h.at("product_metadata").at("product_id") == product)
+        return true;
+    } catch (const std::exception &) {
+    }
+  }
+  return false;
+}
 bool overlaps(const fs::path &a, const fs::path &b) {
   auto x = fs::weakly_canonical(a), y = fs::weakly_canonical(b);
   auto prefix = [](const auto &p, const auto &q) {
@@ -318,7 +549,16 @@ struct ShadowRoller::Impl {
   struct Product {
     std::string name;
     metrics::Gauge *running, *lastComparison, *cooldown;
-    metrics::Counter *records, *failures, *compareFailures, *cooldowns;
+    metrics::Counter *records, *failures, *compareFailures, *cooldowns,
+        *leadForks;
+    bool refused = false;
+    bool healthy = false; // readyMutex
+    // Served watermarks (chunk workers): the current day's history recorder
+    // while it exists, merged into the newest values ever served.
+    mutable std::mutex historyMutex;
+    recording::BookRecorder *history = nullptr;
+    int64_t historyEndMs = 0;
+    mutable std::map<std::string, recording::BookRecorder::Watermarks> served;
     struct ComparisonMetrics {
       std::atomic<bool> ready{false};
       std::atomic<uint64_t> near{0}, deep{0};
@@ -336,6 +576,8 @@ struct ShadowRoller::Impl {
   fs::path primary;
   std::vector<std::unique_ptr<Product>> products;
   std::atomic<bool> stopping{false};
+  std::mutex readyMutex;
+  size_t healthyCount = 0; // readyMutex
   std::mutex mutex;
   std::condition_variable wake;
   std::thread checker;
@@ -369,6 +611,11 @@ struct ShadowRoller::Impl {
       p->compareFailures = &registry.counter(
           "sentinel_roller_shadow_comparison_failures_total",
           "Hourly parity checks that could not complete.", labels);
+      p->leadForks = &registry.counter(
+          "sentinel_roller_shadow_live_lead_forks_total",
+          "Live forming-minute leads forked from durable history state "
+          "(serving path; one per start, day and provisional discard).",
+          labels);
       for (const auto *layer : {"near", "deep"}) {
         registry.counterFn(
             "sentinel_roller_shadow_mismatch_total",
@@ -390,12 +637,21 @@ struct ShadowRoller::Impl {
             const auto t = last->load();
             return t ? std::max(0., (nowMs() - t) / 1000.) : -1.;
           });
+      // Owner decision 2: a product the capture does not journal is refused.
+      if (journalHasProduct(cfg.journalRoot, p->name) == false) {
+        p->refused = true;
+        p->failures->inc();
+        sLog_Error("Roller refused product="
+                   << p->name << " reason=no journal with product_id under "
+                   << cfg.journalRoot);
+      }
       products.push_back(std::move(p));
     }
     // Allocate/register first. A partial thread launch is joined safely.
     try {
       for (auto &p : products)
-        p->worker = std::thread([this, p = p.get()] { run(*p); });
+        if (!p->refused)
+          p->worker = std::thread([this, p = p.get()] { run(*p); });
       checker = std::thread([this] { check(); });
     } catch (...) {
       stop();
@@ -451,6 +707,7 @@ struct ShadowRoller::Impl {
     bool coolingDown = false;
     int64_t furthestCommitted = 0;
     const auto retry = [&](const std::string &reason) {
+      unhealthy(p, reason);
       if (stopping)
         return;
       p.running->set(0);
@@ -503,8 +760,37 @@ struct ShadowRoller::Impl {
                          .get<int64_t>() >= day + Day)
             day += Day;
         }
-        LiveSource source(cfg, p.name, stopping, checkpoint, retry);
+        {
+          std::lock_guard lock(p.historyMutex);
+          auto &near = p.served["near"];
+          near.minuteThroughMs =
+              std::max(near.minuteThroughMs, p.committed.load());
+          auto &deep = p.served["deep"];
+          deep.minuteThroughMs =
+              std::max(deep.minuteThroughMs, p.committed.load());
+        }
+        LiveLead lead(cfg, p.name, *p.leadForks,
+                      [&p] { return p.committed.load(); });
+        LiveSource source(cfg, p.name, stopping, checkpoint, retry,
+                          lead.enabled() ? &lead : nullptr);
         RollOptions o{cfg.journalRoot, cfg.outputRoot, p.name, day, day + Day};
+        o.publisher = cfg.publisher;
+        o.onRecorder = [&](recording::BookRecorder *h, const JournalFeed *f,
+                           int64_t end) {
+          {
+            std::lock_guard lock(p.historyMutex);
+            if (p.history)
+              mergeServed(p); // keep the values of the recorder going away
+            p.history = h;
+            p.historyEndMs = end;
+          }
+          if (h) {
+            if (cfg.publisher)
+              sLog_App("Roller writer open product=" << p.name);
+          } else
+            unhealthy(p, "writer closed");
+          lead.attach(h, f);
+        };
         o.cancelled = [&] { return stopping.load(); };
         o.productWriterLease = true;
         o.onInvalid = [&](const std::string &reason) {
@@ -527,6 +813,7 @@ struct ShadowRoller::Impl {
         };
         o.onCommitted = [&](int64_t through) {
           p.committed = through;
+          healthy(p);
           // Replaying the old checkpoint is not recovery from a persistent
           // fault.
           if (through > furthestCommitted) {
@@ -539,9 +826,9 @@ struct ShadowRoller::Impl {
             p.cooldown->set(0);
           }
         };
-        sLog_App("Roller started product=" << p.name
-                                           << " mode=shadow day=" << day
-                                           << " root=" << cfg.outputRoot);
+        sLog_App("Roller started product="
+                 << p.name << " mode=" << (cfg.publisher ? "live" : "shadow")
+                 << " day=" << day << " root=" << cfg.outputRoot);
         roll(o);
         // Midnight rotates through the same anchor/replay path as batch.
       } catch (const std::exception &e) {
@@ -552,11 +839,59 @@ struct ShadowRoller::Impl {
       p.running->set(0);
     }
   }
+  // Deploy readiness (deploy-runtime.sh), serving only: a product is healthy
+  // from the first durable checkpoint of its current writer (after the policy
+  // check, leases and a committed minute) until a failure or the writer
+  // closes (also at day end). "Roller serving ready" is logged when every
+  // configured product is healthy at once, "Roller serving not ready" on each
+  // loss; the deploy check takes the latest of the two.
+  void healthy(Product &p) {
+    if (!cfg.publisher)
+      return;
+    std::lock_guard lock(readyMutex);
+    if (std::exchange(p.healthy, true))
+      return;
+    sLog_App("Roller writer healthy product=" << p.name);
+    if (++healthyCount == products.size())
+      sLog_App("Roller serving ready products=" << products.size()
+                                                << " root=" << cfg.outputRoot);
+  }
+  void unhealthy(Product &p, const std::string &reason) {
+    if (!cfg.publisher)
+      return;
+    std::lock_guard lock(readyMutex);
+    if (!std::exchange(p.healthy, false))
+      return;
+    --healthyCount;
+    sLog_App("Roller serving not ready product=" << p.name
+                                                 << " reason=" << reason);
+  }
+  // Under historyMutex. Watermarks never regress: a new day's recorder starts
+  // from its anchor, and the old one runs past its commit ceiling.
+  static void mergeServed(const Product &p) {
+    for (const auto *layer : {"near", "deep"}) {
+      auto w = p.history->watermarks(p.name, layer);
+      w.minuteThroughMs = std::min(w.minuteThroughMs, p.historyEndMs);
+      w.hourThroughMs = std::min(w.hourThroughMs, p.historyEndMs);
+      auto &s = p.served[layer];
+      s.minuteThroughMs = std::max(s.minuteThroughMs, w.minuteThroughMs);
+      s.hourThroughMs = std::max(s.hourThroughMs, w.hourThroughMs);
+      s.lastColumnMs = std::max(s.lastColumnMs, w.lastColumnMs);
+    }
+  }
+  const Product *find(const std::string &name) const {
+    for (const auto &p : products)
+      if (p->name == name)
+        return p.get();
+    return nullptr;
+  }
   void check() noexcept {
     while (!stopping) {
       for (auto &p : products) {
         if (stopping)
           break;
+        if (p->refused)
+          continue;
         try {
           validate();
           const auto first = parseTime(cfg.from);
@@ -657,6 +992,23 @@ ShadowRoller::ShadowRoller(ShadowConfig c, std::vector<std::string> p,
     m = std::make_unique<Impl>(std::move(c), std::move(p), std::move(root), r);
 }
 ShadowRoller::~ShadowRoller() = default;
+recording::BookRecorder::Watermarks
+ShadowRoller::watermarks(const std::string &product,
+                         const std::string &layer) const {
+  const auto *p = m ? m->find(product) : nullptr;
+  if (!p)
+    return {};
+  std::lock_guard lock(p->historyMutex);
+  if (p->history)
+    Impl::mergeServed(*p);
+  const auto it = p->served.find(layer);
+  return it == p->served.end() ? recording::BookRecorder::Watermarks{}
+                               : it->second;
+}
+bool ShadowRoller::running(const std::string &product) const {
+  const auto *p = m ? m->find(product) : nullptr;
+  return p && p->running->value() > 0;
+}
 void ShadowRoller::stop() {
   if (m)
     m->stop();

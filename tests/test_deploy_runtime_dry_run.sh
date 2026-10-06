@@ -18,19 +18,29 @@ chmod +x "$dst" "$rollback" "$src"
 
 # This copied script points only at the fixture. The service/signature commands
 # are mocks, so neither launchd nor the owner's runtime can be touched.
+# launchd mock: every kickstart starts a new PID whose run log carries the
+# PID/exe header (deploy-runtime.sh verifies that process only). With
+# MOCK_VERIFY=success it writes the write marker; otherwise it never does.
 cat > "$scratch/mockbin/launchctl" <<'EOF'
 #!/bin/bash
-if [[ $MOCK_VERIFY == success ]]; then
-    mkdir -p "$HOME/Library/Logs/Sentinel"
-    countFile="$HOME/launch-count"
-    count=0
-    [[ ! -f $countFile ]] || count=$(cat "$countFile")
-    count=$((count + 1))
-    printf '%s\n' "$count" > "$countFile"
-    log="$HOME/Library/Logs/Sentinel/sentinel-server-20990101-000000-$count.log"
-    printf 'Recording v2 started\n' > "$log"
-    touch -t "209901010000.0$count" "$log"
+pidFile="$HOME/launch-pid"
+if [[ $1 == print ]]; then
+    [[ ! -f $pidFile ]] || printf '\tpid = %s\n' "$(cat "$pidFile")"
+    exit 0
 fi
+[[ $1 == kickstart ]] || exit 0
+mkdir -p "$HOME/Library/Logs/Sentinel"
+pid=1000
+[[ ! -f $pidFile ]] || pid=$(cat "$pidFile")
+pid=$((pid + 1))
+printf '%s\n' "$pid" > "$pidFile"
+log="$HOME/Library/Logs/Sentinel/sentinel-server-20990101-000000-$pid.log"
+{
+    printf '# Sentinel log: app=sentinel-server version=test pid=%s\n' "$pid"
+    printf '# started=2099-01-01T00:00:00.000\n'
+    printf '# exe=%s built=2099-01-01T00:00:00\n' "$HOME/Sentinel-runtime/bin/sentinel-server"
+    [[ $MOCK_VERIFY != success ]] || printf 'Recording v2 started\n'
+} > "$log"
 EOF
 cat > "$scratch/mockbin/codesign" <<'EOF'
 #!/bin/bash
@@ -57,7 +67,7 @@ deploy=$(/bin/bash "$fixture" --dry-run server)
 [[ $deploy == *"on success move $dst.prev to $rollback"* ]]
 [[ $deploy == *"rollback command:"* ]]
 [[ $(/bin/bash "$fixture" server --dry-run) == "$deploy" ]]
-[[ $(/bin/bash "$fixture" --dry-run rollback server) == *"verify writes within 60 s"* ]]
+[[ $(/bin/bash "$fixture" --dry-run rollback server) == *"verify writes within the window (server 150 s, capture 60 s)"* ]]
 [[ $(cat "$dst") == 'current signed binary' ]]
 [[ $(cat "$rollback") == 'older signed binary' ]]
 

@@ -1,16 +1,20 @@
 #include "Roller.hpp"
+#include "ConfigLoader.hpp"
 #include <yaml-cpp/yaml.h>
 #include <iostream>
 #include <sstream>
 namespace sentinel::roller {
 int rollMain(int argc,char** argv) {
     try {
-        if (argc < 3) throw std::runtime_error("usage: sentinel-roll JOURNAL_ROOT HMC2_ROOT --products BTC-USD,PEPE-USD --from YYYY-MM-DD --to YYYY-MM-DD [--config YAML] [--dry-run]");
+        if (argc < 3) throw std::runtime_error("usage: sentinel-roll JOURNAL_ROOT HMC2_ROOT --products BTC-USD,PEPE-USD --from YYYY-MM-DD --to YYYY-MM-DD [--config YAML] [--dry-run] [--product-lease]");
         RollOptions o; o.journalRoot=argv[1]; o.outputRoot=argv[2];
         std::vector<std::string> products; YAML::Node config;
         for (int i=3;i<argc;++i) {
             const std::string option=argv[i];
             if (option=="--dry-run" || option=="--report") { o.dryRun=true; continue; }
+            // Shared root lease plus an exclusive per-product lease (INV-115): may
+            // write a root a live roller serves, never a product it is rolling.
+            if (option=="--product-lease") { o.productWriterLease=true; continue; }
             if (i+1==argc) throw std::runtime_error("missing value: "+option);
             const std::string value=argv[++i];
             if (option=="--from") o.fromMs=parseTime(value);
@@ -27,19 +31,32 @@ int rollMain(int argc,char** argv) {
         // was supplied. An override must never bypass the live-root exclusion.
         const auto refuseLiveRoot = [&](const YAML::Node& server) {
             if (!server || !server["recording"]) return;
-            for (const auto* key : {"dir", "fallback_dir"}) {
-                const auto value = server["recording"][key];
-                if (!value || value.as<std::string>().empty()) continue;
+            const auto refuse = [&](const YAML::Node& value) {
+                if (!value || value.as<std::string>().empty()) return;
                 const auto live = std::filesystem::weakly_canonical(value.as<std::string>()).string()+"/";
                 if (dest.starts_with(live) || live.starts_with(dest))
                     throw std::runtime_error("refusing configured live recording root: " + live);
-            }
+            };
+            for (const auto* key : {"dir", "fallback_dir"}) refuse(server["recording"][key]);
+            // A roller-served root is live too; only product-scoped repair may write it.
+            const auto source = server["recording"]["source"];
+            if (source && source.as<std::string>() == "roller" && !o.productWriterLease && server["roller_shadow"])
+                refuse(server["roller_shadow"]["dir"]);
         };
         bool foundServerConfig = false;
+        ServerConfig effective; // the server's own merge: the private override wins per key
         for (const auto* path : {"config/server_config.yaml", "config/.server_config.yaml"})
             if (std::filesystem::exists(path)) {
                 refuseLiveRoot(YAML::LoadFile(path)); foundServerConfig = true;
+                if (!ConfigLoader::loadServerConfig(path, &effective))
+                    throw std::runtime_error(std::string("server config unreadable: ") + path);
             }
+        if (foundServerConfig && effective.recording.source == "roller" && !o.productWriterLease &&
+            !effective.rollerShadow.outputRoot.empty()) {
+            const auto live = std::filesystem::weakly_canonical(effective.rollerShadow.outputRoot).string()+"/";
+            if (dest.starts_with(live) || live.starts_with(dest))
+                throw std::runtime_error("refusing roller-served recording root: " + live);
+        }
         if (!foundServerConfig && !config)
             throw std::runtime_error("server config unavailable; run from the checkout or supply --config with recording.dir");
         if (!foundServerConfig && (!config["recording"] || !config["recording"]["dir"]))

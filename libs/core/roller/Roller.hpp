@@ -20,6 +20,12 @@ struct RollOptions {
     bool productWriterLease = false;
     std::function<void(const std::string&)> onInvalid;
     std::function<void(const JournalRecord&)> onApplied;
+    // History publication: committed minutes only (Publication::Finals). Not
+    // part of the checkpoint policy hash.
+    std::function<void(std::shared_ptr<const recording::Hmc2Record>)> publisher;
+    // Live-lead seam, on the calling thread: the day's recorder and journal feed
+    // once both exist, then (nullptr, nullptr, 0) before either is destroyed.
+    std::function<void(recording::BookRecorder*, const JournalFeed*, int64_t dayEndMs)> onRecorder;
 };
 // Atomically replace and fsync a checkpoint in an already durable parent.
 void writeCheckpoint(const std::filesystem::path&, const nlohmann::json&);

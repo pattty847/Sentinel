@@ -323,7 +323,74 @@ with other processes. Incremental oracle state is deferred: the current batch
 checkpoint stores output progress, not the reconstructed book/TWAP state, so
 keeping only its checkpoint would not remove the daily warmup cost.
 
-The startup line is `Roller started ... mode=shadow`. Deployment verification
-continues to require `Recording v2 started` and primary writes: the old marker
-is emitted by both old and new shadow-mode binaries. No deploy script change
-is necessary for slice C.
+`roller_shadow.products` lists the rolled products (default: the server's
+`default_symbols`). A listed product with no RAWL2 file whose header
+`product_metadata.product_id` matches under `journal_dir/<product>` is refused
+at startup: an `E` line `Roller refused product=...`, one
+`setup_failures_total` increment, `running 0`, lag -1, and no worker. An
+unmounted `journal_dir` is not a refusal; the worker retries as usual.
+
+### Serving (`recording.source: roller`, slice D-a)
+
+`recording.source` is `primary` (default: this process's BookRecorder writes
+`recording.dir`) or `roller`. With `roller` (requires `recording.enabled` and
+`roller_shadow.enabled`) no primary recorder is created: chunks, availability,
+`recording.available` and the live minute come from `roller_shadow.dir` and
+the roller. Committed minutes are published from the history recorder, which
+still applies only durable fan-out prefixes. The forming minute comes from a
+**live lead**: a non-persisting fork of the day's history state that also
+applies each provisional fan-out record as it arrives and ticks every 250 ms
+like the primary. A retract, disconnect, EOF, socket failure or day end drops
+the lead and withdraws every provisional minute it published from the live
+cache (`LiveService::retractProvisional`; committed minutes stay). The next
+raw-tail frame omits them, and the client drops omitted provisional minutes
+(`LiveEdge`); when no provisional minute is left the frame resends the newest
+final so it still reaches the client. A lead therefore publishes only while
+the live cache holds a committed minute of both layers: after a restart (whose
+replay republishes no final) it seeds the newest persisted minute from the
+served root, and on a root with none yet it waits for the first commit
+(`Roller live lead waits for a committed minute`). The next fork republishes the forming
+minute from durable history. The legacy-renderer page path cannot withdraw a
+column a client already holds (only a new subscription is clean).
+The lead is forked once per start, per UTC day (about 2 s without a forming
+minute at 00:01 UTC while the new day replays from its anchor) and per
+provisional discard.
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `sentinel_roller_shadow_live_lead_forks_total` | counter | product | Live leads forked from durable history (serving only). Steady growth beyond one per day means repeated provisional discards: read `Shadow roller retry`. |
+| `sentinel_recorder_running` | gauge | - | 1 when recording is served: primary started, or the serving roller attached. |
+| `sentinel_recorder_last_column_timestamp_seconds`, `sentinel_recorder_column_overdue_seconds` | gauge | product, layer | Same series, from the roller's committed watermarks for `roller_shadow.products`; overdue is present while that product's worker is running. |
+| `sentinel_recorder_live_publish_drops_total` | counter | - | Roller publications the live cache refused. |
+
+The primary-only `sentinel_recorder_*_total` stats (columns, late, backward,
+queue drops, invalidations, disk errors) are absent while the roller serves.
+The cross-connection comparison still reads `recording.dir` (informational;
+it stops growing after the flip). Served watermarks never move back across
+the daily anchor replay.
+
+`sentinel-roll` refuses a roller-served `roller_shadow.dir` for unscoped
+batch, judged on each config file and on their merge (the private
+`config/.server_config.yaml` overrides per key, as in the server). `--product-lease` takes the shared root lease plus the product's
+exclusive lease (INV-115): it may repair a product the live roller is not
+rolling, and fails on the product lock for one it is rolling.
+
+Startup lines: `Roller started ... mode=shadow`, or `mode=live` when serving
+(diagnostic only: it precedes the checkpoint policy check and the leases).
+When serving, `Roller writer open product=...` follows each product's history
+writer (diagnostic). A product is healthy (`Roller writer healthy`) from the
+first durable checkpoint of that writer, which follows a committed minute at
+the next minute boundary, until any failure or the writer closing (also each
+UTC midnight): then `Roller serving not ready product=... reason=...`.
+`Roller serving ready products=N` is logged whenever all N configured products
+are healthy at once; a refused product, a held lease, a policy mismatch or a
+failing checkpoint keeps it absent. `deploy-runtime.sh` accepts `Recording v2
+started`, or a roller log whose latest readiness line is `ready`, read once
+from the regular (non-symlink) log file named for the PID launchd reports
+after the restart (never the replaced PID), headed with that PID and `exe=`
+the deployed binary, and only if launchd still reports that PID after the
+read. The server window is 150 s (capture 60 s): readiness needs the catch-up
+and the next minute boundary after a commit. `deploy-runtime.sh
+check-server-log <log dir> <pid> <exe>` runs the same log check. Probe `roller.live` logs every forming-minute publication
+with `ageMs` (now minus bucket start plus observed time) and the lowest
+native price in it.

@@ -30,6 +30,7 @@ recording:
   deep_high_mult: 4
   size_floor: 1.0e-8   # BTC base increment; codes span 1e-8 .. ~11k BTC per row at 0.085%
   live_publish_ms: 500 # open-minute live publication interval (2 Hz; owner 2026-10-01); clamped to [250, 5000]
+  source: primary # primary | roller (roller serves roller_shadow.dir and the live minute; slice D R2)
 candles:
   update_bps_fast: 5e-05
   update_bps_slow: 0.0002
@@ -54,4 +55,5 @@ roller_shadow:
   dir: /Volumes/T7/sentinel-data/hmc2
   socket: "" # empty = ~/Sentinel-runtime/run/capture.sock
   from: "2026-10-03T00:00:00Z"
+  # products: [BTC-USD, ...] # default = default_symbols; products without a journal are refused
   fault_min_duration_ms: 120000 # identical failures must span two minutes before slow probes

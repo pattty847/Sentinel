@@ -12,6 +12,7 @@
 #include <memory_resource>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <thread>
@@ -116,7 +117,7 @@ bool covers(const Hmc2Record &r, const Key &k) {
 struct BookRecorder::Impl {
     RecorderConfig cfg;
     std::function<int64_t()> localClock;
-    Hmc2Store store;
+    std::optional<Hmc2Store> store; // absent for Publication::Lead
     enum class Kind { Snapshot, Updates, Invalid, InvalidEnvelope, Tick, Release };
     struct Message {
         Kind kind = Kind::Tick;
@@ -179,11 +180,14 @@ struct BookRecorder::Impl {
         return c;
     }
     Impl(RecorderConfig c, std::function<int64_t()> clock)
-        : cfg(validateConfig(std::move(c))), localClock(std::move(clock)), store(cfg.root, cfg.deterministicResume, cfg.writerProduct) {
+        : cfg(validateConfig(std::move(c))), localClock(std::move(clock)) {
         if (!localClock)
             throw std::invalid_argument("BookRecorder: missing local clock");
+        if (!lead())
+            store.emplace(cfg.root, cfg.deterministicResume, cfg.writerProduct);
         worker = std::thread([this] { run(); });
     }
+    bool lead() const { return cfg.publication == RecorderConfig::Publication::Lead; }
     void requestStop() {
         {
             std::lock_guard lock(mutex);
@@ -394,7 +398,9 @@ struct BookRecorder::Impl {
         }
     }
     void publishOpen(Symbol &s) {
-        if (!cfg.publisher || !s.observed || s.clock - s.lastPublish < cfg.livePublishMs) return;
+        if (!cfg.publisher || cfg.publication == RecorderConfig::Publication::Finals || !s.observed ||
+            s.clock - s.lastPublish < cfg.livePublishMs)
+            return;
         // An invalid book (resnapshot loop, expired one-sided grace, upstream
         // outage) integrates nothing while its clock moves: republishing would
         // bump the live revision every interval for an unchanged frame. Publish
@@ -412,7 +418,7 @@ struct BookRecorder::Impl {
                 auto r = std::make_shared<Hmc2Record>();
                 r->header = layer.header;
                 r->bucketStartMs = s.minute;
-                r->committedThroughMs = s.closedThrough;
+                r->committedThroughMs = lead() ? 0 : s.closedThrough;
                 r->observedMs = s.observed;
                 r->flags = s.flags | kProvisional | (s.observed < kMinute ? kPartial : 0);
                 r->midOpen = s.midOpen; r->midClose = s.midClose;
@@ -482,7 +488,8 @@ struct BookRecorder::Impl {
                 std::sort(r.entries.begin(), r.entries.end(),
                           [](const auto &a, const auto &b) { return Key{a.row, a.isAsk} < Key{b.row, b.isAsk}; });
                 s.pending.push_back(std::move(r));
-                publishCopy(s.pending.back(), s.closedThrough, true);
+                if (cfg.publication != RecorderConfig::Publication::Finals)
+                    publishCopy(s.pending.back(), lead() ? 0 : s.closedThrough, true);
             }
         }
     }
@@ -514,7 +521,7 @@ struct BookRecorder::Impl {
     void write(const Hmc2Record &r) {
         if (r.bucketStartMs + r.header.tfMs <= cfg.commitFloorMs ||
             r.bucketStartMs + r.header.tfMs > cfg.commitCeilingMs) return;
-        store.append(r);
+        store->append(r);
         ++columnsWritten;
         sLog_Probe("recording.close", "symbol=" << r.header.symbol << " layer=" << r.header.layer
                                                 << " tf=" << r.header.tfMs << " bucket=" << r.bucketStartMs
@@ -649,6 +656,7 @@ struct BookRecorder::Impl {
         while (!s.pending.empty() && (releasing || s.pending.front().bucketStartMs + kMinute + cfg.latenessMs <= s.clock)) {
             auto r = std::move(s.pending.front());
             s.pending.pop_front();
+            if (lead()) continue; // the history recorder owns persistence and finals
             if (r.bucketStartMs + kMinute <= cfg.commitFloorMs ||
                 r.bucketStartMs + kMinute > cfg.commitCeilingMs) continue;
             try {
@@ -845,7 +853,7 @@ struct BookRecorder::Impl {
             // released frozen book on the next timer tick.
             symbols.erase(it);
         }
-        store.releaseSymbol(m.symbol());
+        if (store) store->releaseSymbol(m.symbol());
         {
             std::lock_guard lock(watermarksMutex);
             std::erase_if(watermarksBySeries, [&](const auto &entry) { return entry.first.first == m.symbol(); });
@@ -903,7 +911,7 @@ struct BookRecorder::Impl {
             s.minute = floorDiv(m.time, kMinute) * kMinute;
             s.closedThrough = s.minute;
             for (size_t li = 0; li < s.layers.size(); ++li)
-                if (cfg.layers[li].hourlyRollup)
+                if (cfg.layers[li].hourlyRollup && !lead())
                     restoreHours(s.layers[li], floorDiv(m.time, kHour) * kHour);
         }
         const bool late = m.time < s.closedThrough;
@@ -976,6 +984,68 @@ size_t BookRecorder::retainedSymbolStatesForTest() {
     return impl_->symbols.size() + impl_->producerSymbols.size();
 }
 void BookRecorder::drainForTest() { drain(); }
+std::unique_ptr<BookRecorder> BookRecorder::forkLead(std::function<void(std::shared_ptr<const Hmc2Record>)> publisher,
+                                                     int64_t livePublishMs) {
+    drain(); // the worker is idle and no producer call can race: this is the producer
+    auto &src = *impl_;
+    RecorderConfig c = src.cfg;
+    c.publication = RecorderConfig::Publication::Lead;
+    c.publisher = std::move(publisher);
+    c.livePublishMs = livePublishMs;
+    c.writerProduct.clear();
+    c.deterministicResume = false;
+    c.onSelfInvalidated = {};
+    c.onReleased = {};
+    c.beforePublicationForTest = {};
+    c.beforeQueueWaitForTest = {};
+    auto out = std::make_unique<BookRecorder>(std::move(c), src.localClock);
+    auto &dst = *out->impl_;
+    // The new worker touches symbols only after dequeuing a message under this mutex.
+    std::lock_guard lock(dst.mutex);
+    dst.workerLocal = src.workerLocal;
+    for (const auto &[name, from] : src.symbols) {
+        auto to = std::make_unique<Symbol>();
+        // pmr assignment keeps the destination's own pool.
+        to->bids = from->bids;
+        to->asks = from->asks;
+        to->layers.reserve(from->layers.size());
+        for (const auto &l : from->layers) {
+            auto &layer = to->layers.emplace_back(&to->pool);
+            layer.header = l.header;
+            layer.rows = l.rows; // `touched` is per message scratch; hour state is history only
+            layer.publishedMinuteMs = l.publishedMinuteMs;
+            layer.publishedHourMs = l.publishedHourMs;
+            layer.publishedColumnMs = l.publishedColumnMs;
+            layer.lastColumnMs = l.lastColumnMs;
+            layer.publishedOpen = l.publishedOpen;
+        }
+        to->initialized = from->initialized;
+        to->valid = from->valid;
+        to->clock = from->clock;
+        to->minute = from->minute;
+        to->closedThrough = from->closedThrough;
+        to->offset = from->offset;
+        to->minuteThroughMs = from->minuteThroughMs;
+        to->minuteWatermarkBlocked = from->minuteWatermarkBlocked;
+        to->observed = from->observed;
+        to->flags = from->flags;
+        to->lastPublish = from->lastPublish;
+        to->mid = from->mid;
+        to->midOpen = from->midOpen;
+        to->midMin = from->midMin;
+        to->midMax = from->midMax;
+        to->midClose = from->midClose;
+        to->serial = from->serial;
+        to->pending = from->pending;
+        to->selfInvalidReason = from->selfInvalidReason;
+        to->nextResnapshotLocal = from->nextResnapshotLocal;
+        to->resnapshotIntervalMs = from->resnapshotIntervalMs;
+        to->validSinceLocal = from->validSinceLocal;
+        to->oneSidedSince = from->oneSidedSince;
+        dst.symbols.emplace(name, std::move(to));
+    }
+    return out;
+}
 void BookRecorder::drain() {
     std::unique_lock lock(impl_->mutex);
     impl_->drained.wait(lock, [&] { return !impl_->count && !impl_->emergency && !impl_->busy; });

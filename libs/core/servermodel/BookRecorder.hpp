@@ -54,7 +54,13 @@ struct RecorderConfig {
     std::string writerProduct; // opt-in product lease for independent shadow grids
     int64_t commitFloorMs = 0; // exclusive end <= floor: rebuild, do not append
     int64_t commitCeilingMs = kHmc2EndMs; // only complete buckets below this end
-
+    // Publications the worker builds for the publisher. All: the primary
+    // recorder. Finals: committed minutes only (journal roller history, whose
+    // forming minute comes from a lead fork). Lead: forming and finished-but-held
+    // minutes only, never persisted or rolled up, with no committed cutoff
+    // claim (committedThroughMs 0); normally created by forkLead().
+    enum class Publication { All, Finals, Lead };
+    Publication publication = Publication::All;
 };
 struct Level {
     bool isBid;
@@ -86,6 +92,11 @@ class BookRecorder {
     // Ordered, lossless lifecycle control: commit observed tail and forget the symbol.
     void releaseSymbol(const std::string &symbol, int64_t localMs);
     void onTick(int64_t localNowMs);
+    // Producer thread only: drains, then returns a Publication::Lead recorder
+    // whose books and minute state equal this recorder's after every accepted
+    // message. Feed it the same messages plus newer ones; it never writes.
+    std::unique_ptr<BookRecorder> forkLead(std::function<void(std::shared_ptr<const Hmc2Record>)> publisher,
+                                           int64_t livePublishMs);
     struct Stats {
         uint64_t columnsWritten, lateEvents, backwardSteps, queueDrops, invalidations, diskErrors;
     };

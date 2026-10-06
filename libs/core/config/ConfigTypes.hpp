@@ -116,6 +116,10 @@ struct ServerRecordingConfig {
     // loader clamps it to [kLivePublishMinMs, kLivePublishMaxMs].
     static constexpr int64_t kLivePublishMinMs = 250, kLivePublishMaxMs = 5000;
     int64_t livePublishMs = 500;
+    // recording.source: "primary" (this process's own BookRecorder writes dir)
+    // or "roller" (the journal roller's roller_shadow.dir is served, history and
+    // live minute; no primary recorder). Any other value serves nothing.
+    std::string source = "primary";
 };
 
 struct ServerConfig {
@@ -146,6 +150,13 @@ inline std::vector<std::string> normalizedDefaultSymbols(const std::vector<std::
         if (std::find(out.begin(), out.end(), symbol) == out.end()) out.push_back(std::move(symbol));
     }
     return out;
+}
+
+// Products the journal roller rolls: roller_shadow.products, else the pinned
+// default symbols.
+inline std::vector<std::string> rollerProducts(const ServerConfig& config) {
+    return normalizedDefaultSymbols(config.rollerShadow.products.empty() ? config.defaultSymbols
+                                                                         : config.rollerShadow.products);
 }
 
 struct ClientHeatmapConfig {

@@ -92,6 +92,11 @@ json roll(const RollOptions& o) {
         JournalReader reader(o.journalRoot,o.product,anchor);
         JournalFeed feed(o.product);
         std::unique_ptr<recording::BookRecorder> recorder;
+        // Destroyed first: the live lead forgets this day's recorder and feed.
+        struct Detach {
+            const RollOptions& o;
+            ~Detach() { if (o.onRecorder) o.onRecorder(nullptr, nullptr, 0); }
+        } detach{o};
         uint64_t hash = 0, checkpointColumns = 0;
         bool gridReady = false;
         int64_t latenessMs = recording::RecorderConfig{}.latenessMs;
@@ -123,7 +128,12 @@ json roll(const RollOptions& o) {
                                       {"deepTick",grid.deepTick},{"sizeFloor",grid.sizeFloor}};
                 gridReady = true;
                 if (o.dryRun) return;
+                if (o.publisher) {
+                    cfg.publisher = o.publisher;
+                    cfg.publication = recording::RecorderConfig::Publication::Finals;
+                }
                 recorder = std::make_unique<recording::BookRecorder>(std::move(cfg));
+                if (o.onRecorder) o.onRecorder(recorder.get(), &feed, end);
                 if (o.productWriterLease && !fs::exists(cpPath)) {
                     // Claim provenance before the first asynchronous write, so
                     // a first-minute crash can retry this shadow product safely.
