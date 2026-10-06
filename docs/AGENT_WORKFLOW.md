@@ -162,4 +162,9 @@ Verified 2026-09-27 with codex-cli 0.158; 0.160 was installed by 2026-10-05. Re-
 - Static review and passing suites missed short-outage, socket-failure and watchdog behaviour in the recorder
   (slice C, FM-139), and native A/B runs found GPU span and live-source defects after review (FM-134/135). That
   is why high-risk work carries scenario/native evidence.
+- A conductor session restart kills its background `codex exec` runs and its Claude subagents. Codex `exec`
+  threads resume with `codex exec resume`; Claude subagents do not, so a new reviewer needs the previous
+  findings in its prompt (2026-10-06).
+- Offscreen sandbox tests can pass where native Cocoa fails: key propagation and focus inside menus differed
+  (2026-10-06). UI work that touches focus or keyboard handling needs the native test run before landing.
 - The build-queue wait/cancel path had a TERM-trap issue (FM-195); the owner is hardening the queue.

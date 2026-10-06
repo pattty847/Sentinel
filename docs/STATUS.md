@@ -34,7 +34,7 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 | Branch | Tip | State | Next |
 |---|---|---|---|
-| `lt-astra/complete-overflow` | `665c0ee` on `3aac4d0` | Owner rejected the 665c0ee design 2026-10-06 (`>>` showed every control). Redesign in progress: writer gpt-6.1-sol, thread `01a10fe7-aea8-7641-9fe0-4e32077bd01c`, frozen spec: `>>` lists only hidden controls as labelled entries; Shift+F10 opens the full labelled menu; Layouts/Quick Search/Screenshot move into the gear; gear goes first, far left | Claude review, conductor native checks, owner preview, land |
+| `lt-astra/complete-overflow` | `754ae6e` on `3aac4d0` | Redesign by gpt-6.1-sol (thread `01a10fe7-aea8-7641-9fe0-4e32077bd01c`): `>>` lists only hidden controls with labelled entries and sliders; Shift+F10 full menu with arrow/WASD keys; gear rightmost; Layouts/Quick Search/Screenshot in the gear. Claude closure review PASS. Native run 40/41: WASD guard fails on Cocoa; fix round in progress | Native rerun, owner preview, land |
 | `lt-sol/retained-font-adoption` (W3b) | `e297743` on `3aac4d0` | Astra round 2 PASS (source only); native and full gates not run (held during the Oct 5 freeze) | Native fixture run (pops windows: only when the owner is not working), owner visual approval, then `land` (runs the full suite). Astra thread `01a10eeb-486c-7812-8c1e-db7f3f1754ce` |
 | `lt-sol/settings-clarity` (W3c) | `b27f37d` on `5129d1c` | Review and full 95/95 PASS; held | After overflow lands: same author removes its toolbar/Controls explanation changes, then owner approves settings appearance. Do not land as-is |
 | `lt-sol/label-style` | `d52921b` | Unrelated, locked | Leave alone |
