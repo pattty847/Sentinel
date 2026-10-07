@@ -7,7 +7,7 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 - **Conductor:** Claude Opus 5.5. The owner handed conducting back on 2026-10-06; Codex does not dispatch.
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10). No fallback active: the 2026-10-04
   GPT-reviews-GPT override ended when Claude usage reset.
-- **Budget (2026-10-07 00:00):** Codex reset: 99% weekly for 7 days, owner holds 2 reset credits. Claude weekly 77% but +9% DEFICIT (about 3.3 days at the current pace). Routing: Codex writes, Claude reviews; Claude writers only for native Metal/GUI evidence; Fable (own 92% pool) for high-risk reviews and plans.
+- **Budget (2026-10-07 ~04:30):** Codex weekly 75% but +22% DEFICIT (about 0.7 d at tonight's pace; the owner holds 2 reset credits and said to use them); Claude session 81%, weekly about 66% (deficit). Earlier note: Codex reset: 99% weekly for 7 days, owner holds 2 reset credits. Claude weekly 77% but +9% DEFICIT (about 3.3 days at the current pace). Routing: Codex writes, Claude reviews; Claude writers only for native Metal/GUI evidence; Fable (own 92% pool) for high-risk reviews and plans.
 
 ## Resume (fresh conductor)
 
@@ -55,6 +55,7 @@ On resume, read the Codex outputs: `.claude/acting-orchestrator/corrupt-skip/wri
 |---|---|---|---|
 | `lt-astra/journal-anchors` | `117482e` | Phase A committed (sidecar store; BookRecorder state export/import byte-identical on real BTC/PEPE hours; bounded seek). Anchor size: BTC 1.43 MB, PEPE 61 KB per anchor, retention decided 2026-10-07: 00:00Z anchors kept forever (owner), intraday about 2 days. Phase B (rebase on D-b1, JournalFeed restore, roll() wiring, the 6 owner checks) after D-b1 passes review | Claude Fable review after Phase B; land and deploy after R2 |
 | `lt-sol/gui-reconnect` | `208d6d7` | Fix round 1 (Codex Sol thread `01a11560-3828-7c91-9fba-b8187deb80ba`): backoff reset after 10 s stable uptime, backoff tests, LabData timer removed, quieter outage logs. Visible change: cold-start label reads Reconnecting | Sonnet re-check, land; native check at the next deploy |
+| `lt-astra/anchors-b` | from rebased D-b1 `0de52bd` + phase A applied uncommitted (4 conflict files left for the writer) | Phase B (Codex Astra thread `01a1147d`): unify with corrupt-skip's recoveryIndex, JournalFeed restore, roll()/tap wiring, rebuild CLI, retention, the owner's 6 checks | Claude Fable review; lands after D-b1 |
 | `lt-claude/roller-db1` | rebased onto main (pre-landing, clean; old tip tagged `pre-rebase/roller-db1`) | READY: Astra PASS on all rounds incl. the queue-latency lag metric (`270b629` before rebase). Verifying the rebased build and suites | After the audit: fix round 2 with the same writer, same Astra thread; land only AFTER the R2 deploy |
 
 Retired 2026-10-06 (owner): `lt-sol/label-style` and `lt-claude/heatmap-ab-isolation`, tips kept as tags `archive/<branch>`. Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orchestrator/`. The
