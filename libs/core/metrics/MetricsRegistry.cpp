@@ -112,6 +112,14 @@ MetricsRegistry::Series* MetricsRegistry::find(Family& f, const std::string& lab
     return nullptr;
 }
 
+bool MetricsRegistry::hasSeries(std::string_view name, const Labels& labels) const {
+    const auto labelText = renderLabels(labels);
+    std::lock_guard lock(mutex_);
+    for (const auto& f : families_) if (f->name == name)
+        for (const auto& series : f->series) if (series.labelText == labelText) return true;
+    return false;
+}
+
 Counter& MetricsRegistry::counter(std::string_view name, std::string_view help, const Labels& labels) {
     const std::string labelText = renderLabels(labels);
     std::lock_guard lock(mutex_);

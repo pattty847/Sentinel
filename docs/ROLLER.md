@@ -41,15 +41,27 @@ of unowned files.
 - `roller/JournalReader` inventories one product's headers and orders by run
   start, run id, segment. It reads one decompressed block at a time. Positions
   are `(product, run_id, block ordinal, record index)`, inclusive when reopening.
+  If a saved position lies in a corrupt payload block, the reader returns its
+  first readable successor with a gap instead. Callers that require the exact
+  cursor must handle that recovery case explicitly.
   To poll an open file, reopen and skip the already applied position. Inventory
   refresh is explicit; this batch CLI does not wait forever for new records.
-- Reader framing is shared with capture. The verifier's existing strict default
-  remains unchanged. A roller reader defers an unframed/incomplete terminal tail
-  while the file is unsealed and unsuperseded, even if later block-looking bytes
-  are visible. A valid closing index, subsequent segment or newer run makes that
-  tail terminal: later valid framing is then interior corruption. Complete CRC,
-  zstd and framing errors still fail. A concurrently incomplete file header is
-  an invocation error to retry after the writer finishes the header.
+- Reader framing is shared with capture. The verifier's strict default remains
+  unchanged. Roller replay and anchor searches skip complete payload CRC/zstd
+  failures and damaged block headers/magic. A sealed file's CRC-checked closing
+  index is read first; its entries must describe contiguous, bounded blocks with
+  consecutive ordinals, and supply the boundary past a damaged header. With a
+  missing/damaged index, the file is treated as unsealed: search in 64 KiB chunks,
+  over at most one maximum legal encoded block span, for a complete BLK1 header
+  with valid CRC, valid limits and exactly the successor ordinal. If none can be
+  proved (including consecutive damaged headers), abandon the remaining captured
+  suffix. Incomplete terminal blocks/indexes still defer as pending/torn tails.
+  A skipped region sets the existing boundary gap; validity ends at the previous
+  complete record until the next accepted exchange snapshot. No journal bytes
+  are changed. Each distinct (product, run, segment, offset) is logged at error
+  level and counted once per process by `sentinel_roller_journal_corrupt_blocks_total`.
+  Record-layout corruption behind a valid payload CRC and file-header damage
+  remain strict errors; an incomplete file header is retried after writer progress.
 - Missing segments, torn superseded tails, run/connection changes, transport and
   applicable product-scoped validity markers invalidate observation. A discovered
   gap ends validity at the previous complete record's receive time. Only a new
@@ -322,3 +334,12 @@ This intermittent server lifecycle failure is recorded separately as FM-154;
 no server lifecycle source was changed for the boundary fix. Metal-dependent
 cases explicitly skipped in the sandbox. Both real-roll logs had zero W/E/F
 lines, and the final diff passes whitespace checks.
+
+Corruption acceptance in `RollerCorruptBlockTests` includes an env-gated real-hour
+test: set `SENTINEL_CORRUPTION_HOUR` to a read-only BTC hour containing recovery
+snapshots (the acceptance run uses `2026/10/05/17.rawl2`). The test copies it to
+scratch before changing bytes; without that variable the real-hour cases skip.
+`tests/roller/corrupt_block_mutations.py` is a Mac dev tool: run it inside
+`scripts/dev/build-queue.sh`, with the real-hour variable set for those cases. It
+builds the `mac-clang` preset at `-j 2`, restores each source mutation and rebuilds
+before checking the restored baseline.

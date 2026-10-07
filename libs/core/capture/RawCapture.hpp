@@ -152,10 +152,16 @@ struct ScanResult {
     uint64_t fileBytes = 0;
     uint64_t validBytes = 0;
 };
+// Opt-in journal recovery: validated index entries or bounded CRC-protected
+// successor-header scans supply boundaries past damaged framing. Unknown skipped
+// framing uses only BlockIndex offset/ordinal; other fields may be zero. Empty
+// callback retains strict audit behavior. No files are modified.
+using CorruptBlockVisitor = std::function<void(const BlockIndex&, const char* reason)>;
 // Incremental, bounded reader used for cross-stream crash-prefix verification.
 class RecordReader {
 public:
-    explicit RecordReader(const QString& path, bool pendingTailAllowed = false);
+    explicit RecordReader(const QString& path, bool pendingTailAllowed = false,
+                          CorruptBlockVisitor onCorruptBlock = {});
     ~RecordReader();
     bool next(Record& record);
     const ScanResult& result() const;
