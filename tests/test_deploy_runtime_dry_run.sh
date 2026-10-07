@@ -106,3 +106,22 @@ if /bin/bash "$fixture" server > "$scratch/failure.out" 2>&1; then exit 1; fi
 [[ $(cat "$dst") == 'current signed binary' ]]
 [[ $(cat "$rollback") == 'older signed binary' ]]
 [[ $(wc -l < "$HOME/Sentinel-runtime/bin/DEPLOYED") -eq 2 ]]
+
+# restart: config-only restart of the deployed binary (R2 runbook, owner decision B 2026-10-07).
+[[ $(/bin/bash "$fixture" --dry-run restart server) == *"restart com.sentinel.recorder with the deployed"*"no binary change"* ]]
+if /bin/bash "$fixture" restart both > "$scratch/restart-both.out" 2>&1; then exit 1; fi
+[[ $(cat "$scratch/restart-both.out") == *"usage:"* ]]
+deployed_before=$(wc -l < "$HOME/Sentinel-runtime/bin/DEPLOYED")
+export MOCK_VERIFY=fail
+if /bin/bash "$fixture" restart server > "$scratch/restart-fail.out" 2>&1; then exit 1; fi
+[[ $(cat "$scratch/restart-fail.out") == *"restart FAILED"*"binary is unchanged"* ]]
+[[ $(cat "$dst") == 'current signed binary' ]]
+[[ $(cat "$rollback") == 'older signed binary' ]]
+[[ $(wc -l < "$HOME/Sentinel-runtime/bin/DEPLOYED") -eq $deployed_before ]]
+export MOCK_VERIFY=success
+/bin/bash "$fixture" restart server > "$scratch/restart-ok.out" 2>&1
+[[ $(cat "$scratch/restart-ok.out") == *"restart complete for sentinel-server (binary unchanged)"* ]]
+[[ $(cat "$dst") == 'current signed binary' ]]
+[[ $(cat "$rollback") == 'older signed binary' ]]
+[[ $(wc -l < "$HOME/Sentinel-runtime/bin/DEPLOYED") -eq $((deployed_before + 1)) ]]
+tail -1 "$HOME/Sentinel-runtime/bin/DEPLOYED" | grep -q ' restart sentinel-server$'

@@ -132,6 +132,21 @@ change_binary() { # name label binary
     fi
 }
 
+restart_service() { # name label binary: restart the deployed binary unchanged (config-only changes)
+    local name=$1 label=$2 bin=$3
+    if (( DRY_RUN )); then
+        echo "DRY RUN: restart $label with the deployed $RT/$bin unchanged; verify writes within the window (server 150 s, capture 60 s); no binary change, no rollback copy"
+        return 0
+    fi
+    if verify_writes "$name" "$label" "$bin"; then
+        echo "$(git -C "$REPO" rev-parse --short HEAD) $(date '+%F %T') restart $bin" >> "$RT/DEPLOYED"
+        echo "restart complete for $bin (binary unchanged)"
+    else
+        echo "restart FAILED for $bin: no ready marker within the window. The binary is unchanged: revert the config change on main, then run $0 restart $name again." >&2
+        exit 1
+    fi
+}
+
 main() {
     if [[ ${1:-} == check-server-log ]]; then # check-server-log <dir> <pid> <exe>: tests and the runbook
         [[ $# == 4 ]] || { echo "usage: deploy-runtime.sh check-server-log <log dir> <pid> <exe>" >&2; exit 1; }
@@ -147,10 +162,18 @@ main() {
     set -- ${args[@]+"${args[@]}"}
     ACTION=deploy
     if [[ ${1:-} == rollback ]]; then ACTION=rollback; shift; fi
+    if [[ ${1:-} == restart && $ACTION == deploy ]]; then ACTION=restart; shift; fi
     WHICH=${1:-}
-    if [[ $# != 1 || ! $WHICH =~ ^(server|capture|both)$ || ( $ACTION == rollback && $WHICH == both ) ]]; then
-        echo "usage: deploy-runtime.sh [--dry-run] server|capture|both | [--dry-run] rollback server|capture" >&2
+    if [[ $# != 1 || ! $WHICH =~ ^(server|capture|both)$ || ( $ACTION != deploy && $WHICH == both ) ]]; then
+        echo "usage: deploy-runtime.sh [--dry-run] server|capture|both | [--dry-run] rollback server|capture | [--dry-run] restart server|capture" >&2
         exit 1
+    fi
+    if [[ $ACTION == restart ]]; then
+        case $WHICH in
+            server) restart_service server com.sentinel.recorder sentinel-server ;;
+            capture) restart_service capture com.sentinel.capture sentinel-capture ;;
+        esac
+        return
     fi
     case $WHICH in
         server) change_binary server com.sentinel.recorder sentinel-server ;;
