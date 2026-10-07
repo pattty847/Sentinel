@@ -43,11 +43,16 @@ The owner's `ma-panel` (local plugin) shows live workflow state; this session re
 Retired 2026-10-06 (owner): `lt-sol/label-style` and `lt-claude/heatmap-ab-isolation`, tips kept as tags `archive/<branch>`. Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orchestrator/`. The
 `.claude/worktrees/youthful-ishizaka-b0e889` (`60caa04`, branch `claude/exciting-hypatia-1c7a34`) is not part of this work; leave it alone.
 
+Order of work after R2 (owner audit, 2026-10-07; change it only on purpose): R2 -> D-b1 (gate: a main-thread event-loop lag metric, engine baseline then journal) -> anchors deploy -> D-b2 -> S8b + slice E -> README/ARCHITECTURE pass -> architecture freeze and the workflow/storage audit. Each step deploys separately with its own soak. R2 preconditions: `fanout_clients == 7` (not 1), capacity disconnects 0.
+
 Runbook notes from D-b1 (2026-10-07): the GUI does not reconnect after a server restart, so the owner restarts the GUI after the R2 and D-b1 deploys; capture's fan-out allows 8 clients, one per product, and the recorder uses 7 (FM-207; steady state is 7 fan-out clients, so the D-b runbook's `fanout_clients == 1` is wrong), so a second server (an agent instance, a future Pi) cannot follow all 7 products.
 
 ## Waiting on the owner
 
-1. None open. (Journal anchors approved 2026-10-07 and in progress: owner moved them up to start now, land and deploy after R2; sidecar beside each product/day on the output root, kept as long as the journal.)
+From the 2026-10-07 audit (`docs/research/2026-10-07-audit-triage.md`, recommendations there):
+1. A. Corrupt journal block policy (today one bad block stops that product's roller forever): skip, mark a gap and alert (recommended), or halt loudly.
+2. B. What R2 deploys: a config-only restart of the soaked binary via a new `deploy-runtime.sh restart server` mode (recommended), or one redeploy from main carrying three changes.
+3. C. Bind the stream server to 127.0.0.1 now (recommended; it listens on *:8080 with no auth, and 192.168.1.1 connected twice), with remote clients returning with auth later.
 
 None. (S8 legacy heatmap deletion approved by the owner 2026-10-06; see Next.)
 

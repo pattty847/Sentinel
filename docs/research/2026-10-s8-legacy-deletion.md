@@ -308,3 +308,5 @@ has no W/E line beyond the usual Qt/QML and layout ones.
 | After, clean re-run | 109 | 497 | 630 | 114 / 516 (1148 versions) | 504 | 1.1 / 1.9 |
 
 The deletion leaves live data age unchanged within sampling noise.
+
+6. (2026-10-07, from the owner audit; see docs/research/2026-10-07-audit-triage.md item 9) Before S8b: candles, footprint retention and the GUI toolbar still read server `heatmap.*` config keys. Move each still-used key to a neutral section and list every reader (`rg` each key) before deleting the section.
