@@ -14,7 +14,10 @@ Copy the defaults to the override names to customize; override values take prece
 `server.bind_address` is a string that selects the stream listener's numeric IPv4 or IPv6
 address (default `"127.0.0.1"`, port 8080). The existing flat server config uses the equivalent
 top-level `bind_address` key; a wrapped config places it under `server:`. An invalid address
-or an address not assigned to a local interface fails startup with an error and exit code 1.
+or an address not assigned to a local interface is validated in `apps/sentinel-server/main.cpp`
+before `SentinelServerApp` is constructed; it logs an error and exits with code 1 before recording
+or feeds start. Other stream listener failures (such as missing TLS files or a port already in use)
+are logged and leave the process recording with no client listener. A later listener start can retry.
 For remote clients, set this to the Mac's Tailscale address and use Tailscale for access control.
 For example, `"100.89.99.21"` is the owner's Mac tailnet address on 2026-10-07; it is an example,
 not a default. Explicit `"0.0.0.0"` or `"::"` allows all interfaces and logs

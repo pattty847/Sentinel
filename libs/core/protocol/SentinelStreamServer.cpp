@@ -1957,20 +1957,28 @@ std::string SentinelStreamServer::buildHeatmapHistoryChunk(const std::string& sy
     return payload.dump();
 }
 
-void SentinelStreamServer::start() {
-    if (m_running) return;
+net::ip::address SentinelStreamServer::validateBindAddress(const ServerConfig& config) {
+    const auto address = net::ip::make_address(config.bindAddress);
+    if (!address.is_unspecified()) {
+        QHostAddress requested(QString::fromStdString(address.to_string()));
+        // Qt may report an interface name while Asio uses its numeric index.
+        // Compare address bytes here; bind() remains authoritative for the scope.
+        requested.setScopeId({});
+        for (auto local : QNetworkInterface::allAddresses()) {
+            local.setScopeId({});
+            if (local == requested) return address;
+        }
+        throw std::runtime_error("server.bind_address is not assigned to a local interface");
+    }
+    return address;
+}
+
+bool SentinelStreamServer::start() {
+    if (m_running) return true;
+    // Invalid configuration is fatal; transport availability must not stop recording.
+    const auto address = validateBindAddress(m_serverConfig);
 
     try {
-        // Validate before starting live delivery. Hostnames and missing interfaces
-        // must fail startup rather than broaden the listener's exposure.
-        const auto address = net::ip::make_address(m_serverConfig.bindAddress);
-        if (!address.is_unspecified()) {
-            const QHostAddress requested(QString::fromStdString(address.to_string()));
-            const auto localAddresses = QNetworkInterface::allAddresses();
-            if (!localAddresses.contains(requested)) {
-                throw std::runtime_error("server.bind_address is not assigned to a local interface");
-            }
-        }
         m_ioc.restart();
         if (auto* live = m_model.recordingLive()) live->start();
         m_running = true;
@@ -2037,6 +2045,7 @@ void SentinelStreamServer::start() {
                 }
             }
         });
+        return true;
         
     } catch (const std::exception& e) {
         std::error_code fsError;
@@ -2067,8 +2076,7 @@ void SentinelStreamServer::start() {
             historyWorkers->join();
         }
         m_pendingHistoryTasks.store(0, std::memory_order_release);
-        // SentinelServerApp::initialize catches this and main exits with code 1.
-        throw;
+        return false;
     }
 }
 

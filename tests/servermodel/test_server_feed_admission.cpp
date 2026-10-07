@@ -420,6 +420,15 @@ TEST(ServerFeedConfig, BindAddressDefaultsFlatWrappedAndOverride) {
     EXPECT_EQ(config.bindAddress, "invalid-address");
 }
 
+TEST(ServerFeedConfig, CheckedInConfigDefaultsToLoopback) {
+    ServerConfig config;
+    // Distinguish loading the file's value from retaining the struct default.
+    config.bindAddress = "0.0.0.0";
+    ASSERT_TRUE(ConfigLoader::loadServerConfig(std::string(SENTINEL_SOURCE_DIR) +
+                                               "/config/server_config.yaml", &config));
+    EXPECT_EQ(config.bindAddress, "127.0.0.1");
+}
+
 TEST(ServerFeedConfig, DefaultOverrideAndInvalidCap) {
     EXPECT_EQ(ServerMdcConfig{}.maxConnections, 8);
     QTemporaryDir dir;

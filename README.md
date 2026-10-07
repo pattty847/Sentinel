@@ -214,7 +214,7 @@ The stream server uses TLS with a per-machine self-signed pair that is never com
 bash certs/gen-certs.sh
 ```
 
-(Windows: `certs/gen-certs.ps1`.) Without it the server logs `SentinelStreamServer start failed` and clients cannot connect.
+(Windows: `certs/gen-certs.ps1`.) Without it the server logs `SentinelStreamServer start failed` and clients cannot connect, but the process keeps recording. A port already in use has the same behaviour. Invalid `server.bind_address` configuration instead exits before recording or feeds start.
 
 For **macOS bundles** produced off this repo see **`scripts/release_macos.sh`** and **`LAUNCH_README.md`** bundled with releases.
 

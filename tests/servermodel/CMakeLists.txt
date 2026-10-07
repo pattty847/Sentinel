@@ -243,6 +243,17 @@ add_test(NAME ServerFeedAdmissionTests COMMAND test_server_feed_admission)
 set_tests_properties(ServerFeedAdmissionTests PROPERTIES LABELS "servermodel" TIMEOUT 60)
 add_dependencies(servermodel_tests test_server_feed_admission)
 
+# Exercise the real process entry point with isolated config, logs and recording storage.
+add_executable(test_server_startup test_server_startup.cpp)
+target_link_libraries(test_server_startup PRIVATE GTest::gtest_main Qt6::Core Qt6::Network)
+target_compile_definitions(test_server_startup PRIVATE
+    SENTINEL_SERVER_BINARY="$<TARGET_FILE:sentinel_server>"
+    SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+add_dependencies(test_server_startup sentinel_server)
+add_test(NAME ServerStartupTests COMMAND test_server_startup)
+set_tests_properties(ServerStartupTests PROPERTIES LABELS "servermodel" TIMEOUT 45)
+add_dependencies(servermodel_tests test_server_startup)
+
 add_executable(test_candle_history test_candle_history.cpp)
 target_include_directories(test_candle_history PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_candle_history PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
