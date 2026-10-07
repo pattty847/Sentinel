@@ -7,6 +7,10 @@
 #include "servermodel/TradeOverlayPublisher.hpp"
 #include "protocol/SentinelStreamClient.hpp"
 #include "render/TradeOverlayMapping.hpp"
+#include "render/VolumeProfileRenderer.hpp"
+
+#include <QSGGeometryNode>
+#include <cmath>
 #include "render/FootprintStreamState.hpp"
 #include "render/TpoStreamState.hpp"
 #include "render/DataProcessor.hpp"
@@ -519,4 +523,107 @@ TEST_F(TradeOverlay, LiveTradeWirePreservesExchangeTimeAndNormalizesMakerSide) {
     TradeOverlayWireTest::receive(client,message);
     EXPECT_EQ(received.side,AggressorSide::Unknown);
     EXPECT_EQ(received.timestamp.time_since_epoch().count(),0);
+}
+
+TEST_F(TradeOverlay, VolumeProfileDrawsOnlyFilledBarsAndReusesStorage) {
+    VolumeProfileRenderer renderer;
+    QSGNode root;
+    VolumeProfileState::Snapshot snap;
+    snap.minPrice = 100;
+    snap.tickSize = 1;
+    snap.gridHeight = 8;
+    const std::vector<float> bins{1, 2, 3, 4, 5, 6, 7, 8};
+    const QRectF surface(20, 30, 800, 400);
+    renderer.render(&root, true, surface, 100, 108, bins, snap);
+    auto* bars = static_cast<QSGGeometryNode*>(root.firstChild()->nextSibling());
+    auto* geometry = bars->geometry();
+    const auto* storage = geometry->vertexData();
+    const auto* indices = geometry->indexData();
+
+    // Exercise first allocation, fewer visible bins, disjoint prices, layer
+    // off/on, and a new (smaller) profile grid. Unused triangles must never
+    // connect zeroed spare vertices to a live bar.
+    const auto check = [&](int filledBars) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+        ASSERT_EQ(geometry->vertexCount(), filledBars * 4);
+        ASSERT_EQ(geometry->indexCount(), filledBars * 6);
+#endif
+        const auto* vertices = geometry->vertexDataAsColoredPoint2D();
+        const auto* drawnIndices = geometry->indexDataAsUShort();
+        for (int i = 0; i < geometry->indexCount(); i += 3) {
+            const auto a = drawnIndices[i], b = drawnIndices[i+1], c = drawnIndices[i+2];
+            ASSERT_LT(a, geometry->vertexCount());
+            ASSERT_LT(b, geometry->vertexCount());
+            ASSERT_LT(c, geometry->vertexCount());
+            if (i >= filledBars * 6) {
+                EXPECT_EQ(a, b);
+                EXPECT_EQ(b, c); // Qt < 6.10 retains capacity as degenerate triangles.
+                continue;
+            }
+            for (auto index : {a, b, c}) {
+                EXPECT_GE(vertices[index].x, surface.left());
+                EXPECT_LE(vertices[index].x, surface.right());
+                EXPECT_TRUE(std::isfinite(vertices[index].y));
+            }
+        }
+        EXPECT_EQ(geometry->vertexData(), storage);
+        EXPECT_EQ(geometry->indexData(), indices);
+        EXPECT_EQ(root.childCount(), 3);
+    };
+    check(8);
+    renderer.render(&root, true, surface, 99, 103.5, bins, snap);
+    check(4);
+    renderer.render(&root, true, surface, 110, 118, bins, snap);
+    check(0);
+    renderer.render(&root, false, surface, 100, 108, bins, snap);
+    check(0);
+    snap.gridHeight = 2;
+    const std::vector<float> smaller{3, 5};
+    renderer.render(&root, true, surface, 100, 108, smaller, snap);
+    check(2);
+}
+
+TEST_F(TradeOverlay, VolumeProfileClearsInvalidValueAreaAndRetainsGrownBuffers) {
+    VolumeProfileRenderer renderer;
+    QSGNode root;
+    VolumeProfileState::Snapshot snap;
+    snap.minPrice = 100;
+    snap.tickSize = 1;
+    snap.gridHeight = 4097; // exceeds the initial allocation by one bin
+    snap.va.valid = true;
+    snap.va.valPrice = 100;
+    snap.va.vahPrice = 110;
+    snap.va.pocPrice = 105;
+    const std::vector<float> bins(4097, 1);
+    const QRectF surface(20, 30, 800, 400);
+    renderer.render(&root, true, surface, 99, 4200, bins, snap);
+    auto* va = static_cast<QSGGeometryNode*>(root.firstChild());
+    auto* bars = static_cast<QSGGeometryNode*>(va->nextSibling());
+    auto* poc = static_cast<QSGGeometryNode*>(bars->nextSibling());
+    const auto* storage = bars->geometry()->vertexData();
+    const auto* indices = bars->geometry()->indexData();
+    snap.va.valid = false;
+    snap.gridHeight = 2;
+    renderer.render(&root, true, surface, 99, 4200, {1, 2}, snap);
+    const auto hidden = [](QSGGeometry* geometry) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+        EXPECT_EQ(geometry->vertexCount(), 0);
+        EXPECT_EQ(geometry->indexCount(), 0);
+#else
+        const auto* data = geometry->indexDataAsUShort();
+        for (int i = 0; i < geometry->indexCount(); ++i) EXPECT_EQ(data[i], 0);
+#endif
+    };
+    hidden(va->geometry());
+    hidden(poc->geometry());
+    renderer.render(&root, false, surface, 99, 4200, bins, snap);
+    hidden(bars->geometry());
+    snap.gridHeight = 4097;
+    renderer.render(&root, true, surface, 99, 4200, bins, snap);
+    EXPECT_EQ(bars->geometry()->vertexData(), storage);
+    EXPECT_EQ(bars->geometry()->indexData(), indices);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+    EXPECT_EQ(bars->geometry()->vertexCount(), 4097 * 4);
+    EXPECT_EQ(bars->geometry()->indexCount(), 4097 * 6);
+#endif
 }

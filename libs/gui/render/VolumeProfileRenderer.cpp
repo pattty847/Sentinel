@@ -15,6 +15,23 @@
 // ─────────────────────────────────────────────────────────────────────────────
 namespace {
 
+// Change the draw range without freeing the retained geometry storage.
+// Qt 6.9 has no draw-count setters: unused indexed triangles must degenerate
+// instead, including after a profile moves completely outside the viewport.
+void setDrawCounts(QSGGeometry* geo, int vertices, int indices) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+    geo->setVertexCount(vertices);
+    geo->setIndexCount(indices);
+#else
+    auto* v = geo->vertexDataAsColoredPoint2D();
+    for (int i = vertices; i < geo->vertexCount(); ++i) {
+        v[i].set(0, 0, 0, 0, 0, 0);
+    }
+    auto* idx = geo->indexDataAsUShort();
+    std::fill(idx + indices, idx + geo->indexCount(), quint16(0));
+#endif
+}
+
 // Build a solid-colour axis-aligned rectangle into existing geometry storage
 // (expects the geometry to be pre-allocated for 4 vertices / 6 indices).
 void fillRect(QSGGeometry* geo, const QRectF& r, const QColor& c) {
@@ -108,6 +125,7 @@ void VolumeProfileRenderer::onRootRebuilt() {
     m_vaNode   = nullptr;
     m_barsNode = nullptr;
     m_pocNode  = nullptr;
+    m_barCapacity = 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -155,11 +173,11 @@ void VolumeProfileRenderer::ensureNodes(QSGNode* parentNode) {
     }
     // Bars node
     if (!m_barsNode) {
-        // Pre-allocate for max 4096 bins (each bin = 2 triangles = 4 verts + 6 idx)
-        constexpr int kMaxBins = 4096;
+        // Pre-allocate for 4096 bins (each bin = 2 triangles = 4 verts + 6 idx)
+        m_barCapacity = 4096;
         m_barsNode = new QSGGeometryNode();
         auto* geo = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(),
-                                    kMaxBins * 4, kMaxBins * 6);
+                                    m_barCapacity * 4, m_barCapacity * 6);
         geo->setDrawingMode(QSGGeometry::DrawTriangles);
         geo->setVertexDataPattern(QSGGeometry::DynamicPattern);
         geo->setIndexDataPattern(QSGGeometry::DynamicPattern);
@@ -185,10 +203,10 @@ void VolumeProfileRenderer::ensureNodes(QSGNode* parentNode) {
 }
 
 void VolumeProfileRenderer::clearGeometry() {
-    // Zero out vertex counts so nothing is drawn; nodes stay in tree for reuse.
-    if (m_vaNode   && m_vaNode->geometry())   m_vaNode->geometry()->allocate(0, 0);
-    if (m_barsNode && m_barsNode->geometry()) m_barsNode->geometry()->allocate(0, 0);
-    if (m_pocNode  && m_pocNode->geometry())  m_pocNode->geometry()->allocate(0, 0);
+    // Hide the draw ranges; keep nodes and allocated buffers for reuse.
+    if (m_vaNode)   setDrawCounts(m_vaNode->geometry(), 0, 0);
+    if (m_barsNode) setDrawCounts(m_barsNode->geometry(), 0, 0);
+    if (m_pocNode)  setDrawCounts(m_pocNode->geometry(), 0, 0);
     if (m_vaNode)   m_vaNode->markDirty(QSGNode::DirtyGeometry);
     if (m_barsNode) m_barsNode->markDirty(QSGNode::DirtyGeometry);
     if (m_pocNode)  m_pocNode->markDirty(QSGNode::DirtyGeometry);
@@ -227,10 +245,11 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
                             static_cast<double>(vpWidth),
                             static_cast<double>(std::abs(yVal - yVah)));
         auto* geo = m_vaNode->geometry();
-        if (geo->vertexCount() < 4 || geo->indexCount() < 6) {
-            geo->allocate(4, 6);
-        }
+        setDrawCounts(geo, 4, 6);
         fillRect(geo, vaRect, m_vaColor);
+        m_vaNode->markDirty(QSGNode::DirtyGeometry);
+    } else if (m_vaNode) {
+        setDrawCounts(m_vaNode->geometry(), 0, 0);
         m_vaNode->markDirty(QSGNode::DirtyGeometry);
     }
 
@@ -251,8 +270,9 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
         }
 
         auto* geo = m_barsNode->geometry();
-        if (geo->vertexCount() < visCount * 4 || geo->indexCount() < visCount * 6) {
-            geo->allocate(visCount * 4, visCount * 6);
+        if (visCount > m_barCapacity) {
+            m_barCapacity = std::max(visCount, m_barCapacity * 2);
+            geo->allocate(m_barCapacity * 4, m_barCapacity * 6);
         }
         auto* vdata = geo->vertexDataAsColoredPoint2D();
         auto* idata = geo->indexDataAsUShort();
@@ -290,10 +310,8 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
             vi += 4;
             ii += 6;
         }
-        // Zero out any leftover allocated geometry from prior frames.
-        for (int i = vi; i < geo->vertexCount(); ++i) {
-            vdata[i].set(0, 0, 0, 0, 0, 0);
-        }
+        // Capacity is not a draw count: submit only the vertices/indices filled.
+        setDrawCounts(geo, vi, ii);
         m_barsNode->markDirty(QSGNode::DirtyGeometry);
     }
 
@@ -306,10 +324,11 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
                              static_cast<double>(vpWidth),
                              static_cast<double>(kPocLineHalfH * 2.0f));
         auto* geo = m_pocNode->geometry();
-        if (geo->vertexCount() < 4 || geo->indexCount() < 6) {
-            geo->allocate(4, 6);
-        }
+        setDrawCounts(geo, 4, 6);
         fillRect(geo, pocRect, m_pocColor);
+        m_pocNode->markDirty(QSGNode::DirtyGeometry);
+    } else if (m_pocNode) {
+        setDrawCounts(m_pocNode->geometry(), 0, 0);
         m_pocNode->markDirty(QSGNode::DirtyGeometry);
     }
 }

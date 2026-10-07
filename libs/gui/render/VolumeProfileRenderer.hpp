@@ -93,6 +93,8 @@ private:
     QSGGeometryNode* m_barsNode = nullptr;  // histogram bars
     QSGGeometryNode* m_pocNode  = nullptr;  // POC line
 
+    int m_barCapacity = 0; // allocated bins, independent of the active draw count
+
     // ── Settings ──────────────────────────────────────────────────────────
     float  m_widthFraction = 0.12f;   // 12 % of chart width by default
     bool   m_overlay       = false;
