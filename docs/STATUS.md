@@ -44,6 +44,7 @@ Never without the owner present: R2, any deploy, cutovers, data deletion. Check 
 ## Pause point 2026-10-07 ~02:45 EDT (Claude usage limit)
 
 - A corrupt-skip LANDED `e8c416a` (96/96; Fable 2 rounds, majors fixed; 4 minors deferred, the damaged-index placeholder ordinal goes into the anchors rebase). Deploys after R2.
+- GUI auto-reconnect LANDED `b087329` (96/96; Sonnet 2 rounds). Visible change: the cold-start label reads Reconnecting. Takes effect when the owner's GUI runs a new build.
 - C bind-address LANDED `0688fe0` (95/95). It deploys after R2. After that deploy the server listens on 127.0.0.1 only; the owner's GUI uses 127.0.0.1, and remote clients set the Mac's Tailscale address. Deferred: a sentinel_stream_listening gauge.
 - D-b1: READY (lag metric = direct main-thread queue latency, Astra PASS). Lands after the R2 deploy; journal flip gated on the lag metric (engine baseline, then journal).
 
@@ -54,14 +55,13 @@ On resume, read the Codex outputs: `.claude/acting-orchestrator/corrupt-skip/wri
 | Branch | Tip | State | Next |
 |---|---|---|---|
 | `lt-astra/journal-anchors` | `117482e` | Phase A committed (sidecar store; BookRecorder state export/import byte-identical on real BTC/PEPE hours; bounded seek). Anchor size: BTC 1.43 MB, PEPE 61 KB per anchor, retention decided 2026-10-07: 00:00Z anchors kept forever (owner), intraday about 2 days. Phase B (rebase on D-b1, JournalFeed restore, roll() wiring, the 6 owner checks) after D-b1 passes review | Claude Fable review after Phase B; land and deploy after R2 |
-| `lt-sol/gui-reconnect` | `208d6d7` | Fix round 1 (Codex Sol thread `01a11560-3828-7c91-9fba-b8187deb80ba`): backoff reset after 10 s stable uptime, backoff tests, LabData timer removed, quieter outage logs. Visible change: cold-start label reads Reconnecting | Sonnet re-check, land; native check at the next deploy |
 | `lt-astra/anchors-b` | from rebased D-b1 `0de52bd` + phase A applied uncommitted (4 conflict files left for the writer) | Phase B (Codex Astra thread `01a1147d`): unify with corrupt-skip's recoveryIndex, JournalFeed restore, roll()/tap wiring, rebuild CLI, retention, the owner's 6 checks | Claude Fable review; lands after D-b1 |
 | `lt-claude/roller-db1` | rebased onto main (pre-landing, clean; old tip tagged `pre-rebase/roller-db1`) | READY: Astra PASS on all rounds incl. the queue-latency lag metric (`270b629` before rebase). Verifying the rebased build and suites | After the audit: fix round 2 with the same writer, same Astra thread; land only AFTER the R2 deploy |
 
 Retired 2026-10-06 (owner): `lt-sol/label-style` and `lt-claude/heatmap-ab-isolation`, tips kept as tags `archive/<branch>`. Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orchestrator/`. The
 `.claude/worktrees/youthful-ishizaka-b0e889` (`60caa04`, branch `claude/exciting-hypatia-1c7a34`) is not part of this work; leave it alone.
 
-Order of work after R2 (owner audit, 2026-10-07; change it only on purpose): R2 -> D-b1 (gate: a main-thread event-loop lag metric, engine baseline then journal) -> anchors deploy -> D-b2 -> S8b + slice E -> README/ARCHITECTURE pass -> architecture freeze and the workflow/storage audit. Each step deploys separately with its own soak. R2 preconditions: `fanout_clients == 7` (not 1), capacity disconnects 0. R2 steps: commit `recording.source: roller` on main (owner present), then `scripts/dev/deploy-runtime.sh restart server` (not `server`), then the owner restarts the GUI (no auto-reconnect).
+Order of work after R2 (owner audit, 2026-10-07; change it only on purpose): R2 -> D-b1 (gate: a main-thread event-loop lag metric, engine baseline then journal) -> anchors deploy -> D-b2 -> S8b + slice E -> README/ARCHITECTURE pass -> architecture freeze and the workflow/storage audit. Each step deploys separately with its own soak. R2 preconditions: `fanout_clients == 7` (not 1), capacity disconnects 0. R2 steps: commit `recording.source: roller` on main (owner present), then `scripts/dev/deploy-runtime.sh restart server` (not `server`), then the GUI reconnects by itself if it runs a build that includes `b087329` (GUI auto-reconnect, landed 2026-10-07); with an older GUI build, restart the GUI.
 
 Runbook notes from D-b1 (2026-10-07): the GUI does not reconnect after a server restart, so the owner restarts the GUI after the R2 and D-b1 deploys; capture's fan-out allows 8 clients, one per product, and the recorder uses 7 (FM-207; steady state is 7 fan-out clients, so the D-b runbook's `fanout_clients == 1` is wrong), so a second server (an agent instance, a future Pi) cannot follow all 7 products.
 
