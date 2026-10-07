@@ -62,7 +62,7 @@ The system combines:
 
 - GPU order book heatmap with recorded history and a live edge
 - Heatmap binned on the GPU at the chart's tick size (Auto or Manual)
-- Liquidity range slider (Asset or USD) and liquidity labels on heatmap cells
+- Liquidity range slider (sizes in the base asset) and labels on heatmap cells in Asset or USD units
 - Candle, hollow, and line chart modes
 - Trade bubbles for executions
 - Footprint, TPO, and Volume Profile layers, switched on from the chart toolbar
@@ -106,7 +106,7 @@ The system combines:
 Changes that landed in September and October 2026:
 
 - The GPU heatmap is the only heatmap renderer. The client bins recorded and live order book data on the GPU and draws it. The earlier renderer is removed from the GUI and client.
-- `sentinel-capture` is a separate process that records a raw Coinbase level 2 journal, with one connection per product. `sentinel-roll` builds heatmap history files from that journal. The server can run the roller next to its own recorder and compare the two (`roller_shadow` in `config/server_config.yaml`). The chart still reads the server's own recorder.
+- `sentinel-capture` is a separate process that records a raw Coinbase level 2 journal, with one connection per product. `sentinel-roll` builds heatmap history files from that journal.
 - Candle history loads from Coinbase in pages of 350 bars as you pan back. The server caches closed bars.
 - Chart controls: Auto or Manual tick size, a liquidity range slider, liquidity labels, trade bubbles, and an auto price scale toggle.
 - Footprint, TPO, and Volume Profile are drawn in the GUI. Switch them on with the chart toolbar buttons. TPO and Volume Profile replace the heatmap while they are on.
