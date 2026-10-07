@@ -46,6 +46,8 @@ Runbook notes from D-b1 (2026-10-07): the GUI does not reconnect after a server 
 
 ## Waiting on the owner
 
+1. Journal replay anchors (audit `docs/research/2026-10-journal-anchors-audit.md`): confirm the invariant (RAWL2 stays pristine; Sentinel-made 15-min full-book anchors in a separate sidecar store; replay from an anchor is byte-identical to a full replay) and its placement as a post-one-world slice after D-b; decide the sidecar location and retention.
+
 None. (S8 legacy heatmap deletion approved by the owner 2026-10-06; see Next.)
 
 ## Owner constraints in force
