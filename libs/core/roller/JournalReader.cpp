@@ -1,7 +1,11 @@
 #include "JournalReader.hpp"
+#include "SentinelLogging.hpp"
+#include "metrics/MetricsRegistry.hpp"
 #include <algorithm>
-#include <tuple>
+#include <map>
+#include <set>
 #include <stdexcept>
+#include <tuple>
 
 namespace sentinel::roller {
 using nlohmann::json;
@@ -11,6 +15,32 @@ void from_json(const json& j, JournalPos& p) {
     j.at("block").get_to(p.block); j.at("record").get_to(p.record);
 }
 namespace {
+struct CorruptionState {
+    metrics::Counter count;
+    std::mutex mutex;
+    std::set<std::pair<std::string, uint64_t>> blocks;
+};
+std::shared_ptr<CorruptionState> corruptionState(const std::string& product) {
+    static std::mutex mutex;
+    static std::map<std::string, std::shared_ptr<CorruptionState>> products;
+    std::lock_guard lock(mutex);
+    auto& state = products[product];
+    if (!state) state = std::make_shared<CorruptionState>();
+    return state;
+}
+void reportCorruption(const std::string& product, const JournalFile& file,
+                      const capture::BlockIndex& block, const char* reason) {
+    const auto state = corruptionState(product);
+    // Rare error path only. Remember run/block identity across anchor searches,
+    // daily replay and independent batch comparisons in this process.
+    std::lock_guard lock(state->mutex);
+    if (state->blocks.emplace(file.header.at("run_id").get<std::string>(), block.ordinal).second) {
+        state->count.inc();
+        sLog_Error("Roller journal corrupt block product=" << product.c_str()
+                   << " file=" << file.path.string().c_str() << " offset=" << block.offset
+                   << " reason=" << reason << " action=skip_until_snapshot");
+    }
+}
 auto order(const json& h) {
     return std::tuple(h.at("run_started_system_ns").get<int64_t>(), h.at("run_id").get<std::string>(),
                       h.at("segment").get<uint64_t>());
@@ -23,6 +53,12 @@ bool snapshot(const capture::Record& r, const std::string& product) {
         if (e.value("product_id", "") == product && e.value("type", "") == "snapshot") return true;
     return false;
 }
+}
+void registerJournalMetrics(metrics::MetricsRegistry& registry, const std::string& product) {
+    const auto state = corruptionState(product);
+    registry.counterFn("sentinel_roller_journal_corrupt_blocks_total",
+        "Distinct journal payload blocks skipped by this process.", {{"product", product}},
+        [state] { return static_cast<double>(state->count.value()); });
 }
 JournalReader::JournalReader(std::filesystem::path root, std::string product, std::optional<JournalPos> start)
     : product_(std::move(product)), start_(std::move(start)) {
@@ -54,7 +90,16 @@ JournalReader::JournalReader(std::filesystem::path root, std::string product, st
 bool JournalReader::next(JournalRecord& out) {
     while (file_ < files_.size()) {
         const auto& f = files_[file_];
-        if (!reader_) reader_ = std::make_unique<capture::RecordReader>(QString::fromStdString(f.path.string()), !f.superseded);
+        if (!reader_) reader_ = std::make_unique<capture::RecordReader>(
+            QString::fromStdString(f.path.string()), !f.superseded,
+            [this, &f](const capture::BlockIndex& block, const char* reason) {
+                reportCorruption(product_, f, block, reason);
+                gap_ = true;
+                // A saved cursor in a now-damaged block cannot be delivered;
+                // return its first readable successor with a gap.
+                if (start_ && f.header.at("run_id") == start_->run && start_->block == block.ordinal)
+                    start_.reset();
+            });
         capture::Record record;
         if (reader_->next(record)) {
             const auto& scan = reader_->result();
@@ -69,7 +114,7 @@ bool JournalReader::next(JournalRecord& out) {
         }
         const auto& result = reader_->result();
         pending_ = !f.superseded && !result.indexed;
-        gap_ = result.tornTail || (f.superseded && !result.indexed);
+        gap_ = gap_ || result.tornTail || (f.superseded && !result.indexed);
         nextBlock_ = f.header.at("first_block_ordinal").get<uint64_t>() + result.index.size();
         ++file_;
         if (file_ < files_.size()) {
@@ -88,7 +133,10 @@ std::optional<JournalPos> JournalReader::anchor(int64_t receiveMs) const {
     // search wall time; then choose the last qualifying snapshot in that segment.
     for (auto f = files_.rbegin(); f != files_.rend(); ++f) {
         if (f->header.at("opened_system_ns").get<int64_t>() / 1'000'000 > receiveMs) continue;
-        capture::RecordReader reader(QString::fromStdString(f->path.string()), !f->superseded);
+        capture::RecordReader reader(QString::fromStdString(f->path.string()), !f->superseded,
+            [&](const capture::BlockIndex& block, const char* reason) {
+                reportCorruption(product_, *f, block, reason);
+            });
         capture::Record r;
         std::optional<JournalPos> found;
         while (reader.next(r)) if (r.time.systemNs / 1'000'000 <= receiveMs && snapshot(r, product_)) {

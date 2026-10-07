@@ -41,14 +41,24 @@ of unowned files.
 - `roller/JournalReader` inventories one product's headers and orders by run
   start, run id, segment. It reads one decompressed block at a time. Positions
   are `(product, run_id, block ordinal, record index)`, inclusive when reopening.
+  If a saved position lies in a corrupt payload block, the reader returns its
+  first readable successor with a gap instead. Callers that require the exact
+  cursor must handle that recovery case explicitly.
   To poll an open file, reopen and skip the already applied position. Inventory
   refresh is explicit; this batch CLI does not wait forever for new records.
 - Reader framing is shared with capture. The verifier's existing strict default
   remains unchanged. A roller reader defers an unframed/incomplete terminal tail
   while the file is unsealed and unsuperseded, even if later block-looking bytes
   are visible. A valid closing index, subsequent segment or newer run makes that
-  tail terminal: later valid framing is then interior corruption. Complete CRC,
-  zstd and framing errors still fail. A concurrently incomplete file header is
+  tail terminal: later valid framing is then interior corruption. Complete payload
+  CRC/zstd failures with validated block headers are skipped in both batch and
+  shadow replay, including anchor searches. They set the same boundary gap as a
+  missing segment; validity ends at the previous complete record until the next
+  accepted exchange snapshot. The pristine file is never changed. Each distinct
+  damaged (product, run, block) is logged at error level with file/offset and
+  counted once per process by `sentinel_roller_journal_corrupt_blocks_total`.
+  Header CRC, framing, record-layout and index errors still fail because safe
+  payload recovery is not established. A concurrently incomplete file header is
   an invocation error to retry after the writer finishes the header.
 - Missing segments, torn superseded tails, run/connection changes, transport and
   applicable product-scoped validity markers invalidate observation. A discovered

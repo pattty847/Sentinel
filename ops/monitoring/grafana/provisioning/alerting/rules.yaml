@@ -433,3 +433,40 @@ groups:
                   operator: { type: and }
                   query: { params: [C] }
                   reducer: { type: last, params: [] }
+
+      - uid: sentinel-roller-journal-corruption
+        title: Roller skipped corrupt journal block
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: page
+        annotations:
+          summary: "Roller skipped corrupt journal block"
+          description: >-
+            A complete journal payload block failed CRC or zstd validation and was skipped. Observation is invalid until the next exchange snapshot. Read the Roller journal corrupt block error for product, file and offset; audit with capture-verify. Preserve the journal. This alert remains active for the process lifetime, including corruption found before its first scrape.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 7200, to: 0 }
+            datasourceUid: sentinel-vm
+            model:
+              refId: A
+              expr: max by (product) (sentinel_roller_journal_corrupt_blocks_total{job="sentinel-server"})
+              instant: true
+              range: false
+              intervalMs: 15000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              datasource: { type: __expr__, uid: __expr__ }
+              conditions:
+                - type: query
+                  evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [C] }
+                  reducer: { type: last, params: [] }

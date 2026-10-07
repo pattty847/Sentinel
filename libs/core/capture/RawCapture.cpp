@@ -436,7 +436,7 @@ struct RecordGenerator {
     RecordGenerator& operator=(const RecordGenerator&) = delete;
     ~RecordGenerator() { if (handle) handle.destroy(); }
 };
-RecordGenerator readRecords(const QString path, ScanResult& result, bool pendingTailAllowed) {
+RecordGenerator readRecords(const QString path, ScanResult& result, bool pendingTailAllowed, CorruptBlockVisitor onCorruptBlock) {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) fail("cannot read " + path.toStdString());
     result.header = headerFrom(file);
@@ -494,11 +494,24 @@ RecordGenerator readRecords(const QString path, ScanResult& result, bool pending
             fail("invalid block limits/ordinal");
         if (end - file.pos() < entry.compressedBytes) { result.tornTail = true; break; }
         const auto compressed = read(file, entry.compressedBytes);
-        if (ZSTD_findFrameCompressedSize(compressed.data(), compressed.size()) != compressed.size()) fail("invalid zstd frame boundary");
-        std::string raw(entry.rawBytes, '\0');
-        const auto size = ZSTD_decompress(raw.data(), raw.size(), compressed.data(), compressed.size());
-        if (ZSTD_isError(size) || size != raw.size()) fail("zstd decompression failed");
-        if (crc(raw) != checksum) fail("block CRC mismatch");
+        const char* damage = nullptr;
+        std::string raw;
+        if (ZSTD_findFrameCompressedSize(compressed.data(), compressed.size()) != compressed.size()) {
+            damage = "invalid zstd frame boundary";
+        } else {
+            raw.resize(entry.rawBytes);
+            const auto size = ZSTD_decompress(raw.data(), raw.size(), compressed.data(), compressed.size());
+            if (ZSTD_isError(size) || size != raw.size()) damage = "zstd decompression failed";
+            else if (crc(raw) != checksum) damage = "block CRC mismatch";
+        }
+        if (damage) {
+            if (!onCorruptBlock) fail(damage);
+            onCorruptBlock(entry, damage);
+            // Keep the validated header in the rebuilt index, including skipped
+            // blocks: sealing and ordinal checks must remain strict.
+            result.index.push_back(entry); ++nextOrdinal;
+            continue;
+        }
         // Validate the whole block's framing before exposing any record.
         pos = 0;
         for (uint32_t i = 0; i < entry.records; ++i) {
@@ -542,9 +555,11 @@ RecordGenerator readRecords(const QString path, ScanResult& result, bool pending
 struct RecordReader::Impl {
     ScanResult result;
     RecordGenerator generator;
-    explicit Impl(const QString& path, bool pending) : generator(readRecords(path, result, pending)) {}
+    explicit Impl(const QString& path, bool pending, CorruptBlockVisitor onCorruptBlock)
+        : generator(readRecords(path, result, pending, std::move(onCorruptBlock))) {}
 };
-RecordReader::RecordReader(const QString& path, bool pending) : m_impl(std::make_unique<Impl>(path, pending)) {}
+RecordReader::RecordReader(const QString& path, bool pending, CorruptBlockVisitor onCorruptBlock)
+    : m_impl(std::make_unique<Impl>(path, pending, std::move(onCorruptBlock))) {}
 RecordReader::~RecordReader() = default;
 const ScanResult& RecordReader::result() const { return m_impl->result; }
 bool RecordReader::next(Record& record) {

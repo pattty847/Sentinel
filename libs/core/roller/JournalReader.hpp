@@ -2,7 +2,12 @@
 #include "capture/RawCapture.hpp"
 #include <filesystem>
 
+namespace sentinel::metrics { class MetricsRegistry; }
+
 namespace sentinel::roller {
+// Register before starting product workers. Counts distinct damaged blocks seen
+// by this process, including anchor scans; replay does not count them again.
+void registerJournalMetrics(metrics::MetricsRegistry&, const std::string& product);
 struct JournalPos {
     std::string product, run;
     uint64_t block = 0;

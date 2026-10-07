@@ -269,6 +269,7 @@ minimum elapsed time for an identical-failure streak before slow probes begin.
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
+| `sentinel_roller_journal_corrupt_blocks_total` | counter | product | Distinct (run, block) payload CRC/zstd failures encountered by journal readers in this process, including anchor searches and batch comparisons. Replays do not count the same block again. |
 | `sentinel_roller_shadow_running` | gauge | product | 1 while applying durable records; 0 during setup/retry/stop. Present only when enabled. |
 | `sentinel_roller_shadow_lag_seconds` | gauge | product | Scrape-time age of last applied durable record, -1 before the first record. |
 | `sentinel_roller_shadow_records_applied_total` | counter | product | Applied durable records, including deterministic restart/day warmup replay. |
@@ -288,6 +289,15 @@ connection with shadow is an informational log report with the round-2 bands
 (0.5% per-side total TWAP, 0.02% mids, 1% entry counts, 99% row overlap).
 The pinned identical-input legacy timer fixture separately enforces the tier-2
 32-code/1%-cells/0.01%-totals bounds. No cross-connection difference pages.
+
+`sentinel-roller-journal-corruption` pages immediately when the corrupt-block
+counter is positive, including damage discovered before the first scrape. It
+stays active for the process lifetime. Read `Roller journal corrupt block` for
+product, file, offset and reason. The roller skips only complete payload CRC/zstd
+failures with trustworthy headers, invalidates observation until a new exchange
+snapshot, and continues subsequent days. `capture-verify` still reports the
+corruption. Preserve RAWL2 files; do not repair them in place. Register the reader
+counter at product startup with `registerJournalMetrics(registry, product)`.
 
 Grafana provisions `sentinel-roller-shadow-mismatch` (increase over 2 h) and
 `sentinel-roller-shadow-down` (product down for 5 min); absence is OK while
