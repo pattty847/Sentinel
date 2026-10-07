@@ -36,7 +36,7 @@ The owner's `ma-panel` (local plugin) shows live workflow state; a session start
 
 | Branch | Tip | State | Next |
 |---|---|---|---|
-| `lt-astra/chunk-speed` | `30be12c` (base) | Writer Codex `gpt-6-astra` high (sandboxed; conductor commits), thread `01a11457-d56a-7323-8b5c-9c31c0994097`: measure then fix slow history loading after a timeframe change / zoom-out, CANDLES first (owner saw 2-3 s to fill 15m candles; candle history comes from Coinbase REST via the server), heatmap chunks second (owner OK'd spending Codex resets) | Review Claude Fable (high: GPU heatmap data path); land after measurements |
+| `lt-astra/chunk-speed` | `30be12c` (base) | Writer Codex `gpt-6-astra` high (sandboxed; conductor commits), thread `01a11459-da9d-70f3-9570-e84b6eff7e83`: slow 15m candle fill (owner: 2-3 s over a 2-3 week view). Cause confirmed: the server pages ONE_MINUTE bars (350 per Coinbase call, sequential) and rolls them up, about 60-90 calls for that view; the 1m-anchor roll-up is a 2026-09-28 decision (native coarse REST candles rejected), so the fix must keep it (cache 1m bars, concurrency within the rate limit, newest page first). Heatmap chunks second (owner OK'd spending Codex resets) | Review Claude Fable (high: GPU heatmap data path); land after measurements |
 | `lt-claude/roller-db1` | `6a60e4a` (base) | D-b1 writer (Claude `opus`): journal feeds the model behind `recording.live_feed: engine|journal` (default engine) per `docs/research/2026-10-one-world-db-packet.md` | Review `gpt-6-astra` high; land only AFTER the R2 deploy |
 
 Retired 2026-10-06 (owner): `lt-sol/label-style` and `lt-claude/heatmap-ab-isolation`, tips kept as tags `archive/<branch>`. Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orchestrator/`. The
