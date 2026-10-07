@@ -447,7 +447,7 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
             return;
         }
 
-        // Locate sentinel_backtest binary relative to the running application.
+        // Locate sentinel-backtest binary relative to the running application.
         const QString appDir = QCoreApplication::applicationDirPath();
         QStringList candidates;
         // Dev build layouts.
@@ -469,7 +469,7 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
         }
 
         if (backtestBin.isEmpty()) {
-            m_btStatus->setText(QStringLiteral("Error: sentinel_backtest binary not found."));
+            m_btStatus->setText(QStringLiteral("Error: sentinel-backtest binary not found."));
             m_btStatus->setStyleSheet("QLabel { color: #f44336; }");
             return;
         }
