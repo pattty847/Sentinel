@@ -45,7 +45,11 @@ public:
                                   QObject* parent = nullptr);
     ~SentinelStreamServer();
 
-    void start();
+    // Validate before constructing the application (and starting recording/feeds).
+    // Throws for an unparseable address or an address not assigned locally.
+    static net::ip::address validateBindAddress(const ServerConfig& config);
+    // Invalid addresses throw; other listener failures return false so recording continues.
+    bool start();
     void stop();
 
 signals:

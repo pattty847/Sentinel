@@ -37,6 +37,8 @@ The client connects over **TLS** to **`127.0.0.1:8080`**. Files **`certs/sentine
 
 If the stream server never accepts connections (**Connection refused**), open **`logs/sentinel-server.log`** — a line like **`SentinelStreamServer start failed`** with an OpenSSL hint usually means the cert/key were out of sync (common after copying halves from different machines).
 
+Missing or invalid TLS files and a stream port already in use leave the server process recording with no client listener. An invalid `server.bind_address` instead logs an error and exits before recording or feeds start.
+
 ---
 
 ## Where logs go

@@ -139,6 +139,7 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
 
     if (serverRoot) {
         readScalar(serverRoot, "stream_port", cfg.streamPort);
+        readScalar(serverRoot, "bind_address", cfg.bindAddress);
         if (serverRoot["default_symbols"]) {
             const auto symbols = parseSymbolList(serverRoot["default_symbols"]);
             if (!symbols.empty()) {

@@ -395,6 +395,40 @@ TEST(ServerFeedAdmissionSource, AppChecksUpstreamResultBeforeAcknowledgement) {
     EXPECT_NE(text.find("m_server->releaseIfNoSubscribers(native"), std::string::npos);
 }
 
+TEST(ServerFeedConfig, BindAddressDefaultsFlatWrappedAndOverride) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const auto path = dir.filePath("server.yaml");
+    const auto load = [&](const QByteArray& yaml, ServerConfig& config) {
+        QFile file(path);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+        if (file.write(yaml) != yaml.size()) return false;
+        file.close();
+        return ConfigLoader::loadServerConfig(path.toStdString(), &config);
+    };
+    ServerConfig config;
+    ASSERT_TRUE(load("schema_version: 1\n", config));
+    EXPECT_EQ(config.bindAddress, "127.0.0.1");
+    ASSERT_TRUE(load("bind_address: '100.89.99.21'\n", config));
+    EXPECT_EQ(config.bindAddress, "100.89.99.21");
+    ASSERT_TRUE(load("server:\n  bind_address: '::1'\n", config));
+    EXPECT_EQ(config.bindAddress, "::1");
+    ASSERT_TRUE(load("server:\n  stream_port: 12345\n", config));
+    EXPECT_EQ(config.bindAddress, "::1"); // partial overrides retain the selected address
+    // Parsing the address belongs to listener startup, which must propagate failure.
+    ASSERT_TRUE(load("server:\n  bind_address: 'invalid-address'\n", config));
+    EXPECT_EQ(config.bindAddress, "invalid-address");
+}
+
+TEST(ServerFeedConfig, CheckedInConfigDefaultsToLoopback) {
+    ServerConfig config;
+    // Distinguish loading the file's value from retaining the struct default.
+    config.bindAddress = "0.0.0.0";
+    ASSERT_TRUE(ConfigLoader::loadServerConfig(std::string(SENTINEL_SOURCE_DIR) +
+                                               "/config/server_config.yaml", &config));
+    EXPECT_EQ(config.bindAddress, "127.0.0.1");
+}
+
 TEST(ServerFeedConfig, DefaultOverrideAndInvalidCap) {
     EXPECT_EQ(ServerMdcConfig{}.maxConnections, 8);
     QTemporaryDir dir;

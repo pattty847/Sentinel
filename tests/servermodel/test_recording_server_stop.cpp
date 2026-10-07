@@ -17,6 +17,19 @@
 
 // Drive the actual stop path without starting sockets or needing TLS credentials.
 struct RecordingServerStopTest {
+    static std::optional<tcp::endpoint> endpoint(SentinelStreamServer& server) {
+        if (!server.m_running) return std::nullopt;
+        auto result = std::make_shared<std::promise<tcp::endpoint>>();
+        net::post(server.m_ioc, [&server, result] {
+            beast::error_code ec;
+            const auto endpoint = server.m_acceptor->local_endpoint(ec);
+            if (ec) result->set_exception(std::make_exception_ptr(boost::system::system_error(ec)));
+            else result->set_value(endpoint);
+        });
+        auto ready = result->get_future();
+        if (ready.wait_for(std::chrono::seconds(3)) != std::future_status::ready) return std::nullopt;
+        return ready.get();
+    }
     static bool listening(SentinelStreamServer& server) {
         if (!server.m_running) return false;
         auto result = std::make_shared<std::promise<bool>>();
@@ -557,7 +570,7 @@ struct ServerFixture {
     std::unique_ptr<ServerDataModel> model;
     std::unique_ptr<Authenticator> auth;
     std::unique_ptr<SentinelStreamServer> server;
-    bool init() {
+    bool init(int port = 0) {
         config.heatmap.persistenceEnabled = false;
         config.recording.enabled = false;
         config.tls.certFile = dir.path().toStdString() + "/cert.pem";
@@ -565,11 +578,151 @@ struct ServerFixture {
         if (!dir.isValid() || !writeSelfSignedCert(config.tls.certFile, config.tls.keyFile)) return false;
         model = std::make_unique<ServerDataModel>(config);
         auth = std::make_unique<Authenticator>(dir.path().toStdString() + "/no-credentials");
-        server = std::make_unique<SentinelStreamServer>(*model, *auth, config, 0);
+        server = std::make_unique<SentinelStreamServer>(*model, *auth, config, port);
         return true;
     }
 };
 } // namespace
+
+TEST(StreamServerBind, DefaultIsLoopback) {
+    int argc = 1; char name[] = "bind-default"; char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    ServerFixture fixture;
+    ASSERT_TRUE(fixture.init());
+    fixture.server->start();
+    const auto endpoint = RecordingServerStopTest::endpoint(*fixture.server);
+    ASSERT_TRUE(endpoint.has_value());
+    EXPECT_EQ(endpoint->address(), net::ip::make_address("127.0.0.1"));
+    EXPECT_NE(endpoint->port(), 0);
+    EXPECT_TRUE(RecordingServerStopTest::accepts(*fixture.server, endpoint->port()));
+}
+
+TEST(StreamServerBind, ExplicitIpv6AndWildcardAddressesAreHonoured) {
+    int argc = 1; char name[] = "bind-explicit"; char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    for (const auto* address : {"::1", "0.0.0.0", "::"}) {
+        SCOPED_TRACE(address);
+        ServerFixture fixture;
+        fixture.config.bindAddress = address;
+        ASSERT_TRUE(fixture.init());
+        testing::internal::CaptureStderr();
+        EXPECT_NO_THROW(fixture.server->start());
+        const auto endpoint = RecordingServerStopTest::endpoint(*fixture.server);
+        fixture.server->stop();
+        const auto log = testing::internal::GetCapturedStderr();
+        ASSERT_TRUE(endpoint.has_value());
+        EXPECT_EQ(endpoint->address(), net::ip::make_address(address));
+        EXPECT_NE(endpoint->port(), 0);
+        EXPECT_NE(log.find(std::string("SentinelStreamServer listening: address=") + address), std::string::npos);
+        if (endpoint->address().is_unspecified()) {
+            EXPECT_NE(log.find("listening on all interfaces without client auth"), std::string::npos);
+        } else {
+            EXPECT_EQ(log.find("listening on all interfaces without client auth"), std::string::npos);
+        }
+    }
+}
+
+TEST(StreamServerBind, InvalidOrUnassignedAddressFailsStartup) {
+    int argc = 1; char name[] = "bind-invalid"; char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    ASSERT_FALSE(QNetworkInterface::allAddresses().contains(QHostAddress("192.0.2.1")));
+    for (const auto* address : {"not-an-address", "localhost", "", "192.0.2.1"}) {
+        SCOPED_TRACE(address);
+        ServerFixture fixture;
+        fixture.config.bindAddress = address;
+        ASSERT_TRUE(fixture.init());
+        EXPECT_THROW(SentinelStreamServer::validateBindAddress(fixture.config), std::exception);
+        EXPECT_THROW(fixture.server->start(), std::exception);
+        EXPECT_FALSE(RecordingServerStopTest::listening(*fixture.server));
+    }
+}
+
+TEST(StreamServerBind, NativeAcceptedIpv6ZoneIdsAreHonoured) {
+    int argc = 1; char name[] = "bind-zone"; char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    int exercised = 0;
+    for (const auto& interface : QNetworkInterface::allInterfaces()) {
+        for (const auto& entry : interface.addressEntries()) {
+            auto ip = entry.ip();
+            if (ip.protocol() != QAbstractSocket::IPv6Protocol) continue;
+            ip.setScopeId({});
+            for (const auto& zone : {interface.name(), QString::number(interface.index())}) {
+                const auto text = (ip.toString() + "%" + zone).toStdString();
+                beast::error_code ec;
+                const auto address = net::ip::make_address(text, ec);
+                if (ec) continue;
+                net::io_context ioc;
+                tcp::acceptor probe(ioc);
+                probe.open(tcp::v6(), ec);
+                if (ec) continue;
+                probe.bind({address, 0}, ec);
+                if (ec) continue; // only require addresses this OS accepts
+                SCOPED_TRACE(text);
+                ServerFixture fixture;
+                fixture.config.bindAddress = text;
+                ASSERT_TRUE(fixture.init());
+                EXPECT_EQ(SentinelStreamServer::validateBindAddress(fixture.config), address);
+                ASSERT_TRUE(fixture.server->start());
+                const auto bound = RecordingServerStopTest::endpoint(*fixture.server);
+                ASSERT_TRUE(bound.has_value());
+                EXPECT_EQ(bound->address().to_v6().to_bytes(), address.to_v6().to_bytes());
+                ++exercised;
+            }
+        }
+    }
+    ASSERT_GT(exercised, 0) << "no local scoped IPv6 address accepted by native bind";
+}
+
+TEST(StreamServerStartFailure, OccupiedPortReturnsFalseAndCanRetry) {
+    int argc = 1; char name[] = "bind-occupied"; char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    net::io_context ioc;
+    tcp::acceptor blocker(ioc, {net::ip::make_address("127.0.0.1"), 0});
+    const auto port = blocker.local_endpoint().port();
+    ServerFixture fixture;
+    ASSERT_TRUE(fixture.init(port));
+    EXPECT_FALSE(fixture.server->start());
+    EXPECT_FALSE(RecordingServerStopTest::listening(*fixture.server));
+    auto before = std::chrono::steady_clock::now();
+    fixture.server->stop();
+    EXPECT_LT(std::chrono::steady_clock::now() - before, std::chrono::seconds(1));
+    ServerFixture failedDestructor;
+    ASSERT_TRUE(failedDestructor.init(port));
+    EXPECT_FALSE(failedDestructor.server->start());
+    before = std::chrono::steady_clock::now();
+    failedDestructor.server.reset();
+    EXPECT_LT(std::chrono::steady_clock::now() - before, std::chrono::seconds(1));
+    blocker.close();
+    ASSERT_TRUE(fixture.server->start());
+    EXPECT_TRUE(RecordingServerStopTest::listening(*fixture.server));
+    EXPECT_EQ(RecordingServerStopTest::port(*fixture.server), port);
+}
+
+TEST(StreamServerStartFailure, MissingTlsFilesReturnFalseAndCanRetry) {
+    int argc = 1; char name[] = "bind-no-tls"; char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    for (const bool missingKey : {false, true}) {
+        SCOPED_TRACE(missingKey ? "key" : "cert");
+        ServerFixture fixture;
+        ASSERT_TRUE(fixture.init());
+        const auto path = missingKey ? fixture.config.tls.keyFile : fixture.config.tls.certFile;
+        std::filesystem::rename(path, path + ".saved");
+        EXPECT_FALSE(fixture.server->start());
+        EXPECT_FALSE(RecordingServerStopTest::listening(*fixture.server));
+        auto before = std::chrono::steady_clock::now();
+        fixture.server->stop();
+        EXPECT_LT(std::chrono::steady_clock::now() - before, std::chrono::seconds(1));
+        auto failed = std::make_unique<SentinelStreamServer>(*fixture.model, *fixture.auth, fixture.config, 0);
+        EXPECT_FALSE(failed->start());
+        before = std::chrono::steady_clock::now();
+        failed.reset();
+        EXPECT_LT(std::chrono::steady_clock::now() - before, std::chrono::seconds(1));
+        std::filesystem::rename(path + ".saved", path);
+        ASSERT_TRUE(fixture.server->start());
+        EXPECT_TRUE(RecordingServerStopTest::listening(*fixture.server));
+        EXPECT_NE(RecordingServerStopTest::port(*fixture.server), 0);
+    }
+}
 
 // FM-154/FM-202: stop() queues the acceptor close on the I/O thread and then stops
 // the I/O context. If that thread is busy, the close (and the aborted accept) stay

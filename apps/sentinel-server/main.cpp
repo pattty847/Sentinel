@@ -1,5 +1,6 @@
 #include <QCoreApplication>
 #include <QDir>
+#include <exception>
 #include "SentinelServerApp.hpp"
 #include "SentinelLogging.hpp"
 #include "SentinelLogSink.hpp"
@@ -17,6 +18,15 @@ int main(int argc, char *argv[]) {
                      << " cwd=" << QDir::currentPath());
     }
     ConfigLoader::loadServerConfig("config/.server_config.yaml", &serverConfig);
+
+    // Fail invalid listener configuration before recording or feeds can start.
+    try {
+        SentinelStreamServer::validateBindAddress(serverConfig);
+    } catch (const std::exception& e) {
+        sLog_Error("Invalid server.bind_address: address=" << serverConfig.bindAddress
+                   << " error=" << e.what());
+        return 1;
+    }
 
     // --require-recording (used by the launchd service): record to the configured
     // directory or exit with EX_TEMPFAIL (75) so launchd retries. Never fall back

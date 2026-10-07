@@ -1,4 +1,6 @@
 schema_version: 1
+bind_address: "127.0.0.1" # server.bind_address; local clients only by default
+# bind_address: "100.89.99.21" # Example Mac Tailscale address for remote tailnet clients; use your own local address.
 heatmap:
   timeframes_ms: [1000, 60000, 300000, 900000, 3600000, 14400000, 86400000]
   timeframe: 60000
