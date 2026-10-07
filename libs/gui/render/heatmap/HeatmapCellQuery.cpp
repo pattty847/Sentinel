@@ -220,8 +220,8 @@ struct WallWindow {
     int64_t from = 0, to = 0, firstBucket = 0, endBucket = 0, firstBin = 0, endBin = 0, units = 0;
     double lo = 0, hi = 0, tick = 0;
 };
-std::optional<WallWindow> wallWindow(const WallScanRequest& r, heatmap_window::WallError* error = nullptr) {
-    using Error = heatmap_window::WallError;
+std::optional<WallWindow> wallWindow(const WallScanRequest& r, heatmap::WallError* error = nullptr) {
+    using Error = heatmap::WallError;
     if (error) *error = Error::InvalidRange;
     const auto& q = r.query;
     if (r.tfMs < kMinuteMs || r.tfMs > kDayMs || r.tfMs % kMinuteMs ||
@@ -299,9 +299,9 @@ std::shared_ptr<const SpanSet> wallsPicture(const WallScanRequest& r, const Span
 }
 }
 
-heatmap_window::WallsSnapshot scanWalls(const WallScanRequest& request, const SpanSet& picture,
+heatmap::WallsSnapshot scanWalls(const WallScanRequest& request, const SpanSet& picture,
     const LiveSnapshot* live, ChunkStore& store, LabelWindowBuilder& builder, const HeldChunks& held) {
-    heatmap_window::WallsSnapshot out; out.gpuRenderer = true;
+    heatmap::WallsSnapshot out; out.gpuRenderer = true;
     const auto window = wallWindow(request, &out.error);
     if (!window) { out.status = 422; return out; }
     const auto& w = *window;
@@ -319,7 +319,7 @@ heatmap_window::WallsSnapshot scanWalls(const WallScanRequest& request, const Sp
     std::vector<bool> recorded(size_t(w.endBucket - w.firstBucket), false);
     for (auto bin = w.firstBin; bin < w.endBin;) {
         const auto count = uint32_t(std::min<int64_t>(w.endBin - bin, 250));
-        std::map<std::pair<int64_t, bool>, heatmap_window::Wall> levels;
+        std::map<std::pair<int64_t, bool>, heatmap::Wall> levels;
         for (auto bucket = w.firstBucket; bucket < w.endBucket;) {
             const auto columns = uint32_t(std::min<int64_t>(64, w.endBucket - bucket));
             LabelRequest q{0, picture.version, live ? live->version : 0, request.tfMs, w.units, request.priceScale,
@@ -420,13 +420,13 @@ void HeatmapCellQuery::requestLabels(LabelRequest request, std::shared_ptr<const
 }
 void HeatmapCellQuery::scanWalls(WallScanRequest request, std::shared_ptr<const SpanSet> spans,
     std::shared_ptr<const LiveSnapshot> live, QObject* context,
-    std::function<void(heatmap_window::WallsSnapshot)> completion) {
+    std::function<void(heatmap::WallsSnapshot)> completion) {
     Q_ASSERT(QThread::currentThread() == thread());
     if (!context) return;
-    heatmap_window::WallError error;
+    heatmap::WallError error;
     const auto window = wallWindow(request, &error);
     if (!spans || !window || walls_.size() >= 8) {
-        heatmap_window::WallsSnapshot result;
+        heatmap::WallsSnapshot result;
         result.gpuRenderer = true;
         result.status = !window ? 422 : 503;
         result.error = error;
@@ -493,7 +493,7 @@ void HeatmapCellQuery::pump() {
         if (wall) {
             walls_.pop_front();
             if (task.context) QMetaObject::invokeMethod(task.context, [task] {
-                heatmap_window::WallsSnapshot result; result.gpuRenderer = true; result.status = 503;
+                heatmap::WallsSnapshot result; result.gpuRenderer = true; result.status = 503;
                 task.completion(result);
             }, Qt::QueuedConnection);
             QMetaObject::invokeMethod(this, &HeatmapCellQuery::pump, Qt::QueuedConnection);
@@ -503,7 +503,7 @@ void HeatmapCellQuery::pump() {
     if (!wall) fetcher_.want(chart_, wants, SpanRank{SpanTier::Label, 0}.fetchPriority());
     struct Result {
         std::shared_ptr<const LabelCells> labels;
-        heatmap_window::WallsSnapshot walls;
+        heatmap::WallsSnapshot walls;
         size_t bytes = 0;
     };
     auto result = std::make_shared<Result>();
@@ -569,7 +569,7 @@ void HeatmapCellQuery::pump() {
     } else if (wall && cache_.committedCpuBytes() + scratchReservation > cache_.cpuCeiling()) {
         walls_.pop_front();
         if (task.context) QMetaObject::invokeMethod(task.context, [task] {
-            heatmap_window::WallsSnapshot result; result.gpuRenderer = true; result.status = 503;
+            heatmap::WallsSnapshot result; result.gpuRenderer = true; result.status = 503;
             task.completion(result);
         }, Qt::QueuedConnection);
         cache_.tryCommitQuery(this, {}, retainedBytes_);

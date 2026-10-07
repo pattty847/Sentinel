@@ -712,10 +712,10 @@ QJsonObject HeatmapGpuLayer::state() const {
 }
 
 // Refreshes the controller's stats for the next read (they belong to its thread).
-void HeatmapGpuLayer::scanWalls(const heatmap_window::WallQuery& query,
-    std::function<void(heatmap_window::WallsSnapshot)> completion) {
+void HeatmapGpuLayer::scanWalls(const heatmap::WallQuery& query,
+    std::function<void(heatmap::WallsSnapshot)> completion) {
     if (!controller_ || !snapshot_ || !priceKnown_ || snapshot_->tfMs != tfMs_ || snapshot_->symbol != symbol_) {
-        heatmap_window::WallsSnapshot out; out.status = 503; out.gpuRenderer = true;
+        heatmap::WallsSnapshot out; out.status = 503; out.gpuRenderer = true;
         completion(std::move(out));
         return;
     }

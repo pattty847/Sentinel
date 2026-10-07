@@ -642,7 +642,8 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
 
     FrameContext frame = FrameContextBuilder::build(
         boundingRect(), window(),
-        m_heatmapStreamService->clock(), m_heatmapStreamService->timeAuthority(),
+        m_gpuHeatmap ? m_frameClock : m_heatmapStreamService->clock(),
+        m_gpuHeatmap ? m_timeAuthority : m_heatmapStreamService->timeAuthority(),
         m_heatmapStreamService->stream(), m_viewState.get(),
         m_heatmapLayerEnabled, m_footprintLayerEnabled, m_tpoLayerEnabled,
         m_heatmapStreamService->streamGeneration(),

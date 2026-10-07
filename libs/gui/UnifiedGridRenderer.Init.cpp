@@ -38,6 +38,8 @@ void UnifiedGridRenderer::init() {
         m_heatmapLabelPx = client.heatmap.labelPx;
     }
     qRegisterMetaType<Trade>("Trade");
+    m_frameClock.start();
+    m_timeAuthority.setActiveTimeframeMs(m_currentTimeframe_ms);
 
     m_viewState = std::make_unique<GridViewState>(this);
     // S6b: the per-chart GPU heatmap layer (inactive until the renderer is gpu).

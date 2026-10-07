@@ -686,8 +686,8 @@ void MainWindowGPU::setupGuiApiServer() {
                                                     [this](const AgentApi::ValidationResult& q) { return agentApiCandlesSnapshot(q); },
                                                     [this](int levels) { return agentApiBookSnapshot(levels); },
                                                     [this](qint64 windowMs, int limit) { return agentApiTradesSnapshot(windowMs, limit); },
-                                                    [this](const heatmap_window::WallQuery& query,
-                                                           std::function<void(heatmap_window::WallsSnapshot)> complete) {
+                                                    [this](const heatmap::WallQuery& query,
+                                                           std::function<void(heatmap::WallsSnapshot)> complete) {
                                                         auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
                                                         auto* processor = renderer ? renderer->getDataProcessor() : nullptr;
                                                         if (renderer && renderer->gpuHeatmapActive()) {
@@ -695,7 +695,7 @@ void MainWindowGPU::setupGuiApiServer() {
                                                             return;
                                                         }
                                                         if (!processor) {
-                                                            heatmap_window::WallsSnapshot unavailable;
+                                                            heatmap::WallsSnapshot unavailable;
                                                             unavailable.status = 503;
                                                             complete(std::move(unavailable));
                                                             return;

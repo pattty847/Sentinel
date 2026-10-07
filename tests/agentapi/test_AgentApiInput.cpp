@@ -41,7 +41,7 @@ TEST(AgentApiInput, HttpHandlerDeliversOneWheelToTheViewAndReturnsAnOperation) {
     GuiApiServer server(nullptr, &view, [&] { return state; }, [] { return AgentApi::ViewportSnapshot{}; },
         [](const auto &) { return std::optional<AgentApi::CandleSnapshot>{}; },
         [](int) { return AgentApi::BookSnapshot{}; }, [](qint64, int) { return AgentApi::TradesSnapshot{}; },
-        [](const auto &, auto complete) { complete(heatmap_window::WallsSnapshot{}); },
+        [](const auto &, auto complete) { complete(heatmap::WallsSnapshot{}); },
         [&](const QString &kind, const AgentApi::ControlBody &body) {
             EXPECT_EQ(kind, "input");
             return dispatcher.apply(&view, {0, 0, 600, 450}, body.input);
@@ -127,22 +127,22 @@ TEST(AgentApiInput, AnAbandonedDragIsReleasedAfterTheTimeout) {
 TEST(AgentApiWallsRoute, GpuReturns200ValidatesPeriodAndKeepsSelectionEpoch409) {
     AgentApi::StateSnapshot state; state.meta.symbol = "BTC-USD"; state.meta.selectionEpoch = 1;
     bool changeSelection = false;
-    auto wallError = heatmap_window::WallError::None;
+    auto wallError = heatmap::WallError::None;
     double expectedTick = 5;
     int scans = 0;
     QObject context;
     GuiApiServer server(nullptr, nullptr, [&] { return state; }, [] { return AgentApi::ViewportSnapshot{}; },
         [](const auto&) { return std::optional<AgentApi::CandleSnapshot>{}; },
         [](int) { return AgentApi::BookSnapshot{}; }, [](qint64, int) { return AgentApi::TradesSnapshot{}; },
-        [&](const heatmap_window::WallQuery& q, auto complete) {
+        [&](const heatmap::WallQuery& q, auto complete) {
             ++scans;
             EXPECT_EQ(q.startMs, 100); EXPECT_EQ(q.endMs, 200); EXPECT_EQ(q.tick, expectedTick);
             QMetaObject::invokeMethod(&context, [&, complete = std::move(complete)] {
                 if (changeSelection) ++state.meta.selectionEpoch;
-                heatmap_window::WallsSnapshot result; result.gpuRenderer = true; result.bandTick = 5;
+                heatmap::WallsSnapshot result; result.gpuRenderer = true; result.bandTick = 5;
                 result.recordedColumns = 1; result.rangeStartMs = 100; result.rangeEndMs = 200;
                 result.error = wallError;
-                if (wallError != heatmap_window::WallError::None) result.status = 422;
+                if (wallError != heatmap::WallError::None) result.status = 422;
                 complete(result);
             }, Qt::QueuedConnection);
         }, [](const QString&, const AgentApi::ControlBody&) { return AgentApi::ControlApply{}; },
@@ -166,16 +166,16 @@ TEST(AgentApiWallsRoute, GpuReturns200ValidatesPeriodAndKeepsSelectionEpoch409) 
         EXPECT_TRUE(rejected.startsWith("HTTP/1.1 422")) << rejected.toStdString();
     }
     EXPECT_EQ(scans, 1);
-    wallError = heatmap_window::WallError::BadTick; expectedTick = 1.234;
+    wallError = heatmap::WallError::BadTick; expectedTick = 1.234;
     const auto badTick = get("from_ms=100&to_ms=200&tick=1.234");
     EXPECT_TRUE(badTick.startsWith("HTTP/1.1 422"));
     EXPECT_TRUE(badTick.contains("bad_tick"));
     EXPECT_FALSE(badTick.contains("scan_limit"));
-    wallError = heatmap_window::WallError::ScanLimit; expectedTick = 5;
+    wallError = heatmap::WallError::ScanLimit; expectedTick = 5;
     const auto limited = get("from_ms=100&to_ms=200&tick=5");
     EXPECT_TRUE(limited.startsWith("HTTP/1.1 422"));
     EXPECT_TRUE(limited.contains("scan_limit"));
-    wallError = heatmap_window::WallError::None;
+    wallError = heatmap::WallError::None;
     changeSelection = true;
     const auto changed = get("from_ms=100&to_ms=200&tick=5");
     EXPECT_TRUE(changed.startsWith("HTTP/1.1 409")) << changed.toStdString();

@@ -82,7 +82,7 @@ TEST(AgentApiDocks, RouteListsAndFocusesARealDockWindow) {
     GuiApiServer server(&w.main, nullptr, [&] { return state; }, [] { return AgentApi::ViewportSnapshot{}; },
         [](const auto&) { return std::optional<AgentApi::CandleSnapshot>{}; },
         [](int) { return AgentApi::BookSnapshot{}; }, [](qint64, int) { return AgentApi::TradesSnapshot{}; },
-        [](const auto&, auto complete) { complete(heatmap_window::WallsSnapshot{}); },
+        [](const auto&, auto complete) { complete(heatmap::WallsSnapshot{}); },
         [&](const QString& kind, const AgentApi::ControlBody& body) {
             EXPECT_EQ(kind, "docks");
             AgentApi::ControlApply result;
@@ -223,7 +223,7 @@ TEST(AgentApiDocks, DockScreenshotGrabsWidgetAndReportsHiddenDock) {
     GuiApiServer server(&w.main, nullptr, [&] { return state; }, [] { return AgentApi::ViewportSnapshot{}; },
         [](const auto&) { return std::optional<AgentApi::CandleSnapshot>{}; },
         [](int) { return AgentApi::BookSnapshot{}; }, [](qint64, int) { return AgentApi::TradesSnapshot{}; },
-        [](const auto&, auto complete) { complete(heatmap_window::WallsSnapshot{}); },
+        [](const auto&, auto complete) { complete(heatmap::WallsSnapshot{}); },
         [](const auto&, const auto&) { return AgentApi::ControlApply{}; },
         [] { return std::pair<quint64, quint64>{0, 0}; }, [](quint64) {});
     server.setWidgetGrab([&](const QString& target, QString* error) {
@@ -280,7 +280,7 @@ TEST(AgentApiSymbol, OperationWaitsForActivationAndReportsRefusalOrTimeout) {
     GuiApiServer server(&window, nullptr, [&] { return state; }, [] { return AgentApi::ViewportSnapshot{}; },
         [](const auto&) { return std::optional<AgentApi::CandleSnapshot>{}; },
         [](int) { return AgentApi::BookSnapshot{}; }, [](qint64, int) { return AgentApi::TradesSnapshot{}; },
-        [](const auto&, auto complete) { complete(heatmap_window::WallsSnapshot{}); },
+        [](const auto&, auto complete) { complete(heatmap::WallsSnapshot{}); },
         [](const QString& kind, const AgentApi::ControlBody& body) {
             EXPECT_EQ(kind, "symbol");
             AgentApi::ControlApply result;

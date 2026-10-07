@@ -34,6 +34,7 @@
 #include "render/HeatmapStreamService.hpp"
 #include "render/FrameProfiler.hpp"
 #include "render/FrameContext.hpp"
+#include "render/TimeAuthority.hpp"
 // ── Overlay renderers (owned inline) ─────────────────────────────────────────
 #include "render/IOverlayRenderer.hpp"
 #include "render/HeatmapOverlayRenderer.hpp"
@@ -167,6 +168,17 @@ private:
     bool m_gpuSelfViewport = false; // the seed or follow-live is setting the viewport
     bool m_gpuLimitsDeferred = false; // a timeframe switch applies limits and view as one change
     bool m_chartSensitivityApplied = false;
+    // The chart's frame clock and timeframe cadence (FrameContext::time; the candle
+    // overlay's boundary sequence reads it through currentFrameContext()).
+    QElapsedTimer m_frameClock;
+    TimeAuthority m_timeAuthority;
+    // The first view (heatmap.initial_column_px / initial_price_pct): the time span is
+    // initial_column_px per column (16 columns min); the price window is
+    // initial_price_pct of kSeedBandRows rows at kSeedBandTick (the near layer's $1).
+    int m_initialColumnPx = 8;
+    int m_initialPricePct = 5;
+    static constexpr double kSeedBandTick = 1.0;
+    static constexpr int kSeedBandRows = 2048;
     HeatmapOverlayRenderer m_heatmapOverlay;
     QTimer* m_heatmapRenderTimer = nullptr;
     std::unique_ptr<HeatmapStreamService> m_heatmapStreamService;

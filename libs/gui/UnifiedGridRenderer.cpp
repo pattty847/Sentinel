@@ -634,6 +634,7 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
     setOldestHeatmapAvailableMs(0);
     const int64_t previousTf = m_currentTimeframe_ms;
     m_currentTimeframe_ms = timeframe_ms;
+    if (timeframe_ms > 0) m_timeAuthority.setActiveTimeframeMs(timeframe_ms);
     if (m_useGpuHeatmap && timeframe_ms > 0 && m_heatmapStreamService) {
       m_heatmapStreamService->handleTimeframeChange(static_cast<int64_t>(timeframe_ms),
                                                     m_heatmapOverlay);
@@ -1115,9 +1116,8 @@ void UnifiedGridRenderer::seedGpuViewport(double bestBid, double bestAsk) {
           std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(span) * m_autoScrollPaddingFrac));
     start = end - span;
   }
-  const auto* scroll = m_heatmapStreamService ? m_heatmapStreamService->autoScrollController() : nullptr;
-  const int pct = scroll ? scroll->initialPricePct() : 5;
-  const double full = recording_view::kFinestNativeTick * recording_view::kRows;
+  const int pct = m_initialPricePct;
+  const double full = kSeedBandTick * kSeedBandRows;
   const double span = pct > 0 && pct < 100 ? full * pct / 100.0 : full;
   const double mid = (bestBid + bestAsk) * 0.5;
   const double lo = mid - span * 0.5, hi = mid + span * 0.5;
@@ -1218,12 +1218,11 @@ void UnifiedGridRenderer::bootstrapGpuTimeView() {
   syncGpuView();
 }
 
-// The legacy first view's time span: initial_column_px per column (16 columns min).
+// The first view's time span: initial_column_px per column (16 columns min).
 qint64 UnifiedGridRenderer::gpuInitialSpanMs(double widthPx) const {
   const int64_t tf = std::max<int64_t>(1, m_currentTimeframe_ms);
-  const auto* scroll = m_heatmapStreamService ? m_heatmapStreamService->autoScrollController() : nullptr;
-  const int gridWidth = m_heatmapStreamService ? m_heatmapStreamService->gridWidth() : 5120;
-  return scroll ? scroll->initialSpanMs(widthPx, gridWidth, tf) : 256 * tf;
+  const double width = widthPx > 0.0 ? widthPx : 800.0;
+  return static_cast<int64_t>(std::max(16, static_cast<int>(width / m_initialColumnPx))) * tf;
 }
 
 void UnifiedGridRenderer::setGpuViewportSelf(qint64 start, qint64 end, double priceMin, double priceMax) {
@@ -1628,6 +1627,8 @@ void UnifiedGridRenderer::applyClientConfig(const ClientConfig &config) {
     m_heatmapSensitivityMin = config.heatmap.sensitivityMin;
     m_heatmapSensitivityMax = config.heatmap.sensitivityMax;
   }
+  m_initialColumnPx = std::clamp(config.heatmap.initialColumnPx, 2, 64);
+  m_initialPricePct = std::clamp(config.heatmap.initialPricePct, 0, 100);
   if (m_heatmapStreamService) {
     m_heatmapStreamService->setInitialColumnPx(config.heatmap.initialColumnPx);
     m_heatmapStreamService->setInitialPricePct(config.heatmap.initialPricePct);
