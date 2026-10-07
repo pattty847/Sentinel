@@ -44,6 +44,7 @@ Never without the owner present: R2, any deploy, cutovers, data deletion. Check 
 ## Pause point 2026-10-07 ~02:45 EDT (Claude usage limit)
 
 - A corrupt-skip LANDED `e8c416a` (96/96; Fable 2 rounds, majors fixed; 4 minors deferred, the damaged-index placeholder ordinal goes into the anchors rebase). Deploys after R2.
+- Volume profile fan + colours LANDED `2f4a718` (backlog; Sonnet PASS; GUI-only, takes effect with a new GUI build).
 - GUI auto-reconnect LANDED `b087329` (96/96; Sonnet 2 rounds). Visible change: the cold-start label reads Reconnecting. Takes effect when the owner's GUI runs a new build.
 - C bind-address LANDED `0688fe0` (95/95). It deploys after R2. After that deploy the server listens on 127.0.0.1 only; the owner's GUI uses 127.0.0.1, and remote clients set the Mac's Tailscale address. Deferred: a sentinel_stream_listening gauge.
 - D-b1: READY (lag metric = direct main-thread queue latency, Astra PASS). Lands after the R2 deploy; journal flip gated on the lag metric (engine baseline, then journal).
