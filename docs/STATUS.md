@@ -37,12 +37,12 @@ The owner's `ma-panel` (local plugin) shows live workflow state; a session start
 | Branch | Tip | State | Next |
 |---|---|---|---|
 | `lt-astra/chunk-speed` | `30be12c` (base) | Writer Codex `gpt-6-astra` high (sandboxed; conductor commits), thread `01a1145e-3c59-7001-85a1-a3b39fcf40a2`: slow 15m candle fill (owner: 2-3 s over a 2-3 week view; the server paged ONE_MINUTE bars, 60-90 sequential Coinbase calls). Owner decision 2026-10-06 (`_agent/DECISIONS.md`): native Coinbase timeframes, a server cache of closed bars, newest page first; journal-built 1m/1s candles parked for after D-b. Heatmap chunks second (owner OK'd spending Codex resets) | Review Claude Fable (high: GPU heatmap data path); land after measurements |
-| `lt-claude/roller-db1` | `8e79cac` | READY (Claude `opus` writer; 21/21 suites, 21/21 mutations; live gate pass, trades p95 +23 ms; journal CPU 1.4% vs 2.3%, RSS 83 vs 138 MB). Astra review r1 thread `01a11475-bfb1-7733-9bb5-dc1e0b70751c`, `.claude/acting-orchestrator/db1/review-r1.md` | Verdict; land only AFTER the R2 deploy |
+| `lt-claude/roller-db1` | `8e79cac` | Fix round 1 (Claude `opus` writer): Astra r1 2 major (a reseed request dropped by the throttle; recovery trades corrupt candle bars) + 1 minor (journal admission behind the legacy cap). Gate before the journal flip: measure the 7-book main-thread load live | Same Astra thread re-checks; land only AFTER the R2 deploy |
 
 Retired 2026-10-06 (owner): `lt-sol/label-style` and `lt-claude/heatmap-ab-isolation`, tips kept as tags `archive/<branch>`. Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orchestrator/`. The
 `.claude/worktrees/youthful-ishizaka-b0e889` (`60caa04`, branch `claude/exciting-hypatia-1c7a34`) is not part of this work; leave it alone.
 
-Runbook notes from D-b1 (2026-10-07): the GUI does not reconnect after a server restart, so the owner restarts the GUI after the R2 and D-b1 deploys; capture's fan-out allows 8 clients, one per product, and the recorder uses 7 (FM-207), so a second server (an agent instance, a future Pi) cannot follow all 7 products.
+Runbook notes from D-b1 (2026-10-07): the GUI does not reconnect after a server restart, so the owner restarts the GUI after the R2 and D-b1 deploys; capture's fan-out allows 8 clients, one per product, and the recorder uses 7 (FM-207; steady state is 7 fan-out clients, so the D-b runbook's `fanout_clients == 1` is wrong), so a second server (an agent instance, a future Pi) cannot follow all 7 products.
 
 ## Waiting on the owner
 
