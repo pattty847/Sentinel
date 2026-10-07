@@ -17,7 +17,7 @@ top-level `bind_address` key; a wrapped config places it under `server:`. An inv
 or an address not assigned to a local interface is validated in `apps/sentinel-server/main.cpp`
 before `SentinelServerApp` is constructed; it logs an error and exits with code 1 before recording
 or feeds start. Other stream listener failures (such as missing TLS files or a port already in use)
-are logged and leave the process recording with no client listener. A later listener start can retry.
+are logged and leave the process recording with no client listener. Nothing retries the listener: restart the service (`scripts/dev/deploy-runtime.sh restart server`) once the cause is fixed. Only the log shows the failure today.
 For remote clients, set this to the Mac's Tailscale address and use Tailscale for access control.
 For example, `"100.89.99.21"` is the owner's Mac tailnet address on 2026-10-07; it is an example,
 not a default. Explicit `"0.0.0.0"` or `"::"` allows all interfaces and logs
