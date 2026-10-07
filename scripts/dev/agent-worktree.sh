@@ -3,7 +3,7 @@
 #
 #   scripts/dev/agent-worktree.sh create <branch> [base-ref]   # default base: main
 #   scripts/dev/agent-worktree.sh remove <branch> [--force]
-#   scripts/dev/agent-worktree.sh land <branch> [--yes] [-m <message>]
+#   scripts/dev/agent-worktree.sh land <branch> [--yes] [-m <message>] [--trailer 'Key: value']...
 #   scripts/dev/agent-worktree.sh list
 #
 # land = the merge queue, one branch at a time: rebase the branch onto the
@@ -11,6 +11,9 @@
 # if the rebase changed any commit (git range-diff), refuse if main moved, then
 # merge --no-ff into main and remove the worktree. The rebased tip contains main,
 # so the tested tree is exactly what lands. Run it from the main checkout.
+# --trailer (repeatable) appends git trailers to the merge commit for the workflow
+# audit (AGENTS.md section 10); read them with
+# git log --first-parent main --format='%h %s%n%(trailers:only,unfold)'.
 #
 # Worktrees live on the external drive when it is mounted
 # (SENTINEL_WORKTREE_ROOT, default /Volumes/T7/sentinel-worktrees), otherwise
@@ -88,14 +91,20 @@ case "$cmd" in
         fi
         ;;
     land)
-        branch=${2:?usage: land <branch> [--yes] [-m <message>]}
+        branch=${2:?usage: land <branch> [--yes] [-m <message>] [--trailer 'Key: value']...}
         shift 2
         confirmed=0
         message="merge: $branch"
+        trailers=""
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 --yes) confirmed=1; shift ;;
                 -m) message=${2:?-m needs a message}; shift 2 ;;
+                --trailer)
+                    t=${2:?--trailer needs 'Key: value'}
+                    [[ "$t" =~ ^[A-Za-z][A-Za-z0-9-]*:\ [^[:cntrl:]]+$ ]] ||
+                        { echo "error: bad trailer '$t' (want 'Key: value' on one line)" >&2; exit 2; }
+                    trailers+="$t"$'\n'; shift 2 ;;
                 *) echo "error: unknown option $1" >&2; exit 2 ;;
             esac
         done
@@ -135,7 +144,11 @@ case "$cmd" in
         fi
         [[ "$(git -C "$REPO" rev-parse main)" == "$main_tip" ]] ||
             { echo "error: main moved during land; rerun land" >&2; exit 1; }
-        git -C "$REPO" merge --no-ff -q "$branch" -m "$message"
+        if [[ -n "$trailers" ]]; then
+            git -C "$REPO" merge --no-ff -q "$branch" -m "$message" -m "${trailers%$'\n'}"
+        else
+            git -C "$REPO" merge --no-ff -q "$branch" -m "$message"
+        fi
         echo "landed $branch as $(git -C "$REPO" rev-parse --short HEAD)"
         "$0" remove "$branch"
         echo "queue rule: rebase and retest every other READY branch before it lands (run land on each)."
@@ -144,7 +157,7 @@ case "$cmd" in
         git -C "$REPO" worktree list
         ;;
     *)
-        sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac
