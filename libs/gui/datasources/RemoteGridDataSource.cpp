@@ -64,9 +64,6 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
     : IGridDataSource(parent)
     , m_client(host.toStdString(), port.toStdString(), caFile.toStdString())
 {
-    qRegisterMetaType<HeatmapHistoryColumn>("HeatmapHistoryColumn");
-    qRegisterMetaType<QVector<HeatmapHistoryColumn>>("QVector<HeatmapHistoryColumn>");
-    qRegisterMetaType<HeatmapSlice>("HeatmapSlice");
     qRegisterMetaType<FootprintSlice>("FootprintSlice");
     qRegisterMetaType<TpoSlice>("TpoSlice");
     qRegisterMetaType<BookDelta>("BookDelta");
@@ -95,8 +92,6 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
     connect(&m_bookSnapshotTimer, &QTimer::timeout, this, [this] {
         processBookSnapshotDeadlines(QDateTime::currentMSecsSinceEpoch());
     });
-    connect(&m_client, &SentinelStreamClient::heatmapSliceReceived,
-            this, &RemoteGridDataSource::onHeatmapSliceReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::footprintSliceReceived,
             this, &RemoteGridDataSource::onFootprintSliceReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::tpoSliceReceived,
@@ -108,16 +103,6 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             this, &IGridDataSource::tpoHistoryFailed, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::volumeProfileSliceReceived,
             this, &RemoteGridDataSource::onVolumeProfileSliceReceived, Qt::QueuedConnection);
-    connect(&m_client, &SentinelStreamClient::heatmapHistoryReceived,
-            this, &RemoteGridDataSource::onHeatmapHistoryReceived, Qt::QueuedConnection);
-    connect(&m_client, &SentinelStreamClient::recordingViewError,
-            this, &IGridDataSource::recordingViewError, Qt::QueuedConnection);
-    connect(&m_client, &SentinelStreamClient::recordingHeatmapLiveReceived,
-            this, &IGridDataSource::recordingHeatmapLiveReceived, Qt::QueuedConnection);
-    connect(&m_client, &SentinelStreamClient::recordingHeatmapHistoryReceived,
-            this, &IGridDataSource::recordingHeatmapHistoryReceived, Qt::QueuedConnection);
-    connect(&m_client, &SentinelStreamClient::recordingHeatmapHistoryError,
-            this, &IGridDataSource::recordingHeatmapHistoryError, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::candleBarUpdateReceived,
             this, &RemoteGridDataSource::onCandleBarUpdateReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::candleBarClosedReceived,
@@ -270,29 +255,6 @@ void RemoteGridDataSource::processBookSnapshotDeadlines(qint64 nowMs) {
     }
     if (std::all_of(m_pendingBookSnapshots.begin(), m_pendingBookSnapshots.end(),
         [](const auto& entry) { return entry.second.stale; })) m_bookSnapshotTimer.stop();
-}
-
-void RemoteGridDataSource::requestHeatmapHistory(const QString& symbol,
-                                                 int64_t timeframeMs,
-                                                 int64_t endTimeMs,
-                                                 int count) {
-    if (!symbolPermitted(symbol.toStdString(), "heatmap history")) return;
-    m_client.requestHeatmapHistory(symbol.toStdString(), timeframeMs, endTimeMs, count);
-}
-
-void RemoteGridDataSource::registerRecordingView(const recording::LiveView& view) {
-    if (!symbolPermitted(view.symbol, "recording view")) return;
-    m_client.registerRecordingView(view);
-}
-
-void RemoteGridDataSource::releaseRecordingView(const recording::LiveView& view) {
-    m_client.releaseRecordingView(view.symbol);
-}
-
-void RemoteGridDataSource::requestRecordingHeatmapHistory(
-    const protocol::recordingwire::Request& request) {
-    if (!symbolPermitted(request.symbol, "recording history")) return;
-    m_client.requestRecordingHeatmapHistory(request);
 }
 
 void RemoteGridDataSource::requestFootprintHistory(const QString& symbol,
@@ -527,11 +489,6 @@ void RemoteGridDataSource::onL2UpdateReceivedAt(const QString& productId,
     }
 }
 
-void RemoteGridDataSource::onHeatmapSliceReceived(const HeatmapSlice& slice) {
-    m_marketHealth.heatmapReceived(slice.symbol, QDateTime::currentMSecsSinceEpoch());
-    emit heatmapSliceReceived(slice);
-}
-
 void RemoteGridDataSource::onFootprintSliceReceived(const FootprintSlice& slice) {
     emit footprintSliceReceived(slice);
 }
@@ -542,31 +499,6 @@ void RemoteGridDataSource::onTpoSliceReceived(const TpoSlice& slice) {
 
 void RemoteGridDataSource::onVolumeProfileSliceReceived(const VolumeProfileSlice& slice) {
     emit volumeProfileSliceReceived(slice);
-}
-
-void RemoteGridDataSource::onHeatmapHistoryReceived(const QString& symbol,
-                                                    int64_t timeframeMs,
-                                                    int gridWidth,
-                                                    int gridHeight,
-                                                    int64_t requestEndMs,
-                                                    int64_t oldestAvailableMs,
-                                                    const QVector<SentinelStreamClient::HeatmapHistoryColumn>& columns) {
-    QVector<HeatmapHistoryColumn> converted;
-    converted.reserve(columns.size());
-    for (const auto& col : columns) {
-        HeatmapHistoryColumn out;
-        out.bucketStartMs = col.bucketStartMs;
-        out.bucketEndMs = col.bucketEndMs;
-        out.minPrice = col.minPrice;
-        out.maxPrice = col.maxPrice;
-        out.tickSize = col.tickSize;
-        out.intensity = col.intensity;
-        out.liquidity = col.liquidity;
-        out.liquidityScale = col.liquidityScale;
-        converted.push_back(std::move(out));
-    }
-    emit heatmapHistoryReceived(symbol, timeframeMs, gridWidth, gridHeight,
-                                requestEndMs, oldestAvailableMs, converted);
 }
 
 void RemoteGridDataSource::onCandleBarUpdateReceived(const QString& symbol,

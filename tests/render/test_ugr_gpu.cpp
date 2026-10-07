@@ -17,8 +17,6 @@
 #include "render/CandlestickBatched.hpp"
 #include "render/CandlestickOverlayItem.hpp"
 #include "render/DataProcessor.hpp"
-#include "render/HeatmapIntensityNode.hpp"
-#include "render/HeatmapOverlayRenderer.hpp"
 #include "render/LabTextItem.hpp"
 #include "render/PaperTradeOverlayModel.hpp"
 #include "render/PaperTradeOverlayRenderer.hpp"
@@ -114,10 +112,7 @@ protected:
         scene.reset();
     }
     heatmap::gpu::HeatmapGpuLayer &layer() const { return *ugr->gpuHeatmapLayer(); }
-    void gpuOn() {
-        ugr->setHeatmapRenderer("gpu");
-        ugr->setViewport(viewLo, viewHi, 99'900, 100'300);
-    }
+    void gpuOn() { ugr->setViewport(viewLo, viewHi, 99'900, 100'300); }
     // Renders frames (offscreen rendering emits no frameSwapped: ask for each)
     // until done() holds or `ms` pass; onFrame runs after every frame.
     template <class Done, class OnFrame>
@@ -175,9 +170,8 @@ protected:
         return double(ugr->getViewState()->getVisibleTimeEnd() - ugr->getViewState()->getVisibleTimeStart());
     }
     double priceSpan() const { return ugr->getViewState()->getMaxPrice() - ugr->getViewState()->getMinPrice(); }
-    void recordingMode() {
+    void initialPricePct5() {
         ClientConfig config;
-        config.heatmap.source = "recording";
         config.heatmap.initialPricePct = 5;
         ugr->applyClientConfig(config);
     }
@@ -239,7 +233,6 @@ TEST_F(UgrGpu, SettlesOnTheProductionPath) {
 // the heatmap's column edges are where the mapping puts the timeframe boundaries,
 // and a candle's body is centred in its heatmap column (pixel column check).
 TEST_F(UgrGpu, CandlesAlignWithHeatmapColumns) {
-    ugr->setHeatmapRenderer("gpu");
     // 40 columns over 640 px, starting a third of a column in (not minute-aligned).
     const int64_t lo = viewLo + minute / 3;
     ugr->setViewport(lo, lo + 40 * minute, 99'900, 100'300);
@@ -405,19 +398,6 @@ TEST_F(UgrGpu, TimeframeSwitchUnderFollowLiveIsOneViewportChange) {
     ASSERT_TRUE(pump(30'000, [&] { return layer().settled(); }, [] {})) << error.toStdString();
 }
 
-// Legacy mode is not part of the gpu switch: setTimeframe leaves its viewport alone
-// (its stream service resets the span later, from the new timeframe's data).
-TEST_F(UgrGpu, LegacyTimeframeSwitchLeavesTheViewport) {
-    ugr->setViewport(viewLo, viewHi, 99'900, 100'300);
-    const auto *view = ugr->getViewState();
-    const uint64_t before = view->getViewportVersion();
-    ugr->setTimeframe(int(5 * minute));
-    EXPECT_EQ(view->getViewportVersion(), before);
-    EXPECT_EQ(view->getVisibleTimeStart(), viewLo);
-    EXPECT_EQ(view->getVisibleTimeEnd(), viewHi);
-    EXPECT_EQ(view->maxTimeSpanMs(), 0.0) << "no gpu limits in legacy mode";
-}
-
 // FM-104 on the main chart: the chart moves to a new scene (a new QRhi); the node
 // reports the loss, the controller rebuilds the released images, it settles again.
 TEST_F(UgrGpu, ComesBackAfterTheQRhiIsRecreated) {
@@ -465,36 +445,29 @@ TEST_F(UgrGpu, TpoOverlayDrawsOnTopOfTheGpuRoot) {
     EXPECT_GE(root->childCount(), 2) << "overlays follow the tile node";
 }
 
-// The renderer flips at runtime both ways: gpu mutes the legacy band stream and
-// draws the tile node with the clamps; legacy restores the HeatmapIntensityNode
-// root, unmutes the stream, drops the clamps and destroys the controller.
-TEST_F(UgrGpu, RendererFlipsBothWays) {
-    auto processorEnabled = [&] {
-        bool enabled = false;
-        QMetaObject::invokeMethod(ugr->getDataProcessor(), [&] { enabled = ugr->getDataProcessor()->heatmapEnabled(); },
-                                  Qt::BlockingQueuedConnection);
-        return enabled;
-    };
-    ugr->setViewport(viewLo, viewHi, 99'900, 100'300);
+// S8a: the chart has exactly one root path, the GPU one, from its first frame (no
+// renderer selection, no legacy HeatmapIntensityNode root): a plain node whose first
+// child gates the tile node. It is kept across views and settles; detaching the
+// service ends the controller and the root stays.
+TEST_F(UgrGpu, TheChartHasExactlyOneRootPath) {
     ASSERT_TRUE(frames(3)) << error.toStdString();
-    ASSERT_TRUE(paintRoot(ugr));
-    EXPECT_EQ(paintRoot(ugr)->type(), QSGNode::GeometryNodeType) << "legacy root";
-    EXPECT_TRUE(processorEnabled());
-    EXPECT_EQ(ugr->getViewState()->maxTimeSpanMs(), 0.0);
-    ugr->setHeatmapRenderer("gpu");
+    QSGNode *root = paintRoot(ugr);
+    ASSERT_TRUE(root) << "a root from the first frame, before any viewport";
+    EXPECT_EQ(root->type(), QSGNode::BasicNodeType);
+    ASSERT_TRUE(root->firstChild());
+    EXPECT_EQ(root->firstChild()->type(), QSGNode::OpacityNodeType);
+    EXPECT_EQ(root->firstChild()->firstChild()->type(), QSGNode::RenderNodeType);
+    gpuOn();
     ASSERT_TRUE(settle()) << error.toStdString();
-    EXPECT_EQ(paintRoot(ugr)->type(), QSGNode::BasicNodeType);
-    EXPECT_FALSE(processorEnabled()) << "legacy band stream muted";
-    EXPECT_GT(ugr->getViewState()->maxTimeSpanMs(), 0.0);
+    EXPECT_EQ(paintRoot(ugr), root) << "one root, never replaced";
+    EXPECT_GT(ugr->getViewState()->maxTimeSpanMs(), 0.0) << "the GPU clamps apply";
     EXPECT_EQ(lab::LabData::instance().service().controllerCount(), 1u);
-    ugr->setHeatmapRenderer("legacy");
-    ASSERT_TRUE(frames(3)) << error.toStdString();
-    EXPECT_EQ(paintRoot(ugr)->type(), QSGNode::GeometryNodeType) << "legacy root again";
-    EXPECT_TRUE(processorEnabled());
-    EXPECT_EQ(ugr->getViewState()->maxTimeSpanMs(), 0.0);
+    ugr->setHeatmapService(nullptr);
     EXPECT_EQ(lab::LabData::instance().service().controllerCount(), 0u);
-    ugr->setHeatmapRenderer("gpu");
-    ASSERT_TRUE(settle()) << error.toStdString() << " (second flip)";
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    EXPECT_EQ(paintRoot(ugr), root);
+    ugr->setHeatmapService(&lab::LabData::instance().service());
+    ASSERT_TRUE(settle()) << error.toStdString() << " (service attached again)";
 }
 
 // Spec rules 1, 2 and 9 through the chart (port of LabItemTest.
@@ -567,42 +540,32 @@ TEST_F(UgrGpu, TheServiceMayDieBeforeTheChart) {
     ASSERT_FALSE(scene->renderFrame(&error).isNull());
 }
 
-// Review blocker 2: a book-seeded GPU start leaves the legacy stream's bootstrap
-// and initial price centring pending; flipping to legacy must adopt the view,
-// not re-apply initial_price_pct on the next book or trade.
-TEST_F(UgrGpu, FlipToLegacyKeepsABookSeededView) {
-    recordingMode();
-    ugr->setHeatmapRenderer("gpu");
+// The first price window from the book top (seedGpuViewport): initial_price_pct of
+// a 2048-row band at $1 (the constants S8a moved from RecordingBandPolicy); a later
+// book or trade does not replace it. A symbol switch reseeds from the new book top.
+TEST_F(UgrGpu, BookTopSeedsTheFirstPriceWindow) {
+    initialPricePct5();
     ugr->setLiveBookTop(100'100, 100'101);
     ASSERT_TRUE(ugr->getViewState()->isTimeWindowValid());
     const qint64 start = ugr->getViewState()->getVisibleTimeStart(), end = ugr->getViewState()->getVisibleTimeEnd();
     EXPECT_NEAR(priceSpan(), 102.4, 1e-9) << "the seed: 5% of a 2048-row $1 band";
     ASSERT_TRUE(frames(3)) << error.toStdString();
-    ugr->setHeatmapRenderer("legacy");
+    const double lo = ugr->getViewState()->getMinPrice();
     ugr->setLiveBookTop(100'120, 100'121);
     Trade trade{};
     trade.product_id = "BTC-USD";
     trade.price = 100'125;
     ugr->onTradeReceived(trade);
     ASSERT_TRUE(frames(3)) << error.toStdString();
-    EXPECT_NEAR(priceSpan(), 102.4, 1e-9) << "the legacy resume adopted the view";
+    EXPECT_NEAR(priceSpan(), 102.4, 1e-9);
+    EXPECT_DOUBLE_EQ(ugr->getViewState()->getMinPrice(), lo) << "a later book or trade does not move it";
     EXPECT_EQ(ugr->getViewState()->getVisibleTimeStart(), start);
     EXPECT_EQ(ugr->getViewState()->getVisibleTimeEnd(), end);
-}
-TEST_F(UgrGpu, FlipToLegacyAfterAGpuSymbolSwitchKeepsTheView) {
-    recordingMode();
-    ugr->setHeatmapRenderer("gpu");
-    ugr->setLiveBookTop(100'100, 100'101);
-    ugr->setActiveSymbol("ETH-USD"); // resets the legacy price centring while gpu draws
+    ugr->setActiveSymbol("ETH-USD");
     ugr->setLiveBookTop(3'000, 3'000.5);
-    const double lo = ugr->getViewState()->getMinPrice();
     EXPECT_NEAR(priceSpan(), 102.4, 1e-9);
-    EXPECT_LT(lo, 3'000);
-    ugr->setHeatmapRenderer("legacy");
-    ugr->setLiveBookTop(3'010, 3'010.5);
-    ASSERT_TRUE(frames(3)) << error.toStdString();
-    EXPECT_NEAR(priceSpan(), 102.4, 1e-9);
-    EXPECT_DOUBLE_EQ(ugr->getViewState()->getMinPrice(), lo);
+    EXPECT_LT(ugr->getViewState()->getMinPrice(), 3'000);
+    EXPECT_GT(ugr->getViewState()->getMaxPrice(), 3'000.5);
 }
 
 // Review major 3: the chart schedules its own frames while the node has work
@@ -1140,13 +1103,6 @@ TEST_F(UgrGpu, ViewportRequestsResolveFlagsAndCommitOnce) {
     EXPECT_EQ(view->getMinPrice(), lo0);
     ugr->setAutoPriceScale(true);
     EXPECT_TRUE(ugr->autoPriceScale()) << "the toggle arms while there is nothing to fit";
-    // The legacy renderer has no auto price scale.
-    ugr->setActiveSymbol("BTC-USD");
-    ugr->setHeatmapRenderer("legacy");
-    Request on;
-    on.autoScale = true;
-    EXPECT_EQ(ugr->applyViewportRequest(on), QString("auto_scale_unavailable"));
-    EXPECT_FALSE(ugr->autoPriceScale());
     ugr->setCandleBuffer(nullptr);
 }
 
@@ -1373,7 +1329,6 @@ TEST_F(UgrGpu, TimeAxisResetGoesToTheDefaultView) {
 // the view start and ends inside it is drawn (it was dropped: the slice selected by bar
 // start, and the filter cut at the view start).
 TEST_F(UgrGpu, CandleUnderTheLeftEdgeIsDrawn) {
-    ugr->setHeatmapRenderer("gpu");
     ugr->setHeatmapLayerEnabled(false); // black background: only the candles draw
     // 40 columns of 16 px from the middle of a candle: half of the first is visible.
     const int64_t lo = viewLo + minute / 2;
@@ -1403,7 +1358,6 @@ TEST_F(UgrGpu, CandleUnderTheLeftEdgeIsDrawn) {
 // Review major 5: recording availability only (no book, no trade, no API
 // viewport): a time-only view from availability, the price from decoded data.
 TEST_F(UgrGpu, ColdStartFromTheRecordingAlone) {
-    ugr->setHeatmapRenderer("gpu");
     ASSERT_TRUE(pumpOnRequest(15'000, [&] { return layer().settled(); })) << "never drew: " << error.toStdString();
     EXPECT_GT(ugr->getViewState()->getMinPrice(), 99'000);
     EXPECT_LT(ugr->getViewState()->getMaxPrice(), 101'000);
@@ -1423,71 +1377,6 @@ TEST_F(UgrGpu, ToneChangesReachTheGpuPicture) {
     for (int y = 2; y < 320; y += 4)
         for (int x = 2; x < 640; x += 4) changed += image.pixel(x, y) != before.pixel(x, y);
     EXPECT_GT(changed, 1000) << "the tone mapping changed the picture";
-}
-
-// Owner decision 4: the legacy renderer draws the chart preset from the same
-// palette image with heatmap_intensity.frag; its colour for a recording code is
-// the reference HeatmapTileNode matches (PresetPaletteMatchesTheLegacyColourForEachCode).
-class LegacyHost : public QQuickItem {
-public:
-    LegacyHost() { setFlag(ItemHasContents, true); }
-    HeatmapOverlayRenderer overlay;
-    std::vector<uint16_t> codes; // one column of rows, top first
-    float lo = 0, hi = 1;
-    QSGNode *updatePaintNode(QSGNode *old, UpdatePaintNodeData *) override {
-        auto *node = old ? static_cast<HeatmapIntensityNode *>(old) : new HeatmapIntensityNode();
-        overlay.setGridDimensions(1, int(codes.size()));
-        overlay.setIntensityBytesPerCell(2);
-        std::vector<HeatmapOverlayRenderer::PendingUpload> uploads;
-        QByteArray column(int(codes.size()) * 2, 0);
-        std::memcpy(column.data(), codes.data(), size_t(column.size()));
-        uploads.push_back({0, column});
-        const QRectF r(0, 0, width(), height());
-        overlay.applyToNode(window(), node, true, 1.05f, 1.15f, 0.01f, true, 0.0f, r, QRectF(0, 0, 1, codes.size()),
-                            uploads);
-        node->setValueMode(true, lo, hi);
-        node->setRowGrouping(1, 0);
-        return node;
-    }
-};
-TEST(UgrPalette, LegacyRendererDrawsThePresetAsTheSharedReference) {
-    if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty()) GTEST_SKIP() << "GPU case skipped: " << why.toStdString();
-    lab::OffscreenQuick quick;
-    QString error;
-    ASSERT_TRUE(quick.create(QSize(40, 160), &error)) << error.toStdString();
-    quick.window()->setColor(Qt::black);
-    auto *host = new LegacyHost;
-    host->setParentItem(quick.window()->contentItem());
-    host->setSize(QSizeF(40, 160));
-    const auto window = heatmap::gpu::codeWindow(0.01, 5);
-    host->lo = window.floor;
-    host->hi = window.floor + window.range;
-    // Eight rows: bid and ask codes across the window.
-    for (const double size : {0.02, 0.2, 1.0, 4.0})
-        for (const bool ask : {false, true}) host->codes.push_back(uint16_t(recording::encodeSize(size) | (ask ? 0x8000 : 0)));
-    for (const char *preset : {"Fire", "Matrix"}) {
-        const auto gradients = *heatmap::gpu::presetGradients(preset);
-        host->overlay.setBidGradient(HeatmapOverlayRenderer::toColorStops(gradients.bid));
-        host->overlay.setAskGradient(HeatmapOverlayRenderer::toColorStops(gradients.ask));
-        host->overlay.setPaletteGamma(gradients.gamma);
-        host->update();
-        QImage image;
-        for (int i = 0; i < 3; ++i) {
-            host->update();
-            image = quick.renderFrame(&error);
-            ASSERT_FALSE(image.isNull()) << error.toStdString();
-        }
-        const auto palette = heatmap::gpu::makePalette(gradients, {1.05f, 1.15f, 0.01f});
-        for (size_t row = 0; row < host->codes.size(); ++row) {
-            const auto want = heatmap::gpu::legacyRecordingColor(host->codes[row], window, *palette);
-            const QColor got = image.pixelColor(20, int(row * 20 + 10));
-            EXPECT_NEAR(got.red(), want[0] * 255, 3) << preset << " row " << row;
-            EXPECT_NEAR(got.green(), want[1] * 255, 3) << preset << " row " << row;
-            EXPECT_NEAR(got.blue(), want[2] * 255, 3) << preset << " row " << row;
-        }
-    }
-    delete host;
-    quick.renderFrame(&error);
 }
 
 // The S6a input route on the real chart QML (DepthChartView.qml): a synthesized
@@ -1510,7 +1399,6 @@ TEST(UgrInput, InputRouteReachesTheChartAndAxisAreasOncePerWheel) {
     ugr->setHeatmapService(&lab::LabData::instance().service());
     ugr->setActiveSymbol("BTC-USD");
     ugr->setTimeframe(int(minute));
-    ugr->setHeatmapRenderer("gpu");
     const int64_t lo = epoch + kHourMs;
     ugr->setViewport(lo, lo + 60 * minute, 99'900, 100'300);
     QCoreApplication::processEvents();
@@ -1566,7 +1454,7 @@ TEST(UgrInput, InputRouteReachesTheChartAndAxisAreasOncePerWheel) {
     // The "A" toggle in the axis corner: a click turns it on (fitted), another off.
     auto *button = view.rootObject()->findChild<QQuickItem *>("autoPriceScaleButton");
     ASSERT_TRUE(button);
-    EXPECT_TRUE(button->isVisible()) << "shown with the gpu renderer";
+    EXPECT_TRUE(button->isVisible()) << "always shown (one renderer)";
     auto click = [&] {
         const QPointF at = button->mapToScene(QPointF(button->width() / 2, button->height() / 2));
         for (auto type : {QEvent::MouseButtonPress, QEvent::MouseButtonRelease}) {
@@ -1601,7 +1489,7 @@ TEST(UgrInput, InputRouteReachesTheChartAndAxisAreasOncePerWheel) {
               epoch + 4 * kHourMs + std::max<int64_t>(minute, int64_t(span * 0.08))) << "the live edge, padded";
     EXPECT_LT(span, 0.5 * timeSpanBefore) << "the default span, not the clamped zoom-out";
     ugr->setCandleBuffer(nullptr);
-    ugr->setHeatmapRenderer("legacy"); // its controller goes now
+    ugr->setHeatmapService(nullptr); // its controller goes now
 }
 // Review item 7 (pre-existing): DepthChartView's root `symbol` property shadowed the
 // context property QmlSceneController set, so the candle overlay and the paper-trade

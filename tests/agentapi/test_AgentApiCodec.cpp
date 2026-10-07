@@ -203,7 +203,7 @@ TEST(AgentApiWalls, GpuPeriodTickAndPersistenceMetadata) {
         EXPECT_EQ(parse(bad).status, 422) << bad;
     EXPECT_EQ(parse("from_ms=100&startMs=100&to_ms=200").status, 400);
     WallsSnapshot snapshot;
-    snapshot.data.gpuRenderer = true; snapshot.data.bandTick = 5;
+    snapshot.data.bandTick = 5;
     snapshot.data.rangeStartMs = 100; snapshot.data.rangeEndMs = 200;
     snapshot.data.rangePriceMin = 90; snapshot.data.rangePriceMax = 110;
     snapshot.data.unknownRows = true;
@@ -215,8 +215,6 @@ TEST(AgentApiWalls, GpuPeriodTickAndPersistenceMetadata) {
     const auto wall = data["walls"].toArray().first().toObject();
     EXPECT_EQ(wall["rank"], 1); EXPECT_EQ(wall["columns"], 2); EXPECT_EQ(wall["meanQty"], 1.5);
     EXPECT_TRUE(wall["forming"].toBool());
-    snapshot.data.gpuRenderer = false;
-    EXPECT_FALSE(wallsJson(snapshot)["data"].toObject().contains("renderer"));
 }
 TEST(AgentApiCodec, EnvelopeAndUnknowns) {
     StateSnapshot s;
@@ -238,6 +236,13 @@ TEST(AgentApiCodec, EnvelopeAndUnknowns) {
     EXPECT_TRUE(heatmap.value("configuredTimeframesMs").isNull());
     EXPECT_EQ(heatmap.value("servedTimeframesMs").toArray().size(), 1);
     EXPECT_TRUE(data.value("lastReceivedAtMs").toObject().value("trades").isNull());
+    for (const char* overlay : {"footprint", "tpo", "volumeProfile"})
+        EXPECT_TRUE(data.value("lastReceivedAtMs").toObject().value(overlay).isNull()) << overlay;
+    s.footprintReceivedAtMs = 11; s.tpoReceivedAtMs = 12; s.volumeProfileReceivedAtMs = 13;
+    const auto received = stateJson(s).value("data").toObject().value("lastReceivedAtMs").toObject();
+    EXPECT_EQ(received.value("footprint").toInteger(), 11);
+    EXPECT_EQ(received.value("tpo").toInteger(), 12);
+    EXPECT_EQ(received.value("volumeProfile").toInteger(), 13);
     EXPECT_TRUE(data.value("layers").toObject().value("heatmap").isNull());
     EXPECT_TRUE(data.value("render").toObject().value("frameP50Ms").isNull());
     EXPECT_TRUE(data.value("lastSubscriptionRefusal").isNull());

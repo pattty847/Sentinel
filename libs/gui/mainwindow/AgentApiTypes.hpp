@@ -101,6 +101,7 @@ struct StateSnapshot {
     std::optional<qint64> candlesReceivedAtMs;
     std::optional<qint64> bookReceivedAtMs;
     std::optional<qint64> tradesReceivedAtMs;
+    std::optional<qint64> footprintReceivedAtMs, tpoReceivedAtMs, volumeProfileReceivedAtMs;
     std::optional<bool> heatmapLayer;
     std::optional<bool> candlesLayer;
     std::optional<bool> footprintLayer;

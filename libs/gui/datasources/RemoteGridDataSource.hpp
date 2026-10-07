@@ -17,13 +17,6 @@ public:
 
     void subscribe(const QString& symbol) override;
     void unsubscribe(const QString& symbol) override;
-    void requestHeatmapHistory(const QString& symbol,
-                               int64_t timeframeMs,
-                               int64_t endTimeMs,
-                               int count) override;
-    void registerRecordingView(const recording::LiveView& view) override;
-    void releaseRecordingView(const recording::LiveView& view) override;
-    void requestRecordingHeatmapHistory(const protocol::recordingwire::Request& request) override;
     void requestFootprintHistory(const QString& symbol,
                                  int64_t timeframeMs,
                                  int64_t endTimeMs,
@@ -54,17 +47,9 @@ private slots:
                             quint64 deliveryGeneration, const QString& status, uint64_t bookVersion);
     void onL2UpdateReceived(const QString& productId, const std::vector<BookLevelUpdate>& updates,
                             double tickSize, quint64 deliveryGeneration, uint64_t bookVersion = 0);
-    void onHeatmapSliceReceived(const HeatmapSlice& slice);
     void onFootprintSliceReceived(const FootprintSlice& slice);
     void onTpoSliceReceived(const TpoSlice& slice);
     void onVolumeProfileSliceReceived(const VolumeProfileSlice& slice);
-    void onHeatmapHistoryReceived(const QString& symbol,
-                                  int64_t timeframeMs,
-                                  int gridWidth,
-                                  int gridHeight,
-                                  int64_t requestEndMs,
-                                  int64_t oldestAvailableMs,
-                                  const QVector<SentinelStreamClient::HeatmapHistoryColumn>& columns);
     void onCandleBarUpdateReceived(const QString& symbol,
                                    int64_t timeframeSec,
                                    int64_t bucketStartMs,

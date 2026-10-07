@@ -301,7 +301,7 @@ std::shared_ptr<const SpanSet> wallsPicture(const WallScanRequest& r, const Span
 
 heatmap::WallsSnapshot scanWalls(const WallScanRequest& request, const SpanSet& picture,
     const LiveSnapshot* live, ChunkStore& store, LabelWindowBuilder& builder, const HeldChunks& held) {
-    heatmap::WallsSnapshot out; out.gpuRenderer = true;
+    heatmap::WallsSnapshot out;
     const auto window = wallWindow(request, &out.error);
     if (!window) { out.status = 422; return out; }
     const auto& w = *window;
@@ -427,7 +427,6 @@ void HeatmapCellQuery::scanWalls(WallScanRequest request, std::shared_ptr<const 
     const auto window = wallWindow(request, &error);
     if (!spans || !window || walls_.size() >= 8) {
         heatmap::WallsSnapshot result;
-        result.gpuRenderer = true;
         result.status = !window ? 422 : 503;
         result.error = error;
         QMetaObject::invokeMethod(context, [completion = std::move(completion), result] { completion(result); }, Qt::QueuedConnection);
@@ -493,7 +492,7 @@ void HeatmapCellQuery::pump() {
         if (wall) {
             walls_.pop_front();
             if (task.context) QMetaObject::invokeMethod(task.context, [task] {
-                heatmap::WallsSnapshot result; result.gpuRenderer = true; result.status = 503;
+                heatmap::WallsSnapshot result; result.status = 503;
                 task.completion(result);
             }, Qt::QueuedConnection);
             QMetaObject::invokeMethod(this, &HeatmapCellQuery::pump, Qt::QueuedConnection);
@@ -569,7 +568,7 @@ void HeatmapCellQuery::pump() {
     } else if (wall && cache_.committedCpuBytes() + scratchReservation > cache_.cpuCeiling()) {
         walls_.pop_front();
         if (task.context) QMetaObject::invokeMethod(task.context, [task] {
-            heatmap::WallsSnapshot result; result.gpuRenderer = true; result.status = 503;
+            heatmap::WallsSnapshot result; result.status = 503;
             task.completion(result);
         }, Qt::QueuedConnection);
         cache_.tryCommitQuery(this, {}, retainedBytes_);

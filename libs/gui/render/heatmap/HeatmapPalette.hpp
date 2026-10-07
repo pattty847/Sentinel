@@ -1,9 +1,9 @@
 #pragma once
-// Heatmap colour palettes shared by the legacy renderer (HeatmapOverlayRenderer,
-// heatmap_intensity.frag) and the GPU path (HeatmapTileNode, heatmap_display.frag),
-// so both draw the same colour for the same recording code (S6 plan section 4,
-// owner decision 4). One implementation builds the 512-texel palette image both
-// renderers sample (linear filtering): bids in the left half, asks in the right.
+// Heatmap colour palettes of the GPU path (HeatmapTileNode, heatmap_display.frag).
+// They keep the colours of the retired legacy renderer (deleted in S8a), so the
+// "legacy" names below are the reference the GPU colours were matched to (S6 plan
+// section 4, owner decision 4). The 512-texel palette image is sampled with
+// linear filtering: bids in the left half, asks in the right.
 #include "heatmap/HeatmapChartSettings.hpp"
 #include <array>
 #include <cstdint>
@@ -19,7 +19,7 @@ struct PaletteStop {
 };
 struct PaletteGradients {
     std::vector<PaletteStop> bid, ask;
-    float gamma = 2.0f; // curve applied to the gradient position (HeatmapOverlayRenderer::setPaletteGamma)
+    float gamma = 2.0f; // curve applied to the gradient position
 };
 // Legacy tone mapping of a code's magnitude (heatmap.gamma/contrast/shader_floor).
 struct PaletteTone {
@@ -41,7 +41,7 @@ std::optional<PaletteGradients> presetGradients(std::string_view name);
 // as the legacy renderer's default; #RRGGBBAA alpha is ignored). An unknown
 // preset or an unparsable custom gradient falls back to Electric.
 PaletteGradients gradientsFor(const HeatmapChartSettings &settings);
-// The legacy palette image (HeatmapOverlayRenderer::ensurePaletteImage).
+// The palette image (as the legacy renderer built it).
 PaletteTexels paletteTexels(const PaletteGradients &gradients);
 std::shared_ptr<const HeatmapPalette> makePalette(const PaletteGradients &gradients, PaletteTone tone);
 // Code normalization of the recording palette: [loCode, loCode + range] maps to

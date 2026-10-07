@@ -53,7 +53,6 @@ QString symbolFromSegment(QString value) {
 
 void clampSettings(HeatmapChartSettings &s) {
     const HeatmapChartSettings d;
-    if (s.renderer != "gpu" && s.renderer != "legacy") s.renderer = d.renderer;
     if (s.tickMode != TickMode::Auto && s.tickMode != TickMode::Manual) s.tickMode = TickMode::Auto;
     s.manualTick = presetAtLeast(double(std::clamp<int64_t>(s.manualTick, 1, 1'000'000'000'000LL)), 1);
     s.minRowPx = finiteClamp(s.minRowPx, 0.5, 32, d.minRowPx);
@@ -82,7 +81,6 @@ void clampSettings(HeatmapChartSettings &s) {
 }
 HeatmapChartSettings chartDefaults(const ClientHeatmapConfig &c) {
     HeatmapChartSettings s;
-    s.renderer = c.renderer;
     s.tickMode = c.tickMode == "manual" ? TickMode::Manual : TickMode::Auto;
     s.manualTick = c.manualTick;
     s.minRowPx = c.minRowPx;
@@ -106,7 +104,7 @@ HeatmapChartSettings chartDefaults(const ClientHeatmapConfig &c) {
 }
 QJsonObject settingsJson(const HeatmapChartSettings &s) {
     return {
-        {"renderer", QString::fromStdString(s.renderer)},
+        {"renderer", "gpu"}, // the constant "gpu" since S8a (the key goes in S8b)
         {"manualTick", qint64(s.manualTick)},
         {"minRowPx", s.minRowPx},
         {"hysteresis", s.hysteresis},
@@ -149,7 +147,8 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
         if (v.isDouble() && (!std::isfinite(v.toDouble()) || std::abs(v.toDouble()) > 9007199254740991.0))
             return "Expected a finite safe number: " + key;
         if (integers.contains(key) && std::floor(v.toDouble()) != v.toDouble()) return "Expected an integer: " + key;
-        if (key == "renderer" && v != "legacy" && v != "gpu") return "renderer must be legacy or gpu";
+        if (key == "renderer" && v != "gpu")
+            return "renderer must be gpu (the legacy heatmap renderer was removed)";
         if (key == "tickMode" && v != "auto" && v != "manual") return "tickMode must be auto or manual";
         if (key == "palettePreset" && !palettes.contains(v.toString())) return "Unknown palettePreset";
         if (key == "labelCurrency" && v != "usd" && v != "asset") return "labelCurrency must be usd or asset";
@@ -161,7 +160,6 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
         merged[key] = v;
     }
     HeatmapChartSettings out;
-    out.renderer = merged["renderer"].toString().toStdString();
     out.manualTick = int64_t(merged["manualTick"].toDouble());
     out.minRowPx = merged["minRowPx"].toDouble();
     out.hysteresis = merged["hysteresis"].toDouble();

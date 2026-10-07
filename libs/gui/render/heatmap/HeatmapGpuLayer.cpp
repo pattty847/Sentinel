@@ -715,7 +715,7 @@ QJsonObject HeatmapGpuLayer::state() const {
 void HeatmapGpuLayer::scanWalls(const heatmap::WallQuery& query,
     std::function<void(heatmap::WallsSnapshot)> completion) {
     if (!controller_ || !snapshot_ || !priceKnown_ || snapshot_->tfMs != tfMs_ || snapshot_->symbol != symbol_) {
-        heatmap::WallsSnapshot out; out.status = 503; out.gpuRenderer = true;
+        heatmap::WallsSnapshot out; out.status = 503;
         completion(std::move(out));
         return;
     }

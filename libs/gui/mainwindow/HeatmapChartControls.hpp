@@ -1,11 +1,11 @@
 #pragma once
 // Binds one chart's HeatmapSettingsModel (the single source of truth) to its
 // chart and UI (S6c, GUI thread):
-// - model changed -> UnifiedGridRenderer (settings, renderer flip), the toolbar
+// - model changed -> UnifiedGridRenderer (settings), the toolbar
 //   tick selector, the settings dialog and the telemetry dock visibility;
 // - toolbar tick selector -> model (Auto/Manual, a preset locks Manual and is
 //   remembered per symbol and timeframe);
-// - chart tick/preset/renderer changes -> toolbar and dialog at once; view and
+// - chart tick/preset changes -> toolbar and dialog at once; view and
 //   data changes refresh the veil indicator at most every kIndicatorMs;
 // - the telemetry dock's 4 Hz provider (the layer's metrics + frame stats) and
 //   its showTelemetry visibility (View menu, close button, setting).

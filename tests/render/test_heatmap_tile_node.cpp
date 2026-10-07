@@ -226,8 +226,8 @@ TEST(HeatmapTileNodeScene, DrawsTheCellStatesAndPansWithoutRebinning) {
 // S6b palette parity (owner decision 4): the node draws a valid cell with the
 // chart's palette texture and the legacy tone mapping, so a preset gives the same
 // colour for the same recording code as heatmap_intensity.frag. The reference is
-// legacyRecordingColor on the shared palette image (the legacy renderer samples
-// the same image: HeatmapOverlayRenderer builds it with paletteTexels).
+// legacyRecordingColor on the shared palette image (the colours of the retired
+// legacy renderer, deleted in S8a, which built the same image with paletteTexels).
 TEST(HeatmapTileNodeScene, PresetPaletteMatchesTheLegacyColourForEachCode) {
     if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty()) GTEST_SKIP() << "GPU case skipped: " << why.toStdString();
     Scene scene;

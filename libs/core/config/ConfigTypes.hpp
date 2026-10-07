@@ -160,7 +160,6 @@ inline std::vector<std::string> rollerProducts(const ServerConfig& config) {
 }
 
 struct ClientHeatmapConfig {
-    std::string renderer = "gpu";
     std::string tickMode = "auto";
     int64_t manualTick = 100;
     double minRowPx = 2, hysteresis = 0.25;
@@ -174,20 +173,13 @@ struct ClientHeatmapConfig {
     uint64_t decodedChunkBytes = 512ull << 20, spanSourceBytes = 256ull << 20, cpuCeilingBytes = 1024ull << 20;
     int prefetchTiles = 1, liveMinIntervalMs = 500;
     bool showTelemetry = false;
-    std::string source = "legacy"; // recording requires advertised recording.available
     double gamma = 0.85;
     double contrast = 1.6;
     double shaderFloor = 0.0;
-    int labelPx = 14;
-    int clientCacheColumns = 1024;
     /// Time zoom on connect: screen pixels per heatmap column (2–64).
     int initialColumnPx = 8;
     /// Price zoom on connect: % of full range to show (1–100). 0 = use full range.
     int initialPricePct = 5;
-    /// Display tick: rows merge (1-2-5 steps) until a row is about column width * cellAspect
-    /// tall (cells stay roughly square), and never shorter than targetRowPx.
-    int targetRowPx = 2;
-    double cellAspect = 0.75;
     /// Recording mode colour range, in base units (BTC): sizes at or below min are dark,
     /// at or above max are brightest (log scale in between).
     double sensitivityMin = 0.05;

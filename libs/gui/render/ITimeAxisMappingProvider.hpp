@@ -27,7 +27,6 @@ struct MappingFrameContext {
     bool viewportDragging = false;
     bool viewportAutoScrollEnabled = false;
 
-    uint64_t heatmapGeneration = 0;
     uint64_t footprintGeneration = 0;
     uint64_t candleGeneration = 0;
 

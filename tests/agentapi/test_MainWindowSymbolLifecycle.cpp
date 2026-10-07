@@ -192,8 +192,7 @@ TEST(MainWindowHealthIntegration, ChartProviderKeepsMissingOldAndUnrenderedFacts
     auto* health = source->marketHealth();
     auto* renderer = MainWindowSymbolLifecyclePeer::renderer(window);
     ASSERT_TRUE(renderer);
-    renderer->setHeatmapRenderer("gpu");
-    auto* layer = renderer->gpuHeatmapLayer();
+    auto* layer = renderer->gpuHeatmapLayer(); // the chart's only heatmap renderer (S8a)
     ASSERT_TRUE(layer && layer->controller());
     health->refreshChartState();
     EXPECT_FALSE(health->snapshot().loading.has_value());
@@ -263,7 +262,7 @@ TEST(MainWindowHealthIntegration, ChartProviderKeepsMissingOldAndUnrenderedFacts
     EXPECT_FALSE(health->snapshot().loading.has_value());
     EXPECT_FALSE(health->snapshot().holding.has_value());
     EXPECT_FALSE(health->snapshot().partial.has_value());
-    renderer->setHeatmapRenderer("legacy");
+    renderer->setHeatmapLayerEnabled(false); // no heatmap drawn: no chart facts
     health->refreshChartState();
     EXPECT_FALSE(health->snapshot().loading.has_value());
     EXPECT_TRUE(health->snapshot().coverage.isEmpty());

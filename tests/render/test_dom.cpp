@@ -444,9 +444,6 @@ public:
     const LiveOrderBook& getDirectLiveOrderBook(const std::string&) const override { ++reads; return book; }
     void subscribe(const QString&) override {}
     void unsubscribe(const QString&) override {}
-    void requestHeatmapHistory(const QString&, int64_t, int64_t, int) override {}
-    void registerRecordingView(const recording::LiveView&) override {}
-    void requestRecordingHeatmapHistory(const protocol::recordingwire::Request&) override {}
     void requestFootprintHistory(const QString&, int64_t, int64_t, int) override {}
     void requestTpoHistory(const QString&, int64_t, int, int64_t, int, const QString&) override {}
     void cancelTpoHistory(const QString&, const QString&) override {}

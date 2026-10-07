@@ -71,10 +71,6 @@ set(GRID_CORE_SOURCES
     render/GridViewState.cpp
     render/DataProcessor.hpp
     render/DataProcessor.cpp
-    render/HeatmapColumnWindow.hpp
-    render/HeatmapColumnWindow.cpp
-    render/HeatmapStreamState.hpp
-    render/HeatmapStreamState.cpp
     render/FootprintStreamState.hpp
     render/FootprintStreamState.cpp
     render/TpoStreamState.hpp
@@ -94,19 +90,13 @@ set(GRID_CORE_SOURCES
     render/ITimeAxisMappingProvider.hpp
     render/TimeAuthority.hpp
     render/TimeAuthority.cpp
-    render/ViewportAutoScrollController.hpp
-    render/ViewportAutoScrollController.cpp
     render/TimeAxisMapping.hpp
     render/UgrFrameMath.hpp
     render/UgrFrameMath.cpp
-    render/HeatmapLabelRenderer.hpp
-    render/HeatmapLabelRenderer.cpp
     render/AxisLayout.hpp
     render/AxisLayout.cpp
     render/AxisTextService.hpp
     render/AxisTextService.cpp
-    render/HeatmapStreamService.hpp
-    render/HeatmapStreamService.cpp
     render/IOverlayRenderer.hpp
     render/FrameContext.hpp
     render/FrameContextBuilder.hpp
@@ -124,8 +114,6 @@ set(GRID_CORE_SOURCES
     render/ChartTextRenderer.cpp
     render/heatmap/HeatmapLabelLayout.hpp
     render/heatmap/HeatmapLabelLayout.cpp
-    render/HeatmapOverlayRenderer.hpp
-    render/HeatmapOverlayRenderer.cpp
     render/CandlestickBatched.hpp
     render/CandlestickBatched.cpp
     render/MsdfAtlas.hpp
@@ -293,7 +281,6 @@ qt6_add_qml_module(sentinel_gui_lib
         qml/controls/TimeframeSelector.qml
         qml/controls/GridResolutionSelector.qml
         qml/controls/NavigationControls.qml
-        qml/controls/LiquidityThresholdFilter.qml
         qml/controls/ChartToolRail.qml
         qml/StockChartView.qml
 )

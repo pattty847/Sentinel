@@ -14,17 +14,8 @@ constexpr qint64 kSchemaLogThrottleMs = 2000;
 
 enum class DropReason : int {
     ServerSchema = 0,
-    HeatmapSchema,
     CandleSchema,
     FootprintSchema,
-    HeatmapGridHeight,
-    HeatmapPayloadEstimate,
-    HeatmapPayloadDecoded,
-    HeatmapBase64Decode,
-    HeatmapHistoryGridHeight,
-    HeatmapHistoryPayloadEstimate,
-    HeatmapHistoryPayloadDecoded,
-    HeatmapHistoryBase64Decode,
     FootprintGridHeight,
     FootprintPayloadEstimate,
     FootprintPayloadDecoded,
@@ -193,10 +184,6 @@ SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::s
     qRegisterMetaType<std::vector<BookLevelUpdate>>("BookLevelUpdateVector");
     qRegisterMetaType<OrderBookLevel>("OrderBookLevel");
     qRegisterMetaType<std::vector<OrderBookLevel>>("OrderBookLevelVector");
-    qRegisterMetaType<HeatmapHistoryColumn>("HeatmapHistoryColumn");
-    qRegisterMetaType<QVector<HeatmapHistoryColumn>>("QVector<HeatmapHistoryColumn>");
-    qRegisterMetaType<RecordingHistoryPage>("RecordingHistoryPage");
-    qRegisterMetaType<HeatmapSlice>("HeatmapSlice");
     qRegisterMetaType<FootprintSlice>("FootprintSlice");
     qRegisterMetaType<TpoSlice>("TpoSlice");
     qRegisterMetaType<CandleBar>("CandleBar");
@@ -328,75 +315,6 @@ void SentinelStreamClient::unsubscribe(const std::string& symbol) {
         if (m_isConnected && m_writeQueue.size() == 1) {
             doWrite();
         }
-    });
-}
-
-void SentinelStreamClient::requestHeatmapHistory(const std::string& symbol,
-                                                 int64_t timeframeMs,
-                                                 int64_t endTimeMs,
-                                                 int count) {
-    if (symbol.empty() || timeframeMs <= 0 || count <= 0) {
-        sLog_Warning("Heatmap history request not sent: invalid args symbol=" << symbol
-                     << " tfMs=" << timeframeMs << " count=" << count);
-        return;
-    }
-    const int boundedCount = std::min(count, protocol::SentinelProtocol::kMaxHeatmapHistoryColumns);
-    sLog_Data("Heatmap history request: symbol=" << symbol << " tfMs=" << timeframeMs
-              << " end=" << endTimeMs << " count=" << boundedCount);
-    nlohmann::json msg = {
-        {"type", "heatmap_history_request"},
-        {"symbol", symbol},
-        {"timeframe_ms", timeframeMs},
-        {"end_time", endTimeMs},
-        {"count", boundedCount}
-    };
-
-    std::string str = msg.dump();
-    net::post(m_strand, [this, payload = std::move(str)]() mutable {
-        m_writeQueue.push_back(std::move(payload));
-        if (m_isConnected && m_writeQueue.size() == 1) {
-            doWrite();
-        }
-    });
-}
-
-void SentinelStreamClient::registerRecordingView(const recording::LiveView& view) {
-    auto msg = protocol::recordingwire::viewMessage(view);
-    if (!protocol::recordingwire::parseView(msg)) return;
-    net::post(m_strand, [this, payload = msg.dump()]() mutable {
-        if (!m_isConnected) return; // reconnect registers the newly confirmed band
-        m_writeQueue.push_back(std::move(payload));
-        if (m_writeQueue.size() == 1) doWrite();
-    });
-}
-
-void SentinelStreamClient::releaseRecordingView(const std::string& symbol) {
-    if (symbol.empty() || symbol.size() > 128) return;
-    net::post(m_strand, [this, payload = protocol::recordingwire::unviewMessage(symbol).dump()]() mutable {
-        if (!m_isConnected) return; // a new connection has no view registered
-        m_writeQueue.push_back(std::move(payload));
-        if (m_writeQueue.size() == 1) doWrite();
-    });
-}
-
-void SentinelStreamClient::requestRecordingHeatmapHistory(const protocol::recordingwire::Request& request) {
-    nlohmann::json msg = {{"type", "heatmap_history_request"}, {"source", "recording"},
-                          {"symbol", request.symbol}, {"timeframe_ms", request.timeframeMs},
-                          {"end_time", request.endTimeMs}, {"count", request.count},
-                          {"price_min", request.priceMin}, {"price_max", request.priceMax},
-                          {"rows", request.rows}, {"request_id", request.requestId},
-                          {"band_generation", request.bandGeneration}};
-    if (request.displayTick) msg["display_tick"] = *request.displayTick;
-    const auto parsed = protocol::recordingwire::parseRequest(msg);
-    if (!parsed) {
-        sLog_Warning("Recording history request not sent: invalid args symbol=" << request.symbol);
-        return;
-    }
-    msg["count"] = parsed->count;
-    std::string payload = msg.dump();
-    net::post(m_strand, [this, payload = std::move(payload)]() mutable {
-        m_writeQueue.push_back(std::move(payload));
-        if (m_isConnected && m_writeQueue.size() == 1) doWrite();
     });
 }
 
@@ -817,17 +735,11 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                 handleSnapshotMessage(msg);
                 return;
             case protocol::MessageType::HeatmapSlice:
-                handleHeatmapSliceMessage(msg);
-                return;
             case protocol::MessageType::HeatmapRecordingLive:
-                if (validateFamilySchema(msg, "heatmap", protocol::SentinelProtocol::kHeatmapSchemaVersion,
-                                         DropReason::HeatmapSchema)) {
-                    if (auto page = parseRecordingHistoryChunk(msg); page && page->columns.size() <= 2)
-                        emit recordingHeatmapLiveReceived(*page);
-                }
-                return;
             case protocol::MessageType::HeatmapHistoryChunk:
-                handleHeatmapHistoryChunkMessage(msg);
+                // The retired legacy heatmap (S8a): the server keeps streaming
+                // heatmap_slice to every subscriber until S8b removes it. Dropped
+                // silently, one frame per second per symbol must not log.
                 return;
             case protocol::MessageType::HeatmapAvailability: {
                 const auto availability = protocol::chunkwire::parseAvailability(msg);
@@ -895,19 +807,6 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                      msg.value("code", "") == "upstream_unavailable")) {
                     emit subscriptionRefused(QString::fromStdString(msg.value("symbol", "")),
                         msg.value("max_connections", 0), QString::fromStdString(msg.value("message", "")));
-                }
-                if (msg.value("context", "") == "heatmap_recording_view") {
-                    emit recordingViewError(QString::fromStdString(msg.value("symbol", "")),
-                        msg.value("band_generation", uint64_t{0}), QString::fromStdString(msg.value("code", "")),
-                        QString::fromStdString(msg.value("message", "")), msg.value("retry_ms", 1000));
-                }
-                if (msg.value("context", "") == "heatmap_history_request" &&
-                    msg.contains("request_id") && msg["request_id"].is_string()) {
-                    emit recordingHeatmapHistoryError(
-                        QString::fromStdString(msg.value("symbol", "")),
-                        QString::fromStdString(msg["request_id"].get<std::string>()),
-                        msg.value("band_generation", uint64_t{0}),
-                        QString::fromStdString(msg.value("message", "")));
                 }
                 if (msg.value("context", "") == "trade_overlay" &&
                     msg.contains("request_id") && msg["request_id"].is_string() &&
@@ -996,234 +895,6 @@ void SentinelStreamClient::handleL2UpdateMessage(const nlohmann::json& msg) {
 
 void SentinelStreamClient::handleTradeMessage(const nlohmann::json& msg) {
     emit tradeReceived(protocol::clientparse::parseTrade(msg));
-}
-
-void SentinelStreamClient::handleHeatmapSliceMessage(const nlohmann::json& msg) {
-    if (!validateFamilySchema(msg,
-                              "heatmap",
-                              protocol::SentinelProtocol::kHeatmapSchemaVersion,
-                              DropReason::HeatmapSchema)) {
-        return;
-    }
-    const std::string symbol = msg.value("symbol", "");
-    if (symbol.empty()) {
-        return;
-    }
-
-    const int64_t startMs = msg.value("time_start", static_cast<int64_t>(0));
-    const int64_t endMs = msg.value("time_end", static_cast<int64_t>(0));
-    const int64_t timeframeMs = msg.value("timeframe_ms", static_cast<int64_t>(0));
-    const int gridWidth = msg.value("grid_width", 0);
-    const int gridHeight = msg.value("grid_height", 0);
-    const double minPrice = msg.value("min_price", 0.0);
-    const double maxPrice = msg.value("max_price", 0.0);
-    const double tickSize = msg.value("tick_size", 0.0);
-    const double midPrice = msg.value("mid_price", 0.0);
-    const double lastTrade = msg.value("last_trade", 0.0);
-    const bool reset = msg.value("reset", false);
-    const std::string format = msg.value("format", "u8");
-    const std::string encoded = msg.value("column", "");
-    const std::string liquidityEncoded = msg.value("liquidity_column", "");
-    const double liquidityScale = msg.value("liquidity_scale", 1.0);
-
-    if (!validateGridHeight("heatmap_slice", gridHeight, DropReason::HeatmapGridHeight)) {
-        return;
-    }
-
-    QByteArray column;
-    if (!decodeBase64WithGuardrails("heatmap_slice",
-                                    "column",
-                                    encoded,
-                                    DropReason::HeatmapPayloadEstimate,
-                                    DropReason::HeatmapBase64Decode,
-                                    DropReason::HeatmapPayloadDecoded,
-                                    column)) {
-        return;
-    }
-    QByteArray liquidityColumn;
-    if (!decodeBase64WithGuardrails("heatmap_slice",
-                                    "liquidity_column",
-                                    liquidityEncoded,
-                                    DropReason::HeatmapPayloadEstimate,
-                                    DropReason::HeatmapBase64Decode,
-                                    DropReason::HeatmapPayloadDecoded,
-                                    liquidityColumn)) {
-        return;
-    }
-
-    sLog_Probe("heatmap.recv",
-               "symbol=" << symbol
-               << " tfMs=" << timeframeMs
-               << " start=" << startMs << " end=" << endMs
-               << " grid=" << gridWidth << "x" << gridHeight
-               << " reset=" << reset
-               << " bytes=" << column.size() << " liqBytes=" << liquidityColumn.size());
-
-    HeatmapSlice slice;
-    slice.symbol = QString::fromStdString(symbol);
-    slice.bucketStartMs = startMs;
-    slice.bucketEndMs = endMs;
-    slice.timeframeMs = timeframeMs;
-    slice.gridWidth = gridWidth;
-    slice.gridHeight = gridHeight;
-    slice.minPrice = minPrice;
-    slice.maxPrice = maxPrice;
-    slice.tickSize = tickSize;
-    slice.midPrice = midPrice;
-    slice.lastTrade = lastTrade;
-    slice.format = QString::fromStdString(format);
-    slice.column = column;
-    slice.liquidityColumn = liquidityColumn;
-    slice.liquidityScale = liquidityScale;
-    slice.reset = reset;
-    emit heatmapSliceReceived(slice);
-}
-
-std::optional<SentinelStreamClient::RecordingHistoryPage>
-SentinelStreamClient::parseRecordingHistoryChunk(const nlohmann::json& msg) {
-    RecordingHistoryPage page;
-    page.symbol = QString::fromStdString(msg.value("symbol", ""));
-    page.requestId = QString::fromStdString(msg.value("request_id", ""));
-    page.status = QString::fromStdString(msg.value("status", ""));
-    page.message = QString::fromStdString(msg.value("message", ""));
-    page.layer = QString::fromStdString(msg.value("layer", ""));
-    page.valueEncoding = QString::fromStdString(msg.value("value_encoding", ""));
-    page.timeframeMs = msg.value("timeframe_ms", int64_t{0});
-    page.requestEndMs = msg.value("request_end_time", int64_t{0});
-    page.scannedStartMs = msg.value("scanned_start", int64_t{0});
-    page.scannedEndMs = msg.value("scanned_end", int64_t{0});
-    page.nextEndMs = msg.value("next_end", int64_t{0});
-    page.oldestAvailableMs = msg.value("oldest_available_ms", int64_t{0});
-    page.latestAvailableMs = msg.value("latest_available_ms", int64_t{0});
-    page.bandGeneration = msg.value("band_generation", uint64_t{0});
-    page.exhausted = msg.value("exhausted", false);
-    page.bandLo = msg.value("band_lo", 0.0);
-    page.bandTick = msg.value("band_tick", 0.0);
-    page.bandRows = msg.value("band_rows", 0);
-    page.sizeFloor = msg.value("size_floor", 0.0);
-    page.codesPerOctave = msg.value("codes_per_octave", 0.0);
-    const auto columns = msg.value("columns", nlohmann::json::array());
-    if (page.symbol.isEmpty() || page.bandRows < 1 || page.bandRows > 16384 ||
-        msg.value("encoding", "") != "base64" ||
-        page.valueEncoding != "absolute_log_size" || !columns.is_array() ||
-        columns.size() > protocol::SentinelProtocol::kMaxHeatmapHistoryColumns) {
-        sLog_Warning("Dropping malformed recording history header: symbol=" << page.symbol
-                     << " rows=" << page.bandRows << " columns=" << columns.size());
-        return std::nullopt;
-    }
-    page.columns.reserve(static_cast<int>(columns.size()));
-    for (const auto& item : columns) {
-        HeatmapHistoryColumn col;
-        col.bucketStartMs = item.value("time_start", int64_t{0});
-        col.bucketEndMs = item.value("time_end", int64_t{0});
-        col.minPrice = item.value("min_price", page.bandLo);
-        col.maxPrice = item.value("max_price", page.bandLo + page.bandRows * page.bandTick);
-        col.tickSize = item.value("tick_size", page.bandTick);
-        col.liquidityScale = item.value("liquidity_scale", 0.0);
-        col.observedMs = item.value("observed_ms", uint64_t{0});
-        col.flags = item.value("flags", uint32_t{0});
-        for (const auto& [name, dest] : {
-                 std::pair{"column", &col.intensity},
-                 {"liquidity_column", &col.liquidity}, {"validity", &col.validity}}) {
-            if (!decodeBase64WithGuardrails("heatmap_history_chunk", name,
-                                            item.value(name, ""),
-                                            DropReason::HeatmapHistoryPayloadEstimate,
-                                            DropReason::HeatmapHistoryBase64Decode,
-                                            DropReason::HeatmapHistoryPayloadDecoded,
-                                            *dest)) return std::nullopt;
-        }
-        if (col.intensity.size() != page.bandRows * 2 ||
-            col.liquidity.size() != page.bandRows * 2 ||
-            col.validity.size() != (page.bandRows + 7) / 8) {
-            sLog_Warning("Dropping malformed recording history column: symbol=" << page.symbol
-                         << " rows=" << page.bandRows << " time=" << col.bucketStartMs);
-            return std::nullopt;
-        }
-        page.columns.push_back(std::move(col));
-    }
-    return page;
-}
-
-void SentinelStreamClient::handleHeatmapHistoryChunkMessage(const nlohmann::json& msg) {
-    if (!validateFamilySchema(msg,
-                              "heatmap",
-                              protocol::SentinelProtocol::kHeatmapSchemaVersion,
-                              DropReason::HeatmapSchema)) {
-        return;
-    }
-    if (msg.value("source", std::string("legacy")) == "recording") {
-        if (auto page = parseRecordingHistoryChunk(msg))
-            emit recordingHeatmapHistoryReceived(*page);
-        return;
-    }
-    const std::string symbol = msg.value("symbol", "");
-    if (symbol.empty()) {
-        return;
-    }
-    const int64_t timeframeMs = msg.value("timeframe_ms", static_cast<int64_t>(0));
-    const int gridWidth = msg.value("grid_width", 0);
-    const int gridHeight = msg.value("grid_height", 0);
-    const int64_t requestEndMs = msg.value("request_end_time", static_cast<int64_t>(0));
-    const int64_t oldestAvailableMs = msg.value("oldest_available_ms", static_cast<int64_t>(0));
-    const std::string encoding = msg.value("encoding", "base64");
-    const std::string liquidityEncoding = msg.value("liquidity_encoding", "base64");
-    const auto columns = msg.value("columns", nlohmann::json::array());
-
-    if (!validateGridHeight("heatmap_history_chunk", gridHeight, DropReason::HeatmapHistoryGridHeight)) {
-        return;
-    }
-
-    QVector<HeatmapHistoryColumn> out;
-    if (columns.is_array()) {
-        out.reserve(static_cast<int>(columns.size()));
-        for (const auto& item : columns) {
-            HeatmapHistoryColumn col;
-            col.bucketStartMs = item.value("time_start", static_cast<int64_t>(0));
-            col.bucketEndMs = item.value("time_end", static_cast<int64_t>(0));
-            col.minPrice = item.value("min_price", 0.0);
-            col.maxPrice = item.value("max_price", 0.0);
-            col.tickSize = item.value("tick_size", 0.0);
-            const std::string encoded = item.value("column", "");
-            if (!encoded.empty() && encoding == "base64") {
-                if (!decodeBase64WithGuardrails("heatmap_history_chunk",
-                                                "column",
-                                                encoded,
-                                                DropReason::HeatmapHistoryPayloadEstimate,
-                                                DropReason::HeatmapHistoryBase64Decode,
-                                                DropReason::HeatmapHistoryPayloadDecoded,
-                                                col.intensity)) {
-                    return;
-                }
-            }
-            const std::string liqEncoded = item.value("liquidity_column", "");
-            if (!liqEncoded.empty() && liquidityEncoding == "base64") {
-                if (!decodeBase64WithGuardrails("heatmap_history_chunk",
-                                                "liquidity_column",
-                                                liqEncoded,
-                                                DropReason::HeatmapHistoryPayloadEstimate,
-                                                DropReason::HeatmapHistoryBase64Decode,
-                                                DropReason::HeatmapHistoryPayloadDecoded,
-                                                col.liquidity)) {
-                    return;
-                }
-            }
-            col.liquidityScale = item.value("liquidity_scale", 1.0);
-            out.push_back(std::move(col));
-        }
-    }
-
-    {
-        const int count = out.size();
-        const int64_t first = count > 0 ? out.front().bucketStartMs : 0;
-        const int64_t last = count > 0 ? out.back().bucketStartMs : 0;
-        sLog_Data("Heatmap history recv: symbol=" << symbol << " tfMs=" << timeframeMs
-                  << " count=" << count << " first=" << first << " last=" << last
-                  << " requestEnd=" << requestEndMs << " oldestAvailable=" << oldestAvailableMs
-                  << " grid=" << gridWidth << "x" << gridHeight);
-    }
-
-    emit heatmapHistoryReceived(QString::fromStdString(symbol), timeframeMs, gridWidth, gridHeight,
-                                requestEndMs, oldestAvailableMs, out);
 }
 
 void SentinelStreamClient::handleCandleHistoryChunkMessage(const nlohmann::json& msg) {

@@ -18,26 +18,11 @@ HeatmapSettingsModel::HeatmapSettingsModel(HeatmapSettingsStore &store, QString 
     budgets_ = store_.loadBudgets(defaults_);
 }
 
-void HeatmapSettingsModel::setProcessRenderer(const std::string &renderer) {
-    if (renderer != "gpu" && renderer != "legacy") return;
-    processRenderer_ = renderer;
-    if (settings_.renderer == renderer) return;
-    settings_.renderer = renderer;
-    emit changed(false);
-}
-
-std::string HeatmapSettingsModel::savedRenderer() const { return store_.load(chartId_, defaults_).renderer; }
-
 QString HeatmapSettingsModel::apply(const QJsonObject &patch, bool persist) {
     const Context context = context_ ? context_() : Context{};
     auto next = settings_;
-    const bool savesRenderer = persist && patch.contains("renderer");
-    const std::string savedBefore = savesRenderer ? savedRenderer() : std::string{};
     const auto error = store_.applyChartPatch(chartId_, next, patch, persist, defaults_, context.symbol, context.tfMs);
     if (!error.isEmpty()) return error;
-    if (savesRenderer && savedRenderer() != savedBefore) emit savedRendererChanged();
-    // A session-only renderer survives workspace restores; a saved one ends it.
-    if (patch.contains("renderer")) processRenderer_ = persist ? std::string{} : next.renderer;
     const bool explicitTick = patch.contains("manualTick") && next.tickMode == TickMode::Manual;
     if (next == settings_ && !explicitTick) return {};
     settings_ = std::move(next);
@@ -62,7 +47,6 @@ void HeatmapSettingsModel::restoreLayout(const QString &name) {
     if (name == QLatin1String("_last_session")) return; // live per-chart settings win (INV-088)
     auto next = settings_;
     store_.restoreLayoutInto(name, chartId_, next, defaults_);
-    if (!processRenderer_.empty()) next.renderer = processRenderer_;
     if (next == settings_) return;
     settings_ = std::move(next);
     sLog_App("Heatmap settings restored from workspace=" << name << " chart=" << chartId_);

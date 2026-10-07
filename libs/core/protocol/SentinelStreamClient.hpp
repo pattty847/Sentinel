@@ -16,7 +16,6 @@
 #include <QByteArray>
 #include <QVector>
 #include "SentinelStreamProtocol.hpp"
-#include "RecordingHistoryWire.hpp"
 #include "ChunkWire.hpp"
 #include <boost/asio/thread_pool.hpp>
 #include <map>
@@ -24,7 +23,6 @@
 #include <tuple>
 #include <functional>
 #include <unordered_map>
-#include "HeatmapSlice.hpp"
 #include "FootprintSlice.hpp"
 #include "TpoSlice.hpp"
 #include "VolumeProfileSlice.hpp"
@@ -47,30 +45,6 @@ class SentinelStreamClient : public QObject {
     friend struct ScreenerErrorDispatchTest;
     Q_OBJECT
 public:
-    struct HeatmapHistoryColumn {
-        int64_t bucketStartMs = 0;
-        int64_t bucketEndMs = 0;
-        double minPrice = 0.0;
-        double maxPrice = 0.0;
-        double tickSize = 0.0;
-        QByteArray intensity;
-        QByteArray liquidity;
-        double liquidityScale = 1.0;
-        QByteArray validity;
-        uint64_t observedMs = 0;
-        uint32_t flags = 0;
-    };
-    struct RecordingHistoryPage {
-        QString symbol, requestId, status, layer, valueEncoding, message;
-        int64_t timeframeMs = 0, requestEndMs = 0;
-        int64_t scannedStartMs = 0, scannedEndMs = 0, nextEndMs = 0;
-        int64_t oldestAvailableMs = 0, latestAvailableMs = 0;
-        uint64_t bandGeneration = 0;
-        bool exhausted = false;
-        double bandLo = 0, bandTick = 0, sizeFloor = 0, codesPerOctave = 0;
-        int bandRows = 0;
-        QVector<HeatmapHistoryColumn> columns;
-    };
     struct CandleBar {
         int64_t timeStartMs = 0;
         int64_t timeEndMs = 0;
@@ -106,15 +80,6 @@ public:
     void subscribe(const std::string& symbol);
     void unsubscribe(const std::string& symbol);
     quint64 bookDeliveryGeneration(const std::string& symbol) const;
-    void requestHeatmapHistory(const std::string& symbol,
-                               int64_t timeframeMs,
-                               int64_t endTimeMs,
-                               int count);
-    void registerRecordingView(const recording::LiveView& view);
-    // heatmap_recording_unview: the server stops this connection's live recording view.
-    void releaseRecordingView(const std::string& symbol);
-    void requestRecordingHeatmapHistory(const protocol::recordingwire::Request& request);
-    static std::optional<RecordingHistoryPage> parseRecordingHistoryChunk(const nlohmann::json& msg);
     // One heatmap_chunk_request. Each start yields exactly one heatmapChunkReceived
     // (Chunk or NotModified) or heatmapChunkFailed carrying the returned id.
     // haveHash is empty or parallel to starts (0 = not held). No client-side
@@ -172,7 +137,6 @@ signals:
                           quint64 deliveryGeneration, const QString& status = {},
                           uint64_t bookVersion = 0);
     // Other signals as needed for aggregated slices
-    void heatmapSliceReceived(const HeatmapSlice& slice);
     void footprintSliceReceived(const FootprintSlice& slice);
     void tpoSliceReceived(const TpoSlice& slice);
     // After the in-flight tpo_history_chunk's slices were emitted (requestId always set).
@@ -181,13 +145,6 @@ signals:
     // A trade_overlay error that carries a TPO history request_id.
     void tpoHistoryFailed(const QString& symbol, const QString& requestId, const QString& message);
     void volumeProfileSliceReceived(const VolumeProfileSlice& slice);
-    void heatmapHistoryReceived(const QString& symbol,
-                                int64_t timeframeMs,
-                                int gridWidth,
-                                int gridHeight,
-                                int64_t requestEndMs,
-                                int64_t oldestAvailableMs,
-                                const QVector<HeatmapHistoryColumn>& columns);
     // Emitted from decode/admission threads; connect with a queued connection.
     // chunk->kind is Chunk or NotModified.
     void heatmapChunkReceived(quint64 requestId, SentinelStreamClient::HeatmapChunkPtr chunk);
@@ -195,12 +152,6 @@ signals:
     void heatmapChunkFailed(const SentinelStreamClient::HeatmapChunkError& error);
     // Sent on subscribe and whenever it changes. Refused on a wire-version mismatch.
     void heatmapAvailabilityReceived(const protocol::chunkwire::Availability& availability);
-    void recordingViewError(const QString& symbol, uint64_t generation, const QString& code,
-                            const QString& message, int retryMs);
-    void recordingHeatmapLiveReceived(const RecordingHistoryPage& page);
-    void recordingHeatmapHistoryReceived(const RecordingHistoryPage& page);
-    void recordingHeatmapHistoryError(const QString& symbol, const QString& requestId,
-                                      uint64_t bandGeneration, const QString& message);
     void candleHistoryReceived(const QString& symbol,
                                int64_t timeframeSec,
                                int64_t startTimeSec,
@@ -246,8 +197,6 @@ private:
     void handleSnapshotMessage(const nlohmann::json& msg);
     void handleL2UpdateMessage(const nlohmann::json& msg);
     void handleTradeMessage(const nlohmann::json& msg);
-    void handleHeatmapSliceMessage(const nlohmann::json& msg);
-    void handleHeatmapHistoryChunkMessage(const nlohmann::json& msg);
     void handleCandleHistoryChunkMessage(const nlohmann::json& msg);
     void handleCandleBarMessage(protocol::MessageType type, const nlohmann::json& msg);
     void handleFootprintConfigMessage(const nlohmann::json& msg);
@@ -311,9 +260,6 @@ private:
     std::unique_ptr<net::thread_pool> m_decodePool;
 };
 
-Q_DECLARE_METATYPE(SentinelStreamClient::HeatmapHistoryColumn)
-Q_DECLARE_METATYPE(SentinelStreamClient::RecordingHistoryPage)
-Q_DECLARE_METATYPE(QVector<SentinelStreamClient::HeatmapHistoryColumn>)
 Q_DECLARE_METATYPE(SentinelStreamClient::CandleBar)
 Q_DECLARE_METATYPE(QVector<SentinelStreamClient::CandleBar>)
 Q_DECLARE_METATYPE(SentinelStreamClient::HeatmapChunkPtr)

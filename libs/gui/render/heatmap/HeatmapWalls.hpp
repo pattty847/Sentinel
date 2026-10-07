@@ -36,7 +36,6 @@ enum class WallError { None, BadTick, InvalidRange, ScanLimit };
 
 struct WallsSnapshot {
     int status = 200;
-    bool gpuRenderer = false;
     int64_t loadedStartMs = 0, loadedEndMs = 0;
     double bandTick = 0;
     int recordedColumns = 0, missingColumns = 0;

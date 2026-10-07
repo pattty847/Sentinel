@@ -1,6 +1,5 @@
 #include "HeatmapNodeFixtures.hpp"
 #include "render/heatmap/HeatmapCellQuery.hpp"
-#include "render/HeatmapColumnWindow.hpp" // the legacy capture the page oracle replaces (S8a)
 #include "heatmap/DrawPieces.hpp"
 #include "heatmap/BinCell.hpp"
 #include <gtest/gtest.h>
@@ -407,7 +406,7 @@ TEST(HeatmapWalls, ViewportMarginExplicitPeriodTickBudgetAndMissingColumns) {
     Fixture f; const auto spans = f.spans(kMinuteMs); LabelWindowBuilder builder;
     WallScanRequest q{{}, kMinuteMs, 500, 100, double(start+kHourMs), double(end), 99990, 100010};
     auto walls = scanWalls(q, spans, nullptr, f.store, builder);
-    EXPECT_EQ(walls.status, 200); EXPECT_TRUE(walls.gpuRenderer);
+    EXPECT_EQ(walls.status, 200);
     EXPECT_EQ(walls.rangeStartMs, start+kHourMs); EXPECT_EQ(walls.rangeEndMs, end);
     EXPECT_EQ(walls.rangePriceMin, 99970); EXPECT_EQ(walls.rangePriceMax, 100030); EXPECT_EQ(walls.bandTick, 5);
     ASSERT_FALSE(walls.walls.empty());
@@ -514,7 +513,7 @@ heatmap::WallsSnapshot pageWalls(const recording::BuildResult& page, const heatm
     if (out.walls.size() > size_t(query.limit)) out.walls.resize(size_t(query.limit));
     return out;
 }
-TEST(HeatmapWalls, MatchesLegacyCaptureAtItsBandTickOnTheSameHmc2Recording) {
+TEST(HeatmapWalls, MatchesThePageOracleAtItsBandTickOnTheSameHmc2Recording) {
     QTemporaryDir dir; ASSERT_TRUE(dir.isValid());
     constexpr auto epoch = synthetic_hmc2::epoch;
     {
@@ -549,29 +548,9 @@ TEST(HeatmapWalls, MatchesLegacyCaptureAtItsBandTickOnTheSameHmc2Recording) {
         const auto page = recording::buildPage(reader, q);
         ASSERT_EQ(page.status, recording::BuildStatus::Complete) << page.message;
         ASSERT_FALSE(page.columns.empty()); ASSERT_EQ(page.band.tick, 10);
-        heatmap_window::ColumnWindow legacy;
-        legacy.configure(tf, int(q.count), int(q.count));
-        heatmap_window::Update update;
         const double low = page.band.lo, high = low + page.band.tick*page.band.rows;
-        legacy.setDisplayBand({low, high, page.band.tick}, 1, update); legacy.setRecordingRequest("parity");
-        std::vector<heatmap_window::Column> columns;
         double quantization = 0;
-        for (const auto& c : page.columns) {
-            heatmap_window::Column out;
-            out.bucketStartMs = c.bucketStartMs; out.minPrice = low; out.maxPrice = high; out.tickSize = page.band.tick;
-            out.liquidityScale = c.quantityScale; out.observedMs = c.observedMs;
-            out.intensity.resize(int(c.cells.size()*2)); out.liquidity.resize(int(c.quantities.size()*2));
-            for (size_t i = 0; i < c.cells.size(); ++i) {
-                const auto code = qToLittleEndian(c.cells[i]), qty = qToLittleEndian(c.quantities[i]);
-                std::memcpy(out.intensity.data()+i*2, &code, 2); std::memcpy(out.liquidity.data()+i*2, &qty, 2);
-            }
-            out.validity = QByteArray(reinterpret_cast<const char*>(c.validity.data()), qsizetype(c.validity.size()));
-            quantization = std::max(quantization, c.quantityScale);
-            columns.push_back(out);
-        }
-        bool first = false;
-        ASSERT_TRUE(legacy.ingestRecording(columns, 1, "parity", epoch, epoch+2*kHourMs, true, epoch,
-            epoch+2*kHourMs-tf, page.sizeScale.floor, page.sizeScale.codesPerOctave, update, first));
+        for (const auto& c : page.columns) quantization = std::max(quantization, c.quantityScale);
         SpanSet spans; spans.symbol = "BTC-USD"; spans.tfMs = tf; spans.version = 1;
         spans.availableStartMs = epoch; spans.availableEndMs = epoch+2*kHourMs;
         const auto range = tiles::tilesCovering(epoch, epoch+2*kHourMs, tf);
@@ -592,18 +571,7 @@ TEST(HeatmapWalls, MatchesLegacyCaptureAtItsBandTickOnTheSameHmc2Recording) {
         }
         heatmap::WallQuery wallQuery; wallQuery.limit = 100; wallQuery.startMs = epoch; wallQuery.endMs = epoch+2*kHourMs;
         wallQuery.priceMin = low; wallQuery.priceMax = high;
-        const auto expected = legacy.captureWalls(wallQuery);
-        const auto oracle = pageWalls(page, wallQuery, tf, epoch, epoch+2*kHourMs);
-        // The page oracle reproduces the legacy capture exactly (it replaces it in S8a).
-        EXPECT_EQ(oracle.recordedColumns, expected.recordedColumns); EXPECT_EQ(oracle.missingColumns, expected.missingColumns);
-        EXPECT_EQ(oracle.unknownRows, expected.unknownRows); ASSERT_EQ(oracle.walls.size(), expected.walls.size());
-        for (size_t i = 0; i < oracle.walls.size(); ++i) {
-            const auto& o = oracle.walls[i]; const auto& e = expected.walls[i];
-            EXPECT_EQ(o.priceLow, e.priceLow); EXPECT_EQ(o.ask, e.ask); EXPECT_EQ(o.qty, e.qty);
-            EXPECT_EQ(o.meanQty, e.meanQty); EXPECT_EQ(o.notional, e.notional); EXPECT_EQ(o.columns, e.columns);
-            EXPECT_EQ(o.firstSeenMs, e.firstSeenMs); EXPECT_EQ(o.lastSeenMs, e.lastSeenMs);
-            EXPECT_EQ(o.bucketStartMs, e.bucketStartMs);
-        }
+        const auto expected = pageWalls(page, wallQuery, tf, epoch, epoch+2*kHourMs);
         LabelWindowBuilder builder;
         auto actual = scanWalls({wallQuery, tf, 1000, 100, double(epoch), double(epoch+2*kHourMs), low, high},
                                 spans, nullptr, store, builder);

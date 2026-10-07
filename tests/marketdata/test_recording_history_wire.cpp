@@ -59,17 +59,10 @@ TEST(RecordingHistoryWire, ChunkPadsTopRowsAndValidity) {
     EXPECT_EQ(QByteArray::fromBase64(QByteArray::fromStdString(item.at("validity").get<std::string>())).toHex(), "14");
     EXPECT_EQ(QByteArray::fromBase64(QByteArray::fromStdString(item.at("column").get<std::string>())).toHex(),
               "00000000341200000280");
-    const auto parsed = SentinelStreamClient::parseRecordingHistoryChunk(wire);
-    ASSERT_TRUE(parsed);
-    EXPECT_EQ(parsed->requestId, "r-2");
-    EXPECT_EQ(parsed->bandGeneration, 3u);
-    EXPECT_EQ(parsed->bandRows, 5);
-    EXPECT_EQ(parsed->scannedStartMs, 60'000);
-    EXPECT_TRUE(parsed->exhausted);
-    ASSERT_EQ(parsed->columns.size(), 1);
-    EXPECT_EQ(parsed->columns[0].validity.toHex(), "14");
-    EXPECT_EQ(parsed->columns[0].observedMs, 45'000u);
-    EXPECT_EQ(parsed->columns[0].flags, recording::kPartial);
+    // The client parser went with the legacy GUI page path (S8a); the server's
+    // encoding is checked on the wire until S8b removes it.
+    EXPECT_TRUE(wire.at("exhausted").get<bool>());
+    EXPECT_EQ(wire.at("columns").size(), 1u);
 }
 
 TEST(RecordingHistoryWire, CoveredPaddingKeepsValidityButClearsValues) {
@@ -106,11 +99,10 @@ TEST(RecordingHistoryWire, StatusErrorsAndCapabilities) {
     partial.band = {100.0, 10.0, 4};
     partial.status = recording::BuildStatus::Budget;
     partial.nextEnd = 60'000;
-    const auto dto = SentinelStreamClient::parseRecordingHistoryChunk(buildChunk(q, partial));
-    ASSERT_TRUE(dto);
-    EXPECT_EQ(dto->status, "budget");
-    EXPECT_FALSE(dto->exhausted);
-    EXPECT_EQ(dto->nextEndMs, 60'000);
+    const auto dto = buildChunk(q, partial);
+    EXPECT_EQ(dto.at("status"), "budget");
+    EXPECT_FALSE(dto.at("exhausted").get<bool>());
+    EXPECT_EQ(dto.at("next_end"), 60'000);
     const auto err = error("BTC-USD", "queue full", "r-3", 9);
     EXPECT_EQ(err.at("request_id"), "r-3");
     EXPECT_EQ(err.at("band_generation"), 9);
@@ -180,14 +172,13 @@ TEST(RecordingHistoryWire, LiveUsesIdenticalColumnEncodingAndEchoesGeneration) {
     EXPECT_EQ(wire["type"], "heatmap_recording_live");
     EXPECT_EQ(wire["band_generation"], 123);
     EXPECT_EQ(wire["scanned_start"], 0);
-    auto parsed = SentinelStreamClient::parseRecordingHistoryChunk(wire);
-    ASSERT_TRUE(parsed);
-    ASSERT_EQ(parsed->columns.size(), 1);
-    EXPECT_EQ(parsed->columns[0].observedMs, 1234);
-    EXPECT_EQ(parsed->columns[0].flags, column.flags);
-    EXPECT_EQ(parsed->columns[0].intensity.toHex(), "0100020003800000");
-    EXPECT_EQ(parsed->columns[0].validity.toHex(), "0f");
-    EXPECT_EQ(parsed->bandGeneration, 123);
+    ASSERT_EQ(wire.at("columns").size(), 1u);
+    const auto& item = wire.at("columns").at(0);
+    EXPECT_EQ(item.at("observed_ms"), 1234);
+    EXPECT_EQ(item.at("flags"), column.flags);
+    EXPECT_EQ(QByteArray::fromBase64(QByteArray::fromStdString(item.at("column").get<std::string>())).toHex(),
+              "0100020003800000");
+    EXPECT_EQ(QByteArray::fromBase64(QByteArray::fromStdString(item.at("validity").get<std::string>())).toHex(), "0f");
 }
 
 TEST(RecordingHistoryWire, ViewErrorsCarryTypeIdentityAndRetryDelay) {

@@ -139,7 +139,7 @@ TEST(AgentApiWallsRoute, GpuReturns200ValidatesPeriodAndKeepsSelectionEpoch409) 
             EXPECT_EQ(q.startMs, 100); EXPECT_EQ(q.endMs, 200); EXPECT_EQ(q.tick, expectedTick);
             QMetaObject::invokeMethod(&context, [&, complete = std::move(complete)] {
                 if (changeSelection) ++state.meta.selectionEpoch;
-                heatmap::WallsSnapshot result; result.gpuRenderer = true; result.bandTick = 5;
+                heatmap::WallsSnapshot result; result.bandTick = 5;
                 result.recordedColumns = 1; result.rangeStartMs = 100; result.rangeEndMs = 200;
                 result.error = wallError;
                 if (wallError != heatmap::WallError::None) result.status = 422;
