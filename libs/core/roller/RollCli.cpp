@@ -73,6 +73,7 @@ int rollMain(int argc,char** argv) {
             o.anchorRoot = o.outputRoot;
             o.outputRoot = scratch.path().toStdString();
             o.useAnchors = false; o.writeAnchors = true;
+            o.anchorFailuresFatal = true;
         }
         nlohmann::json reports=nlohmann::json::array();
         for (const auto& p:products) {

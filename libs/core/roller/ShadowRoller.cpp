@@ -907,6 +907,7 @@ struct ShadowRoller::Impl {
       auto p = std::make_unique<Product>();
       p->name = std::move(name);
       registerJournalMetrics(registry, p->name);
+      registerAnchorMetrics(registry, p->name);
       const metrics::Labels labels = {{"product", p->name}};
       p->running = &registry.gauge(
           "sentinel_roller_shadow_running",

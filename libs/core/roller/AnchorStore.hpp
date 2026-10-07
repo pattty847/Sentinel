@@ -36,8 +36,9 @@ public:
     static std::vector<std::filesystem::path> candidates(const std::filesystem::path& root,
         const std::string& product, int64_t dayMs);
     // Journal-time retention: midnight survives forever. Never traverses other stores.
-    static void prune(const std::filesystem::path& root, const std::string& product, int64_t nowMs);
-    static void write(const std::filesystem::path& root, const ReplayAnchor&);
+    static std::error_code prune(const std::filesystem::path& root, const std::string& product, int64_t nowMs);
+    struct WriteStats { uint64_t encodedBytes; double encodeMs, writeMs; };
+    static WriteStats write(const std::filesystem::path& root, const ReplayAnchor&);
     // Missing/corrupt/incompatible cache is a miss, with an explicit reason.
     // Cross-run ceiling ordering belongs to the journal inventory: conservatively
     // reject a different run here when a ceiling is supplied.

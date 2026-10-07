@@ -316,6 +316,9 @@ mutations = [
      'const auto pinned = journal ? rollerProducts(m_serverConfig)', 'const auto pinned = false ? rollerProducts(m_serverConfig)',
      'ShadowTest.JournalLiveFeedAdmissionIgnoresTheEngineCap'),
 ]
+mutations.append(('db1-anchor failure metric registered', SR,
+    'registerAnchorMetrics(registry, p->name);', ';',
+    'ShadowTest.AnchorFailureMetricRegisteredAtStartup'))
 mutations.append(('db1-anchor durable model book is restored without replay', SR,
     'if (tap.enabled()) tap.restoreAnchor(book,up);', ';',
     'ShadowTest.JournalTapAnchorAtDurableTipRestoresWholeBookWithoutReplay'))

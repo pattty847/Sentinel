@@ -1337,7 +1337,7 @@ std::unique_ptr<BookRecorder> BookRecorder::forkLead(std::function<void(std::sha
 std::vector<uint8_t> BookRecorder::exportState() {
     drain(); // producer-only, same synchronization contract as forkLead()
     auto& src = *impl_;
-    stateRequire(!src.diskErrors && !src.queueDrops, "cannot anchor failed recorder");
+    if (src.diskErrors || src.queueDrops) return {}; // degraded recorder has no usable cache state
     StateJson j = {{"version",1},{"policy",statePolicy(src.cfg)},
         {"floatDigits",std::numeric_limits<long double>::digits},
         {"floatExponent",std::numeric_limits<long double>::max_exponent},

@@ -7,6 +7,7 @@
 #include <zstd.h>
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #ifdef _WIN32
 #include <io.h>
 #endif
@@ -100,8 +101,10 @@ ReplayAnchor AnchorStore::decode(const std::vector<uint8_t>& bytes) {
     validate(a);
     return a;
 }
-void AnchorStore::write(const std::filesystem::path& root, const ReplayAnchor& a) {
+AnchorStore::WriteStats AnchorStore::write(const std::filesystem::path& root, const ReplayAnchor& a) {
+    const auto started = std::chrono::steady_clock::now();
     const auto bytes = encode(a); // validate before even creating directories
+    const auto encoded = std::chrono::steady_clock::now();
     const auto file = path(root,a);
     std::vector<std::filesystem::path> missing;
     auto parent = std::filesystem::absolute(file.parent_path());
@@ -124,6 +127,9 @@ void AnchorStore::write(const std::filesystem::path& root, const ReplayAnchor& a
     require(out.commit(), "rename failed");
     require(persistence::syncFilePath(file,error) && persistence::syncDirectory(file.parent_path(),error),
             "durable rename failed");
+    const auto done = std::chrono::steady_clock::now();
+    return {bytes.size(),std::chrono::duration<double,std::milli>(encoded-started).count(),
+        std::chrono::duration<double,std::milli>(done-encoded).count()};
 }
 ReplayAnchor AnchorStore::load(const std::filesystem::path& file) {
         const auto size = std::filesystem::file_size(file);
@@ -146,25 +152,53 @@ std::vector<std::filesystem::path> AnchorStore::candidates(const std::filesystem
     std::sort(out.rbegin(),out.rend());
     return out;
 }
-void AnchorStore::prune(const std::filesystem::path& root, const std::string& product, int64_t nowMs) {
+std::error_code AnchorStore::prune(const std::filesystem::path& root, const std::string& product, int64_t nowMs) {
+    namespace fs = std::filesystem;
     capture::validateSymbol(product);
+    std::error_code firstError;
+    const auto remember = [&](std::error_code ec) { if (ec && !firstError) firstError = ec; };
+    const auto status = [&](const fs::path& path) {
+        std::error_code ec;
+        auto s = fs::symlink_status(path,ec);
+        if (ec != std::errc::no_such_file_or_directory) remember(ec);
+        return s;
+    };
     const auto dir = root/product/"anchors";
-    if (std::filesystem::is_symlink(root/product) || std::filesystem::is_symlink(dir) ||
-        !std::filesystem::is_directory(dir)) return;
-    for (const auto& d : std::filesystem::directory_iterator(dir)) {
-        if (d.is_symlink() || !d.is_directory()) continue;
-        const auto date = QDate::fromString(QString::fromStdString(d.path().filename().string()),"yyyy-MM-dd");
-        if (!date.isValid()) continue;
+    if (!fs::is_directory(status(root/product)) || !fs::is_directory(status(dir))) return firstError;
+    // Temp-file age uses wall time; historical journal rebuilds must also clean
+    // abandoned QSaveFile files. Completed anchors retain journal-time policy.
+    const auto staleBefore = fs::file_time_type::clock::now() - std::chrono::hours(1);
+    std::error_code ec;
+    auto days = fs::directory_iterator(dir,ec);
+    remember(ec);
+    for (; days != fs::directory_iterator{}; days.increment(ec), remember(ec)) {
+        const auto d = days->path();
+        if (!fs::is_directory(status(d))) continue; // includes symlink exclusion
+        const auto dateText = QString::fromStdString(d.filename().string());
+        const auto date = QDate::fromString(dateText,"yyyy-MM-dd");
+        if (!date.isValid() || date.toString("yyyy-MM-dd") != dateText) continue;
         const auto day = QDateTime(date,QTime(0,0),QTimeZone::UTC).toMSecsSinceEpoch();
-        for (const auto& f : std::filesystem::directory_iterator(d)) {
-            const auto name = f.path().filename().string();
-            if (f.is_symlink() || !f.is_regular_file() || name.size() != 11 || name == "0000.anchor" ||
-                name.substr(4) != ".anchor") continue;
+        auto files = fs::directory_iterator(d,ec);
+        remember(ec);
+        for (; files != fs::directory_iterator{}; files.increment(ec), remember(ec)) {
+            const auto file = files->path();
+            const auto name = file.filename().string();
+            if (!fs::is_regular_file(status(file)) || name.size() < 11 || name.substr(4,7) != ".anchor") continue;
             const auto time = QTime::fromString(QString::fromStdString(name.substr(0,4)),"HHmm");
-            if (!time.isValid() || time.minute() % 15 || day + time.msecsSinceStartOfDay() >= nowMs - 2*Day) continue;
-            std::filesystem::remove(f.path());
+            if (!time.isValid() || time.minute() % 15) continue;
+            if (name.size() == 11) {
+                if (name == "0000.anchor" || day + time.msecsSinceStartOfDay() >= nowMs - 2*Day) continue;
+            } else {
+                if (name.size() <= 12 || name[11] != '.') continue;
+                const auto modified = fs::last_write_time(file,ec);
+                remember(ec);
+                if (ec || modified >= staleBefore) continue;
+            }
+            fs::remove(file,ec);
+            remember(ec);
         }
     }
+    return firstError;
 }
 std::optional<ReplayAnchor> AnchorStore::read(const std::filesystem::path& file, const AnchorIdentity& expected,
         int64_t maxBoundaryMs, std::optional<JournalPos> ceiling, std::string* rejection) {

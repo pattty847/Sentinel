@@ -28,6 +28,7 @@ add_test(NAME RollerCorruptBlockTests COMMAND test_roller_corrupt_blocks)
 set_tests_properties(RollerCorruptBlockTests PROPERTIES LABELS "roller" TIMEOUT 120)
 
 add_executable(test_journal_anchors test_anchors.cpp)
+target_compile_definitions(test_journal_anchors PRIVATE ANCHOR_LIVE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/btc-prefix.rawl2")
 target_link_libraries(test_journal_anchors PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
 add_test(NAME JournalAnchorTests COMMAND test_journal_anchors)
 set_tests_properties(JournalAnchorTests PROPERTIES LABELS "roller" TIMEOUT 180)

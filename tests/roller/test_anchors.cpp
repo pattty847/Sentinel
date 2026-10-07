@@ -1,4 +1,6 @@
 #include "roller/AnchorStore.hpp"
+#include "metrics/MetricsRegistry.hpp"
+#include <mutex>
 #include "roller/Roller.hpp"
 #include "roller/Grid.hpp"
 #include "roller/JournalFeed.hpp"
@@ -589,4 +591,156 @@ TEST(AnchorReplay, CancelledRangeDoesNotPruneFutureTime) {
     o.onApplied=[&](const auto& r){ if(r.record.time.systemNs/1000000>=Epoch+Quarter) stop=true; };
     roll(o);
     EXPECT_TRUE(fs::exists(young)); EXPECT_FALSE(fs::exists(expired));
+}
+
+namespace {
+std::mutex anchorLogMutex;
+std::vector<QString>* anchorLogs = nullptr;
+struct AnchorLogs {
+    std::vector<QString> messages;
+    QtMessageHandler previous;
+    AnchorLogs() {
+        { std::lock_guard lock(anchorLogMutex); anchorLogs = &messages; }
+        previous = qInstallMessageHandler([](QtMsgType,const QMessageLogContext&,const QString& message) {
+            std::lock_guard lock(anchorLogMutex);
+            if (anchorLogs) anchorLogs->push_back(message);
+        });
+    }
+    ~AnchorLogs() { qInstallMessageHandler(previous); std::lock_guard lock(anchorLogMutex); anchorLogs = nullptr; }
+    size_t count(const QString& text) {
+        std::lock_guard lock(anchorLogMutex);
+        return std::count_if(messages.begin(),messages.end(),[&](const auto& m){return m.contains(text);});
+    }
+};
+struct RestorePermissions {
+    fs::path path;
+    ~RestorePermissions() { std::error_code ec; fs::permissions(path,fs::perms::owner_all,ec); }
+};
+uint64_t anchorMetric(metrics::MetricsRegistry& registry) {
+    const auto text=registry.render();
+    const std::string prefix="sentinel_roller_anchor_failures_total{product=\"BTC-USD\"} ";
+    const auto at=text.find(prefix);
+    if(at==std::string::npos) { ADD_FAILURE()<<text; return 0; }
+    return std::stoull(text.substr(at+prefix.size()));
+}
+}
+TEST(AnchorReplay, UnwritableLiveFixtureCacheDoesNotAbort) {
+    QTemporaryDir tmp; const fs::path root=tmp.path().toStdString(); fs::create_directories(root/"raw");
+    fs::copy_file(ANCHOR_LIVE_FIXTURE,root/"raw"/"btc.rawl2");
+    const auto from=parseTime("2026-10-01T04:45:00Z"),to=from+10*Minute;
+    RollOptions o{root/"raw",root/"baseline","BTC-USD",from,to}; o.writeAnchors=false;
+    const auto baseline=roll(o); ASSERT_EQ(baseline["days"][0]["committedThroughMs"],to);
+    metrics::MetricsRegistry registry; registerAnchorMetrics(registry,"BTC-USD");
+    EXPECT_NO_THROW(registerAnchorMetrics(registry,"BTC-USD"));
+    for (const auto mode : {fs::perms::owner_read|fs::perms::owner_exec, fs::perms::none}) {
+        o.outputRoot=root/(mode==fs::perms::none?"inaccessible":"unwritable"); o.writeAnchors=true;
+        const auto dir=o.outputRoot/"BTC-USD"/"anchors"; fs::create_directories(dir);
+        RestorePermissions restore{dir}; fs::permissions(dir,mode);
+        const auto before=anchorMetric(registry); AnchorLogs logs;
+        json report; ASSERT_NO_THROW(report=roll(o));
+        const auto& day=report["days"][0];
+        EXPECT_EQ(day["committedThroughMs"],to);
+        const auto failures=day.at("anchorWriteFailures").get<uint64_t>(); EXPECT_GT(failures,0);
+        EXPECT_EQ(logs.count("Roller anchor write failed product=BTC-USD"),failures);
+        EXPECT_EQ(anchorMetric(registry)-before,failures+day.value("anchorPruneFailures",0u)+day.value("anchorReadFailures",0u));
+        if (mode==fs::perms::none) { EXPECT_EQ(day["anchorReadFailures"],1); EXPECT_EQ(day["anchorPruneFailures"],1); }
+        fs::permissions(dir,fs::perms::owner_all); // parity reader is not the cache-isolation subject
+        EXPECT_EQ(files(root/"baseline"),files(o.outputRoot));
+        for(const auto* layer:{"near","deep"})
+            EXPECT_EQ(diff(root/"baseline",o.outputRoot,"BTC-USD",layer,from,to,Minute,true)["mismatching"],0);
+    }
+}
+TEST(AnchorReplay, ExportExceptionsAndDegradedStateAreCacheMisses) {
+    QTemporaryDir tmp; const fs::path root=tmp.path().toStdString(); replayFixture(root/"raw",2*Quarter);
+    RollOptions base{root/"raw",root/"baseline","BTC-USD",Epoch,Epoch+2*Quarter}; base.writeAnchors=false; roll(base);
+    for(int mode=0;mode<4;++mode) {
+        auto cfg=deriveGrid(meta(),100000).config(root/("degraded"+std::to_string(mode)));
+        cfg.blockingQueue=false; cfg.maxQueuedLevels=mode==2?1:100;
+        if(mode==3) { fs::create_directories(cfg.root); std::ofstream(cfg.root/"BTC-USD")<<"blocks recorder product writes"; }
+        BookRecorder degraded(cfg);
+        degraded.onSnapshotAt("BTC-USD",Epoch,Epoch,{{true,99999,1},{false,100001,1}});
+        degraded.onTick(Epoch+123000); degraded.drain();
+        if(mode>=2) {
+            EXPECT_GT(mode==2?degraded.stats().queueDrops:degraded.stats().diskErrors,0);
+            EXPECT_TRUE(degraded.exportState().empty());
+        }
+        auto o=base; o.outputRoot=root/("out"+std::to_string(mode)); o.writeAnchors=true;
+        o.anchorExportForTest=[&](BookRecorder&) -> std::vector<uint8_t> {
+            if(mode==0) throw std::runtime_error("injected export failure");
+            if(mode==1) throw 17;
+            // Exercise a genuinely degraded export without weakening the primary
+            // recorder's independent fail-closed checkpoint fence.
+            return degraded.exportState();
+        };
+        AnchorLogs logs; json report; ASSERT_NO_THROW(report=roll(o));
+        EXPECT_EQ(report["days"][0]["committedThroughMs"],o.toMs);
+        EXPECT_EQ(report["days"][0]["anchorWriteFailures"],2);
+        EXPECT_EQ(logs.count("Roller anchor write failed product="),mode>=2?1:2);
+        EXPECT_TRUE(AnchorStore::candidates(o.outputRoot,"BTC-USD",Epoch).empty());
+        parity(base.outputRoot,o.outputRoot,"BTC-USD",o.toMs);
+        o.outputRoot=root/("fatal"+std::to_string(mode)); o.anchorFailuresFatal=true;
+        EXPECT_THROW(roll(o),std::runtime_error);
+    }
+}
+TEST(AnchorReplay, WriteTimingAndStrictRebuildFailures) {
+    QTemporaryDir tmp; const fs::path root=tmp.path().toStdString(); replayFixture(root/"raw",2*Quarter);
+    RollOptions o{root/"raw",root/"out","BTC-USD",Epoch,Epoch+2*Quarter};
+    AnchorLogs logs; roll(o);
+    EXPECT_EQ(logs.count("Roller anchor written product=BTC-USD"),2);
+    EXPECT_EQ(logs.count(" exportMs="),2); EXPECT_EQ(logs.count(" encodeMs="),2);
+    EXPECT_EQ(logs.count(" encodedBytes="),2); EXPECT_EQ(logs.count(" writeMs="),2);
+    const auto dir=root/"rebuild"/"BTC-USD"/"anchors"; fs::create_directories(dir);
+    RestorePermissions restore{dir}; fs::permissions(dir,fs::perms::owner_read|fs::perms::owner_exec);
+    std::ofstream(root/"config.yaml")<<"recording:\n  dir: "<<(root/"primary").string()<<"\n";
+    std::vector<std::string> args={"sentinel-roll","rebuild-anchors",(root/"raw").string(),(root/"rebuild").string(),
+        "--products","BTC-USD","--from","2026-10-05T00:00:00Z","--to","2026-10-05T00:30:00Z","--config",(root/"config.yaml").string()};
+    std::vector<char*> argv; for(auto& arg:args) argv.push_back(arg.data());
+    EXPECT_EQ(rollMain(int(argv.size()),argv.data()),1);
+}
+TEST(AnchorReplay, ThrowingOverlapReaderRejectsOlderCandidates) {
+    QTemporaryDir tmp; const fs::path root=tmp.path().toStdString(); replayFixture(root/"raw");
+    RollOptions full{root/"raw",root/"full","BTC-USD",Epoch,Epoch+2*3'600'000}; roll(full);
+    for(int mode=0;mode<2;++mode) {
+        auto o=full; o.outputRoot=root/("resume"+std::to_string(mode)); copyPrefix(full.outputRoot,o.outputRoot);
+        fs::copy_file(full.outputRoot/"BTC-USD"/"roller.json",o.outputRoot/"BTC-USD"/"roller.json");
+        o.anchorRoot=full.outputRoot; o.writeAnchors=false;
+        int reads=0;
+        o.anchorOverlapReadForTest=[&](JournalReader&,JournalRecord&) -> bool {
+            ++reads;
+            if(mode==0) throw std::runtime_error("injected overlap read failure");
+            throw 42;
+        };
+        const auto report=roll(o);
+        EXPECT_EQ(reads,1); EXPECT_EQ(report["days"][0]["anchorCandidatesDecoded"],1);
+        EXPECT_FALSE(report["days"][0].contains("anchorBoundaryMs"));
+        parity(full.outputRoot,o.outputRoot,"BTC-USD",o.toMs);
+    }
+}
+TEST(AnchorStore, PruneOnlyStaleRecognizedTemporariesAndReportErrors) {
+    QTemporaryDir tmp; const fs::path root=tmp.path().toStdString(); auto a=anchor(); AnchorStore::write(root,a);
+    const auto dir=AnchorStore::path(root,a).parent_path();
+    for(const auto* name:{"0000.anchor.stale","0015.anchor.stale","0015.anchor.fresh","0010.anchor.stale","0015.anchorX.stale","notes","0015.anchor."}) {
+        const auto file=dir/name; std::ofstream(file)<<"test";
+        fs::last_write_time(file,fs::file_time_type::clock::now()-std::chrono::hours(std::string_view(name)=="0015.anchor.fresh"?0:2));
+    }
+    fs::create_symlink(dir/"notes",dir/"0030.anchor.link");
+    EXPECT_FALSE(AnchorStore::prune(root,"BTC-USD",Epoch));
+    EXPECT_FALSE(fs::exists(dir/"0000.anchor.stale")); EXPECT_FALSE(fs::exists(dir/"0015.anchor.stale"));
+    for(const auto* name:{"0000.anchor","0015.anchor.fresh","0010.anchor.stale","0015.anchorX.stale","notes","0015.anchor.","0030.anchor.link"}) EXPECT_TRUE(fs::exists(dir/name))<<name;
+    RestorePermissions restore{dir}; fs::permissions(dir,fs::perms::none);
+    std::error_code error; EXPECT_NO_THROW(error=AnchorStore::prune(root,"BTC-USD",Epoch)); EXPECT_TRUE(error);
+}
+TEST(AnchorReplay, PruneFailureIsNonFatalUnlessRebuilding) {
+    QTemporaryDir tmp; const fs::path root=tmp.path().toStdString(); replayFixture(root/"raw",2*Quarter);
+    RollOptions o{root/"raw",root/"out","BTC-USD",Epoch,Epoch+2*Quarter}; o.useAnchors=false;
+    o.anchorRoot=root/"cache";
+    const auto dir=o.anchorRoot/"BTC-USD"/"anchors"/"2026-10-04"; fs::create_directories(dir);
+    RestorePermissions restore{dir}; fs::permissions(dir,fs::perms::none);
+    metrics::MetricsRegistry registry; registerAnchorMetrics(registry,"BTC-USD"); const auto before=anchorMetric(registry);
+    AnchorLogs logs; json report; ASSERT_NO_THROW(report=roll(o));
+    EXPECT_EQ(report["days"][0]["committedThroughMs"],o.toMs);
+    EXPECT_EQ(report["days"][0]["anchorPruneFailures"],1);
+    EXPECT_EQ(logs.count("Roller anchor Prune failed product="),1); EXPECT_EQ(anchorMetric(registry),before+1);
+    o.anchorFailuresFatal=true; o.outputRoot=root/"fatal";
+    EXPECT_THROW(roll(o),std::runtime_error);
 }

@@ -3232,3 +3232,8 @@ TEST_F(ShadowTest, JournalTapRestoresBatchRebuiltAnchor) {
   EXPECT_EQ(modelCount("invalidate"),0u);
   shadow.reset(); writer->close();
 }
+
+TEST_F(ShadowTest, AnchorFailureMetricRegisteredAtStartup) {
+  start();
+  EXPECT_TRUE(metrics->hasSeries("sentinel_roller_anchor_failures_total", {{"product", Product}}));
+}
