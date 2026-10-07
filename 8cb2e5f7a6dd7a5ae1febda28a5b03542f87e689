@@ -1,0 +1,12 @@
+Slice: S8a
+Plan: docs/research/2026-10-s8-legacy-deletion.md
+Risk: high
+Writer: claude-opus
+Reviewer: gpt-6-astra-high
+Review-Rounds: 1
+Findings: blocker=0 major=0 minor=1
+Deferred: 1 (legacy frames parsed before drop; S8b removes the sender)
+Writer-Tokens: ~1.71M (sum of two run reports)
+Reviewer-Tokens: 2.13M (ma-panel, thread 01a113f7)
+Planner-Tokens: 0.24M (Fable)
+Evidence: .claude/acting-orchestrator/s8a/
