@@ -34,6 +34,7 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 | Branch | Tip | State | Next |
 |---|---|---|---|
+| `lt-claude/roller-db1` | `6a60e4a` (base) | D-b1 writer (Claude `opus`): journal feeds the model behind `recording.live_feed: engine|journal` (default engine) per `docs/research/2026-10-one-world-db-packet.md` | Review `gpt-6-astra` high; land only AFTER the R2 deploy |
 
 Retired 2026-10-06 (owner): `lt-sol/label-style` and `lt-claude/heatmap-ab-isolation`, tips kept as tags `archive/<branch>`. Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orchestrator/`. The
 `.claude/worktrees/youthful-ishizaka-b0e889` (`60caa04`, branch `claude/exciting-hypatia-1c7a34`) is not part of this work; leave it alone.
