@@ -2199,6 +2199,19 @@ void expectReseededFromDurable(ShadowTest &t, size_t updateIndex) {
   EXPECT_FALSE(t.eventBook(log[reseed]).second.contains(100500));
   EXPECT_EQ(t.resnapshots.load(), 0); // never asks capture to reconnect
 }
+// Scenario tail: after the re-seed the book is live again (a new provisional
+// level arrives before its durable marker) and history is batch-identical.
+void expectLiveAgainWithHistoryUnchanged(ShadowTest &t, int64_t fromSecond) {
+  for (int s = int(fromSecond); s <= 125; ++s)
+    t.writer->append(record(s * 1000, s == 100 ? offer("100004", "2") : heartbeat()));
+  ASSERT_TRUE(eventually([&] { return t.updateAt(100004, 2) != std::string::npos; }));
+  EXPECT_LT(t.modelLog("updates").back().applied, 126u);
+  t.writer->flush();
+  ASSERT_TRUE(eventually([&] { return t.count() == 126; }));
+  t.shadow.reset();
+  t.writer->close();
+  t.parity(120000);
+}
 TEST_F(ShadowTest, JournalTapRetractInvalidatesThenReseedsDurableState) {
   tapModel();
   initial();
@@ -2216,8 +2229,7 @@ TEST_F(ShadowTest, JournalTapRetractInvalidatesThenReseedsDurableState) {
   ASSERT_TRUE(eventually([&] { return modelCount("snapshot") == 2; }));
   expectReseededFromDurable(*this, update);
   EXPECT_EQ(count(), 64u);
-  shadow.reset();
-  writer->close();
+  expectLiveAgainWithHistoryUnchanged(*this, 64);
 }
 TEST_F(ShadowTest, JournalTapDisconnectInvalidatesThenReseedsDurableState) {
   tapModel();
@@ -2245,8 +2257,7 @@ TEST_F(ShadowTest, JournalTapDisconnectInvalidatesThenReseedsDurableState) {
                 "sentinel_fanout_disconnects_total{reason=\"slow_client\"} 0\n"),
             std::string::npos);
   expectReseededFromDurable(*this, update);
-  shadow.reset();
-  writer->close();
+  expectLiveAgainWithHistoryUnchanged(*this, 64);
 }
 TEST_F(ShadowTest, JournalTapEofInvalidatesThenReseedsDurableState) {
   serve(); // with the live heatmap lead, as served
@@ -2273,8 +2284,47 @@ TEST_F(ShadowTest, JournalTapEofInvalidatesThenReseedsDurableState) {
   EXPECT_EQ(modelLog("snapshot").back().applied, 127u);
   EXPECT_TRUE(eventBook(modelLog("snapshot").back()).second.contains(100003));
   expectReseededFromDurable(*this, update);
+  // The new fan-out held no resume cursor: journal catch-up (ring miss).
+  EXPECT_EQ(fanoutMetrics->render().find(
+                "sentinel_fanout_resume_misses_total{product=\"BTC-USD\"} 0\n"),
+            std::string::npos);
+  for (int s = 127; s <= 185; ++s)
+    writer->append(record(s * 1000, s == 130 ? offer("100004", "2") : heartbeat()));
+  ASSERT_TRUE(eventually([&] { return updateAt(100004, 2) != std::string::npos; }));
+  writer->flush();
+  ASSERT_TRUE(eventually([&] { return count() == 186; }));
   shadow.reset();
   writer->close();
+  parity(180000);
+  expectOrderedLive();
+}
+// A capture freeze at the tip (FM-127) on the fake wall clock: 30 s without a
+// socket record invalidates the book and reports disconnected; when records
+// return the book re-seeds and is live, and history is untouched.
+TEST_F(ShadowTest, JournalTapThirtySecondTipSilenceInvalidatesThenReseeds) {
+  serve();
+  tapModel();
+  initial();
+  start();
+  ASSERT_TRUE(eventually([&] {
+    return modelCount("snapshot") == 1 && modelCount("connection") == 1;
+  }));
+  liveNow = Epoch + 29000;
+  std::this_thread::sleep_for(200ms);
+  EXPECT_EQ(modelCount("invalidate"), 0u); // 29 s is not silence
+  liveNow = Epoch + 30000;
+  ASSERT_TRUE(eventually([&] { return modelCount("invalidate") == 1; }));
+  ASSERT_TRUE(eventually([&] { return modelCount("connection") == 2; }));
+  EXPECT_FALSE(modelLog("connection").back().connected);
+  EXPECT_EQ(modelLog("invalidate").front().reason, "journal tip silent");
+  writer->append(record(64000)); // capture is back
+  ASSERT_TRUE(eventually([&] {
+    return modelCount("snapshot") == 2 && modelCount("connection") == 3;
+  }));
+  EXPECT_TRUE(modelLog("connection").back().connected);
+  EXPECT_EQ(eventBook(modelLog("snapshot").back()), batchBook());
+  expectLiveAgainWithHistoryUnchanged(*this, 65);
+  expectOrderedLive();
 }
 // A7: after a restart the model gets nothing from the day's catch-up replay;
 // the seed arrives at the durable tip, equal to batch.
