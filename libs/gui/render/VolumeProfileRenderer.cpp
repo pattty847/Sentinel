@@ -10,11 +10,15 @@
 #include <QSGVertexColorMaterial>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 namespace {
+
+// Four vertices per bar; the last legal vertex index is 65535.
+constexpr int kMaxIndexedBars = (int(std::numeric_limits<quint16>::max()) + 1) / 4;
 
 // Change the draw range without freeing the retained geometry storage.
 // Qt 6.9 has no draw-count setters: unused indexed triangles must degenerate
@@ -30,6 +34,8 @@ void setDrawCounts(QSGGeometry* geo, int vertices, int indices) {
     }
     auto* idx = geo->indexDataAsUShort();
     std::fill(idx + indices, idx + geo->indexCount(), quint16(0));
+    geo->markVertexDataDirty();
+    geo->markIndexDataDirty();
 #endif
 }
 
@@ -56,6 +62,21 @@ void fillRect(QSGGeometry* geo, const QRectF& r, const QColor& c) {
     auto* idx = geo->indexDataAsUShort();
     idx[0] = 0; idx[1] = 1; idx[2] = 2;
     idx[3] = 1; idx[4] = 3; idx[5] = 2;
+    geo->markVertexDataDirty();
+    geo->markIndexDataDirty();
+}
+
+// Clip filled VP rectangles before submission, including the POC thickness.
+// Retain geometry storage when a rectangle is completely outside the surface.
+void fillClippedRect(QSGGeometry* geo, const QRectF& rect,
+                     const QRectF& surface, const QColor& color) {
+    const QRectF clipped = rect.intersected(surface);
+    if (clipped.isEmpty()) {
+        setDrawCounts(geo, 0, 0);
+        return;
+    }
+    setDrawCounts(geo, 4, 6);
+    fillRect(geo, clipped, color);
 }
 
 // Price → screen Y within drawRect for a given visible price range.
@@ -152,25 +173,8 @@ void VolumeProfileRenderer::render(QSGNode* parentNode,
         return;
     }
 
-    const bool firstDraw = !m_vaNode;
     ensureNodes(parentNode);
     rebuildGeometry(drawRect, viewMinPrice, viewMaxPrice, bins, snap);
-    // One initialization event per scene-graph root, not per frame/bucket.
-    if (firstDraw && snap.va.valid && snap.va.vahRow >= 0 &&
-        snap.va.valRow >= snap.va.vahRow && snap.va.valRow < int(bins.size())) {
-        double vaVolume = 0;
-        for (int row = snap.va.vahRow; row <= snap.va.valRow; ++row) {
-            vaVolume += bins[static_cast<size_t>(row)];
-        }
-        sLog_Render("Volume profile geometry initialized: sessionStartMs=" << snap.sessionStartMs
-                    << " gridMinPrice=" << snap.minPrice << " tick=" << snap.tickSize
-                    << " bins=" << bins.size() << " VAL=" << snap.va.valPrice
-                    << " VAH=" << snap.va.vahPrice << " POC=" << snap.va.pocPrice
-                    << " vaVolume=" << vaVolume << " totalVolume=" << snap.va.totalVolume
-                    << " viewMinPrice=" << viewMinPrice << " viewMaxPrice=" << viewMaxPrice
-                    << " vaTopY=" << priceToY(snap.va.vahPrice, viewMinPrice, viewMaxPrice, drawRect)
-                    << " vaBottomY=" << priceToY(snap.va.valPrice, viewMinPrice, viewMaxPrice, drawRect));
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -256,6 +260,11 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
         return;
     }
 
+    sLog_Probe("vp.geometry", "VAL=" << snap.va.valPrice << " VAH=" << snap.va.vahPrice
+               << " POC=" << snap.va.pocPrice << " totalVolume=" << snap.va.totalVolume
+               << " bins=" << n << " viewMinPrice=" << viewMinPrice
+               << " viewMaxPrice=" << viewMaxPrice);
+
     // ── 1. VA band ─────────────────────────────────────────────────────────
     if (snap.va.valid && m_vaNode) {
         const float yVah = priceToY(snap.va.vahPrice, viewMinPrice, viewMaxPrice, drawRect);
@@ -265,8 +274,7 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
                             static_cast<double>(vpWidth),
                             static_cast<double>(std::abs(yVal - yVah)));
         auto* geo = m_vaNode->geometry();
-        setDrawCounts(geo, 4, 6);
-        fillRect(geo, vaRect, m_vaColor);
+        fillClippedRect(geo, vaRect, drawRect, m_vaColor);
         m_vaNode->markDirty(QSGNode::DirtyGeometry);
     } else if (m_vaNode) {
         setDrawCounts(m_vaNode->geometry(), 0, 0);
@@ -282,7 +290,7 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
 
         // Count visible bins first to size the geometry.
         int visCount = 0;
-        for (int i = 0; i < n; ++i) {
+        for (int i = 0; i < n && visCount < kMaxIndexedBars; ++i) {
             const double binTop    = gridMaxPrice - static_cast<double>(i)       * snap.tickSize;
             const double binBottom = gridMaxPrice - static_cast<double>(i + 1)   * snap.tickSize;
             if (binTop < viewMinPrice || binBottom > viewMaxPrice) continue;
@@ -291,7 +299,7 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
 
         auto* geo = m_barsNode->geometry();
         if (visCount > m_barCapacity) {
-            m_barCapacity = std::max(visCount, m_barCapacity * 2);
+            m_barCapacity = std::min(kMaxIndexedBars, std::max(visCount, m_barCapacity * 2));
             geo->allocate(m_barCapacity * 4, m_barCapacity * 6);
         }
         auto* vdata = geo->vertexDataAsColoredPoint2D();
@@ -335,6 +343,8 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
         }
         // Capacity is not a draw count: submit only the vertices/indices filled.
         setDrawCounts(geo, vi, ii);
+        geo->markVertexDataDirty();
+        geo->markIndexDataDirty();
         m_barsNode->markDirty(QSGNode::DirtyGeometry);
     }
 
@@ -347,8 +357,7 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
                              static_cast<double>(vpWidth),
                              static_cast<double>(kPocLineHalfH * 2.0f));
         auto* geo = m_pocNode->geometry();
-        setDrawCounts(geo, 4, 6);
-        fillRect(geo, pocRect, m_pocColor);
+        fillClippedRect(geo, pocRect, drawRect, m_pocColor);
         m_pocNode->markDirty(QSGNode::DirtyGeometry);
     } else if (m_pocNode) {
         setDrawCounts(m_pocNode->geometry(), 0, 0);

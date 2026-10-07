@@ -99,7 +99,7 @@ private:
     float  m_widthFraction = 0.12f;   // 12 % of chart width by default
     bool   m_overlay       = false;
     QColor m_barColor  = QColor(100, 160, 220, 180);
-    QColor m_vaColor   = QColor(100, 220, 235,  60);
+    QColor m_vaColor   = QColor( 60, 200, 100,  60);
     QColor m_pocColor  = QColor(255, 215,   0, 240);
 
     mutable std::mutex m_pendingMutex;

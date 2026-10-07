@@ -11,6 +11,7 @@
 
 #include <QSGGeometryNode>
 #include <cmath>
+#include <utility>
 #include "render/FootprintStreamState.hpp"
 #include "render/TpoStreamState.hpp"
 #include "render/DataProcessor.hpp"
@@ -629,7 +630,7 @@ TEST_F(TradeOverlay, VolumeProfileClearsInvalidValueAreaAndRetainsGrownBuffers) 
 }
 
 
-TEST_F(TradeOverlay, VolumeProfileValueAreaPinsSeventyPercentRangeAndTranslucentCyan) {
+TEST_F(TradeOverlay, VolumeProfileValueAreaPinsSeventyPercentRangeAndTranslucentGreen) {
     // Top-to-bottom rows: total 100, POC row 3 (40), then row 2 (20),
     // then row 4 (15). The smallest contiguous expansion reaching 70%
     // contains 75 and stops before either next neighbouring row (10).
@@ -651,23 +652,21 @@ TEST_F(TradeOverlay, VolumeProfileValueAreaPinsSeventyPercentRangeAndTranslucent
     VolumeProfileRenderer renderer;
     QSGNode root;
     const QRectF surface(20, 30, 800, 400);
-    const auto check = [&](double priceMin, double priceMax) {
+    const auto check = [&](double priceMin, double priceMax, float top, float bottom) {
         renderer.render(&root, true, surface, priceMin, priceMax, bins, snap);
         auto* va = static_cast<QSGGeometryNode*>(root.firstChild());
         auto* geometry = va->geometry();
         ASSERT_EQ(geometry->vertexCount(), 4);
         ASSERT_EQ(geometry->indexCount(), 6);
         const auto* v = geometry->vertexDataAsColoredPoint2D();
-        const float top = float(30 + (priceMax - 130) / (priceMax - priceMin) * 400);
-        const float bottom = float(30 + (priceMax - 115) / (priceMax - priceMin) * 400);
         for (int i = 0; i < 4; ++i) {
             EXPECT_FLOAT_EQ(v[i].x, i % 2 == 0 ? 724 : 820);
             EXPECT_FLOAT_EQ(v[i].y, i < 2 ? top : bottom);
             // QSGVertexColorMaterial consumes premultiplied RGBA. Alpha 60
-            // is 24% opacity; pale cyan (100,220,235) becomes (23,51,55).
-            EXPECT_EQ(v[i].r, 23);
-            EXPECT_EQ(v[i].g, 51);
-            EXPECT_EQ(v[i].b, 55);
+            // is 24% opacity; original green (60,200,100) becomes (14,47,23).
+            EXPECT_EQ(v[i].r, 14);
+            EXPECT_EQ(v[i].g, 47);
+            EXPECT_EQ(v[i].b, 23);
             EXPECT_EQ(v[i].a, 60);
         }
         auto* bars = static_cast<QSGGeometryNode*>(va->nextSibling());
@@ -690,8 +689,8 @@ TEST_F(TradeOverlay, VolumeProfileValueAreaPinsSeventyPercentRangeAndTranslucent
         const quint16 expected[]{0, 1, 2, 1, 3, 2};
         for (int i = 0; i < 6; ++i) EXPECT_EQ(idx[i], expected[i]);
     };
-    check(100, 140); // VA is fully visible.
-    check(120, 125); // Same price bounds, clipped by the chart, not stretched.
+    check(100, 140, 130, 280); // VA is fully visible.
+    check(120, 125, 30, 430); // Both VA edges clip to the surface.
     renderer.setVaColor(QColor(40, 180, 240, 128));
     renderer.render(&root, true, surface, 100, 140, bins, snap);
     const auto* v = static_cast<QSGGeometryNode*>(root.firstChild())->geometry()->vertexDataAsColoredPoint2D();
@@ -701,4 +700,77 @@ TEST_F(TradeOverlay, VolumeProfileValueAreaPinsSeventyPercentRangeAndTranslucent
         EXPECT_EQ(v[i].b, 120);
         EXPECT_EQ(v[i].a, 128);
     }
+}
+
+
+TEST_F(TradeOverlay, VolumeProfileClipsValueAreaAndPocAndHidesDisjointRects) {
+    VolumeProfileRenderer renderer;
+    QSGNode root;
+    VolumeProfileState::Snapshot snap;
+    snap.minPrice = 100;
+    snap.tickSize = 5;
+    snap.gridHeight = 8;
+    const std::vector<float> bins{1, 10, 20, 40, 15, 10, 3, 1};
+    snap.va = VolumeProfileState::computeValueArea(bins, 100, 5);
+    const QRectF surface(20, 30, 800, 400);
+    const auto checkRect = [&](QSGGeometryNode* node, float top, float bottom) {
+        const auto* g = node->geometry();
+        ASSERT_EQ(g->vertexCount(), 4);
+        ASSERT_EQ(g->indexCount(), 6);
+        const auto* v = g->vertexDataAsColoredPoint2D();
+        for (int i = 0; i < 4; ++i) {
+            EXPECT_FLOAT_EQ(v[i].y, i < 2 ? top : bottom);
+            EXPECT_GE(v[i].x, surface.left());
+            EXPECT_LE(v[i].x, surface.right());
+        }
+    };
+    const auto hidden = [](QSGGeometryNode* node) {
+        const auto* g = node->geometry();
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+        EXPECT_EQ(g->vertexCount(), 0);
+        EXPECT_EQ(g->indexCount(), 0);
+#else
+        const auto* idx = g->indexDataAsUShort();
+        for (int i = 0; i < g->indexCount(); ++i) EXPECT_EQ(idx[i], 0);
+#endif
+    };
+    renderer.render(&root, true, surface, 100, 122.5, bins, snap);
+    auto* va = static_cast<QSGGeometryNode*>(root.firstChild());
+    auto* poc = static_cast<QSGGeometryNode*>(va->nextSibling()->nextSibling());
+    checkRect(va, 30, float(30 + 7.5 / 22.5 * 400));
+    checkRect(poc, 30, 31.5); // POC centred on the top edge.
+    renderer.render(&root, true, surface, 122.5, 140, bins, snap);
+    checkRect(va, float(30 + 10.0 / 17.5 * 400), 430);
+    checkRect(poc, 428.5, 430); // POC centred on the bottom edge.
+    for (const auto view : {std::pair{140.0, 160.0}, std::pair{80.0, 100.0}}) {
+        renderer.render(&root, true, surface, view.first, view.second, bins, snap);
+        hidden(va);
+        hidden(poc);
+    }
+    renderer.render(&root, true, surface, 100, 140, bins, snap);
+    checkRect(va, 130, 280); // Restores the retained geometry after hiding.
+    checkRect(poc, 203.5, 206.5);
+}
+
+TEST_F(TradeOverlay, VolumeProfileCapsBarsAtUnsignedShortIndexLimit) {
+    constexpr int maxBars = 16384;
+    VolumeProfileRenderer renderer;
+    QSGNode root;
+    VolumeProfileState::Snapshot snap;
+    snap.minPrice = 100;
+    snap.tickSize = 1;
+    snap.gridHeight = maxBars + 1;
+    const std::vector<float> bins(maxBars + 1, 1);
+    const QRectF surface(20, 30, 800, 400);
+    renderer.render(&root, true, surface, 100, 100.0 + static_cast<double>(bins.size()), bins, snap);
+    auto* g = static_cast<QSGGeometryNode*>(root.firstChild()->nextSibling())->geometry();
+    ASSERT_EQ(g->vertexCount(), maxBars * 4);
+    ASSERT_EQ(g->indexCount(), maxBars * 6);
+    const auto* idx = g->indexDataAsUShort();
+    for (int bar = 0; bar < maxBars; ++bar) {
+        const int first = bar * 4;
+        const int expected[]{first, first+1, first+2, first+1, first+3, first+2};
+        for (int i = 0; i < 6; ++i) EXPECT_EQ(int(idx[bar * 6 + i]), expected[i]);
+    }
+    EXPECT_EQ(idx[maxBars * 6 - 2], 65535);
 }
