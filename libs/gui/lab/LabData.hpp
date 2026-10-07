@@ -4,7 +4,6 @@
 // thread and stats lifetimes are implemented by the production service.
 // GUI thread API unless noted; controllers receive queued calls.
 #include "render/heatmap/HeatmapDataService.hpp"
-#include <QTimer>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -91,7 +90,6 @@ private:
     std::optional<Server> server_;
     std::unique_ptr<heatmap::HeatmapDataService> service_;
     QObject *client_ = nullptr;                     // SentinelStreamClient (server mode)
-    QTimer *reconnectTimer_ = nullptr;
     std::atomic<Connection> connection_{Connection::Local};
     std::atomic<bool> tearingDown_{false};
     heatmap::ChunkTransport *createServerTransport(QObject *context);

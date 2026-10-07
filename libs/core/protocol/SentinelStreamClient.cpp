@@ -5,6 +5,7 @@
 #include "VolumeProfileSlice.hpp"
 #include <QByteArray>
 #include <QElapsedTimer>
+#include <QRandomGenerator>
 #include <array>
 #include <cstdint>
 
@@ -221,24 +222,108 @@ void SentinelStreamClient::connectToServer() {
     m_work = std::make_unique<net::executor_work_guard<net::io_context::executor_type>>(m_ioc.get_executor());
     sLog_Data("SentinelStreamClient connecting: host=" << m_host << " port=" << m_port);
 
-    m_thread = std::thread([this] {
-        sentinel::logging::setCurrentThreadName("stream-client");
+    m_attemptFailed = false;
+    m_retryAttempt = 0;
+    m_connectedAt.reset();
+    m_outageReported = false;
+    m_thread = std::thread([this] { run(); });
+}
+
+int SentinelStreamClient::reconnectDelayMs(unsigned attempt, unsigned jitter) {
+    // Positive jitter spreads clients after a deploy; the final delay stays capped.
+    const unsigned base = 500U << std::min(attempt, 5U);
+    return static_cast<int>(std::min(10000U, base + jitter % (base / 5U + 1U)));
+}
+
+void SentinelStreamClient::run() {
+    sentinel::logging::setCurrentThreadName("stream-client");
+    while (m_running) {
+        net::post(m_strand, [this] {
+            if (!m_running) return;
+            // Bound stalled TCP/TLS/WebSocket handshakes as well as refused connects.
+            boost::beast::get_lowest_layer(*m_ws).expires_after(std::chrono::seconds(10));
+            m_resolver.async_resolve(m_host, m_port, [this](auto ec, auto results) {
+                if (!m_running || m_attemptFailed) return;
+                if (ec) {
+                    failConnection(QString::fromStdString("Resolve: " + ec.message()));
+                    return;
+                }
+                boost::beast::get_lowest_layer(*m_ws).async_connect(
+                    results, [this](auto ec, tcp::endpoint ep) { onConnect(ec, ep); });
+            });
+        });
         try {
-            tcp::resolver resolver(m_ioc);
-            auto const results = resolver.resolve(m_host, m_port);
-            
-            boost::beast::get_lowest_layer(*m_ws).async_connect(
-                results,
-                [this](auto ec, tcp::endpoint ep) { onConnect(ec, ep); }
-            );
-            
-            m_ioc.run();
+            m_ioc.run(); // failure closes the socket and drains every borrowed write buffer
         } catch (const std::exception& e) {
-            sLog_Error("Client thread exception: host=" << m_host << " port=" << m_port
-                       << " error=" << e.what());
-            emit errorOccurred(QString::fromStdString(e.what()));
+            failConnection(QString::fromStdString(e.what()));
+            m_ioc.run(); // drain cancellation even when a handler threw
         }
-    });
+        if (!m_running) break;
+        Q_ASSERT(!m_writeInFlight);
+        // A handshake alone is not recovery: overload can accept then immediately close.
+        if (m_connectedAt && m_disconnectedAt - *m_connectedAt >= std::chrono::seconds(10)) {
+            m_retryAttempt = 0;
+            m_outageReported = false;
+        }
+        m_connectedAt.reset();
+        const int delayMs = reconnectDelayMs(m_retryAttempt, QRandomGenerator::global()->generate());
+        m_retryAttempt = std::min(m_retryAttempt + 1U, 5U);
+        const auto now = ConnectionClock::now();
+        if (!m_outageReported) {
+            m_outageReported = true;
+            m_nextOutageLogAt = now + std::chrono::seconds(60);
+            sLog_Warning("SentinelStreamClient outage: host=" << m_host << " port=" << m_port
+                         << " reason=" << m_connectionError << " delayMs=" << delayMs);
+            // Reporting every failed attempt makes downstream warning handlers noisy too.
+            emit errorOccurred(m_connectionError);
+        } else if (now >= m_nextOutageLogAt) {
+            m_nextOutageLogAt = now + std::chrono::seconds(60);
+            sLog_Data("SentinelStreamClient retrying: host=" << m_host << " port=" << m_port
+                      << " backoffStep=" << m_retryAttempt << " delayMs=" << delayMs
+                      << " reason=" << m_connectionError);
+        }
+        m_ioc.restart();
+        m_reconnectTimer.expires_after(std::chrono::milliseconds(delayMs));
+        m_reconnectTimer.async_wait([](auto) {});
+        m_ioc.run(); // shutdown cancels this wait on the strand
+        if (!m_running) break;
+        m_ioc.restart();
+        m_ws = std::make_unique<WebSocket>(m_strand, m_sslCtx);
+        m_buffer.consume(m_buffer.size());
+        m_writeQueue.clear(); // never replay ambiguous writes or obsolete requests
+        m_expectedTpoRequestId.clear();
+        m_attemptFailed = false;
+        {
+            std::lock_guard lock(m_chunkOrderMutex);
+            ++m_connectionEpoch;
+            m_acceptChunkFrames = true;
+            m_decodeRefusals = 0;
+        }
+        m_work = std::make_unique<net::executor_work_guard<net::io_context::executor_type>>(m_ioc.get_executor());
+    }
+}
+
+void SentinelStreamClient::failConnection(const QString& reason) {
+    if (!m_running || m_attemptFailed) return;
+    m_attemptFailed = true;
+    m_disconnectedAt = ConnectionClock::now();
+    m_connectionError = reason;
+    m_isConnected = false;
+    {
+        std::lock_guard lock(m_chunkOrderMutex);
+        ++m_connectionEpoch;
+        m_acceptChunkFrames = false;
+        m_chunkOrder.clear();
+    }
+    {
+        std::lock_guard lock(m_bookDeliveryMutex);
+        for (auto& [symbol, generation] : m_bookDeliveryGenerations) ++generation;
+    }
+    m_resolver.cancel();
+    boost::beast::error_code ignored;
+    if (m_ws) boost::beast::get_lowest_layer(*m_ws).socket().close(ignored);
+    if (m_work) m_work->reset();
+    emit disconnected();
 }
 
 void SentinelStreamClient::disconnectFromServer() {
@@ -259,7 +344,9 @@ void SentinelStreamClient::disconnectFromServer() {
         // on the strand and drain them before clearing buffers or restarting.
         net::post(m_strand, [this] {
             boost::beast::error_code ignored;
-            boost::beast::get_lowest_layer(*m_ws).socket().close(ignored);
+            m_resolver.cancel();
+            m_reconnectTimer.cancel();
+            if (m_ws) boost::beast::get_lowest_layer(*m_ws).socket().close(ignored);
             if (m_work) m_work->reset();
         });
         m_thread.join();
@@ -609,11 +696,9 @@ void SentinelStreamClient::sendTradeCommand(const trading::TradeCommand& command
 }
 
 void SentinelStreamClient::onConnect(boost::beast::error_code ec, tcp::endpoint) {
-    if (!m_running) return;
+    if (!m_running || m_attemptFailed) return;
     if (ec) {
-        sLog_Error("Connect failed: host=" << m_host << " port=" << m_port
-                   << " error=" << ec.message());
-        emit errorOccurred(QString::fromStdString(ec.message()));
+        failConnection(QString::fromStdString("Connect: " + ec.message()));
         return;
     }
     
@@ -623,28 +708,29 @@ void SentinelStreamClient::onConnect(boost::beast::error_code ec, tcp::endpoint)
 }
 
 void SentinelStreamClient::onSslHandshake(boost::beast::error_code ec) {
-    if (!m_running) return;
+    if (!m_running || m_attemptFailed) return;
     if (ec) {
-        sLog_Error("SSL handshake failed: host=" << m_host << " port=" << m_port
-                   << " error=" << ec.message());
-        emit errorOccurred(QString::fromStdString("SSL: " + ec.message()));
+        failConnection(QString::fromStdString("SSL: " + ec.message()));
         return;
     }
 
+    boost::beast::get_lowest_layer(*m_ws).expires_never();
+    m_ws->set_option(boost::beast::websocket::stream_base::timeout{
+        std::chrono::seconds(10), boost::beast::websocket::stream_base::none(), false});
     m_ws->async_handshake(m_host, "/", [this](auto ec) { onHandshake(ec); });
 }
 
 void SentinelStreamClient::onHandshake(boost::beast::error_code ec) {
-    if (!m_running) return;
+    if (!m_running || m_attemptFailed) return;
     if (ec) {
-        sLog_Error("WebSocket handshake failed: host=" << m_host << " port=" << m_port
-                   << " error=" << ec.message());
-        emit errorOccurred(QString::fromStdString(ec.message()));
+        failConnection(QString::fromStdString("WebSocket: " + ec.message()));
         return;
     }
 
     sLog_Data("SentinelStreamClient connected: host=" << m_host << " port=" << m_port);
     m_isConnected = true;
+    m_connectedAt = ConnectionClock::now();
+    boost::beast::get_lowest_layer(*m_ws).expires_never();
     // Drain pre-handshake messages here, before notifying subscribers. Posting
     // another drain after connected() races a subscription's own write kick.
     doWrite();
@@ -660,19 +746,12 @@ void SentinelStreamClient::doRead() {
 }
 
 void SentinelStreamClient::onRead(boost::beast::error_code ec, std::size_t bytes_transferred) {
-    if (!m_running) return;
+    if (!m_running || m_attemptFailed) return;
     if (ec) {
-        if (ec == boost::beast::websocket::error::closed || ec == net::error::operation_aborted) {
-            sLog_Data("SentinelStreamClient disconnected: host=" << m_host << " port=" << m_port
-                      << " reason=" << ec.message());
-        } else {
-            sLog_Error("Read failed: host=" << m_host << " port=" << m_port
-                       << " error=" << ec.message());
-        }
-        m_isConnected = false;
-        emit disconnected();
+        failConnection(QString::fromStdString("Read: " + ec.message()));
         return;
     }
+
     
     if (m_ws->got_binary()) {
         auto frame = std::make_shared<std::vector<uint8_t>>(bytes_transferred);
@@ -707,10 +786,7 @@ void SentinelStreamClient::onWrite(boost::beast::error_code ec, std::size_t byte
     m_writeInFlight = false;
     if (ec) {
         m_isConnected = false; // Do not retry an ambiguous partial message.
-        if (!m_running) return;
-        sLog_Error("Write failed: host=" << m_host << " port=" << m_port
-                   << " queued=" << m_writeQueue.size() << " error=" << ec.message());
-        emit errorOccurred(QString::fromStdString("Write: " + ec.message()));
+        failConnection(QString::fromStdString("Write: " + ec.message()));
         return;
     }
     if (m_writeQueue.empty()) {

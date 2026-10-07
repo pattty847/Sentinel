@@ -494,6 +494,32 @@ TEST_F(Fetcher, LocalTransportReadsSyntheticHmc2WithoutWriterLockAndReusesHash) 
     EXPECT_EQ(store.revisionCount(), 1u);
 }
 
+TEST_F(Fetcher, AdapterRepeatedDownPublishesOnlyStateChangesAndRetiresPendingRequests) {
+    fetcher.reset();
+    SentinelStreamClient client("127.0.0.1", "1");
+    protocol::SentinelStreamClientTransport adapter(client);
+    unsigned downChanges = 0, received = 0;
+    QObject::connect(&adapter, &ChunkTransport::disconnected, &app,
+                     [&] { ++downChanges; }, Qt::QueuedConnection);
+    QObject::connect(&adapter, &ChunkTransport::received, &app,
+                     [&](quint64, ChunkFramePtr) { ++received; }, Qt::QueuedConnection);
+    client.disconnected(); client.disconnected(); drain();
+    EXPECT_EQ(downChanges, 0u);
+    client.connected(); drain();
+    client.disconnected(); client.disconnected(); drain();
+    EXPECT_EQ(downChanges, 1u);
+    // A request created while offline still needs retirement on the next failed attempt.
+    adapter.request("BTC-USD", "hmc2.deep", kMinuteMs, {epoch}, {});
+    client.disconnected(); client.heatmapChunkReceived(1, body(key())); drain();
+    EXPECT_EQ(downChanges, 2u);
+    EXPECT_EQ(received, 0u);
+    client.disconnected(); drain();
+    EXPECT_EQ(downChanges, 2u);
+    adapter.subscribeLive("BTC-USD", {"hmc2.deep"}, epoch);
+    client.disconnected(); client.disconnected(); drain();
+    EXPECT_EQ(downChanges, 3u);
+}
+
 TEST_F(Fetcher, AdapterSecondConnectedReleasesLostSlotsAndRequiresFreshAvailability) {
     fetcher.reset();
     SentinelStreamClient client("127.0.0.1", "1");
