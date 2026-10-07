@@ -192,7 +192,7 @@ TEST_F(CandleDataSourceTest, TimeframeReentryAlsoRefreshesAndRejectsQueuedClose)
 TEST_F(CandleDataSourceTest, WideRefreshPagesNewestFirstThenResumesOlderBackfill) {
     warm(1000, 1400); // cached oldest=600, covers the whole original prefetch range
     reconnect(1000, 1400);
-    for (const auto [end, limit] : {std::pair{1400, 350}, {1050, 50}, {1000, 350}, {650, 50}}) {
+    for (const auto [end, limit] : {std::pair{1400, 350}, {1050, 350}, {700, 100}}) {
         const auto request = takeRequest();
         ASSERT_FALSE(request.is_null());
         EXPECT_EQ(request.at("end_time_sec"), end * 60);

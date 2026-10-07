@@ -193,7 +193,7 @@ TEST(CandleBackfillState, CoarsePagesCountOutputBarsAndReconnectRearmsSameViewpo
     state.setViewport(btc, 300, 1000 * minute, 2000 * minute);
     auto request = state.next(2000 * minute, false, now);
     ASSERT_TRUE(request);
-    EXPECT_EQ(request->limit, 200); // entire visible 5m range fits one native page
+    EXPECT_EQ(request->limit, 350); // native page crosses into prefetch
     state.disconnect();
     EXPECT_FALSE(accept(state, *request, 0));
     EXPECT_TRUE(state.setViewport(btc, 300, 1000 * minute, 2000 * minute));
@@ -282,7 +282,7 @@ TEST(CandleBackfillState, ExplicitRefreshBypassesCoveredFullCacheThenStops) {
     EXPECT_FALSE(state.next(800 * minute, true, now + 1100));
 }
 
-TEST(CandleBackfillState, NativePagesFillFourteenDaysBeforePrefetchForNormalAndRefresh) {
+TEST(CandleBackfillState, NativePagesCrossVisibleBoundaryWithoutAnExtraRoundTrip) {
     constexpr qint64 tfSec = 900, end = 2'000'000'700, span = 14 * 86400;
     for (bool refresh : {false, true}) {
         CandleBackfillState state;
@@ -293,21 +293,21 @@ TEST(CandleBackfillState, NativePagesFillFourteenDaysBeforePrefetchForNormalAndR
         for (int page = 0; page < 4; ++page) {
             auto request = state.next(oldest, refresh, clock);
             ASSERT_TRUE(request);
-            EXPECT_EQ(request->limit, page == 3 ? 294 : 350);
+            EXPECT_EQ(request->limit, 350);
             EXPECT_EQ(request->endSec, end - page * 350 * tfSec);
-            EXPECT_GE(request->startSec, end - span);
+            EXPECT_EQ(request->startSec, end - (page + 1) * 350 * tfSec);
             ASSERT_TRUE(accept(state, *request, request->startSec * 1000, clock));
             oldest = request->startSec * 1000;
             clock += 100;
         }
         auto prefetch = state.next(oldest, refresh, clock);
         ASSERT_TRUE(prefetch);
-        EXPECT_EQ(prefetch->endSec, end - span);
+        EXPECT_EQ(prefetch->endSec, end - 1400 * tfSec);
         EXPECT_EQ(prefetch->limit, 350);
     }
 }
 
-TEST(CandleBackfillState, CombinesVisibleAndPrefetchOnlyWhenTheyFitOnePage) {
+TEST(CandleBackfillState, UsesFullPagesAcrossVisibleAndPrefetchRanges) {
     for (bool refresh : {false, true}) {
         for (qint64 visibleBars : {100, 175, 176}) {
             CandleBackfillState state;
@@ -315,7 +315,7 @@ TEST(CandleBackfillState, CombinesVisibleAndPrefetchOnlyWhenTheyFitOnePage) {
             if (refresh) state.requestRefresh();
             const auto request = state.next(0, false, now);
             ASSERT_TRUE(request);
-            const qint64 expected = visibleBars * 2 <= 350 ? visibleBars * 2 : visibleBars;
+            const qint64 expected = std::min<qint64>(350, visibleBars * 2);
             EXPECT_EQ(request->limit, expected);
             EXPECT_EQ(request->startSec, (1000 + visibleBars - expected) * 60);
         }

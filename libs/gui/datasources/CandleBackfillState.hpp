@@ -44,7 +44,6 @@ public:
             end = ((endMs - 1) / tfMs + 1) * tfSec;
         }
         changed = changed || start != m_startSec || end != m_endSec;
-        m_visibleStartSec = tfSec > 0 ? (startMs / (tfSec * 1000)) * tfSec : 0;
         m_startSec = start;
         m_endSec = end;
         return changed;
@@ -65,13 +64,9 @@ public:
                 const qint64 nowEnd = ((nowMs / 1000) / m_tfSec + 1) * m_tfSec;
                 m_refreshCursorSec = std::min(m_endSec, nowEnd);
                 m_refreshStartSec = m_startSec;
-                m_refreshVisibleStartSec = m_visibleStartSec;
             }
             const qint64 pageCap = 350;
-            const qint64 floor = m_refreshCursorSec > m_refreshVisibleStartSec &&
-                (m_refreshCursorSec - m_refreshStartSec) / m_tfSec > pageCap
-                ? m_refreshVisibleStartSec : m_refreshStartSec;
-            const qint64 bars = (m_refreshCursorSec - floor + m_tfSec - 1) / m_tfSec;
+            const qint64 bars = (m_refreshCursorSec - m_refreshStartSec + m_tfSec - 1) / m_tfSec;
             const int limit = static_cast<int>(std::min(pageCap, bars));
             const qint64 end = m_refreshCursorSec - (m_tfSec == 1 ? 1 : 0);
             const qint64 start = std::max<qint64>(0, end - limit * m_tfSec);
@@ -92,11 +87,8 @@ public:
         if (boundary <= m_startSec && history.emptyScanStartSec == 0) return std::nullopt;
         const qint64 pageCap = 350;
         // After an empty window, probe full pages beyond it (bounded below).
-        // Split visible work from prefetch only when both cannot fit one page.
-        const qint64 floor = boundary > m_visibleStartSec &&
-            (boundary - m_startSec) / m_tfSec > pageCap ? m_visibleStartSec : m_startSec;
         const qint64 bars = history.emptyScanStartSec > 0 ? pageCap
-            : (boundary - floor + m_tfSec - 1) / m_tfSec;
+            : (boundary - m_startSec + m_tfSec - 1) / m_tfSec;
         int limit = static_cast<int>(std::min(pageCap, bars));
         // 1s history uses inclusive end and retained-bar count. Exclude the
         // oldest loaded bucket explicitly; REST rollup windows already exclude it.
@@ -188,11 +180,11 @@ public:
 private:
     QString m_symbol;
     qint64 m_tfSec = 0, m_startSec = 0, m_endSec = 0, m_retryAfterMs = 0;
-    qint64 m_nextSendMs = 0, m_visibleStartSec = 0;
+    qint64 m_nextSendMs = 0;
     qint64 m_emptyLookbackSec;
     quint64 m_generation = 0;
     bool m_refreshPending = false;
-    qint64 m_refreshCursorSec = 0, m_refreshStartSec = 0, m_refreshVisibleStartSec = 0;
+    qint64 m_refreshCursorSec = 0, m_refreshStartSec = 0;
     std::optional<Request> m_pending;
     struct History {
         qint64 cursorSec = 0;

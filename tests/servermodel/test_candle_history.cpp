@@ -240,3 +240,66 @@ TEST(CandleHistoryCache, ConcurrentRecentTailSharesFlightButLaterRequestRefetche
     EXPECT_TRUE(cache.fetch("BTC-USD", 900, 900, 1800, 1802, fetch).ok);
     EXPECT_EQ(calls, 2);
 }
+
+TEST(CandleHistoryCache, CancelledProducerDoesNotCancelAnotherSessionsWaiter) {
+    CandleHistoryCache cache;
+    std::promise<void> entered, release, waiterJoined;
+    const auto released = release.get_future().share();
+    std::atomic<bool> cancelProducer{false};
+    int producerCalls = 0, waiterCalls = 0;
+    auto producer = std::async(std::launch::async, [&] {
+        return cache.fetch("BTC-USD", 900, 900, 1800, 3600,
+            [&](int64_t start, int64_t end, const std::string& granularity) {
+                ++producerCalls;
+                entered.set_value();
+                released.wait();
+                cancelProducer = true; // session A disconnects during provider I/O
+                return fixture(start, end, granularity);
+            }, [&] { return cancelProducer.load(); });
+    });
+    entered.get_future().wait();
+    auto waiter = std::async(std::launch::async, [&] {
+        int checks = 0;
+        return cache.fetch("BTC-USD", 900, 900, 1800, 3600,
+            [&](int64_t start, int64_t end, const std::string& granularity) {
+                ++waiterCalls;
+                return fixture(start, end, granularity);
+            }, [&] {
+                if (++checks == 2) waiterJoined.set_value();
+                return false; // session B stays connected
+            });
+    });
+    const auto joined = waiterJoined.get_future().wait_for(std::chrono::seconds(1));
+    release.set_value();
+    EXPECT_EQ(joined, std::future_status::ready);
+    EXPECT_EQ(producer.get().error, "cancelled");
+    const auto result = waiter.get();
+    ASSERT_TRUE(result.ok) << result.error;
+    ASSERT_EQ(result.candles.size(), 1u);
+    EXPECT_EQ(result.candles.front().close, 12);
+    EXPECT_EQ(producerCalls, 1);
+    EXPECT_EQ(waiterCalls, 1);
+}
+
+TEST(CandleHistoryCache, ExceptionAfterFetchReleasesFlightForLaterRequest) {
+    CandleHistoryCache cache;
+    int calls = 0;
+    auto fetch = [&](int64_t start, int64_t end, const std::string& granularity) {
+        ++calls;
+        return fixture(start, end, granularity);
+    };
+    // The post-fetch cancellation check also models an exception during merge
+    // or storage, outside fetchRange's error conversion, without a test-only hook.
+    EXPECT_THROW(cache.fetch("BTC-USD", 900, 900, 1800, 3600, fetch, [&]() -> bool {
+        if (calls != 0) throw std::runtime_error("injected after fetch");
+        return false;
+    }), std::runtime_error);
+    EXPECT_EQ(calls, 1);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+    const auto later = cache.fetch("BTC-USD", 900, 900, 1800, 3600, fetch, [&] {
+        return std::chrono::steady_clock::now() >= deadline; // bounds a leaked-flight regression
+    });
+    ASSERT_TRUE(later.ok) << later.error;
+    ASSERT_EQ(later.candles.size(), 1u);
+    EXPECT_EQ(calls, 2);
+}

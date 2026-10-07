@@ -84,11 +84,11 @@ def measure(client, end, timeframe, bars, log):
     remaining = bars
     page_ms = []
     next_send = started
-    while remaining:
+    while remaining > 0:
         # Match CandleBackfillState's leading/trailing 100 ms send throttle.
         time.sleep(max(0, next_send - time.monotonic()))
         next_send = time.monotonic() + .1
-        count = min(350, remaining)
+        count = min(350, remaining + bars)  # one-screen prefetch; no visible-boundary cut
         request = {'type': 'candle_history_request', 'symbol': 'BTC-USD',
                    'timeframe_sec': timeframe, 'end_time_sec': cursor, 'limit': count}
         client.send(json.dumps(request).encode())
@@ -112,7 +112,8 @@ def measure(client, end, timeframe, bars, log):
             first_ms = elapsed
         cursor -= count * timeframe
         remaining -= count
-    assert len(set(timestamps)) == bars
+    assert len(set(timestamps)) == len(timestamps)
+    assert len(timestamps) >= bars
     # Debug/probe log records flush every 250 ms. This wait is outside the
     # measured interval and makes REST counts include the final page.
     time.sleep(.3)
@@ -124,7 +125,7 @@ def measure(client, end, timeframe, bars, log):
     return {'first_ms': round(first_ms, 2), 'full_ms': round(elapsed, 2),
             'server_requests': requests, 'rest_calls': len(starts),
             'min_rest_start_gap_ms': round(min(gaps), 1) if gaps else None,
-            'bars': bars, 'page_ms': page_ms}
+            'bars': len(timestamps), 'visible_bars': bars, 'page_ms': page_ms}
 
 
 def main():
@@ -136,7 +137,9 @@ def main():
     parser.add_argument('--end', type=int, default=1791342900, help='Exclusive, closed UTC page boundary')
     parser.add_argument('--timeframe', type=int, default=900)
     parser.add_argument('--bars', type=int, default=1344)
+    parser.add_argument('--runs', type=int, default=3)
     args = parser.parse_args()
+    assert args.runs > 0
     assert len({args.port, args.health_port, args.offline_mdc_port}) == 3
     assert all(p not in (8080, 8090, 8091, 17100, 17190) and 1024 < p < 65536
                for p in (args.port, args.health_port, args.offline_mdc_port))
@@ -182,7 +185,7 @@ mdc:
     offline.bind(('127.0.0.1', args.offline_mdc_port))
     print(json.dumps({'scratch': str(scratch), 'binary': str(binary)}), flush=True)
     results = []
-    for run in range(1, 4):
+    for run in range(1, args.runs + 1):
         logdir = scratch / f'run-{run}'
         logdir.mkdir()
         env = {**os.environ, 'SENTINEL_HEALTH_PORT': str(args.health_port),

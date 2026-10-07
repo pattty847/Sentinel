@@ -13,6 +13,7 @@
 #include <cmath>
 #include <limits>
 #include <thread>
+#include <QScopeGuard>
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -398,20 +399,36 @@ CandleFetchResult CandleHistoryCache::fetch(const std::string& product, int64_t 
     };
     if (missingFirst < missingLast) {
         const FlightKey flightKey{product, timeframeSec, missingFirst, missingLast};
-        auto [entry, producer] = m_flights.try_emplace(flightKey, std::make_shared<Flight>());
-        const auto flight = entry->second;
-        if (!producer) {
-            // Waiting releases the cache mutex. Only callers of the same missing
-            // range wait; unrelated hits remain available. A completed recent
-            // tail is shared with current waiters, but not retained for later calls.
+        std::shared_ptr<Flight> flight;
+        bool producer = false;
+        for (;;) {
+            auto [entry, inserted] = m_flights.try_emplace(flightKey, std::make_shared<Flight>());
+            flight = entry->second;
+            producer = inserted;
+            if (producer) break;
+            // A failed flight belongs to its producer's session. Retry the claim
+            // with our own fetcher and cancellation state instead of inheriting it.
             while (!flight->done) {
                 if (cancelled && cancelled()) return {false, "cancelled", {}};
                 flight->ready.wait_for(lock, std::chrono::milliseconds(50));
             }
-            if (!flight->result.ok) return flight->result;
+            if (cancelled && cancelled()) return {false, "cancelled", {}};
+            if (flight->result.ok) break;
+        }
+        if (!producer) {
             lock.unlock();
             merge(flight->result);
         } else {
+            // Covers exceptions in post-fetch processing and cache insertion,
+            // whether this scope exits with the mutex held or released.
+            const auto finishFlight = [&] {
+                if (flight->done) return;
+                if (!lock.owns_lock()) lock.lock();
+                flight->done = true;
+                m_flights.erase(flightKey);
+                flight->ready.notify_all();
+            };
+            const auto completion = qScopeGuard(finishFlight);
             lock.unlock();
             const auto fetchRange = [&]() -> CandleFetchResult {
                 std::vector<OHLCVBar> source;
@@ -432,7 +449,6 @@ CandleFetchResult CandleHistoryCache::fetch(const std::string& product, int64_t 
                     }
                     cursor = begin;
                 }
-                if (cancelled && cancelled()) return {false, "cancelled", {}};
                 std::sort(source.begin(), source.end(), [](const auto& a, const auto& b) {
                     return a.timestamp_ms < b.timestamp_ms;
                 });
@@ -451,6 +467,7 @@ CandleFetchResult CandleHistoryCache::fetch(const std::string& product, int64_t 
             } catch (...) {
                 fetched = {false, "candle history fetch threw", {}};
             }
+            if (cancelled && cancelled()) fetched = {false, "cancelled", {}};
             if (fetched.ok) merge(fetched);
             lock.lock();
             if (fetched.ok && missingFirst < cacheableLast) {
@@ -468,9 +485,7 @@ CandleFetchResult CandleHistoryCache::fetch(const std::string& product, int64_t 
                 while (series.buckets.size() > kMaxBucketsPerSeries) series.buckets.erase(series.buckets.begin());
             }
             flight->result = std::move(fetched);
-            flight->done = true;
-            m_flights.erase(flightKey);
-            flight->ready.notify_all();
+            finishFlight();
             lock.unlock();
             if (!flight->result.ok) return flight->result;
         }
