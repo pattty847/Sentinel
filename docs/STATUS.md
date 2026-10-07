@@ -43,9 +43,9 @@ Never without the owner present: R2, any deploy, cutovers, data deletion. Check 
 
 ## Pause point 2026-10-07 ~02:45 EDT (Claude usage limit)
 
-- A corrupt-skip `10f18c4`: Fable FINDINGS `.claude/acting-orchestrator/corrupt-skip/` (agent transcript). 2 major: (1) `registerJournalMetrics` throws on double registration, so make it idempotent per registry/product, then add `registerJournalMetrics(registry, p->name);` after ShadowRoller.cpp:589; (2) header/index/magic damage still stalls, about 3% of bytes: an OWNER CHOICE between full coverage (index-first resync) and accepting the residual. Minors: the alert rule never resolves (owner: permanent page vs increase()[2h]); validBytes; <mutex>; env-gated test. Next: fix round to the Codex writer thread `01a114bd`.
-- C bind-address `56f7d16` (fix r1): Sonnet re-check pending/finished (agent `a4fea1ac`); land if PASS.
-- D-b1 `d71de5c`: Astra delta check of the lag metric running (`.claude/acting-orchestrator/db1/review-r4.md`); then READY, lands after the R2 deploy.
+- A corrupt-skip `10f18c4`: fix round 1 running (Codex thread `01a114bd`; conductor defaults: full header/index coverage, a self-resolving alert). Fable FINDINGS were `.claude/acting-orchestrator/corrupt-skip/` (agent transcript). 2 major: (1) `registerJournalMetrics` throws on double registration, so make it idempotent per registry/product, then add `registerJournalMetrics(registry, p->name);` after ShadowRoller.cpp:589; (2) header/index/magic damage still stalls, about 3% of bytes: an OWNER CHOICE between full coverage (index-first resync) and accepting the residual. Minors: the alert rule never resolves (owner: permanent page vs increase()[2h]); validBytes; <mutex>; env-gated test. Next: fix round to the Codex writer thread `01a114bd`.
+- C bind-address LANDED `0688fe0` (95/95). It deploys after R2. After that deploy the server listens on 127.0.0.1 only; the owner's GUI uses 127.0.0.1, and remote clients set the Mac's Tailscale address. Deferred: a sentinel_stream_listening gauge.
+- D-b1 `d71de5c`: Astra delta FINDINGS 1 major (the sampler measured tick-spacing jitter, not deadline lateness); fix running (Codex Sol thread `01a114eb`); then Astra re-check; lands after the R2 deploy.
 
 ## In flight (T7 worktrees)
 
@@ -55,7 +55,6 @@ On resume, read the Codex outputs: `.claude/acting-orchestrator/corrupt-skip/wri
 |---|---|---|---|
 | `lt-astra/journal-anchors` | `117482e` | Phase A committed (sidecar store; BookRecorder state export/import byte-identical on real BTC/PEPE hours; bounded seek). Anchor size: BTC 1.43 MB, PEPE 61 KB per anchor, retention decided 2026-10-07: 00:00Z anchors kept forever (owner), intraday about 2 days. Phase B (rebase on D-b1, JournalFeed restore, roll() wiring, the 6 owner checks) after D-b1 passes review | Claude Fable review after Phase B; land and deploy after R2 |
 | `lt-astra/corrupt-skip` | main (base) | Writer Codex `gpt-6-astra` high, thread `01a114bd-8fed-7011-bc24-5ee97215173f`: owner decision A (skip a corrupt block, gap until the next snapshot, alert) | Claude Fable review; land; deploys after R2 |
-| `lt-sol/bind-address` | main (base) | Writer Codex `gpt-6.1-sol`, thread `01a114c4-3b29-7822-af4d-73cd8666b236`: owner decision C, `server.bind_address` default 127.0.0.1 (Tailscale 100.89.99.21 as an opt-in example) | Claude review; deploys after R2 |
 | `lt-claude/roller-db1` | `971997c` | Astra r3 PASS (journal-time candle contract). Writer adding the flip-gate main-thread event-loop lag metric (sentinel_server_event_loop_lag_ms p50/p95/p99/max, engine and journal); Astra checks only that delta | After the audit: fix round 2 with the same writer, same Astra thread; land only AFTER the R2 deploy |
 
 Retired 2026-10-06 (owner): `lt-sol/label-style` and `lt-claude/heatmap-ab-isolation`, tips kept as tags `archive/<branch>`. Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orchestrator/`. The
