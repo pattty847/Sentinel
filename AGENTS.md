@@ -116,7 +116,7 @@ recorded-data dumps, profiling): `docs/AGENT_WORKFLOW.md` "Running and seeing th
 Screenshots and GUI runs:
 - Allowed targets: `window`, `heatmap`, a retained dock ID (`orderBook`, `watchlist`, `screener`, `stockChart`, `paperTrading`, `sec`, `copenet`, `telemetry`), `statusBar`, `toolbar`, `chartmenu`, `settings[:Tab]`. Show or focus a hidden dock through the dock API first.
 - Never use `target=main`: it captures whatever window covers the GUI, including other apps' private content. If any shot shows something that is not Sentinel, delete it at once and tell the conductor. This includes `scripts/dev/cloud-gui.sh`: pass `window` explicitly, because its `shot` defaults to `main`.
-- Every agent-run GUI is isolated: use the GUI host (`scripts/dev/gui-shot.sh`), or launch with `--agent-host <scratch dir>`, its own `--api-port` (17110 + n), `--no-screener` and its own scratch directory. Never run a GUI against the owner's settings. Exception: `scripts/dev/heatmap-ab.sh` predates this rule (it relies on `persist:false`, SIGTERM and a before/after settings diff); run it only when the owner asks. It logs `owner settings ... CHANGED` but still exits 0, so read the log and treat that line as a failure.
+- Every agent-run GUI is isolated: use the GUI host (`scripts/dev/gui-shot.sh`), or launch with `--agent-host <scratch dir>`, its own `--api-port` (17110 + n), `--no-screener` and its own scratch directory. Never run a GUI against the owner's settings.
 - Never drive the owner's own GUI: its Agent API (`gui.api_port`, 17100) has no authentication.
 - One hosted GUI session at a time. No automated GUI windows while the owner is working at the Mac unless the owner asks.
 - Never run the GUI binary with `--help` (it starts a full GUI).

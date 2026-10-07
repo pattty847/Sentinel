@@ -3,7 +3,7 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-06 18:45 EDT. R1 deployed; 48 h soak running until 2026-10-08 ~18:40 EDT.
+- **Updated:** 2026-10-06 ~22:00 EDT. S8a landed (`8cb2e5f`); R1 soak clean through its first midnight; R2 waits for the soak end (~2026-10-08 18:40 EDT) and the owner.
 - **Conductor:** Claude Opus 5.5. The owner handed conducting back on 2026-10-06; Codex does not dispatch.
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10). No fallback active: the 2026-10-04
   GPT-reviews-GPT override ended when Claude usage reset.
@@ -34,8 +34,6 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 | Branch | Tip | State | Next |
 |---|---|---|---|
-| `lt-claude/s8a-legacy-gui` | `a3d008f` | READY (Claude `opus` writer; 98 files, -9,453 lines; full suite 93/93 Metal). Astra review r1 thread `01a113f7-5746-7e61-a550-90f2a7edc9ee`, `.claude/acting-orchestrator/s8a/review-r1.md`; clean live-age re-run in progress | Review `gpt-6-astra` high with native evidence, land; R2 needs it |
-| `lt-claude/heatmap-ab-isolation` | `88e7ef4` | Unrelated, locked | Leave alone |
 
 Retired 2026-10-06 (owner): `lt-sol/label-style` and `lt-claude/heatmap-ab-isolation`, tips kept as tags `archive/<branch>`. Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orchestrator/`. The
 `.claude/worktrees/youthful-ishizaka-b0e889` (`60caa04`, branch `claude/exciting-hypatia-1c7a34`) is not part of this work; leave it alone.
@@ -54,7 +52,7 @@ None. (S8 legacy heatmap deletion approved by the owner 2026-10-06; see Next.)
 
 1. Wave 3 complete (2026-10-06): overflow redesign `66e39b2`, retained fonts `fac62a0`, settings with hover tooltips `542be4d`; each owner-approved, full suite 96/96.
 2. Slice D-a LANDED 2026-10-06 as `e8958cd` (option C live path, roller serving switch off by default). Next: R1 widen (owner present; runbook in the plan's slice D section 5 plus owner decisions 5-6), then the 48 h soak, during which S8 and the acceptor fix (FM-154/202) are dispatched. Acceptor restart fix (FM-154/202) LANDED `d10c56a` (97/97; Sol review PASS); not deployed: it ships with the R2 redeploy, so the soak is not restarted. R1 checkpoints: first hourly comparison 2026-10-06 19:37 EDT, all 7 products compared through 23:00Z, 14 mismatch series 0. First UTC midnight (20:01 EDT): all 7 rolled to 2026-10-07, lags < 1.5 s, no cooldown; all 7 compared through 2026-10-07 00:00Z (the midnight hour) with 14 mismatch series 0. Original packet: packet in `docs/research/2026-10-one-world-pipeline.md` "Slice D task packet" plus "Owner decisions on the slice D packet (2026-10-06)" (live path option C: no live-age regression; split D-a/D-b; `from` bump). Writer Claude `opus` (needs native evidence), reviewer `gpt-6-astra` high. Runbook R1 (widen to all 7 products) and R2 (flip) are conductor steps with the owner present. Then D-b (engine replaced by the journal feed: one Coinbase connection) and slice E deletions.
-2a. S8 (delete the legacy heatmap, owner-approved 2026-10-06): dispatch after D-a lands, during the R1 48 h soak (GUI files only; no overlap with roller/server files). First step of the packet: one final legacy-vs-gpu A/B capture with the same steps as `docs/research/2026-10-s6-plan.md` "Sequence and timings", kept as the before/after record. Writer Claude (needs Metal), reviewer `gpt-6-astra` high (GPU heatmap core). Removes the D-a legacy-renderer limit (the legacy page path cannot drop a withdrawn live column). Packet must cite FM-079 (removing legacy heatmap production once stopped live footprint, TPO and volume profile).
+2a. S8a LANDED 2026-10-06 `8cb2e5f` (legacy heatmap deleted from GUI/client, -9.4k lines; Astra review PASS with one deferred minor; fixed history views pixel-identical; live age p50/p95 109/497 ms vs 100/510 before). R2's legacy-renderer blocker is gone. S8b (server legacy production) goes with slice E. Plan: `docs/research/2026-10-s8-legacy-deletion.md`. Original note: dispatch after D-a lands, during the R1 48 h soak (GUI files only; no overlap with roller/server files). First step of the packet: one final legacy-vs-gpu A/B capture with the same steps as `docs/research/2026-10-s6-plan.md` "Sequence and timings", kept as the before/after record. Writer Claude (needs Metal), reviewer `gpt-6-astra` high (GPU heatmap core). Removes the D-a legacy-renderer limit (the legacy page path cannot drop a withdrawn live column). Packet must cite FM-079 (removing legacy heatmap production once stopped live footprint, TPO and volume profile).
 3. After D: change-driven live publishing with a per-client max update rate (see the owner decisions block). Then EATEN vs PULLED liquidity and ABSORPTION (owner's strongest direction): Fable plan after slice D. It crosses
    roller, HMC2, wire and renderer.
 4. On hold (owner, 2026-10-06): TPO session choices become Session (draws New York, London, Asia and Australia together, like ExoCharts), 24H, 1W, 1M. Changes what the TPO draws; needs its own spec.
