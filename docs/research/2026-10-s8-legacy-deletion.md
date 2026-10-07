@@ -292,3 +292,19 @@ warning, ran gpu, and the `stream.legacyHeatmap` probe counted 546 `heatmap_slic
 
 Found while collecting this (pre-existing on main, not S8a): the volume-profile layer draws a fan of
 triangles from the chart's top-left corner (`repro/main-vp-*.png`, `repro/s8a-vp-*.png`).
+
+### Clean soak re-run (after, a3d008f)
+
+Requested by the conductor because the "after" soak overlapped the 21:01:13 Coinbase disconnect.
+Same method (hosted GUI, `--build <worktree> --fresh-profile`, BTC-USD 1m follow-live, 10 minutes of
+5 s samples), binary built 21:16:12 from a3d008f, 21:26:17-21:36:20, evidence in
+`screenshots/s8-final/soak2/`. No disconnect in the window: the server's feed line stays
+`conn=2 ... reconnects=1` (the 21:01 reconnect) throughout, with no EOF or invalidation; the GUI run log
+has no W/E line beyond the usual Qt/QML and layout ones.
+
+| Soak (1m, BTC-USD) | liveAgeMs p50 | p95 | max | layer cumulative p50 / p95 | receive age p95 | frameP95 p50 / p95 |
+|---|---|---|---|---|---|---|
+| Before (unmodified, gpu) | 100 | 510 | 615 | 101 / 493 (1297 versions) | 508 | 1.6 / 2.9 |
+| After, clean re-run | 109 | 497 | 630 | 114 / 516 (1148 versions) | 504 | 1.1 / 1.9 |
+
+The deletion leaves live data age unchanged within sampling noise.
