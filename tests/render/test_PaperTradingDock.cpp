@@ -5,6 +5,10 @@
 #include <QFocusEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QComboBox>
+#include <QTabWidget>
+#include <QDateTime>
+#include <QDateEdit>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSignalBlocker>
@@ -12,6 +16,8 @@
 #include <QTableWidget>
 #include <QTest>
 #include <QTimer>
+#include <QTemporaryDir>
+#include <QPlainTextEdit>
 #include <QToolButton>
 #include <cmath>
 #include <gtest/gtest.h>
@@ -298,6 +304,61 @@ TEST(PaperTicket, AttachingToDisconnectedSourceStartsUnavailable) {
     EXPECT_EQ(status->text(), "UNCONFIRMED");
     EXPECT_TRUE(start->isEnabled());
 }
+TEST(PaperTicket, BacktestSourceDefaultsToJournalAndKeepsFileError) {
+    PaperTradingDock dock;
+    auto* tabs = dock.findChild<QTabWidget*>();
+    ASSERT_NE(tabs, nullptr);
+    tabs->setCurrentIndex(2);
+    dock.show();
+    auto* source = dock.findChild<QComboBox*>("backtestSource");
+    auto* from = dock.findChild<QDateEdit*>("backtestFrom");
+    auto* to = dock.findChild<QDateEdit*>("backtestTo");
+    auto* root = dock.findChild<QLineEdit*>("backtestJournalRoot");
+    ASSERT_NE(source, nullptr); ASSERT_NE(from, nullptr); ASSERT_NE(to, nullptr); ASSERT_NE(root, nullptr);
+    EXPECT_EQ(source->currentText(), "Journal");
+    EXPECT_EQ(from->date(), QDateTime::currentDateTimeUtc().date().addDays(-1));
+    EXPECT_EQ(to->date(), QDateTime::currentDateTimeUtc().date());
+    EXPECT_FALSE(root->isHidden());
+    QPushButton* run = nullptr;
+    for (auto* button : dock.findChildren<QPushButton*>())
+        if (button->text().contains("Run Backtest")) run = button;
+    ASSERT_NE(run, nullptr);
+    from->setDate(to->date());
+    run->click();
+    bool rangeError = false;
+    for (auto* label : dock.findChildren<QLabel*>()) rangeError |= label->text().contains("valid UTC range");
+    EXPECT_TRUE(rangeError);
+    source->setCurrentIndex(1);
+    EXPECT_FALSE(root->isVisible());
+    run->click();
+    bool fileError = false;
+    for (auto* label : dock.findChildren<QLabel*>()) fileError |= label->text().contains("no trade log");
+    EXPECT_TRUE(fileError);
+}
+
+TEST(PaperTicket, R7BacktestModeStatusAndEmptyRangeError) {
+    QTemporaryDir empty;
+    PaperTradingDock dock;
+    auto* source = dock.findChild<QComboBox*>("backtestSource");
+    auto* status = dock.findChild<QLabel*>("backtestStatus");
+    ASSERT_NE(source, nullptr); ASSERT_NE(status, nullptr);
+    source->setCurrentIndex(1);
+    EXPECT_EQ(status->text(), "Select a trade log and press Run.");
+    source->setCurrentIndex(0);
+    EXPECT_EQ(status->text(), "Choose a UTC range and press Run.");
+    dock.findChild<QLineEdit*>("backtestJournalRoot")->setText(empty.path());
+    dock.findChild<QLineEdit*>("backtestProduct")->setText("DB2A-EMPTY-USD");
+    QPushButton* run = nullptr;
+    for (auto* button : dock.findChildren<QPushButton*>())
+        if (button->text().contains("Run Backtest")) run = button;
+    ASSERT_NE(run, nullptr);
+    run->click();
+    for (int i = 0; i < 100 && !run->isEnabled(); ++i) QTest::qWait(50);
+    EXPECT_TRUE(run->isEnabled());
+    EXPECT_EQ(status->text(), "Error: no trades in range.");
+    EXPECT_TRUE(dock.findChild<QPlainTextEdit*>()->toPlainText().contains("no trades in range"));
+}
+
 } // namespace
 
 int main(int argc, char** argv) {

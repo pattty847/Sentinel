@@ -3,6 +3,7 @@
 find_package(Qt6 REQUIRED COMPONENTS Core Gui)
 
 add_executable(test_PaperTradingDock test_PaperTradingDock.cpp)
+add_dependencies(test_PaperTradingDock sentinel_backtest)
 target_include_directories(test_PaperTradingDock PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
 target_link_libraries(test_PaperTradingDock PRIVATE sentinel_gui_lib GTest::gtest Qt6::Widgets Qt6::Test)
 add_test(NAME PaperTradingDockTests COMMAND test_PaperTradingDock)

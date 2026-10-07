@@ -41,9 +41,13 @@ target_include_directories(test_backtest_core PRIVATE
 )
 
 target_link_libraries(test_backtest_core PRIVATE
+    Qt6::Core
     sentinel_core
     GTest::gtest_main
 )
 
 add_test(NAME BacktestCoreTests COMMAND test_backtest_core)
 set_tests_properties(BacktestCoreTests PROPERTIES LABELS "trading")
+
+add_dependencies(test_backtest_core sentinel_backtest)
+target_compile_definitions(test_backtest_core PRIVATE BACKTEST_CLI="$<TARGET_FILE:sentinel_backtest>")
