@@ -3108,8 +3108,10 @@ struct JournalCandles {
       const auto x = steady->getHistory("PEPE-USD", tf, 100000);
       const auto y = outage->getHistory("PEPE-USD", tf, 100000);
       ASSERT_FALSE(x.empty()) << tf;
+      // Contiguous from the first trade on: quiet buckets are carried, a
+      // trade ahead of the watermark leaves no hole.
       for (size_t i = 1; i < y.size(); ++i)
-        EXPECT_LT(y[i - 1].timestamp_ms, y[i].timestamp_ms) << tf << " at " << i;
+        EXPECT_EQ(y[i - 1].timestamp_ms + tf, y[i].timestamp_ms) << tf << " at " << i;
       ASSERT_EQ(x.size(), y.size()) << tf;
       for (size_t i = 0; i < x.size(); ++i)
         EXPECT_EQ(std::tie(x[i].timestamp_ms, x[i].open, x[i].high, x[i].low, x[i].close,
