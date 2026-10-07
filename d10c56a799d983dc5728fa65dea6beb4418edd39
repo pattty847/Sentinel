@@ -1,0 +1,12 @@
+Slice: acceptor-restart (FM-154/202)
+Plan: none (bug fix)
+Risk: medium
+Writer: claude-opus
+Reviewer: gpt-6.1-sol-high
+Review-Rounds: 3
+Findings: blocker=0 major=2 minor=2
+Deferred: 0
+Writer-Tokens: ~0.62M (sum of three run reports)
+Reviewer-Tokens: 0.84M (ma-panel, thread 01a1137e)
+Planner-Tokens: 0
+Evidence: .claude/acting-orchestrator/acceptor/
