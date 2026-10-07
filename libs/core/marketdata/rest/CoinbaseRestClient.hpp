@@ -3,6 +3,12 @@
 #include <vector>
 #include <optional>
 #include <chrono>
+#include <functional>
+#include <map>
+#include <mutex>
+#include <condition_variable>
+#include <memory>
+#include <tuple>
 #include <nlohmann/json.hpp>
 #include "../../servermodel/TimeframeAggregator.hpp"
 #include "../auth/Authenticator.hpp"
@@ -11,6 +17,37 @@ struct CandleFetchResult {
     bool ok = false;
     std::string error;
     std::vector<OHLCVBar> candles;
+};
+
+// Server-owned, bounded cache. A null bucket records a successfully fetched
+// settled empty interval, not an error. Identical in-flight ranges share their
+// result; cache hits never wait for provider I/O. Not used on GUI/render threads.
+class CandleHistoryCache {
+public:
+    using Fetch = std::function<CandleFetchResult(int64_t, int64_t, const std::string&)>;
+    using Cancel = std::function<bool()>;
+    static constexpr size_t kMaxSeries = 16;
+    static constexpr size_t kMaxBucketsPerSeries = 8192;
+    CandleFetchResult fetch(const std::string& product, int64_t timeframeSec,
+                            int64_t startSec, int64_t endSec, int64_t nowSec,
+                            const Fetch& fetcher, const Cancel& cancelled = {});
+    static int64_t sourceSeconds(int64_t timeframeSec);
+
+private:
+    struct Series {
+        uint64_t used = 0;
+        std::map<int64_t, std::optional<OHLCVBar>> buckets;
+    };
+    struct Flight {
+        bool done = false;
+        CandleFetchResult result;
+        std::condition_variable ready;
+    };
+    using FlightKey = std::tuple<std::string, int64_t, int64_t, int64_t>;
+    std::map<FlightKey, std::shared_ptr<Flight>> m_flights;
+    std::mutex m_mutex;
+    uint64_t m_use = 0;
+    std::map<std::pair<std::string, int64_t>, Series> m_series;
 };
 
 struct ProductMetadataResult {
@@ -38,6 +75,12 @@ public:
 
     ProductMetadataResult fetchProductMetadata(const std::string& productId) const;
 
+    // Half-open range; only buckets already closed when the request starts.
+    CandleFetchResult fetchClosedCandleHistory(const std::string& productId,
+                                               int64_t timeframeSec,
+                                               int64_t startSec, int64_t endSec,
+                                               const CandleHistoryCache::Cancel& cancelled = {}) const;
+
     static std::optional<std::string> granularityFromSeconds(int64_t timeframeSec);
 
 private:
@@ -55,4 +98,8 @@ private:
     std::string m_sslCaBundle;
     // One total budget, including DNS and authenticated/public fallback.
     std::chrono::milliseconds m_requestTimeout;
+    mutable CandleHistoryCache m_history;
+    // Serialize only miss start times, never cache hits or HTTP completion.
+    mutable std::mutex m_historyRequestMutex;
+    mutable std::chrono::steady_clock::time_point m_nextHistoryRequest{};
 };

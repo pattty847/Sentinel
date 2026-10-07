@@ -10,6 +10,10 @@
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <algorithm>
+#include <cmath>
+#include <limits>
+#include <thread>
+#include <QScopeGuard>
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -341,4 +345,179 @@ std::optional<std::string> CoinbaseRestClient::granularityFromSeconds(int64_t ti
         case 86400: return "ONE_DAY";
         default: return std::nullopt;
     }
+}
+
+int64_t CandleHistoryCache::sourceSeconds(int64_t timeframeSec) {
+    for (const int64_t native : {86400, 21600, 14400, 7200, 3600, 1800, 900, 300, 60})
+        if (timeframeSec >= native && timeframeSec % native == 0) return native;
+    return 0;
+}
+
+CandleFetchResult CandleHistoryCache::fetch(const std::string& product, int64_t timeframeSec,
+                                            int64_t startSec, int64_t endSec, int64_t nowSec,
+                                            const Fetch& fetcher, const Cancel& cancelled) {
+    CandleFetchResult result;
+    const int64_t sourceSec = sourceSeconds(timeframeSec);
+    if (product.empty() || sourceSec == 0 || startSec <= 0 || endSec <= startSec ||
+        endSec > std::numeric_limits<int64_t>::max() / 1000 || nowSec <= 0 ||
+        (endSec - startSec) / timeframeSec > 350) {
+        result.error = "invalid candle history range";
+        return result;
+    }
+    // Freeze the closed cutoff before network I/O. A bar that closes while the
+    // request is in flight belongs to a later fetch, never a cached partial bar.
+    const int64_t first = startSec / timeframeSec + (startSec % timeframeSec != 0);
+    const int64_t last = std::min(endSec, nowSec) / timeframeSec;
+    result.ok = true;
+    if (first >= last) return result;
+    // Closing is not finalization at Coinbase: serve the newest closed bucket,
+    // but refetch it until at least one source bucket (minimum 60 s) has elapsed.
+    const int64_t settleSec = std::max<int64_t>(sourceSec, 60);
+    const int64_t cacheableLast = std::max<int64_t>(0, nowSec - settleSec) / timeframeSec;
+    std::map<int64_t, std::optional<OHLCVBar>> available;
+    std::unique_lock lock(m_mutex);
+    if (cancelled && cancelled()) return {false, "cancelled", {}};
+    const auto key = std::make_pair(product, timeframeSec);
+    if (const auto it = m_series.find(key); it != m_series.end()) {
+        it->second.used = ++m_use;
+        for (auto bar = it->second.buckets.lower_bound(first);
+             bar != it->second.buckets.end() && bar->first < last; ++bar)
+            available.insert(*bar);
+    }
+    int64_t missingFirst = last, missingLast = first;
+    for (int64_t bucket = first; bucket < last; ++bucket) {
+        if (!available.contains(bucket)) {
+            missingFirst = std::min(missingFirst, bucket);
+            missingLast = bucket + 1;
+        }
+    }
+    const auto merge = [&](const CandleFetchResult& fetched) {
+        for (int64_t bucket = missingFirst; bucket < missingLast; ++bucket)
+            available.try_emplace(bucket, std::nullopt);
+        for (const auto& bar : fetched.candles)
+            available[bar.timestamp_ms / (timeframeSec * 1000)] = bar;
+    };
+    if (missingFirst < missingLast) {
+        const FlightKey flightKey{product, timeframeSec, missingFirst, missingLast};
+        std::shared_ptr<Flight> flight;
+        bool producer = false;
+        for (;;) {
+            auto [entry, inserted] = m_flights.try_emplace(flightKey, std::make_shared<Flight>());
+            flight = entry->second;
+            producer = inserted;
+            if (producer) break;
+            // A failed flight belongs to its producer's session. Retry the claim
+            // with our own fetcher and cancellation state instead of inheriting it.
+            while (!flight->done) {
+                if (cancelled && cancelled()) return {false, "cancelled", {}};
+                flight->ready.wait_for(lock, std::chrono::milliseconds(50));
+            }
+            if (cancelled && cancelled()) return {false, "cancelled", {}};
+            if (flight->result.ok) break;
+        }
+        if (!producer) {
+            lock.unlock();
+            merge(flight->result);
+        } else {
+            // Covers exceptions in post-fetch processing and cache insertion,
+            // whether this scope exits with the mutex held or released.
+            const auto finishFlight = [&] {
+                if (flight->done) return;
+                if (!lock.owns_lock()) lock.lock();
+                flight->done = true;
+                m_flights.erase(flightKey);
+                flight->ready.notify_all();
+            };
+            const auto completion = qScopeGuard(finishFlight);
+            lock.unlock();
+            const auto fetchRange = [&]() -> CandleFetchResult {
+                std::vector<OHLCVBar> source;
+                // Usually one native request; non-native output pages may need
+                // several provider pages. All boundaries are UTC epoch aligned.
+                for (int64_t cursor = missingLast * timeframeSec; cursor > missingFirst * timeframeSec;) {
+                    if (cancelled && cancelled()) return {false, "cancelled", {}};
+                    const int64_t begin = std::max(missingFirst * timeframeSec, cursor - 350 * sourceSec);
+                    auto page = fetcher(begin, cursor, *CoinbaseRestClient::granularityFromSeconds(sourceSec));
+                    if (!page.ok) return page;
+                    for (const auto& bar : page.candles) {
+                        if (bar.timestamp_ms < begin * 1000 || bar.timestamp_ms >= cursor * 1000) continue;
+                        if (bar.timestamp_ms % (sourceSec * 1000) != 0 ||
+                            !std::isfinite(bar.open) || !std::isfinite(bar.high) ||
+                            !std::isfinite(bar.low) || !std::isfinite(bar.close) || !std::isfinite(bar.volume))
+                            return {false, "invalid native candle", {}};
+                        source.push_back(bar);
+                    }
+                    cursor = begin;
+                }
+                std::sort(source.begin(), source.end(), [](const auto& a, const auto& b) {
+                    return a.timestamp_ms < b.timestamp_ms;
+                });
+                source.erase(std::unique(source.begin(), source.end(), [](const auto& a, const auto& b) {
+                    return a.timestamp_ms == b.timestamp_ms;
+                }), source.end());
+                auto bars = TimeframeAggregator::rollupMinutes(source, timeframeSec * 1000);
+                for (auto& bar : bars) bar.is_closed = true;
+                return {true, {}, std::move(bars)};
+            };
+            CandleFetchResult fetched;
+            try {
+                fetched = fetchRange();
+            } catch (const std::exception& error) {
+                fetched = {false, error.what(), {}};
+            } catch (...) {
+                fetched = {false, "candle history fetch threw", {}};
+            }
+            if (cancelled && cancelled()) fetched = {false, "cancelled", {}};
+            if (fetched.ok) merge(fetched);
+            lock.lock();
+            if (fetched.ok && missingFirst < cacheableLast) {
+                // A different request may have evicted this series during I/O.
+                // Never keep a reference into the LRU across the unlocked fetch.
+                if (!m_series.contains(key) && m_series.size() == kMaxSeries) {
+                    const auto oldest = std::min_element(m_series.begin(), m_series.end(),
+                        [](const auto& a, const auto& b) { return a.second.used < b.second.used; });
+                    m_series.erase(oldest);
+                }
+                auto& series = m_series[key];
+                series.used = ++m_use;
+                for (int64_t bucket = missingFirst; bucket < std::min(missingLast, cacheableLast); ++bucket)
+                    series.buckets.try_emplace(bucket, available.at(bucket));
+                while (series.buckets.size() > kMaxBucketsPerSeries) series.buckets.erase(series.buckets.begin());
+            }
+            flight->result = std::move(fetched);
+            finishFlight();
+            lock.unlock();
+            if (!flight->result.ok) return flight->result;
+        }
+    } else {
+        lock.unlock();
+    }
+    for (int64_t bucket = first; bucket < last; ++bucket)
+        if (const auto& bar = available.at(bucket)) result.candles.push_back(*bar);
+    sLog_Probe("candles.cache", "product=" << product << " tfSec=" << timeframeSec
+               << " hit=" << (missingFirst >= missingLast) << " bars=" << result.candles.size());
+    return result;
+}
+
+CandleFetchResult CoinbaseRestClient::fetchClosedCandleHistory(
+    const std::string& productId, int64_t timeframeSec, int64_t startSec, int64_t endSec,
+    const CandleHistoryCache::Cancel& cancelled) const {
+    const auto nowSec = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    return m_history.fetch(productId, timeframeSec, startSec, endSec, nowSec,
+        [&](int64_t begin, int64_t end, const std::string& granularity) {
+            // At most 2.5 history REST starts/s, shared by all chart sessions.
+            // Cache hits bypass this callback and consume no provider budget.
+            {
+                std::lock_guard rateLock(m_historyRequestMutex);
+                std::this_thread::sleep_until(m_nextHistoryRequest);
+                if (cancelled && cancelled()) return CandleFetchResult{false, "cancelled", {}};
+                m_nextHistoryRequest = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
+            }
+            sLog_Probe("candles.rest.request", "product=" << productId << " granularity=" << granularity
+                       << " start=" << begin << " end=" << end);
+            // Coinbase end is inclusive. Exclude the next bucket before its
+            // 350-bar limit is applied, or the oldest requested bar is lost.
+            return fetchProductCandles(productId, begin, end - 1, granularity, 350);
+        }, cancelled);
 }

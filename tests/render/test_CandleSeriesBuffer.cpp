@@ -6,6 +6,7 @@
 #include <QEvent>
 
 #include <vector>
+#include "marketdata/rest/CoinbaseRestClient.hpp"
 
 namespace {
 
@@ -205,4 +206,67 @@ TEST(CandleSeriesBuffer, SelectionReentryRevokesCachedOwnershipButOrdinaryViewpo
     EXPECT_EQ(visible(*buffer).back().seq, 0); // timeframe reentry also revokes ownership
     buffer->applyUpdate(kSym, kTfSec, bar(5, 6.0, true), 1, true);
     EXPECT_DOUBLE_EQ(visible(*buffer).back().close, 6.0);
+}
+
+TEST(CandleSeriesBuffer, NativeHistoryAndLiveAggregatorMeetWithoutGapOrOverlapInEitherArrivalOrder) {
+    constexpr int64_t tfSec = 900, tfMs = tfSec * 1000, seam = 100 * tfMs;
+    for (bool historyFirst : {false, true}) {
+        CandleHistoryCache cache;
+        const auto history = cache.fetch("BTC-USD", tfSec, (seam - 2 * tfMs) / 1000,
+            (seam + tfMs) / 1000, (seam + 1000) / 1000,
+            [](int64_t start, int64_t end, const std::string&) {
+                CandleFetchResult result{true, {}, {}};
+                for (auto t = start; t <= end; t += tfSec)
+                    result.candles.push_back({t * 1000, 10, 10, 10, 10, 1});
+                return result; // inclusive provider end must not leak a forming bar
+            });
+        ASSERT_TRUE(history.ok);
+        ASSERT_EQ(history.candles.size(), 2u);
+        CandleSeriesBuffer buffer;
+        TimeframeAggregator aggregator({60'000, tfMs});
+        uint64_t seq = 0;
+        const auto convert = [](const OHLCVBar& b) {
+            Bar out;
+            out.timeStartMs = b.timestamp_ms;
+            out.timeEndMs = b.timestamp_ms + tfMs;
+            out.open = b.open; out.high = b.high; out.low = b.low;
+            out.close = b.close; out.volume = b.volume; out.isClosed = b.is_closed;
+            return out;
+        };
+        QObject::connect(&aggregator, &TimeframeAggregator::barUpdated, &buffer,
+            [&](const QString& symbol, int64_t tf, const OHLCVBar& b) {
+                if (tf == tfMs) buffer.applyUpdate(symbol, tfSec, convert(b), ++seq, false);
+            });
+        QObject::connect(&aggregator, &TimeframeAggregator::barClosed, &buffer,
+            [&](const QString& symbol, int64_t tf, const OHLCVBar& b) {
+                if (tf == tfMs) buffer.applyUpdate(symbol, tfSec, convert(b), ++seq, true);
+            });
+        const auto merge = [&] {
+            std::vector<Bar> bars;
+            for (const auto& b : history.candles) bars.push_back(convert(b));
+            buffer.applyHistory(kSym, tfSec, bars);
+        };
+        if (historyFirst) merge();
+        Trade trade{};
+        trade.product_id = "BTC-USD"; trade.price = 20; trade.size = 2;
+        trade.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(seam + 1000));
+        aggregator.onTrade(trade);
+        aggregator.tick(seam + 60'000); // coarse live updates consume closed anchor minutes
+        if (!historyFirst) merge();
+        aggregator.tick(seam + tfMs);
+        trade.timestamp += std::chrono::milliseconds(tfMs);
+        trade.price = 30;
+        aggregator.onTrade(trade);
+        aggregator.tick(seam + tfMs + 60'000);
+        merge(); // delayed native reply cannot duplicate or overwrite live ownership
+        std::vector<Bar> bars;
+        buffer.getVisibleSlice(kSym, tfSec, seam - 2 * tfMs, seam + 2 * tfMs, bars);
+        ASSERT_EQ(bars.size(), 4u);
+        for (size_t i = 1; i < bars.size(); ++i)
+            EXPECT_EQ(bars[i - 1].timeEndMs, bars[i].timeStartMs);
+        EXPECT_TRUE(bars[2].isClosed);
+        EXPECT_EQ(bars[2].close, 20);
+        EXPECT_FALSE(bars[3].isClosed);
+        EXPECT_EQ(bars[3].close, 30);
+    }
 }

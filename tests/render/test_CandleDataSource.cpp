@@ -400,3 +400,13 @@ TEST_F(CandleDataSourceTest, StaleL2RequestsFreshSnapshotsWithBoundedBackoff) {
     EXPECT_EQ(staleOff, 1);
     EXPECT_EQ(pendingBookCount(), 0u);
 }
+
+TEST_F(CandleDataSourceTest, FifteenMinuteViewportSendsNativeBarPageThroughRealClientQueue) {
+    source.setCandleHistoryViewport("BTC-USD", 900, 1000 * 900000LL, 2344 * 900000LL);
+    const auto request = takeRequest();
+    ASSERT_FALSE(request.is_null());
+    EXPECT_EQ(request.at("type"), "candle_history_request");
+    EXPECT_EQ(request.at("timeframe_sec"), 900);
+    EXPECT_EQ(request.at("limit"), 350);
+    EXPECT_EQ(request.at("end_time_sec"), 2344 * 900);
+}

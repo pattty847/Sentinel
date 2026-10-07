@@ -65,7 +65,7 @@ public:
                 m_refreshCursorSec = std::min(m_endSec, nowEnd);
                 m_refreshStartSec = m_startSec;
             }
-            const qint64 pageCap = std::clamp<qint64>(350 * 60 / m_tfSec, 1, 350);
+            const qint64 pageCap = 350;
             const qint64 bars = (m_refreshCursorSec - m_refreshStartSec + m_tfSec - 1) / m_tfSec;
             const int limit = static_cast<int>(std::min(pageCap, bars));
             const qint64 end = m_refreshCursorSec - (m_tfSec == 1 ? 1 : 0);
@@ -85,7 +85,7 @@ public:
         qint64 boundary = oldestMs > 0 ? oldestMs / 1000 : std::min(m_endSec, nowEnd);
         if (history.cursorSec > 0) boundary = std::min(boundary, history.cursorSec);
         if (boundary <= m_startSec && history.emptyScanStartSec == 0) return std::nullopt;
-        const qint64 pageCap = std::clamp<qint64>(350 * 60 / m_tfSec, 1, 350);
+        const qint64 pageCap = 350;
         // After an empty window, probe full pages beyond it (bounded below).
         const qint64 bars = history.emptyScanStartSec > 0 ? pageCap
             : (boundary - m_startSec + m_tfSec - 1) / m_tfSec;

@@ -228,3 +228,16 @@ TEST(RestResolver, StalledRefreshSharesLookupKeepsCachedHostAndWaitsForCapacity)
     for (auto& caller : callers) caller.get();
 }
 } // namespace
+
+TEST_F(CoinbaseRestDeadline, ClosedHistoryUsesExclusiveEndAndRepeatDoesNotConnect) {
+    serve(Reply::Candles);
+    CoinbaseRestClient client(auth, "127.0.0.1", std::to_string(acceptor.local_endpoint().port()), caFile, 500ms);
+    const auto first = client.fetchClosedCandleHistory("BTC-USD", 60, 60, 120);
+    ASSERT_TRUE(first.ok) << first.error;
+    ASSERT_EQ(first.candles.size(), 1u);
+    EXPECT_TRUE(first.candles.front().is_closed);
+    const auto repeat = client.fetchClosedCandleHistory("BTC-USD", 60, 60, 120);
+    ASSERT_TRUE(repeat.ok) << repeat.error;
+    EXPECT_EQ(repeat.candles.size(), 1u);
+    EXPECT_NE(request.target().find("start=60&end=119&granularity=ONE_MINUTE&limit=350"), std::string::npos);
+}
