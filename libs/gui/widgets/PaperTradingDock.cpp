@@ -442,6 +442,7 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
     paramGrid->addWidget(new QLabel(QStringLiteral("Symbol:"), paramGroup), 0, 0);
     m_btSymbol = new QLineEdit(QStringLiteral("BTC-USD"), paramGroup);
     m_btSymbol->setAccessibleName(QStringLiteral("Backtest product"));
+    m_btSymbol->setObjectName("backtestProduct");
     paramGrid->addWidget(m_btSymbol, 0, 1);
 
     addLabeledSpin(1, QStringLiteral("Spread (bps):"), m_btSpread,  1.0, 500.0, 1.0, 10.0, QStringLiteral(" bps"));
@@ -455,6 +456,13 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
     m_btRunBtn->setStyleSheet("QPushButton { background: #1a3a6a; color: #82b4ff; border: 1px solid #4478cc; padding: 4px 12px; }");
     m_btStatus = new QLabel(QStringLiteral("Choose a UTC range and press Run."), parent);
     m_btStatus->setStyleSheet("QLabel { color: #888; }");
+    m_btStatus->setObjectName("backtestStatus");
+    connect(m_btSource, &QComboBox::currentIndexChanged, this, [this](int index) {
+        if (m_btProcess && m_btProcess->state() != QProcess::NotRunning) return;
+        m_btStatus->setText(index == 0 ? QStringLiteral("Choose a UTC range and press Run.")
+                                      : QStringLiteral("Select a trade log and press Run."));
+        m_btStatus->setStyleSheet("QLabel { color: #888; }");
+    });
     runRow->addWidget(m_btRunBtn);
     runRow->addWidget(m_btStatus, 1);
     layout->addLayout(runRow);
@@ -509,6 +517,7 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
         QStringList candidates;
         // Dev build layouts.
         for (const auto& rel : {
+                 QString("../../apps/sentinel-backtest/sentinel-backtest"),
                  QString("../sentinel-backtest/sentinel-backtest"),
                  QString("../../sentinel-backtest/sentinel-backtest"),
                  QString("../../../apps/sentinel-backtest/sentinel-backtest"),
@@ -537,6 +546,7 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
             m_btProcess->waitForFinished(500);
         }
 
+        m_btStderr.clear();
         m_btOutput->clear();
         m_btStatus->setText(QStringLiteral("Running..."));
         m_btStatus->setStyleSheet("QLabel { color: #ffc107; }");
@@ -555,8 +565,9 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
                 m_btOutput->appendPlainText(QString::fromLocal8Bit(m_btProcess->readAllStandardOutput()).trimmed());
             });
             connect(m_btProcess, &QProcess::readyReadStandardError, this, [this]() {
-                m_btOutput->appendPlainText(QStringLiteral("[stderr] ") +
-                    QString::fromLocal8Bit(m_btProcess->readAllStandardError()).trimmed());
+                const auto text = QString::fromLocal8Bit(m_btProcess->readAllStandardError());
+                m_btStderr += text;
+                m_btOutput->appendPlainText(QStringLiteral("[stderr] ") + text.trimmed());
             });
             connect(m_btProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
                 if (error != QProcess::FailedToStart) return;
@@ -567,9 +578,15 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
             });
             connect(m_btProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
                     this, [this](int code, QProcess::ExitStatus status) {
+                const auto remaining = QString::fromLocal8Bit(m_btProcess->readAllStandardError());
+                m_btStderr += remaining;
+                if (!remaining.isEmpty()) {
+                    m_btOutput->appendPlainText(QStringLiteral("[stderr] ") + remaining.trimmed());
+                }
                 m_btRunBtn->setEnabled(true);
                 if (status == QProcess::CrashExit || code != 0) {
-                    m_btStatus->setText(QString("Exited with code %1").arg(code));
+                    m_btStatus->setText(m_btStderr.contains(QStringLiteral("no trades in range"))
+                        ? QStringLiteral("Error: no trades in range.") : QString("Exited with code %1").arg(code));
                     m_btStatus->setStyleSheet("QLabel { color: #f44336; }");
                 } else {
                     m_btStatus->setText(QStringLiteral("Done."));

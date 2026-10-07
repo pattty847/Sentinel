@@ -28,7 +28,7 @@ struct CliArgs {
 };
 
 void printUsage() {
-    std::cerr << "History: sentinel-backtest --product P --from UTC --to UTC [--journal ROOT] [--legacy ROOT] [--dump] (to exclusive)\n";
+    std::cerr << "History: sentinel-backtest --product P --from UTC --to UTC [--journal ROOT] [--legacy ROOT] [--dump] [--spread BPS] [--qty QTY] [--maxpos QTY] (to exclusive)\n";
     std::cerr << "Usage: sentinel-backtest <trades.csv|trade_log.bin|trade_dir> [symbol] [spread_bps] [order_qty] [max_pos] [skew_bps]\n";
 }
 
@@ -136,10 +136,19 @@ int main(int argc, char** argv) try {
         source = std::make_unique<trading::TickBinaryTradeEventSource>(inputPath, args->symbol);
     }
 
+    const auto requireTrades = [&](bool found) {
+        std::cerr << "skipped_files=" << source->skippedFiles() << '\n';
+        if (!found) {
+            throw std::runtime_error("no trades in range; journal=" + args->journalRoot +
+                                     " legacy=" + args->legacyRoot);
+        }
+    };
     if (args->dump) {
+        bool found = false;
         std::cout << "trade_id,ms,price,size,side,source\n" << std::setprecision(17);
         while (const auto event = source->next()) {
             if (!event->trade) continue;
+            found = true;
             const auto& t = *event->trade;
             const char* side = t.side == AggressorSide::Buy ? "Buy"
                              : t.side == AggressorSide::Sell ? "Sell" : "Unknown";
@@ -148,6 +157,7 @@ int main(int argc, char** argv) try {
         }
         for (const auto& [down, up] : source->gaps())
             std::cout << "# gap," << down << ',' << up << '\n';
+        requireTrades(found);
         return 0;
     }
 
@@ -164,6 +174,7 @@ int main(int argc, char** argv) try {
     config.strategyId = strategy.id();
     trading::ReplayEngine replay;
     auto result = replay.run(*source, strategy, broker, config);
+    requireTrades(result.summary.eventCount != 0);
 
     std::cout << "strategy=" << result.summary.strategyId
               << " symbol=" << result.summary.symbol

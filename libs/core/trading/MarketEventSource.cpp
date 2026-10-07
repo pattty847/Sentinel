@@ -4,6 +4,8 @@
 #include "marketdata/dispatch/MessageDispatcher.hpp"
 #include <QDateTime>
 #include <QTimeZone>
+#include "SentinelLogging.hpp"
+#include <charconv>
 #include <deque>
 #include <map>
 #include <limits>
@@ -16,6 +18,19 @@
 #include <string>
 
 namespace trading {
+namespace {
+std::optional<uint64_t> numericTradeId(const std::string& id) {
+    uint64_t value = 0;
+    const auto [end, error] = std::from_chars(id.data(), id.data() + id.size(), value);
+    if (error != std::errc{} || end != id.data() + id.size()) return {};
+    return value;
+}
+bool freshTrade(sentinel::capture::TradeIdWindow& window, const std::string& id) {
+    const auto value = numericTradeId(id);
+    return !value || window.observe(*value);
+}
+} // namespace
+
 
 const std::vector<std::pair<int64_t, int64_t>>& IMarketEventSource::gaps() const {
     static const std::vector<std::pair<int64_t, int64_t>> empty;
@@ -91,29 +106,35 @@ std::optional<MarketEvent> TickBinaryTradeEventSource::next() {
             }
         }
 
+        const auto offset = m_currentFile.tellg();
         LogFormat::RecordHeader header{};
         m_currentFile.read(reinterpret_cast<char*>(&header), sizeof(header));
         if (!m_currentFile.good()) {
+            if (m_currentFile.gcount() != 0) ++m_skippedFiles; // Partial record header.
             closeCurrentFile();
             continue;
         }
 
-        if (header.payload_len > sentinel::capture::MaxRecordBytes)
-            throw std::runtime_error("oversized tick record payload");
+        constexpr uint32_t MaxTickPayload = 1024 * 1024;
+        const bool knownType = header.type == LogFormat::RecordType::Trade ||
+            header.type == LogFormat::RecordType::BookUpdate || header.type == LogFormat::RecordType::BookSnapshot;
+        const bool badTradeLength = header.type == LogFormat::RecordType::Trade &&
+            (header.payload_len < sizeof(LogFormat::TradePayload) ||
+             header.payload_len > sizeof(LogFormat::TradePayload) + 256);
+        if (header.payload_len > MaxTickPayload || !knownType || badTradeLength) {
+            skipCurrentFile(offset, "corrupt record header");
+            continue;
+        }
         if (header.payload_len == 0) {
             continue;
         }
 
         switch (header.type) {
         case LogFormat::RecordType::Trade: {
-            if (header.payload_len < sizeof(LogFormat::TradePayload)) {
-                m_currentFile.seekg(static_cast<std::streamoff>(header.payload_len), std::ios::cur);
-                continue;
-            }
-
             LogFormat::TradePayload payload{};
             m_currentFile.read(reinterpret_cast<char*>(&payload), sizeof(payload));
             if (!m_currentFile.good()) {
+                ++m_skippedFiles;
                 closeCurrentFile();
                 continue;
             }
@@ -124,6 +145,7 @@ std::optional<MarketEvent> TickBinaryTradeEventSource::next() {
             if (remaining > 0) {
                 m_currentFile.read(tradeId.data(), remaining);
                 if (!m_currentFile.good()) {
+                    ++m_skippedFiles;
                     closeCurrentFile(); // Normal partial tail of an active hourly file.
                     continue;
                 }
@@ -133,6 +155,8 @@ std::optional<MarketEvent> TickBinaryTradeEventSource::next() {
                 continue;
             }
 
+            // Legacy files have no frame boundaries: retain their recorded order.
+            if (!freshTrade(m_ids[m_currentSymbol], tradeId)) continue;
             TradeEvent trade;
             trade.tradeId = std::move(tradeId);
             trade.side = payload.side == 1 ? AggressorSide::Buy
@@ -154,7 +178,6 @@ std::optional<MarketEvent> TickBinaryTradeEventSource::next() {
         }
         case LogFormat::RecordType::BookUpdate:
         case LogFormat::RecordType::BookSnapshot:
-        default:
             m_currentFile.seekg(static_cast<std::streamoff>(header.payload_len), std::ios::cur);
             break;
         }
@@ -166,6 +189,7 @@ bool TickBinaryTradeEventSource::openNextFile() {
         closeCurrentFile();
         m_currentFile.open(m_files[m_fileIndex++], std::ios::binary);
         if (!m_currentFile.is_open()) {
+            skipCurrentFile(0, "could not open file");
             continue;
         }
 
@@ -173,20 +197,27 @@ bool TickBinaryTradeEventSource::openNextFile() {
         m_currentFile.read(reinterpret_cast<char*>(&header), sizeof(header));
         if (!m_currentFile.good() || header.magic != LogFormat::MAGIC ||
             (header.version != LogFormat::LEGACY_VERSION && header.version != LogFormat::VERSION)) {
-            closeCurrentFile();
+            skipCurrentFile(0, "invalid file header");
             continue;
         }
 
         m_fileVersion = header.version;
         m_currentSymbol = trimNullTerminated(header.symbol, sizeof(header.symbol));
         if (m_currentSymbol.empty()) {
-            closeCurrentFile();
+            skipCurrentFile(0, "empty file symbol");
             continue;
         }
         return true;
     }
     closeCurrentFile();
     return false;
+}
+
+void TickBinaryTradeEventSource::skipCurrentFile(std::streamoff offset, const char* reason) {
+    ++m_skippedFiles;
+    sLog_Warning("Backtest tick file skipped file=" << m_files[m_fileIndex - 1].string().c_str()
+                 << " offset=" << offset << " reason=" << reason);
+    closeCurrentFile();
 }
 
 void TickBinaryTradeEventSource::closeCurrentFile() {
@@ -234,13 +265,19 @@ struct JournalTradeEventSource::State {
     std::optional<int64_t> down;
     std::vector<std::pair<int64_t, int64_t>> gaps;
     std::deque<MarketEvent> ready;
+    sentinel::capture::TradeIdWindow ids;
 
     void beginGap(int64_t ms) {
         if (!down) down = ms;
     }
+    void addGap(int64_t begin, int64_t end) {
+        begin = std::max(begin, fromMs);
+        if (toMs) end = std::min(end, toMs);
+        if (begin < end) gaps.emplace_back(begin, end);
+    }
     void endGap(int64_t ms) {
         if (down) {
-            gaps.emplace_back(*down, ms);
+            addGap(*down, ms);
             down.reset();
         }
     }
@@ -257,14 +294,31 @@ JournalTradeEventSource::JournalTradeEventSource(std::filesystem::path root, std
         throw std::invalid_argument("invalid trade history window");
     }
     s.reader = std::make_unique<sentinel::roller::JournalReader>(root, s.product);
-    std::optional<sentinel::roller::JournalPos> start;
-    for (const auto& file : s.reader->files()) {
-        const auto& h = file.header;
-        if (h.at("opened_system_ns").get<int64_t>() / 1'000'000 <= fromMs)
-            start = sentinel::roller::JournalPos{s.product, h.at("run_id"),
-                                                 h.at("first_block_ordinal"), 0};
+    const auto& files = s.reader->files();
+    std::optional<size_t> candidate;
+    for (size_t i = 0; i < files.size(); ++i) {
+        if (files[i].header.at("opened_system_ns").get<int64_t>() / 1'000'000 <= fromMs) candidate = i;
     }
-    if (start) s.reader = std::make_unique<sentinel::roller::JournalReader>(root, s.product, start);
+    if (candidate) {
+        // A header's first ordinal need not contain a durable record after a crash.
+        // Locate an actual cursor, skipping empty/torn segments, without changing the roller.
+        std::optional<sentinel::roller::JournalPos> start;
+        for (size_t i = *candidate; i < files.size(); ++i) {
+            const auto& file = files[i];
+            sentinel::capture::RecordReader probe(QString::fromStdString(file.path.string()), !file.superseded,
+                [&](const sentinel::capture::BlockIndex& block, const char* reason) {
+                    sLog_Warning("Backtest journal start skipped block file=" << file.path.string().c_str()
+                                 << " offset=" << block.offset << " reason=" << reason);
+                });
+            sentinel::capture::Record record;
+            if (!probe.next(record)) continue;
+            start = sentinel::roller::JournalPos{s.product, file.header.at("run_id"),
+                                                 probe.result().recordOrdinal, probe.result().recordIndex};
+            break;
+        }
+        if (start) s.reader = std::make_unique<sentinel::roller::JournalReader>(root, s.product, start);
+        else s.ended = true; // No durable data; never poll an open start file.
+    }
 }
 JournalTradeEventSource::~JournalTradeEventSource() = default;
 const std::vector<std::pair<int64_t, int64_t>>& JournalTradeEventSource::gaps() const {
@@ -282,6 +336,11 @@ std::optional<MarketEvent> JournalTradeEventSource::next() {
         }
         const auto& r = input.record;
         const int64_t local = r.time.systemNs / 1'000'000;
+        if (!s.seen) {
+            constexpr int64_t DayMs = 86'400'000;
+            const auto dayStart = local - local % DayMs;
+            s.addGap(std::max(s.fromMs, dayStart), local);
+        }
         if (s.toMs && local > s.toMs && local - s.toMs > 60'000) {
             s.ended = true;
             if (s.down) s.endGap(s.toMs);
@@ -302,8 +361,12 @@ std::optional<MarketEvent> JournalTradeEventSource::next() {
         const auto j = nlohmann::json::parse(r.payload); // Malformed trade JSON is an explicit error.
         if (j.value("channel", "") != "market_trades") continue;
         const auto deliver = [&](const nlohmann::json& trades) {
-            const auto parsed = MessageDispatcher::parse({{"channel", "market_trades"}, {"trades", trades}},
+            auto parsed = MessageDispatcher::parse({{"channel", "market_trades"}, {"trades", trades}},
                 std::chrono::system_clock::time_point(std::chrono::milliseconds(local)));
+            std::stable_sort(parsed.events.begin(), parsed.events.end(), [](const auto& a, const auto& b) {
+                return numericTradeId(std::get<::TradeEvent>(a).trade.trade_id).value_or(0) <
+                       numericTradeId(std::get<::TradeEvent>(b).trade.trade_id).value_or(0);
+            });
             for (const auto& e : parsed.events) {
                 const auto* t = std::get_if<::TradeEvent>(&e);
                 if (!t || t->trade.product_id != s.product) continue;
@@ -311,6 +374,7 @@ std::optional<MarketEvent> JournalTradeEventSource::next() {
                 const int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     raw.timestamp.time_since_epoch()).count();
                 if (ms < s.fromMs || (s.toMs && ms >= s.toMs)) continue;
+                if (!freshTrade(s.ids, raw.trade_id)) continue;
                 auto side = raw.side;
                 // Independent maker -> aggressor conversion; B4 pins this to JournalFeed.
                 if (side == AggressorSide::Buy) side = AggressorSide::Sell;
@@ -354,21 +418,28 @@ public:
                 else source_ = std::make_unique<TickBinaryTradeEventSource>(span.path, product_);
             }
             while (auto event = source_->next()) {
-                if (event->timestampMs >= span.from && event->timestampMs < span.to) return event;
+                if (event->timestampMs >= span.from && event->timestampMs < span.to) {
+                    // Keep dedupe state when the selected source changes at UTC midnight.
+                    if (event->trade && !freshTrade(ids_, event->trade->tradeId)) continue;
+                    return event;
+                }
             }
             const auto& gaps = source_->gaps();
             gaps_.insert(gaps_.end(), gaps.begin(), gaps.end());
+            skipped_ += source_->skippedFiles();
             source_.reset();
             ++index_;
         }
         return {};
     }
     const char* sourceName() const override { return source_ ? source_->sourceName() : "file"; }
+    std::size_t skippedFiles() const override { return skipped_ + (source_ ? source_->skippedFiles() : 0); }
     const std::vector<std::pair<int64_t, int64_t>>& gaps() const override { return gaps_; }
 private:
     std::string product_;
     std::vector<HistorySpan> spans_;
-    size_t index_ = 0;
+    size_t index_ = 0, skipped_ = 0;
+    sentinel::capture::TradeIdWindow ids_;
     std::unique_ptr<IMarketEventSource> source_;
     std::vector<std::pair<int64_t, int64_t>> gaps_;
 };

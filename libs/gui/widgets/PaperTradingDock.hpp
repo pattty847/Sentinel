@@ -144,4 +144,5 @@ private:
     QPlainTextEdit* m_btOutput  = nullptr;
     QLabel*       m_btStatus    = nullptr;
     QProcess*     m_btProcess   = nullptr;
+    QString m_btStderr;
 };

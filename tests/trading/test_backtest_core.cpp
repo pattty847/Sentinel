@@ -706,3 +706,291 @@ TEST(BacktestCore, JournalConnectionChangeAndCaptureStopAreGaps) {
     EXPECT_EQ(source.gaps(), (std::vector<std::pair<int64_t, int64_t>>{
         {JournalEpoch + 10, JournalEpoch + 20}, {JournalEpoch + 30, JournalEpoch + 100}}));
 }
+
+namespace {
+void binaryTickFile(const std::filesystem::path& path,
+                    const std::vector<std::pair<std::string, int64_t>>& trades) {
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream out(path, std::ios::binary);
+    LogFormat::FileHeader file;
+    file.version = LogFormat::LEGACY_VERSION;
+    std::memcpy(file.symbol, "BTC-USD", 7);
+    out.write(reinterpret_cast<const char*>(&file), sizeof(file));
+    for (const auto& [id, ms] : trades) {
+        LogFormat::TradePayload payload{123.45, 0.75, 1};
+        LogFormat::RecordHeader header{LogFormat::RecordType::Trade, static_cast<uint64_t>(ms),
+                                      static_cast<uint32_t>(sizeof(payload) + id.size())};
+        out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+        out.write(reinterpret_cast<const char*>(&payload), sizeof(payload));
+        out.write(id.data(), id.size());
+    }
+}
+std::vector<std::string> collectIds(trading::IMarketEventSource& source) {
+    std::vector<std::string> ids;
+    while (auto e = source.next()) ids.push_back(e->trade->tradeId);
+    return ids;
+}
+std::string batchFrame(const std::vector<std::pair<std::string, int64_t>>& ids, bool snapshot = false) {
+    auto trades = nlohmann::json::array();
+    for (const auto& [id, ms] : ids)
+        trades.push_back(nlohmann::json::parse(tradesFrame(id, ms))["trades"][0]);
+    return nlohmann::json{{"channel", "market_trades"}, {"events", nlohmann::json::array({
+        {{"type", snapshot ? "snapshot" : "update"}, {"trades", trades}}})}}.dump();
+}
+}
+
+TEST(BacktestCore, R1CorruptTickHeadersSkipFileAndContinue) {
+    for (int kind = 0; kind < 3; ++kind) {
+        SCOPED_TRACE(kind);
+        QTemporaryDir temp;
+        const auto root = std::filesystem::path(temp.path().toStdString());
+        const auto bad = root / "00.bin";
+        binaryTickFile(bad, {{"1", JournalEpoch}});
+        {
+            std::ofstream out(bad, std::ios::binary | std::ios::app);
+            LogFormat::RecordHeader header{};
+            header.timestamp_ms = JournalEpoch + 5;
+            header.type = kind == 0 ? LogFormat::RecordType::BookUpdate
+                        : kind == 1 ? LogFormat::RecordType::Trade : static_cast<LogFormat::RecordType>(99);
+            header.payload_len = kind == 0 ? 3'392'839'995u : kind == 1 ? sizeof(LogFormat::TradePayload) + 257 : 0;
+            out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+            if (kind == 1) {
+                LogFormat::TradePayload payload{999, 1, 1};
+                out.write(reinterpret_cast<const char*>(&payload), sizeof(payload));
+                out << std::string(257, 'x');
+            }
+        }
+        binaryTickFile(root / "01.bin", {{"2", JournalEpoch + 10}});
+        trading::TickBinaryTradeEventSource source(root, "BTC-USD");
+        EXPECT_EQ(collectIds(source), (std::vector<std::string>{"1", "2"}));
+        EXPECT_EQ(source.skippedFiles(), 1u);
+        for (const auto& path : {temp.path(), QString::fromStdString(bad.string())}) {
+            QProcess process;
+            process.start(QString::fromUtf8(BACKTEST_CLI), {path, "BTC-USD"});
+            ASSERT_TRUE(process.waitForFinished(10000));
+            EXPECT_EQ(process.exitCode(), 0);
+            const auto error = process.readAllStandardError();
+            EXPECT_TRUE(error.contains("skipped_files=1"));
+            EXPECT_TRUE(error.contains("offset="));
+            EXPECT_TRUE(error.contains("00.bin"));
+            EXPECT_TRUE(process.readAllStandardOutput().contains(path == temp.path() ? "events=2" : "events=1"));
+        }
+    }
+}
+
+TEST(BacktestCore, R2JournalDedupeSurvivesUpdatesAndReconnectSnapshots) {
+    QTemporaryDir temp;
+    {
+        capture::Writer writer(journalConfig(temp), journalMetadata());
+        writer.append(journalRecord(JournalEpoch, capture::Kind::Frame, batchFrame({{"1", JournalEpoch}})));
+        writer.append(journalRecord(JournalEpoch + 10, capture::Kind::Frame, batchFrame({{"1", JournalEpoch + 10}})));
+        writer.append(journalRecord(JournalEpoch + 20, capture::Kind::TransportUp, "{}", 2));
+        writer.append(journalRecord(JournalEpoch + 30, capture::Kind::Frame,
+            batchFrame({{"2", JournalEpoch + 30}, {"1", JournalEpoch + 20}}, true), 2));
+        writer.append(journalRecord(JournalEpoch + 40, capture::Kind::Frame,
+            batchFrame({{"", JournalEpoch + 40}, {"text", JournalEpoch + 40}}), 2));
+        writer.append(journalRecord(JournalEpoch + 50, capture::Kind::Frame,
+            batchFrame({{"", JournalEpoch + 50}, {"text", JournalEpoch + 50}}), 2));
+        writer.close();
+    }
+    trading::JournalTradeEventSource source(temp.path().toStdString(), "BTC-USD", JournalEpoch, JournalEpoch + 1000);
+    const auto first = source.next(); ASSERT_TRUE(first);
+    EXPECT_EQ(first->trade->tradeId, "1");
+    EXPECT_EQ(first->timestampMs, JournalEpoch); // Keep the first occurrence.
+    EXPECT_EQ(collectIds(source), (std::vector<std::string>{"2", "", "text", "", "text"}));
+}
+
+TEST(BacktestCore, R2TickDedupeSurvivesFileRotationAndBypassesTextIds) {
+    QTemporaryDir temp;
+    const auto root = std::filesystem::path(temp.path().toStdString());
+    binaryTickFile(root / "00.bin", {{"2", JournalEpoch + 2}, {"1", JournalEpoch + 1}, {"", JournalEpoch + 3}, {"text", JournalEpoch + 4}});
+    binaryTickFile(root / "01.bin", {{"1", JournalEpoch + 5}, {"2", JournalEpoch + 6}, {"", JournalEpoch + 7}, {"text", JournalEpoch + 8}});
+    trading::TickBinaryTradeEventSource source(root, "BTC-USD");
+    EXPECT_EQ(collectIds(source), (std::vector<std::string>{"2", "1", "", "text", "", "text"}));
+}
+
+TEST(BacktestCore, R3JournalFramesSortNumericIdsBeforeDedupe) {
+    QTemporaryDir temp;
+    {
+        capture::Writer writer(journalConfig(temp), journalMetadata());
+        writer.append(journalRecord(JournalEpoch + 100, capture::Kind::Frame,
+            batchFrame({{"3", JournalEpoch + 3}, {"2", JournalEpoch + 2}, {"1", JournalEpoch + 1},
+                        {"1", JournalEpoch + 9}, {"10", JournalEpoch + 10}})));
+        writer.close();
+    }
+    trading::JournalTradeEventSource source(temp.path().toStdString(), "BTC-USD", JournalEpoch, JournalEpoch + 1000);
+    const auto first = source.next(); ASSERT_TRUE(first);
+    EXPECT_EQ(first->trade->tradeId, "1");
+    EXPECT_EQ(first->timestampMs, JournalEpoch + 1); // Stable order for equal IDs.
+    EXPECT_EQ(collectIds(source), (std::vector<std::string>{"2", "3", "10"}));
+}
+
+TEST(BacktestCore, R4M3ReceiveSlackKeepsLateTradesAndStopsAtSixtySeconds) {
+    QTemporaryDir temp;
+    const auto to = JournalEpoch + 1000;
+    {
+        capture::Writer writer(journalConfig(temp), journalMetadata());
+        writer.append(journalRecord(JournalEpoch, capture::Kind::TransportUp));
+        writer.append(journalRecord(to + 30'000, capture::Kind::Frame, tradesFrame("1", to - 1)));
+        writer.append(journalRecord(to + 60'001, capture::Kind::Frame, tradesFrame("2", to - 2)));
+        writer.close();
+    }
+    trading::JournalTradeEventSource source(temp.path().toStdString(), "BTC-USD", JournalEpoch, to);
+    EXPECT_EQ(collectIds(source), (std::vector<std::string>{"1"}));
+}
+
+TEST(BacktestCore, R4M6UnsealedSegmentAddsGapBeforeSuccessor) {
+    QTemporaryDir temp;
+    std::filesystem::path first;
+    uintmax_t durableBytes = 0;
+    {
+        capture::Writer writer(journalConfig(temp), journalMetadata());
+        writer.append(journalRecord(JournalEpoch, capture::Kind::Frame, tradesFrame("1", JournalEpoch)));
+        writer.flush();
+        first = writer.currentPath().toStdString();
+        durableBytes = std::filesystem::file_size(first);
+        writer.sealSegment();
+        writer.append(journalRecord(JournalEpoch + 100, capture::Kind::Frame, tradesFrame("2", JournalEpoch + 100)));
+        writer.close();
+    }
+    std::filesystem::resize_file(first, durableBytes); // Same run/connection/ordinals, missing seal only.
+    trading::JournalTradeEventSource source(temp.path().toStdString(), "BTC-USD", JournalEpoch, JournalEpoch + 1000);
+    EXPECT_EQ(collectIds(source), (std::vector<std::string>{"1", "2"}));
+    EXPECT_EQ(source.gaps(), (std::vector<std::pair<int64_t, int64_t>>{{JournalEpoch, JournalEpoch + 100}}));
+}
+
+TEST(BacktestCore, R4M7LegacySpanClipsBothWindowEdges) {
+    QTemporaryDir temp;
+    const auto root = std::filesystem::path(temp.path().toStdString());
+    binaryTickFile(root / "BTC-USD/2026-10-07/00.bin", {{"1", JournalEpoch + 9}, {"2", JournalEpoch + 11}, {"3", JournalEpoch + 20}});
+    auto source = trading::openTradeHistory("BTC-USD", JournalEpoch + 10, JournalEpoch + 20, {}, root);
+    EXPECT_EQ(collectIds(*source), (std::vector<std::string>{"2"}));
+}
+
+TEST(BacktestCore, R4M9LegacySelectorDoesNotOpenDaysAtOrAfterTo) {
+    QTemporaryDir temp;
+    const auto root = std::filesystem::path(temp.path().toStdString());
+    binaryTickFile(root / "BTC-USD/2026-10-07/00.bin", {{"1", JournalEpoch}});
+    const auto later = root / "BTC-USD/2026-10-08/00.bin";
+    binaryTickFile(later, {});
+    {
+        std::ofstream out(later, std::ios::binary | std::ios::app);
+        LogFormat::RecordHeader bad{static_cast<LogFormat::RecordType>(99), JournalEpoch + 86'400'000, 0};
+        out.write(reinterpret_cast<const char*>(&bad), sizeof(bad));
+    }
+    auto source = trading::openTradeHistory("BTC-USD", JournalEpoch, JournalEpoch + 86'400'000, {}, root);
+    EXPECT_EQ(collectIds(*source), (std::vector<std::string>{"1"}));
+    EXPECT_EQ(source->skippedFiles(), 0u); // An out-of-window file must never be opened.
+}
+
+TEST(BacktestCore, R5JournalGapsAreClippedToRequestedWindow) {
+    QTemporaryDir temp;
+    {
+        capture::Writer writer(journalConfig(temp), journalMetadata());
+        for (const auto& [offset, kind] : std::vector<std::pair<int64_t, capture::Kind>>{
+            {0, capture::Kind::TransportUp}, {10, capture::Kind::TransportDown}, {150, capture::Kind::TransportUp},
+            {450, capture::Kind::TransportDown}, {600, capture::Kind::TransportUp},
+            {700, capture::Kind::TransportDown}, {800, capture::Kind::TransportUp}})
+            writer.append(journalRecord(JournalEpoch + offset, kind));
+        writer.close();
+    }
+    trading::JournalTradeEventSource source(temp.path().toStdString(), "BTC-USD", JournalEpoch + 100, JournalEpoch + 500);
+    EXPECT_FALSE(source.next());
+    EXPECT_EQ(source.gaps(), (std::vector<std::pair<int64_t, int64_t>>{
+        {JournalEpoch + 100, JournalEpoch + 150}, {JournalEpoch + 450, JournalEpoch + 500}}));
+}
+
+TEST(BacktestCore, R6JournalLeadingCoverageGapAppearsInDump) {
+    QTemporaryDir temp;
+    {
+        capture::Writer writer(journalConfig(temp), journalMetadata());
+        writer.append(journalRecord(JournalEpoch + 100, capture::Kind::TransportUp));
+        writer.append(journalRecord(JournalEpoch + 120, capture::Kind::Frame, tradesFrame("1", JournalEpoch + 120)));
+        writer.close();
+    }
+    for (const auto from : {JournalEpoch - 1000, JournalEpoch + 10}) {
+        trading::JournalTradeEventSource source(temp.path().toStdString(), "BTC-USD", from, JournalEpoch + 1000);
+        EXPECT_EQ(collectIds(source), (std::vector<std::string>{"1"}));
+        EXPECT_EQ(source.gaps(), (std::vector<std::pair<int64_t, int64_t>>{{std::max(from, JournalEpoch), JournalEpoch + 100}}));
+    }
+    QProcess process;
+    process.start(QString::fromUtf8(BACKTEST_CLI), {"--product", "BTC-USD", "--from", "2026-10-07", "--to", "2026-10-08",
+        "--journal", temp.path(), "--legacy", temp.path() + "/missing", "--dump"});
+    ASSERT_TRUE(process.waitForFinished(10000)); EXPECT_EQ(process.exitCode(), 0);
+    EXPECT_TRUE(process.readAllStandardOutput().contains("# gap,1791331200000,1791331200100"));
+}
+
+TEST(BacktestCore, R7EmptyRangeFailsWithRootsAndUsageListsParameters) {
+    QTemporaryDir temp;
+    for (const bool dump : {false, true}) {
+        QStringList args{"--product", "BTC-USD", "--from", "2026-10-07", "--to", "2026-10-08",
+            "--journal", temp.path() + "/journal", "--legacy", temp.path() + "/legacy"};
+        if (dump) args << "--dump";
+        QProcess process;
+        process.start(QString::fromUtf8(BACKTEST_CLI), args);
+        ASSERT_TRUE(process.waitForFinished(10000)); EXPECT_NE(process.exitCode(), 0);
+        const auto error = process.readAllStandardError();
+        EXPECT_TRUE(error.contains("no trades in range"));
+        EXPECT_TRUE(error.contains((temp.path() + "/journal").toUtf8()));
+        EXPECT_TRUE(error.contains((temp.path() + "/legacy").toUtf8()));
+    }
+    QProcess process;
+    process.start(QString::fromUtf8(BACKTEST_CLI), QStringList{});
+    ASSERT_TRUE(process.waitForFinished(10000));
+    const auto usage = process.readAllStandardError();
+    EXPECT_TRUE(usage.contains("--spread")); EXPECT_TRUE(usage.contains("--qty")); EXPECT_TRUE(usage.contains("--maxpos"));
+}
+
+TEST(BacktestCore, R8EmptyOrUndurableStartFilesSkipWithoutInvalidCursor) {
+    for (int tailBytes : {0, 24, 49}) {
+        for (const bool following : {false, true}) {
+            SCOPED_TRACE(tailBytes);
+            SCOPED_TRACE(following);
+            QTemporaryDir temp;
+            std::filesystem::path first;
+            uintmax_t headerBytes = 0;
+            {
+                capture::Writer writer(journalConfig(temp), journalMetadata());
+                writer.append(journalRecord(JournalEpoch, capture::Kind::Frame, tradesFrame("1", JournalEpoch)));
+                first = writer.currentPath().toStdString();
+                headerBytes = std::filesystem::file_size(first); // Append is buffered; only the header is durable.
+                writer.sealSegment();
+                if (following) writer.append(journalRecord(JournalEpoch + 3'600'000, capture::Kind::Frame,
+                                                            tradesFrame("2", JournalEpoch + 3'600'000)));
+                writer.close();
+            }
+            std::filesystem::resize_file(first, headerBytes + tailBytes);
+            trading::JournalTradeEventSource source(temp.path().toStdString(), "BTC-USD", JournalEpoch + 1000, JournalEpoch + 7'200'000);
+            EXPECT_NO_THROW({
+                EXPECT_EQ(collectIds(source), (following ? std::vector<std::string>{"2"} : std::vector<std::string>{}));
+                EXPECT_FALSE(source.next());
+            });
+        }
+    }
+}
+
+TEST(BacktestCore, R2HistoryDedupePersistsAcrossSelectedDaySpans) {
+    QTemporaryDir temp;
+    const auto root = std::filesystem::path(temp.path().toStdString());
+    binaryTickFile(root / "BTC-USD/2026-10-07/00.bin", {{"1", JournalEpoch}});
+    binaryTickFile(root / "BTC-USD/2026-10-08/00.bin", {{"1", JournalEpoch + 86'400'000}, {"2", JournalEpoch + 86'400'001}});
+    auto source = trading::openTradeHistory("BTC-USD", JournalEpoch, JournalEpoch + 2 * 86'400'000, {}, root);
+    EXPECT_EQ(collectIds(*source), (std::vector<std::string>{"1", "2"}));
+}
+
+TEST(BacktestCore, R6FirstRecordBeyondStopSlackReportsWholeLeadingGap) {
+    QTemporaryDir temp;
+    {
+        capture::Writer writer(journalConfig(temp), journalMetadata());
+        writer.append(journalRecord(JournalEpoch + 120'000, capture::Kind::TransportUp));
+        writer.close();
+    }
+    trading::JournalTradeEventSource source(temp.path().toStdString(), "BTC-USD", JournalEpoch, JournalEpoch + 1000);
+    EXPECT_FALSE(source.next());
+    EXPECT_EQ(source.gaps(), (std::vector<std::pair<int64_t, int64_t>>{{JournalEpoch, JournalEpoch + 1000}}));
+    QProcess process;
+    process.start(QString::fromUtf8(BACKTEST_CLI), {"--product", "BTC-USD", "--from", "2026-10-07T00:00:00Z",
+        "--to", "2026-10-07T00:00:01Z", "--journal", temp.path(), "--legacy", temp.path() + "/missing", "--dump"});
+    ASSERT_TRUE(process.waitForFinished(10000)); EXPECT_NE(process.exitCode(), 0);
+    EXPECT_TRUE(process.readAllStandardOutput().contains("# gap,1791331200000,1791331201000"));
+}
