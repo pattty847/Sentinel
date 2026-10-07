@@ -553,7 +553,7 @@ History sources today:
   IDs and normalize v1 maker/v2 aggressor sides, preferring RAWL2 journals per UTC
   day with legacy files only on days without a matching journal header. No existing
   stream-server reader/serving endpoint uses them for trade history.
-  Both backtest sources dedupe numeric trade IDs with a bounded window (first occurrence wins); journal trade arrays use stable ascending numeric-ID order, while legacy files retain recorded order because frame boundaries are absent.
+  Both backtest sources dedupe numeric trade IDs with a bounded window (first occurrence wins); journal trade arrays use stable ascending numeric-ID order, while legacy files retain recorded order because frame boundaries are absent; corrupt legacy files and records are skipped with warnings, and an empty history range exits non-zero.
 - RAWL2 capture under `/Volumes/T7/sentinel-data/raw-l2`: durable raw trade source;
   the one-world roller slices B-D own its serving path. This feature neither reads
   those files from the GUI nor starts another history service.

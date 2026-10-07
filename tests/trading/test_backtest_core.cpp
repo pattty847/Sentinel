@@ -16,6 +16,8 @@
 #include <QProcess>
 #include <QDateTime>
 #include <QTimeZone>
+#include <cmath>
+#include <limits>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -993,4 +995,142 @@ TEST(BacktestCore, R6FirstRecordBeyondStopSlackReportsWholeLeadingGap) {
         "--to", "2026-10-07T00:00:01Z", "--journal", temp.path(), "--legacy", temp.path() + "/missing", "--dump"});
     ASSERT_TRUE(process.waitForFinished(10000)); EXPECT_NE(process.exitCode(), 0);
     EXPECT_TRUE(process.readAllStandardOutput().contains("# gap,1791331200000,1791331201000"));
+}
+
+namespace {
+void appendTickTrade(const std::filesystem::path& path, const std::string& id, int64_t ms,
+                     LogFormat::TradePayload payload = {100, 1, 1}) {
+    std::ofstream out(path, std::ios::binary | std::ios::app);
+    LogFormat::RecordHeader header{LogFormat::RecordType::Trade, static_cast<uint64_t>(ms),
+                                  static_cast<uint32_t>(sizeof(payload) + id.size())};
+    out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+    out.write(reinterpret_cast<const char*>(&payload), sizeof(payload));
+    out.write(id.data(), id.size());
+}
+void corruptPriceFixture(const std::filesystem::path& path) {
+    binaryTickFile(path, {});
+    appendTickTrade(path, "1", JournalEpoch);
+    appendTickTrade(path, std::string("2\x80", 2), JournalEpoch + 1, {9e163, 1, 1});
+    appendTickTrade(path, "3", JournalEpoch + 2);
+    appendTickTrade(path, "4", JournalEpoch + 3, {99, 1, 1});
+    appendTickTrade(path, "5", JournalEpoch + 4, {101, 1, 2});
+}
+}
+
+TEST(BacktestCore, R2CorruptTickIdsSkipRecordAndKeepFollowingTrade) {
+    for (const unsigned char byte : {0x00, 0x20, 0x7f, 0x80, 0xff}) {
+        SCOPED_TRACE(static_cast<unsigned>(byte));
+        QTemporaryDir temp;
+        const auto file = std::filesystem::path(temp.path().toStdString()) / "00.bin";
+        binaryTickFile(file, {{"1", JournalEpoch}});
+        appendTickTrade(file, std::string("2") + static_cast<char>(byte), JournalEpoch + 1);
+        appendTickTrade(file, "3", JournalEpoch + 2);
+        trading::TickBinaryTradeEventSource source(file);
+        EXPECT_EQ(collectIds(source), (std::vector<std::string>{"1", "3"}));
+        EXPECT_EQ(source.skippedFiles(), 0u);
+        EXPECT_EQ(source.skippedRecords(), 1u);
+    }
+}
+
+TEST(BacktestCore, R2TickBodyFieldsValidateBeforeDedupe) {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    const std::vector<LogFormat::TradePayload> bad{
+        {nan, 1, 1}, {inf, 1, 1}, {0, 1, 1}, {-1, 1, 1},
+        {100, nan, 1}, {100, inf, 1}, {100, 0, 1}, {100, -1, 1}, {100, 1, 3}};
+    for (size_t i = 0; i < bad.size(); ++i) {
+        SCOPED_TRACE(i);
+        QTemporaryDir temp;
+        const auto file = std::filesystem::path(temp.path().toStdString()) / "00.bin";
+        binaryTickFile(file, {{"1", JournalEpoch}});
+        appendTickTrade(file, "2", JournalEpoch + 1, bad[i]);
+        appendTickTrade(file, "2", JournalEpoch + 2, {100, 1, 0});
+        trading::TickBinaryTradeEventSource source(file);
+        ASSERT_TRUE(source.next());
+        const auto second = source.next();
+        ASSERT_TRUE(second);
+        EXPECT_EQ(second->trade->tradeId, "2");
+        EXPECT_EQ(second->timestampMs, JournalEpoch + 2);
+        EXPECT_EQ(second->trade->side, AggressorSide::Unknown);
+        EXPECT_FALSE(source.next());
+        EXPECT_EQ(source.skippedRecords(), 1u);
+    }
+}
+
+TEST(BacktestCore, R2HugePriceWithDamagedIdIsSkipped) {
+    QTemporaryDir temp;
+    const auto file = std::filesystem::path(temp.path().toStdString()) / "00.bin";
+    corruptPriceFixture(file); // 9e163 is finite: the damaged ID identifies this real-data failure.
+    trading::TickBinaryTradeEventSource source(file);
+    EXPECT_EQ(collectIds(source), (std::vector<std::string>{"1", "3", "4", "5"}));
+    EXPECT_EQ(source.skippedRecords(), 1u);
+    EXPECT_EQ(source.skippedFiles(), 0u);
+}
+
+TEST(BacktestCore, R2CliCorruptTickBodyCannotPoisonRealizedPnl) {
+    QTemporaryDir temp;
+    const auto file = std::filesystem::path(temp.path().toStdString()) / "BTC-USD/2026-10-07/00.bin";
+    corruptPriceFixture(file);
+    QProcess process;
+    process.start(QString::fromUtf8(BACKTEST_CLI), {"--product", "BTC-USD", "--from", "2026-10-07",
+        "--to", "2026-10-08", "--journal", temp.path() + "/missing", "--legacy", temp.path()});
+    ASSERT_TRUE(process.waitForFinished(10000));
+    ASSERT_EQ(process.exitCode(), 0);
+    const auto output = QString::fromUtf8(process.readAllStandardOutput());
+    bool ok = false;
+    const double pnl = output.section("realized_pnl=", 1, 1).section(' ', 0, 0).toDouble(&ok);
+    ASSERT_TRUE(ok);
+    EXPECT_TRUE(std::isfinite(pnl));
+    EXPECT_LT(std::abs(pnl), 1.0);
+    EXPECT_TRUE(output.contains("events=4 "));
+    const auto error = process.readAllStandardError();
+    EXPECT_TRUE(error.contains("skipped_files=0 skipped_records=1"));
+    EXPECT_TRUE(error.contains("00.bin"));
+    EXPECT_TRUE(error.contains("offset="));
+}
+
+TEST(BacktestCore, R2PartialTickTailsAreCleanEndsWithoutSkipCounters) {
+    for (int part = 0; part < 3; ++part) {
+        SCOPED_TRACE(part);
+        QTemporaryDir temp;
+        const auto file = std::filesystem::path(temp.path().toStdString()) / "00.bin";
+        binaryTickFile(file, {{"1", JournalEpoch}});
+        {
+            std::ofstream out(file, std::ios::binary | std::ios::app);
+            LogFormat::RecordHeader h{LogFormat::RecordType::Trade, JournalEpoch + 1,
+                                     sizeof(LogFormat::TradePayload) + 3};
+            out.write(reinterpret_cast<const char*>(&h), part == 0 ? 5 : sizeof(h));
+            if (part > 0) {
+                LogFormat::TradePayload payload{100, 1, 1};
+                out.write(reinterpret_cast<const char*>(&payload), part == 1 ? 8 : sizeof(payload));
+                if (part == 2) out << '2';
+            }
+        }
+        trading::TickBinaryTradeEventSource source(file);
+        EXPECT_EQ(collectIds(source), (std::vector<std::string>{"1"}));
+        EXPECT_EQ(source.skippedFiles(), 0u);
+        EXPECT_EQ(source.skippedRecords(), 0u);
+        QProcess process;
+        process.start(QString::fromUtf8(BACKTEST_CLI), {QString::fromStdString(file.string()), "BTC-USD"});
+        ASSERT_TRUE(process.waitForFinished(10000));
+        EXPECT_EQ(process.exitCode(), 0);
+        EXPECT_TRUE(process.readAllStandardError().isEmpty());
+    }
+}
+
+TEST(BacktestCore, R2EmptyPositionalInputsKeepZeroEventSuccess) {
+    QTemporaryDir temp;
+    const auto root = std::filesystem::path(temp.path().toStdString());
+    std::ofstream(root / "empty.csv").close();
+    binaryTickFile(root / "empty.bin", {});
+    std::filesystem::create_directory(root / "empty-dir");
+    for (const auto& name : {"empty.csv", "empty.bin", "empty-dir"}) {
+        SCOPED_TRACE(name);
+        QProcess process;
+        process.start(QString::fromUtf8(BACKTEST_CLI), {temp.path() + '/' + name, "BTC-USD"});
+        ASSERT_TRUE(process.waitForFinished(10000));
+        EXPECT_EQ(process.exitCode(), 0);
+        EXPECT_TRUE(process.readAllStandardOutput().contains("events=0 "));
+        EXPECT_TRUE(process.readAllStandardError().isEmpty());
+    }
 }

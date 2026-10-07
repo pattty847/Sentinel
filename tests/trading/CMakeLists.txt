@@ -51,8 +51,3 @@ set_tests_properties(BacktestCoreTests PROPERTIES LABELS "trading")
 
 add_dependencies(test_backtest_core sentinel_backtest)
 target_compile_definitions(test_backtest_core PRIVATE BACKTEST_CLI="$<TARGET_FILE:sentinel_backtest>")
-
-# The dock's empty-range regression launches this CLI, including in standalone dock builds.
-if(TARGET test_PaperTradingDock)
-    add_dependencies(test_PaperTradingDock sentinel_backtest)
-endif()

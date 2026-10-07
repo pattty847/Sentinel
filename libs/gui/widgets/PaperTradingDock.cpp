@@ -517,11 +517,11 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
         QStringList candidates;
         // Dev build layouts.
         for (const auto& rel : {
-                 QString("../../apps/sentinel-backtest/sentinel-backtest"),
                  QString("../sentinel-backtest/sentinel-backtest"),
                  QString("../../sentinel-backtest/sentinel-backtest"),
                  QString("../../../apps/sentinel-backtest/sentinel-backtest"),
                  QString("sentinel-backtest"),
+                 QString("../../apps/sentinel-backtest/sentinel-backtest"),
              }) {
             candidates << QDir(appDir).absoluteFilePath(rel);
         }

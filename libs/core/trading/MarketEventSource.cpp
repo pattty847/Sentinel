@@ -6,6 +6,7 @@
 #include <QTimeZone>
 #include "SentinelLogging.hpp"
 #include <charconv>
+#include <cmath>
 #include <deque>
 #include <map>
 #include <limits>
@@ -110,7 +111,6 @@ std::optional<MarketEvent> TickBinaryTradeEventSource::next() {
         LogFormat::RecordHeader header{};
         m_currentFile.read(reinterpret_cast<char*>(&header), sizeof(header));
         if (!m_currentFile.good()) {
-            if (m_currentFile.gcount() != 0) ++m_skippedFiles; // Partial record header.
             closeCurrentFile();
             continue;
         }
@@ -134,7 +134,6 @@ std::optional<MarketEvent> TickBinaryTradeEventSource::next() {
             LogFormat::TradePayload payload{};
             m_currentFile.read(reinterpret_cast<char*>(&payload), sizeof(payload));
             if (!m_currentFile.good()) {
-                ++m_skippedFiles;
                 closeCurrentFile();
                 continue;
             }
@@ -145,10 +144,20 @@ std::optional<MarketEvent> TickBinaryTradeEventSource::next() {
             if (remaining > 0) {
                 m_currentFile.read(tradeId.data(), remaining);
                 if (!m_currentFile.good()) {
-                    ++m_skippedFiles;
                     closeCurrentFile(); // Normal partial tail of an active hourly file.
                     continue;
                 }
+            }
+
+            const bool invalidId = std::any_of(tradeId.begin(), tradeId.end(), [](unsigned char byte) {
+                return byte < 0x21 || byte > 0x7e;
+            });
+            if (invalidId || !std::isfinite(payload.price) || payload.price <= 0 ||
+                !std::isfinite(payload.size) || payload.size <= 0 || payload.side > 2) {
+                ++m_skippedRecords;
+                sLog_Warning("Backtest tick record skipped file=" << m_files[m_fileIndex - 1].string().c_str()
+                             << " offset=" << offset << " reason=corrupt trade body");
+                continue; // Validate before dedupe: a rejected ID must never enter the window.
             }
 
             if (!m_symbolFilter.empty() && m_currentSymbol != m_symbolFilter) {
@@ -427,6 +436,7 @@ public:
             const auto& gaps = source_->gaps();
             gaps_.insert(gaps_.end(), gaps.begin(), gaps.end());
             skipped_ += source_->skippedFiles();
+            skippedRecords_ += source_->skippedRecords();
             source_.reset();
             ++index_;
         }
@@ -434,11 +444,12 @@ public:
     }
     const char* sourceName() const override { return source_ ? source_->sourceName() : "file"; }
     std::size_t skippedFiles() const override { return skipped_ + (source_ ? source_->skippedFiles() : 0); }
+    std::size_t skippedRecords() const override { return skippedRecords_ + (source_ ? source_->skippedRecords() : 0); }
     const std::vector<std::pair<int64_t, int64_t>>& gaps() const override { return gaps_; }
 private:
     std::string product_;
     std::vector<HistorySpan> spans_;
-    size_t index_ = 0, skipped_ = 0;
+    size_t index_ = 0, skipped_ = 0, skippedRecords_ = 0;
     sentinel::capture::TradeIdWindow ids_;
     std::unique_ptr<IMarketEventSource> source_;
     std::vector<std::pair<int64_t, int64_t>> gaps_;

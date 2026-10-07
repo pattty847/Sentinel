@@ -137,8 +137,11 @@ int main(int argc, char** argv) try {
     }
 
     const auto requireTrades = [&](bool found) {
-        std::cerr << "skipped_files=" << source->skippedFiles() << '\n';
-        if (!found) {
+        if (source->skippedFiles() || source->skippedRecords()) {
+            std::cerr << "skipped_files=" << source->skippedFiles()
+                      << " skipped_records=" << source->skippedRecords() << '\n';
+        }
+        if (args->history && !found) {
             throw std::runtime_error("no trades in range; journal=" + args->journalRoot +
                                      " legacy=" + args->legacyRoot);
         }
