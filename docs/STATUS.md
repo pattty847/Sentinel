@@ -43,14 +43,14 @@ The owner's `ma-panel` (local plugin) shows live workflow state; this session re
 Retired 2026-10-06 (owner): `lt-sol/label-style` and `lt-claude/heatmap-ab-isolation`, tips kept as tags `archive/<branch>`. Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orchestrator/`. The
 `.claude/worktrees/youthful-ishizaka-b0e889` (`60caa04`, branch `claude/exciting-hypatia-1c7a34`) is not part of this work; leave it alone.
 
-Order of work after R2 (owner audit, 2026-10-07; change it only on purpose): R2 -> D-b1 (gate: a main-thread event-loop lag metric, engine baseline then journal) -> anchors deploy -> D-b2 -> S8b + slice E -> README/ARCHITECTURE pass -> architecture freeze and the workflow/storage audit. Each step deploys separately with its own soak. R2 preconditions: `fanout_clients == 7` (not 1), capacity disconnects 0.
+Order of work after R2 (owner audit, 2026-10-07; change it only on purpose): R2 -> D-b1 (gate: a main-thread event-loop lag metric, engine baseline then journal) -> anchors deploy -> D-b2 -> S8b + slice E -> README/ARCHITECTURE pass -> architecture freeze and the workflow/storage audit. Each step deploys separately with its own soak. R2 preconditions: `fanout_clients == 7` (not 1), capacity disconnects 0. R2 steps: commit `recording.source: roller` on main (owner present), then `scripts/dev/deploy-runtime.sh restart server` (not `server`), then the owner restarts the GUI (no auto-reconnect).
 
 Runbook notes from D-b1 (2026-10-07): the GUI does not reconnect after a server restart, so the owner restarts the GUI after the R2 and D-b1 deploys; capture's fan-out allows 8 clients, one per product, and the recorder uses 7 (FM-207; steady state is 7 fan-out clients, so the D-b runbook's `fanout_clients == 1` is wrong), so a second server (an agent instance, a future Pi) cannot follow all 7 products.
 
 ## Waiting on the owner
 
 From the 2026-10-07 audit (`docs/research/2026-10-07-audit-triage.md`, recommendations there):
-None open. Decided 2026-10-07 (`_agent/DECISIONS.md`): A skip a corrupt block, mark a gap and alert (writer running); B R2 = `deploy-runtime.sh restart server`, a config-only restart of the soaked binary (mode written, in Sol review); C bind 127.0.0.1 by default, remote clients over Tailscale (writer after R2).
+None open. Decided 2026-10-07 (`_agent/DECISIONS.md`): A skip a corrupt block, mark a gap and alert (writer running); B R2 = `deploy-runtime.sh restart server`, a config-only restart of the soaked binary (mode landed, Sol PASS); C bind 127.0.0.1 by default, remote clients over Tailscale (writer after R2).
 
 None. (S8 legacy heatmap deletion approved by the owner 2026-10-06; see Next.)
 
