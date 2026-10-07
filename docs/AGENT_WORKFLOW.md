@@ -156,6 +156,11 @@ Verified 2026-09-27 with codex-cli 0.158; 0.160 was installed by 2026-10-05. Re-
   the exact document diff into the prompt rather than treating a code-only PASS as review of the docs.
 
 ## Lessons still in force
+- Sandboxed Codex can resolve merge conflicts: the conductor runs `git cherry-pick --no-commit <sha>` (or a rebase) in the writer's worktree, the writer edits the conflicted files, and the conductor checks that no `<<<<<<<` markers remain, then commits (2026-10-07, anchors phase B).
+- Open writer screenshots before accepting a visual claim. Never describe a "before" image as a spec: a misread fan-dominated screenshot became a wrong colour default (2026-10-07, volume profile).
+- Run `scripts/dev/budget.sh` before every dispatch, small follow-ups included; when Claude is tight, Codex writes and Claude only reviews and conducts.
+- `ma-panel`: always match cards by Codex thread id or Claude agent id; a label-only card for an existing agent shows up twice.
+- After two review rounds on the same problem, change the contract instead of patching (2026-10-07: D-b1 candles moved to the journal clock; the lag metric moved to direct queue latency).
 
 - Every GUI-running agent gets its own `--api-port` (17110 + n) and its own scratch directory; two agents once
   shared port 17110 and one drove the other's GUI (2026-10-02).

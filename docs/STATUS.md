@@ -52,6 +52,7 @@ Landed on main (none deployed; all ship after R2, one deploy each):
 - deploy-runtime.sh restart mode `4f8e6ce` (R2 tool)
 READY, waiting for R2: D-b1 (journal live feed + queue-latency lag metric, Astra PASS) and journal anchors stacked on it (`lt-astra/anchors-b` `04a33b0`, Fable PASS; restart 151 s -> 6.3 s, hmc2_diff 0 x96, midnight independent).
 Owner items: (1) Codex is about 0.5 d from empty (+32% deficit); the backlog is held until the owner decides on a reset credit. (2) Looks to judge: VP bars and value-area band at their intended alpha (VA original green, faint); the GUI cold-start label reads Reconnecting. (3) R2 after the soak (~18:40 EDT Oct 8) with the owner at the Mac: `deploy-runtime.sh restart server`.
+Today's candidate work if the owner applies a Codex reset: D-b2 plan (read-only), TPO-history-starts-Oct-3 investigation and fix, a learning-mode tooltip toggle (default on), a local-time axis setting (default UTC), capture fan-out (raise the 8-client cap, FM-207, plus the poll() error loop; high risk; deploys with the owner). Without a reset: only the D-b2 plan.
 Process notes: conductor defaults taken while the owner was away (recorded in _agent/DECISIONS.md): corrupt-skip full header/index coverage and a self-resolving alert; candle-close on the journal clock; lag metric as queue latency.
 
 ## In flight (T7 worktrees)
