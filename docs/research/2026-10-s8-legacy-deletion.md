@@ -310,3 +310,5 @@ has no W/E line beyond the usual Qt/QML and layout ones.
 The deletion leaves live data age unchanged within sampling noise.
 
 6. (2026-10-07, from the owner audit; see docs/research/2026-10-07-audit-triage.md item 9) Before S8b: candles, footprint retention and the GUI toolbar still read server `heatmap.*` config keys. Move each still-used key to a neutral section and list every reader (`rg` each key) before deleting the section.
+
+7. (2026-10-07) Before S8b, read `docs/research/2026-10-07-s8b-config-map.md`: three live keys move to neutral sections (`chart.timeframes_ms`, `chart.default_timeframe_ms`, `trade_overlays.retention_columns`) with defaults and the retention formula unchanged; two wire lists derive from them; relocate RecordingHistoryWireTests capability coverage before deleting the legacy suite.
