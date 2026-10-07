@@ -34,7 +34,7 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 | Branch | Tip | State | Next |
 |---|---|---|---|
-| `lt-claude/s8a-legacy-gui` | `e258947` (base) | S8a writer (Claude `opus`): A/B capture, then delete legacy GUI/client per `docs/research/2026-10-s8-legacy-deletion.md` | Review `gpt-6-astra` high with native evidence, land; R2 needs it |
+| `lt-claude/s8a-legacy-gui` | `a3d008f` | READY (Claude `opus` writer; 98 files, -9,453 lines; full suite 93/93 Metal). Astra review r1 thread `01a113f7-5746-7e61-a550-90f2a7edc9ee`, `.claude/acting-orchestrator/s8a/review-r1.md`; clean live-age re-run in progress | Review `gpt-6-astra` high with native evidence, land; R2 needs it |
 | `lt-claude/heatmap-ab-isolation` | `88e7ef4` | Unrelated, locked | Leave alone |
 
 Retired 2026-10-06 (owner): `lt-sol/label-style` and `lt-claude/heatmap-ab-isolation`, tips kept as tags `archive/<branch>`. Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orchestrator/`. The
