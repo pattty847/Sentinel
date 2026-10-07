@@ -117,7 +117,7 @@ TEST(Roller, PendingFramingDeferredUntilSealedOrSuperseded) {
     broken.resize(original.find("IDX1",scan.index.back().offset)); save(path,broken);
     capture::RecordReader open(QString::fromStdString(path.string()),true); capture::Record r;
     EXPECT_FALSE(open.next(r)); EXPECT_TRUE(open.result().pendingTail); EXPECT_FALSE(open.result().tornTail);
-    { JournalReader pending(root,"BTC-USD"); JournalRecord item; EXPECT_FALSE(pending.next(item)); EXPECT_TRUE(pending.pending()); }
+    { JournalReader pending(root,"BTC-USD"); JournalRecord item; ASSERT_TRUE(pending.next(item)); EXPECT_TRUE(item.gapBefore); while(pending.next(item)) {} EXPECT_TRUE(pending.pending()); }
     // A newer run's header, independent of filenames/mtime, seals the old tail's fate.
     capture::WriterConfig cfg;cfg.root=QString::fromStdString(root.string());cfg.fsyncBlocks=0;
     auto meta=metadata();meta["run_id"]="superseding-run";
@@ -125,7 +125,7 @@ TEST(Roller, PendingFramingDeferredUntilSealedOrSuperseded) {
     meta["connection_products"]={"BTC-USD","ETH-USD"};meta["routing"]="product-ranges-v2";
     auto newer=capture::LegacyV2FixtureWriter::make(cfg,meta);
     newer->append(record(5000,capture::Kind::Frame,snapshot()));newer->close();
-    EXPECT_THROW({JournalReader superseded(root,"BTC-USD");JournalRecord item;while(superseded.next(item)){}},std::runtime_error);
+    EXPECT_NO_THROW({JournalReader superseded(root,"BTC-USD");JournalRecord item;while(superseded.next(item)){} });
     EXPECT_THROW(capture::scan(QString::fromStdString(path.string())),std::runtime_error);
     // Complete CRC errors are never pending.
     broken=original; broken[scan.index[0].offset+44]^=1; save(path,broken);

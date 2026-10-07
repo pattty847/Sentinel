@@ -67,6 +67,8 @@ class MetricsRegistry {
     // std::logic_error when a name is reused with another type, or when an
     // atomic and a sampler share (name, labels). The reference lives as long as
     // the registry.
+    // Query registered static series; registration is a startup operation.
+    bool hasSeries(std::string_view name, const Labels& labels = {}) const;
     Counter& counter(std::string_view name, std::string_view help, const Labels& labels = {});
     Gauge& gauge(std::string_view name, std::string_view help, const Labels& labels = {});
     // Values computed at scrape time (see the threading note above).

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run inside build-queue.sh; restores and rebuilds each mutant before proceeding."""
+"""Mac dev tool. Run inside build-queue.sh; restore/rebuild each mutant before proceeding."""
 import os
 from pathlib import Path
 import subprocess
@@ -39,6 +39,33 @@ mutations = [
     ('pending tail', raw,
      '!pendingTailAllowed && hasFollowingFraming', 'hasFollowingFraming',
      'test_roller', 'Roller.PendingFramingDeferredUntilSealedOrSuperseded'),
+    ('header recovery', raw, '            if (headerDamaged) {',
+     '            if (headerDamaged && magic == "BLK1") fail("mutated header recovery");\n            if (headerDamaged) {',
+     'test_roller_corrupt_blocks', 'CorruptFraming.HeaderDamageCompletesDay'),
+    ('magic recovery', raw, '            if (headerDamaged) {',
+     '            if (headerDamaged && magic != "BLK1" && magic != "IDX1") fail("mutated magic recovery");\n            if (headerDamaged) {',
+     'test_roller_corrupt_blocks', 'CorruptFraming.MagicDamageCompletesDay'),
+    ('index recovery', raw, '            if (headerDamaged) {',
+     '            if (headerDamaged && magic == "IDX1") fail("mutated index recovery");\n            if (headerDamaged) {',
+     'test_roller_corrupt_blocks', 'CorruptFraming.IndexDamageCompletesDay'),
+    ('last header recovery', raw, '            if (headerDamaged) {',
+     '            if (headerDamaged && indexed && result.index.size()+1 == sealed->entries.size()) fail("mutated last header recovery");\n            if (headerDamaged) {',
+     'test_roller_corrupt_blocks', 'CorruptFraming.LastHeaderDamageCompletesDay'),
+    ('exact successor ordinal', raw, 'if (!recoveryLimits(e) || e.ordinal != ordinal) return {};',
+     'if (!recoveryLimits(e)) return {};',
+     'test_roller_corrupt_blocks', 'CorruptFraming.SuccessorRequiresCrcLimitsAndExactOrdinal'),
+    ('skipped payload extent', raw,
+     'result.index.push_back(entry); ++nextOrdinal;\n            result.validBytes = file.pos();\n            continue;',
+     'result.index.push_back(entry); ++nextOrdinal;\n            continue;',
+     'test_roller_corrupt_blocks', 'CorruptFraming.SkippedPayloadAdvancesValidBytes'),
+    ('idempotent registration', journal,
+     'if (registry.hasSeries("sentinel_roller_journal_corrupt_blocks_total", {{"product", product}})) return;',
+     'if (false) return;',
+     'test_roller_corrupt_blocks', 'CorruptBlockPolicy.MetricRegistrationSurvivesRepeatedAndReusedRegistries'),
+    ('self resolving alert', 'ops/monitoring/grafana/provisioning/alerting/rules.yaml',
+     'sum by (product) (increase(sentinel_roller_journal_corrupt_blocks_total{job="sentinel-server"}[2h]))',
+     'max by (product) (sentinel_roller_journal_corrupt_blocks_total{job="sentinel-server"})',
+     'test_roller_corrupt_blocks', 'CorruptBlockPolicy.AlertResolvesAfterTwoHoursWithoutNewCorruption'),
 ]
 if len(sys.argv) > 1:
     mutations = [m for m in mutations if m[0] == sys.argv[1]]

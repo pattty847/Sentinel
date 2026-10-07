@@ -445,14 +445,14 @@ groups:
         annotations:
           summary: "Roller skipped corrupt journal block"
           description: >-
-            A complete journal payload block failed CRC or zstd validation and was skipped. Observation is invalid until the next exchange snapshot. Read the Roller journal corrupt block error for product, file and offset; audit with capture-verify. Preserve the journal. This alert remains active for the process lifetime, including corruption found before its first scrape.
+            A corrupt journal block, header, framing region or closing index was skipped. Observation is invalid until the next exchange snapshot. Read the Roller journal corrupt block error for product, file and offset; audit with capture-verify. Preserve the journal. This alert resolves when no new corruption has been counted for two hours.
         data:
           - refId: A
             relativeTimeRange: { from: 7200, to: 0 }
             datasourceUid: sentinel-vm
             model:
               refId: A
-              expr: max by (product) (sentinel_roller_journal_corrupt_blocks_total{job="sentinel-server"})
+              expr: sum by (product) (increase(sentinel_roller_journal_corrupt_blocks_total{job="sentinel-server"}[2h]))
               instant: true
               range: false
               intervalMs: 15000

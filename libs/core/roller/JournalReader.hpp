@@ -5,7 +5,7 @@
 namespace sentinel::metrics { class MetricsRegistry; }
 
 namespace sentinel::roller {
-// Register before starting product workers. Counts distinct damaged blocks seen
+// Register before starting product workers. Counts distinct damaged regions seen
 // by this process, including anchor scans; replay does not count them again.
 void registerJournalMetrics(metrics::MetricsRegistry&, const std::string& product);
 struct JournalPos {

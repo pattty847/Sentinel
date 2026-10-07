@@ -296,3 +296,14 @@ TEST(MetricsHttpServer, CapsConnectionsAndTimesOutIncompleteRequests) {
     EXPECT_GT(ticks, 50);
     EXPECT_EQ(body(httpExchange(server.port(), "GET /ping HTTP/1.1\r\n\r\n")), "OK");
 }
+
+TEST(MetricsRegistry, HasSeriesChecksRegistryAndExactLabels) {
+    MetricsRegistry a, b;
+    a.counterFn("test_total", "Test.", {{"product", "BTC-USD"}}, [] { return 1.; });
+    a.gauge("test_age", "Test.", {{"product", "BTC-USD"}});
+    EXPECT_TRUE(a.hasSeries("test_total", {{"product", "BTC-USD"}}));
+    EXPECT_TRUE(a.hasSeries("test_age", {{"product", "BTC-USD"}}));
+    EXPECT_FALSE(a.hasSeries("test_total", {{"product", "ETH-USD"}}));
+    EXPECT_FALSE(a.hasSeries("test_total"));
+    EXPECT_FALSE(b.hasSeries("test_total", {{"product", "BTC-USD"}}));
+}

@@ -3,6 +3,7 @@
 #include "metrics/MetricsRegistry.hpp"
 #include <algorithm>
 #include <map>
+#include <mutex>
 #include <set>
 #include <stdexcept>
 #include <tuple>
@@ -18,7 +19,7 @@ namespace {
 struct CorruptionState {
     metrics::Counter count;
     std::mutex mutex;
-    std::set<std::pair<std::string, uint64_t>> blocks;
+    std::set<std::tuple<std::string, uint64_t, uint64_t>> blocks;
 };
 std::shared_ptr<CorruptionState> corruptionState(const std::string& product) {
     static std::mutex mutex;
@@ -31,10 +32,11 @@ std::shared_ptr<CorruptionState> corruptionState(const std::string& product) {
 void reportCorruption(const std::string& product, const JournalFile& file,
                       const capture::BlockIndex& block, const char* reason) {
     const auto state = corruptionState(product);
-    // Rare error path only. Remember run/block identity across anchor searches,
+    // Rare error path only. Remember run/segment/offset across anchor searches,
     // daily replay and independent batch comparisons in this process.
     std::lock_guard lock(state->mutex);
-    if (state->blocks.emplace(file.header.at("run_id").get<std::string>(), block.ordinal).second) {
+    if (state->blocks.emplace(file.header.at("run_id").get<std::string>(),
+                              file.header.at("segment").get<uint64_t>(), block.offset).second) {
         state->count.inc();
         sLog_Error("Roller journal corrupt block product=" << product.c_str()
                    << " file=" << file.path.string().c_str() << " offset=" << block.offset
@@ -55,9 +57,14 @@ bool snapshot(const capture::Record& r, const std::string& product) {
 }
 }
 void registerJournalMetrics(metrics::MetricsRegistry& registry, const std::string& product) {
+    // Serialize our check/register pair; registry identity is its own series
+    // storage, so destruction/reconstruction at the same address is safe.
+    static std::mutex registrationMutex;
+    std::lock_guard lock(registrationMutex);
+    if (registry.hasSeries("sentinel_roller_journal_corrupt_blocks_total", {{"product", product}})) return;
     const auto state = corruptionState(product);
     registry.counterFn("sentinel_roller_journal_corrupt_blocks_total",
-        "Distinct journal payload blocks skipped by this process.", {{"product", product}},
+        "Distinct corrupt journal blocks or framing regions skipped by this process.", {{"product", product}},
         [state] { return static_cast<double>(state->count.value()); });
 }
 JournalReader::JournalReader(std::filesystem::path root, std::string product, std::optional<JournalPos> start)

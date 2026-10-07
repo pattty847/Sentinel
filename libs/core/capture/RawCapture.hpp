@@ -152,9 +152,10 @@ struct ScanResult {
     uint64_t fileBytes = 0;
     uint64_t validBytes = 0;
 };
-// Opt-in payload recovery only: the complete block has a validated header and
-// length, so the next boundary is trustworthy. Empty callback keeps strict audit
-// behavior. Header/framing/index damage always throws.
+// Opt-in journal recovery: validated index entries or bounded CRC-protected
+// successor-header scans supply boundaries past damaged framing. Unknown skipped
+// framing uses only BlockIndex offset/ordinal; other fields may be zero. Empty
+// callback retains strict audit behavior. No files are modified.
 using CorruptBlockVisitor = std::function<void(const BlockIndex&, const char* reason)>;
 // Incremental, bounded reader used for cross-stream crash-prefix verification.
 class RecordReader {
