@@ -3,7 +3,7 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-06 ~22:00 EDT. S8a landed (`8cb2e5f`); R1 soak clean through its first midnight; R2 waits for the soak end (~2026-10-08 18:40 EDT) and the owner.
+- **Updated:** 2026-10-07 ~01:30 EDT. Claude 5-hour window nearly empty (resets ~03:30 EDT); conductor paused, Codex writers keep running. RESUME: read this file, then the Codex outputs below.
 - **Conductor:** Claude Opus 5.5. The owner handed conducting back on 2026-10-06; Codex does not dispatch.
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10). No fallback active: the 2026-10-04
   GPT-reviews-GPT override ended when Claude usage reset.
@@ -33,6 +33,8 @@ The owner's `ma-panel` (local plugin) shows live workflow state; this session re
 - **GUI host** :17190 idle, no session. **Monitoring:** VictoriaMetrics :8428, Grafana :3000.
 
 ## In flight (T7 worktrees)
+
+On resume, read the Codex outputs: `.claude/acting-orchestrator/corrupt-skip/writer-out.md` (A, thread `01a114bd`), `.claude/acting-orchestrator/bind-address/writer-out.md` (C, thread `01a114c4`). Both are sandboxed: commit their diffs, then review A with Claude Fable and C with Claude. The D-b1 lag metric (Claude writer, stopped for budget; see the WIP commit on `lt-claude/roller-db1` if there is one) moves to a Codex writer, then the same Astra thread `01a11475` checks the delta.
 
 | Branch | Tip | State | Next |
 |---|---|---|---|
