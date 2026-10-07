@@ -2,6 +2,7 @@
  * Sentinel – VolumeProfileRenderer (implementation)
  */
 #include "VolumeProfileRenderer.hpp"
+#include "SentinelLogging.hpp"
 
 #include <QSGFlatColorMaterial>
 #include <QSGGeometry>
@@ -39,10 +40,12 @@ void fillRect(QSGGeometry* geo, const QRectF& r, const QColor& c) {
     const float y0 = static_cast<float>(r.top());
     const float x1 = static_cast<float>(r.right());
     const float y1 = static_cast<float>(r.bottom());
-    const quint8 cr = static_cast<quint8>(c.red());
-    const quint8 cg = static_cast<quint8>(c.green());
-    const quint8 cb = static_cast<quint8>(c.blue());
+    // QSGVertexColorMaterial blends premultiplied RGBA (One,
+    // OneMinusSrcAlpha). Straight RGB makes translucent fills additive.
     const quint8 ca = static_cast<quint8>(c.alpha());
+    const quint8 cr = static_cast<quint8>(c.red() * ca / 255);
+    const quint8 cg = static_cast<quint8>(c.green() * ca / 255);
+    const quint8 cb = static_cast<quint8>(c.blue() * ca / 255);
 
     auto* v = geo->vertexDataAsColoredPoint2D();
     v[0].set(x0, y0, cr, cg, cb, ca);
@@ -149,8 +152,25 @@ void VolumeProfileRenderer::render(QSGNode* parentNode,
         return;
     }
 
+    const bool firstDraw = !m_vaNode;
     ensureNodes(parentNode);
     rebuildGeometry(drawRect, viewMinPrice, viewMaxPrice, bins, snap);
+    // One initialization event per scene-graph root, not per frame/bucket.
+    if (firstDraw && snap.va.valid && snap.va.vahRow >= 0 &&
+        snap.va.valRow >= snap.va.vahRow && snap.va.valRow < int(bins.size())) {
+        double vaVolume = 0;
+        for (int row = snap.va.vahRow; row <= snap.va.valRow; ++row) {
+            vaVolume += bins[static_cast<size_t>(row)];
+        }
+        sLog_Render("Volume profile geometry initialized: sessionStartMs=" << snap.sessionStartMs
+                    << " gridMinPrice=" << snap.minPrice << " tick=" << snap.tickSize
+                    << " bins=" << bins.size() << " VAL=" << snap.va.valPrice
+                    << " VAH=" << snap.va.vahPrice << " POC=" << snap.va.pocPrice
+                    << " vaVolume=" << vaVolume << " totalVolume=" << snap.va.totalVolume
+                    << " viewMinPrice=" << viewMinPrice << " viewMaxPrice=" << viewMaxPrice
+                    << " vaTopY=" << priceToY(snap.va.vahPrice, viewMinPrice, viewMaxPrice, drawRect)
+                    << " vaBottomY=" << priceToY(snap.va.valPrice, viewMinPrice, viewMaxPrice, drawRect));
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -300,11 +320,14 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
             const quint8 ca = static_cast<quint8>(
                 std::clamp(static_cast<int>(80 + 175 * barFrac), 80, 255));
 
+            const quint8 pr = static_cast<quint8>(int(cr) * ca / 255);
+            const quint8 pg = static_cast<quint8>(int(cg) * ca / 255);
+            const quint8 pb = static_cast<quint8>(int(cb) * ca / 255);
             const quint16 vi0 = static_cast<quint16>(vi);
-            vdata[vi  ].set(x0, y0, cr, cg, cb, ca);
-            vdata[vi+1].set(x1, y0, cr, cg, cb, ca);
-            vdata[vi+2].set(x0, y1, cr, cg, cb, ca);
-            vdata[vi+3].set(x1, y1, cr, cg, cb, ca);
+            vdata[vi  ].set(x0, y0, pr, pg, pb, ca);
+            vdata[vi+1].set(x1, y0, pr, pg, pb, ca);
+            vdata[vi+2].set(x0, y1, pr, pg, pb, ca);
+            vdata[vi+3].set(x1, y1, pr, pg, pb, ca);
             idata[ii  ] = vi0;     idata[ii+1] = vi0+1; idata[ii+2] = vi0+2;
             idata[ii+3] = vi0+1;   idata[ii+4] = vi0+3; idata[ii+5] = vi0+2;
             vi += 4;

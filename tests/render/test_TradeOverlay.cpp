@@ -627,3 +627,78 @@ TEST_F(TradeOverlay, VolumeProfileClearsInvalidValueAreaAndRetainsGrownBuffers) 
     EXPECT_EQ(bars->geometry()->indexCount(), 4097 * 6);
 #endif
 }
+
+
+TEST_F(TradeOverlay, VolumeProfileValueAreaPinsSeventyPercentRangeAndTranslucentCyan) {
+    // Top-to-bottom rows: total 100, POC row 3 (40), then row 2 (20),
+    // then row 4 (15). The smallest contiguous expansion reaching 70%
+    // contains 75 and stops before either next neighbouring row (10).
+    const std::vector<float> bins{1, 10, 20, 40, 15, 10, 3, 1};
+    VolumeProfileState::Snapshot snap;
+    snap.minPrice = 100;
+    snap.tickSize = 5;
+    snap.gridHeight = int(bins.size());
+    snap.va = VolumeProfileState::computeValueArea(bins, snap.minPrice, snap.tickSize);
+    ASSERT_TRUE(snap.va.valid);
+    EXPECT_DOUBLE_EQ(snap.va.totalVolume, 100);
+    EXPECT_EQ(snap.va.pocRow, 3);
+    EXPECT_EQ(snap.va.vahRow, 2);
+    EXPECT_EQ(snap.va.valRow, 4);
+    EXPECT_DOUBLE_EQ(snap.va.pocPrice, 122.5);
+    EXPECT_DOUBLE_EQ(snap.va.vahPrice, 130);
+    EXPECT_DOUBLE_EQ(snap.va.valPrice, 115);
+
+    VolumeProfileRenderer renderer;
+    QSGNode root;
+    const QRectF surface(20, 30, 800, 400);
+    const auto check = [&](double priceMin, double priceMax) {
+        renderer.render(&root, true, surface, priceMin, priceMax, bins, snap);
+        auto* va = static_cast<QSGGeometryNode*>(root.firstChild());
+        auto* geometry = va->geometry();
+        ASSERT_EQ(geometry->vertexCount(), 4);
+        ASSERT_EQ(geometry->indexCount(), 6);
+        const auto* v = geometry->vertexDataAsColoredPoint2D();
+        const float top = float(30 + (priceMax - 130) / (priceMax - priceMin) * 400);
+        const float bottom = float(30 + (priceMax - 115) / (priceMax - priceMin) * 400);
+        for (int i = 0; i < 4; ++i) {
+            EXPECT_FLOAT_EQ(v[i].x, i % 2 == 0 ? 724 : 820);
+            EXPECT_FLOAT_EQ(v[i].y, i < 2 ? top : bottom);
+            // QSGVertexColorMaterial consumes premultiplied RGBA. Alpha 60
+            // is 24% opacity; pale cyan (100,220,235) becomes (23,51,55).
+            EXPECT_EQ(v[i].r, 23);
+            EXPECT_EQ(v[i].g, 51);
+            EXPECT_EQ(v[i].b, 55);
+            EXPECT_EQ(v[i].a, 60);
+        }
+        auto* bars = static_cast<QSGGeometryNode*>(va->nextSibling());
+        const auto* barVertices = bars->geometry()->vertexDataAsColoredPoint2D();
+        const int visibleBars = priceMin == 100 ? 8 : 3;
+        for (int i = 0; i < visibleBars * 4; ++i) {
+            EXPECT_EQ(barVertices[i].r, 100 * int(barVertices[i].a) / 255);
+            EXPECT_EQ(barVertices[i].g, 160 * int(barVertices[i].a) / 255);
+            EXPECT_EQ(barVertices[i].b, 220 * int(barVertices[i].a) / 255);
+        }
+        auto* poc = static_cast<QSGGeometryNode*>(bars->nextSibling());
+        const auto* pocVertices = poc->geometry()->vertexDataAsColoredPoint2D();
+        for (int i = 0; i < 4; ++i) {
+            EXPECT_EQ(pocVertices[i].r, 240);
+            EXPECT_EQ(pocVertices[i].g, 202);
+            EXPECT_EQ(pocVertices[i].b, 0);
+            EXPECT_EQ(pocVertices[i].a, 240);
+        }
+        const auto* idx = geometry->indexDataAsUShort();
+        const quint16 expected[]{0, 1, 2, 1, 3, 2};
+        for (int i = 0; i < 6; ++i) EXPECT_EQ(idx[i], expected[i]);
+    };
+    check(100, 140); // VA is fully visible.
+    check(120, 125); // Same price bounds, clipped by the chart, not stretched.
+    renderer.setVaColor(QColor(40, 180, 240, 128));
+    renderer.render(&root, true, surface, 100, 140, bins, snap);
+    const auto* v = static_cast<QSGGeometryNode*>(root.firstChild())->geometry()->vertexDataAsColoredPoint2D();
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_EQ(v[i].r, 20);
+        EXPECT_EQ(v[i].g, 90);
+        EXPECT_EQ(v[i].b, 120);
+        EXPECT_EQ(v[i].a, 128);
+    }
+}
