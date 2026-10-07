@@ -1208,56 +1208,18 @@ public:
                 auto self = shared_from_this();
                 const bool queued = owner_->submitHistoryTask([self, symbol, timeframeSec, endTimeSec, startTimeSec, limit]() {
                     sentinel::logging::setCurrentThreadName("candle-fetch");
-                    // Coinbase caps one request at 350 1m bars. Page the anchor,
-                    // then use the same UTC rollup rule as live candle updates.
-                    std::vector<OHLCVBar> minutes;
-                    const int64_t firstMinuteSec = (startTimeSec / 60) * 60;
-                    for (int64_t pageStart = firstMinuteSec; pageStart < endTimeSec;) {
-                        if (self->closing_.load() || self->closePosted_.load() || !self->owner_->m_running.load()) return;
-                        const int64_t pageEnd = std::min(pageStart + 350 * 60, endTimeSec);
-                        auto page = self->owner_->restClient().fetchProductCandles(
-                            symbol, pageStart, pageEnd, "ONE_MINUTE", 350);
-                        if (self->closing_.load() || self->closePosted_.load() || !self->owner_->m_running.load()) return;
-                        if (!page.ok) {
-                            self->send_error("candle_history_request", symbol,
-                                             std::string("fetch failed: ") + page.error);
-                            return;
-                        }
-                        for (auto& minute : page.candles) {
-                            if (minute.timestamp_ms >= pageStart * 1000 &&
-                                minute.timestamp_ms < pageEnd * 1000)
-                                minutes.push_back(std::move(minute));
-                        }
-                        pageStart = pageEnd;
+                    const auto cancelled = [self] {
+                        return self->closing_.load() || self->closePosted_.load() || !self->owner_->m_running.load();
+                    };
+                    auto res = self->owner_->restClient().fetchClosedCandleHistory(
+                        symbol, timeframeSec, startTimeSec, endTimeSec, cancelled);
+                    if (cancelled()) return;
+                    if (!res.ok) {
+                        self->send_error("candle_history_request", symbol, std::string("fetch failed: ") + res.error);
+                        return;
                     }
-                    std::sort(minutes.begin(), minutes.end(),
-                              [](const OHLCVBar& a, const OHLCVBar& b) {
-                                  return a.timestamp_ms < b.timestamp_ms;
-                              });
-                    minutes.erase(std::unique(minutes.begin(), minutes.end(),
-                        [](const OHLCVBar& a, const OHLCVBar& b) {
-                            return a.timestamp_ms == b.timestamp_ms;
-                        }), minutes.end());
-                    CandleFetchResult res;
-                    res.ok = true;
-                    res.candles = TimeframeAggregator::rollupMinutes(minutes, timeframeSec * 1000);
-                    res.candles.erase(std::remove_if(res.candles.begin(), res.candles.end(),
-                        [startTimeSec, endTimeSec](const OHLCVBar& bar) {
-                            return bar.timestamp_ms < startTimeSec * 1000 ||
-                                   bar.timestamp_ms > endTimeSec * 1000;
-                        }), res.candles.end());
-                    if (res.candles.size() > static_cast<size_t>(limit))
-                        res.candles.erase(res.candles.begin(), res.candles.end() - limit);
-
-                    std::sort(res.candles.begin(), res.candles.end(),
-                              [](const OHLCVBar& a, const OHLCVBar& b) {
-                                  return a.timestamp_ms < b.timestamp_ms;
-                              });
 
                     const int64_t tfMs = timeframeSec * 1000;
-                    const int64_t nowMs = static_cast<int64_t>(
-                        std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::system_clock::now().time_since_epoch()).count());
 
                     nlohmann::json payload;
                     payload["type"] = "candle_history_chunk";
@@ -1268,7 +1230,6 @@ public:
                     payload["end_time_sec"] = endTimeSec;
                     auto arr = nlohmann::json::array();
                     for (auto& bar : res.candles) {
-                        bar.is_closed = (bar.timestamp_ms + tfMs) <= nowMs;
                         nlohmann::json item;
                         item["time_start_ms"] = bar.timestamp_ms;
                         item["time_end_ms"] = bar.timestamp_ms + tfMs;

@@ -242,3 +242,9 @@ target_compile_definitions(test_server_feed_admission PRIVATE SENTINEL_SOURCE_DI
 add_test(NAME ServerFeedAdmissionTests COMMAND test_server_feed_admission)
 set_tests_properties(ServerFeedAdmissionTests PROPERTIES LABELS "servermodel" TIMEOUT 60)
 add_dependencies(servermodel_tests test_server_feed_admission)
+
+add_executable(test_candle_history test_candle_history.cpp)
+target_include_directories(test_candle_history PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_candle_history PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+add_test(NAME CandleHistoryCacheTests COMMAND test_candle_history)
+set_tests_properties(CandleHistoryCacheTests PROPERTIES LABELS "servermodel" TIMEOUT 15)

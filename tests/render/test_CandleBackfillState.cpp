@@ -179,7 +179,7 @@ TEST(CandleBackfillState, OneSecondClientUsesInclusiveEndWithoutOverlapAndAccept
     auto request = state.next(950'000, false, now);
     ASSERT_TRUE(request);
     EXPECT_EQ(request->endSec, 949);
-    EXPECT_EQ(request->limit, 150);
+    EXPECT_EQ(request->limit, 50); // finish visible range before prefetch
     // Retained-bar pages can extend earlier than start_time_sec across a gap.
     EXPECT_TRUE(accept(state, *request, 750'000));
     state.setViewport(btc, 1, 700'000, 800'000);
@@ -188,12 +188,12 @@ TEST(CandleBackfillState, OneSecondClientUsesInclusiveEndWithoutOverlapAndAccept
     EXPECT_EQ(next->endSec, 749);
 }
 
-TEST(CandleBackfillState, CoarsePagesBoundRestWorkAndReconnectRearmsSameViewport) {
+TEST(CandleBackfillState, CoarsePagesCountOutputBarsAndReconnectRearmsSameViewport) {
     CandleBackfillState state;
     state.setViewport(btc, 300, 1000 * minute, 2000 * minute);
     auto request = state.next(2000 * minute, false, now);
     ASSERT_TRUE(request);
-    EXPECT_EQ(request->limit, 70);
+    EXPECT_EQ(request->limit, 200); // entire visible 5m range fits one native page
     state.disconnect();
     EXPECT_FALSE(accept(state, *request, 0));
     EXPECT_TRUE(state.setViewport(btc, 300, 1000 * minute, 2000 * minute));
@@ -276,8 +276,38 @@ TEST(CandleBackfillState, ExplicitRefreshBypassesCoveredFullCacheThenStops) {
     ASSERT_TRUE(refresh);
     EXPECT_TRUE(refresh->refresh);
     EXPECT_EQ(refresh->endSec, 1100 * 60);
-    EXPECT_EQ(refresh->startSec, 900 * 60);
+    EXPECT_EQ(refresh->startSec, 1000 * 60);
     EXPECT_FALSE(state.next(800 * minute, true, now + 1000));
-    ASSERT_TRUE(accept(state, *refresh, 900 * minute, now + 1000));
-    EXPECT_FALSE(state.next(800 * minute, true, now + 1000));
+    ASSERT_TRUE(accept(state, *refresh, 1000 * minute, now + 1000));
+    auto prefetch = state.next(800 * minute, true, now + 1000);
+    ASSERT_TRUE(prefetch);
+    EXPECT_EQ(prefetch->endSec, 1000 * 60);
+    EXPECT_EQ(prefetch->startSec, 900 * 60);
+    ASSERT_TRUE(accept(state, *prefetch, 900 * minute, now + 1100));
+    EXPECT_FALSE(state.next(800 * minute, true, now + 1100));
+}
+
+TEST(CandleBackfillState, NativePagesFillFourteenDaysBeforePrefetchForNormalAndRefresh) {
+    constexpr qint64 tfSec = 900, end = 2'000'000'700, span = 14 * 86400;
+    for (bool refresh : {false, true}) {
+        CandleBackfillState state;
+        state.setViewport(btc, tfSec, (end - span) * 1000, end * 1000);
+        if (refresh) state.requestRefresh();
+        qint64 oldest = refresh ? (end - 2 * span) * 1000 : 0;
+        qint64 clock = end * 1000;
+        for (int page = 0; page < 4; ++page) {
+            auto request = state.next(oldest, refresh, clock);
+            ASSERT_TRUE(request);
+            EXPECT_EQ(request->limit, page == 3 ? 294 : 350);
+            EXPECT_EQ(request->endSec, end - page * 350 * tfSec);
+            EXPECT_GE(request->startSec, end - span);
+            ASSERT_TRUE(accept(state, *request, request->startSec * 1000, clock));
+            oldest = request->startSec * 1000;
+            clock += 100;
+        }
+        auto prefetch = state.next(oldest, refresh, clock);
+        ASSERT_TRUE(prefetch);
+        EXPECT_EQ(prefetch->endSec, end - span);
+        EXPECT_EQ(prefetch->limit, 350);
+    }
 }

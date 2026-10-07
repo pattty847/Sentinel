@@ -10,6 +10,9 @@
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <algorithm>
+#include <cmath>
+#include <limits>
+#include <thread>
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -341,4 +344,108 @@ std::optional<std::string> CoinbaseRestClient::granularityFromSeconds(int64_t ti
         case 86400: return "ONE_DAY";
         default: return std::nullopt;
     }
+}
+
+int64_t CandleHistoryCache::sourceSeconds(int64_t timeframeSec) {
+    for (const int64_t native : {86400, 21600, 14400, 7200, 3600, 1800, 900, 300, 60})
+        if (timeframeSec >= native && timeframeSec % native == 0) return native;
+    return 0;
+}
+
+CandleFetchResult CandleHistoryCache::fetch(const std::string& product, int64_t timeframeSec,
+                                            int64_t startSec, int64_t endSec, int64_t nowSec,
+                                            const Fetch& fetcher, const Cancel& cancelled) {
+    CandleFetchResult result;
+    const int64_t sourceSec = sourceSeconds(timeframeSec);
+    if (product.empty() || sourceSec == 0 || startSec <= 0 || endSec <= startSec ||
+        endSec > std::numeric_limits<int64_t>::max() / 1000 || nowSec <= 0 ||
+        (endSec - startSec) / timeframeSec > 350) {
+        result.error = "invalid candle history range";
+        return result;
+    }
+    // Freeze the closed cutoff before network I/O. A bar that closes while the
+    // request is in flight belongs to a later fetch, never a cached partial bar.
+    const int64_t first = startSec / timeframeSec + (startSec % timeframeSec != 0);
+    const int64_t last = std::min(endSec, nowSec) / timeframeSec;
+    result.ok = true;
+    if (first >= last) return result;
+    std::lock_guard lock(m_mutex);
+    if (cancelled && cancelled()) return {false, "cancelled", {}};
+    const auto key = std::make_pair(product, timeframeSec);
+    if (!m_series.contains(key) && m_series.size() == kMaxSeries) {
+        const auto oldest = std::min_element(m_series.begin(), m_series.end(),
+            [](const auto& a, const auto& b) { return a.second.used < b.second.used; });
+        m_series.erase(oldest);
+    }
+    auto& series = m_series[key];
+    series.used = ++m_use;
+    int64_t missingFirst = last, missingLast = first;
+    for (int64_t bucket = first; bucket < last; ++bucket) {
+        if (!series.buckets.contains(bucket)) {
+            missingFirst = std::min(missingFirst, bucket);
+            missingLast = bucket + 1;
+        }
+    }
+    if (missingFirst < missingLast) {
+        std::vector<OHLCVBar> source;
+        // Usually exactly one native request. Non-native configured timeframes
+        // use the largest dividing granularity, with every page on UTC bounds.
+        for (int64_t cursor = missingLast * timeframeSec; cursor > missingFirst * timeframeSec;) {
+            if (cancelled && cancelled()) return {false, "cancelled", {}};
+            const int64_t begin = std::max(missingFirst * timeframeSec, cursor - 350 * sourceSec);
+            auto page = fetcher(begin, cursor, *CoinbaseRestClient::granularityFromSeconds(sourceSec));
+            if (!page.ok) return page; // no negative cache on failure
+            for (const auto& bar : page.candles) {
+                if (bar.timestamp_ms < begin * 1000 || bar.timestamp_ms >= cursor * 1000) continue;
+                if (bar.timestamp_ms % (sourceSec * 1000) != 0 ||
+                    !std::isfinite(bar.open) || !std::isfinite(bar.high) ||
+                    !std::isfinite(bar.low) || !std::isfinite(bar.close) || !std::isfinite(bar.volume))
+                    return {false, "invalid native candle", {}};
+                source.push_back(bar);
+            }
+            cursor = begin;
+        }
+        if (cancelled && cancelled()) return {false, "cancelled", {}};
+        std::sort(source.begin(), source.end(), [](const auto& a, const auto& b) {
+            return a.timestamp_ms < b.timestamp_ms;
+        });
+        source.erase(std::unique(source.begin(), source.end(), [](const auto& a, const auto& b) {
+            return a.timestamp_ms == b.timestamp_ms;
+        }), source.end());
+        auto bars = TimeframeAggregator::rollupMinutes(source, timeframeSec * 1000);
+        for (int64_t bucket = missingFirst; bucket < missingLast; ++bucket)
+            series.buckets.try_emplace(bucket, std::nullopt);
+        for (auto& bar : bars) {
+            bar.is_closed = true;
+            series.buckets[bar.timestamp_ms / (timeframeSec * 1000)] = bar;
+        }
+    }
+    for (int64_t bucket = first; bucket < last; ++bucket)
+        if (const auto& bar = series.buckets.at(bucket)) result.candles.push_back(*bar);
+    // Retain the newest closed buckets; return fetched older pages even when
+    // they immediately fall outside the retention bound.
+    while (series.buckets.size() > kMaxBucketsPerSeries) series.buckets.erase(series.buckets.begin());
+    sLog_Probe("candles.cache", "product=" << product << " tfSec=" << timeframeSec
+               << " hit=" << (missingFirst >= missingLast) << " bars=" << result.candles.size());
+    return result;
+}
+
+CandleFetchResult CoinbaseRestClient::fetchClosedCandleHistory(
+    const std::string& productId, int64_t timeframeSec, int64_t startSec, int64_t endSec,
+    const CandleHistoryCache::Cancel& cancelled) const {
+    const auto nowSec = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    return m_history.fetch(productId, timeframeSec, startSec, endSec, nowSec,
+        [&](int64_t begin, int64_t end, const std::string& granularity) {
+            // At most 2.5 history REST starts/s, shared by all chart sessions.
+            // Cache hits bypass this callback and consume no provider budget.
+            std::this_thread::sleep_until(m_nextHistoryRequest);
+            if (cancelled && cancelled()) return CandleFetchResult{false, "cancelled", {}};
+            m_nextHistoryRequest = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
+            sLog_Probe("candles.rest.request", "product=" << productId << " granularity=" << granularity
+                       << " start=" << begin << " end=" << end);
+            // Coinbase end is inclusive. Exclude the next bucket before its
+            // 350-bar limit is applied, or the oldest requested bar is lost.
+            return fetchProductCandles(productId, begin, end - 1, granularity, 350);
+        }, cancelled);
 }
