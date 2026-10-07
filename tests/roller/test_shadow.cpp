@@ -55,6 +55,10 @@ struct ShadowServerTestAccess {
   static std::string metrics(SentinelServerApp &app) {
     return app.m_metrics.render();
   }
+  static void stopCandleTimer(ServerDataModel &m) { m.m_candleTimer.stop(); }
+  static void tickCandles(ServerDataModel &m, int64_t ms) {
+    m.m_aggregator->tick(ms);
+  }
   static bool hasEngine(SentinelServerApp &app) {
     return app.m_marketDataCore != nullptr;
   }
@@ -454,6 +458,13 @@ struct ShadowTest : testing::Test {
       e.kind = "connection";
       e.product = p;
       e.connected = connected;
+      push(std::move(e));
+    };
+    cfg.model.live = [push](const std::string &p, bool live) {
+      ModelEvent e;
+      e.kind = "live";
+      e.product = p;
+      e.connected = live;
       push(std::move(e));
     };
     cfg.model.metadata = [push](const std::string &p, const json &m) {
@@ -2333,12 +2344,15 @@ TEST_F(ShadowTest, JournalTapRestartSeedsOnlyAfterCatchup) {
   tapModel();
   writer->append(record(0, snapshot()));
   for (int t = 1; t <= 80; ++t)
-    writer->append(record(t * 1000, t % 7 ? heartbeat()
-                                          : offer(std::to_string(100001 + t),
-                                                  std::to_string(t % 5))));
+    writer->append(record(t * 1000, t % 11 == 0 ? trades("BUY", "h" + std::to_string(t))
+                                    : t % 7      ? heartbeat()
+                                                 : offer(std::to_string(100001 + t),
+                                                         std::to_string(t % 5))));
   writer->flush();
   start();
   ASSERT_TRUE(eventually([&] { return modelCount("snapshot") == 1; }));
+  std::this_thread::sleep_for(100ms);
+  EXPECT_EQ(modelCount("trade"), 0u); // a fresh process never replays the day
   shadow.reset();
   {
     std::lock_guard lock(modelMutex);
@@ -2470,6 +2484,26 @@ TEST_F(ShadowTest, JournalTapDeliversEachTradeOnceAcrossRecovery) {
   for (const auto &e : modelLog("trade"))
     ids.push_back(e.trade.trade_id);
   EXPECT_EQ(ids, (std::vector<std::string>{"t1", "t2", "t3"}));
+  // The gap trade t2 is replayed while candle closing is held (live false)
+  // and the hold ends only after it (live true).
+  const auto log = modelLog();
+  size_t held = std::string::npos, gap = std::string::npos, resumed = std::string::npos;
+  for (size_t i = 0; i < log.size(); ++i) {
+    if (log[i].kind == "live" && !log[i].connected && held == std::string::npos)
+      held = i;
+    if (log[i].kind == "trade" && log[i].trade.trade_id == "t2")
+      gap = i;
+    if (log[i].kind == "live" && log[i].connected && gap != std::string::npos &&
+        resumed == std::string::npos)
+      resumed = i;
+  }
+  ASSERT_NE(held, std::string::npos);
+  ASSERT_NE(gap, std::string::npos);
+  ASSERT_NE(resumed, std::string::npos);
+  EXPECT_LT(held, gap);
+  EXPECT_LT(gap, resumed);
+  for (size_t i = held; i < gap; ++i)
+    EXPECT_FALSE(log[i].kind == "live" && log[i].connected) << i;
   // Coinbase reports the maker; the model gets the aggressor (A4).
   EXPECT_EQ(modelLog("trade")[0].trade.side, AggressorSide::Sell);
   EXPECT_EQ(modelLog("trade")[1].trade.side, AggressorSide::Buy);
@@ -2698,6 +2732,7 @@ struct JournalServer {
     std::string product, status;
     double tick;
     size_t bids, asks;
+    std::chrono::steady_clock::time_point at = std::chrono::steady_clock::now();
   };
   std::vector<Book> books;
   int metadataRequests = 0, bookUpdates = 0, bars = 0;
@@ -2934,5 +2969,138 @@ TEST(ShadowConfig, LiveFeedKeyDefaultsToEngine) {
   EXPECT_EQ(c.recording.liveFeed, "journal");
   EXPECT_TRUE(journalLiveFeed(c));
   EXPECT_EQ(liveFeedProblem(c), "");
+}
+
+// Fix round 1 (finding 1): two invalidation/recovery cycles inside the 1 s
+// re-seed throttle. The second request is coalesced and delivered at the
+// deadline, so ordinary deltas find a ready book again (no upstream snapshot).
+TEST_F(ShadowTest, JournalLiveFeedServerCoalescesReseedsInsideTheThrottle) {
+  JournalServer s(*this);
+  ASSERT_TRUE(s.initialize());
+  ASSERT_TRUE(eventuallyQt([&] { return s.status("ready") != std::string::npos; }));
+  const auto move = [&](int64_t ms, std::vector<std::array<std::string, 3>> levels) {
+    json updates = json::array();
+    for (const auto &[side, price, size] : levels)
+      updates.push_back({{"side", side}, {"price_level", price}, {"new_quantity", size}});
+    s.pepe->append(record(ms, json({{"channel", "l2_data"},
+                                    {"events", json::array({{{"type", "update"},
+                                                             {"product_id", "PEPE-USD"},
+                                                             {"updates", updates}}})}})
+                                  .dump()));
+  };
+  move(64000, {{"bid", "0.00000999", "0"}, {"bid", "0.00000980", "0"},
+               {"offer", "0.00001001", "0"}, {"bid", "0.00001500", "10"},
+               {"offer", "0.00001510", "10"}});
+  ASSERT_TRUE(eventuallyQt([&] {
+    const auto lost = s.status("aggregation_unavailable");
+    return lost != std::string::npos && s.status("ready", lost + 1) != std::string::npos;
+  }));
+  const auto first = s.status("aggregation_unavailable");
+  const auto recovered = s.status("ready", first + 1);
+  move(65000, {{"bid", "0.00001500", "0"}, {"offer", "0.00001510", "0"},
+               {"bid", "0.00002500", "10"}, {"offer", "0.00002510", "10"}});
+  ASSERT_TRUE(eventuallyQt([&] {
+    return s.status("aggregation_unavailable", recovered + 1) != std::string::npos;
+  }));
+  const auto second = s.status("aggregation_unavailable", recovered + 1);
+  // Inside the throttle window of the first request.
+  EXPECT_LT(s.books[second].at - s.books[first].at, 900ms);
+  ASSERT_TRUE(eventuallyQt([&] { return s.status("ready", second + 1) != std::string::npos; }));
+  const auto again = s.status("ready", second + 1);
+  EXPECT_EQ(s.books[again].bids, 1u);
+  EXPECT_EQ(s.books[again].asks, 1u);
+  const auto updates = s.bookUpdates;
+  s.pepe->append(record(66000, pepeLevel("offer", "0.00002520", "5")));
+  ASSERT_TRUE(eventuallyQt([&] { return s.bookUpdates > updates; }));
+  EXPECT_EQ(resnapshots.load(), 0);
+}
+// Fix round 1 (finding 3): with the journal feed every captured product is
+// exempt from mdc.max_connections and anything else is an invalid product,
+// never a connection-cap refusal.
+TEST_F(ShadowTest, JournalLiveFeedAdmissionIgnoresTheEngineCap) {
+  JournalServer s(*this);
+  s.config.mdc.maxConnections = 1;
+  s.config.rollerShadow.products = {"PEPE-USD", "ETH-USD", "SOL-USD"};
+  ASSERT_TRUE(s.initialize());
+  auto &server = ShadowServerTestAccess::server(*s.app);
+  using Admission = SentinelStreamServer::FeedAdmission;
+  EXPECT_EQ(server.notifyClientSubscribed("ETH-USD"), Admission::Accepted);
+  EXPECT_EQ(server.notifyClientSubscribed("SOL-USD"), Admission::Accepted);
+  EXPECT_EQ(server.notifyClientSubscribed("PEPE-USD"), Admission::Accepted);
+  EXPECT_EQ(server.notifyClientSubscribed("XRP-USD"), Admission::InvalidProduct);
+  EXPECT_EQ(server.notifyClientSubscribed(Product), Admission::InvalidProduct);
+  EXPECT_NE(s.metrics().find("sentinel_mdc_refused_total{product=\"XRP-USD\"} 1"),
+            std::string::npos);
+}
+// Fix round 1 (finding 2): the production model and its candle timer across an
+// outage spanning several second and minute boundaries. Candle closing is held
+// while the journal feed is not live, so the replayed trades rebuild exactly
+// the bars an uninterrupted feed builds: unique, ordered, same OHLCV.
+TEST(JournalLiveFeedModel, HeldCandlesRebuildAnOutageExactly) {
+  static int argc = 1;
+  static char name[] = "test_shadow";
+  static char *argv[] = {name, nullptr};
+  if (!QCoreApplication::instance())
+    static QCoreApplication app(argc, argv);
+  QTemporaryDir temp;
+  struct Cwd {
+    QString old = QDir::currentPath();
+    ~Cwd() { QDir::setCurrent(old); }
+  } cwd;
+  ASSERT_TRUE(QDir::setCurrent(temp.path()));
+  ServerConfig config;
+  config.defaultSymbols = {"PEPE-USD"};
+  config.rollerShadow.products = {"PEPE-USD"};
+  config.heatmap.persistenceEnabled = false;
+  config.heatmap.timeframesMs = {1000, 60000, 300000};
+  config.recording.liveFeed = "journal";
+  ServerDataModel steady(config), outage(config);
+  for (auto *m : {&steady, &outage})
+    ShadowServerTestAccess::stopCandleTimer(*m);
+  const int64_t t0 = 1'800'000'000'000 / 300'000 * 300'000;
+  std::vector<Trade> tape;
+  for (const auto &[ms, price] : std::vector<std::pair<int64_t, double>>{
+           {10'000, 1.0}, {40'000, 2.0}, {80'000, 3.0}, {81'500, 2.5},
+           {150'000, 4.0}, {200'000, 5.0}, {245'000, 4.5}, {255'000, 6.0}})
+    tape.push_back({std::chrono::system_clock::time_point(std::chrono::milliseconds(t0 + ms)),
+                    "PEPE-USD", std::to_string(ms), AggressorSide::Buy, price, 1.0});
+  size_t a = 0, b = 0;
+  std::vector<Trade> withheld;
+  const auto at = [&](const Trade &t) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(t.timestamp.time_since_epoch()).count();
+  };
+  for (int64_t now = t0; now <= t0 + 400'000; now += 250) {
+    for (; a < tape.size() && at(tape[a]) <= now; ++a)
+      steady.onTrade(tape[a]);
+    if (now == t0 + 50'000)
+      outage.onFeedLive("PEPE-USD", false); // fan-out lost, capture keeps journaling
+    for (; b < tape.size() && at(tape[b]) <= now; ++b)
+      if (now > t0 + 50'000 && now < t0 + 230'000)
+        withheld.push_back(tape[b]);
+      else
+        outage.onTrade(tape[b]);
+    if (now == t0 + 230'000) { // recovery: durable gap trades, then the seed
+      for (const auto &t : withheld)
+        outage.onTrade(t);
+      outage.onFeedLive("PEPE-USD", true);
+    }
+    ShadowServerTestAccess::tickCandles(steady, now);
+    ShadowServerTestAccess::tickCandles(outage, now);
+  }
+  ASSERT_EQ(withheld.size(), 4u);
+  for (const int64_t tf : {1000, 60000, 300000}) {
+    const auto x = steady.getHistory("PEPE-USD", tf, 100000);
+    const auto y = outage.getHistory("PEPE-USD", tf, 100000);
+    ASSERT_FALSE(x.empty()) << tf;
+    for (size_t i = 1; i < y.size(); ++i)
+      EXPECT_LT(y[i - 1].timestamp_ms, y[i].timestamp_ms) << tf << " at " << i;
+    ASSERT_EQ(x.size(), y.size()) << tf;
+    for (size_t i = 0; i < x.size(); ++i)
+      EXPECT_EQ(std::tie(x[i].timestamp_ms, x[i].open, x[i].high, x[i].low, x[i].close,
+                         x[i].volume, x[i].count),
+                std::tie(y[i].timestamp_ms, y[i].open, y[i].high, y[i].low, y[i].close,
+                         y[i].volume, y[i].count))
+          << tf << " at " << i;
+  }
 }
 } // namespace

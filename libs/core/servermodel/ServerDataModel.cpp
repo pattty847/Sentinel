@@ -118,6 +118,8 @@ ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
         }
     });
     m_metadataTimer.start();
+    m_reseedTimer.setSingleShot(true);
+    connect(&m_reseedTimer, &QTimer::timeout, this, [this] { deliverReseeds(); });
     int64_t maxTfMs = std::max<int64_t>(1000, m_serverConfig.heatmap.activeTimeframeMs);
     for (const int64_t tf : m_serverConfig.heatmap.timeframesMs) {
         if (tf > maxTfMs) {
@@ -384,8 +386,16 @@ void ServerDataModel::onFeedMetadata(const std::string& symbol, const nlohmann::
     if (it == m_feeds.end()) return;
     onProductMetadata(symbol, it->second.lifetime, metadata, {});
 }
+void ServerDataModel::onFeedLive(const std::string& symbol, bool live) {
+    if (!m_journalFeed || !m_feeds.contains(symbol) || !m_aggregator) return;
+    m_aggregator->setHeld(symbol, !live);
+}
 void ServerDataModel::setReseedHandler(std::function<void(const std::string&)> handler) {
     m_reseed = std::move(handler);
+    if (!m_reseed) {
+        m_reseedTimer.stop();
+        m_pendingReseeds.clear();
+    }
 }
 // recording.live_feed: journal. The feed holds the whole book: a fresh snapshot
 // replaces "await the next upstream snapshot". At most once per symbol per second.
@@ -393,10 +403,23 @@ void ServerDataModel::requestReseed(const std::string& symbol, const char* why) 
     if (!m_journalFeed || !m_reseed) return;
     const auto now = localNowMs();
     auto& next = m_nextReseedMs[symbol];
-    if (now < next) return;
+    if (now < next) {
+        // Coalesce: the book stays invalid until a snapshot arrives, so the
+        // request is kept and delivered at the deadline.
+        m_pendingReseeds.insert(symbol);
+        const int wait = int(next - now);
+        if (!m_reseedTimer.isActive() || m_reseedTimer.remainingTime() > wait) m_reseedTimer.start(wait);
+        sLog_Data("Live book re-seed deferred: symbol=" << symbol << " reason=" << why << " waitMs=" << wait);
+        return;
+    }
     next = now + 1000;
+    m_pendingReseeds.erase(symbol);
     sLog_Data("Live book re-seed requested: symbol=" << symbol << " reason=" << why);
     m_reseed(symbol);
+}
+void ServerDataModel::deliverReseeds() {
+    const auto pending = std::exchange(m_pendingReseeds, {});
+    for (const auto& symbol : pending) requestReseed(symbol, "deferred");
 }
 void ServerDataModel::releaseGuiFeed(const std::string& symbol, int64_t releaseLocalMs) {
     const auto it = m_feeds.find(symbol);

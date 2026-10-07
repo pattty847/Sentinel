@@ -100,14 +100,29 @@ void TimeframeAggregator::onTrade(const Trade& trade) {
     const int64_t tsMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         trade.timestamp.time_since_epoch()).count();
     auto& state = m_states[trade.product_id];
+    // Held (journal recovery replay): the trade's own time drives closing, as
+    // the timer would have at that time, so bars match uninterrupted delivery.
+    if (m_held.contains(trade.product_id)) closeElapsed(state, trade.product_id, tsMs);
     if (std::binary_search(m_timeframesMs.begin(), m_timeframesMs.end(), kSecondMs))
         updateTradeBar(state, trade.product_id, kSecondMs, trade, tsMs);
     updateTradeBar(state, trade.product_id, kMinuteMs, trade, tsMs);
 }
 
+void TimeframeAggregator::setHeld(const std::string& symbol, bool held) {
+    std::unique_lock lock(m_mutex);
+    if (held) m_held.insert(symbol);
+    else m_held.erase(symbol);
+}
+
 void TimeframeAggregator::tick(int64_t nowMs) {
     std::unique_lock lock(m_mutex);
-    for (auto& [symbol, state] : m_states) {
+    for (auto& [symbol, state] : m_states)
+        if (!m_held.contains(symbol)) closeElapsed(state, symbol, nowMs);
+}
+
+// Closes the symbol's bars that end at or before nowMs, carrying quiet buckets.
+void TimeframeAggregator::closeElapsed(SymbolState& state, const std::string& symbol, int64_t nowMs) {
+    {
         for (const int64_t tf : {kSecondMs, kMinuteMs}) {
             if (!std::binary_search(m_timeframesMs.begin(), m_timeframesMs.end(), tf)) continue;
             auto& bar = state.activeBars[tf];

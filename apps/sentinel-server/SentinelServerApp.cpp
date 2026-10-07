@@ -331,6 +331,9 @@ sentinel::roller::ModelSink SentinelServerApp::journalModelSink() {
             model.onMarketDataConnectionChanged(product, connected);
         });
     };
+    sink.live = [modelPtr](const std::string& product, bool live) {
+        safeInvoke(modelPtr, [product, live](ServerDataModel& model) { model.onFeedLive(product, live); });
+    };
     sink.metadata = [modelPtr](const std::string& product, const nlohmann::json& metadata) {
         safeInvoke(modelPtr, [product, metadata](ServerDataModel& model) { model.onFeedMetadata(product, metadata); });
     };

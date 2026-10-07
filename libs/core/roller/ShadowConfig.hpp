@@ -30,6 +30,10 @@ struct ModelSink {
       invalidate;
   std::function<void(const Trade &)> trade; // aggressor side
   std::function<void(const std::string &product, bool connected)> connection;
+  // False while the product's journal feed is not live at the tip (recovery,
+  // day rotation): the model holds candle closing, so replayed trades build
+  // their bars in order; true after the seed. Optional.
+  std::function<void(const std::string &product, bool live)> live;
   // The journal header's Coinbase product JSON (no REST).
   std::function<void(const std::string &product, const nlohmann::json &)>
       metadata;

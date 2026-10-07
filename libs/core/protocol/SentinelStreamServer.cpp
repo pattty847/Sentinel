@@ -2238,8 +2238,16 @@ SentinelStreamServer::FeedAdmission SentinelStreamServer::notifyClientSubscribed
     bool firstSubscriber = false;
     {
         std::lock_guard<std::mutex> lock(m_symbolSubscriptionsMutex);
-        const auto pinned = normalizedDefaultSymbols(m_serverConfig.defaultSymbols);
+        // recording.live_feed: journal: every captured product is pinned (exempt
+        // from the cap) and nothing else can be opened.
+        const bool journal = journalLiveFeed(m_serverConfig);
+        const auto pinned = journal ? rollerProducts(m_serverConfig)
+                                    : normalizedDefaultSymbols(m_serverConfig.defaultSymbols);
         const auto isPinned = [&](const auto& name) { return std::find(pinned.begin(), pinned.end(), name) != pinned.end(); };
+        if (journal && !isPinned(symbol)) {
+            recordRefusalLocked(symbol, "invalid_product");
+            return FeedAdmission::InvalidProduct;
+        }
         if (!m_symbolSubscriptions.contains(symbol) && !isPinned(symbol)) {
             const auto count = std::count_if(m_symbolSubscriptions.begin(), m_symbolSubscriptions.end(),
                 [&](const auto& entry) { return !isPinned(entry.first); });

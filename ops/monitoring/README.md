@@ -421,7 +421,9 @@ model gets the journal header's `product_metadata` (no REST), one synthesized
 snapshot at the tip and then each record's updates and trades (aggressor side)
 as queued hand-offs. Every `roller_shadow.products` entry is a pinned live
 feed; a subscription for any other product is refused as `invalid_product`.
-REST is used for candle history only. The key is deleted in D-b2.
+REST is used for candle history only. Captured products are exempt from
+`mdc.max_connections`; any other product is refused as `invalid_product`, never
+`connection_cap`. The key is deleted in D-b2.
 
 A retract, disconnect, EOF or worker failure invalidates the product's book
 (`Journal live book invalidated`, status `invalidated` on the wire); the next
@@ -431,10 +433,14 @@ a socket record at the tip (`Journal live tip silent`): a frozen capture
 quiet book. A UTC midnight re-seeds once without invalidating. The model's
 "wait for the next upstream snapshot" paths (raw band exceeded, raw BBO
 unavailable) ask the worker for a fresh snapshot instead (`Live book re-seed
-requested`, at most once per product per second); nothing asks capture to
-resubscribe. Trades reach the model once per journal position; after a
-recovery the gap is filled from the journal, but a restart never replays the
-day's trades.
+requested`, at most once per product per second; a request inside that second
+is kept and sent at the deadline, `Live book re-seed deferred`); nothing asks
+capture to resubscribe. Trades reach the model once per journal position;
+after a recovery the gap is filled from the journal, but a restart never
+replays the day's trades. While a product's feed is not live at the tip
+(recovery, day rotation) the candle timer closes none of its bars; replayed
+trades close them at their own time, so the bars equal uninterrupted delivery
+(1 s bars carry at most 300 quiet buckets per gap, as the timer does).
 
 With `journal`, `sentinel_mdc_connected{pinned="1"}` and the transport
 counters follow the journal (TransportUp/TransportDown records and the 30 s

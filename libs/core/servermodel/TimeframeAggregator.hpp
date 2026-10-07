@@ -4,6 +4,7 @@
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include "../marketdata/model/TradeData.h"
 
@@ -25,6 +26,9 @@ public:
                                  QObject* parent = nullptr);
     void onTrade(const Trade& trade);
     void tick(int64_t nowMs);
+    // recording.live_feed: journal. While held, tick() closes none of the
+    // symbol's bars: trades replayed after an outage build them in order.
+    void setHeld(const std::string& symbol, bool held);
     static std::vector<OHLCVBar> rollupMinutes(const std::vector<OHLCVBar>& minutes,
                                                 int64_t timeframeMs);
     std::vector<OHLCVBar> getHistory(const std::string& symbol, int64_t timeframeMs,
@@ -42,12 +46,14 @@ private:
     mutable std::shared_mutex m_mutex;
     std::unordered_map<std::string, SymbolState> m_states;
     std::vector<int64_t> m_timeframesMs;
+    std::unordered_set<std::string> m_held;
 
     static int64_t bucketStart(int64_t timestampMs, int64_t timeframeMs);
     void closeBar(SymbolState& state, const std::string& symbol, int64_t timeframeMs,
                   OHLCVBar& bar);
     void addMinuteToRollups(SymbolState& state, const std::string& symbol,
                             const OHLCVBar& minute);
+    void closeElapsed(SymbolState& state, const std::string& symbol, int64_t nowMs);
     void updateTradeBar(SymbolState& state, const std::string& symbol,
                         int64_t timeframeMs, const Trade& trade, int64_t tradeTsMs);
 };

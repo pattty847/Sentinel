@@ -275,6 +275,7 @@ class ModelTap {
   bool seeded = false;   // live follows the socket tip
   bool shown = false;    // the model holds a book from this tap
   bool reported = false; // last connection state handed to the model
+  bool liveReported = false; // last ModelSink::live state
   bool tradeHere = false; // the record being applied carries new trades
   const JournalFeed *history = nullptr;
   std::unique_ptr<JournalFeed> feed;
@@ -339,10 +340,19 @@ class ModelTap {
       return;
     cfg.model.connection(product, connected);
   }
+  // Candle closing follows the journal: held while not seeded, so trades the
+  // recovery replays build their bars in order (ModelSink::live).
+  void setLive(bool v) {
+    if (v == std::exchange(liveReported, v))
+      return;
+    if (cfg.model.live)
+      cfg.model.live(product, v);
+  }
   void unseed() {
     seeded = false;
     feed.reset();
     live.clear();
+    setLive(false);
   }
   void serviceReseed() {
     if (!reseed.load(std::memory_order_relaxed) || !reseed.exchange(false))
@@ -453,7 +463,6 @@ public:
       show(live);
     else
       hide("journal book invalid at the tip");
-    report();
     sLog_Data("Journal live seed product="
               << product << " valid=" << live.valid
               << " bids=" << live.bids.size() << " asks=" << live.asks.size()
@@ -463,6 +472,10 @@ public:
                      .count());
     for (const auto &r : pending)
       apply(r);
+    if (!seeded)
+      return; // a replayed record failed: dropped
+    report();
+    setLive(true);
   }
   // A provisional record at the tip, on arrival.
   void apply(const JournalRecord &r) {

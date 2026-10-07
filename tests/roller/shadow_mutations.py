@@ -263,6 +263,25 @@ mutations = [
     ('db1 live_feed key parsed', 'libs/core/ConfigLoader.cpp',
      'readScalar(rec, "live_feed", cfg.recording.liveFeed);', ';',
      'ShadowConfig.LiveFeedKeyDefaultsToEngine'),
+    # D-b1 fix round 1.
+    ('db1-r1-1 throttled re-seed requests are coalesced, not dropped', 'libs/core/servermodel/ServerDataModel.cpp',
+     'm_pendingReseeds.insert(symbol);', ';',
+     'ShadowTest.JournalLiveFeedServerCoalescesReseedsInsideTheThrottle'),
+    ('db1-r1-2 candle closing is held while the feed is not live', 'libs/core/servermodel/TimeframeAggregator.cpp',
+     'if (!m_held.contains(symbol)) closeElapsed(state, symbol, nowMs);', 'closeElapsed(state, symbol, nowMs);',
+     'JournalLiveFeedModel.HeldCandlesRebuildAnOutageExactly'),
+    ('db1-r1-2 replayed trades close held bars at their own time', 'libs/core/servermodel/TimeframeAggregator.cpp',
+     'if (m_held.contains(trade.product_id)) closeElapsed(state, trade.product_id, tsMs);', '',
+     'JournalLiveFeedModel.HeldCandlesRebuildAnOutageExactly'),
+    ('db1-r1-2 the tap holds candles before replaying a gap', SR,
+     'live.clear(); setLive(false);', 'live.clear();',
+     'ShadowTest.JournalTapDeliversEachTradeOnceAcrossRecovery'),
+    ('db1-r1-2 a fresh process never replays the day\'s trades', SR,
+     'if (!delivered) return false;', 'if (!delivered) return true;',
+     'ShadowTest.JournalTapRestartSeedsOnlyAfterCatchup'),
+    ('db1-r1-3 captured products are exempt from the engine cap', 'libs/core/protocol/SentinelStreamServer.cpp',
+     'const auto pinned = journal ? rollerProducts(m_serverConfig)', 'const auto pinned = false ? rollerProducts(m_serverConfig)',
+     'ShadowTest.JournalLiveFeedAdmissionIgnoresTheEngineCap'),
 ]
 if "--round1" in sys.argv:
     mutations = mutations[5:]

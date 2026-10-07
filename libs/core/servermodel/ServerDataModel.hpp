@@ -1,6 +1,7 @@
 #pragma once
 #include "RecordingLive.hpp"
 #include <map>
+#include <set>
 #include <unordered_map>
 #include <vector>
 #include <deque>
@@ -107,6 +108,8 @@ public:
     // JSON for a live feed (no REST), and the roller's re-seed request hook.
     bool journalFeed() const { return m_journalFeed; }
     void onFeedMetadata(const std::string& symbol, const nlohmann::json& metadata);
+    // Candle closing follows the journal feed (held while it is not live).
+    void onFeedLive(const std::string& symbol, bool live);
     void setReseedHandler(std::function<void(const std::string&)> handler);
 
 public slots:
@@ -188,6 +191,10 @@ private:
     const bool m_journalFeed;
     std::function<void(const std::string&)> m_reseed;
     std::map<std::string, int64_t> m_nextReseedMs;
+    // Throttled requests are coalesced, never dropped: delivered at the deadline.
+    std::set<std::string> m_pendingReseeds;
+    QTimer m_reseedTimer;
+    void deliverReseeds();
     void requestReseed(const std::string& symbol, const char* why);
     void startRecorder();
     void startRollerServing();
