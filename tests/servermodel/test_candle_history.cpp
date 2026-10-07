@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "marketdata/rest/CoinbaseRestClient.hpp"
 #include <future>
+#include <atomic>
 
 namespace {
 CandleFetchResult fixture(int64_t start, int64_t end, const std::string& granularity) {
@@ -78,7 +79,7 @@ TEST(CandleHistoryCache, OverlapFetchesOnlyMissingClosedBucketsAndNeverCachesFor
     int calls = 0;
     auto fetch = [&](int64_t start, int64_t end, const std::string& granularity) {
         ++calls;
-        EXPECT_LE(end, calls <= 2 ? 9000 : 9900);
+        EXPECT_LE(end, calls <= 3 ? 9000 : 9900);
         auto page = fixture(start, end, granularity);
         page.candles.push_back({end * 1000, 999, 999, 999, 999, 999});
         return page;
@@ -91,10 +92,10 @@ TEST(CandleHistoryCache, OverlapFetchesOnlyMissingClosedBucketsAndNeverCachesFor
     EXPECT_EQ(calls, 2);
     auto repeat = cache.fetch("BTC-USD", 900, 6300, 9900, 9450, fetch);
     EXPECT_EQ(repeat.candles.size(), 3u);
-    EXPECT_EQ(calls, 2);
+    EXPECT_EQ(calls, 3); // the most recently closed bucket is still settling
     auto rolled = cache.fetch("BTC-USD", 900, 6300, 10800, 9900, fetch);
     ASSERT_EQ(rolled.candles.size(), 4u);
-    EXPECT_EQ(calls, 3);
+    EXPECT_EQ(calls, 4);
     EXPECT_EQ(rolled.candles.back().timestamp_ms, 9000000);
     EXPECT_EQ(rolled.candles.back().close, 12); // not the old forming snapshot
 }
@@ -136,4 +137,106 @@ TEST(CandleHistoryCache, BoundedRetentionEvictsOldBucketsAndLeastRecentlyUsedSer
     const int before = calls;
     EXPECT_TRUE(cache.fetch("BTC-USD", 60, 8400 * 60, 8401 * 60, 10000 * 60, fetch).ok);
     EXPECT_EQ(calls, before + 1);
+}
+
+TEST(CandleHistoryCache, RecentlyClosedMissingAndPartialBucketsRefetchUntilSettled) {
+    for (const int64_t tf : {60, 900, 10800}) {
+        for (bool omitted : {false, true}) {
+            SCOPED_TRACE(std::to_string(tf) + (omitted ? " missing" : " partial"));
+            CandleHistoryCache cache;
+            const int64_t end = 100 * tf;
+            const int64_t source = CandleHistoryCache::sourceSeconds(tf);
+            int calls = 0;
+            auto fetch = [&](int64_t start, int64_t stop, const std::string& granularity) {
+                ++calls;
+                if (calls > 1) EXPECT_EQ(start, end - tf); // older settled bucket stays cached
+                auto result = fixture(start, stop, granularity);
+                if (calls == 1) {
+                    std::erase_if(result.candles, [&](const auto& bar) {
+                        return omitted && bar.timestamp_ms >= (end - tf) * 1000;
+                    });
+                    for (auto& bar : result.candles)
+                        if (bar.timestamp_ms >= (end - tf) * 1000) bar.close = 11;
+                }
+                return result;
+            };
+            const auto first = cache.fetch("BTC-USD", tf, end - 2 * tf, end, end + 1, fetch);
+            ASSERT_TRUE(first.ok);
+            ASSERT_EQ(first.candles.size(), omitted ? 1u : 2u);
+            if (!omitted) EXPECT_EQ(first.candles.back().close, 11);
+            const auto second = cache.fetch("BTC-USD", tf, end - 2 * tf, end, end + 2, fetch);
+            ASSERT_TRUE(second.ok);
+            ASSERT_EQ(second.candles.size(), 2u);
+            EXPECT_EQ(second.candles.back().close, 12);
+            EXPECT_EQ(calls, 2); // neither an empty slot nor a partial snapshot was retained
+            const auto settled = cache.fetch("BTC-USD", tf, end - 2 * tf, end, end + source, fetch);
+            ASSERT_TRUE(settled.ok);
+            EXPECT_EQ(calls, 3);
+            EXPECT_TRUE(cache.fetch("BTC-USD", tf, end - 2 * tf, end, end + source, fetch).ok);
+            EXPECT_EQ(calls, 3);
+        }
+    }
+}
+
+TEST(CandleHistoryCache, UnrelatedCacheHitReturnsWhileProviderIsBlocked) {
+    CandleHistoryCache cache;
+    int hitSeriesCalls = 0;
+    auto hitFetcher = [&](int64_t start, int64_t end, const std::string& granularity) {
+        ++hitSeriesCalls;
+        return fixture(start, end, granularity);
+    };
+    ASSERT_TRUE(cache.fetch("B", 900, 900, 1800, 3600, hitFetcher).ok);
+    std::promise<void> entered, release;
+    const auto released = release.get_future().share();
+    auto miss = std::async(std::launch::async, [&] {
+        return cache.fetch("A", 900, 900, 1800, 3600,
+            [&](int64_t start, int64_t end, const std::string& granularity) {
+                entered.set_value();
+                released.wait();
+                return fixture(start, end, granularity);
+            });
+    });
+    entered.get_future().wait();
+    auto hit = std::async(std::launch::async, [&] {
+        return cache.fetch("B", 900, 900, 1800, 3600, hitFetcher);
+    });
+    const auto hitStatus = hit.wait_for(std::chrono::milliseconds(200));
+    release.set_value(); // release even on regression, so futures cannot deadlock the test
+    EXPECT_EQ(hitStatus, std::future_status::ready);
+    EXPECT_TRUE(hit.get().ok);
+    EXPECT_TRUE(miss.get().ok);
+    EXPECT_EQ(hitSeriesCalls, 1);
+}
+
+TEST(CandleHistoryCache, ConcurrentRecentTailSharesFlightButLaterRequestRefetches) {
+    CandleHistoryCache cache;
+    std::atomic<int> calls{0};
+    std::promise<void> entered, release, waiterJoined;
+    const auto released = release.get_future().share();
+    auto fetch = [&](int64_t start, int64_t end, const std::string& granularity) {
+        if (++calls == 1) {
+            entered.set_value();
+            released.wait();
+        }
+        return fixture(start, end, granularity);
+    };
+    auto producer = std::async(std::launch::async, [&] {
+        return cache.fetch("BTC-USD", 900, 900, 1800, 1801, fetch);
+    });
+    entered.get_future().wait();
+    auto waiter = std::async(std::launch::async, [&] {
+        int checks = 0;
+        return cache.fetch("BTC-USD", 900, 900, 1800, 1801, fetch, [&] {
+            if (++checks == 2) waiterJoined.set_value(); // second check is in the wait loop
+            return false;
+        });
+    });
+    const auto joined = waiterJoined.get_future().wait_for(std::chrono::seconds(1));
+    release.set_value();
+    EXPECT_EQ(joined, std::future_status::ready);
+    EXPECT_TRUE(producer.get().ok);
+    EXPECT_TRUE(waiter.get().ok);
+    EXPECT_EQ(calls, 1);
+    EXPECT_TRUE(cache.fetch("BTC-USD", 900, 900, 1800, 1802, fetch).ok);
+    EXPECT_EQ(calls, 2);
 }

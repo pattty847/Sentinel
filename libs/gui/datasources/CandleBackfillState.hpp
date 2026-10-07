@@ -68,7 +68,8 @@ public:
                 m_refreshVisibleStartSec = m_visibleStartSec;
             }
             const qint64 pageCap = 350;
-            const qint64 floor = m_refreshCursorSec > m_refreshVisibleStartSec
+            const qint64 floor = m_refreshCursorSec > m_refreshVisibleStartSec &&
+                (m_refreshCursorSec - m_refreshStartSec) / m_tfSec > pageCap
                 ? m_refreshVisibleStartSec : m_refreshStartSec;
             const qint64 bars = (m_refreshCursorSec - floor + m_tfSec - 1) / m_tfSec;
             const int limit = static_cast<int>(std::min(pageCap, bars));
@@ -91,8 +92,9 @@ public:
         if (boundary <= m_startSec && history.emptyScanStartSec == 0) return std::nullopt;
         const qint64 pageCap = 350;
         // After an empty window, probe full pages beyond it (bounded below).
-        // Complete the visible interval before spending any page on prefetch.
-        const qint64 floor = boundary > m_visibleStartSec ? m_visibleStartSec : m_startSec;
+        // Split visible work from prefetch only when both cannot fit one page.
+        const qint64 floor = boundary > m_visibleStartSec &&
+            (boundary - m_startSec) / m_tfSec > pageCap ? m_visibleStartSec : m_startSec;
         const qint64 bars = history.emptyScanStartSec > 0 ? pageCap
             : (boundary - floor + m_tfSec - 1) / m_tfSec;
         int limit = static_cast<int>(std::min(pageCap, bars));

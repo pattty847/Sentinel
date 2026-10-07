@@ -179,7 +179,7 @@ TEST(CandleBackfillState, OneSecondClientUsesInclusiveEndWithoutOverlapAndAccept
     auto request = state.next(950'000, false, now);
     ASSERT_TRUE(request);
     EXPECT_EQ(request->endSec, 949);
-    EXPECT_EQ(request->limit, 50); // finish visible range before prefetch
+    EXPECT_EQ(request->limit, 150); // visible remainder and prefetch fit one page
     // Retained-bar pages can extend earlier than start_time_sec across a gap.
     EXPECT_TRUE(accept(state, *request, 750'000));
     state.setViewport(btc, 1, 700'000, 800'000);
@@ -276,14 +276,9 @@ TEST(CandleBackfillState, ExplicitRefreshBypassesCoveredFullCacheThenStops) {
     ASSERT_TRUE(refresh);
     EXPECT_TRUE(refresh->refresh);
     EXPECT_EQ(refresh->endSec, 1100 * 60);
-    EXPECT_EQ(refresh->startSec, 1000 * 60);
+    EXPECT_EQ(refresh->startSec, 900 * 60);
     EXPECT_FALSE(state.next(800 * minute, true, now + 1000));
-    ASSERT_TRUE(accept(state, *refresh, 1000 * minute, now + 1000));
-    auto prefetch = state.next(800 * minute, true, now + 1000);
-    ASSERT_TRUE(prefetch);
-    EXPECT_EQ(prefetch->endSec, 1000 * 60);
-    EXPECT_EQ(prefetch->startSec, 900 * 60);
-    ASSERT_TRUE(accept(state, *prefetch, 900 * minute, now + 1100));
+    ASSERT_TRUE(accept(state, *refresh, 900 * minute, now + 1000));
     EXPECT_FALSE(state.next(800 * minute, true, now + 1100));
 }
 
@@ -309,5 +304,20 @@ TEST(CandleBackfillState, NativePagesFillFourteenDaysBeforePrefetchForNormalAndR
         ASSERT_TRUE(prefetch);
         EXPECT_EQ(prefetch->endSec, end - span);
         EXPECT_EQ(prefetch->limit, 350);
+    }
+}
+
+TEST(CandleBackfillState, CombinesVisibleAndPrefetchOnlyWhenTheyFitOnePage) {
+    for (bool refresh : {false, true}) {
+        for (qint64 visibleBars : {100, 175, 176}) {
+            CandleBackfillState state;
+            view(state, 1000, 1000 + visibleBars);
+            if (refresh) state.requestRefresh();
+            const auto request = state.next(0, false, now);
+            ASSERT_TRUE(request);
+            const qint64 expected = visibleBars * 2 <= 350 ? visibleBars * 2 : visibleBars;
+            EXPECT_EQ(request->limit, expected);
+            EXPECT_EQ(request->startSec, (1000 + visibleBars - expected) * 60);
+        }
     }
 }

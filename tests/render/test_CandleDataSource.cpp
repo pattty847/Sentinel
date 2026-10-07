@@ -113,13 +113,6 @@ struct CandleDataSourceTest : testing::Test {
             reply(request, Json::array({candle(boundary, 1), candle(request.at("end_time_sec").get<qint64>() / 60 - 1, 1)}));
         }
     }
-    void finishSmallRefreshPrefetch() {
-        const auto prefetch = takeRequest();
-        ASSERT_FALSE(prefetch.is_null());
-        EXPECT_EQ(prefetch.at("end_time_sec"), 1000 * 60);
-        EXPECT_EQ(prefetch.at("limit"), 10);
-        reply(prefetch, Json::array({candle(990, 5), candle(999, 5)}));
-    }
     void reconnect(qint64 start = 1000, qint64 end = 1010) {
         client().disconnected();
         deliver();
@@ -138,11 +131,11 @@ TEST_F(CandleDataSourceTest, ReconnectRefreshesCoveredCacheAndPreservesNewLiveOw
     const auto refresh = takeRequest();
     ASSERT_FALSE(refresh.is_null()); // oldest=990 already covers viewport+prefetch
     EXPECT_EQ(refresh.at("end_time_sec"), 1010 * 60);
-    EXPECT_EQ(refresh.at("limit"), 10);
+    EXPECT_EQ(refresh.at("limit"), 20);
     EXPECT_TRUE(takeRequest(120).is_null()); // same single-flight guard during refresh
     live("BTC-USD", 60, 1009, 9, 1, false);
     deliver();
-    reply(refresh, Json::array({candle(1000, 5), candle(1005, 5), candle(1009, 2)}));
+    reply(refresh, Json::array({candle(990, 5), candle(1005, 5), candle(1009, 2)}));
     EXPECT_DOUBLE_EQ(cached(1005).close, 5);
     EXPECT_EQ(cached(1005).seq, 0);
     EXPECT_DOUBLE_EQ(cached(1009).close, 9);
@@ -151,7 +144,6 @@ TEST_F(CandleDataSourceTest, ReconnectRefreshesCoveredCacheAndPreservesNewLiveOw
     live("BTC-USD", 60, 1009, 10, 2, false);
     deliver();
     EXPECT_DOUBLE_EQ(cached(1009).close, 10);
-    finishSmallRefreshPrefetch();
     EXPECT_TRUE(takeRequest(120).is_null()); // refresh finishes, coverage needs no backfill
 }
 
@@ -173,14 +165,13 @@ TEST_F(CandleDataSourceTest, SelectionReentryRefreshRejectsAlreadyQueuedLiveBars
     const auto refresh = takeRequest();
     ASSERT_FALSE(refresh.is_null());
     EXPECT_EQ(refresh.at("end_time_sec"), 1010 * 60);
-    EXPECT_EQ(refresh.at("limit"), 10);
-    reply(refresh, Json::array({candle(1000, 5), candle(1005, 5), candle(1009, 5)}));
+    EXPECT_EQ(refresh.at("limit"), 20);
+    reply(refresh, Json::array({candle(990, 5), candle(1005, 5), candle(1009, 5)}));
     EXPECT_DOUBLE_EQ(cached(1005).close, 5);
     live("BTC-USD", 60, 1005, 6, 1, false);
     deliver();
     EXPECT_DOUBLE_EQ(cached(1005).close, 6);
     EXPECT_EQ(cached(1005).seq, 1);
-    finishSmallRefreshPrefetch();
     EXPECT_TRUE(takeRequest(120).is_null());
 }
 
@@ -193,9 +184,8 @@ TEST_F(CandleDataSourceTest, TimeframeReentryAlsoRefreshesAndRejectsQueuedClose)
     EXPECT_EQ(cached(1009).seq, 0);
     const auto refresh = takeRequest();
     ASSERT_FALSE(refresh.is_null());
-    reply(refresh, Json::array({candle(1000, 5), candle(1009, 5)}));
+    reply(refresh, Json::array({candle(990, 5), candle(1009, 5)}));
     EXPECT_DOUBLE_EQ(cached(1009).close, 5);
-    finishSmallRefreshPrefetch();
     EXPECT_TRUE(takeRequest(120).is_null());
 }
 

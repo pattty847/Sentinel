@@ -6,6 +6,9 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <condition_variable>
+#include <memory>
+#include <tuple>
 #include <nlohmann/json.hpp>
 #include "../../servermodel/TimeframeAggregator.hpp"
 #include "../auth/Authenticator.hpp"
@@ -17,8 +20,8 @@ struct CandleFetchResult {
 };
 
 // Server-owned, bounded cache. A null bucket records a successfully fetched
-// empty interval, not an error. All fetches are serialized, including overlapping
-// requests from different sessions. Never called on the GUI or render thread.
+// settled empty interval, not an error. Identical in-flight ranges share their
+// result; cache hits never wait for provider I/O. Not used on GUI/render threads.
 class CandleHistoryCache {
 public:
     using Fetch = std::function<CandleFetchResult(int64_t, int64_t, const std::string&)>;
@@ -35,6 +38,13 @@ private:
         uint64_t used = 0;
         std::map<int64_t, std::optional<OHLCVBar>> buckets;
     };
+    struct Flight {
+        bool done = false;
+        CandleFetchResult result;
+        std::condition_variable ready;
+    };
+    using FlightKey = std::tuple<std::string, int64_t, int64_t, int64_t>;
+    std::map<FlightKey, std::shared_ptr<Flight>> m_flights;
     std::mutex m_mutex;
     uint64_t m_use = 0;
     std::map<std::pair<std::string, int64_t>, Series> m_series;
@@ -89,6 +99,7 @@ private:
     // One total budget, including DNS and authenticated/public fallback.
     std::chrono::milliseconds m_requestTimeout;
     mutable CandleHistoryCache m_history;
-    // Accessed only inside m_history's serialized fetch callback.
+    // Serialize only miss start times, never cache hits or HTTP completion.
+    mutable std::mutex m_historyRequestMutex;
     mutable std::chrono::steady_clock::time_point m_nextHistoryRequest{};
 };
