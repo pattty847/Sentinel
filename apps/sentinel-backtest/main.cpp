@@ -23,7 +23,7 @@ struct CliArgs {
 };
 
 void printUsage() {
-    std::cerr << "Usage: sentinel_backtest <trades.csv|trade_log.bin|trade_dir> [symbol] [spread_bps] [order_qty] [max_pos] [skew_bps]\n";
+    std::cerr << "Usage: sentinel-backtest <trades.csv|trade_log.bin|trade_dir> [symbol] [spread_bps] [order_qty] [max_pos] [skew_bps]\n";
 }
 
 std::optional<CliArgs> parseArgs(int argc, char** argv) {
