@@ -437,10 +437,18 @@ requested`, at most once per product per second; a request inside that second
 is kept and sent at the deadline, `Live book re-seed deferred`); nothing asks
 capture to resubscribe. Trades reach the model once per journal position;
 after a recovery the gap is filled from the journal, but a restart never
-replays the day's trades. While a product's feed is not live at the tip
-(recovery, day rotation) the candle timer closes none of its bars; replayed
-trades close them at their own time, so the bars equal uninterrupted delivery
-(1 s bars carry at most 300 quiet buckets per gap, as the timer does).
+replays the day's trades. Candles of a captured product close on its own
+journal time, never on this process's wall clock: the worker hands over the
+receive time of the newest delivered record (heartbeats included, so a quiet
+product still advances, about once per second) and the model closes buckets
+that ended 1 s before it; each trade also closes the buckets before its own
+time, and a bucket already closed is never reopened by a late trade. Bars are
+therefore a function of the delivered record sequence only: a stall followed
+by a journal catch-up (however late it is detected) builds exactly the bars
+uninterrupted delivery would. Quiet buckets are carried up to the watermark,
+at most 300 per timeframe (1 s and 1 m alike) per advance; an advance jumps
+that far only across a journal gap with no records at all (capture down),
+which uninterrupted delivery shares.
 
 With `journal`, `sentinel_mdc_connected{pinned="1"}` and the transport
 counters follow the journal (TransportUp/TransportDown records and the 30 s

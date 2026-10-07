@@ -71,10 +71,12 @@ void TimeframeAggregator::addMinuteToRollups(SymbolState& state, const std::stri
 
 void TimeframeAggregator::updateTradeBar(SymbolState& state, const std::string& symbol,
                                          int64_t timeframeMs, const Trade& trade,
-                                         int64_t tradeTsMs) {
+                                         int64_t tradeTsMs, bool journal) {
     const int64_t start = bucketStart(tradeTsMs, timeframeMs);
     auto& bar = state.activeBars[timeframeMs];
     if (bar.count > 0 && start < bar.timestamp_ms) return; // stale trade
+    // Journal clock: a bucket the watermark already closed is never reopened.
+    if (journal && start < bar.timestamp_ms) return;
     if ((bar.count > 0 || bar.timestamp_ms != 0) && start > bar.timestamp_ms) {
         closeBar(state, symbol, timeframeMs, bar);
         bar = {};
@@ -100,24 +102,31 @@ void TimeframeAggregator::onTrade(const Trade& trade) {
     const int64_t tsMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         trade.timestamp.time_since_epoch()).count();
     auto& state = m_states[trade.product_id];
-    // Held (journal recovery replay): the trade's own time drives closing, as
-    // the timer would have at that time, so bars match uninterrupted delivery.
-    if (m_held.contains(trade.product_id)) closeElapsed(state, trade.product_id, tsMs);
+    // Journal clock: the trade's own time closes the buckets before it,
+    // carrying quiet ones, so bars depend only on the delivered sequence.
+    const bool journal = m_journal.contains(trade.product_id);
+    if (journal) closeElapsed(state, trade.product_id, tsMs);
     if (std::binary_search(m_timeframesMs.begin(), m_timeframesMs.end(), kSecondMs))
-        updateTradeBar(state, trade.product_id, kSecondMs, trade, tsMs);
-    updateTradeBar(state, trade.product_id, kMinuteMs, trade, tsMs);
+        updateTradeBar(state, trade.product_id, kSecondMs, trade, tsMs, journal);
+    updateTradeBar(state, trade.product_id, kMinuteMs, trade, tsMs, journal);
 }
 
-void TimeframeAggregator::setHeld(const std::string& symbol, bool held) {
+void TimeframeAggregator::setJournalClock(const std::string& symbol) {
     std::unique_lock lock(m_mutex);
-    if (held) m_held.insert(symbol);
-    else m_held.erase(symbol);
+    m_journal.insert(symbol);
+}
+
+void TimeframeAggregator::advance(const std::string& symbol, int64_t watermarkMs) {
+    std::unique_lock lock(m_mutex);
+    if (!m_journal.contains(symbol)) return;
+    const auto state = m_states.find(symbol);
+    if (state != m_states.end()) closeElapsed(state->second, symbol, watermarkMs);
 }
 
 void TimeframeAggregator::tick(int64_t nowMs) {
     std::unique_lock lock(m_mutex);
     for (auto& [symbol, state] : m_states)
-        if (!m_held.contains(symbol)) closeElapsed(state, symbol, nowMs);
+        if (!m_journal.contains(symbol)) closeElapsed(state, symbol, nowMs);
 }
 
 // Closes the symbol's bars that end at or before nowMs, carrying quiet buckets.

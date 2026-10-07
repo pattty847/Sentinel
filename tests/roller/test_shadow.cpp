@@ -460,11 +460,11 @@ struct ShadowTest : testing::Test {
       e.connected = connected;
       push(std::move(e));
     };
-    cfg.model.live = [push](const std::string &p, bool live) {
+    cfg.model.watermark = [push](const std::string &p, int64_t ms) {
       ModelEvent e;
-      e.kind = "live";
+      e.kind = "watermark";
       e.product = p;
-      e.connected = live;
+      e.trade.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(ms));
       push(std::move(e));
     };
     cfg.model.metadata = [push](const std::string &p, const json &m) {
@@ -2484,26 +2484,27 @@ TEST_F(ShadowTest, JournalTapDeliversEachTradeOnceAcrossRecovery) {
   for (const auto &e : modelLog("trade"))
     ids.push_back(e.trade.trade_id);
   EXPECT_EQ(ids, (std::vector<std::string>{"t1", "t2", "t3"}));
-  // The gap trade t2 is replayed while candle closing is held (live false)
-  // and the hold ends only after it (live true).
+  // The candle watermark follows journal time: strictly increasing, at most
+  // one per journal second, and the gap record carrying t2 (66 s) advances it
+  // after that trade.
   const auto log = modelLog();
-  size_t held = std::string::npos, gap = std::string::npos, resumed = std::string::npos;
+  int64_t lastSecond = INT64_MIN;
+  size_t gap = std::string::npos, gapMark = std::string::npos;
   for (size_t i = 0; i < log.size(); ++i) {
-    if (log[i].kind == "live" && !log[i].connected && held == std::string::npos)
-      held = i;
     if (log[i].kind == "trade" && log[i].trade.trade_id == "t2")
       gap = i;
-    if (log[i].kind == "live" && log[i].connected && gap != std::string::npos &&
-        resumed == std::string::npos)
-      resumed = i;
+    if (log[i].kind != "watermark")
+      continue;
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        log[i].trade.timestamp.time_since_epoch()).count();
+    EXPECT_GT(ms / 1000, lastSecond) << i;
+    lastSecond = ms / 1000;
+    if (ms == Epoch + 66000)
+      gapMark = i;
   }
-  ASSERT_NE(held, std::string::npos);
   ASSERT_NE(gap, std::string::npos);
-  ASSERT_NE(resumed, std::string::npos);
-  EXPECT_LT(held, gap);
-  EXPECT_LT(gap, resumed);
-  for (size_t i = held; i < gap; ++i)
-    EXPECT_FALSE(log[i].kind == "live" && log[i].connected) << i;
+  ASSERT_NE(gapMark, std::string::npos);
+  EXPECT_LT(gap, gapMark);
   // Coinbase reports the maker; the model gets the aggressor (A4).
   EXPECT_EQ(modelLog("trade")[0].trade.side, AggressorSide::Sell);
   EXPECT_EQ(modelLog("trade")[1].trade.side, AggressorSide::Buy);
@@ -3032,75 +3033,139 @@ TEST_F(ShadowTest, JournalLiveFeedAdmissionIgnoresTheEngineCap) {
   EXPECT_NE(s.metrics().find("sentinel_mdc_refused_total{product=\"XRP-USD\"} 1"),
             std::string::npos);
 }
-// Fix round 1 (finding 2): the production model and its candle timer across an
-// outage spanning several second and minute boundaries. Candle closing is held
-// while the journal feed is not live, so the replayed trades rebuild exactly
-// the bars an uninterrupted feed builds: unique, ordered, same OHLCV.
-TEST(JournalLiveFeedModel, HeldCandlesRebuildAnOutageExactly) {
-  static int argc = 1;
-  static char name[] = "test_shadow";
-  static char *argv[] = {name, nullptr};
-  if (!QCoreApplication::instance())
-    static QCoreApplication app(argc, argv);
+// Fix round 2 (finding 2): candles of a journal product close on its journal
+// time only. Two production models run the 250 ms wall-clock candle timer; one
+// gets every record on time, the other loses the fan-out at +50 s without
+// noticing (capture journals trades at +55 s and +65 s; the wall clock passes
+// +60 s) and recovers the journal gap at +80 s. Closed 1 s / 1 m / 5 m bars are
+// unique, ordered and identical.
+struct JournalCandles {
+  ServerConfig config;
   QTemporaryDir temp;
   struct Cwd {
     QString old = QDir::currentPath();
     ~Cwd() { QDir::setCurrent(old); }
   } cwd;
-  ASSERT_TRUE(QDir::setCurrent(temp.path()));
-  ServerConfig config;
-  config.defaultSymbols = {"PEPE-USD"};
-  config.rollerShadow.products = {"PEPE-USD"};
-  config.heatmap.persistenceEnabled = false;
-  config.heatmap.timeframesMs = {1000, 60000, 300000};
-  config.recording.liveFeed = "journal";
-  ServerDataModel steady(config), outage(config);
-  for (auto *m : {&steady, &outage})
-    ShadowServerTestAccess::stopCandleTimer(*m);
-  const int64_t t0 = 1'800'000'000'000 / 300'000 * 300'000;
-  std::vector<Trade> tape;
-  for (const auto &[ms, price] : std::vector<std::pair<int64_t, double>>{
-           {10'000, 1.0}, {40'000, 2.0}, {80'000, 3.0}, {81'500, 2.5},
-           {150'000, 4.0}, {200'000, 5.0}, {245'000, 4.5}, {255'000, 6.0}})
-    tape.push_back({std::chrono::system_clock::time_point(std::chrono::milliseconds(t0 + ms)),
-                    "PEPE-USD", std::to_string(ms), AggressorSide::Buy, price, 1.0});
-  size_t a = 0, b = 0;
-  std::vector<Trade> withheld;
-  const auto at = [&](const Trade &t) {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(t.timestamp.time_since_epoch()).count();
-  };
-  for (int64_t now = t0; now <= t0 + 400'000; now += 250) {
-    for (; a < tape.size() && at(tape[a]) <= now; ++a)
-      steady.onTrade(tape[a]);
-    if (now == t0 + 50'000)
-      outage.onFeedLive("PEPE-USD", false); // fan-out lost, capture keeps journaling
-    for (; b < tape.size() && at(tape[b]) <= now; ++b)
-      if (now > t0 + 50'000 && now < t0 + 230'000)
-        withheld.push_back(tape[b]);
-      else
-        outage.onTrade(tape[b]);
-    if (now == t0 + 230'000) { // recovery: durable gap trades, then the seed
-      for (const auto &t : withheld)
-        outage.onTrade(t);
-      outage.onFeedLive("PEPE-USD", true);
-    }
-    ShadowServerTestAccess::tickCandles(steady, now);
-    ShadowServerTestAccess::tickCandles(outage, now);
+  std::unique_ptr<ServerDataModel> steady, outage;
+  static constexpr int64_t T0 = 1'800'000'000'000 / 300'000 * 300'000;
+  struct Rec { int64_t receiveMs; std::optional<Trade> trade; };
+  std::vector<Rec> journal;
+  JournalCandles() {
+    static int argc = 1;
+    static char name[] = "test_shadow";
+    static char *argv[] = {name, nullptr};
+    if (!QCoreApplication::instance())
+      static QCoreApplication app(argc, argv);
+    EXPECT_TRUE(QDir::setCurrent(temp.path()));
+    config.defaultSymbols = {"PEPE-USD"};
+    config.rollerShadow.products = {"PEPE-USD"};
+    config.heatmap.persistenceEnabled = false;
+    config.heatmap.timeframesMs = {1000, 60000, 300000};
+    config.recording.liveFeed = "journal";
+    steady = std::make_unique<ServerDataModel>(config);
+    outage = std::make_unique<ServerDataModel>(config);
   }
-  ASSERT_EQ(withheld.size(), 4u);
-  for (const int64_t tf : {1000, 60000, 300000}) {
-    const auto x = steady.getHistory("PEPE-USD", tf, 100000);
-    const auto y = outage.getHistory("PEPE-USD", tf, 100000);
-    ASSERT_FALSE(x.empty()) << tf;
-    for (size_t i = 1; i < y.size(); ++i)
-      EXPECT_LT(y[i - 1].timestamp_ms, y[i].timestamp_ms) << tf << " at " << i;
-    ASSERT_EQ(x.size(), y.size()) << tf;
-    for (size_t i = 0; i < x.size(); ++i)
-      EXPECT_EQ(std::tie(x[i].timestamp_ms, x[i].open, x[i].high, x[i].low, x[i].close,
-                         x[i].volume, x[i].count),
-                std::tie(y[i].timestamp_ms, y[i].open, y[i].high, y[i].low, y[i].close,
-                         y[i].volume, y[i].count))
-          << tf << " at " << i;
+  // Capture journals a heartbeat every second and each trade 80 ms after its
+  // exchange time; the tap hands over the watermark once per journal second.
+  void record(std::vector<std::pair<int64_t, double>> trades, int64_t until) {
+    for (int64_t s = 0; s <= until; s += 1000)
+      journal.push_back({T0 + s + 120, std::nullopt});
+    for (const auto &[ms, price] : trades)
+      journal.push_back({T0 + ms + 80, Trade{std::chrono::system_clock::time_point(
+                                                 std::chrono::milliseconds(T0 + ms)),
+                                             "PEPE-USD", std::to_string(ms),
+                                             AggressorSide::Buy, price, 1.0}});
+    std::stable_sort(journal.begin(), journal.end(),
+                     [](const Rec &a, const Rec &b) { return a.receiveMs < b.receiveMs; });
+  }
+  static void deliver(ServerDataModel &m, const Rec &r, int64_t &sentSecond) {
+    if (r.trade)
+      m.onTrade(*r.trade);
+    if (r.receiveMs / 1000 > sentSecond) {
+      sentSecond = r.receiveMs / 1000;
+      m.onFeedWatermark("PEPE-USD", r.receiveMs);
+    }
+  }
+  // Outage: records received in (stallFrom, recoverAt) reach `outage` only at
+  // recoverAt (detection plus journal catch-up), in order.
+  void run(int64_t stallFrom, int64_t recoverAt, int64_t end) {
+    for (auto *m : {steady.get(), outage.get()})
+      ShadowServerTestAccess::stopCandleTimer(*m);
+    size_t a = 0, b = 0;
+    int64_t sentA = INT64_MIN, sentB = INT64_MIN;
+    for (int64_t now = T0; now <= T0 + end; now += 250) {
+      for (; a < journal.size() && journal[a].receiveMs <= now; ++a)
+        deliver(*steady, journal[a], sentA);
+      const bool stalled = now > T0 + stallFrom && now < T0 + recoverAt;
+      for (; !stalled && b < journal.size() && journal[b].receiveMs <= now; ++b)
+        deliver(*outage, journal[b], sentB);
+      ShadowServerTestAccess::tickCandles(*steady, now); // the wall-clock timer
+      ShadowServerTestAccess::tickCandles(*outage, now);
+    }
+  }
+  void expectIdentical() {
+    for (const int64_t tf : {1000, 60000, 300000}) {
+      const auto x = steady->getHistory("PEPE-USD", tf, 100000);
+      const auto y = outage->getHistory("PEPE-USD", tf, 100000);
+      ASSERT_FALSE(x.empty()) << tf;
+      for (size_t i = 1; i < y.size(); ++i)
+        EXPECT_LT(y[i - 1].timestamp_ms, y[i].timestamp_ms) << tf << " at " << i;
+      ASSERT_EQ(x.size(), y.size()) << tf;
+      for (size_t i = 0; i < x.size(); ++i)
+        EXPECT_EQ(std::tie(x[i].timestamp_ms, x[i].open, x[i].high, x[i].low, x[i].close,
+                           x[i].volume, x[i].count),
+                  std::tie(y[i].timestamp_ms, y[i].open, y[i].high, y[i].low, y[i].close,
+                           y[i].volume, y[i].count))
+            << tf << " at " << i;
+    }
+  }
+};
+TEST(JournalLiveFeedModel, DelayedOutageDetectionKeepsCandlesIdentical) {
+  JournalCandles c;
+  c.record({{10'000, 1.0}, {40'000, 2.0}, {55'000, 3.0}, {65'000, 2.5},
+            {150'000, 4.0}, {200'000, 5.0}, {301'000, 6.0}},
+           420'000);
+  c.run(50'000, 80'000, 420'000);
+  c.expectIdentical();
+  // The minute the stall straddled holds both of its trades, once.
+  const auto minutes = c.outage->getHistory("PEPE-USD", 60000, 100);
+  ASSERT_GE(minutes.size(), 2u);
+  EXPECT_EQ(minutes[0].timestamp_ms, JournalCandles::T0);
+  EXPECT_EQ(minutes[0].count, 3u); // 10 s, 40 s, 55 s
+  EXPECT_EQ(minutes[1].count, 1u); // 65 s
+}
+// Heartbeats alone advance journal time: a product with no trades still
+// closes its bars on time (one watermark lag), not on this process's clock.
+TEST(JournalLiveFeedModel, HeartbeatsCloseBarsWithoutTrades) {
+  JournalCandles c;
+  c.record({{10'000, 1.0}}, 130'000);
+  for (auto *m : {c.steady.get(), c.outage.get()})
+    ShadowServerTestAccess::stopCandleTimer(*m);
+  int64_t sent = INT64_MIN;
+  for (const auto &r : c.journal)
+    JournalCandles::deliver(*c.steady, r, sent);
+  // The wall clock is far ahead and closes nothing for a journal product.
+  ShadowServerTestAccess::tickCandles(*c.steady, JournalCandles::T0 + 3'600'000);
+  const auto minutes = c.steady->getHistory("PEPE-USD", 60000, 100);
+  ASSERT_EQ(minutes.size(), 2u); // 0..1 m closed at 129.12 s; 2 m is open
+  EXPECT_EQ(minutes[0].count, 1u);
+  EXPECT_EQ(minutes[1].count, 0u); // carried quiet minute
+  EXPECT_EQ(minutes[1].close, 1.0);
+  const auto seconds = c.steady->getHistory("PEPE-USD", 1000, 1000);
+  ASSERT_FALSE(seconds.empty());
+  EXPECT_EQ(seconds.front().timestamp_ms, JournalCandles::T0 + 10'000);
+  // Last journal record 130.12 s, lag 1 s: seconds through 128 are closed.
+  EXPECT_EQ(seconds.back().timestamp_ms, JournalCandles::T0 + 128'000);
+  // A late trade for a bucket journal time already closed never reopens it.
+  c.steady->onTrade(Trade{std::chrono::system_clock::time_point(
+                              std::chrono::milliseconds(JournalCandles::T0 + 50'000)),
+                          "PEPE-USD", "late", AggressorSide::Buy, 9.0, 1.0});
+  c.steady->onFeedWatermark("PEPE-USD", JournalCandles::T0 + 250'000);
+  const auto after = c.steady->getHistory("PEPE-USD", 60000, 100);
+  ASSERT_EQ(after.size(), 4u);
+  for (size_t i = 0; i < after.size(); ++i) {
+    EXPECT_EQ(after[i].timestamp_ms, JournalCandles::T0 + int64_t(i) * 60'000) << i;
+    EXPECT_NE(after[i].high, 9.0) << i;
   }
 }
 } // namespace

@@ -275,7 +275,7 @@ class ModelTap {
   bool seeded = false;   // live follows the socket tip
   bool shown = false;    // the model holds a book from this tap
   bool reported = false; // last connection state handed to the model
-  bool liveReported = false; // last ModelSink::live state
+  int64_t sentSecond = INT64_MIN; // last ModelSink::watermark journal second
   bool tradeHere = false; // the record being applied carries new trades
   const JournalFeed *history = nullptr;
   std::unique_ptr<JournalFeed> feed;
@@ -340,19 +340,21 @@ class ModelTap {
       return;
     cfg.model.connection(product, connected);
   }
-  // Candle closing follows the journal: held while not seeded, so trades the
-  // recovery replays build their bars in order (ModelSink::live).
-  void setLive(bool v) {
-    if (v == std::exchange(liveReported, v))
+  // Candles close on journal time: the newest delivered record's receive
+  // time, after its trades, once per journal second (ModelSink::watermark).
+  void sendWatermark(const JournalRecord &r) {
+    const int64_t ms = r.record.time.systemNs / 1000000;
+    const int64_t second = ms / 1000 - (ms % 1000 < 0);
+    if (second <= sentSecond)
       return;
-    if (cfg.model.live)
-      cfg.model.live(product, v);
+    sentSecond = second;
+    if (cfg.model.watermark)
+      cfg.model.watermark(product, ms);
   }
   void unseed() {
     seeded = false;
     feed.reset();
     live.clear();
-    setLive(false);
   }
   void serviceReseed() {
     if (!reseed.load(std::memory_order_relaxed) || !reseed.exchange(false))
@@ -416,6 +418,12 @@ public:
     if (tradeHere)
       delivered = p;
   }
+  // After history applied a durable record: a gap-fill record (its trades
+  // were delivered) also advances the candle watermark.
+  void durableApplied(const JournalRecord &r) {
+    if (tradeHere && !seeded)
+      sendWatermark(r);
+  }
   // At the socket tip, after every returned record reached history.
   void ensure(const std::deque<JournalRecord> &pending,
               const JournalPos &applied) {
@@ -472,10 +480,8 @@ public:
                      .count());
     for (const auto &r : pending)
       apply(r);
-    if (!seeded)
-      return; // a replayed record failed: dropped
-    report();
-    setLive(true);
+    if (seeded) // else a replayed record failed: dropped
+      report();
   }
   // A provisional record at the tip, on arrival.
   void apply(const JournalRecord &r) {
@@ -497,6 +503,7 @@ public:
       drop(std::string("journal live feed failed: ") + e.what());
       return;
     }
+    sendWatermark(r);
     serviceReseed();
   }
   // Socket waits: the tip-age guard and re-seed requests.
@@ -1144,6 +1151,8 @@ struct ShadowRoller::Impl {
           return true;
         };
         o.onApplied = [&](const JournalRecord &input) {
+          if (tap.enabled())
+            tap.durableApplied(input);
           p.last->store(input.record.time.systemNs / 1000000);
           p.running->set(1);
           p.records->inc();

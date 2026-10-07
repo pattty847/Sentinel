@@ -129,6 +129,10 @@ ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
     const int64_t gridSpanMs = maxTfMs * std::max<int64_t>(1024, m_serverConfig.heatmap.gridWidth);
     m_footprintTradeRetentionMs = std::clamp<int64_t>(gridSpanMs * 2, 300'000, 86'400'000);
 
+    // recording.live_feed: journal: candles close on each product's journal
+    // time (onFeedWatermark and its trades), never this process's wall clock.
+    if (m_journalFeed)
+        for (const auto& symbol : rollerProducts(m_serverConfig)) m_aggregator->setJournalClock(symbol);
     connect(m_aggregator.get(), &TimeframeAggregator::barClosed, this, &ServerDataModel::barClosed);
     connect(m_aggregator.get(), &TimeframeAggregator::barUpdated, this, &ServerDataModel::barUpdated);
 
@@ -386,9 +390,11 @@ void ServerDataModel::onFeedMetadata(const std::string& symbol, const nlohmann::
     if (it == m_feeds.end()) return;
     onProductMetadata(symbol, it->second.lifetime, metadata, {});
 }
-void ServerDataModel::onFeedLive(const std::string& symbol, bool live) {
-    if (!m_journalFeed || !m_feeds.contains(symbol) || !m_aggregator) return;
-    m_aggregator->setHeld(symbol, !live);
+void ServerDataModel::onFeedWatermark(const std::string& symbol, int64_t journalMs) {
+    if (!m_journalFeed || !m_aggregator) return;
+    // Receive time leads exchange time by the feed latency: close only buckets
+    // that ended kJournalCandleLagMs before it, so in-flight trades still land.
+    m_aggregator->advance(symbol, journalMs - kJournalCandleLagMs);
 }
 void ServerDataModel::setReseedHandler(std::function<void(const std::string&)> handler) {
     m_reseed = std::move(handler);

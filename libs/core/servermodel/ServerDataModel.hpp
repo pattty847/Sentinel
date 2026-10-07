@@ -108,8 +108,10 @@ public:
     // JSON for a live feed (no REST), and the roller's re-seed request hook.
     bool journalFeed() const { return m_journalFeed; }
     void onFeedMetadata(const std::string& symbol, const nlohmann::json& metadata);
-    // Candle closing follows the journal feed (held while it is not live).
-    void onFeedLive(const std::string& symbol, bool live);
+    // Journal time (capture receive ms) of the newest record delivered for a
+    // product: closes its candles up to journalMs - kJournalCandleLagMs.
+    static constexpr int64_t kJournalCandleLagMs = 1000;
+    void onFeedWatermark(const std::string& symbol, int64_t journalMs);
     void setReseedHandler(std::function<void(const std::string&)> handler);
 
 public slots:
