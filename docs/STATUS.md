@@ -41,6 +41,12 @@ The owner's `ma-panel` (local plugin) shows live workflow state; this session re
 5. S8b prep: map every reader of the server `heatmap.*` keys and plan their move.
 Never without the owner present: R2, any deploy, cutovers, data deletion. Check `scripts/dev/budget.sh` before each dispatch; Codex writes, Claude reviews and conducts.
 
+## Pause point 2026-10-07 ~02:45 EDT (Claude usage limit)
+
+- A corrupt-skip `10f18c4`: Fable FINDINGS `.claude/acting-orchestrator/corrupt-skip/` (agent transcript). 2 major: (1) `registerJournalMetrics` throws on double registration, so make it idempotent per registry/product, then add `registerJournalMetrics(registry, p->name);` after ShadowRoller.cpp:589; (2) header/index/magic damage still stalls, about 3% of bytes: an OWNER CHOICE between full coverage (index-first resync) and accepting the residual. Minors: the alert rule never resolves (owner: permanent page vs increase()[2h]); validBytes; <mutex>; env-gated test. Next: fix round to the Codex writer thread `01a114bd`.
+- C bind-address `56f7d16` (fix r1): Sonnet re-check pending/finished (agent `a4fea1ac`); land if PASS.
+- D-b1 `d71de5c`: Astra delta check of the lag metric running (`.claude/acting-orchestrator/db1/review-r4.md`); then READY, lands after the R2 deploy.
+
 ## In flight (T7 worktrees)
 
 On resume, read the Codex outputs: `.claude/acting-orchestrator/corrupt-skip/writer-out.md` (A, thread `01a114bd`), `.claude/acting-orchestrator/bind-address/writer-out.md` (C, thread `01a114c4`). Both are sandboxed: commit their diffs, then review A with Claude Fable and C with Claude. A (corrupt-skip) is committed on `lt-astra/corrupt-skip` (metric registration in ShadowRoller left for the conductor; see writer-out.md), awaiting a Fable review. C (bind address) is committed `98b4faf` on `lt-sol/bind-address`, awaiting a Claude review. D-b1 lag metric: WIP `d4873aa` on `lt-claude/roller-db1` (sampler `libs/core/metrics/EventLoopLag.*`, gauges and test done). Left: the README section, one `--db1` mutation run (3 new lag mutations), the 22 suites plus ServerMetricsTests. Give that to a Codex writer, then the same Astra thread `01a11475` checks the delta.
