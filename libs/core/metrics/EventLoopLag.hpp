@@ -9,8 +9,9 @@ class Counter;
 class MetricsRegistry;
 
 // Main-thread event-loop lag: a repeating timer on the constructing thread
-// records how late each tick fires (time since the previous tick minus the
-// interval, floored at 0) into a fixed ring. Per tick: one clock read, one ring
+// records how late each tick fires against its expected deadline (floored at
+// 0) into a fixed ring. Deadlines advance by the interval, or rebase after an
+// overrun following Qt's precise-timer policy. Per tick: one clock read, one ring
 // store, at most one relaxed counter increment; no allocation. Quantiles are
 // computed at scrape over the last `window` from a preallocated scratch array.
 // Construct, register and render on the same thread (the main thread in
@@ -32,13 +33,18 @@ class EventLoopLagSampler {
     double quantileMs(double q);
 
   private:
+    // Deterministic tick/query driver; no clock injection on the production path.
+    friend struct EventLoopLagTestAccess;
     void tick();
+    void recordTick(int64_t nowNs);
+    double quantileMsAt(double q, int64_t nowMs);
+    static constexpr int64_t kIntervalNs = int64_t(kIntervalMs) * 1'000'000;
     struct Entry { int64_t atMs = 0; float lagMs = 0; };
     // 60 s at 100 ms is 600 ticks; slack for timer jitter.
     std::array<Entry, 1024> m_ring{};
     std::array<float, 1024> m_scratch{};
     size_t m_next = 0, m_size = 0;
-    int64_t m_lastNs = 0;
+    int64_t m_expectedNs = kIntervalNs;
     QElapsedTimer m_clock;
     QTimer m_timer;
     Counter* m_late = nullptr;

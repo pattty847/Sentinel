@@ -267,6 +267,15 @@ mutations = [
     ('db1-lag a late tick is counted', 'libs/core/metrics/EventLoopLag.cpp',
      'if (lagMs > kLateMs && m_late) m_late->inc();', ';',
      'ServerMetrics.EventLoopLagShowsABlockedMainThread', 'servermodel/test_server_metrics'),
+    # Recover previous actual time from the ring; deterministic deliveries use exact ms.
+    ('db1-lag deadline lateness is not callback-spacing jitter', 'libs/core/metrics/EventLoopLag.cpp',
+     'const double lagMs = std::max(0.0, double(nowNs - m_expectedNs) / 1e6);',
+     "const int64_t previousNs = m_size == 0 ? 0 : m_ring[(m_next + m_ring.size() - 1) % m_ring.size()].atMs * 1'000'000; "
+     'const double lagMs = std::max(0.0, double(nowNs - previousNs) / 1e6 - kIntervalMs);',
+     'ServerMetrics.EventLoopLagRepeatedDeadlineLateness:'
+     'ServerMetrics.EventLoopLagStallRealignsDeadline:'
+     'ServerMetrics.EventLoopLagWindowExpiryAndRingWrap',
+     'servermodel/test_server_metrics'),
     ('db1-lag the server registers the sampler in journal mode', APP,
      'm_eventLoopLag.registerMetrics(m_metrics);', ';',
      'ShadowTest.JournalLiveFeedServerHasNoEngineAndServesCapturedProducts'),

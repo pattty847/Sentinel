@@ -16,6 +16,18 @@
 using sentinel::metrics::MetricsHttpServer;
 using sentinel::metrics::MetricsRegistry;
 
+namespace sentinel::metrics {
+struct EventLoopLagTestAccess {
+    static void tick(EventLoopLagSampler& sampler, int64_t nowMs) {
+        sampler.recordTick(nowMs * 1'000'000);
+    }
+    static double quantile(EventLoopLagSampler& sampler, double q, int64_t nowMs) {
+        return sampler.quantileMsAt(q, nowMs);
+    }
+    static size_t capacity(const EventLoopLagSampler& sampler) { return sampler.m_ring.size(); }
+};
+} // namespace sentinel::metrics
+
 namespace {
 std::string scrape(uint16_t port) {
     QTcpSocket client;
@@ -224,4 +236,66 @@ TEST(ServerMetrics, EventLoopLagShowsABlockedMainThread) {
     EXPECT_GE(value(text, "sentinel_server_event_loop_lag_ms{quantile=\"max\"}"), 250) << text;
     EXPECT_LT(value(text, "sentinel_server_event_loop_lag_ms{quantile=\"0.5\"}"), 50);
     EXPECT_GE(value(text, "sentinel_server_event_loop_late_ticks_total"), 1);
+}
+
+// Fake delivery times drive the same record/query code as QTimer and /metrics.
+// No sleeps, timer activation or injected callable on the production callback.
+TEST(ServerMetrics, EventLoopLagRepeatedDeadlineLateness) {
+    using sentinel::metrics::EventLoopLagSampler;
+    using Driver = sentinel::metrics::EventLoopLagTestAccess;
+    MetricsRegistry registry;
+    EventLoopLagSampler lag;
+    lag.registerMetrics(registry);
+    EXPECT_EQ(Driver::quantile(lag, 0.5, 0), -1);
+    // Deadlines 100, 200, ...; every delivery is 50 ms late for 20 seconds.
+    for (int i = 1; i <= 200; ++i) Driver::tick(lag, i * 100 + 50);
+    for (double q : {0.5, 0.95, 0.99, 1.0})
+        EXPECT_DOUBLE_EQ(Driver::quantile(lag, q, 20'050), 50);
+    EXPECT_EQ(value(registry.render(), "sentinel_server_event_loop_late_ticks_total"), 0);
+}
+
+TEST(ServerMetrics, EventLoopLagStallRealignsDeadline) {
+    using sentinel::metrics::EventLoopLagSampler;
+    using Driver = sentinel::metrics::EventLoopLagTestAccess;
+    MetricsRegistry registry;
+    EventLoopLagSampler lag;
+    lag.registerMetrics(registry);
+    Driver::tick(lag, 150); // Deadline 100: 50 ms late.
+    Driver::tick(lag, 1050); // Deadline 200: 850 ms late, not 800 ms spacing jitter.
+    EXPECT_DOUBLE_EQ(Driver::quantile(lag, 1.0, 1050), 850);
+    // Qt rebases the overdue next deadline to delivery + 100 ms (1150).
+    // All subsequent deliveries are on time, with no historical drift.
+    for (int64_t now = 1150; now <= 2250; now += 100) Driver::tick(lag, now);
+    EXPECT_DOUBLE_EQ(Driver::quantile(lag, 0.5, 2250), 0);
+    EXPECT_DOUBLE_EQ(Driver::quantile(lag, 1.0, 2250), 850);
+    EXPECT_EQ(value(registry.render(), "sentinel_server_event_loop_late_ticks_total"), 1);
+    // Once the stall expires, only normally delivered ticks remain.
+    EXPECT_DOUBLE_EQ(Driver::quantile(lag, 1.0, 61'051), 0);
+}
+
+TEST(ServerMetrics, EventLoopLagWindowExpiryAndRingWrap) {
+    using sentinel::metrics::EventLoopLagSampler;
+    using Driver = sentinel::metrics::EventLoopLagTestAccess;
+    EventLoopLagSampler ranks;
+    for (int i = 1; i <= 4; ++i) Driver::tick(ranks, i * 110);
+    // Deadline lateness 10, 20, 30, 40 ms; nearest-rank quantiles.
+    EXPECT_DOUBLE_EQ(Driver::quantile(ranks, 0.5, 440), 20);
+    for (double q : {0.95, 0.99, 1.0}) EXPECT_DOUBLE_EQ(Driver::quantile(ranks, q, 440), 40);
+    EXPECT_DOUBLE_EQ(Driver::quantile(ranks, 0.5, 60'110), 20); // Boundary included.
+    EXPECT_DOUBLE_EQ(Driver::quantile(ranks, 0.5, 60'111), 30); // First sample expired.
+    EXPECT_DOUBLE_EQ(Driver::quantile(ranks, 1.0, 60'440), 40);
+    EXPECT_EQ(Driver::quantile(ranks, 1.0, 60'441), -1); // Empty window.
+
+    EventLoopLagSampler wrapped;
+    Driver::tick(wrapped, 450); // 350 ms stall, then next deadline at 550.
+    int64_t now = 0;
+    for (size_t i = 0; i < 3 * Driver::capacity(wrapped); ++i) {
+        now = 600 + int64_t(i) * 100;
+        Driver::tick(wrapped, now); // Every tick 50 ms after its deadline.
+    }
+    // Several ring wraps must evict the stall and preserve the newest window.
+    for (double q : {0.5, 0.95, 0.99, 1.0})
+        EXPECT_DOUBLE_EQ(Driver::quantile(wrapped, q, now), 50);
+    EXPECT_DOUBLE_EQ(Driver::quantile(wrapped, 1.0, now + 60'000), 50);
+    EXPECT_EQ(Driver::quantile(wrapped, 1.0, now + 60'001), -1);
 }

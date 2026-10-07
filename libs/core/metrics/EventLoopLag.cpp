@@ -12,14 +12,23 @@ EventLoopLagSampler::EventLoopLagSampler() {
 
 void EventLoopLagSampler::start() {
     m_clock.start();
-    m_lastNs = 0;
+    m_expectedNs = kIntervalNs;
+    m_next = m_size = 0;
     m_timer.start();
 }
 
 void EventLoopLagSampler::tick() {
-    const int64_t nowNs = m_clock.nsecsElapsed();
-    const double lagMs = std::max(0.0, double(nowNs - m_lastNs) / 1e6 - kIntervalMs);
-    m_lastNs = nowNs;
+    recordTick(m_clock.nsecsElapsed());
+}
+
+void EventLoopLagSampler::recordTick(int64_t nowNs) {
+    const double lagMs = std::max(0.0, double(nowNs - m_expectedNs) / 1e6);
+    // Qt's calculateNextTimeout: advance the previous deadline, then rebase
+    // to now + interval only if the next deadline is already in the past.
+    // Keeping sub-interval delays out of the deadline preserves sustained lag;
+    // rebasing after an overrun avoids carrying a stall into future samples.
+    m_expectedNs += kIntervalNs;
+    if (m_expectedNs < nowNs) m_expectedNs = nowNs + kIntervalNs;
     m_ring[m_next] = {nowNs / 1'000'000, float(lagMs)};
     m_next = (m_next + 1) % m_ring.size();
     m_size = std::min(m_size + 1, m_ring.size());
@@ -28,7 +37,11 @@ void EventLoopLagSampler::tick() {
 
 double EventLoopLagSampler::quantileMs(double q) {
     if (!m_clock.isValid()) return -1;
-    const int64_t from = m_clock.elapsed() - kWindowMs;
+    return quantileMsAt(q, m_clock.elapsed());
+}
+
+double EventLoopLagSampler::quantileMsAt(double q, int64_t nowMs) {
+    const int64_t from = nowMs - kWindowMs;
     size_t n = 0;
     for (size_t i = 0; i < m_size; ++i)
         if (m_ring[i].atMs >= from) m_scratch[n++] = m_ring[i].lagMs;

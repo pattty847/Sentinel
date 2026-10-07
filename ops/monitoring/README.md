@@ -145,16 +145,22 @@ signal is on a hot path.
 
 The lag sampler runs in both `recording.live_feed: engine` and `journal`.
 A main-thread `QTimer` requests a tick every 100 ms using a monotonic clock;
-each sample is `max(0, elapsed since previous tick - 100 ms)`. Samples go
-into a fixed ring without per-tick allocation; quantiles are computed when
-`/metrics` is scraped, using samples from the preceding 60 s.
+each sample is `max(0, actual delivery time - expected deadline)`. Deadlines
+normally advance from the timer start by 100 ms per tick, preserving repeated
+sub-interval delay (deliveries at 150, 250, 350 ms are all 50 ms late). If
+advancing the deadline once leaves it in the past, the next deadline is
+rebased to actual delivery time + 100 ms, matching Qt's precise-timer overrun
+policy. A long stall therefore stays visible in `max` without making later
+on-time callbacks appear late. Samples go into a fixed ring without per-tick
+allocation; quantiles are computed when `/metrics` is scraped, using samples
+from the preceding 60 s.
 
 Read p50 (`quantile="0.5"`) as typical timer lateness, p95/p99 as the tail,
 and `max` as the worst observed stall still in that window. A brief stall
 can raise `max` without moving p99. The late-tick counter increments once
-per callback whose lateness exceeds 100 ms (more than 200 ms since the
-previous callback); it does not count every missed timer interval. This
-measures main-thread scheduling delay, not exchange latency or the age of
+per callback whose deadline lateness exceeds 100 ms; it does not count every
+missed timer interval. This measures main-thread scheduling delay, not exchange
+latency or the age of
 a journal record. Since `/metrics` also runs on the main thread, a stall
 can delay the scrape itself; a missing scrape is not evidence of zero lag.
 
