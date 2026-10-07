@@ -137,6 +137,9 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
                 }
                 m_pendingBookSnapshots.clear();
                 m_bookVersions.clear();
+                for (auto& [symbol, book] : m_replicaBooks) {
+                    if (book) book->clear();
+                }
                 m_candleBackfill.disconnect();
                 m_marketHealth.setTransport(MarketHealth::Transport::Reconnecting);
                 m_connectionActive = false;
@@ -180,6 +183,7 @@ bool symbolPermitted(const std::string& symbol, const char* what) {
 }  // namespace
 
 void RemoteGridDataSource::connectToServer() {
+    if (!m_connectionActive) m_marketHealth.setTransport(MarketHealth::Transport::Reconnecting);
     m_client.connectToServer();
 }
 

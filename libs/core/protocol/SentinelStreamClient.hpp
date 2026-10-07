@@ -7,6 +7,7 @@
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/ssl/context.hpp>
 #include <boost/asio/strand.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <memory>
 #include <thread>
 #include <atomic>
@@ -180,6 +181,8 @@ signals:
 
 private:
     void run();
+    void failConnection(const QString& reason);
+    static int reconnectDelayMs(unsigned attempt, unsigned jitter);
     void onResolve(boost::beast::error_code ec, tcp::resolver::results_type results);
     void onConnect(boost::beast::error_code ec, tcp::endpoint ep);
     void onSslHandshake(boost::beast::error_code ec);
@@ -220,6 +223,10 @@ private:
     net::strand<net::io_context::executor_type> m_strand{m_ioc.get_executor()};
     std::unique_ptr<net::executor_work_guard<net::io_context::executor_type>> m_work;
     std::thread m_thread;
+    tcp::resolver m_resolver{m_strand};
+    net::steady_timer m_reconnectTimer{m_strand};
+    bool m_attemptFailed = false; // network worker only; reset after draining cancellations
+    unsigned m_retryAttempt = 0;
     
     ssl::context m_sslCtx{ssl::context::tlsv13_client};
     using WebSocket = boost::beast::websocket::stream<

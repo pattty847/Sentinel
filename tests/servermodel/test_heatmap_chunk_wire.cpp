@@ -4,6 +4,8 @@
 // budget counters and write queue.
 #include "protocol/SentinelStreamServer.cpp"
 #include "protocol/SentinelStreamClient.hpp"
+#include "protocol/SentinelStreamClientTransport.hpp"
+#include "heatmap/ChunkFetcher.hpp"
 #include "marketdata/auth/Authenticator.hpp"
 #include "heatmap/ChunkCodec.hpp"
 #include "servermodel/ChunkService.hpp"
@@ -11,6 +13,7 @@
 #include "servermodel/RecordingChunks.hpp"
 #include <QCoreApplication>
 #include <QTemporaryDir>
+#include <QScopeGuard>
 #include <gtest/gtest.h>
 #include <openssl/pem.h>
 #include <condition_variable>
@@ -49,6 +52,9 @@ struct HeatmapChunkWireTest {
         });
         auto ready = result->get_future();
         return ready.wait_for(5s) == std::future_status::ready ? ready.get() : 0;
+    }
+    static void reusePortAfterStop(SentinelStreamServer& server, unsigned short port) {
+        server.m_port = port; // stopped fixture only; production uses a fixed configured port
     }
     static std::shared_ptr<Session> onlySession(SentinelStreamServer& server) {
         std::lock_guard lock(server.m_sessionsMutex);
@@ -1022,4 +1028,103 @@ TEST(ChunkClientAdmission, LiveFramesShareDecodeBoundsAndBypassChunkOrdering) {
     EXPECT_EQ(inbox.errorsFor(125).at(0).code, "client_overloaded");
     EXPECT_TRUE(inbox.liveFor(125).empty());
     HeatmapChunkWireTest::setDecodeBacklog(client, 0);
+}
+
+TEST_F(ChunkWire, AutomaticReconnectAfterServerRestartRestoresSubscribedSymbolData) {
+    startAndConnect();
+    const auto port = HeatmapChunkWireTest::port(*server);
+    std::atomic<unsigned> ups{1}, downs{0};
+    std::atomic<quint64> latestRequest{0};
+    const auto restoreSession = [&] {
+        client->subscribe("BTC-USD");
+        latestRequest = client->requestHeatmapChunks("BTC-USD", "hmc2.deep", kMin, {kEpoch});
+    };
+    QObject::connect(client.get(), &SentinelStreamClient::connected, client.get(), [&] {
+        restoreSession(); // same startup sender path on every transport-up
+        ++ups;
+    }, Qt::DirectConnection);
+    QObject::connect(client.get(), &SentinelStreamClient::disconnected, client.get(),
+                     [&] { ++downs; }, Qt::DirectConnection);
+    const auto stopClient = qScopeGuard([&] { client->disconnectFromServer(); });
+    restoreSession();
+    ASSERT_TRUE(inbox.waitReplies(latestRequest.load(), 1));
+    ASSERT_EQ(inbox.chunksFor(latestRequest.load()).size(), 1u);
+    server->stop();
+    ASSERT_TRUE(poll([&] { return downs.load() > 0; }));
+    // Keep the listener absent through the first retry: failure must rearm too.
+    ASSERT_TRUE(poll([&] { return downs.load() >= 2; }, 2s));
+    HeatmapChunkWireTest::reusePortAfterStop(*server, port);
+    const auto restartedAt = std::chrono::steady_clock::now();
+    ASSERT_TRUE(server->start());
+    ASSERT_EQ(HeatmapChunkWireTest::port(*server), port);
+    ASSERT_TRUE(poll([&] { return ups.load() == 2; }, 3s));
+    EXPECT_LT(std::chrono::steady_clock::now() - restartedAt, 3s);
+    ASSERT_TRUE(inbox.waitReplies(latestRequest.load(), 1));
+    const auto resumed = inbox.chunksFor(latestRequest.load());
+    ASSERT_EQ(resumed.size(), 1u);
+    EXPECT_EQ(resumed.front()->key.symbol, "BTC-USD");
+    EXPECT_EQ(HeatmapChunkWireTest::sessionCount(*server), 1u);
+    client->disconnectFromServer();
+    std::this_thread::sleep_for(650ms);
+    EXPECT_EQ(ups.load(), 2u);
+    EXPECT_EQ(HeatmapChunkWireTest::sessionCount(*server), 0u);
+}
+
+TEST_F(ChunkWire, AutomaticReconnectRearmsExistingChunkFetcherAndLiveInterest) {
+    useControlledWatermarks();
+    marks.minute = kEpoch + 30 * kMin; // unsealed wanted chunk must refresh on reconnect
+    marks.hour = kEpoch;
+    useLiveClock();
+    ASSERT_TRUE(server->start());
+    const auto port = HeatmapChunkWireTest::port(*server);
+    client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(port));
+    inbox.attach(*client);
+    protocol::SentinelStreamClientTransport transport(*client);
+    heatmap::ChunkStore store;
+    heatmap::ChunkFetcher fetcher(store, transport);
+    const ChunkKey key{"BTC-USD", "hmc2.deep", kMin, kEpoch};
+    fetcher.want(1, {key});
+    fetcher.wantLive(1, "BTC-USD");
+    std::atomic<unsigned> ups{0}, downs{0}, chunks{0};
+    QObject::connect(client.get(), &SentinelStreamClient::connected, client.get(), [&] {
+        client->subscribe("BTC-USD"); // existing startup subscription pushes fresh availability
+        ++ups;
+    }, Qt::DirectConnection);
+    QObject::connect(client.get(), &SentinelStreamClient::disconnected, client.get(),
+                     [&] { ++downs; }, Qt::DirectConnection);
+    QObject::connect(client.get(), &SentinelStreamClient::heatmapChunkReceived, client.get(),
+        [&](quint64, SentinelStreamClient::HeatmapChunkPtr frame) {
+            if (frame->key == key) ++chunks;
+        }, Qt::DirectConnection);
+    const auto stopClient = qScopeGuard([&] { client->disconnectFromServer(); });
+    const auto waitGui = [&](auto pred) {
+        return poll([&] {
+            QCoreApplication::processEvents();
+            return pred();
+        }, 3s);
+    };
+    client->connectToServer();
+    ASSERT_TRUE(waitGui([&] { return ups == 1 && store.contains(key); }));
+    auto session = HeatmapChunkWireTest::onlySession(*server);
+    ASSERT_TRUE(session);
+    ASSERT_TRUE(waitGui([&] { return bool(HeatmapChunkWireTest::rawView(*session, "BTC-USD")); }));
+    const auto oldSub = HeatmapChunkWireTest::rawView(*session, "BTC-USD")->view.sub;
+    publishLive(0, true);
+    liveTurn(0);
+    ASSERT_FALSE(inbox.liveFor(oldSub).empty());
+    const auto beforeRestart = chunks.load();
+    server->stop();
+    ASSERT_TRUE(waitGui([&] { return downs > 0; }));
+    HeatmapChunkWireTest::reusePortAfterStop(*server, port);
+    ASSERT_TRUE(server->start());
+    ASSERT_TRUE(waitGui([&] { return ups == 2 && chunks > beforeRestart; }));
+    session = HeatmapChunkWireTest::onlySession(*server);
+    ASSERT_TRUE(session);
+    ASSERT_TRUE(waitGui([&] { return bool(HeatmapChunkWireTest::rawView(*session, "BTC-USD")); }));
+    const auto newSub = HeatmapChunkWireTest::rawView(*session, "BTC-USD")->view.sub;
+    EXPECT_NE(newSub, oldSub);
+    publishLive(1, true);
+    liveTurn(1000);
+    ASSERT_TRUE(waitGui([&] { return !inbox.liveFor(newSub).empty(); }));
+    EXPECT_EQ(inbox.liveFor(newSub).back()->key.symbol, "BTC-USD");
 }

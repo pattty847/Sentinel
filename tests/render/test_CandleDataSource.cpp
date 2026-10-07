@@ -3,6 +3,9 @@
 #include <QCoreApplication>
 #include <QEvent>
 #include <QEventLoop>
+#include <QTemporaryDir>
+#include <QScopeGuard>
+#include "config/AgentHostMode.hpp"
 #include <chrono>
 #include <thread>
 
@@ -409,4 +412,39 @@ TEST_F(CandleDataSourceTest, FifteenMinuteViewportSendsNativeBarPageThroughRealC
     EXPECT_EQ(request.at("timeframe_sec"), 900);
     EXPECT_EQ(request.at("limit"), 350);
     EXPECT_EQ(request.at("end_time_sec"), 2344 * 900);
+}
+
+TEST_F(CandleDataSourceTest, DisconnectClearsReplicaBeforeGuardedStartupResubscribe) {
+    QTemporaryDir host("/private/tmp/sentinel-reconnect-host-XXXXXX");
+    const auto resetHost = qScopeGuard([] { AgentHostMode::resetForTests(); });
+    QString error;
+    ASSERT_TRUE(AgentHostMode::activate(host.path(), {}, &error)) << error.toStdString();
+    AgentHostMode::setSymbolAllowlist({"BTC-USD"});
+    // Keep the startup subscriber connected for every new transport session.
+    QObject::connect(&source, &IGridDataSource::connectionStatusChanged, &source, [&](bool up) {
+        if (up) {
+            source.subscribe("BTC-USD");
+            source.subscribe("ETH-USD"); // refused at the same boundary on reconnect
+        }
+    });
+    client().connected();
+    deliver();
+    ASSERT_EQ(takeRequest().at("symbol"), "BTC-USD");
+    EXPECT_TRUE(takeRequest(20).is_null());
+    bookSnapshot(300.0, 301.0);
+    deliver();
+    ASSERT_FALSE(source.getDirectLiveOrderBook("BTC-USD").isEmpty());
+    client().disconnected();
+    deliver();
+    EXPECT_TRUE(source.getDirectLiveOrderBook("BTC-USD").isEmpty());
+    EXPECT_EQ(source.marketHealth()->snapshot().transport, MarketHealth::Transport::Reconnecting);
+    client().connected();
+    deliver();
+    ASSERT_EQ(takeRequest().at("symbol"), "BTC-USD");
+    EXPECT_TRUE(takeRequest(20).is_null());
+    EXPECT_TRUE(source.getDirectLiveOrderBook("BTC-USD").isEmpty());
+    EXPECT_EQ(source.marketHealth()->snapshot().transport, MarketHealth::Transport::Connected);
+    bookSnapshot(400.0, 401.0);
+    deliver();
+    EXPECT_FALSE(source.getDirectLiveOrderBook("BTC-USD").isEmpty());
 }

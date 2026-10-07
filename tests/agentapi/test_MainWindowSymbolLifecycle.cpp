@@ -420,6 +420,12 @@ TEST(MainWindowHealthIntegration, DefaultLayoutPreservesNavigationRailCapAtNarro
 }
 
 void connected(MainWindowGPU& window) {
+    // These tests inject lifecycle events. Retire the constructor's real client
+    // and deliver any already queued down before simulating transport-up.
+    auto* source = dynamic_cast<RemoteGridDataSource*>(ServiceLocator::dataSource());
+    ASSERT_TRUE(source);
+    source->streamClient()->disconnectFromServer();
+    deliver(source);
     ASSERT_TRUE(QMetaObject::invokeMethod(&window, "onConnectionStatusChanged", Qt::DirectConnection,
                                           Q_ARG(bool, true)));
 }

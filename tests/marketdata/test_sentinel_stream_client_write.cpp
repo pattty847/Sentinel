@@ -1,6 +1,7 @@
 #include "protocol/SentinelStreamClient.hpp"
 #include <gtest/gtest.h>
 #include <QTemporaryDir>
+#include <QScopeGuard>
 #include <openssl/pem.h>
 #include <condition_variable>
 #include <future>
@@ -126,6 +127,9 @@ struct SentinelStreamClientWriteTest : testing::Test {
             c.m_writeQueue.emplace_back("must not survive reconnect");
             started.set_value();
         });
+    }
+    static int retryDelay(unsigned attempt, unsigned jitter) {
+        return SentinelStreamClient::reconnectDelayMs(attempt, jitter);
     }
     static void deliver(SentinelStreamClient& c, const std::string& message) { c.handleMessage(message); }
     void expectDrained(SentinelStreamClient& c) {
@@ -280,4 +284,45 @@ TEST_F(SentinelStreamClientWriteTest, RetiredLegacyHeatmapFramesAreDroppedWithou
     qInstallMessageHandler(legacyframes::previous);
     EXPECT_EQ(legacy, 0);
     EXPECT_EQ(unknown, 1);
+}
+
+TEST_F(SentinelStreamClientWriteTest, ReconnectBackoffDoublesWithJitterAndCapsAtTenSeconds) {
+    for (unsigned attempt = 0; attempt < 100; ++attempt) {
+        const int base = std::min(10000U, 500U << std::min(attempt, 5U));
+        EXPECT_EQ(retryDelay(attempt, 0), base);
+        for (unsigned jitter : {1U, 100U, 0xffffffffU}) {
+            EXPECT_GE(retryDelay(attempt, jitter), base);
+            EXPECT_LE(retryDelay(attempt, jitter), std::min(10000, base + base / 5));
+        }
+    }
+    EXPECT_GT(retryDelay(0, 1), retryDelay(0, 0));
+}
+
+TEST_F(SentinelStreamClientWriteTest, FailedInitialConnectRetriesAndShutdownCancelsPendingRetry) {
+    // Pick an ephemeral loopback port, then close its listener to get a refused connect.
+    tcp::acceptor unavailable(ioc, {net::ip::make_address("127.0.0.1"), 0});
+    const auto port = unavailable.local_endpoint().port();
+    unavailable.close();
+    SentinelStreamClient c("127.0.0.1", std::to_string(port), ca);
+    std::atomic<unsigned> downs{0}, ups{0};
+    QObject::connect(&c, &SentinelStreamClient::disconnected, &c,
+                     [&] { ++downs; }, Qt::DirectConnection);
+    QObject::connect(&c, &SentinelStreamClient::connected, &c,
+                     [&] { ++ups; }, Qt::DirectConnection);
+    const auto stopClient = qScopeGuard([&] { c.disconnectFromServer(); });
+    c.connectToServer();
+    c.connectToServer(); // duplicate requests cannot start another worker/session
+    const auto deadline = std::chrono::steady_clock::now() + 3s;
+    while (downs < 2 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(1ms);
+    ASSERT_GE(downs.load(), 2u);
+    EXPECT_EQ(ups.load(), 0u);
+    const auto shutdownAt = std::chrono::steady_clock::now();
+    c.disconnectFromServer();
+    EXPECT_LT(std::chrono::steady_clock::now() - shutdownAt, 300ms);
+    const auto stoppedAt = downs.load();
+    std::this_thread::sleep_for(1200ms); // exceeds the pending second backoff
+    EXPECT_EQ(downs.load(), stoppedAt);
+    EXPECT_EQ(ups.load(), 0u);
+    expectDrained(c);
 }
