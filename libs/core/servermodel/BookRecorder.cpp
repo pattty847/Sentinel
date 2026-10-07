@@ -1,6 +1,11 @@
 #include "BookRecorder.hpp"
 #include "Hmc2Store.hpp"
 #include "SentinelLogging.hpp"
+#include "HmcolFormat.hpp"
+#include <nlohmann/json.hpp>
+#include <iomanip>
+#include <locale>
+#include <sstream>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -111,6 +116,288 @@ std::pair<int64_t, int64_t> bounds(double loMid, double hiMid, const LayerConfig
 }
 bool covers(const Hmc2Record &r, const Key &k) {
     return k.second ? k.first >= r.askRowLo && k.first <= r.askRowHi : k.first >= r.bidRowLo && k.first <= r.bidRowHi;
+}
+
+// Versioned replay state is deliberately separate from HMC2. Long-double row
+// accumulators use classic-locale max_digits10 text, never a narrowing cast to
+// double. CBOR represents the remaining doubles/integers without loss.
+using StateJson = nlohmann::json;
+constexpr size_t kMaxStateBytes = 128 * 1024 * 1024;
+void stateRequire(bool value, const char* reason) {
+    if (!value) throw std::runtime_error(std::string("BookRecorder state: ") + reason);
+}
+std::string wideFloat(long double value) {
+    stateRequire(std::isfinite(value), "nonfinite accumulator");
+    std::ostringstream out;
+    out.imbue(std::locale::classic());
+    out << std::setprecision(std::numeric_limits<long double>::max_digits10) << value;
+    return out.str();
+}
+long double wideFloat(const StateJson& value) {
+    const auto text = value.get<std::string>();
+    stateRequire(text.size() <= 128, "oversize accumulator");
+    std::istringstream in(text);
+    in.imbue(std::locale::classic());
+    long double out = 0;
+    in >> out;
+    stateRequire(!in.fail() && in.peek() == std::char_traits<char>::eof() && std::isfinite(out), "bad accumulator");
+    return out;
+}
+void finiteState(const StateJson& j) {
+    if (j.is_number_float()) stateRequire(std::isfinite(j.get<double>()), "nonfinite number");
+    else if (j.is_structured()) for (const auto& v : j) finiteState(v);
+}
+StateJson statePolicy(const RecorderConfig& c) {
+    StateJson j;
+    j["priceScale"] = c.priceScale;
+    j["latenessMs"] = c.latenessMs;
+    j["maxQueuedLevels"] = c.maxQueuedLevels;
+    j["livePublishMs"] = c.livePublishMs;
+    j["resnapshotIntervalMs"] = c.resnapshotIntervalMs;
+    j["resnapshotMaxIntervalMs"] = c.resnapshotMaxIntervalMs;
+    j["resnapshotStableMs"] = c.resnapshotStableMs;
+    j["oneSidedGraceMs"] = c.oneSidedGraceMs;
+    j["blockingQueue"] = c.blockingQueue;
+    j["deterministicResume"] = c.deterministicResume;
+    j["commitFloorMs"] = c.commitFloorMs;
+    j["commitCeilingMs"] = c.commitCeilingMs;
+    j["sizeScale"] = {c.sizeScale.floor,c.sizeScale.codesPerOctave};
+    j["publication"] = int(c.publication);
+    j["layers"] = StateJson::array();
+    for (const auto& l : c.layers) j["layers"].push_back({l.name,l.rowTickUnits,l.lowFrac,l.highMult,l.hourlyRollup});
+    return j;
+}
+StateJson pack(const Hmc2Header& v) {
+    StateJson j;
+    j["symbol"] = v.symbol;
+    j["layer"] = v.layer;
+    j["tfMs"] = v.tfMs;
+    j["priceScale"] = v.priceScale;
+    j["rowTickUnits"] = v.rowTickUnits;
+    j["configHash"] = v.configHash;
+    j["sizeScale"] = {v.sizeScale.floor,v.sizeScale.codesPerOctave};
+    return j;
+}
+void unpack(const StateJson& j, Hmc2Header& v) {
+    j.at("symbol").get_to(v.symbol);
+    j.at("layer").get_to(v.layer);
+    j.at("tfMs").get_to(v.tfMs);
+    j.at("priceScale").get_to(v.priceScale);
+    j.at("rowTickUnits").get_to(v.rowTickUnits);
+    j.at("configHash").get_to(v.configHash);
+    v.sizeScale = {j.at("sizeScale").at(0),j.at("sizeScale").at(1)};
+}
+StateJson pack(const Hmc2Entry& v) {
+    StateJson j;
+    j["row"] = v.row;
+    j["isAsk"] = v.isAsk;
+    j["twapCode"] = v.twapCode;
+    j["peakCode"] = v.peakCode;
+    j["coveredMs"] = v.coveredMs;
+    return j;
+}
+void unpack(const StateJson& j, Hmc2Entry& v) {
+    j.at("row").get_to(v.row);
+    j.at("isAsk").get_to(v.isAsk);
+    j.at("twapCode").get_to(v.twapCode);
+    j.at("peakCode").get_to(v.peakCode);
+    j.at("coveredMs").get_to(v.coveredMs);
+}
+StateJson pack(const CoverageRun& v) {
+    StateJson j;
+    j["lo"] = v.lo;
+    j["hi"] = v.hi;
+    j["isAsk"] = v.isAsk;
+    j["coveredMs"] = v.coveredMs;
+    return j;
+}
+void unpack(const StateJson& j, CoverageRun& v) {
+    j.at("lo").get_to(v.lo);
+    j.at("hi").get_to(v.hi);
+    j.at("isAsk").get_to(v.isAsk);
+    j.at("coveredMs").get_to(v.coveredMs);
+}
+StateJson pack(const Hmc2Record& v) {
+    StateJson j;
+    j["bucketStartMs"] = v.bucketStartMs;
+    j["observedMs"] = v.observedMs;
+    j["flags"] = v.flags;
+    j["bidRowLo"] = v.bidRowLo;
+    j["bidRowHi"] = v.bidRowHi;
+    j["askRowLo"] = v.askRowLo;
+    j["askRowHi"] = v.askRowHi;
+    j["midOpen"] = v.midOpen;
+    j["midClose"] = v.midClose;
+    j["midMin"] = v.midMin;
+    j["midMax"] = v.midMax;
+    j["committedThroughMs"] = v.committedThroughMs;
+    j["header"] = pack(v.header);
+    j["entries"] = StateJson::array(); j["coverage"] = StateJson::array();
+    for (const auto& e : v.entries) j["entries"].push_back(pack(e));
+    for (const auto& e : v.coverage) j["coverage"].push_back(pack(e));
+    return j;
+}
+void unpack(const StateJson& j, Hmc2Record& v) {
+    j.at("bucketStartMs").get_to(v.bucketStartMs);
+    j.at("observedMs").get_to(v.observedMs);
+    j.at("flags").get_to(v.flags);
+    j.at("bidRowLo").get_to(v.bidRowLo);
+    j.at("bidRowHi").get_to(v.bidRowHi);
+    j.at("askRowLo").get_to(v.askRowLo);
+    j.at("askRowHi").get_to(v.askRowHi);
+    j.at("midOpen").get_to(v.midOpen);
+    j.at("midClose").get_to(v.midClose);
+    j.at("midMin").get_to(v.midMin);
+    j.at("midMax").get_to(v.midMax);
+    j.at("committedThroughMs").get_to(v.committedThroughMs);
+    unpack(j.at("header"),v.header);
+    stateRequire(j.at("entries").is_array() && j.at("coverage").is_array(), "record arrays");
+    for (const auto& e : j.at("entries")) { Hmc2Entry out; unpack(e,out); v.entries.push_back(out); }
+    for (const auto& e : j.at("coverage")) { CoverageRun out; unpack(e,out); v.coverage.push_back(out); }
+    stateRequire(v.header.tfMs == kMinute && v.observedMs <= kMinute &&
+        v.bucketStartMs >= 0 && v.bucketStartMs <= kMaxTime && v.bucketStartMs % kMinute == 0 &&
+        v.coverage.empty(), "invalid minute record");
+    std::optional<Key> previous;
+    for (const auto& e : v.entries) {
+        const Key key{e.row,e.isAsk};
+        stateRequire(e.row >= 0 && (!previous || *previous < key) &&
+            e.twapCode <= kMaxCode && e.peakCode <= kMaxCode &&
+            (e.coveredMs == 0 || e.coveredMs == v.observedMs), "invalid minute entry");
+        previous = key;
+    }
+}
+StateJson packSymbol(const Symbol& v) {
+    StateJson j;
+    j["initialized"] = v.initialized;
+    j["valid"] = v.valid;
+    j["clock"] = v.clock;
+    j["minute"] = v.minute;
+    j["closedThrough"] = v.closedThrough;
+    j["offset"] = v.offset;
+    j["minuteThroughMs"] = v.minuteThroughMs;
+    j["minuteWatermarkBlocked"] = v.minuteWatermarkBlocked;
+    j["observed"] = v.observed;
+    j["flags"] = v.flags;
+    j["lastPublish"] = v.lastPublish;
+    j["mid"] = v.mid;
+    j["midOpen"] = v.midOpen;
+    j["midMin"] = v.midMin;
+    j["midMax"] = v.midMax;
+    j["midClose"] = v.midClose;
+    j["serial"] = v.serial;
+    j["selfInvalidReason"] = v.selfInvalidReason;
+    j["nextResnapshotLocal"] = v.nextResnapshotLocal;
+    j["resnapshotIntervalMs"] = v.resnapshotIntervalMs;
+    j["validSinceLocal"] = v.validSinceLocal;
+    j["oneSidedSince"] = v.oneSidedSince;
+    j["bids"] = v.bids; j["asks"] = v.asks;
+    j["pending"] = StateJson::array(); j["layers"] = StateJson::array();
+    for (const auto& r : v.pending) j["pending"].push_back(pack(r));
+    for (const auto& l : v.layers) {
+        StateJson a;
+        a["hour"] = l.hour;
+        a["hourThroughMs"] = l.hourThroughMs;
+        a["hourWatermarkBlocked"] = l.hourWatermarkBlocked;
+        a["publishedMinuteMs"] = l.publishedMinuteMs;
+        a["publishedHourMs"] = l.publishedHourMs;
+        a["publishedColumnMs"] = l.publishedColumnMs;
+        a["lastColumnMs"] = l.lastColumnMs;
+        a["header"] = pack(l.header);
+        a["publishedOpen"] = {l.publishedOpen.minute,l.publishedOpen.through,l.publishedOpen.observed,l.publishedOpen.flags};
+        a["rows"] = StateJson::array(); a["hourMinutes"] = StateJson::array();
+        // Stable serialization order; hash iteration order is not replay state.
+        std::map<Key,const Row*> rows;
+        for (const auto& [key,row] : l.rows) rows.emplace(key,&row);
+        for (const auto& [key,r] : rows)
+            a["rows"].push_back({key.first,key.second,wideFloat(r->size),wideFloat(r->integral),
+                wideFloat(r->peak),r->last,r->touched,r->levels});
+        for (const auto& r : l.hourMinutes) a["hourMinutes"].push_back(pack(r));
+        j["layers"].push_back(std::move(a));
+    }
+    return j;
+}
+std::unique_ptr<Symbol> unpackSymbol(const StateJson& j, const std::string& name, const RecorderConfig& cfg) {
+    auto symbol = std::make_unique<Symbol>();
+    auto& v = *symbol;
+    j.at("initialized").get_to(v.initialized);
+    j.at("valid").get_to(v.valid);
+    j.at("clock").get_to(v.clock);
+    j.at("minute").get_to(v.minute);
+    j.at("closedThrough").get_to(v.closedThrough);
+    j.at("offset").get_to(v.offset);
+    j.at("minuteThroughMs").get_to(v.minuteThroughMs);
+    j.at("minuteWatermarkBlocked").get_to(v.minuteWatermarkBlocked);
+    j.at("observed").get_to(v.observed);
+    j.at("flags").get_to(v.flags);
+    j.at("lastPublish").get_to(v.lastPublish);
+    j.at("mid").get_to(v.mid);
+    j.at("midOpen").get_to(v.midOpen);
+    j.at("midMin").get_to(v.midMin);
+    j.at("midMax").get_to(v.midMax);
+    j.at("midClose").get_to(v.midClose);
+    j.at("serial").get_to(v.serial);
+    j.at("selfInvalidReason").get_to(v.selfInvalidReason);
+    j.at("nextResnapshotLocal").get_to(v.nextResnapshotLocal);
+    j.at("resnapshotIntervalMs").get_to(v.resnapshotIntervalMs);
+    j.at("validSinceLocal").get_to(v.validSinceLocal);
+    j.at("oneSidedSince").get_to(v.oneSidedSince);
+    stateRequire(v.clock >= 0 && v.clock <= kMaxTime && v.minute >= 0 && v.minute % kMinute == 0 &&
+        v.clock >= v.minute && v.clock < v.minute + kMinute && v.observed <= kMinute &&
+        v.closedThrough >= 0 && v.closedThrough <= v.clock && (!v.valid || v.initialized), "invalid symbol clock/validity");
+    const auto book = [](const StateJson& items, auto& dest) {
+        stateRequire(items.is_array(), "book schema");
+        for (const auto& e : items) {
+            stateRequire(e.is_array() && e.size() == 2, "book entry schema");
+            const auto price = e.at(0).get<int64_t>(); const auto size = e.at(1).get<double>();
+            stateRequire(price > 0 && std::isfinite(size) && size > 0 && dest.emplace(price,size).second, "invalid/duplicate book level");
+        }
+    };
+    book(j.at("bids"),v.bids); book(j.at("asks"),v.asks);
+    stateRequire(j.at("layers").is_array() && j.at("layers").size() == cfg.layers.size(), "layer count");
+    v.layers.reserve(cfg.layers.size());
+    size_t li = 0;
+    for (const auto& a : j.at("layers")) {
+        auto& l = v.layers.emplace_back(&v.pool);
+        a.at("hour").get_to(l.hour);
+        a.at("hourThroughMs").get_to(l.hourThroughMs);
+        a.at("hourWatermarkBlocked").get_to(l.hourWatermarkBlocked);
+        a.at("publishedMinuteMs").get_to(l.publishedMinuteMs);
+        a.at("publishedHourMs").get_to(l.publishedHourMs);
+        a.at("publishedColumnMs").get_to(l.publishedColumnMs);
+        a.at("lastColumnMs").get_to(l.lastColumnMs);
+        unpack(a.at("header"),l.header);
+        const auto& c = cfg.layers[li++];
+        Hmc2Header expected{name,c.name,kMinute,cfg.priceScale,c.rowTickUnits,cfg.sizeScale,0};
+        expected.configHash = Hmc2Store::configHash(expected,c.lowFrac,c.highMult);
+        stateRequire(pack(l.header) == pack(expected), "layer header policy mismatch");
+        const auto& o = a.at("publishedOpen");
+        l.publishedOpen = {o.at(0),o.at(1),o.at(2),o.at(3)};
+        stateRequire(a.at("rows").is_array(), "rows schema");
+        for (const auto& e : a.at("rows")) {
+            stateRequire(e.is_array() && e.size() == 8, "row schema");
+            Key key{e.at(0),e.at(1)};
+            Row r{wideFloat(e.at(2)),wideFloat(e.at(3)),wideFloat(e.at(4)),e.at(5),e.at(6),e.at(7)};
+            stateRequire(key.first >= 0 && r.size >= 0 && r.integral >= 0 && r.peak >= 0 &&
+                r.last >= 0 && r.last <= v.clock && l.rows.emplace(key,r).second, "invalid/duplicate row");
+        }
+        stateRequire(a.at("hourMinutes").is_array() && a.at("hourMinutes").size() <= 60, "hour size");
+        for (const auto& r : a.at("hourMinutes")) {
+            Hmc2Record out; unpack(r,out);
+            stateRequire(pack(out.header) == pack(l.header) && out.bucketStartMs >= l.hour &&
+                out.bucketStartMs < l.hour + kHour &&
+                (l.hourMinutes.empty() || l.hourMinutes.back().bucketStartMs < out.bucketStartMs), "hour record identity/order");
+            l.hourMinutes.push_back(std::move(out));
+        }
+    }
+    stateRequire(j.at("pending").is_array(), "pending schema");
+    stateRequire(j.at("pending").size() <= cfg.layers.size() * (size_t(cfg.latenessMs / kMinute) + 2), "pending size");
+    for (const auto& r : j.at("pending")) {
+        Hmc2Record out; unpack(r,out);
+        stateRequire(std::any_of(v.layers.begin(),v.layers.end(),[&](const auto& l) { return pack(out.header) == pack(l.header); }) &&
+            out.bucketStartMs < v.minute && (v.pending.empty() || v.pending.back().bucketStartMs <= out.bucketStartMs), "pending identity/order");
+        v.pending.push_back(std::move(out));
+    }
+    return symbol;
 }
 } // namespace
 
@@ -1045,6 +1332,78 @@ std::unique_ptr<BookRecorder> BookRecorder::forkLead(std::function<void(std::sha
         dst.symbols.emplace(name, std::move(to));
     }
     return out;
+}
+
+std::vector<uint8_t> BookRecorder::exportState() {
+    drain(); // producer-only, same synchronization contract as forkLead()
+    auto& src = *impl_;
+    stateRequire(!src.diskErrors && !src.queueDrops, "cannot anchor failed recorder");
+    StateJson j = {{"version",1},{"policy",statePolicy(src.cfg)},
+        {"floatDigits",std::numeric_limits<long double>::digits},
+        {"floatExponent",std::numeric_limits<long double>::max_exponent},
+        {"workerLocal",src.workerLocal},{"openFailureLogLocal",src.openFailureLogLocal},
+        {"openFailuresSuppressed",src.openFailuresSuppressed},{"symbols",StateJson::object()},
+        {"watermarks",StateJson::array()},
+        {"stats",{src.columnsWritten.load(),src.lateEvents.load(),src.backwardSteps.load(),
+                   src.queueDrops.load(),src.invalidations.load(),src.diskErrors.load()}}};
+    for (const auto& [name,s] : src.symbols) j["symbols"][name] = packSymbol(*s);
+    {
+        std::lock_guard lock(src.watermarksMutex);
+        for (const auto& [key,w] : src.watermarksBySeries)
+            j["watermarks"].push_back({key.first,key.second,w.minuteThroughMs,w.hourThroughMs,w.lastColumnMs});
+    }
+    finiteState(j);
+    auto bytes = StateJson::to_cbor(j);
+    stateRequire(bytes.size() <= kMaxStateBytes-4, "state too large");
+    const auto crc = hmcol::crc32(bytes.data(),bytes.size());
+    for (unsigned i = 0; i < 4; ++i) bytes.push_back(uint8_t(crc >> (i*8)));
+    return bytes;
+}
+void BookRecorder::importState(const std::vector<uint8_t>& bytes) {
+    stateRequire(bytes.size() >= 5 && bytes.size() <= kMaxStateBytes, "state length");
+    uint32_t crc = 0;
+    for (unsigned i = 0; i < 4; ++i) crc |= uint32_t(bytes[bytes.size()-4+i]) << (i*8);
+    stateRequire(crc == hmcol::crc32(bytes.data(),bytes.size()-4), "state CRC mismatch");
+    const auto j = StateJson::from_cbor(bytes.begin(),bytes.end()-4);
+    finiteState(j);
+    auto& dst = *impl_;
+    stateRequire(j.at("version") == 1 && j.at("policy") == statePolicy(dst.cfg) &&
+        j.at("floatDigits") == std::numeric_limits<long double>::digits &&
+        j.at("floatExponent") == std::numeric_limits<long double>::max_exponent, "state version/policy/float mismatch");
+    // Construct and validate everything off to the side. No partially installed
+    // state, callbacks or durable writes on any rejection path.
+    std::map<std::string,std::unique_ptr<Symbol>> symbols;
+    stateRequire(j.at("symbols").is_object(), "symbols schema");
+    for (const auto& [name,s] : j.at("symbols").items()) {
+        stateRequire(dst.cfg.writerProduct.empty() || dst.cfg.writerProduct == name, "writer product scope mismatch");
+        Hmc2Header h; h.symbol = name; h.layer = dst.cfg.layers.front().name;
+        (void)Hmc2Store::filePath(dst.cfg.root,h,kHmc2MinMs);
+        symbols.emplace(name,unpackSymbol(s,name,dst.cfg));
+    }
+    std::map<std::pair<std::string,std::string>,Watermarks> watermarks;
+    stateRequire(j.at("watermarks").is_array(), "watermarks schema");
+    for (const auto& w : j.at("watermarks")) {
+        const auto symbol = w.at(0).get<std::string>(), layer = w.at(1).get<std::string>();
+        stateRequire(symbols.contains(symbol) &&
+            std::any_of(dst.cfg.layers.begin(),dst.cfg.layers.end(),[&](const auto& l) { return l.name == layer; }), "watermark series");
+        Watermarks mark{w.at(2),w.at(3),w.at(4)};
+        stateRequire(mark.minuteThroughMs >= 0 && mark.hourThroughMs >= 0 && mark.lastColumnMs >= 0 &&
+            watermarks.emplace(std::pair(symbol,layer),mark).second, "invalid/duplicate watermark");
+    }
+    const auto stats = j.at("stats").get<std::array<uint64_t,6>>();
+    stateRequire(!stats[3] && !stats[5], "failed state");
+    const auto local = j.at("workerLocal").get<int64_t>();
+    const auto failureLocal = j.at("openFailureLogLocal").get<int64_t>();
+    const auto failures = j.at("openFailuresSuppressed").get<uint64_t>();
+    drain();
+    std::scoped_lock lock(dst.mutex,dst.watermarksMutex);
+    stateRequire(dst.symbols.empty() && dst.producerSymbols.empty() && dst.watermarksBySeries.empty() &&
+        !dst.count && !dst.busy && !dst.stopping && !dst.columnsWritten && !dst.invalidations &&
+        !dst.queueDrops && !dst.diskErrors && dst.workerLocal == 0, "import requires fresh recorder");
+    dst.symbols.swap(symbols); dst.watermarksBySeries.swap(watermarks);
+    dst.workerLocal = local; dst.openFailureLogLocal = failureLocal; dst.openFailuresSuppressed = failures;
+    dst.columnsWritten = stats[0]; dst.lateEvents = stats[1]; dst.backwardSteps = stats[2];
+    dst.queueDrops = stats[3]; dst.invalidations = stats[4]; dst.diskErrors = stats[5];
 }
 void BookRecorder::drain() {
     std::unique_lock lock(impl_->mutex);

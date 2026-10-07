@@ -3,14 +3,18 @@
 #include <yaml-cpp/yaml.h>
 #include <iostream>
 #include <sstream>
+#include <QTemporaryDir>
 namespace sentinel::roller {
 int rollMain(int argc,char** argv) {
     try {
         if (argc < 3) throw std::runtime_error("usage: sentinel-roll JOURNAL_ROOT HMC2_ROOT --products BTC-USD,PEPE-USD --from YYYY-MM-DD --to YYYY-MM-DD [--config YAML] [--dry-run] [--product-lease]");
+        const bool rebuild = std::string_view(argv[1]) == "rebuild-anchors";
+        if (rebuild) { --argc; ++argv; if (argc < 3) throw std::runtime_error("rebuild-anchors requires journal and output roots"); }
         RollOptions o; o.journalRoot=argv[1]; o.outputRoot=argv[2];
         std::vector<std::string> products; YAML::Node config;
         for (int i=3;i<argc;++i) {
             const std::string option=argv[i];
+            if (option=="--no-anchors") { o.useAnchors=false; o.writeAnchors=false; continue; }
             if (option=="--dry-run" || option=="--report") { o.dryRun=true; continue; }
             // Shared root lease plus an exclusive per-product lease (INV-115): may
             // write a root a live roller serves, never a product it is rolling.
@@ -63,6 +67,13 @@ int rollMain(int argc,char** argv) {
             throw std::runtime_error("--config must specify recording.dir when the standard server config is unavailable");
         refuseLiveRoot(config);
         for (const auto& p : products) validateOutputProduct(o.outputRoot, p);
+        QTemporaryDir scratch;
+        if (rebuild) {
+            if (!scratch.isValid() || o.dryRun) throw std::runtime_error("rebuild requires writable scratch and no --dry-run");
+            o.anchorRoot = o.outputRoot;
+            o.outputRoot = scratch.path().toStdString();
+            o.useAnchors = false; o.writeAnchors = true;
+        }
         nlohmann::json reports=nlohmann::json::array();
         for (const auto& p:products) {
             o.product=p; o.overrides=nlohmann::json::object();
@@ -70,6 +81,11 @@ int rollMain(int argc,char** argv) {
                 const auto c=config["recording"]["products"][p];
                 for (const auto* key:{"near_tick","deep_tick","price_scale","size_floor"}) if(c[key]) o.overrides[key]=c[key].as<double>();
             }
+            // Rebuild owns the destination product just like a normal roller,
+            // while its disposable HMC2 recorder owns a separate scratch root.
+            std::unique_ptr<recording::Hmc2Store> anchorLease;
+            if (rebuild) anchorLease = std::make_unique<recording::Hmc2Store>(
+                o.anchorRoot,false,o.productWriterLease ? p : std::string{});
             reports.push_back(roll(o));
         }
         std::cout << reports.dump(2) << '\n'; return 0;

@@ -217,7 +217,7 @@ TEST(CorruptBlockPolicy, DecompressionErrorSkipsOnlyValidatedPayload) {
     }
     ASSERT_TRUE(found); save(p, b);
     unsigned corruptions = 0, records = 0;
-    capture::RecordReader reader(qpath(p), false, [&](const auto& entry, const char* reason) {
+    capture::RecordReader reader(qpath(p), false, {}, [&](const auto& entry, const char* reason) {
         ++corruptions; EXPECT_EQ(entry.offset, block.offset); EXPECT_STREQ(reason, "zstd decompression failed");
     });
     capture::Record r; while (reader.next(r)) ++records;
@@ -226,7 +226,7 @@ TEST(CorruptBlockPolicy, DecompressionErrorSkipsOnlyValidatedPayload) {
     EXPECT_THROW(capture::scan(qpath(p)), std::runtime_error);
     // The validated closing index also permits skipping a damaged header.
     b[block.offset+44] ^= 1; save(p, b);
-    capture::RecordReader strictHeader(qpath(p), false, [](const auto&, const char*) {});
+    capture::RecordReader strictHeader(qpath(p), false, {}, [](const auto&, const char*) {});
     EXPECT_NO_THROW(while (strictHeader.next(r)) {});
     EXPECT_THROW(capture::scan(qpath(p)), std::runtime_error);
 }
@@ -373,7 +373,7 @@ TEST(CorruptFraming, DamagedIndexFormsAndMissingIndexAreUnsealed) {
         if (at == footer+12) put32(b, b.size()-4, hmcol::crc32(b.data()+footer+8, b.size()-footer-12));
         save(p, b);
         unsigned skips = 0, records = 0;
-        capture::RecordReader reader(qpath(p), true, [&](const auto& block, const char*) { ++skips; EXPECT_EQ(block.offset, footer); });
+        capture::RecordReader reader(qpath(p), true, {}, [&](const auto& block, const char*) { ++skips; EXPECT_EQ(block.offset, footer); });
         capture::Record r; EXPECT_NO_THROW(while (reader.next(r)) ++records);
         EXPECT_EQ(records, 366); EXPECT_EQ(skips, 1); EXPECT_FALSE(reader.result().indexed);
         EXPECT_EQ(reader.result().validBytes, b.size());
@@ -381,7 +381,7 @@ TEST(CorruptFraming, DamagedIndexFormsAndMissingIndexAreUnsealed) {
     }
     save(p, original.substr(0, footer));
     unsigned skips = 0, records = 0;
-    capture::RecordReader reader(qpath(p), true, [&](const auto&, const char*) { ++skips; }); capture::Record r;
+    capture::RecordReader reader(qpath(p), true, {}, [&](const auto&, const char*) { ++skips; }); capture::Record r;
     while (reader.next(r)) ++records;
     EXPECT_EQ(records, 366); EXPECT_EQ(skips, 0); EXPECT_FALSE(reader.result().indexed);
 }
@@ -394,7 +394,7 @@ TEST(CorruptFraming, SuccessorRequiresCrcLimitsAndExactOrdinal) {
     // length also claims a legal, complete block; only exact ordinal rejects it.
     auto fake = b.substr(scan.index[74].offset, 48);
     b.replace(target.offset+48, fake.size(), fake); save(p, b);
-    unsigned skips = 0; capture::RecordReader reader(qpath(p), false, [&](const auto&, const char*) { ++skips; });
+    unsigned skips = 0; capture::RecordReader reader(qpath(p), false, {}, [&](const auto&, const char*) { ++skips; });
     capture::Record r; unsigned count = 0;
     while (reader.next(r)) {
         EXPECT_NE(reader.result().recordOrdinal, target.ordinal);
@@ -404,7 +404,7 @@ TEST(CorruptFraming, SuccessorRequiresCrcLimitsAndExactOrdinal) {
     EXPECT_EQ(count, 365); EXPECT_EQ(skips, 1);
     // CRC-bad plausible magic at the true successor is not accepted either.
     b[scan.index[76].offset+44] ^= 1; save(p, b);
-    capture::RecordReader abandoned(qpath(p), true, [](const auto&, const char*) {});
+    capture::RecordReader abandoned(qpath(p), true, {}, [](const auto&, const char*) {});
     count = 0; while (abandoned.next(r)) ++count;
     EXPECT_EQ(count, 75); EXPECT_TRUE(abandoned.result().pendingTail);
     EXPECT_EQ(abandoned.result().validBytes, b.size());
@@ -413,7 +413,7 @@ TEST(CorruptFraming, SkippedPayloadAdvancesValidBytes) {
     QTemporaryDir temp; const fs::path root = temp.path().toStdString();
     const auto p = fixture(root/"raw"); const auto scan = capture::scan(qpath(p)); const auto block = scan.index.back();
     corrupt(p, block, false); auto b = bytes(p); b.resize(block.offset+48+block.compressedBytes); save(p, b);
-    capture::RecordReader reader(qpath(p), true, [](const auto&, const char*) {}); capture::Record r;
+    capture::RecordReader reader(qpath(p), true, {}, [](const auto&, const char*) {}); capture::Record r;
     while (reader.next(r)) {}
     EXPECT_EQ(reader.result().validBytes, b.size());
 }

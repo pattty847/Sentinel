@@ -238,35 +238,7 @@ public:
 // once per journal position: provisional ones on arrival; durable ones only to
 // fill a gap after the model was live (never the day's history at a restart).
 class ModelTap {
-  struct Book {
-    bool valid = false;
-    int64_t envelopeMs = 0;
-    std::map<double, double> bids, asks; // native prices, whole book
-    void clear() {
-      valid = false;
-      bids.clear();
-      asks.clear();
-    }
-    void apply(int64_t envelope, const std::vector<recording::Level> &levels) {
-      envelopeMs = envelope;
-      for (const auto &l : levels) {
-        if (!std::isfinite(l.price) || !std::isfinite(l.size))
-          continue;
-        auto &side = l.isBid ? bids : asks;
-        if (l.size > 0)
-          side[l.price] = l.size;
-        else
-          side.erase(l.price);
-      }
-    }
-    void snapshot(int64_t envelope,
-                  const std::vector<recording::Level> &levels) {
-      bids.clear();
-      asks.clear();
-      apply(envelope, levels);
-      valid = true;
-    }
-  };
+  using Book = JournalBook;
   const ShadowConfig &cfg;
   const std::string product;
   std::atomic<bool> &reseed; // set by ShadowRoller::requestReseed
@@ -405,6 +377,10 @@ public:
         cfg.model.trade(t);
     };
     f.onConnection = [this](bool up) { durableUp = up; };
+  }
+  std::pair<JournalBook,bool> anchorBook() const { return {durable,durableUp}; }
+  void restoreAnchor(const JournalBook& book, bool up) {
+    durable = book; durableUp = up;
   }
   // onRecorder(nullptr): the day's feed goes away (day end or failure). Quiet:
   // the model keeps its book until the next seed or drop().
@@ -744,6 +720,16 @@ public:
   }
   LiveSource(const LiveSource &) = delete;
   LiveSource &operator=(const LiveSource &) = delete;
+  bool anchorAllowed(const JournalPos& p) {
+    return diskTarget && older(p,*diskTarget);
+  }
+  void restoreAnchor(const JournalPos& p, bool cursorApplied) {
+    if (!anchorAllowed(p)) throw std::runtime_error("anchor crosses durable handshake ceiling");
+    if (!cursorApplied) { applied.reset(); diskDone = false; return; }
+    applied = p;
+    diskDone = p == *diskTarget;
+    if (diskDone) received = p;
+  }
   bool next(JournalReader &disk, JournalRecord &out) {
     while (!stopping) {
       try {
@@ -1135,6 +1121,14 @@ struct ShadowRoller::Impl {
         };
         if (tap.enabled())
           o.onFeed = [&](JournalFeed &f) { tap.observe(f); };
+        o.anchorAllowed = [&](const JournalPos& pos) { return source.anchorAllowed(pos); };
+        o.onAnchorRestore = [&](const JournalPos& pos, const JournalBook& book, bool up, bool cursorApplied, int64_t receiveMs) {
+          source.restoreAnchor(pos,cursorApplied);
+          if (tap.enabled()) tap.restoreAnchor(book,up);
+          p.last->store(receiveMs);
+          p.running->set(1);
+        };
+        if (tap.enabled()) o.anchorBook = [&] { return tap.anchorBook(); };
         o.cancelled = [&] { return stopping.load(); };
         o.productWriterLease = true;
         o.onInvalid = [&](const std::string &reason) {

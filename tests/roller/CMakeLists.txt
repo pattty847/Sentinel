@@ -26,3 +26,8 @@ target_link_libraries(test_roller_corrupt_blocks PRIVATE sentinel_core GTest::gt
 target_compile_definitions(test_roller_corrupt_blocks PRIVATE SENTINEL_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 add_test(NAME RollerCorruptBlockTests COMMAND test_roller_corrupt_blocks)
 set_tests_properties(RollerCorruptBlockTests PROPERTIES LABELS "roller" TIMEOUT 120)
+
+add_executable(test_journal_anchors test_anchors.cpp)
+target_link_libraries(test_journal_anchors PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+add_test(NAME JournalAnchorTests COMMAND test_journal_anchors)
+set_tests_properties(JournalAnchorTests PROPERTIES LABELS "roller" TIMEOUT 180)

@@ -1,8 +1,57 @@
 #include "JournalFeed.hpp"
+#include <cmath>
 #include "marketdata/dispatch/BookParser.hpp"
 #include "marketdata/dispatch/MessageDispatcher.hpp"
 
 namespace sentinel::roller {
+void JournalBook::apply(int64_t envelope, const std::vector<recording::Level>& levels) {
+    envelopeMs = envelope;
+    for (const auto& l : levels) {
+        if (!std::isfinite(l.price) || !std::isfinite(l.size)) continue;
+        auto& side = l.isBid ? bids : asks;
+        if (l.size > 0) side[l.price] = l.size; else side.erase(l.price);
+    }
+}
+nlohmann::json JournalBook::exportState() const {
+    nlohmann::json j = {{"version",1},{"valid",valid},{"envelope",envelopeMs},
+                       {"bids",nlohmann::json::array()},{"asks",nlohmann::json::array()}};
+    for (const auto& [p,q] : bids) j["bids"].push_back({p,q});
+    for (const auto& [p,q] : asks) j["asks"].push_back({p,q});
+    return j;
+}
+JournalBook JournalBook::fromState(const nlohmann::json& j) {
+    if (j.at("version") != 1) throw std::runtime_error("book anchor version");
+    JournalBook b; b.valid = j.at("valid"); b.envelopeMs = j.at("envelope");
+    for (const auto* side : {"bids","asks"}) {
+        auto& out = std::string_view(side) == "bids" ? b.bids : b.asks;
+        for (const auto& l : j.at(side)) {
+            const double p = l.at(0), q = l.at(1);
+            if (!std::isfinite(p) || !std::isfinite(q) || q <= 0 || !out.emplace(p,q).second)
+                throw std::runtime_error("invalid book anchor level");
+        }
+    }
+    if (!b.valid && (!b.bids.empty() || !b.asks.empty())) throw std::runtime_error("invalid book anchor validity");
+    return b;
+}
+nlohmann::json JournalFeed::exportState() const {
+    return {{"version",1},{"product",product_},{"run",run_},{"connection",connection_},
+        {"lastLocal",lastLocal_},{"sequence",sequence_ ? nlohmann::json(*sequence_) : nlohmann::json()},
+        {"anchored",anchored_}};
+}
+void JournalFeed::importState(const nlohmann::json& j) {
+    if (j.at("version") != 1 || j.at("product") != product_)
+        throw std::runtime_error("feed anchor version/product mismatch");
+    auto run = j.at("run").get<std::string>();
+    const auto connection = j.at("connection").get<uint64_t>();
+    const auto local = j.at("lastLocal").get<int64_t>();
+    const auto anchored = j.at("anchored").get<bool>();
+    std::optional<uint64_t> sequence;
+    if (!j.at("sequence").is_null()) sequence = j.at("sequence").get<uint64_t>();
+    if (run.empty() || run.size() > 256 || local <= 0 || (sequence && *sequence >= INT64_MAX))
+        throw std::runtime_error("invalid feed anchor");
+    run_ = std::move(run); connection_ = connection; lastLocal_ = local;
+    sequence_ = sequence; anchored_ = anchored;
+}
 void JournalFeed::invalid(int64_t local, const std::string& reason) {
     anchored_ = false;
     if (onInvalid) onInvalid(local, reason);

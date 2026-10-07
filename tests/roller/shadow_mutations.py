@@ -316,6 +316,16 @@ mutations = [
      'const auto pinned = journal ? rollerProducts(m_serverConfig)', 'const auto pinned = false ? rollerProducts(m_serverConfig)',
      'ShadowTest.JournalLiveFeedAdmissionIgnoresTheEngineCap'),
 ]
+mutations.append(('db1-anchor durable model book is restored without replay', SR,
+    'if (tap.enabled()) tap.restoreAnchor(book,up);', ';',
+    'ShadowTest.JournalTapAnchorAtDurableTipRestoresWholeBookWithoutReplay'))
+mutations.append(('db1-anchor batch rebuild remains live-compatible', 'libs/core/roller/Roller.cpp',
+    'cfg.publication = recording::RecorderConfig::Publication::Finals;',
+    'if (o.publisher) cfg.publication = recording::RecorderConfig::Publication::Finals;',
+    'ShadowTest.JournalTapRestoresBatchRebuiltAnchor'))
+mutations.append(('db1-anchor restored durable state reports running', SR,
+    'p.last->store(receiveMs); p.running->set(1);', ';',
+    'ShadowTest.JournalTapAnchorAtDurableTipRestoresWholeBookWithoutReplay'))
 if "--round1" in sys.argv:
     mutations = mutations[5:]
 if "--slice-d" in sys.argv:

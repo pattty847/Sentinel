@@ -561,11 +561,11 @@ TEST_F(ShadowTest, CatchupLiveResumeNoGapsOrDuplicates) {
     applied.clear();
   }
   start();
-  ASSERT_TRUE(eventually([&] { return count() == 126; }));
+  ASSERT_TRUE(eventually([&] { return count() == 125; }));
   for (int t = 126; t <= 185; ++t)
     writer->append(record(t * 1000));
   writer->flush();
-  ASSERT_TRUE(eventually([&] { return count() == 186; }));
+  ASSERT_TRUE(eventually([&] { return count() == 185; }));
   shadow.reset();
   writer->close();
   parity(180000);
@@ -639,7 +639,7 @@ TEST_F(ShadowTest, RingMissCatchesUpToDurableTip) {
     applied.clear();
   }
   start();
-  ASSERT_TRUE(eventually([&] { return count() == 186; }));
+  ASSERT_TRUE(eventually([&] { return count() == 185; }));
   ASSERT_TRUE(eventually([&] { return liveBucket(Epoch + 180000); }));
   shadow.reset();
   writer->close();
@@ -1024,7 +1024,7 @@ TEST_F(ShadowTest, ComparisonWatermarkAndMismatchTotalsSurviveRestart) {
   cfg.beforeCompareWaitForTest = [waits] { ++*waits; };
   const auto previous = count();
   start();
-  ASSERT_TRUE(eventually([&] { return count() == previous + 3662; }));
+  ASSERT_TRUE(eventually([&] { return count() == previous + 61; }));
   const auto pass = waits->load();
   // Observe completed checker passes after warmup, not a short sleep that
   // could cancel a wrongly restarted oracle before it publishes its result.
@@ -1754,11 +1754,11 @@ TEST_F(ShadowTest, RestartMidMinuteCommitsStraddledMinuteOnce) {
     applied.clear();
   }
   start();
-  ASSERT_TRUE(eventually([&] { return count() == 81 && forks() == 1; }));
+  ASSERT_TRUE(eventually([&] { return count() == 80 && forks() == 1; }));
   for (int t = 81; t <= 185; ++t)
     writer->append(record(t * 1000));
   writer->flush();
-  ASSERT_TRUE(eventually([&] { return count() == 186; }));
+  ASSERT_TRUE(eventually([&] { return count() == 185; }));
   shadow.reset();
   writer->close();
   parity(180000);
@@ -2352,6 +2352,9 @@ TEST_F(ShadowTest, JournalTapRestartSeedsOnlyAfterCatchup) {
   start();
   ASSERT_TRUE(eventually([&] { return modelCount("snapshot") == 1; }));
   std::this_thread::sleep_for(100ms);
+  EXPECT_EQ(modelCount("snapshot"),1u); // no early snapshot during initial catch-up
+  for (const auto& e : modelLog()) if (e.kind != "connection")
+    EXPECT_EQ(e.applied,81u) << e.kind;
   EXPECT_EQ(modelCount("trade"), 0u); // a fresh process never replays the day
   shadow.reset();
   {
@@ -2368,7 +2371,7 @@ TEST_F(ShadowTest, JournalTapRestartSeedsOnlyAfterCatchup) {
   ASSERT_FALSE(log.empty());
   for (const auto &e : log)
     if (e.kind != "connection")
-      EXPECT_EQ(e.applied, 81u) << e.kind;
+      EXPECT_EQ(e.applied, 80u) << e.kind; // midnight snapshot restored, not replayed
   EXPECT_EQ(eventBook(modelLog("snapshot").front()), batchBook());
   EXPECT_EQ(modelCount("trade"), 0u);
   shadow.reset();
@@ -3184,3 +3187,48 @@ TEST(JournalLiveFeedModel, HeartbeatsCloseBarsWithoutTrades) {
   }
 }
 } // namespace
+
+TEST_F(ShadowTest, JournalTapAnchorAtDurableTipRestoresWholeBookWithoutReplay) {
+  serve(); tapModel();
+  writer->append(record(0,snapshot()));
+  for(int t=1;t<=900;++t)
+    writer->append(record(t*1000,t==800 ? offer("100007","11") : heartbeat()));
+  writer->flush(); start();
+  ASSERT_TRUE(eventually([&]{return modelCount("snapshot")==1;}));
+  const auto expected=batchBook();
+  shadow.reset();
+  {
+    std::lock_guard lock(modelMutex); modelEvents.clear();
+  }
+  {
+    std::lock_guard lock(mutex); applied.clear();
+  }
+  start();
+  ASSERT_TRUE(eventually([&]{return modelCount("snapshot")==1;}));
+  EXPECT_TRUE(shadow->running(Product));
+  EXPECT_EQ(count(),0u); // exclusive restore at the handshake ceiling
+  EXPECT_EQ(eventBook(modelLog("snapshot").front()),expected);
+  EXPECT_TRUE(expected.second.contains(100007));
+  EXPECT_EQ(modelCount("invalidate"),0u);
+  EXPECT_EQ(modelCount("trade"),0u);
+  writer->append(record(901000,offer("100008","13")));
+  ASSERT_TRUE(eventually([&]{return updateAt(100008,13)!=std::string::npos;}));
+  writer->flush();
+  ASSERT_TRUE(eventually([&]{return count()==1;}));
+  shadow.reset(); writer->close();
+}
+TEST_F(ShadowTest, JournalTapRestoresBatchRebuiltAnchor) {
+  serve(); tapModel();
+  writer->append(record(0,snapshot()));
+  for(int t=1;t<=901;++t)
+    writer->append(record(t*1000,t==800 ? offer("100009","17") : heartbeat()));
+  writer->flush();
+  // Batch/rebuild has no publisher; its state must still import into live Finals.
+  roll({cfg.journalRoot,cfg.outputRoot,Product,Epoch,Epoch+86400000});
+  start();
+  ASSERT_TRUE(eventually([&]{return modelCount("snapshot")==1;}));
+  EXPECT_EQ(count(),1u); // only the record after the 00:15 anchor
+  EXPECT_EQ(eventBook(modelLog("snapshot").front()),batchBook());
+  EXPECT_EQ(modelCount("invalidate"),0u);
+  shadow.reset(); writer->close();
+}

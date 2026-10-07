@@ -31,6 +31,15 @@ struct RollOptions {
     // The tap may chain them (observing levels before the recorder takes them).
     // The feed lives until onRecorder(nullptr, nullptr, 0). Not policy.
     std::function<void(JournalFeed&)> onFeed;
+    bool useAnchors = true, writeAnchors = true;
+    std::filesystem::path anchorRoot; // empty means outputRoot; rebuild uses scratch HMC2
+    // LiveSource validates against its handshake ceiling before any installation.
+    std::function<bool(const JournalPos&)> anchorAllowed;
+    std::function<void(const JournalPos&, const JournalBook&, bool, bool cursorApplied, int64_t receiveMs)> onAnchorRestore;
+    // Reuse the model tap's durable book; batch replay maintains its own otherwise.
+    std::function<std::pair<JournalBook,bool>()> anchorBook;
+    std::function<void(int64_t)> afterAnchorForTest;
+
 };
 // Atomically replace and fsync a checkpoint in an already durable parent.
 void writeCheckpoint(const std::filesystem::path&, const nlohmann::json&);
