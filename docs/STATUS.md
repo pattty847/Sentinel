@@ -36,7 +36,7 @@ The owner's `ma-panel` (local plugin) shows live workflow state; this session re
 
 - README top half corrected, landed `24e3020` (96/96): unverified numbers removed (110 FPS, zero-allocation), footprint/TPO/VP described as live, TLS always on. Also fixed: the backtest binary is now named `sentinel-backtest`, so the Paper Trading dock's Backtest tab can find it on macOS. Quick Start, Run, Configuration and Architecture wait for the full pass after slice E (owner 2026-10-06/07; the owner takes new screenshots and GIFs then).
 - D-b2 packet: `docs/research/2026-10-07-db2-packet.md` (Fable). Split: D-b2a (backtests read the journal; additive; now) and D-b2b (engine leaves the server; after D-b1's 48 h journal soak). Owner decisions (section 12): day granularity, minimal dock row. Conductor decisions (section 11): rename A1b to "live feed down", refuse `recording.source: primary` in D-b2b and delete it in slice E, keep `recording.live_feed` in the YAML until the D-b2b soak ends (rollback trap).
-- D-b2a writer dispatched (see In flight).
+- D-b2a writer dispatched 18:15 EDT (see In flight).
 
 Landed overnight, not deployed (each ships after R2, one deploy each): candle history speed `533420c`, bind address `0688fe0`, corrupt-block skip `e8c416a`, GUI auto-reconnect `b087329`, volume profile fan + colours `2f4a718`, deploy-runtime.sh restart mode `4f8e6ce`, README + backtest name `24e3020`.
 
@@ -44,6 +44,7 @@ Landed overnight, not deployed (each ships after R2, one deploy each): candle hi
 
 | Branch | Tip | State | Next |
 |---|---|---|---|
+| `lt-sol/backtest-journal` | base `cf3b659` | D-b2a writer running: Codex `gpt-6.1-sol` high, thread `01a11868`, sandboxed (conductor commits). Prompt and output in `.claude/acting-orchestrator/backtest-journal/` | Review: Claude Sonnet; land on its own (no deploy). B4 parity test is `DISABLED_` until D-b1 lands: enable it in the D-b1 landing |
 | `lt-astra/journal-anchors` | `117482e` | Phase A committed (sidecar store; BookRecorder state export/import byte-identical on real BTC/PEPE hours; bounded seek). Anchor size: BTC 1.43 MB, PEPE 61 KB per anchor, retention decided 2026-10-07: 00:00Z anchors kept forever (owner), intraday about 2 days. Phase B (rebase on D-b1, JournalFeed restore, roll() wiring, the 6 owner checks) after D-b1 passes review | Claude Fable review after Phase B; land and deploy after R2 |
 | `lt-astra/anchors-b` | `04a33b0` (stacked on rebased D-b1 `0de52bd`) | READY: Fable PASS (2 rounds) | Lands right after D-b1 (after R2); its own deploy after D-b1's flip soak |
 | `lt-claude/roller-db1` | rebased onto main (pre-landing, clean; old tip tagged `pre-rebase/roller-db1`) | READY: Astra PASS on all rounds incl. the queue-latency lag metric (`270b629` before rebase). Verifying the rebased build and suites | After the audit: fix round 2 with the same writer, same Astra thread; land only AFTER the R2 deploy |
