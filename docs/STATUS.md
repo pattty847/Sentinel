@@ -36,6 +36,7 @@ The owner's `ma-panel` (local plugin) shows live workflow state; a session start
 
 | Branch | Tip | State | Next |
 |---|---|---|---|
+| `lt-astra/chunk-speed` | `30be12c` (base) | Writer Codex `gpt-6-astra` high (sandboxed; conductor commits), thread `01a11455-2577-7301-9d1c-d52b754896c5`: measure then fix slow heatmap chunk loading on timeframe change / zoom-out (owner #1 GUI complaint; owner OK'd spending Codex resets) | Review Claude Fable (high: GPU heatmap data path); land after measurements |
 | `lt-claude/roller-db1` | `6a60e4a` (base) | D-b1 writer (Claude `opus`): journal feeds the model behind `recording.live_feed: engine|journal` (default engine) per `docs/research/2026-10-one-world-db-packet.md` | Review `gpt-6-astra` high; land only AFTER the R2 deploy |
 
 Retired 2026-10-06 (owner): `lt-sol/label-style` and `lt-claude/heatmap-ab-isolation`, tips kept as tags `archive/<branch>`. Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orchestrator/`. The
