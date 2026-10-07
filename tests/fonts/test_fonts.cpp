@@ -204,6 +204,10 @@ TEST(FontWidgets, PaperTradingRuntimeAndHiddenWidgetsInheritSelectedFont) {
         auto* tabs = paper.findChild<QTabWidget*>();
         ASSERT_NE(tabs, nullptr);
         tabs->setCurrentIndex(2);
+        // Journal is now the default; explicitly exercise the existing File error path.
+        auto* backtestSource = paper.findChild<QComboBox*>("backtestSource");
+        ASSERT_NE(backtestSource, nullptr);
+        backtestSource->setCurrentIndex(1);
         for (auto* button : paper.findChildren<QPushButton*>()) {
             if (button->text().contains(QStringLiteral("Run Backtest"))) button->click();
         }

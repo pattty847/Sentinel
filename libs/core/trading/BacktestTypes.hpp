@@ -1,6 +1,7 @@
 #pragma once
 
 #include "TradingTypes.hpp"
+#include "marketdata/model/TradeData.h"
 
 #include <cstdint>
 #include <optional>
@@ -19,6 +20,8 @@ struct TradeEvent {
     double price = 0.0;
     double qty = 0.0;
     int64_t timestampMs = 0;
+    std::string tradeId;
+    AggressorSide side = AggressorSide::Unknown;
 };
 
 struct BookEvent {

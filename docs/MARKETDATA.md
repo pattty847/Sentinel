@@ -549,7 +549,9 @@ History sources today:
 - `TradeOverlayPublisher`: footprint/VP aggregates and TPO letters; TPO's older
   REST-candle range fallback contains no individual executions, sizes or sides.
   `trade_overlay` is also the error context, not a raw-row response family.
-- `TickBinaryLogger`: hourly binary trades under `data/market`, but no existing
+- `TickBinaryLogger`: hourly binary trades under `data/market`; backtests preserve
+  IDs and normalize v1 maker/v2 aggressor sides, preferring RAWL2 journals per UTC
+  day with legacy files only on days without a matching journal header. No existing
   stream-server reader/serving endpoint uses them for trade history.
 - RAWL2 capture under `/Volumes/T7/sentinel-data/raw-l2`: durable raw trade source;
   the one-world roller slices B-D own its serving path. This feature neither reads

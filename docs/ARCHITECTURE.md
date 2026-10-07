@@ -42,7 +42,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 - **`sentinel-server`:** Minimal footprint CLI bootstrap that instantiates the Core data daemon.
 - **`sentinel_gui`:** Minimal footprint UI bootstrap that instantiates the Qt `QApplication` and connects to the server daemon.
 - **`sentinel-roll` / `hmc2_diff`:** Thin QtCore bootstraps for the core roller and decoded recording comparison; output policy and conversion logic live in `libs/core/roller`.
-- **`sentinel-backtest`:** Minimal CLI bootstrap that replays historical trade files through the shared trading simulation core.
+- **`sentinel-backtest`:** Minimal CLI bootstrap that replays RAWL2 journal trades or historical trade files through the shared trading simulation core; UTC days prefer journals and fall back to legacy tick files, with a CSV dump for identity/gap comparisons.
 - **`sentinel-lab`:** Benchmark and inspection harness for the production heatmap GPU path (S5c): `LocalChunkTransport` -> `ChunkFetcher` -> `HeatmapSourceController` on a heatmap-data thread (`lab/LabData`) -> `HeatmapTileNode` in a plain `QQuickItem` (`lab/LabItem`). Headless `--screenshot`, `--window-screenshot`, `--tick-sweep`, `--tick-change-frames`, `--s5-bench` (vs the B1 hybrid) and the binner compute `--bench`; tick controls (Auto/Manual, `--hysteresis`, `--min-row-px`, `--tick`, `--zoom-rows-px`, `--no-crossfade`), `--end-utc` (a pinned closed range), `--band-edges` (E4) and `--charts`.
 
 ## Data pipeline
@@ -55,7 +55,7 @@ Exchange → MarketDataCoreEngine → ServerDataModel → Persistence + Sentinel
 
 - **MarketDataCoreEngine** — Exchange connections, feed parsing, order book updates. See `docs/MARKETDATA.md`.
 - **ServerDataModel** — Central hub for all symbols; coordinates persistence and streaming.
-- **TickBinaryLogger** — Append-only binary logging with hourly rotation.
+- **TickBinaryLogger** — Append-only binary logging with hourly rotation; the backtest reader preserves trade IDs and normalizes v1 maker/v2 aggressor sides. JournalTradeEventSource reads RAWL2 trades independently of the book feed.
 - **TimeframeAggregator** — Timer-driven aggregation (e.g. 100 ms, 1 s) into GPU-ready slices.
 - **SentinelStreamServer** — Broadcasts pre-aggregated heatmap columns and related streams to clients. Each client session is owned until explicit teardown, serializes model events on its Asio executor, and enforces bounded event/write backlogs. Upstream symbol subscriptions are reference-counted across clients.
 
