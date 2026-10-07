@@ -3,7 +3,7 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-07 ~01:30 EDT. Claude 5-hour window nearly empty (resets ~03:30 EDT); conductor paused, Codex writers keep running. RESUME: read this file, then the Codex outputs below.
+- **Updated:** 2026-10-07 ~07:45 EDT. OWNER SUMMARY (back 11:00): see "Overnight results" below.
 - **Conductor:** Claude Opus 5.5. The owner handed conducting back on 2026-10-06; Codex does not dispatch.
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10). No fallback active: the 2026-10-04
   GPT-reviews-GPT override ended when Claude usage reset.
@@ -41,13 +41,18 @@ The owner's `ma-panel` (local plugin) shows live workflow state; this session re
 5. S8b prep: map every reader of the server `heatmap.*` keys and plan their move.
 Never without the owner present: R2, any deploy, cutovers, data deletion. Check `scripts/dev/budget.sh` before each dispatch; Codex writes, Claude reviews and conducts.
 
-## Pause point 2026-10-07 ~02:45 EDT (Claude usage limit)
+## Overnight results (2026-10-07, autonomous run)
 
-- A corrupt-skip LANDED `e8c416a` (96/96; Fable 2 rounds, majors fixed; 4 minors deferred, the damaged-index placeholder ordinal goes into the anchors rebase). Deploys after R2.
-- Volume profile fan + colours LANDED `2f4a718` (backlog; Sonnet PASS; GUI-only, takes effect with a new GUI build).
-- GUI auto-reconnect LANDED `b087329` (96/96; Sonnet 2 rounds). Visible change: the cold-start label reads Reconnecting. Takes effect when the owner's GUI runs a new build.
-- C bind-address LANDED `0688fe0` (95/95). It deploys after R2. After that deploy the server listens on 127.0.0.1 only; the owner's GUI uses 127.0.0.1, and remote clients set the Mac's Tailscale address. Deferred: a sentinel_stream_listening gauge.
-- D-b1: READY (lag metric = direct main-thread queue latency, Astra PASS). Lands after the R2 deploy; journal flip gated on the lag metric (engine baseline, then journal).
+Landed on main (none deployed; all ship after R2, one deploy each):
+- candle history speed `533420c` (14-day 15m fill 10 s -> 1.35 s, warm 0 REST)
+- bind address `0688fe0` (127.0.0.1 default; Tailscale for remote)
+- corrupt-block skip `e8c416a` (never stalls; gap + alert)
+- GUI auto-reconnect `b087329` (no GUI restart after server deploys)
+- volume profile fan + colours `2f4a718` (backlog)
+- deploy-runtime.sh restart mode `4f8e6ce` (R2 tool)
+READY, waiting for R2: D-b1 (journal live feed + queue-latency lag metric, Astra PASS) and journal anchors stacked on it (`lt-astra/anchors-b` `04a33b0`, Fable PASS; restart 151 s -> 6.3 s, hmc2_diff 0 x96, midnight independent).
+Owner items: (1) Codex is about 0.5 d from empty (+32% deficit); the backlog is held until the owner decides on a reset credit. (2) Looks to judge: VP bars and value-area band at their intended alpha (VA original green, faint); the GUI cold-start label reads Reconnecting. (3) R2 after the soak (~18:40 EDT Oct 8) with the owner at the Mac: `deploy-runtime.sh restart server`.
+Process notes: conductor defaults taken while the owner was away (recorded in _agent/DECISIONS.md): corrupt-skip full header/index coverage and a self-resolving alert; candle-close on the journal clock; lag metric as queue latency.
 
 ## In flight (T7 worktrees)
 
@@ -56,7 +61,7 @@ On resume, read the Codex outputs: `.claude/acting-orchestrator/corrupt-skip/wri
 | Branch | Tip | State | Next |
 |---|---|---|---|
 | `lt-astra/journal-anchors` | `117482e` | Phase A committed (sidecar store; BookRecorder state export/import byte-identical on real BTC/PEPE hours; bounded seek). Anchor size: BTC 1.43 MB, PEPE 61 KB per anchor, retention decided 2026-10-07: 00:00Z anchors kept forever (owner), intraday about 2 days. Phase B (rebase on D-b1, JournalFeed restore, roll() wiring, the 6 owner checks) after D-b1 passes review | Claude Fable review after Phase B; land and deploy after R2 |
-| `lt-astra/anchors-b` | `09328f7` (stacked on rebased D-b1 `0de52bd`) | Phase B READY: restart 151 s -> 6.3 s (7 products), max replay about 15 min, strict hmc2_diff 0 across 96 resumes each for BTC and PEPE, midnight independent. Fable r1: determinism sound; 1 major (anchor write failure aborts the roll) + 3 minors; fix round running (Codex thread `01a1147d`) | Fable re-check; lands after D-b1 lands (after R2) |
+| `lt-astra/anchors-b` | `04a33b0` (stacked on rebased D-b1 `0de52bd`) | READY: Fable PASS (2 rounds) | Lands right after D-b1 (after R2); its own deploy after D-b1's flip soak |
 | `lt-claude/roller-db1` | rebased onto main (pre-landing, clean; old tip tagged `pre-rebase/roller-db1`) | READY: Astra PASS on all rounds incl. the queue-latency lag metric (`270b629` before rebase). Verifying the rebased build and suites | After the audit: fix round 2 with the same writer, same Astra thread; land only AFTER the R2 deploy |
 
 Retired 2026-10-06 (owner): `lt-sol/label-style` and `lt-claude/heatmap-ab-isolation`, tips kept as tags `archive/<branch>`. Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orchestrator/`. The
