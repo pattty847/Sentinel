@@ -9,8 +9,11 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
+#include <QHostAddress>
+#include <QTcpServer>
 #include <QTemporaryDir>
 #include <fstream>
+#include <sys/resource.h>
 #include <future>
 #include <gtest/gtest.h>
 #include <iostream>
@@ -51,6 +54,12 @@ struct ShadowServerTestAccess {
   }
   static std::string metrics(SentinelServerApp &app) {
     return app.m_metrics.render();
+  }
+  static bool hasEngine(SentinelServerApp &app) {
+    return app.m_marketDataCore != nullptr;
+  }
+  static SentinelStreamServer &server(SentinelServerApp &app) {
+    return *app.m_server;
   }
 };
 namespace {
@@ -202,13 +211,18 @@ struct ShadowTest : testing::Test {
     writer.reset();
     fanout.reset();
   }
-  void startFanout(size_t ringBytes = 32 * 1024 * 1024) {
+  // Fan-out "resnapshot" requests (capture reconnects); the roller sends none.
+  std::atomic<int> resnapshots{0};
+  void startFanout(size_t ringBytes = 32 * 1024 * 1024,
+                   size_t clientBytes = 16 * 1024 * 1024) {
     capture::FanoutConfig c;
     c.socketPath = QString::fromStdString(cfg.socketPath);
     c.ringBytes = ringBytes;
+    c.clientBytes = clientBytes;
     fanoutMetrics = std::make_unique<metrics::MetricsRegistry>();
     fanout = std::make_unique<capture::CaptureFanout>(
-        c, std::vector{Product}, *fanoutMetrics, [](const auto &) {});
+        c, std::vector{Product}, *fanoutMetrics,
+        [this](const auto &) { ++resnapshots; });
   }
   void startWriter() {
     capture::WriterConfig c;
@@ -381,6 +395,134 @@ struct ShadowTest : testing::Test {
       ++n;
     }
     return n;
+  }
+  // recording.live_feed: journal (slice D-b1). The sink stands in for the
+  // queued hand-offs into ServerDataModel; each event notes how many durable
+  // records history had applied when the worker handed it over.
+  struct ModelEvent {
+    std::string kind, product, reason;
+    std::vector<OrderBookLevel> bids, asks;
+    std::vector<BookLevelUpdate> updates;
+    Trade trade{};
+    bool connected = false;
+    json metadata;
+    size_t applied = 0;
+  };
+  std::mutex modelMutex;
+  std::vector<ModelEvent> modelEvents;
+  void tapModel() {
+    const auto push = [this](ModelEvent e) {
+      e.applied = count();
+      std::lock_guard lock(modelMutex);
+      modelEvents.push_back(std::move(e));
+    };
+    cfg.model.snapshot = [push](const std::string &p,
+                                std::vector<OrderBookLevel> bids,
+                                std::vector<OrderBookLevel> asks, int64_t) {
+      ModelEvent e;
+      e.kind = "snapshot";
+      e.product = p;
+      e.bids = std::move(bids);
+      e.asks = std::move(asks);
+      push(std::move(e));
+    };
+    cfg.model.updates = [push](const std::string &p,
+                               std::vector<BookLevelUpdate> updates, int64_t) {
+      ModelEvent e;
+      e.kind = "updates";
+      e.product = p;
+      e.updates = std::move(updates);
+      push(std::move(e));
+    };
+    cfg.model.invalidate = [push](const std::string &p,
+                                  const std::string &reason) {
+      ModelEvent e;
+      e.kind = "invalidate";
+      e.product = p;
+      e.reason = reason;
+      push(std::move(e));
+    };
+    cfg.model.trade = [push](const Trade &t) {
+      ModelEvent e;
+      e.kind = "trade";
+      e.product = t.product_id;
+      e.trade = t;
+      push(std::move(e));
+    };
+    cfg.model.connection = [push](const std::string &p, bool connected) {
+      ModelEvent e;
+      e.kind = "connection";
+      e.product = p;
+      e.connected = connected;
+      push(std::move(e));
+    };
+    cfg.model.metadata = [push](const std::string &p, const json &m) {
+      ModelEvent e;
+      e.kind = "metadata";
+      e.product = p;
+      e.metadata = m;
+      push(std::move(e));
+    };
+  }
+  std::vector<ModelEvent> modelLog(const std::string &kind = {},
+                                   const std::string &product = Product) {
+    std::lock_guard lock(modelMutex);
+    std::vector<ModelEvent> out;
+    for (const auto &e : modelEvents)
+      if ((kind.empty() || e.kind == kind) && e.product == product)
+        out.push_back(e);
+    return out;
+  }
+  size_t modelCount(const std::string &kind,
+                    const std::string &product = Product) {
+    return modelLog(kind, product).size();
+  }
+  // Position in the product's event log of the first update setting
+  // price to qty, or npos.
+  size_t updateAt(double price, double qty,
+                  const std::string &product = Product) {
+    const auto log = modelLog({}, product);
+    for (size_t i = 0; i < log.size(); ++i)
+      for (const auto &u : log[i].updates)
+        if (log[i].kind == "updates" && u.price == price && u.quantity == qty)
+          return i;
+    return std::string::npos;
+  }
+  using RawBook = std::pair<std::map<double, double>, std::map<double, double>>;
+  // Batch reference: every journal record on disk through a fresh JournalFeed.
+  RawBook batchBook(const std::string &product = Product) {
+    RawBook b;
+    JournalFeed f(product);
+    const auto apply = [&b](const std::vector<recording::Level> &v) {
+      for (const auto &l : v) {
+        auto &side = l.isBid ? b.first : b.second;
+        if (l.size > 0)
+          side[l.price] = l.size;
+        else
+          side.erase(l.price);
+      }
+    };
+    f.onSnapshot = [&](int64_t, int64_t, std::vector<recording::Level> v) {
+      b = {};
+      apply(v);
+    };
+    f.onUpdates = [&](int64_t, int64_t, std::vector<recording::Level> v) {
+      apply(v);
+    };
+    f.onInvalid = [&](int64_t, const std::string &) { b = {}; };
+    JournalReader reader(cfg.journalRoot, product);
+    JournalRecord r;
+    while (reader.next(r))
+      f.apply(r);
+    return b;
+  }
+  static RawBook eventBook(const ModelEvent &e) {
+    RawBook b;
+    for (const auto &l : e.bids)
+      b.first[l.price] = l.size;
+    for (const auto &l : e.asks)
+      b.second[l.price] = l.size;
+    return b;
   }
 };
 TEST_F(ShadowTest, CatchupLiveResumeNoGapsOrDuplicates) {
@@ -1966,5 +2108,781 @@ TEST(ShadowConfig, RequireRecordingChecksTheServedRoot) {
   EXPECT_EQ(SentinelServerApp::requiredRecordingProblem(copy), "");
   copy.recording.source = "rolling";
   EXPECT_NE(SentinelServerApp::requiredRecordingProblem(copy), "");
+}
+
+// ---------------------------------------------------------------------------
+// Slice D-b1: recording.live_feed: journal. The roller workers feed the
+// server's live model (ModelSink) from the journal and fan-out.
+// ---------------------------------------------------------------------------
+std::string trades(const std::string &side, const std::string &id,
+                   const std::string &product = Product,
+                   const std::string &price = "100000") {
+  return json({{"channel", "market_trades"},
+               {"events",
+                json::array({{{"type", "update"},
+                              {"trades", json::array({{{"trade_id", id},
+                                                       {"product_id", product},
+                                                       {"price", price},
+                                                       {"size", "0.5"},
+                                                       {"side", side},
+                                                       {"time",
+                                                        "2026-10-01T00:01:"
+                                                        "05Z"}}})}}})}})
+      .dump();
+}
+capture::Record lifecycle(int64_t ms, capture::Kind kind) {
+  return {kind,
+          {Epoch * 1000000 + ms * 1000000, capture::Stamp::now().steadyNs},
+          1,
+          "{}"};
+}
+std::string heartbeat() { return "{\"channel\":\"heartbeats\"}"; }
+// A1: the first tip hands over one synthesized snapshot equal to a batch
+// replay of the durable journal (anchor plus durable updates), then every
+// provisional record's updates on arrival, before its durable marker.
+TEST_F(ShadowTest, JournalTapSeedsOneSnapshotEqualToBatchThenProvisionalUpdates) {
+  tapModel();
+  writer->append(record(0, snapshot()));
+  for (int t = 1; t <= 63; ++t)
+    writer->append(record(t * 1000, t == 10   ? offer("100002", "4")
+                                    : t == 20 ? offer("100001", "0")
+                                              : heartbeat()));
+  writer->flush();
+  start();
+  ASSERT_TRUE(eventually([&] { return modelCount("snapshot") == 1; }));
+  const auto seed = modelLog("snapshot").front();
+  EXPECT_EQ(seed.applied, 64u); // after catch-up, at the durable tip
+  const auto batch = batchBook();
+  EXPECT_EQ(eventBook(seed), batch);
+  EXPECT_TRUE(batch.second.contains(100002));
+  EXPECT_FALSE(batch.second.contains(100001));
+  EXPECT_EQ(modelCount("metadata"), 1u);
+  ASSERT_EQ(modelCount("connection"), 1u);
+  EXPECT_TRUE(modelLog("connection").front().connected);
+  // Provisional (published, not yet durable): handed over on arrival.
+  writer->append(record(64000, offer("100500", "7")));
+  writer->append(record(65000, offer("100500", "0")));
+  ASSERT_TRUE(eventually([&] {
+    return updateAt(100500, 0) != std::string::npos;
+  }));
+  EXPECT_EQ(count(), 64u); // neither is durable yet
+  EXPECT_LT(updateAt(100500, 7), updateAt(100500, 0)); // arrival order
+  for (const auto &e : modelLog("updates"))
+    EXPECT_EQ(e.applied, 64u);
+  writer->flush();
+  ASSERT_TRUE(eventually([&] { return count() == 66; }));
+  std::this_thread::sleep_for(100ms);
+  // The durable marker adds nothing: one seed, two updates, no invalidation.
+  EXPECT_EQ(modelCount("snapshot"), 1u);
+  EXPECT_EQ(modelCount("updates"), 2u);
+  EXPECT_EQ(modelCount("invalidate"), 0u);
+  EXPECT_EQ(resnapshots.load(), 0);
+  shadow.reset();
+  writer->close();
+}
+// A2 shared check: the provisional level reached the model, then recovery
+// invalidated the book and re-seeded it from durable state only.
+void expectReseededFromDurable(ShadowTest &t, size_t updateIndex) {
+  const auto log = t.modelLog();
+  size_t invalid = std::string::npos, reseed = std::string::npos;
+  for (size_t i = updateIndex + 1; i < log.size(); ++i) {
+    if (invalid == std::string::npos && log[i].kind == "invalidate")
+      invalid = i;
+    if (invalid != std::string::npos && log[i].kind == "snapshot") {
+      reseed = i;
+      break;
+    }
+  }
+  ASSERT_NE(invalid, std::string::npos);
+  ASSERT_NE(reseed, std::string::npos);
+  EXPECT_EQ(t.eventBook(log[reseed]), t.batchBook());
+  EXPECT_FALSE(t.eventBook(log[reseed]).second.contains(100500));
+  EXPECT_EQ(t.resnapshots.load(), 0); // never asks capture to reconnect
+}
+TEST_F(ShadowTest, JournalTapRetractInvalidatesThenReseedsDurableState) {
+  tapModel();
+  initial();
+  start();
+  ASSERT_TRUE(eventually([&] { return modelCount("snapshot") == 1; }));
+  fanout->publish(0, {capture::JournalEventKind::Record, durable.runId,
+                      durable.block + 1, 0, true,
+                      frame(record(64000, offer("100500", "7")))});
+  ASSERT_TRUE(eventually([&] {
+    return updateAt(100500, 7) != std::string::npos;
+  }));
+  const auto update = updateAt(100500, 7);
+  fanout->publish(0, {capture::JournalEventKind::Retract, durable.runId,
+                      durable.block, durable.record, true, {}});
+  ASSERT_TRUE(eventually([&] { return modelCount("snapshot") == 2; }));
+  expectReseededFromDurable(*this, update);
+  EXPECT_EQ(count(), 64u);
+  shadow.reset();
+  writer->close();
+}
+TEST_F(ShadowTest, JournalTapDisconnectInvalidatesThenReseedsDurableState) {
+  tapModel();
+  fanout.reset();
+  startFanout(32 * 1024 * 1024, 64 * 1024);
+  initial();
+  start();
+  ASSERT_TRUE(eventually([&] { return modelCount("snapshot") == 1; }));
+  fanout->publish(0, {capture::JournalEventKind::Record, durable.runId,
+                      durable.block + 1, 0, true,
+                      frame(record(64000, offer("100500", "7")))});
+  ASSERT_TRUE(eventually([&] {
+    return updateAt(100500, 7) != std::string::npos;
+  }));
+  const auto update = updateAt(100500, 7);
+  // Larger than the client budget: the fan-out sends "disconnect" and closes.
+  fanout->publish(0, {capture::JournalEventKind::Record, durable.runId,
+                      durable.block + 1, 1, true,
+                      frame(record(64001, std::string(128 * 1024, ' ')))});
+  // Withdraw both from the ring, so the reconnect resumes at the durable tip.
+  fanout->publish(0, {capture::JournalEventKind::Retract, durable.runId,
+                      durable.block, durable.record, true, {}});
+  ASSERT_TRUE(eventually([&] { return modelCount("snapshot") >= 2; }));
+  EXPECT_EQ(fanoutMetrics->render().find(
+                "sentinel_fanout_disconnects_total{reason=\"slow_client\"} 0\n"),
+            std::string::npos);
+  expectReseededFromDurable(*this, update);
+  shadow.reset();
+  writer->close();
+}
+TEST_F(ShadowTest, JournalTapEofInvalidatesThenReseedsDurableState) {
+  serve(); // with the live heatmap lead, as served
+  tapModel();
+  initial();
+  start();
+  ASSERT_TRUE(eventually([&] { return modelCount("snapshot") == 1; }));
+  fanout->publish(0, {capture::JournalEventKind::Record, durable.runId,
+                      durable.block + 1, 0, true,
+                      frame(record(64000, offer("100500", "7")))});
+  ASSERT_TRUE(eventually([&] {
+    return updateAt(100500, 7) != std::string::npos;
+  }));
+  const auto update = updateAt(100500, 7);
+  fanout.reset(); // EOF
+  ASSERT_TRUE(eventually([&] { return modelCount("invalidate") == 1; }));
+  for (int t = 64; t <= 125; ++t)
+    writer->append(record(t * 1000, t == 70 ? offer("100003", "5") : heartbeat()));
+  writer->flush();
+  startFanout(); // empty ring: file catch-up to the first new durable marker
+  writer->append(record(126000));
+  writer->flush();
+  ASSERT_TRUE(eventually([&] { return modelCount("snapshot") == 2; }));
+  EXPECT_EQ(modelLog("snapshot").back().applied, 127u);
+  EXPECT_TRUE(eventBook(modelLog("snapshot").back()).second.contains(100003));
+  expectReseededFromDurable(*this, update);
+  shadow.reset();
+  writer->close();
+}
+// A7: after a restart the model gets nothing from the day's catch-up replay;
+// the seed arrives at the durable tip, equal to batch.
+TEST_F(ShadowTest, JournalTapRestartSeedsOnlyAfterCatchup) {
+  serve();
+  tapModel();
+  writer->append(record(0, snapshot()));
+  for (int t = 1; t <= 80; ++t)
+    writer->append(record(t * 1000, t % 7 ? heartbeat()
+                                          : offer(std::to_string(100001 + t),
+                                                  std::to_string(t % 5))));
+  writer->flush();
+  start();
+  ASSERT_TRUE(eventually([&] { return modelCount("snapshot") == 1; }));
+  shadow.reset();
+  {
+    std::lock_guard lock(modelMutex);
+    modelEvents.clear();
+  }
+  {
+    std::lock_guard lock(mutex);
+    applied.clear();
+  }
+  start();
+  ASSERT_TRUE(eventually([&] { return modelCount("snapshot") == 1; }));
+  const auto log = modelLog();
+  ASSERT_FALSE(log.empty());
+  for (const auto &e : log)
+    if (e.kind != "connection")
+      EXPECT_EQ(e.applied, 81u) << e.kind;
+  EXPECT_EQ(eventBook(modelLog("snapshot").front()), batchBook());
+  EXPECT_EQ(modelCount("trade"), 0u);
+  shadow.reset();
+  writer->close();
+}
+// A8: the day rotation replays the new day from its anchor without telling
+// the model: no invalidation, one re-seed at the new tip.
+TEST_F(ShadowTest, JournalTapMidnightReseedsOnceWithoutInvalidation) {
+  serve();
+  tapModel();
+  fanout.reset();
+  fanoutMetrics = std::make_unique<metrics::MetricsRegistry>();
+  capture::FanoutConfig fc;
+  fc.socketPath = QString::fromStdString(cfg.socketPath);
+  fanout = std::make_unique<capture::CaptureFanout>(
+      fc, std::vector<std::string>{Product, "ETH-USD"}, *fanoutMetrics,
+      [](const auto &) {});
+  writer.reset();
+  capture::WriterConfig bc, ec;
+  bc.root = ec.root = QString::fromStdString(cfg.journalRoot);
+  ec.symbol = "ETH-USD";
+  bc.fsyncBlocks = ec.fsyncBlocks = 1;
+  bc.onJournal = [&](const capture::JournalEvent &e) { fanout->publish(0, e); };
+  ec.onJournal = [&](const capture::JournalEvent &e) { fanout->publish(1, e); };
+  capture::Writer btc(bc, meta()), eth(ec, meta("ETH-USD"));
+  const int64_t Day = 86400000, from = Day - 120000;
+  const auto append = [&](int64_t t0, int64_t t1) {
+    for (auto t = t0; t <= t1; t += 1000) {
+      const bool level = t % 13000 == 0;
+      btc.append(record(t, t == from ? snapshot()
+                           : level   ? offer(std::to_string(100100 + t / 1000 % 50), "1")
+                                     : heartbeat()));
+      eth.append(record(t, t == from ? snapshot("ETH-USD")
+                           : level   ? offer(std::to_string(100100 + t / 1000 % 50), "2", "ETH-USD")
+                                     : heartbeat()));
+    }
+    btc.flush();
+    eth.flush();
+  };
+  append(from, Day - 30000);
+  shadow = std::make_unique<ShadowRoller>(
+      cfg, std::vector<std::string>{Product, "ETH-USD"}, root / "primary",
+      *metrics);
+  ASSERT_TRUE(eventually([&] {
+    return modelCount("snapshot") == 1 && modelCount("snapshot", "ETH-USD") == 1;
+  }));
+  append(Day - 29000, Day + 179000);
+  ASSERT_TRUE(eventually([&] {
+    for (const auto &p : {Product, std::string("ETH-USD")})
+      if (shadow->watermarks(p, "near").minuteThroughMs < Epoch + Day + 120000)
+        return false;
+    return modelCount("snapshot") == 2 && modelCount("snapshot", "ETH-USD") == 2;
+  }));
+  std::this_thread::sleep_for(100ms);
+  for (const auto &p : {Product, std::string("ETH-USD")}) {
+    EXPECT_EQ(modelCount("invalidate", p), 0u) << p;
+    EXPECT_EQ(modelCount("snapshot", p), 2u) << p; // the seed and one re-seed
+    ASSERT_EQ(modelCount("connection", p), 1u) << p;
+    EXPECT_EQ(eventBook(modelLog("snapshot", p).back()), batchBook(p)) << p;
+  }
+  shadow.reset();
+  btc.close();
+  eth.close();
+}
+// The model's "await the next upstream snapshot" paths become a re-seed
+// request: the worker answers with its current live book (provisional too).
+TEST_F(ShadowTest, JournalTapReseedRequestSendsTheCurrentLiveBook) {
+  tapModel();
+  initial();
+  start();
+  ASSERT_TRUE(eventually([&] { return modelCount("snapshot") == 1; }));
+  writer->append(record(64000, offer("100500", "7"))); // provisional
+  ASSERT_TRUE(eventually([&] {
+    return updateAt(100500, 7) != std::string::npos;
+  }));
+  shadow->requestReseed(Product);
+  ASSERT_TRUE(eventually([&] { return modelCount("snapshot") == 2; }));
+  auto expected = batchBook();
+  expected.second[100500] = 7;
+  EXPECT_EQ(eventBook(modelLog("snapshot").back()), expected);
+  EXPECT_EQ(modelCount("invalidate"), 0u);
+  shadow.reset();
+  writer->close();
+}
+// Trades reach the model once per journal position: on arrival, never again
+// when recovery reads the same record from the journal, and from durable
+// catch-up only to fill a gap after the model was live.
+TEST_F(ShadowTest, JournalTapDeliversEachTradeOnceAcrossRecovery) {
+  tapModel();
+  initial();
+  start();
+  ASSERT_TRUE(eventually([&] { return modelCount("snapshot") == 1; }));
+  writer->append(record(64000, trades("BUY", "t1"))); // provisional
+  ASSERT_TRUE(eventually([&] { return modelCount("trade") == 1; }));
+  // EOF before t1 is durable; capture keeps journaling (t1, then the gap t2).
+  fanout.reset();
+  ASSERT_TRUE(eventually([&] { return modelCount("invalidate") == 1; }));
+  writer->append(record(65000));
+  writer->flush();
+  writer->append(record(66000, trades("SELL", "t2")));
+  writer->flush();
+  startFanout();
+  writer->append(record(67000));
+  writer->flush();
+  ASSERT_TRUE(eventually([&] { return modelCount("snapshot") == 2; }));
+  EXPECT_EQ(count(), 68u);
+  writer->append(record(68000, trades("BUY", "t3"))); // provisional again
+  ASSERT_TRUE(eventually([&] { return modelCount("trade") == 3; }));
+  writer->flush();
+  ASSERT_TRUE(eventually([&] { return count() == 69; }));
+  std::this_thread::sleep_for(150ms);
+  std::vector<std::string> ids;
+  for (const auto &e : modelLog("trade"))
+    ids.push_back(e.trade.trade_id);
+  EXPECT_EQ(ids, (std::vector<std::string>{"t1", "t2", "t3"}));
+  // Coinbase reports the maker; the model gets the aggressor (A4).
+  EXPECT_EQ(modelLog("trade")[0].trade.side, AggressorSide::Sell);
+  EXPECT_EQ(modelLog("trade")[1].trade.side, AggressorSide::Buy);
+  EXPECT_EQ(resnapshots.load(), 0);
+  shadow.reset();
+  writer->close();
+}
+// A reconnect that resumes from the fan-out ring replays provisional records
+// the model already has: their trades are not delivered again.
+TEST_F(ShadowTest, JournalTapRingReplayNeverRedeliversATrade) {
+  tapModel();
+  cfg.pendingBytes = 600; // two provisional records overflow: ring resume
+  initial();
+  start();
+  ASSERT_TRUE(eventually([&] { return modelCount("snapshot") == 1; }));
+  writer->append(record(64000, trades("BUY", "t1"))); // provisional
+  ASSERT_TRUE(eventually([&] { return modelCount("trade") == 1; }));
+  writer->append(record(65000, json({{"channel", "heartbeats"},
+                                     {"pad", std::string(400, 'x')}})
+                                   .dump()));
+  // Each resume replays t1 and the padding from the ring and overflows again.
+  ASSERT_TRUE(eventually([&] { return modelCount("snapshot") >= 3; }));
+  writer->flush(); // durable: the resume catches up from the journal instead
+  ASSERT_TRUE(eventually([&] { return count() == 66; }));
+  writer->append(record(66000, trades("SELL", "t2")));
+  writer->flush();
+  ASSERT_TRUE(eventually([&] { return modelCount("trade") == 2; }));
+  std::this_thread::sleep_for(150ms);
+  std::vector<std::string> ids;
+  for (const auto &e : modelLog("trade"))
+    ids.push_back(e.trade.trade_id);
+  EXPECT_EQ(ids, (std::vector<std::string>{"t1", "t2"}));
+  shadow.reset();
+  writer->close();
+}
+// Hot-path evidence (AGENTS 5): capture publish -> model hand-off latency for
+// provisional records at the tip, and the per-record worker CPU of the tap.
+TEST_F(ShadowTest, JournalTapHandoffLatencyBenchmark) {
+  writer.reset();
+  capture::WriterConfig wc;
+  wc.root = QString::fromStdString(cfg.journalRoot);
+  wc.onJournal = [&](const capture::JournalEvent &e) { fanout->publish(0, e); };
+  capture::Session session(wc, meta());
+  ASSERT_TRUE(session.submit(record(0, snapshot())));
+  for (int t = 1; t <= 63; ++t)
+    ASSERT_TRUE(session.submit(record(t * 1000)));
+  std::mutex samplesMutex;
+  std::vector<double> handed;
+  std::atomic<bool> seeded{false};
+  cfg.model.snapshot = [&](const std::string &, std::vector<OrderBookLevel>,
+                           std::vector<OrderBookLevel>, int64_t) { seeded = true; };
+  cfg.model.updates = [&](const std::string &, std::vector<BookLevelUpdate> u,
+                          int64_t) {
+    // The level size carries the submit time (steady us).
+    const auto us = capture::Stamp::now().steadyNs / 1000. - u.front().quantity;
+    std::lock_guard lock(samplesMutex);
+    handed.push_back(us);
+  };
+  cfg.model.invalidate = [](const std::string &, const std::string &) {};
+  cfg.model.trade = [](const Trade &) {};
+  cfg.model.connection = [](const std::string &, bool) {};
+  cfg.model.metadata = [](const std::string &, const json &) {};
+  start();
+  ASSERT_TRUE(eventually([&] { return seeded.load(); }));
+  const auto begin = std::chrono::steady_clock::now();
+  for (int i = 0; i < 200; ++i) {
+    const auto stamp = std::to_string(capture::Stamp::now().steadyNs / 1000);
+    ASSERT_TRUE(session.submit(record(64000 + i, offer(std::to_string(100100 + i % 50), stamp))));
+    std::this_thread::sleep_until(begin + (i + 1) * 10ms);
+  }
+  ASSERT_TRUE(eventually([&] {
+    std::lock_guard lock(samplesMutex);
+    return handed.size() == 200;
+  }));
+  shadow.reset();
+  session.close();
+  std::sort(handed.begin(), handed.end());
+  std::cout << "JOURNAL_TAP_HANDOFF samples=200 submit_to_model_us p50="
+            << handed[99] << " p95=" << handed[189] << '\n';
+}
+// A7 cost evidence (run with --gtest_also_run_disabled_tests): process CPU for
+// the day catch-up of 7 synthetic products, with and without the model tap.
+TEST_F(ShadowTest, DISABLED_JournalTapCatchupCostSevenProducts) {
+  const std::vector<std::string> products = {"BTC-USD", "ETH-USD", "SOL-USD", "FARTCOIN-USD",
+                                             "PEPE-USD", "DOGE-USD", "AVAX-USD"};
+  const int records = std::getenv("TAP_BENCH_RECORDS") ? std::atoi(std::getenv("TAP_BENCH_RECORDS")) : 20000;
+  fanout.reset();
+  writer.reset();
+  fanoutMetrics = std::make_unique<metrics::MetricsRegistry>();
+  capture::FanoutConfig fc;
+  fc.socketPath = QString::fromStdString(cfg.socketPath);
+  fanout = std::make_unique<capture::CaptureFanout>(fc, products, *fanoutMetrics, [](const auto &) {});
+  std::vector<std::unique_ptr<capture::Writer>> writers;
+  for (size_t i = 0; i < products.size(); ++i) {
+    capture::WriterConfig wc;
+    wc.root = QString::fromStdString(cfg.journalRoot);
+    wc.symbol = products[i];
+    wc.fsyncBlocks = 0;
+    wc.onJournal = [this, i](const capture::JournalEvent &e) { fanout->publish(i, e); };
+    writers.push_back(std::make_unique<capture::Writer>(wc, meta(products[i])));
+    auto &w = *writers.back();
+    w.append(record(0, snapshot(products[i])));
+    for (int r = 1; r < records; ++r) {
+      const auto ms = int64_t(r) * 3000000 / records * 1; // ~50 minutes
+      if (r % 10 == 0)
+        w.append(record(ms, trades(r % 20 ? "BUY" : "SELL", std::to_string(r), products[i])));
+      else
+        w.append(record(ms, json({{"channel", "l2_data"},
+                                  {"events", json::array({{{"type", "update"},
+                                    {"product_id", products[i]},
+                                    {"updates", json::array({
+                                      {{"side", "offer"}, {"price_level", std::to_string(100002 + r % 40)}, {"new_quantity", std::to_string(r % 9)}},
+                                      {{"side", "bid"}, {"price_level", std::to_string(99998 - r % 40)}, {"new_quantity", std::to_string(r % 7)}},
+                                      {{"side", "offer"}, {"price_level", std::to_string(100050 + r % 13)}, {"new_quantity", "1.5"}}})}}})}})
+                                .dump()));
+    }
+    w.flush();
+  }
+  const auto cpu = [] {
+    rusage u{};
+    getrusage(RUSAGE_SELF, &u);
+    return u.ru_utime.tv_sec + u.ru_stime.tv_sec + (u.ru_utime.tv_usec + u.ru_stime.tv_usec) / 1e6;
+  };
+  for (int round = 0; round < 3; ++round)
+    for (const bool tapped : {false, true}) {
+      cfg.outputRoot = (root / ("out-" + std::to_string(round) + (tapped ? "-tap" : "-plain"))).string();
+      cfg.model = {};
+      std::atomic<int> seeds{0};
+      if (tapped) {
+        cfg.model.snapshot = [&](const std::string &, std::vector<OrderBookLevel>,
+                                 std::vector<OrderBookLevel>, int64_t) { ++seeds; };
+        cfg.model.updates = [](const std::string &, std::vector<BookLevelUpdate>, int64_t) {};
+        cfg.model.invalidate = [](const std::string &, const std::string &) {};
+        cfg.model.trade = [](const Trade &) {};
+        cfg.model.connection = [](const std::string &, bool) {};
+        cfg.model.metadata = [](const std::string &, const json &) {};
+      }
+      {
+        std::lock_guard lock(mutex);
+        applied.clear();
+      }
+      const auto c0 = cpu();
+      const auto w0 = std::chrono::steady_clock::now();
+      metrics = std::make_unique<metrics::MetricsRegistry>();
+      shadow = std::make_unique<ShadowRoller>(cfg, products, root / "primary", *metrics);
+      const auto until = std::chrono::steady_clock::now() + 120s;
+      while ((count() < products.size() * records ||
+              (tapped && seeds.load() < int(products.size()))) &&
+             std::chrono::steady_clock::now() < until)
+        std::this_thread::sleep_for(2ms);
+      ASSERT_EQ(count(), products.size() * records);
+      const auto wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - w0).count();
+      const auto used = cpu() - c0;
+      shadow.reset();
+      std::cout << "JOURNAL_TAP_CATCHUP round=" << round << " tap=" << tapped
+                << " products=" << products.size() << " records=" << count()
+                << " cpuS=" << used << " wallS=" << wall << '\n';
+    }
+  for (auto &w : writers)
+    w->close();
+}
+// With the journal feed the model never asks REST for product metadata, even
+// when a feed connects before its journal header arrived.
+TEST(JournalLiveFeedModel, NeverRequestsRestMetadata) {
+  static int argc = 1;
+  static char name[] = "test_shadow";
+  static char *argv[] = {name, nullptr};
+  if (!QCoreApplication::instance())
+    static QCoreApplication app(argc, argv);
+  QTemporaryDir temp;
+  struct Cwd {
+    QString old = QDir::currentPath();
+    ~Cwd() { QDir::setCurrent(old); }
+  } cwd;
+  ASSERT_TRUE(QDir::setCurrent(temp.path()));
+  for (const auto *feed : {"engine", "journal"}) {
+    ServerConfig config;
+    config.defaultSymbols = {"PEPE-USD"};
+    config.rollerShadow.products = {"PEPE-USD"};
+    config.heatmap.persistenceEnabled = false;
+    config.recording.liveFeed = feed;
+    ServerDataModel model(config);
+    int requests = 0;
+    QObject::connect(&model, &ServerDataModel::productMetadataRequested,
+                     [&](const QString &, uint64_t) { ++requests; });
+    model.onMarketDataConnectionChanged("PEPE-USD", true);
+    EXPECT_EQ(requests, std::string(feed) == "engine" ? 1 : 0) << feed;
+  }
+}
+// ---- Slice D-b1 through the production server graph: initialize() with
+// recording.live_feed: journal, PEPE-USD captured, a real queued hand-off into
+// ServerDataModel on this (main) thread.
+bool eventuallyQt(auto f) {
+  const auto until = std::chrono::steady_clock::now() + 8s;
+  do {
+    QCoreApplication::processEvents();
+    if (f())
+      return true;
+    std::this_thread::sleep_for(5ms);
+  } while (std::chrono::steady_clock::now() < until);
+  QCoreApplication::processEvents();
+  return f();
+}
+std::string pepeLevel(const std::string &side, const std::string &price,
+                      const std::string &size) {
+  return json({{"channel", "l2_data"},
+               {"events",
+                json::array({{{"type", "update"},
+                              {"product_id", "PEPE-USD"},
+                              {"updates", json::array({{{"side", side},
+                                                        {"price_level", price},
+                                                        {"new_quantity",
+                                                         size}}})}}})}})
+      .dump();
+}
+struct JournalServer {
+  ShadowTest &t;
+  std::unique_ptr<capture::Writer> pepe;
+  struct Cwd {
+    QString old = QDir::currentPath();
+    ~Cwd() { QDir::setCurrent(old); }
+  } cwd;
+  ServerConfig config;
+  std::unique_ptr<SentinelServerApp> app;
+  struct Book {
+    std::string product, status;
+    double tick;
+    size_t bids, asks;
+  };
+  std::vector<Book> books;
+  int metadataRequests = 0, bookUpdates = 0, bars = 0;
+  std::vector<Trade> trades;
+  explicit JournalServer(ShadowTest &test) : t(test) {
+    t.fanout.reset();
+    t.writer.reset();
+    t.fanoutMetrics = std::make_unique<metrics::MetricsRegistry>();
+    capture::FanoutConfig fc;
+    fc.socketPath = QString::fromStdString(t.cfg.socketPath);
+    t.fanout = std::make_unique<capture::CaptureFanout>(
+        fc, std::vector<std::string>{"PEPE-USD"}, *t.fanoutMetrics,
+        [this](const auto &) { ++t.resnapshots; });
+    capture::WriterConfig wc;
+    wc.root = QString::fromStdString(t.cfg.journalRoot);
+    wc.symbol = "PEPE-USD";
+    wc.fsyncBlocks = 1;
+    wc.onJournal = [this](const capture::JournalEvent &e) {
+      if (t.fanout)
+        t.fanout->publish(0, e);
+    };
+    pepe = std::make_unique<capture::Writer>(wc, pepeMeta());
+    pepe->append(record(0, pepeSnapshot()));
+    for (int s = 1; s <= 63; ++s)
+      pepe->append(record(s * 1000));
+    pepe->flush();
+    EXPECT_TRUE(QDir::setCurrent(t.temp.path())); // relative tick logs
+    config.defaultSymbols = {Product};
+    config.streamPort = 0;
+    config.recording.enabled = true;
+    config.recording.source = "roller";
+    config.recording.liveFeed = "journal";
+    config.recording.dir = (t.root / "primary").string();
+    config.recording.fallbackDir.clear();
+    config.heatmap.persistenceEnabled = false;
+    config.rollerShadow = t.cfg;
+    config.rollerShadow.products = {"PEPE-USD"};
+    config.rollerShadow.liveNowForTest = [&test] { return test.liveNow.load(); };
+    QTcpServer probe; // a free loopback port for the metrics endpoint
+    EXPECT_TRUE(probe.listen(QHostAddress::LocalHost, 0));
+    const auto port = probe.serverPort();
+    probe.close();
+    qputenv("SENTINEL_HEALTH_PORT", QByteArray::number(port));
+  }
+  bool initialize() {
+    app = std::make_unique<SentinelServerApp>(config);
+    const bool ok = app->initialize();
+    if (!ok)
+      return false;
+    auto &m = model();
+    QObject::connect(&m, &ServerDataModel::bookSnapshotBroadcast,
+                     [this](const QString &id,
+                            const std::vector<OrderBookLevel> &bids,
+                            const std::vector<OrderBookLevel> &asks, double tick,
+                            const QString &status, uint64_t) {
+                       books.push_back({id.toStdString(), status.toStdString(),
+                                        tick, bids.size(), asks.size()});
+                     });
+    QObject::connect(&m, &ServerDataModel::bookUpdateBroadcast,
+                     [this](const QString &, const std::vector<BookDelta> &,
+                            double, double, uint64_t) { ++bookUpdates; });
+    QObject::connect(&m, &ServerDataModel::productMetadataRequested,
+                     [this](const QString &, uint64_t) { ++metadataRequests; });
+    QObject::connect(&m, &ServerDataModel::barUpdated,
+                     [this](const QString &, int64_t, const OHLCVBar &) {
+                       ++bars;
+                     });
+    QObject::connect(&m, &ServerDataModel::tradeBroadcast,
+                     [this](const Trade &trade) { trades.push_back(trade); });
+    return true;
+  }
+  ~JournalServer() {
+    app.reset();
+    pepe->close();
+    qunsetenv("SENTINEL_HEALTH_PORT");
+  }
+  ServerDataModel &model() { return ShadowServerTestAccess::model(*app); }
+  std::string metrics() { return ShadowServerTestAccess::metrics(*app); }
+  bool connected(bool up) {
+    return metrics().find(std::string("sentinel_mdc_connected{product=\"PEPE-"
+                                      "USD\",pinned=\"1\"} ") +
+                          (up ? "1" : "0") + "\n") != std::string::npos;
+  }
+  // Index of the first PEPE book status `status` at or after `from`.
+  size_t status(const std::string &status, size_t from = 0) {
+    for (size_t i = from; i < books.size(); ++i)
+      if (books[i].product == "PEPE-USD" && books[i].status == status)
+        return i;
+    return std::string::npos;
+  }
+};
+// A5 and A3: no MarketDataFeeds; captured products only; PEPE's tick comes
+// from the journal header (no REST) and a far move re-seeds instead of
+// waiting for an upstream snapshot.
+TEST_F(ShadowTest, JournalLiveFeedServerHasNoEngineAndServesCapturedProducts) {
+  JournalServer s(*this);
+  ASSERT_TRUE(s.initialize());
+  EXPECT_FALSE(ShadowServerTestAccess::hasEngine(*s.app));
+  auto &server = ShadowServerTestAccess::server(*s.app);
+  using Admission = SentinelStreamServer::FeedAdmission;
+  EXPECT_EQ(server.notifyClientSubscribed("PEPE-USD"), Admission::Accepted);
+  EXPECT_EQ(server.notifyClientSubscribed("XRP-USD"), Admission::InvalidProduct);
+  EXPECT_EQ(server.notifyClientSubscribed(Product), Admission::InvalidProduct);
+  ASSERT_TRUE(eventuallyQt([&] {
+    return s.status("ready") != std::string::npos && s.connected(true);
+  }));
+  const auto &ready = s.books[s.status("ready")];
+  EXPECT_EQ(ready.tick,
+            deriveGrid(pepeMeta()["product_metadata"], 0.00001).nearTick);
+  EXPECT_LT(ready.tick, 0.005);
+  EXPECT_EQ(ready.bids, 2u);
+  EXPECT_EQ(ready.asks, 1u);
+  EXPECT_EQ(s.metadataRequests, 0); // never REST
+  EXPECT_EQ(s.metrics().find("sentinel_mdc_ws_latency_ms"), std::string::npos);
+  // Provisional updates below $0.005 reach the live book.
+  s.pepe->append(record(64000, pepeLevel("offer", "0.00001002", "123")));
+  ASSERT_TRUE(eventuallyQt([&] { return s.bookUpdates > 0; }));
+  // A 50 % move leaves the model's bounded raw band: re-seed, not "await".
+  s.pepe->append(record(
+      65000,
+      json({{"channel", "l2_data"},
+            {"events",
+             json::array({{{"type", "update"},
+                           {"product_id", "PEPE-USD"},
+                           {"updates",
+                            json::array({{{"side", "bid"},
+                                          {"price_level", "0.00000999"},
+                                          {"new_quantity", "0"}},
+                                         {{"side", "bid"},
+                                          {"price_level", "0.00000980"},
+                                          {"new_quantity", "0"}},
+                                         {{"side", "offer"},
+                                          {"price_level", "0.00001001"},
+                                          {"new_quantity", "0"}},
+                                         {{"side", "offer"},
+                                          {"price_level", "0.00001002"},
+                                          {"new_quantity", "0"}},
+                                         {{"side", "bid"},
+                                          {"price_level", "0.00001500"},
+                                          {"new_quantity", "10"}},
+                                         {{"side", "offer"},
+                                          {"price_level", "0.00001510"},
+                                          {"new_quantity", "10"}}})}}})}})
+          .dump()));
+  ASSERT_TRUE(eventuallyQt([&] {
+    const auto lost = s.status("aggregation_unavailable");
+    return lost != std::string::npos &&
+           s.status("ready", lost + 1) != std::string::npos;
+  }));
+  const auto &moved = s.books[s.status("ready", s.status("aggregation_unavailable") + 1)];
+  EXPECT_EQ(moved.bids, 1u);
+  EXPECT_EQ(moved.asks, 1u);
+  EXPECT_EQ(resnapshots.load(), 0);
+}
+// A4: a journal market_trades BUY (Coinbase maker side) reaches the model as
+// the aggressor Sell; the tape, footprint and candles follow it.
+TEST_F(ShadowTest, JournalLiveFeedServerTradesCarryTheAggressorSide) {
+  JournalServer s(*this);
+  ASSERT_TRUE(s.initialize());
+  ASSERT_TRUE(eventuallyQt([&] { return s.status("ready") != std::string::npos; }));
+  s.pepe->append(record(65000, trades("BUY", "p1", "PEPE-USD", "0.00001")));
+  ASSERT_TRUE(eventuallyQt([&] { return !s.trades.empty() && s.bars > 0; }));
+  EXPECT_EQ(s.trades.front().trade_id, "p1");
+  EXPECT_EQ(s.trades.front().side, AggressorSide::Sell);
+  std::vector<ServerDataModel::FootprintTradeSample> footprint;
+  ASSERT_TRUE(s.model().collectFootprintTrades("PEPE-USD", Epoch + 64000,
+                                               Epoch + 66000, footprint));
+  ASSERT_EQ(footprint.size(), 1u);
+  EXPECT_EQ(footprint.front().side, AggressorSide::Sell);
+}
+// A6: TransportDown invalidates; 30 s without a socket record reports the
+// product disconnected (and invalid); TransportUp plus a snapshot is ready.
+TEST_F(ShadowTest, JournalLiveFeedServerConnectionFollowsTransportAndTipAge) {
+  JournalServer s(*this);
+  ASSERT_TRUE(s.initialize());
+  ASSERT_TRUE(eventuallyQt([&] {
+    return s.status("ready") != std::string::npos && s.connected(true);
+  }));
+  s.pepe->append(lifecycle(64000, capture::Kind::TransportDown));
+  ASSERT_TRUE(eventuallyQt([&] {
+    return s.status("invalidated") != std::string::npos && s.connected(false);
+  }));
+  const auto down = s.books.size();
+  s.pepe->append(lifecycle(65000, capture::Kind::TransportUp));
+  ASSERT_TRUE(eventuallyQt([&] { return s.connected(true); }));
+  EXPECT_EQ(s.status("ready", down), std::string::npos); // no book yet
+  s.pepe->append(record(66000, pepeSnapshot()));
+  ASSERT_TRUE(eventuallyQt([&] { return s.status("ready", down) != std::string::npos; }));
+  // Tip-age guard: a frozen capture (FM-127) shows as invalid and down.
+  const auto quiet = s.books.size();
+  liveNow = Epoch + 66000 + 30000;
+  ASSERT_TRUE(eventuallyQt([&] {
+    return s.connected(false) && s.status("invalidated", quiet) != std::string::npos;
+  }));
+  // Records again: re-seed from durable plus the provisional suffix.
+  const auto silent = s.books.size();
+  s.pepe->append(record(67000));
+  ASSERT_TRUE(eventuallyQt([&] {
+    return s.connected(true) && s.status("ready", silent) != std::string::npos;
+  }));
+  EXPECT_EQ(s.books.back().status, "ready");
+}
+// A5: the journal feed needs the roller-served recording; anything else is
+// refused at startup with the reason logged.
+TEST_F(ShadowTest, JournalLiveFeedRefusedWithoutTheRollerSource) {
+  JournalServer s(*this);
+  s.config.recording.source = "primary";
+  EXPECT_FALSE(s.initialize());
+  EXPECT_NE(liveFeedProblem(s.config).find("requires recording.source=roller"),
+            std::string::npos);
+  s.config.recording.source = "roller";
+  s.config.recording.liveFeed = "websocket";
+  EXPECT_NE(liveFeedProblem(s.config), "");
+  EXPECT_FALSE(s.initialize());
+  s.config.recording.liveFeed = "journal";
+  s.config.rollerShadow.enabled = false;
+  EXPECT_NE(liveFeedProblem(s.config), "");
+  EXPECT_FALSE(s.initialize());
+  s.app.reset();
+}
+TEST(ShadowConfig, LiveFeedKeyDefaultsToEngine) {
+  QTemporaryDir tmp;
+  const auto p = fs::path(tmp.path().toStdString()) / "config.yaml";
+  {
+    std::ofstream out(p);
+    out << "recording:\n  source: roller\n  live_feed: journal\n"
+           "roller_shadow:\n  enabled: true\n";
+  }
+  ServerConfig c;
+  EXPECT_EQ(c.recording.liveFeed, "engine");
+  EXPECT_EQ(liveFeedProblem(c), "");
+  EXPECT_FALSE(journalLiveFeed(c));
+  ASSERT_TRUE(ConfigLoader::loadServerConfig(p.string(), &c));
+  EXPECT_EQ(c.recording.liveFeed, "journal");
+  EXPECT_TRUE(journalLiveFeed(c));
+  EXPECT_EQ(liveFeedProblem(c), "");
 }
 } // namespace

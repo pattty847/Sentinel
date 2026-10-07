@@ -27,7 +27,11 @@ public:
     static std::string requiredRecordingProblem(ServerConfig& config);
 
 private:
-    void startShadow(const std::vector<std::string>& symbols);
+    // False only when the journal live feed cannot start (no roller).
+    bool startShadow(const std::vector<std::string>& symbols);
+    void wireEngineFeed(const std::vector<std::string>& symbolList);
+    void wireJournalFeed();
+    sentinel::roller::ModelSink journalModelSink();
     ServerConfig m_serverConfig;
     // Declared first: outlives every component whose samplers it holds.
     sentinel::metrics::MetricsRegistry m_metrics;

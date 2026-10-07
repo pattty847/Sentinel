@@ -101,8 +101,11 @@ ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
     , m_logger(std::make_unique<TickBinaryLogger>())
     , m_aggregator(std::make_unique<TimeframeAggregator>(m_serverConfig.heatmap.timeframesMs))
     , m_heatmapStreamer(std::make_unique<HeatmapTwapStreamer>(*this, m_serverConfig.heatmap))
+    , m_journalFeed(journalLiveFeed(m_serverConfig))
 {
-    for (const auto& symbol : normalizedDefaultSymbols(m_serverConfig.defaultSymbols)) {
+    // recording.live_feed: journal: every captured product is a pinned live feed.
+    for (const auto& symbol : m_journalFeed ? rollerProducts(m_serverConfig)
+                                            : normalizedDefaultSymbols(m_serverConfig.defaultSymbols)) {
         auto& feed = m_feeds[symbol];
         feed.pinned = true;
         feed.lifetime = ++m_nextFeedLifetime;
@@ -339,6 +342,8 @@ void ServerDataModel::acquireGuiFeed(const std::string& symbol) {
     }
 }
 void ServerDataModel::requestProductMetadataIfNeeded(const std::string& symbol, FeedState& feed) {
+    // recording.live_feed: journal: the journal header carries it (onFeedMetadata), no REST.
+    if (m_journalFeed) return;
     if (symbol == "BTC-USD" || !feed.metadata.is_null() || feed.metadataPending ||
         localNowMs() < feed.nextMetadataAttemptMs) return;
     feed.metadataPending = true;
@@ -373,6 +378,25 @@ void ServerDataModel::onProductMetadata(const std::string& symbol, uint64_t life
                                    data.liveBook.stateVersion());
         sLog_Warning("Live book metadata unavailable: symbol=" << symbol << " error=" << e.what());
     }
+}
+void ServerDataModel::onFeedMetadata(const std::string& symbol, const nlohmann::json& metadata) {
+    const auto it = m_feeds.find(symbol);
+    if (it == m_feeds.end()) return;
+    onProductMetadata(symbol, it->second.lifetime, metadata, {});
+}
+void ServerDataModel::setReseedHandler(std::function<void(const std::string&)> handler) {
+    m_reseed = std::move(handler);
+}
+// recording.live_feed: journal. The feed holds the whole book: a fresh snapshot
+// replaces "await the next upstream snapshot". At most once per symbol per second.
+void ServerDataModel::requestReseed(const std::string& symbol, const char* why) {
+    if (!m_journalFeed || !m_reseed) return;
+    const auto now = localNowMs();
+    auto& next = m_nextReseedMs[symbol];
+    if (now < next) return;
+    next = now + 1000;
+    sLog_Data("Live book re-seed requested: symbol=" << symbol << " reason=" << why);
+    m_reseed(symbol);
 }
 void ServerDataModel::releaseGuiFeed(const std::string& symbol, int64_t releaseLocalMs) {
     const auto it = m_feeds.find(symbol);
@@ -650,6 +674,7 @@ void ServerDataModel::onLiveOrderBookLevelUpdates(const QString& productId,
                                            data.liveBook.stateVersion());
                 sLog_Warning("Live book raw band exceeded by potential best: symbol=" << symbol
                              << " price=" << update.price);
+                requestReseed(symbol, "raw band exceeded");
                 return;
             }
             continue;
@@ -821,6 +846,7 @@ void ServerDataModel::publishAggregatedBook(const QString& productId, SymbolHotD
                                    data.liveBook.stateVersion());
         sLog_Warning("Live book current raw BBO unavailable: symbol=" << symbol
                      << " bid=" << bestBid << " ask=" << bestAsk);
+        requestReseed(symbol, "raw BBO unavailable");
         return;
     }
     data.awaitingRawBbo = false;

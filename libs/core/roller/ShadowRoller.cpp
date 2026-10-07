@@ -5,6 +5,7 @@
 #include <QLocalSocket>
 #include <QTemporaryDir>
 #include <algorithm>
+#include <cmath>
 #include <condition_variable>
 #include <deque>
 #include <fstream>
@@ -222,6 +223,292 @@ public:
     }
   }
 };
+// recording.live_feed: journal (slice D-b1), roller worker thread only. The
+// server's live model follows this product's journal through cfg.model:
+// - `durable` follows the history feed (durable records, catch-up included;
+//   RollOptions::onFeed chains its callbacks, so nothing is parsed twice);
+// - at the socket tip `live` starts as a copy of it and applies every
+//   provisional record on arrival through its own fork of the history feed.
+// Nothing reaches the model before the tip. Each seed (first tip, recovery, day
+// rotation, silence) hands over the header metadata and one synthesized
+// snapshot, then one queued hand-off per provisional record. A failure, a
+// provisional discard or tipSilenceMs without a socket record invalidates the
+// model's book and reports connected=false; the next tip re-seeds from durable
+// state. A day rotation re-seeds without invalidating. Trades reach the model
+// once per journal position: provisional ones on arrival; durable ones only to
+// fill a gap after the model was live (never the day's history at a restart).
+class ModelTap {
+  struct Book {
+    bool valid = false;
+    int64_t envelopeMs = 0;
+    std::map<double, double> bids, asks; // native prices, whole book
+    void clear() {
+      valid = false;
+      bids.clear();
+      asks.clear();
+    }
+    void apply(int64_t envelope, const std::vector<recording::Level> &levels) {
+      envelopeMs = envelope;
+      for (const auto &l : levels) {
+        if (!std::isfinite(l.price) || !std::isfinite(l.size))
+          continue;
+        auto &side = l.isBid ? bids : asks;
+        if (l.size > 0)
+          side[l.price] = l.size;
+        else
+          side.erase(l.price);
+      }
+    }
+    void snapshot(int64_t envelope,
+                  const std::vector<recording::Level> &levels) {
+      bids.clear();
+      asks.clear();
+      apply(envelope, levels);
+      valid = true;
+    }
+  };
+  const ShadowConfig &cfg;
+  const std::string product;
+  std::atomic<bool> &reseed; // set by ShadowRoller::requestReseed
+  Book durable, live;
+  bool durableUp = true, liveUp = false;
+  bool seeded = false;   // live follows the socket tip
+  bool shown = false;    // the model holds a book from this tap
+  bool reported = false; // last connection state handed to the model
+  bool tradeHere = false; // the record being applied carries new trades
+  const JournalFeed *history = nullptr;
+  std::unique_ptr<JournalFeed> feed;
+  // Newest journal position whose trades reached the model.
+  std::optional<JournalPos> delivered;
+  std::string lastRun;
+  json sentMetadata;
+  int64_t lastRecordMs = 0;
+  // Bound by the current LiveSource (run order and header metadata).
+  std::function<bool(const JournalPos &, const JournalPos &)> older;
+  std::function<const json *(const std::string &)> metadataOf;
+  int64_t now() const {
+    return cfg.liveNowForTest ? cfg.liveNowForTest() : nowMs();
+  }
+  // Strictly newer than the delivered position; unknown order is not newer.
+  bool undelivered(const JournalPos &p) const {
+    if (!delivered)
+      return false;
+    if (!older)
+      return false;
+    try {
+      return !older(p, *delivered);
+    } catch (const std::exception &) {
+      return false;
+    }
+  }
+  void sendMetadata(const std::string &run) {
+    lastRun = run;
+    if (!metadataOf)
+      return;
+    try {
+      const auto *m = metadataOf(run);
+      if (!m || *m == sentMetadata)
+        return;
+      sentMetadata = *m;
+      cfg.model.metadata(product, *m);
+    } catch (const std::exception &e) {
+      sLog_Warning("Journal live metadata unavailable product="
+                   << product << " run=" << run << " error=" << e.what());
+    }
+  }
+  void show(const Book &b) {
+    std::vector<OrderBookLevel> bids, asks;
+    bids.reserve(b.bids.size());
+    asks.reserve(b.asks.size());
+    for (auto it = b.bids.rbegin(); it != b.bids.rend(); ++it)
+      bids.push_back({it->first, it->second});
+    for (const auto &[price, size] : b.asks)
+      asks.push_back({price, size});
+    cfg.model.snapshot(product, std::move(bids), std::move(asks),
+                       b.envelopeMs);
+    shown = true;
+  }
+  void hide(const std::string &reason) {
+    if (!std::exchange(shown, false))
+      return;
+    cfg.model.invalidate(product, reason);
+  }
+  void report() {
+    const bool connected = seeded && liveUp;
+    if (connected == std::exchange(reported, connected))
+      return;
+    cfg.model.connection(product, connected);
+  }
+  void unseed() {
+    seeded = false;
+    feed.reset();
+    live.clear();
+  }
+  void serviceReseed() {
+    if (!reseed.load(std::memory_order_relaxed) || !reseed.exchange(false))
+      return;
+    if (!seeded || !live.valid)
+      return; // the next seed sends a snapshot anyway
+    show(live);
+    sLog_Data("Journal live re-seed product=" << product << " bids="
+                                              << live.bids.size()
+                                              << " asks=" << live.asks.size());
+  }
+
+public:
+  ModelTap(const ShadowConfig &c, std::string p, std::atomic<bool> &r)
+      : cfg(c), product(std::move(p)), reseed(r) {}
+  bool enabled() const { return bool(cfg.model); }
+  void bind(std::function<bool(const JournalPos &, const JournalPos &)> o,
+            std::function<const json *(const std::string &)> m) {
+    older = std::move(o);
+    metadataOf = std::move(m);
+  }
+  // RollOptions::onFeed: follow the day's history feed. A new day replays
+  // from its anchor, so the durable book starts empty.
+  void observe(JournalFeed &f) {
+    history = &f;
+    durable.clear();
+    durableUp = true;
+    f.onSnapshot = [this, next = std::move(f.onSnapshot)](
+                       int64_t e, int64_t l, std::vector<recording::Level> v) {
+      durable.snapshot(e, v);
+      if (next)
+        next(e, l, std::move(v));
+    };
+    f.onUpdates = [this, next = std::move(f.onUpdates)](
+                      int64_t e, int64_t l, std::vector<recording::Level> v) {
+      durable.apply(e, v);
+      if (next)
+        next(e, l, std::move(v));
+    };
+    f.onInvalid = [this, next = std::move(f.onInvalid)](
+                      int64_t t, const std::string &reason) {
+      durable.clear();
+      if (next)
+        next(t, reason);
+    };
+    f.onTrade = [this](const Trade &t) {
+      if (tradeHere)
+        cfg.model.trade(t);
+    };
+    f.onConnection = [this](bool up) { durableUp = up; };
+  }
+  // onRecorder(nullptr): the day's feed goes away (day end or failure). Quiet:
+  // the model keeps its book until the next seed or drop().
+  void detach() {
+    history = nullptr;
+    unseed();
+  }
+  // Before history applies a durable record (RollOptions::nextRecord).
+  void durableRecord(const JournalPos &p) {
+    tradeHere = !seeded && undelivered(p);
+    if (tradeHere)
+      delivered = p;
+  }
+  // At the socket tip, after every returned record reached history.
+  void ensure(const std::deque<JournalRecord> &pending,
+              const JournalPos &applied) {
+    if (seeded || !history)
+      return;
+    const auto began = std::chrono::steady_clock::now();
+    sendMetadata(applied.run);
+    live = durable;
+    liveUp = durableUp;
+    feed = std::make_unique<JournalFeed>(*history);
+    feed->onSnapshot = [this](int64_t e, int64_t,
+                              std::vector<recording::Level> v) {
+      live.snapshot(e, v);
+      show(live);
+    };
+    feed->onUpdates = [this](int64_t e, int64_t,
+                             std::vector<recording::Level> v) {
+      live.apply(e, v);
+      if (!shown)
+        return;
+      std::vector<BookLevelUpdate> updates;
+      updates.reserve(v.size());
+      for (const auto &l : v)
+        updates.push_back({l.isBid, l.price, l.size});
+      cfg.model.updates(product, std::move(updates), e);
+    };
+    feed->onInvalid = [this](int64_t, const std::string &reason) {
+      live.clear();
+      hide(reason);
+    };
+    feed->onTrade = [this](const Trade &t) {
+      if (tradeHere)
+        cfg.model.trade(t);
+    };
+    feed->onConnection = [this](bool up) {
+      liveUp = up;
+      report();
+    };
+    feed->onTick = {};
+    seeded = true;
+    if (!delivered || undelivered(applied))
+      delivered = applied; // the durable tip's trades are history
+    lastRecordMs = now();
+    if (live.valid)
+      show(live);
+    else
+      hide("journal book invalid at the tip");
+    report();
+    sLog_Data("Journal live seed product="
+              << product << " valid=" << live.valid
+              << " bids=" << live.bids.size() << " asks=" << live.asks.size()
+              << " provisional=" << pending.size() << " seedUs="
+              << std::chrono::duration_cast<std::chrono::microseconds>(
+                     std::chrono::steady_clock::now() - began)
+                     .count());
+    for (const auto &r : pending)
+      apply(r);
+  }
+  // A provisional record at the tip, on arrival.
+  void apply(const JournalRecord &r) {
+    if (!seeded)
+      return;
+    lastRecordMs = now();
+    if (r.pos.run != lastRun)
+      sendMetadata(r.pos.run);
+    tradeHere = undelivered(r.pos);
+    if (tradeHere)
+      delivered = r.pos;
+    sLog_Probe("journal.live",
+               "product=" << product << " kind=" << int(r.record.kind)
+                          << " ageMs="
+                          << nowMs() - r.record.time.systemNs / 1000000);
+    try {
+      feed->apply(r);
+    } catch (const std::exception &e) {
+      drop(std::string("journal live feed failed: ") + e.what());
+      return;
+    }
+    serviceReseed();
+  }
+  // Socket waits: the tip-age guard and re-seed requests.
+  void idle() {
+    if (!seeded)
+      return;
+    if (now() - lastRecordMs >= cfg.tipSilenceMs) {
+      sLog_Warning("Journal live tip silent product="
+                   << product << " ms=" << now() - lastRecordMs);
+      drop("journal tip silent");
+      return;
+    }
+    serviceReseed();
+  }
+  // Failure or provisional discard: the model's book is invalid until the
+  // next seed.
+  void drop(const std::string &reason) {
+    unseed();
+    if (shown)
+      sLog_Data("Journal live book invalidated product=" << product
+                                                        << " reason=" << reason);
+    hide(reason);
+    report();
+  }
+};
 // A bounded synchronous socket, owned by this product's worker only. Timeouts
 // periodically check cancellation; no Qt event loop or main-thread invocation.
 class LiveSource {
@@ -239,6 +526,7 @@ class LiveSource {
   bool atTip = false;
   std::function<void(const std::string &)> retry;
   LiveLead *lead;
+  ModelTap *tap;
   std::unique_ptr<JournalReader> catchup;
   std::map<std::string, json> metadata;
   std::map<std::string, size_t> runOrder;
@@ -287,6 +575,8 @@ class LiveSource {
           lead->ensure(pending);
         lead->idle();
       }
+      if (tap)
+        tap->idle();
       if (socket.bytesAvailable() == 0)
         socket.waitForReadyRead(50);
       bytes += socket.read(capture::MaxRecordBytes + 4100 - bytes.size());
@@ -336,6 +626,8 @@ class LiveSource {
       pending.push_back(std::move(r));
       if (lead)
         lead->apply(pending.back());
+      if (tap)
+        tap->apply(pending.back());
     } else {
       if (!raw.empty())
         throw std::runtime_error("fanout control with raw suffix");
@@ -404,10 +696,21 @@ public:
              const std::atomic<bool> &stop,
              const std::optional<JournalPos> &checkpoint,
              std::function<void(const std::string &)> onRetry,
-             LiveLead *liveLead = nullptr)
+             LiveLead *liveLead = nullptr, ModelTap *modelTap = nullptr)
       : cfg(c), product(std::move(p)), stopping(stop),
-        retry(std::move(onRetry)), lead(liveLead) {
+        retry(std::move(onRetry)), lead(liveLead), tap(modelTap) {
     handshake(checkpoint);
+    if (tap)
+      tap->bind(
+          [this](const JournalPos &a, const JournalPos &b) {
+            return older(a, b);
+          },
+          [this](const std::string &run) -> const json * {
+            if (!metadata.contains(run))
+              inventory();
+            const auto it = metadata.find(run);
+            return it == metadata.end() ? nullptr : &it->second;
+          });
     // A day-anchor rebuild can exceed the bounded server backlog. Hold no
     // socket during that replay; reconnect at the fully applied durable tip.
     socket.abort();
@@ -415,6 +718,12 @@ public:
     discardProvisional();
     received.reset();
   }
+  ~LiveSource() {
+    if (tap)
+      tap->bind({}, {});
+  }
+  LiveSource(const LiveSource &) = delete;
+  LiveSource &operator=(const LiveSource &) = delete;
   bool next(JournalReader &disk, JournalRecord &out) {
     while (!stopping) {
       try {
@@ -506,6 +815,8 @@ private:
         atTip = true;
         lead->ensure(pending);
       }
+      if (tap && applied)
+        tap->ensure(pending, *applied);
       controlOrRecord();
     }
     return false;
@@ -553,6 +864,8 @@ struct ShadowRoller::Impl {
         *leadForks;
     bool refused = false;
     bool healthy = false; // readyMutex
+    // recording.live_feed: journal: the model asked for a fresh snapshot.
+    std::atomic<bool> reseed{false};
     // Served watermarks (chunk workers): the current day's history recorder
     // while it exists, merged into the newest values ever served.
     mutable std::mutex historyMutex;
@@ -707,7 +1020,12 @@ struct ShadowRoller::Impl {
     std::optional<std::chrono::steady_clock::time_point> failureSince;
     bool coolingDown = false;
     int64_t furthestCommitted = 0;
+    // Outlives each day's source and feed: a day rotation re-seeds the model
+    // without invalidating it.
+    ModelTap tap(cfg, p.name, p.reseed);
     const auto retry = [&](const std::string &reason) {
+      if (tap.enabled())
+        tap.drop(reason);
       unhealthy(p, reason);
       if (stopping)
         return;
@@ -773,7 +1091,8 @@ struct ShadowRoller::Impl {
         LiveLead lead(cfg, p.name, *p.leadForks,
                       [&p] { return p.committed.load(); });
         LiveSource source(cfg, p.name, stopping, checkpoint, retry,
-                          lead.enabled() ? &lead : nullptr);
+                          lead.enabled() ? &lead : nullptr,
+                          tap.enabled() ? &tap : nullptr);
         RollOptions o{cfg.journalRoot, cfg.outputRoot, p.name, day, day + Day};
         o.publisher = cfg.publisher;
         o.onRecorder = [&](recording::BookRecorder *h, const JournalFeed *f,
@@ -791,7 +1110,11 @@ struct ShadowRoller::Impl {
           } else
             unhealthy(p, "writer closed");
           lead.attach(h, f);
+          if (!h && !f)
+            tap.detach();
         };
+        if (tap.enabled())
+          o.onFeed = [&](JournalFeed &f) { tap.observe(f); };
         o.cancelled = [&] { return stopping.load(); };
         o.productWriterLease = true;
         o.onInvalid = [&](const std::string &reason) {
@@ -803,6 +1126,8 @@ struct ShadowRoller::Impl {
         o.nextRecord = [&](JournalReader &reader, JournalRecord &input) {
           if (!source.next(reader, input))
             return false;
+          if (tap.enabled())
+            tap.durableRecord(input.pos);
           return true;
         };
         o.onApplied = [&](const JournalRecord &input) {
@@ -1005,6 +1330,13 @@ ShadowRoller::watermarks(const std::string &product,
   const auto it = p->served.find(layer);
   return it == p->served.end() ? recording::BookRecorder::Watermarks{}
                                : it->second;
+}
+void ShadowRoller::requestReseed(const std::string &product) {
+  if (!m)
+    return;
+  for (auto &p : m->products)
+    if (p->name == product)
+      p->reseed.store(true);
 }
 bool ShadowRoller::running(const std::string &product) const {
   const auto *p = m ? m->find(product) : nullptr;

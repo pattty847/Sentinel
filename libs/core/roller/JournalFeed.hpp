@@ -10,6 +10,7 @@ public:
     explicit JournalFeed(std::string product) : product_(std::move(product)) {}
     std::function<void(int64_t, int64_t, std::vector<recording::Level>)> onSnapshot, onUpdates;
     std::function<void(int64_t, const std::string&)> onInvalid;
+    // Aggressor side (Coinbase's maker side flipped once, here).
     std::function<void(const Trade&)> onTrade;
     std::function<void(bool)> onConnection;
     std::function<void(int64_t)> onTick;

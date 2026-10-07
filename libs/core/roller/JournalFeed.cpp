@@ -82,7 +82,12 @@ void JournalFeed::apply(const JournalRecord& input) {
                     for (const auto& e : MessageDispatcher::parse({{"channel","market_trades"},{"trades",trades}},
                             std::chrono::system_clock::time_point(std::chrono::milliseconds(local))).events)
                         if (const auto* t = std::get_if<TradeEvent>(&e); t && t->trade.product_id == product_ && onTrade) {
-                            try { onTrade(t->trade); }
+                            // Coinbase market_trades reports the resting maker. Like the
+                            // engine boundary, deliver the initiating aggressor side.
+                            Trade trade = t->trade;
+                            if (trade.side == AggressorSide::Buy) trade.side = AggressorSide::Sell;
+                            else if (trade.side == AggressorSide::Sell) trade.side = AggressorSide::Buy;
+                            try { onTrade(trade); }
                             catch (const std::exception& error) { throw std::logic_error(error.what()); }
                         }
                 };

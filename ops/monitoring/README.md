@@ -407,3 +407,39 @@ and the next minute boundary after a commit. `deploy-runtime.sh
 check-server-log <log dir> <pid> <exe>` runs the same log check. Probe `roller.live` logs every forming-minute publication
 with `ageMs` (now minus bucket start plus observed time) and the lowest
 native price in it.
+
+### Live feed from the journal (`recording.live_feed: journal`, slice D-b1)
+
+`recording.live_feed` is `engine` (default: this process's Coinbase WebSocket,
+`MarketDataFeeds`, feeds the live book, trades and metadata) or `journal`.
+`journal` requires `recording.source: roller` and `roller_shadow.enabled`; any
+other combination or value stops the server at startup (`Server not started:
+...`). With `journal` the server opens no Coinbase WebSocket: each roller
+worker keeps a whole raw book that follows its history feed and, at the socket
+tip, a live copy that applies every provisional fan-out record on arrival. The
+model gets the journal header's `product_metadata` (no REST), one synthesized
+snapshot at the tip and then each record's updates and trades (aggressor side)
+as queued hand-offs. Every `roller_shadow.products` entry is a pinned live
+feed; a subscription for any other product is refused as `invalid_product`.
+REST is used for candle history only. The key is deleted in D-b2.
+
+A retract, disconnect, EOF or worker failure invalidates the product's book
+(`Journal live book invalidated`, status `invalidated` on the wire); the next
+tip re-seeds it from durable state (`Journal live seed`). So does 30 s without
+a socket record at the tip (`Journal live tip silent`): a frozen capture
+(FM-127) shows as an invalid book and `sentinel_mdc_connected 0`, not as a
+quiet book. A UTC midnight re-seeds once without invalidating. The model's
+"wait for the next upstream snapshot" paths (raw band exceeded, raw BBO
+unavailable) ask the worker for a fresh snapshot instead (`Live book re-seed
+requested`, at most once per product per second); nothing asks capture to
+resubscribe. Trades reach the model once per journal position; after a
+recovery the gap is filled from the journal, but a restart never replays the
+day's trades.
+
+With `journal`, `sentinel_mdc_connected{pinned="1"}` and the transport
+counters follow the journal (TransportUp/TransportDown records and the 30 s
+guard), so A1b keeps working; capture's own `sentinel_capture_feed_up` is the
+upstream truth. `sentinel_mdc_ws_latency_ms` is absent, and the `mdc`
+connection gauges keep their meaning only for the cap check. Probe
+`journal.live` logs every provisional record handed to the model with `ageMs`
+(now minus its capture receive time).

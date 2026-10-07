@@ -354,6 +354,36 @@ TEST(Roller, PublisherKeepsSliceACheckpointPolicyHash) {
     ASSERT_EQ(finals.size(),4u);
     for(const auto& r:finals){EXPECT_FALSE(r->flags&recording::kProvisional);EXPECT_EQ(r->committedThroughMs,r->bucketStartMs+60'000);}
 }
+// D-b1 A9: the journal model tap chains the day's feed (RollOptions::onFeed);
+// it is not checkpoint policy and changes neither the hash nor the output.
+TEST(Roller, FeedTapKeepsCheckpointPolicyHashAndOutput) {
+    constexpr uint64_t SliceABtcHash=18293455670244139256ull; // /Volumes/T7/sentinel-data/hmc2/BTC-USD/roller.json
+    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); fs::path root=temp.path().toStdString(); fixture(root/"raw");
+    auto plain=options(root/"raw",root/"plain"); plain.toMs=Epoch+240'000; plain.productWriterLease=true;
+    roll(plain);
+    auto tapped=options(root/"raw",root/"tapped"); tapped.toMs=Epoch+240'000; tapped.productWriterLease=true;
+    size_t snapshots=0,updates=0;
+    tapped.onFeed=[&](JournalFeed& feed){
+        feed.onSnapshot=[&,next=std::move(feed.onSnapshot)](int64_t e,int64_t l,std::vector<recording::Level> v){++snapshots;next(e,l,std::move(v));};
+        feed.onUpdates=[&,next=std::move(feed.onUpdates)](int64_t e,int64_t l,std::vector<recording::Level> v){++updates;next(e,l,std::move(v));};
+    };
+    roll(tapped);
+    EXPECT_GT(snapshots,0u); EXPECT_GT(updates,0u);
+    for(const auto* name:{"plain","tapped"})
+        EXPECT_EQ(json::parse(contents(root/name/"BTC-USD"/"roller.json")).at("configHash").get<uint64_t>(),SliceABtcHash) << name;
+    const auto plainFiles=files(root/"plain");
+    EXPECT_FALSE(plainFiles.empty()); EXPECT_EQ(plainFiles,files(root/"tapped"));
+}
+// D-b1 A4: JournalFeed delivers the aggressor side (Coinbase reports the maker).
+TEST(Roller, FeedFlipsMakerSideToAggressorOnce) {
+    JournalFeed feed("BTC-USD"); std::vector<AggressorSide> sides;
+    feed.onTrade=[&](const Trade& t){sides.push_back(t.side);};
+    const auto trade=[](const char* side){return json({{"channel","market_trades"},{"events",json::array({{{"trades",
+        json::array({{{"product_id","BTC-USD"},{"price","100"},{"size","1"},{"side",side}}})}}})}}).dump();};
+    for(const auto* side:{"BUY","SELL","UNKNOWN"})
+        feed.apply({record(1000,capture::Kind::Frame,trade(side)),{"BTC-USD","run",0,0},{},false,2});
+    EXPECT_EQ(sides,(std::vector<AggressorSide>{AggressorSide::Sell,AggressorSide::Buy,AggressorSide::Unknown}));
+}
 // The lead fork shares no store: it coexists with the history recorder's
 // product lease, never writes, and claims no committed cutoff.
 TEST(Roller, LeadForkNeverPersistsAndClaimsNoCommit) {

@@ -1,8 +1,10 @@
 #pragma once
+#include "marketdata/model/TradeData.h"
 #include <chrono>
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <nlohmann/json_fwd.hpp>
 #include <string>
 #include <vector>
 namespace recording {
@@ -10,6 +12,29 @@ struct Hmc2Record;
 }
 namespace sentinel::roller {
 struct JournalRecord;
+// recording.live_feed: journal (slice D-b1): the server's live model follows
+// the capture journal instead of a Coinbase WebSocket. Installed by the server,
+// never read from config and not part of configHash. Every call is made on the
+// product's roller worker and must be one queued hand-off to the model's thread.
+struct ModelSink {
+  // A synthesized whole-book snapshot (native prices) at the socket tip.
+  std::function<void(const std::string &product, std::vector<OrderBookLevel> bids,
+                     std::vector<OrderBookLevel> asks, int64_t envelopeMs)>
+      snapshot;
+  // One provisional record's level changes, in arrival order.
+  std::function<void(const std::string &product,
+                     std::vector<BookLevelUpdate> updates, int64_t exchangeMs)>
+      updates;
+  // The book is unusable until the next snapshot.
+  std::function<void(const std::string &product, const std::string &reason)>
+      invalidate;
+  std::function<void(const Trade &)> trade; // aggressor side
+  std::function<void(const std::string &product, bool connected)> connection;
+  // The journal header's Coinbase product JSON (no REST).
+  std::function<void(const std::string &product, const nlohmann::json &)>
+      metadata;
+  explicit operator bool() const { return bool(snapshot); }
+};
 struct ShadowConfig {
   bool enabled = false;
   std::string journalRoot = "/Volumes/T7/sentinel-data/raw-l2";
@@ -54,5 +79,10 @@ struct ShadowConfig {
   int64_t livePublishMs = 500;
   // Wall clock (epoch ms) for lead ticks every 250 ms; tests inject.
   std::function<int64_t()> liveNowForTest;
+  // recording.live_feed: journal. Empty: the model is fed by the engine.
+  ModelSink model;
+  // With model: no socket record for this long at the tip invalidates the
+  // model's book and reports connected=false (on the liveNowForTest clock).
+  int64_t tipSilenceMs = 30000;
 };
 } // namespace sentinel::roller

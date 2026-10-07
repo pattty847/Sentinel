@@ -38,18 +38,28 @@ SentinelServerApp::~SentinelServerApp() {
     if (m_marketDataCore) {
         m_marketDataCore->stop();
     }
+    // recording.live_feed: journal: the model's re-seed hook names the roller,
+    // which is destroyed first (its workers' queued hand-offs check the model).
+    if (m_serverModel) m_serverModel->setReseedHandler({});
 }
 
 bool SentinelServerApp::initialize() {
     try {
+        const bool journal = journalLiveFeed(m_serverConfig);
+        if (const auto problem = liveFeedProblem(m_serverConfig); !problem.empty()) {
+            sLog_Error("Server not started: " << problem);
+            return false;
+        }
         sLog_App("Initializing server components: streamPort=" << m_serverConfig.streamPort
                  << " mdcHost=" << m_serverConfig.mdc.host
-                 << " defaultSymbols=" << m_serverConfig.defaultSymbols.size());
+                 << " defaultSymbols=" << m_serverConfig.defaultSymbols.size()
+                 << " liveFeed=" << m_serverConfig.recording.liveFeed);
 
         // GET /ping and GET /metrics on 127.0.0.1 (ops/monitoring/README.md).
         sentinel::metrics::registerProcessMetrics(m_metrics);
-        m_wsLatencyMs = &m_metrics.gauge("sentinel_mdc_ws_latency_ms",
-                                         "Latest Coinbase WebSocket latency (server time minus exchange timestamp).");
+        if (!journal) // no Coinbase WebSocket with the journal feed
+            m_wsLatencyMs = &m_metrics.gauge("sentinel_mdc_ws_latency_ms",
+                                             "Latest Coinbase WebSocket latency (server time minus exchange timestamp).");
         m_httpServer = std::make_unique<sentinel::metrics::MetricsHttpServer>(m_metrics);
         const QByteArray portEnv = qgetenv("SENTINEL_HEALTH_PORT");
         bool ok = false;
@@ -69,8 +79,8 @@ bool SentinelServerApp::initialize() {
         sLog_App("Authenticator: credentials=" << m_authenticator->hasCredentials()
                  << " useJwt=" << m_serverConfig.mdc.useJwt);
 
-        // 2. Market Data Core
-        try {
+        // 2. Market Data Core (recording.live_feed: engine only)
+        if (!journal) try {
             if (m_serverConfig.mdc.maxConnections < 1) throw std::invalid_argument("max_connections must be at least 1");
             MarketDataFeeds::Options options;
             options.maxConnections = size_t(m_serverConfig.mdc.maxConnections);
@@ -101,7 +111,30 @@ bool SentinelServerApp::initialize() {
         m_server->registerMetrics(m_metrics);
         m_metrics.gaugeFn("sentinel_stream_sessions", "Open client stream sessions.", {},
                           [this]() -> std::optional<double> { return double(m_server->sessionCount()); });
-        
+
+        const auto normalizedSymbols = normalizedDefaultSymbols(m_serverConfig.defaultSymbols);
+        std::vector<std::string> symbolList;
+        symbolList.reserve(normalizedSymbols.size());
+        for (const auto& sym : normalizedSymbols) {
+            if (m_defaultSymbols.insert(sym).second) {
+                symbolList.push_back(sym);
+            }
+        }
+        if (journal) wireJournalFeed();
+        else wireEngineFeed(symbolList);
+        // Before the stream server starts: a roller-served recording must be
+        // attached before the first hello reports recording availability.
+        if (!startShadow(symbolList)) return false;
+        m_server->start();
+        return true;
+    } catch (const std::exception& e) {
+        sLog_Error("Exception during initialization: " << e.what());
+        return false;
+    }
+}
+
+// recording.live_feed: engine: this process's Coinbase WebSocket (MarketDataFeeds).
+void SentinelServerApp::wireEngineFeed(const std::vector<std::string>& symbolList) {
         // Connect MarketDataFeeds -> ServerDataModel via queued invocations
         QPointer<ServerDataModel> modelPtr(m_serverModel.get());
         // Lifecycle and data callbacks originate on the same I/O executor;
@@ -239,30 +272,73 @@ bool SentinelServerApp::initialize() {
         // Start connection
         m_marketDataCore->start();
 
-        const auto normalizedSymbols = normalizedDefaultSymbols(m_serverConfig.defaultSymbols);
-        std::vector<std::string> symbolList;
-        symbolList.reserve(normalizedSymbols.size());
-        for (const auto& sym : normalizedSymbols) {
-            if (m_defaultSymbols.insert(sym).second) {
-                symbolList.push_back(sym);
-            }
-        }
-
         for (const auto& symbol : symbolList) m_marketDataCore->add(symbol, true);
         sLog_Data("Server default subscribe: count=" << symbolList.size()
                   << " guiConnectionCap=" << m_serverConfig.mdc.maxConnections);
-        // Before the stream server starts: a roller-served recording must be
-        // attached before the first hello reports recording availability.
-        startShadow(symbolList);
-        m_server->start();
-        return true;
-    } catch (const std::exception& e) {
-        sLog_Error("Exception during initialization: " << e.what());
-        return false;
-    }
 }
 
-void SentinelServerApp::startShadow(const std::vector<std::string>& symbols) {
+// recording.live_feed: journal (slice D-b1): no MarketDataFeeds and no Coinbase
+// WebSocket. The roller workers feed the model through the ModelSink that
+// startShadow installs; REST serves candle history only. Only captured
+// products (rollerProducts) can be opened; any other is an invalid product.
+void SentinelServerApp::wireJournalFeed() {
+    const auto products = rollerProducts(m_serverConfig);
+    sLog_App("Live feed: journal (capture fan-out); no Coinbase WebSocket: products=" << products.size());
+    m_server->setFeedAdmissionHandler([products](const std::string& symbol) {
+        if (std::find(products.begin(), products.end(), symbol) != products.end())
+            return SentinelStreamServer::FeedAdmission::Accepted;
+        sLog_Data("Feed admission refused, product not captured: symbol=" << symbol);
+        return SentinelStreamServer::FeedAdmission::InvalidProduct;
+    });
+}
+
+// Roller worker threads: each call is one queued hand-off to the model's thread.
+sentinel::roller::ModelSink SentinelServerApp::journalModelSink() {
+    QPointer<ServerDataModel> modelPtr(m_serverModel.get());
+    // Shared, read-only after construction: no per-record QString conversion.
+    auto names = std::make_shared<std::map<std::string, QString>>();
+    for (const auto& product : rollerProducts(m_serverConfig))
+        names->emplace(product, QString::fromStdString(product));
+    const auto name = [names](const std::string& product) {
+        const auto it = names->find(product);
+        return it != names->end() ? it->second : QString::fromStdString(product);
+    };
+    sentinel::roller::ModelSink sink;
+    sink.snapshot = [modelPtr, name](const std::string& product, std::vector<OrderBookLevel> bids,
+                                     std::vector<OrderBookLevel> asks, int64_t envelopeMs) {
+        safeInvoke(modelPtr, [id = name(product), bids = std::move(bids), asks = std::move(asks),
+                              envelopeMs](ServerDataModel& model) {
+            model.onLiveOrderBookInitialized(id, bids, asks, static_cast<qint64>(envelopeMs));
+        });
+    };
+    sink.updates = [modelPtr, name](const std::string& product, std::vector<BookLevelUpdate> updates,
+                                    int64_t exchangeMs) {
+        safeInvoke(modelPtr, [id = name(product), updates = std::move(updates), exchangeMs](ServerDataModel& model) {
+            model.onLiveOrderBookLevelUpdates(id, updates, static_cast<qint64>(exchangeMs));
+        });
+    };
+    sink.invalidate = [modelPtr, name](const std::string& product, const std::string& reason) {
+        safeInvoke(modelPtr, [id = name(product), reason = QString::fromStdString(reason)](ServerDataModel& model) {
+            model.onLiveOrderBookInvalidated(id, reason);
+        });
+    };
+    sink.trade = [modelPtr](const Trade& trade) {
+        safeInvoke(modelPtr, [trade](ServerDataModel& model) { model.onTrade(trade); });
+    };
+    sink.connection = [modelPtr](const std::string& product, bool connected) {
+        safeInvoke(modelPtr, [product, connected](ServerDataModel& model) {
+            sLog_App("Journal live feed: product=" << product << " " << (connected ? "CONNECTED" : "DISCONNECTED"));
+            model.onMarketDataConnectionChanged(product, connected);
+        });
+    };
+    sink.metadata = [modelPtr](const std::string& product, const nlohmann::json& metadata) {
+        safeInvoke(modelPtr, [product, metadata](ServerDataModel& model) { model.onFeedMetadata(product, metadata); });
+    };
+    return sink;
+}
+
+bool SentinelServerApp::startShadow(const std::vector<std::string>& symbols) {
+    const bool journal = journalLiveFeed(m_serverConfig);
     // Shadow: an independent consumer; no primary callbacks or recorder queue.
     // Serving (recording.source: roller): the model has no primary recorder and
     // serves roller_shadow.dir; the roller publishes into its LiveService.
@@ -279,6 +355,7 @@ void SentinelServerApp::startShadow(const std::vector<std::string>& symbols) {
             shadow.ensureLiveFinal = m_serverModel->rollerEnsureFinal();
             shadow.livePublishMs = m_serverConfig.recording.livePublishMs;
         }
+        if (journal) shadow.model = journalModelSink();
         const auto products = shadow.products.empty() ? symbols : rollerProducts(m_serverConfig);
         // Informational cross-connection comparison root: the primary recorder's.
         const std::filesystem::path primaryRoot =
@@ -293,11 +370,19 @@ void SentinelServerApp::startShadow(const std::vector<std::string>& symbols) {
                 },
                 [roller](const std::string& product) { return roller->running(product); });
         }
+        if (journal) {
+            if (!m_shadowRoller->active()) throw std::runtime_error("the journal live feed needs the roller");
+            auto* roller = m_shadowRoller.get();
+            m_serverModel->setReseedHandler([roller](const std::string& product) { roller->requestReseed(product); });
+        }
     } catch (const std::exception& e) {
         m_metrics.counter("sentinel_roller_shadow_start_failures_total",
                           "Shadow supervisor construction failures.").inc();
         sLog_Error("Shadow roller supervisor failed: " << e.what());
+        // Engine: the shadow is independent of serving. Journal: no live feed at all.
+        return !journal;
     }
+    return true;
 }
 
 std::string SentinelServerApp::requiredRecordingProblem(ServerConfig& config) {

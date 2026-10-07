@@ -24,6 +24,9 @@ public:
   watermarks(const std::string &product, const std::string &layer) const;
   // Thread-safe: the product's worker is consuming the journal/socket.
   bool running(const std::string &product) const;
+  // Thread-safe (recording.live_feed: journal): ask the product's worker for a
+  // fresh synthesized snapshot of its live book (ModelSink::snapshot).
+  void requestReseed(const std::string &product);
 
 private:
   struct Impl;
