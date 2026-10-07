@@ -45,7 +45,7 @@ Never without the owner present: R2, any deploy, cutovers, data deletion. Check 
 
 - A corrupt-skip LANDED `e8c416a` (96/96; Fable 2 rounds, majors fixed; 4 minors deferred, the damaged-index placeholder ordinal goes into the anchors rebase). Deploys after R2.
 - C bind-address LANDED `0688fe0` (95/95). It deploys after R2. After that deploy the server listens on 127.0.0.1 only; the owner's GUI uses 127.0.0.1, and remote clients set the Mac's Tailscale address. Deferred: a sentinel_stream_listening gauge.
-- D-b1 `d71de5c`: Astra delta FINDINGS 1 major (the sampler measured tick-spacing jitter, not deadline lateness); fix running (Codex Sol thread `01a114eb`); then Astra re-check; lands after the R2 deploy.
+- D-b1: READY (lag metric = direct main-thread queue latency, Astra PASS). Lands after the R2 deploy; journal flip gated on the lag metric (engine baseline, then journal).
 
 ## In flight (T7 worktrees)
 
@@ -55,7 +55,7 @@ On resume, read the Codex outputs: `.claude/acting-orchestrator/corrupt-skip/wri
 |---|---|---|---|
 | `lt-astra/journal-anchors` | `117482e` | Phase A committed (sidecar store; BookRecorder state export/import byte-identical on real BTC/PEPE hours; bounded seek). Anchor size: BTC 1.43 MB, PEPE 61 KB per anchor, retention decided 2026-10-07: 00:00Z anchors kept forever (owner), intraday about 2 days. Phase B (rebase on D-b1, JournalFeed restore, roll() wiring, the 6 owner checks) after D-b1 passes review | Claude Fable review after Phase B; land and deploy after R2 |
 | `lt-sol/gui-reconnect` | `208d6d7` | Fix round 1 (Codex Sol thread `01a11560-3828-7c91-9fba-b8187deb80ba`): backoff reset after 10 s stable uptime, backoff tests, LabData timer removed, quieter outage logs. Visible change: cold-start label reads Reconnecting | Sonnet re-check, land; native check at the next deploy |
-| `lt-claude/roller-db1` | `971997c` | Astra r3 PASS (journal-time candle contract). Writer adding the flip-gate main-thread event-loop lag metric (sentinel_server_event_loop_lag_ms p50/p95/p99/max, engine and journal); Astra checks only that delta | After the audit: fix round 2 with the same writer, same Astra thread; land only AFTER the R2 deploy |
+| `lt-claude/roller-db1` | rebased onto main (pre-landing, clean; old tip tagged `pre-rebase/roller-db1`) | READY: Astra PASS on all rounds incl. the queue-latency lag metric (`270b629` before rebase). Verifying the rebased build and suites | After the audit: fix round 2 with the same writer, same Astra thread; land only AFTER the R2 deploy |
 
 Retired 2026-10-06 (owner): `lt-sol/label-style` and `lt-claude/heatmap-ab-isolation`, tips kept as tags `archive/<branch>`. Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orchestrator/`. The
 `.claude/worktrees/youthful-ishizaka-b0e889` (`60caa04`, branch `claude/exciting-hypatia-1c7a34`) is not part of this work; leave it alone.
