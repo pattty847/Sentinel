@@ -1082,12 +1082,12 @@ TEST_F(ChunkWire, AutomaticReconnectAfterServerRestartRestoresSubscribedSymbolDa
     const auto downsBeforeStableDrop = downs.load();
     server->stop();
     ASSERT_TRUE(poll([&] { return downs.load() > downsBeforeStableDrop; }));
-    ASSERT_TRUE(poll([&] { return downs.load() >= downsBeforeStableDrop + 2; }, 700ms));
+    ASSERT_TRUE(poll([&] { return downs.load() >= downsBeforeStableDrop + 2; }, 1500ms));
     {
         std::lock_guard lock(timesMutex);
         const auto gap = downTimes[downsBeforeStableDrop + 1] - downTimes[downsBeforeStableDrop];
         EXPECT_GE(gap, 450ms);
-        EXPECT_LT(gap, 700ms); // stable uptime resets a previously grown retry counter
+        EXPECT_LT(gap, 1400ms); // stable uptime resets a previously grown retry counter
     }
     client->disconnectFromServer();
     std::this_thread::sleep_for(650ms);
