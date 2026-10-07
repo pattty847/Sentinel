@@ -2505,6 +2505,13 @@ TEST_F(ShadowTest, JournalTapDeliversEachTradeOnceAcrossRecovery) {
   ASSERT_NE(gap, std::string::npos);
   ASSERT_NE(gapMark, std::string::npos);
   EXPECT_LT(gap, gapMark);
+  // Provisional records at the tip advance it too (t1 at 64 s, t3 at 68 s).
+  for (const int64_t ms : {Epoch + 64000, Epoch + 68000})
+    EXPECT_TRUE(std::any_of(log.begin(), log.end(), [&](const ModelEvent &e) {
+      return e.kind == "watermark" &&
+             std::chrono::duration_cast<std::chrono::milliseconds>(
+                 e.trade.timestamp.time_since_epoch()).count() == ms;
+    })) << ms;
   // Coinbase reports the maker; the model gets the aggressor (A4).
   EXPECT_EQ(modelLog("trade")[0].trade.side, AggressorSide::Sell);
   EXPECT_EQ(modelLog("trade")[1].trade.side, AggressorSide::Buy);
