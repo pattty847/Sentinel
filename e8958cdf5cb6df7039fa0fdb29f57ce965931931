@@ -1,0 +1,12 @@
+Slice: D-a
+Plan: docs/research/2026-10-one-world-pipeline.md
+Risk: high
+Writer: claude-opus
+Reviewer: gpt-6-astra-high
+Review-Rounds: 4
+Findings: blocker=1 major=7 minor=2
+Deferred: 1 (new-product live startup delay, owner-accepted)
+Writer-Tokens: ~2.24M (sum of four run reports)
+Reviewer-Tokens: 3.88M (ma-panel, thread 01a112a9)
+Planner-Tokens: unknown (Fable packet in an earlier session)
+Evidence: .claude/acting-orchestrator/d-a/
