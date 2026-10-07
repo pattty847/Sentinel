@@ -36,7 +36,7 @@ The owner's `ma-panel` (local plugin) shows live workflow state; a session start
 
 | Branch | Tip | State | Next |
 |---|---|---|---|
-| `lt-astra/chunk-speed` | `30be12c` (base) | Writer Codex `gpt-6-astra` high (sandboxed; conductor commits), thread `01a1145e-3c59-7001-85a1-a3b39fcf40a2`: slow 15m candle fill (owner: 2-3 s over a 2-3 week view; the server paged ONE_MINUTE bars, 60-90 sequential Coinbase calls). Owner decision 2026-10-06 (`_agent/DECISIONS.md`): native Coinbase timeframes, a server cache of closed bars, newest page first; journal-built 1m/1s candles parked for after D-b. Heatmap chunks second (owner OK'd spending Codex resets) | Review Claude Fable (high: GPU heatmap data path); land after measurements |
+| `lt-astra/chunk-speed` | `a61f113` | READY, committed by the conductor (Codex `gpt-6-astra` writer). Candle history: 14-day 15m fill 9,975 -> 1,333 ms cold, 310 ms warm, 59 -> 4 requests, 0 REST when warm; native granularity, a closed-bar cache, newest first, 2.5/s REST cap | Claude Fable review; then land (ships with the next server deploy) |
 | `lt-claude/roller-db1` | `8e79cac` | Fix round 1 (Claude `opus` writer): Astra r1 2 major (a reseed request dropped by the throttle; recovery trades corrupt candle bars) + 1 minor (journal admission behind the legacy cap). Gate before the journal flip: measure the 7-book main-thread load live | Same Astra thread re-checks; land only AFTER the R2 deploy |
 
 Retired 2026-10-06 (owner): `lt-sol/label-style` and `lt-claude/heatmap-ab-isolation`, tips kept as tags `archive/<branch>`. Evidence (logs, screenshots, review reports) is in ignored `.claude/acting-orchestrator/`. The
