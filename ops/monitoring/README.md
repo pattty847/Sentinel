@@ -123,8 +123,9 @@ scrape. VictoriaMetrics adds `job` and `instance` to every series.
 | `sentinel_mdc_ws_latency_ms` | gauge | - | Latest Coinbase WebSocket latency (server time minus exchange timestamp). |
 | `sentinel_exchange_clock_offset_ms` | gauge | - | Smoothed local clock minus exchange clock. 0 means not yet measured. |
 | `sentinel_stream_sessions` | gauge | - | Open client stream sessions (GUIs). |
-| `sentinel_server_event_loop_lag_ms` | gauge | quantile | Main-thread timer lateness in ms over the last 60 s; quantile=`0.5`, `0.95`, `0.99` or `max`. Absent until the first tick, or if no tick remains in the window. |
-| `sentinel_server_event_loop_late_ticks_total` | counter | - | Timer callbacks more than 100 ms late; resets on server restart. |
+| `sentinel_server_event_loop_lag_ms` | gauge | quantile | Main-thread queue wait in ms over the last 60 s; quantile=`0.5`, `0.95`, `0.99` or `max`. Absent until a probe is delivered, or if no delivered sample remains in the window. |
+| `sentinel_server_event_loop_late_ticks_total` | counter | - | Delivered probe calls with queue wait greater than 100 ms; resets on server restart. |
+| `sentinel_server_event_loop_skipped_ticks_total` | counter | - | Helper wakes skipped because a previous probe is still outstanding; resets on server restart. |
 | `process_resident_memory_bytes` | gauge | - | RSS. |
 | `process_cpu_seconds_total` | counter | - | User + system CPU seconds. |
 | `process_start_time_seconds` | gauge | - | Time when the metrics were set up at startup. Restarts = `changes(x[1h])`. |
@@ -143,52 +144,61 @@ signal is on a hot path.
 
 ### Main-thread lag: the D-b1 journal flip gate
 
-The lag sampler runs in both `recording.live_feed: engine` and `journal`.
-A main-thread `QTimer` requests a tick every 100 ms using a monotonic clock;
-each sample is `max(0, actual delivery time - expected deadline)`. Deadlines
-normally advance from the timer start by 100 ms per tick, preserving repeated
-sub-interval delay (deliveries at 150, 250, 350 ms are all 50 ms late). If
-advancing the deadline once leaves it in the past, the next deadline is
-rebased to actual delivery time + 100 ms, matching Qt's precise-timer overrun
-policy. A long stall therefore stays visible in `max` without making later
-on-time callbacks appear late. Samples go into a fixed ring without per-tick
-allocation; quantiles are computed when `/metrics` is scraped, using samples
-from the preceding 60 s.
+The sampler runs in both `recording.live_feed: engine` and `journal`. A small
+helper thread wakes every 100 ms and uses `Qt::QueuedConnection` to post its
+`steady_clock` send time to a private main-thread receiver. The slot records
+`max(0, delivery time - send time)`. This measures the queue wait that journal
+`ModelSink` hand-offs also experience, so it is the relevant D-b1 gate. It
+uses no timer-deadline estimate and is independent of Qt timer rescheduling.
+The slot stores samples in a fixed ring without allocating or taking a lock;
+scrapes compute quantiles over samples delivered in the preceding 60 s.
 
-Read p50 (`quantile="0.5"`) as typical timer lateness, p95/p99 as the tail,
-and `max` as the worst observed stall still in that window. A brief stall
-can raise `max` without moving p99. The late-tick counter increments once
-per callback whose deadline lateness exceeds 100 ms; it does not count every
-missed timer interval. This measures main-thread scheduling delay, not exchange
-latency or the age of
-a journal record. Since `/metrics` also runs on the main thread, a stall
-can delay the scrape itself; a missing scrape is not evidence of zero lag.
+At most one probe is outstanding. A helper wake while that call is pending
+increments `sentinel_server_event_loop_skipped_ticks_total` instead of adding
+another event. Stop wakes and joins the helper, then cancels its pending call
+before destroying the receiver. Skipped wakes produce no latency sample;
+quantiles describe delivered probes, not every 100 ms period or every model
+hand-off, and are not time-weighted. Rising skipped counts make that reduced
+sampling visible during sustained main-thread congestion.
+
+Read p50 (`quantile="0.5"`) as typical sampled queue wait, p95/p99 as the tail,
+and `max` as the worst delivered probe still in the window. A brief block can
+raise `max` without moving p99. The late-tick counter increments once per
+delivered probe whose queue wait exceeds 100 ms; it does not count every
+skipped wake. This measures queue wait rather than exchange latency, the age
+of a journal record, or the time spent executing a model hand-off. Since
+`/metrics` also runs on the main thread, a block can delay the scrape itself;
+a missing scrape is not evidence of zero queue wait.
 
 Before the owner-approved D-b1 flip, record an **engine baseline** with this
-metric enabled. Let the 60 s window fill, then retain a representative
+metric enabled. Use the queue-latency build for both measurements; historical
+timer-based samples under these names are not comparable. Let the 60 s window
+fill, then retain a representative
 interval (for example, 30 minutes) with the build, time range, product set,
 client/session load and capture/roller state. Include ordinary streaming
 and the relevant reconnect/catch-up workload. After the conductor performs
 the approved switch to **journal**, let its window fill and measure the
 same duration under comparable load. Compare p50/p95/p99, window maxima
-and late ticks per minute; use CPU, feed connectivity and journal catch-up
+and late/skipped ticks per minute; use CPU, feed connectivity and journal catch-up
 metrics to explain differences. Keep startup/recovery observations separate
 from steady streaming so a quiet interval cannot hide a catch-up stall.
 
 The gate is a recorded engine-versus-journal comparison reviewed by the
 owner, not merely the presence of the series. Investigate sustained tail
-growth, repeated large maxima or a higher late-tick rate before accepting
+growth, repeated large maxima or higher late/skipped-tick rates before accepting
 the flip. This metric supplies no universal pass threshold and does not
 authorize a service restart or configuration cutover.
 
 Suggested **non-paging Grafana panel**: a time-series panel titled
-"Server main-thread lag (60 s window)", unit milliseconds, with
+"Server main-thread queue latency (60 s window)", unit milliseconds, with
 `sentinel_server_event_loop_lag_ms{job="sentinel-server"}` and legend
 `{{instance}} / {{quantile}}`. Show all four series, including `max`, keep
 missing samples as gaps, and annotate the engine and journal measurement
 ranges and restart/flip time. A companion series or panel can show late
 ticks per minute with
 `60 * rate(sentinel_server_event_loop_late_ticks_total{job="sentinel-server"}[5m])`.
+Show skipped wakes per minute alongside it with
+`60 * rate(sentinel_server_event_loop_skipped_ticks_total{job="sentinel-server"}[5m])`.
 Use `increase(sentinel_server_event_loop_late_ticks_total{job="sentinel-server"}[30m])`
 for the comparison interval's reset-aware count. The lag series are already
 window quantiles: do not apply `rate` or `histogram_quantile` to them, or
