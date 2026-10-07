@@ -45,6 +45,7 @@ public:
                                   QObject* parent = nullptr);
     ~SentinelStreamServer();
 
+    // Throws on startup failure; callers must fail application initialization.
     void start();
     void stop();
 

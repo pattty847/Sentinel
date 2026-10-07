@@ -26,6 +26,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -36,6 +37,8 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
+#include <QHostAddress>
+#include <QNetworkInterface>
 #include <QProcess>
 #include <QtEndian>
 #include <cstdio>
@@ -1958,6 +1961,16 @@ void SentinelStreamServer::start() {
     if (m_running) return;
 
     try {
+        // Validate before starting live delivery. Hostnames and missing interfaces
+        // must fail startup rather than broaden the listener's exposure.
+        const auto address = net::ip::make_address(m_serverConfig.bindAddress);
+        if (!address.is_unspecified()) {
+            const QHostAddress requested(QString::fromStdString(address.to_string()));
+            const auto localAddresses = QNetworkInterface::allAddresses();
+            if (!localAddresses.contains(requested)) {
+                throw std::runtime_error("server.bind_address is not assigned to a local interface");
+            }
+        }
         m_ioc.restart();
         if (auto* live = m_model.recordingLive()) live->start();
         m_running = true;
@@ -1966,7 +1979,7 @@ void SentinelStreamServer::start() {
         m_sslCtx.use_certificate_chain_file(tls.certFile);
         m_sslCtx.use_private_key_file(tls.keyFile, ssl::context::pem);
 
-        tcp::endpoint endpoint(tcp::v4(), m_port);
+        tcp::endpoint endpoint(address, m_port);
         // Work still queued from the previous stop() carries the old generation.
         const uint64_t acceptGeneration = m_acceptGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
         m_acceptRetryTimer = std::make_unique<net::steady_timer>(m_ioc);
@@ -1976,6 +1989,10 @@ void SentinelStreamServer::start() {
         m_acceptor->set_option(net::socket_base::reuse_address(true));
         m_acceptor->bind(endpoint);
         m_acceptor->listen();
+        if (address.is_unspecified()) {
+            sLog_Warning("listening on all interfaces without client auth: address="
+                         << address.to_string() << " port=" << m_acceptor->local_endpoint().port());
+        }
 
         if (!m_tradingSession) {
             const double slippageBps = m_serverConfig.trading.slippageBps;
@@ -2003,7 +2020,9 @@ void SentinelStreamServer::start() {
         m_pendingHistoryTasks.store(0, std::memory_order_release);
 
         doAccept(acceptGeneration);
-        sLog_App("SentinelStreamServer listening: port=" << m_port
+        const auto boundEndpoint = m_acceptor->local_endpoint();
+        sLog_App("SentinelStreamServer listening: address=" << boundEndpoint.address().to_string()
+                 << " port=" << boundEndpoint.port()
                  << " cert=" << tls.certFile
                  << " historyWorkers=" << kHistoryWorkerCount);
 
@@ -2024,7 +2043,8 @@ void SentinelStreamServer::start() {
         const bool tlsFilesMissing =
             !std::filesystem::exists(m_serverConfig.tls.certFile, fsError) ||
             !std::filesystem::exists(m_serverConfig.tls.keyFile, fsError);
-        sLog_Error("SentinelStreamServer start failed: port=" << m_port
+        sLog_Error("SentinelStreamServer start failed: address=" << m_serverConfig.bindAddress
+                   << " port=" << m_port
                    << " cert=" << m_serverConfig.tls.certFile
                    << " key=" << m_serverConfig.tls.keyFile
                    << " error=" << e.what()
@@ -2032,6 +2052,11 @@ void SentinelStreamServer::start() {
                            ? " (TLS files missing: run `bash certs/gen-certs.sh` from the repo root)"
                            : ""));
         m_running = false;
+        beast::error_code ignored;
+        if (m_acceptor) m_acceptor->close(ignored);
+        if (m_acceptRetryTimer) m_acceptRetryTimer->cancel();
+        if (auto* live = m_model.recordingLive()) live->shutdown();
+        m_ioc.stop();
         std::unique_ptr<net::thread_pool> historyWorkers;
         {
             std::lock_guard<std::mutex> lock(m_historyWorkersMutex);
@@ -2042,6 +2067,8 @@ void SentinelStreamServer::start() {
             historyWorkers->join();
         }
         m_pendingHistoryTasks.store(0, std::memory_order_release);
+        // SentinelServerApp::initialize catches this and main exits with code 1.
+        throw;
     }
 }
 

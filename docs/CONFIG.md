@@ -11,6 +11,16 @@ Sentinel uses two YAML configs: server (authoritative for data and trading) and 
 
 Copy the defaults to the override names to customize; override values take precedence.
 
+`server.bind_address` is a string that selects the stream listener's numeric IPv4 or IPv6
+address (default `"127.0.0.1"`, port 8080). The existing flat server config uses the equivalent
+top-level `bind_address` key; a wrapped config places it under `server:`. An invalid address
+or an address not assigned to a local interface fails startup with an error and exit code 1.
+For remote clients, set this to the Mac's Tailscale address and use Tailscale for access control.
+For example, `"100.89.99.21"` is the owner's Mac tailnet address on 2026-10-07; it is an example,
+not a default. Explicit `"0.0.0.0"` or `"::"` allows all interfaces and logs
+`listening on all interfaces without client auth`. The stream has no client authentication.
+This setting does not affect the Prometheus HTTP listener, which remains on `127.0.0.1:8090`.
+
 ## Ownership
 
 **Server-authoritative (client cannot override):**
@@ -49,6 +59,8 @@ recorded HMC2 grids are independent of this live-book setting.
 
 ```yaml
 stream_port: 8080
+bind_address: "127.0.0.1"
+# bind_address: "100.89.99.21"  # Example only: use the Mac's current local Tailscale address.
 heatmap:
   timeframes_ms: [1000, 60000, 300000, 900000, 3600000, 14400000, 86400000]
   timeframe: 60000
@@ -74,16 +86,15 @@ recording:                # recording v2: near and deep order-book layers (docs/
   live_publish_ms: 500      # open-minute live publication interval (2 Hz); clamped to [250, 5000]
   # advanced: price_scale (100), size_floor (1e-6), codes_per_octave (819), lateness_ms (2000)
 
-server:
-  mdc:
-    host: advanced-trade-ws.coinbase.com
-    port: 443
-    target: /v1
-    use_jwt: false   # true only when key.json exists and user/futures channels are needed
-    ssl_ca_bundle: resources/certs/ca-bundle.crt
-    connect_timeout_ms: 20000  # resolve + TCP + TLS + WS handshake; timeout -> backoff retry
-    close_timeout_ms: 3000     # WS close to an unresponsive peer
-    max_connections: 8        # GUI-only products; pinned default_symbols do not count (minimum 1)
+mdc:
+  host: advanced-trade-ws.coinbase.com
+  port: 443
+  target: /v1
+  use_jwt: false   # true only when key.json exists and user/futures channels are needed
+  ssl_ca_bundle: resources/certs/ca-bundle.crt
+  connect_timeout_ms: 20000  # resolve + TCP + TLS + WS handshake; timeout -> backoff retry
+  close_timeout_ms: 3000     # WS close to an unresponsive peer
+  max_connections: 8        # GUI-only products; pinned default_symbols do not count (minimum 1)
 ```
 
 `recording.live_publish_ms` (default 500, clamped to [250, 5000]) is how often the recorder publishes each layer's open minute to live subscribers (owner decision 2026-10-01: 500 ms, 2 Hz). The live worker paces subscriptions at half of it, so each publication is sent at the next worker turn; refused sends back off from there up to 5 s. It does not change what is recorded on disk. Recorder-thread cost: about 0.4 ms per publication for a BTC-USD book (~23,500 near+deep entries), 0.08% of a core at 2 Hz (`recording_live_bench --publish`).
