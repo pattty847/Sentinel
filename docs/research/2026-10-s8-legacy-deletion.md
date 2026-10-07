@@ -208,4 +208,4 @@ When `HeatmapTwapStreamer` goes, the recorder stops writing `data/heatmap` (HMCL
    - `RecordingPage` stays as the test oracle until S8b.
    - `heatmap-ab.sh` retires after the final capture.
 3. The A/B capture uses the GUI-host fallback: one hosted session per renderer, run one after the other. Each launches with `gui-shot.sh launch --renderer legacy|gpu --build <worktree>`, which is isolated by design. The locked `lt-claude/heatmap-ab-isolation` branch is not landed for this; it stays locked, and its owner decides its fate.
-4. `lt-sol/label-style` (locked) changes `HeatmapLabelRenderer` and `HeatmapOverlayRenderer`, both of which S8a deletes. That branch will no longer apply after S8a; the owner decides whether to retire it or port it to the GPU label path.
+4. `lt-sol/label-style` (locked) changes `HeatmapLabelRenderer` and `HeatmapOverlayRenderer`, both of which S8a deletes. That branch will no longer apply after S8a; the owner retired it on 2026-10-06 (tag `archive/lt-sol-label-style`).
