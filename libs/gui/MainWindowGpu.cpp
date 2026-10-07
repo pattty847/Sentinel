@@ -94,8 +94,7 @@ std::function<MarketHealth::ChartFacts()> chartHealthProvider(UnifiedGridRendere
     QPointer<MarketHealth> model = health;
     return [chart, model] {
         MarketHealth::ChartFacts facts;
-        if (!chart || !model || model->activeSymbol().isEmpty() || !chart->gpuHeatmapActive()
-            || !chart->heatmapLayerEnabled()) return facts;
+        if (!chart || !model || model->activeSymbol().isEmpty() || !chart->heatmapLayerEnabled()) return facts;
         const auto *layer = chart->gpuHeatmapLayer();
         if (!layer || !layer->active() || !layer->controller()) return facts;
         facts.symbol = model->activeSymbol();
@@ -166,16 +165,10 @@ MainWindowGPU::MainWindowGPU(QWidget* parent, int symbolSwitchTimeoutMs)
         QString::fromStdString(clientConfig.server.caFile));
     m_heatmapSettings = std::make_unique<heatmap::HeatmapSettingsModel>(m_heatmapSettingsStore, "main",
                                                                          clientConfig.heatmap);
-    if (const auto& renderer = GuiConfigStore::instance().heatmapRendererOverride(); !renderer.isEmpty()) {
-        // --heatmap-renderer: this process only; later persisted patches and
-        // workspace snapshots never carry it (they save from the stored settings).
-        m_heatmapSettings->setProcessRenderer(renderer.toStdString());
-        sLog_App("Heatmap renderer override (process only): " << renderer);
-    }
     m_heatmapControls = new HeatmapChartControls(m_heatmapSettings.get(), this);
     // Attach BEFORE connect: the adapter learns connection state only from the
     // signal, and subscribe immediately pushes availability. No chart/controller
-    // is created in S6a, in either configured renderer mode.
+    // is created here.
     m_heatmapDataService = std::make_unique<heatmap::HeatmapDataService>(
         [client = remote->streamClient()](QObject *) {
             return new protocol::SentinelStreamClientTransport(*client);
@@ -296,8 +289,8 @@ MainWindowGPU::MainWindowGPU(QWidget* parent, int symbolSwitchTimeoutMs)
         if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
             connect(renderer, &UnifiedGridRenderer::timeframeChanged, this, [this]() {
                 ++m_agentApiSelectionEpoch;
-                m_heatmapReceivedAtMs.reset();
                 m_candlesReceivedAtMs.reset();
+                m_footprintReceivedAtMs.reset(); // footprint columns follow the chart timeframe
                 requestCandleHistoryForSymbol(m_currentSymbol);
             });
             connect(renderer, &UnifiedGridRenderer::viewportChanged, this, [this]() {
@@ -441,32 +434,10 @@ void MainWindowGPU::setupUI() {
                 m_modeController->setCandlesEnabled(enabled);
             }
         });
-        connect(m_heatmapDock->toolbar(), &TopToolbar::liquidityThresholdChanged, this, [this](double value) {
-            if (!m_qmlController) return;
-            auto* renderer = m_qmlController->getUnifiedGridRenderer();
-            if (!renderer) return;
-            // value is raw 0–1000 slider position.
-            // Convert to log-scaled threshold using the observed data range.
-            // Dead zone: bottom 4% of slider (value < 40) = threshold 0 (off).
-            constexpr double kSliderMax = 1000.0;
-            constexpr double kDeadZone  = 0.04;
-            const double ratio = value / kSliderMax;
-            double threshold = 0.0;
-            if (ratio >= kDeadZone) {
-                const double obsMin = renderer->heatmapMinObservedLiquidity();
-                const double obsMax = renderer->heatmapMaxObservedLiquidity();
-                const double minVal = (obsMin > 0.0 && obsMin < obsMax) ? obsMin : (obsMax > 0.0 ? obsMax / 1000.0 : 1e-9);
-                const double maxVal = obsMax > 0.0 ? obsMax : 1e-6;
-                const double r = (ratio - kDeadZone) / (1.0 - kDeadZone);
-                const double logSpan = std::log(maxVal / minVal);
-                threshold = minVal * std::exp(r * logSpan);
-            }
-            renderer->setProperty("heatmapLiquidityThreshold", threshold);
-        });
         // Label currency, labels on/off and the GPU range slider go through the
         // chart settings model (HeatmapChartControls::setToolbar).
         connect(m_heatmapDock->toolbar(), &TopToolbar::colorPresetSelected, this, [this](const QString& preset) {
-            // The chart palette is a persisted chart setting both renderers draw (S6b).
+            // The chart palette is a persisted chart setting (S6b).
             if (const auto error = m_heatmapSettings->apply({{"palettePreset", preset}}); !error.isEmpty())
                 sLog_Warning("Palette preset rejected: " << preset << " " << error);
         });
@@ -686,28 +657,16 @@ void MainWindowGPU::setupGuiApiServer() {
                                                     [this](const AgentApi::ValidationResult& q) { return agentApiCandlesSnapshot(q); },
                                                     [this](int levels) { return agentApiBookSnapshot(levels); },
                                                     [this](qint64 windowMs, int limit) { return agentApiTradesSnapshot(windowMs, limit); },
-                                                    [this](const heatmap_window::WallQuery& query,
-                                                           std::function<void(heatmap_window::WallsSnapshot)> complete) {
+                                                    [this](const heatmap::WallQuery& query,
+                                                           std::function<void(heatmap::WallsSnapshot)> complete) {
                                                         auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
-                                                        auto* processor = renderer ? renderer->getDataProcessor() : nullptr;
-                                                        if (renderer && renderer->gpuHeatmapActive()) {
-                                                            renderer->gpuHeatmapLayer()->scanWalls(query, std::move(complete));
-                                                            return;
-                                                        }
-                                                        if (!processor) {
-                                                            heatmap_window::WallsSnapshot unavailable;
+                                                        if (!renderer || !renderer->gpuHeatmapLayer()) {
+                                                            heatmap::WallsSnapshot unavailable;
                                                             unavailable.status = 503;
                                                             complete(std::move(unavailable));
                                                             return;
                                                         }
-                                                        QMetaObject::invokeMethod(processor,
-                                                            [processor, renderer, query, complete = std::move(complete)]() mutable {
-                                                                auto snapshot = processor->captureHeatmapWalls(query);
-                                                                QMetaObject::invokeMethod(renderer,
-                                                                    [snapshot = std::move(snapshot), complete = std::move(complete)]() mutable {
-                                                                        complete(std::move(snapshot));
-                                                                    }, Qt::QueuedConnection);
-                                                            }, Qt::QueuedConnection);
+                                                        renderer->gpuHeatmapLayer()->scanWalls(query, std::move(complete));
                                                     },
                                                     [this](const QString& kind, const AgentApi::ControlBody& body) { return agentApiApplyControl(kind, body); },
                                                     [this]() {
@@ -1117,7 +1076,6 @@ void MainWindowGPU::selectTimeframe(int ms) {
     renderer->setTimeframe(ms);
     if (m_heatmapDock && m_heatmapDock->toolbar()) m_heatmapDock->toolbar()->setTimeframeMs(ms);
     if (m_connected && m_userSubscribed) {
-        requestHeatmapHistoryForSymbol(m_currentSymbol);
         requestCandleHistoryForSymbol(m_currentSymbol);
         if (m_modeController && m_modeController->primaryField() == 1) requestFootprintHistoryForSymbol(m_currentSymbol);
         else if (m_modeController && (m_modeController->primaryField() == 2 || m_modeController->primaryField() == 3))
@@ -1128,10 +1086,7 @@ void MainWindowGPU::selectTimeframe(int ms) {
 void MainWindowGPU::propagateSymbolChange(const QString& symbol) {
     if (m_currentSymbol != symbol) {
         ++m_agentApiSelectionEpoch;
-        m_heatmapReceivedAtMs.reset();
-        m_candlesReceivedAtMs.reset();
-        m_bookReceivedAtMs.reset();
-        m_tradesReceivedAtMs.reset();
+        resetReceivedAt();
     }
     m_currentSymbol = symbol;
     if (m_qmlController) {
@@ -1143,6 +1098,15 @@ void MainWindowGPU::propagateSymbolChange(const QString& symbol) {
     emit symbolChanged(symbol);
 }
 
+void MainWindowGPU::resetReceivedAt() {
+    m_candlesReceivedAtMs.reset();
+    m_bookReceivedAtMs.reset();
+    m_tradesReceivedAtMs.reset();
+    m_footprintReceivedAtMs.reset();
+    m_tpoReceivedAtMs.reset();
+    m_volumeProfileReceivedAtMs.reset();
+}
+
 bool MainWindowGPU::canRequestConfiguredHistoryForSymbol(const QString& symbol) const {
     return m_connected && m_userSubscribed && m_serverConfigReady && m_dataSource &&
            !symbol.isEmpty() && symbol == m_currentSymbol;
@@ -1152,55 +1116,8 @@ void MainWindowGPU::requestConfiguredHistoryForSymbol(const QString& symbol) {
     if (!canRequestConfiguredHistoryForSymbol(symbol)) {
         return;
     }
-    requestHeatmapHistoryForSymbol(symbol);
     requestFootprintHistoryForSymbol(symbol);
     requestCandleHistoryForSymbol(symbol);
-}
-
-void MainWindowGPU::requestHeatmapHistoryForSymbol(const QString& symbol) {
-    if (!canRequestConfiguredHistoryForSymbol(symbol)) {
-        return;
-    }
-    if (auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
-        renderer && renderer->gpuHeatmapActive()) {
-        return; // the GPU layer's controller plans and fetches its own chunks
-    }
-    const auto& store = GuiConfigStore::instance();
-    if (store.clientConfig().heatmap.source == "recording" &&
-        store.serverConfig().wasAdvertised("recording.available") && store.serverConfig().recording.available) {
-        if (m_qmlController) {
-            if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
-                QMetaObject::invokeMethod(renderer->getDataProcessor(), &DataProcessor::refreshRecordingHistory,
-                                          Qt::QueuedConnection);
-            }
-        }
-        return;
-    }
-    int64_t timeframeMs = 0;
-    if (m_qmlController) {
-        if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
-            timeframeMs = renderer->getCurrentTimeframe();
-        }
-    }
-    if (timeframeMs <= 0) {
-        const auto& serverConfig = GuiConfigStore::instance().serverConfig();
-        timeframeMs = static_cast<int64_t>(serverConfig.heatmap.activeTimeframeMs);
-        if (timeframeMs <= 0 && !serverConfig.heatmap.timeframesMs.empty()) {
-            timeframeMs = serverConfig.heatmap.timeframesMs.front();
-        }
-    }
-    const auto& serverConfig = GuiConfigStore::instance().serverConfig();
-    const auto& clientConfig = GuiConfigStore::instance().clientConfig();
-    const int requestCount = clientConfig.heatmap.clientCacheColumns;
-    const int gridWidth = serverConfig.heatmap.gridWidth;
-    const int count = (requestCount > 0) ? requestCount : (gridWidth > 0 ? gridWidth : 5120);
-    int64_t tf = (timeframeMs > 0) ? timeframeMs : 1000;
-    if (tf <= 0 && !serverConfig.heatmap.timeframesMs.empty()) {
-        tf = serverConfig.heatmap.timeframesMs.front();
-    }
-    sLog_Data("Heatmap history request: symbol=" << symbol << " tfMs=" << tf
-              << " count=" << count);
-    m_dataSource->requestHeatmapHistory(symbol, tf, 0, count);
 }
 
 void MainWindowGPU::requestFootprintHistoryForSymbol(const QString& symbol) {
@@ -1457,16 +1374,6 @@ void MainWindowGPU::connectMarketDataSignals() {
             },
             Qt::QueuedConnection);
 
-    // Scroll-past-cache: fetch older heatmap history when the user pans past the edge.
-    connect(unifiedGridRenderer,
-            &UnifiedGridRenderer::heatmapHistoryNeeded,
-            this,
-            [this](int64_t timeframeMs, int64_t endTimeMs, int count) {
-                if (!canRequestConfiguredHistoryForSymbol(m_currentSymbol)) return;
-                m_dataSource->requestHeatmapHistory(m_currentSymbol, timeframeMs, endTimeMs, count);
-            },
-            Qt::QueuedConnection);
-
     unifiedGridRenderer->applyClientConfig(GuiConfigStore::instance().clientConfig());
     if (GuiConfigStore::instance().hasServerConfig()) {
         unifiedGridRenderer->applyServerConfig(GuiConfigStore::instance().serverConfig());
@@ -1475,11 +1382,11 @@ void MainWindowGPU::connectMarketDataSignals() {
     auto dataProcessor = unifiedGridRenderer->getDataProcessor();
     unifiedGridRenderer->setActiveSymbol(m_currentSymbol);
     // S6b: the GPU heatmap layer shares the process service (attached before the
-    // stream client connected, INV-088); the chart settings pick the renderer.
+    // stream client connected, INV-088).
     unifiedGridRenderer->setHeatmapService(m_heatmapDataService.get());
     if (auto *remote = dynamic_cast<RemoteGridDataSource *>(m_dataSource.get()))
         remote->marketHealth()->setChartProvider(chartHealthProvider(unifiedGridRenderer, remote->marketHealth()));
-    // S6c: the controls apply the tick memory, settings and renderer, then keep the
+    // S6c: the controls apply the tick memory and settings, then keep the
     // chart, toolbar, dialog and telemetry dock on the settings model.
     m_heatmapControls->setRenderer(unifiedGridRenderer);
     if (m_heatmapDock && m_heatmapDock->toolbar()) {
@@ -1490,52 +1397,31 @@ void MainWindowGPU::connectMarketDataSignals() {
         });
     }
     if (dataProcessor) {
-        QMetaObject::invokeMethod(dataProcessor, [dataProcessor, connected = m_connected] {
-            dataProcessor->setRecordingConnected(connected);
-        }, Qt::QueuedConnection);
-        connect(m_dataSource.get(), &IGridDataSource::connectionStatusChanged,
-                dataProcessor, &DataProcessor::setRecordingConnected, Qt::QueuedConnection);
-        connect(m_dataSource.get(), &IGridDataSource::recordingViewError,
-                dataProcessor, &DataProcessor::onRecordingViewError, Qt::QueuedConnection);
-        connect(m_dataSource.get(), &IGridDataSource::recordingHeatmapLiveReceived,
-                dataProcessor, &DataProcessor::onRecordingLiveReceived, Qt::QueuedConnection);
-        connect(dataProcessor, &DataProcessor::recordingViewNeeded, this,
-                [this](const recording::LiveView& view) {
-                    if (canRequestConfiguredHistoryForSymbol(QString::fromStdString(view.symbol)))
-                        m_dataSource->registerRecordingView(view);
-                }, Qt::QueuedConnection);
-        connect(dataProcessor, &DataProcessor::recordingViewReleased, this,
-                [this](const recording::LiveView& view) {
-                    if (m_dataSource) m_dataSource->releaseRecordingView(view);
-                }, Qt::QueuedConnection);
-        connect(m_dataSource.get(), &IGridDataSource::recordingHeatmapHistoryReceived,
-                dataProcessor, &DataProcessor::onRecordingHistoryReceived, Qt::QueuedConnection);
-        connect(m_dataSource.get(), &IGridDataSource::recordingHeatmapHistoryError,
-                dataProcessor, &DataProcessor::onRecordingHistoryError, Qt::QueuedConnection);
-        connect(dataProcessor, &DataProcessor::recordingHistoryFetchNeeded, this,
-                [this](const protocol::recordingwire::Request& request) {
-                    if (!canRequestConfiguredHistoryForSymbol(QString::fromStdString(request.symbol))) return;
-                    m_dataSource->requestRecordingHeatmapHistory(request);
-                }, Qt::QueuedConnection);
-        connect(m_dataSource.get(), &IGridDataSource::heatmapSliceReceived,
-                dataProcessor, &DataProcessor::onHeatmapSliceReceived, Qt::QueuedConnection);
         connect(m_dataSource.get(), &IGridDataSource::footprintSliceReceived,
                 dataProcessor, &DataProcessor::onFootprintSliceReceived, Qt::QueuedConnection);
         connect(m_dataSource.get(), &IGridDataSource::tpoSliceReceived,
                 dataProcessor, &DataProcessor::onTpoSliceReceived, Qt::QueuedConnection);
         connect(m_dataSource.get(), &IGridDataSource::volumeProfileSliceReceived,
                 dataProcessor, &DataProcessor::onVolumeProfileSliceReceived, Qt::QueuedConnection);
-        connect(m_dataSource.get(), &IGridDataSource::heatmapHistoryReceived,
-                dataProcessor, &DataProcessor::onHeatmapHistoryReceived, Qt::QueuedConnection);
     }
     
     // Trade connection (simplified, assume UnifiedGridRenderer has a slot)
     connect(m_dataSource.get(), &IGridDataSource::tradeReceived,
             unifiedGridRenderer, &UnifiedGridRenderer::onTradeReceived, Qt::QueuedConnection);
     
-    connect(m_dataSource.get(), &IGridDataSource::heatmapSliceReceived, this,
-            [this](const HeatmapSlice& slice) {
-                if (slice.symbol == m_currentSymbol) m_heatmapReceivedAtMs = QDateTime::currentMSecsSinceEpoch();
+    // Agent API lastReceivedAtMs of the trade overlays (FM-079: they stay live on
+    // the server's trade-overlay publisher, without the legacy heatmap stream).
+    connect(m_dataSource.get(), &IGridDataSource::footprintSliceReceived, this,
+            [this](const FootprintSlice& slice) {
+                if (slice.symbol == m_currentSymbol) m_footprintReceivedAtMs = QDateTime::currentMSecsSinceEpoch();
+            });
+    connect(m_dataSource.get(), &IGridDataSource::tpoSliceReceived, this,
+            [this](const TpoSlice& slice) {
+                if (slice.symbol == m_currentSymbol) m_tpoReceivedAtMs = QDateTime::currentMSecsSinceEpoch();
+            });
+    connect(m_dataSource.get(), &IGridDataSource::volumeProfileSliceReceived, this,
+            [this](const VolumeProfileSlice& slice) {
+                if (slice.symbol == m_currentSymbol) m_volumeProfileReceivedAtMs = QDateTime::currentMSecsSinceEpoch();
             });
     connect(m_dataSource.get(), &IGridDataSource::tradeReceived, this,
             [this](const Trade& trade) {
@@ -1678,13 +1564,7 @@ void MainWindowGPU::onConnectionStatusChanged(bool connected) {
     }
     if (connected != m_connected) {
         ++m_agentApiSelectionEpoch;
-        m_heatmapReceivedAtMs.reset();
-        m_candlesReceivedAtMs.reset();
-        m_bookReceivedAtMs.reset();
-        m_tradesReceivedAtMs.reset();
-        if (auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr) {
-            renderer->resetLivePriceCenter();
-        }
+        resetReceivedAt();
     }
     m_connected = connected;
     if (!connected) {
@@ -1830,16 +1710,18 @@ AgentApi::StateSnapshot MainWindowGPU::agentApiStateSnapshot() const {
     if (portOk && port > 0 && port <= 65535) s.serverPort = port;
     if (m_serverConfigReady)
         AgentApi::applyAdvertisedServerConfig(s, GuiConfigStore::instance().serverConfig());
-    s.heatmapReceivedAtMs = m_heatmapReceivedAtMs;
     if (auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
-        renderer && renderer->gpuHeatmapActive()) {
-        // gpu mode: the newest live frame of the chart's symbol/timeframe.
+        renderer && renderer->gpuHeatmapLayer()) {
+        // The newest live frame of the chart's symbol/timeframe.
         const qint64 at = renderer->gpuHeatmapLayer()->liveReceivedAtMs();
         s.heatmapReceivedAtMs = at > 0 ? std::optional<qint64>(at) : std::nullopt;
     }
     s.candlesReceivedAtMs = m_candlesReceivedAtMs;
     s.bookReceivedAtMs = m_bookReceivedAtMs;
     s.tradesReceivedAtMs = m_tradesReceivedAtMs;
+    s.footprintReceivedAtMs = m_footprintReceivedAtMs;
+    s.tpoReceivedAtMs = m_tpoReceivedAtMs;
+    s.volumeProfileReceivedAtMs = m_volumeProfileReceivedAtMs;
     if (m_qmlController) {
         if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
             s.heatmapLayer = renderer->heatmapLayerEnabled();
@@ -1885,8 +1767,9 @@ QJsonObject MainWindowGPU::agentApiHeatmapSnapshot() const {
     const auto &s = m_heatmapSettings->settings();
     const QJsonValue missing(QJsonValue::Null);
     auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
-    const bool gpu = renderer && renderer->gpuHeatmapActive();
-    QJsonObject out{{"renderer", QString::fromStdString(s.renderer)}, {"activeRenderer", gpu ? "gpu" : "legacy"},
+    const auto* layer = renderer ? renderer->gpuHeatmapLayer() : nullptr;
+    // renderer/activeRenderer: the constant "gpu" since S8a (the fields go in S8b).
+    QJsonObject out{{"renderer", "gpu"}, {"activeRenderer", "gpu"},
         {"tickMode", s.tickMode == heatmap::TickMode::Auto ? "auto" : "manual"},
         {"tickUnits", s.tickMode == heatmap::TickMode::Manual ? QJsonValue(qint64(s.manualTick)) : missing},
         {"offeredPresets", missing}, {"settled", missing}, {"drawnTimeframeMs", missing},
@@ -1901,9 +1784,9 @@ QJsonObject MainWindowGPU::agentApiHeatmapSnapshot() const {
             {"committedCpuBytes", qint64(stats.committedCpuBytes)},
             {"chunkRequests", qint64(stats.fetcher.requests)}};
     } else out["service"] = missing;
-    if (gpu) {
+    if (layer) {
         // Live layer state replaces the S6a placeholders (plan section 5).
-        const auto state = renderer->gpuHeatmapLayer()->state();
+        const auto state = layer->state();
         for (auto it = state.begin(); it != state.end(); ++it) out[it.key()] = it.value();
         out["tickUnits"] = state["tickUnits"];
     }
@@ -1926,15 +1809,14 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
     }
     if (kind == "heatmap/settings") {
         // The settings model is the single source of truth: its changed() signal
-        // drives the chart (renderer flip, tick policy, palette), the toolbar, the
+        // drives the chart (tick policy, palette), the toolbar, the
         // settings dialog and the telemetry dock (S6c).
         const auto error = m_heatmapSettings->apply(body.heatmapSettings, body.persistHeatmapSettings);
         if (!error.isEmpty()) {
             out.status = 422; out.code = "invalid_settings"; out.message = error;
             return out;
         }
-        sLog_App("Heatmap settings applied chart=main renderer=" << m_heatmapSettings->settings().renderer
-                 << " persist=" << body.persistHeatmapSettings);
+        sLog_App("Heatmap settings applied chart=main persist=" << body.persistHeatmapSettings);
         out.data = agentApiHeatmapSnapshot();
         out.data["persist"] = body.persistHeatmapSettings;
     } else if (kind == "input") {
@@ -1963,12 +1845,7 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
             {body.startMs, body.endMs, body.priceMin, body.priceMax, body.followLive, body.autoScale, body.fit});
         if (error == "fit_unavailable") {
             out.status = 409; out.code = "fit_unavailable";
-            out.message = "Auto-fit needs the gpu renderer and known data (live anchor or price)";
-            return out;
-        }
-        if (error == "auto_scale_unavailable") {
-            out.status = 409; out.code = "auto_scale_unavailable";
-            out.message = "The auto price scale needs the gpu renderer";
+            out.message = "Auto-fit needs known data (a live anchor or a price)";
             return out;
         }
         if (!body.fit.isEmpty()) out.data["fit"] = body.fit;

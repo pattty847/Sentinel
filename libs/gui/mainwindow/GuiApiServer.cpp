@@ -53,8 +53,8 @@ GuiApiServer::GuiApiServer(QWidget* targetWindow,
                            std::function<std::optional<AgentApi::CandleSnapshot>(const AgentApi::ValidationResult&)> candlesSnapshot,
                            std::function<AgentApi::BookSnapshot(int)> bookSnapshot,
                            std::function<AgentApi::TradesSnapshot(qint64, int)> tradesSnapshot,
-                           std::function<void(const heatmap_window::WallQuery&,
-                                              std::function<void(heatmap_window::WallsSnapshot)>)> wallsSnapshot,
+                           std::function<void(const heatmap::WallQuery&,
+                                              std::function<void(heatmap::WallsSnapshot)>)> wallsSnapshot,
                            std::function<AgentApi::ControlApply(const QString&, const AgentApi::ControlBody&)> applyControl,
                            std::function<std::pair<quint64, quint64>()> frameAck,
                            std::function<void(quint64)> publishRevision,
@@ -263,18 +263,15 @@ void GuiApiServer::handleRequest(QTcpSocket* socket) {
             QPointer<GuiApiServer> server(this);
             QPointer<QTcpSocket> peer(socket);
             m_pendingWalls.insert(socket);
-            m_wallsSnapshot(check.walls, [server, peer, meta](heatmap_window::WallsSnapshot data) mutable {
+            m_wallsSnapshot(check.walls, [server, peer, meta](heatmap::WallsSnapshot data) mutable {
                 if (!server || !peer || !server->m_pendingWalls.remove(peer.data()) ||
                     peer->state() != QAbstractSocket::ConnectedState) return;
                 if (server->m_stateSnapshot().meta.selectionEpoch != meta.selectionEpoch) {
                     server->respond(peer, 409, AgentApi::jsonBytes(AgentApi::error(
                         "selection_changed", "Symbol or timeframe changed while reading walls")), "application/json");
-                } else if (data.status == 409) {
-                    server->respond(peer, 409, AgentApi::jsonBytes(AgentApi::error(
-                        "recording_required", "Legacy liquidity is absolute, but its intensity side can disagree and rows lack validity")), "application/json");
                 } else if (data.status == 422) {
-                    const bool badTick = data.error == heatmap_window::WallError::BadTick;
-                    const bool badRange = data.error == heatmap_window::WallError::InvalidRange;
+                    const bool badTick = data.error == heatmap::WallError::BadTick;
+                    const bool badRange = data.error == heatmap::WallError::InvalidRange;
                     server->respond(peer, 422, AgentApi::jsonBytes(AgentApi::error(
                         badTick ? "bad_tick" : badRange ? "invalid_range" : "scan_limit",
                         badTick ? "Tick must be positive and representable in integer source price units" :

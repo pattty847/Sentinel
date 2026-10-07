@@ -277,10 +277,6 @@ HeatmapSettingsDialog::HeatmapSettingsDialog(heatmap::HeatmapSettingsModel *mode
     buildUi();
     if (m_model) connect(m_model, &heatmap::HeatmapSettingsModel::changed, this, [this] { refreshFromModel(); });
     if (m_model) connect(m_model, &heatmap::HeatmapSettingsModel::budgetsChanged, this, [this] { refreshFromModel(); });
-    if (m_model)
-        connect(m_model, &heatmap::HeatmapSettingsModel::savedRendererChanged, this, [this] {
-            m_savedRenderer->setText(QString::fromStdString(m_model->savedRenderer()));
-        });
     refreshFromModel();
     setRenderer(renderer); // binds its signals and refreshes the renderer-backed controls
 }
@@ -315,7 +311,7 @@ QStringList HeatmapSettingsDialog::tabKeys(const QString &tab) {
                 "crossfadeMs", "showBandEdges"};
     if (tab == "Budgets") return {"gpuCapBytes", "uploadBudgetBytes", "prefetchTiles"};
     if (tab == "Live") return {"liveMinIntervalMs"};
-    if (tab == "Debug") return {"renderer", "showTelemetry"};
+    if (tab == "Debug") return {"showTelemetry"};
     return {};
 }
 
@@ -405,7 +401,7 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
                       page));
     m_tradesAboveCandles = new QCheckBox("Trades above candles", page);
     m_tradesAboveCandles->setObjectName("tradesAboveCandles");
-    m_tradesAboveCandles->setToolTip("Keep translucent executions visible over opaque candle bodies (GPU renderer).");
+    m_tradesAboveCandles->setToolTip("Keep translucent executions visible over opaque candle bodies.");
     form->addRow("Trades", m_tradesAboveCandles);
     connect(m_tradesAboveCandles, &QCheckBox::toggled, this, [this](bool on) { apply({{"tradesAboveCandles", on}}); });
     auto *candles = new QGroupBox("Candles", page);
@@ -561,7 +557,7 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     form->addRow("Band edges (lab only)", m_bandEdges);
     form->setRowVisible(m_bandEdges, false); // lab-only setting has no main-chart effect
 
-    auto *tone = new QGroupBox("Tone mapping (both renderers, this session)", page);
+    auto *tone = new QGroupBox("Tone mapping (this session)", page);
     auto *toneForm = new QFormLayout(tone);
     auto [gammaSlider, gammaLabel] = makeSlider(tone, 10, 500, 85);
     m_gammaSlider = gammaSlider;
@@ -591,7 +587,7 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     describe(form, m_askGradient, "Set the ask-side colours from low to high liquidity. Edit stops to select the Custom palette.");
     describe(form, m_sensitivityMin, m_sensitivityMin->toolTip());
     describe(form, m_sensitivityMax, m_sensitivityMax->toolTip());
-    describe(form, m_opacity, "GPU heatmap opacity: 0 = transparent, 1 = solid. Lower it to see other chart layers through the heatmap. The legacy renderer ignores it.");
+    describe(form, m_opacity, "GPU heatmap opacity: 0 = transparent, 1 = solid. Lower it to see other chart layers through the heatmap.");
     describe(form, fadeRow, "Blend old and new GPU heatmap rows over 1-2000 milliseconds when the tick changes. Turn off for an immediate switch, or lower the duration for a quicker blend.");
     describe(form, m_bandEdges, m_bandEdges->toolTip());
     describe(toneForm, gammaRow, "Curve of heatmap colour intensity (0.1-5). Lower it to bring out weaker liquidity; higher values favour stronger liquidity, this session only.");
@@ -694,31 +690,11 @@ QWidget *HeatmapSettingsDialog::buildLiveTab() {
 QWidget *HeatmapSettingsDialog::buildDebugTab() {
     auto *page = new QWidget(this);
     auto *form = new QFormLayout(page);
-    m_rendererCombo = new QComboBox(page);
-    m_rendererCombo->setObjectName("renderer");
-    m_rendererCombo->addItem("GPU (default)", "gpu");
-    m_rendererCombo->addItem("Legacy", "legacy");
-    form->addRow("Renderer", m_rendererCombo);
-    m_makeDefault = new QCheckBox("Make default (saved; otherwise this session only)", page);
-    m_makeDefault->setObjectName("makeDefault");
-    form->addRow("", m_makeDefault);
-    m_savedRenderer = new QLabel(page);
-    m_savedRenderer->setObjectName("savedRenderer");
-    form->addRow("Saved default", m_savedRenderer);
     m_showTelemetry = new QCheckBox("Show the heatmap telemetry dock", page);
     m_showTelemetry->setObjectName("showTelemetry");
     form->addRow("Telemetry", m_showTelemetry);
-    form->addRow(note("GPU heatmap cell labels can be toggled in Chart; the legacy renderer draws its own labels.", page));
     form->addRow(resetButton("Debug", page));
-    describe(form, m_rendererCombo, "Choose GPU or Legacy heatmap rendering for this chart. Switch to compare output or diagnose rendering; this session only unless Make default is checked.");
-    describe(form, m_makeDefault, "Save the selected renderer as this chart's default for future launches. Leave unchecked for a session-only comparison.");
     describe(form, m_showTelemetry, "Show the heatmap telemetry dock with tick, cache, upload and timing values. Use it to diagnose missing data or slow rendering.");
-    connect(m_rendererCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
-        apply({{"renderer", m_rendererCombo->currentData().toString()}}, m_makeDefault->isChecked());
-    });
-    connect(m_makeDefault, &QCheckBox::toggled, this, [this](bool on) {
-        if (on) apply({{"renderer", m_rendererCombo->currentData().toString()}}, true);
-    });
     connect(m_showTelemetry, &QCheckBox::toggled, this, [this](bool on) { apply({{"showTelemetry", on}}); });
     return page;
 }
@@ -828,7 +804,6 @@ void HeatmapSettingsDialog::refreshFromModel() {
         m_showLabels->setChecked(s.showLabels);
         const QSignalBlocker trades(m_tradesAboveCandles);
         m_tradesAboveCandles->setChecked(s.tradesAboveCandles);
-        m_tradesAboveCandles->setEnabled(s.renderer == "gpu");
         m_labelCurrency->setCurrentIndex(std::max(0, m_labelCurrency->findData(QString::fromStdString(s.labelCurrency))));
     }
     set(m_labelMinPx, s.labelMinPx);
@@ -872,11 +847,6 @@ void HeatmapSettingsDialog::refreshFromModel() {
     set(m_spanMiB, int(b.spanSources / MiB));
     set(m_ceilingMiB, int(b.cpuCeiling / MiB));
     set(m_liveMinInterval, s.liveMinIntervalMs);
-    {
-        const QSignalBlocker block(m_rendererCombo);
-        m_rendererCombo->setCurrentIndex(std::max(0, m_rendererCombo->findData(QString::fromStdString(s.renderer))));
-    }
-    m_savedRenderer->setText(QString::fromStdString(m_model->savedRenderer()));
     {
         const QSignalBlocker block(m_showTelemetry);
         m_showTelemetry->setChecked(s.showTelemetry);

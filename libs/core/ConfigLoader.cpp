@@ -237,7 +237,12 @@ void parseClientConfig(const std::string& filePath, ClientConfig& cfg) {
     }
 
     if (heatmapNode) {
-        readScalar(heatmapNode, "renderer", cfg.heatmap.renderer);
+        // S8a removed the legacy renderer and its keys (renderer, source, label_px,
+        // client_cache_columns, target_row_px, cell_aspect): an old file still loads.
+        if (const auto renderer = heatmapNode["renderer"];
+            renderer && renderer.IsScalar() && renderer.Scalar() != "gpu")
+            sLog_Warning("Ignored heatmap.renderer: " << renderer.Scalar()
+                         << " (the legacy renderer was removed; gpu is the only renderer)");
         readScalar(heatmapNode, "tick_mode", cfg.heatmap.tickMode);
         readScalar(heatmapNode, "manual_tick", cfg.heatmap.manualTick);
         readScalar(heatmapNode, "min_row_px", cfg.heatmap.minRowPx);
@@ -279,20 +284,11 @@ void parseClientConfig(const std::string& filePath, ClientConfig& cfg) {
         readScalar(heatmapNode, "prefetch_tiles", cfg.heatmap.prefetchTiles);
         readScalar(heatmapNode, "live_min_interval_ms", cfg.heatmap.liveMinIntervalMs);
         readScalar(heatmapNode, "show_telemetry", cfg.heatmap.showTelemetry);
-        if (cfg.heatmap.renderer != "legacy" && cfg.heatmap.renderer != "gpu")
-            cfg.heatmap.renderer = "gpu";
-        readScalar(heatmapNode, "source", cfg.heatmap.source);
-        if (cfg.heatmap.source != "legacy" && cfg.heatmap.source != "recording")
-            cfg.heatmap.source = "legacy";
         readScalar(heatmapNode, "gamma", cfg.heatmap.gamma);
         readScalar(heatmapNode, "contrast", cfg.heatmap.contrast);
         readScalar(heatmapNode, "shader_floor", cfg.heatmap.shaderFloor);
-        readScalar(heatmapNode, "label_px", cfg.heatmap.labelPx);
-        readScalar(heatmapNode, "client_cache_columns", cfg.heatmap.clientCacheColumns);
         readScalar(heatmapNode, "initial_column_px", cfg.heatmap.initialColumnPx);
         readScalar(heatmapNode, "initial_price_pct", cfg.heatmap.initialPricePct);
-        readScalar(heatmapNode, "target_row_px", cfg.heatmap.targetRowPx);
-        readScalar(heatmapNode, "cell_aspect", cfg.heatmap.cellAspect);
         readScalar(heatmapNode, "sensitivity_min", cfg.heatmap.sensitivityMin);
         readScalar(heatmapNode, "sensitivity_max", cfg.heatmap.sensitivityMax);
     }

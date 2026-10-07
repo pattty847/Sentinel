@@ -19,7 +19,6 @@ public:
     explicit TopToolbar(QWidget* parent = nullptr);
 
     QLineEdit* symbolSearch() const { return m_symbolSearch; }
-    QSlider* liquiditySlider() const { return m_liquiditySlider; }
     QToolButton* subscribeButton() const { return m_subscribeButton; }
     QComboBox* liquidityModeCombo() const { return m_liquidityModeCombo; }
     void setTimeframeMs(int64_t ms);
@@ -28,8 +27,8 @@ public:
     void setAvailableTimeframes(const std::vector<int64_t>& servedTimeframesMs);
     // The heatmap tick selector beside the timeframe combo (S6c, spec rules 2 and 4).
     // Auto shows the drawn tick, Manual the locked preset; the preset list is what
-    // some loaded data can build (rule 4 option B). Disabled (with reason) when the
-    // chart draws with the legacy renderer.
+    // some loaded data can build (rule 4 option B). Disabled (with reason) while no
+    // chart is attached.
     struct TickSelectorState {
         bool enabled = false;
         QString disabledReason;
@@ -59,20 +58,20 @@ public:
 
     // The toolbar adapts to the chart's active layers (owner request 2026-10-02).
     // controlVisibility() is the ONE place the rules live:
-    // - heatmap-only: tick and range (GPU) or threshold (legacy);
+    // - heatmap-only: tick and liquidity range;
     // - palette and label appearance: the gear menu, leaving the primary strip
     //   for navigation and data controls;
     // - candle style: candles are on;
     // - TPO session: TPO or volume profile is on (the profile follows the TPO
     //   session); TPO layout: TPO is on.
     struct ModeState {
-        bool heatmap = true, footprint = false, tpo = false, volumeProfile = false, candles = true, gpu = true;
+        bool heatmap = true, footprint = false, tpo = false, volumeProfile = false, candles = true;
         bool operator==(const ModeState &) const = default;
     };
     struct ControlVisibility {
-        bool tickSelector = false, palette = false, liquidity = false, rangeSlider = false, thresholdSlider = false;
+        bool tickSelector = false, palette = false, liquidity = false, rangeSlider = false;
         bool candleStyle = false, tpoSession = false, tpoLayout = false;
-        bool labelsToggle = false; // gpu heatmap only (legacy draws its own labels, always)
+        bool labelsToggle = false;
         bool operator==(const ControlVisibility &) const = default;
     };
     static ControlVisibility controlVisibility(const ModeState &mode);
@@ -126,7 +125,6 @@ signals:
     void quickSearchRequested();
     void fullscreenToggled();
     void screenshotRequested();
-    void liquidityThresholdChanged(double threshold);
     void liquidityLabelModeChanged(int mode);
     void colorPresetSelected(const QString& preset);
     void tickModeRequested(bool manual);    // user changed Auto/Manual
@@ -164,7 +162,6 @@ private:
     QLabel* m_tickVeilLabel = nullptr;
     TickSelectorState m_tickState;
     bool m_tickStateSet = false;
-    QSlider* m_liquiditySlider = nullptr;
     QComboBox* m_liquidityModeCombo = nullptr;
     QToolButton* m_subscribeButton = nullptr;
     QToolButton* m_heatmapButton = nullptr;
@@ -187,7 +184,6 @@ private:
     bool m_overflowMenuDirty = false;
     QMenu* m_tickMenu = nullptr;
     QMenu* m_labelsMenu = nullptr;
-    QMenu* m_legacyThresholdMenu = nullptr;
     QMenu* m_layoutsMenu = nullptr;
     QAction* m_quickSearchAction = nullptr;
     QAction* m_screenshotAction = nullptr;
@@ -213,5 +209,5 @@ private:
     QAction *m_chartTypeAction = nullptr, *m_paletteAction = nullptr;
     QAction *m_liqLabelAction = nullptr, *m_modeLabelAction = nullptr, *m_modeComboAction = nullptr;
     QAction *m_labelsAction = nullptr, *m_rangeAction = nullptr, *m_rangeLabelAction = nullptr;
-    QAction *m_thresholdAction = nullptr, *m_tpoSessionAction = nullptr, *m_tpoLayoutAction = nullptr;
+    QAction *m_tpoSessionAction = nullptr, *m_tpoLayoutAction = nullptr;
 };

@@ -2,7 +2,7 @@
 #include "HeatmapSourceController.hpp"
 #include "heatmap/TimeComposer.hpp"
 #include "heatmap/DrawPieces.hpp"
-#include "../HeatmapColumnWindow.hpp"
+#include "HeatmapWalls.hpp"
 #include <QPointer>
 #include <array>
 #include <list>
@@ -72,13 +72,13 @@ private:
 };
 
 struct WallScanRequest {
-    heatmap_window::WallQuery query;
+    heatmap::WallQuery query;
     int64_t tfMs = 0, drawnTickUnits = 0;
     double priceScale = 100;
     double timeLoMs = 0, timeHiMs = 0, priceLo = 0, priceHi = 0;
 };
 // Same cell oracle and fill pass as labels; bounded batches, no text formatting.
-heatmap_window::WallsSnapshot scanWalls(const WallScanRequest &, const SpanSet &, const LiveSnapshot *,
+heatmap::WallsSnapshot scanWalls(const WallScanRequest &, const SpanSet &, const LiveSnapshot *,
                                         ChunkStore &, LabelWindowBuilder &, const HeldChunks &held = {});
 
 // Per controller; lives on heatmap-data, uses the cache's bounded worker pool.
@@ -94,7 +94,7 @@ public:
     // Client-held chunks only, including cached history outside the drawn view.
     // Completion is queued to context; no label request or periodic scan needed.
     void scanWalls(WallScanRequest, std::shared_ptr<const SpanSet>, std::shared_ptr<const LiveSnapshot>,
-                   QObject *context, std::function<void(heatmap_window::WallsSnapshot)> completion);
+                   QObject *context, std::function<void(heatmap::WallsSnapshot)> completion);
     void cancel();
 signals:
     void labelsChanged();
@@ -112,7 +112,7 @@ private:
         std::shared_ptr<const SpanSet> spans;
         std::shared_ptr<const LiveSnapshot> live;
         QPointer<QObject> context;
-        std::function<void(heatmap_window::WallsSnapshot)> completion;
+        std::function<void(heatmap::WallsSnapshot)> completion;
     };
     ChunkStore &store_;
     ChunkFetcher &fetcher_;

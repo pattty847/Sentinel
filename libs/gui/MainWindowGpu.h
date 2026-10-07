@@ -116,7 +116,6 @@ private:
     void propagateSymbolChange(const QString& symbol);
     bool canRequestConfiguredHistoryForSymbol(const QString& symbol) const;
     void requestConfiguredHistoryForSymbol(const QString& symbol);
-    void requestHeatmapHistoryForSymbol(const QString& symbol);
     void requestFootprintHistoryForSymbol(const QString& symbol);
     void requestTpoHistoryForSymbol(const QString& symbol);
     void requestCandleHistoryForSymbol(const QString& symbol);
@@ -179,10 +178,13 @@ private:
     int m_heldRetryAttempt = 0;
     QString m_agentApiSessionId;
     quint64 m_agentApiSelectionEpoch = 1;
-    std::optional<qint64> m_heatmapReceivedAtMs;
     std::optional<qint64> m_candlesReceivedAtMs;
     std::optional<qint64> m_bookReceivedAtMs;
     std::optional<qint64> m_tradesReceivedAtMs;
+    std::optional<qint64> m_footprintReceivedAtMs;
+    std::optional<qint64> m_tpoReceivedAtMs;
+    std::optional<qint64> m_volumeProfileReceivedAtMs;
+    void resetReceivedAt(); // the selection changed or the connection dropped
     AgentApi::TradeTape m_agentApiTradeTape;
     QQuickView* m_qquickView = nullptr;
     QWidget* m_qmlContainer = nullptr;

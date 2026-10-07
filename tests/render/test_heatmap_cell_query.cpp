@@ -12,6 +12,7 @@
 #include "servermodel/RecordingPage.hpp"
 #include <QtEndian>
 #include <cstring>
+#include <map>
 
 namespace {
 using namespace heatmap;
@@ -262,7 +263,7 @@ TEST(HeatmapCellQuery, EvictedSealedChunksAreRewantedAtTheLabelRankAndReloadTheS
     emit fetcher.chunkFailed({"OTHER-USD", nodefx::kCoarse, kMinuteMs, start}, "missing", "unrelated chart");
     drainQueries();
     EXPECT_GT(cache.committedCpuBytes(), 0u); // another chart's failure cannot cancel our reload
-    std::optional<heatmap_window::WallsSnapshot> wallResult;
+    std::optional<heatmap::WallsSnapshot> wallResult;
     WallScanRequest wall{{}, kMinuteMs, 100, 100, double(start), double(start + 10*kMinuteMs), 99980, 100040};
     query.scanWalls(wall, spans, {}, &query, [&](auto result) { wallResult = std::move(result); });
     ASSERT_EQ(jobs.size(), 1u);
@@ -340,7 +341,7 @@ TEST(HeatmapWalls, HeldChunksSurviveLruEvictionBeforeTheWorkerScans) {
     SpanSourceCache cache(options); HeatmapCellQuery query(f.store, fetcher, cache, 95);
     const auto picture = std::make_shared<const SpanSet>(f.spans(kMinuteMs));
     WallScanRequest q{{}, kMinuteMs, 1000, 100, double(start+kHourMs), double(end), 99990, 100010};
-    std::optional<heatmap_window::WallsSnapshot> answer;
+    std::optional<heatmap::WallsSnapshot> answer;
     query.scanWalls(q, picture, {}, &query, [&](auto result) { answer = std::move(result); });
     ASSERT_EQ(jobs.size(), 1u);
     EXPECT_EQ(f.store.stats().wantedBytes, 0u); // walls never pin via fetch wants
@@ -405,7 +406,7 @@ TEST(HeatmapWalls, ViewportMarginExplicitPeriodTickBudgetAndMissingColumns) {
     Fixture f; const auto spans = f.spans(kMinuteMs); LabelWindowBuilder builder;
     WallScanRequest q{{}, kMinuteMs, 500, 100, double(start+kHourMs), double(end), 99990, 100010};
     auto walls = scanWalls(q, spans, nullptr, f.store, builder);
-    EXPECT_EQ(walls.status, 200); EXPECT_TRUE(walls.gpuRenderer);
+    EXPECT_EQ(walls.status, 200);
     EXPECT_EQ(walls.rangeStartMs, start+kHourMs); EXPECT_EQ(walls.rangeEndMs, end);
     EXPECT_EQ(walls.rangePriceMin, 99970); EXPECT_EQ(walls.rangePriceMax, 100030); EXPECT_EQ(walls.bandTick, 5);
     ASSERT_FALSE(walls.walls.empty());
@@ -416,7 +417,7 @@ TEST(HeatmapWalls, ViewportMarginExplicitPeriodTickBudgetAndMissingColumns) {
     q.query.tick = 1.234;
     const auto badTick = scanWalls(q, spans, nullptr, f.store, builder);
     EXPECT_EQ(badTick.status, 422);
-    EXPECT_EQ(badTick.error, heatmap_window::WallError::BadTick);
+    EXPECT_EQ(badTick.error, heatmap::WallError::BadTick);
     q.query.tick = .01; q.query.endMs = start + 1000000*kMinuteMs;
     EXPECT_EQ(scanWalls(q, spans, nullptr, f.store, builder).status, 422);
 }
@@ -463,7 +464,56 @@ recording::Hmc2Record parityHour(const std::vector<recording::Hmc2Record>& minut
     });
     return out;
 }
-TEST(HeatmapWalls, MatchesLegacyCaptureAtItsBandTickOnTheSameHmc2Recording) {
+// The walls oracle: recording::buildPage's served columns at its band tick, ranked
+// by peak quantity per (price cell, side) over [startMs, endMs) (the scan rule the
+// retired legacy column window applied to the same page, S8a).
+heatmap::WallsSnapshot pageWalls(const recording::BuildResult& page, const heatmap::WallQuery& query,
+                                 int64_t tfMs, int64_t startMs, int64_t endMs) {
+    heatmap::WallsSnapshot out;
+    const int rows = int(page.band.rows);
+    const double tick = page.band.tick, top = page.band.lo + tick * rows;
+    const int64_t first = (startMs + tfMs - 1) / tfMs * tfMs;
+    std::map<int64_t, const recording::ServedColumn*> byBucket;
+    for (const auto& c : page.columns) byBucket[c.bucketStartMs] = &c;
+    std::map<std::pair<int64_t, bool>, heatmap::Wall> levels;
+    for (int64_t bucket = first; bucket < endMs; bucket += tfMs) {
+        const auto it = byBucket.find(bucket);
+        if (it == byBucket.end()) { ++out.missingColumns; continue; }
+        const auto& c = *it->second;
+        ++out.recordedColumns;
+        for (int row = 0; row < rows && row < int(c.cells.size()); ++row) {
+            const double high = top - row * tick, low = high - tick;
+            if (query.priceMin && high <= *query.priceMin) continue;
+            if (query.priceMax && low >= *query.priceMax) continue;
+            if (!(c.validity.at(size_t(row / 8)) & (1u << (row % 8)))) { out.unknownRows = true; continue; }
+            const double qty = double(c.quantities[size_t(row)]) * c.quantityScale;
+            if (!(qty > 0.0) || qty < query.minQty) continue;
+            const uint16_t code = c.cells[size_t(row)];
+            if ((code & 0x7fffu) == 0) continue;
+            heatmap::Wall wall{bucket, low, high, (code & 0x8000u) != 0, qty, qty * (low + high) / 2.0, false};
+            auto [level, added] = levels.try_emplace({std::llround(low / tick), wall.ask}, wall);
+            auto& w = level->second;
+            if (added) { w.firstSeenMs = bucket; w.meanQty = 0; }
+            else if (qty > w.qty) { w.qty = qty; w.notional = wall.notional; w.bucketStartMs = bucket; }
+            w.meanQty += qty;
+            w.lastSeenMs = bucket;
+            ++w.columns;
+        }
+    }
+    for (auto& [key, w] : levels) {
+        w.meanQty = out.recordedColumns > 0 ? w.meanQty / out.recordedColumns : 0.0;
+        out.walls.push_back(w);
+    }
+    std::sort(out.walls.begin(), out.walls.end(), [](const auto& a, const auto& b) {
+        if (a.qty != b.qty) return a.qty > b.qty;
+        if (a.bucketStartMs != b.bucketStartMs) return a.bucketStartMs < b.bucketStartMs;
+        if (a.priceLow != b.priceLow) return a.priceLow < b.priceLow;
+        return a.ask < b.ask;
+    });
+    if (out.walls.size() > size_t(query.limit)) out.walls.resize(size_t(query.limit));
+    return out;
+}
+TEST(HeatmapWalls, MatchesThePageOracleAtItsBandTickOnTheSameHmc2Recording) {
     QTemporaryDir dir; ASSERT_TRUE(dir.isValid());
     constexpr auto epoch = synthetic_hmc2::epoch;
     {
@@ -498,29 +548,9 @@ TEST(HeatmapWalls, MatchesLegacyCaptureAtItsBandTickOnTheSameHmc2Recording) {
         const auto page = recording::buildPage(reader, q);
         ASSERT_EQ(page.status, recording::BuildStatus::Complete) << page.message;
         ASSERT_FALSE(page.columns.empty()); ASSERT_EQ(page.band.tick, 10);
-        heatmap_window::ColumnWindow legacy;
-        legacy.configure(tf, int(q.count), int(q.count));
-        heatmap_window::Update update;
         const double low = page.band.lo, high = low + page.band.tick*page.band.rows;
-        legacy.setDisplayBand({low, high, page.band.tick}, 1, update); legacy.setRecordingRequest("parity");
-        std::vector<heatmap_window::Column> columns;
         double quantization = 0;
-        for (const auto& c : page.columns) {
-            heatmap_window::Column out;
-            out.bucketStartMs = c.bucketStartMs; out.minPrice = low; out.maxPrice = high; out.tickSize = page.band.tick;
-            out.liquidityScale = c.quantityScale; out.observedMs = c.observedMs;
-            out.intensity.resize(int(c.cells.size()*2)); out.liquidity.resize(int(c.quantities.size()*2));
-            for (size_t i = 0; i < c.cells.size(); ++i) {
-                const auto code = qToLittleEndian(c.cells[i]), qty = qToLittleEndian(c.quantities[i]);
-                std::memcpy(out.intensity.data()+i*2, &code, 2); std::memcpy(out.liquidity.data()+i*2, &qty, 2);
-            }
-            out.validity = QByteArray(reinterpret_cast<const char*>(c.validity.data()), qsizetype(c.validity.size()));
-            quantization = std::max(quantization, c.quantityScale);
-            columns.push_back(out);
-        }
-        bool first = false;
-        ASSERT_TRUE(legacy.ingestRecording(columns, 1, "parity", epoch, epoch+2*kHourMs, true, epoch,
-            epoch+2*kHourMs-tf, page.sizeScale.floor, page.sizeScale.codesPerOctave, update, first));
+        for (const auto& c : page.columns) quantization = std::max(quantization, c.quantityScale);
         SpanSet spans; spans.symbol = "BTC-USD"; spans.tfMs = tf; spans.version = 1;
         spans.availableStartMs = epoch; spans.availableEndMs = epoch+2*kHourMs;
         const auto range = tiles::tilesCovering(epoch, epoch+2*kHourMs, tf);
@@ -539,9 +569,9 @@ TEST(HeatmapWalls, MatchesLegacyCaptureAtItsBandTickOnTheSameHmc2Recording) {
             });
             spans.spans.push_back(std::move(span));
         }
-        heatmap_window::WallQuery wallQuery; wallQuery.limit = 100; wallQuery.startMs = epoch; wallQuery.endMs = epoch+2*kHourMs;
+        heatmap::WallQuery wallQuery; wallQuery.limit = 100; wallQuery.startMs = epoch; wallQuery.endMs = epoch+2*kHourMs;
         wallQuery.priceMin = low; wallQuery.priceMax = high;
-        const auto expected = legacy.captureWalls(wallQuery);
+        const auto expected = pageWalls(page, wallQuery, tf, epoch, epoch+2*kHourMs);
         LabelWindowBuilder builder;
         auto actual = scanWalls({wallQuery, tf, 1000, 100, double(epoch), double(epoch+2*kHourMs), low, high},
                                 spans, nullptr, store, builder);
@@ -594,7 +624,7 @@ TEST(HeatmapWalls, AsyncScansNeedNoLabelsAndNeverFetchUnheldHistory) {
     SpanSourceCache cache(options); HeatmapCellQuery query(f.store, fetcher, cache, 99);
     auto picture = std::make_shared<SpanSet>(f.spans(kMinuteMs)); picture->spans.clear(); // period outside drawn spans
     WallScanRequest q{{}, kMinuteMs, 1000, 100, double(start), double(end), 99990, 100010};
-    std::optional<heatmap_window::WallsSnapshot> answer;
+    std::optional<heatmap::WallsSnapshot> answer;
     query.scanWalls(q, picture, {}, &query, [&](auto result) { answer = std::move(result); });
     ASSERT_EQ(jobs.size(), 1u);
     EXPECT_EQ(query.latestLabels(), nullptr); EXPECT_TRUE(transport.requests.empty());

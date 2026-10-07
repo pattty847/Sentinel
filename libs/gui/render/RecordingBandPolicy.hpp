@@ -1,4 +1,7 @@
 #pragma once
+// Test-only since S8a: the legacy GUI page path that used this client band policy
+// is deleted; RecordingPageTests (ClientBandPreservesIdealTickThroughServerAlignment)
+// still checks the server page oracle against it. It goes with the page path in S8b.
 
 #include "../../core/heatmap/HeatmapResolution.hpp"
 #include <algorithm>

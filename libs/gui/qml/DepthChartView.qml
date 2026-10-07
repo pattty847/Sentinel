@@ -77,9 +77,6 @@ Rectangle {
         anchors.bottomMargin: timeAxisChrome.height
         // No clip here: the renderer draws the price/time axis text into the gutters.
         visible: true
-        intensityScale: 1.0
-        maxCells: 500000
-        heatmapBackgroundColor: "black"
         priceAxisSource: priceAxisModel
         timeAxisSource: timeAxisModel
         candleBuffer: dataSource ? dataSource.candleBuffer : null
@@ -92,52 +89,6 @@ Rectangle {
         
         Component.onCompleted: {
             root.currentActiveTimeframe = unifiedGridRenderer.timeframeMs
-        }
-    }
-
-    Rectangle {
-        id: heatmapHistoryStatus
-        anchors.top: unifiedGridRenderer.top
-        anchors.right: unifiedGridRenderer.right
-        anchors.topMargin: 10
-        anchors.rightMargin: 10
-        width: historyStatusRow.implicitWidth + 18
-        height: 26
-        radius: 4
-        color: unifiedGridRenderer.heatmapHistoryLoading
-            ? Qt.rgba(0.12, 0.16, 0.20, 0.94)
-            : Qt.rgba(0.10, 0.12, 0.15, 0.90)
-        border.width: 1
-        border.color: unifiedGridRenderer.heatmapHistoryLoading ? "#58758f" : "#46505d"
-        visible: unifiedGridRenderer.heatmapHistoryLoading ||
-                 (unifiedGridRenderer.heatmapHistoryAtFloor &&
-                  !unifiedGridRenderer.autoScrollEnabled &&
-                  unifiedGridRenderer.heatmapHistoryFloorMs > 0 &&
-                  unifiedGridRenderer.visibleTimeStart <=
-                      unifiedGridRenderer.heatmapHistoryFloorMs + unifiedGridRenderer.timeframeMs)
-        z: 9
-
-        Row {
-            id: historyStatusRow
-            anchors.centerIn: parent
-            spacing: 7
-
-            Rectangle {
-                width: 7
-                height: 7
-                radius: 3.5
-                anchors.verticalCenter: parent.verticalCenter
-                color: unifiedGridRenderer.heatmapHistoryLoading ? "#72b7e8" : "#8b98a8"
-            }
-
-            Text {
-                anchors.verticalCenter: parent.verticalCenter
-                color: "#d8e1ea"
-                font.pixelSize: 11
-                text: unifiedGridRenderer.heatmapHistoryLoading
-                    ? "Loading heatmap history…"
-                    : "Start of recorded history"
-            }
         }
     }
 
@@ -819,7 +770,6 @@ Rectangle {
     Row {
         anchors.centerIn: axisCorner
         spacing: 3
-        visible: unifiedGridRenderer.gpuHeatmapActive
         z: 6
 
         Rectangle {
@@ -988,55 +938,6 @@ Rectangle {
             }
 
             Text {
-                id: textureSizeText
-                color: "#9ef6ff"
-                font.pixelSize: 10
-                text: "Texture: N/A"
-            }
-
-            Text {
-                id: textureMemText
-                color: "#9ef6ff"
-                font.pixelSize: 10
-                text: "Memory: N/A"
-            }
-
-            Text {
-                id: textureFormatText
-                color: "#9ef6ff"
-                font.pixelSize: 10
-                text: "Format: N/A"
-            }
-
-            Text {
-                id: uploadBandwidthText
-                color: "#9ef6ff"
-                font.pixelSize: 10
-                text: "Upload: 0.0 MB/s"
-            }
-
-            Text {
-                id: ringCursorText
-                color: "#9ef6ff"
-                font.pixelSize: 10
-                text: "Ring Cursor: N/A"
-            }
-
-            Text {
-                id: dirtyRegionsText
-                color: "#9ef6ff"
-                font.pixelSize: 10
-                text: "Dirty Regions: 0"
-            }
-
-            Text {
-                id: labelRingText
-                color: "#9ef6ff"
-                font.pixelSize: 10
-                text: "Label ring: N/A"
-            }
-
-            Text {
                 id: msdfAtlasText
                 color: "#9ef6ff"
                 font.pixelSize: 10
@@ -1049,13 +950,6 @@ Rectangle {
             repeat: true
             running: gpuStatsOverlay.visible
             onTriggered: {
-                textureSizeText.text = "Texture: " + unifiedGridRenderer.getTextureSize();
-                textureMemText.text = "Memory: " + unifiedGridRenderer.getTextureMemory();
-                textureFormatText.text = "Format: " + unifiedGridRenderer.getTextureFormat();
-                uploadBandwidthText.text = "Upload: " + unifiedGridRenderer.getUploadBandwidth().toFixed(2) + " MB/s";
-                ringCursorText.text = "Ring Cursor: " + unifiedGridRenderer.getRingCursorInfo();
-                dirtyRegionsText.text = "Dirty Regions: " + unifiedGridRenderer.getDirtyRegionCount();
-                labelRingText.text = unifiedGridRenderer.getLabelRingMemory();
                 msdfAtlasText.text = unifiedGridRenderer.getMsdfAtlasMemory();
             }
         }

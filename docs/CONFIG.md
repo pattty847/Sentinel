@@ -100,16 +100,11 @@ Public market data (level2, market_trades, candles) does not require a key; the 
 
 ```yaml
 heatmap:
-  source: legacy             # legacy | recording; recording requires advertised recording.available
   gamma: 1.05
   contrast: 1.15
-  label_px: 9999
-  client_cache_columns: 1024  # history/GPU page; protocol maximum is 1024
   initial_column_px: 8        # time zoom on connect: screen pixels per heatmap column
-  initial_price_pct: 5        # price zoom on connect: % of the band; 0 = full
-  target_row_px: 2            # display tick: minimum row height (px)
-  cell_aspect: 0.75           # display tick: rows merge (1-2-5 steps) toward column width * cell_aspect (square-ish cells)
-  sensitivity_min: 0.05       # recording mode colour range in base units (log scale): <= min dark
+  initial_price_pct: 5        # price zoom on connect: % of a 2048-row $1 band; 0 = full
+  sensitivity_min: 0.05       # colour range in base units (log scale): <= min dark
   sensitivity_max: 50         # >= max brightest
 
 gui:
@@ -118,43 +113,26 @@ gui:
   default_order_qty: 1.0
 ```
 
-`heatmap.source` defaults to `legacy` (unknown values also fall back to legacy).
-`recording` is active only after a connected server advertises `recording.available: true`;
-otherwise the client uses the legacy path. Recording mode displays closed recording buckets
-only; legacy live values are not mixed into its absolute log codes. Live recording columns
-are deferred to S4. The presentation clock holds at the newest recorded bucket.
-
-Recording requests use 2048 rows and the square-cell target from `target_row_px` and
-`cell_aspect`. A price exit from the buffered band or a change in the ideal 1-2-5 tick
-starts a 150 ms trailing debounce. Requests retain at least 50% of the visible price
-span on each side (clipped at price zero). Because the current protocol's `display_tick`
-is exact and native ticks are not advertised, the first request expands the range to
-at least `2048 * ideal_tick` and leaves tick selection to the server. Its returned
-band is authoritative; continuation pages pin that band and tick. Thus the buffer
-can be wider than 50%, especially at close time zoom. This requires no protocol change.
-
-For data-path checks, start the GUI with `SENTINEL_PROBES=heatmap.recording,heatmap.window`.
-`heatmap.recording.reband` logs the generation, requested range, ideal tick and row count;
-`request` adds the unique request id and paging boundary; `page` logs the authoritative
-tick, scanned interval, `next_end` and exhaustion; `stale` reports obsolete replies.
-Shader/label support for these codes and validity bits is a separate S3b change.
+The legacy heatmap renderer and its keys (`renderer`, `source`, `label_px`,
+`client_cache_columns`, `target_row_px`, `cell_aspect`) were removed in S8a
+(2026-10-06). A file that still sets them loads; `renderer` other than `gpu` logs one
+warning, the rest are ignored.
 
 ### Heatmap chart settings (S6)
 
-`heatmap.renderer: legacy|gpu` defaults to `gpu` (the owner flipped the default on 2026-10-01); unknown config values fall back to `gpu`. `legacy` stays selectable (Settings > Debug, `--heatmap-renderer legacy`, the settings route) until S8 deletes it. This is independent of `heatmap.source` (the legacy projection's data source). With `gpu` (S6b) the main chart draws the heatmap through `HeatmapGpuLayer`/`HeatmapTileNode`, the legacy band stream is muted (`DataProcessor::setHeatmapEnabled(false)`; on-chart liquidity labels come from the S7a cell query (S7b, below); walls use the S7a CPU cell query on request, defaulting to the viewport with optional period and tick), and the chart's GridViewState clamps zoom-out at one column per pixel (and one row per pixel in Manual). A timeframe change keeps the columns on screen: the time span scales by the timeframe ratio about the view end (1m -> 1h shows 60x more history), inside the clamps (S6d, FM-134); the legacy renderer resets to `initial_column_px` columns instead. The renderer flips at runtime both ways through the settings route.
+The main chart draws the heatmap through `HeatmapGpuLayer`/`HeatmapTileNode` (S6b), the only renderer since S8a: on-chart liquidity labels come from the S7a cell query (S7b, below), walls use the S7a CPU cell query on request (defaulting to the viewport with optional period and tick), and the chart's GridViewState clamps zoom-out at one column per pixel (and one row per pixel in Manual). A timeframe change keeps the columns on screen: the time span scales by the timeframe ratio about the view end (1m -> 1h shows 60x more history), inside the clamps (S6d, FM-134).
 
-Process-only overrides on the `sentinel-gui` command line (never persisted): `--heatmap-renderer legacy|gpu` selects the renderer for this process, `--api-port N` moves the Agent API off `gui.api_port` (two processes on one server for A/B runs), and `--no-screener` skips the `screener_server.py` child (it binds port 17200 and the GUI kills any port-17200 holder before it starts one, so extra processes such as `scripts/dev/heatmap-ab.sh` pass it).
+Process-only overrides on the `sentinel-gui` command line (never persisted): `--api-port N` moves the Agent API off `gui.api_port` (a second process on one server), and `--no-screener` skips the `screener_server.py` child (it binds port 17200 and the GUI kills any port-17200 holder before it starts one, so extra processes such as the GUI host's pass it). `--heatmap-renderer gpu` is accepted and ignored; any other value logs one warning (the legacy renderer was removed in S8a).
 
-The palette (`palette_preset`, or `Custom` with `bid_gradient`/`ask_gradient`) and `sensitivity_min`/`sensitivity_max` are chart settings that both renderers draw (S6b): the legacy renderer and `HeatmapTileNode` sample the same 512-texel palette image with the legacy tone mapping (`heatmap.gamma`, `contrast`, `shader_floor`), so a preset gives the same colour for the same recording code. The toolbar's palette combo writes `palettePreset`. `opacity` applies to the GPU renderer.
+The palette (`palette_preset`, or `Custom` with `bid_gradient`/`ask_gradient`) and `sensitivity_min`/`sensitivity_max` are chart settings (S6b): `HeatmapTileNode` samples a 512-texel palette image with the tone mapping `heatmap.gamma`, `contrast` and `shader_floor` (the retired legacy renderer's colours, matched in S6). The toolbar's palette combo writes `palettePreset`.
 
 On first use, per-chart defaults come from the client YAML keys below (also supported under `client.heatmap`). Persisted values override those defaults. `HeatmapSettingsStore` uses `QSettings("Sentinel", "SentinelTerminal")`, `heatmap/<chartId>/<field>` with camelCase field names; the main chart ID is `main`. Named layout save/restore snapshots the persisted model under `layouts/<name>/heatmap/<chartId>/<field>`. `_last_session` never saves or restores heatmap settings, preventing stale close-time snapshots from overwriting live changes after a crash. Agent API patches with `persist:false` affect only that process and are excluded from later unrelated persisted patches and named snapshots. Shared manual tick choices live under `heatmap/manualTick/<symbol>/<timeframeMs>` and are independent of layouts. Names are escaped as path segments. Malformed stored fields fall back to their configured defaults.
 
 | YAML key | Default | Validation / meaning |
 |---|---|---|
-| `renderer` | `gpu` | `gpu`, `legacy` (legacy is removed in S8) |
 | `tick_mode` | `auto` | `auto`, `manual` |
 | `manual_tick` | 100 | Integer price units, clamped 1..10^12 then rounded up to a `{1,2,2.5,5} x 10^k` preset |
-| `min_row_px` | 2 | 0.5..32; GPU policy, separate from legacy `target_row_px` |
+| `min_row_px` | 2 | 0.5..32 |
 | `hysteresis` | 0.25 | 0..0.9 |
 | `crossfade_ms` | 150 | Integer 0..2000; 0 disables |
 | `show_band_edges` | false | Boolean; saved and editable, drawn by sentinel-lab only (the main chart does not draw band edges yet) |
@@ -176,17 +154,16 @@ On first use, per-chart defaults come from the client YAML keys below (also supp
 | (settings only) `candleBodyOpacity` | 1 | 0..1; 1 is fully opaque. |
 | (settings only) `candleWickWidth` | 1 | Integer 1..3 device pixels, independent of zoom and display scale. |
 
-**Liquidity labels and the range filter (S7b, GPU renderer).** A label shows on every coloured cell (valid and above the low end of the liquidity range, exactly as the shader colours it) where its text fits at `labelMinPx` plus padding (3 px each side, 1 px above and below); it grows with the cells up to `labelMaxPx` and never shrinks below `labelMinPx`. Text: at most three significant digits with k/M/B/T, trailing zeros dropped (`$11k`, `$1.2M`, `$1.24M`); the asset amount is the number only (`12.5`, `0.358`), owner decision 2026-10-02. Labels draw only on columns that show exactly the picture they were computed from (the node's drawn span content and live version, and this frame's target); a column in a transition (a live version paging in, a span revision in slot fallback, a crossfade or hold) shows none until both agree. The toolbar's two-handle range slider (log scale) writes `sensitivityMin` (low handle: smaller cells get no colour and no label) and `sensitivityMax` (high handle: colour saturation); its ends span the liquidity of the current label window (5th percentile to maximum), widened to the handles, and hold while zoomed out past the 16,000-cell label window. A drag applies for this process while it moves and is saved on release. In legacy mode the toolbar shows the old threshold slider instead, and no Labels toggle (legacy always draws its labels; the currency combo stays). Label text and the window are computed off the GUI thread (HeatmapCellQuery); the chart only lays out reused glyph runs per frame.
+**Liquidity labels and the range filter (S7b, GPU renderer).** A label shows on every coloured cell (valid and above the low end of the liquidity range, exactly as the shader colours it) where its text fits at `labelMinPx` plus padding (3 px each side, 1 px above and below); it grows with the cells up to `labelMaxPx` and never shrinks below `labelMinPx`. Text: at most three significant digits with k/M/B/T, trailing zeros dropped (`$11k`, `$1.2M`, `$1.24M`); the asset amount is the number only (`12.5`, `0.358`), owner decision 2026-10-02. Labels draw only on columns that show exactly the picture they were computed from (the node's drawn span content and live version, and this frame's target); a column in a transition (a live version paging in, a span revision in slot fallback, a crossfade or hold) shows none until both agree. The toolbar's two-handle range slider (log scale) writes `sensitivityMin` (low handle: smaller cells get no colour and no label) and `sensitivityMax` (high handle: colour saturation); its ends span the liquidity of the current label window (5th percentile to maximum), widened to the handles, and hold while zoomed out past the 16,000-cell label window. A drag applies for this process while it moves and is saved on release. Label text and the window are computed off the GUI thread (HeatmapCellQuery); the chart only lays out reused glyph runs per frame.
 
 **Chart menu and toolbar modes.** The toolbar gear opens the chart menu: Chart settings / Heatmap settings (the dialog's Chart and Look tabs), Liquidity labels, Label currency, Label size presets (12-15, 14-18, 16-20 px), Candle style, Save chart screenshot (the chart's own scene grab into `gui.screenshot_dir`, as the camera button), Layouts (save, restore, reset) and Font. The toolbar shows only the controls of the active layers: tick selector, palette and liquidity controls with the heatmap layer; candle style with candles; TPO session with TPO or the volume profile; TPO layout with TPO.
 
-**Settings UI (S6c).** Every field above is editable in the chart's Chart Settings dialog (toolbar gear > Chart settings): tabs Chart (labels and Candles with a live preview), Tick, Look, Budgets, Live, Debug (and TPO for the chart's TPO controls). Candle colours, opacity, and wick width persist under `heatmap/<chartId>/` with the other chart settings; candle style remains a session control. Changes apply at once and are saved per chart, except the Debug renderer, which applies to this session only unless "Make default" is ticked. Each tab has a Reset to defaults (the YAML/config defaults). The Budgets tab also edits the process RAM tiers (`heatmap/budgets/...`, every chart, applied to the running data service at once and saved only when it accepts them). The toolbar's Auto/Manual combo and preset combo (beside the timeframe) write `tickMode`/`manualTick`; a preset picked there locks Manual and is remembered under `heatmap/manualTick/<symbol>/<timeframeMs>`; entering Manual with nothing remembered locks the tick drawn now. The dialog, toolbar, telemetry dock and Agent API all go through one `HeatmapSettingsModel` per chart, so a change from any of them shows in the others. Tone mapping (gamma/contrast/shader floor) stays a session control in the Look tab, as before.
+**Settings UI (S6c).** Every field above is editable in the chart's Chart Settings dialog (toolbar gear > Chart settings): tabs Chart (labels and Candles with a live preview), Tick, Look, Budgets, Live, Debug (and TPO for the chart's TPO controls). Candle colours, opacity, and wick width persist under `heatmap/<chartId>/` with the other chart settings; candle style remains a session control. Changes apply at once and are saved per chart (the Debug tab holds the telemetry toggle; its renderer choice went with the legacy renderer in S8a). Each tab has a Reset to defaults (the YAML/config defaults). The Budgets tab also edits the process RAM tiers (`heatmap/budgets/...`, every chart, applied to the running data service at once and saved only when it accepts them). The toolbar's Auto/Manual combo and preset combo (beside the timeframe) write `tickMode`/`manualTick`; a preset picked there locks Manual and is remembered under `heatmap/manualTick/<symbol>/<timeframeMs>`; entering Manual with nothing remembered locks the tick drawn now. The dialog, toolbar, telemetry dock and Agent API all go through one `HeatmapSettingsModel` per chart, so a change from any of them shows in the others. Tone mapping (gamma/contrast/shader floor) stays a session control in the Look tab, as before.
 
 Non-finite stored/config numbers fall back to model defaults. The API requires finite numbers and correct types before clamping. Example custom gradient:
 
 ```yaml
 heatmap:
-  renderer: gpu
   palette_preset: Custom
   bid_gradient: [{position: 0, color: "#000000"}, {position: 1, color: "#00ffff"}]
   ask_gradient: [{position: 0, color: "#000000"}, {position: 1, color: "#ffc800"}]

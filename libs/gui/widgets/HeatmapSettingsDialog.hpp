@@ -2,8 +2,7 @@
 // Chart settings (S6c, S7b): every HeatmapChartSettings field in six tabs
 // (Chart, Tick, Look, Budgets, Live, Debug) plus the chart's TPO controls. The
 // Chart tab holds the liquidity labels and the candle style. Changes apply
-// live through HeatmapSettingsModel::apply (persisted per chart; the Debug
-// renderer only for this session unless "Make default" is ticked) and the dialog
+// live through HeatmapSettingsModel::apply (persisted per chart) and the dialog
 // follows the model's changed() signal, so Agent API and toolbar changes show here.
 // Widgets carry objectNames equal to the setting keys (tests and inspection).
 #include "heatmap/HeatmapChartSettings.hpp"
@@ -144,9 +143,6 @@ private:
     // Live
     QSpinBox *m_liveMinInterval = nullptr;
     // Debug
-    QComboBox *m_rendererCombo = nullptr;
-    QCheckBox *m_makeDefault = nullptr;
-    QLabel *m_savedRenderer = nullptr;
     QCheckBox *m_showTelemetry = nullptr;
     // TPO (renderer state, not chart settings)
     QComboBox *m_tpoTimeframeCombo = nullptr;

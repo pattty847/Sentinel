@@ -207,7 +207,104 @@ When `HeatmapTwapStreamer` goes, the recorder stops writing `data/heatmap` (HMCL
    - The Agent API renderer fields stay as the constant `"gpu"` in S8a.
    - `RecordingPage` stays as the test oracle until S8b.
    - `heatmap-ab.sh` retires after the final capture.
-3. The A/B capture uses the GUI-host fallback: one hosted session per renderer, run one after the other. Each launches with `gui-shot.sh launch --renderer legacy|gpu --build <worktree>`, which is isolated by design. The locked `lt-claude/heatmap-ab-isolation` branch is not landed for this; it stays locked, and its owner decides its fate.
+3. The A/B capture uses the GUI-host fallback: one hosted session per renderer, run one after the other. Each launches with `gui-shot.sh launch --renderer legacy|gpu --build <worktree>`, which is isolated by design. The `lt-claude/heatmap-ab-isolation` branch was not landed for this; the owner retired it on 2026-10-06 (tag `archive/lt-claude-heatmap-ab-isolation`).
 4. `lt-sol/label-style` (locked) changes `HeatmapLabelRenderer` and `HeatmapOverlayRenderer`, both of which S8a deletes. That branch will no longer apply after S8a; the owner retired it on 2026-10-06 (tag `archive/lt-sol-label-style`).
 
 5. (conductor, after the Astra r1 review) Accepted minor, not fixed in S8a: retired legacy frames are still JSON-parsed before the client drops them (`SentinelStreamClient.cpp:685,726,737`; about 20 frames/s at 11 KB, a cost inherited from before S8a). S8b removes the sender, which removes the cost; a pre-parse discriminator would be throwaway code.
+
+## 9. A/B record (S8a writer, 2026-10-06)
+
+Hosted GUI sessions (`gui-shot.sh launch --build <worktree> --fresh-profile`, one at a time, on the
+running recorder; screenshots `target=heatmap` only; owner settings unchanged after every session).
+Evidence under `screenshots/s8-final/` (gitignored): `before/` (`legacy-*`, `gpu-*`, unmodified branch
+@ e258947), `after/` (gpu, branch @ fd9fcd5), `native/` (section 5 run), `repro/` (main vs S8a checks).
+Steps: the S6d sequence (`2026-10-s6-plan.md` "Sequence and timings") plus 11b/11c labels; windows 05,
+08b, 11, 11b and 11c are fixed absolute windows shared by all runs (`windows.env`). The legacy and
+gpu "before" sessions ran 12 minutes apart, so live steps (01-04, 09, 10, 12, 13) show different data.
+
+### Before (unmodified branch)
+
+| Step | legacy op->rendered (ms) | gpu op->rendered (ms) | gpu settled after (ms) | legacy frameP95 | gpu frameP95 | gpu tick (units) | legacy vs gpu (3% fuzz) |
+|---|---|---|---|---|---|---|---|
+| 01 symbol BTC-USD | 392 | 33 | 16 | 1.1 | 4.6 | 100 | 62.4% (live) |
+| 02 tf 1m | 25 | 30 | 29 | 0.8 | 1.0 | 100 | 62.9% (live) |
+| 03 tf 5m | 27 | 43 | 22 | 0.8 | 1.1 | 500 | 66.4% (live) |
+| 04 tf 1h | 29 | 49 | 1511 | 0.8 | 9.3 | 500 | 60.9% (live) |
+| 05 viewport 36 h @1h | 31 | 28 | 27 | 0.5 | 0.8 | 500 | 40.4% (tick: legacy band vs gpu Auto $5) |
+| 06 wheel x5 | 21-25 each | 20-24 each | 27 | 0.9 | 0.9 | 500 | **0.11%** |
+| 07 price-axis drag | 29 | 29 | 27 | 0.7 | 0.8 | 1000 | 46.9% (tick) |
+| 08 Manual $1 (gpu only) | - | 34 | 28 | 0.8 | 0.9 | 100 | n/a |
+| 08b Manual $1, 72 h | 25 | 27 | 24 | 0.9 | 0.8 | 100 | n/a |
+| 09 follow-live | 30 | 30 | 24 | 0.5 | 1.2 | 100 | live |
+| 10 tf 1m (follow) | 37 | 48 | 25 | 0.5 | 0.8 | 100 | live |
+| 11 viewport 3 h @1m | 30 | 39 | 22 | 0.6 | 0.7 | 100 | **5.9%** |
+| 11b labels USD | 25 | 29 | 22 | 1.3 | 0.5 | 100 | 9.9% |
+| 11c labels asset | 55 | 32 | 20 | 1.0 | 0.9 | 100 | 9.9% |
+| 12 follow-live 1m | 35 | 25 | 24 | 1.0 | 2.3 | 100 | live |
+| 13 after 60 s live | - | - | 36 | 0.8 | 1.5 | 100 | live |
+
+10-minute live soak at 1m follow-live: legacy heatmap receive age p50 33 / p95 56 ms (legacy has no
+draw-age metric), frameP95 p50 0.9 / p95 2.0 ms; gpu `liveAgeMs` p50 100 / p95 510 / max 615 ms (layer
+cumulative p50 101 / p95 493 over 1297 drawn versions), frameP95 p50 1.6 / p95 2.9 ms. Cold start (host
+launch to API, gpu settled): gpu 1354 ms; legacy 616 ms (no settle wait).
+
+### After (S8a, gpu only)
+
+| Step | op->rendered (ms) | settled after (ms) | frameP95 | tick (units) | vs before gpu (3% fuzz) |
+|---|---|---|---|---|---|
+| 01 symbol BTC-USD | 31 | 15 | 6.7 | 100 | live |
+| 02 tf 1m | 28 | 18 | 1.0 | 100 | live |
+| 03 tf 5m | 36 | 23 | 1.1 | 500 | live |
+| 04 tf 1h | 27 | 21 | 1.0 | 500 | live |
+| 05 viewport 36 h @1h | 26 | 22 | 0.5 | 500 | **0.00%** |
+| 06 wheel x5 | 20-24 each | 30 | 0.6 | 500 | **0.00%** |
+| 07 price-axis drag | 28 | 22 | 0.9 | 1000 | 5.4% (candles only, see below) |
+| 08 Manual $1 | 33 | 19 | 0.7 | 100 | **0.00%** |
+| 08b Manual $1, 72 h | 27 | 23 | 1.6 | 100 | **0.00%** |
+| 09 follow-live | 25 | 22 | 0.8 | 100 | live |
+| 10 tf 1m (follow) | 32 | 25 | 0.9 | 100 | live |
+| 11 viewport 3 h @1m | 37 | 22 | 0.9 | 100 | **0.00%** |
+| 11b labels USD | 27 | 27 | 1.1 | 100 | **0.00%** |
+| 11c labels asset | 24 | 23 | 0.7 | 100 | **0.00%** |
+| 12 follow-live 1m | 26 | 21 | 1.5 | 100 | live |
+| 13 after 60 s live | - | 27 | 1.7 | 100 | live |
+
+10-minute soak: `liveAgeMs` p50 115 / p95 2202 ms, but the high samples are the first 30 s only
+(2.2-2.4 s): the Coinbase feed dropped at 21:01:13 (server log: EOF, reconnect, exchange clock offset
+10 s, `backward=877`), while the client receive age stayed p95 501 ms. From 35 s on the soak matches
+"before" (all samples <= 594 ms). frameP95 p50 1.8 / p95 2.6 ms. Cold start 1421 ms (901 ms in the native
+run). Step 07: the heatmap is identical; the candles of the settled shot still showed the first of the
+two drag steps (a stale overlay frame). Not reproduced in 6 + 6 two-step drags on main's build and on
+S8a (`repro/`, candles off/on refresh shows no difference): a timing race, not an S8a change.
+
+### Native run (section 5, `native/`)
+
+BTC-USD 1m, 5m, 1h, wheel x5, price-axis drag, Manual $1, follow-live, ETH-USD and back: every step
+`settled` true, renderer/activeRenderer "gpu"; `liveAgeP95Ms` 620 ms at 1m (2739 ms cumulative after the
+1h steps, whose live versions are minutes old by construction). Trade overlays over 3 min with
+footprint, TPO and VP on in turn: `lastReceivedAtMs.footprint/tpo/volumeProfile` advanced every 10 s
+sample (18/18). `POST heatmap/settings {"renderer":"legacy"}` -> 422 `invalid_settings`. Run log: no W
+line from the stream client. A direct `--agent-host` launch with `--heatmap-renderer legacy` logged one
+warning, ran gpu, and the `stream.legacyHeatmap` probe counted 546 `heatmap_slice` frames dropped in
+27 s (about 20/s, 11 KB each: S8b removes them at the source). Screenshots: `extra-heatmap.png`,
+`extra-window.png`, `extra-settings-debug.png` (no renderer combo), `extra-toolbar.png`,
+`extra-overlay-*.png`.
+
+Found while collecting this (pre-existing on main, not S8a): the volume-profile layer draws a fan of
+triangles from the chart's top-left corner (`repro/main-vp-*.png`, `repro/s8a-vp-*.png`).
+
+### Clean soak re-run (after, a3d008f)
+
+Requested by the conductor because the "after" soak overlapped the 21:01:13 Coinbase disconnect.
+Same method (hosted GUI, `--build <worktree> --fresh-profile`, BTC-USD 1m follow-live, 10 minutes of
+5 s samples), binary built 21:16:12 from a3d008f, 21:26:17-21:36:20, evidence in
+`screenshots/s8-final/soak2/`. No disconnect in the window: the server's feed line stays
+`conn=2 ... reconnects=1` (the 21:01 reconnect) throughout, with no EOF or invalidation; the GUI run log
+has no W/E line beyond the usual Qt/QML and layout ones.
+
+| Soak (1m, BTC-USD) | liveAgeMs p50 | p95 | max | layer cumulative p50 / p95 | receive age p95 | frameP95 p50 / p95 |
+|---|---|---|---|---|---|---|
+| Before (unmodified, gpu) | 100 | 510 | 615 | 101 / 493 (1297 versions) | 508 | 1.6 / 2.9 |
+| After, clean re-run | 109 | 497 | 630 | 114 / 516 (1148 versions) | 504 | 1.1 / 1.9 |
+
+The deletion leaves live data age unchanged within sampling noise.

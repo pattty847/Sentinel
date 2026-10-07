@@ -129,7 +129,9 @@ TEST_F(TradeOverlay, FootprintGridResetAndSkippedBucketsDoNotStretchTime) {
     ASSERT_TRUE(ring.ingestSlice(180000,360000,180000,4,10,110,130,2,data));
     EXPECT_EQ(ring.snapshot().timeframeMs,180000);
 }
-TEST_F(TradeOverlay, DataProcessorPublishesMetadataIndependentOfRecordingReband) {
+// The footprint grid is the overlay's own (INV-068): a repeated slice keeps its
+// metadata; a chart timeframe change on the processor does not reset it either.
+TEST_F(TradeOverlay, DataProcessorPublishesStableFootprintGridMetadata) {
     DataProcessor processor; processor.setActiveSymbol("BTC-USD");
     TradeOverlayGrid grid; int uploads = 0;
     QObject::connect(&processor, &DataProcessor::footprintColumnReady, &processor,
@@ -138,7 +140,7 @@ TEST_F(TradeOverlay, DataProcessorPublishesMetadataIndependentOfRecordingReband)
     s.bucketStartMs=60000; s.bucketEndMs=120000; s.gridWidth=16; s.gridHeight=10;
     s.minPrice=100; s.maxPrice=120; s.tickSize=2; s.format="q16_delta"; s.deltaLevelsQ16=QByteArray(20,'\0');
     processor.onFootprintSliceReceived(s); ASSERT_EQ(uploads,1); const auto before=grid;
-    processor.setRecordingConfig(true,2); processor.setHeatmapViewport(0,600000,false,1000,2000,800,400);
+    processor.setTimeframe(300000);
     processor.onFootprintSliceReceived(s); ASSERT_EQ(uploads,2);
     EXPECT_EQ(grid.startMs,before.startMs); EXPECT_EQ(grid.endMs,before.endMs);
     EXPECT_EQ(grid.maxPrice,before.maxPrice); EXPECT_EQ(grid.tick,before.tick);

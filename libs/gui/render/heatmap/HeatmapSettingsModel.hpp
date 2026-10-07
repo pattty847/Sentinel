@@ -33,10 +33,6 @@ public:
     HeatmapSettingsStore &store() { return store_; }
 
     void setContextProvider(std::function<Context()> provider) { context_ = std::move(provider); }
-    // The renderer this process draws with, never persisted (--heatmap-renderer).
-    void setProcessRenderer(const std::string &renderer);
-    // The renderer saved as the default (what a restart uses).
-    std::string savedRenderer() const;
 
     // A partial settings patch (the Agent API schema). persist=false changes this
     // process only. Returns the S6a validation error (nothing changes) or empty.
@@ -64,9 +60,6 @@ signals:
     // tick choice (HeatmapGpuLayer::setSettings remembers it for the context).
     void changed(bool explicitManualTick);
     void budgetsChanged();
-    // The saved default renderer changed (a persisted renderer patch) while the
-    // effective settings may not have: persistence only, the chart does no work.
-    void savedRendererChanged();
 
 private:
     HeatmapSettingsStore &store_;
@@ -74,7 +67,6 @@ private:
     ClientHeatmapConfig defaults_;
     HeatmapChartSettings settings_;
     HeatmapBudgets budgets_;
-    std::string processRenderer_; // session-only renderer (not persisted), kept over workspace restores
     std::function<Context()> context_;
     std::function<bool(const HeatmapBudgets &)> budgetSink_;
 };

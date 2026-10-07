@@ -8,7 +8,7 @@ namespace {
 struct Rgb {
     int r = 0, g = 0, b = 0;
 };
-// HeatmapOverlayRenderer::ColorGradient::interpolate: QColor channels from a float
+// The legacy ColorGradient::interpolate: QColor channels from a float
 // expression, truncated to int.
 Rgb interpolate(const std::vector<PaletteStop> &stops, float t) {
     if (stops.empty()) return {};
@@ -55,7 +55,7 @@ std::optional<std::vector<PaletteStop>> stopsFrom(const std::vector<GradientStop
 } // namespace
 
 PaletteGradients legacyDefaultGradients() {
-    // Electric cyan and hot orange (HeatmapOverlayRenderer's built-in stops).
+    // Electric cyan and hot orange (the legacy renderer's built-in stops).
     return {{{0.00f, 0, 20, 25}, {0.35f, 0, 110, 130}, {0.70f, 0, 210, 220}, {1.00f, 160, 255, 248}},
             {{0.00f, 35, 5, 0}, {0.30f, 160, 30, 10}, {0.60f, 230, 80, 0}, {0.85f, 255, 160, 30}, {1.00f, 255, 230, 80}},
             2.0f};

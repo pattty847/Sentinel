@@ -6,6 +6,7 @@
 #include <future>
 #include <map>
 #include <set>
+#include <QtGlobal>
 
 using namespace std::chrono_literals;
 namespace beast = boost::beast;
@@ -126,6 +127,7 @@ struct SentinelStreamClientWriteTest : testing::Test {
             started.set_value();
         });
     }
+    static void deliver(SentinelStreamClient& c, const std::string& message) { c.handleMessage(message); }
     void expectDrained(SentinelStreamClient& c) {
         EXPECT_FALSE(c.m_writeInFlight);
         EXPECT_TRUE(c.m_writeQueue.empty());
@@ -210,7 +212,7 @@ TEST_F(SentinelStreamClientWriteTest, HeatmapRequestsFromOtherThreadsAreWrittenO
         });
     for (int i = 0; i < kGui; ++i) c->subscribe("BTC-USD"); // the GUI thread meanwhile
     for (auto &w : workers) w.join();
-    c->releaseRecordingView("BTC-USD");
+    c->unsubscribeHeatmapLive("BTC-USD");
     const size_t total = kThreads * (kEach + 1) + kGui + 1;
     ASSERT_TRUE(count(total));
     c->disconnectFromServer();
@@ -222,7 +224,7 @@ TEST_F(SentinelStreamClientWriteTest, HeatmapRequestsFromOtherThreadsAreWrittenO
     ASSERT_EQ(messages.size(), total) << "nothing lost or duplicated";
     std::map<int, std::vector<int64_t>> startsByThread;
     std::set<quint64> written;
-    int unview = 0, subscribes = 0;
+    int unsubscribes = 0, subscribes = 0;
     for (const auto &m : messages) {
         const auto j = nlohmann::json::parse(m);
         const auto type = j.value("type", std::string{});
@@ -232,18 +234,50 @@ TEST_F(SentinelStreamClientWriteTest, HeatmapRequestsFromOtherThreadsAreWrittenO
             startsByThread[int(start / 1'000'000'000)].push_back(start);
         } else if (type == "heatmap_live_subscribe") {
             written.insert(j["sub"].get<quint64>());
-        } else if (type == "heatmap_recording_unview") {
-            ++unview;
+        } else if (type == "heatmap_live_unsubscribe") {
+            ++unsubscribes;
             EXPECT_EQ(j.value("symbol", std::string{}), "BTC-USD");
         } else {
             ++subscribes;
         }
     }
     EXPECT_EQ(written, unique) << "each id was written once";
-    EXPECT_EQ(unview, 1);
+    EXPECT_EQ(unsubscribes, 1);
     EXPECT_EQ(subscribes, kGui);
     for (const auto &[thread, starts] : startsByThread) {
         EXPECT_EQ(starts.size(), size_t(kEach));
         EXPECT_TRUE(std::is_sorted(starts.begin(), starts.end())) << "thread " << thread << " kept its order";
     }
+}
+
+namespace legacyframes {
+std::atomic<int> warnings{0};
+QtMessageHandler previous = nullptr;
+void handler(QtMsgType type, const QMessageLogContext& context, const QString& message) {
+    if (type == QtWarningMsg || type == QtCriticalMsg) ++warnings;
+    if (previous) previous(type, context, message);
+}
+}
+
+// S8a: the retired legacy heatmap frames keep arriving from the server until S8b
+// (heatmap_slice once per second per subscribed symbol). The client drops them
+// without a per-frame warning; an unknown type still warns (the capture works).
+TEST_F(SentinelStreamClientWriteTest, RetiredLegacyHeatmapFramesAreDroppedWithoutWarnings) {
+    auto c = client();
+    const int version = protocol::SentinelProtocol::kHeatmapSchemaVersion;
+    legacyframes::warnings = 0;
+    legacyframes::previous = qInstallMessageHandler(legacyframes::handler);
+    for (int i = 0; i < 50; ++i) {
+        for (const char* type : {"heatmap_slice", "heatmap_history_chunk", "heatmap_recording_live"}) {
+            deliver(*c, nlohmann::json{{"type", type}, {"schema_version", version}, {"symbol", "BTC-USD"},
+                                       {"column", "not base64"}, {"columns", nlohmann::json::array()}}.dump());
+            deliver(*c, nlohmann::json{{"type", type}, {"symbol", "BTC-USD"}}.dump()); // no schema_version
+        }
+    }
+    const int legacy = legacyframes::warnings;
+    deliver(*c, R"({"type":"s8a_unknown_type"})");
+    const int unknown = legacyframes::warnings - legacy;
+    qInstallMessageHandler(legacyframes::previous);
+    EXPECT_EQ(legacy, 0);
+    EXPECT_EQ(unknown, 1);
 }

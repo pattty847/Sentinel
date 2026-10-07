@@ -119,24 +119,27 @@ QJsonArray stopsJson(std::initializer_list<std::pair<double, const char *>> stop
 }
 
 // ------------------------------------------------------------- persistence
-TEST(HeatmapSettingsModelTest, PersistsPerChartAndASessionRendererIsNotSaved) {
+TEST(HeatmapSettingsModelTest, PersistsPerChartAndRefusesTheRemovedLegacyRenderer) {
     TempStore t;
     HeatmapSettingsModel main(t.store, "main", t.config), other(t.store, "other", t.config);
     QSignalSpy changed(&main, &HeatmapSettingsModel::changed);
     ASSERT_TRUE(main.apply({{"palettePreset", "Ocean"}, {"crossfadeMs", 0}, {"minRowPx", 3.0}}).isEmpty());
     EXPECT_EQ(changed.count(), 1);
-    ASSERT_TRUE(main.apply({{"renderer", "legacy"}}, false).isEmpty()); // this session only (gpu is the default)
-    EXPECT_EQ(main.settings().renderer, "legacy");
-    EXPECT_EQ(main.savedRenderer(), "gpu");
+    // S8a: gpu is the only renderer; a legacy patch is refused and changes nothing.
+    changed.clear();
+    EXPECT_FALSE(main.apply({{"renderer", "legacy"}}, false).isEmpty());
+    EXPECT_FALSE(main.apply({{"renderer", "legacy"}, {"opacity", 0.25}}).isEmpty());
+    EXPECT_EQ(changed.count(), 0);
+    EXPECT_TRUE(main.apply({{"renderer", "gpu"}}, false).isEmpty()) << "gpu stays accepted (a no-op)";
+    EXPECT_EQ(changed.count(), 0);
     const auto saved = t.reload();
     EXPECT_EQ(saved.palettePreset, "Ocean");
     EXPECT_EQ(saved.crossfadeMs, 0);
     EXPECT_EQ(saved.minRowPx, 3.0);
-    EXPECT_EQ(saved.renderer, "gpu");
+    EXPECT_NE(saved.opacity, 0.25);
     EXPECT_EQ(t.reload("other"), other.defaultSettings()); // per chart
-    // A later persisted patch saves its own fields only, never the session renderer.
+    // A later persisted patch saves its own fields.
     ASSERT_TRUE(main.apply({{"opacity", 0.5}}).isEmpty());
-    EXPECT_EQ(t.reload().renderer, "gpu");
     EXPECT_EQ(t.reload().opacity, 0.5);
     // An invalid patch changes nothing and emits nothing.
     changed.clear();
@@ -279,10 +282,6 @@ TEST(HeatmapSettingsModelTest, NamedWorkspacesRestoreButLastSessionNever) {
     EXPECT_EQ(model.settings().palettePreset, "Fire");
     EXPECT_EQ(model.settings().liveMinIntervalMs, 900);
     EXPECT_EQ(t.reload().palettePreset, "Fire"); // the restored workspace is the chart's settings now
-    // A session-only renderer survives a workspace restore.
-    ASSERT_TRUE(model.apply({{"renderer", "legacy"}}, false).isEmpty());
-    model.restoreLayout("Scalping");
-    EXPECT_EQ(model.settings().renderer, "legacy");
 }
 
 TEST(HeatmapSettingsModelTest, ProcessBudgetsValidateApplyAndPersist) {
@@ -333,7 +332,6 @@ HeatmapChartSettings nonDefaults() {
     s.uploadBudgetBytes = 4 * MiB;
     s.prefetchTiles = 3;
     s.liveMinIntervalMs = 1200;
-    s.renderer = "legacy"; // gpu is the default
     s.showTelemetry = true;
     return s;
 }
@@ -374,8 +372,10 @@ TEST(HeatmapSettingsDialogTest, EveryTabShowsTheModel) {
     EXPECT_EQ(child<QSpinBox>(dialog, "spanSources")->value(), 256);
     EXPECT_EQ(child<QSpinBox>(dialog, "cpuCeiling")->value(), 1024);
     EXPECT_EQ(child<QSpinBox>(dialog, "liveMinIntervalMs")->value(), 1200);
-    EXPECT_EQ(child<QComboBox>(dialog, "renderer")->currentData().toString(), "legacy");
-    EXPECT_EQ(child<QLabel>(dialog, "savedRenderer")->text(), "legacy");
+    // S8a: the Debug tab has no renderer choice any more.
+    EXPECT_FALSE(dialog.findChild<QComboBox *>("renderer"));
+    EXPECT_FALSE(dialog.findChild<QCheckBox *>("makeDefault"));
+    EXPECT_FALSE(dialog.findChild<QLabel *>("savedRenderer"));
     EXPECT_TRUE(child<QCheckBox>(dialog, "showTelemetry")->isChecked());
 }
 
@@ -513,23 +513,6 @@ TEST(HeatmapSettingsDialogTest, DeepOnlyHistoryOffersOnlyItsPresets) {
     }
 }
 
-// Item 4 of the review: an identical persisted renderer patch saves the default;
-// the open dialog's "Saved default" follows, and the chart does no work.
-TEST(HeatmapSettingsDialogTest, SavingTheSessionRendererUpdatesSavedDefault) {
-    TempStore t;
-    HeatmapSettingsModel model(t.store, "main", t.config);
-    HeatmapSettingsDialog dialog(&model, nullptr);
-    ASSERT_TRUE(model.apply({{"renderer", "legacy"}}, false).isEmpty());
-    EXPECT_EQ(child<QLabel>(dialog, "savedRenderer")->text(), "gpu");
-    QSignalSpy changed(&model, &HeatmapSettingsModel::changed);
-    QSignalSpy saved(&model, &HeatmapSettingsModel::savedRendererChanged);
-    ASSERT_TRUE(model.apply({{"renderer", "legacy"}}, true).isEmpty()); // e.g. the API, persist:true
-    EXPECT_EQ(changed.count(), 0); // the effective settings did not change
-    EXPECT_EQ(saved.count(), 1);
-    EXPECT_EQ(child<QLabel>(dialog, "savedRenderer")->text(), "legacy");
-    EXPECT_EQ(t.reload().renderer, "legacy");
-}
-
 // Item 5 of the review: Look reset includes the renderer's tone controls; TPO has
 // a reset to the configured tpo values.
 TEST(HeatmapSettingsDialogTest, ResetCoversRendererBackedControls) {
@@ -629,17 +612,6 @@ TEST(HeatmapSettingsDialogTest, EveryWidgetWritesItsSettingLiveAndSaved) {
     EXPECT_EQ(model.settings().crossfadeMs, 0);
     child<QCheckBox>(dialog, "crossfadeOn")->setChecked(true);
     EXPECT_EQ(model.settings().crossfadeMs, 400);
-
-    // Renderer: this session only unless "Make default" is ticked.
-    auto *rendererCombo = child<QComboBox>(dialog, "renderer");
-    EXPECT_EQ(rendererCombo->itemData(0).toString(), "gpu"); // GPU reads as the default
-    rendererCombo->setCurrentIndex(rendererCombo->findData("legacy"));
-    EXPECT_EQ(model.settings().renderer, "legacy");
-    EXPECT_EQ(t.reload().renderer, "gpu");
-    EXPECT_EQ(child<QLabel>(dialog, "savedRenderer")->text(), "gpu");
-    child<QCheckBox>(dialog, "makeDefault")->setChecked(true);
-    EXPECT_EQ(t.reload().renderer, "legacy");
-    EXPECT_EQ(child<QLabel>(dialog, "savedRenderer")->text(), "legacy");
 }
 
 TEST(HeatmapSettingsDialogTest, ValidationUsesTheModelClampsAndRejectsBadInput) {
@@ -713,10 +685,9 @@ TEST(HeatmapSettingsDialogTest, ResetRestoresOnlyItsTab) {
 
     click("resetLive");
     EXPECT_EQ(model.settings().liveMinIntervalMs, d.liveMinIntervalMs);
-    EXPECT_EQ(model.settings().renderer, "legacy");
+    EXPECT_NE(model.settings().showTelemetry, d.showTelemetry);
 
     click("resetDebug");
-    EXPECT_EQ(model.settings().renderer, d.renderer);
     EXPECT_EQ(model.settings().showTelemetry, d.showTelemetry);
     EXPECT_EQ(model.settings(), d);
     EXPECT_EQ(t.reload(), d); // resets are saved
@@ -860,8 +831,8 @@ TEST(TradeBubbleControls, LayerOrderUsesRealQmlBindingAndPersistedChartApiSettin
     child<QPushButton>(dialog,"resetChart")->click();
     EXPECT_TRUE(check->isChecked());
     EXPECT_TRUE(t.reload().tradesAboveCandles);
-    ASSERT_TRUE(model.apply({{"renderer","legacy"}},false).isEmpty());
-    EXPECT_FALSE(check->isEnabled());
+    EXPECT_FALSE(model.apply({{"renderer","legacy"}},false).isEmpty());
+    EXPECT_TRUE(check->isEnabled()) << "one renderer (S8a): always enabled";
 }
 
 TEST(TradeBubbleControls, GuiIngestionKeepsHiddenSessionTradesAndIsolatesSymbols) {
@@ -922,12 +893,9 @@ TEST(TradeBubbleControls, GearTogglePresetsAndApiSharePersistedChartSettings) {
     EXPECT_TRUE(actions[3]->isChecked());
     EXPECT_TRUE(t.reload().showTrades);
     EXPECT_EQ(t.reload().tradeMinNotional, 1000);
-    ASSERT_TRUE(model.apply({{"renderer", "legacy"}}, false).isEmpty());
+    EXPECT_FALSE(model.apply({{"renderer", "legacy"}}, false).isEmpty());
     controls.refreshChartMenu();
-    EXPECT_FALSE(toggle->isEnabled());
-    EXPECT_FALSE(sizes->menuAction()->isEnabled());
-    ASSERT_TRUE(model.apply({{"renderer", "gpu"}}, false).isEmpty());
-    controls.refreshChartMenu();
+    EXPECT_TRUE(toggle->isEnabled()) << "one renderer (S8a): the trade entries stay enabled";
     EXPECT_TRUE(sizes->menuAction()->isEnabled());
 }
 
@@ -956,7 +924,7 @@ TEST(HeatmapTelemetryDockTest, PollsAt4HzOnlyWhileVisible) {
     const int hidden = calls;
     QTest::qWait(600);
     EXPECT_EQ(calls, hidden);
-    // nullopt (legacy renderer): the disabled state.
+    // nullopt (no chart layer): the disabled state.
     dock.setProvider([] { return std::optional<QVariantMap>{}; });
     EXPECT_TRUE(dock.disabledShown());
 }
@@ -1049,8 +1017,6 @@ protected:
         ugr->setTimeframe(int(minute));
         temp = std::make_unique<TempStore>();
         model = std::make_unique<HeatmapSettingsModel>(temp->store, "main", temp->config);
-        // gpu is the default; these cases start from the legacy renderer and flip with gpuOn().
-        ASSERT_TRUE(model->apply({{"renderer", "legacy"}}, false).isEmpty());
         controls = std::make_unique<HeatmapChartControls>(model.get());
         toolbar = std::make_unique<TopToolbar>();
         controls->setToolbar(toolbar.get());
@@ -1064,10 +1030,7 @@ protected:
         scene.reset();
     }
     heatmap::gpu::HeatmapGpuLayer &layer() const { return *ugr->gpuHeatmapLayer(); }
-    void gpuOn() {
-        ASSERT_TRUE(model->apply({{"renderer", "gpu"}}, false).isEmpty());
-        ugr->setViewport(viewLo, viewHi, 99'900, 100'300);
-    }
+    void gpuOn() { ugr->setViewport(viewLo, viewHi, 99'900, 100'300); }
     template <class Done> bool pump(int ms, Done done) {
         QElapsedTimer timer;
         timer.start();
@@ -1106,19 +1069,23 @@ protected:
     }
 };
 
-TEST_F(HeatmapChartUi, TickSelectorIsDisabledInLegacyWithAReason) {
-    EXPECT_FALSE(ugr->gpuHeatmapActive());
+// S8a: no renderer can disable the selector any more; it is disabled (with a
+// reason) only while no chart is attached.
+TEST_F(HeatmapChartUi, TickSelectorIsDisabledWithoutAChartWithAReason) {
+    controls->setRenderer(nullptr);
+    syncUi();
     EXPECT_FALSE(toolbar->tickModeCombo()->isEnabled());
     EXPECT_FALSE(toolbar->tickPresetCombo()->isEnabled());
-    EXPECT_TRUE(toolbar->tickModeCombo()->toolTip().contains("GPU heatmap renderer"));
+    EXPECT_TRUE(toolbar->tickModeCombo()->toolTip().contains("No chart"));
+    controls->setRenderer(ugr);
     gpuOn();
     ASSERT_TRUE(settle()) << error.toStdString();
     syncUi();
     EXPECT_TRUE(toolbar->tickModeCombo()->isEnabled());
     EXPECT_TRUE(toolbar->tickPresetCombo()->isEnabled());
-    ASSERT_TRUE(model->apply({{"renderer", "legacy"}}, false).isEmpty());
+    EXPECT_FALSE(model->apply({{"renderer", "legacy"}}, false).isEmpty()) << "refused: the selector stays";
     syncUi();
-    EXPECT_FALSE(toolbar->tickModeCombo()->isEnabled());
+    EXPECT_TRUE(toolbar->tickModeCombo()->isEnabled());
 }
 
 TEST_F(HeatmapChartUi, AutoShowsTheDrawnTickAndPresetsFollowTheLoadedData) {
@@ -1251,12 +1218,14 @@ TEST_F(HeatmapChartUi, EnteringManualLocksTheDrawnTick) {
 
 TEST_F(HeatmapChartUi, TelemetryDockShowsTheLayerAt4HzWithNoPerFrameWork) {
     HeatmapTelemetryDock dock;
+    controls->setRenderer(nullptr);
     controls->setTelemetryDock(&dock);
     ASSERT_TRUE(model->apply({{"showTelemetry", true}}).isEmpty());
     ASSERT_TRUE(dock.isVisible());
     ASSERT_TRUE(dock.timer()->isActive());
     dock.refresh();
-    EXPECT_TRUE(dock.disabledShown()); // legacy renderer
+    EXPECT_TRUE(dock.disabledShown()) << "no chart attached";
+    controls->setRenderer(ugr); // rebinds the dock's provider
     gpuOn();
     ASSERT_TRUE(settle()) << error.toStdString();
     dock.refresh();

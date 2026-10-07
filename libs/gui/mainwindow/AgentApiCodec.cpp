@@ -565,7 +565,8 @@ QJsonObject stateJson(const StateSnapshot& s) {
                 {"tickSize", number(s.candleTickSize)}}}}},
         {"lastReceivedAtMs", QJsonObject{{"heatmap", integer(s.heatmapReceivedAtMs)},
             {"candles", integer(s.candlesReceivedAtMs)}, {"book", integer(s.bookReceivedAtMs)},
-            {"trades", integer(s.tradesReceivedAtMs)}}},
+            {"trades", integer(s.tradesReceivedAtMs)}, {"footprint", integer(s.footprintReceivedAtMs)},
+            {"tpo", integer(s.tpoReceivedAtMs)}, {"volumeProfile", integer(s.volumeProfileReceivedAtMs)}}},
         {"layers", QJsonObject{{"heatmap", boolean(s.heatmapLayer)}, {"candles", boolean(s.candlesLayer)},
             {"footprint", boolean(s.footprintLayer)}, {"tpo", boolean(s.tpoLayer)},
             {"volumeProfile", boolean(s.volumeProfileLayer)},
@@ -630,7 +631,7 @@ QJsonObject wallsJson(const WallsSnapshot& s) {
         {"qty", w.qty}, {"notional", w.notional}, {"forming", w.forming},
         {"meanQty", w.meanQty}, {"firstSeenMs", qint64(w.firstSeenMs)}, {"lastSeenMs", qint64(w.lastSeenMs)},
         {"columns", qint64(w.columns)}};
-        if (s.data.gpuRenderer) row.insert("rank", rows.size() + 1);
+        row.insert("rank", rows.size() + 1);
         rows.append(row);
     }
     auto out = envelope(s.meta, {{"basis", "recording-twap-sum"},
@@ -638,9 +639,9 @@ QJsonObject wallsJson(const WallsSnapshot& s) {
         {"loadedRange", QJsonArray{qint64(s.data.loadedStartMs), qint64(s.data.loadedEndMs)}},
         {"recordedColumns", qint64(s.data.recordedColumns)}, {"missingColumns", qint64(s.data.missingColumns)},
         {"note", "Aggregated resting size per cell, not individual orders"}, {"walls", rows}});
-    if (s.data.gpuRenderer) {
+    {
         auto data = out.value("data").toObject();
-        data.insert("renderer", "gpu");
+        data.insert("renderer", "gpu"); // the constant "gpu" since S8a (goes in S8b)
         data.insert("tick", s.data.bandTick);
         data.insert("unknownRows", s.data.unknownRows);
         data.insert("range", QJsonObject{{"from_ms", qint64(s.data.rangeStartMs)}, {"to_ms", qint64(s.data.rangeEndMs)},

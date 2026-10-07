@@ -139,6 +139,11 @@ class HostTrust(unittest.TestCase):
             self.assertRefused("bad_build", gh.launch, {key: "/Volumes/T7/sentinel-worktrees/lt-x"})
         self.assertRefused("main_only", gh.launch, {"binary": "/Volumes/T7/sentinel-worktrees/lt-x/build/gui"})
 
+    def test_launch_refuses_the_removed_legacy_renderer(self):
+        self.binary()
+        for renderer in ("legacy", "", "GPU", None, 1):
+            self.assertRefused("bad_renderer", gh.launch, {"renderer": renderer})
+
     # ---- the scripts agents run must be executable (a rewrite with a tool that creates a fresh file drops the bit)
     def test_scripts_are_executable(self):
         for name in ("gui-host.py", "gui-shot.sh"):
@@ -153,18 +158,18 @@ class HostTrust(unittest.TestCase):
         self.assertEqual(env, {"HOME": "/h", "USER": "u", "PATH": gh.SAFE_PATH})
 
     def test_gui_argv_is_fixed_flags_with_no_caller_supplied_arguments(self):
-        argv = gh.gui_argv("/bin/gui", "/sess", "gpu", 17130)
+        argv = gh.gui_argv("/bin/gui", "/sess", 17130)
         self.assertEqual(argv[0], "/bin/gui")
         self.assertEqual(argv[1:3], ["--agent-host", "/sess"])
         self.assertEqual(argv[3:5], ["--agent-host-profile", gh.profile_dir()])
         self.assertEqual(argv[5:7], ["--agent-host-symbols", gh.SYMBOLS])
-        self.assertEqual(argv[7:], ["--heatmap-renderer", "gpu", "--api-port", "17130", "--no-screener"])
+        self.assertEqual(argv[7:], ["--api-port", "17130", "--no-screener"])
         self.assertIn("BTC-USD", gh.SYMBOLS.split(","))
         self.assertTrue(all(re.fullmatch(r"[A-Z0-9]{2,20}-[A-Z0-9]{2,20}", x) for x in gh.SYMBOLS.split(",")))
 
     def test_only_dock_file_persists_across_sessions_and_reset_keeps_session_data(self):
-        first = gh.gui_argv("/bin/gui", os.path.join(gh.SESSIONS_DIR, "one"), "gpu", 17130)
-        second = gh.gui_argv("/bin/gui", os.path.join(gh.SESSIONS_DIR, "two"), "gpu", 17131)
+        first = gh.gui_argv("/bin/gui", os.path.join(gh.SESSIONS_DIR, "one"), 17130)
+        second = gh.gui_argv("/bin/gui", os.path.join(gh.SESSIONS_DIR, "two"), 17131)
         self.assertNotEqual(first[2], second[2])
         self.assertEqual(first[4], second[4])
         self.assertEqual(os.path.basename(first[4]), "docks.ini")

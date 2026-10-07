@@ -44,12 +44,9 @@ void HeatmapChartControls::setRenderer(UnifiedGridRenderer *renderer) {
     renderer->setHeatmapTickMemory(m_model->manualTicks());
     renderer->setHeatmapChartSettings(m_model->settings());
     renderer->setCandleAppearance(m_model->settings());
-    renderer->setHeatmapRenderer(QString::fromStdString(m_model->settings().renderer));
-    renderer->setLiquidityLabelMode(m_model->settings().labelCurrency == "usd" ? 1 : 0);
     connect(renderer, &UnifiedGridRenderer::timeframeChanged, this, &HeatmapChartControls::scheduleSync);
     connect(renderer, &UnifiedGridRenderer::viewportChanged, this, &HeatmapChartControls::scheduleIndicator);
     connect(renderer, &UnifiedGridRenderer::layerVisibilityChanged, this, &HeatmapChartControls::scheduleSync);
-    connect(renderer, &UnifiedGridRenderer::heatmapRendererChanged, this, &HeatmapChartControls::scheduleSync);
     connect(renderer, &UnifiedGridRenderer::tpoConfigChanged, this, &HeatmapChartControls::scheduleSync);
     connect(renderer, &UnifiedGridRenderer::tpoStyleChanged, this, &HeatmapChartControls::scheduleSync);
     connect(renderer, &UnifiedGridRenderer::candleStyleChanged, this, &HeatmapChartControls::scheduleSync);
@@ -99,9 +96,6 @@ TopToolbar::ModeState HeatmapChartControls::modeState() const {
         mode.footprint = m_renderer->footprintLayerEnabled();
         mode.tpo = m_renderer->tpoLayerEnabled();
         mode.volumeProfile = m_renderer->volumeProfileLayerEnabled();
-        mode.gpu = m_renderer->gpuHeatmapActive();
-    } else {
-        mode.gpu = m_model->settings().renderer == "gpu";
     }
     mode.candles = m_toolbar ? m_toolbar->candlesChecked() : true;
     return mode;
@@ -271,8 +265,6 @@ void HeatmapChartControls::refreshChartMenu() {
     QMenu *menu = m_toolbar ? m_toolbar->chartMenu() : nullptr;
     if (!menu) return;
     const auto &s = m_model->settings();
-    if (auto* sizes = menu->findChild<QMenu*>("chartMenuTradeSize"))
-        sizes->menuAction()->setEnabled(modeState().gpu);
     if (auto *palettes = menu->findChild<QMenu *>("chartMenuPalettes"))
         palettes->menuAction()->setEnabled(modeState().heatmap);
     for (QAction *a : menu->findChildren<QAction *>()) {
@@ -289,13 +281,10 @@ void HeatmapChartControls::refreshChartMenu() {
             a->setToolTip(m_renderer ? "Show renderer diagnostics on the chart" : "No chart is attached");
         } else if (name == "chartMenuTrades") {
             a->setChecked(s.showTrades);
-            a->setEnabled(modeState().gpu);
         } else if (name == "chartMenuTradeSizePreset") {
             a->setChecked(s.tradeMinNotional == a->data().toDouble());
-            a->setEnabled(modeState().gpu);
         } else if (name == "chartMenuLabels") {
             a->setChecked(s.showLabels);
-            a->setVisible(modeState().gpu); // hidden in legacy (it always draws its own labels), as the toolbar
         }
         else if (name == "chartMenuCurrencyUsd") a->setChecked(s.labelCurrency == "usd");
         else if (name == "chartMenuCurrencyAsset") a->setChecked(s.labelCurrency == "asset");
@@ -327,7 +316,7 @@ void HeatmapChartControls::setTelemetryDock(HeatmapTelemetryDock *dock) {
     disconnect(dock->toggleViewAction(), nullptr, this, nullptr);
     QPointer<UnifiedGridRenderer> renderer = m_renderer;
     dock->setProvider([renderer]() -> std::optional<QVariantMap> {
-        if (!renderer || !renderer->gpuHeatmapActive() || !renderer->gpuHeatmapLayer()) return std::nullopt;
+        if (!renderer || !renderer->gpuHeatmapLayer()) return std::nullopt;
         auto m = renderer->gpuHeatmapLayer()->metrics();
         const auto frames = PerformanceMonitor::instance().frameStats().window;
         m["fps"] = frames.renderRateHz;
@@ -363,8 +352,6 @@ void HeatmapChartControls::onModelChanged(bool explicitManualTick) {
     if (m_renderer) {
         m_renderer->setHeatmapChartSettings(s, explicitManualTick);
         m_renderer->setCandleAppearance(s);
-        m_renderer->setHeatmapRenderer(QString::fromStdString(s.renderer));
-        m_renderer->setLiquidityLabelMode(s.labelCurrency == "usd" ? 1 : 0); // legacy labels follow the model too
     }
     syncTelemetryVisibility();
     syncNow(); // the toolbar and dialog follow every change at once (API, dialog, toolbar)
@@ -383,13 +370,11 @@ TopToolbar::TickSelectorState HeatmapChartControls::tickSelectorState() const {
     TopToolbar::TickSelectorState st;
     const auto &s = m_model->settings();
     const auto *layer = m_renderer ? m_renderer->gpuHeatmapLayer() : nullptr;
-    const bool gpu = m_renderer && m_renderer->gpuHeatmapActive() && layer;
-    st.enabled = gpu;
-    st.manual = gpu ? layer->manualMode() : s.tickMode == heatmap::TickMode::Manual;
-    st.manualUnits = gpu ? layer->manualTickUnits() : s.manualTick;
-    if (!gpu) {
-        st.disabledReason = QStringLiteral("The tick selector drives the GPU heatmap renderer. This chart draws with "
-                                           "the legacy renderer (Settings > Debug > Renderer).");
+    st.enabled = layer != nullptr;
+    st.manual = layer ? layer->manualMode() : s.tickMode == heatmap::TickMode::Manual;
+    st.manualUnits = layer ? layer->manualTickUnits() : s.manualTick;
+    if (!layer) {
+        st.disabledReason = QStringLiteral("No chart is attached");
         return st;
     }
     st.drawnUnits = layer->tickUnits();
@@ -456,7 +441,7 @@ QJsonObject HeatmapChartControls::uiState() const {
         const auto shown = m_toolbar->shownControls();
         toolbar["shown"] = QJsonObject{{"tickSelector", shown.tickSelector}, {"palette", shown.palette},
                                        {"liquidity", shown.liquidity}, {"rangeSlider", shown.rangeSlider},
-                                       {"thresholdSlider", shown.thresholdSlider}, {"candleStyle", shown.candleStyle},
+                                       {"candleStyle", shown.candleStyle},
                                        {"tpoSession", shown.tpoSession}, {"tpoLayout", shown.tpoLayout},
                                        {"labelsToggle", shown.labelsToggle}};
         toolbar["liquidityRange"] = QJsonObject{{"low", m_toolbar->rangeSlider()->low()},
@@ -474,5 +459,5 @@ QJsonObject HeatmapChartControls::uiState() const {
             {"budgets", QJsonObject{{"decodedChunkBytes", qint64(b.decodedChunks)},
                                     {"spanSourceBytes", qint64(b.spanSources)},
                                     {"cpuCeilingBytes", qint64(b.cpuCeiling)}}},
-            {"savedRenderer", QString::fromStdString(m_model->savedRenderer())}};
+            {"savedRenderer", "gpu"}}; // the constant "gpu" since S8a (goes in S8b)
 }

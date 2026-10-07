@@ -124,7 +124,7 @@ TEST_F(HeatmapPlumbing, SettingsRoundTripWorkspaceAndSharedTickMemory) {
     QSettings ini(dir.filePath("test.ini"), QSettings::IniFormat);
     HeatmapSettingsStore store(ini);
     auto s = chartDefaults({});
-    ASSERT_TRUE(applySettingsPatch(s, {{"renderer", "legacy"}, {"tickMode", "manual"}, {"manualTick", 250},
+    ASSERT_TRUE(applySettingsPatch(s, {{"renderer", "gpu"}, {"tickMode", "manual"}, {"manualTick", 250},
         {"minRowPx", 3.5}, {"hysteresis", 0.4}, {"crossfadeMs", 0}, {"showBandEdges", true},
         {"palettePreset", "Custom"}, {"bidGradient", QJsonArray{QJsonObject{{"position", 0}, {"color", "#112233"}}, QJsonObject{{"position", 1}, {"color", "#aabbccdd"}}}},
         {"sensitivityMin", 100}, {"sensitivityMax", 1000}, {"opacity", 0.6},
@@ -156,15 +156,14 @@ TEST_F(HeatmapPlumbing, DefaultsComeFromYamlAndEveryNumericFieldClamps) {
     ASSERT_TRUE(ConfigLoader::loadClientConfig(yaml.fileName().toStdString(), &config));
     QSettings ini(dir.filePath("test.ini"), QSettings::IniFormat);
     HeatmapSettingsStore store(ini);
-    auto s = store.load("main", config.heatmap);
-    EXPECT_EQ(s.renderer, "legacy"); EXPECT_EQ(s.tickMode, TickMode::Manual); EXPECT_EQ(s.manualTick, 250);
+    auto s = store.load("main", config.heatmap); // renderer: legacy in the YAML is ignored (S8a)
+    EXPECT_EQ(s.tickMode, TickMode::Manual); EXPECT_EQ(s.manualTick, 250);
     EXPECT_EQ(s.minRowPx, 4); EXPECT_EQ(s.hysteresis, 0.6); EXPECT_EQ(s.crossfadeMs, 350);
     EXPECT_TRUE(s.showBandEdges); EXPECT_EQ(s.palettePreset, "Fire"); EXPECT_EQ(s.opacity, 0.7);
     EXPECT_EQ(s.sensitivityMin, 1); EXPECT_EQ(s.sensitivityMax, 100); EXPECT_EQ(s.gpuCapBytes, 64ull << 20);
     EXPECT_EQ(s.uploadBudgetBytes, 2ull << 20); EXPECT_EQ(s.prefetchTiles, 3); EXPECT_EQ(s.liveMinIntervalMs, 800);
     EXPECT_TRUE(s.showTelemetry); EXPECT_EQ(store.loadBudgets(config.heatmap).cpuCeiling, 64ull << 20);
     EXPECT_EQ(s.bidGradient.front().color, "#123456"); EXPECT_EQ(s.bidGradient.back().color, "#abcdef");
-    EXPECT_EQ(chartDefaults(ClientHeatmapConfig{}).renderer, "gpu");
     ASSERT_TRUE(applySettingsPatch(s, {{"manualTick", 37}, {"minRowPx", -1}, {"hysteresis", 7},
         {"crossfadeMs", -10}, {"sensitivityMin", -5}, {"sensitivityMax", -6}, {"opacity", 2},
         {"gpuCapBytes", -1}, {"uploadBudgetBytes", 999999999}, {"prefetchTiles", 99}, {"liveMinIntervalMs", 0}}).isEmpty());
@@ -173,37 +172,32 @@ TEST_F(HeatmapPlumbing, DefaultsComeFromYamlAndEveryNumericFieldClamps) {
     EXPECT_EQ(s.opacity, 1); EXPECT_EQ(s.gpuCapBytes, 1ull << 20); EXPECT_EQ(s.uploadBudgetBytes, s.gpuCapBytes);
     EXPECT_EQ(s.prefetchTiles, 16); EXPECT_EQ(s.liveMinIntervalMs, 100);
     const auto before = s;
-    EXPECT_FALSE(applySettingsPatch(s, {{"opacity", "wrong"}, {"renderer", "gpu"}}).isEmpty()); // s is legacy here: a real change
+    EXPECT_FALSE(applySettingsPatch(s, {{"opacity", "wrong"}, {"crossfadeMs", 100}}).isEmpty()); // atomic: crossfadeMs stays
     EXPECT_EQ(s, before);
     s.opacity = std::numeric_limits<double>::quiet_NaN();
     s.minRowPx = std::numeric_limits<double>::infinity();
     clampSettings(s);
     EXPECT_EQ(s.opacity, 1); EXPECT_EQ(s.minRowPx, 2);
     ini.setValue("heatmap/main/opacity", "bad");
-    ini.setValue("heatmap/main/renderer", "unknown");
+    ini.setValue("heatmap/main/renderer", "legacy"); // saved by a pre-S8a binary: ignored
+    ini.setValue("heatmap/main/minRowPx", 6);
     EXPECT_EQ(store.load("main", config.heatmap).opacity, 0.7);
-    EXPECT_EQ(store.load("main", config.heatmap).renderer, "legacy"); // the YAML default
+    EXPECT_EQ(store.load("main", config.heatmap).minRowPx, 6) << "the other saved fields still load";
     ini.setValue("heatmap/budgets/cpuCeiling", 1);
     EXPECT_TRUE(store.loadBudgets(config.heatmap).valid());
 }
-TEST_F(HeatmapPlumbing, RendererDefaultsToGpuAndUnknownYamlFallsBackToGpu) {
+// S8a: the client config has no renderer or source keys any more; a file that
+// still names them (renderer: legacy, source: recording) loads, the keys ignored.
+TEST_F(HeatmapPlumbing, RetiredRendererAndSourceYamlKeysAreIgnored) {
     QTemporaryDir dir;
-    for (const char *body : {"heatmap:\n  gamma: 1\n", "heatmap:\n  renderer: bogus\n"}) {
-        QFile yaml(dir.filePath("client.yaml"));
-        ASSERT_TRUE(yaml.open(QIODevice::WriteOnly | QIODevice::Truncate));
-        yaml.write(body);
-        yaml.close();
-        ClientConfig config;
-        ASSERT_TRUE(ConfigLoader::loadClientConfig(yaml.fileName().toStdString(), &config));
-        EXPECT_EQ(config.heatmap.renderer, "gpu") << body;
-    }
     QFile yaml(dir.filePath("client.yaml"));
     ASSERT_TRUE(yaml.open(QIODevice::WriteOnly | QIODevice::Truncate));
-    yaml.write("heatmap:\n  renderer: legacy\n");
+    yaml.write("heatmap:\n  renderer: legacy\n  source: recording\n  label_px: 13\n  gamma: 1.3\n  opacity: 0.6\n");
     yaml.close();
     ClientConfig config;
     ASSERT_TRUE(ConfigLoader::loadClientConfig(yaml.fileName().toStdString(), &config));
-    EXPECT_EQ(config.heatmap.renderer, "legacy"); // legacy stays selectable
+    EXPECT_DOUBLE_EQ(config.heatmap.gamma, 1.3);
+    EXPECT_DOUBLE_EQ(config.heatmap.opacity, 0.6);
 }
 TEST_F(HeatmapPlumbing, LastSessionNeverOverwritesLiveSettingsOrSnapshotsOverrides) {
     QTemporaryDir dir;
@@ -228,31 +222,28 @@ TEST_F(HeatmapPlumbing, LastSessionNeverOverwritesLiveSettingsOrSnapshotsOverrid
     EXPECT_EQ(current.opacity, 1); // explicit named workspace still restores
     EXPECT_EQ(store.load("main", {}).opacity, 1);
 }
-TEST_F(HeatmapPlumbing, ProcessOnlyRendererNeverLeaksIntoOtherPatchesOrWorkspaces) {
+// S8a acceptance 1: POST /api/v1/heatmap/settings {"renderer":"legacy"} is refused
+// (MainWindowGPU maps the patch error to 422 invalid_settings), persisted or not,
+// and nothing changes or is written; "gpu" stays accepted as a no-op; the
+// reported renderer is the constant "gpu".
+TEST_F(HeatmapPlumbing, LegacyRendererPatchIsRefusedAndGpuIsTheConstant) {
     QTemporaryDir dir;
     QSettings ini(dir.filePath("test.ini"), QSettings::IniFormat);
     HeatmapSettingsStore store(ini);
     auto current = store.load("main", {});
-    ASSERT_TRUE(store.applyChartPatch("main", current, {{"renderer", "legacy"}}, false, {}, "BTC-USD", kMinuteMs).isEmpty());
-    EXPECT_EQ(current.renderer, "legacy");
-    EXPECT_TRUE(ini.allKeys().isEmpty());
-    // Automatic session restore cannot erase a process override, either.
-    store.restoreLayoutInto("_last_session", "main", current, {});
-    EXPECT_EQ(current.renderer, "legacy");
-    ASSERT_TRUE(store.applyChartPatch("main", current, {{"opacity", 0.4}}, true, {}, "BTC-USD", kMinuteMs).isEmpty());
-    EXPECT_EQ(current.renderer, "legacy");
-    EXPECT_EQ(store.load("main", {}).renderer, "gpu");
-    EXPECT_EQ(store.load("main", {}).opacity, 0.4);
-    store.saveLayout("ab", "main", {});
-    EXPECT_EQ(ini.value("layouts/ab/heatmap/main/renderer").toString(), "gpu");
-    ini.sync();
-    QSettings peerIni(dir.filePath("test.ini"), QSettings::IniFormat);
-    HeatmapSettingsStore peer(peerIni);
-    EXPECT_EQ(peer.load("main", {}).renderer, "gpu");
-    // Bad patches are still atomic even when no persistence was requested.
     const auto before = current;
-    EXPECT_FALSE(store.applyChartPatch("main", current, {{"renderer", "bad"}}, false, {}, "BTC-USD", kMinuteMs).isEmpty());
+    for (const bool persist : {false, true}) {
+        for (const auto& value : {QJsonValue("legacy"), QJsonValue("bad"), QJsonValue(1)}) {
+            const auto error = store.applyChartPatch("main", current, {{"renderer", value}, {"opacity", 0.4}}, persist,
+                                                     {}, "BTC-USD", kMinuteMs);
+            EXPECT_FALSE(error.isEmpty()) << persist;
+            EXPECT_EQ(current, before);
+        }
+    }
+    EXPECT_TRUE(ini.allKeys().isEmpty()) << "nothing written";
+    ASSERT_TRUE(store.applyChartPatch("main", current, {{"renderer", "gpu"}}, false, {}, "BTC-USD", kMinuteMs).isEmpty());
     EXPECT_EQ(current, before);
+    EXPECT_EQ(settingsJson(current).value("renderer").toString(), "gpu");
 }
 TEST_F(HeatmapPlumbing, EnteringManualAlonePreservesTheRememberedSymbolTick) {
     QTemporaryDir dir;

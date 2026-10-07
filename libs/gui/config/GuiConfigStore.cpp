@@ -45,14 +45,6 @@ void GuiConfigStore::setClientConfig(const ClientConfig& config) {
             sLog_Warning("Invalid SENTINEL_HEATMAP_SHADER_FLOOR ignored: value=" << floorEnv);
         }
     }
-    const int labelPx = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_LABEL_PX");
-    if (labelPx > 0) {
-        m_clientConfig.heatmap.labelPx = labelPx;
-    }
-    const int cacheCols = qEnvironmentVariableIntValue("SENTINEL_HEATMAP_CLIENT_CACHE_COLUMNS");
-    if (cacheCols > 0) {
-        m_clientConfig.heatmap.clientCacheColumns = cacheCols;
-    }
     emit clientConfigUpdated(m_clientConfig);
 }
 

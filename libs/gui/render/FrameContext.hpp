@@ -4,7 +4,6 @@
 #include <QRectF>
 #include <cstdint>
 
-#include "HeatmapStreamState.hpp"
 #include "TimeAuthority.hpp"
 #include "TimeAxisMapping.hpp"
 
@@ -22,7 +21,6 @@ struct FrameViewportSnapshot {
 
 /// Per-frame stream generation counters for change detection.
 struct FrameStreamGenerations {
-    uint64_t heatmap = 0;
     uint64_t footprint = 0;
     uint64_t candle = 0;
 };
@@ -43,9 +41,7 @@ struct FrameContext {
     double surfaceDpr = 1.0;
     qint64 presentationTimeMs = 0;
     FrameViewportSnapshot viewport;
-    HeatmapStreamState::Snapshot heatmapSnapshot;
     FrameStreamGenerations streamGenerations;
     OverlayActivationSet overlays;
-    bool forceFull = false;
     TimeAxisMapping mapping;
 };

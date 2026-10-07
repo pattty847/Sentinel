@@ -14,12 +14,6 @@ target_link_libraries(test_FrameStatsWindow PRIVATE GTest::gtest_main)
 add_test(NAME FrameStatsWindowTests COMMAND test_FrameStatsWindow)
 set_tests_properties(FrameStatsWindowTests PROPERTIES LABELS "render")
 
-add_executable(test_PriceCenteringPolicy test_PriceCenteringPolicy.cpp)
-target_include_directories(test_PriceCenteringPolicy PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
-target_link_libraries(test_PriceCenteringPolicy PRIVATE GTest::gtest_main)
-add_test(NAME PriceCenteringPolicyTests COMMAND test_PriceCenteringPolicy)
-set_tests_properties(PriceCenteringPolicyTests PROPERTIES LABELS "render")
-
 add_executable(test_TimeAxisMapping test_TimeAxisMapping.cpp)
 target_include_directories(test_TimeAxisMapping PRIVATE
     ${CMAKE_SOURCE_DIR}/libs/gui
@@ -53,21 +47,6 @@ target_include_directories(test_GridViewState PRIVATE ${CMAKE_SOURCE_DIR}/libs/g
 target_link_libraries(test_GridViewState PRIVATE GTest::gtest sentinel_gui_lib Qt6::Core Qt6::Gui)
 add_test(NAME GridViewStateTests COMMAND test_GridViewState)
 set_tests_properties(GridViewStateTests PROPERTIES LABELS "render")
-
-add_executable(test_HeatmapColumnWindow
-    test_HeatmapColumnWindow.cpp
-    ${CMAKE_SOURCE_DIR}/libs/gui/render/HeatmapColumnWindow.cpp
-    ${CMAKE_SOURCE_DIR}/libs/gui/render/HeatmapStreamState.cpp
-)
-target_include_directories(test_HeatmapColumnWindow PRIVATE
-    ${CMAKE_SOURCE_DIR}/libs/gui
-)
-target_link_libraries(test_HeatmapColumnWindow PRIVATE
-    GTest::gtest_main
-    Qt6::Core
-)
-add_test(NAME HeatmapColumnWindowTests COMMAND test_HeatmapColumnWindow)
-set_tests_properties(HeatmapColumnWindowTests PROPERTIES LABELS "render")
 
 add_executable(test_CandleBackfillState test_CandleBackfillState.cpp)
 target_include_directories(test_CandleBackfillState PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
@@ -125,17 +104,6 @@ target_link_libraries(test_PriceAxisModel PRIVATE GTest::gtest_main sentinel_gui
 add_test(NAME PriceAxisModelTests COMMAND test_PriceAxisModel)
 set_tests_properties(PriceAxisModelTests PROPERTIES LABELS "render")
 
-add_executable(test_RecordingBandPolicy test_RecordingBandPolicy.cpp)
-target_include_directories(test_RecordingBandPolicy PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
-target_link_libraries(test_RecordingBandPolicy PRIVATE GTest::gtest_main)
-add_test(NAME RecordingBandPolicyTests COMMAND test_RecordingBandPolicy)
-set_tests_properties(RecordingBandPolicyTests PROPERTIES LABELS "render")
-
-add_executable(test_RecordingDataProcessor test_RecordingDataProcessor.cpp)
-target_include_directories(test_RecordingDataProcessor PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
-target_link_libraries(test_RecordingDataProcessor PRIVATE GTest::gtest_main sentinel_gui_lib Qt6::Core)
-add_test(NAME RecordingDataProcessorTests COMMAND test_RecordingDataProcessor)
-set_tests_properties(RecordingDataProcessorTests PROPERTIES LABELS "render")
 
 add_executable(test_TradeOverlay test_TradeOverlay.cpp)
 target_include_directories(test_TradeOverlay PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
@@ -257,9 +225,7 @@ add_test(NAME TpoProfileModelTests COMMAND test_TpoProfileModel)
 set_tests_properties(TpoProfileModelTests PROPERTIES LABELS "render")
 
 # S7a cell oracle and local-recording benchmark (QCoreApplication, no GPU runs).
-add_executable(test_heatmap_cell_query test_heatmap_cell_query.cpp
-    ${CMAKE_SOURCE_DIR}/libs/gui/render/HeatmapColumnWindow.cpp
-    ${CMAKE_SOURCE_DIR}/libs/gui/render/HeatmapStreamState.cpp)
+add_executable(test_heatmap_cell_query test_heatmap_cell_query.cpp)
 target_link_libraries(test_heatmap_cell_query PRIVATE sentinel_heatmap_gpu GTest::gtest_main)
 add_test(NAME HeatmapCellQueryTests COMMAND test_heatmap_cell_query)
 set_tests_properties(HeatmapCellQueryTests PROPERTIES LABELS "render;heatmap")

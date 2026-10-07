@@ -8,7 +8,7 @@
 #include <optional>
 #include <array>
 #include <vector>
-#include "../render/HeatmapColumnWindow.hpp"
+#include "../render/heatmap/HeatmapWalls.hpp"
 
 namespace AgentApi {
 
@@ -39,7 +39,7 @@ struct ValidationResult {
     qint64 windowMs = 60000;
     int limit = 100;
     int levels = 20;
-    heatmap_window::WallQuery walls;
+    heatmap::WallQuery walls;
     QString afterOperation;
     int waitMs = 0;
 };
@@ -101,6 +101,7 @@ struct StateSnapshot {
     std::optional<qint64> candlesReceivedAtMs;
     std::optional<qint64> bookReceivedAtMs;
     std::optional<qint64> tradesReceivedAtMs;
+    std::optional<qint64> footprintReceivedAtMs, tpoReceivedAtMs, volumeProfileReceivedAtMs;
     std::optional<bool> heatmapLayer;
     std::optional<bool> candlesLayer;
     std::optional<bool> footprintLayer;
@@ -170,7 +171,7 @@ struct TradesSnapshot {
 
 struct WallsSnapshot {
     Metadata meta;
-    heatmap_window::WallsSnapshot data;
+    heatmap::WallsSnapshot data;
 };
 
 class TradeTape {

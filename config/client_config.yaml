@@ -3,23 +3,15 @@
 # User-specific overrides go in config/.client_config.yaml (not tracked in git).
 
 heatmap:
-  renderer: gpu # gpu (default) or legacy; legacy stays selectable until S8 removes it
-  source: recording # recording requires server recording.available
   # Visual settings (client only)
   gamma: 1.05
   contrast: 1.15
   shader_floor: 0.01
-  label_px: 13  # Enable labels
-  client_cache_columns: 1024  # Bounded GPU/history page; older data loads on demand
 
   # Initial viewport (client only)
   initial_column_px: 8      # Time zoom on connect: screen pixels per heatmap column
   initial_price_pct: 5      # Price zoom (% of full range); 0 = full
 
-  # Display tick: recorded rows merge (1-2-5 steps) so cells stay roughly square:
-  # row height ~ column width * cell_aspect, never below target_row_px
-  target_row_px: 2
-  cell_aspect: 0.75
   # Recording mode colour range in BTC (log scale): <= min dark, >= max brightest
   sensitivity_min: 0.05
   sensitivity_max: 50

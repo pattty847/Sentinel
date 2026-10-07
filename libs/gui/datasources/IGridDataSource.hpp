@@ -7,7 +7,6 @@
 #include <QByteArray>
 #include <QVector>
 #include "../../core/marketdata/model/TradeData.h"
-#include "../../core/protocol/HeatmapSlice.hpp"
 #include "../../core/protocol/SentinelStreamClient.hpp"
 #include "../../core/protocol/FootprintSlice.hpp"
 #include "../../core/protocol/TpoSlice.hpp"
@@ -19,17 +18,6 @@
 class IGridDataSource : public QObject {
     Q_OBJECT
 public:
-    struct HeatmapHistoryColumn {
-        int64_t bucketStartMs = 0;
-        int64_t bucketEndMs = 0;
-        double minPrice = 0.0;
-        double maxPrice = 0.0;
-        double tickSize = 0.0;
-        QByteArray intensity;
-        QByteArray liquidity;
-        double liquidityScale = 1.0;
-    };
-
     explicit IGridDataSource(QObject* parent = nullptr) : QObject(parent) {
         connect(this, &IGridDataSource::connectionStatusChanged, this,
                 [this](bool connected) { m_connectionState = connected; });
@@ -41,13 +29,6 @@ public:
 
     virtual void subscribe(const QString& symbol) = 0;
     virtual void unsubscribe(const QString& symbol) = 0;
-    virtual void requestHeatmapHistory(const QString& symbol,
-                                       int64_t timeframeMs,
-                                       int64_t endTimeMs,
-                                       int count) = 0;
-    virtual void registerRecordingView(const recording::LiveView& view) = 0;
-    virtual void releaseRecordingView(const recording::LiveView& view) { Q_UNUSED(view); }
-    virtual void requestRecordingHeatmapHistory(const protocol::recordingwire::Request& request) = 0;
     virtual void requestFootprintHistory(const QString& symbol,
                                          int64_t timeframeMs,
                                          int64_t endTimeMs,
@@ -77,26 +58,12 @@ signals:
     void tradeReceived(const Trade& trade);
     void liveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas);
     void orderBookUpdated(std::shared_ptr<const OrderBook> book);
-    void heatmapSliceReceived(const HeatmapSlice& slice);
     void footprintSliceReceived(const FootprintSlice& slice);
     void tpoSliceReceived(const TpoSlice& slice);
     void tpoHistoryChunkReceived(const QString& symbol, const QString& requestId, qint64 timeframeMs,
                                  int sessionType, qint64 lastEndMs, int columns);
     void tpoHistoryFailed(const QString& symbol, const QString& requestId, const QString& message);
     void volumeProfileSliceReceived(const VolumeProfileSlice& slice);
-    void heatmapHistoryReceived(const QString& symbol,
-                                int64_t timeframeMs,
-                                int gridWidth,
-                                int gridHeight,
-                                int64_t requestEndMs,
-                                int64_t oldestAvailableMs,
-                                const QVector<HeatmapHistoryColumn>& columns);
-    void recordingViewError(const QString& symbol, uint64_t generation, const QString& code,
-                            const QString& message, int retryMs);
-    void recordingHeatmapLiveReceived(const SentinelStreamClient::RecordingHistoryPage& page);
-    void recordingHeatmapHistoryReceived(const SentinelStreamClient::RecordingHistoryPage& page);
-    void recordingHeatmapHistoryError(const QString& symbol, const QString& requestId,
-                                      uint64_t bandGeneration, const QString& message);
     
     void connectionStatusChanged(bool connected);
     void errorOccurred(const QString& error);
@@ -110,8 +77,6 @@ signals:
     void pnlSnapshotReceived(const trading::PnlSnapshot& snapshot);
 };
 
-Q_DECLARE_METATYPE(IGridDataSource::HeatmapHistoryColumn)
-Q_DECLARE_METATYPE(QVector<IGridDataSource::HeatmapHistoryColumn>)
 Q_DECLARE_METATYPE(trading::OrderUpdate)
 Q_DECLARE_METATYPE(trading::PositionUpdate)
 Q_DECLARE_METATYPE(trading::RiskOrderUpdate)

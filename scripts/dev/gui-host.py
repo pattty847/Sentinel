@@ -26,7 +26,7 @@ never restarted leaves one GUI running until someone ends it (`pkill -f 'sentine
 API (JSON; every POST needs the header `X-Gui-Host: 1`, which a browser page cannot send
 cross-origin without a preflight this server never answers; the Host header must be loopback):
     GET  /status      the live session or null, and whether main is launchable
-    POST /launch {renderer?:"gpu"|"legacy", replace?:bool, freshProfile?:bool, build?:worktree path}
+    POST /launch {replace?:bool, freshProfile?:bool, build?:worktree path}   (renderer?: only "gpu", S8a)
     POST /shot   {name, afterOperation?, target?: retained dock id | "toolbar" | "chartmenu" | "settings[:Tab]", settle?:bool}
     POST /stop
     POST /profile-reset    clears the persistent dock state while no GUI is running
@@ -121,11 +121,10 @@ def child_env(environ=None):
     return env
 
 
-def gui_argv(binary, session_dir, renderer, port, dock_profile=None):
+def gui_argv(binary, session_dir, port, dock_profile=None):
     """The only command line the host ever builds: fixed flags, no caller-supplied arguments."""
     return [binary, "--agent-host", session_dir, "--agent-host-profile", dock_profile or profile_dir(),
-            "--agent-host-symbols", SYMBOLS,
-            "--heatmap-renderer", renderer, "--api-port", str(port), "--no-screener"]
+            "--agent-host-symbols", SYMBOLS, "--api-port", str(port), "--no-screener"]
 
 
 def profile_dir():
@@ -281,9 +280,9 @@ def stop_session(reason):
 
 def launch(body):
     global session
-    renderer = body.get("renderer", "gpu")
-    if renderer not in ("gpu", "legacy"):
-        raise HostError(400, "bad_renderer", "renderer must be gpu or legacy")
+    if body.get("renderer", "gpu") != "gpu":  # the legacy renderer was removed (S8a)
+        raise HostError(400, "bad_renderer", "renderer can only be gpu (the legacy heatmap renderer was removed)")
+    renderer = "gpu"
     if "freshProfile" in body and not isinstance(body["freshProfile"], bool):
         raise HostError(400, "bad_profile", "freshProfile must be boolean")
     for forbidden in ("worktree", "path"):
@@ -315,7 +314,7 @@ def launch(body):
         log = os.path.join(sdir, "gui.out")
         before = settings_dump()
         with open(log, "wb") as out:
-            proc = subprocess.Popen(gui_argv(binary, sdir, renderer, port, dock_profile), cwd=cwd, env=child_env(),
+            proc = subprocess.Popen(gui_argv(binary, sdir, port, dock_profile), cwd=cwd, env=child_env(),
                                     stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                     start_new_session=True)
         session = dict(id=sid, pid=proc.pid, port=port, renderer=renderer, proc=proc, log=log,
@@ -340,7 +339,7 @@ def launch(body):
             if session is s:
                 stop_session("api timeout")
         raise HostError(504, "api_timeout", "the GUI API did not come up in 60 s", log=log)
-    settled = wait_settled(port, 30) if renderer == "gpu" else None
+    settled = wait_settled(port, 30)
     found = sorted(glob.glob(os.path.expanduser(f"~/Library/Logs/Sentinel/sentinel-gui-*-{s['pid']}.log")))
     s["runLog"] = found[-1] if found else None
     out = public(s)
@@ -372,11 +371,11 @@ def shot(body):
             raise HostError(409, "no_session", "no running GUI session (POST /launch first)")
         s["lastUsed"] = time.time()
         wait = 1.15 - (time.time() - s["lastShot"])  # the API allows one screenshot per second
-        port, shot_dir, renderer = s["port"], s["shotDir"], s["renderer"]
+        port, shot_dir = s["port"], s["shotDir"]
         if wait > 0:
             time.sleep(wait)
         s["lastShot"] = time.time()
-    if body.get("settle") and renderer == "gpu":
+    if body.get("settle"):
         wait_settled(port, 30)
     q = {"name": name, "target": target}
     if body.get("afterOperation"):

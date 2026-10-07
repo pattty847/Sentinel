@@ -236,18 +236,17 @@ TEST(ChartToolbar, ControlVisibilityRulesPerMode) {
         Mode mode;
         Shown shown;
     };
+    // One renderer since S8a: no gpu/legacy mode, no legacy threshold slider.
     const std::vector<Case> cases{
-        {"heatmap gpu + candles", {true, false, false, false, true, true},
-         {true, false, false, true, false, true, false, false, false}},
-        {"heatmap legacy (no Labels toggle: legacy always labels)", {true, false, false, false, true, false},
-         {true, false, false, false, true, true, false, false, false}},
-        {"tpo", {false, false, true, false, true, true}, {false, false, false, false, false, true, true, true, false}},
-        {"volume profile", {false, false, false, true, false, true},
-         {false, false, false, false, false, false, true, false, false}},
-        {"footprint only", {false, true, false, false, false, true},
+        {"heatmap + candles", {true, false, false, false, true},
+         {true, false, false, true, true, false, false, false}},
+        {"tpo", {false, false, true, false, true}, {false, false, false, false, true, true, true, false}},
+        {"volume profile", {false, false, false, true, false},
+         {false, false, false, false, false, true, false, false}},
+        {"footprint only", {false, true, false, false, false},
          {false, false, false, false, false, false, false, false}},
-        {"heatmap + footprint, no candles", {true, true, false, false, false, true},
-         {true, false, false, true, false, false, false, false, false}},
+        {"heatmap + footprint, no candles", {true, true, false, false, false},
+         {true, false, false, true, false, false, false, false}},
     };
     TopToolbar toolbar;
     for (const auto &c : cases) {
@@ -399,8 +398,8 @@ TEST(ChartToolbar, RealOverflowRestoresInlineControlsAcrossWidthModeAndFontChang
         QFont font = original;
         font.setPointSize(fontSize);
         toolbar.setFont(font);
-        for (const Mode mode : {Mode{}, Mode{false, false, true, false, true, true},
-                               Mode{false, false, false, true, false, true}}) {
+        for (const Mode mode : {Mode{}, Mode{false, false, true, false, true},
+                               Mode{false, false, false, true, false}}) {
             toolbar.setModeState(mode);
             for (int width : {420, 480, 960, 1920, 480, 1920}) {
                 SCOPED_TRACE(::testing::Message() << "font=" << fontSize << " width=" << width << " tpo=" << mode.tpo);
@@ -448,8 +447,8 @@ TEST(ChartToolbar, RealOverflowRestoresInlineControlsAcrossWidthModeAndFontChang
 TEST(ChartToolbar, OverflowAppearsOnlyBelowExactSizeHintBoundary) {
     TopToolbar toolbar;
     toolbar.show();
-    for (const Mode mode : {Mode{}, Mode{true, true, true, true, true, true},
-                           Mode{false, true, false, false, false, true}}) {
+    for (const Mode mode : {Mode{}, Mode{true, true, true, true, true},
+                           Mode{false, true, false, false, false}}) {
         toolbar.setModeState(mode);
         toolbar.resize(3200, 44);
         QTest::qWait(20);
@@ -485,8 +484,8 @@ TEST(ChartToolbar, OpenOverflowEditorSurvivesFitChangesAndRebuildsAfterHide) {
         editor = entry->defaultWidget();
         ASSERT_TRUE(editor);
         const auto before = menuEntries(menu);
-        toolbar.setModeState({true, false, false, false, true, false});
-        toolbar.setTickSelectorState({false, "Legacy renderer", false, 0, 0, {}, 100, {}});
+        toolbar.setModeState({false, true, false, false, true}); // footprint: no heatmap controls
+        toolbar.setTickSelectorState({false, "No chart is attached", false, 0, 0, {}, 100, {}});
         QFont larger = toolbar.font();
         larger.setPointSize(larger.pointSize() + 1);
         toolbar.setFont(larger);
@@ -500,9 +499,9 @@ TEST(ChartToolbar, OpenOverflowEditorSurvivesFitChangesAndRebuildsAfterHide) {
     EXPECT_FALSE(editor) << "the closed popup must rebuild the old editor";
     const auto after = menuEntries(toolbar.controlsButton()->menu());
     EXPECT_FALSE(after.contains("Liquidity range"));
-    EXPECT_TRUE(after.contains("Liquidity threshold"));
+    EXPECT_FALSE(after.contains("Liquidity threshold")) << "the legacy threshold went in S8a";
     useOverflow(toolbar, [&](QMenu *menu) {
-        EXPECT_TRUE(menu->findChild<QSlider *>("overflowThresholdSlider"));
+        EXPECT_FALSE(menu->findChild<QSlider *>("overflowThresholdSlider"));
         EXPECT_FALSE(menu->findChild<LiquidityRangeSlider *>("overflowRangeSlider"));
     });
 }
@@ -521,7 +520,7 @@ TEST(ChartToolbar, OneHiddenControlIsTheOnlyOverflowEntry) {
 
 TEST(ChartToolbar, AllHiddenControlsKeepToolbarOrderAndSeparatorGroups) {
     TopToolbar toolbar;
-    toolbar.setModeState({true, true, true, true, true, true});
+    toolbar.setModeState({true, true, true, true, true});
     toolbar.setTickSelectorState({true, {}, false, 10, 0, {10, 20}, 100, {}});
     toolbar.show();
     QTest::qWait(20);
@@ -593,17 +592,17 @@ TEST(ChartToolbar, OverflowTickCombosKeepUnavailableValueAndDisabledReason) {
     ASSERT_EQ(ticks.size(), 1);
     EXPECT_EQ(ticks[0][0].toLongLong(), 20);
     EXPECT_EQ(toolbar.tickPresetCombo()->currentData().toLongLong(), 20);
-    toolbar.setModeState({true, false, false, false, true, false});
-    toolbar.setTickSelectorState({false, "Tick selection requires the GPU heatmap", false, 0, 0, {}, 100, {}});
+    toolbar.setModeState({true, false, false, false, true});
+    toolbar.setTickSelectorState({false, "No chart is attached", false, 0, 0, {}, 100, {}});
     QTest::qWait(20);
     useOverflow(toolbar, [&](QMenu *menu) {
         auto *mode = menu->findChild<QMenu *>("overflowTickMode");
         ASSERT_TRUE(mode);
         EXPECT_FALSE(mode->menuAction()->isEnabled());
         EXPECT_EQ(mode->menuAction()->toolTip(), toolbar.tickModeCombo()->toolTip());
-        EXPECT_TRUE(mode->menuAction()->toolTip().contains("GPU"));
+        EXPECT_TRUE(mode->menuAction()->toolTip().contains("No chart"));
     });
-    toolbar.setModeState({false, false, false, false, true, true});
+    toolbar.setModeState({false, false, false, false, true});
     QTest::qWait(20);
     useCompleteMenu(toolbar, [&](QMenu *menu) {
         auto *ticksMenu = menu->findChild<QMenu *>("controlsTick");
@@ -769,8 +768,8 @@ TEST(ChartToolbar, OverflowDownTraversesSliderRowsWithoutEditingAndEscapeCloses)
     toolbar.show();
     QTest::qWait(20);
     toolbar.resize(220, 44);
-    for (bool gpu : {true, false}) {
-        toolbar.setModeState({true, false, false, false, true, gpu});
+    for (bool gpu : {true}) { // one renderer since S8a: the range slider row
+        toolbar.setModeState({true, false, false, false, true});
         QTest::qWait(20);
         useOverflow(toolbar, [&](QMenu *menu) {
             ASSERT_TRUE(QTest::qWaitFor([&] { return menu->hasFocus(); }, 1000));
@@ -930,7 +929,6 @@ TEST(ChartShell, AxisControlsHaveKeyboardActionsAndIndependentFollowStates) {
     auto *price = shell->findChild<QQuickItem *>("autoPriceScaleButton");
     auto *live = shell->findChild<QQuickItem *>("followLiveButton");
     ASSERT_TRUE(renderer && price && live);
-    renderer->setHeatmapRenderer("gpu");
     renderer->setAutoPriceScale(false);
     renderer->enableAutoScroll(false);
     const auto press = [](QObject *target, int key) {
@@ -1162,39 +1160,6 @@ TEST_F(ChartControls, OverflowSlidersDragAndShareInlineAndChartState) {
         EXPECT_TRUE(label->text().endsWith(" ETH"));
         EXPECT_TRUE(slider->toolTip().contains("ETH per cell"));
     });
-    toolbar->setModeState({true, false, false, false, true, false});
-    QTest::qWait(20);
-    QSignalSpy thresholds(toolbar.get(), &TopToolbar::liquidityThresholdChanged);
-    useOverflow(*toolbar, [&](QMenu *menu) {
-        auto *strength = menu->findChild<QSlider *>("overflowThresholdSlider");
-        ASSERT_TRUE(strength);
-        EXPECT_EQ(strength->orientation(), Qt::Horizontal);
-        EXPECT_EQ(strength->width(), toolbar->liquiditySlider()->width());
-        strength->setValue(450);
-        EXPECT_EQ(toolbar->liquiditySlider()->value(), 450);
-        toolbar->liquiditySlider()->setValue(600);
-        EXPECT_EQ(strength->value(), 600);
-        QStyleOptionSlider option;
-        option.initFrom(strength);
-        option.orientation = Qt::Horizontal;
-        option.minimum = strength->minimum();
-        option.maximum = strength->maximum();
-        option.sliderPosition = option.sliderValue = strength->value();
-        const QRect handle = strength->style()->subControlRect(QStyle::CC_Slider, &option, QStyle::SC_SliderHandle, strength);
-        const QPoint target = handle.center() + QPoint(-25, 0);
-        const int before = strength->value();
-        QTest::mousePress(strength, Qt::LeftButton, {}, handle.center());
-        ASSERT_TRUE(strength->isSliderDown());
-        QMouseEvent move(QEvent::MouseMove, QPointF(target), strength->mapToGlobal(QPointF(target)),
-                         Qt::NoButton, Qt::LeftButton, {});
-        QApplication::sendEvent(strength, &move);
-        QTest::mouseRelease(strength, Qt::LeftButton, {}, target);
-        EXPECT_TRUE(menu->isVisible());
-        EXPECT_LT(strength->value(), before);
-        EXPECT_EQ(strength->value(), toolbar->liquiditySlider()->value());
-        EXPECT_DOUBLE_EQ(thresholds.last()[0].toDouble(), strength->value());
-    });
-    EXPECT_GE(thresholds.size(), 3);
 }
 
 TEST_F(ChartControls, GearMovedCommandsSurviveHostRebuildWithoutVisibleDuplicates) {
@@ -1402,12 +1367,15 @@ TEST_F(ChartControls, ChartMenuRoundTripsTheLabelSettings) {
     EXPECT_EQ(model->settings().labelCurrency, "asset");
 }
 
-TEST_F(ChartControls, LegacyCurrencyRemainsAvailableInAppearanceMenu) {
-    ASSERT_TRUE(model->apply({{"renderer", "legacy"}}, false).isEmpty());
+// S8a: one renderer, so the Labels toggle is always in the gear menu (it was
+// hidden with the legacy renderer), and the currency stays an appearance entry.
+TEST_F(ChartControls, LabelsToggleAndCurrencyAreAlwaysInTheAppearanceMenu) {
     controls->syncNow();
     EXPECT_FALSE(toolbar->shownControls().liquidity) << "currency is secondary appearance, not primary-strip chrome";
-    EXPECT_TRUE(toolbar->shownControls().thresholdSlider);
     emit toolbar->chartMenu()->aboutToShow();
+    auto* labels = menuAction(toolbar->chartMenu(), "chartMenuLabels");
+    ASSERT_TRUE(labels);
+    EXPECT_TRUE(labels->isVisible());
     auto* currency = toolbar->chartMenu()->findChild<QMenu*>("chartMenuCurrency");
     ASSERT_TRUE(currency);
     EXPECT_TRUE(currency->menuAction()->isVisible());
@@ -1415,8 +1383,6 @@ TEST_F(ChartControls, LegacyCurrencyRemainsAvailableInAppearanceMenu) {
     auto* asset = menuAction(currency, "chartMenuCurrencyAsset");
     auto* usd = menuAction(currency, "chartMenuCurrencyUsd");
     ASSERT_TRUE(asset && usd);
-    EXPECT_TRUE(asset->isVisible());
-    EXPECT_TRUE(asset->isEnabled());
     asset->trigger();
     EXPECT_EQ(model->settings().labelCurrency, "asset");
     emit toolbar->chartMenu()->aboutToShow();
@@ -1702,7 +1668,7 @@ TEST_F(ChartLabels, ASymbolSwitchMidRequestDropsTheOldSymbolsLabels) {
 }
 
 // The toolbar follows the chart's layers (TPO hides the heatmap-only controls),
-// and the appearance menu drives the model and the legacy label currency.
+// and the appearance menu drives the model's label currency.
 TEST_F(ChartLabels, ToolbarFollowsTheChartsLayers) {
     pump(300, [] { return false; });
     EXPECT_TRUE(toolbar->shownControls().rangeSlider);
@@ -1731,15 +1697,12 @@ TEST_F(ChartLabels, ToolbarFollowsTheChartsLayers) {
     EXPECT_TRUE(shown.tickSelector);
     EXPECT_TRUE(shown.rangeSlider);
     EXPECT_FALSE(shown.tpoSession);
-    // Legacy renderer: the threshold slider instead of the range slider.
-    ASSERT_TRUE(model->apply({{"renderer", "legacy"}}, false).isEmpty());
+    // A renderer patch can only name gpu now (S8a): legacy is refused, nothing changes.
+    EXPECT_FALSE(model->apply({{"renderer", "legacy"}}, false).isEmpty());
     pump(300, [] { return false; });
-    shown = toolbar->shownControls();
-    EXPECT_FALSE(shown.rangeSlider);
-    EXPECT_TRUE(shown.thresholdSlider);
-    EXPECT_FALSE(shown.labelsToggle) << "legacy always draws its labels: no toggle";
+    EXPECT_TRUE(toolbar->shownControls().rangeSlider);
     emit toolbar->chartMenu()->aboutToShow();
-    EXPECT_FALSE(menuAction(toolbar->chartMenu(), "chartMenuLabels")->isVisible()) << "hidden in legacy, as the toolbar";
+    EXPECT_TRUE(menuAction(toolbar->chartMenu(), "chartMenuLabels")->isVisible()) << "the Labels toggle is always shown";
     EXPECT_FALSE(shown.liquidity) << "appearance stays in the gear menu";
     auto *currency = toolbar->chartMenu()->findChild<QMenu *>("chartMenuCurrency");
     ASSERT_TRUE(currency);
@@ -1749,11 +1712,11 @@ TEST_F(ChartLabels, ToolbarFollowsTheChartsLayers) {
     ASSERT_TRUE(asset && asset->isVisible() && asset->isEnabled());
     asset->trigger();
     EXPECT_EQ(model->settings().labelCurrency, "asset");
-    EXPECT_EQ(ugr->liquidityLabelMode(), 0);
+    EXPECT_EQ(layer().settings().labelCurrency, "asset") << "the GPU labels follow the model";
     emit toolbar->chartMenu()->aboutToShow();
     EXPECT_TRUE(asset->isChecked());
     ASSERT_TRUE(model->apply({{"labelCurrency", "usd"}}, false).isEmpty());
-    EXPECT_EQ(ugr->liquidityLabelMode(), 1);
+    EXPECT_EQ(layer().settings().labelCurrency, "usd");
     emit toolbar->chartMenu()->aboutToShow();
     EXPECT_TRUE(menuAction(currency, "chartMenuCurrencyUsd")->isChecked());
     EXPECT_FALSE(asset->isChecked());

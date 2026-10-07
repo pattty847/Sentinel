@@ -245,12 +245,12 @@ TEST(AgentHostModeSources, NoNativeFormatQSettingsInTheGui) {
 // trade/algo senders, (b) a sender in the data source loses its guard or the guard comes after the send,
 // or (c) a new outbound method appears that nobody has classified.
 TEST(AgentHostModeSources, EveryOutboundRequestInTheDataSourceIsGuarded) {
-    const QSet<QString> guarded{"subscribe", "requestHeatmapHistory", "registerRecordingView",
-                                "requestRecordingHeatmapHistory", "requestFootprintHistory",
-                                "requestCandleHistory", "requestTpoHistory", "sendTradeCommand", "sendAlgoCommand"};
+    // The legacy heatmap requests (heatmap history, recording view and history) went in S8a.
+    const QSet<QString> guarded{"subscribe", "requestFootprintHistory", "requestCandleHistory",
+                                "requestTpoHistory", "sendTradeCommand", "sendAlgoCommand"};
     // Connection management, releases, cancels and the local generation lookup:
     // they name no new symbol to the server or carry no request.
-    const QSet<QString> exempt{"connectToServer", "unsubscribe", "releaseRecordingView", "cancelTpoHistory",
+    const QSet<QString> exempt{"connectToServer", "unsubscribe", "cancelTpoHistory",
                                "setCandleDeliveryGeneration", "bookDeliveryGeneration"};
     QFile file(QString(SENTINEL_SOURCE_DIR) + "/libs/gui/datasources/RemoteGridDataSource.cpp");
     ASSERT_TRUE(file.open(QIODevice::ReadOnly));

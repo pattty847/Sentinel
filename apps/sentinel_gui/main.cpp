@@ -108,8 +108,8 @@ int main(int argc, char *argv[])
                      << " cwd=" << QDir::currentPath());
     }
     ConfigLoader::loadClientConfig("config/.client_config.yaml", &clientConfig);
-    // Process-only overrides (S6b; A/B runs use two processes on one server):
-    //   --heatmap-renderer legacy|gpu   never persisted (owner decision 2)
+    // Process-only overrides:
+    //   --heatmap-renderer gpu          accepted and ignored: gpu is the only renderer (S8a)
     //   --api-port N                    Agent API port instead of gui.api_port
     //   --no-screener                   no screener_server.py child (it owns port 17200 and
     //                                   kills its holder at start, so a second process must not)
@@ -121,8 +121,9 @@ int main(int argc, char *argv[])
     for (int i = 1; i + 1 < argc; ++i) {
         const QByteArray flag(argv[i]), value(argv[i + 1]);
         if (flag == "--heatmap-renderer") {
-            if (value == "legacy" || value == "gpu") GuiConfigStore::instance().setHeatmapRendererOverride(QString::fromLatin1(value));
-            else sLog_Warning("Ignored --heatmap-renderer " << value << " (legacy|gpu)");
+            if (value != "gpu")
+                sLog_Warning("Ignored --heatmap-renderer " << value
+                             << ": the legacy heatmap renderer was removed (S8a); the chart draws with gpu");
         } else if (flag == "--agent-host") {
             // Launched by scripts/dev/gui-host.py for sandboxed agents (see AgentHostMode.hpp).
             // Must run before any QSettings use. The checkout (cwd) and the build tree are

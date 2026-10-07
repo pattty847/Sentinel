@@ -30,8 +30,8 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 **Responsibility:** GPU-accelerated rendering, declarative UI, and data sourcing for the visualizer.
 **Ownership & Boundaries:**
 - The GUI layer exclusively owns rendering logic, QSG node generation, and visual widget behavior. It heavily employs Qt6, QML, and QSG.
-- **`datasources`:** Acts as the ingress point from the Core network layer. `RemoteGridDataSource` receives heatmap slices and buffers them before dispatching to the renderer.
-- **`render`:** The performance-critical hot-path. Owns the generation of QSG structures (e.g., `HeatmapIntensityNode`, `MsdfGlyphNode`). Must avoid manipulating `QObject` trees on the render thread to ensure low-lag performance. Coordinated entirely by the `UnifiedGridRenderer`. See `docs/UI_ARCHITECTURE.md` for a deep-dive into the GUI structure.
+- **`datasources`:** Acts as the ingress point from the Core network layer. `RemoteGridDataSource` receives book, trade, candle and trade-overlay messages and dispatches them to the renderer; the heatmap arrives through `HeatmapDataService` (chunks and the live raw tail).
+- **`render`:** The performance-critical hot-path. Owns the generation of QSG structures (e.g., `HeatmapTileNode`, `MsdfGlyphNode`). Must avoid manipulating `QObject` trees on the render thread to ensure low-lag performance. Coordinated entirely by the `UnifiedGridRenderer`. See `docs/UI_ARCHITECTURE.md` for a deep-dive into the GUI structure.
 - **`lab`:** Isolated QRhi compute/render path for measuring client-side binning over recording entries. It is not wired into `UnifiedGridRenderer` or the server stream.
 - **`qml` & `widgets`:** Owns the declarative scenes (e.g., `CandleChartView`) and the dockable window management (e.g., `ChartDock`, `OrderBookDock`).
 - **DOM (`models/DomModel`, `widgets/OrderBookDock`):** the datasource ingests every book delta; the dock stores every active-symbol trade in a fixed 1,000-event ring even before a book arrives or while hidden. A visible, non-minimized 67 ms timer publishes 2,001 contiguous integer price buckets to a retained table model, including empty levels; scrolling pins the price window and Recenter / follow restores automatic centering. The ladder fits a 180 px dock with Bid / Price / Ask; buy/sell count columns collapse first, leaving a slim signed delta at intermediate widths, then delta collapses at the narrowest widths. The default layout requests a compact 260 px DOM (Qt may adjust for neighboring dock constraints). Numeric quantities use complete compact formats with full-value tooltips; prices retain tick precision. There is no horizontal scrollbar. Two single-line metadata rows carry tick/units, bucketed spread and freshness; full book-top/count-window details remain in tooltips. Resting quantities use base units; prices/tick and bucketed spread use quote units. Executions are counts, with unknown aggressors retained in the window but excluded from buy/sell/delta. Freshness uses retained connection and snapshot-stale state; quiet books remain connected, with last-change age displayed separately. Identical L2 updates and trades do not reset that displayed change age. Every product's replica uses the server's configured order-book tick unchanged, preserving shared resolution for chart book-top lines and the Agent API; per-product tick derivation belongs to the planned server slice. The GUI datasource has no roller dependency. Effective ticks above 1% of midpoint or best levels collapsed to zero suppress the ladder and spread with an explicit server-aggregation explanation; the client cannot recover precision lost upstream. This small freshness policy is replaceable by W2a's shared health model. No hub visibility hook, core throttling, or per-event table-item construction is used.
@@ -66,50 +66,20 @@ WebSocket → SentinelStreamClient → RemoteGridDataSource → DataProcessor �
 ```
 
 - **SentinelStreamClient** — Boost.Beast WebSocket client; parses, validates, and emits typed slice DTOs. See `docs/SENTINEL_STREAM_CLIENT.md`.
-- **RemoteGridDataSource** — Local buffers for received slices; emits `heatmapSliceReceived`.
-- **DataProcessor** — Validates live slices and prepares bounded historical heatmap pages off the GUI thread, including missing-time columns and price-band resampling.
+- **RemoteGridDataSource** — Book replica, candles and trade-overlay slices (footprint, TPO, volume profile); the client drops the retired legacy heatmap frames (`heatmap_slice`) silently until the server stops sending them (S8b).
+- **DataProcessor** — Stages the trade overlays on their own grids off the GUI thread (INV-068).
+- **HeatmapDataService / HeatmapGpuLayer** — The heatmap: chunk requests and the live raw tail on the heatmap-data thread, drawn by `HeatmapTileNode` (S5-S6; the legacy band renderer was removed in S8a).
 - **History workers** — SentinelStreamServer uses two bounded workers for persisted heatmap reads and response encoding; at most eight jobs may be queued or running, and completions re-enter the owning session through its Asio executor.
-- **UnifiedGridRenderer** — Viewport state, bounded ring-buffer uploads, history request identity, and `updatePaintNode()`; drives heatmap, footprint, TPO, candles, labels.
-- **HeatmapIntensityNode** — Single-quad QSG material; samples intensity and palette on GPU.
+- **UnifiedGridRenderer** — Viewport state and `updatePaintNode()` (one root: the gated `HeatmapTileNode`, then the overlays and text); drives heatmap, footprint, TPO, candles, labels.
+- **HeatmapTileNode** — QSG render node; bins and draws the span sources on the GPU with the chart palette.
 - **MsdfGlyphNode** — QSG node for MSDF glyph quads from atlas textures.
 
 ## Rendering pipeline
 
-**Server:** LiveOrderBook → HeatmapTwapStreamer (TWAP, dense u8 column) → SentinelStreamServer (`heatmap_slice`).  
-**Client:** RemoteGridDataSource → DataProcessor → UnifiedGridRenderer → HeatmapIntensityNode, MsdfGlyphNode, CandlestickOverlayItem, and other overlays → GPU.
+**Server:** BookRecorder (HMC2 recording) → ChunkService / LiveService raw tail → SentinelStreamServer (binary chunk replies to `heatmap_chunk_request`, the `heatmap_live_subscribe` raw tail and `heatmap_availability`). The legacy `HeatmapTwapStreamer` → `heatmap_slice` path still runs until S8b; no client reads it.  
+**Client:** HeatmapDataService → HeatmapGpuLayer → UnifiedGridRenderer → HeatmapTileNode, MsdfGlyphNode, CandlestickOverlayItem, and other overlays → GPU.
 
-The server produces dense live columns and self-describing u16 persisted columns. The client uploads live data incrementally and replaces historical GPU pages in bounded batches; no per-cell QML rendering is used. Labels use the MSDF atlas; candlesticks are a GPU-batched overlay on the same coordinate plane.
-
-### Recording heatmap re-band publication
-
-After the first recording picture, `heatmap_window::ColumnWindow` stages each new
-display band on the DataProcessor worker without publishing intermediate slot
-writes. The GUI keeps its existing ring, price/time mapping, coverage and texture.
-The worker continues to cache live arrivals and fetch history. A replacement is
-ready when every bucket intersecting the current visible time range and bounded
-window is loaded or proven missing by a scanned interval/storage floor. Partially
-visible buckets count; future time and off-screen prefetch do not. Row validity
-and intensity are not time-page readiness signals: valid zero values and proven
-gaps must both be allowed to replace the old picture.
-
-The ready generation publishes one full immutable window update, replacing data
-and mapping together through the existing snapshot/upload path. A newer re-band
-discards only the staged projection and restarts readiness; generation and request
-checks reject stale replies. Viewport changes re-evaluate readiness, and a reset
-cancels the hold. Initial loading and legacy publication keep their existing
-behavior. If a page fails, the old picture remains until fetching succeeds; it
-retains its original world coordinates, so newly exposed prices/times outside
-that picture remain uncovered. The walls API reads the worker's staged projection,
-which can differ from the retained picture during this interval.
-
-This first step uses an instant swap. Holding publication adds no GPU memory or
-per-frame rendering work, and causes one existing full upload at readiness instead
-of blanking uploads at re-band time. Readiness costs at most the window width in
-map lookups per worker update while waiting (no allocations). A future two-layer
-GPU fade would additionally retain an R16 texture (`2 * width * rows` bytes:
-32 MiB at 8192 x 2048), its mapping and coverage, and draw a second blended quad
-during the fade. That option needs separate mapping/label lifecycle handling and
-live GPU measurement; it is not implemented here.
+No per-cell QML rendering is used. Labels use the MSDF atlas; candlesticks are a GPU-batched overlay on the same coordinate plane.
 
 ### Sparse heatmap core model (integration slice S1)
 
@@ -263,20 +233,17 @@ service is still alive. `LabData` configures local HMC2 or its own reconnecting
 server client and delegates shared lifecycle/stats to this service.
 
 The main window creates a service around `RemoteGridDataSource::streamClient()`
-before connecting that client, in both renderer modes. It also installs GUI
+before connecting that client. It also installs GUI
 hello/config callbacks before connecting. The adapter learns connection state
 only from signals: attaching after connect misses both that state and the
 initial subscription availability push. No main-chart controller exists in
 S6a. In S6b a controller may receive its view/timeframe before availability;
-its existing availability callback replans that pending view. The legacy
-`DataProcessor::setHeatmapEnabled` is a separate mute switch that preserves
-recording capability/mode; disabling recording configuration would instead
-select the old slice path. S6a leaves the mute switch enabled.
+its existing availability callback replans that pending view.
 
 `HeatmapChartSettings` is a core value type with no GUI types; validation,
 QSettings storage, layout snapshots and the GUI-thread synthetic input adapter
-belong to GUI. The new API settings acknowledge persistence in S6a, with an
-explicit `activeRenderer: legacy`; renderer application and metrics are S6b.
+belong to GUI. Since S8a the chart has one renderer (gpu); the API's renderer
+fields are the constant `"gpu"` until S8b removes them.
 
 ### Heatmap tile node (slice S5c)
 

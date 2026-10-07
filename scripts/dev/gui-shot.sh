@@ -2,7 +2,7 @@
 # gui-shot.sh: client for scripts/dev/gui-host.py. Lets a sandboxed agent (no window server)
 # start the GUI, drive the Agent API and read screenshots.
 #
-#   scripts/dev/gui-shot.sh launch [--renderer gpu|legacy] [--replace] [--fresh-profile] [--build <worktree>]
+#   scripts/dev/gui-shot.sh launch [--replace] [--fresh-profile] [--build <worktree>]
 #   scripts/dev/gui-shot.sh shot <name> [--after <operationId>] [--settle] [--target window|<dock-id>|toolbar|chartmenu|settings[:Tab]]
 #   scripts/dev/gui-shot.sh api GET|POST </api/v1/...> [json]       # state, viewport, heatmap/settings ...
 #   scripts/dev/gui-shot.sh docks [list|focus <id>|show <id>|hide <id>]
@@ -37,17 +37,16 @@ session_port() {
 cmd=${1:-}; shift || true
 case "$cmd" in
     launch)
-        renderer=gpu; replace=false; fresh=false; build=
+        replace=false; fresh=false; build=
         while (( $# )); do
             case "$1" in
-                --renderer) renderer=${2:?--renderer needs gpu|legacy}; shift 2 ;;
                 --replace) replace=true; shift ;;
                 --fresh-profile) fresh=true; shift ;;
                 --build) build=${2:?--build needs an absolute worktree path}; shift 2 ;;
-                *) die "unknown argument $1 (launch takes --renderer, --replace, --fresh-profile and --build)" ;;
+                *) die "unknown argument $1 (launch takes --replace, --fresh-profile and --build)" ;;
             esac
         done
-        host POST /launch "$(jq -n --arg r "$renderer" --argjson p "$replace" --argjson f "$fresh" --arg b "$build" '{renderer:$r, replace:$p, freshProfile:$f} + (if $b == "" then {} else {build:$b} end)')" ;;
+        host POST /launch "$(jq -n --argjson p "$replace" --argjson f "$fresh" --arg b "$build" '{replace:$p, freshProfile:$f} + (if $b == "" then {} else {build:$b} end)')" ;;
     shot)
         name=${1:?usage: shot <name> [--after <op>] [--settle] [--target T]}; shift
         body=$(jq -n --arg n "$name" '{name:$n}')

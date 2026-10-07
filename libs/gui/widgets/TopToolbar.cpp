@@ -307,17 +307,6 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_rangeLabel->setMinimumWidth(72);
     m_rangeLabelAction = addWidget(m_rangeLabel);
 
-    // Legacy renderer: the threshold slider.
-    m_liquiditySlider = new QSlider(Qt::Horizontal, this);
-    m_liquiditySlider->setObjectName("liquidityThresholdSlider");
-    m_liquiditySlider->setRange(0, 1000);
-    m_liquiditySlider->setFixedWidth(120);
-    m_liquiditySlider->setToolTip("Liquidity threshold");
-    m_thresholdAction = addWidget(m_liquiditySlider);
-    connect(m_liquiditySlider, &QSlider::valueChanged, this, [this](int value) {
-        emit liquidityThresholdChanged(static_cast<double>(value));
-    });
-
     addSeparator();
 
     m_indicatorsAction = addIconAction(":/svg/indicators.svg", "Indicators", "Indicators are not available on this chart yet");
@@ -359,7 +348,7 @@ TopToolbar::TopToolbar(QWidget* parent)
     for (int i = 0; i < m_inlineActions.size(); ++i) {
         QList<QAction*> group{m_inlineActions[i]};
         QAction *last = m_inlineActions[i] == m_tickLabelAction ? m_tickVeilAction
-                      : m_inlineActions[i] == m_liqLabelAction ? m_thresholdAction : nullptr;
+                      : m_inlineActions[i] == m_liqLabelAction ? m_rangeLabelAction : nullptr;
         if (last) while (group.back() != last && i + 1 < m_inlineActions.size()) group << m_inlineActions[++i];
         m_inlineGroups << group;
         for (auto *action : group) m_modeVisibility.insert(action, true);
@@ -431,22 +420,6 @@ void TopToolbar::buildControlsMenu() {
     m_rangeMenuAction = m_controlsMenu->addAction("Edit liquidity range...");
     m_rangeMenuAction->setObjectName("controlsLiquidityRange");
     connect(m_rangeMenuAction, &QAction::triggered, this, &TopToolbar::liquidityRangeSettingsRequested);
-    m_legacyThresholdMenu = m_controlsMenu->addMenu("Liquidity threshold");
-    m_legacyThresholdMenu->setObjectName("controlsLegacyThreshold");
-    auto *row = new QWidget(m_legacyThresholdMenu);
-    auto *rowLayout = new QHBoxLayout(row);
-    rowLayout->addWidget(new QLabel("Filter strength", row));
-    auto *strength = new QSpinBox(row);
-    strength->setObjectName("controlsThresholdStrength");
-    strength->setAccessibleName("Liquidity filter strength");
-    strength->setRange(m_liquiditySlider->minimum(), m_liquiditySlider->maximum());
-    strength->setToolTip("0 disables the filter; higher values hide smaller liquidity. Uses the same scale as the toolbar slider.");
-    rowLayout->addWidget(strength);
-    auto *editor = new QWidgetAction(m_legacyThresholdMenu);
-    editor->setDefaultWidget(row);
-    m_legacyThresholdMenu->addAction(editor);
-    connect(strength, QOverload<int>::of(&QSpinBox::valueChanged), m_liquiditySlider, &QSlider::setValue);
-    connect(m_liquiditySlider, &QSlider::valueChanged, strength, &QSpinBox::setValue);
     m_labelsMenu = m_controlsMenu->addMenu("Liquidity labels");
     m_labelsMenu->setObjectName("controlsLabels");
     m_controlsMenu->addSeparator();
@@ -466,21 +439,16 @@ void TopToolbar::refreshControlsMenu() {
     // actions, including after the host rebuilds its hooks.
     emit m_chartMenu->aboutToShow();
     m_labelsMenu->clear();
-    if (m_mode.gpu)
-        for (auto *entry : m_chartMenu->actions())
-            if (entry->objectName() == QLatin1String("chartMenuLabels")) m_labelsMenu->addAction(entry);
-    for (const auto *name : {"chartMenuCurrency", "chartMenuLabelSize"}) {
-        if (!m_mode.gpu && QString::fromLatin1(name) == QLatin1String("chartMenuLabelSize")) continue;
+    for (auto *entry : m_chartMenu->actions())
+        if (entry->objectName() == QLatin1String("chartMenuLabels")) m_labelsMenu->addAction(entry);
+    for (const auto *name : {"chartMenuCurrency", "chartMenuLabelSize"})
         if (auto *menu = m_chartMenu->findChild<QMenu *>(name)) m_labelsMenu->addMenu(menu);
-    }
     m_labelsMenu->menuAction()->setEnabled(m_mode.heatmap && !m_labelsMenu->isEmpty());
-    m_labelsMenu->menuAction()->setToolTip("Liquidity label currency, with visibility and size on the GPU heatmap");
+    m_labelsMenu->menuAction()->setToolTip("Liquidity label visibility, currency and size");
     m_layoutsMenu->clear();
     if (auto *layouts = m_chartMenu->findChild<QMenu *>("chartMenuLayouts"))
         for (auto *entry : layouts->actions()) m_layoutsMenu->addAction(entry);
     m_layoutsMenu->menuAction()->setEnabled(!m_layoutsMenu->isEmpty());
-    m_legacyThresholdMenu->menuAction()->setEnabled(m_mode.heatmap && !m_mode.gpu);
-    m_legacyThresholdMenu->menuAction()->setVisible(!m_mode.gpu);
     action("controlsCandles")->setChecked(candlesChecked());
     action("controlsHeatmap")->setChecked(m_heatmapButton->isChecked());
     action("controlsFootprint")->setChecked(m_footprintButton->isChecked());
@@ -511,9 +479,8 @@ void TopToolbar::refreshControlsMenu() {
             entry->setEnabled(active && combo->isEnabled());
         }
     }
-    m_tickMenu->menuAction()->setEnabled(m_mode.heatmap && m_mode.gpu && m_tickState.enabled);
+    m_tickMenu->menuAction()->setEnabled(m_mode.heatmap && m_tickState.enabled);
     m_tickMenu->menuAction()->setToolTip(!m_mode.heatmap ? QStringLiteral("Enable the heatmap layer to change its tick")
-        : !m_mode.gpu ? QStringLiteral("Tick selection requires the GPU heatmap")
         : m_tickState.enabled ? m_tickState.indicator : m_tickState.disabledReason);
     m_tickMenu->clear();
     QAction *autoTick = m_tickMenu->addAction("Auto tick");
@@ -547,10 +514,8 @@ void TopToolbar::refreshControlsMenu() {
         indicator->setToolTip(m_tickState.indicator);
         indicator->setEnabled(false);
     }
-    m_rangeMenuAction->setEnabled(m_mode.heatmap && m_mode.gpu);
-    m_rangeMenuAction->setVisible(m_mode.gpu);
-    m_rangeMenuAction->setToolTip(m_mode.gpu ? QStringLiteral("Edit base-asset cell sizes in Chart settings")
-                                              : QStringLiteral("Liquidity range is available with the GPU heatmap"));
+    m_rangeMenuAction->setEnabled(m_mode.heatmap);
+    m_rangeMenuAction->setToolTip(QStringLiteral("Edit base-asset cell sizes in Chart settings"));
     prepareControlsMenu(m_controlsMenu);
 }
 
@@ -647,29 +612,6 @@ void TopToolbar::refreshOverflowMenu() {
             }
         });
     };
-    auto thresholdEntry = [this] {
-        auto *row = new QWidget(m_overflowMenu);
-        auto *layout = new QHBoxLayout(row);
-        layout->addWidget(new QLabel("Liquidity threshold", row));
-        auto *strength = new QSlider(Qt::Horizontal, row);
-        strength->setObjectName("overflowThresholdSlider");
-        strength->setAccessibleName("Liquidity filter strength");
-        strength->setFixedWidth(m_liquiditySlider->width());
-        strength->setRange(m_liquiditySlider->minimum(), m_liquiditySlider->maximum());
-        strength->setSingleStep(m_liquiditySlider->singleStep());
-        strength->setPageStep(m_liquiditySlider->pageStep());
-        strength->setValue(m_liquiditySlider->value());
-        strength->setToolTip(m_liquiditySlider->toolTip());
-        strength->setEnabled(m_liquiditySlider->isEnabled());
-        layout->addWidget(strength);
-        auto *entry = new QWidgetAction(m_overflowMenu);
-        entry->setObjectName("overflowLiquidityThreshold");
-        entry->setText("Liquidity threshold");
-        entry->setDefaultWidget(row);
-        m_overflowMenu->addAction(entry);
-        connect(strength, &QSlider::valueChanged, m_liquiditySlider, &QSlider::setValue);
-        connect(m_liquiditySlider, &QSlider::valueChanged, strength, &QSlider::setValue);
-    };
     const QHash<QComboBox *, std::pair<QString, const char *>> combos{
         {m_timeframeCombo, {"Timeframe", "controlsTimeframes"}},
         {m_tickModeCombo, {"Heatmap tick mode", "overflowTickMode"}},
@@ -699,9 +641,6 @@ void TopToolbar::refreshOverflowMenu() {
         } else if (widget == m_rangeSlider) {
             separate();
             rangeEntry();
-        } else if (widget == m_liquiditySlider) {
-            separate();
-            thresholdEntry();
         } else if (auto *button = qobject_cast<QToolButton *>(widget)) {
             QAction *command = button->defaultAction();
             const char *name = nullptr;
@@ -951,8 +890,7 @@ TopToolbar::ControlVisibility TopToolbar::controlVisibility(const ModeState &mod
     v.tickSelector = mode.heatmap;
     // Appearance lives in the gear menu. Retain the selectors as model adapters
     // for existing callers, without consuming primary toolbar width.
-    v.rangeSlider = mode.heatmap && mode.gpu;
-    v.thresholdSlider = mode.heatmap && !mode.gpu;
+    v.rangeSlider = mode.heatmap;
     v.candleStyle = mode.candles;
     v.tpoSession = mode.tpo || mode.volumeProfile;
     v.tpoLayout = mode.tpo;
@@ -985,12 +923,11 @@ void TopToolbar::applyVisibility() {
     show(m_tickPresetAction, v.tickSelector);
     show(m_tickVeilAction, v.tickSelector && m_tickState.enabled && !m_tickState.indicator.isEmpty());
     show(m_paletteAction, v.palette);
-    show(m_liqLabelAction, v.rangeSlider || v.thresholdSlider);
+    show(m_liqLabelAction, v.rangeSlider);
     for (auto *a : {m_modeLabelAction, m_modeComboAction}) show(a, v.liquidity);
     show(m_labelsAction, v.labelsToggle);
     show(m_rangeAction, v.rangeSlider);
     show(m_rangeLabelAction, v.rangeSlider);
-    show(m_thresholdAction, v.thresholdSlider);
     show(m_chartTypeAction, v.candleStyle);
     show(m_tpoSessionAction, v.tpoSession);
     show(m_tpoLayoutAction, v.tpoLayout);
@@ -1005,7 +942,6 @@ TopToolbar::ControlVisibility TopToolbar::shownControls() const {
     v.liquidity = on(m_modeComboAction);
     v.labelsToggle = on(m_labelsAction);
     v.rangeSlider = on(m_rangeAction);
-    v.thresholdSlider = on(m_thresholdAction);
     v.candleStyle = on(m_chartTypeAction);
     v.tpoSession = on(m_tpoSessionAction);
     v.tpoLayout = on(m_tpoLayoutAction);
