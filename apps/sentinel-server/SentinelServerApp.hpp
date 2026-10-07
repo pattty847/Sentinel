@@ -8,6 +8,7 @@
 #include "../../libs/core/servermodel/ServerDataModel.hpp"
 #include "../../libs/core/protocol/SentinelStreamServer.hpp"
 #include "../../libs/core/config/ConfigTypes.hpp"
+#include "../../libs/core/metrics/EventLoopLag.hpp"
 #include "../../libs/core/metrics/MetricsHttpServer.hpp"
 #include "../../libs/core/metrics/MetricsRegistry.hpp"
 
@@ -35,6 +36,9 @@ private:
     ServerConfig m_serverConfig;
     // Declared first: outlives every component whose samplers it holds.
     sentinel::metrics::MetricsRegistry m_metrics;
+    // Main-thread event-loop lag (both live feeds); scraped only through
+    // m_httpServer, which is destroyed first.
+    sentinel::metrics::EventLoopLagSampler m_eventLoopLag;
     sentinel::metrics::Gauge* m_wsLatencyMs = nullptr;
     std::unique_ptr<Authenticator> m_authenticator;
     std::unique_ptr<MarketDataFeeds> m_marketDataCore;

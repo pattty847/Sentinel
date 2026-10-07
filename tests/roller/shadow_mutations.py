@@ -18,7 +18,7 @@ def build(target):
     if target is None:
         return
     # -j 2: the owner's Mac froze under heavier load (AGENTS section 4).
-    p = command(['cmake', '--build', '--preset', 'mac-clang', '-j', '2', '--target', target])
+    p = command(['cmake', '--build', '--preset', 'mac-clang', '-j', '2', '--target', target.split('/')[-1]])
     if p.returncode:
         raise RuntimeError(p.stdout[-10000:])
 
@@ -28,7 +28,8 @@ def test(name, target, fail=False):
         if p.returncode != (1 if fail else 0):
             raise RuntimeError(p.stdout[-12000:])
         return
-    p = command([f'build/mac-clang/tests/roller/{target}', '--gtest_filter=' + name])
+    exe = target if '/' in target else f'roller/{target}'
+    p = command([f'build/mac-clang/tests/{exe}', '--gtest_filter=' + name])
     if (p.returncode != (1 if fail else 0)) or (fail and '[  FAILED  ]' not in p.stdout):
         raise RuntimeError(p.stdout[-12000:])
 
@@ -260,6 +261,15 @@ mutations = [
     ('db1 the model never asks for metadata over REST', 'libs/core/servermodel/ServerDataModel.cpp',
      'if (m_journalFeed) return;', '',
      'JournalLiveFeedModel.NeverRequestsRestMetadata'),
+    ('db1-lag the main-thread lag timer runs', 'libs/core/metrics/EventLoopLag.cpp',
+     'm_timer.start();', ';',
+     'ServerMetrics.EventLoopLagShowsABlockedMainThread', 'servermodel/test_server_metrics'),
+    ('db1-lag a late tick is counted', 'libs/core/metrics/EventLoopLag.cpp',
+     'if (lagMs > kLateMs && m_late) m_late->inc();', ';',
+     'ServerMetrics.EventLoopLagShowsABlockedMainThread', 'servermodel/test_server_metrics'),
+    ('db1-lag the server registers the sampler in journal mode', APP,
+     'm_eventLoopLag.registerMetrics(m_metrics);', ';',
+     'ShadowTest.JournalLiveFeedServerHasNoEngineAndServesCapturedProducts'),
     ('db1 live_feed key parsed', 'libs/core/ConfigLoader.cpp',
      'readScalar(rec, "live_feed", cfg.recording.liveFeed);', ';',
      'ShadowConfig.LiveFeedKeyDefaultsToEngine'),

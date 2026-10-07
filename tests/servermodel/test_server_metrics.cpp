@@ -1,6 +1,7 @@
 // sentinel-server's /metrics wiring without the live data: ServerDataModel records
 // into a QTemporaryDir (never the configured recording root), and the route is
 // served by the same MetricsHttpServer the app uses, on an ephemeral port.
+#include "metrics/EventLoopLag.hpp"
 #include "metrics/MetricsHttpServer.hpp"
 #include "metrics/MetricsRegistry.hpp"
 #include "servermodel/ServerDataModel.hpp"
@@ -10,6 +11,7 @@
 #include <QTcpSocket>
 #include <QTemporaryDir>
 #include <gtest/gtest.h>
+#include <thread>
 
 using sentinel::metrics::MetricsHttpServer;
 using sentinel::metrics::MetricsRegistry;
@@ -175,4 +177,51 @@ TEST(ServerMetrics, RecorderOffExportsOnlyItsState) {
     const std::string text = registry.render();
     EXPECT_TRUE(has(text, "sentinel_recorder_running 0"));
     EXPECT_EQ(text.find("sentinel_recorder_columns_written_total"), std::string::npos);
+}
+
+namespace {
+// Value of the exposition line starting with `series` (labels included), or -1.
+double value(const std::string& text, const std::string& series) {
+    const auto at = text.find("\n" + series + " ");
+    return at == std::string::npos ? -1 : std::stod(text.substr(at + series.size() + 2));
+}
+void pump(int ms) {
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < ms) QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+}
+} // namespace
+
+// D-b1 flip gate: main-thread event-loop lag over the real /metrics route. An
+// idle loop stays near zero; a queued slot that blocks the main thread for
+// 400 ms shows up in the max gauge and the late-tick counter.
+TEST(ServerMetrics, EventLoopLagShowsABlockedMainThread) {
+    int argc = 1;
+    char name[] = "server-metrics";
+    char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    MetricsRegistry registry;
+    sentinel::metrics::EventLoopLagSampler lag;
+    lag.registerMetrics(registry);
+    MetricsHttpServer server(registry);
+    ASSERT_TRUE(server.listen(0));
+    std::string text = scrape(server.port());
+    EXPECT_FALSE(hasSeries(text, "sentinel_server_event_loop_lag_ms{")) << "no tick yet";
+    EXPECT_TRUE(has(text, "sentinel_server_event_loop_late_ticks_total 0"));
+
+    lag.start();
+    pump(1200);
+    text = scrape(server.port());
+    const double idleP99 = value(text, "sentinel_server_event_loop_lag_ms{quantile=\"0.99\"}");
+    ASSERT_GE(idleP99, 0) << text;
+    EXPECT_LT(idleP99, 50);
+    EXPECT_TRUE(has(text, "sentinel_server_event_loop_late_ticks_total 0"));
+
+    QMetaObject::invokeMethod(&app, [] { std::this_thread::sleep_for(std::chrono::milliseconds(400)); },
+                              Qt::QueuedConnection);
+    pump(600);
+    text = scrape(server.port());
+    EXPECT_GE(value(text, "sentinel_server_event_loop_lag_ms{quantile=\"max\"}"), 250) << text;
+    EXPECT_LT(value(text, "sentinel_server_event_loop_lag_ms{quantile=\"0.5\"}"), 50);
+    EXPECT_GE(value(text, "sentinel_server_event_loop_late_ticks_total"), 1);
 }

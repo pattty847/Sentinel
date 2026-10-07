@@ -2854,6 +2854,12 @@ TEST_F(ShadowTest, JournalLiveFeedServerHasNoEngineAndServesCapturedProducts) {
   EXPECT_EQ(ready.bids, 2u);
   EXPECT_EQ(ready.asks, 1u);
   EXPECT_EQ(s.metadataRequests, 0); // never REST
+  // The main-thread lag sampler runs in this mode too (D-b1 flip gate).
+  EXPECT_TRUE(eventuallyQt([&] {
+    return s.metrics().find("sentinel_server_event_loop_lag_ms{quantile=\"max\"} ") !=
+           std::string::npos;
+  }));
+  EXPECT_NE(s.metrics().find("sentinel_server_event_loop_late_ticks_total "), std::string::npos);
   EXPECT_EQ(s.metrics().find("sentinel_mdc_ws_latency_ms"), std::string::npos);
   // Provisional updates below $0.005 reach the live book.
   s.pepe->append(record(64000, pepeLevel("offer", "0.00001002", "123")));

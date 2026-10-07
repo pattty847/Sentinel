@@ -57,6 +57,9 @@ bool SentinelServerApp::initialize() {
 
         // GET /ping and GET /metrics on 127.0.0.1 (ops/monitoring/README.md).
         sentinel::metrics::registerProcessMetrics(m_metrics);
+        // Main-thread load (engine and journal alike): the D-b1 flip gate.
+        m_eventLoopLag.registerMetrics(m_metrics);
+        m_eventLoopLag.start();
         if (!journal) // no Coinbase WebSocket with the journal feed
             m_wsLatencyMs = &m_metrics.gauge("sentinel_mdc_ws_latency_ms",
                                              "Latest Coinbase WebSocket latency (server time minus exchange timestamp).");
