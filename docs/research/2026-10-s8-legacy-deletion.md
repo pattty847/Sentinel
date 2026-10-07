@@ -209,3 +209,5 @@ When `HeatmapTwapStreamer` goes, the recorder stops writing `data/heatmap` (HMCL
    - `heatmap-ab.sh` retires after the final capture.
 3. The A/B capture uses the GUI-host fallback: one hosted session per renderer, run one after the other. Each launches with `gui-shot.sh launch --renderer legacy|gpu --build <worktree>`, which is isolated by design. The locked `lt-claude/heatmap-ab-isolation` branch is not landed for this; it stays locked, and its owner decides its fate.
 4. `lt-sol/label-style` (locked) changes `HeatmapLabelRenderer` and `HeatmapOverlayRenderer`, both of which S8a deletes. That branch will no longer apply after S8a; the owner retired it on 2026-10-06 (tag `archive/lt-sol-label-style`).
+
+5. (conductor, after the Astra r1 review) Accepted minor, not fixed in S8a: retired legacy frames are still JSON-parsed before the client drops them (`SentinelStreamClient.cpp:685,726,737`; about 20 frames/s at 11 KB, a cost inherited from before S8a). S8b removes the sender, which removes the cost; a pre-parse discriminator would be throwaway code.
