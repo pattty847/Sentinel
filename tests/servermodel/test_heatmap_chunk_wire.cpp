@@ -53,6 +53,15 @@ struct HeatmapChunkWireTest {
         auto ready = result->get_future();
         return ready.wait_for(5s) == std::future_status::ready ? ready.get() : 0;
     }
+    static bool markConnectionStable(SentinelStreamClient& client) {
+        auto done = std::make_shared<std::promise<void>>();
+        net::post(client.m_strand, [&client, done] {
+            // Age the actual handshake timestamp instead of sleeping ten seconds.
+            client.m_connectedAt = SentinelStreamClient::ConnectionClock::now() - 10s;
+            done->set_value();
+        });
+        return done->get_future().wait_for(5s) == std::future_status::ready;
+    }
     static void reusePortAfterStop(SentinelStreamServer& server, unsigned short port) {
         server.m_port = port; // stopped fixture only; production uses a fixed configured port
     }
@@ -1035,6 +1044,8 @@ TEST_F(ChunkWire, AutomaticReconnectAfterServerRestartRestoresSubscribedSymbolDa
     const auto port = HeatmapChunkWireTest::port(*server);
     std::atomic<unsigned> ups{1}, downs{0};
     std::atomic<quint64> latestRequest{0};
+    std::mutex timesMutex;
+    std::vector<std::chrono::steady_clock::time_point> downTimes;
     const auto restoreSession = [&] {
         client->subscribe("BTC-USD");
         latestRequest = client->requestHeatmapChunks("BTC-USD", "hmc2.deep", kMin, {kEpoch});
@@ -1043,8 +1054,11 @@ TEST_F(ChunkWire, AutomaticReconnectAfterServerRestartRestoresSubscribedSymbolDa
         restoreSession(); // same startup sender path on every transport-up
         ++ups;
     }, Qt::DirectConnection);
-    QObject::connect(client.get(), &SentinelStreamClient::disconnected, client.get(),
-                     [&] { ++downs; }, Qt::DirectConnection);
+    QObject::connect(client.get(), &SentinelStreamClient::disconnected, client.get(), [&] {
+        std::lock_guard lock(timesMutex);
+        downTimes.push_back(std::chrono::steady_clock::now());
+        ++downs;
+    }, Qt::DirectConnection);
     const auto stopClient = qScopeGuard([&] { client->disconnectFromServer(); });
     restoreSession();
     ASSERT_TRUE(inbox.waitReplies(latestRequest.load(), 1));
@@ -1057,13 +1071,24 @@ TEST_F(ChunkWire, AutomaticReconnectAfterServerRestartRestoresSubscribedSymbolDa
     const auto restartedAt = std::chrono::steady_clock::now();
     ASSERT_TRUE(server->start());
     ASSERT_EQ(HeatmapChunkWireTest::port(*server), port);
-    ASSERT_TRUE(poll([&] { return ups.load() == 2; }, 3s));
-    EXPECT_LT(std::chrono::steady_clock::now() - restartedAt, 3s);
+    ASSERT_TRUE(poll([&] { return ups.load() == 2; }, 6s));
+    EXPECT_LT(std::chrono::steady_clock::now() - restartedAt, 6s);
     ASSERT_TRUE(inbox.waitReplies(latestRequest.load(), 1));
     const auto resumed = inbox.chunksFor(latestRequest.load());
     ASSERT_EQ(resumed.size(), 1u);
     EXPECT_EQ(resumed.front()->key.symbol, "BTC-USD");
     EXPECT_EQ(HeatmapChunkWireTest::sessionCount(*server), 1u);
+    ASSERT_TRUE(HeatmapChunkWireTest::markConnectionStable(*client));
+    const auto downsBeforeStableDrop = downs.load();
+    server->stop();
+    ASSERT_TRUE(poll([&] { return downs.load() > downsBeforeStableDrop; }));
+    ASSERT_TRUE(poll([&] { return downs.load() >= downsBeforeStableDrop + 2; }, 700ms));
+    {
+        std::lock_guard lock(timesMutex);
+        const auto gap = downTimes[downsBeforeStableDrop + 1] - downTimes[downsBeforeStableDrop];
+        EXPECT_GE(gap, 450ms);
+        EXPECT_LT(gap, 700ms); // stable uptime resets a previously grown retry counter
+    }
     client->disconnectFromServer();
     std::this_thread::sleep_for(650ms);
     EXPECT_EQ(ups.load(), 2u);

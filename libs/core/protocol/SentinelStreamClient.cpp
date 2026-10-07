@@ -224,6 +224,8 @@ void SentinelStreamClient::connectToServer() {
 
     m_attemptFailed = false;
     m_retryAttempt = 0;
+    m_connectedAt.reset();
+    m_outageReported = false;
     m_thread = std::thread([this] { run(); });
 }
 
@@ -258,10 +260,28 @@ void SentinelStreamClient::run() {
         }
         if (!m_running) break;
         Q_ASSERT(!m_writeInFlight);
+        // A handshake alone is not recovery: overload can accept then immediately close.
+        if (m_connectedAt && m_disconnectedAt - *m_connectedAt >= std::chrono::seconds(10)) {
+            m_retryAttempt = 0;
+            m_outageReported = false;
+        }
+        m_connectedAt.reset();
         const int delayMs = reconnectDelayMs(m_retryAttempt, QRandomGenerator::global()->generate());
         m_retryAttempt = std::min(m_retryAttempt + 1U, 5U);
-        sLog_Data("SentinelStreamClient reconnect scheduled: host=" << m_host << " port=" << m_port
-                  << " attempt=" << m_retryAttempt << " delayMs=" << delayMs);
+        const auto now = ConnectionClock::now();
+        if (!m_outageReported) {
+            m_outageReported = true;
+            m_nextOutageLogAt = now + std::chrono::seconds(60);
+            sLog_Warning("SentinelStreamClient outage: host=" << m_host << " port=" << m_port
+                         << " reason=" << m_connectionError << " delayMs=" << delayMs);
+            // Reporting every failed attempt makes downstream warning handlers noisy too.
+            emit errorOccurred(m_connectionError);
+        } else if (now >= m_nextOutageLogAt) {
+            m_nextOutageLogAt = now + std::chrono::seconds(60);
+            sLog_Data("SentinelStreamClient retrying: host=" << m_host << " port=" << m_port
+                      << " backoffStep=" << m_retryAttempt << " delayMs=" << delayMs
+                      << " reason=" << m_connectionError);
+        }
         m_ioc.restart();
         m_reconnectTimer.expires_after(std::chrono::milliseconds(delayMs));
         m_reconnectTimer.async_wait([](auto) {});
@@ -280,13 +300,14 @@ void SentinelStreamClient::run() {
             m_decodeRefusals = 0;
         }
         m_work = std::make_unique<net::executor_work_guard<net::io_context::executor_type>>(m_ioc.get_executor());
-        sLog_DataN(500, "SentinelStreamClient reconnect attempt: host=" << m_host << " port=" << m_port);
     }
 }
 
 void SentinelStreamClient::failConnection(const QString& reason) {
     if (!m_running || m_attemptFailed) return;
     m_attemptFailed = true;
+    m_disconnectedAt = ConnectionClock::now();
+    m_connectionError = reason;
     m_isConnected = false;
     {
         std::lock_guard lock(m_chunkOrderMutex);
@@ -298,13 +319,10 @@ void SentinelStreamClient::failConnection(const QString& reason) {
         std::lock_guard lock(m_bookDeliveryMutex);
         for (auto& [symbol, generation] : m_bookDeliveryGenerations) ++generation;
     }
-    sLog_Warning("SentinelStreamClient transport down: host=" << m_host << " port=" << m_port
-                  << " reason=" << reason);
     m_resolver.cancel();
     boost::beast::error_code ignored;
     if (m_ws) boost::beast::get_lowest_layer(*m_ws).socket().close(ignored);
     if (m_work) m_work->reset();
-    emit errorOccurred(reason);
     emit disconnected();
 }
 
@@ -711,7 +729,7 @@ void SentinelStreamClient::onHandshake(boost::beast::error_code ec) {
 
     sLog_Data("SentinelStreamClient connected: host=" << m_host << " port=" << m_port);
     m_isConnected = true;
-    m_retryAttempt = 0;
+    m_connectedAt = ConnectionClock::now();
     boost::beast::get_lowest_layer(*m_ws).expires_never();
     // Drain pre-handshake messages here, before notifying subscribers. Posting
     // another drain after connected() races a subscription's own write kick.

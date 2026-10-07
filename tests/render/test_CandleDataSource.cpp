@@ -420,8 +420,10 @@ TEST_F(CandleDataSourceTest, DisconnectClearsReplicaBeforeGuardedStartupResubscr
     QString error;
     ASSERT_TRUE(AgentHostMode::activate(host.path(), {}, &error)) << error.toStdString();
     AgentHostMode::setSymbolAllowlist({"BTC-USD"});
+    std::vector<bool> statuses;
     // Keep the startup subscriber connected for every new transport session.
     QObject::connect(&source, &IGridDataSource::connectionStatusChanged, &source, [&](bool up) {
+        statuses.push_back(up);
         if (up) {
             source.subscribe("BTC-USD");
             source.subscribe("ETH-USD"); // refused at the same boundary on reconnect
@@ -438,6 +440,9 @@ TEST_F(CandleDataSourceTest, DisconnectClearsReplicaBeforeGuardedStartupResubscr
     deliver();
     EXPECT_TRUE(source.getDirectLiveOrderBook("BTC-USD").isEmpty());
     EXPECT_EQ(source.marketHealth()->snapshot().transport, MarketHealth::Transport::Reconnecting);
+    client().disconnected(); // failed retry stays down without another GUI status notification
+    deliver();
+    EXPECT_EQ(statuses, (std::vector<bool>{true, false}));
     client().connected();
     deliver();
     ASSERT_EQ(takeRequest().at("symbol"), "BTC-USD");

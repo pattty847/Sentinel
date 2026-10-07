@@ -142,8 +142,9 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
                 }
                 m_candleBackfill.disconnect();
                 m_marketHealth.setTransport(MarketHealth::Transport::Reconnecting);
+                const bool wasConnected = m_connectionActive;
                 m_connectionActive = false;
-                emit connectionStatusChanged(false);
+                if (wasConnected) emit connectionStatusChanged(false);
             },
             Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::subscriptionRefused,
