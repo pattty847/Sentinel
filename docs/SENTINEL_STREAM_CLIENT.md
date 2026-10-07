@@ -38,7 +38,8 @@ Writes (subscribe, history requests, trade commands) are posted to `m_strand` an
 |--------|--------------|---------|
 | `subscribe(symbol)` | `subscribe` | Subscribe to symbol feed |
 | `unsubscribe(symbol)` | `unsubscribe` | Unsubscribe |
-| `requestHeatmapHistory(...)` | `heatmap_history_request` | Historical heatmap columns |
+| `requestHeatmapChunks(...)` | `heatmap_chunk_request` | Recorded heatmap chunks (binary replies) |
+| `subscribeHeatmapLive(...)` / `unsubscribeHeatmapLive(...)` | `heatmap_live_subscribe` / `heatmap_live_unsubscribe` | The live raw tail |
 | `requestFootprintHistory(...)` | `footprint_history_request` | Historical footprint slices |
 | `requestTpoHistory(...)` | `tpo_history_request` | Historical TPO slices |
 | `requestCandleHistory(...)` | `candle_history_request` | OHLCV candle history |
@@ -60,8 +61,8 @@ The client parses JSON by `type` and dispatches to handler methods. Each handler
 | `snapshot` | `handleSnapshotMessage` | `snapshotReceived` | Order book init |
 | `l2update` | `handleL2UpdateMessage` | `l2UpdateReceived` | Order book deltas |
 | `trade` | `handleTradeMessage` | `tradeReceived` | Trade feed |
-| `heatmap_slice` | `handleHeatmapSliceMessage` | `heatmapSliceReceived` | Live heatmap column → GPU texture |
-| `heatmap_history_chunk` | `handleHeatmapHistoryChunkMessage` | `heatmapHistoryReceived` | Historical heatmap columns |
+| `heatmap_availability` | (inline) | `heatmapAvailabilityReceived` | Recorded heatmap sources and levels |
+| `heatmap_slice`, `heatmap_history_chunk`, `heatmap_recording_live` | none | none | Retired legacy heatmap (S8a): dropped silently, no per-frame warning, until the server stops sending them (S8b) |
 | `footprint_slice` | `handleFootprintSliceMessage` | `footprintSliceReceived` | Footprint delta levels → GPU |
 | `footprint_history_chunk` | `handleFootprintHistoryChunkMessage` | `footprintSliceReceived` (per column) | Historical footprint |
 | `tpo_slice` | `handleTpoSliceMessage` | `tpoSliceReceived` | TPO letters → GPU |

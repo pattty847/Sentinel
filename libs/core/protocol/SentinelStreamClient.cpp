@@ -739,7 +739,9 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
             case protocol::MessageType::HeatmapHistoryChunk:
                 // The retired legacy heatmap (S8a): the server keeps streaming
                 // heatmap_slice to every subscriber until S8b removes it. Dropped
-                // silently, one frame per second per symbol must not log.
+                // without a warning (one frame per second per symbol); the probe
+                // (SENTINEL_PROBES=stream.legacyHeatmap) counts them when asked.
+                sLog_Probe("stream.legacyHeatmap", "dropped type=" << typeStr << " bytes=" << msgStr.size());
                 return;
             case protocol::MessageType::HeatmapAvailability: {
                 const auto availability = protocol::chunkwire::parseAvailability(msg);

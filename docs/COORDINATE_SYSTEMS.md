@@ -7,7 +7,7 @@ This document defines the coordinate spaces used by chart rendering and the cont
 | Space | Axes | Meaning | Produced / owned by |
 |-------|------|---------|---------------------|
 | **World** | `time_ms`, `price` | Market truth; independent of viewport and texture layout | `TimeAxisMapping` inputs and helpers |
-| **Grid / texture** | `column`, `row` | Ring-buffer and texture indexing (`gridWidth` × `gridHeight`) | Stream state and upload paths (`HeatmapStreamState`, `FootprintStreamState`, `TpoStreamState`) |
+| **Grid / texture** | `column`, `row` | Ring-buffer and texture indexing (`gridWidth` × `gridHeight`) | Stream state and upload paths (`FootprintStreamState`, `TpoStreamState`) |
 | **Screen** | `x`, `y` (pixels) | Final rendered coordinates in the QQuickItem draw area | Per-frame `drawRect` and `srcRect` mapping |
 
 ## 2. Single source of truth for world↔screen
@@ -25,10 +25,9 @@ Any world-semantic renderer (candles, labels, volume profile price bands) must m
 
 Use when data is a dense 2D grid and incremental column texture uploads matter.
 
-**Heatmap (`HeatmapOverlayRenderer`)**  
-- Contract: ring-texture sampling.  
-- Uses `drawRect`, `srcRect`, and `timeOffset` in the shader path.  
-- `timeOffset` is valid here; X/Y sampling is bound to heatmap grid semantics.
+The heatmap (`HeatmapTileNode`, S6) is not a ring texture: it draws the span sources
+for the viewport-only `TimeAxisMapping` (columns anchored to epoch multiples of the
+timeframe, rows at the drawn tick). The legacy ring heatmap went in S8a.
 
 **Footprint (`FootprintOverlayRenderer`)**  
 - Contract: ring-texture sampling over the footprint delta grid.  
