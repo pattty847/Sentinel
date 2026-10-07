@@ -32,6 +32,15 @@ The owner's `ma-panel` (local plugin) shows live workflow state; this session re
   `scripts/dev/deploy-runtime.sh rollback capture`.
 - **GUI host** :17190 idle, no session. **Monitoring:** VictoriaMetrics :8428, Grafana :3000.
 
+## Autonomous queue (owner, 2026-10-07 ~02:00 EDT: autonomous run approved; the owner is off on Oct 7 and clicks approvals)
+
+1. Land A (corrupt-skip, Fable review) and C (bind-address, Sonnet review) after PASS; no deploy until after R2.
+2. D-b1: the Codex Sol writer finishes the lag metric, the Astra thread `01a11475` checks the delta, stays READY, lands after the R2 deploy.
+3. Anchors phase B: the conductor rebases D-b1 onto main (pre-landing), then anchors onto D-b1; a Codex writer does the JournalFeed restore, the roll()/tap wiring and the owner's 6 checks; Fable reviews.
+4. GUI auto-reconnect (Codex writer, Claude review).
+5. S8b prep: map every reader of the server `heatmap.*` keys and plan their move.
+Never without the owner present: R2, any deploy, cutovers, data deletion. Check `scripts/dev/budget.sh` before each dispatch; Codex writes, Claude reviews and conducts.
+
 ## In flight (T7 worktrees)
 
 On resume, read the Codex outputs: `.claude/acting-orchestrator/corrupt-skip/writer-out.md` (A, thread `01a114bd`), `.claude/acting-orchestrator/bind-address/writer-out.md` (C, thread `01a114c4`). Both are sandboxed: commit their diffs, then review A with Claude Fable and C with Claude. A (corrupt-skip) is committed on `lt-astra/corrupt-skip` (metric registration in ShadowRoller left for the conductor; see writer-out.md), awaiting a Fable review. C (bind address) is committed `98b4faf` on `lt-sol/bind-address`, awaiting a Claude review. D-b1 lag metric: WIP `d4873aa` on `lt-claude/roller-db1` (sampler `libs/core/metrics/EventLoopLag.*`, gauges and test done). Left: the README section, one `--db1` mutation run (3 new lag mutations), the 22 suites plus ServerMetricsTests. Give that to a Codex writer, then the same Astra thread `01a11475` checks the delta.
