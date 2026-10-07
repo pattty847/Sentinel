@@ -11,6 +11,8 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 ## Resume (fresh conductor)
 
+The owner's `ma-panel` (local plugin) shows live workflow state; a session started before it existed has no `workflow_update` tool. Report to it from the first fresh session after 2026-10-06.
+
 1. Read `AGENTS.md` and this file. See what landed since: `git log --oneline --first-parent <last STATUS commit>..main`.
 2. `scripts/dev/budget.sh`; service checks in `docs/AGENT_WORKFLOW.md` "Data and performance".
 3. `git worktree list`, `scripts/dev/build-queue.sh status`, `curl -s 127.0.0.1:17190/status`.
