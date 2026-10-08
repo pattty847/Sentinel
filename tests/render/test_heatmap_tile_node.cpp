@@ -16,12 +16,15 @@
 #include "render/heatmap/HeatmapTileNode.hpp"
 #include "render/heatmap/HeatmapPalette.hpp"
 #include <QCoreApplication>
+#include <QFile>
+#include <QMatrix4x4>
 #include <QEvent>
 #include <QGuiApplication>
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <gtest/gtest.h>
 #include <rhi/qrhi.h>
+#include <rhi/qshader.h>
 #include <cstring>
 #include <deque>
 #include <iostream>
@@ -89,6 +92,206 @@ uint64_t uploadResident(QRhi *rhi, HeatmapGpuBinner &binner, const std::shared_p
     EXPECT_EQ(rhi->endOffscreenFrame(), QRhi::FrameOpSuccess);
     EXPECT_TRUE(complete);
     return source->id;
+}
+
+// Direct display-pass readback: upload known packed cells so the floor-path
+// checks exercise the production shaders independently of price binning.
+class DisplayReadback {
+public:
+    explicit DisplayReadback(QRhi *rhi) : rhi_(rhi) {}
+    bool create(QSize size, uint32_t rows, const HeatmapPalette &palette) {
+        size_ = size;
+        rows_ = rows;
+        cells_.reset(rhi_->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer, rows * 4));
+        params_.reset(rhi_->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(Draw)));
+        palette_.reset(rhi_->newTexture(QRhiTexture::RGBA8, QSize(kPaletteWidth, 1), 1));
+        color_.reset(rhi_->newTexture(QRhiTexture::RGBA8, size, 1,
+                                      QRhiTexture::RenderTarget | QRhiTexture::UsedAsTransferSource));
+        sampler_.reset(rhi_->newSampler(QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::None,
+                                        QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge));
+        if (!cells_->create() || !params_->create() || !palette_->create() || !color_->create() ||
+            !sampler_->create())
+            return false;
+        QRhiTextureRenderTargetDescription description{QRhiColorAttachment(color_.get())};
+        target_.reset(rhi_->newTextureRenderTarget(description));
+        pass_.reset(target_->newCompatibleRenderPassDescriptor());
+        target_->setRenderPassDescriptor(pass_.get());
+        if (!target_->create()) return false;
+        const auto fs = QRhiShaderResourceBinding::FragmentStage;
+        const auto vs = QRhiShaderResourceBinding::VertexStage;
+        bindings_.reset(rhi_->newShaderResourceBindings());
+        bindings_->setBindings(
+            {QRhiShaderResourceBinding::bufferLoad(0, fs, cells_.get()),
+             QRhiShaderResourceBinding::uniformBuffer(1, vs | fs, params_.get()),
+             QRhiShaderResourceBinding::sampledTexture(2, fs, palette_.get(), sampler_.get())});
+        if (!bindings_->create()) return false;
+        auto shader = [](const char *path) {
+            QFile file(QString::fromLatin1(path));
+            return file.open(QIODevice::ReadOnly) ? QShader::fromSerialized(file.readAll()) : QShader{};
+        };
+        pipeline_.reset(rhi_->newGraphicsPipeline());
+        pipeline_->setShaderStages(
+            {{QRhiShaderStage::Vertex, shader(":/heatmapgpu/heatmap_display.vert.qsb")},
+             {QRhiShaderStage::Fragment, shader(":/heatmapgpu/heatmap_display.frag.qsb")}});
+        pipeline_->setTopology(QRhiGraphicsPipeline::TriangleStrip);
+        pipeline_->setShaderResourceBindings(bindings_.get());
+        pipeline_->setRenderPassDescriptor(pass_.get());
+        if (!pipeline_->create()) return false;
+        texels_ = palette.texels;
+        tone_ = palette.tone;
+        return true;
+    }
+    QImage render(const std::vector<uint32_t> &cells, float top, float span, bool clampRows = false) {
+        if (cells.size() != rows_) return {};
+        Draw draw{};
+        QMatrix4x4 projection;
+        projection.ortho(0.0f, float(size_.width()), float(size_.height()), 0.0f, -1.0f, 1.0f);
+        const QMatrix4x4 mvp = rhi_->clipSpaceCorrMatrix() * projection;
+        std::memcpy(draw.mvp, mvp.constData(), sizeof(draw.mvp));
+        draw.rect[2] = float(size_.width());
+        draw.rect[3] = float(size_.height());
+        draw.mapping[1] = 1.0f;
+        draw.mapping[2] = top;
+        draw.mapping[3] = span;
+        draw.dims[0] = 1;
+        draw.dims[1] = rows_;
+        draw.dims[2] = clampRows ? 1u : 0u;
+        draw.style[1] = 32767.0f;
+        draw.style[2] = 1.0f;
+        draw.tone[0] = tone_.gamma;
+        draw.tone[1] = tone_.contrast;
+        draw.tone[2] = tone_.floor;
+        QRhiCommandBuffer *cb = nullptr;
+        if (rhi_->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess) return {};
+        auto *updates = rhi_->nextResourceUpdateBatch();
+        updates->uploadStaticBuffer(cells_.get(), cells.data());
+        updates->updateDynamicBuffer(params_.get(), 0, sizeof(draw), &draw);
+        const QByteArray bytes(reinterpret_cast<const char *>(texels_.data()), int(texels_.size()));
+        updates->uploadTexture(palette_.get(), QRhiTextureUploadDescription({QRhiTextureUploadEntry(
+                                                   0, 0, QRhiTextureSubresourceUploadDescription(bytes))}));
+        cb->beginPass(target_.get(), QColor(0, 0, 0, 0), {1.0f, 0}, updates);
+        cb->setGraphicsPipeline(pipeline_.get());
+        cb->setViewport(QRhiViewport(0, 0, float(size_.width()), float(size_.height())));
+        cb->setShaderResources(bindings_.get());
+        cb->draw(4);
+        cb->endPass();
+        QRhiReadbackResult result;
+        auto *read = rhi_->nextResourceUpdateBatch();
+        read->readBackTexture(QRhiReadbackDescription(color_.get()), &result);
+        cb->resourceUpdate(read);
+        if (rhi_->endOffscreenFrame() != QRhi::FrameOpSuccess ||
+            result.data.size() != qsizetype(size_.width()) * size_.height() * 4)
+            return {};
+        // Keep raw premultiplied bytes for exact RGBA comparisons.
+        const QImage image(reinterpret_cast<const uchar *>(result.data.constData()), size_.width(),
+                           size_.height(), QImage::Format_RGBA8888);
+        return rhi_->isYUpInFramebuffer() ? image.flipped(Qt::Vertical) : image.copy();
+    }
+
+private:
+    struct Draw {
+        float mvp[16], rect[4], mapping[4];
+        uint32_t dims[4];
+        float style[4], tone[4];
+    };
+    static_assert(sizeof(Draw) == 144);
+    QRhi *rhi_;
+    QSize size_;
+    uint32_t rows_ = 0;
+    PaletteTexels texels_{};
+    PaletteTone tone_;
+    std::unique_ptr<QRhiBuffer> cells_, params_;
+    std::unique_ptr<QRhiTexture> palette_, color_;
+    std::unique_ptr<QRhiSampler> sampler_;
+    std::unique_ptr<QRhiRenderPassDescriptor> pass_;
+    std::unique_ptr<QRhiTextureRenderTarget> target_;
+    std::unique_ptr<QRhiShaderResourceBindings> bindings_;
+    std::unique_ptr<QRhiGraphicsPipeline> pipeline_;
+};
+HeatmapPalette solidSidePalette() {
+    HeatmapPalette palette;
+    palette.tone = {1.0f, 1.0f, 0.0f};
+    for (int i = 0; i < kPaletteWidth; ++i) {
+        const std::array<uint8_t, 4> rgba =
+            i < 256 ? std::array<uint8_t, 4>{32, 128, 240, 255} : std::array<uint8_t, 4>{224, 64, 16, 255};
+        std::copy(rgba.begin(), rgba.end(), palette.texels.begin() + i * 4);
+    }
+    return palette;
+}
+constexpr uint32_t validCell = 3u << 16;
+constexpr uint32_t hotBid = validCell | 32767u;
+constexpr uint32_t hotAsk = hotBid | 0x8000u;
+
+// Interior floor-selected data pixels match the CPU palette reference exactly.
+TEST(HeatmapDisplayFloor, InteriorDataPixelsMatchTheCpuReference) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << gpu.skipReason();
+    const auto palette = solidSidePalette();
+    DisplayReadback display(gpu.rhi.get());
+    ASSERT_TRUE(display.create(QSize(8, 24), 8, palette));
+    const std::vector<uint32_t> cells{hotAsk, hotBid, hotAsk, hotBid, hotAsk, hotBid, hotAsk, hotBid};
+    int compared = 0;
+    for (int offset = 0; offset < 16; ++offset) {
+        const float top = -1.0f - float(offset) / 16.0f / 2.4f;
+        const auto image = display.render(cells, top, 10.0f);
+        ASSERT_FALSE(image.isNull());
+        for (int y = 0; y < image.height(); ++y) {
+            const double lo = top + double(y) / 2.4, hi = top + double(y + 1) / 2.4;
+            const int row = int(std::floor(lo));
+            if (row < 0 || row >= 8 || hi >= row + 1.0 - 1e-5 || lo <= row + 1e-5) continue;
+            const auto rgba = legacyRecordingColor(uint16_t(cells[row]), {0, 32767}, palette);
+            const QColor original(int(std::lround(rgba[0] * 255)), int(std::lround(rgba[1] * 255)),
+                                  int(std::lround(rgba[2] * 255)), int(std::lround(rgba[3] * 255)));
+            EXPECT_EQ(image.pixelColor(4, y), original) << "offset=" << offset << " y=" << y;
+            ++compared;
+        }
+    }
+    EXPECT_GE(compared, 100);
+}
+
+// Loading and veil bytes match a full-screen hatch at the same screen pixels,
+// including both tones, when the floor-selected row is next to data.
+TEST(HeatmapDisplayFloor, LoadingAndVeilHatchesStayByteIdenticalNextToData) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << gpu.skipReason();
+    DisplayReadback display(gpu.rhi.get());
+    ASSERT_TRUE(display.create(QSize(16, 24), 8, solidSidePalette()));
+    for (const uint32_t state : {1u, 2u}) {
+        for (int offset = 0; offset < 8; ++offset) {
+            const float top = -1.0f - float(offset) / 8.0f / 2.4f;
+            std::vector<uint32_t> cells(8, state << 16);
+            const auto original = display.render(cells, 0.0f, 8.0f);
+            ASSERT_FALSE(original.isNull());
+            cells[3] = hotBid;
+            cells[5] = hotAsk;
+            const auto adjacent = display.render(cells, top, 10.0f);
+            ASSERT_FALSE(adjacent.isNull());
+            int compared = 0;
+            std::set<QRgb> tones;
+            for (int y = 0; y < adjacent.height(); ++y) {
+                const double centre = top + (double(y) + 0.5) / 2.4;
+                if (std::abs(centre - std::round(centre)) < 1e-5) continue;
+                const int row = int(std::floor(centre));
+                if (row < 0 || row >= 8 || row == 3 || row == 5) continue;
+                for (int x = 0; x < adjacent.width(); ++x) {
+                    EXPECT_EQ(adjacent.pixel(x, y), original.pixel(x, y)) << "state=" << state << " y=" << y;
+                    tones.insert(adjacent.pixel(x, y));
+                    ++compared;
+                }
+            }
+            EXPECT_GE(compared, 64);
+            EXPECT_EQ(tones.size(), 2u);
+            const std::set<QRgb> legacyTones = state == 1u
+                                                   ? std::set<QRgb>{qRgb(27, 41, 61), qRgb(14, 20, 31)}
+                                                   : std::set<QRgb>{qRgb(83, 83, 87), qRgb(62, 62, 67)};
+            std::set<QRgb> rgbTones;
+            for (const QRgb pixel : tones) {
+                rgbTones.insert(pixel | 0xff000000u);
+                EXPECT_NEAR(qAlpha(pixel), state == 1u ? 204.0 : 229.5, state == 1u ? 0.0 : 0.5);
+            }
+            EXPECT_EQ(rgbTones, legacyTones) << "original premultiplied hatch RGB bytes";
+        }
+    }
 }
 
 // ---------------------------------------------------------------- fill pass

@@ -54,7 +54,7 @@ vec4 shade() {
     float adjusted = pow(max(magnitude, tone.z), tone.x);
     adjusted = clamp((adjusted - 0.5) * tone.y + 0.5, 0.0, 1.0);
     bool ask = (cell & 0x8000u) != 0u;
-    float u = ask ? 0.51 + adjusted * 0.49 : adjusted * 0.49;
+    float u = ask ? (256.5 + adjusted * 255.0) / 512.0 : (0.5 + adjusted * 255.0) / 512.0;
     vec4 color = textureLod(paletteTex, vec2(u, 0.5), 0.0); // no mips; divergent flow
     return vec4(color.rgb * color.a, color.a);
 }
