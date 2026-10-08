@@ -38,6 +38,8 @@ Protect these at all times:
 
 Prefer simpler/faster designs over preserving weak legacy patterns unless compatibility is explicitly required.
 
+**No backward compatibility (owner rule).** Once a replacement works, delete the superseded code path, format, reader and their tests in the same push. Keep a switch only while a live A/B comparison is wanted. Old recorded data is not a reason to keep code: propose archiving or dropping it instead (deleting recorded data still needs the owner present, section 4b).
+
 ## 2) Critical Invariants
 
 - **Viewport updates must go through `setViewport()`** so `viewportVersion` increments.
