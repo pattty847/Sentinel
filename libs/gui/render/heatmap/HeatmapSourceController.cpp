@@ -80,11 +80,15 @@ size_t SpanSourceKeyHash::operator()(const SpanSourceKey &key) const {
     return h;
 }
 
-SpanSourceBuildPtr buildSpanSource(const SpanSourceInput &input, std::shared_ptr<std::atomic<int64_t>> liveBytes) {
+SpanSourceBuildPtr buildSpanSource(const SpanSourceInput &input, std::shared_ptr<std::atomic<int64_t>> liveBytes,
+                                   const std::function<bool()> &cancelled) {
+    auto stop = [&] { return cancelled && cancelled(); };
+    if (stop()) return {};
     const auto &key = input.key;
     const int64_t start = key.span.startMs(), end = key.span.endMs();
     // SparseColumns::layer is migration metadata; identity stays the source id.
     const auto composed = tiles::composeChunks(input.chunks, key.span.symbol, key.source, key.span.tfMs, start, end);
+    if (stop()) return {};
     gpu::GpuSourceOptions options;
     options.availableStartMs = key.availableStartMs;
     options.availableEndMs = key.availableEndMs;
@@ -99,6 +103,7 @@ SpanSourceBuildPtr buildSpanSource(const SpanSourceInput &input, std::shared_ptr
         ? std::clamp(recording::floorDiv(std::min(localThrough, key.availableEndMs), key.span.tfMs) * key.span.tfMs, start, end)
         : composed.scannedRanges.back().endMs;
     auto image = std::make_unique<gpu::GpuSource>(gpu::buildGpuSource(composed, options));
+    if (stop()) return {};
     out->uploadBytes = size_t(image->bytes());
     const size_t cpu = imageBytes(*image);
     if (liveBytes) {
@@ -111,10 +116,13 @@ SpanSourceBuildPtr buildSpanSource(const SpanSourceInput &input, std::shared_ptr
         out->gpu = std::move(image);
     }
     out->resolution = summarizeResolution(composed, key.source, key.span.tfMs, start, end, key.priceScale);
-    for (const auto &column : out->resolution.columns)
+    if (stop()) return {};
+    for (const auto &column : out->resolution.columns) {
+        if (stop()) return {};
         for (const auto &source : column.sources)
             if (source.commonUnits > 0)
                 out->commonUnits = out->commonUnits ? std::lcm(out->commonUnits, source.commonUnits) : source.commonUnits;
+    }
     out->bytes = sizeof(SpanSourceBuild) + cpu + resolutionBytes(out->resolution);
     return out;
 }
@@ -134,11 +142,16 @@ struct SpanSourceCache::State {
         Completion completion;
     };
     struct Job {
+        enum Phase { Queued, Running, Finished, Cancelled };
+        std::atomic<Phase> phase{Queued}; // CAS arbitrates queued cancellation vs worker start
+        std::atomic<bool> cancelled{false};
+        SpanSourceInput input; // worker-owned after Running; cancellation owns it after Queued -> Cancelled
         size_t reserved = 0;          // held until the job finishes
         std::vector<ChunkBytes> keys; // input chunks it owns until then
         std::vector<Waiter> waiters;
     };
-    std::unordered_map<SpanSourceKey, Job, SpanSourceKeyHash> pending;
+    std::unordered_map<SpanSourceKey, std::shared_ptr<Job>, SpanSourceKeyHash> pending;
+    size_t spanJobs = 0; // includes cancelled workers until their completion releases the ledger
     struct Claim {
         size_t bytes = 0;
         unsigned count = 0;
@@ -287,7 +300,7 @@ SpanSourceCache::Stats SpanSourceCache::stats() const {
     auto out = state_->stats;
     out.bytes = state_->lru.bytes();
     out.entries = state_->lru.size();
-    out.jobs = state_->pending.size() + state_->liveJobs;
+    out.jobs = state_->spanJobs + state_->liveJobs;
     out.claimedBytes = state_->claimedBytes;
     out.reservedBytes = state_->reservedBytes;
     out.liveBytes = state_->liveBytes->load();
@@ -295,6 +308,7 @@ SpanSourceCache::Stats SpanSourceCache::stats() const {
 }
 void SpanSourceCache::attach(HeatmapSourceController *controller) { state_->controllers.push_back(controller); }
 void SpanSourceCache::detach(HeatmapSourceController *controller) {
+    cancelRequests(controller);
     std::erase(state_->controllers, controller);
     commitCpu(controller, {}, 0, false);
     state_->commitments.erase(controller);
@@ -398,50 +412,106 @@ SpanSourceBuildPtr SpanSourceCache::find(const SpanSourceKey &key) {
     return build;
 }
 
+void SpanSourceCache::cancelRequests(QObject *context, const std::function<bool(const SpanSourceKey &)> &keep) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    auto &s = *state_;
+    uint64_t queued = 0, running = 0;
+    for (auto it = s.pending.begin(); it != s.pending.end();) {
+        auto &job = *it->second;
+        std::erase_if(job.waiters, [&](const State::Waiter &waiter) {
+            return !waiter.context || (waiter.context == context && (!keep || !keep(it->first)));
+        });
+        if (!job.waiters.empty()) { ++it; continue; }
+        job.cancelled.store(true, std::memory_order_relaxed);
+        auto expected = State::Job::Queued;
+        if (job.phase.compare_exchange_strong(expected, State::Job::Cancelled)) {
+            // The worker cannot enter: drop actual inputs as well as their ledger refs.
+            job.input.chunks.clear();
+            s.dropRefs(job.keys);
+            s.reservedBytes -= job.reserved;
+            --s.spanJobs;
+            ++queued;
+        } else if (expected == State::Job::Running) {
+            ++running; // includes a finished worker awaiting owner-thread delivery
+        }
+        // Running jobs keep their resources until acknowledgement. Removing the
+        // lookup now lets a new request for this very key start independently.
+        it = s.pending.erase(it);
+    }
+    s.stats.queuedCancels += queued;
+    s.stats.runningCancels += running;
+    if (queued || running)
+        sLog_Probe("heatmap.cache.cancel", "queued=" << queued << " running=" << running);
+    if (queued) {
+        freed();
+        emit settled();
+    }
+}
+
 bool SpanSourceCache::request(SpanSourceInput input, int priority, size_t reserveBytes, QObject *context,
                               Completion completion) {
     Q_ASSERT(QThread::currentThread() == thread() && context && context->thread() == thread());
     auto &s = *state_;
     if (const auto it = s.pending.find(input.key); it != s.pending.end()) {
         ++s.stats.sharedBuilds;
-        it->second.waiters.push_back({context, std::move(completion)});
+        it->second->waiters.push_back({context, std::move(completion)});
         return true;
     }
-    if (s.pending.size() + s.liveJobs >= s.options.maxJobs) return false;
-    auto &job = s.pending[input.key];
-    job.reserved = reserveBytes;
-    for (const auto &chunk : input.chunks)
-        if (chunk) job.keys.push_back({chunk->key, chunk->bytes, true});
-    s.addRefs(job.keys); // the job owns its inputs until it finishes
-    job.waiters.push_back({context, std::move(completion)});
+    if (s.spanJobs + s.liveJobs >= s.options.maxJobs) return false;
+    auto job = std::make_shared<State::Job>();
+    s.pending.emplace(input.key, job);
+    job->input = std::move(input);
+    job->reserved = reserveBytes;
+    for (const auto &chunk : job->input.chunks)
+        if (chunk) job->keys.push_back({chunk->key, chunk->bytes, true});
+    s.addRefs(job->keys); // the job owns its inputs until it finishes
+    job->waiters.push_back({context, std::move(completion)});
     s.reservedBytes += reserveBytes;
+    ++s.spanJobs;
     ++s.stats.builds;
-    auto run = [this, input = std::move(input), live = s.liveBytes, before = s.options.beforeBuild] {
+    auto run = [this, job, live = s.liveBytes, before = s.options.beforeBuild,
+                checkpoint = s.options.buildCheckpoint] {
+        auto expected = State::Job::Queued;
+        if (!job->phase.compare_exchange_strong(expected, State::Job::Running)) return;
         SpanSourceBuildPtr build;
         QString error;
         try {
             if (before) before();
-            build = buildSpanSource(input, live);
+            build = buildSpanSource(job->input, live, [&] {
+                if (checkpoint) checkpoint();
+                return job->cancelled.load(std::memory_order_relaxed);
+            });
         } catch (const std::exception &e) {
             error = QString::fromUtf8(e.what());
         }
-        QMetaObject::invokeMethod(this, [this, key = input.key, build, error] {
+        job->input.chunks.clear(); // release bodies before owner-thread ledger acknowledgement
+        QMetaObject::invokeMethod(this, [this, job, build = std::move(build), error]() mutable {
             auto &s = *state_;
-            auto job = std::move(s.pending.at(key));
-            s.pending.erase(key);
-            s.reservedBytes -= job.reserved;
-            s.dropRefs(job.keys);
+            const auto &key = job->input.key;
+            job->phase.store(State::Job::Finished);
+            --s.spanJobs;
+            s.reservedBytes -= job->reserved;
+            s.dropRefs(job->keys);
+            // Cancellation removes waiters, not useful completed work. A worker
+            // that finished before observing the flag still warms the shared cache.
             if (build) {
                 s.uploaded.erase(key); // a new image (a rebuild after a loss)
                 s.lru.insert(key, build, build->bytes);
                 s.live[key] = build;
                 s.hints[{key.span, key.source}] = {build->bytes, build->uploadBytes};
                 if (s.hints.size() > 16384) s.hints.clear(); // size hints only; rebuilt on demand
-            } else {
+            } else if (!job->cancelled.load(std::memory_order_relaxed)) {
                 ++s.stats.failures;
             }
-            for (auto &waiter : job.waiters)
+            // Keep the job discoverable during delivery: a callback may remove
+            // another waiter (or destroy its controller) reentrantly.
+            while (!job->waiters.empty()) {
+                auto waiter = std::move(job->waiters.front());
+                job->waiters.erase(job->waiters.begin());
                 if (waiter.context) waiter.completion(build, error);
+            }
+            const auto it = s.pending.find(key);
+            if (it != s.pending.end() && it->second == job) s.pending.erase(it);
             trim();
             freed(); // its reservation and input chunks are released
             emit settled();
@@ -455,7 +525,7 @@ bool SpanSourceCache::request(SpanSourceInput input, int priority, size_t reserv
 bool SpanSourceCache::requestLive(std::vector<ChunkBytes> chunks, size_t reserveBytes, QObject *context,
                                   std::function<void()> work, std::function<void(QString)> completion, int priority) {
     auto &s = *state_;
-    if (s.pending.size() + s.liveJobs >= s.options.maxJobs) return false;
+    if (s.spanJobs + s.liveJobs >= s.options.maxJobs) return false;
     ++s.liveJobs;
     s.addRefs(chunks);
     s.reservedBytes += reserveBytes;
@@ -621,6 +691,7 @@ bool HeatmapSourceController::applyBudgets(const HeatmapBudgets &budgets, ChunkS
 }
 
 void HeatmapSourceController::reset() {
+    cache_.cancelRequests(this);
     cellQuery_->cancel();
     liveInterested_ = false;
     liveReleaseMs_.reset();
@@ -649,6 +720,9 @@ void HeatmapSourceController::setView(const std::string &symbol, int64_t tfMs, d
         reset();
         ++serial_;
     } else if (tfMs != tfMs_) {
+        // A fallback rebuild after GPU loss can already target the new tf.
+        // Keep that waiter; reconcile will check its full desired key.
+        cache_.cancelRequests(this, [&](const SpanSourceKey &key) { return key.span.tfMs == tfMs; });
         cellQuery_->cancel();
         resetLive();
         // The previous tf's built visible spans stay as fallback until the new
@@ -661,10 +735,11 @@ void HeatmapSourceController::setView(const std::string &symbol, int64_t tfMs, d
                 retained_.push_back(id);
         }
         visibleReady_ = false;
-        // Builds of the old serial are dropped on completion: forget them, so a
-        // return to that tf rejoins the build or takes it from the cache.
+        // Forget removed waiters. Already-built images remain as fallback; a
+        // return to this tf rejoins another consumer's job or starts a new one.
         for (auto &[id, slot] : slots_)
-            for (auto &[name, source] : slot.sources) source.pending.reset();
+            if (id.tfMs != tfMs)
+                for (auto &[name, source] : slot.sources) source.pending.reset();
     }
     if (symbol != symbol_ || tfMs != tfMs_)
         sLog_Data("Heatmap controller view chart=" << chart_ << " symbol=" << symbol << " tf=" << tfMs
@@ -1288,6 +1363,7 @@ std::vector<std::pair<SpanRank, SpanId>> HeatmapSourceController::releasable() c
 void HeatmapSourceController::dropForMemory(const SpanId &span) {
     sLog_Probe("heatmap.controller.cpu_drop", "chart=" << chart_ << " tf=" << span.tfMs << " tile=" << span.tile);
     slots_.erase(span);
+    cache_.cancelRequests(this, [&](const SpanSourceKey &key) { return key.span != span; });
     ++stats_.pressureDrops;
     dirty_ = true;
     schedule();
@@ -1545,6 +1621,26 @@ void HeatmapSourceController::reconcile() {
         for (const auto &planned : slot.plan.sources) list.push_back(need(slot, planned));
     }
 
+    // Reconcile interest before admitting replacements. Pans, source/plan
+    // changes and chunk revisions can invalidate work without a serial bump.
+    for (auto &[id, slot] : slots_) {
+        const auto &list = needs.at(id);
+        for (size_t i = 0; i < slot.plan.sources.size(); ++i) {
+            auto &source = slot.sources[slot.plan.sources[i].source];
+            if (source.pending && (!list[i].build || *source.pending != list[i].desired))
+                source.pending.reset();
+        }
+    }
+    auto cancelObsolete = [&] {
+        cache_.cancelRequests(this, [&](const SpanSourceKey &key) {
+            const auto slot = slots_.find(key.span);
+            if (slot == slots_.end()) return false;
+            const auto source = slot->second.sources.find(key.source);
+            return source != slot->second.sources.end() && source->second.pending == key;
+        });
+    };
+    cancelObsolete();
+
     // Process-wide CPU ceiling over wanted decoded chunks plus span images.
     // This chart commits what it pins; above the ceiling it gives up recent-tf,
     // then prefetch (far first), then fallback, then visible spans farthest from
@@ -1615,6 +1711,7 @@ void HeatmapSourceController::reconcile() {
         const size_t before = total;
         slots_.erase(victim); // releases its CPU claims; its running jobs keep their keys
         needs.erase(id);
+        cancelObsolete();
         total = commitment();
         if (tier == SpanTier::Visible) {
             refusedSpans.push_back(id);
@@ -1706,10 +1803,9 @@ void HeatmapSourceController::reconcile() {
             }
             if (refused) continue;
             const auto key = n.input.key;
-            const auto serial = serial_;
             if (cache_.request(std::move(n.input), slot.plan.rank.fetchPriority(), estimate(span.id, key.source, false),
-                               this, [this, serial, key](SpanSourceBuildPtr build, const QString &error) {
-                                   onBuilt(serial, key, std::move(build), error);
+                               this, [this, key](SpanSourceBuildPtr build, const QString &error) {
+                                   onBuilt(key, std::move(build), error);
                                }))
                 source.pending = key;
             else refused = true;
@@ -1734,14 +1830,16 @@ void HeatmapSourceController::reconcile() {
     refreshLive();
 }
 
-void HeatmapSourceController::onBuilt(uint64_t serial, const SpanSourceKey &key, SpanSourceBuildPtr build,
+void HeatmapSourceController::onBuilt(const SpanSourceKey &key, SpanSourceBuildPtr build,
                                       const QString &error) {
     SourceSlot *found = nullptr;
-    if (const auto slot = slots_.find(key.span); serial == serial_ && slot != slots_.end())
+    // Removed waiters cannot call back. A kept waiter can cross a serial bump
+    // when the new view needs the identical key (e.g. a fallback rebuild).
+    if (const auto slot = slots_.find(key.span); slot != slots_.end())
         if (const auto it = slot->second.sources.find(key.source);
             it != slot->second.sources.end() && it->second.pending == key)
             found = &it->second;
-    if (!found) { // an older serial, or the slot moved on to another request
+    if (!found) { // the slot moved on to another request
         ++stats_.staleResults;
         sLog_Probe("heatmap.controller.stale", "chart=" << chart_ << " tile=" << key.span.tile << " source=" << key.source);
         return;

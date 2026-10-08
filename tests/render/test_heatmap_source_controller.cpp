@@ -109,6 +109,7 @@ protected:
     std::unique_ptr<SpanSourceCache> cache;
     std::vector<std::unique_ptr<HeatmapSourceController>> charts;
     size_t answered = 0;
+    std::function<void()> beforeBuild, buildCheckpoint;
 
     void SetUp() override {
         hourOldest = 0;
@@ -134,8 +135,27 @@ protected:
         SpanSourceCache::Options options;
         options.maxBytes = maxBytes;
         options.maxJobs = maxJobs;
+        options.beforeBuild = [this] { if (beforeBuild) beforeBuild(); };
+        options.buildCheckpoint = [this] { if (buildCheckpoint) buildCheckpoint(); };
         options.executor = [this](std::function<void()> job, int) { jobs.push_back(std::move(job)); };
         cache = std::make_unique<SpanSourceCache>(options);
+    }
+    SpanSourceInput input() {
+        const ChunkKey key{"BTC-USD", std::string(kChunkSources[0].id), kMinuteMs, epoch / kHourMs * kHourMs};
+        revise(store, key, 1);
+        auto chunk = store.cached(key);
+        SpanSourceInput out;
+        out.key = {{key.symbol, kMinuteMs, tiles::tileOfBucket(epoch / kMinuteMs)}, key.source,
+                   availableStart, availableEnd, 100, 0,
+                   {{key.symbol, key.source, key.levelMs, key.startMs, chunk->generation, chunk->sealed}}};
+        out.chunks.push_back(std::move(chunk));
+        return out;
+    }
+    void runFirst() {
+        ASSERT_FALSE(jobs.empty());
+        auto job = std::move(jobs.front());
+        jobs.pop_front();
+        job();
     }
     HeatmapSourceController &chart(size_t gpuBytes = 320ull << 20, size_t estimate = 64 * 1024) {
         HeatmapSourceController::Options options;
@@ -447,7 +467,323 @@ TEST_F(SourceController, AutoCrossesTheFineBandEdgeAndManualReportsTheVeil) {
     EXPECT_TRUE(veiledRanges(summary, 500, lo, hi, 94, 106).empty());
 }
 
-TEST_F(SourceController, OlderSerialBuildResultsAreDropped) {
+// C1: two nested executor invocations represent occupied worker slots; the
+// other six admissions are queued. No timers, sleeps or scheduling races.
+TEST_F(SourceController, TimeframeSwitchCancelsQueuedJobsBehindTwoRunningBuilds) {
+    auto &a = chart();
+    view(a);
+    answerAll();
+    ASSERT_EQ(cache->stats().jobs, 8u);
+    ASSERT_EQ(jobs.size(), 8u);
+    int started = 0;
+    beforeBuild = [&] {
+        ++started;
+        if (started == 1) {
+            runFirst(); // second occupied worker
+        } else if (started == 2) {
+            view(a, 5 * kMinuteMs);
+            EXPECT_EQ(cache->stats().jobs, 2u); // six queued A jobs dropped immediately
+            EXPECT_EQ(cache->stats().queuedCancels, 6u);
+            EXPECT_EQ(cache->stats().runningCancels, 2u);
+            answerAll(); // B can enter before either cancelled worker acknowledges
+            EXPECT_GT(cache->stats().jobs, 2u);
+        }
+    };
+    runFirst();
+    EXPECT_EQ(started, 2);
+    drain();
+    for (int i = 0; i < 6; ++i) runFirst(); // stale executor closures never enter the builder
+    EXPECT_EQ(started, 2);
+    runFirst(); // first B build
+    EXPECT_EQ(started, 3);
+    beforeBuild = {};
+    settle();
+    EXPECT_EQ(a.stats().staleResults, 0u);
+    EXPECT_TRUE(visibleComplete(*a.latestSnapshot()));
+}
+
+// C2: stop after composition and after image allocation. Actual chunk bodies,
+// reservations, image bytes and admission must all be released, exactly once.
+TEST_F(SourceController, RunningCancellationStopsAtCheckpointAndReleasesResources) {
+    for (int stopAt : {2, 4}) {
+        SCOPED_TRACE(stopAt);
+        QObject consumer;
+        auto in = input();
+        const auto key = in.key;
+        std::weak_ptr<const StoredChunk> chunk = in.chunks.front();
+        const size_t baseline = cache->committedCpuBytes();
+        const size_t chunkBytes = in.chunks.front()->bytes;
+        int checkpoints = 0, completions = 0, freed = 0;
+        const auto connection = QObject::connect(cache.get(), &SpanSourceCache::capacityFreed, &consumer, [&] { ++freed; });
+        buildCheckpoint = [&] {
+            if (++checkpoints != stopAt) return;
+            cache->cancelRequests(&consumer);
+            EXPECT_EQ(cache->stats().jobs, 1u);
+            EXPECT_EQ(cache->stats().reservedBytes, 1234u);
+            EXPECT_EQ(cache->committedCpuBytes(), baseline + chunkBytes + 1234);
+            EXPECT_FALSE(chunk.expired());
+        };
+        ASSERT_TRUE(cache->request(std::move(in), 0, 1234, &consumer,
+                                  [&](auto, auto) { ++completions; }));
+        store.clear(); // only the job owns the StoredChunk now
+        runFirst();
+        EXPECT_EQ(checkpoints, stopAt); // the build did not proceed to the next phase
+        EXPECT_TRUE(chunk.expired());
+        EXPECT_EQ(cache->stats().jobs, 1u); // no early ledger release
+        drain();
+        EXPECT_EQ(cache->stats().jobs, 0u);
+        EXPECT_EQ(cache->stats().reservedBytes, 0u);
+        EXPECT_EQ(cache->committedCpuBytes(), baseline);
+        EXPECT_EQ(cache->stats().liveBytes, 0);
+        EXPECT_EQ(cache->stats().failures, 0u); // cancellation is not a build failure
+        EXPECT_EQ(completions, 0);
+        EXPECT_EQ(freed, 1);
+        EXPECT_FALSE(cache->find(key));
+        QObject::disconnect(connection);
+        buildCheckpoint = {};
+    }
+}
+
+// C3: cancellation is per consumer, including while a shared job is running.
+TEST_F(SourceController, SharedRunningBuildSurvivesOneConsumersCancellation) {
+    QObject a, b;
+    auto in = input();
+    const auto key = in.key;
+    int calledA = 0, calledB = 0;
+    ASSERT_TRUE(cache->request(in, 0, 100, &a, [&](auto, auto) { ++calledA; }));
+    ASSERT_TRUE(cache->request(in, 0, 100, &b, [&](auto build, auto error) {
+        ++calledB;
+        EXPECT_TRUE(build);
+        EXPECT_TRUE(error.isEmpty());
+    }));
+    beforeBuild = [&] { cache->cancelRequests(&a); };
+    runFirst();
+    beforeBuild = {};
+    drain();
+    EXPECT_EQ(calledA, 0);
+    EXPECT_EQ(calledB, 1);
+    EXPECT_TRUE(cache->find(key));
+    EXPECT_EQ(cache->stats().builds, 1u);
+    EXPECT_EQ(cache->stats().queuedCancels, 0u);
+    EXPECT_EQ(cache->stats().runningCancels, 0u);
+}
+
+TEST_F(SourceController, SharedChartBuildsSurviveOtherChartsTimeframeSwitch) {
+    auto &a = chart();
+    auto &b = chart();
+    view(a);
+    view(b);
+    answerAll();
+    const auto admitted = cache->stats().builds;
+    ASSERT_EQ(cache->stats().jobs, 8u);
+    view(a, 5 * kMinuteMs);
+    EXPECT_EQ(cache->stats().jobs, 8u); // every A key still has B's waiter
+    for (size_t i = 0; i < admitted; ++i) runFirst();
+    drain();
+    EXPECT_TRUE(visibleComplete(*b.latestSnapshot()));
+    EXPECT_EQ(a.stats().staleResults, 0u);
+    settle();
+    EXPECT_TRUE(visibleComplete(*a.latestSnapshot()));
+}
+
+// C4: cancelling old work does not release the already-built picture.
+TEST_F(SourceController, TimeframeSwitchKeepsBuiltFallbackWhileNewBuildsWait) {
+    auto &a = chart();
+    view(a);
+    settle();
+    const auto picture = builds(*a.latestSnapshot(), SpanTier::Visible);
+    ASSERT_FALSE(picture.empty());
+    // Queue a revision of that picture, then leave while it is pending.
+    const auto g = (*picture.begin())->key.generations.front();
+    revise(store, {g.symbol, g.source, g.levelMs, g.startMs}, 2);
+    drain();
+    ASSERT_FALSE(jobs.empty());
+    view(a, 5 * kMinuteMs);
+    answerAll();
+    EXPECT_EQ(builds(*a.latestSnapshot(), SpanTier::Fallback), picture);
+    EXPECT_FALSE(visibleComplete(*a.latestSnapshot()));
+    settle();
+    EXPECT_EQ(builds(*a.latestSnapshot(), SpanTier::RecentTf), picture);
+    EXPECT_TRUE(visibleComplete(*a.latestSnapshot()));
+}
+
+TEST_F(SourceController, ReturningTimeframeKeepsPendingFallbackRebuild) {
+    auto &a = chart();
+    view(a);
+    settle();
+    upload(a, 1ull << 30);
+    view(a, 5 * kMinuteMs);
+    drain(); // 5m chunks remain unanswered
+    a.capacity()->report(1ull << 30, {}, true);
+    a.pollCapacity();
+    drain(); // GPU loss queued two 1m fallback source rebuilds
+    const auto pending = cache->stats().jobs;
+    ASSERT_EQ(pending, 2u);
+    const auto admitted = cache->stats().builds;
+    view(a, kMinuteMs);
+    EXPECT_EQ(cache->stats().jobs, pending); // same keys are now visible again
+    // Deliver before the new view's reconcile as well as across its serial.
+    for (size_t i = 0; i < pending; ++i) runFirst();
+    drain();
+    EXPECT_TRUE(visibleComplete(*a.latestSnapshot()));
+    EXPECT_EQ(a.stats().staleResults, 0u);
+    settle();
+    // The other four spans each need two fresh sources after loss.
+    EXPECT_EQ(cache->stats().builds, admitted + 8);
+}
+
+// C5: queued, already-posted and reentrant completion removal. A replacement
+// for the same key must never be erased by its cancelled predecessor.
+TEST_F(SourceController, CancelledCompletionCannotConsumeSameKeyReplacement) {
+    QObject consumer, otherConsumer;
+    auto in = input();
+    int oldCalls = 0, newCalls = 0, otherCalls = 0;
+    ASSERT_TRUE(cache->request(in, 0, 100, &consumer, [&](auto, auto) { ++oldCalls; }));
+    runFirst(); // completed on worker; owner-thread delivery still pending
+    cache->cancelRequests(&consumer);
+    ASSERT_TRUE(cache->request(in, 0, 100, &consumer, [&](auto build, auto) {
+        ++newCalls;
+        EXPECT_TRUE(build);
+    }));
+    drain(); // old completion must leave the new pending job alone
+    EXPECT_EQ(cache->stats().jobs, 1u);
+    const auto beforeJoin = cache->stats();
+    ASSERT_TRUE(cache->request(in, 0, 100, &otherConsumer, [&](auto build, auto) {
+        ++otherCalls;
+        EXPECT_TRUE(build);
+    }));
+    EXPECT_EQ(cache->stats().builds, beforeJoin.builds);
+    EXPECT_EQ(cache->stats().sharedBuilds, beforeJoin.sharedBuilds + 1);
+    runFirst();
+    drain();
+    EXPECT_EQ(otherCalls, 1);
+    EXPECT_EQ(oldCalls, 0);
+    EXPECT_EQ(newCalls, 1);
+    EXPECT_EQ(cache->stats().jobs, 0u);
+}
+
+TEST_F(SourceController, CompletedBuildCancelledBeforeDeliveryRemainsReusable) {
+    QObject consumer;
+    auto in = input();
+    const auto key = in.key;
+    int completions = 0;
+    ASSERT_TRUE(cache->request(std::move(in), 0, 100, &consumer, [&](auto, auto) { ++completions; }));
+    runFirst(); // every build phase finished; delivery is still queued
+    cache->cancelRequests(&consumer);
+    cache->cancelRequests(&consumer); // cancellation counts jobs, never repeated calls
+    drain();
+    EXPECT_EQ(completions, 0);
+    EXPECT_EQ(cache->stats().queuedCancels, 0u);
+    EXPECT_EQ(cache->stats().runningCancels, 1u);
+    EXPECT_EQ(cache->stats().jobs, 0u);
+    EXPECT_EQ(cache->stats().reservedBytes, 0u);
+    EXPECT_EQ(cache->committedCpuBytes(), 0u);
+    EXPECT_EQ(cache->stats().failures, 0u);
+    EXPECT_EQ(cache->stats().entries, 1u);
+    auto held = cache->find(key);
+    ASSERT_TRUE(held); // a quick return can take the completed LRU entry
+    cache->setMaxBytes(0);
+    EXPECT_EQ(cache->stats().entries, 0u);
+    EXPECT_EQ(cache->find(key), held); // still shared through the weak live registry
+    EXPECT_EQ(cache->stats().builds, 1u);
+}
+
+TEST_F(SourceController, QueuedCancellationReleasesChunkBodiesAndNotifiesCapacity) {
+    QObject consumer;
+    auto in = input();
+    std::weak_ptr<const StoredChunk> chunk = in.chunks.front();
+    int completions = 0, capacitySignals = 0;
+    ASSERT_TRUE(cache->request(std::move(in), 0, 100, &consumer, [&](auto, auto) { ++completions; }));
+    store.clear(); // the queued job is now the sole owner of the body
+    drain();
+    ASSERT_FALSE(chunk.expired());
+    QObject::connect(cache.get(), &SpanSourceCache::capacityFreed, &consumer, [&] { ++capacitySignals; });
+    cache->cancelRequests(&consumer);
+    EXPECT_TRUE(chunk.expired()); // must release now, without running its tombstone
+    EXPECT_EQ(cache->stats().jobs, 0u);
+    EXPECT_EQ(cache->committedCpuBytes(), 0u);
+    EXPECT_EQ(cache->stats().queuedCancels, 1u);
+    EXPECT_EQ(cache->stats().runningCancels, 0u);
+    cache->cancelRequests(&consumer);
+    drain();
+    EXPECT_EQ(capacitySignals, 1);
+    EXPECT_EQ(cache->stats().queuedCancels, 1u);
+    runFirst();
+    drain();
+    EXPECT_EQ(completions, 0);
+    EXPECT_EQ(capacitySignals, 1); // no second release from the tombstone
+}
+
+TEST_F(SourceController, QueuedCancellationRetriesAnotherChartRefusedByAdmission) {
+    makeCache(256ull << 20, 1);
+    auto &a = chart();
+    view(a);
+    answerAll();
+    ASSERT_EQ(cache->stats().jobs, 1u);
+    auto &b = chart();
+    b.setView("BTC-USD", kMinuteMs, double(epoch + 20 * tileMs), double(epoch + 21 * tileMs));
+    answerAll(); // all B inputs present, but A owns the single admission
+    ASSERT_EQ(cache->stats().builds, 1u);
+    ASSERT_FALSE(visibleComplete(*b.latestSnapshot()));
+    const auto reconciles = b.stats().reconciles;
+    a.setView("", 0, 0, 0); // cancels queued A; no worker completion to wake B
+    ASSERT_EQ(cache->stats().jobs, 0u);
+    drain();
+    EXPECT_GT(b.stats().reconciles, reconciles);
+    EXPECT_EQ(cache->stats().jobs, 1u);
+    EXPECT_EQ(cache->stats().builds, 2u);
+    settle();
+    EXPECT_TRUE(visibleComplete(*b.latestSnapshot()));
+}
+
+TEST_F(SourceController, CompletionCanRemoveAnotherWaiterReentrantly) {
+    QObject a, b;
+    auto in = input();
+    int calledA = 0, calledB = 0;
+    ASSERT_TRUE(cache->request(in, 0, 100, &a, [&](auto, auto) {
+        ++calledA;
+        cache->cancelRequests(&b);
+    }));
+    ASSERT_TRUE(cache->request(in, 0, 100, &b, [&](auto, auto) { ++calledB; }));
+    runFirst();
+    drain();
+    EXPECT_EQ(calledA, 1);
+    EXPECT_EQ(calledB, 0);
+    EXPECT_EQ(cache->stats().reservedBytes, 0u);
+}
+
+TEST_F(SourceController, CancelledQueuedClosuresOutliveControllerAndCache) {
+    int started = 0;
+    beforeBuild = [&] { ++started; };
+    view(chart());
+    answerAll();
+    ASSERT_FALSE(jobs.empty());
+    charts.clear();
+    EXPECT_EQ(cache->stats().jobs, 0u);
+    EXPECT_EQ(cache->committedCpuBytes(), 0u);
+    cache.reset();
+    while (!jobs.empty()) runFirst(); // no dereference of the captured, destroyed cache
+    drain();
+    EXPECT_EQ(started, 0);
+    beforeBuild = {};
+}
+
+TEST_F(SourceController, PanKeepsStillNeededPendingKeys) {
+    auto &a = chart();
+    view(a);
+    answerAll();
+    const auto admitted = cache->stats().builds;
+    // Same tile, different view bounds: all pending keys are still needed.
+    a.setView("BTC-USD", kMinuteMs, double(epoch + kMinuteMs), double(epoch + tileMs - kMinuteMs));
+    drain();
+    EXPECT_EQ(cache->stats().builds, admitted);
+    EXPECT_EQ(cache->stats().jobs, admitted);
+    settle();
+    EXPECT_EQ(cache->stats().builds, 10u); // five spans, two sources; none rebuilt
+    EXPECT_TRUE(visibleComplete(*a.latestSnapshot()));
+}
+
+TEST_F(SourceController, OlderSerialBuildWaitersAreRemoved) {
     auto &a = chart();
     view(a, kMinuteMs);
     // Chunks arrive; the 1m builds are queued but not run.
@@ -464,7 +800,7 @@ TEST_F(SourceController, OlderSerialBuildResultsAreDropped) {
     drain();
     const auto serial = a.latestSnapshot()->serial;
     settle();
-    EXPECT_GT(a.stats().staleResults, 0u);
+    EXPECT_EQ(a.stats().staleResults, 0u);
     const auto snapshot = a.latestSnapshot();
     EXPECT_EQ(snapshot->serial, serial);
     EXPECT_EQ(snapshot->tfMs, 5 * kMinuteMs);
@@ -494,7 +830,7 @@ TEST_F(SourceController, BuildSupersededByARevisionIsDroppedForTheNewerOne) {
     ASSERT_TRUE(store.put(key, std::shared_ptr<const SparseColumns>(revised, &revised->columns), revised->state,
                           revised->contentHash));
     settle();
-    EXPECT_GT(a.stats().staleResults, 0u);
+    EXPECT_EQ(a.stats().staleResults, 0u);
     const auto snapshot = a.latestSnapshot();
     EXPECT_EQ(snapshot->serial, serial);
     const auto generation = store.generationOf(key);
@@ -553,8 +889,8 @@ TEST_F(SourceController, ChunksLargerThanTheDecodedBudgetAreFetchedOnce) {
     EXPECT_EQ(store.stats().entries, 0u);
 }
 
-// Review fix 2: a rebuild dropped for an old serial is rejoined on return.
-TEST_F(SourceController, ReturningToATimeframeRejoinsARebuildStartedBeforeLeavingIt) {
+// A cancelled old-serial rebuild is requested afresh on return.
+TEST_F(SourceController, ReturningToATimeframeRestartsACancelledRebuild) {
     auto &a = chart();
     view(a, kMinuteMs);
     settle();
@@ -568,8 +904,8 @@ TEST_F(SourceController, ReturningToATimeframeRejoinsARebuildStartedBeforeLeavin
     drain();
     ASSERT_FALSE(jobs.empty()); // the rebuild is queued
     view(a, 5 * kMinuteMs);
-    settle(); // the rebuild completes under the old serial and is dropped
-    EXPECT_GT(a.stats().staleResults, 0u);
+    settle(); // the old-serial rebuild is cancelled; built content stays retained
+    EXPECT_EQ(a.stats().staleResults, 0u);
     view(a, kMinuteMs);
     settle();
     bool checked = false;
@@ -878,7 +1214,7 @@ TEST_F(SourceController, SmallerBuildsReturnCreditWithoutANewNodeReport) {
 }
 
 // Review fix 7: a refused replacement must not let the obsolete build publish.
-TEST_F(SourceController, SupersededBuildIsNotPublishedWhenTheQueueRefusedItsReplacement) {
+TEST_F(SourceController, SupersededQueuedBuildReleasesAdmissionForItsReplacement) {
     makeCache(256ull << 20, 1);
     auto &a = chart();
     view(a);
@@ -887,12 +1223,13 @@ TEST_F(SourceController, SupersededBuildIsNotPublishedWhenTheQueueRefusedItsRepl
     const ChunkKey key{"BTC-USD", std::string(kChunkSources[0].id), kMinuteMs, epoch / kHourMs * kHourMs};
     revise(store, key, 2);
     drain();
-    ASSERT_EQ(jobs.size(), 1u); // the replacement was refused
+    ASSERT_EQ(cache->stats().jobs, 1u); // the replacement took the released admission slot
+    ASSERT_EQ(jobs.size(), 2u); // old executor closure is an inert tombstone
     auto job = std::move(jobs.front());
     jobs.pop_front();
     job();
     drain();
-    EXPECT_GT(a.stats().staleResults, 0u);
+    EXPECT_EQ(a.stats().staleResults, 0u);
     for (const auto &span : a.latestSnapshot()->spans)
         for (const auto &source : span.sources)
             if (source.build)
@@ -1159,7 +1496,7 @@ TEST_F(SourceController, PlanChangeInvalidatesABuildInFlightBeforeItsNewChunkArr
     }
     for (const auto &span : a.latestSnapshot()->spans)
         if (span.rank.tier == SpanTier::Visible) EXPECT_FALSE(span.complete) << "an obsolete plan built as current";
-    EXPECT_GT(a.stats().staleResults, 0u);
+    EXPECT_EQ(a.stats().staleResults, 0u);
     settle();
     EXPECT_TRUE(visibleComplete(*a.latestSnapshot()));
 }
@@ -1185,35 +1522,45 @@ TEST_F(SourceController, FreedCpuCapacityWakesASuppressedChart) {
     EXPECT_EQ(bPtr->latestSnapshot()->spans.size(), 5u);
 }
 
-// Final round P1: a closed chart's running builds stay in the ledger.
-// (The manual executor is the pause: jobs run only when the test says.)
+// Queued work releases immediately, but a cancelled worker remains in the
+// ledger until it returns and its owner-thread acknowledgement is delivered.
 TEST_F(SourceController, RunningBuildsOfAClosedChartStayInTheLedger) {
     view(chart());
     answerAll();
-    ASSERT_FALSE(jobs.empty()); // A's builds are paused
-    charts.clear();             // A closes; its jobs keep inputs and reservations
-    drain();
-    const size_t jobBytes = cache->committedCpuBytes();
-    ASSERT_GT(jobBytes, 0u);
-    cache->setCpuCeiling(jobBytes); // room for the paused jobs only
-    HeatmapSourceController::Options options;
-    options.sourceEstimateBytes = 1;
-    options.chunkEstimateBytes = 1; // B alone would fit easily
-    options.capacityPollMs = 0;
-    charts.push_back(std::make_unique<HeatmapSourceController>(store, fetcher, *cache, options));
-    auto &b = *charts.back();
-    b.setView("BTC-USD", kMinuteMs, double(epoch + 19 * tileMs), double(epoch + 22 * tileMs)); // three tiles
-    drain();
-    EXPECT_EQ(b.latestSnapshot()->refused.size(), 2u); // only B's keeper next to the jobs
-    EXPECT_GE(cache->committedCpuBytes(), jobBytes);
-    // The jobs finish: their bytes drop and B is woken to admit the rest.
-    while (!jobs.empty()) {
-        auto job = std::move(jobs.front());
-        jobs.pop_front();
-        job();
-    }
-    drain();
-    EXPECT_TRUE(b.latestSnapshot()->refused.empty());
+    ASSERT_FALSE(jobs.empty());
+    HeatmapSourceController *b = nullptr;
+    uint64_t reconciles = 0;
+    beforeBuild = [&] {
+        charts.clear();
+        EXPECT_EQ(cache->stats().jobs, 1u); // only this genuinely started job
+        EXPECT_GT(cache->stats().reservedBytes, 0u);
+        EXPECT_GT(cache->committedCpuBytes(), cache->stats().reservedBytes);
+        drain(); // deliver all releases from A's queued cancels before B exists
+        const size_t jobBytes = cache->committedCpuBytes();
+        cache->setCpuCeiling(jobBytes); // no room beside the cancelled running job
+        HeatmapSourceController::Options options;
+        options.sourceEstimateBytes = 1;
+        options.chunkEstimateBytes = 1; // B alone fits easily after A acknowledges
+        options.capacityPollMs = 0;
+        charts.push_back(std::make_unique<HeatmapSourceController>(store, fetcher, *cache, options));
+        b = charts.back().get();
+        b->setView("BTC-USD", kMinuteMs, double(epoch + 19 * tileMs), double(epoch + 22 * tileMs));
+        drain();
+        EXPECT_EQ(b->latestSnapshot()->refused.size(), 2u); // only its keeper fits
+        EXPECT_GE(cache->committedCpuBytes(), jobBytes);
+        reconciles = b->stats().reconciles;
+    };
+    runFirst();
+    EXPECT_EQ(cache->stats().jobs, 1u); // acknowledgement still queued
+    beforeBuild = {};
+    drain(); // running completion releases capacity and wakes B without another input
+    ASSERT_NE(b, nullptr);
+    EXPECT_GT(b->stats().reconciles, reconciles);
+    EXPECT_TRUE(b->latestSnapshot()->refused.empty());
+    EXPECT_EQ(cache->stats().jobs, 0u); // B's distant chunks remain unanswered
+    charts.clear();
+    EXPECT_EQ(cache->committedCpuBytes(), 0u);
+    settle(); // cancelled executor closures are safe no-ops
 }
 
 // Final round P1: a chart pushed over by another chart's keeper sheds its own
@@ -1292,7 +1639,7 @@ TEST_F(SourceController, ABackfilledChunkChangesTheBuildIdentityBeforeItArrives)
 }
 
 // Last round A: dropping pending spans that share chunks never raises the total
-// (their running jobs keep the keys; the union does not grow).
+// (queued jobs release their keys; shared keys keep their measured size).
 TEST_F(SourceController, DroppingPendingSpansThatShareChunksNeverRaisesTheTotal) {
     makeCache(256ull << 20, 64); // every build is a queued job
     auto &a = chart();
@@ -1302,8 +1649,10 @@ TEST_F(SourceController, DroppingPendingSpansThatShareChunksNeverRaisesTheTotal)
     const size_t before = cache->committedCpuBytes();
     cache->setCpuCeiling(before - 1); // force shedding
     drain();
-    EXPECT_EQ(a.latestSnapshot()->spans.size(), 1u); // shed down to the keeper
-    EXPECT_LE(cache->committedCpuBytes(), before);
+    EXPECT_LT(a.latestSnapshot()->spans.size(), 5u); // cancellation frees enough before reaching the keeper
+    EXPECT_FALSE(a.latestSnapshot()->spans.empty());
+    EXPECT_LE(cache->committedCpuBytes(), cache->cpuCeiling());
+    EXPECT_LT(cache->committedCpuBytes(), before);
 }
 
 // Last round A: a job and a surviving span that share chunks count them once.
@@ -1312,14 +1661,12 @@ TEST_F(SourceController, AJobAndASpanSharingChunksCountThemOnce) {
     view(chart());
     answerAll();
     ASSERT_EQ(jobs.size(), 10u);
-    charts.clear(); // the jobs alone own the chunks now
-    drain();
-    const size_t jobsOnly = cache->committedCpuBytes();
-    ASSERT_GT(jobsOnly, 0u);
-    view(chart()); // the same view: same chunks, joins the same jobs
+    const size_t firstChartAndJobs = cache->committedCpuBytes();
+    ASSERT_GT(firstChartAndJobs, 0u);
+    view(chart()); // same chunks: second chart joins, neither the chunks nor jobs count twice
     drain();
     EXPECT_EQ(cache->stats().jobs, 10u);
-    EXPECT_EQ(cache->committedCpuBytes(), jobsOnly);
+    EXPECT_EQ(cache->committedCpuBytes(), firstChartAndJobs);
 }
 
 // Last round B: a keeper whose jobs exist before its commit still makes the

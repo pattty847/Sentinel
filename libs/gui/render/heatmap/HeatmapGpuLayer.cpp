@@ -695,12 +695,15 @@ QJsonObject HeatmapGpuLayer::state() const {
                     {"snapshotVersion", qint64(snapshot_ ? snapshot_->version : 0)}};
     if (controllerStats_->valid) {
         const auto &c = controllerStats_->stats;
+        const auto cache = service_ ? service_->stats().cache : SpanSourceCache::Stats{};
         out["controllerStats"] = QJsonObject{{"publications", qint64(c.publications)},
                                              {"admissions", qint64(c.admissions)},
                                              {"evictions", qint64(c.evictions)},
                                              {"suppressed", qint64(c.suppressed)},
                                              {"refused", qint64(c.refused)},
                                              {"committedBytes", qint64(c.committedBytes)},
+                                             {"spanQueuedCancels", qint64(cache.queuedCancels)},
+                                             {"spanRunningCancels", qint64(cache.runningCancels)},
                                              {"livePublications", qint64(c.livePublications)},
                                              {"liveComposeMs", c.liveComposeMs},
                                              {"liveIntervalMs", c.liveIntervalMs}};
@@ -810,6 +813,8 @@ QVariantMap HeatmapGpuLayer::metrics() const {
                   {"spanLiveBytes", qlonglong(data.cache.liveBytes)}, {"spanCacheBytes", qulonglong(data.cache.bytes)},
                   {"spanClaimedBytes", qulonglong(data.cache.claimedBytes)},
                   {"spanReservedBytes", qulonglong(data.cache.reservedBytes)},
+                  {"spanQueuedCancels", qulonglong(data.cache.queuedCancels)},
+                  {"spanRunningCancels", qulonglong(data.cache.runningCancels)},
                   {"chunkWantedBytes", qulonglong(data.store.wantedBytes)},
                   {"cpuCommittedBytes", qulonglong(data.committedCpuBytes)}});
     }

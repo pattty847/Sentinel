@@ -216,8 +216,17 @@ lowest-rank prefetch/recent-tf slots of all charts. A process-wide CPU ceiling
 commits its share to a ledger and, above the ceiling, gives up recent-tf,
 prefetch, fallback, then the visible spans farthest from its view centre (they
 draw as loading and are listed in `SpanSet::refused`); its nearest visible span
-always stays. A built source keeps only its open chunks wanted. Results for an
-older serial, or not matching the source's current desired key, are dropped.
+always stays. A built source keeps only its open chunks wanted. Controllers remove
+obsolete build waiters when their view, desired source key or retained slots change.
+Jobs with remaining consumers continue; otherwise queued jobs release their inputs
+and admission immediately, while running jobs stop cooperatively and keep their
+ledger commitments until acknowledgement. Already-built fallback content and
+pending keys still needed by the new view survive a timeframe switch. A build
+completed before observing cancellation remains reusable in the shared cache,
+without a callback to removed waiters. Process-wide cancellation counts appear as
+`controllerStats.spanQueuedCancels` and `controllerStats.spanRunningCancels` in
+`GET /api/v1/heatmap/state`; `SENTINEL_PROBES=heatmap.cache.cancel` logs each batch.
+The running count includes workers finished but still awaiting completion delivery.
 The chunk store never evicts a key some chart wants.
 
 ### Shared heatmap data service (S6a)
