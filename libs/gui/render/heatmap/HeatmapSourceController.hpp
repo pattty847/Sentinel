@@ -189,6 +189,7 @@ public:
     size_t committedCpuBytes() const; // ledger total of every controller plus uncovered jobs
     struct Stats {
         uint64_t builds = 0, hits = 0, sharedBuilds = 0, failures = 0, evictions = 0, pressureDrops = 0;
+        uint64_t queuedCancels = 0, runningCancels = 0; // jobs, process-wide; running includes awaiting delivery
         size_t bytes = 0, entries = 0, jobs = 0; // LRU
         size_t claimedBytes = 0, reservedBytes = 0;
         int64_t liveBytes = 0;

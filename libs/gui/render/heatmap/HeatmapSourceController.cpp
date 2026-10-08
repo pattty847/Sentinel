@@ -415,7 +415,7 @@ SpanSourceBuildPtr SpanSourceCache::find(const SpanSourceKey &key) {
 void SpanSourceCache::cancelRequests(QObject *context, const std::function<bool(const SpanSourceKey &)> &keep) {
     Q_ASSERT(QThread::currentThread() == thread());
     auto &s = *state_;
-    bool released = false;
+    uint64_t queued = 0, running = 0;
     for (auto it = s.pending.begin(); it != s.pending.end();) {
         auto &job = *it->second;
         std::erase_if(job.waiters, [&](const State::Waiter &waiter) {
@@ -430,13 +430,19 @@ void SpanSourceCache::cancelRequests(QObject *context, const std::function<bool(
             s.dropRefs(job.keys);
             s.reservedBytes -= job.reserved;
             --s.spanJobs;
-            released = true;
+            ++queued;
+        } else if (expected == State::Job::Running) {
+            ++running; // includes a finished worker awaiting owner-thread delivery
         }
         // Running jobs keep their resources until acknowledgement. Removing the
         // lookup now lets a new request for this very key start independently.
         it = s.pending.erase(it);
     }
-    if (released) {
+    s.stats.queuedCancels += queued;
+    s.stats.runningCancels += running;
+    if (queued || running)
+        sLog_Probe("heatmap.cache.cancel", "queued=" << queued << " running=" << running);
+    if (queued) {
         freed();
         emit settled();
     }
@@ -486,14 +492,15 @@ bool SpanSourceCache::request(SpanSourceInput input, int priority, size_t reserv
             --s.spanJobs;
             s.reservedBytes -= job->reserved;
             s.dropRefs(job->keys);
-            if (job->cancelled.load(std::memory_order_relaxed)) build.reset();
-            else if (build) {
+            // Cancellation removes waiters, not useful completed work. A worker
+            // that finished before observing the flag still warms the shared cache.
+            if (build) {
                 s.uploaded.erase(key); // a new image (a rebuild after a loss)
                 s.lru.insert(key, build, build->bytes);
                 s.live[key] = build;
                 s.hints[{key.span, key.source}] = {build->bytes, build->uploadBytes};
                 if (s.hints.size() > 16384) s.hints.clear(); // size hints only; rebuilt on demand
-            } else {
+            } else if (!job->cancelled.load(std::memory_order_relaxed)) {
                 ++s.stats.failures;
             }
             // Keep the job discoverable during delivery: a callback may remove
