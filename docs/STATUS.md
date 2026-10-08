@@ -25,6 +25,7 @@ The owner's `ma-panel` (local plugin) shows live workflow state; this session re
   near/deep mismatches 0, setup/comparison failures 0, lag 0.9 s; primary queue drops and disk errors 0.
   Global invalidations are 30 and cumulative; they are not a parity signal.
   Rollback: `scripts/dev/deploy-runtime.sh rollback server`, or `roller_shadow.enabled: false` and redeploy.
+- **Expected CPU sawtooth (checked 2026-10-07):** the shadow roller's hourly comparison re-rolls the current UTC day from midnight as its oracle (`ShadowRoller.cpp` ~935), 7 products in sequence, so each check runs 15 s at 00Z up to ~170 s at 23Z at ~0.85 core, resets at UTC midnight, and drifts a few minutes later each hour (the next check waits an hour after the last finishes). About 2% of a core averaged. Goes away with the primary recorder (D-b2b/slice E). Not a leak.
 - **Known limit:** the legacy cent-scale primary format rejects prices below $0.005 (PEPE, low DOGE levels).
   Slice D must serve the product-aware roller grids, not this format. Live aggregation uses a fixed band: an
   out-of-band best price invalidates it until the next upstream snapshot (recording continues).
