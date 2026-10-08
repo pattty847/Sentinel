@@ -156,6 +156,13 @@ target_include_directories(test_heatmap_tile_node PRIVATE ${CMAKE_SOURCE_DIR}/li
 target_link_libraries(test_heatmap_tile_node PRIVATE sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::Quick)
 add_test(NAME HeatmapTileNodeTests COMMAND test_heatmap_tile_node)
 set_tests_properties(HeatmapTileNodeTests PROPERTIES LABELS "render;heatmap")
+# Palette sampling endpoints and CPU/display/intensity shader formula parity.
+add_executable(test_heatmap_palette test_heatmap_palette.cpp)
+target_include_directories(test_heatmap_palette PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_heatmap_palette PRIVATE sentinel_heatmap_gpu GTest::gtest_main Qt6::Core)
+target_compile_definitions(test_heatmap_palette PRIVATE SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+add_test(NAME HeatmapPaletteTests COMMAND test_heatmap_palette)
+set_tests_properties(HeatmapPaletteTests PROPERTIES LABELS "render;heatmap")
 # S5L-c: the live edge in the node (draw clip E/L vs the composed oracle, partial
 # column, rollover coverage, held/fading retention, no buffer churn, disconnect).
 add_executable(test_heatmap_live_node test_heatmap_live_node.cpp)

@@ -91,7 +91,7 @@ void main() {
     adjusted = clamp((adjusted - 0.5) * contrast + 0.5, 0.0, 1.0);
     
     // Map to palette: bids use 0.0-0.5, asks use 0.5-1.0
-    float u = mix(adjusted * 0.49, 0.51 + adjusted * 0.49, isAsk);
+    float u = mix((0.5 + adjusted * 255.0) / 512.0, (256.5 + adjusted * 255.0) / 512.0, isAsk);
 
     vec4 color = texture(paletteTex, vec2(u, 0.5));
     fragColor = vec4(color.rgb, color.a * params.x);
