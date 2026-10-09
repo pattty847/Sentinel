@@ -227,6 +227,7 @@ void UnifiedGridRenderer::advanceAxisGlide(AxisGlide& g, bool time, const chart_
     g.deadlineMs = std::min(cap, std::max(g.deadlineMs, now + chart_raster::kZoomGlideMs / 2));
     g.startMs = now;
     g.progress = 0.0;
+    ++m_glideRebases;
     if (time) m_glideColPx = g.end.colPx;
     else m_glideRow = {g.end.tick, g.end.rowPx};
     sLog_Probe("zoom.glide", "rebased " << (time ? "time" : "price") << " to colPx=" << g.end.colPx << " rowPx="

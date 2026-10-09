@@ -606,7 +606,7 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
                 break;
               }
             end = e;
-            m_followPadding = FollowPadding{e - newLiveEnd, span, tf};
+            m_followPadding = FollowPadding{e - newLiveEnd, e - span, e, tf};
           }
         }
       } else if (rightFrac) {
@@ -879,12 +879,22 @@ bool UnifiedGridRenderer::rasterPanShift(QPointF drag, qint64& timeShiftMs, doub
   auto viewport = FrameContextBuilder::viewportSnapshot(m_viewState.get());
   viewport.dragging = false; // the committed view; panShift applies the drag
   const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
-  const auto in = rasterInputs(viewport, m_gpuLayer->tickPrice(), width(), height(), dpr);
   chart_raster::RasterStep previous;
   {
     std::lock_guard<std::mutex> lock(m_frameContextMutex);
     previous = m_rasterStep;
   }
+  // An axis that glides is committed against its fixed end (its tick and whole pixels,
+  // the predicted tick before it commits): the committed view then reproduces the end
+  // translated by the dragged pixels (endPanAt moves the end by them). An axis at rest
+  // uses the rest camera.
+  double tick = m_gpuLayer->tickPrice();
+  if (m_glidePrice.active && m_glidePrice.end.valid) {
+    tick = m_glidePrice.end.tick;
+    previous.rowPx = m_glidePrice.end.rowPx;
+  }
+  if (m_glideTime.active && m_glideTime.end.valid) previous.colPx = m_glideTime.end.colPx;
+  const auto in = rasterInputs(viewport, tick, width(), height(), dpr);
   int64_t time = 0;
   if (!chart_raster::panShift(in, previous, drag, time, priceShift)) return false;
   timeShiftMs = time;
@@ -908,7 +918,11 @@ void UnifiedGridRenderer::followGpuLiveTo(int64_t openEnd) {
   const int64_t liveEnd = recording::floorDiv(openEnd + tf - 1, tf) * tf;
   // The padding a timeframe switch kept (the Now column where it was drawn), while the
   // span and timeframe are the switch's; else the nominal one.
-  const bool kept = m_followPadding && m_followPadding->spanMs == span && m_followPadding->tfMs == tf;
+  // Only while the view is still the placement the switch made (follow updates move it
+  // along); any other write of the time window (return to live, reset, the API, an
+  // explicit view, a pan) is a new placement with the nominal padding.
+  const bool kept = m_followPadding && m_followPadding->startMs == start && m_followPadding->endMs == end &&
+                    m_followPadding->tfMs == tf;
   const int64_t pad = kept ? m_followPadding->padMs
                            : std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(span) *
                                                                          m_autoScrollPaddingFrac));
@@ -926,6 +940,10 @@ void UnifiedGridRenderer::followGpuLiveTo(int64_t openEnd) {
     g.anchorTime += double(shift);
   }
   setGpuViewportSelf(start + shift, end + shift, m_viewState->getMinPrice(), m_viewState->getMaxPrice());
+  if (kept) { // the follow update keeps the switch's placement
+    m_followPadding->startMs = m_viewState->getVisibleTimeStart();
+    m_followPadding->endMs = m_viewState->getVisibleTimeEnd();
+  }
   emit liveRenderTick();
 }
 

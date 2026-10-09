@@ -195,13 +195,16 @@ private:
         double progress = 1.0; // eased, for the frame being prepared
     };
     AxisGlide m_glideTime, m_glidePrice;
+    int m_glideRebases = 0; // diagnostics and tests
     // The rungs the glides go to: rapid clicks step on from here.
     int m_glideColPx = 0;
     chart_raster::RowRung m_glideRow;
     // Following live after a timeframe switch that kept the Now column: the padding the
-    // follow-live updates keep (for that span and timeframe), not the nominal one.
+    // follow-live updates keep, not the nominal one, for as long as the time window is the
+    // placement the switch made (follow updates move it along; any other write of the
+    // window ends it).
     struct FollowPadding {
-        int64_t padMs = 0, spanMs = 0, tfMs = 0;
+        int64_t padMs = 0, startMs = 0, endMs = 0, tfMs = 0;
     };
     std::optional<FollowPadding> m_followPadding;
     bool m_zoomGesture = false;         // a pinch or trackpad scroll draws the continuous camera
@@ -500,6 +503,7 @@ public:
     bool zoomGliding() const { return m_glideTime.active || m_glidePrice.active; }
     bool timeGliding() const { return m_glideTime.active; }
     bool priceGliding() const { return m_glidePrice.active; }
+    int glideRebasesForTest() const { return m_glideRebases; }
     // Tests: a follow-live update for a live open end (the fixtures have no live feed).
     void followLiveForTest(qint64 openEndMs) { followGpuLiveTo(openEndMs); }
     bool zoomGesturing() const { return m_zoomGesture; }

@@ -2759,6 +2759,109 @@ TEST_F(UgrGpu, FollowLiveSwitchThatChangesTheColumnWidthLaysOutAtTheNominalEnd) 
     }
 }
 
+// ---------------------------------------------------------------- A2 fix round 3
+// Fix round 3, gap 1: a drag released before the target's Auto tick commits. The price
+// glide's end is at the predicted tick ($2 rows) while the frame still draws the old one;
+// the pan commit is solved against that end, so the landed view is the undragged one
+// moved by exactly the dragged 160 device px, with no rebase and the same landing time.
+TEST_F(UgrGpu, APanReleasedBeforeThePredictedTickCommitsMovesTheEndExactly) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    view->setAutoPriceScale(false);
+    const int64_t s = epoch + 120 * minute, e = s + 4 * minute;
+    auto wide = [&] {
+        view->setRasterAnchor(1.0, 0.5);
+        ugr->setViewport(s, e, 99'000, 101'000);
+        return settle();
+    };
+    // Astra's case: $5 rows of 6 px (1.2 px/$) at the bottom of the near band; a click
+    // near the bottom targets $2 rows of 3 px (1.5 px/$), which the old $5 tick draws at
+    // 8 px (1.6 px/$) until the tick commits. The target moved 160 px up in price stays
+    // inside the band.
+    const double startLo = 99'835, startHi = startLo + 320.0 * 5 / 6, oldTick = 5, clickY = 310;
+    ASSERT_TRUE(wide()) << error.toStdString();
+    view->setRasterAnchor(1.0, 0.5);
+    ugr->setViewport(s, e, startLo, startHi);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ASSERT_EQ(drawn().tick, oldTick);
+    ASSERT_EQ(drawn().rowPx, 6);
+    const auto cam0 = drawn();
+    const chart_raster::RowRung target = chart_raster::rowRung(
+        {cam0.tick, cam0.rowPx}, 1, cam0.heightDev, view->minPriceSpan(), view->maxPriceSpan(),
+        tickOver(s, e, cam0.priceAtYDev(clickY * cam0.dpr), clickY / 320));
+    ASSERT_EQ(target, (chart_raster::RowRung{2.0, 3}));
+    ASSERT_EQ(chart_raster::stepPixels(320.0 * 5 / (320.0 * 2 / 3), 6), 8) << "the old tick draws the target at 8 px";
+    manualZoomClock();
+    struct Landed { chart_raster::RasterCamera cam; qint64 ms = -1; int rebases = 0; };
+    auto run = [&](bool drag) {
+        Landed out;
+        if (!wide()) return out;
+        view->setRasterAnchor(1.0, 0.5);
+        ugr->setViewport(s, e, startLo, startHi);
+        if (!settle() || drawn().tick != oldTick) return out;
+        const qint64 t0 = clockMs;
+        const int rebases = ugr->glideRebasesForTest();
+        ugr->zoomPriceClicks(1, clickY);
+        if (drag) { // before any frame: the predicted tick is pending
+            ugr->beginPanAt(320, 60);
+            ugr->updatePanAt(320, 220); // 160 px down
+            ugr->endPanAt();
+        }
+        for (qint64 ms = 50; ms <= 400; ms += 10) {
+            if (!frameAt(t0 + ms)) return out;
+            if (!ugr->priceGliding()) {
+                out.ms = ms;
+                break;
+            }
+        }
+        out.cam = drawn();
+        out.rebases = ugr->glideRebasesForTest() - rebases;
+        return out;
+    };
+    const Landed plain = run(false), dragged = run(true);
+    ASSERT_GE(plain.ms, 0) << error.toStdString();
+    ASSERT_GE(dragged.ms, 0) << error.toStdString();
+    EXPECT_EQ(dragged.cam.tick, target.tick);
+    EXPECT_EQ(dragged.cam.rowPx, target.rowPx);
+    EXPECT_EQ(dragged.cam.topRowIndex, plain.cam.topRowIndex + 160) << "the end moved by exactly the dragged 160 px";
+    EXPECT_EQ(dragged.rebases, 0) << "the release is a translation, not a retarget";
+    EXPECT_EQ(dragged.ms, plain.ms) << "the glide timing is unchanged";
+}
+
+// Fix round 3, gap 2: the padding a timeframe switch kept lives only as long as its
+// placement. 1m, 4 columns (C = 160) following at the nominal padding; one Right step
+// (24 s, still following); 5m keeps the Now column (420 s of padding); follow off and on
+// returns to the nominal end (300 s), and the next unchanged live update leaves it there
+// (the kept 420 s would have shifted it by a whole bucket, 160 px).
+TEST_F(UgrGpu, AReturnToLiveEndsTheKeptFollowPadding) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(pump(10'000, [&] { return layer().liveAnchorMs() > 0; })) << "the recording's availability";
+    const int64_t anchor = layer().liveAnchorMs();
+    const int64_t liveEnd = (anchor + minute - 1) / minute * minute;
+    ugr->getViewState()->setRasterAnchor(1.0, 0.5);
+    ugr->setViewport(liveEnd + minute - 4 * minute, liveEnd + minute, 99'900, 100'300);
+    ugr->enableAutoScroll(true);
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    ASSERT_EQ(drawn().colPx, 160);
+    ugr->panRight();
+    ASSERT_TRUE(ugr->autoScrollEnabled()) << "a Right step keeps following";
+    ASSERT_EQ(ugr->getViewState()->getVisibleTimeEnd(), liveEnd + minute + 24'000);
+    ugr->setTimeframe(int(5 * minute));
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    ASSERT_EQ(drawn().colPx, 160);
+    const int64_t liveEnd5 = (anchor + 5 * minute - 1) / (5 * minute) * (5 * minute);
+    ASSERT_EQ(ugr->getViewState()->getVisibleTimeEnd() - liveEnd5, 420'000) << "the Now column kept";
+    ugr->enableAutoScroll(false);
+    ugr->enableAutoScroll(true);
+    const int64_t nominal = ugr->getViewState()->getVisibleTimeEnd();
+    ASSERT_EQ(nominal - liveEnd5, 5 * minute) << "back at the nominal live end";
+    ugr->followLiveForTest(anchor);
+    EXPECT_EQ(ugr->getViewState()->getVisibleTimeEnd(), nominal) << "the next live update moved it";
+}
+
 // ---------------------------------------------------------------- A2 fix round 2
 // The sources that can change a glide's end, one row each (the contracts are in
 // docs/ARCHITECTURE.md, smooth zoom). The fixture for most: auto price off, a click in
