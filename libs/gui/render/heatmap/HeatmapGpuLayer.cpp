@@ -137,6 +137,7 @@ void HeatmapGpuLayer::destroyController() {
 void HeatmapGpuLayer::setSymbol(const std::string &symbol) {
     if (symbol_ == symbol) return;
     symbol_ = symbol;
+    autoPriceTick_.reset();
     invalidateTickProposal();
     lastLiveEndMs_ = 0;
     resetLabels(true); // the old symbol's labels never draw on the new picture
@@ -149,6 +150,7 @@ void HeatmapGpuLayer::setSymbol(const std::string &symbol) {
 void HeatmapGpuLayer::setTimeframeMs(int64_t tfMs) {
     if (tfMs <= 0 || tfMs_ == tfMs) return;
     tfMs_ = tfMs;
+    autoPriceTick_.reset();
     invalidateTickProposal();
     autoUnits_ = 0;
     restoreTick(); // Manual: this timeframe's remembered tick
@@ -291,6 +293,7 @@ void HeatmapGpuLayer::postLiveInterval() {
 void HeatmapGpuLayer::onSnapshot() {
     if (!controller_) return;
     snapshot_ = controller_->latestSnapshot();
+    resolution_ = controller_->latestResolution();
     if (!snapshot_) return;
     refreshPresets();
     noteLimits(); // the price scale may have changed
@@ -299,6 +302,7 @@ void HeatmapGpuLayer::onSnapshot() {
 
 void HeatmapGpuLayer::onLive() {
     if (!controller_) return;
+    resolution_ = controller_->latestResolution();
     live_ = controller_->latestLive();
     if (live_ && live_->version != lastLiveVersion_) {
         lastLiveVersion_ = live_->version;
@@ -353,6 +357,8 @@ void HeatmapGpuLayer::refreshPresets() {
 int64_t HeatmapGpuLayer::chooseTick(const ViewWindow &view) {
     if (!snapshot_ || snapshot_->tfMs != tfMs_ || snapshot_->symbol != symbol_) return tickUnits_; // nothing built yet
     if (manualMode_) return isPresetUnits(manualUnits_) ? manualUnits_ : tickUnits_;
+    if (autoPriceTick_) return autoUnits_ = *autoPriceTick_;
+
     // Auto: the history summary merged with the live window's columns (S5L-b
     // latestResolution(); a live revision never replaces the SpanSet).
     const ResolutionSummary &summary = resolution_ && resolution_->tfMs == tfMs_ ? *resolution_ : snapshot_->resolution;
@@ -423,10 +429,26 @@ void HeatmapGpuLayer::commitProposedTick() {
 int64_t HeatmapGpuLayer::predictTickUnits(const ViewWindow &view) const {
     if (!snapshot_ || snapshot_->tfMs != tfMs_ || snapshot_->symbol != symbol_ || !priceKnown_) return tickUnits_;
     if (manualMode_) return isPresetUnits(manualUnits_) ? manualUnits_ : tickUnits_;
+    if (autoPriceTick_) return *autoPriceTick_;
+
     const ResolutionSummary &summary = resolution_ && resolution_->tfMs == tfMs_ ? *resolution_ : snapshot_->resolution;
     const int64_t units = autoTickUnits(summary, autoUnits_, view.timeLoMs, view.timeHiMs, view.priceLo, view.priceHi,
                                         heightPx_ * dpr_, {settings_.minRowPx, settings_.hysteresis});
     return units > 0 ? units : autoUnits_ > 0 ? autoUnits_ : tickUnits_;
+}
+
+bool HeatmapGpuLayer::buildsTick(int64_t units, const ViewWindow &candidate) const {
+    if (!snapshot_ || snapshot_->tfMs != tfMs_ || snapshot_->symbol != symbol_) return false;
+    const auto &summary = resolution_ && resolution_->tfMs == tfMs_ ? *resolution_ : snapshot_->resolution;
+    return buildsInView(summary, units, candidate.timeLoMs, candidate.timeHiMs, candidate.priceLo, candidate.priceHi);
+}
+
+bool HeatmapGpuLayer::setAutoPriceTick(std::optional<int64_t> units) {
+    if (autoPriceTick_ == units) return false;
+    autoPriceTick_ = units;
+    tickKey_ = {};
+    invalidateTickProposal(); // an older frame's proposal belongs to another raw fit
+    return true;
 }
 
 bool HeatmapGpuLayer::prepareFrame(HeatmapTileNode::Frame &frame, const QRectF &rect, const ViewWindow &view,

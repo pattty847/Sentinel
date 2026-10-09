@@ -211,7 +211,6 @@ private:
     bool m_zoomGesture = false;         // a pinch or trackpad scroll draws the continuous camera
     // The axes the gesture has zoomed (the others stay the rest camera's whole pixels).
     bool m_gestureTime = false, m_gesturePrice = false;
-    double m_gestureBaseTimeSpan = 0, m_gestureBasePriceSpan = 0;
     QPointF m_gestureAt;
     QTimer* m_zoomSettleTimer = nullptr; // a gesture settles after a pause (a lost end included)
     std::function<qint64()> m_zoomClock;
@@ -249,7 +248,7 @@ private:
     void followGpuLiveTo(int64_t openEnd);
     // Moves the stored view to a rung about a drawn point (fracX/fracY of the item).
     bool setZoomRung(const chart_raster::RasterCamera& drawn, double fracX, double fracY, bool time, int colPx,
-                     bool price, chart_raster::RowRung row, int autoDirection, double previousPriceSpan);
+                     bool price, chart_raster::RowRung row);
     // The tick the chart would draw a price span with, in the time window [start, end)
     // and about anchorPrice at fracY (Auto's rule and state, or the Manual tick).
     chart_raster::TickAt tickPredictor(qint64 start, qint64 end, double anchorPrice, double fracY) const;
@@ -634,16 +633,7 @@ private:
     // camera's drawn time window (current anchor, or anchorFracX when the caller sets
     // one with this change; DPR, column hysteresis).
     std::optional<std::pair<double, double>> gpuFitPriceWindow(qint64 start, qint64 end, bool candlesOnly,
-                                                               std::optional<double> anchorFracX = std::nullopt,
-                                                               bool rasterize = true) const;
-    struct SolvedZoomFit {
-        qint64 start = 0, end = 0, tf = 0;
-        uint64_t placement = 0;
-        int widthDev = 0, heightDev = 0;
-        std::pair<double, double> raw;
-        chart_raster::AutoPriceFit fit;
-    };
-    std::optional<SolvedZoomFit> m_solvedZoomFit;
+                                                               std::optional<double> anchorFracX = std::nullopt);
     std::pair<double, double> drawnTimeWindow(qint64 start, qint64 end,
                                               std::optional<double> anchorFracX = std::nullopt) const;
     // GridViewState's price fit while auto price scale is on. 
