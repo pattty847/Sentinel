@@ -291,10 +291,10 @@ void TpoOverlayRenderer::rebuildSession(Session& session, const LayoutKey& key, 
     const double cellH = key.cellH;
     const float gapX = cellW >= 6.0 ? 1.0f : 0.0f;
     const float gapY = cellH >= 6.0 ? 1.0f : 0.0f;
-    const auto edge = [&key](double logical) {
-        return key.free ? logical : std::round(logical * key.dpr) / key.dpr;
+    const auto edge = [&key](double logical, bool snap) {
+        return snap ? std::round(logical * key.dpr) / key.dpr : logical;
     };
-    const float minCell = static_cast<float>(key.free ? 1.0 : std::ceil(key.dpr) / key.dpr);
+    const float minCell = static_cast<float>(1.0 / key.dpr);
     const int group = profile.group();
 
     int lastPeriod = -1;
@@ -324,9 +324,9 @@ void TpoOverlayRenderer::rebuildSession(Session& session, const LayoutKey& key, 
 
     if (pocBar) {
         const double top = rowTop(va.poc);
-        writeQuad(v + written, 0.0f, static_cast<float>(edge(top)),
-                  static_cast<float>(edge((lastPeriod + 1) * periodPx)),
-                  static_cast<float>(edge(top + cellH)), tpo::pocBarColor(style.theme));
+        writeQuad(v + written, 0.0f, static_cast<float>(edge(top, key.snapY)),
+                  static_cast<float>(edge((lastPeriod + 1) * periodPx, key.snapX)),
+                  static_cast<float>(edge(top + cellH, key.snapY)), tpo::pocBarColor(style.theme));
         written += 6;
     }
 
@@ -336,16 +336,16 @@ void TpoOverlayRenderer::rebuildSession(Session& session, const LayoutKey& key, 
             continue;
         }
         const double top = rowTop(row);
-        const float y0 = static_cast<float>(edge(top));
-        const float y1 = static_cast<float>(edge(top + cellH - gapY));
+        const float y0 = static_cast<float>(edge(top, key.snapY));
+        const float y1 = static_cast<float>(edge(top + cellH - gapY, key.snapY));
         const float cy = static_cast<float>(top + cellH * 0.5);
         const bool inVa = va.contains(row);
         const bool poc = row == va.poc;
         int k = 0;
         profile.forEachPeriod(row, [&](int period) {
             const double left = split ? period * periodPx : k * cellW;
-            const float x0 = static_cast<float>(edge(left));
-            const float x1 = static_cast<float>(edge(left + cellW - gapX));
+            const float x0 = static_cast<float>(edge(left, key.snapX));
+            const float x1 = static_cast<float>(edge(left + cellW - gapX, key.snapX));
             const tpo::Rgba color = tpo::cellColor(style.theme, period, session.periods, inVa, poc);
             if (written + 6 <= session.cellCapacity) {
                 writeQuad(v + written, x0, y0, std::max(x0 + minCell, x1), std::max(y0 + minCell, y1), color);
@@ -429,7 +429,7 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
                                 bool drawTpo,
                                 const ChartTextAtlas& atlas,
                                 bool atlasReady,
-                                const chart_raster::RasterCamera& camera, double dpr,
+                                const chart_raster::RasterCamera& camera, double dpr, bool snapX, bool snapY,
                                 const QRectF& surfaceBounds) {
     if (!window || !parentNode) {
         return;
@@ -454,9 +454,8 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
     const auto mapping = chart_raster::toMapping(camera);
     const double viewStartMs = mapping.viewStartMs, viewEndMs = mapping.viewEndMs;
     const double scale = std::isfinite(dpr) && dpr > 0 ? dpr : 1.0;
-    const bool free = camera.free;
-    const auto edge = [scale, free](double logical) {
-        return free ? logical : std::round(logical * scale) / scale;
+    const auto edge = [scale](double logical, bool snap) {
+        return snap ? std::round(logical * scale) / scale : logical;
     };
     const bool viewValid = mapping.valid && viewEndMs > viewStartMs &&
         !surfaceBounds.isEmpty() && m_grid.tick > 0.0;
@@ -558,7 +557,8 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
         key.cellW = cellW;
         key.cellH = cellH;
         key.dpr = scale;
-        key.free = free;
+        key.snapX = snapX;
+        key.snapY = snapY;
         key.layout = style.layout;
         key.theme = style.theme;
         key.text = textAvailable && fontPx >= kTextHiddenPx;
@@ -574,8 +574,8 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
             // Keep the profile readable while its session is on screen.
             anchorX = std::max(startX, std::min(surfaceBounds.left(), endX - session.profileWidthPx));
         }
-        const double tx = edge(anchorX);
-        const double ty = edge(anchorY);
+        const double tx = edge(anchorX, snapX);
+        const double ty = edge(anchorY, snapY);
         if (tx != session.lastTx || ty != session.lastTy) {
             QMatrix4x4 matrix;
             matrix.translate(static_cast<float>(tx), static_cast<float>(ty));

@@ -3,6 +3,7 @@
 
 #include "SentinelLogging.hpp"
 #include "render/FrameContextBuilder.hpp"
+#include "render/CandlePixelGeometry.hpp"
 #include "render/VolumeProfileState.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
 #include "render/heatmap/HeatmapTileNode.hpp"
@@ -57,13 +58,14 @@ void UnifiedGridRenderer::renderTradeOverlays(
     VolumeProfileState::Snapshot localSnap;
     m_vpRenderer.drainPending(localBins, localSnap);
 
+    const auto snap = candle_pixels::axisSnap(frame.raster);
     m_vpRenderer.render(parent,
                         m_volumeProfileLayerEnabled && !localBins.empty(),
                         frame.surfaceBounds,
                         frame.mapping.viewMinPrice,
                         frame.mapping.viewMaxPrice,
                         localBins,
-                        localSnap, frame.surfaceDpr, frame.raster.free);
+                        localSnap, frame.surfaceDpr, snap.y);
 
     // TPO uses the same drawn camera, including fractional glide time.
     m_tpoOverlay.render(window(),
@@ -71,7 +73,7 @@ void UnifiedGridRenderer::renderTradeOverlays(
                         drawTpo,
                         m_chartTextAtlas,
                         m_chartTextAtlasBuilt,
-                        frame.raster, frame.surfaceDpr, frame.surfaceBounds);
+                        frame.raster, frame.surfaceDpr, snap.x, snap.y, frame.surfaceBounds);
 }
 
 // ── GPU heatmap (S6b) ─────────────────────────────────────────────────────────

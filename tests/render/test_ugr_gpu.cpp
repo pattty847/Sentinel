@@ -64,9 +64,10 @@ QSGNode *paintRoot(QQuickItem *item) { return QQuickItemPrivate::get(item)->pain
 // device edges rather than the former round-to-nearest candle rasterization.
 candle_pixels::Body bodyForFrame(const MappingFrameContext& frame, double bucket, double open, double close) {
     const auto& mapping = frame.mapping;
+    const auto snap = candle_pixels::axisSnap(frame.raster);
     return candle_pixels::body(mapping.timeToScreenX(bucket), mapping.timeToScreenX(bucket + mapping.appendMs),
                                mapping.priceToScreenY(open), mapping.priceToScreenY(close),
-                               frame.surfaceDpr, frame.raster.free);
+                               frame.surfaceDpr, snap.x, snap.y);
 }
 void expectBodyRows(int top, int bottomExclusive, const candle_pixels::Body& expected, double dpr) {
     EXPECT_EQ(top, int(std::lround(expected.y.lo * dpr))) << "candle body top at this frame's rows";

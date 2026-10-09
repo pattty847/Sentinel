@@ -51,7 +51,7 @@ public:
     QSGVertexColorMaterial* wickMaterial = nullptr;
     QSGVertexColorMaterial* bodyMaterial = nullptr;
     int wickCapacity = 0, bodyCapacity = 0;
-    bool cameraFree = false;
+    candle_pixels::AxisSnap snap;
     double surfaceDpr = 0;
     void setCounts(int wickCount, int bodyCount) {
         candle_pixels::setGeometryCount(*wickGeometry, wickCapacity, wickCount);
@@ -354,9 +354,10 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
 
     const MappingFrameContext frame = m_mappingProvider->currentFrameContext();
     const TimeAxisMapping mapping = frame.mapping;
-    if (mappingChanged(mapping, m_lastMapping) || root->cameraFree != frame.raster.free ||
+    const auto snap = candle_pixels::axisSnap(frame.raster);
+    if (mappingChanged(mapping, m_lastMapping) || root->snap != snap ||
         root->surfaceDpr != frame.surfaceDpr) {
-        root->cameraFree = frame.raster.free;
+        root->snap = snap;
         root->surfaceDpr = frame.surfaceDpr;
         m_lastMapping = mapping;
         m_geometryDirty = true;
@@ -583,15 +584,14 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         const double xEnd = mapping.timeToScreenX(static_cast<double>(c.timeStartMs) + mapping.appendMs);
         const double candleW = xEnd - x;
         const double centerX = x + candleW * 0.5;
-        const bool free = frame.raster.free;
         const double yOpen = mapping.priceToScreenY(c.open);
         const double yClose = mapping.priceToScreenY(c.close);
-        const auto body = candle_pixels::body(x, xEnd, yOpen, yClose, dpr, free);
+        const auto body = candle_pixels::body(x, xEnd, yOpen, yClose, dpr, snap.x, snap.y);
         const float bodyX0 = body.x.lo, bodyX1 = body.x.hi;
         const float bodyY0 = body.y.lo, bodyY1 = body.y.hi;
         const float bodyWidth = bodyX1 - bodyX0;
 
-        const auto wickSpan = free
+        const auto wickSpan = !snap.x
             ? candle_pixels::Span{float(centerX - m_wickWidth * 0.5 / dpr),
                                   float(centerX + m_wickWidth * 0.5 / dpr)}
             : candle_pixels::stroke(centerX, m_wickWidth, dpr);

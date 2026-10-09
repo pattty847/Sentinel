@@ -163,7 +163,7 @@ void VolumeProfileRenderer::render(QSGNode* parentNode,
                                    double viewMaxPrice,
                                    const std::vector<float>& bins,
                                    const VolumeProfileState::Snapshot& snap,
-                                   double dpr, bool free) {
+                                   double dpr, bool snapY) {
     if (!parentNode) {
         return;
     }
@@ -175,7 +175,7 @@ void VolumeProfileRenderer::render(QSGNode* parentNode,
     }
 
     ensureNodes(parentNode);
-    rebuildGeometry(drawRect, viewMinPrice, viewMaxPrice, bins, snap, dpr, free);
+    rebuildGeometry(drawRect, viewMinPrice, viewMaxPrice, bins, snap, dpr, snapY);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -242,13 +242,13 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
                                              double viewMaxPrice,
                                              const std::vector<float>& bins,
                                              const VolumeProfileState::Snapshot& snap,
-                                   double dpr, bool free) {
+                                   double dpr, bool snapY) {
     const int n = static_cast<int>(bins.size());
     if (n == 0) return;
 
     const double scale = std::isfinite(dpr) && dpr > 0 ? dpr : 1.0;
-    const auto edge = [scale, free](double y) {
-        if (free) return y;
+    const auto edge = [scale, snapY](double y) {
+        if (!snapY) return y;
         const double device = y * scale;
         const double exact = std::abs(device - std::round(device)) < 1e-7 ? std::round(device) : device;
         return std::floor(exact) / scale;

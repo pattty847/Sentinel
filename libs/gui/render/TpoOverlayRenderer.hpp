@@ -76,14 +76,14 @@ public:
     void onRootRebuilt() override;
     int zOrder() const override { return 2; }
 
-    // World -> screen uses the published frame camera; DPR and free/rest also
+    // World -> screen uses the published frame camera; DPR and per-axis snapping also
     // participate in the cached layout. No integer time-bound conversion.
     void render(QQuickWindow* window,
                 QSGNode* parentNode,
                 bool drawTpo,
                 const ChartTextAtlas& atlas,
                 bool atlasReady,
-                const chart_raster::RasterCamera& camera, double dpr,
+                const chart_raster::RasterCamera& camera, double dpr, bool snapX, bool snapY,
                 const QRectF& surfaceBounds);
 
 private:
@@ -93,7 +93,7 @@ private:
         double cellW = 0.0;
         double cellH = 0.0;
         double dpr = 1.0;
-        bool free = false;
+        bool snapX = true, snapY = true;
         tpo::Layout layout = tpo::Layout::Collapsed;
         tpo::Theme theme = tpo::Theme::Rainbow;
         bool text = false;

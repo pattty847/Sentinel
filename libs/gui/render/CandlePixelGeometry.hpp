@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <QSGGeometry>
+#include "ChartRaster.hpp"
 
 namespace candle_pixels {
 struct Span { float lo, hi; };
@@ -33,27 +34,31 @@ inline Span doji(double yLogical, double dpr) {
     const double top = std::floor(yLogical * scale);
     return {float(top / scale), float((top + 1.0) / scale)};
 }
+// A2 composes time and price independently. A free camera can still have one
+// exact rest axis (or both while holding its end), so classify each axis from
+// its continuous form and the corresponding whole-pixel origin/scale.
+struct AxisSnap {
+    bool x = true, y = true;
+    bool operator==(const AxisSnap&) const = default;
+};
+inline AxisSnap axisSnap(const chart_raster::RasterCamera& camera) {
+    return {camera.colPxF == camera.colPx && camera.leftF == camera.leftColIndex,
+            camera.rowPxF == camera.rowPx && camera.topF == camera.topRowIndex};
+}
 struct Body { Span x, y; };
-// Logical coordinates from the frame mapping. At rest, column edges are whole
-// device pixels and each side loses the owner's integer gap. A free camera
-// keeps every edge continuous, including the minimum-height and doji cases.
+// Logical coordinates from the frame mapping. Snap only an axis that matches
+// its whole-pixel camera; the moving axis keeps continuous edges.
 inline Body body(double columnLeft, double columnRight, double openY, double closeY,
-                 double dpr, bool free = false) {
+                 double dpr, bool snapX = true, bool snapY = true) {
     const double scale = std::isfinite(dpr) && dpr > 0 ? dpr : 1.0;
     double left = columnLeft * scale, right = columnRight * scale;
     double top = std::min(openY, closeY) * scale;
     double bottom = std::max(openY, closeY) * scale;
-    if (free) {
+    if (!snapX) {
         const double width = std::max(1.0, (right - left) * 0.7);
         const double mid = (left + right) * 0.5;
         left = mid - width * 0.5;
         right = mid + width * 0.5;
-        const double minHeight = openY == closeY ? 1.0 : std::max(1.0, 1.5 * scale);
-        if (bottom - top < minHeight) {
-            const double midY = (top + bottom) * 0.5;
-            top = midY - minHeight * 0.5;
-            bottom = midY + minHeight * 0.5;
-        }
     } else {
         left = std::round(left);
         right = std::round(right);
@@ -61,23 +66,30 @@ inline Body body(double columnLeft, double columnRight, double openY, double clo
         const double gap = columns >= 3 ? std::max(1.0, std::floor(0.15 * columns)) : 0.0;
         right = left + columns - gap;
         left += gap;
-        if (openY == closeY) {
-            const auto span = doji(openY, scale);
-            top = span.lo * scale;
-            bottom = span.hi * scale;
-        } else {
-            // Mapping arithmetic can put an exact bin edge a few ulps either
-            // side of its integer. Preserve that edge before floor/ceil.
-            const auto exactEdge = [](double v) {
-                return std::abs(v - std::round(v)) < 1e-7 ? std::round(v) : v;
-            };
-            top = std::floor(exactEdge(top));
-            bottom = std::ceil(exactEdge(bottom));
-            const double minHeight = std::max(1L, std::lround(1.5 * scale));
-            if (bottom - top < minHeight) {
-                top = std::floor((top + bottom - minHeight) * 0.5);
-                bottom = top + minHeight;
-            }
+    }
+    if (!snapY) {
+        const double minHeight = openY == closeY ? 1.0 : std::max(1.0, 1.5 * scale);
+        if (bottom - top < minHeight) {
+            const double midY = (top + bottom) * 0.5;
+            top = midY - minHeight * 0.5;
+            bottom = midY + minHeight * 0.5;
+        }
+    } else if (openY == closeY) {
+        const auto span = doji(openY, scale);
+        top = span.lo * scale;
+        bottom = span.hi * scale;
+    } else {
+        // Mapping arithmetic can put an exact bin edge a few ulps either
+        // side of its integer. Preserve that edge before floor/ceil.
+        const auto exactEdge = [](double v) {
+            return std::abs(v - std::round(v)) < 1e-7 ? std::round(v) : v;
+        };
+        top = std::floor(exactEdge(top));
+        bottom = std::ceil(exactEdge(bottom));
+        const double minHeight = std::max(1L, std::lround(1.5 * scale));
+        if (bottom - top < minHeight) {
+            top = std::floor((top + bottom - minHeight) * 0.5);
+            bottom = top + minHeight;
         }
     }
     return {{float(left / scale), float(right / scale)},

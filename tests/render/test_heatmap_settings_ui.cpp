@@ -8,6 +8,7 @@
 #include "render/CandlestickOverlayItem.hpp"
 #include "render/CandlePixelGeometry.hpp"
 #include "render/TpoOverlayRenderer.hpp"
+#include "render/VolumeProfileRenderer.hpp"
 #include "render/ChartTextAtlas.hpp"
 #include "lab/LabData.hpp"
 #include "lab/OffscreenQuick.hpp"
@@ -287,11 +288,11 @@ TEST(CandleStyleTest, SubmittedBodiesMatchRasterEdgesAtRestAndDuringGlide) {
 // Run the renderer's retained scene graph geometry on the CPU. The independent
 // trade-grid tick and non-bucket session/period times exercise fractional local
 // edges even when the chart camera itself is at rest.
-void checkTpoPixelGeometry(bool glide) {
-    for (double dpr : {1.0, 1.5, 2.0}) {
+void checkTpoPixelGeometry(bool timeFree, bool priceFree, bool hold = false) {
+    for (double dpr : {1.0, 1.25, 1.5, 2.0}) {
         for (auto layout : {tpo::Layout::Collapsed, tpo::Layout::Split}) {
             SCOPED_TRACE(::testing::Message() << "dpr=" << dpr << " split=" << (layout == tpo::Layout::Split)
-                                            << " glide=" << glide);
+                                            << " time=" << timeFree << " price=" << priceFree << " hold=" << hold);
             TpoOverlayRenderer renderer;
             TpoOverlayRenderer::Style style;
             style.layout = layout;
@@ -327,14 +328,19 @@ void checkTpoPixelGeometry(bool glide) {
             fromInput.timeEnd += 5 * tf;
             fromInput.maxPrice += 1.3;
             const auto from = chart_raster::computeRaster(fromInput, {});
-            const auto camera = glide ? chart_raster::glideRaster(from, rest, start, 108, 0.47) : rest;
-            ASSERT_EQ(camera.free, glide);
-            if (glide) EXPECT_NE(camera.drawnStartMs, std::floor(camera.drawnStartMs));
+            const auto mid = hold ? rest : chart_raster::glideRaster(from, rest, start, 108, 0.47);
+            const auto camera = chart_raster::composeAxes(mid, timeFree, mid, priceFree, rest);
+            ASSERT_EQ(camera.free, timeFree || priceFree);
+            const bool snapX = !timeFree || hold, snapY = !priceFree || hold;
+            const auto snap = candle_pixels::axisSnap(camera);
+            EXPECT_EQ(snap.x, snapX);
+            EXPECT_EQ(snap.y, snapY);
+            if (timeFree && !hold) EXPECT_NE(camera.drawnStartMs, std::floor(camera.drawnStartMs));
             QQuickWindow window;
             ChartTextAtlas atlas; // text disabled: no texture or GPU required
             QSGNode root;
             const QRectF surface(0, 0, 640, 320);
-            renderer.render(&window, &root, true, atlas, false, rest, dpr, surface);
+            renderer.render(&window, &root, true, atlas, false, rest, dpr, true, true, surface);
             auto* transform = static_cast<QSGTransformNode*>(root.firstChild()->firstChild()->firstChild()->firstChild());
             auto* geometry = static_cast<QSGGeometryNode*>(transform->firstChild())->geometry();
             const void* storage = geometry->vertexData();
@@ -349,23 +355,25 @@ void checkTpoPixelGeometry(bool glide) {
                 return result;
             };
             const auto restVertices = snapshot();
-            renderer.render(&window, &root, true, atlas, false, camera, dpr, surface);
+            renderer.render(&window, &root, true, atlas, false, camera, dpr, snap.x, snap.y, surface);
             ASSERT_EQ(geometry->vertexData(), storage) << "reuse the warmed geometry through the glide";
             const auto mapping = chart_raster::toMapping(camera);
-            const auto edge = [&](double value) { return glide ? value : std::round(value * dpr) / dpr; };
+            const auto edge = [&](double value, bool snapAxis) { return snapAxis ? std::round(value * dpr) / dpr : value; };
             const double basePx = tradeTick * camera.pxPerPrice() / dpr;
             const double periodPx = period * camera.pxPerMs() / dpr;
             const double cellW = layout == tpo::Layout::Split ? periodPx : std::min(basePx * 0.85, 16.0);
-            const double tx = edge(mapping.timeToScreenX(start));
-            const double ty = edge(mapping.priceToScreenY(gridTop));
+            const double tx = edge(mapping.timeToScreenX(start), snapX);
+            // Use the absolute trade-bin anchor that the renderer projects;
+            // the decimal gridTop can differ by an ulp at a rounding tie.
+            const double ty = edge(mapping.priceToScreenY(150 * tradeTick), snapY);
             EXPECT_NEAR(transform->matrix()(0, 3), tx, 1e-5);
             EXPECT_NEAR(transform->matrix()(1, 3), ty, 1e-5);
             const auto* v = geometry->vertexDataAsColoredPoint2D();
             const auto checkQuad = [&](int index, double left, double top, double right, double bottom) {
-                EXPECT_NEAR(v[index].x, edge(left), 1e-5);
-                EXPECT_NEAR(v[index].y, edge(top), 1e-5);
-                EXPECT_NEAR(v[index+1].x, edge(right), 1e-5);
-                EXPECT_NEAR(v[index+2].y, edge(bottom), 1e-5);
+                EXPECT_NEAR(v[index].x, edge(left, snapX), 1e-5);
+                EXPECT_NEAR(v[index].y, edge(top, snapY), 1e-5);
+                EXPECT_NEAR(v[index+1].x, edge(right, snapX), 1e-5);
+                EXPECT_NEAR(v[index+2].y, edge(bottom, snapY), 1e-5);
             };
             int written = 0;
             if (layout == tpo::Layout::Split) {
@@ -384,15 +392,14 @@ void checkTpoPixelGeometry(bool glide) {
                 });
             }
             ASSERT_EQ(written, liveVertices);
-            if (!glide) {
-                for (const auto& point : snapshot()) {
-                    EXPECT_NEAR(point.x() * dpr, std::round(point.x() * dpr), 1e-4);
-                    EXPECT_NEAR(point.y() * dpr, std::round(point.y() * dpr), 1e-4);
-                }
-            } else {
+            for (const auto& point : snapshot()) {
+                if (snapX) EXPECT_NEAR(point.x() * dpr, std::round(point.x() * dpr), 1e-4);
+                if (snapY) EXPECT_NEAR(point.y() * dpr, std::round(point.y() * dpr), 1e-4);
+            }
+            if (timeFree || priceFree) {
                 const auto landing = chart_raster::glideRaster(from, rest, start, 108, 1.0);
                 ASSERT_FALSE(landing.free);
-                renderer.render(&window, &root, true, atlas, false, landing, dpr, surface);
+                renderer.render(&window, &root, true, atlas, false, landing, dpr, true, true, surface);
                 EXPECT_EQ(snapshot(), restVertices) << "landing geometry equals the initial rest geometry";
                 EXPECT_EQ(geometry->vertexData(), storage);
             }
@@ -400,8 +407,160 @@ void checkTpoPixelGeometry(bool glide) {
     }
 }
 
-TEST(TpoPixelGeometry, SnapsTranslationsAndCellEdgesAtRest) { checkTpoPixelGeometry(false); }
-TEST(TpoPixelGeometry, KeepsFractionalGlideMappingAndLandsOnRestGeometry) { checkTpoPixelGeometry(true); }
+TEST(TpoPixelGeometry, SnapsTranslationsAndCellEdgesAtRest) { checkTpoPixelGeometry(false, false); }
+TEST(TpoPixelGeometry, KeepsFractionalGlideMappingAndLandsOnRestGeometry) { checkTpoPixelGeometry(true, true); }
+
+// Actual candle and VP submission for the two composed-axis cases. Expectations
+// classify the axis under test independently of the production snap helper.
+void checkIndependentAxisGeometry(bool timeFree) {
+    for (double dpr : {1.0, 1.25, 1.5, 2.0}) {
+        chart_raster::RasterInputs in;
+        in.timeStart = 560'000;
+        in.timeEnd = in.timeStart + 32 * 60'000;
+        in.minPrice = 96;
+        in.maxPrice = 112;
+        in.tfMs = 60'000;
+        in.tick = 1;
+        in.itemWidthLogical = 640;
+        in.itemHeightLogical = 320;
+        in.dpr = dpr;
+        in.anchorFracX = 0;
+        const auto rest = chart_raster::computeRaster(in, {});
+        auto fromInput = in;
+        fromInput.timeEnd += 5 * 60'000;
+        fromInput.maxPrice += 1.3;
+        const auto from = chart_raster::computeRaster(fromInput, {});
+        const auto mid = chart_raster::glideRaster(from, rest, 600'123, 108, 0.47);
+        const auto camera = timeFree ? chart_raster::composeAxes(mid, true, rest, false, rest)
+                                    : chart_raster::composeAxes(rest, false, mid, true, rest);
+        const auto snap = candle_pixels::axisSnap(camera);
+        ASSERT_TRUE(camera.free);
+        EXPECT_EQ(snap.x, !timeFree);
+        EXPECT_EQ(snap.y, timeFree);
+        const auto mapping = chart_raster::toMapping(camera);
+        const auto restMapping = chart_raster::toMapping(rest);
+        for (double close : {108.37, 104.231, 104.23}) {
+            SCOPED_TRACE(::testing::Message() << "dpr=" << dpr << " time=" << timeFree << " close=" << close);
+            constexpr qint64 bucket = 600'000;
+            constexpr double open = 104.23;
+            CandleFrameProvider provider;
+            provider.frame.raster = camera;
+            provider.frame.mapping = mapping;
+            provider.frame.surfaceDpr = dpr;
+            provider.frame.viewportValid = true;
+            provider.frame.viewportTimeStart = in.timeStart;
+            provider.frame.viewportTimeEnd = in.timeEnd;
+            CandleSeriesBuffer buffer;
+            buffer.applyHistory("BTC-USD", 60, {{bucket, bucket + 60'000, open, 111, 98, close, 1, true, 0, false}});
+            CandleGeometryItem item;
+            item.setSize({640, 320});
+            item.setMappingProvider(&provider);
+            item.setCandleBuffer(&buffer);
+            item.setSymbol("BTC-USD");
+            item.setTimeframeSec(60);
+            std::unique_ptr<QSGNode> root(item.updatePaintNode(nullptr, nullptr));
+            const auto* geometry = static_cast<QSGGeometryNode*>(root->lastChild())->geometry();
+            ASSERT_EQ(geometry->vertexCount(), 6);
+            const auto* v = geometry->vertexDataAsColoredPoint2D();
+            const auto expected = candle_pixels::body(mapping.timeToScreenX(bucket), mapping.timeToScreenX(bucket + 60'000),
+                mapping.priceToScreenY(open), mapping.priceToScreenY(close), dpr, !timeFree, timeFree);
+            EXPECT_FLOAT_EQ(v[0].x, expected.x.lo);
+            EXPECT_FLOAT_EQ(v[2].x, expected.x.hi);
+            EXPECT_FLOAT_EQ(v[0].y, expected.y.lo);
+            EXPECT_FLOAT_EQ(v[1].y, expected.y.hi);
+            const auto atRest = candle_pixels::body(restMapping.timeToScreenX(bucket), restMapping.timeToScreenX(bucket + 60'000),
+                restMapping.priceToScreenY(open), restMapping.priceToScreenY(close), dpr);
+            if (timeFree) {
+                EXPECT_FLOAT_EQ(v[0].y, atRest.y.lo);
+                EXPECT_FLOAT_EQ(v[1].y, atRest.y.hi);
+            } else {
+                EXPECT_FLOAT_EQ(v[0].x, atRest.x.lo);
+                EXPECT_FLOAT_EQ(v[2].x, atRest.x.hi);
+            }
+        }
+        VolumeProfileRenderer vp;
+        QSGNode vpRoot;
+        VolumeProfileState::Snapshot profile;
+        profile.minPrice = 100.23;
+        profile.tickSize = 0.731;
+        profile.gridHeight = 8;
+        profile.va.valid = true;
+        profile.va.vahPrice = 105.73;
+        profile.va.valPrice = 101.29;
+        profile.va.pocPrice = 103.57;
+        const std::vector<float> bins(8, 1);
+        vp.render(&vpRoot, true, mapping.drawRect, mapping.viewMinPrice, mapping.viewMaxPrice, bins, profile, dpr, snap.y);
+        const auto edge = [&](double y) { return timeFree ? std::floor(y * dpr) / dpr : y; };
+        const auto check = [&](QSGGeometryNode* node, int offset, double top, double bottom) {
+            const auto* v = node->geometry()->vertexDataAsColoredPoint2D() + offset;
+            EXPECT_NEAR(v[0].y, edge(top), 1e-5);
+            EXPECT_NEAR(v[2].y, edge(bottom), 1e-5);
+        };
+        auto* va = static_cast<QSGGeometryNode*>(vpRoot.firstChild());
+        auto* bars = static_cast<QSGGeometryNode*>(va->nextSibling());
+        auto* poc = static_cast<QSGGeometryNode*>(bars->nextSibling());
+        check(va, 0, mapping.priceToScreenY(profile.va.vahPrice), mapping.priceToScreenY(profile.va.valPrice));
+        const double gridTop = profile.minPrice + 8 * profile.tickSize;
+        for (int i = 0; i < 8; ++i)
+            check(bars, i * 4, mapping.priceToScreenY(gridTop - i * profile.tickSize),
+                  mapping.priceToScreenY(gridTop - (i+1) * profile.tickSize));
+        check(poc, 0, mapping.priceToScreenY(profile.va.pocPrice) - 1.5, mapping.priceToScreenY(profile.va.pocPrice) + 1.5);
+    }
+}
+TEST(PixelAxisGeometry, TimeOnlyGlideKeepsPriceGeometrySnapped) {
+    checkIndependentAxisGeometry(true);
+    checkTpoPixelGeometry(true, false);
+}
+TEST(PixelAxisGeometry, PriceOnlyGlideKeepsTimeGeometrySnapped) {
+    checkIndependentAxisGeometry(false);
+    checkTpoPixelGeometry(false, true);
+}
+TEST(TpoPixelGeometry, HeldEndCameraKeepsBothAxesSnapped) { checkTpoPixelGeometry(true, true, true); }
+
+TEST(TpoPixelGeometry, MinimumCellIsOneDevicePixelAtFractionalDpr) {
+    for (double dpr : {1.25, 1.5}) {
+        TpoOverlayRenderer renderer;
+        TpoOverlayRenderer::Style style;
+        style.layout = tpo::Layout::Collapsed;
+        style.rowPx = 4;
+        renderer.setStyle(style);
+        for (int p = 0; p < 2; ++p) {
+            TpoOverlayRenderer::PendingUpload upload;
+            upload.x = p;
+            upload.gridWidth = 2;
+            upload.gridHeight = 1;
+            upload.periodMs = 1;
+            upload.grid = {600'123, 600'125, 109.86, 0.7324, 1};
+            upload.letters = QByteArray(1, 'A' + p);
+            renderer.enqueue(std::move(upload));
+        }
+        chart_raster::RasterInputs in;
+        in.timeStart = 560'000;
+        in.timeEnd = in.timeStart + 32 * 60'000;
+        in.minPrice = 96;
+        in.maxPrice = 112;
+        in.tfMs = 60'000;
+        in.tick = 1;
+        in.itemWidthLogical = 640;
+        in.itemHeightLogical = 320;
+        in.dpr = dpr;
+        const auto camera = chart_raster::computeRaster(in, {});
+        QQuickWindow window;
+        ChartTextAtlas atlas;
+        QSGNode root;
+        renderer.render(&window, &root, true, atlas, false, camera, dpr, true, true, {0, 0, 640, 320});
+        auto* transform = static_cast<QSGTransformNode*>(root.firstChild()->firstChild()->firstChild()->firstChild());
+        const auto* geometry = static_cast<QSGGeometryNode*>(transform->firstChild())->geometry();
+        const auto* v = geometry->vertexDataAsColoredPoint2D();
+        int onePixelCells = 0;
+        for (int k = 0; k < 2; ++k) {
+            const double width = std::max(1.0, std::round((k + 1) * dpr) - std::round(k * dpr));
+            EXPECT_NEAR((v[k*6+1].x - v[k*6].x) * dpr, width, 1e-5);
+            onePixelCells += width == 1;
+        }
+        EXPECT_GE(onePixelCells, 1) << "fixture must exercise a one-device-pixel cell";
+    }
+}
 
 TEST(CandleStyleTest, DefaultColoursOpacityAndGeometryCapacity) {
     CandlestickOverlayItem item;
