@@ -2578,8 +2578,8 @@ TEST_F(UgrGpu, ADevicePixelRatioChangeMidGlideKeepsTheAnchor) {
 }
 
 // Finding 4: one wheel event applies at most four clicks and carries only a partial
-// notch: eight notches then one back is +4 then -1. A partial notch carries only on
-// its route and axes, and not across a reversal.
+// notch: eight notches, then one more, then one back is +4, +1, -1 (not +4, +4, +3). A
+// partial notch carries only on its route and axes, and not across a reversal.
 TEST_F(UgrGpu, TheWheelCarriesOnlyAPartialNotchPerRoute) {
     noLabels();
     gpuOn();
@@ -2590,6 +2590,10 @@ TEST_F(UgrGpu, TheWheelCarriesOnlyAPartialNotchPerRoute) {
     wheelAngle(960, at); // eight notches in one event
     ASSERT_TRUE(settle()) << error.toStdString();
     EXPECT_EQ(drawn().colPx, chart_raster::columnRung(c0, 4, 1, 0)) << "four clicks";
+    const int c01 = drawn().colPx;
+    wheelAngle(120, at);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    EXPECT_EQ(drawn().colPx, chart_raster::columnRung(c01, 1, 1, 0)) << "then one click, nothing left over";
     const int c1 = drawn().colPx;
     wheelAngle(-120, at);
     ASSERT_TRUE(settle()) << error.toStdString();
