@@ -2862,6 +2862,269 @@ TEST_F(UgrGpu, AReturnToLiveEndsTheKeptFollowPadding) {
     EXPECT_EQ(ugr->getViewState()->getVisibleTimeEnd(), nominal) << "the next live update moved it";
 }
 
+TEST_F(UgrGpu, AutoPriceFitGlidesStraightToItsSolvedRange) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    CandleSeriesBuffer buffer;
+    const int64_t centre = epoch + 2 * kHourMs + 15 * minute;
+    std::vector<CandleSeriesBuffer::CandleBar> bars;
+    for (int i = -60; i < 60; ++i) {
+        const double r = 8 + 7 * std::max(std::abs(i), std::abs(i + 1));
+        const int64_t t = centre + i * minute;
+        bars.push_back({t, t + minute, 100150, 100150 + r, 100150 - r, 100150, 1, true, 0, false});
+    }
+    buffer.applyHistory("BTC-USD", 60, bars);
+    ugr->setCandleBuffer(&buffer);
+    ugr->setViewport(centre - 2 * minute, centre + 2 * minute, 100120, 100180);
+    ugr->setAutoPriceScale(true);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    manualZoomClock();
+    auto* v = ugr->getViewState();
+    for (int i = 0; i < 18; ++i) {
+        SCOPED_TRACE(i);
+        if (i < 16) ugr->zoomClicks(i < 8 ? -1 : 1, 320, 160);
+        else {
+            ugr->zoomContinuous(i == 16 ? .2 : 5.0, 320, 160, true, false);
+            ugr->endZoomGesture();
+        }
+        const auto version = v->getViewportVersion();
+        const double lo = v->getMinPrice(), hi = v->getMaxPrice();
+        const auto predicted = layer().predictTickUnits({double(v->getVisibleTimeStart()),
+                                                        double(v->getVisibleTimeEnd()), lo, hi});
+        const int rebases = ugr->glideRebasesForTest();
+        const qint64 startClock = clockMs;
+        for (int ms = 10; ms <= 300; ms += 10) {
+            ASSERT_TRUE(frameAt(startClock + ms)) << error.toStdString();
+            EXPECT_EQ(v->getViewportVersion(), version);
+            EXPECT_DOUBLE_EQ(v->getMinPrice(), lo);
+            EXPECT_DOUBLE_EQ(v->getMaxPrice(), hi);
+        }
+        EXPECT_FALSE(ugr->zoomGliding());
+        EXPECT_EQ(ugr->glideRebasesForTest(), rebases);
+        EXPECT_EQ(layer().tickUnits(), predicted);
+        EXPECT_NEAR(drawn().drawnMinPrice, lo, 1e-8);
+        EXPECT_NEAR(drawn().drawnMaxPrice, hi, 1e-8);
+    }
+    ugr->setCandleBuffer(nullptr);
+}
+
+// A3 / Astra r4: use a scripted availability edge so return-to-live actually
+// lands on the IDENTICAL keyed window. This helper exercises production placement
+// and follow code both without QRhi and in the native GPU fixture.
+void identicalReturnToLive(UnifiedGridRenderer& chart, const std::function<void()>& frame) {
+    FakeChunkTransport* transport = nullptr;
+    heatmap::HeatmapDataService service([&](QObject*) -> heatmap::ChunkTransport* {
+        transport = new FakeChunkTransport;
+        return transport;
+    }, heatmap::HeatmapBudgets{}, [](heatmap::ChunkTransport& t) { static_cast<FakeChunkTransport&>(t).goOnline(); });
+    const int64_t L = (epoch + 4 * kHourMs) / (5 * minute) * (5 * minute);
+    auto live = [&](int64_t end) {
+        heatmap::ChunkAvailability a;
+        a.symbol = "BTC-USD";
+        a.chunkWireVersion = heatmap::kChunkWireVersion;
+        for (const auto& source : heatmap::kChunkSources) {
+            protocol::chunkwire::SourceInfo info;
+            info.id = source.id;
+            info.levels.push_back({minute, kHourMs, end, L - kHourMs, end - minute});
+            a.sources.push_back(info);
+        }
+        service.onData([&] { transport->push(a); });
+        service.onData([] {}); // drain the fetcher's queued availability callback
+    };
+    chart.setHeatmapService(&service);
+    chart.setSize({640, 320});
+    chart.setTimeframe(int(minute));
+    chart.setActiveSymbol("BTC-USD");
+    live(L);
+    chart.setViewport(L + minute - 10 * minute, L + minute, 99900, 100300);
+    chart.enableAutoScroll(true);
+    frame();
+    auto* view = chart.getViewState();
+    ASSERT_EQ(chart.rasterCameraNow(false).colPx, 64);
+    chart.panRight();
+    ASSERT_EQ(view->getVisibleTimeEnd(), L + 2 * minute);
+    ASSERT_TRUE(chart.autoScrollEnabled());
+    chart.setTimeframe(int(5 * minute));
+    frame();
+    ASSERT_EQ(chart.rasterCameraNow(false).colPx, 64);
+    ASSERT_EQ(view->getVisibleTimeEnd(), L + 10 * minute);
+    const auto placement = view->placementVersion();
+    const auto start = view->getVisibleTimeStart(), end = view->getVisibleTimeEnd();
+    chart.enableAutoScroll(false);
+    live(L + 5 * minute);
+    ASSERT_EQ(chart.gpuHeatmapLayer()->liveAnchorMs(), L + 5 * minute);
+    chart.enableAutoScroll(true);
+    ASSERT_EQ(view->getVisibleTimeStart(), start);
+    ASSERT_EQ(view->getVisibleTimeEnd(), end);
+    EXPECT_GT(view->placementVersion(), placement);
+    chart.followLiveForTest(L + 5 * minute);
+    EXPECT_EQ(view->getVisibleTimeEnd(), end) << "stale 600s padding would jump 64px";
+    chart.followLiveForTest(L + 10 * minute);
+    EXPECT_EQ(view->getVisibleTimeEnd(), end + 5 * minute) << "next bucket uses nominal 300s padding";
+    chart.setHeatmapService(nullptr);
+}
+
+TEST(UgrPlacementCpu, AnIdenticalReturnToLiveInvalidatesKeptPadding) {
+    UnifiedGridRenderer chart;
+    identicalReturnToLive(chart, [] {});
+}
+
+TEST_F(UgrGpu, AnIdenticalReturnToLiveInvalidatesKeptPadding) {
+    identicalReturnToLive(*ugr, [&] { EXPECT_TRUE(frames(2)) << error.toStdString(); });
+}
+
+// CPU integration uses the real chart, candle buffer, layer and asynchronous
+// controller over the synthetic recording. Only QRhi drawing is absent.
+class CpuZoomChart : public UnifiedGridRenderer {
+public:
+    using UnifiedGridRenderer::updatePolish;
+};
+class UgrZoomCpu : public testing::Test {
+protected:
+    CpuZoomChart chart;
+    CandleSeriesBuffer candles;
+    qint64 clock = 0;
+    const int64_t centre = epoch + 2 * kHourMs + 15 * minute;
+    void SetUp() override {
+        chart.setSize({640, 320});
+        chart.setHeatmapService(&lab::LabData::instance().service());
+        chart.setActiveSymbol("BTC-USD");
+        chart.setTimeframe(int(minute));
+        auto settings = brightSettings();
+        settings.showLabels = false;
+        chart.setHeatmapChartSettings(settings);
+        chart.setZoomClockForTest([&] { return clock; });
+        std::vector<CandleSeriesBuffer::CandleBar> bars;
+        for (int i = -60; i < 60; ++i) {
+            const double radius = 8 + 7 * std::max(std::abs(i), std::abs(i + 1));
+            const int64_t t = centre + i * minute;
+            bars.push_back({t, t + minute, 100150, 100150 + radius, 100150 - radius, 100150, 1, true, 0, false});
+        }
+        candles.applyHistory("BTC-USD", 60, bars);
+        chart.setCandleBuffer(&candles);
+        chart.setViewport(centre - 20 * minute, centre + 20 * minute, 99800, 100500);
+        ASSERT_TRUE(waitFor([&] {
+            const auto snapshot = chart.gpuHeatmapLayer()->snapshot();
+            return snapshot && !snapshot->resolution.columns.empty() && !snapshot->spans.empty() &&
+                   std::all_of(snapshot->spans.begin(), snapshot->spans.end(),
+                               [](const auto& span) { return span.complete; }) && chart.heatmapTickSize() > 0;
+        })) << "the tick policy must see loaded resolution, not a pending empty snapshot";
+        chart.setViewport(centre - 2 * minute, centre + 2 * minute, 100120, 100180);
+        chart.setAutoPriceScale(true);
+        for (int i = 0; i < 6; ++i) frame();
+    }
+    void TearDown() override {
+        chart.setCandleBuffer(nullptr);
+        chart.setHeatmapService(nullptr);
+    }
+    void frame() {
+        auto* v = chart.getViewState();
+        chart.gpuHeatmapLayer()->chooseTickForView({double(v->getVisibleTimeStart()), double(v->getVisibleTimeEnd()),
+                                                  v->getMinPrice(), v->getMaxPrice()});
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        clock += 10;
+        chart.updatePolish();
+    }
+    bool waitFor(const std::function<bool()>& done) {
+        QElapsedTimer timer;
+        timer.start();
+        do { frame(); } while (!done() && timer.elapsed() < 10000);
+        return done();
+    }
+    void checkSettle() {
+        auto* v = chart.getViewState();
+        const auto version = v->getViewportVersion();
+        const double lo = v->getMinPrice(), hi = v->getMaxPrice();
+        const auto predicted = chart.gpuHeatmapLayer()->predictTickUnits(
+            {double(v->getVisibleTimeStart()), double(v->getVisibleTimeEnd()), lo, hi});
+        const int rebases = chart.glideRebasesForTest();
+        ASSERT_TRUE(waitFor([&] { return !chart.zoomGliding(); }));
+        EXPECT_EQ(chart.gpuHeatmapLayer()->tickUnits(), predicted);
+        EXPECT_EQ(v->getViewportVersion(), version) << "commit must not refit the solved range";
+        EXPECT_DOUBLE_EQ(v->getMinPrice(), lo);
+        EXPECT_DOUBLE_EQ(v->getMaxPrice(), hi);
+        EXPECT_EQ(chart.glideRebasesForTest(), rebases);
+        const auto cam = chart.rasterCameraNow(false);
+        EXPECT_NEAR(cam.drawnMinPrice, lo, 1e-8);
+        EXPECT_NEAR(cam.drawnMaxPrice, hi, 1e-8);
+        EXPECT_NEAR(320 * cam.tick / (hi - lo), cam.rowPx, 1e-8);
+    }
+};
+
+TEST_F(UgrZoomCpu, AutoFitTickCommitsDoNotRetargetSixteenClicks) {
+    int commits = 0;
+    for (int i = 0; i < 16; ++i) {
+        SCOPED_TRACE(i);
+        const double tick = chart.heatmapTickSize();
+        const auto version = chart.getViewState()->getViewportVersion();
+        chart.zoomClicks(i < 8 ? -1 : 1, 320, 160);
+        ASSERT_EQ(chart.getViewState()->getViewportVersion(), version + 1);
+        checkSettle();
+        commits += chart.heatmapTickSize() != tick;
+    }
+    EXPECT_GT(commits, 0) << "must exercise an actual Auto tick commit";
+}
+
+TEST_F(UgrZoomCpu, PinchAndTrackpadSettleWithASolvedFit) {
+    for (bool pinch : {false, true}) {
+        chart.setViewport(centre - 2 * minute, centre + 2 * minute, 100125, 100175);
+        chart.setAutoPriceScale(true);
+        for (int i = 0; i < 6; ++i) frame();
+        const double tickBefore = chart.heatmapTickSize();
+        if (pinch) {
+            QNativeGestureEvent begin(Qt::BeginNativeGesture, QPointingDevice::primaryPointingDevice(), 2,
+                                      {320, 160}, {320, 160}, {320, 160}, 0, {}, 1);
+            QCoreApplication::sendEvent(&chart, &begin);
+            QNativeGestureEvent zoom(Qt::ZoomNativeGesture, QPointingDevice::primaryPointingDevice(), 2,
+                                     {320, 160}, {320, 160}, {320, 160}, -.8, {}, 2);
+            QCoreApplication::sendEvent(&chart, &zoom);
+            QNativeGestureEvent end(Qt::EndNativeGesture, QPointingDevice::primaryPointingDevice(), 2,
+                                    {320, 160}, {320, 160}, {320, 160}, 0, {}, 3);
+            QCoreApplication::sendEvent(&chart, &end);
+        } else {
+            for (int i = 0; i < 8; ++i) chart.zoomTimeWheel(-400, -100, int(Qt::ScrollUpdate), 320);
+            chart.zoomTimeWheel(0, 0, int(Qt::ScrollEnd), 320);
+        }
+        EXPECT_FALSE(chart.zoomGesturing());
+        checkSettle();
+        EXPECT_NE(chart.heatmapTickSize(), tickBefore) << "settle must exercise an Auto tick commit";
+    }
+}
+
+TEST_F(UgrZoomCpu, AWidthChangeInvalidatesTheSolvedCandleWindow) {
+    chart.setViewport(centre - 4 * minute, centre + 4 * minute, 100100, 100200);
+    chart.setAutoPriceScale(true);
+    for (int i = 0; i < 6; ++i) frame();
+    chart.zoomClicks(-1, 320, 160); // C80 -> C64, exactly ten minutes
+    checkSettle();
+    ASSERT_EQ(chart.rasterCameraNow(false).colPx, 64);
+    auto* v = chart.getViewState();
+    ASSERT_LT(v->getMaxPrice() - v->getMinPrice(), 112);
+    chart.setWidth(641); // C stays 64: reveals the adjacent minute candles
+    EXPECT_EQ(chart.rasterCameraNow(false).colPx, 64);
+    EXPECT_LE(v->getMinPrice(), 100094);
+    EXPECT_GE(v->getMaxPrice(), 100206);
+}
+
+TEST_F(UgrZoomCpu, LiveRefitsAtRestKeepTheirExistingBehavior) {
+    auto* v = chart.getViewState();
+    uint64_t version = v->getViewportVersion();
+    int changes = 0;
+    for (int i = 1; i <= 16; ++i) {
+        candles.applyUpdate("BTC-USD", 60,
+            {centre, centre + minute, 100150, 100157 + .1 * i, 100143, 100150, 1, false, 0, false}, i, false);
+        changes += v->getViewportVersion() != version;
+        version = v->getViewportVersion();
+    }
+    EXPECT_EQ(changes, 0);
+    candles.applyUpdate("BTC-USD", 60,
+        {centre, centre + minute, 100150, 100250, 100143, 100150, 1, false, 0, false}, 17, false);
+    EXPECT_EQ(v->getViewportVersion(), version + 1);
+    EXPECT_GT(v->getMaxPrice(), 100250);
+    std::cout << "CPU LIVE REST changed=0/16 interior revisions, 1/1 new extreme\n";
+}
+
 // ---------------------------------------------------------------- A2 fix round 2
 // The sources that can change a glide's end, one row each (the contracts are in
 // docs/ARCHITECTURE.md, smooth zoom). The fixture for most: auto price off, a click in

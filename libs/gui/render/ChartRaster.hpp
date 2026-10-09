@@ -14,6 +14,7 @@
 #include <QPointF>
 #include <cstdint>
 #include <functional>
+#include <optional>
 
 namespace chart_raster {
 
@@ -161,5 +162,20 @@ int64_t followShift(int64_t endMs, int64_t targetMs, int64_t tfMs, int colPx);
 // on a row edge of that P (the drawn window then equals the stored one). False
 // (nothing changed) without a tick or a valid range.
 bool fitPriceToRows(double &lo, double &hi, int heightDev, double tick);
+
+struct AutoPriceFit {
+    double lo = 0, hi = 0, tick = 0;
+    int rowPx = 0, iterations = 0;
+    bool cycleBroken = false;
+};
+using TickForWindow = std::function<double(double lo, double hi)>;
+// Zoom input only. Contains the supplied candle+margin interval, including the
+// pixel phase. Prefer a non-narrowing fit on zoom-out; zoom-in takes the tightest
+// containing fit (which can widen at a resolution boundary). Auto itself is unchanged.
+// At a cycle, keep the widest span visited as a floor and continue from the
+// predicted tick. This makes the cycle's next pass deterministic and expansive.
+// No partially solved result escapes the 16-evaluation bound.
+std::optional<AutoPriceFit> solveAutoPriceFit(double lo, double hi, int heightDev, double tick,
+                                             int direction, double previousSpan, const TickForWindow &predict);
 
 } // namespace chart_raster

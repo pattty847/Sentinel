@@ -6,6 +6,9 @@
 // GridViewState) and fits price on integer pixels per row. Pure CPU.
 #include "render/ChartRaster.hpp"
 #include "render/GridViewState.hpp"
+#include "heatmap/HeatmapSpanPlanner.hpp"
+#include <iostream>
+#include <iomanip>
 
 #include <QCoreApplication>
 #include <gtest/gtest.h>
@@ -588,6 +591,222 @@ TEST(ChartRasterZoom, FollowShiftsByWholeBucketsOutsideOneDrawnPixel) {
     // pixel (42,858 ms), so follow-live leaves the Now column where it is.
     const int64_t liveEnd = 1'790'000'100'000 / (5 * kMinute) * (5 * kMinute);
     EXPECT_EQ(followShift(liveEnd + 2'100'000, liveEnd + 2'121'429, 5 * kMinute, 7), 0);
+}
+// A3 feasibility witness: dropping the two coarse outer columns on one zoom-in
+// changes Auto's admissible ticks. All candles (including their 8% margin) need
+// a price span of 180. The previous, valid fit is 200 at tick 2.5 / P=4.
+// For every span in [180, 200], Auto chooses tick 2. Its adjacent whole-row
+// spans are 160 (clips) and 213 1/3 (widens): relaxed T2 must choose the latter.
+TEST(ChartRasterZoom, A3ResolutionBoundaryChoosesTheTightestContainingFit) {
+    using namespace heatmap;
+    constexpr int H = 320;
+    constexpr double centre = 100000, need = 180, previous = 200;
+    ResolutionSummary summary;
+    summary.tfMs = kMinute;
+    summary.priceScale = 100;
+    for (int i = 0; i < 10; ++i) {
+        const int64_t common = i == 0 || i == 9 ? 250 : 1;
+        summary.columns.push_back({i * kMinute,
+            {{"fixture", BucketState::Present, {common}, common, {{0, 20000000}}}}});
+    }
+    double lo = centre - need / 2, hi = centre + need / 2;
+    ASSERT_TRUE(fitPriceToRows(lo, hi, H, 2.5));
+    ASSERT_DOUBLE_EQ(hi - lo, previous);
+    ASSERT_EQ(autoTickUnits(summary, 250, 0, 10 * kMinute, lo, hi, H), 250);
+    ASSERT_EQ(columnRung(64, 1, 1, 160), 80); // 10m -> 8m, centred: drops exactly the outer columns
+    ASSERT_EQ(autoTickUnits(summary, 250, kMinute, 9 * kMinute, lo, hi, H), 200);
+    const auto solved = solveAutoPriceFit(centre - need / 2, centre + need / 2, H, 2.5, 1, previous,
+        [&](double low, double high) {
+            return fromUnits(autoTickUnits(summary, 250, kMinute, 9 * kMinute, low, high, H), 100);
+        });
+    ASSERT_TRUE(solved);
+    EXPECT_EQ(solved->tick, 2);
+    EXPECT_EQ(solved->rowPx, 3);
+    EXPECT_NEAR(solved->hi - solved->lo, 640.0 / 3, 1e-9);
+    EXPECT_LE(solved->lo, centre - need / 2);
+    EXPECT_GE(solved->hi, centre + need / 2);
+    EXPECT_GT(solved->hi - solved->lo, previous); // containment wins, in one glide
+    EXPECT_EQ(autoTickUnits(summary, 250, kMinute, 9 * kMinute, solved->lo, solved->hi, H), 200);
+}
+
+TEST(ChartRasterZoom, A3SolvesTheTickBeforePublishingTheFit) {
+    const auto predict = [](double lo, double hi) {
+        return heatmap::fromUnits(heatmap::autoTickUnits(50, 1, (hi - lo) * 100 / 320), 100);
+    };
+    const auto fit = solveAutoPriceFit(99964 - 72 * .08, 100036 + 72 * .08, 320, .5, -1, 80, predict);
+    ASSERT_TRUE(fit);
+    EXPECT_EQ(fit->tick, 1);
+    EXPECT_EQ(fit->rowPx, 3);
+    EXPECT_NEAR(fit->hi - fit->lo, 320.0 / 3, 1e-9);
+    EXPECT_EQ(predict(fit->lo, fit->hi), fit->tick);
+    EXPECT_GT(fit->iterations, 1);
+}
+
+TEST(ChartRasterZoom, A3PrefersAMonotonicContainingFitWhenOneExists) {
+    const auto predict = [](double lo, double hi) {
+        return heatmap::fromUnits(heatmap::autoTickUnits(100, 1, (hi - lo) * 100 / 320), 100);
+    };
+    const auto out = solveAutoPriceFit(99950, 100050, 320, 1, -1, 160, predict);
+    ASSERT_TRUE(out);
+    EXPECT_EQ(out->tick, 1);
+    EXPECT_EQ(out->rowPx, 2);
+    EXPECT_DOUBLE_EQ(out->hi - out->lo, 160); // tight fit is 106 2/3, but narrows
+    const auto in = solveAutoPriceFit(99950, 100050, 320, 1, 1, 160, predict);
+    ASSERT_TRUE(in);
+    EXPECT_EQ(in->rowPx, 3);
+    EXPECT_NEAR(in->hi - in->lo, 320.0 / 3, 1e-9);
+}
+
+TEST(ChartRasterZoom, A3RepeatingAFractionalFitDoesNotAddARowRung) {
+    const auto predict = [](double lo, double hi) {
+        return heatmap::fromUnits(heatmap::autoTickUnits(100, 1, (hi - lo) * 100 / 320), 100);
+    };
+    const auto first = solveAutoPriceFit(99960, 100040, 320, 1, -1, 80, predict);
+    ASSERT_TRUE(first);
+    ASSERT_EQ(first->rowPx, 4);
+    const auto fractional = solveAutoPriceFit(99955, 100045, 320, 1, -1, first->hi - first->lo, predict);
+    ASSERT_TRUE(fractional);
+    ASSERT_EQ(fractional->rowPx, 3);
+    const auto again = solveAutoPriceFit(99955, 100045, 320, 1, -1, fractional->hi - fractional->lo, predict);
+    ASSERT_TRUE(again);
+    EXPECT_EQ(again->rowPx, 3);
+    EXPECT_DOUBLE_EQ(again->lo, fractional->lo);
+    EXPECT_DOUBLE_EQ(again->hi, fractional->hi);
+}
+
+TEST(ChartRasterZoom, A3CycleKeepsTheWidestCandidateAndRechecksAuto) {
+    const auto predict = [](double lo, double hi) {
+        return heatmap::fromUnits(heatmap::autoTickUnits(500, 1, (hi - lo) * 100 / 320), 100);
+    };
+    // Raw 300: tick 5 / P5 / span320 predicts 2.5; tick 2.5 / P2 /
+    // span400 predicts 5. Keeping span400 breaks the cycle at tick5 / P4.
+    const auto fit = solveAutoPriceFit(99850, 100150, 320, 5, 1, 500, predict);
+    ASSERT_TRUE(fit);
+    EXPECT_TRUE(fit->cycleBroken);
+    EXPECT_EQ(fit->tick, 5);
+    EXPECT_EQ(fit->rowPx, 4);
+    EXPECT_DOUBLE_EQ(fit->hi - fit->lo, 400);
+    EXPECT_EQ(predict(fit->lo, fit->hi), fit->tick);
+    EXPECT_LE(fit->iterations, 16);
+}
+
+TEST(ChartRasterZoom, A3FitsContainBothMarginEdgesIncludingThePixelPhase) {
+    std::mt19937_64 rng(20261009);
+    for (int i = 0; i < 1000; ++i) {
+        const double scale = i % 2 ? 100 : 1e10;
+        const double centre = i % 2 ? 100000.00123 : .00001000123;
+        const int64_t current = heatmap::presetLadderUnits()[4 + rng() % 12];
+        const double tick = heatmap::fromUnits(current, scale);
+        const double rawSpan = tick * (20 + rng() % 500);
+        const int H = 320 + int(rng() % 481);
+        const auto fit = solveAutoPriceFit(centre - rawSpan / 2, centre + rawSpan / 2, H, tick,
+            i % 2 ? 1 : -1, rawSpan * 1.1, [&](double lo, double hi) {
+                return heatmap::fromUnits(heatmap::autoTickUnits(current, 1, (hi - lo) * scale / H), scale);
+            });
+        ASSERT_TRUE(fit) << i;
+        EXPECT_LE(fit->lo, centre - rawSpan / 2);
+        EXPECT_GE(fit->hi, centre + rawSpan / 2);
+        EXPECT_NEAR(H * fit->tick / (fit->hi - fit->lo), fit->rowPx, 1e-5);
+    }
+}
+
+// CPU reduction of the A2 fit -> Auto proposal -> commit/refit loop. Uniform
+// native cents build every offered tick; candles are minute bars centred at zero.
+// Keep the original diagnostic's synthetic 8% margin for before/after comparison;
+// the renderer integration tests use production kFitPriceMargin (6%), unchanged.
+TEST(ChartRasterZoom, A3Trace) {
+    constexpr int H = 320;
+    int C = 16;
+    while (C < 160) C = columnRung(C, 1, 1, 160); // zoom in to the four-column floor
+    int64_t tick = 50;
+    struct Candle { int minute; double lo, hi; };
+    std::vector<Candle> candles;
+    for (int i = -64; i < 64; ++i) {
+        const double radius = 8 + 7 * std::max(std::abs(i), std::abs(i + 1));
+        candles.push_back({i, 100000 - radius, 100000 + radius});
+    }
+    auto range = [&](int col) {
+        const double half = 320.0 / col;
+        double lo = 100000, hi = 100000;
+        for (const auto& bar : candles)
+            if (bar.minute < half && bar.minute + 1 > -half) {
+                lo = std::min(lo, bar.lo);
+                hi = std::max(hi, bar.hi);
+            }
+        return std::pair{lo, hi};
+    };
+    auto fit = [&](int col, int64_t t) {
+        const auto [low, high] = range(col);
+        const double margin = (high - low) * 0.08;
+        double lo = low - margin, hi = high + margin;
+        fitPriceToRows(lo, hi, H, double(t) / 100);
+        return std::pair{lo, hi};
+    };
+    auto predict = [&](std::pair<double, double> w) {
+        return heatmap::autoTickUnits(tick, 1, (w.second - w.first) * 100 / H);
+    };
+    for (int warm = 0; warm < 8; ++warm) tick = predict(fit(C, tick));
+    const auto flags = std::cout.flags();
+    const auto precision = std::cout.precision();
+    std::cout << std::fixed << std::setprecision(5);
+    for (int click = 0; click < 16; ++click) {
+        C = columnRung(C, click < 8 ? -1 : 1, 1, 160);
+        const auto [low, high] = range(C);
+        std::cout << "TRACE " << (click < 8 ? "out" : "in") << click % 8 + 1
+                  << " minutes=" << 640.0 / C << " candles=[" << low << "," << high << "]";
+        int rebases = 0;
+        auto w = fit(C, tick);
+        for (int round = 0; round < 8; ++round) {
+            const auto next = predict(w);
+            std::cout << " fit=[" << w.first << "," << w.second << "] tick=" << tick
+                      << " predicted=" << next << " P=" << H * (double(tick) / 100) / (w.second - w.first);
+            if (next == tick) break;
+            tick = next;
+            const auto after = fit(C, tick);
+            rebases += after != w;
+            w = after;
+        }
+        std::cout << " modeledGlides=1 fitRetargets=" << rebases << " final=[" << w.first << "," << w.second << "]\n";
+    }
+    C = 160;
+    tick = 50;
+    double previous = fit(C, tick).second - fit(C, tick).first;
+    for (int click = 0; click < 16; ++click) {
+        const int direction = click < 8 ? -1 : 1;
+        C = columnRung(C, direction, 1, 160);
+        const auto [lo, hi] = range(C);
+        const double margin = (hi - lo) * .08;
+        const auto solved = solveAutoPriceFit(lo - margin, hi + margin, H, double(tick) / 100,
+            direction, previous, [&](double low, double high) {
+                return heatmap::fromUnits(predict({low, high}), 100);
+            });
+        ASSERT_TRUE(solved);
+        EXPECT_EQ(double(predict({solved->lo, solved->hi})) / 100, solved->tick);
+        tick = heatmap::toUnits(solved->tick, 100); // commit; a second prediction must be unchanged
+        EXPECT_EQ(double(predict({solved->lo, solved->hi})) / 100, solved->tick);
+        EXPECT_LE(solved->lo, lo - margin);
+        EXPECT_GE(solved->hi, hi + margin);
+        std::cout << "SOLVED " << (direction < 0 ? "out" : "in") << click % 8 + 1
+                  << " minutes=" << 640.0 / C << " final=[" << solved->lo << "," << solved->hi
+                  << "] tick=" << solved->tick << " P=" << solved->rowPx
+                  << " iterations=" << solved->iterations << " cycle=" << solved->cycleBroken << "\n";
+        previous = solved->hi - solved->lo;
+    }
+    auto rest = fit(C, tick);
+    int changes = 0;
+    for (int update = 0; update < 16; ++update) {
+        // Real revisions to a visible candle, all inside the existing extrema.
+        candles[64].hi += 0.1;
+        auto next = fit(C, tick);
+        changes += next != rest;
+        rest = next;
+    }
+    EXPECT_EQ(changes, 0);
+    candles[64].hi = 100100; // a new visible high
+    EXPECT_NE(fit(C, tick), rest);
+    std::cout << "REST refits changed=" << changes << "/16 interior revisions; 1/1 new extreme\n";
+    std::cout.flags(flags);
+    std::cout.precision(precision);
 }
 } // namespace
 

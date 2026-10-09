@@ -144,6 +144,19 @@ TEST(GridViewStateAutoPrice, TheFitFollowsTheDisplayedWindowDuringADrag) {
     EXPECT_DOUBLE_EQ(v.state.getMinPrice(), 0);
     EXPECT_EQ(v.state.displayedTimeWindow(), std::make_pair(qint64(0), qint64(600 * kMinute)));
 }
+TEST(GridViewStatePlacement, AnIdenticalExplicitWindowEndsThePreviousPlacement) {
+    GridViewState view;
+    view.setViewport(1, 600001, 90, 110);
+    const auto placement = view.placementVersion(), viewport = view.getViewportVersion();
+    view.setViewport(1, 600001, 90, 110);
+    EXPECT_EQ(view.placementVersion(), placement + 1);
+    EXPECT_EQ(view.getViewportVersion(), viewport) << "no content change or extra signal";
+    view.setViewport(300001, 900001, 90, 110, true); // automatic follow step
+    EXPECT_EQ(view.placementVersion(), placement + 1);
+    EXPECT_EQ(view.getViewportVersion(), viewport + 1);
+    view.setViewport(300001, 900001, 89, 111, true); // automatic refit
+    EXPECT_EQ(view.placementVersion(), placement + 1);
+}
 } // namespace
 
 int main(int argc, char **argv) {

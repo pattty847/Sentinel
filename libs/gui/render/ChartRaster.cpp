@@ -1,7 +1,9 @@
 #include "ChartRaster.hpp"
+#include <array>
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace chart_raster {
 
@@ -407,6 +409,69 @@ bool fitPriceToRows(double &lo, double &hi, int heightDev, double tick) {
     hi = top;
     lo = top - fitted;
     return true;
+}
+
+std::optional<AutoPriceFit> solveAutoPriceFit(double lo, double hi, int heightDev, double tick,
+                                             int direction, double previousSpan, const TickForWindow &predict) {
+    if (!std::isfinite(lo) || !std::isfinite(hi) || !std::isfinite(hi - lo) || !(hi > lo) || heightDev <= 0 ||
+        !std::isfinite(tick) || !(tick > 0) || !predict)
+        return std::nullopt;
+    double floorSpan = hi - lo;
+    if (direction < 0 && std::isfinite(previousSpan)) floorSpan = std::max(floorSpan, previousSpan);
+    double widest = floorSpan;
+    // Subtracting two price endpoints loses a few ulps relative to H*tick/P.
+    // Do not turn that loss into an entire extra row rung on the next click.
+    const double spanUlp = 4 * std::numeric_limits<double>::epsilon() * std::max(std::abs(lo), std::abs(hi));
+    std::array<double, 16> visited{};
+    int count = 0;
+    bool cycled = false;
+    for (int iteration = 1; iteration <= int(visited.size()); ++iteration) {
+        if (!std::isfinite(double(heightDev) * tick)) return std::nullopt;
+        // The largest P is the tightest span. A snapped top must contain BOTH
+        // margin edges; rounding the centre alone can clip up to half a pixel.
+        int p = int(std::clamp(std::floor(double(heightDev) * tick / std::max(floorSpan - spanUlp, floorSpan * .5)),
+                              0.0, double(kMaxCellPx)));
+        AutoPriceFit fit;
+        for (; p > 0; --p) {
+            const double step = tick / p, span = double(heightDev) * tick / p;
+            const double minTop = std::ceil(hi / step), maxTop = std::floor(lo / step + heightDev);
+            if (minTop > maxTop) continue;
+            const double top = std::clamp(std::round((lo + hi + span) * 0.5 / step), minTop, maxTop);
+            // Outward rounding of the exact row edges also keeps a fractional
+            // span (e.g. 640/3) from falling on the wrong side of Auto's band.
+            // The drawn camera still snaps to these same integer pixel edges.
+            auto edge = [&](double index, bool upper) {
+                const double product = index * tick;
+                const double productError = std::fma(index, tick, -product);
+                double value = product / p;
+                const double error = std::fma(value, double(p), -product) - productError;
+                if (upper ? error < 0 : error > 0)
+                    value = std::nextafter(value, upper ? INFINITY : -INFINITY);
+                return value;
+            };
+            fit = {edge(top - heightDev, false), edge(top, true), tick, p, iteration, cycled};
+            // Floating point at a large price/small tick must not crop an edge.
+            if (fit.lo <= lo && fit.hi >= hi) break;
+        }
+        // The old tick can be too small even at P=1. Ask Auto about the containing
+        // interval, never a clipped one, to find a coarser starting tick.
+        const double centre = (lo + hi) * 0.5;
+        const double next = p > 0 ? predict(fit.lo, fit.hi)
+                                  : predict(centre - floorSpan * 0.5, centre + floorSpan * 0.5);
+        if (!std::isfinite(next) || !(next > 0)) return std::nullopt;
+        if (p > 0 && next == tick) return fit;
+        if (p > 0) widest = std::max(widest, fit.hi - fit.lo);
+        visited[count++] = tick;
+        if (std::find(visited.begin(), visited.begin() + count, next) != visited.begin() + count) {
+            // Break a fit/tick cycle by keeping its widest candidate. If already
+            // there, move just past it so the next row rung is strictly wider.
+            floorSpan = widest > floorSpan + spanUlp ? widest : floorSpan + 2 * spanUlp;
+            count = 0;
+            cycled = true;
+        }
+        tick = next;
+    }
+    return std::nullopt;
 }
 
 } // namespace chart_raster
