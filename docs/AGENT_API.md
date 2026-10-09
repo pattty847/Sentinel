@@ -5,7 +5,7 @@ The GUI listens on `127.0.0.1` at `gui.api_port` (default `17100`). `api_port=0`
 | Method | Route | Result |
 |---|---|---|
 | GET | `/api/v1/state` | Connection, advertised server configuration, active layers, receive times (`lastReceivedAtMs`: `heatmap`, `candles`, `book`, `trades`, and since S8a the trade overlays `footprint`, `tpo`, `volumeProfile`) and chart render statistics. |
-| GET | `/api/v1/viewport` | Active chart bounds, linked heatmap/candle timeframe, follow mode, auto price scale (`autoScale`), dimensions, zoom and viewport version. |
+| GET | `/api/v1/viewport` | Active chart bounds, linked heatmap/candle timeframe, follow mode, auto price scale (`autoScale`), dimensions, zoom, viewport version and the last frame's drawn window (`drawn`). |
 | GET | `/api/v1/docks` | Every available dock ID and its visible boolean. |
 | GET | `/api/v1/candles?startMs=...&endMs=...&timeframeMs=...&limit=500` | Locally held candle bars and `nextStartMs` for pagination. `limit` maximum 2,000. |
 | GET | `/api/v1/book?levels=20` | Best prices, spread, up to 200 levels per side, band and receive time. |
@@ -24,6 +24,8 @@ The GUI listens on `127.0.0.1` at `gui.api_port` (default `17100`). `api_port=0`
 | GET | `/screenshot?name=review&target=main` | Legacy screenshot route and response, retained for existing agents. |
 
 State, viewport, candles, book, trades and walls accept optional `symbol=<active-symbol>`; a different symbol returns `409`. `servedTimeframesMs` comes only from the server's advertisement. An older server that omits it yields `null`, distinct from an advertised empty array. Other unavailable configuration fields and unseen receive timestamps also yield `null`. `selectionEpoch` is a decimal string and advances when the active symbol or timeframe changes, or connection status changes. `sessionId` changes on each GUI run. `viewportVersion` is a decimal string when the viewport is valid. An unknown viewport field is `null`.
+
+Viewport `startMs`/`endMs`/`priceMin`/`priceMax` and `zoom` are the stored (continuous) view that `POST /viewport` sets. `drawn` is what the last rendered frame drew (whole-pixel mapping, the raster camera): `{startMs, endMs, priceMin, priceMax, rowPx, colPx, dpr}`, where `rowPx`/`colPx` are the integer device pixels per heatmap row and per column and the bounds are the exact drawn window (ms and prices as numbers; `startMs`/`endMs` may be fractional). After a wheel or axis zoom the drawn window differs from the stored one by up to the ratio of the continuous to the drawn pixels per row/column; after a price fit they are equal. `drawn` is `null` before the first frame.
 
 State `data.render` contains `frameP50Ms`, `frameP95Ms`, `rateHz`, and `idle`. Durations cover CPU work on the chart render thread from scene synchronization through render command submission; they do not measure GPU completion. Percentiles use rendered frames from the preceding one second and are `null` if that window has no frames. `rateHz` counts renders in that same one-second window, including data-driven renders, so it is not an FPS capacity estimate. `idle` means no mouse, touch, wheel, or keyboard input reached the chart in the past second. The GUI refreshes these values four times a second.
 

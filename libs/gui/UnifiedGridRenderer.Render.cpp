@@ -132,14 +132,20 @@ void UnifiedGridRenderer::computeGpuFrameMapping(FrameContext& frame) {
     }
     const double priceSpan = in.maxPrice - in.minPrice;
     m_gpuLayer->noteRaster(cam.rowPx, cam.colPx, priceSpan > 0 ? double(cam.heightDev) * cam.tick / priceSpan : 0.0);
-    const RasterSurface surface{cam.step(), cam.dpr, cam.widthDev, cam.heightDev};
+    const RasterSurface surface{cam.step(), cam.dpr, cam.tick, cam.widthDev, cam.heightDev};
     if (surface != m_rasterAnnounced) {
         sLog_Probe("raster.step", "rowPx=" << cam.rowPx << " colPx=" << cam.colPx << " dpr=" << cam.dpr
                    << " dev=" << cam.widthDev << "x" << cam.heightDev << " tick=" << cam.tick
                    << " rRow=" << (priceSpan > 0 ? double(cam.heightDev) * cam.tick / priceSpan : 0.0)
                    << " rCol=" << double(cam.widthDev) * cam.tfMs / double(in.timeEnd - in.timeStart));
         m_rasterAnnounced = surface;
-        QMetaObject::invokeMethod(this, [this] { emit rasterChanged(); }, Qt::QueuedConnection);
+        // The drawn window moved without a viewport change (a tick, step, DPR or size
+        // change): the axis models and the sibling overlays that redraw on
+        // viewportChanged (candles, algo, paper trading) follow in the next frame.
+        QMetaObject::invokeMethod(this, [this] {
+            emit rasterChanged();
+            emit viewportChanged();
+        }, Qt::QueuedConnection);
     }
 }
 

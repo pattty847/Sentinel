@@ -245,12 +245,20 @@ protected:
         return g;
     }
     // Pixels of `now` that differ from `before` shifted by (dx, dy), over the
-    // interior both cover (a margin away from every edge).
-    static int shiftedDifferences(const QImage &now, const QImage &before, int dx, int dy, int margin = 20) {
-        int differences = 0;
+    // interior both cover (a margin away from every edge). The veil and loading
+    // hatches are stripes in screen pixels by design (they never move with the
+    // cells): hatch pixels are not compared; *compared counts the rest.
+    static int shiftedDifferences(const QImage &now, const QImage &before, int dx, int dy, int margin = 20,
+                                  int *compared = nullptr) {
+        int differences = 0, n = 0;
         for (int y = margin; y < now.height() - margin; ++y)
-            for (int x = margin; x < now.width() - margin; ++x)
-                differences += now.pixel(x, y) != before.pixel(x - dx, y - dy);
+            for (int x = margin; x < now.width() - margin; ++x) {
+                const QRgb a = now.pixel(x, y), b = before.pixel(x - dx, y - dy);
+                if (hatch(a) && hatch(b)) continue;
+                differences += a != b;
+                ++n;
+            }
+        if (compared) *compared = n;
         return differences;
     }
 };
@@ -285,9 +293,10 @@ TEST_F(UgrGpu, SettlesOnTheProductionPath) {
 // px (whole-pixel moves of 0 and 3 px), and a release keeps the dragged picture.
 TEST_F(UgrGpu, CandlesAlignWithHeatmapColumns) {
     noLabels();
-    // 40 columns over 640 px, starting a third of a column in (not minute-aligned).
+    // 41.3 columns over 640 px (15.5 px each: drawn at 15), starting a third of a column
+    // in (not minute-aligned), $417 over 320 px (not a whole number of px per row).
     const int64_t lo = viewLo + minute / 3;
-    ugr->setViewport(lo, lo + 40 * minute, 99'900, 100'300);
+    ugr->setViewport(lo, lo + 41 * minute + 3 * minute / 10, 99'900, 100'317);
     ASSERT_TRUE(settle()) << error.toStdString();
     const double tick = layer().tickPrice();
     ASSERT_GT(tick, 0);
@@ -314,7 +323,8 @@ TEST_F(UgrGpu, CandlesAlignWithHeatmapColumns) {
         const auto mapping = ugr->currentTimeAxisMapping();
         const auto cam = drawn();
         ASSERT_TRUE(mapping.valid && cam.valid);
-        ASSERT_EQ(cam.colPx, 16);
+        ASSERT_EQ(cam.colPx, 15);
+        EXPECT_FALSE(whole(drawn().heightDev * tick / priceSpan())) << "a fractional continuous row height";
         candles->setVisible(true);
         ASSERT_TRUE(frames(3)) << error.toStdString();
         const QImage withCandles = image;
@@ -405,7 +415,7 @@ TEST_F(UgrGpu, CandlesAlignWithHeatmapColumns) {
 TEST_F(UgrGpu, APanMovesEveryLayerByTheSameWholePixels) {
     noLabels();
     const int64_t lo = viewLo + minute / 3;
-    ugr->setViewport(lo, lo + 40 * minute, 99'900, 100'300);
+    ugr->setViewport(lo, lo + 41 * minute + 3 * minute / 10, 99'900, 100'317); // fractional px per cell
     CandleSeriesBuffer buffer;
     std::vector<CandleSeriesBuffer::CandleBar> bars;
     for (int64_t t = (lo / minute - 2) * minute; t < lo + 44 * minute; t += minute) {
@@ -443,8 +453,10 @@ TEST_F(UgrGpu, APanMovesEveryLayerByTheSameWholePixels) {
         ugr->updatePanAt(320 + drag.x(), 160 + drag.y());
         ASSERT_TRUE(frames(1)) << error.toStdString();
         const int dx = int(std::llround(drag.x())), dy = int(std::llround(drag.y()));
-        EXPECT_EQ(shiftedDifferences(image, base, dx, dy), 0) << "frame " << i << ": not the first picture moved by ("
-                                                              << dx << ", " << dy << ")";
+        int pixels = 0;
+        EXPECT_EQ(shiftedDifferences(image, base, dx, dy, 20, &pixels), 0)
+            << "frame " << i << ": not the first picture moved by (" << dx << ", " << dy << ")";
+        EXPECT_GT(pixels, 100'000) << "frame " << i;
         int compared = 0;
         priceAxis.copyTicks(ticks);
         for (const auto &t : ticks) {
@@ -555,13 +567,14 @@ TEST_F(UgrGpu, TheCursorPriceStaysWithinARowAcrossAnIntegerStep) {
 // picture is byte-identical; at a step it translates by whole pixels; C is constant.
 TEST_F(UgrGpu, FollowLiveMovesByWholePixelSteps) {
     noLabels();
-    gpuOn();
+    ugr->setViewport(viewLo, viewLo + 41 * minute + 3 * minute / 10, 99'900, 100'317); // 15.5 px columns
     ugr->enableAutoScroll(true);
     ASSERT_TRUE(settle()) << error.toStdString();
     ASSERT_TRUE(ugr->autoScrollEnabled());
     auto *view = ugr->getViewState();
     const auto cam0 = drawn();
     ASSERT_TRUE(cam0.valid);
+    ASSERT_EQ(cam0.colPx, 15);
     const int64_t step = int64_t(std::llround(0.3 * double(minute) / cam0.colPx));
     const qint64 s0 = view->getVisibleTimeStart(), e0 = view->getVisibleTimeEnd();
     const double p0 = view->getMinPrice(), p1 = view->getMaxPrice();
@@ -596,6 +609,16 @@ TEST_F(UgrGpu, TheClampsDrawOnePixelColumnsAndRows) {
     noLabels();
     gpuOn();
     ASSERT_TRUE(settle()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    // From 2 px columns straight to the 1 column/px clamp (one step), then by the wheel.
+    view->setViewport(view->getVisibleTimeEnd() - 320 * minute, view->getVisibleTimeEnd(), view->getMinPrice(),
+                      view->getMaxPrice());
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    ASSERT_EQ(drawn().colPx, 2);
+    view->setViewport(view->getVisibleTimeEnd() - 640 * minute, view->getVisibleTimeEnd(), view->getMinPrice(),
+                      view->getMaxPrice());
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    EXPECT_EQ(drawn().colPx, 1) << "one column per device pixel at the clamp";
     for (int i = 0; i < 80; ++i) ugr->zoomTimeAt(-120, 320);
     ASSERT_EQ(timeSpan(), 640.0 * minute);
     ASSERT_TRUE(frames(2)) << error.toStdString();
@@ -608,6 +631,9 @@ TEST_F(UgrGpu, TheClampsDrawOnePixelColumnsAndRows) {
     manual.tickMode = heatmap::TickMode::Manual;
     manual.manualTick = 1000; // $10
     ugr->setHeatmapChartSettings(manual, true);
+    ASSERT_TRUE(setRows(2.0));
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ASSERT_EQ(drawn().rowPx, 2);
     for (int i = 0; i < 80; ++i) ugr->zoomPriceAt(-120, 160);
     ASSERT_NEAR(priceSpan(), 3200, 1e-6);
     ASSERT_TRUE(settle()) << error.toStdString();

@@ -173,7 +173,7 @@ private:
     // Render thread: what rasterChanged() last announced.
     struct RasterSurface {
         chart_raster::RasterStep step;
-        double dpr = 0;
+        double dpr = 0, tick = 0;
         int widthDev = 0, heightDev = 0;
         bool operator==(const RasterSurface&) const = default;
     } m_rasterAnnounced;
@@ -467,8 +467,8 @@ signals:
     void candleBufferChanged();
     void autoPriceScaleChanged();
     void liveRenderTick();
-    // A frame drew new whole pixels per row or column, a new device pixel ratio or
-    // surface (queued from the render thread; not per frame).
+    // A frame drew new whole pixels per row or column, a new tick, device pixel ratio
+    // or surface (queued from the render thread with viewportChanged; not per frame).
     void rasterChanged();
 
 protected:
