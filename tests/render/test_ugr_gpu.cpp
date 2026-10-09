@@ -2569,6 +2569,28 @@ TEST(UgrInput, InputRouteReachesTheChartAndAxisAreasOncePerWheel) {
     ASSERT_EQ(apply("wheel", "priceAxis", 20, 200, 120), 200);
     EXPECT_EQ(changes, 2) << "the price axis WheelHandler: one change";
     EXPECT_EQ(timeSpan(), time1) << "price only";
+    {
+        // A trackpad scroll on the price axis: the WheelHandler passes the pixel delta
+        // and the scroll phase through, so it zooms continuously (x1.02 for 40 angle
+        // units, from the window the camera draws), not as a notch.
+        auto *axis = view.rootObject()->findChild<QQuickItem *>("priceAxisControl");
+        ASSERT_TRUE(axis);
+        const QPointF axisAt = axis->mapToScene(QPointF(axis->width() / 2, axis->height() / 2));
+        auto scroll = [&](Qt::ScrollPhase phase, int angle) {
+            QWheelEvent e(axisAt, view.mapToGlobal(axisAt), {0, angle / 4}, {0, angle}, Qt::NoButton, Qt::NoModifier,
+                          phase, false);
+            QCoreApplication::sendEvent(&view, &e);
+        };
+        const auto cam0 = ugr->rasterCameraNow(false);
+        const double before = cam0.valid ? cam0.drawnMaxPrice - cam0.drawnMinPrice : priceSpan();
+        scroll(Qt::ScrollBegin, 0);
+        scroll(Qt::ScrollUpdate, 40);
+        const double during = priceSpan();
+        scroll(Qt::ScrollEnd, 0);
+        EXPECT_NEAR(during, before / 1.02, before * 1e-9) << "continuous, not a notch";
+        EXPECT_FALSE(ugr->zoomGesturing()) << "ScrollEnd ends it";
+        changes = 2;
+    }
     // Time axis drag outward far past the clamp (MouseArea zoomTimeDrag, the release
     // settles on the nearest rung).
     ASSERT_EQ(apply("dragStart", "timeAxis", 500, 10), 200);
