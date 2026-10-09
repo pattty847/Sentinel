@@ -1218,7 +1218,6 @@ std::optional<std::pair<double, double>> UnifiedGridRenderer::gpuFitPriceWindow(
   if (m_candleBuffer && last > first)
     m_candleBuffer->getVisibleSlice(m_activeSymbol, std::max<int64_t>(1, (tf + 500) / 1000), alignedStart, last, bars);
   size_t used = 0;
-  bool allFlat = true;
   double newestClose = 0;
   qint64 newestStart = 0;
   for (const auto& bar : bars) {
@@ -1232,28 +1231,12 @@ std::optional<std::pair<double, double>> UnifiedGridRenderer::gpuFitPriceWindow(
       newestStart = bar.timeStartMs;
       newestClose = std::isfinite(bar.close) && bar.close > 0 ? bar.close : (bar.low + bar.high) * 0.5;
     }
-    allFlat = allFlat && bar.high == bar.low;
     ++used;
   }
+  const bool onePrice = used && hi == lo;
   const double current = m_viewState->getMaxPrice() - m_viewState->getMinPrice();
   if (used) {
     centre = (lo + hi) * 0.5;
-    if (allFlat && m_viewState->autoPriceScale() && m_gpuLayer && !m_gpuLayer->manualMode() &&
-        current > 0 && std::isfinite(current)) {
-      // A flat window has no new scale information. Keep the span and the tick
-      // decision (including one not committed yet); only translate by whole rows.
-      double low = m_viewState->getMinPrice(), high = m_viewState->getMaxPrice();
-      const int64_t units = m_gpuLayer->autoPriceTickUnits();
-      const double row = double(units) / m_gpuLayer->priceScale();
-      if (units > 0 && m_gpuLayer->setAutoPriceTick(units)) update();
-      const double margin = current * kFitPriceMargin;
-      if ((lo <= low + margin || hi >= high - margin) && std::isfinite(row) && row > 0) {
-        const double shift = std::round((centre - (low + high) * .5) / row) * row;
-        low += shift;
-        high += shift;
-      }
-      return std::make_pair(low, high);
-    }
     span = hi > lo ? (hi - lo) * (1.0 + 2.0 * kFitPriceMargin) : current;
   } else {
     if (candlesOnly) return std::nullopt;
@@ -1287,10 +1270,19 @@ std::optional<std::pair<double, double>> UnifiedGridRenderer::gpuFitPriceWindow(
   if (m_viewState->autoPriceScale() && m_gpuLayer && !m_gpuLayer->manualMode()) {
     // Startup and symbol/timeframe switches have no resolution to solve against.
     // This is expected; only a failed solve with current data warrants a warning.
-    if (!m_gpuLayer->hasCurrentResolution()) {
-      if (m_gpuLayer->setAutoPriceTick(std::nullopt)) update();
-      chart_raster::fitPriceToRows(lo, hi, H, tick);
-      return std::make_pair(lo, hi);
+    if (!m_gpuLayer->hasCurrentResolution()) return std::make_pair(lo, hi);
+    if (onePrice && current > 0 && std::isfinite(current)) {
+      // One price (hi == lo) has no new scale information. Keep the span and
+      // leave the tick decision/proposal untouched; translate by drawn whole rows.
+      double low = m_viewState->getMinPrice(), high = m_viewState->getMaxPrice();
+      const double row = m_gpuLayer->tickPrice();
+      const double margin = current * kFitPriceMargin;
+      if ((centre <= low + margin || centre >= high - margin) && std::isfinite(row) && row > 0) {
+        const double shift = std::round((centre - (low + high) * .5) / row) * row;
+        low += shift;
+        high += shift;
+      }
+      return std::make_pair(low, high);
     }
     // Every Auto price fit uses the same raw basis and candidate coverage rule.
     // Publish the tick decision before setViewport notifies the renderer.

@@ -3191,7 +3191,6 @@ TEST_F(UgrZoomCpu, SymbolSwitchBeforeFirstSnapshotUsesPlainFitSilently) {
             {centre, centre + minute, 100150, 100150 + radius, 100150 - radius, 100150,
              double(i), false, 0, false}, i, false);
         double lo = 100150 - radius * 1.12, hi = 100150 + radius * 1.12;
-        chart_raster::fitPriceToRows(lo, hi, 320, layer->tickPrice());
         EXPECT_EQ(v->getMinPrice(), lo);
         EXPECT_EQ(v->getMaxPrice(), hi);
         EXPECT_FALSE(layer->hasCurrentResolution());
@@ -3199,12 +3198,56 @@ TEST_F(UgrZoomCpu, SymbolSwitchBeforeFirstSnapshotUsesPlainFitSilently) {
     EXPECT_EQ(AutoFitWarnings::count.load(), 0);
 }
 
+TEST_F(UgrZoomCpu, SinglePrintStaircaseFitsBothPricesWithMargin) {
+    auto* v = chart.getViewState();
+    const double span = v->getMaxPrice() - v->getMinPrice();
+    const double low = 100150 - span, high = 100150 + span;
+    CandleSeriesBuffer staircase;
+    staircase.applyHistory("BTC-USD", 60, {
+        {centre - minute, centre, low, low, low, low, 1, false, 0, false},
+        {centre, centre + minute, high, high, high, high, 1, false, 0, false}});
+    chart.setCandleBuffer(&staircase);
+    EXPECT_LE(v->getMinPrice(), low - 2 * span * UnifiedGridRenderer::kFitPriceMargin);
+    EXPECT_GE(v->getMaxPrice(), high + 2 * span * UnifiedGridRenderer::kFitPriceMargin);
+    EXPECT_GT(v->getMaxPrice() - v->getMinPrice(), 2 * span);
+    checkSettle();
+    chart.setCandleBuffer(&candles);
+}
+
+TEST_F(UgrZoomCpu, SymbolSwitchToOnePriceLeavesTheTickDecisionToTheFrame) {
+    auto* layer = chart.gpuHeatmapLayer();
+    const auto oldTick = layer->tickUnits();
+    constexpr double price = .0010015;
+    candles.applyHistory("TINY-USD", 60,
+        {{centre, centre + minute, price, price, price, price, 1, false, 0, false}});
+    chart.setActiveSymbol("TINY-USD");
+    EXPECT_FALSE(layer->autoPriceTickUnits());
+    ASSERT_TRUE(waitFor([&] { return layer->hasCurrentResolution(); }));
+    EXPECT_FALSE(layer->autoPriceTickUnits());
+    auto* v = chart.getViewState();
+    const auto& settings = layer->settings();
+    const auto expected = heatmap::autoTickUnits(layer->snapshot()->resolution, layer->autoTickState(),
+        v->getVisibleTimeStart(), v->getVisibleTimeEnd(), v->getMinPrice(), v->getMaxPrice(), 320,
+        {settings.minRowPx, settings.hysteresis});
+    ASSERT_GT(expected, 0);
+    EXPECT_NE(expected, oldTick); // the old symbol's tick must not be pinned
+    // Queue the frame's Auto proposal, then refit before its queued commit runs.
+    layer->chooseTickForView({double(v->getVisibleTimeStart()), double(v->getVisibleTimeEnd()),
+                             v->getMinPrice(), v->getMaxPrice()});
+    candles.applyUpdate("TINY-USD", 60,
+        {centre, centre + minute, price, price, price, price, 2, false, 0, false}, 1, false);
+    EXPECT_FALSE(layer->autoPriceTickUnits());
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    EXPECT_EQ(layer->tickUnits(), expected) << "the refit must not cancel the pending Auto proposal";
+    EXPECT_FALSE(layer->autoPriceTickUnits());
+}
+
 TEST_F(UgrZoomCpu, FlatCandlesKeepSpanAndTickAcrossRevisionsTranslationsAndClicks) {
     auto* v = chart.getViewState();
     const auto version = v->getViewportVersion();
     const double lo = v->getMinPrice(), hi = v->getMaxPrice(), span = hi - lo;
     const auto tick = chart.gpuHeatmapLayer()->autoPriceTickUnits();
-    const double row = double(tick) / chart.gpuHeatmapLayer()->priceScale();
+    const double row = chart.gpuHeatmapLayer()->tickPrice();
     CandleSeriesBuffer flat;
     flat.applyHistory("BTC-USD", 60,
         {{centre, centre + minute, 100150, 100150, 100150, 100150, 1, false, 0, false}});
@@ -3836,9 +3879,26 @@ TEST(UgrInput, InputRouteReachesTheChartAndAxisAreasOncePerWheel) {
     ASSERT_EQ(apply("doubleClick", "priceAxis", 20, 200), 200);
     EXPECT_EQ(changes - before, 1) << "price axis double-click: one change";
     EXPECT_TRUE(ugr->autoPriceScale()) << "the price-axis double-click turns it on";
-    // Before resolution arrives, the plain whole-row fit may expand the margin.
-    EXPECT_LE(state->getMinPrice(), 100'800 - 400 * UnifiedGridRenderer::kFitPriceMargin);
-    EXPECT_GE(state->getMaxPrice(), 101'200 + 400 * UnifiedGridRenderer::kFitPriceMargin);
+    // With resolution, Auto chooses the tick and the fit widens to whole rows
+    // at it. Before resolution, the raw bounds are exact.
+    auto checkPriceFit = [&] {
+        auto* layer = ugr->gpuHeatmapLayer();
+        const double rawLo = 100'800 - 400 * UnifiedGridRenderer::kFitPriceMargin;
+        const double rawHi = 101'200 + 400 * UnifiedGridRenderer::kFitPriceMargin;
+        if (layer->hasCurrentResolution()) {
+            ASSERT_TRUE(layer->autoPriceTickUnits());
+            const double P = chart_raster::devicePixels(ugr->height(), dpr) *
+                             double(*layer->autoPriceTickUnits()) / layer->priceScale() / priceSpan();
+            EXPECT_NEAR(P, std::round(P), 1e-8);
+            EXPECT_GE(P, 1);
+            EXPECT_LE(state->getMinPrice(), rawLo);
+            EXPECT_GE(state->getMaxPrice(), rawHi);
+        } else {
+            EXPECT_EQ(state->getMinPrice(), rawLo);
+            EXPECT_EQ(state->getMaxPrice(), rawHi);
+        }
+    };
+    checkPriceFit();
     // A price-axis drag turns it off.
     ASSERT_EQ(apply("dragStart", "priceAxis", 20, 200), 200);
     ASSERT_EQ(apply("dragMove", "priceAxis", 20, 260), 200);
@@ -3860,7 +3920,7 @@ TEST(UgrInput, InputRouteReachesTheChartAndAxisAreasOncePerWheel) {
     click();
     EXPECT_TRUE(ugr->autoPriceScale()) << "the A toggle turns it on";
     EXPECT_EQ(changes - before, 1);
-    EXPECT_LE(state->getMinPrice(), 100'800 - 400 * UnifiedGridRenderer::kFitPriceMargin);
+    checkPriceFit();
     QElapsedTimer pause; // not a double-click
     pause.start();
     while (pause.elapsed() < 600) QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
