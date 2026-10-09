@@ -530,6 +530,11 @@ TEST(ChartRasterZoom, FollowShiftsByWholeBucketsOutsideOneDrawnPixel) {
     EXPECT_EQ(followShift(1'000'000, 1'000'000 + 8'573, tf, 7), tf) << "one bucket";
     EXPECT_EQ(followShift(1'000'000, 1'000'000 + tf + 1, tf, 7), 2 * tf);
     EXPECT_EQ(followShift(1'000'000, 1'000'000 + 123, tf, 0), 123) << "no camera: exact";
+    // Astra's case after the 1m -> 5m switch (C = 7): the end keeps the drawn 49 px of
+    // padding (2,100,000 ms), the nominal padding is 2,121,429 ms: inside one drawn
+    // pixel (42,858 ms), so follow-live leaves the Now column where it is.
+    const int64_t liveEnd = 1'790'000'100'000 / (5 * kMinute) * (5 * kMinute);
+    EXPECT_EQ(followShift(liveEnd + 2'100'000, liveEnd + 2'121'429, 5 * kMinute, 7), 0);
 }
 } // namespace
 

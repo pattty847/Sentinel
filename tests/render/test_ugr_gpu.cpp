@@ -250,7 +250,7 @@ protected:
     }
     bool landGlide() {
         clockMs += chart_raster::kZoomGlideMs + 1;
-        return frames(1) && !ugr->zoomGliding();
+        return frames(1);
     }
     void noLabels() {
         auto settings = brightSettings();
@@ -2091,7 +2091,7 @@ TEST_F(UgrGpu, EveryWheelClickChangesTheDrawnZoom) {
             ASSERT_FALSE(before.free);
             if (direction < 0 && before.colPx <= minCol) break; // one column per pixel
             notch(direction, {320, 160});
-            ASSERT_TRUE(ugr->zoomGliding()) << "click " << clicks << ": the click starts a glide";
+            EXPECT_TRUE(ugr->zoomGliding()) << "click " << clicks << ": the click starts a glide";
             ASSERT_TRUE(settle()) << error.toStdString();
             const auto after = drawn();
             SCOPED_TRACE(testing::Message() << "click " << clicks++ << " direction " << direction << " col "
@@ -2157,6 +2157,7 @@ TEST_F(UgrGpu, AGlideLandsOnTheRestFrameOfItsTarget) {
     }
     EXPECT_GE(blended, 8) << "fractional rows and columns during the glide";
     ASSERT_TRUE(landGlide()) << error.toStdString();
+    EXPECT_FALSE(ugr->zoomGliding()) << "landed";
     const auto landed = drawn();
     EXPECT_FALSE(landed.free) << "the landing frame is the rest camera";
     EXPECT_FALSE(layer().tileStats().coverageBlend.load()) << "floor() from the landing frame";
@@ -2271,6 +2272,7 @@ TEST_F(UgrGpu, APinchZoomsContinuouslyAndSettlesOnARung) {
         EXPECT_FALSE(ugr->zoomGesturing());
         ASSERT_TRUE(ugr->zoomGliding()) << "the end eases to a rung";
         ASSERT_TRUE(landGlide()) << error.toStdString();
+        EXPECT_FALSE(ugr->zoomGliding());
         const auto landed = drawn();
         EXPECT_FALSE(landed.free);
         EXPECT_LE(std::abs(landed.colPx - last), 0.5 + 1e-9) << "the nearest column rung";
@@ -2282,9 +2284,11 @@ TEST_F(UgrGpu, APinchZoomsContinuouslyAndSettlesOnARung) {
     }
 }
 
-// Acceptance 7: a zoom-out click glide bins its whole extent once, at its start: no
-// re-bin on any later glide frame (the data for the target is resident: the wider view
-// was shown before).
+// Acceptance 7: a zoom-out click glide bins its whole extent once, at its start: the
+// tiles of the start and target windows are the node's slots from the first glide
+// frame on (no tile joins later) and bin work happens on at most one frame. The
+// target's data is resident (the wider view was shown before), so only the extent
+// decides when bins are needed.
 TEST_F(UgrGpu, AClickGlideBinsItsExtentOnce) {
     noLabels();
     manualZoomClock();
@@ -2293,22 +2297,29 @@ TEST_F(UgrGpu, AClickGlideBinsItsExtentOnce) {
     auto *view = ugr->getViewState();
     view->setAutoPriceScale(false);
     ASSERT_TRUE(settle()) << error.toStdString();
-    const QPointF at(320, 160);
-    // Warm the target's data: the zoomed-out view, then back.
+    const QPointF at(160, 160); // a quarter across: the zoom-out reaches a tile to the right
     const qint64 s0 = view->getVisibleTimeStart(), e0 = view->getVisibleTimeEnd();
     const double p0 = view->getMinPrice(), p1 = view->getMaxPrice();
-    notch(-2, at);
+    const auto anchor0 = view->rasterAnchor();
+    const auto &st = layer().tileStats();
+    const uint32_t startSlots = st.slotCount.load();
+    // Warm the target's data: the zoomed-out view, then back.
+    notch(-4, at);
     ASSERT_TRUE(settle()) << error.toStdString();
+    const uint32_t targetSlots = st.slotCount.load();
+    ASSERT_GT(targetSlots, startSlots) << "the target reaches more tiles than the start";
+    view->setRasterAnchor(anchor0.fracX, anchor0.fracY);
     ugr->setViewport(s0, e0, p0, p1);
     ASSERT_TRUE(settle()) << error.toStdString();
-    const auto &st = layer().tileStats();
+    ASSERT_EQ(st.slotCount.load(), startSlots);
     const uint64_t rebins0 = st.rebins.load(), made0 = st.binsMade.load();
     int framesThatBinned = 0;
     uint64_t lastRebins = rebins0, lastMade = made0;
     const qint64 t0 = clockMs;
-    notch(-2, at);
+    notch(-4, at);
     for (qint64 ms = 0; ms <= chart_raster::kZoomGlideMs + 1; ms += 10) {
         ASSERT_TRUE(frameAt(t0 + ms)) << error.toStdString();
+        if (ugr->zoomGliding()) EXPECT_EQ(st.slotCount.load(), targetSlots) << ms << " ms: the glide's whole extent";
         const uint64_t r = st.rebins.load(), m = st.binsMade.load();
         framesThatBinned += (r != lastRebins || m != lastMade);
         lastRebins = r;
@@ -2316,7 +2327,7 @@ TEST_F(UgrGpu, AClickGlideBinsItsExtentOnce) {
     }
     ASSERT_FALSE(ugr->zoomGliding());
     EXPECT_LE(framesThatBinned, 1) << "rebins " << lastRebins - rebins0 << " bins made " << lastMade - made0;
-    EXPECT_GT(drawn().drawnEndMs - drawn().drawnStartMs, double(e0 - s0)) << "the glide zoomed out";
+    EXPECT_EQ(st.slotCount.load(), targetSlots);
 }
 
 // Acceptance 8: after a glide the rest frames are slice A's: no coverage, the drawn
