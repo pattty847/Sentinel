@@ -526,37 +526,6 @@ Rectangle {
         z: 3
         enabled: false
 
-        function getXForTimePoint(timePoint) {
-            var viewport = {
-                timeStart_ms: unifiedGridRenderer.visibleTimeStart,
-                timeEnd_ms: unifiedGridRenderer.visibleTimeEnd,
-                priceMin: unifiedGridRenderer.minPrice,
-                priceMax: unifiedGridRenderer.maxPrice,
-                width: unifiedGridRenderer.width,
-                height: unifiedGridRenderer.height
-            };
-            
-            var timeRange = viewport.timeEnd_ms - viewport.timeStart_ms;
-            var priceRange = viewport.priceMax - viewport.priceMin;
-            
-            if (timeRange <= 0 || priceRange <= 0) return 0;
-            
-            var normalizedTime = (timePoint - viewport.timeStart_ms) / timeRange;
-            var normalizedPrice = (unifiedGridRenderer.minPrice - viewport.priceMin) / priceRange;
-            
-            normalizedTime = Math.max(0, Math.min(1, normalizedTime));
-            normalizedPrice = Math.max(0, Math.min(1, normalizedPrice));
-            
-            var x = normalizedTime * viewport.width;
-            var y = (1.0 - normalizedPrice) * viewport.height;
-            
-            return x;
-        }
-        
-        function getTimePointForIndex(index, step, timeframe) {
-            return unifiedGridRenderer.visibleTimeStart + (index * step * timeframe);
-        }
-        
         Repeater {
             id: gridRepeater
             model: root.showTimeGrid ? timeAxisModel : null
@@ -567,7 +536,8 @@ Rectangle {
                 color: model.isMajorTick ? "#F0F0F0" : "#DCDCDC"
                 visible: root.showTimeGrid
                 
-                x: model.position + unifiedGridRenderer.panVisualOffset.x
+                // The time axis model maps through the raster camera (drag included).
+                x: model.position
             }
         }
     }

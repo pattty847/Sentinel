@@ -124,6 +124,14 @@ struct ViewportSnapshot {
     std::optional<quint64> viewportVersion;
     std::optional<double> widthPx;
     std::optional<double> heightPx;
+    // The last drawn frame's raster camera (whole-pixel mapping): its window, drawn
+    // device pixels per row and per column, and device pixel ratio.
+    struct Drawn {
+        double startMs = 0, endMs = 0, priceMin = 0, priceMax = 0;
+        int rowPx = 0, colPx = 0;
+        double dpr = 1;
+    };
+    std::optional<Drawn> drawn;
 };
 
 struct CandleRow {

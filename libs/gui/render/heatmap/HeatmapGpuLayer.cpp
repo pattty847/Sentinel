@@ -126,6 +126,7 @@ void HeatmapGpuLayer::destroyController() {
     live_.reset();
     resolution_.reset();
     tickUnits_ = autoUnits_ = 0;
+    proposedTickUnits_.store(0, std::memory_order_relaxed);
     postedTickUnits_ = -1;
     tickKey_ = {};
     lastLiveVersion_ = 0;
@@ -136,6 +137,7 @@ void HeatmapGpuLayer::destroyController() {
 void HeatmapGpuLayer::setSymbol(const std::string &symbol) {
     if (symbol_ == symbol) return;
     symbol_ = symbol;
+    invalidateTickProposal();
     lastLiveEndMs_ = 0;
     resetLabels(true); // the old symbol's labels never draw on the new picture
     autoUnits_ = 0; // Auto evaluates fresh on the new symbol's data
@@ -147,6 +149,7 @@ void HeatmapGpuLayer::setSymbol(const std::string &symbol) {
 void HeatmapGpuLayer::setTimeframeMs(int64_t tfMs) {
     if (tfMs <= 0 || tfMs_ == tfMs) return;
     tfMs_ = tfMs;
+    invalidateTickProposal();
     autoUnits_ = 0;
     restoreTick(); // Manual: this timeframe's remembered tick
     noteLimits();
@@ -171,6 +174,7 @@ void HeatmapGpuLayer::setSurface(double widthPx, double heightPx, double dpr) {
 void HeatmapGpuLayer::setSettings(const HeatmapChartSettings &settings, bool explicitManualTick) {
     const auto previous = settings_;
     settings_ = settings;
+    invalidateTickProposal(); // tick mode, Manual tick, minimum row height or hysteresis may change
     const bool wasManual = manualMode_;
     const int64_t wasUnits = manualUnits_;
     manualMode_ = settings.tickMode == TickMode::Manual;
@@ -202,6 +206,7 @@ void HeatmapGpuLayer::setTone(PaletteTone tone) {
 
 void HeatmapGpuLayer::setTickMemory(const ManualTickMemory &memory) {
     tickMemory_ = memory;
+    invalidateTickProposal();
     restoreTick();
     noteLimits();
 }
@@ -362,19 +367,28 @@ int64_t HeatmapGpuLayer::chooseTick(const ViewWindow &view) {
     return autoUnits_ > 0 ? autoUnits_ : tickUnits_;
 }
 
-bool HeatmapGpuLayer::prepareFrame(HeatmapTileNode::Frame &frame, const QRectF &rect, const ViewWindow &view) {
-    if (!controller_) return false;
-    // GUI thread blocked: take the freshest snapshot, pick the tick, hand both to
-    // the node in this frame (no thread hop on a tick change).
+void HeatmapGpuLayer::chooseTickForView(const ViewWindow &view) {
+    if (!controller_) return;
+    // GUI thread blocked: take the freshest snapshot, pick the tick; prepareFrame
+    // hands both to the node in this frame (no thread hop on a tick change).
     if (auto latest = controller_->latestSnapshot(); latest && latest != snapshot_) snapshot_ = std::move(latest);
     live_ = controller_->latestLive(); // pointer reads; the node uploads only a new version
     resolution_ = controller_->latestResolution();
     const int64_t tick = priceKnown_ ? chooseTick(view) : 0; // nothing to draw before the price view exists
-    if (tick != tickUnits_) {
-        tickUnits_ = tick;
-        ++tickChanges_;
-        sLog_Probe("heatmap.gpu.tick", "tf=" << tfMs_ << " units=" << tick << " mode=" << (manualMode_ ? "manual" : "auto"));
-        QMetaObject::invokeMethod(this, [this] { emit tickChanged(); }, Qt::QueuedConnection);
+    // The drawn tick changes on the GUI thread (commitProposedTick), never here: the
+    // chart then moves every layer that maps through the raster camera (axis models,
+    // candles, paper and algo overlays) before the frame that draws the new rows, so no
+    // frame mixes two mappings. This frame keeps the drawn tick.
+    if (tick != proposedTickUnits_.load(std::memory_order_relaxed)) {
+        proposedTickUnits_.store(tick, std::memory_order_relaxed);
+        // Tagged with the tick policy it was chosen under (symbol, timeframe, settings,
+        // Manual memory): a GUI-side change before the commit makes it stale.
+        proposedPolicy_.store(tickPolicy_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        if (tick != tickUnits_) {
+            sLog_Probe("heatmap.gpu.tick", "proposed tf=" << tfMs_ << " units=" << tick
+                       << " mode=" << (manualMode_ ? "manual" : "auto"));
+            QMetaObject::invokeMethod(this, [this] { commitProposedTick(); }, Qt::QueuedConnection);
+        }
     }
     if (tickUnits_ != postedTickUnits_ || manualMode_ != postedManual_) {
         postedTickUnits_ = tickUnits_;
@@ -383,6 +397,31 @@ bool HeatmapGpuLayer::prepareFrame(HeatmapTileNode::Frame &frame, const QRectF &
         QMetaObject::invokeMethod(controller_, [c = controller_, mode, units = tickUnits_] { c->setTickRequest(mode, units); },
                                   Qt::QueuedConnection);
     }
+}
+
+void HeatmapGpuLayer::invalidateTickProposal() {
+    // GUI thread: a pending proposal belongs to the old policy; the next frame chooses
+    // afresh under the new one (and proposes even the same units again).
+    tickPolicy_.fetch_add(1, std::memory_order_relaxed);
+    proposedTickUnits_.store(tickUnits_, std::memory_order_relaxed);
+}
+
+void HeatmapGpuLayer::commitProposedTick() {
+    // GUI thread (the render thread only reads tickUnits_ while the GUI thread is blocked).
+    const int64_t tick = proposedTickUnits_.load(std::memory_order_relaxed);
+    if (tick == tickUnits_) return; // superseded (the proposal went back to the drawn tick)
+    if (proposedPolicy_.load(std::memory_order_relaxed) != tickPolicy_.load(std::memory_order_relaxed)) {
+        sLog_Probe("heatmap.gpu.tick", "stale proposal dropped tf=" << tfMs_ << " units=" << tick);
+        return; // chosen under another symbol, timeframe or tick setting: the next frame proposes again
+    }
+    tickUnits_ = tick;
+    ++tickChanges_;
+    sLog_Probe("heatmap.gpu.tick", "tf=" << tfMs_ << " units=" << tick << " mode=" << (manualMode_ ? "manual" : "auto"));
+    emit tickChanged();
+}
+
+bool HeatmapGpuLayer::prepareFrame(HeatmapTileNode::Frame &frame, const QRectF &rect, const ViewWindow &view) {
+    if (!controller_) return false;
     frame.spans = snapshot_;
     frame.capacity = capacity_;
     frame.tfMs = tfMs_;
@@ -743,11 +782,15 @@ void HeatmapGpuLayer::refreshControllerStats() const {
     }, Qt::QueuedConnection);
 }
 
+void HeatmapGpuLayer::noteRaster(int rowPx, int colPx, double rowPxContinuous) {
+    rowPxDrawn_.store(rowPx, std::memory_order_relaxed);
+    colPxDrawn_.store(colPx, std::memory_order_relaxed);
+    rowPxContinuous_.store(rowPxContinuous, std::memory_order_relaxed);
+}
+
 QVariantMap HeatmapGpuLayer::metrics() const {
     const auto &s = *tileStats_;
     const double tick = tickPrice();
-    const double heightPx = heightPx_ * dpr_;
-    const double priceSpan = view_.priceHi - view_.priceLo;
     QVariantMap m{{"active", active_}, {"symbol", QString::fromStdString(symbol_)}, {"timeframeMs", qlonglong(tfMs_)},
                   {"mode", manualMode_ ? QStringLiteral("manual") : QStringLiteral("auto")},
                   {"tick", tick}, {"tickUnits", qlonglong(tickUnits_)},
@@ -755,7 +798,9 @@ QVariantMap HeatmapGpuLayer::metrics() const {
                   {"hysteresis", settings_.hysteresis}, {"minRowPx", settings_.minRowPx},
                   {"crossfadeMs", settings_.crossfadeMs}, {"crossfading", s.crossfading.load()},
                   {"holding", s.holding.load()}, {"tickChanges", qulonglong(tickChanges_)},
-                  {"rowPx", tick > 0 && priceSpan > 0 ? tick * heightPx / priceSpan : 0.0},
+                  {"rowPx", rowPxContinuous_.load(std::memory_order_relaxed)},
+                  {"rowPxDrawn", rowPxDrawn_.load(std::memory_order_relaxed)},
+                  {"colPxDrawn", colPxDrawn_.load(std::memory_order_relaxed)},
                   {"indicator", resolutionIndicator()}, {"settled", settled()},
                   {"lastBinMs", s.lastBinMs.load()}, {"prepareMs", s.prepareMs.load()},
                   {"gpuFrameMs", s.gpuFrameMs.load()}, {"gpuCapBytes", qulonglong(settings_.gpuCapBytes)},

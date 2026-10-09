@@ -47,7 +47,12 @@ void UnifiedGridRenderer::init() {
     connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::tickChanged, this, [this] {
         applyGpuLimits();
         refitAutoPrice(); // the fit's min/max price spans follow the tick
+        syncGpuView();    // the drawn rows (and so the drawn price window) follow it too
+        // Before the frame that draws the new tick: the axis models recalculate on
+        // heatmapTickSizeChanged, the sibling overlays (candles, paper, algo) redraw on
+        // viewportChanged; all of them sync with the new raster camera in that frame.
         emit heatmapTickSizeChanged();
+        emit viewportChanged();
         update();
     });
     connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::limitsChanged, this, [this] {
@@ -104,6 +109,18 @@ void UnifiedGridRenderer::init() {
     // Auto price scale (gpu): every setViewport takes its price from the visible candles.
     m_viewState->setPriceFit([this](qint64 start, qint64 end, double& priceMin, double& priceMax) {
         return autoPriceFit(start, end, priceMin, priceMax);
+    });
+    // Whole-pixel mapping: a drag commits exactly the whole device pixels it shows, and
+    // a zoom keeps what is drawn under the cursor.
+    m_viewState->setPanShift([this](QPointF drag, qint64& timeShiftMs, double& priceShift) {
+        return rasterPanShift(drag, timeShiftMs, priceShift);
+    });
+    m_viewState->setDrawnPoint([this](double fracX, double fracY, double& timeMs, double& price) {
+        const auto cam = rasterCameraNow(false);
+        if (!cam.valid) return false;
+        timeMs = cam.timeAtXDev(fracX * cam.widthDev);
+        price = cam.priceAtYDev(fracY * cam.heightDev);
+        return true;
     });
     connect(m_viewState.get(), &GridViewState::priceInteracted, this, [this]() {
         m_priceCarry.reset(); // the user owns price now: no pending carry replaces it

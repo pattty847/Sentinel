@@ -9,11 +9,12 @@
 // - the tick policy (interaction spec rules 1-4) with its TickKey cache,
 //   Manual tick memory per (symbol, timeframe) and the offered presets,
 // - the per-chart node frame inputs (palette, style, budgets) and HeatmapTileStats.
-// prepareFrame() runs in updatePaintNode (render thread, GUI thread blocked): it
-// takes the freshest snapshot, chooses the tick (cached by TickKey: no work when
-// nothing changed) and fills the HeatmapTileNode frame in the same frame, then
-// queues the tick request to the controller. No allocation per frame beyond the
-// lab's (the node frame holds shared pointers).
+// chooseTickForView() and prepareFrame() run in updatePaintNode (render thread,
+// GUI thread blocked): the first takes the freshest snapshot, chooses the tick
+// (cached by TickKey: no work when nothing changed) and queues the tick request to
+// the controller; the second fills the HeatmapTileNode frame for the raster
+// camera's drawn view in the same frame. No allocation per frame beyond the lab's
+// (the node frame holds shared pointers).
 #include "HeatmapDataService.hpp"
 #include "HeatmapPalette.hpp"
 #include "HeatmapTileNode.hpp"
@@ -24,6 +25,7 @@
 #include <QVariantMap>
 #include <QObject>
 #include <QTimer>
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -76,10 +78,21 @@ public:
     void setTickMemory(const ManualTickMemory &memory);
     const ManualTickMemory &tickMemory() const { return tickMemory_; }
 
-    // Render thread, GUI thread blocked (updatePaintNode). `view` is the view the
-    // chart draws now (drag offset baked in). Returns false when there is nothing
-    // to draw yet (no controller).
-    bool prepareFrame(HeatmapTileNode::Frame &frame, const QRectF &rect, const ViewWindow &view);
+    // Render thread, GUI thread blocked (updatePaintNode), in this order each frame:
+    // chooseTickForView takes the freshest snapshot and chooses the tick for the
+    // continuous view (committed + drag: Auto decides on the continuous camera);
+    // the chart then computes its raster camera at that tick, and prepareFrame
+    // fills the node frame and posts labels for `drawnView`, the raster camera's
+    // window (exactly what is on screen) over `rect`. prepareFrame returns false
+    // when there is nothing to draw yet (no controller).
+    // The tick it chooses is a proposal: commitProposedTick (queued to the GUI thread)
+    // makes it the drawn tick and emits tickChanged, so the chart moves every dependent
+    // layer before the next frame draws it.
+    void chooseTickForView(const ViewWindow &view);
+    bool prepareFrame(HeatmapTileNode::Frame &frame, const QRectF &rect, const ViewWindow &drawnView);
+    // Render thread: the frame's drawn device pixels per row and column and the
+    // continuous rows' height (device px) for metrics() (atomics; GUI-thread reads).
+    void noteRaster(int rowPx, int colPx, double rowPxContinuous);
 
     // Spec rules 1, 2 and 9 for the chart's GridViewState (0 = none): one column
     // per physical pixel; Manual: one row per physical pixel.
@@ -258,6 +271,14 @@ private:
     std::vector<double> liquidityScratch_;
     LabelCounters labelCounters_;
     std::shared_ptr<HeatmapCellCapture> capture_;
+    std::atomic<int> rowPxDrawn_{0}, colPxDrawn_{0};
+    std::atomic<int64_t> proposedTickUnits_{0}; // render thread's choice, committed on the GUI thread
+    // The tick policy generation (GUI thread: symbol, timeframe, settings, Manual memory)
+    // and the one the pending proposal was chosen under; a mismatch drops the proposal.
+    std::atomic<uint64_t> tickPolicy_{0}, proposedPolicy_{0};
+    void invalidateTickProposal();
+    void commitProposedTick();
+    std::atomic<double> rowPxContinuous_{0.0};
 
     void createController();
     void destroyController();

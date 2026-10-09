@@ -164,9 +164,28 @@ private:
     bool m_tpoLayerEnabled = false;
     bool m_volumeProfileLayerEnabled = false;
 
-    TimeAxisMapping m_lastTimeAxisMapping;
     mutable std::mutex m_frameContextMutex;
     MappingFrameContext m_lastFrameContext;
+    // Whole-pixel mapping: last frame's drawn pixels per row/column (the step rule's
+    // hysteresis state). Written by the render thread (GUI blocked), read by the GUI
+    // thread's rasterCameraNow(); under m_frameContextMutex.
+    chart_raster::RasterStep m_rasterStep;
+    // Render thread: what rasterChanged() last announced.
+    struct RasterSurface {
+        chart_raster::RasterStep step;
+        double dpr = 0, tick = 0;
+        int widthDev = 0, heightDev = 0;
+        bool operator==(const RasterSurface&) const = default;
+    } m_rasterAnnounced;
+    QMetaObject::Connection m_screenChangedConn;
+    QMetaObject::Connection m_beforeSyncConn;
+    // Render thread: this sync's frame (context, tick, raster camera), prepared in
+    // beforeSynchronizing and drawn by updatePaintNode in the same sync.
+    struct SyncFrame {
+        FrameContext frame;
+        bool drawHeatmap = false;
+        bool ready = false;
+    } m_sync;
 
     ChartTextAtlas m_chartTextAtlas;
     bool m_chartTextAtlasBuilt = false;
@@ -366,6 +385,11 @@ public:
     TimeAxisMapping lastTimeAxisMapping() const { return currentTimeAxisMapping(); }
     MappingFrameContext currentFrameContext() const override;
     TimeAxisMapping currentTimeAxisMapping() const override;
+    // GUI thread: the raster camera the next frame computes from the current view
+    // (same inputs and hysteresis state; a tick change in that frame aside). The axis
+    // models, the drawn window posted to the controller and the pan commit use it;
+    // hit tests use the published frame (currentFrameContext().raster).
+    chart_raster::RasterCamera rasterCameraNow(bool includeDrag = true) const;
     void applyClientConfig(const ClientConfig& config);
     void applyTpoConfig(const ClientTpoConfig& tpo);
     void applyServerConfig(const ServerConfig& config);
@@ -443,6 +467,9 @@ signals:
     void candleBufferChanged();
     void autoPriceScaleChanged();
     void liveRenderTick();
+    // A frame drew new whole pixels per row or column, a new tick, device pixel ratio
+    // or surface (queued from the render thread with viewportChanged; not per frame).
+    void rasterChanged();
 
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) override;
@@ -464,8 +491,14 @@ private:
     QSGNode* ensureGpuRootNode(QSGNode* oldNode, heatmap::gpu::HeatmapTileNode** tile);
     QSGNode* updateGpuPaintNode(QSGNode* oldNode, FrameContext& frame, bool profile);
     void updateGpuLabels(const FrameContext& frame, bool prepared);
-    // TimeAxisMapping from the viewport only (plan section 2 "Mapping").
-    void computeGpuFrameMapping(FrameContext& frame, heatmap::gpu::ViewWindow& view, double tickSize);
+    // The frame's raster camera and its TimeAxisMapping (whole-pixel mapping, once
+    // per frame, at the layer's tick for this frame).
+    void computeGpuFrameMapping(FrameContext& frame);
+    void prepareSyncFrame();
+    chart_raster::RasterInputs rasterInputs(const FrameViewportSnapshot& viewport, double tick, double width,
+                                            double height, double dpr) const;
+    // The committed shifts for a drag (GridViewState::PanShift).
+    bool rasterPanShift(QPointF drag, qint64& timeShiftMs, double& priceShift) const;
     void renderTradeOverlays(QSGNode* parent, const FrameContext& frame, bool drawFootprint, bool drawTpo,
                              std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads);
     void syncGpuView();
@@ -486,7 +519,13 @@ private:
     // Auto-fit (fitView). Window pieces return nullopt when nothing is known.
     std::optional<std::pair<qint64, qint64>> gpuFitTimeWindow() const;
     // candlesOnly: no live-price fallback (the auto price scale's fit).
-    std::optional<std::pair<double, double>> gpuFitPriceWindow(qint64 start, qint64 end, bool candlesOnly) const;
+    // The candles fitted are those the stored window [start, end] draws: the raster
+    // camera's drawn time window (current anchor, or anchorFracX when the caller sets
+    // one with this change; DPR, column hysteresis).
+    std::optional<std::pair<double, double>> gpuFitPriceWindow(qint64 start, qint64 end, bool candlesOnly,
+                                                               std::optional<double> anchorFracX = std::nullopt) const;
+    std::pair<double, double> drawnTimeWindow(qint64 start, qint64 end,
+                                              std::optional<double> anchorFracX = std::nullopt) const;
     // GridViewState's price fit while auto price scale is on. 
     bool autoPriceFit(qint64 start, qint64 end, double& priceMin, double& priceMax);
     // Auto price scale on: the current time range through setViewport (a bump only

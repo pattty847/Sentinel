@@ -37,8 +37,8 @@ Overlays are independent C++ classes that manage their respective GPU resources 
 
 ## 4. Coordinate Systems and Mapping
 
-### CoordinateSystem
-A stateless, QML-compatible math utility class that performs simple arithmetic transformations between World (price/time) and Screen (pixels) given a specific `Viewport`. 
+### Raster camera
+`chart_raster::computeRaster` (`render/ChartRaster.hpp`) turns the stored viewport into what the chart draws: whole device pixels per heatmap row and column, edges on device pixels, drags as whole pixels (see `docs/ARCHITECTURE.md`, "Whole-pixel mapping"). `UnifiedGridRenderer::worldToScreen`/`screenToWorld` (QML hit tests) use the last drawn frame's mapping; the axis models use `rasterCameraNow()`.
 
 ### TimeAxisMapping
 `TimeAxisMapping` is the single source of truth produced by UGR on every frame.

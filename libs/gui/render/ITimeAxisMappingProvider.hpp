@@ -1,6 +1,7 @@
 // Mapping provider contract for render-frame time/price transforms.
 #pragma once
 
+#include "ChartRaster.hpp"
 #include "TimeAxisMapping.hpp"
 #include <QPointF>
 #include <QRectF>
@@ -31,6 +32,8 @@ struct MappingFrameContext {
     uint64_t candleGeneration = 0;
 
     TimeAxisMapping mapping;
+    // The frame's raster camera (whole-pixel mapping): the drawn window, P and C.
+    chart_raster::RasterCamera raster;
 };
 
 class ITimeAxisMappingProvider {

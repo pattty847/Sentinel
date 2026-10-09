@@ -3,11 +3,11 @@
 
 #include "SentinelLogging.hpp"
 #include "render/FrameContextBuilder.hpp"
-#include "render/UgrFrameMath.hpp"
 #include "render/VolumeProfileState.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
 #include "render/heatmap/HeatmapTileNode.hpp"
 
+#include <QQuickWindow>
 #include <QSGOpacityNode>
 #include <algorithm>
 #include <cmath>
@@ -34,6 +34,7 @@ void UnifiedGridRenderer::publishFrameContext(const FrameContext& frame) {
     published.footprintGeneration = frame.streamGenerations.footprint;
     published.candleGeneration = frame.streamGenerations.candle;
     published.mapping = frame.mapping;
+    published.raster = frame.raster;
     std::lock_guard<std::mutex> lock(m_frameContextMutex);
     m_lastFrameContext = published;
 }
@@ -91,52 +92,61 @@ QSGNode* UnifiedGridRenderer::ensureGpuRootNode(QSGNode* oldNode, heatmap::gpu::
     return root;
 }
 
-void UnifiedGridRenderer::computeGpuFrameMapping(FrameContext& frame, heatmap::gpu::ViewWindow& view,
-                                                 double tickSize) {
-    const QRectF bounds = frame.surfaceBounds;
-    UgrFrameMath::ViewportState vs;
-    vs.valid = frame.viewport.valid;
-    vs.timeStart = static_cast<double>(frame.viewport.timeStart);
-    vs.timeEnd = static_cast<double>(frame.viewport.timeEnd);
-    vs.minPrice = frame.viewport.minPrice;
-    vs.maxPrice = frame.viewport.maxPrice;
-    vs.panVisualOffset = frame.viewport.panVisualOffset;
-    vs.dragging = frame.viewport.dragging;
-    vs = UgrFrameMath::applyDragPan(vs, bounds); // the drag offset moves heatmap and overlays together
-    view = {vs.timeStart, vs.timeEnd, vs.minPrice, vs.maxPrice};
-    const double tf = static_cast<double>(m_currentTimeframe_ms);
-    const double timeSpan = vs.timeEnd - vs.timeStart, priceSpan = vs.maxPrice - vs.minPrice;
-    // Before a tick is drawn the rows are one pixel tall: the mapping stays valid.
-    const double tick = tickSize > 0 ? tickSize : priceSpan / std::max(1.0, bounds.height());
-    auto& m = frame.mapping;
-    m.viewStartMs = vs.timeStart;
-    m.viewEndMs = vs.timeEnd;
-    m.viewMinPrice = vs.minPrice;
-    m.viewMaxPrice = vs.maxPrice;
-    m.valid = vs.valid && tf > 0 && timeSpan > 0 && priceSpan > 0 && tick > 0 && !bounds.isEmpty();
-    if (!m.valid) {
-        m_lastTimeAxisMapping = m;
-        return;
+chart_raster::RasterInputs UnifiedGridRenderer::rasterInputs(const FrameViewportSnapshot& viewport, double tick,
+                                                             double width, double height, double dpr) const {
+    chart_raster::RasterInputs in;
+    if (!viewport.valid) return in;
+    in.timeStart = viewport.timeStart;
+    in.timeEnd = viewport.timeEnd;
+    in.minPrice = viewport.minPrice;
+    in.maxPrice = viewport.maxPrice;
+    in.dragLogicalPx = viewport.dragging ? viewport.panVisualOffset : QPointF();
+    in.tfMs = static_cast<double>(m_currentTimeframe_ms);
+    in.tick = tick;
+    in.itemWidthLogical = width;
+    in.itemHeightLogical = height;
+    in.dpr = dpr;
+    in.anchorFracX = viewport.anchorFracX;
+    in.anchorFracY = viewport.anchorFracY;
+    return in;
+}
+
+// Whole-pixel mapping (docs/research/2026-10-08-whole-pixel-mapping.md): one raster
+// camera per frame at the layer's tick; every layer maps through toMapping(camera).
+// Plain arithmetic on the render thread (GUI blocked): no allocation.
+void UnifiedGridRenderer::computeGpuFrameMapping(FrameContext& frame) {
+    const double tick = m_gpuLayer->tickPrice();
+    const auto in = rasterInputs(frame.viewport, tick, width(), height(), frame.surfaceDpr);
+    chart_raster::RasterStep previous;
+    {
+        std::lock_guard<std::mutex> lock(m_frameContextMutex);
+        previous = m_rasterStep;
     }
-    // Columns are anchored to epoch multiples of the timeframe (spec rule 3).
-    m.dataStartMs = std::floor(vs.timeStart / tf) * tf;
-    m.dataEndMs = std::ceil(vs.timeEnd / tf) * tf;
-    m.actualDataStartMs = vs.timeStart;
-    m.actualDataEndMs = vs.timeEnd;
-    m.viewportColumns = true;
-    m.dataMinPrice = vs.minPrice;
-    m.dataMaxPrice = vs.maxPrice;
-    m.appendMs = tf;
-    m.tickSize = tick;
-    m.drawRect = bounds;
-    m.srcRect = QRectF((vs.timeStart - m.dataStartMs) / tf, 0.0, timeSpan / tf, priceSpan / tick);
-    m.gridWidth = static_cast<int>(std::ceil(m.srcRect.right())) + 1;
-    m.gridHeight = static_cast<int>(std::ceil(m.srcRect.height()));
-    m.filledColumns = m.gridWidth;
-    m.timeOffset = 0.0f;
-    m.cellW = bounds.width() / m.srcRect.width();
-    m.cellH = bounds.height() / m.srcRect.height();
-    m_lastTimeAxisMapping = m;
+    frame.raster = chart_raster::computeRaster(in, previous);
+    frame.mapping = chart_raster::toMapping(frame.raster);
+    const auto& cam = frame.raster;
+    if (!cam.valid) return;
+    if (cam.step() != previous) {
+        std::lock_guard<std::mutex> lock(m_frameContextMutex);
+        m_rasterStep = cam.step();
+    }
+    const double priceSpan = in.maxPrice - in.minPrice;
+    m_gpuLayer->noteRaster(cam.rowPx, cam.colPx, priceSpan > 0 ? double(cam.heightDev) * cam.tick / priceSpan : 0.0);
+    const RasterSurface surface{cam.step(), cam.dpr, cam.tick, cam.widthDev, cam.heightDev};
+    if (surface != m_rasterAnnounced) {
+        sLog_Probe("raster.step", "rowPx=" << cam.rowPx << " colPx=" << cam.colPx << " dpr=" << cam.dpr
+                   << " dev=" << cam.widthDev << "x" << cam.heightDev << " tick=" << cam.tick
+                   << " rRow=" << (priceSpan > 0 ? double(cam.heightDev) * cam.tick / priceSpan : 0.0)
+                   << " rCol=" << double(cam.widthDev) * cam.tfMs / double(in.timeEnd - in.timeStart));
+        m_rasterAnnounced = surface;
+        // The drawn window moved without a viewport change (a tick, step, DPR or size
+        // change): the axis models and the sibling overlays that redraw on
+        // viewportChanged (candles, algo, paper trading) follow in the next frame.
+        QMetaObject::invokeMethod(this, [this] {
+            emit rasterChanged();
+            emit viewportChanged();
+        }, Qt::QueuedConnection);
+    }
 }
 
 // S7b liquidity labels: the layer's matched LabelCells, laid out by the reused
@@ -176,24 +186,60 @@ void UnifiedGridRenderer::updateGpuLabels(const FrameContext& frame, bool prepar
     m_chartTextRenderer.submitGlyphs(m_heatmapLabelGlyphs, ChartTextRenderer::Priority::Low);
 }
 
+// Steps 1-3 of the frame (whole-pixel plan section 1.9) and the publication, on the
+// render thread with the GUI blocked, before any item syncs (beforeSynchronizing): every
+// sibling overlay that reads currentFrameContext() in its own updatePaintNode (candles,
+// algo, paper trading) maps through the camera the heatmap draws in this frame, in
+// whatever order Qt syncs the items. Plain data and arithmetic: no allocation.
+void UnifiedGridRenderer::prepareSyncFrame() {
+    m_sync.ready = false;
+    if (width() <= 0 || height() <= 0 || !m_gpuLayer) return;
+    const bool profile = FrameProfiler::enabled();
+    if (profile) m_frameProfiler.beginFrame();
+    FrameContext& frame = m_sync.frame;
+    frame = FrameContextBuilder::build(
+        boundingRect(), window(), m_frameClock, m_timeAuthority, m_viewState.get(),
+        m_heatmapLayerEnabled, m_footprintLayerEnabled, m_tpoLayerEnabled,
+        m_footprintStreamGeneration.load(std::memory_order_acquire),
+        m_candleStreamGeneration.load(std::memory_order_acquire));
+    if (profile) m_frameProfiler.mark(FrameProfiler::Context);
+    // 1-2. The tick for the continuous view (committed + an active drag at the
+    // continuous scale): Auto decides on the continuous camera.
+    const auto& vp = frame.viewport;
+    const double timeSpan = double(vp.timeEnd - vp.timeStart), priceSpan = vp.maxPrice - vp.minPrice;
+    const QRectF& bounds = frame.surfaceBounds;
+    const bool viewValid = vp.valid && m_currentTimeframe_ms > 0 && timeSpan > 0 && priceSpan > 0 && !bounds.isEmpty();
+    m_sync.drawHeatmap = frame.overlays.heatmap && viewValid;
+    if (m_sync.drawHeatmap) {
+        const QPointF drag = vp.dragging ? vp.panVisualOffset : QPointF();
+        const double dt = -drag.x() * timeSpan / bounds.width(), dp = drag.y() * priceSpan / bounds.height();
+        m_gpuLayer->chooseTickForView({double(vp.timeStart) + dt, double(vp.timeEnd) + dt, vp.minPrice + dp,
+                                       vp.maxPrice + dp});
+    }
+    // 3. The raster camera at that tick (rows follow the drawn tick: heatmapTickSize,
+    // PriceAxisModel), the frame's mapping, published.
+    computeGpuFrameMapping(frame);
+    publishFrameContext(frame);
+    if (profile) m_frameProfiler.mark(FrameProfiler::Mapping);
+    m_sync.ready = true;
+}
+
 QSGNode* UnifiedGridRenderer::updateGpuPaintNode(QSGNode* oldNode, FrameContext& frame, bool profile) {
     heatmap::gpu::HeatmapTileNode* tile = nullptr;
     QSGNode* root = ensureGpuRootNode(oldNode, &tile);
-    heatmap::gpu::ViewWindow view;
-    computeGpuFrameMapping(frame, view, 0.0);
-    const bool drawHeatmap = frame.overlays.heatmap && frame.mapping.valid;
+    // 4. The node draws the camera's window: rows and columns on device pixel edges.
     heatmap::gpu::HeatmapTileNode::Frame tileFrame;
-    const bool prepared = drawHeatmap && m_gpuLayer->prepareFrame(tileFrame, frame.surfaceBounds, view);
-    // The mapping's rows follow the drawn tick (heatmapTickSize, PriceAxisModel).
-    if (m_gpuLayer->tickPrice() > 0) computeGpuFrameMapping(frame, view, m_gpuLayer->tickPrice());
+    const auto& cam = frame.raster;
+    const bool prepared =
+        m_sync.drawHeatmap && cam.valid &&
+        m_gpuLayer->prepareFrame(tileFrame, frame.surfaceBounds,
+                                 {cam.drawnStartMs, cam.drawnEndMs, cam.drawnMinPrice, cam.drawnMaxPrice});
     auto* gate = static_cast<QSGOpacityNode*>(root->firstChild());
     const double opacity = prepared ? 1.0 : 0.0; // 0 blocks the subtree: no prepare(), no draw
     if (gate->opacity() != opacity) gate->setOpacity(opacity);
     if (prepared) tile->setFrame(std::move(tileFrame));
-    publishFrameContext(frame);
     m_pendingFrameRevision = frame.controlRevision;
     m_pendingFrameId = frame.frameId;
-    if (profile) m_frameProfiler.mark(FrameProfiler::Mapping);
 
     std::vector<FootprintOverlayRenderer::PendingUpload> footprintUploads;
     m_footprintOverlay.drainPending(footprintUploads);
@@ -232,20 +278,17 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     Q_UNUSED(data)
     m_tradeBubbleFrame->enabled = false; // Also covers invalid surfaces.
     if (width() <= 0 || height() <= 0 || !m_gpuLayer) {
+        m_sync.ready = false;
         return oldNode;
     }
-    const bool profile = FrameProfiler::enabled();
-    if (profile) m_frameProfiler.beginFrame();
-
-    FrameContext frame = FrameContextBuilder::build(
-        boundingRect(), window(), m_frameClock, m_timeAuthority, m_viewState.get(),
-        m_heatmapLayerEnabled, m_footprintLayerEnabled, m_tpoLayerEnabled,
-        m_footprintStreamGeneration.load(std::memory_order_acquire),
-        m_candleStreamGeneration.load(std::memory_order_acquire));
+    // This sync's frame from beforeSynchronizing; built here when the window did not
+    // announce the sync (an item just added to a window).
+    if (!m_sync.ready) prepareSyncFrame();
+    m_sync.ready = false;
+    FrameContext& frame = m_sync.frame;
     frame.controlRevision = m_controlRevision.load(std::memory_order_acquire);
     frame.selectionEpoch = m_controlSelectionEpoch.load(std::memory_order_acquire);
     frame.viewportVersion = m_controlViewportVersion.load(std::memory_order_acquire);
     frame.frameId = ++m_nextFrameId;
-    if (profile) m_frameProfiler.mark(FrameProfiler::Context);
-    return updateGpuPaintNode(oldNode, frame, profile); // the one root path (S8a)
+    return updateGpuPaintNode(oldNode, frame, FrameProfiler::enabled()); // the one root path (S8a)
 }
