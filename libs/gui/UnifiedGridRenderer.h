@@ -11,6 +11,7 @@
 #include <QColor>
 #include <QPointer>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -178,12 +179,54 @@ private:
         bool operator==(const RasterSurface&) const = default;
     } m_rasterAnnounced;
     QMetaObject::Connection m_screenChangedConn;
+    // Whole-pixel smooth zoom (slice A2), GUI thread; the frame reads it while the GUI
+    // thread is blocked.
+    struct ZoomGlide {
+        bool active = false;
+        chart_raster::RasterCamera from; // drawn when it started, without a drag
+        double anchorTime = 0, anchorPrice = 0; // the content under the cursor
+        qint64 startMs = 0;
+        double progress = 1.0; // eased, for the frame being prepared
+        // The rung it goes to: rapid clicks step on from here.
+        int colPx = 0;
+        chart_raster::RowRung row;
+    } m_glide;
+    bool m_zoomGesture = false;         // a pinch or trackpad scroll draws the continuous camera
+    bool m_gestureTime = true, m_gesturePrice = true;
+    QPointF m_gestureAt;
+    QTimer* m_zoomSettleTimer = nullptr; // a trackpad scroll without phases settles after a pause
+    std::function<qint64()> m_zoomClock;
+    int m_wheelAngleRemainder = 0;      // hi-res mouse wheels: angle toward the next notch
+    qint64 zoomNowMs() const;
+    // GUI thread, once per frame before the sync (updatePolish): the glide's progress
+    // for that frame; the axis models and sibling overlays follow it. The next frame's
+    // polish is requested through a reused zero timer (never from inside updatePolish).
+    void advanceZoomGlide();
+    QTimer* m_glidePolishTimer = nullptr;
+    void endZoomGlide();                // an explicit view change lands it (no glide)
+    void startZoomGlide(const chart_raster::RasterCamera& from, double anchorTime, double anchorPrice, int colPx,
+                        chart_raster::RowRung row);
+    // Moves the stored view to a rung about a drawn point (fracX/fracY of the item).
+    bool setZoomRung(const chart_raster::RasterCamera& drawn, double fracX, double fracY, bool time, int colPx,
+                     bool price, chart_raster::RowRung row);
+    chart_raster::TickAt tickPredictor(qint64 start, qint64 end) const;
+    // The rest camera and the camera drawn (a glide or a gesture applied) for inputs.
+    struct Cameras {
+        chart_raster::RasterCamera rest, drawn;
+        bool hasBinView = false;
+        double binTimeLo = 0, binTimeHi = 0, binPriceLo = 0, binPriceHi = 0;
+    };
+    Cameras camerasFor(const chart_raster::RasterInputs& in, chart_raster::RasterStep previous) const;
     QMetaObject::Connection m_beforeSyncConn;
     // Render thread: this sync's frame (context, tick, raster camera), prepared in
     // beforeSynchronizing and drawn by updatePaintNode in the same sync.
     struct SyncFrame {
         FrameContext frame;
         bool drawHeatmap = false;
+        // Smooth zoom: coverage gamma (0 at rest) and a glide's bin extent.
+        float coverageGamma = 0.0f;
+        bool hasBinView = false;
+        double binTimeLo = 0, binTimeHi = 0, binPriceLo = 0, binPriceHi = 0;
         bool ready = false;
     } m_sync;
 
@@ -398,6 +441,26 @@ public:
     Q_INVOKABLE void setTimeframe(int timeframe_ms);
     
     
+    // Whole-pixel smooth zoom (slice A2, docs/ARCHITECTURE.md). A click (mouse wheel
+    // notch, keyboard, toolbar) moves to the next rung, a view with whole device pixels
+    // per column and per row, by a kZoomGlideMs eased glide drawn with coverage; a
+    // pinch or trackpad scroll zooms continuously and settles on the nearest rung.
+    // Item coordinates (logical px); time/price select the axes.
+    Q_INVOKABLE void zoomClicks(int clicks, double x, double y, bool time = true, bool price = true);
+    Q_INVOKABLE void zoomContinuous(double factor, double x, double y, bool time = true, bool price = true);
+    Q_INVOKABLE void endZoomGesture();
+    // Axis wheels (QML): a notch without pixel deltas is a click, else continuous.
+    Q_INVOKABLE void zoomTimeWheel(double angleDelta, double pixelDelta, double x);
+    Q_INVOKABLE void zoomPriceWheel(double angleDelta, double pixelDelta, double y);
+    Q_INVOKABLE void zoomTimeClicks(int clicks, double x) { zoomClicks(clicks, x, height() / 2, true, false); }
+    Q_INVOKABLE void zoomPriceClicks(int clicks, double y) { zoomClicks(clicks, width() / 2, y, false, true); }
+    bool zoomGliding() const { return m_glide.active; }
+    bool zoomGesturing() const { return m_zoomGesture; }
+    // Tests: the glide clock (ms); default the chart's frame clock.
+    void setZoomClockForTest(std::function<qint64()> clock) { m_zoomClock = std::move(clock); }
+    // The camera the next frame draws without a zoom transition (the rest camera of
+    // the stored view; a glide's target).
+    chart_raster::RasterCamera restCameraNow(bool includeDrag = true) const;
     Q_INVOKABLE void zoomIn();
     Q_INVOKABLE void zoomOut();
     Q_INVOKABLE void zoomAt(double rawDelta, double centerX, double centerY,
@@ -480,6 +543,8 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
+    bool event(QEvent* event) override; // the trackpad pinch (native zoom gesture)
+    void updatePolish() override;        // a zoom glide advances once per frame (GUI thread)
 
 private:
     void buildMsdfAtlas();

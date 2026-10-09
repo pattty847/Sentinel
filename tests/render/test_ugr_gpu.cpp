@@ -185,7 +185,10 @@ protected:
         int streak = 0;
         const bool ok = pump(30'000, [&] {
             const auto &st = layer().tileStats();
-            streak = layer().settled() && !st.crossfading.load() && !st.holding.load() ? streak + 1 : 0;
+            // A zoom glide (A2) is part of settling: it lands on a rung.
+            streak = layer().settled() && !st.crossfading.load() && !st.holding.load() && !ugr->zoomGliding()
+                         ? streak + 1
+                         : 0;
             return streak >= 3;
         });
         if (!ok && error.isEmpty()) error = QStringLiteral("did not settle");
@@ -1027,8 +1030,10 @@ TEST_F(UgrGpu, TimeframeSwitchUnderFollowLiveIsOneViewportChange) {
     EXPECT_EQ(span, 40 * 5 * minute);
     const int64_t tf = 5 * minute;
     const int64_t liveEnd = (anchor + tf - 1) / tf * tf;
-    EXPECT_EQ(view->getVisibleTimeEnd(), liveEnd + std::max<int64_t>(tf, int64_t(double(span) * 0.08)))
-        << "the padding follows the new span";
+    // The padding follows the new span, kept to the pixel the Now column was drawn at
+    // (smooth zoom A2: within one drawn pixel of time of the nominal padding).
+    const int64_t nominal = liveEnd + std::max<int64_t>(tf, int64_t(double(span) * 0.08));
+    EXPECT_LE(std::abs(view->getVisibleTimeEnd() - nominal), tf / ugr->restCameraNow(false).colPx);
     ASSERT_TRUE(pump(30'000, [&] { return layer().settled(); }, [] {})) << error.toStdString();
 }
 
@@ -1123,7 +1128,12 @@ TEST_F(UgrGpu, ShiftWheelScalesPriceOnlyWithinTheClamps) {
     const double time0 = timeSpan(), price0 = priceSpan();
     wheel({120, 0}, Qt::ShiftModifier); // Shift+wheel as macOS sends it
     EXPECT_EQ(timeSpan(), time0) << "price only";
-    EXPECT_NEAR(priceSpan(), price0 / 1.06, 1e-6 * price0);
+    // Smooth zoom (A2): one click is one price rung, whole device px per row at the
+    // tick drawn there.
+    EXPECT_LT(priceSpan(), price0);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    EXPECT_FALSE(drawn().free);
+    EXPECT_TRUE(whole(drawn().heightDev * drawn().tick / priceSpan())) << 320 * drawn().tick / priceSpan() << " px rows";
     const double price1 = priceSpan();
     wheel({0, 120}, Qt::ShiftModifier); // a mouse that keeps the vertical delta
     EXPECT_LT(priceSpan(), price1);
