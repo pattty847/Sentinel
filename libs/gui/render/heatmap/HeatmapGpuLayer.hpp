@@ -99,6 +99,9 @@ public:
     // GUI-thread inputs for the Auto-price fitter; candidate coverage includes
     // its fitted margin. The frame commits the decision instead of re-deciding.
     int64_t autoTickState() const { return autoUnits_; }
+    bool hasCurrentResolution() const; // false during startup/symbol/timeframe transients
+    // Flat candles retain the decision even before the frame commits it.
+    int64_t autoPriceTickUnits() const { return autoPriceTick_.value_or(tickUnits_); }
     bool buildsTick(int64_t units, const ViewWindow &candidate) const;
     bool setAutoPriceTick(std::optional<int64_t> units); // true: schedule a frame even if bounds stayed
     // Render thread: the frame's drawn device pixels per row and column and the

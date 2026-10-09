@@ -437,8 +437,14 @@ int64_t HeatmapGpuLayer::predictTickUnits(const ViewWindow &view) const {
     return units > 0 ? units : autoUnits_ > 0 ? autoUnits_ : tickUnits_;
 }
 
-bool HeatmapGpuLayer::buildsTick(int64_t units, const ViewWindow &candidate) const {
+bool HeatmapGpuLayer::hasCurrentResolution() const {
     if (!snapshot_ || snapshot_->tfMs != tfMs_ || snapshot_->symbol != symbol_) return false;
+    const auto &summary = resolution_ && resolution_->tfMs == tfMs_ ? *resolution_ : snapshot_->resolution;
+    return summary.tfMs == tfMs_ && !summary.columns.empty();
+}
+
+bool HeatmapGpuLayer::buildsTick(int64_t units, const ViewWindow &candidate) const {
+    if (!hasCurrentResolution()) return false;
     const auto &summary = resolution_ && resolution_->tfMs == tfMs_ ? *resolution_ : snapshot_->resolution;
     return buildsInView(summary, units, candidate.timeLoMs, candidate.timeHiMs, candidate.priceLo, candidate.priceHi);
 }
