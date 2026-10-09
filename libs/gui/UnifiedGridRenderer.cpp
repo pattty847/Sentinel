@@ -1,13 +1,12 @@
 // Slots on main thread, paint on render thread.
 #include "UnifiedGridRenderer.h"
 #include "PerformanceMonitor.hpp"
-#include "CoordinateSystem.h"
 #include "SentinelLogging.hpp"
 #include "config/GuiConfigStore.hpp"
 #include "datasources/CandleSeriesBuffer.hpp"
 #include "render/DataProcessor.hpp"
 #include "render/GridViewState.hpp"
-#include "render/UgrFrameMath.hpp"
+#include "render/FrameContextBuilder.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
 #include "render/heatmap/HeatmapSettingsStore.hpp"
 #include "servermodel/RecordingCodec.hpp"
@@ -81,7 +80,20 @@ void UnifiedGridRenderer::bindWindow(QQuickWindow* w) {
     m_axisTextService->bindAxisLayoutWindow(w);
   }
   syncGpuSurface(); // the device pixel ratio sets the 1 column/px clamp
+  if (m_screenChangedConn) disconnect(m_screenChangedConn);
+  if (m_beforeSyncConn) disconnect(m_beforeSyncConn);
   if (!w) return;
+  // The frame's raster camera is computed and published before any item syncs
+  // (render thread, GUI blocked; prepareSyncFrame).
+  m_beforeSyncConn = connect(w, &QQuickWindow::beforeSynchronizing, this, [this] { prepareSyncFrame(); },
+                             Qt::DirectConnection);
+  // A move to a screen of another device pixel ratio: the clamps follow it, and the
+  // controller's drawn window (the raster camera re-rounds in the next frame).
+  m_screenChangedConn = connect(w, &QQuickWindow::screenChanged, this, [this] {
+    syncGpuSurface();
+    syncGpuView();
+    update();
+  });
   // The GPU tile node's stats outlive this connection (shared).
   auto tileStats = m_gpuLayer ? m_gpuLayer->tileStatsPtr() : nullptr;
   connect(w, &QQuickWindow::afterRendering, this, [this, tileStats]() {
@@ -104,6 +116,11 @@ void UnifiedGridRenderer::bindWindow(QQuickWindow* w) {
 
 
 UnifiedGridRenderer::~UnifiedGridRenderer() {
+  // ~QQuickItem leaves the window (windowChanged) after this class's members are gone:
+  // unbind the window now, while they exist.
+  disconnect(this, &QQuickItem::windowChanged, this, nullptr);
+  if (m_screenChangedConn) disconnect(m_screenChangedConn);
+  if (m_beforeSyncConn) disconnect(m_beforeSyncConn);
   m_gpuLayer.reset(); // destroys its controller on the heatmap-data thread
   if (m_dataProcessor) {
     if (m_dataProcessorThread && m_dataProcessorThread->isRunning()) {
@@ -198,6 +215,14 @@ void UnifiedGridRenderer::geometryChange(const QRectF &newGeometry,
     }
     if (m_axisTextService) {
       m_axisTextService->refreshAxisLayout();
+    }
+    // Whole-pixel mapping: layers align item-relative; absolute alignment also needs
+    // the item origin on a device pixel.
+    if (window()) {
+      const double dpr = window()->effectiveDevicePixelRatio();
+      const QPointF origin = mapToScene(QPointF(0, 0)) * dpr;
+      sLog_Probe("raster.origin", "x=" << origin.x() << " y=" << origin.y() << " dpr=" << dpr
+                 << " size=" << newGeometry.width() << "x" << newGeometry.height());
     }
     syncGpuSurface();
     if (m_gpuViewPristine && m_viewState && m_viewState->isTimeWindowValid() &&
@@ -530,6 +555,8 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
       // candles held so far (later pages refit through candlesDirty). setViewport
       // applies the new max price span.
       m_viewState->setMinSpans(m_gpuLayer->minTimeSpanMs(), m_gpuLayer->minPriceSpan());
+      // The raster camera keeps the Now column (else the view end) where it was.
+      m_viewState->setRasterAnchor(rightFrac ? 1.0 - *rightFrac : 1.0, m_viewState->rasterAnchor().fracY);
       m_viewState->setViewportAndMaxSpans(end - span, end, m_viewState->getMinPrice(), m_viewState->getMaxPrice(),
                                           maxTime, m_gpuLayer->maxPriceSpan());
       syncGpuView();
@@ -777,7 +804,42 @@ void UnifiedGridRenderer::syncGpuView() {
   heatmap::gpu::ViewWindow view{static_cast<double>(m_viewState->getVisibleTimeStart()),
                                 static_cast<double>(m_viewState->getVisibleTimeEnd()), m_viewState->getMinPrice(),
                                 m_viewState->getMaxPrice()};
+  // The controller plans for what the committed view draws: the raster camera's
+  // window (whole pixels per row and column), not the stored bounds.
+  if (const auto cam = rasterCameraNow(false); cam.valid)
+    view = {cam.drawnStartMs, cam.drawnEndMs, cam.drawnMinPrice, cam.drawnMaxPrice};
   m_gpuLayer->setView(view, m_gpuPriceKnown);
+}
+
+chart_raster::RasterCamera UnifiedGridRenderer::rasterCameraNow(bool includeDrag) const {
+  if (!m_viewState || !m_gpuLayer) return {};
+  auto viewport = FrameContextBuilder::viewportSnapshot(m_viewState.get());
+  if (!includeDrag) viewport.dragging = false;
+  const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
+  const auto in = rasterInputs(viewport, m_gpuLayer->tickPrice(), width(), height(), dpr);
+  chart_raster::RasterStep previous;
+  {
+    std::lock_guard<std::mutex> lock(m_frameContextMutex);
+    previous = m_rasterStep;
+  }
+  return chart_raster::computeRaster(in, previous);
+}
+
+bool UnifiedGridRenderer::rasterPanShift(QPointF drag, qint64& timeShiftMs, double& priceShift) const {
+  if (!m_viewState || !m_gpuLayer) return false;
+  auto viewport = FrameContextBuilder::viewportSnapshot(m_viewState.get());
+  viewport.dragging = false; // the committed view; panShift applies the drag
+  const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
+  const auto in = rasterInputs(viewport, m_gpuLayer->tickPrice(), width(), height(), dpr);
+  chart_raster::RasterStep previous;
+  {
+    std::lock_guard<std::mutex> lock(m_frameContextMutex);
+    previous = m_rasterStep;
+  }
+  int64_t time = 0;
+  if (!chart_raster::panShift(in, previous, drag, time, priceShift)) return false;
+  timeShiftMs = time;
+  return true;
 }
 
 // Follow-live from LiveSnapshot::openEndMs: the view end stays one padding past
@@ -831,6 +893,8 @@ void UnifiedGridRenderer::seedGpuViewport(double bestBid, double bestAsk) {
               << "] carry=" << carry << " autoPriceScale=" << autoPriceScale());
   // A symbol switch with auto price scale off: the carried zoom; else the default band
   // (auto price scale on: the visible candles win inside setViewport).
+  // The raster camera's anchor: the seeded price centred, a seeded time at its end.
+  m_viewState->setRasterAnchor(timeValid ? m_viewState->rasterAnchor().fracX : 1.0, 0.5);
   if (!carry || !applyPriceCarry(mid)) setGpuViewportSelf(start, end, lo, hi);
   syncGpuView(); // also when the viewport did not change (priceKnown flips)
   update();
@@ -885,6 +949,7 @@ void UnifiedGridRenderer::returnGpuToLive() {
   const int64_t end = gpuLiveEndMs(span);
   if (end <= 0) return; // nothing known yet: the next live frame steps forward
   sLog_Render("GPU heatmap returns to live: anchor=" << m_gpuLayer->liveAnchorMs() << " end=" << end);
+  m_viewState->setRasterAnchor(1.0, m_viewState->rasterAnchor().fracY); // the live edge
   m_viewState->setViewport(end - span, end, m_viewState->getMinPrice(), m_viewState->getMaxPrice());
   syncGpuView(); // publishes the view even when it was already there
   emit liveRenderTick();
@@ -916,6 +981,7 @@ void UnifiedGridRenderer::bootstrapGpuTimeView() {
               << ".." << end << "] (price from the first decoded data)");
   m_gpuPriceKnown = false;
   m_gpuViewPristine = true;
+  m_viewState->setRasterAnchor(1.0, 0.5);
   setGpuViewportSelf(end - span, end, 0.0, 1.0); // placeholder price: nothing draws until it is known
   syncGpuView();
 }
@@ -1062,7 +1128,14 @@ std::optional<std::pair<double, double>> UnifiedGridRenderer::gpuFitPriceWindow(
       if (now > 0) centre = now;
     }
   }
-  return std::make_pair(centre - span * 0.5, centre + span * 0.5);
+  lo = centre - span * 0.5;
+  hi = centre + span * 0.5;
+  // Whole pixels per row (raster camera): the fitted span is heightDev * tick / P for
+  // an integer P, its top on a row edge, so the drawn window equals the fitted one
+  // (no snap crops the candles). Before a tick is drawn the span stays.
+  const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
+  chart_raster::fitPriceToRows(lo, hi, chart_raster::devicePixels(height(), dpr), m_gpuLayer ? m_gpuLayer->tickPrice() : 0.0);
+  return std::make_pair(lo, hi);
 }
 
 bool UnifiedGridRenderer::autoPriceFit(qint64 start, qint64 end, double& priceMin, double& priceMax) {
@@ -1125,6 +1198,9 @@ bool UnifiedGridRenderer::fitView(bool time, bool price) {
     m_gpuReseedPrice = false;
     m_viewState->setAutoPriceScale(true); // a price fit is the auto price scale
   }
+  // Raster anchor of the fitted axes: the view end (live edge) and the price centre.
+  const auto anchor = m_viewState->rasterAnchor();
+  m_viewState->setRasterAnchor(time ? 1.0 : anchor.fracX, price ? 0.5 : anchor.fracY);
   m_viewState->setViewport(start, end, lo, hi); // one change; follow-live is kept
   syncGpuView();
   update();
@@ -1174,6 +1250,12 @@ QString UnifiedGridRenderer::applyViewportRequest(const ViewportRequest& request
   }
   sLog_Render("viewport request: time=[" << start << ".." << end << "] price=[" << lo << ".." << hi
               << "] follow=" << follow << " autoPriceScale=" << m_viewState->autoPriceScale());
+  // Raster anchor: the centre of an explicitly moved axis (following live keeps the
+  // live edge); an unchanged axis keeps its anchor (no re-snap).
+  const auto anchor = m_viewState->rasterAnchor();
+  const bool timeMoved = start != start0 || end != end0;
+  const bool priceMoved = lo != m_viewState->getMinPrice() || hi != m_viewState->getMaxPrice();
+  m_viewState->setRasterAnchor(follow ? 1.0 : timeMoved ? 0.5 : anchor.fracX, priceMoved ? 0.5 : anchor.fracY);
   m_viewState->setViewport(start, end, lo, hi); // one change (the auto fit applies inside)
   syncGpuView();
   if (follow) emit liveRenderTick();
@@ -1202,6 +1284,7 @@ bool UnifiedGridRenderer::resetView() {
     m_gpuReseedPrice = false;
   }
   sLog_Render("view reset to default: time=[" << end - span << ".." << end << "] price=[" << lo << ".." << hi << "]");
+  m_viewState->setRasterAnchor(1.0, 0.5);
   setGpuViewportSelf(end - span, end, lo, hi);
   m_gpuViewPristine = true; // the default span follows the chart's width again
   syncGpuView();
@@ -1210,35 +1293,18 @@ bool UnifiedGridRenderer::resetView() {
   return true;
 }
 
-//  COORDINATE SYSTEM INTEGRATION: Expose CoordinateSystem to QML
-QPointF UnifiedGridRenderer::worldToScreen(qint64 timestamp_ms,
-                                           double price) const {
-  if (!m_viewState)
-    return QPointF();
-
-  Viewport viewport;
-  viewport.timeStart_ms = m_viewState->getVisibleTimeStart();
-  viewport.timeEnd_ms = m_viewState->getVisibleTimeEnd();
-  viewport.priceMin = m_viewState->getMinPrice();
-  viewport.priceMax = m_viewState->getMaxPrice();
-  viewport.width = width();
-  viewport.height = height();
-  return CoordinateSystem::worldToScreen(timestamp_ms, price, viewport);
+// World <-> item coordinates through the last published frame's mapping (what is on
+// screen: the raster camera's drawn window).
+QPointF UnifiedGridRenderer::worldToScreen(qint64 timestamp_ms, double price) const {
+  const TimeAxisMapping mapping = currentTimeAxisMapping();
+  if (!mapping.valid) return QPointF();
+  return QPointF(mapping.timeToScreenX(static_cast<double>(timestamp_ms)), mapping.priceToScreenY(price));
 }
 
-QPointF UnifiedGridRenderer::screenToWorld(double screenX,
-                                           double screenY) const {
-  if (!m_viewState)
-    return QPointF();
-
-  Viewport viewport;
-  viewport.timeStart_ms = m_viewState->getVisibleTimeStart();
-  viewport.timeEnd_ms = m_viewState->getVisibleTimeEnd();
-  viewport.priceMin = m_viewState->getMinPrice();
-  viewport.priceMax = m_viewState->getMaxPrice();
-  viewport.width = width();
-  viewport.height = height();
-  return CoordinateSystem::screenToWorld(QPointF(screenX, screenY), viewport);
+QPointF UnifiedGridRenderer::screenToWorld(double screenX, double screenY) const {
+  const TimeAxisMapping mapping = currentTimeAxisMapping();
+  if (!mapping.valid) return QPointF();
+  return QPointF(mapping.screenXToTime(screenX), mapping.screenYToPrice(screenY));
 }
 
 void UnifiedGridRenderer::buildMsdfAtlas() {
@@ -1497,6 +1563,15 @@ void UnifiedGridRenderer::setViewport(qint64 timeStart, qint64 timeEnd,
     // the viewport moves: the auto fit would replace it).
     m_viewState->setAutoPriceScale(false);
     m_viewState->enableAutoScroll(false);
+  }
+  if (m_viewState) {
+    // Raster anchor: the centre of a moved axis; an unchanged axis keeps its anchor.
+    const auto anchor = m_viewState->rasterAnchor();
+    const bool timeMoved =
+        timeStart != m_viewState->getVisibleTimeStart() || timeEnd != m_viewState->getVisibleTimeEnd();
+    const bool priceMoved = priceMin != m_viewState->getMinPrice() || priceMax != m_viewState->getMaxPrice();
+    m_viewState->setRasterAnchor(timeMoved && !m_viewState->isAutoScrollEnabled() ? 0.5 : anchor.fracX,
+                                 priceMoved ? 0.5 : anchor.fracY);
   }
   onViewChanged(timeStart, timeEnd, priceMin, priceMax);
   syncGpuView(); // also when the values were unchanged (price now known)

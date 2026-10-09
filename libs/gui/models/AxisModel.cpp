@@ -30,6 +30,12 @@ void AxisModel::setTarget(QQuickItem* target) {
         connect(m_renderer, &QQuickItem::heightChanged, this, [this]() {
             setViewportSize(m_renderer->width(), m_renderer->height());
         });
+        // The drawn pixels per row/column, the drawn tick or the device pixel ratio
+        // changed without a viewport change.
+        connect(m_renderer, &UnifiedGridRenderer::rasterChanged, this, &AxisModel::onViewportChanged,
+                Qt::UniqueConnection);
+        connect(m_renderer, &UnifiedGridRenderer::heatmapTickSizeChanged, this, &AxisModel::onViewportChanged,
+                Qt::UniqueConnection);
         setViewportSize(m_renderer->width(), m_renderer->height());
     }
 }
@@ -166,6 +172,10 @@ bool AxisModel::isViewportValid() const {
            m_viewportWidth > 0 && m_viewportHeight > 0;
 }
 
+void AxisModel::refreshRaster() {
+    m_raster = m_renderer ? m_renderer->rasterCameraNow() : chart_raster::RasterCamera{};
+}
+
 void AxisModel::clearTicks() {
     if (static_cast<int>(m_ticks.size()) != m_labelCapacity) {
         m_ticks.assign(static_cast<size_t>(m_labelCapacity), TickInfo());
@@ -196,7 +206,9 @@ void AxisModel::updateTicksAndNotify() {
     bool positionChanged = false;
     bool labelChanged = false;
     bool majorChanged = false;
-    const double kPosEps = 0.5;  // Half-pixel: sub-pixel position changes don't need a redraw
+    // Positions are whole device pixels (raster camera): any change is at least one
+    // device pixel and must redraw.
+    const double kPosEps = 1e-6;
 
     const size_t count = std::min(m_ticksScratch.size(), m_ticks.size());
     for (size_t i = 0; i < count; ++i) {

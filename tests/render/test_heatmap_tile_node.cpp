@@ -15,6 +15,7 @@
 #include "render/heatmap/HeatmapGpuBinner.hpp"
 #include "render/heatmap/HeatmapTileNode.hpp"
 #include "render/heatmap/HeatmapPalette.hpp"
+#include "render/ChartRaster.hpp"
 #include <QCoreApplication>
 #include <QFile>
 #include <QMatrix4x4>
@@ -290,6 +291,124 @@ TEST(HeatmapDisplayFloor, LoadingAndVeilHatchesStayByteIdenticalNextToData) {
                 EXPECT_NEAR(qAlpha(pixel), state == 1u ? 204.0 : 229.5, state == 1u ? 0.0 : 0.5);
             }
             EXPECT_EQ(rgbTones, legacyTones) << "original premultiplied hatch RGB bytes";
+        }
+    }
+}
+
+// ---------------------------------------------------------------- whole-pixel rows
+// Plan 2026-10-08 B1/B2: the raster camera (chart_raster::computeRaster) -> its drawn
+// window -> the node's draw parameters (mappingFor over one block covering the view,
+// as HeatmapTileNode::addBinDraw) -> the production display shader. Rows are drawn
+// whole device pixels tall, the same height everywhere and at every drag offset.
+struct RasterRows {
+    static constexpr double tick = 1.0;
+    static constexpr int64_t firstBin = 99'800; // the grid's bottom bin
+    static constexpr uint32_t rows = 400;      // bins 99,800 .. 100,199
+    QSize size{8, 240};                        // device pixels (dpr 2: 4 x 120 logical)
+    chart_raster::RasterInputs view(double rowsPx, double dragDevicePx) const {
+        chart_raster::RasterInputs in;
+        in.tfMs = double(minute);
+        in.tick = tick;
+        in.dpr = 2.0;
+        in.itemWidthLogical = size.width() / in.dpr;
+        in.itemHeightLogical = size.height() / in.dpr;
+        in.timeStart = 0;
+        in.timeEnd = minute;
+        in.maxPrice = 100'050.3; // not on a row edge
+        in.minPrice = in.maxPrice - size.height() * tick / rowsPx;
+        in.anchorFracY = 0.3;
+        in.dragLogicalPx = QPointF(0, dragDevicePx / in.dpr);
+        return in;
+    }
+    // The cells top row first (fy = 0 is bin firstBin + rows - 1).
+    static std::vector<uint32_t> cells(const std::function<uint32_t(int64_t bin)> &cellOf) {
+        std::vector<uint32_t> out(rows);
+        for (uint32_t i = 0; i < rows; ++i) out[i] = cellOf(firstBin + int64_t(rows) - 1 - int64_t(i));
+        return out;
+    }
+    static QImage draw(DisplayReadback &display, const std::vector<uint32_t> &cells, const chart_raster::RasterCamera &cam) {
+        const BinGrid grid{minute, 0, 1, tick, firstBin, rows};
+        const auto mapping = mappingFor(grid, {cam.drawnStartMs, cam.drawnEndMs, cam.drawnMinPrice, cam.drawnMaxPrice});
+        return display.render(cells, mapping.priceOffset, mapping.priceSpan);
+    }
+    // Lengths of the colour runs in pixel column x that touch neither image edge.
+    static std::vector<std::pair<QRgb, int>> interiorRuns(const QImage &image, int x) {
+        std::vector<std::pair<QRgb, int>> runs;
+        int start = 0;
+        for (int y = 1; y <= image.height(); ++y) {
+            if (y < image.height() && image.pixel(x, y) == image.pixel(x, start)) continue;
+            if (start > 0 && y < image.height()) runs.push_back({image.pixel(x, start), y - start});
+            start = y;
+        }
+        return runs;
+    }
+};
+
+// B1: one hot row in an otherwise empty grid at today's Auto regime (2.4 px per row),
+// 300 sub-pixel drag offsets: the hot row is always P = 2 device pixels tall, never 3.
+TEST(HeatmapDisplayRaster, AnIsolatedRowKeepsItsHeightAtEveryDragOffset) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "GPU case skipped: " << gpu.skipReason();
+    RasterRows fx;
+    DisplayReadback display(gpu.rhi.get());
+    ASSERT_TRUE(display.create(fx.size, RasterRows::rows, solidSidePalette()));
+    const int64_t hotBin = 100'000;
+    const auto cells = RasterRows::cells([&](int64_t bin) { return bin == hotBin ? hotBid : 0u; });
+    chart_raster::RasterStep prev{};
+    int drawn = 0;
+    std::set<int> heights;
+    for (int i = 0; i < 300; ++i) {
+        const auto cam = chart_raster::computeRaster(fx.view(2.4, -0.3 * i), prev);
+        ASSERT_TRUE(cam.valid);
+        ASSERT_EQ(cam.rowPx, 2) << "offset " << i;
+        prev = cam.step();
+        const QImage image = RasterRows::draw(display, cells, cam);
+        ASSERT_FALSE(image.isNull());
+        int hot = 0, first = -1;
+        for (int y = 0; y < image.height(); ++y)
+            if (qAlpha(image.pixel(3, y)) > 0) {
+                if (first < 0) first = y;
+                ++hot;
+            }
+        if (first <= 0 || first + hot >= image.height()) continue; // the row is cut by an edge
+        heights.insert(hot);
+        EXPECT_EQ(hot, cam.rowPx) << "drag offset " << i << " (" << -0.3 * i << " device px): the hot row is " << hot
+                                  << " px tall at y=" << first;
+        EXPECT_NEAR(first, cam.yDev(double(hotBin + 1) * RasterRows::tick), 1e-6) << "its top edge is the camera's";
+        ++drawn;
+    }
+    EXPECT_GE(drawn, 250);
+    EXPECT_EQ(heights, std::set<int>{2});
+}
+
+// B2: ten rows of distinct colours over the view: every band is exactly P tall, for
+// P = 2, 3 and 5, at several sub-pixel drag offsets.
+TEST(HeatmapDisplayRaster, EveryDrawnRowHasTheSameHeight) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "GPU case skipped: " << gpu.skipReason();
+    RasterRows fx;
+    DisplayReadback display(gpu.rhi.get());
+    ASSERT_TRUE(display.create(fx.size, RasterRows::rows, *makePalette(legacyDefaultGradients(), {1.0f, 1.0f, 0.0f})));
+    // Bins 100,020 .. 100,029 alternate sides with rising codes: neighbours always differ.
+    const auto cells = RasterRows::cells([](int64_t bin) {
+        if (bin < 100'020 || bin > 100'029) return 0u;
+        const uint32_t k = uint32_t(bin - 100'020);
+        return validCell | (3000u + k * 2900u) | ((k % 2) ? 0x8000u : 0u);
+    });
+    for (const auto [r, expected] : {std::pair{2.4, 2}, {3.3, 3}, {4.7, 5}}) {
+        for (int i = 0; i < 12; ++i) {
+            const auto cam = chart_raster::computeRaster(fx.view(r, 0.37 * i), {});
+            ASSERT_TRUE(cam.valid);
+            ASSERT_EQ(cam.rowPx, expected);
+            const QImage image = RasterRows::draw(display, cells, cam);
+            ASSERT_FALSE(image.isNull());
+            int bands = 0;
+            for (const auto &[colour, length] : RasterRows::interiorRuns(image, 3)) {
+                if (qAlpha(colour) == 0) continue; // the empty rows around the ten
+                EXPECT_EQ(length, cam.rowPx) << "r=" << r << " offset " << i << ": a band of " << length << " px";
+                ++bands;
+            }
+            EXPECT_EQ(bands, 10) << "r=" << r << " offset " << i;
         }
     }
 }

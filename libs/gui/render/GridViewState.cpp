@@ -1,6 +1,5 @@
 // GridViewState: viewport pan/zoom math; main GUI thread only.
 #include "GridViewState.hpp"
-#include <QMatrix4x4>
 #include <QSizeF>
 #include "SentinelLogging.hpp"
 #include <algorithm>
@@ -104,7 +103,11 @@ void GridViewState::setViewportAndMaxSpans(qint64 timeStart, qint64 timeEnd, dou
 }
 
 qint64 GridViewState::dragShiftMs(qint64 spanMs) const {
-    if (!m_isDragging || m_viewportWidth <= 0 || m_panVisualOffset.x() == 0.0) return 0;
+    if (!m_isDragging || m_panVisualOffset.x() == 0.0) return 0;
+    qint64 timeShift = 0;
+    double priceShift = 0.0;
+    if (m_panShift && m_panShift(QPointF(m_panVisualOffset.x(), 0.0), timeShift, priceShift)) return timeShift;
+    if (m_viewportWidth <= 0) return 0;
     return static_cast<qint64>(std::floor(-m_panVisualOffset.x() * static_cast<double>(spanMs) / m_viewportWidth));
 }
 
@@ -127,28 +130,9 @@ void GridViewState::setViewportSize(double width, double height) {
     }
 }
 
-QMatrix4x4 GridViewState::calculateViewportTransform(const QRectF& itemBounds) const {
-    if (!m_timeWindowValid || itemBounds.isEmpty()) {
-        return QMatrix4x4();
-    }
-    const double timeRange = static_cast<double>(m_visibleTimeEnd_ms - m_visibleTimeStart_ms);
-    const double priceRange = (m_maxPrice - m_minPrice);
-    if (timeRange <= 0.0 || priceRange <= 0.0 || m_viewportWidth <= 0.0 || m_viewportHeight <= 0.0) {
-        return QMatrix4x4();
-    }
-
-    const double sx = m_viewportWidth / timeRange;
-    const double sy = -m_viewportHeight / priceRange;
-    QMatrix4x4 transform;
-    transform.scale(sx, sy, 1.0);
-    transform.translate(-static_cast<double>(m_visibleTimeStart_ms), -m_maxPrice, 0.0);
-    if (!m_panVisualOffset.isNull()) {
-        QMatrix4x4 screenSpace;
-        screenSpace.translate(m_panVisualOffset.x(), m_panVisualOffset.y());
-        transform = screenSpace * transform;
-    }
-
-    return transform;
+void GridViewState::setRasterAnchor(double fracX, double fracY) {
+    if (std::isfinite(fracX)) m_rasterAnchor.fracX = std::clamp(fracX, 0.0, 1.0);
+    if (std::isfinite(fracY)) m_rasterAnchor.fracY = std::clamp(fracY, 0.0, 1.0);
 }
 
 void GridViewState::handleZoom(double delta, const QPointF& center) {
@@ -175,6 +159,9 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
     double centerPriceRatio = 1.0 - (center.y() / viewportSize.height());
     centerTimeRatio = std::max(0.0, std::min(1.0, centerTimeRatio));
     centerPriceRatio = std::max(0.0, std::min(1.0, centerPriceRatio));
+    // The content under the cursor stays put across a whole-pixel step (raster camera);
+    // with the auto price scale the price is the fit's, so its anchor stays.
+    setRasterAnchor(centerTimeRatio, m_autoPriceScale ? m_rasterAnchor.fracY : 1.0 - centerPriceRatio);
 
     const int64_t currentCenterTime = m_visibleTimeStart_ms + static_cast<int64_t>(currentTimeRange * centerTimeRatio);
     const double currentCenterPrice = m_minPrice + (currentPriceRange * centerPriceRatio);
@@ -266,6 +253,18 @@ void GridViewState::handlePanEnd(bool applyViewport) {
             setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
         return;
     }
+    // Raster camera: commit exactly what the picture shows (whole device pixels at
+    // the drawn scale), however small: a release never moves the picture.
+    qint64 timeShift = 0;
+    double priceShift = 0.0;
+    if (m_panShift && m_timeWindowValid && m_panShift(m_panVisualOffset, timeShift, priceShift)) {
+        if (timeShift != 0 || priceShift != 0.0) {
+            setViewport(m_visibleTimeStart_ms + timeShift, m_visibleTimeEnd_ms + timeShift, m_minPrice + priceShift,
+                        m_maxPrice + priceShift);
+            if (priceShift != 0.0) emit priceInteracted();
+        }
+        return;
+    }
     const double threshold = 1.0;
     double timeDeltaF = 0.0;
     double priceDelta = 0.0;
@@ -312,6 +311,7 @@ void GridViewState::handleTimeZoomWithSensitivity(double rawDelta, double center
 
     double centerRatio = centerX / viewportWidth;
     centerRatio = std::max(0.0, std::min(1.0, centerRatio));
+    setRasterAnchor(centerRatio, m_rasterAnchor.fracY);
     const int64_t currentCenterTime =
         m_visibleTimeStart_ms +
         static_cast<int64_t>(static_cast<double>(currentTimeRange) * centerRatio);
@@ -349,6 +349,7 @@ void GridViewState::handlePriceZoomWithSensitivity(double rawDelta, double cente
 
     double centerRatio = 1.0 - (centerY / viewportHeight);
     centerRatio = std::max(0.0, std::min(1.0, centerRatio));
+    setRasterAnchor(m_rasterAnchor.fracX, 1.0 - centerRatio);
     const double currentCenterPrice = m_minPrice + currentPriceRange * centerRatio;
     const double newMinPrice = currentCenterPrice - newPriceRange * centerRatio;
     const double newMaxPrice =
@@ -366,6 +367,9 @@ void GridViewState::handlePriceZoomWithSensitivity(double rawDelta, double cente
 }
 
 void GridViewState::enableAutoScroll(bool enabled) {
+    // Following live anchors the raster camera at the live edge (the view end), and
+    // it stays there when a drag or a zoom turns following off (no jump).
+    if (enabled) setRasterAnchor(1.0, m_rasterAnchor.fracY);
     if (m_autoScrollEnabled != enabled) {
         m_autoScrollEnabled = enabled;
         emit autoScrollEnabledChanged();

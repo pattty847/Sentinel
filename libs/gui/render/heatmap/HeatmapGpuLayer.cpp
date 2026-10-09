@@ -362,10 +362,10 @@ int64_t HeatmapGpuLayer::chooseTick(const ViewWindow &view) {
     return autoUnits_ > 0 ? autoUnits_ : tickUnits_;
 }
 
-bool HeatmapGpuLayer::prepareFrame(HeatmapTileNode::Frame &frame, const QRectF &rect, const ViewWindow &view) {
-    if (!controller_) return false;
-    // GUI thread blocked: take the freshest snapshot, pick the tick, hand both to
-    // the node in this frame (no thread hop on a tick change).
+void HeatmapGpuLayer::chooseTickForView(const ViewWindow &view) {
+    if (!controller_) return;
+    // GUI thread blocked: take the freshest snapshot, pick the tick; prepareFrame
+    // hands both to the node in this frame (no thread hop on a tick change).
     if (auto latest = controller_->latestSnapshot(); latest && latest != snapshot_) snapshot_ = std::move(latest);
     live_ = controller_->latestLive(); // pointer reads; the node uploads only a new version
     resolution_ = controller_->latestResolution();
@@ -383,6 +383,10 @@ bool HeatmapGpuLayer::prepareFrame(HeatmapTileNode::Frame &frame, const QRectF &
         QMetaObject::invokeMethod(controller_, [c = controller_, mode, units = tickUnits_] { c->setTickRequest(mode, units); },
                                   Qt::QueuedConnection);
     }
+}
+
+bool HeatmapGpuLayer::prepareFrame(HeatmapTileNode::Frame &frame, const QRectF &rect, const ViewWindow &view) {
+    if (!controller_) return false;
     frame.spans = snapshot_;
     frame.capacity = capacity_;
     frame.tfMs = tfMs_;
@@ -743,11 +747,15 @@ void HeatmapGpuLayer::refreshControllerStats() const {
     }, Qt::QueuedConnection);
 }
 
+void HeatmapGpuLayer::noteRaster(int rowPx, int colPx, double rowPxContinuous) {
+    rowPxDrawn_.store(rowPx, std::memory_order_relaxed);
+    colPxDrawn_.store(colPx, std::memory_order_relaxed);
+    rowPxContinuous_.store(rowPxContinuous, std::memory_order_relaxed);
+}
+
 QVariantMap HeatmapGpuLayer::metrics() const {
     const auto &s = *tileStats_;
     const double tick = tickPrice();
-    const double heightPx = heightPx_ * dpr_;
-    const double priceSpan = view_.priceHi - view_.priceLo;
     QVariantMap m{{"active", active_}, {"symbol", QString::fromStdString(symbol_)}, {"timeframeMs", qlonglong(tfMs_)},
                   {"mode", manualMode_ ? QStringLiteral("manual") : QStringLiteral("auto")},
                   {"tick", tick}, {"tickUnits", qlonglong(tickUnits_)},
@@ -755,7 +763,9 @@ QVariantMap HeatmapGpuLayer::metrics() const {
                   {"hysteresis", settings_.hysteresis}, {"minRowPx", settings_.minRowPx},
                   {"crossfadeMs", settings_.crossfadeMs}, {"crossfading", s.crossfading.load()},
                   {"holding", s.holding.load()}, {"tickChanges", qulonglong(tickChanges_)},
-                  {"rowPx", tick > 0 && priceSpan > 0 ? tick * heightPx / priceSpan : 0.0},
+                  {"rowPx", rowPxContinuous_.load(std::memory_order_relaxed)},
+                  {"rowPxDrawn", rowPxDrawn_.load(std::memory_order_relaxed)},
+                  {"colPxDrawn", colPxDrawn_.load(std::memory_order_relaxed)},
                   {"indicator", resolutionIndicator()}, {"settled", settled()},
                   {"lastBinMs", s.lastBinMs.load()}, {"prepareMs", s.prepareMs.load()},
                   {"gpuFrameMs", s.gpuFrameMs.load()}, {"gpuCapBytes", qulonglong(settings_.gpuCapBytes)},

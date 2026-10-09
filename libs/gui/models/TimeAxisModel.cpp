@@ -54,10 +54,13 @@ bool TimeAxisModel::updateEffectiveViewport() {
         return false;
     }
 
-    const double viewStart = getViewportStart();
-    const double viewEnd = getViewportEnd();
+    // The drawn window (raster camera, drag included as whole device pixels); the
+    // committed viewport without a renderer.
+    refreshRaster();
+    const double viewStart = m_raster.valid ? m_raster.drawnStartMs : getViewportStart();
+    const double viewEnd = m_raster.valid ? m_raster.drawnEndMs : getViewportEnd();
     const double viewSpan = viewEnd - viewStart;
-    const double viewWidth = getViewportWidth();
+    const double viewWidth = m_raster.valid ? m_raster.widthDev / m_raster.dpr : getViewportWidth();
     if (viewSpan <= 0.0 || viewWidth <= 0.0) {
         return false;
     }
@@ -124,39 +127,16 @@ QString TimeAxisModel::formatLabel(double value) const {
 }
 
 double TimeAxisModel::getViewportStart() const {
-    if (!m_viewState) {
-        return 0.0;
-    }
-    double start = static_cast<double>(m_viewState->getVisibleTimeStart());
-    if (m_viewState->isDragging()) {
-        const double viewWidth = getViewportWidth();
-        const double timeRange = static_cast<double>(m_viewState->getVisibleTimeEnd() - m_viewState->getVisibleTimeStart());
-        if (viewWidth > 0.0 && timeRange > 0.0) {
-            const double timePixelsToMs = timeRange / viewWidth;
-            start += (-m_viewState->getPanVisualOffset().x() * timePixelsToMs);
-        }
-    }
-    return start;
+    return m_viewState ? static_cast<double>(m_viewState->getVisibleTimeStart()) : 0.0;
 }
 
 double TimeAxisModel::getViewportEnd() const {
-    if (!m_viewState) {
-        return 60000.0;
-    }
-    double end = static_cast<double>(m_viewState->getVisibleTimeEnd());
-    if (m_viewState->isDragging()) {
-        const double viewWidth = getViewportWidth();
-        const double timeRange = static_cast<double>(m_viewState->getVisibleTimeEnd() - m_viewState->getVisibleTimeStart());
-        if (viewWidth > 0.0 && timeRange > 0.0) {
-            const double timePixelsToMs = timeRange / viewWidth;
-            end += (-m_viewState->getPanVisualOffset().x() * timePixelsToMs);
-        }
-    }
-    return end;
+    return m_viewState ? static_cast<double>(m_viewState->getVisibleTimeEnd()) : 60000.0;
 }
 
 double TimeAxisModel::valueToScreenPosition(double value) const {
     if (!isViewportValid()) return 0.0;
+    if (m_effectiveViewportValid && m_raster.valid) return m_raster.xDev(value) / m_raster.dpr;
 
     if (m_effectiveViewportValid && m_effectiveEnd > m_effectiveStart) {
         double normalized = (value - m_effectiveStart) / (m_effectiveEnd - m_effectiveStart);

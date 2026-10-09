@@ -1,7 +1,7 @@
 #pragma once
 #include <QObject>
 #include <QPointF>
-#include <QMatrix4x4>
+#include <QSizeF>
 #include <QElapsedTimer>
 #include <functional>
 #include <utility>
@@ -58,7 +58,24 @@ public:
     std::pair<qint64, qint64> displayedTimeWindow() const;
     // Does not touch the viewport (the caller refits through setViewport).
     void setAutoPriceScale(bool enabled);
-    QMatrix4x4 calculateViewportTransform(const QRectF& itemBounds) const;
+    // Whole-pixel chart mapping (render/ChartRaster.hpp). The raster anchor is the
+    // view point (fractions of the width from the left and of the height from the
+    // top) that keeps its screen position when the drawn pixels per row or column
+    // step: the zoom handlers set it to the cursor; the renderer sets it for its own
+    // moves. It never changes the viewport.
+    struct RasterAnchor {
+        double fracX = 0.5, fracY = 0.5;
+        bool operator==(const RasterAnchor&) const = default;
+    };
+    void setRasterAnchor(double fracX, double fracY);
+    RasterAnchor rasterAnchor() const { return m_rasterAnchor; }
+    // The committed shifts for a drag offset (logical px): what the drawn picture
+    // shows, whole device pixels at the drawn pixels per row and column (the time
+    // shift in whole ms). The pan commit, the displayed window and the drag's auto
+    // fit use it, so a release lands exactly where the drag left the picture. False:
+    // none (the continuous scale applies).
+    using PanShift = std::function<bool(QPointF dragLogicalPx, qint64& timeShiftMs, double& priceShift)>;
+    void setPanShift(PanShift shift) { m_panShift = std::move(shift); }
     
     void handleZoom(double delta, const QPointF& center);
     void handleZoomWithViewport(double delta, const QPointF& center, const QSizeF& viewportSize);
@@ -107,6 +124,8 @@ private:
     bool m_autoScrollEnabled = true;
     bool m_autoPriceScale = false;
     PriceFit m_priceFit;
+    PanShift m_panShift;
+    RasterAnchor m_rasterAnchor{1.0, 0.5}; // follow-live (the default) anchors the view end
     
     static constexpr double ZOOM_SENSITIVITY = 0.0005;
     static constexpr double MAX_ZOOM_DELTA = 0.4;

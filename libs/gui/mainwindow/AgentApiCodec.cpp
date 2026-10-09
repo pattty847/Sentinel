@@ -587,7 +587,12 @@ QJsonObject viewportJson(const ViewportSnapshot& s) {
         {"followLive", boolean(s.followLive)}, {"autoScale", boolean(s.autoScale)},
         {"viewportVersion", s.viewportVersion ? QJsonValue(QString::number(*s.viewportVersion)) : QJsonValue(QJsonValue::Null)},
         {"widthPx", number(s.widthPx)}, {"heightPx", number(s.heightPx)},
-        {"zoom", QJsonObject{{"msPerPx", number(msPerPx)}, {"pricePerPx", number(pricePerPx)}}}});
+        {"zoom", QJsonObject{{"msPerPx", number(msPerPx)}, {"pricePerPx", number(pricePerPx)}}},
+        {"drawn", s.drawn ? QJsonValue(QJsonObject{{"startMs", s.drawn->startMs}, {"endMs", s.drawn->endMs},
+                                                   {"priceMin", s.drawn->priceMin}, {"priceMax", s.drawn->priceMax},
+                                                   {"rowPx", s.drawn->rowPx}, {"colPx", s.drawn->colPx},
+                                                   {"dpr", s.drawn->dpr}})
+                          : QJsonValue(QJsonValue::Null)}});
 }
 QJsonObject candlesJson(const CandleSnapshot& s) {
     QJsonArray bars;

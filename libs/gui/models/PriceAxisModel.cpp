@@ -44,10 +44,13 @@ bool PriceAxisModel::updateEffectiveViewport() {
         return false;
     }
 
-    const double viewMin = getViewportStart();
-    const double viewMax = getViewportEnd();
+    // The drawn window (raster camera, drag included as whole device pixels); the
+    // committed viewport without a renderer.
+    refreshRaster();
+    const double viewMin = m_raster.valid ? m_raster.drawnMinPrice : getViewportStart();
+    const double viewMax = m_raster.valid ? m_raster.drawnMaxPrice : getViewportEnd();
     const double viewSpan = viewMax - viewMin;
-    const double viewHeight = getViewportHeight();
+    const double viewHeight = m_raster.valid ? m_raster.heightDev / m_raster.dpr : getViewportHeight();
     if (viewSpan <= 0.0 || viewHeight <= 0.0) {
         return false;
     }
@@ -148,39 +151,16 @@ QString PriceAxisModel::formatLabel(double value) const {
 }
 
 double PriceAxisModel::getViewportStart() const {
-    if (!m_viewState) {
-        return 0.0;
-    }
-    double minPrice = m_viewState->getMinPrice();
-    if (m_viewState->isDragging()) {
-        const double viewHeight = getViewportHeight();
-        const double priceRange = m_viewState->getMaxPrice() - m_viewState->getMinPrice();
-        if (viewHeight > 0.0 && priceRange > 0.0) {
-            const double pricePixelsToUnits = priceRange / viewHeight;
-            minPrice += (m_viewState->getPanVisualOffset().y() * pricePixelsToUnits);
-        }
-    }
-    return minPrice;
+    return m_viewState ? m_viewState->getMinPrice() : 0.0;
 }
 
 double PriceAxisModel::getViewportEnd() const {
-    if (!m_viewState) {
-        return 100.0;
-    }
-    double maxPrice = m_viewState->getMaxPrice();
-    if (m_viewState->isDragging()) {
-        const double viewHeight = getViewportHeight();
-        const double priceRange = m_viewState->getMaxPrice() - m_viewState->getMinPrice();
-        if (viewHeight > 0.0 && priceRange > 0.0) {
-            const double pricePixelsToUnits = priceRange / viewHeight;
-            maxPrice += (m_viewState->getPanVisualOffset().y() * pricePixelsToUnits);
-        }
-    }
-    return maxPrice;
+    return m_viewState ? m_viewState->getMaxPrice() : 100.0;
 }
 
 double PriceAxisModel::valueToScreenPosition(double value) const {
     if (!isViewportValid()) return 0.0;
+    if (m_effectiveViewportValid && m_raster.valid) return m_raster.yDev(value) / m_raster.dpr;
 
     if (m_effectiveViewportValid && m_effectiveMaxPrice > m_effectiveMinPrice) {
         double normalized = (value - m_effectiveMinPrice) / (m_effectiveMaxPrice - m_effectiveMinPrice);

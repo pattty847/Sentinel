@@ -27,20 +27,12 @@ target_link_libraries(test_TimeAxisMapping PRIVATE
 add_test(NAME TimeAxisMappingTests COMMAND test_TimeAxisMapping)
 set_tests_properties(TimeAxisMappingTests PROPERTIES LABELS "render")
 
-add_executable(test_UgrFrameMath
-    test_UgrFrameMath.cpp
-    ${CMAKE_SOURCE_DIR}/libs/gui/render/UgrFrameMath.cpp
-)
-target_include_directories(test_UgrFrameMath PRIVATE
-    ${CMAKE_SOURCE_DIR}/libs/gui
-)
-target_link_libraries(test_UgrFrameMath PRIVATE
-    GTest::gtest_main
-    Qt6::Core
-    Qt6::Gui
-)
-add_test(NAME UgrFrameMathTests COMMAND test_UgrFrameMath)
-set_tests_properties(UgrFrameMathTests PROPERTIES LABELS "render")
+# Whole-pixel chart mapping (raster camera), plan 2026-10-08 checks A1-A8.
+add_executable(test_ChartRaster test_ChartRaster.cpp)
+target_include_directories(test_ChartRaster PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_ChartRaster PRIVATE GTest::gtest sentinel_gui_lib Qt6::Core Qt6::Gui)
+add_test(NAME ChartRasterTests COMMAND test_ChartRaster)
+set_tests_properties(ChartRasterTests PROPERTIES LABELS "render")
 
 # S6b: GridViewState clamps (spec rules 1, 2, 9): wheel, axis drags and direct viewports.
 add_executable(test_GridViewState test_GridViewState.cpp)
@@ -151,7 +143,7 @@ qt_add_shaders(test_heatmap_gpu_binner test_unguarded_kernel
 add_test(NAME HeatmapGpuBinnerTests COMMAND test_heatmap_gpu_binner)
 # S5c: HeatmapTileNode on the SpanSet (retention, cap, capacity reports, QRhi
 # loss, never-blank transitions) and the bin kernel's fill pass vs the CPU oracle.
-add_executable(test_heatmap_tile_node test_heatmap_tile_node.cpp)
+add_executable(test_heatmap_tile_node test_heatmap_tile_node.cpp ${CMAKE_SOURCE_DIR}/libs/gui/render/ChartRaster.cpp)
 target_include_directories(test_heatmap_tile_node PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_heatmap_tile_node PRIVATE sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::Quick)
 add_test(NAME HeatmapTileNodeTests COMMAND test_heatmap_tile_node)

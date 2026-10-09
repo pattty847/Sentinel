@@ -7,7 +7,6 @@
 #include "UnifiedGridRenderer.h"
 #include "render/CandlestickOverlayItem.hpp"
 #include "render/CandlePixelGeometry.hpp"
-#include "CoordinateSystem.h"
 #include "lab/LabData.hpp"
 #include "lab/OffscreenQuick.hpp"
 #include "lab/RhiBackend.hpp"

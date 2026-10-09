@@ -4,6 +4,7 @@
 #include <QPointF>
 #include <QQuickItem>
 #include <vector>
+#include "../render/ChartRaster.hpp"
 
 class GridViewState;
 class UnifiedGridRenderer;
@@ -87,6 +88,11 @@ protected:
     std::vector<TickInfo> m_ticksScratch;  // swap buffer — avoids heap alloc in hot path
     UnifiedGridRenderer* m_renderer = nullptr;
     UnifiedGridRenderer* renderer() const { return m_renderer; }
+    // Whole-pixel mapping: the renderer's raster camera for this calculation (the
+    // drawn window; positions are its device pixels / dpr). Invalid without a
+    // renderer: the committed viewport maps continuously.
+    chart_raster::RasterCamera m_raster;
+    void refreshRaster();
     int m_labelCapacity = 32;
     int m_tickWriteIndex = 0;
     

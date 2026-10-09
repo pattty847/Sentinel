@@ -285,6 +285,17 @@ TEST(AgentApiCodec, ViewportFixtureAndNullZoom) {
     data = viewportJson(s).value("data").toObject();
     EXPECT_TRUE(data.value("widthPx").isNull());
     EXPECT_TRUE(data.value("zoom").toObject().value("msPerPx").isNull());
+    EXPECT_TRUE(data.value("drawn").isNull()) << "no frame drawn yet";
+    // Whole-pixel mapping: what the last frame drew (the raster camera).
+    s.drawn = ViewportSnapshot::Drawn{1790593187500.0, 1790596787500.0, 63999.5, 65000.5, 2, 16, 2.0};
+    const auto drawn = viewportJson(s).value("data").toObject().value("drawn").toObject();
+    EXPECT_DOUBLE_EQ(drawn.value("startMs").toDouble(), 1790593187500.0);
+    EXPECT_DOUBLE_EQ(drawn.value("endMs").toDouble(), 1790596787500.0);
+    EXPECT_DOUBLE_EQ(drawn.value("priceMin").toDouble(), 63999.5);
+    EXPECT_DOUBLE_EQ(drawn.value("priceMax").toDouble(), 65000.5);
+    EXPECT_EQ(drawn.value("rowPx").toInt(), 2);
+    EXPECT_EQ(drawn.value("colPx").toInt(), 16);
+    EXPECT_DOUBLE_EQ(drawn.value("dpr").toDouble(), 2.0);
 }
 
 TEST(AgentApiCodec, QueryValidation) {
