@@ -156,6 +156,7 @@ Verified 2026-09-27 with codex-cli 0.158; 0.160 was installed by 2026-10-05. Re-
   the exact document diff into the prompt rather than treating a code-only PASS as review of the docs.
 
 ## Lessons still in force
+- Sandboxed Codex cannot write the shared ccache: set `CCACHE_DIR` to a scratch dir under `/tmp` for its builds. Never add the shared ccache as a writable root: main-checkout builds and deploys read it, so a writable cache would let an agent plant objects that get deployed (2026-10-09).
 - Run `codex exec resume` from the writer's worktree (`cd <worktree> && codex exec resume ...`): resume has no `-C`, and the current directory becomes the writable workspace, so a resume started in the main checkout makes the main checkout writable (2026-10-07).
 - Sandboxed Codex can resolve merge conflicts: the conductor runs `git cherry-pick --no-commit <sha>` (or a rebase) in the writer's worktree, the writer edits the conflicted files, and the conductor checks that no `<<<<<<<` markers remain, then commits (2026-10-07, anchors phase B).
 - Open writer screenshots before accepting a visual claim. Never describe a "before" image as a spec: a misread fan-dominated screenshot became a wrong colour default (2026-10-07, volume profile).
