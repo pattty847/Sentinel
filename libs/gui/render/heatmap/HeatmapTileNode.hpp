@@ -66,6 +66,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -178,6 +179,13 @@ public:
         int64_t tickUnits = 0; // display tick in price units of spans->priceScale (0: none yet)
         ViewWindow view;
         QRectF rect;
+        // Whole-pixel smooth zoom (slice A2). A zoom transition draws fractional pixels
+        // per row/column with exact coverage in linear light: the coverage gamma (2.2);
+        // 0 at rest (the single cell under each pixel centre). binView: the extent the
+        // transition will reach (its start and target), binned once at its start so the
+        // glide never rebins; none at rest (the view).
+        float coverageGamma = 0.0f;
+        std::optional<ViewWindow> binView;
         recording::SizeScale outputScale;
         uint64_t uploadBudgetBytes = 8ull << 20;
         uint64_t gpuCapBytes = 320ull << 20; // HeatmapBudgets::gpuPerChart
@@ -337,6 +345,7 @@ private:
     void noteLiveDrawn(const Bin &bin);
     bool binRows(Bin &bin, QRhiCommandBuffer *cb);
     bool rowsCover(const Bin &bin) const;
+    ViewWindow binExtent() const; // the view and the frame's binView
     Bin *findBin(uint64_t id) const;
     void retire(bool keepDrawn);
     void pinSources(const Bin &bin);
