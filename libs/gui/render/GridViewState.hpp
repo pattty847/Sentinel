@@ -4,6 +4,7 @@
 #include <QSizeF>
 #include <QElapsedTimer>
 #include <functional>
+#include <tuple>
 #include <utility>
 
 class GridViewState : public QObject {
@@ -76,6 +77,13 @@ public:
     // none (the continuous scale applies).
     using PanShift = std::function<bool(QPointF dragLogicalPx, qint64& timeShiftMs, double& priceShift)>;
     void setPanShift(PanShift shift) { m_panShift = std::move(shift); }
+    // What the picture shows at a view point (fractions of the width from the left and
+    // of the height from the top): the raster camera's time and price there. The zoom
+    // handlers keep that content under the cursor (they zoom about it, not about the
+    // stored bounds, which differ from the drawn ones by up to a cell's rounding per
+    // cell). False: none (the stored bounds' point applies).
+    using DrawnPoint = std::function<bool(double fracX, double fracY, double& timeMs, double& price)>;
+    void setDrawnPoint(DrawnPoint point) { m_drawnPoint = std::move(point); }
     
     void handleZoom(double delta, const QPointF& center);
     void handleZoomWithViewport(double delta, const QPointF& center, const QSizeF& viewportSize);
@@ -125,6 +133,11 @@ private:
     bool m_autoPriceScale = false;
     PriceFit m_priceFit;
     PanShift m_panShift;
+    DrawnPoint m_drawnPoint;
+    // The zoom's fixed point: the drawn time/price at (fracX, fracY) when known (third:
+    // true), else the given continuous ones. Not during a drag.
+    std::tuple<double, double, bool> zoomAnchor(double fracX, double fracY, double continuousTime,
+                                                double continuousPrice) const;
     RasterAnchor m_rasterAnchor{1.0, 0.5}; // follow-live (the default) anchors the view end
     
     static constexpr double ZOOM_SENSITIVITY = 0.0005;

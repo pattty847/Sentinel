@@ -17,6 +17,10 @@ int stepPixels(double r, int previous) {
     return static_cast<int>(std::clamp(std::round(r), 1.0, double(kMaxCellPx)));
 }
 
+int maxColumnPixels(double tfMs) {
+    return static_cast<int>(std::clamp(std::floor(tfMs), 1.0, double(kMaxCellPx)));
+}
+
 RasterCamera computeRaster(const RasterInputs &in, RasterStep previous) {
     RasterCamera cam;
     cam.dpr = std::isfinite(in.dpr) && in.dpr > 0 ? in.dpr : 1.0;
@@ -34,7 +38,10 @@ RasterCamera computeRaster(const RasterInputs &in, RasterStep previous) {
     const double rRow = double(cam.heightDev) * tick / priceSpan;
     const double rCol = double(cam.widthDev) * in.tfMs / timeSpan;
     cam.rowPx = stepPixels(rRow, previous.rowPx);
-    cam.colPx = stepPixels(rCol, previous.colPx);
+    // At most one ms per device pixel (a column of tf ms is at most tf px): a drag of
+    // whole device pixels is then always a whole-ms commit (panShift). A stored window
+    // narrower than that (a direct viewport of a few ms) draws wider than stored.
+    cam.colPx = std::min(stepPixels(rCol, previous.colPx), maxColumnPixels(in.tfMs));
     const double P = cam.rowPx, C = cam.colPx;
     // The anchor keeps its screen position within half a device pixel for any P
     // and C; the drag moves the picture by whole device pixels, 1:1 with the mouse.
@@ -113,13 +120,15 @@ bool panShift(const RasterInputs &committed, RasterStep previous, QPointF drag, 
     for (const int64_t candidate : {nearest, nearest - 1, nearest + 1}) {
         in.timeStart = committed.timeStart + candidate;
         in.timeEnd = committed.timeEnd + candidate;
-        if (computeRaster(in, dragged.step()).leftColIndex == dragged.leftColIndex) {
+        const RasterCamera after = computeRaster(in, dragged.step());
+        if (after.leftColIndex == dragged.leftColIndex && after.topRowIndex == dragged.topRowIndex) {
             timeShiftMs = candidate;
             return true;
         }
     }
-    timeShiftMs = nearest; // a column narrower than a ms: the nearest whole ms
-    return true;
+    // No whole-ms commit reproduces the drawn columns. Unreachable while a column is
+    // at most tf device px (computeRaster); never reported as an exact commit.
+    return false;
 }
 
 bool fitPriceToRows(double &lo, double &hi, int heightDev, double tick) {

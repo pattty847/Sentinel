@@ -64,6 +64,9 @@ int devicePixels(double logical, double dpr);
 // The integer step rule: keep `previous` while |r - previous| <= 0.5 + kStepBandPx,
 // else round (at least 1, at most kMaxCellPx).
 int stepPixels(double r, int previous);
+// Columns are at most tf device px (one ms per device pixel; at most kMaxCellPx): every
+// whole-pixel drag then has an exact whole-ms commit.
+int maxColumnPixels(double tfMs);
 
 RasterCamera computeRaster(const RasterInputs &in, RasterStep previous);
 // The frame's TimeAxisMapping (every layer maps through it): the drawn window over
@@ -73,7 +76,8 @@ TimeAxisMapping toMapping(const RasterCamera &camera);
 // The committed shifts for a drag that shows `dragLogicalPx`: the camera moved by
 // whole device pixels (llround(drag * dpr)) at its P and C. The time shift is whole
 // ms, chosen so the drawn columns after the commit are exactly the dragged ones;
-// the price shift keeps the drawn rows. False when the camera is invalid.
+// the price shift keeps the drawn rows. False when the camera is invalid or no
+// whole-ms shift reproduces the dragged camera (never with maxColumnPixels).
 bool panShift(const RasterInputs &committed, RasterStep previous, QPointF dragLogicalPx, int64_t &timeShiftMs,
               double &priceShift);
 

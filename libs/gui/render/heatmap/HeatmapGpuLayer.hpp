@@ -85,6 +85,9 @@ public:
     // fills the node frame and posts labels for `drawnView`, the raster camera's
     // window (exactly what is on screen) over `rect`. prepareFrame returns false
     // when there is nothing to draw yet (no controller).
+    // The tick it chooses is a proposal: commitProposedTick (queued to the GUI thread)
+    // makes it the drawn tick and emits tickChanged, so the chart moves every dependent
+    // layer before the next frame draws it.
     void chooseTickForView(const ViewWindow &view);
     bool prepareFrame(HeatmapTileNode::Frame &frame, const QRectF &rect, const ViewWindow &drawnView);
     // Render thread: the frame's drawn device pixels per row and column and the
@@ -269,6 +272,8 @@ private:
     LabelCounters labelCounters_;
     std::shared_ptr<HeatmapCellCapture> capture_;
     std::atomic<int> rowPxDrawn_{0}, colPxDrawn_{0};
+    std::atomic<int64_t> proposedTickUnits_{0}; // render thread's choice, committed on the GUI thread
+    void commitProposedTick();
     std::atomic<double> rowPxContinuous_{0.0};
 
     void createController();

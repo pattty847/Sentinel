@@ -519,7 +519,13 @@ private:
     // Auto-fit (fitView). Window pieces return nullopt when nothing is known.
     std::optional<std::pair<qint64, qint64>> gpuFitTimeWindow() const;
     // candlesOnly: no live-price fallback (the auto price scale's fit).
-    std::optional<std::pair<double, double>> gpuFitPriceWindow(qint64 start, qint64 end, bool candlesOnly) const;
+    // The candles fitted are those the stored window [start, end] draws: the raster
+    // camera's drawn time window (current anchor, or anchorFracX when the caller sets
+    // one with this change; DPR, column hysteresis).
+    std::optional<std::pair<double, double>> gpuFitPriceWindow(qint64 start, qint64 end, bool candlesOnly,
+                                                               std::optional<double> anchorFracX = std::nullopt) const;
+    std::pair<double, double> drawnTimeWindow(qint64 start, qint64 end,
+                                              std::optional<double> anchorFracX = std::nullopt) const;
     // GridViewState's price fit while auto price scale is on. 
     bool autoPriceFit(qint64 start, qint64 end, double& priceMin, double& priceMax);
     // Auto price scale on: the current time range through setViewport (a bump only

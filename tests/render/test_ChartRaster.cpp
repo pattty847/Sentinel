@@ -295,6 +295,30 @@ TEST(ChartRaster, A7_AReleaseCommitsExactlyWhatTheDragDrew) {
     }
 }
 
+// Review fix 4: a 1 ms stored window (any direct viewport is accepted) draws at most
+// one ms per device pixel, and every whole-pixel drag then has an exact whole-ms commit.
+TEST(ChartRaster, A7_HighZoomDragsStillCommitExactly) {
+    for (const double tf : {1'000.0, double(kMinute), 3'600'000.0}) {
+        RasterInputs in = viewOf(2.4, 16.4, 1.0, tf, 640, 320, 2.0);
+        in.timeEnd = in.timeStart + 1;
+        const RasterCamera cam = computeRaster(in, {});
+        ASSERT_TRUE(cam.valid);
+        EXPECT_EQ(cam.colPx, maxColumnPixels(tf)) << "tf " << tf;
+        EXPECT_LE(double(cam.colPx), tf);
+        for (const double drag : {0.5, 1.0, -1.0, 3.3, -7.7, 40.2}) {
+            int64_t timeShift = 0;
+            double priceShift = 0;
+            ASSERT_TRUE(panShift(in, cam.step(), QPointF(drag, 0), timeShift, priceShift)) << "tf " << tf << " drag " << drag;
+            RasterInputs dragged = in, committed = in;
+            dragged.dragLogicalPx = QPointF(drag, 0);
+            committed.timeStart += timeShift;
+            committed.timeEnd += timeShift;
+            EXPECT_EQ(computeRaster(committed, cam.step()).leftColIndex, computeRaster(dragged, cam.step()).leftColIndex)
+                << "tf " << tf << " drag " << drag;
+        }
+    }
+}
+
 // A8: a price fit lands on an integer number of device pixels per row, never narrower
 // than the margined span, and the camera then draws exactly the fitted window.
 TEST(ChartRaster, A8_PriceFitsAreIntegerPixelSpans) {

@@ -130,6 +130,15 @@ void GridViewState::setViewportSize(double width, double height) {
     }
 }
 
+std::tuple<double, double, bool> GridViewState::zoomAnchor(double fracX, double fracY, double continuousTime,
+                                                          double continuousPrice) const {
+    double time = continuousTime, price = continuousPrice;
+    if (!m_isDragging && m_drawnPoint && m_drawnPoint(fracX, fracY, time, price) && std::isfinite(time) &&
+        std::isfinite(price))
+        return {time, price, true};
+    return {continuousTime, continuousPrice, false};
+}
+
 void GridViewState::setRasterAnchor(double fracX, double fracY) {
     if (std::isfinite(fracX)) m_rasterAnchor.fracX = std::clamp(fracX, 0.0, 1.0);
     if (std::isfinite(fracY)) m_rasterAnchor.fracY = std::clamp(fracY, 0.0, 1.0);
@@ -159,14 +168,16 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
     double centerPriceRatio = 1.0 - (center.y() / viewportSize.height());
     centerTimeRatio = std::max(0.0, std::min(1.0, centerTimeRatio));
     centerPriceRatio = std::max(0.0, std::min(1.0, centerPriceRatio));
-    // The content under the cursor stays put across a whole-pixel step (raster camera);
-    // with the auto price scale the price is the fit's, so its anchor stays.
+    // The content under the cursor stays put: the zoom is about what is drawn there (the
+    // raster camera before this zoom), and the camera re-snaps about the cursor. With
+    // the auto price scale the price is the fit's, so its anchor stays.
+    const auto [currentCenterTime, currentCenterPrice, drawn] =
+        zoomAnchor(centerTimeRatio, 1.0 - centerPriceRatio,
+                   static_cast<double>(m_visibleTimeStart_ms + static_cast<int64_t>(currentTimeRange * centerTimeRatio)),
+                   m_minPrice + (currentPriceRange * centerPriceRatio));
     setRasterAnchor(centerTimeRatio, m_autoPriceScale ? m_rasterAnchor.fracY : 1.0 - centerPriceRatio);
-
-    const int64_t currentCenterTime = m_visibleTimeStart_ms + static_cast<int64_t>(currentTimeRange * centerTimeRatio);
-    const double currentCenterPrice = m_minPrice + (currentPriceRange * centerPriceRatio);
-    const int64_t newTimeStart = static_cast<int64_t>(
-        std::floor(static_cast<double>(currentCenterTime) - static_cast<double>(newTimeRange) * centerTimeRatio));
+    const double newStartD = currentCenterTime - static_cast<double>(newTimeRange) * centerTimeRatio;
+    const int64_t newTimeStart = static_cast<int64_t>(drawn ? std::llround(newStartD) : std::floor(newStartD));
     const int64_t newTimeEnd = newTimeStart + newTimeRange;
     const double newMinPrice = currentCenterPrice - (newPriceRange * centerPriceRatio);
     const double newMaxPrice = currentCenterPrice + (newPriceRange * (1.0 - centerPriceRatio));
@@ -311,14 +322,15 @@ void GridViewState::handleTimeZoomWithSensitivity(double rawDelta, double center
 
     double centerRatio = centerX / viewportWidth;
     centerRatio = std::max(0.0, std::min(1.0, centerRatio));
+    // About the time drawn under the cursor (raster camera before this zoom).
+    const auto [currentCenterTime, unusedPrice, drawn] =
+        zoomAnchor(centerRatio, m_rasterAnchor.fracY,
+                   static_cast<double>(m_visibleTimeStart_ms +
+                                       static_cast<int64_t>(static_cast<double>(currentTimeRange) * centerRatio)),
+                   0.0);
     setRasterAnchor(centerRatio, m_rasterAnchor.fracY);
-    const int64_t currentCenterTime =
-        m_visibleTimeStart_ms +
-        static_cast<int64_t>(static_cast<double>(currentTimeRange) * centerRatio);
-    const double newTimeStartD =
-        static_cast<double>(currentCenterTime) -
-        static_cast<double>(newTimeRange) * centerRatio;
-    const int64_t newTimeStart = static_cast<int64_t>(std::floor(newTimeStartD));
+    const double newTimeStartD = currentCenterTime - static_cast<double>(newTimeRange) * centerRatio;
+    const int64_t newTimeStart = static_cast<int64_t>(drawn ? std::llround(newTimeStartD) : std::floor(newTimeStartD));
     const int64_t newTimeEnd = newTimeStart + newTimeRange;
 
     setViewport(newTimeStart, newTimeEnd, m_minPrice, m_maxPrice);
@@ -349,8 +361,11 @@ void GridViewState::handlePriceZoomWithSensitivity(double rawDelta, double cente
 
     double centerRatio = 1.0 - (centerY / viewportHeight);
     centerRatio = std::max(0.0, std::min(1.0, centerRatio));
+    // About the price drawn under the cursor (raster camera before this zoom).
+    const auto [unusedTime, currentCenterPrice, drawn] =
+        zoomAnchor(m_rasterAnchor.fracX, 1.0 - centerRatio, 0.0, m_minPrice + currentPriceRange * centerRatio);
+    (void)drawn;
     setRasterAnchor(m_rasterAnchor.fracX, 1.0 - centerRatio);
-    const double currentCenterPrice = m_minPrice + currentPriceRange * centerRatio;
     const double newMinPrice = currentCenterPrice - newPriceRange * centerRatio;
     const double newMaxPrice =
         currentCenterPrice + newPriceRange * (1.0 - centerRatio);

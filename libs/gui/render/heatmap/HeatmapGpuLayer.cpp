@@ -126,6 +126,7 @@ void HeatmapGpuLayer::destroyController() {
     live_.reset();
     resolution_.reset();
     tickUnits_ = autoUnits_ = 0;
+    proposedTickUnits_.store(0, std::memory_order_relaxed);
     postedTickUnits_ = -1;
     tickKey_ = {};
     lastLiveVersion_ = 0;
@@ -370,11 +371,17 @@ void HeatmapGpuLayer::chooseTickForView(const ViewWindow &view) {
     live_ = controller_->latestLive(); // pointer reads; the node uploads only a new version
     resolution_ = controller_->latestResolution();
     const int64_t tick = priceKnown_ ? chooseTick(view) : 0; // nothing to draw before the price view exists
-    if (tick != tickUnits_) {
-        tickUnits_ = tick;
-        ++tickChanges_;
-        sLog_Probe("heatmap.gpu.tick", "tf=" << tfMs_ << " units=" << tick << " mode=" << (manualMode_ ? "manual" : "auto"));
-        QMetaObject::invokeMethod(this, [this] { emit tickChanged(); }, Qt::QueuedConnection);
+    // The drawn tick changes on the GUI thread (commitProposedTick), never here: the
+    // chart then moves every layer that maps through the raster camera (axis models,
+    // candles, paper and algo overlays) before the frame that draws the new rows, so no
+    // frame mixes two mappings. This frame keeps the drawn tick.
+    if (tick != proposedTickUnits_.load(std::memory_order_relaxed)) {
+        proposedTickUnits_.store(tick, std::memory_order_relaxed);
+        if (tick != tickUnits_) {
+            sLog_Probe("heatmap.gpu.tick", "proposed tf=" << tfMs_ << " units=" << tick
+                       << " mode=" << (manualMode_ ? "manual" : "auto"));
+            QMetaObject::invokeMethod(this, [this] { commitProposedTick(); }, Qt::QueuedConnection);
+        }
     }
     if (tickUnits_ != postedTickUnits_ || manualMode_ != postedManual_) {
         postedTickUnits_ = tickUnits_;
@@ -383,6 +390,16 @@ void HeatmapGpuLayer::chooseTickForView(const ViewWindow &view) {
         QMetaObject::invokeMethod(controller_, [c = controller_, mode, units = tickUnits_] { c->setTickRequest(mode, units); },
                                   Qt::QueuedConnection);
     }
+}
+
+void HeatmapGpuLayer::commitProposedTick() {
+    // GUI thread (the render thread only reads tickUnits_ while the GUI thread is blocked).
+    const int64_t tick = proposedTickUnits_.load(std::memory_order_relaxed);
+    if (tick == tickUnits_) return; // superseded (the proposal went back to the drawn tick)
+    tickUnits_ = tick;
+    ++tickChanges_;
+    sLog_Probe("heatmap.gpu.tick", "tf=" << tfMs_ << " units=" << tick << " mode=" << (manualMode_ ? "manual" : "auto"));
+    emit tickChanged();
 }
 
 bool HeatmapGpuLayer::prepareFrame(HeatmapTileNode::Frame &frame, const QRectF &rect, const ViewWindow &view) {

@@ -507,6 +507,9 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
   if (m_currentTimeframe_ms != timeframe_ms) {
     sLog_Render("timeframe changed: prevMs=" << m_currentTimeframe_ms
                 << " tfMs=" << timeframe_ms);
+    // What is drawn before the switch (the raster camera at the old timeframe): the Now
+    // column keeps its drawn position, not its position in the stored bounds.
+    const auto drawnBefore = rasterCameraNow(false);
     const int64_t previousTf = m_currentTimeframe_ms;
     m_currentTimeframe_ms = timeframe_ms;
     if (timeframe_ms > 0) m_timeAuthority.setActiveTimeframeMs(timeframe_ms);
@@ -537,8 +540,14 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
     std::optional<double> rightFrac;
     if (anchor > 0 && oldEnd > oldStart) {
       const double now = nowCentre(previousTf);
-      if (m_viewState->isAutoScrollEnabled() || (now >= double(oldStart) && now <= double(oldEnd)))
+      // Following live the view end is the live edge one padding inside (the stored
+      // bounds are exact); a historical view keeps the Now column where it is drawn.
+      if (drawnBefore.valid && !m_viewState->isAutoScrollEnabled()) {
+        const double x = drawnBefore.xDev(now) / drawnBefore.widthDev; // its drawn fraction
+        if (m_viewState->isAutoScrollEnabled() || (x >= 0.0 && x <= 1.0)) rightFrac = 1.0 - x;
+      } else if (m_viewState->isAutoScrollEnabled() || (now >= double(oldStart) && now <= double(oldEnd))) {
         rightFrac = (static_cast<double>(oldEnd) - now) / static_cast<double>(oldEnd - oldStart);
+      }
     }
     if (m_gpuLayer && timeframe_ms > 0) {
       m_gpuLimitsDeferred = keepColumns;
@@ -1018,10 +1027,12 @@ void UnifiedGridRenderer::setCandleBuffer(QObject* buffer) {
                                     return;
                                   const int64_t tf = std::max<int64_t>(1, m_currentTimeframe_ms);
                                   if (timeframeSec != std::max<int64_t>(1, (tf + 500) / 1000)) return;
-                                  // The window on screen (a drag commits only at release).
+                                  // The window drawn on screen (a drag commits only at release).
                                   const auto [shownStart, shownEnd] = m_viewState->displayedTimeWindow();
-                                  const qint64 viewStart = recording::floorDiv(shownStart, tf) * tf;
-                                  if (std::max(dirtyEnd, dirtyStart + tf) <= viewStart || dirtyStart >= shownEnd)
+                                  const auto [drawnStart, drawnEnd] = drawnTimeWindow(shownStart, shownEnd);
+                                  const qint64 viewStart =
+                                      recording::floorDiv(static_cast<qint64>(std::floor(drawnStart)), tf) * tf;
+                                  if (std::max(dirtyEnd, dirtyStart + tf) <= viewStart || double(dirtyStart) >= drawnEnd)
                                     return;
                                   refitAutoPrice();
                                 });
@@ -1076,24 +1087,54 @@ std::optional<std::pair<qint64, qint64>> UnifiedGridRenderer::gpuFitTimeWindow()
   return std::make_pair<qint64, qint64>(qint64(start), start + span);
 }
 
+std::pair<double, double> UnifiedGridRenderer::drawnTimeWindow(qint64 start, qint64 end,
+                                                               std::optional<double> anchorFracX) const {
+  if (!m_viewState || !m_gpuLayer || !(end > start)) return {double(start), double(end)};
+  auto viewport = FrameContextBuilder::viewportSnapshot(m_viewState.get());
+  viewport.valid = true;
+  viewport.timeStart = start;
+  viewport.timeEnd = end;
+  viewport.dragging = false; // a drag is already in [start, end] (displayedTimeWindow)
+  if (!(viewport.maxPrice > viewport.minPrice)) { // the time window does not depend on price
+    viewport.minPrice = 0.0;
+    viewport.maxPrice = 1.0;
+  }
+  if (anchorFracX) viewport.anchorFracX = *anchorFracX;
+  const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
+  chart_raster::RasterStep previous;
+  {
+    std::lock_guard<std::mutex> lock(m_frameContextMutex);
+    previous = m_rasterStep;
+  }
+  const auto cam = chart_raster::computeRaster(rasterInputs(viewport, m_gpuLayer->tickPrice(), width(), height(), dpr),
+                                               previous);
+  if (!cam.valid) return {double(start), double(end)};
+  return {cam.drawnStartMs, cam.drawnEndMs};
+}
+
 std::optional<std::pair<double, double>> UnifiedGridRenderer::gpuFitPriceWindow(qint64 start, qint64 end,
-                                                                                bool candlesOnly) const {
+                                                                                bool candlesOnly,
+                                                                                std::optional<double> anchorFracX) const {
   const int64_t tf = std::max<int64_t>(1, m_currentTimeframe_ms);
   double lo = 0, hi = 0, centre = 0, span = 0;
+  // The candles the window draws: the raster camera's time window (wider or narrower
+  // than [start, end] by the column rounding), as the candle overlay selects them.
+  const auto [drawnStart, drawnEnd] = drawnTimeWindow(start, end, anchorFracX);
+  const qint64 first = static_cast<qint64>(std::floor(drawnStart)), last = static_cast<qint64>(std::ceil(drawnEnd));
   // From the bucket that contains the view start: getVisibleSlice selects by bar
   // start, and the candle that starts before the view and ends inside it counts.
-  const int64_t alignedStart = recording::floorDiv(start, tf) * tf;
+  const int64_t alignedStart = recording::floorDiv(first, tf) * tf;
   auto& bars = m_fitBars; // reused: the auto price scale runs this on every change in view
   bars.clear();
-  if (m_candleBuffer && end > start)
-    m_candleBuffer->getVisibleSlice(m_activeSymbol, std::max<int64_t>(1, (tf + 500) / 1000), alignedStart, end, bars);
+  if (m_candleBuffer && last > first)
+    m_candleBuffer->getVisibleSlice(m_activeSymbol, std::max<int64_t>(1, (tf + 500) / 1000), alignedStart, last, bars);
   size_t used = 0;
   double newestClose = 0;
   qint64 newestStart = 0;
   for (const auto& bar : bars) {
     const qint64 barEnd = bar.timeEndMs > bar.timeStartMs ? bar.timeEndMs : bar.timeStartMs + tf;
-    if (bar.timeStartMs >= end || barEnd <= start || !std::isfinite(bar.high) || !std::isfinite(bar.low) ||
-        !(bar.low > 0) || bar.high < bar.low)
+    if (double(bar.timeStartMs) >= drawnEnd || double(barEnd) <= drawnStart || !std::isfinite(bar.high) ||
+        !std::isfinite(bar.low) || !(bar.low > 0) || bar.high < bar.low)
       continue;
     lo = used ? std::min(lo, bar.low) : bar.low;
     hi = used ? std::max(hi, bar.high) : bar.high;
@@ -1186,8 +1227,10 @@ bool UnifiedGridRenderer::fitView(bool time, bool price) {
     else ok = false;
   }
   if (price && ok) {
-    // Candles, else the live price (setViewport's auto fit takes the candles first).
-    if (const auto window = gpuFitPriceWindow(start, end, false)) std::tie(lo, hi) = *window;
+    // Candles, else the live price (setViewport's auto fit takes the candles first),
+    // over what the fitted window draws (a time fit anchors the view end).
+    if (const auto window = gpuFitPriceWindow(start, end, false, time ? std::optional<double>(1.0) : std::nullopt))
+      std::tie(lo, hi) = *window;
     else ok = false;
   }
   sLog_Render("view fit time=" << time << " price=" << price << " applied=" << ok << " time=[" << start << ".."
@@ -1241,8 +1284,10 @@ QString UnifiedGridRenderer::applyViewportRequest(const ViewportRequest& request
     m_gpuPriceKnown = true;
     m_gpuReseedPrice = false;
   } else if (request.autoScale.value_or(false)) {
-    // On: the price-axis double-click (candles; with none, the live price centred).
-    if (const auto window = gpuFitPriceWindow(start, end, false)) {
+    // On: the price-axis double-click (candles; with none, the live price centred), over
+    // what the requested window draws with the anchor it gets below.
+    const double fracX = follow ? 1.0 : (start != start0 || end != end0) ? 0.5 : m_viewState->rasterAnchor().fracX;
+    if (const auto window = gpuFitPriceWindow(start, end, false, fracX)) {
       std::tie(lo, hi) = *window;
       m_gpuPriceKnown = true;
       m_gpuReseedPrice = false;
@@ -1278,7 +1323,7 @@ bool UnifiedGridRenderer::resetView() {
   m_viewState->setAutoPriceScale(true);
   m_viewState->enableAutoScroll(true); // the view state's flag only: the viewport moves once, below
   double lo = m_viewState->getMinPrice(), hi = m_viewState->getMaxPrice();
-  if (const auto window = gpuFitPriceWindow(end - span, end, false)) {
+  if (const auto window = gpuFitPriceWindow(end - span, end, false, 1.0)) {
     std::tie(lo, hi) = *window;
     m_gpuPriceKnown = true;
     m_gpuReseedPrice = false;
