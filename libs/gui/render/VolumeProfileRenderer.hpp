@@ -70,13 +70,15 @@ public:
     // viewMaxPrice: top  of the visible price range
     // bins        : volume per price bin (top→bottom, may be empty = no data)
     // snap        : snapshot from VolumeProfileState (price range, VA, etc.)
+    // dpr / free  : frame surface ratio and raster camera rest/glide signal
     void render(QSGNode* parentNode,
                 bool drawVp,
                 const QRectF& drawRect,
                 double viewMinPrice,
                 double viewMaxPrice,
                 const std::vector<float>& bins,
-                const VolumeProfileState::Snapshot& snap);
+                const VolumeProfileState::Snapshot& snap,
+                double dpr, bool free);
 
 private:
     void ensureNodes(QSGNode* parentNode);
@@ -86,7 +88,8 @@ private:
                          double viewMinPrice,
                          double viewMaxPrice,
                          const std::vector<float>& bins,
-                         const VolumeProfileState::Snapshot& snap);
+                         const VolumeProfileState::Snapshot& snap,
+                         double dpr, bool free);
 
     // ── Node pointers (owned by the QSG tree) ─────────────────────────────
     QSGGeometryNode* m_vaNode   = nullptr;  // VA band

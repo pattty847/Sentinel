@@ -291,6 +291,10 @@ void TpoOverlayRenderer::rebuildSession(Session& session, const LayoutKey& key, 
     const double cellH = key.cellH;
     const float gapX = cellW >= 6.0 ? 1.0f : 0.0f;
     const float gapY = cellH >= 6.0 ? 1.0f : 0.0f;
+    const auto edge = [&key](double logical) {
+        return key.free ? logical : std::round(logical * key.dpr) / key.dpr;
+    };
+    const float minCell = static_cast<float>(key.free ? 1.0 : std::ceil(key.dpr) / key.dpr);
     const int group = profile.group();
 
     int lastPeriod = -1;
@@ -320,9 +324,9 @@ void TpoOverlayRenderer::rebuildSession(Session& session, const LayoutKey& key, 
 
     if (pocBar) {
         const double top = rowTop(va.poc);
-        writeQuad(v + written, 0.0f, static_cast<float>(std::round(top)),
-                  static_cast<float>(std::round((lastPeriod + 1) * periodPx)),
-                  static_cast<float>(std::round(top + cellH)), tpo::pocBarColor(style.theme));
+        writeQuad(v + written, 0.0f, static_cast<float>(edge(top)),
+                  static_cast<float>(edge((lastPeriod + 1) * periodPx)),
+                  static_cast<float>(edge(top + cellH)), tpo::pocBarColor(style.theme));
         written += 6;
     }
 
@@ -332,19 +336,19 @@ void TpoOverlayRenderer::rebuildSession(Session& session, const LayoutKey& key, 
             continue;
         }
         const double top = rowTop(row);
-        const float y0 = static_cast<float>(std::round(top));
-        const float y1 = static_cast<float>(std::round(top + cellH)) - gapY;
+        const float y0 = static_cast<float>(edge(top));
+        const float y1 = static_cast<float>(edge(top + cellH - gapY));
         const float cy = static_cast<float>(top + cellH * 0.5);
         const bool inVa = va.contains(row);
         const bool poc = row == va.poc;
         int k = 0;
         profile.forEachPeriod(row, [&](int period) {
             const double left = split ? period * periodPx : k * cellW;
-            const float x0 = static_cast<float>(std::round(left));
-            const float x1 = static_cast<float>(std::round(left + cellW)) - gapX;
+            const float x0 = static_cast<float>(edge(left));
+            const float x1 = static_cast<float>(edge(left + cellW - gapX));
             const tpo::Rgba color = tpo::cellColor(style.theme, period, session.periods, inVa, poc);
             if (written + 6 <= session.cellCapacity) {
-                writeQuad(v + written, x0, y0, std::max(x0 + 1.0f, x1), std::max(y0 + 1.0f, y1), color);
+                writeQuad(v + written, x0, y0, std::max(x0 + minCell, x1), std::max(y0 + minCell, y1), color);
                 written += 6;
             }
             if (key.text) {
@@ -425,8 +429,7 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
                                 bool drawTpo,
                                 const ChartTextAtlas& atlas,
                                 bool atlasReady,
-                                double viewMin, double viewMax,
-                                int64_t viewStartMs, int64_t viewEndMs,
+                                const chart_raster::RasterCamera& camera, double dpr,
                                 const QRectF& surfaceBounds) {
     if (!window || !parentNode) {
         return;
@@ -448,8 +451,15 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
     // Created on the first frame so the TPO subtree keeps its place below chart text.
     ensureRoot(parentNode);
 
-    const bool viewValid = viewEndMs > viewStartMs && std::isfinite(viewMin) && std::isfinite(viewMax) &&
-        viewMax > viewMin && !surfaceBounds.isEmpty() && m_grid.tick > 0.0;
+    const auto mapping = chart_raster::toMapping(camera);
+    const double viewStartMs = mapping.viewStartMs, viewEndMs = mapping.viewEndMs;
+    const double scale = std::isfinite(dpr) && dpr > 0 ? dpr : 1.0;
+    const bool free = camera.free;
+    const auto edge = [scale, free](double logical) {
+        return free ? logical : std::round(logical * scale) / scale;
+    };
+    const bool viewValid = mapping.valid && viewEndMs > viewStartMs &&
+        !surfaceBounds.isEmpty() && m_grid.tick > 0.0;
     const bool visible = drawTpo && viewValid && !m_sessions.empty();
     const double opacity = visible ? 1.0 : 0.0;
     if (m_opacity->opacity() != opacity) {
@@ -484,8 +494,8 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
     }
     const bool textAvailable = atlasReady && m_root->texture != nullptr;
 
-    const double pxPerMs = surfaceBounds.width() / static_cast<double>(viewEndMs - viewStartMs);
-    const double pxPerPrice = surfaceBounds.height() / (viewMax - viewMin);
+    const double pxPerMs = camera.pxPerMs() / scale;
+    const double pxPerPrice = camera.pxPerPrice() / scale;
     const double basePx = m_grid.tick * pxPerPrice;
     const int64_t topAbs = std::llround(m_grid.maxPrice / m_grid.tick);
     uint64_t dataVersions = 0;
@@ -498,7 +508,7 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
     }
     const int group = m_group;
     const double cellH = basePx * group;
-    const double anchorY = surfaceBounds.top() + (viewMax - static_cast<double>(topAbs) * m_grid.tick) * pxPerPrice;
+    const double anchorY = surfaceBounds.top() + mapping.priceToScreenY(static_cast<double>(topAbs) * m_grid.tick);
     const auto& capGlyph = atlas.glyph(QChar('A'));
     const double advanceRatio = (atlasReady && atlas.fontPx() > 0 && capGlyph.advance > 0.0f)
         ? capGlyph.advance / atlas.fontPx() : 0.6;
@@ -532,8 +542,8 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
             session.lightText->setPxRange(atlas.pxRange());
             session.darkText->setPxRange(atlas.pxRange());
         }
-        const double startX = surfaceBounds.left() + static_cast<double>(session.startMs - viewStartMs) * pxPerMs;
-        const double endX = surfaceBounds.left() + static_cast<double>(session.endMs - viewStartMs) * pxPerMs;
+        const double startX = surfaceBounds.left() + mapping.timeToScreenX(static_cast<double>(session.startMs));
+        const double endX = surfaceBounds.left() + mapping.timeToScreenX(static_cast<double>(session.endMs));
         const bool onScreen = endX > surfaceBounds.left() && startX < surfaceBounds.right();
 
         const double periodPx = static_cast<double>(session.periodMs) * pxPerMs;
@@ -543,8 +553,12 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
         LayoutKey key;
         key.dataVersion = session.profileVersion;
         key.group = group;
-        key.cellW = static_cast<double>(quantize(cellW)) / 256.0;
-        key.cellH = static_cast<double>(quantize(cellH)) / 256.0;
+        // Quantized sizes leave cells behind the continuous camera during a glide.
+        // Exact sizes are stable at rest and rebuild only as the drawn scale changes.
+        key.cellW = cellW;
+        key.cellH = cellH;
+        key.dpr = scale;
+        key.free = free;
         key.layout = style.layout;
         key.theme = style.theme;
         key.text = textAvailable && fontPx >= kTextHiddenPx;
@@ -560,8 +574,8 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
             // Keep the profile readable while its session is on screen.
             anchorX = std::max(startX, std::min(surfaceBounds.left(), endX - session.profileWidthPx));
         }
-        const double tx = std::round(anchorX);
-        const double ty = std::round(anchorY);
+        const double tx = edge(anchorX);
+        const double ty = edge(anchorY);
         if (tx != session.lastTx || ty != session.lastTy) {
             QMatrix4x4 matrix;
             matrix.translate(static_cast<float>(tx), static_cast<float>(ty));

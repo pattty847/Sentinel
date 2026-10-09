@@ -51,6 +51,8 @@ public:
     QSGVertexColorMaterial* wickMaterial = nullptr;
     QSGVertexColorMaterial* bodyMaterial = nullptr;
     int wickCapacity = 0, bodyCapacity = 0;
+    bool cameraFree = false;
+    double surfaceDpr = 0;
     void setCounts(int wickCount, int bodyCount) {
         candle_pixels::setGeometryCount(*wickGeometry, wickCapacity, wickCount);
         candle_pixels::setGeometryCount(*bodyGeometry, bodyCapacity, bodyCount);
@@ -352,7 +354,10 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
 
     const MappingFrameContext frame = m_mappingProvider->currentFrameContext();
     const TimeAxisMapping mapping = frame.mapping;
-    if (mappingChanged(mapping, m_lastMapping)) {
+    if (mappingChanged(mapping, m_lastMapping) || root->cameraFree != frame.raster.free ||
+        root->surfaceDpr != frame.surfaceDpr) {
+        root->cameraFree = frame.raster.free;
+        root->surfaceDpr = frame.surfaceDpr;
         m_lastMapping = mapping;
         m_geometryDirty = true;
     }
@@ -577,30 +582,23 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         const double x    = mapping.timeToScreenX(static_cast<double>(c.timeStartMs));
         const double xEnd = mapping.timeToScreenX(static_cast<double>(c.timeStartMs) + mapping.appendMs);
         const double candleW = xEnd - x;
-        float bodyWidth = std::max(1.0f, static_cast<float>(candleW) * 0.7f);
-        const float centerX = static_cast<float>(x + candleW * 0.5);
-        const float bodyX0  = centerX - bodyWidth * 0.5f;
-        const float bodyX1  = centerX + bodyWidth * 0.5f;
+        const double centerX = x + candleW * 0.5;
+        const bool free = frame.raster.free;
+        const double yOpen = mapping.priceToScreenY(c.open);
+        const double yClose = mapping.priceToScreenY(c.close);
+        const auto body = candle_pixels::body(x, xEnd, yOpen, yClose, dpr, free);
+        const float bodyX0 = body.x.lo, bodyX1 = body.x.hi;
+        const float bodyY0 = body.y.lo, bodyY1 = body.y.hi;
+        const float bodyWidth = bodyX1 - bodyX0;
 
-        const auto wickSpan = candle_pixels::stroke(centerX, m_wickWidth, dpr);
+        const auto wickSpan = free
+            ? candle_pixels::Span{float(centerX - m_wickWidth * 0.5 / dpr),
+                                  float(centerX + m_wickWidth * 0.5 / dpr)}
+            : candle_pixels::stroke(centerX, m_wickWidth, dpr);
         const float wickX0 = wickSpan.lo;
         const float wickX1 = wickSpan.hi;
-
-        const float yHighF  = static_cast<float>(mapping.priceToScreenY(c.high));
-        const float yLowF   = static_cast<float>(mapping.priceToScreenY(c.low));
-        const float yOpenF  = static_cast<float>(mapping.priceToScreenY(c.open));
-        const float yCloseF = static_cast<float>(mapping.priceToScreenY(c.close));
-        float bodyY0 = std::min(yOpenF, yCloseF);
-        float bodyY1 = std::max(yOpenF, yCloseF);
-        if (c.open == c.close) {
-            const auto dojiSpan = candle_pixels::doji(yOpenF, dpr);
-            bodyY0 = dojiSpan.lo;
-            bodyY1 = dojiSpan.hi;
-        } else if ((bodyY1 - bodyY0) < 1.5f) {
-            const float mid = 0.5f * (bodyY0 + bodyY1);
-            bodyY0 = mid - 0.75f;
-            bodyY1 = mid + 0.75f;
-        }
+        const float yHighF = static_cast<float>(mapping.priceToScreenY(c.high));
+        const float yLowF = static_cast<float>(mapping.priceToScreenY(c.low));
 
         const uchar br = bullish ? bullR : bearR;
         const uchar bg = bullish ? bullG : bearG;

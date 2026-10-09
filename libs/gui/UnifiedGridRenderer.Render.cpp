@@ -63,17 +63,15 @@ void UnifiedGridRenderer::renderTradeOverlays(
                         frame.mapping.viewMinPrice,
                         frame.mapping.viewMaxPrice,
                         localBins,
-                        localSnap);
+                        localSnap, frame.surfaceDpr, frame.raster.free);
 
-    // TPO maps world -> screen with surfaceBounds + view time/price (INV-037).
+    // TPO uses the same drawn camera, including fractional glide time.
     m_tpoOverlay.render(window(),
                         parent,
                         drawTpo,
                         m_chartTextAtlas,
                         m_chartTextAtlasBuilt,
-                        frame.mapping.viewMinPrice, frame.mapping.viewMaxPrice,
-                        frame.mapping.viewStartMs, frame.mapping.viewEndMs,
-                        frame.surfaceBounds);
+                        frame.raster, frame.surfaceDpr, frame.surfaceBounds);
 }
 
 // ── GPU heatmap (S6b) ─────────────────────────────────────────────────────────

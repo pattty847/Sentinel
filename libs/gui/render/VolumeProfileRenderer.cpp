@@ -81,13 +81,13 @@ void fillClippedRect(QSGGeometry* geo, const QRectF& rect,
 
 // Price → screen Y within drawRect for a given visible price range.
 // viewMaxPrice maps to drawRect.top(); viewMinPrice to drawRect.bottom().
-inline float priceToY(double price, double viewMinPrice, double viewMaxPrice,
+inline double priceToY(double price, double viewMinPrice, double viewMaxPrice,
                       const QRectF& drawRect) {
     if (viewMaxPrice <= viewMinPrice) {
-        return static_cast<float>(drawRect.center().y());
+        return drawRect.center().y();
     }
     const double frac = (viewMaxPrice - price) / (viewMaxPrice - viewMinPrice);
-    return static_cast<float>(drawRect.top() + frac * drawRect.height());
+    return drawRect.top() + frac * drawRect.height();
 }
 
 } // namespace
@@ -162,7 +162,8 @@ void VolumeProfileRenderer::render(QSGNode* parentNode,
                                    double viewMinPrice,
                                    double viewMaxPrice,
                                    const std::vector<float>& bins,
-                                   const VolumeProfileState::Snapshot& snap) {
+                                   const VolumeProfileState::Snapshot& snap,
+                                   double dpr, bool free) {
     if (!parentNode) {
         return;
     }
@@ -174,7 +175,7 @@ void VolumeProfileRenderer::render(QSGNode* parentNode,
     }
 
     ensureNodes(parentNode);
-    rebuildGeometry(drawRect, viewMinPrice, viewMaxPrice, bins, snap);
+    rebuildGeometry(drawRect, viewMinPrice, viewMaxPrice, bins, snap, dpr, free);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -240,9 +241,21 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
                                              double viewMinPrice,
                                              double viewMaxPrice,
                                              const std::vector<float>& bins,
-                                             const VolumeProfileState::Snapshot& snap) {
+                                             const VolumeProfileState::Snapshot& snap,
+                                   double dpr, bool free) {
     const int n = static_cast<int>(bins.size());
     if (n == 0) return;
+
+    const double scale = std::isfinite(dpr) && dpr > 0 ? dpr : 1.0;
+    const auto edge = [scale, free](double y) {
+        if (free) return y;
+        const double device = y * scale;
+        const double exact = std::abs(device - std::round(device)) < 1e-7 ? std::round(device) : device;
+        return std::floor(exact) / scale;
+    };
+    const auto priceEdge = [&](double price) {
+        return edge(priceToY(price, viewMinPrice, viewMaxPrice, drawRect));
+    };
 
     // ── Histogram area ─────────────────────────────────────────────────────
     // The VP is pinned to the right edge.
@@ -267,8 +280,8 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
 
     // ── 1. VA band ─────────────────────────────────────────────────────────
     if (snap.va.valid && m_vaNode) {
-        const float yVah = priceToY(snap.va.vahPrice, viewMinPrice, viewMaxPrice, drawRect);
-        const float yVal = priceToY(snap.va.valPrice, viewMinPrice, viewMaxPrice, drawRect);
+        const float yVah = priceEdge(snap.va.vahPrice);
+        const float yVal = priceEdge(snap.va.valPrice);
         const QRectF vaRect(static_cast<double>(vpLeft),
                             static_cast<double>(std::min(yVah, yVal)),
                             static_cast<double>(vpWidth),
@@ -322,8 +335,8 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
             // Bars extend leftward from vpRight.
             const float x0 = vpRight - barWidth;
             const float x1 = vpRight;
-            const float y0 = priceToY(binTop,    viewMinPrice, viewMaxPrice, drawRect);
-            const float y1 = priceToY(binBottom, viewMinPrice, viewMaxPrice, drawRect);
+            const float y0 = priceEdge(binTop);
+            const float y1 = priceEdge(binBottom);
             // Intensity: brighter for higher volume (keep hue, scale alpha).
             const quint8 ca = static_cast<quint8>(
                 std::clamp(static_cast<int>(80 + 175 * barFrac), 80, 255));
@@ -350,12 +363,12 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
 
     // ── 3. POC line ────────────────────────────────────────────────────────
     if (snap.va.valid && m_pocNode) {
-        const float yPoc = priceToY(snap.va.pocPrice, viewMinPrice, viewMaxPrice, drawRect);
+        const double yPoc = priceToY(snap.va.pocPrice, viewMinPrice, viewMaxPrice, drawRect);
         constexpr float kPocLineHalfH = 1.5f;
         const QRectF pocRect(static_cast<double>(vpLeft),
-                             static_cast<double>(yPoc - kPocLineHalfH),
+                             edge(yPoc - kPocLineHalfH),
                              static_cast<double>(vpWidth),
-                             static_cast<double>(kPocLineHalfH * 2.0f));
+                             edge(yPoc + kPocLineHalfH) - edge(yPoc - kPocLineHalfH));
         auto* geo = m_pocNode->geometry();
         fillClippedRect(geo, pocRect, drawRect, m_pocColor);
         m_pocNode->markDirty(QSGNode::DirtyGeometry);

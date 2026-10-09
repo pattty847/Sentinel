@@ -535,7 +535,7 @@ TEST_F(TradeOverlay, VolumeProfileDrawsOnlyFilledBarsAndReusesStorage) {
     snap.gridHeight = 8;
     const std::vector<float> bins{1, 2, 3, 4, 5, 6, 7, 8};
     const QRectF surface(20, 30, 800, 400);
-    renderer.render(&root, true, surface, 100, 108, bins, snap);
+    renderer.render(&root, true, surface, 100, 108, bins, snap, 1.0, false);
     auto* bars = static_cast<QSGGeometryNode*>(root.firstChild()->nextSibling());
     auto* geometry = bars->geometry();
     const auto* storage = geometry->vertexData();
@@ -572,15 +572,15 @@ TEST_F(TradeOverlay, VolumeProfileDrawsOnlyFilledBarsAndReusesStorage) {
         EXPECT_EQ(root.childCount(), 3);
     };
     check(8);
-    renderer.render(&root, true, surface, 99, 103.5, bins, snap);
+    renderer.render(&root, true, surface, 99, 103.5, bins, snap, 1.0, false);
     check(4);
-    renderer.render(&root, true, surface, 110, 118, bins, snap);
+    renderer.render(&root, true, surface, 110, 118, bins, snap, 1.0, false);
     check(0);
-    renderer.render(&root, false, surface, 100, 108, bins, snap);
+    renderer.render(&root, false, surface, 100, 108, bins, snap, 1.0, false);
     check(0);
     snap.gridHeight = 2;
     const std::vector<float> smaller{3, 5};
-    renderer.render(&root, true, surface, 100, 108, smaller, snap);
+    renderer.render(&root, true, surface, 100, 108, smaller, snap, 1.0, false);
     check(2);
 }
 
@@ -597,7 +597,7 @@ TEST_F(TradeOverlay, VolumeProfileClearsInvalidValueAreaAndRetainsGrownBuffers) 
     snap.va.pocPrice = 105;
     const std::vector<float> bins(4097, 1);
     const QRectF surface(20, 30, 800, 400);
-    renderer.render(&root, true, surface, 99, 4200, bins, snap);
+    renderer.render(&root, true, surface, 99, 4200, bins, snap, 1.0, false);
     auto* va = static_cast<QSGGeometryNode*>(root.firstChild());
     auto* bars = static_cast<QSGGeometryNode*>(va->nextSibling());
     auto* poc = static_cast<QSGGeometryNode*>(bars->nextSibling());
@@ -605,7 +605,7 @@ TEST_F(TradeOverlay, VolumeProfileClearsInvalidValueAreaAndRetainsGrownBuffers) 
     const auto* indices = bars->geometry()->indexData();
     snap.va.valid = false;
     snap.gridHeight = 2;
-    renderer.render(&root, true, surface, 99, 4200, {1, 2}, snap);
+    renderer.render(&root, true, surface, 99, 4200, {1, 2}, snap, 1.0, false);
     const auto hidden = [](QSGGeometry* geometry) {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
         EXPECT_EQ(geometry->vertexCount(), 0);
@@ -617,10 +617,10 @@ TEST_F(TradeOverlay, VolumeProfileClearsInvalidValueAreaAndRetainsGrownBuffers) 
     };
     hidden(va->geometry());
     hidden(poc->geometry());
-    renderer.render(&root, false, surface, 99, 4200, bins, snap);
+    renderer.render(&root, false, surface, 99, 4200, bins, snap, 1.0, false);
     hidden(bars->geometry());
     snap.gridHeight = 4097;
-    renderer.render(&root, true, surface, 99, 4200, bins, snap);
+    renderer.render(&root, true, surface, 99, 4200, bins, snap, 1.0, false);
     EXPECT_EQ(bars->geometry()->vertexData(), storage);
     EXPECT_EQ(bars->geometry()->indexData(), indices);
 #if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
@@ -653,7 +653,7 @@ TEST_F(TradeOverlay, VolumeProfileValueAreaPinsSeventyPercentRangeAndTranslucent
     QSGNode root;
     const QRectF surface(20, 30, 800, 400);
     const auto check = [&](double priceMin, double priceMax, float top, float bottom) {
-        renderer.render(&root, true, surface, priceMin, priceMax, bins, snap);
+        renderer.render(&root, true, surface, priceMin, priceMax, bins, snap, 1.0, false);
         auto* va = static_cast<QSGGeometryNode*>(root.firstChild());
         auto* geometry = va->geometry();
         ASSERT_EQ(geometry->vertexCount(), 4);
@@ -692,7 +692,7 @@ TEST_F(TradeOverlay, VolumeProfileValueAreaPinsSeventyPercentRangeAndTranslucent
     check(100, 140, 130, 280); // VA is fully visible.
     check(120, 125, 30, 430); // Both VA edges clip to the surface.
     renderer.setVaColor(QColor(40, 180, 240, 128));
-    renderer.render(&root, true, surface, 100, 140, bins, snap);
+    renderer.render(&root, true, surface, 100, 140, bins, snap, 1.0, false);
     const auto* v = static_cast<QSGGeometryNode*>(root.firstChild())->geometry()->vertexDataAsColoredPoint2D();
     for (int i = 0; i < 4; ++i) {
         EXPECT_EQ(v[i].r, 20);
@@ -734,22 +734,22 @@ TEST_F(TradeOverlay, VolumeProfileClipsValueAreaAndPocAndHidesDisjointRects) {
         for (int i = 0; i < g->indexCount(); ++i) EXPECT_EQ(idx[i], 0);
 #endif
     };
-    renderer.render(&root, true, surface, 100, 122.5, bins, snap);
+    renderer.render(&root, true, surface, 100, 122.5, bins, snap, 1.0, false);
     auto* va = static_cast<QSGGeometryNode*>(root.firstChild());
     auto* poc = static_cast<QSGGeometryNode*>(va->nextSibling()->nextSibling());
-    checkRect(va, 30, float(30 + 7.5 / 22.5 * 400));
-    checkRect(poc, 30, 31.5); // POC centred on the top edge.
-    renderer.render(&root, true, surface, 122.5, 140, bins, snap);
-    checkRect(va, float(30 + 10.0 / 17.5 * 400), 430);
-    checkRect(poc, 428.5, 430); // POC centred on the bottom edge.
+    checkRect(va, 30, 163);
+    checkRect(poc, 30, 31); // POC centred on the top edge.
+    renderer.render(&root, true, surface, 122.5, 140, bins, snap, 1.0, false);
+    checkRect(va, 258, 430);
+    checkRect(poc, 428, 430); // POC centred on the bottom edge.
     for (const auto view : {std::pair{140.0, 160.0}, std::pair{80.0, 100.0}}) {
-        renderer.render(&root, true, surface, view.first, view.second, bins, snap);
+        renderer.render(&root, true, surface, view.first, view.second, bins, snap, 1.0, false);
         hidden(va);
         hidden(poc);
     }
-    renderer.render(&root, true, surface, 100, 140, bins, snap);
+    renderer.render(&root, true, surface, 100, 140, bins, snap, 1.0, false);
     checkRect(va, 130, 280); // Restores the retained geometry after hiding.
-    checkRect(poc, 203.5, 206.5);
+    checkRect(poc, 203, 206);
 }
 
 TEST_F(TradeOverlay, VolumeProfileCapsBarsAtUnsignedShortIndexLimit) {
@@ -762,7 +762,7 @@ TEST_F(TradeOverlay, VolumeProfileCapsBarsAtUnsignedShortIndexLimit) {
     snap.gridHeight = maxBars + 1;
     const std::vector<float> bins(maxBars + 1, 1);
     const QRectF surface(20, 30, 800, 400);
-    renderer.render(&root, true, surface, 100, 100.0 + static_cast<double>(bins.size()), bins, snap);
+    renderer.render(&root, true, surface, 100, 100.0 + static_cast<double>(bins.size()), bins, snap, 1.0, false);
     auto* g = static_cast<QSGGeometryNode*>(root.firstChild()->nextSibling())->geometry();
     ASSERT_EQ(g->vertexCount(), maxBars * 4);
     ASSERT_EQ(g->indexCount(), maxBars * 6);
@@ -773,4 +773,42 @@ TEST_F(TradeOverlay, VolumeProfileCapsBarsAtUnsignedShortIndexLimit) {
         for (int i = 0; i < 6; ++i) EXPECT_EQ(int(idx[bar * 6 + i]), expected[i]);
     }
     EXPECT_EQ(idx[maxBars * 6 - 2], 65535);
+}
+
+TEST_F(TradeOverlay, VolumeProfileEdgesUseDevicePixelsOnlyAtRest) {
+    VolumeProfileRenderer renderer;
+    QSGNode root;
+    VolumeProfileState::Snapshot snap;
+    snap.minPrice = 100;
+    snap.tickSize = 1;
+    snap.gridHeight = 8;
+    snap.va.valid = true;
+    snap.va.vahPrice = 106;
+    snap.va.valPrice = 102;
+    snap.va.pocPrice = 104.5;
+    const std::vector<float> bins(8, 1);
+    const QRectF surface(0, 0, 800, 400);
+    for (double dpr : {1.0, 2.0}) {
+        for (bool free : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "dpr=" << dpr << " free=" << free);
+            renderer.render(&root, true, surface, 99.3, 109.1, bins, snap, dpr, free);
+            const auto y = [&](double price) { return (109.1 - price) / 9.8 * 400; };
+            const auto edge = [&](double value) { return free ? value : std::floor(value * dpr) / dpr; };
+            auto* va = static_cast<QSGGeometryNode*>(root.firstChild());
+            auto* bars = static_cast<QSGGeometryNode*>(va->nextSibling());
+            auto* poc = static_cast<QSGGeometryNode*>(bars->nextSibling());
+            const auto check = [&](QSGGeometryNode* node, int offset, double top, double bottom) {
+                const auto* v = node->geometry()->vertexDataAsColoredPoint2D() + offset;
+                EXPECT_FLOAT_EQ(v[0].y, edge(top));
+                EXPECT_FLOAT_EQ(v[2].y, edge(bottom));
+                if (!free) {
+                    EXPECT_FLOAT_EQ(v[0].y * dpr, std::round(v[0].y * dpr));
+                    EXPECT_FLOAT_EQ(v[2].y * dpr, std::round(v[2].y * dpr));
+                }
+            };
+            check(va, 0, y(106), y(102));
+            for (int i = 0; i < 8; ++i) check(bars, 4 * i, y(108 - i), y(107 - i));
+            check(poc, 0, y(104.5) - 1.5, y(104.5) + 1.5);
+        }
+    }
 }
