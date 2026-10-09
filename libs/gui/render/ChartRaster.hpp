@@ -64,7 +64,7 @@ int devicePixels(double logical, double dpr);
 // The integer step rule: keep `previous` while |r - previous| <= 0.5 + kStepBandPx,
 // else round (at least 1, at most kMaxCellPx).
 int stepPixels(double r, int previous);
-// Columns are at most tf device px (one ms per device pixel; at most kMaxCellPx): every
+// Columns are at most tf device px (at least one ms per device pixel; at most kMaxCellPx): every
 // whole-pixel drag then has an exact whole-ms commit.
 int maxColumnPixels(double tfMs);
 

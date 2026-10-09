@@ -168,19 +168,24 @@ void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, 
     double centerPriceRatio = 1.0 - (center.y() / viewportSize.height());
     centerTimeRatio = std::max(0.0, std::min(1.0, centerTimeRatio));
     centerPriceRatio = std::max(0.0, std::min(1.0, centerPriceRatio));
-    // The content under the cursor stays put: the zoom is about what is drawn there (the
-    // raster camera before this zoom), and the camera re-snaps about the cursor. With
-    // the auto price scale the price is the fit's, so its anchor stays.
+    // The content under the cursor stays put: an axis this event zooms is solved about
+    // what is drawn there (the raster camera before this zoom) and the camera re-snaps
+    // about the cursor. An axis it does not zoom (the auto price scale's price, a span at
+    // its limit) keeps its bounds and its anchor exactly: re-solving it about the drawn
+    // point would translate it.
+    const bool zoomTime = newTimeRange != currentTimeRange, zoomPrice = newPriceRange != currentPriceRange;
     const auto [currentCenterTime, currentCenterPrice, drawn] =
         zoomAnchor(centerTimeRatio, 1.0 - centerPriceRatio,
                    static_cast<double>(m_visibleTimeStart_ms + static_cast<int64_t>(currentTimeRange * centerTimeRatio)),
                    m_minPrice + (currentPriceRange * centerPriceRatio));
-    setRasterAnchor(centerTimeRatio, m_autoPriceScale ? m_rasterAnchor.fracY : 1.0 - centerPriceRatio);
+    setRasterAnchor(zoomTime ? centerTimeRatio : m_rasterAnchor.fracX,
+                    zoomPrice ? 1.0 - centerPriceRatio : m_rasterAnchor.fracY);
     const double newStartD = currentCenterTime - static_cast<double>(newTimeRange) * centerTimeRatio;
-    const int64_t newTimeStart = static_cast<int64_t>(drawn ? std::llround(newStartD) : std::floor(newStartD));
+    const int64_t newTimeStart = !zoomTime ? m_visibleTimeStart_ms
+                                           : static_cast<int64_t>(drawn ? std::llround(newStartD) : std::floor(newStartD));
     const int64_t newTimeEnd = newTimeStart + newTimeRange;
-    const double newMinPrice = currentCenterPrice - (newPriceRange * centerPriceRatio);
-    const double newMaxPrice = currentCenterPrice + (newPriceRange * (1.0 - centerPriceRatio));
+    const double newMinPrice = zoomPrice ? currentCenterPrice - (newPriceRange * centerPriceRatio) : m_minPrice;
+    const double newMaxPrice = zoomPrice ? currentCenterPrice + (newPriceRange * (1.0 - centerPriceRatio)) : m_maxPrice;
 
     sLog_Probe("viewport.zoom", "delta=" << delta << "->" << clampedDelta
                << " mouse=(" << center.x() << "," << center.y() << ")"

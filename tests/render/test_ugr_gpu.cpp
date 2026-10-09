@@ -627,6 +627,104 @@ TEST_F(UgrGpu, TimeframeSwitchKeepsTheDrawnNowColumn) {
     }
 }
 
+// Review round 2, fix 1: following live, a timeframe switch at fractional pixels per
+// column keeps the Now column where it is drawn (the view stays anchored at its end,
+// the live edge one padding inside; the padding scales with the span).
+TEST_F(UgrGpu, TimeframeSwitchWhileFollowingLiveKeepsTheDrawnNowColumn) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(pump(10'000, [&] { return layer().liveAnchorMs() > 0; })) << "the recording's availability";
+    const int64_t anchor = layer().liveAnchorMs();
+    const int64_t span = int64_t(std::llround(640.0 / 2.4 * double(minute))); // 2.4 px columns, drawn at 2
+    ugr->setViewport(anchor - span, anchor, 99'900, 100'300);
+    ugr->enableAutoScroll(true);
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    ASSERT_TRUE(ugr->autoScrollEnabled());
+    ASSERT_EQ(drawn().colPx, 2);
+    auto nowCentre = [&](int64_t tf) { return double((anchor + tf - 1) / tf * tf) - double(tf) / 2; };
+    double x = ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(minute));
+    ASSERT_GT(x, 0.5 * 640);
+    ASSERT_LT(x, 640);
+    for (const int64_t tf : {5 * minute, 15 * minute, minute}) {
+        ugr->setTimeframe(int(tf));
+        ASSERT_TRUE(frames(2)) << error.toStdString();
+        EXPECT_TRUE(ugr->autoScrollEnabled()) << "still following live";
+        const double now = ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(tf));
+        EXPECT_LE(std::abs(now - x), 0.5 / drawn().dpr + 1e-6) << "Now column at tf " << tf;
+        x = now;
+    }
+}
+
+// Review round 2, fix 2: with the auto price scale on and no candle fit, a wheel zoom
+// (time only) leaves the price window and the drawn rows exactly where they were, at a
+// fractional price span (the drawn price under the cursor differs from the stored one).
+TEST_F(UgrGpu, AutoScaleWheelWithoutAFitKeepsThePrice) {
+    noLabels();
+    const int64_t lo = viewLo + minute / 3;
+    ugr->setViewport(lo, lo + 41 * minute + 3 * minute / 10, 99'900, 100'317);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    view->setAutoPriceScale(true); // no candle buffer: autoPriceFit has nothing to fit
+    ASSERT_TRUE(ugr->autoPriceScale());
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    const double p0 = view->getMinPrice(), p1 = view->getMaxPrice();
+    const auto before = drawn();
+    for (const auto &[delta, y] : {std::pair{60.0, 60.0}, {-90.0, 250.0}, {120.0, 20.0}}) {
+        ugr->zoomAt(delta, 320, y);
+        ASSERT_TRUE(frames(2)) << error.toStdString();
+        EXPECT_EQ(view->getMinPrice(), p0) << "wheel at y=" << y << ": time only, the price stays";
+        EXPECT_EQ(view->getMaxPrice(), p1);
+        EXPECT_EQ(drawn().topRowIndex, before.topRowIndex) << "the drawn rows did not move";
+        EXPECT_EQ(drawn().rowPx, before.rowPx);
+    }
+}
+
+// Review round 2, fix 3: a tick proposal queued by a frame is dropped when the tick
+// policy changes before the GUI thread commits it (a Manual tick chosen, a timeframe or
+// symbol switch): the stale Auto tick is never drawn.
+TEST_F(UgrGpu, AStaleTickProposalIsNeverCommitted) {
+    enum Change { None, ManualTick, Timeframe, Symbol };
+    for (const Change change : {None, ManualTick, Timeframe, Symbol}) {
+        SCOPED_TRACE(testing::Message() << "change " << int(change));
+        ugr->setActiveSymbol("BTC-USD");
+        ugr->setTimeframe(int(minute));
+        noLabels();
+        const int64_t lo = viewLo + minute / 3;
+        ugr->setViewport(lo, lo + 41 * minute + 3 * minute / 10, 99'900, 100'317);
+        ASSERT_TRUE(settle()) << error.toStdString();
+        const int64_t t0 = layer().tickUnits();
+        auto coarse = brightSettings();
+        coarse.showLabels = false;
+        coarse.minRowPx = 12; // Auto picks a coarser tick in the next frame
+        ugr->setHeatmapChartSettings(coarse);
+        ugr->update();
+        image = scene->renderFrame(&error); // the frame that proposes; its commit is queued
+        ASSERT_FALSE(image.isNull()) << error.toStdString();
+        ASSERT_EQ(layer().tickUnits(), t0) << "the proposing frame draws the committed tick";
+        if (change == ManualTick) {
+            auto manual = coarse;
+            manual.tickMode = heatmap::TickMode::Manual;
+            manual.manualTick = 500; // $5
+            ugr->setHeatmapChartSettings(manual, true);
+        } else if (change == Timeframe) {
+            ugr->setTimeframe(int(5 * minute));
+        } else if (change == Symbol) {
+            ugr->setActiveSymbol("TINY-USD");
+        }
+        QCoreApplication::processEvents(); // the queued commit runs
+        if (change == None) {
+            EXPECT_NE(layer().tickUnits(), t0) << "control: the proposal commits";
+            continue;
+        }
+        EXPECT_EQ(layer().tickUnits(), t0) << "the stale Auto proposal is dropped";
+        if (change == ManualTick) {
+            ASSERT_TRUE(frames(3)) << error.toStdString();
+            EXPECT_EQ(layer().tickUnits(), 500) << "the Manual tick is drawn next";
+        }
+        ugr->setHeatmapChartSettings(brightSettings());
+    }
+}
+
 // Review fix 2: a tick chosen at render time (here: Auto after a larger minimum row
 // height, no viewport change, candles and axis models otherwise idle) moves every layer
 // in the SAME frame: in the first frame that draws the new tick, the candle bodies and
@@ -719,7 +817,7 @@ TEST_F(UgrGpu, PriceFitCoversCandlesDrawnOutsideTheStoredWindow) {
     ugr->setCandleBuffer(nullptr);
 }
 
-// Review fix 4: a direct (API) viewport of 1 ms draws at most one ms per device pixel
+// Review fix 4: a direct (API) viewport of 1 ms draws at least one ms per device pixel
 // (C <= tf), so every whole-pixel drag commits exactly: the release keeps the dragged
 // columns.
 TEST_F(UgrGpu, AHighZoomReleaseKeepsTheDrawnColumns) {
@@ -732,7 +830,7 @@ TEST_F(UgrGpu, AHighZoomReleaseKeepsTheDrawnColumns) {
     ASSERT_TRUE(ugr->applyViewportRequest(request).isEmpty());
     ASSERT_TRUE(frames(2)) << error.toStdString();
     auto before = drawn();
-    EXPECT_EQ(before.colPx, int(minute)) << "one ms per device pixel at most";
+    EXPECT_EQ(before.colPx, int(minute)) << "at least one ms per device pixel (C <= tf)";
     for (const double drag : {1.0, -3.0, 0.6, 2.4}) {
         SCOPED_TRACE(testing::Message() << "drag " << drag);
         ugr->beginPanAt(320, 160);

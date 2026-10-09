@@ -295,8 +295,9 @@ TEST(ChartRaster, A7_AReleaseCommitsExactlyWhatTheDragDrew) {
     }
 }
 
-// Review fix 4: a 1 ms stored window (any direct viewport is accepted) draws at most
-// one ms per device pixel, and every whole-pixel drag then has an exact whole-ms commit.
+// Review fix 4: a 1 ms stored window (any direct viewport is accepted) draws at least
+// one ms per device pixel (C <= tf), and every whole-pixel drag then has an exact
+// whole-ms commit.
 TEST(ChartRaster, A7_HighZoomDragsStillCommitExactly) {
     for (const double tf : {1'000.0, double(kMinute), 3'600'000.0}) {
         RasterInputs in = viewOf(2.4, 16.4, 1.0, tf, 640, 320, 2.0);

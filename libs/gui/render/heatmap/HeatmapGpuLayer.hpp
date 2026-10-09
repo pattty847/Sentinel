@@ -273,6 +273,10 @@ private:
     std::shared_ptr<HeatmapCellCapture> capture_;
     std::atomic<int> rowPxDrawn_{0}, colPxDrawn_{0};
     std::atomic<int64_t> proposedTickUnits_{0}; // render thread's choice, committed on the GUI thread
+    // The tick policy generation (GUI thread: symbol, timeframe, settings, Manual memory)
+    // and the one the pending proposal was chosen under; a mismatch drops the proposal.
+    std::atomic<uint64_t> tickPolicy_{0}, proposedPolicy_{0};
+    void invalidateTickProposal();
     void commitProposedTick();
     std::atomic<double> rowPxContinuous_{0.0};
 

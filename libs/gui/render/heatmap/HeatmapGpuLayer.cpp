@@ -137,6 +137,7 @@ void HeatmapGpuLayer::destroyController() {
 void HeatmapGpuLayer::setSymbol(const std::string &symbol) {
     if (symbol_ == symbol) return;
     symbol_ = symbol;
+    invalidateTickProposal();
     lastLiveEndMs_ = 0;
     resetLabels(true); // the old symbol's labels never draw on the new picture
     autoUnits_ = 0; // Auto evaluates fresh on the new symbol's data
@@ -148,6 +149,7 @@ void HeatmapGpuLayer::setSymbol(const std::string &symbol) {
 void HeatmapGpuLayer::setTimeframeMs(int64_t tfMs) {
     if (tfMs <= 0 || tfMs_ == tfMs) return;
     tfMs_ = tfMs;
+    invalidateTickProposal();
     autoUnits_ = 0;
     restoreTick(); // Manual: this timeframe's remembered tick
     noteLimits();
@@ -172,6 +174,7 @@ void HeatmapGpuLayer::setSurface(double widthPx, double heightPx, double dpr) {
 void HeatmapGpuLayer::setSettings(const HeatmapChartSettings &settings, bool explicitManualTick) {
     const auto previous = settings_;
     settings_ = settings;
+    invalidateTickProposal(); // tick mode, Manual tick, minimum row height or hysteresis may change
     const bool wasManual = manualMode_;
     const int64_t wasUnits = manualUnits_;
     manualMode_ = settings.tickMode == TickMode::Manual;
@@ -203,6 +206,7 @@ void HeatmapGpuLayer::setTone(PaletteTone tone) {
 
 void HeatmapGpuLayer::setTickMemory(const ManualTickMemory &memory) {
     tickMemory_ = memory;
+    invalidateTickProposal();
     restoreTick();
     noteLimits();
 }
@@ -377,6 +381,9 @@ void HeatmapGpuLayer::chooseTickForView(const ViewWindow &view) {
     // frame mixes two mappings. This frame keeps the drawn tick.
     if (tick != proposedTickUnits_.load(std::memory_order_relaxed)) {
         proposedTickUnits_.store(tick, std::memory_order_relaxed);
+        // Tagged with the tick policy it was chosen under (symbol, timeframe, settings,
+        // Manual memory): a GUI-side change before the commit makes it stale.
+        proposedPolicy_.store(tickPolicy_.load(std::memory_order_relaxed), std::memory_order_relaxed);
         if (tick != tickUnits_) {
             sLog_Probe("heatmap.gpu.tick", "proposed tf=" << tfMs_ << " units=" << tick
                        << " mode=" << (manualMode_ ? "manual" : "auto"));
@@ -392,10 +399,21 @@ void HeatmapGpuLayer::chooseTickForView(const ViewWindow &view) {
     }
 }
 
+void HeatmapGpuLayer::invalidateTickProposal() {
+    // GUI thread: a pending proposal belongs to the old policy; the next frame chooses
+    // afresh under the new one (and proposes even the same units again).
+    tickPolicy_.fetch_add(1, std::memory_order_relaxed);
+    proposedTickUnits_.store(tickUnits_, std::memory_order_relaxed);
+}
+
 void HeatmapGpuLayer::commitProposedTick() {
     // GUI thread (the render thread only reads tickUnits_ while the GUI thread is blocked).
     const int64_t tick = proposedTickUnits_.load(std::memory_order_relaxed);
     if (tick == tickUnits_) return; // superseded (the proposal went back to the drawn tick)
+    if (proposedPolicy_.load(std::memory_order_relaxed) != tickPolicy_.load(std::memory_order_relaxed)) {
+        sLog_Probe("heatmap.gpu.tick", "stale proposal dropped tf=" << tfMs_ << " units=" << tick);
+        return; // chosen under another symbol, timeframe or tick setting: the next frame proposes again
+    }
     tickUnits_ = tick;
     ++tickChanges_;
     sLog_Probe("heatmap.gpu.tick", "tf=" << tfMs_ << " units=" << tick << " mode=" << (manualMode_ ? "manual" : "auto"));

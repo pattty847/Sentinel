@@ -537,15 +537,18 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
     auto nowCentre = [anchor](int64_t tf) {
       return static_cast<double>(recording::floorDiv(anchor + tf - 1, tf) * tf) - static_cast<double>(tf) * 0.5;
     };
+    // Following live, the view stays anchored at its end (the live edge one padding
+    // inside, exact): the padding scales with the span (same columns), so the Now
+    // column keeps its drawn distance from that edge. A historical view keeps the Now
+    // column where it is drawn (its drawn fraction, from the camera before the switch).
+    const bool following = m_viewState && m_viewState->isAutoScrollEnabled();
     std::optional<double> rightFrac;
-    if (anchor > 0 && oldEnd > oldStart) {
+    if (anchor > 0 && oldEnd > oldStart && !following) {
       const double now = nowCentre(previousTf);
-      // Following live the view end is the live edge one padding inside (the stored
-      // bounds are exact); a historical view keeps the Now column where it is drawn.
-      if (drawnBefore.valid && !m_viewState->isAutoScrollEnabled()) {
+      if (drawnBefore.valid) {
         const double x = drawnBefore.xDev(now) / drawnBefore.widthDev; // its drawn fraction
-        if (m_viewState->isAutoScrollEnabled() || (x >= 0.0 && x <= 1.0)) rightFrac = 1.0 - x;
-      } else if (m_viewState->isAutoScrollEnabled() || (now >= double(oldStart) && now <= double(oldEnd))) {
+        if (x >= 0.0 && x <= 1.0) rightFrac = 1.0 - x;
+      } else if (now >= double(oldStart) && now <= double(oldEnd)) {
         rightFrac = (static_cast<double>(oldEnd) - now) / static_cast<double>(oldEnd - oldStart);
       }
     }
@@ -558,14 +561,20 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
       const double maxTime = m_gpuLayer->maxTimeSpanMs();
       int64_t span = std::max<int64_t>(1, static_cast<int64_t>(std::llround(scaledSpan)));
       if (maxTime > 0) span = std::min(span, std::max<int64_t>(1, static_cast<int64_t>(std::floor(maxTime))));
-      const int64_t end =
-          rightFrac ? static_cast<int64_t>(std::llround(nowCentre(timeframe_ms) + *rightFrac * double(span))) : oldEnd;
+      int64_t end = oldEnd;
+      double anchorX = 1.0; // the view end (follow-live, or a historical view without Now)
+      if (following) {
+        if (const qint64 liveEnd = gpuLiveEndMs(span); liveEnd > 0) end = liveEnd; // the new timeframe's
+      } else if (rightFrac) {
+        end = static_cast<int64_t>(std::llround(nowCentre(timeframe_ms) + *rightFrac * double(span)));
+        anchorX = 1.0 - *rightFrac;
+      }
       // Price: auto price scale off keeps it; on, setViewport fits the new timeframe's
       // candles held so far (later pages refit through candlesDirty). setViewport
       // applies the new max price span.
       m_viewState->setMinSpans(m_gpuLayer->minTimeSpanMs(), m_gpuLayer->minPriceSpan());
-      // The raster camera keeps the Now column (else the view end) where it was.
-      m_viewState->setRasterAnchor(rightFrac ? 1.0 - *rightFrac : 1.0, m_viewState->rasterAnchor().fracY);
+      // The raster camera keeps the Now column (else the view end) where it was drawn.
+      m_viewState->setRasterAnchor(anchorX, m_viewState->rasterAnchor().fracY);
       m_viewState->setViewportAndMaxSpans(end - span, end, m_viewState->getMinPrice(), m_viewState->getMaxPrice(),
                                           maxTime, m_gpuLayer->maxPriceSpan());
       syncGpuView();

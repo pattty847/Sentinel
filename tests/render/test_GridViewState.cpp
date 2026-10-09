@@ -274,6 +274,41 @@ TEST(GridViewStateAutoPrice, TheFitFollowsTheDisplayedWindowDuringADrag) {
     EXPECT_DOUBLE_EQ(v.state.getMinPrice(), 0);
     EXPECT_EQ(v.state.displayedTimeWindow(), std::make_pair(qint64(0), qint64(600 * kMinute)));
 }
+// Whole-pixel review fix 2: the wheel solves an axis about the DRAWN point under the
+// cursor only when the event zooms that axis. With the auto price scale and no fit, or
+// with the price span at its limit, the price bounds stay exactly as they were (a
+// re-solve about the drawn price would translate them); the time axis still zooms
+// about the drawn time.
+TEST(GridViewStateRaster, AWheelLeavesAnAxisItDoesNotZoomExactlyWhereItWas) {
+    for (const bool autoPrice : {true, false}) {
+        SCOPED_TRACE(autoPrice ? "auto price scale, no fit" : "price at its max span");
+        AutoView v;
+        v.haveFit = false;
+        if (!autoPrice) {
+            v.state.setAutoPriceScale(false);
+            v.state.setMaxSpans(0, 500); // the price span (500) is at its limit: a zoom-out keeps it
+        }
+        v.state.setViewport(0, 600 * kMinute, 100'000, 100'500);
+        // The drawn picture differs from the stored bounds (a fractional cell rounding).
+        v.state.setDrawnPoint([&](double fracX, double fracY, double &t, double &p) {
+            t = double(v.state.getVisibleTimeStart()) + fracX * v.time() + 7'777;
+            p = v.state.getMaxPrice() - fracY * v.price() + 13.5;
+            return true;
+        });
+        const double lo = v.state.getMinPrice(), hi = v.state.getMaxPrice();
+        const auto anchor = v.state.rasterAnchor();
+        const QPointF cursor(300, 100);
+        const double drawnTime = double(v.state.getVisibleTimeStart()) + 0.3 * v.time() + 7'777;
+        v.state.handleZoomWithSensitivity(autoPrice ? 120 : -120, cursor, QSizeF(1000, 500));
+        EXPECT_EQ(v.state.getMinPrice(), lo) << "the price is not zoomed: its bounds stay";
+        EXPECT_EQ(v.state.getMaxPrice(), hi);
+        EXPECT_EQ(v.state.rasterAnchor().fracY, anchor.fracY) << "and so does its anchor";
+        EXPECT_NE(v.time(), 600.0 * kMinute) << "time zoomed";
+        EXPECT_NEAR(double(v.state.getVisibleTimeStart()) + 0.3 * v.time(), drawnTime, 1.0)
+            << "about the drawn time under the cursor";
+        EXPECT_DOUBLE_EQ(v.state.rasterAnchor().fracX, 0.3);
+    }
+}
 } // namespace
 
 int main(int argc, char **argv) {

@@ -38,7 +38,7 @@ RasterCamera computeRaster(const RasterInputs &in, RasterStep previous) {
     const double rRow = double(cam.heightDev) * tick / priceSpan;
     const double rCol = double(cam.widthDev) * in.tfMs / timeSpan;
     cam.rowPx = stepPixels(rRow, previous.rowPx);
-    // At most one ms per device pixel (a column of tf ms is at most tf px): a drag of
+    // At least one ms per device pixel (a column of tf ms is at most tf px): a drag of
     // whole device pixels is then always a whole-ms commit (panShift). A stored window
     // narrower than that (a direct viewport of a few ms) draws wider than stored.
     cam.colPx = std::min(stepPixels(rCol, previous.colPx), maxColumnPixels(in.tfMs));
