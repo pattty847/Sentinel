@@ -606,6 +606,8 @@ TEST_F(UgrGpu, ZoomKeepsTheDrawnContentUnderTheCursor) {
 // where it is drawn (within half a device pixel), not where the stored bounds put it.
 TEST_F(UgrGpu, TimeframeSwitchKeepsTheDrawnNowColumn) {
     noLabels();
+    gpuOn();
+    ASSERT_TRUE(pump(10'000, [&] { return layer().liveAnchorMs() > 0; })) << "the recording's availability";
     const int64_t anchor = layer().liveAnchorMs();
     ASSERT_EQ(anchor, epoch + 4 * kHourMs);
     const int64_t start = anchor - minute / 2 - 29 * minute - minute / 7; // Now ~70% across
