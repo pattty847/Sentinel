@@ -96,6 +96,14 @@ public:
     // GUI thread: the tick a frame would choose for `view` now (the same rule and
     // state as chooseTickForView; nothing changes): the zoom ladder's target tick.
     int64_t predictTickUnits(const ViewWindow &view) const;
+    // GUI-thread inputs for the Auto-price fitter; candidate coverage includes
+    // its fitted margin. The frame commits the decision instead of re-deciding.
+    int64_t autoTickState() const { return autoUnits_; }
+    bool hasCurrentResolution() const; // false during startup/symbol/timeframe transients
+    // The fitted tick decision, if any (distinct from the committed/drawn tick).
+    std::optional<int64_t> autoPriceTickUnits() const { return autoPriceTick_; }
+    bool buildsTick(int64_t units, const ViewWindow &candidate) const;
+    bool setAutoPriceTick(std::optional<int64_t> units); // true: schedule a frame even if bounds stayed
     // Render thread: the frame's drawn device pixels per row and column and the
     // continuous rows' height (device px) for metrics() (atomics; GUI-thread reads).
     void noteRaster(int rowPx, int colPx, double rowPxContinuous);
@@ -246,6 +254,7 @@ private:
     // Tick state (written in prepareFrame while the GUI thread is blocked).
     int64_t tickUnits_ = 0, autoUnits_ = 0, postedTickUnits_ = -1;
     bool postedManual_ = false;
+    std::optional<int64_t> autoPriceTick_; // fit policy input, not a retained click/window
     struct TickKey {
         uint64_t version = 0;
         const ResolutionSummary *set = nullptr;

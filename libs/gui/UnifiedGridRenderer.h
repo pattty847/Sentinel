@@ -205,6 +205,7 @@ private:
     // window ends it).
     struct FollowPadding {
         int64_t padMs = 0, startMs = 0, endMs = 0, tfMs = 0;
+        uint64_t placement = 0;
     };
     std::optional<FollowPadding> m_followPadding;
     bool m_zoomGesture = false;         // a pinch or trackpad scroll draws the continuous camera
@@ -614,7 +615,7 @@ private:
     void applyGpuLimits();
     void followGpuLive();
     void seedGpuViewport(double bestBid, double bestAsk);
-    void setGpuViewportSelf(qint64 start, qint64 end, double priceMin, double priceMax);
+    void setGpuViewportSelf(qint64 start, qint64 end, double priceMin, double priceMax, bool preservePlacement = false);
     // "Return to live" (follow-live activation): the view's right edge goes one
     // padding past the live anchor's bucket, in either direction, span kept.
     void returnGpuToLive();
@@ -632,7 +633,7 @@ private:
     // camera's drawn time window (current anchor, or anchorFracX when the caller sets
     // one with this change; DPR, column hysteresis).
     std::optional<std::pair<double, double>> gpuFitPriceWindow(qint64 start, qint64 end, bool candlesOnly,
-                                                               std::optional<double> anchorFracX = std::nullopt) const;
+                                                               std::optional<double> anchorFracX = std::nullopt);
     std::pair<double, double> drawnTimeWindow(qint64 start, qint64 end,
                                               std::optional<double> anchorFracX = std::nullopt) const;
     // GridViewState's price fit while auto price scale is on. 

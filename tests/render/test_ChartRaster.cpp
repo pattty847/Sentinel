@@ -6,6 +6,9 @@
 // GridViewState) and fits price on integer pixels per row. Pure CPU.
 #include "render/ChartRaster.hpp"
 #include "render/GridViewState.hpp"
+#include "heatmap/HeatmapSpanPlanner.hpp"
+#include <iostream>
+#include <iomanip>
 
 #include <QCoreApplication>
 #include <gtest/gtest.h>
@@ -588,6 +591,179 @@ TEST(ChartRasterZoom, FollowShiftsByWholeBucketsOutsideOneDrawnPixel) {
     // pixel (42,858 ms), so follow-live leaves the Now column where it is.
     const int64_t liveEnd = 1'790'000'100'000 / (5 * kMinute) * (5 * kMinute);
     EXPECT_EQ(followShift(liveEnd + 2'100'000, liveEnd + 2'121'429, 5 * kMinute, 7), 0);
+}
+// A3 feasibility witness: dropping the two coarse outer columns on one zoom-in
+// changes Auto's admissible ticks. All candles (including their 8% margin) need
+// a price span of 180. The previous, valid fit is 200 at tick 2.5 / P=4.
+// For every span in [180, 200], Auto chooses tick 2. Its adjacent whole-row
+// spans are 160 (clips) and 213 1/3 (widens): relaxed T2 must choose the latter.
+const BuildsPriceWindow allTicksBuild = [](int64_t, double, double) { return true; };
+
+TEST(ChartRasterZoom, A3RawSpanFitSurvivesTheAutoStateCommit) {
+    const auto fit = solveAutoPriceFit(99661, 100339, 576, 200, 100, {}, allTicksBuild);
+    ASSERT_TRUE(fit);
+    EXPECT_EQ(fit->tickUnits, 200);
+    EXPECT_EQ(fit->rowPx, 1); // unchanged hysteresis allows P=1
+    EXPECT_EQ(fit->lo, 99424);
+    EXPECT_EQ(fit->hi, 100576);
+    const auto repeated = solveAutoPriceFit(99661, 100339, 576, fit->tickUnits, 100, {}, allTicksBuild);
+    ASSERT_TRUE(repeated);
+    EXPECT_EQ(repeated->tickUnits, fit->tickUnits);
+    EXPECT_EQ(repeated->lo, fit->lo);
+    EXPECT_EQ(repeated->hi, fit->hi);
+}
+
+TEST(ChartRasterZoom, A3ResolutionBoundaryChoosesTheTightestContainingFit) {
+    using namespace heatmap;
+    ResolutionSummary summary;
+    summary.tfMs = kMinute;
+    summary.priceScale = 100;
+    for (int i = 0; i < 10; ++i) {
+        const int64_t common = i == 0 || i == 9 ? 250 : 1;
+        summary.columns.push_back({i * kMinute,
+            {{"fixture", BucketState::Present, {common}, common, {{0, 20000000}}}}});
+    }
+    auto solve = [&](double need, int64_t current, int begin, int end) {
+        return solveAutoPriceFit(100000 - need / 2, 100000 + need / 2, 320, current, 100, {},
+            [&](int64_t units, double lo, double hi) {
+                return buildsInView(summary, units, begin * kMinute, end * kMinute, lo, hi);
+            });
+    };
+    const auto narrow = solve(180, 250, 1, 9);
+    ASSERT_TRUE(narrow);
+    EXPECT_EQ(narrow->tick, 2);
+    EXPECT_EQ(narrow->rowPx, 3);
+    EXPECT_NEAR(narrow->hi - narrow->lo, 640.0 / 3, 1e-9);
+    GridViewState view;
+    int64_t current = 200;
+    view.setPriceFit([&](qint64 start, qint64 end, double& lo, double& hi) {
+        const auto fit = solve(190, current, int(start / kMinute), int(end / kMinute));
+        if (!fit) return false;
+        lo = fit->lo;
+        hi = fit->hi;
+        return true;
+    });
+    view.setAutoPriceScale(true);
+    view.setViewport(kMinute, 9 * kMinute, narrow->lo, narrow->hi);
+    ASSERT_NEAR(view.getMaxPrice() - view.getMinPrice(), 640.0 / 3, 1e-9);
+    view.setViewport(0, 10 * kMinute, view.getMinPrice(), view.getMaxPrice()); // click out
+    ASSERT_EQ(view.getMaxPrice() - view.getMinPrice(), 200); // no previous-span floor
+    const auto version = view.getViewportVersion();
+    const double lo = view.getMinPrice(), hi = view.getMaxPrice();
+    current = 250; // commit, then an interior revision: raw extrema are unchanged
+    for (int event = 0; event < 2; ++event) {
+        view.setViewport(0, 10 * kMinute, lo, hi);
+        EXPECT_EQ(view.getViewportVersion(), version);
+        EXPECT_EQ(view.getMinPrice(), lo);
+        EXPECT_EQ(view.getMaxPrice(), hi);
+    }
+}
+
+TEST(ChartRasterZoom, A3BuildabilityIncludesEachCandidatesFittedMargin) {
+    using namespace heatmap;
+    ResolutionSummary summary;
+    summary.tfMs = kMinute;
+    summary.priceScale = 100;
+    summary.columns.push_back({0, {
+        {"fine", BucketState::Present, {1}, 1, {{9995000, 10005000}}},
+        {"coarse", BucketState::Present, {100}, 100, {{0, 20000000}}}}});
+    constexpr double lo = 99958.9, hi = 100041.1;
+    ASSERT_EQ(autoTickUnits(summary, 50, 0, kMinute, lo, hi, 320), 50);
+    const auto fit = solveAutoPriceFit(lo, hi, 320, 50, 100, {},
+        [&](int64_t units, double low, double high) {
+            return buildsInView(summary, units, 0, kMinute, low, high);
+        });
+    ASSERT_TRUE(fit);
+    EXPECT_EQ(fit->tickUnits, 100);
+    EXPECT_TRUE(buildsInView(summary, fit->tickUnits, 0, kMinute, fit->lo, fit->hi));
+}
+
+TEST(ChartRasterZoom, A3EveryPresetAcrossTwoDecadesIsIdenticalAfterCommit) {
+    size_t checked = 0, unavailable = 0;
+    for (const int H : {320, 576, 901}) {
+        for (const int64_t current : heatmap::presetLadderUnits()) {
+            for (int i = 0; i <= 2000; ++i) {
+                // 2001 logarithmic points over two decades, relative to each
+                // preset: raw row heights 20 down to .2, crossing both thresholds.
+                const double span = H * double(current) * .05 * std::pow(100.0, i / 2000.0);
+                const double centre = span * 3.00123;
+                const double lo = centre - span / 2, hi = centre + span / 2;
+                const auto fit = solveAutoPriceFit(lo, hi, H, current, 1, {}, allTicksBuild);
+                if (!fit) { ++unavailable; continue; } // beyond the largest offered preset
+                const auto repeated = solveAutoPriceFit(lo, hi, H, fit->tickUnits, 1, {}, allTicksBuild);
+                ASSERT_TRUE(repeated) << H << " current=" << current << " i=" << i;
+                ASSERT_EQ(repeated->tickUnits, fit->tickUnits) << H << " current=" << current << " i=" << i;
+                ASSERT_EQ(repeated->lo, fit->lo) << H << " current=" << current << " i=" << i;
+                ASSERT_EQ(repeated->hi, fit->hi) << H << " current=" << current << " i=" << i;
+                ASSERT_LE(fit->lo, lo);
+                ASSERT_GE(fit->hi, hi);
+                ++checked;
+            }
+        }
+    }
+    EXPECT_GT(checked, 300000u);
+    std::cout << "D5 SWEEP identical=" << checked << " unavailable=" << unavailable << "\n";
+}
+
+TEST(ChartRasterZoom, A3NoBuildableFitReturnsNoDecision) {
+    int checked = 0;
+    EXPECT_FALSE(solveAutoPriceFit(99950, 100050, 320, 100, 100, {},
+        [&](int64_t, double, double) { ++checked; return false; }));
+    EXPECT_GT(checked, 0);
+    EXPECT_LE(checked, 2 * int(heatmap::presetLadderUnits().size()) + 1);
+}
+
+TEST(ChartRasterZoom, A3FitsContainBothMarginEdgesIncludingThePixelPhase) {
+    std::mt19937_64 rng(20261009);
+    for (int i = 0; i < 1000; ++i) {
+        const double scale = i % 2 ? 100 : 1e10;
+        const double centre = i % 2 ? 100000.00123 : .00001000123;
+        const int64_t current = heatmap::presetLadderUnits()[4 + rng() % 12];
+        const double tick = heatmap::fromUnits(current, scale);
+        const double span = tick * (20 + rng() % 500);
+        const int H = 320 + int(rng() % 481);
+        const auto fit = solveAutoPriceFit(centre - span / 2, centre + span / 2, H, current, scale, {}, allTicksBuild);
+        ASSERT_TRUE(fit) << i;
+        EXPECT_LE(fit->lo, centre - span / 2);
+        EXPECT_GE(fit->hi, centre + span / 2);
+        EXPECT_NEAR(H * fit->tick / (fit->hi - fit->lo), fit->rowPx, 1e-5);
+    }
+}
+
+// Keep the original diagnostic's synthetic 8% margin for comparison. Renderer
+// integration uses production kFitPriceMargin (6%), unchanged.
+TEST(ChartRasterZoom, A3Trace) {
+    constexpr int H = 320;
+    int C = 160;
+    int64_t tick = 50;
+    const auto flags = std::cout.flags();
+    const auto precision = std::cout.precision();
+    std::cout << std::fixed << std::setprecision(5);
+    for (int click = 0; click < 16; ++click) {
+        const int direction = click < 8 ? -1 : 1;
+        C = columnRung(C, direction, 1, 160);
+        double lo = 100000, hi = 100000;
+        for (int i = -64; i < 64; ++i) {
+            if (i < 320.0 / C && i + 1 > -320.0 / C) {
+                const double radius = 8 + 7 * std::max(std::abs(i), std::abs(i + 1));
+                lo = std::min(lo, 100000 - radius);
+                hi = std::max(hi, 100000 + radius);
+            }
+        }
+        const double margin = (hi - lo) * .08;
+        const auto fit = solveAutoPriceFit(lo - margin, hi + margin, H, tick, 100, {}, allTicksBuild);
+        ASSERT_TRUE(fit);
+        tick = fit->tickUnits;
+        const auto repeated = solveAutoPriceFit(lo - margin, hi + margin, H, tick, 100, {}, allTicksBuild);
+        ASSERT_TRUE(repeated);
+        EXPECT_EQ(repeated->lo, fit->lo);
+        EXPECT_EQ(repeated->hi, fit->hi);
+        std::cout << "D5 " << (direction < 0 ? "out" : "in") << click % 8 + 1 << " minutes=" << 640.0 / C
+                  << " candles=[" << lo << "," << hi << "] final=[" << fit->lo << "," << fit->hi
+                  << "] tick=" << fit->tick << " P=" << fit->rowPx << "\n";
+    }
+    std::cout.flags(flags);
+    std::cout.precision(precision);
 }
 } // namespace
 

@@ -70,6 +70,15 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem *parent)
   connect(this, &QQuickItem::windowChanged, this, [this](QQuickWindow* w) { bindWindow(w); });
 
   init();
+  connect(m_viewState.get(), &GridViewState::autoPriceScaleChanged, this, [this] {
+    if (!m_viewState->autoPriceScale() && m_gpuLayer->setAutoPriceTick(std::nullopt)) update();
+  });
+  // A new resolution summary can change which candidate fits are buildable.
+  // Refit on the GUI thread, never from the frame's tick chooser.
+  connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::snapshotChanged, this,
+          &UnifiedGridRenderer::refitAutoPrice);
+  connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::liveChanged, this,
+          &UnifiedGridRenderer::refitAutoPrice);
   // An item constructed with a parent already in a window (C++ hosts, tests)
   // saw windowChanged before the connection above.
   if (window()) bindWindow(window());
@@ -621,6 +630,7 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
       m_viewState->setRasterAnchor(anchorX, m_viewState->rasterAnchor().fracY);
       m_viewState->setViewportAndMaxSpans(end - span, end, m_viewState->getMinPrice(), m_viewState->getMaxPrice(),
                                           maxTime, m_gpuLayer->maxPriceSpan());
+      if (following && m_followPadding) m_followPadding->placement = m_viewState->placementVersion();
       syncGpuView();
       if (m_viewState->isAutoScrollEnabled()) emit liveRenderTick();
     }
@@ -820,6 +830,7 @@ void UnifiedGridRenderer::setHeatmapChartSettings(const heatmap::HeatmapChartSet
                                                   bool explicitManualTick) {
   if (!m_gpuLayer) return;
   m_gpuLayer->setSettings(settings, explicitManualTick);
+  refitAutoPrice();
   const auto gradients = heatmap::gpu::gradientsFor(settings);
   m_showTrades = settings.showTrades;
   if (m_tradesAboveCandles != settings.tradesAboveCandles) {
@@ -851,6 +862,7 @@ void UnifiedGridRenderer::syncGpuSurface() {
   if (!m_gpuLayer) return;
   const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
   m_gpuLayer->setSurface(width(), height(), dpr);
+  refitAutoPrice(); // raw row height and candidate pixel phases follow the surface
 }
 
 // Spec rules 1, 2 and 9: GridViewState clamps wheel, axis drags and the Agent
@@ -922,7 +934,7 @@ void UnifiedGridRenderer::followGpuLiveTo(int64_t openEnd) {
   // along); any other write of the time window (return to live, reset, the API, an
   // explicit view, a pan) is a new placement with the nominal padding.
   const bool kept = m_followPadding && m_followPadding->startMs == start && m_followPadding->endMs == end &&
-                    m_followPadding->tfMs == tf;
+                    m_followPadding->tfMs == tf && m_followPadding->placement == m_viewState->placementVersion();
   const int64_t pad = kept ? m_followPadding->padMs
                            : std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(span) *
                                                                          m_autoScrollPaddingFrac));
@@ -939,7 +951,7 @@ void UnifiedGridRenderer::followGpuLiveTo(int64_t openEnd) {
     g.end = chart_raster::shiftedRaster(g.end, -double(shift) * g.end.pxPerMs(), 0);
     g.anchorTime += double(shift);
   }
-  setGpuViewportSelf(start + shift, end + shift, m_viewState->getMinPrice(), m_viewState->getMaxPrice());
+  setGpuViewportSelf(start + shift, end + shift, m_viewState->getMinPrice(), m_viewState->getMaxPrice(), true);
   if (kept) { // the follow update keeps the switch's placement
     m_followPadding->startMs = m_viewState->getVisibleTimeStart();
     m_followPadding->endMs = m_viewState->getVisibleTimeEnd();
@@ -1016,7 +1028,7 @@ bool UnifiedGridRenderer::applyPriceCarry(double now, bool liveOnly) {
     }
     if (!m_carryWaitTimer->isActive()) m_carryWaitTimer->start(kCarryLiveOnlyWaitMs);
   }
-  setGpuViewportSelf(m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd(), lo, hi);
+  setGpuViewportSelf(m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd(), lo, hi, true);
   return true;
 }
 
@@ -1078,9 +1090,10 @@ qint64 UnifiedGridRenderer::gpuInitialSpanMs(double widthPx) const {
   return static_cast<int64_t>(std::max(16, static_cast<int>(width / m_initialColumnPx))) * tf;
 }
 
-void UnifiedGridRenderer::setGpuViewportSelf(qint64 start, qint64 end, double priceMin, double priceMax) {
+void UnifiedGridRenderer::setGpuViewportSelf(qint64 start, qint64 end, double priceMin, double priceMax,
+                                             bool preservePlacement) {
   m_gpuSelfViewport = true;
-  m_viewState->setViewport(start, end, priceMin, priceMax);
+  m_viewState->setViewport(start, end, priceMin, priceMax, preservePlacement);
   m_gpuSelfViewport = false;
 }
 
@@ -1190,7 +1203,7 @@ std::pair<double, double> UnifiedGridRenderer::drawnTimeWindow(qint64 start, qin
 
 std::optional<std::pair<double, double>> UnifiedGridRenderer::gpuFitPriceWindow(qint64 start, qint64 end,
                                                                                 bool candlesOnly,
-                                                                                std::optional<double> anchorFracX) const {
+                                                                                std::optional<double> anchorFracX) {
   const int64_t tf = std::max<int64_t>(1, m_currentTimeframe_ms);
   double lo = 0, hi = 0, centre = 0, span = 0;
   // The candles the window draws: the raster camera's time window (wider or narrower
@@ -1220,6 +1233,7 @@ std::optional<std::pair<double, double>> UnifiedGridRenderer::gpuFitPriceWindow(
     }
     ++used;
   }
+  const bool onePrice = used && hi == lo;
   const double current = m_viewState->getMaxPrice() - m_viewState->getMinPrice();
   if (used) {
     centre = (lo + hi) * 0.5;
@@ -1251,14 +1265,64 @@ std::optional<std::pair<double, double>> UnifiedGridRenderer::gpuFitPriceWindow(
   // an integer P, its top on a row edge, so the drawn window equals the fitted one
   // (no snap crops the candles). Before a tick is drawn the span stays.
   const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
-  chart_raster::fitPriceToRows(lo, hi, chart_raster::devicePixels(height(), dpr), m_gpuLayer ? m_gpuLayer->tickPrice() : 0.0);
+  const int H = chart_raster::devicePixels(height(), dpr);
+  const double tick = m_gpuLayer ? m_gpuLayer->tickPrice() : 0.0;
+  if (m_viewState->autoPriceScale() && m_gpuLayer && !m_gpuLayer->manualMode()) {
+    // Startup and symbol/timeframe switches have no resolution to solve against.
+    // This is expected; only a failed solve with current data warrants a warning.
+    if (!m_gpuLayer->hasCurrentResolution()) return std::make_pair(lo, hi);
+    if (onePrice && current > 0 && std::isfinite(current)) {
+      // One price (hi == lo) has no new scale information. Keep the span and
+      // leave the tick decision/proposal untouched; translate by drawn whole rows.
+      double low = m_viewState->getMinPrice(), high = m_viewState->getMaxPrice();
+      const double row = m_gpuLayer->tickPrice();
+      const double margin = current * kFitPriceMargin;
+      if ((centre <= low + margin || centre >= high - margin) && std::isfinite(row) && row > 0) {
+        const double shift = std::round((centre - (low + high) * .5) / row) * row;
+        low += shift;
+        high += shift;
+      }
+      return std::make_pair(low, high);
+    }
+    // Every Auto price fit uses the same raw basis and candidate coverage rule.
+    // Publish the tick decision before setViewport notifies the renderer.
+    const auto &settings = m_gpuLayer->settings();
+    const auto fit = chart_raster::solveAutoPriceFit(lo, hi, H, m_gpuLayer->autoTickState(), m_gpuLayer->priceScale(),
+        {settings.minRowPx, settings.hysteresis}, [&](int64_t units, double low, double high) {
+          return m_gpuLayer->buildsTick(units, {drawnStart, drawnEnd, low, high});
+        });
+    if (m_gpuLayer->setAutoPriceTick(fit ? std::optional(fit->tickUnits) : std::nullopt)) update();
+    if (fit) {
+      sLog_Probe("zoom.fit", "raw=[" << lo << ".." << hi << "] fit=[" << fit->lo << ".." << fit->hi
+                 << "] tick=" << fit->tick << " P=" << fit->rowPx);
+      lo = fit->lo;
+      hi = fit->hi;
+    } else {
+      sLog_Warning("auto price fit unavailable; publishing plain fit time=[" << start << ".." << end
+                   << "] raw=[" << lo << ".." << hi << "]");
+      chart_raster::fitPriceToRows(lo, hi, H, tick);
+    }
+  } else {
+    // Frozen A2 path for Manual tick and auto scale off: rounded-centre placement
+    // and the P=1 clamp, including the Manual maximum-span behavior.
+    const double priceSpan = hi - lo;
+    if (H > 0 && std::isfinite(tick) && tick > 0 && std::isfinite(priceSpan) && priceSpan > 0) {
+      const double P = std::clamp(std::floor(double(H) * tick / priceSpan), 1.0, double(chart_raster::kMaxCellPx));
+      const double fitted = double(H) * tick / P;
+      const double top = std::round(((lo + hi) * .5 + fitted * .5) * P / tick) * tick / P;
+      if (std::isfinite(top)) { hi = top; lo = top - fitted; }
+    }
+  }
   return std::make_pair(lo, hi);
 }
 
 bool UnifiedGridRenderer::autoPriceFit(qint64 start, qint64 end, double& priceMin, double& priceMax) {
   if (!m_gpuLayer || !m_viewState) return false;
   const auto window = gpuFitPriceWindow(start, end, true);
-  if (!window) return false; // no visible candle: the given price stays
+  if (!window) {
+    if (m_gpuLayer->setAutoPriceTick(std::nullopt)) update();
+    return false; // no visible candle: the given price stays
+  }
   std::tie(priceMin, priceMax) = *window;
   m_gpuPriceKnown = true; // a real price window (no book-top seed replaces it)
   m_gpuReseedPrice = false;
@@ -1272,7 +1336,7 @@ void UnifiedGridRenderer::refitAutoPrice() {
     return;
   const bool known = m_gpuPriceKnown;
   setGpuViewportSelf(m_viewState->getVisibleTimeStart(), m_viewState->getVisibleTimeEnd(), m_viewState->getMinPrice(),
-                     m_viewState->getMaxPrice());
+                     m_viewState->getMaxPrice(), true);
   if (m_gpuPriceKnown != known) syncGpuView();
 }
 

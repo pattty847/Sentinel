@@ -20,7 +20,9 @@ GridViewState::GridViewState(QObject* parent)
     m_interactionTimer.start();
 }
 
-void GridViewState::setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax) {
+void GridViewState::setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax,
+                                bool preservePlacement) {
+    if (!preservePlacement) ++m_placementVersion;
     // Spec rules 1 and 9: a span over the limit shrinks about its centre. The zoom
     // handlers clamp about their anchor first, so this only acts on direct calls.
     const int64_t timeLimit = timeSpanLimit(m_maxTimeSpanMs);
@@ -82,7 +84,7 @@ void GridViewState::setMaxSpans(double maxTimeSpanMs, double maxPriceSpan) {
     if (time == m_maxTimeSpanMs && price == m_maxPriceSpan) return;
     m_maxTimeSpanMs = time;
     m_maxPriceSpan = price;
-    if (m_timeWindowValid) setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice);
+    if (m_timeWindowValid) setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, m_minPrice, m_maxPrice, true);
 }
 
 void GridViewState::setMinSpans(double minTimeSpanMs, double minPriceSpan) {

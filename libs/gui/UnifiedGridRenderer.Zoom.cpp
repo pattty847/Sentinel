@@ -391,7 +391,7 @@ void UnifiedGridRenderer::zoomClicks(int clicks, double x, double y, bool time, 
   sLog_Probe("zoom.click", "clicks=" << clicks << " col=" << baseCol << "->" << col << " row=" << baseRow.rowPx
              << "@" << baseRow.tick << "->" << row.rowPx << "@" << row.tick);
   const auto restBefore = restCameraNow(false);
-  setZoomRung(drawn, fracX, fracY, zoomTime, col, zoomPrice, row);
+  if (!setZoomRung(drawn, fracX, fracY, zoomTime, col, zoomPrice, row)) return;
   if (zoomPrice) emit m_viewState->priceInteracted();
   if (m_viewState->isAutoScrollEnabled()) enableAutoScroll(false);
   // A new glide from what is drawn on every axis whose end the click changed (the auto
@@ -507,7 +507,10 @@ void UnifiedGridRenderer::endZoomGesture() {
   if (price)
     row = chart_raster::nearestRowRung(from.pxPerPrice(), int(H), m_viewState->minPriceSpan(),
                                        m_viewState->maxPriceSpan(), tickPredictor(tickStart, tickEnd, ap, fracY));
-  setZoomRung(from, fracX, fracY, m_gestureTime, col, price && row.rowPx > 0, row);
+  if (!setZoomRung(from, fracX, fracY, m_gestureTime, col, price && row.rowPx > 0, row)) {
+    update();
+    return;
+  }
   // The gesture's axes glide from their continuous camera to the rung; the other axis
   // is left as it is.
   startAxisGlides(from, restBefore, at, ap, m_gestureTime, m_gesturePrice);

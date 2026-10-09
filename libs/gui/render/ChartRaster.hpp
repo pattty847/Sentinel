@@ -8,12 +8,14 @@
 // thread): the render thread runs it once per frame, the GUI thread evaluates it for
 // the axis models, hit tests and the pan commit with the same inputs.
 #pragma once
+#include "heatmap/HeatmapResolution.hpp"
 
 #include "TimeAxisMapping.hpp"
 
 #include <QPointF>
 #include <cstdint>
 #include <functional>
+#include <optional>
 
 namespace chart_raster {
 
@@ -156,10 +158,22 @@ RowRung nearestRowRung(double pxPerPrice, int heightDev, double minSpan, double 
 // live step moves the picture by whole columns. colPx <= 0: the exact shift.
 int64_t followShift(int64_t endMs, int64_t targetMs, int64_t tfMs, int colPx);
 
-// A price fit on whole pixels per row: [lo, hi] widened about its centre to
-// heightDev * tick / P with P = max(1, floor(heightDev * tick / (hi - lo))), its top
-// on a row edge of that P (the drawn window then equals the stored one). False
-// (nothing changed) without a tick or a valid range.
+// Tightest whole-row fit containing both margin edges. The top is clamped to
+// a containing pixel phase and rational edges are rounded outward. False leaves
+// the inputs unchanged (invalid input or no containing P >= 1 at this tick).
 bool fitPriceToRows(double &lo, double &hi, int heightDev, double tick);
+
+struct AutoPriceFit {
+    double lo = 0, hi = 0, tick = 0;
+    int64_t tickUnits = 0;
+    int rowPx = 0;
+};
+using BuildsPriceWindow = std::function<bool(int64_t units, double lo, double hi)>;
+// D5: raw candle+margin span -> Auto tick -> containing fit. Auto's existing
+// hysteresis is unchanged (P=1 is permitted). Check candidate buildability over
+// its own fit, never just the raw window. No iteration or retained fit state.
+std::optional<AutoPriceFit> solveAutoPriceFit(double lo, double hi, int heightDev, int64_t currentUnits,
+                                             double priceScale, const heatmap::AutoTickParams &params,
+                                             const BuildsPriceWindow &builds);
 
 } // namespace chart_raster
