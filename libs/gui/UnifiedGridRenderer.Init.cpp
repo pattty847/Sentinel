@@ -115,13 +115,6 @@ void UnifiedGridRenderer::init() {
     m_viewState->setPanShift([this](QPointF drag, qint64& timeShiftMs, double& priceShift) {
         return rasterPanShift(drag, timeShiftMs, priceShift);
     });
-    m_viewState->setDrawnPoint([this](double fracX, double fracY, double& timeMs, double& price) {
-        const auto cam = rasterCameraNow(false);
-        if (!cam.valid) return false;
-        timeMs = cam.timeAtXDev(fracX * cam.widthDev);
-        price = cam.priceAtYDev(fracY * cam.heightDev);
-        return true;
-    });
     connect(m_viewState.get(), &GridViewState::priceInteracted, this, [this]() {
         m_priceCarry.reset(); // the user owns price now: no pending carry replaces it
     });

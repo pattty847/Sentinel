@@ -5,6 +5,7 @@
 #include <QQuickRenderTarget>
 #include <QQuickWindow>
 #include <rhi/qrhi.h>
+#include <cmath>
 #if QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>)
 #include <QVulkanInstance>
 #endif
@@ -17,6 +18,8 @@ OffscreenQuick::~OffscreenQuick() {
     window_.reset();
     control_.reset();
     target_.reset(); pass_.reset(); depth_.reset(); color_.reset();
+    for (auto &resource : retired_) resource.reset(); // targets before their textures
+    retired_.clear();
     // device_ (the QRhi) is destroyed last, as a member.
 }
 
@@ -44,6 +47,24 @@ bool OffscreenQuick::create(QSize pixelSize, QString *error) {
         return fail(name + QStringLiteral(" backend: QQuickRenderControl::initialize failed (a QQuickWindow created "
                                           "earlier in this process may have fixed another scene graph backend; "
                                           "call lab::selectQuickSceneGraph() in main() before any QQuickWindow)"));
+    logicalSize_ = pixelSize;
+    if (!createTargets(pixelSize, 1.0, error)) return false;
+    window_->resize(logicalSize_);
+    window_->contentItem()->setSize(QSizeF(logicalSize_));
+    return true;
+}
+
+bool OffscreenQuick::createTargets(QSize pixelSize, double dpr, QString *error) {
+    auto fail = [&](const QString &message) {
+        if (error) *error = message;
+        return false;
+    };
+    QRhi *rhi = device_.rhi.get();
+    const QString name = device_.backend.name;
+    if (target_) retired_.push_back(std::move(target_));
+    if (pass_) retired_.push_back(std::move(pass_));
+    if (depth_) retired_.push_back(std::move(depth_));
+    if (color_) retired_.push_back(std::move(color_));
     size_ = pixelSize;
     color_.reset(rhi->newTexture(QRhiTexture::RGBA8, size_, 1,
                                   QRhiTexture::RenderTarget | QRhiTexture::UsedAsTransferSource));
@@ -56,10 +77,19 @@ bool OffscreenQuick::create(QSize pixelSize, QString *error) {
     pass_.reset(target_->newCompatibleRenderPassDescriptor());
     target_->setRenderPassDescriptor(pass_.get());
     if (!target_->create()) return fail(name + QStringLiteral(" backend: render target creation failed"));
-    window_->setRenderTarget(QQuickRenderTarget::fromRhiRenderTarget(target_.get()));
-    window_->resize(size_);
-    window_->contentItem()->setSize(QSizeF(size_));
+    auto renderTarget = QQuickRenderTarget::fromRhiRenderTarget(target_.get());
+    renderTarget.setDevicePixelRatio(dpr);
+    window_->setRenderTarget(renderTarget);
     return true;
+}
+
+bool OffscreenQuick::setDevicePixelRatio(double dpr, QString *error) {
+    if (!control_ || !(dpr > 0)) {
+        if (error) *error = QStringLiteral("offscreen scene was not created");
+        return false;
+    }
+    const QSize pixels(int(std::lround(logicalSize_.width() * dpr)), int(std::lround(logicalSize_.height() * dpr)));
+    return createTargets(pixels, dpr, error);
 }
 
 bool OffscreenQuick::renderFrameOnly(QString *error) {

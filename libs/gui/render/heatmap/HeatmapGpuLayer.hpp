@@ -89,7 +89,13 @@ public:
     // makes it the drawn tick and emits tickChanged, so the chart moves every dependent
     // layer before the next frame draws it.
     void chooseTickForView(const ViewWindow &view);
-    bool prepareFrame(HeatmapTileNode::Frame &frame, const QRectF &rect, const ViewWindow &drawnView);
+    // coverageGamma: 0 at rest; 2.2 while a zoom transition draws fractional pixels
+    // (coverage in linear light). binView: a zoom glide's whole extent (binned once).
+    bool prepareFrame(HeatmapTileNode::Frame &frame, const QRectF &rect, const ViewWindow &drawnView,
+                      float coverageGamma = 0.0f, std::optional<ViewWindow> binView = std::nullopt);
+    // GUI thread: the tick a frame would choose for `view` now (the same rule and
+    // state as chooseTickForView; nothing changes): the zoom ladder's target tick.
+    int64_t predictTickUnits(const ViewWindow &view) const;
     // Render thread: the frame's drawn device pixels per row and column and the
     // continuous rows' height (device px) for metrics() (atomics; GUI-thread reads).
     void noteRaster(int rowPx, int colPx, double rowPxContinuous);

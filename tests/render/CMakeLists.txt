@@ -146,6 +146,16 @@ add_test(NAME HeatmapGpuBinnerTests COMMAND test_heatmap_gpu_binner)
 add_executable(test_heatmap_tile_node test_heatmap_tile_node.cpp ${CMAKE_SOURCE_DIR}/libs/gui/render/ChartRaster.cpp)
 target_include_directories(test_heatmap_tile_node PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_heatmap_tile_node PRIVATE sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::Quick)
+# Whole-pixel smooth zoom (slice A2): the display shader as slice A shipped it, the
+# reference for the production shader's rest path (byte-identical).
+qt_add_shaders(test_heatmap_tile_node slice_a_display_shader
+    GLSL "440"
+    HLSL 50
+    MSL 12
+    PREFIX "/slicea"
+    BASE "shaders"
+    FILES shaders/heatmap_display_slice_a.frag
+)
 add_test(NAME HeatmapTileNodeTests COMMAND test_heatmap_tile_node)
 set_tests_properties(HeatmapTileNodeTests PROPERTIES LABELS "render;heatmap")
 # Palette sampling endpoints and CPU/display/intensity shader formula parity.

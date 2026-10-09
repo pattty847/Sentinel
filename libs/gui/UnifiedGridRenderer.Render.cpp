@@ -122,9 +122,18 @@ void UnifiedGridRenderer::computeGpuFrameMapping(FrameContext& frame) {
         std::lock_guard<std::mutex> lock(m_frameContextMutex);
         previous = m_rasterStep;
     }
-    frame.raster = chart_raster::computeRaster(in, previous);
+    // The rest camera (whole pixels), and what this frame draws: the rest camera, or a
+    // free one during a zoom glide or gesture (fractional, drawn with coverage).
+    const Cameras cameras = camerasFor(in, previous);
+    frame.raster = cameras.drawn;
     frame.mapping = chart_raster::toMapping(frame.raster);
-    const auto& cam = frame.raster;
+    m_sync.coverageGamma = cameras.drawn.valid && cameras.drawn.free ? 2.2f : 0.0f;
+    m_sync.hasBinView = cameras.hasBinView;
+    m_sync.binTimeLo = cameras.binTimeLo;
+    m_sync.binTimeHi = cameras.binTimeHi;
+    m_sync.binPriceLo = cameras.binPriceLo;
+    m_sync.binPriceHi = cameras.binPriceHi;
+    const auto& cam = cameras.rest;
     if (!cam.valid) return;
     if (cam.step() != previous) {
         std::lock_guard<std::mutex> lock(m_frameContextMutex);
@@ -230,10 +239,14 @@ QSGNode* UnifiedGridRenderer::updateGpuPaintNode(QSGNode* oldNode, FrameContext&
     // 4. The node draws the camera's window: rows and columns on device pixel edges.
     heatmap::gpu::HeatmapTileNode::Frame tileFrame;
     const auto& cam = frame.raster;
+    std::optional<heatmap::gpu::ViewWindow> binView;
+    if (m_sync.hasBinView) binView = heatmap::gpu::ViewWindow{m_sync.binTimeLo, m_sync.binTimeHi, m_sync.binPriceLo,
+                                                              m_sync.binPriceHi};
     const bool prepared =
         m_sync.drawHeatmap && cam.valid &&
         m_gpuLayer->prepareFrame(tileFrame, frame.surfaceBounds,
-                                 {cam.drawnStartMs, cam.drawnEndMs, cam.drawnMinPrice, cam.drawnMaxPrice});
+                                 {cam.drawnStartMs, cam.drawnEndMs, cam.drawnMinPrice, cam.drawnMaxPrice},
+                                 m_sync.coverageGamma, binView);
     auto* gate = static_cast<QSGOpacityNode*>(root->firstChild());
     const double opacity = prepared ? 1.0 : 0.0; // 0 blocks the subtree: no prepare(), no draw
     if (gate->opacity() != opacity) gate->setOpacity(opacity);

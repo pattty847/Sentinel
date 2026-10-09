@@ -96,14 +96,18 @@ uint64_t uploadResident(QRhi *rhi, HeatmapGpuBinner &binner, const std::shared_p
 }
 
 // Direct display-pass readback: upload known packed cells so the floor-path
-// checks exercise the production shaders independently of price binning.
+// checks exercise the production shaders independently of price binning. Cells are
+// row-major, top row first (`columns` per row). The fragment shader defaults to the
+// production one; the slice A reference (tests/render/shaders) checks the rest path.
 class DisplayReadback {
 public:
     explicit DisplayReadback(QRhi *rhi) : rhi_(rhi) {}
-    bool create(QSize size, uint32_t rows, const HeatmapPalette &palette) {
+    bool create(QSize size, uint32_t rows, const HeatmapPalette &palette, uint32_t columns = 1,
+                const char *fragment = ":/heatmapgpu/heatmap_display.frag.qsb") {
         size_ = size;
         rows_ = rows;
-        cells_.reset(rhi_->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer, rows * 4));
+        columns_ = columns;
+        cells_.reset(rhi_->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer, rows * columns * 4));
         params_.reset(rhi_->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(Draw)));
         palette_.reset(rhi_->newTexture(QRhiTexture::RGBA8, QSize(kPaletteWidth, 1), 1));
         color_.reset(rhi_->newTexture(QRhiTexture::RGBA8, size, 1,
@@ -130,10 +134,12 @@ public:
             QFile file(QString::fromLatin1(path));
             return file.open(QIODevice::ReadOnly) ? QShader::fromSerialized(file.readAll()) : QShader{};
         };
+        const QShader frag = shader(fragment);
+        if (!frag.isValid()) return false;
         pipeline_.reset(rhi_->newGraphicsPipeline());
         pipeline_->setShaderStages(
             {{QRhiShaderStage::Vertex, shader(":/heatmapgpu/heatmap_display.vert.qsb")},
-             {QRhiShaderStage::Fragment, shader(":/heatmapgpu/heatmap_display.frag.qsb")}});
+             {QRhiShaderStage::Fragment, frag}});
         pipeline_->setTopology(QRhiGraphicsPipeline::TriangleStrip);
         pipeline_->setShaderResourceBindings(bindings_.get());
         pipeline_->setRenderPassDescriptor(pass_.get());
@@ -142,8 +148,11 @@ public:
         tone_ = palette.tone;
         return true;
     }
-    QImage render(const std::vector<uint32_t> &cells, float top, float span, bool clampRows = false) {
-        if (cells.size() != rows_) return {};
+    // top/span: the row offset and rows down the image; left/across: the column offset
+    // and columns across it. coverageGamma 0: rest (single cell), 2.2: a transition.
+    QImage render(const std::vector<uint32_t> &cells, float top, float span, bool clampRows = false,
+                  float coverageGamma = 0.0f, float left = 0.0f, float across = 1.0f) {
+        if (cells.size() != size_t(rows_) * columns_) return {};
         Draw draw{};
         QMatrix4x4 projection;
         projection.ortho(0.0f, float(size_.width()), float(size_.height()), 0.0f, -1.0f, 1.0f);
@@ -151,10 +160,11 @@ public:
         std::memcpy(draw.mvp, mvp.constData(), sizeof(draw.mvp));
         draw.rect[2] = float(size_.width());
         draw.rect[3] = float(size_.height());
-        draw.mapping[1] = 1.0f;
+        draw.mapping[0] = left;
+        draw.mapping[1] = across;
         draw.mapping[2] = top;
         draw.mapping[3] = span;
-        draw.dims[0] = 1;
+        draw.dims[0] = columns_;
         draw.dims[1] = rows_;
         draw.dims[2] = clampRows ? 1u : 0u;
         draw.style[1] = 32767.0f;
@@ -162,6 +172,7 @@ public:
         draw.tone[0] = tone_.gamma;
         draw.tone[1] = tone_.contrast;
         draw.tone[2] = tone_.floor;
+        draw.tone[3] = coverageGamma;
         QRhiCommandBuffer *cb = nullptr;
         if (rhi_->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess) return {};
         auto *updates = rhi_->nextResourceUpdateBatch();
@@ -183,7 +194,7 @@ public:
         if (rhi_->endOffscreenFrame() != QRhi::FrameOpSuccess ||
             result.data.size() != qsizetype(size_.width()) * size_.height() * 4)
             return {};
-        // Keep raw premultiplied bytes for exact RGBA comparisons.
+        // Keep raw premultiplied bytes for exact RGBA comparisons and light sums.
         const QImage image(reinterpret_cast<const uchar *>(result.data.constData()), size_.width(),
                            size_.height(), QImage::Format_RGBA8888);
         return rhi_->isYUpInFramebuffer() ? image.flipped(Qt::Vertical) : image.copy();
@@ -198,7 +209,7 @@ private:
     static_assert(sizeof(Draw) == 144);
     QRhi *rhi_;
     QSize size_;
-    uint32_t rows_ = 0;
+    uint32_t rows_ = 0, columns_ = 1;
     PaletteTexels texels_{};
     PaletteTone tone_;
     std::unique_ptr<QRhiBuffer> cells_, params_;
@@ -409,6 +420,143 @@ TEST(HeatmapDisplayRaster, EveryDrawnRowHasTheSameHeight) {
                 ++bands;
             }
             EXPECT_EQ(bands, 10) << "r=" << r << " offset " << i;
+        }
+    }
+}
+
+// ---------------------------------------------------------------- smooth zoom (A2)
+// Whole-pixel smooth zoom (slice A2): at rest the display shader draws the single cell
+// under each pixel centre exactly as slice A did; during a zoom transition it covers
+// the pixel footprint in rows AND columns with coverage in linear light (gamma 2.2).
+double decodeSrgb(int byte) {
+    const double c = byte / 255.0;
+    return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4);
+}
+double decodedLight(const QImage &image, int x0, int y0, int x1, int y1) {
+    double light = 0;
+    for (int y = y0; y < y1; ++y)
+        for (int x = x0; x < x1; ++x) {
+            const QRgb p = image.pixel(x, y);
+            light += decodeSrgb(qRed(p)) + decodeSrgb(qGreen(p)) + decodeSrgb(qBlue(p));
+        }
+    return light;
+}
+
+// Rest bytes: the production shader with coverage gamma 0 renders exactly what the
+// slice A shader (tests/render/shaders/heatmap_display_slice_a.frag) renders, for every
+// cell state, codes on both sides, whole and fractional mappings, clamped and not.
+TEST(HeatmapDisplayZoom, RestPathRendersTheSliceAShaderBytes) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "GPU case skipped: " << gpu.skipReason();
+    const auto palette = *makePalette(legacyDefaultGradients(), {1.05f, 1.15f, 0.01f});
+    const uint32_t rows = 8, columns = 6;
+    DisplayReadback production(gpu.rhi.get()), sliceA(gpu.rhi.get());
+    ASSERT_TRUE(production.create(QSize(40, 36), rows, palette, columns));
+    ASSERT_TRUE(sliceA.create(QSize(40, 36), rows, palette, columns, ":/slicea/heatmap_display_slice_a.frag.qsb"));
+    std::vector<uint32_t> cells(rows * columns);
+    for (uint32_t i = 0; i < cells.size(); ++i) {
+        const uint32_t kind = (i * 7u) % 6u;
+        cells[i] = kind == 0 ? 0u : kind == 1 ? 1u << 16 : kind == 2 ? 2u << 16 : kind == 3 ? validCell
+                 : validCell | ((i * 2654435761u) % 32767u) | ((i % 2) ? 0x8000u : 0u);
+    }
+    int compared = 0;
+    for (const bool clampRows : {false, true})
+        for (const auto [left, across, top, span] : {std::array<float, 4>{0, 6, 0, 8}, {-0.5f, 7.3f, -1.25f, 9.7f},
+                                                      {0.37f, 2.5f, 0.6f, 3.1f}, {1, 4, 2, 4}, {-2, 10, -3, 14}}) {
+            const auto a = production.render(cells, top, span, clampRows, 0.0f, left, across);
+            const auto b = sliceA.render(cells, top, span, clampRows, 0.0f, left, across);
+            ASSERT_FALSE(a.isNull());
+            ASSERT_FALSE(b.isNull());
+            EXPECT_EQ(a, b) << "clamp=" << clampRows << " mapping=" << left << "," << across << "," << top << "," << span;
+            ++compared;
+        }
+    EXPECT_EQ(compared, 10);
+}
+
+// Linear-light conservation during a glide: one hot row in an otherwise empty grid,
+// its height gliding 2 -> 3 device px with sub-pixel offsets: the decoded light (and
+// the alpha area) equal the row's height in pixels within 3% on every frame.
+TEST(HeatmapDisplayZoom, ATransitionConservesTheLightOfAnIsolatedRow) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "GPU case skipped: " << gpu.skipReason();
+    DisplayReadback display(gpu.rhi.get());
+    ASSERT_TRUE(display.create(QSize(8, 48), 16, solidSidePalette()));
+    const double fullPixelLight = decodeSrgb(32) + decodeSrgb(128) + decodeSrgb(240);
+    for (const uint32_t empty : {validCell, 0u}) {
+        std::vector<uint32_t> cells(16, empty);
+        cells[7] = hotBid;
+        for (int frame = 0; frame <= 12; ++frame) {
+            const double rowPx = 2.0 * std::pow(1.5, frame / 12.0); // a 2 -> 3 px glide
+            const double top = 7.0 - (17.3 + 0.37 * frame) / rowPx;    // the hot row near y = 17..20
+            const auto image = display.render(cells, float(top), float(48.0 / rowPx), false, 2.2f);
+            ASSERT_FALSE(image.isNull());
+            const double light = decodedLight(image, 4, 0, 5, 48) / fullPixelLight;
+            int alpha = 0;
+            for (int y = 0; y < 48; ++y) alpha += qAlpha(image.pixel(4, y));
+            EXPECT_NEAR(light, rowPx, rowPx * 0.03) << "frame " << frame << " row " << rowPx << " px";
+            EXPECT_NEAR(alpha, rowPx * 255, 3.0) << "frame " << frame;
+        }
+    }
+}
+
+// The same in columns: a hot column gliding 2 -> 3 px wide.
+TEST(HeatmapDisplayZoom, ATransitionConservesTheLightOfAnIsolatedColumn) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "GPU case skipped: " << gpu.skipReason();
+    DisplayReadback display(gpu.rhi.get());
+    ASSERT_TRUE(display.create(QSize(48, 6), 1, solidSidePalette(), 16));
+    const double fullPixelLight = decodeSrgb(224) + decodeSrgb(64) + decodeSrgb(16);
+    std::vector<uint32_t> cells(16, validCell);
+    cells[7] = hotAsk;
+    for (int frame = 0; frame <= 12; ++frame) {
+        const double colPx = 2.0 * std::pow(1.5, frame / 12.0);
+        const double left = 7.0 - (17.3 + 0.37 * frame) / colPx;
+        const auto image = display.render(cells, 0.0f, 1.0f, false, 2.2f, float(left), float(48.0 / colPx));
+        ASSERT_FALSE(image.isNull());
+        const double light = decodedLight(image, 0, 3, 48, 4) / fullPixelLight;
+        EXPECT_NEAR(light, colPx, colPx * 0.03) << "frame " << frame << " column " << colPx << " px";
+    }
+}
+
+// Inside one cell the transition draws that cell's exact rest bytes; a half-covered
+// hatch edge carries half its light (linear) and half its alpha.
+TEST(HeatmapDisplayZoom, InteriorCellsKeepTheirBytesAndHatchEdgesAreWeighted) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "GPU case skipped: " << gpu.skipReason();
+    const auto palette = solidSidePalette();
+    DisplayReadback display(gpu.rhi.get());
+    ASSERT_TRUE(display.create(QSize(8, 24), 8, palette));
+    const std::vector<uint32_t> cells{hotAsk, hotBid, hotAsk, hotBid, hotAsk, hotBid, hotAsk, hotBid};
+    int compared = 0;
+    for (int offset = 0; offset < 16; ++offset) {
+        const float top = -1.0f - float(offset) / 16.0f / 2.4f;
+        const auto rest = display.render(cells, top, 10.0f);
+        const auto blend = display.render(cells, top, 10.0f, false, 2.2f);
+        ASSERT_FALSE(rest.isNull());
+        ASSERT_FALSE(blend.isNull());
+        for (int y = 0; y < 24; ++y) {
+            const double lo = top + double(y) / 2.4, hi = top + double(y + 1) / 2.4;
+            const int row = int(std::floor(lo));
+            if (row < 0 || row >= 8 || hi >= row + 1.0 - 1e-5 || lo <= row + 1e-5) continue;
+            EXPECT_EQ(blend.pixel(4, y), rest.pixel(4, y)) << "offset=" << offset << " y=" << y;
+            ++compared;
+        }
+    }
+    EXPECT_GE(compared, 100);
+    DisplayReadback hatch(gpu.rhi.get());
+    ASSERT_TRUE(hatch.create(QSize(16, 24), 8, palette));
+    for (const uint32_t state : {1u, 2u}) {
+        const auto full = hatch.render(std::vector<uint32_t>(8, state << 16), 0.0f, 8.0f);
+        std::vector<uint32_t> one(8, validCell);
+        one[3] = state << 16;
+        const auto partial = hatch.render(one, 0.25f, 12.0f, false, 2.2f); // y=5 covers [2.75, 3.25]
+        ASSERT_FALSE(full.isNull());
+        ASSERT_FALSE(partial.isNull());
+        const double halfRgb = std::pow(0.5, 1.0 / 2.2);
+        for (int x = 0; x < 16; ++x) {
+            const QRgb under = full.pixel(x, 5), got = partial.pixel(x, 5);
+            EXPECT_NEAR(qRed(got), qRed(under) * halfRgb, 1.0) << "state " << state << " x " << x;
+            EXPECT_NEAR(qAlpha(got), qAlpha(under) * 0.5, 1.0) << "state " << state << " x " << x;
         }
     }
 }

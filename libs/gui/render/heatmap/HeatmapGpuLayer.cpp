@@ -420,7 +420,17 @@ void HeatmapGpuLayer::commitProposedTick() {
     emit tickChanged();
 }
 
-bool HeatmapGpuLayer::prepareFrame(HeatmapTileNode::Frame &frame, const QRectF &rect, const ViewWindow &view) {
+int64_t HeatmapGpuLayer::predictTickUnits(const ViewWindow &view) const {
+    if (!snapshot_ || snapshot_->tfMs != tfMs_ || snapshot_->symbol != symbol_ || !priceKnown_) return tickUnits_;
+    if (manualMode_) return isPresetUnits(manualUnits_) ? manualUnits_ : tickUnits_;
+    const ResolutionSummary &summary = resolution_ && resolution_->tfMs == tfMs_ ? *resolution_ : snapshot_->resolution;
+    const int64_t units = autoTickUnits(summary, autoUnits_, view.timeLoMs, view.timeHiMs, view.priceLo, view.priceHi,
+                                        heightPx_ * dpr_, {settings_.minRowPx, settings_.hysteresis});
+    return units > 0 ? units : autoUnits_ > 0 ? autoUnits_ : tickUnits_;
+}
+
+bool HeatmapGpuLayer::prepareFrame(HeatmapTileNode::Frame &frame, const QRectF &rect, const ViewWindow &view,
+                                   float coverageGamma, std::optional<ViewWindow> binView) {
     if (!controller_) return false;
     frame.spans = snapshot_;
     frame.capacity = capacity_;
@@ -428,6 +438,8 @@ bool HeatmapGpuLayer::prepareFrame(HeatmapTileNode::Frame &frame, const QRectF &
     frame.tickUnits = tickUnits_;
     frame.view = view;
     frame.rect = rect;
+    frame.coverageGamma = coverageGamma;
+    frame.binView = binView;
     frame.uploadBudgetBytes = settings_.uploadBudgetBytes;
     frame.gpuCapBytes = settings_.gpuCapBytes;
     frame.style = style_;

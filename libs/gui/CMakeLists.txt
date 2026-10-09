@@ -49,6 +49,7 @@ set(GRID_CORE_SOURCES
     UnifiedGridRenderer.cpp
     UnifiedGridRenderer.Init.cpp
     UnifiedGridRenderer.Render.cpp
+    UnifiedGridRenderer.Zoom.cpp
     UnifiedGridRenderer.h
     ChartMode.h
 

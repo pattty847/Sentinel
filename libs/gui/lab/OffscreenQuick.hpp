@@ -4,6 +4,7 @@
 #include <QString>
 #include "RhiBackend.hpp"
 #include <memory>
+#include <vector>
 
 class QQuickWindow;
 class QQuickRenderControl;
@@ -11,6 +12,7 @@ class QRhi;
 class QRhiTexture;
 class QRhiTextureRenderTarget;
 class QRhiRenderPassDescriptor;
+class QRhiResource;
 
 namespace lab {
 // Renders a real Qt Quick scene graph (QSGBatchRenderer, render nodes and all)
@@ -33,6 +35,10 @@ public:
     QImage renderFrame(QString *error);
     // The same frame without the readback (timing runs). Waits for the GPU.
     bool renderFrameOnly(QString *error);
+    // Tests: render at another device pixel ratio (a move to another screen): the
+    // targets are recreated at the logical size times dpr; the window keeps its logical
+    // size. The caller emits the window's screenChanged if the items should be told.
+    bool setDevicePixelRatio(double dpr, QString *error);
     // Whether the scene asked for a frame (QQuickRenderControl renderRequested or
     // sceneChanged) since the last render: tests drive frames only on request,
     // as a real render loop does.
@@ -44,7 +50,12 @@ private:
     std::unique_ptr<QRhiTexture> color_, depth_;
     std::unique_ptr<QRhiTextureRenderTarget> target_;
     std::unique_ptr<QRhiRenderPassDescriptor> pass_;
-    QSize size_;
+    // Targets replaced by setDevicePixelRatio: kept until the scene is destroyed (the
+    // scene graph may still reference their render pass descriptor).
+    std::vector<std::unique_ptr<QRhiResource>> retired_;
+    bool createTargets(QSize pixelSize, double dpr, QString *error);
+    QSize size_;            // the colour target's pixels
+    QSize logicalSize_;     // the window's logical size
     bool requested_ = false;
 };
 } // namespace lab

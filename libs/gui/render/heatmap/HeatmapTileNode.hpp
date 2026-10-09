@@ -66,6 +66,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -91,6 +92,8 @@ struct HeatmapTileStats {
     // self-test readback. Hosts schedule a frame while it is set (S6b review 3).
     std::atomic<bool> wantsFrame{false};
     std::atomic<int64_t> drawnTickUnits{0}, drawnTfMs{0};
+    // The last frame drew with coverage (a zoom transition, slice A2); false at rest.
+    std::atomic<bool> coverageBlend{false};
     std::atomic<double> prepareMs{0}, lastBinMs{0}, gpuFrameMs{0};
     std::atomic<bool> preciseKernel{true};
     // Live edge (S5L-c). Uploads and bin passes happen only on a new version;
@@ -178,6 +181,13 @@ public:
         int64_t tickUnits = 0; // display tick in price units of spans->priceScale (0: none yet)
         ViewWindow view;
         QRectF rect;
+        // Whole-pixel smooth zoom (slice A2). A zoom transition draws fractional pixels
+        // per row/column with exact coverage in linear light: the coverage gamma (2.2);
+        // 0 at rest (the single cell under each pixel centre). binView: the extent the
+        // transition will reach (its start and target), binned once at its start so the
+        // glide never rebins; none at rest (the view).
+        float coverageGamma = 0.0f;
+        std::optional<ViewWindow> binView;
         recording::SizeScale outputScale;
         uint64_t uploadBudgetBytes = 8ull << 20;
         uint64_t gpuCapBytes = 320ull << 20; // HeatmapBudgets::gpuPerChart
@@ -337,6 +347,7 @@ private:
     void noteLiveDrawn(const Bin &bin);
     bool binRows(Bin &bin, QRhiCommandBuffer *cb);
     bool rowsCover(const Bin &bin) const;
+    ViewWindow binExtent() const; // the view and the frame's binView
     Bin *findBin(uint64_t id) const;
     void retire(bool keepDrawn);
     void pinSources(const Bin &bin);
