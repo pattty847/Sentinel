@@ -20,7 +20,7 @@ The owner's `ma-panel` (local plugin) shows live workflow state; this session re
 
 ## Services (owner's Mac, launchd)
 
-- **Recorder** deployed 2026-10-06 18:36 EDT from `08d3bb8` (R1: D-a code, roller shadow on all 7 capture products from 2026-10-06, `recording.source: primary`). All 7 lags < 5 s within 54 s of the deploy; server 4% CPU, 243 MB. BTC `comparison.json` moved aside to `comparison.json.pre-r1` (owner-approved; the `from` bump broke its identity, FM-203), so BTC parity restarts from 2026-10-06 00:00Z. R1 soak gates (plan slice D section 5): all 14 mismatch series 0 for 48 h incl. one UTC midnight; rollback triggers: any mismatch, fault_cooldown 1, primary column_overdue > 120, disk_errors > 0; rollback = `deploy-runtime.sh rollback server` + revert `08d3bb8`. Previous deploy notes: Shadow roller ON for BTC-USD,
+- **Recorder** R2 DONE 2026-10-08 21:41 EDT (owner present): `recording.source: roller` (`319cc42`), `deploy-runtime.sh restart server` (same binary, built 2026-10-06 18:36, pid 61640). "Roller serving ready products=7" 8 s after start; lags 0.2-1.0 s; fault cooldowns 0; fanout_clients 7, capacity 0. Expected restart warnings only (journal boundary per product, one FARTCOIN transport blip). R1 soak before the flip: 51 h, 14 mismatch series 0. Rollback: revert `319cc42`, then `deploy-runtime.sh restart server`. Same day: the 40 pre-2026-09-30 BTC `data/market` day dirs and the T7 backup copy were moved to `~/.Trash` (owner empties it).
   writing `/Volumes/T7/sentinel-data/hmc2`. The 48 h soak passed (2026-10-05 22:17). At 2026-10-06 01:55:
   near/deep mismatches 0, setup/comparison failures 0, lag 0.9 s; primary queue drops and disk errors 0.
   Global invalidations are 30 and cumulative; they are not a parity signal.
@@ -64,8 +64,8 @@ Runbook notes: capture's fan-out allows 8 clients and the recorder uses 7, one p
 
 ## Waiting on the owner
 
-1. R2 after the soak (~18:40 EDT Oct 8), owner at the Mac: commit `recording.source: roller`, then `scripts/dev/deploy-runtime.sh restart server`; check `fanout_clients == 7`.
-1a. Same sitting as R2 (owner at the Mac, before or after R2 itself, not during it): data deletion approved by the owner 2026-10-07. Move to the Trash (owner empties it): `data/market/BTC-USD/<40 day dirs before 2026-09-30>` (Feb, Mar, May, Sep 28-29) and `/Volumes/T7/sentinel-backup/internal-data/market` (179 MB, this morning's copy). No other product has days before 2026-09-30. The rest of `data/market` (2026-09-30 on, still written by the server) goes to the Trash at the D-b2b deploy, after the server stops writing it; the journal covers those days.
+1. DONE: R2 (2026-10-08 21:41 EDT). Next per the order of work: deploy the landed server fixes one at a time (acceptor `d10c56a`, candle history `533420c`, bind address `0688fe0`, corrupt-block skip `e8c416a`), then land D-b1 and anchors.
+1a. DONE 2026-10-08: pre-2026-09-30 trade logs and their T7 copy moved to the Trash; the rest of `data/market` goes at the D-b2b deploy.
 2. Looks to judge: VP bars and the value-area band at their intended alpha (VA original green, faint); the GUI cold-start label reads Reconnecting; the new Backtest tab row in the Paper Trading dock (Source: Journal | File); the agent shot could not select the tab, so the owner looks in a GUI built from main after `9fc32ac`.
 3. Parked until the owner can set up the MacBook Pro (1 TB free): a nightly copy-only pull of `/Volumes/T7/sentinel-data` over Tailscale. Needs the owner: Remote Login on this Mac and the MacBook's SSH key. Today the journal (6 GB, about 0.85 GB/day for 7 products) has one copy since the 2026-10-07 one-time backup. The internal SSD (60 GB free) is a stopgap only. Cloud (for example Backblaze B2) later as the off-site copy.
 
