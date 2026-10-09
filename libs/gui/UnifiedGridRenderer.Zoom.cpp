@@ -14,9 +14,17 @@
 #include <cmath>
 
 namespace {
-constexpr double kCoverageGamma = 2.2;
-// A trackpad scroll without phase information settles on a rung after this pause.
+// A trackpad scroll settles on a rung after this pause (a scroll without phases, or a
+// pause with the fingers on the pad).
 constexpr int kGestureSettleMs = 160;
+// A gesture with an explicit end (pinch, axis drag) settles after this pause if its
+// end never arrives.
+constexpr int kGestureSafetyMs = 1000;
+// The continuous zoom of one event, as the wheel always scaled it (>1 zooms in).
+double continuousFactor(double delta) {
+  return 1.0 + std::clamp(delta * GridViewState::ZOOM_SENSITIVITY, -GridViewState::MAX_ZOOM_DELTA,
+                          GridViewState::MAX_ZOOM_DELTA);
+}
 } // namespace
 
 qint64 UnifiedGridRenderer::zoomNowMs() const {
@@ -80,11 +88,14 @@ chart_raster::RasterCamera UnifiedGridRenderer::restCameraNow(bool includeDrag) 
   return chart_raster::computeRaster(in, previous);
 }
 
-chart_raster::TickAt UnifiedGridRenderer::tickPredictor(qint64 start, qint64 end) const {
-  const double centre = m_viewState ? (m_viewState->getMinPrice() + m_viewState->getMaxPrice()) * 0.5 : 0.0;
-  return [this, start, end, centre](double span) -> double {
+chart_raster::TickAt UnifiedGridRenderer::tickPredictor(qint64 start, qint64 end, double anchorPrice,
+                                                       double fracY) const {
+  // The window a price span is drawn with: about the anchor (Auto judges the rows in
+  // view, so the window matters, not only its span).
+  return [this, start, end, anchorPrice, fracY](double span) -> double {
     if (!m_gpuLayer || !(span > 0)) return 0.0;
-    const heatmap::gpu::ViewWindow view{double(start), double(end), centre - span * 0.5, centre + span * 0.5};
+    const double hi = anchorPrice + fracY * span;
+    const heatmap::gpu::ViewWindow view{double(start), double(end), hi - span, hi};
     const int64_t units = m_gpuLayer->predictTickUnits(view);
     return units > 0 ? heatmap::fromUnits(units, m_gpuLayer->priceScale()) : 0.0;
   };
@@ -204,7 +215,7 @@ void UnifiedGridRenderer::zoomClicks(int clicks, double x, double y, bool time, 
   chart_raster::RowRung row = baseRow;
   if (price && m_gpuLayer->tickPrice() > 0) {
     row = chart_raster::rowRung(baseRow, clicks, int(H), m_viewState->minPriceSpan(), m_viewState->maxPriceSpan(),
-                                tickPredictor(targetStart, targetStart + targetSpan));
+                                tickPredictor(targetStart, targetStart + targetSpan, ap, fracY));
   } else if (price) {
     // No tick drawn yet (no rows to whole-pixel): the price span by the ratio, in limits.
     double span = (m_viewState->getMaxPrice() - m_viewState->getMinPrice()) /
@@ -225,6 +236,11 @@ void UnifiedGridRenderer::zoomClicks(int clicks, double x, double y, bool time, 
 }
 
 void UnifiedGridRenderer::zoomContinuous(double factor, double x, double y, bool time, bool price) {
+  zoomContinuousFor(factor, x, y, time, price, kGestureSettleMs);
+}
+
+void UnifiedGridRenderer::zoomContinuousFor(double factor, double x, double y, bool time, bool price,
+                                            int settleMs) {
   if (!m_viewState || !m_gpuLayer || !m_viewState->isTimeWindowValid() || !std::isfinite(factor) ||
       !(factor > 0) || factor == 1.0 || m_viewState->isDragging())
     return;
@@ -282,7 +298,7 @@ void UnifiedGridRenderer::zoomContinuous(double factor, double x, double y, bool
     m_zoomSettleTimer->setSingleShot(true);
     connect(m_zoomSettleTimer, &QTimer::timeout, this, [this] { endZoomGesture(); });
   }
-  m_zoomSettleTimer->start(kGestureSettleMs);
+  m_zoomSettleTimer->start(settleMs);
   update();
 }
 
@@ -305,7 +321,8 @@ void UnifiedGridRenderer::endZoomGesture() {
   const int maxCol = std::min(chart_raster::maxColumnPixels(tf),
                               minTime > 0 ? std::max(1, int(std::floor(W * tf / minTime + 1e-9)))
                                           : chart_raster::kMaxCellPx);
-  const int col = chart_raster::nearestColumnRung(from.colPxF, minCol, maxCol);
+  // An axis the gesture did not zoom keeps its drawn whole pixels.
+  const int col = m_gestureTime ? chart_raster::nearestColumnRung(from.colPxF, minCol, maxCol) : from.colPx;
   const qint64 span = std::llround(W * tf / double(col));
   const double at = from.timeAtXDev(fracX * W), ap = from.priceAtYDev(fracY * H);
   const qint64 start = std::llround(at - fracX * double(span));
@@ -313,36 +330,48 @@ void UnifiedGridRenderer::endZoomGesture() {
   chart_raster::RowRung row{from.tick, from.rowPx};
   if (price)
     row = chart_raster::nearestRowRung(from.pxPerPrice(), int(H), m_viewState->minPriceSpan(),
-                                       m_viewState->maxPriceSpan(), tickPredictor(start, start + span));
-  setZoomRung(from, fracX, fracY, true, col, price && row.rowPx > 0, row);
+                                       m_viewState->maxPriceSpan(), tickPredictor(start, start + span, ap, fracY));
+  setZoomRung(from, fracX, fracY, m_gestureTime, col, price && row.rowPx > 0, row);
   startZoomGlide(from, at, ap, col, price && row.rowPx > 0 ? row : chart_raster::RowRung{from.tick, from.rowPx});
 }
 
-void UnifiedGridRenderer::zoomTimeWheel(double angleDelta, double pixelDelta, double x) {
-  if (pixelDelta == 0.0) {
-    m_wheelAngleRemainder += int(std::lround(angleDelta));
+void UnifiedGridRenderer::wheelZoom(int angle, bool notch, Qt::ScrollPhase phase, double x, double y, bool time,
+                                    bool price) {
+  if (notch && phase == Qt::NoScrollPhase) {
+    m_wheelAngleRemainder += angle;
     const int clicks = std::clamp(m_wheelAngleRemainder / 120, -4, 4);
     m_wheelAngleRemainder -= clicks * 120;
-    if (clicks) zoomTimeClicks(clicks, x);
-    return;
+    if (clicks) zoomClicks(clicks, x, y, time, price);
+  } else if (phase == Qt::ScrollEnd) {
+    endZoomGesture();
+  } else if (angle != 0) {
+    zoomContinuousFor(continuousFactor(angle), x, y, time, price, kGestureSettleMs);
   }
-  zoomContinuous(1.0 + std::clamp(angleDelta * 0.0005, -0.4, 0.4), x, height() / 2, true, false);
 }
 
-void UnifiedGridRenderer::zoomPriceWheel(double angleDelta, double pixelDelta, double y) {
-  if (pixelDelta == 0.0) {
-    m_wheelAngleRemainder += int(std::lround(angleDelta));
-    const int clicks = std::clamp(m_wheelAngleRemainder / 120, -4, 4);
-    m_wheelAngleRemainder -= clicks * 120;
-    if (clicks) {
-      // A price zoom takes price over (as the axis zoom always did).
-      if (m_viewState) m_viewState->setAutoPriceScale(false);
-      zoomPriceClicks(clicks, y);
-    }
-    return;
-  }
+void UnifiedGridRenderer::zoomTimeWheel(int angleDelta, int pixelDelta, int phase, double x) {
+  wheelZoom(angleDelta, pixelDelta == 0, Qt::ScrollPhase(phase), x, height() / 2, true, false);
+}
+
+void UnifiedGridRenderer::zoomPriceWheel(int angleDelta, int pixelDelta, int phase, double y) {
+  if (m_viewState && angleDelta != 0) m_viewState->setAutoPriceScale(false);
+  wheelZoom(angleDelta, pixelDelta == 0, Qt::ScrollPhase(phase), width() / 2, y, false, true);
+}
+
+void UnifiedGridRenderer::zoomTimeDrag(double delta, double x) {
+  zoomContinuousFor(continuousFactor(delta), x, height() / 2, true, false, kGestureSafetyMs);
+}
+
+void UnifiedGridRenderer::zoomPriceDrag(double delta, double y) {
   if (m_viewState) m_viewState->setAutoPriceScale(false);
-  zoomContinuous(1.0 + std::clamp(angleDelta * 0.0005, -0.4, 0.4), width() / 2, y, false, true);
+  zoomContinuousFor(continuousFactor(delta), width() / 2, y, false, true, kGestureSafetyMs);
+}
+
+void UnifiedGridRenderer::zoomTimeClicks(int clicks, double x) { zoomClicks(clicks, x, height() / 2, true, false); }
+
+void UnifiedGridRenderer::zoomPriceClicks(int clicks, double y) {
+  if (m_viewState) m_viewState->setAutoPriceScale(false);
+  zoomClicks(clicks, width() / 2, y, false, true);
 }
 
 bool UnifiedGridRenderer::event(QEvent* e) {
@@ -352,7 +381,8 @@ bool UnifiedGridRenderer::event(QEvent* e) {
     case Qt::ZoomNativeGesture: {
       const QPointF at = gesture->position();
       const bool shift = gesture->modifiers() & Qt::ShiftModifier;
-      zoomContinuous(1.0 + gesture->value(), at.x(), at.y(), !shift, true);
+      if (shift && m_viewState) m_viewState->setAutoPriceScale(false);
+      zoomContinuousFor(1.0 + gesture->value(), at.x(), at.y(), !shift, true, kGestureSafetyMs);
       gesture->accept();
       return true;
     }

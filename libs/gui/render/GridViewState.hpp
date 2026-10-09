@@ -105,6 +105,11 @@ public:
     
     double calculateOptimalPriceResolution() const;
 
+    // Continuous zoom (axis drag, trackpad scroll, pinch): the span changes by
+    // 1 + clamp(delta * ZOOM_SENSITIVITY, +-MAX_ZOOM_DELTA) per event.
+    static constexpr double ZOOM_SENSITIVITY = 0.0005;
+    static constexpr double MAX_ZOOM_DELTA = 0.4;
+
 signals:
     void viewportChanged();
     void panVisualOffsetChanged();
@@ -139,9 +144,7 @@ private:
     std::tuple<double, double, bool> zoomAnchor(double fracX, double fracY, double continuousTime,
                                                 double continuousPrice) const;
     RasterAnchor m_rasterAnchor{1.0, 0.5}; // follow-live (the default) anchors the view end
-    
-    static constexpr double ZOOM_SENSITIVITY = 0.0005;
-    static constexpr double MAX_ZOOM_DELTA = 0.4;
+
     
     bool m_isDragging = false;
     QPointF m_lastMousePos;

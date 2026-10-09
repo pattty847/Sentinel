@@ -1438,6 +1438,7 @@ void HeatmapTileNode::prepare() {
     stats_->crossfading.store(fadingLayers > 0);
     stats_->drawnTickUnits.store(drawnTick_);
     stats_->drawnTfMs.store(drawnTf_);
+    stats_->coverageBlend.store(frame_.coverageGamma != 0.0f);
     stats_->complete.store(complete);
     stats_->wantsFrame.store(uploadPending_ || fadingLayers > 0 || pendingLive_ != nullptr ||
                              (binner_ && binner_->selfTestInFlightForTest()));

@@ -194,10 +194,14 @@ private:
     bool m_zoomGesture = false;         // a pinch or trackpad scroll draws the continuous camera
     bool m_gestureTime = true, m_gesturePrice = true;
     QPointF m_gestureAt;
-    QTimer* m_zoomSettleTimer = nullptr; // a trackpad scroll without phases settles after a pause
+    QTimer* m_zoomSettleTimer = nullptr; // a gesture settles after a pause (a lost end included)
     std::function<qint64()> m_zoomClock;
     int m_wheelAngleRemainder = 0;      // hi-res mouse wheels: angle toward the next notch
     qint64 zoomNowMs() const;
+    // The chart and axis wheels: notches are clicks, a trackpad scroll is continuous.
+    void wheelZoom(int angle, bool notch, Qt::ScrollPhase phase, double x, double y, bool time, bool price);
+    // A continuous zoom that settles on a rung after settleMs without input.
+    void zoomContinuousFor(double factor, double x, double y, bool time, bool price, int settleMs);
     // GUI thread, once per frame before the sync (updatePolish): the glide's progress
     // for that frame; the axis models and sibling overlays follow it. The next frame's
     // polish is requested through a reused zero timer (never from inside updatePolish).
@@ -209,7 +213,9 @@ private:
     // Moves the stored view to a rung about a drawn point (fracX/fracY of the item).
     bool setZoomRung(const chart_raster::RasterCamera& drawn, double fracX, double fracY, bool time, int colPx,
                      bool price, chart_raster::RowRung row);
-    chart_raster::TickAt tickPredictor(qint64 start, qint64 end) const;
+    // The tick the chart would draw a price span with, in the time window [start, end)
+    // and about anchorPrice at fracY (Auto's rule and state, or the Manual tick).
+    chart_raster::TickAt tickPredictor(qint64 start, qint64 end, double anchorPrice, double fracY) const;
     // The rest camera and the camera drawn (a glide or a gesture applied) for inputs.
     struct Cameras {
         chart_raster::RasterCamera rest, drawn;
@@ -447,13 +453,18 @@ public:
     // pinch or trackpad scroll zooms continuously and settles on the nearest rung.
     // Item coordinates (logical px); time/price select the axes.
     Q_INVOKABLE void zoomClicks(int clicks, double x, double y, bool time = true, bool price = true);
+    // factor > 1 zooms in; the gesture settles on a rung at endZoomGesture() or after a pause.
     Q_INVOKABLE void zoomContinuous(double factor, double x, double y, bool time = true, bool price = true);
     Q_INVOKABLE void endZoomGesture();
-    // Axis wheels (QML): a notch without pixel deltas is a click, else continuous.
-    Q_INVOKABLE void zoomTimeWheel(double angleDelta, double pixelDelta, double x);
-    Q_INVOKABLE void zoomPriceWheel(double angleDelta, double pixelDelta, double y);
-    Q_INVOKABLE void zoomTimeClicks(int clicks, double x) { zoomClicks(clicks, x, height() / 2, true, false); }
-    Q_INVOKABLE void zoomPriceClicks(int clicks, double y) { zoomClicks(clicks, width() / 2, y, false, true); }
+    // The axes (QML). Wheels: a notch (no pixel delta, no scroll phase) is a click, a
+    // trackpad scroll is continuous until its ScrollEnd. Drags are continuous until the
+    // release (endZoomGesture). A price zoom takes price over (auto price scale off).
+    Q_INVOKABLE void zoomTimeWheel(int angleDelta, int pixelDelta, int phase, double x);
+    Q_INVOKABLE void zoomPriceWheel(int angleDelta, int pixelDelta, int phase, double y);
+    Q_INVOKABLE void zoomTimeDrag(double delta, double x);
+    Q_INVOKABLE void zoomPriceDrag(double delta, double y);
+    Q_INVOKABLE void zoomTimeClicks(int clicks, double x);
+    Q_INVOKABLE void zoomPriceClicks(int clicks, double y);
     bool zoomGliding() const { return m_glide.active; }
     bool zoomGesturing() const { return m_zoomGesture; }
     // Tests: the glide clock (ms); default the chart's frame clock.

@@ -27,6 +27,8 @@
 #include "SyntheticHmc2Fixture.hpp"
 #include "marketdata/model/TradeData.h"
 #include <QElapsedTimer>
+#include <QNativeGestureEvent>
+#include <QPointingDevice>
 #include <QEventLoop>
 #include <QGuiApplication>
 #include <QQmlContext>
@@ -185,7 +187,9 @@ protected:
         int streak = 0;
         const bool ok = pump(30'000, [&] {
             const auto &st = layer().tileStats();
-            // A zoom glide (A2) is part of settling: it lands on a rung.
+            // A zoom glide (A2) is part of settling: it lands on a rung (a test's manual
+            // glide clock moves on while it settles).
+            if (ugr->zoomGliding()) clockMs += 20;
             streak = layer().settled() && !st.crossfading.load() && !st.holding.load() && !ugr->zoomGliding()
                          ? streak + 1
                          : 0;
@@ -208,6 +212,7 @@ protected:
                 drawn += std::max(0.0, std::min(hi, double(s.hiMs)) - std::max(lo, double(s.loMs)));
         return hi > lo ? drawn / (hi - lo) : 0;
     }
+    qint64 clockMs = 1'000;
     QImage image;
     // Whole-pixel mapping (plan 2026-10-08): what the last frame drew (the source of
     // GET /api/v1/viewport `drawn`).
@@ -218,6 +223,35 @@ protected:
         return {int64_t(std::floor(cam.drawnStartMs)), int64_t(std::ceil(cam.drawnEndMs))};
     }
     static bool whole(double v) { return std::abs(v - std::round(v)) < 1e-6; }
+    // Smooth zoom (A2): the glide clock under the test's control, and wheel input as
+    // the platform delivers it (a mouse notch: no pixel delta, no scroll phase).
+    void manualZoomClock() { ugr->setZoomClockForTest([this] { return clockMs; }); }
+    void notch(int clicks, QPointF at, Qt::KeyboardModifiers modifiers = Qt::NoModifier) {
+        QWheelEvent event(at, scene->window()->mapToGlobal(at), {}, {0, 120 * clicks}, Qt::NoButton, modifiers,
+                          Qt::NoScrollPhase, false);
+        QCoreApplication::sendEvent(scene->window(), &event);
+    }
+    // A trackpad scroll event (pixel deltas, a phase).
+    void scroll(int angle, Qt::ScrollPhase phase, QPointF at) {
+        QWheelEvent event(at, scene->window()->mapToGlobal(at), {0, angle / 4}, {0, angle}, Qt::NoButton,
+                          Qt::NoModifier, phase, false);
+        QCoreApplication::sendEvent(scene->window(), &event);
+    }
+    void pinch(Qt::NativeGestureType type, double value, QPointF at) {
+        QNativeGestureEvent event(type, QPointingDevice::primaryPointingDevice(), 2, at, at,
+                                  scene->window()->mapToGlobal(at), value, QPointF());
+        QCoreApplication::sendEvent(scene->window(), &event);
+    }
+    // One frame at glide time `ms`, then the frames to the landing (the clock past the
+    // glide's end): the landing frame is the first frame drawn after it.
+    bool frameAt(qint64 ms) {
+        clockMs = ms;
+        return frames(1);
+    }
+    bool landGlide() {
+        clockMs += chart_raster::kZoomGlideMs + 1;
+        return frames(1) && !ugr->zoomGliding();
+    }
     void noLabels() {
         auto settings = brightSettings();
         settings.showLabels = false; // nothing drawn inside a cell
@@ -2036,6 +2070,315 @@ TEST_F(UgrGpu, ToneChangesReachTheGpuPicture) {
     for (int y = 2; y < 320; y += 4)
         for (int x = 2; x < 640; x += 4) changed += image.pixel(x, y) != before.pixel(x, y);
     EXPECT_GT(changed, 1000) << "the tone mapping changed the picture";
+}
+
+// ---------------------------------------------------------------- smooth zoom (A2)
+// Acceptance 1: every mouse wheel click changes the drawn zoom, in and out, from 16 px
+// columns down to one column per pixel (slice A zoomed x1.06 per notch: at 1-3 px
+// cells 2-3 clicks stayed inside the step band and drew nothing). Price zooms with
+// it (auto price scale off): every click moves the drawn rows as well.
+TEST_F(UgrGpu, EveryWheelClickChangesTheDrawnZoom) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ugr->getViewState()->setAutoPriceScale(false);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const double minCol = std::ceil(640.0 * minute / ugr->getViewState()->maxTimeSpanMs() - 1e-9);
+    int clicks = 0;
+    for (const int direction : {+1, -1}) {
+        for (int i = 0; i < (direction > 0 ? 4 : 14); ++i) {
+            const auto before = drawn();
+            ASSERT_FALSE(before.free);
+            if (direction < 0 && before.colPx <= minCol) break; // one column per pixel
+            notch(direction, {320, 160});
+            ASSERT_TRUE(ugr->zoomGliding()) << "click " << clicks << ": the click starts a glide";
+            ASSERT_TRUE(settle()) << error.toStdString();
+            const auto after = drawn();
+            SCOPED_TRACE(testing::Message() << "click " << clicks++ << " direction " << direction << " col "
+                                            << before.colPx << " -> " << after.colPx << " row " << before.rowPx
+                                            << "@" << before.tick << " -> " << after.rowPx << "@" << after.tick);
+            EXPECT_FALSE(after.free) << "landed at rest";
+            EXPECT_EQ(direction > 0, after.colPx > before.colPx);
+            EXPECT_NE(after.colPx, before.colPx) << "every click changes the drawn columns";
+            EXPECT_NE(after.pxPerPrice(), before.pxPerPrice()) << "and the drawn rows";
+            EXPECT_EQ(direction > 0, after.pxPerPrice() > before.pxPerPrice());
+            EXPECT_TRUE(whole(after.heightDev * after.tick / priceSpan())) << "the stored view is a whole-row rung";
+            EXPECT_NEAR(640.0 * minute / timeSpan(), after.colPx, 1e-3) << "and a whole-column rung (whole ms)";
+        }
+    }
+    EXPECT_GE(clicks, 12);
+    EXPECT_EQ(drawn().colPx, int(minCol)) << "the zoom-out reached one column per pixel";
+}
+
+// Acceptance 2: the glide draws fractional frames with coverage and lands on whole
+// rows and columns, edges on pixel edges; the landing frame is byte-identical to a rest
+// render of the target view reached without a glide.
+TEST_F(UgrGpu, AGlideLandsOnTheRestFrameOfItsTarget) {
+    noLabels();
+    manualZoomClock();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    view->setAutoPriceScale(false);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const auto start = drawn();
+    const qint64 s0 = view->getVisibleTimeStart(), e0 = view->getVisibleTimeEnd();
+    const double p0 = view->getMinPrice(), p1 = view->getMaxPrice();
+    const auto anchor0 = view->rasterAnchor();
+    const QPointF at(211, 97);
+    // The target, rendered at rest: the same click, its glide cut short by a view set.
+    notch(1, at);
+    const qint64 ts = view->getVisibleTimeStart(), te = view->getVisibleTimeEnd();
+    const double tlo = view->getMinPrice(), thi = view->getMaxPrice();
+    ugr->setViewport(ts, te, tlo, thi); // lands at once (no glide)
+    ASSERT_FALSE(ugr->zoomGliding());
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const auto target = drawn();
+    const QImage rest = image;
+    ASSERT_FALSE(target.free);
+    ASSERT_EQ(target.tick, start.tick) << "the fixture keeps the tick (no crossfade at the landing)";
+    // Back to the start, then the same click with its glide.
+    view->setRasterAnchor(anchor0.fracX, anchor0.fracY);
+    ugr->setViewport(s0, e0, p0, p1);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ASSERT_EQ(drawn().leftColIndex, start.leftColIndex);
+    ASSERT_EQ(drawn().topRowIndex, start.topRowIndex);
+    const qint64 t0 = clockMs;
+    notch(1, at);
+    ASSERT_EQ(view->getVisibleTimeStart(), ts) << "the same target";
+    ASSERT_EQ(view->getMaxPrice(), thi);
+    int blended = 0;
+    for (qint64 ms = 0; ms < chart_raster::kZoomGlideMs; ms += 13) {
+        ASSERT_TRUE(frameAt(t0 + ms)) << error.toStdString();
+        const auto cam = drawn();
+        EXPECT_TRUE(cam.free) << ms << " ms: a transition frame";
+        EXPECT_TRUE(layer().tileStats().coverageBlend.load()) << ms << " ms: drawn with coverage";
+        blended += !whole(cam.colPxF) && !whole(cam.rowPxF);
+    }
+    EXPECT_GE(blended, 8) << "fractional rows and columns during the glide";
+    ASSERT_TRUE(landGlide()) << error.toStdString();
+    const auto landed = drawn();
+    EXPECT_FALSE(landed.free) << "the landing frame is the rest camera";
+    EXPECT_FALSE(layer().tileStats().coverageBlend.load()) << "floor() from the landing frame";
+    EXPECT_EQ(landed.colPx, target.colPx);
+    EXPECT_EQ(landed.rowPx, target.rowPx);
+    EXPECT_EQ(landed.leftColIndex, target.leftColIndex) << "edges on the target's pixel edges";
+    EXPECT_EQ(landed.topRowIndex, target.topRowIndex);
+    EXPECT_EQ(landed.drawnStartMs, target.drawnStartMs);
+    EXPECT_EQ(landed.drawnMaxPrice, target.drawnMaxPrice);
+    EXPECT_TRUE(image == rest) << "the landing frame is byte-identical to the rest render";
+}
+
+// Acceptance 4: the content under the cursor stays within half a device pixel of it on
+// every glide frame, zooming in and out, at several cursor positions.
+TEST_F(UgrGpu, TheCursorAnchorHoldsOnEveryGlideFrame) {
+    noLabels();
+    manualZoomClock();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ugr->getViewState()->setAutoPriceScale(false);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    int checked = 0;
+    for (const auto &[clicks, at] : {std::pair{1, QPointF(211, 97)}, {2, QPointF(37.5, 290)}, {-1, QPointF(600, 12)},
+                                     {-2, QPointF(320, 160)}, {1, QPointF(5, 5)}}) {
+        SCOPED_TRACE(testing::Message() << "clicks " << clicks << " at " << at.x() << "," << at.y());
+        const auto before = ugr->currentTimeAxisMapping();
+        const double t = before.screenXToTime(at.x()), p = before.screenYToPrice(at.y());
+        const qint64 t0 = clockMs;
+        notch(clicks, at);
+        ASSERT_TRUE(ugr->zoomGliding());
+        for (qint64 ms = 0; ms <= chart_raster::kZoomGlideMs + 1; ms += 10) {
+            ASSERT_TRUE(frameAt(t0 + ms)) << error.toStdString();
+            const auto mapping = ugr->currentTimeAxisMapping();
+            const double dpr = drawn().dpr;
+            EXPECT_LE(std::abs(mapping.timeToScreenX(t) - at.x()) * dpr, 0.5 + 1e-6) << ms << " ms: time";
+            EXPECT_LE(std::abs(mapping.priceToScreenY(p) - at.y()) * dpr, 0.5 + 1e-6) << ms << " ms: price";
+            ++checked;
+        }
+        ASSERT_FALSE(ugr->zoomGliding());
+        ASSERT_TRUE(settle()) << error.toStdString();
+    }
+    EXPECT_EQ(checked, 5 * 14);
+}
+
+// Acceptance 5: clicks during a glide retarget it from what is drawn: the drawn scale
+// only grows (no reverse jump), no frame repeats the previous one (no stall), and the
+// glide lands three rungs on.
+TEST_F(UgrGpu, RapidClicksRetargetMonotonically) {
+    noLabels();
+    manualZoomClock();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ugr->getViewState()->setAutoPriceScale(false);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const auto start = drawn();
+    const qint64 t0 = clockMs;
+    std::vector<double> cols, rows;
+    auto record = [&] {
+        cols.push_back(drawn().colPxF);
+        rows.push_back(drawn().pxPerPrice());
+    };
+    notch(1, {200, 100});
+    for (qint64 ms = 0; ms <= 300; ms += 10) {
+        if (ms == 40 || ms == 80) notch(1, {200, 100}); // two more clicks mid-glide
+        ASSERT_TRUE(frameAt(t0 + ms)) << error.toStdString();
+        record();
+    }
+    ASSERT_FALSE(ugr->zoomGliding());
+    for (size_t i = 1; i < cols.size(); ++i) {
+        EXPECT_GE(cols[i], cols[i - 1]) << "frame " << i << ": columns never shrink";
+        EXPECT_GE(rows[i], rows[i - 1]) << "frame " << i << ": rows never shrink";
+    }
+    for (size_t i = 1; i < 18; ++i) EXPECT_GT(cols[i], cols[i - 1]) << "frame " << i << ": no stall while gliding";
+    EXPECT_EQ(drawn().colPx, chart_raster::columnRung(start.colPx, 3, 1, 0)) << "three rungs on";
+    EXPECT_FALSE(drawn().free);
+}
+
+// Acceptance 6: a trackpad pinch (the macOS native zoom gesture) zooms continuously
+// while the fingers move, drawn with coverage; its end eases to the nearest rung. The
+// same for a trackpad scroll (pixel deltas with scroll phases).
+TEST_F(UgrGpu, APinchZoomsContinuouslyAndSettlesOnARung) {
+    noLabels();
+    manualZoomClock();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ugr->getViewState()->setAutoPriceScale(false);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    for (const bool native : {true, false}) {
+        SCOPED_TRACE(native ? "native pinch" : "trackpad scroll");
+        const QPointF at(250, 120);
+        if (native) pinch(Qt::BeginNativeGesture, 0, at);
+        else scroll(0, Qt::ScrollBegin, at);
+        double last = drawn().colPxF, lastRows = drawn().pxPerPrice();
+        int fractional = 0;
+        for (int i = 0; i < 9; ++i) {
+            const double step = native ? 0.037 : 48 * GridViewState::ZOOM_SENSITIVITY;
+            if (native) pinch(Qt::ZoomNativeGesture, 0.037, at);
+            else scroll(48, Qt::ScrollUpdate, at);
+            ASSERT_TRUE(ugr->zoomGesturing());
+            ASSERT_TRUE(frameAt(clockMs + 8)) << error.toStdString();
+            const auto cam = drawn();
+            EXPECT_TRUE(cam.free) << "event " << i << ": continuous";
+            EXPECT_NEAR(cam.colPxF / last, 1 + step, 0.004) << "event " << i << ": the columns follow the fingers";
+            EXPECT_NEAR(cam.pxPerPrice() / lastRows, 1 + step, 0.004) << "event " << i << ": and the rows";
+            fractional += !whole(cam.colPxF);
+            last = cam.colPxF;
+            lastRows = cam.pxPerPrice();
+        }
+        EXPECT_GE(fractional, 8) << "fractional sizes while the fingers move";
+        if (native) pinch(Qt::EndNativeGesture, 0, at);
+        else scroll(0, Qt::ScrollEnd, at);
+        EXPECT_FALSE(ugr->zoomGesturing());
+        ASSERT_TRUE(ugr->zoomGliding()) << "the end eases to a rung";
+        ASSERT_TRUE(landGlide()) << error.toStdString();
+        const auto landed = drawn();
+        EXPECT_FALSE(landed.free);
+        EXPECT_LE(std::abs(landed.colPx - last), 0.5 + 1e-9) << "the nearest column rung";
+        EXPECT_LE(std::abs(std::log(landed.pxPerPrice() / lastRows)), std::log((landed.rowPx + 1.0) / landed.rowPx))
+            << "a nearby whole-row rung";
+        EXPECT_NEAR(640.0 * minute / timeSpan(), landed.colPx, 1e-3);
+        EXPECT_TRUE(whole(landed.heightDev * landed.tick / priceSpan()));
+        ASSERT_TRUE(settle()) << error.toStdString();
+    }
+}
+
+// Acceptance 7: a zoom-out click glide bins its whole extent once, at its start: no
+// re-bin on any later glide frame (the data for the target is resident: the wider view
+// was shown before).
+TEST_F(UgrGpu, AClickGlideBinsItsExtentOnce) {
+    noLabels();
+    manualZoomClock();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    view->setAutoPriceScale(false);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const QPointF at(320, 160);
+    // Warm the target's data: the zoomed-out view, then back.
+    const qint64 s0 = view->getVisibleTimeStart(), e0 = view->getVisibleTimeEnd();
+    const double p0 = view->getMinPrice(), p1 = view->getMaxPrice();
+    notch(-2, at);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ugr->setViewport(s0, e0, p0, p1);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const auto &st = layer().tileStats();
+    const uint64_t rebins0 = st.rebins.load(), made0 = st.binsMade.load();
+    int framesThatBinned = 0;
+    uint64_t lastRebins = rebins0, lastMade = made0;
+    const qint64 t0 = clockMs;
+    notch(-2, at);
+    for (qint64 ms = 0; ms <= chart_raster::kZoomGlideMs + 1; ms += 10) {
+        ASSERT_TRUE(frameAt(t0 + ms)) << error.toStdString();
+        const uint64_t r = st.rebins.load(), m = st.binsMade.load();
+        framesThatBinned += (r != lastRebins || m != lastMade);
+        lastRebins = r;
+        lastMade = m;
+    }
+    ASSERT_FALSE(ugr->zoomGliding());
+    EXPECT_LE(framesThatBinned, 1) << "rebins " << lastRebins - rebins0 << " bins made " << lastMade - made0;
+    EXPECT_GT(drawn().drawnEndMs - drawn().drawnStartMs, double(e0 - s0)) << "the glide zoomed out";
+}
+
+// Acceptance 8: after a glide the rest frames are slice A's: no coverage, the drawn
+// camera of the rest view, and a click in and a click out about the same point return
+// the same view byte for byte.
+TEST_F(UgrGpu, RestFramesAfterAGlideAreTheRestRender) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    view->setAutoPriceScale(false);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const QPointF at(400, 200);
+    notch(1, at); // the anchor at the cursor (a rest view about it)
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const auto rest = drawn();
+    const QImage before = image;
+    const qint64 s = view->getVisibleTimeStart();
+    const double hi = view->getMaxPrice();
+    notch(1, at);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    notch(-1, at);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    EXPECT_FALSE(layer().tileStats().coverageBlend.load()) << "no coverage at rest";
+    const auto after = drawn();
+    EXPECT_FALSE(after.free);
+    EXPECT_EQ(after.colPx, rest.colPx);
+    EXPECT_EQ(after.rowPx, rest.rowPx);
+    EXPECT_EQ(after.leftColIndex, rest.leftColIndex);
+    EXPECT_EQ(after.topRowIndex, rest.topRowIndex);
+    EXPECT_LE(std::abs(view->getVisibleTimeStart() - s), 1) << "the same stored view (whole ms)";
+    EXPECT_NEAR(view->getMaxPrice(), hi, 1e-9 * hi);
+    EXPECT_TRUE(image == before) << "byte-identical to the rest render before the glides";
+}
+
+// Acceptance 9 (slice A deferred finding, Astra's counterexample): following live at
+// DPR 1, 640 px, a 1m view of 5,303,573 ms (C = 7, the padding a hair under 49.5 px):
+// the switch to 5m keeps the Now column exactly where it was drawn (0 px).
+TEST_F(UgrGpu, FollowLiveTimeframeSwitchKeepsTheNowColumnExactly) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(pump(10'000, [&] { return layer().liveAnchorMs() > 0; })) << "the recording's availability";
+    const int64_t anchor = layer().liveAnchorMs();
+    const int64_t span = 5'303'573, liveEnd = (anchor + minute - 1) / minute * minute;
+    const int64_t end = liveEnd + int64_t(double(span) * 0.08); // the follow-live padding (424,285 ms)
+    ASSERT_EQ(end - liveEnd, 424'285);
+    ugr->getViewState()->setRasterAnchor(1.0, 0.5);
+    ugr->setViewport(end - span, end, 99'900, 100'300);
+    ugr->enableAutoScroll(true);
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    ASSERT_TRUE(ugr->autoScrollEnabled());
+    ASSERT_EQ(drawn().colPx, 7);
+    ASSERT_EQ(drawn().dpr, 1.0);
+    auto nowCentre = [&](int64_t tf) { return double((anchor + tf - 1) / tf * tf) - double(tf) / 2; };
+    const double x = ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(minute));
+    EXPECT_EQ(x, 587.5) << "W - C/2 - round(49.4999 px)";
+    ugr->setTimeframe(int(5 * minute));
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    EXPECT_TRUE(ugr->autoScrollEnabled());
+    ASSERT_EQ(drawn().colPx, 7);
+    EXPECT_EQ(ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(5 * minute)), x) << "the Now column moved";
 }
 
 // The S6a input route on the real chart QML (DepthChartView.qml): a synthesized

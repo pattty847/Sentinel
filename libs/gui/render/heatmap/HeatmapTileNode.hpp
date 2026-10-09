@@ -92,6 +92,8 @@ struct HeatmapTileStats {
     // self-test readback. Hosts schedule a frame while it is set (S6b review 3).
     std::atomic<bool> wantsFrame{false};
     std::atomic<int64_t> drawnTickUnits{0}, drawnTfMs{0};
+    // The last frame drew with coverage (a zoom transition, slice A2); false at rest.
+    std::atomic<bool> coverageBlend{false};
     std::atomic<double> prepareMs{0}, lastBinMs{0}, gpuFrameMs{0};
     std::atomic<bool> preciseKernel{true};
     // Live edge (S5L-c). Uploads and bin passes happen only on a new version;

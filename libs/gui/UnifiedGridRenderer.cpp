@@ -1507,16 +1507,7 @@ void UnifiedGridRenderer::wheelEvent(QWheelEvent *event) {
   // Whole-pixel smooth zoom (slice A2): a mouse notch (no pixel deltas, no scroll
   // phase) is a click to the next rung; a trackpad scroll (pixel deltas or phases)
   // zooms continuously and settles on the nearest rung when it ends.
-  if (event->phase() == Qt::NoScrollPhase && event->pixelDelta().isNull()) {
-    m_wheelAngleRemainder += angle;
-    const int clicks = std::clamp(m_wheelAngleRemainder / 120, -4, 4);
-    m_wheelAngleRemainder -= clicks * 120;
-    if (clicks) zoomClicks(clicks, at.x(), at.y(), !shift, true);
-  } else if (event->phase() == Qt::ScrollEnd) {
-    endZoomGesture();
-  } else if (angle != 0) {
-    zoomContinuous(1.0 + std::clamp(angle * 0.0005, -0.4, 0.4), at.x(), at.y(), !shift, true);
-  }
+  wheelZoom(angle, event->pixelDelta().isNull(), event->phase(), at.x(), at.y(), !shift, true);
   update();
   event->accept();
 }

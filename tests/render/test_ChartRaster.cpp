@@ -358,6 +358,179 @@ TEST(ChartRaster, A8_PriceFitsAreIntegerPixelSpans) {
     EXPECT_EQ(lo, 1);
     EXPECT_EQ(hi, 2);
 }
+
+// ---------------------------------------------------------------- smooth zoom (A2)
+// Every click moves the column rung by at least one device pixel per direction (no
+// dead click), toward currentPx * kZoomStepRatio^clicks, and stops at the limits.
+TEST(ChartRasterZoom, EveryColumnClickMovesAWholePixelRung) {
+    for (int px = 1; px <= 400; ++px) {
+        const int in = columnRung(px, 1, 1, 2000), out = columnRung(px, -1, 1, 2000);
+        EXPECT_GT(in, px) << px;
+        EXPECT_NEAR(in, std::max(px + 1.0, std::round(px * kZoomStepRatio)), 0.0) << px;
+        if (px > 1) {
+            EXPECT_LT(out, px) << px;
+            EXPECT_NEAR(out, std::min(px - 1.0, std::round(px / kZoomStepRatio)), 0.0) << px;
+        } else {
+            EXPECT_EQ(out, 1) << "one px per column is the floor";
+        }
+    }
+    EXPECT_EQ(columnRung(16, 3, 1, 2000), 31) << "16 -> 20 -> 25 -> 31";
+    EXPECT_EQ(columnRung(20, 1, 1, 22), 22) << "the zoom-in limit";
+    EXPECT_EQ(columnRung(22, 1, 1, 22), 22) << "at the limit: no step";
+    EXPECT_EQ(columnRung(4, -1, 3, 0), 3);
+    EXPECT_EQ(columnRung(3, -1, 3, 0), 3);
+    EXPECT_EQ(columnRung(2, -1, 3, 0), 2) << "below the floor already: never a step the wrong way";
+    EXPECT_EQ(nearestColumnRung(7.49, 1, 0), 7);
+    EXPECT_EQ(nearestColumnRung(7.51, 1, 0), 8);
+    EXPECT_EQ(nearestColumnRung(0.2, 1, 0), 1);
+    EXPECT_EQ(nearestColumnRung(30.0, 1, 12), 12);
+}
+
+// Price rungs land on whole px per row at the tick the chart draws there. With one
+// tick: P -> next whole P toward x1.25. With an Auto-like tick (finer rows switch the
+// tick when rows grow past 2x its minimum), a click across the switch lands on the
+// predicted tick (2 px -> 4 px, as TapeSurf's Auto tick shows).
+TEST(ChartRasterZoom, PriceClicksLandOnWholeRowsAtThePredictedTick) {
+    const int H = 600;
+    const TickAt fixed = [](double) { return 5.0; };
+    RowRung r{5.0, 2};
+    std::vector<int> seen;
+    for (int i = 0; i < 8; ++i) {
+        const RowRung next = rowRung(r, 1, H, 0, 0, fixed);
+        EXPECT_EQ(next.tick, 5.0);
+        EXPECT_GT(next.rowPx, r.rowPx) << "every click moves";
+        r = next;
+        seen.push_back(r.rowPx);
+    }
+    EXPECT_EQ(seen, (std::vector<int>{3, 4, 5, 6, 8, 10, 13, 16}));
+    for (int i = 0; i < 20; ++i) {
+        const RowRung next = rowRung(r, -1, H, 0, 0, fixed);
+        if (next == r) break;
+        EXPECT_LT(next.rowPx, r.rowPx);
+        r = next;
+    }
+    EXPECT_EQ(r.rowPx, 1) << "zoom-out ends at one row per pixel";
+    // Auto: $10 rows below 4 px switch to $5 rows... modelled as: span s -> the finest
+    // tick in {1, 2, 5, 10} whose rows are at least 2 px.
+    const TickAt autoTick = [&](double span) {
+        for (const double t : {1.0, 2.0, 5.0, 10.0})
+            if (double(H) * t / span >= 2.0 - 1e-9) return t;
+        return 10.0;
+    };
+    RowRung a{10.0, 3}; // $10 rows of 3 px (span $2000)
+    const RowRung in = rowRung(a, 1, H, 0, 0, autoTick);
+    // x1.25 aims at 3.75 px of $10 = 1.875 px of $5: Auto draws $5 there only from 2 px.
+    EXPECT_EQ(in.tick, autoTick(double(H) * in.tick / in.rowPx)) << "the rung is drawn at its tick";
+    EXPECT_GT(double(in.rowPx) / in.tick, 3.0 / 10.0) << "zoomed in";
+    RowRung b{5.0, 3};
+    const RowRung outB = rowRung(b, -1, H, 0, 0, autoTick);
+    EXPECT_EQ(outB.tick, autoTick(double(H) * outB.tick / outB.rowPx));
+    EXPECT_LT(double(outB.rowPx) / outB.tick, 3.0 / 5.0) << "zoomed out";
+    // The limits: a span beyond maxSpan is no rung.
+    const RowRung limited = rowRung({5.0, 2}, -1, H, 0, double(H) * 5.0 / 2.0, fixed);
+    EXPECT_EQ(limited, (RowRung{5.0, 2})) << "at the zoom-out limit: no step";
+    // A gesture's end: the nearest whole row at the predicted tick.
+    const RowRung near = nearestRowRung(2.38 / 5.0, H, 0, 0, fixed);
+    EXPECT_EQ(near, (RowRung{5.0, 2}));
+    EXPECT_EQ(nearestRowRung(2.62 / 5.0, H, 0, 0, fixed), (RowRung{5.0, 3}));
+}
+
+// The glide: eased, from `from` (e = 0: its scales and its anchor position) to `to`
+// (e >= 1: exactly `to`, the landing frame is the rest frame); the anchor (the content
+// under the cursor) moves linearly between where the two cameras draw it, so when both
+// draw it at the cursor it never leaves it.
+TEST(ChartRasterZoom, AGlideKeepsTheAnchorAndLandsOnTheRestCamera) {
+    EXPECT_EQ(easeZoom(0), 0.0);
+    EXPECT_EQ(easeZoom(1), 1.0);
+    EXPECT_EQ(easeZoom(2), 1.0);
+    double last = 0;
+    for (int i = 1; i <= 20; ++i) {
+        const double e = easeZoom(i / 20.0);
+        EXPECT_GT(e, last);
+        last = e;
+    }
+    EXPECT_GT(easeZoom(0.5), 0.8) << "ease-out: most of the way at half time";
+    const double tick = 5, tf = double(kMinute);
+    auto in = viewOf(2, 16, tick, tf, 640, 320, 1);
+    in.anchorFracX = 0.3;
+    in.anchorFracY = 0.7;
+    const RasterCamera from = computeRaster(in, {});
+    ASSERT_TRUE(from.valid);
+    const double cursorX = 0.3 * 640, cursorY = 0.7 * 320;
+    const double t = from.timeAtXDev(cursorX), p = from.priceAtYDev(cursorY);
+    // The target rung about the cursor: 20 px columns, 3 px rows.
+    RasterInputs target = in;
+    const double span = 640.0 * tf / 20.0, priceSpan = 320.0 * tick / 3.0;
+    target.timeStart = std::llround(t - 0.3 * span);
+    target.timeEnd = target.timeStart + std::llround(span);
+    target.maxPrice = p + 0.7 * priceSpan;
+    target.minPrice = target.maxPrice - priceSpan;
+    const RasterCamera to = computeRaster(target, from.step());
+    ASSERT_TRUE(to.valid);
+    ASSERT_EQ(to.colPx, 20);
+    ASSERT_EQ(to.rowPx, 3);
+    const RasterCamera start = glideRaster(from, to, t, p, 0.0);
+    EXPECT_TRUE(start.free);
+    EXPECT_NEAR(start.colPxF, 16, 1e-9);
+    EXPECT_NEAR(start.rowPxF, 2, 1e-9);
+    EXPECT_NEAR(start.drawnStartMs, from.drawnStartMs, 1e-3);
+    EXPECT_NEAR(start.drawnMaxPrice, from.drawnMaxPrice, 1e-6);
+    double lastCol = 16;
+    for (int i = 1; i < 20; ++i) {
+        const RasterCamera mid = glideRaster(from, to, t, p, easeZoom(i / 20.0));
+        ASSERT_TRUE(mid.valid);
+        EXPECT_TRUE(mid.free);
+        EXPECT_GT(mid.colPxF, lastCol);
+        lastCol = mid.colPxF;
+        const double ax = from.xDev(t) + (to.xDev(t) - from.xDev(t)) * easeZoom(i / 20.0);
+        EXPECT_NEAR(mid.xDev(t), ax, 1e-6) << "anchor time on its path";
+        EXPECT_LE(std::abs(mid.xDev(t) - cursorX), 0.5 + 1e-9) << "within half a device px of the cursor";
+        EXPECT_LE(std::abs(mid.yDev(p) - cursorY), 0.5 + 1e-9);
+        const auto mapping = toMapping(mid);
+        EXPECT_NEAR(mapping.cellW, mid.colPxF, 1e-12);
+        EXPECT_NEAR(mapping.timeToScreenX(t), mid.xDev(t), 1e-6) << "the frame mapping is the glide camera";
+    }
+    const RasterCamera landed = glideRaster(from, to, t, p, 1.0);
+    EXPECT_FALSE(landed.free);
+    EXPECT_EQ(landed.leftColIndex, to.leftColIndex);
+    EXPECT_EQ(landed.topRowIndex, to.topRowIndex);
+    EXPECT_EQ(landed.drawnStartMs, to.drawnStartMs);
+    EXPECT_EQ(landed.drawnMaxPrice, to.drawnMaxPrice);
+    // A drag during a glide moves the free camera by whole device pixels.
+    const RasterCamera moved = shiftedRaster(glideRaster(from, to, t, p, 0.5), 7, -3);
+    const RasterCamera half = glideRaster(from, to, t, p, 0.5);
+    EXPECT_NEAR(moved.xDev(t) - half.xDev(t), 7, 1e-9);
+    EXPECT_NEAR(moved.yDev(p) - half.yDev(p), -3, 1e-9);
+}
+
+// The continuous camera (a pinch): fractional px per row and column from the stored
+// view, the anchor exactly at its fraction.
+TEST(ChartRasterZoom, TheContinuousCameraDrawsTheStoredViewExactly) {
+    auto in = viewOf(2.37, 13.61, 5, double(kMinute), 640, 320, 2);
+    in.anchorFracX = 0.25;
+    in.anchorFracY = 0.6;
+    const RasterCamera cam = continuousRaster(in);
+    ASSERT_TRUE(cam.valid);
+    EXPECT_TRUE(cam.free);
+    EXPECT_NEAR(cam.rowPxF, 2.37, 1e-9);
+    EXPECT_NEAR(cam.colPxF, 1280.0 * kMinute / double(in.timeEnd - in.timeStart), 1e-9);
+    EXPECT_NEAR(cam.drawnStartMs, double(in.timeStart), 1e-3);
+    EXPECT_NEAR(cam.drawnEndMs, double(in.timeEnd), 1e-3);
+    EXPECT_NEAR(cam.drawnMaxPrice, in.maxPrice, 1e-6);
+    EXPECT_NEAR(cam.drawnMinPrice, in.minPrice, 1e-6);
+}
+
+// Follow-live: no shift within one drawn pixel of the target (or past it), else whole
+// buckets.
+TEST(ChartRasterZoom, FollowShiftsByWholeBucketsOutsideOneDrawnPixel) {
+    const int64_t tf = kMinute;
+    EXPECT_EQ(followShift(1'000'000, 1'000'000, tf, 7), 0);
+    EXPECT_EQ(followShift(1'000'000, 999'000, tf, 7), 0) << "past the target";
+    EXPECT_EQ(followShift(1'000'000, 1'000'000 + 8'572, tf, 7), 0) << "within ceil(tf / C) ms";
+    EXPECT_EQ(followShift(1'000'000, 1'000'000 + 8'573, tf, 7), tf) << "one bucket";
+    EXPECT_EQ(followShift(1'000'000, 1'000'000 + tf + 1, tf, 7), 2 * tf);
+    EXPECT_EQ(followShift(1'000'000, 1'000'000 + 123, tf, 0), 123) << "no camera: exact";
+}
 } // namespace
 
 int main(int argc, char **argv) {
