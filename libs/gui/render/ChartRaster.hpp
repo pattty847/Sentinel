@@ -87,10 +87,17 @@ RasterCamera continuousRaster(const RasterInputs &in);
 // (px per ms, px per price) interpolate geometrically and the anchor point (world time
 // and price) moves linearly from where `from` draws it to where `to` draws it, at
 // eased progress e. e >= 1 returns `to` exactly (the landing frame is the rest frame).
+// A `from` on another surface (another device pixel ratio) is first put on `to`'s.
 RasterCamera glideRaster(const RasterCamera &from, const RasterCamera &to, double anchorTimeMs, double anchorPrice,
                          double e);
 // A camera moved by whole device pixels (dx right, dy down), its free form included.
 RasterCamera shiftedRaster(RasterCamera camera, double dxDev, double dyDev);
+// A camera expressed on another surface (device pixel ratio and device size): the
+// logical picture stays, device coordinates scale with the ratio (free form).
+RasterCamera onSurface(RasterCamera camera, double dpr, int widthDev, int heightDev);
+// The continuous camera on the axes a gesture zooms, the rest camera's whole pixels
+// on the others.
+RasterCamera partlyContinuous(RasterCamera continuous, const RasterCamera &rest, bool time, bool price);
 // The frame's TimeAxisMapping (every layer maps through it): the drawn window over
 // the device-integer surface, cellW = C / dpr, cellH = P / dpr.
 TimeAxisMapping toMapping(const RasterCamera &camera);
@@ -115,9 +122,9 @@ inline constexpr double kZoomStepRatio = 1.25;
 // The glide to a rung: duration and easing (cubic ease-out: fast start, soft landing).
 inline constexpr int kZoomGlideMs = 130;
 double easeZoom(double t);
-// The column rung `clicks` wheel clicks from `currentPx` (> 0 zooms in): the whole px
-// width nearest currentPx * kZoomStepRatio^clicks, at least one px per direction away,
-// inside [minPx, maxPx] (currentPx when the limit is reached).
+// The column rung `clicks` wheel clicks from `currentPx` (> 0 zooms in): per click, the
+// whole px width nearest px * kZoomStepRatio^(+-1), at least one px away, inside
+// [minPx, maxPx]; batched clicks walk the same rungs as single ones, stopping at a limit.
 int columnRung(int currentPx, int clicks, int minPx, int maxPx);
 // The column rung nearest a continuous width (a pinch's end).
 int nearestColumnRung(double colPxF, int minPx, int maxPx);

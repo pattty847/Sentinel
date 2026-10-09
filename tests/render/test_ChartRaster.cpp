@@ -503,6 +503,59 @@ TEST(ChartRasterZoom, AGlideKeepsTheAnchorAndLandsOnTheRestCamera) {
     EXPECT_NEAR(moved.yDev(p) - half.yDev(p), -3, 1e-9);
 }
 
+// Fix round 1, finding 5: batched clicks walk the same rungs as single clicks, in both
+// directions, at every small size (the one-pixel rule applies per click).
+TEST(ChartRasterZoom, BatchedClicksWalkTheSingleClickLadder) {
+    const TickAt fixed = [](double) { return 10.0; };
+    for (int px = 1; px <= 60; ++px)
+        for (const int clicks : {2, 3, 4, -2, -3, -4}) {
+            int single = px;
+            RowRung row{10.0, px}, rowSingle = row;
+            for (int i = 0; i < std::abs(clicks); ++i) {
+                single = columnRung(single, clicks > 0 ? 1 : -1, 1, 2000);
+                rowSingle = rowRung(rowSingle, clicks > 0 ? 1 : -1, 600, 0, 0, fixed);
+            }
+            EXPECT_EQ(columnRung(px, clicks, 1, 2000), single) << px << " px, " << clicks << " clicks";
+            EXPECT_EQ(rowRung(row, clicks, 600, 0, 0, fixed), rowSingle) << px << " px rows, " << clicks << " clicks";
+        }
+    EXPECT_EQ(columnRung(1, 4, 1, 2000), 5) << "1 -> 2 -> 3 -> 4 -> 5";
+    EXPECT_EQ(rowRung({10.0, 2}, 2, 600, 0, 0, fixed), (RowRung{10.0, 4})) << "2 -> 3 -> 4";
+    EXPECT_EQ(columnRung(3, 4, 1, 5), 5) << "a batch stops at the limit";
+}
+
+// Fix round 1, finding 3: a glide whose start was drawn at another device pixel ratio
+// (a move to another screen) puts the start on the target's surface: the anchor keeps
+// its logical position (it is not interpolated across two device coordinate systems).
+TEST(ChartRasterZoom, AGlideAcrossADevicePixelRatioChangeKeepsTheAnchor) {
+    const double tick = 5, tf = double(kMinute);
+    auto in = viewOf(2, 16, tick, tf, 640, 320, 1);
+    in.anchorFracX = 0.5;
+    in.anchorFracY = 0.5;
+    const RasterCamera from = computeRaster(in, {});
+    ASSERT_TRUE(from.valid);
+    const double t = from.timeAtXDev(320), p = from.priceAtYDev(160);
+    RasterInputs target = in; // the same view at dpr 2 (device px double)
+    target.dpr = 2;
+    const RasterCamera to = computeRaster(target, {});
+    ASSERT_TRUE(to.valid);
+    ASSERT_EQ(to.widthDev, 1280);
+    // The anchor's logical position moves linearly from where `from` draws it (320, 160)
+    // to where `to` draws it (within half a device pixel of each other).
+    const double x1 = to.xDev(t) / 2, y1 = to.yDev(p) / 2;
+    ASSERT_LE(std::abs(x1 - 320), 0.75);
+    for (int i = 0; i <= 10; ++i) {
+        const double e = i / 10.0;
+        const RasterCamera mid = glideRaster(from, to, t, p, e);
+        ASSERT_TRUE(mid.valid);
+        EXPECT_EQ(mid.dpr, 2.0);
+        EXPECT_NEAR(mid.xDev(t) / mid.dpr, 320 + (x1 - 320) * e, 1e-6) << "e " << e;
+        EXPECT_NEAR(mid.yDev(p) / mid.dpr, 160 + (y1 - 160) * e, 1e-6) << "e " << e;
+    }
+    const RasterCamera moved = onSurface(from, 2, 1280, 640);
+    EXPECT_NEAR(moved.xDev(t), 2 * from.xDev(t), 1e-9);
+    EXPECT_NEAR(moved.drawnStartMs, from.drawnStartMs, 1e-6) << "the same logical picture";
+}
+
 // The continuous camera (a pinch): fractional px per row and column from the stored
 // view, the anchor exactly at its fraction.
 TEST(ChartRasterZoom, TheContinuousCameraDrawsTheStoredViewExactly) {

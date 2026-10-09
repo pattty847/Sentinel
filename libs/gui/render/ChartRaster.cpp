@@ -99,10 +99,50 @@ RasterCamera continuousRaster(const RasterInputs &in) {
     return cam;
 }
 
-RasterCamera glideRaster(const RasterCamera &from, const RasterCamera &to, double anchorTimeMs, double anchorPrice,
+RasterCamera onSurface(RasterCamera cam, double dpr, int widthDev, int heightDev) {
+    if (!cam.valid || !(dpr > 0) || !std::isfinite(dpr) || (dpr == cam.dpr && widthDev == cam.widthDev &&
+                                                            heightDev == cam.heightDev))
+        return cam;
+    // Device pixels scale with the ratio; the logical picture stays where it is.
+    const double k = dpr / cam.dpr;
+    cam.colPxF *= k;
+    cam.rowPxF *= k;
+    cam.leftF *= k;
+    cam.topF *= k;
+    cam.dpr = dpr;
+    cam.widthDev = widthDev;
+    cam.heightDev = heightDev;
+    finishFree(cam);
+    return cam;
+}
+
+RasterCamera partlyContinuous(RasterCamera continuous, const RasterCamera &rest, bool time, bool price) {
+    if (!rest.valid || !continuous.valid || (!time && !price)) return rest;
+    if (!time) { // the time axis stays the rest camera's whole pixels
+        continuous.colPx = rest.colPx;
+        continuous.leftColIndex = rest.leftColIndex;
+        continuous.colPxF = rest.colPxF;
+        continuous.leftF = rest.leftF;
+    }
+    if (!price) {
+        continuous.rowPx = rest.rowPx;
+        continuous.topRowIndex = rest.topRowIndex;
+        continuous.rowPxF = rest.rowPxF;
+        continuous.topF = rest.topF;
+    }
+    finishFree(continuous);
+    return continuous.valid ? continuous : rest;
+}
+
+RasterCamera glideRaster(const RasterCamera &start, const RasterCamera &to, double anchorTimeMs, double anchorPrice,
                          double e) {
-    if (!(e < 1.0) || !from.valid || !to.valid) return to;
+    if (!(e < 1.0) || !start.valid || !to.valid) return to;
     e = std::max(0.0, e);
+    // A start on another surface (a move to a screen of another device pixel ratio
+    // mid-glide): its device coordinates in the target's, so the anchor keeps its
+    // logical position.
+    const RasterCamera from = onSurface(start, to.dpr, to.widthDev, to.heightDev);
+    if (!from.valid) return to;
     RasterCamera cam = to;
     const double sx0 = from.pxPerMs(), sx1 = to.pxPerMs(), sy0 = from.pxPerPrice(), sy1 = to.pxPerPrice();
     const double sx = std::exp(std::log(sx0) * (1.0 - e) + std::log(sx1) * e);
@@ -218,16 +258,31 @@ double easeZoom(double t) {
     return 1.0 - u * u * u;
 }
 
-int columnRung(int currentPx, int clicks, int minPx, int maxPx) {
-    if (clicks == 0 || currentPx <= 0) return currentPx;
-    const double aim = double(currentPx) * std::pow(kZoomStepRatio, double(clicks));
+namespace {
+// One click's column rung (dir = +1 in, -1 out).
+int columnRungOnce(int currentPx, int dir, int minPx, int maxPx) {
+    const double aim = double(currentPx) * (dir > 0 ? kZoomStepRatio : 1.0 / kZoomStepRatio);
     int px = int(std::clamp(std::round(aim), 1.0, double(kMaxCellPx)));
-    px = clicks > 0 ? std::max(px, currentPx + 1) : std::min(px, currentPx - 1);
+    px = dir > 0 ? std::max(px, currentPx + 1) : std::min(px, currentPx - 1);
     if (minPx > 0) px = std::max(px, minPx);
     if (maxPx > 0) px = std::min(px, maxPx);
     // A limit in the click's direction: no step back past where it is.
-    if ((clicks > 0 && px < currentPx) || (clicks < 0 && px > currentPx)) return currentPx;
+    if ((dir > 0 && px < currentPx) || (dir < 0 && px > currentPx)) return currentPx;
     return std::max(px, 1);
+}
+} // namespace
+
+int columnRung(int currentPx, int clicks, int minPx, int maxPx) {
+    if (clicks == 0 || currentPx <= 0) return currentPx;
+    // Batched clicks walk the ladder one click at a time (the same rungs as single
+    // clicks), stopping at a limit.
+    int px = currentPx;
+    for (int i = 0; i < std::abs(clicks); ++i) {
+        const int next = columnRungOnce(px, clicks > 0 ? 1 : -1, minPx, maxPx);
+        if (next == px) break;
+        px = next;
+    }
+    return px;
 }
 
 int nearestColumnRung(double colPxF, int minPx, int maxPx) {
@@ -276,8 +331,8 @@ RowRung bestRung(double aim, int heightDev, double minSpan, double maxSpan, cons
 }
 } // namespace
 
-RowRung rowRung(RowRung current, int clicks, int heightDev, double minSpan, double maxSpan, const TickAt &tickAt) {
-    if (clicks == 0 || !(current.tick > 0) || current.rowPx <= 0 || heightDev <= 0) return current;
+namespace {
+RowRung rowRungOnce(RowRung current, int clicks, int heightDev, double minSpan, double maxSpan, const TickAt &tickAt) {
     const double s0 = double(current.rowPx) / current.tick;
     const double aim = s0 * std::pow(kZoomStepRatio, double(clicks));
     // Only the limit in the click's direction applies: a view beyond the other one
@@ -295,6 +350,19 @@ RowRung rowRung(RowRung current, int clicks, int heightDev, double minSpan, doub
     if (clicks > 0 && lo > 0) px = std::min(px, int(std::floor(H * t / lo + 1e-9)));
     if (px >= 1 && (clicks > 0 ? px > current.rowPx : px < current.rowPx)) return {t, px};
     return current;
+}
+} // namespace
+
+RowRung rowRung(RowRung current, int clicks, int heightDev, double minSpan, double maxSpan, const TickAt &tickAt) {
+    if (clicks == 0 || !(current.tick > 0) || current.rowPx <= 0 || heightDev <= 0) return current;
+    // Batched clicks walk the ladder one click at a time, stopping at a limit.
+    RowRung r = current;
+    for (int i = 0; i < std::abs(clicks); ++i) {
+        const RowRung next = rowRungOnce(r, clicks > 0 ? 1 : -1, heightDev, minSpan, maxSpan, tickAt);
+        if (next == r) break;
+        r = next;
+    }
+    return r;
 }
 
 RowRung nearestRowRung(double pxPerPrice, int heightDev, double minSpan, double maxSpan, const TickAt &tickAt) {

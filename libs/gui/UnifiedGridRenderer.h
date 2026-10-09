@@ -185,21 +185,31 @@ private:
         bool active = false;
         chart_raster::RasterCamera from; // drawn when it started, without a drag
         double anchorTime = 0, anchorPrice = 0; // the content under the cursor
-        qint64 startMs = 0;
+        qint64 startMs = 0, durationMs = 0;
         double progress = 1.0; // eased, for the frame being prepared
+        // The rest camera the last advance glided to (without a drag): a new scale there
+        // (an Auto tick committed for the target, another device pixel ratio) rebases
+        // the glide on what was drawn.
+        chart_raster::RasterCamera to;
         // The rung it goes to: rapid clicks step on from here.
         int colPx = 0;
         chart_raster::RowRung row;
     } m_glide;
     bool m_zoomGesture = false;         // a pinch or trackpad scroll draws the continuous camera
-    bool m_gestureTime = true, m_gesturePrice = true;
+    // The axes the gesture has zoomed (the others stay the rest camera's whole pixels).
+    bool m_gestureTime = false, m_gesturePrice = false;
     QPointF m_gestureAt;
     QTimer* m_zoomSettleTimer = nullptr; // a gesture settles after a pause (a lost end included)
     std::function<qint64()> m_zoomClock;
-    int m_wheelAngleRemainder = 0;      // hi-res mouse wheels: angle toward the next notch
+    // Hi-res mouse wheels: the partial notch toward the next click, for one route and
+    // its axes (a change of either, or a reversal, drops it).
+    enum class WheelRoute { Chart, TimeAxis, PriceAxis };
+    int m_wheelAngleRemainder = 0;
+    int m_wheelCarryKey = -1;
     qint64 zoomNowMs() const;
     // The chart and axis wheels: notches are clicks, a trackpad scroll is continuous.
-    void wheelZoom(int angle, bool notch, Qt::ScrollPhase phase, double x, double y, bool time, bool price);
+    void wheelZoom(int angle, bool notch, Qt::ScrollPhase phase, double x, double y, bool time, bool price,
+                   WheelRoute route);
     // The stored view zoomed by factor about a point, in the limits (no camera yet).
     void zoomStoredView(double factor, double x, double y, bool time, bool price);
     // A continuous zoom that settles on a rung after settleMs without input.

@@ -571,15 +571,47 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
       int64_t end = oldEnd;
       double anchorX = 1.0; // the view end (follow-live, or a historical view without Now)
       if (following) {
-        if (const qint64 liveEnd = gpuLiveEndMs(span); liveEnd > 0) end = liveEnd; // the new timeframe's
-        if (drawnBefore.valid && anchor > 0) {
-          // Keep the drawn distance from the live bucket's end to the right edge exactly
-          // (whole device pixels): the padding's ms truncation can otherwise cross a pixel
-          // boundary and move the Now column by one pixel (review r3).
+        const qint64 nominal = gpuLiveEndMs(span);
+        if (nominal > 0) end = nominal; // the new timeframe's padded live edge
+        if (drawnBefore.valid && anchor > 0 && nominal > 0) {
+          // Keep the drawn Now column (the live bucket's centre) exactly where it is drawn,
+          // in whole device pixels: the destination camera's column width first (the new
+          // timeframe can clamp it, at most tf px), then the end that puts the new live
+          // bucket's centre on the old one's (review r3; fix round 1, finding 6).
+          const int64_t tf = timeframe_ms;
           const double oldLiveEnd = double(recording::floorDiv(anchor + previousTf - 1, previousTf) * previousTf);
-          const double padPx = std::round(double(drawnBefore.widthDev) - drawnBefore.xDev(oldLiveEnd));
-          const int64_t newLiveEnd = recording::floorDiv(anchor + timeframe_ms - 1, int64_t(timeframe_ms)) * timeframe_ms;
-          end = newLiveEnd + std::llround(padPx * double(timeframe_ms) / double(drawnBefore.colPx));
+          const double oldNow = drawnBefore.xDev(oldLiveEnd) - 0.5 * drawnBefore.colPxF;
+          const int64_t newLiveEnd = recording::floorDiv(anchor + tf - 1, tf) * tf;
+          const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
+          chart_raster::RasterStep previous;
+          {
+            std::lock_guard<std::mutex> lock(m_frameContextMutex);
+            previous = m_rasterStep;
+          }
+          auto restAt = [&](int64_t e) {
+            auto vp = FrameContextBuilder::viewportSnapshot(m_viewState.get());
+            vp.timeStart = e - span;
+            vp.timeEnd = e;
+            vp.dragging = false;
+            vp.anchorFracX = 1.0;
+            return chart_raster::computeRaster(rasterInputs(vp, m_gpuLayer->tickPrice(), width(), height(), dpr),
+                                               previous);
+          };
+          if (const auto dest = restAt(nominal); dest.valid) {
+            const double C = dest.colPx, W = dest.widthDev;
+            // The live bucket's end at a whole pixel (a column width that changed by an odd
+            // number of pixels leaves the centre half a pixel off: the nearest is kept).
+            const double liveEndX = std::round(oldNow + 0.5 * C);
+            int64_t e = newLiveEnd + std::llround((W - liveEndX) * double(tf) / C);
+            for (const int64_t candidate : {e, e - 1, e + 1})
+              if (const auto cam = restAt(candidate); cam.valid && cam.colPx == dest.colPx &&
+                                                      cam.xDev(double(newLiveEnd)) == liveEndX) {
+                e = candidate;
+                break;
+              }
+            // Follow-live keeps it (no shift right after the switch); else the nominal end.
+            if (chart_raster::followShift(e, nominal, tf, dest.colPx) == 0) end = e;
+          }
         }
       } else if (rightFrac) {
         end = static_cast<int64_t>(std::llround(nowCentre(timeframe_ms) + *rightFrac * double(span)));
@@ -1507,7 +1539,7 @@ void UnifiedGridRenderer::wheelEvent(QWheelEvent *event) {
   // Whole-pixel smooth zoom (slice A2): a mouse notch (no pixel deltas, no scroll
   // phase) is a click to the next rung; a trackpad scroll (pixel deltas or phases)
   // zooms continuously and settles on the nearest rung when it ends.
-  wheelZoom(angle, event->pixelDelta().isNull(), event->phase(), at.x(), at.y(), !shift, true);
+  wheelZoom(angle, event->pixelDelta().isNull(), event->phase(), at.x(), at.y(), !shift, true, WheelRoute::Chart);
   update();
   event->accept();
 }
@@ -1684,9 +1716,11 @@ void UnifiedGridRenderer::endPanAt() {
   const QPointF drag = m_viewState->getPanVisualOffset();
   const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
   m_viewState->handlePanEnd(true);
-  if (m_glide.active && dragging)
-    m_glide.from = chart_raster::shiftedRaster(m_glide.from, double(std::llround(drag.x() * dpr)),
-                                               double(std::llround(drag.y() * dpr)));
+  if (m_glide.active && dragging) {
+    const double dx = double(std::llround(drag.x() * dpr)), dy = double(std::llround(drag.y() * dpr));
+    m_glide.from = chart_raster::shiftedRaster(m_glide.from, dx, dy);
+    m_glide.to = chart_raster::shiftedRaster(m_glide.to, dx, dy);
+  }
   update();
 }
 void UnifiedGridRenderer::panLeft() {

@@ -51,6 +51,8 @@
 #include <numeric>
 #include <optional>
 #include <stdexcept>
+#include <tuple>
+#include <vector>
 
 namespace {
 using namespace synthetic_hmc2;
@@ -237,6 +239,20 @@ protected:
         QWheelEvent event(at, scene->window()->mapToGlobal(at), {0, angle / 4}, {0, angle}, Qt::NoButton,
                           Qt::NoModifier, phase, false);
         QCoreApplication::sendEvent(scene->window(), &event);
+    }
+    void wheelAngle(int angle, QPointF at) { // a mouse wheel event of `angle` units (120: one notch)
+        QWheelEvent event(at, scene->window()->mapToGlobal(at), {}, {0, angle}, Qt::NoButton, Qt::NoModifier,
+                          Qt::NoScrollPhase, false);
+        QCoreApplication::sendEvent(scene->window(), &event);
+    }
+    // The chart's tick prediction for a price span over [start, end) about ap at fracY
+    // (UnifiedGridRenderer::tickPredictor): what Auto (or Manual) draws there.
+    chart_raster::TickAt tickOver(qint64 start, qint64 end, double ap, double fracY) const {
+        return [this, start, end, ap, fracY](double span) {
+            const double hi = ap + fracY * span;
+            const int64_t units = layer().predictTickUnits({double(start), double(end), hi - span, hi});
+            return units > 0 ? heatmap::fromUnits(units, layer().priceScale()) : 0.0;
+        };
     }
     void pinch(Qt::NativeGestureType type, double value, QPointF at) {
         QNativeGestureEvent event(type, QPointingDevice::primaryPointingDevice(), 2, at, at,
@@ -2419,6 +2435,247 @@ TEST_F(UgrGpu, FollowLiveTimeframeSwitchKeepsTheNowColumnExactly) {
     EXPECT_TRUE(ugr->autoScrollEnabled());
     ASSERT_EQ(drawn().colPx, 7);
     EXPECT_EQ(ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(5 * minute)), x) << "the Now column moved";
+}
+
+// ---------------------------------------------------------------- A2 fix round 1
+// Finding 1: a price-only zoom predicts Auto's tick over the time bounds it commits
+// (the stored ones), not over the drawn columns. Mixed resolution: in minutes 120..148
+// the near $1 band covers $100,080..$100,090, in minutes 119 and 149 only the deep $10
+// rows do. The stored window is minutes 120..149, the drawn one (22 px columns, the
+// view end anchored) reaches into minute 119: Auto draws $1, a prediction over the
+// drawn columns says $10 and puts the rung on a span that is no whole row at $1.
+TEST_F(UgrGpu, APriceOnlyZoomPredictsTheTickOverTheStoredTime) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    view->setAutoPriceScale(false);
+    const int64_t s = epoch + 120 * minute, e = epoch + 149 * minute;
+    const double lo = 100'080.5, hi = lo + 320.0 / 35; // 35 px rows at $1
+    for (const bool gesture : {false, true}) {
+        SCOPED_TRACE(gesture ? "price axis drag" : "price axis click");
+        view->setRasterAnchor(1.0, 0.5);
+        ugr->setViewport(s, e, lo, hi);
+        ASSERT_TRUE(settle()) << error.toStdString();
+        const auto before = drawn();
+        ASSERT_EQ(before.colPx, 22);
+        ASSERT_LT(before.drawnStartMs, double(s)) << "the drawn columns reach minute 119";
+        ASSERT_EQ(layer().tickUnits(), 100) << "Auto draws $1 over the stored minutes";
+        ASSERT_EQ(layer().predictTickUnits({before.drawnStartMs, before.drawnEndMs, lo, hi}), 1000)
+            << "over the drawn columns only the $10 rows build";
+        if (gesture) {
+            for (int i = 0; i < 3; ++i) {
+                ugr->zoomPriceDrag(240, 160);
+                ASSERT_TRUE(frames(1)) << error.toStdString();
+            }
+            ugr->endZoomGesture();
+        } else {
+            ugr->zoomPriceClicks(1, 160);
+        }
+        ASSERT_TRUE(settle()) << error.toStdString();
+        const auto after = drawn();
+        EXPECT_EQ(view->getVisibleTimeStart(), s) << "time did not zoom: its stored bounds stay";
+        EXPECT_EQ(view->getVisibleTimeEnd(), e);
+        EXPECT_EQ(after.tick, 1.0);
+        EXPECT_GT(after.pxPerPrice(), before.pxPerPrice()) << "the click zoomed in";
+        EXPECT_TRUE(whole(320.0 * after.tick / priceSpan())) << 320.0 * after.tick / priceSpan()
+                                                             << " px rows: a rung at the tick drawn";
+    }
+}
+
+// Finding 2: the Auto tick for a click's target commits only after the first frame
+// proposed it (here a late first frame, 50 ms after the click). The glide then
+// continues from what was drawn to the new end: the drawn scale never moves back.
+TEST_F(UgrGpu, AnAutoTickCommitMidGlideKeepsTheGlideMonotonic) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    view->setAutoPriceScale(false);
+    // Minutes 120..123: the near $1 band covers $99,830..$100,200 (fine data, Auto
+    // picks $1, $2, $5 or $10 by the rows).
+    const int64_t s = epoch + 120 * minute, e = s + 4 * minute;
+    view->setRasterAnchor(1.0, 0.5);
+    ugr->setViewport(s, e, 99'840, 100'190);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    // Click in until the next click's rung changes the tick and the old tick would draw
+    // the target with a larger scale than the rung's (the overshoot that reverses).
+    chart_raster::RowRung target;
+    bool found = false;
+    for (int i = 0; i < 16 && !found; ++i) {
+        const auto cam = drawn();
+        const double ap = cam.priceAtYDev(160 * cam.dpr);
+        const chart_raster::RowRung current{cam.tick, cam.rowPx};
+        target = chart_raster::rowRung(current, 1, cam.heightDev, view->minPriceSpan(), view->maxPriceSpan(),
+                                       tickOver(view->getVisibleTimeStart(), view->getVisibleTimeEnd(), ap, 0.5));
+        if (target.tick != current.tick && target.tick > 0) {
+            const double span = cam.heightDev * target.tick / target.rowPx;
+            const int oldRows = chart_raster::stepPixels(cam.heightDev * current.tick / span, current.rowPx);
+            if (oldRows / current.tick > target.rowPx / target.tick * (1 + 1e-9)) {
+                found = true;
+                break;
+            }
+        }
+        ugr->zoomPriceClicks(1, 160);
+        ASSERT_TRUE(settle()) << error.toStdString();
+    }
+    ASSERT_TRUE(found) << "no zoom-in whose Auto tick change overshoots at the old tick";
+    const double oldTick = drawn().tick;
+    manualZoomClock();
+    const qint64 t0 = clockMs;
+    ugr->zoomPriceClicks(1, 160);
+    std::vector<double> scales;
+    std::vector<double> ticks;
+    for (qint64 ms = 50; ms <= 50 + 2 * chart_raster::kZoomGlideMs; ms += 10) {
+        ASSERT_TRUE(frameAt(t0 + ms)) << error.toStdString();
+        scales.push_back(drawn().pxPerPrice());
+        ticks.push_back(drawn().tick);
+        if (!ugr->zoomGliding()) break;
+    }
+    ASSERT_FALSE(ugr->zoomGliding());
+    EXPECT_EQ(ticks.front(), oldTick) << "the first frame proposed the new tick";
+    EXPECT_EQ(ticks.back(), target.tick) << "and it committed during the glide";
+    for (size_t i = 1; i < scales.size(); ++i)
+        EXPECT_GE(scales[i], scales[i - 1] * (1 - 1e-12)) << "frame " << i << ": the drawn scale moved back";
+    EXPECT_EQ(drawn().rowPx, target.rowPx);
+    EXPECT_FALSE(drawn().free);
+}
+
+// Finding 3: a move to a screen of another device pixel ratio mid-glide. The glide's
+// start camera is put on the new surface: the content under the cursor stays within
+// half a device pixel of it on every frame, before and after the change.
+TEST_F(UgrGpu, ADevicePixelRatioChangeMidGlideKeepsTheAnchor) {
+    noLabels();
+    manualZoomClock();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ugr->getViewState()->setAutoPriceScale(false);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const QPointF at(211, 97);
+    const auto before = ugr->currentTimeAxisMapping();
+    const double t = before.screenXToTime(at.x()), p = before.screenYToPrice(at.y());
+    const qint64 t0 = clockMs;
+    notch(1, at);
+    int checked = 0;
+    for (qint64 ms = 0; ms <= 3 * chart_raster::kZoomGlideMs; ms += 10) {
+        if (ms == 40) {
+            ASSERT_TRUE(scene->setDevicePixelRatio(2.0, &error)) << error.toStdString();
+            emit scene->window()->screenChanged(scene->window()->screen());
+            ASSERT_EQ(scene->window()->effectiveDevicePixelRatio(), 2.0);
+        }
+        ASSERT_TRUE(frameAt(t0 + ms)) << error.toStdString();
+        const auto mapping = ugr->currentTimeAxisMapping();
+        const double dpr = drawn().dpr;
+        EXPECT_EQ(dpr, ms < 40 ? 1.0 : 2.0);
+        EXPECT_LE(std::abs(mapping.timeToScreenX(t) - at.x()) * dpr, 0.5 + 1e-6) << ms << " ms: time";
+        EXPECT_LE(std::abs(mapping.priceToScreenY(p) - at.y()) * dpr, 0.5 + 1e-6) << ms << " ms: price";
+        ++checked;
+        if (!ugr->zoomGliding()) break;
+    }
+    EXPECT_FALSE(ugr->zoomGliding());
+    EXPECT_FALSE(drawn().free);
+    EXPECT_GE(checked, 10);
+}
+
+// Finding 4: one wheel event applies at most four clicks and carries only a partial
+// notch: eight notches then one back is +4 then -1. A partial notch carries only on
+// its route and axes, and not across a reversal.
+TEST_F(UgrGpu, TheWheelCarriesOnlyAPartialNotchPerRoute) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString(); // auto price scale off: the chart wheel zooms time and price
+    auto *view = ugr->getViewState();
+    const QPointF at(320, 160);
+    const int c0 = drawn().colPx;
+    wheelAngle(960, at); // eight notches in one event
+    ASSERT_TRUE(settle()) << error.toStdString();
+    EXPECT_EQ(drawn().colPx, chart_raster::columnRung(c0, 4, 1, 0)) << "four clicks";
+    const int c1 = drawn().colPx;
+    wheelAngle(-120, at);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    EXPECT_EQ(drawn().colPx, chart_raster::columnRung(c1, -1, 1, 0)) << "then one click out, not three in";
+    // Half notches on different routes and axes do not add up.
+    uint64_t v = view->getViewportVersion();
+    ugr->zoomPriceWheel(60, 0, 0, 160); // the price axis
+    wheelAngle(60, at);                 // the chart
+    ugr->zoomTimeWheel(60, 0, 0, 320);  // the time axis
+    wheelAngle(60, at);                 // the chart again: one half notch carried
+    EXPECT_EQ(view->getViewportVersion(), v) << "no click from half notches of other routes";
+    // A reversal drops the partial notch: a full notch back is one click.
+    const int c2 = drawn().colPx;
+    wheelAngle(-120, at);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    EXPECT_EQ(drawn().colPx, chart_raster::columnRung(c2, -1, 1, 0)) << "a full notch back after a half notch in";
+}
+
+// Finding 5: batched notches walk the same rungs as single clicks (at small cells the
+// one-pixel rule matters on every click).
+TEST_F(UgrGpu, BatchedNotchesLandOnTheSingleClickRungs) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    view->setAutoPriceScale(false);
+    auto manual = brightSettings();
+    manual.showLabels = false;
+    manual.tickMode = heatmap::TickMode::Manual;
+    manual.manualTick = 1000; // $10: rows of a fixed tick
+    ugr->setHeatmapChartSettings(manual, true);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const QPointF at(320, 160);
+    for (const auto &[startCols, startRows, clicks] : {std::tuple{320.0, 2.0, 4}, {160.0, 1.0, 3}, {80.0, 3.0, 2}}) {
+        SCOPED_TRACE(testing::Message() << startCols << " columns, " << startRows << " px rows, " << clicks << " clicks");
+        auto reset = [&] {
+            const double span = 320.0 * 10 / startRows;
+            view->setRasterAnchor(0.5, 0.5);
+            ugr->setViewport(viewLo, viewLo + int64_t(startCols) * minute, 100'000 - span / 2, 100'000 + span / 2);
+            return settle();
+        };
+        ASSERT_TRUE(reset()) << error.toStdString();
+        const auto start = drawn();
+        for (int i = 0; i < clicks; ++i) {
+            notch(1, at);
+            ASSERT_TRUE(settle()) << error.toStdString();
+        }
+        const auto single = drawn();
+        ASSERT_TRUE(reset()) << error.toStdString();
+        ASSERT_EQ(drawn().colPx, start.colPx);
+        ASSERT_EQ(drawn().rowPx, start.rowPx);
+        notch(clicks, at);
+        ASSERT_TRUE(settle()) << error.toStdString();
+        EXPECT_EQ(drawn().colPx, single.colPx) << "batched columns";
+        EXPECT_EQ(drawn().rowPx, single.rowPx) << "batched rows";
+        EXPECT_GT(single.colPx, start.colPx + clicks - 1) << "every click at least a pixel";
+    }
+}
+
+// Finding 6 (Astra's case at 640 px): following live, a 1m view of 4 columns (C = 160,
+// the live bucket one column inside, Now centre at 400 px) switched to 100 ms, where
+// a column is at most 100 px: the destination's column width is solved first, and the
+// Now column stays at 400 px exactly (the old column width put it at 490).
+TEST_F(UgrGpu, FollowLiveSwitchToAClampedColumnWidthKeepsTheNowColumn) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(pump(10'000, [&] { return layer().liveAnchorMs() > 0; })) << "the recording's availability";
+    const int64_t anchor = layer().liveAnchorMs();
+    const int64_t liveEnd = (anchor + minute - 1) / minute * minute, end = liveEnd + minute;
+    ugr->getViewState()->setRasterAnchor(1.0, 0.5);
+    ugr->setViewport(end - 4 * minute, end, 99'900, 100'300);
+    ugr->enableAutoScroll(true);
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    ASSERT_TRUE(ugr->autoScrollEnabled());
+    ASSERT_EQ(drawn().colPx, 160);
+    auto nowCentre = [&](int64_t tf) { return double((anchor + tf - 1) / tf * tf) - double(tf) / 2; };
+    const double x = ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(minute));
+    ASSERT_EQ(x, 400.0);
+    ugr->setTimeframe(100);
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    EXPECT_TRUE(ugr->autoScrollEnabled());
+    EXPECT_EQ(drawn().colPx, 100) << "a column is at most tf device px";
+    EXPECT_EQ(ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(100)), x) << "the Now column moved";
+    const int64_t target = (anchor + 99) / 100 * 100 + std::max<int64_t>(100, int64_t(double(timeSpan()) * 0.08));
+    EXPECT_EQ(chart_raster::followShift(ugr->getViewState()->getVisibleTimeEnd(), target, 100, drawn().colPx), 0)
+        << "follow-live keeps it";
 }
 
 // The zoom limits on the ladder and the gestures (spec rules 1, 2 and 9; ported from
