@@ -2880,11 +2880,17 @@ TEST_F(UgrGlide, AnEndThatChangesEveryFrameLandsByTheCap) {
 }
 
 // Rule B, an auto price refit during a glide that keeps the scale and moves the window
-// (new candles shifted by $230): the price glide continues from what was drawn (a frame
-// at the same instant draws the same rows), then lands on the refit window.
+// (a Manual $10 tick; new candles shifted by $230): the price glide continues from what
+// was drawn (a frame at the same instant draws the same rows), then lands on the refit
+// window at the glide's own end.
 TEST_F(UgrGlide, AConstantScaleRefitMidGlideContinuesFromTheDrawnRows) {
     noLabels();
     manualZoomClock();
+    auto manual = brightSettings();
+    manual.showLabels = false;
+    manual.tickMode = heatmap::TickMode::Manual;
+    manual.manualTick = 1000; // $10: the refit keeps the tick
+    ugr->setHeatmapChartSettings(manual, true);
     gpuOn();
     ASSERT_TRUE(settle()) << error.toStdString();
     CandleSeriesBuffer buffer;
@@ -2903,6 +2909,7 @@ TEST_F(UgrGlide, AConstantScaleRefitMidGlideContinuesFromTheDrawnRows) {
     for (const auto &bar : risingBars(viewLo - kHourMs, viewHi + kHourMs, minute, 99'230, 4)) // every bar $230 up
         buffer.applyUpdate("BTC-USD", 60, bar, seq++, false);
     const auto restAfter = ugr->restCameraNow(false);
+    ASSERT_EQ(restAfter.tick, restBefore.tick);
     ASSERT_EQ(restAfter.rowPx, restBefore.rowPx) << "the refit keeps the scale";
     ASSERT_NE(restAfter.topRowIndex, restBefore.topRowIndex) << "and moves the window";
     ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
