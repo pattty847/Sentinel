@@ -1651,47 +1651,6 @@ void UnifiedGridRenderer::togglePerformanceOverlay() {}
 
 void UnifiedGridRenderer::zoomIn() { zoomClicks(1, width() / 2, height() / 2); }
 void UnifiedGridRenderer::zoomOut() { zoomClicks(-1, width() / 2, height() / 2); }
-void UnifiedGridRenderer::zoomAt(double rawDelta, double centerX, double centerY,
-                                 double viewportWidth, double viewportHeight) {
-  if (!m_viewState || !isVisible() || !m_viewState->isTimeWindowValid()) {
-    return;
-  }
-  const double effectiveWidth = (viewportWidth > 0.0) ? viewportWidth : width();
-  const double effectiveHeight =
-      (viewportHeight > 0.0) ? viewportHeight : height();
-  if (effectiveWidth <= 0.0 || effectiveHeight <= 0.0) {
-    return;
-  }
-  m_viewState->handleZoomWithSensitivity(
-      rawDelta, QPointF(centerX, centerY),
-      QSizeF(effectiveWidth, effectiveHeight));
-  update();
-}
-void UnifiedGridRenderer::zoomTimeAt(double rawDelta, double centerX,
-                                     double viewportWidth) {
-  if (!m_viewState || !isVisible() || !m_viewState->isTimeWindowValid()) {
-    return;
-  }
-  const double effectiveWidth = (viewportWidth > 0.0) ? viewportWidth : width();
-  if (effectiveWidth <= 0.0) {
-    return;
-  }
-  m_viewState->handleTimeZoomWithSensitivity(rawDelta, centerX, effectiveWidth);
-  update();
-}
-void UnifiedGridRenderer::zoomPriceAt(double rawDelta, double centerY,
-                                      double viewportHeight) {
-  if (!m_viewState || !isVisible() || !m_viewState->isTimeWindowValid()) {
-    return;
-  }
-  const double effectiveHeight =
-      (viewportHeight > 0.0) ? viewportHeight : height();
-  if (effectiveHeight <= 0.0) {
-    return;
-  }
-  m_viewState->handlePriceZoomWithSensitivity(rawDelta, centerY, effectiveHeight);
-  update();
-}
 void UnifiedGridRenderer::resetZoom() {
   if (m_viewState) {
     m_viewState->resetZoom();

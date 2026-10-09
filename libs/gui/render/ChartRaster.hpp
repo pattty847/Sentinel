@@ -124,7 +124,9 @@ int nearestColumnRung(double colPxF, int minPx, int maxPx);
 // A price rung: the tick drawn there and whole device px per row (span = heightDev *
 // tick / rowPx). tickAt(span) predicts the tick the chart draws a price span with
 // (Auto's rule and state, or the Manual tick); a rung is only one where the predicted
-// tick is the rung's tick, so it lands on whole rows. minSpan/maxSpan <= 0: no limit.
+// tick is the rung's tick, so it lands on whole rows. minSpan/maxSpan <= 0: no limit;
+// a click obeys only the limit in its direction (a zoom-out from below the zoom-in
+// floor still moves).
 struct RowRung {
     double tick = 0;
     int rowPx = 0;

@@ -20,10 +20,12 @@ constexpr int kGestureSettleMs = 160;
 // A gesture with an explicit end (pinch, axis drag) settles after this pause if its
 // end never arrives.
 constexpr int kGestureSafetyMs = 1000;
-// The continuous zoom of one event, as the wheel always scaled it (>1 zooms in).
+// The continuous zoom of one event (an axis drag step, a trackpad scroll delta in
+// angle units), as the wheel always scaled it: 1 + clamp(delta * 0.0005, +-0.4)
+// (> 1 zooms in).
+constexpr double kContinuousZoomPerUnit = 0.0005, kContinuousZoomMaxStep = 0.4;
 double continuousFactor(double delta) {
-  return 1.0 + std::clamp(delta * GridViewState::ZOOM_SENSITIVITY, -GridViewState::MAX_ZOOM_DELTA,
-                          GridViewState::MAX_ZOOM_DELTA);
+  return 1.0 + std::clamp(delta * kContinuousZoomPerUnit, -kContinuousZoomMaxStep, kContinuousZoomMaxStep);
 }
 } // namespace
 
@@ -186,6 +188,40 @@ bool UnifiedGridRenderer::setZoomRung(const chart_raster::RasterCamera& drawn, d
   return true;
 }
 
+void UnifiedGridRenderer::zoomStoredView(double factor, double x, double y, bool time, bool price) {
+  const double fracX = std::clamp(width() > 0 ? x / width() : 0.5, 0.0, 1.0);
+  const double fracY = std::clamp(height() > 0 ? y / height() : 0.5, 0.0, 1.0);
+  qint64 start = m_viewState->getVisibleTimeStart(), end = m_viewState->getVisibleTimeEnd();
+  double lo = m_viewState->getMinPrice(), hi = m_viewState->getMaxPrice();
+  if (time) {
+    double span = double(end - start) / factor;
+    if (m_viewState->maxTimeSpanMs() > 0) span = std::min(span, m_viewState->maxTimeSpanMs());
+    if (m_viewState->minTimeSpanMs() > 0) span = std::max(span, std::min(double(end - start), m_viewState->minTimeSpanMs()));
+    const double at = double(start) + fracX * double(end - start);
+    const int64_t s = std::max<int64_t>(1, std::llround(span));
+    start = std::llround(at - fracX * double(s));
+    end = start + s;
+  }
+  if (price && hi > lo) {
+    double span = (hi - lo) / factor;
+    if (m_viewState->maxPriceSpan() > 0) span = std::min(span, m_viewState->maxPriceSpan());
+    if (m_viewState->minPriceSpan() > 0) span = std::max(span, std::min(hi - lo, m_viewState->minPriceSpan()));
+    const double ap = hi - fracY * (hi - lo);
+    hi = ap + fracY * span;
+    lo = hi - span;
+  }
+  sLog_Probe("zoom.click", "no camera: the stored view x" << factor << " time=" << time << " price=" << price);
+  if (start == m_viewState->getVisibleTimeStart() && end == m_viewState->getVisibleTimeEnd() &&
+      lo == m_viewState->getMinPrice() && hi == m_viewState->getMaxPrice())
+    return; // at the limits
+  const auto anchor = m_viewState->rasterAnchor();
+  m_viewState->setRasterAnchor(time ? fracX : anchor.fracX, price ? fracY : anchor.fracY);
+  m_viewState->setViewport(start, end, lo, hi);
+  if (price) emit m_viewState->priceInteracted();
+  if (m_viewState->isAutoScrollEnabled()) enableAutoScroll(false);
+  update();
+}
+
 void UnifiedGridRenderer::zoomClicks(int clicks, double x, double y, bool time, bool price) {
   if (!m_viewState || !m_gpuLayer || !m_viewState->isTimeWindowValid() || clicks == 0 ||
       m_viewState->isDragging())
@@ -194,7 +230,12 @@ void UnifiedGridRenderer::zoomClicks(int clicks, double x, double y, bool time, 
   // The auto price scale owns price: the chart wheel zooms time only.
   price = price && !m_viewState->autoPriceScale();
   const auto drawn = rasterCameraNow(false); // what is on screen now (a glide in flight included)
-  if (!drawn.valid || (!time && !price)) return;
+  if (!time && !price) return;
+  if (!drawn.valid) {
+    // Nothing drawn yet (no tick or size): the stored view by the ratio, no glide.
+    zoomStoredView(std::pow(chart_raster::kZoomStepRatio, double(clicks)), x, y, time, price);
+    return;
+  }
   const double W = drawn.widthDev, H = drawn.heightDev, tf = double(m_currentTimeframe_ms);
   const double fracX = std::clamp(width() > 0 ? x / width() : 0.5, 0.0, 1.0);
   const double fracY = std::clamp(height() > 0 ? y / height() : 0.5, 0.0, 1.0);
@@ -213,19 +254,27 @@ void UnifiedGridRenderer::zoomClicks(int clicks, double x, double y, bool time, 
   const double at = drawn.timeAtXDev(fracX * W), ap = drawn.priceAtYDev(fracY * H);
   const qint64 targetStart = std::llround(at - fracX * double(targetSpan));
   chart_raster::RowRung row = baseRow;
-  if (price && m_gpuLayer->tickPrice() > 0) {
+  if (price && m_gpuLayer->tickPrice() > 0)
     row = chart_raster::rowRung(baseRow, clicks, int(H), m_viewState->minPriceSpan(), m_viewState->maxPriceSpan(),
                                 tickPredictor(targetStart, targetStart + targetSpan, ap, fracY));
-  } else if (price) {
-    // No tick drawn yet (no rows to whole-pixel): the price span by the ratio, in limits.
-    double span = (m_viewState->getMaxPrice() - m_viewState->getMinPrice()) /
-                  std::pow(chart_raster::kZoomStepRatio, double(clicks));
-    if (m_viewState->maxPriceSpan() > 0) span = std::min(span, m_viewState->maxPriceSpan());
-    if (m_viewState->minPriceSpan() > 0) span = std::max(span, m_viewState->minPriceSpan());
-    row = {-span, 0};
+  if (price && row == baseRow) {
+    // No rows to whole-pixel (no tick drawn yet) or no rung (rows at the cell cap, e.g.
+    // a carried window before the new symbol's price): the price span by the ratio, in
+    // the limit of the click's direction (encoded as row {-span, 0}).
+    const double current = m_viewState->getMaxPrice() - m_viewState->getMinPrice();
+    double span = current / std::pow(chart_raster::kZoomStepRatio, double(clicks));
+    if (clicks < 0 && m_viewState->maxPriceSpan() > 0) span = std::min(span, std::max(current, m_viewState->maxPriceSpan()));
+    if (clicks > 0 && m_viewState->minPriceSpan() > 0) span = std::max(span, std::min(current, m_viewState->minPriceSpan()));
+    if (span != current && std::isfinite(span) && span > 0) row = {-span, 0};
   }
   const bool zoomTime = time && col != baseCol, zoomPrice = price && !(row == baseRow);
-  if (!zoomTime && !zoomPrice) return; // at the limits
+  if (!zoomTime && !zoomPrice) {
+    sLog_Probe("zoom.click", "at the limits clicks=" << clicks << " time=" << time << " price=" << price << " col="
+               << baseCol << " row=" << baseRow.rowPx << "@" << baseRow.tick << " span="
+               << m_viewState->getMaxPrice() - m_viewState->getMinPrice() << " limits=" << m_viewState->minPriceSpan()
+               << ".." << m_viewState->maxPriceSpan());
+    return;
+  }
   sLog_Probe("zoom.click", "clicks=" << clicks << " col=" << baseCol << "->" << col << " row=" << baseRow.rowPx
              << "@" << baseRow.tick << "->" << row.rowPx << "@" << row.tick);
   setZoomRung(drawn, fracX, fracY, zoomTime, col, zoomPrice, row);
@@ -248,28 +297,30 @@ void UnifiedGridRenderer::zoomContinuousFor(double factor, double x, double y, b
   if (!time && !price) return;
   const double fracX = std::clamp(width() > 0 ? x / width() : 0.5, 0.0, 1.0);
   const double fracY = std::clamp(height() > 0 ? y / height() : 0.5, 0.0, 1.0);
-  if (!m_zoomGesture) {
-    // The gesture starts from what is drawn: the stored view becomes the drawn window,
-    // so the continuous camera starts exactly on the picture (no jump).
-    const auto drawn = rasterCameraNow(false);
+  // The camera on screen: at the gesture's start what is drawn (a rest view or a glide),
+  // later the continuous camera of the stored view. The gesture starts from the drawn
+  // window, so the continuous camera starts exactly on the picture (no jump), in one
+  // viewport change.
+  const bool starting = !m_zoomGesture;
+  const auto cam = rasterCameraNow(false);
+  if (!cam.valid) {
+    if (!m_zoomGesture) zoomStoredView(factor, x, y, time, price); // nothing drawn yet
+    return;
+  }
+  if (starting) {
     endZoomGlide();
-    if (!drawn.valid) return;
-    const auto anchor = m_viewState->rasterAnchor();
-    m_viewState->setRasterAnchor(time ? fracX : anchor.fracX, price ? fracY : anchor.fracY);
-    m_viewState->setViewport(std::llround(drawn.drawnStartMs), std::llround(drawn.drawnEndMs), drawn.drawnMinPrice,
-                             drawn.drawnMaxPrice);
     m_zoomGesture = true;
     sLog_Probe("zoom.gesture", "begin");
   }
   m_gestureTime = time;
   m_gesturePrice = price;
   m_gestureAt = QPointF(x, y);
-  const auto cam = rasterCameraNow(false); // the continuous camera
-  if (!cam.valid) return;
   const double W = cam.widthDev, H = cam.heightDev;
   const double at = cam.timeAtXDev(fracX * W), ap = cam.priceAtYDev(fracY * H);
-  qint64 start = m_viewState->getVisibleTimeStart(), end = m_viewState->getVisibleTimeEnd();
-  double lo = m_viewState->getMinPrice(), hi = m_viewState->getMaxPrice();
+  qint64 start = starting ? std::llround(cam.drawnStartMs) : m_viewState->getVisibleTimeStart();
+  qint64 end = starting ? std::llround(cam.drawnEndMs) : m_viewState->getVisibleTimeEnd();
+  double lo = starting ? cam.drawnMinPrice : m_viewState->getMinPrice();
+  double hi = starting ? cam.drawnMaxPrice : m_viewState->getMaxPrice();
   if (time) {
     // Inside the zoom limits (one column per pixel out; the zoom-in floor in).
     const double maxTime = m_viewState->maxTimeSpanMs(), minTime = m_viewState->minTimeSpanMs();

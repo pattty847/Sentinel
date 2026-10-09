@@ -1,6 +1,5 @@
 // GridViewState: viewport pan/zoom math; main GUI thread only.
 #include "GridViewState.hpp"
-#include <QSizeF>
 #include "SentinelLogging.hpp"
 #include <algorithm>
 #include <cmath>
@@ -13,10 +12,6 @@ constexpr int64_t kSaneTimeSpanMs = 50LL * 365 * 24 * 3600 * 1000;
 // Largest whole-ms time span allowed by maxSpan (<= 0: no limit but the sane one).
 int64_t timeSpanLimit(double maxSpan) {
     return maxSpan > 0 ? std::max<int64_t>(1, static_cast<int64_t>(std::floor(maxSpan))) : kSaneTimeSpanMs;
-}
-double clampProcessedZoomDelta(double rawDelta, double sensitivity, double maxDelta) {
-    const double processed = rawDelta * sensitivity;
-    return std::max(-maxDelta, std::min(maxDelta, processed));
 }
 }
 
@@ -130,105 +125,9 @@ void GridViewState::setViewportSize(double width, double height) {
     }
 }
 
-std::tuple<double, double, bool> GridViewState::zoomAnchor(double fracX, double fracY, double continuousTime,
-                                                          double continuousPrice) const {
-    double time = continuousTime, price = continuousPrice;
-    if (!m_isDragging && m_drawnPoint && m_drawnPoint(fracX, fracY, time, price) && std::isfinite(time) &&
-        std::isfinite(price))
-        return {time, price, true};
-    return {continuousTime, continuousPrice, false};
-}
-
 void GridViewState::setRasterAnchor(double fracX, double fracY) {
     if (std::isfinite(fracX)) m_rasterAnchor.fracX = std::clamp(fracX, 0.0, 1.0);
     if (std::isfinite(fracY)) m_rasterAnchor.fracY = std::clamp(fracY, 0.0, 1.0);
-}
-
-void GridViewState::handleZoom(double delta, const QPointF& center) {
-    handleZoomWithViewport(delta, center, QSizeF(m_viewportWidth, m_viewportHeight));
-}
-
-void GridViewState::handleZoomWithViewport(double delta, const QPointF& center, const QSizeF& viewportSize) {
-    if (!m_timeWindowValid || viewportSize.isEmpty()) return;
-    if (center.x() < 0 || center.y() < 0) return;
-
-    const double clampedDelta = std::max(-MAX_ZOOM_DELTA, std::min(MAX_ZOOM_DELTA, delta));
-    const double zoomMultiplier = 1.0 + clampedDelta;
-    if (zoomMultiplier <= 0.0 || zoomMultiplier == 1.0) return;
-    const int64_t currentTimeRange = std::max<int64_t>(1, m_visibleTimeEnd_ms - m_visibleTimeStart_ms);
-    const double currentPriceRange = m_maxPrice > m_minPrice ? m_maxPrice - m_minPrice : 1.0;
-    // Spec rules 1, 2 and 9: the spans themselves are zoomed and clamped (no relative
-    // zoom factor: an axis zoom that widened the view cannot leave the wheel stuck).
-    // Auto price scale: the wheel zooms time only (the price fit follows the candles).
-    const int64_t newTimeRange = zoomedTimeSpan(currentTimeRange, zoomMultiplier);
-    const double newPriceRange = m_autoPriceScale ? currentPriceRange : zoomedPriceSpan(currentPriceRange, zoomMultiplier);
-    if (newTimeRange == currentTimeRange && newPriceRange == currentPriceRange) return; // at the limits
-
-    double centerTimeRatio = center.x() / viewportSize.width();
-    double centerPriceRatio = 1.0 - (center.y() / viewportSize.height());
-    centerTimeRatio = std::max(0.0, std::min(1.0, centerTimeRatio));
-    centerPriceRatio = std::max(0.0, std::min(1.0, centerPriceRatio));
-    // The content under the cursor stays put: an axis this event zooms is solved about
-    // what is drawn there (the raster camera before this zoom) and the camera re-snaps
-    // about the cursor. An axis it does not zoom (the auto price scale's price, a span at
-    // its limit) keeps its bounds and its anchor exactly: re-solving it about the drawn
-    // point would translate it.
-    const bool zoomTime = newTimeRange != currentTimeRange, zoomPrice = newPriceRange != currentPriceRange;
-    const auto [currentCenterTime, currentCenterPrice, drawn] =
-        zoomAnchor(centerTimeRatio, 1.0 - centerPriceRatio,
-                   static_cast<double>(m_visibleTimeStart_ms + static_cast<int64_t>(currentTimeRange * centerTimeRatio)),
-                   m_minPrice + (currentPriceRange * centerPriceRatio));
-    setRasterAnchor(zoomTime ? centerTimeRatio : m_rasterAnchor.fracX,
-                    zoomPrice ? 1.0 - centerPriceRatio : m_rasterAnchor.fracY);
-    const double newStartD = currentCenterTime - static_cast<double>(newTimeRange) * centerTimeRatio;
-    const int64_t newTimeStart = !zoomTime ? m_visibleTimeStart_ms
-                                           : static_cast<int64_t>(drawn ? std::llround(newStartD) : std::floor(newStartD));
-    const int64_t newTimeEnd = newTimeStart + newTimeRange;
-    const double newMinPrice = zoomPrice ? currentCenterPrice - (newPriceRange * centerPriceRatio) : m_minPrice;
-    const double newMaxPrice = zoomPrice ? currentCenterPrice + (newPriceRange * (1.0 - centerPriceRatio)) : m_maxPrice;
-
-    sLog_Probe("viewport.zoom", "delta=" << delta << "->" << clampedDelta
-               << " mouse=(" << center.x() << "," << center.y() << ")"
-               << " centerRatio=(" << centerTimeRatio << "," << centerPriceRatio << ")"
-               << " time=[" << m_visibleTimeStart_ms << ".." << m_visibleTimeEnd_ms << "]->["
-               << newTimeStart << ".." << newTimeEnd << "]"
-               << " price=[" << m_minPrice << ".." << m_maxPrice << "]->["
-               << newMinPrice << ".." << newMaxPrice << "]");
-    if (newTimeEnd <= newTimeStart || !(newMaxPrice > newMinPrice)) {
-        sLog_Warning("Zoom aborted: invalid final bounds time=[" << newTimeStart << ".." << newTimeEnd
-                     << "] price=[" << newMinPrice << ".." << newMaxPrice << "]");
-        return;
-    }
-    setViewport(newTimeStart, newTimeEnd, newMinPrice, newMaxPrice);
-    if (!m_autoPriceScale) emit priceInteracted();
-    if (m_autoScrollEnabled) {
-        m_autoScrollEnabled = false;
-        emit autoScrollEnabledChanged();
-    }
-}
-
-int64_t GridViewState::zoomedTimeSpan(int64_t current, double zoomMultiplier) const {
-    const double wanted = static_cast<double>(current) / zoomMultiplier;
-    const bool zoomingOut = zoomMultiplier < 1.0;
-    int64_t span = std::max<int64_t>(1, static_cast<int64_t>(zoomingOut ? std::ceil(wanted) : std::floor(wanted)));
-    if (zoomingOut) {
-        span = std::min(span, std::max(current, timeSpanLimit(m_maxTimeSpanMs)));
-    } else if (m_minTimeSpanMs > 0) {
-        // A zoom-in stops at the floor; a view already below it is not widened.
-        const int64_t floorSpan = std::max<int64_t>(1, static_cast<int64_t>(std::ceil(m_minTimeSpanMs)));
-        span = std::max(span, std::min(current, floorSpan));
-    }
-    return span;
-}
-
-double GridViewState::zoomedPriceSpan(double current, double zoomMultiplier) const {
-    double span = std::max(1e-6, current / zoomMultiplier);
-    if (zoomMultiplier < 1.0) {
-        if (m_maxPriceSpan > 0) span = std::min(span, std::max(current, m_maxPriceSpan));
-    } else if (m_minPriceSpan > 0) {
-        span = std::max(span, std::min(current, m_minPriceSpan));
-    }
-    return span;
 }
 
 void GridViewState::handlePanStart(const QPointF& position) {
@@ -300,89 +199,6 @@ void GridViewState::handlePanEnd(bool applyViewport) {
                    m_minPrice + priceDelta,
                    m_maxPrice + priceDelta);
         if (priceDelta != 0.0) emit priceInteracted();
-    }
-}
-
-void GridViewState::handleZoomWithSensitivity(double rawDelta, const QPointF& center, const QSizeF& viewportSize) {
-    if (!m_timeWindowValid || viewportSize.isEmpty()) return;
-    double processedDelta = clampProcessedZoomDelta(rawDelta, ZOOM_SENSITIVITY, MAX_ZOOM_DELTA);
-    handleZoomWithViewport(processedDelta, center, viewportSize);
-}
-
-void GridViewState::handleTimeZoomWithSensitivity(double rawDelta, double centerX, double viewportWidth) {
-    if (!m_timeWindowValid || viewportWidth <= 0.0) {
-        return;
-    }
-
-    const double processedDelta =
-        clampProcessedZoomDelta(rawDelta, ZOOM_SENSITIVITY, MAX_ZOOM_DELTA);
-    const double zoomMultiplier = 1.0 + processedDelta;
-    if (zoomMultiplier <= 0.0 || zoomMultiplier == 1.0) {
-        return;
-    }
-
-    const int64_t currentTimeRange = std::max<int64_t>(1, m_visibleTimeEnd_ms - m_visibleTimeStart_ms);
-    const int64_t newTimeRange = zoomedTimeSpan(currentTimeRange, zoomMultiplier);
-    if (newTimeRange == currentTimeRange) return; // at the limit
-
-    double centerRatio = centerX / viewportWidth;
-    centerRatio = std::max(0.0, std::min(1.0, centerRatio));
-    // About the time drawn under the cursor (raster camera before this zoom).
-    const auto [currentCenterTime, unusedPrice, drawn] =
-        zoomAnchor(centerRatio, m_rasterAnchor.fracY,
-                   static_cast<double>(m_visibleTimeStart_ms +
-                                       static_cast<int64_t>(static_cast<double>(currentTimeRange) * centerRatio)),
-                   0.0);
-    setRasterAnchor(centerRatio, m_rasterAnchor.fracY);
-    const double newTimeStartD = currentCenterTime - static_cast<double>(newTimeRange) * centerRatio;
-    const int64_t newTimeStart = static_cast<int64_t>(drawn ? std::llround(newTimeStartD) : std::floor(newTimeStartD));
-    const int64_t newTimeEnd = newTimeStart + newTimeRange;
-
-    setViewport(newTimeStart, newTimeEnd, m_minPrice, m_maxPrice);
-    if (m_autoScrollEnabled) {
-        m_autoScrollEnabled = false;
-        emit autoScrollEnabledChanged();
-    }
-}
-
-void GridViewState::handlePriceZoomWithSensitivity(double rawDelta, double centerY, double viewportHeight) {
-    if (!m_timeWindowValid || viewportHeight <= 0.0) {
-        return;
-    }
-
-    const double processedDelta =
-        clampProcessedZoomDelta(rawDelta, ZOOM_SENSITIVITY, MAX_ZOOM_DELTA);
-    const double zoomMultiplier = 1.0 + processedDelta;
-    if (zoomMultiplier <= 0.0 || zoomMultiplier == 1.0) {
-        return;
-    }
-
-    // A price zoom takes price over: auto price scale off before the viewport moves
-    // (else the refit in setViewport would undo the zoom).
-    setAutoPriceScale(false);
-    const double currentPriceRange = m_maxPrice > m_minPrice ? m_maxPrice - m_minPrice : 1.0;
-    const double newPriceRange = zoomedPriceSpan(currentPriceRange, zoomMultiplier);
-    if (newPriceRange == currentPriceRange) return; // at the limit
-
-    double centerRatio = 1.0 - (centerY / viewportHeight);
-    centerRatio = std::max(0.0, std::min(1.0, centerRatio));
-    // About the price drawn under the cursor (raster camera before this zoom).
-    const auto [unusedTime, currentCenterPrice, drawn] =
-        zoomAnchor(m_rasterAnchor.fracX, 1.0 - centerRatio, 0.0, m_minPrice + currentPriceRange * centerRatio);
-    (void)drawn;
-    setRasterAnchor(m_rasterAnchor.fracX, 1.0 - centerRatio);
-    const double newMinPrice = currentCenterPrice - newPriceRange * centerRatio;
-    const double newMaxPrice =
-        currentCenterPrice + newPriceRange * (1.0 - centerRatio);
-    if (newMaxPrice <= newMinPrice) {
-        return;
-    }
-
-    setViewport(m_visibleTimeStart_ms, m_visibleTimeEnd_ms, newMinPrice, newMaxPrice);
-    emit priceInteracted();
-    if (m_autoScrollEnabled) {
-        m_autoScrollEnabled = false;
-        emit autoScrollEnabledChanged();
     }
 }
 

@@ -4,7 +4,6 @@
 #include <QSizeF>
 #include <QElapsedTimer>
 #include <functional>
-#include <tuple>
 #include <utility>
 
 class GridViewState : public QObject {
@@ -77,19 +76,6 @@ public:
     // none (the continuous scale applies).
     using PanShift = std::function<bool(QPointF dragLogicalPx, qint64& timeShiftMs, double& priceShift)>;
     void setPanShift(PanShift shift) { m_panShift = std::move(shift); }
-    // What the picture shows at a view point (fractions of the width from the left and
-    // of the height from the top): the raster camera's time and price there. The zoom
-    // handlers keep that content under the cursor (they zoom about it, not about the
-    // stored bounds, which differ from the drawn ones by up to a cell's rounding per
-    // cell). False: none (the stored bounds' point applies).
-    using DrawnPoint = std::function<bool(double fracX, double fracY, double& timeMs, double& price)>;
-    void setDrawnPoint(DrawnPoint point) { m_drawnPoint = std::move(point); }
-    
-    void handleZoom(double delta, const QPointF& center);
-    void handleZoomWithViewport(double delta, const QPointF& center, const QSizeF& viewportSize);
-    void handleZoomWithSensitivity(double rawDelta, const QPointF& center, const QSizeF& viewportSize);
-    void handleTimeZoomWithSensitivity(double rawDelta, double centerX, double viewportWidth);
-    void handlePriceZoomWithSensitivity(double rawDelta, double centerY, double viewportHeight);
     void handlePanStart(const QPointF& position);
     void handlePanMove(const QPointF& position);
     void handlePanEnd(bool applyViewport = true);
@@ -105,11 +91,6 @@ public:
     
     double calculateOptimalPriceResolution() const;
 
-    // Continuous zoom (axis drag, trackpad scroll, pinch): the span changes by
-    // 1 + clamp(delta * ZOOM_SENSITIVITY, +-MAX_ZOOM_DELTA) per event.
-    static constexpr double ZOOM_SENSITIVITY = 0.0005;
-    static constexpr double MAX_ZOOM_DELTA = 0.4;
-
 signals:
     void viewportChanged();
     void panVisualOffsetChanged();
@@ -120,10 +101,6 @@ signals:
 private:
     // A drag's time shift for a window of spanMs (0 when not dragging).
     qint64 dragShiftMs(qint64 spanMs) const;
-    // One zoom step of a span (multiplier > 1 zooms in) inside the limits: a
-    // zoom-out never narrows and a zoom-in never widens the current span.
-    int64_t zoomedTimeSpan(int64_t current, double zoomMultiplier) const;
-    double zoomedPriceSpan(double current, double zoomMultiplier) const;
 
     qint64 m_visibleTimeStart_ms = 0;
     qint64 m_visibleTimeEnd_ms = 0;
@@ -138,11 +115,6 @@ private:
     bool m_autoPriceScale = false;
     PriceFit m_priceFit;
     PanShift m_panShift;
-    DrawnPoint m_drawnPoint;
-    // The zoom's fixed point: the drawn time/price at (fracX, fracY) when known (third:
-    // true), else the given continuous ones. Not during a drag.
-    std::tuple<double, double, bool> zoomAnchor(double fracX, double fracY, double continuousTime,
-                                                double continuousPrice) const;
     RasterAnchor m_rasterAnchor{1.0, 0.5}; // follow-live (the default) anchors the view end
 
     

@@ -217,9 +217,10 @@ protected:
     // Whole-pixel mapping (plan 2026-10-08): what the last frame drew (the source of
     // GET /api/v1/viewport `drawn`).
     chart_raster::RasterCamera drawn() const { return ugr->currentFrameContext().raster; }
-    // The time window the next frame draws (whole ms around it): the price fit's candles.
+    // The time window the next frame draws at rest (whole ms around it; a zoom glide's
+    // target): the price fit's candles.
     std::pair<int64_t, int64_t> drawnWindow() const {
-        const auto cam = ugr->rasterCameraNow(false);
+        const auto cam = ugr->restCameraNow(false);
         return {int64_t(std::floor(cam.drawnStartMs)), int64_t(std::ceil(cam.drawnEndMs))};
     }
     static bool whole(double v) { return std::abs(v - std::round(v)) < 1e-6; }
@@ -527,11 +528,12 @@ TEST_F(UgrGpu, APanMovesEveryLayerByTheSameWholePixels) {
     delete candles;
 }
 
-// Plan 2026-10-08 B5: wheel zooms in and out at one cursor position (exact inverse
-// steps), the rows oscillating around 2.5 px inside the step band (2.45 <-> 2.60):
-// the drawn rows never change; across 2.6 they step exactly once. The drawn rowPx
-// (the frame's raster camera: GET /api/v1/viewport `drawn.rowPx`) is the measured
-// band height of the picture.
+// Plan 2026-10-08 B5: a stored view zoomed in and out about one point (exact inverse
+// steps; a direct view such as the Agent API's, the wheel clicks to rungs since slice
+// A2), the rows oscillating around 2.5 px inside the step band (2.45 <-> 2.60): the
+// drawn rows never change; across 2.6 they step exactly once. The drawn rowPx (the
+// frame's raster camera: GET /api/v1/viewport `drawn.rowPx`) is the measured band
+// height of the picture.
 TEST_F(UgrGpu, AZoomInsideTheStepBandNeverOscillates) {
     noLabels();
     gpuOn();
@@ -540,7 +542,12 @@ TEST_F(UgrGpu, AZoomInsideTheStepBandNeverOscillates) {
     ASSERT_GT(tick, 0);
     ASSERT_TRUE(setRows(2.3));
     ASSERT_EQ(drawn().rowPx, 2);
-    const double wheelIn = 120, wheelOut = -(1 - 1 / 1.06) / 0.0005; // x1.06, then exactly back
+    auto *view = ugr->getViewState();
+    auto zoomAbout = [&](double factor) { // the price span / factor about y = 100
+        const double frac = 100.0 / 320, at = view->getMaxPrice() - frac * priceSpan(), span = priceSpan() / factor;
+        ugr->setViewport(view->getVisibleTimeStart(), view->getVisibleTimeEnd(), at + frac * span - span,
+                         at + frac * span);
+    };
     auto rows = [&] { return drawn().heightDev * tick / priceSpan(); };
     for (const auto [startRows, expectedChanges] : {std::pair{2.45, 0}, {2.52, 1}}) {
         SCOPED_TRACE(testing::Message() << "rows " << startRows << " <-> " << startRows * 1.06);
@@ -550,7 +557,7 @@ TEST_F(UgrGpu, AZoomInsideTheStepBandNeverOscillates) {
         int changes = 0, last = 2;
         double lowest = 1e9, highest = 0;
         for (int i = 0; i < 50; ++i) {
-            ugr->zoomAt(i % 2 ? wheelOut : wheelIn, 320, 100);
+            zoomAbout(i % 2 ? 1 / 1.06 : 1.06);
             ASSERT_TRUE(frames(2)) << error.toStdString();
             ASSERT_EQ(layer().tickPrice(), tick) << "Auto keeps the tick";
             const int P = drawn().rowPx;
@@ -571,9 +578,10 @@ TEST_F(UgrGpu, AZoomInsideTheStepBandNeverOscillates) {
     }
 }
 
-// Plan 2026-10-08 B6: wheel zooms at 30% of the height until the rows step 2 -> 3:
-// the price under the cursor (the published mapping's inverse) moves by less than a
-// row across the step, and stays within half a device pixel of the continuous camera.
+// Plan 2026-10-08 B6: wheel clicks at 30% of the height until the rows step 2 -> 3 (one
+// click since slice A2): the price under the cursor (the published mapping's inverse)
+// moves by less than a row across the step, and stays within half a device pixel of
+// the continuous camera.
 TEST_F(UgrGpu, TheCursorPriceStaysWithinARowAcrossAnIntegerStep) {
     noLabels();
     gpuOn();
@@ -592,8 +600,8 @@ TEST_F(UgrGpu, TheCursorPriceStaysWithinARowAcrossAnIntegerStep) {
         // event, the first at the new position included), within half a device pixel.
         const auto mapping = ugr->currentTimeAxisMapping();
         const double under = mapping.screenYToPrice(y);
-        ugr->zoomAt(120, 320, y);
-        ASSERT_TRUE(frames(2)) << error.toStdString();
+        notch(1, {320, y});
+        ASSERT_TRUE(settle()) << error.toStdString();
         const auto cam = drawn();
         const auto now = ugr->currentTimeAxisMapping();
         EXPECT_LE(std::abs(now.priceToScreenY(under) - y), 0.5 / cam.dpr + 1e-6) << "wheel " << i;
@@ -609,10 +617,10 @@ TEST_F(UgrGpu, TheCursorPriceStaysWithinARowAcrossAnIntegerStep) {
 }
 
 // Review fix 1 (whole-pixel plan section 1.4): every zoom keeps the content drawn under
-// the cursor within half a device pixel of it: the first wheel at a new cursor position,
-// later ones elsewhere, the time and price axis zooms, at fractional pixels per cell
-// (the stored bounds differ from the drawn ones, so zooming about the stored point
-// would translate the picture).
+// the cursor within half a device pixel of it: the first wheel click at a new cursor
+// position, later ones elsewhere, the time and price axis drags (continuous, then the
+// nearest rung), starting at fractional pixels per cell (the stored bounds differ from
+// the drawn ones, so zooming about the stored point would translate the picture).
 TEST_F(UgrGpu, ZoomKeepsTheDrawnContentUnderTheCursor) {
     noLabels();
     const int64_t lo = viewLo + minute / 3;
@@ -620,22 +628,31 @@ TEST_F(UgrGpu, ZoomKeepsTheDrawnContentUnderTheCursor) {
     ASSERT_TRUE(settle()) << error.toStdString();
     enum Kind { Wheel, TimeAxis, PriceAxis };
     struct Event { Kind kind; double delta, x, y; };
-    const Event events[] = {{Wheel, 30, 200, 100}, {Wheel, 30, 200, 100}, {Wheel, -40, 500, 250},
-                            {TimeAxis, 60, 100, 0},  {PriceAxis, -60, 0, 280}, {Wheel, 120, 90, 40},
-                            {TimeAxis, -90, 610, 0}, {PriceAxis, 80, 0, 30},   {Wheel, -120, 333, 177}};
+    const Event events[] = {{Wheel, 1, 200, 100},  {Wheel, 1, 200, 100},  {Wheel, -1, 500, 250},
+                            {TimeAxis, 60, 100, 0}, {PriceAxis, -60, 0, 280}, {Wheel, 2, 90, 40},
+                            {TimeAxis, -90, 610, 0}, {PriceAxis, 80, 0, 30},  {Wheel, -2, 333, 177}};
     int i = 0;
     for (const auto &e : events) {
         SCOPED_TRACE(testing::Message() << "event " << i++);
         const auto before = ugr->currentTimeAxisMapping();
-        const double t = before.screenXToTime(e.x), p = before.screenYToPrice(e.y);
-        if (e.kind == Wheel) ugr->zoomAt(e.delta, e.x, e.y);
-        else if (e.kind == TimeAxis) ugr->zoomTimeAt(e.delta, e.x);
-        else ugr->zoomPriceAt(e.delta, e.y);
-        ASSERT_TRUE(frames(2)) << error.toStdString();
+        const double y = e.kind == TimeAxis ? 160 : e.y, x = e.kind == PriceAxis ? 320 : e.x;
+        const double t = before.screenXToTime(x), p = before.screenYToPrice(y);
+        if (e.kind == Wheel) {
+            notch(int(e.delta), {e.x, e.y});
+        } else {
+            for (int step = 0; step < 3; ++step) { // a drag: three moves, then the release
+                if (e.kind == TimeAxis) ugr->zoomTimeDrag(e.delta, e.x);
+                else ugr->zoomPriceDrag(e.delta, e.y);
+                ASSERT_TRUE(frames(1)) << error.toStdString();
+            }
+            ugr->endZoomGesture();
+        }
+        ASSERT_TRUE(settle()) << error.toStdString();
         const auto after = ugr->currentTimeAxisMapping();
         const double half = 0.5 / drawn().dpr + 1e-6;
-        if (e.kind != PriceAxis) EXPECT_LE(std::abs(after.timeToScreenX(t) - e.x), half) << "time under the cursor";
-        if (e.kind != TimeAxis) EXPECT_LE(std::abs(after.priceToScreenY(p) - e.y), half) << "price under the cursor";
+        if (e.kind != PriceAxis) EXPECT_LE(std::abs(after.timeToScreenX(t) - x), half) << "time under the cursor";
+        if (e.kind != TimeAxis) EXPECT_LE(std::abs(after.priceToScreenY(p) - y), half) << "price under the cursor";
+        EXPECT_FALSE(drawn().free) << "landed on a rung";
     }
 }
 
@@ -706,9 +723,9 @@ TEST_F(UgrGpu, AutoScaleWheelWithoutAFitKeepsThePrice) {
     ASSERT_TRUE(frames(2)) << error.toStdString();
     const double p0 = view->getMinPrice(), p1 = view->getMaxPrice();
     const auto before = drawn();
-    for (const auto &[delta, y] : {std::pair{60.0, 60.0}, {-90.0, 250.0}, {120.0, 20.0}}) {
-        ugr->zoomAt(delta, 320, y);
-        ASSERT_TRUE(frames(2)) << error.toStdString();
+    for (const auto &[clicks, y] : {std::pair{1, 60.0}, {-1, 250.0}, {2, 20.0}}) {
+        notch(clicks, {320, y});
+        ASSERT_TRUE(settle()) << error.toStdString();
         EXPECT_EQ(view->getMinPrice(), p0) << "wheel at y=" << y << ": time only, the price stays";
         EXPECT_EQ(view->getMaxPrice(), p1);
         EXPECT_EQ(drawn().topRowIndex, before.topRowIndex) << "the drawn rows did not move";
@@ -847,8 +864,13 @@ TEST_F(UgrGpu, PriceFitCoversCandlesDrawnOutsideTheStoredWindow) {
     ASSERT_TRUE(ugr->fitPriceToData());
     EXPECT_LE(view->getMinPrice(), 99'000) << "the drawn outlier's low is in the fit";
     EXPECT_GE(view->getMaxPrice(), 101'500) << "and its high";
-    // The auto price scale's refit on a time change uses the drawn window too.
-    ugr->zoomTimeAt(10, 320);
+    // The auto price scale's refit on a time change uses the drawn window too (a 1 ms
+    // shift: the stored window still excludes the outlier, the drawn one has it).
+    ugr->getViewState()->setViewport(view->getVisibleTimeStart() + 1, view->getVisibleTimeEnd() + 1, 99'990,
+                                     100'010);
+    ASSERT_TRUE(ugr->autoPriceScale());
+    ASSERT_GE(view->getVisibleTimeStart(), outlier + minute);
+    ASSERT_LT(ugr->rasterCameraNow(false).drawnStartMs, double(outlier));
     EXPECT_LE(view->getMinPrice(), 99'000);
     EXPECT_GE(view->getMaxPrice(), 101'500);
     ugr->setCandleBuffer(nullptr);
@@ -941,7 +963,7 @@ TEST_F(UgrGpu, TheClampsDrawOnePixelColumnsAndRows) {
                       view->getMaxPrice());
     ASSERT_TRUE(frames(2)) << error.toStdString();
     EXPECT_EQ(drawn().colPx, 1) << "one column per device pixel at the clamp";
-    for (int i = 0; i < 80; ++i) ugr->zoomTimeAt(-120, 320);
+    for (int i = 0; i < 80; ++i) ugr->zoomTimeClicks(-1, 320);
     ASSERT_EQ(timeSpan(), 640.0 * minute);
     ASSERT_TRUE(frames(2)) << error.toStdString();
     auto cam = drawn();
@@ -956,7 +978,7 @@ TEST_F(UgrGpu, TheClampsDrawOnePixelColumnsAndRows) {
     ASSERT_TRUE(setRows(2.0));
     ASSERT_TRUE(settle()) << error.toStdString();
     ASSERT_EQ(drawn().rowPx, 2);
-    for (int i = 0; i < 80; ++i) ugr->zoomPriceAt(-120, 160);
+    for (int i = 0; i < 80; ++i) ugr->zoomPriceClicks(-1, 160);
     ASSERT_NEAR(priceSpan(), 3200, 1e-6);
     ASSERT_TRUE(settle()) << error.toStdString();
     cam = drawn();
@@ -1529,15 +1551,22 @@ TEST_F(UgrGpu, AutoScaleFollowsTheVisibleCandlesAcrossTimeChanges) {
     // The chart wheel zooms time only and keeps it on.
     const double span0 = timeSpan();
     v = view->getViewportVersion();
-    ugr->zoomAt(-240, 320, 160);
+    notch(-2, {320, 160});
     EXPECT_EQ(view->getViewportVersion() - v, 1u);
     EXPECT_GT(timeSpan(), span0);
     EXPECT_TRUE(ugr->autoPriceScale()) << "the wheel keeps it on";
     expectFitted("wheel zoom out");
     v = view->getViewportVersion();
-    ugr->zoomTimeAt(240, 320);
+    ugr->zoomTimeClicks(2, 320); // the time axis wheel
     EXPECT_EQ(view->getViewportVersion() - v, 1u);
-    expectFitted("time axis zoom");
+    expectFitted("time axis wheel");
+    v = view->getViewportVersion();
+    ugr->zoomTimeDrag(240, 320); // a time axis drag: one change per move, one at the release
+    EXPECT_EQ(view->getViewportVersion() - v, 1u);
+    expectFitted("time axis drag");
+    ugr->endZoomGesture();
+    EXPECT_EQ(view->getViewportVersion() - v, 2u);
+    expectFitted("time axis drag release");
     ugr->setCandleBuffer(nullptr);
 }
 
@@ -1588,7 +1617,7 @@ TEST_F(UgrGpu, PriceZoomTurnsAutoScaleOffAndTheRangeSurvivesATimeframeSwitch) {
     ugr->setCandleBuffer(&buffer);
     ugr->setAutoPriceScale(true);
     const auto *view = ugr->getViewState();
-    ugr->zoomPriceAt(120, 100, 320);
+    ugr->zoomPriceClicks(1, 100);
     EXPECT_FALSE(ugr->autoPriceScale()) << "a price zoom turns it off";
     const double lo = view->getMinPrice(), hi = view->getMaxPrice();
     ugr->setTimeframe(int(tf5));
@@ -1868,7 +1897,7 @@ TEST_F(UgrGpu, SymbolSwitchCarryAcrossPriceScalesAndUnpricedSwitches) {
     expectCarried(0.00001, "TINY after an unpriced ETH");
     // A user price action before the new symbol's price cancels the pending carry.
     ugr->setActiveSymbol("BTC-USD");
-    ugr->zoomPriceAt(120, 160, 320);
+    ugr->zoomPriceClicks(-1, 160); // a zoom-out (TINY's window is far below BTC's zoom-in floor)
     ugr->setLiveBookTop(99'999, 100'001);
     EXPECT_GT(std::abs((view->getMaxPrice() - view->getMinPrice()) - 2'000), 100) << "the default seed, no carry";
     EXPECT_NEAR((view->getMaxPrice() + view->getMinPrice()) / 2, 100'000, 1e-6);
@@ -2253,7 +2282,7 @@ TEST_F(UgrGpu, APinchZoomsContinuouslyAndSettlesOnARung) {
         double last = drawn().colPxF, lastRows = drawn().pxPerPrice();
         int fractional = 0;
         for (int i = 0; i < 9; ++i) {
-            const double step = native ? 0.037 : 48 * GridViewState::ZOOM_SENSITIVITY;
+            const double step = native ? 0.037 : 48 * 0.0005; // a scroll: 0.0005 per angle unit
             if (native) pinch(Qt::ZoomNativeGesture, 0.037, at);
             else scroll(48, Qt::ScrollUpdate, at);
             ASSERT_TRUE(ugr->zoomGesturing());
@@ -2392,6 +2421,110 @@ TEST_F(UgrGpu, FollowLiveTimeframeSwitchKeepsTheNowColumnExactly) {
     EXPECT_EQ(ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(5 * minute)), x) << "the Now column moved";
 }
 
+// The zoom limits on the ladder and the gestures (spec rules 1, 2 and 9; ported from
+// GridViewState's wheel handlers, deleted with slice A2): from any start the clicks
+// zoom out to exactly one column per pixel and, under Manual $10, one row per pixel;
+// the clicks in stop at the minimum spans; a view already below them is not widened by
+// a zoom-in; after an axis drag the clicks still zoom out to the max spans; an axis at
+// its limit keeps its bounds exactly; the stored view changes once per click.
+TEST_F(UgrGpu, ZoomClicksAndGesturesObeyTheLimits) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    view->setAutoPriceScale(false);
+    auto manual = brightSettings();
+    manual.showLabels = false;
+    manual.tickMode = heatmap::TickMode::Manual;
+    manual.manualTick = 1000; // $10: one row per pixel is $3,200 over 320 px
+    ugr->setHeatmapChartSettings(manual, true);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const double maxTime = 640.0 * minute, maxPrice = 3200;
+    ASSERT_EQ(view->maxTimeSpanMs(), maxTime);
+    ASSERT_DOUBLE_EQ(view->maxPriceSpan(), maxPrice);
+    const QPointF at(250, 100);
+    auto clicksOut = [&](int n) {
+        for (int i = 0; i < n; ++i) {
+            const uint64_t v = view->getViewportVersion();
+            const double t = timeSpan(), p = priceSpan();
+            notch(-1, at);
+            const bool moved = timeSpan() != t || priceSpan() != p;
+            EXPECT_EQ(view->getViewportVersion() - v, moved ? 1u : 0u) << "one stored change per click";
+        }
+        return settle();
+    };
+    for (const int64_t startMinutes : {2, 10, 60, 600}) {
+        SCOPED_TRACE(testing::Message() << startMinutes << " min");
+        const double centre = 100'100;
+        ugr->setViewport(viewLo, viewLo + startMinutes * minute, centre - startMinutes, centre + startMinutes);
+        ASSERT_TRUE(settle()) << error.toStdString();
+        ASSERT_TRUE(clicksOut(40)) << error.toStdString();
+        // One column per pixel drawn (a 600 min view already draws it: its clicks have
+        // nothing left to zoom), one row per pixel.
+        EXPECT_EQ(drawn().colPx, 1);
+        EXPECT_NEAR(drawn().drawnEndMs - drawn().drawnStartMs, maxTime, 1e-3) << "one column per pixel";
+        EXPECT_LE(timeSpan(), maxTime);
+        EXPECT_DOUBLE_EQ(priceSpan(), maxPrice) << "one row per pixel";
+        EXPECT_EQ(drawn().rowPx, 1);
+    }
+    // At the price limit a click out keeps the price bounds exactly (time is at its
+    // limit too: nothing moves); from a narrower time it zooms time only.
+    ugr->setViewport(viewLo, viewLo + 100 * minute, view->getMinPrice(), view->getMaxPrice());
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const double lo = view->getMinPrice(), hi = view->getMaxPrice();
+    notch(-1, at);
+    EXPECT_GT(timeSpan(), 100.0 * minute);
+    EXPECT_EQ(view->getMinPrice(), lo) << "the price at its limit stays exactly";
+    EXPECT_EQ(view->getMaxPrice(), hi);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    // Zoom-in stops at the minimum spans (the GPU floors: a few columns and rows).
+    const double minTime = view->minTimeSpanMs(), minPrice = view->minPriceSpan();
+    ASSERT_GT(minTime, 0);
+    ASSERT_GT(minPrice, 0);
+    for (int i = 0; i < 60; ++i) notch(1, at);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    EXPECT_GE(timeSpan(), minTime);
+    EXPECT_LT(timeSpan(), minTime * chart_raster::kZoomStepRatio * 1.3) << "and reaches the floor's rung";
+    EXPECT_GE(priceSpan(), minPrice * (1 - 1e-12));
+    EXPECT_LT(priceSpan(), minPrice * 2);
+    // A view below the floors (e.g. the Agent API's) is not widened by a zoom-in; a
+    // zoom-out works from there.
+    ugr->setViewport(viewLo, viewLo + minute, 100'000, 100'001);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const double t1 = timeSpan(), p1 = priceSpan();
+    const uint64_t v1 = view->getViewportVersion();
+    notch(1, at);
+    EXPECT_EQ(view->getViewportVersion(), v1) << "a zoom-in never widens";
+    EXPECT_EQ(timeSpan(), t1);
+    EXPECT_EQ(priceSpan(), p1);
+    notch(-1, at);
+    EXPECT_GT(timeSpan(), t1) << "zoom-out works from there";
+    ASSERT_TRUE(settle()) << error.toStdString();
+    // After axis drags widen the view (continuous, then the nearest rung), the clicks
+    // still zoom out to the max spans.
+    for (int i = 0; i < 5; ++i) {
+        ugr->zoomTimeDrag(-240, 320);
+        ugr->zoomPriceDrag(-240, 160);
+        ASSERT_TRUE(frames(1)) << error.toStdString();
+    }
+    ugr->endZoomGesture();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    EXPECT_FALSE(drawn().free);
+    ASSERT_TRUE(clicksOut(40)) << error.toStdString();
+    EXPECT_EQ(drawn().colPx, 1);
+    EXPECT_NEAR(drawn().drawnEndMs - drawn().drawnStartMs, maxTime, 1e-3);
+    EXPECT_DOUBLE_EQ(priceSpan(), maxPrice);
+    // Axis drags far past the limits stop at them too.
+    for (int i = 0; i < 100; ++i) {
+        ugr->zoomTimeDrag(-240, 320);
+        ugr->zoomPriceDrag(-240, 160);
+    }
+    ugr->endZoomGesture();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    EXPECT_EQ(timeSpan(), maxTime);
+    EXPECT_DOUBLE_EQ(priceSpan(), maxPrice);
+}
+
 // The S6a input route on the real chart QML (DepthChartView.qml): a synthesized
 // wheel reaches UnifiedGridRenderer and changes the viewport exactly once; the
 // price axis WheelHandler zooms price only; a time-axis MouseArea drag obeys the
@@ -2436,7 +2569,8 @@ TEST(UgrInput, InputRouteReachesTheChartAndAxisAreasOncePerWheel) {
     ASSERT_EQ(apply("wheel", "priceAxis", 20, 200, 120), 200);
     EXPECT_EQ(changes, 2) << "the price axis WheelHandler: one change";
     EXPECT_EQ(timeSpan(), time1) << "price only";
-    // Time axis drag outward far past the clamp (MouseArea zoomTimeAt).
+    // Time axis drag outward far past the clamp (MouseArea zoomTimeDrag, the release
+    // settles on the nearest rung).
     ASSERT_EQ(apply("dragStart", "timeAxis", 500, 10), 200);
     for (int x = 480; x > 0; x -= 20) ASSERT_EQ(apply("dragMove", "timeAxis", x, 10), 200);
     ASSERT_EQ(apply("dragEnd", "timeAxis", 20, 10), 200);

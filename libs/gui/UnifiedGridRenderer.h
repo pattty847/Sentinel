@@ -200,6 +200,8 @@ private:
     qint64 zoomNowMs() const;
     // The chart and axis wheels: notches are clicks, a trackpad scroll is continuous.
     void wheelZoom(int angle, bool notch, Qt::ScrollPhase phase, double x, double y, bool time, bool price);
+    // The stored view zoomed by factor about a point, in the limits (no camera yet).
+    void zoomStoredView(double factor, double x, double y, bool time, bool price);
     // A continuous zoom that settles on a rung after settleMs without input.
     void zoomContinuousFor(double factor, double x, double y, bool time, bool price, int settleMs);
     // GUI thread, once per frame before the sync (updatePolish): the glide's progress
@@ -474,13 +476,6 @@ public:
     chart_raster::RasterCamera restCameraNow(bool includeDrag = true) const;
     Q_INVOKABLE void zoomIn();
     Q_INVOKABLE void zoomOut();
-    Q_INVOKABLE void zoomAt(double rawDelta, double centerX, double centerY,
-                            double viewportWidth = -1.0,
-                            double viewportHeight = -1.0);
-    Q_INVOKABLE void zoomTimeAt(double rawDelta, double centerX,
-                                double viewportWidth = -1.0);
-    Q_INVOKABLE void zoomPriceAt(double rawDelta, double centerY,
-                                 double viewportHeight = -1.0);
     Q_INVOKABLE void resetZoom();
     Q_INVOKABLE void beginPanAt(double x, double y);
     Q_INVOKABLE void updatePanAt(double x, double y);

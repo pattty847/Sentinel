@@ -280,13 +280,20 @@ RowRung rowRung(RowRung current, int clicks, int heightDev, double minSpan, doub
     if (clicks == 0 || !(current.tick > 0) || current.rowPx <= 0 || heightDev <= 0) return current;
     const double s0 = double(current.rowPx) / current.tick;
     const double aim = s0 * std::pow(kZoomStepRatio, double(clicks));
-    const RowRung best = bestRung(aim, heightDev, minSpan, maxSpan, tickAt, current.tick, [&](double scale) {
+    // Only the limit in the click's direction applies: a view beyond the other one
+    // (e.g. an API view below the zoom-in floor) still zooms back toward it.
+    const double lo = clicks > 0 ? minSpan : 0.0, hi = clicks < 0 ? maxSpan : 0.0;
+    const RowRung best = bestRung(aim, heightDev, lo, hi, tickAt, current.tick, [&](double scale) {
         return clicks > 0 ? scale > s0 * (1 + 1e-9) : scale < s0 * (1 - 1e-9);
     });
     if (best.rowPx > 0) return best;
-    // No whole-row rung the chart would keep: one px at the current tick, if allowed.
-    const int px = current.rowPx + (clicks > 0 ? 1 : -1);
-    if (px >= 1 && inLimits(double(heightDev) * current.tick / px, minSpan, maxSpan)) return {current.tick, px};
+    // No whole-row rung the chart would keep in the limit: one px at the current tick,
+    // or the rung at the limit, if that still moves.
+    const double H = double(heightDev), t = current.tick;
+    int px = current.rowPx + (clicks > 0 ? 1 : -1);
+    if (clicks < 0 && hi > 0) px = std::max(px, int(std::ceil(H * t / hi - 1e-9)));
+    if (clicks > 0 && lo > 0) px = std::min(px, int(std::floor(H * t / lo + 1e-9)));
+    if (px >= 1 && (clicks > 0 ? px > current.rowPx : px < current.rowPx)) return {t, px};
     return current;
 }
 
