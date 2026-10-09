@@ -95,9 +95,16 @@ RasterCamera shiftedRaster(RasterCamera camera, double dxDev, double dyDev);
 // A camera expressed on another surface (device pixel ratio and device size): the
 // logical picture stays, device coordinates scale with the ratio (free form).
 RasterCamera onSurface(RasterCamera camera, double dpr, int widthDev, int heightDev);
-// The continuous camera on the axes a gesture zooms, the rest camera's whole pixels
-// on the others.
-RasterCamera partlyContinuous(RasterCamera continuous, const RasterCamera &rest, bool time, bool price);
+// The camera a frame draws when the axes move independently: the time axis from
+// timeCam and the price axis from priceCam where they are free (a glide or a gesture on
+// that axis), the rest camera's whole pixels elsewhere; dimensions, tick and integers
+// are the rest camera's (the price scale is kept in world terms at the frame's tick).
+RasterCamera composeAxes(const RasterCamera &timeCam, bool timeFree, const RasterCamera &priceCam, bool priceFree,
+                         const RasterCamera &rest);
+// The same rest camera on one axis: whole pixels, edges and surface (and the tick for
+// price).
+bool sameTimeAxis(const RasterCamera &a, const RasterCamera &b);
+bool samePriceAxis(const RasterCamera &a, const RasterCamera &b);
 // The frame's TimeAxisMapping (every layer maps through it): the drawn window over
 // the device-integer surface, cellW = C / dpr, cellH = P / dpr.
 TimeAxisMapping toMapping(const RasterCamera &camera);

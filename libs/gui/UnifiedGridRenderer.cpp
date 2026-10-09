@@ -210,8 +210,6 @@ void UnifiedGridRenderer::geometryChange(const QRectF &newGeometry,
                "old=" << oldGeometry.width() << "x" << oldGeometry.height()
                << " new=" << newGeometry.width() << "x" << newGeometry.height());
 
-    endZoomGlide(); // a resize changes the surface the glide interpolates on
-    m_zoomGesture = false;
     if (m_viewState) {
       m_viewState->setViewportSize(newGeometry.width(), newGeometry.height());
     }
@@ -573,15 +571,13 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
       if (following) {
         const qint64 nominal = gpuLiveEndMs(span);
         if (nominal > 0) end = nominal; // the new timeframe's padded live edge
+        m_followPadding.reset();
         if (drawnBefore.valid && anchor > 0 && nominal > 0) {
-          // Keep the drawn Now column (the live bucket's centre) exactly where it is drawn,
-          // in whole device pixels: the destination camera's column width first (the new
-          // timeframe can clamp it, at most tf px), then the end that puts the new live
-          // bucket's centre on the old one's (review r3; fix round 1, finding 6).
+          // The destination camera's column width: when it equals the drawn one, the Now
+          // column stays exactly where it is drawn (whole device pixels; review r3) and
+          // follow-live keeps that padding; when a cap changed it (a column is at most tf
+          // px, at least one per px), the chart re-lays out at the nominal live end.
           const int64_t tf = timeframe_ms;
-          const double oldLiveEnd = double(recording::floorDiv(anchor + previousTf - 1, previousTf) * previousTf);
-          const double oldNow = drawnBefore.xDev(oldLiveEnd) - 0.5 * drawnBefore.colPxF;
-          const int64_t newLiveEnd = recording::floorDiv(anchor + tf - 1, tf) * tf;
           const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
           chart_raster::RasterStep previous;
           {
@@ -597,11 +593,11 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
             return chart_raster::computeRaster(rasterInputs(vp, m_gpuLayer->tickPrice(), width(), height(), dpr),
                                                previous);
           };
-          if (const auto dest = restAt(nominal); dest.valid) {
+          if (const auto dest = restAt(nominal); dest.valid && dest.colPx == drawnBefore.colPx) {
+            const double oldLiveEnd = double(recording::floorDiv(anchor + previousTf - 1, previousTf) * previousTf);
+            const double liveEndX = drawnBefore.xDev(oldLiveEnd); // whole device px at rest
+            const int64_t newLiveEnd = recording::floorDiv(anchor + tf - 1, tf) * tf;
             const double C = dest.colPx, W = dest.widthDev;
-            // The live bucket's end at a whole pixel (a column width that changed by an odd
-            // number of pixels leaves the centre half a pixel off: the nearest is kept).
-            const double liveEndX = std::round(oldNow + 0.5 * C);
             int64_t e = newLiveEnd + std::llround((W - liveEndX) * double(tf) / C);
             for (const int64_t candidate : {e, e - 1, e + 1})
               if (const auto cam = restAt(candidate); cam.valid && cam.colPx == dest.colPx &&
@@ -609,8 +605,8 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
                 e = candidate;
                 break;
               }
-            // Follow-live keeps it (no shift right after the switch); else the nominal end.
-            if (chart_raster::followShift(e, nominal, tf, dest.colPx) == 0) end = e;
+            end = e;
+            m_followPadding = FollowPadding{e - newLiveEnd, span, tf};
           }
         }
       } else if (rightFrac) {
@@ -898,24 +894,37 @@ bool UnifiedGridRenderer::rasterPanShift(QPointF drag, qint64& timeShiftMs, doub
 // Follow-live from LiveSnapshot::openEndMs: the view end stays one padding past
 // the live bucket's end.
 void UnifiedGridRenderer::followGpuLive() {
+  if (m_gpuLayer) followGpuLiveTo(m_gpuLayer->liveOpenEndMs());
+}
+
+void UnifiedGridRenderer::followGpuLiveTo(int64_t openEnd) {
   if (!m_gpuLayer || !m_viewState || !m_viewState->isTimeWindowValid() ||
       !m_viewState->isAutoScrollEnabled() || m_viewState->isDragging())
     return;
-  const int64_t openEnd = m_gpuLayer->liveOpenEndMs();
   const int64_t tf = m_currentTimeframe_ms;
   if (openEnd <= 0 || tf <= 0) return;
   const int64_t start = m_viewState->getVisibleTimeStart(), end = m_viewState->getVisibleTimeEnd();
   const int64_t span = end - start;
   const int64_t liveEnd = recording::floorDiv(openEnd + tf - 1, tf) * tf;
-  const int64_t pad = std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(span) * m_autoScrollPaddingFrac));
+  // The padding a timeframe switch kept (the Now column where it was drawn), while the
+  // span and timeframe are the switch's; else the nominal one.
+  const bool kept = m_followPadding && m_followPadding->spanMs == span && m_followPadding->tfMs == tf;
+  const int64_t pad = kept ? m_followPadding->padMs
+                           : std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(span) *
+                                                                         m_autoScrollPaddingFrac));
   const int64_t target = liveEnd + pad;
-  // Whole buckets, and nothing while the end is within one drawn pixel of the padding (a
-  // timeframe switch keeps the Now column's drawn pixel, so its end may differ from the
-  // nominal padding by up to a pixel): the drawn phase never changes, a live step moves
-  // the picture by whole columns.
+  // Whole buckets, and nothing while the end is within one drawn pixel of the padding:
+  // the drawn phase never changes, a live step moves the picture by whole columns.
   const auto cam = restCameraNow(false);
   const int64_t shift = chart_raster::followShift(end, target, tf, cam.valid ? cam.colPx : 0);
   if (shift <= 0) return; // the live bucket is inside the padded view
+  // A glide in flight on time moves with the view (the same world shift at both ends).
+  if (m_glideTime.active) {
+    auto& g = m_glideTime;
+    g.from = chart_raster::shiftedRaster(g.from, -double(shift) * g.from.pxPerMs(), 0);
+    g.end = chart_raster::shiftedRaster(g.end, -double(shift) * g.end.pxPerMs(), 0);
+    g.anchorTime += double(shift);
+  }
   setGpuViewportSelf(start + shift, end + shift, m_viewState->getMinPrice(), m_viewState->getMaxPrice());
   emit liveRenderTick();
 }
@@ -1716,10 +1725,15 @@ void UnifiedGridRenderer::endPanAt() {
   const QPointF drag = m_viewState->getPanVisualOffset();
   const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
   m_viewState->handlePanEnd(true);
-  if (m_glide.active && dragging) {
+  if (dragging) {
+    // A glide in flight: the release commits the dragged whole pixels, so both of its
+    // ends move by them too (the picture stays where the drag left it).
     const double dx = double(std::llround(drag.x() * dpr)), dy = double(std::llround(drag.y() * dpr));
-    m_glide.from = chart_raster::shiftedRaster(m_glide.from, dx, dy);
-    m_glide.to = chart_raster::shiftedRaster(m_glide.to, dx, dy);
+    for (AxisGlide* g : {&m_glideTime, &m_glidePrice})
+      if (g->active) {
+        g->from = chart_raster::shiftedRaster(g->from, dx, dy);
+        g->end = chart_raster::shiftedRaster(g->end, dx, dy);
+      }
   }
   update();
 }

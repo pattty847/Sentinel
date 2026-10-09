@@ -2435,6 +2435,48 @@ TEST_F(UgrGpu, FollowLiveTimeframeSwitchKeepsTheNowColumnExactly) {
     EXPECT_TRUE(ugr->autoScrollEnabled());
     ASSERT_EQ(drawn().colPx, 7);
     EXPECT_EQ(ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(5 * minute)), x) << "the Now column moved";
+    // Follow-live honors that end: no snap at the next update; a live step of one bucket
+    // moves the picture by exactly one column.
+    ugr->followLiveForTest(anchor);
+    ASSERT_TRUE(frames(1)) << error.toStdString();
+    EXPECT_EQ(ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(5 * minute)), x) << "a follow update snapped";
+    const double before = ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(5 * minute));
+    ugr->followLiveForTest(anchor + 5 * minute);
+    ASSERT_TRUE(frames(1)) << error.toStdString();
+    EXPECT_EQ(ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(5 * minute)), before - 7) << "one column";
+}
+
+// Contract D: the kept end is a follow-live padding that later updates honor. A view
+// whose end sat one drawn pixel behind the nominal padding (allowed while following)
+// keeps its Now column across 1m -> 5m (C = 51 both), and the next follow update does
+// not shift it (the nominal 5m padding is 8,229 ms more, beyond one drawn pixel).
+TEST_F(UgrGpu, AKeptFollowLivePaddingIsHonoredByTheNextUpdate) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(pump(10'000, [&] { return layer().liveAnchorMs() > 0; })) << "the recording's availability";
+    const int64_t anchor = layer().liveAnchorMs();
+    const int64_t span = 754'735, liveEnd = (anchor + minute - 1) / minute * minute;
+    const int64_t end = liveEnd + int64_t(double(span) * 0.08) - 1'177; // one drawn pixel behind
+    ugr->setViewport(end - span, end, 99'900, 100'300);
+    ugr->enableAutoScroll(true); // returns to the nominal live end
+    ugr->getViewState()->setRasterAnchor(1.0, 0.5);
+    ugr->getViewState()->setViewport(end - span, end, 99'900, 100'300); // following, one drawn pixel behind
+    ASSERT_TRUE(ugr->autoScrollEnabled());
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    ASSERT_EQ(drawn().colPx, 51);
+    ugr->followLiveForTest(anchor);
+    ASSERT_EQ(ugr->getViewState()->getVisibleTimeEnd(), end) << "follow-live keeps it (within one drawn pixel)";
+    auto nowCentre = [&](int64_t tf) { return double((anchor + tf - 1) / tf * tf) - double(tf) / 2; };
+    const double x = ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(minute));
+    ugr->setTimeframe(int(5 * minute));
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    ASSERT_EQ(drawn().colPx, 51);
+    EXPECT_EQ(ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(5 * minute)), x) << "Now kept";
+    const int64_t kept = ugr->getViewState()->getVisibleTimeEnd();
+    ugr->followLiveForTest(anchor);
+    ASSERT_TRUE(frames(1)) << error.toStdString();
+    EXPECT_EQ(ugr->getViewState()->getVisibleTimeEnd(), kept) << "the next follow update shifted the kept end";
+    EXPECT_EQ(ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(5 * minute)), x);
 }
 
 // ---------------------------------------------------------------- A2 fix round 1
@@ -2483,9 +2525,11 @@ TEST_F(UgrGpu, APriceOnlyZoomPredictsTheTickOverTheStoredTime) {
     }
 }
 
-// Finding 2: the Auto tick for a click's target commits only after the first frame
-// proposed it (here a late first frame, 50 ms after the click). The glide then
-// continues from what was drawn to the new end: the drawn scale never moves back.
+// Contract A (fix rounds 1-2): the glide's end is fixed at the click, at the tick and
+// rung the click chose; the Auto tick for it commits only after the first frame
+// proposed it. With the first frame 50, 60, 100, 130 or 200 ms after the click the
+// drawn scale only grows, never passes the rung's, and lands on the rung (a first frame
+// after the glide's end holds the end until the tick commits).
 TEST_F(UgrGpu, AnAutoTickCommitMidGlideKeepsTheGlideMonotonic) {
     noLabels();
     gpuOn();
@@ -2495,12 +2539,19 @@ TEST_F(UgrGpu, AnAutoTickCommitMidGlideKeepsTheGlideMonotonic) {
     // Minutes 120..123: the near $1 band covers $99,830..$100,200 (fine data, Auto
     // picks $1, $2, $5 or $10 by the rows).
     const int64_t s = epoch + 120 * minute, e = s + 4 * minute;
+    auto wide = [&] { // a coarse Auto state, then the start view
+        view->setRasterAnchor(1.0, 0.5);
+        ugr->setViewport(s, e, 99'000, 101'000);
+        return settle();
+    };
+    ASSERT_TRUE(wide()) << error.toStdString();
     view->setRasterAnchor(1.0, 0.5);
     ugr->setViewport(s, e, 99'840, 100'190);
     ASSERT_TRUE(settle()) << error.toStdString();
     // Click in until the next click's rung changes the tick and the old tick would draw
     // the target with a larger scale than the rung's (the overshoot that reverses).
     chart_raster::RowRung target;
+    double startLo = 0, startHi = 0, oldTick = 0;
     bool found = false;
     for (int i = 0; i < 16 && !found; ++i) {
         const auto cam = drawn();
@@ -2513,6 +2564,9 @@ TEST_F(UgrGpu, AnAutoTickCommitMidGlideKeepsTheGlideMonotonic) {
             const int oldRows = chart_raster::stepPixels(cam.heightDev * current.tick / span, current.rowPx);
             if (oldRows / current.tick > target.rowPx / target.tick * (1 + 1e-9)) {
                 found = true;
+                startLo = view->getMinPrice();
+                startHi = view->getMaxPrice();
+                oldTick = current.tick;
                 break;
             }
         }
@@ -2520,25 +2574,36 @@ TEST_F(UgrGpu, AnAutoTickCommitMidGlideKeepsTheGlideMonotonic) {
         ASSERT_TRUE(settle()) << error.toStdString();
     }
     ASSERT_TRUE(found) << "no zoom-in whose Auto tick change overshoots at the old tick";
-    const double oldTick = drawn().tick;
+    const double targetScale = target.rowPx / target.tick;
     manualZoomClock();
-    const qint64 t0 = clockMs;
-    ugr->zoomPriceClicks(1, 160);
-    std::vector<double> scales;
-    std::vector<double> ticks;
-    for (qint64 ms = 50; ms <= 50 + 2 * chart_raster::kZoomGlideMs; ms += 10) {
-        ASSERT_TRUE(frameAt(t0 + ms)) << error.toStdString();
-        scales.push_back(drawn().pxPerPrice());
-        ticks.push_back(drawn().tick);
-        if (!ugr->zoomGliding()) break;
+    for (const qint64 delay : {50, 60, 100, 130, 200}) {
+        SCOPED_TRACE(testing::Message() << "first frame " << delay << " ms after the click");
+        ASSERT_TRUE(wide()) << error.toStdString();
+        view->setRasterAnchor(1.0, 0.5);
+        ugr->setViewport(s, e, startLo, startHi);
+        ASSERT_TRUE(settle()) << error.toStdString();
+        ASSERT_EQ(drawn().tick, oldTick);
+        const qint64 t0 = clockMs;
+        ugr->zoomPriceClicks(1, 160);
+        std::vector<double> scales;
+        bool sawOldTick = false;
+        for (qint64 ms = delay; ms <= delay + 3 * chart_raster::kZoomGlideMs; ms += 10) {
+            ASSERT_TRUE(frameAt(t0 + ms)) << error.toStdString();
+            scales.push_back(drawn().pxPerPrice());
+            sawOldTick = sawOldTick || drawn().tick == oldTick;
+            EXPECT_LE(scales.back(), targetScale * (1 + 1e-9)) << ms << " ms: past the rung";
+            if (!ugr->priceGliding()) break;
+        }
+        ASSERT_FALSE(ugr->priceGliding()) << "landed";
+        EXPECT_TRUE(sawOldTick) << "the first frame drew the old tick (the commit came later)";
+        for (size_t i = 1; i < scales.size(); ++i)
+            EXPECT_GE(scales[i], scales[i - 1] * (1 - 1e-12)) << "frame " << i << ": the drawn scale moved back";
+        EXPECT_EQ(drawn().tick, target.tick);
+        EXPECT_EQ(drawn().rowPx, target.rowPx);
+        EXPECT_FALSE(drawn().free);
+        EXPECT_LE(clockMs - t0, 2 * chart_raster::kZoomGlideMs + std::max<qint64>(delay, 10))
+            << "landed by the cap (or the first frame after it)";
     }
-    ASSERT_FALSE(ugr->zoomGliding());
-    EXPECT_EQ(ticks.front(), oldTick) << "the first frame proposed the new tick";
-    EXPECT_EQ(ticks.back(), target.tick) << "and it committed during the glide";
-    for (size_t i = 1; i < scales.size(); ++i)
-        EXPECT_GE(scales[i], scales[i - 1] * (1 - 1e-12)) << "frame " << i << ": the drawn scale moved back";
-    EXPECT_EQ(drawn().rowPx, target.rowPx);
-    EXPECT_FALSE(drawn().free);
 }
 
 // Finding 3: a move to a screen of another device pixel ratio mid-glide. The glide's
@@ -2653,33 +2718,324 @@ TEST_F(UgrGpu, BatchedNotchesLandOnTheSingleClickRungs) {
     }
 }
 
-// Finding 6 (Astra's case at 640 px): following live, a 1m view of 4 columns (C = 160,
-// the live bucket one column inside, Now centre at 400 px) switched to 100 ms, where
-// a column is at most 100 px: the destination's column width is solved first, and the
-// Now column stays at 400 px exactly (the old column width put it at 490).
-TEST_F(UgrGpu, FollowLiveSwitchToAClampedColumnWidthKeepsTheNowColumn) {
+// Contract D: following live, a timeframe switch whose 1 ms/px or 1 px/column cap
+// changes the column width re-lays out at the nominal live end of the new timeframe
+// (no preservation), and follow-live does not shift right after. Astra's cases at
+// 8,000 device px: 4 columns of 1m (C = 2,000) to 1s (C capped to 1,000), and back.
+TEST_F(UgrGpu, FollowLiveSwitchThatChangesTheColumnWidthLaysOutAtTheNominalEnd) {
     noLabels();
+    ugr->setSize(QSizeF(8000, 320)); // wider than the scene: only the mapping matters here
     gpuOn();
     ASSERT_TRUE(pump(10'000, [&] { return layer().liveAnchorMs() > 0; })) << "the recording's availability";
     const int64_t anchor = layer().liveAnchorMs();
-    const int64_t liveEnd = (anchor + minute - 1) / minute * minute, end = liveEnd + minute;
-    ugr->getViewState()->setRasterAnchor(1.0, 0.5);
-    ugr->setViewport(end - 4 * minute, end, 99'900, 100'300);
-    ugr->enableAutoScroll(true);
-    ASSERT_TRUE(frames(3)) << error.toStdString();
-    ASSERT_TRUE(ugr->autoScrollEnabled());
-    ASSERT_EQ(drawn().colPx, 160);
-    auto nowCentre = [&](int64_t tf) { return double((anchor + tf - 1) / tf * tf) - double(tf) / 2; };
-    const double x = ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(minute));
-    ASSERT_EQ(x, 400.0);
-    ugr->setTimeframe(100);
-    ASSERT_TRUE(frames(2)) << error.toStdString();
-    EXPECT_TRUE(ugr->autoScrollEnabled());
-    EXPECT_EQ(drawn().colPx, 100) << "a column is at most tf device px";
-    EXPECT_EQ(ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(100)), x) << "the Now column moved";
-    const int64_t target = (anchor + 99) / 100 * 100 + std::max<int64_t>(100, int64_t(double(timeSpan()) * 0.08));
-    EXPECT_EQ(chart_raster::followShift(ugr->getViewState()->getVisibleTimeEnd(), target, 100, drawn().colPx), 0)
-        << "follow-live keeps it";
+    auto nominalEnd = [&](int64_t tf, int64_t span) {
+        return (anchor + tf - 1) / tf * tf + std::max<int64_t>(tf, int64_t(double(span) * 0.08));
+    };
+    auto nowX = [&](int64_t tf) {
+        return ugr->currentTimeAxisMapping().timeToScreenX(double((anchor + tf - 1) / tf * tf) - double(tf) / 2);
+    };
+    const int64_t second = 1000;
+    for (const auto &[fromTf, toTf, fromC, toC] : {std::tuple{minute, second, 2000, 1000},
+                                                    {second, minute, 1000, 2000}}) {
+        SCOPED_TRACE(testing::Message() << fromTf << " ms -> " << toTf << " ms");
+        ugr->setTimeframe(int(fromTf));
+        const int64_t span = 4 * fromTf;
+        ugr->getViewState()->setRasterAnchor(1.0, 0.5);
+        ugr->setViewport(nominalEnd(fromTf, span) - span, nominalEnd(fromTf, span), 99'900, 100'300);
+        ugr->enableAutoScroll(true);
+        ASSERT_TRUE(frames(3)) << error.toStdString();
+        ASSERT_TRUE(ugr->autoScrollEnabled());
+        ASSERT_EQ(drawn().colPx, fromC);
+        ugr->setTimeframe(int(toTf));
+        ASSERT_TRUE(frames(2)) << error.toStdString();
+        ASSERT_EQ(drawn().colPx, toC) << "the cap changed the column width";
+        const int64_t toSpan = timeSpan();
+        const int64_t end = ugr->getViewState()->getVisibleTimeEnd();
+        EXPECT_EQ(end, nominalEnd(toTf, toSpan)) << "the nominal live end of the new timeframe";
+        const double padPx = double(end - (anchor + toTf - 1) / toTf * toTf) * toC / double(toTf);
+        EXPECT_EQ(nowX(toTf), 8000.0 - padPx - toC / 2.0) << "Now at the nominal placement";
+        ugr->followLiveForTest(anchor);
+        EXPECT_EQ(ugr->getViewState()->getVisibleTimeEnd(), end) << "no follow-live shift right after";
+    }
+}
+
+// ---------------------------------------------------------------- A2 fix round 2
+// The sources that can change a glide's end, one row each (the contracts are in
+// docs/ARCHITECTURE.md, smooth zoom). The fixture for most: auto price off, a click in
+// at (211, 97) that zooms both axes, the manual glide clock; `x/y` the drawn position of
+// the content under the cursor.
+class UgrGlide : public UgrGpu {
+protected:
+    const QPointF at{211, 97};
+    double t = 0, p = 0; // the content under the cursor before the click
+    qint64 t0 = 0;
+    bool startBothAxes() {
+        noLabels();
+        manualZoomClock();
+        gpuOn();
+        if (!settle()) return false;
+        ugr->getViewState()->setAutoPriceScale(false);
+        if (!settle()) return false;
+        const auto m = ugr->currentTimeAxisMapping();
+        t = m.screenXToTime(at.x());
+        p = m.screenYToPrice(at.y());
+        t0 = clockMs;
+        notch(1, at);
+        return ugr->timeGliding() && ugr->priceGliding();
+    }
+    double x() const { return ugr->currentTimeAxisMapping().timeToScreenX(t); }
+    double y() const { return ugr->currentTimeAxisMapping().priceToScreenY(p); }
+    // Frames every 10 ms until both axes land (or `untilMs` after t0).
+    bool glideOn(qint64 untilMs) {
+        for (qint64 ms = clockMs - t0 + 10; ms <= untilMs; ms += 10) {
+            if (!frameAt(t0 + ms)) return false;
+            if (!ugr->zoomGliding()) return true;
+        }
+        return true;
+    }
+};
+
+// Rule B, a drag and its pan commit during a glide: the picture moves 1:1 with the
+// pointer, the release keeps it where the drag left it (no (1-e)*delta jump), and the
+// glide lands on the dragged rest view.
+TEST_F(UgrGlide, ADragAndItsCommitMoveTheGlideWithThePointer) {
+    ASSERT_TRUE(startBothAxes()) << error.toStdString();
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    const double x0 = x(), y0 = y();
+    ugr->beginPanAt(320, 160);
+    ugr->updatePanAt(337, 151); // 17 px right, 9 px up
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    EXPECT_NEAR(x() - x0, 17, 1e-6) << "the drag moves the glide 1:1";
+    EXPECT_NEAR(y() - y0, -9, 1e-6);
+    ugr->endPanAt();
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    EXPECT_NEAR(x() - x0, 17, 1e-6) << "the commit keeps the picture where the drag left it";
+    EXPECT_NEAR(y() - y0, -9, 1e-6);
+    ASSERT_TRUE(glideOn(400)) << error.toStdString();
+    EXPECT_FALSE(ugr->zoomGliding());
+    EXPECT_LE(std::abs(x() - at.x() - 17), 0.5 + 1e-6) << "landed with the content dragged by 17 px";
+    EXPECT_FALSE(drawn().free);
+}
+
+// Rule B, a resize during a glide (another surface): the glide continues from what was
+// drawn (the logical picture stays) and lands on the new rest view.
+TEST_F(UgrGlide, AResizeRebasesTheGlide) {
+    ASSERT_TRUE(startBothAxes()) << error.toStdString();
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    const double x0 = x(), y0 = y();
+    ugr->setSize(QSizeF(600, 300));
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    EXPECT_TRUE(ugr->zoomGliding()) << "still gliding";
+    EXPECT_NEAR(x(), x0, 1e-6) << "no jump at the resize";
+    EXPECT_NEAR(y(), y0, 1e-6);
+    ASSERT_TRUE(glideOn(400)) << error.toStdString();
+    EXPECT_FALSE(ugr->zoomGliding());
+    EXPECT_EQ(drawn().widthDev, 600);
+    EXPECT_FALSE(drawn().free);
+}
+
+// Rule B, a tick change the click did not predict (a Manual tick chosen mid-glide): the
+// glide continues from what was drawn to the new tick's rows and lands well before the
+// cap.
+TEST_F(UgrGlide, ATickChangeMidGlideRebasesAndLands) {
+    auto manual = brightSettings();
+    manual.showLabels = false;
+    manual.tickMode = heatmap::TickMode::Manual;
+    manual.manualTick = 1000; // $10
+    ugr->setHeatmapChartSettings(manual, true);
+    ASSERT_TRUE(startBothAxes()) << error.toStdString();
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    const double y0 = y();
+    manual.manualTick = 500; // $5
+    ugr->setHeatmapChartSettings(manual, true);
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    EXPECT_NEAR(y(), y0, 1e-6) << "no jump at the change";
+    ASSERT_TRUE(glideOn(2 * chart_raster::kZoomGlideMs - 20)) << error.toStdString();
+    EXPECT_FALSE(ugr->priceGliding()) << "landed on the new rows before the cap";
+    EXPECT_EQ(drawn().tick, 5.0);
+    EXPECT_FALSE(drawn().free);
+}
+
+// Rule B, an end that changes on every frame (a stored price moved by one tick per
+// frame, as repeated refits): every change rebases, and the glide still lands no later
+// than its click + 2 * kZoomGlideMs, on the then current rest view.
+TEST_F(UgrGlide, AnEndThatChangesEveryFrameLandsByTheCap) {
+    ASSERT_TRUE(startBothAxes()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    const double tick = layer().tickPrice();
+    qint64 landedAt = -1;
+    for (qint64 ms = 10; ms <= 3 * chart_raster::kZoomGlideMs; ms += 10) {
+        view->setViewport(view->getVisibleTimeStart(), view->getVisibleTimeEnd(), view->getMinPrice() + tick,
+                          view->getMaxPrice() + tick); // as a refit (GridViewState directly)
+        ASSERT_TRUE(frameAt(t0 + ms)) << error.toStdString();
+        if (!ugr->priceGliding()) {
+            landedAt = ms;
+            break;
+        }
+    }
+    ASSERT_GE(landedAt, 0) << "the price glide never landed";
+    EXPECT_LE(landedAt, 2 * chart_raster::kZoomGlideMs) << "landed by the cap";
+    EXPECT_FALSE(drawn().free);
+    EXPECT_EQ(drawn().topRowIndex, ugr->restCameraNow(false).topRowIndex) << "on the current rest view";
+}
+
+// Rule B, an auto price refit during a glide that keeps the scale and moves the window
+// (new candles shifted by $230): the price glide continues from what was drawn (a frame
+// at the same instant draws the same rows), then lands on the refit window.
+TEST_F(UgrGlide, AConstantScaleRefitMidGlideContinuesFromTheDrawnRows) {
+    noLabels();
+    manualZoomClock();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    CandleSeriesBuffer buffer;
+    buffer.applyHistory("BTC-USD", 60, risingBars(viewLo - kHourMs, viewHi + kHourMs, minute, 99'000, 4));
+    ugr->setCandleBuffer(&buffer);
+    ugr->setAutoPriceScale(true);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    t0 = clockMs;
+    notch(2, at); // time zooms; the fit of the new window moves price too
+    ASSERT_TRUE(ugr->timeGliding());
+    ASSERT_TRUE(ugr->priceGliding()) << "the click's refit glides price";
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    const auto before = drawn();
+    const auto restBefore = ugr->restCameraNow(false);
+    uint64_t seq = 1;
+    for (const auto &bar : risingBars(viewLo - kHourMs, viewHi + kHourMs, minute, 99'230, 4)) // every bar $230 up
+        buffer.applyUpdate("BTC-USD", 60, bar, seq++, false);
+    const auto restAfter = ugr->restCameraNow(false);
+    ASSERT_EQ(restAfter.rowPx, restBefore.rowPx) << "the refit keeps the scale";
+    ASSERT_NE(restAfter.topRowIndex, restBefore.topRowIndex) << "and moves the window";
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    EXPECT_NEAR(drawn().drawnMaxPrice, before.drawnMaxPrice, 1e-9) << "the same instant draws the same rows";
+    EXPECT_NEAR(drawn().pxPerPrice(), before.pxPerPrice(), 1e-12);
+    // Then it moves on smoothly to the refit window: no frame moves the price under the
+    // cursor by more than 40% of the way left, and it lands at the glide's own end.
+    const double way = std::abs(restAfter.priceAtYDev(97) - drawn().priceAtYDev(97));
+    ASSERT_GT(way, 0);
+    double last = drawn().priceAtYDev(97), worst = 0;
+    qint64 landedAt = -1;
+    for (qint64 ms = 50; ms <= 3 * chart_raster::kZoomGlideMs; ms += 10) {
+        ASSERT_TRUE(frameAt(t0 + ms)) << error.toStdString();
+        const double now = drawn().priceAtYDev(97);
+        worst = std::max(worst, std::abs(now - last));
+        last = now;
+        if (!ugr->priceGliding()) {
+            landedAt = ms;
+            break;
+        }
+    }
+    EXPECT_LE(worst, 0.4 * way) << "a frame jumped " << worst << " of " << way;
+    ASSERT_GE(landedAt, 0);
+    EXPECT_LE(landedAt, chart_raster::kZoomGlideMs + 10) << "landed at the glide's end, not at the cap";
+    ASSERT_TRUE(glideOn(400)) << error.toStdString();
+    EXPECT_FALSE(ugr->zoomGliding());
+    EXPECT_EQ(drawn().topRowIndex, ugr->restCameraNow(false).topRowIndex);
+    ugr->setCandleBuffer(nullptr);
+}
+
+// Rule B, a follow-live step during a glide: both ends move by the same world shift, so
+// the picture moves with the live data at once (no rebase).
+TEST_F(UgrGlide, AFollowLiveStepMovesTheGlideByTheSameWorldShift) {
+    ASSERT_TRUE(startBothAxes()) << error.toStdString();
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    const double x0 = x();
+    auto *view = ugr->getViewState();
+    const int64_t end = view->getVisibleTimeEnd();
+    view->enableAutoScroll(true); // as following live (the zoom turned it off)
+    ugr->followLiveForTest(end + 3 * minute);
+    const int64_t shift = view->getVisibleTimeEnd() - end;
+    ASSERT_GT(shift, 0);
+    ASSERT_EQ(shift % minute, 0);
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    EXPECT_NEAR(ugr->currentTimeAxisMapping().timeToScreenX(t + double(shift)), x0, 1e-6)
+        << "the content moved by the world shift";
+    EXPECT_TRUE(ugr->timeGliding());
+}
+
+// Explicit re-layouts land a glide at once (as at rest): a timeframe switch and a symbol
+// switch.
+TEST_F(UgrGlide, ATimeframeOrSymbolSwitchLandsTheGlideAtOnce) {
+    ASSERT_TRUE(startBothAxes()) << error.toStdString();
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    ugr->setTimeframe(int(5 * minute));
+    EXPECT_FALSE(ugr->zoomGliding()) << "timeframe switch";
+    ASSERT_TRUE(frameAt(t0 + 50)) << error.toStdString();
+    EXPECT_FALSE(drawn().free);
+    t0 = clockMs;
+    notch(1, at);
+    ASSERT_TRUE(ugr->zoomGliding());
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    ugr->setActiveSymbol("TINY-USD");
+    EXPECT_FALSE(ugr->zoomGliding()) << "symbol switch";
+    ugr->setActiveSymbol("BTC-USD");
+}
+
+// Contract C, a click on one axis during a glide on the other: the running glide keeps
+// its course and its end time.
+TEST_F(UgrGlide, AClickOnOneAxisLeavesTheOtherAxisGlide) {
+    noLabels();
+    manualZoomClock();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ugr->getViewState()->setAutoPriceScale(false);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    t0 = clockMs;
+    ugr->zoomTimeClicks(1, 211);
+    ASSERT_TRUE(ugr->timeGliding());
+    ASSERT_FALSE(ugr->priceGliding());
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    const double c40 = drawn().colPxF;
+    ugr->zoomPriceClicks(1, 97);
+    ASSERT_TRUE(ugr->priceGliding());
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    EXPECT_EQ(drawn().colPxF, c40) << "the time glide did not restart";
+    ASSERT_TRUE(frameAt(t0 + chart_raster::kZoomGlideMs - 10)) << error.toStdString();
+    EXPECT_TRUE(ugr->timeGliding());
+    ASSERT_TRUE(frameAt(t0 + chart_raster::kZoomGlideMs + 1)) << error.toStdString();
+    EXPECT_FALSE(ugr->timeGliding()) << "the time glide landed at its own end";
+    EXPECT_TRUE(ugr->priceGliding()) << "the price glide is later";
+}
+
+// Contract C, a gesture on one axis during a glide on both: the gesture starts from the
+// drawn camera on its axis, the other axis keeps gliding (no snap to its end), in both
+// directions; an axis at rest stays whole-pixel.
+TEST_F(UgrGlide, AGestureOnOneAxisLeavesTheOtherAxisGlide) {
+    for (const bool priceGesture : {true, false}) {
+        SCOPED_TRACE(priceGesture ? "price axis drag during the glide" : "time axis drag during the glide");
+        ASSERT_TRUE(startBothAxes()) << error.toStdString();
+        ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+        const auto before = drawn();
+        const int endCol = ugr->restCameraNow(false).colPx, endRows = ugr->restCameraNow(false).rowPx;
+        if (priceGesture) ugr->zoomPriceDrag(48, 160);
+        else ugr->zoomTimeDrag(48, 320);
+        ASSERT_TRUE(ugr->zoomGesturing());
+        ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+        const auto now = drawn();
+        if (priceGesture) {
+            EXPECT_TRUE(ugr->timeGliding()) << "time keeps gliding";
+            EXPECT_FALSE(ugr->priceGliding());
+            EXPECT_EQ(now.colPxF, before.colPxF) << "time did not snap to its end";
+            EXPECT_NEAR(now.pxPerPrice(), before.pxPerPrice() * (1 + 48 * 0.0005), before.pxPerPrice() * 1e-9)
+                << "price continues from the drawn rows";
+        } else {
+            EXPECT_TRUE(ugr->priceGliding()) << "price keeps gliding";
+            EXPECT_FALSE(ugr->timeGliding());
+            EXPECT_EQ(now.pxPerPrice(), before.pxPerPrice()) << "price did not snap to its end";
+            EXPECT_NEAR(now.colPxF, before.colPxF * (1 + 48 * 0.0005), before.colPxF * 1e-6)
+                << "time continues from the drawn columns";
+        }
+        ASSERT_TRUE(frameAt(t0 + chart_raster::kZoomGlideMs + 1)) << error.toStdString();
+        if (priceGesture) {
+            EXPECT_FALSE(ugr->timeGliding()) << "time landed at its own end";
+            EXPECT_EQ(drawn().colPxF, double(endCol)) << "time at rest: whole pixels";
+        } else {
+            EXPECT_FALSE(ugr->priceGliding());
+            EXPECT_EQ(drawn().rowPxF, double(endRows));
+        }
+        ugr->endZoomGesture();
+        ASSERT_TRUE(settle()) << error.toStdString();
+        EXPECT_FALSE(drawn().free);
+    }
 }
 
 // The zoom limits on the ladder and the gestures (spec rules 1, 2 and 9; ported from

@@ -116,22 +116,33 @@ RasterCamera onSurface(RasterCamera cam, double dpr, int widthDev, int heightDev
     return cam;
 }
 
-RasterCamera partlyContinuous(RasterCamera continuous, const RasterCamera &rest, bool time, bool price) {
-    if (!rest.valid || !continuous.valid || (!time && !price)) return rest;
-    if (!time) { // the time axis stays the rest camera's whole pixels
-        continuous.colPx = rest.colPx;
-        continuous.leftColIndex = rest.leftColIndex;
-        continuous.colPxF = rest.colPxF;
-        continuous.leftF = rest.leftF;
+RasterCamera composeAxes(const RasterCamera &timeCam, bool timeFree, const RasterCamera &priceCam, bool priceFree,
+                         const RasterCamera &rest) {
+    if (!rest.valid || (!timeFree && !priceFree)) return rest;
+    RasterCamera cam = rest; // dimensions, tick, timeframe, the rest integers
+    if (timeFree && timeCam.valid) {
+        const RasterCamera t = onSurface(timeCam, rest.dpr, rest.widthDev, rest.heightDev);
+        cam.colPxF = t.colPxF;
+        cam.leftF = t.leftF;
     }
-    if (!price) {
-        continuous.rowPx = rest.rowPx;
-        continuous.topRowIndex = rest.topRowIndex;
-        continuous.rowPxF = rest.rowPxF;
-        continuous.topF = rest.topF;
+    if (priceFree && priceCam.valid) {
+        // The same world scale at the frame's tick (the drawn rows are the frame's).
+        const RasterCamera p = onSurface(priceCam, rest.dpr, rest.widthDev, rest.heightDev);
+        cam.rowPxF = p.pxPerPrice() * rest.tick;
+        cam.topF = p.topF;
     }
-    finishFree(continuous);
-    return continuous.valid ? continuous : rest;
+    finishFree(cam);
+    return cam.valid ? cam : rest;
+}
+
+bool sameTimeAxis(const RasterCamera &a, const RasterCamera &b) {
+    return a.valid && b.valid && a.colPx == b.colPx && a.leftColIndex == b.leftColIndex && a.widthDev == b.widthDev &&
+           a.dpr == b.dpr && a.tfMs == b.tfMs;
+}
+
+bool samePriceAxis(const RasterCamera &a, const RasterCamera &b) {
+    return a.valid && b.valid && a.tick == b.tick && a.rowPx == b.rowPx && a.topRowIndex == b.topRowIndex &&
+           a.heightDev == b.heightDev && a.dpr == b.dpr;
 }
 
 RasterCamera glideRaster(const RasterCamera &start, const RasterCamera &to, double anchorTimeMs, double anchorPrice,
