@@ -154,6 +154,90 @@ TEST(Roller, FeedFiltersProductsClocksAndLifecycle) {
     apply(7000,capture::Kind::FrameReference,"{\"sequence_gaps\":0}");
     EXPECT_EQ(ticks,8);EXPECT_EQ(snaps,1);EXPECT_EQ(invalid,2);EXPECT_EQ(trades,1);EXPECT_EQ(time,Epoch+7000);
 }
+TEST(Roller, FeedSortsWholeTradeFramesAndDedupesResentSnapshots) {
+    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/trades-XXXXXX"));
+    ASSERT_TRUE(temp.isValid());
+    const auto trade=[](const char* id,const char* time,const char* product="BTC-USD",const char* price="100") {
+        return json{{"product_id",product},{"trade_id",id},{"time",time},
+                    {"side","BUY"},{"price",price},{"size","1"}};
+    };
+    const auto one=trade("1","2027-01-01T00:00:01.000Z");
+    const auto two=trade("2","2027-01-01T00:00:02.000Z");
+    const auto ten=trade("10","2027-01-01T00:00:02.000Z");
+    const auto opaque=trade("1x","2027-01-01T00:00:02.000Z");
+    const auto newest=trade("900","2027-01-01T00:00:06.000Z");
+    const auto later=trade("3","2027-01-01T00:00:07.000Z");
+    const auto foreign=trade("1","2027-01-01T00:00:00.000Z","ETH-USD");
+    const auto duplicateTwo=trade("2","2027-01-01T00:00:02.000Z","BTC-USD","200");
+    const json first={{"channel","market_trades"},{"trades",json::array({newest,opaque,ten,two})},
+        {"events",json::array({{{"type","update"},{"trades",json::array({duplicateTwo,one,foreign})}}})}};
+    const json resent={{"channel","market_trades"},{"events",json::array({
+        {{"type","snapshot"},{"trades",json::array({later,newest,opaque,ten,two,one,foreign})}}})}};
+    capture::WriterConfig config;config.root=temp.path();config.fsyncBlocks=0;
+    {
+        capture::Writer writer(config,metadata());
+        writer.append(record(0,capture::Kind::TransportUp,"{}"));
+        writer.append(record(6000,capture::Kind::Frame,first.dump()));
+        writer.append(record(7000,capture::Kind::TransportDown,"{}"));
+        writer.append(record(8000,capture::Kind::TransportUp,"{}",2));
+        writer.append(record(9000,capture::Kind::Frame,resent.dump(),2)); // Reconnect snapshot.
+        writer.append(record(10000,capture::Kind::Frame,resent.dump(),2)); // Mid-connection snapshot.
+        auto repeated=resent;repeated["events"][0]["type"]="update";
+        writer.append(record(11000,capture::Kind::Frame,repeated.dump(),2));
+        writer.close();
+    }
+    JournalFeed feed("BTC-USD"),eth("ETH-USD");
+    std::vector<Trade> emitted;std::vector<std::string> foreignIds;
+    feed.onTrade=[&](const Trade& t){emitted.push_back(t);};
+    eth.onTrade=[&](const Trade& t){foreignIds.push_back(t.trade_id);};
+    JournalReader reader(temp.path().toStdString(),"BTC-USD");JournalRecord input;
+    while(reader.next(input)){feed.apply(input);eth.apply(input);}
+    ASSERT_EQ(emitted.size(),6u); // Pre-fix emits 24 BTC trades, including the re-sent IDs.
+    std::vector<std::string> ids;
+    for(const auto& t:emitted) ids.push_back(t.trade_id);
+    EXPECT_EQ(ids,(std::vector<std::string>{"1","2","10","1x","900","3"}));
+    EXPECT_TRUE(std::is_sorted(emitted.begin(),emitted.end(),[](const auto& a,const auto& b){
+        return a.timestamp<b.timestamp;
+    }));
+    // Stable tie ordering keeps the first occurrence when time and ID are identical.
+    EXPECT_DOUBLE_EQ(emitted[1].price,100);
+    EXPECT_EQ(foreignIds,(std::vector<std::string>{"1"}));
+}
+TEST(Roller, FeedTradeIdWindowIsBoundedAndEvictsOldest) {
+    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/trade-window-XXXXXX"));
+    ASSERT_TRUE(temp.isValid());
+    const auto trade=[](size_t id) {
+        return json{{"product_id","BTC-USD"},{"trade_id",std::to_string(id)},
+            {"time","2027-01-01T00:00:01.000Z"},{"side","BUY"},{"price","100"},{"size","1"}};
+    };
+    constexpr size_t capacity=JournalFeed::TradeIdWindowCapacity;
+    constexpr size_t unique=2*capacity+3; // Exercise more than two full ring rotations.
+    capture::WriterConfig config;config.root=temp.path();config.fsyncBlocks=0;
+    {
+        capture::Writer writer(config,metadata());
+        for(size_t start=1;start<=unique;start+=100) {
+            auto trades=json::array();
+            for(size_t id=start;id<=unique&&id<start+100;++id) trades.push_back(trade(id));
+            writer.append(record(1000,capture::Kind::Frame,
+                json({{"channel","market_trades"},{"trades",std::move(trades)}}).dump()));
+        }
+        // An evicted ID may emit again; duplicates still retained must stay suppressed.
+        writer.append(record(2000,capture::Kind::Frame,json({{"channel","market_trades"},
+            {"trades",json::array({trade(unique),trade(1),trade(1),trade(unique)})}}).dump()));
+        writer.close();
+    }
+    JournalFeed feed("BTC-USD");size_t emitted=0;std::string lastId;
+    feed.onTrade=[&](const Trade& t){++emitted;lastId=t.trade_id;};
+    JournalReader reader(temp.path().toStdString(),"BTC-USD");JournalRecord input;
+    while(reader.next(input)) {
+        feed.apply(input);
+        EXPECT_EQ(feed.retainedTradeIds(),std::min(emitted,capacity));
+        ASSERT_LE(feed.retainedTradeIds(),capacity);
+    }
+    EXPECT_EQ(emitted,unique+1);
+    EXPECT_EQ(lastId,"1");
+    EXPECT_EQ(feed.retainedTradeIds(),capacity);
+}
 TEST(Roller, RunIdentityCrashResumeAndIdempotence) {
     QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); fs::path root=temp.path().toStdString(); fixture(root/"raw",3665);
     auto a=options(root/"raw",root/"a"); a.toMs=Epoch+3'660'000; const auto report=roll(a);
