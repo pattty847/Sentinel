@@ -516,9 +516,17 @@ void UnifiedGridRenderer::endZoomGesture() {
   startAxisGlides(from, restBefore, at, ap, m_gestureTime, m_gesturePrice);
 }
 
-void UnifiedGridRenderer::wheelZoom(int angle, bool notch, Qt::ScrollPhase phase, double x, double y, bool time,
-                                    bool price, WheelRoute route) {
-  if (notch && phase == Qt::NoScrollPhase) {
+void UnifiedGridRenderer::wheelZoom(int angle, bool pixelDeltaNull, Qt::ScrollPhase phase, bool precise,
+                                    double x, double y, bool time, bool price, WheelRoute route) {
+  // Qt 6.11.2 Cocoa qnsview_mouse.mm:647-675 gives plain wheels pixels too, but
+  // only precise scrolls have SynthesizedBySystem source; gestures have phases.
+  // Device type cannot veto a notch: Cocoa shares deviceID 0 and its TouchPad
+  // promotion is sticky (pointingDeviceFor, scrollWheel). QML has no source, so
+  // axes use phase/deltas. Unphased non-precise 120-unit multiples are clicks even
+  // with pixels; null-pixel partial angles retain the high-resolution wheel carry.
+  const bool notch = phase == Qt::NoScrollPhase && !precise &&
+                     (pixelDeltaNull || (angle != 0 && angle % 120 == 0));
+  if (notch) {
     // A partial notch carries to the next event of the same route and axes, in the same
     // direction; at most four clicks per event, and only the partial notch is kept.
     const int key = int(route) * 4 + (time ? 2 : 0) + (price ? 1 : 0);
@@ -538,12 +546,14 @@ void UnifiedGridRenderer::wheelZoom(int angle, bool notch, Qt::ScrollPhase phase
 }
 
 void UnifiedGridRenderer::zoomTimeWheel(int angleDelta, int pixelDelta, int phase, double x) {
-  wheelZoom(angleDelta, pixelDelta == 0, Qt::ScrollPhase(phase), x, height() / 2, true, false, WheelRoute::TimeAxis);
+  wheelZoom(angleDelta, pixelDelta == 0, Qt::ScrollPhase(phase), false,
+            x, height() / 2, true, false, WheelRoute::TimeAxis);
 }
 
 void UnifiedGridRenderer::zoomPriceWheel(int angleDelta, int pixelDelta, int phase, double y) {
   if (m_viewState && angleDelta != 0) m_viewState->setAutoPriceScale(false);
-  wheelZoom(angleDelta, pixelDelta == 0, Qt::ScrollPhase(phase), width() / 2, y, false, true, WheelRoute::PriceAxis);
+  wheelZoom(angleDelta, pixelDelta == 0, Qt::ScrollPhase(phase), false,
+            width() / 2, y, false, true, WheelRoute::PriceAxis);
 }
 
 void UnifiedGridRenderer::zoomTimeDrag(double delta, double x) {

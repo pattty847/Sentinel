@@ -1627,10 +1627,9 @@ void UnifiedGridRenderer::wheelEvent(QWheelEvent *event) {
   const int angle = shift && event->angleDelta().y() == 0 ? event->angleDelta().x() : event->angleDelta().y();
   if (shift) m_viewState->setAutoPriceScale(false);
   const QPointF at = event->position();
-  // Whole-pixel smooth zoom (slice A2): a mouse notch (no pixel deltas, no scroll
-  // phase) is a click to the next rung; a trackpad scroll (pixel deltas or phases)
-  // zooms continuously and settles on the nearest rung when it ends.
-  wheelZoom(angle, event->pixelDelta().isNull(), event->phase(), at.x(), at.y(), !shift, true, WheelRoute::Chart);
+  wheelZoom(angle, event->pixelDelta().isNull(), event->phase(),
+            event->source() == Qt::MouseEventSynthesizedBySystem,
+            at.x(), at.y(), !shift, true, WheelRoute::Chart);
   update();
   event->accept();
 }

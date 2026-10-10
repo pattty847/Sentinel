@@ -622,6 +622,7 @@ Rectangle {
         ToolTip.text: "Price axis · drag/scroll to zoom; double-click or Home to fit"
 
         WheelHandler {
+            acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
             target: null
 
             onWheel: function(event) {
@@ -712,6 +713,7 @@ Rectangle {
         ToolTip.text: "Time axis · drag/scroll to zoom; double-click or Home to reset live view"
 
         WheelHandler {
+            acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
             target: null
 
             onWheel: function(event) {
