@@ -1628,8 +1628,7 @@ void UnifiedGridRenderer::wheelEvent(QWheelEvent *event) {
   if (shift) m_viewState->setAutoPriceScale(false);
   const QPointF at = event->position();
   wheelZoom(angle, event->pixelDelta().isNull(), event->phase(),
-            event->source() == Qt::MouseEventSynthesizedBySystem ||
-                event->deviceType() == QInputDevice::DeviceType::TouchPad,
+            event->source() == Qt::MouseEventSynthesizedBySystem,
             at.x(), at.y(), !shift, true, WheelRoute::Chart);
   update();
   event->accept();

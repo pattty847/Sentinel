@@ -2854,9 +2854,9 @@ TEST_F(UgrGpu, TheWheelCarriesOnlyAPartialNotchPerRoute) {
     EXPECT_EQ(drawn().colPx, chart_raster::columnRung(c1, -1, 1, 0)) << "then one click out, not three in";
     // Half notches on different routes and axes do not add up.
     uint64_t v = view->getViewportVersion();
-    ugr->zoomPriceWheel(60, 0, 0, 160, int(QInputDevice::DeviceType::Mouse)); // the price axis
+    ugr->zoomPriceWheel(60, 0, 0, 160); // the price axis
     wheelAngle(60, at);                 // the chart
-    ugr->zoomTimeWheel(60, 0, 0, 320, int(QInputDevice::DeviceType::Mouse));  // the time axis
+    ugr->zoomTimeWheel(60, 0, 0, 320);  // the time axis
     wheelAngle(60, at);                 // the chart again: one half notch carried
     EXPECT_EQ(view->getViewportVersion(), v) << "no click from half notches of other routes";
     // A reversal drops the partial notch: a full notch back is one click.
@@ -3298,15 +3298,10 @@ protected:
             QCoreApplication::sendEvent(&chart, &event);
             EXPECT_TRUE(event.isAccepted());
         } else if (route == TimeAxis) {
-            chart.zoomTimeWheel(angle, pixels, int(phase), 320, int(type));
+            chart.zoomTimeWheel(angle, pixels, int(phase), 320);
         } else {
-            chart.zoomPriceWheel(angle, pixels, int(phase), 160, int(type));
+            chart.zoomPriceWheel(angle, pixels, int(phase), 160);
         }
-    }
-    bool settleTimerActive() {
-        for (const auto* timer : chart.findChildren<QTimer*>())
-            if (timer->interval() == 160 && timer->isActive()) return true;
-        return false;
     }
     void expectOneRung(Route route, int direction, const chart_raster::RasterCamera& before) {
         auto* v = chart.getViewState();
@@ -3317,7 +3312,7 @@ protected:
         EXPECT_EQ(double(v->getVisibleTimeEnd() - v->getVisibleTimeStart()), 640.0 * minute / col);
         EXPECT_NEAR(v->getMaxPrice() - v->getMinPrice(), 320 * row.tick / row.rowPx, 1e-8);
         EXPECT_FALSE(chart.zoomGesturing());
-        EXPECT_FALSE(settleTimerActive()) << "a notch must never arm the nearest-rung settle";
+        EXPECT_FALSE(chart.gestureSettlePending()) << "a notch must never arm the nearest-rung settle";
         EXPECT_TRUE(chart.zoomGliding());
         ASSERT_TRUE(waitFor([&] { return !chart.zoomGliding(); }));
         const auto landed = chart.rasterCameraNow(false);
@@ -3342,6 +3337,27 @@ TEST_F(UgrWheelCpu, MacMousePixelsStillMoveOneRungPerNotchOnEveryRoute) {
     }
 }
 
+TEST_F(UgrWheelCpu, MouseNotchesOnAStickyTouchPadDeviceStillMoveOneRung) {
+    for (const auto route : {Chart, TimeAxis, PriceAxis}) {
+        SCOPED_TRACE(route);
+        resetWheelView();
+        wheel(route, 30, 15, Qt::ScrollUpdate, Qt::MouseEventSynthesizedBySystem, QInputDevice::DeviceType::TouchPad);
+        wheel(route, 0, 0, Qt::ScrollEnd, Qt::MouseEventSynthesizedBySystem, QInputDevice::DeviceType::TouchPad);
+        ASSERT_TRUE(waitFor([&] { return !chart.zoomGliding(); }));
+        for (const int direction : {1, 1, -1, -1}) {
+            SCOPED_TRACE(direction);
+            const auto before = chart.rasterCameraNow(false);
+            const auto version = chart.getViewState()->getViewportVersion();
+            // Cocoa can report the same TouchPad-typed primary device for a plain
+            // mouse after one precise scroll. The axes deliberately receive no type.
+            wheel(route, direction * 120, direction > 0 ? 2 : -6, Qt::NoScrollPhase,
+                  Qt::MouseEventNotSynthesized, QInputDevice::DeviceType::TouchPad);
+            EXPECT_EQ(chart.getViewState()->getViewportVersion(), version + 1);
+            expectOneRung(route, direction, before);
+        }
+    }
+}
+
 TEST_F(UgrWheelCpu, WindowsMouseNotchesAndPartialAngleCarryStayClicks) {
     for (const auto route : {Chart, TimeAxis, PriceAxis}) {
         SCOPED_TRACE(route);
@@ -3355,7 +3371,7 @@ TEST_F(UgrWheelCpu, WindowsMouseNotchesAndPartialAngleCarryStayClicks) {
             wheel(route, 30);
             EXPECT_EQ(chart.getViewState()->getViewportVersion(), version);
             EXPECT_FALSE(chart.zoomGesturing());
-            EXPECT_FALSE(settleTimerActive());
+            EXPECT_FALSE(chart.gestureSettlePending());
         }
         wheel(route, 30);
         expectOneRung(route, 1, before);
@@ -3374,38 +3390,40 @@ TEST_F(UgrWheelCpu, PhasedPreciseScrollStaysContinuousAndSettlesOnEveryRoute) {
         wheel(route, 0, 0, Qt::ScrollBegin, Qt::MouseEventSynthesizedBySystem, QInputDevice::DeviceType::TouchPad);
         wheel(route, 30, 15, Qt::ScrollUpdate, Qt::MouseEventSynthesizedBySystem, QInputDevice::DeviceType::TouchPad);
         EXPECT_TRUE(chart.zoomGesturing());
-        EXPECT_TRUE(settleTimerActive());
+        EXPECT_TRUE(chart.gestureSettlePending());
         const auto during = chart.rasterCameraNow(false);
         if (route != PriceAxis) EXPECT_NEAR(during.colPxF, before.colPx * 1.015, 1e-6);
         if (route != TimeAxis) EXPECT_NEAR(during.rowPxF, before.rowPx * 1.015, 1e-6);
         wheel(route, 0, 0, Qt::ScrollEnd, Qt::MouseEventSynthesizedBySystem, QInputDevice::DeviceType::TouchPad);
         EXPECT_FALSE(chart.zoomGesturing());
-        EXPECT_FALSE(settleTimerActive());
+        EXPECT_FALSE(chart.gestureSettlePending());
         ASSERT_TRUE(waitFor([&] { return !chart.zoomGliding(); }));
         // A precise stream whose end is lost still settles after the 160 ms pause.
         wheel(route, 30, 15, Qt::ScrollUpdate, Qt::MouseEventSynthesizedBySystem, QInputDevice::DeviceType::TouchPad);
         ASSERT_TRUE(waitFor([&] { return !chart.zoomGesturing() && !chart.zoomGliding(); }));
-        EXPECT_FALSE(settleTimerActive());
+        EXPECT_FALSE(chart.gestureSettlePending());
     }
 }
 
-TEST_F(UgrWheelCpu, UnphasedPreciseDevicesAndPixelPartialAnglesStayContinuous) {
-    for (const auto route : {Chart, TimeAxis, PriceAxis}) {
-        SCOPED_TRACE(route);
+TEST_F(UgrWheelCpu, UnphasedSystemSourceAndPixelPartialAnglesStayContinuous) {
+    // Only the chart sees source(). QML axes rely on phases for precise devices;
+    // an unphased exact 120 cannot be vetoed by a sticky device type.
+    for (const auto type : {QInputDevice::DeviceType::Mouse, QInputDevice::DeviceType::TouchPad}) {
+        SCOPED_TRACE(int(type));
         for (const int pixels : {0, 60}) {
             resetWheelView();
-            // Even an exact 120 (or a rounded-to-zero pixel delta) is precise when
-            // source/device says so. QML has device.type, but no event.source.
-            wheel(route, 120, pixels, Qt::NoScrollPhase, Qt::MouseEventSynthesizedBySystem,
-                  route == Chart ? QInputDevice::DeviceType::Mouse : QInputDevice::DeviceType::TouchPad);
+            wheel(Chart, 120, pixels, Qt::NoScrollPhase, Qt::MouseEventSynthesizedBySystem, type);
             EXPECT_TRUE(chart.zoomGesturing());
-            EXPECT_TRUE(settleTimerActive());
+            EXPECT_TRUE(chart.gestureSettlePending());
             chart.endZoomGesture();
         }
+    }
+    for (const auto route : {Chart, TimeAxis, PriceAxis}) {
+        SCOPED_TRACE(route);
         resetWheelView();
-        wheel(route, 30, 2); // non-null precise deltas without phase/type information
+        wheel(route, 30, 2); // non-null partial deltas stay continuous without phase/source information
         EXPECT_TRUE(chart.zoomGesturing());
-        EXPECT_TRUE(settleTimerActive());
+        EXPECT_TRUE(chart.gestureSettlePending());
         chart.endZoomGesture();
     }
 }
@@ -3441,8 +3459,8 @@ TEST_F(UgrZoomCpu, PinchAndTrackpadSettleWithASolvedFit) {
                                     {320, 160}, {320, 160}, {320, 160}, 0, {}, 3);
             QCoreApplication::sendEvent(&chart, &end);
         } else {
-            for (int i = 0; i < 8; ++i) chart.zoomTimeWheel(-400, -100, int(Qt::ScrollUpdate), 320, int(QInputDevice::DeviceType::TouchPad));
-            chart.zoomTimeWheel(0, 0, int(Qt::ScrollEnd), 320, int(QInputDevice::DeviceType::TouchPad));
+            for (int i = 0; i < 8; ++i) chart.zoomTimeWheel(-400, -100, int(Qt::ScrollUpdate), 320);
+            chart.zoomTimeWheel(0, 0, int(Qt::ScrollEnd), 320);
         }
         EXPECT_FALSE(chart.zoomGesturing());
         checkSettle();
@@ -4272,8 +4290,8 @@ TEST(UgrInput, InputRouteReachesTheChartAndAxisAreasOncePerWheel) {
     ugr->setCandleBuffer(nullptr);
     ugr->setHeatmapService(nullptr); // its controller goes now
 }
-// Real QML delivery verifies device.type forwarding and WheelHandler's precise
-// device filter, in addition to the CPU rung assertions above.
+// Real QML delivery verifies that WheelHandler accepts both mouse and precise
+// scrolls even when Cocoa reports a sticky TouchPad type on their shared device.
 TEST(UgrInput, MacMouseAndPreciseScrollReachBothAxisWheelHandlers) {
     QQuickView view;
     view.setResizeMode(QQuickView::SizeRootObjectToView);
@@ -4317,8 +4335,7 @@ TEST(UgrInput, MacMouseAndPreciseScrollReachBothAxisWheelHandlers) {
             send(direction * 120, direction > 0 ? 2 : -6, Qt::NoScrollPhase, mouse, Qt::MouseEventNotSynthesized);
             EXPECT_EQ(chart->getViewState()->getViewportVersion(), version + 1);
             EXPECT_FALSE(chart->zoomGesturing()) << "mouse pixels must route to a click";
-            for (const auto* timer : chart->findChildren<QTimer*>())
-                if (timer->interval() == 160) EXPECT_FALSE(timer->isActive());
+            EXPECT_FALSE(chart->gestureSettlePending());
         }
         reset();
         send(0, 0, Qt::ScrollBegin, pad, Qt::MouseEventSynthesizedBySystem);
@@ -4328,9 +4345,16 @@ TEST(UgrInput, MacMouseAndPreciseScrollReachBothAxisWheelHandlers) {
         EXPECT_TRUE(chart->zoomGesturing()) << "WheelHandler must accept a synthesized TouchPad scroll";
         send(0, 0, Qt::ScrollEnd, pad, Qt::MouseEventSynthesizedBySystem);
         EXPECT_FALSE(chart->zoomGesturing());
-        reset();
-        send(120, 60, Qt::NoScrollPhase, pad, Qt::MouseEventSynthesizedBySystem);
-        EXPECT_TRUE(chart->zoomGesturing()) << "QML must forward the precise device even for an exact 120";
+        // Reuse the very same TouchPad-typed device after the precise stream,
+        // but now send ordinary mouse notches (Cocoa's shared deviceID 0).
+        for (const int direction : {1, -1}) {
+            reset();
+            const auto afterScroll = chart->getViewState()->getViewportVersion();
+            send(direction * 120, direction > 0 ? 2 : -6, Qt::NoScrollPhase, pad, Qt::MouseEventNotSynthesized);
+            EXPECT_EQ(chart->getViewState()->getViewportVersion(), afterScroll + 1);
+            EXPECT_FALSE(chart->zoomGesturing()) << "a sticky TouchPad type must not veto a mouse notch";
+            EXPECT_FALSE(chart->gestureSettlePending());
+        }
     }
     chart->endZoomGesture();
     chart->setHeatmapService(nullptr);

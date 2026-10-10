@@ -628,7 +628,7 @@ Rectangle {
             onWheel: function(event) {
                 const p = root.mapPriceAxisPoint(priceAxis, event.x, event.y)
                 unifiedGridRenderer.zoomPriceWheel(event.angleDelta.y, event.pixelDelta.y,
-                                                   event.phase, p.y, event.device.type)
+                                                   event.phase, p.y)
                 event.accepted = true
             }
         }
@@ -719,7 +719,7 @@ Rectangle {
             onWheel: function(event) {
                 const p = root.mapTimeAxisPoint(timeAxis, event.x, event.y)
                 unifiedGridRenderer.zoomTimeWheel(event.angleDelta.y, event.pixelDelta.y,
-                                                  event.phase, p.x, event.device.type)
+                                                  event.phase, p.x)
                 event.accepted = true
             }
         }

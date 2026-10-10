@@ -496,8 +496,8 @@ public:
     // The axes (QML). Unphased mouse notches are clicks (pixel deltas may be present); a
     // trackpad scroll is continuous until its ScrollEnd. Drags are continuous until the
     // release (endZoomGesture). A price zoom takes price over (auto price scale off).
-    Q_INVOKABLE void zoomTimeWheel(int angleDelta, int pixelDelta, int phase, double x, int deviceType);
-    Q_INVOKABLE void zoomPriceWheel(int angleDelta, int pixelDelta, int phase, double y, int deviceType);
+    Q_INVOKABLE void zoomTimeWheel(int angleDelta, int pixelDelta, int phase, double x);
+    Q_INVOKABLE void zoomPriceWheel(int angleDelta, int pixelDelta, int phase, double y);
     Q_INVOKABLE void zoomTimeDrag(double delta, double x);
     Q_INVOKABLE void zoomPriceDrag(double delta, double y);
     Q_INVOKABLE void zoomTimeClicks(int clicks, double x);
@@ -509,6 +509,8 @@ public:
     // Tests: a follow-live update for a live open end (the fixtures have no live feed).
     void followLiveForTest(qint64 openEndMs) { followGpuLiveTo(openEndMs); }
     bool zoomGesturing() const { return m_zoomGesture; }
+    // Tests: inspect the actual settle timer without depending on its duration.
+    bool gestureSettlePending() const { return m_zoomSettleTimer && m_zoomSettleTimer->isActive(); }
     // Tests: the glide clock (ms); default the chart's frame clock.
     void setZoomClockForTest(std::function<qint64()> clock) { m_zoomClock = std::move(clock); }
     // The camera the next frame draws without a zoom transition (the rest camera of
