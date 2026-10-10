@@ -7,6 +7,7 @@
 #include "ChartRaster.hpp"
 
 namespace candle_pixels {
+inline constexpr double kCandleMaxBodyLogicalPx = 9.0;
 struct Span { float lo, hi; };
 inline int capacityFor(int current, int required) {
     int capacity = std::max(6, current);
@@ -55,7 +56,7 @@ inline Body body(double columnLeft, double columnRight, double openY, double clo
     double top = std::min(openY, closeY) * scale;
     double bottom = std::max(openY, closeY) * scale;
     if (!snapX) {
-        const double width = std::max(1.0, (right - left) * 0.7);
+        const double width = std::max(1.0, std::min(right - left - 2.0, kCandleMaxBodyLogicalPx * scale));
         const double mid = (left + right) * 0.5;
         left = mid - width * 0.5;
         right = mid + width * 0.5;
@@ -63,9 +64,13 @@ inline Body body(double columnLeft, double columnRight, double openY, double clo
         left = std::round(left);
         right = std::round(right);
         const double columns = std::max(1.0, right - left);
-        const double gap = columns >= 3 ? std::max(1.0, std::floor(0.15 * columns)) : 0.0;
-        right = left + columns - gap;
-        left += gap;
+        const double gap = columns >= 3 ? 1.0 : 0.0;
+        const double maxBody = std::max(1L, std::lround(kCandleMaxBodyLogicalPx * scale));
+        const double width = std::max(1.0, std::min(columns - 2.0 * gap, maxBody));
+        // Opposite column/body parity has two equally close whole-pixel
+        // positions. Choose the left one while keeping the requested width.
+        left += std::floor((columns - width) * 0.5);
+        right = left + width;
     }
     if (!snapY) {
         const double minHeight = openY == closeY ? 1.0 : std::max(1.0, 1.5 * scale);

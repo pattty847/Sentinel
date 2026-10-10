@@ -175,14 +175,21 @@ TEST(CandleStyleTest, PhysicalWicksSnapAndDojiIsOnePixel) {
     }
 }
 
-TEST(CandleStyleTest, BodyUsesIntegerGapAndMinimumHeight) {
+TEST(CandleStyleTest, BodyUsesCappedWidthAndMinimumHeight) {
+    struct WidthCase { int columns, widthDpr1, widthDpr2; };
     for (double dpr : {1.0, 2.0}) {
-        for (const auto [columns, gap] : {std::pair{1, 0}, {2, 0}, {3, 1}, {6, 1}, {7, 1}, {20, 3}}) {
+        for (const auto [columns, widthDpr1, widthDpr2] : {
+                WidthCase{1, 1, 1}, {2, 2, 2}, {3, 1, 1}, {4, 2, 2},
+                {10, 8, 8}, {11, 9, 9}, {12, 9, 10}, {32, 9, 18}, {60, 9, 18}}) {
             SCOPED_TRACE(::testing::Message() << "C=" << columns << " dpr=" << dpr);
+            const int width = dpr == 1 ? widthDpr1 : widthDpr2;
+            const int inset = (columns - width) / 2;
             const auto b = candle_pixels::body(11 / dpr, (11 + columns) / dpr, 20.2 / dpr, 20.3 / dpr, dpr);
-            EXPECT_FLOAT_EQ(b.x.lo * dpr, 11 + gap);
-            EXPECT_FLOAT_EQ(b.x.hi * dpr, 11 + columns - gap);
-            EXPECT_GE((b.x.hi - b.x.lo) * dpr, 1);
+            EXPECT_FLOAT_EQ(b.x.lo * dpr, 11 + inset);
+            EXPECT_FLOAT_EQ(b.x.hi * dpr, 11 + inset + width);
+            EXPECT_FLOAT_EQ((b.x.hi - b.x.lo) * dpr, width);
+            EXPECT_GE(inset, columns >= 3 ? 1 : 0);
+            EXPECT_LE(std::abs((b.x.lo + b.x.hi) * dpr * 0.5 - (11 + columns * 0.5)), 0.5);
             EXPECT_FLOAT_EQ((b.y.hi - b.y.lo) * dpr, std::lround(1.5 * dpr));
             EXPECT_FLOAT_EQ(b.y.lo * dpr, std::floor(b.y.lo * dpr));
             EXPECT_FLOAT_EQ(b.y.hi * dpr, std::floor(b.y.hi * dpr));
@@ -237,7 +244,7 @@ TEST(CandleStyleTest, SubmittedBodiesMatchRasterEdgesAtRestAndDuringGlide) {
         return g->vertexCount() == 6 ? g->vertexDataAsColoredPoint2D() : nullptr;
     };
     for (double dpr : {1.0, 2.0}) {
-        for (int columns : {3, 5, 8, 20}) {
+        for (int columns : {1, 2, 3, 4, 5, 8, 10, 11, 12, 20, 32, 60}) {
             SCOPED_TRACE(::testing::Message() << "C=" << columns << " dpr=" << dpr);
             chart_raster::RasterInputs in;
             in.timeStart = time - tf + tf / 3;
@@ -255,25 +262,43 @@ TEST(CandleStyleTest, SubmittedBodiesMatchRasterEdgesAtRestAndDuringGlide) {
             ASSERT_EQ(rest.colPx, columns);
             const auto* v = submit(rest);
             ASSERT_NE(v, nullptr);
-            const double gap = std::max(1.0, std::floor(0.15 * columns));
-            EXPECT_NEAR(v[0].x * dpr, rest.xDev(time) + gap, 1e-5);
-            EXPECT_NEAR(v[2].x * dpr, rest.xDev(time + tf) - gap, 1e-5);
+            const double width = std::max(1.0, std::min(columns - (columns >= 3 ? 2.0 : 0.0), 9 * dpr));
+            const double inset = std::floor((columns - width) * 0.5);
+            EXPECT_NEAR(v[0].x * dpr, rest.xDev(time) + inset, 1e-5);
+            EXPECT_NEAR(v[2].x * dpr, rest.xDev(time) + inset + width, 1e-5);
             EXPECT_NEAR(v[0].y * dpr, rest.yDev(108), 1e-5);
             EXPECT_NEAR(v[1].y * dpr, rest.yDev(104), 1e-5);
             const std::vector<QPointF> restVertices{{v[0].x, v[0].y}, {v[2].x, v[1].y}};
+            const auto* wick = static_cast<QSGGeometryNode*>(root->firstChild())->geometry()->vertexDataAsColoredPoint2D();
+            const double bodyCentre = (v[0].x + v[2].x) * 0.5;
+            const auto expectedWick = candle_pixels::stroke(bodyCentre, 1, dpr);
+            EXPECT_FLOAT_EQ(wick[0].x, expectedWick.lo);
+            EXPECT_FLOAT_EQ(wick[2].x, expectedWick.hi);
+            EXPECT_NEAR((wick[0].x + wick[2].x) * dpr * 0.5 - bodyCentre * dpr,
+                        int(width) % 2 == 0 ? 0.5 : 0.0, 1e-5);
             auto fromInput = in;
-            fromInput.timeEnd = fromInput.timeStart + std::llround((in.timeEnd - in.timeStart) * 1.3);
+            fromInput.timeEnd = fromInput.timeStart + std::llround(640 * dpr * tf / (columns + 3));
             fromInput.maxPrice = 117.3;
             const auto from = chart_raster::computeRaster(fromInput, {});
             const auto mid = chart_raster::glideRaster(from, rest, time, 106, 0.47);
             ASSERT_TRUE(mid.free);
+            ASSERT_FALSE(candle_pixels::axisSnap(mid).x);
             v = submit(mid);
             ASSERT_NE(v, nullptr);
-            const double width = mid.colPxF * 0.7;
-            EXPECT_NEAR(v[0].x * dpr, mid.xDev(time + tf * 0.5) - width * 0.5, 1e-5);
-            EXPECT_NEAR(v[2].x * dpr, mid.xDev(time + tf * 0.5) + width * 0.5, 1e-5);
+            const double glideWidth = std::max(1.0, std::min(mid.colPxF - 2.0, 9 * dpr));
+            EXPECT_NEAR(v[0].x * dpr, mid.xDev(time + tf * 0.5) - glideWidth * 0.5, 1e-4);
+            EXPECT_NEAR(v[2].x * dpr, mid.xDev(time + tf * 0.5) + glideWidth * 0.5, 1e-4);
+            wick = static_cast<QSGGeometryNode*>(root->firstChild())->geometry()->vertexDataAsColoredPoint2D();
+            EXPECT_NEAR((wick[0].x + wick[2].x) * dpr * 0.5, mid.xDev(time + tf * 0.5), 1e-4);
             EXPECT_NEAR(v[0].y * dpr, mid.yDev(108), 1e-4);
             EXPECT_NEAR(v[1].y * dpr, mid.yDev(104), 1e-4);
+            const auto timeMid = chart_raster::composeAxes(mid, true, rest, false, rest);
+            v = submit(timeMid);
+            ASSERT_NE(v, nullptr);
+            EXPECT_NEAR(v[0].x * dpr, timeMid.xDev(time + tf * 0.5) - glideWidth * 0.5, 1e-4);
+            EXPECT_NEAR(v[2].x * dpr, timeMid.xDev(time + tf * 0.5) + glideWidth * 0.5, 1e-4);
+            EXPECT_DOUBLE_EQ(v[0].y, restVertices[0].y());
+            EXPECT_DOUBLE_EQ(v[1].y, restVertices[1].y());
             const auto landed = chart_raster::glideRaster(from, rest, time, 106, 1.0);
             ASSERT_FALSE(landed.free);
             v = submit(landed);
@@ -283,6 +308,27 @@ TEST(CandleStyleTest, SubmittedBodiesMatchRasterEdgesAtRestAndDuringGlide) {
         }
     }
     delete root;
+}
+
+TEST(CandleStyleTest, BodyWidthIsContinuousDuringTimeGlide) {
+    for (double dpr : {1.0, 2.0}) {
+        for (double columns : {2.7, 3.0, 3.01, 10.7, 11.0, 11.01, 32.37, 60.2}) {
+            SCOPED_TRACE(::testing::Message() << "C=" << columns << " dpr=" << dpr);
+            constexpr double left = 11.31;
+            const auto sample = [&](double c) {
+                return candle_pixels::body(left / dpr, (left + c) / dpr, 17.2 / dpr, 23.1 / dpr, dpr, false, true);
+            };
+            const auto b = sample(columns);
+            const double width = std::max(1.0, std::min(columns - 2.0, 9 * dpr));
+            EXPECT_NEAR(b.x.lo * dpr, left + (columns - width) * 0.5, 1e-5);
+            EXPECT_NEAR(b.x.hi * dpr, left + (columns + width) * 0.5, 1e-5);
+            EXPECT_FLOAT_EQ(b.y.lo * dpr, 17);
+            EXPECT_FLOAT_EQ(b.y.hi * dpr, 24);
+            const auto next = sample(columns + 0.001);
+            EXPECT_LE(std::abs(next.x.lo - b.x.lo) * dpr, 0.00101);
+            EXPECT_LE(std::abs(next.x.hi - b.x.hi) * dpr, 0.00101);
+        }
+    }
 }
 
 // Run the renderer's retained scene graph geometry on the CPU. The independent

@@ -363,8 +363,8 @@ TEST_F(UgrGpu, SettlesOnTheProductionPath) {
 // Plan section 2 "Mapping" and whole-pixel plan 2026-10-08 B3: candles map through the
 // frame's TimeAxisMapping; the heatmap's column and row edges are exactly (not +-1) where
 // the mapping puts the timeframe and bin boundaries, on whole device pixels; a candle's
-// body is centred exactly in its heatmap column, and a body whose open/close sit on bin
-// edges starts and ends on heatmap row edges. The same under drags of 0.3 and 2.7 device
+// body is centred to the nearest whole pixel in its heatmap column. A body whose
+// open/close sit on bin edges starts and ends on heatmap row edges. The same under drags of 0.3 and 2.7 device
 // px (whole-pixel moves of 0 and 3 px), and a release keeps the dragged picture.
 TEST_F(UgrGpu, CandlesAlignWithHeatmapColumns) {
     noLabels();
@@ -452,10 +452,11 @@ TEST_F(UgrGpu, CandlesAlignWithHeatmapColumns) {
                     last = x;
                 }
             ASSERT_GE(first, 0) << "a candle body in the column [" << a << ", " << b << ")";
-            const int gap = std::max(1, int(std::floor(0.15 * cam.colPx)));
-            EXPECT_EQ(first, a + gap) << "body left equals column left + integer gap";
-            EXPECT_EQ(last + 1, b - gap) << "body right equals column right - integer gap";
-            EXPECT_EQ(first + last, a + b - 1) << "the body is centred exactly in [" << a << ", " << b << ")";
+            const int width = std::min(b - a - 2, int(std::lround(9 * frame.surfaceDpr)));
+            const int inset = (b - a - width) / 2;
+            EXPECT_EQ(first, a + inset) << "body left equals column left + capped-width inset";
+            EXPECT_EQ(last + 1, a + inset + width) << "body right keeps the requested width";
+            EXPECT_LE(std::abs(first + last - (a + b - 1)), 1) << "nearest whole-pixel centre";
             // The body's rows (beside the wick): from the close's row edge to the open's.
             int top = -1, bottom = -1;
             for (int y = 0; y < 320; ++y)
@@ -508,7 +509,7 @@ TEST_F(UgrGpu, CandleBodyEdgesAtEveryColumnWidthAndDeviceRatio) {
     for (double dpr : {1.0, 2.0}) {
         ASSERT_TRUE(scene->setDevicePixelRatio(dpr, &error)) << error.toStdString();
         emit scene->window()->screenChanged(scene->window()->screen());
-        for (int columns : {3, 5, 8, 20}) {
+        for (int columns : {3, 4, 5, 8, 10, 11, 12, 20, 32, 60}) {
             SCOPED_TRACE(::testing::Message() << "C=" << columns << " dpr=" << dpr);
             const qint64 lo = epoch + minute / 3;
             ugr->setViewport(lo, lo + std::llround(320 * dpr * minute / columns), 99'900, 100'300);
@@ -532,13 +533,14 @@ TEST_F(UgrGpu, CandleBodyEdgesAtEveryColumnWidthAndDeviceRatio) {
             const auto* geometry = static_cast<const QSGGeometryNode*>(root->lastChild())->geometry();
             const auto* v = geometry->vertexDataAsColoredPoint2D();
             ASSERT_GT(geometry->vertexCount(), 0);
-            const double gap = std::max(1.0, std::floor(0.15 * columns));
+            const double width = std::min(columns - 2.0, 9 * dpr);
+            const double inset = std::floor((columns - width) * 0.5);
             int checked = 0;
             for (int i = 0; i < geometry->vertexCount(); i += 6) {
                 if (v[i].x < 0 || v[i+2].x > 320) continue;
-                const qint64 t = std::llround(mapping.screenXToTime(v[i].x - gap / dpr) / minute) * minute;
-                EXPECT_NEAR(v[i].x * dpr, cam.xDev(t) + gap, 1e-4);
-                EXPECT_NEAR(v[i+2].x * dpr, cam.xDev(t + minute) - gap, 1e-4);
+                const qint64 t = std::llround(mapping.screenXToTime(v[i].x - inset / dpr) / minute) * minute;
+                EXPECT_NEAR(v[i].x * dpr, cam.xDev(t) + inset, 1e-4);
+                EXPECT_NEAR(v[i+2].x * dpr, cam.xDev(t) + inset + width, 1e-4);
                 EXPECT_NEAR(v[i].y * dpr, cam.yDev(close), 1e-4);
                 EXPECT_NEAR(v[i+1].y * dpr, cam.yDev(open), 1e-4);
                 // The heatmap changes exactly at the column boundary beside this body.
@@ -551,7 +553,7 @@ TEST_F(UgrGpu, CandleBodyEdgesAtEveryColumnWidthAndDeviceRatio) {
                 }
                 ++checked;
             }
-            EXPECT_GE(checked, 10);
+            EXPECT_GE(checked, columns <= 20 ? 10 : 3) << "including the widest columns";
             ugr->endPanAt();
         }
     }
@@ -2377,14 +2379,16 @@ TEST_F(UgrGpu, AGlideLandsOnTheRestFrameOfItsTarget) {
         const auto* g = static_cast<const QSGGeometryNode*>(root->lastChild())->geometry();
         const auto* v = g->vertexDataAsColoredPoint2D();
         ASSERT_GT(g->vertexCount(), 0);
-        const auto mapping = ugr->currentTimeAxisMapping();
-        const double gap = cam.colPxF * 0.15;
+        const auto frame = ugr->currentFrameContext();
+        const auto& mapping = frame.mapping;
         for (int i = 0; i < g->vertexCount(); i += 6) {
-            const qint64 t = std::llround(mapping.screenXToTime(v[i].x - gap / cam.dpr) / minute) * minute;
-            EXPECT_NEAR(v[i].x * cam.dpr, cam.xDev(t) + gap, 1e-4);
-            EXPECT_NEAR(v[i+2].x * cam.dpr, cam.xDev(t + minute) - gap, 1e-4);
-            EXPECT_NEAR(v[i].y * cam.dpr, cam.yDev(100'100), 1e-4);
-            EXPECT_NEAR(v[i+1].y * cam.dpr, cam.yDev(100'000), 1e-4);
+            const double bodyCentre = (double(v[i].x) + v[i+2].x) * 0.5;
+            const qint64 t = std::llround((mapping.screenXToTime(bodyCentre) - minute * 0.5) / minute) * minute;
+            const auto expected = bodyForFrame(frame, t, 100'000, 100'100);
+            EXPECT_NEAR(v[i].x, expected.x.lo, 1e-4);
+            EXPECT_NEAR(v[i+2].x, expected.x.hi, 1e-4);
+            EXPECT_NEAR(v[i].y, expected.y.lo, 1e-4);
+            EXPECT_NEAR(v[i+1].y, expected.y.hi, 1e-4);
         }
         blended += !whole(cam.colPxF) && !whole(cam.rowPxF);
     }
