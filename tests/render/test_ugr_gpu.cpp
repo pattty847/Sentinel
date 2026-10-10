@@ -452,7 +452,7 @@ TEST_F(UgrGpu, CandlesAlignWithHeatmapColumns) {
                     last = x;
                 }
             ASSERT_GE(first, 0) << "a candle body in the column [" << a << ", " << b << ")";
-            const int width = std::min(b - a - 2, int(std::lround(9 * frame.surfaceDpr)));
+            const int width = std::min(b - a - 2, int(std::lround(13 * frame.surfaceDpr)));
             const int inset = (b - a - width) / 2;
             EXPECT_EQ(first, a + inset) << "body left equals column left + capped-width inset";
             EXPECT_EQ(last + 1, a + inset + width) << "body right keeps the requested width";
@@ -509,7 +509,7 @@ TEST_F(UgrGpu, CandleBodyEdgesAtEveryColumnWidthAndDeviceRatio) {
     for (double dpr : {1.0, 2.0}) {
         ASSERT_TRUE(scene->setDevicePixelRatio(dpr, &error)) << error.toStdString();
         emit scene->window()->screenChanged(scene->window()->screen());
-        for (int columns : {3, 4, 5, 8, 10, 11, 12, 20, 32, 60}) {
+        for (int columns : {3, 4, 5, 8, 10, 11, 12, 15, 20, 32, 60}) {
             SCOPED_TRACE(::testing::Message() << "C=" << columns << " dpr=" << dpr);
             const qint64 lo = epoch + minute / 3;
             ugr->setViewport(lo, lo + std::llround(320 * dpr * minute / columns), 99'900, 100'300);
@@ -533,7 +533,7 @@ TEST_F(UgrGpu, CandleBodyEdgesAtEveryColumnWidthAndDeviceRatio) {
             const auto* geometry = static_cast<const QSGGeometryNode*>(root->lastChild())->geometry();
             const auto* v = geometry->vertexDataAsColoredPoint2D();
             ASSERT_GT(geometry->vertexCount(), 0);
-            const double width = std::min(columns - 2.0, 9 * dpr);
+            const double width = std::min(columns - 2.0, 13 * dpr);
             const double inset = std::floor((columns - width) * 0.5);
             int checked = 0;
             for (int i = 0; i < geometry->vertexCount(); i += 6) {

@@ -180,7 +180,7 @@ TEST(CandleStyleTest, BodyUsesCappedWidthAndMinimumHeight) {
     for (double dpr : {1.0, 2.0}) {
         for (const auto [columns, widthDpr1, widthDpr2] : {
                 WidthCase{1, 1, 1}, {2, 2, 2}, {3, 1, 1}, {4, 2, 2},
-                {10, 8, 8}, {11, 9, 9}, {12, 9, 10}, {32, 9, 18}, {60, 9, 18}}) {
+                {10, 8, 8}, {11, 9, 9}, {12, 10, 10}, {15, 13, 13}, {32, 13, 26}, {60, 13, 26}}) {
             SCOPED_TRACE(::testing::Message() << "C=" << columns << " dpr=" << dpr);
             const int width = dpr == 1 ? widthDpr1 : widthDpr2;
             const int inset = (columns - width) / 2;
@@ -244,7 +244,7 @@ TEST(CandleStyleTest, SubmittedBodiesMatchRasterEdgesAtRestAndDuringGlide) {
         return g->vertexCount() == 6 ? g->vertexDataAsColoredPoint2D() : nullptr;
     };
     for (double dpr : {1.0, 2.0}) {
-        for (int columns : {1, 2, 3, 4, 5, 8, 10, 11, 12, 20, 32, 60}) {
+        for (int columns : {1, 2, 3, 4, 5, 8, 10, 11, 12, 15, 20, 32, 60}) {
             SCOPED_TRACE(::testing::Message() << "C=" << columns << " dpr=" << dpr);
             chart_raster::RasterInputs in;
             in.timeStart = time - tf + tf / 3;
@@ -262,7 +262,7 @@ TEST(CandleStyleTest, SubmittedBodiesMatchRasterEdgesAtRestAndDuringGlide) {
             ASSERT_EQ(rest.colPx, columns);
             const auto* v = submit(rest);
             ASSERT_NE(v, nullptr);
-            const double width = std::max(1.0, std::min(columns - (columns >= 3 ? 2.0 : 0.0), 9 * dpr));
+            const double width = std::max(1.0, std::min(columns - (columns >= 3 ? 2.0 : 0.0), 13 * dpr));
             const double inset = std::floor((columns - width) * 0.5);
             EXPECT_NEAR(v[0].x * dpr, rest.xDev(time) + inset, 1e-5);
             EXPECT_NEAR(v[2].x * dpr, rest.xDev(time) + inset + width, 1e-5);
@@ -285,7 +285,8 @@ TEST(CandleStyleTest, SubmittedBodiesMatchRasterEdgesAtRestAndDuringGlide) {
             ASSERT_FALSE(candle_pixels::axisSnap(mid).x);
             v = submit(mid);
             ASSERT_NE(v, nullptr);
-            const double glideWidth = std::max(1.0, std::min(mid.colPxF - 2.0, 9 * dpr));
+            const double gapF = std::clamp(mid.colPxF - 2.0, 0.0, 1.0);
+            const double glideWidth = std::max(1.0, std::min(mid.colPxF - 2.0 * gapF, 13 * dpr));
             EXPECT_NEAR(v[0].x * dpr, mid.xDev(time + tf * 0.5) - glideWidth * 0.5, 1e-4);
             EXPECT_NEAR(v[2].x * dpr, mid.xDev(time + tf * 0.5) + glideWidth * 0.5, 1e-4);
             wick = static_cast<QSGGeometryNode*>(root->firstChild())->geometry()->vertexDataAsColoredPoint2D();
@@ -312,14 +313,19 @@ TEST(CandleStyleTest, SubmittedBodiesMatchRasterEdgesAtRestAndDuringGlide) {
 
 TEST(CandleStyleTest, BodyWidthIsContinuousDuringTimeGlide) {
     for (double dpr : {1.0, 2.0}) {
-        for (double columns : {2.7, 3.0, 3.01, 10.7, 11.0, 11.01, 32.37, 60.2}) {
+        constexpr double left = 11.31;
+        const auto sample = [&](double c) {
+            return candle_pixels::body(left / dpr, (left + c) / dpr, 17.2 / dpr, 23.1 / dpr, dpr, false, true);
+        };
+        const auto atTwo = sample(2.0);
+        const auto restTwo = candle_pixels::body(left / dpr, (left + 2.0) / dpr, 17.2 / dpr, 23.1 / dpr, dpr, true, true);
+        EXPECT_NEAR((atTwo.x.hi - atTwo.x.lo) * dpr, (restTwo.x.hi - restTwo.x.lo) * dpr, 1e-5)
+            << "C2 has no gap in either the continuous or rest frame";
+        for (double columns : {1.0, 2.0, 2.001, 2.7, 3.0, 3.01, 14.7, 15.0, 15.01, 27.7, 28.0, 28.01, 32.37, 60.2}) {
             SCOPED_TRACE(::testing::Message() << "C=" << columns << " dpr=" << dpr);
-            constexpr double left = 11.31;
-            const auto sample = [&](double c) {
-                return candle_pixels::body(left / dpr, (left + c) / dpr, 17.2 / dpr, 23.1 / dpr, dpr, false, true);
-            };
             const auto b = sample(columns);
-            const double width = std::max(1.0, std::min(columns - 2.0, 9 * dpr));
+            const double gapF = std::clamp(columns - 2.0, 0.0, 1.0);
+            const double width = std::max(1.0, std::min(columns - 2.0 * gapF, 13 * dpr));
             EXPECT_NEAR(b.x.lo * dpr, left + (columns - width) * 0.5, 1e-5);
             EXPECT_NEAR(b.x.hi * dpr, left + (columns + width) * 0.5, 1e-5);
             EXPECT_FLOAT_EQ(b.y.lo * dpr, 17);
