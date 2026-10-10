@@ -90,7 +90,7 @@ curl -s 127.0.0.1:8091/metrics | rg '^sentinel_capture'
 curl -s 'http://127.0.0.1:8428/api/v1/query' --data-urlencode 'query=up'
 curl -s 'http://127.0.0.1:8428/api/v1/query' \
   --data-urlencode 'query=max by (product,layer) (sentinel_recorder_column_overdue_seconds)'
-curl -s 'http://127.0.0.1:8428/api/v1/query_range' --data-urlencode 'query=increase(sentinel_recorder_invalidations_total[1h])' \
+curl -s 'http://127.0.0.1:8428/api/v1/query_range' --data-urlencode 'query=increase(sentinel_roller_invalidations_total[1h])' \
   --data-urlencode "start=$(date -v-24H +%s)" --data-urlencode "end=$(date +%s)" --data-urlencode 'step=1h'
 ```
 
@@ -105,15 +105,17 @@ scrape. VictoriaMetrics adds `job` and `instance` to every series.
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `sentinel_recorder_running` | gauge | - | 1 when recording v2 started in this process. The `sentinel_recorder_*` series below exist only when it is 1. |
+| `sentinel_recorder_running` | gauge | - | 1 when recording is served: primary recorder started or serving roller attached. |
 | `sentinel_recorder_last_column_timestamp_seconds` | gauge | product, layer | Start of the newest committed minute column. Absent until the first column. Age = `time() - x`; normal age is 60-125 s. |
 | `sentinel_recorder_column_overdue_seconds` | gauge | product, layer | Seconds that the next column is past due, by the stall monitor's deadline: last column bucket (or the connect minute) + 2 min + lateness. 0 means on time. 60 is when the log warns `Recording v2 stalled`. Absent while that product's upstream is disconnected. |
-| `sentinel_recorder_columns_written_total` | counter | - | Committed minute columns, all series. |
-| `sentinel_recorder_invalidations_total` | counter | - | Recorder book invalidations (from upstream and from the recorder itself). |
-| `sentinel_recorder_queue_drops_total` | counter | - | Book messages dropped (or turned into an invalidation) when the recorder queue overflowed. |
-| `sentinel_recorder_disk_errors_total` | counter | - | Recorder disk write failures. |
-| `sentinel_recorder_late_events_total` | counter | - | Book messages timestamped before the minutes that are already closed. |
-| `sentinel_recorder_backward_steps_total` | counter | - | Book messages whose timestamp went backwards. |
+| `sentinel_roller_invalidations_total` | counter | product | Journal book invalidations counted at ShadowRoller journal invalidation handling; retained across daily recorders/retries, resets with the process. |
+| `sentinel_roller_write_errors_total` | counter | product | Failed HMC2 appends (minutes and hourly rollups), counted once at the append failure; excludes setup, checkpoint and socket errors (see shadow setup failures). Retained across daily recorders/retries, resets with the process. |
+| `sentinel_recorder_columns_written_total` | counter | - | Serving roller: committed minute appends across products/layers, excluding rollups and checkpoint replay. Primary mode: BookRecorder appends (including rollups). Process lifetime; present at zero before first commit. |
+| `sentinel_recorder_invalidations_total` | counter | - | Primary mode only (absent in roller mode): Recorder book invalidations (from upstream and from the recorder itself). |
+| `sentinel_recorder_queue_drops_total` | counter | - | Primary mode only (absent in roller mode): Book messages dropped (or turned into an invalidation) when the recorder queue overflowed. |
+| `sentinel_recorder_disk_errors_total` | counter | - | Primary mode only (absent in roller mode): Recorder disk write failures. |
+| `sentinel_recorder_late_events_total` | counter | - | Primary mode only (absent in roller mode): Book messages timestamped before the minutes that are already closed. |
+| `sentinel_recorder_backward_steps_total` | counter | - | Primary mode only (absent in roller mode): Book messages whose timestamp went backwards. |
 | `sentinel_recorder_live_publish_drops_total` | counter | - | Live publications that were refused (series limit or stale). |
 | `sentinel_mdc_connected` | gauge | product, pinned | 1 while this product connection is up; pinned=`1` for recorder defaults, `0` for GUI-only feeds. |
 | `sentinel_mdc_transport_up_total` / `_down_total` | counter | product, pinned | Transitions in this feed lifetime. Reconnects = up - 1 per product. |
@@ -372,12 +374,17 @@ provisional discard.
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
 | `sentinel_roller_shadow_live_lead_forks_total` | counter | product | Live leads forked from durable history (serving only). Steady growth beyond one per day means repeated provisional discards: read `Shadow roller retry`. |
-| `sentinel_recorder_running` | gauge | - | 1 when recording is served: primary started, or the serving roller attached. |
+| `sentinel_recorder_running` | gauge | - | 1 when recording is served: primary recorder started or serving roller attached. |
 | `sentinel_recorder_last_column_timestamp_seconds`, `sentinel_recorder_column_overdue_seconds` | gauge | product, layer | Same series, from the roller's committed watermarks for `roller_shadow.products`; overdue is present while that product's worker is running. |
 | `sentinel_recorder_live_publish_drops_total` | counter | - | Roller publications the live cache refused. |
 
-The primary-only `sentinel_recorder_*_total` stats (columns, late, backward,
-queue drops, invalidations, disk errors) are absent while the roller serves.
+The columns-written counter is exported in both serving modes. The primary-only
+late-event, backward-step, queue-drop, invalidation and disk-error counters are
+absent while the roller serves. Dashboards use `sentinel_roller_invalidations_total`
+and `sentinel_roller_write_errors_total` instead; late/backward targets have no
+roller equivalent, and blocking recorder admission has no queue-drop equivalent.
+The recorder columns/minute query is unchanged. Alert provisioning currently
+references none of these six counters; no alert expressions need changing.
 The cross-connection comparison still reads `recording.dir` (informational;
 it stops growing after the flip). Served watermarks never move back across
 the daily anchor replay.

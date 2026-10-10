@@ -437,6 +437,9 @@ void ServerDataModel::registerMetrics(sentinel::metrics::MetricsRegistry& r) {
         r.counterFn("sentinel_recorder_invalidations_total", "Recorder book invalidations (upstream and self).", {}, stat(&Stats::invalidations));
         r.counterFn("sentinel_recorder_disk_errors_total", "Recorder disk write failures.", {}, stat(&Stats::diskErrors));
     }
+    if (m_servesRoller)
+        r.counter("sentinel_recorder_columns_written_total",
+                  "Minute columns the serving roller committed across products and layers.");
     r.counterFn("sentinel_recorder_live_publish_drops_total", "Live publications refused (series limit or stale).", {},
                 load(m_livePublishDrops));
 

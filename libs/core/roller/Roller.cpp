@@ -117,6 +117,8 @@ json roll(const RollOptions& o) {
                 hash = configHash(cfg);
                 latenessMs = cfg.latenessMs;
                 cfg.commitFloorMs = from; cfg.commitCeilingMs = end;
+                cfg.minuteColumnsCounter = o.minuteColumnsCounter;
+                cfg.writeErrorsCounter = o.writeErrorsCounter;
                 if (cp["days"].contains(key)) {
                     const auto& saved = cp["days"][key];
                     if (saved.at("configHash") != hash || saved.at("fromMs") != from)

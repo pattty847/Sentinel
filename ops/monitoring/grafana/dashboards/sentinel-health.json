@@ -259,8 +259,8 @@
     {
       "id": 4,
       "type": "stat",
-      "title": "Recorder errors (1h)",
-      "description": "Increase over the last hour. Disk errors and queue drops should be 0; a few invalidations per reconnect are normal.",
+      "title": "Roller errors (1h)",
+      "description": "Per-product HMC2 append failures should be 0; journal invalidations can occur on reconnect. The roller uses blocking recorder admission, so the primary queue-drop target is removed.",
       "datasource": {
         "type": "prometheus",
         "uid": "sentinel-vm"
@@ -278,19 +278,8 @@
             "type": "prometheus",
             "uid": "sentinel-vm"
           },
-          "expr": "increase(sentinel_recorder_disk_errors_total[1h])",
-          "legendFormat": "disk errors",
-          "range": false,
-          "instant": true
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "sentinel-vm"
-          },
-          "expr": "increase(sentinel_recorder_queue_drops_total[1h])",
-          "legendFormat": "queue drops",
+          "expr": "increase(sentinel_roller_write_errors_total[1h])",
+          "legendFormat": "write errors {{product}}",
           "range": false,
           "instant": true
         },
@@ -300,8 +289,8 @@
             "type": "prometheus",
             "uid": "sentinel-vm"
           },
-          "expr": "increase(sentinel_recorder_invalidations_total[1h])",
-          "legendFormat": "invalidations",
+          "expr": "increase(sentinel_roller_invalidations_total[1h])",
+          "legendFormat": "invalidations {{product}}",
           "range": false,
           "instant": true
         },

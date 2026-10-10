@@ -9,6 +9,9 @@ struct RollOptions {
     int64_t fromMs = 0, toMs = 0; // [from,to), complete UTC minutes
     nlohmann::json overrides = nlohmann::json::object();
     bool dryRun = false;
+    // Optional process counters retained across daily recorders and retries.
+    sentinel::metrics::Counter* minuteColumnsCounter = nullptr;
+    sentinel::metrics::Counter* writeErrorsCounter = nullptr;
     // Crash/lifecycle seam: invoked after a processed record, before a possible
     // checkpoint fence. Throw to interrupt; the next run must recover identically.
     std::function<void(uint64_t)> afterRecordForTest;

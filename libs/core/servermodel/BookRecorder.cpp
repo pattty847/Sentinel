@@ -1,6 +1,7 @@
 #include "BookRecorder.hpp"
 #include "Hmc2Store.hpp"
 #include "SentinelLogging.hpp"
+#include "metrics/MetricsRegistry.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -521,7 +522,14 @@ struct BookRecorder::Impl {
     void write(const Hmc2Record &r) {
         if (r.bucketStartMs + r.header.tfMs <= cfg.commitFloorMs ||
             r.bucketStartMs + r.header.tfMs > cfg.commitCeilingMs) return;
-        store->append(r);
+        bool appended;
+        try {
+            appended = store->append(r);
+        } catch (...) {
+            if (cfg.writeErrorsCounter) cfg.writeErrorsCounter->inc();
+            throw;
+        }
+        if (appended && r.header.tfMs == kMinute && cfg.minuteColumnsCounter) cfg.minuteColumnsCounter->inc();
         ++columnsWritten;
         sLog_Probe("recording.close", "symbol=" << r.header.symbol << " layer=" << r.header.layer
                                                 << " tf=" << r.header.tfMs << " bucket=" << r.bucketStartMs
@@ -994,6 +1002,8 @@ std::unique_ptr<BookRecorder> BookRecorder::forkLead(std::function<void(std::sha
     c.livePublishMs = livePublishMs;
     c.writerProduct.clear();
     c.deterministicResume = false;
+    c.minuteColumnsCounter = nullptr;
+    c.writeErrorsCounter = nullptr;
     c.onSelfInvalidated = {};
     c.onReleased = {};
     c.beforePublicationForTest = {};

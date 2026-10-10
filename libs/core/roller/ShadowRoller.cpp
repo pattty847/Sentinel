@@ -550,7 +550,8 @@ struct ShadowRoller::Impl {
     std::string name;
     metrics::Gauge *running, *lastComparison, *cooldown;
     metrics::Counter *records, *failures, *compareFailures, *cooldowns,
-        *leadForks;
+        *leadForks, *invalidations, *writeErrors;
+    metrics::Counter *minuteColumns = nullptr;
     bool refused = false;
     bool healthy = false; // readyMutex
     // Served watermarks (chunk workers): the current day's history recorder
@@ -603,6 +604,18 @@ struct ShadowRoller::Impl {
       p->failures = &registry.counter(
           "sentinel_roller_shadow_setup_failures_total",
           "Shadow setup/stream/write failures requiring retry.", labels);
+      p->invalidations = &registry.counter(
+          "sentinel_roller_invalidations_total",
+          "Journal book invalidations applied by the roller.", labels);
+      p->writeErrors = &registry.counter(
+          "sentinel_roller_write_errors_total",
+          "Roller HMC2 append failures (minutes and rollups).", labels);
+      // Shadow-only runs must not collide with primary recorder samplers or
+      // add shadow writes to the primary recording throughput.
+      if (cfg.publisher)
+        p->minuteColumns = &registry.counter(
+            "sentinel_recorder_columns_written_total",
+            "Minute columns the serving roller committed across products and layers.");
       p->cooldown = &registry.gauge(
           "sentinel_roller_shadow_fault_cooldown",
           "Product is probing a persistent fault at slow cadence.", labels);
@@ -776,6 +789,8 @@ struct ShadowRoller::Impl {
                           lead.enabled() ? &lead : nullptr);
         RollOptions o{cfg.journalRoot, cfg.outputRoot, p.name, day, day + Day};
         o.publisher = cfg.publisher;
+        o.minuteColumnsCounter = p.minuteColumns;
+        o.writeErrorsCounter = p.writeErrors;
         o.onRecorder = [&](recording::BookRecorder *h, const JournalFeed *f,
                            int64_t end) {
           {
@@ -797,6 +812,7 @@ struct ShadowRoller::Impl {
         o.onInvalid = [&](const std::string &reason) {
           // Match batch: invalidate the book, then continue to the next
           // snapshot.
+          p.invalidations->inc();
           sLog_Warning("Shadow journal invalidated product="
                        << p.name << " reason=" << reason);
         };
