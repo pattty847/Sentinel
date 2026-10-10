@@ -582,15 +582,16 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
 
         const double x    = mapping.timeToScreenX(static_cast<double>(c.timeStartMs));
         const double xEnd = mapping.timeToScreenX(static_cast<double>(c.timeStartMs) + mapping.appendMs);
-        const double candleW = xEnd - x;
-        const double centerX = x + candleW * 0.5;
         const double yOpen = mapping.priceToScreenY(c.open);
         const double yClose = mapping.priceToScreenY(c.close);
         const auto body = candle_pixels::body(x, xEnd, yOpen, yClose, dpr, snap.x, snap.y);
         const float bodyX0 = body.x.lo, bodyX1 = body.x.hi;
         const float bodyY0 = body.y.lo, bodyY1 = body.y.hi;
         const float bodyWidth = bodyX1 - bodyX0;
+        const double centerX = (double(bodyX0) + bodyX1) * 0.5;
 
+        // An even body and odd wick cannot share an exact device-pixel
+        // centre. stroke() resolves that half-pixel tie to the right.
         const auto wickSpan = !snap.x
             ? candle_pixels::Span{float(centerX - m_wickWidth * 0.5 / dpr),
                                   float(centerX + m_wickWidth * 0.5 / dpr)}
