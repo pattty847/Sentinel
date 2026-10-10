@@ -2,6 +2,7 @@
  * Sentinel – VolumeProfileRenderer (implementation)
  */
 #include "VolumeProfileRenderer.hpp"
+#include "SentinelLogging.hpp"
 
 #include <QSGFlatColorMaterial>
 #include <QSGGeometry>
@@ -9,11 +10,34 @@
 #include <QSGVertexColorMaterial>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 namespace {
+
+// Four vertices per bar; the last legal vertex index is 65535.
+constexpr int kMaxIndexedBars = (int(std::numeric_limits<quint16>::max()) + 1) / 4;
+
+// Change the draw range without freeing the retained geometry storage.
+// Qt 6.9 has no draw-count setters: unused indexed triangles must degenerate
+// instead, including after a profile moves completely outside the viewport.
+void setDrawCounts(QSGGeometry* geo, int vertices, int indices) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+    geo->setVertexCount(vertices);
+    geo->setIndexCount(indices);
+#else
+    auto* v = geo->vertexDataAsColoredPoint2D();
+    for (int i = vertices; i < geo->vertexCount(); ++i) {
+        v[i].set(0, 0, 0, 0, 0, 0);
+    }
+    auto* idx = geo->indexDataAsUShort();
+    std::fill(idx + indices, idx + geo->indexCount(), quint16(0));
+    geo->markVertexDataDirty();
+    geo->markIndexDataDirty();
+#endif
+}
 
 // Build a solid-colour axis-aligned rectangle into existing geometry storage
 // (expects the geometry to be pre-allocated for 4 vertices / 6 indices).
@@ -22,10 +46,12 @@ void fillRect(QSGGeometry* geo, const QRectF& r, const QColor& c) {
     const float y0 = static_cast<float>(r.top());
     const float x1 = static_cast<float>(r.right());
     const float y1 = static_cast<float>(r.bottom());
-    const quint8 cr = static_cast<quint8>(c.red());
-    const quint8 cg = static_cast<quint8>(c.green());
-    const quint8 cb = static_cast<quint8>(c.blue());
+    // QSGVertexColorMaterial blends premultiplied RGBA (One,
+    // OneMinusSrcAlpha). Straight RGB makes translucent fills additive.
     const quint8 ca = static_cast<quint8>(c.alpha());
+    const quint8 cr = static_cast<quint8>(c.red() * ca / 255);
+    const quint8 cg = static_cast<quint8>(c.green() * ca / 255);
+    const quint8 cb = static_cast<quint8>(c.blue() * ca / 255);
 
     auto* v = geo->vertexDataAsColoredPoint2D();
     v[0].set(x0, y0, cr, cg, cb, ca);
@@ -36,17 +62,32 @@ void fillRect(QSGGeometry* geo, const QRectF& r, const QColor& c) {
     auto* idx = geo->indexDataAsUShort();
     idx[0] = 0; idx[1] = 1; idx[2] = 2;
     idx[3] = 1; idx[4] = 3; idx[5] = 2;
+    geo->markVertexDataDirty();
+    geo->markIndexDataDirty();
+}
+
+// Clip filled VP rectangles before submission, including the POC thickness.
+// Retain geometry storage when a rectangle is completely outside the surface.
+void fillClippedRect(QSGGeometry* geo, const QRectF& rect,
+                     const QRectF& surface, const QColor& color) {
+    const QRectF clipped = rect.intersected(surface);
+    if (clipped.isEmpty()) {
+        setDrawCounts(geo, 0, 0);
+        return;
+    }
+    setDrawCounts(geo, 4, 6);
+    fillRect(geo, clipped, color);
 }
 
 // Price → screen Y within drawRect for a given visible price range.
 // viewMaxPrice maps to drawRect.top(); viewMinPrice to drawRect.bottom().
-inline float priceToY(double price, double viewMinPrice, double viewMaxPrice,
+inline double priceToY(double price, double viewMinPrice, double viewMaxPrice,
                       const QRectF& drawRect) {
     if (viewMaxPrice <= viewMinPrice) {
-        return static_cast<float>(drawRect.center().y());
+        return drawRect.center().y();
     }
     const double frac = (viewMaxPrice - price) / (viewMaxPrice - viewMinPrice);
-    return static_cast<float>(drawRect.top() + frac * drawRect.height());
+    return drawRect.top() + frac * drawRect.height();
 }
 
 } // namespace
@@ -108,6 +149,7 @@ void VolumeProfileRenderer::onRootRebuilt() {
     m_vaNode   = nullptr;
     m_barsNode = nullptr;
     m_pocNode  = nullptr;
+    m_barCapacity = 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -120,7 +162,8 @@ void VolumeProfileRenderer::render(QSGNode* parentNode,
                                    double viewMinPrice,
                                    double viewMaxPrice,
                                    const std::vector<float>& bins,
-                                   const VolumeProfileState::Snapshot& snap) {
+                                   const VolumeProfileState::Snapshot& snap,
+                                   double dpr, bool snapY) {
     if (!parentNode) {
         return;
     }
@@ -132,7 +175,7 @@ void VolumeProfileRenderer::render(QSGNode* parentNode,
     }
 
     ensureNodes(parentNode);
-    rebuildGeometry(drawRect, viewMinPrice, viewMaxPrice, bins, snap);
+    rebuildGeometry(drawRect, viewMinPrice, viewMaxPrice, bins, snap, dpr, snapY);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -155,11 +198,11 @@ void VolumeProfileRenderer::ensureNodes(QSGNode* parentNode) {
     }
     // Bars node
     if (!m_barsNode) {
-        // Pre-allocate for max 4096 bins (each bin = 2 triangles = 4 verts + 6 idx)
-        constexpr int kMaxBins = 4096;
+        // Pre-allocate for 4096 bins (each bin = 2 triangles = 4 verts + 6 idx)
+        m_barCapacity = 4096;
         m_barsNode = new QSGGeometryNode();
         auto* geo = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(),
-                                    kMaxBins * 4, kMaxBins * 6);
+                                    m_barCapacity * 4, m_barCapacity * 6);
         geo->setDrawingMode(QSGGeometry::DrawTriangles);
         geo->setVertexDataPattern(QSGGeometry::DynamicPattern);
         geo->setIndexDataPattern(QSGGeometry::DynamicPattern);
@@ -185,10 +228,10 @@ void VolumeProfileRenderer::ensureNodes(QSGNode* parentNode) {
 }
 
 void VolumeProfileRenderer::clearGeometry() {
-    // Zero out vertex counts so nothing is drawn; nodes stay in tree for reuse.
-    if (m_vaNode   && m_vaNode->geometry())   m_vaNode->geometry()->allocate(0, 0);
-    if (m_barsNode && m_barsNode->geometry()) m_barsNode->geometry()->allocate(0, 0);
-    if (m_pocNode  && m_pocNode->geometry())  m_pocNode->geometry()->allocate(0, 0);
+    // Hide the draw ranges; keep nodes and allocated buffers for reuse.
+    if (m_vaNode)   setDrawCounts(m_vaNode->geometry(), 0, 0);
+    if (m_barsNode) setDrawCounts(m_barsNode->geometry(), 0, 0);
+    if (m_pocNode)  setDrawCounts(m_pocNode->geometry(), 0, 0);
     if (m_vaNode)   m_vaNode->markDirty(QSGNode::DirtyGeometry);
     if (m_barsNode) m_barsNode->markDirty(QSGNode::DirtyGeometry);
     if (m_pocNode)  m_pocNode->markDirty(QSGNode::DirtyGeometry);
@@ -198,9 +241,21 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
                                              double viewMinPrice,
                                              double viewMaxPrice,
                                              const std::vector<float>& bins,
-                                             const VolumeProfileState::Snapshot& snap) {
+                                             const VolumeProfileState::Snapshot& snap,
+                                   double dpr, bool snapY) {
     const int n = static_cast<int>(bins.size());
     if (n == 0) return;
+
+    const double scale = std::isfinite(dpr) && dpr > 0 ? dpr : 1.0;
+    const auto edge = [scale, snapY](double y) {
+        if (!snapY) return y;
+        const double device = y * scale;
+        const double exact = std::abs(device - std::round(device)) < 1e-7 ? std::round(device) : device;
+        return std::floor(exact) / scale;
+    };
+    const auto priceEdge = [&](double price) {
+        return edge(priceToY(price, viewMinPrice, viewMaxPrice, drawRect));
+    };
 
     // ── Histogram area ─────────────────────────────────────────────────────
     // The VP is pinned to the right edge.
@@ -218,19 +273,24 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
         return;
     }
 
+    sLog_Probe("vp.geometry", "VAL=" << snap.va.valPrice << " VAH=" << snap.va.vahPrice
+               << " POC=" << snap.va.pocPrice << " totalVolume=" << snap.va.totalVolume
+               << " bins=" << n << " viewMinPrice=" << viewMinPrice
+               << " viewMaxPrice=" << viewMaxPrice);
+
     // ── 1. VA band ─────────────────────────────────────────────────────────
     if (snap.va.valid && m_vaNode) {
-        const float yVah = priceToY(snap.va.vahPrice, viewMinPrice, viewMaxPrice, drawRect);
-        const float yVal = priceToY(snap.va.valPrice, viewMinPrice, viewMaxPrice, drawRect);
+        const float yVah = priceEdge(snap.va.vahPrice);
+        const float yVal = priceEdge(snap.va.valPrice);
         const QRectF vaRect(static_cast<double>(vpLeft),
                             static_cast<double>(std::min(yVah, yVal)),
                             static_cast<double>(vpWidth),
                             static_cast<double>(std::abs(yVal - yVah)));
         auto* geo = m_vaNode->geometry();
-        if (geo->vertexCount() < 4 || geo->indexCount() < 6) {
-            geo->allocate(4, 6);
-        }
-        fillRect(geo, vaRect, m_vaColor);
+        fillClippedRect(geo, vaRect, drawRect, m_vaColor);
+        m_vaNode->markDirty(QSGNode::DirtyGeometry);
+    } else if (m_vaNode) {
+        setDrawCounts(m_vaNode->geometry(), 0, 0);
         m_vaNode->markDirty(QSGNode::DirtyGeometry);
     }
 
@@ -243,7 +303,7 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
 
         // Count visible bins first to size the geometry.
         int visCount = 0;
-        for (int i = 0; i < n; ++i) {
+        for (int i = 0; i < n && visCount < kMaxIndexedBars; ++i) {
             const double binTop    = gridMaxPrice - static_cast<double>(i)       * snap.tickSize;
             const double binBottom = gridMaxPrice - static_cast<double>(i + 1)   * snap.tickSize;
             if (binTop < viewMinPrice || binBottom > viewMaxPrice) continue;
@@ -251,8 +311,9 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
         }
 
         auto* geo = m_barsNode->geometry();
-        if (geo->vertexCount() < visCount * 4 || geo->indexCount() < visCount * 6) {
-            geo->allocate(visCount * 4, visCount * 6);
+        if (visCount > m_barCapacity) {
+            m_barCapacity = std::min(kMaxIndexedBars, std::max(visCount, m_barCapacity * 2));
+            geo->allocate(m_barCapacity * 4, m_barCapacity * 6);
         }
         auto* vdata = geo->vertexDataAsColoredPoint2D();
         auto* idata = geo->indexDataAsUShort();
@@ -274,42 +335,45 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
             // Bars extend leftward from vpRight.
             const float x0 = vpRight - barWidth;
             const float x1 = vpRight;
-            const float y0 = priceToY(binTop,    viewMinPrice, viewMaxPrice, drawRect);
-            const float y1 = priceToY(binBottom, viewMinPrice, viewMaxPrice, drawRect);
+            const float y0 = priceEdge(binTop);
+            const float y1 = priceEdge(binBottom);
             // Intensity: brighter for higher volume (keep hue, scale alpha).
             const quint8 ca = static_cast<quint8>(
                 std::clamp(static_cast<int>(80 + 175 * barFrac), 80, 255));
 
+            const quint8 pr = static_cast<quint8>(int(cr) * ca / 255);
+            const quint8 pg = static_cast<quint8>(int(cg) * ca / 255);
+            const quint8 pb = static_cast<quint8>(int(cb) * ca / 255);
             const quint16 vi0 = static_cast<quint16>(vi);
-            vdata[vi  ].set(x0, y0, cr, cg, cb, ca);
-            vdata[vi+1].set(x1, y0, cr, cg, cb, ca);
-            vdata[vi+2].set(x0, y1, cr, cg, cb, ca);
-            vdata[vi+3].set(x1, y1, cr, cg, cb, ca);
+            vdata[vi  ].set(x0, y0, pr, pg, pb, ca);
+            vdata[vi+1].set(x1, y0, pr, pg, pb, ca);
+            vdata[vi+2].set(x0, y1, pr, pg, pb, ca);
+            vdata[vi+3].set(x1, y1, pr, pg, pb, ca);
             idata[ii  ] = vi0;     idata[ii+1] = vi0+1; idata[ii+2] = vi0+2;
             idata[ii+3] = vi0+1;   idata[ii+4] = vi0+3; idata[ii+5] = vi0+2;
             vi += 4;
             ii += 6;
         }
-        // Zero out any leftover allocated geometry from prior frames.
-        for (int i = vi; i < geo->vertexCount(); ++i) {
-            vdata[i].set(0, 0, 0, 0, 0, 0);
-        }
+        // Capacity is not a draw count: submit only the vertices/indices filled.
+        setDrawCounts(geo, vi, ii);
+        geo->markVertexDataDirty();
+        geo->markIndexDataDirty();
         m_barsNode->markDirty(QSGNode::DirtyGeometry);
     }
 
     // ── 3. POC line ────────────────────────────────────────────────────────
     if (snap.va.valid && m_pocNode) {
-        const float yPoc = priceToY(snap.va.pocPrice, viewMinPrice, viewMaxPrice, drawRect);
+        const double yPoc = priceToY(snap.va.pocPrice, viewMinPrice, viewMaxPrice, drawRect);
         constexpr float kPocLineHalfH = 1.5f;
         const QRectF pocRect(static_cast<double>(vpLeft),
-                             static_cast<double>(yPoc - kPocLineHalfH),
+                             edge(yPoc - kPocLineHalfH),
                              static_cast<double>(vpWidth),
-                             static_cast<double>(kPocLineHalfH * 2.0f));
+                             edge(yPoc + kPocLineHalfH) - edge(yPoc - kPocLineHalfH));
         auto* geo = m_pocNode->geometry();
-        if (geo->vertexCount() < 4 || geo->indexCount() < 6) {
-            geo->allocate(4, 6);
-        }
-        fillRect(geo, pocRect, m_pocColor);
+        fillClippedRect(geo, pocRect, drawRect, m_pocColor);
+        m_pocNode->markDirty(QSGNode::DirtyGeometry);
+    } else if (m_pocNode) {
+        setDrawCounts(m_pocNode->geometry(), 0, 0);
         m_pocNode->markDirty(QSGNode::DirtyGeometry);
     }
 }

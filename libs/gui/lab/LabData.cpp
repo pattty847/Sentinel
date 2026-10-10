@@ -6,7 +6,6 @@
 #include "protocol/SentinelStreamClientTransport.hpp"
 #include "servermodel/RecordingChunks.hpp"
 #include <QCoreApplication>
-#include <QTimer>
 
 namespace lab {
 uint64_t processFootprintBytes() { return heatmap::processFootprintBytes(); }
@@ -111,7 +110,6 @@ void LabData::start() {
         else {
             connection_ = Connection::Connecting;
             static_cast<SentinelStreamClient *>(client_)->connectToServer();
-            reconnectTimer_->start();
         }
     }, [this] {
         tearingDown_ = true;
@@ -123,9 +121,9 @@ void LabData::start() {
         sLog_App("Lab heatmap data path started root=" << root_ << " pinnedEndMs=" << pinnedEndMs_);
 }
 
-// Data thread. The stream client has no reconnect of its own: retry every 2 s
-// while not connected. Availability is pushed on "subscribe" (and on change),
-// so subscribe on every connect; the fetcher then (re)subscribes the live edge.
+// Data thread. The stream client owns reconnect. Availability is pushed on
+// "subscribe" (and on change), so subscribe on every connect; the fetcher then
+// (re)subscribes the live edge.
 // Every callback uses the client itself as its context: a delivery queued while
 // the data path shuts down is dropped with the client, never run on a dead one.
 heatmap::ChunkTransport *LabData::createServerTransport(QObject *context) {
@@ -150,14 +148,6 @@ heatmap::ChunkTransport *LabData::createServerTransport(QObject *context) {
         if (connection_.load() != Connection::Connected) connection_ = Connection::Disconnected;
         sLog_DataN(5000, "Lab stream client error: " << error);
     }, Qt::QueuedConnection);
-    reconnectTimer_ = new QTimer(client);
-    reconnectTimer_->setInterval(2000);
-    QObject::connect(reconnectTimer_, &QTimer::timeout, client, [this, client] {
-        if (connection_.load() != Connection::Disconnected) return;
-        connection_ = Connection::Connecting;
-        client->disconnectFromServer();
-        client->connectToServer();
-    });
     return transport;
 }
 

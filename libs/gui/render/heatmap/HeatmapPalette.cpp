@@ -138,7 +138,7 @@ std::array<float, 4> legacyRecordingColor(uint16_t cell, CodeWindow window, cons
     const auto &tone = palette.tone;
     float adjusted = std::pow(std::max(magnitude, tone.floor), tone.gamma);
     adjusted = std::clamp((adjusted - 0.5f) * tone.contrast + 0.5f, 0.0f, 1.0f);
-    const float u = ask ? 0.51f + adjusted * 0.49f : adjusted * 0.49f;
+    const float u = ask ? (256.5f + adjusted * 255.0f) / 512.0f : (0.5f + adjusted * 255.0f) / 512.0f;
     // Linear filtering, clamp to edge.
     const float coord = u * float(kPaletteWidth) - 0.5f;
     const int i0 = int(std::floor(coord));

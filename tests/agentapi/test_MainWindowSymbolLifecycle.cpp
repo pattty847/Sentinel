@@ -15,7 +15,6 @@
 #include "widgets/ServiceLocator.hpp"
 #include "mainwindow/GuiApiServer.h"
 #include "UnifiedGridRenderer.h"
-#include "CoordinateSystem.h"
 #include "models/TimeAxisModel.hpp"
 #include "models/PriceAxisModel.hpp"
 #include "render/LabTextItem.hpp"
@@ -420,6 +419,12 @@ TEST(MainWindowHealthIntegration, DefaultLayoutPreservesNavigationRailCapAtNarro
 }
 
 void connected(MainWindowGPU& window) {
+    // These tests inject lifecycle events. Retire the constructor's real client
+    // and deliver any already queued down before simulating transport-up.
+    auto* source = dynamic_cast<RemoteGridDataSource*>(ServiceLocator::dataSource());
+    ASSERT_TRUE(source);
+    source->streamClient()->disconnectFromServer();
+    deliver(source);
     ASSERT_TRUE(QMetaObject::invokeMethod(&window, "onConnectionStatusChanged", Qt::DirectConnection,
                                           Q_ARG(bool, true)));
 }
@@ -806,7 +811,6 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     qmlRegisterModule("Sentinel", 1, 0);
     qmlRegisterType<UnifiedGridRenderer>("Sentinel", 1, 0, "UnifiedGridRenderer");
-    qmlRegisterType<CoordinateSystem>("Sentinel", 1, 0, "CoordinateSystem");
     qmlRegisterType<TimeAxisModel>("Sentinel", 1, 0, "TimeAxisModel");
     qmlRegisterType<PriceAxisModel>("Sentinel", 1, 0, "PriceAxisModel");
     qmlRegisterType<AlgoOverlayRenderer>("Sentinel", 1, 0, "AlgoOverlayRenderer");

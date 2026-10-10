@@ -3,6 +3,7 @@
 find_package(Qt6 REQUIRED COMPONENTS Core Gui)
 
 add_executable(test_PaperTradingDock test_PaperTradingDock.cpp)
+add_dependencies(test_PaperTradingDock sentinel_backtest)
 target_include_directories(test_PaperTradingDock PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
 target_link_libraries(test_PaperTradingDock PRIVATE sentinel_gui_lib GTest::gtest Qt6::Widgets Qt6::Test)
 add_test(NAME PaperTradingDockTests COMMAND test_PaperTradingDock)
@@ -26,20 +27,12 @@ target_link_libraries(test_TimeAxisMapping PRIVATE
 add_test(NAME TimeAxisMappingTests COMMAND test_TimeAxisMapping)
 set_tests_properties(TimeAxisMappingTests PROPERTIES LABELS "render")
 
-add_executable(test_UgrFrameMath
-    test_UgrFrameMath.cpp
-    ${CMAKE_SOURCE_DIR}/libs/gui/render/UgrFrameMath.cpp
-)
-target_include_directories(test_UgrFrameMath PRIVATE
-    ${CMAKE_SOURCE_DIR}/libs/gui
-)
-target_link_libraries(test_UgrFrameMath PRIVATE
-    GTest::gtest_main
-    Qt6::Core
-    Qt6::Gui
-)
-add_test(NAME UgrFrameMathTests COMMAND test_UgrFrameMath)
-set_tests_properties(UgrFrameMathTests PROPERTIES LABELS "render")
+# Whole-pixel chart mapping (raster camera), plan 2026-10-08 checks A1-A8.
+add_executable(test_ChartRaster test_ChartRaster.cpp)
+target_include_directories(test_ChartRaster PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_ChartRaster PRIVATE GTest::gtest sentinel_gui_lib Qt6::Core Qt6::Gui)
+add_test(NAME ChartRasterTests COMMAND test_ChartRaster)
+set_tests_properties(ChartRasterTests PROPERTIES LABELS "render")
 
 # S6b: GridViewState clamps (spec rules 1, 2, 9): wheel, axis drags and direct viewports.
 add_executable(test_GridViewState test_GridViewState.cpp)
@@ -150,11 +143,28 @@ qt_add_shaders(test_heatmap_gpu_binner test_unguarded_kernel
 add_test(NAME HeatmapGpuBinnerTests COMMAND test_heatmap_gpu_binner)
 # S5c: HeatmapTileNode on the SpanSet (retention, cap, capacity reports, QRhi
 # loss, never-blank transitions) and the bin kernel's fill pass vs the CPU oracle.
-add_executable(test_heatmap_tile_node test_heatmap_tile_node.cpp)
+add_executable(test_heatmap_tile_node test_heatmap_tile_node.cpp ${CMAKE_SOURCE_DIR}/libs/gui/render/ChartRaster.cpp)
 target_include_directories(test_heatmap_tile_node PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_heatmap_tile_node PRIVATE sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::Quick)
+# Whole-pixel smooth zoom (slice A2): the display shader as slice A shipped it, the
+# reference for the production shader's rest path (byte-identical).
+qt_add_shaders(test_heatmap_tile_node slice_a_display_shader
+    GLSL "440"
+    HLSL 50
+    MSL 12
+    PREFIX "/slicea"
+    BASE "shaders"
+    FILES shaders/heatmap_display_slice_a.frag
+)
 add_test(NAME HeatmapTileNodeTests COMMAND test_heatmap_tile_node)
 set_tests_properties(HeatmapTileNodeTests PROPERTIES LABELS "render;heatmap")
+# Palette sampling endpoints and CPU/display/intensity shader formula parity.
+add_executable(test_heatmap_palette test_heatmap_palette.cpp)
+target_include_directories(test_heatmap_palette PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_heatmap_palette PRIVATE sentinel_heatmap_gpu GTest::gtest_main Qt6::Core)
+target_compile_definitions(test_heatmap_palette PRIVATE SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+add_test(NAME HeatmapPaletteTests COMMAND test_heatmap_palette)
+set_tests_properties(HeatmapPaletteTests PROPERTIES LABELS "render;heatmap")
 # S5L-c: the live edge in the node (draw clip E/L vs the composed oracle, partial
 # column, rollover coverage, held/fading retention, no buffer churn, disconnect).
 add_executable(test_heatmap_live_node test_heatmap_live_node.cpp)

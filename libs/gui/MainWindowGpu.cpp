@@ -1760,6 +1760,10 @@ AgentApi::ViewportSnapshot MainWindowGPU::agentApiViewportSnapshot() const {
     s.viewportVersion = view->getViewportVersion();
     if (renderer->width() > 0) s.widthPx = renderer->width();
     if (renderer->height() > 0) s.heightPx = renderer->height();
+    // What the last frame drew (the raster camera; the bounds above are the stored view).
+    if (const auto cam = renderer->currentFrameContext().raster; cam.valid)
+        s.drawn = AgentApi::ViewportSnapshot::Drawn{cam.drawnStartMs, cam.drawnEndMs, cam.drawnMinPrice,
+                                                    cam.drawnMaxPrice, cam.rowPx,    cam.colPx, cam.dpr};
     return s;
 }
 

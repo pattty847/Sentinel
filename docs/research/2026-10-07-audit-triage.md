@@ -99,3 +99,8 @@ end-state conditions).
   from main carrying three changes at once.
 - **C. Listener exposure.** Recommended: bind the stream server to `127.0.0.1` by default now. Remote clients (the
   Windows machine, a future Pi) come back with authentication as part of the multi-server work.
+
+
+## Owner decision (2026-10-09): no more soaks; delete all legacy
+
+This supersedes every 24 h and 48 h soak and every rollback window in this plan, and the soak-per-step order of work from 2026-10-07. The roller serving path has worked since R2 (2026-10-08). The finish: one Coinbase connection (capture) -> journal -> roller -> server -> clients, with every legacy path deleted. Each deploy keeps `deploy-runtime.sh` verification plus a 10-minute smoke check. Legacy code and config keys are removed in the same change that makes them dead; a rollback restores the previous binary. The live checklist (6 steps, 2 owner sittings) is the "One-world: what's left" section of `docs/STATUS.md`.

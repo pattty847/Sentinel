@@ -49,9 +49,8 @@ set(GRID_CORE_SOURCES
     UnifiedGridRenderer.cpp
     UnifiedGridRenderer.Init.cpp
     UnifiedGridRenderer.Render.cpp
+    UnifiedGridRenderer.Zoom.cpp
     UnifiedGridRenderer.h
-    CoordinateSystem.cpp
-    CoordinateSystem.h
     ChartMode.h
 
     # Axis models for QML integration
@@ -69,6 +68,8 @@ set(GRID_CORE_SOURCES
     # New modular render architecture (V2)
     render/GridViewState.hpp
     render/GridViewState.cpp
+    render/ChartRaster.hpp
+    render/ChartRaster.cpp
     render/DataProcessor.hpp
     render/DataProcessor.cpp
     render/FootprintStreamState.hpp
@@ -91,8 +92,6 @@ set(GRID_CORE_SOURCES
     render/TimeAuthority.hpp
     render/TimeAuthority.cpp
     render/TimeAxisMapping.hpp
-    render/UgrFrameMath.hpp
-    render/UgrFrameMath.cpp
     render/AxisLayout.hpp
     render/AxisLayout.cpp
     render/AxisTextService.hpp

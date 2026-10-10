@@ -38,6 +38,8 @@ Protect these at all times:
 
 Prefer simpler/faster designs over preserving weak legacy patterns unless compatibility is explicitly required.
 
+**No backward compatibility (owner rule).** Once a replacement works, delete the superseded code path, format, reader and their tests in the same push. Keep a switch only while a live A/B comparison is wanted. Old recorded data is not a reason to keep code: propose archiving or dropping it instead (deleting recorded data still needs the owner present, section 4b).
+
 ## 2) Critical Invariants
 
 - **Viewport updates must go through `setViewport()`** so `viewportVersion` increments.
@@ -64,9 +66,9 @@ changes behaviour, data or looks (owner decisions) or needs an approval listed i
 
 ## 4) Commands and Testing
 
-Build (owner's Mac): `scripts/dev/build-queue.sh --label <branch> -- cmake --build --preset mac-clang -j 2`
+Build (owner's Mac): `scripts/dev/build-queue.sh --label <branch> -- cmake --build --preset mac-clang -j 6`
 - Every build, ctest run or benchmark on the Mac goes through the FIFO build queue, one at a time.
-- Use `-j 2` until the owner raises it (the desktop froze under heavier load on 2026-10-05).
+- Use `-j 6` (owner, 2026-10-08: Mac mini M4, 10 cores, 16 GB). The queue keeps it to one build at a time. Do not go higher without the owner: ninja's default (12 jobs) can exhaust 16 GB with Qt/Boost translation units, and the desktop froze under heavier load on 2026-10-05.
 - Windows: `cmake --build --preset windows-msvc-vs`.
 
 Verification ladder:
@@ -225,7 +227,7 @@ Per feature, 1 + 1:
 - **Fallback** (the other provider is out of usage): a different model of the same provider reviews (Sol and Astra review each other; Opus or Sonnet and Fable review each other). The conductor notes the fallback in STATUS; it ends when the other provider is back. High-risk work waits for a cross-provider review unless the owner waives it.
 
 Limits on the 16 GB Mac:
-- At most two active writers across all features; one queued build/test at a time (`-j 2`); one hosted GUI session.
+- At most two active writers across all features; one queued build/test at a time (`-j 6`); one hosted GUI session.
 - Hot files (`MainWindowGpu.cpp`, `DataProcessor.cpp`, `HeatmapTwapStreamer.cpp`, `MarketDataCoreEngine.cpp`, `UnifiedGridRenderer.cpp`) belong to one branch at a time; serialize or split tasks that need the same one.
 - At most 2-3 items wait on the owner at once, sent in one digest.
 - Run `scripts/dev/budget.sh` (CodexBar) before a dispatch batch and route to the subscription with room. Tell the owner when Codex is near 0 (they hold reset credits). Exact token and agent status come from the owner's local `ma-panel` (`.claude/skills/ma-panel/`); agents build no other usage tracking.

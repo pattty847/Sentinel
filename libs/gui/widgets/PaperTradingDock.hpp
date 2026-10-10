@@ -20,6 +20,8 @@ class QLineEdit;
 class QPlainTextEdit;
 class QProcess;
 class QTimer;
+class QComboBox;
+class QDateEdit;
 class PnlCurveItem;
 class IGridDataSource;
 class MarketHealth;
@@ -129,6 +131,10 @@ private:
     PnlCurveItem* m_pnlCurve = nullptr;
 
     // Backtest tab
+    QComboBox* m_btSource = nullptr;
+    QDateEdit* m_btFrom = nullptr;
+    QDateEdit* m_btTo = nullptr;
+    QLineEdit* m_btJournalRoot = nullptr;
     QLineEdit*    m_btFilePath   = nullptr;
     QLineEdit*    m_btSymbol     = nullptr;
     QDoubleSpinBox* m_btSpread  = nullptr;
@@ -138,4 +144,5 @@ private:
     QPlainTextEdit* m_btOutput  = nullptr;
     QLabel*       m_btStatus    = nullptr;
     QProcess*     m_btProcess   = nullptr;
+    QString m_btStderr;
 };

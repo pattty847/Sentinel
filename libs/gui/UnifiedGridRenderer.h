@@ -11,6 +11,7 @@
 #include <QColor>
 #include <QPointer>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -164,9 +165,113 @@ private:
     bool m_tpoLayerEnabled = false;
     bool m_volumeProfileLayerEnabled = false;
 
-    TimeAxisMapping m_lastTimeAxisMapping;
     mutable std::mutex m_frameContextMutex;
     MappingFrameContext m_lastFrameContext;
+    // Whole-pixel mapping: last frame's drawn pixels per row/column (the step rule's
+    // hysteresis state). Written by the render thread (GUI blocked), read by the GUI
+    // thread's rasterCameraNow(); under m_frameContextMutex.
+    chart_raster::RasterStep m_rasterStep;
+    // Render thread: what rasterChanged() last announced.
+    struct RasterSurface {
+        chart_raster::RasterStep step;
+        double dpr = 0, tick = 0;
+        int widthDev = 0, heightDev = 0;
+        bool operator==(const RasterSurface&) const = default;
+    } m_rasterAnnounced;
+    QMetaObject::Connection m_screenChangedConn;
+    // Whole-pixel smooth zoom (slice A2), GUI thread; the frame reads it while the GUI
+    // thread is blocked. Time and price glide independently: a click or a gesture on one
+    // axis leaves a glide on the other running.
+    struct AxisGlide {
+        bool active = false;
+        bool holding = false; // at its end, waiting for the frame's rest camera (a tick commit)
+        // Full cameras without a drag; this axis's part is used. The end is fixed when the
+        // glide starts: the stored view's rest camera at the tick it is drawn with.
+        chart_raster::RasterCamera from, end;
+        double anchorTime = 0, anchorPrice = 0; // the content under the cursor
+        // beganMs: the click (or gesture end); a retarget never lands later than
+        // beganMs + 2 * kZoomGlideMs.
+        qint64 beganMs = 0, startMs = 0, deadlineMs = 0;
+        double progress = 1.0; // eased, for the frame being prepared
+    };
+    AxisGlide m_glideTime, m_glidePrice;
+    int m_glideRebases = 0; // diagnostics and tests
+    // The rungs the glides go to: rapid clicks step on from here.
+    int m_glideColPx = 0;
+    chart_raster::RowRung m_glideRow;
+    // Following live after a timeframe switch that kept the Now column: the padding the
+    // follow-live updates keep, not the nominal one, for as long as the time window is the
+    // placement the switch made (follow updates move it along; any other write of the
+    // window ends it).
+    struct FollowPadding {
+        int64_t padMs = 0, startMs = 0, endMs = 0, tfMs = 0;
+        uint64_t placement = 0;
+    };
+    std::optional<FollowPadding> m_followPadding;
+    bool m_zoomGesture = false;         // a pinch or trackpad scroll draws the continuous camera
+    // The axes the gesture has zoomed (the others stay the rest camera's whole pixels).
+    bool m_gestureTime = false, m_gesturePrice = false;
+    QPointF m_gestureAt;
+    QTimer* m_zoomSettleTimer = nullptr; // a gesture settles after a pause (a lost end included)
+    std::function<qint64()> m_zoomClock;
+    // Hi-res mouse wheels: the partial notch toward the next click, for one route and
+    // its axes (a change of either, or a reversal, drops it).
+    enum class WheelRoute { Chart, TimeAxis, PriceAxis };
+    int m_wheelAngleRemainder = 0;
+    int m_wheelCarryKey = -1;
+    qint64 zoomNowMs() const;
+    // The chart and axis wheels: notches are clicks, a trackpad scroll is continuous.
+    void wheelZoom(int angle, bool pixelDeltaNull, Qt::ScrollPhase phase, bool precise,
+                   double x, double y, bool time, bool price,
+                   WheelRoute route);
+    // The stored view zoomed by factor about a point, in the limits (no camera yet).
+    void zoomStoredView(double factor, double x, double y, bool time, bool price);
+    // A continuous zoom that settles on a rung after settleMs without input.
+    void zoomContinuousFor(double factor, double x, double y, bool time, bool price, int settleMs);
+    // GUI thread, once per frame before the sync (updatePolish): the glide's progress
+    // for that frame; the axis models and sibling overlays follow it. The next frame's
+    // polish is requested through a reused zero timer (never from inside updatePolish).
+    void advanceZoomGlide();
+    QTimer* m_glidePolishTimer = nullptr;
+    // An explicit view change lands the glides of these axes at once (no glide).
+    void endZoomGlide(bool time = true, bool price = true);
+    // After a click or a gesture's end changed the stored view: each axis whose end
+    // changed (or that the gesture moved: force) glides from the drawn camera; an axis
+    // whose end is unchanged keeps its glide or its rest.
+    void startAxisGlides(const chart_raster::RasterCamera& drawn, const chart_raster::RasterCamera& restBefore,
+                         double anchorTime, double anchorPrice, bool forceTime, bool forcePrice);
+    void advanceAxisGlide(AxisGlide& glide, bool time, const chart_raster::RasterCamera& rest,
+                          const chart_raster::RasterCamera& intended, qint64 now);
+    // The stored view's rest camera at the tick the chart will draw it with (the
+    // predicted Auto tick or the Manual one): a glide's end.
+    chart_raster::RasterCamera intendedEndNow() const;
+    // Follow-live with a given live open end (followGpuLive with the layer's).
+    void followGpuLiveTo(int64_t openEnd);
+    // Moves the stored view to a rung about a drawn point (fracX/fracY of the item).
+    bool setZoomRung(const chart_raster::RasterCamera& drawn, double fracX, double fracY, bool time, int colPx,
+                     bool price, chart_raster::RowRung row);
+    // The tick the chart would draw a price span with, in the time window [start, end)
+    // and about anchorPrice at fracY (Auto's rule and state, or the Manual tick).
+    chart_raster::TickAt tickPredictor(qint64 start, qint64 end, double anchorPrice, double fracY) const;
+    // The rest camera and the camera drawn (a glide or a gesture applied) for inputs.
+    struct Cameras {
+        chart_raster::RasterCamera rest, drawn;
+        bool hasBinView = false;
+        double binTimeLo = 0, binTimeHi = 0, binPriceLo = 0, binPriceHi = 0;
+    };
+    Cameras camerasFor(const chart_raster::RasterInputs& in, chart_raster::RasterStep previous) const;
+    QMetaObject::Connection m_beforeSyncConn;
+    // Render thread: this sync's frame (context, tick, raster camera), prepared in
+    // beforeSynchronizing and drawn by updatePaintNode in the same sync.
+    struct SyncFrame {
+        FrameContext frame;
+        bool drawHeatmap = false;
+        // Smooth zoom: coverage gamma (0 at rest) and a glide's bin extent.
+        float coverageGamma = 0.0f;
+        bool hasBinView = false;
+        double binTimeLo = 0, binTimeHi = 0, binPriceLo = 0, binPriceHi = 0;
+        bool ready = false;
+    } m_sync;
 
     ChartTextAtlas m_chartTextAtlas;
     bool m_chartTextAtlasBuilt = false;
@@ -366,6 +471,11 @@ public:
     TimeAxisMapping lastTimeAxisMapping() const { return currentTimeAxisMapping(); }
     MappingFrameContext currentFrameContext() const override;
     TimeAxisMapping currentTimeAxisMapping() const override;
+    // GUI thread: the raster camera the next frame computes from the current view
+    // (same inputs and hysteresis state; a tick change in that frame aside). The axis
+    // models, the drawn window posted to the controller and the pan commit use it;
+    // hit tests use the published frame (currentFrameContext().raster).
+    chart_raster::RasterCamera rasterCameraNow(bool includeDrag = true) const;
     void applyClientConfig(const ClientConfig& config);
     void applyTpoConfig(const ClientTpoConfig& tpo);
     void applyServerConfig(const ServerConfig& config);
@@ -374,15 +484,40 @@ public:
     Q_INVOKABLE void setTimeframe(int timeframe_ms);
     
     
+    // Whole-pixel smooth zoom (slice A2, docs/ARCHITECTURE.md). A click (mouse wheel
+    // notch, keyboard, toolbar) moves to the next rung, a view with whole device pixels
+    // per column and per row, by a kZoomGlideMs eased glide drawn with coverage; a
+    // pinch or trackpad scroll zooms continuously and settles on the nearest rung.
+    // Item coordinates (logical px); time/price select the axes.
+    Q_INVOKABLE void zoomClicks(int clicks, double x, double y, bool time = true, bool price = true);
+    // factor > 1 zooms in; the gesture settles on a rung at endZoomGesture() or after a pause.
+    Q_INVOKABLE void zoomContinuous(double factor, double x, double y, bool time = true, bool price = true);
+    Q_INVOKABLE void endZoomGesture();
+    // The axes (QML). Unphased mouse notches are clicks (pixel deltas may be present); a
+    // trackpad scroll is continuous until its ScrollEnd. Drags are continuous until the
+    // release (endZoomGesture). A price zoom takes price over (auto price scale off).
+    Q_INVOKABLE void zoomTimeWheel(int angleDelta, int pixelDelta, int phase, double x);
+    Q_INVOKABLE void zoomPriceWheel(int angleDelta, int pixelDelta, int phase, double y);
+    Q_INVOKABLE void zoomTimeDrag(double delta, double x);
+    Q_INVOKABLE void zoomPriceDrag(double delta, double y);
+    Q_INVOKABLE void zoomTimeClicks(int clicks, double x);
+    Q_INVOKABLE void zoomPriceClicks(int clicks, double y);
+    bool zoomGliding() const { return m_glideTime.active || m_glidePrice.active; }
+    bool timeGliding() const { return m_glideTime.active; }
+    bool priceGliding() const { return m_glidePrice.active; }
+    int glideRebasesForTest() const { return m_glideRebases; }
+    // Tests: a follow-live update for a live open end (the fixtures have no live feed).
+    void followLiveForTest(qint64 openEndMs) { followGpuLiveTo(openEndMs); }
+    bool zoomGesturing() const { return m_zoomGesture; }
+    // Tests: inspect the actual settle timer without depending on its duration.
+    bool gestureSettlePending() const { return m_zoomSettleTimer && m_zoomSettleTimer->isActive(); }
+    // Tests: the glide clock (ms); default the chart's frame clock.
+    void setZoomClockForTest(std::function<qint64()> clock) { m_zoomClock = std::move(clock); }
+    // The camera the next frame draws without a zoom transition (the rest camera of
+    // the stored view; a glide's target).
+    chart_raster::RasterCamera restCameraNow(bool includeDrag = true) const;
     Q_INVOKABLE void zoomIn();
     Q_INVOKABLE void zoomOut();
-    Q_INVOKABLE void zoomAt(double rawDelta, double centerX, double centerY,
-                            double viewportWidth = -1.0,
-                            double viewportHeight = -1.0);
-    Q_INVOKABLE void zoomTimeAt(double rawDelta, double centerX,
-                                double viewportWidth = -1.0);
-    Q_INVOKABLE void zoomPriceAt(double rawDelta, double centerY,
-                                 double viewportHeight = -1.0);
     Q_INVOKABLE void resetZoom();
     Q_INVOKABLE void beginPanAt(double x, double y);
     Q_INVOKABLE void updatePanAt(double x, double y);
@@ -443,6 +578,9 @@ signals:
     void candleBufferChanged();
     void autoPriceScaleChanged();
     void liveRenderTick();
+    // A frame drew new whole pixels per row or column, a new tick, device pixel ratio
+    // or surface (queued from the render thread with viewportChanged; not per frame).
+    void rasterChanged();
 
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) override;
@@ -453,6 +591,8 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
+    bool event(QEvent* event) override; // the trackpad pinch (native zoom gesture)
+    void updatePolish() override;        // a zoom glide advances once per frame (GUI thread)
 
 private:
     void buildMsdfAtlas();
@@ -464,15 +604,21 @@ private:
     QSGNode* ensureGpuRootNode(QSGNode* oldNode, heatmap::gpu::HeatmapTileNode** tile);
     QSGNode* updateGpuPaintNode(QSGNode* oldNode, FrameContext& frame, bool profile);
     void updateGpuLabels(const FrameContext& frame, bool prepared);
-    // TimeAxisMapping from the viewport only (plan section 2 "Mapping").
-    void computeGpuFrameMapping(FrameContext& frame, heatmap::gpu::ViewWindow& view, double tickSize);
+    // The frame's raster camera and its TimeAxisMapping (whole-pixel mapping, once
+    // per frame, at the layer's tick for this frame).
+    void computeGpuFrameMapping(FrameContext& frame);
+    void prepareSyncFrame();
+    chart_raster::RasterInputs rasterInputs(const FrameViewportSnapshot& viewport, double tick, double width,
+                                            double height, double dpr) const;
+    // The committed shifts for a drag (GridViewState::PanShift).
+    bool rasterPanShift(QPointF drag, qint64& timeShiftMs, double& priceShift) const;
     void renderTradeOverlays(QSGNode* parent, const FrameContext& frame, bool drawFootprint, bool drawTpo,
                              std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads);
     void syncGpuView();
     void applyGpuLimits();
     void followGpuLive();
     void seedGpuViewport(double bestBid, double bestAsk);
-    void setGpuViewportSelf(qint64 start, qint64 end, double priceMin, double priceMax);
+    void setGpuViewportSelf(qint64 start, qint64 end, double priceMin, double priceMax, bool preservePlacement = false);
     // "Return to live" (follow-live activation): the view's right edge goes one
     // padding past the live anchor's bucket, in either direction, span kept.
     void returnGpuToLive();
@@ -486,7 +632,13 @@ private:
     // Auto-fit (fitView). Window pieces return nullopt when nothing is known.
     std::optional<std::pair<qint64, qint64>> gpuFitTimeWindow() const;
     // candlesOnly: no live-price fallback (the auto price scale's fit).
-    std::optional<std::pair<double, double>> gpuFitPriceWindow(qint64 start, qint64 end, bool candlesOnly) const;
+    // The candles fitted are those the stored window [start, end] draws: the raster
+    // camera's drawn time window (current anchor, or anchorFracX when the caller sets
+    // one with this change; DPR, column hysteresis).
+    std::optional<std::pair<double, double>> gpuFitPriceWindow(qint64 start, qint64 end, bool candlesOnly,
+                                                               std::optional<double> anchorFracX = std::nullopt);
+    std::pair<double, double> drawnTimeWindow(qint64 start, qint64 end,
+                                              std::optional<double> anchorFracX = std::nullopt) const;
     // GridViewState's price fit while auto price scale is on. 
     bool autoPriceFit(qint64 start, qint64 end, double& priceMin, double& priceMax);
     // Auto price scale on: the current time range through setViewport (a bump only

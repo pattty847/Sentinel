@@ -1,7 +1,7 @@
 #pragma once
 #include <QObject>
 #include <QPointF>
-#include <QMatrix4x4>
+#include <QSizeF>
 #include <QElapsedTimer>
 #include <functional>
 #include <utility>
@@ -25,7 +25,11 @@ public:
     bool isTimeWindowValid() const { return m_timeWindowValid; }
     bool isDragging() const { return m_isDragging; }
     
-    void setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax);
+    // Explicit placements advance even when the bounds are bit-identical. Only
+    // automatic refits/follow updates preserve the placement (not viewportVersion).
+    void setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax,
+                     bool preservePlacement = false);
+    uint64_t placementVersion() const { return m_placementVersion; }
     // Spec rules 1, 2 and 9 (S6b, GPU heatmap): optional maximum spans (<= 0: none).
     // setViewport and every zoom handler apply them, so wheel, axis drags and the
     // Agent API clamp the same way; setting them re-clamps the current viewport.
@@ -58,13 +62,24 @@ public:
     std::pair<qint64, qint64> displayedTimeWindow() const;
     // Does not touch the viewport (the caller refits through setViewport).
     void setAutoPriceScale(bool enabled);
-    QMatrix4x4 calculateViewportTransform(const QRectF& itemBounds) const;
-    
-    void handleZoom(double delta, const QPointF& center);
-    void handleZoomWithViewport(double delta, const QPointF& center, const QSizeF& viewportSize);
-    void handleZoomWithSensitivity(double rawDelta, const QPointF& center, const QSizeF& viewportSize);
-    void handleTimeZoomWithSensitivity(double rawDelta, double centerX, double viewportWidth);
-    void handlePriceZoomWithSensitivity(double rawDelta, double centerY, double viewportHeight);
+    // Whole-pixel chart mapping (render/ChartRaster.hpp). The raster anchor is the
+    // view point (fractions of the width from the left and of the height from the
+    // top) that keeps its screen position when the drawn pixels per row or column
+    // step: the zoom handlers set it to the cursor; the renderer sets it for its own
+    // moves. It never changes the viewport.
+    struct RasterAnchor {
+        double fracX = 0.5, fracY = 0.5;
+        bool operator==(const RasterAnchor&) const = default;
+    };
+    void setRasterAnchor(double fracX, double fracY);
+    RasterAnchor rasterAnchor() const { return m_rasterAnchor; }
+    // The committed shifts for a drag offset (logical px): what the drawn picture
+    // shows, whole device pixels at the drawn pixels per row and column (the time
+    // shift in whole ms). The pan commit, the displayed window and the drag's auto
+    // fit use it, so a release lands exactly where the drag left the picture. False:
+    // none (the continuous scale applies).
+    using PanShift = std::function<bool(QPointF dragLogicalPx, qint64& timeShiftMs, double& priceShift)>;
+    void setPanShift(PanShift shift) { m_panShift = std::move(shift); }
     void handlePanStart(const QPointF& position);
     void handlePanMove(const QPointF& position);
     void handlePanEnd(bool applyViewport = true);
@@ -90,10 +105,6 @@ signals:
 private:
     // A drag's time shift for a window of spanMs (0 when not dragging).
     qint64 dragShiftMs(qint64 spanMs) const;
-    // One zoom step of a span (multiplier > 1 zooms in) inside the limits: a
-    // zoom-out never narrows and a zoom-in never widens the current span.
-    int64_t zoomedTimeSpan(int64_t current, double zoomMultiplier) const;
-    double zoomedPriceSpan(double current, double zoomMultiplier) const;
 
     qint64 m_visibleTimeStart_ms = 0;
     qint64 m_visibleTimeEnd_ms = 0;
@@ -107,9 +118,9 @@ private:
     bool m_autoScrollEnabled = true;
     bool m_autoPriceScale = false;
     PriceFit m_priceFit;
-    
-    static constexpr double ZOOM_SENSITIVITY = 0.0005;
-    static constexpr double MAX_ZOOM_DELTA = 0.4;
+    PanShift m_panShift;
+    RasterAnchor m_rasterAnchor{1.0, 0.5}; // follow-live (the default) anchors the view end
+
     
     bool m_isDragging = false;
     QPointF m_lastMousePos;
@@ -118,6 +129,7 @@ private:
     double m_panRemainderTimeMs = 0.0;
     QElapsedTimer m_interactionTimer;
     uint64_t m_viewportVersion = 1;
+    uint64_t m_placementVersion = 0;
     double m_maxTimeSpanMs = 0.0;
     double m_maxPriceSpan = 0.0;
     double m_minTimeSpanMs = 0.0;

@@ -37,6 +37,9 @@ void SentinelStreamClientTransport::attach(SentinelStreamClient &client) {
     }, Qt::QueuedConnection);
     connect(&client, &SentinelStreamClient::disconnected, this, [this, epoch] {
         if (epoch != epoch_) return;
+        // Failed retries while already down invalidate nothing. Do not republish
+        // the same state (and trigger recurring fetcher/consumer diagnostics).
+        if (!connected_ && requests_.empty() && liveRequests_.empty()) return;
         requests_.clear();
         liveRequests_.clear();
         connected_ = false;

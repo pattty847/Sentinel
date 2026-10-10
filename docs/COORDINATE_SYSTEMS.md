@@ -19,6 +19,8 @@ This document defines the coordinate spaces used by chart rendering and the cont
 
 Any world-semantic renderer (candles, labels, volume profile price bands) must map through this authority. Do not implement ad-hoc world↔screen math when these helpers exist.
 
+The mapping is the frame's raster camera (`render/ChartRaster.hpp`): its `view*` bounds are the drawn window, row and column edges sit on whole device pixels (`rowPxDev`/`colPxDev` per row/column, `dpr`), and a drag is already baked in as whole device pixels. Never add `panVisualOffset` or the stored `GridViewState` bounds on top of it; GUI-thread code that needs the next frame's mapping uses `UnifiedGridRenderer::rasterCameraNow()`.
+
 ## 3. Renderer families and contracts
 
 ### 3.1 Texture-quad overlays
