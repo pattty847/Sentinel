@@ -221,7 +221,8 @@ private:
     int m_wheelCarryKey = -1;
     qint64 zoomNowMs() const;
     // The chart and axis wheels: notches are clicks, a trackpad scroll is continuous.
-    void wheelZoom(int angle, bool notch, Qt::ScrollPhase phase, double x, double y, bool time, bool price,
+    void wheelZoom(int angle, bool pixelDeltaNull, Qt::ScrollPhase phase, bool precise,
+                   double x, double y, bool time, bool price,
                    WheelRoute route);
     // The stored view zoomed by factor about a point, in the limits (no camera yet).
     void zoomStoredView(double factor, double x, double y, bool time, bool price);
@@ -492,11 +493,11 @@ public:
     // factor > 1 zooms in; the gesture settles on a rung at endZoomGesture() or after a pause.
     Q_INVOKABLE void zoomContinuous(double factor, double x, double y, bool time = true, bool price = true);
     Q_INVOKABLE void endZoomGesture();
-    // The axes (QML). Wheels: a notch (no pixel delta, no scroll phase) is a click, a
+    // The axes (QML). Unphased mouse notches are clicks (pixel deltas may be present); a
     // trackpad scroll is continuous until its ScrollEnd. Drags are continuous until the
     // release (endZoomGesture). A price zoom takes price over (auto price scale off).
-    Q_INVOKABLE void zoomTimeWheel(int angleDelta, int pixelDelta, int phase, double x);
-    Q_INVOKABLE void zoomPriceWheel(int angleDelta, int pixelDelta, int phase, double y);
+    Q_INVOKABLE void zoomTimeWheel(int angleDelta, int pixelDelta, int phase, double x, int deviceType);
+    Q_INVOKABLE void zoomPriceWheel(int angleDelta, int pixelDelta, int phase, double y, int deviceType);
     Q_INVOKABLE void zoomTimeDrag(double delta, double x);
     Q_INVOKABLE void zoomPriceDrag(double delta, double y);
     Q_INVOKABLE void zoomTimeClicks(int clicks, double x);

@@ -2854,9 +2854,9 @@ TEST_F(UgrGpu, TheWheelCarriesOnlyAPartialNotchPerRoute) {
     EXPECT_EQ(drawn().colPx, chart_raster::columnRung(c1, -1, 1, 0)) << "then one click out, not three in";
     // Half notches on different routes and axes do not add up.
     uint64_t v = view->getViewportVersion();
-    ugr->zoomPriceWheel(60, 0, 0, 160); // the price axis
+    ugr->zoomPriceWheel(60, 0, 0, 160, int(QInputDevice::DeviceType::Mouse)); // the price axis
     wheelAngle(60, at);                 // the chart
-    ugr->zoomTimeWheel(60, 0, 0, 320);  // the time axis
+    ugr->zoomTimeWheel(60, 0, 0, 320, int(QInputDevice::DeviceType::Mouse));  // the time axis
     wheelAngle(60, at);                 // the chart again: one half notch carried
     EXPECT_EQ(view->getViewportVersion(), v) << "no click from half notches of other routes";
     // A reversal drops the partial notch: a full notch back is one click.
@@ -3271,6 +3271,145 @@ protected:
     }
 };
 
+// Exercise the chart QWheelEvent and the same C++ axis entries called by QML,
+// without QRhi. Fixed Manual ticks make the one-rung assertion independent of Auto.
+class UgrWheelCpu : public UgrZoomCpu {
+protected:
+    enum Route { Chart, TimeAxis, PriceAxis };
+    void resetWheelView() {
+        auto settings = brightSettings();
+        settings.tickMode = heatmap::TickMode::Manual;
+        settings.manualTick = 1000; // $10
+        chart.setHeatmapChartSettings(settings, true);
+        chart.setAutoPriceScale(false);
+        chart.setViewport(centre - 20 * minute, centre + 20 * minute, 99950, 100350);
+        for (int i = 0; i < 6; ++i) frame();
+        ASSERT_FALSE(chart.zoomGliding());
+        ASSERT_FALSE(chart.zoomGesturing());
+    }
+    void wheel(Route route, int angle, int pixels = 0, Qt::ScrollPhase phase = Qt::NoScrollPhase,
+               Qt::MouseEventSource source = Qt::MouseEventNotSynthesized,
+               QInputDevice::DeviceType type = QInputDevice::DeviceType::Mouse) {
+        if (route == Chart) {
+            const QPointingDevice device("wheel test", 123, type, QPointingDevice::PointerType::Generic,
+                                         QInputDevice::Capability::Position, 1, 0);
+            QWheelEvent event({320, 160}, {320, 160}, {0, pixels}, {0, angle}, Qt::NoButton,
+                              Qt::NoModifier, phase, false, source, &device);
+            QCoreApplication::sendEvent(&chart, &event);
+            EXPECT_TRUE(event.isAccepted());
+        } else if (route == TimeAxis) {
+            chart.zoomTimeWheel(angle, pixels, int(phase), 320, int(type));
+        } else {
+            chart.zoomPriceWheel(angle, pixels, int(phase), 160, int(type));
+        }
+    }
+    bool settleTimerActive() {
+        for (const auto* timer : chart.findChildren<QTimer*>())
+            if (timer->interval() == 160 && timer->isActive()) return true;
+        return false;
+    }
+    void expectOneRung(Route route, int direction, const chart_raster::RasterCamera& before) {
+        auto* v = chart.getViewState();
+        const int col = route == PriceAxis ? before.colPx : chart_raster::columnRung(before.colPx, direction, 1, 0);
+        const auto row = route == TimeAxis ? chart_raster::RowRung{before.tick, before.rowPx} :
+            chart_raster::rowRung({before.tick, before.rowPx}, direction, 320,
+                                 v->minPriceSpan(), v->maxPriceSpan(), [&](double) { return before.tick; });
+        EXPECT_EQ(double(v->getVisibleTimeEnd() - v->getVisibleTimeStart()), 640.0 * minute / col);
+        EXPECT_NEAR(v->getMaxPrice() - v->getMinPrice(), 320 * row.tick / row.rowPx, 1e-8);
+        EXPECT_FALSE(chart.zoomGesturing());
+        EXPECT_FALSE(settleTimerActive()) << "a notch must never arm the nearest-rung settle";
+        EXPECT_TRUE(chart.zoomGliding());
+        ASSERT_TRUE(waitFor([&] { return !chart.zoomGliding(); }));
+        const auto landed = chart.rasterCameraNow(false);
+        EXPECT_EQ(landed.colPx, col);
+        EXPECT_EQ(landed.rowPx, row.rowPx);
+        EXPECT_DOUBLE_EQ(landed.tick, row.tick);
+    }
+};
+
+TEST_F(UgrWheelCpu, MacMousePixelsStillMoveOneRungPerNotchOnEveryRoute) {
+    for (const auto route : {Chart, TimeAxis, PriceAxis}) {
+        SCOPED_TRACE(route);
+        resetWheelView();
+        for (const int direction : {1, 1, -1, -1}) {
+            SCOPED_TRACE(direction);
+            const auto before = chart.rasterCameraNow(false);
+            const auto version = chart.getViewState()->getViewportVersion();
+            wheel(route, direction * 120, direction > 0 ? 2 : -6);
+            EXPECT_EQ(chart.getViewState()->getViewportVersion(), version + 1);
+            expectOneRung(route, direction, before);
+        }
+    }
+}
+
+TEST_F(UgrWheelCpu, WindowsMouseNotchesAndPartialAngleCarryStayClicks) {
+    for (const auto route : {Chart, TimeAxis, PriceAxis}) {
+        SCOPED_TRACE(route);
+        resetWheelView();
+        auto before = chart.rasterCameraNow(false);
+        wheel(route, 120);
+        expectOneRung(route, 1, before);
+        before = chart.rasterCameraNow(false);
+        const auto version = chart.getViewState()->getViewportVersion();
+        for (int i = 0; i < 3; ++i) {
+            wheel(route, 30);
+            EXPECT_EQ(chart.getViewState()->getViewportVersion(), version);
+            EXPECT_FALSE(chart.zoomGesturing());
+            EXPECT_FALSE(settleTimerActive());
+        }
+        wheel(route, 30);
+        expectOneRung(route, 1, before);
+        before = chart.rasterCameraNow(false);
+        wheel(route, 30);
+        wheel(route, -120); // reversal discards the partial positive notch
+        expectOneRung(route, -1, before);
+    }
+}
+
+TEST_F(UgrWheelCpu, PhasedPreciseScrollStaysContinuousAndSettlesOnEveryRoute) {
+    for (const auto route : {Chart, TimeAxis, PriceAxis}) {
+        SCOPED_TRACE(route);
+        resetWheelView();
+        const auto before = chart.rasterCameraNow(false);
+        wheel(route, 0, 0, Qt::ScrollBegin, Qt::MouseEventSynthesizedBySystem, QInputDevice::DeviceType::TouchPad);
+        wheel(route, 30, 15, Qt::ScrollUpdate, Qt::MouseEventSynthesizedBySystem, QInputDevice::DeviceType::TouchPad);
+        EXPECT_TRUE(chart.zoomGesturing());
+        EXPECT_TRUE(settleTimerActive());
+        const auto during = chart.rasterCameraNow(false);
+        if (route != PriceAxis) EXPECT_NEAR(during.colPxF, before.colPx * 1.015, 1e-6);
+        if (route != TimeAxis) EXPECT_NEAR(during.rowPxF, before.rowPx * 1.015, 1e-6);
+        wheel(route, 0, 0, Qt::ScrollEnd, Qt::MouseEventSynthesizedBySystem, QInputDevice::DeviceType::TouchPad);
+        EXPECT_FALSE(chart.zoomGesturing());
+        EXPECT_FALSE(settleTimerActive());
+        ASSERT_TRUE(waitFor([&] { return !chart.zoomGliding(); }));
+        // A precise stream whose end is lost still settles after the 160 ms pause.
+        wheel(route, 30, 15, Qt::ScrollUpdate, Qt::MouseEventSynthesizedBySystem, QInputDevice::DeviceType::TouchPad);
+        ASSERT_TRUE(waitFor([&] { return !chart.zoomGesturing() && !chart.zoomGliding(); }));
+        EXPECT_FALSE(settleTimerActive());
+    }
+}
+
+TEST_F(UgrWheelCpu, UnphasedPreciseDevicesAndPixelPartialAnglesStayContinuous) {
+    for (const auto route : {Chart, TimeAxis, PriceAxis}) {
+        SCOPED_TRACE(route);
+        for (const int pixels : {0, 60}) {
+            resetWheelView();
+            // Even an exact 120 (or a rounded-to-zero pixel delta) is precise when
+            // source/device says so. QML has device.type, but no event.source.
+            wheel(route, 120, pixels, Qt::NoScrollPhase, Qt::MouseEventSynthesizedBySystem,
+                  route == Chart ? QInputDevice::DeviceType::Mouse : QInputDevice::DeviceType::TouchPad);
+            EXPECT_TRUE(chart.zoomGesturing());
+            EXPECT_TRUE(settleTimerActive());
+            chart.endZoomGesture();
+        }
+        resetWheelView();
+        wheel(route, 30, 2); // non-null precise deltas without phase/type information
+        EXPECT_TRUE(chart.zoomGesturing());
+        EXPECT_TRUE(settleTimerActive());
+        chart.endZoomGesture();
+    }
+}
+
 TEST_F(UgrZoomCpu, AutoFitTickCommitsDoNotRetargetSixteenClicks) {
     int commits = 0;
     for (int i = 0; i < 16; ++i) {
@@ -3302,8 +3441,8 @@ TEST_F(UgrZoomCpu, PinchAndTrackpadSettleWithASolvedFit) {
                                     {320, 160}, {320, 160}, {320, 160}, 0, {}, 3);
             QCoreApplication::sendEvent(&chart, &end);
         } else {
-            for (int i = 0; i < 8; ++i) chart.zoomTimeWheel(-400, -100, int(Qt::ScrollUpdate), 320);
-            chart.zoomTimeWheel(0, 0, int(Qt::ScrollEnd), 320);
+            for (int i = 0; i < 8; ++i) chart.zoomTimeWheel(-400, -100, int(Qt::ScrollUpdate), 320, int(QInputDevice::DeviceType::TouchPad));
+            chart.zoomTimeWheel(0, 0, int(Qt::ScrollEnd), 320, int(QInputDevice::DeviceType::TouchPad));
         }
         EXPECT_FALSE(chart.zoomGesturing());
         checkSettle();
@@ -4133,6 +4272,70 @@ TEST(UgrInput, InputRouteReachesTheChartAndAxisAreasOncePerWheel) {
     ugr->setCandleBuffer(nullptr);
     ugr->setHeatmapService(nullptr); // its controller goes now
 }
+// Real QML delivery verifies device.type forwarding and WheelHandler's precise
+// device filter, in addition to the CPU rung assertions above.
+TEST(UgrInput, MacMouseAndPreciseScrollReachBothAxisWheelHandlers) {
+    QQuickView view;
+    view.setResizeMode(QQuickView::SizeRootObjectToView);
+    view.rootContext()->setContextProperty("uiTheme", nullptr);
+    view.rootContext()->setContextProperty("dataSource", nullptr);
+    view.rootContext()->setContextProperty("chartModeController", nullptr);
+    view.setSource(QUrl::fromLocalFile(QStringLiteral(SENTINEL_SOURCE_DIR "/libs/gui/qml/DepthChartView.qml")));
+    ASSERT_EQ(view.status(), QQuickView::Ready) << view.errors().value(0).toString().toStdString();
+    view.resize(1000, 600);
+    view.rootObject()->setSize({1000, 600}); // never expose a native GUI window
+    QCoreApplication::processEvents();
+    auto* chart = view.rootObject()->findChild<UnifiedGridRenderer*>("unifiedGridRenderer");
+    ASSERT_TRUE(chart);
+    chart->setHeatmapService(&lab::LabData::instance().service());
+    chart->setActiveSymbol("BTC-USD");
+    chart->setTimeframe(int(minute));
+    const QPointingDevice mouse("notched mouse", 124, QInputDevice::DeviceType::Mouse,
+                                QPointingDevice::PointerType::Generic, QInputDevice::Capability::Position, 1, 0);
+    const QPointingDevice pad("precise scroll", 125, QInputDevice::DeviceType::TouchPad,
+                              QPointingDevice::PointerType::Finger,
+                              QInputDevice::Capability::Position | QInputDevice::Capability::PixelScroll, 2, 0);
+    for (const char* name : {"priceAxisControl", "timeAxisControl"}) {
+        SCOPED_TRACE(name);
+        auto* axis = view.rootObject()->findChild<QQuickItem*>(name);
+        ASSERT_TRUE(axis);
+        const auto at = axis->mapToScene({axis->width() / 2, axis->height() / 2});
+        auto reset = [&] {
+            chart->endZoomGesture();
+            chart->setViewport(epoch + kHourMs, epoch + 2 * kHourMs, 99900, 100300);
+            QCoreApplication::processEvents();
+        };
+        auto send = [&](int angle, int pixels, Qt::ScrollPhase phase, const QPointingDevice& device,
+                        Qt::MouseEventSource source) {
+            QWheelEvent event(at, view.mapToGlobal(at), {0, pixels}, {0, angle}, Qt::NoButton,
+                              Qt::NoModifier, phase, false, source, &device);
+            QCoreApplication::sendEvent(&view, &event);
+        };
+        for (const int direction : {1, -1}) {
+            reset();
+            const auto version = chart->getViewState()->getViewportVersion();
+            send(direction * 120, direction > 0 ? 2 : -6, Qt::NoScrollPhase, mouse, Qt::MouseEventNotSynthesized);
+            EXPECT_EQ(chart->getViewState()->getViewportVersion(), version + 1);
+            EXPECT_FALSE(chart->zoomGesturing()) << "mouse pixels must route to a click";
+            for (const auto* timer : chart->findChildren<QTimer*>())
+                if (timer->interval() == 160) EXPECT_FALSE(timer->isActive());
+        }
+        reset();
+        send(0, 0, Qt::ScrollBegin, pad, Qt::MouseEventSynthesizedBySystem);
+        const auto version = chart->getViewState()->getViewportVersion();
+        send(30, 15, Qt::ScrollUpdate, pad, Qt::MouseEventSynthesizedBySystem);
+        EXPECT_GT(chart->getViewState()->getViewportVersion(), version);
+        EXPECT_TRUE(chart->zoomGesturing()) << "WheelHandler must accept a synthesized TouchPad scroll";
+        send(0, 0, Qt::ScrollEnd, pad, Qt::MouseEventSynthesizedBySystem);
+        EXPECT_FALSE(chart->zoomGesturing());
+        reset();
+        send(120, 60, Qt::NoScrollPhase, pad, Qt::MouseEventSynthesizedBySystem);
+        EXPECT_TRUE(chart->zoomGesturing()) << "QML must forward the precise device even for an exact 120";
+    }
+    chart->endZoomGesture();
+    chart->setHeatmapService(nullptr);
+}
+
 // Review item 7 (pre-existing): DepthChartView's root `symbol` property shadowed the
 // context property QmlSceneController set, so the candle overlay and the paper-trade
 // model stayed on BTC-USD after a symbol switch.
