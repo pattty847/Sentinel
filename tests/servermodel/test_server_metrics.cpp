@@ -224,6 +224,9 @@ struct RollerMetricsFixture {
         for (size_t i = 0; i < c.products.size(); ++i) {
             sentinel::capture::WriterConfig w;
             w.root = QString::fromStdString(c.journalRoot);
+            // WriterConfig defaults to BTC-USD; routing and the RAWL2 header
+            // must match this writer's product metadata and fanout slot.
+            w.symbol = c.products[i];
             w.fsyncBlocks = 1;
             w.onJournal = [this, i](const auto& event) { fanout->publish(i, event); };
             writers.push_back(std::make_unique<sentinel::capture::Writer>(w,
