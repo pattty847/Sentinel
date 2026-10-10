@@ -2,6 +2,8 @@
 #include <cmath>
 #include "marketdata/dispatch/BookParser.hpp"
 #include "marketdata/dispatch/MessageDispatcher.hpp"
+#include <algorithm>
+#include <charconv>
 
 namespace sentinel::roller {
 void JournalBook::apply(int64_t envelope, const std::vector<recording::Level>& levels) {
@@ -51,6 +53,35 @@ void JournalFeed::importState(const nlohmann::json& j) {
         throw std::runtime_error("invalid feed anchor");
     run_ = std::move(run); connection_ = connection; lastLocal_ = local;
     sequence_ = sequence; anchored_ = anchored;
+}
+namespace {
+std::optional<uint64_t> numericTradeId(const std::string& id) {
+    uint64_t value = 0;
+    const auto result = std::from_chars(id.data(), id.data() + id.size(), value);
+    if (result.ec != std::errc{} || result.ptr != id.data() + id.size()) return {};
+    return value;
+}
+}
+bool JournalFeed::rememberTradeId(const std::string& id) {
+    // Missing IDs cannot identify a repeat; opaque nonempty IDs still dedupe.
+    if (id.empty()) return true;
+    if (tradeIds_.contains(id)) return false;
+    if (tradeIdRing_.empty()) {
+        tradeIdRing_.reserve(TradeIdWindowCapacity);
+        tradeIds_.reserve(TradeIdWindowCapacity);
+    }
+    if (tradeIdRing_.size() < TradeIdWindowCapacity) {
+        tradeIds_.insert(id);
+        tradeIdRing_.push_back(id);
+    } else {
+        // Reuse the evicted hash node: no node allocation after the window fills.
+        auto node = tradeIds_.extract(tradeIdRing_[nextTradeId_]);
+        node.value() = id;
+        tradeIds_.insert(std::move(node));
+        tradeIdRing_[nextTradeId_] = id;
+        nextTradeId_ = (nextTradeId_ + 1) % TradeIdWindowCapacity;
+    }
+    return true;
 }
 void JournalFeed::invalid(int64_t local, const std::string& reason) {
     anchored_ = false;
@@ -127,21 +158,40 @@ void JournalFeed::apply(const JournalRecord& input) {
                     }
                 }
             } else if (channel == "market_trades") {
-                const auto deliver = [&](const nlohmann::json& trades) {
-                    for (const auto& e : MessageDispatcher::parse({{"channel","market_trades"},{"trades",trades}},
-                            std::chrono::system_clock::time_point(std::chrono::milliseconds(local))).events)
-                        if (const auto* t = std::get_if<TradeEvent>(&e); t && t->trade.product_id == product_ && onTrade) {
-                            // Coinbase market_trades reports the resting maker. Like the
-                            // engine boundary, deliver the initiating aggressor side.
-                            Trade trade = t->trade;
-                            if (trade.side == AggressorSide::Buy) trade.side = AggressorSide::Sell;
-                            else if (trade.side == AggressorSide::Sell) trade.side = AggressorSide::Buy;
-                            try { onTrade(trade); }
-                            catch (const std::exception& error) { throw std::logic_error(error.what()); }
-                        }
+                frameTrades_.clear();
+                const auto collect = [&](const nlohmann::json& trades) {
+                    if (!trades.is_array()) return;
+                    for (const auto& raw : trades) {
+                        auto trade = MessageDispatcher::parseTrade(raw,
+                            std::chrono::system_clock::time_point(std::chrono::milliseconds(local)));
+                        if (trade.product_id != product_ || !onTrade) continue;
+                        const auto id = numericTradeId(trade.trade_id);
+                        frameTrades_.push_back({std::move(trade), id, frameTrades_.size()});
+                    }
                 };
-                if (j.contains("trades")) deliver(j["trades"]);
-                if (j.contains("events")) for (const auto& e : j["events"]) if (e.contains("trades")) deliver(e["trades"]);
+                if (j.contains("trades")) collect(j["trades"]);
+                if (j.contains("events")) for (const auto& e : j["events"]) if (e.contains("trades")) collect(e["trades"]);
+                // Original position makes the ordering stable without stable_sort's scratch allocation.
+                std::sort(frameTrades_.begin(), frameTrades_.end(), [](const auto& a, const auto& b) {
+                    if (a.trade.timestamp != b.trade.timestamp) return a.trade.timestamp < b.trade.timestamp;
+                    // Numeric Coinbase IDs precede opaque IDs; keep a strict total order for mixed input.
+                    if (a.numericId.has_value() != b.numericId.has_value()) return a.numericId.has_value();
+                    if (a.numericId && b.numericId) {
+                        if (*a.numericId != *b.numericId) return *a.numericId < *b.numericId;
+                    }
+                    if (a.trade.trade_id != b.trade.trade_id) return a.trade.trade_id < b.trade.trade_id;
+                    return a.order < b.order;
+                });
+                for (auto& pending : frameTrades_) {
+                    auto& trade = pending.trade;
+                    if (!rememberTradeId(trade.trade_id)) continue;
+                    // Coinbase market_trades reports the resting maker. Like the
+                    // engine boundary, deliver the initiating aggressor side.
+                    if (trade.side == AggressorSide::Buy) trade.side = AggressorSide::Sell;
+                    else if (trade.side == AggressorSide::Sell) trade.side = AggressorSide::Buy;
+                    try { onTrade(trade); }
+                    catch (const std::exception& error) { throw std::logic_error(error.what()); }
+                }
             }
         } catch (const nlohmann::json::exception&) { invalid(local, "malformed journal JSON"); }
           catch (const std::runtime_error& e) { invalid(local, e.what()); }
