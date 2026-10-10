@@ -25,7 +25,7 @@ add_executable(test_roller_corrupt_blocks test_corrupt_blocks.cpp)
 target_link_libraries(test_roller_corrupt_blocks PRIVATE sentinel_core GTest::gtest_main Qt6::Core Qt6::Network)
 target_compile_definitions(test_roller_corrupt_blocks PRIVATE SENTINEL_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 add_test(NAME RollerCorruptBlockTests COMMAND test_roller_corrupt_blocks)
-set_tests_properties(RollerCorruptBlockTests PROPERTIES LABELS "roller" TIMEOUT 120)
+set_tests_properties(RollerCorruptBlockTests PROPERTIES LABELS "roller" TIMEOUT 120 RUN_SERIAL TRUE)
 
 add_executable(test_journal_anchors test_anchors.cpp)
 target_compile_definitions(test_journal_anchors PRIVATE ANCHOR_LIVE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/btc-prefix.rawl2")
