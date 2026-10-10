@@ -920,3 +920,8 @@ WORKFLOW: the plan's cutover switch and line references were taken on trust in S
 6. (2026-10-06) Runbook changes from D-a review: no server deploy (R1, R2, rollbacks by redeploy) from 23:55 to 00:05 UTC, because readiness is revoked at the midnight writer close; the server deploy verify window is 150 s (capture stays 60 s); the deploy marker is `Roller serving ready` (roller) or `Recording v2 started` (primary), read from the log of the PID launchd reports; R2 also needs S8 (legacy heatmap deleted) because the legacy page path cannot drop a withdrawn live column.
 
 Follow-up slice after D (owner direction, not part of D): replace the fixed live publish timer with change-driven, coalesced publishing ("latest wins", only when something changed), capped by a per-client "Max update rate" setting (Auto default plus a manual value), with per-client queues so a slow or remote client cannot slow others. Flicker of short-lived orders is handled by drawing the time-weighted value (`twapCode`) rather than `peakCode` (`Hmc2Store.hpp:31`), not by delaying updates.
+
+
+## Owner decision (2026-10-09): no more soaks; delete all legacy
+
+This supersedes every 24 h and 48 h soak and every rollback window in this plan, and the soak-per-step order of work from 2026-10-07. The roller serving path has worked since R2 (2026-10-08). The finish: one Coinbase connection (capture) -> journal -> roller -> server -> clients, with every legacy path deleted. Each deploy keeps `deploy-runtime.sh` verification plus a 10-minute smoke check. Legacy code and config keys are removed in the same change that makes them dead; a rollback restores the previous binary. The live checklist (6 steps, 2 owner sittings) is the "One-world: what's left" section of `docs/STATUS.md`.
