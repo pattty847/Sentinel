@@ -4,7 +4,6 @@
 // selected QRhi backend (lab::OffscreenQuick) and skip with the reason when it
 // cannot create one: a skipped case is no result.
 #include "UnifiedGridRenderer.h"
-#include "CoordinateSystem.h"
 #include "datasources/CandleSeriesBuffer.hpp"
 #include "lab/LabData.hpp"
 #include "lab/OffscreenQuick.hpp"
@@ -16,6 +15,7 @@
 #include "render/AlgoOverlayRenderer.hpp"
 #include "render/CandlestickBatched.hpp"
 #include "render/CandlestickOverlayItem.hpp"
+#include "render/CandlePixelGeometry.hpp"
 #include "render/DataProcessor.hpp"
 #include "render/LabTextItem.hpp"
 #include "render/PaperTradeOverlayModel.hpp"
@@ -28,6 +28,8 @@
 #include "SyntheticHmc2Fixture.hpp"
 #include "marketdata/model/TradeData.h"
 #include <QElapsedTimer>
+#include <QNativeGestureEvent>
+#include <QPointingDevice>
 #include <QEventLoop>
 #include <QGuiApplication>
 #include <QQmlContext>
@@ -36,22 +38,41 @@
 #include <QQuickView>
 #include <QQuickWindow>
 #include <QSGOpacityNode>
+#include <QSGGeometryNode>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QtQml/qqml.h>
 #include <gtest/gtest.h>
 #include <private/qquickitem_p.h>
+#include <algorithm>
 #include <atomic>
 #include <climits>
 #include <cmath>
 #include <functional>
 #include <iostream>
+#include <numeric>
 #include <optional>
 #include <stdexcept>
+#include <tuple>
+#include <vector>
 
 namespace {
 using namespace synthetic_hmc2;
 QSGNode *paintRoot(QQuickItem *item) { return QQuickItemPrivate::get(item)->paintNode; }
+
+// Body policy belongs to the production helper; image checks must use its
+// device edges rather than the former round-to-nearest candle rasterization.
+candle_pixels::Body bodyForFrame(const MappingFrameContext& frame, double bucket, double open, double close) {
+    const auto& mapping = frame.mapping;
+    const auto snap = candle_pixels::axisSnap(frame.raster);
+    return candle_pixels::body(mapping.timeToScreenX(bucket), mapping.timeToScreenX(bucket + mapping.appendMs),
+                               mapping.priceToScreenY(open), mapping.priceToScreenY(close),
+                               frame.surfaceDpr, snap.x, snap.y);
+}
+void expectBodyRows(int top, int bottomExclusive, const candle_pixels::Body& expected, double dpr) {
+    EXPECT_EQ(top, int(std::lround(expected.y.lo * dpr))) << "candle body top at this frame's rows";
+    EXPECT_EQ(bottomExclusive, int(std::lround(expected.y.hi * dpr))) << "candle body bottom at this frame's rows";
+}
 
 // One synthetic recording (4 h) for the whole binary: the data path is configured
 // once in main() and never reconfigured (a reconfigure with local chunk reads in
@@ -184,7 +205,12 @@ protected:
         int streak = 0;
         const bool ok = pump(30'000, [&] {
             const auto &st = layer().tileStats();
-            streak = layer().settled() && !st.crossfading.load() && !st.holding.load() ? streak + 1 : 0;
+            // A zoom glide (A2) is part of settling: it lands on a rung (a test's manual
+            // glide clock moves on while it settles).
+            if (ugr->zoomGliding()) clockMs += 20;
+            streak = layer().settled() && !st.crossfading.load() && !st.holding.load() && !ugr->zoomGliding()
+                         ? streak + 1
+                         : 0;
             return streak >= 3;
         });
         if (!ok && error.isEmpty()) error = QStringLiteral("did not settle");
@@ -204,7 +230,112 @@ protected:
                 drawn += std::max(0.0, std::min(hi, double(s.hiMs)) - std::max(lo, double(s.loMs)));
         return hi > lo ? drawn / (hi - lo) : 0;
     }
+    qint64 clockMs = 1'000;
     QImage image;
+    // Whole-pixel mapping (plan 2026-10-08): what the last frame drew (the source of
+    // GET /api/v1/viewport `drawn`).
+    chart_raster::RasterCamera drawn() const { return ugr->currentFrameContext().raster; }
+    // The time window the next frame draws at rest (whole ms around it; a zoom glide's
+    // target): the price fit's candles.
+    std::pair<int64_t, int64_t> drawnWindow() const {
+        const auto cam = ugr->restCameraNow(false);
+        return {int64_t(std::floor(cam.drawnStartMs)), int64_t(std::ceil(cam.drawnEndMs))};
+    }
+    static bool whole(double v) { return std::abs(v - std::round(v)) < 1e-6; }
+    // Smooth zoom (A2): the glide clock under the test's control, and wheel input as
+    // the platform delivers it (a mouse notch: no pixel delta, no scroll phase).
+    void manualZoomClock() { ugr->setZoomClockForTest([this] { return clockMs; }); }
+    void notch(int clicks, QPointF at, Qt::KeyboardModifiers modifiers = Qt::NoModifier) {
+        QWheelEvent event(at, scene->window()->mapToGlobal(at), {}, {0, 120 * clicks}, Qt::NoButton, modifiers,
+                          Qt::NoScrollPhase, false);
+        QCoreApplication::sendEvent(scene->window(), &event);
+    }
+    // A trackpad scroll event (pixel deltas, a phase).
+    void scroll(int angle, Qt::ScrollPhase phase, QPointF at) {
+        QWheelEvent event(at, scene->window()->mapToGlobal(at), {0, angle / 4}, {0, angle}, Qt::NoButton,
+                          Qt::NoModifier, phase, false);
+        QCoreApplication::sendEvent(scene->window(), &event);
+    }
+    void wheelAngle(int angle, QPointF at) { // a mouse wheel event of `angle` units (120: one notch)
+        QWheelEvent event(at, scene->window()->mapToGlobal(at), {}, {0, angle}, Qt::NoButton, Qt::NoModifier,
+                          Qt::NoScrollPhase, false);
+        QCoreApplication::sendEvent(scene->window(), &event);
+    }
+    // The chart's tick prediction for a price span over [start, end) about ap at fracY
+    // (UnifiedGridRenderer::tickPredictor): what Auto (or Manual) draws there.
+    chart_raster::TickAt tickOver(qint64 start, qint64 end, double ap, double fracY) const {
+        return [this, start, end, ap, fracY](double span) {
+            const double hi = ap + fracY * span;
+            const int64_t units = layer().predictTickUnits({double(start), double(end), hi - span, hi});
+            return units > 0 ? heatmap::fromUnits(units, layer().priceScale()) : 0.0;
+        };
+    }
+    void pinch(Qt::NativeGestureType type, double value, QPointF at) {
+        QNativeGestureEvent event(type, QPointingDevice::primaryPointingDevice(), 2, at, at,
+                                  scene->window()->mapToGlobal(at), value, QPointF());
+        QCoreApplication::sendEvent(scene->window(), &event);
+    }
+    // One frame at glide time `ms`, then the frames to the landing (the clock past the
+    // glide's end): the landing frame is the first frame drawn after it.
+    bool frameAt(qint64 ms) {
+        clockMs = ms;
+        return frames(1);
+    }
+    bool landGlide() {
+        clockMs += chart_raster::kZoomGlideMs + 1;
+        return frames(1);
+    }
+    void noLabels() {
+        auto settings = brightSettings();
+        settings.showLabels = false; // nothing drawn inside a cell
+        ugr->setHeatmapChartSettings(settings);
+    }
+    // An explicit price window of `rowsPx` device px per row of the drawn tick
+    // about its centre (auto price scale off), then two frames.
+    bool setRows(double rowsPx) {
+        const auto *view = ugr->getViewState();
+        const double centre = (view->getMinPrice() + view->getMaxPrice()) * 0.5;
+        const double span = drawn().heightDev * layer().tickPrice() / rowsPx;
+        ugr->setViewport(view->getVisibleTimeStart(), view->getVisibleTimeEnd(), centre - span / 2, centre + span / 2);
+        return frames(2);
+    }
+    // The greatest common divisor of the vertical colour runs that touch neither
+    // edge, over a spread of pixel columns: the drawn row height. The grey veil and
+    // loading hatches are screen-space stripes inside whole cells: their runs are
+    // skipped (the cells around them are still whole rows).
+    static bool hatch(QRgb c) {
+        const int hi = std::max({qRed(c), qGreen(c), qBlue(c)}), lo = std::min({qRed(c), qGreen(c), qBlue(c)});
+        return (hi > 0 && hi - lo <= 8) || c == qRgb(27, 41, 61) || c == qRgb(14, 20, 31);
+    }
+    static int bandHeight(const QImage &picture) {
+        int g = 0;
+        for (int x = 20; x < picture.width() - 20; x += 37) {
+            int start = 0;
+            for (int y = 1; y <= picture.height(); ++y) {
+                if (y < picture.height() && picture.pixel(x, y) == picture.pixel(x, start)) continue;
+                if (start > 0 && y < picture.height() && !hatch(picture.pixel(x, start))) g = std::gcd(g, y - start);
+                start = y;
+            }
+        }
+        return g;
+    }
+    // Pixels of `now` that differ from `before` shifted by (dx, dy), over the
+    // interior both cover (a margin away from every edge). The veil and loading
+    // hatches are stripes in screen pixels by design (they never move with the
+    // cells): hatch pixels are not compared; *compared counts the rest.
+    static int shiftedDifferences(const QImage &now, const QImage &before, int dx, int dy, int margin = 20,
+                                  int *compared = nullptr) {
+        int differences = 0, n = 0;
+        for (int y = margin; y < now.height() - margin; ++y)
+            for (int x = margin; x < now.width() - margin; ++x) {
+                const QRgb a = now.pixel(x, y), b = before.pixel(x - dx, y - dy);
+                if (hatch(a) && hatch(b)) continue;
+                differences += a != b;
+                ++n;
+            }
+        if (compared) *compared = n;
+        return differences;
+    }
 };
 
 TEST_F(UgrGpu, SettlesOnTheProductionPath) {
@@ -229,45 +360,27 @@ TEST_F(UgrGpu, SettlesOnTheProductionPath) {
     EXPECT_EQ(ugr->getViewState()->maxTimeSpanMs(), 640.0 * minute);
 }
 
-// Plan section 2 "Mapping": candles map through the viewport-only TimeAxisMapping;
-// the heatmap's column edges are where the mapping puts the timeframe boundaries,
-// and a candle's body is centred in its heatmap column (pixel column check).
+// Plan section 2 "Mapping" and whole-pixel plan 2026-10-08 B3: candles map through the
+// frame's TimeAxisMapping; the heatmap's column and row edges are exactly (not +-1) where
+// the mapping puts the timeframe and bin boundaries, on whole device pixels; a candle's
+// body is centred to the nearest whole pixel in its heatmap column. A body whose
+// open/close sit on bin edges starts and ends on heatmap row edges. The same under drags of 0.3 and 2.7 device
+// px (whole-pixel moves of 0 and 3 px), and a release keeps the dragged picture.
 TEST_F(UgrGpu, CandlesAlignWithHeatmapColumns) {
-    // 40 columns over 640 px, starting a third of a column in (not minute-aligned).
+    noLabels();
+    // 41.3 columns over 640 px (15.5 px each: drawn at 15), starting a third of a column
+    // in (not minute-aligned), $417 over 320 px (not a whole number of px per row).
     const int64_t lo = viewLo + minute / 3;
-    ugr->setViewport(lo, lo + 40 * minute, 99'900, 100'300);
+    ugr->setViewport(lo, lo + 41 * minute + 3 * minute / 10, 99'900, 100'317);
     ASSERT_TRUE(settle()) << error.toStdString();
-    const QImage heat = image;
-    const auto mapping = ugr->currentTimeAxisMapping();
-    ASSERT_TRUE(mapping.valid);
-    // Expected column edges (pixel index where the next column starts).
-    std::vector<int> edges;
-    for (int64_t t = (lo / minute + 1) * minute; t < lo + 40 * minute; t += minute)
-        edges.push_back(int(std::ceil(mapping.timeToScreenX(double(t)) - 0.5)));
-    // Measured edges: x where the colour changes from x-1 in most rows.
-    auto edgeStrength = [&](int x) {
-        int changes = 0;
-        for (int y = 5; y < 315; y += 2) changes += heat.pixel(x - 1, y) != heat.pixel(x, y);
-        return changes;
-    };
-    int matched = 0;
-    for (const int e : edges) {
-        if (e < 2 || e > 637) continue;
-        const int best = std::max({edgeStrength(e - 1), edgeStrength(e), edgeStrength(e + 1)});
-        EXPECT_GE(best, 40) << "a heatmap column edge at x=" << e;
-        matched += best >= 40;
-    }
-    EXPECT_GE(matched, 35);
-    for (int x = 2; x < 638; ++x) {
-        if (edgeStrength(x) < 80) continue;
-        const bool near = std::any_of(edges.begin(), edges.end(), [&](int e) { return std::abs(e - x) <= 1; });
-        EXPECT_TRUE(near) << "a strong vertical edge at x=" << x << " where no column boundary maps";
-    }
-    // Candles over the chart: full-height green bodies, one per minute.
+    const double tick = layer().tickPrice();
+    ASSERT_GT(tick, 0);
+    // Bullish bodies whose open and close are bin edges, wicks beyond the view.
+    const double open = std::round(100'050 / tick) * tick, close = open + 12 * tick;
     CandleSeriesBuffer buffer;
     std::vector<CandleSeriesBuffer::CandleBar> bars;
-    for (int64_t t = (lo / minute) * minute; t < lo + 41 * minute; t += minute)
-        bars.push_back({t, t + minute, 99'800, 100'400, 99'800, 100'400, 1.0, true, 0, false});
+    for (int64_t t = (lo / minute - 2) * minute; t < lo + 44 * minute; t += minute)
+        bars.push_back({t, t + minute, open, 100'400, 99'800, close, 1.0, true, 0, false});
     buffer.applyHistory("BTC-USD", 60, bars);
     auto *candles = new CandlestickOverlayItem(scene->window()->contentItem());
     candles->setSize(ugr->size());
@@ -275,25 +388,785 @@ TEST_F(UgrGpu, CandlesAlignWithHeatmapColumns) {
     candles->setCandleBuffer(&buffer);
     candles->setSymbol("BTC-USD");
     candles->setTimeframeSec(60);
-    ASSERT_TRUE(frames(5)) << error.toStdString();
-    const QImage withCandles = image;
-    int checked = 0;
-    for (size_t i = 0; i + 1 < edges.size(); ++i) {
-        const int a = edges[i], b = edges[i + 1];
-        if (a < 2 || b > 637) continue;
-        // The body: pixels at mid height that differ from the heatmap-only frame.
-        int first = -1, last = -1;
-        for (int x = a; x < b; ++x)
-            if (withCandles.pixel(x, 160) != heat.pixel(x, 160) && withCandles.pixel(x, 120) != heat.pixel(x, 120)) {
-                if (first < 0) first = x;
-                last = x;
-            }
-        ASSERT_GE(first, 0) << "a candle body in the column [" << a << ", " << b << ")";
-        EXPECT_NEAR((first + last) * 0.5, (a + b - 1) * 0.5, 1.0) << "the body is centred in its heatmap column";
-        ++checked;
+
+    auto check = [&](const char *label) {
+        SCOPED_TRACE(label);
+        // The heatmap alone, then with the candles.
+        candles->setVisible(false);
+        ASSERT_TRUE(frames(3)) << error.toStdString();
+        const QImage heat = image;
+        const auto frame = ugr->currentFrameContext();
+        const auto mapping = frame.mapping;
+        const auto cam = drawn();
+        ASSERT_TRUE(mapping.valid && cam.valid);
+        ASSERT_EQ(cam.colPx, 15);
+        EXPECT_FALSE(whole(drawn().heightDev * tick / priceSpan())) << "a fractional continuous row height";
+        candles->setVisible(true);
+        ASSERT_TRUE(frames(3)) << error.toStdString();
+        const QImage withCandles = image;
+        // Column edges: whole pixels, measured exactly there and nowhere else.
+        auto edgeStrength = [&](int x) {
+            int changes = 0;
+            for (int y = 5; y < 315; y += 2) changes += heat.pixel(x - 1, y) != heat.pixel(x, y);
+            return changes;
+        };
+        std::vector<int> edges;
+        for (int64_t t = (int64_t(mapping.viewStartMs) / minute + 1) * minute; t < mapping.viewEndMs; t += minute) {
+            const double x = mapping.timeToScreenX(double(t));
+            EXPECT_TRUE(whole(x)) << "column edge at x=" << x;
+            edges.push_back(int(std::lround(x)));
+        }
+        int matched = 0;
+        for (const int e : edges) {
+            if (e < 2 || e > 637) continue;
+            EXPECT_GE(edgeStrength(e), 40) << "a heatmap column edge at x=" << e;
+            EXPECT_EQ(edgeStrength(e - 1), 0) << "inside the column left of x=" << e;
+            EXPECT_EQ(edgeStrength(e + 1), 0) << "inside the column right of x=" << e;
+            matched += edgeStrength(e) >= 40;
+        }
+        EXPECT_GE(matched, 35);
+        for (int x = 2; x < 638; ++x)
+            if (edgeStrength(x) > 0)
+                EXPECT_TRUE(std::find(edges.begin(), edges.end(), x) != edges.end())
+                    << "a vertical edge at x=" << x << " where no column boundary maps";
+        // Row edges: every vertical colour change of the heatmap is a bin edge.
+        int rowEdges = 0;
+        for (int x = 7; x < 640; x += 53)
+            for (int y = 1; y < 320; ++y)
+                if (heat.pixel(x, y - 1) != heat.pixel(x, y)) {
+                    EXPECT_TRUE(whole(cam.priceAtYDev(y) / tick)) << "a row edge at y=" << y << " x=" << x;
+                    ++rowEdges;
+                }
+        EXPECT_GE(rowEdges, 50);
+        const double yClose = mapping.priceToScreenY(close), yOpen = mapping.priceToScreenY(open);
+        ASSERT_TRUE(whole(yClose) && whole(yOpen)) << yClose << " " << yOpen;
+        const int yMid = int(std::lround((yClose + yOpen) / 2));
+        int checked = 0;
+        for (size_t i = 0; i + 1 < edges.size(); ++i) {
+            const int a = edges[i], b = edges[i + 1];
+            if (a < 2 || b > 637) continue;
+            int first = -1, last = -1;
+            for (int x = a; x < b; ++x)
+                if (withCandles.pixel(x, yMid) != heat.pixel(x, yMid)) {
+                    if (first < 0) first = x;
+                    last = x;
+                }
+            ASSERT_GE(first, 0) << "a candle body in the column [" << a << ", " << b << ")";
+            const int width = std::min(b - a - 2, int(std::lround(13 * frame.surfaceDpr)));
+            const int inset = (b - a - width) / 2;
+            EXPECT_EQ(first, a + inset) << "body left equals column left + capped-width inset";
+            EXPECT_EQ(last + 1, a + inset + width) << "body right keeps the requested width";
+            EXPECT_LE(std::abs(first + last - (a + b - 1)), 1) << "nearest whole-pixel centre";
+            // The body's rows (beside the wick): from the close's row edge to the open's.
+            int top = -1, bottom = -1;
+            for (int y = 0; y < 320; ++y)
+                if (withCandles.pixel(first + 1, y) != heat.pixel(first + 1, y)) {
+                    if (top < 0) top = y;
+                    bottom = y;
+                }
+            const auto expected = bodyForFrame(frame, mapping.screenXToTime(a), open, close);
+            EXPECT_FLOAT_EQ(expected.y.lo, yClose) << "close is a heatmap bin edge";
+            EXPECT_FLOAT_EQ(expected.y.hi, yOpen) << "open is a heatmap bin edge";
+            expectBodyRows(top, bottom + 1, expected, frame.surfaceDpr);
+            ++checked;
+        }
+        EXPECT_GE(checked, 35);
+    };
+    check("still");
+    for (const double drag : {0.3, 2.7}) {
+        const auto before = drawn();
+        ugr->beginPanAt(320, 160);
+        ugr->updatePanAt(320 + drag, 160 + drag);
+        check(drag < 1 ? "dragged 0.3 px" : "dragged 2.7 px");
+        const auto during = drawn();
+        EXPECT_EQ(before.leftColIndex - during.leftColIndex, std::llround(drag));
+        EXPECT_EQ(during.topRowIndex - before.topRowIndex, std::llround(drag));
+        const QImage dragged = image;
+        ugr->endPanAt();
+        ASSERT_TRUE(frames(3)) << error.toStdString();
+        EXPECT_EQ(drawn().leftColIndex, during.leftColIndex) << "the release keeps the dragged columns";
+        EXPECT_EQ(drawn().topRowIndex, during.topRowIndex) << "the release keeps the dragged rows";
+        EXPECT_EQ(image, dragged) << "the release does not move the picture";
     }
-    EXPECT_GE(checked, 35);
     delete candles;
+}
+
+// B3's small/wide columns and both device ratios on the real sync/render path.
+// Inspect submitted geometry as well as the heatmap pixels: C3 has a one-pixel
+// body under its wick, so an image alone cannot distinguish those two quads.
+TEST_F(UgrGpu, CandleBodyEdgesAtEveryColumnWidthAndDeviceRatio) {
+    noLabels();
+    ugr->setWidth(320);
+    auto* view = ugr->getViewState();
+    view->setAutoPriceScale(false);
+    CandleSeriesBuffer buffer;
+    auto* candles = new CandlestickOverlayItem(scene->window()->contentItem());
+    candles->setSize(ugr->size());
+    candles->setMappingProvider(ugr);
+    candles->setCandleBuffer(&buffer);
+    candles->setSymbol("BTC-USD");
+    candles->setTimeframeSec(60);
+    for (double dpr : {1.0, 2.0}) {
+        ASSERT_TRUE(scene->setDevicePixelRatio(dpr, &error)) << error.toStdString();
+        emit scene->window()->screenChanged(scene->window()->screen());
+        for (int columns : {3, 4, 5, 8, 10, 11, 12, 15, 20, 32, 60}) {
+            SCOPED_TRACE(::testing::Message() << "C=" << columns << " dpr=" << dpr);
+            const qint64 lo = epoch + minute / 3;
+            ugr->setViewport(lo, lo + std::llround(320 * dpr * minute / columns), 99'900, 100'300);
+            ASSERT_TRUE(settle()) << error.toStdString();
+            const double tick = drawn().tick;
+            const double open = std::round(100'050 / tick) * tick, close = open + 4 * tick;
+            std::vector<CandleSeriesBuffer::CandleBar> bars;
+            for (qint64 t = lo / minute * minute; t < view->getVisibleTimeEnd() + minute; t += minute)
+                bars.push_back({t, t + minute, open, close, open, close, 1, true, 0, false});
+            buffer.applyHistory("BTC-USD", 60, bars);
+            ugr->beginPanAt(320, 160);
+            ugr->updatePanAt(320 + 0.3 / dpr, 160 + 0.3 / dpr);
+            ASSERT_TRUE(frames(3)) << error.toStdString();
+            const auto cam = drawn();
+            ASSERT_FALSE(cam.free);
+            ASSERT_EQ(cam.colPx, columns);
+            ASSERT_EQ(cam.dpr, dpr);
+            const auto mapping = ugr->currentTimeAxisMapping();
+            const auto* root = paintRoot(candles);
+            ASSERT_TRUE(root);
+            const auto* geometry = static_cast<const QSGGeometryNode*>(root->lastChild())->geometry();
+            const auto* v = geometry->vertexDataAsColoredPoint2D();
+            ASSERT_GT(geometry->vertexCount(), 0);
+            const double width = std::min(columns - 2.0, 13 * dpr);
+            const double inset = std::floor((columns - width) * 0.5);
+            int checked = 0;
+            for (int i = 0; i < geometry->vertexCount(); i += 6) {
+                if (v[i].x < 0 || v[i+2].x > 320) continue;
+                const qint64 t = std::llround(mapping.screenXToTime(v[i].x - inset / dpr) / minute) * minute;
+                EXPECT_NEAR(v[i].x * dpr, cam.xDev(t) + inset, 1e-4);
+                EXPECT_NEAR(v[i+2].x * dpr, cam.xDev(t) + inset + width, 1e-4);
+                EXPECT_NEAR(v[i].y * dpr, cam.yDev(close), 1e-4);
+                EXPECT_NEAR(v[i+1].y * dpr, cam.yDev(open), 1e-4);
+                // The heatmap changes exactly at the column boundary beside this body.
+                const int edge = std::lround(cam.xDev(t));
+                if (edge > 0 && edge < image.width()) {
+                    int changes = 0;
+                    for (int y = 5; y < image.height() - 5; y += 2)
+                        changes += image.pixel(edge-1, y) != image.pixel(edge, y);
+                    EXPECT_GT(changes, 0);
+                }
+                ++checked;
+            }
+            EXPECT_GE(checked, columns <= 20 ? 10 : 3) << "including the widest columns";
+            ugr->endPanAt();
+        }
+    }
+    delete candles;
+}
+
+// Plan 2026-10-08 B4: a pan in 0.3 x 0.2 device px steps moves the heatmap, the
+// candles and the axis labels by the same whole pixels every frame (the picture is
+// the first frame translated; label positions shift by exactly that much).
+TEST_F(UgrGpu, APanMovesEveryLayerByTheSameWholePixels) {
+    noLabels();
+    const int64_t lo = viewLo + minute / 3;
+    ugr->setViewport(lo, lo + 41 * minute + 3 * minute / 10, 99'900, 100'317); // fractional px per cell
+    CandleSeriesBuffer buffer;
+    std::vector<CandleSeriesBuffer::CandleBar> bars;
+    for (int64_t t = (lo / minute - 2) * minute; t < lo + 44 * minute; t += minute) {
+        const double base = 100'000 + double((t / minute) % 9) * 13.7;
+        bars.push_back({t, t + minute, base, base + 61.3, base - 47.9, base + 22.1, 1.0, true, 0, false});
+    }
+    buffer.applyHistory("BTC-USD", 60, bars);
+    auto *candles = new CandlestickOverlayItem(scene->window()->contentItem());
+    candles->setSize(ugr->size());
+    candles->setMappingProvider(ugr);
+    candles->setCandleBuffer(&buffer);
+    candles->setSymbol("BTC-USD");
+    candles->setTimeframeSec(60);
+    PriceAxisModel priceAxis;
+    TimeAxisModel timeAxis;
+    priceAxis.setTarget(ugr);
+    timeAxis.setTarget(ugr);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    const QImage base = image;
+    std::vector<AxisModel::TickSnapshot> price0, time0, ticks;
+    priceAxis.copyTicks(price0);
+    timeAxis.copyTicks(time0);
+    ASSERT_GE(price0.size(), 2u);
+    ASSERT_GE(time0.size(), 2u);
+    auto positionOf = [](const std::vector<AxisModel::TickSnapshot> &list, double value) -> std::optional<double> {
+        for (const auto &t : list)
+            if (t.value == value) return t.position;
+        return std::nullopt;
+    };
+    ugr->beginPanAt(320, 160);
+    int moved = 0;
+    for (int i = 1; i <= 40; ++i) {
+        const QPointF drag(0.3 * i, 0.2 * i);
+        ugr->updatePanAt(320 + drag.x(), 160 + drag.y());
+        ASSERT_TRUE(frames(1)) << error.toStdString();
+        const int dx = int(std::llround(drag.x())), dy = int(std::llround(drag.y()));
+        int pixels = 0;
+        EXPECT_EQ(shiftedDifferences(image, base, dx, dy, 20, &pixels), 0)
+            << "frame " << i << ": not the first picture moved by (" << dx << ", " << dy << ")";
+        EXPECT_GT(pixels, 100'000) << "frame " << i;
+        int compared = 0;
+        priceAxis.copyTicks(ticks);
+        for (const auto &t : ticks) {
+            EXPECT_TRUE(whole(t.position)) << "price label at y=" << t.position;
+            if (const auto p0 = positionOf(price0, t.value)) {
+                EXPECT_DOUBLE_EQ(t.position - *p0, double(dy)) << "frame " << i << " price label " << t.value;
+                ++compared;
+            }
+        }
+        timeAxis.copyTicks(ticks);
+        for (const auto &t : ticks) {
+            EXPECT_TRUE(whole(t.position)) << "time label at x=" << t.position;
+            if (const auto p0 = positionOf(time0, t.value)) {
+                EXPECT_DOUBLE_EQ(t.position - *p0, double(dx)) << "frame " << i << " time label " << t.value;
+                ++compared;
+            }
+        }
+        EXPECT_GE(compared, 3) << "frame " << i << ": labels kept across the pan";
+        moved += dx != 0;
+    }
+    const QImage dragged = image;
+    ugr->endPanAt();
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    EXPECT_EQ(image, dragged) << "the release does not move the picture";
+    EXPECT_GE(moved, 35);
+    delete candles;
+}
+
+// Plan 2026-10-08 B5: a stored view zoomed in and out about one point (exact inverse
+// steps; a direct view such as the Agent API's, the wheel clicks to rungs since slice
+// A2), the rows oscillating around 2.5 px inside the step band (2.45 <-> 2.60): the
+// drawn rows never change; across 2.6 they step exactly once. The drawn rowPx (the
+// frame's raster camera: GET /api/v1/viewport `drawn.rowPx`) is the measured band
+// height of the picture.
+TEST_F(UgrGpu, AZoomInsideTheStepBandNeverOscillates) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const double tick = layer().tickPrice();
+    ASSERT_GT(tick, 0);
+    ASSERT_TRUE(setRows(2.3));
+    ASSERT_EQ(drawn().rowPx, 2);
+    auto *view = ugr->getViewState();
+    auto zoomAbout = [&](double factor) { // the price span / factor about y = 100
+        const double frac = 100.0 / 320, at = view->getMaxPrice() - frac * priceSpan(), span = priceSpan() / factor;
+        ugr->setViewport(view->getVisibleTimeStart(), view->getVisibleTimeEnd(), at + frac * span - span,
+                         at + frac * span);
+    };
+    auto rows = [&] { return drawn().heightDev * tick / priceSpan(); };
+    for (const auto [startRows, expectedChanges] : {std::pair{2.45, 0}, {2.52, 1}}) {
+        SCOPED_TRACE(testing::Message() << "rows " << startRows << " <-> " << startRows * 1.06);
+        ASSERT_TRUE(setRows(2.3));
+        ASSERT_TRUE(setRows(startRows));
+        ASSERT_EQ(drawn().rowPx, 2);
+        int changes = 0, last = 2;
+        double lowest = 1e9, highest = 0;
+        for (int i = 0; i < 50; ++i) {
+            zoomAbout(i % 2 ? 1 / 1.06 : 1.06);
+            ASSERT_TRUE(frames(2)) << error.toStdString();
+            ASSERT_EQ(layer().tickPrice(), tick) << "Auto keeps the tick";
+            const int P = drawn().rowPx;
+            changes += P != last;
+            last = P;
+            lowest = std::min(lowest, rows());
+            highest = std::max(highest, rows());
+            EXPECT_EQ(bandHeight(image), P) << "step " << i << ": drawn.rowPx is what the picture shows";
+        }
+        EXPECT_EQ(changes, expectedChanges);
+        EXPECT_GT(highest, startRows * 1.05);
+        if (expectedChanges == 0) {
+            EXPECT_LT(lowest, 2.5) << "the zoom crossed the half-integer";
+            EXPECT_GT(highest, 2.5);
+        } else {
+            EXPECT_GT(highest, 2.6) << "the zoom crossed the step";
+        }
+    }
+}
+
+// Plan 2026-10-08 B6: wheel clicks at 30% of the height until the rows step 2 -> 3 (one
+// click since slice A2): the price under the cursor (the published mapping's inverse)
+// moves by less than a row across the step, and stays within half a device pixel of
+// the continuous camera.
+TEST_F(UgrGpu, TheCursorPriceStaysWithinARowAcrossAnIntegerStep) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const double tick = layer().tickPrice();
+    ASSERT_GT(tick, 0);
+    ASSERT_TRUE(setRows(2.3)); // anchored at the centre: the cursor below is a new position
+    ASSERT_EQ(drawn().rowPx, 2);
+    const double y = 0.3 * 320;
+    const auto *view = ugr->getViewState();
+    auto continuous = [&] { return view->getMaxPrice() - y / 320 * priceSpan(); };
+    double before = 0, after = 0;
+    bool stepped = false;
+    for (int i = 0; i < 10 && !stepped; ++i) {
+        // What is drawn under the cursor before this wheel event stays under it (every
+        // event, the first at the new position included), within half a device pixel.
+        const auto mapping = ugr->currentTimeAxisMapping();
+        const double under = mapping.screenYToPrice(y);
+        notch(1, {320, y});
+        ASSERT_TRUE(settle()) << error.toStdString();
+        const auto cam = drawn();
+        const auto now = ugr->currentTimeAxisMapping();
+        EXPECT_LE(std::abs(now.priceToScreenY(under) - y), 0.5 / cam.dpr + 1e-6) << "wheel " << i;
+        EXPECT_LE(std::abs(now.screenYToPrice(y) - continuous()), 0.5 * tick / cam.rowPx + 1e-9) << "wheel " << i;
+        if (cam.rowPx == 3) {
+            before = under;
+            after = now.screenYToPrice(y);
+            stepped = true;
+        }
+    }
+    ASSERT_TRUE(stepped);
+    EXPECT_LT(std::abs(after - before), tick) << "the price under the cursor jumped across the step";
+}
+
+// Review fix 1 (whole-pixel plan section 1.4): every zoom keeps the content drawn under
+// the cursor within half a device pixel of it: the first wheel click at a new cursor
+// position, later ones elsewhere, the time and price axis drags (continuous, then the
+// nearest rung), starting at fractional pixels per cell (the stored bounds differ from
+// the drawn ones, so zooming about the stored point would translate the picture).
+TEST_F(UgrGpu, ZoomKeepsTheDrawnContentUnderTheCursor) {
+    noLabels();
+    const int64_t lo = viewLo + minute / 3;
+    ugr->setViewport(lo, lo + 41 * minute + 3 * minute / 10, 99'900, 100'317);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    enum Kind { Wheel, TimeAxis, PriceAxis };
+    struct Event { Kind kind; double delta, x, y; };
+    const Event events[] = {{Wheel, 1, 200, 100},  {Wheel, 1, 200, 100},  {Wheel, -1, 500, 250},
+                            {TimeAxis, 60, 100, 0}, {PriceAxis, -60, 0, 280}, {Wheel, 2, 90, 40},
+                            {TimeAxis, -90, 610, 0}, {PriceAxis, 80, 0, 30},  {Wheel, -2, 333, 177}};
+    int i = 0;
+    for (const auto &e : events) {
+        SCOPED_TRACE(testing::Message() << "event " << i++);
+        const auto before = ugr->currentTimeAxisMapping();
+        const double y = e.kind == TimeAxis ? 160 : e.y, x = e.kind == PriceAxis ? 320 : e.x;
+        const double t = before.screenXToTime(x), p = before.screenYToPrice(y);
+        if (e.kind == Wheel) {
+            notch(int(e.delta), {e.x, e.y});
+        } else {
+            for (int step = 0; step < 3; ++step) { // a drag: three moves, then the release
+                if (e.kind == TimeAxis) ugr->zoomTimeDrag(e.delta, e.x);
+                else ugr->zoomPriceDrag(e.delta, e.y);
+                ASSERT_TRUE(frames(1)) << error.toStdString();
+            }
+            ugr->endZoomGesture();
+        }
+        ASSERT_TRUE(settle()) << error.toStdString();
+        const auto after = ugr->currentTimeAxisMapping();
+        const double half = 0.5 / drawn().dpr + 1e-6;
+        if (e.kind != PriceAxis) EXPECT_LE(std::abs(after.timeToScreenX(t) - x), half) << "time under the cursor";
+        if (e.kind != TimeAxis) EXPECT_LE(std::abs(after.priceToScreenY(p) - y), half) << "price under the cursor";
+        EXPECT_FALSE(drawn().free) << "landed on a rung";
+    }
+}
+
+// Review fix 1: a timeframe switch at fractional pixels per column keeps the Now column
+// where it is drawn (within half a device pixel), not where the stored bounds put it.
+TEST_F(UgrGpu, TimeframeSwitchKeepsTheDrawnNowColumn) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(pump(10'000, [&] { return layer().liveAnchorMs() > 0; })) << "the recording's availability";
+    const int64_t anchor = layer().liveAnchorMs();
+    ASSERT_EQ(anchor, epoch + 4 * kHourMs);
+    const int64_t start = anchor - minute / 2 - 29 * minute - minute / 7; // Now ~70% across
+    ugr->setViewport(start, start + 41 * minute + 3 * minute / 10, 99'900, 100'317);
+    ASSERT_FALSE(ugr->autoScrollEnabled());
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    auto nowCentre = [&](int64_t tf) { return double((anchor + tf - 1) / tf * tf) - double(tf) / 2; };
+    double x = ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(minute));
+    ASSERT_GT(x, 0.6 * 640);
+    ASSERT_LT(x, 0.8 * 640);
+    for (const int64_t tf : {5 * minute, 15 * minute, minute}) {
+        ugr->setTimeframe(int(tf));
+        ASSERT_TRUE(frames(2)) << error.toStdString();
+        const double now = ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(tf));
+        EXPECT_LE(std::abs(now - x), 0.5 / drawn().dpr + 1e-6) << "Now column at tf " << tf;
+        x = now;
+    }
+}
+
+// Review round 2, fix 1: following live, a timeframe switch at fractional pixels per
+// column keeps the Now column where it is drawn (the view stays anchored at its end,
+// the live edge one padding inside; the padding scales with the span).
+TEST_F(UgrGpu, TimeframeSwitchWhileFollowingLiveKeepsTheDrawnNowColumn) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(pump(10'000, [&] { return layer().liveAnchorMs() > 0; })) << "the recording's availability";
+    const int64_t anchor = layer().liveAnchorMs();
+    const int64_t span = int64_t(std::llround(640.0 / 2.4 * double(minute))); // 2.4 px columns, drawn at 2
+    ugr->setViewport(anchor - span, anchor, 99'900, 100'300);
+    ugr->enableAutoScroll(true);
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    ASSERT_TRUE(ugr->autoScrollEnabled());
+    ASSERT_EQ(drawn().colPx, 2);
+    auto nowCentre = [&](int64_t tf) { return double((anchor + tf - 1) / tf * tf) - double(tf) / 2; };
+    double x = ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(minute));
+    ASSERT_GT(x, 0.5 * 640);
+    ASSERT_LT(x, 640);
+    for (const int64_t tf : {5 * minute, 15 * minute, minute}) {
+        ugr->setTimeframe(int(tf));
+        ASSERT_TRUE(frames(2)) << error.toStdString();
+        EXPECT_TRUE(ugr->autoScrollEnabled()) << "still following live";
+        const double now = ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(tf));
+        EXPECT_LE(std::abs(now - x), 0.5 / drawn().dpr + 1e-6) << "Now column at tf " << tf;
+        x = now;
+    }
+}
+
+// Review round 2, fix 2: with the auto price scale on and no candle fit, a wheel zoom
+// (time only) leaves the price window and the drawn rows exactly where they were, at a
+// fractional price span (the drawn price under the cursor differs from the stored one).
+TEST_F(UgrGpu, AutoScaleWheelWithoutAFitKeepsThePrice) {
+    noLabels();
+    const int64_t lo = viewLo + minute / 3;
+    ugr->setViewport(lo, lo + 41 * minute + 3 * minute / 10, 99'900, 100'317);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    view->setAutoPriceScale(true); // no candle buffer: autoPriceFit has nothing to fit
+    ASSERT_TRUE(ugr->autoPriceScale());
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    const double p0 = view->getMinPrice(), p1 = view->getMaxPrice();
+    const auto before = drawn();
+    for (const auto &[clicks, y] : {std::pair{1, 60.0}, {-1, 250.0}, {2, 20.0}}) {
+        notch(clicks, {320, y});
+        ASSERT_TRUE(settle()) << error.toStdString();
+        EXPECT_EQ(view->getMinPrice(), p0) << "wheel at y=" << y << ": time only, the price stays";
+        EXPECT_EQ(view->getMaxPrice(), p1);
+        EXPECT_EQ(drawn().topRowIndex, before.topRowIndex) << "the drawn rows did not move";
+        EXPECT_EQ(drawn().rowPx, before.rowPx);
+    }
+}
+
+// Review round 2, fix 3: a tick proposal queued by a frame is dropped when the tick
+// policy changes before the GUI thread commits it (a Manual tick chosen, a timeframe or
+// symbol switch): the stale Auto tick is never drawn.
+TEST_F(UgrGpu, AStaleTickProposalIsNeverCommitted) {
+    enum Change { None, ManualTick, Timeframe, Symbol };
+    for (const Change change : {None, ManualTick, Timeframe, Symbol}) {
+        SCOPED_TRACE(testing::Message() << "change " << int(change));
+        ugr->setActiveSymbol("BTC-USD");
+        ugr->setTimeframe(int(minute));
+        noLabels();
+        const int64_t lo = viewLo + minute / 3;
+        ugr->setViewport(lo, lo + 41 * minute + 3 * minute / 10, 99'900, 100'317);
+        ASSERT_TRUE(settle()) << error.toStdString();
+        const int64_t t0 = layer().tickUnits();
+        auto coarse = brightSettings();
+        coarse.showLabels = false;
+        coarse.minRowPx = 12; // Auto picks a coarser tick in the next frame
+        ugr->setHeatmapChartSettings(coarse);
+        ugr->update();
+        image = scene->renderFrame(&error); // the frame that proposes; its commit is queued
+        ASSERT_FALSE(image.isNull()) << error.toStdString();
+        ASSERT_EQ(layer().tickUnits(), t0) << "the proposing frame draws the committed tick";
+        if (change == ManualTick) {
+            auto manual = coarse;
+            manual.tickMode = heatmap::TickMode::Manual;
+            manual.manualTick = 500; // $5
+            ugr->setHeatmapChartSettings(manual, true);
+        } else if (change == Timeframe) {
+            ugr->setTimeframe(int(5 * minute));
+        } else if (change == Symbol) {
+            ugr->setActiveSymbol("TINY-USD");
+        }
+        QCoreApplication::processEvents(); // the queued commit runs
+        if (change == None) {
+            EXPECT_NE(layer().tickUnits(), t0) << "control: the proposal commits";
+            continue;
+        }
+        EXPECT_EQ(layer().tickUnits(), t0) << "the stale Auto proposal is dropped";
+        if (change == ManualTick) {
+            ASSERT_TRUE(frames(3)) << error.toStdString();
+            EXPECT_EQ(layer().tickUnits(), 500) << "the Manual tick is drawn next";
+        }
+        ugr->setHeatmapChartSettings(brightSettings());
+    }
+}
+
+// Review fix 2: a tick chosen at render time (here: Auto after a larger minimum row
+// height, no viewport change, candles and axis models otherwise idle) moves every layer
+// in the SAME frame: in the first frame that draws the new tick, the candle bodies and
+// the price axis labels are already at that frame's rows.
+TEST_F(UgrGpu, ATickChangeMovesEveryLayerInTheSameFrame) {
+    noLabels();
+    const int64_t lo = viewLo + minute / 3;
+    ugr->setViewport(lo, lo + 41 * minute + 3 * minute / 10, 99'900, 100'317);
+    CandleSeriesBuffer buffer;
+    std::vector<CandleSeriesBuffer::CandleBar> bars;
+    const double open = 100'050, close = 100'150;
+    for (int64_t t = (lo / minute - 2) * minute; t < lo + 44 * minute; t += minute)
+        bars.push_back({t, t + minute, open, 100'250, 99'950, close, 1.0, true, 0, false});
+    buffer.applyHistory("BTC-USD", 60, bars);
+    auto *candles = new CandlestickOverlayItem(scene->window()->contentItem());
+    candles->setSize(ugr->size());
+    candles->setMappingProvider(ugr);
+    candles->setCandleBuffer(&buffer);
+    candles->setSymbol("BTC-USD");
+    candles->setTimeframeSec(60);
+    PriceAxisModel priceAxis;
+    priceAxis.setTarget(ugr);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    const auto previousFrame = ugr->currentFrameContext();
+    const double tick0 = previousFrame.raster.tick;
+    const uint64_t version = ugr->getViewState()->getViewportVersion();
+    auto settings = brightSettings();
+    settings.showLabels = false;
+    settings.minRowPx = 12; // Auto re-ticks coarser at the next frame ($10 rows are 7.7 px)
+    ugr->setHeatmapChartSettings(settings);
+    const QRgb body = QColor("#2EBD85").rgb();
+    bool seen = false;
+    std::vector<AxisModel::TickSnapshot> ticks;
+    for (int i = 0; i < 10 && !seen; ++i) {
+        ASSERT_TRUE(frames(1)) << error.toStdString();
+        const auto cam = drawn();
+        if (cam.tick == tick0) continue;
+        seen = true; // the first frame that draws the new tick
+        EXPECT_EQ(ugr->getViewState()->getViewportVersion(), version) << "a tick-only change";
+        const auto frame = ugr->currentFrameContext();
+        const int64_t bucket = (lo / minute + 20) * minute;
+        const auto expected = bodyForFrame(frame, bucket, open, close);
+        const auto stale = bodyForFrame(previousFrame, bucket, open, close);
+        ASSERT_TRUE(expected.y.lo != stale.y.lo || expected.y.hi != stale.y.hi)
+            << "the first new-tick frame must distinguish a previous-tick candle";
+        // Inside the body, beside the wick, in physical image coordinates.
+        const int x = int(std::floor((expected.x.lo + (expected.x.hi - expected.x.lo) * 0.25) * frame.surfaceDpr));
+        int top = -1, bottom = -1;
+        for (int y = 0; y < image.height(); ++y)
+            if (image.pixel(x, y) == body) {
+                if (top < 0) top = y;
+                bottom = y;
+            }
+        expectBodyRows(top, bottom + 1, expected, frame.surfaceDpr);
+        priceAxis.copyTicks(ticks);
+        ASSERT_FALSE(ticks.empty());
+        for (const auto &t : ticks)
+            EXPECT_DOUBLE_EQ(t.position, cam.yDev(t.value) / cam.dpr) << "price label " << t.value << " at this frame's rows";
+    }
+    EXPECT_TRUE(seen) << "the tick changed";
+    delete candles;
+}
+
+class CandleTickFrameProvider : public UnifiedGridRenderer {
+public:
+    MappingFrameContext frame;
+    MappingFrameContext currentFrameContext() const override { return frame; }
+};
+class CandleTickGeometryItem : public CandlestickOverlayItem {
+public:
+    using CandlestickOverlayItem::updatePaintNode;
+};
+TEST(UgrCandleCpu, ATickChangeBodyOracleRejectsPreviousFrameGeometry) {
+    CandleTickFrameProvider provider;
+    CandleTickGeometryItem candles;
+    CandleSeriesBuffer buffer;
+    constexpr qint64 bucket = 1'200'000;
+    constexpr double open = 100'050, close = 100'150;
+    buffer.applyHistory("BTC-USD", 60, {{bucket, bucket + minute, open, 100'250, 99'950, close, 1, true, 0, false}});
+    candles.setSize({640, 320});
+    candles.setMappingProvider(&provider);
+    candles.setCandleBuffer(&buffer);
+    candles.setSymbol("BTC-USD");
+    candles.setTimeframeSec(60);
+    QSGNode* root = nullptr;
+    for (double dpr : {1.0, 2.0}) {
+        chart_raster::RasterInputs in;
+        in.timeStart = bucket - minute + minute / 3;
+        in.timeEnd = in.timeStart + 41 * minute + 3 * minute / 10;
+        in.minPrice = 99'900;
+        in.maxPrice = 100'317;
+        in.tfMs = minute;
+        in.tick = 10;
+        in.itemWidthLogical = 640;
+        in.itemHeightLogical = 320;
+        in.dpr = dpr;
+        const auto previous = chart_raster::computeRaster(in, {});
+        in.tick = 20;
+        const auto current = chart_raster::computeRaster(in, previous.step());
+        const auto frameFor = [&](const chart_raster::RasterCamera& camera) {
+            MappingFrameContext frame;
+            frame.raster = camera;
+            frame.mapping = chart_raster::toMapping(camera);
+            frame.surfaceDpr = dpr;
+            frame.viewportValid = true;
+            frame.viewportTimeStart = in.timeStart;
+            frame.viewportTimeEnd = in.timeEnd;
+            return frame;
+        };
+        const auto previousFrame = frameFor(previous), currentFrame = frameFor(current);
+        const auto stale = bodyForFrame(previousFrame, bucket, open, close);
+        const auto expected = bodyForFrame(currentFrame, bucket, open, close);
+        ASSERT_TRUE(expected.y.lo != stale.y.lo || expected.y.hi != stale.y.hi);
+        provider.frame = previousFrame;
+        root = candles.updatePaintNode(root, nullptr);
+        auto* geometry = static_cast<QSGGeometryNode*>(root->lastChild())->geometry();
+        ASSERT_EQ(geometry->vertexCount(), 6);
+        const auto* v = geometry->vertexDataAsColoredPoint2D();
+        expectBodyRows(std::lround(v[0].y * dpr), std::lround(v[1].y * dpr), stale, dpr);
+        // Tick-only publication: generation, viewport and item size stay fixed.
+        provider.frame = currentFrame;
+        root = candles.updatePaintNode(root, nullptr);
+        geometry = static_cast<QSGGeometryNode*>(root->lastChild())->geometry();
+        ASSERT_EQ(geometry->vertexCount(), 6);
+        v = geometry->vertexDataAsColoredPoint2D();
+        expectBodyRows(std::lround(v[0].y * dpr), std::lround(v[1].y * dpr), expected, dpr);
+    }
+    delete root;
+}
+
+// Review fix 3: the price fit covers the candles drawn, not only those in the stored
+// window. At 2.4 continuous px per column (drawn at 2) a centred 266.7-column window
+// draws 320 columns: an outlier candle 150 minutes left of the centre is drawn but lies
+// outside the stored window.
+TEST_F(UgrGpu, PriceFitCoversCandlesDrawnOutsideTheStoredWindow) {
+    noLabels();
+    const int64_t centre = viewLo + 20 * minute;
+    const int64_t span = int64_t(std::llround(640.0 / 2.4 * double(minute)));
+    ugr->setViewport(centre - span / 2, centre - span / 2 + span, 99'900, 100'300);
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    CandleSeriesBuffer buffer;
+    std::vector<CandleSeriesBuffer::CandleBar> bars;
+    const int64_t outlier = centre - 150 * minute;
+    for (int64_t t = centre - 170 * minute; t < centre + 170 * minute; t += minute)
+        bars.push_back(t == outlier ? CandleSeriesBuffer::CandleBar{t, t + minute, 100'000, 101'500, 99'000, 100'050, 1.0, true, 0, false}
+                                    : CandleSeriesBuffer::CandleBar{t, t + minute, 100'000, 100'100, 100'000, 100'050, 1.0, true, 0, false});
+    buffer.applyHistory("BTC-USD", 60, bars);
+    ugr->setCandleBuffer(&buffer);
+    const auto *view = ugr->getViewState();
+    const auto cam = ugr->rasterCameraNow(false);
+    ASSERT_EQ(cam.colPx, 2);
+    ASSERT_LT(cam.drawnStartMs, double(outlier)) << "the outlier is drawn";
+    ASSERT_GE(view->getVisibleTimeStart(), outlier + minute) << "and outside the stored window";
+    ASSERT_TRUE(ugr->fitPriceToData());
+    EXPECT_LE(view->getMinPrice(), 99'000) << "the drawn outlier's low is in the fit";
+    EXPECT_GE(view->getMaxPrice(), 101'500) << "and its high";
+    // The auto price scale's refit on a time change uses the drawn window too (a 1 ms
+    // shift: the stored window still excludes the outlier, the drawn one has it).
+    ugr->getViewState()->setViewport(view->getVisibleTimeStart() + 1, view->getVisibleTimeEnd() + 1, 99'990,
+                                     100'010);
+    ASSERT_TRUE(ugr->autoPriceScale());
+    ASSERT_GE(view->getVisibleTimeStart(), outlier + minute);
+    ASSERT_LT(ugr->rasterCameraNow(false).drawnStartMs, double(outlier));
+    EXPECT_LE(view->getMinPrice(), 99'000);
+    EXPECT_GE(view->getMaxPrice(), 101'500);
+    ugr->setCandleBuffer(nullptr);
+}
+
+// Review fix 4: a direct (API) viewport of 1 ms draws at least one ms per device pixel
+// (C <= tf), so every whole-pixel drag commits exactly: the release keeps the dragged
+// columns.
+TEST_F(UgrGpu, AHighZoomReleaseKeepsTheDrawnColumns) {
+    noLabels();
+    UnifiedGridRenderer::ViewportRequest request;
+    request.startMs = viewLo + 7'777;
+    request.endMs = viewLo + 7'778;
+    request.priceMin = 99'900;
+    request.priceMax = 100'300;
+    ASSERT_TRUE(ugr->applyViewportRequest(request).isEmpty());
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    auto before = drawn();
+    EXPECT_EQ(before.colPx, int(minute)) << "at least one ms per device pixel (C <= tf)";
+    for (const double drag : {1.0, -3.0, 0.6, 2.4}) {
+        SCOPED_TRACE(testing::Message() << "drag " << drag);
+        ugr->beginPanAt(320, 160);
+        ugr->updatePanAt(320 + drag, 160);
+        ASSERT_TRUE(frames(2)) << error.toStdString();
+        const auto during = drawn();
+        EXPECT_EQ(before.leftColIndex - during.leftColIndex, std::llround(drag));
+        ugr->endPanAt();
+        ASSERT_TRUE(frames(2)) << error.toStdString();
+        const auto after = drawn();
+        EXPECT_EQ(after.leftColIndex, during.leftColIndex) << "the release keeps the dragged columns";
+        EXPECT_EQ(after.topRowIndex, during.topRowIndex);
+        before = after;
+    }
+}
+
+// Plan 2026-10-08 B7: following live, the committed view advances by 0.3 device px
+// worth of time per frame (as followGpuLive moves it): between whole-pixel steps the
+// picture is byte-identical; at a step it translates by whole pixels; C is constant.
+TEST_F(UgrGpu, FollowLiveMovesByWholePixelSteps) {
+    noLabels();
+    ugr->setViewport(viewLo, viewLo + 41 * minute + 3 * minute / 10, 99'900, 100'317); // 15.5 px columns
+    ugr->enableAutoScroll(true);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ASSERT_TRUE(ugr->autoScrollEnabled());
+    auto *view = ugr->getViewState();
+    const auto cam0 = drawn();
+    ASSERT_TRUE(cam0.valid);
+    ASSERT_EQ(cam0.colPx, 15);
+    const int64_t step = int64_t(std::llround(0.3 * double(minute) / cam0.colPx));
+    const qint64 s0 = view->getVisibleTimeStart(), e0 = view->getVisibleTimeEnd();
+    const double p0 = view->getMinPrice(), p1 = view->getMaxPrice();
+    QImage previous = image;
+    int64_t m = cam0.leftColIndex;
+    int identical = 0, steps = 0;
+    for (int i = 1; i <= 40; ++i) {
+        view->setViewport(s0 + i * step, e0 + i * step, p0, p1);
+        ASSERT_TRUE(frames(1)) << error.toStdString();
+        const auto cam = drawn();
+        ASSERT_TRUE(view->isAutoScrollEnabled());
+        EXPECT_EQ(cam.colPx, cam0.colPx) << "frame " << i;
+        const int k = int(cam.leftColIndex - m);
+        if (k == 0) {
+            EXPECT_EQ(image, previous) << "frame " << i << ": no whole-pixel step, yet the picture changed";
+            ++identical;
+        } else {
+            EXPECT_EQ(shiftedDifferences(image, previous, -k, 0), 0) << "frame " << i << ": not a " << k << " px move";
+            ++steps;
+        }
+        previous = image;
+        m = cam.leftColIndex;
+    }
+    EXPECT_GE(identical, 20);
+    EXPECT_GE(steps, 10);
+}
+
+// Plan 2026-10-08 B8: at the clamps the drawn cells are one device pixel: zoomed out to
+// one column per pixel, C = 1 and the drawn window is exactly the 640 columns; Manual at
+// its maximum price span (one row per pixel), P = 1 and 320 rows.
+TEST_F(UgrGpu, TheClampsDrawOnePixelColumnsAndRows) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    // From 2 px columns straight to the 1 column/px clamp (one step), then by the wheel.
+    view->setViewport(view->getVisibleTimeEnd() - 320 * minute, view->getVisibleTimeEnd(), view->getMinPrice(),
+                      view->getMaxPrice());
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    ASSERT_EQ(drawn().colPx, 2);
+    view->setViewport(view->getVisibleTimeEnd() - 640 * minute, view->getVisibleTimeEnd(), view->getMinPrice(),
+                      view->getMaxPrice());
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    EXPECT_EQ(drawn().colPx, 1) << "one column per device pixel at the clamp";
+    for (int i = 0; i < 80; ++i) ugr->zoomTimeClicks(-1, 320);
+    ASSERT_EQ(timeSpan(), 640.0 * minute);
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    auto cam = drawn();
+    EXPECT_EQ(cam.colPx, 1);
+    EXPECT_NEAR((cam.drawnEndMs - cam.drawnStartMs) / double(minute), 640.0, 1e-6);
+    EXPECT_DOUBLE_EQ(ugr->currentTimeAxisMapping().cellW, 1.0);
+    auto manual = brightSettings();
+    manual.showLabels = false;
+    manual.tickMode = heatmap::TickMode::Manual;
+    manual.manualTick = 1000; // $10
+    ugr->setHeatmapChartSettings(manual, true);
+    ASSERT_TRUE(setRows(2.0));
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ASSERT_EQ(drawn().rowPx, 2);
+    for (int i = 0; i < 80; ++i) ugr->zoomPriceClicks(-1, 160);
+    ASSERT_NEAR(priceSpan(), 3200, 1e-6);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    cam = drawn();
+    EXPECT_DOUBLE_EQ(cam.tick, 10.0);
+    EXPECT_EQ(cam.rowPx, 1);
+    EXPECT_NEAR((cam.drawnMaxPrice - cam.drawnMinPrice) / cam.tick, 320.0, 1e-9);
+    EXPECT_DOUBLE_EQ(ugr->currentTimeAxisMapping().cellH, 1.0);
+    EXPECT_EQ(bandHeight(image), 1);
 }
 
 // Spec rules 6-8 and plan section 2: a timeframe switch keeps the old picture
@@ -393,8 +1266,10 @@ TEST_F(UgrGpu, TimeframeSwitchUnderFollowLiveIsOneViewportChange) {
     EXPECT_EQ(span, 40 * 5 * minute);
     const int64_t tf = 5 * minute;
     const int64_t liveEnd = (anchor + tf - 1) / tf * tf;
-    EXPECT_EQ(view->getVisibleTimeEnd(), liveEnd + std::max<int64_t>(tf, int64_t(double(span) * 0.08)))
-        << "the padding follows the new span";
+    // The padding follows the new span, kept to the pixel the Now column was drawn at
+    // (smooth zoom A2: within one drawn pixel of time of the nominal padding).
+    const int64_t nominal = liveEnd + std::max<int64_t>(tf, int64_t(double(span) * 0.08));
+    EXPECT_LE(std::abs(view->getVisibleTimeEnd() - nominal), tf / ugr->restCameraNow(false).colPx);
     ASSERT_TRUE(pump(30'000, [&] { return layer().settled(); }, [] {})) << error.toStdString();
 }
 
@@ -489,7 +1364,12 @@ TEST_F(UgrGpu, ShiftWheelScalesPriceOnlyWithinTheClamps) {
     const double time0 = timeSpan(), price0 = priceSpan();
     wheel({120, 0}, Qt::ShiftModifier); // Shift+wheel as macOS sends it
     EXPECT_EQ(timeSpan(), time0) << "price only";
-    EXPECT_NEAR(priceSpan(), price0 / 1.06, 1e-6 * price0);
+    // Smooth zoom (A2): one click is one price rung, whole device px per row at the
+    // tick drawn there.
+    EXPECT_LT(priceSpan(), price0);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    EXPECT_FALSE(drawn().free);
+    EXPECT_TRUE(whole(drawn().heightDev * drawn().tick / priceSpan())) << 320 * drawn().tick / priceSpan() << " px rows";
     const double price1 = priceSpan();
     wheel({0, 120}, Qt::ShiftModifier); // a mouse that keeps the vertical delta
     EXPECT_LT(priceSpan(), price1);
@@ -647,8 +1527,23 @@ TEST_F(UgrGpu, PriceAxisFitLandsTheVisibleCandlesInView) {
     EXPECT_EQ(view->getVisibleTimeEnd(), t1);
     const double lo = 101'000 - 20, hi = 101'000 + 39 * 10 + 50;
     const double margin = (hi - lo) * UnifiedGridRenderer::kFitPriceMargin;
-    EXPECT_NEAR(view->getMinPrice(), lo - margin, 1e-6);
+    EXPECT_NEAR(view->getMinPrice(), lo - margin, 1e-6) << "no tick drawn yet: the fit is not widened";
     EXPECT_NEAR(view->getMaxPrice(), hi + margin, 1e-6);
+    // Whole-pixel plan A8: once a tick is drawn the fit (and the auto price scale's
+    // refit on the tick change) is an integer number of device pixels per row, never
+    // narrower than the margined span, and the drawn window is the fitted one.
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const double tick = layer().tickPrice();
+    ASSERT_GT(tick, 0);
+    ASSERT_TRUE(ugr->fitPriceToData());
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    const double span = view->getMaxPrice() - view->getMinPrice();
+    EXPECT_TRUE(whole(320 * tick / span)) << "rows of " << 320 * tick / span << " px";
+    EXPECT_GE(span, (hi - lo) * (1 + 2 * UnifiedGridRenderer::kFitPriceMargin) * (1 - 1e-12));
+    EXPECT_LE(view->getMinPrice(), lo);
+    EXPECT_GE(view->getMaxPrice(), hi);
+    EXPECT_NEAR(drawn().drawnMinPrice, view->getMinPrice(), 1e-6) << "drawn == stored";
+    EXPECT_NEAR(drawn().drawnMaxPrice, view->getMaxPrice(), 1e-6);
     // Following live stays on (a price fit is not a pan).
     ugr->enableAutoScroll(true);
     ugr->setViewport(view->getVisibleTimeStart(), view->getVisibleTimeEnd(), 99'000, 99'100);
@@ -807,7 +1702,7 @@ TEST_F(UgrGpu, AutoScaleFollowsTheVisibleCandlesAcrossTimeChanges) {
     ugr->setCandleBuffer(&buffer);
     const auto *view = ugr->getViewState();
     auto expectFitted = [&](const char *what) {
-        const auto [lo, hi] = expectedFit(bars, view->getVisibleTimeStart(), view->getVisibleTimeEnd());
+        const auto [lo, hi] = expectedFit(bars, drawnWindow().first, drawnWindow().second);
         EXPECT_NEAR(view->getMinPrice(), lo, 1e-6) << what;
         EXPECT_NEAR(view->getMaxPrice(), hi, 1e-6) << what;
     };
@@ -836,15 +1731,22 @@ TEST_F(UgrGpu, AutoScaleFollowsTheVisibleCandlesAcrossTimeChanges) {
     // The chart wheel zooms time only and keeps it on.
     const double span0 = timeSpan();
     v = view->getViewportVersion();
-    ugr->zoomAt(-240, 320, 160);
+    notch(-2, {320, 160});
     EXPECT_EQ(view->getViewportVersion() - v, 1u);
     EXPECT_GT(timeSpan(), span0);
     EXPECT_TRUE(ugr->autoPriceScale()) << "the wheel keeps it on";
     expectFitted("wheel zoom out");
     v = view->getViewportVersion();
-    ugr->zoomTimeAt(240, 320);
+    ugr->zoomTimeClicks(2, 320); // the time axis wheel
     EXPECT_EQ(view->getViewportVersion() - v, 1u);
-    expectFitted("time axis zoom");
+    expectFitted("time axis wheel");
+    v = view->getViewportVersion();
+    ugr->zoomTimeDrag(240, 320); // a time axis drag: one change per move, one at the release
+    EXPECT_EQ(view->getViewportVersion() - v, 1u);
+    expectFitted("time axis drag");
+    ugr->endZoomGesture();
+    EXPECT_EQ(view->getViewportVersion() - v, 2u);
+    expectFitted("time axis drag release");
     ugr->setCandleBuffer(nullptr);
 }
 
@@ -895,7 +1797,7 @@ TEST_F(UgrGpu, PriceZoomTurnsAutoScaleOffAndTheRangeSurvivesATimeframeSwitch) {
     ugr->setCandleBuffer(&buffer);
     ugr->setAutoPriceScale(true);
     const auto *view = ugr->getViewState();
-    ugr->zoomPriceAt(120, 100, 320);
+    ugr->zoomPriceClicks(1, 100);
     EXPECT_FALSE(ugr->autoPriceScale()) << "a price zoom turns it off";
     const double lo = view->getMinPrice(), hi = view->getMaxPrice();
     ugr->setTimeframe(int(tf5));
@@ -916,7 +1818,7 @@ TEST_F(UgrGpu, PriceZoomTurnsAutoScaleOffAndTheRangeSurvivesATimeframeSwitch) {
     ugr->setTimeframe(int(tf5));
     EXPECT_EQ(view->getViewportVersion() - v, 1u) << "scaled span and fitted price: one change";
     {
-        const auto [flo, fhi] = expectedFit(bars5, view->getVisibleTimeStart(), view->getVisibleTimeEnd());
+        const auto [flo, fhi] = expectedFit(bars5, drawnWindow().first, drawnWindow().second);
         EXPECT_NEAR(view->getMinPrice(), flo, 1e-6);
         EXPECT_NEAR(view->getMaxPrice(), fhi, 1e-6);
     }
@@ -930,7 +1832,7 @@ TEST_F(UgrGpu, PriceZoomTurnsAutoScaleOffAndTheRangeSurvivesATimeframeSwitch) {
     v = view->getViewportVersion();
     buffer.applyHistory("BTC-USD", 900, bars15);
     EXPECT_EQ(view->getViewportVersion() - v, 1u);
-    const auto [flo, fhi] = expectedFit(bars15, view->getVisibleTimeStart(), view->getVisibleTimeEnd());
+    const auto [flo, fhi] = expectedFit(bars15, drawnWindow().first, drawnWindow().second);
     EXPECT_NEAR(view->getMinPrice(), flo, 1e-6);
     EXPECT_NEAR(view->getMaxPrice(), fhi, 1e-6);
     ugr->setCandleBuffer(nullptr);
@@ -1065,7 +1967,7 @@ TEST_F(UgrGpu, ViewportRequestsResolveFlagsAndCommitOnce) {
     const int64_t anchor = layer().liveAnchorMs();
     EXPECT_EQ(view->getVisibleTimeEnd(), anchor + std::max<int64_t>(minute, int64_t(timeSpan() * 0.08)));
     {
-        const auto [lo, hi] = expectedFit(bars, view->getVisibleTimeStart(), view->getVisibleTimeEnd());
+        const auto [lo, hi] = expectedFit(bars, drawnWindow().first, drawnWindow().second);
         EXPECT_NEAR(view->getMinPrice(), lo, 1e-6);
         EXPECT_NEAR(view->getMaxPrice(), hi, 1e-6);
     }
@@ -1175,7 +2077,7 @@ TEST_F(UgrGpu, SymbolSwitchCarryAcrossPriceScalesAndUnpricedSwitches) {
     expectCarried(0.00001, "TINY after an unpriced ETH");
     // A user price action before the new symbol's price cancels the pending carry.
     ugr->setActiveSymbol("BTC-USD");
-    ugr->zoomPriceAt(120, 160, 320);
+    ugr->zoomPriceClicks(-1, 160); // a zoom-out (TINY's window is far below BTC's zoom-in floor)
     ugr->setLiveBookTop(99'999, 100'001);
     EXPECT_GT(std::abs((view->getMaxPrice() - view->getMinPrice()) - 2'000), 100) << "the default seed, no carry";
     EXPECT_NEAR((view->getMaxPrice() + view->getMinPrice()) / 2, 100'000, 1e-6);
@@ -1379,6 +2281,1866 @@ TEST_F(UgrGpu, ToneChangesReachTheGpuPicture) {
     EXPECT_GT(changed, 1000) << "the tone mapping changed the picture";
 }
 
+// ---------------------------------------------------------------- smooth zoom (A2)
+// Acceptance 1: every mouse wheel click changes the drawn zoom, in and out, from 16 px
+// columns down to one column per pixel (slice A zoomed x1.06 per notch: at 1-3 px
+// cells 2-3 clicks stayed inside the step band and drew nothing). Price zooms with
+// it (auto price scale off): every click moves the drawn rows as well.
+TEST_F(UgrGpu, EveryWheelClickChangesTheDrawnZoom) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ugr->getViewState()->setAutoPriceScale(false);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const double minCol = std::ceil(640.0 * minute / ugr->getViewState()->maxTimeSpanMs() - 1e-9);
+    int clicks = 0;
+    for (const int direction : {+1, -1}) {
+        for (int i = 0; i < (direction > 0 ? 4 : 14); ++i) {
+            const auto before = drawn();
+            ASSERT_FALSE(before.free);
+            if (direction < 0 && before.colPx <= minCol) break; // one column per pixel
+            notch(direction, {320, 160});
+            EXPECT_TRUE(ugr->zoomGliding()) << "click " << clicks << ": the click starts a glide";
+            ASSERT_TRUE(settle()) << error.toStdString();
+            const auto after = drawn();
+            SCOPED_TRACE(testing::Message() << "click " << clicks++ << " direction " << direction << " col "
+                                            << before.colPx << " -> " << after.colPx << " row " << before.rowPx
+                                            << "@" << before.tick << " -> " << after.rowPx << "@" << after.tick);
+            EXPECT_FALSE(after.free) << "landed at rest";
+            EXPECT_EQ(direction > 0, after.colPx > before.colPx);
+            EXPECT_NE(after.colPx, before.colPx) << "every click changes the drawn columns";
+            EXPECT_NE(after.pxPerPrice(), before.pxPerPrice()) << "and the drawn rows";
+            EXPECT_EQ(direction > 0, after.pxPerPrice() > before.pxPerPrice());
+            EXPECT_TRUE(whole(after.heightDev * after.tick / priceSpan())) << "the stored view is a whole-row rung";
+            EXPECT_NEAR(640.0 * minute / timeSpan(), after.colPx, 1e-3) << "and a whole-column rung (whole ms)";
+        }
+    }
+    EXPECT_GE(clicks, 12);
+    EXPECT_EQ(drawn().colPx, int(minCol)) << "the zoom-out reached one column per pixel";
+}
+
+// Acceptance 2: the glide draws fractional frames with coverage and lands on whole
+// rows and columns, edges on pixel edges; the landing frame is byte-identical to a rest
+// render of the target view reached without a glide.
+TEST_F(UgrGpu, AGlideLandsOnTheRestFrameOfItsTarget) {
+    noLabels();
+    manualZoomClock();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    view->setAutoPriceScale(false);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    CandleSeriesBuffer buffer;
+    std::vector<CandleSeriesBuffer::CandleBar> bars;
+    for (qint64 t = viewLo - 20 * minute; t < viewHi + 20 * minute; t += minute)
+        bars.push_back({t, t + minute, 100'000, 100'130, 99'980, 100'100, 1, true, 0, false});
+    buffer.applyHistory("BTC-USD", 60, bars);
+    auto* candles = new CandlestickOverlayItem(scene->window()->contentItem());
+    candles->setSize(ugr->size());
+    candles->setMappingProvider(ugr);
+    candles->setCandleBuffer(&buffer);
+    candles->setSymbol("BTC-USD");
+    candles->setTimeframeSec(60);
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    const auto start = drawn();
+    const qint64 s0 = view->getVisibleTimeStart(), e0 = view->getVisibleTimeEnd();
+    const double p0 = view->getMinPrice(), p1 = view->getMaxPrice();
+    const auto anchor0 = view->rasterAnchor();
+    const QPointF at(211, 97);
+    // The target, rendered at rest: the same click, its glide cut short by a view set.
+    notch(1, at);
+    const qint64 ts = view->getVisibleTimeStart(), te = view->getVisibleTimeEnd();
+    const double tlo = view->getMinPrice(), thi = view->getMaxPrice();
+    ugr->setViewport(ts, te, tlo, thi); // lands at once (no glide)
+    ASSERT_FALSE(ugr->zoomGliding());
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const auto target = drawn();
+    const QImage rest = image;
+    ASSERT_FALSE(target.free);
+    ASSERT_EQ(target.tick, start.tick) << "the fixture keeps the tick (no crossfade at the landing)";
+    // Back to the start, then the same click with its glide.
+    view->setRasterAnchor(anchor0.fracX, anchor0.fracY);
+    ugr->setViewport(s0, e0, p0, p1);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ASSERT_EQ(drawn().leftColIndex, start.leftColIndex);
+    ASSERT_EQ(drawn().topRowIndex, start.topRowIndex);
+    const qint64 t0 = clockMs;
+    notch(1, at);
+    ASSERT_EQ(view->getVisibleTimeStart(), ts) << "the same target";
+    ASSERT_EQ(view->getMaxPrice(), thi);
+    int blended = 0;
+    for (qint64 ms = 0; ms < chart_raster::kZoomGlideMs; ms += 13) {
+        ASSERT_TRUE(frameAt(t0 + ms)) << error.toStdString();
+        const auto cam = drawn();
+        EXPECT_TRUE(cam.free) << ms << " ms: a transition frame";
+        EXPECT_TRUE(layer().tileStats().coverageBlend.load()) << ms << " ms: drawn with coverage";
+        const auto* root = paintRoot(candles);
+        ASSERT_TRUE(root);
+        const auto* g = static_cast<const QSGGeometryNode*>(root->lastChild())->geometry();
+        const auto* v = g->vertexDataAsColoredPoint2D();
+        ASSERT_GT(g->vertexCount(), 0);
+        const auto frame = ugr->currentFrameContext();
+        const auto& mapping = frame.mapping;
+        for (int i = 0; i < g->vertexCount(); i += 6) {
+            const double bodyCentre = (double(v[i].x) + v[i+2].x) * 0.5;
+            const qint64 t = std::llround((mapping.screenXToTime(bodyCentre) - minute * 0.5) / minute) * minute;
+            const auto expected = bodyForFrame(frame, t, 100'000, 100'100);
+            EXPECT_NEAR(v[i].x, expected.x.lo, 1e-4);
+            EXPECT_NEAR(v[i+2].x, expected.x.hi, 1e-4);
+            EXPECT_NEAR(v[i].y, expected.y.lo, 1e-4);
+            EXPECT_NEAR(v[i+1].y, expected.y.hi, 1e-4);
+        }
+        blended += !whole(cam.colPxF) && !whole(cam.rowPxF);
+    }
+    EXPECT_GE(blended, 8) << "fractional rows and columns during the glide";
+    ASSERT_TRUE(landGlide()) << error.toStdString();
+    EXPECT_FALSE(ugr->zoomGliding()) << "landed";
+    const auto landed = drawn();
+    EXPECT_FALSE(landed.free) << "the landing frame is the rest camera";
+    EXPECT_FALSE(layer().tileStats().coverageBlend.load()) << "floor() from the landing frame";
+    EXPECT_EQ(landed.colPx, target.colPx);
+    EXPECT_EQ(landed.rowPx, target.rowPx);
+    EXPECT_EQ(landed.leftColIndex, target.leftColIndex) << "edges on the target's pixel edges";
+    EXPECT_EQ(landed.topRowIndex, target.topRowIndex);
+    EXPECT_EQ(landed.drawnStartMs, target.drawnStartMs);
+    EXPECT_EQ(landed.drawnMaxPrice, target.drawnMaxPrice);
+    EXPECT_TRUE(image == rest) << "the landing frame with candles is byte-identical to the rest render";
+    delete candles;
+}
+
+// Acceptance 4: the content under the cursor stays within half a device pixel of it on
+// every glide frame, zooming in and out, at several cursor positions.
+TEST_F(UgrGpu, TheCursorAnchorHoldsOnEveryGlideFrame) {
+    noLabels();
+    manualZoomClock();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ugr->getViewState()->setAutoPriceScale(false);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    int checked = 0;
+    for (const auto &[clicks, at] : {std::pair{1, QPointF(211, 97)}, {2, QPointF(37.5, 290)}, {-1, QPointF(600, 12)},
+                                     {-2, QPointF(320, 160)}, {1, QPointF(5, 5)}}) {
+        SCOPED_TRACE(testing::Message() << "clicks " << clicks << " at " << at.x() << "," << at.y());
+        const auto before = ugr->currentTimeAxisMapping();
+        const double t = before.screenXToTime(at.x()), p = before.screenYToPrice(at.y());
+        const qint64 t0 = clockMs;
+        notch(clicks, at);
+        ASSERT_TRUE(ugr->zoomGliding());
+        for (qint64 ms = 0; ms <= chart_raster::kZoomGlideMs + 1; ms += 10) {
+            ASSERT_TRUE(frameAt(t0 + ms)) << error.toStdString();
+            const auto mapping = ugr->currentTimeAxisMapping();
+            const double dpr = drawn().dpr;
+            EXPECT_LE(std::abs(mapping.timeToScreenX(t) - at.x()) * dpr, 0.5 + 1e-6) << ms << " ms: time";
+            EXPECT_LE(std::abs(mapping.priceToScreenY(p) - at.y()) * dpr, 0.5 + 1e-6) << ms << " ms: price";
+            ++checked;
+        }
+        ASSERT_FALSE(ugr->zoomGliding());
+        ASSERT_TRUE(settle()) << error.toStdString();
+    }
+    EXPECT_EQ(checked, 5 * 14);
+}
+
+// Acceptance 5: clicks during a glide retarget it from what is drawn: the drawn scale
+// only grows (no reverse jump), no frame repeats the previous one (no stall), and the
+// glide lands three rungs on.
+TEST_F(UgrGpu, RapidClicksRetargetMonotonically) {
+    noLabels();
+    manualZoomClock();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ugr->getViewState()->setAutoPriceScale(false);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const auto start = drawn();
+    const qint64 t0 = clockMs;
+    std::vector<double> cols, rows;
+    auto record = [&] {
+        cols.push_back(drawn().colPxF);
+        rows.push_back(drawn().pxPerPrice());
+    };
+    notch(1, {200, 100});
+    for (qint64 ms = 0; ms <= 300; ms += 10) {
+        if (ms == 40 || ms == 80) notch(1, {200, 100}); // two more clicks mid-glide
+        ASSERT_TRUE(frameAt(t0 + ms)) << error.toStdString();
+        record();
+    }
+    ASSERT_FALSE(ugr->zoomGliding());
+    for (size_t i = 1; i < cols.size(); ++i) {
+        EXPECT_GE(cols[i], cols[i - 1]) << "frame " << i << ": columns never shrink";
+        EXPECT_GE(rows[i], rows[i - 1]) << "frame " << i << ": rows never shrink";
+    }
+    for (size_t i = 1; i < 18; ++i) EXPECT_GT(cols[i], cols[i - 1]) << "frame " << i << ": no stall while gliding";
+    EXPECT_EQ(drawn().colPx, chart_raster::columnRung(start.colPx, 3, 1, 0)) << "three rungs on";
+    EXPECT_FALSE(drawn().free);
+}
+
+// Acceptance 6: a trackpad pinch (the macOS native zoom gesture) zooms continuously
+// while the fingers move, drawn with coverage; its end eases to the nearest rung. The
+// same for a trackpad scroll (pixel deltas with scroll phases).
+TEST_F(UgrGpu, APinchZoomsContinuouslyAndSettlesOnARung) {
+    noLabels();
+    manualZoomClock();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ugr->getViewState()->setAutoPriceScale(false);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    for (const bool native : {true, false}) {
+        SCOPED_TRACE(native ? "native pinch" : "trackpad scroll");
+        const QPointF at(250, 120);
+        if (native) pinch(Qt::BeginNativeGesture, 0, at);
+        else scroll(0, Qt::ScrollBegin, at);
+        double last = drawn().colPxF, lastRows = drawn().pxPerPrice();
+        int fractional = 0;
+        for (int i = 0; i < 9; ++i) {
+            const double step = native ? 0.037 : 48 * 0.0005; // a scroll: 0.0005 per angle unit
+            if (native) pinch(Qt::ZoomNativeGesture, 0.037, at);
+            else scroll(48, Qt::ScrollUpdate, at);
+            ASSERT_TRUE(ugr->zoomGesturing());
+            ASSERT_TRUE(frameAt(clockMs + 8)) << error.toStdString();
+            const auto cam = drawn();
+            EXPECT_TRUE(cam.free) << "event " << i << ": continuous";
+            EXPECT_NEAR(cam.colPxF / last, 1 + step, 0.004) << "event " << i << ": the columns follow the fingers";
+            EXPECT_NEAR(cam.pxPerPrice() / lastRows, 1 + step, 0.004) << "event " << i << ": and the rows";
+            fractional += !whole(cam.colPxF);
+            last = cam.colPxF;
+            lastRows = cam.pxPerPrice();
+        }
+        EXPECT_GE(fractional, 8) << "fractional sizes while the fingers move";
+        if (native) pinch(Qt::EndNativeGesture, 0, at);
+        else scroll(0, Qt::ScrollEnd, at);
+        EXPECT_FALSE(ugr->zoomGesturing());
+        ASSERT_TRUE(ugr->zoomGliding()) << "the end eases to a rung";
+        ASSERT_TRUE(landGlide()) << error.toStdString();
+        EXPECT_FALSE(ugr->zoomGliding());
+        const auto landed = drawn();
+        EXPECT_FALSE(landed.free);
+        EXPECT_LE(std::abs(landed.colPx - last), 0.5 + 1e-9) << "the nearest column rung";
+        EXPECT_LE(std::abs(std::log(landed.pxPerPrice() / lastRows)), std::log((landed.rowPx + 1.0) / landed.rowPx))
+            << "a nearby whole-row rung";
+        EXPECT_NEAR(640.0 * minute / timeSpan(), landed.colPx, 1e-3);
+        EXPECT_TRUE(whole(landed.heightDev * landed.tick / priceSpan()));
+        ASSERT_TRUE(settle()) << error.toStdString();
+    }
+}
+
+// Acceptance 7: a zoom-out click glide bins its whole extent once, at its start: the
+// tiles of the start and target windows are the node's slots from the first glide
+// frame on (no tile joins later) and bin work happens on at most one frame. The
+// target's data is resident (the wider view was shown before), so only the extent
+// decides when bins are needed.
+TEST_F(UgrGpu, AClickGlideBinsItsExtentOnce) {
+    noLabels();
+    manualZoomClock();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    view->setAutoPriceScale(false);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const QPointF at(160, 160); // a quarter across: the zoom-out reaches a tile to the right
+    const qint64 s0 = view->getVisibleTimeStart(), e0 = view->getVisibleTimeEnd();
+    const double p0 = view->getMinPrice(), p1 = view->getMaxPrice();
+    const auto anchor0 = view->rasterAnchor();
+    const auto &st = layer().tileStats();
+    const uint32_t startSlots = st.slotCount.load();
+    // Warm the target's data: the zoomed-out view, then back.
+    notch(-4, at);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const uint32_t targetSlots = st.slotCount.load();
+    ASSERT_GT(targetSlots, startSlots) << "the target reaches more tiles than the start";
+    view->setRasterAnchor(anchor0.fracX, anchor0.fracY);
+    ugr->setViewport(s0, e0, p0, p1);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ASSERT_EQ(st.slotCount.load(), startSlots);
+    const uint64_t rebins0 = st.rebins.load(), made0 = st.binsMade.load();
+    int framesThatBinned = 0;
+    uint64_t lastRebins = rebins0, lastMade = made0;
+    const qint64 t0 = clockMs;
+    notch(-4, at);
+    for (qint64 ms = 0; ms <= chart_raster::kZoomGlideMs + 1; ms += 10) {
+        ASSERT_TRUE(frameAt(t0 + ms)) << error.toStdString();
+        if (ugr->zoomGliding()) EXPECT_EQ(st.slotCount.load(), targetSlots) << ms << " ms: the glide's whole extent";
+        const uint64_t r = st.rebins.load(), m = st.binsMade.load();
+        framesThatBinned += (r != lastRebins || m != lastMade);
+        lastRebins = r;
+        lastMade = m;
+    }
+    ASSERT_FALSE(ugr->zoomGliding());
+    EXPECT_LE(framesThatBinned, 1) << "rebins " << lastRebins - rebins0 << " bins made " << lastMade - made0;
+    EXPECT_EQ(st.slotCount.load(), targetSlots);
+}
+
+// Acceptance 8: after a glide the rest frames are slice A's: no coverage, the drawn
+// camera of the rest view, and a click in and a click out about the same point return
+// the same view byte for byte.
+TEST_F(UgrGpu, RestFramesAfterAGlideAreTheRestRender) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    view->setAutoPriceScale(false);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const QPointF at(400, 200);
+    notch(1, at); // the anchor at the cursor (a rest view about it)
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const auto rest = drawn();
+    const QImage before = image;
+    const qint64 s = view->getVisibleTimeStart();
+    const double hi = view->getMaxPrice();
+    notch(1, at);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    notch(-1, at);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    EXPECT_FALSE(layer().tileStats().coverageBlend.load()) << "no coverage at rest";
+    const auto after = drawn();
+    EXPECT_FALSE(after.free);
+    EXPECT_EQ(after.colPx, rest.colPx);
+    EXPECT_EQ(after.rowPx, rest.rowPx);
+    EXPECT_EQ(after.leftColIndex, rest.leftColIndex);
+    EXPECT_EQ(after.topRowIndex, rest.topRowIndex);
+    EXPECT_LE(std::abs(view->getVisibleTimeStart() - s), 1) << "the same stored view (whole ms)";
+    EXPECT_NEAR(view->getMaxPrice(), hi, 1e-9 * hi);
+    EXPECT_TRUE(image == before) << "byte-identical to the rest render before the glides";
+}
+
+// Acceptance 9 (slice A deferred finding, Astra's counterexample): following live at
+// DPR 1, 640 px, a 1m view of 5,303,573 ms (C = 7, the padding a hair under 49.5 px):
+// the switch to 5m keeps the Now column exactly where it was drawn (0 px).
+TEST_F(UgrGpu, FollowLiveTimeframeSwitchKeepsTheNowColumnExactly) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(pump(10'000, [&] { return layer().liveAnchorMs() > 0; })) << "the recording's availability";
+    const int64_t anchor = layer().liveAnchorMs();
+    const int64_t span = 5'303'573, liveEnd = (anchor + minute - 1) / minute * minute;
+    const int64_t end = liveEnd + int64_t(double(span) * 0.08); // the follow-live padding (424,285 ms)
+    ASSERT_EQ(end - liveEnd, 424'285);
+    ugr->getViewState()->setRasterAnchor(1.0, 0.5);
+    ugr->setViewport(end - span, end, 99'900, 100'300);
+    ugr->enableAutoScroll(true);
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    ASSERT_TRUE(ugr->autoScrollEnabled());
+    ASSERT_EQ(drawn().colPx, 7);
+    ASSERT_EQ(drawn().dpr, 1.0);
+    auto nowCentre = [&](int64_t tf) { return double((anchor + tf - 1) / tf * tf) - double(tf) / 2; };
+    const double x = ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(minute));
+    EXPECT_EQ(x, 587.5) << "W - C/2 - round(49.4999 px)";
+    ugr->setTimeframe(int(5 * minute));
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    EXPECT_TRUE(ugr->autoScrollEnabled());
+    ASSERT_EQ(drawn().colPx, 7);
+    EXPECT_EQ(ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(5 * minute)), x) << "the Now column moved";
+    // Follow-live honors that end: no snap at the next update; a live step of one bucket
+    // moves the picture by exactly one column.
+    ugr->followLiveForTest(anchor);
+    ASSERT_TRUE(frames(1)) << error.toStdString();
+    EXPECT_EQ(ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(5 * minute)), x) << "a follow update snapped";
+    const double before = ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(5 * minute));
+    ugr->followLiveForTest(anchor + 5 * minute);
+    ASSERT_TRUE(frames(1)) << error.toStdString();
+    EXPECT_EQ(ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(5 * minute)), before - 7) << "one column";
+}
+
+// Contract D: the kept end is a follow-live padding that later updates honor. A view
+// whose end sat one drawn pixel behind the nominal padding (allowed while following)
+// keeps its Now column across 1m -> 5m (C = 51 both), and the next follow update does
+// not shift it (the nominal 5m padding is 8,229 ms more, beyond one drawn pixel).
+TEST_F(UgrGpu, AKeptFollowLivePaddingIsHonoredByTheNextUpdate) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(pump(10'000, [&] { return layer().liveAnchorMs() > 0; })) << "the recording's availability";
+    const int64_t anchor = layer().liveAnchorMs();
+    const int64_t span = 754'735, liveEnd = (anchor + minute - 1) / minute * minute;
+    const int64_t end = liveEnd + int64_t(double(span) * 0.08) - 1'177; // one drawn pixel behind
+    ugr->setViewport(end - span, end, 99'900, 100'300);
+    ugr->enableAutoScroll(true); // returns to the nominal live end
+    ugr->getViewState()->setRasterAnchor(1.0, 0.5);
+    ugr->getViewState()->setViewport(end - span, end, 99'900, 100'300); // following, one drawn pixel behind
+    ASSERT_TRUE(ugr->autoScrollEnabled());
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    ASSERT_EQ(drawn().colPx, 51);
+    ugr->followLiveForTest(anchor);
+    ASSERT_EQ(ugr->getViewState()->getVisibleTimeEnd(), end) << "follow-live keeps it (within one drawn pixel)";
+    auto nowCentre = [&](int64_t tf) { return double((anchor + tf - 1) / tf * tf) - double(tf) / 2; };
+    const double x = ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(minute));
+    ugr->setTimeframe(int(5 * minute));
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    ASSERT_EQ(drawn().colPx, 51);
+    EXPECT_EQ(ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(5 * minute)), x) << "Now kept";
+    const int64_t kept = ugr->getViewState()->getVisibleTimeEnd();
+    ugr->followLiveForTest(anchor);
+    ASSERT_TRUE(frames(1)) << error.toStdString();
+    EXPECT_EQ(ugr->getViewState()->getVisibleTimeEnd(), kept) << "the next follow update shifted the kept end";
+    EXPECT_EQ(ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(5 * minute)), x);
+}
+
+// ---------------------------------------------------------------- A2 fix round 1
+// Finding 1: a price-only zoom predicts Auto's tick over the time bounds it commits
+// (the stored ones), not over the drawn columns. Mixed resolution: in minutes 120..148
+// the near $1 band covers $100,080..$100,090, in minutes 119 and 149 only the deep $10
+// rows do. The stored window is minutes 120..149, the drawn one (22 px columns, the
+// view end anchored) reaches into minute 119: Auto draws $1, a prediction over the
+// drawn columns says $10 and puts the rung on a span that is no whole row at $1.
+TEST_F(UgrGpu, APriceOnlyZoomPredictsTheTickOverTheStoredTime) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    view->setAutoPriceScale(false);
+    const int64_t s = epoch + 120 * minute, e = epoch + 149 * minute;
+    const double lo = 100'080.5, hi = lo + 320.0 / 35; // 35 px rows at $1
+    for (const bool gesture : {false, true}) {
+        SCOPED_TRACE(gesture ? "price axis drag" : "price axis click");
+        view->setRasterAnchor(1.0, 0.5);
+        ugr->setViewport(s, e, lo, hi);
+        ASSERT_TRUE(settle()) << error.toStdString();
+        const auto before = drawn();
+        ASSERT_EQ(before.colPx, 22);
+        ASSERT_LT(before.drawnStartMs, double(s)) << "the drawn columns reach minute 119";
+        ASSERT_EQ(layer().tickUnits(), 100) << "Auto draws $1 over the stored minutes";
+        ASSERT_EQ(layer().predictTickUnits({before.drawnStartMs, before.drawnEndMs, lo, hi}), 1000)
+            << "over the drawn columns only the $10 rows build";
+        if (gesture) {
+            for (int i = 0; i < 3; ++i) {
+                ugr->zoomPriceDrag(240, 160);
+                ASSERT_TRUE(frames(1)) << error.toStdString();
+            }
+            ugr->endZoomGesture();
+        } else {
+            ugr->zoomPriceClicks(1, 160);
+        }
+        ASSERT_TRUE(settle()) << error.toStdString();
+        const auto after = drawn();
+        EXPECT_EQ(view->getVisibleTimeStart(), s) << "time did not zoom: its stored bounds stay";
+        EXPECT_EQ(view->getVisibleTimeEnd(), e);
+        EXPECT_EQ(after.tick, 1.0);
+        EXPECT_GT(after.pxPerPrice(), before.pxPerPrice()) << "the click zoomed in";
+        EXPECT_TRUE(whole(320.0 * after.tick / priceSpan())) << 320.0 * after.tick / priceSpan()
+                                                             << " px rows: a rung at the tick drawn";
+    }
+}
+
+// Contract A (fix rounds 1-2): the glide's end is fixed at the click, at the tick and
+// rung the click chose; the Auto tick for it commits only after the first frame
+// proposed it. With the first frame 50, 60, 100, 130 or 200 ms after the click the
+// drawn scale only grows, never passes the rung's, and lands on the rung (a first frame
+// after the glide's end holds the end until the tick commits).
+TEST_F(UgrGpu, AnAutoTickCommitMidGlideKeepsTheGlideMonotonic) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    view->setAutoPriceScale(false);
+    // Minutes 120..123: the near $1 band covers $99,830..$100,200 (fine data, Auto
+    // picks $1, $2, $5 or $10 by the rows).
+    const int64_t s = epoch + 120 * minute, e = s + 4 * minute;
+    auto wide = [&] { // a coarse Auto state, then the start view
+        view->setRasterAnchor(1.0, 0.5);
+        ugr->setViewport(s, e, 99'000, 101'000);
+        return settle();
+    };
+    ASSERT_TRUE(wide()) << error.toStdString();
+    view->setRasterAnchor(1.0, 0.5);
+    ugr->setViewport(s, e, 99'840, 100'190);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    // Click in until the next click's rung changes the tick and the old tick would draw
+    // the target with a larger scale than the rung's (the overshoot that reverses).
+    chart_raster::RowRung target;
+    double startLo = 0, startHi = 0, oldTick = 0;
+    bool found = false;
+    for (int i = 0; i < 16 && !found; ++i) {
+        const auto cam = drawn();
+        const double ap = cam.priceAtYDev(160 * cam.dpr);
+        const chart_raster::RowRung current{cam.tick, cam.rowPx};
+        target = chart_raster::rowRung(current, 1, cam.heightDev, view->minPriceSpan(), view->maxPriceSpan(),
+                                       tickOver(view->getVisibleTimeStart(), view->getVisibleTimeEnd(), ap, 0.5));
+        if (target.tick != current.tick && target.tick > 0) {
+            const double span = cam.heightDev * target.tick / target.rowPx;
+            const int oldRows = chart_raster::stepPixels(cam.heightDev * current.tick / span, current.rowPx);
+            if (oldRows / current.tick > target.rowPx / target.tick * (1 + 1e-9)) {
+                found = true;
+                startLo = view->getMinPrice();
+                startHi = view->getMaxPrice();
+                oldTick = current.tick;
+                break;
+            }
+        }
+        ugr->zoomPriceClicks(1, 160);
+        ASSERT_TRUE(settle()) << error.toStdString();
+    }
+    ASSERT_TRUE(found) << "no zoom-in whose Auto tick change overshoots at the old tick";
+    const double targetScale = target.rowPx / target.tick;
+    manualZoomClock();
+    for (const qint64 delay : {50, 60, 100, 130, 200}) {
+        SCOPED_TRACE(testing::Message() << "first frame " << delay << " ms after the click");
+        ASSERT_TRUE(wide()) << error.toStdString();
+        view->setRasterAnchor(1.0, 0.5);
+        ugr->setViewport(s, e, startLo, startHi);
+        ASSERT_TRUE(settle()) << error.toStdString();
+        ASSERT_EQ(drawn().tick, oldTick);
+        const qint64 t0 = clockMs;
+        ugr->zoomPriceClicks(1, 160);
+        std::vector<double> scales;
+        bool sawOldTick = false;
+        for (qint64 ms = delay; ms <= delay + 3 * chart_raster::kZoomGlideMs; ms += 10) {
+            ASSERT_TRUE(frameAt(t0 + ms)) << error.toStdString();
+            scales.push_back(drawn().pxPerPrice());
+            sawOldTick = sawOldTick || drawn().tick == oldTick;
+            EXPECT_LE(scales.back(), targetScale * (1 + 1e-9)) << ms << " ms: past the rung";
+            if (!ugr->priceGliding()) break;
+        }
+        ASSERT_FALSE(ugr->priceGliding()) << "landed";
+        EXPECT_TRUE(sawOldTick) << "the first frame drew the old tick (the commit came later)";
+        for (size_t i = 1; i < scales.size(); ++i)
+            EXPECT_GE(scales[i], scales[i - 1] * (1 - 1e-12)) << "frame " << i << ": the drawn scale moved back";
+        EXPECT_EQ(drawn().tick, target.tick);
+        EXPECT_EQ(drawn().rowPx, target.rowPx);
+        EXPECT_FALSE(drawn().free);
+        EXPECT_LE(clockMs - t0, 2 * chart_raster::kZoomGlideMs + std::max<qint64>(delay, 10))
+            << "landed by the cap (or the first frame after it)";
+    }
+}
+
+// Finding 3: a move to a screen of another device pixel ratio mid-glide. The glide's
+// start camera is put on the new surface: the content under the cursor stays within
+// half a device pixel of it on every frame, before and after the change.
+TEST_F(UgrGpu, ADevicePixelRatioChangeMidGlideKeepsTheAnchor) {
+    noLabels();
+    manualZoomClock();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ugr->getViewState()->setAutoPriceScale(false);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const QPointF at(211, 97);
+    const auto before = ugr->currentTimeAxisMapping();
+    const double t = before.screenXToTime(at.x()), p = before.screenYToPrice(at.y());
+    const qint64 t0 = clockMs;
+    notch(1, at);
+    int checked = 0;
+    for (qint64 ms = 0; ms <= 3 * chart_raster::kZoomGlideMs; ms += 10) {
+        if (ms == 40) {
+            ASSERT_TRUE(scene->setDevicePixelRatio(2.0, &error)) << error.toStdString();
+            emit scene->window()->screenChanged(scene->window()->screen());
+            ASSERT_EQ(scene->window()->effectiveDevicePixelRatio(), 2.0);
+        }
+        ASSERT_TRUE(frameAt(t0 + ms)) << error.toStdString();
+        const auto mapping = ugr->currentTimeAxisMapping();
+        const double dpr = drawn().dpr;
+        EXPECT_EQ(dpr, ms < 40 ? 1.0 : 2.0);
+        EXPECT_LE(std::abs(mapping.timeToScreenX(t) - at.x()) * dpr, 0.5 + 1e-6) << ms << " ms: time";
+        EXPECT_LE(std::abs(mapping.priceToScreenY(p) - at.y()) * dpr, 0.5 + 1e-6) << ms << " ms: price";
+        ++checked;
+        if (!ugr->zoomGliding()) break;
+    }
+    EXPECT_FALSE(ugr->zoomGliding());
+    EXPECT_FALSE(drawn().free);
+    EXPECT_GE(checked, 10);
+}
+
+// Finding 4: one wheel event applies at most four clicks and carries only a partial
+// notch: eight notches, then one more, then one back is +4, +1, -1 (not +4, +4, +3). A
+// partial notch carries only on its route and axes, and not across a reversal.
+TEST_F(UgrGpu, TheWheelCarriesOnlyAPartialNotchPerRoute) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString(); // auto price scale off: the chart wheel zooms time and price
+    auto *view = ugr->getViewState();
+    const QPointF at(320, 160);
+    const int c0 = drawn().colPx;
+    wheelAngle(960, at); // eight notches in one event
+    ASSERT_TRUE(settle()) << error.toStdString();
+    EXPECT_EQ(drawn().colPx, chart_raster::columnRung(c0, 4, 1, 0)) << "four clicks";
+    const int c01 = drawn().colPx;
+    wheelAngle(120, at);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    EXPECT_EQ(drawn().colPx, chart_raster::columnRung(c01, 1, 1, 0)) << "then one click, nothing left over";
+    const int c1 = drawn().colPx;
+    wheelAngle(-120, at);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    EXPECT_EQ(drawn().colPx, chart_raster::columnRung(c1, -1, 1, 0)) << "then one click out, not three in";
+    // Half notches on different routes and axes do not add up.
+    uint64_t v = view->getViewportVersion();
+    ugr->zoomPriceWheel(60, 0, 0, 160); // the price axis
+    wheelAngle(60, at);                 // the chart
+    ugr->zoomTimeWheel(60, 0, 0, 320);  // the time axis
+    wheelAngle(60, at);                 // the chart again: one half notch carried
+    EXPECT_EQ(view->getViewportVersion(), v) << "no click from half notches of other routes";
+    // A reversal drops the partial notch: a full notch back is one click.
+    const int c2 = drawn().colPx;
+    wheelAngle(-120, at);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    EXPECT_EQ(drawn().colPx, chart_raster::columnRung(c2, -1, 1, 0)) << "a full notch back after a half notch in";
+}
+
+// Finding 5: batched notches walk the same rungs as single clicks (at small cells the
+// one-pixel rule matters on every click).
+TEST_F(UgrGpu, BatchedNotchesLandOnTheSingleClickRungs) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    view->setAutoPriceScale(false);
+    auto manual = brightSettings();
+    manual.showLabels = false;
+    manual.tickMode = heatmap::TickMode::Manual;
+    manual.manualTick = 1000; // $10: rows of a fixed tick
+    ugr->setHeatmapChartSettings(manual, true);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const QPointF at(320, 160);
+    for (const auto &[startCols, startRows, clicks] : {std::tuple{320.0, 2.0, 4}, {160.0, 1.0, 3}, {80.0, 3.0, 2}}) {
+        SCOPED_TRACE(testing::Message() << startCols << " columns, " << startRows << " px rows, " << clicks << " clicks");
+        auto reset = [&] {
+            const double span = 320.0 * 10 / startRows;
+            view->setRasterAnchor(0.5, 0.5);
+            ugr->setViewport(viewLo, viewLo + int64_t(startCols) * minute, 100'000 - span / 2, 100'000 + span / 2);
+            return settle();
+        };
+        ASSERT_TRUE(reset()) << error.toStdString();
+        const auto start = drawn();
+        for (int i = 0; i < clicks; ++i) {
+            notch(1, at);
+            ASSERT_TRUE(settle()) << error.toStdString();
+        }
+        const auto single = drawn();
+        ASSERT_TRUE(reset()) << error.toStdString();
+        ASSERT_EQ(drawn().colPx, start.colPx);
+        ASSERT_EQ(drawn().rowPx, start.rowPx);
+        notch(clicks, at);
+        ASSERT_TRUE(settle()) << error.toStdString();
+        EXPECT_EQ(drawn().colPx, single.colPx) << "batched columns";
+        EXPECT_EQ(drawn().rowPx, single.rowPx) << "batched rows";
+        EXPECT_GT(single.colPx, start.colPx + clicks - 1) << "every click at least a pixel";
+    }
+}
+
+// Contract D: following live, a timeframe switch whose 1 ms/px or 1 px/column cap
+// changes the column width re-lays out at the nominal live end of the new timeframe
+// (no preservation), and follow-live does not shift right after. Astra's cases at
+// 8,000 device px: 4 columns of 1m (C = 2,000) to 1s (C capped to 1,000), and back.
+TEST_F(UgrGpu, FollowLiveSwitchThatChangesTheColumnWidthLaysOutAtTheNominalEnd) {
+    noLabels();
+    ugr->setSize(QSizeF(8000, 320)); // wider than the scene: only the mapping matters here
+    gpuOn();
+    ASSERT_TRUE(pump(10'000, [&] { return layer().liveAnchorMs() > 0; })) << "the recording's availability";
+    const int64_t anchor = layer().liveAnchorMs();
+    auto nominalEnd = [&](int64_t tf, int64_t span) {
+        return (anchor + tf - 1) / tf * tf + std::max<int64_t>(tf, int64_t(double(span) * 0.08));
+    };
+    auto nowX = [&](int64_t tf) {
+        return ugr->currentTimeAxisMapping().timeToScreenX(double((anchor + tf - 1) / tf * tf) - double(tf) / 2);
+    };
+    const int64_t second = 1000;
+    for (const auto &[fromTf, toTf, fromC, toC] : {std::tuple{minute, second, 2000, 1000},
+                                                    {second, minute, 1000, 2000}}) {
+        SCOPED_TRACE(testing::Message() << fromTf << " ms -> " << toTf << " ms");
+        ugr->setTimeframe(int(fromTf));
+        const int64_t span = 4 * fromTf;
+        ugr->getViewState()->setRasterAnchor(1.0, 0.5);
+        ugr->setViewport(nominalEnd(fromTf, span) - span, nominalEnd(fromTf, span), 99'900, 100'300);
+        ugr->enableAutoScroll(true);
+        ASSERT_TRUE(frames(3)) << error.toStdString();
+        ASSERT_TRUE(ugr->autoScrollEnabled());
+        ASSERT_EQ(drawn().colPx, fromC);
+        ugr->setTimeframe(int(toTf));
+        ASSERT_TRUE(frames(2)) << error.toStdString();
+        ASSERT_EQ(drawn().colPx, toC) << "the cap changed the column width";
+        const int64_t toSpan = timeSpan();
+        const int64_t end = ugr->getViewState()->getVisibleTimeEnd();
+        EXPECT_EQ(end, nominalEnd(toTf, toSpan)) << "the nominal live end of the new timeframe";
+        const double padPx = double(end - (anchor + toTf - 1) / toTf * toTf) * toC / double(toTf);
+        EXPECT_EQ(nowX(toTf), 8000.0 - padPx - toC / 2.0) << "Now at the nominal placement";
+        ugr->followLiveForTest(anchor);
+        EXPECT_EQ(ugr->getViewState()->getVisibleTimeEnd(), end) << "no follow-live shift right after";
+    }
+}
+
+// ---------------------------------------------------------------- A2 fix round 3
+// Fix round 3, gap 1: a drag released before the target's Auto tick commits. The price
+// glide's end is at the predicted tick ($2 rows) while the frame still draws the old one;
+// the pan commit is solved against that end, so the landed view is the undragged one
+// moved by exactly the dragged 160 device px, with no rebase and the same landing time.
+TEST_F(UgrGpu, APanReleasedBeforeThePredictedTickCommitsMovesTheEndExactly) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    view->setAutoPriceScale(false);
+    const int64_t s = epoch + 120 * minute, e = s + 4 * minute;
+    auto wide = [&] {
+        view->setRasterAnchor(1.0, 0.5);
+        ugr->setViewport(s, e, 99'000, 101'000);
+        return settle();
+    };
+    // Astra's case: $5 rows of 6 px (1.2 px/$) at the bottom of the near band; a click
+    // near the bottom targets $2 rows of 3 px (1.5 px/$), which the old $5 tick draws at
+    // 8 px (1.6 px/$) until the tick commits. The target moved 160 px up in price stays
+    // inside the band.
+    const double startLo = 99'835, startHi = startLo + 320.0 * 5 / 6, oldTick = 5, clickY = 310;
+    ASSERT_TRUE(wide()) << error.toStdString();
+    view->setRasterAnchor(1.0, 0.5);
+    ugr->setViewport(s, e, startLo, startHi);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ASSERT_EQ(drawn().tick, oldTick);
+    ASSERT_EQ(drawn().rowPx, 6);
+    const auto cam0 = drawn();
+    const chart_raster::RowRung target = chart_raster::rowRung(
+        {cam0.tick, cam0.rowPx}, 1, cam0.heightDev, view->minPriceSpan(), view->maxPriceSpan(),
+        tickOver(s, e, cam0.priceAtYDev(clickY * cam0.dpr), clickY / 320));
+    ASSERT_EQ(target, (chart_raster::RowRung{2.0, 3}));
+    ASSERT_EQ(chart_raster::stepPixels(320.0 * 5 / (320.0 * 2 / 3), 6), 8) << "the old tick draws the target at 8 px";
+    manualZoomClock();
+    struct Landed { chart_raster::RasterCamera cam; qint64 ms = -1; int rebases = 0; };
+    auto run = [&](bool drag) {
+        Landed out;
+        if (!wide()) return out;
+        view->setRasterAnchor(1.0, 0.5);
+        ugr->setViewport(s, e, startLo, startHi);
+        if (!settle() || drawn().tick != oldTick) return out;
+        const qint64 t0 = clockMs;
+        const int rebases = ugr->glideRebasesForTest();
+        ugr->zoomPriceClicks(1, clickY);
+        if (drag) { // before any frame: the predicted tick is pending
+            ugr->beginPanAt(320, 60);
+            ugr->updatePanAt(320, 220); // 160 px down
+            ugr->endPanAt();
+        }
+        for (qint64 ms = 50; ms <= 400; ms += 10) {
+            if (!frameAt(t0 + ms)) return out;
+            if (!ugr->priceGliding()) {
+                out.ms = ms;
+                break;
+            }
+        }
+        out.cam = drawn();
+        out.rebases = ugr->glideRebasesForTest() - rebases;
+        return out;
+    };
+    const Landed plain = run(false), dragged = run(true);
+    ASSERT_GE(plain.ms, 0) << error.toStdString();
+    ASSERT_GE(dragged.ms, 0) << error.toStdString();
+    EXPECT_EQ(dragged.cam.tick, target.tick);
+    EXPECT_EQ(dragged.cam.rowPx, target.rowPx);
+    EXPECT_EQ(dragged.cam.topRowIndex, plain.cam.topRowIndex + 160) << "the end moved by exactly the dragged 160 px";
+    EXPECT_EQ(dragged.rebases, 0) << "the release is a translation, not a retarget";
+    EXPECT_EQ(dragged.ms, plain.ms) << "the glide timing is unchanged";
+}
+
+// Fix round 3, gap 2: the padding a timeframe switch kept lives only as long as its
+// placement. 1m, 4 columns (C = 160) following at the nominal padding; one Right step
+// (24 s, still following); 5m keeps the Now column (420 s of padding); follow off and on
+// returns to the nominal end (300 s), and the next unchanged live update leaves it there
+// (the kept 420 s would have shifted it by a whole bucket, 160 px).
+TEST_F(UgrGpu, AReturnToLiveEndsTheKeptFollowPadding) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(pump(10'000, [&] { return layer().liveAnchorMs() > 0; })) << "the recording's availability";
+    const int64_t anchor = layer().liveAnchorMs();
+    const int64_t liveEnd = (anchor + minute - 1) / minute * minute;
+    ugr->getViewState()->setRasterAnchor(1.0, 0.5);
+    ugr->setViewport(liveEnd + minute - 4 * minute, liveEnd + minute, 99'900, 100'300);
+    ugr->enableAutoScroll(true);
+    ASSERT_TRUE(frames(3)) << error.toStdString();
+    ASSERT_EQ(drawn().colPx, 160);
+    ugr->panRight();
+    ASSERT_TRUE(ugr->autoScrollEnabled()) << "a Right step keeps following";
+    ASSERT_EQ(ugr->getViewState()->getVisibleTimeEnd(), liveEnd + minute + 24'000);
+    ugr->setTimeframe(int(5 * minute));
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    ASSERT_EQ(drawn().colPx, 160);
+    const int64_t liveEnd5 = (anchor + 5 * minute - 1) / (5 * minute) * (5 * minute);
+    ASSERT_EQ(ugr->getViewState()->getVisibleTimeEnd() - liveEnd5, 420'000) << "the Now column kept";
+    ugr->enableAutoScroll(false);
+    ugr->enableAutoScroll(true);
+    const int64_t nominal = ugr->getViewState()->getVisibleTimeEnd();
+    ASSERT_EQ(nominal - liveEnd5, 5 * minute) << "back at the nominal live end";
+    ugr->followLiveForTest(anchor);
+    EXPECT_EQ(ugr->getViewState()->getVisibleTimeEnd(), nominal) << "the next live update moved it";
+}
+
+TEST_F(UgrGpu, AutoPriceFitGlidesStraightToItsSolvedRange) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    CandleSeriesBuffer buffer;
+    const int64_t centre = epoch + 2 * kHourMs + 15 * minute;
+    std::vector<CandleSeriesBuffer::CandleBar> bars;
+    for (int i = -60; i < 60; ++i) {
+        const double r = 8 + 7 * std::max(std::abs(i), std::abs(i + 1));
+        const int64_t t = centre + i * minute;
+        bars.push_back({t, t + minute, 100150, 100150 + r, 100150 - r, 100150, 1, true, 0, false});
+    }
+    buffer.applyHistory("BTC-USD", 60, bars);
+    ugr->setCandleBuffer(&buffer);
+    ugr->setViewport(centre - 2 * minute, centre + 2 * minute, 100120, 100180);
+    ugr->setAutoPriceScale(true);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    manualZoomClock();
+    auto* v = ugr->getViewState();
+    for (int i = 0; i < 18; ++i) {
+        SCOPED_TRACE(i);
+        if (i < 16) ugr->zoomClicks(i < 8 ? -1 : 1, 320, 160);
+        else {
+            ugr->zoomContinuous(i == 16 ? .2 : 5.0, 320, 160, true, false);
+            ugr->endZoomGesture();
+        }
+        const auto version = v->getViewportVersion();
+        const double lo = v->getMinPrice(), hi = v->getMaxPrice();
+        const auto predicted = layer().predictTickUnits({double(v->getVisibleTimeStart()),
+                                                        double(v->getVisibleTimeEnd()), lo, hi});
+        const int rebases = ugr->glideRebasesForTest();
+        const qint64 startClock = clockMs;
+        for (int ms = 10; ms <= 300; ms += 10) {
+            ASSERT_TRUE(frameAt(startClock + ms)) << error.toStdString();
+            EXPECT_EQ(v->getViewportVersion(), version);
+            EXPECT_DOUBLE_EQ(v->getMinPrice(), lo);
+            EXPECT_DOUBLE_EQ(v->getMaxPrice(), hi);
+        }
+        EXPECT_FALSE(ugr->zoomGliding());
+        EXPECT_EQ(ugr->glideRebasesForTest(), rebases);
+        EXPECT_EQ(layer().tickUnits(), predicted);
+        EXPECT_NEAR(drawn().drawnMinPrice, lo, 1e-8);
+        EXPECT_NEAR(drawn().drawnMaxPrice, hi, 1e-8);
+    }
+    // New extrema at rest and in flight must use that same raw-basis decision.
+    int revision = 0;
+    for (bool inFlight : {false, true}) {
+        if (inFlight) {
+            // Restore the deep candle window so the click changes the price end,
+            // not just time: the revision must exercise an active price glide.
+            buffer.applyUpdate("BTC-USD", 60,
+                {centre, centre + minute, 100150, 100165, 100143, 100150, 1, false, 0, false}, ++revision, false);
+            ugr->setViewport(centre - 2 * minute, centre + 2 * minute, v->getMinPrice(), v->getMaxPrice());
+            const auto resetClock = clockMs;
+            for (int ms = 10; ms <= 300; ms += 10) ASSERT_TRUE(frameAt(resetClock + ms));
+            ugr->zoomClicks(-1, 320, 160);
+            ASSERT_TRUE(ugr->priceGliding());
+        }
+        const auto version = v->getViewportVersion();
+        const int rebases = ugr->glideRebasesForTest();
+        const double high = inFlight ? 100650 : 100350;
+        buffer.applyUpdate("BTC-USD", 60,
+            {centre, centre + minute, 100150, high, 100143, 100150, 1, false, 0, false}, ++revision, false);
+        EXPECT_EQ(v->getViewportVersion(), version + 1);
+        const double lo = v->getMinPrice(), hi = v->getMaxPrice();
+        const qint64 startClock = clockMs;
+        for (int ms = 10; ms <= 300; ms += 10) {
+            ASSERT_TRUE(frameAt(startClock + ms)) << error.toStdString();
+            EXPECT_EQ(v->getViewportVersion(), version + 1);
+            EXPECT_EQ(v->getMinPrice(), lo);
+            EXPECT_EQ(v->getMaxPrice(), hi);
+        }
+        EXPECT_EQ(ugr->glideRebasesForTest(), rebases + int(inFlight));
+    }
+    ugr->setCandleBuffer(nullptr);
+}
+
+// A3 / Astra r4: use a scripted availability edge so return-to-live actually
+// lands on the IDENTICAL keyed window. This helper exercises production placement
+// and follow code both without QRhi and in the native GPU fixture.
+void identicalReturnToLive(UnifiedGridRenderer& chart, const std::function<void()>& frame) {
+    FakeChunkTransport* transport = nullptr;
+    heatmap::HeatmapDataService service([&](QObject*) -> heatmap::ChunkTransport* {
+        transport = new FakeChunkTransport;
+        return transport;
+    }, heatmap::HeatmapBudgets{}, [](heatmap::ChunkTransport& t) { static_cast<FakeChunkTransport&>(t).goOnline(); });
+    const int64_t L = (epoch + 4 * kHourMs) / (5 * minute) * (5 * minute);
+    auto live = [&](int64_t end) {
+        heatmap::ChunkAvailability a;
+        a.symbol = "BTC-USD";
+        a.chunkWireVersion = heatmap::kChunkWireVersion;
+        for (const auto& source : heatmap::kChunkSources) {
+            protocol::chunkwire::SourceInfo info;
+            info.id = source.id;
+            info.levels.push_back({minute, kHourMs, end, L - kHourMs, end - minute});
+            a.sources.push_back(info);
+        }
+        service.onData([&] { transport->push(a); });
+        service.onData([] {}); // drain the fetcher's queued availability callback
+    };
+    chart.setHeatmapService(&service);
+    chart.setSize({640, 320});
+    chart.setTimeframe(int(minute));
+    chart.setActiveSymbol("BTC-USD");
+    live(L);
+    chart.setViewport(L + minute - 10 * minute, L + minute, 99900, 100300);
+    chart.enableAutoScroll(true);
+    frame();
+    auto* view = chart.getViewState();
+    ASSERT_EQ(chart.rasterCameraNow(false).colPx, 64);
+    chart.panRight();
+    ASSERT_EQ(view->getVisibleTimeEnd(), L + 2 * minute);
+    ASSERT_TRUE(chart.autoScrollEnabled());
+    chart.setTimeframe(int(5 * minute));
+    frame();
+    ASSERT_EQ(chart.rasterCameraNow(false).colPx, 64);
+    ASSERT_EQ(view->getVisibleTimeEnd(), L + 10 * minute);
+    const auto placement = view->placementVersion();
+    const auto start = view->getVisibleTimeStart(), end = view->getVisibleTimeEnd();
+    chart.enableAutoScroll(false);
+    live(L + 5 * minute);
+    ASSERT_EQ(chart.gpuHeatmapLayer()->liveAnchorMs(), L + 5 * minute);
+    chart.enableAutoScroll(true);
+    ASSERT_EQ(view->getVisibleTimeStart(), start);
+    ASSERT_EQ(view->getVisibleTimeEnd(), end);
+    EXPECT_GT(view->placementVersion(), placement);
+    chart.followLiveForTest(L + 5 * minute);
+    EXPECT_EQ(view->getVisibleTimeEnd(), end) << "stale 600s padding would jump 64px";
+    chart.followLiveForTest(L + 10 * minute);
+    EXPECT_EQ(view->getVisibleTimeEnd(), end + 5 * minute) << "next bucket uses nominal 300s padding";
+    chart.setHeatmapService(nullptr);
+}
+
+TEST(UgrPlacementCpu, AnIdenticalReturnToLiveInvalidatesKeptPadding) {
+    UnifiedGridRenderer chart;
+    identicalReturnToLive(chart, [] {});
+}
+
+TEST_F(UgrGpu, AnIdenticalReturnToLiveInvalidatesKeptPadding) {
+    identicalReturnToLive(*ugr, [&] { EXPECT_TRUE(frames(2)) << error.toStdString(); });
+}
+
+// CPU integration uses the real chart, candle buffer, layer and asynchronous
+// controller over the synthetic recording. Only QRhi drawing is absent.
+class CpuZoomChart : public UnifiedGridRenderer {
+public:
+    using UnifiedGridRenderer::updatePolish;
+};
+class UgrZoomCpu : public testing::Test {
+protected:
+    CpuZoomChart chart;
+    CandleSeriesBuffer candles;
+    qint64 clock = 0;
+    const int64_t centre = epoch + 2 * kHourMs + 15 * minute;
+    void SetUp() override {
+        chart.setSize({640, 320});
+        chart.setHeatmapService(&lab::LabData::instance().service());
+        chart.setActiveSymbol("BTC-USD");
+        chart.setTimeframe(int(minute));
+        auto settings = brightSettings();
+        settings.showLabels = false;
+        chart.setHeatmapChartSettings(settings);
+        chart.setZoomClockForTest([&] { return clock; });
+        std::vector<CandleSeriesBuffer::CandleBar> bars;
+        for (int i = -60; i < 60; ++i) {
+            const double radius = 8 + 7 * std::max(std::abs(i), std::abs(i + 1));
+            const int64_t t = centre + i * minute;
+            bars.push_back({t, t + minute, 100150, 100150 + radius, 100150 - radius, 100150, 1, true, 0, false});
+        }
+        candles.applyHistory("BTC-USD", 60, bars);
+        chart.setCandleBuffer(&candles);
+        chart.setViewport(centre - 20 * minute, centre + 20 * minute, 99800, 100500);
+        ASSERT_TRUE(waitFor([&] {
+            const auto snapshot = chart.gpuHeatmapLayer()->snapshot();
+            return snapshot && !snapshot->resolution.columns.empty() && !snapshot->spans.empty() &&
+                   std::all_of(snapshot->spans.begin(), snapshot->spans.end(),
+                               [](const auto& span) { return span.complete; }) && chart.heatmapTickSize() > 0;
+        })) << "the tick policy must see loaded resolution, not a pending empty snapshot";
+        chart.setViewport(centre - 2 * minute, centre + 2 * minute, 100120, 100180);
+        chart.setAutoPriceScale(true);
+        for (int i = 0; i < 6; ++i) frame();
+    }
+    void TearDown() override {
+        chart.setCandleBuffer(nullptr);
+        chart.setHeatmapService(nullptr);
+    }
+    void frame() {
+        auto* v = chart.getViewState();
+        chart.gpuHeatmapLayer()->chooseTickForView({double(v->getVisibleTimeStart()), double(v->getVisibleTimeEnd()),
+                                                  v->getMinPrice(), v->getMaxPrice()});
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        clock += 10;
+        chart.updatePolish();
+    }
+    bool waitFor(const std::function<bool()>& done) {
+        QElapsedTimer timer;
+        timer.start();
+        do { frame(); } while (!done() && timer.elapsed() < 10000);
+        return done();
+    }
+    void checkSettle() {
+        auto* v = chart.getViewState();
+        const auto version = v->getViewportVersion();
+        const double lo = v->getMinPrice(), hi = v->getMaxPrice();
+        const auto predicted = chart.gpuHeatmapLayer()->predictTickUnits(
+            {double(v->getVisibleTimeStart()), double(v->getVisibleTimeEnd()), lo, hi});
+        const int rebases = chart.glideRebasesForTest();
+        ASSERT_TRUE(waitFor([&] { return !chart.zoomGliding(); }));
+        EXPECT_EQ(chart.gpuHeatmapLayer()->tickUnits(), predicted);
+        EXPECT_EQ(v->getViewportVersion(), version) << "commit must not refit the solved range";
+        EXPECT_DOUBLE_EQ(v->getMinPrice(), lo);
+        EXPECT_DOUBLE_EQ(v->getMaxPrice(), hi);
+        EXPECT_EQ(chart.glideRebasesForTest(), rebases);
+        const auto cam = chart.rasterCameraNow(false);
+        EXPECT_NEAR(cam.drawnMinPrice, lo, 1e-8);
+        EXPECT_NEAR(cam.drawnMaxPrice, hi, 1e-8);
+        EXPECT_NEAR(320 * cam.tick / (hi - lo), cam.rowPx, 1e-8);
+    }
+};
+
+// Exercise the chart QWheelEvent and the same C++ axis entries called by QML,
+// without QRhi. Fixed Manual ticks make the one-rung assertion independent of Auto.
+class UgrWheelCpu : public UgrZoomCpu {
+protected:
+    enum Route { Chart, TimeAxis, PriceAxis };
+    void resetWheelView() {
+        auto settings = brightSettings();
+        settings.tickMode = heatmap::TickMode::Manual;
+        settings.manualTick = 1000; // $10
+        chart.setHeatmapChartSettings(settings, true);
+        chart.setAutoPriceScale(false);
+        chart.setViewport(centre - 20 * minute, centre + 20 * minute, 99950, 100350);
+        for (int i = 0; i < 6; ++i) frame();
+        ASSERT_FALSE(chart.zoomGliding());
+        ASSERT_FALSE(chart.zoomGesturing());
+    }
+    void wheel(Route route, int angle, int pixels = 0, Qt::ScrollPhase phase = Qt::NoScrollPhase,
+               Qt::MouseEventSource source = Qt::MouseEventNotSynthesized,
+               QInputDevice::DeviceType type = QInputDevice::DeviceType::Mouse) {
+        if (route == Chart) {
+            const QPointingDevice device("wheel test", 123, type, QPointingDevice::PointerType::Generic,
+                                         QInputDevice::Capability::Position, 1, 0);
+            QWheelEvent event({320, 160}, {320, 160}, {0, pixels}, {0, angle}, Qt::NoButton,
+                              Qt::NoModifier, phase, false, source, &device);
+            QCoreApplication::sendEvent(&chart, &event);
+            EXPECT_TRUE(event.isAccepted());
+        } else if (route == TimeAxis) {
+            chart.zoomTimeWheel(angle, pixels, int(phase), 320);
+        } else {
+            chart.zoomPriceWheel(angle, pixels, int(phase), 160);
+        }
+    }
+    void expectOneRung(Route route, int direction, const chart_raster::RasterCamera& before) {
+        auto* v = chart.getViewState();
+        const int col = route == PriceAxis ? before.colPx : chart_raster::columnRung(before.colPx, direction, 1, 0);
+        const auto row = route == TimeAxis ? chart_raster::RowRung{before.tick, before.rowPx} :
+            chart_raster::rowRung({before.tick, before.rowPx}, direction, 320,
+                                 v->minPriceSpan(), v->maxPriceSpan(), [&](double) { return before.tick; });
+        EXPECT_EQ(double(v->getVisibleTimeEnd() - v->getVisibleTimeStart()), 640.0 * minute / col);
+        EXPECT_NEAR(v->getMaxPrice() - v->getMinPrice(), 320 * row.tick / row.rowPx, 1e-8);
+        EXPECT_FALSE(chart.zoomGesturing());
+        EXPECT_FALSE(chart.gestureSettlePending()) << "a notch must never arm the nearest-rung settle";
+        EXPECT_TRUE(chart.zoomGliding());
+        ASSERT_TRUE(waitFor([&] { return !chart.zoomGliding(); }));
+        const auto landed = chart.rasterCameraNow(false);
+        EXPECT_EQ(landed.colPx, col);
+        EXPECT_EQ(landed.rowPx, row.rowPx);
+        EXPECT_DOUBLE_EQ(landed.tick, row.tick);
+    }
+};
+
+TEST_F(UgrWheelCpu, MacMousePixelsStillMoveOneRungPerNotchOnEveryRoute) {
+    for (const auto route : {Chart, TimeAxis, PriceAxis}) {
+        SCOPED_TRACE(route);
+        resetWheelView();
+        for (const int direction : {1, 1, -1, -1}) {
+            SCOPED_TRACE(direction);
+            const auto before = chart.rasterCameraNow(false);
+            const auto version = chart.getViewState()->getViewportVersion();
+            wheel(route, direction * 120, direction > 0 ? 2 : -6);
+            EXPECT_EQ(chart.getViewState()->getViewportVersion(), version + 1);
+            expectOneRung(route, direction, before);
+        }
+    }
+}
+
+TEST_F(UgrWheelCpu, MouseNotchesOnAStickyTouchPadDeviceStillMoveOneRung) {
+    for (const auto route : {Chart, TimeAxis, PriceAxis}) {
+        SCOPED_TRACE(route);
+        resetWheelView();
+        wheel(route, 30, 15, Qt::ScrollUpdate, Qt::MouseEventSynthesizedBySystem, QInputDevice::DeviceType::TouchPad);
+        wheel(route, 0, 0, Qt::ScrollEnd, Qt::MouseEventSynthesizedBySystem, QInputDevice::DeviceType::TouchPad);
+        ASSERT_TRUE(waitFor([&] { return !chart.zoomGliding(); }));
+        for (const int direction : {1, 1, -1, -1}) {
+            SCOPED_TRACE(direction);
+            const auto before = chart.rasterCameraNow(false);
+            const auto version = chart.getViewState()->getViewportVersion();
+            // Cocoa can report the same TouchPad-typed primary device for a plain
+            // mouse after one precise scroll. The axes deliberately receive no type.
+            wheel(route, direction * 120, direction > 0 ? 2 : -6, Qt::NoScrollPhase,
+                  Qt::MouseEventNotSynthesized, QInputDevice::DeviceType::TouchPad);
+            EXPECT_EQ(chart.getViewState()->getViewportVersion(), version + 1);
+            expectOneRung(route, direction, before);
+        }
+    }
+}
+
+TEST_F(UgrWheelCpu, WindowsMouseNotchesAndPartialAngleCarryStayClicks) {
+    for (const auto route : {Chart, TimeAxis, PriceAxis}) {
+        SCOPED_TRACE(route);
+        resetWheelView();
+        auto before = chart.rasterCameraNow(false);
+        wheel(route, 120);
+        expectOneRung(route, 1, before);
+        before = chart.rasterCameraNow(false);
+        const auto version = chart.getViewState()->getViewportVersion();
+        for (int i = 0; i < 3; ++i) {
+            wheel(route, 30);
+            EXPECT_EQ(chart.getViewState()->getViewportVersion(), version);
+            EXPECT_FALSE(chart.zoomGesturing());
+            EXPECT_FALSE(chart.gestureSettlePending());
+        }
+        wheel(route, 30);
+        expectOneRung(route, 1, before);
+        before = chart.rasterCameraNow(false);
+        wheel(route, 30);
+        wheel(route, -120); // reversal discards the partial positive notch
+        expectOneRung(route, -1, before);
+    }
+}
+
+TEST_F(UgrWheelCpu, PhasedPreciseScrollStaysContinuousAndSettlesOnEveryRoute) {
+    for (const auto route : {Chart, TimeAxis, PriceAxis}) {
+        SCOPED_TRACE(route);
+        resetWheelView();
+        const auto before = chart.rasterCameraNow(false);
+        wheel(route, 0, 0, Qt::ScrollBegin, Qt::MouseEventSynthesizedBySystem, QInputDevice::DeviceType::TouchPad);
+        wheel(route, 30, 15, Qt::ScrollUpdate, Qt::MouseEventSynthesizedBySystem, QInputDevice::DeviceType::TouchPad);
+        EXPECT_TRUE(chart.zoomGesturing());
+        EXPECT_TRUE(chart.gestureSettlePending());
+        const auto during = chart.rasterCameraNow(false);
+        if (route != PriceAxis) EXPECT_NEAR(during.colPxF, before.colPx * 1.015, 1e-6);
+        if (route != TimeAxis) EXPECT_NEAR(during.rowPxF, before.rowPx * 1.015, 1e-6);
+        wheel(route, 0, 0, Qt::ScrollEnd, Qt::MouseEventSynthesizedBySystem, QInputDevice::DeviceType::TouchPad);
+        EXPECT_FALSE(chart.zoomGesturing());
+        EXPECT_FALSE(chart.gestureSettlePending());
+        ASSERT_TRUE(waitFor([&] { return !chart.zoomGliding(); }));
+        // A precise stream whose end is lost still settles after the 160 ms pause.
+        wheel(route, 30, 15, Qt::ScrollUpdate, Qt::MouseEventSynthesizedBySystem, QInputDevice::DeviceType::TouchPad);
+        ASSERT_TRUE(waitFor([&] { return !chart.zoomGesturing() && !chart.zoomGliding(); }));
+        EXPECT_FALSE(chart.gestureSettlePending());
+    }
+}
+
+TEST_F(UgrWheelCpu, UnphasedSystemSourceAndPixelPartialAnglesStayContinuous) {
+    // Only the chart sees source(). QML axes rely on phases for precise devices;
+    // an unphased exact 120 cannot be vetoed by a sticky device type.
+    for (const auto type : {QInputDevice::DeviceType::Mouse, QInputDevice::DeviceType::TouchPad}) {
+        SCOPED_TRACE(int(type));
+        for (const int pixels : {0, 60}) {
+            resetWheelView();
+            wheel(Chart, 120, pixels, Qt::NoScrollPhase, Qt::MouseEventSynthesizedBySystem, type);
+            EXPECT_TRUE(chart.zoomGesturing());
+            EXPECT_TRUE(chart.gestureSettlePending());
+            chart.endZoomGesture();
+        }
+    }
+    for (const auto route : {Chart, TimeAxis, PriceAxis}) {
+        SCOPED_TRACE(route);
+        resetWheelView();
+        wheel(route, 30, 2); // non-null partial deltas stay continuous without phase/source information
+        EXPECT_TRUE(chart.zoomGesturing());
+        EXPECT_TRUE(chart.gestureSettlePending());
+        chart.endZoomGesture();
+    }
+}
+
+TEST_F(UgrZoomCpu, AutoFitTickCommitsDoNotRetargetSixteenClicks) {
+    int commits = 0;
+    for (int i = 0; i < 16; ++i) {
+        SCOPED_TRACE(i);
+        const double tick = chart.heatmapTickSize();
+        const auto version = chart.getViewState()->getViewportVersion();
+        chart.zoomClicks(i < 8 ? -1 : 1, 320, 160);
+        ASSERT_EQ(chart.getViewState()->getViewportVersion(), version + 1);
+        checkSettle();
+        commits += chart.heatmapTickSize() != tick;
+    }
+    EXPECT_GT(commits, 0) << "must exercise an actual Auto tick commit";
+}
+
+TEST_F(UgrZoomCpu, PinchAndTrackpadSettleWithASolvedFit) {
+    for (bool pinch : {false, true}) {
+        chart.setViewport(centre - 2 * minute, centre + 2 * minute, 100125, 100175);
+        chart.setAutoPriceScale(true);
+        for (int i = 0; i < 6; ++i) frame();
+        const double tickBefore = chart.heatmapTickSize();
+        if (pinch) {
+            QNativeGestureEvent begin(Qt::BeginNativeGesture, QPointingDevice::primaryPointingDevice(), 2,
+                                      {320, 160}, {320, 160}, {320, 160}, 0, {}, 1);
+            QCoreApplication::sendEvent(&chart, &begin);
+            QNativeGestureEvent zoom(Qt::ZoomNativeGesture, QPointingDevice::primaryPointingDevice(), 2,
+                                     {320, 160}, {320, 160}, {320, 160}, -.8, {}, 2);
+            QCoreApplication::sendEvent(&chart, &zoom);
+            QNativeGestureEvent end(Qt::EndNativeGesture, QPointingDevice::primaryPointingDevice(), 2,
+                                    {320, 160}, {320, 160}, {320, 160}, 0, {}, 3);
+            QCoreApplication::sendEvent(&chart, &end);
+        } else {
+            for (int i = 0; i < 8; ++i) chart.zoomTimeWheel(-400, -100, int(Qt::ScrollUpdate), 320);
+            chart.zoomTimeWheel(0, 0, int(Qt::ScrollEnd), 320);
+        }
+        EXPECT_FALSE(chart.zoomGesturing());
+        checkSettle();
+        EXPECT_NE(chart.heatmapTickSize(), tickBefore) << "settle must exercise an Auto tick commit";
+    }
+}
+
+TEST_F(UgrZoomCpu, AWidthChangeInvalidatesTheSolvedCandleWindow) {
+    chart.setViewport(centre - 4 * minute, centre + 4 * minute, 100100, 100200);
+    chart.setAutoPriceScale(true);
+    for (int i = 0; i < 6; ++i) frame();
+    chart.zoomClicks(-1, 320, 160); // C80 -> C64, exactly ten minutes
+    checkSettle();
+    ASSERT_EQ(chart.rasterCameraNow(false).colPx, 64);
+    auto* v = chart.getViewState();
+    ASSERT_LT(v->getMaxPrice() - v->getMinPrice(), 112);
+    chart.setWidth(641); // C stays 64: reveals the adjacent minute candles
+    EXPECT_EQ(chart.rasterCameraNow(false).colPx, 64);
+    EXPECT_LE(v->getMinPrice(), 100094);
+    EXPECT_GE(v->getMaxPrice(), 100206);
+}
+
+TEST_F(UgrZoomCpu, SurfaceAndAutoModeChangesRefreshTheTickDecision) {
+    auto* v = chart.getViewState();
+    chart.setHeight(576);
+    auto* layer = chart.gpuHeatmapLayer();
+    const auto& settings = layer->settings();
+    const auto fit = chart_raster::solveAutoPriceFit(100150 - 22 * 1.12, 100150 + 22 * 1.12, 576,
+        layer->autoTickState(), layer->priceScale(), {settings.minRowPx, settings.hysteresis},
+        [&](int64_t units, double lo, double hi) {
+            return layer->buildsTick(units, {double(v->getVisibleTimeStart()), double(v->getVisibleTimeEnd()), lo, hi});
+        });
+    ASSERT_TRUE(fit);
+    EXPECT_EQ(v->getMinPrice(), fit->lo);
+    EXPECT_EQ(v->getMaxPrice(), fit->hi);
+    for (int i = 0; i < 30; ++i) frame();
+    EXPECT_EQ(chart.gpuHeatmapLayer()->tickUnits(), fit->tickUnits);
+    chart.setAutoPriceScale(false);
+    chart.setViewport(centre - 2 * minute, centre + 2 * minute, 99000, 101000);
+    const auto expected = chart.gpuHeatmapLayer()->predictTickUnits(
+        {double(v->getVisibleTimeStart()), double(v->getVisibleTimeEnd()), 99000, 101000});
+    EXPECT_NE(expected, fit->tickUnits) << "auto-scale-off must judge the stored span again";
+    for (int i = 0; i < 30; ++i) frame();
+    EXPECT_EQ(chart.gpuHeatmapLayer()->tickUnits(), expected);
+}
+
+// Capture just the diagnostic under test; preserve the normal test/run logging.
+class AutoFitWarnings {
+public:
+    AutoFitWarnings() {
+        count = 0;
+        previous = qInstallMessageHandler([](QtMsgType type, const QMessageLogContext& context, const QString& message) {
+            if (type == QtWarningMsg && message.contains("auto price fit unavailable")) ++count;
+            if (previous) previous(type, context, message);
+        });
+    }
+    ~AutoFitWarnings() { qInstallMessageHandler(previous); }
+    static inline std::atomic<int> count{0};
+private:
+    static inline QtMessageHandler previous = nullptr;
+};
+
+TEST_F(UgrZoomCpu, SymbolSwitchBeforeFirstSnapshotUsesPlainFitSilently) {
+    candles.applyHistory("A3-NO-SNAPSHOT", 60,
+        {{centre, centre + minute, 100150, 100170, 100130, 100150, 1, false, 0, false}});
+    AutoFitWarnings warnings;
+    chart.setActiveSymbol("A3-NO-SNAPSHOT");
+    auto* layer = chart.gpuHeatmapLayer();
+    ASSERT_FALSE(layer->hasCurrentResolution());
+    auto* v = chart.getViewState();
+    for (int i = 1; i <= 16; ++i) {
+        const double radius = 20 + i;
+        candles.applyUpdate("A3-NO-SNAPSHOT", 60,
+            {centre, centre + minute, 100150, 100150 + radius, 100150 - radius, 100150,
+             double(i), false, 0, false}, i, false);
+        double lo = 100150 - radius * 1.12, hi = 100150 + radius * 1.12;
+        EXPECT_EQ(v->getMinPrice(), lo);
+        EXPECT_EQ(v->getMaxPrice(), hi);
+        EXPECT_FALSE(layer->hasCurrentResolution());
+    }
+    EXPECT_EQ(AutoFitWarnings::count.load(), 0);
+}
+
+TEST_F(UgrZoomCpu, SinglePrintStaircaseFitsBothPricesWithMargin) {
+    auto* v = chart.getViewState();
+    const double span = v->getMaxPrice() - v->getMinPrice();
+    const double low = 100150 - span, high = 100150 + span;
+    CandleSeriesBuffer staircase;
+    staircase.applyHistory("BTC-USD", 60, {
+        {centre - minute, centre, low, low, low, low, 1, false, 0, false},
+        {centre, centre + minute, high, high, high, high, 1, false, 0, false}});
+    chart.setCandleBuffer(&staircase);
+    EXPECT_LE(v->getMinPrice(), low - 2 * span * UnifiedGridRenderer::kFitPriceMargin);
+    EXPECT_GE(v->getMaxPrice(), high + 2 * span * UnifiedGridRenderer::kFitPriceMargin);
+    EXPECT_GT(v->getMaxPrice() - v->getMinPrice(), 2 * span);
+    checkSettle();
+    chart.setCandleBuffer(&candles);
+}
+
+TEST_F(UgrZoomCpu, SymbolSwitchToOnePriceLeavesTheTickDecisionToTheFrame) {
+    auto* layer = chart.gpuHeatmapLayer();
+    const auto oldTick = layer->tickUnits();
+    constexpr double price = .0010015;
+    candles.applyHistory("TINY-USD", 60,
+        {{centre, centre + minute, price, price, price, price, 1, false, 0, false}});
+    chart.setActiveSymbol("TINY-USD");
+    EXPECT_FALSE(layer->autoPriceTickUnits());
+    ASSERT_TRUE(waitFor([&] { return layer->hasCurrentResolution(); }));
+    EXPECT_FALSE(layer->autoPriceTickUnits());
+    auto* v = chart.getViewState();
+    const auto& settings = layer->settings();
+    const auto expected = heatmap::autoTickUnits(layer->snapshot()->resolution, layer->autoTickState(),
+        v->getVisibleTimeStart(), v->getVisibleTimeEnd(), v->getMinPrice(), v->getMaxPrice(), 320,
+        {settings.minRowPx, settings.hysteresis});
+    ASSERT_GT(expected, 0);
+    EXPECT_NE(expected, oldTick); // the old symbol's tick must not be pinned
+    // Queue the frame's Auto proposal, then refit before its queued commit runs.
+    layer->chooseTickForView({double(v->getVisibleTimeStart()), double(v->getVisibleTimeEnd()),
+                             v->getMinPrice(), v->getMaxPrice()});
+    candles.applyUpdate("TINY-USD", 60,
+        {centre, centre + minute, price, price, price, price, 2, false, 0, false}, 1, false);
+    EXPECT_FALSE(layer->autoPriceTickUnits());
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    EXPECT_EQ(layer->tickUnits(), expected) << "the refit must not cancel the pending Auto proposal";
+    EXPECT_FALSE(layer->autoPriceTickUnits());
+}
+
+TEST_F(UgrZoomCpu, FlatCandlesKeepSpanAndTickAcrossRevisionsTranslationsAndClicks) {
+    auto* v = chart.getViewState();
+    const auto version = v->getViewportVersion();
+    const double lo = v->getMinPrice(), hi = v->getMaxPrice(), span = hi - lo;
+    const auto tick = chart.gpuHeatmapLayer()->autoPriceTickUnits();
+    const double row = chart.gpuHeatmapLayer()->tickPrice();
+    CandleSeriesBuffer flat;
+    flat.applyHistory("BTC-USD", 60,
+        {{centre, centre + minute, 100150, 100150, 100150, 100150, 1, false, 0, false}});
+    chart.setCandleBuffer(&flat);
+    checkSettle();
+    for (int i = 1; i <= 16; ++i) {
+        flat.applyUpdate("BTC-USD", 60,
+            {centre, centre + minute, 100150, 100150, 100150, 100150, double(i), false, 0, false}, i, false);
+        frame();
+        EXPECT_EQ(v->getViewportVersion(), version);
+        EXPECT_EQ(v->getMinPrice(), lo);
+        EXPECT_EQ(v->getMaxPrice(), hi);
+        EXPECT_EQ(chart.gpuHeatmapLayer()->autoPriceTickUnits(), tick);
+    }
+    chart.zoomClicks(-1, 320, 160);
+    checkSettle();
+    EXPECT_EQ(v->getMinPrice(), lo);
+    EXPECT_EQ(v->getMaxPrice(), hi);
+    EXPECT_EQ(chart.gpuHeatmapLayer()->autoPriceTickUnits(), tick);
+
+    // An outside point and a point in the edge margin each cause one whole-row
+    // translation; neither adds margin to the stored span or chooses a new tick.
+    for (int i = 0; i < 2; ++i) {
+        const double low = v->getMinPrice(), high = v->getMaxPrice();
+        const double price = i == 0 ? high + 2 * span : high - .03 * span;
+        const double shift = std::round((price - (low + high) * .5) / row) * row;
+        const auto before = v->getViewportVersion();
+        flat.applyUpdate("BTC-USD", 60,
+            {centre, centre + minute, price, price, price, price, 20. + i, false, 0, false}, 20 + i, false);
+        EXPECT_EQ(v->getViewportVersion(), before + 1);
+        EXPECT_EQ(v->getMinPrice(), low + shift);
+        EXPECT_EQ(v->getMaxPrice(), high + shift);
+        EXPECT_EQ(v->getMaxPrice() - v->getMinPrice(), span);
+        EXPECT_EQ(chart.gpuHeatmapLayer()->autoPriceTickUnits(), tick);
+        checkSettle();
+    }
+    const double price = (v->getMinPrice() + v->getMaxPrice()) * .5;
+    flat.applyUpdate("BTC-USD", 60,
+        {centre, centre + minute, price, price + span, price - span, price, 30, false, 0, false}, 30, false);
+    EXPECT_GT(v->getMaxPrice() - v->getMinPrice(), span); // first range resumes normal fitting
+    checkSettle();
+    chart.setCandleBuffer(&candles);
+}
+
+TEST_F(UgrZoomCpu, ClickIntoAFlatWindowKeepsTheStoredSpanAndPendingTick) {
+    chart.setViewport(centre - 5 * minute, centre + 5 * minute, 100100, 100200);
+    chart.setAutoPriceScale(true);
+    checkSettle();
+    CandleSeriesBuffer flat;
+    flat.applyHistory("BTC-USD", 60, {
+        {centre, centre + minute, 100150, 100150, 100150, 100150, 1, false, 0, false},
+        {centre + 4 * minute, centre + 5 * minute, 100150, 100400, 99900, 100150, 1, false, 0, false}});
+    chart.setCandleBuffer(&flat); // the extreme selects a new tick, not committed yet
+    auto* v = chart.getViewState();
+    const double lo = v->getMinPrice(), hi = v->getMaxPrice();
+    const auto tick = chart.gpuHeatmapLayer()->autoPriceTickUnits();
+    ASSERT_NE(tick, chart.gpuHeatmapLayer()->tickUnits());
+    chart.zoomClicks(1, 320, 160); // 10m -> 8m: the ranged candle leaves the view
+    ASSERT_EQ(v->getVisibleTimeEnd(), centre + 4 * minute);
+    EXPECT_EQ(v->getMinPrice(), lo);
+    EXPECT_EQ(v->getMaxPrice(), hi);
+    EXPECT_EQ(chart.gpuHeatmapLayer()->autoPriceTickUnits(), tick);
+    checkSettle();
+    chart.setCandleBuffer(&candles);
+}
+
+TEST_F(UgrZoomCpu, SixteenLiveRevisionsAfterClicksDoNotRefit) {
+    for (int i = 0; i < 16; ++i) {
+        chart.zoomClicks(i < 8 ? -1 : 1, 320, 160);
+        checkSettle();
+    }
+    auto* v = chart.getViewState();
+    const double lo = v->getMinPrice(), hi = v->getMaxPrice();
+    uint64_t version = v->getViewportVersion();
+    int changes = 0;
+    for (int i = 1; i <= 16; ++i) {
+        candles.applyUpdate("BTC-USD", 60,
+            {centre, centre + minute, 100150, 100157 + .1 * i, 100143, 100150, 1, false, 0, false}, i, false);
+        for (int j = 0; j < 3; ++j) frame();
+        changes += v->getViewportVersion() != version;
+        version = v->getViewportVersion();
+        EXPECT_EQ(v->getMinPrice(), lo);
+        EXPECT_EQ(v->getMaxPrice(), hi);
+    }
+    EXPECT_EQ(changes, 0);
+    std::cout << "CPU LIVE REST after 16 clicks changed=" << changes << "/16 interior revisions\n";
+}
+
+TEST_F(UgrZoomCpu, NewExtremeDuringGlideRebasesOnceBeforeTickCommit) {
+    chart.zoomClicks(-1, 320, 160);
+    ASSERT_TRUE(chart.zoomGliding());
+    clock += 30;
+    auto* v = chart.getViewState();
+    const auto version = v->getViewportVersion();
+    const int rebases = chart.glideRebasesForTest();
+    const double tick = chart.heatmapTickSize();
+    candles.applyUpdate("BTC-USD", 60,
+        {centre, centre + minute, 100150, 100350, 100143, 100150, 1, false, 0, false}, 1, false);
+    EXPECT_EQ(v->getViewportVersion(), version + 1);
+    chart.updatePolish(); // observe the revised end before the frame's tick proposal
+    EXPECT_EQ(chart.glideRebasesForTest(), rebases + 1);
+    EXPECT_GE(v->getMaxPrice(), 100350 + (100350 - 100121) * .06);
+    checkSettle();
+    EXPECT_NE(chart.heatmapTickSize(), tick);
+    const auto settled = v->getViewportVersion();
+    candles.applyUpdate("BTC-USD", 60,
+        {centre, centre + minute, 100150, 100350, 100143, 100151, 2, false, 0, false}, 2, false);
+    EXPECT_EQ(v->getViewportVersion(), settled);
+    EXPECT_EQ(chart.glideRebasesForTest(), rebases + 1);
+}
+
+TEST_F(UgrZoomCpu, NewExtremeAtRestFitsOnceBeforeTickCommit) {
+    chart.zoomClicks(-1, 320, 160);
+    checkSettle();
+    auto* v = chart.getViewState();
+    const auto version = v->getViewportVersion();
+    const double tick = chart.heatmapTickSize();
+    candles.applyUpdate("BTC-USD", 60,
+        {centre, centre + minute, 100150, 100350, 100143, 100150, 1, false, 0, false}, 1, false);
+    EXPECT_EQ(v->getViewportVersion(), version + 1);
+    EXPECT_GE(v->getMaxPrice(), 100350 + (100350 - 100121) * .06);
+    checkSettle();
+    EXPECT_NE(chart.heatmapTickSize(), tick);
+    EXPECT_EQ(v->getViewportVersion(), version + 1);
+    std::cout << "CPU LIVE REST extreme changes=" << v->getViewportVersion() - version << "/1\n";
+}
+
+// An unavailable solve must still publish both time rungs and a plain fit.
+// Invalid row settings deterministically exercise the same no-decision fallback.
+TEST_F(UgrZoomCpu, NoDecisionStillPublishesClickAndGestureTimeRungs) {
+    ASSERT_TRUE(chart.gpuHeatmapLayer()->hasCurrentResolution());
+    AutoFitWarnings warnings;
+    auto settings = chart.gpuHeatmapLayer()->settings();
+    settings.minRowPx = 0; // invalid policy input: the solver returns no decision
+    chart.setHeatmapChartSettings(settings);
+    auto* v = chart.getViewState();
+    const auto before = v->getVisibleTimeEnd() - v->getVisibleTimeStart();
+    chart.zoomClicks(-1, 320, 160);
+    EXPECT_GT(v->getVisibleTimeEnd() - v->getVisibleTimeStart(), before);
+    EXPECT_TRUE(chart.zoomGliding());
+    for (int i = 0; i < 30; ++i) frame();
+    const auto clicked = v->getVisibleTimeEnd() - v->getVisibleTimeStart();
+    chart.zoomContinuous(.83, 320, 160, true, false);
+    chart.endZoomGesture();
+    EXPECT_GT(v->getVisibleTimeEnd() - v->getVisibleTimeStart(), clicked);
+    EXPECT_FALSE(chart.zoomGesturing());
+    EXPECT_TRUE(chart.zoomGliding());
+    EXPECT_GT(AutoFitWarnings::count.load(), 0); // data-present failures still warn
+    const double span = v->getMaxPrice() - v->getMinPrice();
+    EXPECT_NEAR(320 * chart.heatmapTickSize() / span,
+                std::round(320 * chart.heatmapTickSize() / span), 1e-8);
+}
+
+// ---------------------------------------------------------------- A2 fix round 2
+// The sources that can change a glide's end, one row each (the contracts are in
+// docs/ARCHITECTURE.md, smooth zoom). The fixture for most: auto price off, a click in
+// at (211, 97) that zooms both axes, the manual glide clock; `x/y` the drawn position of
+// the content under the cursor.
+class UgrGlide : public UgrGpu {
+protected:
+    const QPointF at{211, 97};
+    double t = 0, p = 0; // the content under the cursor before the click
+    qint64 t0 = 0;
+    bool startBothAxes() {
+        noLabels();
+        manualZoomClock();
+        gpuOn();
+        if (!settle()) return false;
+        ugr->getViewState()->setAutoPriceScale(false);
+        if (!settle()) return false;
+        const auto m = ugr->currentTimeAxisMapping();
+        t = m.screenXToTime(at.x());
+        p = m.screenYToPrice(at.y());
+        t0 = clockMs;
+        notch(1, at);
+        return ugr->timeGliding() && ugr->priceGliding();
+    }
+    double x() const { return ugr->currentTimeAxisMapping().timeToScreenX(t); }
+    double y() const { return ugr->currentTimeAxisMapping().priceToScreenY(p); }
+    // Frames every 10 ms until both axes land (or `untilMs` after t0).
+    bool glideOn(qint64 untilMs) {
+        for (qint64 ms = clockMs - t0 + 10; ms <= untilMs; ms += 10) {
+            if (!frameAt(t0 + ms)) return false;
+            if (!ugr->zoomGliding()) return true;
+        }
+        return true;
+    }
+};
+
+// Rule B, a drag and its pan commit during a glide: the picture moves 1:1 with the
+// pointer, the release keeps it where the drag left it (no (1-e)*delta jump), and the
+// glide lands on the dragged rest view.
+TEST_F(UgrGlide, ADragAndItsCommitMoveTheGlideWithThePointer) {
+    ASSERT_TRUE(startBothAxes()) << error.toStdString();
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    const double x0 = x(), y0 = y();
+    ugr->beginPanAt(320, 160);
+    ugr->updatePanAt(337, 151); // 17 px right, 9 px up
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    EXPECT_NEAR(x() - x0, 17, 1e-6) << "the drag moves the glide 1:1";
+    EXPECT_NEAR(y() - y0, -9, 1e-6);
+    ugr->endPanAt();
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    EXPECT_NEAR(x() - x0, 17, 1e-6) << "the commit keeps the picture where the drag left it";
+    EXPECT_NEAR(y() - y0, -9, 1e-6);
+    ASSERT_TRUE(glideOn(400)) << error.toStdString();
+    EXPECT_FALSE(ugr->zoomGliding());
+    EXPECT_LE(std::abs(x() - at.x() - 17), 0.5 + 1e-6) << "landed with the content dragged by 17 px";
+    EXPECT_FALSE(drawn().free);
+}
+
+// Rule B, a resize during a glide (another surface): the glide continues from what was
+// drawn (the logical picture stays) and lands on the new rest view.
+TEST_F(UgrGlide, AResizeRebasesTheGlide) {
+    ASSERT_TRUE(startBothAxes()) << error.toStdString();
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    const double x0 = x(), y0 = y();
+    ugr->setSize(QSizeF(600, 300));
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    EXPECT_TRUE(ugr->zoomGliding()) << "still gliding";
+    EXPECT_NEAR(x(), x0, 1e-6) << "no jump at the resize";
+    EXPECT_NEAR(y(), y0, 1e-6);
+    ASSERT_TRUE(glideOn(400)) << error.toStdString();
+    EXPECT_FALSE(ugr->zoomGliding());
+    EXPECT_EQ(drawn().widthDev, 600);
+    EXPECT_FALSE(drawn().free);
+}
+
+// Rule B, a tick change the click did not predict (a Manual tick chosen mid-glide): the
+// glide continues from what was drawn to the new tick's rows and lands well before the
+// cap.
+TEST_F(UgrGlide, ATickChangeMidGlideRebasesAndLands) {
+    auto manual = brightSettings();
+    manual.showLabels = false;
+    manual.tickMode = heatmap::TickMode::Manual;
+    manual.manualTick = 1000; // $10
+    ugr->setHeatmapChartSettings(manual, true);
+    ASSERT_TRUE(startBothAxes()) << error.toStdString();
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    const double y0 = y();
+    manual.manualTick = 500; // $5
+    ugr->setHeatmapChartSettings(manual, true);
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    EXPECT_NEAR(y(), y0, 1e-6) << "no jump at the change";
+    ASSERT_TRUE(glideOn(2 * chart_raster::kZoomGlideMs - 20)) << error.toStdString();
+    EXPECT_FALSE(ugr->priceGliding()) << "landed on the new rows before the cap";
+    EXPECT_EQ(drawn().tick, 5.0);
+    EXPECT_FALSE(drawn().free);
+}
+
+// Rule B, an end that changes on every frame (a stored price moved by one tick per
+// frame, as repeated refits): every change rebases, and the glide still lands no later
+// than its click + 2 * kZoomGlideMs, on the then current rest view.
+TEST_F(UgrGlide, AnEndThatChangesEveryFrameLandsByTheCap) {
+    ASSERT_TRUE(startBothAxes()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    const double tick = layer().tickPrice();
+    qint64 landedAt = -1;
+    for (qint64 ms = 10; ms <= 3 * chart_raster::kZoomGlideMs; ms += 10) {
+        view->setViewport(view->getVisibleTimeStart(), view->getVisibleTimeEnd(), view->getMinPrice() + tick,
+                          view->getMaxPrice() + tick); // as a refit (GridViewState directly)
+        ASSERT_TRUE(frameAt(t0 + ms)) << error.toStdString();
+        if (!ugr->priceGliding()) {
+            landedAt = ms;
+            break;
+        }
+    }
+    ASSERT_GE(landedAt, 0) << "the price glide never landed";
+    EXPECT_LE(landedAt, 2 * chart_raster::kZoomGlideMs) << "landed by the cap";
+    EXPECT_FALSE(drawn().free);
+    EXPECT_EQ(drawn().topRowIndex, ugr->restCameraNow(false).topRowIndex) << "on the current rest view";
+}
+
+// Rule B, an auto price refit during a glide that keeps the scale and moves the window
+// (a Manual $10 tick; new candles shifted by $230): the price glide continues from what
+// was drawn (a frame at the same instant draws the same rows), then lands on the refit
+// window at the glide's own end.
+TEST_F(UgrGlide, AConstantScaleRefitMidGlideContinuesFromTheDrawnRows) {
+    noLabels();
+    manualZoomClock();
+    auto manual = brightSettings();
+    manual.showLabels = false;
+    manual.tickMode = heatmap::TickMode::Manual;
+    manual.manualTick = 1000; // $10: the refit keeps the tick
+    ugr->setHeatmapChartSettings(manual, true);
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    CandleSeriesBuffer buffer;
+    buffer.applyHistory("BTC-USD", 60, risingBars(viewLo - kHourMs, viewHi + kHourMs, minute, 99'000, 4));
+    ugr->setCandleBuffer(&buffer);
+    ugr->setAutoPriceScale(true);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    t0 = clockMs;
+    notch(2, at); // time zooms; the fit of the new window moves price too
+    ASSERT_TRUE(ugr->timeGliding());
+    ASSERT_TRUE(ugr->priceGliding()) << "the click's refit glides price";
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    const auto before = drawn();
+    const auto restBefore = ugr->restCameraNow(false);
+    uint64_t seq = 1;
+    for (const auto &bar : risingBars(viewLo - kHourMs, viewHi + kHourMs, minute, 99'230, 4)) // every bar $230 up
+        buffer.applyUpdate("BTC-USD", 60, bar, seq++, false);
+    const auto restAfter = ugr->restCameraNow(false);
+    ASSERT_EQ(restAfter.tick, restBefore.tick);
+    ASSERT_EQ(restAfter.rowPx, restBefore.rowPx) << "the refit keeps the scale";
+    ASSERT_NE(restAfter.topRowIndex, restBefore.topRowIndex) << "and moves the window";
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    EXPECT_NEAR(drawn().drawnMaxPrice, before.drawnMaxPrice, 1e-9) << "the same instant draws the same rows";
+    EXPECT_NEAR(drawn().pxPerPrice(), before.pxPerPrice(), 1e-12);
+    // Then it moves on smoothly to the refit window: no frame moves the price under the
+    // cursor by more than 40% of the way left, and it lands at the glide's own end.
+    const double way = std::abs(restAfter.priceAtYDev(97) - drawn().priceAtYDev(97));
+    ASSERT_GT(way, 0);
+    double last = drawn().priceAtYDev(97), worst = 0;
+    qint64 landedAt = -1;
+    for (qint64 ms = 50; ms <= 3 * chart_raster::kZoomGlideMs; ms += 10) {
+        ASSERT_TRUE(frameAt(t0 + ms)) << error.toStdString();
+        const double now = drawn().priceAtYDev(97);
+        worst = std::max(worst, std::abs(now - last));
+        last = now;
+        if (!ugr->priceGliding()) {
+            landedAt = ms;
+            break;
+        }
+    }
+    EXPECT_LE(worst, 0.4 * way) << "a frame jumped " << worst << " of " << way;
+    ASSERT_GE(landedAt, 0);
+    EXPECT_LE(landedAt, chart_raster::kZoomGlideMs + 10) << "landed at the glide's end, not at the cap";
+    ASSERT_TRUE(glideOn(400)) << error.toStdString();
+    EXPECT_FALSE(ugr->zoomGliding());
+    EXPECT_EQ(drawn().topRowIndex, ugr->restCameraNow(false).topRowIndex);
+    ugr->setCandleBuffer(nullptr);
+}
+
+// Rule B, a follow-live step during a glide: both ends move by the same world shift, so
+// the picture moves with the live data at once (no rebase).
+TEST_F(UgrGlide, AFollowLiveStepMovesTheGlideByTheSameWorldShift) {
+    ASSERT_TRUE(startBothAxes()) << error.toStdString();
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    const double x0 = x();
+    auto *view = ugr->getViewState();
+    const int64_t end = view->getVisibleTimeEnd();
+    view->enableAutoScroll(true); // as following live (the zoom turned it off)
+    ugr->followLiveForTest(end + 3 * minute);
+    const int64_t shift = view->getVisibleTimeEnd() - end;
+    ASSERT_GT(shift, 0);
+    ASSERT_EQ(shift % minute, 0);
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    EXPECT_NEAR(ugr->currentTimeAxisMapping().timeToScreenX(t + double(shift)), x0, 1e-6)
+        << "the content moved by the world shift";
+    EXPECT_TRUE(ugr->timeGliding());
+}
+
+// Explicit re-layouts land a glide at once (as at rest): a timeframe switch and a symbol
+// switch.
+TEST_F(UgrGlide, ATimeframeOrSymbolSwitchLandsTheGlideAtOnce) {
+    ASSERT_TRUE(startBothAxes()) << error.toStdString();
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    ugr->setTimeframe(int(5 * minute));
+    EXPECT_FALSE(ugr->zoomGliding()) << "timeframe switch";
+    ASSERT_TRUE(frameAt(t0 + 50)) << error.toStdString();
+    EXPECT_FALSE(drawn().free);
+    t0 = clockMs;
+    notch(1, at);
+    ASSERT_TRUE(ugr->zoomGliding());
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    ugr->setActiveSymbol("TINY-USD");
+    EXPECT_FALSE(ugr->zoomGliding()) << "symbol switch";
+    ugr->setActiveSymbol("BTC-USD");
+}
+
+// Contract C, a click on one axis during a glide on the other: the running glide keeps
+// its course and its end time.
+TEST_F(UgrGlide, AClickOnOneAxisLeavesTheOtherAxisGlide) {
+    noLabels();
+    manualZoomClock();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    ugr->getViewState()->setAutoPriceScale(false);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    t0 = clockMs;
+    ugr->zoomTimeClicks(1, 211);
+    ASSERT_TRUE(ugr->timeGliding());
+    ASSERT_FALSE(ugr->priceGliding());
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    const double c40 = drawn().colPxF;
+    ugr->zoomPriceClicks(1, 97);
+    ASSERT_TRUE(ugr->priceGliding());
+    ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+    EXPECT_EQ(drawn().colPxF, c40) << "the time glide did not restart";
+    ASSERT_TRUE(frameAt(t0 + chart_raster::kZoomGlideMs - 10)) << error.toStdString();
+    EXPECT_TRUE(ugr->timeGliding());
+    ASSERT_TRUE(frameAt(t0 + chart_raster::kZoomGlideMs + 1)) << error.toStdString();
+    EXPECT_FALSE(ugr->timeGliding()) << "the time glide landed at its own end";
+    EXPECT_TRUE(ugr->priceGliding()) << "the price glide is later";
+}
+
+// Contract C, a gesture on one axis during a glide on both: the gesture starts from the
+// drawn camera on its axis, the other axis keeps gliding (no snap to its end), in both
+// directions; an axis at rest stays whole-pixel.
+TEST_F(UgrGlide, AGestureOnOneAxisLeavesTheOtherAxisGlide) {
+    for (const bool priceGesture : {true, false}) {
+        SCOPED_TRACE(priceGesture ? "price axis drag during the glide" : "time axis drag during the glide");
+        ASSERT_TRUE(startBothAxes()) << error.toStdString();
+        ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+        const auto before = drawn();
+        const int endCol = ugr->restCameraNow(false).colPx, endRows = ugr->restCameraNow(false).rowPx;
+        if (priceGesture) ugr->zoomPriceDrag(48, 160);
+        else ugr->zoomTimeDrag(48, 320);
+        ASSERT_TRUE(ugr->zoomGesturing());
+        ASSERT_TRUE(frameAt(t0 + 40)) << error.toStdString();
+        const auto now = drawn();
+        if (priceGesture) {
+            EXPECT_TRUE(ugr->timeGliding()) << "time keeps gliding";
+            EXPECT_FALSE(ugr->priceGliding());
+            EXPECT_EQ(now.colPxF, before.colPxF) << "time did not snap to its end";
+            EXPECT_NEAR(now.pxPerPrice(), before.pxPerPrice() * (1 + 48 * 0.0005), before.pxPerPrice() * 1e-9)
+                << "price continues from the drawn rows";
+        } else {
+            EXPECT_TRUE(ugr->priceGliding()) << "price keeps gliding";
+            EXPECT_FALSE(ugr->timeGliding());
+            EXPECT_EQ(now.pxPerPrice(), before.pxPerPrice()) << "price did not snap to its end";
+            EXPECT_NEAR(now.colPxF, before.colPxF * (1 + 48 * 0.0005), before.colPxF * 1e-6)
+                << "time continues from the drawn columns";
+        }
+        ASSERT_TRUE(frameAt(t0 + chart_raster::kZoomGlideMs + 1)) << error.toStdString();
+        if (priceGesture) {
+            EXPECT_FALSE(ugr->timeGliding()) << "time landed at its own end";
+            EXPECT_EQ(drawn().colPxF, double(endCol)) << "time at rest: whole pixels";
+        } else {
+            EXPECT_FALSE(ugr->priceGliding());
+            EXPECT_EQ(drawn().rowPxF, double(endRows));
+        }
+        ugr->endZoomGesture();
+        ASSERT_TRUE(settle()) << error.toStdString();
+        EXPECT_FALSE(drawn().free);
+    }
+}
+
+// The zoom limits on the ladder and the gestures (spec rules 1, 2 and 9; ported from
+// GridViewState's wheel handlers, deleted with slice A2): from any start the clicks
+// zoom out to exactly one column per pixel and, under Manual $10, one row per pixel;
+// the clicks in stop at the minimum spans; a view already below them is not widened by
+// a zoom-in; after an axis drag the clicks still zoom out to the max spans; an axis at
+// its limit keeps its bounds exactly; the stored view changes once per click.
+TEST_F(UgrGpu, ZoomClicksAndGesturesObeyTheLimits) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    auto *view = ugr->getViewState();
+    view->setAutoPriceScale(false);
+    auto manual = brightSettings();
+    manual.showLabels = false;
+    manual.tickMode = heatmap::TickMode::Manual;
+    manual.manualTick = 1000; // $10: one row per pixel is $3,200 over 320 px
+    ugr->setHeatmapChartSettings(manual, true);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const double maxTime = 640.0 * minute, maxPrice = 3200;
+    ASSERT_EQ(view->maxTimeSpanMs(), maxTime);
+    ASSERT_DOUBLE_EQ(view->maxPriceSpan(), maxPrice);
+    const QPointF at(250, 100);
+    auto clicksOut = [&](int n) {
+        for (int i = 0; i < n; ++i) {
+            const uint64_t v = view->getViewportVersion();
+            const double t = timeSpan(), p = priceSpan();
+            notch(-1, at);
+            const bool moved = timeSpan() != t || priceSpan() != p;
+            EXPECT_EQ(view->getViewportVersion() - v, moved ? 1u : 0u) << "one stored change per click";
+        }
+        return settle();
+    };
+    for (const int64_t startMinutes : {2, 10, 60, 600}) {
+        SCOPED_TRACE(testing::Message() << startMinutes << " min");
+        const double centre = 100'100;
+        ugr->setViewport(viewLo, viewLo + startMinutes * minute, centre - startMinutes, centre + startMinutes);
+        ASSERT_TRUE(settle()) << error.toStdString();
+        ASSERT_TRUE(clicksOut(40)) << error.toStdString();
+        // One column per pixel drawn (a 600 min view already draws it: its clicks have
+        // nothing left to zoom), one row per pixel.
+        EXPECT_EQ(drawn().colPx, 1);
+        EXPECT_NEAR(drawn().drawnEndMs - drawn().drawnStartMs, maxTime, 1e-3) << "one column per pixel";
+        EXPECT_LE(timeSpan(), maxTime);
+        EXPECT_DOUBLE_EQ(priceSpan(), maxPrice) << "one row per pixel";
+        EXPECT_EQ(drawn().rowPx, 1);
+    }
+    // At the price limit a click out keeps the price bounds exactly (time is at its
+    // limit too: nothing moves); from a narrower time it zooms time only.
+    ugr->setViewport(viewLo, viewLo + 100 * minute, view->getMinPrice(), view->getMaxPrice());
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const double lo = view->getMinPrice(), hi = view->getMaxPrice();
+    notch(-1, at);
+    EXPECT_GT(timeSpan(), 100.0 * minute);
+    EXPECT_EQ(view->getMinPrice(), lo) << "the price at its limit stays exactly";
+    EXPECT_EQ(view->getMaxPrice(), hi);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    // Zoom-in stops at the minimum spans (the GPU floors: a few columns and rows).
+    const double minTime = view->minTimeSpanMs(), minPrice = view->minPriceSpan();
+    ASSERT_GT(minTime, 0);
+    ASSERT_GT(minPrice, 0);
+    for (int i = 0; i < 60; ++i) notch(1, at);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    EXPECT_GE(timeSpan(), minTime);
+    EXPECT_LT(timeSpan(), minTime * chart_raster::kZoomStepRatio * 1.3) << "and reaches the floor's rung";
+    EXPECT_GE(priceSpan(), minPrice * (1 - 1e-12));
+    EXPECT_LT(priceSpan(), minPrice * 2);
+    // A view below the floors (e.g. the Agent API's) is not widened by a zoom-in; a
+    // zoom-out works from there.
+    ugr->setViewport(viewLo, viewLo + minute, 100'000, 100'001);
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const double t1 = timeSpan(), p1 = priceSpan();
+    const uint64_t v1 = view->getViewportVersion();
+    notch(1, at);
+    EXPECT_EQ(view->getViewportVersion(), v1) << "a zoom-in never widens";
+    EXPECT_EQ(timeSpan(), t1);
+    EXPECT_EQ(priceSpan(), p1);
+    notch(-1, at);
+    EXPECT_GT(timeSpan(), t1) << "zoom-out works from there";
+    ASSERT_TRUE(settle()) << error.toStdString();
+    // After axis drags widen the view (continuous, then the nearest rung), the clicks
+    // still zoom out to the max spans.
+    for (int i = 0; i < 5; ++i) {
+        ugr->zoomTimeDrag(-240, 320);
+        ugr->zoomPriceDrag(-240, 160);
+        ASSERT_TRUE(frames(1)) << error.toStdString();
+    }
+    ugr->endZoomGesture();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    EXPECT_FALSE(drawn().free);
+    ASSERT_TRUE(clicksOut(40)) << error.toStdString();
+    EXPECT_EQ(drawn().colPx, 1);
+    EXPECT_NEAR(drawn().drawnEndMs - drawn().drawnStartMs, maxTime, 1e-3);
+    EXPECT_DOUBLE_EQ(priceSpan(), maxPrice);
+    // Axis drags far past the limits stop at them too.
+    for (int i = 0; i < 100; ++i) {
+        ugr->zoomTimeDrag(-240, 320);
+        ugr->zoomPriceDrag(-240, 160);
+    }
+    ugr->endZoomGesture();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    EXPECT_EQ(timeSpan(), maxTime);
+    EXPECT_DOUBLE_EQ(priceSpan(), maxPrice);
+}
+
 // The S6a input route on the real chart QML (DepthChartView.qml): a synthesized
 // wheel reaches UnifiedGridRenderer and changes the viewport exactly once; the
 // price axis WheelHandler zooms price only; a time-axis MouseArea drag obeys the
@@ -1423,7 +4185,30 @@ TEST(UgrInput, InputRouteReachesTheChartAndAxisAreasOncePerWheel) {
     ASSERT_EQ(apply("wheel", "priceAxis", 20, 200, 120), 200);
     EXPECT_EQ(changes, 2) << "the price axis WheelHandler: one change";
     EXPECT_EQ(timeSpan(), time1) << "price only";
-    // Time axis drag outward far past the clamp (MouseArea zoomTimeAt).
+    {
+        // A trackpad scroll on the price axis: the WheelHandler passes the pixel delta
+        // and the scroll phase through, so it zooms continuously (x1.02 for 40 angle
+        // units, from the window the camera draws), not as a notch.
+        auto *axis = view.rootObject()->findChild<QQuickItem *>("priceAxisControl");
+        ASSERT_TRUE(axis);
+        const QPointF axisAt = axis->mapToScene(QPointF(axis->width() / 2, axis->height() / 2));
+        auto scroll = [&](Qt::ScrollPhase phase, int angle) {
+            QWheelEvent e(axisAt, view.mapToGlobal(axisAt), {0, angle / 4}, {0, angle}, Qt::NoButton, Qt::NoModifier,
+                          phase, false);
+            QCoreApplication::sendEvent(&view, &e);
+        };
+        const auto cam0 = ugr->rasterCameraNow(false);
+        const double before = cam0.valid ? cam0.drawnMaxPrice - cam0.drawnMinPrice : priceSpan();
+        scroll(Qt::ScrollBegin, 0);
+        scroll(Qt::ScrollUpdate, 40);
+        const double during = priceSpan();
+        scroll(Qt::ScrollEnd, 0);
+        EXPECT_NEAR(during, before / 1.02, before * 1e-9) << "continuous, not a notch";
+        EXPECT_FALSE(ugr->zoomGesturing()) << "ScrollEnd ends it";
+        changes = 2;
+    }
+    // Time axis drag outward far past the clamp (MouseArea zoomTimeDrag, the release
+    // settles on the nearest rung).
     ASSERT_EQ(apply("dragStart", "timeAxis", 500, 10), 200);
     for (int x = 480; x > 0; x -= 20) ASSERT_EQ(apply("dragMove", "timeAxis", x, 10), 200);
     ASSERT_EQ(apply("dragEnd", "timeAxis", 20, 10), 200);
@@ -1444,8 +4229,26 @@ TEST(UgrInput, InputRouteReachesTheChartAndAxisAreasOncePerWheel) {
     ASSERT_EQ(apply("doubleClick", "priceAxis", 20, 200), 200);
     EXPECT_EQ(changes - before, 1) << "price axis double-click: one change";
     EXPECT_TRUE(ugr->autoPriceScale()) << "the price-axis double-click turns it on";
-    EXPECT_NEAR(state->getMinPrice(), 100'800 - 400 * UnifiedGridRenderer::kFitPriceMargin, 1e-6);
-    EXPECT_NEAR(state->getMaxPrice(), 101'200 + 400 * UnifiedGridRenderer::kFitPriceMargin, 1e-6);
+    // With resolution, Auto chooses the tick and the fit widens to whole rows
+    // at it. Before resolution, the raw bounds are exact.
+    auto checkPriceFit = [&] {
+        auto* layer = ugr->gpuHeatmapLayer();
+        const double rawLo = 100'800 - 400 * UnifiedGridRenderer::kFitPriceMargin;
+        const double rawHi = 101'200 + 400 * UnifiedGridRenderer::kFitPriceMargin;
+        if (layer->hasCurrentResolution()) {
+            ASSERT_TRUE(layer->autoPriceTickUnits());
+            const double P = chart_raster::devicePixels(ugr->height(), dpr) *
+                             double(*layer->autoPriceTickUnits()) / layer->priceScale() / priceSpan();
+            EXPECT_NEAR(P, std::round(P), 1e-8);
+            EXPECT_GE(P, 1);
+            EXPECT_LE(state->getMinPrice(), rawLo);
+            EXPECT_GE(state->getMaxPrice(), rawHi);
+        } else {
+            EXPECT_EQ(state->getMinPrice(), rawLo);
+            EXPECT_EQ(state->getMaxPrice(), rawHi);
+        }
+    };
+    checkPriceFit();
     // A price-axis drag turns it off.
     ASSERT_EQ(apply("dragStart", "priceAxis", 20, 200), 200);
     ASSERT_EQ(apply("dragMove", "priceAxis", 20, 260), 200);
@@ -1467,7 +4270,7 @@ TEST(UgrInput, InputRouteReachesTheChartAndAxisAreasOncePerWheel) {
     click();
     EXPECT_TRUE(ugr->autoPriceScale()) << "the A toggle turns it on";
     EXPECT_EQ(changes - before, 1);
-    EXPECT_NEAR(state->getMinPrice(), 100'800 - 400 * UnifiedGridRenderer::kFitPriceMargin, 1e-6);
+    checkPriceFit();
     QElapsedTimer pause; // not a double-click
     pause.start();
     while (pause.elapsed() < 600) QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
@@ -1491,6 +4294,76 @@ TEST(UgrInput, InputRouteReachesTheChartAndAxisAreasOncePerWheel) {
     ugr->setCandleBuffer(nullptr);
     ugr->setHeatmapService(nullptr); // its controller goes now
 }
+// Real QML delivery verifies that WheelHandler accepts both mouse and precise
+// scrolls even when Cocoa reports a sticky TouchPad type on their shared device.
+TEST(UgrInput, MacMouseAndPreciseScrollReachBothAxisWheelHandlers) {
+    QQuickView view;
+    view.setResizeMode(QQuickView::SizeRootObjectToView);
+    view.rootContext()->setContextProperty("uiTheme", nullptr);
+    view.rootContext()->setContextProperty("dataSource", nullptr);
+    view.rootContext()->setContextProperty("chartModeController", nullptr);
+    view.setSource(QUrl::fromLocalFile(QStringLiteral(SENTINEL_SOURCE_DIR "/libs/gui/qml/DepthChartView.qml")));
+    ASSERT_EQ(view.status(), QQuickView::Ready) << view.errors().value(0).toString().toStdString();
+    view.resize(1000, 600);
+    view.rootObject()->setSize({1000, 600}); // never expose a native GUI window
+    QCoreApplication::processEvents();
+    auto* chart = view.rootObject()->findChild<UnifiedGridRenderer*>("unifiedGridRenderer");
+    ASSERT_TRUE(chart);
+    chart->setHeatmapService(&lab::LabData::instance().service());
+    chart->setActiveSymbol("BTC-USD");
+    chart->setTimeframe(int(minute));
+    const QPointingDevice mouse("notched mouse", 124, QInputDevice::DeviceType::Mouse,
+                                QPointingDevice::PointerType::Generic, QInputDevice::Capability::Position, 1, 0);
+    const QPointingDevice pad("precise scroll", 125, QInputDevice::DeviceType::TouchPad,
+                              QPointingDevice::PointerType::Finger,
+                              QInputDevice::Capability::Position | QInputDevice::Capability::PixelScroll, 2, 0);
+    for (const char* name : {"priceAxisControl", "timeAxisControl"}) {
+        SCOPED_TRACE(name);
+        auto* axis = view.rootObject()->findChild<QQuickItem*>(name);
+        ASSERT_TRUE(axis);
+        const auto at = axis->mapToScene({axis->width() / 2, axis->height() / 2});
+        auto reset = [&] {
+            chart->endZoomGesture();
+            chart->setViewport(epoch + kHourMs, epoch + 2 * kHourMs, 99900, 100300);
+            QCoreApplication::processEvents();
+        };
+        auto send = [&](int angle, int pixels, Qt::ScrollPhase phase, const QPointingDevice& device,
+                        Qt::MouseEventSource source) {
+            QWheelEvent event(at, view.mapToGlobal(at), {0, pixels}, {0, angle}, Qt::NoButton,
+                              Qt::NoModifier, phase, false, source, &device);
+            QCoreApplication::sendEvent(&view, &event);
+        };
+        for (const int direction : {1, -1}) {
+            reset();
+            const auto version = chart->getViewState()->getViewportVersion();
+            send(direction * 120, direction > 0 ? 2 : -6, Qt::NoScrollPhase, mouse, Qt::MouseEventNotSynthesized);
+            EXPECT_EQ(chart->getViewState()->getViewportVersion(), version + 1);
+            EXPECT_FALSE(chart->zoomGesturing()) << "mouse pixels must route to a click";
+            EXPECT_FALSE(chart->gestureSettlePending());
+        }
+        reset();
+        send(0, 0, Qt::ScrollBegin, pad, Qt::MouseEventSynthesizedBySystem);
+        const auto version = chart->getViewState()->getViewportVersion();
+        send(30, 15, Qt::ScrollUpdate, pad, Qt::MouseEventSynthesizedBySystem);
+        EXPECT_GT(chart->getViewState()->getViewportVersion(), version);
+        EXPECT_TRUE(chart->zoomGesturing()) << "WheelHandler must accept a synthesized TouchPad scroll";
+        send(0, 0, Qt::ScrollEnd, pad, Qt::MouseEventSynthesizedBySystem);
+        EXPECT_FALSE(chart->zoomGesturing());
+        // Reuse the very same TouchPad-typed device after the precise stream,
+        // but now send ordinary mouse notches (Cocoa's shared deviceID 0).
+        for (const int direction : {1, -1}) {
+            reset();
+            const auto afterScroll = chart->getViewState()->getViewportVersion();
+            send(direction * 120, direction > 0 ? 2 : -6, Qt::NoScrollPhase, pad, Qt::MouseEventNotSynthesized);
+            EXPECT_EQ(chart->getViewState()->getViewportVersion(), afterScroll + 1);
+            EXPECT_FALSE(chart->zoomGesturing()) << "a sticky TouchPad type must not veto a mouse notch";
+            EXPECT_FALSE(chart->gestureSettlePending());
+        }
+    }
+    chart->endZoomGesture();
+    chart->setHeatmapService(nullptr);
+}
+
 // Review item 7 (pre-existing): DepthChartView's root `symbol` property shadowed the
 // context property QmlSceneController set, so the candle overlay and the paper-trade
 // model stayed on BTC-USD after a symbol switch.
@@ -1590,7 +4463,6 @@ int main(int argc, char **argv) {
     Q_INIT_RESOURCE(sentinel_ui_fonts);
     qmlRegisterModule("Sentinel", 1, 0);
     qmlRegisterType<UnifiedGridRenderer>("Sentinel", 1, 0, "UnifiedGridRenderer");
-    qmlRegisterType<CoordinateSystem>("Sentinel", 1, 0, "CoordinateSystem");
     qmlRegisterType<TimeAxisModel>("Sentinel", 1, 0, "TimeAxisModel");
     qmlRegisterType<PriceAxisModel>("Sentinel", 1, 0, "PriceAxisModel");
     qmlRegisterType<AlgoOverlayRenderer>("Sentinel", 1, 0, "AlgoOverlayRenderer");

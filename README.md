@@ -1,8 +1,8 @@
 # Sentinel
 
-High-performance **GPU-accelerated trading terminal** built with **C++20** and **Qt 6**.
+**GPU-accelerated trading terminal** built with **C++20** and **Qt 6**.
 
-A desktop workstation for visualizing market structure, order flow, and real-time data — powered by a custom rendering pipeline and a client/server architecture designed for speed.
+A desktop workstation for viewing market structure, order flow, and real-time data. A headless server ingests and records Coinbase market data. A Qt client draws it on the GPU. Orders are simulated: Sentinel has paper trading only and sends no real orders.
 
 <div align="center">
   <img src="https://img.shields.io/badge/C%2B%2B-20-blue" />
@@ -18,7 +18,7 @@ A desktop workstation for visualizing market structure, order flow, and real-tim
 
 ### GPU Heatmap Rendering
 
-High-density order book visualization with real-time updates and smooth interaction.
+Order book heatmap with live updates, pan, and zoom.
 
 ![Heatmap render demo](docs/assets/gifs/heatmap-render.gif)
 
@@ -26,7 +26,7 @@ High-density order book visualization with real-time updates and smooth interact
 
 ### Stock Chart + SEC Insider Signals
 
-Integrated equity charting with insider transaction overlays and contextual signals.
+Equity charting with insider transaction overlays and signals from SEC filings.
 
 ![Stock chart insider signals demo](docs/assets/gifs/stock-chart-insiders.gif)
 
@@ -34,7 +34,7 @@ Integrated equity charting with insider transaction overlays and contextual sign
 
 ### Screener Workflow
 
-Fast symbol discovery and routing into the charting system.
+Screener rows open on the charts: crypto pairs on the main chart, stocks on the Stock Chart.
 
 ![Stock screener demo](docs/assets/gifs/stock-screener.gif)
 
@@ -48,10 +48,11 @@ Sentinel is built around a single constraint:
 
 The system combines:
 
-- GPU-first rendering (no per-frame allocations)
+- GPU-first rendering
 - Real-time streaming data pipelines
-- Desktop workstation UI (Qt + QML + Scene Graph)
-- Trading and simulation infrastructure
+- Recorded order book history
+- Desktop workstation UI (Qt Widgets docks, QML, Qt Scene Graph)
+- Paper trading and simulation
 
 ---
 
@@ -59,61 +60,56 @@ The system combines:
 
 ### Rendering & Charting
 
-- GPU-accelerated heatmap (single-quad texture sampling)
-- ~110+ FPS during pan/zoom with live axis updates
-- Zero-allocation axis rendering
+- GPU order book heatmap with recorded history and a live edge
+- Heatmap binned on the GPU at the chart's tick size (Auto or Manual)
+- Liquidity range slider (sizes in the base asset) and labels on heatmap cells in Asset or USD units
 - Candle, hollow, and line chart modes
+- Trade bubbles for executions
+- Footprint, TPO, and Volume Profile layers, switched on from the chart toolbar
+- Axis label models of fixed size, so pan and zoom do not add or remove label items
 - Consistent viewport mapping across overlays
-- High-density grid support
 
 ---
 
 ### Market Tools
 
-- Live heatmap chart
-- Candle overlays aligned to heatmap mapping
-- Stock chart workspace
-- SEC insider signal overlays
-- Watchlists with smart routing
-- TradingView screener integration
-- Order book / DOM ladder
+- Heatmap chart with candle overlays aligned to the heatmap mapping
+- Stock Chart dock (daily candles for equities)
+- SEC insider signal overlays (Form 4 filings from SEC EDGAR)
+- Watchlists: crypto pairs open on the main chart, stocks on the Stock Chart
+- TradingView screener dock (crypto and stocks)
+- Order book (DOM) ladder dock
 
 ---
 
 ### Trading & Simulation
 
-- Paper trading infrastructure
-- TP/SL bracket handling (server-backed)
-- Replay and backtesting groundwork
-- Shared simulation core
-- Algo integration foundation
+- Paper trading on the server: market and limit orders, positions, and PnL. No real orders are sent.
+- Trade hotkeys (B, S, F, C) and a Paper Trading dock
+- TP/SL brackets on an open position, held and triggered by the server
+- Backtesting: `sentinel-backtest` replays a trade file (CSV or binary trade log) through the same simulation core. The Paper Trading dock has a Backtest tab for it.
+- Algo: a market-making algo (Avendella MM) runs in paper mode. Start and stop it from the Paper Trading dock.
 
 ---
 
 ### Platform Architecture
 
 - Client/server split
-- Custom stream protocol
-- TLS / WSS transport support
-- Config-driven runtime
-- Deterministic render/data flow
+- Custom stream protocol over WebSocket
+- Client and server talk over TLS (WSS). The server listens on 127.0.0.1 by default.
+- Config-driven runtime (YAML server and client configs)
 
 ---
 
 ## Recent Platform Expansion
 
-The latest integration introduced a major expansion across rendering, trading, and system architecture.
+Changes that landed in September and October 2026:
 
-Highlights:
-
-- Unified chart rendering architecture
-- Major `UnifiedGridRenderer` refactor
-- Paper trading + simulation vertical slice
-- Stock chart + SEC overlays
-- Watchlist, screener, and DOM improvements
-- Transport security (TLS / WSS)
-
-TPO, Footprint, and Volume Profile are implemented at a foundational level but remain disabled in the UI until complete.
+- The GPU heatmap is the only heatmap renderer. The client bins recorded and live order book data on the GPU and draws it. The earlier renderer is removed from the GUI and client.
+- `sentinel-capture` is a separate process that records a raw Coinbase level 2 journal, with one connection per product. `sentinel-roll` builds heatmap history files from that journal.
+- Candle history loads from Coinbase in pages of 350 bars as you pan back. The server caches closed bars.
+- Chart controls: Auto or Manual tick size, a liquidity range slider, liquidity labels, trade bubbles, and an auto price scale toggle.
+- Footprint, TPO, and Volume Profile are drawn in the GUI. Switch them on with the chart toolbar buttons. TPO and Volume Profile replace the heatmap while they are on.
 
 ---
 

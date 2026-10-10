@@ -11,7 +11,6 @@ This version modularizes startup logic for maintainability and clarity.
 #include <QByteArray> // for qputenv / qgetenv on all platforms
 #include "marketdata/model/TradeData.h"
 #include "UnifiedGridRenderer.h"
-#include "CoordinateSystem.h"
 #include "models/TimeAxisModel.hpp"
 #include "models/PriceAxisModel.hpp"
 #include "render/CandlestickBatched.hpp"
@@ -84,7 +83,6 @@ void registerMetaTypesAndQml() {
 
     qmlRegisterModule("Sentinel", 1, 0);
     qmlRegisterType<UnifiedGridRenderer>("Sentinel", 1, 0, "UnifiedGridRenderer");
-    qmlRegisterType<CoordinateSystem>("Sentinel", 1, 0, "CoordinateSystem");
     qmlRegisterType<TimeAxisModel>("Sentinel", 1, 0, "TimeAxisModel");
     qmlRegisterType<PriceAxisModel>("Sentinel", 1, 0, "PriceAxisModel");
     qmlRegisterType<AlgoOverlayRenderer>("Sentinel", 1, 0, "AlgoOverlayRenderer");

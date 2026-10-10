@@ -5,6 +5,9 @@
 
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QDateEdit>
+#include <QComboBox>
+#include "../../core/trading/MarketEventSource.hpp"
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -364,6 +367,43 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
     layout->setContentsMargins(6, 6, 6, 6);
     layout->setSpacing(6);
 
+    auto* sourceRow = new QHBoxLayout();
+    auto* sourceLabel = new QLabel(QStringLiteral("Source:"), parent);
+    m_btSource = new QComboBox(parent);
+    m_btSource->setObjectName("backtestSource");
+    m_btSource->addItems({QStringLiteral("Journal"), QStringLiteral("File")});
+    sourceLabel->setBuddy(m_btSource);
+    sourceRow->addWidget(sourceLabel);
+    sourceRow->addWidget(m_btSource, 1);
+    layout->addLayout(sourceRow);
+
+    auto* journalGroup = new QWidget(parent);
+    auto* journalGrid = new QGridLayout(journalGroup);
+    journalGrid->setContentsMargins(0, 0, 0, 0);
+    journalGrid->setSpacing(4);
+    const auto today = QDateTime::currentDateTimeUtc().date();
+    m_btFrom = new QDateEdit(today.addDays(-1), journalGroup);
+    m_btTo = new QDateEdit(today, journalGroup);
+    m_btFrom->setObjectName("backtestFrom");
+    m_btTo->setObjectName("backtestTo");
+    int column = 0;
+    for (auto* edit : {m_btFrom, m_btTo}) {
+        edit->setDisplayFormat("yyyy-MM-dd");
+        edit->setCalendarPopup(true);
+        auto* label = new QLabel(column == 0 ? QStringLiteral("From (UTC):") : QStringLiteral("To (UTC):"), journalGroup);
+        label->setBuddy(edit);
+        journalGrid->addWidget(label, 0, column++);
+        journalGrid->addWidget(edit, 0, column++);
+    }
+    m_btTo->setToolTip(QStringLiteral("Exclusive end date in UTC"));
+    m_btJournalRoot = new QLineEdit(QString::fromUtf8(trading::DefaultJournalRoot), journalGroup);
+    m_btJournalRoot->setObjectName("backtestJournalRoot");
+    auto* rootLabel = new QLabel(QStringLiteral("Journal root:"), journalGroup);
+    rootLabel->setBuddy(m_btJournalRoot);
+    journalGrid->addWidget(rootLabel, 1, 0);
+    journalGrid->addWidget(m_btJournalRoot, 1, 1, 1, 3);
+    layout->addWidget(journalGroup);
+
     // ── Trade log file picker ───────────────────────────────────────────────
     auto* fileGroup = new QGroupBox(QStringLiteral("Trade Log"), parent);
     auto* fileLayout = new QHBoxLayout(fileGroup);
@@ -375,6 +415,11 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
     browseBtn->setFixedWidth(60);
     fileLayout->addWidget(browseBtn);
     layout->addWidget(fileGroup);
+    fileGroup->hide();
+    connect(m_btSource, &QComboBox::currentIndexChanged, this, [journalGroup, fileGroup](int index) {
+        journalGroup->setVisible(index == 0);
+        fileGroup->setVisible(index == 1);
+    });
 
     // ── Parameters ─────────────────────────────────────────────────────────
     auto* paramGroup = new QGroupBox(QStringLiteral("Parameters"), parent);
@@ -396,6 +441,8 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
 
     paramGrid->addWidget(new QLabel(QStringLiteral("Symbol:"), paramGroup), 0, 0);
     m_btSymbol = new QLineEdit(QStringLiteral("BTC-USD"), paramGroup);
+    m_btSymbol->setAccessibleName(QStringLiteral("Backtest product"));
+    m_btSymbol->setObjectName("backtestProduct");
     paramGrid->addWidget(m_btSymbol, 0, 1);
 
     addLabeledSpin(1, QStringLiteral("Spread (bps):"), m_btSpread,  1.0, 500.0, 1.0, 10.0, QStringLiteral(" bps"));
@@ -407,8 +454,15 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
     auto* runRow = new QHBoxLayout();
     m_btRunBtn = new QPushButton(QStringLiteral("▶ Run Backtest"), parent);
     m_btRunBtn->setStyleSheet("QPushButton { background: #1a3a6a; color: #82b4ff; border: 1px solid #4478cc; padding: 4px 12px; }");
-    m_btStatus = new QLabel(QStringLiteral("Select a trade log and press Run."), parent);
+    m_btStatus = new QLabel(QStringLiteral("Choose a UTC range and press Run."), parent);
     m_btStatus->setStyleSheet("QLabel { color: #888; }");
+    m_btStatus->setObjectName("backtestStatus");
+    connect(m_btSource, &QComboBox::currentIndexChanged, this, [this](int index) {
+        if (m_btProcess && m_btProcess->state() != QProcess::NotRunning) return;
+        m_btStatus->setText(index == 0 ? QStringLiteral("Choose a UTC range and press Run.")
+                                      : QStringLiteral("Select a trade log and press Run."));
+        m_btStatus->setStyleSheet("QLabel { color: #888; }");
+    });
     runRow->addWidget(m_btRunBtn);
     runRow->addWidget(m_btStatus, 1);
     layout->addLayout(runRow);
@@ -436,18 +490,29 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
     // ── Run handler ────────────────────────────────────────────────────────
     connect(m_btRunBtn, &QPushButton::clicked, this, [this]() {
         const QString inputPath = m_btFilePath->text().trimmed();
-        if (inputPath.isEmpty()) {
+        const bool journal = m_btSource->currentIndex() == 0;
+        if (journal && (m_btFrom->date() >= m_btTo->date() || m_btJournalRoot->text().trimmed().isEmpty())) {
+            m_btStatus->setText(QStringLiteral("Error: select a journal root and a valid UTC range."));
+            m_btStatus->setStyleSheet("QLabel { color: #f44336; }");
+            return;
+        }
+        if (journal && !QFileInfo::exists(m_btJournalRoot->text().trimmed())) {
+            m_btStatus->setText(QStringLiteral("Error: journal root not found."));
+            m_btStatus->setStyleSheet("QLabel { color: #f44336; }");
+            return;
+        }
+        if (!journal && inputPath.isEmpty()) {
             m_btStatus->setText(QStringLiteral("Error: no trade log selected."));
             m_btStatus->setStyleSheet("QLabel { color: #f44336; }");
             return;
         }
-        if (!QFileInfo::exists(inputPath)) {
+        if (!journal && !QFileInfo::exists(inputPath)) {
             m_btStatus->setText(QStringLiteral("Error: file not found."));
             m_btStatus->setStyleSheet("QLabel { color: #f44336; }");
             return;
         }
 
-        // Locate sentinel_backtest binary relative to the running application.
+        // Locate sentinel-backtest binary relative to the running application.
         const QString appDir = QCoreApplication::applicationDirPath();
         QStringList candidates;
         // Dev build layouts.
@@ -456,6 +521,7 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
                  QString("../../sentinel-backtest/sentinel-backtest"),
                  QString("../../../apps/sentinel-backtest/sentinel-backtest"),
                  QString("sentinel-backtest"),
+                 QString("../../apps/sentinel-backtest/sentinel-backtest"),
              }) {
             candidates << QDir(appDir).absoluteFilePath(rel);
         }
@@ -469,7 +535,7 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
         }
 
         if (backtestBin.isEmpty()) {
-            m_btStatus->setText(QStringLiteral("Error: sentinel_backtest binary not found."));
+            m_btStatus->setText(QStringLiteral("Error: sentinel-backtest binary not found."));
             m_btStatus->setStyleSheet("QLabel { color: #f44336; }");
             return;
         }
@@ -480,6 +546,7 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
             m_btProcess->waitForFinished(500);
         }
 
+        m_btStderr.clear();
         m_btOutput->clear();
         m_btStatus->setText(QStringLiteral("Running..."));
         m_btStatus->setStyleSheet("QLabel { color: #ffc107; }");
@@ -498,14 +565,28 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
                 m_btOutput->appendPlainText(QString::fromLocal8Bit(m_btProcess->readAllStandardOutput()).trimmed());
             });
             connect(m_btProcess, &QProcess::readyReadStandardError, this, [this]() {
-                m_btOutput->appendPlainText(QStringLiteral("[stderr] ") +
-                    QString::fromLocal8Bit(m_btProcess->readAllStandardError()).trimmed());
+                const auto text = QString::fromLocal8Bit(m_btProcess->readAllStandardError());
+                m_btStderr += text;
+                m_btOutput->appendPlainText(QStringLiteral("[stderr] ") + text.trimmed());
+            });
+            connect(m_btProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+                if (error != QProcess::FailedToStart) return;
+                m_btRunBtn->setEnabled(true);
+                m_btStatus->setText(QStringLiteral("Error: backtest failed to start."));
+                m_btStatus->setStyleSheet("QLabel { color: #f44336; }");
+                m_btOutput->appendPlainText(m_btProcess->errorString());
             });
             connect(m_btProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
                     this, [this](int code, QProcess::ExitStatus status) {
+                const auto remaining = QString::fromLocal8Bit(m_btProcess->readAllStandardError());
+                m_btStderr += remaining;
+                if (!remaining.isEmpty()) {
+                    m_btOutput->appendPlainText(QStringLiteral("[stderr] ") + remaining.trimmed());
+                }
                 m_btRunBtn->setEnabled(true);
                 if (status == QProcess::CrashExit || code != 0) {
-                    m_btStatus->setText(QString("Exited with code %1").arg(code));
+                    m_btStatus->setText(m_btStderr.contains(QStringLiteral("no trades in range"))
+                        ? QStringLiteral("Error: no trades in range.") : QString("Exited with code %1").arg(code));
                     m_btStatus->setStyleSheet("QLabel { color: #f44336; }");
                 } else {
                     m_btStatus->setText(QStringLiteral("Done."));
@@ -514,7 +595,12 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
             });
         }
 
-        m_btProcess->start(backtestBin, {inputPath, symbol, spread, qty, maxPos});
+        const QStringList arguments = journal
+            ? QStringList{"--product", symbol, "--from", m_btFrom->date().toString("yyyy-MM-dd"),
+                          "--to", m_btTo->date().toString("yyyy-MM-dd"), "--journal",
+                          m_btJournalRoot->text().trimmed(), "--spread", spread, "--qty", qty, "--maxpos", maxPos}
+            : QStringList{inputPath, symbol, spread, qty, maxPos};
+        m_btProcess->start(backtestBin, arguments);
     });
 }
 

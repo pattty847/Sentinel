@@ -80,8 +80,10 @@ struct SpanSourceInput {
 // Composes the chunks at the span's tf and builds the upload image and the
 // resolution summary. Pure; any thread; throws what the builders throw. When
 // liveBytes is given, it holds the CPU bytes of the image while it is alive.
+// Cancellation is checked between build phases and summary columns; returns nullptr.
 SpanSourceBuildPtr buildSpanSource(const SpanSourceInput &input,
-                                   std::shared_ptr<std::atomic<int64_t>> liveBytes = {});
+                                   std::shared_ptr<std::atomic<int64_t>> liveBytes = {},
+                                   const std::function<bool()> &cancelled = {});
 
 class HeatmapSourceController;
 class HeatmapCellQuery;
@@ -98,6 +100,9 @@ struct ChunkBytes {
 // - Builds: a bounded pool (2 threads); concurrent requests for one key share
 //   one build; at most maxJobs keys are queued or running (request() refuses
 //   more and emits settled() when a job finishes).
+// - Cancellation is by consumer. Only jobs without waiters stop. Queued jobs
+//   release inputs and admission immediately; running jobs keep both in the
+//   ledger until they acknowledge cancellation. A cancelled job is never joined.
 // - Sharing: an LRU of builds plus a weak registry, so a build some chart still
 //   holds is shared even after the LRU dropped it.
 // - CPU tier (maxBytes, HeatmapBudgets::spanSources): controllers claim the
@@ -138,6 +143,7 @@ public:
         // inject a queue they run explicitly (deterministic, no sleeps).
         std::function<void(std::function<void()> job, int priority)> executor;
         std::function<void()> beforeBuild; // tests only: runs on the build thread
+        std::function<void()> buildCheckpoint; // tests only: at each cooperative stop point
         size_t cpuCeiling = 1024ull << 20;  // process-wide CPU ceiling (HeatmapBudgets)
     };
     explicit SpanSourceCache(QObject *parent = nullptr);
@@ -151,6 +157,9 @@ public:
     // thread, unless `context` was destroyed. False when the queue is full:
     // retry after settled().
     bool request(SpanSourceInput input, int priority, size_t reserveBytes, QObject *context, Completion completion);
+    // Remove this consumer's waiters except keys still needed by its current view.
+    // Owner thread only; completion cannot fire for a removed waiter.
+    void cancelRequests(QObject *context, const std::function<bool(const SpanSourceKey &)> &keep = {});
     // Pins an image in the CPU tier until the returned token is destroyed (on
     // this thread). A key claimed by several holders counts once.
     std::shared_ptr<void> claim(const SpanSourceBuildPtr &build);
@@ -180,6 +189,7 @@ public:
     size_t committedCpuBytes() const; // ledger total of every controller plus uncovered jobs
     struct Stats {
         uint64_t builds = 0, hits = 0, sharedBuilds = 0, failures = 0, evictions = 0, pressureDrops = 0;
+        uint64_t queuedCancels = 0, runningCancels = 0; // jobs, process-wide; running includes awaiting delivery
         size_t bytes = 0, entries = 0, jobs = 0; // LRU
         size_t claimedBytes = 0, reservedBytes = 0;
         int64_t liveBytes = 0;
@@ -368,8 +378,8 @@ public:
                             QObject *parent = nullptr);
     ~HeatmapSourceController() override;
     // Owner thread only (queue from others). A symbol or tf change bumps the
-    // serial (in-flight builds of the old serial are dropped and rejoined from
-    // the cache); the previous tf's built visible spans stay as fallback, then
+    // serial and removes its obsolete build waiters; shared builds keep running.
+    // The previous tf's built visible spans stay as fallback, then
     // as the recent-tf tier, so switching back republishes them without a build.
     void setView(const std::string &symbol, int64_t tfMs, double timeLoMs, double timeHiMs);
     // The tick the GUI drew. Sources are tick-free, so this never rebuilds;
@@ -512,7 +522,7 @@ private:
     SourceNeed need(const Slot &slot, const SpanSourcePlan &planned);
 
     size_t chunkCost(const ChunkKey &key) const;
-    void onBuilt(uint64_t serial, const SpanSourceKey &key, SpanSourceBuildPtr build, const QString &error);
+    void onBuilt(const SpanSourceKey &key, SpanSourceBuildPtr build, const QString &error);
     size_t estimate(const SpanId &span, const std::string &source, bool upload) const;
     size_t gpuBytes(const Slot &slot) const;
     size_t outstanding(const Slot &slot) const;

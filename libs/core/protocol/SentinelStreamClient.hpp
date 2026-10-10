@@ -7,9 +7,11 @@
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/ssl/context.hpp>
 #include <boost/asio/strand.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <memory>
 #include <thread>
 #include <atomic>
+#include <chrono>
 #include <optional>
 #include <deque>
 #include <nlohmann/json.hpp>
@@ -118,8 +120,12 @@ public:
     void sendAlgoCommand(const std::string& algoId, const std::string& action, const std::string& symbol, const trading::AlgoParams& params);
 
 signals:
+    // Repeated lifecycle notifications: connected fires on each successful handshake;
+    // disconnected also fires for failed attempts that never connected. Consumers
+    // must be idempotent and restore their session through the connected path.
     void connected();
     void disconnected();
+    // Transport failures report once per outage; protocol errors remain independently reported.
     void errorOccurred(const QString& error);
     void screenerRequestError(const QString& message);
     void subscriptionRefused(const QString& symbol, int maxConnections, const QString& message);
@@ -180,6 +186,8 @@ signals:
 
 private:
     void run();
+    void failConnection(const QString& reason);
+    static int reconnectDelayMs(unsigned attempt, unsigned jitter);
     void onResolve(boost::beast::error_code ec, tcp::resolver::results_type results);
     void onConnect(boost::beast::error_code ec, tcp::endpoint ep);
     void onSslHandshake(boost::beast::error_code ec);
@@ -220,6 +228,16 @@ private:
     net::strand<net::io_context::executor_type> m_strand{m_ioc.get_executor()};
     std::unique_ptr<net::executor_work_guard<net::io_context::executor_type>> m_work;
     std::thread m_thread;
+    tcp::resolver m_resolver{m_strand};
+    net::steady_timer m_reconnectTimer{m_strand};
+    bool m_attemptFailed = false; // network worker only; reset after draining cancellations
+    unsigned m_retryAttempt = 0;
+    using ConnectionClock = std::chrono::steady_clock;
+    std::optional<ConnectionClock::time_point> m_connectedAt;
+    ConnectionClock::time_point m_disconnectedAt;
+    ConnectionClock::time_point m_nextOutageLogAt;
+    QString m_connectionError;
+    bool m_outageReported = false; // survives handshakes until a connection stays up 10 s
     
     ssl::context m_sslCtx{ssl::context::tlsv13_client};
     using WebSocket = boost::beast::websocket::stream<

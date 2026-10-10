@@ -4,6 +4,7 @@
 #include <QRectF>
 #include <cstdint>
 
+#include "ChartRaster.hpp"
 #include "TimeAuthority.hpp"
 #include "TimeAxisMapping.hpp"
 
@@ -17,6 +18,9 @@ struct FrameViewportSnapshot {
     QPointF panVisualOffset;
     bool dragging = false;
     bool autoScrollEnabled = false;
+    // GridViewState::rasterAnchor (the raster camera's fixed point).
+    double anchorFracX = 0.5;
+    double anchorFracY = 0.5;
 };
 
 /// Per-frame stream generation counters for change detection.
@@ -44,4 +48,5 @@ struct FrameContext {
     FrameStreamGenerations streamGenerations;
     OverlayActivationSet overlays;
     TimeAxisMapping mapping;
+    chart_raster::RasterCamera raster; // what this frame draws (mapping is toMapping(raster))
 };

@@ -13,7 +13,8 @@ Threading: Populated on render thread in updatePaintNode(); consumed by
 #include <cstdint>
 
 struct TimeAxisMapping {
-    // View bounds (pan baked in during drag)
+    // View bounds: the drawn window (the raster camera's; a drag is baked in as
+    // whole device pixels)
     double viewStartMs = 0.0;
     double viewEndMs = 0.0;
     double viewMinPrice = 0.0;
@@ -39,6 +40,14 @@ struct TimeAxisMapping {
     QRectF srcRect;           // texture column/row sub-rect
     double cellW = 0.0;       // pixels per column
     double cellH = 0.0;       // pixels per row
+
+    // Whole-pixel chart mapping (render/ChartRaster.hpp): the surface's device pixel
+    // ratio and the drawn device pixels per row and per column (0: not a raster
+    // mapping). Row and column edges of the mapping sit on device pixel edges, so a
+    // layer that snaps its own geometry rounds y * dpr and x * dpr to integers.
+    double dpr = 1.0;
+    int rowPxDev = 0;
+    int colPxDev = 0;
 
     // Heatmap shader ONLY — never use for candle/label mapping
     float timeOffset = 0.0f;

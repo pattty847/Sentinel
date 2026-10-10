@@ -526,37 +526,6 @@ Rectangle {
         z: 3
         enabled: false
 
-        function getXForTimePoint(timePoint) {
-            var viewport = {
-                timeStart_ms: unifiedGridRenderer.visibleTimeStart,
-                timeEnd_ms: unifiedGridRenderer.visibleTimeEnd,
-                priceMin: unifiedGridRenderer.minPrice,
-                priceMax: unifiedGridRenderer.maxPrice,
-                width: unifiedGridRenderer.width,
-                height: unifiedGridRenderer.height
-            };
-            
-            var timeRange = viewport.timeEnd_ms - viewport.timeStart_ms;
-            var priceRange = viewport.priceMax - viewport.priceMin;
-            
-            if (timeRange <= 0 || priceRange <= 0) return 0;
-            
-            var normalizedTime = (timePoint - viewport.timeStart_ms) / timeRange;
-            var normalizedPrice = (unifiedGridRenderer.minPrice - viewport.priceMin) / priceRange;
-            
-            normalizedTime = Math.max(0, Math.min(1, normalizedTime));
-            normalizedPrice = Math.max(0, Math.min(1, normalizedPrice));
-            
-            var x = normalizedTime * viewport.width;
-            var y = (1.0 - normalizedPrice) * viewport.height;
-            
-            return x;
-        }
-        
-        function getTimePointForIndex(index, step, timeframe) {
-            return unifiedGridRenderer.visibleTimeStart + (index * step * timeframe);
-        }
-        
         Repeater {
             id: gridRepeater
             model: root.showTimeGrid ? timeAxisModel : null
@@ -567,7 +536,8 @@ Rectangle {
                 color: model.isMajorTick ? "#F0F0F0" : "#DCDCDC"
                 visible: root.showTimeGrid
                 
-                x: model.position + unifiedGridRenderer.panVisualOffset.x
+                // The time axis model maps through the raster camera (drag included).
+                x: model.position
             }
         }
     }
@@ -598,8 +568,8 @@ Rectangle {
         Accessible.description: "Drag or scroll to zoom price. Up/Down zoom; Home fits visible prices."
         Keys.onPressed: function(event) {
             if (event.key === Qt.Key_Up || event.key === Qt.Key_Down) {
-                unifiedGridRenderer.zoomPriceAt(event.key === Qt.Key_Up ? 120 : -120,
-                                               unifiedGridRenderer.height / 2, unifiedGridRenderer.height)
+                unifiedGridRenderer.zoomPriceClicks(event.key === Qt.Key_Up ? 1 : -1,
+                                                    unifiedGridRenderer.height / 2)
                 event.accepted = true
             } else if (event.key === Qt.Key_Home) {
                 unifiedGridRenderer.fitPriceToData()
@@ -639,25 +609,26 @@ Rectangle {
                 const p = root.mapPriceAxisPoint(priceAxis, mouse.x, mouse.y)
                 const deltaY = mouse.y - lastY
                 lastY = mouse.y
-                unifiedGridRenderer.zoomPriceAt(-deltaY * 24.0, p.y,
-                                                unifiedGridRenderer.height)
+                // Continuous while dragging; the release settles on a zoom rung.
+                unifiedGridRenderer.zoomPriceDrag(-deltaY * 24.0, p.y)
             }
             // Auto price scale on: fit the visible candles (live price when none).
             onDoubleClicked: unifiedGridRenderer.fitPriceToData()
-            onReleased: {}
-            onCanceled: {}
+            onReleased: unifiedGridRenderer.endZoomGesture()
+            onCanceled: unifiedGridRenderer.endZoomGesture()
         }
         ToolTip.visible: priceAxisMouse.containsMouse
         ToolTip.delay: 550
         ToolTip.text: "Price axis · drag/scroll to zoom; double-click or Home to fit"
 
         WheelHandler {
+            acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
             target: null
 
             onWheel: function(event) {
                 const p = root.mapPriceAxisPoint(priceAxis, event.x, event.y)
-                unifiedGridRenderer.zoomPriceAt(event.angleDelta.y, p.y,
-                                                unifiedGridRenderer.height)
+                unifiedGridRenderer.zoomPriceWheel(event.angleDelta.y, event.pixelDelta.y,
+                                                   event.phase, p.y)
                 event.accepted = true
             }
         }
@@ -689,8 +660,8 @@ Rectangle {
         Accessible.description: "Drag or scroll to zoom time. Left/Right zoom; Home resets the live view."
         Keys.onPressed: function(event) {
             if (event.key === Qt.Key_Right || event.key === Qt.Key_Left) {
-                unifiedGridRenderer.zoomTimeAt(event.key === Qt.Key_Right ? 120 : -120,
-                                              unifiedGridRenderer.width / 2, unifiedGridRenderer.width)
+                unifiedGridRenderer.zoomTimeClicks(event.key === Qt.Key_Right ? 1 : -1,
+                                                   unifiedGridRenderer.width / 2)
                 event.accepted = true
             } else if (event.key === Qt.Key_Home) {
                 unifiedGridRenderer.resetView()
@@ -729,25 +700,26 @@ Rectangle {
                 const p = root.mapTimeAxisPoint(timeAxis, mouse.x, mouse.y)
                 const deltaX = mouse.x - lastX
                 lastX = mouse.x
-                unifiedGridRenderer.zoomTimeAt(deltaX * 24.0, p.x,
-                                               unifiedGridRenderer.width)
+                // Continuous while dragging; the release settles on a zoom rung.
+                unifiedGridRenderer.zoomTimeDrag(deltaX * 24.0, p.x)
             }
             // The default view: initial span at the live edge, follow-live, auto price scale.
             onDoubleClicked: unifiedGridRenderer.resetView()
-            onReleased: {}
-            onCanceled: {}
+            onReleased: unifiedGridRenderer.endZoomGesture()
+            onCanceled: unifiedGridRenderer.endZoomGesture()
         }
         ToolTip.visible: timeAxisMouse.containsMouse
         ToolTip.delay: 550
         ToolTip.text: "Time axis · drag/scroll to zoom; double-click or Home to reset live view"
 
         WheelHandler {
+            acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
             target: null
 
             onWheel: function(event) {
                 const p = root.mapTimeAxisPoint(timeAxis, event.x, event.y)
-                unifiedGridRenderer.zoomTimeAt(event.angleDelta.y, p.x,
-                                               unifiedGridRenderer.width)
+                unifiedGridRenderer.zoomTimeWheel(event.angleDelta.y, event.pixelDelta.y,
+                                                  event.phase, p.x)
                 event.accepted = true
             }
         }

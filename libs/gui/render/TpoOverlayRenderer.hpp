@@ -1,5 +1,6 @@
 #pragma once
 #include "TradeOverlayMapping.hpp"
+#include "ChartRaster.hpp"
 
 #include "ChartTextPrimitives.hpp"
 #include "IOverlayRenderer.hpp"
@@ -75,14 +76,14 @@ public:
     void onRootRebuilt() override;
     int zOrder() const override { return 2; }
 
-    // World -> screen uses surfaceBounds + view time/price (INV-037).
+    // World -> screen uses the published frame camera; DPR and per-axis snapping also
+    // participate in the cached layout. No integer time-bound conversion.
     void render(QQuickWindow* window,
                 QSGNode* parentNode,
                 bool drawTpo,
                 const ChartTextAtlas& atlas,
                 bool atlasReady,
-                double viewMin, double viewMax,
-                int64_t viewStartMs, int64_t viewEndMs,
+                const chart_raster::RasterCamera& camera, double dpr, bool snapX, bool snapY,
                 const QRectF& surfaceBounds);
 
 private:
@@ -91,6 +92,8 @@ private:
         int group = 0;
         double cellW = 0.0;
         double cellH = 0.0;
+        double dpr = 1.0;
+        bool snapX = true, snapY = true;
         tpo::Layout layout = tpo::Layout::Collapsed;
         tpo::Theme theme = tpo::Theme::Rainbow;
         bool text = false;

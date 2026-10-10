@@ -16,7 +16,7 @@ struct alignas(16) DrawParams { // heatmap_display.vert/.frag uniform block
     float mapping[4];
     uint32_t dims[4];
     float style[4];
-    float tone[4]; // palette gamma, contrast, magnitude floor (HeatmapPalette tone)
+    float tone[4]; // palette gamma, contrast, magnitude floor (HeatmapPalette tone), coverage gamma (0: rest)
 };
 static_assert(sizeof(DrawParams) == 144);
 constexpr uint32_t kClampRows = 1;    // dims.z bit 0: rows beyond the grid repeat the sentinel rows
@@ -282,7 +282,7 @@ bool HeatmapTileNode::wanted(const SpanRef &ref, size_t index) const {
     while (first < ref.count && !ref.sources[first]) ++first;
     if (index == first) return true;
     if (source->bandEnd <= source->bandLo || !indexed_) return false;
-    const auto &v = frame_.view;
+    const ViewWindow v = binExtent();
     const double span = v.priceHi - v.priceLo, scale = indexed_->priceScale;
     const double lo = (v.priceLo - span) * scale, hi = (v.priceHi + span) * scale;
     return double(source->bandLo) < hi && double(source->bandEnd) > lo;
@@ -440,10 +440,18 @@ std::unique_ptr<QRhiBuffer> HeatmapTileNode::cellBuffer(uint64_t bytes, bool liv
     return buffer;
 }
 
+ViewWindow HeatmapTileNode::binExtent() const {
+    if (!frame_.binView) return frame_.view;
+    const auto &v = frame_.view, &b = *frame_.binView;
+    return {std::min(v.timeLoMs, b.timeLoMs), std::max(v.timeHiMs, b.timeHiMs), std::min(v.priceLo, b.priceLo),
+            std::max(v.priceHi, b.priceHi)};
+}
+
 bool HeatmapTileNode::rowsCover(const Bin &bin) const {
     const double tick = bin.tick;
-    const auto first = int64_t(std::floor(frame_.view.priceLo / tick)) - 1;
-    const auto end = int64_t(std::ceil(frame_.view.priceHi / tick)) + 1;
+    const ViewWindow extent = binExtent();
+    const auto first = int64_t(std::floor(extent.priceLo / tick)) - 1;
+    const auto end = int64_t(std::ceil(extent.priceHi / tick)) + 1;
     return first >= bin.grid.firstBin && end <= bin.grid.firstBin + int64_t(bin.grid.rows);
 }
 
@@ -451,7 +459,7 @@ bool HeatmapTileNode::rowsCover(const Bin &bin) const {
 // blocks: the first source, then each finer source as a fill pass.
 bool HeatmapTileNode::binRows(Bin &bin, QRhiCommandBuffer *cb) {
     const auto started = std::chrono::steady_clock::now();
-    const auto &view = frame_.view;
+    const ViewWindow view = binExtent();
     const double span = view.priceHi - view.priceLo;
     bin.grid.firstBin = int64_t(std::floor((view.priceLo - span) / bin.tick)) - 1;
     const int64_t end = int64_t(std::ceil((view.priceHi + span) / bin.tick)) + 1;
@@ -814,7 +822,7 @@ bool HeatmapTileNode::addBinDraw(QRhiResourceUpdateBatch *updates, Bin &bin, flo
         p.dims[0] = block.grid.columns; p.dims[1] = block.grid.rows; p.dims[2] = kClampRows;
         p.style[0] = frame_.style.codeFloor; p.style[1] = frame_.style.codeRange; p.style[2] = opacity * frame_.style.opacity;
         const auto &tone = palette().tone;
-        p.tone[0] = tone.gamma; p.tone[1] = tone.contrast; p.tone[2] = tone.floor;
+        p.tone[0] = tone.gamma; p.tone[1] = tone.contrast; p.tone[2] = tone.floor; p.tone[3] = frame_.coverageGamma;
         updates->updateDynamicBuffer(block.params.get(), 0, sizeof(p), &p);
         tileDraws_.push_back({block.bindings.get(), opacity});
         any = true;
@@ -851,7 +859,7 @@ bool HeatmapTileNode::addLoadingDraw(QRhiResourceUpdateBatch *updates, int64_t l
     p.mapping[0] = 0; p.mapping[1] = 0.999f; p.mapping[2] = 0; p.mapping[3] = 1;
     p.dims[0] = 1; p.dims[1] = 1; p.dims[2] = kClampRows;
     p.style[0] = frame_.style.codeFloor; p.style[1] = frame_.style.codeRange; p.style[2] = frame_.style.opacity;
-    p.tone[0] = 1; p.tone[1] = 1; // the hatch does not sample the palette
+    p.tone[0] = 1; p.tone[1] = 1; p.tone[3] = frame_.coverageGamma; // the hatch does not sample the palette
     updates->updateDynamicBuffer(loadingDraws_[loadingUsed_]->params.get(), 0, sizeof(p), &p);
     ++loadingUsed_;
     return true;
@@ -1204,7 +1212,8 @@ void HeatmapTileNode::prepare() {
     slots_.clear();
     uint32_t refusedSlots = 0;
     if (set && tf > 0) {
-        auto range = tiles::tilesCovering(frame_.view.timeLoMs, frame_.view.timeHiMs, tf, 0);
+        const ViewWindow extent = binExtent(); // a zoom glide's whole extent, at its start
+        auto range = tiles::tilesCovering(extent.timeLoMs, extent.timeHiMs, tf, 0);
         if (range.count() > 4096) range.end = range.first; // degenerate view (time zoom is clamped upstream)
         for (int64_t t = range.first; t < range.end; ++t) {
             Slot s;
@@ -1429,6 +1438,7 @@ void HeatmapTileNode::prepare() {
     stats_->crossfading.store(fadingLayers > 0);
     stats_->drawnTickUnits.store(drawnTick_);
     stats_->drawnTfMs.store(drawnTf_);
+    stats_->coverageBlend.store(frame_.coverageGamma != 0.0f);
     stats_->complete.store(complete);
     stats_->wantsFrame.store(uploadPending_ || fadingLayers > 0 || pendingLive_ != nullptr ||
                              (binner_ && binner_->selfTestInFlightForTest()));
