@@ -8,7 +8,8 @@
 #include "roller/ShadowRoller.hpp"
 #include <chrono>
 #include <thread>
-#include <stdexcept>
+#include <fstream>
+#include <functional>
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QElapsedTimer>
@@ -195,10 +196,6 @@ struct RollerMetricsFixture {
     std::unique_ptr<sentinel::roller::ShadowRoller> roller;
     const int64_t epoch = sentinel::roller::parseTime("2026-10-01T00:00:00Z");
 
-    ~RollerMetricsFixture() {
-        roller.reset(); // join before clearing the process-wide failure hook
-        recording::Hmc2Store::setDirectorySyncHookForTest({});
-    }
     void prepare() {
         ASSERT_TRUE(dir.isValid());
         config = recordingConfig(dir);
@@ -259,15 +256,18 @@ struct RollerMetricsFixture {
             [this](const auto& product, const auto& layer) { return roller->watermarks(product, layer); },
             [this](const auto& product) { return roller->running(product); });
     }
-    bool waitFor(const std::string& line) {
+    bool waitUntil(const std::function<bool()>& predicate) {
         QElapsedTimer timer;
         timer.start();
         do {
-            if (has(registry.render(), line)) return true;
+            if (predicate()) return true;
             QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         } while (timer.elapsed() < 5000);
-        return has(registry.render(), line);
+        return predicate();
+    }
+    bool waitFor(const std::string& line) {
+        return waitUntil([&] { return has(registry.render(), line); });
     }
 };
 } // namespace
@@ -309,14 +309,43 @@ TEST(ServerMetrics, RollerColumnsAndInvalidationsOverHttp) {
              "{\"product\":\"BTC-USD\",\"reason\":\"test invalidation\"}");
     ASSERT_TRUE(f.waitFor("sentinel_roller_invalidations_total{product=\"BTC-USD\"} 2"));
     EXPECT_TRUE(has(f.registry.render(), "sentinel_roller_invalidations_total{product=\"SOL-USD\"} 1"));
-    // Replacing the daily recorder cannot reset the process counter or count
-    // replayed minutes below the checkpoint as fresh appends.
-    f.roller.reset();
-    f.start();
-    ASSERT_TRUE(f.waitFor("sentinel_roller_shadow_running{product=\"BTC-USD\"} 1"));
+    // Replace the history recorder through a production retry inside the
+    // existing supervisor. A process restart has a new registry; constructing
+    // another supervisor against this registry would re-register samplers.
+    const auto checkpoint = std::filesystem::path(f.config.rollerShadow.outputRoot) / "BTC-USD" / "roller.json";
+    nlohmann::json savedCheckpoint;
+    {
+        std::ifstream in(checkpoint);
+        ASSERT_TRUE(in.is_open());
+        in >> savedCheckpoint;
+    }
+    ASSERT_EQ(savedCheckpoint.at("committedThroughMs").get<int64_t>(), f.epoch + 120000);
+    ASSERT_TRUE(std::filesystem::remove(checkpoint));
+    ASSERT_TRUE(std::filesystem::create_directory(checkpoint));
+    {
+        std::ofstream blocker(checkpoint / "blocker");
+        blocker << "block checkpoint replacement";
+        blocker.close();
+        ASSERT_TRUE(blocker.good());
+    }
+    // Both minute appends succeed, but the checkpoint replacement fails.
     f.append(0, 183000, sentinel::capture::Kind::Frame);
     ASSERT_TRUE(f.waitFor("sentinel_recorder_columns_written_total 8")) << f.registry.render();
+    auto& retries = f.registry.counter("sentinel_roller_shadow_setup_failures_total", "", {{"product", "BTC-USD"}});
+    ASSERT_TRUE(f.waitUntil([&] { return retries.value() >= 1; })) << f.registry.render();
+    ASSERT_TRUE(std::filesystem::remove(checkpoint / "blocker"));
+    ASSERT_TRUE(std::filesystem::remove(checkpoint));
+    sentinel::roller::writeCheckpoint(checkpoint, savedCheckpoint);
+    // Recovery replays the appended minute and durably checkpoints it. The
+    // count stays at eight: replay does not perform a new HMC2 append.
+    ASSERT_TRUE(f.waitUntil([&] {
+        std::ifstream in(checkpoint);
+        if (!in.is_open()) return false;
+        const auto current = nlohmann::json::parse(in, nullptr, false);
+        return current.is_object() && current.value("committedThroughMs", int64_t{0}) >= f.epoch + 180000;
+    })) << f.registry.render();
     EXPECT_TRUE(has(scrape(server.port()), "sentinel_recorder_columns_written_total 8"));
+    EXPECT_TRUE(has(f.registry.render(), "sentinel_roller_write_errors_total{product=\"BTC-USD\"} 0"));
 }
 
 TEST(ServerMetrics, RollerHmc2AppendFailureIsExported) {
@@ -327,12 +356,18 @@ TEST(ServerMetrics, RollerHmc2AppendFailureIsExported) {
     RollerMetricsFixture f;
     f.prepare();
     ASSERT_FALSE(HasFatalFailure());
-    // Fail directory durability inside BTC's minute append, after store setup.
-    // The other product still commits. Keep the hook installed through join.
-    recording::Hmc2Store::setDirectorySyncHookForTest([](const auto& path) {
-        if (path.filename() == "near-60000" && path.parent_path().filename() == "BTC-USD")
-            throw std::runtime_error("injected HMC2 directory sync failure");
-    });
+    // A regular file where the near-layer directory belongs forces failure
+    // inside append() on every retry. Store setup and BTC deep/SOL appends
+    // still succeed; no process-wide hook or parent-sync assumption is needed.
+    const auto blockedLayer = std::filesystem::path(f.config.rollerShadow.outputRoot) / "BTC-USD" / "near-60000";
+    std::filesystem::create_directories(blockedLayer.parent_path());
+    {
+        std::ofstream blocker(blockedLayer);
+        blocker << "block near-layer directory creation";
+        blocker.close();
+        ASSERT_TRUE(blocker.good());
+    }
+    ASSERT_TRUE(std::filesystem::is_regular_file(blockedLayer));
     f.start();
     for (size_t i = 0; i < 2; ++i) f.append(i, 63000, sentinel::capture::Kind::Frame);
     ASSERT_TRUE(f.waitFor("sentinel_recorder_last_column_timestamp_seconds{product=\"SOL-USD\",layer=\"near\"} " +
@@ -342,12 +377,7 @@ TEST(ServerMetrics, RollerHmc2AppendFailureIsExported) {
     ASSERT_TRUE(f.registry.hasSeries("sentinel_roller_write_errors_total", {{"product", "BTC-USD"}}));
     auto& failures = f.registry.counter("sentinel_roller_write_errors_total", "", {{"product", "BTC-USD"}});
     auto& retries = f.registry.counter("sentinel_roller_shadow_setup_failures_total", "", {{"product", "BTC-USD"}});
-    QElapsedTimer timer;
-    timer.start();
-    while (retries.value() < 2 && timer.elapsed() < 5000) {
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    ASSERT_TRUE(f.waitUntil([&] { return retries.value() >= 2; })) << f.registry.render();
     MetricsHttpServer server(f.registry);
     ASSERT_TRUE(server.listen(0));
     const auto text = scrape(server.port());
