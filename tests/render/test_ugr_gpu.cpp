@@ -15,6 +15,7 @@
 #include "render/AlgoOverlayRenderer.hpp"
 #include "render/CandlestickBatched.hpp"
 #include "render/CandlestickOverlayItem.hpp"
+#include "render/CandlePixelGeometry.hpp"
 #include "render/DataProcessor.hpp"
 #include "render/LabTextItem.hpp"
 #include "render/PaperTradeOverlayModel.hpp"
@@ -37,6 +38,7 @@
 #include <QQuickView>
 #include <QQuickWindow>
 #include <QSGOpacityNode>
+#include <QSGGeometryNode>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QtQml/qqml.h>
@@ -57,6 +59,20 @@
 namespace {
 using namespace synthetic_hmc2;
 QSGNode *paintRoot(QQuickItem *item) { return QQuickItemPrivate::get(item)->paintNode; }
+
+// Body policy belongs to the production helper; image checks must use its
+// device edges rather than the former round-to-nearest candle rasterization.
+candle_pixels::Body bodyForFrame(const MappingFrameContext& frame, double bucket, double open, double close) {
+    const auto& mapping = frame.mapping;
+    const auto snap = candle_pixels::axisSnap(frame.raster);
+    return candle_pixels::body(mapping.timeToScreenX(bucket), mapping.timeToScreenX(bucket + mapping.appendMs),
+                               mapping.priceToScreenY(open), mapping.priceToScreenY(close),
+                               frame.surfaceDpr, snap.x, snap.y);
+}
+void expectBodyRows(int top, int bottomExclusive, const candle_pixels::Body& expected, double dpr) {
+    EXPECT_EQ(top, int(std::lround(expected.y.lo * dpr))) << "candle body top at this frame's rows";
+    EXPECT_EQ(bottomExclusive, int(std::lround(expected.y.hi * dpr))) << "candle body bottom at this frame's rows";
+}
 
 // One synthetic recording (4 h) for the whole binary: the data path is configured
 // once in main() and never reconfigured (a reconfigure with local chunk reads in
@@ -379,7 +395,8 @@ TEST_F(UgrGpu, CandlesAlignWithHeatmapColumns) {
         candles->setVisible(false);
         ASSERT_TRUE(frames(3)) << error.toStdString();
         const QImage heat = image;
-        const auto mapping = ugr->currentTimeAxisMapping();
+        const auto frame = ugr->currentFrameContext();
+        const auto mapping = frame.mapping;
         const auto cam = drawn();
         ASSERT_TRUE(mapping.valid && cam.valid);
         ASSERT_EQ(cam.colPx, 15);
@@ -435,6 +452,9 @@ TEST_F(UgrGpu, CandlesAlignWithHeatmapColumns) {
                     last = x;
                 }
             ASSERT_GE(first, 0) << "a candle body in the column [" << a << ", " << b << ")";
+            const int gap = std::max(1, int(std::floor(0.15 * cam.colPx)));
+            EXPECT_EQ(first, a + gap) << "body left equals column left + integer gap";
+            EXPECT_EQ(last + 1, b - gap) << "body right equals column right - integer gap";
             EXPECT_EQ(first + last, a + b - 1) << "the body is centred exactly in [" << a << ", " << b << ")";
             // The body's rows (beside the wick): from the close's row edge to the open's.
             int top = -1, bottom = -1;
@@ -443,8 +463,10 @@ TEST_F(UgrGpu, CandlesAlignWithHeatmapColumns) {
                     if (top < 0) top = y;
                     bottom = y;
                 }
-            EXPECT_EQ(top, int(std::lround(yClose))) << "body top on the close's row edge, column " << a;
-            EXPECT_EQ(bottom + 1, int(std::lround(yOpen))) << "body bottom on the open's row edge, column " << a;
+            const auto expected = bodyForFrame(frame, mapping.screenXToTime(a), open, close);
+            EXPECT_FLOAT_EQ(expected.y.lo, yClose) << "close is a heatmap bin edge";
+            EXPECT_FLOAT_EQ(expected.y.hi, yOpen) << "open is a heatmap bin edge";
+            expectBodyRows(top, bottom + 1, expected, frame.surfaceDpr);
             ++checked;
         }
         EXPECT_GE(checked, 35);
@@ -464,6 +486,74 @@ TEST_F(UgrGpu, CandlesAlignWithHeatmapColumns) {
         EXPECT_EQ(drawn().leftColIndex, during.leftColIndex) << "the release keeps the dragged columns";
         EXPECT_EQ(drawn().topRowIndex, during.topRowIndex) << "the release keeps the dragged rows";
         EXPECT_EQ(image, dragged) << "the release does not move the picture";
+    }
+    delete candles;
+}
+
+// B3's small/wide columns and both device ratios on the real sync/render path.
+// Inspect submitted geometry as well as the heatmap pixels: C3 has a one-pixel
+// body under its wick, so an image alone cannot distinguish those two quads.
+TEST_F(UgrGpu, CandleBodyEdgesAtEveryColumnWidthAndDeviceRatio) {
+    noLabels();
+    ugr->setWidth(320);
+    auto* view = ugr->getViewState();
+    view->setAutoPriceScale(false);
+    CandleSeriesBuffer buffer;
+    auto* candles = new CandlestickOverlayItem(scene->window()->contentItem());
+    candles->setSize(ugr->size());
+    candles->setMappingProvider(ugr);
+    candles->setCandleBuffer(&buffer);
+    candles->setSymbol("BTC-USD");
+    candles->setTimeframeSec(60);
+    for (double dpr : {1.0, 2.0}) {
+        ASSERT_TRUE(scene->setDevicePixelRatio(dpr, &error)) << error.toStdString();
+        emit scene->window()->screenChanged(scene->window()->screen());
+        for (int columns : {3, 5, 8, 20}) {
+            SCOPED_TRACE(::testing::Message() << "C=" << columns << " dpr=" << dpr);
+            const qint64 lo = epoch + minute / 3;
+            ugr->setViewport(lo, lo + std::llround(320 * dpr * minute / columns), 99'900, 100'300);
+            ASSERT_TRUE(settle()) << error.toStdString();
+            const double tick = drawn().tick;
+            const double open = std::round(100'050 / tick) * tick, close = open + 4 * tick;
+            std::vector<CandleSeriesBuffer::CandleBar> bars;
+            for (qint64 t = lo / minute * minute; t < view->getVisibleTimeEnd() + minute; t += minute)
+                bars.push_back({t, t + minute, open, close, open, close, 1, true, 0, false});
+            buffer.applyHistory("BTC-USD", 60, bars);
+            ugr->beginPanAt(320, 160);
+            ugr->updatePanAt(320 + 0.3 / dpr, 160 + 0.3 / dpr);
+            ASSERT_TRUE(frames(3)) << error.toStdString();
+            const auto cam = drawn();
+            ASSERT_FALSE(cam.free);
+            ASSERT_EQ(cam.colPx, columns);
+            ASSERT_EQ(cam.dpr, dpr);
+            const auto mapping = ugr->currentTimeAxisMapping();
+            const auto* root = paintRoot(candles);
+            ASSERT_TRUE(root);
+            const auto* geometry = static_cast<const QSGGeometryNode*>(root->lastChild())->geometry();
+            const auto* v = geometry->vertexDataAsColoredPoint2D();
+            ASSERT_GT(geometry->vertexCount(), 0);
+            const double gap = std::max(1.0, std::floor(0.15 * columns));
+            int checked = 0;
+            for (int i = 0; i < geometry->vertexCount(); i += 6) {
+                if (v[i].x < 0 || v[i+2].x > 320) continue;
+                const qint64 t = std::llround(mapping.screenXToTime(v[i].x - gap / dpr) / minute) * minute;
+                EXPECT_NEAR(v[i].x * dpr, cam.xDev(t) + gap, 1e-4);
+                EXPECT_NEAR(v[i+2].x * dpr, cam.xDev(t + minute) - gap, 1e-4);
+                EXPECT_NEAR(v[i].y * dpr, cam.yDev(close), 1e-4);
+                EXPECT_NEAR(v[i+1].y * dpr, cam.yDev(open), 1e-4);
+                // The heatmap changes exactly at the column boundary beside this body.
+                const int edge = std::lround(cam.xDev(t));
+                if (edge > 0 && edge < image.width()) {
+                    int changes = 0;
+                    for (int y = 5; y < image.height() - 5; y += 2)
+                        changes += image.pixel(edge-1, y) != image.pixel(edge, y);
+                    EXPECT_GT(changes, 0);
+                }
+                ++checked;
+            }
+            EXPECT_GE(checked, 10);
+            ugr->endPanAt();
+        }
     }
     delete candles;
 }
@@ -819,7 +909,8 @@ TEST_F(UgrGpu, ATickChangeMovesEveryLayerInTheSameFrame) {
     priceAxis.setTarget(ugr);
     ASSERT_TRUE(settle()) << error.toStdString();
     ASSERT_TRUE(frames(3)) << error.toStdString();
-    const double tick0 = drawn().tick;
+    const auto previousFrame = ugr->currentFrameContext();
+    const double tick0 = previousFrame.raster.tick;
     const uint64_t version = ugr->getViewState()->getViewportVersion();
     auto settings = brightSettings();
     settings.showLabels = false;
@@ -834,17 +925,21 @@ TEST_F(UgrGpu, ATickChangeMovesEveryLayerInTheSameFrame) {
         if (cam.tick == tick0) continue;
         seen = true; // the first frame that draws the new tick
         EXPECT_EQ(ugr->getViewState()->getViewportVersion(), version) << "a tick-only change";
-        const auto mapping = ugr->currentTimeAxisMapping();
+        const auto frame = ugr->currentFrameContext();
         const int64_t bucket = (lo / minute + 20) * minute;
-        const int x = int(std::floor(mapping.timeToScreenX(double(bucket) + minute / 2.0) - 0.2 * mapping.cellW));
+        const auto expected = bodyForFrame(frame, bucket, open, close);
+        const auto stale = bodyForFrame(previousFrame, bucket, open, close);
+        ASSERT_TRUE(expected.y.lo != stale.y.lo || expected.y.hi != stale.y.hi)
+            << "the first new-tick frame must distinguish a previous-tick candle";
+        // Inside the body, beside the wick, in physical image coordinates.
+        const int x = int(std::floor((expected.x.lo + (expected.x.hi - expected.x.lo) * 0.25) * frame.surfaceDpr));
         int top = -1, bottom = -1;
         for (int y = 0; y < image.height(); ++y)
             if (image.pixel(x, y) == body) {
                 if (top < 0) top = y;
                 bottom = y;
             }
-        EXPECT_EQ(top, int(std::ceil(mapping.priceToScreenY(close) - 0.5))) << "candle body top at this frame's rows";
-        EXPECT_EQ(bottom + 1, int(std::ceil(mapping.priceToScreenY(open) - 0.5))) << "candle body bottom";
+        expectBodyRows(top, bottom + 1, expected, frame.surfaceDpr);
         priceAxis.copyTicks(ticks);
         ASSERT_FALSE(ticks.empty());
         for (const auto &t : ticks)
@@ -852,6 +947,73 @@ TEST_F(UgrGpu, ATickChangeMovesEveryLayerInTheSameFrame) {
     }
     EXPECT_TRUE(seen) << "the tick changed";
     delete candles;
+}
+
+class CandleTickFrameProvider : public UnifiedGridRenderer {
+public:
+    MappingFrameContext frame;
+    MappingFrameContext currentFrameContext() const override { return frame; }
+};
+class CandleTickGeometryItem : public CandlestickOverlayItem {
+public:
+    using CandlestickOverlayItem::updatePaintNode;
+};
+TEST(UgrCandleCpu, ATickChangeBodyOracleRejectsPreviousFrameGeometry) {
+    CandleTickFrameProvider provider;
+    CandleTickGeometryItem candles;
+    CandleSeriesBuffer buffer;
+    constexpr qint64 bucket = 1'200'000;
+    constexpr double open = 100'050, close = 100'150;
+    buffer.applyHistory("BTC-USD", 60, {{bucket, bucket + minute, open, 100'250, 99'950, close, 1, true, 0, false}});
+    candles.setSize({640, 320});
+    candles.setMappingProvider(&provider);
+    candles.setCandleBuffer(&buffer);
+    candles.setSymbol("BTC-USD");
+    candles.setTimeframeSec(60);
+    QSGNode* root = nullptr;
+    for (double dpr : {1.0, 2.0}) {
+        chart_raster::RasterInputs in;
+        in.timeStart = bucket - minute + minute / 3;
+        in.timeEnd = in.timeStart + 41 * minute + 3 * minute / 10;
+        in.minPrice = 99'900;
+        in.maxPrice = 100'317;
+        in.tfMs = minute;
+        in.tick = 10;
+        in.itemWidthLogical = 640;
+        in.itemHeightLogical = 320;
+        in.dpr = dpr;
+        const auto previous = chart_raster::computeRaster(in, {});
+        in.tick = 20;
+        const auto current = chart_raster::computeRaster(in, previous.step());
+        const auto frameFor = [&](const chart_raster::RasterCamera& camera) {
+            MappingFrameContext frame;
+            frame.raster = camera;
+            frame.mapping = chart_raster::toMapping(camera);
+            frame.surfaceDpr = dpr;
+            frame.viewportValid = true;
+            frame.viewportTimeStart = in.timeStart;
+            frame.viewportTimeEnd = in.timeEnd;
+            return frame;
+        };
+        const auto previousFrame = frameFor(previous), currentFrame = frameFor(current);
+        const auto stale = bodyForFrame(previousFrame, bucket, open, close);
+        const auto expected = bodyForFrame(currentFrame, bucket, open, close);
+        ASSERT_TRUE(expected.y.lo != stale.y.lo || expected.y.hi != stale.y.hi);
+        provider.frame = previousFrame;
+        root = candles.updatePaintNode(root, nullptr);
+        auto* geometry = static_cast<QSGGeometryNode*>(root->lastChild())->geometry();
+        ASSERT_EQ(geometry->vertexCount(), 6);
+        const auto* v = geometry->vertexDataAsColoredPoint2D();
+        expectBodyRows(std::lround(v[0].y * dpr), std::lround(v[1].y * dpr), stale, dpr);
+        // Tick-only publication: generation, viewport and item size stay fixed.
+        provider.frame = currentFrame;
+        root = candles.updatePaintNode(root, nullptr);
+        geometry = static_cast<QSGGeometryNode*>(root->lastChild())->geometry();
+        ASSERT_EQ(geometry->vertexCount(), 6);
+        v = geometry->vertexDataAsColoredPoint2D();
+        expectBodyRows(std::lround(v[0].y * dpr), std::lround(v[1].y * dpr), expected, dpr);
+    }
+    delete root;
 }
 
 // Review fix 3: the price fit covers the candles drawn, not only those in the stored
@@ -2166,6 +2328,18 @@ TEST_F(UgrGpu, AGlideLandsOnTheRestFrameOfItsTarget) {
     auto *view = ugr->getViewState();
     view->setAutoPriceScale(false);
     ASSERT_TRUE(settle()) << error.toStdString();
+    CandleSeriesBuffer buffer;
+    std::vector<CandleSeriesBuffer::CandleBar> bars;
+    for (qint64 t = viewLo - 20 * minute; t < viewHi + 20 * minute; t += minute)
+        bars.push_back({t, t + minute, 100'000, 100'130, 99'980, 100'100, 1, true, 0, false});
+    buffer.applyHistory("BTC-USD", 60, bars);
+    auto* candles = new CandlestickOverlayItem(scene->window()->contentItem());
+    candles->setSize(ugr->size());
+    candles->setMappingProvider(ugr);
+    candles->setCandleBuffer(&buffer);
+    candles->setSymbol("BTC-USD");
+    candles->setTimeframeSec(60);
+    ASSERT_TRUE(frames(2)) << error.toStdString();
     const auto start = drawn();
     const qint64 s0 = view->getVisibleTimeStart(), e0 = view->getVisibleTimeEnd();
     const double p0 = view->getMinPrice(), p1 = view->getMaxPrice();
@@ -2198,6 +2372,20 @@ TEST_F(UgrGpu, AGlideLandsOnTheRestFrameOfItsTarget) {
         const auto cam = drawn();
         EXPECT_TRUE(cam.free) << ms << " ms: a transition frame";
         EXPECT_TRUE(layer().tileStats().coverageBlend.load()) << ms << " ms: drawn with coverage";
+        const auto* root = paintRoot(candles);
+        ASSERT_TRUE(root);
+        const auto* g = static_cast<const QSGGeometryNode*>(root->lastChild())->geometry();
+        const auto* v = g->vertexDataAsColoredPoint2D();
+        ASSERT_GT(g->vertexCount(), 0);
+        const auto mapping = ugr->currentTimeAxisMapping();
+        const double gap = cam.colPxF * 0.15;
+        for (int i = 0; i < g->vertexCount(); i += 6) {
+            const qint64 t = std::llround(mapping.screenXToTime(v[i].x - gap / cam.dpr) / minute) * minute;
+            EXPECT_NEAR(v[i].x * cam.dpr, cam.xDev(t) + gap, 1e-4);
+            EXPECT_NEAR(v[i+2].x * cam.dpr, cam.xDev(t + minute) - gap, 1e-4);
+            EXPECT_NEAR(v[i].y * cam.dpr, cam.yDev(100'100), 1e-4);
+            EXPECT_NEAR(v[i+1].y * cam.dpr, cam.yDev(100'000), 1e-4);
+        }
         blended += !whole(cam.colPxF) && !whole(cam.rowPxF);
     }
     EXPECT_GE(blended, 8) << "fractional rows and columns during the glide";
@@ -2212,7 +2400,8 @@ TEST_F(UgrGpu, AGlideLandsOnTheRestFrameOfItsTarget) {
     EXPECT_EQ(landed.topRowIndex, target.topRowIndex);
     EXPECT_EQ(landed.drawnStartMs, target.drawnStartMs);
     EXPECT_EQ(landed.drawnMaxPrice, target.drawnMaxPrice);
-    EXPECT_TRUE(image == rest) << "the landing frame is byte-identical to the rest render";
+    EXPECT_TRUE(image == rest) << "the landing frame with candles is byte-identical to the rest render";
+    delete candles;
 }
 
 // Acceptance 4: the content under the cursor stays within half a device pixel of it on
