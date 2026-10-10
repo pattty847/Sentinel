@@ -81,7 +81,7 @@ Runbook notes: capture's fan-out allows 8 clients and the recorder uses 7, one p
 
 0. GUI zoom polish, then a fresh conductor (owner 2026-10-09):
    - Candle width (owner screenshots 2026-10-09): body = column - 2 px, capped at 9 px (zoomed in: thin; zoomed out: 1 px from each column edge). In flight (`lt-sol/candle-width`).
-   - Autofit decision: the owner compares auto price scale on (TradingView-style: the wheel zooms time, price follows candles in whole-row steps) and off (map-style: both axes) once the wheel fix is in.
+   - Autofit DECIDED (owner 2026-10-09): stays as it is, TradingView-style, toggled by the bottom-right buttons. The disliked "auto resize" was the wheel bug, now fixed.
    - Min row height default (2 vs 3) after the owner tries it.
    - UGR refactor (owner 2026-10-09, in a fresh conductor session): `UnifiedGridRenderer` is about 3,600 lines over 5 files plus a 685-line header (26 commits since 2026-10-01, mostly agent fix rounds); `MainWindowGpu.cpp` 1,928. Step 1: a read-only Fable audit and split plan (responsibilities, dead code, duplicated logic), approved by the owner. Step 2: behavior-neutral slices, each moving or deleting code only, with byte-identical rendering and unchanged tests, one hot-file branch at a time. Fold in the deferred A3 minors (refit cost, a test rename, the destroyController autoPriceTick_ reset) and the render perf pass items. Server work (deploys, D-b1, anchors) runs in parallel; it touches no GUI files.
 1. Wave 3 complete (2026-10-06): overflow redesign `66e39b2`, retained fonts `fac62a0`, settings with hover tooltips `542be4d`; each owner-approved, full suite 96/96.
