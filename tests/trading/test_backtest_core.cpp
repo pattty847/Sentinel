@@ -595,8 +595,7 @@ TEST(BacktestCore, B3TransportGapsAndConnectionBoundaries) {
     EXPECT_EQ(source.gaps(), expected);
 }
 
-// enable when D-b1 (`lt-claude/roller-db1`) lands
-TEST(BacktestCore, DISABLED_B4JournalFeedAggressorParity) {
+TEST(BacktestCore, B4JournalFeedAggressorParity) {
     QTemporaryDir temp;
     {
         capture::Writer writer(journalConfig(temp), journalMetadata());
