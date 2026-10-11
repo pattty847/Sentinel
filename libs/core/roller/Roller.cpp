@@ -151,6 +151,7 @@ json roll(const RollOptions& o) {
         };
         feed.onInvalid = [&](int64_t t,const std::string& reason) { if (o.onInvalid) o.onInvalid(reason); if (recorder) recorder->onInvalid(o.product,t,reason); };
         feed.onTick = [&](int64_t t) { if (recorder) recorder->onTick(t); };
+        if (o.onFeed) o.onFeed(feed);
         const auto fence = [&] {
             if (!recorder) return;
             recorder->drain();

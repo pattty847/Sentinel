@@ -26,6 +26,11 @@ struct RollOptions {
     // Live-lead seam, on the calling thread: the day's recorder and journal feed
     // once both exist, then (nullptr, nullptr, 0) before either is destroyed.
     std::function<void(recording::BookRecorder*, const JournalFeed*, int64_t dayEndMs)> onRecorder;
+    // Model-tap seam (recording.live_feed: journal), on the calling thread: the
+    // day's feed after roll() installed its callbacks, before the first record.
+    // The tap may chain them (observing levels before the recorder takes them).
+    // The feed lives until onRecorder(nullptr, nullptr, 0). Not policy.
+    std::function<void(JournalFeed&)> onFeed;
 };
 // Atomically replace and fsync a checkpoint in an already durable parent.
 void writeCheckpoint(const std::filesystem::path&, const nlohmann::json&);

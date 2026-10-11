@@ -24,6 +24,8 @@ add_library(sentinel_core
     metrics/MetricsHttpServer.hpp
     metrics/ProcessMetrics.cpp
     metrics/ProcessMetrics.hpp
+    metrics/EventLoopLag.cpp
+    metrics/EventLoopLag.hpp
     ConfigLoader.cpp
     ConfigLoader.hpp
     marketdata/MarketDataFeeds.cpp

@@ -123,6 +123,9 @@ scrape. VictoriaMetrics adds `job` and `instance` to every series.
 | `sentinel_mdc_ws_latency_ms` | gauge | - | Latest Coinbase WebSocket latency (server time minus exchange timestamp). |
 | `sentinel_exchange_clock_offset_ms` | gauge | - | Smoothed local clock minus exchange clock. 0 means not yet measured. |
 | `sentinel_stream_sessions` | gauge | - | Open client stream sessions (GUIs). |
+| `sentinel_server_event_loop_lag_ms` | gauge | quantile | Main-thread queue wait in ms over the last 60 s; quantile=`0.5`, `0.95`, `0.99` or `max`. Absent until a probe is delivered, or if no delivered sample remains in the window. |
+| `sentinel_server_event_loop_late_ticks_total` | counter | - | Delivered probe calls with queue wait greater than 100 ms; resets on server restart. |
+| `sentinel_server_event_loop_skipped_ticks_total` | counter | - | Helper wakes skipped because a previous probe is still outstanding; resets on server restart. |
 | `process_resident_memory_bytes` | gauge | - | RSS. |
 | `process_cpu_seconds_total` | counter | - | User + system CPU seconds. |
 | `process_start_time_seconds` | gauge | - | Time when the metrics were set up at startup. Restarts = `changes(x[1h])`. |
@@ -138,6 +141,69 @@ Threading: the HTTP listener and the scrape-time samplers run on the server's ma
 That thread already reads `BookRecorder::stats()` and `watermarks()`. The recorder worker
 and the market-data I/O thread only do relaxed atomic stores. No new lock, allocation or
 signal is on a hot path.
+
+### Main-thread lag: the D-b1 journal flip gate
+
+The sampler runs in both `recording.live_feed: engine` and `journal`. A small
+helper thread wakes every 100 ms and uses `Qt::QueuedConnection` to post its
+`steady_clock` send time to a private main-thread receiver. The slot records
+`max(0, delivery time - send time)`. This measures the queue wait that journal
+`ModelSink` hand-offs also experience, so it is the relevant D-b1 gate. It
+uses no timer-deadline estimate and is independent of Qt timer rescheduling.
+The slot stores samples in a fixed ring without allocating or taking a lock;
+scrapes compute quantiles over samples delivered in the preceding 60 s.
+
+At most one probe is outstanding. A helper wake while that call is pending
+increments `sentinel_server_event_loop_skipped_ticks_total` instead of adding
+another event. Stop wakes and joins the helper, then cancels its pending call
+before destroying the receiver. Skipped wakes produce no latency sample;
+quantiles describe delivered probes, not every 100 ms period or every model
+hand-off, and are not time-weighted. Rising skipped counts make that reduced
+sampling visible during sustained main-thread congestion.
+
+Read p50 (`quantile="0.5"`) as typical sampled queue wait, p95/p99 as the tail,
+and `max` as the worst delivered probe still in the window. A brief block can
+raise `max` without moving p99. The late-tick counter increments once per
+delivered probe whose queue wait exceeds 100 ms; it does not count every
+skipped wake. This measures queue wait rather than exchange latency, the age
+of a journal record, or the time spent executing a model hand-off. Since
+`/metrics` also runs on the main thread, a block can delay the scrape itself;
+a missing scrape is not evidence of zero queue wait.
+
+Before the owner-approved D-b1 flip, record an **engine baseline** with this
+metric enabled. Use the queue-latency build for both measurements; historical
+timer-based samples under these names are not comparable. Let the 60 s window
+fill, then retain a representative
+interval (for example, 30 minutes) with the build, time range, product set,
+client/session load and capture/roller state. Include ordinary streaming
+and the relevant reconnect/catch-up workload. After the conductor performs
+the approved switch to **journal**, let its window fill and measure the
+same duration under comparable load. Compare p50/p95/p99, window maxima
+and late/skipped ticks per minute; use CPU, feed connectivity and journal catch-up
+metrics to explain differences. Keep startup/recovery observations separate
+from steady streaming so a quiet interval cannot hide a catch-up stall.
+
+The gate is a recorded engine-versus-journal comparison reviewed by the
+owner, not merely the presence of the series. Investigate sustained tail
+growth, repeated large maxima or higher late/skipped-tick rates before accepting
+the flip. This metric supplies no universal pass threshold and does not
+authorize a service restart or configuration cutover.
+
+Suggested **non-paging Grafana panel**: a time-series panel titled
+"Server main-thread queue latency (60 s window)", unit milliseconds, with
+`sentinel_server_event_loop_lag_ms{job="sentinel-server"}` and legend
+`{{instance}} / {{quantile}}`. Show all four series, including `max`, keep
+missing samples as gaps, and annotate the engine and journal measurement
+ranges and restart/flip time. A companion series or panel can show late
+ticks per minute with
+`60 * rate(sentinel_server_event_loop_late_ticks_total{job="sentinel-server"}[5m])`.
+Show skipped wakes per minute alongside it with
+`60 * rate(sentinel_server_event_loop_skipped_ticks_total{job="sentinel-server"}[5m])`.
+Use `increase(sentinel_server_event_loop_late_ticks_total{job="sentinel-server"}[30m])`
+for the comparison interval's reset-aware count. The lag series are already
+window quantiles: do not apply `rate` or `histogram_quantile` to them, or
+average quantiles across instances. These panels are diagnostic only; no
+lag alert or notification rule is added.
 
 ## sentinel-capture metrics (`GET 127.0.0.1:8091/metrics`)
 
@@ -407,3 +473,53 @@ and the next minute boundary after a commit. `deploy-runtime.sh
 check-server-log <log dir> <pid> <exe>` runs the same log check. Probe `roller.live` logs every forming-minute publication
 with `ageMs` (now minus bucket start plus observed time) and the lowest
 native price in it.
+
+### Live feed from the journal (`recording.live_feed: journal`, slice D-b1)
+
+`recording.live_feed` is `engine` (default: this process's Coinbase WebSocket,
+`MarketDataFeeds`, feeds the live book, trades and metadata) or `journal`.
+`journal` requires `recording.source: roller` and `roller_shadow.enabled`; any
+other combination or value stops the server at startup (`Server not started:
+...`). With `journal` the server opens no Coinbase WebSocket: each roller
+worker keeps a whole raw book that follows its history feed and, at the socket
+tip, a live copy that applies every provisional fan-out record on arrival. The
+model gets the journal header's `product_metadata` (no REST), one synthesized
+snapshot at the tip and then each record's updates and trades (aggressor side)
+as queued hand-offs. Every `roller_shadow.products` entry is a pinned live
+feed; a subscription for any other product is refused as `invalid_product`.
+REST is used for candle history only. Captured products are exempt from
+`mdc.max_connections`; any other product is refused as `invalid_product`, never
+`connection_cap`. The key is deleted in D-b2.
+
+A retract, disconnect, EOF or worker failure invalidates the product's book
+(`Journal live book invalidated`, status `invalidated` on the wire); the next
+tip re-seeds it from durable state (`Journal live seed`). So does 30 s without
+a socket record at the tip (`Journal live tip silent`): a frozen capture
+(FM-127) shows as an invalid book and `sentinel_mdc_connected 0`, not as a
+quiet book. A UTC midnight re-seeds once without invalidating. The model's
+"wait for the next upstream snapshot" paths (raw band exceeded, raw BBO
+unavailable) ask the worker for a fresh snapshot instead (`Live book re-seed
+requested`, at most once per product per second; a request inside that second
+is kept and sent at the deadline, `Live book re-seed deferred`); nothing asks
+capture to resubscribe. Trades reach the model once per journal position;
+after a recovery the gap is filled from the journal, but a restart never
+replays the day's trades. Candles of a captured product close on its own
+journal time, never on this process's wall clock: the worker hands over the
+receive time of the newest delivered record (heartbeats included, so a quiet
+product still advances, about once per second) and the model closes buckets
+that ended 1 s before it; each trade also closes the buckets before its own
+time, and a bucket already closed is never reopened by a late trade. Bars are
+therefore a function of the delivered record sequence only: a stall followed
+by a journal catch-up (however late it is detected) builds exactly the bars
+uninterrupted delivery would. Quiet buckets are carried up to the watermark,
+at most 300 per timeframe (1 s and 1 m alike) per advance; an advance jumps
+that far only across a journal gap with no records at all (capture down),
+which uninterrupted delivery shares.
+
+With `journal`, `sentinel_mdc_connected{pinned="1"}` and the transport
+counters follow the journal (TransportUp/TransportDown records and the 30 s
+guard), so A1b keeps working; capture's own `sentinel_capture_feed_up` is the
+upstream truth. `sentinel_mdc_ws_latency_ms` is absent, and the `mdc`
+connection gauges keep their meaning only for the cap check. Probe
+`journal.live` logs every provisional record handed to the model with `ageMs`
+(now minus its capture receive time).

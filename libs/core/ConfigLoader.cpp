@@ -185,6 +185,7 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
             readScalar(rec, "deep_high_mult", cfg.recording.deepHighMult);
             readScalar(rec, "lateness_ms", cfg.recording.latenessMs);
             readScalar(rec, "source", cfg.recording.source);
+            readScalar(rec, "live_feed", cfg.recording.liveFeed);
             if (readScalar(rec, "live_publish_ms", cfg.recording.livePublishMs))
                 cfg.recording.livePublishMs = std::clamp(cfg.recording.livePublishMs,
                     ServerRecordingConfig::kLivePublishMinMs, ServerRecordingConfig::kLivePublishMaxMs);
