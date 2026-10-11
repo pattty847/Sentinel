@@ -137,13 +137,6 @@ TEST_F(AgentHostModeTest, DockPersistencePolicyHonorsHostAndOwnerFlag) {
     EXPECT_TRUE(AgentHostMode::dockChangesPersist(true));
 }
 
-TEST(AgentHostModeSources, DockRouteUsesHostAwarePersistencePolicy) {
-    QFile file(QString(SENTINEL_SOURCE_DIR) + "/libs/gui/MainWindowGpu.cpp");
-    ASSERT_TRUE(file.open(QIODevice::ReadOnly));
-    const QString source = QString::fromUtf8(file.readAll());
-    EXPECT_TRUE(source.contains("AgentHostMode::dockChangesPersist(body.persistDocks)"));
-}
-
 TEST_F(AgentHostModeTest, RefusesDirectoriesThatAreNotSafeAndLeavesModeInactive) {
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());

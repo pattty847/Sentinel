@@ -55,3 +55,6 @@ add_test(NAME NoLocalStdTypeinfo
 set_tests_properties(NoLocalStdTypeinfo PROPERTIES
     LABELS "link"
     SKIP_REGULAR_EXPRESSION "SKIPPED:")
+
+# This directory is added last, after every other test directory.
+include(${CMAKE_SOURCE_DIR}/tests/TestResources.cmake)

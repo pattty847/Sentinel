@@ -209,6 +209,8 @@ bool HeadlessRhi::create(bool timestamps) {
 }
 
 std::string HeadlessRhi::skipReason() const {
+    if (qEnvironmentVariableIntValue("SENTINEL_REQUIRE_GPU") == 1)
+        qFatal("SENTINEL_REQUIRE_GPU=1 but GPU is unavailable: %s", qPrintable(error));
     return ("GPU case skipped: " + error).toStdString();
 }
 
@@ -233,6 +235,8 @@ QString gpuUnavailableReason() {
         HeadlessRhi probe;
         return probe.create() ? QString() : probe.error;
     }();
+    if (!reason.isEmpty() && qEnvironmentVariableIntValue("SENTINEL_REQUIRE_GPU") == 1)
+        qFatal("SENTINEL_REQUIRE_GPU=1 but GPU is unavailable: %s", qPrintable(reason));
     return reason;
 }
 

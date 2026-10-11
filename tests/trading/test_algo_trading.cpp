@@ -376,13 +376,14 @@ TEST(AlgoEngineTest, TickOnWrongSymbolDoesNothing) {
     algoEngine.startAlgo("AvendellaMM", "BTC-USD", defaultParams());
 
     int callbackCount = 0;
-    algoEngine.setResultCallback([&](trading::TradingResult, std::vector<trading::AlgoOrderEvent>) {
+    int orderEvents = 0;
+    algoEngine.setResultCallback([&](trading::TradingResult result, std::vector<trading::AlgoOrderEvent> events) {
         ++callbackCount;
+        orderEvents += static_cast<int>(result.orderUpdates.size() + events.size());
     });
 
     // Tick on different symbol — AvendellaMM is watching BTC-USD
     algoEngine.onTick("ETH-USD", 2000.0, 1000);
-    // Callback may still fire (for limit checks) but algo should not emit orders for ETH-USD
-    // We just verify it doesn't crash
-    SUCCEED();
+    EXPECT_EQ(callbackCount, 0);
+    EXPECT_EQ(orderEvents, 0);
 }
