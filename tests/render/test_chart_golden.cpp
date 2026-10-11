@@ -479,6 +479,12 @@ int main(int argc, char** argv) {
                 ++failures;
             }
         }
+        if (required || !expected.isEmpty())
+            for (const QString& name : expected.keys())
+                if (!mine.contains(name)) {
+                    std::fprintf(stderr, "golden: scene in manifest not produced: %s\n", name.toStdString().c_str());
+                    ++failures;
+                }
         if (!owner && expected.isEmpty()) {
             std::fprintf(stderr, "ChartGolden: SKIPPED (no baseline for '%s' on this machine)\n", key.toStdString().c_str());
             return 77;
