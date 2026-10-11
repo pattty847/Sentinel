@@ -827,7 +827,6 @@ int main(int argc, char** argv) {
     client.server.host = "127.0.0.1";
     client.server.port = "1"; // no owner recorder; signals below are deterministic
     client.gui.apiPort = 0;
-    client.gui.startScreener = false;
     GuiConfigStore::instance().setClientConfig(client);
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
