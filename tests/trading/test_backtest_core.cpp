@@ -728,22 +728,45 @@ TEST(BacktestCore, R6JournalLeadingCoverageGapAppearsInDump) {
 
 TEST(BacktestCore, R7EmptyRangeFailsWithRootsAndUsageListsParameters) {
     QTemporaryDir temp;
-    for (const bool dump : {false, true}) {
-        QStringList args{"--product", "BTC-USD", "--from", "2026-10-07", "--to", "2026-10-08",
-            "--journal", temp.path() + "/journal"};
-        if (dump) args << "--dump";
-        QProcess process;
-        process.start(QString::fromUtf8(BACKTEST_CLI), args);
-        ASSERT_TRUE(process.waitForFinished(10000)); EXPECT_NE(process.exitCode(), 0);
-        const auto error = process.readAllStandardError();
-        EXPECT_TRUE(error.contains("no trades in range"));
-        EXPECT_TRUE(error.contains((temp.path() + "/journal").toUtf8()));
+    // A missing root and an existing empty root must reach the same CLI error.
+    for (const auto& root : {temp.path() + "/journal", temp.path()}) {
+        for (const bool dump : {false, true}) {
+            SCOPED_TRACE(root.toStdString() + (dump ? " dump" : " replay"));
+            QStringList args{"--product", "DB2A-EMPTY-USD", "--from", "2026-10-07", "--to", "2026-10-08",
+                "--journal", root};
+            if (dump) args << "--dump";
+            QProcess process;
+            process.start(QString::fromUtf8(BACKTEST_CLI), args);
+            ASSERT_TRUE(process.waitForFinished(10000)); EXPECT_NE(process.exitCode(), 0);
+            const auto error = process.readAllStandardError();
+            EXPECT_TRUE(error.contains("no trades in range")) << error.toStdString();
+            EXPECT_TRUE(error.contains(root.toUtf8()));
+        }
     }
     QProcess process;
     process.start(QString::fromUtf8(BACKTEST_CLI), QStringList{});
     ASSERT_TRUE(process.waitForFinished(10000));
     const auto usage = process.readAllStandardError();
     EXPECT_TRUE(usage.contains("--spread")); EXPECT_TRUE(usage.contains("--qty")); EXPECT_TRUE(usage.contains("--maxpos"));
+}
+
+TEST(BacktestCore, MissingProductHistoryIsEmptyButCorruptJournalStillFails) {
+    QTemporaryDir temp;
+    {
+        capture::Writer writer(journalConfig(temp), journalMetadata());
+        writer.append(journalRecord(JournalEpoch, capture::Kind::Frame, tradesFrame("1", JournalEpoch)));
+        writer.close();
+    }
+    auto empty = trading::openTradeHistory("DB2A-EMPTY-USD", JournalEpoch, JournalEpoch + 1000,
+                                          temp.path().toStdString());
+    EXPECT_FALSE(empty->next().has_value());
+    // Only the typed no-files condition becomes empty history, not damaged input.
+    QFile corrupt(temp.path() + "/bad.rawl2");
+    ASSERT_TRUE(corrupt.open(QIODevice::WriteOnly));
+    corrupt.write("invalid journal header");
+    corrupt.close();
+    EXPECT_THROW(trading::openTradeHistory("DB2A-EMPTY-USD", JournalEpoch, JournalEpoch + 1000,
+                                           temp.path().toStdString()), std::runtime_error);
 }
 
 TEST(BacktestCore, R8EmptyOrUndurableStartFilesSkipWithoutInvalidCursor) {

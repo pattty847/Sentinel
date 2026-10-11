@@ -77,7 +77,7 @@ JournalReader::JournalReader(std::filesystem::path root, std::string product, st
         if (h.at("product_metadata").at("product_id") == product_) files_.push_back({e.path(), std::move(h)});
     }
     std::sort(files_.begin(), files_.end(), [](const auto& a, const auto& b) { return order(a.header) < order(b.header); });
-    if (files_.empty()) throw std::runtime_error("no journal files for " + product_);
+    if (files_.empty()) throw NoJournalFiles(product_);
     for (size_t i = 0; i < files_.size(); ++i) {
         if (i && order(files_[i-1].header) == order(files_[i].header)) throw std::runtime_error("duplicate journal segment");
         files_[i].superseded = i + 1 < files_.size();

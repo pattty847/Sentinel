@@ -240,7 +240,13 @@ std::unique_ptr<IMarketEventSource> openTradeHistory(const std::string& product,
         throw std::invalid_argument("invalid trade history window");
     if (!std::filesystem::exists(journalRoot))
         return std::make_unique<VectorMarketEventSource>(std::vector<MarketEvent>{});
-    return std::make_unique<JournalTradeEventSource>(journalRoot, product, fromMs, toMs);
+    try {
+        return std::make_unique<JournalTradeEventSource>(journalRoot, product, fromMs, toMs);
+    } catch (const sentinel::roller::NoJournalFiles&) {
+        // Missing product history is an empty range; keep I/O and corruption
+        // errors visible instead of reporting them as a successful empty read.
+        return std::make_unique<VectorMarketEventSource>(std::vector<MarketEvent>{});
+    }
 }
 
 } // namespace trading

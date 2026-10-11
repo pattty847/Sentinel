@@ -28,7 +28,8 @@ recording, and did anything drop.
   checkout. A change in git takes effect after 60 s (scrape config), after 30 s
   (dashboards), or when Grafana restarts (alerts and datasource).
 - The server's `/metrics` port follows `SENTINEL_HEALTH_PORT` (default 8090), the same as
-  `/ping`. There is no config key. The capture's port is `sentinel-capture --metrics-port`
+  `/ping`; explicit 0 binds an OS-assigned port (logged at startup) for isolated tests.
+  There is no config key. The capture's port is `sentinel-capture --metrics-port`
   (default 8091, 0 = no listener); the launchd plist does not pass it.
 - `sentinel-capture` is a required A3 job. Its scrape job is active in `prometheus.yml`,
   so landing the change makes VictoriaMetrics scrape 8091 within 60 s. Deploy the capture

@@ -2,10 +2,17 @@
 #include "capture/RawCapture.hpp"
 #include <filesystem>
 #include <deque>
+#include <stdexcept>
 
 namespace sentinel::metrics { class MetricsRegistry; }
 
 namespace sentinel::roller {
+// An absent product history is distinct from an unreadable or corrupt journal.
+class NoJournalFiles : public std::runtime_error {
+public:
+    explicit NoJournalFiles(const std::string& product)
+        : std::runtime_error("no journal files for " + product) {}
+};
 // Register before starting product workers. Counts distinct damaged regions seen
 // by this process, including anchor scans; replay does not count them again.
 void registerJournalMetrics(metrics::MetricsRegistry&, const std::string& product);

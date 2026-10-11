@@ -52,9 +52,10 @@ bool SentinelServerApp::initialize() {
         const QByteArray portEnv = qgetenv("SENTINEL_HEALTH_PORT");
         bool ok = false;
         const int port = portEnv.toInt(&ok);
-        const quint16 healthPort = (ok && port > 0) ? static_cast<quint16>(port) : 8090;
+        // Explicit zero lets isolated callers bind an OS-assigned port atomically.
+        const quint16 healthPort = (ok && port >= 0 && port <= 65535) ? static_cast<quint16>(port) : 8090;
         if (m_httpServer->listen(healthPort)) {
-            sLog_App("Health and metrics endpoint listening on 127.0.0.1:" << healthPort << " (/ping, /metrics)");
+            sLog_App("Health and metrics endpoint listening on 127.0.0.1:" << m_httpServer->port() << " (/ping, /metrics)");
         } else {
             sLog_Warning("Health endpoint failed to bind on 127.0.0.1:" << healthPort
                          << " error=" << m_httpServer->errorString());

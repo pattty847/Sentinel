@@ -10,9 +10,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QHostAddress>
-#include <QTcpServer>
 #include <QTcpSocket>
-#include <QElapsedTimer>
 #include <QTemporaryDir>
 #include <fstream>
 #include <sys/resource.h>
@@ -2752,17 +2750,14 @@ struct JournalServer {
     config.rollerShadow = t.cfg;
     config.rollerShadow.products = {"PEPE-USD"};
     config.rollerShadow.liveNowForTest = [&test] { return test.liveNow.load(); };
-    QTcpServer probe; // a free loopback port for the metrics endpoint
-    EXPECT_TRUE(probe.listen(QHostAddress::LocalHost, 0));
-    const auto port = probe.serverPort();
-    probe.close();
-    qputenv("SENTINEL_HEALTH_PORT", QByteArray::number(port));
+    qputenv("SENTINEL_HEALTH_PORT", "0"); // bind an ephemeral port without a probe/close race
   }
   bool initialize() {
     app = std::make_unique<SentinelServerApp>(config);
     const bool ok = app->initialize();
     if (!ok)
       return false;
+    EXPECT_GT(ShadowServerTestAccess::healthPort(*app), 0);
     auto &m = model();
     QObject::connect(&m, &ServerDataModel::bookSnapshotBroadcast,
                      [this](const QString &id,
@@ -2792,22 +2787,28 @@ struct JournalServer {
   std::string metrics() { return ShadowServerTestAccess::metrics(*app); }
   std::string scrape() {
     QTcpSocket client;
-    client.connectToHost(QHostAddress::LocalHost, ShadowServerTestAccess::healthPort(*app));
     QByteArray response;
-    bool sent = false;
-    QElapsedTimer timer;
-    timer.start();
-    while (timer.elapsed() < 3000) {
-      QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
-      if (!sent && client.state() == QAbstractSocket::ConnectedState) {
-        client.write("GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
-        sent = true;
+    QObject::connect(&client, &QTcpSocket::connected, &client, [&] {
+      client.write("GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+    });
+    QObject::connect(&client, &QTcpSocket::readyRead, &client,
+                     [&] { response += client.readAll(); });
+    client.connectToHost(QHostAddress::LocalHost, ShadowServerTestAccess::healthPort(*app));
+    // Both HTTP endpoints run on this thread: pump their events until the
+    // entire response arrives, without a blocking socket wait or fixed delay.
+    const bool complete = eventuallyQt([&] {
+      const auto headersEnd = response.indexOf("\r\n\r\n");
+      if (headersEnd < 0) return false;
+      for (const auto &line : response.left(headersEnd).split('\n')) {
+        if (!line.startsWith("Content-Length: ")) continue;
+        bool ok = false;
+        const auto length = line.mid(16).trimmed().toLongLong(&ok);
+        return ok && length >= 0 && response.size() - headersEnd - 4 == length;
       }
-      client.waitForReadyRead(5);
-      response += client.readAll();
-      if (sent && client.state() == QAbstractSocket::UnconnectedState) break;
-    }
-    EXPECT_TRUE(response.startsWith("HTTP/1.1 200 OK\r\n"));
+      return false;
+    });
+    EXPECT_TRUE(complete) << client.errorString().toStdString() << "; response=" << response.toStdString();
+    EXPECT_TRUE(response.startsWith("HTTP/1.1 200 OK\r\n")) << response.toStdString();
     return response.toStdString();
   }
   bool connected(bool up) {
