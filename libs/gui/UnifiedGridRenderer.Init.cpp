@@ -26,6 +26,7 @@ void UnifiedGridRenderer::init() {
     m_heatmapPort = std::make_unique<chart::HeatmapChartPort>(*this, *m_gpuLayer);
     m_view = std::make_unique<chart::ChartViewController>(*m_heatmapPort, *m_heatmapPort, *m_heatmapPort, m_published, this);
     bindLivePlacement();
+    bindTimeframeSwitch();
     m_view->session().timeframeMs = defaultTimeframeMs;
     m_gpuLayer->setTone({static_cast<float>(m_heatmapGamma), static_cast<float>(m_heatmapContrast),
                          static_cast<float>(m_heatmapShaderFloor)});
@@ -54,11 +55,7 @@ void UnifiedGridRenderer::init() {
     });
     connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::limitsChanged, this, [this] {
         m_view->applyGpuLimits();
-        // A carry applied before the new symbol's price scale was known: again, now
-        // that its limits are.
-        if (m_view->priceFitter().priceCarry() && !m_view->flags().reseedPrice && !m_view->flags().limitsDeferred &&
-            m_gpuLayer->priceScaleCurrent())
-            applyPriceCarry(m_view->gpuLivePrice());
+        m_view->priceCarry().limitsChanged();
         refitAutoPrice(); // e.g. a new symbol's tick: its min/max price spans
     });
     connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::labelsChanged, this, [this] { update(); });
@@ -111,7 +108,7 @@ void UnifiedGridRenderer::init() {
         return m_view->camera().panShift(drag, timeShiftMs, priceShift);
     });
     connect(getViewState(), &GridViewState::priceInteracted, this, [this]() {
-        m_view->priceFitter().priceCarry().reset(); // the user owns price now: no pending carry replaces it
+        m_view->priceCarry().priceInteracted();
     });
     
     QMetaObject::invokeMethod(

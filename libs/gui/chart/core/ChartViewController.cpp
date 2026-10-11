@@ -16,7 +16,25 @@ ChartViewController::ChartViewController(IChartEnvironment& environment, IHeatma
                                          ITickOracle& ticks, const PublishedFrame& published, QObject* parent)
     : QObject(parent), environment_(environment), sink_(sink), view_(std::make_unique<GridViewState>(parent)),
       camera_(*view_, session_, environment, ticks, published, glide_), zoomGlide_(glide_, camera_),
-      priceFitter_(*this, environment, ticks), livePlacement_(*this, environment) {}
+      priceFitter_(*this, environment, ticks), livePlacement_(*this, environment),
+      priceCarry_(*this, environment), timeframeSwitch_(*this, environment, published) {
+    livePlacement_.setApplyPriceCarry([this](double mid) { return priceCarry_.apply(mid); });
+}
+
+void ChartViewController::setTimeframe(int next) {
+    if (!timeframeSwitch_.request(next)) return;
+    zoomGlide_.endZoomGlide();
+    glide_.gesture = false;
+    const auto inputs = timeframeSwitch_.capture(next);
+    timeframeSwitch_.updateLimits(inputs);
+    const auto plan = timeframeSwitch_.plan(inputs);
+    if (plan.apply) {
+        timeframeSwitch_.apply(inputs, plan);
+        syncGpuView();
+        if (view_->isAutoScrollEnabled()) emit liveRenderTick();
+    }
+    emit timeframeChanged(next);
+}
 
 void ChartViewController::applyGpuLimits() {
     if (!environment_.attached() || flags().limitsDeferred) return;

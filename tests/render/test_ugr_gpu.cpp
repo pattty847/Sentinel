@@ -2163,13 +2163,13 @@ TEST_F(UgrGpu, LiveOnlySymbolCarryAppliesAfterTheWait) {
         timer.start();
         while (timer.elapsed() < ms) QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
     };
-    wait(UnifiedGridRenderer::kCarryLiveOnlyWaitMs + 600);
+    wait(chart::PriceCarryPolicy::kCarryLiveOnlyWaitMs + 600);
     EXPECT_FALSE(layer().priceScaleCurrent()) << "no recorded scale for ETH-USD";
     expectCarried(3'100, "applied from the live price after the wait");
     EXPECT_EQ(view->maxPriceSpan(), 0.0) << "no Manual max span without a scale";
     // Consumed: later prices do not move the view.
     ugr->setLiveBookTop(3'199, 3'201);
-    wait(UnifiedGridRenderer::kCarryLiveOnlyWaitMs + 600);
+    wait(chart::PriceCarryPolicy::kCarryLiveOnlyWaitMs + 600);
     expectCarried(3'100, "consumed");
 }
 

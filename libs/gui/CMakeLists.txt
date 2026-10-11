@@ -178,6 +178,10 @@ add_library(sentinel_chart_core STATIC
     chart/core/ChartSession.hpp
     chart/core/PriceFitter.hpp
     chart/core/PriceFitter.cpp
+    chart/core/TimeframeSwitch.hpp
+    chart/core/TimeframeSwitch.cpp
+    chart/core/PriceCarryPolicy.hpp
+    chart/core/PriceCarryPolicy.cpp
     chart/core/LivePlacement.hpp
     chart/core/LivePlacement.cpp
     chart/core/ZoomGlide.hpp

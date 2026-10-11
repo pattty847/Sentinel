@@ -159,6 +159,7 @@ private:
     void zoomContinuousFor(double factor, double x, double y, bool time, bool price, int settleMs);
     void bindZoomGlide();
     void bindLivePlacement();
+    void bindTimeframeSwitch();
     QTimer* m_glidePolishTimer = nullptr;
     // Moves the stored view to a rung about a drawn point (fracX/fracY of the item).
     bool setZoomRung(const chart_raster::RasterCamera& drawn, double fracX, double fracY, bool time, int colPx,
@@ -296,7 +297,6 @@ public:
     Q_INVOKABLE bool fitPriceToData() { return fitView(false, true); }
     Q_INVOKABLE bool resetView();
     static constexpr double kFitPriceMargin = chart::PriceFitter::kFitPriceMargin;
-    static constexpr int kCarryLiveOnlyWaitMs = 2000;
     struct ViewportRequest {
         std::optional<qint64> startMs, endMs;
         std::optional<double> priceMin, priceMax;
@@ -450,11 +450,6 @@ private:
     void refitAutoPrice();
     chart::CandleBufferSource m_candleSource;
     QMetaObject::Connection m_candleDirtyConn;
-    // The carry onto price `now`, one viewport change; kept pending until the layer's
-    // price scale is the new symbol's. False (nothing applied) for an unusable price.
-    // liveOnly: the live-only fallback (consume without a recorded price scale).
-    bool applyPriceCarry(double now, bool liveOnly = false);
-    QTimer* m_carryWaitTimer = nullptr;
     void syncGpuSurface();
     void syncGpuTone();
     void bindWindow(QQuickWindow* window);

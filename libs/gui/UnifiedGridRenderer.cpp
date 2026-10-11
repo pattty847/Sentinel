@@ -93,10 +93,25 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem *parent)
 void UnifiedGridRenderer::bindLivePlacement() {
   m_view->priceFitter().setRequestUpdate([this] { update(); });
   auto& live = m_view->livePlacement();
-  live.setApplyPriceCarry([this](double mid) { return applyPriceCarry(mid); });
   connect(&live, &chart::LivePlacement::liveRenderTick, this, &UnifiedGridRenderer::liveRenderTick, Qt::DirectConnection);
   connect(&live, &chart::LivePlacement::autoScrollEnabledChanged, this, &UnifiedGridRenderer::autoScrollEnabledChanged, Qt::DirectConnection);
   connect(&live, &chart::LivePlacement::updateRequested, this, &QQuickItem::update, Qt::DirectConnection);
+}
+
+void UnifiedGridRenderer::bindTimeframeSwitch() {
+  m_view->timeframeSwitch().setHooks(
+      [this](int tf) { m_timeAuthority.setActiveTimeframeMs(tf); },
+      [this](int tf) { m_gpuLayer->setTimeframeMs(tf); });
+  connect(m_view.get(), &chart::ChartViewController::liveRenderTick, this,
+          &UnifiedGridRenderer::liveRenderTick, Qt::DirectConnection);
+  connect(m_view.get(), &chart::ChartViewController::timeframeChanged, this, [this](int tf) {
+    if (m_dataProcessor) {
+      QMetaObject::invokeMethod(m_dataProcessor.get(),
+          [this, tf]() { m_dataProcessor->setTimeframe(tf); }, Qt::QueuedConnection);
+    }
+    update();
+    emit timeframeChanged();
+  }, Qt::DirectConnection);
 }
 
 void UnifiedGridRenderer::bindWindow(QQuickWindow* w) {
@@ -140,12 +155,14 @@ void UnifiedGridRenderer::bindWindow(QQuickWindow* w) {
 
 
 UnifiedGridRenderer::~UnifiedGridRenderer() {
-  for (auto* timer : {m_glidePolishTimer, m_zoomSettleTimer, m_carryWaitTimer})
+  for (auto* timer : {m_glidePolishTimer, m_zoomSettleTimer})
     if (timer) {
       timer->stop();
       disconnect(timer, nullptr, this, nullptr);
     }
   if (m_view) {
+    m_view->priceCarry().stop();
+    disconnect(m_view.get(), nullptr, this, nullptr);
     m_view->livePlacement().stopBootstrap();
     disconnect(&m_view->livePlacement(), nullptr, this, nullptr);
     disconnect(&m_view->zoomGlide(), nullptr, this, nullptr);
@@ -317,34 +334,13 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
               << " symbol=" << normalized);
   m_view->zoomGlide().endZoomGlide();
   m_view->glide().gesture = false;
-  // Auto price scale off: carry the zoom as a fraction of the price, with the current
-  // price at the same height, onto the new symbol's first price (seedGpuViewport).
-  // A symbol that never got its own price (m_view->flags().reseedPrice) still shows an earlier
-  // symbol's bounds: its pending carry is kept, not recomputed against them.
-  if (!getViewState() || getViewState()->autoPriceScale() || !m_view->flags().reseedPrice) m_view->priceFitter().priceCarry().reset();
-  if (m_view->flags().priceKnown && !m_view->flags().reseedPrice && getViewState() && getViewState()->isTimeWindowValid() &&
-      !getViewState()->autoPriceScale()) {
-    double now = m_view->gpuLivePrice();
-    if (!(now > 0) && m_candleSource.buffer()) {
-      // No book, trade or decoded price: the newest visible candle's close.
-      const int64_t tf = std::max<int64_t>(1, m_view->session().timeframeMs);
-      m_candleSource.buffer()->getVisibleSlice(m_view->session().symbol, std::max<int64_t>(1, (tf + 500) / 1000),
-                                      recording::floorDiv(getViewState()->getVisibleTimeStart(), tf) * tf,
-                                      getViewState()->getVisibleTimeEnd(), m_view->priceFitter().scratchBars());
-      for (auto it = m_view->priceFitter().scratchBars().rbegin(); it != m_view->priceFitter().scratchBars().rend() && !(now > 0); ++it)
-        if (std::isfinite(it->close) && it->close > 0) now = it->close;
-    }
-    const double lo = getViewState()->getMinPrice(), span = getViewState()->getMaxPrice() - lo;
-    const chart::PriceFitter::PriceCarry carry{span / now, (now - lo) / span};
-    if (now > 0 && span > 0 && std::isfinite(carry.spanRatio) && carry.spanRatio > 0 && std::isfinite(carry.heightFrac))
-      m_view->priceFitter().priceCarry() = carry;
-  }
+  m_view->priceCarry().capture();
   m_view->session().symbol = normalized;
   m_view->session().bookMid = m_view->session().lastTrade = 0.0;
   // The controller serial switches the heatmap (the node holds the old picture
   // until the new spans are ready); clearData() resets the trade overlays. The
   // next book top centres the new price.
-  if (m_carryWaitTimer) m_carryWaitTimer->stop(); // the live-only wait is per symbol
+  m_view->priceCarry().stop(); // the live-only wait is per symbol
   // Reseed first: the layer's limitsChanged (setSymbol) must not apply a pending carry
   // before the new symbol has a price of its own.
   m_view->flags().reseedPrice = true;
@@ -462,127 +458,7 @@ void UnifiedGridRenderer::setVolumeProfileLayerEnabled(bool enabled) {
 }
 
 void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
-  if (m_view->session().timeframeMs != timeframe_ms) {
-    sLog_Render("timeframe changed: prevMs=" << m_view->session().timeframeMs
-                << " tfMs=" << timeframe_ms);
-    // A zoom glide or gesture lands first (the switch rescales the view).
-    m_view->zoomGlide().endZoomGlide();
-    m_view->glide().gesture = false;
-    // What is drawn before the switch (the raster camera at the old timeframe): the Now
-    // column keeps its drawn position, not its position in the stored bounds.
-    const auto drawnBefore = rasterCameraNow(false);
-    const int64_t previousTf = m_view->session().timeframeMs;
-    m_view->session().timeframeMs = timeframe_ms;
-    if (timeframe_ms > 0) m_timeAuthority.setActiveTimeframeMs(timeframe_ms);
-    // A column is the timeframe, and a longer one is how to see further
-    // back. A fixed time span would leave too few long-timeframe columns or too many
-    // narrow short-timeframe columns. Scale the span by the timeframe ratio about
-    // the view end, inside the new timeframe's 1 column/px limit. previousTf >= 1 s skips the 100 ms
-    // default before the server advertises its timeframe. The span is read before the new
-    // limits apply (72 h of 1h is 72 columns of 1m, not 30.8 h of the clamp then /60), and
-    // limits, scaled span and follow-live end are published as ONE viewport change: the
-    // layer's limitsChanged is held back here, so the old view is never re-clamped first.
-    const bool keepColumns = m_gpuLayer && timeframe_ms > 0 && previousTf >= 1000 && getViewState() &&
-                             getViewState()->isTimeWindowValid();
-    const int64_t oldStart = keepColumns ? getViewState()->getVisibleTimeStart() : 0;
-    const int64_t oldEnd = keepColumns ? getViewState()->getVisibleTimeEnd() : 0;
-    const double scaledSpan = keepColumns ? static_cast<double>(oldEnd - oldStart) * static_cast<double>(timeframe_ms) /
-                                                static_cast<double>(previousTf)
-                                          : 0.0;
-    // The Now column (the live bucket) keeps its screen x when it is in view or the view follows live; a
-    // historical view keeps its end. rightFrac: the view's part right of the Now centre.
-    const int64_t anchor = keepColumns ? m_gpuLayer->liveAnchorMs() : 0;
-    auto nowCentre = [anchor](int64_t tf) {
-      return static_cast<double>(recording::floorDiv(anchor + tf - 1, tf) * tf) - static_cast<double>(tf) * 0.5;
-    };
-    // Following live, the view stays anchored at its end (the live edge one padding
-    // inside, exact): the padding scales with the span (same columns), so the Now
-    // column keeps its drawn distance from that edge. A historical view keeps the Now
-    // column where it is drawn (its drawn fraction, from the camera before the switch).
-    const bool following = getViewState() && getViewState()->isAutoScrollEnabled();
-    std::optional<double> rightFrac;
-    if (anchor > 0 && oldEnd > oldStart && !following) {
-      const double now = nowCentre(previousTf);
-      if (drawnBefore.valid) {
-        const double x = drawnBefore.xDev(now) / drawnBefore.widthDev; // its drawn fraction
-        if (x >= 0.0 && x <= 1.0) rightFrac = 1.0 - x;
-      } else if (now >= double(oldStart) && now <= double(oldEnd)) {
-        rightFrac = (static_cast<double>(oldEnd) - now) / static_cast<double>(oldEnd - oldStart);
-      }
-    }
-    if (m_gpuLayer && timeframe_ms > 0) {
-      m_view->flags().limitsDeferred = keepColumns;
-      m_gpuLayer->setTimeframeMs(timeframe_ms); // new limits (applied below when keepColumns)
-      m_view->flags().limitsDeferred = false;
-    }
-    if (keepColumns) {
-      const double maxTime = m_gpuLayer->maxTimeSpanMs();
-      int64_t span = std::max<int64_t>(1, static_cast<int64_t>(std::llround(scaledSpan)));
-      if (maxTime > 0) span = std::min(span, std::max<int64_t>(1, static_cast<int64_t>(std::floor(maxTime))));
-      int64_t end = oldEnd;
-      double anchorX = 1.0; // the view end (follow-live, or a historical view without Now)
-      if (following) {
-        const qint64 nominal = m_view->priceFitter().gpuLiveEndMs(span);
-        if (nominal > 0) end = nominal; // the new timeframe's padded live edge
-        m_view->livePlacement().followPadding().reset();
-        if (drawnBefore.valid && anchor > 0 && nominal > 0) {
-          // The destination camera's column width: when it equals the drawn one, the Now
-          // column stays exactly where it is drawn in whole device pixels and
-          // follow-live keeps that padding; when a cap changed it (a column is at most tf
-          // px, at least one per px), the chart re-lays out at the nominal live end.
-          const int64_t tf = timeframe_ms;
-          const auto surface = m_heatmapPort->surface();
-          const chart_raster::RasterStep previous = m_published.step();
-          auto restAt = [&](int64_t e) {
-            auto vp = FrameContextBuilder::viewportSnapshot(getViewState());
-            vp.timeStart = e - span;
-            vp.timeEnd = e;
-            vp.dragging = false;
-            vp.anchorFracX = 1.0;
-            return chart_raster::computeRaster(m_view->camera().rasterInputs(vp, m_gpuLayer->tickPrice(), surface),
-                                               previous);
-          };
-          if (const auto dest = restAt(nominal); dest.valid && dest.colPx == drawnBefore.colPx) {
-            const double oldLiveEnd = double(recording::floorDiv(anchor + previousTf - 1, previousTf) * previousTf);
-            const double liveEndX = drawnBefore.xDev(oldLiveEnd); // whole device px at rest
-            const int64_t newLiveEnd = recording::floorDiv(anchor + tf - 1, tf) * tf;
-            const double C = dest.colPx, W = dest.widthDev;
-            int64_t e = newLiveEnd + std::llround((W - liveEndX) * double(tf) / C);
-            for (const int64_t candidate : {e, e - 1, e + 1})
-              if (const auto cam = restAt(candidate); cam.valid && cam.colPx == dest.colPx &&
-                                                      cam.xDev(double(newLiveEnd)) == liveEndX) {
-                e = candidate;
-                break;
-              }
-            end = e;
-            m_view->livePlacement().followPadding() = chart::LivePlacement::FollowPadding{e - newLiveEnd, e - span, e, tf};
-          }
-        }
-      } else if (rightFrac) {
-        end = static_cast<int64_t>(std::llround(nowCentre(timeframe_ms) + *rightFrac * double(span)));
-        anchorX = 1.0 - *rightFrac;
-      }
-      // Price: auto price scale off keeps it; on, setViewport fits the new timeframe's
-      // candles held so far (later pages refit through candlesDirty). setViewport
-      // applies the new max price span.
-      getViewState()->setMinSpans(m_gpuLayer->minTimeSpanMs(), m_gpuLayer->minPriceSpan());
-      // The raster camera keeps the Now column (else the view end) where it was drawn.
-      getViewState()->setRasterAnchor(anchorX, getViewState()->rasterAnchor().fracY);
-      getViewState()->setViewportAndMaxSpans(end - span, end, getViewState()->getMinPrice(), getViewState()->getMaxPrice(),
-                                          maxTime, m_gpuLayer->maxPriceSpan());
-      if (following && m_view->livePlacement().followPadding()) m_view->livePlacement().followPadding()->placement = getViewState()->placementVersion();
-      m_view->syncGpuView();
-      if (getViewState()->isAutoScrollEnabled()) emit liveRenderTick();
-    }
-    if (m_dataProcessor) {
-      QMetaObject::invokeMethod(
-          m_dataProcessor.get(),
-          [this, timeframe_ms]() { m_dataProcessor->setTimeframe(timeframe_ms); },
-          Qt::QueuedConnection);
-    }
-    update();
-    emit timeframeChanged();
-  }
+  m_view->setTimeframe(timeframe_ms);
 }
 
 void UnifiedGridRenderer::setHeatmapGamma(double gamma) {
@@ -798,41 +674,6 @@ void UnifiedGridRenderer::syncGpuSurface() {
   const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
   m_gpuLayer->setSurface(width(), height(), dpr);
   refitAutoPrice(); // raw row height and candidate pixel phases follow the surface
-}
-
-bool UnifiedGridRenderer::applyPriceCarry(double now, bool liveOnly) {
-  if (!m_view->priceFitter().priceCarry() || !getViewState() || !(now > 0) || !std::isfinite(now)) return false;
-  const double span = m_view->priceFitter().priceCarry()->spanRatio * now;
-  const double lo = now - m_view->priceFitter().priceCarry()->heightFrac * span, hi = lo + span;
-  if (!std::isfinite(span) || !(span > 0) || !std::isfinite(lo) || !std::isfinite(hi) || !(hi > lo)) {
-    m_view->priceFitter().priceCarry().reset();
-    return false;
-  }
-  // Consumed once the layer's price scale (and so its limits) is the new symbol's;
-  // before that the limits are unknown (no clamp) and the carry is applied again
-  // from the then current price when they arrive (limitsChanged). A live-only symbol
-  // (no recorded availability) never gets one: kCarryLiveOnlyWaitMs after the first
-  // pending apply, the carry is applied from the live price and consumed, with no
-  // Manual max span (the limits stay unknown).
-  const bool confirmed = liveOnly || (m_gpuLayer && m_gpuLayer->priceScaleCurrent());
-  sLog_Render("price carry applied: now=" << now << " price=[" << lo << ".." << hi << "] confirmed=" << confirmed
-              << " liveOnly=" << liveOnly);
-  if (confirmed) {
-    m_view->priceFitter().priceCarry().reset();
-    if (m_carryWaitTimer) m_carryWaitTimer->stop();
-  } else {
-    if (!m_carryWaitTimer) {
-      m_carryWaitTimer = new QTimer(this);
-      m_carryWaitTimer->setSingleShot(true);
-      connect(m_carryWaitTimer, &QTimer::timeout, this, [this] {
-        if (m_gpuLayer && m_view->priceFitter().priceCarry() && !m_view->flags().reseedPrice && !m_gpuLayer->priceScaleCurrent())
-          applyPriceCarry(m_view->gpuLivePrice(), true);
-      });
-    }
-    if (!m_carryWaitTimer->isActive()) m_carryWaitTimer->start(kCarryLiveOnlyWaitMs);
-  }
-  m_view->setGpuViewportSelf(getViewState()->getVisibleTimeStart(), getViewState()->getVisibleTimeEnd(), lo, hi, true);
-  return true;
 }
 
 // ── Auto-fit ────────────────────────────────────────────────────────────────

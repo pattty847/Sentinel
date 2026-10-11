@@ -325,3 +325,15 @@ target_include_directories(test_LivePlacement PRIVATE ${CMAKE_SOURCE_DIR}/libs/g
 target_link_libraries(test_LivePlacement PRIVATE GTest::gtest_main sentinel_chart_core Qt6::Core)
 add_test(NAME LivePlacementTests COMMAND test_LivePlacement)
 set_tests_properties(LivePlacementTests PROPERTIES LABELS "render;fast")
+
+add_executable(test_TimeframeCarry test_timeframe_carry.cpp)
+target_include_directories(test_TimeframeCarry PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_TimeframeCarry PRIVATE GTest::gtest_main sentinel_chart_core Qt6::Core)
+add_test(NAME TimeframeCarryTests COMMAND test_TimeframeCarry)
+set_tests_properties(TimeframeCarryTests PROPERTIES LABELS "render;fast")
+
+add_executable(test_TimeframeSwitch test_timeframe_switch.cpp)
+target_include_directories(test_TimeframeSwitch PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_TimeframeSwitch PRIVATE GTest::gtest_main sentinel_chart_core Qt6::Core)
+add_test(NAME TimeframeSwitchTests COMMAND test_TimeframeSwitch)
+set_tests_properties(TimeframeSwitchTests PROPERTIES LABELS "render;fast")
