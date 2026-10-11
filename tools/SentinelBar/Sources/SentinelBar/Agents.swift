@@ -90,7 +90,8 @@ enum TranscriptFiles {
             includingPropertiesForKeys: [.contentModificationDateKey])) ?? []).filter { $0.pathExtension == "jsonl" }
         let main = mains.compactMap { url -> (URL, Date)? in modified(url).map { (url, $0) } }.max { $0.1 < $1.1 }
         var children: [(URL, Date)] = []
-        for file in mains {
+        // Only the current (newest) session's subagents: older sessions' interrupted subagents never complete.
+        for file in main.map({ [$0.0] }) ?? [] {
             let dir = root.appendingPathComponent(file.deletingPathExtension().lastPathComponent)
                 .appendingPathComponent("subagents")
             let subfiles = (try? FileManager.default.contentsOfDirectory(at: dir,
