@@ -60,7 +60,6 @@ class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     
     Q_PROPERTY(bool autoScrollEnabled READ autoScrollEnabled WRITE enableAutoScroll NOTIFY autoScrollEnabledChanged)
     
-    Q_PROPERTY(double currentPriceResolution READ getCurrentPriceResolution CONSTANT)
     Q_PROPERTY(double heatmapGamma READ heatmapGamma WRITE setHeatmapGamma NOTIFY heatmapGammaChanged)
     Q_PROPERTY(double heatmapContrast READ heatmapContrast WRITE setHeatmapContrast NOTIFY heatmapContrastChanged)
     Q_PROPERTY(double heatmapShaderFloor READ heatmapShaderFloor WRITE setHeatmapShaderFloor NOTIFY heatmapShaderFloorChanged)
@@ -422,8 +421,6 @@ public:
     void setActiveSymbol(const QString& symbol);
     void setLiveBookTop(double bestBid, double bestAsk);
     
-    Q_INVOKABLE void setPriceResolution(double resolution);
-    Q_INVOKABLE double getCurrentPriceResolution() const;
     Q_INVOKABLE QString getViewportMathDebug() const;
     Q_INVOKABLE QString getDataPipelineDebug() const;
     

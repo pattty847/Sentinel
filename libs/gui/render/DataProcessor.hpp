@@ -35,12 +35,6 @@ public:
     void startProcessing();
     void stopProcessing();
 
-    void setPriceResolution(double resolution);
-    double getPriceResolution() const;
-    void addTimeframe(int timeframe_ms);
-    int64_t suggestTimeframe(qint64 timeStart, qint64 timeEnd, int maxCells) const;
-    int getDisplayMode() const;
-
     void setTimeframe(int timeframe_ms);
     bool isManualTimeframeSet() const;
 

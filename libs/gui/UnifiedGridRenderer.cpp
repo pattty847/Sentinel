@@ -440,18 +440,6 @@ void UnifiedGridRenderer::setVolumeProfileLayerEnabled(bool enabled) {
   emit layerVisibilityChanged();
 }
 
-void UnifiedGridRenderer::setPriceResolution(double resolution) {
-  if (m_dataProcessor && resolution > 0) {
-    QMetaObject::invokeMethod(
-        m_dataProcessor.get(),
-        [this, resolution]() {
-          m_dataProcessor->setPriceResolution(resolution);
-        },
-        Qt::QueuedConnection);
-    update();
-  }
-}
-
 void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
   if (m_currentTimeframe_ms != timeframe_ms) {
     sLog_Render("timeframe changed: prevMs=" << m_currentTimeframe_ms
@@ -1556,9 +1544,6 @@ void UnifiedGridRenderer::wheelEvent(QWheelEvent *event) {
   event->accept();
 }
 
-double UnifiedGridRenderer::getCurrentPriceResolution() const {
-  return 1.0;
-}
 qint64 UnifiedGridRenderer::getVisibleTimeStart() const {
   return m_viewState ? m_viewState->getVisibleTimeStart() : 0;
 }
