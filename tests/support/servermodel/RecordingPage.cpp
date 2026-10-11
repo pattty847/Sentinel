@@ -1,3 +1,4 @@
+// Test-only parity oracle for the GPU path.
 #include "RecordingPage.hpp"
 #include "servermodel/PriceLadder.hpp"
 #include <array>

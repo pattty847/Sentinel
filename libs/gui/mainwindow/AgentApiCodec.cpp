@@ -515,7 +515,7 @@ void applyAdvertisedServerConfig(StateSnapshot& s, const ServerConfig& config) {
         s.servedTimeframesMs = values;
     }
     if (has("chart.defaultTimeframeMs")) s.activeTimeframeMs = config.chart.defaultTimeframeMs;
-    if (has("tradeOverlays.retentionColumns")) s.gridWidth = config.tradeOverlays.retentionColumns;
+    if (has("tradeOverlays.retentionColumns")) s.retentionColumns = config.tradeOverlays.retentionColumns;
     if (has("orderbook.tickSize")) s.tickSize = config.orderbook.tickSize;
     if (has("orderbook.bandPct")) s.bandPct = config.orderbook.bandPct;
     if (has("candles.bpsFast")) s.candleBpsFast = config.candles.bpsFast;
@@ -555,7 +555,7 @@ QJsonObject stateJson(const StateSnapshot& s) {
             {"defaultSymbols", s.defaultSymbols ? QJsonValue(symbols) : QJsonValue(QJsonValue::Null)},
             {"heatmap", QJsonObject{{"configuredTimeframesMs", list(s.configuredTimeframesMs)},
                 {"servedTimeframesMs", list(s.servedTimeframesMs)}, {"activeTimeframeMs", integer(s.activeTimeframeMs)},
-                {"gridWidth", integer(s.gridWidth)}, {"gridHeight", integer(s.gridHeight)}}},
+                {"retentionColumns", integer(s.retentionColumns)}}},
             {"orderbook", QJsonObject{{"tickSize", number(s.tickSize)}, {"bandPct", number(s.bandPct)}}},
             {"candles", QJsonObject{{"bpsFast", number(s.candleBpsFast)}, {"bpsSlow", number(s.candleBpsSlow)},
                 {"tickMultFast", integer(s.candleTickMultFast)}, {"tickMultSlow", integer(s.candleTickMultSlow)},

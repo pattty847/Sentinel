@@ -113,6 +113,39 @@ struct RecordingServerStopTest {
         });
         return result->get_future().wait_for(std::chrono::seconds(3)) == std::future_status::ready;
     }
+    static void checkRawLiveSlotRelease(ServerDataModel& model) {
+        net::io_context ioc;
+        ssl::context tls(ssl::context::tls_server);
+        auto session = std::make_shared<Session>(tcp::socket(ioc), tls, model, nullptr);
+        // Hold the transport at its in-flight write so deliveries stay queued.
+        session->write_queue_.push_back({"in-flight", false});
+        session->write_queue_.push_back({"ordinary", false});
+        session->pendingWriteBytes_ = 17;
+        session->handleLiveSubscribe(protocol::chunkwire::buildLiveSubscribe(
+            {"BTC-USD", {"hmc2.near"}, 1, 0}));
+        ASSERT_EQ(session->rawViews_.size(), 1u);
+        auto subscription = session->rawViews_.at("BTC-USD");
+        auto budget = session->rawWriteSlot_;
+        // The transport treats the encoded body as opaque; only its size matters.
+        recording::RawTailFrame frame{std::make_shared<const std::vector<uint8_t>>(32, 0), 1, 0};
+        ASSERT_TRUE(subscription->deliver(subscription->view, "hmc2.near", frame));
+        ASSERT_TRUE(subscription->deliver(subscription->view, "hmc2.near", frame));
+        ioc.poll();
+        ASSERT_EQ(session->write_queue_.size(), 4u);
+        EXPECT_TRUE(std::next(session->write_queue_.begin())->rawLive);
+        EXPECT_FALSE(session->write_queue_.back().rawLive);
+        EXPECT_EQ(budget->bytes(), 2 * (frame.bytes->size() + 14));
+
+        session->beginClose("raw live slot release test");
+        EXPECT_FALSE(subscription->active.load());
+        EXPECT_TRUE(session->rawViews_.empty());
+        ASSERT_EQ(session->write_queue_.size(), 1u);
+        EXPECT_EQ(session->write_queue_.front().payload, "in-flight");
+        EXPECT_EQ(budget->bytes(), 0u);
+        const bool reusable = budget->tryAcquire(recording::kRawLiveByteBudget);
+        EXPECT_TRUE(reusable);
+        if (reusable) budget->release(recording::kRawLiveByteBudget);
+    }
     static void checkIndependentOverlays(SentinelStreamServer& server, ServerDataModel& model) {
         server.m_running = true;
         server.m_historyWorkers = std::make_unique<net::thread_pool>(2);
@@ -302,6 +335,21 @@ bool writeSelfSignedCert(const std::string& certFile, const std::string& keyFile
         if (PEM_write_bio_X509(pemCert.get(), cert.get()) != 1) return false;
     }
     return true;
+}
+
+TEST(RecordingServerStop, SessionPrioritizesRawLiveAndReleasesSlotOnBeginClose) {
+    int argc = 1;
+    char name[] = "raw-live-close";
+    char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    ServerConfig config;
+    config.recording.enabled = true;
+    config.recording.dir = dir.path().toStdString();
+    ServerDataModel model(config);
+    ASSERT_NE(model.recordingLive(), nullptr);
+    RecordingServerStopTest::checkRawLiveSlotRelease(model);
 }
 
 TEST(RecordingServerStop, ActiveDeliveryIsJoinedBeforeDelayedExecutorDrain) {

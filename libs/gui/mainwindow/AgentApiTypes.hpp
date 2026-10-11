@@ -84,8 +84,7 @@ struct StateSnapshot {
     std::optional<QList<qint64>> configuredTimeframesMs;
     std::optional<QList<qint64>> servedTimeframesMs;
     std::optional<qint64> activeTimeframeMs;
-    std::optional<int> gridWidth;
-    std::optional<int> gridHeight;
+    std::optional<int> retentionColumns;
     std::optional<double> tickSize;
     std::optional<double> bandPct;
     std::optional<double> candleBpsFast;
