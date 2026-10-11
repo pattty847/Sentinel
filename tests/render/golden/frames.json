@@ -1,0 +1,20 @@
+{
+    "keys": {
+        "Metal:Apple M4": {
+            "01.rest-auto-candles": "62f2e76ca23fe5d1dde0ab89562434bfeb48360790ecb8ebeecc4ad2e0bdb9c3",
+            "02.manual-tick": "3779401dfcfa6383f0dd072c7225ace29a6055ce8ecc59e126c526ea0573cadc",
+            "03.mid-glide-65ms": "7737d62221341e94312008e2f1f744cb2544effb47d034fd903b8c472b24cbab",
+            "04.drag-0.3px": "027d0b43a8a910af8ffd29a3dd7e364724de9ada593ddf32f7268dc27a19394f",
+            "05.follow-live-step": "c0584df17fb24c43eed0912e552b2b4cd24be4986a037dd7d66d4df842237638",
+            "06a.tpo-split": "409c919c8d953459eadf16be965f1b7e6a01f6ad4e7649290a02207c615c7d27",
+            "06b.tpo-collapsed": "1c5265e2e8e85c6beb5816d33d5035599a53ded9932e7f0446320b0a477751f8",
+            "07.volume-profile": "151a2df2f303dc59ccf89272657c9d719f31d1beccbee82a141cf3fb43dee8d9",
+            "08.footprint": "f2bfa6264710ba9643233874104236ce117cd141aef4cb314920e638633f697b",
+            "09.labels": "ae94e5a9685f24b8a4b36f029e1f0d10ba0f7b2863e8df0681a3f0c9fb3e20fb",
+            "10.trade-bubbles": "640ff0733345033927b2dfcf2fa09abcde14dbb2b7ac5795c063f95b1dfdc366",
+            "11.after-1m-to-15m": "9af3ac2dc06d992e9f3738b9106f1867467e64f046c498e73d48bb49dd1c4b5a",
+            "12.rest-dpr2": "4fa5b45e6b077cc33ab63c972d75e3499141f77f2567a751a350c9d5fa8df63e"
+        }
+    },
+    "version": 1
+}
