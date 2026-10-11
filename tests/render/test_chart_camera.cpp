@@ -128,6 +128,145 @@ TEST_F(ChartCameraTest, PredictedEndAndIndependentHeldAxis) {
     EXPECT_DOUBLE_EQ(composed.binView->priceHi, 140);
 }
 
+TEST_F(ChartCameraTest, GestureUsesContinuousCameraOnlyOnSelectedAxis) {
+    controller.viewPtr()->setViewport(1000, 1975, 100, 139);
+    auto& glide = controller.glide();
+    glide.gesture = glide.gestureTime = true;
+    auto drawn = controller.camera().rasterCameraNow(false);
+    EXPECT_TRUE(drawn.free);
+    EXPECT_DOUBLE_EQ(drawn.colPxF, 20000.0 / 975.0);
+    EXPECT_DOUBLE_EQ(drawn.rowPxF, 8);
+    glide.gestureTime = false;
+    glide.gesturePrice = true;
+    drawn = controller.camera().rasterCameraNow(false);
+    EXPECT_DOUBLE_EQ(drawn.colPxF, 20);
+    EXPECT_DOUBLE_EQ(drawn.rowPxF, 320.0 / 39.0);
+}
+
+TEST_F(ChartCameraTest, NonHoldingGlideDrawsIntermediateProgress) {
+    auto& g = controller.glide().time;
+    g.active = true;
+    g.from = controller.camera().restCameraNow(false);
+    g.end = chart_raster::shiftedRaster(g.from, 20, 0);
+    g.anchorTime = 1500;
+    g.anchorPrice = 120;
+    g.progress = 0.25;
+    auto drawn = controller.camera().rasterCameraNow(false);
+    EXPECT_DOUBLE_EQ(drawn.drawnStartMs, 975);
+    EXPECT_DOUBLE_EQ(drawn.drawnEndMs, 1975);
+    g.progress = 0.75;
+    drawn = controller.camera().rasterCameraNow(false);
+    EXPECT_DOUBLE_EQ(drawn.drawnStartMs, 925);
+    EXPECT_DOUBLE_EQ(drawn.drawnMinPrice, 100);
+}
+
+TEST_F(ChartCameraTest, PanCommitsAtActiveGlideTickAndRungs) {
+    controller.viewPtr()->setViewport(1000, 1975, 100, 139);
+    auto& glide = controller.glide();
+    glide.time.active = glide.price.active = true;
+    glide.time.end = glide.price.end = controller.camera().intendedEndNow();
+    glide.time.end.colPx = 21;
+    glide.price.end.rowPx = 17;
+    qint64 time = 0;
+    double price = 0;
+    ASSERT_TRUE(controller.camera().panShift({10, 4}, time, price));
+    EXPECT_EQ(time, -95);
+    EXPECT_DOUBLE_EQ(price, 32.0 / 17.0);
+}
+
+TEST_F(ChartCameraTest, DrawnTimeWindowUsesPriceFallback) {
+    chart::ChartViewController empty{port, port, port, published};
+    const auto window = empty.camera().drawnTimeWindow(1000, 1975);
+    EXPECT_DOUBLE_EQ(window.first, 990);
+    EXPECT_DOUBLE_EQ(window.second, 1990);
+}
+
+TEST_F(ChartCameraTest, DrawnTimeWindowUsesExplicitAnchor) {
+    const auto window = controller.camera().drawnTimeWindow(1000, 1975, 0.0);
+    EXPECT_DOUBLE_EQ(window.first, 1000);
+    EXPECT_DOUBLE_EQ(window.second, 2000);
+}
+
+TEST_F(ChartCameraTest, ZoomGlideStartAdvanceAndEndPreserveNotificationOrder) {
+    auto& policy = controller.zoomGlide();
+    qint64 now = 17;
+    policy.setClock([&] { return now; });
+    std::string events;
+    QObject::connect(&policy, &chart::ZoomGlide::rasterChanged, &policy, [&] { events += 'r'; }, Qt::DirectConnection);
+    QObject::connect(&policy, &chart::ZoomGlide::viewportChanged, &policy, [&] { events += 'v'; }, Qt::DirectConnection);
+    QObject::connect(&policy, &chart::ZoomGlide::polishRequested, &policy, [&] { events += 'p'; }, Qt::DirectConnection);
+    QObject::connect(&policy, &chart::ZoomGlide::updateRequested, &policy, [&] { events += 'u'; }, Qt::DirectConnection);
+    const auto before = controller.camera().restCameraNow(false);
+    controller.viewPtr()->setViewport(1200, 2000, 104, 136);
+    policy.startAxisGlides(before, before, 1800, 120, false, false);
+    EXPECT_EQ(events, "rvpu");
+    EXPECT_TRUE(controller.glide().time.active);
+    EXPECT_TRUE(controller.glide().price.active);
+    EXPECT_EQ(controller.glide().time.beganMs, now);
+    events.clear();
+    controller.advanceFrame(now + chart_raster::kZoomGlideMs / 2);
+    EXPECT_EQ(events, "rvu");
+    EXPECT_DOUBLE_EQ(controller.glide().time.progress, chart_raster::easeZoom(0.5));
+    EXPECT_DOUBLE_EQ(controller.glide().price.progress, chart_raster::easeZoom(0.5));
+    events.clear();
+    policy.endZoomGlide(true, false);
+    EXPECT_EQ(events, "u");
+    EXPECT_FALSE(controller.glide().time.active);
+    EXPECT_TRUE(controller.glide().price.active);
+    policy.endZoomGlide(true, false);
+    EXPECT_EQ(events, "u");
+    policy.endZoomGlide();
+    EXPECT_EQ(events, "uu");
+    events.clear();
+    controller.advanceFrame(now + 1);
+    EXPECT_TRUE(events.empty());
+}
+
+TEST_F(ChartCameraTest, ZoomGlideHoldsPredictedTickThenRebasesAndCaps) {
+    auto& policy = controller.zoomGlide();
+    const auto before = controller.camera().restCameraNow(false);
+    // Price uses a different tick in the predicted end, before a frame commits it.
+    policy.startAxisGlides(before, before, 1500, 120, true, true);
+    controller.advanceFrame(chart_raster::kZoomGlideMs);
+    EXPECT_FALSE(controller.glide().time.active);
+    EXPECT_TRUE(controller.glide().price.active);
+    EXPECT_TRUE(controller.glide().price.holding);
+    const auto held = controller.glide().price.end;
+    controller.viewPtr()->setViewport(1000, 2000, 100, 132);
+    controller.advanceFrame(chart_raster::kZoomGlideMs + 1);
+    EXPECT_EQ(controller.glide().rebases, 1);
+    EXPECT_FALSE(controller.glide().price.holding);
+    EXPECT_DOUBLE_EQ(controller.glide().price.from.drawnMaxPrice, held.drawnMaxPrice);
+    EXPECT_DOUBLE_EQ(controller.glide().price.progress, 0);
+    controller.advanceFrame(2 * chart_raster::kZoomGlideMs);
+    EXPECT_FALSE(policy.gliding());
+    EXPECT_DOUBLE_EQ(controller.glide().price.progress, 1);
+}
+
+TEST_F(ChartCameraTest, ZoomGlideTranslationsMoveBothEndsWithoutRebase) {
+    auto& policy = controller.zoomGlide();
+    const auto before = controller.camera().restCameraNow(false);
+    policy.startAxisGlides(before, before, 1500, 120, true, true);
+    const auto original = controller.glide();
+    policy.shiftTime(100);
+    EXPECT_DOUBLE_EQ(controller.glide().time.from.drawnStartMs, original.time.from.drawnStartMs + 100);
+    EXPECT_DOUBLE_EQ(controller.glide().time.end.drawnStartMs, original.time.end.drawnStartMs + 100);
+    EXPECT_DOUBLE_EQ(controller.glide().time.anchorTime, 1600);
+    EXPECT_DOUBLE_EQ(controller.glide().price.anchorTime, 1500);
+    policy.shiftBoth(20, -8);
+    EXPECT_DOUBLE_EQ(controller.glide().time.from.drawnStartMs, original.time.from.drawnStartMs);
+    EXPECT_DOUBLE_EQ(controller.glide().time.end.drawnStartMs, original.time.end.drawnStartMs);
+    EXPECT_DOUBLE_EQ(controller.glide().price.from.drawnMinPrice, original.price.from.drawnMinPrice - 2);
+    EXPECT_DOUBLE_EQ(controller.glide().price.end.drawnMinPrice, original.price.end.drawnMinPrice - 2);
+    EXPECT_EQ(controller.glide().rebases, 0);
+    policy.endZoomGlide();
+    const auto ended = controller.glide();
+    policy.shiftTime(100);
+    policy.shiftBoth(20, 8);
+    EXPECT_DOUBLE_EQ(controller.glide().time.from.drawnStartMs, ended.time.from.drawnStartMs);
+    EXPECT_DOUBLE_EQ(controller.glide().price.end.drawnMinPrice, ended.price.end.drawnMinPrice);
+}
+
 TEST_F(ChartCameraTest, DetachedCameraDoesNotProduceViews) {
     port.isAttached = false;
     auto& camera = controller.camera();

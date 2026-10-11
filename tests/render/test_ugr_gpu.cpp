@@ -261,7 +261,7 @@ protected:
         QCoreApplication::sendEvent(scene->window(), &event);
     }
     // The chart's tick prediction for a price span over [start, end) about ap at fracY
-    // (UnifiedGridRenderer::tickPredictor): what Auto (or Manual) draws there.
+    // (ChartCamera::tickPredictor): what Auto (or Manual) draws there.
     chart_raster::TickAt tickOver(qint64 start, qint64 end, double ap, double fracY) const {
         return [this, start, end, ap, fracY](double span) {
             const double hi = ap + fracY * span;

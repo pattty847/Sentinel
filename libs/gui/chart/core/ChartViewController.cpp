@@ -15,7 +15,7 @@ struct LivePricePolicy {
 ChartViewController::ChartViewController(IChartEnvironment& environment, IHeatmapViewSink& sink,
                                          const ITickOracle& ticks, const PublishedFrame& published, QObject* parent)
     : QObject(parent), environment_(environment), sink_(sink), view_(std::make_unique<GridViewState>(parent)),
-      camera_(*view_, session_, environment, ticks, published, glide_) {}
+      camera_(*view_, session_, environment, ticks, published, glide_), zoomGlide_(glide_, camera_) {}
 
 void ChartViewController::applyGpuLimits() {
     if (!environment_.attached() || flags_.limitsDeferred) return;

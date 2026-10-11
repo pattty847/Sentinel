@@ -55,8 +55,7 @@ bool envIntValue(const char *name, int &out) {
 
 chart::SurfaceFacts chart::HeatmapChartPort::surface() const {
   if (!layer_) return {};
-  const auto window = [this] { return item_.window(); };
-  return {item_.width(), item_.height(), window() ? window()->effectiveDevicePixelRatio() : 1.0};
+  return {item_.width(), item_.height(), item_.window() ? item_.window()->effectiveDevicePixelRatio() : 1.0};
 }
 
 std::optional<heatmap::gpu::ViewWindow> chart::HeatmapChartPort::restView() const {
@@ -76,6 +75,7 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem *parent)
   connect(this, &QQuickItem::windowChanged, this, [this](QQuickWindow* w) { bindWindow(w); });
 
   init();
+  bindZoomGlide();
   connect(getViewState(), &GridViewState::autoPriceScaleChanged, this, [this] {
     if (!getViewState()->autoPriceScale() && m_gpuLayer->setAutoPriceTick(std::nullopt)) update();
   });
@@ -131,6 +131,16 @@ void UnifiedGridRenderer::bindWindow(QQuickWindow* w) {
 
 
 UnifiedGridRenderer::~UnifiedGridRenderer() {
+  for (auto* timer : {m_glidePolishTimer, m_zoomSettleTimer, m_carryWaitTimer, m_gpuBootstrapTimer})
+    if (timer) {
+      timer->stop();
+      disconnect(timer, nullptr, this, nullptr);
+    }
+  if (m_view) {
+    disconnect(&m_view->zoomGlide(), nullptr, this, nullptr);
+    disconnect(getViewState(), nullptr, this, nullptr);
+    getViewState()->setPanShift({});
+  }
   // ~QQuickItem leaves the window (windowChanged) after this class's members are gone:
   // unbind the window now, while they exist.
   disconnect(this, &QQuickItem::windowChanged, this, nullptr);
@@ -310,7 +320,7 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
   }
   sLog_Render("active symbol changed, clearing chart data: prev=" << m_view->session().symbol
               << " symbol=" << normalized);
-  endZoomGlide();
+  m_view->zoomGlide().endZoomGlide();
   m_view->glide().gesture = false;
   // Auto price scale off: carry the zoom as a fraction of the price, with the current
   // price at the same height, onto the new symbol's first price (seedGpuViewport).
@@ -461,7 +471,7 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
     sLog_Render("timeframe changed: prevMs=" << m_view->session().timeframeMs
                 << " tfMs=" << timeframe_ms);
     // A zoom glide or gesture lands first (the switch rescales the view).
-    endZoomGlide();
+    m_view->zoomGlide().endZoomGlide();
     m_view->glide().gesture = false;
     // What is drawn before the switch (the raster camera at the old timeframe): the Now
     // column keeps its drawn position, not its position in the stored bounds.
@@ -832,12 +842,7 @@ void UnifiedGridRenderer::followGpuLiveTo(int64_t openEnd) {
   const int64_t shift = chart_raster::followShift(end, target, tf, cam.valid ? cam.colPx : 0);
   if (shift <= 0) return; // the live bucket is inside the padded view
   // A glide in flight on time moves with the view (the same world shift at both ends).
-  if (m_view->glide().time.active) {
-    auto& g = m_view->glide().time;
-    g.from = chart_raster::shiftedRaster(g.from, -double(shift) * g.from.pxPerMs(), 0);
-    g.end = chart_raster::shiftedRaster(g.end, -double(shift) * g.end.pxPerMs(), 0);
-    g.anchorTime += double(shift);
-  }
+  m_view->zoomGlide().shiftTime(shift);
   m_view->setGpuViewportSelf(start + shift, end + shift, getViewState()->getMinPrice(), getViewState()->getMaxPrice(), true);
   if (kept) { // the follow update keeps the switch's placement
     m_followPadding->startMs = getViewState()->getVisibleTimeStart();
@@ -1201,7 +1206,7 @@ void UnifiedGridRenderer::setAutoPriceScale(bool enabled) {
 }
 
 bool UnifiedGridRenderer::fitView(bool time, bool price) {
-  endZoomGlide();
+  m_view->zoomGlide().endZoomGlide();
   m_view->glide().gesture = false;
   if (!m_gpuLayer || !getViewState() || !getViewState()->isTimeWindowValid() || (!time && !price) ||
       getViewState()->isDragging()) {
@@ -1243,7 +1248,7 @@ bool UnifiedGridRenderer::fitView(bool time, bool price) {
 
 QString UnifiedGridRenderer::applyViewportRequest(const ViewportRequest& request) {
   if (!getViewState()) return QStringLiteral("viewport_unavailable");
-  endZoomGlide();
+  m_view->zoomGlide().endZoomGlide();
   m_view->glide().gesture = false;
   if (!request.fit.isEmpty()) {
     const bool time = request.fit != "price", price = request.fit != "time";
@@ -1302,7 +1307,7 @@ QString UnifiedGridRenderer::applyViewportRequest(const ViewportRequest& request
 }
 
 bool UnifiedGridRenderer::resetView() {
-  endZoomGlide();
+  m_view->zoomGlide().endZoomGlide();
   m_view->glide().gesture = false;
   if (!m_gpuLayer || !getViewState() || !getViewState()->isTimeWindowValid() ||
       getViewState()->isDragging())
@@ -1556,7 +1561,7 @@ void UnifiedGridRenderer::addTrade(const Trade &trade) {
 }
 void UnifiedGridRenderer::setViewport(qint64 timeStart, qint64 timeEnd,
                                       double priceMin, double priceMax) {
-  endZoomGlide(); // an explicit view lands any zoom glide or gesture
+  m_view->zoomGlide().endZoomGlide(); // an explicit view lands any zoom glide or gesture
   m_view->glide().gesture = false;
   if (priceMax > priceMin) {
     // An explicit viewport (Agent API, QML) is a real price window: no book-top
@@ -1620,14 +1625,8 @@ void UnifiedGridRenderer::endPanAt() {
   const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
   getViewState()->handlePanEnd(true);
   if (dragging) {
-    // A glide in flight: the release commits the dragged whole pixels, so both of its
-    // ends move by them too (the picture stays where the drag left it).
     const double dx = double(std::llround(drag.x() * dpr)), dy = double(std::llround(drag.y() * dpr));
-    for (chart::AxisGlide* g : {&m_view->glide().time, &m_view->glide().price})
-      if (g->active) {
-        g->from = chart_raster::shiftedRaster(g->from, dx, dy);
-        g->end = chart_raster::shiftedRaster(g->end, dx, dy);
-      }
+    m_view->zoomGlide().shiftBoth(dx, dy);
   }
   update();
 }
