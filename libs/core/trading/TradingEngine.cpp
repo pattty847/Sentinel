@@ -90,7 +90,8 @@ TradingResult TradingEngine::onExternalFill(const std::string& orderId,
     if (!existing.has_value()) {
         return out;
     }
-    if (cumulativeFilledQty < 0.0 || fillPrice <= 0.0) {
+    if (!std::isfinite(cumulativeFilledQty) || !std::isfinite(fillPrice) ||
+        cumulativeFilledQty < 0.0 || fillPrice <= 0.0) {
         return out;
     }
 
@@ -132,7 +133,7 @@ TradingResult TradingEngine::onExternalFill(const std::string& orderId,
 
 TradingResult TradingEngine::onTick(const std::string& symbol, double lastTradePrice, int64_t timestampMs) {
     TradingResult out;
-    if (lastTradePrice <= 0.0) {
+    if (!std::isfinite(lastTradePrice) || lastTradePrice <= 0.0) {
         return out;
     }
 
@@ -189,6 +190,9 @@ TradingResult TradingEngine::onTick(const std::string& symbol, double lastTradeP
 
 TradingResult TradingEngine::fillOrder(Order& order, double fillPx, double markPrice, int64_t timestampMs) {
     TradingResult out;
+    if (!std::isfinite(fillPx) || !std::isfinite(markPrice) || fillPx <= 0.0 || markPrice <= 0.0) {
+        return out;
+    }
     if (order.status == OrderStatus::Canceled || order.status == OrderStatus::Filled) {
         return out;
     }
@@ -232,6 +236,10 @@ PnlSnapshot TradingEngine::buildSnapshot(const std::string& symbol, double markP
 }
 
 TradingResult TradingEngine::onCommand(const TradeCommand& command) {
+    if (!std::isfinite(command.qty) || !std::isfinite(command.price) ||
+        !std::isfinite(command.takeProfitPrice) || !std::isfinite(command.stopLossPrice)) {
+        return {};
+    }
     switch (command.action) {
         case TradeAction::PlaceOrder: return handlePlaceOrder(command);
         case TradeAction::CancelOrder: return handleCancelOrder(command);
@@ -244,7 +252,8 @@ TradingResult TradingEngine::onCommand(const TradeCommand& command) {
 
 TradingResult TradingEngine::handlePlaceOrder(const TradeCommand& command) {
     TradingResult out;
-    if (command.symbol.empty() || command.qty <= 0.0 || command.side == OrderSide::Unknown) {
+    if (command.symbol.empty() || !std::isfinite(command.qty) || command.qty <= 0.0 ||
+        command.side == OrderSide::Unknown) {
         return out;
     }
 
@@ -260,7 +269,7 @@ TradingResult TradingEngine::handlePlaceOrder(const TradeCommand& command) {
     order.algoId = command.algoId;
 
     if (command.orderType == OrderType::Limit) {
-        if (!command.hasPrice || command.price <= 0.0) {
+        if (!command.hasPrice || !std::isfinite(command.price) || command.price <= 0.0) {
             return out;
         }
         // Resting limit: acknowledge as Open
@@ -273,8 +282,11 @@ TradingResult TradingEngine::handlePlaceOrder(const TradeCommand& command) {
 
     // Market order: fill immediately
     const double lastPrice = m_priceResolver(command.symbol);
+    if (!std::isfinite(lastPrice) || lastPrice <= 0.0) {
+        return out;
+    }
     const double fillPrice = m_execution.fillPrice(lastPrice, command.side);
-    if (fillPrice <= 0.0) {
+    if (!std::isfinite(fillPrice) || fillPrice <= 0.0) {
         return out;
     }
 

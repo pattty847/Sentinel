@@ -1,9 +1,57 @@
 #include "TradeData.h"
-#include "SentinelLogging.hpp"
 #include <algorithm>
 #include <cmath>
 #include <span>
 #include <bit>
+
+namespace {
+
+void appendSnapshotSide(const std::vector<double>& levels, double minPrice, double tickSize,
+                        std::vector<OrderBookLevel>& out) {
+    for (size_t i = 0; i < levels.size(); ++i) {
+        if (levels[i] > 0.0) out.push_back({minPrice + double(i) * tickSize, levels[i]});
+    }
+}
+
+size_t captureSide(bool isBid, const std::vector<uint64_t>& present,
+                   const std::vector<double>& levels,
+                   std::vector<std::pair<uint32_t, double>>& out,
+                   size_t maxPerSide, size_t maxScanWords) {
+    size_t scanned = 0;
+    while (scanned < present.size() && out.size() < maxPerSide && scanned < maxScanWords) {
+        const size_t word = isBid ? present.size() - 1 - scanned : scanned;
+        ++scanned;
+        uint64_t bits = present[word];
+        while (bits && out.size() < maxPerSide) {
+            const unsigned bit = isBid ? 63u - std::countl_zero(bits) : std::countr_zero(bits);
+            const size_t index = word * 64 + bit;
+            out.emplace_back(static_cast<uint32_t>(index), levels[index]);
+            if (isBid) bits &= ~(uint64_t{1} << bit);
+            else bits &= bits - 1;
+        }
+    }
+    return scanned;
+}
+
+void accumulateSide(bool isBid, const std::vector<double>& levels,
+                    size_t startIdx, size_t endIdx, double minPrice, double tickSize,
+                    double spanMin, double spanMax, double rowTickSize,
+                    std::vector<double>& rows, double* bestPrice) {
+    for (size_t offset = 0; offset <= endIdx - startIdx; ++offset) {
+        const size_t i = isBid ? endIdx - offset : startIdx + offset;
+        const double qty = levels[i];
+        if (qty <= 0.0) continue;
+        const double price = minPrice + (static_cast<double>(i) * tickSize);
+        if (price < spanMin || price > spanMax) continue;
+        if (bestPrice && *bestPrice == 0.0) *bestPrice = price;
+        const int row = static_cast<int>(std::floor((spanMax - price) / rowTickSize));
+        if (row >= 0 && row < static_cast<int>(rows.size())) {
+            rows[static_cast<size_t>(row)] += qty;
+        }
+    }
+}
+
+} // namespace
 
 void LiveOrderBook::initialize(double min_price, double max_price, double tick_size) {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -52,12 +100,8 @@ LiveOrderBook::LevelsSnapshot LiveOrderBook::snapshotLevels() const {
     LevelsSnapshot out;
     out.tickSize = m_tick_size;
     out.version = m_stateVersion;
-    for (size_t i = 0; i < m_bids.size(); ++i) {
-        if (m_bids[i] > 0.0) out.bids.push_back({m_min_price + double(i) * m_tick_size, m_bids[i]});
-    }
-    for (size_t i = 0; i < m_asks.size(); ++i) {
-        if (m_asks[i] > 0.0) out.asks.push_back({m_min_price + double(i) * m_tick_size, m_asks[i]});
-    }
+    appendSnapshotSide(m_bids, m_min_price, m_tick_size, out.bids);
+    appendSnapshotSide(m_asks, m_min_price, m_tick_size, out.asks);
     return out;
 }
 
@@ -178,32 +222,10 @@ LiveOrderBook::DenseBookSnapshotView LiveOrderBook::captureDenseNonZero(
     bidBuffer.reserve(std::min(maxPerSide, m_bids.size()));
     askBuffer.reserve(std::min(maxPerSide, m_asks.size()));
 
-    size_t bidScanned = 0;
-    if (m_nonZeroBidCount) {
-        for (size_t word = m_bidPresent.size(); word-- > 0 && bidBuffer.size() < maxPerSide && bidScanned < maxScanWordsPerSide;) {
-            ++bidScanned;
-            uint64_t bits = m_bidPresent[word];
-            while (bits && bidBuffer.size() < maxPerSide) {
-                const unsigned bit = 63u - std::countl_zero(bits);
-                const size_t index = word * 64 + bit;
-                bidBuffer.emplace_back(static_cast<uint32_t>(index), m_bids[index]);
-                bits &= ~(uint64_t{1} << bit);
-            }
-        }
-    }
-    size_t askScanned = 0;
-    if (m_nonZeroAskCount) {
-        for (size_t word = 0; word < m_askPresent.size() && askBuffer.size() < maxPerSide && askScanned < maxScanWordsPerSide; ++word) {
-            ++askScanned;
-            uint64_t bits = m_askPresent[word];
-            while (bits && askBuffer.size() < maxPerSide) {
-                const unsigned bit = std::countr_zero(bits);
-                const size_t index = word * 64 + bit;
-                askBuffer.emplace_back(static_cast<uint32_t>(index), m_asks[index]);
-                bits &= bits - 1;
-            }
-        }
-    }
+    const size_t bidScanned = m_nonZeroBidCount
+        ? captureSide(true, m_bidPresent, m_bids, bidBuffer, maxPerSide, maxScanWordsPerSide) : 0;
+    const size_t askScanned = m_nonZeroAskCount
+        ? captureSide(false, m_askPresent, m_asks, askBuffer, maxPerSide, maxScanWordsPerSide) : 0;
 
     DenseBookSnapshotView view;
     view.minPrice = m_min_price;
@@ -241,44 +263,11 @@ void LiveOrderBook::accumulateRange(double minPrice,
     }
 
     const size_t clampedEnd = std::min(endIdx, m_bids.size() - 1);
-    const double spanMax = maxPrice;
-    const double spanMin = minPrice;
-
-    for (size_t i = clampedEnd + 1; i-- > startIdx; ) {
-        const double qty = m_bids[i];
-        if (qty <= 0.0) {
-            continue;
-        }
-        const double price = m_min_price + (static_cast<double>(i) * m_tick_size);
-        if (price < spanMin || price > spanMax) {
-            continue;
-        }
-        if (bestBid && *bestBid == 0.0) {
-            *bestBid = price;
-        }
-        const int row = static_cast<int>(std::floor((spanMax - price) / rowTickSize));
-        if (row >= 0 && row < static_cast<int>(rowValues.size())) {
-            rowValues[static_cast<size_t>(row)] += qty;
-        }
-    }
-
-    for (size_t i = startIdx; i <= clampedEnd; ++i) {
-        const double qty = m_asks[i];
-        if (qty <= 0.0) {
-            continue;
-        }
-        const double price = m_min_price + (static_cast<double>(i) * m_tick_size);
-        if (price < spanMin || price > spanMax) {
-            continue;
-        }
-        if (bestAsk && *bestAsk == 0.0) {
-            *bestAsk = price;
-        }
-        const int row = static_cast<int>(std::floor((spanMax - price) / rowTickSize));
-        if (row >= 0 && row < static_cast<int>(rowValues.size())) {
-            rowValues[static_cast<size_t>(row)] += qty;
-        }
-    }
+    if (clampedEnd < startIdx) return;
+    accumulateSide(true, m_bids, startIdx, clampedEnd, m_min_price, m_tick_size,
+                   minPrice, maxPrice, rowTickSize, rowValues, bestBid);
+    accumulateSide(false, m_asks, startIdx, clampedEnd, m_min_price, m_tick_size,
+                   minPrice, maxPrice, rowTickSize, rowValues, bestAsk);
 }
 
 void LiveOrderBook::accumulateRangeSplit(double minPrice,
@@ -307,42 +296,9 @@ void LiveOrderBook::accumulateRangeSplit(double minPrice,
     }
 
     const size_t clampedEnd = std::min(endIdx, m_bids.size() - 1);
-    const double spanMax = maxPrice;
-    const double spanMin = minPrice;
-
-    for (size_t i = clampedEnd + 1; i-- > startIdx; ) {
-        const double qty = m_bids[i];
-        if (qty <= 0.0) {
-            continue;
-        }
-        const double price = m_min_price + (static_cast<double>(i) * m_tick_size);
-        if (price < spanMin || price > spanMax) {
-            continue;
-        }
-        if (bestBid && *bestBid == 0.0) {
-            *bestBid = price;
-        }
-        const int row = static_cast<int>(std::floor((spanMax - price) / rowTickSize));
-        if (row >= 0 && row < static_cast<int>(bidRows.size())) {
-            bidRows[static_cast<size_t>(row)] += qty;
-        }
-    }
-
-    for (size_t i = startIdx; i <= clampedEnd; ++i) {
-        const double qty = m_asks[i];
-        if (qty <= 0.0) {
-            continue;
-        }
-        const double price = m_min_price + (static_cast<double>(i) * m_tick_size);
-        if (price < spanMin || price > spanMax) {
-            continue;
-        }
-        if (bestAsk && *bestAsk == 0.0) {
-            *bestAsk = price;
-        }
-        const int row = static_cast<int>(std::floor((spanMax - price) / rowTickSize));
-        if (row >= 0 && row < static_cast<int>(askRows.size())) {
-            askRows[static_cast<size_t>(row)] += qty;
-        }
-    }
+    if (clampedEnd < startIdx) return;
+    accumulateSide(true, m_bids, startIdx, clampedEnd, m_min_price, m_tick_size,
+                   minPrice, maxPrice, rowTickSize, bidRows, bestBid);
+    accumulateSide(false, m_asks, startIdx, clampedEnd, m_min_price, m_tick_size,
+                   minPrice, maxPrice, rowTickSize, askRows, bestAsk);
 }
