@@ -7,6 +7,7 @@
 #include "chart/core/TimeframeSwitch.hpp"
 #include "chart/core/ChartSession.hpp"
 #include "chart/core/ZoomGlide.hpp"
+#include "chart/core/ZoomController.hpp"
 #include "render/GridViewState.hpp"
 
 #include <QObject>
@@ -43,6 +44,8 @@ public:
 
     PriceFitter& priceFitter() { return priceFitter_; }
 
+    ZoomController& zoom() { return zoom_; }
+
     ZoomGlide& zoomGlide() { return zoomGlide_; }
     void advanceFrame(qint64 now) { zoomGlide_.advanceZoomGlide(now); }
 
@@ -64,6 +67,7 @@ private:
     ZoomGlideState glide_;
     ChartCamera camera_;
     ZoomGlide zoomGlide_;
+    ZoomController zoom_;
     PriceFitter priceFitter_;
     LivePlacement livePlacement_;
     PriceCarryPolicy priceCarry_;

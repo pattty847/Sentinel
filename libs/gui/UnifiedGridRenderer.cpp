@@ -153,14 +153,14 @@ void UnifiedGridRenderer::bindWindow(QQuickWindow* w) {
   }, Qt::DirectConnection);
 }
 
-
 UnifiedGridRenderer::~UnifiedGridRenderer() {
-  for (auto* timer : {m_glidePolishTimer, m_zoomSettleTimer})
-    if (timer) {
-      timer->stop();
-      disconnect(timer, nullptr, this, nullptr);
-    }
+  if (m_glidePolishTimer) {
+    m_glidePolishTimer->stop();
+    disconnect(m_glidePolishTimer, nullptr, this, nullptr);
+  }
   if (m_view) {
+    m_view->zoom().stop();
+    disconnect(&m_view->zoom(), nullptr, this, nullptr);
     m_view->priceCarry().stop();
     disconnect(m_view.get(), nullptr, this, nullptr);
     m_view->livePlacement().stopBootstrap();
@@ -977,9 +977,9 @@ void UnifiedGridRenderer::wheelEvent(QWheelEvent *event) {
   const int angle = shift && event->angleDelta().y() == 0 ? event->angleDelta().x() : event->angleDelta().y();
   if (shift) getViewState()->setAutoPriceScale(false);
   const QPointF at = event->position();
-  wheelZoom(angle, event->pixelDelta().isNull(), event->phase(),
+  m_view->zoom().wheelZoom(angle, event->pixelDelta().isNull(), event->phase(),
             event->source() == Qt::MouseEventSynthesizedBySystem,
-            at.x(), at.y(), !shift, true, WheelRoute::Chart);
+            at.x(), at.y(), !shift, true, chart::ZoomController::WheelRoute::Chart);
   update();
   event->accept();
 }

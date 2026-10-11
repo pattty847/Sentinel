@@ -140,30 +140,12 @@ private:
         bool operator==(const RasterSurface&) const = default;
     } m_rasterAnnounced;
     QMetaObject::Connection m_screenChangedConn;
-    QPointF m_gestureAt;
-    QTimer* m_zoomSettleTimer = nullptr; // a gesture settles after a pause (a lost end included)
     std::function<qint64()> m_zoomClock;
-    // Hi-res mouse wheels: the partial notch toward the next click, for one route and
-    // its axes (a change of either, or a reversal, drops it).
-    enum class WheelRoute { Chart, TimeAxis, PriceAxis };
-    int m_wheelAngleRemainder = 0;
-    int m_wheelCarryKey = -1;
     qint64 zoomNowMs() const;
-    // The chart and axis wheels: notches are clicks, a trackpad scroll is continuous.
-    void wheelZoom(int angle, bool pixelDeltaNull, Qt::ScrollPhase phase, bool precise,
-                   double x, double y, bool time, bool price,
-                   WheelRoute route);
-    // The stored view zoomed by factor about a point, in the limits (no camera yet).
-    void zoomStoredView(double factor, double x, double y, bool time, bool price);
-    // A continuous zoom that settles on a rung after settleMs without input.
-    void zoomContinuousFor(double factor, double x, double y, bool time, bool price, int settleMs);
     void bindZoomGlide();
     void bindLivePlacement();
     void bindTimeframeSwitch();
     QTimer* m_glidePolishTimer = nullptr;
-    // Moves the stored view to a rung about a drawn point (fracX/fracY of the item).
-    bool setZoomRung(const chart_raster::RasterCamera& drawn, double fracX, double fracY, bool time, int colPx,
-                     bool price, chart_raster::RowRung row);
     QMetaObject::Connection m_beforeSyncConn;
     // Render thread: this sync's frame (context, tick, raster camera), prepared in
     // beforeSynchronizing and drawn by updatePaintNode in the same sync.
@@ -359,7 +341,7 @@ public:
     void followLiveForTest(qint64 openEndMs) { m_view->livePlacement().followGpuLiveTo(openEndMs); }
     bool zoomGesturing() const { Q_ASSERT(m_view); return m_view->glide().gesture; }
     // Tests: inspect the actual settle timer without depending on its duration.
-    bool gestureSettlePending() const { return m_zoomSettleTimer && m_zoomSettleTimer->isActive(); }
+    bool gestureSettlePending() const { return m_view->zoom().gestureSettlePending(); }
     // Tests: the glide clock (ms); default the chart's frame clock.
     void setZoomClockForTest(std::function<qint64()> clock) { m_zoomClock = std::move(clock); }
     // The camera the next frame draws without a zoom transition (the rest camera of
