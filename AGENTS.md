@@ -64,6 +64,26 @@ Prefer simpler/faster designs over preserving weak legacy patterns unless compat
 If a change crosses these boundaries, state why before implementing it. Stop and ask only when it
 changes behaviour, data or looks (owner decisions) or needs an approval listed in this file.
 
+## 3a) Chart core: where chart behaviour goes (owner, 2026-10-11)
+
+`UnifiedGridRenderer` (UGR) is a Qt Quick shell. It changes only for item lifecycle, window/sync wiring and `QQuickItem` overrides. The migration plan is `docs/research/2026-10-11-chart-core-architecture.md`; until S15 lands, chart-view features are frozen (bug fixes land in the slice that owns the code).
+
+- View behaviour (camera, zoom, glide, fit, follow-live, placement, timeframe or symbol switch) goes in a policy class in `libs/gui/chart/core/` once that directory exists, never as new UGR members. `ChartViewController` only sequences policies: no arithmetic or branching on prices, times or pixels.
+- `sentinel_chart_core` links QtCore only: no QtGui, QtQuick, QSG, QML or `QQuickWindow` (the build and `chart-health.sh` enforce it). It never includes `HeatmapGpuLayer.hpp`, the source controller or recording types; it talks through `ChartPorts.hpp`.
+- A new chart overlay is an `IChartLayer` in `libs/gui/chart/layers/` plus one line in `ChartLayerSet.cpp`. Render-thread code reads only `ChartFrame`, its own state and its mailbox; never `GridViewState`, a `QObject` or UGR.
+- New QML knobs go on the owning sub-object (`view`, `candles`, `tpo`, `layers`, `debug`); new Agent API fields go in `ChartAgentPort`; new test hooks go on the policy under test, not on UGR.
+- New view behaviour ships with a Qt-free unit test of its policy that fails without the change. A GPU test alone is not enough.
+- `tests/render/golden/*` (CPU view trace, Metal frame hashes) is re-blessed only in a slice that declares a visible change; the hand-off names every changed scene and why. A slice labelled neutral with a re-bless is rejected. On the owner's Mac (M4, Metal) a missing or mismatched golden fails.
+- `scripts/dev/chart-health.sh` runs in `agent-worktree.sh land` and must pass. Writers run it before `READY`. It checks only the chart and UGR files the branch changed (`libs/gui/chart/**`, `libs/gui/UnifiedGridRenderer*`), against the branch's merge-base with `main`:
+  - file caps: no UGR file grows past its merge-base size; from S14, `UnifiedGridRenderer.cpp` <= 450 lines and `.h` <= 350; every `libs/gui/chart/**` file <= 500;
+  - UGR `m_` member count never grows (<= 15 from S14);
+  - new functions CCN <= 15, <= 60 NLOC, <= 6 parameters (`ChartViewController` CCN <= 10); a touched or moved existing function may not rise above max(15, its merge-base CCN);
+  - no new jscpd clone (>= 8 lines / 60 tokens) involving `libs/gui/chart/**` or `UnifiedGridRenderer*`;
+  - no QtGui/Quick/SG/QML include in `chart/core`; no `UnifiedGridRenderer.h` include outside the shell allowlist.
+  A breach fails the land unless the conductor stamps `--trailer 'Chart-Health-Waiver: <reason>'`.
+
+Reviewers of any `libs/gui/UnifiedGridRenderer*` or `libs/gui/chart/**` diff reject: new UGR members, properties or signals that aren't lifecycle or wiring; a hand-copied camera setup instead of `ChartCamera`; a new `IChartLayer` parameter for one layer's needs; changed signal emission order or reordered floating-point operands in a neutral slice; per-frame allocation on the render path (section 5); process comments (slice, review-round or plan references) in production code.
+
 ## 4) Commands and Testing
 
 Build (owner's Mac): `scripts/dev/build-queue.sh --label <branch> -- cmake --build --preset mac-clang -j 6`
