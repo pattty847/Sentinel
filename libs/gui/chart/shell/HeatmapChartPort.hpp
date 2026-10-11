@@ -19,6 +19,7 @@ public:
     bool attached() const override { return layer_ != nullptr; }
 
     SurfaceFacts surface() const override;
+    bool visible() const override;
     double drawnTick() const override;
     double priceScale() const override;
     bool manualTick() const override;

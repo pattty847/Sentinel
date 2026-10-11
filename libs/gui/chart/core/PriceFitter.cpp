@@ -213,8 +213,7 @@ bool PriceFitter::autoPriceFit(qint64 start, qint64 end, double& priceMin, doubl
     return false; // no visible candle: the given price stays
   }
   std::tie(priceMin, priceMax) = *window;
-  controller_.flags().priceKnown = true; // a real price window (no book-top seed replaces it)
-  controller_.flags().reseedPrice = false;
+  controller_.flags().markPriceKnown();
   priceCarry_.reset();
   return true;
 }

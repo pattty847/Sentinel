@@ -16,6 +16,7 @@ public:
     ZoomGlide(ZoomGlideState& state, const ChartCamera& camera);
     void setClock(std::function<qint64()> clock) { now_ = std::move(clock); }
     bool gliding() const { return state_.time.active || state_.price.active; }
+    void land();
     void endZoomGlide(bool time = true, bool price = true);
     void startAxisGlides(const chart_raster::RasterCamera& drawn, const chart_raster::RasterCamera& restBefore,
                          double anchorTime, double anchorPrice, bool forceTime, bool forcePrice);

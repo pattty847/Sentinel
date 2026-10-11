@@ -195,6 +195,8 @@ add_library(sentinel_chart_core STATIC
     chart/core/PublishedFrame.cpp
     chart/core/ChartViewController.hpp
     chart/core/ChartViewController.cpp
+    chart/core/ViewCommands.hpp
+    chart/core/ViewCommands.cpp
 )
 target_include_directories(sentinel_chart_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(sentinel_chart_core PUBLIC sentinel_core Qt6::Core)

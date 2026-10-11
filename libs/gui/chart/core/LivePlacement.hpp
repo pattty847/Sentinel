@@ -4,11 +4,13 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 
 namespace chart {
 class ChartViewController;
 
 struct PlacementFlags {
+    void markPriceKnown() { priceKnown = true; reseedPrice = false; }
     bool priceKnown = false;
     bool reseedPrice = false;
     bool pristine = false;
@@ -55,6 +57,7 @@ public:
     qint64 gpuInitialSpanMs(double widthPx) const;
     void enableAutoScroll(bool enabled);
     void setLiveBookTop(double bestBid, double bestAsk);
+    static bool matchesUtf8Product(QStringView symbol, std::string_view product);
     void onTrade(const std::string& product, double price);
     void resize(double width);
     static int64_t liveEndCeil(int64_t x, int64_t tf);

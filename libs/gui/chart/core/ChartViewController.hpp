@@ -1,6 +1,7 @@
 #pragma once
 
 #include "chart/core/ChartCamera.hpp"
+#include "chart/core/ViewCommands.hpp"
 #include "chart/core/LivePlacement.hpp"
 #include "chart/core/PriceFitter.hpp"
 #include "chart/core/PriceCarryPolicy.hpp"
@@ -44,6 +45,8 @@ public:
 
     PriceFitter& priceFitter() { return priceFitter_; }
 
+    ViewCommands& commands() { return commands_; }
+
     ZoomController& zoom() { return zoom_; }
 
     ZoomGlide& zoomGlide() { return zoomGlide_; }
@@ -72,6 +75,7 @@ private:
     LivePlacement livePlacement_;
     PriceCarryPolicy priceCarry_;
     TimeframeSwitch timeframeSwitch_;
+    ViewCommands commands_;
 };
 
 } // namespace chart

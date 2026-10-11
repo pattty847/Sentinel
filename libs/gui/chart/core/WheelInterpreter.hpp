@@ -2,6 +2,7 @@
 
 namespace chart {
 struct WheelInterpreter {
+  static constexpr int kNoScrollPhase = 0, kScrollEnd = 3;
   enum class Kind { Notch, End, Continuous, Ignore };
   // Phase values match Qt's scroll phases; classification itself has no Qt dependency.
   static Kind classify(int angle, bool pixelDeltaNull, int phase, bool precise) {
@@ -11,10 +12,10 @@ struct WheelInterpreter {
     // promotion is sticky (pointingDeviceFor, scrollWheel). QML has no source, so
     // axes use phase/deltas. Unphased non-precise 120-unit multiples are clicks even
     // with pixels; null-pixel partial angles retain the high-resolution wheel carry.
-    const bool notch = phase == 0 && !precise &&
+    const bool notch = phase == kNoScrollPhase && !precise &&
                        (pixelDeltaNull || (angle != 0 && angle % 120 == 0));
     if (notch) return Kind::Notch;
-    if (phase == 3) return Kind::End;
+    if (phase == kScrollEnd) return Kind::End;
     if (angle != 0) return Kind::Continuous;
     return Kind::Ignore;
   }
