@@ -183,6 +183,14 @@ target_link_libraries(test_chart_view_trace PRIVATE sentinel_gui_lib sentinel_la
 target_compile_definitions(test_chart_view_trace PRIVATE SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME ChartViewTraceTests COMMAND test_chart_view_trace)
 set_tests_properties(ChartViewTraceTests PROPERTIES LABELS "render" TIMEOUT 300)
+# S0b: Metal frame-hash golden (golden/frames.json). Exit 77 (skip) only off the owner's Mac.
+add_executable(test_chart_golden test_chart_golden.cpp)
+target_include_directories(test_chart_golden PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_chart_golden PRIVATE sentinel_gui_lib sentinel_lab_lib Qt6::GuiPrivate Qt6::QuickPrivate Qt6::Quick)
+target_compile_definitions(test_chart_golden PRIVATE SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+                           SENTINEL_GOLDEN_OUT_DIR="${CMAKE_BINARY_DIR}/golden-out")
+add_test(NAME ChartGoldenTests COMMAND test_chart_golden)
+set_tests_properties(ChartGoldenTests PROPERTIES LABELS "render;heatmap" TIMEOUT 600 SKIP_RETURN_CODE 77)
 add_test(NAME UgrGpuTests COMMAND test_ugr_gpu)
 set_tests_properties(UgrGpuTests PROPERTIES LABELS "render;heatmap" TIMEOUT 300)
 # Review blocker 1 under Guard Malloc: the data service dies before the chart.
