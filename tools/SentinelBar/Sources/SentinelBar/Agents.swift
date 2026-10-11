@@ -64,8 +64,8 @@ enum TranscriptFiles {
         return cwd
     }
 
-    static func codexIndex() -> [String: (URL, Date)] {
-        var result: [String: (URL, Date)] = [:]
+    static func codexFiles() -> [AgentTranscript] {
+        var result: [AgentTranscript] = []
         let home = ProcessInfo.processInfo.environment["CODEX_HOME"] ?? NSHomeDirectory() + "/.codex"
         let calendar = Calendar.current
         for back in 0...1 {
@@ -77,29 +77,29 @@ enum TranscriptFiles {
                 includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
             for url in files where url.lastPathComponent.hasPrefix("rollout-") && url.pathExtension == "jsonl" {
                 guard let cwd = codexCwd(url), let date = modified(url) else { continue }
-                if result[cwd]?.1 ?? .distantPast < date { result[cwd] = (url, date) }
+                result.append(AgentTranscript(path: url.path, cwd: cwd, kind: "codex", modified: date))
             }
         }
         return result
     }
 
-    static func claudeFiles(cwd: String) -> (main: (URL, Date)?, children: [(URL, Date)]) {
+    static func claudeFiles(cwd: String) -> [AgentTranscript] {
         let slug = cwd.map { $0 == "/" || $0 == "." ? "-" : $0 }.map(String.init).joined()
         let root = URL(fileURLWithPath: NSHomeDirectory() + "/.claude/projects/" + slug)
         let mains = ((try? FileManager.default.contentsOfDirectory(at: root,
             includingPropertiesForKeys: [.contentModificationDateKey])) ?? []).filter { $0.pathExtension == "jsonl" }
-        let main = mains.compactMap { url -> (URL, Date)? in modified(url).map { (url, $0) } }.max { $0.1 < $1.1 }
-        var children: [(URL, Date)] = []
-        // Only the current (newest) session's subagents: older sessions' interrupted subagents never complete.
-        for file in main.map({ [$0.0] }) ?? [] {
-            let dir = root.appendingPathComponent(file.deletingPathExtension().lastPathComponent)
-                .appendingPathComponent("subagents")
-            let subfiles = (try? FileManager.default.contentsOfDirectory(at: dir,
-                includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
-            children += subfiles.filter { $0.pathExtension == "jsonl" }
-                .compactMap { url in modified(url).map { (url, $0) } }
+        return mains.compactMap { url in
+            modified(url).map { AgentTranscript(path: url.path, cwd: cwd, kind: "claude", modified: $0) }
         }
-        return (main, children)
+    }
+
+    static func claudeChildren(main: URL) -> [(URL, Date)] {
+        let dir = main.deletingLastPathComponent().appendingPathComponent(main.deletingPathExtension().lastPathComponent)
+            .appendingPathComponent("subagents")
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir,
+            includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        return files.filter { $0.pathExtension == "jsonl" }
+            .compactMap { url in modified(url).map { (url, $0) } }
     }
 
     private static func modified(_ url: URL) -> Date? {
@@ -121,29 +121,44 @@ enum AgentProbe {
         let kinds = Dictionary(processes.map { ($0.pid, $0.kind) }, uniquingKeysWith: { a, _ in a })
         processes.removeAll { kinds[$0.parent] == $0.kind }
         guard let cwds = cwdsOf(processes.map(\.pid)) else { return nil }
-        if !processes.isEmpty && cwds.isEmpty { return nil }
-        let codex = TranscriptFiles.codexIndex()
+        let descriptors: [AgentProcess] = processes.compactMap { process in
+            let fallback = cwds[process.pid] ?? "/"
+            let provisional = AgentProcess(pid: process.pid, kind: process.kind, cwd: fallback,
+                                           args: process.args, hasWorktree: false)
+            let cwd = AgentMatcher.cwd(for: provisional)
+            guard cwds[process.pid] != nil || (process.kind == "codex" && cwd != "/") else { return nil }
+            let managed = worktrees.contains { cwd == $0.path || cwd.hasPrefix($0.path + "/") }
+            return AgentProcess(pid: process.pid, kind: process.kind, cwd: fallback,
+                                args: process.args, hasWorktree: managed)
+        }
+        let claudeCwds = Set(descriptors.filter { $0.kind == "claude" }.map { AgentMatcher.cwd(for: $0) })
+        let transcripts = TranscriptFiles.codexFiles() + claudeCwds.flatMap { TranscriptFiles.claudeFiles(cwd: $0) }
+        let selected = AgentMatcher.select(processes: descriptors, transcripts: transcripts)
+        let byPID = Dictionary(processes.map { ($0.pid, $0) }, uniquingKeysWith: { a, _ in a })
+        let descriptorByPID = Dictionary(descriptors.map { ($0.pid, $0) }, uniquingKeysWith: { a, _ in a })
         var jobs: [AgentJob] = []
         var terminalSubagents: [String: SubagentDisposition] = [:]
-        for p in processes {
-            guard let cwd = cwds[p.pid] else { continue }
+        for match in selected {
+            guard let p = byPID[match.pid], let descriptor = descriptorByPID[match.pid] else { continue }
+            let cwd = AgentMatcher.cwd(for: descriptor)
             let branch = worktrees.filter { cwd == $0.path || cwd.hasPrefix($0.path + "/") }
                 .max { $0.path.count < $1.path.count }?.branch
-            var job = AgentJob(id: String(p.pid), pid: p.pid, kind: p.kind,
-                               model: modelArg(p.args), cwd: cwd, branch: branch)
-            if p.kind == "codex", let (url, date) = codex[cwd] {
-                apply(url, date, to: &job)
-            } else if p.kind == "claude" {
-                let files = TranscriptFiles.claudeFiles(cwd: cwd)
-                if let (url, date) = files.main { apply(url, date, to: &job) }
-                for (url, date) in files.children {
-                    var child = AgentJob(id: url.path, pid: p.pid, kind: "claude",
-                                         model: nil, cwd: cwd, branch: branch, subagent: true)
-                    apply(url, date, to: &child)
-                    let disposition = SubagentLifecycle.decide(parentAlive: true, state: child.transcriptState,
-                        secondsSinceActivity: Date().timeIntervalSince(date))
-                    if disposition == .active { jobs.append(child) }
-                    else { terminalSubagents[child.id] = disposition }
+            let id = p.kind == "claude" ? (match.transcript?.path ?? String(p.pid)) : String(p.pid)
+            var job = AgentJob(id: id, pid: p.pid, kind: p.kind,
+                               model: AgentMatcher.modelArgument(p.args), cwd: cwd, branch: branch)
+            if let transcript = match.transcript {
+                let url = URL(fileURLWithPath: transcript.path)
+                apply(url, transcript.modified, to: &job)
+                if p.kind == "claude" {
+                    for (url, date) in TranscriptFiles.claudeChildren(main: url) {
+                        var child = AgentJob(id: url.path, pid: p.pid, kind: "claude",
+                                             model: nil, cwd: cwd, branch: branch, subagent: true)
+                        apply(url, date, to: &child)
+                        let disposition = SubagentLifecycle.decide(parentAlive: true, state: child.transcriptState,
+                            secondsSinceActivity: Date().timeIntervalSince(date))
+                        if disposition == .active { jobs.append(child) }
+                        else { terminalSubagents[child.id] = disposition }
+                    }
                 }
             }
             jobs.append(job)
@@ -168,14 +183,6 @@ enum AgentProbe {
             let name = (arg as NSString).lastPathComponent
             if name == "claude" { return "claude" }
             if name == "codex" || name.hasPrefix("codex-") { return "codex" }
-        }
-        return nil
-    }
-
-    private static func modelArg(_ args: [String]) -> String? {
-        for (index, arg) in args.enumerated() {
-            if (arg == "-m" || arg == "--model") && index + 1 < args.count { return args[index + 1] }
-            if arg.hasPrefix("--model=") { return String(arg.dropFirst(8)) }
         }
         return nil
     }

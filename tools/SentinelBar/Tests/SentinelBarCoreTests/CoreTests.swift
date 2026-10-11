@@ -31,11 +31,16 @@ struct CoreTests {
         #expect(!state.failed)
     }
 
-    @Test func idleSubagentRemainsActiveUntilCompletionOrParentExit() {
+    @Test func staleSubagentDisappearsWithoutNotification() {
         let state = TranscriptState()
         let idle = SubagentLifecycle.decide(parentAlive: true, state: state, secondsSinceActivity: 300)
         #expect(idle == .active)
         #expect(!idle.shouldNotify)
+        let stale = SubagentLifecycle.decide(parentAlive: true, state: state, secondsSinceActivity: 1801)
+        #expect(stale == .stale)
+        #expect(!stale.shouldNotify)
+        #expect(SubagentLifecycle.decide(parentAlive: false, state: state,
+                                         secondsSinceActivity: 1801) == .stale)
 
         var completed = state
         completed.completed = true
@@ -52,6 +57,54 @@ struct CoreTests {
             #"{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"synthetic done"}]}}"#
         ])
         #expect(ended.completed)
+    }
+
+    @Test func claudeSessionsAreDistinctAndDefaultModelFallsBack() {
+        let cwd = "/synthetic/main"
+        let processes = (1...6).map { index in
+            AgentProcess(pid: Int32(index), kind: "claude", cwd: cwd,
+                         args: index == 1 ? ["claude", "--resume", "session-3", "--model", "default"] : ["claude"],
+                         hasWorktree: true)
+        }
+        let transcripts = (1...7).map { index in
+            AgentTranscript(path: "/synthetic/claude/session-\(index).jsonl", cwd: cwd,
+                            kind: "claude", modified: Date(timeIntervalSince1970: Double(index)))
+        }
+        let matches = AgentMatcher.select(processes: processes, transcripts: transcripts)
+        #expect(matches.count == 6)
+        #expect(matches.first?.transcript?.path.hasSuffix("session-3.jsonl") == true)
+        #expect(Set(matches.compactMap { $0.transcript?.path }).count == 6)
+        #expect(!matches.contains { $0.transcript?.path.hasSuffix("session-1.jsonl") == true })
+        #expect(AgentMatcher.modelArgument(processes[0].args) == nil)
+    }
+
+    @Test func codexUsesCommandCwdAndHidesUnmatchedHelpers() {
+        let main = AgentProcess(pid: 1, kind: "codex", cwd: "/synthetic/launcher",
+                                args: ["codex", "-C", "/synthetic/worktree"], hasWorktree: true)
+        let helper = AgentProcess(pid: 2, kind: "codex", cwd: "/synthetic/helper",
+                                  args: ["codex"], hasWorktree: false)
+        let other = AgentProcess(pid: 3, kind: "codex", cwd: "/synthetic/worktree",
+                                 args: ["codex", "--cd=/synthetic/worktree"], hasWorktree: true)
+        let rollouts = (1...2).map { index in
+            AgentTranscript(path: "/synthetic/rollout-\(index).jsonl", cwd: "/synthetic/worktree",
+                            kind: "codex", modified: Date(timeIntervalSince1970: Double(index)))
+        }
+        #expect(AgentMatcher.cwd(for: main) == "/synthetic/worktree")
+        let matches = AgentMatcher.select(processes: [main, helper, other], transcripts: rollouts)
+        #expect(matches.map(\.pid) == [1, 3])
+        #expect(Set(matches.compactMap { $0.transcript?.path }).count == 2)
+        #expect(matches[0].transcript?.path.hasSuffix("rollout-2.jsonl") == true)
+    }
+
+    @Test func planSkipsNewestZeroSliceDocumentUnlessPinned() {
+        let empty = "# SentinelBar\n## Goal\nNo slices here."
+        let slices = "# Chart plan\n### Phase One\n**S0a: Camera**"
+        let candidates = [(path: "sentinelbar.md", document: empty),
+                          (path: "chart.md", document: slices)]
+        let selected = PlanParser.select(candidates)
+        #expect(selected?.path == "chart.md")
+        #expect(selected?.plan.phases.flatMap(\.slices).map(\.id) == ["S0a"])
+        #expect(PlanParser.select(candidates, pinned: true)?.path == "sentinelbar.md")
     }
 
     @Test func chartPlanSlicesAndBugRows() throws {

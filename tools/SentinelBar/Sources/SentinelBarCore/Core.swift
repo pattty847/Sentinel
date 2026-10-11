@@ -15,17 +15,98 @@ public enum SubagentDisposition: Equatable {
     case active
     case finished
     case failed
+    case stale
 
-    public var shouldNotify: Bool { self != .active }
+    public var shouldNotify: Bool { self == .finished || self == .failed }
 }
 
 public enum SubagentLifecycle {
-    /// Activity age affects the idle label, not whether an agent is alive.
     public static func decide(parentAlive: Bool, state: TranscriptState,
                               secondsSinceActivity: TimeInterval) -> SubagentDisposition {
         if state.failed { return .failed }
-        if state.completed || !parentAlive { return .finished }
+        if state.completed { return .finished }
+        if secondsSinceActivity > 30 * 60 { return .stale }
+        if !parentAlive { return .finished }
         return .active
+    }
+}
+
+public struct AgentProcess {
+    public let pid: Int32
+    public let kind: String
+    public let cwd: String
+    public let args: [String]
+    public let hasWorktree: Bool
+
+    public init(pid: Int32, kind: String, cwd: String, args: [String], hasWorktree: Bool) {
+        self.pid = pid; self.kind = kind; self.cwd = cwd; self.args = args; self.hasWorktree = hasWorktree
+    }
+}
+
+public struct AgentTranscript {
+    public let path: String
+    public let cwd: String
+    public let kind: String
+    public let modified: Date
+
+    public init(path: String, cwd: String, kind: String, modified: Date) {
+        self.path = path; self.cwd = cwd; self.kind = kind; self.modified = modified
+    }
+}
+
+public struct AgentMatch {
+    public let pid: Int32
+    public let transcript: AgentTranscript?
+}
+
+public enum AgentMatcher {
+    public static func cwd(for process: AgentProcess) -> String {
+        guard process.kind == "codex", let path = argument(process.args, names: ["-C", "--cd"]) else {
+            return process.cwd
+        }
+        let full = path.hasPrefix("/") ? path : process.cwd + "/" + path
+        return URL(fileURLWithPath: full).standardizedFileURL.path
+    }
+
+    public static func modelArgument(_ args: [String]) -> String? {
+        guard let model = argument(args, names: ["-m", "--model"]), model != "default" else { return nil }
+        return model
+    }
+
+    public static func select(processes: [AgentProcess], transcripts: [AgentTranscript]) -> [AgentMatch] {
+        var used: Set<String> = []
+        var selected: [Int32: AgentTranscript] = [:]
+        let ordered = transcripts.sorted { $0.modified == $1.modified ? $0.path < $1.path : $0.modified > $1.modified }
+        // A pinned Claude session takes precedence over cwd-based assignment.
+        for process in processes where process.kind == "claude" {
+            guard let id = argument(process.args, names: ["--resume", "-r", "--session-id"]),
+                  let transcript = ordered.first(where: { $0.kind == "claude" && $0.cwd == cwd(for: process) &&
+                      URL(fileURLWithPath: $0.path).lastPathComponent == id + ".jsonl" && !used.contains($0.path) }) else { continue }
+            selected[process.pid] = transcript
+            used.insert(transcript.path)
+        }
+        for process in processes where selected[process.pid] == nil {
+            if process.kind == "claude" &&
+                argument(process.args, names: ["--resume", "-r", "--session-id"]) != nil { continue }
+            guard let transcript = ordered.first(where: { $0.kind == process.kind && $0.cwd == cwd(for: process) &&
+                !used.contains($0.path) }) else { continue }
+            selected[process.pid] = transcript
+            used.insert(transcript.path)
+        }
+        return processes.compactMap { process in
+            let transcript = selected[process.pid]
+            return transcript != nil || process.hasWorktree ? AgentMatch(pid: process.pid, transcript: transcript) : nil
+        }
+    }
+
+    private static func argument(_ args: [String], names: [String]) -> String? {
+        for (index, arg) in args.enumerated() {
+            if names.contains(arg), index + 1 < args.count { return args[index + 1] }
+            for name in names where name.hasPrefix("--") && arg.hasPrefix(name + "=") {
+                return String(arg.dropFirst(name.count + 1))
+            }
+        }
+        return nil
     }
 }
 
@@ -139,6 +220,17 @@ public struct Plan: Equatable {
 }
 
 public enum PlanParser {
+    public static func select(_ candidates: [(path: String, document: String)], pinned: Bool = false)
+        -> (path: String, plan: Plan)? {
+        for candidate in candidates {
+            let plan = parse(candidate.document)
+            if pinned || plan.phases.contains(where: { !$0.slices.isEmpty }) {
+                return (candidate.path, plan)
+            }
+        }
+        return nil
+    }
+
     public static func parse(_ document: String) -> Plan {
         let lines = document.components(separatedBy: .newlines)
         let title = lines.first { $0.hasPrefix("# ") }.map { String($0.dropFirst(2)) } ?? "Plan"

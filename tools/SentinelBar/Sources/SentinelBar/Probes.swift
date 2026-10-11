@@ -124,12 +124,28 @@ enum Probes {
         }
     }
 
-    static func plan(repo: String, pinned: String?, landings: [Landing]) -> Plan? {
-        let path = pinned.flatMap { $0.isEmpty ? nil : $0 } ?? landings.compactMap(\.plan).first
-        guard let path else { return nil }
-        let url = path.hasPrefix("/") ? URL(fileURLWithPath: path) : URL(fileURLWithPath: repo).appendingPathComponent(path)
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
-        return PlanParser.parse(text)
+    static func plan(repo: String, pinned: String?) -> (path: String, plan: Plan)? {
+        let isPinned = !(pinned ?? "").isEmpty
+        let paths = isPinned ? [pinned!] : planTrailers(repo: repo)
+        var seen: Set<String> = []
+        for path in paths where seen.insert(path).inserted {
+            let url = path.hasPrefix("/") ? URL(fileURLWithPath: path) : URL(fileURLWithPath: repo).appendingPathComponent(path)
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            if let selected = PlanParser.select([(path: path, document: text)], pinned: isPinned) {
+                return selected
+            }
+        }
+        return nil
+    }
+
+    private static func planTrailers(repo: String) -> [String] {
+        guard let output = Shell.run("/usr/bin/git", ["-C", repo, "log", "--first-parent", "main",
+            "--format=%(trailers:only,unfold)%x1e"]) else { return [] }
+        return output.components(separatedBy: "\u{1e}").flatMap { record in
+            record.components(separatedBy: "\n").compactMap { line in
+                line.hasPrefix("Plan: ") ? String(line.dropFirst(6)) : nil
+            }
+        }
     }
 
     static func events() -> [Milestone] {

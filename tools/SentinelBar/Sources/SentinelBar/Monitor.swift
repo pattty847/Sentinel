@@ -122,7 +122,9 @@ final class Monitor: ObservableObject {
         let parentPIDs = Set(fresh.filter { !$0.subagent }.map(\.pid))
         let scannedIDs = Set(fresh.map(\.id))
         for child in agents where child.subagent && !scannedIDs.contains(child.id) &&
-            parentPIDs.contains(child.pid) && scan.terminalSubagents[child.id] == nil {
+            parentPIDs.contains(child.pid) && scan.terminalSubagents[child.id] == nil &&
+            SubagentLifecycle.decide(parentAlive: true, state: child.transcriptState,
+                secondsSinceActivity: child.lastActive.map { Date().timeIntervalSince($0) } ?? 0) == .active {
             fresh.append(child)
         }
         let ids = Set(fresh.map(\.id))
@@ -205,13 +207,13 @@ final class Monitor: ObservableObject {
         }.value
         if head != mainHead {
             let pinned = pinnedPlan
-            let data = await Task.detached { () -> ([Landing], Plan?) in
+            let data = await Task.detached { () -> ([Landing], (path: String, plan: Plan)?) in
                 let landed = Probes.landings(repo: path)
-                return (landed, Probes.plan(repo: path, pinned: pinned, landings: landed))
+                return (landed, Probes.plan(repo: path, pinned: pinned))
             }.value
             landings = data.0
-            plan = data.1
-            selectedPlanPath = pinned.isEmpty ? data.0.compactMap(\.plan).first : pinned
+            plan = data.1?.plan
+            selectedPlanPath = data.1?.path
             mainHead = head
         }
     }
