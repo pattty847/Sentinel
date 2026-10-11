@@ -28,9 +28,6 @@ struct MappingFrameContext {
     bool viewportDragging = false;
     bool viewportAutoScrollEnabled = false;
 
-    uint64_t footprintGeneration = 0;
-    uint64_t candleGeneration = 0;
-
     TimeAxisMapping mapping;
     // The frame's raster camera (whole-pixel mapping): the drawn window, P and C.
     chart_raster::RasterCamera raster;

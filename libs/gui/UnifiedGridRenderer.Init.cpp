@@ -2,13 +2,8 @@
 #include "UnifiedGridRenderer.h"
 
 #include "SentinelLogging.hpp"
-#include <QDateTime>
 #include <QMetaObject>
-#include <QMetaType>
-#include <QElapsedTimer>
-#include <QTimer>
-#include <QtEndian>
-#include <algorithm>
+#include <QThread>
 #include <limits>
 
 #include "render/DataProcessor.hpp"
@@ -151,7 +146,6 @@ void UnifiedGridRenderer::connectDataProcessorSignals() {
 
                 m_footprintOverlay.enqueue(
                     FootprintOverlayRenderer::PendingUpload{x, gridWidth, gridHeight, std::move(columnQ16), grid});
-                m_footprintStreamGeneration.fetch_add(1, std::memory_order_acq_rel);
                 sLog_Probe("footprint.queue",
                            "x=" << x << " grid=" << gridWidth << "x" << gridHeight);
                 update();

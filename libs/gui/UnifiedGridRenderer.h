@@ -1,8 +1,5 @@
 #pragma once
 #include <QQuickItem>
-#include <QSGGeometryNode>
-#include <QSGVertexColorMaterial>
-#include <QImage>
 #include <QTimer>
 #include <QThread>
 #include <QMouseEvent>
@@ -63,9 +60,7 @@ class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     
     Q_PROPERTY(bool autoScrollEnabled READ autoScrollEnabled WRITE enableAutoScroll NOTIFY autoScrollEnabledChanged)
     
-    Q_PROPERTY(double currentPriceResolution READ getCurrentPriceResolution NOTIFY priceResolutionChanged)
-    Q_PROPERTY(double autoScrollPaddingFrac READ autoScrollPaddingFrac WRITE setAutoScrollPaddingFrac NOTIFY autoScrollPaddingFracChanged)
-    Q_PROPERTY(bool autoScrollSmoothEnabled READ autoScrollSmoothEnabled WRITE setAutoScrollSmoothEnabled NOTIFY autoScrollSmoothEnabledChanged)
+    Q_PROPERTY(double currentPriceResolution READ getCurrentPriceResolution CONSTANT)
     Q_PROPERTY(double heatmapGamma READ heatmapGamma WRITE setHeatmapGamma NOTIFY heatmapGammaChanged)
     Q_PROPERTY(double heatmapContrast READ heatmapContrast WRITE setHeatmapContrast NOTIFY heatmapContrastChanged)
     Q_PROPERTY(double heatmapShaderFloor READ heatmapShaderFloor WRITE setHeatmapShaderFloor NOTIFY heatmapShaderFloorChanged)
@@ -79,10 +74,7 @@ class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     
     Q_PROPERTY(bool showGpuStatsOverlay READ showGpuStatsOverlay WRITE setShowGpuStatsOverlay NOTIFY showGpuStatsOverlayChanged)
     Q_PROPERTY(bool showDataPipelineOverlay READ showDataPipelineOverlay WRITE setShowDataPipelineOverlay NOTIFY showDataPipelineOverlayChanged)
-    Q_PROPERTY(bool showRenderStrategyOverlay READ showRenderStrategyOverlay WRITE setShowRenderStrategyOverlay NOTIFY showRenderStrategyOverlayChanged)
     Q_PROPERTY(bool showViewportMathOverlay READ showViewportMathOverlay WRITE setShowViewportMathOverlay NOTIFY showViewportMathOverlayChanged)
-    Q_PROPERTY(bool showMemoryCacheOverlay READ showMemoryCacheOverlay WRITE setShowMemoryCacheOverlay NOTIFY showMemoryCacheOverlayChanged)
-    Q_PROPERTY(bool showModeFlagsOverlay READ showModeFlagsOverlay WRITE setShowModeFlagsOverlay NOTIFY showModeFlagsOverlayChanged)
 
     Q_PROPERTY(qint64 visibleTimeStart READ getVisibleTimeStart NOTIFY viewportChanged)
     Q_PROPERTY(qint64 visibleTimeEnd READ getVisibleTimeEnd NOTIFY viewportChanged)
@@ -115,18 +107,12 @@ private:
     
     bool m_showGpuStatsOverlay = false;
     bool m_showDataPipelineOverlay = false;
-    bool m_showRenderStrategyOverlay = false;
     bool m_showViewportMathOverlay = false;
-    bool m_showMemoryCacheOverlay = false;
-    bool m_showModeFlagsOverlay = false;
     int m_candleStyle = 0;
     QColor m_candleUpColor{"#2EBD85"}, m_candleDownColor{"#F6465D"};
     QString m_candleWickColor = "auto"; // each wick follows its body
     double m_candleBodyOpacity = 1;
     int m_candleWickWidth = 1;
-
-    bool m_manualTimeframeSet = false;
-    QElapsedTimer m_manualTimeframeTimer;
 
     FrameProfiler m_frameProfiler;  // SENTINEL_FRAME_PROFILE=1, render thread only
     QString m_activeSymbol;
@@ -152,8 +138,7 @@ private:
     int m_initialPricePct = 5;
     static constexpr double kSeedBandTick = 1.0;
     static constexpr int kSeedBandRows = 2048;
-    double m_autoScrollPaddingFrac = 0.08;
-    bool m_smoothAutoScrollEnabled = true;
+    static constexpr double kAutoScrollPaddingFrac = 0.08;
     double m_heatmapGamma = 1.05;
     double m_heatmapContrast = 1.15;
     double m_heatmapShaderFloor = 0.01;
@@ -294,8 +279,6 @@ private:
     int m_tpoTimeframeMs = 1800000;           // 30m brackets (config tpo.period_minutes)
     int m_tpoSessionType = 4;                 // SessionManager::SessionType::H24
 
-    std::atomic<uint64_t> m_footprintStreamGeneration{0};
-    std::atomic<uint64_t> m_candleStreamGeneration{0};
     std::atomic<uint64_t> m_controlRevision{0};
     std::atomic<uint64_t> m_controlSelectionEpoch{0};
     std::atomic<uint64_t> m_controlViewportVersion{0};
@@ -317,10 +300,7 @@ public:
     explicit UnifiedGridRenderer(QQuickItem* parent = nullptr);
     ~UnifiedGridRenderer();
     
-    int64_t currentTimeframe() const { return m_currentTimeframe_ms; }
     bool autoScrollEnabled() const { return m_viewState ? m_viewState->isAutoScrollEnabled() : false; }
-    double autoScrollPaddingFrac() const { return m_autoScrollPaddingFrac; }
-    bool autoScrollSmoothEnabled() const { return m_smoothAutoScrollEnabled; }
     int candleStyle() const { return m_candleStyle; }
     void setCandleStyle(int style);
     QColor candleUpColor() const { return m_candleUpColor; }
@@ -359,10 +339,7 @@ public:
     
     bool showGpuStatsOverlay() const { return m_showGpuStatsOverlay; }
     bool showDataPipelineOverlay() const { return m_showDataPipelineOverlay; }
-    bool showRenderStrategyOverlay() const { return m_showRenderStrategyOverlay; }
     bool showViewportMathOverlay() const { return m_showViewportMathOverlay; }
-    bool showMemoryCacheOverlay() const { return m_showMemoryCacheOverlay; }
-    bool showModeFlagsOverlay() const { return m_showModeFlagsOverlay; }
 
     Q_INVOKABLE qint64 getVisibleTimeStart() const;
     Q_INVOKABLE qint64 getVisibleTimeEnd() const; 
@@ -446,26 +423,13 @@ public:
     void setLiveBookTop(double bestBid, double bestAsk);
     
     Q_INVOKABLE void setPriceResolution(double resolution);
-    Q_INVOKABLE int getCurrentTimeResolution() const;
     Q_INVOKABLE double getCurrentPriceResolution() const;
-    Q_INVOKABLE void setGridResolution(int timeResMs, double priceRes);
-    struct GridResolution {
-        int timeMs;
-        double price;
-    };
-    static GridResolution calculateOptimalResolution(qint64 timeSpanMs, double priceSpan, int targetVerticalLines = 10, int targetHorizontalLines = 15);
-    
-    Q_INVOKABLE QString getGridDebugInfo() const;
-    Q_INVOKABLE QString getDetailedGridDebug() const;
     Q_INVOKABLE QString getViewportMathDebug() const;
     Q_INVOKABLE QString getDataPipelineDebug() const;
     
-    Q_INVOKABLE void togglePerformanceOverlay();
     Q_INVOKABLE QString getPerformanceStats() const;
-    Q_INVOKABLE double getCacheHitRate() const;
 
     Q_INVOKABLE QString getMsdfAtlasMemory() const;
-    TimeAxisMapping lastTimeAxisMapping() const { return currentTimeAxisMapping(); }
     MappingFrameContext currentFrameContext() const override;
     TimeAxisMapping currentTimeAxisMapping() const override;
     // GUI thread: the raster camera the next frame computes from the current view
@@ -524,10 +488,6 @@ public:
     Q_INVOKABLE void panDown();
     Q_INVOKABLE void enableAutoScroll(bool enabled);
     
-    Q_INVOKABLE QPointF worldToScreen(qint64 timestamp_ms, double price) const;
-    Q_INVOKABLE QPointF screenToWorld(double screenX, double screenY) const;
-    Q_INVOKABLE double getScreenWidth() const;
-    Q_INVOKABLE double getScreenHeight() const;
     void setHeatmapGamma(double gamma);
     void setHeatmapContrast(double contrast);
     void setHeatmapShaderFloor(double floor);
@@ -542,17 +502,10 @@ public:
     void onViewportChanged();
 
 signals:
-    void gridResolutionChanged(int timeRes_ms, double priceRes);
     void autoScrollEnabledChanged();
-    void priceResolutionChanged();
-    void autoScrollPaddingFracChanged();
-    void autoScrollSmoothEnabledChanged();
     void showGpuStatsOverlayChanged();
     void showDataPipelineOverlayChanged();
-    void showRenderStrategyOverlayChanged();
     void showViewportMathOverlayChanged();
-    void showMemoryCacheOverlayChanged();
-    void showModeFlagsOverlayChanged();
     void candleStyleChanged();
     void candleAppearanceChanged();
     void heatmapGammaChanged();
@@ -665,12 +618,7 @@ private:
 private:
     void setShowGpuStatsOverlay(bool show);
     void setShowDataPipelineOverlay(bool show);
-    void setShowRenderStrategyOverlay(bool show);
     void setShowViewportMathOverlay(bool show);
-    void setShowMemoryCacheOverlay(bool show);
-    void setShowModeFlagsOverlay(bool show);
-    void setAutoScrollPaddingFrac(double fraction);
-    void setAutoScrollSmoothEnabled(bool enabled);
 
     std::unique_ptr<GridViewState> m_viewState;
     std::unique_ptr<DataProcessor> m_dataProcessor;

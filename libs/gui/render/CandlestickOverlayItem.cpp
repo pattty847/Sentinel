@@ -370,7 +370,6 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     }
 
     const QSizeF currentSize(width(), height());
-    const uint64_t candleGeneration = frame.candleGeneration;
     const qint64 expectedTfMs = static_cast<qint64>(m_timeframeSec) * 1000;
     const bool cadenceMatches = (expectedTfMs > 0 && frame.activeTimeframeMs == expectedTfMs);
     if (cadenceMatches && frame.boundarySequence != m_lastBoundarySequence) {
@@ -381,11 +380,10 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     if (cadenceMatches) {
         m_lastBoundarySequence = frame.boundarySequence;
     }
-    if (!m_geometryDirty && m_lastCandleGeneration == candleGeneration && m_lastSize == currentSize) {
+    if (!m_geometryDirty && m_lastSize == currentSize) {
         return root;
     }
 
-    m_lastCandleGeneration = candleGeneration;
     m_lastSize = currentSize;
     m_geometryDirty = false;
 

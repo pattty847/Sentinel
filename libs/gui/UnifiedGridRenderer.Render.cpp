@@ -32,8 +32,6 @@ void UnifiedGridRenderer::publishFrameContext(const FrameContext& frame) {
     published.viewportPanVisualOffset = frame.viewport.panVisualOffset;
     published.viewportDragging = frame.viewport.dragging;
     published.viewportAutoScrollEnabled = frame.viewport.autoScrollEnabled;
-    published.footprintGeneration = frame.streamGenerations.footprint;
-    published.candleGeneration = frame.streamGenerations.candle;
     published.mapping = frame.mapping;
     published.raster = frame.raster;
     std::lock_guard<std::mutex> lock(m_frameContextMutex);
@@ -208,9 +206,7 @@ void UnifiedGridRenderer::prepareSyncFrame() {
     FrameContext& frame = m_sync.frame;
     frame = FrameContextBuilder::build(
         boundingRect(), window(), m_frameClock, m_timeAuthority, m_viewState.get(),
-        m_heatmapLayerEnabled, m_footprintLayerEnabled, m_tpoLayerEnabled,
-        m_footprintStreamGeneration.load(std::memory_order_acquire),
-        m_candleStreamGeneration.load(std::memory_order_acquire));
+        m_heatmapLayerEnabled, m_footprintLayerEnabled, m_tpoLayerEnabled);
     if (profile) m_frameProfiler.mark(FrameProfiler::Context);
     // 1-2. The tick for the continuous view (committed + an active drag at the
     // continuous scale): Auto decides on the continuous camera.
