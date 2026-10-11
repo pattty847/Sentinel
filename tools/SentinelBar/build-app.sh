@@ -31,7 +31,7 @@ PLIST
 codesign --force --sign - "$app"
 echo "built $PWD/$app"
 if [ "${1:-}" = --install ]; then
-    pkill -x SentinelBar 2>/dev/null || true
+    pkill -x SentinelBar 2>/dev/null && sleep 1 || true   # LaunchServices -600 if reopened too soon
     rm -rf "$HOME/Applications/SentinelBar.app"
     mkdir -p "$HOME/Applications"
     cp -R "$app" "$HOME/Applications/"
