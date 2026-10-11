@@ -2,10 +2,7 @@
 #include "marketdata/MarketDataFeeds.hpp"
 #include "fixtures/coinbase_messages.hpp"
 #include "fixtures/fake_ws_transport.hpp"
-#include "servermodel/BookRecorder.hpp"
-#include "servermodel/Hmc2Store.hpp"
 #include "servermodel/TradeOverlayPublisher.hpp"
-#include <QTemporaryDir>
 #include <QtEndian>
 
 namespace {
@@ -304,113 +301,6 @@ TEST_F(FeedsTest, MalformedBatchCannotAcceptLaterSnapshotOnClosingSocket) {
     peerUntouched();
 }
 
-struct RecorderFeed {
-    static constexpr int64_t kT0 = 1'767'225'600'000; // 2026-01-01T00:00:00Z
-    QTemporaryDir dir;
-    std::atomic<int64_t> local{kT0};
-    std::mutex mutex;
-    std::vector<std::pair<std::string, std::string>> requests;
-    std::unique_ptr<recording::BookRecorder> recorder;
-    RecorderFeed(MarketDataFeeds& engine, size_t maxQueuedLevels) {
-        recording::RecorderConfig config{dir.path().toStdString(), 100, {}, {{"near", 100, 0.5, 2, false}}, 0,
-                                         maxQueuedLevels};
-        config.onSelfInvalidated = [this, &engine](const std::string& symbol, const std::string& reason) {
-            { std::lock_guard lock(mutex); requests.emplace_back(symbol, reason); }
-            engine.requestResnapshot(symbol);
-        };
-        recorder = std::make_unique<recording::BookRecorder>(std::move(config), [this] { return local.load(); });
-        engine.onLiveOrderBookInitialized([this](const std::string& product, const auto& bids, const auto& asks, int64_t ms) {
-            std::vector<recording::Level> levels;
-            for (const auto& l : bids) levels.push_back({true, l.price, l.size});
-            for (const auto& l : asks) levels.push_back({false, l.price, l.size});
-            recorder->onSnapshot(product, ms, std::move(levels));
-        });
-        engine.onLiveOrderBookLevelUpdates([this](const std::string& product, const auto& updates, int64_t ms) {
-            std::vector<recording::Level> levels;
-            for (const auto& u : updates) levels.push_back({u.isBid, u.price, u.quantity});
-            recorder->onUpdates(product, ms, std::move(levels));
-        });
-        engine.onLiveOrderBookInvalidated([this](const std::string& product, const std::string& reason) {
-            recorder->onInvalid(product, local.load(), reason);
-        });
-    }
-    std::vector<recording::Hmc2Record> rows(const std::string& symbol) {
-        recorder->drainForTest();
-        return recording::Hmc2Store::readRange(dir.path().toStdString(), symbol, "near", 60000, kT0, kT0 + 3'600'000);
-    }
-    size_t requestCount() { std::lock_guard lock(mutex); return requests.size(); }
-};
-std::string frame(nlohmann::json message, int sequence) {
-    message["sequence_num"] = sequence;
-    return message.dump();
-}
-// Queue-level overflow depends on what is still queued, so the trigger alone
-// exceeds the cap (7 > 6) while every other burst in a test fits under it.
-const std::vector<std::tuple<std::string, double, double>> kOverflow{
-    {"bid", 98, 1}, {"bid", 97, 1}, {"bid", 96, 1}, {"bid", 95, 1}, {"offer", 102, 1}, {"offer", 103, 1}, {"offer", 104, 1}};
-double twap(const recording::Hmc2Record& r, int64_t row, bool ask) {
-    for (const auto& e : r.entries)
-        if (e.row == row && e.isAsk == ask) return recording::decodeSize(e.twapCode);
-    return -1;
-}
-
-TEST_F(FeedsTest, RecorderSelfInvalidationResnapshotsAndRecordingResumes) {
-    auto state = scenarios["BTC-USD"] = std::make_shared<fixtures::WsScenario>();
-    state->onAttempt = [](auto& transport, int attempt) {
-        transport.up();
-        if (attempt == 1) {
-            transport.frame(frame(coinbaseL2Snapshot("BTC-USD", {{99, 2}}, {{101, 4}}, "2026-01-01T00:00:00Z"), 0));
-            transport.frame(frame(coinbaseL2Update("BTC-USD", kOverflow, "2026-01-01T00:00:10Z"), 1));
-        } else {
-            transport.frame(frame(coinbaseL2Snapshot("BTC-USD", {{99, 2}}, {{101, 4}}, "2026-01-01T00:00:30Z"), 0));
-            transport.frame(frame(coinbaseL2Update("BTC-USD", {{"bid", 99, 3}}, "2026-01-01T00:01:10Z"), 1));
-            transport.frame(frame(coinbaseL2Update("BTC-USD", {{"offer", 101, 5}}, "2026-01-01T00:02:10Z"), 2));
-        }
-    };
-    ServerMdcConfig config; config.sslCaBundle = SENTINEL_TEST_CA;
-    feeds = std::make_unique<MarketDataFeeds>(auth, config, options);
-    RecorderFeed feed(*feeds, 6);
-    struct Stop { MarketDataFeeds& feeds; ~Stop() { feeds.stop(); } } stop{*feeds};
-    feeds->add("BTC-USD"); feeds->start(); feeds->poll();
-    feed.recorder->drainForTest(); feeds->poll(); advance(1'000'000);
-    feeds->stop();
-    const auto rows = feed.rows("BTC-USD");
-    EXPECT_EQ(state->attempts.size(), 2u);
-    EXPECT_EQ(feed.recorder->stats().queueDrops, 1);
-    ASSERT_EQ(rows.size(), 2u);
-    EXPECT_EQ(rows[0].observedMs, 40000);
-    EXPECT_NE(rows[0].flags & recording::kResynced, 0u);
-    EXPECT_EQ(rows[1].observedMs, 60000);
-    EXPECT_NEAR(twap(rows[1], 99, false), (2.0 * 10 + 3.0 * 50) / 60, 0.01);
-}
-TEST_F(FeedsTest, RecorderInvalidationKeepsPeerFullyObserved) {
-    ServerMdcConfig config; config.sslCaBundle = SENTINEL_TEST_CA;
-    feeds = std::make_unique<MarketDataFeeds>(auth, config, options);
-    RecorderFeed feed(*feeds, 100);
-    struct Stop { MarketDataFeeds& feeds; ~Stop() { feeds.stop(); } } stop{*feeds};
-    feeds->add("BTC-USD"); feeds->add("ETH-USD"); feeds->start(); feeds->poll(); advance(1'000'000);
-    const auto push = [&](const std::string& product, nlohmann::json message, int sequence, int64_t ms) {
-        feed.local = RecorderFeed::kT0 + ms;
-        transports[product]->frame(frame(std::move(message), sequence)); feeds->poll();
-        feed.recorder->drainForTest();
-    };
-    for (const std::string p : {"BTC-USD", "ETH-USD"})
-        push(p, coinbaseL2Snapshot(p, {{99, 2}}, {{101, 4}}, "2026-01-01T00:00:00Z"), 0, 0);
-    push("ETH-USD", coinbaseL2Update("ETH-USD", {{"bid", 99, 3}}, "2026-01-01T00:00:20Z"), 2, 20000);
-    advance(1'000'000);
-    push("ETH-USD", coinbaseL2Snapshot("ETH-USD", {{99, 2}}, {{101, 4}}, "2026-01-01T00:00:30Z"), 0, 30000);
-    for (const std::string p : {"BTC-USD", "ETH-USD"}) {
-        push(p, coinbaseL2Update(p, {{"bid", 99, 3}}, "2026-01-01T00:01:10Z"), 1, 70000);
-        push(p, coinbaseL2Update(p, {{"offer", 101, 5}}, "2026-01-01T00:02:10Z"), 2, 130000);
-    }
-    feeds->stop();
-    const auto btc = feed.rows("BTC-USD"), eth = feed.rows("ETH-USD");
-    ASSERT_EQ(btc.size(), 2u); ASSERT_EQ(eth.size(), 2u);
-    EXPECT_EQ(btc[0].observedMs, 60000); EXPECT_EQ(btc[1].observedMs, 60000);
-    EXPECT_EQ(eth[0].observedMs, 50000); EXPECT_EQ(eth[1].observedMs, 60000);
-    EXPECT_EQ(scenarios["BTC-USD"]->attempts.size(), 1u);
-    EXPECT_EQ(scenarios["ETH-USD"]->attempts.size(), 2u);
-}
 } // namespace
 
 TEST_F(FeedsTest, FailedAttemptDoesNotConsumeConnectionIdOrCountAsReconnect) {

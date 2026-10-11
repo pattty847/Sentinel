@@ -21,7 +21,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 - The Core may use QtCore (QObject/signals, QTimer, QByteArray, QString). It cannot have any Qt GUI, Quick, QML or scene-graph dependencies.
 - **`marketdata` / `coinbase`:** Owns the exchange connections and feed parsing (`MarketDataCoreEngine`).
 - **`servermodel`:** Owns the central state of the server. It aggregates journal-fed trades into candles via `TimeframeAggregator`, retains execution history for the independent trade-overlay publisher, and serves recording chunks and raw live tails.
-- **`roller`:** Offline RAWL2 v1/v2 reading, shared journal feed parsing, daily product grids and deterministic BookRecorder driving/checkpoints. The batch converter owns no exchange connection; the live server path is unchanged in slice A. See [ROLLER.md](ROLLER.md).
+- **`roller`:** Offline RAWL2 v1/v2 reading, shared journal feed parsing, daily product grids and deterministic BookRecorder driving/checkpoints. Capture owns the exchange connections; both live serving and batch conversion consume its journal. See [ROLLER.md](ROLLER.md).
 - **`heatmap`:** GUI-independent sparse heatmap model (`SparseColumns`, `TimeComposer`, `binCell`/`binColumn` CPU reference, `ChunkCodec`, `HeatmapResolution`); see "Sparse heatmap core model" below.
 - **`network` / `protocol`:** Owns the client-server websocket communication (`SentinelStreamClient`, `SentinelStreamServer`). See `docs/SENTINEL_STREAM_CLIENT.md` for the stream client’s role in prepping render objects.
 - **`trading`:** Owns simulated order execution, local order storage, position tracking, and the shared replay/paper-trading backtest core.
@@ -87,7 +87,7 @@ WebSocket → SentinelStreamClient → RemoteGridDataSource → DataProcessor �
 
 ## Rendering pipeline
 
-**Server:** BookRecorder (HMC2 recording) → ChunkService / LiveService raw tail → SentinelStreamServer (binary chunk replies to `heatmap_chunk_request`, the `heatmap_live_subscribe` raw tail and `heatmap_availability`).
+**Server:** capture journal → roller (`BookRecorder` history plus live lead) → ChunkService / LiveService raw tail → SentinelStreamServer (binary chunk replies to `heatmap_chunk_request`, the `heatmap_live_subscribe` raw tail and `heatmap_availability`).
 **Client:** HeatmapDataService → HeatmapGpuLayer → UnifiedGridRenderer → HeatmapTileNode, MsdfGlyphNode, CandlestickOverlayItem, and other overlays → GPU.
 
 No per-cell QML rendering is used. Labels use the MSDF atlas; candlesticks are a GPU-batched overlay on the same coordinate plane.
@@ -397,14 +397,19 @@ re-bands do not reset these overlays or stretch them to the heatmap overlap rect
 model sink and lifetime. The server requires the roller source; it refuses the
 primary source at startup. Each product has independent journal/socket and recorder workers
 because daily grids differ. A separate sequential comparison worker produces
-same-journal batch oracles in temporary storage. Roller workers feed the model
+incremental same-journal oracles under `shadow-oracle/<product>/<day>`, separate
+from served product trees. Oracle checkpoints and completed-hour anchors let the
+next comparison resume with a stable day policy. Roller workers feed the model
 through queued `ModelSink` hand-offs; REST is used only for candle history.
-The primary recorder implementation remains compiled until slice E. Config and monitoring are in
+`BookRecorder` is only the roller core: explicit journal timestamps, lossless blocking
+admission, committed history and provisional lead forks. The model owns the live
+service and queries roller watermarks. The hourly same-journal self-check is retained;
+its primary-versus-roller report is removed. Config and monitoring are in
 `ops/monitoring/README.md` under Shadow roller.
 
 HMC2's default writer lease remains exclusive for the entire root. An opt-in
 `writerProduct` uses a shared root lock and an exclusive `.writer-<product>.lock`,
 and refuses appends for any other symbol. Thus different shadow products can
-write distinct files concurrently, while primary/batch owners and another
+write distinct files concurrently, while unscoped batch owners and another
 writer for the same product are excluded. This does not change file paths,
-wire payloads, codecs or the primary recorder's per-message behavior.
+wire payloads or codecs.

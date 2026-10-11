@@ -65,7 +65,7 @@ recording::RecorderConfig Grid::config(const std::filesystem::path& root) const 
     c.root = root; c.priceScale = priceScale; c.sizeScale.floor = sizeFloor;
     c.layers = {{"near",std::llround(nearTick*priceScale),.95,1.05,false},
                 {"deep",std::llround(deepTick*priceScale),.25,4.,true}};
-    c.blockingQueue = c.deterministicResume = true;
+    c.deterministicResume = true;
     return c;
 }
 } // namespace sentinel::roller

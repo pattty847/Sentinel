@@ -26,7 +26,7 @@ public:
                                  QObject* parent = nullptr);
     void onTrade(const Trade& trade);
     void tick(int64_t nowMs);
-    // recording.live_feed: journal. The symbol's bars close on its own journal
+    // Journal live feed. The symbol's bars close on its own journal
     // time, never the wall clock: tick() skips it; advance() closes buckets
     // ending at or before the watermark, and each trade closes those before it.
     // Bars are then a function of the delivered sequence alone, so a recovery

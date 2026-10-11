@@ -54,13 +54,12 @@ public:
                                 std::vector<FootprintTradeSample>& out) const;
     virtual int64_t exchangeNowMs() const;
     recording::LiveService* recordingLive() const { return m_recordingLive.get(); }
-    // Primary recorder started, or (recording.source: roller) the roller attached.
-    bool recordingAvailable() const { return m_recorder != nullptr || m_rollerAttached.load(); }
+    // The journal roller is attached.
+    bool recordingAvailable() const { return m_rollerAttached.load(); }
     const std::optional<std::filesystem::path>& recordingDir() const { return m_recordingDir; }
     // Per-level recorder cutoffs; zero when the series is not recorded in this process.
     recording::BookRecorder::Watermarks recordingWatermarks(const std::string& symbol,
                                                             const std::string& layer) const {
-        if (m_recorder) return m_recorder->watermarks(symbol, layer);
         if (m_rollerAttached.load()) return m_rollerWatermarks(symbol, layer);
         return {};
     }
@@ -115,9 +114,6 @@ signals:
     void barClosed(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar);
     void barUpdated(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar);
 
-    // The recorder lost a symbol's book on its own; only a fresh upstream snapshot
-    // resumes it. Main thread, at most once per symbol per 30 s (recorder-limited).
-    void recordingResnapshotRequested(const QString& symbol, const QString& reason);
 
 private:
     void updateExchangeOffsetMs(int64_t exchangeMs);
@@ -129,7 +125,7 @@ private:
     std::unique_ptr<TimeframeAggregator> m_aggregator;
     std::atomic<int64_t> m_exchangeOffsetMs{0};
     // Metrics mirrors. Written on the main thread, except live publish drops
-    // (recorder worker); declared before m_recorder so they outlive its worker.
+    // (roller workers, joined by the app before model destruction).
     std::atomic<uint64_t> m_livePublishDrops{0};
     struct FeedState {
         bool connected = false;
@@ -145,10 +141,8 @@ private:
     QTimer m_candleTimer;
     // Recording v2 (null when recording.enabled is false or no usable dir).
     std::shared_ptr<recording::LiveService> m_recordingLive;
-    std::unique_ptr<recording::BookRecorder> m_recorder;
     std::optional<std::filesystem::path> m_recordingDir;
     QTimer m_recorderTimer;
-    int m_recorderTicks = 0;
     // Main thread: every pinned symbol x recorded layer must keep committing columns.
     std::optional<recording::RecorderStallMonitor> m_stallMonitor;
     std::vector<recording::RecorderStallMonitor::Series> m_stallSeries;
@@ -163,7 +157,6 @@ private:
     QTimer m_reseedTimer;
     void deliverReseeds();
     void requestReseed(const std::string& symbol, const char* why);
-    void startRecorder();
     void startRollerServing();
     void checkRecorderProgress(int64_t nowMs);
 };

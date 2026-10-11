@@ -80,7 +80,7 @@ struct ServerFeedAdmissionTest : testing::Test {
         QCoreApplication::sendPostedEvents();
     }
     void checkGuiRefusal();
-    void checkMetadataRecorder();
+    void checkMetadataGate();
     void checkTradeWire();
     void checkRefusal();
     bool sessionHas(const std::shared_ptr<Session>& s, const std::string& symbol) const {
@@ -193,7 +193,7 @@ TEST(ServerFeedConfig, OnlyRestCaBundleIsReadFromMdc) {
         for (const bool nested : {false, true}) {
             const QByteArray indent = wrapped ? "  " : "";
             QByteArray yaml = wrapped ? "server:\n" : "";
-            yaml += indent + "recording:\n" + indent + "  source: roller\n" + indent + "  live_feed: journal\n";
+            yaml += indent + "recording:\n" + indent + "  source: roller\n";
             yaml += indent + "roller_shadow:\n" + indent + "  enabled: true\n";
             yaml += indent + "host: ignored.example\n" + indent + "port: ignored\n";
             yaml += indent + "ssl_ca_bundle: root-ca.pem\n";
@@ -226,15 +226,9 @@ TEST(ServerFeedAlerts, A1bSelectsEachCapturedProductForFiveMinutes) {
     EXPECT_NE(rule.find("evaluator: { type: lt, params: [1] }"), std::string::npos);
 }
 
-void ServerFeedAdmissionTest::checkMetadataRecorder() {
+void ServerFeedAdmissionTest::checkMetadataGate() {
     using namespace recording;
     const auto epoch = kHmc2MinMs;
-    RecorderConfig rc;
-    rc.root = dir.filePath("metadata-recording").toStdString();
-    rc.layers = {{"near", 100, .5, 2, false}};
-    rc.latenessMs = 2000;
-    model->m_recorder = std::make_unique<BookRecorder>(rc, [&] { return recordingLocal; });
-    auto cleanup = qScopeGuard([&] { model->m_recorder.reset(); });
     auto s = session();
     request(s, "ETH-USD"); // No product metadata response yet.
     recordingLocal = epoch + 10000;
@@ -243,21 +237,11 @@ void ServerFeedAdmissionTest::checkMetadataRecorder() {
     recordingLocal = epoch + 15000;
     model->onLiveOrderBookLevelUpdates("ETH-USD", {{true, 99, 5}}, recordingLocal);
     recordingLocal = epoch + 70000;
-    model->m_recorder->onTick(recordingLocal);
-    model->m_recorder->drainForTest();
-    EXPECT_EQ(model->m_recorder->stats().invalidations, 0u);
-    const auto rows = Hmc2Store::readRange(rc.root, "ETH-USD", "near", 60000, epoch, epoch + 120000);
-    ASSERT_EQ(rows.size(), 1u);
-    const auto bid = std::find_if(rows[0].entries.begin(), rows[0].entries.end(),
-                                  [](const auto& e) { return !e.isAsk && e.peakCode > 0; });
-    ASSERT_NE(bid, rows[0].entries.end());
-    EXPECT_GT(decodeSize(bid->peakCode), 4.5); // Native 99 level rose from 2 to 5.
     seedEthMetadata();
     EXPECT_TRUE(model->ensureSymbol("ETH-USD").bookValid);
     EXPECT_DOUBLE_EQ(model->ensureSymbol("ETH-USD").liveBook.getBidVolume(), 5.0);
-    EXPECT_EQ(model->m_recorder->stats().invalidations, 0u);
 }
-TEST_F(ServerFeedAdmissionTest, MetadataGateRecordsNativeSnapshotAndDeltasWithoutInvalidation) { checkMetadataRecorder(); }
+TEST_F(ServerFeedAdmissionTest, MetadataGateRetainsNativeSnapshotAndDeltas) { checkMetadataGate(); }
 
 void ServerFeedAdmissionTest::checkRefusal() {
     auto s = session();

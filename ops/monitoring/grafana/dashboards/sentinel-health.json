@@ -260,7 +260,7 @@
       "id": 4,
       "type": "stat",
       "title": "Roller errors (1h)",
-      "description": "Per-product HMC2 append failures should be 0; journal invalidations can occur on reconnect. The roller uses blocking recorder admission, so the primary queue-drop target is removed.",
+      "description": "Per-product HMC2 append failures should be 0; journal invalidations can occur on reconnect. The roller uses lossless blocking recorder admission.",
       "datasource": {
         "type": "prometheus",
         "uid": "sentinel-vm"

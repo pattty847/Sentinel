@@ -97,7 +97,9 @@ bool hasSeries(const std::string& text, const std::string& prefix) {
 ServerConfig recordingConfig(const QTemporaryDir& dir) {
     ServerConfig config;
     config.recording.enabled = true;
-    config.recording.dir = dir.path().toStdString();
+    config.recording.source = "roller";
+    config.rollerShadow.enabled = true;
+    config.rollerShadow.outputRoot = dir.path().toStdString();
     config.recording.fallbackDir.clear();
     config.defaultSymbols = {"btc-usd"};
     return config;
@@ -112,6 +114,9 @@ TEST(ServerMetrics, RecorderAndConnectionSeriesOverHttp) {
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
     ServerDataModel model(recordingConfig(dir));
+    EXPECT_FALSE(model.recordingAvailable());
+    model.attachRoller([](const auto&, const auto&) { return recording::BookRecorder::Watermarks{}; },
+                       [](const auto&) { return false; });
     ASSERT_TRUE(model.recordingAvailable());
     ASSERT_EQ(model.recordingDir()->string(), dir.path().toStdString());
     MetricsRegistry registry;
@@ -125,9 +130,9 @@ TEST(ServerMetrics, RecorderAndConnectionSeriesOverHttp) {
     EXPECT_TRUE(has(text, "sentinel_live_feed_up{product=\"BTC-USD\"} 0"));
     EXPECT_TRUE(has(text, "sentinel_live_feed_up_total{product=\"BTC-USD\"} 0"));
     EXPECT_TRUE(has(text, "sentinel_recorder_columns_written_total 0"));
-    EXPECT_TRUE(has(text, "sentinel_recorder_disk_errors_total 0"));
+    EXPECT_FALSE(hasSeries(text, "sentinel_recorder_disk_errors_total"));
     EXPECT_TRUE(has(text, "sentinel_recorder_live_publish_drops_total 0"));
-    EXPECT_TRUE(has(text, "# TYPE sentinel_recorder_queue_drops_total counter"));
+    EXPECT_FALSE(hasSeries(text, "# TYPE sentinel_recorder_queue_drops_total"));
     // No column yet and disconnected: both per-series gauges stay absent, so an
     // alert on them cannot fire on a series that has nothing to measure.
     EXPECT_FALSE(hasSeries(text, "sentinel_recorder_last_column_timestamp_seconds{"));
@@ -147,14 +152,6 @@ TEST(ServerMetrics, RecorderAndConnectionSeriesOverHttp) {
     EXPECT_TRUE(has(text, "sentinel_live_feed_down_total{product=\"BTC-USD\"} 1"));
     EXPECT_FALSE(hasSeries(text, "sentinel_recorder_column_overdue_seconds{"));
 
-    // An upstream invalidation reaches the recorder's counter (worker thread).
-    model.onLiveOrderBookInitialized("BTC-USD", {{100.0, 2.0}}, {{101.0, 1.0}}, QDateTime::currentMSecsSinceEpoch());
-    model.onLiveOrderBookInvalidated("BTC-USD", "disconnected");
-    QElapsedTimer timer;
-    timer.start();
-    while (!has(text, "sentinel_recorder_invalidations_total 1") && timer.elapsed() < 3000)
-        text = scrape(server.port());
-    EXPECT_TRUE(has(text, "sentinel_recorder_invalidations_total 1")) << text;
 }
 
 // Only captured products have live feed health series.
@@ -168,6 +165,9 @@ TEST(ServerMetrics, UncapturedProductConnectionIsIgnored) {
     ServerConfig config = recordingConfig(dir);
     config.defaultSymbols = {"btc-usd", "sol-usd"};
     ServerDataModel model(config);
+    EXPECT_FALSE(model.recordingAvailable());
+    model.attachRoller([](const auto&, const auto&) { return recording::BookRecorder::Watermarks{}; },
+                       [](const auto&) { return false; });
     ASSERT_TRUE(model.recordingAvailable());
     MetricsRegistry registry;
     model.registerMetrics(registry);
@@ -288,7 +288,7 @@ struct RollerMetricsFixture {
         c.ensureLiveFinal = model->rollerEnsureFinal();
         c.liveNowForTest = [this] { return epoch; }; // lead never advances history
         roller = std::make_unique<sentinel::roller::ShadowRoller>(
-            c, c.products, config.recording.dir, registry);
+            c, c.products, registry);
         model->attachRoller(
             [this](const auto& product, const auto& layer) { return roller->watermarks(product, layer); },
             [this](const auto& product) { return roller->running(product); });

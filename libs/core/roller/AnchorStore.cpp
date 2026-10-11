@@ -38,7 +38,7 @@ void validate(const ReplayAnchor& a) {
             "grid metadata");
     size_t size = 0;
     for (const auto* section : {&a.feed, &a.book, &a.recorder}) {
-        require(section->version == 1, "unsupported section version");
+        require(section->version == AnchorSection::Version, "unsupported section version");
         require(section->bytes.size() <= AnchorStore::MaxBytes - size, "sections too large");
         size += section->bytes.size();
     }
@@ -54,8 +54,8 @@ uint32_t get(const std::vector<uint8_t>& b, size_t p) {
 }
 json section(const AnchorSection& s) { return {{"version",s.version},{"bytes",json::binary(s.bytes)}}; }
 AnchorSection section(const json& j) {
-    require(j.at("version") == 1 && j.at("bytes").is_binary(), "section schema/version");
-    return {1, j.at("bytes").get_binary()};
+    require(j.at("version") == AnchorSection::Version && j.at("bytes").is_binary(), "section schema/version");
+    return {AnchorSection::Version, j.at("bytes").get_binary()};
 }
 }
 std::filesystem::path AnchorStore::path(const std::filesystem::path& root, const ReplayAnchor& a) {

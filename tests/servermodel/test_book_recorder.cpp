@@ -10,7 +10,6 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
-#include <future>
 #include <limits>
 #include <thread>
 
@@ -26,16 +25,16 @@ class RecorderTest : public testing::Test {
         return {dir.path().toStdString(), 100, {}, {{"near", 100, 0.5, 2, false}}, 0, 2'000'000};
     }
     std::unique_ptr<BookRecorder> make(RecorderConfig c) {
-        return std::make_unique<BookRecorder>(std::move(c), [&] { return kEpoch + local; });
+        return std::make_unique<BookRecorder>(std::move(c));
     }
     void snap(BookRecorder &r, int64_t t, std::vector<Level> l = {{true, 99, 2}, {false, 101, 4}}) {
         local = t;
-        r.onSnapshot("BTC-USD", kEpoch + t, std::move(l));
+        r.onSnapshotAt("BTC-USD", kEpoch + t, kEpoch + local, std::move(l));
         r.drainForTest();
     }
     void update(BookRecorder &r, int64_t t, std::vector<Level> l) {
         local = t;
-        r.onUpdates("BTC-USD", kEpoch + t, std::move(l));
+        r.onUpdatesAt("BTC-USD", kEpoch + t, kEpoch + local, std::move(l));
         r.drainForTest();
     }
     void tick(BookRecorder &r, int64_t t) {
@@ -158,7 +157,7 @@ TEST_F(RecorderTest, IdleCloseUsesLocalMinusEnvelopeOffset) {
     c.latenessMs = 2000;
     auto r = make(c);
     local = 1'000'000;
-    r->onSnapshot("BTC-USD", kEpoch + 10000, {{true, 99, 2}, {false, 101, 4}});
+    r->onSnapshotAt("BTC-USD", kEpoch + 10000, kEpoch + local, {{true, 99, 2}, {false, 101, 4}});
     r->drainForTest();
     tick(*r, 1'051'999);
     EXPECT_TRUE(read().empty());
@@ -189,22 +188,19 @@ TEST_F(RecorderTest, UnknownGapsAndRestartNeverFillDowntime) {
     EXPECT_EQ(rows[2].bucketStartMs, 7 * 3'600'000);
     EXPECT_EQ(rows[2].observedMs, 30000);
 }
-TEST_F(RecorderTest, QueueOverflowInvalidatesUntilAcceptedSnapshot) {
+TEST_F(RecorderTest, DefaultAdmissionPreservesOversizedAtomicSnapshot) {
     auto c = config();
-    c.maxQueuedLevels = 2;
+    c.maxQueuedLevels = 1;
     auto r = make(c);
-    snap(*r, 0);
-    update(*r, 20000, {{true, 99, 7}, {false, 101, 8}, {true, 98, 1}});
-    EXPECT_EQ(r->stats().queueDrops, 1);
-    EXPECT_EQ(r->stats().invalidations, 1);
-    update(*r, 30000, {{true, 99, 50}});
-    snap(*r, 40000);
+    snap(*r, 0); // two levels exceed the cap but must remain an atomic snapshot
     tick(*r, 60000);
-    auto rows = read();
-    ASSERT_EQ(rows.size(), 1);
-    EXPECT_EQ(rows[0].observedMs, 40000);
-    value(rows[0], 99, false, 2, 2);
+    const auto rows = read();
+    ASSERT_EQ(rows.size(), 1u);
+    EXPECT_EQ(rows.front().observedMs, 60000u);
+    EXPECT_EQ(r->stats().invalidations, 0u);
+    value(rows.front(), 99, false, 2, 2);
 }
+
 TEST_F(RecorderTest, MalformedBatchIsRejectedAtomically) {
     auto r = make(config());
     snap(*r, 0);
@@ -294,7 +290,7 @@ TEST_F(RecorderTest, DeepWindowAndIndependentSymbolValidity) {
     auto r = make(c);
     snap(*r, 0, {{true, 99, 2}, {true, 30, 7}, {false, 101, 4}, {false, 390, 8}, {false, 410, 9}});
     local = 0;
-    r->onSnapshot("ETH-USD", kEpoch + 0, {{true, 99, 3}, {false, 101, 5}});
+    r->onSnapshotAt("ETH-USD", kEpoch + 0, kEpoch + local, {{true, 99, 3}, {false, 101, 5}});
     r->drainForTest();
     r->onInvalid("BTC-USD", kEpoch + 20000, "gap");
     r->drainForTest();
@@ -342,10 +338,10 @@ TEST_F(RecorderTest, QueuedLongSymbolOwnsItsLifetime) {
     auto r = make(config());
     const std::string expected(80, 'X');
     std::string callerName = expected;
-    r->onSnapshot(callerName, kEpoch + 0, {{true, 99, 2}, {false, 101, 4}});
+    r->onSnapshotAt(callerName, kEpoch + 0, kEpoch + local, {{true, 99, 2}, {false, 101, 4}});
     callerName.assign("caller-reused-its-storage");
     local = 30000;
-    r->onUpdates(expected, kEpoch + 30000, {{true, 99, 6}});
+    r->onUpdatesAt(expected, kEpoch + 30000, kEpoch + local, {{true, 99, 6}});
     tick(*r, 60000);
     auto rows = Hmc2Store::readRange(dir.path().toStdString(), expected, "near", 60000, kEpoch, kEpoch + 60000);
     ASSERT_EQ(rows.size(), 1);
@@ -429,7 +425,7 @@ TEST_F(RecorderTest, HistoryReadFailureDoesNotInvalidateAnySymbol) {
         blocked << 'x';
     }
     auto r = make(c);
-    r->onSnapshot("ETH-USD", kEpoch, {{true, 99, 2}, {false, 101, 4}});
+    r->onSnapshotAt("ETH-USD", kEpoch, kEpoch + local, {{true, 99, 2}, {false, 101, 4}});
     r->drainForTest();
     snap(*r, 0); // Its history directory is unreadable, but the new book is valid.
     EXPECT_EQ(r->stats().invalidations, 0);
@@ -500,15 +496,17 @@ TEST_F(RecorderTest, PublicationIsWorkerOwnedAndConstantBookMatchesClose) {
     };
     auto r = make(c);
     snap(*r, 0);
-    tick(*r, 30'000);
+    auto lead = r->forkLead(c.publisher, c.livePublishMs);
+    tick(*lead, 30'000);
     ASSERT_EQ(publications.size(), 1);
     const auto provisional = publications.back();
     EXPECT_TRUE(provisional->flags & kProvisional);
     EXPECT_EQ(provisional->observedMs, 30'000);
     value(*provisional, 99, false, 2, 2);
     value(*provisional, 101, true, 4, 4);
-    tick(*r, 30'000 + c.livePublishMs - 1);
+    tick(*lead, 30'000 + c.livePublishMs - 1);
     EXPECT_EQ(publications.size(), 1); // coalesced to one per livePublishMs
+    tick(*lead, 60'000);
     tick(*r, 60'000);
     ASSERT_EQ(publications.size(), 3); // finished-pending publication, then commit
     const auto committed = publications.back();
@@ -535,6 +533,7 @@ TEST_F(RecorderTest, OpenMinutePublishesAtTheConfiguredInterval) {
         QTemporaryDir own;
         std::vector<int64_t> observed;
         auto c = config();
+    c.publication = RecorderConfig::Publication::Lead;
         c.root = own.path().toStdString();
         c.livePublishMs = interval;
         c.publisher = [&](auto record) { if (record->flags & kProvisional) observed.push_back(record->observedMs); };
@@ -575,6 +574,7 @@ TEST(RecordingServerConfig, LivePublishMsDefaultsAndClamps) {
 TEST_F(RecorderTest, PublicationExcludesInvalidTimeAndResyncDoesNotInventLiquidity) {
     std::vector<std::shared_ptr<const Hmc2Record>> publications;
     auto c = config();
+    c.publication = RecorderConfig::Publication::Lead;
     c.publisher = [&](auto record) { publications.push_back(std::move(record)); };
     auto r = make(c);
     snap(*r, 0);
@@ -596,36 +596,8 @@ TEST_F(RecorderTest, PublicationExcludesInvalidTimeAndResyncDoesNotInventLiquidi
     value(*publications.back(), 99, false, 4, 6);
     tick(*r, 60'000);
     EXPECT_EQ(publications.back()->observedMs, 30'000);
-    EXPECT_FALSE(publications.back()->flags & kProvisional);
+    EXPECT_TRUE(publications.back()->flags & kProvisional);
     value(*publications.back(), 99, false, 14.0 / 3, 6);
-}
-
-TEST_F(RecorderTest, FirstCommitWatermarkPreservesPendingMinuteInColdLiveView) {
-    LiveCache cache;
-    auto c = config();
-    c.latenessMs = 2000;
-    c.publisher = [&](auto r) { cache.publish(std::move(r)); };
-    auto recorder = make(c);
-    Hmc2Reader reader(c.root);
-    LiveBuilder builder({"BTC-USD", "near", 300000, {90, 1, 20}, 1});
-    snap(*recorder, 0);
-    tick(*recorder, 59000);
-    auto before = builder.build(reader, cache.snapshot("BTC-USD", "near"));
-    ASSERT_EQ(before.columns.size(), 1);
-    EXPECT_EQ(before.columns[0].observedMs, 59000);
-    tick(*recorder, 61000);
-    const auto pending = cache.snapshot("BTC-USD", "near");
-    EXPECT_EQ(pending.committedThroughMs, kEpoch);
-    EXPECT_EQ(pending.provisional.size(), 2);
-    EXPECT_TRUE(pending.committed.empty());
-    auto atBoundary = builder.build(reader, pending);
-    ASSERT_EQ(atBoundary.columns.size(), 1);
-    EXPECT_EQ(atBoundary.columns[0].observedMs, 61000);
-    tick(*recorder, 62000);
-    auto after = builder.build(reader, cache.snapshot("BTC-USD", "near"));
-    ASSERT_EQ(after.columns.size(), 1);
-    EXPECT_EQ(after.columns[0].observedMs, 62000);
-    EXPECT_EQ(after.columns[0].cells, atBoundary.columns[0].cells);
 }
 
 TEST_F(RecorderTest, PublisherFailureDoesNotLoseCommittedMinuteOrHourRollup) {
@@ -648,6 +620,7 @@ TEST_F(RecorderTest, PublisherFailureDoesNotLoseCommittedMinuteOrHourRollup) {
 TEST_F(RecorderTest, InvalidBookPublishesUnchangedOpenMinuteOnlyOnce) {
     std::vector<std::shared_ptr<const Hmc2Record>> pubs;
     auto c = config();
+    c.publication = RecorderConfig::Publication::Lead;
     c.publisher = [&](auto record) { pubs.push_back(std::move(record)); };
     auto r = make(c);
     const auto invalidAt = [&](int64_t t) {
@@ -678,18 +651,16 @@ TEST_F(RecorderTest, InvalidBookPublishesUnchangedOpenMinuteOnlyOnce) {
     EXPECT_EQ(pubs.back()->observedMs, 20'000);
     for (int64_t t = 45'500; t < 60'000; t += 500) tick(*r, t);
     EXPECT_EQ(pubs.size(), 5);
-    tick(*r, 60'000); // rollover: the closed minute still publishes pending, then committed
-    ASSERT_EQ(pubs.size(), 7);
+    tick(*r, 60'000); // rollover: the lead publishes the finished pending minute
+    ASSERT_EQ(pubs.size(), 6);
     EXPECT_EQ(pubs[5]->bucketStartMs, kEpoch);
     EXPECT_TRUE(pubs[5]->flags & kProvisional);
     EXPECT_EQ(pubs[5]->observedMs, 20'000);
-    EXPECT_FALSE(pubs[6]->flags & kProvisional);
-    EXPECT_EQ(pubs[6]->observedMs, 20'000);
     for (int64_t t = 60'500; t < 70'000; t += 500) tick(*r, t);
-    EXPECT_EQ(pubs.size(), 7) << "an unobserved invalid minute publishes nothing";
+    EXPECT_EQ(pubs.size(), 6) << "an unobserved invalid minute publishes nothing";
     snap(*r, 70'000);
     tick(*r, 70'500);
-    ASSERT_EQ(pubs.size(), 8);
+    ASSERT_EQ(pubs.size(), 7);
     EXPECT_EQ(pubs.back()->bucketStartMs, kEpoch + 60'000);
     EXPECT_EQ(pubs.back()->observedMs, 500);
 }
@@ -700,23 +671,21 @@ TEST_F(RecorderTest, OpenPublicationAllocationFailureInvalidatesNoBook) {
     size_t opens = 0, finals = 0;
     bool failOpen = true;
     auto c = config();
+    c.publication = RecorderConfig::Publication::Lead;
     c.publisher = [&](auto record) { ++((record->flags & kProvisional) ? opens : finals); };
     c.beforePublicationForTest = [&](bool provisional) { if (provisional && failOpen) throw std::bad_alloc(); };
     auto r = make(c);
     local = 0;
-    r->onSnapshot("ETH-USD", kEpoch, {{true, 9, 1}, {false, 11, 1}});
+    r->onSnapshotAt("ETH-USD", kEpoch, kEpoch + local, {{true, 9, 1}, {false, 11, 1}});
     snap(*r, 0);
     for (int64_t t = 500; t < 60'000; t += 500) tick(*r, t);
     EXPECT_EQ(opens, 0);
     EXPECT_EQ(r->stats().invalidations, 0);
     EXPECT_EQ(r->stats().diskErrors, 0);
     tick(*r, 60'000);
-    EXPECT_EQ(r->stats().columnsWritten, 2);
-    EXPECT_EQ(finals, 2);
-    auto rows = read();
-    ASSERT_EQ(rows.size(), 1);
-    EXPECT_EQ(rows[0].observedMs, 60'000);
-    value(rows[0], 99, false, 2, 2);
+    EXPECT_EQ(r->stats().columnsWritten, 0);
+    EXPECT_EQ(finals, 0);
+    EXPECT_TRUE(read().empty());
     failOpen = false;
     tick(*r, 60'500);
     EXPECT_EQ(opens, 2) << "both symbols publish again once allocation succeeds";
@@ -774,84 +743,14 @@ TEST_F(RecorderTest, EmptySideAcrossMinuteBoundaryKeepsLastMid) {
     EXPECT_DOUBLE_EQ(rows[2].midOpen, 100.5);
     value(rows[2], 102, true, 5, 5);
 }
-TEST_F(RecorderTest, SelfInvalidationRequestsResnapshot) {
-    std::vector<std::pair<std::string, std::string>> requests;
-    auto c = config();
-    c.maxQueuedLevels = 2;
-    c.onSelfInvalidated = [&](const std::string &symbol, const std::string &reason) {
-        requests.emplace_back(symbol, reason);
-    };
-    auto r = make(c);
-    snap(*r, 0);
-    update(*r, 20000, {{true, 99, 7}, {false, 101, 8}, {true, 98, 1}}); // queue level overflow
-    ASSERT_EQ(requests.size(), 1);
-    EXPECT_EQ(requests[0], (std::pair<std::string, std::string>{"BTC-USD", "queue level/slot overflow"}));
-    snap(*r, 30000);
-    local = 100000;
-    r->onInvalid("BTC-USD", kEpoch + 100000, "disconnect"); // upstream owes the snapshot
-    r->drainForTest();
-    tick(*r, 200000);
-    EXPECT_EQ(requests.size(), 1);
-}
-TEST_F(RecorderTest, ResnapshotRequestsAreRateLimitedAndRepeatWhileStuck) {
-    std::vector<int64_t> requestedAt;
-    auto c = config();
-    c.maxQueuedLevels = 2;
-    c.onSelfInvalidated = [&](const std::string &, const std::string &) { requestedAt.push_back(local); };
-    auto r = make(c);
-    const std::vector<Level> overflow{{true, 99, 7}, {false, 101, 8}, {true, 98, 1}};
-    snap(*r, 0);
-    update(*r, 10000, overflow);
-    snap(*r, 20000);
-    update(*r, 25000, overflow); // second self-invalidation inside 30 s: suppressed
-    tick(*r, 39999);
-    EXPECT_EQ(requestedAt, (std::vector<int64_t>{10000}));
-    tick(*r, 40000); // still invalid: ask again once the interval has passed
-    tick(*r, 50000);
-    EXPECT_EQ(requestedAt, (std::vector<int64_t>{10000, 40000}));
-    snap(*r, 60000);
-    tick(*r, 200000); // valid again: no more requests
-    EXPECT_EQ(requestedAt, (std::vector<int64_t>{10000, 40000}));
-}
-// A persistent cause (here: every snapshot is one-sided) backs off 30, 60, 120 s
-// ... up to 10 min instead of reconnecting the shared socket every 30 s. The
-// backoff resets only after a snapshot has stayed valid for a full minute.
-TEST_F(RecorderTest, ResnapshotBackoffDoublesWhileSnapshotsKeepFailing) {
-    std::vector<int64_t> at;
-    auto c = config();
-    c.onSelfInvalidated = [&](const std::string &, const std::string &) { at.push_back(local); };
-    auto r = make(c);
-    const std::vector<Level> oneSided{{true, 99, 2}};
-    snap(*r, 0, oneSided);
-    for (int64_t t = 1000; t <= 2'200'000; t += 1000) {
-        const auto before = at.size();
-        tick(*r, t);
-        if (at.size() != before)
-            snap(*r, t, oneSided); // the reconnect brings another unusable snapshot
-    }
-    EXPECT_EQ(at, (std::vector<int64_t>{0, 30000, 90000, 210000, 450000, 930000, 1530000, 2130000}));
-    snap(*r, 2'200'000);
-    snap(*r, 2'230'000, oneSided); // valid only 30 s: no reset, next request still at 2'730'000
-    EXPECT_EQ(at.size(), 8);
-    snap(*r, 2'240'000);
-    tick(*r, 2'300'000); // valid for a minute: backoff resets
-    snap(*r, 2'310'000, oneSided);
-    tick(*r, 2'339'000);
-    tick(*r, 2'340'000);
-    EXPECT_EQ(at, (std::vector<int64_t>{0, 30000, 90000, 210000, 450000, 930000, 1530000, 2130000, 2310000,
-                                        2340000}));
-}
 // A side that never refills must not be integrated forever with a frozen mid.
-TEST_F(RecorderTest, OneSidedBeyondGraceInvalidatesAndRequestsResnapshot) {
-    std::vector<std::string> reasons;
+TEST_F(RecorderTest, OneSidedBeyondGraceInvalidates) {
     auto c = config();
-    c.onSelfInvalidated = [&](const std::string &, const std::string &reason) { reasons.push_back(reason); };
     auto r = make(c);
     snap(*r, 0);
     update(*r, 10000, {{false, 101, 0}});
     tick(*r, 20000);
     EXPECT_EQ(r->stats().invalidations, 1);
-    EXPECT_EQ(reasons, (std::vector<std::string>{"one-sided book"}));
     tick(*r, 60000);
     auto rows = read();
     ASSERT_EQ(rows.size(), 1);
@@ -874,60 +773,6 @@ TEST_F(RecorderTest, OneSidedBookAcrossNearWindowMidMoveStopsAtGrace) {
     EXPECT_EQ(rows[0].observedMs, 15000);
     EXPECT_DOUBLE_EQ(rows[0].midMax, 100);
     EXPECT_EQ(r->stats().invalidations, 1);
-}
-// A queue overflow can turn the very first snapshot into a drop: the symbol is
-// not initialized yet, but it still needs (rate-limited) resnapshot requests.
-TEST_F(RecorderTest, DroppedFirstSnapshotIsRetriedWithoutObservation) {
-    std::vector<int64_t> at;
-    auto c = config();
-    c.maxQueuedLevels = 2;
-    c.onSelfInvalidated = [&](const std::string &, const std::string &) { at.push_back(local); };
-    auto r = make(c);
-    snap(*r, 0, {{true, 99, 2}, {true, 98, 1}, {false, 101, 4}});
-    EXPECT_EQ(r->stats().queueDrops, 1);
-    EXPECT_EQ(at, (std::vector<int64_t>{0}));
-    tick(*r, 29999);
-    tick(*r, 30000);
-    EXPECT_EQ(at, (std::vector<int64_t>{0, 30000}));
-    snap(*r, 40000);
-    tick(*r, 120000);
-    tick(*r, 200000);
-    EXPECT_EQ(at.size(), 2);
-    auto rows = read();
-    ASSERT_GE(rows.size(), 2);
-    EXPECT_EQ(rows[0].bucketStartMs, 0);
-    EXPECT_EQ(rows[0].observedMs, 20000);
-    EXPECT_EQ(rows[1].observedMs, 60000);
-}
-// The emergency path (all 4096 slots full) invalidates as "queue control
-// overflow"; that is the recorder's own decision, so it must request a snapshot.
-TEST_F(RecorderTest, QueueControlOverflowRequestsResnapshot) {
-    std::vector<std::pair<std::string, std::string>> requests;
-    std::promise<void> entered, release;
-    auto released = release.get_future().share();
-    std::atomic<bool> blocked{false};
-    auto c = config();
-    c.publisher = [&](auto) {
-        if (!blocked.exchange(true)) {
-            entered.set_value();
-            released.wait();
-        }
-    };
-    c.onSelfInvalidated = [&](const std::string &symbol, const std::string &reason) {
-        requests.emplace_back(symbol, reason);
-    };
-    auto r = make(c);
-    snap(*r, 0);
-    local = 2000;
-    r->onUpdates("BTC-USD", kEpoch + 2000, {{true, 99, 3}}); // the worker blocks in publication
-    ASSERT_EQ(entered.get_future().wait_for(std::chrono::seconds(3)), std::future_status::ready);
-    for (int i = 0; i <= 4096; ++i)
-        r->onTick(kEpoch + 3000);
-    EXPECT_EQ(r->stats().queueDrops, 1);
-    release.set_value();
-    r->drainForTest();
-    EXPECT_EQ(r->stats().invalidations, 1);
-    EXPECT_EQ(requests, (std::vector<std::pair<std::string, std::string>>{{"BTC-USD", "queue control overflow"}}));
 }
 // Watermarks follow each layer's own appends; a near failure is not hidden by deep.
 TEST_F(RecorderTest, LayerWatermarksTrackOwnPersistenceAndStallFlagsFailedLayer) {
@@ -1042,136 +887,4 @@ TEST(RecorderStallMonitor, GuiProductOutageCannotMuteOrResetPinnedRecorderDeadli
     EXPECT_EQ(monitor.overdueMs("BTC-USD", kT + 240'000, 0), 120'000); // due kT + 120 s
     EXPECT_EQ(monitor.overdueMs("ETH-USD", kT + 240'000, 0), 0); // reconnect restarted ETH's deadline
     EXPECT_FALSE(monitor.overdueMs("SOL-USD", kT + 240'000, 0).has_value()); // never reported
-}
-
-TEST_F(RecorderTest, ReleaseCommitsObservedTailAndStopsAllLaterBuckets) {
-    auto c = config(); c.latenessMs = 2000;
-    c.layers.push_back({"deep", 100, .5, 2, true});
-    size_t published = 0, released = 0;
-    c.publisher = [&](RecordPtr) { ++published; };
-    c.onReleased = [&](const std::string&) { ++released; };
-    auto r = make(c);
-    snap(*r, 10000);
-    tick(*r, 61000); // preceding minute is still inside lateness
-    r->releaseSymbol("BTC-USD", kEpoch + 65000);
-    r->drainForTest();
-    auto rows = read();
-    ASSERT_EQ(rows.size(), 2u);
-    EXPECT_EQ(rows[0].observedMs, 50000u);
-    EXPECT_EQ(rows[1].observedMs, 5000u);
-    for (const auto& row : rows) {
-        EXPECT_TRUE(row.flags & kPartial);
-        EXPECT_FALSE(row.flags & kProvisional);
-        value(row, 99, false, 2, 2);
-    }
-    auto hours = read(3600000, "deep");
-    ASSERT_EQ(hours.size(), 1u);
-    EXPECT_EQ(hours[0].observedMs, 55000u);
-    const auto publicationsAtRelease = published;
-    tick(*r, 7200000);
-    update(*r, 7201000, {{true, 99, 200}});
-    tick(*r, 7260000);
-    EXPECT_EQ(read().size(), 2u);
-    EXPECT_EQ(published, publicationsAtRelease);
-    EXPECT_EQ(released, 1u);
-    EXPECT_EQ(r->watermarks("BTC-USD", "near").minuteThroughMs, 0);
-    snap(*r, 7320000, {{true, 199, 3}, {false, 201, 5}});
-    r->releaseSymbol("BTC-USD", kEpoch + 7330000);
-    r->drainForTest();
-    rows = read();
-    ASSERT_EQ(rows.size(), 3u);
-    EXPECT_EQ(rows.back().observedMs, 10000u);
-    EXPECT_EQ(rows.back().midOpen, 200);
-    EXPECT_TRUE(rows.back().flags & kResynced);
-    EXPECT_EQ(r->stats().diskErrors, 0u);
-}
-
-TEST_F(RecorderTest, ReleaseCyclesReclaimLiveSeriesAndDoNotRequestResnapshots) {
-    auto c = config();
-    LiveCache cache;
-    size_t requests = 0;
-    c.publisher = [&](RecordPtr r) { EXPECT_TRUE(cache.publish(std::move(r))); };
-    c.onReleased = [&](const std::string& symbol) { cache.releaseSymbol(symbol); };
-    c.onSelfInvalidated = [&](const auto&, const auto&) { ++requests; };
-    auto r = make(c);
-    for (size_t i = 0; i < LiveCache::kMaxSeries + 2; ++i) {
-        const auto symbol = "CYCLE" + std::to_string(i) + "-USD";
-        local = i * 60000;
-        r->onSnapshot(symbol, kEpoch + local, {{true, 99, 2}, {false, 101, 4}});
-        r->releaseSymbol(symbol, kEpoch + local + 1000);
-        r->releaseSymbol(symbol, kEpoch + local + 1000); // idempotent
-        r->drainForTest();
-        EXPECT_EQ(cache.snapshot(symbol, "near").revision, 0u);
-        EXPECT_EQ(r->retainedSymbolStatesForTest(), 0u);
-        EXPECT_EQ(r->watermarks(symbol, "near").lastColumnMs, 0);
-    }
-    const auto columns = r->stats().columnsWritten;
-    tick(*r, 24 * 3600000);
-    EXPECT_EQ(r->stats().columnsWritten, columns);
-    EXPECT_EQ(columns, LiveCache::kMaxSeries + 2);
-    EXPECT_EQ(requests, 0u);
-    EXPECT_EQ(r->stats().diskErrors, 0u);
-}
-
-TEST_F(RecorderTest, ReleaseCleanupSurvivesDiskFailure) {
-    auto c = config();
-    size_t released = 0;
-    c.onReleased = [&](const auto&) { ++released; };
-    auto r = make(c);
-    snap(*r, 0);
-    // Force mkdir failure in this temp product tree, without global fault hooks.
-    std::ofstream blocker(c.root / "BTC-USD"); blocker << "not a directory"; blocker.close();
-    r->releaseSymbol("BTC-USD", kEpoch + 20000);
-    r->drainForTest();
-    EXPECT_GT(r->stats().diskErrors, 0u);
-    EXPECT_EQ(released, 1u);
-    const auto failures = r->stats().diskErrors;
-    tick(*r, 600000);
-    EXPECT_EQ(r->stats().diskErrors, failures);
-    EXPECT_EQ(r->stats().columnsWritten, 0u);
-    EXPECT_EQ(r->watermarks("BTC-USD", "near").minuteThroughMs, 0);
-}
-
-TEST_F(RecorderTest, ReleaseIsNotLostWhenControlQueueIsFull) {
-    auto c = config();
-    std::promise<void> entered, unblock;
-    auto wait = unblock.get_future().share();
-    bool first = true;
-    c.publisher = [&](RecordPtr) {
-        if (first) { first = false; entered.set_value(); wait.wait(); }
-    };
-    auto r = make(c);
-    r->onSnapshot("BTC-USD", kEpoch, {{true, 99, 2}, {false, 101, 4}});
-    r->onTick(kEpoch + 500);
-    entered.get_future().wait();
-    for (int i = 0; i < 4200; ++i) r->onTick(kEpoch + 1000);
-    auto releasing = std::async(std::launch::async, [&] { r->releaseSymbol("BTC-USD", kEpoch + 2000); });
-    unblock.set_value();
-    releasing.get();
-    r->drainForTest();
-    ASSERT_GT(r->stats().queueDrops, 0u);
-    const auto rows = read();
-    ASSERT_EQ(rows.size(), 1u);
-    EXPECT_LE(rows[0].observedMs, 2000u);
-    EXPECT_TRUE(rows[0].flags & kPartial);
-    EXPECT_EQ(r->watermarks("BTC-USD", "near").lastColumnMs, 0);
-    const auto columns = r->stats().columnsWritten;
-    tick(*r, 600000);
-    EXPECT_EQ(r->stats().columnsWritten, columns);
-}
-
-TEST_F(RecorderTest, ReleaseUsesLocalOffsetAndDoesNotObserveInvalidTime) {
-    auto r = make(config());
-    local = 700;
-    r->onSnapshot("BTC-USD", kEpoch, {{true, 99, 2}, {false, 101, 4}});
-    r->onInvalid("BTC-USD", kEpoch + 10700, "disconnect before release");
-    r->releaseSymbol("BTC-USD", kEpoch + 20700);
-    r->drainForTest();
-    auto rows = read();
-    ASSERT_EQ(rows.size(), 1u);
-    EXPECT_EQ(rows[0].observedMs, 10000u);
-    EXPECT_TRUE(rows[0].flags & kPartial);
-    value(rows[0], 99, false, 2, 2);
-    tick(*r, 600000);
-    EXPECT_EQ(read().size(), 1u);
 }

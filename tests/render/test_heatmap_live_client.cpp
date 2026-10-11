@@ -1248,12 +1248,14 @@ TEST_F(LiveClient, RecorderReplayMatchesLiveBuilderAndAnalyticalTwapAtOneAndFive
     int64_t localNow = base;
     recording::RecorderConfig config{dir.path().toStdString(), 100, {}, {{"deep", 100, 0.5, 2, false}}, 2000, 10000};
     config.publisher = [&](recording::RecordPtr record) { mailbox.publish(std::move(record)); };
-    recording::BookRecorder recorder(config, [&] { return localNow; });
-    recorder.onSnapshot(symbol, base, {{true, 99, 2}, {false, 101, 4}}); recorder.drainForTest();
+    recording::BookRecorder recorder(config);
+    recorder.onSnapshotAt(symbol, base, localNow, {{true, 99, 2}, {false, 101, 4}}); recorder.drainForTest();
     localNow = base + 30000;
-    recorder.onUpdates(symbol, localNow, {{true, 99, 6}, {false, 101, 8}}); recorder.drainForTest();
+    recorder.onUpdatesAt(symbol, localNow, localNow, {{true, 99, 6}, {false, 101, 8}}); recorder.drainForTest();
+    auto lead = recorder.forkLead(config.publisher, config.livePublishMs);
     localNow = base + 90000;
     recorder.onTick(localNow); recorder.drainForTest();
+    lead->onTick(localNow); lead->drainForTest();
     // 1m committed: bid (2*30s + 6*30s)/60s = 4. Current
     // minute: bid 6 over 30s. Five-minute forming mean = 14/3.
     const auto snapshot = mailbox.snapshot(symbol, "deep");

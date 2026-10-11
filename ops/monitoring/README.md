@@ -106,17 +106,12 @@ scrape. VictoriaMetrics adds `job` and `instance` to every series.
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `sentinel_recorder_running` | gauge | - | 1 when recording is served: primary recorder started or serving roller attached. |
+| `sentinel_recorder_running` | gauge | - | 1 when recording is served: serving roller attached. |
 | `sentinel_recorder_last_column_timestamp_seconds` | gauge | product, layer | Start of the newest committed minute column. Absent until the first column. Age = `time() - x`; normal age is 60-125 s. |
 | `sentinel_recorder_column_overdue_seconds` | gauge | product, layer | Seconds that the next column is past due, by the stall monitor's deadline: last column bucket (or the connect minute) + 2 min + lateness. 0 means on time. 60 is when the log warns `Recording v2 stalled`. Absent while that product's upstream is disconnected. |
 | `sentinel_roller_invalidations_total` | counter | product | Journal book invalidations counted at ShadowRoller journal invalidation handling; retained across daily recorders/retries, resets with the process. |
 | `sentinel_roller_write_errors_total` | counter | product | Failed HMC2 appends (minutes and hourly rollups), counted once at the append failure; excludes setup, checkpoint and socket errors (see shadow setup failures). Retained across daily recorders/retries, resets with the process. |
-| `sentinel_recorder_columns_written_total` | counter | - | Serving roller: committed minute appends across products/layers, excluding rollups and checkpoint replay. Primary mode: BookRecorder appends (including rollups). Process lifetime; present at zero before first commit. |
-| `sentinel_recorder_invalidations_total` | counter | - | Primary mode only (absent in roller mode): Recorder book invalidations (from upstream and from the recorder itself). |
-| `sentinel_recorder_queue_drops_total` | counter | - | Primary mode only (absent in roller mode): Book messages dropped (or turned into an invalidation) when the recorder queue overflowed. |
-| `sentinel_recorder_disk_errors_total` | counter | - | Primary mode only (absent in roller mode): Recorder disk write failures. |
-| `sentinel_recorder_late_events_total` | counter | - | Primary mode only (absent in roller mode): Book messages timestamped before the minutes that are already closed. |
-| `sentinel_recorder_backward_steps_total` | counter | - | Primary mode only (absent in roller mode): Book messages whose timestamp went backwards. |
+| `sentinel_recorder_columns_written_total` | counter | - | Serving roller: committed minute appends across products/layers, excluding rollups and checkpoint replay. Process lifetime; present at zero before first commit. |
 | `sentinel_recorder_live_publish_drops_total` | counter | - | Live publications that were refused (series limit or stale). |
 | `sentinel_live_feed_up` | gauge | product | 1 while the captured product's live journal feed is up; follows transport records and the 30 s tip-silence guard. |
 | `sentinel_live_feed_up_total` / `sentinel_live_feed_down_total` | counter | product | Live journal feed transitions in this server process. |
@@ -136,13 +131,13 @@ Uncaptured products never create a series. Recorder series name the recorded
 products and layers (`near` and `deep`).
 
 Threading: the HTTP listener and the scrape-time samplers run on the server's main thread.
-That thread already reads `BookRecorder::stats()` and `watermarks()`. The recorder worker
+That thread reads the roller's watermarks and atomic process counters. The recorder worker
 and the market-data I/O thread only do relaxed atomic stores. No new lock, allocation or
 signal is on a hot path.
 
 ### Main-thread lag: the D-b1 journal flip gate
 
-The sampler runs in both `recording.live_feed: engine` and `journal`. A small
+The sampler runs with the journal feed. A small
 helper thread wakes every 100 ms and uses `Qt::QueuedConnection` to post its
 `steady_clock` send time to a private main-thread receiver. The slot records
 `max(0, delivery time - send time)`. This measures the queue wait that journal
@@ -323,9 +318,8 @@ Opt in with `roller_shadow.enabled` in the server YAML. Defaults are off;
 `~/Sentinel-runtime/run/capture.sock`, and `from` is a required UTC-midnight
 ISO timestamp for the first journal day. Set the start deliberately before
 turning it on. Existing per-day `roller.json` checkpoints retain the replay
-policy/range and select the first incomplete day. No primary path or client
-wire capability changes. The output must be disjoint from the journal and
-all actual/configured primary/fallback roots, including symlink aliases.
+policy/range and select the first incomplete day. The output must be disjoint from the journal and
+configured archival recording/fallback roots, including symlink aliases.
 `fault_min_duration_ms` defaults to 120000 and must be positive. It is the
 minimum elapsed time for an identical-failure streak before slow probes begin.
 
@@ -345,13 +339,12 @@ minimum elapsed time for an identical-failure streak before slow probes begin.
 | `sentinel_roller_shadow_comparison_failures_total` | counter | product | Hourly oracle/report failures; failed hours retry at the next pass. |
 
 The independent comparison worker runs hourly over fully committed completed
-UTC hours, with temporary batch output and sequential product/hour processing.
+UTC hours, with persistent per-product/day oracle output and sequential
+product/hour processing.
 It calls the same diff implementation as `hmc2_diff`. Strict live-vs-batch
-mismatches increment the gate metric; comparing the independent primary
-connection with shadow is an informational log report with the round-2 bands
-(0.5% per-side total TWAP, 0.02% mids, 1% entry counts, 99% row overlap).
-The pinned identical-input legacy timer fixture separately enforces the tier-2
-32-code/1%-cells/0.01%-totals bounds. No cross-connection difference pages.
+mismatches increment the gate metric. This hourly self-check is retained, including
+checkpointed progress and mismatch totals across restarts. It compares only the
+live roller and a re-roll of the same journal; no primary recorder is read.
 
 `sentinel-roller-journal-corruption` pages when the per-product corruption
 counter increases over two hours, matching the shadow mismatch rule. It resolves
@@ -367,7 +360,7 @@ strict. Preserve RAWL2 files; do not repair them in place. Product startup regis
 
 Grafana provisions `sentinel-roller-shadow-mismatch` (increase over 2 h) and
 `sentinel-roller-shadow-down` (product down for 5 min); absence is OK while
-shadow is disabled. Existing primary health rules remain authoritative.
+the roller is disabled. The live-feed and recorder health rules cover serving.
 Read `Shadow roller retry` for the error and 1 s to 60 s exponential backoff.
 After **three identical consecutive failures spanning at least two minutes by
 default without a newer committed watermark**, that product probes once every
@@ -390,14 +383,16 @@ checkpoint to silence alerts. If a previously observed comparison checkpoint
 disappears, the checker retains its totals and reports a comparison failure
 until the checkpoint is restored; it does not start a fresh audit.
 
-The hourly oracle remains a fresh deterministic batch from the day's anchor:
-24 hourly comparisons scan roughly **12.5 complete days of records per product
-per day** (1 + 2 + ... + 24 hours), plus any pre-midnight anchor warmup. With
-seven products this is roughly 87.5 product-day scans/day. Product comparisons
-are sequential on their own thread, but CPU and storage bandwidth still compete
-with other processes. Incremental oracle state is deferred: the current batch
-checkpoint stores output progress, not the reconstructed book/TWAP state, so
-keeping only its checkpoint would not remove the daily warmup cost.
+The hourly oracle persists its output, checkpoint and replay anchors under
+`<shadow>/shadow-oracle/<product>/<dayMs>`, outside the served product trees.
+A stable day ceiling and an anchor at each completed hour let the next pass
+resume at its checkpoint and process the new hour. Missing or incompatible
+anchors still fall back to journal replay. Corrupt oracle checkpoint state resets
+only that day's derived oracle and re-rolls it; journal errors propagate without
+wiping the oracle. At day rollover, older oracle day directories are removed;
+symlinks and non-directory entries are left untouched. These oracle caches are
+separate from `comparison.json`, whose persisted totals and audit watermark
+retain the behavior described above.
 
 `roller_shadow.products` lists the rolled products (default: the server's
 `default_symbols`). A listed product with no RAWL2 file whose header
@@ -408,15 +403,14 @@ unmounted `journal_dir` is not a refusal; the worker retries as usual.
 
 ### Serving (`recording.source: roller`, slice D-a)
 
-`recording.source` is `primary` (default: this process's BookRecorder writes
-`recording.dir`) or `roller`. With `roller` (requires `recording.enabled` and
-`roller_shadow.enabled`) no primary recorder is created: chunks, availability,
+`recording.source` must explicitly be `roller`, the only accepted source (requires
+`recording.enabled` and `roller_shadow.enabled`). Chunks, availability,
 `recording.available` and the live minute come from `roller_shadow.dir` and
 the roller. Committed minutes are published from the history recorder, which
 still applies only durable fan-out prefixes. The forming minute comes from a
 **live lead**: a non-persisting fork of the day's history state that also
 applies each provisional fan-out record as it arrives and ticks every 250 ms
-like the primary. A retract, disconnect, EOF, socket failure or day end drops
+on the wall clock. A retract, disconnect, EOF, socket failure or day end drops
 the lead and withdraws every provisional minute it published from the live
 cache (`LiveService::retractProvisional`; committed minutes stay). The next
 raw-tail frame omits them, and the client drops omitted provisional minutes
@@ -426,8 +420,7 @@ the live cache holds a committed minute of both layers: after a restart (whose
 replay republishes no final) it seeds the newest persisted minute from the
 served root, and on a root with none yet it waits for the first commit
 (`Roller live lead waits for a committed minute`). The next fork republishes the forming
-minute from durable history. The legacy-renderer page path cannot withdraw a
-column a client already holds (only a new subscription is clean).
+minute from durable history.
 The lead is forked once per start, per UTC day (about 2 s without a forming
 minute at 00:01 UTC while the new day replays from its anchor) and per
 provisional discard.
@@ -435,20 +428,14 @@ provisional discard.
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
 | `sentinel_roller_shadow_live_lead_forks_total` | counter | product | Live leads forked from durable history (serving only). Steady growth beyond one per day means repeated provisional discards: read `Shadow roller retry`. |
-| `sentinel_recorder_running` | gauge | - | 1 when recording is served: primary recorder started or serving roller attached. |
+| `sentinel_recorder_running` | gauge | - | 1 when recording is served: serving roller attached. |
 | `sentinel_recorder_last_column_timestamp_seconds`, `sentinel_recorder_column_overdue_seconds` | gauge | product, layer | Same series, from the roller's committed watermarks for `roller_shadow.products`; overdue is present while that product's worker is running. |
 | `sentinel_recorder_live_publish_drops_total` | counter | - | Roller publications the live cache refused. |
 
-The columns-written counter is exported in both serving modes. The primary-only
-late-event, backward-step, queue-drop, invalidation and disk-error counters are
-absent while the roller serves. Dashboards use `sentinel_roller_invalidations_total`
-and `sentinel_roller_write_errors_total` instead; late/backward targets have no
-roller equivalent, and blocking recorder admission has no queue-drop equivalent.
-The recorder columns/minute query is unchanged. Alert provisioning currently
-references none of these six counters; no alert expressions need changing.
-The cross-connection comparison still reads `recording.dir` (informational;
-it stops growing after the flip). Served watermarks never move back across
-the daily anchor replay.
+The columns-written counter measures serving roller minute appends. Dashboards use
+`sentinel_roller_invalidations_total` and `sentinel_roller_write_errors_total`.
+There are no primary queue-drop, late-event, backward-step, invalidation or disk-error
+series. Served watermarks never move back across the daily anchor replay.
 
 `sentinel-roll` refuses a roller-served `roller_shadow.dir` for unscoped
 batch, judged on each config file and on their merge (the private
@@ -479,8 +466,7 @@ native price in it.
 ### Live feed from the journal
 
 The server requires `recording.source: roller` and `roller_shadow.enabled`.
-`primary` is refused at startup: its recorder has no feed. The primary recorder
-implementation remains compiled until slice E. The server opens no Coinbase
+`primary` is refused at startup. The server opens no Coinbase
 WebSocket. Each roller worker keeps a whole raw book following its history feed
 and, at the socket tip, a live copy that applies provisional fan-out records.
 The model receives journal-header metadata, one synthesized snapshot and then
@@ -488,10 +474,10 @@ updates and trades as queued hand-offs. Admission accepts only `rollerProducts()
 (`roller_shadow.products`, or normalized `default_symbols` when empty); other
 products get `invalid_product`. REST serves candle history only.
 
-The loader ignores `recording.live_feed` and the old MDC WebSocket/cap keys.
-Keep `recording.live_feed: journal` in the deployed YAML until slice E: the
-previous binary defaults to `engine` without it, opening a second upstream
-connection on rollback. Only `ssl_ca_bundle` is still read for REST TLS.
+There is no `recording.live_feed` setting. The deployed S8b loader (`110e970`)
+already ignores that key, so deleting its YAML line preserves every effective
+setting on that binary. The old MDC WebSocket/cap keys are also ignored; only
+`ssl_ca_bundle` is still read for REST TLS.
 
 A retract, disconnect, EOF or worker failure invalidates the product's book
 (`Journal live book invalidated`, status `invalidated` on the wire); the next

@@ -306,12 +306,16 @@ protected:
             store.append(hourRecord());
         }
         config.recording.enabled = true;
-        config.recording.dir = root().string();
+        config.recording.source = "roller";
+        config.rollerShadow.enabled = true;
+        config.rollerShadow.outputRoot = root().string();
         config.tls.certFile = dir.path().toStdString() + "/cert.pem";
         config.tls.keyFile = dir.path().toStdString() + "/key.pem";
         ASSERT_TRUE(writeSelfSignedCert(config.tls.certFile, config.tls.keyFile));
         model = std::make_unique<ServerDataModel>(config);
         ASSERT_TRUE(model->recordingDir());
+        model->attachRoller([](const auto&, const auto&) { return recording::BookRecorder::Watermarks{}; },
+                            [](const auto&) { return true; });
         auth = std::make_unique<Authenticator>(dir.path().toStdString() + "/no-credentials");
         server = std::make_unique<SentinelStreamServer>(*model, *auth, config, 0);
         // This fixture bypasses SentinelServerApp; install its captured-product admission policy.

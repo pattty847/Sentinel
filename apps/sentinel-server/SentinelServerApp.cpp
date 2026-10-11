@@ -157,13 +157,11 @@ sentinel::roller::ModelSink SentinelServerApp::journalModelSink() {
 }
 
 bool SentinelServerApp::startShadow(const std::vector<std::string>& symbols) {
-    // Shadow: an independent consumer; no primary callbacks or recorder queue.
-    // Serving (recording.source: roller): the model has no primary recorder and
-    // serves roller_shadow.dir; the roller publishes into its LiveService.
+    // The roller serves history and publishes into the model's LiveService.
     try {
         const bool serving = m_serverModel->servesRoller();
         auto& shadow = m_serverConfig.rollerShadow;
-        // Roots of the primary recorder only: never the served roller root.
+        // Protect configured archival roots from accidental output aliasing.
         shadow.protectedRoots = {m_serverConfig.recording.dir};
         if (!m_serverConfig.recording.fallbackDir.empty())
             shadow.protectedRoots.push_back(m_serverConfig.recording.fallbackDir);
@@ -175,11 +173,7 @@ bool SentinelServerApp::startShadow(const std::vector<std::string>& symbols) {
         }
         shadow.model = journalModelSink();
         const auto products = shadow.products.empty() ? symbols : rollerProducts(m_serverConfig);
-        // Informational cross-connection comparison root: the primary recorder's.
-        const std::filesystem::path primaryRoot =
-            serving ? std::filesystem::path(m_serverConfig.recording.dir)
-                    : m_serverModel->recordingDir().value_or(m_serverConfig.recording.dir);
-        m_shadowRoller = std::make_unique<sentinel::roller::ShadowRoller>(shadow, products, primaryRoot, m_metrics);
+        m_shadowRoller = std::make_unique<sentinel::roller::ShadowRoller>(shadow, products, m_metrics);
         if (serving && m_shadowRoller->active()) {
             auto* roller = m_shadowRoller.get();
             m_serverModel->attachRoller(

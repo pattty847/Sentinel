@@ -277,7 +277,7 @@ TEST(Roller, BlockingQueueAdmitsAtomicOversizedSnapshot) {
     recording::BookRecorder r(c);
     r.onSnapshotAt("BTC-USD",Epoch,Epoch,{{true,99999.99,2},{false,100000.01,3}});
     for(int t=1;t<=10000;++t) r.onUpdatesAt("BTC-USD",Epoch+t,Epoch+t,{{true,99999.99,double(2+t%3)}});
-    r.onTick(Epoch+60'000); r.drain(); EXPECT_EQ(r.stats().queueDrops,0);EXPECT_EQ(r.stats().invalidations,0);
+    r.onTick(Epoch+60'000); r.drain(); EXPECT_EQ(r.stats().invalidations,0);
     EXPECT_EQ(r.stats().columnsWritten,2);
 }
 TEST(Roller, CommitFloorAndCeiling) {
@@ -369,6 +369,7 @@ TEST(Roller, StopWakesBlockedProducerBeforeWorkerDrains) {
     std::promise<void> workerEntered,releaseWorker,producerWaiting;
     auto release=releaseWorker.get_future().share();std::atomic<bool> first{true};int waiting=0;
     cfg.publisher=[](auto){};
+    cfg.publication=recording::RecorderConfig::Publication::Lead;
     cfg.beforePublicationForTest=[&](bool){if(first.exchange(false)){workerEntered.set_value();release.wait();}};
     cfg.beforeQueueWaitForTest=[&]{if(++waiting==2)producerWaiting.set_value();};
     recording::BookRecorder recorder(cfg);

@@ -107,7 +107,7 @@ most once per minute until up. The pre-parse ingest observer includes product an
 Lifecycle calls and callback setters belong to the owner's non-I/O thread.
 Set callbacks before the first successful add; later setters throw `logic_error`
 instead of silently leaving existing engines unchanged. `requestResnapshot(product)` is thread-safe,
-including from recorder callbacks. Lifecycle operations synchronize with the I/O
+including from capture supervision. Lifecycle operations synchronize with the I/O
 thread; consumers must not call blocking lifecycle/stats methods from callbacks.
 All engine state changes enter its strand. Transport callbacks, JSON parsing and
 DTO callbacks run on the single I/O thread; server/model notifications cross to
@@ -120,37 +120,14 @@ L2 parsing validates side, positive finite price and nonnegative finite quantity
 `Authenticator` supplies optional JWTs; public market-data channels need no key.
 `LiveOrderBook`/recording consumers own book storage, caching and persistence.
 
-## Slice-1 integration boundary
+## Server integration boundary
 
-The server adds pinned defaults and GUI symbols as independent feeds and retains
-its queued book/trade/invalidation handoff. Connection state and the recorder
-stall monitor are scoped by symbol: a GUI product outage cannot mute or reset
-a pinned product's flat-column warning. There is no shared last-status boolean.
+Capture owns `MarketDataFeeds`. The server follows the journal through roller
+workers, with queued book, trade, metadata and health hand-offs to the model.
+Subscriptions select captured products and release only their own client views;
+they never acquire an upstream feed or start, stop or flush a recorder. The roller
+owns each product's recording lifetime and its per-product stall deadline.
 
-Feed acquire/release events share the I/O-to-model queue with book data. Removing
-an unpinned feed closes its observation at the release timestamp: HMC2 commits the
-observed partial minute (`kPartial`, with the actual `observedMs`) and pending
-lateness tail, then releases the book, writer delta bases, watermarks and live
-cache. Session unsubscribe retires its own live views immediately, so draining an
-old recorder tail cannot retire a newly acquired view. No later minute is synthesized. Legacy heatmap sampling is
-invalidated and its per-symbol state and writers are closed too. Removed feeds
-have no connection metrics or stall deadlines; pinned feeds are unchanged.
-Retired transport callbacks cannot reach a newly acquired lifetime. A later
-subscription requires a fresh snapshot and records `kResynced` as usual. Release
-control cannot be dropped by recorder queue overflow, and cleanup still runs if
-the final disk write fails (the error is logged and counted).
-
-
-Capture adds all configured products (seven in deployment) to one feed owner,
-with one single-product `Session` and one RAWL2 v1 stream per product: independent
-run IDs, product-local established-connection IDs, no routing receipts. The RAWL2
-v2 writer is removed (slice 2); the verifier keeps the v2 reader for the
-2026-09-30..10-02 archive. All sessions account to one `QueuePool` (`--queue-mib`,
-default 512 MiB, with a `--queue-floor-mib` floor per product, default 2 MiB). The
-pool is accounting only (no up-front allocation); its mutex guards arithmetic,
-never I/O. A failed session returns its queued bytes at failure.
-The obsolete whole-capture 60 s engine-restart supervisor is removed; each
-transport already guarantees bounded connect/close completion and per-feed retry.
 
 ## Heatmap timeframes
 
@@ -278,13 +255,13 @@ The server runs paper execution (no real broker); fills use last trade price plu
 
 ## Recording v2 core (HMC2)
 
-`recording::BookRecorder` and `Hmc2Store` live in `libs/core/servermodel` and do not depend on GUI Qt. The recorder takes full, unclipped absolute L2 batches from one producer, and performs integration, compression and disk I/O on its own worker. `onInvalid` ends observation; only an accepted snapshot resumes it. An invalid interval preserves the minute's earlier numerator and peaks. Zero-observation minutes are omitted. The constructor overload accepting a local-clock function and `drainForTest()` permit deterministic replay without sleeps.
+`recording::BookRecorder` and `Hmc2Store` live in `libs/core/servermodel` and do not depend on GUI Qt. The recorder takes full, unclipped absolute L2 batches from one producer, and performs integration, compression and disk I/O on its own worker. `onInvalid` ends observation; only an accepted snapshot resumes it. An invalid interval preserves the minute's earlier numerator and peaks. Zero-observation minutes are omitted. The roller supplies envelope and capture-receive time explicitly through `onSnapshotAt` / `onUpdatesAt`; `drain()` fences deterministic replay. The model owns no recorder and never requests capture resnapshots.
 
 Each side has an ordered, pooled price map (O(log levels) updates, O(1) best bid/ask access). Each layer has a pooled hash map keyed by `(integer row, side)`, with lazily advanced integrals and a reused touched-row buffer. One message is applied in full before its final row sizes update peaks. Malformed prices/sizes invalidate the whole batch's book continuity. Prices use checked nearest rounding in integer price units; an inclusion window tests the row's lower price edge, so bounds are `ceil(minMid * lowFrac * priceScale / rowTickUnits)` through `floor(maxMid * highMult * priceScale / rowTickUnits)`, inclusive on both sides. Empty entries inside minute bounds mean observed zero, not a missing book.
 
-Enqueue arrival time samples the supplied local clock; idle ticks use the last actual `local - envelope` offset. Envelope time is clamped to a nondecreasing integration clock. A crossed minute is sealed before applying the new batch, then held until `clock >= bucketEnd + latenessMs`. Backward messages cannot revise sealed integrals, even within the lateness hold; older-than-committed messages also set the current minute's late flag. Lateness is therefore a commit delay, not an event-reordering buffer. Shutdown drains accepted messages but does not advance time: the open minute and any sealed records still in the lateness hold are dropped. Crash has the same uncommitted-tail loss. Restart begins observation at the new snapshot, never the last stored timestamp. Upstream must deliver disconnect/gap/suspend invalidations in order before timer advancement; silence alone is not evidence of an invalid book.
+Enqueue carries the journal's capture-receive timestamp; idle ticks use the last actual `local - envelope` offset. Envelope time is clamped to a nondecreasing integration clock. A crossed minute is sealed before applying the new batch, then held until `clock >= bucketEnd + latenessMs`. Backward messages cannot revise sealed integrals, even within the lateness hold; older-than-committed messages also set the current minute's late flag. Lateness is therefore a commit delay, not an event-reordering buffer. Shutdown drains accepted messages but does not advance time: the open minute and any sealed records still in the lateness hold are dropped. Crash has the same uncommitted-tail loss. Restart begins observation at the new snapshot, never the last stored timestamp. Upstream must deliver disconnect/gap/suspend invalidations in order before timer advancement; silence alone is not evidence of an invalid book.
 
-The queue bounds queued level count and has 4,096 message slots, including control events. A dropped data batch becomes an ordered invalidation for its symbol. If the control slots themselves fill, an out-of-band barrier invalidates all symbols after the queued prefix; incoming messages, including snapshots, are dropped until that barrier is consumed. Continuity then requires a newly accepted snapshot. All drops are counted. Symbols are interned once on the producer, so even long symbol names do not allocate on repeated enqueues. Pooled containers and buffers reuse their high-water storage; new symbols, larger books/batches, minute sealing and hourly work can still allocate.
+The queue bounds queued level count and uses a 4,096-slot ring with at most 4,095 admitted messages. Admission blocks until space is available; an oversized atomic snapshot is admitted alone. Stop wakes blocked producers with an error, and owners join them before destruction. There is no queue-drop invalidation path. Symbols are interned once on the producer, so even long symbol names do not allocate on repeated enqueues. Pooled containers and buffers reuse their high-water storage; new symbols, larger books/batches, minute sealing and hourly work can still allocate.
 
 ### HMC2 byte layout
 
@@ -381,7 +358,7 @@ Each update is a separate SHE1/SHC1 kind `live_column` (2) frame per source. SHE
 
 Within the byte budget described below, the body carries every retained provisional minute (up to 60 pending minutes plus the open minute), flagged `kProvisional`, and held committed finals whose start is at or after that subscriber's final marker. A final is before `committedThroughMs`; a provisional is at or after it. Column flags come directly from the recorder: an observed forming minute has `kPartial` and `observedMs` for time covered so far, while a complete lateness-held provisional can have `observedMs = 60000` without `kPartial`, including the newest column during rollover. A commit can precede the next open publication: its frame can contain finals without an observed open column. Each minute has one native grid constituent and the original size codes, with entries sorted by (row, side). `scannedRanges` is the coalesced union of transported minute records. It never claims that an omitted or evicted final was an empty recorder minute; such holes stay `NotLoaded` until a chunk scans them. Both encoder and decoder reject inconsistent flags, extents, states, scan claims, counts, grids, durations, or overflowing input. Existing SHC1 payload/envelope limits and hash/zstd validation also apply.
 
-**Live rate.** The recorder publishes each layer's open minute at most once per `recording.live_publish_ms` of integration clock (default 500 ms, clamped to [250, 5000]; owner decision 2026-10-01), so live frames carry a new revision at 2 Hz. While a symbol's book is invalid (resnapshot loop, expired one-sided grace, upstream outage) nothing integrates, so the recorder publishes the open minute once and then only when an input changes (validity, observed time, flags, commit cutoff, minute); it never re-sends a byte-identical record. A failure while building an open-minute publication is logged (throttled) and skipped; it never invalidates a book. The live worker turns every ~100 ms and paces each subscription at half that interval (`liveCadenceMs`, 250 ms by default). It sends only a changed revision, so frames still follow publications (2 Hz). In steady state (provisional publications only, with no intervening final deliveries and no byte-budget backpressure) each publication goes out at the first worker turn after it; a refused admission backs the cadence off as described below. A cadence equal to the publish interval would, after turn rounding, fall behind the recorder, skip publications, and let the data age sawtooth through a whole interval.
+**Live rate.** The recorder publishes each layer's open minute at most once per `recording.live_publish_ms` of integration clock (default 500 ms, clamped to [250, 5000]; owner decision 2026-10-01), so live frames carry a new revision at 2 Hz. While a symbol's book is invalid (expired one-sided grace or journal outage) nothing integrates, so the recorder publishes the open minute once and then only when an input changes (validity, observed time, flags, commit cutoff, minute); it never re-sends a byte-identical record. A failure while building an open-minute publication is logged (throttled) and skipped; it never invalidates a book. The live worker turns every ~100 ms and paces each subscription at half that interval (`liveCadenceMs`, 250 ms by default). It sends only a changed revision, so frames still follow publications (2 Hz). In steady state (provisional publications only, with no intervening final deliveries and no byte-budget backpressure) each publication goes out at the first worker turn after it; a refused admission backs the cadence off as described below. A cadence equal to the publish interval would, after turn rounding, fall behind the recorder, skip publications, and let the data age sawtooth through a whole interval.
 
 The raw path uses `LiveService`'s existing worker and `LiveCache::snapshot()` only, with no disk reads and no recorder changes. It attempts changed revisions at the live cadence above. Entries, column storage, and compression scratch are reused; an encoding is shared across subscribers needing the same retained final suffix, and all subscribers with no pending finals share one encoding per (series, revision). Each session has an independent raw **1 MiB aggregate byte budget**, including SHE1 envelopes, separate from the chunk reply budget. Multiple raw frames can be admitted together, preserving the live rate for both sources and multiple symbols. Queued raw frames retain FIFO order behind the current write, ahead of queued history; bytes remain charged through write completion or discard. Refusal coalesces to the newest snapshot and doubles the cadence from its base up to 5 seconds (0.25 -> 0.5 -> 1 -> 2 -> 4 -> 5 s by default). Only accepted admission advances that source's final marker, so a refused final accompanies the next accepted frame while it remains retained. Successful admission restores the base cadence. After budget pressure, attempts rotate across sources to prevent starvation. Empty builds consume the revision without delivery or congestion backoff. Allocation/build failures are logged and retried with backoff. Replaced/unsubscribed queued frames are discarded; an already in-flight frame can finish and consumers must correlate `sub`.
 

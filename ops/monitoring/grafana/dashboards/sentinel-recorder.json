@@ -77,7 +77,7 @@
       "id": 8,
       "type": "timeseries",
       "title": "Journal invalidations (per 5 min)",
-      "description": "Per-product journal book invalidations. No roller equivalent for primary late-event or backward-step counters.",
+      "description": "Per-product journal book invalidations.",
       "datasource": {
         "type": "prometheus",
         "uid": "sentinel-vm"
@@ -121,7 +121,7 @@
       "id": 9,
       "type": "timeseries",
       "title": "Write errors and live drops (per 5 min)",
-      "description": "Per-product HMC2 append failures and refused live publications. The roller uses blocking recorder admission; no primary queue-drop equivalent.",
+      "description": "Per-product HMC2 append failures and refused live publications. The roller uses lossless blocking recorder admission.",
       "datasource": {
         "type": "prometheus",
         "uid": "sentinel-vm"

@@ -127,116 +127,23 @@ ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
     });
     m_candleTimer.start();
 
-    startRecorder();
+    startRollerServing();
 }
 
 ServerDataModel::~ServerDataModel() {
 }
 
-namespace {
-std::vector<recording::Level> toRecorderLevels(const std::vector<OrderBookLevel>& bids,
-                                               const std::vector<OrderBookLevel>& asks) {
-    std::vector<recording::Level> levels;
-    levels.reserve(bids.size() + asks.size());
-    for (const auto& l : bids) levels.push_back({true, l.price, l.size});
-    for (const auto& l : asks) levels.push_back({false, l.price, l.size});
-    return levels;
-}
-} // namespace
-
-void ServerDataModel::startRecorder() {
-    const auto& rc = m_serverConfig.recording;
-    if (!rc.enabled) {
-        sLog_App("Recording v2 disabled (recording.enabled=false)");
-        return;
-    }
-    if (rc.source == "roller") {
-        startRollerServing();
-        return;
-    }
-    if (rc.source != "primary") {
-        sLog_Error("Recording v2 not started: unknown recording.source=" << rc.source << " (primary | roller)");
-        return;
-    }
-    const auto choice = recording::resolveRecordingDir(rc.dir, rc.fallbackDir); // shared with the lab
-    if (choice.dir.empty()) {
-        sLog_Warning("Recording v2 not started: volume for " << rc.dir
-                     << " is not mounted and recording.fallback_dir is empty");
-        return;
-    }
-    if (choice.fallback)
-        sLog_Warning("Recording v2: volume for " << rc.dir << " not mounted, using fallback " << rc.fallbackDir);
-    const std::filesystem::path dir = choice.dir;
-    recording::RecorderConfig cfg;
-    cfg.root = dir;
-    cfg.priceScale = rc.priceScale;
-    cfg.sizeScale = {rc.sizeFloor, rc.codesPerOctave};
-    cfg.latenessMs = rc.latenessMs;
-    cfg.livePublishMs = rc.livePublishMs;
-    const auto units = [&](double dollars) { return static_cast<int64_t>(std::llround(dollars * rc.priceScale)); };
-    cfg.layers = {
-        {"near", units(rc.nearTick), 1.0 - rc.nearPct, 1.0 + rc.nearPct, false},
-        {"deep", units(rc.deepTick), rc.deepLowFrac, rc.deepHighMult, true},
-    };
-    // Symbols as the app subscribes them (upper-cased), one series per layer.
-    m_stallSeries.clear();
-    for (const auto& symbol : normalizedDefaultSymbols(m_serverConfig.defaultSymbols))
-        for (const auto& layer : cfg.layers)
-            m_stallSeries.push_back({symbol, layer.name, 0});
-    m_stallMonitor.emplace(rc.latenessMs);
-    try {
-        m_recordingLive = std::make_shared<recording::LiveService>(recording::liveCadenceMs(rc.livePublishMs));
-        cfg.publisher = [live = m_recordingLive, drops = &m_livePublishDrops](recording::RecordPtr record) {
-            if (!live->publish(std::move(record))) {
-                drops->fetch_add(1, std::memory_order_relaxed);
-                sLog_Probe("recording.live.drop", "publication exceeds series limit or is stale");
-            }
-        };
-        cfg.onReleased = [live = m_recordingLive](const std::string& symbol) { live->releaseSymbol(symbol); };
-        cfg.onSelfInvalidated = [this](const std::string& symbol, const std::string& reason) {
-            // Recorder worker thread: hand off only.
-            QMetaObject::invokeMethod(this, [this, s = QString::fromStdString(symbol),
-                                             r = QString::fromStdString(reason)] {
-                if (m_feeds.contains(s.toStdString())) emit recordingResnapshotRequested(s, r);
-            }, Qt::QueuedConnection);
-        };
-        m_recorder = std::make_unique<recording::BookRecorder>(std::move(cfg));
-        m_recordingDir = dir;
-    } catch (const std::exception& e) {
-        m_recordingLive.reset();
-        m_stallMonitor.reset();
-        sLog_Error("Recording v2 failed to start: dir=" << dir.string() << " error=" << e.what());
-        return;
-    }
-    sLog_App("Recording v2 started: dir=" << dir.string()
-             << " near=" << rc.nearTick << "@+/-" << rc.nearPct * 100 << "%"
-             << " deep=" << rc.deepTick << "@[" << rc.deepLowFrac << "x.." << rc.deepHighMult << "x]"
-             << " livePublishMs=" << rc.livePublishMs << " liveCadenceMs=" << recording::liveCadenceMs(rc.livePublishMs));
-
-    m_recorderTimer.setInterval(250);
-    connect(&m_recorderTimer, &QTimer::timeout, this, [this]() {
-        if (!m_recorder) return;
-        m_recorder->onTick(localNowMs());
-        if (++m_recorderTicks % 4 == 0)  // once a second
-            checkRecorderProgress(localNowMs());
-        if (m_recorderTicks % 240 == 0) {  // once a minute
-            const auto s = m_recorder->stats();
-            sLog_Data("Recording v2 stats: columns=" << s.columnsWritten << " late=" << s.lateEvents
-                      << " backward=" << s.backwardSteps << " queueDrops=" << s.queueDrops
-                      << " invalidations=" << s.invalidations << " diskErrors=" << s.diskErrors);
-        }
-    });
-    m_recorderTimer.start();
-}
-
-// recording.source: roller. No primary BookRecorder: the journal roller writes
-// roller_shadow.dir and publishes into this LiveService (SentinelServerApp
-// installs rollerPublisher() and attachRoller() before the stream server starts).
+// The roller publishes into this LiveService; the app attaches its watermark
+// and health queries before the stream server starts.
 void ServerDataModel::startRollerServing() {
     const auto& rc = m_serverConfig.recording;
     const auto& shadow = m_serverConfig.rollerShadow;
-    if (!shadow.enabled) {
-        sLog_Error("Recording not served: recording.source=roller requires roller_shadow.enabled=true");
+    if (!rc.enabled) {
+        sLog_App("Recording disabled (recording.enabled=false)");
+        return;
+    }
+    if (const auto problem = recordingSourceProblem(m_serverConfig); !problem.empty()) {
+        sLog_Error("Recording not served: " << problem);
         return;
     }
     if (shadow.outputRoot.empty() || !recording::volumeMounted(shadow.outputRoot)) {
@@ -308,8 +215,7 @@ void ServerDataModel::checkRecorderProgress(int64_t nowMs) {
         series.lastColumnMs = recordingWatermarks(series.symbol, series.layer).lastColumnMs;
     for (const auto& stall : m_stallMonitor->check(nowMs, m_stallSeries))
         sLog_Warning("Recording v2 stalled: symbol=" << stall.symbol << " layer=" << stall.layer
-                     << " lastColumnMs=" << stall.lastColumnMs << " overdueMs=" << stall.overdueMs
-                     << " invalidations=" << (m_recorder ? m_recorder->stats().invalidations : 0));
+                     << " lastColumnMs=" << stall.lastColumnMs << " overdueMs=" << stall.overdueMs);
 }
 
 void ServerDataModel::onProductMetadata(const std::string& symbol,
@@ -409,24 +315,12 @@ void ServerDataModel::registerMetrics(sentinel::metrics::MetricsRegistry& r) {
                sampleFeeds([](const FeedState& f) { return f.downs; }));
     r.gaugeFn("sentinel_exchange_clock_offset_ms", "Smoothed local minus exchange clock in ms (0 = not yet measured).", {},
               [this]() -> Value { return double(m_exchangeOffsetMs.load(std::memory_order_relaxed)); });
-    r.gaugeFn("sentinel_recorder_running", "1 when recording is served (primary recorder started, or the roller attached).", {},
+    r.gaugeFn("sentinel_recorder_running", "1 when the journal roller is attached.", {},
               [this]() -> Value { return recordingAvailable() ? 1.0 : 0.0; });
-    if (!m_recorder && !m_servesRoller) return;
+    if (!m_servesRoller) return;
 
-    if (m_recorder) {
-        // BookRecorder::stats() is relaxed atomics; one call per series per scrape.
-        using Stats = recording::BookRecorder::Stats;
-        const auto stat = [this](uint64_t Stats::*field) { return [this, field]() -> Value { return double(m_recorder->stats().*field); }; };
-        r.counterFn("sentinel_recorder_columns_written_total", "Minute columns the recorder committed.", {}, stat(&Stats::columnsWritten));
-        r.counterFn("sentinel_recorder_late_events_total", "Book messages timestamped before the already-closed minutes.", {}, stat(&Stats::lateEvents));
-        r.counterFn("sentinel_recorder_backward_steps_total", "Book messages whose timestamp stepped backwards.", {}, stat(&Stats::backwardSteps));
-        r.counterFn("sentinel_recorder_queue_drops_total", "Book messages dropped (or turned into an invalidation) on recorder queue overflow.", {}, stat(&Stats::queueDrops));
-        r.counterFn("sentinel_recorder_invalidations_total", "Recorder book invalidations (upstream and self).", {}, stat(&Stats::invalidations));
-        r.counterFn("sentinel_recorder_disk_errors_total", "Recorder disk write failures.", {}, stat(&Stats::diskErrors));
-    }
-    if (m_servesRoller)
-        r.counter("sentinel_recorder_columns_written_total",
-                  "Minute columns the serving roller committed across products and layers.");
+    r.counter("sentinel_recorder_columns_written_total",
+              "Minute columns the serving roller committed across products and layers.");
     r.counterFn("sentinel_recorder_live_publish_drops_total", "Live publications refused (series limit or stale).", {},
                 load(m_livePublishDrops));
 
@@ -565,12 +459,6 @@ void ServerDataModel::onLiveOrderBookLevelUpdates(const QString& productId,
 
     updateExchangeOffsetMs(static_cast<int64_t>(exchangeMs));
 
-    if (m_recorder && !updates.empty()) {
-        std::vector<recording::Level> levels;
-        levels.reserve(updates.size());
-        for (const auto& u : updates) levels.push_back({u.isBid, u.price, u.quantity});
-        m_recorder->onUpdates(symbol, static_cast<int64_t>(exchangeMs), std::move(levels));
-    }
 
     if (updates.empty()) return;
     if (!data.rawValid) {
@@ -686,9 +574,6 @@ void ServerDataModel::onLiveOrderBookInvalidated(const QString& productId, const
     }
     for (const auto& [product, version] : notifications)
         emit bookSnapshotBroadcast(product, {}, {}, 0.0, QStringLiteral("invalidated"), version);
-    if (m_recorder) {
-        m_recorder->onInvalid(symbol, localNowMs(), reason.toStdString());
-    }
     sLog_Data("ServerDataModel: book invalid until next snapshot: symbol="
               << (symbol.empty() ? std::string("*") : symbol) << " symbols=" << count
               << " reason=" << reason);
@@ -699,11 +584,6 @@ void ServerDataModel::onLiveOrderBookInitialized(const QString& productId, const
     if (!m_feeds.contains(symbol)) return;
     SymbolHotData& data = ensureSymbol(symbol);
     
-    if (m_recorder) {
-        // The whole book, before the live book's band clip.
-        m_recorder->onSnapshot(symbol, envelopeMs > 0 ? static_cast<int64_t>(envelopeMs) : exchangeNowMs(),
-                               toRecorderLevels(bids, asks));
-    }
 
     const auto validSide = [](const std::vector<OrderBookLevel>& side) {
         return !side.empty() && std::all_of(side.begin(), side.end(), [](const OrderBookLevel& level) {

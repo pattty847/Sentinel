@@ -89,34 +89,14 @@ nlohmann::json diff(const std::filesystem::path& a,const std::filesystem::path& 
             {"mismatching",mismatches},{"nonqualifying",excluded},{"minutes",details}};
 }
 nlohmann::json compareShadow(const std::filesystem::path& shadow,const std::filesystem::path& batch,
-                            const std::filesystem::path& primary,const std::string& product,
+                            const std::string& product,
                             const std::string& layer,int64_t from,int64_t to,metrics::Counter& mismatch) {
     const auto strict=diff(shadow,batch,product,layer,from,to,60'000,true);
     uint64_t hourMismatching=0;
     if(layer=="deep" && from%3600000==0 && to%3600000==0)
         hourMismatching=diff(shadow,batch,product,layer,from,to,3600000,true).at("mismatching").get<uint64_t>();
     mismatch.inc(strict.at("mismatching").get<uint64_t>()+hourMismatching);
-    const auto cross=diff(primary,shadow,product,layer,from,to);
-    uint64_t within=0;
-    for(const auto& minute:cross["minutes"]) if(minute["qualifies"].get<bool>()) {
-        const auto& d=minute["difference"];
-        bool pass=true;
-        for(const auto* side:{"bid","ask"}) {
-            const auto& v=d["totalTwap"][side]["relativeDelta"];
-            pass=pass && !v.is_null() && std::abs(v.get<double>())<=.005;
-        }
-        for(size_t i=0;i<4;++i) {
-            const auto a=d["midsA"][i].get<double>(),b=d["midsB"][i].get<double>();
-            pass=pass && a>0 && std::abs(b-a)/a<=.0002;
-        }
-        const auto a=d["entriesA"].get<double>(),b=d["entriesB"].get<double>();
-        const auto onlyA=d["onlyA"].get<double>(),onlyB=d["onlyB"].get<double>();
-        pass=pass && a>0 && std::abs(b-a)/a<=.01 && (a-onlyA)/(a+onlyB)>=.99;
-        within+=pass;
-    }
     return {{"product",product},{"layer",layer},{"fromMs",from},{"toMs",to},
-        {"strictHourMismatching",hourMismatching},{"strictMismatching",strict["mismatching"]},{"strictMatching",strict["matching"]},
-        {"crossConnectionQualifying",cross["qualifying"]},{"crossConnectionWithinBands",within},
-        {"crossConnectionInformational",true}};
+        {"strictHourMismatching",hourMismatching},{"strictMismatching",strict["mismatching"]},{"strictMatching",strict["matching"]}};
 }
 } // namespace sentinel::roller

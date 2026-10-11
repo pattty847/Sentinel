@@ -168,9 +168,8 @@ json roll(const RollOptions& o) {
             if (o.productWriterLease) cfg.writerProduct = o.product;
             cfg.commitFloorMs = floor;
             cfg.commitCeilingMs = o.allowGrowingEnd ? day + Day : end;
-            // All roll recorders are history writers. With no publisher Finals
-            // is behaviorally identical to All, and rebuilds must be portable
-            // into the live history writer without relaxing import validation.
+            // History writers publish committed minutes only; their state is
+            // portable between offline replay and live serving.
             cfg.publication = recording::RecorderConfig::Publication::Finals;
             if (o.publisher) {
                 cfg.publisher = [&, publish=o.publisher](auto record) {
@@ -283,7 +282,8 @@ json roll(const RollOptions& o) {
                             std::pair(checkpoint->block,checkpoint->record)) continue;
                 }
                 if (o.anchorAllowed && !o.anchorAllowed(cursorPos)) continue;
-                auto candidateReader = std::make_unique<JournalReader>(o.journalRoot,o.product,cursorPos);
+                auto candidateReader = o.anchorReaderForTest ? o.anchorReaderForTest(cursorPos) :
+                    std::make_unique<JournalReader>(o.journalRoot,o.product,cursorPos);
                 JournalRecord cursor;
                 const bool present = candidateReader->next(cursor);
                 candidateDecoded = candidateReader->decodedRecords();
@@ -411,7 +411,7 @@ json roll(const RollOptions& o) {
                 a.recorder.bytes = o.anchorExportForTest ? o.anchorExportForTest(*recorder) : recorder->exportState();
                 if (a.recorder.bytes.empty()) {
                     degraded = true;
-                    throw std::runtime_error("degraded recorder: diskErrors or queueDrops");
+                    throw std::runtime_error("degraded recorder: diskErrors");
                 }
                 if (o.anchorBook) {
                     auto state = o.anchorBook(); book = std::move(state.first); bookUp = state.second;
@@ -443,7 +443,7 @@ json roll(const RollOptions& o) {
             if (!recorder) return;
             recorder->drain();
             const auto stats = recorder->stats();
-            if (stats.diskErrors || stats.queueDrops) throw std::runtime_error("roller recorder failed; checkpoint not advanced");
+            if (stats.diskErrors) throw std::runtime_error("roller recorder failed; checkpoint not advanced");
             if (!o.productWriterLease && stats.columnsWritten == checkpointColumns) return;
             auto through = end;
             for (const auto* layer : {"near","deep"})

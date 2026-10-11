@@ -284,7 +284,7 @@ TEST(CorruptBlockPolicy, ShadowWorkerCrossesDamagedDayWithoutRetry) {
         progressChanged.notify_one();
     };
     const auto shadowStartedAt = std::chrono::steady_clock::now();
-    ShadowRoller shadow(c, {"BTC-USD"}, root/"primary", registry);
+    ShadowRoller shadow(c, {"BTC-USD"}, registry);
     registerJournalMetrics(registry, "BTC-USD"); // production constructor also registers
     metrics::MetricsHttpServer http(registry); ASSERT_TRUE(http.listen(0));
     QTcpSocket client; client.connectToHost("127.0.0.1", http.port()); ASSERT_TRUE(client.waitForConnected(1000));

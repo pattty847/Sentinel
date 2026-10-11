@@ -4,7 +4,8 @@
 namespace sentinel::roller {
 // Derived cache only; no RAWL2 records or exchange events are created here.
 struct AnchorSection {
-    uint32_t version = 1;
+    static constexpr uint32_t Version = 2;
+    uint32_t version = Version;
     std::vector<uint8_t> bytes;
 };
 struct AnchorIdentity {

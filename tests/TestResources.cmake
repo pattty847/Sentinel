@@ -14,7 +14,7 @@ set(_sentinel_gpu_tests
 set(_sentinel_server_tests
     CaptureApplicationTests ServerStartupTests LabOutputGuardTests
     RecordingServerStopTests HeatmapChunkWireTests ShadowRollerTests
-    ServerFeedAdmissionTests BacktestCoreTests StorageProbeCliTests
+    ServerFeedAdmissionTests BacktestCoreTests
     ResearchUiTests)
 set(_sentinel_integration_tests
     ${_sentinel_server_tests} DeployRuntimeDryRun MarketDataEngineReconnectTests
@@ -79,9 +79,7 @@ foreach(_sentinel_area IN ITEMS core marketdata capture roller render agentapi
             set_tests_properties("${_sentinel_test}" DIRECTORY "${_sentinel_dir}"
                 PROPERTIES PROCESSORS 2)
         endif()
-        if(_sentinel_test STREQUAL RollerLiveFixtureTests)
-            list(APPEND _sentinel_labels roller)
-        elseif(_sentinel_test STREQUAL PriceLadderTests)
+        if(_sentinel_test STREQUAL PriceLadderTests)
             list(APPEND _sentinel_labels servermodel)
         endif()
         list(REMOVE_DUPLICATES _sentinel_labels)
