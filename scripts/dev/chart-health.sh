@@ -70,7 +70,50 @@ def self_test(script):
             print(changed.stdout + changed.stderr, end="", file=sys.stderr)
             print("chart-health: self-test complexity branch was not rejected", file=sys.stderr)
             return 1
-    print("chart-health: self-test PASS (no-op passed; gpuFitPriceWindow +if failed)")
+        run(["git", "switch", "-qc", "moved", "main"], cwd=root)
+        code = path.read_text()
+        start = code.index("std::optional<std::pair<double, double>> UnifiedGridRenderer::gpuFitPriceWindow(")
+        brace = code.index("{", start)
+        depth = 0
+        for end in range(brace, len(code)):
+            depth += (code[end] == "{") - (code[end] == "}")
+            if depth == 0:
+                break
+        else:
+            print("chart-health: self-test could not find function end", file=sys.stderr)
+            return 1
+        moved_file = root / "libs/gui/chart/core/PriceFitter.cpp"
+        moved_file.parent.mkdir(parents=True)
+        moved_file.write_text(code[start:end + 1] + "\n")
+        path.write_text(code[:start] + code[end + 1:])
+        run(["git", "add", "libs/gui"], cwd=root)
+        run(["git", "commit", "-qm", "move function verbatim"], cwd=root, env=env)
+        moved = run([str(script)], cwd=root, check=False)
+        if moved.returncode or "chart-health: PASS" not in moved.stdout:
+            print(moved.stdout + moved.stderr, end="", file=sys.stderr)
+            print("chart-health: self-test verbatim move was rejected", file=sys.stderr)
+            return 1
+        run(["git", "switch", "-qc", "outside", "main"], cwd=root)
+        unrelated = root / "libs/core/Unrelated.cpp"
+        unrelated.parent.mkdir(parents=True)
+        unrelated.write_text("int unrelated(int x) {\n" + "".join(f"  if (x == {i}) return {i};\n" for i in range(20)) + "  return -1;\n}\n")
+        run(["git", "add", "libs/core/Unrelated.cpp"], cwd=root)
+        run(["git", "commit", "-qm", "unrelated C++"], cwd=root, env=env)
+        outside = run([str(script)], cwd=root, check=False)
+        if outside.returncode or "chart-health: PASS" not in outside.stdout:
+            print(outside.stdout + outside.stderr, end="", file=sys.stderr)
+            print("chart-health: self-test unrelated C++ was rejected", file=sys.stderr)
+            return 1
+        include = root / "libs/gui/Outside.cpp"
+        include.write_text('#include "UnifiedGridRenderer.h"\n')
+        run(["git", "add", "libs/gui/Outside.cpp"], cwd=root)
+        run(["git", "commit", "-qm", "illegal UGR include"], cwd=root, env=env)
+        boundary = run([str(script)], cwd=root, check=False)
+        if boundary.returncode != 1 or "FAIL UGR-include" not in boundary.stdout:
+            print(boundary.stdout + boundary.stderr, end="", file=sys.stderr)
+            print("chart-health: self-test UGR include was not rejected", file=sys.stderr)
+            return 1
+    print("chart-health: self-test PASS (no-op and verbatim move passed; +if and outside include failed; unrelated C++ passed)")
     return 0
 
 
@@ -80,8 +123,10 @@ def lizard_functions(path):
     for row in csv.reader(io.StringIO(result.stdout)):
         if len(row) < 8 or not row[0].isdigit():
             continue
-        # csv: NLOC,CCN,tokens,params,length,long_name,file,name,...
-        functions[row[7]] = (int(row[1]), int(row[0]), int(row[3]))
+        # csv: NLOC,CCN,tokens,params,length,location,file,name,signature,...
+        if len(row) < 9:
+            continue
+        functions[row[8]] = (int(row[1]), int(row[0]), int(row[3]), row[7].rsplit("::", 1)[-1])
     return functions
 
 
@@ -92,6 +137,27 @@ def source_at(base, name):
 
 def members(source):
     return sum(bool(re.search(r"^\s+[^/(]*\bm_[a-zA-Z]", line)) for line in source.splitlines())
+
+
+def chart_file(name):
+    return name.startswith("libs/gui/chart/") or name.startswith("libs/gui/UnifiedGridRenderer")
+
+
+def baseline_ccn(base):
+    """Qualified signatures identify local functions; unqualified names find verbatim moves."""
+    paths = [p for p in git("ls-tree", "-r", "--name-only", base, "libs/gui").splitlines()
+             if chart_file(p) and p.endswith((".cpp", ".hpp", ".h"))]
+    by_name = {}
+    with tempfile.TemporaryDirectory(prefix="chart-health-baseline-") as scratch:
+        for index, name in enumerate(paths):
+            source = source_at(base, name)
+            if source is None:
+                continue
+            path = Path(scratch) / f"{index}{Path(name).suffix}"
+            path.write_text(source)
+            for ccn, _, _, unqualified in lizard_functions(path).values():
+                by_name[unqualified] = max(ccn, by_name.get(unqualified, 0))
+    return by_name
 
 
 def scan_clones(root, paths, out):
@@ -122,6 +188,7 @@ def check():
     base = git("merge-base", "HEAD", "main")
     changed = [p for p in git("diff", "--name-only", "--diff-filter=ACMR", base, "HEAD").splitlines() if p]
     breaches = []
+    old_functions_by_name = None
     def fail(kind, name, old, new):
         location = name if ":" in name else f"{name}:file"
         breaches.append(f"chart-health: FAIL {kind} {location} {old} -> {new}")
@@ -135,6 +202,13 @@ def check():
             continue
         current = path.read_text(errors="replace")
         old = source_at(base, name)
+        # The UGR include boundary is repo-wide within libs/gui. All other
+        # budgets apply only to chart-core and UGR source files.
+        if name.startswith("libs/gui/") and "UnifiedGridRenderer.h" in current and "UnifiedGridRenderer.h" not in (old or ""):
+            allowed = name.startswith(("libs/gui/UnifiedGridRenderer", "libs/gui/MainWindowGpu", "libs/gui/mainwindow/"))
+            if not allowed: fail("UGR-include", name, 0, 1)
+        if not chart_file(name):
+            continue
         if name.startswith("libs/gui/UnifiedGridRenderer"):
             old_lines = len(old.splitlines()) if old is not None else 0
             new_lines = len(current.splitlines())
@@ -158,22 +232,26 @@ def check():
                 forbidden = re.findall(r'^\s*#include\s*[<"](?:QQuick|QSG|QtGui|QtQuick|QQml)', current, re.M)
                 before = re.findall(r'^\s*#include\s*[<"](?:QQuick|QSG|QtGui|QtQuick|QQml)', old or "", re.M)
                 if len(forbidden) > len(before): fail("core-include", name, len(before), len(forbidden))
-        if name.startswith("libs/gui/") and "UnifiedGridRenderer.h" in current and "UnifiedGridRenderer.h" not in (old or ""):
-            allowed = name.startswith(("libs/gui/UnifiedGridRenderer", "libs/gui/MainWindowGpu", "libs/gui/mainwindow/"))
-            if not allowed: fail("UGR-include", name, 0, 1)
         if name.endswith((".cpp", ".hpp", ".h")):
             with tempfile.TemporaryDirectory(prefix="chart-health-lizard-") as scratch:
                 old_path = Path(scratch) / ("old" + path.suffix)
                 if old is not None: old_path.write_text(old)
                 before = lizard_functions(old_path) if old is not None else {}
                 after = lizard_functions(path)
-            for func, (ccn, nloc, params) in after.items():
+            for func, (ccn, nloc, params, unqualified) in after.items():
                 prior = before.get(func)
                 if prior is None:
-                    limit = 10 if "ChartViewController" in name else 15
-                    if ccn > limit: fail("complexity", f"{name}:{func}", limit, ccn)
-                    if nloc > 60: fail("NLOC", f"{name}:{func}", 60, nloc)
-                    if params > 6: fail("params", f"{name}:{func}", 6, params)
+                    if old_functions_by_name is None:
+                        old_functions_by_name = baseline_ccn(base)
+                    moved_ccn = old_functions_by_name.get(unqualified)
+                    if moved_ccn is not None:
+                        if ccn > max(15, moved_ccn):
+                            fail("complexity", f"{name}:{func}", moved_ccn, ccn)
+                    else:
+                        limit = 10 if "ChartViewController" in name else 15
+                        if ccn > limit: fail("complexity", f"{name}:{func}", limit, ccn)
+                        if nloc > 60: fail("NLOC", f"{name}:{func}", 60, nloc)
+                        if params > 6: fail("params", f"{name}:{func}", 6, params)
                 elif ccn > max(15, prior[0]):
                     fail("complexity", f"{name}:{func}", prior[0], ccn)
                 if name == "libs/gui/UnifiedGridRenderer.Qml.cpp" and nloc > 3:

@@ -147,8 +147,10 @@ public:
         appendDouble(line, "rasterAnchor.y", anchor.fracY);
         appendInt(line, "viewportVersion", v->getViewportVersion());
         appendInt(line, "placementVersion", v->placementVersion());
-        appendCamera(line, "raster", chart.rasterCameraNow(false));
-        appendCamera(line, "rest", chart.restCameraNow(false));
+        appendCamera(line, "raster", chart.rasterCameraNow());
+        appendCamera(line, "rest", chart.restCameraNow());
+        appendCamera(line, "rasterNoDrag", chart.rasterCameraNow(false));
+        appendCamera(line, "restNoDrag", chart.restCameraNow(false));
         appendInt(line, "timeGliding", chart.timeGliding());
         appendInt(line, "priceGliding", chart.priceGliding());
         appendInt(line, "zoomGesturing", chart.zoomGesturing());
@@ -162,12 +164,16 @@ public:
         step("cold-bootstrap", false);
         chart.setViewport(centre - 20 * minute, centre + 20 * minute, 99800, 100500);
         ready();
-        chart.setViewport(centre - 2 * minute, centre + 2 * minute, 100120, 100180);
+        chart.setViewport(centre - 4 * minute, centre + 4 * minute, 100120, 100180);
         chart.setAutoPriceScale(true);
         step("initial");
         const double points[][2] = {{120, 70}, {320, 160}, {520, 250}};
         for (int i = 0; i < 3; ++i) {
+            const auto* view = chart.getViewState();
+            const qint64 before = view->getVisibleTimeEnd() - view->getVisibleTimeStart();
             chart.zoomClicks(1, points[i][0], points[i][1]);
+            if (view->getVisibleTimeEnd() - view->getVisibleTimeStart() >= before)
+                throw std::runtime_error("wheel-in did not change the time span");
             step("wheel-in-0"); advance(65, "wheel-in-65"); advance(65, "wheel-in-130"); advance(170, "wheel-in-300");
             chart.zoomClicks(-1, points[i][0], points[i][1]);
             step("wheel-out-0"); advance(65, "wheel-out-65"); advance(65, "wheel-out-130"); advance(170, "wheel-out-300");
@@ -181,9 +187,23 @@ public:
         chart.endZoomGesture(); advance(300, "price-drag-settle");
         chart.zoomClicks(1, 240, 130); advance(65, "pan-glide");
         chart.beginPanAt(250, 150); chart.updatePanAt(279, 160); step("pan-active");
+        if (chart.rasterCameraNow().drawnStartMs == chart.rasterCameraNow(false).drawnStartMs)
+            throw std::runtime_error("pan drag did not shift the raster camera");
         chart.endPanAt(); step("pan-release"); advance(300, "pan-settle");
-        chart.enableAutoScroll(true); chart.followLiveForTest(centre + 4 * minute); step("follow-1");
-        chart.followLiveForTest(centre + 9 * minute); step("follow-2");
+        chart.enableAutoScroll(true);
+        {
+            auto* view = chart.getViewState();
+            const qint64 span = view->getVisibleTimeEnd() - view->getVisibleTimeStart();
+            const qint64 end = epoch + 2 * kHourMs + 30 * minute;
+            chart.setViewport(end - span, end, view->getMinPrice(), view->getMaxPrice());
+        }
+        step("follow-base");
+        const qint64 beforeFollow = chart.getViewState()->getVisibleTimeEnd();
+        chart.followLiveForTest(epoch + 3 * kHourMs); step("follow-1");
+        const qint64 afterFirstFollow = chart.getViewState()->getVisibleTimeEnd();
+        chart.followLiveForTest(epoch + 3 * kHourMs + 5 * minute); step("follow-2");
+        if (afterFirstFollow <= beforeFollow || chart.getViewState()->getVisibleTimeEnd() <= afterFirstFollow)
+            throw std::runtime_error("follow-live steps did not advance the view");
         chart.setTimeframe(int(15 * minute)); step("tf-15m-follow");
         chart.setTimeframe(int(minute)); step("tf-1m-follow");
         chart.enableAutoScroll(false); chart.setViewport(centre - 8 * minute, centre + 8 * minute, 100100, 100200);
