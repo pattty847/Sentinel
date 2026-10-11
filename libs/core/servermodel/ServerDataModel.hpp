@@ -19,7 +19,6 @@
 #include "SymbolHotData.hpp"
 #include "HeatmapTwapStreamer.hpp"
 #include "IHeatmapDataSource.hpp"
-#include "TickBinaryLogger.hpp"
 #include "TimeframeAggregator.hpp"
 #include "BookRecorder.hpp"
 #include "RecorderStallMonitor.hpp"
@@ -100,13 +99,10 @@ public:
     // Recorder and upstream-connection series for GET /metrics. Call once on the
     // main thread; the samplers read main-thread state, so render on that thread.
     void registerMetrics(sentinel::metrics::MetricsRegistry& registry);
-    void acquireGuiFeed(const std::string& symbol);
-    void releaseGuiFeed(const std::string& symbol, int64_t releaseLocalMs = 0);
-    void onProductMetadata(const std::string& symbol, uint64_t lifetime,
-                           const nlohmann::json& metadata, const std::string& error);
-    // recording.live_feed: journal (main thread): the journal header's product
+    void onProductMetadata(const std::string& symbol,
+                           const nlohmann::json& metadata);
+    // Main thread: the journal header's product
     // JSON for a live feed (no REST), and the roller's re-seed request hook.
-    bool journalFeed() const { return m_journalFeed; }
     void onFeedMetadata(const std::string& symbol, const nlohmann::json& metadata);
     // Journal time (capture receive ms) of the newest record delivered for a
     // product: closes its candles up to journalMs - kJournalCandleLagMs.
@@ -122,8 +118,7 @@ public slots:
     void onLiveOrderBookInitialized(const QString& productId, const std::vector<OrderBookLevel>& bids, const std::vector<OrderBookLevel>& asks, qint64 envelopeMs = 0);
     // Empty productId = every symbol. The book stays invalid until its next snapshot.
     void onLiveOrderBookInvalidated(const QString& productId, const QString& reason);
-    // One product's market-data connection up/down. Gates that symbol's recorder
-    // stall warning; recorder alerts select only pinned (default) symbols.
+    // One captured product's live journal feed up/down.
     void onMarketDataConnectionChanged(const std::string& symbol, bool connected);
 
 signals:
@@ -134,7 +129,6 @@ signals:
     void bookSnapshotBroadcast(const QString& productId, const std::vector<OrderBookLevel>& bids,
                                const std::vector<OrderBookLevel>& asks, double tickSize,
                                const QString& status, uint64_t bookVersion);
-    void productMetadataRequested(const QString& productId, uint64_t lifetime);
     
     // Aggregation signals (forwarded from aggregator)
     void barClosed(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar);
@@ -153,7 +147,6 @@ private:
     mutable std::shared_mutex m_mutex;
     ServerConfig m_serverConfig;
     std::unordered_map<std::string, std::unique_ptr<SymbolHotData>> m_symbols;
-    std::unique_ptr<TickBinaryLogger> m_logger;
     std::unique_ptr<TimeframeAggregator> m_aggregator;
     std::unique_ptr<HeatmapTwapStreamer> m_heatmapStreamer;
     std::atomic<int64_t> m_exchangeOffsetMs{0};
@@ -161,18 +154,13 @@ private:
     // (recorder worker); declared before m_recorder so they outlive its worker.
     std::atomic<uint64_t> m_livePublishDrops{0};
     struct FeedState {
-        bool pinned = false, connected = false;
-        uint64_t ups = 0, downs = 0, lifetime = 0;
-        bool metadataPending = false;
+        bool connected = false;
+        uint64_t ups = 0, downs = 0;
         nlohmann::json metadata;
-        int64_t nextMetadataAttemptMs = 0;
     };
-    void requestProductMetadataIfNeeded(const std::string& symbol, FeedState& feed);
     void publishAggregatedBook(const QString& productId, SymbolHotData& data,
                                const FeedState& feed, qint64 envelopeMs);
-    std::map<std::string, FeedState> m_feeds; // main thread, pinned + active GUI feeds only
-    uint64_t m_nextFeedLifetime = 0;
-    QTimer m_metadataTimer;
+    std::map<std::string, FeedState> m_feeds; // main thread, captured products only
     mutable std::mutex m_footprintTradeMutex;
     std::unordered_map<std::string, std::deque<FootprintTradeSample>> m_recentFootprintTrades;
     int64_t m_footprintTradeRetentionMs = 300'000;
@@ -190,7 +178,6 @@ private:
     std::atomic<bool> m_rollerAttached{false};
     RollerWatermarks m_rollerWatermarks;
     std::function<bool(const std::string&)> m_rollerRunning;
-    const bool m_journalFeed;
     std::function<void(const std::string&)> m_reseed;
     std::map<std::string, int64_t> m_nextReseedMs;
     // Throttled requests are coalesced, never dropped: delivered at the deadline.

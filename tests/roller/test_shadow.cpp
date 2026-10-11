@@ -10,7 +10,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QHostAddress>
-#include <QTcpServer>
+#include <QTcpSocket>
 #include <QTemporaryDir>
 #include <fstream>
 #include <sys/resource.h>
@@ -59,9 +59,7 @@ struct ShadowServerTestAccess {
   static void tickCandles(ServerDataModel &m, int64_t ms) {
     m.m_aggregator->tick(ms);
   }
-  static bool hasEngine(SentinelServerApp &app) {
-    return app.m_marketDataCore != nullptr;
-  }
+  static quint16 healthPort(SentinelServerApp &app) { return app.m_httpServer->port(); }
   static SentinelStreamServer &server(SentinelServerApp &app) {
     return *app.m_server;
   }
@@ -768,12 +766,6 @@ TEST_F(ShadowTest, EofDiscardsProvisionalAndRecoversJournal) {
 }
 TEST_F(ShadowTest, StalledAndFailingShadowDoesNotDelayServerPrimary) {
   initial(125);
-  // TickBinaryLogger has a relative default; contain it in this temporary cwd.
-  struct Cwd {
-    QString old = QDir::currentPath();
-    ~Cwd() { QDir::setCurrent(old); }
-  } cwd;
-  ASSERT_TRUE(QDir::setCurrent(temp.path()));
   std::atomic<bool> entered{false}, stalled{false};
   cfg.observeForTest = [&](const auto &, bool applied) {
     if (applied && !entered.exchange(true)) {
@@ -2122,7 +2114,7 @@ TEST(ShadowConfig, RequireRecordingChecksTheServedRoot) {
   copy.recording.source = "primary";
   EXPECT_NE(SentinelServerApp::requiredRecordingProblem(copy), "");
   copy.recording.dir = (root / "primary").string();
-  EXPECT_EQ(SentinelServerApp::requiredRecordingProblem(copy), "");
+  EXPECT_NE(SentinelServerApp::requiredRecordingProblem(copy), "");
   copy.recording.source = "rolling";
   EXPECT_NE(SentinelServerApp::requiredRecordingProblem(copy), "");
 }
@@ -2682,36 +2674,7 @@ TEST_F(ShadowTest, DISABLED_JournalTapCatchupCostSevenProducts) {
   for (auto &w : writers)
     w->close();
 }
-// With the journal feed the model never asks REST for product metadata, even
-// when a feed connects before its journal header arrived.
-TEST(JournalLiveFeedModel, NeverRequestsRestMetadata) {
-  static int argc = 1;
-  static char name[] = "test_shadow";
-  static char *argv[] = {name, nullptr};
-  if (!QCoreApplication::instance())
-    static QCoreApplication app(argc, argv);
-  QTemporaryDir temp;
-  struct Cwd {
-    QString old = QDir::currentPath();
-    ~Cwd() { QDir::setCurrent(old); }
-  } cwd;
-  ASSERT_TRUE(QDir::setCurrent(temp.path()));
-  for (const auto *feed : {"engine", "journal"}) {
-    ServerConfig config;
-    config.defaultSymbols = {"PEPE-USD"};
-    config.rollerShadow.products = {"PEPE-USD"};
-    config.heatmap.persistenceEnabled = false;
-    config.recording.liveFeed = feed;
-    ServerDataModel model(config);
-    int requests = 0;
-    QObject::connect(&model, &ServerDataModel::productMetadataRequested,
-                     [&](const QString &, uint64_t) { ++requests; });
-    model.onMarketDataConnectionChanged("PEPE-USD", true);
-    EXPECT_EQ(requests, std::string(feed) == "engine" ? 1 : 0) << feed;
-  }
-}
-// ---- Slice D-b1 through the production server graph: initialize() with
-// recording.live_feed: journal, PEPE-USD captured, a real queued hand-off into
+// Production server graph: PEPE-USD captured, a real queued hand-off into
 // ServerDataModel on this (main) thread.
 bool eventuallyQt(auto f) {
   const auto until = std::chrono::steady_clock::now() + 8s;
@@ -2752,8 +2715,8 @@ struct JournalServer {
     std::chrono::steady_clock::time_point at = std::chrono::steady_clock::now();
   };
   std::vector<Book> books;
-  int metadataRequests = 0, bookUpdates = 0, bars = 0;
   std::vector<Trade> trades;
+  int bars = 0, bookUpdates = 0;
   explicit JournalServer(ShadowTest &test) : t(test) {
     t.fanout.reset();
     t.writer.reset();
@@ -2776,29 +2739,25 @@ struct JournalServer {
     for (int s = 1; s <= 63; ++s)
       pepe->append(record(s * 1000));
     pepe->flush();
-    EXPECT_TRUE(QDir::setCurrent(t.temp.path())); // relative tick logs
+    EXPECT_TRUE(QDir::setCurrent(t.temp.path())); // isolate relative config/credential lookup
     config.defaultSymbols = {Product};
     config.streamPort = 0;
     config.recording.enabled = true;
     config.recording.source = "roller";
-    config.recording.liveFeed = "journal";
     config.recording.dir = (t.root / "primary").string();
     config.recording.fallbackDir.clear();
     config.heatmap.persistenceEnabled = false;
     config.rollerShadow = t.cfg;
     config.rollerShadow.products = {"PEPE-USD"};
     config.rollerShadow.liveNowForTest = [&test] { return test.liveNow.load(); };
-    QTcpServer probe; // a free loopback port for the metrics endpoint
-    EXPECT_TRUE(probe.listen(QHostAddress::LocalHost, 0));
-    const auto port = probe.serverPort();
-    probe.close();
-    qputenv("SENTINEL_HEALTH_PORT", QByteArray::number(port));
+    qputenv("SENTINEL_HEALTH_PORT", "0"); // bind an ephemeral port without a probe/close race
   }
   bool initialize() {
     app = std::make_unique<SentinelServerApp>(config);
     const bool ok = app->initialize();
     if (!ok)
       return false;
+    EXPECT_GT(ShadowServerTestAccess::healthPort(*app), 0);
     auto &m = model();
     QObject::connect(&m, &ServerDataModel::bookSnapshotBroadcast,
                      [this](const QString &id,
@@ -2811,8 +2770,6 @@ struct JournalServer {
     QObject::connect(&m, &ServerDataModel::bookUpdateBroadcast,
                      [this](const QString &, const std::vector<BookDelta> &,
                             double, double, uint64_t) { ++bookUpdates; });
-    QObject::connect(&m, &ServerDataModel::productMetadataRequested,
-                     [this](const QString &, uint64_t) { ++metadataRequests; });
     QObject::connect(&m, &ServerDataModel::barUpdated,
                      [this](const QString &, int64_t, const OHLCVBar &) {
                        ++bars;
@@ -2828,9 +2785,35 @@ struct JournalServer {
   }
   ServerDataModel &model() { return ShadowServerTestAccess::model(*app); }
   std::string metrics() { return ShadowServerTestAccess::metrics(*app); }
+  std::string scrape() {
+    QTcpSocket client;
+    QByteArray response;
+    QObject::connect(&client, &QTcpSocket::connected, &client, [&] {
+      client.write("GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+    });
+    QObject::connect(&client, &QTcpSocket::readyRead, &client,
+                     [&] { response += client.readAll(); });
+    client.connectToHost(QHostAddress::LocalHost, ShadowServerTestAccess::healthPort(*app));
+    // Both HTTP endpoints run on this thread: pump their events until the
+    // entire response arrives, without a blocking socket wait or fixed delay.
+    const bool complete = eventuallyQt([&] {
+      const auto headersEnd = response.indexOf("\r\n\r\n");
+      if (headersEnd < 0) return false;
+      for (const auto &line : response.left(headersEnd).split('\n')) {
+        if (!line.startsWith("Content-Length: ")) continue;
+        bool ok = false;
+        const auto length = line.mid(16).trimmed().toLongLong(&ok);
+        return ok && length >= 0 && response.size() - headersEnd - 4 == length;
+      }
+      return false;
+    });
+    EXPECT_TRUE(complete) << client.errorString().toStdString() << "; response=" << response.toStdString();
+    EXPECT_TRUE(response.startsWith("HTTP/1.1 200 OK\r\n")) << response.toStdString();
+    return response.toStdString();
+  }
   bool connected(bool up) {
-    return metrics().find(std::string("sentinel_mdc_connected{product=\"PEPE-"
-                                      "USD\",pinned=\"1\"} ") +
+    return metrics().find(std::string("sentinel_live_feed_up{product=\"PEPE-"
+                                      "USD\"} ") +
                           (up ? "1" : "0") + "\n") != std::string::npos;
   }
   // Index of the first PEPE book status `status` at or after `from`.
@@ -2847,7 +2830,6 @@ struct JournalServer {
 TEST_F(ShadowTest, JournalLiveFeedServerHasNoEngineAndServesCapturedProducts) {
   JournalServer s(*this);
   ASSERT_TRUE(s.initialize());
-  EXPECT_FALSE(ShadowServerTestAccess::hasEngine(*s.app));
   auto &server = ShadowServerTestAccess::server(*s.app);
   using Admission = SentinelStreamServer::FeedAdmission;
   EXPECT_EQ(server.notifyClientSubscribed("PEPE-USD"), Admission::Accepted);
@@ -2862,14 +2844,13 @@ TEST_F(ShadowTest, JournalLiveFeedServerHasNoEngineAndServesCapturedProducts) {
   EXPECT_LT(ready.tick, 0.005);
   EXPECT_EQ(ready.bids, 2u);
   EXPECT_EQ(ready.asks, 1u);
-  EXPECT_EQ(s.metadataRequests, 0); // never REST
   // The main-thread lag sampler runs in this mode too (D-b1 flip gate).
   EXPECT_TRUE(eventuallyQt([&] {
     return s.metrics().find("sentinel_server_event_loop_lag_ms{quantile=\"max\"} ") !=
            std::string::npos;
   }));
   EXPECT_NE(s.metrics().find("sentinel_server_event_loop_late_ticks_total "), std::string::npos);
-  EXPECT_EQ(s.metrics().find("sentinel_mdc_ws_latency_ms"), std::string::npos);
+  EXPECT_EQ(s.metrics().find("sentinel_mdc_"), std::string::npos);
   // Provisional updates below $0.005 reach the live book.
   s.pepe->append(record(64000, pepeLevel("offer", "0.00001002", "123")));
   ASSERT_TRUE(eventuallyQt([&] { return s.bookUpdates > 0; }));
@@ -2934,6 +2915,7 @@ TEST_F(ShadowTest, JournalLiveFeedServerConnectionFollowsTransportAndTipAge) {
   ASSERT_TRUE(eventuallyQt([&] {
     return s.status("ready") != std::string::npos && s.connected(true);
   }));
+  EXPECT_NE(s.scrape().find("sentinel_live_feed_up{product=\"PEPE-USD\"} 1\n"), std::string::npos);
   s.pepe->append(lifecycle(64000, capture::Kind::TransportDown));
   ASSERT_TRUE(eventuallyQt([&] {
     return s.status("invalidated") != std::string::npos && s.connected(false);
@@ -2950,6 +2932,9 @@ TEST_F(ShadowTest, JournalLiveFeedServerConnectionFollowsTransportAndTipAge) {
   ASSERT_TRUE(eventuallyQt([&] {
     return s.connected(false) && s.status("invalidated", quiet) != std::string::npos;
   }));
+  const auto downMetrics = s.scrape();
+  EXPECT_NE(downMetrics.find("sentinel_live_feed_up{product=\"PEPE-USD\"} 0\n"), std::string::npos);
+  EXPECT_EQ(downMetrics.find("sentinel_mdc_"), std::string::npos);
   // Records again: re-seed from durable plus the provisional suffix.
   const auto silent = s.books.size();
   s.pepe->append(record(67000));
@@ -2958,40 +2943,73 @@ TEST_F(ShadowTest, JournalLiveFeedServerConnectionFollowsTransportAndTipAge) {
   }));
   EXPECT_EQ(s.books.back().status, "ready");
 }
+// Synthetic service sequence, entirely inside the fixture's journal and socket.
+TEST_F(ShadowTest, JournalLiveFeedServerRecoversAfterCaptureStopsAndRestarts) {
+  JournalServer s(*this);
+  ASSERT_TRUE(s.initialize());
+  ASSERT_TRUE(eventuallyQt([&] { return s.status("ready") != std::string::npos && s.connected(true); }));
+  s.pepe->append(lifecycle(64000, capture::Kind::CaptureStopped));
+  s.pepe->flush();
+  ASSERT_TRUE(eventuallyQt([&] { return s.status("invalidated") != std::string::npos && s.connected(false); }));
+  s.pepe->close();
+  s.pepe.reset();
+  capture::WriterConfig wc;
+  wc.root = QString::fromStdString(cfg.journalRoot);
+  wc.symbol = "PEPE-USD";
+  wc.fsyncBlocks = 1;
+  wc.onJournal = [&](const capture::JournalEvent &e) { fanout->publish(0, e); };
+  s.pepe = std::make_unique<capture::Writer>(wc, pepeMeta());
+  const auto before = s.books.size();
+  s.pepe->append(lifecycle(65000, capture::Kind::TransportUp));
+  s.pepe->append(record(66000, pepeSnapshot()));
+  s.pepe->flush();
+  ASSERT_TRUE(eventuallyQt([&] { return s.connected(true) && s.status("ready", before) != std::string::npos; }));
+  s.pepe->append(record(67000, trades("BUY", "restarted-capture", "PEPE-USD", "0.00001")));
+  ASSERT_TRUE(eventuallyQt([&] { return !s.trades.empty(); }));
+  EXPECT_EQ(s.trades.back().trade_id, "restarted-capture");
+  EXPECT_EQ(s.trades.back().side, AggressorSide::Sell);
+  EXPECT_EQ(resnapshots.load(), 0);
+}
+
+TEST_F(ShadowTest, JournalLiveFeedServerRestartSeedsBookAndResumesNewTrades) {
+  JournalServer s(*this);
+  ASSERT_TRUE(s.initialize());
+  ASSERT_TRUE(eventuallyQt([&] { return s.status("ready") != std::string::npos; }));
+  s.pepe->append(record(64000, trades("BUY", "before-restart", "PEPE-USD", "0.00001")));
+  ASSERT_TRUE(eventuallyQt([&] { return s.trades.size() == 1; }));
+  s.pepe->flush();
+  s.app.reset();
+  s.books.clear();
+  s.trades.clear();
+  const auto start = std::chrono::steady_clock::now();
+  ASSERT_TRUE(s.initialize());
+  ASSERT_TRUE(eventuallyQt([&] { return s.status("ready") != std::string::npos && s.connected(true); }));
+  EXPECT_TRUE(s.trades.empty()); // a fresh process never replays old trades
+  s.pepe->append(record(65000, trades("SELL", "after-restart", "PEPE-USD", "0.00001")));
+  ASSERT_TRUE(eventuallyQt([&] { return s.trades.size() == 1; }));
+  EXPECT_EQ(s.trades.front().trade_id, "after-restart");
+  EXPECT_EQ(s.trades.front().side, AggressorSide::Buy);
+  std::cout << "DB2_SYNTHETIC_SERVER_RESTART ready_and_trade_ms="
+            << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count()
+            << std::endl;
+  EXPECT_EQ(resnapshots.load(), 0);
+}
+
 // A5: the journal feed needs the roller-served recording; anything else is
 // refused at startup with the reason logged.
 TEST_F(ShadowTest, JournalLiveFeedRefusedWithoutTheRollerSource) {
   JournalServer s(*this);
-  s.config.recording.source = "primary";
-  EXPECT_FALSE(s.initialize());
-  EXPECT_NE(liveFeedProblem(s.config).find("requires recording.source=roller"),
-            std::string::npos);
-  s.config.recording.source = "roller";
-  s.config.recording.liveFeed = "websocket";
-  EXPECT_NE(liveFeedProblem(s.config), "");
-  EXPECT_FALSE(s.initialize());
-  s.config.recording.liveFeed = "journal";
-  s.config.rollerShadow.enabled = false;
-  EXPECT_NE(liveFeedProblem(s.config), "");
-  EXPECT_FALSE(s.initialize());
-  s.app.reset();
-}
-TEST(ShadowConfig, LiveFeedKeyDefaultsToEngine) {
-  QTemporaryDir tmp;
-  const auto p = fs::path(tmp.path().toStdString()) / "config.yaml";
-  {
-    std::ofstream out(p);
-    out << "recording:\n  source: roller\n  live_feed: journal\n"
-           "roller_shadow:\n  enabled: true\n";
+  for (const auto* source : {"primary", "unknown"}) {
+    s.config.recording.source = source;
+    EXPECT_NE(recordingSourceProblem(s.config), "");
+    EXPECT_NE(SentinelServerApp::requiredRecordingProblem(s.config), "");
+    EXPECT_FALSE(s.initialize());
   }
-  ServerConfig c;
-  EXPECT_EQ(c.recording.liveFeed, "engine");
-  EXPECT_EQ(liveFeedProblem(c), "");
-  EXPECT_FALSE(journalLiveFeed(c));
-  ASSERT_TRUE(ConfigLoader::loadServerConfig(p.string(), &c));
-  EXPECT_EQ(c.recording.liveFeed, "journal");
-  EXPECT_TRUE(journalLiveFeed(c));
-  EXPECT_EQ(liveFeedProblem(c), "");
+  s.config.recording.source = "roller";
+  EXPECT_EQ(recordingSourceProblem(s.config), "");
+  s.config.rollerShadow.enabled = false;
+  EXPECT_NE(recordingSourceProblem(s.config), "");
+  EXPECT_FALSE(s.initialize());
 }
 
 // Fix round 1 (finding 1): two invalidation/recovery cycles inside the 1 s
@@ -3037,23 +3055,18 @@ TEST_F(ShadowTest, JournalLiveFeedServerCoalescesReseedsInsideTheThrottle) {
   ASSERT_TRUE(eventuallyQt([&] { return s.bookUpdates > updates; }));
   EXPECT_EQ(resnapshots.load(), 0);
 }
-// Fix round 1 (finding 3): with the journal feed every captured product is
-// exempt from mdc.max_connections and anything else is an invalid product,
-// never a connection-cap refusal.
-TEST_F(ShadowTest, JournalLiveFeedAdmissionIgnoresTheEngineCap) {
+// Admission is membership only, regardless of how many products are captured.
+TEST_F(ShadowTest, JournalLiveFeedAdmissionAcceptsAllCapturedProducts) {
   JournalServer s(*this);
-  s.config.mdc.maxConnections = 1;
-  s.config.rollerShadow.products = {"PEPE-USD", "ETH-USD", "SOL-USD"};
+  s.config.rollerShadow.products = {"PEPE-USD", "ETH-USD", "SOL-USD", "DOGE-USD",
+      "AVAX-USD", "FARTCOIN-USD", "ADA-USD", "LTC-USD", "LINK-USD"};
   ASSERT_TRUE(s.initialize());
   auto &server = ShadowServerTestAccess::server(*s.app);
   using Admission = SentinelStreamServer::FeedAdmission;
-  EXPECT_EQ(server.notifyClientSubscribed("ETH-USD"), Admission::Accepted);
-  EXPECT_EQ(server.notifyClientSubscribed("SOL-USD"), Admission::Accepted);
-  EXPECT_EQ(server.notifyClientSubscribed("PEPE-USD"), Admission::Accepted);
+  for (const auto& product : s.config.rollerShadow.products)
+    EXPECT_EQ(server.notifyClientSubscribed(product), Admission::Accepted) << product;
   EXPECT_EQ(server.notifyClientSubscribed("XRP-USD"), Admission::InvalidProduct);
-  EXPECT_EQ(server.notifyClientSubscribed(Product), Admission::InvalidProduct);
-  EXPECT_NE(s.metrics().find("sentinel_mdc_refused_total{product=\"XRP-USD\"} 1"),
-            std::string::npos);
+  EXPECT_EQ(s.metrics().find("sentinel_mdc_"), std::string::npos);
 }
 // Fix round 2 (finding 2): candles of a journal product close on its journal
 // time only. Two production models run the 250 ms wall-clock candle timer; one
@@ -3083,7 +3096,6 @@ struct JournalCandles {
     config.rollerShadow.products = {"PEPE-USD"};
     config.heatmap.persistenceEnabled = false;
     config.heatmap.timeframesMs = {1000, 60000, 300000};
-    config.recording.liveFeed = "journal";
     steady = std::make_unique<ServerDataModel>(config);
     outage = std::make_unique<ServerDataModel>(config);
   }

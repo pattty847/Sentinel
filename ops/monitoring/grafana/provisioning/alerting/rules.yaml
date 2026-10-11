@@ -57,10 +57,9 @@ groups:
                   query: { params: [C] }
                   reducer: { type: last, params: [] }
 
-      # A1b: one pinned upstream has been down for 5 min; that product stops recording and A1 is
-      # silent by design (its gauge is absent while disconnected).
+      # A1b: the live journal feed can be down while file catch-up and capture remain healthy.
       - uid: sentinel-a1b-upstream-down
-        title: A1b recorder upstream disconnected
+        title: A1b live feed down
         condition: C
         for: 5m
         noDataState: OK
@@ -68,19 +67,19 @@ groups:
         labels:
           severity: page
         annotations:
-          summary: "Recorder {{ .Labels.product }} upstream disconnected for 5 min"
+          summary: "Live feed {{ .Labels.product }} down for 5 min"
           description: >-
-            sentinel-server reports a pinned (recorded) product's market-data connection down
-            (sentinel_mdc_connected == 0) for 5 minutes; that product is not being recorded. GUI
-            chart products are excluded by pinned="1". Check Transport down / reconnect lines with
-            product= in the server log.
+            sentinel-server reports a captured product's live journal feed down for 5 minutes.
+            History may still commit from file catch-up while the live book is dark.
+            Check fan-out disconnects, journal transport records and tip-silence warnings
+            with product= in the server log; compare capture's feed-up metric.
         data:
           - refId: A
             relativeTimeRange: { from: 300, to: 0 }
             datasourceUid: sentinel-vm
             model:
               refId: A
-              expr: min by (product) (sentinel_mdc_connected{pinned="1"})
+              expr: min by (product) (sentinel_live_feed_up)
               instant: true
               range: false
               intervalMs: 15000

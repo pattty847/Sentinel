@@ -185,7 +185,6 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
             readScalar(rec, "deep_high_mult", cfg.recording.deepHighMult);
             readScalar(rec, "lateness_ms", cfg.recording.latenessMs);
             readScalar(rec, "source", cfg.recording.source);
-            readScalar(rec, "live_feed", cfg.recording.liveFeed);
             if (readScalar(rec, "live_publish_ms", cfg.recording.livePublishMs))
                 cfg.recording.livePublishMs = std::clamp(cfg.recording.livePublishMs,
                     ServerRecordingConfig::kLivePublishMinMs, ServerRecordingConfig::kLivePublishMaxMs);
@@ -216,16 +215,7 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
 
     const YAML::Node mdc = serverRoot ? serverRoot["mdc"] : YAML::Node{};
     const bool wrapped = bool(serverNode);
-    readMdcScalar(serverRoot, mdc, filePath, wrapped, "host", cfg.mdc.host);
-    readMdcScalar(serverRoot, mdc, filePath, wrapped, "port", cfg.mdc.port);
-    readMdcScalar(serverRoot, mdc, filePath, wrapped, "target", cfg.mdc.target);
-    readMdcScalar(serverRoot, mdc, filePath, wrapped, "use_jwt", cfg.mdc.useJwt);
     readMdcScalar(serverRoot, mdc, filePath, wrapped, "ssl_ca_bundle", cfg.mdc.sslCaBundle);
-    readMdcScalar(serverRoot, mdc, filePath, wrapped, "connect_timeout_ms", cfg.mdc.connectTimeoutMs);
-    readMdcScalar(serverRoot, mdc, filePath, wrapped, "close_timeout_ms", cfg.mdc.closeTimeoutMs);
-    readMdcScalar(serverRoot, mdc, filePath, wrapped, "max_connections", cfg.mdc.maxConnections);
-    if (cfg.mdc.maxConnections < 1)
-        throw std::runtime_error("server.mdc.max_connections must be at least 1");
 }
 
 void parseClientConfig(const std::string& filePath, ClientConfig& cfg) {

@@ -249,7 +249,6 @@ class Session : public std::enable_shared_from_this<Session> {
     };
     std::unordered_map<std::string, CandleStreamState> candleStates_;
     std::mutex candle_mutex_;
-    uint64_t m_latencySenderId = 0;
     uint64_t m_tradingBroadcasterId = 0;
     bool m_tradingBroadcasterRegistered = false;
 
@@ -353,21 +352,12 @@ class Session : public std::enable_shared_from_this<Session> {
         recordingView_.reset();
         for (const auto& [symbol, view] : rawViews_) view->active.store(false);
         rawViews_.clear();
-        if (owner_ && m_latencySenderId != 0) {
-            owner_->unregisterLatencySender(m_latencySenderId);
-            m_latencySenderId = 0;
-        }
         if (owner_ && m_tradingBroadcasterRegistered) {
             owner_->unregisterTradingBroadcaster(m_tradingBroadcasterId);
             m_tradingBroadcasterRegistered = false;
         }
         const size_t subscriptionCount = subscriptions_.size();
-        if (owner_) {
-            for (const auto& symbol : subscriptions_) {
-                owner_->notifyClientUnsubscribed(symbol);
-            }
-            subscriptions_.clear();
-        }
+        subscriptions_.clear();
 
         beast::error_code ignored;
         beast::get_lowest_layer(ws_).cancel();
@@ -842,15 +832,6 @@ public:
                 }
             });
         if (owner_) {
-            m_latencySenderId = owner_->registerLatencySender(
-                [weak](int ms) {
-                    if (auto self = weak.lock()) {
-                        self->postModelEvent([ms](Session& session) {
-                            session.sendCoinbaseLatency(ms);
-                        });
-                    }
-                });
-
             // Register for trading/algo broadcast messages
             m_tradingBroadcasterId = owner_->registerTradingBroadcaster(
                 [weak](const std::string& json) {
@@ -865,13 +846,6 @@ public:
         armOverlayTimer();
         armAvailabilityTimer();
         do_read();
-    }
-
-    void sendCoinbaseLatency(int ms) {
-        nlohmann::json payload;
-        payload["type"] = protocol::toString(protocol::MessageType::CoinbaseLatency);
-        payload["ms"] = ms;
-        do_write(payload.dump());
     }
 
     void do_read() {
@@ -920,21 +894,9 @@ public:
                     const auto admission = !subscriptions_.contains(symbol) && owner_
                         ? owner_->notifyClientSubscribed(symbol) : SentinelStreamServer::FeedAdmission::Accepted;
                     if (admission != SentinelStreamServer::FeedAdmission::Accepted) {
-                        const int cap = owner_->serverConfig().mdc.maxConnections;
-                        const bool capacity = admission == SentinelStreamServer::FeedAdmission::CapacityExceeded;
-                        const std::string message = capacity
-                            ? "Cannot subscribe to " + symbol + ": GUI connection cap (" +
-                                std::to_string(cap) + ") reached. Close another symbol and retry."
-                            : admission == SentinelStreamServer::FeedAdmission::InvalidProduct
-                                ? "Cannot subscribe to " + symbol + ": invalid product."
-                                : "Cannot subscribe to " + symbol + ": upstream feed unavailable.";
-                        const char* code = capacity ? "connection_cap"
-                            : admission == SentinelStreamServer::FeedAdmission::InvalidProduct
-                                ? "invalid_product" : "upstream_unavailable";
                         do_write(nlohmann::json{{"type", "error"}, {"context", "subscribe"},
-                            {"code", code},
-                            {"symbol", symbol}, {"max_connections", cap},
-                            {"message", message}}.dump());
+                            {"code", "invalid_product"}, {"symbol", symbol},
+                            {"message", "Cannot subscribe to " + symbol + ": invalid product."}}.dump());
                         return;
                     }
                     const bool inserted = subscriptions_.insert(symbol).second;
@@ -1320,9 +1282,6 @@ public:
                      }
                      return true;
                  });
-                 if (removed && owner_) {
-                     owner_->notifyClientUnsubscribed(symbol);
-                 }
                  sLog_Data("Client unsubscribe: peer=" << peer_ << " symbol=" << symbol
                            << " removed=" << removed << " subscriptions=" << subscriptions_.size());
             } else if (type == "screener_request") {
@@ -2223,150 +2182,14 @@ void SentinelStreamServer::unregisterSession(const Session* session) {
     m_sessionsDrained.notify_all();
 }
 
-void SentinelStreamServer::recordRefusalLocked(const std::string& symbol, const char* code) {
-    uint64_t refusals = 1;
-    const auto found = std::find_if(m_refusals.begin(), m_refusals.end(),
-        [&](const auto& entry) { return entry.first == symbol; });
-    if (found != m_refusals.end()) { refusals += found->second; m_refusals.erase(found); }
-    if (m_refusals.size() == 8) m_refusals.erase(m_refusals.begin());
-    m_refusals.emplace_back(symbol, refusals);
-    sLog_Error("Feed refused: symbol=" << symbol << " cap=" << m_serverConfig.mdc.maxConnections
-               << " code=" << code);
-}
-
 SentinelStreamServer::FeedAdmission SentinelStreamServer::notifyClientSubscribed(const std::string& symbol) {
-    bool firstSubscriber = false;
-    {
-        std::lock_guard<std::mutex> lock(m_symbolSubscriptionsMutex);
-        // recording.live_feed: journal: every captured product is pinned (exempt
-        // from the cap). No other product is ever admitted (the journal
-        // admission handler refuses it as invalid_product), so none holds a slot.
-        const bool journal = journalLiveFeed(m_serverConfig);
-        const auto pinned = journal ? rollerProducts(m_serverConfig)
-                                    : normalizedDefaultSymbols(m_serverConfig.defaultSymbols);
-        const auto isPinned = [&](const auto& name) { return std::find(pinned.begin(), pinned.end(), name) != pinned.end(); };
-        if (!m_symbolSubscriptions.contains(symbol) && !isPinned(symbol)) {
-            const auto count = std::count_if(m_symbolSubscriptions.begin(), m_symbolSubscriptions.end(),
-                [&](const auto& entry) { return !isPinned(entry.first); });
-            if (count >= m_serverConfig.mdc.maxConnections) {
-                recordRefusalLocked(symbol, "connection_cap");
-                return FeedAdmission::CapacityExceeded;
-            }
-        }
-        auto& count = m_symbolSubscriptions[symbol];
-        firstSubscriber = count++ == 0;
-    }
-    if (firstSubscriber && m_feedAdmissionHandler) {
-        const auto result = m_feedAdmissionHandler(symbol);
-        if (result != FeedAdmission::Accepted) {
-            std::lock_guard lock(m_symbolSubscriptionsMutex);
-            m_symbolSubscriptions.erase(symbol);
-            const char* code = result == FeedAdmission::CapacityExceeded ? "connection_cap"
-                : result == FeedAdmission::InvalidProduct ? "invalid_product" : "upstream_unavailable";
-            recordRefusalLocked(symbol, code);
-            return result;
-        }
-    }
-    if (firstSubscriber) emit clientSubscribed(QString::fromStdString(symbol));
-    return FeedAdmission::Accepted;
-}
-
-void SentinelStreamServer::registerMetrics(sentinel::metrics::MetricsRegistry& r) {
-    using Registry = sentinel::metrics::MetricsRegistry;
-    r.gaugeFn("sentinel_mdc_max_connections", "Maximum GUI-only product connections (pinned exempt).", {},
-        [this]() -> std::optional<double> { return m_serverConfig.mdc.maxConnections; });
-    r.familyFn("sentinel_mdc_connections", "Admitted product connections, including connecting feeds.", Registry::Type::Gauge,
-        [this] {
-            std::lock_guard lock(m_symbolSubscriptionsMutex);
-            const auto pinned = normalizedDefaultSymbols(m_serverConfig.defaultSymbols);
-            const auto gui = std::count_if(m_symbolSubscriptions.begin(), m_symbolSubscriptions.end(), [&](const auto& entry) {
-                return std::find(pinned.begin(), pinned.end(), entry.first) == pinned.end();
-            });
-            return std::vector<Registry::Sample>{{{{"pinned", "1"}}, double(pinned.size())}, {{{"pinned", "0"}}, double(gui)}};
-        });
-    r.familyFn("sentinel_mdc_refused_total", "Refusals per product; eight most recently refused products, resets on eviction.",
-        Registry::Type::Counter, [this] {
-            std::lock_guard lock(m_symbolSubscriptionsMutex);
-            std::vector<Registry::Sample> samples;
-            for (const auto& [symbol, count] : m_refusals) samples.push_back({{{"product", symbol}}, double(count)});
-            return samples;
-        });
-}
-
-void SentinelStreamServer::notifyClientUnsubscribed(const std::string& symbol) {
-    bool lastSubscriber = false;
-    {
-        std::lock_guard<std::mutex> lock(m_symbolSubscriptionsMutex);
-        auto it = m_symbolSubscriptions.find(symbol);
-        if (it == m_symbolSubscriptions.end()) {
-            return;
-        }
-        if (--it->second == 0) {
-            m_symbolSubscriptions.erase(it);
-            lastSubscriber = true;
-        }
-    }
-    if (lastSubscriber) {
-        emit clientUnsubscribed(QString::fromStdString(symbol));
-    }
-}
-
-bool SentinelStreamServer::releaseIfNoSubscribers(const std::string& symbol,
-                                                   const std::function<void()>& release) {
-    std::lock_guard lock(m_symbolSubscriptionsMutex);
-    if (m_symbolSubscriptions.contains(symbol)) return false;
-    release();
-    return true;
+    const auto result = m_feedAdmissionHandler ? m_feedAdmissionHandler(symbol) : FeedAdmission::InvalidProduct;
+    if (result != FeedAdmission::Accepted) sLog_Error("Feed refused: symbol=" << symbol << " code=invalid_product");
+    return result;
 }
 
 CoinbaseRestClient& SentinelStreamServer::restClient() {
     return *m_restClient;
-}
-
-void SentinelStreamServer::requestBookProductMetadata(const QString& symbol, uint64_t lifetime) {
-    const auto product = symbol.toStdString();
-    QPointer<ServerDataModel> model(&m_model);
-    const bool accepted = submitHistoryTask([this, model, product, lifetime] {
-        const auto result = m_restClient->fetchProductMetadata(product);
-        if (!model) return;
-        QMetaObject::invokeMethod(model.data(), [model, product, lifetime,
-                                                  metadata = result.metadata, error = result.error]() {
-            if (model) model->onProductMetadata(product, lifetime, metadata, error);
-        }, Qt::QueuedConnection);
-    });
-    if (!accepted) {
-        sLog_Warning("Live book metadata worker unavailable: symbol=" << product);
-        QMetaObject::invokeMethod(model.data(), [model, product, lifetime] {
-            if (model) model->onProductMetadata(product, lifetime, nullptr, "metadata worker unavailable");
-        }, Qt::QueuedConnection);
-    }
-}
-
-uint64_t SentinelStreamServer::registerLatencySender(std::function<void(int)> sendFn) {
-    const uint64_t id = m_nextLatencySenderId++;
-    std::lock_guard<std::mutex> lock(m_latencySendersMutex);
-    m_latencySenders.emplace_back(id, std::move(sendFn));
-    return id;
-}
-
-void SentinelStreamServer::unregisterLatencySender(uint64_t id) {
-    std::lock_guard<std::mutex> lock(m_latencySendersMutex);
-    m_latencySenders.erase(
-        std::remove_if(m_latencySenders.begin(), m_latencySenders.end(),
-            [id](const std::pair<uint64_t, std::function<void(int)>>& p) { return p.first == id; }),
-        m_latencySenders.end());
-}
-
-void SentinelStreamServer::broadcastCoinbaseLatency(int milliseconds) {
-    std::vector<std::function<void(int)>> copy;
-    {
-        std::lock_guard<std::mutex> lock(m_latencySendersMutex);
-        copy.reserve(m_latencySenders.size());
-        for (auto& p : m_latencySenders)
-            copy.push_back(p.second);
-    }
-    for (auto& fn : copy)
-        fn(milliseconds);
 }
 
 // ─── Trading engine & AlgoEngine initialization ──────────────────────────────

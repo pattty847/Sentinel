@@ -28,7 +28,8 @@ recording, and did anything drop.
   checkout. A change in git takes effect after 60 s (scrape config), after 30 s
   (dashboards), or when Grafana restarts (alerts and datasource).
 - The server's `/metrics` port follows `SENTINEL_HEALTH_PORT` (default 8090), the same as
-  `/ping`. There is no config key. The capture's port is `sentinel-capture --metrics-port`
+  `/ping`; explicit 0 binds an OS-assigned port (logged at startup) for isolated tests.
+  There is no config key. The capture's port is `sentinel-capture --metrics-port`
   (default 8091, 0 = no listener); the launchd plist does not pass it.
 - `sentinel-capture` is a required A3 job. Its scrape job is active in `prometheus.yml`,
   so landing the change makes VictoriaMetrics scrape 8091 within 60 s. Deploy the capture
@@ -117,12 +118,8 @@ scrape. VictoriaMetrics adds `job` and `instance` to every series.
 | `sentinel_recorder_late_events_total` | counter | - | Primary mode only (absent in roller mode): Book messages timestamped before the minutes that are already closed. |
 | `sentinel_recorder_backward_steps_total` | counter | - | Primary mode only (absent in roller mode): Book messages whose timestamp went backwards. |
 | `sentinel_recorder_live_publish_drops_total` | counter | - | Live publications that were refused (series limit or stale). |
-| `sentinel_mdc_connected` | gauge | product, pinned | 1 while this product connection is up; pinned=`1` for recorder defaults, `0` for GUI-only feeds. |
-| `sentinel_mdc_transport_up_total` / `_down_total` | counter | product, pinned | Transitions in this feed lifetime. Reconnects = up - 1 per product. |
-| `sentinel_mdc_connections` | gauge | pinned | Admitted distinct products, including connecting feeds; pinned defaults and GUI-only products counted separately. |
-| `sentinel_mdc_max_connections` | gauge | - | GUI-only connection cap (default 8); pinned products are exempt. |
-| `sentinel_mdc_refused_total` | counter | product | Admission refusals; bounded LRU of eight most recently refused products. Counts reset after eviction. |
-| `sentinel_mdc_ws_latency_ms` | gauge | - | Latest Coinbase WebSocket latency (server time minus exchange timestamp). |
+| `sentinel_live_feed_up` | gauge | product | 1 while the captured product's live journal feed is up; follows transport records and the 30 s tip-silence guard. |
+| `sentinel_live_feed_up_total` / `sentinel_live_feed_down_total` | counter | product | Live journal feed transitions in this server process. |
 | `sentinel_exchange_clock_offset_ms` | gauge | - | Smoothed local clock minus exchange clock. 0 means not yet measured. |
 | `sentinel_stream_sessions` | gauge | - | Open client stream sessions (GUIs). |
 | `sentinel_server_event_loop_lag_ms` | gauge | quantile | Main-thread queue wait in ms over the last 60 s; quantile=`0.5`, `0.95`, `0.99` or `max`. Absent until a probe is delivered, or if no delivered sample remains in the window. |
@@ -133,11 +130,10 @@ scrape. VictoriaMetrics adds `job` and `instance` to every series.
 | `process_start_time_seconds` | gauge | - | Time when the metrics were set up at startup. Restarts = `changes(x[1h])`. |
 | `sentinel_build_info` | gauge | version | Always 1. |
 
-Connection product labels are pinned defaults plus currently active GUI products (upper case).
-GUI connection series disappear on final unsubscribe/close, including their counters; a new
-feed lifetime starts at zero. Refusal series retain only eight recent products, independently
-of active feeds, so arbitrary refused names cannot grow registry memory. Recorder series
-still name pinned products only. Layers are `near` and `deep`.
+Live feed product labels name the fixed captured product set (upper case).
+Chart subscribe/unsubscribe does not change those series or reset their counters.
+Uncaptured products never create a series. Recorder series name the recorded
+products and layers (`near` and `deep`).
 
 Threading: the HTTP listener and the scrape-time samplers run on the server's main thread.
 That thread already reads `BookRecorder::stats()` and `watermarks()`. The recorder worker
@@ -246,7 +242,7 @@ never waits on the I/O thread, so it answers while T7 I/O is frozen (FM-127).
 | Alert | Fires when | For |
 |---|---|---|
 | A1 recorder stalled | `max by (product,layer) (sentinel_recorder_column_overdue_seconds) > 60` (only while that product is connected) | 1 m |
-| A1b recorder upstream disconnected | `min by (product) (sentinel_mdc_connected{pinned="1"}) < 1`. A1 is silent by design while disconnected, so this alert covers that gap. | 5 m |
+| A1b live feed down | `min by (product) (sentinel_live_feed_up) < 1`. Covers a dark live book even while history catches up from files and capture is healthy. | 5 m |
 | A3 service down | `up{job=~"sentinel-server\|sentinel-capture\|node"} or (absent(up{job="sentinel-server"}) - 1) or (absent(up{job="sentinel-capture"}) - 1) or (absent(up{job="node"}) - 1)` is below 1. This gives one sample per required job: a failed scrape (up 0) and a job whose `up` series is missing (absent - 1 = 0) both fire for that job. When VictoriaMetrics does not answer, Grafana sends its DatasourceError notification. | 2 m |
 | A3b T7 absent | `absent(node_filesystem_avail_bytes{mountpoint="/Volumes/T7"})` | 5 m |
 | A4 capture product down | `max by (product) (sentinel_capture_feed_down_seconds) > 120`. The gauge is the down time, so there is no pending period. | 0 s |
@@ -281,14 +277,12 @@ later. See the plan, section 4.
 
 ### Server per-product metrics deploy
 
-Deploy the server via `scripts/dev/deploy-runtime.sh server` before the orchestrator reloads
-Grafana alert provisioning. The old unlabeled `sentinel_mdc_connected` disappears; dashboards
-and A1b now select `pinned="1"` and keep the product label. Check one connected gauge per
-pinned product, `sentinel_mdc_max_connections 8`, and separate `sentinel_mdc_connections`
-counts. A1 is unchanged. Test a GUI-only open/close: its three connection series disappear,
-pinned counters stay unchanged, and the recorder keeps committing. At capacity, check the
-`Feed refused` error, client status text, Agent API refusal object and refused counter.
-No monitoring or recorder service is restarted by the agent implementing this change.
+The conductor deploys the server before reloading Grafana alert provisioning.
+Check `sentinel_live_feed_up{product}` for every captured product, plus its
+`sentinel_live_feed_up_total` / `sentinel_live_feed_down_total` counters.
+The server exports no `sentinel_mdc_*` series. A1b retains each product label;
+A1 remains the recorder's per-product/layer deadline alert. Subscribing or
+closing a GUI chart does not create or remove a feed or its health series.
 
 ### Capture fan-out metrics (slice B)
 
@@ -482,28 +476,28 @@ check-server-log <log dir> <pid> <exe>` runs the same log check. Probe `roller.l
 with `ageMs` (now minus bucket start plus observed time) and the lowest
 native price in it.
 
-### Live feed from the journal (`recording.live_feed: journal`, slice D-b1)
+### Live feed from the journal
 
-`recording.live_feed` is `engine` (default: this process's Coinbase WebSocket,
-`MarketDataFeeds`, feeds the live book, trades and metadata) or `journal`.
-`journal` requires `recording.source: roller` and `roller_shadow.enabled`; any
-other combination or value stops the server at startup (`Server not started:
-...`). With `journal` the server opens no Coinbase WebSocket: each roller
-worker keeps a whole raw book that follows its history feed and, at the socket
-tip, a live copy that applies every provisional fan-out record on arrival. The
-model gets the journal header's `product_metadata` (no REST), one synthesized
-snapshot at the tip and then each record's updates and trades (aggressor side)
-as queued hand-offs. Every `roller_shadow.products` entry is a pinned live
-feed; a subscription for any other product is refused as `invalid_product`.
-REST is used for candle history only. Captured products are exempt from
-`mdc.max_connections`; any other product is refused as `invalid_product`, never
-`connection_cap`. The key is deleted in D-b2.
+The server requires `recording.source: roller` and `roller_shadow.enabled`.
+`primary` is refused at startup: its recorder has no feed. The primary recorder
+implementation remains compiled until slice E. The server opens no Coinbase
+WebSocket. Each roller worker keeps a whole raw book following its history feed
+and, at the socket tip, a live copy that applies provisional fan-out records.
+The model receives journal-header metadata, one synthesized snapshot and then
+updates and trades as queued hand-offs. Admission accepts only `rollerProducts()`
+(`roller_shadow.products`, or normalized `default_symbols` when empty); other
+products get `invalid_product`. REST serves candle history only.
+
+The loader ignores `recording.live_feed` and the old MDC WebSocket/cap keys.
+Keep `recording.live_feed: journal` in the deployed YAML until slice E: the
+previous binary defaults to `engine` without it, opening a second upstream
+connection on rollback. Only `ssl_ca_bundle` is still read for REST TLS.
 
 A retract, disconnect, EOF or worker failure invalidates the product's book
 (`Journal live book invalidated`, status `invalidated` on the wire); the next
 tip re-seeds it from durable state (`Journal live seed`). So does 30 s without
 a socket record at the tip (`Journal live tip silent`): a frozen capture
-(FM-127) shows as an invalid book and `sentinel_mdc_connected 0`, not as a
+(FM-127) shows as an invalid book and `sentinel_live_feed_up 0`, not as a
 quiet book. A UTC midnight re-seeds once without invalidating. The model's
 "wait for the next upstream snapshot" paths (raw band exceeded, raw BBO
 unavailable) ask the worker for a fresh snapshot instead (`Live book re-seed
@@ -524,10 +518,8 @@ at most 300 per timeframe (1 s and 1 m alike) per advance; an advance jumps
 that far only across a journal gap with no records at all (capture down),
 which uninterrupted delivery shares.
 
-With `journal`, `sentinel_mdc_connected{pinned="1"}` and the transport
-counters follow the journal (TransportUp/TransportDown records and the 30 s
-guard), so A1b keeps working; capture's own `sentinel_capture_feed_up` is the
-upstream truth. `sentinel_mdc_ws_latency_ms` is absent, and the `mdc`
-connection gauges keep their meaning only for the cap check. Probe
-`journal.live` logs every provisional record handed to the model with `ageMs`
-(now minus its capture receive time).
+`sentinel_live_feed_up{product}` and its transition counters follow TransportUp /
+TransportDown records and the 30 s tip-silence guard. Capture's own
+`sentinel_capture_feed_up` reports the upstream connection. Probe `journal.live`
+logs every provisional record handed to the model with `ageMs` (now minus
+capture receive time).

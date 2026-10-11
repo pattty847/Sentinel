@@ -2,7 +2,7 @@
 
 ## Overview
 
-`MarketDataFeeds` owns one shared Boost.Asio `io_context`, one `mdc-io` thread,
+In capture, `MarketDataFeeds` owns one shared Boost.Asio `io_context`, one `mdc-io` thread,
 one TLS context (CA loading once), and one `MarketDataCoreEngine` per product.
 Each engine owns one transport and strand, a single connection sequence counter,
 its own heartbeat/L2 liveness and reconnect state. Core depends on QtCore logging,
@@ -10,24 +10,20 @@ never GUI Qt. Consumers retain history and books; engines only dispatch data.
 
 Coinbase Advanced Trade `market_trades.side` names the resting maker. The
 `MarketDataCoreEngine` flips BUY to sell aggressor and SELL to buy aggressor
-once, before delivering a `Trade` to server consumers. Unknown stays unknown.
+once for engine consumers. The server consumes `JournalFeed`, which independently
+flips the raw maker side once; `JournalTradeEventSource` does the same for backtests. Unknown stays unknown.
 Server footprint delta is positive for buy aggressors and negative for sell
 aggressors; candle, TPO, and volume profile calculations ignore side. Live
 stream `trade` messages carry `side_basis: "aggressor"` so clients use `side`
 without another flip. An unmarked older stream carries Coinbase maker side.
 
-Hourly tick files use the same 1=buy, 2=sell side codes with a versioned basis:
-v1 `HH.bin` records are maker based; v2 `HH.v2.bin` records are aggressor based
-(0 also represents unknown). The reader accepts both versions. The distinct
-v2 filename prevents a resumed logger from appending new semantics to a v1
-file for the same hour. Historical v1 side codes must be inverted when used
-as aggressor direction; the current backtest tick reader ignores side.
+The server owns no exchange engine. Live books, metadata, trades and candle
+clocks come from the capture fan-out and journal through the roller; REST is
+used for candle history. Legacy binary tick writers and readers are removed;
+backtests read RAWL2 journal trades or explicitly imported CSV files.
 
 ```
-MarketDataFeeds (one I/O thread, shared TLS and connect limiter)
-  BTC-USD engine/strand -> BTC-USD WebSocket -> callbacks(product=BTC-USD)
-  ETH-USD engine/strand -> ETH-USD WebSocket -> callbacks(product=ETH-USD)
-                                         -> queued ServerDataModel handoff
+Coinbase -> capture -> RAWL2 journal + fan-out -> roller -> queued ServerDataModel -> clients
 ```
 
 ## Connection ownership and isolation
@@ -70,8 +66,8 @@ The owner drives connection and watchdog deadlines with one 100 ms Asio timer;
 each engine applies its own deadlines on its strand. A monotonic clock and jitter
 source are injectable, with manual pumping for deterministic offline tests.
 No additional thread or per-frame timer is created. Beast enforces separate
-connect/close deadlines (`server.mdc.connect_timeout_ms`, default 20 s;
-`close_timeout_ms`, default 3 s). Pending transport operations retain the
+connect/close deadlines (`ServerMdcConfig::connectTimeoutMs`, default 20 s;
+`ServerMdcConfig::closeTimeoutMs`, default 3 s). Pending transport operations retain the
 transport through cancellation, so removing a feed cannot leave dangling handlers.
 Owner shutdown closes every socket before joining the producer thread.
 
@@ -225,14 +221,14 @@ replica. New subscribers receive the current aggregated book and tick; existing 
 a fresh snapshot whenever an upstream snapshot resets the server grid, before subsequent deltas.
 During rollout, a new GUI connected to an older server that omits `tick_size` keeps the live book
 unavailable until the server is upgraded; it does not guess a tick from price or global config.
-For non-BTC products the server fetches exact Coinbase quote-increment metadata asynchronously,
+For non-BTC products the server receives exact Coinbase quote-increment metadata from the journal header,
 then uses the roller near-grid rule on the current raw BBO midpoint (~1 bp nearest 1-2-5, rounded up to
 a quote-increment multiple). Missing or invalid metadata leaves the aggregated live book unavailable;
 the server retains the accepted upstream snapshot and every in-band native-price delta meanwhile.
 When metadata arrives it builds an authoritative snapshot from that current raw state without a
 metadata-driven upstream reconnect or recorder invalidation. A real upstream invalidation clears
-the raw state and requires the provider's next snapshot. BTC-USD keeps the configured `orderbook.tick_size`. Feed release invalidates
-its metadata lifetime, so a late REST reply cannot initialize a newly acquired feed. Raw recorder
+the raw state until the journal worker re-seeds a valid snapshot. BTC-USD keeps the configured
+`orderbook.tick_size`. Metadata never comes from a server REST request. Raw recorder
 snapshots and deltas remain independent of this live aggregation gate. For every product, the server
 retains raw price levels only inside the live book's band, sums all quantities in each tick bucket,
 and adjusts the bucket total when one raw level changes or is deleted. The wire carries these bucket
@@ -485,7 +481,7 @@ congestion without an unbounded server replay queue or a permanent oldest-bucket
 
 ## Live trade rows and chart bubbles
 
-Coinbase `market_trades` -> `MarketDataCoreEngine::processTrades` -> queued
+Captured Coinbase `market_trades` -> roller `JournalFeed` -> queued
 `ServerDataModel::onTrade` -> `tradeBroadcast` -> stream Session `on_trade` ->
 Sentinel wire `type:"trade"` -> `SentinelStreamClient::tradeReceived` -> queued
 `RemoteGridDataSource` -> queued `UnifiedGridRenderer::onTradeReceived`.
@@ -495,7 +491,7 @@ fields do not require a server upgrade for bubbles: older servers already send t
 The client now preserves exchange time and ID instead of discarding them.
 Invalid/missing time stays zero and cannot produce a bubble.
 
-**Side contract:** since the trade-side fix the engine converts Coinbase's maker `side` to
+**Side contract:** `JournalFeed` converts Coinbase's maker `side` to
 the aggressor side once at ingest, and trade frames carry `side_basis:"aggressor"` (see the
 trade side section at the top of this file). The client uses `side` as-is when
 `side_basis` is `"aggressor"`; an unmarked frame from an older server is treated as maker and
@@ -549,14 +545,9 @@ History sources today:
 - `TradeOverlayPublisher`: footprint/VP aggregates and TPO letters; TPO's older
   REST-candle range fallback contains no individual executions, sizes or sides.
   `trade_overlay` is also the error context, not a raw-row response family.
-- `TickBinaryLogger`: hourly binary trades under `data/market`; backtests preserve
-  IDs and normalize v1 maker/v2 aggressor sides, preferring RAWL2 journals per UTC
-  day with legacy files only on days without a matching journal header. No existing
-  stream-server reader/serving endpoint uses them for trade history.
-  Both backtest sources dedupe numeric trade IDs with a bounded window (first occurrence wins); journal trade arrays use stable ascending numeric-ID order, while legacy files retain recorded order because frame boundaries are absent; corrupt legacy files and records are skipped with warnings, and an empty history range exits non-zero.
-- RAWL2 capture under `/Volumes/T7/sentinel-data/raw-l2`: durable raw trade source;
-  the one-world roller slices B-D own its serving path. This feature neither reads
-  those files from the GUI nor starts another history service.
+- `JournalTradeEventSource`: recorded trades come from RAWL2 only, with preserved
+  trade IDs, millisecond time, aggressor sides and capture gaps. The CLI also
+  imports CSV. There is no binary tick logger/reader or legacy history fallback.
 
 Cheapest durable extension: page event-time executions (ID, price, base size,
 normalized aggressor, symbol/selection identity and explicit coverage) from the
@@ -636,33 +627,24 @@ trade-history storage. Footprint and VP still have no observations outside the
 retained tape; an empty profile does not establish complete historical coverage.
 
 
-### Server feed admission and lifecycle (slice 3)
+### Server feed admission and lifecycle (D-b2b)
 
-The server starts one pinned feed for each normalized `default_symbols` product before
-accepting GUI sessions. A distinct GUI-only symbol reserves a connection slot on its first
-subscriber; other clients share that feed. The final unsubscribe or session close releases
-it. Pinned feeds are never removed by clients and never count against
-`server.mdc.max_connections` (default 8, minimum 1). Connecting feeds count against the cap.
-
-Admission reserves the stream slot and synchronously checks the upstream feed before the
-Session stores a subscription, creates model/availability state, or acknowledges it.
-An upstream `CapacityExceeded` releases the reserved slot and takes the same refusal path
-as the stream cap. An upstream `InvalidProduct` also releases the slot and sends the same
-structured error with `code: "invalid_product"`. An upstream admission exception also
-releases the slot and reports `upstream_unavailable`. At capacity the server logs
-`Feed refused: symbol=<product> cap=<N> code=connection_cap` and sends only:
+The server admits only captured products from `rollerProducts()`:
+`roller_shadow.products`, falling back to normalized `default_symbols` when empty.
+It checks membership before a Session stores a subscription, creates availability
+state or sends an acknowledgement. An uncaptured product produces only:
 
 ```json
-{"type":"error","context":"subscribe","code":"connection_cap","symbol":"ETH-USD","max_connections":8,"message":"Cannot subscribe to ETH-USD: GUI connection cap (8) reached. Close another symbol and retry."}
+{"type":"error","context":"subscribe","code":"invalid_product","symbol":"XRP-USD","message":"Cannot subscribe to XRP-USD: invalid product."}
 ```
 
-No watched chart is evicted. The client emits `subscriptionRefused`, delivered across the
-queued data-source boundary to the GUI status bar and `/api/v1/state` diagnostics. The
-stream reservation and queued first/last subscriber events preserve lifecycle order.
-The feed owner also enforces the same cap. Subscribe/unsubscribe symbols are normalized
-uppercase, matching pinned products.
+The refusal has no `max_connections` field. The client emits `subscriptionRefused`
+through the queued data-source boundary to the GUI and Agent API diagnostics;
+the previously held chart subscription remains active. Subscribe/unsubscribe
+symbols are normalized uppercase. Chart lifetimes do not acquire or release feeds.
+The server no longer sends Coinbase latency messages.
 
-Connection metrics carry `{product,pinned}`; pinned series persist, GUI series exist only
-while their feeds are acquired (transition counters restart for a new feed lifetime).
-Recorder deadlines remain per symbol. A1 watches connected recorder deadlines; A1b watches
-each pinned product independently, so a healthy GUI feed cannot mask a BTC outage.
+`sentinel_live_feed_up{product}` and `sentinel_live_feed_up_total` /
+`sentinel_live_feed_down_total` follow each captured product's live journal feed.
+A1b pages after five minutes down even if history is healthy from file catch-up.
+No `sentinel_mdc_*` series is exported.

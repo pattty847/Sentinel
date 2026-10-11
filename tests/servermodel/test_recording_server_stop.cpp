@@ -218,7 +218,8 @@ struct RecordingServerStopTest {
         const auto sparse = fetch("ETH-USD", 20, 2);
         const auto& candles = sparse.at("candles");
         ASSERT_EQ(candles.size(), 2);
-        EXPECT_EQ(candles[0].at("time_start_ms"), 10'000);
+        // Journal time carries quiet buckets forward before the next trade.
+        EXPECT_EQ(candles[0].at("time_start_ms"), 19'000);
         EXPECT_EQ(candles[1].at("time_start_ms"), 20'000);
         EXPECT_EQ(sparse.at("start_time_sec"), 18); // metadata, not a sparse-bar lower bound
         EXPECT_TRUE(fetch("UNKNOWN-USD", 20, 2).at("candles").empty());
@@ -542,6 +543,7 @@ TEST(CandleHistoryPaging, OneSecondPagesReachOlderRetainedBars) {
     config.recording.enabled = false;
     config.heatmap.persistenceEnabled = false;
     config.heatmap.timeframesMs = {1000, 60000};
+    config.rollerShadow.products = {"BTC-USD", "ETH-USD"};
     ServerDataModel model(config);
     for (int second = 1; second <= 1001; ++second) {
         Trade trade{};
@@ -551,7 +553,6 @@ TEST(CandleHistoryPaging, OneSecondPagesReachOlderRetainedBars) {
         trade.size = 1;
         model.onTrade(trade);
     }
-    model.acquireGuiFeed("ETH-USD");
     for (const int second : {1, 10, 20, 30}) {
         Trade trade{};
         trade.product_id = "ETH-USD";

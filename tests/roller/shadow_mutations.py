@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 os.chdir(ROOT)
-os.environ['CCACHE_DIR'] = '/tmp/sentinel-ccache'
+os.environ.setdefault('CCACHE_DIR', '/tmp/sentinel-db2b-ccache')
 SHADOW, ROLLER = 'test_shadow_roller', 'test_roller'
 
 def command(args):
@@ -17,8 +17,8 @@ def command(args):
 def build(target):
     if target is None:
         return
-    # -j 2: the owner's Mac froze under heavier load (AGENTS section 4).
-    p = command(['cmake', '--build', '--preset', 'mac-clang', '-j', '2', '--target', target.split('/')[-1]])
+    # Caller holds the FIFO build queue; use the owner-approved six jobs.
+    p = command(['cmake', '--build', '--preset', 'mac-clang', '-j', '6', '--target', target.split('/')[-1]])
     if p.returncode:
         raise RuntimeError(p.stdout[-10000:])
 
@@ -122,7 +122,7 @@ mutations = [
      'm_stallMonitor->setConnected(series.symbol, m_rollerRunning(series.symbol), nowMs);', ';',
      'ShadowTest.ServingRollerReplacesPrimaryRecorderForNonDefaultProduct'),
     ('A8 require-recording checks the served root', APP,
-     'const std::string dir = roller ? config.rollerShadow.outputRoot : rc.dir;', 'const std::string dir = rc.dir;',
+     'const std::string dir = config.rollerShadow.outputRoot;', 'const std::string dir = rc.dir;',
      'ShadowConfig.RequireRecordingChecksTheServedRoot'),
     ('A1 roller_shadow.products parsed', 'libs/core/ConfigLoader.cpp',
      'cfg.rollerShadow.products = normalizedDefaultSymbols(parseSymbolList(shadow["products"]));', ';',
@@ -221,16 +221,10 @@ mutations = [
      'if (trade.side == AggressorSide::Buy) trade.side = AggressorSide::Sell;',
      'if (false) trade.side = AggressorSide::Sell;',
      'ShadowTest.JournalLiveFeedServerTradesCarryTheAggressorSide'),
-    ('db1-A5 no engine with the journal feed', APP,
-     'if (!journal) try {', 'try {',
-     'ShadowTest.JournalLiveFeedServerHasNoEngineAndServesCapturedProducts'),
     ('db1-A5 uncaptured products are invalid', APP,
      'return SentinelStreamServer::FeedAdmission::InvalidProduct;',
      'return SentinelStreamServer::FeedAdmission::Accepted;',
      'ShadowTest.JournalLiveFeedServerHasNoEngineAndServesCapturedProducts'),
-    ('db1-A5 journal needs the roller source', 'libs/core/config/ConfigTypes.hpp',
-     'if (feed == "journal" && config.recording.source != "roller")', 'if (false)',
-     'ShadowTest.JournalLiveFeedRefusedWithoutTheRollerSource'),
     ('db1-A6 tip-age guard', SR,
      'if (now() - lastRecordMs >= cfg.tipSilenceMs) {', 'if (false) {',
      'ShadowTest.JournalLiveFeedServerConnectionFollowsTransportAndTipAge'),
@@ -258,9 +252,6 @@ mutations = [
     ('db1 ring replay never repeats a delivered trade', SR,
      'tradeHere = undelivered(r.pos);', 'tradeHere = true;',
      'ShadowTest.JournalTapRingReplayNeverRedeliversATrade'),
-    ('db1 the model never asks for metadata over REST', 'libs/core/servermodel/ServerDataModel.cpp',
-     'if (m_journalFeed) return;', '',
-     'JournalLiveFeedModel.NeverRequestsRestMetadata'),
     ('db1-lag the queue-latency helper runs', 'libs/core/metrics/EventLoopLag.cpp',
      'm_worker = std::thread([this] { run(); });', ';',
      'ServerMetrics.EventLoopLagShowsABlockedMainThread', 'servermodel/test_server_metrics'),
@@ -280,9 +271,6 @@ mutations = [
     ('db1-lag the server registers the sampler in journal mode', APP,
      'm_eventLoopLag.registerMetrics(m_metrics);', ';',
      'ShadowTest.JournalLiveFeedServerHasNoEngineAndServesCapturedProducts'),
-    ('db1 live_feed key parsed', 'libs/core/ConfigLoader.cpp',
-     'readScalar(rec, "live_feed", cfg.recording.liveFeed);', ';',
-     'ShadowConfig.LiveFeedKeyDefaultsToEngine'),
     # D-b1 fix round 1.
     ('db1-r1-1 throttled re-seed requests are coalesced, not dropped', 'libs/core/servermodel/ServerDataModel.cpp',
      'm_pendingReseeds.insert(symbol);', ';',
@@ -312,9 +300,6 @@ mutations = [
     ('db1-r1-2 a fresh process never replays the day\'s trades', SR,
      'if (!delivered) return false;', 'if (!delivered) return true;',
      'ShadowTest.JournalTapRestartSeedsOnlyAfterCatchup'),
-    ('db1-r1-3 captured products are exempt from the engine cap', 'libs/core/protocol/SentinelStreamServer.cpp',
-     'const auto pinned = journal ? rollerProducts(m_serverConfig)', 'const auto pinned = false ? rollerProducts(m_serverConfig)',
-     'ShadowTest.JournalLiveFeedAdmissionIgnoresTheEngineCap'),
 ]
 mutations.append(('db1-anchor failure metric registered', SR,
     'registerAnchorMetrics(registry, p->name);', ';',
@@ -329,6 +314,45 @@ mutations.append(('db1-anchor batch rebuild remains live-compatible', 'libs/core
 mutations.append(('db1-anchor restored durable state reports running', SR,
     'p.last->store(receiveMs); p.running->set(1);', ';',
     'ShadowTest.JournalTapAnchorAtDurableTipRestoresWholeBookWithoutReplay'))
+# D-b2: structural deletion guards plus behavioral contract mutations.
+ADMISSION = 'servermodel/test_server_feed_admission'
+mutations.extend([
+    ('db2-C1 server cannot own an engine', APP,
+     '#include "SentinelServerApp.hpp"',
+     '#include "SentinelServerApp.hpp"\n#include "marketdata/MarketDataFeeds.hpp"',
+     'ServerFeedAdmissionSource.ServerHasOnlyTheJournalFeed', ADMISSION),
+    ('db2-C2 uncaptured products are refused', APP,
+     'return SentinelStreamServer::FeedAdmission::InvalidProduct;',
+     'return SentinelStreamServer::FeedAdmission::Accepted;',
+     'ShadowTest.JournalLiveFeedAdmissionAcceptsAllCapturedProducts'),
+    ('db2-C2 refusal JSON has no cap', 'libs/core/protocol/SentinelStreamServer.cpp',
+     '{"code", "invalid_product"}, {"symbol", symbol}',
+     '{"code", "invalid_product"}, {"symbol", symbol}, {"max_connections", 8}',
+     'ServerFeedAdmissionTest.UncapturedProductRefusalIsAtomic', ADMISSION),
+    ('db2-C3 primary source cannot start', 'libs/core/config/ConfigTypes.hpp',
+     'if (config.recording.source != "roller")', 'if (false)',
+     'ShadowTest.JournalLiveFeedRefusedWithoutTheRollerSource'),
+    ('db2-C4 trades never create legacy logs', 'libs/core/servermodel/ServerDataModel.cpp',
+     'void ServerDataModel::onTrade(const Trade& trade) {',
+     'void ServerDataModel::onTrade(const Trade& trade) { std::filesystem::create_directories("data/market");',
+     'ServerFeedAdmissionTest.TradesNeverCreateLegacyTickLogs', ADMISSION),
+    ('db2-C5 no metadata REST call site', 'libs/core/protocol/SentinelStreamServer.cpp',
+     'CoinbaseRestClient& SentinelStreamServer::restClient() {',
+     'CoinbaseRestClient& SentinelStreamServer::restClient() { /* fetchProductMetadata */',
+     'ServerFeedAdmissionSource.ServerHasOnlyTheJournalFeed', ADMISSION),
+    ('db2-C6 journal feed metric replaces MDC', 'libs/core/servermodel/ServerDataModel.cpp',
+     'r.familyFn("sentinel_live_feed_up",', 'r.familyFn("sentinel_mdc_connected",',
+     'ShadowTest.JournalLiveFeedServerConnectionFollowsTransportAndTipAge'),
+    ('db2-C7 REST CA override survives', 'libs/core/ConfigLoader.cpp',
+     'readMdcScalar(serverRoot, mdc, filePath, wrapped, "ssl_ca_bundle", cfg.mdc.sslCaBundle);', ';',
+     'ServerFeedConfig.OnlyRestCaBundleIsReadFromMdc', ADMISSION),
+    ('db2-C8 alert watches live journal feed', 'ops/monitoring/grafana/provisioning/alerting/rules.yaml',
+     'expr: min by (product) (sentinel_live_feed_up)',
+     'expr: min by (product) (sentinel_mdc_connected{pinned="1"})',
+     'ServerFeedAlerts.A1bSelectsEachCapturedProductForFiveMinutes', ADMISSION),
+])
+if "--db2" in sys.argv:
+    mutations = [m for m in mutations if m[0].startswith('db2-')]
 if "--round1" in sys.argv:
     mutations = mutations[5:]
 if "--slice-d" in sys.argv:

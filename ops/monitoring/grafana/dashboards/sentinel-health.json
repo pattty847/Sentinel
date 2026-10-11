@@ -32,7 +32,7 @@
     {
       "id": 1,
       "type": "stat",
-      "title": "Upstream connected",
+      "title": "Live feed up",
       "description": "sentinel-server market-data transport. Alert A1b after 5 min down.",
       "datasource": {
         "type": "prometheus",
@@ -51,7 +51,7 @@
             "type": "prometheus",
             "uid": "sentinel-vm"
           },
-          "expr": "min by (product) (sentinel_mdc_connected{pinned=\"1\"})",
+          "expr": "min by (product) (sentinel_live_feed_up)",
           "legendFormat": "{{product}}",
           "range": false,
           "instant": true

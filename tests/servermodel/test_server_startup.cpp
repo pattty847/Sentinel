@@ -12,7 +12,7 @@
 
 namespace {
 // Run the real entry point from scratch config/storage, with an offline feed.
-// Reserve an ephemeral port for both health and MDC so no live service is reached.
+// Use scratch roots and an absent fan-out socket so no live service is reached.
 struct ServerProcess {
     QTemporaryDir scratch;
     QTcpServer healthReservation;
@@ -40,11 +40,11 @@ struct ServerProcess {
             "stream_port: 0\n"
             "default_symbols: [BTC-USD]\n"
             "heatmap:\n  persistence_enabled: false\n  grid_width: 16\n  grid_height: 32\n"
-            "recording:\n  enabled: true\n  dir: '" + scratch.filePath("recording").toUtf8() + "'\n  fallback_dir: ''\n"
-            "roller_shadow:\n  enabled: false\n"
-            "mdc:\n  host: 127.0.0.1\n  port: '" + QByteArray::number(healthReservation.serverPort()) + "'\n"
-            "  connect_timeout_ms: 100\n  close_timeout_ms: 100\n  use_jwt: false\n"
-            "  ssl_ca_bundle: '" + QByteArray(SENTINEL_SOURCE_DIR) + "/resources/certs/ca-bundle.crt'\n"
+            "recording:\n  enabled: true\n  source: roller\n  dir: '" + scratch.filePath("primary").toUtf8() + "'\n  fallback_dir: ''\n"
+            "roller_shadow:\n  enabled: true\n  dir: '" + scratch.filePath("recording").toUtf8() + "'\n"
+            "  journal_dir: '" + scratch.filePath("journal").toUtf8() + "'\n"
+            "  socket: '" + scratch.filePath("absent.sock").toUtf8() + "'\n  products: [BTC-USD]\n"
+            "ssl_ca_bundle: '" + QByteArray(SENTINEL_SOURCE_DIR) + "/resources/certs/ca-bundle.crt'\n"
             "tls:\n  cert_file: missing-cert.pem\n  key_file: missing-key.pem\n";
         if (config.write(yaml) != yaml.size()) return false;
         config.close();
@@ -102,9 +102,10 @@ TEST(ServerStartup, MissingTlsLeavesTheRequiredRecorderRunning) {
     EXPECT_TRUE(log.contains("exe=" + QByteArray(SENTINEL_SERVER_BINARY) + " built="));
     EXPECT_TRUE(log.contains(" E app ")) << log.constData();
     EXPECT_TRUE(log.contains("SentinelStreamServer start failed")) << log.constData();
-    EXPECT_TRUE(log.contains("Recording v2 started: dir=")) << log.constData();
-    EXPECT_TRUE(log.contains("mdcHost=127.0.0.1")) << log.constData();
-    EXPECT_TRUE(log.contains("Server default subscribe: count=1")) << log.constData();
+    EXPECT_TRUE(log.contains("Recording served by the journal roller: dir=")) << log.constData();
+    EXPECT_FALSE(log.contains("mdcHost=")) << log.constData();
+    EXPECT_FALSE(log.contains("Server default subscribe")) << log.constData();
+    EXPECT_TRUE(log.contains("Live feed: journal")) << log.constData();
     EXPECT_TRUE(log.contains("Sentinel Server running")) << log.constData();
     EXPECT_TRUE(QDir(server.scratch.filePath("recording")).exists());
     EXPECT_FALSE(server.process.waitForFinished(200)) << server.process.readAllStandardError().constData();
