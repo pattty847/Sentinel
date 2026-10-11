@@ -27,65 +27,32 @@ double continuousFactor(double delta) {
 }
 } // namespace
 
+void UnifiedGridRenderer::bindZoomGlide() {
+  auto& glide = m_view->zoomGlide();
+  glide.setClock([this] { return zoomNowMs(); });
+  connect(&glide, &chart::ZoomGlide::rasterChanged, this, &UnifiedGridRenderer::rasterChanged, Qt::DirectConnection);
+  connect(&glide, &chart::ZoomGlide::viewportChanged, this, &UnifiedGridRenderer::viewportChanged, Qt::DirectConnection);
+  connect(&glide, &chart::ZoomGlide::polishRequested, this, [this] { polish(); }, Qt::DirectConnection);
+  connect(&glide, &chart::ZoomGlide::updateRequested, this, [this] { update(); }, Qt::DirectConnection);
+}
+
 qint64 UnifiedGridRenderer::zoomNowMs() const {
   return m_zoomClock ? m_zoomClock() : (m_frameClock.isValid() ? m_frameClock.elapsed() : 0);
 }
 
 chart_raster::RasterCamera UnifiedGridRenderer::rasterCameraNow(bool includeDrag) const {
+  Q_ASSERT(m_view);
   return m_view->camera().rasterCameraNow(includeDrag);
 }
 
 chart_raster::RasterCamera UnifiedGridRenderer::restCameraNow(bool includeDrag) const {
+  Q_ASSERT(m_view);
   return m_view->camera().restCameraNow(includeDrag);
-}
-
-void UnifiedGridRenderer::endZoomGlide(bool time, bool price) {
-  bool ended = false;
-  if (time && m_view->glide().time.active) ended = true, m_view->glide().time.active = false;
-  if (price && m_view->glide().price.active) ended = true, m_view->glide().price.active = false;
-  if (ended) update();
-}
-
-void UnifiedGridRenderer::startAxisGlides(const chart_raster::RasterCamera& drawn,
-                                          const chart_raster::RasterCamera& restBefore, double anchorTime,
-                                          double anchorPrice, bool forceTime, bool forcePrice) {
-  const auto end = m_view->camera().intendedEndNow();
-  if (!end.valid || !drawn.valid) return;
-  const qint64 now = zoomNowMs();
-  bool started = false;
-  auto start = [&](chart::AxisGlide& g, bool time, bool force) {
-    // The end this axis had: its glide's, or the rest camera it was drawn at.
-    const auto& before = g.active ? g.end : restBefore;
-    const bool same = time ? chart_raster::sameTimeAxis(end, before) : chart_raster::samePriceAxis(end, before);
-    if (same && !force) return; // unchanged: a running glide keeps going, a rest axis stays
-    g.active = true;
-    g.holding = false;
-    g.from = drawn;
-    g.end = end;
-    g.anchorTime = anchorTime;
-    g.anchorPrice = anchorPrice;
-    g.beganMs = g.startMs = now;
-    g.deadlineMs = now + chart_raster::kZoomGlideMs;
-    g.progress = 0.0;
-    started = true;
-  };
-  start(m_view->glide().time, true, forceTime);
-  start(m_view->glide().price, false, forcePrice);
-  if (m_view->glide().time.active) m_view->glide().colPx = m_view->glide().time.end.colPx;
-  if (m_view->glide().price.active) m_view->glide().row = {m_view->glide().price.end.tick, m_view->glide().price.end.rowPx};
-  if (!started) return;
-  sLog_Probe("zoom.glide", "start time=" << m_view->glide().time.active << " colPx=" << drawn.colPxF << "->" << end.colPx
-             << " price=" << m_view->glide().price.active << " rows=" << drawn.pxPerPrice() << "->" << end.rowPx << "@"
-             << end.tick);
-  emit rasterChanged();
-  emit viewportChanged();
-  polish(); // the next frame's updatePolish advances it
-  update();
 }
 
 void UnifiedGridRenderer::updatePolish() {
   QQuickItem::updatePolish();
-  advanceZoomGlide();
+  if (zoomGliding()) m_view->advanceFrame(zoomNowMs());
   if (!zoomGliding()) return;
   if (!m_glidePolishTimer) {
     m_glidePolishTimer = new QTimer(this);
@@ -99,65 +66,6 @@ void UnifiedGridRenderer::updatePolish() {
     });
   }
   m_glidePolishTimer->start();
-}
-
-void UnifiedGridRenderer::advanceAxisGlide(chart::AxisGlide& g, bool time, const chart_raster::RasterCamera& rest,
-                                           const chart_raster::RasterCamera& intended, qint64 now) {
-  if (!g.active) return;
-  const qint64 cap = g.beganMs + 2 * chart_raster::kZoomGlideMs;
-  // The end is fixed at the click. A change of it that the user did not ask for (a
-  // refit, another device pixel ratio or size, a tick that differs from the
-  // predicted one) continues from what the last frame drew: no jump, no reverse
-  // movement. A drag, a pan commit and a follow-live step move both ends instead.
-  const bool same = time ? chart_raster::sameTimeAxis(intended, g.end) : chart_raster::samePriceAxis(intended, g.end);
-  if (intended.valid && !same) {
-    g.from = chart::glidePart(g.from, g.end, g.anchorTime, g.anchorPrice, g.progress, g.holding);
-    g.end = intended;
-    g.holding = false;
-    g.deadlineMs = std::min(cap, std::max(g.deadlineMs, now + chart_raster::kZoomGlideMs / 2));
-    g.startMs = now;
-    g.progress = 0.0;
-    ++m_view->glide().rebases;
-    if (time) m_view->glide().colPx = g.end.colPx;
-    else m_view->glide().row = {g.end.tick, g.end.rowPx};
-    sLog_Probe("zoom.glide", "rebased " << (time ? "time" : "price") << " to colPx=" << g.end.colPx << " rowPx="
-               << g.end.rowPx << "@" << g.end.tick << " dpr=" << g.end.dpr << " leftMs=" << g.deadlineMs - now);
-  }
-  // At the cap the frame lands on the current rest camera (as at rest).
-  if (now >= cap) {
-    g.active = false;
-    g.progress = 1.0;
-    sLog_Probe("zoom.glide", "landed at the cap " << (time ? "time" : "price"));
-    return;
-  }
-  const double t = double(now - g.startMs) / double(std::max<qint64>(1, g.deadlineMs - g.startMs));
-  if (t < 1.0) {
-    g.progress = chart_raster::easeZoom(t);
-    return;
-  }
-  g.progress = 1.0;
-  // The end is reached. It lands when the frame's rest camera is the end (the landing
-  // frame is the rest frame); until then (the end's tick not committed yet) it holds
-  // the end, drawn with coverage.
-  const bool landed = time ? chart_raster::sameTimeAxis(rest, g.end) : chart_raster::samePriceAxis(rest, g.end);
-  g.holding = !landed;
-  if (landed) {
-    g.active = false;
-    sLog_Probe("zoom.glide", "landed " << (time ? "time" : "price"));
-  }
-}
-
-void UnifiedGridRenderer::advanceZoomGlide() {
-  if (!zoomGliding()) return;
-  const qint64 now = zoomNowMs();
-  const auto rest = restCameraNow(false), intended = m_view->camera().intendedEndNow();
-  advanceAxisGlide(m_view->glide().time, true, rest, intended, now);
-  advanceAxisGlide(m_view->glide().price, false, rest, intended, now);
-  // This frame's camera for every layer: the axis models recalculate, the sibling
-  // overlays (candles, paper, algo) redraw in this synchronization.
-  emit rasterChanged();
-  emit viewportChanged();
-  update();
 }
 
 bool UnifiedGridRenderer::setZoomRung(const chart_raster::RasterCamera& drawn, double fracX, double fracY,
@@ -286,7 +194,7 @@ void UnifiedGridRenderer::zoomClicks(int clicks, double x, double y, bool time, 
   if (getViewState()->isAutoScrollEnabled()) enableAutoScroll(false);
   // A new glide from what is drawn on every axis whose end the click changed (the auto
   // price fit of the new time window included); the other axis is left as it is.
-  startAxisGlides(drawn, restBefore, at, ap, false, false);
+  m_view->zoomGlide().startAxisGlides(drawn, restBefore, at, ap, false, false);
 }
 
 void UnifiedGridRenderer::zoomContinuous(double factor, double x, double y, bool time, bool price) {
@@ -322,7 +230,7 @@ void UnifiedGridRenderer::zoomContinuousFor(double factor, double x, double y, b
   const bool timeJoins = time && !glide.gestureTime, priceJoins = price && !glide.gesturePrice;
   // An axis joining the gesture leaves its glide where it is drawn; a glide on the other
   // axis keeps running.
-  endZoomGlide(timeJoins, priceJoins);
+  m_view->zoomGlide().endZoomGlide(timeJoins, priceJoins);
   glide.gestureTime = glide.gestureTime || time;
   glide.gesturePrice = glide.gesturePrice || price;
   m_gestureAt = QPointF(x, y);
@@ -404,7 +312,7 @@ void UnifiedGridRenderer::endZoomGesture() {
   }
   // The gesture's axes glide from their continuous camera to the rung; the other axis
   // is left as it is.
-  startAxisGlides(from, restBefore, at, ap, m_view->glide().gestureTime, m_view->glide().gesturePrice);
+  m_view->zoomGlide().startAxisGlides(from, restBefore, at, ap, m_view->glide().gestureTime, m_view->glide().gesturePrice);
 }
 
 void UnifiedGridRenderer::wheelZoom(int angle, bool pixelDeltaNull, Qt::ScrollPhase phase, bool precise,

@@ -175,6 +175,9 @@ add_library(sentinel_chart_core STATIC
     render/FrameContextBuilder.cpp
     chart/core/ChartCamera.hpp
     chart/core/ChartCamera.cpp
+    chart/core/ChartSession.hpp
+    chart/core/ZoomGlide.hpp
+    chart/core/ZoomGlide.cpp
     chart/core/ZoomGlideState.hpp
     chart/core/ChartPorts.hpp
     chart/core/PublishedFrame.hpp

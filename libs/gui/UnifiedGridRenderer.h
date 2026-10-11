@@ -171,20 +171,8 @@ private:
     void zoomStoredView(double factor, double x, double y, bool time, bool price);
     // A continuous zoom that settles on a rung after settleMs without input.
     void zoomContinuousFor(double factor, double x, double y, bool time, bool price, int settleMs);
-    // GUI thread, once per frame before the sync (updatePolish): the glide's progress
-    // for that frame; the axis models and sibling overlays follow it. The next frame's
-    // polish is requested through a reused zero timer (never from inside updatePolish).
-    void advanceZoomGlide();
+    void bindZoomGlide();
     QTimer* m_glidePolishTimer = nullptr;
-    // An explicit view change lands the glides of these axes at once (no glide).
-    void endZoomGlide(bool time = true, bool price = true);
-    // After a click or a gesture's end changed the stored view: each axis whose end
-    // changed (or that the gesture moved: force) glides from the drawn camera; an axis
-    // whose end is unchanged keeps its glide or its rest.
-    void startAxisGlides(const chart_raster::RasterCamera& drawn, const chart_raster::RasterCamera& restBefore,
-                         double anchorTime, double anchorPrice, bool forceTime, bool forcePrice);
-    void advanceAxisGlide(chart::AxisGlide& glide, bool time, const chart_raster::RasterCamera& rest,
-                          const chart_raster::RasterCamera& intended, qint64 now);
     // Follow-live with a given live open end (followGpuLive with the layer's).
     void followGpuLiveTo(int64_t openEnd);
     // Moves the stored view to a rung about a drawn point (fracX/fracY of the item).
@@ -378,13 +366,13 @@ public:
     Q_INVOKABLE void zoomPriceDrag(double delta, double y);
     Q_INVOKABLE void zoomTimeClicks(int clicks, double x);
     Q_INVOKABLE void zoomPriceClicks(int clicks, double y);
-    bool zoomGliding() const { return m_view->glide().time.active || m_view->glide().price.active; }
-    bool timeGliding() const { return m_view->glide().time.active; }
-    bool priceGliding() const { return m_view->glide().price.active; }
+    bool zoomGliding() const { Q_ASSERT(m_view); return m_view->glide().time.active || m_view->glide().price.active; }
+    bool timeGliding() const { Q_ASSERT(m_view); return m_view->glide().time.active; }
+    bool priceGliding() const { Q_ASSERT(m_view); return m_view->glide().price.active; }
     int glideRebasesForTest() const { return m_view->glide().rebases; }
     // Tests: a follow-live update for a live open end (the fixtures have no live feed).
     void followLiveForTest(qint64 openEndMs) { followGpuLiveTo(openEndMs); }
-    bool zoomGesturing() const { return m_view->glide().gesture; }
+    bool zoomGesturing() const { Q_ASSERT(m_view); return m_view->glide().gesture; }
     // Tests: inspect the actual settle timer without depending on its duration.
     bool gestureSettlePending() const { return m_zoomSettleTimer && m_zoomSettleTimer->isActive(); }
     // Tests: the glide clock (ms); default the chart's frame clock.

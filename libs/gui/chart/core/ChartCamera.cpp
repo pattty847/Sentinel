@@ -1,8 +1,9 @@
 #include "chart/core/ChartCamera.hpp"
 
-#include "chart/core/ChartViewController.hpp"
+#include "chart/core/ChartSession.hpp"
 #include "chart/core/PublishedFrame.hpp"
 #include "render/FrameContextBuilder.hpp"
+#include "render/GridViewState.hpp"
 
 #include <algorithm>
 #include <cmath>

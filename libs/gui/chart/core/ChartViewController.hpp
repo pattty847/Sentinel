@@ -1,6 +1,8 @@
 #pragma once
 
 #include "chart/core/ChartCamera.hpp"
+#include "chart/core/ChartSession.hpp"
+#include "chart/core/ZoomGlide.hpp"
 #include "render/GridViewState.hpp"
 
 #include <QObject>
@@ -9,13 +11,6 @@
 #include <memory>
 
 namespace chart {
-
-struct ChartSession {
-    QString symbol;
-    int64_t timeframeMs = 100;
-    double bookMid = 0.0;
-    double lastTrade = 0.0;
-};
 
 struct PlacementFlags {
     bool priceKnown = false;
@@ -49,6 +44,9 @@ public:
     ChartCamera& camera() { return camera_; }
     const ChartCamera& camera() const { return camera_; }
 
+    ZoomGlide& zoomGlide() { return zoomGlide_; }
+    void advanceFrame(qint64 now) { zoomGlide_.advanceZoomGlide(now); }
+
     void applyGpuLimits();
     void syncGpuView();
     void setGpuViewportSelf(qint64 start, qint64 end, double priceMin, double priceMax,
@@ -64,6 +62,7 @@ private:
     InitialViewSettings initialViewSettings_;
     ZoomGlideState glide_;
     ChartCamera camera_;
+    ZoomGlide zoomGlide_;
 };
 
 } // namespace chart
