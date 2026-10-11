@@ -181,3 +181,11 @@ Verified 2026-09-27 with codex-cli 0.158; 0.160 was installed by 2026-10-05. Re-
 - Offscreen sandbox tests can pass where native Cocoa fails: key propagation and focus inside menus differed
   (2026-10-06). UI work that touches focus or keyboard handling needs the native test run before landing.
 - The build-queue wait/cancel path had a TERM-trap issue (FM-195); the owner is hardening the queue.
+
+### SentinelBar milestones
+
+The conductor records only meaningful changes with
+`scripts/dev/sentinel-event.sh <kind> <tone> <text> [--slice S0b] [--branch branch]`.
+Use `review` once per review round with blocker/major/minor counts, `blocker`
+when work stops, and `plan` for a new plan or phase change. The build and land
+scripts emit failures and successful landings automatically.

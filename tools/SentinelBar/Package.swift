@@ -5,6 +5,8 @@ let package = Package(
     name: "SentinelBar",
     platforms: [.macOS(.v13)],
     targets: [
-        .executableTarget(name: "SentinelBar", path: "Sources/SentinelBar"),
+        .target(name: "SentinelBarCore"),
+        .executableTarget(name: "SentinelBar", dependencies: ["SentinelBarCore"], path: "Sources/SentinelBar", exclude: ["Resources"]),
+        .testTarget(name: "SentinelBarCoreTests", dependencies: ["SentinelBarCore"]),
     ]
 )

@@ -1,203 +1,174 @@
 import Foundation
-
-// Running Claude Code and Codex jobs: found by process scan, placed by cwd, and described by the
-// newest entry of their own session transcript (best effort; formats are the CLIs', not ours).
+import SentinelBarCore
 
 struct AgentJob: Identifiable {
-    var id: Int32 { pid }
+    let id: String
     let pid: Int32
-    let kind: String          // "claude" | "codex"
-    let model: String?
-    let elapsed: String       // ps etime
+    let kind: String
+    var model: String?
     let cwd: String
-    var worktree: String?     // branch of the worktree containing cwd
-    var step: String?         // last tool call or message
-    var lastActive: Date?     // transcript mtime
+    var branch: String?
+    var transcript: URL?
+    var step: String?
+    var tokens: Int?
+    var lastActive: Date?
+    var failed = false
+    var subagent = false
+    var idle: Bool { lastActive.map { Date().timeIntervalSince($0) > 120 } ?? false }
+}
+
+enum TranscriptFiles {
+    private static var states: [String: (Date, TranscriptState)] = [:]
+    private static var cwds: [String: String] = [:]
+
+    static func tail(_ url: URL) -> [String] {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        let offset = size > 256 * 1024 ? size - 256 * 1024 : 0
+        try? handle.seek(toOffset: offset)
+        guard let data = try? handle.read(upToCount: 256 * 1024) else { return [] }
+        let text = String(decoding: data, as: UTF8.self)
+        var lines = text.components(separatedBy: "\n")
+        if offset > 0 && !lines.isEmpty { lines.removeFirst() }
+        if !text.hasSuffix("\n") && !lines.isEmpty { lines.removeLast() }
+        return lines
+    }
+
+    static func state(_ url: URL, _ date: Date, kind: String) -> TranscriptState {
+        if let cached = states[url.path], cached.0 == date { return cached.1 }
+        let state = kind == "codex" ? TranscriptParser.codex(tail(url)) : TranscriptParser.claude(tail(url))
+        states[url.path] = (date, state)
+        return state
+    }
+
+    static func codexCwd(_ url: URL) -> String? {
+        if let cached = cwds[url.path] { return cached }
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: 65536),
+              let first = String(data: data, encoding: .utf8)?.components(separatedBy: "\n").first,
+              let cwd = TranscriptParser.codexCwd(first) else { return nil }
+        cwds[url.path] = cwd
+        return cwd
+    }
+
+    static func codexIndex() -> [String: (URL, Date)] {
+        var result: [String: (URL, Date)] = [:]
+        let home = ProcessInfo.processInfo.environment["CODEX_HOME"] ?? NSHomeDirectory() + "/.codex"
+        let calendar = Calendar.current
+        for back in 0...1 {
+            guard let day = calendar.date(byAdding: .day, value: -back, to: Date()) else { continue }
+            let parts = calendar.dateComponents([.year, .month, .day], from: day)
+            let path = String(format: "%@/sessions/%04d/%02d/%02d", home, parts.year!, parts.month!, parts.day!)
+            let files = (try? FileManager.default.contentsOfDirectory(at: URL(fileURLWithPath: path),
+                includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+            for url in files where url.lastPathComponent.hasPrefix("rollout-") && url.pathExtension == "jsonl" {
+                guard let cwd = codexCwd(url), let date = modified(url) else { continue }
+                if result[cwd]?.1 ?? .distantPast < date { result[cwd] = (url, date) }
+            }
+        }
+        return result
+    }
+
+    static func claudeFiles(cwd: String) -> (main: (URL, Date)?, children: [(URL, Date)]) {
+        let slug = cwd.map { $0 == "/" || $0 == "." ? "-" : $0 }.map(String.init).joined()
+        let root = URL(fileURLWithPath: NSHomeDirectory() + "/.claude/projects/" + slug)
+        let mains = ((try? FileManager.default.contentsOfDirectory(at: root,
+            includingPropertiesForKeys: [.contentModificationDateKey])) ?? []).filter { $0.pathExtension == "jsonl" }
+        let main = mains.compactMap { url -> (URL, Date)? in modified(url).map { (url, $0) } }.max { $0.1 < $1.1 }
+        var children: [(URL, Date)] = []
+        for file in mains {
+            let dir = root.appendingPathComponent(file.deletingPathExtension().lastPathComponent)
+                .appendingPathComponent("subagents")
+            let subfiles = (try? FileManager.default.contentsOfDirectory(at: dir,
+                includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+            children += subfiles.filter { $0.pathExtension == "jsonl" }
+                .compactMap { url in modified(url).map { (url, $0) } }
+        }
+        return (main, children)
+    }
+
+    private static func modified(_ url: URL) -> Date? {
+        try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+    }
 }
 
 enum AgentProbe {
     static func scan(worktrees: [Worktree]) -> [AgentJob] {
-        guard let ps = Shell.run("/bin/ps", ["-axo", "pid=,ppid=,etime=,command="]) else { return [] }
-        var found: [(pid: Int32, ppid: Int32, etime: String, kind: String, args: [String])] = []
-        for line in ps.split(separator: "\n") {
-            let f = line.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: true).map(String.init)
-            guard f.count == 4, let pid = Int32(f[0]), let ppid = Int32(f[1]) else { continue }
-            let args = f[3].split(separator: " ").map(String.init)
+        guard let output = Shell.run("/bin/ps", ["-axo", "pid=,ppid=,command="]) else { return [] }
+        var processes: [(pid: Int32, parent: Int32, kind: String, args: [String])] = []
+        for line in output.split(separator: "\n") {
+            let f = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true).map(String.init)
+            guard f.count == 3, let pid = Int32(f[0]), let parent = Int32(f[1]) else { continue }
+            let args = f[2].split(separator: " ").map(String.init)
             guard let kind = kindOf(args) else { continue }
-            found.append((pid, ppid, f[2], kind, args))
+            processes.append((pid, parent, kind, args))
         }
-        // Wrappers (node shim -> native binary) show up twice; keep the outermost process of each job.
-        let kindByPid = Dictionary(found.map { ($0.pid, $0.kind) }, uniquingKeysWith: { a, _ in a })
-        found.removeAll { kindByPid[$0.ppid] == $0.kind }
-        guard !found.isEmpty else { return [] }
-        let cwds = cwdsOf(found.map(\.pid))
-        let codexIndex = CodexSessions.index()
-        return found.compactMap { p in
-            guard let cwd = cwds[p.pid] else { return nil }
-            var job = AgentJob(pid: p.pid, kind: p.kind, model: modelArg(p.args), elapsed: p.etime, cwd: cwd)
-            job.worktree = worktrees.filter { cwd == $0.path || cwd.hasPrefix($0.path + "/") }
+        let kinds = Dictionary(processes.map { ($0.pid, $0.kind) }, uniquingKeysWith: { a, _ in a })
+        processes.removeAll { kinds[$0.parent] == $0.kind }
+        let cwds = cwdsOf(processes.map(\.pid))
+        let codex = TranscriptFiles.codexIndex()
+        var jobs: [AgentJob] = []
+        for p in processes {
+            guard let cwd = cwds[p.pid] else { continue }
+            let branch = worktrees.filter { cwd == $0.path || cwd.hasPrefix($0.path + "/") }
                 .max { $0.path.count < $1.path.count }?.branch
-            let t = p.kind == "claude" ? ClaudeSessions.latest(cwd: cwd) : codexIndex.latest(cwd: cwd)
-            job.step = t?.step
-            job.lastActive = t?.mtime
-            return job
+            var job = AgentJob(id: String(p.pid), pid: p.pid, kind: p.kind,
+                               model: modelArg(p.args), cwd: cwd, branch: branch)
+            if p.kind == "codex", let (url, date) = codex[cwd] {
+                apply(url, date, to: &job)
+            } else if p.kind == "claude" {
+                let files = TranscriptFiles.claudeFiles(cwd: cwd)
+                if let (url, date) = files.main { apply(url, date, to: &job) }
+                for (url, date) in files.children where Date().timeIntervalSince(date) < 120 {
+                    var child = AgentJob(id: url.path, pid: p.pid, kind: "claude",
+                                         model: nil, cwd: cwd, branch: branch, subagent: true)
+                    apply(url, date, to: &child)
+                    jobs.append(child)
+                }
+            }
+            jobs.append(job)
         }
-        .sorted { ($0.lastActive ?? .distantPast) > ($1.lastActive ?? .distantPast) }
+        return jobs.sorted { ($0.lastActive ?? .distantPast) > ($1.lastActive ?? .distantPast) }
+    }
+
+    private static func apply(_ url: URL, _ date: Date, to job: inout AgentJob) {
+        let state = TranscriptFiles.state(url, date, kind: job.kind)
+        job.transcript = url
+        job.model = job.model ?? state.model
+        job.step = state.step
+        job.tokens = state.tokens
+        job.lastActive = date
+        job.failed = state.failed
     }
 
     private static func kindOf(_ args: [String]) -> String? {
-        // argv0 may be the binary itself or an interpreter (node) running a script.
-        for a in args.prefix(2) {
-            let base = (a as NSString).lastPathComponent
-            if base == "claude" { return "claude" }
-            if base == "codex" || base.hasPrefix("codex-") { return "codex" }
+        for arg in args.prefix(2) {
+            let name = (arg as NSString).lastPathComponent
+            if name == "claude" { return "claude" }
+            if name == "codex" || name.hasPrefix("codex-") { return "codex" }
         }
         return nil
     }
 
     private static func modelArg(_ args: [String]) -> String? {
-        for (i, a) in args.enumerated() {
-            if (a == "-m" || a == "--model"), i + 1 < args.count { return args[i + 1] }
-            if a.hasPrefix("--model=") { return String(a.dropFirst(8)) }
+        for (index, arg) in args.enumerated() {
+            if (arg == "-m" || arg == "--model") && index + 1 < args.count { return args[index + 1] }
+            if arg.hasPrefix("--model=") { return String(arg.dropFirst(8)) }
         }
         return nil
     }
 
     private static func cwdsOf(_ pids: [Int32]) -> [Int32: String] {
-        let list = pids.map(String.init).joined(separator: ",")
-        guard let out = Shell.run("/usr/sbin/lsof", ["-a", "-d", "cwd", "-Fn", "-p", list], anyExit: true) else { return [:] }
+        guard !pids.isEmpty, let output = Shell.run("/usr/sbin/lsof",
+            ["-a", "-d", "cwd", "-Fn", "-p", pids.map(String.init).joined(separator: ",")], anyExit: true) else { return [:] }
         var result: [Int32: String] = [:]
         var current: Int32?
-        for line in out.split(separator: "\n") {
+        for line in output.split(separator: "\n") {
             if line.hasPrefix("p") { current = Int32(line.dropFirst()) }
-            if line.hasPrefix("n"), let pid = current { result[pid] = String(line.dropFirst()) }
+            if line.hasPrefix("n"), let current { result[current] = String(line.dropFirst()) }
         }
         return result
-    }
-}
-
-struct TranscriptStep {
-    let step: String?
-    let mtime: Date
-}
-
-enum Transcript {
-    /// Last `bytes` of a file as complete lines, newest first.
-    static func tailLines(_ url: URL, bytes: Int = 256 * 1024) -> [Substring] {
-        guard let h = try? FileHandle(forReadingFrom: url) else { return [] }
-        defer { try? h.close() }
-        let size = (try? h.seekToEnd()) ?? 0
-        try? h.seek(toOffset: size > UInt64(bytes) ? size - UInt64(bytes) : 0)
-        guard let data = try? h.readToEnd(), let text = String(data: data, encoding: .utf8) else { return [] }
-        return Array(text.split(separator: "\n").reversed())
-    }
-
-    static func json(_ line: Substring) -> [String: Any]? {
-        (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any]
-    }
-
-    static func newest(in dir: URL, ext: String = "jsonl") -> (URL, Date)? {
-        let keys: [URLResourceKey] = [.contentModificationDateKey]
-        guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: keys) else { return nil }
-        return files.filter { $0.pathExtension == ext }
-            .compactMap { u -> (URL, Date)? in
-                guard let d = try? u.resourceValues(forKeys: Set(keys)).contentModificationDate else { return nil }
-                return (u, d)
-            }
-            .max { $0.1 < $1.1 }
-    }
-
-    static func oneLine(_ s: String, max: Int = 90) -> String {
-        let flat = s.split(whereSeparator: \.isNewline).first.map(String.init) ?? s
-        return flat.count > max ? String(flat.prefix(max - 1)) + "…" : flat
-    }
-}
-
-/// Claude Code: ~/.claude/projects/<cwd with / and . as ->/<session>.jsonl
-enum ClaudeSessions {
-    static func latest(cwd: String) -> TranscriptStep? {
-        let slug = cwd.map { $0 == "/" || $0 == "." ? "-" : $0 }.map(String.init).joined()
-        let dir = URL(fileURLWithPath: NSHomeDirectory() + "/.claude/projects/" + slug)
-        guard let (file, mtime) = Transcript.newest(in: dir) else { return nil }
-        for line in Transcript.tailLines(file) {
-            guard let obj = Transcript.json(line), obj["type"] as? String == "assistant",
-                  let msg = obj["message"] as? [String: Any],
-                  let content = msg["content"] as? [[String: Any]] else { continue }
-            for item in content.reversed() {
-                if item["type"] as? String == "tool_use", let name = item["name"] as? String {
-                    let input = item["input"] as? [String: Any] ?? [:]
-                    let detail = ["description", "command", "file_path", "pattern", "prompt"]
-                        .lazy.compactMap { input[$0] as? String }.first
-                    return TranscriptStep(step: Transcript.oneLine(detail.map { "\(name): \($0)" } ?? name), mtime: mtime)
-                }
-                if item["type"] as? String == "text", let text = item["text"] as? String, !text.isEmpty {
-                    return TranscriptStep(step: Transcript.oneLine(text), mtime: mtime)
-                }
-            }
-        }
-        return TranscriptStep(step: nil, mtime: mtime)
-    }
-}
-
-/// Codex: $CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl; the first line's session_meta carries the cwd.
-struct CodexSessions {
-    private var byCwd: [String: (URL, Date)] = [:]
-
-    static func index() -> CodexSessions {
-        var idx = CodexSessions()
-        let home = ProcessInfo.processInfo.environment["CODEX_HOME"] ?? NSHomeDirectory() + "/.codex"
-        let cal = Calendar.current
-        for back in 0...1 {   // today and yesterday cover a job that started before midnight
-            guard let day = cal.date(byAdding: .day, value: -back, to: Date()) else { continue }
-            let c = cal.dateComponents([.year, .month, .day], from: day)
-            let dir = URL(fileURLWithPath: String(format: "%@/sessions/%04d/%02d/%02d", home, c.year!, c.month!, c.day!))
-            let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
-            for f in files where f.pathExtension == "jsonl" {
-                guard let mtime = try? f.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
-                      let cwd = firstLineCwd(f) else { continue }
-                if let have = idx.byCwd[cwd], have.1 >= mtime { continue }
-                idx.byCwd[cwd] = (f, mtime)
-            }
-        }
-        return idx
-    }
-
-    private static func firstLineCwd(_ url: URL) -> String? {
-        guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
-        defer { try? h.close() }
-        guard let data = try? h.read(upToCount: 64 * 1024), let text = String(data: data, encoding: .utf8),
-              let first = text.split(separator: "\n").first, let obj = Transcript.json(first) else { return nil }
-        let payload = obj["payload"] as? [String: Any] ?? obj
-        return payload["cwd"] as? String
-    }
-
-    func latest(cwd: String) -> TranscriptStep? {
-        guard let (file, mtime) = byCwd[cwd] else { return nil }
-        for line in Transcript.tailLines(file) {
-            guard let obj = Transcript.json(line), let p = obj["payload"] as? [String: Any],
-                  let type = p["type"] as? String else { continue }
-            switch type {
-            case "function_call", "custom_tool_call", "local_shell_call":
-                let name = p["name"] as? String ?? "shell"
-                var detail = p["arguments"] as? String ?? p["input"] as? String ?? ""
-                if let args = (try? JSONSerialization.jsonObject(with: Data(detail.utf8))) as? [String: Any] {
-                    if let cmd = args["command"] as? [String] { detail = cmd.joined(separator: " ") }
-                    else if let cmd = args["command"] as? String { detail = cmd }
-                }
-                return TranscriptStep(step: Transcript.oneLine("\(name): \(detail)"), mtime: mtime)
-            case "message" where p["role"] as? String == "assistant":
-                let parts = p["content"] as? [[String: Any]] ?? []
-                if let text = parts.compactMap({ $0["text"] as? String }).last, !text.isEmpty {
-                    return TranscriptStep(step: Transcript.oneLine(text), mtime: mtime)
-                }
-            case "agent_message", "agent_reasoning":
-                if let text = p["message"] as? String ?? p["text"] as? String, !text.isEmpty {
-                    return TranscriptStep(step: Transcript.oneLine(text), mtime: mtime)
-                }
-            default:
-                continue
-            }
-        }
-        return TranscriptStep(step: nil, mtime: mtime)
     }
 }

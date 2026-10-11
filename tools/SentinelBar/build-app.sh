@@ -7,12 +7,13 @@
 # Ad-hoc signed (codesign -s -). It never uses the "Sentinel Local Code Signing" identity.
 set -euo pipefail
 cd "$(dirname "$0")"
-swift build -c release
+../../scripts/dev/build-queue.sh --label SentinelBar-release -- swift build -c release
 bin="$(swift build -c release --show-bin-path)/SentinelBar"
 app=build/SentinelBar.app
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin" "$app/Contents/MacOS/SentinelBar"
+cp Sources/SentinelBar/Resources/*.png "$app/Contents/Resources/"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
