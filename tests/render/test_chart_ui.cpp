@@ -1305,7 +1305,6 @@ TEST_F(ChartControls, GearPaletteAndLayoutActionsPersistAndUseHostHooks) {
     EXPECT_TRUE(menuAction(gear, "chartMenuPalettePreset", 1)->isChecked());
     menuAction(gear, "chartMenuDebugSettings")->trigger();
     EXPECT_EQ(openedTab, "Debug");
-    EXPECT_FALSE(menuAction(gear, "chartMenuDebugOverlay")->isEnabled());
 }
 
 // The chart settings menu: one entry point; every entry round-trips through the

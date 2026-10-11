@@ -259,14 +259,6 @@ void UnifiedGridRenderer::componentComplete() {
   }
 }
 
-void UnifiedGridRenderer::setMinVolumeFilter(double minVolume) {
-  if (m_minVolumeFilter != minVolume) {
-    m_minVolumeFilter = minVolume;
-    update();
-    emit minVolumeFilterChanged();
-  }
-}
-
 void UnifiedGridRenderer::setAutoScrollPaddingFrac(double fraction) {
   const double clamped = std::clamp(fraction, 0.0, 0.45);
   if (m_autoScrollPaddingFrac != clamped) {
@@ -502,15 +494,6 @@ void UnifiedGridRenderer::setPriceResolution(double resolution) {
         },
         Qt::QueuedConnection);
     update();
-  }
-}
-
-void UnifiedGridRenderer::setGridResolutionPreset(int preset) {
-  const double priceRes[] = {2.5, 5.0, 10.0};
-  const int timeRes[] = {50, 100, 250};
-  if (preset >= 0 && preset <= 2) {
-    setPriceResolution(priceRes[preset]);
-    setTimeframe(timeRes[preset]);
   }
 }
 

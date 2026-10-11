@@ -551,12 +551,6 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     fadeRow->addWidget(m_crossfadeOn);
     fadeRow->addWidget(m_crossfadeMs);
     form->addRow("Transition", fadeRow);
-    m_bandEdges = new QCheckBox("Show near-band edges", page);
-    m_bandEdges->setObjectName("showBandEdges");
-    m_bandEdges->setToolTip("Saved with the chart. sentinel-lab draws the band edges; the main chart does not yet.");
-    form->addRow("Band edges (lab only)", m_bandEdges);
-    form->setRowVisible(m_bandEdges, false); // lab-only setting has no main-chart effect
-
     auto *tone = new QGroupBox("Tone mapping (this session)", page);
     auto *toneForm = new QFormLayout(tone);
     auto [gammaSlider, gammaLabel] = makeSlider(tone, 10, 500, 85);
@@ -589,7 +583,6 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     describe(form, m_sensitivityMax, m_sensitivityMax->toolTip());
     describe(form, m_opacity, "GPU heatmap opacity: 0 = transparent, 1 = solid. Lower it to see other chart layers through the heatmap.");
     describe(form, fadeRow, "Blend old and new GPU heatmap rows over 1-2000 milliseconds when the tick changes. Turn off for an immediate switch, or lower the duration for a quicker blend.");
-    describe(form, m_bandEdges, m_bandEdges->toolTip());
     describe(toneForm, gammaRow, "Curve of heatmap colour intensity (0.1-5). Lower it to bring out weaker liquidity; higher values favour stronger liquidity, this session only.");
     describe(toneForm, contrastRow, "Spread heatmap colour intensity around its midpoint (0.1-5). Raise it for stronger separation, or lower it for a flatter scale; this session only.");
     describe(toneForm, floorRow, "Minimum intensity before the colour curve (0-0.5; 0 = off). Raise it to boost faint visible cells; cells below range low stay hidden, this session only.");
@@ -611,7 +604,6 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     connect(m_crossfadeMs, &QSpinBox::valueChanged, this, [this](int ms) {
         if (m_crossfadeOn->isChecked()) apply({{"crossfadeMs", ms}});
     });
-    connect(m_bandEdges, &QCheckBox::toggled, this, [this](bool on) { apply({{"showBandEdges", on}}); });
     connect(m_gammaSlider, &QSlider::valueChanged, this, [this](int v) {
         m_gammaLabel->setText(QString::number(v / 100.0, 'f', 2));
         if (m_renderer && !m_loading) m_renderer->setHeatmapGamma(v / 100.0);
@@ -636,11 +628,6 @@ QWidget *HeatmapSettingsDialog::buildBudgetsTab() {
     chartForm->addRow("GPU memory cap", m_gpuCapMiB);
     m_uploadKiB = intSpin(chart, "uploadBudgetBytes", 1, 128 * 1024, 512, " KiB");
     chartForm->addRow("Upload budget per frame", m_uploadKiB);
-    m_prefetchTiles = intSpin(chart, "prefetchTiles", 0, 16, 1, "");
-    m_prefetchTiles->setToolTip("Saved with the chart. The span planner prefetches max(2, view width) tiles and "
-                                "does not read this setting yet.");
-    chartForm->addRow("Prefetch tiles (not used yet)", m_prefetchTiles);
-    chartForm->setRowVisible(m_prefetchTiles, false); // retain the saved field without offering an inactive control
     chartForm->addRow(note("The upload budget is at most 128 MiB and at most the GPU cap.", chart));
     layout->addWidget(chart);
 
@@ -659,7 +646,6 @@ QWidget *HeatmapSettingsDialog::buildBudgetsTab() {
     layout->addStretch();
     describe(chartForm, m_gpuCapMiB, "GPU heatmap cache budget for this chart, in MiB. Raise it if panning reloads tiles; tiles on screen or kept as a stand-in while detail loads can keep usage above the cap.");
     describe(chartForm, m_uploadKiB, "GPU heatmap upload budget per frame, in KiB; capped at 128 MiB and the GPU memory cap. Lower it to spread uploads across frames, or raise it to load tiles sooner.");
-    describe(chartForm, m_prefetchTiles, m_prefetchTiles->toolTip());
     describe(processForm, m_decodedMiB, "Budget for recorded data unpacked in RAM across all charts, in MiB (1-4096). Raise it to keep more history cached when revisiting it.");
     describe(processForm, m_spanMiB, "RAM budget for ready-to-draw heatmap data built from recordings across all charts, in MiB (1-4096). Raise it to keep more chart data ready for reuse when panning.");
     describe(processForm, m_ceilingMiB, "Total RAM allowed for both of the above across all charts, in MiB (1-4096); must be at least their combined budgets. Raise it when the memory limit prevents loading more heatmap data.");
@@ -668,7 +654,6 @@ QWidget *HeatmapSettingsDialog::buildBudgetsTab() {
     connect(m_uploadKiB, &QSpinBox::valueChanged, this, [this](int kib) {
         apply({{"uploadBudgetBytes", qint64(kib) * qint64(KiB)}});
     });
-    connect(m_prefetchTiles, &QSpinBox::valueChanged, this, [this](int n) { apply({{"prefetchTiles", n}}); });
     for (auto *spin : {m_decodedMiB, m_spanMiB, m_ceilingMiB})
         connect(spin, &QSpinBox::valueChanged, this, [this] { applyBudgets(); });
     return page;
@@ -835,13 +820,8 @@ void HeatmapSettingsDialog::refreshFromModel() {
     }
     if (s.crossfadeMs > 0) set(m_crossfadeMs, s.crossfadeMs);
     m_crossfadeMs->setEnabled(s.crossfadeMs > 0);
-    {
-        const QSignalBlocker block(m_bandEdges);
-        m_bandEdges->setChecked(s.showBandEdges);
-    }
     set(m_gpuCapMiB, int(std::max<uint64_t>(1, s.gpuCapBytes / MiB)));
     set(m_uploadKiB, int(std::max<uint64_t>(1, s.uploadBudgetBytes / KiB)));
-    set(m_prefetchTiles, s.prefetchTiles);
     const auto b = m_model->budgets();
     set(m_decodedMiB, int(b.decodedChunks / MiB));
     set(m_spanMiB, int(b.spanSources / MiB));

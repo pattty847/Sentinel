@@ -17,7 +17,6 @@
 #include "render/CandlestickOverlayItem.hpp"
 #include "render/CandlePixelGeometry.hpp"
 #include "render/DataProcessor.hpp"
-#include "render/LabTextItem.hpp"
 #include "render/PaperTradeOverlayModel.hpp"
 #include "render/PaperTradeOverlayRenderer.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
@@ -4469,7 +4468,6 @@ int main(int argc, char **argv) {
     qmlRegisterType<PaperTradeOverlayModel>("Sentinel", 1, 0, "PaperTradeOverlayModel");
     qmlRegisterType<PaperTradeOverlayRenderer>("Sentinel", 1, 0, "PaperTradeOverlayRenderer");
     qmlRegisterModule("Sentinel.Charts", 1, 0);
-    qmlRegisterType<LabTextItem>("Sentinel.Charts", 1, 0, "LabTextItem");
     qmlRegisterType<CandlestickBatched>("Sentinel.Charts", 1, 0, "CandlestickBatched");
     qmlRegisterType<TradeBubbleOverlayItem>("Sentinel.Charts", 1, 0, "TradeBubbleOverlayItem");
     qmlRegisterType<CandlestickOverlayItem>("Sentinel.Charts", 1, 0, "CandlestickOverlayItem");

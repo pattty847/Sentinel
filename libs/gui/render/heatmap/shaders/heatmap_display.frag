@@ -33,7 +33,7 @@ vec4 hatchColor(uint state) {
 }
 vec4 paintMagnitude(float code, bool ask) {
     if (code <= 0.0) return vec4(0.0);
-    // Recording-mode tone mapping exactly as heatmap_intensity.frag (A/B parity):
+    // Recording-mode tone mapping (matches the HeatmapPalette CPU reference):
     // [codeFloor, codeFloor + codeRange] -> [0, 1], then gamma, floor, contrast.
     float magnitude = clamp((code - style.x) / max(style.y, 1.0), 0.0, 1.0);
     if (magnitude <= 0.0) return vec4(0.0);

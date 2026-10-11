@@ -17,7 +17,6 @@
 #include "UnifiedGridRenderer.h"
 #include "models/TimeAxisModel.hpp"
 #include "models/PriceAxisModel.hpp"
-#include "render/LabTextItem.hpp"
 #include "render/CandlestickBatched.hpp"
 #include "render/CandlestickOverlayItem.hpp"
 #include "render/AlgoOverlayRenderer.hpp"
@@ -817,7 +816,6 @@ int main(int argc, char** argv) {
     qmlRegisterType<PaperTradeOverlayModel>("Sentinel", 1, 0, "PaperTradeOverlayModel");
     qmlRegisterType<PaperTradeOverlayRenderer>("Sentinel", 1, 0, "PaperTradeOverlayRenderer");
     qmlRegisterModule("Sentinel.Charts", 1, 0);
-    qmlRegisterType<LabTextItem>("Sentinel.Charts", 1, 0, "LabTextItem");
     qmlRegisterType<CandlestickBatched>("Sentinel.Charts", 1, 0, "CandlestickBatched");
     qmlRegisterType<CandlestickOverlayItem>("Sentinel.Charts", 1, 0, "CandlestickOverlayItem");
     QTemporaryDir settingsDir;

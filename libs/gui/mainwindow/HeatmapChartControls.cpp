@@ -243,19 +243,6 @@ void HeatmapChartControls::buildChartMenu() {
         requestTelemetryVisible(!m_model->settings().showTelemetry);
     });
     telemetry->setCheckable(true);
-    for (const auto &[text, property] : {
-             std::pair{"Frame and GPU statistics", "showGpuStatsOverlay"},
-             std::pair{"Data pipeline", "showDataPipelineOverlay"},
-             std::pair{"Render strategy", "showRenderStrategyOverlay"},
-             std::pair{"Viewport math", "showViewportMathOverlay"},
-             std::pair{"Memory and cache", "showMemoryCacheOverlay"},
-             std::pair{"Mode flags", "showModeFlagsOverlay"}}) {
-        QAction *overlay = add(debug, text, "chartMenuDebugOverlay", [this, property] {
-            if (m_renderer) m_renderer->setProperty(property, !m_renderer->property(property).toBool());
-        });
-        overlay->setCheckable(true);
-        overlay->setData(property);
-    }
     add(debug, "Advanced settings...", "chartMenuDebugSettings",
         m_hooks.openSettings ? std::function<void()>([this] { m_hooks.openSettings("Debug"); }) : nullptr);
     refreshChartMenu();
@@ -275,10 +262,6 @@ void HeatmapChartControls::refreshChartMenu() {
             a->setChecked(s.showTelemetry);
             a->setEnabled(bool(m_dock));
             a->setToolTip(m_dock ? "Show detailed heatmap diagnostics" : "Heatmap telemetry is unavailable without its dock");
-        } else if (name == "chartMenuDebugOverlay") {
-            a->setChecked(m_renderer && m_renderer->property(a->data().toString().toLatin1().constData()).toBool());
-            a->setEnabled(bool(m_renderer));
-            a->setToolTip(m_renderer ? "Show renderer diagnostics on the chart" : "No chart is attached");
         } else if (name == "chartMenuTrades") {
             a->setChecked(s.showTrades);
         } else if (name == "chartMenuTradeSizePreset") {

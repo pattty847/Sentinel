@@ -807,10 +807,8 @@ TEST(HeatmapSettingsDialogTest, EveryTabShowsTheModel) {
     EXPECT_EQ(child<QDoubleSpinBox>(dialog, "opacity")->value(), 0.75);
     EXPECT_FALSE(child<QCheckBox>(dialog, "crossfadeOn")->isChecked());
     EXPECT_FALSE(child<QSpinBox>(dialog, "crossfadeMs")->isEnabled());
-    EXPECT_TRUE(child<QCheckBox>(dialog, "showBandEdges")->isChecked());
     EXPECT_EQ(child<QSpinBox>(dialog, "gpuCapBytes")->value(), 256);
     EXPECT_EQ(child<QSpinBox>(dialog, "uploadBudgetBytes")->value(), 4096);
-    EXPECT_EQ(child<QSpinBox>(dialog, "prefetchTiles")->value(), 3);
     EXPECT_EQ(child<QSpinBox>(dialog, "decodedChunks")->value(), 512);
     EXPECT_EQ(child<QSpinBox>(dialog, "spanSources")->value(), 256);
     EXPECT_EQ(child<QSpinBox>(dialog, "cpuCeiling")->value(), 1024);
@@ -896,9 +894,7 @@ TEST(HeatmapSettingsDialogTest, ShortDialogScrollsToLookControlsWithoutChangingP
     EXPECT_TRUE(reset->isVisible());
     reset->click();
     EXPECT_DOUBLE_EQ(t.reload().opacity, model.defaultSettings().opacity);
-    EXPECT_TRUE(child<QCheckBox>(dialog, "showBandEdges")->isHidden());
     dialog.tabs()->setCurrentIndex(3);
-    EXPECT_TRUE(child<QSpinBox>(dialog, "prefetchTiles")->isHidden());
 }
 
 // Item 2 of the review: only presets loaded data builds are offered; with nothing
@@ -1017,11 +1013,9 @@ TEST(HeatmapSettingsDialogTest, EveryWidgetWritesItsSettingLiveAndSaved) {
     child<QDoubleSpinBox>(dialog, "sensitivityMin")->setValue(0.5);
     child<QDoubleSpinBox>(dialog, "opacity")->setValue(0.6);
     child<QSpinBox>(dialog, "crossfadeMs")->setValue(400);
-    child<QCheckBox>(dialog, "showBandEdges")->setChecked(true);
     // Budgets
     child<QSpinBox>(dialog, "gpuCapBytes")->setValue(128);
     child<QSpinBox>(dialog, "uploadBudgetBytes")->setValue(2048);
-    child<QSpinBox>(dialog, "prefetchTiles")->setValue(4);
     child<QSpinBox>(dialog, "cpuCeiling")->setValue(2048);
     // Live
     child<QSpinBox>(dialog, "liveMinIntervalMs")->setValue(750);
@@ -1039,15 +1033,13 @@ TEST(HeatmapSettingsDialogTest, EveryWidgetWritesItsSettingLiveAndSaved) {
     EXPECT_EQ(s.sensitivityMax, 80);
     EXPECT_EQ(s.opacity, 0.6);
     EXPECT_EQ(s.crossfadeMs, 400);
-    EXPECT_TRUE(s.showBandEdges);
     EXPECT_EQ(s.gpuCapBytes, 128 * MiB);
     EXPECT_EQ(s.uploadBudgetBytes, 2 * MiB);
-    EXPECT_EQ(s.prefetchTiles, 4);
     EXPECT_EQ(s.liveMinIntervalMs, 750);
     EXPECT_TRUE(s.showTelemetry);
     ASSERT_FALSE(applied.empty());
     EXPECT_EQ(applied.back().cpuCeiling, 2048 * MiB);
-    EXPECT_GE(changed.count(), 15); // live: each change reached listeners at once
+    EXPECT_GE(changed.count(), 13); // live: each change reached listeners at once
     EXPECT_EQ(t.reload(), s);       // and each was saved
 
     // Crossfade off is crossfadeMs 0 (hard switch); on restores the ms value.

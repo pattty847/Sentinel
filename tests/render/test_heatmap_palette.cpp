@@ -61,15 +61,13 @@ TEST(HeatmapPalette, CpuLinearSamplingMatchesTheTexelCentreFormula) {
     }
 }
 
-// A4 parity mutations: restore the old mapping in either shader independently.
+// A4 parity mutation: restore the old mapping in the display shader.
 // The shader parity check is a source-text match of the u statement.
-TEST(HeatmapPalette, BothShaderMappingsUseTheCpuTexelCentres) {
+TEST(HeatmapPalette, DisplayShaderMappingUsesTheCpuTexelCentres) {
     const std::string bid = "(0.5+adjusted*255.0)/512.0";
     const std::string ask = "(256.5+adjusted*255.0)/512.0";
     for (const auto &[path, expression] :
-         {std::pair{"libs/gui/render/heatmap/shaders/heatmap_display.frag", "ask?" + ask + ":" + bid},
-          std::pair{"libs/gui/render/shaders/heatmap_intensity.frag",
-                    "mix(" + bid + "," + ask + ",isAsk)"}}) {
+         {std::pair{"libs/gui/render/heatmap/shaders/heatmap_display.frag", "ask?" + ask + ":" + bid}}) {
         QFile source(QString::fromUtf8(SENTINEL_SOURCE_DIR) + '/' + QString::fromUtf8(path));
         ASSERT_TRUE(source.open(QIODevice::ReadOnly)) << path;
         const auto text = std::regex_replace(source.readAll().toStdString(), std::regex("\\s+"), "");

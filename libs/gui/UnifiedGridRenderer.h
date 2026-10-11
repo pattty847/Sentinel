@@ -63,7 +63,6 @@ class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     
     Q_PROPERTY(bool autoScrollEnabled READ autoScrollEnabled WRITE enableAutoScroll NOTIFY autoScrollEnabledChanged)
     
-    Q_PROPERTY(double minVolumeFilter READ minVolumeFilter WRITE setMinVolumeFilter NOTIFY minVolumeFilterChanged)
     Q_PROPERTY(double currentPriceResolution READ getCurrentPriceResolution NOTIFY priceResolutionChanged)
     Q_PROPERTY(double autoScrollPaddingFrac READ autoScrollPaddingFrac WRITE setAutoScrollPaddingFrac NOTIFY autoScrollPaddingFracChanged)
     Q_PROPERTY(bool autoScrollSmoothEnabled READ autoScrollSmoothEnabled WRITE setAutoScrollSmoothEnabled NOTIFY autoScrollSmoothEnabledChanged)
@@ -112,7 +111,6 @@ class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     Q_PROPERTY(bool autoPriceScale READ autoPriceScale WRITE setAutoPriceScale NOTIFY autoPriceScaleChanged)
 
 private:
-    double m_minVolumeFilter = 0.0;
     int64_t m_currentTimeframe_ms = 100;
     
     bool m_showGpuStatsOverlay = false;
@@ -320,7 +318,6 @@ public:
     ~UnifiedGridRenderer();
     
     int64_t currentTimeframe() const { return m_currentTimeframe_ms; }
-    double minVolumeFilter() const { return m_minVolumeFilter; }
     bool autoScrollEnabled() const { return m_viewState ? m_viewState->isAutoScrollEnabled() : false; }
     double autoScrollPaddingFrac() const { return m_autoScrollPaddingFrac; }
     bool autoScrollSmoothEnabled() const { return m_smoothAutoScrollEnabled; }
@@ -480,7 +477,6 @@ public:
     void applyTpoConfig(const ClientTpoConfig& tpo);
     void applyServerConfig(const ServerConfig& config);
 
-    Q_INVOKABLE void setGridResolutionPreset(int preset);
     Q_INVOKABLE void setTimeframe(int timeframe_ms);
     
     
@@ -548,7 +544,6 @@ public:
 signals:
     void gridResolutionChanged(int timeRes_ms, double priceRes);
     void autoScrollEnabledChanged();
-    void minVolumeFilterChanged();
     void priceResolutionChanged();
     void autoScrollPaddingFracChanged();
     void autoScrollSmoothEnabledChanged();
@@ -668,7 +663,6 @@ private:
     void setTimeAxisSource(QObject* source);
 
 private:
-    void setMinVolumeFilter(double minVolume);
     void setShowGpuStatsOverlay(bool show);
     void setShowDataPipelineOverlay(bool show);
     void setShowRenderStrategyOverlay(bool show);

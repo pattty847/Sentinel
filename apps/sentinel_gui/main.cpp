@@ -107,7 +107,6 @@ int main(int argc, char *argv[])
     }
     ConfigLoader::loadClientConfig("config/.client_config.yaml", &clientConfig);
     // Process-only overrides:
-    //   --heatmap-renderer gpu          accepted and ignored: gpu is the only renderer (S8a)
     //   --api-port N                    Agent API port instead of gui.api_port
     //   --no-screener                   no screener_server.py child (it owns port 17200 and
     //                                   kills its holder at start, so a second process must not)
@@ -118,11 +117,7 @@ int main(int argc, char *argv[])
         if (QByteArray(argv[i]) == "--agent-host-profile") agentDockProfileFile = QString::fromLocal8Bit(argv[i + 1]);
     for (int i = 1; i + 1 < argc; ++i) {
         const QByteArray flag(argv[i]), value(argv[i + 1]);
-        if (flag == "--heatmap-renderer") {
-            if (value != "gpu")
-                sLog_Warning("Ignored --heatmap-renderer " << value
-                             << ": the legacy heatmap renderer was removed (S8a); the chart draws with gpu");
-        } else if (flag == "--agent-host") {
+        if (flag == "--agent-host") {
             // Launched by scripts/dev/gui-host.py for sandboxed agents (see AgentHostMode.hpp).
             // Must run before any QSettings use. The checkout (cwd) and the build tree are
             // agent-writable, so the session directory may not live in them.

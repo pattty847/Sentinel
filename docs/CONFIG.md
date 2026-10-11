@@ -124,7 +124,6 @@ heatmap:
 gui:
   api_port: 17100
   screenshot_dir: ./screenshots
-  default_order_qty: 1.0
 ```
 
 The legacy heatmap renderer and its keys (`renderer`, `source`, `label_px`,
@@ -136,7 +135,7 @@ warning, the rest are ignored.
 
 The main chart draws the heatmap through `HeatmapGpuLayer`/`HeatmapTileNode` (S6b), the only renderer since S8a: on-chart liquidity labels come from the S7a cell query (S7b, below), walls use the S7a CPU cell query on request (defaulting to the viewport with optional period and tick), and the chart's GridViewState clamps zoom-out at one column per pixel (and one row per pixel in Manual). A timeframe change keeps the columns on screen: the time span scales by the timeframe ratio about the view end (1m -> 1h shows 60x more history), inside the clamps (S6d, FM-134).
 
-Process-only overrides on the `sentinel-gui` command line (never persisted): `--api-port N` moves the Agent API off `gui.api_port` (a second process on one server), and `--no-screener` skips the `screener_server.py` child (it binds port 17200 and the GUI kills any port-17200 holder before it starts one, so extra processes such as the GUI host's pass it). `--heatmap-renderer gpu` is accepted and ignored; any other value logs one warning (the legacy renderer was removed in S8a).
+Process-only overrides on the `sentinel-gui` command line (never persisted): `--api-port N` moves the Agent API off `gui.api_port` (a second process on one server), and `--no-screener` skips the `screener_server.py` child (it binds port 17200 and the GUI kills any port-17200 holder before it starts one, so extra processes such as the GUI host's pass it).
 
 The palette (`palette_preset`, or `Custom` with `bid_gradient`/`ask_gradient`) and `sensitivity_min`/`sensitivity_max` are chart settings (S6b): `HeatmapTileNode` samples a 512-texel palette image with the tone mapping `heatmap.gamma`, `contrast` and `shader_floor` (the retired legacy renderer's colours, matched in S6). The toolbar's palette combo writes `palettePreset`.
 
@@ -149,7 +148,7 @@ On first use, per-chart defaults come from the client YAML keys below (also supp
 | `min_row_px` | 2 | 0.5..32 |
 | `hysteresis` | 0.25 | 0..0.9 |
 | `crossfade_ms` | 150 | Integer 0..2000; 0 disables |
-| `show_band_edges` | false | Boolean; saved and editable, drawn by sentinel-lab only (the main chart does not draw band edges yet) |
+| `show_band_edges` | false | Boolean; retained in config and settings storage, with no main-chart effect or settings-dialog control. The lab has its own band-edge toggle. |
 | `palette_preset` | `Electric` | `Electric`, `Fire`, `Ocean`, `Monochrome`, `Matrix`, `Custom` |
 | `bid_gradient`, `ask_gradient` | black-to-cyan / black-to-orange | 2..16 `{position, color}` stops; strictly increasing positions, first 0 and last 1; `#RRGGBB` or `#RRGGBBAA` |
 | `sensitivity_min` | 0.05 | 10^-9..10^12, base quantity |
@@ -157,7 +156,7 @@ On first use, per-chart defaults come from the client YAML keys below (also supp
 | `opacity` | 1 | 0..1 |
 | `gpu_cap_bytes` | 335544320 (320 MiB) | Integer 1 MiB..4 GiB per chart |
 | `upload_budget_bytes` | 8388608 (8 MiB) | Integer 1..min(128 MiB, GPU cap) |
-| `prefetch_tiles` | 1 | Integer 0..16; saved and editable, not read by the span planner yet (it prefetches max(2, view width) tiles) |
+| `prefetch_tiles` | 1 | Integer 0..16; retained in config and settings storage, with no settings-dialog control. The span planner uses max(2, view width) tiles instead. |
 | `live_min_interval_ms` | 500 | Integer 100..5000; the shortest spacing of the chart's live-edge compositions (S6c: applied live to its controller; the slow-compose backoff stays max(5000, this)) |
 | `show_telemetry` | false | Boolean; shows the Heatmap Telemetry dock (View menu, its close button and Settings > Debug write it) |
 | (settings only) `showLabels` | true | Boolean; GPU liquidity labels on the heatmap cells |
