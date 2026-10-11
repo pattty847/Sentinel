@@ -20,7 +20,7 @@ Done: slices A-C, D-a, R1/R2, D-b1 + anchors, D-b2a, cutover (`f15264f`, `record
 
 Left:
 1. **Slice E** (writer + review, high risk): primary BookRecorder code, resnapshot wiring, `localClock`, the overflow invalidation path, `storage_probe`, and the unread `recording.live_feed` key (`docs/research/2026-10-one-world-pipeline.md` section 9). Same files as S8b; starts now that S8b landed.
-2. **Final deploy, owner at the Mac:** deploy slice E, smoke, then the rest of `data/market` to the Trash (owner empties it). Owner question still open: keep or delete the hourly roller self-check.
+2. **Final deploy, owner at the Mac:** deploy slice E, smoke, then the rest of `data/market` to the Trash (owner empties it).
 3. README/ARCHITECTURE pass for the finished one-world.
 
 ## Services (owner's Mac, launchd)
@@ -28,7 +28,7 @@ Left:
 - **Recorder/server:** S8b build `110e970`, pid 45525, deployed 2026-10-11 09:52Z. Smoke: live_feed_up 1 for all 7, no `sentinel_mdc_*`, roller lag max 1.9 s, fanout_clients 7, candles/trades advancing, 0 W/E/F log lines, `data/heatmap` (251 MB) no longer written and left untouched. Live history-chunk serving was not exercised (no GUI connected); tell the conductor if scrollback looks off. **Do not roll back** with `deploy-runtime.sh rollback server`: the previous binary does not match main's `config/server_config.yaml` (moved keys) or the server_config schema 2; fix forward instead. A GUI built before `110e970` does not match this server.
 - **Capture** deployed 2026-10-03 22:13; 7 products; fan-out to the server. Rollback: `deploy-runtime.sh rollback capture`.
 - **Monitoring:** VictoriaMetrics :8428, Grafana :3000 (restarted 2026-10-11 07:06Z; A1b is "A1b live feed down" on `sentinel_live_feed_up`, 7 series Normal). GUI host :17190.
-- **Expected CPU sawtooth:** the shadow roller's hourly comparison re-rolls the current UTC day (15 s at 00Z up to ~170 s at 23Z, ~0.85 core). Not a leak.
+- **Shadow self-check (incremental since bae9a85, owner: keep it):** each hourly check rolls only the new hour per product; a fresh midnight replay happens only for 00Z and after an oracle reset. Hours 2-24 resume from the oracle's own hourly anchor, so an anchor-resume defect would also show as a mismatch. The oracle lives at `hmc2/shadow-oracle/<product>/<dayMs>` (~150-250 MB, current day only; exclude it from backups). `Shadow oracle reset` in the server log means a reset happened.
 
 ## In flight (T7 worktrees, Codex threads)
 
