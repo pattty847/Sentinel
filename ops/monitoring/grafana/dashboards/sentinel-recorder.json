@@ -5,7 +5,7 @@
     "sentinel"
   ],
   "timezone": "browser",
-  "editable": false,
+  "editable": true,
   "refresh": "30s",
   "time": {
     "from": "now-6h",
@@ -230,8 +230,8 @@
     {
       "id": 11,
       "type": "timeseries",
-      "title": "Coinbase WebSocket latency",
-      "description": "",
+      "title": "Live feed lag (roller)",
+      "description": "Age of the last journal record the roller applied, per product. Replaces the Coinbase WebSocket latency panel: since the 2026-10-11 cutover the server has no Coinbase socket; capture is the only connection.",
       "datasource": {
         "type": "prometheus",
         "uid": "sentinel-vm"
@@ -249,15 +249,15 @@
             "type": "prometheus",
             "uid": "sentinel-vm"
           },
-          "expr": "sentinel_mdc_ws_latency_ms",
-          "legendFormat": "latency",
+          "expr": "sentinel_roller_shadow_lag_seconds >= 0",
+          "legendFormat": "{{product}}",
           "range": true,
           "instant": false
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "ms"
+          "unit": "s"
         },
         "overrides": []
       },

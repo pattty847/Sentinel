@@ -5,7 +5,7 @@
     "sentinel"
   ],
   "timezone": "browser",
-  "editable": false,
+  "editable": true,
   "refresh": "30s",
   "time": {
     "from": "now-6h",
