@@ -313,3 +313,9 @@ target_include_directories(test_WatchRailScreener PRIVATE ${CMAKE_SOURCE_DIR}/li
 target_link_libraries(test_WatchRailScreener PRIVATE sentinel_gui_lib GTest::gtest Qt6::Widgets Qt6::Test)
 add_test(NAME WatchRailScreenerTests COMMAND test_WatchRailScreener)
 set_tests_properties(WatchRailScreenerTests PROPERTIES LABELS "render;ui" TIMEOUT 60)
+
+add_executable(test_PriceFitter test_price_fitter.cpp)
+target_include_directories(test_PriceFitter PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_PriceFitter PRIVATE GTest::gtest_main sentinel_chart_core Qt6::Core)
+add_test(NAME PriceFitterTests COMMAND test_PriceFitter)
+set_tests_properties(PriceFitterTests PROPERTIES LABELS "render;fast")

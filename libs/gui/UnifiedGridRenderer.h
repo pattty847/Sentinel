@@ -1,4 +1,5 @@
 #pragma once
+#include "chart/shell/CandleBufferSource.hpp"
 #include <QQuickItem>
 #include <QTimer>
 #include <QThread>
@@ -126,7 +127,7 @@ private:
     // initial_price_pct of kSeedBandRows rows at kSeedBandTick (the near layer's $1).
     static constexpr double kSeedBandTick = 1.0;
     static constexpr int kSeedBandRows = 2048;
-    static constexpr double kAutoScrollPaddingFrac = 0.08;
+    static constexpr double kAutoScrollPaddingFrac = chart::PriceFitter::kAutoScrollPaddingFrac;
     double m_heatmapGamma = 1.05;
     double m_heatmapContrast = 1.15;
     double m_heatmapShaderFloor = 0.01;
@@ -310,7 +311,7 @@ public:
     Q_INVOKABLE bool fitTimeToData() { return fitView(true, false); }
     Q_INVOKABLE bool fitPriceToData() { return fitView(false, true); }
     Q_INVOKABLE bool resetView();
-    static constexpr double kFitPriceMargin = 0.06;
+    static constexpr double kFitPriceMargin = chart::PriceFitter::kFitPriceMargin;
     static constexpr int kCarryLiveOnlyWaitMs = 2000;
     struct ViewportRequest {
         std::optional<qint64> startMs, endMs;
@@ -467,33 +468,13 @@ private:
     // "Return to live" (follow-live activation): the view's right edge goes one
     // padding past the live anchor's bucket, in either direction, span kept.
     void returnGpuToLive();
-    // The view end that puts the live anchor's bucket one padding inside the right
-    // edge for a view of spanMs (0 while no live anchor is known).
-    qint64 gpuLiveEndMs(qint64 spanMs) const;
     // Cold start without a book or trade: a time-only view from the recording's
     // availability (price unknown until decoded data supplies it).
     void bootstrapGpuTimeView();
     QTimer* m_gpuBootstrapTimer = nullptr;
-    // Auto-fit (fitView). Window pieces return nullopt when nothing is known.
-    std::optional<std::pair<qint64, qint64>> gpuFitTimeWindow() const;
-    // candlesOnly: no live-price fallback (the auto price scale's fit).
-    // The candles fitted are those the stored window [start, end] draws: the raster
-    // camera's drawn time window (current anchor, or anchorFracX when the caller sets
-    // one with this change; DPR, column hysteresis).
-    std::optional<std::pair<double, double>> gpuFitPriceWindow(qint64 start, qint64 end, bool candlesOnly,
-                                                               std::optional<double> anchorFracX = std::nullopt);
-    // GridViewState's price fit while auto price scale is on. 
-    bool autoPriceFit(qint64 start, qint64 end, double& priceMin, double& priceMax);
-    // Auto price scale on: the current time range through setViewport (a bump only
-    // when the fitted range changed). Candle updates in view and new limits use it.
     void refitAutoPrice();
-    QPointer<CandleSeriesBuffer> m_candleBuffer;
+    chart::CandleBufferSource m_candleSource;
     QMetaObject::Connection m_candleDirtyConn;
-    mutable std::vector<CandleSeriesBuffer::CandleBar> m_fitBars; // gpuFitPriceWindow scratch
-    // Symbol switch with auto price scale off: the old span / price and the current
-    // price's height in the view (0 = bottom), applied when the new price is known.
-    struct PriceCarry { double spanRatio = 0.0, heightFrac = 0.0; };
-    std::optional<PriceCarry> m_priceCarry;
     // The carry onto price `now`, one viewport change; kept pending until the layer's
     // price scale is the new symbol's. False (nothing applied) for an unusable price.
     // liveOnly: the live-only fallback (consume without a recorded price scale).

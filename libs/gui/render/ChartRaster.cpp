@@ -453,4 +453,17 @@ std::optional<AutoPriceFit> solveAutoPriceFit(double lo, double hi, int heightDe
     return AutoPriceFit{lo, hi, tick, units, int(std::llround(heightDev * tick / (hi - lo)))};
 }
 
+
+void fitPriceManualRows(double& lo, double& hi, int H, double tick) {
+    // Manual tick and auto scale off keep rounded-centre placement
+    // and the P=1 clamp, including the Manual maximum-span behavior.
+    const double priceSpan = hi - lo;
+    if (H > 0 && std::isfinite(tick) && tick > 0 && std::isfinite(priceSpan) && priceSpan > 0) {
+      const double P = std::clamp(std::floor(double(H) * tick / priceSpan), 1.0, double(chart_raster::kMaxCellPx));
+      const double fitted = double(H) * tick / P;
+      const double top = std::round(((lo + hi) * .5 + fitted * .5) * P / tick) * tick / P;
+      if (std::isfinite(top)) { hi = top; lo = top - fitted; }
+    }
+}
+
 } // namespace chart_raster

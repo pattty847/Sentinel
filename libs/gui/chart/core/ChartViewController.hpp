@@ -1,6 +1,7 @@
 #pragma once
 
 #include "chart/core/ChartCamera.hpp"
+#include "chart/core/PriceFitter.hpp"
 #include "chart/core/ChartSession.hpp"
 #include "chart/core/ZoomGlide.hpp"
 #include "render/GridViewState.hpp"
@@ -29,7 +30,7 @@ class ChartViewController : public QObject {
     Q_OBJECT
 public:
     ChartViewController(IChartEnvironment& environment, IHeatmapViewSink& sink,
-                        const ITickOracle& ticks, const PublishedFrame& published, QObject* parent = nullptr);
+                        ITickOracle& ticks, const PublishedFrame& published, QObject* parent = nullptr);
 
     GridViewState* viewPtr() const { return view_.get(); }
     ChartSession& session() { return session_; }
@@ -43,6 +44,8 @@ public:
     const ZoomGlideState& glide() const { return glide_; }
     ChartCamera& camera() { return camera_; }
     const ChartCamera& camera() const { return camera_; }
+
+    PriceFitter& priceFitter() { return priceFitter_; }
 
     ZoomGlide& zoomGlide() { return zoomGlide_; }
     void advanceFrame(qint64 now) { zoomGlide_.advanceZoomGlide(now); }
@@ -63,6 +66,7 @@ private:
     ZoomGlideState glide_;
     ChartCamera camera_;
     ZoomGlide zoomGlide_;
+    PriceFitter priceFitter_;
 };
 
 } // namespace chart
