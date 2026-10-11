@@ -26,6 +26,7 @@ struct SpanLimits {
 class IChartEnvironment {
 public:
     virtual ~IChartEnvironment() = default;
+    virtual bool attached() const = 0;
     virtual SurfaceFacts surface() const = 0;
     virtual double drawnTick() const = 0;
     virtual double priceScale() const = 0;

@@ -54,10 +54,12 @@ bool envIntValue(const char *name, int &out) {
 } // namespace
 
 chart::SurfaceFacts chart::HeatmapChartPort::surface() const {
+  if (!layer_) return {};
   return {item_.width(), item_.height(), item_.window() ? item_.window()->effectiveDevicePixelRatio() : 1.0};
 }
 
 std::optional<heatmap::gpu::ViewWindow> chart::HeatmapChartPort::restView() const {
+  if (!layer_) return std::nullopt;
   const auto cam = item_.restCameraNow(false);
   if (!cam.valid) return std::nullopt;
   return heatmap::gpu::ViewWindow{cam.drawnStartMs, cam.drawnEndMs, cam.drawnMinPrice, cam.drawnMaxPrice};
@@ -133,6 +135,7 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
   disconnect(this, &QQuickItem::windowChanged, this, nullptr);
   if (m_screenChangedConn) disconnect(m_screenChangedConn);
   if (m_beforeSyncConn) disconnect(m_beforeSyncConn);
+  if (m_heatmapPort) m_heatmapPort->detach();
   m_gpuLayer.reset(); // destroys its controller on the heatmap-data thread
   if (m_dataProcessor) {
     if (m_dataProcessorThread && m_dataProcessorThread->isRunning()) {

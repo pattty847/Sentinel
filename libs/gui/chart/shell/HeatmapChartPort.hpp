@@ -13,7 +13,10 @@ namespace chart {
 class HeatmapChartPort final : public IChartEnvironment, public ITickOracle, public IHeatmapViewSink {
 public:
     HeatmapChartPort(UnifiedGridRenderer& item, heatmap::gpu::HeatmapGpuLayer& layer)
-        : item_(item), layer_(layer) {}
+        : item_(item), layer_(&layer) {}
+
+    void detach() { layer_ = nullptr; }
+    bool attached() const override { return layer_ != nullptr; }
 
     SurfaceFacts surface() const override;
     double drawnTick() const override;
@@ -38,7 +41,7 @@ public:
 
 private:
     UnifiedGridRenderer& item_;
-    heatmap::gpu::HeatmapGpuLayer& layer_;
+    heatmap::gpu::HeatmapGpuLayer* layer_;
 };
 
 } // namespace chart
