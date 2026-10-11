@@ -128,6 +128,16 @@ case "$cmd" in
             fi
         fi
         new_tip=$(git -C "$dir" rev-parse HEAD)
+        health_status=0
+        (cd "$dir" && "$dir/scripts/dev/chart-health.sh") || health_status=$?
+        if [[ "$health_status" -ne 0 ]]; then
+            if [[ "$health_status" -eq 1 ]] && grep -q '^Chart-Health-Waiver: ' <<< "$trailers"; then
+                echo "chart-health: waived by Chart-Health-Waiver trailer"
+            else
+                echo "error: chart-health failed (exit $health_status)" >&2
+                exit "$health_status"
+            fi
+        fi
         echo "building and testing $branch at $new_tip..."
         (cd "$dir" && "$REPO/scripts/dev/build-queue.sh" --label "land $branch (build)" -- cmake --build --preset mac-clang -j 6 > "$dir/.land-build.log" 2>&1) ||
             { echo "error: build failed, see $dir/.land-build.log" >&2; exit 1; }
