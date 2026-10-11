@@ -2,6 +2,12 @@
 # Find Qt components needed for tests
 find_package(Qt6 REQUIRED COMPONENTS Core Test)
 
+add_executable(test_live_order_book test_live_order_book.cpp)
+target_include_directories(test_live_order_book PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_live_order_book PRIVATE sentinel_core GTest::gtest_main)
+add_test(NAME LiveOrderBookTests COMMAND test_live_order_book)
+set_tests_properties(LiveOrderBookTests PROPERTIES LABELS "marketdata")
+
 # Test Target: test_message_dispatcher
 add_executable(test_message_dispatcher test_message_dispatcher.cpp)
 target_include_directories(test_message_dispatcher PRIVATE
@@ -82,6 +88,7 @@ add_custom_target(marketdata_tests
         test_sentinel_stream_client_parse_helpers
         test_recording_history_wire
         test_coinbase_rest_deadline
+        test_live_order_book
     COMMENT "Running market data refactor tests"
 )
 
