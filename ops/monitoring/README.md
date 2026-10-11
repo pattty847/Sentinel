@@ -335,6 +335,7 @@ minimum elapsed time for an identical-failure streak before slow probes begin.
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
+| `sentinel_roller_anchor_failures_total` | counter | product | Failed optional anchor writes/exports (including degraded skips), candidate enumeration or pruning attempts. Normal rolling continues; explicit anchor rebuilds fail. Registered idempotently at roller startup. |
 | `sentinel_roller_journal_corrupt_blocks_total` | counter | product | Distinct (run, segment, offset) payload, header, framing or index failures encountered by journal readers in this process, including anchor searches and batch comparisons. Replays do not count the same block again. |
 | `sentinel_roller_shadow_running` | gauge | product | 1 while applying durable records; 0 during setup/retry/stop. Present only when enabled. |
 | `sentinel_roller_shadow_lag_seconds` | gauge | product | Scrape-time age of last applied durable record, -1 before the first record. |

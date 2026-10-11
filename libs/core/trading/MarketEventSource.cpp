@@ -314,7 +314,7 @@ JournalTradeEventSource::JournalTradeEventSource(std::filesystem::path root, std
         std::optional<sentinel::roller::JournalPos> start;
         for (size_t i = *candidate; i < files.size(); ++i) {
             const auto& file = files[i];
-            sentinel::capture::RecordReader probe(QString::fromStdString(file.path.string()), !file.superseded,
+            sentinel::capture::RecordReader probe(QString::fromStdString(file.path.string()), !file.superseded, {},
                 [&](const sentinel::capture::BlockIndex& block, const char* reason) {
                     sLog_Warning("Backtest journal start skipped block file=" << file.path.string().c_str()
                                  << " offset=" << block.offset << " reason=" << reason);

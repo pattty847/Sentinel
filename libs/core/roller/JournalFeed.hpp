@@ -5,6 +5,20 @@
 #include <unordered_set>
 
 namespace sentinel::roller {
+// Native-price durable book, also used by the journal model tap. Boundary
+// serialization preserves doubles exactly; it does not synthesize snapshots.
+struct JournalBook {
+    bool valid = false;
+    int64_t envelopeMs = 0;
+    std::map<double,double> bids, asks;
+    void clear() { valid = false; bids.clear(); asks.clear(); }
+    void apply(int64_t envelope, const std::vector<recording::Level>& levels);
+    void snapshot(int64_t envelope, const std::vector<recording::Level>& levels) {
+        bids.clear(); asks.clear(); apply(envelope, levels); valid = true;
+    }
+    nlohmann::json exportState() const;
+    static JournalBook fromState(const nlohmann::json&);
+};
 // Single producer. Parsing and callbacks use receive time, never a host clock.
 class JournalFeed {
 public:
@@ -16,6 +30,9 @@ public:
     std::function<void(bool)> onConnection;
     std::function<void(int64_t)> onTick;
     void apply(const JournalRecord& input);
+    // Boundary-only, validated before installation; never emits an event.
+    nlohmann::json exportState() const;
+    void importState(const nlohmann::json&);
     // 16K IDs cover many 100-trade reconnect snapshots while capping per-product memory.
     static constexpr size_t TradeIdWindowCapacity = 16'384;
     size_t retainedTradeIds() const { return tradeIds_.size(); }
