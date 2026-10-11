@@ -1,10 +1,17 @@
 #include "chart/core/ChartViewController.hpp"
+#include "chart/core/PublishedFrame.hpp"
 
 #include <gtest/gtest.h>
 
 namespace {
 
-struct FakeEnvironment final : chart::IChartEnvironment {
+struct FakeEnvironment final : chart::IChartEnvironment, chart::ITickOracle {
+    int64_t predictTickUnits(const heatmap::gpu::ViewWindow&) const override { return 0; }
+    bool buildsTick(int64_t, const heatmap::gpu::ViewWindow&) const override { return false; }
+    int64_t autoTickState() const override { return 0; }
+    heatmap::AutoTickParams autoTickParams() const override { return {}; }
+    bool setAutoPriceTick(std::optional<int64_t>) override { return false; }
+
     bool isAttached = true;
     mutable int limitsReads = 0;
     mutable int recentMidReads = 0;
@@ -39,7 +46,8 @@ struct FakeSink final : chart::IHeatmapViewSink {
 TEST(ChartViewController, DetachedEnvironmentDoesNotApplyLimitsOrPublishView) {
     FakeEnvironment environment;
     FakeSink sink;
-    chart::ChartViewController controller(environment, sink);
+    chart::PublishedFrame published;
+    chart::ChartViewController controller(environment, sink, environment, published);
     controller.viewPtr()->setViewport(100, 200, 10.0, 20.0);
     environment.isAttached = false;
 
@@ -55,7 +63,8 @@ TEST(ChartViewController, DetachedEnvironmentDoesNotApplyLimitsOrPublishView) {
 TEST(ChartViewController, LivePriceUsesBookThenTradeThenRecentMidThenDetachedZero) {
     FakeEnvironment environment;
     FakeSink sink;
-    chart::ChartViewController controller(environment, sink);
+    chart::PublishedFrame published;
+    chart::ChartViewController controller(environment, sink, environment, published);
     controller.session().bookMid = 101.0;
     controller.session().lastTrade = 102.0;
 

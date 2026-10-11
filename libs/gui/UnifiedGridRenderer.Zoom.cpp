@@ -4,11 +4,9 @@
 #include "UnifiedGridRenderer.h"
 
 #include "SentinelLogging.hpp"
-#include "render/FrameContextBuilder.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
 
 #include <QNativeGestureEvent>
-#include <QQuickWindow>
 #include <QTimer>
 #include <algorithm>
 #include <cmath>
@@ -33,125 +31,29 @@ qint64 UnifiedGridRenderer::zoomNowMs() const {
   return m_zoomClock ? m_zoomClock() : (m_frameClock.isValid() ? m_frameClock.elapsed() : 0);
 }
 
-namespace {
-// What a glide draws on its axis this frame (without a drag): its end while holding.
-chart_raster::RasterCamera glidePart(const chart_raster::RasterCamera& from, const chart_raster::RasterCamera& end,
-                                     double anchorTime, double anchorPrice, double progress, bool holding) {
-  return holding ? end : chart_raster::glideRaster(from, end, anchorTime, anchorPrice, progress);
-}
-} // namespace
-
-UnifiedGridRenderer::Cameras UnifiedGridRenderer::camerasFor(const chart_raster::RasterInputs& in,
-                                                             chart_raster::RasterStep previous) const {
-  Cameras c;
-  c.rest = chart_raster::computeRaster(in, previous);
-  c.drawn = c.rest;
-  if (!c.rest.valid) return c;
-  const bool gestureTime = m_zoomGesture && m_gestureTime, gesturePrice = m_zoomGesture && m_gesturePrice;
-  const bool timeMoves = gestureTime || m_glideTime.active, priceMoves = gesturePrice || m_glidePrice.active;
-  if (!timeMoves && !priceMoves) return c;
-  // Each axis on its own: a gesture's continuous camera, a glide, or the rest camera.
-  // A drag moves a glide's ends by the same whole device pixels as the picture (1:1).
-  const double dpr = c.rest.dpr;
-  const double dx = std::isfinite(in.dragLogicalPx.x()) ? double(std::llround(in.dragLogicalPx.x() * dpr)) : 0.0;
-  const double dy = std::isfinite(in.dragLogicalPx.y()) ? double(std::llround(in.dragLogicalPx.y() * dpr)) : 0.0;
-  const chart_raster::RasterCamera continuous =
-      gestureTime || gesturePrice ? chart_raster::continuousRaster(in) : chart_raster::RasterCamera{};
-  double timeLo = c.rest.drawnStartMs, timeHi = c.rest.drawnEndMs;
-  double priceLo = c.rest.drawnMinPrice, priceHi = c.rest.drawnMaxPrice;
-  auto axis = [&](const AxisGlide& g, bool time, bool gesture) {
-    if (gesture) return continuous;
-    if (!g.active) return c.rest;
-    const auto from = chart_raster::shiftedRaster(g.from, dx, dy), end = chart_raster::shiftedRaster(g.end, dx, dy);
-    // Bin the glide's whole extent (its start and its end) once, at its start.
-    if (time) {
-      timeLo = std::min({timeLo, from.drawnStartMs, end.drawnStartMs});
-      timeHi = std::max({timeHi, from.drawnEndMs, end.drawnEndMs});
-    } else {
-      priceLo = std::min({priceLo, from.drawnMinPrice, end.drawnMinPrice});
-      priceHi = std::max({priceHi, from.drawnMaxPrice, end.drawnMaxPrice});
-    }
-    return glidePart(from, end, g.anchorTime, g.anchorPrice, g.progress, g.holding);
-  };
-  const auto timeCam = axis(m_glideTime, true, gestureTime);
-  const auto priceCam = axis(m_glidePrice, false, gesturePrice);
-  c.drawn = chart_raster::composeAxes(timeCam, timeMoves, priceCam, priceMoves, c.rest);
-  if (c.drawn.free) {
-    c.hasBinView = true;
-    c.binTimeLo = std::min(timeLo, c.drawn.drawnStartMs);
-    c.binTimeHi = std::max(timeHi, c.drawn.drawnEndMs);
-    c.binPriceLo = std::min(priceLo, c.drawn.drawnMinPrice);
-    c.binPriceHi = std::max(priceHi, c.drawn.drawnMaxPrice);
-  }
-  return c;
-}
-
 chart_raster::RasterCamera UnifiedGridRenderer::rasterCameraNow(bool includeDrag) const {
-  if (!getViewState() || !m_gpuLayer) return {};
-  auto viewport = FrameContextBuilder::viewportSnapshot(getViewState());
-  if (!includeDrag) viewport.dragging = false;
-  const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
-  const auto in = rasterInputs(viewport, m_gpuLayer->tickPrice(), width(), height(), dpr);
-  const chart_raster::RasterStep previous = m_published.step();
-  return camerasFor(in, previous).drawn;
+  return m_view->camera().rasterCameraNow(includeDrag);
 }
 
 chart_raster::RasterCamera UnifiedGridRenderer::restCameraNow(bool includeDrag) const {
-  if (!getViewState() || !m_gpuLayer) return {};
-  auto viewport = FrameContextBuilder::viewportSnapshot(getViewState());
-  if (!includeDrag) viewport.dragging = false;
-  const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
-  const auto in = rasterInputs(viewport, m_gpuLayer->tickPrice(), width(), height(), dpr);
-  const chart_raster::RasterStep previous = m_published.step();
-  return chart_raster::computeRaster(in, previous);
-}
-
-chart_raster::RasterCamera UnifiedGridRenderer::intendedEndNow() const {
-  if (!getViewState() || !m_gpuLayer) return {};
-  auto viewport = FrameContextBuilder::viewportSnapshot(getViewState());
-  viewport.dragging = false;
-  // The tick the frame chooses for the stored view (the chooser's own rule and state),
-  // before it is committed.
-  double tick = m_gpuLayer->tickPrice();
-  if (tick > 0 && viewport.valid) {
-    const int64_t units = m_gpuLayer->predictTickUnits(
-        {double(viewport.timeStart), double(viewport.timeEnd), viewport.minPrice, viewport.maxPrice});
-    if (units > 0) tick = heatmap::fromUnits(units, m_gpuLayer->priceScale());
-  }
-  const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
-  const auto in = rasterInputs(viewport, tick, width(), height(), dpr);
-  const chart_raster::RasterStep previous = m_published.step();
-  return chart_raster::computeRaster(in, previous);
-}
-
-chart_raster::TickAt UnifiedGridRenderer::tickPredictor(qint64 start, qint64 end, double anchorPrice,
-                                                       double fracY) const {
-  // The window a price span is drawn with: about the anchor (Auto judges the rows in
-  // view, so the window matters, not only its span).
-  return [this, start, end, anchorPrice, fracY](double span) -> double {
-    if (!m_gpuLayer || !(span > 0)) return 0.0;
-    const double hi = anchorPrice + fracY * span;
-    const heatmap::gpu::ViewWindow view{double(start), double(end), hi - span, hi};
-    const int64_t units = m_gpuLayer->predictTickUnits(view);
-    return units > 0 ? heatmap::fromUnits(units, m_gpuLayer->priceScale()) : 0.0;
-  };
+  return m_view->camera().restCameraNow(includeDrag);
 }
 
 void UnifiedGridRenderer::endZoomGlide(bool time, bool price) {
   bool ended = false;
-  if (time && m_glideTime.active) ended = true, m_glideTime.active = false;
-  if (price && m_glidePrice.active) ended = true, m_glidePrice.active = false;
+  if (time && m_view->glide().time.active) ended = true, m_view->glide().time.active = false;
+  if (price && m_view->glide().price.active) ended = true, m_view->glide().price.active = false;
   if (ended) update();
 }
 
 void UnifiedGridRenderer::startAxisGlides(const chart_raster::RasterCamera& drawn,
                                           const chart_raster::RasterCamera& restBefore, double anchorTime,
                                           double anchorPrice, bool forceTime, bool forcePrice) {
-  const auto end = intendedEndNow();
+  const auto end = m_view->camera().intendedEndNow();
   if (!end.valid || !drawn.valid) return;
   const qint64 now = zoomNowMs();
   bool started = false;
-  auto start = [&](AxisGlide& g, bool time, bool force) {
+  auto start = [&](chart::AxisGlide& g, bool time, bool force) {
     // The end this axis had: its glide's, or the rest camera it was drawn at.
     const auto& before = g.active ? g.end : restBefore;
     const bool same = time ? chart_raster::sameTimeAxis(end, before) : chart_raster::samePriceAxis(end, before);
@@ -167,13 +69,13 @@ void UnifiedGridRenderer::startAxisGlides(const chart_raster::RasterCamera& draw
     g.progress = 0.0;
     started = true;
   };
-  start(m_glideTime, true, forceTime);
-  start(m_glidePrice, false, forcePrice);
-  if (m_glideTime.active) m_glideColPx = m_glideTime.end.colPx;
-  if (m_glidePrice.active) m_glideRow = {m_glidePrice.end.tick, m_glidePrice.end.rowPx};
+  start(m_view->glide().time, true, forceTime);
+  start(m_view->glide().price, false, forcePrice);
+  if (m_view->glide().time.active) m_view->glide().colPx = m_view->glide().time.end.colPx;
+  if (m_view->glide().price.active) m_view->glide().row = {m_view->glide().price.end.tick, m_view->glide().price.end.rowPx};
   if (!started) return;
-  sLog_Probe("zoom.glide", "start time=" << m_glideTime.active << " colPx=" << drawn.colPxF << "->" << end.colPx
-             << " price=" << m_glidePrice.active << " rows=" << drawn.pxPerPrice() << "->" << end.rowPx << "@"
+  sLog_Probe("zoom.glide", "start time=" << m_view->glide().time.active << " colPx=" << drawn.colPxF << "->" << end.colPx
+             << " price=" << m_view->glide().price.active << " rows=" << drawn.pxPerPrice() << "->" << end.rowPx << "@"
              << end.tick);
   emit rasterChanged();
   emit viewportChanged();
@@ -199,7 +101,7 @@ void UnifiedGridRenderer::updatePolish() {
   m_glidePolishTimer->start();
 }
 
-void UnifiedGridRenderer::advanceAxisGlide(AxisGlide& g, bool time, const chart_raster::RasterCamera& rest,
+void UnifiedGridRenderer::advanceAxisGlide(chart::AxisGlide& g, bool time, const chart_raster::RasterCamera& rest,
                                            const chart_raster::RasterCamera& intended, qint64 now) {
   if (!g.active) return;
   const qint64 cap = g.beganMs + 2 * chart_raster::kZoomGlideMs;
@@ -209,15 +111,15 @@ void UnifiedGridRenderer::advanceAxisGlide(AxisGlide& g, bool time, const chart_
   // movement. A drag, a pan commit and a follow-live step move both ends instead.
   const bool same = time ? chart_raster::sameTimeAxis(intended, g.end) : chart_raster::samePriceAxis(intended, g.end);
   if (intended.valid && !same) {
-    g.from = glidePart(g.from, g.end, g.anchorTime, g.anchorPrice, g.progress, g.holding);
+    g.from = chart::glidePart(g.from, g.end, g.anchorTime, g.anchorPrice, g.progress, g.holding);
     g.end = intended;
     g.holding = false;
     g.deadlineMs = std::min(cap, std::max(g.deadlineMs, now + chart_raster::kZoomGlideMs / 2));
     g.startMs = now;
     g.progress = 0.0;
-    ++m_glideRebases;
-    if (time) m_glideColPx = g.end.colPx;
-    else m_glideRow = {g.end.tick, g.end.rowPx};
+    ++m_view->glide().rebases;
+    if (time) m_view->glide().colPx = g.end.colPx;
+    else m_view->glide().row = {g.end.tick, g.end.rowPx};
     sLog_Probe("zoom.glide", "rebased " << (time ? "time" : "price") << " to colPx=" << g.end.colPx << " rowPx="
                << g.end.rowPx << "@" << g.end.tick << " dpr=" << g.end.dpr << " leftMs=" << g.deadlineMs - now);
   }
@@ -248,9 +150,9 @@ void UnifiedGridRenderer::advanceAxisGlide(AxisGlide& g, bool time, const chart_
 void UnifiedGridRenderer::advanceZoomGlide() {
   if (!zoomGliding()) return;
   const qint64 now = zoomNowMs();
-  const auto rest = restCameraNow(false), intended = intendedEndNow();
-  advanceAxisGlide(m_glideTime, true, rest, intended, now);
-  advanceAxisGlide(m_glidePrice, false, rest, intended, now);
+  const auto rest = restCameraNow(false), intended = m_view->camera().intendedEndNow();
+  advanceAxisGlide(m_view->glide().time, true, rest, intended, now);
+  advanceAxisGlide(m_view->glide().price, false, rest, intended, now);
   // This frame's camera for every layer: the axis models recalculate, the sibling
   // overlays (candles, paper, algo) redraw in this synchronization.
   emit rasterChanged();
@@ -321,7 +223,7 @@ void UnifiedGridRenderer::zoomClicks(int clicks, double x, double y, bool time, 
   if (!getViewState() || !m_gpuLayer || !getViewState()->isTimeWindowValid() || clicks == 0 ||
       getViewState()->isDragging())
     return;
-  if (m_zoomGesture) endZoomGesture();
+  if (m_view->glide().gesture) endZoomGesture();
   // The auto price scale owns price: the chart wheel zooms time only.
   price = price && !getViewState()->autoPriceScale();
   const auto drawn = rasterCameraNow(false); // what is on screen now (a glide in flight included)
@@ -335,9 +237,9 @@ void UnifiedGridRenderer::zoomClicks(int clicks, double x, double y, bool time, 
   const double fracX = std::clamp(width() > 0 ? x / width() : 0.5, 0.0, 1.0);
   const double fracY = std::clamp(height() > 0 ? y / height() : 0.5, 0.0, 1.0);
   // Rapid clicks step on from the glide's target, so they accumulate monotonically.
-  const int baseCol = m_glideTime.active ? m_glideColPx : drawn.colPx;
+  const int baseCol = m_view->glide().time.active ? m_view->glide().colPx : drawn.colPx;
   const chart_raster::RowRung baseRow =
-      m_glidePrice.active ? m_glideRow : chart_raster::RowRung{drawn.tick, drawn.rowPx};
+      m_view->glide().price.active ? m_view->glide().row : chart_raster::RowRung{drawn.tick, drawn.rowPx};
   const double maxTime = getViewState()->maxTimeSpanMs(), minTime = getViewState()->minTimeSpanMs();
   const int minCol = maxTime > 0 ? std::max(1, int(std::ceil(W * tf / maxTime - 1e-9))) : 1;
   const int maxCol = std::min(chart_raster::maxColumnPixels(tf),
@@ -357,7 +259,7 @@ void UnifiedGridRenderer::zoomClicks(int clicks, double x, double y, bool time, 
   chart_raster::RowRung row = baseRow;
   if (price && m_gpuLayer->tickPrice() > 0)
     row = chart_raster::rowRung(baseRow, clicks, int(H), getViewState()->minPriceSpan(), getViewState()->maxPriceSpan(),
-                                tickPredictor(tickStart, tickEnd, ap, fracY));
+                                m_view->camera().tickPredictor(tickStart, tickEnd, ap, fracY));
   if (price && row == baseRow) {
     // No rows to whole-pixel (no tick drawn yet) or no rung (rows at the cell cap, e.g.
     // a carried window before the new symbol's price): the price span by the ratio, in
@@ -405,23 +307,24 @@ void UnifiedGridRenderer::zoomContinuousFor(double factor, double x, double y, b
   // gesture from its drawn window, so its continuous camera starts exactly on the
   // picture (no jump), in one viewport change; an axis the gesture does not zoom keeps
   // its stored bounds and its whole pixels.
-  const bool starting = !m_zoomGesture;
+  auto& glide = m_view->glide();
+  const bool starting = !glide.gesture;
   const auto cam = rasterCameraNow(false);
   if (!cam.valid) {
-    if (!m_zoomGesture) zoomStoredView(factor, x, y, time, price); // nothing drawn yet
+    if (!glide.gesture) zoomStoredView(factor, x, y, time, price); // nothing drawn yet
     return;
   }
   if (starting) {
-    m_zoomGesture = true;
-    m_gestureTime = m_gesturePrice = false;
+    glide.gesture = true;
+    glide.gestureTime = glide.gesturePrice = false;
     sLog_Probe("zoom.gesture", "begin");
   }
-  const bool timeJoins = time && !m_gestureTime, priceJoins = price && !m_gesturePrice;
+  const bool timeJoins = time && !glide.gestureTime, priceJoins = price && !glide.gesturePrice;
   // An axis joining the gesture leaves its glide where it is drawn; a glide on the other
   // axis keeps running.
   endZoomGlide(timeJoins, priceJoins);
-  m_gestureTime = m_gestureTime || time;
-  m_gesturePrice = m_gesturePrice || price;
+  glide.gestureTime = glide.gestureTime || time;
+  glide.gesturePrice = glide.gesturePrice || price;
   m_gestureAt = QPointF(x, y);
   const double W = cam.widthDev, H = cam.heightDev;
   const double at = cam.timeAtXDev(fracX * W), ap = cam.priceAtYDev(fracY * H);
@@ -463,10 +366,10 @@ void UnifiedGridRenderer::zoomContinuousFor(double factor, double x, double y, b
 
 void UnifiedGridRenderer::endZoomGesture() {
   if (m_zoomSettleTimer) m_zoomSettleTimer->stop();
-  if (!m_zoomGesture) return;
+  if (!m_view->glide().gesture) return;
   const auto from = rasterCameraNow(false); // the continuous camera on the gesture's axes, as drawn
   const auto restBefore = restCameraNow(false);
-  m_zoomGesture = false;
+  m_view->glide().gesture = false;
   sLog_Probe("zoom.gesture", "end");
   if (!from.valid || !getViewState()) {
     update();
@@ -482,26 +385,26 @@ void UnifiedGridRenderer::endZoomGesture() {
                               minTime > 0 ? std::max(1, int(std::floor(W * tf / minTime + 1e-9)))
                                           : chart_raster::kMaxCellPx);
   // An axis the gesture did not zoom keeps its drawn whole pixels.
-  const int col = m_gestureTime ? chart_raster::nearestColumnRung(from.colPxF, minCol, maxCol) : from.colPx;
+  const int col = m_view->glide().gestureTime ? chart_raster::nearestColumnRung(from.colPxF, minCol, maxCol) : from.colPx;
   const qint64 span = std::llround(W * tf / double(col));
   const double at = from.timeAtXDev(fracX * W), ap = from.priceAtYDev(fracY * H);
   const qint64 start = std::llround(at - fracX * double(span));
-  const bool price = m_gesturePrice && !getViewState()->autoPriceScale() && m_gpuLayer && m_gpuLayer->tickPrice() > 0;
+  const bool price = m_view->glide().gesturePrice && !getViewState()->autoPriceScale() && m_gpuLayer && m_gpuLayer->tickPrice() > 0;
   // The tick predicted over the time bounds committed below (the stored ones when the
   // gesture did not zoom time).
-  const qint64 tickStart = m_gestureTime ? start : getViewState()->getVisibleTimeStart();
-  const qint64 tickEnd = m_gestureTime ? start + span : getViewState()->getVisibleTimeEnd();
+  const qint64 tickStart = m_view->glide().gestureTime ? start : getViewState()->getVisibleTimeStart();
+  const qint64 tickEnd = m_view->glide().gestureTime ? start + span : getViewState()->getVisibleTimeEnd();
   chart_raster::RowRung row{from.tick, from.rowPx};
   if (price)
     row = chart_raster::nearestRowRung(from.pxPerPrice(), int(H), getViewState()->minPriceSpan(),
-                                       getViewState()->maxPriceSpan(), tickPredictor(tickStart, tickEnd, ap, fracY));
-  if (!setZoomRung(from, fracX, fracY, m_gestureTime, col, price && row.rowPx > 0, row)) {
+                                       getViewState()->maxPriceSpan(), m_view->camera().tickPredictor(tickStart, tickEnd, ap, fracY));
+  if (!setZoomRung(from, fracX, fracY, m_view->glide().gestureTime, col, price && row.rowPx > 0, row)) {
     update();
     return;
   }
   // The gesture's axes glide from their continuous camera to the rung; the other axis
   // is left as it is.
-  startAxisGlides(from, restBefore, at, ap, m_gestureTime, m_gesturePrice);
+  startAxisGlides(from, restBefore, at, ap, m_view->glide().gestureTime, m_view->glide().gesturePrice);
 }
 
 void UnifiedGridRenderer::wheelZoom(int angle, bool pixelDeltaNull, Qt::ScrollPhase phase, bool precise,

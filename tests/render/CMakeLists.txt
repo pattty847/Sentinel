@@ -41,6 +41,12 @@ target_link_libraries(test_GridViewState PRIVATE GTest::gtest sentinel_gui_lib Q
 add_test(NAME GridViewStateTests COMMAND test_GridViewState)
 set_tests_properties(GridViewStateTests PROPERTIES LABELS "render")
 
+add_executable(test_ChartCamera test_chart_camera.cpp)
+target_include_directories(test_ChartCamera PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_ChartCamera PRIVATE GTest::gtest_main sentinel_chart_core Qt6::Core)
+add_test(NAME ChartCameraTests COMMAND test_ChartCamera)
+set_tests_properties(ChartCameraTests PROPERTIES LABELS "render;fast")
+
 add_executable(test_ChartViewController test_chart_view_controller.cpp)
 target_include_directories(test_ChartViewController PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
 target_link_libraries(test_ChartViewController PRIVATE GTest::gtest_main sentinel_chart_core Qt6::Core)
