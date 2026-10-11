@@ -11,7 +11,7 @@
 #include <iostream>
 #include <random>
 #include <zstd.h>
-#include "servermodel/HmcolFormat.hpp"
+#include "Crc32.hpp"
 #include "servermodel/PersistenceIo.hpp"
 #include "servermodel/RecordingDir.hpp"
 
@@ -100,7 +100,7 @@ class StoreTest : public testing::Test {
         scalar(b, h.sizeScale.codesPerOctave);
         scalar(b, h.configHash);
         set32(b, 6, b.size());
-        set32(b, 10, hmcol::crc32(b.data(), b.size()));
+        set32(b, 10, sentinel::crc32(b.data(), b.size()));
         for (const auto &r : records) {
             const auto frame = frameFromRaw(absolutePayload(r));
             b.insert(b.end(), frame.begin(), frame.end());
@@ -148,7 +148,7 @@ class StoreTest : public testing::Test {
         set32(frame, 0, kHmc2RecordMagic);
         set32(frame, 4, static_cast<uint32_t>(compressed.size()));
         set32(frame, 8, static_cast<uint32_t>(raw.size() * (multiFrame ? 2 : 1)));
-        set32(frame, 12, hmcol::crc32(compressed.data(), compressed.size()));
+        set32(frame, 12, sentinel::crc32(compressed.data(), compressed.size()));
         frame.insert(frame.end(), compressed.begin(), compressed.end());
         return frame;
     }
@@ -677,7 +677,7 @@ TEST_F(StoreTest, CrcValidUndecodablePayloadsAndMultipleZstdFramesAreSkipped) {
         if (kind == 2)
             raw[94] = 2; // invalid side byte
         auto bad = frameFromRaw(raw, kind == 3);
-        EXPECT_EQ(u32(bad, 12), hmcol::crc32(bad.data() + 16, bad.size() - 16));
+        EXPECT_EQ(u32(bad, 12), sentinel::crc32(bad.data() + 16, bad.size() - 16));
         b.insert(b.end(), bad.begin(), bad.end());
         auto last = r;
         last.bucketStartMs += 120000;
@@ -1107,7 +1107,7 @@ TEST_F(StoreTest, LegacyHoursExposeApproximateCoverageForSchemasOneTwoAndThree) 
             b.resize(headerLength);
             b[4] = 3;
             set32(b, 10, 0);
-            set32(b, 10, hmcol::crc32(b.data(), b.size()));
+            set32(b, 10, sentinel::crc32(b.data(), b.size()));
             auto minute = h;
             minute.header.tfMs = 60000;
             auto frame = frameFor(minute); // schema 3 absolute payload

@@ -1,5 +1,5 @@
 #include "Hmc2Store.hpp"
-#include "HmcolFormat.hpp"
+#include "../Crc32.hpp"
 #include "PersistenceIo.hpp"
 #include "SentinelLogging.hpp"
 #include <zstd.h>
@@ -116,7 +116,7 @@ Bytes encodeHeader(const Hmc2Header &h) {
     put(b, static_cast<uint32_t>(kPrefix + body.size()));
     put(b, uint32_t{0});
     b.insert(b.end(), body.begin(), body.end());
-    const uint32_t crc = hmcol::crc32(b.data(), b.size());
+    const uint32_t crc = sentinel::crc32(b.data(), b.size());
     for (size_t i = 0; i < 4; ++i)
         b[10 + i] = static_cast<uint8_t>(crc >> (8 * i));
     return b;
@@ -141,7 +141,7 @@ Hmc2Header readHeader(std::ifstream &f, uint64_t &pos, uint16_t &schema) {
     if (n < kPrefix || n > kMaxHeader || !readAt(f, 0, b, n))
         throw Corrupt("header length");
     std::fill(b.begin() + 10, b.begin() + 14, 0);
-    if (hmcol::crc32(b.data(), b.size()) != crc)
+    if (sentinel::crc32(b.data(), b.size()) != crc)
         throw Corrupt("header CRC");
     c.p = kPrefix;
     Hmc2Header h;
@@ -545,7 +545,7 @@ template <class Sink> void scan(const fs::path &path, bool repair, Sink sink,
         }
         if (!readAt(f, pos + 16, compressed, clen))
             throw ReadIo("read payload " + path.string());
-        bool good = hmcol::crc32(compressed.data(), compressed.size()) == crc;
+        bool good = sentinel::crc32(compressed.data(), compressed.size()) == crc;
         if (good) {
             raw.resize(rlen);
             const auto frameSize = ZSTD_findFrameCompressedSize(compressed.data(), compressed.size());
@@ -743,7 +743,7 @@ struct Hmc2Reader::Impl {
         if (last.end != idx.nextOffset || last.end < last.offset + 16) return false;
         if (!readAt(f, last.offset + 16, bytes, last.end - last.offset - 16))
             throw ReadIo("read tail " + path.string());
-        return hmcol::crc32(bytes.data(), bytes.size()) == last.crc;
+        return sentinel::crc32(bytes.data(), bytes.size()) == last.crc;
     }
     explicit Impl(fs::path p) : root(std::move(p)) {}
     Index *index(const fs::path &path, ReadControl &control) {
@@ -903,7 +903,7 @@ struct Hmc2Reader::Impl {
                 throw Corrupt("indexed frame bounds");
             if (!readAt(f, frame.offset + 16, compressed, clen))
                 throw ReadIo("read selected payload " + path.string());
-            if (hmcol::crc32(compressed.data(), clen) != crc)
+            if (sentinel::crc32(compressed.data(), clen) != crc)
                 throw Corrupt("indexed frame CRC");
             raw.resize(rlen);
             const auto n = ZSTD_decompress(raw.data(), rlen, compressed.data(), clen);
@@ -1320,7 +1320,7 @@ bool Hmc2Store::append(const Hmc2Record &r) {
     put(i.frame, kHmc2RecordMagic);
     put(i.frame, static_cast<uint32_t>(n));
     put(i.frame, static_cast<uint32_t>(i.raw.size()));
-    put(i.frame, hmcol::crc32(i.compressed.data(), n));
+    put(i.frame, sentinel::crc32(i.compressed.data(), n));
     std::error_code sizeError;
     const auto offset = fs::file_size(w.path, sizeError);
     if (sizeError) {

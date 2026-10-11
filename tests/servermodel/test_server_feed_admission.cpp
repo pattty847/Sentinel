@@ -37,7 +37,6 @@ struct ServerFeedAdmissionTest : testing::Test {
 
     void SetUp() override {
         config.recording.enabled = false;
-        config.heatmap.persistenceEnabled = false;
         config.rollerShadow.products = {"BTC-USD", "SOL-USD", "ETH-USD"};
         config.mdc.sslCaBundle = std::string(SENTINEL_SOURCE_DIR) + "/resources/certs/ca-bundle.crt";
         model = std::make_unique<FeedClockModel>(config, recordingLocal);

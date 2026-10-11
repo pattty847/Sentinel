@@ -13,7 +13,7 @@
 #include <future>
 #include <filesystem>
 #include <iostream>
-#include "servermodel/HmcolFormat.hpp"
+#include "Crc32.hpp"
 #include "marketdata/fixtures/coinbase_messages.hpp"
 #include <QDirIterator>
 #include <QElapsedTimer>
@@ -153,7 +153,7 @@ TEST_F(CaptureTest, RejectsCompleteCorruptionInHeaderBlockAndIndex) {
     auto wrongRawCrc = original;
     const auto block = intact.index.back().offset;
     wrongRawCrc[block + 40] = char(wrongRawCrc[block + 40] ^ 1);
-    const auto headerCrc = hmcol::crc32(wrongRawCrc.constData() + block, 44);
+    const auto headerCrc = sentinel::crc32(wrongRawCrc.constData() + block, 44);
     for (int i = 0; i < 4; ++i) wrongRawCrc[block + 44 + i] = char(headerCrc >> (8 * i));
     save(path, wrongRawCrc);
     try { scan(path); FAIL() << "expected raw CRC failure"; }

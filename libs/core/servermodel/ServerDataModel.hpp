@@ -17,18 +17,15 @@
 #include <QByteArray>
 #include <QTimer>
 #include "SymbolHotData.hpp"
-#include "HeatmapTwapStreamer.hpp"
-#include "IHeatmapDataSource.hpp"
 #include "TimeframeAggregator.hpp"
 #include "BookRecorder.hpp"
 #include "RecorderStallMonitor.hpp"
 #include "../marketdata/model/TradeData.h"
-#include "../protocol/HeatmapSlice.hpp"
 #include "../config/ConfigTypes.hpp"
 
 namespace sentinel::metrics { class MetricsRegistry; }
 
-class ServerDataModel : public QObject, public IHeatmapDataSource {
+class ServerDataModel : public QObject {
     Q_OBJECT
     friend struct TradeOverlayModelTest;
     friend struct ServerFeedAdmissionTest;
@@ -44,26 +41,10 @@ public:
     explicit ServerDataModel(const ServerConfig& config, QObject* parent = nullptr);
     ~ServerDataModel();
 
-    SymbolHotData& ensureSymbol(const std::string& symbol) override;
-    std::vector<std::string> getSymbolsSnapshot() const override;
+    SymbolHotData& ensureSymbol(const std::string& symbol);
     
-    // Snapshot Accessor
-    const LiveOrderBook& getLiveOrderBook(const std::string& symbol);
     // History Accessor
     std::vector<OHLCVBar> getHistory(const std::string& symbol, int64_t timeframeMs, size_t limit = 1000) const;
-    bool getHeatmapHistory(const std::string& symbol,
-                           int64_t timeframeMs,
-                           int64_t endTimeMs,
-                           int count,
-                           int& outGridWidth,
-                           int& outGridHeight,
-                           std::vector<HeatmapTwapStreamer::HistoryColumn>& out,
-                           int64_t startTimeMs = 0) const;
-
-    // Phase 4: lowest persisted bucketStartMs for (symbol, tf), or 0 if no
-    // persistence / no records. Surfaced to clients as oldest_available_ms.
-    int64_t oldestHeatmapPersistedMs(const std::string& symbol,
-                                     int64_t timeframeMs) const;
     bool collectOverlayTrades(const std::string& symbol, int64_t startMs, int64_t endMs,
                               size_t limit, std::vector<FootprintTradeSample>& out,
                               int64_t* retainedFromMs = nullptr) const;
@@ -71,7 +52,7 @@ public:
                                 int64_t startTimeMs,
                                 int64_t endTimeMs,
                                 std::vector<FootprintTradeSample>& out) const;
-    int64_t exchangeNowMs() const override;
+    virtual int64_t exchangeNowMs() const;
     recording::LiveService* recordingLive() const { return m_recordingLive.get(); }
     // Primary recorder started, or (recording.source: roller) the roller attached.
     bool recordingAvailable() const { return m_recorder != nullptr || m_rollerAttached.load(); }
@@ -134,8 +115,6 @@ signals:
     void barClosed(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar);
     void barUpdated(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar);
 
-    void heatmapSliceReady(const HeatmapSlice& slice);
-
     // The recorder lost a symbol's book on its own; only a fresh upstream snapshot
     // resumes it. Main thread, at most once per symbol per 30 s (recorder-limited).
     void recordingResnapshotRequested(const QString& symbol, const QString& reason);
@@ -148,7 +127,6 @@ private:
     ServerConfig m_serverConfig;
     std::unordered_map<std::string, std::unique_ptr<SymbolHotData>> m_symbols;
     std::unique_ptr<TimeframeAggregator> m_aggregator;
-    std::unique_ptr<HeatmapTwapStreamer> m_heatmapStreamer;
     std::atomic<int64_t> m_exchangeOffsetMs{0};
     // Metrics mirrors. Written on the main thread, except live publish drops
     // (recorder worker); declared before m_recorder so they outlive its worker.

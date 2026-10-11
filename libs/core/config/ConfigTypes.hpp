@@ -10,41 +10,15 @@
 #include <set>
 #include <QMetaType>
 
-struct ServerHeatmapConfig {
-    int gridWidth = 5120;
-    int gridHeight = 2048;
-    double tickSize = 0.0;
-    double recenterDelta = 0.01;
-    // Configured candidates; the streamer currently builds only the active timeframe.
+struct ServerChartConfig {
     std::vector<int64_t> timeframesMs{1000, 60000, 300000, 900000, 3600000, 14400000, 86400000};
-    // Empty means the server did not advertise availability (older protocol peer).
+    // Empty means the server did not advertise availability.
     std::vector<int64_t> servedTimeframesMs;
-    int64_t activeTimeframeMs = 0;
-    double bandFast = 0.15;
-    double bandMedium = 0.25;
-    double bandSlow = 0.35;
-    std::string intensityMode{"log"};
-    std::string intensityMaxMode{"running"};
-    double intensityMaxDecay = 0.995;
-    double intensityLogScale = 1000.0;
-    double intensityPower = 0.4;
-    double intensityFloor = 0.001;
-    bool debugSliceLog = false;
-
-    // F1 phase 1.3: derived heatmap column persistence (slot-addressed .hmcol files).
-    // Default OFF until validated in real-world soak testing. When enabled, every
-    // finalized bucket on the active timeframe is appended to disk via
-    // HeatmapColumnStore. See docs/private/plans/F1_HEATMAP_PERSISTENCE.md.
-    bool persistenceEnabled = false;
-    std::string persistenceDir{"data/heatmap"};
-    int persistenceFsyncEveryNRecords = 1;
-    int persistenceFsyncEveryMs = 1000;
-    // F1 phase 5: per-(symbol, tf) day-file retention. 0 = keep forever; N>0
-    // means delete any day file older than today UTC - N days at server start.
-    int persistenceRetentionDays = 0;
+    int64_t defaultTimeframeMs = 0;
 };
 
 struct ServerTradeOverlayConfig {
+    int retentionColumns = 5120;
     int gridWidth = 512;
     int gridHeight = 2048;
     double tickSize = 5.0;
@@ -125,7 +99,7 @@ struct ServerConfig {
     // Client-side wire presence: absent capabilities must not appear as defaults.
     std::set<std::string> advertisedFields;
     bool wasAdvertised(const std::string& key) const { return advertisedFields.contains(key); }
-    ServerHeatmapConfig heatmap;
+    ServerChartConfig chart;
     ServerOrderBookConfig orderbook;
     ServerTradeOverlayConfig tradeOverlays;
     ServerCandleGateConfig candles;

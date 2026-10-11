@@ -1,5 +1,5 @@
 #pragma once
-#include "RecordingPage.hpp"
+#include "Hmc2Store.hpp"
 #include "../heatmap/ChunkCodec.hpp"
 #include <atomic>
 #include <deque>
@@ -11,12 +11,6 @@ struct RecordingLiveTest;
 struct HeatmapChunkWireTest;
 namespace recording {
 using RecordPtr = std::shared_ptr<const Hmc2Record>;
-struct LiveView {
-    std::string symbol, layer;
-    int64_t tfMs = 60'000;
-    PriceBand band;
-    uint64_t generation = 0;
-};
 // Bounded, immutable publication mailbox. No disk or projection under its lock.
 class LiveCache {
 public:
@@ -47,18 +41,6 @@ private:
     uint64_t revisionFloor_ = 0; // Fresh lifetimes exceed retired revisions without retaining symbol names.
     bool warnedSeriesLimit_ = false;
     std::optional<std::pair<std::string, std::string>> capacityWarning_;
-};
-// Worker-owned, incremental two-bucket projection. Reader warmup resumes at its
-// proven scan cursor. No cold I/O is repeated each second.
-class LiveBuilder {
-public:
-    explicit LiveBuilder(LiveView view);
-    ~LiveBuilder();
-    BuildResult build(Hmc2Reader &reader, const LiveCache::Snapshot &source,
-                      int64_t deliveredFinalThroughMs = 0);
-private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
 };
 struct RawTailView {
     std::string symbol;
@@ -151,13 +133,6 @@ struct LiveRegistrationGate {
 class LiveService {
 public:
     // Callback runs on live worker; must reserve bounded transport capacity and return.
-    using Deliver = std::function<bool(const LiveView &, const BuildResult &)>;
-    struct Subscription {
-        LiveView view;
-        Deliver deliver;
-        std::atomic_bool active{true};
-        explicit Subscription(LiveView v, Deliver d) : view(std::move(v)), deliver(std::move(d)) {}
-    };
     using RawDeliver = std::function<bool(const RawTailView&, const std::string&, const RawTailFrame&)>;
     struct RawSubscription {
         RawTailView view;
@@ -165,10 +140,10 @@ public:
         std::atomic_bool active{true};
         RawSubscription(RawTailView v, RawDeliver d) : view(std::move(v)), deliver(std::move(d)) {}
     };
-    static constexpr size_t kMaxRawSubscriptions = 128; // symbols, separate from legacy views
+    static constexpr size_t kMaxRawSubscriptions = 128; // symbols
     // cadenceMs: LiveCadence base for every subscription (liveCadenceMs() of
     // the recorder's publish interval).
-    explicit LiveService(std::filesystem::path root, int64_t cadenceMs = kLiveCadenceDefaultMs);
+    explicit LiveService(int64_t cadenceMs = kLiveCadenceDefaultMs);
     ~LiveService();
     // Idempotent. Deactivates subscriptions and joins in-flight delivery before
     // the transport executor can be stopped/destroyed. Call off the live worker.
@@ -176,7 +151,6 @@ public:
     // Idempotent restart after shutdown; old subscriptions remain inactive.
     void start();
     struct Diagnostics {
-        uint64_t builds = 0, buildMicros = 0, deliveries = 0, deliveryMicros = 0;
         uint64_t rawEncodings = 0, rawBuildMicros = 0, rawDeliveries = 0;
         uint64_t rawBuilds = 0, rawFailures = 0;
     };
@@ -191,7 +165,6 @@ public:
     // See LiveCache::ensureFinal. A publisher that may withdraw provisional
     // minutes publishes them only while this holds for the series.
     bool ensureFinal(const std::string &symbol, const std::string &layer, RecordPtr final);
-    std::shared_ptr<Subscription> subscribe(LiveView view, Deliver deliver);
     std::shared_ptr<RawSubscription> subscribeRaw(RawTailView view, RawDeliver deliver);
 private:
     friend struct ::RecordingLiveTest;

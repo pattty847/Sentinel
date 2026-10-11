@@ -779,16 +779,15 @@ TEST_F(ShadowTest, StalledAndFailingShadowDoesNotDelayServerPrimary) {
   config.recording.enabled = true;
   config.recording.dir = (root / "primary").string();
   config.recording.fallbackDir.clear();
-  config.heatmap.persistenceEnabled = false;
   config.rollerShadow = cfg;
   SentinelServerApp app(config);
   ShadowServerTestAccess::prepare(app, root);
   auto &model = ShadowServerTestAccess::model(app);
   ASSERT_TRUE(model.recordingAvailable());
   std::atomic<int> deliveries{0};
-  auto subscription = model.recordingLive()->subscribe(
-      {Product, "near", 60000, {99990, 1, 20}, 1},
-      [&](const auto &, const auto &) {
+  auto subscription = model.recordingLive()->subscribeRaw(
+      {Product, {"hmc2.near"}, 1, 0},
+      [&](const auto &, const auto &, const auto &) {
         ++deliveries;
         return true;
       });
@@ -1397,7 +1396,7 @@ void expectShownThenCleared(LiveClient &c) {
 // client's LiveEdge: the existing subscriber drops the withdrawn minutes, a
 // subscriber that connects after the withdrawal never receives them.
 TEST_F(ShadowTest, WithdrawnRecoverySnapshotLeavesLiveServiceSubscribers) {
-  auto service = std::make_shared<recording::LiveService>(cfg.outputRoot);
+  auto service = std::make_shared<recording::LiveService>();
   serveTo(service);
   const auto subscribe = [&](std::shared_ptr<Client> client) {
     return subscribeClient(*service, client);
@@ -1524,7 +1523,7 @@ TEST_F(ShadowTest, RestartWithdrawalWithZeroCachedFinalsReachesSubscriber) {
     writer->append(record(t * 1000, t == 64 ? "not JSON"
                                             : "{\"channel\":\"heartbeats\"}"));
   writer->flush();
-  serveTo(std::make_shared<recording::LiveService>(cfg.outputRoot));
+  serveTo(std::make_shared<recording::LiveService>());
   start();
   ASSERT_TRUE(eventually([&] {
     return fs::exists(root / "shadow" / Product / "roller.json") &&
@@ -1533,7 +1532,7 @@ TEST_F(ShadowTest, RestartWithdrawalWithZeroCachedFinalsReachesSubscriber) {
   }));
   shadow.reset();
   // Restarted process: a new, empty live cache with an existing subscriber.
-  auto service = std::make_shared<recording::LiveService>(cfg.outputRoot);
+  auto service = std::make_shared<recording::LiveService>();
   serveTo(service);
   auto existing = std::make_shared<LiveClient>();
   auto sub = subscribeClient(*service, existing);
@@ -1563,7 +1562,7 @@ TEST_F(ShadowTest, RestartWithdrawalWithZeroCachedFinalsReachesSubscriber) {
 // Review r2 finding 1: on a root with no committed minute yet the lead does not
 // publish (nothing could carry a withdrawal) until history commits one.
 TEST_F(ShadowTest, LeadWaitsForACommittedMinuteOnANewRoot) {
-  auto service = std::make_shared<recording::LiveService>(cfg.outputRoot);
+  auto service = std::make_shared<recording::LiveService>();
   serveTo(service);
   auto client = std::make_shared<LiveClient>();
   auto sub = subscribeClient(*service, client);
@@ -1972,7 +1971,6 @@ TEST_F(ShadowTest, ServingRollerReplacesPrimaryRecorderForNonDefaultProduct) {
   config.recording.source = "roller";
   config.recording.dir = (root / "primary").string();
   config.recording.fallbackDir.clear();
-  config.heatmap.persistenceEnabled = false;
   config.rollerShadow = cfg;
   config.rollerShadow.products = {"PEPE-USD"};
   config.rollerShadow.liveNowForTest = [this] { return liveNow.load(); };
@@ -2746,7 +2744,6 @@ struct JournalServer {
     config.recording.source = "roller";
     config.recording.dir = (t.root / "primary").string();
     config.recording.fallbackDir.clear();
-    config.heatmap.persistenceEnabled = false;
     config.rollerShadow = t.cfg;
     config.rollerShadow.products = {"PEPE-USD"};
     config.rollerShadow.liveNowForTest = [&test] { return test.liveNow.load(); };
@@ -3094,8 +3091,7 @@ struct JournalCandles {
     EXPECT_TRUE(QDir::setCurrent(temp.path()));
     config.defaultSymbols = {"PEPE-USD"};
     config.rollerShadow.products = {"PEPE-USD"};
-    config.heatmap.persistenceEnabled = false;
-    config.heatmap.timeframesMs = {1000, 60000, 300000};
+    config.chart.timeframesMs = {1000, 60000, 300000};
     steady = std::make_unique<ServerDataModel>(config);
     outage = std::make_unique<ServerDataModel>(config);
   }

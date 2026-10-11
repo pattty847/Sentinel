@@ -29,53 +29,32 @@ ServerConfig parseServerConfig(const nlohmann::json& msg) {
     auto mark = [&cfg](const nlohmann::json& object, const char* wire, const char* field) {
         if (object.contains(wire)) cfg.advertisedFields.insert(field);
     };
-    mark(msg, "timeframes_ms", "heatmap.configuredTimeframesMs");
-    mark(msg, "default_symbols", "defaultSymbols");
-    if (msg.contains("timeframes_ms") && msg["timeframes_ms"].is_array()) {
-        cfg.heatmap.timeframesMs.clear();
-        for (const auto& item : msg["timeframes_ms"]) {
-            const int64_t tf = item.get<int64_t>();
-            if (tf > 0) {
-                cfg.heatmap.timeframesMs.push_back(tf);
-            }
-        }
-    }
     if (msg.contains("trade_overlays") && msg["trade_overlays"].is_object()) {
         const auto& overlay = msg["trade_overlays"];
+        mark(overlay, "retention_columns", "tradeOverlays.retentionColumns");
+        cfg.tradeOverlays.retentionColumns = overlay.value("retention_columns", cfg.tradeOverlays.retentionColumns);
         cfg.tradeOverlays.gridWidth = overlay.value("grid_width", cfg.tradeOverlays.gridWidth);
         cfg.tradeOverlays.gridHeight = overlay.value("grid_height", cfg.tradeOverlays.gridHeight);
         cfg.tradeOverlays.tickSize = overlay.value("tick_size", cfg.tradeOverlays.tickSize);
         cfg.tradeOverlays.footprintTimeframeMs = overlay.value("footprint_timeframe_ms", cfg.tradeOverlays.footprintTimeframeMs);
     }
-    if (msg.contains("heatmap") && msg["heatmap"].is_object()) {
-        const auto& hm = msg["heatmap"];
-        for (const auto& [wire, field] : {std::pair{"grid_width", "heatmap.gridWidth"},
-                 {"grid_height", "heatmap.gridHeight"}, {"active_timeframe_ms", "heatmap.activeTimeframeMs"},
-                 {"served_timeframes_ms", "heatmap.servedTimeframesMs"}}) mark(hm, wire, field);
-        cfg.heatmap.gridWidth = hm.value("grid_width", cfg.heatmap.gridWidth);
-        cfg.heatmap.gridHeight = hm.value("grid_height", cfg.heatmap.gridHeight);
-        cfg.heatmap.tickSize = hm.value("tick_size", cfg.heatmap.tickSize);
-        cfg.heatmap.recenterDelta = hm.value("recenter_delta", cfg.heatmap.recenterDelta);
-        cfg.heatmap.bandFast = hm.value("band_fast", cfg.heatmap.bandFast);
-        cfg.heatmap.bandMedium = hm.value("band_medium", cfg.heatmap.bandMedium);
-        cfg.heatmap.bandSlow = hm.value("band_slow", cfg.heatmap.bandSlow);
-        cfg.heatmap.intensityMode = hm.value("intensity_mode", cfg.heatmap.intensityMode);
-        cfg.heatmap.intensityMaxMode = hm.value("intensity_max_mode", cfg.heatmap.intensityMaxMode);
-        cfg.heatmap.intensityMaxDecay = hm.value("intensity_max_decay", cfg.heatmap.intensityMaxDecay);
-        cfg.heatmap.intensityLogScale = hm.value("intensity_log_scale", cfg.heatmap.intensityLogScale);
-        cfg.heatmap.intensityPower = hm.value("intensity_power", cfg.heatmap.intensityPower);
-        cfg.heatmap.intensityFloor = hm.value("intensity_floor", cfg.heatmap.intensityFloor);
-        cfg.heatmap.debugSliceLog = hm.value("debug_slice_log", cfg.heatmap.debugSliceLog);
-        cfg.heatmap.activeTimeframeMs = hm.value("active_timeframe_ms", cfg.heatmap.activeTimeframeMs);
-        if (hm.contains("served_timeframes_ms") && hm["served_timeframes_ms"].is_array()) {
-            for (const auto& item : hm["served_timeframes_ms"]) {
-                if (item.is_number_integer()) {
-                    const int64_t tf = item.get<int64_t>();
-                    if (tf > 0) {
-                        cfg.heatmap.servedTimeframesMs.push_back(tf);
-                    }
-                }
-            }
+    mark(msg, "default_symbols", "defaultSymbols");
+    if (msg.contains("chart") && msg["chart"].is_object()) {
+        const auto& chart = msg["chart"];
+        mark(chart, "timeframes_ms", "chart.configuredTimeframesMs");
+        mark(chart, "default_timeframe_ms", "chart.defaultTimeframeMs");
+        mark(chart, "served_timeframes_ms", "chart.servedTimeframesMs");
+        cfg.chart.defaultTimeframeMs = chart.value("default_timeframe_ms", cfg.chart.defaultTimeframeMs);
+        if (chart.contains("timeframes_ms") && chart["timeframes_ms"].is_array()) {
+            cfg.chart.timeframesMs.clear();
+            for (const auto& item : chart["timeframes_ms"])
+                if (item.is_number_integer() && item.get<int64_t>() > 0)
+                    cfg.chart.timeframesMs.push_back(item.get<int64_t>());
+        }
+        if (chart.contains("served_timeframes_ms") && chart["served_timeframes_ms"].is_array()) {
+            for (const auto& item : chart["served_timeframes_ms"])
+                if (item.is_number_integer() && item.get<int64_t>() > 0)
+                    cfg.chart.servedTimeframesMs.push_back(item.get<int64_t>());
         }
     }
     if (msg.contains("orderbook") && msg["orderbook"].is_object()) {

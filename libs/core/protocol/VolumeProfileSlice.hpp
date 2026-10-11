@@ -13,7 +13,7 @@
  * volumeBinsF32: float32 little-endian, one value per price bin, size == gridHeight.
  *   bin[0]             → price = maxPrice - 0.5*tickSize  (top of grid)
  *   bin[gridHeight-1]  → price = minPrice + 0.5*tickSize  (bottom of grid)
- *   Same row ordering as HeatmapSlice / FootprintSlice.
+ *   Same row ordering as FootprintSlice.
  *
  * POC / VAH / VAL use Steidlmayer 70 % value-area methodology:
  *   - POC  = price level with the highest volume

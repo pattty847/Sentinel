@@ -94,12 +94,6 @@ private:
     bool admitSession(const std::shared_ptr<Session>& session, uint64_t generation);
     void unregisterSession(const Session* session);
     bool submitHistoryTask(std::function<void()> task);
-    std::string buildHeatmapHistoryChunk(const std::string& symbol,
-                                         int64_t timeframeMs,
-                                         int64_t endTimeMs,
-                                         int64_t startTimeMs,
-                                         int count) const;
-
     ServerDataModel& m_model;
     // Heatmap chunk serving; null when recording is unavailable. Shared with
     // history-worker jobs, which the server joins in stop().

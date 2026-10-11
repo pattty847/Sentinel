@@ -50,19 +50,15 @@ add_library(sentinel_core
     servermodel/ServerDataModel.hpp
     servermodel/ServerDataModel.cpp
     servermodel/TradeOverlayPublisher.cpp
-    servermodel/HeatmapTwapStreamer.hpp
-    servermodel/HeatmapTwapStreamer.cpp
     servermodel/SymbolHotData.hpp
-    servermodel/HmcolFormat.hpp
-    servermodel/HmcolFormat.cpp
+    Crc32.hpp
+    Crc32.cpp
     servermodel/BookRecorder.cpp
     servermodel/BookRecorder.hpp
     servermodel/RecorderStallMonitor.hpp
     servermodel/RecordingLive.cpp
     servermodel/RecordingLive.hpp
     servermodel/RecordingDir.hpp
-    servermodel/RecordingPage.cpp
-    servermodel/RecordingPage.hpp
     servermodel/RecordingChunks.cpp
     servermodel/RecordingChunks.hpp
     servermodel/ChunkService.cpp
@@ -96,8 +92,6 @@ add_library(sentinel_core
     heatmap/HeatmapTiles.hpp
     servermodel/Hmc2Store.cpp
     servermodel/Hmc2Store.hpp
-    servermodel/HeatmapColumnStore.hpp
-    servermodel/HeatmapColumnStore.cpp
     servermodel/TimeframeAggregator.hpp
     servermodel/TimeframeAggregator.cpp
     protocol/SentinelStreamServer.hpp

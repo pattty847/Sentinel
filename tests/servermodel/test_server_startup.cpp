@@ -39,7 +39,6 @@ struct ServerProcess {
             "bind_address: '" + address + "'\n"
             "stream_port: 0\n"
             "default_symbols: [BTC-USD]\n"
-            "heatmap:\n  persistence_enabled: false\n  grid_width: 16\n  grid_height: 32\n"
             "recording:\n  enabled: true\n  source: roller\n  dir: '" + scratch.filePath("primary").toUtf8() + "'\n  fallback_dir: ''\n"
             "roller_shadow:\n  enabled: true\n  dir: '" + scratch.filePath("recording").toUtf8() + "'\n"
             "  journal_dir: '" + scratch.filePath("journal").toUtf8() + "'\n"

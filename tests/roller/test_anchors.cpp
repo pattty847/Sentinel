@@ -4,7 +4,7 @@
 #include "roller/Roller.hpp"
 #include "roller/Grid.hpp"
 #include "roller/JournalFeed.hpp"
-#include "servermodel/HmcolFormat.hpp"
+#include "Crc32.hpp"
 #include <gtest/gtest.h>
 #include <QTemporaryDir>
 #include <QDateTime>
@@ -56,7 +56,7 @@ void sameWatermarks(BookRecorder& a, BookRecorder& b, const std::string& p) {
     }
 }
 void fixStateCrc(std::vector<uint8_t>& b) {
-    const auto crc=hmcol::crc32(b.data(),b.size()-4);
+    const auto crc=sentinel::crc32(b.data(),b.size()-4);
     for (unsigned i=0;i<4;++i) b[b.size()-4+i]=uint8_t(crc>>(i*8));
 }
 }

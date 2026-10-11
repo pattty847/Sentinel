@@ -1,19 +1,11 @@
 schema_version: 1
 bind_address: "127.0.0.1" # server.bind_address; local clients only by default
 # bind_address: "100.89.99.21" # Example Mac Tailscale address for remote tailnet clients; use your own local address.
-heatmap:
+chart:
   timeframes_ms: [1000, 60000, 300000, 900000, 3600000, 14400000, 86400000]
-  timeframe: 60000
-  grid_width: 8192
-  grid_height: 2048
-  tick_size: 5
-  recenter_delta: 0.01
-  persistence_enabled: true
-  persistence_dir: data/heatmap
-  persistence_fsync_every_n_records: 1
-  persistence_fsync_every_ms: 1000
-  persistence_retention_days: 0
+  default_timeframe_ms: 60000
 trade_overlays:
+  retention_columns: 8192
   grid_width: 512
   grid_height: 2048
   tick_size: 5

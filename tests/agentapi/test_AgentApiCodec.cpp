@@ -321,10 +321,10 @@ TEST(AgentApiCodec, QueryValidation) {
 
 TEST(AgentApiCodec, AdvertisedCapabilitiesOnly) {
     ServerConfig config;
-    config.heatmap.servedTimeframesMs = {60000};
-    config.heatmap.timeframesMs = {1000, 60000};
-    config.heatmap.gridWidth = 4096;
-    config.advertisedFields = {"heatmap.servedTimeframesMs", "heatmap.gridWidth"};
+    config.chart.servedTimeframesMs = {60000};
+    config.chart.timeframesMs = {1000, 60000};
+    config.tradeOverlays.retentionColumns = 4096;
+    config.advertisedFields = {"chart.servedTimeframesMs", "tradeOverlays.retentionColumns"};
     StateSnapshot state;
     applyAdvertisedServerConfig(state, config);
     ASSERT_TRUE(state.servedTimeframesMs.has_value());

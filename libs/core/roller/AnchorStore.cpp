@@ -1,5 +1,5 @@
 #include "AnchorStore.hpp"
-#include "servermodel/HmcolFormat.hpp"
+#include "Crc32.hpp"
 #include "servermodel/PersistenceIo.hpp"
 #include <QDateTime>
 #include <QTimeZone>
@@ -79,7 +79,7 @@ std::vector<uint8_t> AnchorStore::encode(const ReplayAnchor& a) {
     std::vector<uint8_t> out(Magic.begin(), Magic.end());
     put(out, Version); put(out, uint32_t(raw.size())); put(out, uint32_t(n));
     out.insert(out.end(), compressed.begin(), compressed.begin() + n);
-    put(out, hmcol::crc32(out.data(), out.size()));
+    put(out, sentinel::crc32(out.data(), out.size()));
     return out;
 }
 ReplayAnchor AnchorStore::decode(const std::vector<uint8_t>& bytes) {
@@ -87,7 +87,7 @@ ReplayAnchor AnchorStore::decode(const std::vector<uint8_t>& bytes) {
     require(std::equal(Magic.begin(), Magic.end(), bytes.begin()) && get(bytes,8) == Version, "magic/version");
     const auto rawSize = get(bytes,12), packedSize = get(bytes,16);
     require(rawSize && rawSize <= MaxBytes && packedSize == bytes.size()-24, "payload length");
-    require(get(bytes,bytes.size()-4) == hmcol::crc32(bytes.data(),bytes.size()-4), "CRC mismatch");
+    require(get(bytes,bytes.size()-4) == sentinel::crc32(bytes.data(),bytes.size()-4), "CRC mismatch");
     require(ZSTD_findFrameCompressedSize(bytes.data()+20, packedSize) == packedSize, "compression framing");
     std::vector<uint8_t> raw(rawSize);
     require(ZSTD_decompress(raw.data(),raw.size(),bytes.data()+20,packedSize) == rawSize, "decompression failed");
