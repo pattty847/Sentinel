@@ -53,8 +53,6 @@ add_library(sentinel_core
     servermodel/HeatmapTwapStreamer.hpp
     servermodel/HeatmapTwapStreamer.cpp
     servermodel/SymbolHotData.hpp
-    servermodel/TickBinaryLogger.hpp
-    servermodel/TickBinaryLogger.cpp
     servermodel/HmcolFormat.hpp
     servermodel/HmcolFormat.cpp
     servermodel/BookRecorder.cpp

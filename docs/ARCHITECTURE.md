@@ -42,7 +42,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 - **`sentinel-server`:** Minimal footprint CLI bootstrap that instantiates the Core data daemon.
 - **`sentinel_gui`:** Minimal footprint UI bootstrap that instantiates the Qt `QApplication` and connects to the server daemon.
 - **`sentinel-roll` / `hmc2_diff`:** Thin QtCore bootstraps for the core roller and decoded recording comparison; output policy and conversion logic live in `libs/core/roller`.
-- **`sentinel-backtest`:** Minimal CLI bootstrap that replays RAWL2 journal trades or historical trade files through the shared trading simulation core; UTC days prefer journals and fall back to legacy tick files, with a CSV dump for identity/gap comparisons.
+- **`sentinel-backtest`:** Minimal CLI bootstrap that replays RAWL2 journal trades or imported CSV through the shared trading simulation core, with a CSV dump for identity/gap comparisons. Legacy binary tick input is removed.
 - **`sentinel-lab`:** Benchmark and inspection harness for the production heatmap GPU path (S5c): `LocalChunkTransport` -> `ChunkFetcher` -> `HeatmapSourceController` on a heatmap-data thread (`lab/LabData`) -> `HeatmapTileNode` in a plain `QQuickItem` (`lab/LabItem`). Headless `--screenshot`, `--window-screenshot`, `--tick-sweep`, `--tick-change-frames`, `--s5-bench` (vs the B1 hybrid) and the binner compute `--bench`; tick controls (Auto/Manual, `--hysteresis`, `--min-row-px`, `--tick`, `--zoom-rows-px`, `--no-crossfade`), `--end-utc` (a pinned closed range), `--band-edges` (E4) and `--charts`.
 
 ## Data pipeline
@@ -50,14 +50,14 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 ### Server
 
 ```
-Exchange → MarketDataCoreEngine → ServerDataModel → Persistence + SentinelStreamServer → WebSocket
+Exchange → capture → RAWL2 journal + fan-out → roller → ServerDataModel + HMC2 → SentinelStreamServer → WebSocket
 ```
 
-- **MarketDataCoreEngine** — Exchange connections, feed parsing, order book updates. See `docs/MARKETDATA.md`.
+- **MarketDataCoreEngine** — Capture-only exchange connections, feed parsing, order book updates. See `docs/MARKETDATA.md`.
 - **ServerDataModel** — Central hub for all symbols; coordinates persistence and streaming.
-- **TickBinaryLogger** — Append-only binary logging with hourly rotation; the backtest reader preserves trade IDs and normalizes v1 maker/v2 aggressor sides. JournalTradeEventSource reads RAWL2 trades independently of the book feed.
-- **TimeframeAggregator** — Timer-driven aggregation (e.g. 100 ms, 1 s) into GPU-ready slices.
-- **SentinelStreamServer** — Broadcasts pre-aggregated heatmap columns and related streams to clients. Each client session is owned until explicit teardown, serializes model events on its Asio executor, and enforces bounded event/write backlogs. Upstream symbol subscriptions are reference-counted across clients.
+- **JournalTradeEventSource** — Reads RAWL2 trades for backtests independently of the book feed, preserving IDs and converting maker sides to aggressor sides. No legacy tick files are read or written.
+- **TimeframeAggregator** — Journal-clock aggregation (e.g. 100 ms, 1 s); captured products never close bars on the wall-clock timer.
+- **SentinelStreamServer** — Broadcasts pre-aggregated heatmap columns and related streams to clients. Each client session is owned until explicit teardown, serializes model events on its Asio executor, and enforces bounded event/write backlogs. Live subscriptions accept captured products only; chart lifetimes do not acquire or release upstream feeds.
 
 ### Client
 
@@ -375,14 +375,16 @@ to its own grid; TPO clears its old band when its own price metadata changes.
 Volume profile also uses the full surface and its own price metadata. Recording
 re-bands do not reset these overlays or stretch them to the heatmap overlap rect.
 
-### Optional journal shadow recorder
+### Journal roller and live model feed
 
-`libs/core/roller/ShadowRoller` owns the optional server shadow pipeline;
-`SentinelServerApp` only wires configuration, pinned products, metrics and
-lifetime. Each product has independent journal/socket and recorder workers
+`libs/core/roller/ShadowRoller` owns the server's journal pipeline;
+`SentinelServerApp` wires configuration, captured products, metrics, the queued
+model sink and lifetime. The server requires the roller source; it refuses the
+primary source at startup. Each product has independent journal/socket and recorder workers
 because daily grids differ. A separate sequential comparison worker produces
-same-journal batch oracles in temporary storage. There are no callbacks into
-the primary engine/recorder or client stream. Config and monitoring are in
+same-journal batch oracles in temporary storage. Roller workers feed the model
+through queued `ModelSink` hand-offs; REST is used only for candle history.
+The primary recorder implementation remains compiled until slice E. Config and monitoring are in
 `ops/monitoring/README.md` under Shadow roller.
 
 HMC2's default writer lease remains exclusive for the entire root. An opt-in

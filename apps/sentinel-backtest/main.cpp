@@ -24,12 +24,12 @@ struct CliArgs {
     trading::AlgoParams params;
     bool history = false, dump = false;
     int64_t fromMs = 0, toMs = 0;
-    std::string journalRoot = trading::DefaultJournalRoot, legacyRoot = "data/market";
+    std::string journalRoot = trading::DefaultJournalRoot;
 };
 
 void printUsage() {
-    std::cerr << "History: sentinel-backtest --product P --from UTC --to UTC [--journal ROOT] [--legacy ROOT] [--dump] [--spread BPS] [--qty QTY] [--maxpos QTY] (to exclusive)\n";
-    std::cerr << "Usage: sentinel-backtest <trades.csv|trade_log.bin|trade_dir> [symbol] [spread_bps] [order_qty] [max_pos] [skew_bps]\n";
+    std::cerr << "History: sentinel-backtest --product P --from UTC --to UTC [--journal ROOT] [--dump] [--spread BPS] [--qty QTY] [--maxpos QTY] (to exclusive)\n";
+    std::cerr << "Usage: sentinel-backtest <trades.csv> [symbol] [spread_bps] [order_qty] [max_pos] [skew_bps]\n";
 }
 
 int64_t parseUtc(const std::string& value) {
@@ -71,7 +71,6 @@ std::optional<CliArgs> parseArgs(int argc, char** argv) {
             else if (flag == "--from") { args.fromMs = parseUtc(value); from = true; }
             else if (flag == "--to") { args.toMs = parseUtc(value); to = true; }
             else if (flag == "--journal") args.journalRoot = value;
-            else if (flag == "--legacy") args.legacyRoot = value;
             else if (flag == "--spread") args.params.spreadBps = std::stod(value);
             else if (flag == "--qty") args.params.orderQty = std::stod(value);
             else if (flag == "--maxpos") args.params.maxPositionQty = std::stod(value);
@@ -124,7 +123,7 @@ int main(int argc, char** argv) try {
     const std::filesystem::path inputPath(args->inputPath);
     if (args->history) {
         source = trading::openTradeHistory(args->symbol, args->fromMs, args->toMs,
-                                           args->journalRoot, args->legacyRoot);
+                                           args->journalRoot);
     } else if (inputPath.extension() == ".csv") {
         csvInput.open(inputPath);
         if (!csvInput.is_open()) {
@@ -133,17 +132,12 @@ int main(int argc, char** argv) try {
         }
         source = std::make_unique<trading::CsvTradeEventSource>(csvInput);
     } else {
-        source = std::make_unique<trading::TickBinaryTradeEventSource>(inputPath, args->symbol);
+        throw std::invalid_argument("file input must be a .csv trade file");
     }
 
     const auto requireTrades = [&](bool found) {
-        if (source->skippedFiles() || source->skippedRecords()) {
-            std::cerr << "skipped_files=" << source->skippedFiles()
-                      << " skipped_records=" << source->skippedRecords() << '\n';
-        }
         if (args->history && !found) {
-            throw std::runtime_error("no trades in range; journal=" + args->journalRoot +
-                                     " legacy=" + args->legacyRoot);
+            throw std::runtime_error("no trades in range; journal=" + args->journalRoot);
         }
     };
     if (args->dump) {

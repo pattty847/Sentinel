@@ -409,7 +409,7 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
     auto* fileLayout = new QHBoxLayout(fileGroup);
     fileLayout->setSpacing(4);
     m_btFilePath = new QLineEdit(fileGroup);
-    m_btFilePath->setPlaceholderText(QStringLiteral("/path/to/trade_log.bin or directory/"));
+    m_btFilePath->setPlaceholderText(QStringLiteral("/path/to/trades.csv"));
     fileLayout->addWidget(m_btFilePath, 1);
     auto* browseBtn = new QPushButton(QStringLiteral("Browse"), fileGroup);
     browseBtn->setFixedWidth(60);
@@ -481,7 +481,7 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
             this,
             QStringLiteral("Select Trade Log"),
             QDir::homePath(),
-            QStringLiteral("Binary Trade Logs (*.bin);;CSV Trade Logs (*.csv);;All Files (*)"));
+            QStringLiteral("CSV Trade Logs (*.csv)"));
         if (!path.isEmpty()) {
             m_btFilePath->setText(path);
         }

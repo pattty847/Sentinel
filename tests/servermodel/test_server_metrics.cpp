@@ -121,9 +121,10 @@ TEST(ServerMetrics, RecorderAndConnectionSeriesOverHttp) {
     ASSERT_TRUE(server.listen(0));
 
     std::string text = scrape(server.port());
+    EXPECT_EQ(text.find("sentinel_mdc_"), std::string::npos);
     EXPECT_TRUE(has(text, "sentinel_recorder_running 1"));
-    EXPECT_TRUE(has(text, "sentinel_mdc_connected{product=\"BTC-USD\",pinned=\"1\"} 0"));
-    EXPECT_TRUE(has(text, "sentinel_mdc_transport_up_total{product=\"BTC-USD\",pinned=\"1\"} 0"));
+    EXPECT_TRUE(has(text, "sentinel_live_feed_up{product=\"BTC-USD\"} 0"));
+    EXPECT_TRUE(has(text, "sentinel_live_feed_up_total{product=\"BTC-USD\"} 0"));
     EXPECT_TRUE(has(text, "sentinel_recorder_columns_written_total 0"));
     EXPECT_TRUE(has(text, "sentinel_recorder_disk_errors_total 0"));
     EXPECT_TRUE(has(text, "sentinel_recorder_live_publish_drops_total 0"));
@@ -136,17 +137,15 @@ TEST(ServerMetrics, RecorderAndConnectionSeriesOverHttp) {
     model.onMarketDataConnectionChanged("BTC-USD", true);
     model.onMarketDataConnectionChanged("BTC-USD", true); // repeated status is not a transition
     text = scrape(server.port());
-    EXPECT_TRUE(has(text, "sentinel_mdc_connected{product=\"BTC-USD\",pinned=\"1\"} 1"));
-    EXPECT_TRUE(has(text, "sentinel_mdc_transport_up_total{product=\"BTC-USD\",pinned=\"1\"} 1"));
-    EXPECT_TRUE(has(text, "sentinel_mdc_transport_down_total{product=\"BTC-USD\",pinned=\"1\"} 0"));
-    // Just connected: every pinned symbol x layer is on time.
-    EXPECT_TRUE(has(text, "sentinel_recorder_column_overdue_seconds{product=\"BTC-USD\",layer=\"near\"} 0"));
-    EXPECT_TRUE(has(text, "sentinel_recorder_column_overdue_seconds{product=\"BTC-USD\",layer=\"deep\"} 0"));
+    EXPECT_TRUE(has(text, "sentinel_live_feed_up{product=\"BTC-USD\"} 1"));
+    EXPECT_TRUE(has(text, "sentinel_live_feed_up_total{product=\"BTC-USD\"} 1"));
+    EXPECT_TRUE(has(text, "sentinel_live_feed_down_total{product=\"BTC-USD\"} 0"));
+    // Primary-recorder stall wiring is retired; the roller owns deadlines.
 
     model.onMarketDataConnectionChanged("BTC-USD", false);
     text = scrape(server.port());
-    EXPECT_TRUE(has(text, "sentinel_mdc_connected{product=\"BTC-USD\",pinned=\"1\"} 0"));
-    EXPECT_TRUE(has(text, "sentinel_mdc_transport_down_total{product=\"BTC-USD\",pinned=\"1\"} 1"));
+    EXPECT_TRUE(has(text, "sentinel_live_feed_up{product=\"BTC-USD\"} 0"));
+    EXPECT_TRUE(has(text, "sentinel_live_feed_down_total{product=\"BTC-USD\"} 1"));
     EXPECT_FALSE(hasSeries(text, "sentinel_recorder_column_overdue_seconds{"));
 
     // An upstream invalidation reaches the recorder's counter (worker thread).
@@ -159,10 +158,8 @@ TEST(ServerMetrics, RecorderAndConnectionSeriesOverHttp) {
     EXPECT_TRUE(has(text, "sentinel_recorder_invalidations_total 1")) << text;
 }
 
-// Per-product connections: only pinned (recorder) symbols drive the health series.
-// A GUI chart's product going down must not page A1b or hide BTC's overdue
-// deadline, and a pinned product down must show even while a GUI product is up.
-TEST(ServerMetrics, GuiProductConnectionCannotMoveThePinnedHealthSeries) {
+// Only captured products have live feed health series.
+TEST(ServerMetrics, UncapturedProductConnectionIsIgnored) {
     int argc = 1;
     char name[] = "server-metrics-gui";
     char* argv[] = {name, nullptr};
@@ -180,38 +177,32 @@ TEST(ServerMetrics, GuiProductConnectionCannotMoveThePinnedHealthSeries) {
 
     model.onMarketDataConnectionChanged("BTC-USD", true);
     std::string text = registry.render();
-    EXPECT_TRUE(has(text, "sentinel_mdc_connected{product=\"SOL-USD\",pinned=\"1\"} 0")) << "SOL-USD (pinned) is still down";
+    EXPECT_TRUE(has(text, "sentinel_live_feed_up{product=\"SOL-USD\"} 0")) << "SOL-USD (pinned) is still down";
     model.onMarketDataConnectionChanged("SOL-USD", true);
     text = registry.render();
-    EXPECT_TRUE(has(text, "sentinel_mdc_connected{product=\"BTC-USD\",pinned=\"1\"} 1"));
-    EXPECT_TRUE(has(text, "sentinel_mdc_transport_up_total{product=\"BTC-USD\",pinned=\"1\"} 1"));
-    EXPECT_TRUE(has(text, btcOverdue + " 0"));
+    EXPECT_TRUE(has(text, "sentinel_live_feed_up{product=\"BTC-USD\"} 1"));
+    EXPECT_TRUE(has(text, "sentinel_live_feed_up_total{product=\"BTC-USD\"} 1"));
 
-    model.acquireGuiFeed("ETH-USD");
-    // A GUI chart opens and closes ETH-USD: nothing pinned moves.
+    // Status changes for uncaptured ETH-USD cannot change captured feeds.
     for (const bool up : {true, false, true, false}) {
         model.onMarketDataConnectionChanged("ETH-USD", up);
         text = registry.render();
-        EXPECT_TRUE(has(text, "sentinel_mdc_connected{product=\"BTC-USD\",pinned=\"1\"} 1")) << "ETH up=" << up;
-        EXPECT_TRUE(has(text, "sentinel_mdc_transport_up_total{product=\"BTC-USD\",pinned=\"1\"} 1"));
-        EXPECT_TRUE(has(text, "sentinel_mdc_transport_down_total{product=\"BTC-USD\",pinned=\"1\"} 0"));
-        EXPECT_TRUE(has(text, btcOverdue + " 0")) << "ETH up=" << up;
+        EXPECT_TRUE(has(text, "sentinel_live_feed_up{product=\"BTC-USD\"} 1")) << "ETH up=" << up;
+        EXPECT_TRUE(has(text, "sentinel_live_feed_up_total{product=\"BTC-USD\"} 1"));
+        EXPECT_TRUE(has(text, "sentinel_live_feed_down_total{product=\"BTC-USD\"} 0"));
         EXPECT_FALSE(hasSeries(text, ethOverdue)) << "only pinned symbols have recorder series";
     }
 
-    model.releaseGuiFeed("ETH-USD");
     model.onMarketDataConnectionChanged("ETH-USD", true); // late callback cannot recreate it
     text = registry.render();
-    EXPECT_FALSE(hasSeries(text, "sentinel_mdc_connected{product=\"ETH-USD\""));
-    model.acquireGuiFeed("ETH-USD");
-    // BTC alone down while the GUI's ETH is up: the gauge drops, BTC's overdue goes absent.
+    EXPECT_FALSE(hasSeries(text, "sentinel_live_feed_up{product=\"ETH-USD\""));
+    // BTC going down must show even after an uncaptured up notification.
     model.onMarketDataConnectionChanged("ETH-USD", true);
     model.onMarketDataConnectionChanged("BTC-USD", false);
     text = registry.render();
-    EXPECT_TRUE(has(text, "sentinel_mdc_connected{product=\"BTC-USD\",pinned=\"1\"} 0"));
-    EXPECT_TRUE(has(text, "sentinel_mdc_transport_down_total{product=\"BTC-USD\",pinned=\"1\"} 1"));
+    EXPECT_TRUE(has(text, "sentinel_live_feed_up{product=\"BTC-USD\"} 0"));
+    EXPECT_TRUE(has(text, "sentinel_live_feed_down_total{product=\"BTC-USD\"} 1"));
     EXPECT_FALSE(hasSeries(text, btcOverdue));
-    EXPECT_TRUE(hasSeries(text, "sentinel_recorder_column_overdue_seconds{product=\"SOL-USD\",layer=\"near\"}"));
 }
 
 TEST(ServerMetrics, RecorderOffExportsOnlyItsState) {

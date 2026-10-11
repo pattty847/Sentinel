@@ -98,26 +98,10 @@ void ServerDataModel::updateExchangeOffsetMs(int64_t exchangeMs) {
 ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
     : QObject(parent)
     , m_serverConfig(config)
-    , m_logger(std::make_unique<TickBinaryLogger>())
     , m_aggregator(std::make_unique<TimeframeAggregator>(m_serverConfig.heatmap.timeframesMs))
     , m_heatmapStreamer(std::make_unique<HeatmapTwapStreamer>(*this, m_serverConfig.heatmap))
-    , m_journalFeed(journalLiveFeed(m_serverConfig))
 {
-    // recording.live_feed: journal: every captured product is a pinned live feed.
-    for (const auto& symbol : m_journalFeed ? rollerProducts(m_serverConfig)
-                                            : normalizedDefaultSymbols(m_serverConfig.defaultSymbols)) {
-        auto& feed = m_feeds[symbol];
-        feed.pinned = true;
-        feed.lifetime = ++m_nextFeedLifetime;
-    }
-    m_metadataTimer.setInterval(5000);
-    connect(&m_metadataTimer, &QTimer::timeout, this, [this] {
-        for (auto& [symbol, feed] : m_feeds) {
-            if (symbol == "BTC-USD") continue; // Keep the established configured BTC book tick.
-            requestProductMetadataIfNeeded(symbol, feed);
-        }
-    });
-    m_metadataTimer.start();
+    for (const auto& symbol : rollerProducts(m_serverConfig)) m_feeds.try_emplace(symbol);
     m_reseedTimer.setSingleShot(true);
     connect(&m_reseedTimer, &QTimer::timeout, this, [this] { deliverReseeds(); });
     int64_t maxTfMs = std::max<int64_t>(1000, m_serverConfig.heatmap.activeTimeframeMs);
@@ -129,10 +113,9 @@ ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
     const int64_t gridSpanMs = maxTfMs * std::max<int64_t>(1024, m_serverConfig.heatmap.gridWidth);
     m_footprintTradeRetentionMs = std::clamp<int64_t>(gridSpanMs * 2, 300'000, 86'400'000);
 
-    // recording.live_feed: journal: candles close on each product's journal
+    // Candles close on each product's journal
     // time (onFeedWatermark and its trades), never this process's wall clock.
-    if (m_journalFeed)
-        for (const auto& symbol : rollerProducts(m_serverConfig)) m_aggregator->setJournalClock(symbol);
+    for (const auto& symbol : rollerProducts(m_serverConfig)) m_aggregator->setJournalClock(symbol);
     connect(m_aggregator.get(), &TimeframeAggregator::barClosed, this, &ServerDataModel::barClosed);
     connect(m_aggregator.get(), &TimeframeAggregator::barUpdated, this, &ServerDataModel::barUpdated);
 
@@ -339,31 +322,12 @@ void ServerDataModel::checkRecorderProgress(int64_t nowMs) {
                      << " invalidations=" << (m_recorder ? m_recorder->stats().invalidations : 0));
 }
 
-// Active feed membership is managed before queued transport statuses are delivered.
-void ServerDataModel::acquireGuiFeed(const std::string& symbol) {
-    auto [it, inserted] = m_feeds.try_emplace(symbol);
-    if (inserted) {
-        it->second.lifetime = ++m_nextFeedLifetime;
-        requestProductMetadataIfNeeded(symbol, it->second);
-    }
-}
-void ServerDataModel::requestProductMetadataIfNeeded(const std::string& symbol, FeedState& feed) {
-    // recording.live_feed: journal: the journal header carries it (onFeedMetadata), no REST.
-    if (m_journalFeed) return;
-    if (symbol == "BTC-USD" || !feed.metadata.is_null() || feed.metadataPending ||
-        localNowMs() < feed.nextMetadataAttemptMs) return;
-    feed.metadataPending = true;
-    feed.nextMetadataAttemptMs = localNowMs() + 30'000;
-    emit productMetadataRequested(QString::fromStdString(symbol), feed.lifetime);
-}
-void ServerDataModel::onProductMetadata(const std::string& symbol, uint64_t lifetime,
-                                        const nlohmann::json& metadata, const std::string& error) {
+void ServerDataModel::onProductMetadata(const std::string& symbol,
+                                        const nlohmann::json& metadata) {
     const auto it = m_feeds.find(symbol);
-    if (it == m_feeds.end() || it->second.lifetime != lifetime || symbol == "BTC-USD") return;
+    if (it == m_feeds.end() || symbol == "BTC-USD") return;
     auto& feed = it->second;
-    feed.metadataPending = false;
     try {
-        if (!error.empty()) throw std::runtime_error(error);
         if (metadata.at("product_id").get<std::string>() != symbol)
             throw std::runtime_error("product_id mismatch");
         // Validate exact decimal strings now; derive from the retained current BBO below.
@@ -376,7 +340,6 @@ void ServerDataModel::onProductMetadata(const std::string& symbol, uint64_t life
             publishAggregatedBook(QString::fromStdString(symbol), data, feed, 0);
     } catch (const std::exception& e) {
         feed.metadata = nullptr;
-        feed.nextMetadataAttemptMs = localNowMs() + 30'000;
         auto& data = ensureSymbol(symbol);
         data.clearAggregatedBook();
         emit bookSnapshotBroadcast(QString::fromStdString(symbol), {}, {}, 0.0,
@@ -388,10 +351,10 @@ void ServerDataModel::onProductMetadata(const std::string& symbol, uint64_t life
 void ServerDataModel::onFeedMetadata(const std::string& symbol, const nlohmann::json& metadata) {
     const auto it = m_feeds.find(symbol);
     if (it == m_feeds.end()) return;
-    onProductMetadata(symbol, it->second.lifetime, metadata, {});
+    onProductMetadata(symbol, metadata);
 }
 void ServerDataModel::onFeedWatermark(const std::string& symbol, int64_t journalMs) {
-    if (!m_journalFeed || !m_aggregator) return;
+    if (!m_aggregator) return;
     // Receive time leads exchange time by the feed latency: close only buckets
     // that ended kJournalCandleLagMs before it, so in-flight trades still land.
     m_aggregator->advance(symbol, journalMs - kJournalCandleLagMs);
@@ -403,10 +366,10 @@ void ServerDataModel::setReseedHandler(std::function<void(const std::string&)> h
         m_pendingReseeds.clear();
     }
 }
-// recording.live_feed: journal. The feed holds the whole book: a fresh snapshot
+// The journal feed holds the whole book: a fresh snapshot
 // replaces "await the next upstream snapshot". At most once per symbol per second.
 void ServerDataModel::requestReseed(const std::string& symbol, const char* why) {
-    if (!m_journalFeed || !m_reseed) return;
+    if (!m_reseed) return;
     const auto now = localNowMs();
     auto& next = m_nextReseedMs[symbol];
     if (now < next) {
@@ -427,28 +390,9 @@ void ServerDataModel::deliverReseeds() {
     const auto pending = std::exchange(m_pendingReseeds, {});
     for (const auto& symbol : pending) requestReseed(symbol, "deferred");
 }
-void ServerDataModel::releaseGuiFeed(const std::string& symbol, int64_t releaseLocalMs) {
-    const auto it = m_feeds.find(symbol);
-    if (it == m_feeds.end() || it->second.pinned) return;
-    m_feeds.erase(it);
-    {
-        std::shared_lock lock(m_mutex);
-        if (const auto data = m_symbols.find(symbol); data != m_symbols.end()) {
-            data->second->invalidateLiveBook();
-            data->second->lastTradePrice = 0;
-        }
-    }
-    if (m_heatmapStreamer) m_heatmapStreamer->releaseSymbol(symbol);
-    if (m_recorder) m_recorder->releaseSymbol(symbol, releaseLocalMs ? releaseLocalMs : localNowMs());
-    else if (m_recordingLive && !m_servesRoller) m_recordingLive->releaseSymbol(symbol); // the roller owns its series
-    sLog_Data("ServerDataModel: feed released, recording stopped: symbol=" << symbol);
-}
 void ServerDataModel::onMarketDataConnectionChanged(const std::string& symbol, bool connected) {
     const auto it = m_feeds.find(symbol);
-    if (it == m_feeds.end()) return; // retired GUI socket: never recreate a series
-    if (connected) requestProductMetadataIfNeeded(symbol, it->second);
-    // Only recorded products need deadlines; do not retain closed GUI products here.
-    if (m_stallMonitor && it->second.pinned && !m_servesRoller) m_stallMonitor->setConnected(symbol, connected, localNowMs());
+    if (it == m_feeds.end()) return; // uncaptured product: never create a series
     auto& feed = it->second;
     if (feed.connected == connected) return;
     feed.connected = connected;
@@ -463,15 +407,15 @@ void ServerDataModel::registerMetrics(sentinel::metrics::MetricsRegistry& r) {
         return [this, value] {
             std::vector<Registry::Sample> samples;
             for (const auto& [symbol, feed] : m_feeds)
-                samples.push_back({{{"product", symbol}, {"pinned", feed.pinned ? "1" : "0"}}, double(value(feed))});
+                samples.push_back({{{"product", symbol}}, double(value(feed))});
             return samples;
         };
     };
-    r.familyFn("sentinel_mdc_connected", "1 while this product's upstream connection is up.", Registry::Type::Gauge,
+    r.familyFn("sentinel_live_feed_up", "1 while this product's journal feed is up.", Registry::Type::Gauge,
                sampleFeeds([](const FeedState& f) { return f.connected; }));
-    r.familyFn("sentinel_mdc_transport_up_total", "Product upstream up transitions in this feed lifetime.", Registry::Type::Counter,
+    r.familyFn("sentinel_live_feed_up_total", "Product journal feed up transitions in this process.", Registry::Type::Counter,
                sampleFeeds([](const FeedState& f) { return f.ups; }));
-    r.familyFn("sentinel_mdc_transport_down_total", "Product upstream down transitions in this feed lifetime.", Registry::Type::Counter,
+    r.familyFn("sentinel_live_feed_down_total", "Product journal feed down transitions in this process.", Registry::Type::Counter,
                sampleFeeds([](const FeedState& f) { return f.downs; }));
     r.gaugeFn("sentinel_exchange_clock_offset_ms", "Smoothed local minus exchange clock in ms (0 = not yet measured).", {},
               [this]() -> Value { return double(m_exchangeOffsetMs.load(std::memory_order_relaxed)); });
@@ -633,10 +577,6 @@ bool ServerDataModel::collectFootprintTrades(const std::string& symbol,
 
 void ServerDataModel::onTrade(const Trade& trade) {
     if (!m_feeds.contains(trade.product_id)) return;
-    if (m_logger) {
-        m_logger->logTrade(trade);
-    }
-
     const int64_t exchangeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         trade.timestamp.time_since_epoch()).count();
     updateExchangeOffsetMs(exchangeMs);

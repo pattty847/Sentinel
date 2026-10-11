@@ -317,6 +317,11 @@ protected:
         ASSERT_TRUE(model->recordingDir());
         auth = std::make_unique<Authenticator>(dir.path().toStdString() + "/no-credentials");
         server = std::make_unique<SentinelStreamServer>(*model, *auth, config, 0);
+        // This fixture bypasses SentinelServerApp; install its captured-product admission policy.
+        server->setFeedAdmissionHandler([products = rollerProducts(config)](const std::string& symbol) {
+            return std::find(products.begin(), products.end(), symbol) != products.end()
+                ? SentinelStreamServer::FeedAdmission::Accepted : SentinelStreamServer::FeedAdmission::InvalidProduct;
+        });
     }
     void TearDown() override {
         if (marks.block.exchange(false)) marks.release.set_value();

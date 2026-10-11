@@ -175,7 +175,7 @@
     {
       "id": 10,
       "type": "timeseries",
-      "title": "Upstream transport",
+      "title": "Live journal feed",
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -194,7 +194,7 @@
             "type": "prometheus",
             "uid": "sentinel-vm"
           },
-          "expr": "sentinel_mdc_connected{pinned=\"1\"}",
+          "expr": "sentinel_live_feed_up",
           "legendFormat": "{{product}} connected",
           "range": true,
           "instant": false
@@ -205,7 +205,7 @@
             "type": "prometheus",
             "uid": "sentinel-vm"
           },
-          "expr": "increase(sentinel_mdc_transport_down_total{pinned=\"1\"}[1h])",
+          "expr": "increase(sentinel_live_feed_down_total[1h])",
           "legendFormat": "{{product}} downs in last hour",
           "range": true,
           "instant": false

@@ -45,7 +45,7 @@ This setting does not affect the Prometheus HTTP listener, which remains on `127
 For other products the server derives a live-book tick when metadata and an accepted raw book are
 both available, using the current raw BBO midpoint:
 about one basis point, rounded to the nearest 1-2-5 step, then rounded up to a multiple of
-Coinbase's exact `quote_increment`. Metadata is fetched on the server worker pool. Until it is valid,
+Coinbase's exact `quote_increment`. Metadata comes from the capture journal header. Until it is valid,
 the live aggregated book is unavailable; no global tick or guessed increment is used. The server
 retains the bounded native-price snapshot and all in-band deltas while metadata is pending. When
 metadata arrives, it builds the live aggregation from that current raw state without reconnecting
@@ -79,8 +79,10 @@ heatmap:
 
 recording:                # recording v2: near and deep order-book layers (docs/research/2026-09-recording-v2.md)
   enabled: true
-  dir: /Volumes/T7/sentinel-data/recording
-  fallback_dir: data/recording   # used when dir's volume is not mounted; empty = do not record
+  source: roller           # required; primary has no feed and is refused at startup
+  live_feed: journal       # ignored; retained for the previous binary until slice E
+  dir: /Volumes/T7/sentinel-data/recording # protected primary root, unused for serving
+  fallback_dir: data/recording   # protected fallback root; primary code removed in slice E
   near_tick: 1              # $ rows within near_pct of the mid
   near_pct: 0.05
   deep_tick: 5              # $ rows across [mid*deep_low_frac, mid*deep_high_mult]
@@ -89,24 +91,30 @@ recording:                # recording v2: near and deep order-book layers (docs/
   live_publish_ms: 500      # open-minute live publication interval (2 Hz); clamped to [250, 5000]
   # advanced: price_scale (100), size_floor (1e-6), codes_per_octave (819), lateness_ms (2000)
 
+roller_shadow:
+  enabled: true
+  journal_dir: /Volumes/T7/sentinel-data/raw-l2
+  dir: /Volumes/T7/sentinel-data/hmc2
+  products: [BTC-USD]
+
 mdc:
-  host: advanced-trade-ws.coinbase.com
-  port: 443
-  target: /v1
-  use_jwt: false   # true only when key.json exists and user/futures channels are needed
-  ssl_ca_bundle: resources/certs/ca-bundle.crt
-  connect_timeout_ms: 20000  # resolve + TCP + TLS + WS handshake; timeout -> backoff retry
-  close_timeout_ms: 3000     # WS close to an unresponsive peer
-  max_connections: 8        # GUI-only products; pinned default_symbols do not count (minimum 1)
+  ssl_ca_bundle: resources/certs/ca-bundle.crt  # REST candle-history TLS
 ```
 
 `recording.live_publish_ms` (default 500, clamped to [250, 5000]) is how often the recorder publishes each layer's open minute to live subscribers (owner decision 2026-10-01: 500 ms, 2 Hz). The live worker paces subscriptions at half of it, so each publication is sent at the next worker turn; refused sends back off from there up to 5 s. It does not change what is recorded on disk. Recorder-thread cost: about 0.4 ms per publication for a BTC-USD book (~23,500 near+deep entries), 0.08% of a core at 2 Hz (`recording_live_bench --publish`).
 
 Changing `recording.deep_tick` from $10 to $5 changes the recording config hash and starts a new HMC2 generation; existing files stay in the same series. Display ticks use `{1,2,2.5,5} x 10^k` restricted to native-tick multiples, so the $5 layer supports $25 rows. Pages spanning old $10 and new $5 generations serve both at common multiples (for example $50); at $25, output buckets containing $10 records are unknown while compatible buckets still serve. History and live projection use the same rule.
 
-`server.mdc.max_connections` limits distinct active GUI-only products, including feeds still connecting. The default is 8; values below 1 are rejected. Multiple clients watching the same product share a slot. Pinned `default_symbols` are exempt. At capacity, a new symbol is refused with a stream error (symbol and cap), a GUI status-bar message and `data.lastSubscriptionRefusal` in `/api/v1/state`; existing watched products are never evicted. Unsubscribing or disconnecting the final watcher frees the slot.
+The server's only live source is the capture journal through the roller. It requires
+`recording.source: roller` and `roller_shadow.enabled: true`; `primary` is refused.
+Subscriptions accept only captured products (`roller_shadow.products`, falling back
+to normalized `default_symbols`); there is no GUI feed cap or upstream acquisition.
 
-Market data connection keys may appear beside `mdc` (the older form) or inside it, either under `server` or at the YAML root. The loader reads sibling keys first, then applies `mdc` per key; an `mdc:` block containing only `max_connections` therefore retains sibling `host`, `port`, and `ssl_ca_bundle`. The startup log prints each effective MDC value with its file and source (`root`/`mdc`, `server`/`server.mdc`, or `retained` when this file has no override).
+`ssl_ca_bundle` may appear beside or inside `mdc`, at the YAML root or under `server`.
+The nested value overrides its sibling. All former WebSocket keys (`host`, `port`,
+`target`, `use_jwt`, timeout keys, `max_connections`) and `recording.live_feed` are
+ignored. Keep `recording.live_feed: journal` in the deployed YAML until slice E so
+a rollback to the preceding binary cannot open its default engine feed.
 
 Public market data (level2, market_trades, candles) does not require a key; the server runs without `key.json` by default.
 

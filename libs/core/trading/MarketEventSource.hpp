@@ -21,8 +21,6 @@ public:
     virtual std::optional<MarketEvent> next() = 0;
     virtual const std::vector<std::pair<int64_t, int64_t>>& gaps() const;
     virtual const char* sourceName() const { return "file"; }
-    virtual std::size_t skippedFiles() const { return 0; }
-    virtual std::size_t skippedRecords() const { return 0; }
 };
 
 class VectorMarketEventSource : public IMarketEventSource {
@@ -44,31 +42,6 @@ private:
     std::istream& m_input;
 };
 
-class TickBinaryTradeEventSource : public IMarketEventSource {
-public:
-    explicit TickBinaryTradeEventSource(const std::filesystem::path& path,
-                                        std::string symbolFilter = {});
-    std::optional<MarketEvent> next() override;
-    std::size_t skippedFiles() const override { return m_skippedFiles; }
-    std::size_t skippedRecords() const override { return m_skippedRecords; }
-
-private:
-    bool openNextFile();
-    void closeCurrentFile();
-    void skipCurrentFile(std::streamoff offset, const char* reason);
-    static std::vector<std::filesystem::path> enumerateFiles(const std::filesystem::path& path);
-    static std::string trimNullTerminated(const char* data, std::size_t size);
-
-    std::vector<std::filesystem::path> m_files;
-    std::size_t m_fileIndex = 0;
-    std::ifstream m_currentFile;
-    std::size_t m_skippedFiles = 0, m_skippedRecords = 0;
-    std::map<std::string, sentinel::capture::TradeIdWindow> m_ids;
-    uint16_t m_fileVersion = 0;
-    std::string m_currentSymbol;
-    std::string m_symbolFilter;
-};
-
 inline constexpr const char* DefaultJournalRoot = "/Volumes/T7/sentinel-data/raw-l2";
 
 class JournalTradeEventSource : public IMarketEventSource {
@@ -84,11 +57,9 @@ private:
     std::unique_ptr<State> m_state;
 };
 
-// A UTC day belongs to the journal if any matching header exists on that day.
-// Missing days use legacy files; sources are never merged within a day.
+// Recorded trade history is read only from the capture journal.
 std::unique_ptr<IMarketEventSource> openTradeHistory(
     const std::string& product, int64_t fromMs, int64_t toMs,
-    const std::filesystem::path& journalRoot = DefaultJournalRoot,
-    const std::filesystem::path& legacyRoot = "data/market");
+    const std::filesystem::path& journalRoot = DefaultJournalRoot);
 
 } // namespace trading

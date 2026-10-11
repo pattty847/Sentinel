@@ -53,8 +53,6 @@ public:
     void stop();
 
 signals:
-    void clientSubscribed(const QString& symbol);
-    void clientUnsubscribed(const QString& symbol);
     void orderUpdateBroadcast(const trading::OrderUpdate& update);
     void positionUpdateBroadcast(const trading::PositionUpdate& update);
     void riskOrderUpdateBroadcast(const trading::RiskOrderUpdate& update);
@@ -62,17 +60,12 @@ signals:
     void pnlSnapshotBroadcast(const trading::PnlSnapshot& snapshot);
 
 public:
-    enum class FeedAdmission { Accepted, CapacityExceeded, InvalidProduct, UpstreamUnavailable };
+    enum class FeedAdmission { Accepted, InvalidProduct };
     void setFeedAdmissionHandler(std::function<FeedAdmission(const std::string&)> handler) {
         m_feedAdmissionHandler = std::move(handler);
     }
     FeedAdmission notifyClientSubscribed(const std::string& symbol);
-    void registerMetrics(sentinel::metrics::MetricsRegistry& registry);
-    void notifyClientUnsubscribed(const std::string& symbol);
-    // Serialize a queued upstream release with admission on the server thread.
-    bool releaseIfNoSubscribers(const std::string& symbol, const std::function<void()>& release);
     CoinbaseRestClient& restClient();
-    void requestBookProductMetadata(const QString& symbol, uint64_t lifetime);
     const ServerConfig& serverConfig() const { return m_serverConfig; }
     void processTradeCommand(const trading::TradeCommand& command);
     void broadcastOrderUpdate(const trading::OrderUpdate& update);
@@ -80,13 +73,10 @@ public:
     void broadcastRiskOrderUpdate(const trading::RiskOrderUpdate& update);
     void broadcastAlgoOrderEvent(const trading::AlgoOrderEvent& event);
     void broadcastPnlSnapshot(const trading::PnlSnapshot& snapshot);
-    void broadcastCoinbaseLatency(int milliseconds);
     bool startAlgo(const std::string& algoId, const std::string& symbol, const trading::AlgoParams& params);
     void stopAlgo(const std::string& algoId);
     trading::LiveTradingSession& tradingSession() { return *m_tradingSession; }
     trading::LiveTradingSession* tradingSessionPtr() const { return m_tradingSession.get(); }
-    uint64_t registerLatencySender(std::function<void(int)> sendFn);
-    void unregisterLatencySender(uint64_t id);
     // Open client sessions; takes the sessions mutex briefly (metrics scrape).
     size_t sessionCount();
 
@@ -145,16 +135,7 @@ private:
     std::condition_variable m_sessionsDrained;
     std::unordered_set<std::shared_ptr<Session>> m_sessions;
 
-    std::mutex m_symbolSubscriptionsMutex;
-    std::unordered_map<std::string, size_t> m_symbolSubscriptions;
     std::function<FeedAdmission(const std::string&)> m_feedAdmissionHandler;
-    // Refusal diagnostics retain at most eight recent products (LRU, resets on eviction).
-    std::vector<std::pair<std::string, uint64_t>> m_refusals;
-    void recordRefusalLocked(const std::string& symbol, const char* code);
-
-    std::mutex m_latencySendersMutex;
-    std::vector<std::pair<uint64_t, std::function<void(int)>>> m_latencySenders;
-    std::atomic<uint64_t> m_nextLatencySenderId{0};
 
     std::mutex m_tradingBroadcastMutex;
     std::vector<std::pair<uint64_t, std::function<void(const std::string&)>>> m_tradingBroadcasters;
