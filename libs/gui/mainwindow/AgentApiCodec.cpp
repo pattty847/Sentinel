@@ -504,19 +504,18 @@ void applyAdvertisedServerConfig(StateSnapshot& s, const ServerConfig& config) {
         for (const auto& symbol : config.defaultSymbols) symbols.append(QString::fromStdString(symbol));
         s.defaultSymbols = symbols;
     }
-    if (has("heatmap.configuredTimeframesMs")) {
+    if (has("chart.configuredTimeframesMs")) {
         QList<qint64> values;
-        for (int64_t tf : config.heatmap.timeframesMs) values.append(tf);
+        for (int64_t tf : config.chart.timeframesMs) values.append(tf);
         s.configuredTimeframesMs = values;
     }
-    if (has("heatmap.servedTimeframesMs")) {
+    if (has("chart.servedTimeframesMs")) {
         QList<qint64> values;
-        for (int64_t tf : config.heatmap.servedTimeframesMs) values.append(tf);
+        for (int64_t tf : config.chart.servedTimeframesMs) values.append(tf);
         s.servedTimeframesMs = values;
     }
-    if (has("heatmap.activeTimeframeMs")) s.activeTimeframeMs = config.heatmap.activeTimeframeMs;
-    if (has("heatmap.gridWidth")) s.gridWidth = config.heatmap.gridWidth;
-    if (has("heatmap.gridHeight")) s.gridHeight = config.heatmap.gridHeight;
+    if (has("chart.defaultTimeframeMs")) s.activeTimeframeMs = config.chart.defaultTimeframeMs;
+    if (has("tradeOverlays.retentionColumns")) s.retentionColumns = config.tradeOverlays.retentionColumns;
     if (has("orderbook.tickSize")) s.tickSize = config.orderbook.tickSize;
     if (has("orderbook.bandPct")) s.bandPct = config.orderbook.bandPct;
     if (has("candles.bpsFast")) s.candleBpsFast = config.candles.bpsFast;
@@ -556,7 +555,7 @@ QJsonObject stateJson(const StateSnapshot& s) {
             {"defaultSymbols", s.defaultSymbols ? QJsonValue(symbols) : QJsonValue(QJsonValue::Null)},
             {"heatmap", QJsonObject{{"configuredTimeframesMs", list(s.configuredTimeframesMs)},
                 {"servedTimeframesMs", list(s.servedTimeframesMs)}, {"activeTimeframeMs", integer(s.activeTimeframeMs)},
-                {"gridWidth", integer(s.gridWidth)}, {"gridHeight", integer(s.gridHeight)}}},
+                {"retentionColumns", integer(s.retentionColumns)}}},
             {"orderbook", QJsonObject{{"tickSize", number(s.tickSize)}, {"bandPct", number(s.bandPct)}}},
             {"candles", QJsonObject{{"bpsFast", number(s.candleBpsFast)}, {"bpsSlow", number(s.candleBpsSlow)},
                 {"tickMultFast", integer(s.candleTickMultFast)}, {"tickMultSlow", integer(s.candleTickMultSlow)},

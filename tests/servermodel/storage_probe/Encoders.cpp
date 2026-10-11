@@ -1,5 +1,5 @@
 #include "Encoders.hpp"
-#include "servermodel/HmcolFormat.hpp"
+#include "Crc32.hpp"
 #include <zstd.h>
 #include <bit>
 #include <cstring>
@@ -40,7 +40,7 @@ Bytes compress(const Bytes& raw, Stats& stats, uint32_t magic) {
     put(frame, magic);
     put(frame, uint32_t(n));
     put(frame, uint32_t(raw.size()));
-    put(frame, hmcol::crc32(packed.data(), packed.size()));
+    put(frame, sentinel::crc32(packed.data(), packed.size()));
     frame.insert(frame.end(), packed.begin(), packed.end());
     stats.bytes += frame.size();
     stats.payloadBytes += n;
@@ -53,7 +53,7 @@ auto key(const Hmc2Entry& e) { return std::pair(e.row, e.isAsk); }
 Bytes decompressBlock(const Bytes& frame) {
     const auto n = u32(frame, 4), rawSize = u32(frame, 8);
     if (frame.size() != 16ULL + n || !rawSize || rawSize > maxBlock ||
-        hmcol::crc32(frame.data() + 16, n) != u32(frame, 12))
+        sentinel::crc32(frame.data() + 16, n) != u32(frame, 12))
         throw std::runtime_error("invalid block length/CRC");
     Bytes raw(rawSize);
     const auto got = ZSTD_decompress(raw.data(), raw.size(), frame.data() + 16, n);

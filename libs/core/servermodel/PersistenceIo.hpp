@@ -1,5 +1,5 @@
 #pragma once
-// Native persistence primitives shared by HMCL and HMC2. No format policy here.
+// Native persistence primitives for recording stores. No format policy here.
 #include <cerrno>
 #include <filesystem>
 #include <span>

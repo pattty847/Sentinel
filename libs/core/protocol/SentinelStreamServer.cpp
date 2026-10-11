@@ -1,10 +1,9 @@
 #include "metrics/MetricsRegistry.hpp"
 #include "SentinelStreamServer.hpp"
-#include "HeatmapSlice.hpp"
 #include "../servermodel/TradeOverlayPublisher.hpp"
 #include <boost/asio/steady_timer.hpp>
 #include "SentinelStreamProtocol.hpp"
-#include "RecordingHistoryWire.hpp"
+#include "RecordingCapability.hpp"
 #include "ChunkWire.hpp"
 #include <list>
 #include "SentinelLogging.hpp"
@@ -133,39 +132,26 @@ nlohmann::json buildServerConfigPayload(const ServerConfig& cfg, bool recordingA
     nlohmann::json payload;
     payload["type"] = "server_config";
     payload["schema_version"] = protocol::SentinelProtocol::kServerConfigSchemaVersion;
-    payload["timeframes_ms"] = cfg.heatmap.timeframesMs;
-    const int64_t servedTimeframeMs = cfg.heatmap.activeTimeframeMs > 0
-        ? cfg.heatmap.activeTimeframeMs
-        : (cfg.heatmap.timeframesMs.empty() ? 0 : cfg.heatmap.timeframesMs.front());
-    std::vector<int64_t> servedHeatmap;
-    if (servedTimeframeMs > 0) servedHeatmap.push_back(servedTimeframeMs);
+    const int64_t servedTimeframeMs = cfg.chart.defaultTimeframeMs > 0
+        ? cfg.chart.defaultTimeframeMs
+        : (cfg.chart.timeframesMs.empty() ? 0 : cfg.chart.timeframesMs.front());
+    std::vector<int64_t> servedTimeframes;
+    if (servedTimeframeMs > 0) servedTimeframes.push_back(servedTimeframeMs);
     if (servedTimeframeMs == 60'000) {
-        for (const auto tf : cfg.heatmap.timeframesMs) {
-            if (tf > 60'000 && tf % 60'000 == 0) servedHeatmap.push_back(tf);
+        for (const auto tf : cfg.chart.timeframesMs) {
+            if (tf > 60'000 && tf % 60'000 == 0) servedTimeframes.push_back(tf);
         }
     }
     payload["trade_overlays"] = {
+        {"retention_columns", cfg.tradeOverlays.retentionColumns},
         {"grid_width", cfg.tradeOverlays.gridWidth}, {"grid_height", cfg.tradeOverlays.gridHeight},
         {"tick_size", cfg.tradeOverlays.tickSize}, {"footprint_timeframe_ms", cfg.tradeOverlays.footprintTimeframeMs}};
-    payload["heatmap"] = {
-        {"served_timeframes_ms", servedHeatmap},
-        {"grid_width", cfg.heatmap.gridWidth},
-        {"grid_height", cfg.heatmap.gridHeight},
-        {"tick_size", cfg.heatmap.tickSize},
-        {"recenter_delta", cfg.heatmap.recenterDelta},
-        {"band_fast", cfg.heatmap.bandFast},
-        {"band_medium", cfg.heatmap.bandMedium},
-        {"band_slow", cfg.heatmap.bandSlow},
-        {"intensity_mode", cfg.heatmap.intensityMode},
-        {"intensity_max_mode", cfg.heatmap.intensityMaxMode},
-        {"intensity_max_decay", cfg.heatmap.intensityMaxDecay},
-        {"intensity_log_scale", cfg.heatmap.intensityLogScale},
-        {"intensity_power", cfg.heatmap.intensityPower},
-        {"intensity_floor", cfg.heatmap.intensityFloor},
-        {"debug_slice_log", cfg.heatmap.debugSliceLog}
+    payload["chart"] = {
+        {"timeframes_ms", cfg.chart.timeframesMs},
+        {"served_timeframes_ms", servedTimeframes}
     };
-    if (cfg.heatmap.activeTimeframeMs > 0) {
-        payload["heatmap"]["active_timeframe_ms"] = cfg.heatmap.activeTimeframeMs;
+    if (cfg.chart.defaultTimeframeMs > 0) {
+        payload["chart"]["default_timeframe_ms"] = cfg.chart.defaultTimeframeMs;
     }
     payload["orderbook"] = {
         {"tick_size", cfg.orderbook.tickSize},
@@ -220,13 +206,10 @@ class Session : public std::enable_shared_from_this<Session> {
     // per-session chunk byte budget instead of the slow-client write limit.
     struct PendingWrite {
         std::string payload;
-        bool recording = false, binary = false, chunk = false, rawLive = false;
+        bool binary = false, chunk = false, rawLive = false;
         std::weak_ptr<recording::LiveService::RawSubscription> rawSubscription;
     };
     std::list<PendingWrite> write_queue_; // insertion preserves the in-flight Beast buffer
-    std::shared_ptr<recording::LiveWriteSlot> recordingWriteSlot_ = std::make_shared<recording::LiveWriteSlot>();
-    recording::LiveRegistrationGate recordingRegistrationGate_;
-    std::shared_ptr<recording::LiveService::Subscription> recordingView_;
     std::shared_ptr<recording::LiveWriteBudget> rawWriteSlot_ = std::make_shared<recording::LiveWriteBudget>();
     std::map<std::string, std::shared_ptr<recording::LiveService::RawSubscription>> rawViews_;
     std::atomic_size_t pendingWriteBytes_{0};
@@ -237,7 +220,6 @@ class Session : public std::enable_shared_from_this<Session> {
     QMetaObject::Connection tradeConn_;
     QMetaObject::Connection bookConn_;
     QMetaObject::Connection bookSnapshotConn_;
-    QMetaObject::Connection heatmapConn_;
     QMetaObject::Connection barUpdatedConn_;
     QMetaObject::Connection barClosedConn_;
 
@@ -269,8 +251,7 @@ class Session : public std::enable_shared_from_this<Session> {
     std::unordered_map<std::string, AvailabilityState> availability_;
 
     void releaseWrite(const PendingWrite& write) {
-        if (write.recording) recordingWriteSlot_->release();
-        else if (write.rawLive) rawWriteSlot_->release(write.payload.size());
+        if (write.rawLive) rawWriteSlot_->release(write.payload.size());
         else if (write.chunk) chunkBytes_ -= std::min(chunkBytes_, write.payload.size());
         else releasePendingWriteBytes(write.payload.size());
     }
@@ -288,13 +269,11 @@ class Session : public std::enable_shared_from_this<Session> {
         QObject::disconnect(tradeConn_);
         QObject::disconnect(bookConn_);
         QObject::disconnect(bookSnapshotConn_);
-        QObject::disconnect(heatmapConn_);
         QObject::disconnect(barUpdatedConn_);
         QObject::disconnect(barClosedConn_);
         tradeConn_ = {};
         bookConn_ = {};
         bookSnapshotConn_ = {};
-        heatmapConn_ = {};
         barUpdatedConn_ = {};
         barClosedConn_ = {};
     }
@@ -348,8 +327,6 @@ class Session : public std::enable_shared_from_this<Session> {
         availabilityTimer_.cancel();
         availability_.clear();
         overlayHistory_.clear();
-        if (recordingView_) recordingView_->active.store(false);
-        recordingView_.reset();
         for (const auto& [symbol, view] : rawViews_) view->active.store(false);
         rawViews_.clear();
         if (owner_ && m_tradingBroadcasterRegistered) {
@@ -650,7 +627,7 @@ class Session : public std::enable_shared_from_this<Session> {
         if (chunkJobs_ > 0) --chunkJobs_;
         if (closing_.load(std::memory_order_acquire)) return;
         chunkBytes_ += payload.size();
-        write_queue_.push_back({std::move(payload), false, true, true});
+        write_queue_.push_back({std::move(payload), true, true});
         if (write_queue_.size() == 1) internal_async_write();
     }
     void pushAvailability(const std::string& symbol) {
@@ -713,7 +690,6 @@ public:
     }
 
     ~Session() {
-        if (recordingView_) recordingView_->active.store(false);
         for (const auto& [symbol, view] : rawViews_) view->active.store(false);
         disconnectModelSignals();
     }
@@ -801,15 +777,6 @@ public:
                 if (auto self = weak.lock()) {
                     self->postModelEvent([productId, bids, asks, tickSize, status, bookVersion](Session& session) {
                         session.on_book_snapshot(productId, bids, asks, tickSize, status, bookVersion);
-                    });
-                }
-            });
-
-        heatmapConn_ = QObject::connect(&model_, &ServerDataModel::heatmapSliceReady,
-            [weak](const HeatmapSlice& slice) {
-                if (auto self = weak.lock()) {
-                    self->postModelEvent([slice](Session& session) {
-                        session.on_heatmap_slice(slice);
                     });
                 }
             });
@@ -917,53 +884,6 @@ public:
                     availability_[symbol].sent.clear();
                     pushAvailability(symbol);
                 }
-            } else if (type == "heatmap_recording_view") {
-                const auto view = protocol::recordingwire::parseView(j);
-                recording::LiveView identity;
-                identity.symbol = j.value("symbol", std::string{});
-                identity.generation = j.value("band_generation", uint64_t{0});
-                const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count();
-                if (!recordingRegistrationGate_.admit(now)) {
-                    do_write(protocol::recordingwire::viewError(identity, "rate_limited", "recording registration rate exceeded").dump());
-                    return;
-                }
-                if (!view || !model_.recordingLive()) {
-                    do_write(protocol::recordingwire::viewError(identity,
-                        view ? "unavailable" : "invalid_request", "invalid recording view or recording unavailable").dump());
-                    return;
-                }
-                if (recordingView_) recordingView_->active.store(false);
-                // The worker never locks a Session. All Session ownership and final
-                // releases stay on its executor; shutdown joins the worker first.
-                auto weak = weak_from_this();
-                const auto executor = ws_.get_executor();
-                recordingView_ = model_.recordingLive()->subscribe(*view,
-                    [weak, executor, slot = recordingWriteSlot_](const recording::LiveView& v,
-                                                               const recording::BuildResult& page) {
-                        if (!slot->tryAcquire()) return false;
-                        try {
-                            auto payload = (page.status == recording::BuildStatus::Complete
-                                ? protocol::recordingwire::buildLive(v, page)
-                                : protocol::recordingwire::viewError(v, protocol::recordingwire::statusName(page.status),
-                                                                    page.message)).dump();
-                            if (payload.size() > 1024 * 1024) { slot->release(); return false; }
-                            net::post(executor, [weak, slot, payload = std::move(payload)]() mutable {
-                                if (auto self = weak.lock()) self->onRecordingWritePost(std::move(payload));
-                                else slot->release();
-                            });
-                            return true;
-                        } catch (...) { slot->release(); throw; }
-                    });
-                if (!recordingView_) do_write(protocol::recordingwire::viewError(*view,
-                    "capacity", "recording live view capacity reached or service stopped").dump());
-                sLog_Probe("recording.live.view", "symbol=" << view->symbol << " tf=" << view->tfMs
-                    << " gen=" << view->generation << " layer=" << view->layer);
-            } else if (type == "heatmap_recording_unview") {
-                // The client muted its legacy band stream (GPU renderer, S6b).
-                if (recordingView_) recordingView_->active.store(false);
-                recordingView_.reset();
-                sLog_Probe("recording.live.view", "released symbol=" << j.value("symbol", std::string{}));
             } else if (type == "heatmap_live_subscribe") {
                 handleLiveSubscribe(j);
             } else if (type == "heatmap_live_unsubscribe") {
@@ -979,93 +899,6 @@ public:
                 }
             } else if (type == "heatmap_chunk_request") {
                 handleChunkRequest(j);
-            } else if (type == "heatmap_history_request") {
-                std::string symbol = j.value("symbol", "");
-                const std::string source = j.value("source", std::string("legacy"));
-                if (source == "recording") {
-                    const std::string requestId = j.contains("request_id") && j["request_id"].is_string()
-                        ? j["request_id"].get<std::string>() : "";
-                    const uint64_t generation = j.contains("band_generation") && j["band_generation"].is_number_unsigned()
-                        ? j["band_generation"].get<uint64_t>() : 0;
-                    auto fail = [this, &symbol, &requestId, generation](const std::string& message) {
-                        sLog_Warning("Recording history request rejected: symbol=" << symbol
-                                     << " requestId=" << requestId << " reason=" << message);
-                        do_write(protocol::recordingwire::error(symbol, message, requestId, generation).dump());
-                    };
-                    const auto q = protocol::recordingwire::parseRequest(j);
-                    if (!q) { fail("invalid recording history request"); return; }
-                    if (!owner_ || !owner_->m_model.recordingDir()) {
-                        fail("recording unavailable"); return;
-                    }
-                    auto weak = weak_from_this();
-                    auto* owner = owner_;
-                    const auto root = *owner->m_model.recordingDir();
-                    const bool queued = owner->submitHistoryTask([weak, q = *q, root] {
-                        try {
-                            auto request = protocol::recordingwire::buildRequest(q);
-                            auto page = recording::buildPage(protocol::recordingwire::threadReader(root), request);
-                            protocol::recordingwire::emptyPaddingValues(q, page);
-                            auto response = protocol::recordingwire::buildChunk(q, page).dump();
-                            if (auto self = weak.lock()) self->do_write(std::move(response));
-                        } catch (const std::exception& ex) {
-                            sLog_Error("Recording history build failed: symbol=" << q.symbol
-                                       << " requestId=" << q.requestId << " error=" << ex.what());
-                            if (auto self = weak.lock())
-                                self->do_write(protocol::recordingwire::error(
-                                    q.symbol, std::string("history build failed: ") + ex.what(),
-                                    q.requestId, q.bandGeneration).dump());
-                        }
-                    });
-                    if (!queued) fail("history worker queue is full");
-                    return;
-                }
-                if (source != "legacy") {
-                    const auto id = j.contains("request_id") && j["request_id"].is_string()
-                        ? j["request_id"].get<std::string>() : "";
-                    const auto generation = j.contains("band_generation") && j["band_generation"].is_number_unsigned()
-                        ? j["band_generation"].get<uint64_t>() : 0;
-                    do_write(protocol::recordingwire::error(symbol, "unsupported source", id, generation).dump());
-                    return;
-                }
-                const int64_t timeframeMs = j.value("timeframe_ms", static_cast<int64_t>(0));
-                const int64_t endTimeMs = j.value("end_time", static_cast<int64_t>(0));
-                // Phase 4: optional start_time. 0 (or absent) means no lower bound.
-                const int64_t startTimeMs = j.value("start_time", static_cast<int64_t>(0));
-                const int requestedCount = j.value("count", 0);
-                const int count = std::min(requestedCount,
-                    protocol::SentinelProtocol::kMaxHeatmapHistoryColumns);
-                if (!symbol.empty() && timeframeMs > 0 && count > 0) {
-                    if (!owner_) {
-                        send_error("heatmap_history_request", symbol, "server unavailable");
-                        return;
-                    }
-                    auto weak = weak_from_this();
-                    auto* owner = owner_;
-                    const bool queued = owner->submitHistoryTask(
-                        [weak, owner, symbol, timeframeMs, endTimeMs, startTimeMs, count] {
-                            try {
-                                auto response = owner->buildHeatmapHistoryChunk(
-                                    symbol, timeframeMs, endTimeMs, startTimeMs, count);
-                                if (auto self = weak.lock()) {
-                                    self->do_write(std::move(response));
-                                }
-                            } catch (const std::exception& ex) {
-                                if (auto self = weak.lock()) {
-                                    self->send_error("heatmap_history_request", symbol,
-                                                     std::string("history build failed: ") + ex.what());
-                                }
-                            }
-                        });
-                    if (!queued) {
-                        // send_error logs the rejection.
-                        send_error("heatmap_history_request", symbol,
-                                   "history worker queue is full");
-                    }
-                } else {
-                    sLog_Warning("Ignoring invalid heatmap_history_request: peer=" << peer_
-                                 << " symbol=" << symbol << " tfMs=" << timeframeMs
-                                 << " count=" << requestedCount);
-                }
             } else if (type == "footprint_history_request") {
                 requestOverlayHistory(j, false);
             } else if (type == "tpo_history_request") {
@@ -1157,9 +990,9 @@ public:
 
                 const int64_t timeframeMs = timeframeSec * 1000;
                 if (timeframeMs < 60'000 || timeframeMs % 60'000 != 0 ||
-                    std::find(owner_->serverConfig().heatmap.timeframesMs.begin(),
-                              owner_->serverConfig().heatmap.timeframesMs.end(),
-                              timeframeMs) == owner_->serverConfig().heatmap.timeframesMs.end()) {
+                    std::find(owner_->serverConfig().chart.timeframesMs.begin(),
+                              owner_->serverConfig().chart.timeframesMs.end(),
+                              timeframeMs) == owner_->serverConfig().chart.timeframesMs.end()) {
                     send_error("candle_history_request", symbol, "unsupported timeframe_sec");
                     return;
                 }
@@ -1261,10 +1094,6 @@ public:
                  std::transform(symbol.begin(), symbol.end(), symbol.begin(),
                                 [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
                  const bool removed = !symbol.empty() && subscriptions_.erase(symbol) > 0;
-                 if (recordingView_ && recordingView_->view.symbol == symbol) {
-                     recordingView_->active.store(false);
-                     recordingView_.reset();
-                 }
                  if (const auto it = rawViews_.find(symbol); it != rawViews_.end()) {
                      it->second->active.store(false);
                      rawViews_.erase(it);
@@ -1446,39 +1275,6 @@ public:
         j["deltas"] = deltaJson;
         
         do_write(j.dump());
-    }
-
-    void on_heatmap_slice(const HeatmapSlice& slice) {
-        const std::string sym = slice.symbol.toStdString();
-        if (subscriptions_.find(sym) == subscriptions_.end()) return;
-
-        nlohmann::json j;
-        j["type"] = "heatmap_slice";
-        j["schema_version"] = protocol::SentinelProtocol::kHeatmapSchemaVersion;
-        j["symbol"] = sym;
-        j["time_start"] = slice.bucketStartMs;
-        j["time_end"] = slice.bucketEndMs;
-        j["timeframe_ms"] = slice.timeframeMs;
-        j["grid_width"] = slice.gridWidth;
-        j["grid_height"] = slice.gridHeight;
-        j["min_price"] = slice.minPrice;
-        j["max_price"] = slice.maxPrice;
-        j["tick_size"] = slice.tickSize;
-        j["mid_price"] = slice.midPrice;
-        j["last_trade"] = slice.lastTrade;
-        j["reset"] = slice.reset;
-        j["format"] = slice.format.toStdString();
-        j["encoding"] = "base64";
-        j["column"] = slice.column.toBase64().toStdString();
-        if (!slice.liquidityColumn.isEmpty()) {
-            j["liquidity_format"] = "u16";
-            j["liquidity_encoding"] = "base64";
-            j["liquidity_scale"] = slice.liquidityScale;
-            j["liquidity_column"] = slice.liquidityColumn.toBase64().toStdString();
-        }
-
-        do_write(j.dump());
-
     }
 
     static bool should_emit_update(const OHLCVBar& bar,
@@ -1664,7 +1460,7 @@ public:
                         if (!self || !subscription || !subscription->active.load() || self->closing_.load()) {
                             slot->release(bytes); return;
                         }
-                        PendingWrite write{std::move(payload), false, true, false, true, subscription};
+                        PendingWrite write{std::move(payload), true, false, true, subscription};
                         if (self->write_queue_.empty()) {
                             self->write_queue_.push_back(std::move(write));
                             self->internal_async_write();
@@ -1685,16 +1481,6 @@ public:
         rawViews_[view.symbol] = std::move(subscription);
         sLog_Data("Raw heatmap subscribe: peer=" << peer_ << " symbol=" << view.symbol
             << " sub=" << view.sub << " sources=" << view.sources.size() << " since=" << view.sinceMs);
-    }
-
-    void onRecordingWritePost(std::string payload) {
-        if (closing_.load()) { recordingWriteSlot_->release(); return; }
-        // One independent <=1 MiB live payload; put it immediately behind the
-        // write already in flight so history cannot indefinitely starve it.
-        if (write_queue_.empty()) {
-            write_queue_.push_back({std::move(payload), true});
-            internal_async_write();
-        } else write_queue_.insert(std::next(write_queue_.begin()), {std::move(payload), true});
     }
 
     void do_write(std::string payload, bool binary = false) {
@@ -1745,7 +1531,7 @@ public:
             releasePendingWriteBytes(payload.size());
             return;
         }
-        write_queue_.push_back({std::move(payload), false, binary});
+        write_queue_.push_back({std::move(payload), binary});
         
         if (write_queue_.size() > 1) {
             return;
@@ -1861,59 +1647,6 @@ bool SentinelStreamServer::submitHistoryTask(std::function<void()> task) {
         return false;
     }
     return true;
-}
-
-std::string SentinelStreamServer::buildHeatmapHistoryChunk(const std::string& symbol,
-                                                           int64_t timeframeMs,
-                                                           int64_t endTimeMs,
-                                                           int64_t startTimeMs,
-                                                           int count) const {
-    std::vector<HeatmapTwapStreamer::HistoryColumn> columns;
-    int gridWidth = 0;
-    int gridHeight = 0;
-    const bool ok = m_model.getHeatmapHistory(symbol, timeframeMs, endTimeMs, count,
-                                              gridWidth, gridHeight, columns, startTimeMs);
-
-    nlohmann::json payload;
-    payload["type"] = "heatmap_history_chunk";
-    payload["schema_version"] = protocol::SentinelProtocol::kHeatmapSchemaVersion;
-    payload["symbol"] = symbol;
-    payload["timeframe_ms"] = timeframeMs;
-    payload["request_end_time"] = endTimeMs;
-    payload["grid_width"] = gridWidth;
-    payload["grid_height"] = gridHeight;
-    payload["format"] = "u16";
-    payload["encoding"] = "base64";
-    payload["liquidity_format"] = "u16";
-    payload["liquidity_encoding"] = "base64";
-    // 0 means no persisted data (or persistence disabled); the client should
-    // treat the in-memory ring as the only source.
-    payload["oldest_available_ms"] =
-        m_model.oldestHeatmapPersistedMs(symbol, timeframeMs);
-    auto arr = nlohmann::json::array();
-    if (ok) {
-        for (const auto& col : columns) {
-            nlohmann::json item;
-            item["time_start"] = col.bucketStartMs;
-            item["time_end"] = col.bucketEndMs;
-            item["min_price"] = col.minPrice;
-            item["max_price"] = col.maxPrice;
-            item["tick_size"] = col.tickSize;
-            item["column"] = col.intensity.toBase64().toStdString();
-            if (!col.liquidity.isEmpty()) {
-                item["liquidity_column"] = col.liquidity.toBase64().toStdString();
-                item["liquidity_scale"] = col.liquidityScale;
-            }
-            arr.push_back(std::move(item));
-        }
-    }
-    sLog_Data("Heatmap history built: symbol=" << symbol << " tfMs=" << timeframeMs
-              << " start=" << startTimeMs << " end=" << endTimeMs << " requested=" << count
-              << " ok=" << ok << " columns=" << arr.size()
-              << " grid=" << gridWidth << "x" << gridHeight
-              << " oldestAvailable=" << payload["oldest_available_ms"].get<int64_t>());
-    payload["columns"] = std::move(arr);
-    return payload.dump();
 }
 
 net::ip::address SentinelStreamServer::validateBindAddress(const ServerConfig& config) {

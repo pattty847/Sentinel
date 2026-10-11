@@ -8,7 +8,7 @@
 #include <QStorageInfo>
 #include <QUuid>
 #include <QTimeZone>
-#include "servermodel/HmcolFormat.hpp"
+#include "Crc32.hpp"
 #include "servermodel/PersistenceIo.hpp"
 #include <zstd.h>
 #include <algorithm>
@@ -36,7 +36,7 @@ constexpr int64_t HourNs = 3600LL * 1000000000LL;
 
 [[noreturn]] void fail(const std::string& message) { throw std::runtime_error("RAWL2: " + message); }
 uint32_t crc(std::string_view bytes) {
-    return hmcol::crc32(bytes.data(), bytes.size());
+    return sentinel::crc32(bytes.data(), bytes.size());
 }
 void put32(std::string& bytes, uint32_t value) {
     for (int i = 0; i < 4; ++i) bytes.push_back(static_cast<char>(value >> (i * 8)));

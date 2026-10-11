@@ -1477,9 +1477,9 @@ void UnifiedGridRenderer::applyClientConfig(const ClientConfig &config) {
 }
 
 void UnifiedGridRenderer::applyServerConfig(const ServerConfig &config) {
-  int64_t forcedTf = config.heatmap.activeTimeframeMs;
-  if (forcedTf <= 0 && !config.heatmap.timeframesMs.empty()) {
-    forcedTf = config.heatmap.timeframesMs.front();
+  int64_t forcedTf = config.chart.defaultTimeframeMs;
+  if (forcedTf <= 0 && !config.chart.timeframesMs.empty()) {
+    forcedTf = config.chart.timeframesMs.front();
   }
   if (forcedTf > 0) setTimeframe(static_cast<int>(forcedTf));
 }

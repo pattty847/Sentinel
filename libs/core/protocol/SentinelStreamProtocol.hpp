@@ -7,15 +7,13 @@
 namespace protocol {
 
 namespace SentinelProtocol {
-constexpr int kServerConfigSchemaVersion = 1;
-constexpr int kHeatmapSchemaVersion = 1;
+constexpr int kServerConfigSchemaVersion = 2;
 constexpr int kCandleSchemaVersion = 1;
 constexpr int kFootprintSchemaVersion = 1;
 constexpr int kTpoSchemaVersion = 1;
 constexpr int kVolumeProfileSchemaVersion = 1;
 constexpr int kMaxGridHeight = 65536;
 constexpr int kMaxPayloadBytes = 262144; // 256 KiB
-constexpr int kMaxHeatmapHistoryColumns = 1024;
 }
 
 enum class MessageType {
@@ -24,10 +22,6 @@ enum class MessageType {
     ServerConfig,
     Snapshot,
     SliceBatch,
-    HeatmapSlice,
-    HeatmapHistoryRequest,
-    HeatmapHistoryChunk,
-    HeatmapRecordingLive,
     HeatmapChunkRequest,  // JSON request; replies are binary SHE1/SHC1 frames
     HeatmapAvailability,
     CandleHistoryRequest,
@@ -64,10 +58,6 @@ inline std::string toString(MessageType t) {
         case MessageType::ServerConfig: return "server_config";
         case MessageType::Snapshot: return "snapshot";
         case MessageType::SliceBatch: return "slice_batch";
-        case MessageType::HeatmapSlice: return "heatmap_slice";
-        case MessageType::HeatmapHistoryRequest: return "heatmap_history_request";
-        case MessageType::HeatmapRecordingLive: return "heatmap_recording_live";
-        case MessageType::HeatmapHistoryChunk: return "heatmap_history_chunk";
         case MessageType::HeatmapChunkRequest: return "heatmap_chunk_request";
         case MessageType::HeatmapAvailability: return "heatmap_availability";
         case MessageType::CandleHistoryRequest: return "candle_history_request";
@@ -103,10 +93,6 @@ inline MessageType fromString(const std::string& s) {
     if (s == "server_config") return MessageType::ServerConfig;
     if (s == "snapshot") return MessageType::Snapshot;
     if (s == "slice_batch") return MessageType::SliceBatch;
-    if (s == "heatmap_slice") return MessageType::HeatmapSlice;
-    if (s == "heatmap_history_request") return MessageType::HeatmapHistoryRequest;
-    if (s == "heatmap_recording_live") return MessageType::HeatmapRecordingLive;
-    if (s == "heatmap_history_chunk") return MessageType::HeatmapHistoryChunk;
     if (s == "heatmap_chunk_request") return MessageType::HeatmapChunkRequest;
     if (s == "heatmap_availability") return MessageType::HeatmapAvailability;
     if (s == "candle_history_request") return MessageType::CandleHistoryRequest;

@@ -15,7 +15,7 @@ ROLLER = "libs/core/roller/Roller.cpp"
 FEED = "libs/core/roller/JournalFeed.cpp"
 MUTATIONS = [
     ("sidecar CRC", STORE,
-     'require(get(bytes,bytes.size()-4) == hmcol::crc32(bytes.data(),bytes.size()-4), "CRC mismatch");',
+     'require(get(bytes,bytes.size()-4) == sentinel::crc32(bytes.data(),bytes.size()-4), "CRC mismatch");',
      '', 'AnchorStore.RejectsCorruptionVersionsIdentityAndFuturePositions'),
     ("sidecar policy and range", STORE,
      'require(a.identity == expected, "policy/range identity mismatch");',

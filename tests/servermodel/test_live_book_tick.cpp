@@ -18,7 +18,6 @@ struct LiveBookTickTest : testing::Test {
     ServerConfig config;
     LiveBookTickTest() {
         config.recording.enabled = false;
-        config.heatmap.persistenceEnabled = false;
         config.rollerShadow.products = {"BTC-USD", "DOGE-USD", "PEPE-USD", "ODD-USD", "ETH-USD"};
         config.orderbook.tickSize = .1;
     }

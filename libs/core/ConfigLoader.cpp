@@ -94,50 +94,12 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
     YAML::Node root = YAML::LoadFile(filePath);
     YAML::Node serverNode = root["server"];
     YAML::Node serverRoot = serverNode ? serverNode : root;
-    YAML::Node heatmapNode;
-    if (serverNode && serverNode["heatmap"]) {
-        heatmapNode = serverNode["heatmap"];
-    } else {
-        heatmapNode = root["heatmap"];
-    }
-
-    if (heatmapNode) {
-        readScalar(heatmapNode, "grid_width", cfg.heatmap.gridWidth);
-        readScalar(heatmapNode, "grid_height", cfg.heatmap.gridHeight);
-        readScalar(heatmapNode, "tick_size", cfg.heatmap.tickSize);
-        readScalar(heatmapNode, "timeframe", cfg.heatmap.activeTimeframeMs);
-        if (!readScalar(heatmapNode, "recenter_delta", cfg.heatmap.recenterDelta)) {
-            readScalar(heatmapNode, "recenter", cfg.heatmap.recenterDelta);
-        }
-        readScalar(heatmapNode, "band_fast", cfg.heatmap.bandFast);
-        readScalar(heatmapNode, "band_medium", cfg.heatmap.bandMedium);
-        readScalar(heatmapNode, "band_slow", cfg.heatmap.bandSlow);
-        readScalar(heatmapNode, "intensity_mode", cfg.heatmap.intensityMode);
-        readScalar(heatmapNode, "intensity_max_mode", cfg.heatmap.intensityMaxMode);
-        readScalar(heatmapNode, "intensity_max_decay", cfg.heatmap.intensityMaxDecay);
-        readScalar(heatmapNode, "intensity_log_scale", cfg.heatmap.intensityLogScale);
-        readScalar(heatmapNode, "intensity_power", cfg.heatmap.intensityPower);
-        readScalar(heatmapNode, "intensity_floor", cfg.heatmap.intensityFloor);
-        readScalar(heatmapNode, "debug_slice_log", cfg.heatmap.debugSliceLog);
-        readScalar(heatmapNode, "persistence_enabled", cfg.heatmap.persistenceEnabled);
-        readScalar(heatmapNode, "persistence_dir", cfg.heatmap.persistenceDir);
-        readScalar(heatmapNode, "persistence_fsync_every_n_records", cfg.heatmap.persistenceFsyncEveryNRecords);
-        readScalar(heatmapNode, "persistence_fsync_every_ms", cfg.heatmap.persistenceFsyncEveryMs);
-        readScalar(heatmapNode, "persistence_retention_days", cfg.heatmap.persistenceRetentionDays);
-        if (heatmapNode["timeframes"]) {
-            auto parsed = parseTimeframes(heatmapNode["timeframes"]);
-            if (!parsed.empty()) {
-                cfg.heatmap.timeframesMs = std::move(parsed);
-            }
-        } else if (heatmapNode["timeframes_ms"]) {
-            auto parsed = parseTimeframes(heatmapNode["timeframes_ms"]);
-            if (!parsed.empty()) {
-                cfg.heatmap.timeframesMs = std::move(parsed);
-            }
-        }
-    }
-
     if (serverRoot) {
+        if (const auto chart = serverRoot["chart"]) {
+            readScalar(chart, "default_timeframe_ms", cfg.chart.defaultTimeframeMs);
+            auto parsed = parseTimeframes(chart["timeframes_ms"]);
+            if (!parsed.empty()) cfg.chart.timeframesMs = std::move(parsed);
+        }
         readScalar(serverRoot, "stream_port", cfg.streamPort);
         readScalar(serverRoot, "bind_address", cfg.bindAddress);
         if (serverRoot["default_symbols"]) {
@@ -148,6 +110,7 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
         }
         if (serverRoot["trade_overlays"]) {
             const auto node = serverRoot["trade_overlays"];
+            readScalar(node, "retention_columns", cfg.tradeOverlays.retentionColumns);
             readScalar(node, "grid_width", cfg.tradeOverlays.gridWidth);
             readScalar(node, "grid_height", cfg.tradeOverlays.gridHeight);
             readScalar(node, "tick_size", cfg.tradeOverlays.tickSize);

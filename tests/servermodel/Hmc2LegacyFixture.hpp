@@ -1,6 +1,6 @@
 #pragma once
 #include "servermodel/Hmc2Store.hpp"
-#include "servermodel/HmcolFormat.hpp"
+#include "Crc32.hpp"
 #include <bit>
 #include <fstream>
 #include <zstd.h>
@@ -25,7 +25,7 @@ inline void schema3Hour(const std::filesystem::path &path, const recording::Hmc2
     }
     put(b, r.header.tfMs); put(b, r.header.priceScale); put(b, r.header.rowTickUnits);
     put(b, r.header.sizeScale.floor); put(b, r.header.sizeScale.codesPerOctave); put(b, r.header.configHash);
-    set32(b, 6, b.size()); set32(b, 10, hmcol::crc32(b.data(), b.size()));
+    set32(b, 6, b.size()); set32(b, 10, sentinel::crc32(b.data(), b.size()));
     Bytes raw;
     put(raw, r.bucketStartMs); put(raw, r.observedMs); put(raw, r.flags);
     for (auto v : {r.bidRowLo, r.bidRowHi, r.askRowLo, r.askRowHi}) put(raw, v);
@@ -42,7 +42,7 @@ inline void schema3Hour(const std::filesystem::path &path, const recording::Hmc2
     if (ZSTD_isError(n)) throw std::runtime_error("fixture zstd");
     compressed.resize(n);
     put(b, kHmc2RecordMagic); put(b, static_cast<uint32_t>(n)); put(b, static_cast<uint32_t>(raw.size()));
-    put(b, hmcol::crc32(compressed.data(), n)); b.insert(b.end(), compressed.begin(), compressed.end());
+    put(b, sentinel::crc32(compressed.data(), n)); b.insert(b.end(), compressed.begin(), compressed.end());
     std::filesystem::create_directories(path.parent_path());
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     file.exceptions(std::ios::badbit | std::ios::failbit);

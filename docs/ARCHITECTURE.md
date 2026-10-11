@@ -20,7 +20,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 **Ownership & Boundaries:**
 - The Core may use QtCore (QObject/signals, QTimer, QByteArray, QString). It cannot have any Qt GUI, Quick, QML or scene-graph dependencies.
 - **`marketdata` / `coinbase`:** Owns the exchange connections and feed parsing (`MarketDataCoreEngine`).
-- **`servermodel`:** Owns the central state of the server. It aggregates high-frequency market data into GPU-ready heatmap slices and TWAP streams via the `TimeframeAggregator` and `HeatmapTwapStreamer`.
+- **`servermodel`:** Owns the central state of the server. It aggregates journal-fed trades into candles via `TimeframeAggregator`, retains execution history for the independent trade-overlay publisher, and serves recording chunks and raw live tails.
 - **`roller`:** Offline RAWL2 v1/v2 reading, shared journal feed parsing, daily product grids and deterministic BookRecorder driving/checkpoints. The batch converter owns no exchange connection; the live server path is unchanged in slice A. See [ROLLER.md](ROLLER.md).
 - **`heatmap`:** GUI-independent sparse heatmap model (`SparseColumns`, `TimeComposer`, `binCell`/`binColumn` CPU reference, `ChunkCodec`, `HeatmapResolution`); see "Sparse heatmap core model" below.
 - **`network` / `protocol`:** Owns the client-server websocket communication (`SentinelStreamClient`, `SentinelStreamServer`). See `docs/SENTINEL_STREAM_CLIENT.md` for the stream client’s role in prepping render objects.
@@ -66,7 +66,7 @@ WebSocket → SentinelStreamClient → RemoteGridDataSource → DataProcessor �
 ```
 
 - **SentinelStreamClient** — Boost.Beast WebSocket client; parses, validates, and emits typed slice DTOs. See `docs/SENTINEL_STREAM_CLIENT.md`.
-- **RemoteGridDataSource** — Book replica, candles and trade-overlay slices (footprint, TPO, volume profile); the client drops the retired legacy heatmap frames (`heatmap_slice`) silently until the server stops sending them (S8b).
+- **RemoteGridDataSource** — Book replica, candles and trade-overlay slices (footprint, TPO, volume profile).
 - **DataProcessor** — Stages the trade overlays on their own grids off the GUI thread (INV-068).
 - **HeatmapDataService / HeatmapGpuLayer** — The heatmap: chunk requests and the live raw tail on the heatmap-data thread, drawn by `HeatmapTileNode` (S5-S6; the legacy band renderer was removed in S8a).
 - **History workers** — SentinelStreamServer uses two bounded workers for persisted heatmap reads and response encoding; at most eight jobs may be queued or running, and completions re-enter the owning session through its Asio executor.
@@ -76,7 +76,7 @@ WebSocket → SentinelStreamClient → RemoteGridDataSource → DataProcessor �
 
 ## Rendering pipeline
 
-**Server:** BookRecorder (HMC2 recording) → ChunkService / LiveService raw tail → SentinelStreamServer (binary chunk replies to `heatmap_chunk_request`, the `heatmap_live_subscribe` raw tail and `heatmap_availability`). The legacy `HeatmapTwapStreamer` → `heatmap_slice` path still runs until S8b; no client reads it.  
+**Server:** BookRecorder (HMC2 recording) → ChunkService / LiveService raw tail → SentinelStreamServer (binary chunk replies to `heatmap_chunk_request`, the `heatmap_live_subscribe` raw tail and `heatmap_availability`).
 **Client:** HeatmapDataService → HeatmapGpuLayer → UnifiedGridRenderer → HeatmapTileNode, MsdfGlyphNode, CandlestickOverlayItem, and other overlays → GPU.
 
 No per-cell QML rendering is used. Labels use the MSDF atlas; candlesticks are a GPU-batched overlay on the same coordinate plane.
@@ -136,7 +136,7 @@ its readback results and registers a QRhi cleanup callback: whichever of the
 binner and its QRhi goes first, in-flight readbacks complete before their result
 is freed and nothing calls into a destroyed QRhi (FM-099). The veil is a neutral
 grey hatch, distinct from the background, data and the blue loading hatch. `idealTick` and
-`layerFor` remain for the legacy page path and the near/deep migration only.
+`layerFor` remain for the test projection oracle and the near/deep migration only.
 
 ### GPU heatmap price binning (integration slice S4)
 
@@ -327,7 +327,7 @@ Cross-thread communication uses `Qt::QueuedConnection` exclusively.
 ## Performance and runtime
 
 - Server can stream large depth grids (e.g. 8192×8192). Client aims for 60+ FPS; CPU cost is largely constant (GPU does the work).
-- Client requires a server connection (no local-only mode). Server is authoritative for heatmap config and timeframes; client consumes `server_config` on connect.
+- Client requires a server connection (no local-only mode). Server is authoritative for chart timeframes and trade-overlay config; client consumes `server_config` on connect.
 - **Screenshot API** — GUI listens on `127.0.0.1`; `GET /screenshot` captures the main window as PNG. Configure via `gui.api_port` and `gui.screenshot_dir` in client config.
 
 ## Related documentation
@@ -369,7 +369,7 @@ QProcess APIs with a 90-second process deadline (uv startup, the upstream
 process group; cancellation sends SIGTERM to the group, allows 250 ms of grace,
 then sends SIGKILL to the group and reaps the direct child. Shutdown joins admitted work before destroying the REST
 client or executor.
-The legacy heatmap streamer remains only for its heatmap path pending removal.
+The legacy HMCL writer, streamer, JSON history and band-projected live path are removed. Existing archives remain untouched. `RecordingPage` and `LiveBuilder` survive only in the test support target as projection oracles; production core does not link them.
 
 The GUI carries `TradeOverlayGrid` with each immutable footprint/TPO upload.
 `TradeOverlayMapping` projects that grid against the frame's common world

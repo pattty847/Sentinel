@@ -2,7 +2,7 @@
 #include "Hmc2Store.hpp"
 #include "SentinelLogging.hpp"
 #include "metrics/MetricsRegistry.hpp"
-#include "HmcolFormat.hpp"
+#include "../Crc32.hpp"
 #include <nlohmann/json.hpp>
 #include <iomanip>
 #include <locale>
@@ -1365,7 +1365,7 @@ std::vector<uint8_t> BookRecorder::exportState() {
     finiteState(j);
     auto bytes = StateJson::to_cbor(j);
     stateRequire(bytes.size() <= kMaxStateBytes-4, "state too large");
-    const auto crc = hmcol::crc32(bytes.data(),bytes.size());
+    const auto crc = sentinel::crc32(bytes.data(),bytes.size());
     for (unsigned i = 0; i < 4; ++i) bytes.push_back(uint8_t(crc >> (i*8)));
     return bytes;
 }
@@ -1373,7 +1373,7 @@ void BookRecorder::importState(const std::vector<uint8_t>& bytes) {
     stateRequire(bytes.size() >= 5 && bytes.size() <= kMaxStateBytes, "state length");
     uint32_t crc = 0;
     for (unsigned i = 0; i < 4; ++i) crc |= uint32_t(bytes[bytes.size()-4+i]) << (i*8);
-    stateRequire(crc == hmcol::crc32(bytes.data(),bytes.size()-4), "state CRC mismatch");
+    stateRequire(crc == sentinel::crc32(bytes.data(),bytes.size()-4), "state CRC mismatch");
     const auto j = StateJson::from_cbor(bytes.begin(),bytes.end()-4);
     finiteState(j);
     auto& dst = *impl_;

@@ -28,7 +28,7 @@ This setting does not affect the Prometheus HTTP listener, which remains on `127
 
 **Server-authoritative (client cannot override):**
 
-- Heatmap grid, timeframes, intensity normalization
+- Chart timeframes and trade-overlay retention/grid
 - Order book tick size and band percent
 - Candle gating
 - Market data connection and TLS
@@ -64,18 +64,11 @@ recorded HMC2 grids are independent of this live-book setting.
 stream_port: 8080
 bind_address: "127.0.0.1"
 # bind_address: "100.89.99.21"  # Example only: use the Mac's current local Tailscale address.
-heatmap:
+chart:
   timeframes_ms: [1000, 60000, 300000, 900000, 3600000, 14400000, 86400000]
-  timeframe: 60000
-  grid_width: 2048
-  grid_height: 1024
-  intensity_mode: log
-  intensity_max_mode: running
-  persistence_enabled: true
-  persistence_dir: data/heatmap
-  persistence_fsync_every_n_records: 1
-  persistence_fsync_every_ms: 1000
-  persistence_retention_days: 0  # keep all day files
+  default_timeframe_ms: 60000
+trade_overlays:
+  retention_columns: 8192
 
 recording:                # recording v2: near and deep order-book layers (docs/research/2026-09-recording-v2.md)
   enabled: true
@@ -226,6 +219,23 @@ that accepts session type 6.
 - **`docs/ARCHITECTURE.md`** — How server and client use config (e.g. `server_config` on connect).
 - **`docs/PAPER_TRADING_QUICKSTART.md`** — Paper trading setup and hotkeys.
 
+## Chart timeframes and retained trades
+
+`chart.timeframes_ms` configures candle aggregation, the candle-history allowlist,
+and advertised chart/recording timeframes. Its default is
+`[1000, 60000, 300000, 900000, 3600000, 14400000, 86400000]`; the loader keeps
+positive durations, sorts and deduplicates them, and keeps defaults for an empty
+result. `chart.default_timeframe_ms` defaults to 0 (use the first configured
+candidate); the checked-in configuration selects 60000.
+
+`trade_overlays.retention_columns` defaults to 5120 (8192 in the checked-in config).
+Retained execution history uses exactly
+`clamp(2 * max(1000, default_timeframe_ms, timeframes_ms...) * max(1024, retention_columns), 300000, 86400000)`
+milliseconds. It is independent of the overlay display `grid_width` (default 512).
+These sections may be at the YAML root or under `server`. Server `heatmap.*` keys
+are retired, with no aliases. Existing `data/heatmap` archives are untouched and
+no longer read or written. Deploying this change requires the owner present.
+
 ## Trade overlays
 
 Footprint, TPO and volume profile use an independent trade grid. The server
@@ -233,6 +243,7 @@ advertises these settings as `trade_overlays` in `server_config`:
 
 ```yaml
 trade_overlays:
+  retention_columns: 8192
   grid_width: 512
   grid_height: 2048
   tick_size: 5

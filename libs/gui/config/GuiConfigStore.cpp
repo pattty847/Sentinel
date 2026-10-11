@@ -53,10 +53,9 @@ void GuiConfigStore::setServerConfig(const ServerConfig& config) {
     // and the client must never rewrite it.
     m_serverConfig = config;
     m_hasServerConfig = true;
-    sLog_Data("Server config received: grid=" << config.heatmap.gridWidth << "x"
-              << config.heatmap.gridHeight
-              << " activeTfMs=" << config.heatmap.activeTimeframeMs
-              << " timeframes=" << config.heatmap.timeframesMs.size()
+    sLog_Data("Server config received: retentionColumns=" << config.tradeOverlays.retentionColumns
+              << " defaultTfMs=" << config.chart.defaultTimeframeMs
+              << " timeframes=" << config.chart.timeframesMs.size()
               << " defaultSymbol="
               << (config.defaultSymbols.empty() ? std::string() : config.defaultSymbols.front()));
     emit serverConfigUpdated(m_serverConfig);

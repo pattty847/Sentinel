@@ -260,38 +260,6 @@ TEST_F(SentinelStreamClientWriteTest, HeatmapRequestsFromOtherThreadsAreWrittenO
     }
 }
 
-namespace legacyframes {
-std::atomic<int> warnings{0};
-QtMessageHandler previous = nullptr;
-void handler(QtMsgType type, const QMessageLogContext& context, const QString& message) {
-    if (type == QtWarningMsg || type == QtCriticalMsg) ++warnings;
-    if (previous) previous(type, context, message);
-}
-}
-
-// S8a: the retired legacy heatmap frames keep arriving from the server until S8b
-// (heatmap_slice once per second per subscribed symbol). The client drops them
-// without a per-frame warning; an unknown type still warns (the capture works).
-TEST_F(SentinelStreamClientWriteTest, RetiredLegacyHeatmapFramesAreDroppedWithoutWarnings) {
-    auto c = client();
-    const int version = protocol::SentinelProtocol::kHeatmapSchemaVersion;
-    legacyframes::warnings = 0;
-    legacyframes::previous = qInstallMessageHandler(legacyframes::handler);
-    for (int i = 0; i < 50; ++i) {
-        for (const char* type : {"heatmap_slice", "heatmap_history_chunk", "heatmap_recording_live"}) {
-            deliver(*c, nlohmann::json{{"type", type}, {"schema_version", version}, {"symbol", "BTC-USD"},
-                                       {"column", "not base64"}, {"columns", nlohmann::json::array()}}.dump());
-            deliver(*c, nlohmann::json{{"type", type}, {"symbol", "BTC-USD"}}.dump()); // no schema_version
-        }
-    }
-    const int legacy = legacyframes::warnings;
-    deliver(*c, R"({"type":"s8a_unknown_type"})");
-    const int unknown = legacyframes::warnings - legacy;
-    qInstallMessageHandler(legacyframes::previous);
-    EXPECT_EQ(legacy, 0);
-    EXPECT_EQ(unknown, 1);
-}
-
 TEST_F(SentinelStreamClientWriteTest, ReconnectBackoffDoublesWithJitterAndCapsAtTenSeconds) {
     for (unsigned attempt = 0; attempt < 100; ++attempt) {
         const int base = std::min(10000U, 500U << std::min(attempt, 5U));

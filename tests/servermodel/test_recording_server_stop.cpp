@@ -2,9 +2,11 @@
 // and close path without exposing transport internals in a production header.
 #include "protocol/SentinelStreamServer.cpp"
 #include "marketdata/auth/Authenticator.hpp"
+#include "ConfigLoader.hpp"
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QThread>
+#include <QtEndian>
 #include <QTemporaryDir>
 #include <QDir>
 #include <QFile>
@@ -111,35 +113,86 @@ struct RecordingServerStopTest {
         });
         return result->get_future().wait_for(std::chrono::seconds(3)) == std::future_status::ready;
     }
-    static void checkRecordingQueue(ServerDataModel& model) {
+    static void checkRawLiveSlotRelease(ServerDataModel& model) {
         net::io_context ioc;
-        ssl::context ctx(ssl::context::tls_server);
-        auto session = std::make_shared<Session>(tcp::socket(ioc), ctx, model, nullptr);
+        ssl::context tls(ssl::context::tls_server);
+        auto session = std::make_shared<Session>(tcp::socket(ioc), tls, model, nullptr);
+        // Hold the transport at its in-flight write so deliveries stay queued.
         session->write_queue_.push_back({"in-flight", false});
-        session->write_queue_.push_back({"history-1", false});
-        session->write_queue_.push_back({"history-2", false});
-        session->pendingWriteBytes_ = 27;
-        const auto* buffer = session->write_queue_.front().payload.data();
-        const auto slot = session->recordingWriteSlot_;
-        ASSERT_TRUE(slot->tryAcquire());
-        session->onRecordingWritePost("live");
-        EXPECT_EQ(session->write_queue_.front().payload.data(), buffer);
-        std::vector<std::string> order;
-        for (const auto& item : session->write_queue_) order.push_back(item.payload);
-        EXPECT_EQ(order, (std::vector<std::string>{"in-flight", "live", "history-1", "history-2"}));
-        EXPECT_FALSE(slot->tryAcquire());
-        session->beginClose("recording queue test");
-        ASSERT_EQ(session->write_queue_.size(), 1);
-        EXPECT_EQ(session->write_queue_.front().payload.data(), buffer);
-        EXPECT_EQ(session->pendingWriteBytes_.load(), 9);
-        ASSERT_TRUE(slot->tryAcquire()); // queued live was released by beginClose
-        session->onRecordingWritePost("late post"); // worker post racing with close
-        EXPECT_EQ(session->write_queue_.size(), 1);
-        ASSERT_TRUE(slot->tryAcquire());
-        slot->release();
-        session->on_write_complete(net::error::operation_aborted, 0);
-        EXPECT_TRUE(session->write_queue_.empty());
-        EXPECT_EQ(session->pendingWriteBytes_.load(), 0);
+        session->write_queue_.push_back({"ordinary", false});
+        session->pendingWriteBytes_ = 17;
+        session->handleLiveSubscribe(protocol::chunkwire::buildLiveSubscribe(
+            {"BTC-USD", {"hmc2.near"}, 1, 0}));
+        ASSERT_EQ(session->rawViews_.size(), 1u);
+        auto subscription = session->rawViews_.at("BTC-USD");
+        auto budget = session->rawWriteSlot_;
+        // The transport treats the encoded body as opaque; only its size matters.
+        recording::RawTailFrame frame{std::make_shared<const std::vector<uint8_t>>(32, 0), 1, 0};
+        ASSERT_TRUE(subscription->deliver(subscription->view, "hmc2.near", frame));
+        ASSERT_TRUE(subscription->deliver(subscription->view, "hmc2.near", frame));
+        ioc.poll();
+        ASSERT_EQ(session->write_queue_.size(), 4u);
+        EXPECT_TRUE(std::next(session->write_queue_.begin())->rawLive);
+        EXPECT_FALSE(session->write_queue_.back().rawLive);
+        EXPECT_EQ(budget->bytes(), 2 * (frame.bytes->size() + 14));
+
+        session->beginClose("raw live slot release test");
+        EXPECT_FALSE(subscription->active.load());
+        EXPECT_TRUE(session->rawViews_.empty());
+        ASSERT_EQ(session->write_queue_.size(), 1u);
+        EXPECT_EQ(session->write_queue_.front().payload, "in-flight");
+        EXPECT_EQ(budget->bytes(), 0u);
+        const bool reusable = budget->tryAcquire(recording::kRawLiveByteBudget);
+        EXPECT_TRUE(reusable);
+        if (reusable) budget->release(recording::kRawLiveByteBudget);
+    }
+    static void checkIndependentOverlays(SentinelStreamServer& server, ServerDataModel& model) {
+        server.m_running = true;
+        server.m_historyWorkers = std::make_unique<net::thread_pool>(2);
+        net::io_context ioc;
+        ssl::context tls(ssl::context::tls_server);
+        auto session = std::make_shared<Session>(tcp::socket(ioc), tls, model, &server);
+        session->subscriptions_.insert("BTC-USD");
+        session->overlayState("BTC-USD");
+        session->write_queue_.push_back({"in-flight", false});
+        session->pendingWriteBytes_ = 9;
+        session->pumpOverlays();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        std::set<std::string> types;
+        bool footprintHasTrade = false, tpoHasTrade = false;
+        double profileVolume = 0;
+        while (std::chrono::steady_clock::now() < deadline) {
+            ioc.restart(); ioc.poll();
+            for (const auto& write : session->write_queue_) {
+                if (write.payload == "in-flight") continue;
+                const auto message = nlohmann::json::parse(write.payload);
+                const auto type = message.value("type", "");
+                types.insert(type);
+                if (type == "volume_profile_slice") profileVolume = message.value("total_volume", 0.0);
+                if (type == "tpo_slice") {
+                    const auto letters = QByteArray::fromBase64(QByteArray::fromStdString(message.at("letters")));
+                    tpoHasTrade |= std::any_of(letters.begin(), letters.end(), [](char c) { return c != 0; });
+                }
+                if (type == "footprint_slice") {
+                    const auto bytes = QByteArray::fromBase64(QByteArray::fromStdString(message.at("delta_levels_q16")));
+                    for (int row = 0; row < bytes.size() / 2; ++row)
+                        footprintHasTrade |= qFromLittleEndian<uint16_t>(bytes.constData() + row * 2) != 32768;
+                }
+            }
+            if (types.contains("footprint_slice") && types.contains("tpo_slice") &&
+                types.contains("volume_profile_slice")) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        EXPECT_TRUE(types.contains("footprint_slice"));
+        EXPECT_TRUE(types.contains("tpo_slice"));
+        EXPECT_TRUE(types.contains("volume_profile_slice"));
+        EXPECT_FALSE(types.contains("heatmap_slice"));
+        EXPECT_TRUE(footprintHasTrade);
+        EXPECT_TRUE(tpoHasTrade);
+        EXPECT_DOUBLE_EQ(profileVolume, 2);
+        session->beginClose("overlay independence test");
+        server.stop();
+        ioc.restart(); ioc.poll();
     }
     static void checkOverlayBounds(SentinelStreamServer& server, ServerDataModel& model) {
         server.m_running = true;
@@ -284,6 +337,21 @@ bool writeSelfSignedCert(const std::string& certFile, const std::string& keyFile
     return true;
 }
 
+TEST(RecordingServerStop, SessionPrioritizesRawLiveAndReleasesSlotOnBeginClose) {
+    int argc = 1;
+    char name[] = "raw-live-close";
+    char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    ServerConfig config;
+    config.recording.enabled = true;
+    config.recording.dir = dir.path().toStdString();
+    ServerDataModel model(config);
+    ASSERT_NE(model.recordingLive(), nullptr);
+    RecordingServerStopTest::checkRawLiveSlotRelease(model);
+}
+
 TEST(RecordingServerStop, ActiveDeliveryIsJoinedBeforeDelayedExecutorDrain) {
     int argc = 1;
     char name[] = "recording-stop";
@@ -293,7 +361,6 @@ TEST(RecordingServerStop, ActiveDeliveryIsJoinedBeforeDelayedExecutorDrain) {
     ServerConfig config;
     config.recording.enabled = true;
     config.recording.dir = dir.path().toStdString();
-    config.heatmap.persistenceEnabled = false;
     ServerDataModel model(config);
     ASSERT_NE(model.recordingLive(), nullptr);
     Authenticator auth(dir.path().toStdString() + "/no-credentials");
@@ -304,9 +371,9 @@ TEST(RecordingServerStop, ActiveDeliveryIsJoinedBeforeDelayedExecutorDrain) {
     auto releaseDelivery = deliveryRelease.get_future().share();
     boost::asio::post(executor, [&] { executorEntered.set_value(); releaseExecutor.wait(); });
     ASSERT_EQ(executorEntered.get_future().wait_for(std::chrono::seconds(3)), std::future_status::ready);
-    recording::LiveView view{"BTC-USD", "near", 60000, {90, 1, 20}, 1};
+    recording::RawTailView view{"BTC-USD", {"hmc2.near"}, 1, 0};
     std::atomic_bool postedWhileAlive{false};
-    auto subscription = model.recordingLive()->subscribe(view, [&](const auto&, const auto&) {
+    auto subscription = model.recordingLive()->subscribeRaw(view, [&](const auto&, const auto&, const auto&) {
         deliveryEntered.set_value();
         releaseDelivery.wait();
         postedWhileAlive = !executor.stopped();
@@ -330,7 +397,7 @@ TEST(RecordingServerStop, ActiveDeliveryIsJoinedBeforeDelayedExecutorDrain) {
     // is joined and cannot post again while the server is waiting to join I/O.
     EXPECT_EQ(stopped.wait_for(std::chrono::milliseconds(2200)), std::future_status::timeout);
     EXPECT_TRUE(postedWhileAlive.load());
-    EXPECT_FALSE(model.recordingLive()->subscribe(view, [](const auto&, const auto&) { return true; }));
+    EXPECT_FALSE(model.recordingLive()->subscribeRaw(view, [](const auto&, const auto&, const auto&) { return true; }));
     executorRelease.set_value();
     EXPECT_EQ(stopped.wait_for(std::chrono::seconds(3)), std::future_status::ready);
 }
@@ -345,7 +412,6 @@ TEST(RecordingServerStop, FailedRecorderStartReleasesItsLiveService) {
     ServerConfig config;
     config.recording.enabled = true;
     config.recording.dir = dir.path().toStdString();
-    config.heatmap.persistenceEnabled = false;
     ServerDataModel model(config);
     EXPECT_FALSE(model.recordingAvailable());
     EXPECT_EQ(model.recordingLive(), nullptr);
@@ -363,7 +429,6 @@ TEST(RecordingServerStop, SelfInvalidationIsHandedToTheMainThread) {
     ServerConfig config;
     config.recording.enabled = true;
     config.recording.dir = dir.path().toStdString();
-    config.heatmap.persistenceEnabled = false;
     ServerDataModel model(config);
     ASSERT_TRUE(model.recordingAvailable());
     std::vector<std::pair<QString, QString>> requests;
@@ -386,18 +451,6 @@ TEST(RecordingServerStop, SelfInvalidationIsHandedToTheMainThread) {
     EXPECT_TRUE(onMainThread);
 }
 
-TEST(RecordingServerStop, SessionPrioritizesLiveAndReleasesSlotOnBeginClose) {
-    int argc = 1;
-    char name[] = "recording-session";
-    char* argv[] = {name, nullptr};
-    QCoreApplication app(argc, argv);
-    ServerConfig config;
-    config.heatmap.persistenceEnabled = false;
-    config.recording.enabled = false;
-    ServerDataModel model(config);
-    RecordingServerStopTest::checkRecordingQueue(model);
-}
-
 TEST(RecordingServerStop, ActualServerStartStopStartRestoresLiveDelivery) {
     int argc = 1;
     char name[] = "recording-restart";
@@ -405,7 +458,6 @@ TEST(RecordingServerStop, ActualServerStartStopStartRestoresLiveDelivery) {
     QCoreApplication app(argc, argv);
     QTemporaryDir dir;
     ServerConfig config;
-    config.heatmap.persistenceEnabled = false;
     config.recording.enabled = true;
     config.recording.dir = dir.path().toStdString();
     config.tls.certFile = dir.path().toStdString() + "/cert.pem";
@@ -418,8 +470,11 @@ TEST(RecordingServerStop, ActualServerStartStopStartRestoresLiveDelivery) {
         server.start();
         EXPECT_TRUE(RecordingServerStopTest::listening(server));
         std::promise<uint64_t> delivered;
-        auto sub = model.recordingLive()->subscribe({"BTC-USD", "near", 60000, {90, 1, 20}, 1},
-            [&](const auto&, const auto& page) { delivered.set_value(page.columns.back().observedMs); return true; });
+        auto sub = model.recordingLive()->subscribeRaw({"BTC-USD", {"hmc2.near"}, 1, 0},
+            [&](const auto&, const auto&, const recording::RawTailFrame& frame) {
+                delivered.set_value(heatmap::decodeChunk(*frame.bytes).columns.columns.back().observedMs);
+                return true;
+            });
         ASSERT_TRUE(sub);
         auto record = std::make_shared<recording::Hmc2Record>();
         record->header.symbol = "BTC-USD"; record->header.layer = "near";
@@ -439,7 +494,7 @@ TEST(RecordingServerStop, ActualServerStartStopStartRestoresLiveDelivery) {
 TEST(TradeOverlayServer, BoundedWorkersHistoryAndCloseDiscardLatePublication) {
     int argc = 1; char name[] = "overlay-queue"; char* argv[] = {name, nullptr};
     QCoreApplication app(argc, argv);
-    ServerConfig config; config.heatmap.persistenceEnabled = false; config.recording.enabled = false;
+    ServerConfig config; config.recording.enabled = false;
     ServerDataModel model(config);
     QTemporaryDir dir;
     Authenticator auth(dir.path().toStdString() + "/no-credentials");
@@ -453,8 +508,8 @@ TEST(RecordingServerStop, StalledCandleFetchIsJoinedBeforeServerDestruction) {
     QTemporaryDir directory; ASSERT_TRUE(directory.isValid());
     struct RestoreDirectory { QString path = QDir::currentPath(); ~RestoreDirectory() { QDir::setCurrent(path); } } restore;
     ASSERT_TRUE(QDir::setCurrent(directory.path()));
-    ServerConfig config; config.recording.enabled = false; config.heatmap.persistenceEnabled = false;
-    config.heatmap.timeframesMs = {60000};
+    ServerConfig config; config.recording.enabled = false;
+    config.chart.timeframesMs = {60000};
     ServerDataModel model(config);
     Authenticator auth(directory.path().toStdString() + "/no-key");
     net::io_context listener;
@@ -541,8 +596,7 @@ TEST(CandleHistoryPaging, OneSecondPagesReachOlderRetainedBars) {
     ASSERT_TRUE(QDir::setCurrent(directory.path()));
     ServerConfig config;
     config.recording.enabled = false;
-    config.heatmap.persistenceEnabled = false;
-    config.heatmap.timeframesMs = {1000, 60000};
+    config.chart.timeframesMs = {1000, 60000};
     config.rollerShadow.products = {"BTC-USD", "ETH-USD"};
     ServerDataModel model(config);
     for (int second = 1; second <= 1001; ++second) {
@@ -572,7 +626,6 @@ struct ServerFixture {
     std::unique_ptr<Authenticator> auth;
     std::unique_ptr<SentinelStreamServer> server;
     bool init(int port = 0) {
-        config.heatmap.persistenceEnabled = false;
         config.recording.enabled = false;
         config.tls.certFile = dir.path().toStdString() + "/cert.pem";
         config.tls.keyFile = dir.path().toStdString() + "/key.pem";
@@ -899,4 +952,104 @@ TEST(RecordingServerStop, AcceptRacingStopLeavesNoSessionBehind) {
     EXPECT_TRUE(RecordingServerStopTest::accepts(server, restarted));
     client.close(ec);
     server.stop();
+}
+
+// Private retained-tape invariant, shared with the trade-overlay test fixture.
+struct TradeOverlayModelTest {
+    static int64_t retention(const ServerDataModel& model) { return model.m_footprintTradeRetentionMs; }
+};
+
+TEST(ServerChartConfig, NeutralKeysKeepDefaultsNormalizationAndRetention) {
+    int argc = 1;
+    char name[] = "chart-config";
+    char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const ServerConfig defaults;
+    EXPECT_EQ(defaults.chart.timeframesMs,
+              (std::vector<int64_t>{1000, 60000, 300000, 900000, 3600000, 14400000, 86400000}));
+    EXPECT_EQ(defaults.chart.defaultTimeframeMs, 0);
+    EXPECT_EQ(defaults.tradeOverlays.retentionColumns, 5120);
+    for (bool wrapped : {false, true}) {
+        QFile file(dir.filePath("config.yaml"));
+        ASSERT_TRUE(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        const QByteArray prefix = wrapped ? "  " : "";
+        if (wrapped) file.write("server:\n");
+        for (const auto& line : QByteArray("chart:\n  timeframes_ms: [2000, -1, 1000, 2000, 0]\n"
+                "  default_timeframe_ms: 3000\ntrade_overlays:\n  retention_columns: 2048\n"
+                "  grid_width: 17\nrecording:\n  enabled: false\n").split('\n')) {
+            if (!line.isEmpty()) file.write(prefix + line + '\n');
+        }
+        file.close();
+        ServerConfig config;
+        ASSERT_TRUE(ConfigLoader::loadServerConfig(file.fileName().toStdString(), &config));
+        EXPECT_EQ(config.chart.timeframesMs, (std::vector<int64_t>{1000, 2000}));
+        EXPECT_EQ(config.chart.defaultTimeframeMs, 3000);
+        EXPECT_EQ(config.tradeOverlays.retentionColumns, 2048);
+        ServerDataModel model(config);
+        EXPECT_EQ(TradeOverlayModelTest::retention(model), 2 * 3000 * 2048);
+        config.chart.defaultTimeframeMs = 0;
+        config.tradeOverlays.retentionColumns = 1;
+        ServerDataModel minimumColumns(config);
+        EXPECT_EQ(TradeOverlayModelTest::retention(minimumColumns), 2 * 2000 * 1024);
+        config.chart.timeframesMs = {86400000};
+        ServerDataModel maximumWindow(config);
+        EXPECT_EQ(TradeOverlayModelTest::retention(maximumWindow), 86400000);
+    }
+}
+
+TEST(ServerChartConfig, WireUsesNeutralFieldsAndRetainsCapabilityFilter) {
+    ServerConfig config;
+    config.chart.timeframesMs = {1000, 60000, 300000, 3600000, 5400000, 7200000};
+    config.chart.defaultTimeframeMs = 60000;
+    config.tradeOverlays.retentionColumns = 8192;
+    const auto wire = buildServerConfigPayload(config, true, true);
+    EXPECT_EQ(wire.at("schema_version"), 2);
+    EXPECT_FALSE(wire.contains("heatmap"));
+    EXPECT_FALSE(wire.contains("timeframes_ms"));
+    EXPECT_EQ(wire.at("chart").at("timeframes_ms"), config.chart.timeframesMs);
+    EXPECT_EQ(wire.at("chart").at("default_timeframe_ms"), 60000);
+    EXPECT_EQ(wire.at("chart").at("served_timeframes_ms"),
+              (std::vector<int64_t>{60000, 300000, 3600000, 5400000, 7200000}));
+    EXPECT_EQ(wire.at("trade_overlays").at("retention_columns"), 8192);
+    const auto& capability = wire.at("recording");
+    EXPECT_TRUE(capability.at("available"));
+    EXPECT_EQ(capability.at("layers"), (std::vector<std::string>{"near", "deep"}));
+    EXPECT_EQ(capability.at("timeframes_ms"), (std::vector<int64_t>{60000, 300000, 3600000, 7200000}));
+    EXPECT_EQ(capability.at("size_floor"), config.recording.sizeFloor);
+    EXPECT_EQ(capability.at("codes_per_octave"), config.recording.codesPerOctave);
+    config.chart.defaultTimeframeMs = 0;
+    const auto fallback = buildServerConfigPayload(config, false, false);
+    EXPECT_FALSE(fallback.at("chart").contains("default_timeframe_ms"));
+    EXPECT_EQ(fallback.at("chart").at("served_timeframes_ms"), (std::vector<int64_t>{1000}));
+    EXPECT_FALSE(fallback.at("recording").at("available"));
+}
+
+TEST(TradeOverlayServer, RetainedTradesPublishAllThreeOverlaysWithoutLegacyProducer) {
+    int argc = 1;
+    char name[] = "independent-overlays";
+    char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    ServerConfig config;
+    config.recording.enabled = false;
+    config.tradeOverlays.gridWidth = 16;
+    config.tradeOverlays.gridHeight = 32;
+    config.tradeOverlays.tickSize = 1;
+    struct ClockModel : ServerDataModel {
+        using ServerDataModel::ServerDataModel;
+        int64_t exchangeNowMs() const override { return recording::kHmc2MinMs + 61000; }
+    } model(config);
+    EXPECT_EQ(model.metaObject()->indexOfSignal("heatmapSliceReady(HeatmapSlice)"), -1);
+    Trade trade{};
+    trade.product_id = "BTC-USD";
+    trade.price = 100;
+    trade.size = 2;
+    trade.side = AggressorSide::Buy;
+    trade.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(model.exchangeNowMs() - 1000));
+    model.onTrade(trade);
+    QTemporaryDir dir;
+    Authenticator auth(dir.path().toStdString() + "/no-credentials");
+    SentinelStreamServer server(model, auth, config, 0);
+    RecordingServerStopTest::checkIndependentOverlays(server, model);
 }

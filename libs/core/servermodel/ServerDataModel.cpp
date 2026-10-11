@@ -98,19 +98,18 @@ void ServerDataModel::updateExchangeOffsetMs(int64_t exchangeMs) {
 ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
     : QObject(parent)
     , m_serverConfig(config)
-    , m_aggregator(std::make_unique<TimeframeAggregator>(m_serverConfig.heatmap.timeframesMs))
-    , m_heatmapStreamer(std::make_unique<HeatmapTwapStreamer>(*this, m_serverConfig.heatmap))
+    , m_aggregator(std::make_unique<TimeframeAggregator>(m_serverConfig.chart.timeframesMs))
 {
     for (const auto& symbol : rollerProducts(m_serverConfig)) m_feeds.try_emplace(symbol);
     m_reseedTimer.setSingleShot(true);
     connect(&m_reseedTimer, &QTimer::timeout, this, [this] { deliverReseeds(); });
-    int64_t maxTfMs = std::max<int64_t>(1000, m_serverConfig.heatmap.activeTimeframeMs);
-    for (const int64_t tf : m_serverConfig.heatmap.timeframesMs) {
+    int64_t maxTfMs = std::max<int64_t>(1000, m_serverConfig.chart.defaultTimeframeMs);
+    for (const int64_t tf : m_serverConfig.chart.timeframesMs) {
         if (tf > maxTfMs) {
             maxTfMs = tf;
         }
     }
-    const int64_t gridSpanMs = maxTfMs * std::max<int64_t>(1024, m_serverConfig.heatmap.gridWidth);
+    const int64_t gridSpanMs = maxTfMs * std::max<int64_t>(1024, m_serverConfig.tradeOverlays.retentionColumns);
     m_footprintTradeRetentionMs = std::clamp<int64_t>(gridSpanMs * 2, 300'000, 86'400'000);
 
     // Candles close on each product's journal
@@ -118,15 +117,6 @@ ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
     for (const auto& symbol : rollerProducts(m_serverConfig)) m_aggregator->setJournalClock(symbol);
     connect(m_aggregator.get(), &TimeframeAggregator::barClosed, this, &ServerDataModel::barClosed);
     connect(m_aggregator.get(), &TimeframeAggregator::barUpdated, this, &ServerDataModel::barUpdated);
-
-    connect(m_heatmapStreamer.get(), &HeatmapTwapStreamer::heatmapSliceReady,
-            this, &ServerDataModel::heatmapSliceReady);
-
-    // F1 phase 2: prime the in-RAM heatmap rings from any persisted columns
-    // before the streamer starts sampling. No-op when persistence is disabled.
-    m_heatmapStreamer->bootstrapFromDisk(m_serverConfig.defaultSymbols);
-
-    m_heatmapStreamer->start();
 
     m_candleTimer.setTimerType(Qt::PreciseTimer);
     m_candleTimer.setInterval(250);
@@ -195,7 +185,7 @@ void ServerDataModel::startRecorder() {
             m_stallSeries.push_back({symbol, layer.name, 0});
     m_stallMonitor.emplace(rc.latenessMs);
     try {
-        m_recordingLive = std::make_shared<recording::LiveService>(dir, recording::liveCadenceMs(rc.livePublishMs));
+        m_recordingLive = std::make_shared<recording::LiveService>(recording::liveCadenceMs(rc.livePublishMs));
         cfg.publisher = [live = m_recordingLive, drops = &m_livePublishDrops](recording::RecordPtr record) {
             if (!live->publish(std::move(record))) {
                 drops->fetch_add(1, std::memory_order_relaxed);
@@ -260,7 +250,7 @@ void ServerDataModel::startRollerServing() {
             m_stallSeries.push_back({symbol, layer, 0});
     m_stallMonitor.emplace(recording::RecorderConfig{}.latenessMs);
     try {
-        m_recordingLive = std::make_shared<recording::LiveService>(dir, recording::liveCadenceMs(rc.livePublishMs));
+        m_recordingLive = std::make_shared<recording::LiveService>(recording::liveCadenceMs(rc.livePublishMs));
     } catch (const std::exception& e) {
         m_stallMonitor.reset();
         sLog_Error("Recording not served: dir=" << dir.string() << " error=" << e.what());
@@ -478,46 +468,11 @@ SymbolHotData& ServerDataModel::ensureSymbol(const std::string& symbol) {
     return *it->second;
 }
 
-std::vector<std::string> ServerDataModel::getSymbolsSnapshot() const {
-    std::shared_lock lock(m_mutex);
-    std::vector<std::string> symbols;
-    symbols.reserve(m_symbols.size());
-    for (const auto& [key, _] : m_symbols) {
-        symbols.push_back(key);
-    }
-    return symbols;
-}
-
-const LiveOrderBook& ServerDataModel::getLiveOrderBook(const std::string& symbol) {
-    return ensureSymbol(symbol).liveBook;
-}
-
 std::vector<OHLCVBar> ServerDataModel::getHistory(const std::string& symbol, int64_t timeframeMs, size_t limit) const {
     if (m_aggregator) {
         return m_aggregator->getHistory(symbol, timeframeMs, limit);
     }
     return {};
-}
-
-bool ServerDataModel::getHeatmapHistory(const std::string& symbol,
-                                        int64_t timeframeMs,
-                                        int64_t endTimeMs,
-                                        int count,
-                                        int& outGridWidth,
-                                        int& outGridHeight,
-                                        std::vector<HeatmapTwapStreamer::HistoryColumn>& out,
-                                        int64_t startTimeMs) const {
-    if (!m_heatmapStreamer) {
-        return false;
-    }
-    return m_heatmapStreamer->fetchHistory(symbol, timeframeMs, endTimeMs, count,
-                                           outGridWidth, outGridHeight, out, startTimeMs);
-}
-
-int64_t ServerDataModel::oldestHeatmapPersistedMs(const std::string& symbol,
-                                                  int64_t timeframeMs) const {
-    if (!m_heatmapStreamer) return 0;
-    return m_heatmapStreamer->oldestPersistedMs(symbol, timeframeMs);
 }
 
 // Worker-only bounded snapshot. False means over budget, never a partial tape.

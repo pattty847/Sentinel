@@ -234,6 +234,7 @@ TEST(AgentApiCodec, EnvelopeAndUnknowns) {
     EXPECT_TRUE(config.value("defaultSymbols").isNull());
     const auto heatmap = config.value("heatmap").toObject();
     EXPECT_TRUE(heatmap.value("configuredTimeframesMs").isNull());
+    EXPECT_TRUE(heatmap.value("retentionColumns").isNull());
     EXPECT_EQ(heatmap.value("servedTimeframesMs").toArray().size(), 1);
     EXPECT_TRUE(data.value("lastReceivedAtMs").toObject().value("trades").isNull());
     for (const char* overlay : {"footprint", "tpo", "volumeProfile"})
@@ -321,18 +322,21 @@ TEST(AgentApiCodec, QueryValidation) {
 
 TEST(AgentApiCodec, AdvertisedCapabilitiesOnly) {
     ServerConfig config;
-    config.heatmap.servedTimeframesMs = {60000};
-    config.heatmap.timeframesMs = {1000, 60000};
-    config.heatmap.gridWidth = 4096;
-    config.advertisedFields = {"heatmap.servedTimeframesMs", "heatmap.gridWidth"};
+    config.chart.servedTimeframesMs = {60000};
+    config.chart.timeframesMs = {1000, 60000};
+    config.tradeOverlays.retentionColumns = 4096;
+    config.advertisedFields = {"chart.servedTimeframesMs", "tradeOverlays.retentionColumns"};
     StateSnapshot state;
     applyAdvertisedServerConfig(state, config);
     ASSERT_TRUE(state.servedTimeframesMs.has_value());
     EXPECT_EQ(state.servedTimeframesMs->size(), 1);
-    EXPECT_EQ(state.gridWidth, 4096);
+    EXPECT_EQ(state.retentionColumns, 4096);
     EXPECT_FALSE(state.configuredTimeframesMs.has_value());
-    EXPECT_FALSE(state.gridHeight.has_value());
     EXPECT_FALSE(state.defaultSymbols.has_value());
+    const auto heatmap = stateJson(state)["data"].toObject()["serverConfig"].toObject()["heatmap"].toObject();
+    EXPECT_EQ(heatmap.value("retentionColumns").toInt(), 4096);
+    EXPECT_FALSE(heatmap.contains("gridWidth"));
+    EXPECT_FALSE(heatmap.contains("gridHeight"));
 }
 
 TEST(AgentApiCodec, CandleHalfOpenAndPageLimit) {

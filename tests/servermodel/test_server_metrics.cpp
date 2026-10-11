@@ -99,7 +99,6 @@ ServerConfig recordingConfig(const QTemporaryDir& dir) {
     config.recording.enabled = true;
     config.recording.dir = dir.path().toStdString();
     config.recording.fallbackDir.clear();
-    config.heatmap.persistenceEnabled = false;
     config.defaultSymbols = {"btc-usd"};
     return config;
 }

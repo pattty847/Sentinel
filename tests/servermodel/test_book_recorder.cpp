@@ -1,3 +1,4 @@
+#include "servermodel/RecordingPage.hpp"
 #include "servermodel/BookRecorder.hpp"
 #include "servermodel/Hmc2Store.hpp"
 #include "servermodel/RecordingLive.hpp"

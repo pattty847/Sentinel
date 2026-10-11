@@ -36,8 +36,6 @@ struct HeatmapChunkWireTest {
     static void park(Session& session, std::promise<void>& entered, std::shared_future<void> gate) {
         net::post(session.ws_.get_executor(), [&entered, gate] { entered.set_value(); gate.wait(); });
     }
-    static bool holdLegacySlot(Session& session) { return session.recordingWriteSlot_->tryAcquire(); }
-    static void releaseLegacySlot(Session& session) { session.recordingWriteSlot_->release(); }
     static void setChunks(SentinelStreamServer& server, std::shared_ptr<recording::ChunkService> chunks) {
         server.m_chunks = std::move(chunks);
     }
@@ -307,7 +305,6 @@ protected:
             }
             store.append(hourRecord());
         }
-        config.heatmap.persistenceEnabled = false;
         config.recording.enabled = true;
         config.recording.dir = root().string();
         config.tls.certFile = dir.path().toStdString() + "/cert.pem";
@@ -838,21 +835,19 @@ protected:
     }
 };
 
-TEST_F(ChunkWireConfiguredRate, LiveConfiguredCadenceIndependentSlotAndBusyCoalescingKeepFinals) {
+TEST_F(ChunkWireConfiguredRate, LiveConfiguredCadenceAndBusyCoalescingKeepFinals) {
     const int64_t B = recording::liveCadenceMs(config.recording.livePublishMs);
     ASSERT_EQ(B, 750);
     const int64_t retry = 8 * B + std::min<int64_t>(recording::kLiveCadenceMaxMs, 8 * B);
     EXPECT_TRUE(buildServerConfigPayload(config, true, true).at("recording").at("chunk_live").get<bool>());
     useLiveClock(); startAndConnect();
     auto session = HeatmapChunkWireTest::onlySession(*server); ASSERT_TRUE(session);
-    ASSERT_TRUE(HeatmapChunkWireTest::holdLegacySlot(*session));
     const auto sub = client->subscribeHeatmapLive("BTC-USD", {"hmc2.near"}, kEpoch);
     ASSERT_TRUE(poll([&] { return bool(HeatmapChunkWireTest::rawView(*session, "BTC-USD")); }));
     publishLive(0, false); publishLive(1, true, 1000);
     liveTurn(0);
     ASSERT_EQ(inbox.liveFor(sub).size(), 1);
     EXPECT_EQ(inbox.liveFor(sub)[0]->columns.columns.size(), 2);
-    HeatmapChunkWireTest::releaseLegacySlot(*session);
     const auto registered = HeatmapChunkWireTest::rawView(*session, "BTC-USD");
     recording::RawTailFrame oversized{std::make_shared<const std::vector<uint8_t>>(1024*1024-13), 1, 0};
     EXPECT_FALSE(registered->deliver(registered->view, "hmc2.near", oversized)); // envelope would exceed 1 MiB

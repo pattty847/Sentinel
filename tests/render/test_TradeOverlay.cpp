@@ -153,10 +153,9 @@ TEST_F(TradeOverlay, DataProcessorPublishesStableFootprintGridMetadata) {
     s.symbol="ETH-USD"; processor.onFootprintSliceReceived(s); EXPECT_EQ(uploads,2);
 }
 
-TEST_F(TradeOverlay, AdvertisedDefaultsAreIndependentOfHeatmapConfig) {
+TEST_F(TradeOverlay, AdvertisedOverlayGridIsIndependentOfRetention) {
     const auto config = protocol::clientparse::parseServerConfig({
-        {"heatmap", {{"grid_width", 8192}, {"grid_height", 999}, {"tick_size", 100}}},
-        {"trade_overlays", {{"grid_width", 256}, {"grid_height", 100}, {"tick_size", 2.5},
+        {"trade_overlays", {{"retention_columns", 8192}, {"grid_width", 256}, {"grid_height", 100}, {"tick_size", 2.5},
                             {"footprint_timeframe_ms", 300000}}}});
     EXPECT_EQ(config.tradeOverlays.gridWidth,256);
     EXPECT_EQ(config.tradeOverlays.gridHeight,100);
@@ -171,7 +170,7 @@ TEST_F(TradeOverlay, SnapshotBudgetsOnlyRequestedWindowAndSortsOnlyMatches) {
         ~RestoreDirectory() { QDir::setCurrent(path); }
     } restore;
     ASSERT_TRUE(QDir::setCurrent(directory.path()));
-    ServerConfig config; config.heatmap.persistenceEnabled = false; config.recording.enabled = false;
+    ServerConfig config; config.recording.enabled = false;
     ServerDataModel model(config);
     using Trade = ServerDataModel::FootprintTradeSample;
     std::deque<Trade> retained(kMaxTrades + 1, Trade{day, 100, 1, AggressorSide::Buy});

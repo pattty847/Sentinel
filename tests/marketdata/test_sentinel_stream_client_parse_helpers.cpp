@@ -3,28 +3,23 @@
 
 TEST(SentinelStreamClientParseHelpers, ParseServerConfigMapsFields) {
     nlohmann::json msg = {
-        {"timeframes_ms", nlohmann::json::array({0, 1000, -1, 60000})},
-        {"heatmap",
-         {{"grid_width", 4096},
-          {"grid_height", 1024},
-          {"tick_size", 0.5},
-          {"active_timeframe_ms", 60000},
-          {"served_timeframes_ms", nlohmann::json::array({0, 60000, -1, 300000})}}},
+        {"chart", {{"timeframes_ms", {0, 1000, -1, 60000}},
+                   {"default_timeframe_ms", 60000},
+                   {"served_timeframes_ms", {0, 60000, -1, 300000}}}},
+        {"trade_overlays", {{"retention_columns", 4096}}},
         {"orderbook", {{"tick_size", 0.01}, {"band_pct", 0.25}}},
         {"candles", {{"update_bps_fast", 0.1}, {"update_tick_size", 0.5}}},
         {"default_symbols", nlohmann::json::array({"BTC-USD", 123, "ETH-USD"})}
     };
 
     const ServerConfig cfg = protocol::clientparse::parseServerConfig(msg);
-    ASSERT_EQ(cfg.heatmap.timeframesMs.size(), 2u);
-    EXPECT_EQ(cfg.heatmap.timeframesMs[0], 1000);
-    EXPECT_EQ(cfg.heatmap.timeframesMs[1], 60000);
-    EXPECT_EQ(cfg.heatmap.gridWidth, 4096);
-    EXPECT_EQ(cfg.heatmap.gridHeight, 1024);
-    EXPECT_DOUBLE_EQ(cfg.heatmap.tickSize, 0.5);
-    EXPECT_EQ(cfg.heatmap.activeTimeframeMs, 60000);
-    EXPECT_EQ(cfg.heatmap.servedTimeframesMs, (std::vector<int64_t>{60000, 300000}));
-    EXPECT_TRUE(cfg.wasAdvertised("heatmap.servedTimeframesMs"));
+    ASSERT_EQ(cfg.chart.timeframesMs.size(), 2u);
+    EXPECT_EQ(cfg.chart.timeframesMs[0], 1000);
+    EXPECT_EQ(cfg.chart.timeframesMs[1], 60000);
+    EXPECT_EQ(cfg.tradeOverlays.retentionColumns, 4096);
+    EXPECT_EQ(cfg.chart.defaultTimeframeMs, 60000);
+    EXPECT_EQ(cfg.chart.servedTimeframesMs, (std::vector<int64_t>{60000, 300000}));
+    EXPECT_TRUE(cfg.wasAdvertised("chart.servedTimeframesMs"));
     EXPECT_TRUE(cfg.wasAdvertised("orderbook.tickSize"));
     EXPECT_FALSE(cfg.wasAdvertised("candles.bpsSlow"));
     EXPECT_DOUBLE_EQ(cfg.orderbook.tickSize, 0.01);
@@ -38,11 +33,10 @@ TEST(SentinelStreamClientParseHelpers, ParseServerConfigMapsFields) {
 
 TEST(SentinelStreamClientParseHelpers, MissingServedTimeframesMeansUnknown) {
     const auto cfg = protocol::clientparse::parseServerConfig({
-        {"timeframes_ms", nlohmann::json::array({1000, 60000})},
-        {"heatmap", {{"active_timeframe_ms", 60000}}}
+        {"chart", {{"timeframes_ms", {1000, 60000}}, {"default_timeframe_ms", 60000}}}
     });
-    EXPECT_TRUE(cfg.heatmap.servedTimeframesMs.empty());
-    EXPECT_FALSE(cfg.wasAdvertised("heatmap.servedTimeframesMs"));
+    EXPECT_TRUE(cfg.chart.servedTimeframesMs.empty());
+    EXPECT_FALSE(cfg.wasAdvertised("chart.servedTimeframesMs"));
 }
 
 namespace {

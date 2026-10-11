@@ -7,7 +7,7 @@
 #include "metrics/MetricsRegistry.hpp"
 #include "metrics/MetricsHttpServer.hpp"
 #include <QTcpSocket>
-#include "servermodel/HmcolFormat.hpp"
+#include "Crc32.hpp"
 #include <QTemporaryDir>
 #include <QFile>
 #include <gtest/gtest.h>
@@ -40,7 +40,7 @@ void corrupt(const fs::path& p, const capture::BlockIndex& block, bool zstd) {
     if (zstd) b[block.offset + 48] ^= 1; // destroy zstd magic, keep RAWL2 header valid
     else {
         b[block.offset + 40] ^= 1; // wrong raw CRC, correctly re-checksummed header
-        put32(b, block.offset + 44, hmcol::crc32(
+        put32(b, block.offset + 44, sentinel::crc32(
             reinterpret_cast<const uint8_t*>(b.data() + block.offset), 44));
     }
     save(p, b);
@@ -370,7 +370,7 @@ TEST(CorruptFraming, DamagedIndexFormsAndMissingIndexAreUnsealed) {
     const auto& last = scan.index.back(); const auto footer = last.offset+48+last.compressedBytes;
     for (const auto at : {footer, footer+4, footer+12, uint64_t(original.size()-1)}) {
         auto b = original; b[at] ^= 0x40;
-        if (at == footer+12) put32(b, b.size()-4, hmcol::crc32(b.data()+footer+8, b.size()-footer-12));
+        if (at == footer+12) put32(b, b.size()-4, sentinel::crc32(b.data()+footer+8, b.size()-footer-12));
         save(p, b);
         unsigned skips = 0, records = 0;
         capture::RecordReader reader(qpath(p), true, {}, [&](const auto& block, const char*) { ++skips; EXPECT_EQ(block.offset, footer); });

@@ -1,3 +1,4 @@
+#include "servermodel/RecordingPage.hpp"
 #include "protocol/SentinelStreamClient.hpp"
 #include "render/heatmap/HeatmapSourceController.hpp"
 #include "heatmap/TimeComposer.hpp"

@@ -155,11 +155,9 @@ def main():
     (scratch / 'config/server_config.yaml').write_text(f'''schema_version: 1
 stream_port: {args.port}
 default_symbols: [BTC-USD]
-heatmap:
+chart:
   timeframes_ms: [60000, 300000, 900000, 3600000, 14400000, 86400000]
-  timeframe: 60000
-  persistence_enabled: false
-  persistence_dir: {scratch}/heatmap
+  default_timeframe_ms: 60000
 recording:
   enabled: false
   dir: {scratch}/recording

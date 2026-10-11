@@ -1,5 +1,6 @@
 #pragma once
-#include "Hmc2Store.hpp"
+#include "servermodel/Hmc2Store.hpp"
+#include "servermodel/RecordingLive.hpp"
 
 namespace recording {
 struct BuildRequest {
@@ -41,4 +42,22 @@ struct BuildResult {
 // Root overload is a one-shot convenience. No network or GUI work occurs here.
 BuildResult buildPage(Hmc2Reader &reader, const BuildRequest &request, StopToken stop = {});
 BuildResult buildPage(const std::filesystem::path &root, const BuildRequest &request, StopToken stop = {});
+struct LiveView {
+    std::string symbol, layer;
+    int64_t tfMs = 60'000;
+    PriceBand band;
+    uint64_t generation = 0;
+};
+// Worker-owned, incremental two-bucket projection. Reader warmup resumes at its
+// proven scan cursor. No cold I/O is repeated each second.
+class LiveBuilder {
+public:
+    explicit LiveBuilder(LiveView view);
+    ~LiveBuilder();
+    BuildResult build(Hmc2Reader &reader, const LiveCache::Snapshot &source,
+                      int64_t deliveredFinalThroughMs = 0);
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 } // namespace recording
