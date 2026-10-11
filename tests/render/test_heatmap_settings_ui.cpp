@@ -237,7 +237,6 @@ TEST(CandleStyleTest, SubmittedBodiesMatchRasterEdgesAtRestAndDuringGlide) {
         f.surfaceDpr = camera.dpr;
         f.viewportTimeStart = std::floor(camera.drawnStartMs);
         f.viewportTimeEnd = std::ceil(camera.drawnEndMs);
-        ++f.candleGeneration;
         root = item.updatePaintNode(root, nullptr);
         const auto* g = static_cast<QSGGeometryNode*>(root->lastChild())->geometry();
         EXPECT_EQ(g->vertexCount(), 6);

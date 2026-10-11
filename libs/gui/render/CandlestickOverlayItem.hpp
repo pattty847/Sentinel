@@ -94,7 +94,6 @@ private:
     QMetaObject::Connection m_mappingTimeframeConn;
     QMetaObject::Connection m_candleDirtyConn;
 
-    uint64_t m_lastCandleGeneration = 0;
     qint64 m_lastBoundarySequence = std::numeric_limits<qint64>::min();
     QSizeF m_lastSize;
     bool m_geometryDirty = true;

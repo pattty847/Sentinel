@@ -31,9 +31,7 @@ FrameContext build(const QRectF& boundingRect,
                    const GridViewState* viewState,
                    bool heatmapEnabled,
                    bool footprintEnabled,
-                   bool tpoEnabled,
-                   uint64_t footprintGen,
-                   uint64_t candleGen) {
+                   bool tpoEnabled) {
     FrameContext frame;
     frame.surfaceDpr = window ? window->effectiveDevicePixelRatio() : 1.0;
     // The whole device pixels of the item (the raster camera's surface): every layer
@@ -48,8 +46,6 @@ FrameContext build(const QRectF& boundingRect,
     frame.overlays.heatmap = heatmapEnabled;
     frame.overlays.footprint = footprintEnabled;
     frame.overlays.tpo = tpoEnabled;
-    frame.streamGenerations.footprint = footprintGen;
-    frame.streamGenerations.candle = candleGen;
     frame.viewport = viewportSnapshot(viewState);
     return frame;
 }

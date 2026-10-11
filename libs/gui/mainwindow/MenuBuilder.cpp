@@ -144,18 +144,6 @@ void MenuBuilder::buildDebugMenu() {
         }
     });
 
-    QAction* renderStrategyAction = m_debugMenu->addAction("Render Strategy");
-    renderStrategyAction->setCheckable(true);
-    renderStrategyAction->setChecked(false);
-    QObject::connect(renderStrategyAction, &QAction::toggled, [this](bool checked) {
-        if (m_heatmapDock && m_heatmapDock->qquickView()) {
-            QObject* renderer = m_heatmapDock->qquickView()->rootObject()->findChild<QObject*>("unifiedGridRenderer");
-            if (renderer) {
-                renderer->setProperty("showRenderStrategyOverlay", checked);
-            }
-        }
-    });
-
     QAction* viewportMathAction = m_debugMenu->addAction("Viewport Math");
     viewportMathAction->setCheckable(true);
     viewportMathAction->setChecked(false);
@@ -168,16 +156,5 @@ void MenuBuilder::buildDebugMenu() {
         }
     });
 
-    QAction* modeFlagsAction = m_debugMenu->addAction("Mode Flags");
-    modeFlagsAction->setCheckable(true);
-    modeFlagsAction->setChecked(false);
-    QObject::connect(modeFlagsAction, &QAction::toggled, [this](bool checked) {
-        if (m_heatmapDock && m_heatmapDock->qquickView()) {
-            QObject* renderer = m_heatmapDock->qquickView()->rootObject()->findChild<QObject*>("unifiedGridRenderer");
-            if (renderer) {
-                renderer->setProperty("showModeFlagsOverlay", checked);
-            }
-        }
-    });
 }
 

@@ -21,8 +21,6 @@ FrameContext build(const QRectF& boundingRect,
                    const GridViewState* viewState,
                    bool heatmapEnabled,
                    bool footprintEnabled,
-                   bool tpoEnabled,
-                   uint64_t footprintGen,
-                   uint64_t candleGen);
+                   bool tpoEnabled);
 
 } // namespace FrameContextBuilder

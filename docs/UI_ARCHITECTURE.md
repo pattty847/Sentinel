@@ -24,7 +24,7 @@ The rendering pipeline is coordinated by `UnifiedGridRenderer`, which inherits f
 
 ### UnifiedGridRenderer (UGR)
 UGR implements the `QSGNode` lifecycle via `updatePaintNode()`. 
-*   **FrameContext Construction:** At the start of every render pass, UGR constructs an immutable `FrameContext`, which contains the current viewport, time mapping, and stream generations.
+*   **FrameContext Construction:** At the start of every render pass, UGR constructs a `FrameContext` snapshot with the current viewport and time mapping.
 *   **Thread Safety:** Validates incoming state via thread-safe mutexes (e.g., `m_vpMutex` for Volume Profile, `m_footprintPendingMutex` for footprint textures). The render thread never touches full QObject graphs.
 *   **Orchestration:** Hands off the `FrameContext` to the various render strategies (overlays).
 
@@ -38,9 +38,9 @@ Overlays are independent C++ classes that manage their respective GPU resources 
 ## 4. Coordinate Systems and Mapping
 
 ### Raster camera
-`chart_raster::computeRaster` (`render/ChartRaster.hpp`) turns the stored viewport into what the chart draws: whole device pixels per heatmap row and column, edges on device pixels, drags as whole pixels (see `docs/ARCHITECTURE.md`, "Whole-pixel mapping"). `UnifiedGridRenderer::worldToScreen`/`screenToWorld` (QML hit tests) use the last drawn frame's mapping; the axis models use `rasterCameraNow()`.
+`chart_raster::computeRaster` (`render/ChartRaster.hpp`) turns the stored viewport into what the chart draws: whole device pixels per heatmap row and column, edges on device pixels, drags as whole pixels (see `docs/ARCHITECTURE.md`, "Whole-pixel mapping"). Sibling overlays use the published frame's mapping; the axis models use `rasterCameraNow()`.
 
 ### TimeAxisMapping
 `TimeAxisMapping` is the single source of truth produced by UGR on every frame.
-*   It guarantees that all overlays map coordinates consistently. If the viewport pans or zooms, the `TimeAxisMapping` is rebuilt in `updatePaintNode()` and propagated via the `FrameContext`. 
+*   It guarantees that all overlays map coordinates consistently. If the viewport pans or zooms, the `TimeAxisMapping` is rebuilt in `prepareSyncFrame()` and propagated via the `FrameContext`.
 *   **Domains:** Maintains strict boundaries between World, Grid (texture col/row), and Screen, ensuring `timeOffset` remains an isolated shader parameter for ring textures rather than leaking into candlestick or label Math.

@@ -12,22 +12,14 @@
 #include "servermodel/RecordingCodec.hpp"
 #include "../core/servermodel/SessionManager.hpp"
 #include <QDateTime>
+#include <QImage>
 #include <tuple>
 #include <QMetaObject>
 #include <algorithm>
 #include <cmath>
-#include <QMetaType>
-#include <QSGFlatColorMaterial>
-#include <QSGGeometry>
-#include <QSGVertexColorMaterial>
 #include <QQuickWindow>
-#include <QScreen>
 #include <QStringList>
-#include <QThread>
 #include <QTimer>
-#include <QtEndian>
-#include <algorithm>
-#include <cmath>
 
 
 namespace {
@@ -259,21 +251,6 @@ void UnifiedGridRenderer::componentComplete() {
   }
 }
 
-void UnifiedGridRenderer::setAutoScrollPaddingFrac(double fraction) {
-  const double clamped = std::clamp(fraction, 0.0, 0.45);
-  if (m_autoScrollPaddingFrac != clamped) {
-    m_autoScrollPaddingFrac = clamped;
-    emit autoScrollPaddingFracChanged();
-  }
-}
-
-void UnifiedGridRenderer::setAutoScrollSmoothEnabled(bool enabled) {
-  if (m_smoothAutoScrollEnabled != enabled) {
-    m_smoothAutoScrollEnabled = enabled;
-    emit autoScrollSmoothEnabledChanged();
-  }
-}
-
 void UnifiedGridRenderer::setShowGpuStatsOverlay(bool show) {
   if (m_showGpuStatsOverlay != show) {
     m_showGpuStatsOverlay = show;
@@ -288,31 +265,10 @@ void UnifiedGridRenderer::setShowDataPipelineOverlay(bool show) {
   }
 }
 
-void UnifiedGridRenderer::setShowRenderStrategyOverlay(bool show) {
-  if (m_showRenderStrategyOverlay != show) {
-    m_showRenderStrategyOverlay = show;
-    emit showRenderStrategyOverlayChanged();
-  }
-}
-
 void UnifiedGridRenderer::setShowViewportMathOverlay(bool show) {
   if (m_showViewportMathOverlay != show) {
     m_showViewportMathOverlay = show;
     emit showViewportMathOverlayChanged();
-  }
-}
-
-void UnifiedGridRenderer::setShowMemoryCacheOverlay(bool show) {
-  if (m_showMemoryCacheOverlay != show) {
-    m_showMemoryCacheOverlay = show;
-    emit showMemoryCacheOverlayChanged();
-  }
-}
-
-void UnifiedGridRenderer::setShowModeFlagsOverlay(bool show) {
-  if (m_showModeFlagsOverlay != show) {
-    m_showModeFlagsOverlay = show;
-    emit showModeFlagsOverlayChanged();
   }
 }
 
@@ -328,7 +284,6 @@ void UnifiedGridRenderer::clearData() {
   m_footprintOverlay.clearPending();
   m_vpRenderer.clearPending();
   m_footprintOverlay.requestNeutralReset();
-  m_footprintStreamGeneration.fetch_add(1, std::memory_order_acq_rel);
   update();
 }
 
@@ -510,8 +465,6 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
     const int64_t previousTf = m_currentTimeframe_ms;
     m_currentTimeframe_ms = timeframe_ms;
     if (timeframe_ms > 0) m_timeAuthority.setActiveTimeframeMs(timeframe_ms);
-    m_manualTimeframeSet = true;
-    m_manualTimeframeTimer.start();
     // Spec rule 1: a column is the timeframe, and a longer one is how to see further
     // back. Keep the columns on screen (S6d: keeping the time span gave four 1h columns
     // after 1m, and 1,600 hairline 1m columns after 1h): scale the span by the timeframe
@@ -920,7 +873,7 @@ void UnifiedGridRenderer::followGpuLiveTo(int64_t openEnd) {
                     m_followPadding->tfMs == tf && m_followPadding->placement == m_viewState->placementVersion();
   const int64_t pad = kept ? m_followPadding->padMs
                            : std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(span) *
-                                                                         m_autoScrollPaddingFrac));
+                                                                         kAutoScrollPaddingFrac));
   const int64_t target = liveEnd + pad;
   // Whole buckets, and nothing while the end is within one drawn pixel of the padding:
   // the drawn phase never changes, a live step moves the picture by whole columns.
@@ -957,7 +910,7 @@ void UnifiedGridRenderer::seedGpuViewport(double bestBid, double bestAsk) {
     const int64_t now = QDateTime::currentMSecsSinceEpoch();
     m_gpuViewPristine = true;
     end = recording::floorDiv(now, tf) * tf + tf +
-          std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(span) * m_autoScrollPaddingFrac));
+          std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(span) * kAutoScrollPaddingFrac));
     start = end - span;
   }
   const int pct = m_initialPricePct;
@@ -1020,7 +973,7 @@ qint64 UnifiedGridRenderer::gpuLiveEndMs(qint64 spanMs) const {
   const int64_t tf = m_currentTimeframe_ms;
   if (anchor <= 0 || tf <= 0) return 0;
   const int64_t liveEnd = recording::floorDiv(anchor + tf - 1, tf) * tf;
-  return liveEnd + std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(spanMs) * m_autoScrollPaddingFrac));
+  return liveEnd + std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(spanMs) * kAutoScrollPaddingFrac));
 }
 
 void UnifiedGridRenderer::returnGpuToLive() {
@@ -1056,7 +1009,7 @@ void UnifiedGridRenderer::bootstrapGpuTimeView() {
   if (m_gpuBootstrapTimer) m_gpuBootstrapTimer->stop();
   const int64_t span = gpuInitialSpanMs(width());
   const int64_t end = recording::floorDiv(anchor, tf) * tf + tf +
-                      std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(span) * m_autoScrollPaddingFrac));
+                      std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(span) * kAutoScrollPaddingFrac));
   sLog_Render("GPU heatmap time-only bootstrap from availability: anchor=" << anchor << " time=[" << end - span
               << ".." << end << "] (price from the first decoded data)");
   m_gpuPriceKnown = false;
@@ -1131,7 +1084,7 @@ std::optional<std::pair<qint64, qint64>> UnifiedGridRenderer::gpuFitTimeWindow()
   const double maxTime = m_viewState->maxTimeSpanMs();
   const int64_t maxSpan = maxTime > 0 ? std::max<int64_t>(1, static_cast<int64_t>(std::floor(maxTime))) : INT64_MAX / 4;
   const int64_t minSpan = std::max<int64_t>(tf, static_cast<int64_t>(std::ceil(m_viewState->minTimeSpanMs())));
-  const double pad = m_autoScrollPaddingFrac;
+  const double pad = kAutoScrollPaddingFrac;
   // The span that shows [dataStart, dataEnd] plus the follow-live padding
   // (max(tf, span * pad)) after it.
   int64_t span = maxSpan;
@@ -1467,20 +1420,6 @@ bool UnifiedGridRenderer::resetView() {
   return true;
 }
 
-// World <-> item coordinates through the last published frame's mapping (what is on
-// screen: the raster camera's drawn window).
-QPointF UnifiedGridRenderer::worldToScreen(qint64 timestamp_ms, double price) const {
-  const TimeAxisMapping mapping = currentTimeAxisMapping();
-  if (!mapping.valid) return QPointF();
-  return QPointF(mapping.timeToScreenX(static_cast<double>(timestamp_ms)), mapping.priceToScreenY(price));
-}
-
-QPointF UnifiedGridRenderer::screenToWorld(double screenX, double screenY) const {
-  const TimeAxisMapping mapping = currentTimeAxisMapping();
-  if (!mapping.valid) return QPointF();
-  return QPointF(mapping.screenXToTime(screenX), mapping.screenYToPrice(screenY));
-}
-
 void UnifiedGridRenderer::buildMsdfAtlas() {
   if (m_chartTextAtlasBuilt) {
     return;
@@ -1617,14 +1556,9 @@ void UnifiedGridRenderer::wheelEvent(QWheelEvent *event) {
   event->accept();
 }
 
-int UnifiedGridRenderer::getCurrentTimeResolution() const {
-  return static_cast<int>(m_currentTimeframe_ms);
-}
 double UnifiedGridRenderer::getCurrentPriceResolution() const {
   return 1.0;
 }
-double UnifiedGridRenderer::getScreenWidth() const { return width(); }
-double UnifiedGridRenderer::getScreenHeight() const { return height(); }
 qint64 UnifiedGridRenderer::getVisibleTimeStart() const {
   return m_viewState ? m_viewState->getVisibleTimeStart() : 0;
 }
@@ -1650,13 +1584,6 @@ TimeAxisMapping UnifiedGridRenderer::currentTimeAxisMapping() const {
   return currentFrameContext().mapping;
 }
 
-QString UnifiedGridRenderer::getGridDebugInfo() const {
-  return QString("Size:%1x%2").arg(width()).arg(height());
-}
-QString UnifiedGridRenderer::getDetailedGridDebug() const {
-  return getGridDebugInfo() +
-         QString("DataProcessor:%1").arg(m_dataProcessor ? "YES" : "NO");
-}
 // The last frame's TimeAxisMapping (viewport columns at the drawn tick).
 QString UnifiedGridRenderer::getViewportMathDebug() const {
   const TimeAxisMapping m = currentTimeAxisMapping();
@@ -1714,7 +1641,6 @@ QString UnifiedGridRenderer::getDataPipelineDebug() const {
 QString UnifiedGridRenderer::getPerformanceStats() const {
   return PerformanceMonitor::instance().frameStatsText();
 }
-double UnifiedGridRenderer::getCacheHitRate() const { return 0.0; }
 
 void UnifiedGridRenderer::addTrade(const Trade &trade) {
   onTradeReceived(trade);
@@ -1749,11 +1675,6 @@ void UnifiedGridRenderer::setViewport(qint64 timeStart, qint64 timeEnd,
   onViewChanged(timeStart, timeEnd, priceMin, priceMax);
   syncGpuView(); // also when the values were unchanged (price now known)
 }
-void UnifiedGridRenderer::setGridResolution(int timeResMs, double priceRes) {
-  setPriceResolution(priceRes);
-}
-void UnifiedGridRenderer::togglePerformanceOverlay() {}
-
 void UnifiedGridRenderer::zoomIn() { zoomClicks(1, width() / 2, height() / 2); }
 void UnifiedGridRenderer::zoomOut() { zoomClicks(-1, width() / 2, height() / 2); }
 void UnifiedGridRenderer::resetZoom() {
