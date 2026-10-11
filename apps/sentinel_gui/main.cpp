@@ -108,10 +108,6 @@ int main(int argc, char *argv[])
     ConfigLoader::loadClientConfig("config/.client_config.yaml", &clientConfig);
     // Process-only overrides:
     //   --api-port N                    Agent API port instead of gui.api_port
-    //   --no-screener                   no screener_server.py child (it owns port 17200 and
-    //                                   kills its holder at start, so a second process must not)
-    for (int i = 1; i < argc; ++i)
-        if (QByteArray(argv[i]) == "--no-screener") clientConfig.gui.startScreener = false;
     QString agentDockProfileFile;
     for (int i = 1; i + 1 < argc; ++i)
         if (QByteArray(argv[i]) == "--agent-host-profile") agentDockProfileFile = QString::fromLocal8Bit(argv[i + 1]);

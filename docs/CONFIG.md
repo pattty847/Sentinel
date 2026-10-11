@@ -135,7 +135,7 @@ warning, the rest are ignored.
 
 The main chart draws the heatmap through `HeatmapGpuLayer`/`HeatmapTileNode` (S6b), the only renderer since S8a: on-chart liquidity labels come from the S7a cell query (S7b, below), walls use the S7a CPU cell query on request (defaulting to the viewport with optional period and tick), and the chart's GridViewState clamps zoom-out at one column per pixel (and one row per pixel in Manual). A timeframe change keeps the columns on screen: the time span scales by the timeframe ratio about the view end (1m -> 1h shows 60x more history), inside the clamps (S6d, FM-134).
 
-Process-only overrides on the `sentinel-gui` command line (never persisted): `--api-port N` moves the Agent API off `gui.api_port` (a second process on one server), and `--no-screener` skips the `screener_server.py` child (it binds port 17200 and the GUI kills any port-17200 holder before it starts one, so extra processes such as the GUI host's pass it).
+The process-only `--api-port N` override moves the Agent API off `gui.api_port` for a second GUI process on the same server; it is never persisted. Screener data comes from the stream server, which invokes `screener_fetch.py`; the GUI does not launch a separate screener server.
 
 The palette (`palette_preset`, or `Custom` with `bid_gradient`/`ask_gradient`) and `sensitivity_min`/`sensitivity_max` are chart settings (S6b): `HeatmapTileNode` samples a 512-texel palette image with the tone mapping `heatmap.gamma`, `contrast` and `shader_floor` (the retired legacy renderer's colours, matched in S6). The toolbar's palette combo writes `palettePreset`.
 

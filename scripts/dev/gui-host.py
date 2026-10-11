@@ -63,7 +63,7 @@ HOST_PORT = int(os.environ.get("GUI_HOST_PORT", "17190"))
 TTL_S = int(os.environ.get("GUI_HOST_TTL_S", "1800"))
 SERVER_PORT = int(os.environ.get("GUI_HOST_SERVER_PORT", "8080"))
 API_PORTS = range(17130, 17170)
-OWNER_PORTS = (17100, 17200)
+OWNER_PORTS = (17100,)
 PLIST_DOMAIN = "com.sentinel.SentinelTerminal"
 GUI_REL = os.path.join("build", "mac-clang", "apps", "sentinel-gui", "sentinel-gui")
 EXTERNAL_WORKTREES = "/Volumes/T7/sentinel-worktrees"
@@ -124,7 +124,7 @@ def child_env(environ=None):
 def gui_argv(binary, session_dir, port, dock_profile=None):
     """The only command line the host ever builds: fixed flags, no caller-supplied arguments."""
     return [binary, "--agent-host", session_dir, "--agent-host-profile", dock_profile or profile_dir(),
-            "--agent-host-symbols", SYMBOLS, "--api-port", str(port), "--no-screener"]
+            "--agent-host-symbols", SYMBOLS, "--api-port", str(port)]
 
 
 def profile_dir():

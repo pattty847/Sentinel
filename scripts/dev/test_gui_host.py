@@ -163,7 +163,7 @@ class HostTrust(unittest.TestCase):
         self.assertEqual(argv[1:3], ["--agent-host", "/sess"])
         self.assertEqual(argv[3:5], ["--agent-host-profile", gh.profile_dir()])
         self.assertEqual(argv[5:7], ["--agent-host-symbols", gh.SYMBOLS])
-        self.assertEqual(argv[7:], ["--api-port", "17130", "--no-screener"])
+        self.assertEqual(argv[7:], ["--api-port", "17130"])
         self.assertIn("BTC-USD", gh.SYMBOLS.split(","))
         self.assertTrue(all(re.fullmatch(r"[A-Z0-9]{2,20}-[A-Z0-9]{2,20}", x) for x in gh.SYMBOLS.split(",")))
 

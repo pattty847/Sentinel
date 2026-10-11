@@ -14,7 +14,6 @@
 #include <QSGRendererInterface>
 #include <QCloseEvent>
 #include <QPointer>
-#include <QProcess>
 #include <memory>
 #include <optional>
 #include "mainwindow/AgentApiTypes.hpp"
@@ -205,11 +204,4 @@ private:
     QDoubleSpinBox* m_orderQtyInput = nullptr;
 
     bool m_firstShow = true;
-
-    // Screener Python server subprocess (owned lifetime = window lifetime)
-    QProcess* m_screenerProcess = nullptr;
-    int       m_screenerRestartCount = 0;
-    static constexpr int kMaxScreenerRestarts = 3;
-    void startScreenerServer();
-    void stopScreenerServer();
 };

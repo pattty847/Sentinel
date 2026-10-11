@@ -69,7 +69,6 @@
 #include <QMetaObject>
 #include <QDir>
 #include <QFile>
-#include <QFileInfo>
 #include <QTimer>
 #include <QSGRendererInterface>
 #include <QSettings>
@@ -80,8 +79,6 @@
 #include <QScreen>
 #include <QApplication>
 #include <QTabWidget>
-#include <QCoreApplication>
-#include <QProcess>
 #include <QRegularExpression>
 #include <QtGlobal>
 #include <algorithm>
@@ -781,123 +778,6 @@ void MainWindowGPU::setupGuiApiServer() {
     }
 }
 
-void MainWindowGPU::startScreenerServer() {
-    if (m_screenerProcess && m_screenerProcess->state() != QProcess::NotRunning) {
-        return;  // already running
-    }
-    if (!GuiConfigStore::instance().clientConfig().gui.startScreener) {
-        sLog_App("Screener server not started: --no-screener");
-        return;
-    }
-
-    // Locate scripts/screener/screener_server.py relative to the running binary.
-    const QString appDir = QCoreApplication::applicationDirPath();
-    QStringList candidates;
-    for (const QString& rel : {
-             QStringLiteral("../../../../scripts"),         // dev: build/mac-clang/apps/sentinel-gui/ -> repo/scripts
-             QStringLiteral("../../../scripts"),
-             QStringLiteral("../../scripts"),
-             QStringLiteral("../scripts"),
-             QStringLiteral("scripts"),
-         }) {
-        candidates << QDir(appDir).absoluteFilePath(rel);
-    }
-
-    QString scriptsDir;
-    for (const QString& candidate : candidates) {
-        if (QFileInfo(candidate + QStringLiteral("/screener/screener_server.py")).exists()) {
-            scriptsDir = candidate;
-            break;
-        }
-    }
-
-    if (scriptsDir.isEmpty()) {
-        sLog_Warning("Screener server not started: scripts/screener/screener_server.py not found near appDir="
-                     << appDir);
-        return;
-    }
-
-    // Kill any stale process holding port 17200 from a previous run.
-    QProcess::execute(QStringLiteral("sh"),
-        {QStringLiteral("-c"),
-         QStringLiteral("lsof -ti tcp:17200 | xargs kill -9 2>/dev/null; true")});
-
-    // Use 'uv run' so Python deps are automatically resolved from the venv.
-    const QString uvBin = QStringLiteral("uv");
-    QStringList args;
-    args << QStringLiteral("run")
-         << QStringLiteral("python")
-         << QStringLiteral("screener/screener_server.py");
-
-    if (!m_screenerProcess) {
-        m_screenerProcess = new QProcess(this);
-        // Capture both stdout and stderr so we see Python tracebacks.
-        auto logOutput = [this]() {
-            const QString out = QString::fromUtf8(m_screenerProcess->readAllStandardOutput()).trimmed();
-            if (!out.isEmpty()) sLog_App("[screener_server] " << out);
-        };
-        auto logErr = [this]() {
-            const QString err = QString::fromUtf8(m_screenerProcess->readAllStandardError()).trimmed();
-            if (!err.isEmpty()) sLog_App("[screener_server] " << err);
-        };
-        connect(m_screenerProcess, &QProcess::readyReadStandardOutput, this, logOutput);
-        connect(m_screenerProcess, &QProcess::readyReadStandardError,  this, logErr);
-        connect(m_screenerProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                this, [this, scriptsDir, uvBin, args](int exitCode, QProcess::ExitStatus status) {
-                    if (!m_screenerProcess) {  // deliberate shutdown
-                        sLog_App("Screener server stopped: code=" << exitCode
-                                 << " status=" << static_cast<int>(status));
-                        return;
-                    }
-                    sLog_Warning("Screener server exited: code=" << exitCode
-                                 << " status=" << static_cast<int>(status));
-                    ++m_screenerRestartCount;
-                    if (m_screenerRestartCount > kMaxScreenerRestarts) {
-                        sLog_Warning("Screener server failed " << m_screenerRestartCount
-                                     << " times in a row, giving up. Kill port 17200 and restart the app.");
-                        return;
-                    }
-                    const int delayMs = 2000 * m_screenerRestartCount;  // back off: 2s, 4s, 6s
-                    sLog_App("Screener server restarting (attempt " << m_screenerRestartCount
-                             << "/" << kMaxScreenerRestarts << ") in " << delayMs << "ms...");
-                    QTimer::singleShot(delayMs, this, [this, scriptsDir, uvBin, args]() {
-                        if (!m_screenerProcess) return;
-                        // Kill stale process before retrying too.
-                        QProcess::execute(QStringLiteral("sh"),
-                            {QStringLiteral("-c"),
-                             QStringLiteral("lsof -ti tcp:17200 | xargs kill -9 2>/dev/null; true")});
-                        m_screenerProcess->setWorkingDirectory(scriptsDir);
-                        m_screenerProcess->start(uvBin, args);
-                    });
-                });
-    }
-
-    m_screenerRestartCount = 0;
-    m_screenerProcess->setWorkingDirectory(scriptsDir);
-    m_screenerProcess->start(uvBin, args);
-    if (m_screenerProcess->waitForStarted(2000)) {
-        sLog_App("Screener server started: pid=" << m_screenerProcess->processId()
-                 << " dir=" << scriptsDir);
-    } else {
-        sLog_Warning("Screener server failed to start: program=" << uvBin
-                     << " dir=" << scriptsDir << " error=" << m_screenerProcess->errorString());
-    }
-}
-
-void MainWindowGPU::stopScreenerServer() {
-    if (!m_screenerProcess || m_screenerProcess->state() == QProcess::NotRunning) {
-        m_screenerProcess = nullptr;
-        return;
-    }
-    // Null first so the finished() handler doesn't schedule an auto-restart.
-    QProcess* proc = m_screenerProcess;
-    m_screenerProcess = nullptr;
-    proc->terminate();
-    if (!proc->waitForFinished(2000)) {
-        proc->kill();
-    }
-}
-
 void MainWindowGPU::onAssetSymbolSelected(const QString& symbol, const QString& assetType) {
     if (assetType == QLatin1String("crypto") && m_symbolInput) {
         m_symbolInput->setText(symbol);
@@ -1220,7 +1100,6 @@ void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
 }
 
 void MainWindowGPU::closeEvent(QCloseEvent* event) {
-    stopScreenerServer();
     m_dockVisibility->restoreBeforeSessionSave();
     m_layoutOrchestrator->saveLayout("_last_session");
     QMainWindow::closeEvent(event);
@@ -1242,8 +1121,6 @@ void MainWindowGPU::showEvent(QShowEvent* event) {
 
     if (m_firstShow) {
         m_firstShow = false;
-
-        startScreenerServer();
 
         if (const auto screen = QApplication::primaryScreen()) {
             setGeometry(screen->availableGeometry());
