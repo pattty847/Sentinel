@@ -35,6 +35,7 @@ struct RollOptions {
     // The feed lives until onRecorder(nullptr, nullptr, 0). Not policy.
     std::function<void(JournalFeed&)> onFeed;
     bool useAnchors = true, writeAnchors = true;
+    bool allowGrowingEnd = false; // hourly oracle keeps day policy and anchors at each completed end
     std::filesystem::path anchorRoot; // empty means outputRoot; rebuild uses scratch HMC2
     // LiveSource validates against its handshake ceiling before any installation.
     std::function<bool(const JournalPos&)> anchorAllowed;
