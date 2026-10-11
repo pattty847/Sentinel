@@ -12,8 +12,8 @@
 #include "render/heatmap/HeatmapGpuLayer.hpp"
 void UnifiedGridRenderer::init() {
     const auto& store = GuiConfigStore::instance();
-    if (store.hasServerConfig() && store.serverConfig().heatmap.activeTimeframeMs > 0)
-        m_currentTimeframe_ms = store.serverConfig().heatmap.activeTimeframeMs;
+    if (store.hasServerConfig() && store.serverConfig().chart.defaultTimeframeMs > 0)
+        m_currentTimeframe_ms = store.serverConfig().chart.defaultTimeframeMs;
     const auto& client = store.clientConfig();
     m_heatmapGamma = client.heatmap.gamma;
     m_heatmapContrast = client.heatmap.contrast;

@@ -196,7 +196,7 @@ MainWindowGPU::MainWindowGPU(QWidget* parent, int symbolSwitchTimeoutMs)
             if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
                 renderer->applyServerConfig(config);
                 if (m_heatmapDock && m_heatmapDock->toolbar()) {
-                    m_heatmapDock->toolbar()->setAvailableTimeframes(config.heatmap.servedTimeframesMs);
+                    m_heatmapDock->toolbar()->setAvailableTimeframes(config.chart.servedTimeframesMs);
                     m_heatmapDock->toolbar()->setTimeframeMs(renderer->getCurrentTimeframe());
                 }
             }
@@ -1181,15 +1181,15 @@ void MainWindowGPU::connectMarketDataSignals() {
     m_serverConfigReady = configStore.hasServerConfig();
     if (m_heatmapDock && m_heatmapDock->toolbar()) {
         const auto& serverConfig = configStore.serverConfig();
-        int64_t tf = m_serverConfigReady ? serverConfig.heatmap.activeTimeframeMs : 0;
-        if (tf <= 0 && m_serverConfigReady && !serverConfig.heatmap.timeframesMs.empty()) {
-            tf = serverConfig.heatmap.timeframesMs.front();
+        int64_t tf = m_serverConfigReady ? serverConfig.chart.defaultTimeframeMs : 0;
+        if (tf <= 0 && m_serverConfigReady && !serverConfig.chart.timeframesMs.empty()) {
+            tf = serverConfig.chart.timeframesMs.front();
         }
         if (tf > 0) {
             unifiedGridRenderer->setTimeframe(static_cast<int>(tf));
         }
         if (m_serverConfigReady) {
-            m_heatmapDock->toolbar()->setAvailableTimeframes(serverConfig.heatmap.servedTimeframesMs);
+            m_heatmapDock->toolbar()->setAvailableTimeframes(serverConfig.chart.servedTimeframesMs);
         }
         m_heatmapDock->toolbar()->setTimeframeMs(unifiedGridRenderer->getCurrentTimeframe());
         sLog_App("Chart timeframe init: serverTfMs=" << tf
