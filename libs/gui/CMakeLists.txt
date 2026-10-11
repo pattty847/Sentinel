@@ -65,10 +65,6 @@ set(GRID_CORE_SOURCES
     models/PriceAxisModel.cpp
 
     # New modular render architecture (V2)
-    render/GridViewState.hpp
-    render/GridViewState.cpp
-    render/ChartRaster.hpp
-    render/ChartRaster.cpp
     render/DataProcessor.hpp
     render/DataProcessor.cpp
     render/FootprintStreamState.hpp
@@ -88,17 +84,11 @@ set(GRID_CORE_SOURCES
     render/CandlestickOverlayItem.hpp
     render/CandlestickOverlayItem.cpp
     render/ITimeAxisMappingProvider.hpp
-    render/TimeAuthority.hpp
-    render/TimeAuthority.cpp
-    render/TimeAxisMapping.hpp
     render/AxisLayout.hpp
     render/AxisLayout.cpp
     render/AxisTextService.hpp
     render/AxisTextService.cpp
     render/IOverlayRenderer.hpp
-    render/FrameContext.hpp
-    render/FrameContextBuilder.hpp
-    render/FrameContextBuilder.cpp
     render/ChartTextPrimitives.hpp
     render/ChartTextAtlas.hpp
     render/ChartTextAtlas.cpp
@@ -169,6 +159,24 @@ set(THEME_SOURCES
 )
 
 set(GUI_SOURCES ${GRID_CORE_SOURCES} ${WIDGET_SOURCES} ${THEME_SOURCES})
+
+add_library(sentinel_chart_core STATIC
+    render/ChartRaster.hpp
+    render/ChartRaster.cpp
+    render/GridViewState.hpp
+    render/GridViewState.cpp
+    render/TimeAxisMapping.hpp
+    render/TimeAuthority.hpp
+    render/TimeAuthority.cpp
+    render/FrameContext.hpp
+    render/FrameContextBuilder.hpp
+    render/FrameContextBuilder.cpp
+    chart/core/ChartPorts.hpp
+    chart/core/PublishedFrame.hpp
+    chart/core/PublishedFrame.cpp
+)
+target_include_directories(sentinel_chart_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(sentinel_chart_core PUBLIC sentinel_core Qt6::Core)
 
 # Create the main library target
 add_library(sentinel_gui_lib ${GUI_SOURCES})
@@ -381,6 +389,7 @@ target_include_directories(sentinel_gui_lib
 
 target_link_libraries(sentinel_gui_lib
     PUBLIC
+        sentinel_chart_core
         sentinel_heatmap_gpu
         sentinel_core
         msdfgen::msdfgen

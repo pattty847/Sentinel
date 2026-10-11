@@ -14,7 +14,6 @@
 #include <vector>
 #include <memory>
 #include <atomic>
-#include <mutex>
 #include "../core/config/ConfigTypes.hpp"
 #include "../core/marketdata/model/TradeData.h"
 #include "datasources/CandleSeriesBuffer.hpp"
@@ -31,6 +30,7 @@
 #include "render/FrameProfiler.hpp"
 #include "render/FrameContext.hpp"
 #include "render/TimeAuthority.hpp"
+#include "chart/core/PublishedFrame.hpp"
 // ── Overlay renderers (owned inline) ─────────────────────────────────────────
 #include "render/IOverlayRenderer.hpp"
 #include "render/FootprintOverlayRenderer.hpp"
@@ -146,12 +146,7 @@ private:
     bool m_tpoLayerEnabled = false;
     bool m_volumeProfileLayerEnabled = false;
 
-    mutable std::mutex m_frameContextMutex;
-    MappingFrameContext m_lastFrameContext;
-    // Whole-pixel mapping: last frame's drawn pixels per row/column (the step rule's
-    // hysteresis state). Written by the render thread (GUI blocked), read by the GUI
-    // thread's rasterCameraNow(); under m_frameContextMutex.
-    chart_raster::RasterStep m_rasterStep;
+    chart::PublishedFrame m_published;
     // Render thread: what rasterChanged() last announced.
     struct RasterSurface {
         chart_raster::RasterStep step;

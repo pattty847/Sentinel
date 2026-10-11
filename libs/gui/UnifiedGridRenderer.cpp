@@ -512,11 +512,7 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
           // px, at least one per px), the chart re-lays out at the nominal live end.
           const int64_t tf = timeframe_ms;
           const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
-          chart_raster::RasterStep previous;
-          {
-            std::lock_guard<std::mutex> lock(m_frameContextMutex);
-            previous = m_rasterStep;
-          }
+          const chart_raster::RasterStep previous = m_published.step();
           auto restAt = [&](int64_t e) {
             auto vp = FrameContextBuilder::viewportSnapshot(m_viewState.get());
             vp.timeStart = e - span;
@@ -814,11 +810,7 @@ bool UnifiedGridRenderer::rasterPanShift(QPointF drag, qint64& timeShiftMs, doub
   auto viewport = FrameContextBuilder::viewportSnapshot(m_viewState.get());
   viewport.dragging = false; // the committed view; panShift applies the drag
   const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
-  chart_raster::RasterStep previous;
-  {
-    std::lock_guard<std::mutex> lock(m_frameContextMutex);
-    previous = m_rasterStep;
-  }
+  chart_raster::RasterStep previous = m_published.step();
   // An axis that glides is committed against its fixed end (its tick and whole pixels,
   // the predicted tick before it commits): the committed view then reproduces the end
   // translated by the dragged pixels (endPanAt moves the end by them). An axis at rest
@@ -1113,11 +1105,7 @@ std::pair<double, double> UnifiedGridRenderer::drawnTimeWindow(qint64 start, qin
   }
   if (anchorFracX) viewport.anchorFracX = *anchorFracX;
   const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
-  chart_raster::RasterStep previous;
-  {
-    std::lock_guard<std::mutex> lock(m_frameContextMutex);
-    previous = m_rasterStep;
-  }
+  const chart_raster::RasterStep previous = m_published.step();
   const auto cam = chart_raster::computeRaster(rasterInputs(viewport, m_gpuLayer->tickPrice(), width(), height(), dpr),
                                                previous);
   if (!cam.valid) return {double(start), double(end)};
@@ -1560,8 +1548,7 @@ QPointF UnifiedGridRenderer::getPanVisualOffset() const {
 }
 
 MappingFrameContext UnifiedGridRenderer::currentFrameContext() const {
-  std::lock_guard<std::mutex> lock(m_frameContextMutex);
-  return m_lastFrameContext;
+  return m_published.current();
 }
 
 TimeAxisMapping UnifiedGridRenderer::currentTimeAxisMapping() const {

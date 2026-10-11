@@ -3,7 +3,6 @@
 #include "FrameContext.hpp"
 
 class GridViewState;
-class QQuickWindow;
 class QElapsedTimer;
 
 namespace FrameContextBuilder {
@@ -15,7 +14,7 @@ FrameViewportSnapshot viewportSnapshot(const GridViewState* viewState);
 /// Assemble an immutable FrameContext from the current state of all data sources.
 /// Pure data read — no side effects.
 FrameContext build(const QRectF& boundingRect,
-                   QQuickWindow* window,
+                   double dpr,
                    const QElapsedTimer& frameClock,
                    const TimeAuthority& timeAuthority,
                    const GridViewState* viewState,
