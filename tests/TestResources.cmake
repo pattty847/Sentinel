@@ -45,8 +45,8 @@ set(_sentinel_fast_tests
     AgentApiCodecTests SymbolSubscriptionManagerTests
     ExceptionTypeinfoTests)
 
-# Temporary: load-sensitive under the -j4 land gate until the injected-clock fixes for FM-261 and FM-262 land.
-set(_sentinel_run_serial HeatmapLiveNodeTests RollerCorruptBlockTests)
+# Temporary: load-sensitive under the -j4 land gate until the injected-clock fix for FM-262 lands.
+set(_sentinel_run_serial RollerCorruptBlockTests)
 
 foreach(_sentinel_area IN ITEMS core marketdata capture roller render agentapi
                                 trading servermodel market_health fonts research_ui link)
