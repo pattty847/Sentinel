@@ -16,10 +16,10 @@ ChartViewController::ChartViewController(IChartEnvironment& environment, IHeatma
                                          ITickOracle& ticks, const PublishedFrame& published, QObject* parent)
     : QObject(parent), environment_(environment), sink_(sink), view_(std::make_unique<GridViewState>(parent)),
       camera_(*view_, session_, environment, ticks, published, glide_), zoomGlide_(glide_, camera_),
-      priceFitter_(*this, environment, ticks) {}
+      priceFitter_(*this, environment, ticks), livePlacement_(*this, environment) {}
 
 void ChartViewController::applyGpuLimits() {
-    if (!environment_.attached() || flags_.limitsDeferred) return;
+    if (!environment_.attached() || flags().limitsDeferred) return;
     const auto limits = environment_.limits();
     view_->setMinSpans(limits.minTimeMs, limits.minPrice);
     view_->setMaxSpans(limits.maxTimeMs, limits.maxPrice);
@@ -31,14 +31,14 @@ void ChartViewController::syncGpuView() {
                                   static_cast<double>(view_->getVisibleTimeEnd()), view_->getMinPrice(),
                                   view_->getMaxPrice()};
     if (const auto rest = environment_.restView()) view = *rest;
-    sink_.setView(view, flags_.priceKnown);
+    sink_.setView(view, flags().priceKnown);
 }
 
 void ChartViewController::setGpuViewportSelf(qint64 start, qint64 end, double priceMin, double priceMax,
                                               bool preservePlacement) {
-    flags_.selfViewport = true;
+    flags().selfViewport = true;
     view_->setViewport(start, end, priceMin, priceMax, preservePlacement);
-    flags_.selfViewport = false;
+    flags().selfViewport = false;
 }
 
 double ChartViewController::gpuLivePrice() const {

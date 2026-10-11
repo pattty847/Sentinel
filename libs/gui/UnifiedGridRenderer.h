@@ -122,12 +122,6 @@ private:
     // overlay's boundary sequence reads it through currentFrameContext()).
     QElapsedTimer m_frameClock;
     TimeAuthority m_timeAuthority;
-    // The first view (heatmap.initial_column_px / initial_price_pct): the time span is
-    // initial_column_px per column (16 columns min); the price window is
-    // initial_price_pct of kSeedBandRows rows at kSeedBandTick (the near layer's $1).
-    static constexpr double kSeedBandTick = 1.0;
-    static constexpr int kSeedBandRows = 2048;
-    static constexpr double kAutoScrollPaddingFrac = chart::PriceFitter::kAutoScrollPaddingFrac;
     double m_heatmapGamma = 1.05;
     double m_heatmapContrast = 1.15;
     double m_heatmapShaderFloor = 0.01;
@@ -146,15 +140,6 @@ private:
         bool operator==(const RasterSurface&) const = default;
     } m_rasterAnnounced;
     QMetaObject::Connection m_screenChangedConn;
-    // Following live after a timeframe switch that kept the Now column: the padding the
-    // follow-live updates keep, not the nominal one, for as long as the time window is the
-    // placement the switch made (follow updates move it along; any other write of the
-    // window ends it).
-    struct FollowPadding {
-        int64_t padMs = 0, startMs = 0, endMs = 0, tfMs = 0;
-        uint64_t placement = 0;
-    };
-    std::optional<FollowPadding> m_followPadding;
     QPointF m_gestureAt;
     QTimer* m_zoomSettleTimer = nullptr; // a gesture settles after a pause (a lost end included)
     std::function<qint64()> m_zoomClock;
@@ -173,9 +158,8 @@ private:
     // A continuous zoom that settles on a rung after settleMs without input.
     void zoomContinuousFor(double factor, double x, double y, bool time, bool price, int settleMs);
     void bindZoomGlide();
+    void bindLivePlacement();
     QTimer* m_glidePolishTimer = nullptr;
-    // Follow-live with a given live open end (followGpuLive with the layer's).
-    void followGpuLiveTo(int64_t openEnd);
     // Moves the stored view to a rung about a drawn point (fracX/fracY of the item).
     bool setZoomRung(const chart_raster::RasterCamera& drawn, double fracX, double fracY, bool time, int colPx,
                      bool price, chart_raster::RowRung row);
@@ -372,7 +356,7 @@ public:
     bool priceGliding() const { Q_ASSERT(m_view); return m_view->glide().price.active; }
     int glideRebasesForTest() const { return m_view->glide().rebases; }
     // Tests: a follow-live update for a live open end (the fixtures have no live feed).
-    void followLiveForTest(qint64 openEndMs) { followGpuLiveTo(openEndMs); }
+    void followLiveForTest(qint64 openEndMs) { m_view->livePlacement().followGpuLiveTo(openEndMs); }
     bool zoomGesturing() const { Q_ASSERT(m_view); return m_view->glide().gesture; }
     // Tests: inspect the actual settle timer without depending on its duration.
     bool gestureSettlePending() const { return m_zoomSettleTimer && m_zoomSettleTimer->isActive(); }
@@ -463,15 +447,6 @@ private:
     void prepareSyncFrame();
     void renderTradeOverlays(QSGNode* parent, const FrameContext& frame, bool drawFootprint, bool drawTpo,
                              std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads);
-    void followGpuLive();
-    void seedGpuViewport(double bestBid, double bestAsk);
-    // "Return to live" (follow-live activation): the view's right edge goes one
-    // padding past the live anchor's bucket, in either direction, span kept.
-    void returnGpuToLive();
-    // Cold start without a book or trade: a time-only view from the recording's
-    // availability (price unknown until decoded data supplies it).
-    void bootstrapGpuTimeView();
-    QTimer* m_gpuBootstrapTimer = nullptr;
     void refitAutoPrice();
     chart::CandleBufferSource m_candleSource;
     QMetaObject::Connection m_candleDirtyConn;
@@ -480,7 +455,6 @@ private:
     // liveOnly: the live-only fallback (consume without a recorded price scale).
     bool applyPriceCarry(double now, bool liveOnly = false);
     QTimer* m_carryWaitTimer = nullptr;
-    qint64 gpuInitialSpanMs(double widthPx) const;
     void syncGpuSurface();
     void syncGpuTone();
     void bindWindow(QQuickWindow* window);

@@ -25,19 +25,19 @@ void UnifiedGridRenderer::init() {
     m_gpuLayer = std::make_unique<heatmap::gpu::HeatmapGpuLayer>();
     m_heatmapPort = std::make_unique<chart::HeatmapChartPort>(*this, *m_gpuLayer);
     m_view = std::make_unique<chart::ChartViewController>(*m_heatmapPort, *m_heatmapPort, *m_heatmapPort, m_published, this);
-    m_view->priceFitter().setRequestUpdate([this] { update(); });
+    bindLivePlacement();
     m_view->session().timeframeMs = defaultTimeframeMs;
     m_gpuLayer->setTone({static_cast<float>(m_heatmapGamma), static_cast<float>(m_heatmapContrast),
                          static_cast<float>(m_heatmapShaderFloor)});
     connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::snapshotChanged, this, [this] {
         // No book top yet (or a symbol switch): centre on the decoded data instead.
         if ((!m_view->flags().priceKnown || m_view->flags().reseedPrice) && getViewState()->isTimeWindowValid()) {
-            if (const double mid = m_gpuLayer->recentMidPrice(); mid > 0) seedGpuViewport(mid, mid);
+            if (const double mid = m_gpuLayer->recentMidPrice(); mid > 0) m_view->livePlacement().seedGpuViewport(mid, mid);
         }
         update();
     });
     connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::liveChanged, this, [this] {
-        followGpuLive();
+        m_view->livePlacement().followGpuLive();
         emit liveRenderTick();
         update();
     });
@@ -127,7 +127,7 @@ void UnifiedGridRenderer::init() {
     m_gpuLayer->setActive(true);
     getViewState()->setAutoPriceScale(true);
     m_view->applyGpuLimits();
-    bootstrapGpuTimeView();
+    m_view->livePlacement().bootstrapGpuTimeView();
 }
 
 void UnifiedGridRenderer::connectDataProcessorSignals() {
