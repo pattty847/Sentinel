@@ -124,7 +124,7 @@ TEST_F(LabOutputGuard, S5BenchRefusesAJsonPathInsideTheRootAndLeavesTheFile) {
 TEST_F(LabOutputGuard, WindowScreenshotRefusesAPathInsideTheRoot) {
     const auto target = root / "window.png";
     QByteArray output;
-    EXPECT_EQ(runLab({QStringLiteral("--synthetic"), QStringLiteral("20000"), QStringLiteral("--window-screenshot"),
+    EXPECT_EQ(runLab({QStringLiteral("--synthetic"), QStringLiteral("1"), QStringLiteral("--window-screenshot"),
                       q(target)}, root, &output), 2)
         << output.toStdString();
     EXPECT_FALSE(fs::exists(target));
@@ -140,7 +140,7 @@ TEST_F(LabOutputGuard, DotDotAfterALinkIsRefusedByTheScreenshotWriter) {
     const QString requested = q(link) + QStringLiteral("/../result.png");
     EXPECT_FALSE(lab::labOutputAllowed(requested));
     QByteArray output;
-    EXPECT_EQ(runLab({QStringLiteral("--synthetic"), QStringLiteral("20000"), QStringLiteral("--screenshot"), requested},
+    EXPECT_EQ(runLab({QStringLiteral("--synthetic"), QStringLiteral("1"), QStringLiteral("--screenshot"), requested},
                      root, &output), 2)
         << output.toStdString();
     EXPECT_TRUE(output.contains("..")) << output.toStdString();

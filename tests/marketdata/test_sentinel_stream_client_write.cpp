@@ -280,11 +280,13 @@ TEST_F(SentinelStreamClientWriteTest, FailedInitialConnectRetriesAndShutdownCanc
     SentinelStreamClient c("127.0.0.1", std::to_string(port), ca);
     std::atomic<unsigned> downs{0}, ups{0};
     std::mutex timesMutex;
+    std::condition_variable downChanged;
     std::vector<std::chrono::steady_clock::time_point> downTimes;
     QObject::connect(&c, &SentinelStreamClient::disconnected, &c, [&] {
         std::lock_guard lock(timesMutex);
         downTimes.push_back(std::chrono::steady_clock::now());
         ++downs;
+        downChanged.notify_all();
     }, Qt::DirectConnection);
     QObject::connect(&c, &SentinelStreamClient::connected, &c,
                      [&] { ++ups; }, Qt::DirectConnection);
@@ -292,22 +294,30 @@ TEST_F(SentinelStreamClientWriteTest, FailedInitialConnectRetriesAndShutdownCanc
     const auto startedAt = std::chrono::steady_clock::now();
     c.connectToServer();
     c.connectToServer(); // duplicate requests cannot start another worker/session
-    const auto deadline = std::chrono::steady_clock::now() + 3s;
-    while (downs < 2 && std::chrono::steady_clock::now() < deadline)
-        std::this_thread::sleep_for(1ms);
+    {
+        std::unique_lock lock(timesMutex);
+        downChanged.wait_for(lock, 3s, [&] { return downs >= 2; });
+    }
     ASSERT_GE(downs.load(), 2u);
     {
         std::lock_guard lock(timesMutex);
         EXPECT_GE(downTimes[1] - downTimes[0], 450ms);
     }
-    std::this_thread::sleep_until(startedAt + 700ms);
+    {
+        std::unique_lock lock(timesMutex);
+        downChanged.wait_until(lock, startedAt + 700ms, [&] { return downs > 3; });
+    }
     EXPECT_LE(downs.load(), 3u);
     EXPECT_EQ(ups.load(), 0u);
     const auto shutdownAt = std::chrono::steady_clock::now();
     c.disconnectFromServer();
     EXPECT_LT(std::chrono::steady_clock::now() - shutdownAt, 300ms);
     const auto stoppedAt = downs.load();
-    std::this_thread::sleep_for(1200ms); // exceeds the pending second backoff
+    // Observe beyond the pending second backoff, waking early on a retry.
+    {
+        std::unique_lock lock(timesMutex);
+        downChanged.wait_for(lock, 1200ms, [&] { return downs != stoppedAt; });
+    }
     EXPECT_EQ(downs.load(), stoppedAt);
     EXPECT_EQ(ups.load(), 0u);
     expectDrained(c);
@@ -318,6 +328,7 @@ TEST_F(SentinelStreamClientWriteTest, HandshakeThenCloseKeepsGrowingBackoffAcros
     auto c = client();
     std::atomic<unsigned> ups{0}, downs{0}, errors{0};
     std::mutex timesMutex;
+    std::condition_variable downChanged;
     std::vector<std::chrono::steady_clock::time_point> downTimes;
     QObject::connect(c.get(), &SentinelStreamClient::connected, c.get(),
                      [&] { ++ups; }, Qt::DirectConnection);
@@ -327,12 +338,14 @@ TEST_F(SentinelStreamClientWriteTest, HandshakeThenCloseKeepsGrowingBackoffAcros
         std::lock_guard lock(timesMutex);
         downTimes.push_back(std::chrono::steady_clock::now());
         ++downs;
+        downChanged.notify_all();
     }, Qt::DirectConnection);
     const auto stopClient = qScopeGuard([&] { c->disconnectFromServer(); });
     c->connectToServer();
-    const auto deadline = std::chrono::steady_clock::now() + 5s;
-    while (downs < 3 && std::chrono::steady_clock::now() < deadline)
-        std::this_thread::sleep_for(1ms);
+    {
+        std::unique_lock lock(timesMutex);
+        downChanged.wait_for(lock, 5s, [&] { return downs >= 3; });
+    }
     ASSERT_EQ(downs.load(), 3u);
     EXPECT_EQ(ups.load(), 3u); // every drop followed a successful handshake
     {
