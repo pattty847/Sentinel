@@ -1,8 +1,88 @@
 #include "JournalFeed.hpp"
+#include <cmath>
 #include "marketdata/dispatch/BookParser.hpp"
 #include "marketdata/dispatch/MessageDispatcher.hpp"
+#include <algorithm>
+#include <charconv>
 
 namespace sentinel::roller {
+void JournalBook::apply(int64_t envelope, const std::vector<recording::Level>& levels) {
+    envelopeMs = envelope;
+    for (const auto& l : levels) {
+        if (!std::isfinite(l.price) || !std::isfinite(l.size)) continue;
+        auto& side = l.isBid ? bids : asks;
+        if (l.size > 0) side[l.price] = l.size; else side.erase(l.price);
+    }
+}
+nlohmann::json JournalBook::exportState() const {
+    nlohmann::json j = {{"version",1},{"valid",valid},{"envelope",envelopeMs},
+                       {"bids",nlohmann::json::array()},{"asks",nlohmann::json::array()}};
+    for (const auto& [p,q] : bids) j["bids"].push_back({p,q});
+    for (const auto& [p,q] : asks) j["asks"].push_back({p,q});
+    return j;
+}
+JournalBook JournalBook::fromState(const nlohmann::json& j) {
+    if (j.at("version") != 1) throw std::runtime_error("book anchor version");
+    JournalBook b; b.valid = j.at("valid"); b.envelopeMs = j.at("envelope");
+    for (const auto* side : {"bids","asks"}) {
+        auto& out = std::string_view(side) == "bids" ? b.bids : b.asks;
+        for (const auto& l : j.at(side)) {
+            const double p = l.at(0), q = l.at(1);
+            if (!std::isfinite(p) || !std::isfinite(q) || q <= 0 || !out.emplace(p,q).second)
+                throw std::runtime_error("invalid book anchor level");
+        }
+    }
+    if (!b.valid && (!b.bids.empty() || !b.asks.empty())) throw std::runtime_error("invalid book anchor validity");
+    return b;
+}
+nlohmann::json JournalFeed::exportState() const {
+    return {{"version",1},{"product",product_},{"run",run_},{"connection",connection_},
+        {"lastLocal",lastLocal_},{"sequence",sequence_ ? nlohmann::json(*sequence_) : nlohmann::json()},
+        {"anchored",anchored_}};
+}
+void JournalFeed::importState(const nlohmann::json& j) {
+    if (j.at("version") != 1 || j.at("product") != product_)
+        throw std::runtime_error("feed anchor version/product mismatch");
+    auto run = j.at("run").get<std::string>();
+    const auto connection = j.at("connection").get<uint64_t>();
+    const auto local = j.at("lastLocal").get<int64_t>();
+    const auto anchored = j.at("anchored").get<bool>();
+    std::optional<uint64_t> sequence;
+    if (!j.at("sequence").is_null()) sequence = j.at("sequence").get<uint64_t>();
+    if (run.empty() || run.size() > 256 || local <= 0 || (sequence && *sequence >= INT64_MAX))
+        throw std::runtime_error("invalid feed anchor");
+    run_ = std::move(run); connection_ = connection; lastLocal_ = local;
+    sequence_ = sequence; anchored_ = anchored;
+}
+namespace {
+std::optional<uint64_t> numericTradeId(const std::string& id) {
+    uint64_t value = 0;
+    const auto result = std::from_chars(id.data(), id.data() + id.size(), value);
+    if (result.ec != std::errc{} || result.ptr != id.data() + id.size()) return {};
+    return value;
+}
+}
+bool JournalFeed::rememberTradeId(const std::string& id) {
+    // Missing IDs cannot identify a repeat; opaque nonempty IDs still dedupe.
+    if (id.empty()) return true;
+    if (tradeIds_.contains(id)) return false;
+    if (tradeIdRing_.empty()) {
+        tradeIdRing_.reserve(TradeIdWindowCapacity);
+        tradeIds_.reserve(TradeIdWindowCapacity);
+    }
+    if (tradeIdRing_.size() < TradeIdWindowCapacity) {
+        tradeIds_.insert(id);
+        tradeIdRing_.push_back(id);
+    } else {
+        // Reuse the evicted hash node: no node allocation after the window fills.
+        auto node = tradeIds_.extract(tradeIdRing_[nextTradeId_]);
+        node.value() = id;
+        tradeIds_.insert(std::move(node));
+        tradeIdRing_[nextTradeId_] = id;
+        nextTradeId_ = (nextTradeId_ + 1) % TradeIdWindowCapacity;
+    }
+    return true;
+}
 void JournalFeed::invalid(int64_t local, const std::string& reason) {
     anchored_ = false;
     if (onInvalid) onInvalid(local, reason);
@@ -78,16 +158,40 @@ void JournalFeed::apply(const JournalRecord& input) {
                     }
                 }
             } else if (channel == "market_trades") {
-                const auto deliver = [&](const nlohmann::json& trades) {
-                    for (const auto& e : MessageDispatcher::parse({{"channel","market_trades"},{"trades",trades}},
-                            std::chrono::system_clock::time_point(std::chrono::milliseconds(local))).events)
-                        if (const auto* t = std::get_if<TradeEvent>(&e); t && t->trade.product_id == product_ && onTrade) {
-                            try { onTrade(t->trade); }
-                            catch (const std::exception& error) { throw std::logic_error(error.what()); }
-                        }
+                frameTrades_.clear();
+                const auto collect = [&](const nlohmann::json& trades) {
+                    if (!trades.is_array()) return;
+                    for (const auto& raw : trades) {
+                        auto trade = MessageDispatcher::parseTrade(raw,
+                            std::chrono::system_clock::time_point(std::chrono::milliseconds(local)));
+                        if (trade.product_id != product_ || !onTrade) continue;
+                        const auto id = numericTradeId(trade.trade_id);
+                        frameTrades_.push_back({std::move(trade), id, frameTrades_.size()});
+                    }
                 };
-                if (j.contains("trades")) deliver(j["trades"]);
-                if (j.contains("events")) for (const auto& e : j["events"]) if (e.contains("trades")) deliver(e["trades"]);
+                if (j.contains("trades")) collect(j["trades"]);
+                if (j.contains("events")) for (const auto& e : j["events"]) if (e.contains("trades")) collect(e["trades"]);
+                // Original position makes the ordering stable without stable_sort's scratch allocation.
+                std::sort(frameTrades_.begin(), frameTrades_.end(), [](const auto& a, const auto& b) {
+                    if (a.trade.timestamp != b.trade.timestamp) return a.trade.timestamp < b.trade.timestamp;
+                    // Numeric Coinbase IDs precede opaque IDs; keep a strict total order for mixed input.
+                    if (a.numericId.has_value() != b.numericId.has_value()) return a.numericId.has_value();
+                    if (a.numericId && b.numericId) {
+                        if (*a.numericId != *b.numericId) return *a.numericId < *b.numericId;
+                    }
+                    if (a.trade.trade_id != b.trade.trade_id) return a.trade.trade_id < b.trade.trade_id;
+                    return a.order < b.order;
+                });
+                for (auto& pending : frameTrades_) {
+                    auto& trade = pending.trade;
+                    if (!rememberTradeId(trade.trade_id)) continue;
+                    // Coinbase market_trades reports the resting maker. Like the
+                    // engine boundary, deliver the initiating aggressor side.
+                    if (trade.side == AggressorSide::Buy) trade.side = AggressorSide::Sell;
+                    else if (trade.side == AggressorSide::Sell) trade.side = AggressorSide::Buy;
+                    try { onTrade(trade); }
+                    catch (const std::exception& error) { throw std::logic_error(error.what()); }
+                }
             }
         } catch (const nlohmann::json::exception&) { invalid(local, "malformed journal JSON"); }
           catch (const std::runtime_error& e) { invalid(local, e.what()); }

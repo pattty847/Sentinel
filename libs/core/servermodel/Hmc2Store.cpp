@@ -1239,7 +1239,7 @@ void Hmc2Store::releaseSymbol(const std::string &symbol) {
         return false;
     });
 }
-void Hmc2Store::append(const Hmc2Record &r) {
+bool Hmc2Store::append(const Hmc2Record &r) {
     if (!impl_->writerProduct.empty())
         check(impl_->writerProduct == r.header.symbol, "writer product scope mismatch");
     validate(r.header);
@@ -1297,7 +1297,7 @@ void Hmc2Store::append(const Hmc2Record &r) {
         encodeRecord(existing.front(), b, nullptr);
         check(headerBody(existing.front().header) == headerBody(r.header) && a == b,
               "journal replay differs from committed bucket=" + std::to_string(r.bucketStartMs));
-        return;
+        return false;
     }
     check(std::isfinite(r.midOpen) && std::isfinite(r.midClose) && std::isfinite(r.midMin) && std::isfinite(r.midMax),
           "nonfinite mid metadata");
@@ -1360,6 +1360,7 @@ void Hmc2Store::append(const Hmc2Record &r) {
         }
         throw;
     }
+    return true;
 }
 void Hmc2Store::afterFrameHeaderForTest(std::function<void()> hook) {
     impl_->afterFrameHeader = std::move(hook);

@@ -142,7 +142,8 @@ class Hmc2Store {
     ~Hmc2Store();
     Hmc2Store(const Hmc2Store &) = delete;
     Hmc2Store &operator=(const Hmc2Store &) = delete;
-    void append(const Hmc2Record &record);
+    // True after a new durable append; false for verified deterministic replay.
+    bool append(const Hmc2Record &record);
     void releaseSymbol(const std::string &symbol); // forget delta bases; next append opens fresh
     // One-shot hook after flushing the next record's frame header. Tests can
     // throw to simulate a torn write or rendezvous with a concurrent reader.

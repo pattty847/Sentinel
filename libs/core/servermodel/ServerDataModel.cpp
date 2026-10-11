@@ -101,8 +101,11 @@ ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
     , m_logger(std::make_unique<TickBinaryLogger>())
     , m_aggregator(std::make_unique<TimeframeAggregator>(m_serverConfig.heatmap.timeframesMs))
     , m_heatmapStreamer(std::make_unique<HeatmapTwapStreamer>(*this, m_serverConfig.heatmap))
+    , m_journalFeed(journalLiveFeed(m_serverConfig))
 {
-    for (const auto& symbol : normalizedDefaultSymbols(m_serverConfig.defaultSymbols)) {
+    // recording.live_feed: journal: every captured product is a pinned live feed.
+    for (const auto& symbol : m_journalFeed ? rollerProducts(m_serverConfig)
+                                            : normalizedDefaultSymbols(m_serverConfig.defaultSymbols)) {
         auto& feed = m_feeds[symbol];
         feed.pinned = true;
         feed.lifetime = ++m_nextFeedLifetime;
@@ -115,6 +118,8 @@ ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
         }
     });
     m_metadataTimer.start();
+    m_reseedTimer.setSingleShot(true);
+    connect(&m_reseedTimer, &QTimer::timeout, this, [this] { deliverReseeds(); });
     int64_t maxTfMs = std::max<int64_t>(1000, m_serverConfig.heatmap.activeTimeframeMs);
     for (const int64_t tf : m_serverConfig.heatmap.timeframesMs) {
         if (tf > maxTfMs) {
@@ -124,6 +129,10 @@ ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
     const int64_t gridSpanMs = maxTfMs * std::max<int64_t>(1024, m_serverConfig.heatmap.gridWidth);
     m_footprintTradeRetentionMs = std::clamp<int64_t>(gridSpanMs * 2, 300'000, 86'400'000);
 
+    // recording.live_feed: journal: candles close on each product's journal
+    // time (onFeedWatermark and its trades), never this process's wall clock.
+    if (m_journalFeed)
+        for (const auto& symbol : rollerProducts(m_serverConfig)) m_aggregator->setJournalClock(symbol);
     connect(m_aggregator.get(), &TimeframeAggregator::barClosed, this, &ServerDataModel::barClosed);
     connect(m_aggregator.get(), &TimeframeAggregator::barUpdated, this, &ServerDataModel::barUpdated);
 
@@ -339,6 +348,8 @@ void ServerDataModel::acquireGuiFeed(const std::string& symbol) {
     }
 }
 void ServerDataModel::requestProductMetadataIfNeeded(const std::string& symbol, FeedState& feed) {
+    // recording.live_feed: journal: the journal header carries it (onFeedMetadata), no REST.
+    if (m_journalFeed) return;
     if (symbol == "BTC-USD" || !feed.metadata.is_null() || feed.metadataPending ||
         localNowMs() < feed.nextMetadataAttemptMs) return;
     feed.metadataPending = true;
@@ -373,6 +384,48 @@ void ServerDataModel::onProductMetadata(const std::string& symbol, uint64_t life
                                    data.liveBook.stateVersion());
         sLog_Warning("Live book metadata unavailable: symbol=" << symbol << " error=" << e.what());
     }
+}
+void ServerDataModel::onFeedMetadata(const std::string& symbol, const nlohmann::json& metadata) {
+    const auto it = m_feeds.find(symbol);
+    if (it == m_feeds.end()) return;
+    onProductMetadata(symbol, it->second.lifetime, metadata, {});
+}
+void ServerDataModel::onFeedWatermark(const std::string& symbol, int64_t journalMs) {
+    if (!m_journalFeed || !m_aggregator) return;
+    // Receive time leads exchange time by the feed latency: close only buckets
+    // that ended kJournalCandleLagMs before it, so in-flight trades still land.
+    m_aggregator->advance(symbol, journalMs - kJournalCandleLagMs);
+}
+void ServerDataModel::setReseedHandler(std::function<void(const std::string&)> handler) {
+    m_reseed = std::move(handler);
+    if (!m_reseed) {
+        m_reseedTimer.stop();
+        m_pendingReseeds.clear();
+    }
+}
+// recording.live_feed: journal. The feed holds the whole book: a fresh snapshot
+// replaces "await the next upstream snapshot". At most once per symbol per second.
+void ServerDataModel::requestReseed(const std::string& symbol, const char* why) {
+    if (!m_journalFeed || !m_reseed) return;
+    const auto now = localNowMs();
+    auto& next = m_nextReseedMs[symbol];
+    if (now < next) {
+        // Coalesce: the book stays invalid until a snapshot arrives, so the
+        // request is kept and delivered at the deadline.
+        m_pendingReseeds.insert(symbol);
+        const int wait = int(next - now);
+        if (!m_reseedTimer.isActive() || m_reseedTimer.remainingTime() > wait) m_reseedTimer.start(wait);
+        sLog_Data("Live book re-seed deferred: symbol=" << symbol << " reason=" << why << " waitMs=" << wait);
+        return;
+    }
+    next = now + 1000;
+    m_pendingReseeds.erase(symbol);
+    sLog_Data("Live book re-seed requested: symbol=" << symbol << " reason=" << why);
+    m_reseed(symbol);
+}
+void ServerDataModel::deliverReseeds() {
+    const auto pending = std::exchange(m_pendingReseeds, {});
+    for (const auto& symbol : pending) requestReseed(symbol, "deferred");
 }
 void ServerDataModel::releaseGuiFeed(const std::string& symbol, int64_t releaseLocalMs) {
     const auto it = m_feeds.find(symbol);
@@ -437,6 +490,9 @@ void ServerDataModel::registerMetrics(sentinel::metrics::MetricsRegistry& r) {
         r.counterFn("sentinel_recorder_invalidations_total", "Recorder book invalidations (upstream and self).", {}, stat(&Stats::invalidations));
         r.counterFn("sentinel_recorder_disk_errors_total", "Recorder disk write failures.", {}, stat(&Stats::diskErrors));
     }
+    if (m_servesRoller)
+        r.counter("sentinel_recorder_columns_written_total",
+                  "Minute columns the serving roller committed across products and layers.");
     r.counterFn("sentinel_recorder_live_publish_drops_total", "Live publications refused (series limit or stale).", {},
                 load(m_livePublishDrops));
 
@@ -650,6 +706,7 @@ void ServerDataModel::onLiveOrderBookLevelUpdates(const QString& productId,
                                            data.liveBook.stateVersion());
                 sLog_Warning("Live book raw band exceeded by potential best: symbol=" << symbol
                              << " price=" << update.price);
+                requestReseed(symbol, "raw band exceeded");
                 return;
             }
             continue;
@@ -821,6 +878,7 @@ void ServerDataModel::publishAggregatedBook(const QString& productId, SymbolHotD
                                    data.liveBook.stateVersion());
         sLog_Warning("Live book current raw BBO unavailable: symbol=" << symbol
                      << " bid=" << bestBid << " ask=" << bestAsk);
+        requestReseed(symbol, "raw BBO unavailable");
         return;
     }
     data.awaitingRawBbo = false;

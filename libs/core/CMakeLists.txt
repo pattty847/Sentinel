@@ -1,6 +1,7 @@
 project(sentinel_core)
 
 add_library(sentinel_core
+    roller/AnchorStore.cpp
     roller/JournalReader.cpp
     roller/JournalFeed.cpp
     roller/Grid.cpp
@@ -24,6 +25,8 @@ add_library(sentinel_core
     metrics/MetricsHttpServer.hpp
     metrics/ProcessMetrics.cpp
     metrics/ProcessMetrics.hpp
+    metrics/EventLoopLag.cpp
+    metrics/EventLoopLag.hpp
     ConfigLoader.cpp
     ConfigLoader.hpp
     marketdata/MarketDataFeeds.cpp

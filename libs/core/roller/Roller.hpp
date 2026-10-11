@@ -9,6 +9,9 @@ struct RollOptions {
     int64_t fromMs = 0, toMs = 0; // [from,to), complete UTC minutes
     nlohmann::json overrides = nlohmann::json::object();
     bool dryRun = false;
+    // Optional process counters retained across daily recorders and retries.
+    sentinel::metrics::Counter* minuteColumnsCounter = nullptr;
+    sentinel::metrics::Counter* writeErrorsCounter = nullptr;
     // Crash/lifecycle seam: invoked after a processed record, before a possible
     // checkpoint fence. Throw to interrupt; the next run must recover identically.
     std::function<void(uint64_t)> afterRecordForTest;
@@ -26,7 +29,26 @@ struct RollOptions {
     // Live-lead seam, on the calling thread: the day's recorder and journal feed
     // once both exist, then (nullptr, nullptr, 0) before either is destroyed.
     std::function<void(recording::BookRecorder*, const JournalFeed*, int64_t dayEndMs)> onRecorder;
+    // Model-tap seam (recording.live_feed: journal), on the calling thread: the
+    // day's feed after roll() installed its callbacks, before the first record.
+    // The tap may chain them (observing levels before the recorder takes them).
+    // The feed lives until onRecorder(nullptr, nullptr, 0). Not policy.
+    std::function<void(JournalFeed&)> onFeed;
+    bool useAnchors = true, writeAnchors = true;
+    std::filesystem::path anchorRoot; // empty means outputRoot; rebuild uses scratch HMC2
+    // LiveSource validates against its handshake ceiling before any installation.
+    std::function<bool(const JournalPos&)> anchorAllowed;
+    std::function<void(const JournalPos&, const JournalBook&, bool, bool cursorApplied, int64_t receiveMs)> onAnchorRestore;
+    // Reuse the model tap's durable book; batch replay maintains its own otherwise.
+    std::function<std::pair<JournalBook,bool>()> anchorBook;
+    std::function<void(int64_t)> afterAnchorForTest;
+    bool anchorFailuresFatal = false; // rebuild-anchors: sidecars are the requested product
+    // Boundary/error-path injection only; never used on the primary record hot path.
+    std::function<std::vector<uint8_t>(recording::BookRecorder&)> anchorExportForTest;
+    std::function<bool(JournalReader&, JournalRecord&)> anchorOverlapReadForTest;
+
 };
+void registerAnchorMetrics(metrics::MetricsRegistry&, const std::string& product);
 // Atomically replace and fsync a checkpoint in an already durable parent.
 void writeCheckpoint(const std::filesystem::path&, const nlohmann::json&);
 void validateOutputProduct(const std::filesystem::path& root, const std::string& product);

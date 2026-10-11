@@ -4,6 +4,7 @@
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include "../marketdata/model/TradeData.h"
 
@@ -25,6 +26,14 @@ public:
                                  QObject* parent = nullptr);
     void onTrade(const Trade& trade);
     void tick(int64_t nowMs);
+    // recording.live_feed: journal. The symbol's bars close on its own journal
+    // time, never the wall clock: tick() skips it; advance() closes buckets
+    // ending at or before the watermark, and each trade closes those before it.
+    // Bars are then a function of the delivered sequence alone, so a recovery
+    // replay builds exactly what uninterrupted delivery would. Quiet buckets
+    // are carried, at most 300 per timeframe (1 s and 1 m) per advance.
+    void setJournalClock(const std::string& symbol);
+    void advance(const std::string& symbol, int64_t watermarkMs);
     static std::vector<OHLCVBar> rollupMinutes(const std::vector<OHLCVBar>& minutes,
                                                 int64_t timeframeMs);
     std::vector<OHLCVBar> getHistory(const std::string& symbol, int64_t timeframeMs,
@@ -42,12 +51,15 @@ private:
     mutable std::shared_mutex m_mutex;
     std::unordered_map<std::string, SymbolState> m_states;
     std::vector<int64_t> m_timeframesMs;
+    std::unordered_set<std::string> m_journal;
 
     static int64_t bucketStart(int64_t timestampMs, int64_t timeframeMs);
     void closeBar(SymbolState& state, const std::string& symbol, int64_t timeframeMs,
                   OHLCVBar& bar);
     void addMinuteToRollups(SymbolState& state, const std::string& symbol,
                             const OHLCVBar& minute);
+    void closeElapsed(SymbolState& state, const std::string& symbol, int64_t nowMs);
     void updateTradeBar(SymbolState& state, const std::string& symbol,
-                        int64_t timeframeMs, const Trade& trade, int64_t tradeTsMs);
+                        int64_t timeframeMs, const Trade& trade, int64_t tradeTsMs,
+                        bool journal = false);
 };

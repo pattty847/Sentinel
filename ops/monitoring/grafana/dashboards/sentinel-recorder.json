@@ -33,7 +33,7 @@
       "id": 7,
       "type": "timeseries",
       "title": "Columns written per minute",
-      "description": "Expected: pinned symbols x 2 layers per minute.",
+      "description": "Expected in roller mode: rolled products x 2 layers per minute. Counts committed minute appends; excludes hourly rollups and replay below the checkpoint.",
       "datasource": {
         "type": "prometheus",
         "uid": "sentinel-vm"
@@ -76,8 +76,8 @@
     {
       "id": 8,
       "type": "timeseries",
-      "title": "Invalidations and disorder (per 5 min)",
-      "description": "",
+      "title": "Journal invalidations (per 5 min)",
+      "description": "Per-product journal book invalidations. No roller equivalent for primary late-event or backward-step counters.",
       "datasource": {
         "type": "prometheus",
         "uid": "sentinel-vm"
@@ -95,30 +95,8 @@
             "type": "prometheus",
             "uid": "sentinel-vm"
           },
-          "expr": "increase(sentinel_recorder_invalidations_total[5m])",
-          "legendFormat": "invalidations",
-          "range": true,
-          "instant": false
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "sentinel-vm"
-          },
-          "expr": "increase(sentinel_recorder_late_events_total[5m])",
-          "legendFormat": "late events",
-          "range": true,
-          "instant": false
-        },
-        {
-          "refId": "C",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "sentinel-vm"
-          },
-          "expr": "increase(sentinel_recorder_backward_steps_total[5m])",
-          "legendFormat": "backward steps",
+          "expr": "increase(sentinel_roller_invalidations_total[5m])",
+          "legendFormat": "invalidations {{product}}",
           "range": true,
           "instant": false
         }
@@ -142,8 +120,8 @@
     {
       "id": 9,
       "type": "timeseries",
-      "title": "Drops and disk errors (per 5 min)",
-      "description": "",
+      "title": "Write errors and live drops (per 5 min)",
+      "description": "Per-product HMC2 append failures and refused live publications. The roller uses blocking recorder admission; no primary queue-drop equivalent.",
       "datasource": {
         "type": "prometheus",
         "uid": "sentinel-vm"
@@ -156,24 +134,13 @@
       },
       "targets": [
         {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "sentinel-vm"
-          },
-          "expr": "increase(sentinel_recorder_queue_drops_total[5m])",
-          "legendFormat": "queue drops",
-          "range": true,
-          "instant": false
-        },
-        {
           "refId": "B",
           "datasource": {
             "type": "prometheus",
             "uid": "sentinel-vm"
           },
-          "expr": "increase(sentinel_recorder_disk_errors_total[5m])",
-          "legendFormat": "disk errors",
+          "expr": "increase(sentinel_roller_write_errors_total[5m])",
+          "legendFormat": "write errors {{product}}",
           "range": true,
           "instant": false
         },
