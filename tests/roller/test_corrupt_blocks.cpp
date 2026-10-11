@@ -2,6 +2,8 @@
 #include "roller/ShadowRoller.hpp"
 #include "capture/CaptureFanout.hpp"
 #include <QCoreApplication>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 #include "capture/CaptureVerifier.hpp"
 #include "metrics/MetricsRegistry.hpp"
@@ -265,6 +267,17 @@ TEST(CorruptBlockPolicy, ShadowWorkerCrossesDamagedDayWithoutRetry) {
     c.journalRoot = (root/"raw").string(); c.outputRoot = (root/"shadow").string();
     c.socketPath = fc.socketPath.toStdString();
     c.retryMin = std::chrono::milliseconds(20); c.retryMax = std::chrono::milliseconds(100);
+    std::mutex progressMutex;
+    std::condition_variable progressChanged;
+    bool lastRecordApplied = false;
+    c.observeForTest = [&](const JournalRecord& record, bool applied) {
+        if (!applied || record.record.time.systemNs / 1'000'000 < Epoch+Day+245'000) return;
+        {
+            std::lock_guard lock(progressMutex);
+            lastRecordApplied = true;
+        }
+        progressChanged.notify_one();
+    };
     ShadowRoller shadow(c, {"BTC-USD"}, root/"primary", registry);
     registerJournalMetrics(registry, "BTC-USD"); // production constructor also registers
     metrics::MetricsHttpServer http(registry); ASSERT_TRUE(http.listen(0));
@@ -281,11 +294,14 @@ TEST(CorruptBlockPolicy, ShadowWorkerCrossesDamagedDayWithoutRetry) {
     const std::string series = "sentinel_roller_journal_corrupt_blocks_total{product=\"BTC-USD\"} ";
     const auto first = exposition.find(series); ASSERT_NE(first, std::string::npos);
     EXPECT_EQ(exposition.find(series, first+series.size()), std::string::npos);
-    const auto deadline = std::chrono::steady_clock::now()+std::chrono::seconds(15);
-    while (shadow.watermarks("BTC-USD", "near").minuteThroughMs < Epoch+Day+240'000 &&
-           std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    EXPECT_GE(shadow.watermarks("BTC-USD", "near").minuteThroughMs, Epoch+Day+240'000);
+    {
+        std::unique_lock lock(progressMutex);
+        EXPECT_TRUE(progressChanged.wait_for(lock, std::chrono::seconds(90), [&] {
+            return lastRecordApplied;
+        })) << "shadow did not apply the last record of the damaged day";
+    }
     shadow.stop();
+    EXPECT_GE(shadow.watermarks("BTC-USD", "near").minuteThroughMs, Epoch+Day+240'000);
     EXPECT_NE(registry.render().find("sentinel_roller_shadow_setup_failures_total{product=\"BTC-USD\"} 0\n"), std::string::npos);
     EXPECT_EQ(counter(registry), before+1);
     RollOptions o{root/"raw", root/"batch", "BTC-USD", Epoch, Epoch+Day+240'000}; roll(o);

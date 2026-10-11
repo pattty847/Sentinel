@@ -45,8 +45,7 @@ set(_sentinel_fast_tests
     AgentApiCodecTests SymbolSubscriptionManagerTests
     ExceptionTypeinfoTests)
 
-# Temporary: load-sensitive under the -j4 land gate until the injected-clock fix for FM-262 lands.
-set(_sentinel_run_serial RollerCorruptBlockTests)
+set_tests_properties(RollerCorruptBlockTests DIRECTORY "${CMAKE_SOURCE_DIR}/tests/roller" PROPERTIES RUN_SERIAL FALSE)
 
 foreach(_sentinel_area IN ITEMS core marketdata capture roller render agentapi
                                 trading servermodel market_health fonts research_ui link)
@@ -76,10 +75,6 @@ foreach(_sentinel_area IN ITEMS core marketdata capture roller render agentapi
         endif()
         if(_sentinel_test IN_LIST _sentinel_lint_tests)
             list(APPEND _sentinel_labels lint)
-        endif()
-        if(_sentinel_test IN_LIST _sentinel_run_serial)
-            set_tests_properties("${_sentinel_test}" DIRECTORY "${_sentinel_dir}"
-                PROPERTIES RUN_SERIAL TRUE)
         endif()
         if(_sentinel_test IN_LIST _sentinel_processors_two)
             set_tests_properties("${_sentinel_test}" DIRECTORY "${_sentinel_dir}"
