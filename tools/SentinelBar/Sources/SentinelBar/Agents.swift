@@ -60,7 +60,8 @@ enum TranscriptFiles {
         for back in 0...1 {
             guard let day = calendar.date(byAdding: .day, value: -back, to: Date()) else { continue }
             let parts = calendar.dateComponents([.year, .month, .day], from: day)
-            let path = String(format: "%@/sessions/%04d/%02d/%02d", home, parts.year!, parts.month!, parts.day!)
+            guard let year = parts.year, let month = parts.month, let day = parts.day else { continue }
+            let path = String(format: "%@/sessions/%04d/%02d/%02d", home, year, month, day)
             let files = (try? FileManager.default.contentsOfDirectory(at: URL(fileURLWithPath: path),
                 includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
             for url in files where url.lastPathComponent.hasPrefix("rollout-") && url.pathExtension == "jsonl" {

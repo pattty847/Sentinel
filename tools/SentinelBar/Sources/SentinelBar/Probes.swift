@@ -36,7 +36,7 @@ struct Worktree: Identifiable {
 struct Service: Identifiable {
     var id: String { name }
     let name: String
-    let url: URL
+    let url: URL?
     let critical: Bool
     var up: Bool?
 }
@@ -162,7 +162,8 @@ enum Probes {
         return result
     }
 
-    static func isUp(_ url: URL) async -> Bool {
+    static func isUp(_ url: URL?) async -> Bool {
+        guard let url else { return false }
         var req = URLRequest(url: url)
         req.timeoutInterval = 2
         guard let (_, resp) = try? await URLSession.shared.data(for: req),

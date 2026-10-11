@@ -5,7 +5,7 @@ import SwiftUI
 
 @main
 struct SentinelBarApp: App {
-    @StateObject private var monitor = Monitor()
+    @StateObject private var monitor = Monitor(defaults: .standard)
 
     init() { NSApplication.shared.setActivationPolicy(.accessory) }
 
@@ -181,7 +181,9 @@ struct StatusPanel: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Button("Grafana") { open(URL(string: "http://127.0.0.1:3000")!) }
+                Button("Grafana") {
+                    if let url = URL(string: "http://127.0.0.1:3000") { open(url) }
+                }
                 Button("Logs") { open(URL(fileURLWithPath: NSHomeDirectory() + "/Library/Logs/Sentinel")) }
                 Button("Terminal") { openTerminal(monitor.repo) }
                 Spacer()
@@ -253,7 +255,6 @@ struct SettingsPanel: View {
     @State private var repo: String = ""
     @State private var pinned: String = ""
     @State private var login = SMAppService.mainApp.status == .enabled
-    private let defaults = UserDefaults(suiteName: "com.sentinel.bar")!
     private let kinds = ["agent started", "agent finished", "agent failed", "slice landed",
                          "land failed", "review", "blocker raised", "blocker resolved",
                          "plan or phase change", "build failed", "service down", "service back up"]
@@ -271,7 +272,7 @@ struct SettingsPanel: View {
             }
             Text("Notifications").font(.subheadline).bold()
             ForEach(kinds, id: \.self) { kind in
-                NotificationToggle(kind: kind, defaults: defaults)
+                NotificationToggle(kind: kind, defaults: monitor.defaults)
             }
             HStack {
                 Spacer()

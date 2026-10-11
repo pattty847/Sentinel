@@ -10,9 +10,9 @@ final class Monitor: ObservableObject {
     @Published var worktrees: [Worktree] = []
     @Published var agents: [AgentJob] = []
     @Published var services: [Service] = [
-        Service(name: "server :8090", url: URL(string: "http://127.0.0.1:8090/metrics")!, critical: true),
-        Service(name: "capture :8091", url: URL(string: "http://127.0.0.1:8091/metrics")!, critical: true),
-        Service(name: "GUI host :17190", url: URL(string: "http://127.0.0.1:17190/status")!, critical: false)
+        Service(name: "server :8090", url: URL(string: "http://127.0.0.1:8090/metrics"), critical: true),
+        Service(name: "capture :8091", url: URL(string: "http://127.0.0.1:8091/metrics"), critical: true),
+        Service(name: "GUI host :17190", url: URL(string: "http://127.0.0.1:17190/status"), critical: false)
     ]
     @Published var budget: [String]? = nil
     @Published var budgetLoaded = false
@@ -27,7 +27,7 @@ final class Monitor: ObservableObject {
 
     let queueDir = ProcessInfo.processInfo.environment["SENTINEL_BUILD_QUEUE"] ?? "/tmp/sentinel-build-queue"
     let launchAt = Date()
-    private let defaults = UserDefaults(suiteName: "com.sentinel.bar")!
+    let defaults: UserDefaults
     private var seenEvents: Set<String>?
     private var seenAgents: Set<String>?
     private var lastNotified: [String: Date] = [:]
@@ -49,10 +49,10 @@ final class Monitor: ObservableObject {
         blockers.contains { Date().timeIntervalSince($0.at) < 24 * 3600 }
     }
 
-    init() {
-        let settings = UserDefaults(suiteName: "com.sentinel.bar")!
-        repo = settings.string(forKey: "repoPath") ?? NSHomeDirectory() + "/Programming/Sentinel"
-        pinnedPlan = settings.string(forKey: "pinnedPlan") ?? ""
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        repo = defaults.string(forKey: "repoPath") ?? NSHomeDirectory() + "/Programming/Sentinel"
+        pinnedPlan = defaults.string(forKey: "pinnedPlan") ?? ""
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         Task {
             while !Task.isCancelled {
