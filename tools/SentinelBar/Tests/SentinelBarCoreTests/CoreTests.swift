@@ -28,7 +28,30 @@ struct CoreTests {
         #expect(state.model == "synthetic-model")
         #expect(state.step == "Read: /synthetic/file")
         #expect(state.tokens == 5)
-        #expect(state.failed)
+        #expect(!state.failed)
+    }
+
+    @Test func idleSubagentRemainsActiveUntilCompletionOrParentExit() {
+        let state = TranscriptState()
+        let idle = SubagentLifecycle.decide(parentAlive: true, state: state, secondsSinceActivity: 300)
+        #expect(idle == .active)
+        #expect(!idle.shouldNotify)
+
+        var completed = state
+        completed.completed = true
+        #expect(SubagentLifecycle.decide(parentAlive: true, state: completed,
+                                         secondsSinceActivity: 300) == .finished)
+        var failed = state
+        failed.failed = true
+        #expect(SubagentLifecycle.decide(parentAlive: true, state: failed,
+                                         secondsSinceActivity: 300) == .failed)
+        #expect(SubagentLifecycle.decide(parentAlive: false, state: state,
+                                         secondsSinceActivity: 300).shouldNotify)
+
+        let ended = TranscriptParser.claude([
+            #"{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"synthetic done"}]}}"#
+        ])
+        #expect(ended.completed)
     }
 
     @Test func chartPlanSlicesAndBugRows() throws {

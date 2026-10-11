@@ -68,7 +68,7 @@ enum Shell {
 enum Probes {
     /// Mirrors `build-queue.sh status`: tickets sorted by name (enqueue time in ns), first live one runs.
     /// Tickets without a heartbeat for 120 s are dead; the script prunes them, we only skip them.
-    static func buildQueue(dir: String) -> [QueueEntry] {
+    static func buildQueue(dir: String, processes: [BuildProcess]) -> [QueueEntry] {
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: dir) else { return [] }
         let now = Date()
@@ -81,7 +81,6 @@ enum Probes {
             let ns = Double(name.split(separator: "-").first ?? "") ?? 0
             return Ticket(id: name, label: label, queuedAt: Date(timeIntervalSince1970: ns / 1e9), modifiedAt: mtime)
         }
-        let processes = buildProcesses()
         return TicketParser.live(tickets, now: now).map { ticket in
             QueueEntry(id: ticket.id, label: ticket.label, queuedAt: ticket.queuedAt,
                        running: ticket.running, command: ticket.running ? processes.first { !$0.outsideQueue }?.command : nil)

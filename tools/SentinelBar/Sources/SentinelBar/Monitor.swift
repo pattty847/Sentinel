@@ -30,6 +30,7 @@ final class Monitor: ObservableObject {
     let defaults: UserDefaults
     private var seenEvents: Set<String>?
     private var seenAgents: Set<String>?
+    private var agentScanInProgress = false
     private var lastNotified: [String: Date] = [:]
     private var mainHead: String?
     private var selectedPlanPath: String?
@@ -111,9 +112,19 @@ final class Monitor: ObservableObject {
     }
 
     private func refreshAgents() async {
+        guard !agentScanInProgress else { return }
+        agentScanInProgress = true
+        defer { agentScanInProgress = false }
         let previous = seenAgents
         let trees = worktrees
-        let fresh = await Task.detached { AgentProbe.scan(worktrees: trees) }.value
+        guard let scan = await Task.detached(operation: { AgentProbe.scan(worktrees: trees) }).value else { return }
+        var fresh = scan.jobs
+        let parentPIDs = Set(fresh.filter { !$0.subagent }.map(\.pid))
+        let scannedIDs = Set(fresh.map(\.id))
+        for child in agents where child.subagent && !scannedIDs.contains(child.id) &&
+            parentPIDs.contains(child.pid) && scan.terminalSubagents[child.id] == nil {
+            fresh.append(child)
+        }
         let ids = Set(fresh.map(\.id))
         if let previous {
             for job in fresh where !previous.contains(job.id) {
@@ -122,11 +133,22 @@ final class Monitor: ObservableObject {
                     tone: "info", slice: nil, branch: job.branch))
             }
             for job in agents where !ids.contains(job.id) {
-                notify(kind: job.failed ? "agent failed" : "agent finished", agent: job.id,
+                let failed: Bool
+                if job.subagent {
+                    let disposition = scan.terminalSubagents[job.id] ??
+                        SubagentLifecycle.decide(parentAlive: parentPIDs.contains(job.pid),
+                            state: job.transcriptState,
+                            secondsSinceActivity: job.lastActive.map { Date().timeIntervalSince($0) } ?? 0)
+                    guard disposition.shouldNotify else { continue }
+                    failed = disposition == .failed
+                } else {
+                    failed = job.failed
+                }
+                notify(kind: failed ? "agent failed" : "agent finished", agent: job.id,
                        text: "\(job.kind) \(job.model ?? "") finished")
-                agentEvents.append(Milestone(at: Date(), kind: job.failed ? "agent_failed" : "agent_finished",
-                    text: "\(job.kind) \(job.failed ? "failed" : "finished") · \(job.branch ?? "unmanaged")",
-                    tone: job.failed ? "bad" : "ok", slice: nil, branch: job.branch))
+                agentEvents.append(Milestone(at: Date(), kind: failed ? "agent_failed" : "agent_finished",
+                    text: "\(job.kind) \(failed ? "failed" : "finished") · \(job.branch ?? "unmanaged")",
+                    tone: failed ? "bad" : "ok", slice: nil, branch: job.branch))
             }
         }
         agentEvents = Array(agentEvents.suffix(30))
@@ -137,7 +159,10 @@ final class Monitor: ObservableObject {
 
     private func refreshBuilds() async {
         let dir = queueDir
-        let fresh = await Task.detached { (Probes.buildQueue(dir: dir), Probes.buildProcesses()) }.value
+        let fresh = await Task.detached {
+            let processes = Probes.buildProcesses()
+            return (Probes.buildQueue(dir: dir, processes: processes), processes)
+        }.value
         let runningIDs = Set(fresh.0.filter(\.running).map(\.id))
         runningSince = runningSince.filter { runningIDs.contains($0.key) }
         for id in runningIDs where runningSince[id] == nil { runningSince[id] = Date() }

@@ -11,6 +11,24 @@ public struct TranscriptState: Equatable {
     public init() {}
 }
 
+public enum SubagentDisposition: Equatable {
+    case active
+    case finished
+    case failed
+
+    public var shouldNotify: Bool { self != .active }
+}
+
+public enum SubagentLifecycle {
+    /// Activity age affects the idle label, not whether an agent is alive.
+    public static func decide(parentAlive: Bool, state: TranscriptState,
+                              secondsSinceActivity: TimeInterval) -> SubagentDisposition {
+        if state.failed { return .failed }
+        if state.completed || !parentAlive { return .finished }
+        return .active
+    }
+}
+
 public enum TranscriptParser {
     public static func codex(_ lines: [String]) -> TranscriptState {
         var state = TranscriptState()
@@ -69,7 +87,7 @@ public enum TranscriptParser {
             guard let object = json(line), let type = object["type"] as? String else { continue }
             if type == "assistant", let message = object["message"] as? [String: Any] {
                 state.started = true
-                state.completed = false
+                state.completed = message["stop_reason"] as? String == "end_turn"
                 state.failed = false
                 state.model = message["model"] as? String ?? state.model
                 if let usage = message["usage"] as? [String: Any] {
@@ -90,10 +108,6 @@ public enum TranscriptParser {
                 }
             } else if type == "system", object["subtype"] as? String == "turn_duration" {
                 state.completed = true
-            } else if type == "user", let message = object["message"] as? [String: Any],
-                      let content = message["content"] as? [[String: Any]],
-                      content.contains(where: { $0["is_error"] as? Bool == true }) {
-                state.failed = true
             }
         }
         return state

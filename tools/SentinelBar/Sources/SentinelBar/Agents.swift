@@ -14,10 +14,17 @@ struct AgentJob: Identifiable {
     var lastActive: Date?
     var failed = false
     var subagent = false
+    var transcriptState = TranscriptState()
     var idle: Bool { lastActive.map { Date().timeIntervalSince($0) > 120 } ?? false }
 }
 
+struct AgentScan {
+    let jobs: [AgentJob]
+    let terminalSubagents: [String: SubagentDisposition]
+}
+
 enum TranscriptFiles {
+    private static let cacheLock = NSLock()
     private static var states: [String: (Date, TranscriptState)] = [:]
     private static var cwds: [String: String] = [:]
 
@@ -36,6 +43,8 @@ enum TranscriptFiles {
     }
 
     static func state(_ url: URL, _ date: Date, kind: String) -> TranscriptState {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
         if let cached = states[url.path], cached.0 == date { return cached.1 }
         let state = kind == "codex" ? TranscriptParser.codex(tail(url)) : TranscriptParser.claude(tail(url))
         states[url.path] = (date, state)
@@ -43,6 +52,8 @@ enum TranscriptFiles {
     }
 
     static func codexCwd(_ url: URL) -> String? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
         if let cached = cwds[url.path] { return cached }
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
@@ -96,8 +107,8 @@ enum TranscriptFiles {
 }
 
 enum AgentProbe {
-    static func scan(worktrees: [Worktree]) -> [AgentJob] {
-        guard let output = Shell.run("/bin/ps", ["-axo", "pid=,ppid=,command="]) else { return [] }
+    static func scan(worktrees: [Worktree]) -> AgentScan? {
+        guard let output = Shell.run("/bin/ps", ["-axo", "pid=,ppid=,command="]) else { return nil }
         var processes: [(pid: Int32, parent: Int32, kind: String, args: [String])] = []
         for line in output.split(separator: "\n") {
             let f = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true).map(String.init)
@@ -108,9 +119,11 @@ enum AgentProbe {
         }
         let kinds = Dictionary(processes.map { ($0.pid, $0.kind) }, uniquingKeysWith: { a, _ in a })
         processes.removeAll { kinds[$0.parent] == $0.kind }
-        let cwds = cwdsOf(processes.map(\.pid))
+        guard let cwds = cwdsOf(processes.map(\.pid)) else { return nil }
+        if !processes.isEmpty && cwds.isEmpty { return nil }
         let codex = TranscriptFiles.codexIndex()
         var jobs: [AgentJob] = []
+        var terminalSubagents: [String: SubagentDisposition] = [:]
         for p in processes {
             guard let cwd = cwds[p.pid] else { continue }
             let branch = worktrees.filter { cwd == $0.path || cwd.hasPrefix($0.path + "/") }
@@ -122,16 +135,20 @@ enum AgentProbe {
             } else if p.kind == "claude" {
                 let files = TranscriptFiles.claudeFiles(cwd: cwd)
                 if let (url, date) = files.main { apply(url, date, to: &job) }
-                for (url, date) in files.children where Date().timeIntervalSince(date) < 120 {
+                for (url, date) in files.children {
                     var child = AgentJob(id: url.path, pid: p.pid, kind: "claude",
                                          model: nil, cwd: cwd, branch: branch, subagent: true)
                     apply(url, date, to: &child)
-                    jobs.append(child)
+                    let disposition = SubagentLifecycle.decide(parentAlive: true, state: child.transcriptState,
+                        secondsSinceActivity: Date().timeIntervalSince(date))
+                    if disposition == .active { jobs.append(child) }
+                    else { terminalSubagents[child.id] = disposition }
                 }
             }
             jobs.append(job)
         }
-        return jobs.sorted { ($0.lastActive ?? .distantPast) > ($1.lastActive ?? .distantPast) }
+        return AgentScan(jobs: jobs.sorted { ($0.lastActive ?? .distantPast) > ($1.lastActive ?? .distantPast) },
+                         terminalSubagents: terminalSubagents)
     }
 
     private static func apply(_ url: URL, _ date: Date, to job: inout AgentJob) {
@@ -142,6 +159,7 @@ enum AgentProbe {
         job.tokens = state.tokens
         job.lastActive = date
         job.failed = state.failed
+        job.transcriptState = state
     }
 
     private static func kindOf(_ args: [String]) -> String? {
@@ -161,9 +179,10 @@ enum AgentProbe {
         return nil
     }
 
-    private static func cwdsOf(_ pids: [Int32]) -> [Int32: String] {
-        guard !pids.isEmpty, let output = Shell.run("/usr/sbin/lsof",
-            ["-a", "-d", "cwd", "-Fn", "-p", pids.map(String.init).joined(separator: ",")], anyExit: true) else { return [:] }
+    private static func cwdsOf(_ pids: [Int32]) -> [Int32: String]? {
+        guard !pids.isEmpty else { return [:] }
+        guard let output = Shell.run("/usr/sbin/lsof",
+            ["-a", "-d", "cwd", "-Fn", "-p", pids.map(String.init).joined(separator: ",")], anyExit: true) else { return nil }
         var result: [Int32: String] = [:]
         var current: Int32?
         for line in output.split(separator: "\n") {
