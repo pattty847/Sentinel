@@ -34,6 +34,8 @@ struct SentinelBarApp: App {
 struct StatusPanel: View {
     @EnvironmentObject var monitor: Monitor
     @State private var showWorktrees = false
+    // MenuBarExtra windows size to the ScrollView's ideal height, which is ~0: measure the content instead.
+    @State private var contentHeight: CGFloat = 400
 
     var body: some View {
         ScrollView {
@@ -138,9 +140,12 @@ struct StatusPanel: View {
                 footer
             }
             .padding(12)
+            .background(GeometryReader { proxy in
+                Color.clear.preference(key: PanelHeightKey.self, value: proxy.size.height)
+            })
         }
-        .frame(width: 420)
-        .frame(maxHeight: 640)
+        .frame(width: 420, height: min(max(contentHeight, 120), 640))
+        .onPreferenceChange(PanelHeightKey.self) { contentHeight = $0 }
         .sheet(isPresented: $monitor.showSettings) {
             SettingsPanel(monitor: monitor)
         }
@@ -298,4 +303,9 @@ struct NotificationToggle: View {
             enabled = (defaults.object(forKey: "notify." + kind) as? Bool) ?? (kind != "agent started")
         }.onChange(of: enabled) { defaults.set($0, forKey: "notify." + kind) }
     }
+}
+
+private struct PanelHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
