@@ -107,7 +107,7 @@ void UnifiedGridRenderer::bindWindow(QQuickWindow* w) {
       QMetaObject::invokeMethod(this, [this] { update(); }, Qt::QueuedConnection);
     // Labels held back by a transition (a crossfade's last frame, a picture not
     // yet matched): once this frame's prepare() has moved the node on, redraw
-    // only if the labels would now draw differently (transition-driven, S7b).
+    // only if the labels would now draw differently after the transition.
     if (m_gpuLabelsIncomplete.exchange(false))
       QMetaObject::invokeMethod(this, [this] {
         if (m_gpuLayer && m_gpuLayer->labelSignature() != m_gpuLabelSignature.load()) update();
@@ -152,7 +152,8 @@ void UnifiedGridRenderer::onTradeReceived(const Trade &trade) {
     if (m_tradeBubbleTape->append({ms, trade.price, trade.size, trade.side, trade.trade_id}) && m_showTrades)
       update(); // Qt coalesces trade bursts into one scene synchronization
   }
-  // The live price for auto-fit (no allocation per trade: product ids are ASCII).
+  // The live price for auto-fit compares the ASCII product id without conversion.
+  // The separate seed comparison below converts to QString and may allocate.
   if (std::isfinite(trade.price) && trade.price > 0 &&
       m_activeSymbol == QLatin1String(trade.product_id.data(), static_cast<qsizetype>(trade.product_id.size())))
     m_gpuLastTrade = trade.price;
@@ -453,10 +454,10 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
     const int64_t previousTf = m_currentTimeframe_ms;
     m_currentTimeframe_ms = timeframe_ms;
     if (timeframe_ms > 0) m_timeAuthority.setActiveTimeframeMs(timeframe_ms);
-    // Spec rule 1: a column is the timeframe, and a longer one is how to see further
-    // back. Keep the columns on screen (S6d: keeping the time span gave four 1h columns
-    // after 1m, and 1,600 hairline 1m columns after 1h): scale the span by the timeframe
-    // ratio about the view end, inside the new timeframe's 1 column/px limit. previousTf >= 1 s skips the 100 ms
+    // A column is the timeframe, and a longer one is how to see further
+    // back. A fixed time span would leave too few long-timeframe columns or too many
+    // narrow short-timeframe columns. Scale the span by the timeframe ratio about
+    // the view end, inside the new timeframe's 1 column/px limit. previousTf >= 1 s skips the 100 ms
     // default before the server advertises its timeframe. The span is read before the new
     // limits apply (72 h of 1h is 72 columns of 1m, not 30.8 h of the clamp then /60), and
     // limits, scaled span and follow-live end are published as ONE viewport change: the
@@ -468,8 +469,7 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
     const double scaledSpan = keepColumns ? static_cast<double>(oldEnd - oldStart) * static_cast<double>(timeframe_ms) /
                                                 static_cast<double>(previousTf)
                                           : 0.0;
-    // Viewport model (docs/research/2026-10-viewport-autoscale.md): the Now column (the
-    // live bucket) keeps its screen x when it is in view or the view follows live; a
+    // The Now column (the live bucket) keeps its screen x when it is in view or the view follows live; a
     // historical view keeps its end. rightFrac: the view's part right of the Now centre.
     const int64_t anchor = keepColumns ? m_gpuLayer->liveAnchorMs() : 0;
     auto nowCentre = [anchor](int64_t tf) {
@@ -507,7 +507,7 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
         m_followPadding.reset();
         if (drawnBefore.valid && anchor > 0 && nominal > 0) {
           // The destination camera's column width: when it equals the drawn one, the Now
-          // column stays exactly where it is drawn (whole device pixels; review r3) and
+          // column stays exactly where it is drawn in whole device pixels and
           // follow-live keeps that padding; when a cap changed it (a column is at most tf
           // px, at least one per px), the chart re-lays out at the nominal live end.
           const int64_t tf = timeframe_ms;
@@ -739,7 +739,7 @@ void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
 }
 
 
-// ── GPU heatmap renderer (S6b) ───────────────────────────────────────────────
+// ── GPU heatmap renderer ──
 double UnifiedGridRenderer::heatmapTickSize() const {
   return m_gpuLayer ? m_gpuLayer->tickPrice() : 0.0;
 }
@@ -789,8 +789,7 @@ void UnifiedGridRenderer::syncGpuSurface() {
   refitAutoPrice(); // raw row height and candidate pixel phases follow the surface
 }
 
-// Spec rules 1, 2 and 9: GridViewState clamps wheel, axis drags and the Agent
-// API identically.
+// GridViewState applies the same limits to wheel, axis drags and the Agent API.
 void UnifiedGridRenderer::applyGpuLimits() {
   if (!m_viewState || m_gpuLimitsDeferred || !m_gpuLayer) return;
   m_viewState->setMinSpans(m_gpuLayer->minTimeSpanMs(), m_gpuLayer->minPriceSpan());
@@ -883,7 +882,7 @@ void UnifiedGridRenderer::followGpuLiveTo(int64_t openEnd) {
   emit liveRenderTick();
 }
 
-// Cold start (plan section 2): the first book top places the first viewport and
+// On cold start, the first book top places the first viewport and
 // the view is requested at once; the node draws the loading hatch until the newest
 // span lands. The price window uses initial_price_pct of kSeedBandRows rows at
 // kSeedBandTick.
@@ -1174,7 +1173,7 @@ std::optional<std::pair<double, double>> UnifiedGridRenderer::gpuFitPriceWindow(
   if (const double minSpan = m_viewState->minPriceSpan(); minSpan < centre) span = std::max(span, minSpan);
   const double maxSpan = m_viewState->maxPriceSpan();
   if (maxSpan > 0 && span > maxSpan) {
-    // Manual tick (owner decision 2026-10-02): the user's tick stays (never Auto,
+    // Manual tick: the user's tick stays (never Auto,
     // never coarsened); the candles need more than one row per pixel, so show what
     // the limit can, centred on the current price: book mid, last trade, newest close.
     span = maxSpan;
@@ -1192,8 +1191,8 @@ std::optional<std::pair<double, double>> UnifiedGridRenderer::gpuFitPriceWindow(
   const int H = chart_raster::devicePixels(height(), dpr);
   const double tick = m_gpuLayer ? m_gpuLayer->tickPrice() : 0.0;
   if (m_viewState->autoPriceScale() && m_gpuLayer && !m_gpuLayer->manualMode()) {
-    // Startup and symbol/timeframe switches have no resolution to solve against.
-    // This is expected; only a failed solve with current data warrants a warning.
+    // Startup and symbol/timeframe switches can lack a current resolution; a fit
+    // needs it, while a failed solve after resolution arrives warrants a warning.
     if (!m_gpuLayer->hasCurrentResolution()) return std::make_pair(lo, hi);
     if (onePrice && current > 0 && std::isfinite(current)) {
       // One price (hi == lo) has no new scale information. Keep the span and
@@ -1208,8 +1207,8 @@ std::optional<std::pair<double, double>> UnifiedGridRenderer::gpuFitPriceWindow(
       }
       return std::make_pair(low, high);
     }
-    // Every Auto price fit uses the same raw basis and candidate coverage rule.
-    // Publish the tick decision before setViewport notifies the renderer.
+    // Solve from the raw candle bounds and check coverage for each candidate's
+    // fitted window; publish its tick before setViewport notifies the renderer.
     const auto &settings = m_gpuLayer->settings();
     const auto fit = chart_raster::solveAutoPriceFit(lo, hi, H, m_gpuLayer->autoTickState(), m_gpuLayer->priceScale(),
         {settings.minRowPx, settings.hysteresis}, [&](int64_t units, double low, double high) {
@@ -1227,7 +1226,7 @@ std::optional<std::pair<double, double>> UnifiedGridRenderer::gpuFitPriceWindow(
       chart_raster::fitPriceToRows(lo, hi, H, tick);
     }
   } else {
-    // Frozen A2 path for Manual tick and auto scale off: rounded-centre placement
+    // Manual tick and auto scale off keep rounded-centre placement
     // and the P=1 clamp, including the Manual maximum-span behavior.
     const double priceSpan = hi - lo;
     if (H > 0 && std::isfinite(tick) && tick > 0 && std::isfinite(priceSpan) && priceSpan > 0) {
@@ -1531,7 +1530,7 @@ void UnifiedGridRenderer::wheelEvent(QWheelEvent *event) {
     event->ignore();
     return;
   }
-  // Shift+wheel scales price only (spec rule 2, as the lab); macOS delivers it as a
+  // Shift+wheel scales price only; macOS delivers it as a
   // horizontal delta, so whichever axis moved is used. A price zoom takes price over.
   const bool shift = event->modifiers() & Qt::ShiftModifier;
   const int angle = shift && event->angleDelta().y() == 0 ? event->angleDelta().x() : event->angleDelta().y();

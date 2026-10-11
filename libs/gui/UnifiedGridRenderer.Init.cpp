@@ -1,4 +1,4 @@
-// UnifiedGridRenderer init/data-thread wiring split from main TU.
+// UnifiedGridRenderer initialization and data-thread wiring.
 #include "UnifiedGridRenderer.h"
 
 #include "SentinelLogging.hpp"
@@ -23,7 +23,7 @@ void UnifiedGridRenderer::init() {
     m_timeAuthority.setActiveTimeframeMs(m_currentTimeframe_ms);
 
     m_viewState = std::make_unique<GridViewState>(this);
-    // S6b: the per-chart GPU heatmap layer (the only heatmap renderer since S8a).
+    // Each chart owns its GPU heatmap layer.
     m_gpuLayer = std::make_unique<heatmap::gpu::HeatmapGpuLayer>();
     m_gpuLayer->setTone({static_cast<float>(m_heatmapGamma), static_cast<float>(m_heatmapContrast),
                          static_cast<float>(m_heatmapShaderFloor)});

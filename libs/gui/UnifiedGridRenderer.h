@@ -116,8 +116,7 @@ private:
     FrameProfiler m_frameProfiler;  // SENTINEL_FRAME_PROFILE=1, render thread only
     QString m_activeSymbol;
 
-    // S6b GPU heatmap (the only heatmap renderer since S8a). GUI thread state,
-    // read in updatePaintNode (GUI blocked).
+    // Per-chart GPU heatmap state, read in updatePaintNode while the GUI is blocked.
     std::unique_ptr<heatmap::gpu::HeatmapGpuLayer> m_gpuLayer;
     bool m_gpuPriceKnown = false;   // the viewport's price window is real (not a placeholder)
     bool m_gpuReseedPrice = false;  // a symbol switch: the next book top centres price
@@ -259,7 +258,7 @@ private:
     bool m_chartTextAtlasBuilt = false;
     ChartTextRenderer m_chartTextRenderer;
     std::vector<ChartGlyphInstance> m_heatmapLabelGlyphs;
-    heatmap::gpu::HeatmapLabelLayout m_gpuLabels; // S7b: render thread (updatePaintNode)
+    heatmap::gpu::HeatmapLabelLayout m_gpuLabels; // render thread (updatePaintNode)
     uint64_t m_gpuLabelSerial = 0;
     std::vector<uint8_t> m_gpuLabelColumns;          // render thread: matched label columns (reused)
     std::atomic<uint64_t> m_gpuLabelSignature{0};    // what the last frame's labels drew
@@ -351,7 +350,7 @@ public:
     // The drawn tick (the GPU layer's).
     double heatmapTickSize() const;
 
-    // ── GPU heatmap renderer (S6b, docs/research/2026-10-s6-plan.md) ─────────
+    // ── GPU heatmap renderer ──
     // The process service (MainWindowGPU owns it; it outlives this item). nullptr
     // detaches the layer's controller (teardown).
     void setHeatmapService(heatmap::HeatmapDataService* service);
@@ -362,49 +361,21 @@ public:
     void setHeatmapChartSettings(const heatmap::HeatmapChartSettings& settings, bool explicitManualTick = false);
     void setHeatmapTickMemory(const heatmap::ManualTickMemory& memory);
     heatmap::gpu::HeatmapGpuLayer* gpuHeatmapLayer() const { return m_gpuLayer.get(); }
-    // Tests: the S7b label layout of the last gpu frame and its glyphs.
+    // Tests: the label layout of the last GPU frame and its glyphs.
     const heatmap::gpu::HeatmapLabelLayout& gpuLabelLayout() const { return m_gpuLabels; }
     const std::vector<ChartGlyphInstance>& gpuLabelGlyphs() const { return m_heatmapLabelGlyphs; }
     uint64_t gpuLabelSerial() const { return m_gpuLabelSerial; } // the LabelCells serial drawn (0: none)
 
     // ── Auto price scale and fits ──
-    // docs/research/2026-10-viewport-autoscale.md. Auto price scale (default on): the price range follows the visible candles' high/low (plus
-    // kFitPriceMargin each side) on every viewport change and on candle updates in
-    // view, inside the same setViewport (one viewportVersion step, none when the fit
-    // is unchanged); no vertical pan; the wheel zooms time. A price zoom turns it off;
-    // off, the price range stays where the user left it (also across timeframe
-    // switches). A symbol switch keeps the state: on fits the new symbol's candles,
-    // off carries the span as a fraction of the price with the current price at the
-    // same screen height.
+    // View and fit behavior: docs/ARCHITECTURE.md, "Coordinate system: TimeAxisMapping".
     bool autoPriceScale() const { return m_viewState && m_viewState->autoPriceScale(); }
-    // On: the price-axis double-click (fitPriceToData). Off: price stays put.
     void setAutoPriceScale(bool enabled);
-    // One viewport change (one viewportVersion step) per call; follow-live is kept.
-    // Time: the data's available range (recording availability, else the candle
-    // series), at most maxTimeSpanMs; following live (or when it all fits) it ends
-    // one padding past the live bucket, else it keeps the view centre inside the data.
-    // Price (turns auto price scale on): the visible candles' high/low plus a
-    // kFitPriceMargin margin each side, inside the min/max price spans (when the Manual
-    // max cuts it, the max span centred on the current price: book mid, last trade,
-    // newest close); no visible candle: the span kept, centred on the live price (book
-    // mid, last trade, decoded data).
     Q_INVOKABLE bool fitView(bool time, bool price);
     Q_INVOKABLE bool fitTimeToData() { return fitView(true, false); }
     Q_INVOKABLE bool fitPriceToData() { return fitView(false, true); }
-    // The default view (time-axis double-click): auto price scale on, follow-live on,
-    // the initial span (initial_column_px per bar) ending one padding past the live
-    // bucket, price fitted. One viewport change; false while no live anchor is known.
     Q_INVOKABLE bool resetView();
     static constexpr double kFitPriceMargin = 0.06;
-    // A pending auto-off symbol carry waits this long after the new symbol's first
-    // usable price for its recorded price scale; then (live-only symbol) it is applied
-    // from the live price with no Manual max span.
     static constexpr int kCarryLiveOnlyWaitMs = 2000;
-    // POST /api/v1/viewport (validated by AgentApiCodec). The flags and the final
-    // window are resolved first and committed as ONE viewport change. Explicit price
-    // bounds (even equal to the current ones) turn auto price scale and follow-live
-    // off; autoScale:true fits (candles, else the live price); fit stands alone.
-    // Returns an empty string, or the error code (fit_unavailable, viewport_unavailable).
     struct ViewportRequest {
         std::optional<qint64> startMs, endMs;
         std::optional<double> priceMin, priceMax;
@@ -542,10 +513,10 @@ protected:
 private:
     void buildMsdfAtlas();
     void connectDataProcessorSignals();
+    void publishTradeBubbleFrame(const TimeAxisMapping& mapping);
     // The one root: a plain QSGNode whose first child is an opacity node holding
     // the HeatmapTileNode (opacity 0 blocks it while the heatmap layer is off);
     // overlays and text follow it as later children (drawn on top).
-    void publishTradeBubbleFrame(const TimeAxisMapping& mapping);
     QSGNode* ensureGpuRootNode(QSGNode* oldNode, heatmap::gpu::HeatmapTileNode** tile);
     QSGNode* updateGpuPaintNode(QSGNode* oldNode, FrameContext& frame, bool profile);
     void updateGpuLabels(const FrameContext& frame, bool prepared);

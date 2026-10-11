@@ -1,4 +1,4 @@
-// UnifiedGridRenderer render-thread hot path split from main TU.
+// UnifiedGridRenderer render-thread frame preparation and drawing.
 #include "UnifiedGridRenderer.h"
 
 #include "SentinelLogging.hpp"
@@ -74,7 +74,7 @@ void UnifiedGridRenderer::renderTradeOverlays(
                         frame.raster, frame.surfaceDpr, snap.x, snap.y, frame.surfaceBounds);
 }
 
-// ── GPU heatmap (S6b) ─────────────────────────────────────────────────────────
+// ── GPU heatmap ──
 QSGNode* UnifiedGridRenderer::ensureGpuRootNode(QSGNode* oldNode, heatmap::gpu::HeatmapTileNode** tile) {
     auto* root = oldNode;
     if (!root) {
@@ -109,8 +109,8 @@ chart_raster::RasterInputs UnifiedGridRenderer::rasterInputs(const FrameViewport
     return in;
 }
 
-// Whole-pixel mapping (docs/research/2026-10-08-whole-pixel-mapping.md): one raster
-// camera per frame at the layer's tick; every layer maps through toMapping(camera).
+// One raster camera per frame at the layer's tick; every layer maps through
+// toMapping(camera).
 // Plain arithmetic on the render thread (GUI blocked): no allocation.
 void UnifiedGridRenderer::computeGpuFrameMapping(FrameContext& frame) {
     const double tick = m_gpuLayer->tickPrice();
@@ -156,7 +156,7 @@ void UnifiedGridRenderer::computeGpuFrameMapping(FrameContext& frame) {
     }
 }
 
-// S7b liquidity labels: the layer's matched LabelCells, laid out by the reused
+// Liquidity labels: the layer's matched LabelCells, laid out by the reused
 // HeatmapLabelLayout (no per-frame allocation), submitted as low-priority text.
 void UnifiedGridRenderer::updateGpuLabels(const FrameContext& frame, bool prepared) {
     if (m_heatmapLabelGlyphs.capacity() < heatmap::gpu::HeatmapLabelLayout::kMaxGlyphs)
@@ -193,8 +193,8 @@ void UnifiedGridRenderer::updateGpuLabels(const FrameContext& frame, bool prepar
     m_chartTextRenderer.submitGlyphs(m_heatmapLabelGlyphs, ChartTextRenderer::Priority::Low);
 }
 
-// Steps 1-3 of the frame (whole-pixel plan section 1.9) and the publication, on the
-// render thread with the GUI blocked, before any item syncs (beforeSynchronizing): every
+// Prepare and publish the frame on the render thread with the GUI blocked,
+// before any item syncs (beforeSynchronizing): every
 // sibling overlay that reads currentFrameContext() in its own updatePaintNode (candles,
 // algo, paper trading) maps through the camera the heatmap draws in this frame, in
 // whatever order Qt syncs the items. Plain data and arithmetic: no allocation.
@@ -208,7 +208,7 @@ void UnifiedGridRenderer::prepareSyncFrame() {
         boundingRect(), window(), m_frameClock, m_timeAuthority, m_viewState.get(),
         m_heatmapLayerEnabled, m_footprintLayerEnabled, m_tpoLayerEnabled);
     if (profile) m_frameProfiler.mark(FrameProfiler::Context);
-    // 1-2. The tick for the continuous view (committed + an active drag at the
+    // Choose the tick for the continuous view (committed + an active drag at the
     // continuous scale): Auto decides on the continuous camera.
     const auto& vp = frame.viewport;
     const double timeSpan = double(vp.timeEnd - vp.timeStart), priceSpan = vp.maxPrice - vp.minPrice;
@@ -221,8 +221,8 @@ void UnifiedGridRenderer::prepareSyncFrame() {
         m_gpuLayer->chooseTickForView({double(vp.timeStart) + dt, double(vp.timeEnd) + dt, vp.minPrice + dp,
                                        vp.maxPrice + dp});
     }
-    // 3. The raster camera at that tick (rows follow the drawn tick: heatmapTickSize,
-    // PriceAxisModel), the frame's mapping, published.
+    // Publish the raster camera and frame mapping at that tick, so rows follow
+    // the drawn tick in heatmapTickSize and PriceAxisModel.
     computeGpuFrameMapping(frame);
     publishFrameContext(frame);
     if (profile) m_frameProfiler.mark(FrameProfiler::Mapping);
@@ -232,7 +232,7 @@ void UnifiedGridRenderer::prepareSyncFrame() {
 QSGNode* UnifiedGridRenderer::updateGpuPaintNode(QSGNode* oldNode, FrameContext& frame, bool profile) {
     heatmap::gpu::HeatmapTileNode* tile = nullptr;
     QSGNode* root = ensureGpuRootNode(oldNode, &tile);
-    // 4. The node draws the camera's window: rows and columns on device pixel edges.
+    // The node draws the camera's window: rows and columns on device pixel edges.
     heatmap::gpu::HeatmapTileNode::Frame tileFrame;
     const auto& cam = frame.raster;
     std::optional<heatmap::gpu::ViewWindow> binView;
@@ -299,5 +299,5 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     frame.selectionEpoch = m_controlSelectionEpoch.load(std::memory_order_acquire);
     frame.viewportVersion = m_controlViewportVersion.load(std::memory_order_acquire);
     frame.frameId = ++m_nextFrameId;
-    return updateGpuPaintNode(oldNode, frame, FrameProfiler::enabled()); // the one root path (S8a)
+    return updateGpuPaintNode(oldNode, frame, FrameProfiler::enabled()); // the one root path
 }
