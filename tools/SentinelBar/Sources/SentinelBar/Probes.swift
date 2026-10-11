@@ -27,8 +27,10 @@ struct Service: Identifiable {
 }
 
 enum Shell {
-    /// Runs a command and returns stdout, or nil if it failed to start, timed out or exited non-zero.
-    static func run(_ exe: String, _ args: [String], cwd: String? = nil, timeout: TimeInterval = 15) -> String? {
+    /// Runs a command and returns stdout, or nil if it failed to start, timed out or exited non-zero
+    /// (`anyExit` keeps the output of a non-zero exit, e.g. lsof when one pid has gone).
+    static func run(_ exe: String, _ args: [String], cwd: String? = nil, timeout: TimeInterval = 15,
+                    anyExit: Bool = false) -> String? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: exe)
         p.arguments = args
@@ -43,7 +45,7 @@ enum Shell {
         DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { if p.isRunning { p.terminate() } }
         let data = out.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
-        guard p.terminationReason == .exit, p.terminationStatus == 0 else { return nil }
+        guard p.terminationReason == .exit, anyExit || p.terminationStatus == 0 else { return nil }
         return String(data: data, encoding: .utf8)
     }
 }

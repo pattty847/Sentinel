@@ -6,6 +6,7 @@ import SwiftUI
 final class Monitor: ObservableObject {
     @Published var queue: [QueueEntry] = []
     @Published var worktrees: [Worktree] = []
+    @Published var agents: [AgentJob] = []
     @Published var services: [Service]
     @Published var budget: [String]? = nil
     @Published var budgetLoaded = false
@@ -33,11 +34,13 @@ final class Monitor: ObservableObject {
     func refresh() async {
         let repo = repo, dir = queueDir
         async let q = Task.detached { Probes.buildQueue(dir: dir) }.value
-        async let w = Task.detached { Probes.worktrees(repo: repo) }.value
+        let w = await Task.detached { Probes.worktrees(repo: repo) }.value
+        async let a = Task.detached { AgentProbe.scan(worktrees: w) }.value
         var updated = services
         for i in updated.indices { updated[i].up = await Probes.isUp(updated[i].url) }
         queue = await q
-        worktrees = await w
+        worktrees = w
+        agents = await a
         services = updated
         lastRefresh = Date()
     }
@@ -68,16 +71,22 @@ struct SentinelBarApp: App {
 struct BarLabel: View {
     @ObservedObject var monitor: Monitor
 
+    private var labelText: String {
+        var parts: [String] = []
+        if !monitor.agents.isEmpty { parts.append("\(monitor.agents.count)") }
+        if !monitor.queue.isEmpty { parts.append("q\(monitor.queue.count)") }
+        return parts.joined(separator: " ")
+    }
+
     var body: some View {
         if monitor.alert {
             Image(systemName: "exclamationmark.triangle.fill")
-        } else if monitor.queue.isEmpty {
+        } else if monitor.agents.isEmpty && monitor.queue.isEmpty {
             Image(systemName: "waveform.path.ecg")
         } else {
-            HStack(spacing: 2) {
-                Image(systemName: "hammer.fill")
-                Text("\(monitor.queue.count)")
-            }
+            // One string: menu bar labels render a single image plus text reliably, not nested stacks.
+            Label(labelText, systemImage: monitor.queue.isEmpty ? "cpu" : "hammer.fill")
+                .labelStyle(.titleAndIcon)
         }
     }
 }
@@ -87,6 +96,10 @@ struct StatusPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            section("Agents") {
+                if m.agents.isEmpty { dim("none running") }
+                ForEach(m.agents) { a in AgentRow(job: a) }
+            }
             section("Build queue") {
                 if m.queue.isEmpty { dim("empty") }
                 ForEach(m.queue) { e in
@@ -144,7 +157,7 @@ struct StatusPanel: View {
             }
         }
         .padding(12)
-        .frame(width: 360)
+        .frame(width: 420)
     }
 
     private func section<C: View>(_ title: String, @ViewBuilder _ content: () -> C) -> some View {
@@ -181,5 +194,26 @@ struct LoginToggle: View {
                 if enable { try? SMAppService.mainApp.register() } else { try? SMAppService.mainApp.unregister() }
                 on = SMAppService.mainApp.status == .enabled
             }
+    }
+}
+
+struct AgentRow: View {
+    let job: AgentJob
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack {
+                Image(systemName: job.kind == "codex" ? "chevron.left.forwardslash.chevron.right" : "sparkle")
+                    .foregroundStyle(job.kind == "codex" ? .blue : .orange)
+                Text(job.model.map { "\(job.kind) \($0)" } ?? job.kind).bold()
+                Text(job.worktree ?? (job.cwd as NSString).lastPathComponent)
+                    .lineLimit(1).truncationMode(.middle).foregroundStyle(.secondary)
+                Spacer()
+                if let t = job.lastActive { Text(t, style: .relative).monospacedDigit().foregroundStyle(.secondary) }
+            }
+            Text(job.step ?? "no transcript found").font(.caption).lineLimit(2)
+                .foregroundStyle(job.step == nil ? .tertiary : .secondary)
+        }
+        .help("pid \(job.pid), up \(job.elapsed)\n\(job.cwd)")
     }
 }
