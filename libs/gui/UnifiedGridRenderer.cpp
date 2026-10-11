@@ -55,7 +55,8 @@ bool envIntValue(const char *name, int &out) {
 
 chart::SurfaceFacts chart::HeatmapChartPort::surface() const {
   if (!layer_) return {};
-  return {item_.width(), item_.height(), item_.window() ? item_.window()->effectiveDevicePixelRatio() : 1.0};
+  const auto window = [this] { return item_.window(); };
+  return {item_.width(), item_.height(), window() ? window()->effectiveDevicePixelRatio() : 1.0};
 }
 
 std::optional<heatmap::gpu::ViewWindow> chart::HeatmapChartPort::restView() const {
@@ -310,7 +311,7 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
   sLog_Render("active symbol changed, clearing chart data: prev=" << m_view->session().symbol
               << " symbol=" << normalized);
   endZoomGlide();
-  m_zoomGesture = false;
+  m_view->glide().gesture = false;
   // Auto price scale off: carry the zoom as a fraction of the price, with the current
   // price at the same height, onto the new symbol's first price (seedGpuViewport).
   // A symbol that never got its own price (m_view->flags().reseedPrice) still shows an earlier
@@ -461,7 +462,7 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
                 << " tfMs=" << timeframe_ms);
     // A zoom glide or gesture lands first (the switch rescales the view).
     endZoomGlide();
-    m_zoomGesture = false;
+    m_view->glide().gesture = false;
     // What is drawn before the switch (the raster camera at the old timeframe): the Now
     // column keeps its drawn position, not its position in the stored bounds.
     const auto drawnBefore = rasterCameraNow(false);
@@ -525,7 +526,7 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
           // follow-live keeps that padding; when a cap changed it (a column is at most tf
           // px, at least one per px), the chart re-lays out at the nominal live end.
           const int64_t tf = timeframe_ms;
-          const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
+          const auto surface = m_heatmapPort->surface();
           const chart_raster::RasterStep previous = m_published.step();
           auto restAt = [&](int64_t e) {
             auto vp = FrameContextBuilder::viewportSnapshot(getViewState());
@@ -533,7 +534,7 @@ void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
             vp.timeEnd = e;
             vp.dragging = false;
             vp.anchorFracX = 1.0;
-            return chart_raster::computeRaster(rasterInputs(vp, m_gpuLayer->tickPrice(), width(), height(), dpr),
+            return chart_raster::computeRaster(m_view->camera().rasterInputs(vp, m_gpuLayer->tickPrice(), surface),
                                                previous);
           };
           if (const auto dest = restAt(nominal); dest.valid && dest.colPx == drawnBefore.colPx) {
@@ -799,29 +800,6 @@ void UnifiedGridRenderer::syncGpuSurface() {
   refitAutoPrice(); // raw row height and candidate pixel phases follow the surface
 }
 
-bool UnifiedGridRenderer::rasterPanShift(QPointF drag, qint64& timeShiftMs, double& priceShift) const {
-  if (!getViewState() || !m_gpuLayer) return false;
-  auto viewport = FrameContextBuilder::viewportSnapshot(getViewState());
-  viewport.dragging = false; // the committed view; panShift applies the drag
-  const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
-  chart_raster::RasterStep previous = m_published.step();
-  // An axis that glides is committed against its fixed end (its tick and whole pixels,
-  // the predicted tick before it commits): the committed view then reproduces the end
-  // translated by the dragged pixels (endPanAt moves the end by them). An axis at rest
-  // uses the rest camera.
-  double tick = m_gpuLayer->tickPrice();
-  if (m_glidePrice.active && m_glidePrice.end.valid) {
-    tick = m_glidePrice.end.tick;
-    previous.rowPx = m_glidePrice.end.rowPx;
-  }
-  if (m_glideTime.active && m_glideTime.end.valid) previous.colPx = m_glideTime.end.colPx;
-  const auto in = rasterInputs(viewport, tick, width(), height(), dpr);
-  int64_t time = 0;
-  if (!chart_raster::panShift(in, previous, drag, time, priceShift)) return false;
-  timeShiftMs = time;
-  return true;
-}
-
 // Follow-live from LiveSnapshot::openEndMs: the view end stays one padding past
 // the live bucket's end.
 void UnifiedGridRenderer::followGpuLive() {
@@ -854,8 +832,8 @@ void UnifiedGridRenderer::followGpuLiveTo(int64_t openEnd) {
   const int64_t shift = chart_raster::followShift(end, target, tf, cam.valid ? cam.colPx : 0);
   if (shift <= 0) return; // the live bucket is inside the padded view
   // A glide in flight on time moves with the view (the same world shift at both ends).
-  if (m_glideTime.active) {
-    auto& g = m_glideTime;
+  if (m_view->glide().time.active) {
+    auto& g = m_view->glide().time;
     g.from = chart_raster::shiftedRaster(g.from, -double(shift) * g.from.pxPerMs(), 0);
     g.end = chart_raster::shiftedRaster(g.end, -double(shift) * g.end.pxPerMs(), 0);
     g.anchorTime += double(shift);
@@ -1020,7 +998,7 @@ void UnifiedGridRenderer::setCandleBuffer(QObject* buffer) {
                                   if (timeframeSec != std::max<int64_t>(1, (tf + 500) / 1000)) return;
                                   // The window drawn on screen (a drag commits only at release).
                                   const auto [shownStart, shownEnd] = getViewState()->displayedTimeWindow();
-                                  const auto [drawnStart, drawnEnd] = drawnTimeWindow(shownStart, shownEnd);
+                                  const auto [drawnStart, drawnEnd] = m_view->camera().drawnTimeWindow(shownStart, shownEnd);
                                   const qint64 viewStart =
                                       recording::floorDiv(static_cast<qint64>(std::floor(drawnStart)), tf) * tf;
                                   if (std::max(dirtyEnd, dirtyStart + tf) <= viewStart || double(dirtyStart) >= drawnEnd)
@@ -1072,27 +1050,6 @@ std::optional<std::pair<qint64, qint64>> UnifiedGridRenderer::gpuFitTimeWindow()
   return std::make_pair<qint64, qint64>(qint64(start), start + span);
 }
 
-std::pair<double, double> UnifiedGridRenderer::drawnTimeWindow(qint64 start, qint64 end,
-                                                               std::optional<double> anchorFracX) const {
-  if (!getViewState() || !m_gpuLayer || !(end > start)) return {double(start), double(end)};
-  auto viewport = FrameContextBuilder::viewportSnapshot(getViewState());
-  viewport.valid = true;
-  viewport.timeStart = start;
-  viewport.timeEnd = end;
-  viewport.dragging = false; // a drag is already in [start, end] (displayedTimeWindow)
-  if (!(viewport.maxPrice > viewport.minPrice)) { // the time window does not depend on price
-    viewport.minPrice = 0.0;
-    viewport.maxPrice = 1.0;
-  }
-  if (anchorFracX) viewport.anchorFracX = *anchorFracX;
-  const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
-  const chart_raster::RasterStep previous = m_published.step();
-  const auto cam = chart_raster::computeRaster(rasterInputs(viewport, m_gpuLayer->tickPrice(), width(), height(), dpr),
-                                               previous);
-  if (!cam.valid) return {double(start), double(end)};
-  return {cam.drawnStartMs, cam.drawnEndMs};
-}
-
 std::optional<std::pair<double, double>> UnifiedGridRenderer::gpuFitPriceWindow(qint64 start, qint64 end,
                                                                                 bool candlesOnly,
                                                                                 std::optional<double> anchorFracX) {
@@ -1100,7 +1057,7 @@ std::optional<std::pair<double, double>> UnifiedGridRenderer::gpuFitPriceWindow(
   double lo = 0, hi = 0, centre = 0, span = 0;
   // The candles the window draws: the raster camera's time window (wider or narrower
   // than [start, end] by the column rounding), as the candle overlay selects them.
-  const auto [drawnStart, drawnEnd] = drawnTimeWindow(start, end, anchorFracX);
+  const auto [drawnStart, drawnEnd] = m_view->camera().drawnTimeWindow(start, end, anchorFracX);
   const qint64 first = static_cast<qint64>(std::floor(drawnStart)), last = static_cast<qint64>(std::ceil(drawnEnd));
   // From the bucket that contains the view start: getVisibleSlice selects by bar
   // start, and the candle that starts before the view and ends inside it counts.
@@ -1245,7 +1202,7 @@ void UnifiedGridRenderer::setAutoPriceScale(bool enabled) {
 
 bool UnifiedGridRenderer::fitView(bool time, bool price) {
   endZoomGlide();
-  m_zoomGesture = false;
+  m_view->glide().gesture = false;
   if (!m_gpuLayer || !getViewState() || !getViewState()->isTimeWindowValid() || (!time && !price) ||
       getViewState()->isDragging()) {
     sLog_Render("view fit skipped: time=" << time << " price=" << price);
@@ -1287,7 +1244,7 @@ bool UnifiedGridRenderer::fitView(bool time, bool price) {
 QString UnifiedGridRenderer::applyViewportRequest(const ViewportRequest& request) {
   if (!getViewState()) return QStringLiteral("viewport_unavailable");
   endZoomGlide();
-  m_zoomGesture = false;
+  m_view->glide().gesture = false;
   if (!request.fit.isEmpty()) {
     const bool time = request.fit != "price", price = request.fit != "time";
     const bool ok = request.fit == "default" ? resetView() : fitView(time, price);
@@ -1346,7 +1303,7 @@ QString UnifiedGridRenderer::applyViewportRequest(const ViewportRequest& request
 
 bool UnifiedGridRenderer::resetView() {
   endZoomGlide();
-  m_zoomGesture = false;
+  m_view->glide().gesture = false;
   if (!m_gpuLayer || !getViewState() || !getViewState()->isTimeWindowValid() ||
       getViewState()->isDragging())
     return false;
@@ -1600,7 +1557,7 @@ void UnifiedGridRenderer::addTrade(const Trade &trade) {
 void UnifiedGridRenderer::setViewport(qint64 timeStart, qint64 timeEnd,
                                       double priceMin, double priceMax) {
   endZoomGlide(); // an explicit view lands any zoom glide or gesture
-  m_zoomGesture = false;
+  m_view->glide().gesture = false;
   if (priceMax > priceMin) {
     // An explicit viewport (Agent API, QML) is a real price window: no book-top
     // seed replaces it.
@@ -1666,7 +1623,7 @@ void UnifiedGridRenderer::endPanAt() {
     // A glide in flight: the release commits the dragged whole pixels, so both of its
     // ends move by them too (the picture stays where the drag left it).
     const double dx = double(std::llround(drag.x() * dpr)), dy = double(std::llround(drag.y() * dpr));
-    for (AxisGlide* g : {&m_glideTime, &m_glidePrice})
+    for (chart::AxisGlide* g : {&m_view->glide().time, &m_view->glide().price})
       if (g->active) {
         g->from = chart_raster::shiftedRaster(g->from, dx, dy);
         g->end = chart_raster::shiftedRaster(g->end, dx, dy);

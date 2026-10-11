@@ -89,43 +89,20 @@ QSGNode* UnifiedGridRenderer::ensureGpuRootNode(QSGNode* oldNode, heatmap::gpu::
     return root;
 }
 
-chart_raster::RasterInputs UnifiedGridRenderer::rasterInputs(const FrameViewportSnapshot& viewport, double tick,
-                                                             double width, double height, double dpr) const {
-    chart_raster::RasterInputs in;
-    if (!viewport.valid) return in;
-    in.timeStart = viewport.timeStart;
-    in.timeEnd = viewport.timeEnd;
-    in.minPrice = viewport.minPrice;
-    in.maxPrice = viewport.maxPrice;
-    in.dragLogicalPx = viewport.dragging ? viewport.panVisualOffset : QPointF();
-    in.tfMs = static_cast<double>(m_view->session().timeframeMs);
-    in.tick = tick;
-    in.itemWidthLogical = width;
-    in.itemHeightLogical = height;
-    in.dpr = dpr;
-    in.anchorFracX = viewport.anchorFracX;
-    in.anchorFracY = viewport.anchorFracY;
-    return in;
-}
-
 // One raster camera per frame at the layer's tick; every layer maps through
 // toMapping(camera).
 // Plain arithmetic on the render thread (GUI blocked): no allocation.
 void UnifiedGridRenderer::computeGpuFrameMapping(FrameContext& frame) {
     const double tick = m_gpuLayer->tickPrice();
-    const auto in = rasterInputs(frame.viewport, tick, width(), height(), frame.surfaceDpr);
+    const auto in = m_view->camera().rasterInputs(frame.viewport, tick, {width(), height(), frame.surfaceDpr});
     const chart_raster::RasterStep previous = m_published.step();
     // The rest camera (whole pixels), and what this frame draws: the rest camera, or a
     // free one during a zoom glide or gesture (fractional, drawn with coverage).
-    const Cameras cameras = camerasFor(in, previous);
+    const chart::Cameras cameras = chart::camerasFor({in, previous, m_view->glide()});
     frame.raster = cameras.drawn;
     frame.mapping = chart_raster::toMapping(frame.raster);
     m_sync.coverageGamma = cameras.drawn.valid && cameras.drawn.free ? 2.2f : 0.0f;
-    m_sync.hasBinView = cameras.hasBinView;
-    m_sync.binTimeLo = cameras.binTimeLo;
-    m_sync.binTimeHi = cameras.binTimeHi;
-    m_sync.binPriceLo = cameras.binPriceLo;
-    m_sync.binPriceHi = cameras.binPriceHi;
+    m_sync.binView = cameras.binView;
     const auto& cam = cameras.rest;
     if (!cam.valid) return;
     if (cam.step() != previous) m_published.setStep(cam.step());
@@ -229,8 +206,8 @@ QSGNode* UnifiedGridRenderer::updateGpuPaintNode(QSGNode* oldNode, FrameContext&
     heatmap::gpu::HeatmapTileNode::Frame tileFrame;
     const auto& cam = frame.raster;
     std::optional<heatmap::gpu::ViewWindow> binView;
-    if (m_sync.hasBinView) binView = heatmap::gpu::ViewWindow{m_sync.binTimeLo, m_sync.binTimeHi, m_sync.binPriceLo,
-                                                              m_sync.binPriceHi};
+    if (m_sync.binView) binView = heatmap::gpu::ViewWindow{m_sync.binView->timeLo, m_sync.binView->timeHi,
+                                                          m_sync.binView->priceLo, m_sync.binView->priceHi};
     const bool prepared =
         m_sync.drawHeatmap && cam.valid &&
         m_gpuLayer->prepareFrame(tileFrame, frame.surfaceBounds,

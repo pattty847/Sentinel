@@ -1,6 +1,6 @@
 #pragma once
 
-#include "chart/core/ChartPorts.hpp"
+#include "chart/core/ChartCamera.hpp"
 #include "render/GridViewState.hpp"
 
 #include <QObject>
@@ -33,7 +33,8 @@ struct InitialViewSettings {
 class ChartViewController : public QObject {
     Q_OBJECT
 public:
-    ChartViewController(IChartEnvironment& environment, IHeatmapViewSink& sink, QObject* parent = nullptr);
+    ChartViewController(IChartEnvironment& environment, IHeatmapViewSink& sink,
+                        const ITickOracle& ticks, const PublishedFrame& published, QObject* parent = nullptr);
 
     GridViewState* viewPtr() const { return view_.get(); }
     ChartSession& session() { return session_; }
@@ -42,6 +43,11 @@ public:
     const PlacementFlags& flags() const { return flags_; }
     InitialViewSettings& initialViewSettings() { return initialViewSettings_; }
     const InitialViewSettings& initialViewSettings() const { return initialViewSettings_; }
+
+    ZoomGlideState& glide() { return glide_; }
+    const ZoomGlideState& glide() const { return glide_; }
+    ChartCamera& camera() { return camera_; }
+    const ChartCamera& camera() const { return camera_; }
 
     void applyGpuLimits();
     void syncGpuView();
@@ -56,6 +62,8 @@ private:
     ChartSession session_;
     PlacementFlags flags_;
     InitialViewSettings initialViewSettings_;
+    ZoomGlideState glide_;
+    ChartCamera camera_;
 };
 
 } // namespace chart

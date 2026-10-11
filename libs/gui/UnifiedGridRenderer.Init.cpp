@@ -25,7 +25,7 @@ void UnifiedGridRenderer::init() {
     // Each chart owns its GPU heatmap layer.
     m_gpuLayer = std::make_unique<heatmap::gpu::HeatmapGpuLayer>();
     m_heatmapPort = std::make_unique<chart::HeatmapChartPort>(*this, *m_gpuLayer);
-    m_view = std::make_unique<chart::ChartViewController>(*m_heatmapPort, *m_heatmapPort, this);
+    m_view = std::make_unique<chart::ChartViewController>(*m_heatmapPort, *m_heatmapPort, *m_heatmapPort, m_published, this);
     m_view->session().timeframeMs = defaultTimeframeMs;
     m_gpuLayer->setTone({static_cast<float>(m_heatmapGamma), static_cast<float>(m_heatmapContrast),
                          static_cast<float>(m_heatmapShaderFloor)});
@@ -108,7 +108,7 @@ void UnifiedGridRenderer::init() {
     // Whole-pixel mapping: a drag commits exactly the whole device pixels it shows, and
     // a zoom keeps what is drawn under the cursor.
     getViewState()->setPanShift([this](QPointF drag, qint64& timeShiftMs, double& priceShift) {
-        return rasterPanShift(drag, timeShiftMs, priceShift);
+        return m_view->camera().panShift(drag, timeShiftMs, priceShift);
     });
     connect(getViewState(), &GridViewState::priceInteracted, this, [this]() {
         m_priceCarry.reset(); // the user owns price now: no pending carry replaces it
