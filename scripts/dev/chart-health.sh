@@ -56,23 +56,23 @@ def self_test(script):
             return 1
         path = root / "libs/gui/UnifiedGridRenderer.cpp"
         code = path.read_text()
-        needle = "UnifiedGridRenderer::gpuFitPriceWindow(qint64 start, qint64 end,"
+        needle = "UnifiedGridRenderer::wheelEvent(QWheelEvent *event)"
         start = code.find(needle)
         if start < 0:
             print("chart-health: self-test function missing", file=sys.stderr)
             return 1
         brace = code.find("{", start)
-        path.write_text(code[:brace + 1] + "\n  if (start == end) {}\n" + code[brace + 1:])
+        path.write_text(code[:brace + 1] + "\n" + "  if (event) {}\n" * 16 + code[brace + 1:])
         run(["git", "add", "libs/gui/UnifiedGridRenderer.cpp"], cwd=root)
-        run(["git", "commit", "-qm", "add one branch"], cwd=root, env=env)
+        run(["git", "commit", "-qm", "exceed the branch limit"], cwd=root, env=env)
         changed = run([str(script)], cwd=root, check=False)
-        if changed.returncode != 1 or "FAIL complexity" not in changed.stdout or "gpuFitPriceWindow" not in changed.stdout:
+        if changed.returncode != 1 or "FAIL complexity" not in changed.stdout or "wheelEvent" not in changed.stdout:
             print(changed.stdout + changed.stderr, end="", file=sys.stderr)
             print("chart-health: self-test complexity branch was not rejected", file=sys.stderr)
             return 1
         run(["git", "switch", "-qc", "moved", "main"], cwd=root)
         code = path.read_text()
-        start = code.index("std::optional<std::pair<double, double>> UnifiedGridRenderer::gpuFitPriceWindow(")
+        start = code.index("void UnifiedGridRenderer::wheelEvent(")
         brace = code.index("{", start)
         depth = 0
         for end in range(brace, len(code)):
@@ -82,7 +82,7 @@ def self_test(script):
         else:
             print("chart-health: self-test could not find function end", file=sys.stderr)
             return 1
-        moved_file = root / "libs/gui/chart/core/PriceFitter.cpp"
+        moved_file = root / "libs/gui/chart/shell/WheelEvent.cpp"
         moved_file.parent.mkdir(parents=True)
         moved_file.write_text(code[start:end + 1] + "\n")
         path.write_text(code[:start] + code[end + 1:])

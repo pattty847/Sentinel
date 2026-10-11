@@ -1,0 +1,196 @@
+#include "chart/core/LivePlacement.hpp"
+#include "chart/core/ChartViewController.hpp"
+#include "chart/core/PublishedFrame.hpp"
+#include <gtest/gtest.h>
+#include <limits>
+
+namespace {
+struct Environment final : chart::IChartEnvironment, chart::ITickOracle, chart::IHeatmapViewSink {
+    chart::SurfaceFacts size{800, 400, 1};
+    int64_t anchor = 10000;
+    int syncs = 0;
+    bool attached() const override { return true; }
+    chart::SurfaceFacts surface() const override { return size; }
+    double drawnTick() const override { return 1; }
+    double priceScale() const override { return 1; }
+    bool manualTick() const override { return false; }
+    bool hasCurrentResolution() const override { return false; }
+    bool priceScaleCurrent() const override { return true; }
+    chart::SpanLimits limits() const override { return {}; }
+    int64_t liveAnchorMs() const override { return anchor; }
+    int64_t liveOpenEndMs() const override { return anchor; }
+    int64_t oldestAvailableMs() const override { return 0; }
+    double recentMidPrice() const override { return 100; }
+    std::optional<heatmap::gpu::ViewWindow> restView() const override { return std::nullopt; }
+    int64_t predictTickUnits(const heatmap::gpu::ViewWindow&) const override { return 1; }
+    bool buildsTick(int64_t, const heatmap::gpu::ViewWindow&) const override { return true; }
+    int64_t autoTickState() const override { return 1; }
+    heatmap::AutoTickParams autoTickParams() const override { return {1, .1}; }
+    bool setAutoPriceTick(std::optional<int64_t>) override { return false; }
+    void setView(const heatmap::gpu::ViewWindow&, bool) override { ++syncs; }
+};
+using Placement = chart::LivePlacement;
+struct Timer final : chart::ILivePlacementTimer {
+    bool active = false;
+    int interval = 0;
+    std::function<void()> fire;
+    void setInterval(int ms) override { interval = ms; }
+    bool isActive() const override { return active; }
+    void start() override { active = true; }
+    void stop() override { active = false; }
+};
+struct LivePlacementTest : testing::Test {
+    Environment env;
+    chart::PublishedFrame published;
+    chart::ChartViewController controller{env, env, env, published};
+    Placement& live = controller.livePlacement();
+    Timer* timer = nullptr;
+    GridViewState& view = *controller.viewPtr();
+    std::vector<std::string> events;
+    void SetUp() override {
+        controller.session().symbol = "TEST";
+        controller.session().timeframeMs = 1000;
+        view.setViewportSize(800, 400);
+        view.setAutoPriceScale(false);
+        live.setTimingForTest([] { return 10000; }, [this](std::function<void()> timeout) {
+            auto owned = std::make_unique<Timer>();
+            timer = owned.get();
+            timer->fire = std::move(timeout);
+            return owned;
+        });
+        QObject::connect(&live, &Placement::liveRenderTick, &live, [this] { events.push_back("tick"); }, Qt::DirectConnection);
+        QObject::connect(&live, &Placement::updateRequested, &live, [this] { events.push_back("update"); }, Qt::DirectConnection);
+        QObject::connect(&live, &Placement::autoScrollEnabledChanged, &live, [this] { events.push_back("changed"); }, Qt::DirectConnection);
+    }
+    void window(qint64 start, qint64 end) {
+        EXPECT_EQ(view.getVisibleTimeStart(), start);
+        EXPECT_EQ(view.getVisibleTimeEnd(), end);
+    }
+};
+TEST_F(LivePlacementTest, FollowTarget) {
+    view.setViewport(1000, 11000, 90, 110);
+    view.enableAutoScroll(true);
+    live.followGpuLiveTo(12000);
+    window(3000, 13000);
+    EXPECT_EQ(events, (std::vector<std::string>{"tick"}));
+    live.followGpuLiveTo(11000); // never step backwards
+    window(3000, 13000);
+    view.enableAutoScroll(false);
+    live.followGpuLiveTo(20000);
+    window(3000, 13000);
+    EXPECT_EQ(events.size(), 1);
+}
+TEST_F(LivePlacementTest, SeedViewport) {
+    live.seedGpuViewport(99, 101);
+    window(-81000, 19000);
+    EXPECT_DOUBLE_EQ(view.getMinPrice(), 100 - 102.4 * .5);
+    EXPECT_DOUBLE_EQ(view.getMaxPrice(), 100 + 102.4 * .5);
+    EXPECT_TRUE(controller.flags().priceKnown);
+    EXPECT_TRUE(controller.flags().pristine);
+    EXPECT_FALSE(controller.flags().reseedPrice);
+    EXPECT_EQ(env.syncs, 1);
+    EXPECT_EQ(events, (std::vector<std::string>{"update"}));
+    live.seedGpuViewport(199, 201);
+    EXPECT_EQ(events.size(), 1);
+}
+TEST_F(LivePlacementTest, ReturnToLive) {
+    view.setViewport(30000, 40000, 90, 110);
+    view.setRasterAnchor(.3, .7);
+    live.returnGpuToLive();
+    window(1000, 11000);
+    EXPECT_DOUBLE_EQ(view.rasterAnchor().fracX, 1);
+    EXPECT_DOUBLE_EQ(view.rasterAnchor().fracY, .7);
+    EXPECT_EQ(env.syncs, 1);
+    EXPECT_EQ(events, (std::vector<std::string>{"tick"}));
+}
+TEST_F(LivePlacementTest, BootstrapTimeView) {
+    live.bootstrapGpuTimeView();
+    window(-81000, 19000);
+    EXPECT_FALSE(controller.flags().priceKnown);
+    EXPECT_TRUE(controller.flags().pristine);
+    EXPECT_EQ(view.getMinPrice(), 0);
+    EXPECT_EQ(view.getMaxPrice(), 1);
+    EXPECT_EQ(env.syncs, 1);
+    live.bootstrapGpuTimeView();
+    EXPECT_EQ(env.syncs, 1);
+}
+TEST_F(LivePlacementTest, BootstrapTimer) {
+    env.anchor = 0;
+    live.bootstrapGpuTimeView();
+    ASSERT_NE(timer, nullptr);
+    EXPECT_EQ(timer->interval, 50);
+    EXPECT_TRUE(timer->active);
+    EXPECT_FALSE(view.isTimeWindowValid());
+    auto* firstTimer = timer;
+    live.bootstrapGpuTimeView();
+    EXPECT_EQ(timer, firstTimer);
+    env.anchor = 10001;
+    timer->fire();
+    window(-81000, 19000);
+    EXPECT_FALSE(timer->active);
+}
+TEST_F(LivePlacementTest, InitialSpan) {
+    EXPECT_EQ(live.gpuInitialSpanMs(800), 100000);
+    EXPECT_EQ(live.gpuInitialSpanMs(0), 100000);
+    EXPECT_EQ(live.gpuInitialSpanMs(1), 16000);
+    controller.initialViewSettings().columnPx = 10;
+    EXPECT_EQ(live.gpuInitialSpanMs(999), 99000);
+}
+TEST_F(LivePlacementTest, FollowPadding) {
+    view.setViewport(1000, 11000, 90, 110);
+    view.enableAutoScroll(true);
+    live.followPadding() = Placement::FollowPadding{4000, 1000, 11000, 1000, view.placementVersion()};
+    env.anchor = 12000;
+    live.followGpuLive();
+    window(6000, 16000);
+    EXPECT_EQ(live.followPadding()->startMs, 6000);
+    EXPECT_EQ(live.followPadding()->endMs, 16000);
+    view.setViewport(6000, 16000, 90, 110); // explicit placement invalidates retained padding
+    live.followGpuLiveTo(18000);
+    window(9000, 19000);
+}
+TEST_F(LivePlacementTest, TradeAndBookSeed) {
+    live.onTrade("OTHER", 500);
+    EXPECT_FALSE(view.isTimeWindowValid());
+    live.onTrade("TEST", 100);
+    EXPECT_EQ(controller.session().lastTrade, 100);
+    EXPECT_DOUBLE_EQ(view.getMinPrice(), 48.8);
+    live.setLiveBookTop(199, 201);
+    EXPECT_EQ(controller.session().bookMid, 200);
+    EXPECT_DOUBLE_EQ(view.getMinPrice(), 48.8); // only the first price seeds
+    controller.flags().reseedPrice = true;
+    live.setLiveBookTop(299, 301);
+    EXPECT_DOUBLE_EQ(view.getMinPrice(), 248.8);
+    live.onTrade("TEST", std::numeric_limits<double>::quiet_NaN());
+    EXPECT_EQ(controller.session().lastTrade, 100);
+}
+TEST_F(LivePlacementTest, PristineResize) {
+    live.seedGpuViewport(99, 101);
+    live.resize(400);
+    window(-31000, 19000);
+    controller.flags().pristine = false;
+    live.resize(100);
+    window(-31000, 19000);
+}
+TEST_F(LivePlacementTest, EnableAutoScroll) {
+    view.setViewport(30000, 40000, 90, 110);
+    live.enableAutoScroll(true);
+    window(1000, 11000);
+    EXPECT_TRUE(view.isAutoScrollEnabled());
+    EXPECT_EQ(events, (std::vector<std::string>{"tick", "update", "changed"}));
+    events.clear();
+    live.enableAutoScroll(false);
+    EXPECT_FALSE(view.isAutoScrollEnabled());
+    EXPECT_EQ(events, (std::vector<std::string>{"update", "changed"}));
+}
+TEST_F(LivePlacementTest, LiveEndHelpers) {
+    EXPECT_EQ(Placement::liveEndCeil(10000, 1000), 10000);
+    EXPECT_EQ(Placement::nextBucketEnd(10000, 1000), 11000);
+    EXPECT_EQ(Placement::liveEndCeil(10001, 1000), 11000);
+    EXPECT_EQ(Placement::nextBucketEnd(10001, 1000), 11000);
+    EXPECT_EQ(Placement::liveEndCeil(-1000, 1000), -1000);
+    EXPECT_EQ(Placement::nextBucketEnd(-1000, 1000), 0);
+    EXPECT_EQ(Placement::liveEndCeil(-1001, 1000), -1000);
+    EXPECT_EQ(Placement::nextBucketEnd(-1001, 1000), -1000);
+}
+} // namespace

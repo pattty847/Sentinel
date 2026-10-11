@@ -1,6 +1,7 @@
 #pragma once
 
 #include "chart/core/ChartCamera.hpp"
+#include "chart/core/LivePlacement.hpp"
 #include "chart/core/PriceFitter.hpp"
 #include "chart/core/ChartSession.hpp"
 #include "chart/core/ZoomGlide.hpp"
@@ -13,19 +14,6 @@
 
 namespace chart {
 
-struct PlacementFlags {
-    bool priceKnown = false;
-    bool reseedPrice = false;
-    bool pristine = false;
-    bool selfViewport = false;
-    bool limitsDeferred = false;
-};
-
-struct InitialViewSettings {
-    int columnPx = 8;
-    int pricePct = 5;
-};
-
 class ChartViewController : public QObject {
     Q_OBJECT
 public:
@@ -35,15 +23,17 @@ public:
     GridViewState* viewPtr() const { return view_.get(); }
     ChartSession& session() { return session_; }
     const ChartSession& session() const { return session_; }
-    PlacementFlags& flags() { return flags_; }
-    const PlacementFlags& flags() const { return flags_; }
-    InitialViewSettings& initialViewSettings() { return initialViewSettings_; }
-    const InitialViewSettings& initialViewSettings() const { return initialViewSettings_; }
+    PlacementFlags& flags() { return livePlacement_.flags(); }
+    const PlacementFlags& flags() const { return livePlacement_.flags(); }
+    InitialViewSettings& initialViewSettings() { return livePlacement_.initialViewSettings(); }
+    const InitialViewSettings& initialViewSettings() const { return livePlacement_.initialViewSettings(); }
 
     ZoomGlideState& glide() { return glide_; }
     const ZoomGlideState& glide() const { return glide_; }
     ChartCamera& camera() { return camera_; }
     const ChartCamera& camera() const { return camera_; }
+
+    LivePlacement& livePlacement() { return livePlacement_; }
 
     PriceFitter& priceFitter() { return priceFitter_; }
 
@@ -61,12 +51,11 @@ private:
     IHeatmapViewSink& sink_;
     std::unique_ptr<GridViewState> view_;
     ChartSession session_;
-    PlacementFlags flags_;
-    InitialViewSettings initialViewSettings_;
     ZoomGlideState glide_;
     ChartCamera camera_;
     ZoomGlide zoomGlide_;
     PriceFitter priceFitter_;
+    LivePlacement livePlacement_;
 };
 
 } // namespace chart

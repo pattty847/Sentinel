@@ -1,15 +1,13 @@
 #include "chart/core/PriceFitter.hpp"
 #include "chart/core/ChartViewController.hpp"
 #include "SentinelLogging.hpp"
+#include "servermodel/RecordingCodec.hpp"
 #include <algorithm>
 #include <cmath>
 #include <tuple>
 
 namespace chart {
 namespace {
-constexpr int64_t floorDiv(int64_t value, int64_t divisor) {
-    return value / divisor - (value % divisor < 0 ? 1 : 0);
-}
 bool skipBar(const CandleBar& bar, int64_t tf, double drawnStart, double drawnEnd) {
     const qint64 barEnd = bar.timeEndMs > bar.timeStartMs ? bar.timeEndMs : bar.timeStartMs + tf;
     return double(bar.timeStartMs) >= drawnEnd || double(barEnd) <= drawnStart || !std::isfinite(bar.high) ||
@@ -24,7 +22,7 @@ qint64 PriceFitter::gpuLiveEndMs(qint64 spanMs) const {
   const int64_t anchor = environment_.attached() ? environment_.liveAnchorMs() : 0;
   const int64_t tf = controller_.session().timeframeMs;
   if (anchor <= 0 || tf <= 0) return 0;
-  const int64_t liveEnd = floorDiv(anchor + tf - 1, tf) * tf;
+  const int64_t liveEnd = recording::floorDiv(anchor + tf - 1, tf) * tf;
   return liveEnd + std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(spanMs) * kAutoScrollPaddingFrac));
 }
 
@@ -35,8 +33,8 @@ std::optional<std::pair<qint64, qint64>> PriceFitter::gpuFitTimeWindow() const {
   int64_t oldest = environment_.oldestAvailableMs();
   if (oldest <= 0 && candles_)
     oldest = candles_->oldestTimeMs(controller_.session().symbol, std::max<int64_t>(1, (tf + 500) / 1000));
-  const int64_t dataEnd = floorDiv(anchor + tf - 1, tf) * tf; // the live bucket's end
-  const int64_t dataStart = oldest > 0 ? floorDiv(oldest, tf) * tf : 0;
+  const int64_t dataEnd = recording::floorDiv(anchor + tf - 1, tf) * tf; // the live bucket's end
+  const int64_t dataStart = oldest > 0 ? recording::floorDiv(oldest, tf) * tf : 0;
   const double maxTime = controller_.viewPtr()->maxTimeSpanMs();
   const int64_t maxSpan = maxTime > 0 ? std::max<int64_t>(1, static_cast<int64_t>(std::floor(maxTime))) : INT64_MAX / 4;
   const int64_t minSpan = std::max<int64_t>(tf, static_cast<int64_t>(std::ceil(controller_.viewPtr()->minTimeSpanMs())));
@@ -90,7 +88,7 @@ PriceFitter::VisibleBars PriceFitter::collectVisibleBars(int64_t tf, double draw
   const qint64 first = static_cast<qint64>(std::floor(drawnStart)), last = static_cast<qint64>(std::ceil(drawnEnd));
   // From the bucket that contains the view start: visibleBars selects by bar
   // start, and the candle that starts before the view and ends inside it counts.
-  const int64_t alignedStart = floorDiv(first, tf) * tf;
+  const int64_t alignedStart = recording::floorDiv(first, tf) * tf;
   auto& bars = bars_; // reused: the auto price scale runs this on every change in view
   bars.clear();
   if (candles_ && last > first)
@@ -241,7 +239,7 @@ void PriceFitter::candlesDirty(const QString& symbol, int64_t timeframeSec, qint
   const auto [shownStart, shownEnd] = controller_.viewPtr()->displayedTimeWindow();
   const auto [drawnStart, drawnEnd] = controller_.camera().drawnTimeWindow(shownStart, shownEnd);
   const qint64 viewStart =
-      floorDiv(static_cast<qint64>(std::floor(drawnStart)), tf) * tf;
+      recording::floorDiv(static_cast<qint64>(std::floor(drawnStart)), tf) * tf;
   if (std::max(dirtyEnd, dirtyStart + tf) <= viewStart || double(dirtyStart) >= drawnEnd)
     return;
   refitAutoPrice();
