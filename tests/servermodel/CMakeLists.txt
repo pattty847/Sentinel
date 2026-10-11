@@ -31,7 +31,7 @@ set_tests_properties(SessionManagerTests PROPERTIES LABELS "servermodel")
 
 add_custom_target(servermodel_tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -L servermodel
-    DEPENDS test_timeframe_aggregator test_crc32 test_session_manager
+    DEPENDS test_timeframe_aggregator test_crc32 test_session_manager test_TradeOverlay
     COMMENT "Running servermodel persistence tests"
 )
 
@@ -143,6 +143,7 @@ add_executable(test_price_ladder test_price_ladder.cpp)
 target_include_directories(test_price_ladder PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_price_ladder PRIVATE GTest::gtest_main)
 add_test(NAME PriceLadderTests COMMAND test_price_ladder)
+add_dependencies(servermodel_tests test_price_ladder)
 
 # Disposable storage research harness; no application links this library.
 add_library(storage_probe_encoders STATIC storage_probe/Encoders.cpp)
@@ -212,3 +213,4 @@ target_include_directories(test_candle_history PRIVATE ${CMAKE_SOURCE_DIR}/libs/
 target_link_libraries(test_candle_history PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
 add_test(NAME CandleHistoryCacheTests COMMAND test_candle_history)
 set_tests_properties(CandleHistoryCacheTests PROPERTIES LABELS "servermodel" TIMEOUT 15)
+add_dependencies(servermodel_tests test_candle_history)
