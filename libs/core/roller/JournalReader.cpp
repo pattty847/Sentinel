@@ -94,11 +94,16 @@ JournalReader::JournalReader(std::filesystem::path root, std::string product, st
         if (!found) throw std::runtime_error("journal position unavailable");
     }
 }
+void JournalReader::putBack(JournalRecord record) {
+    buffered_.push_front(std::move(record));
+}
 bool JournalReader::next(JournalRecord& out) {
+    if (!buffered_.empty()) { out = std::move(buffered_.front()); buffered_.pop_front(); return true; }
     while (file_ < files_.size()) {
         const auto& f = files_[file_];
         if (!reader_) reader_ = std::make_unique<capture::RecordReader>(
             QString::fromStdString(f.path.string()), !f.superseded,
+            start_ ? std::optional<uint64_t>(start_->block) : std::nullopt,
             [this, &f](const capture::BlockIndex& block, const char* reason) {
                 reportCorruption(product_, f, block, reason);
                 gap_ = true;
@@ -130,6 +135,7 @@ bool JournalReader::next(JournalRecord& out) {
                 next.at("first_block_ordinal").get<uint64_t>() != nextBlock_ ||
                 next.at("segment").get<uint64_t>() != f.header.at("segment").get<uint64_t>() + 1;
         }
+        decoded_ += result.decodedRecords;
         reader_.reset();
     }
     if (start_) throw std::runtime_error("journal position beyond durable prefix");
@@ -140,7 +146,7 @@ std::optional<JournalPos> JournalReader::anchor(int64_t receiveMs) const {
     // search wall time; then choose the last qualifying snapshot in that segment.
     for (auto f = files_.rbegin(); f != files_.rend(); ++f) {
         if (f->header.at("opened_system_ns").get<int64_t>() / 1'000'000 > receiveMs) continue;
-        capture::RecordReader reader(QString::fromStdString(f->path.string()), !f->superseded,
+        capture::RecordReader reader(QString::fromStdString(f->path.string()), !f->superseded, {},
             [&](const capture::BlockIndex& block, const char* reason) {
                 reportCorruption(product_, *f, block, reason);
             });
@@ -149,6 +155,7 @@ std::optional<JournalPos> JournalReader::anchor(int64_t receiveMs) const {
         while (reader.next(r)) if (r.time.systemNs / 1'000'000 <= receiveMs && snapshot(r, product_)) {
             found = JournalPos{product_, f->header.at("run_id"), reader.result().recordOrdinal, reader.result().recordIndex};
         }
+        anchorDecoded_ += reader.result().decodedRecords;
         if (found) return found;
     }
     return {};

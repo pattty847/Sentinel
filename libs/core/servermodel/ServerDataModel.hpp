@@ -1,6 +1,7 @@
 #pragma once
 #include "RecordingLive.hpp"
 #include <map>
+#include <set>
 #include <unordered_map>
 #include <vector>
 #include <deque>
@@ -103,6 +104,15 @@ public:
     void releaseGuiFeed(const std::string& symbol, int64_t releaseLocalMs = 0);
     void onProductMetadata(const std::string& symbol, uint64_t lifetime,
                            const nlohmann::json& metadata, const std::string& error);
+    // recording.live_feed: journal (main thread): the journal header's product
+    // JSON for a live feed (no REST), and the roller's re-seed request hook.
+    bool journalFeed() const { return m_journalFeed; }
+    void onFeedMetadata(const std::string& symbol, const nlohmann::json& metadata);
+    // Journal time (capture receive ms) of the newest record delivered for a
+    // product: closes its candles up to journalMs - kJournalCandleLagMs.
+    static constexpr int64_t kJournalCandleLagMs = 1000;
+    void onFeedWatermark(const std::string& symbol, int64_t journalMs);
+    void setReseedHandler(std::function<void(const std::string&)> handler);
 
 public slots:
     void onTrade(const Trade& trade);
@@ -180,6 +190,14 @@ private:
     std::atomic<bool> m_rollerAttached{false};
     RollerWatermarks m_rollerWatermarks;
     std::function<bool(const std::string&)> m_rollerRunning;
+    const bool m_journalFeed;
+    std::function<void(const std::string&)> m_reseed;
+    std::map<std::string, int64_t> m_nextReseedMs;
+    // Throttled requests are coalesced, never dropped: delivered at the deadline.
+    std::set<std::string> m_pendingReseeds;
+    QTimer m_reseedTimer;
+    void deliverReseeds();
+    void requestReseed(const std::string& symbol, const char* why);
     void startRecorder();
     void startRollerServing();
     void checkRecorderProgress(int64_t nowMs);

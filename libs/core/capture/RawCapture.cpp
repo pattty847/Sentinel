@@ -509,7 +509,8 @@ struct RecordGenerator {
     RecordGenerator& operator=(const RecordGenerator&) = delete;
     ~RecordGenerator() { if (handle) handle.destroy(); }
 };
-RecordGenerator readRecords(const QString path, ScanResult& result, bool pendingTailAllowed, CorruptBlockVisitor onCorruptBlock) {
+RecordGenerator readRecords(const QString path, ScanResult& result, bool pendingTailAllowed,
+                            std::optional<uint64_t> startBlock, CorruptBlockVisitor onCorruptBlock) {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) fail("cannot read " + path.toStdString());
     result.header = headerFrom(file);
@@ -519,7 +520,7 @@ RecordGenerator readRecords(const QString path, ScanResult& result, bool pending
     result.validBytes = file.pos();
     const auto begin = file.pos();
     const auto firstOrdinal = result.header.at("first_block_ordinal").get<uint64_t>();
-    const auto sealed = onCorruptBlock ? recoveryIndex(file, begin, end, firstOrdinal) : std::nullopt;
+    const auto sealed = (onCorruptBlock || startBlock) ? recoveryIndex(file, begin, end, firstOrdinal) : std::nullopt;
     if (!file.seek(begin)) fail("recovery header seek failed");
     if (sealed) pendingTailAllowed = false;
     if (pendingTailAllowed && !onCorruptBlock) {
@@ -530,6 +531,19 @@ RecordGenerator readRecords(const QString path, ScanResult& result, bool pending
         if (!file.seek(begin)) fail("header seek failed");
     }
     uint64_t nextOrdinal = result.header.at("first_block_ordinal").get<uint64_t>();
+    if (startBlock) {
+        if (*startBlock < nextOrdinal) fail("seek block before segment");
+        const auto begin = file.pos();
+        const auto* index = sealed ? &sealed->entries : nullptr;
+        if (index) {
+            const auto n = *startBlock - nextOrdinal;
+            if (n >= index->size()) fail("seek block unavailable");
+            result.index.assign(index->begin(), index->begin() + n);
+            result.seekSkippedBlocks = n;
+            nextOrdinal = *startBlock;
+            if (!file.seek((*index)[n].offset)) fail("block seek failed");
+        } else if (!file.seek(begin)) fail("header walk seek failed");
+    }
     while (file.pos() < end) {
         const auto offset = file.pos();
         if (end - offset < 4) { result.tornTail = true; break; }
@@ -570,6 +584,13 @@ RecordGenerator readRecords(const QString path, ScanResult& result, bool pending
                 if (indexed) skipped = *indexed;
                 onCorruptBlock(skipped, magic == "IDX1" ? "damaged closing index" :
                     magic == "BLK1" ? "damaged block header" : "damaged block magic/framing");
+                // A closing index is not a data block. Reporting its damage
+                // must not invent a block ordinal or shift the next segment.
+                if (!indexed && magic == "IDX1") {
+                    result.validBytes = end;
+                    result.tornTail = true;
+                    break;
+                }
                 result.index.push_back(skipped); ++nextOrdinal;
                 const auto successor = indexed ? std::optional<BlockIndex>{} : recoverySuccessor(file, offset, end, nextOrdinal);
                 const auto resume = indexed ? qint64(indexed->offset + BlockHeaderBytes + indexed->compressedBytes) :
@@ -620,6 +641,12 @@ RecordGenerator readRecords(const QString path, ScanResult& result, bool pending
             entry.records > entry.rawBytes / 32 || entry.ordinal != nextOrdinal || result.index.size() >= MaxIndexEntries)
             fail("invalid block limits/ordinal");
         if (end - file.pos() < entry.compressedBytes) { result.tornTail = true; break; }
+        if (startBlock && entry.ordinal < *startBlock) {
+            if (!file.seek(file.pos() + entry.compressedBytes)) fail("block skip failed");
+            result.index.push_back(entry); ++nextOrdinal; ++result.seekSkippedBlocks;
+            result.validBytes = file.pos();
+            continue;
+        }
         const auto compressed = read(file, entry.compressedBytes);
         const char* damage = nullptr;
         std::string raw;
@@ -640,6 +667,7 @@ RecordGenerator readRecords(const QString path, ScanResult& result, bool pending
             result.validBytes = file.pos();
             continue;
         }
+        result.decodedRecords += entry.records;
         // Validate the whole block's framing before exposing any record.
         pos = 0;
         for (uint32_t i = 0; i < entry.records; ++i) {
@@ -683,11 +711,11 @@ RecordGenerator readRecords(const QString path, ScanResult& result, bool pending
 struct RecordReader::Impl {
     ScanResult result;
     RecordGenerator generator;
-    explicit Impl(const QString& path, bool pending, CorruptBlockVisitor onCorruptBlock)
-        : generator(readRecords(path, result, pending, std::move(onCorruptBlock))) {}
+    explicit Impl(const QString& path, bool pending, std::optional<uint64_t> start, CorruptBlockVisitor onCorruptBlock)
+        : generator(readRecords(path, result, pending, start, std::move(onCorruptBlock))) {}
 };
-RecordReader::RecordReader(const QString& path, bool pending, CorruptBlockVisitor onCorruptBlock)
-    : m_impl(std::make_unique<Impl>(path, pending, std::move(onCorruptBlock))) {}
+RecordReader::RecordReader(const QString& path, bool pending, std::optional<uint64_t> start, CorruptBlockVisitor onCorruptBlock)
+    : m_impl(std::make_unique<Impl>(path, pending, start, std::move(onCorruptBlock))) {}
 RecordReader::~RecordReader() = default;
 const ScanResult& RecordReader::result() const { return m_impl->result; }
 bool RecordReader::next(Record& record) {

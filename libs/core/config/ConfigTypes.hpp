@@ -120,6 +120,12 @@ struct ServerRecordingConfig {
     // or "roller" (the journal roller's roller_shadow.dir is served, history and
     // live minute; no primary recorder). Any other value serves nothing.
     std::string source = "primary";
+    // recording.live_feed (slice D-b1, deleted in D-b2): "engine" (this process's
+    // Coinbase WebSocket feeds the live book, trades and metadata) or "journal"
+    // (the capture fan-out and journal feed them through the roller workers; no
+    // MarketDataFeeds, REST for candle history only). "journal" requires
+    // source "roller"; the server refuses to start otherwise.
+    std::string liveFeed = "engine";
 };
 
 struct ServerConfig {
@@ -159,6 +165,23 @@ inline std::vector<std::string> normalizedDefaultSymbols(const std::vector<std::
 inline std::vector<std::string> rollerProducts(const ServerConfig& config) {
     return normalizedDefaultSymbols(config.rollerShadow.products.empty() ? config.defaultSymbols
                                                                          : config.rollerShadow.products);
+}
+
+// recording.live_feed: journal is in effect (the model is fed by the roller).
+inline bool journalLiveFeed(const ServerConfig& config) {
+    return config.recording.liveFeed == "journal";
+}
+// Why this config's recording.live_feed cannot start, or empty.
+inline std::string liveFeedProblem(const ServerConfig& config) {
+    const auto& feed = config.recording.liveFeed;
+    if (feed != "engine" && feed != "journal")
+        return "unknown recording.live_feed=" + feed + " (engine | journal)";
+    if (feed == "journal" && config.recording.source != "roller")
+        return "recording.live_feed=journal requires recording.source=roller (source=" +
+               config.recording.source + ")";
+    if (feed == "journal" && !config.rollerShadow.enabled)
+        return "recording.live_feed=journal requires roller_shadow.enabled=true";
+    return {};
 }
 
 struct ClientHeatmapConfig {

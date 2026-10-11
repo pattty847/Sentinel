@@ -1,4 +1,9 @@
 #include "Roller.hpp"
+#include "AnchorStore.hpp"
+#include "metrics/MetricsRegistry.hpp"
+#include <map>
+#include <mutex>
+#include "SentinelLogging.hpp"
 #include "servermodel/PersistenceIo.hpp"
 #include <QDateTime>
 #include <QTimeZone>
@@ -11,8 +16,25 @@ namespace sentinel::roller {
 using nlohmann::json;
 namespace fs = std::filesystem;
 namespace {
-constexpr int64_t Minute = 60'000, Day = 86'400'000;
+constexpr int64_t Minute = 60'000, Quarter = 900'000, Day = 86'400'000;
 constexpr int Version = 1;
+std::shared_ptr<metrics::Counter> anchorFailures(const std::string& product) {
+    static std::mutex mutex;
+    static std::map<std::string,std::shared_ptr<metrics::Counter>> counters;
+    std::lock_guard lock(mutex);
+    auto& counter = counters[product];
+    if (!counter) counter = std::make_shared<metrics::Counter>();
+    return counter;
+}
+}
+void registerAnchorMetrics(metrics::MetricsRegistry& registry, const std::string& product) {
+    static std::mutex mutex;
+    std::lock_guard lock(mutex);
+    const auto name = "sentinel_roller_anchor_failures_total";
+    if (registry.hasSeries(name,{{"product",product}})) return;
+    const auto counter = anchorFailures(product);
+    registry.counterFn(name,"Failed anchor writes, degraded skips, reads or pruning attempts.",{{"product",product}},
+        [counter] { return static_cast<double>(counter->value()); });
 }
 void writeCheckpoint(const fs::path& path, const json& j) {
     // Hmc2Store has already durably created this product's parent and files.
@@ -42,8 +64,10 @@ uint64_t configHash(const recording::RecorderConfig& c) {
 }
 uint64_t outputBytes(const fs::path& root, const std::string& product) {
     uint64_t n = 0;
-    if (fs::exists(root/product)) for (const auto& e : fs::recursive_directory_iterator(root/product))
-        if (e.is_regular_file() && e.path().extension() == ".hmc2") n += e.file_size();
+    if (fs::exists(root/product)) for (auto it = fs::recursive_directory_iterator(root/product); it != fs::recursive_directory_iterator{}; ++it) {
+        if (it->path() == root/product/"anchors") { it.disable_recursion_pending(); continue; }
+        if (it->is_regular_file() && it->path().extension() == ".hmc2") n += it->file_size();
+    }
     return n;
 }
 }
@@ -60,9 +84,11 @@ void validateOutputProduct(const fs::path& root, const std::string& product) {
     capture::validateSymbol(product);
     const auto dir = root/product;
     if (fs::exists(dir) && !fs::is_regular_file(dir/"roller.json"))
-        for (const auto& entry : fs::recursive_directory_iterator(dir))
-            if (entry.is_regular_file() && entry.path().extension() == ".hmc2")
+        for (auto it = fs::recursive_directory_iterator(dir); it != fs::recursive_directory_iterator{}; ++it) {
+            if (it->path() == dir/"anchors") { it.disable_recursion_pending(); continue; }
+            if (it->is_regular_file() && it->path().extension() == ".hmc2")
                 throw std::runtime_error("refusing HMC2 product without roller.json: " + dir.string());
+        }
 }
 json roll(const RollOptions& o) {
     validateOutputProduct(o.outputRoot, o.product);
@@ -77,19 +103,33 @@ json roll(const RollOptions& o) {
         std::ifstream in(cpPath); in >> cp;
         if (cp.at("rollerVersion") != Version || cp.at("product") != o.product) throw std::runtime_error("checkpoint version/product mismatch");
     }
-    uint64_t records = 0, bytes = 0, columns = 0;
+    uint64_t records = 0, bytes = 0, columns = 0, decoded = 0;
+    const auto anchorRoot = o.anchorRoot.empty() ? o.outputRoot : o.anchorRoot;
     json days = json::array();
-    bool pending = false;
+    bool pending = false, warnedDegraded = false;
+    const auto anchorFailureCounter = anchorFailures(o.product);
     for (auto day = o.fromMs / Day * Day; day < o.toMs; day += Day) {
         const auto from = std::max(day,o.fromMs), end = std::min(day+Day,o.toMs);
         const auto key = std::to_string(day);
+        std::optional<JournalPos> checkpoint;
+        int64_t targetBoundary = day;
         if (cp["days"].contains(key)) {
-            JournalReader check(o.journalRoot, o.product, cp["days"][key].at("pos").get<JournalPos>());
-            JournalRecord saved;
-            if (!check.next(saved)) throw std::runtime_error("checkpoint journal position unavailable");
+            const auto& saved = cp["days"][key];
+            checkpoint = saved.at("pos").get<JournalPos>();
+            if (saved.contains("receiveThroughMs")) targetBoundary = saved.at("receiveThroughMs");
+            else {
+                // Old checkpoints have no receive high-water. A bounded cursor
+                // read supplies the target time without scanning for a snapshot.
+                JournalReader check(o.journalRoot,o.product,checkpoint);
+                JournalRecord cursor;
+                if (!check.next(cursor)) throw std::runtime_error("checkpoint journal position unavailable");
+                targetBoundary = cursor.record.time.systemNs / 1'000'000;
+                decoded += check.decodedRecords();
+            }
         }
-        const auto anchor = inventory.anchor(day);
-        JournalReader reader(o.journalRoot,o.product,anchor);
+        // A cache miss takes the original snapshot path. Do not scan for a
+        // snapshot until after candidates have been validated (bounded restart).
+        std::unique_ptr<JournalReader> reader;
         JournalFeed feed(o.product);
         std::unique_ptr<recording::BookRecorder> recorder;
         // Destroyed first: the live lead forgets this day's recorder and feed.
@@ -97,62 +137,302 @@ json roll(const RollOptions& o) {
             const RollOptions& o;
             ~Detach() { if (o.onRecorder) o.onRecorder(nullptr, nullptr, 0); }
         } detach{o};
-        uint64_t hash = 0, checkpointColumns = 0;
+        uint64_t hash = 0, checkpointColumns = 0, importedColumns = 0;
         bool gridReady = false;
         int64_t latenessMs = recording::RecorderConfig{}.latenessMs;
-        int64_t savedThrough = from, lastFence = -1;
+        int64_t savedThrough = from, lastFence = -1, lastTailFence = -1;
         json dayReport = {{"day",QDateTime::fromMSecsSinceEpoch(day,QTimeZone::UTC).toString("yyyy-MM-dd").toStdString()}};
+        const auto anchorFailure = [&](const char* operation, int64_t boundary, const std::string& error, bool warn = true) {
+            const std::string field = std::string("anchor") + operation + "Failures";
+            dayReport[field] = dayReport.value(field,uint64_t{}) + 1;
+            anchorFailureCounter->inc();
+            if (warn) {
+                if (std::string_view(operation) == "Write")
+                    sLog_Warning("Roller anchor write failed product=" << o.product << " boundaryMs=" << boundary << " error=" << error);
+                else
+                    sLog_Warning("Roller anchor " << operation << " failed product=" << o.product << " boundaryMs=" << boundary << " error=" << error);
+            }
+            if (o.anchorFailuresFatal) throw std::runtime_error("anchor " + std::string(operation) + " failed: " + error);
+        };
         JournalRecord input;
-        JournalPos applied;
+        JournalPos applied, gridSnapshot, restoreCursor;
+        bool restoreCursorApplied = true;
+        int64_t restoreLocal = 0;
+        double referenceMid = 0;
+        json gridMetadata;
+        JournalBook book;
+        bool bookUp = true;
+        int64_t recorderFloor = from, nextBoundary = day, receiveThrough = 0;
+        const auto configure = [&](const Grid& grid, int64_t floor) {
+            auto cfg = grid.config(o.outputRoot);
+            if (o.productWriterLease) cfg.writerProduct = o.product;
+            cfg.commitFloorMs = floor; cfg.commitCeilingMs = end;
+            // All roll recorders are history writers. With no publisher Finals
+            // is behaviorally identical to All, and rebuilds must be portable
+            // into the live history writer without relaxing import validation.
+            cfg.publication = recording::RecorderConfig::Publication::Finals;
+            if (o.publisher) {
+                cfg.publisher = [&, publish=o.publisher](auto record) {
+                    if (record->bucketStartMs + record->header.tfMs > savedThrough) publish(std::move(record));
+                };
+            }
+            cfg.minuteColumnsCounter = o.minuteColumnsCounter;
+            cfg.writeErrorsCounter = o.writeErrorsCounter;
+            return cfg;
+        };
+        const auto describeGrid = [&](const Grid& grid) {
+            dayReport["grid"] = {{"priceScale",grid.priceScale},{"nearTick",grid.nearTick},
+                                  {"deepTick",grid.deepTick},{"sizeFloor",grid.sizeFloor}};
+        };
+
+        const auto claimProvenance = [&] {
+            if (o.productWriterLease && !fs::exists(cpPath)) {
+                // Claim provenance before the first asynchronous write, so
+                // a first-minute crash can retry this shadow product safely.
+                fs::create_directories(cpPath.parent_path());
+                int error = 0;
+                if (!persistence::syncDirectory(o.outputRoot, error))
+                    throw std::runtime_error("shadow product directory sync failed");
+                writeCheckpoint(cpPath, cp);
+            }
+        };
         feed.onSnapshot = [&](int64_t exchange, int64_t local, std::vector<recording::Level> levels) {
+            if (!o.anchorBook) book.snapshot(exchange,levels);
             if (!gridReady) {
                 double bid = 0, ask = std::numeric_limits<double>::infinity();
                 for (const auto& l : levels) if (l.size > 0) {
                     if (l.isBid) bid = std::max(bid,l.price); else ask = std::min(ask,l.price);
                 }
                 if (!(bid > 0) || !std::isfinite(ask)) return;
-                const auto grid = deriveGrid(input.metadata,std::midpoint(bid,ask),o.overrides);
+                referenceMid = std::midpoint(bid,ask);
+                gridSnapshot = input.pos; gridMetadata = input.metadata;
+                const auto grid = deriveGrid(gridMetadata,referenceMid,o.overrides);
                 auto cfg = grid.config(o.outputRoot);
-                if (o.productWriterLease) cfg.writerProduct = o.product;
                 hash = configHash(cfg);
-                latenessMs = cfg.latenessMs;
-                cfg.commitFloorMs = from; cfg.commitCeilingMs = end;
-                cfg.minuteColumnsCounter = o.minuteColumnsCounter;
-                cfg.writeErrorsCounter = o.writeErrorsCounter;
                 if (cp["days"].contains(key)) {
                     const auto& saved = cp["days"][key];
                     if (saved.at("configHash") != hash || saved.at("fromMs") != from)
                         throw std::logic_error("checkpoint policy/range mismatch; use a new output root");
                     savedThrough = saved.at("committedThroughMs");
-                    cfg.commitFloorMs = std::max(from,savedThrough);
+                    recorderFloor = std::max(from,savedThrough);
                 }
-                dayReport["grid"] = {{"priceScale",grid.priceScale},{"nearTick",grid.nearTick},
-                                      {"deepTick",grid.deepTick},{"sizeFloor",grid.sizeFloor}};
+                cfg = configure(grid,recorderFloor);
+                latenessMs = cfg.latenessMs;
+                describeGrid(grid);
                 gridReady = true;
                 if (o.dryRun) return;
-                if (o.publisher) {
-                    cfg.publisher = o.publisher;
-                    cfg.publication = recording::RecorderConfig::Publication::Finals;
-                }
                 recorder = std::make_unique<recording::BookRecorder>(std::move(cfg));
                 if (o.onRecorder) o.onRecorder(recorder.get(), &feed, end);
-                if (o.productWriterLease && !fs::exists(cpPath)) {
-                    // Claim provenance before the first asynchronous write, so
-                    // a first-minute crash can retry this shadow product safely.
-                    fs::create_directories(cpPath.parent_path());
-                    int error = 0;
-                    if (!persistence::syncDirectory(o.outputRoot, error))
-                        throw std::runtime_error("shadow product directory sync failed");
-                    writeCheckpoint(cpPath, cp);
-                }
+                claimProvenance();
             }
             if (recorder) recorder->onSnapshotAt(o.product,exchange,local,std::move(levels));
         };
         feed.onUpdates = [&](int64_t t,int64_t local,std::vector<recording::Level> levels) {
+            if (!o.anchorBook) book.apply(t,levels);
             if (recorder) recorder->onUpdatesAt(o.product,t,local,std::move(levels));
         };
-        feed.onInvalid = [&](int64_t t,const std::string& reason) { if (o.onInvalid) o.onInvalid(reason); if (recorder) recorder->onInvalid(o.product,t,reason); };
+        feed.onInvalid = [&](int64_t t,const std::string& reason) { if (!o.anchorBook) book.clear(); if (o.onInvalid) o.onInvalid(reason); if (recorder) recorder->onInvalid(o.product,t,reason); };
         feed.onTick = [&](int64_t t) { if (recorder) recorder->onTick(t); };
+        feed.onConnection = [&](bool up) { bookUp = up; };
+        if (o.onFeed) o.onFeed(feed);
+        std::vector<fs::path> candidates;
+        if (o.useAnchors && !o.dryRun) {
+            try { candidates = AnchorStore::candidates(anchorRoot,o.product,day); }
+            catch (const std::exception& e) { anchorFailure("Read",day,e.what()); }
+            catch (...) { anchorFailure("Read",day,"unknown exception"); }
+        }
+        if (o.useAnchors && !o.dryRun) for (const auto& file : candidates) {
+            // Canonical names encode UTC boundaries. Filter future candidates
+            // before decompressing megabytes of recorder state.
+            const auto name = file.stem().string();
+            const auto time = QTime::fromString(QString::fromStdString(name),"HHmm");
+            if (!time.isValid() || day + time.msecsSinceStartOfDay() > targetBoundary) continue;
+            uint64_t candidateDecoded = 0;
+            bool rejectedPrefix = false;
+            try {
+                dayReport["anchorCandidatesDecoded"] = dayReport.value("anchorCandidatesDecoded",0u) + 1;
+                auto a = AnchorStore::load(file);
+                if (a.boundaryMs != day + time.msecsSinceStartOfDay())
+                    throw std::runtime_error("anchor filename/boundary mismatch");
+                // With no checkpoint only midnight is a complete independent
+                // starting point; intraday anchors require the committed prefix.
+                if (!checkpoint && a.boundaryMs != day) continue;
+                const auto grid = deriveGrid(a.metadata,a.referenceMid,o.overrides);
+                const auto expectedHash = configHash(grid.config(o.outputRoot));
+                const AnchorIdentity expected{o.product,day,from,end,expectedHash};
+                if (a.identity != expected) throw std::runtime_error("anchor policy/range mismatch");
+                const auto state = json::from_cbor(a.feed.bytes);
+                const bool before = !state.at("resumeAt").is_null();
+                const auto cursorPos = before ? state.at("resumeAt").get<JournalPos>() : a.pos;
+                if (before && (a.boundaryMs != day || cursorPos.product != o.product ||
+                    (a.pos.run == cursorPos.run && std::pair(a.pos.block,a.pos.record) >= std::pair(cursorPos.block,cursorPos.record))))
+                    throw std::runtime_error("invalid midnight resume cursor");
+                if (checkpoint) {
+                    const auto& saved = cp["days"][key];
+                    if (saved.at("configHash") != expectedHash || saved.at("fromMs") != from)
+                        throw std::runtime_error("anchor checkpoint identity mismatch");
+                    // Conservative across runs: an older-run candidate falls
+                    // back unless a same-run anchor is available.
+                    if (cursorPos.run != checkpoint->run || std::pair(cursorPos.block,cursorPos.record) >
+                            std::pair(checkpoint->block,checkpoint->record)) continue;
+                }
+                if (o.anchorAllowed && !o.anchorAllowed(cursorPos)) continue;
+                auto candidateReader = std::make_unique<JournalReader>(o.journalRoot,o.product,cursorPos);
+                JournalRecord cursor;
+                const bool present = candidateReader->next(cursor);
+                candidateDecoded = candidateReader->decodedRecords();
+                if (!present || cursor.pos != cursorPos)
+                    throw std::runtime_error("anchor durable position unavailable");
+                JournalFeed candidateFeed(o.product); candidateFeed.importState(state.at("feed"));
+                auto candidateBook = JournalBook::fromState(state.at("book"));
+                const bool candidateUp = state.at("up");
+                const auto candidateReceive = state.at("receiveThroughMs").get<int64_t>();
+                const auto floor = state.at("recorderFloor").get<int64_t>();
+                const auto lastLocal = state.at("feed").at("lastLocal").get<int64_t>();
+                if (floor < from || floor > end || (!checkpoint && floor != from) ||
+                    candidateReceive < lastLocal || state.at("feed").at("run") != a.pos.run ||
+                    (!before && (lastLocal != cursor.record.time.systemNs / 1'000'000 ||
+                        candidateReceive < a.boundaryMs || state.at("feed").at("connection") != cursor.record.connection)) ||
+                    (before && (lastLocal >= day || candidateReceive >= day)) ||
+                    cursor.record.time.systemNs / 1'000'000 < a.boundaryMs)
+                    throw std::runtime_error("anchor cursor/state mismatch");
+                // Validate the committed overlap before importing. A newly
+                // damaged block in this interval would otherwise make duplicate
+                // verification fail repeatedly against the old good HMC2 prefix.
+                // Keep decoded records to replay once, so the normal bound is
+                // still one quarter plus the selected block (not two scans).
+                std::vector<JournalRecord> overlap;
+                size_t overlapBytes = 0;
+                const auto retain = [&](JournalRecord r) {
+                    overlapBytes += r.record.payload.size() + r.metadata.dump().size()*8 + sizeof(r);
+                    if (overlapBytes > 256*1024*1024) {
+                        rejectedPrefix = true;
+                        throw std::runtime_error("anchor committed overlap exceeds buffer bound");
+                    }
+                    overlap.push_back(std::move(r));
+                };
+                auto checked = cursor.pos;
+                if (before) {
+                    cursor.gapBefore = state.at("resumeGap").get<bool>();
+                    retain(std::move(cursor));
+                }
+                rejectedPrefix = true; // any reader/retention exception makes older candidates redundant
+                while (checkpoint && checked != *checkpoint) {
+                    JournalRecord r;
+                    const bool present = o.anchorOverlapReadForTest ? o.anchorOverlapReadForTest(*candidateReader,r) : candidateReader->next(r);
+                    candidateDecoded = candidateReader->decodedRecords();
+                    if (!present || r.gapBefore || r.pos.run != checkpoint->run ||
+                        std::pair(r.pos.block,r.pos.record) > std::pair(checkpoint->block,checkpoint->record)) {
+                        rejectedPrefix = true;
+                        throw std::runtime_error("anchor committed overlap is unavailable or damaged");
+                    }
+                    checked = r.pos;
+                    retain(std::move(r));
+                }
+                rejectedPrefix = false;
+                for (auto it=overlap.rbegin();it!=overlap.rend();++it)
+                    candidateReader->putBack(std::move(*it));
+                auto candidate = std::make_unique<recording::BookRecorder>(configure(grid,floor));
+                candidate->importState(a.recorder.bytes);
+                // Everything above is validation on fresh, unpublished objects.
+                // Preserve installed callbacks: importing never invokes them.
+                feed.importState(state.at("feed"));
+                book = std::move(candidateBook); bookUp = candidateUp;
+                recorder = std::move(candidate); reader = std::move(candidateReader);
+                gridReady = true; hash = expectedHash; recorderFloor = floor;
+                referenceMid = a.referenceMid; gridSnapshot = a.gridSnapshot; gridMetadata = a.metadata;
+                applied = a.pos; restoreCursor = cursorPos; restoreCursorApplied = !before;
+                nextBoundary = a.boundaryMs + Quarter;
+                receiveThrough = candidateReceive; restoreLocal = lastLocal;
+                if (checkpoint) savedThrough = cp["days"][key].at("committedThroughMs");
+                checkpointColumns = recorder->stats().columnsWritten;
+                importedColumns = checkpointColumns;
+                describeGrid(grid);
+                dayReport["anchorBoundaryMs"] = a.boundaryMs;
+                dayReport["anchorPos"] = a.pos;
+            } catch (const std::exception& e) {
+                decoded += candidateDecoded;
+                dayReport["anchorRejection"] = e.what();
+                if (rejectedPrefix) break; // older candidates span the same bad overlap
+                continue;
+            } catch (...) {
+                decoded += candidateDecoded;
+                dayReport["anchorRejection"] = "unknown candidate exception";
+                if (rejectedPrefix) break;
+                continue;
+            }
+            // Consumer installation errors must propagate, never re-enter fallback
+            // with partially attached external consumers.
+            claimProvenance();
+            sLog_Data("Roller anchor restored product=" << o.product
+                << " boundaryMs=" << dayReport.at("anchorBoundaryMs").get<int64_t>()
+                << " cursorRun=" << restoreCursor.run << " cursorBlock=" << restoreCursor.block
+                << " cursorRecord=" << restoreCursor.record << " cursorApplied=" << restoreCursorApplied);
+            if (o.onAnchorRestore) o.onAnchorRestore(restoreCursor,book,bookUp,restoreCursorApplied,restoreLocal);
+            if (o.onRecorder) o.onRecorder(recorder.get(), &feed, end);
+            // A restore exactly at the checkpoint can reach the socket tip
+            // without processing another record. Reaffirm that durable progress
+            // so serving readiness need not wait for a future minute commit.
+            if (checkpoint && savedThrough > from && o.onCommitted &&
+                recorder->watermarks(o.product,"near").minuteThroughMs >= savedThrough &&
+                recorder->watermarks(o.product,"deep").minuteThroughMs >= savedThrough)
+                o.onCommitted(savedThrough);
+            break;
+        }
+        if (!reader) {
+            if (dayReport.contains("anchorRejection"))
+                sLog_Warning("Roller anchor fallback product=" << o.product << " dayMs=" << day
+                    << " reason=" << dayReport.at("anchorRejection").get<std::string>());
+            if (checkpoint) {
+                JournalReader check(o.journalRoot,o.product,checkpoint);
+                JournalRecord saved;
+                if (!check.next(saved)) throw std::runtime_error("checkpoint journal position unavailable");
+                decoded += check.decodedRecords();
+            }
+            reader = std::make_unique<JournalReader>(o.journalRoot,o.product,inventory.anchor(day));
+        }
+        const auto saveAnchor = [&](int64_t boundary, const JournalRecord* resume = nullptr) {
+            // Snapshot fallback may be warming up below an existing output
+            // floor. Such a state cannot replace a standalone midnight anchor
+            // or an older cache with a different committed prefix.
+            if (!o.writeAnchors || !recorder || boundary < savedThrough ||
+                (boundary == day && recorderFloor != from)) return;
+            bool degraded = false;
+            try {
+                const auto start = std::chrono::steady_clock::now();
+                ReplayAnchor a;
+                // Export drains and reports degraded state without serializing it.
+                a.recorder.bytes = o.anchorExportForTest ? o.anchorExportForTest(*recorder) : recorder->exportState();
+                if (a.recorder.bytes.empty()) {
+                    degraded = true;
+                    throw std::runtime_error("degraded recorder: diskErrors or queueDrops");
+                }
+                if (o.anchorBook) {
+                    auto state = o.anchorBook(); book = std::move(state.first); bookUp = state.second;
+                }
+                a.identity = {o.product,day,from,end,hash}; a.boundaryMs = boundary; a.pos = applied;
+                a.gridSnapshot = gridSnapshot; a.referenceMid = referenceMid; a.metadata = gridMetadata;
+                a.feed.bytes = json::to_cbor({{"feed",feed.exportState()},{"book",book.exportState()},
+                    {"up",bookUp},{"recorderFloor",recorderFloor},{"receiveThroughMs",receiveThrough},
+                    {"resumeAt",resume ? json(resume->pos) : json()},{"resumeGap",resume && resume->gapBefore}});
+                const auto exportMs = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+                const auto written = AnchorStore::write(anchorRoot,a);
+                dayReport["anchorBytes"] = written.encodedBytes;
+                sLog_Data("Roller anchor written product=" << o.product << " boundaryMs=" << boundary
+                    << " exportMs=" << exportMs << " encodeMs=" << written.encodeMs
+                    << " encodedBytes=" << written.encodedBytes << " writeMs=" << written.writeMs);
+            } catch (const std::exception& e) {
+                const bool warn = !degraded || !warnedDegraded;
+                warnedDegraded = warnedDegraded || degraded;
+                anchorFailure("Write",boundary,e.what(),warn);
+                return;
+            } catch (...) {
+                anchorFailure("Write",boundary,"unknown exception");
+                return;
+            }
+            if (o.afterAnchorForTest) o.afterAnchorForTest(boundary);
+        };
+
         const auto fence = [&] {
             if (!recorder) return;
             recorder->drain();
@@ -164,23 +444,45 @@ json roll(const RollOptions& o) {
                 through = std::min(through,recorder->watermarks(o.product,layer).minuteThroughMs);
             if (through < savedThrough ||
                 (through == savedThrough && stats.columnsWritten == checkpointColumns)) return;
-            cp["days"][key] = {{"pos",applied},{"committedThroughMs",through},{"configHash",hash},{"fromMs",from}};
+            cp["days"][key] = {{"pos",applied},{"committedThroughMs",through},{"configHash",hash},{"fromMs",from},{"receiveThroughMs",receiveThrough}};
             // Also expose the newest checkpoint in the plan's flat schema.
             cp["pos"] = applied; cp["committedThroughMs"] = through; cp["configHash"] = hash;
             writeCheckpoint(cpPath,cp);
             savedThrough = through; checkpointColumns = stats.columnsWritten;
             if (o.onCommitted) o.onCommitted(through);
         };
-        while ((!o.cancelled || !o.cancelled()) &&
-               (o.nextRecord ? o.nextRecord(reader, input) : reader.next(input))) {
+        while ((!recorder || o.nextRecord || savedThrough < end) && (!o.cancelled || !o.cancelled()) &&
+               (o.nextRecord ? o.nextRecord(*reader, input) : reader->next(input))) {
             // No synthetic EOF tick: only actual journal records prove elapsed time.
             // Warmup is read in journal order; receipt clock need not be monotonic.
+            if (recorder && nextBoundary == day && input.record.time.systemNs / 1'000'000 >= day) {
+                // Midnight is the state before today's first record. Its exact
+                // inclusive position may be in yesterday, but resumeAt lives in
+                // today's file and is replayed once. This also handles a long
+                // silent interval across midnight without losing its minutes.
+                saveAnchor(day,&input); nextBoundary += Quarter;
+            }
             feed.apply(input); applied = input.pos; ++records;
+            receiveThrough = std::max(receiveThrough,input.record.time.systemNs / 1'000'000);
             if (o.onApplied) o.onApplied(input);
             if (input.record.kind == capture::Kind::Frame) bytes += input.record.payload.size();
+            if (recorder && input.record.time.systemNs / 1'000'000 >= nextBoundary) {
+                // First durable record at/after the UTC fence. No host-clock tick
+                // is invented, and the position identifies precisely this state.
+                while (nextBoundary < end && input.record.time.systemNs / 1'000'000 >= nextBoundary) {
+                    saveAnchor(nextBoundary); nextBoundary += Quarter;
+                }
+            }
             if (o.afterRecordForTest) o.afterRecordForTest(records);
             const auto minute = input.record.time.systemNs / 1'000'000 / Minute;
-            if (minute != lastFence) { fence(); lastFence = minute; }
+            const auto second = input.record.time.systemNs / 1'000'000 / 1000;
+            // The lateness tail normally closes seconds after the range. Waiting
+            // for the next minute fence adds an unnecessary minute to restart.
+            const bool tailFence = second >= end / 1000 && second != lastTailFence;
+            if (minute != lastFence || tailFence) {
+                fence(); lastFence = minute;
+                if (tailFence) lastTailFence = second;
+            }
             // Receive time can lead the recorder's envelope-based integration
             // clock. Only a drained, committed watermark proves range completion.
             if (recorder && savedThrough >= end) break;
@@ -188,12 +490,22 @@ json roll(const RollOptions& o) {
             if (o.dryRun && input.record.time.systemNs / 1'000'000 >= end + latenessMs) break;
         }
         fence();
-        if (recorder) columns += recorder->stats().columnsWritten;
+        if (recorder) columns += recorder->stats().columnsWritten - importedColumns;
         dayReport["committedThroughMs"] = savedThrough;
-        days.push_back(std::move(dayReport)); pending = pending || reader.pending();
+        decoded += reader->decodedRecords();
+        if (o.writeAnchors && !o.dryRun) {
+            try {
+                const auto error = AnchorStore::prune(anchorRoot,o.product,receiveThrough);
+                if (error) throw std::system_error(error,"anchor prune");
+            } catch (const std::exception& e) { anchorFailure("Prune",receiveThrough,e.what()); }
+            catch (...) { anchorFailure("Prune",receiveThrough,"unknown exception"); }
+        }
+        days.push_back(std::move(dayReport)); pending = pending || reader->pending();
+
     }
+    decoded += inventory.decodedRecords();
     const auto seconds = std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
-    return {{"product",o.product},{"dryRun",o.dryRun},{"records",records},{"jsonBytes",bytes},
+    return {{"product",o.product},{"dryRun",o.dryRun},{"records",records},{"jsonBytes",bytes},{"decodedRecords",decoded},
             {"wallSeconds",seconds},{"recordsPerSecond",records/seconds},{"jsonMBPerSecond",bytes/seconds/1e6},
             {"columnsWritten",columns},{"outputBytes",o.dryRun ? 0 : outputBytes(o.outputRoot,o.product)},
             {"pendingTail",pending},{"days",days}};
