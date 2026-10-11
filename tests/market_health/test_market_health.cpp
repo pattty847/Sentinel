@@ -10,6 +10,7 @@
 #include <QTest>
 #include <QTimer>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QDir>
 #include <QTemporaryDir>
 #include <QSettings>
@@ -116,9 +117,10 @@ TEST(MarketHealthWidgets, VisiblePaperDetachImmediatelyWithdrawsHealth) {
     PaperTradingDock dock;
     dock.setDataSource(&source);
     dock.setSymbol("BTC-USD");
-    dock.show(); QTest::qWait(20);
+    dock.show();
     auto* label = dock.findChild<QLabel*>("paperMarketHealth");
     ASSERT_TRUE(label);
+    QTRY_VERIFY_WITH_TIMEOUT(label->text().startsWith("Live"), 1000);
     EXPECT_TRUE(label->text().startsWith("Live"));
     EXPECT_FALSE(label->toolTip().isEmpty());
     dock.setDataSource(nullptr);
@@ -237,7 +239,7 @@ TEST(MarketHealth, AcceptedHeatmapPathRejectsExpiredIdsWrongSourcesAndOldRevisio
     client.heatmapLiveReceived(2, healthLiveFrame(9)); drainHealth();
     EXPECT_EQ(accepted.count(), 1);
     EXPECT_EQ(h.snapshot("BTC-USD", sampleAt).heatmapAgeMs, 10'000);
-    QTest::qWait(5);
+    QTRY_VERIFY_WITH_TIMEOUT(QDateTime::currentMSecsSinceEpoch() > acceptedAt, 1000);
     client.heatmapLiveReceived(2, healthLiveFrame(11)); drainHealth();
     ASSERT_EQ(accepted.count(), 2);
     EXPECT_GT(accepted.at(1).at(1).toLongLong(), acceptedAt);
@@ -303,25 +305,38 @@ TEST(MarketHealthWidgets, StatusAndTelemetryStopPollingWhileHiddenAndKeepUnknown
     StatusBar bar;
     bar.setMarketHealth(&health);
     EXPECT_EQ(reads, 0);
-    bar.show(); QTest::qWait(30);
+    bar.show();
+    QTRY_VERIFY_WITH_TIMEOUT(reads > 0, 1000);
     EXPECT_EQ(bar.findChild<QLabel*>("marketState")->text(), "Live");
     EXPECT_GT(reads, 0);
     bar.hide(); const int hiddenReads = reads;
-    QTest::qWait(1100);
+    QElapsedTimer hiddenBarWindow;
+    hiddenBarWindow.start();
+    while (hiddenBarWindow.elapsed() < 1100) {
+        QTest::qWait(20);
+        EXPECT_EQ(reads, hiddenReads);
+    }
     EXPECT_EQ(reads, hiddenReads);
     HeatmapTelemetryDock dock;
     int polls = 0;
     dock.setMarketHealth(&health);
     dock.setProvider([&]() -> std::optional<QVariantMap> { ++polls; return QVariantMap{{"tick", 5.0}}; });
     EXPECT_EQ(polls, 0);
-    dock.show(); QTest::qWait(30);
+    dock.show();
+    QTRY_COMPARE_WITH_TIMEOUT(dock.valueText("tick"), QString("$5"), 1000);
     EXPECT_EQ(dock.valueText("tick"), "$5");
     EXPECT_EQ(dock.valueText("residentBytes"), "Unknown");
     EXPECT_EQ(dock.valueText("holding"), "Unknown");
     EXPECT_TRUE(dock.frameHistory().empty());
     EXPECT_TRUE(dock.valueText("marketDetail").contains("Heatmap live receive age: Unknown"));
     dock.hide(); const auto hiddenPolls = polls;
-    dock.refresh(); QTest::qWait(350);
+    dock.refresh();
+    QElapsedTimer hiddenDockWindow;
+    hiddenDockWindow.start();
+    while (hiddenDockWindow.elapsed() < 350) {
+        QTest::qWait(20);
+        EXPECT_EQ(polls, hiddenPolls);
+    }
     EXPECT_EQ(polls, hiddenPolls);
 }
 TEST(MarketHealthWidgets, TelemetryVisualFixtures) {

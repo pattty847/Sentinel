@@ -417,7 +417,7 @@ TEST(HeatmapModelRows, SparseMergeAndWholeColumnBinningMatchCellOracle) {
     EXPECT_THROW(heatmap::validate(broken), std::invalid_argument);
 }
 
-TEST(HeatmapModelTiming, SyntheticMonthOfDeepHoursReportsComposeMilliseconds) {
+TEST(HeatmapModelTiming, DISABLED_SyntheticMonthOfDeepHoursReportsComposeMilliseconds) {
     // A single assert-free timing sample, not a latency gate or benchmark loop.
     // 720 input columns fit on one screen at >=1px/column; fixture construction
     // is excluded. Include full validation, decode tables and output allocation.

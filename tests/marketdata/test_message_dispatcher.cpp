@@ -271,9 +271,10 @@ TEST(MessageDispatcher, HandleMissingChannel) {
         {"product_id", "BTC-USD"}
     };
 
-    auto result = MessageDispatcher::parse(json);
-    // Should handle gracefully (empty events or specific error event)
     EXPECT_NO_THROW(MessageDispatcher::parse(json));
+    const auto result = MessageDispatcher::parse(json);
+    EXPECT_TRUE(result.events.empty());
+    EXPECT_EQ(result.dropped, 1u);
 }
 
 TEST(MessageDispatcher, HandleMissingTradeFields) {

@@ -1,5 +1,6 @@
 #pragma once
 #include <variant>
+#include <cstddef>
 #include <optional>
 #include <vector>
 #include <string>
@@ -19,7 +20,10 @@ struct ProviderErrorEvent { std::string message; };
 
 using Event = std::variant<TradeEvent, BookSnapshotEvent, BookUpdateEvent, SubscriptionAckEvent, ProviderErrorEvent>;
 
-struct DispatchResult { std::vector<Event> events; };
+struct DispatchResult {
+    std::vector<Event> events;
+    size_t dropped = 0; // Messages with an unrecognized channel and type.
+};
 
 class MessageDispatcher {
 public:
@@ -106,6 +110,8 @@ public:
         } else if (type == "error") {
             const std::string msg = j.value("message", "provider error");
             out.events.emplace_back(ProviderErrorEvent{msg});
+        } else {
+            out.dropped = 1;
         }
 
         return out;
