@@ -70,7 +70,8 @@ struct CoreTests {
             AgentTranscript(path: "/synthetic/claude/session-\(index).jsonl", cwd: cwd,
                             kind: "claude", modified: Date(timeIntervalSince1970: Double(index)))
         }
-        let matches = AgentMatcher.select(processes: processes, transcripts: transcripts)
+        let matches = AgentMatcher.select(processes: processes, transcripts: transcripts,
+                                          now: Date(timeIntervalSince1970: 100))
         #expect(matches.count == 6)
         #expect(matches.first?.transcript?.path.hasSuffix("session-3.jsonl") == true)
         #expect(Set(matches.compactMap { $0.transcript?.path }).count == 6)
@@ -90,10 +91,29 @@ struct CoreTests {
                             kind: "codex", modified: Date(timeIntervalSince1970: Double(index)))
         }
         #expect(AgentMatcher.cwd(for: main) == "/synthetic/worktree")
-        let matches = AgentMatcher.select(processes: [main, helper, other], transcripts: rollouts)
+        let matches = AgentMatcher.select(processes: [main, helper, other], transcripts: rollouts,
+                                          now: Date(timeIntervalSince1970: 100))
         #expect(matches.map(\.pid) == [1, 3])
         #expect(Set(matches.compactMap { $0.transcript?.path }).count == 2)
         #expect(matches[0].transcript?.path.hasSuffix("rollout-2.jsonl") == true)
+    }
+
+    @Test func unpinnedClaudeIgnoresOldTranscriptButPinnedSessionCanUseIt() {
+        let now = Date(timeIntervalSince1970: 200_000)
+        let cwd = "/synthetic/main"
+        let old = AgentTranscript(path: "/synthetic/old.jsonl", cwd: cwd, kind: "claude",
+                                  modified: now.addingTimeInterval(-25 * 3600))
+        let fresh = AgentTranscript(path: "/synthetic/fresh.jsonl", cwd: cwd, kind: "claude",
+                                    modified: now.addingTimeInterval(-3600))
+        let pinned = AgentProcess(pid: 1, kind: "claude", cwd: cwd,
+                                  args: ["claude", "--resume", "old"], hasWorktree: true)
+        let current = AgentProcess(pid: 2, kind: "claude", cwd: cwd, args: ["claude"], hasWorktree: true)
+        let extra = AgentProcess(pid: 3, kind: "claude", cwd: cwd, args: ["claude"], hasWorktree: true)
+        let matches = AgentMatcher.select(processes: [pinned, current, extra],
+                                          transcripts: [old, fresh], now: now)
+        #expect(matches.map { $0.transcript?.path } == [old.path, fresh.path, nil])
+        let unpinned = AgentMatcher.select(processes: [current, extra], transcripts: [old], now: now)
+        #expect(unpinned.allSatisfy { $0.transcript == nil })
     }
 
     @Test func planSkipsNewestZeroSliceDocumentUnlessPinned() {
@@ -129,6 +149,18 @@ struct CoreTests {
             .raw("unrecognized budget line")
         ]
         #expect(BudgetParser.parse(lines) == expected)
+    }
+
+    @Test func budgetEvenPaceTickAndDurationFormatting() {
+        #expect(abs((BudgetGuide.evenPaceLeft(window: "weekly", reset: "6.3d") ?? 0) - 0.9) < 0.0001)
+        #expect(BudgetGuide.evenPaceLeft(window: "session", reset: "2.5h") == 0.5)
+        #expect(BudgetGuide.evenPaceLeft(window: "session", reset: "8h") == 1)
+        #expect(BudgetGuide.evenPaceLeft(window: "extra", reset: "2.5h") == nil)
+        #expect(BudgetGuide.evenPaceLeft(window: "weekly", reset: nil) == nil)
+        #expect(BudgetGuide.duration("6.3d") == "6d 7h")
+        #expect(BudgetGuide.duration("2.5h") == "2h 30m")
+        #expect(BudgetGuide.duration("0.95d") == "22h 48m")
+        #expect(BudgetGuide.duration("unknown") == nil)
     }
 
     @Test func chartPlanSlicesAndBugRows() throws {

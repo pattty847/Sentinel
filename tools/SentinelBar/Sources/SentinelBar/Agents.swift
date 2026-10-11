@@ -133,7 +133,7 @@ enum AgentProbe {
         }
         let claudeCwds = Set(descriptors.filter { $0.kind == "claude" }.map { AgentMatcher.cwd(for: $0) })
         let transcripts = TranscriptFiles.codexFiles() + claudeCwds.flatMap { TranscriptFiles.claudeFiles(cwd: $0) }
-        let selected = AgentMatcher.select(processes: descriptors, transcripts: transcripts)
+        let selected = AgentMatcher.select(processes: descriptors, transcripts: transcripts, now: Date())
         let byPID = Dictionary(processes.map { ($0.pid, $0) }, uniquingKeysWith: { a, _ in a })
         let descriptorByPID = Dictionary(descriptors.map { ($0.pid, $0) }, uniquingKeysWith: { a, _ in a })
         var jobs: [AgentJob] = []

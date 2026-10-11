@@ -73,7 +73,7 @@ public enum AgentMatcher {
         return model
     }
 
-    public static func select(processes: [AgentProcess], transcripts: [AgentTranscript]) -> [AgentMatch] {
+    public static func select(processes: [AgentProcess], transcripts: [AgentTranscript], now: Date) -> [AgentMatch] {
         var used: Set<String> = []
         var selected: [Int32: AgentTranscript] = [:]
         let ordered = transcripts.sorted { $0.modified == $1.modified ? $0.path < $1.path : $0.modified > $1.modified }
@@ -89,7 +89,8 @@ public enum AgentMatcher {
             if process.kind == "claude" &&
                 argument(process.args, names: ["--resume", "-r", "--session-id"]) != nil { continue }
             guard let transcript = ordered.first(where: { $0.kind == process.kind && $0.cwd == cwd(for: process) &&
-                !used.contains($0.path) }) else { continue }
+                !used.contains($0.path) && (process.kind != "claude" ||
+                    $0.modified >= now.addingTimeInterval(-24 * 3600)) }) else { continue }
             selected[process.pid] = transcript
             used.insert(transcript.path)
         }
@@ -332,6 +333,43 @@ public enum BudgetParser {
     private static func field(_ index: Int, in line: String, match: NSTextCheckingResult) -> String? {
         guard let range = Range(match.range(at: index), in: line) else { return nil }
         return String(line[range])
+    }
+}
+
+public enum BudgetGuide {
+    public static func evenPaceLeft(window: String, reset: String?) -> Double? {
+        guard let reset, let hours = hoursUntilReset(reset) else { return nil }
+        let length: Double
+        switch window.lowercased() {
+        case "weekly": length = 7 * 24
+        case "session": length = 5
+        default: return nil
+        }
+        return min(1, max(0, hours / length))
+    }
+
+    public static func duration(_ raw: String) -> String? {
+        guard let hours = hoursUntilReset(raw) else { return nil }
+        if hours >= 24 {
+            let roundedHours = Int(hours.rounded())
+            let days = roundedHours / 24
+            let remainingHours = roundedHours % 24
+            return remainingHours == 0 ? "\(days)d" : "\(days)d \(remainingHours)h"
+        }
+        let minutes = Int((hours * 60).rounded())
+        let wholeHours = minutes / 60
+        let remainingMinutes = minutes % 60
+        if wholeHours == 0 { return "\(remainingMinutes)m" }
+        return remainingMinutes == 0 ? "\(wholeHours)h" : "\(wholeHours)h \(remainingMinutes)m"
+    }
+
+    private static func hoursUntilReset(_ raw: String) -> Double? {
+        guard let unit = raw.last, let value = Double(raw.dropLast()), value.isFinite, value >= 0 else { return nil }
+        switch unit {
+        case "d": return value * 24
+        case "h": return value
+        default: return nil
+        }
     }
 }
 
