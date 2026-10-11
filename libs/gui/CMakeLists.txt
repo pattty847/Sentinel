@@ -176,6 +176,8 @@ add_library(sentinel_chart_core STATIC
     chart/core/ChartCamera.hpp
     chart/core/ChartCamera.cpp
     chart/core/ChartSession.hpp
+    chart/core/PriceFitter.hpp
+    chart/core/PriceFitter.cpp
     chart/core/ZoomGlide.hpp
     chart/core/ZoomGlide.cpp
     chart/core/ZoomGlideState.hpp

@@ -22,10 +22,10 @@ void UnifiedGridRenderer::init() {
     qRegisterMetaType<Trade>("Trade");
     m_frameClock.start();
     m_timeAuthority.setActiveTimeframeMs(defaultTimeframeMs);
-    // Each chart owns its GPU heatmap layer.
     m_gpuLayer = std::make_unique<heatmap::gpu::HeatmapGpuLayer>();
     m_heatmapPort = std::make_unique<chart::HeatmapChartPort>(*this, *m_gpuLayer);
     m_view = std::make_unique<chart::ChartViewController>(*m_heatmapPort, *m_heatmapPort, *m_heatmapPort, m_published, this);
+    m_view->priceFitter().setRequestUpdate([this] { update(); });
     m_view->session().timeframeMs = defaultTimeframeMs;
     m_gpuLayer->setTone({static_cast<float>(m_heatmapGamma), static_cast<float>(m_heatmapContrast),
                          static_cast<float>(m_heatmapShaderFloor)});
@@ -56,7 +56,7 @@ void UnifiedGridRenderer::init() {
         m_view->applyGpuLimits();
         // A carry applied before the new symbol's price scale was known: again, now
         // that its limits are.
-        if (m_priceCarry && !m_view->flags().reseedPrice && !m_view->flags().limitsDeferred &&
+        if (m_view->priceFitter().priceCarry() && !m_view->flags().reseedPrice && !m_view->flags().limitsDeferred &&
             m_gpuLayer->priceScaleCurrent())
             applyPriceCarry(m_view->gpuLivePrice());
         refitAutoPrice(); // e.g. a new symbol's tick: its min/max price spans
@@ -98,12 +98,12 @@ void UnifiedGridRenderer::init() {
     connect(getViewState(), &GridViewState::autoScrollEnabledChanged, this, &UnifiedGridRenderer::autoScrollEnabledChanged);
     connect(getViewState(), &GridViewState::autoPriceScaleChanged, this, [this]() {
         sLog_Render("auto price scale=" << getViewState()->autoPriceScale());
-        if (getViewState()->autoPriceScale()) m_priceCarry.reset(); // on: the candles fit
+        if (getViewState()->autoPriceScale()) m_view->priceFitter().priceCarry().reset(); // on: the candles fit
         emit autoPriceScaleChanged();
     });
     // Auto price scale (gpu): every setViewport takes its price from the visible candles.
     getViewState()->setPriceFit([this](qint64 start, qint64 end, double& priceMin, double& priceMax) {
-        return autoPriceFit(start, end, priceMin, priceMax);
+        return m_view->priceFitter().autoPriceFit(start, end, priceMin, priceMax);
     });
     // Whole-pixel mapping: a drag commits exactly the whole device pixels it shows, and
     // a zoom keeps what is drawn under the cursor.
@@ -111,7 +111,7 @@ void UnifiedGridRenderer::init() {
         return m_view->camera().panShift(drag, timeShiftMs, priceShift);
     });
     connect(getViewState(), &GridViewState::priceInteracted, this, [this]() {
-        m_priceCarry.reset(); // the user owns price now: no pending carry replaces it
+        m_view->priceFitter().priceCarry().reset(); // the user owns price now: no pending carry replaces it
     });
     
     QMetaObject::invokeMethod(

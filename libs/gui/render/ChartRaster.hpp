@@ -161,6 +161,8 @@ int64_t followShift(int64_t endMs, int64_t targetMs, int64_t tfMs, int colPx);
 // Tightest whole-row fit containing both margin edges. The top is clamped to
 // a containing pixel phase and rational edges are rounded outward. False leaves
 // the inputs unchanged (invalid input or no containing P >= 1 at this tick).
+void fitPriceManualRows(double& lo, double& hi, int H, double tick);
+
 bool fitPriceToRows(double &lo, double &hi, int heightDev, double tick);
 
 struct AutoPriceFit {
