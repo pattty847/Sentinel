@@ -14,6 +14,7 @@
 #include <QFile>
 #include <gtest/gtest.h>
 #include <fstream>
+#include <iostream>
 #include <yaml-cpp/yaml.h>
 #include <zstd.h>
 
@@ -270,14 +271,19 @@ TEST(CorruptBlockPolicy, ShadowWorkerCrossesDamagedDayWithoutRetry) {
     std::mutex progressMutex;
     std::condition_variable progressChanged;
     bool lastRecordApplied = false;
+    std::chrono::steady_clock::time_point lastRecordAppliedAt;
     c.observeForTest = [&](const JournalRecord& record, bool applied) {
         if (!applied || record.record.time.systemNs / 1'000'000 < Epoch+Day+245'000) return;
         {
             std::lock_guard lock(progressMutex);
-            lastRecordApplied = true;
+            if (!lastRecordApplied) {
+                lastRecordAppliedAt = std::chrono::steady_clock::now();
+                lastRecordApplied = true;
+            }
         }
         progressChanged.notify_one();
     };
+    const auto shadowStartedAt = std::chrono::steady_clock::now();
     ShadowRoller shadow(c, {"BTC-USD"}, root/"primary", registry);
     registerJournalMetrics(registry, "BTC-USD"); // production constructor also registers
     metrics::MetricsHttpServer http(registry); ASSERT_TRUE(http.listen(0));
@@ -299,6 +305,12 @@ TEST(CorruptBlockPolicy, ShadowWorkerCrossesDamagedDayWithoutRetry) {
         EXPECT_TRUE(progressChanged.wait_for(lock, std::chrono::seconds(90), [&] {
             return lastRecordApplied;
         })) << "shadow did not apply the last record of the damaged day";
+        if (lastRecordApplied) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                lastRecordAppliedAt - shadowStartedAt);
+            if (elapsed > std::chrono::seconds(30))
+                std::cerr << "Shadow worker applied the final record after " << elapsed.count() << " ms\n";
+        }
     }
     shadow.stop();
     EXPECT_GE(shadow.watermarks("BTC-USD", "near").minuteThroughMs, Epoch+Day+240'000);

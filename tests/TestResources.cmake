@@ -45,8 +45,6 @@ set(_sentinel_fast_tests
     AgentApiCodecTests SymbolSubscriptionManagerTests
     ExceptionTypeinfoTests)
 
-set_tests_properties(RollerCorruptBlockTests DIRECTORY "${CMAKE_SOURCE_DIR}/tests/roller" PROPERTIES RUN_SERIAL FALSE)
-
 foreach(_sentinel_area IN ITEMS core marketdata capture roller render agentapi
                                 trading servermodel market_health fonts research_ui link)
     set(_sentinel_dir "${CMAKE_SOURCE_DIR}/tests/${_sentinel_area}")
