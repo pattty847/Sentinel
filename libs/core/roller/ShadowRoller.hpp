@@ -32,6 +32,12 @@ private:
   struct Impl;
   std::unique_ptr<Impl> m;
 };
+// One hourly oracle advance. Its output and anchors live outside served product trees.
+nlohmann::json rollShadowOracleHour(const std::filesystem::path &journalRoot,
+                                   const std::filesystem::path &shadowRoot,
+                                   const std::string &product, int64_t dayMs,
+                                   int64_t toMs,
+                                   std::function<bool()> cancelled = {});
 // Shared with the hourly checker and divergent-fixture tests. Strict journal
 // parity includes missing and partial buckets; cross-connection is
 // informational.

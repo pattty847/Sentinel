@@ -1039,6 +1039,102 @@ TEST_F(ShadowTest, ComparisonWatermarkAndMismatchTotalsSurviveRestart) {
   EXPECT_TRUE(has("sentinel_roller_shadow_mismatch_total{product=\"BTC-USD\","
                   "layer=\"near\"} 1"));
 }
+TEST_F(ShadowTest, OracleAdvancesOnlyNewHour) {
+  writer->append(record(0, snapshot()));
+  for (int64_t t = 30000; t <= 2 * 3600000 + 90000; t += 30000)
+    writer->append(record(t));
+  writer->flush();
+  const auto oracle = root / "shadow" / "shadow-oracle" / Product /
+                      std::to_string(Epoch);
+  const auto first = rollShadowOracleHour(cfg.journalRoot, cfg.outputRoot,
+                                          Product, Epoch, Epoch + 3600000);
+  ASSERT_TRUE(fs::exists(oracle / Product / "roller.json"));
+  EXPECT_FALSE(fs::exists(root / "shadow" / Product));
+  EXPECT_EQ(load(oracle / Product / "roller.json")["days"]
+                [std::to_string(Epoch)]["committedThroughMs"], Epoch + 3600000);
+  const auto second = rollShadowOracleHour(cfg.journalRoot, cfg.outputRoot,
+                                           Product, Epoch, Epoch + 7200000);
+  EXPECT_EQ(second.at("days").at(0).at("anchorBoundaryMs"), Epoch + 3600000);
+  EXPECT_EQ(load(oracle / Product / "roller.json")["days"]
+                [std::to_string(Epoch)]["committedThroughMs"], Epoch + 7200000);
+  // The completed-hour anchor resumes at the checkpoint. A fresh oracle
+  // applies the full two-hour journal here.
+  EXPECT_LT(second.at("records").get<uint64_t>(), 200);
+  EXPECT_LT(second.at("columnsWritten").get<uint64_t>(),
+            first.at("columnsWritten").get<uint64_t>() + 10);
+}
+TEST_F(ShadowTest, CorruptOracleCheckpointResetsAndStillCompares) {
+  writer->append(record(0, snapshot()));
+  for (int64_t t = 30000; t <= 2 * 3600000 + 90000; t += 30000)
+    writer->append(record(t));
+  writer->flush();
+  const auto oracle = root / "shadow" / "shadow-oracle" / Product /
+                      std::to_string(Epoch);
+  rollShadowOracleHour(cfg.journalRoot, cfg.outputRoot, Product, Epoch,
+                       Epoch + 3600000);
+  { std::ofstream(oracle / Product / "roller.json") << "{broken"; }
+  const auto replay = rollShadowOracleHour(cfg.journalRoot, cfg.outputRoot,
+                                           Product, Epoch, Epoch + 7200000);
+  EXPECT_GT(replay.at("decodedRecords").get<uint64_t>(), 200);
+  roll({cfg.journalRoot, root / "clean", Product, Epoch, Epoch + 7200000});
+  for (const auto *layer : {"near", "deep"}) {
+    metrics::Counter mismatch;
+    compareShadow(root / "clean", oracle, root / "primary", Product, layer,
+                  Epoch, Epoch + 7200000, mismatch);
+    EXPECT_EQ(mismatch.value(), 0);
+  }
+}
+TEST_F(ShadowTest, JournalErrorDoesNotWipeOracle) {
+  writer->append(record(0, snapshot()));
+  for (int64_t t = 30000; t <= 3690000; t += 30000)
+    writer->append(record(t));
+  writer->close();
+  const auto oracle = root / "shadow" / "shadow-oracle" / Product /
+                      std::to_string(Epoch);
+  rollShadowOracleHour(cfg.journalRoot, cfg.outputRoot, Product, Epoch,
+                       Epoch + 3600000);
+  const auto checkpointPath = oracle / Product / "roller.json";
+  const auto saved = load(checkpointPath);
+  fs::path segment;
+  for (const auto &entry : fs::recursive_directory_iterator(cfg.journalRoot))
+    if (entry.path().extension() == ".rawl2") {
+      segment = entry.path();
+      break;
+    }
+  ASSERT_FALSE(segment.empty());
+  fs::copy_file(segment, segment.parent_path() / "duplicate.rawl2");
+  try {
+    rollShadowOracleHour(cfg.journalRoot, cfg.outputRoot, Product, Epoch,
+                         Epoch + 7200000);
+    FAIL() << "duplicate journal segment was accepted";
+  } catch (const std::runtime_error &e) {
+    EXPECT_STREQ(e.what(), "duplicate journal segment");
+  }
+  EXPECT_TRUE(fs::is_directory(oracle));
+  EXPECT_EQ(load(checkpointPath), saved);
+}
+TEST_F(ShadowTest, OracleRemovesPreviousDayAtRollover) {
+  const auto next = Epoch + 86400000;
+  writer->append(record(86400000, snapshot()));
+  for (int64_t t = 86430000; t <= 86400000 + 3690000; t += 30000)
+    writer->append(record(t));
+  writer->flush();
+  const auto productOracle = root / "shadow" / "shadow-oracle" / Product;
+  const auto previous = productOracle / std::to_string(Epoch);
+  fs::create_directories(previous);
+  std::ofstream(previous / "stale") << "prior day";
+  const auto strayFile = productOracle / std::to_string(Epoch - 86400000);
+  const auto strayLink = productOracle / std::to_string(Epoch - 2 * 86400000);
+  std::ofstream(strayFile) << "keep";
+  fs::create_directory_symlink(previous, strayLink);
+  rollShadowOracleHour(cfg.journalRoot, cfg.outputRoot, Product, next,
+                       next + 3600000);
+  EXPECT_FALSE(fs::exists(previous));
+  EXPECT_TRUE(fs::is_regular_file(strayFile));
+  EXPECT_TRUE(fs::is_symlink(strayLink));
+  EXPECT_TRUE(fs::exists(productOracle / std::to_string(next) / Product /
+                         "roller.json"));
+}
 TEST_F(ShadowTest, RefusesAliasedPrimaryRoot) {
   initial();
   fs::create_directories(root / "primary");

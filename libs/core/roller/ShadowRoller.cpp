@@ -3,8 +3,8 @@
 #include "capture/CaptureFanout.hpp"
 #include <QDir>
 #include <QLocalSocket>
-#include <QTemporaryDir>
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <condition_variable>
 #include <deque>
@@ -862,6 +862,88 @@ bool overlaps(const fs::path &a, const fs::path &b) {
 }
 } // namespace
 
+nlohmann::json rollShadowOracleHour(const fs::path &journalRoot,
+                                   const fs::path &shadowRoot,
+                                   const std::string &product, int64_t dayMs,
+                                   int64_t toMs,
+                                   std::function<bool()> cancelled) {
+  capture::validateSymbol(product);
+  if (dayMs % Day || toMs <= dayMs || toMs > dayMs + Day || toMs % Hour)
+    throw std::runtime_error("invalid shadow oracle hour");
+  const auto productRoot = shadowRoot / "shadow-oracle" / product;
+  const auto dayRoot = productRoot / std::to_string(dayMs);
+  for (const auto &path : {shadowRoot / "shadow-oracle", productRoot, dayRoot})
+    if (fs::is_symlink(path))
+      throw std::runtime_error("shadow oracle directory is a symlink");
+  if (fs::exists(productRoot)) {
+    for (const auto &entry : fs::directory_iterator(productRoot)) {
+      const auto name = entry.path().filename().string();
+      int64_t previous = 0;
+      const auto [last, error] = std::from_chars(name.data(), name.data() + name.size(), previous);
+      if (error != std::errc{} || last != name.data() + name.size() ||
+          std::to_string(previous) != name || previous >= dayMs)
+        continue;
+      if (entry.is_symlink() || !entry.is_directory()) {
+        sLog_Warning("Shadow oracle cleanup skipped product=" << product
+                                                             << " entry=" << name);
+        continue;
+      }
+      fs::remove_all(entry.path());
+    }
+  }
+  RollOptions o{journalRoot, dayRoot, product, dayMs, toMs};
+  o.allowGrowingEnd = true;
+  o.cancelled = std::move(cancelled);
+  const bool hadOracle = fs::exists(dayRoot);
+  const auto reset = [&](std::string_view reason) {
+    sLog_Warning("Shadow oracle reset product=" << product << " day=" << dayMs
+                                                << " error=" << std::string(reason));
+    fs::remove_all(dayRoot);
+    return roll(o);
+  };
+  const auto checkpointPath = dayRoot / product / "roller.json";
+  if (hadOracle && fs::exists(checkpointPath)) {
+    std::ifstream in(checkpointPath);
+    if (!in)
+      throw std::runtime_error("shadow oracle checkpoint open failed");
+    std::optional<std::string> checkpointFault;
+    try {
+      json checkpoint;
+      in >> checkpoint;
+      (void)checkpoint.at("rollerVersion").get<int>();
+      (void)checkpoint.at("product").get<std::string>();
+      const auto &days = checkpoint.at("days");
+      if (!days.is_object())
+        checkpointFault = "checkpoint days schema mismatch";
+      else if (const auto key = std::to_string(dayMs); days.contains(key)) {
+        const auto &saved = days.at(key);
+        (void)saved.at("pos").get<JournalPos>();
+        (void)saved.at("committedThroughMs").get<int64_t>();
+        (void)saved.at("configHash").get<uint64_t>();
+        (void)saved.at("fromMs").get<int64_t>();
+        if (saved.contains("receiveThroughMs"))
+          (void)saved.at("receiveThroughMs").get<int64_t>();
+      }
+    } catch (const json::exception &e) {
+      checkpointFault = e.what();
+    }
+    if (checkpointFault)
+      return reset(*checkpointFault);
+  }
+  try {
+    return roll(o);
+  } catch (const std::exception &e) {
+    const std::string_view error = e.what();
+    const bool brokenState = error.starts_with("checkpoint version/product mismatch") ||
+                             error.starts_with("checkpoint policy/range mismatch") ||
+                             error.starts_with("checkpoint journal position unavailable") ||
+                             error.starts_with("refusing HMC2 product without roller.json");
+    if (!hadOracle || !brokenState || (o.cancelled && o.cancelled()))
+      throw;
+    return reset(error);
+  }
+}
+
 struct ShadowRoller::Impl {
   struct Product {
     std::string name;
@@ -1291,22 +1373,20 @@ struct ShadowRoller::Impl {
           // One hour at a time, sequential across products; no work on
           // the source workers, primary path, or metrics scrape thread.
           while (p->compared < end && !stopping) {
-            QTemporaryDir temp;
-            if (!temp.isValid())
-              throw std::runtime_error("shadow oracle temp directory");
             const auto begin = p->compared;
-            const auto batchEnd = std::min(end, begin / Day * Day + Day);
-            RollOptions o{cfg.journalRoot, temp.path().toStdString(), p->name,
-                          begin / Day * Day, batchEnd};
-            o.cancelled = [&] { return stopping.load(); };
-            roll(o);
+            const auto day = begin / Day * Day;
+            const auto batchEnd = std::min(end, day + Day);
+            const auto oracleRoot = fs::path(cfg.outputRoot) / "shadow-oracle" /
+                                    p->name / std::to_string(day);
+            rollShadowOracleHour(cfg.journalRoot, cfg.outputRoot, p->name, day,
+                                 batchEnd, [&] { return stopping.load(); });
             if (stopping)
               break;
             while (p->compared < batchEnd && !stopping) {
               metrics::Counter nearDelta, deepDelta;
               for (const auto *layer : {"near", "deep"}) {
                 auto report = compareShadow(
-                    cfg.outputRoot, o.outputRoot, primary, p->name, layer,
+                    cfg.outputRoot, oracleRoot, primary, p->name, layer,
                     p->compared, p->compared + Hour,
                     std::string_view(layer) == "near" ? nearDelta : deepDelta);
                 sLog_Data("Shadow roller comparison " << report.dump());

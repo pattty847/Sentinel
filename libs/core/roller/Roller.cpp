@@ -166,7 +166,8 @@ json roll(const RollOptions& o) {
         const auto configure = [&](const Grid& grid, int64_t floor) {
             auto cfg = grid.config(o.outputRoot);
             if (o.productWriterLease) cfg.writerProduct = o.product;
-            cfg.commitFloorMs = floor; cfg.commitCeilingMs = end;
+            cfg.commitFloorMs = floor;
+            cfg.commitCeilingMs = o.allowGrowingEnd ? day + Day : end;
             // All roll recorders are history writers. With no publisher Finals
             // is behaviorally identical to All, and rebuilds must be portable
             // into the live history writer without relaxing import validation.
@@ -260,7 +261,12 @@ json roll(const RollOptions& o) {
                 const auto grid = deriveGrid(a.metadata,a.referenceMid,o.overrides);
                 const auto expectedHash = configHash(grid.config(o.outputRoot));
                 const AnchorIdentity expected{o.product,day,from,end,expectedHash};
-                if (a.identity != expected) throw std::runtime_error("anchor policy/range mismatch");
+                if (a.identity != expected &&
+                    !(o.allowGrowingEnd && a.identity.product == expected.product &&
+                      a.identity.dayMs == expected.dayMs && a.identity.fromMs == expected.fromMs &&
+                      a.identity.configHash == expected.configHash &&
+                      a.identity.toMs >= a.boundaryMs && a.identity.toMs < end))
+                    throw std::runtime_error("anchor policy/range mismatch");
                 const auto state = json::from_cbor(a.feed.bytes);
                 const bool before = !state.at("resumeAt").is_null();
                 const auto cursorPos = before ? state.at("resumeAt").get<JournalPos>() : a.pos;
@@ -490,6 +496,8 @@ json roll(const RollOptions& o) {
             if (o.dryRun && input.record.time.systemNs / 1'000'000 >= end + latenessMs) break;
         }
         fence();
+        if (o.allowGrowingEnd && savedThrough >= end && end < day + Day)
+            saveAnchor(end);
         if (recorder) columns += recorder->stats().columnsWritten - importedColumns;
         dayReport["committedThroughMs"] = savedThrough;
         decoded += reader->decodedRecords();
