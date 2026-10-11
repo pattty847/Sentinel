@@ -92,6 +92,9 @@ case "$cmd" in
         ;;
     land)
         branch=${2:?usage: land <branch> [--yes] [-m <message>] [--trailer 'Key: value']...}
+        land_gate=arguments
+        land_done=0
+        trap 'rc=$?; if [[ $rc -ne 0 && $land_done -eq 0 ]]; then "$REPO/scripts/dev/sentinel-event.sh" land_failed bad "land $branch failed at $land_gate (exit $rc)" --branch "$branch" || true; fi' EXIT
         shift 2
         confirmed=0
         message="merge: $branch"
@@ -108,6 +111,7 @@ case "$cmd" in
                 *) echo "error: unknown option $1" >&2; exit 2 ;;
             esac
         done
+        land_gate=preflight
         [[ "$(git -C "$REPO" symbolic-ref --short HEAD)" == "main" ]] ||
             { echo "error: $REPO is not on main" >&2; exit 1; }
         git -C "$REPO" diff --quiet && git -C "$REPO" diff --cached --quiet ||
@@ -120,6 +124,7 @@ case "$cmd" in
         old_tip=$(git -C "$dir" rev-parse HEAD)
         old_base=$(git -C "$dir" merge-base HEAD main)
         if [[ "$old_base" != "$main_tip" ]]; then
+            land_gate=rebase
             echo "rebasing $branch onto main ($main_tip)..."
             if ! git -C "$dir" -c rerere.enabled=true -c rerere.autoUpdate=true rebase main; then
                 git -C "$dir" rebase --abort || true
@@ -128,6 +133,7 @@ case "$cmd" in
             fi
         fi
         new_tip=$(git -C "$dir" rev-parse HEAD)
+        land_gate=chart-health
         health_status=0
         (cd "$dir" && "$dir/scripts/dev/chart-health.sh") || health_status=$?
         if [[ "$health_status" -ne 0 ]]; then
@@ -139,28 +145,41 @@ case "$cmd" in
             fi
         fi
         echo "building and testing $branch at $new_tip..."
+        land_gate=build
         (cd "$dir" && "$REPO/scripts/dev/build-queue.sh" --label "land $branch (build)" -- cmake --build --preset mac-clang -j 6 > "$dir/.land-build.log" 2>&1) ||
             { echo "error: build failed, see $dir/.land-build.log" >&2; exit 1; }
+        land_gate=ctest
         (cd "$dir" && SENTINEL_REQUIRE_GPU=1 "$REPO/scripts/dev/build-queue.sh" --label "land $branch (ctest)" -- ctest --test-dir build/mac-clang --output-on-failure --timeout 600 -j 4 > "$dir/.land-ctest.log" 2>&1) ||
             { tail -20 "$dir/.land-ctest.log" >&2; echo "error: ctest failed, see $dir/.land-ctest.log" >&2; exit 1; }
         grep -E "tests passed" "$dir/.land-ctest.log" || true
         if [[ "$old_tip" != "$new_tip" ]]; then
+            land_gate=range-diff
             changed=$(git -C "$REPO" range-diff "$old_base..$old_tip" "$main_tip..$new_tip" | grep -c '^[0-9-]*: *[0-9a-f-]* ! ' || true)
             if [[ "$changed" -gt 0 && "$confirmed" -eq 0 ]]; then
                 git -C "$REPO" range-diff "$old_base..$old_tip" "$main_tip..$new_tip"
                 echo "stop: the rebase changed $changed commit(s) (above). Review, then rerun with --yes." >&2
+                "$REPO/scripts/dev/sentinel-event.sh" land_review warn "land $branch changed $changed commit(s); review then rerun with --yes" --branch "$branch" || true
+                land_done=1
                 exit 3
             fi
         fi
+        land_gate=main-tip
         [[ "$(git -C "$REPO" rev-parse main)" == "$main_tip" ]] ||
             { echo "error: main moved during land; rerun land" >&2; exit 1; }
+        land_gate=merge
         if [[ -n "$trailers" ]]; then
             git -C "$REPO" merge --no-ff -q "$branch" -m "$message" -m "${trailers%$'\n'}"
         else
             git -C "$REPO" merge --no-ff -q "$branch" -m "$message"
         fi
         echo "landed $branch as $(git -C "$REPO" rev-parse --short HEAD)"
+        land_gate=remove
         "$0" remove "$branch"
+        land_done=1
+        slice=$(sed -n 's/^Slice: //p' <<< "$trailers" | head -1)
+        event_args=(--branch "$branch")
+        [[ -z "$slice" ]] || event_args+=(--slice "$slice")
+        "$REPO/scripts/dev/sentinel-event.sh" landed ok "$branch landed as $(git -C "$REPO" rev-parse --short HEAD)" "${event_args[@]}" || true
         echo "queue rule: rebase and retest every other READY branch before it lands (run land on each)."
         ;;
     list)

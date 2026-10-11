@@ -66,4 +66,5 @@ echo "build-queue: $label's turn: $*" >&2
 "$@"
 status=$?
 echo "build-queue: $label done (exit $status)" >&2
+[ "$status" -eq 0 ] || "$(dirname "$0")/sentinel-event.sh" build_failed bad "$label exited $status" || true
 exit $status
