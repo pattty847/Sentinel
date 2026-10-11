@@ -2025,13 +2025,19 @@ TEST_F(ShadowTest, ServingRollerReplacesPrimaryRecorderForNonDefaultProduct) {
   EXPECT_NE(text().find("sentinel_recorder_column_overdue_seconds{product="
                         "\"PEPE-USD\",layer=\"near\"}"),
             std::string::npos);
-  EXPECT_EQ(text().find("sentinel_recorder_columns_written_total"),
+  // Throughput is exported in serving roller mode, including non-default
+  // products. Registration can precede the first durable minute append.
+  EXPECT_NE(text().find("# TYPE sentinel_recorder_columns_written_total counter\n"),
             std::string::npos);
   // A3: watermarks and availability from the roller's hmc2 root.
   ASSERT_TRUE(eventually([&] {
     return model.recordingWatermarks("PEPE-USD", "near").minuteThroughMs >=
-           Epoch + 60000;
+               Epoch + 60000 &&
+           model.recordingWatermarks("PEPE-USD", "deep").minuteThroughMs >=
+               Epoch + 60000;
   }));
+  EXPECT_NE(text().find("\nsentinel_recorder_columns_written_total 2\n"),
+            std::string::npos);
   recording::ChunkService chunks(
       *model.recordingDir(),
       [&model](const std::string &s, const std::string &l) {
@@ -3215,6 +3221,14 @@ TEST_F(ShadowTest, JournalTapAnchorAtDurableTipRestoresWholeBookWithoutReplay) {
   ASSERT_TRUE(eventually([&]{return updateAt(100008,13)!=std::string::npos;}));
   writer->flush();
   ASSERT_TRUE(eventually([&]{return count()==1;}));
+  // The restored recorder is built through the same configure() as a cold
+  // start: it must keep feeding the throughput counter.
+  const std::string columns = "\nsentinel_recorder_columns_written_total";
+  const double before = counter(columns);
+  ASSERT_GE(before,0) << "columns counter is not registered after restore";
+  for(int t=902;t<=1100;++t) writer->append(record(t*1000,heartbeat()));
+  writer->flush();
+  EXPECT_TRUE(eventually([&]{return counter(columns)>before;}));
   shadow.reset(); writer->close();
 }
 TEST_F(ShadowTest, JournalTapRestoresBatchRebuiltAnchor) {

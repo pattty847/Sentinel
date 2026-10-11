@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+namespace sentinel::metrics { class Counter; }
+
 namespace recording {
 struct LayerConfig {
     std::string name;
@@ -50,6 +52,10 @@ struct RecorderConfig {
     bool blockingQueue = false;
     // Test synchronization only, called under the queue mutex before blocking.
     std::function<void()> beforeQueueWaitForTest;
+    // Optional process counters; registry must outlive the recorder. Worker
+    // increments only (one relaxed atomic), never registers or samples.
+    sentinel::metrics::Counter* minuteColumnsCounter = nullptr;
+    sentinel::metrics::Counter* writeErrorsCounter = nullptr;
     bool deterministicResume = false;
     std::string writerProduct; // opt-in product lease for independent shadow grids
     int64_t commitFloorMs = 0; // exclusive end <= floor: rebuild, do not append

@@ -176,6 +176,8 @@ json roll(const RollOptions& o) {
                     if (record->bucketStartMs + record->header.tfMs > savedThrough) publish(std::move(record));
                 };
             }
+            cfg.minuteColumnsCounter = o.minuteColumnsCounter;
+            cfg.writeErrorsCounter = o.writeErrorsCounter;
             return cfg;
         };
         const auto describeGrid = [&](const Grid& grid) {
