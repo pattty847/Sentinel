@@ -869,18 +869,24 @@ TEST_F(LiveNode, ReturningToATickNeverMutatesALiveBinAFadingPictureDraws) {
     const int64_t open = T - 5 * minute;
     frame().view = {double(T - 30 * minute), double(T), 99'800, 100'200};
     frame().crossfadeMs = 60'000;
+    // Fixed instants make every fade opacity independent of GPU and CPU scheduling.
+    auto fadeNow = std::chrono::steady_clock::time_point{std::chrono::seconds{1}};
+    frame().fadeNowForTest = fadeNow;
     show(tf, {tile1}, open, open, open, 10'000, 1);
     frame().tickUnits = 500; // A
     ASSERT_TRUE(render(3));
+    frame().fadeNowForTest = fadeNow += std::chrono::milliseconds{100};
     frame().tickUnits = 1000; // B
     ASSERT_TRUE(render());
     frame().live = spans.live(tf, open, open, 25'000, 2); // a new version while A fades
     ASSERT_TRUE(render());
+    frame().fadeNowForTest = fadeNow += std::chrono::milliseconds{100};
     frame().tickUnits = 500; // A again
     ASSERT_TRUE(render());
+    frame().fadeNowForTest = fadeNow += std::chrono::milliseconds{100};
     frame().tickUnits = 2000; // C
     ASSERT_TRUE(render());
-    std::this_thread::sleep_for(std::chrono::milliseconds(30)); // the newest fade has started too
+    frame().fadeNowForTest = fadeNow += std::chrono::milliseconds{30};
     ASSERT_TRUE(render());
     std::map<uint8_t, Segment> live;
     for (const auto &seg : stats().segments())
@@ -890,6 +896,9 @@ TEST_F(LiveNode, ReturningToATickNeverMutatesALiveBinAFadingPictureDraws) {
     EXPECT_EQ(live[3].liveVersion, 2u) << "the second A picture";
     EXPECT_NE(live[1].bin, live[3].bin);
     EXPECT_EQ(live[0].opacity, 1.0f);
+    EXPECT_FLOAT_EQ(live[1].opacity, float(1 - 230.0 / 60'000));
+    EXPECT_FLOAT_EQ(live[2].opacity, float(1 - 130.0 / 60'000));
+    EXPECT_FLOAT_EQ(live[3].opacity, float(1 - 30.0 / 60'000));
     EXPECT_LT(live[1].opacity, live[2].opacity) << "older layers fade further";
     EXPECT_LT(live[2].opacity, live[3].opacity);
     EXPECT_LT(live[3].opacity, 1.0f);
