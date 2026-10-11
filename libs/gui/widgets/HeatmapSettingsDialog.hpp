@@ -126,7 +126,6 @@ private:
     QDoubleSpinBox *m_opacity = nullptr;
     QCheckBox *m_crossfadeOn = nullptr;
     QSpinBox *m_crossfadeMs = nullptr;
-    QCheckBox *m_bandEdges = nullptr;
     QSlider *m_gammaSlider = nullptr;
     QLabel *m_gammaLabel = nullptr;
     QSlider *m_contrastSlider = nullptr;
@@ -136,7 +135,6 @@ private:
     // Budgets
     QSpinBox *m_gpuCapMiB = nullptr;
     QSpinBox *m_uploadKiB = nullptr;
-    QSpinBox *m_prefetchTiles = nullptr;
     QSpinBox *m_decodedMiB = nullptr;
     QSpinBox *m_spanMiB = nullptr;
     QSpinBox *m_ceilingMiB = nullptr;

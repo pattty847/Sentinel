@@ -51,7 +51,6 @@ set(GRID_CORE_SOURCES
     UnifiedGridRenderer.Render.cpp
     UnifiedGridRenderer.Zoom.cpp
     UnifiedGridRenderer.h
-    ChartMode.h
 
     # Axis models for QML integration
     models/DomModel.cpp
@@ -119,10 +118,8 @@ set(GRID_CORE_SOURCES
     render/MsdfAtlas.cpp
     render/MsdfGlyphNode.hpp
     render/MsdfGlyphNode.cpp
-    render/LabTextItem.hpp
-    render/LabTextItem.cpp
-    render/HeatmapIntensityNode.hpp
-    render/HeatmapIntensityNode.cpp
+    render/HeatmapColumnTexture.hpp
+    render/HeatmapColumnTexture.cpp
     render/FootprintIntensityNode.hpp
     render/FootprintIntensityNode.cpp
     render/AlgoOverlayRenderer.hpp
@@ -273,14 +270,7 @@ qt6_add_qml_module(sentinel_gui_lib
         render/PaperTradeOverlayModel.cpp
     QML_FILES
         qml/DepthChartView.qml
-        qml/CandleChartView.qml
         qml/Theme.qml
-        qml/controls/VolumeFilter.qml
-        qml/controls/PriceResolutionSelector.qml
-        qml/controls/TimeframeSelector.qml
-        qml/controls/GridResolutionSelector.qml
-        qml/controls/NavigationControls.qml
-        qml/controls/ChartToolRail.qml
         qml/StockChartView.qml
 )
 
@@ -375,8 +365,6 @@ qt_add_shaders(sentinel_gui_lib heatmap_shaders
     BASE
         "render/shaders"
     FILES
-        render/shaders/heatmap_intensity.vert
-        render/shaders/heatmap_intensity.frag
         render/shaders/heatmap_msdf.vert
         render/shaders/heatmap_msdf.frag
         render/shaders/footprint_intensity.vert
@@ -400,9 +388,7 @@ target_link_libraries(sentinel_gui_lib
         Qt6::Core
         Qt6::Gui
         Qt6::Widgets
-        Qt6::Charts
         Qt6::Network
-        Qt6::WebSockets
         Qt6::Quick
         Qt6::Qml
         Qt6::QuickControls2

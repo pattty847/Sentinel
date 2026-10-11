@@ -29,7 +29,6 @@ gui:
   screenshot_dir: ./screenshots
   msdf_font: resources/fonts/RobotoMono/RobotoMono-Regular.ttf
   axis_label_px: 0  # <= 0 uses automatic monitor-scaled sizing
-  default_order_qty: 1.0
 
 server:
   host: 127.0.0.1

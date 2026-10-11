@@ -1,5 +1,5 @@
 #include "FootprintOverlayRenderer.hpp"
-#include "HeatmapIntensityNode.hpp"
+#include "HeatmapColumnTexture.hpp"
 
 #include "FootprintIntensityNode.hpp"
 #include "SentinelLogging.hpp"

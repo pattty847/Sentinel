@@ -31,7 +31,7 @@ AGENTS.md. Remove a note here when it stops being true.
   SIGKILLed host: end that with `pkill -f 'sentinel-gui.*--agent-host'`. Status: `curl -s 127.0.0.1:17190/status`.
 - Agents use `scripts/dev/gui-shot.sh`:
   - `launch [--replace] [--build <worktree path>] [--fresh-profile]` starts the GUI on a
-    spare API port with `--no-screener`.
+    spare API port with isolated settings.
   - `api GET|POST /api/v1/...` drives state, viewport and heatmap settings.
   - `shot <name> [--after <op>] [--settle]` returns the absolute PNG path to open.
   - `docks focus <id>` shows that dock and hides others. Hosted dock changes persist in

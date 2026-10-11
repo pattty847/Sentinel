@@ -10,7 +10,7 @@
 #   - Boost, OpenSSL-free system libs, yaml-cpp, nlohmann-json, Xvfb: apt
 #   - Qt 6.9 (with private headers + CMake configs): conda-forge via py-rattler
 #   - msdfgen, jwt-cpp, googletest: git clone (+ build msdfgen)
-# Ubuntu's apt Qt is 6.4, too old: HeatmapIntensityNode needs <rhi/qrhi.h> (Qt >= 6.6).
+# Ubuntu's apt Qt is 6.4, too old: HeatmapColumnTexture needs <rhi/qrhi.h> (Qt >= 6.6).
 set -euo pipefail
 
 DEPS=${SENTINEL_DEPS:-/opt/sentinel-deps}

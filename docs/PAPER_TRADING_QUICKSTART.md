@@ -23,15 +23,6 @@ trading:
 - `mode` — Currently only `paper` is supported.
 - `slippage_bps` — Basis-point slippage applied to paper fills.
 
-**Client** (`config/client_config.yaml` or `config/.client_config.yaml`):
-
-```yaml
-gui:
-  default_order_qty: 1.0
-```
-
-- Default quantity for trade hotkeys. The Qty field in the status bar overrides this at runtime.
-
 ## 2. Run server and client
 
 Start the server first, then the GUI client (e.g. after `cmake --build --preset windows-msvc-vs`):
@@ -52,7 +43,7 @@ In the GUI, subscribe to a symbol (e.g. `BTC-USD`). Paper fills use the last tra
 | **F** | Flatten current symbol position |
 | **C** | Cancel all active orders |
 
-**Order quantity:** Status bar Qty input → else `gui.default_order_qty` from client config → else `1.0`.
+**Order quantity:** Set the Base qty field in the Paper Trading dock.
 
 ## 5. UI feedback
 

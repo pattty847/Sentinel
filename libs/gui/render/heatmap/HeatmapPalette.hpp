@@ -52,7 +52,7 @@ struct CodeWindow {
 CodeWindow codeWindow(double sensitivityMin, double sensitivityMax, double sizeFloor = 1e-6,
                       double codesPerOctave = 819.0);
 
-// CPU reference of heatmap_intensity.frag in recording mode (a nonzero code
+// CPU reference of heatmap_display.frag in recording mode (a nonzero code
 // without the unknown marker), sampling the palette with linear filtering:
 // premultiplied RGBA in [0, 1]. Tests compare both renderers against it.
 std::array<float, 4> legacyRecordingColor(uint16_t cell, CodeWindow window, const HeatmapPalette &palette,
