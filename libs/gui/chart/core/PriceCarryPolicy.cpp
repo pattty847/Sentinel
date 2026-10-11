@@ -2,24 +2,13 @@
 #include "chart/core/ChartViewController.hpp"
 #include "servermodel/RecordingCodec.hpp"
 #include "SentinelLogging.hpp"
-#include <QTimer>
+#include "chart/core/PolicyTimer.hpp"
 #include <algorithm>
 #include <cmath>
 
 namespace chart {
 namespace {
-class CarryTimer final : public IPriceCarryTimer {
-public:
-    explicit CarryTimer(std::function<void()> timeout) {
-        timer_.setSingleShot(true);
-        QObject::connect(&timer_, &QTimer::timeout, &timer_, std::move(timeout));
-    }
-    bool isActive() const override { return timer_.isActive(); }
-    void start(int ms) override { timer_.start(ms); }
-    void stop() override { timer_.stop(); }
-private:
-    QTimer timer_;
-};
+using CarryTimer = PolicyTimer<IPriceCarryTimer>;
 }
 PriceCarryPolicy::PriceCarryPolicy(ChartViewController& controller, IChartEnvironment& environment)
     : controller_(controller), environment_(environment),
@@ -76,8 +65,12 @@ bool PriceCarryPolicy::apply(double now, bool liveOnly) {
         carry.reset();
         return false;
     }
-    // Unknown limits leave the carry pending. A live-only symbol consumes it from
-    // its live price after the wait, even if no recorded price scale ever arrives.
+    // Consumed once the layer's price scale (and so its limits) is the new symbol's;
+    // before that the limits are unknown (no clamp) and the carry is applied again
+    // from the then current price when they arrive (limitsChanged). A live-only symbol
+    // (no recorded availability) never gets one: kCarryLiveOnlyWaitMs after the first
+    // pending apply, the carry is applied from the live price and consumed, with no
+    // Manual max span (the limits stay unknown).
     const bool confirmed = liveOnly || (environment_.attached() && environment_.priceScaleCurrent());
     sLog_Render("price carry applied: now=" << now << " price=[" << lo << ".." << hi << "] confirmed=" << confirmed
                 << " liveOnly=" << liveOnly);

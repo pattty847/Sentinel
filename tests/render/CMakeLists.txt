@@ -337,3 +337,9 @@ target_include_directories(test_TimeframeSwitch PRIVATE ${CMAKE_SOURCE_DIR}/libs
 target_link_libraries(test_TimeframeSwitch PRIVATE GTest::gtest_main sentinel_chart_core Qt6::Core)
 add_test(NAME TimeframeSwitchTests COMMAND test_TimeframeSwitch)
 set_tests_properties(TimeframeSwitchTests PROPERTIES LABELS "render;fast")
+
+add_executable(test_ZoomController test_zoom_controller.cpp)
+target_include_directories(test_ZoomController PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_ZoomController PRIVATE GTest::gtest_main sentinel_chart_core Qt6::Core)
+add_test(NAME ZoomControllerTests COMMAND test_ZoomController)
+set_tests_properties(ZoomControllerTests PROPERTIES LABELS "render;fast")

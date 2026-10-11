@@ -184,6 +184,9 @@ add_library(sentinel_chart_core STATIC
     chart/core/PriceCarryPolicy.cpp
     chart/core/LivePlacement.hpp
     chart/core/LivePlacement.cpp
+    chart/core/ZoomController.hpp
+    chart/core/ZoomController.cpp
+    chart/core/WheelInterpreter.hpp
     chart/core/ZoomGlide.hpp
     chart/core/ZoomGlide.cpp
     chart/core/ZoomGlideState.hpp
