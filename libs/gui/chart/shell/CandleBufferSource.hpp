@@ -5,6 +5,7 @@
 namespace chart {
 class CandleBufferSource final : public ICandleSource {
 public:
+    bool available() const override { return !buffer_.isNull(); }
     CandleSeriesBuffer* buffer() const { return buffer_.data(); }
     void setBuffer(CandleSeriesBuffer* buffer) { buffer_ = buffer; }
     void visibleBars(const QString& symbol, int64_t tfSec, int64_t start, int64_t end,

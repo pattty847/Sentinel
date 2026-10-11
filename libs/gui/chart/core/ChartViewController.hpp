@@ -3,6 +3,8 @@
 #include "chart/core/ChartCamera.hpp"
 #include "chart/core/LivePlacement.hpp"
 #include "chart/core/PriceFitter.hpp"
+#include "chart/core/PriceCarryPolicy.hpp"
+#include "chart/core/TimeframeSwitch.hpp"
 #include "chart/core/ChartSession.hpp"
 #include "chart/core/ZoomGlide.hpp"
 #include "render/GridViewState.hpp"
@@ -35,6 +37,10 @@ public:
 
     LivePlacement& livePlacement() { return livePlacement_; }
 
+    PriceCarryPolicy& priceCarry() { return priceCarry_; }
+    TimeframeSwitch& timeframeSwitch() { return timeframeSwitch_; }
+    void setTimeframe(int next);
+
     PriceFitter& priceFitter() { return priceFitter_; }
 
     ZoomGlide& zoomGlide() { return zoomGlide_; }
@@ -46,6 +52,10 @@ public:
                             bool preservePlacement = false);
     double gpuLivePrice() const;
 
+signals:
+    void liveRenderTick();
+    void timeframeChanged(int next);
+
 private:
     IChartEnvironment& environment_;
     IHeatmapViewSink& sink_;
@@ -56,6 +66,8 @@ private:
     ZoomGlide zoomGlide_;
     PriceFitter priceFitter_;
     LivePlacement livePlacement_;
+    PriceCarryPolicy priceCarry_;
+    TimeframeSwitch timeframeSwitch_;
 };
 
 } // namespace chart

@@ -14,6 +14,7 @@ public:
 
     PriceFitter(ChartViewController& controller, IChartEnvironment& environment, ITickOracle& ticks);
     void setCandleSource(const ICandleSource* source) { candles_ = source; }
+    const ICandleSource* candleSource() const { return candles_; }
     void setRequestUpdate(std::function<void()> request) { requestUpdate_ = std::move(request); }
     std::optional<PriceCarry>& priceCarry() { return priceCarry_; }
     // Shared scratch for the placement policy's newest-close lookup.
