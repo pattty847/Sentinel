@@ -14,7 +14,7 @@ final class Monitor: ObservableObject {
         Service(name: "capture :8091", url: URL(string: "http://127.0.0.1:8091/metrics"), critical: true),
         Service(name: "GUI host :17190", url: URL(string: "http://127.0.0.1:17190/status"), critical: false)
     ]
-    @Published var budget: [String]? = nil
+    @Published var budget: [BudgetEntry]? = nil
     @Published var budgetLoaded = false
     @Published var events: [Milestone] = []
     @Published var agentEvents: [Milestone] = []

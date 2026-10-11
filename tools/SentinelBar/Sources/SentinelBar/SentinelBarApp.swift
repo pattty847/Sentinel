@@ -133,7 +133,9 @@ struct StatusPanel: View {
                     }
                     if !monitor.budgetLoaded { dim("Budget loading…") }
                     else if let budget = monitor.budget {
-                        ForEach(budget, id: \.self) { Text($0).font(.caption.monospaced()) }
+                        ForEach(budget.indices, id: \.self) { index in
+                            budgetRow(budget[index])
+                        }
                     } else { dim("Budget unavailable") }
                 }
                 Divider()
@@ -214,6 +216,43 @@ struct StatusPanel: View {
     }
 
     private func dim(_ text: String) -> some View { Text(text).foregroundStyle(.secondary).font(.caption) }
+
+    @ViewBuilder private func budgetRow(_ entry: BudgetEntry) -> some View {
+        switch entry {
+        case .window(let window):
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 8) {
+                    Text("\(window.provider) · \(window.window)")
+                        .frame(width: 135, alignment: .leading).lineLimit(1)
+                    Text("\(window.percentLeft)% left")
+                        .foregroundStyle(budgetColor(window.percentLeft))
+                        .frame(width: 65, alignment: .trailing)
+                    Text(window.reset.map { "resets in \($0)" } ?? "")
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .trailing).lineLimit(1)
+                }.font(.caption).monospacedDigit()
+                if let pace = window.pace {
+                    let sign = pace.percent >= 0 ? "+" : ""
+                    let label = pace.kind == .deficit ? "DEFICIT" : "reserve"
+                    Text("\(sign)\(pace.percent)% \(label)" +
+                         (pace.runsOut.map { " · runs out in \($0)" } ?? ""))
+                        .font(.caption2)
+                        .foregroundStyle(pace.kind == .deficit ? Color.red : Color.green)
+                        .padding(.leading, 135)
+                }
+            }
+        case .credits(let provider, let count):
+            Text("\(provider) · \(count) credit\(count == 1 ? "" : "s") held by owner")
+                .font(.caption).foregroundStyle(.secondary)
+        case .raw(let line):
+            Text(line).font(.caption.monospaced()).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func budgetColor(_ percentLeft: Int) -> Color {
+        percentLeft < 10 ? .red : percentLeft < 25 ? .orange : .primary
+    }
+
     private func open(_ url: URL) { NSWorkspace.shared.open(url) }
 }
 

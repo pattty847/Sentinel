@@ -107,6 +107,30 @@ struct CoreTests {
         #expect(PlanParser.select(candidates, pinned: true)?.path == "sentinelbar.md")
     }
 
+    @Test func budgetRowsParseWindowsCreditsAndRawFallback() {
+        let lines = [
+            "codex  weekly      60% left resets in 6.3d | +30% DEFICIT, runs out in 1.0d",
+            "codex  resets     3 credit(s) held by the owner",
+            "claude session     90% left resets in 2.5h | -40% reserve",
+            "claude weekly      14% left resets in 1.3d | +4% DEFICIT, runs out in 0.9d",
+            "codex  extra       80% left",
+            "unrecognized budget line"
+        ]
+        let expected: [BudgetEntry] = [
+            .window(BudgetWindow(provider: "codex", window: "weekly", percentLeft: 60, reset: "6.3d",
+                                 pace: BudgetPace(kind: .deficit, percent: 30, runsOut: "1.0d"))),
+            .credits(provider: "codex", count: 3),
+            .window(BudgetWindow(provider: "claude", window: "session", percentLeft: 90, reset: "2.5h",
+                                 pace: BudgetPace(kind: .reserve, percent: -40, runsOut: nil))),
+            .window(BudgetWindow(provider: "claude", window: "weekly", percentLeft: 14, reset: "1.3d",
+                                 pace: BudgetPace(kind: .deficit, percent: 4, runsOut: "0.9d"))),
+            .window(BudgetWindow(provider: "codex", window: "extra", percentLeft: 80,
+                                 reset: nil, pace: nil)),
+            .raw("unrecognized budget line")
+        ]
+        #expect(BudgetParser.parse(lines) == expected)
+    }
+
     @Test func chartPlanSlicesAndBugRows() throws {
         let path = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()

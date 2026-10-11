@@ -275,6 +275,66 @@ public enum PlanParser {
     }
 }
 
+public struct BudgetWindow: Equatable {
+    public let provider: String
+    public let window: String
+    public let percentLeft: Int
+    public let reset: String?
+    public let pace: BudgetPace?
+}
+
+public struct BudgetPace: Equatable {
+    public enum Kind: Equatable { case deficit, reserve }
+    public let kind: Kind
+    public let percent: Int
+    public let runsOut: String?
+}
+
+public enum BudgetEntry: Equatable {
+    case window(BudgetWindow)
+    case credits(provider: String, count: Int)
+    case raw(String)
+}
+
+public enum BudgetParser {
+    private static let windowPattern = try! NSRegularExpression(
+        pattern: #"^\s*(claude|codex)\s+(.+?)\s+(-?\d+)% left(?:\s+resets in (\S+))?(?:\s+\|\s+([+-]\d+)% (DEFICIT|reserve)(?:, runs out in (\S+))?)?\s*$"#)
+    private static let creditsPattern = try! NSRegularExpression(
+        pattern: #"^\s*(claude|codex)\s+resets\s+(\d+) credit\(s\) held by the owner\s*$"#)
+
+    public static func parse(_ lines: [String]) -> [BudgetEntry] {
+        lines.map(parseLine)
+    }
+
+    private static func parseLine(_ line: String) -> BudgetEntry {
+        let range = NSRange(line.startIndex..<line.endIndex, in: line)
+        if let match = creditsPattern.firstMatch(in: line, range: range),
+           let provider = field(1, in: line, match: match),
+           let count = field(2, in: line, match: match).flatMap(Int.init) {
+            return .credits(provider: provider, count: count)
+        }
+        guard let match = windowPattern.firstMatch(in: line, range: range),
+              let provider = field(1, in: line, match: match),
+              let window = field(2, in: line, match: match),
+              let percentLeft = field(3, in: line, match: match).flatMap(Int.init) else { return .raw(line) }
+        let pace: BudgetPace?
+        if let percent = field(5, in: line, match: match).flatMap(Int.init),
+           let label = field(6, in: line, match: match) {
+            pace = BudgetPace(kind: label == "DEFICIT" ? .deficit : .reserve,
+                              percent: percent, runsOut: field(7, in: line, match: match))
+        } else {
+            pace = nil
+        }
+        return .window(BudgetWindow(provider: provider, window: window, percentLeft: percentLeft,
+                                    reset: field(4, in: line, match: match), pace: pace))
+    }
+
+    private static func field(_ index: Int, in line: String, match: NSTextCheckingResult) -> String? {
+        guard let range = Range(match.range(at: index), in: line) else { return nil }
+        return String(line[range])
+    }
+}
+
 public struct Ticket: Equatable, Identifiable {
     public let id: String
     public let label: String

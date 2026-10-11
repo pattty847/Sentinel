@@ -187,8 +187,8 @@ enum Probes {
     }
 
     /// `budget.sh` text lines (it shells out to the CodexBar CLI), or nil when it fails.
-    static func budget(repo: String) -> [String]? {
+    static func budget(repo: String) -> [BudgetEntry]? {
         guard let out = Shell.run("/bin/bash", [repo + "/scripts/dev/budget.sh"], cwd: repo, timeout: 60) else { return nil }
-        return out.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+        return BudgetParser.parse(out.split(separator: "\n").map(String.init))
     }
 }
