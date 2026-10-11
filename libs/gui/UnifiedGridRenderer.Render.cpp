@@ -34,8 +34,7 @@ void UnifiedGridRenderer::publishFrameContext(const FrameContext& frame) {
     published.viewportAutoScrollEnabled = frame.viewport.autoScrollEnabled;
     published.mapping = frame.mapping;
     published.raster = frame.raster;
-    std::lock_guard<std::mutex> lock(m_frameContextMutex);
-    m_lastFrameContext = published;
+    m_published.publish(published);
 }
 
 // Footprint, volume profile and TPO under `parent`, after its heatmap content.
@@ -115,11 +114,7 @@ chart_raster::RasterInputs UnifiedGridRenderer::rasterInputs(const FrameViewport
 void UnifiedGridRenderer::computeGpuFrameMapping(FrameContext& frame) {
     const double tick = m_gpuLayer->tickPrice();
     const auto in = rasterInputs(frame.viewport, tick, width(), height(), frame.surfaceDpr);
-    chart_raster::RasterStep previous;
-    {
-        std::lock_guard<std::mutex> lock(m_frameContextMutex);
-        previous = m_rasterStep;
-    }
+    const chart_raster::RasterStep previous = m_published.step();
     // The rest camera (whole pixels), and what this frame draws: the rest camera, or a
     // free one during a zoom glide or gesture (fractional, drawn with coverage).
     const Cameras cameras = camerasFor(in, previous);
@@ -133,10 +128,7 @@ void UnifiedGridRenderer::computeGpuFrameMapping(FrameContext& frame) {
     m_sync.binPriceHi = cameras.binPriceHi;
     const auto& cam = cameras.rest;
     if (!cam.valid) return;
-    if (cam.step() != previous) {
-        std::lock_guard<std::mutex> lock(m_frameContextMutex);
-        m_rasterStep = cam.step();
-    }
+    if (cam.step() != previous) m_published.setStep(cam.step());
     const double priceSpan = in.maxPrice - in.minPrice;
     m_gpuLayer->noteRaster(cam.rowPx, cam.colPx, priceSpan > 0 ? double(cam.heightDev) * cam.tick / priceSpan : 0.0);
     const RasterSurface surface{cam.step(), cam.dpr, cam.tick, cam.widthDev, cam.heightDev};
@@ -205,7 +197,8 @@ void UnifiedGridRenderer::prepareSyncFrame() {
     if (profile) m_frameProfiler.beginFrame();
     FrameContext& frame = m_sync.frame;
     frame = FrameContextBuilder::build(
-        boundingRect(), window(), m_frameClock, m_timeAuthority, m_viewState.get(),
+        boundingRect(), window() ? window()->effectiveDevicePixelRatio() : 1.0,
+        m_frameClock, m_timeAuthority, m_viewState.get(),
         m_heatmapLayerEnabled, m_footprintLayerEnabled, m_tpoLayerEnabled);
     if (profile) m_frameProfiler.mark(FrameProfiler::Context);
     // Choose the tick for the continuous view (committed + an active drag at the

@@ -92,11 +92,7 @@ chart_raster::RasterCamera UnifiedGridRenderer::rasterCameraNow(bool includeDrag
   if (!includeDrag) viewport.dragging = false;
   const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
   const auto in = rasterInputs(viewport, m_gpuLayer->tickPrice(), width(), height(), dpr);
-  chart_raster::RasterStep previous;
-  {
-    std::lock_guard<std::mutex> lock(m_frameContextMutex);
-    previous = m_rasterStep;
-  }
+  const chart_raster::RasterStep previous = m_published.step();
   return camerasFor(in, previous).drawn;
 }
 
@@ -106,11 +102,7 @@ chart_raster::RasterCamera UnifiedGridRenderer::restCameraNow(bool includeDrag) 
   if (!includeDrag) viewport.dragging = false;
   const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
   const auto in = rasterInputs(viewport, m_gpuLayer->tickPrice(), width(), height(), dpr);
-  chart_raster::RasterStep previous;
-  {
-    std::lock_guard<std::mutex> lock(m_frameContextMutex);
-    previous = m_rasterStep;
-  }
+  const chart_raster::RasterStep previous = m_published.step();
   return chart_raster::computeRaster(in, previous);
 }
 
@@ -128,11 +120,7 @@ chart_raster::RasterCamera UnifiedGridRenderer::intendedEndNow() const {
   }
   const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
   const auto in = rasterInputs(viewport, tick, width(), height(), dpr);
-  chart_raster::RasterStep previous;
-  {
-    std::lock_guard<std::mutex> lock(m_frameContextMutex);
-    previous = m_rasterStep;
-  }
+  const chart_raster::RasterStep previous = m_published.step();
   return chart_raster::computeRaster(in, previous);
 }
 

@@ -30,6 +30,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 **Responsibility:** GPU-accelerated rendering, declarative UI, and data sourcing for the visualizer.
 **Ownership & Boundaries:**
 - The GUI layer exclusively owns rendering logic, QSG node generation, and visual widget behavior. It heavily employs Qt6, QML, and QSG.
+- **`sentinel_chart_core`:** QtCore-only chart state, raster mapping, time authority, frame construction, and the `PublishedFrame` GUI/render handoff. `sentinel_gui_lib` links it publicly; the Quick shell supplies surface DPR and keeps QSG ownership.
 - **`datasources`:** Acts as the ingress point from the Core network layer. `RemoteGridDataSource` receives book, trade, candle and trade-overlay messages and dispatches them to the renderer; the heatmap arrives through `HeatmapDataService` (chunks and the live raw tail).
 - **`render`:** The performance-critical hot-path. Owns the generation of QSG structures (e.g., `HeatmapTileNode`, `MsdfGlyphNode`). Must avoid manipulating `QObject` trees on the render thread to ensure low-lag performance. Coordinated entirely by the `UnifiedGridRenderer`. See `docs/UI_ARCHITECTURE.md` for a deep-dive into the GUI structure.
 - **`lab`:** Isolated QRhi compute/render path for measuring client-side binning over recording entries. It is not wired into `UnifiedGridRenderer` or the server stream.
