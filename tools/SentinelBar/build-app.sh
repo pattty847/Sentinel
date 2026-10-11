@@ -39,6 +39,11 @@ if [ "${1:-}" = --install ]; then
     rm -rf "$HOME/Applications/SentinelBar.app"
     mkdir -p "$HOME/Applications"
     cp -R "$app" "$HOME/Applications/"
-    open "$HOME/Applications/SentinelBar.app"
+    # A freshly copied bundle can fail with LaunchServices -600 until it is registered: retry.
+    for try in 1 2 3 4 5; do
+        open "$HOME/Applications/SentinelBar.app" 2>/dev/null && break
+        [ "$try" = 5 ] && { echo "error: open failed 5 times" >&2; exit 1; }
+        sleep 1
+    done
     echo "installed ~/Applications/SentinelBar.app"
 fi
