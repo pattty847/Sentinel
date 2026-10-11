@@ -105,7 +105,7 @@ struct StatusPanel: View {
                 ForEach(m.queue) { e in
                     HStack {
                         Image(systemName: e.running ? "play.circle.fill" : "clock")
-                            .foregroundStyle(e.running ? .green : .secondary)
+                            .foregroundStyle(e.running ? Color.green : Color.secondary)
                         Text(e.label).lineLimit(1).truncationMode(.middle)
                         Spacer()
                         Text(e.queuedAt, style: .relative).monospacedDigit().foregroundStyle(.secondary)
@@ -116,7 +116,7 @@ struct StatusPanel: View {
                 ForEach(m.worktrees) { w in
                     HStack {
                         Text(w.branch).lineLimit(1).truncationMode(.middle)
-                            .foregroundStyle(w.missing ? .secondary : .primary)
+                            .foregroundStyle(w.missing ? Color.secondary : Color.primary)
                         Spacer()
                         if w.missing { dim("drive offline") }
                         if let a = w.ahead { dim("+\(a)") }
@@ -204,7 +204,7 @@ struct AgentRow: View {
         VStack(alignment: .leading, spacing: 1) {
             HStack {
                 Image(systemName: job.kind == "codex" ? "chevron.left.forwardslash.chevron.right" : "sparkle")
-                    .foregroundStyle(job.kind == "codex" ? .blue : .orange)
+                    .foregroundStyle(job.kind == "codex" ? Color.blue : Color.orange)
                 Text(job.model.map { "\(job.kind) \($0)" } ?? job.kind).bold()
                 Text(job.worktree ?? (job.cwd as NSString).lastPathComponent)
                     .lineLimit(1).truncationMode(.middle).foregroundStyle(.secondary)
@@ -212,7 +212,7 @@ struct AgentRow: View {
                 if let t = job.lastActive { Text(t, style: .relative).monospacedDigit().foregroundStyle(.secondary) }
             }
             Text(job.step ?? "no transcript found").font(.caption).lineLimit(2)
-                .foregroundStyle(job.step == nil ? .tertiary : .secondary)
+                .foregroundStyle(job.step == nil ? HierarchicalShapeStyle.tertiary : HierarchicalShapeStyle.secondary)
         }
         .help("pid \(job.pid), up \(job.elapsed)\n\(job.cwd)")
     }
