@@ -31,7 +31,11 @@ PLIST
 codesign --force --sign - "$app"
 echo "built $PWD/$app"
 if [ "${1:-}" = --install ]; then
-    pkill -x SentinelBar 2>/dev/null && sleep 1 || true   # LaunchServices -600 if reopened too soon
+    # Wait for the old instance to exit (up to 10 s): reopening too soon fails with LaunchServices -600.
+    if pkill -x SentinelBar 2>/dev/null; then
+        for _ in $(seq 50); do pgrep -x SentinelBar >/dev/null || break; sleep 0.2; done
+        pgrep -x SentinelBar >/dev/null && { echo "error: old SentinelBar did not exit" >&2; exit 1; }
+    fi
     rm -rf "$HOME/Applications/SentinelBar.app"
     mkdir -p "$HOME/Applications"
     cp -R "$app" "$HOME/Applications/"
