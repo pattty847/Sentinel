@@ -51,6 +51,8 @@ set(GRID_CORE_SOURCES
     UnifiedGridRenderer.Render.cpp
     UnifiedGridRenderer.Zoom.cpp
     UnifiedGridRenderer.h
+    chart/shell/HeatmapChartPort.hpp
+    chart/shell/HeatmapChartPort.cpp
 
     # Axis models for QML integration
     models/DomModel.cpp
@@ -174,6 +176,8 @@ add_library(sentinel_chart_core STATIC
     chart/core/ChartPorts.hpp
     chart/core/PublishedFrame.hpp
     chart/core/PublishedFrame.cpp
+    chart/core/ChartViewController.hpp
+    chart/core/ChartViewController.cpp
 )
 target_include_directories(sentinel_chart_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(sentinel_chart_core PUBLIC sentinel_core Qt6::Core)

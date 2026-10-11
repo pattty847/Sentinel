@@ -31,6 +31,7 @@
 #include "render/FrameContext.hpp"
 #include "render/TimeAuthority.hpp"
 #include "chart/core/PublishedFrame.hpp"
+#include "chart/core/ChartViewController.hpp"
 // ── Overlay renderers (owned inline) ─────────────────────────────────────────
 #include "render/IOverlayRenderer.hpp"
 #include "render/FootprintOverlayRenderer.hpp"
@@ -51,9 +52,11 @@ struct ViewWindow;
 }
 class QQuickWindow;
 class QScreen;
+namespace chart { class HeatmapChartPort; }
 
 class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     friend struct TradeBubbleRendererTest;
+    friend class chart::HeatmapChartPort;
     Q_OBJECT
     Q_INTERFACES(ITimeAxisMappingProvider)
     QML_ELEMENT
@@ -102,8 +105,6 @@ class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
     Q_PROPERTY(bool autoPriceScale READ autoPriceScale WRITE setAutoPriceScale NOTIFY autoPriceScaleChanged)
 
 private:
-    int64_t m_currentTimeframe_ms = 100;
-    
     bool m_showGpuStatsOverlay = false;
     bool m_showDataPipelineOverlay = false;
     bool m_showViewportMathOverlay = false;
@@ -114,17 +115,8 @@ private:
     int m_candleWickWidth = 1;
 
     FrameProfiler m_frameProfiler;  // SENTINEL_FRAME_PROFILE=1, render thread only
-    QString m_activeSymbol;
-
     // Per-chart GPU heatmap state, read in updatePaintNode while the GUI is blocked.
     std::unique_ptr<heatmap::gpu::HeatmapGpuLayer> m_gpuLayer;
-    bool m_gpuPriceKnown = false;   // the viewport's price window is real (not a placeholder)
-    bool m_gpuReseedPrice = false;  // a symbol switch: the next book top centres price
-    // The seeded time window follows the chart's size until the user (or the
-    // Agent API) moves the view: the first book top can arrive before layout.
-    bool m_gpuViewPristine = false;
-    bool m_gpuSelfViewport = false; // the seed or follow-live is setting the viewport
-    bool m_gpuLimitsDeferred = false; // a timeframe switch applies limits and view as one change
     // The chart's frame clock and timeframe cadence (FrameContext::time; the candle
     // overlay's boundary sequence reads it through currentFrameContext()).
     QElapsedTimer m_frameClock;
@@ -132,8 +124,6 @@ private:
     // The first view (heatmap.initial_column_px / initial_price_pct): the time span is
     // initial_column_px per column (16 columns min); the price window is
     // initial_price_pct of kSeedBandRows rows at kSeedBandTick (the near layer's $1).
-    int m_initialColumnPx = 8;
-    int m_initialPricePct = 5;
     static constexpr double kSeedBandTick = 1.0;
     static constexpr int kSeedBandRows = 2048;
     static constexpr double kAutoScrollPaddingFrac = 0.08;
@@ -293,7 +283,7 @@ public:
     explicit UnifiedGridRenderer(QQuickItem* parent = nullptr);
     ~UnifiedGridRenderer();
     
-    bool autoScrollEnabled() const { return m_viewState ? m_viewState->isAutoScrollEnabled() : false; }
+    bool autoScrollEnabled() const { return getViewState() ? getViewState()->isAutoScrollEnabled() : false; }
     int candleStyle() const { return m_candleStyle; }
     void setCandleStyle(int style);
     QColor candleUpColor() const { return m_candleUpColor; }
@@ -322,8 +312,8 @@ public:
     QString tpoTheme() const;
     int tpoSessions() const { return m_tpoOverlay.style().maxSessions; }
     
-    GridViewState* getViewState() const { return m_viewState.get(); }
-    QObject* viewState() const { return m_viewState.get(); }
+    GridViewState* getViewState() const { return m_view ? m_view->viewPtr() : nullptr; }
+    QObject* viewState() const { return getViewState(); }
     QObject* priceAxisSource() const { return m_axisTextService ? m_axisTextService->priceAxisSource() : nullptr; }
     QObject* timeAxisSource() const { return m_axisTextService ? m_axisTextService->timeAxisSource() : nullptr; }
     double effectiveAxisLabelPx() const { return m_axisTextService ? m_axisTextService->effectiveAxisLabelPx() : AxisLayout::kAutoAxisLabelBasePx; }
@@ -339,7 +329,7 @@ public:
     Q_INVOKABLE double getMinPrice() const;
     Q_INVOKABLE double getMaxPrice() const;
     
-    int getCurrentTimeframe() const { return static_cast<int>(m_currentTimeframe_ms); }
+    int getCurrentTimeframe() const { return static_cast<int>(m_view->session().timeframeMs); }
     
     Q_INVOKABLE QPointF getPanVisualOffset() const;
     // The drawn tick (the GPU layer's).
@@ -363,7 +353,7 @@ public:
 
     // ── Auto price scale and fits ──
     // View and fit behavior: docs/ARCHITECTURE.md, "Coordinate system: TimeAxisMapping".
-    bool autoPriceScale() const { return m_viewState && m_viewState->autoPriceScale(); }
+    bool autoPriceScale() const { return getViewState() && getViewState()->autoPriceScale(); }
     void setAutoPriceScale(bool enabled);
     Q_INVOKABLE bool fitView(bool time, bool price);
     Q_INVOKABLE bool fitTimeToData() { return fitView(true, false); }
@@ -525,11 +515,8 @@ private:
     bool rasterPanShift(QPointF drag, qint64& timeShiftMs, double& priceShift) const;
     void renderTradeOverlays(QSGNode* parent, const FrameContext& frame, bool drawFootprint, bool drawTpo,
                              std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads);
-    void syncGpuView();
-    void applyGpuLimits();
     void followGpuLive();
     void seedGpuViewport(double bestBid, double bestAsk);
-    void setGpuViewportSelf(qint64 start, qint64 end, double priceMin, double priceMax, bool preservePlacement = false);
     // "Return to live" (follow-live activation): the view's right edge goes one
     // padding past the live anchor's bucket, in either direction, span kept.
     void returnGpuToLive();
@@ -555,7 +542,6 @@ private:
     // Auto price scale on: the current time range through setViewport (a bump only
     // when the fitted range changed). Candle updates in view and new limits use it.
     void refitAutoPrice();
-    double gpuLivePrice() const;
     QPointer<CandleSeriesBuffer> m_candleBuffer;
     QMetaObject::Connection m_candleDirtyConn;
     mutable std::vector<CandleSeriesBuffer::CandleBar> m_fitBars; // gpuFitPriceWindow scratch
@@ -568,8 +554,6 @@ private:
     // liveOnly: the live-only fallback (consume without a recorded price scale).
     bool applyPriceCarry(double now, bool liveOnly = false);
     QTimer* m_carryWaitTimer = nullptr;
-    double m_gpuBookMid = 0.0;   // newest book-top mid of the active symbol
-    double m_gpuLastTrade = 0.0; // newest trade price of the active symbol
     qint64 gpuInitialSpanMs(double widthPx) const;
     void syncGpuSurface();
     void syncGpuTone();
@@ -583,7 +567,8 @@ private:
     void setShowDataPipelineOverlay(bool show);
     void setShowViewportMathOverlay(bool show);
 
-    std::unique_ptr<GridViewState> m_viewState;
+    std::unique_ptr<chart::HeatmapChartPort> m_heatmapPort;
+    std::unique_ptr<chart::ChartViewController> m_view;
     std::unique_ptr<DataProcessor> m_dataProcessor;
     std::unique_ptr<QThread> m_dataProcessorThread;
     void init();

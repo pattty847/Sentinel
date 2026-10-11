@@ -98,7 +98,7 @@ chart_raster::RasterInputs UnifiedGridRenderer::rasterInputs(const FrameViewport
     in.minPrice = viewport.minPrice;
     in.maxPrice = viewport.maxPrice;
     in.dragLogicalPx = viewport.dragging ? viewport.panVisualOffset : QPointF();
-    in.tfMs = static_cast<double>(m_currentTimeframe_ms);
+    in.tfMs = static_cast<double>(m_view->session().timeframeMs);
     in.tick = tick;
     in.itemWidthLogical = width;
     in.itemHeightLogical = height;
@@ -198,7 +198,7 @@ void UnifiedGridRenderer::prepareSyncFrame() {
     FrameContext& frame = m_sync.frame;
     frame = FrameContextBuilder::build(
         boundingRect(), window() ? window()->effectiveDevicePixelRatio() : 1.0,
-        m_frameClock, m_timeAuthority, m_viewState.get(),
+        m_frameClock, m_timeAuthority, getViewState(),
         m_heatmapLayerEnabled, m_footprintLayerEnabled, m_tpoLayerEnabled);
     if (profile) m_frameProfiler.mark(FrameProfiler::Context);
     // Choose the tick for the continuous view (committed + an active drag at the
@@ -206,7 +206,7 @@ void UnifiedGridRenderer::prepareSyncFrame() {
     const auto& vp = frame.viewport;
     const double timeSpan = double(vp.timeEnd - vp.timeStart), priceSpan = vp.maxPrice - vp.minPrice;
     const QRectF& bounds = frame.surfaceBounds;
-    const bool viewValid = vp.valid && m_currentTimeframe_ms > 0 && timeSpan > 0 && priceSpan > 0 && !bounds.isEmpty();
+    const bool viewValid = vp.valid && m_view->session().timeframeMs > 0 && timeSpan > 0 && priceSpan > 0 && !bounds.isEmpty();
     m_sync.drawHeatmap = frame.overlays.heatmap && viewValid;
     if (m_sync.drawHeatmap) {
         const QPointF drag = vp.dragging ? vp.panVisualOffset : QPointF();

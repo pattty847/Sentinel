@@ -4,18 +4,13 @@
 // A view that stays inside the grid's guard margin is drawn by translating the
 // fragment mapping only (sub-bin smooth panning); values never re-bin on a pan.
 #include "servermodel/RecordingCodec.hpp"
+#include "render/heatmap/ViewWindow.hpp"
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <optional>
 
 namespace heatmap::gpu {
-
-struct ViewWindow {
-    double timeLoMs = 0, timeHiMs = 1; // half-open, epoch milliseconds
-    double priceLo = 0, priceHi = 1;
-    bool operator==(const ViewWindow &) const = default;
-};
 
 struct BinGrid {
     int64_t tfMs = 0;

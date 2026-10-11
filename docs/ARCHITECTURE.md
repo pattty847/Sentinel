@@ -71,7 +71,8 @@ WebSocket → SentinelStreamClient → RemoteGridDataSource → DataProcessor �
 - **DataProcessor** — Stages the trade overlays on their own grids off the GUI thread (INV-068).
 - **HeatmapDataService / HeatmapGpuLayer** — The heatmap: chunk requests and the live raw tail on the heatmap-data thread, drawn by `HeatmapTileNode` (S5-S6; the legacy band renderer was removed in S8a).
 - **History workers** — SentinelStreamServer uses two bounded workers for persisted heatmap reads and response encoding; at most eight jobs may be queued or running, and completions re-enter the owning session through its Asio executor.
-- **UnifiedGridRenderer** — Viewport state and `updatePaintNode()` (one root: the gated `HeatmapTileNode`, then the overlays and text); drives heatmap, footprint, TPO, candles, labels.
+- **ChartViewController** — Owns `GridViewState`, the chart session and initial placement state; forwards the committed view and limits through the heatmap port.
+- **UnifiedGridRenderer** — Qt Quick item and `updatePaintNode()` (one root: the gated `HeatmapTileNode`, then the overlays and text); still wires the heatmap, footprint, TPO, candles and labels during the chart-core migration.
 - **HeatmapTileNode** — QSG render node; bins and draws the span sources on the GPU with the chart palette.
 - **MsdfGlyphNode** — QSG node for MSDF glyph quads from atlas textures.
 

@@ -2,14 +2,11 @@
 
 #include "datasources/CandleSeriesBuffer.hpp"
 #include "heatmap/HeatmapResolution.hpp"
+#include "render/heatmap/ViewWindow.hpp"
 
 #include <cstdint>
 #include <optional>
 #include <vector>
-
-namespace heatmap::gpu {
-struct ViewWindow;
-}
 
 namespace chart {
 
@@ -40,6 +37,7 @@ public:
     virtual int64_t liveOpenEndMs() const = 0;
     virtual int64_t oldestAvailableMs() const = 0;
     virtual double recentMidPrice() const = 0;
+    virtual std::optional<heatmap::gpu::ViewWindow> restView() const = 0;
 };
 
 class ITickOracle {
