@@ -196,6 +196,7 @@ public:
         // legacy default palette. Uploaded only when the pointer changes.
         std::shared_ptr<const HeatmapPalette> palette;
         double crossfadeMs = 150;
+        std::optional<std::chrono::steady_clock::time_point> fadeNowForTest;
         // The controller's latest live snapshot (nullptr: none; the last live bin
         // then stays only while a drawn picture holds it).
         std::shared_ptr<const LiveSnapshot> live;

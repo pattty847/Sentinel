@@ -1242,6 +1242,9 @@ void HeatmapTileNode::prepare() {
     Bin *liveBin = liveBinFor(tick, cb); // never holds a transition: it is binned with its upload
 
     // 3. Transitions.
+    const auto fadeNow = [this] {
+        return frame_.fadeNowForTest ? *frame_.fadeNowForTest : std::chrono::steady_clock::now();
+    };
     const bool targetChanged = tf != drawnTf_ || tick != drawnTick_;
     bool allReady = tick > 0 && !slots_.empty();
     for (const auto &s : slots_) allReady = allReady && s.ready;
@@ -1258,7 +1261,7 @@ void HeatmapTileNode::prepare() {
                                                [](const Layer &a, const Layer &b) { return a.start < b.start; });
                 }
                 layer->draws.assign(held_.begin(), held_.end());
-                layer->start = std::chrono::steady_clock::now();
+                layer->start = fadeNow();
                 layer->used = true;
             }
             sLog_Probe("heatmap.node.switch", "tf=" << drawnTf_ << "->" << tf << " tick=" << drawnTick_ << "->" << tick
@@ -1366,7 +1369,8 @@ void HeatmapTileNode::prepare() {
     for (const Layer *l : byAge) {
         auto &layer = const_cast<Layer &>(*l);
         if (!layer.used) continue;
-        const double t = msSince(layer.start) / std::max(frame_.crossfadeMs, 1e-3);
+        const double elapsedMs = std::chrono::duration<double, std::milli>(fadeNow() - layer.start).count();
+        const double t = elapsedMs / std::max(frame_.crossfadeMs, 1e-3);
         if (t >= 1 || frame_.crossfadeMs <= 0) {
             layer.used = false;
             layer.draws.clear();
