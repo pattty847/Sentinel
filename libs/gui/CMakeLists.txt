@@ -270,7 +270,6 @@ qt6_add_qml_module(sentinel_gui_lib
         render/PaperTradeOverlayModel.cpp
     QML_FILES
         qml/DepthChartView.qml
-        qml/Theme.qml
         qml/StockChartView.qml
 )
 

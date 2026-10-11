@@ -7,7 +7,17 @@ import Sentinel.Charts 1.0
 Rectangle {
     id: root
     color: theme.bg
-    Theme { id: theme }
+    QtObject {
+        id: theme
+        readonly property color bg: "#0F1114"
+        readonly property color panel: "#1B1F24"
+        readonly property color panelAlt: "#20252B"
+        readonly property color border: "#2B3138"
+        readonly property color text: "#D7DDE3"
+        readonly property color textDim: "#93A1AF"
+        readonly property color accent: "#2BB3FF"
+        readonly property color accentSoft: "#1E4B66"
+    }
     property font uiFont
     readonly property real fontScale: uiFont.pointSize > 0 ? uiFont.pointSize / 10 : uiFont.pixelSize / 13
     property string dataSymbol: ""

@@ -273,29 +273,6 @@ void DataProcessor::onVolumeProfileSliceReceived(const VolumeProfileSlice& slice
     emit volumeProfileReady(std::move(bins), std::move(snap));
 }
 
-void DataProcessor::setPriceResolution(double resolution) {
-    Q_UNUSED(resolution);
-}
-
-double DataProcessor::getPriceResolution() const {
-    return 1.0;
-}
-
-void DataProcessor::addTimeframe(int timeframe_ms) {
-    Q_UNUSED(timeframe_ms);
-}
-
-int64_t DataProcessor::suggestTimeframe(qint64 timeStart, qint64 timeEnd, int maxCells) const {
-    Q_UNUSED(timeStart);
-    Q_UNUSED(timeEnd);
-    Q_UNUSED(maxCells);
-    return 100;
-}
-
-int DataProcessor::getDisplayMode() const {
-    return 0;
-}
-
 void DataProcessor::setTimeframe(int timeframe_ms) {
     if (timeframe_ms > 0) {
         sLog_Render("Overlay timeframe: tf=" << m_currentTimeframe_ms << "->" << timeframe_ms);
