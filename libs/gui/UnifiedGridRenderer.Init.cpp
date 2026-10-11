@@ -10,26 +10,28 @@
 #include "render/VolumeProfileState.hpp"
 #include "config/GuiConfigStore.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
+#include "chart/shell/HeatmapChartPort.hpp"
 void UnifiedGridRenderer::init() {
     const auto& store = GuiConfigStore::instance();
-    if (store.hasServerConfig() && store.serverConfig().chart.defaultTimeframeMs > 0)
-        m_currentTimeframe_ms = store.serverConfig().chart.defaultTimeframeMs;
+    const auto defaultTimeframeMs = store.hasServerConfig() && store.serverConfig().chart.defaultTimeframeMs > 0
+                                        ? store.serverConfig().chart.defaultTimeframeMs : 100;
     const auto& client = store.clientConfig();
     m_heatmapGamma = client.heatmap.gamma;
     m_heatmapContrast = client.heatmap.contrast;
     m_heatmapShaderFloor = client.heatmap.shaderFloor;
     qRegisterMetaType<Trade>("Trade");
     m_frameClock.start();
-    m_timeAuthority.setActiveTimeframeMs(m_currentTimeframe_ms);
-
-    m_viewState = std::make_unique<GridViewState>(this);
+    m_timeAuthority.setActiveTimeframeMs(defaultTimeframeMs);
     // Each chart owns its GPU heatmap layer.
     m_gpuLayer = std::make_unique<heatmap::gpu::HeatmapGpuLayer>();
+    m_heatmapPort = std::make_unique<chart::HeatmapChartPort>(*this, *m_gpuLayer);
+    m_view = std::make_unique<chart::ChartViewController>(*m_heatmapPort, *m_heatmapPort, this);
+    m_view->session().timeframeMs = defaultTimeframeMs;
     m_gpuLayer->setTone({static_cast<float>(m_heatmapGamma), static_cast<float>(m_heatmapContrast),
                          static_cast<float>(m_heatmapShaderFloor)});
     connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::snapshotChanged, this, [this] {
         // No book top yet (or a symbol switch): centre on the decoded data instead.
-        if ((!m_gpuPriceKnown || m_gpuReseedPrice) && m_viewState->isTimeWindowValid()) {
+        if ((!m_view->flags().priceKnown || m_view->flags().reseedPrice) && getViewState()->isTimeWindowValid()) {
             if (const double mid = m_gpuLayer->recentMidPrice(); mid > 0) seedGpuViewport(mid, mid);
         }
         update();
@@ -40,9 +42,9 @@ void UnifiedGridRenderer::init() {
         update();
     });
     connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::tickChanged, this, [this] {
-        applyGpuLimits();
+        m_view->applyGpuLimits();
         refitAutoPrice(); // the fit's min/max price spans follow the tick
-        syncGpuView();    // the drawn rows (and so the drawn price window) follow it too
+        m_view->syncGpuView();    // the drawn rows (and so the drawn price window) follow it too
         // Before the frame that draws the new tick: the axis models recalculate on
         // heatmapTickSizeChanged, the sibling overlays (candles, paper, algo) redraw on
         // viewportChanged; all of them sync with the new raster camera in that frame.
@@ -51,12 +53,12 @@ void UnifiedGridRenderer::init() {
         update();
     });
     connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::limitsChanged, this, [this] {
-        applyGpuLimits();
+        m_view->applyGpuLimits();
         // A carry applied before the new symbol's price scale was known: again, now
         // that its limits are.
-        if (m_priceCarry && !m_gpuReseedPrice && !m_gpuLimitsDeferred &&
+        if (m_priceCarry && !m_view->flags().reseedPrice && !m_view->flags().limitsDeferred &&
             m_gpuLayer->priceScaleCurrent())
-            applyPriceCarry(gpuLivePrice());
+            applyPriceCarry(m_view->gpuLivePrice());
         refitAutoPrice(); // e.g. a new symbol's tick: its min/max price spans
     });
     connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::labelsChanged, this, [this] { update(); });
@@ -85,32 +87,30 @@ void UnifiedGridRenderer::init() {
             [this](const ClientConfig& config) { applyClientConfig(config); });
     connect(&store, &GuiConfigStore::serverConfigUpdated, this,
             [this](const ServerConfig& config) { applyServerConfig(config); });
-    
     connectDataProcessorSignals();
     m_dataProcessorThread->start();
     if (width() > 0 && height() > 0) {
-        m_viewState->setViewportSize(width(), height());
+        getViewState()->setViewportSize(width(), height());
     }
-    
-    connect(m_viewState.get(), &GridViewState::viewportChanged, this, &UnifiedGridRenderer::viewportChanged);
-    connect(m_viewState.get(), &GridViewState::viewportChanged, this, &UnifiedGridRenderer::onViewportChanged);
-    connect(m_viewState.get(), &GridViewState::panVisualOffsetChanged, this, &UnifiedGridRenderer::panVisualOffsetChanged);
-    connect(m_viewState.get(), &GridViewState::autoScrollEnabledChanged, this, &UnifiedGridRenderer::autoScrollEnabledChanged);
-    connect(m_viewState.get(), &GridViewState::autoPriceScaleChanged, this, [this]() {
-        sLog_Render("auto price scale=" << m_viewState->autoPriceScale());
-        if (m_viewState->autoPriceScale()) m_priceCarry.reset(); // on: the candles fit
+    connect(getViewState(), &GridViewState::viewportChanged, this, &UnifiedGridRenderer::viewportChanged);
+    connect(getViewState(), &GridViewState::viewportChanged, this, &UnifiedGridRenderer::onViewportChanged);
+    connect(getViewState(), &GridViewState::panVisualOffsetChanged, this, &UnifiedGridRenderer::panVisualOffsetChanged);
+    connect(getViewState(), &GridViewState::autoScrollEnabledChanged, this, &UnifiedGridRenderer::autoScrollEnabledChanged);
+    connect(getViewState(), &GridViewState::autoPriceScaleChanged, this, [this]() {
+        sLog_Render("auto price scale=" << getViewState()->autoPriceScale());
+        if (getViewState()->autoPriceScale()) m_priceCarry.reset(); // on: the candles fit
         emit autoPriceScaleChanged();
     });
     // Auto price scale (gpu): every setViewport takes its price from the visible candles.
-    m_viewState->setPriceFit([this](qint64 start, qint64 end, double& priceMin, double& priceMax) {
+    getViewState()->setPriceFit([this](qint64 start, qint64 end, double& priceMin, double& priceMax) {
         return autoPriceFit(start, end, priceMin, priceMax);
     });
     // Whole-pixel mapping: a drag commits exactly the whole device pixels it shows, and
     // a zoom keeps what is drawn under the cursor.
-    m_viewState->setPanShift([this](QPointF drag, qint64& timeShiftMs, double& priceShift) {
+    getViewState()->setPanShift([this](QPointF drag, qint64& timeShiftMs, double& priceShift) {
         return rasterPanShift(drag, timeShiftMs, priceShift);
     });
-    connect(m_viewState.get(), &GridViewState::priceInteracted, this, [this]() {
+    connect(getViewState(), &GridViewState::priceInteracted, this, [this]() {
         m_priceCarry.reset(); // the user owns price now: no pending carry replaces it
     });
     
@@ -122,11 +122,11 @@ void UnifiedGridRenderer::init() {
     // The GPU heatmap is active from construction: the default view model is the
     // auto price scale; the first view comes from the service's availability, a
     // book top, a trade or the API (bootstrapGpuTimeView, seedGpuViewport).
-    m_gpuLayer->setSymbol(m_activeSymbol.toStdString());
-    m_gpuLayer->setTimeframeMs(m_currentTimeframe_ms);
+    m_gpuLayer->setSymbol(m_view->session().symbol.toStdString());
+    m_gpuLayer->setTimeframeMs(m_view->session().timeframeMs);
     m_gpuLayer->setActive(true);
-    m_viewState->setAutoPriceScale(true);
-    applyGpuLimits();
+    getViewState()->setAutoPriceScale(true);
+    m_view->applyGpuLimits();
     bootstrapGpuTimeView();
 }
 
