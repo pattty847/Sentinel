@@ -1,6 +1,19 @@
 #include "chart/core/ChartViewController.hpp"
+#include "render/FrameContextBuilder.hpp"
 
 namespace chart {
+
+FrameInputs ChartViewController::frameInputs(const QRectF& bounds, double dpr, const QElapsedTimer& clock,
+                                           const TimeAuthority& time, FrameContext::OverlayActivationSet overlays) const {
+    FrameInputs inputs;
+    inputs.context = FrameContextBuilder::build(bounds, dpr, clock, time, view_.get(),
+                                                overlays.heatmap, overlays.footprint, overlays.tpo);
+    inputs.camera.raster = camera_.rasterInputs(inputs.context.viewport, 0, {bounds.width(), bounds.height(), dpr});
+    inputs.camera.glide = glide_;
+    inputs.timeframeMs = session_.timeframeMs;
+    return inputs;
+}
+
 
 namespace {
 struct LivePricePolicy {

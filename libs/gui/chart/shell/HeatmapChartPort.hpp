@@ -10,7 +10,7 @@ class HeatmapGpuLayer;
 
 namespace chart {
 
-class HeatmapChartPort final : public IChartEnvironment, public ITickOracle, public IHeatmapViewSink {
+class HeatmapChartPort final : public IChartEnvironment, public ITickOracle, public IHeatmapViewSink, public ITickAuthority {
 public:
     HeatmapChartPort(UnifiedGridRenderer& item, heatmap::gpu::HeatmapGpuLayer& layer)
         : item_(item), layer_(&layer) {}
@@ -37,6 +37,10 @@ public:
     int64_t autoTickState() const override;
     heatmap::AutoTickParams autoTickParams() const override;
     bool setAutoPriceTick(std::optional<int64_t> units) override;
+
+    void chooseTickForView(const heatmap::gpu::ViewWindow& view) override;
+    double tickPrice() const override;
+    void noteRaster(int rowPx, int colPx, double rowPxContinuous) override;
 
     void setView(const heatmap::gpu::ViewWindow& drawn, bool priceKnown) override;
 
