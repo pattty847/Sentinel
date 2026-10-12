@@ -114,11 +114,12 @@ void UnifiedGridRenderer::bindWindow(QQuickWindow* w) {
   }
   syncGpuSurface(); // the device pixel ratio sets the 1 column/px clamp
   if (m_screenChangedConn) disconnect(m_screenChangedConn);
-  if (m_beforeSyncConn) disconnect(m_beforeSyncConn);
+  if (m_renderConnections.beforeSync) disconnect(m_renderConnections.beforeSync);
+  if (m_renderConnections.afterRender) disconnect(m_renderConnections.afterRender);
   if (!w) return;
   // The frame's raster camera is computed and published before any item syncs
   // (render thread, GUI blocked; prepareSyncFrame).
-  m_beforeSyncConn = connect(w, &QQuickWindow::beforeSynchronizing, this, [this] { prepareSyncFrame(); },
+  m_renderConnections.beforeSync = connect(w, &QQuickWindow::beforeSynchronizing, this, [this] { prepareSyncFrame(); },
                              Qt::DirectConnection);
   // A move to a screen of another device pixel ratio: the clamps follow it, and the
   // controller's drawn window (the raster camera re-rounds in the next frame).
@@ -127,13 +128,15 @@ void UnifiedGridRenderer::bindWindow(QQuickWindow* w) {
     m_view->syncGpuView();
     update();
   });
-  connect(w, &QQuickWindow::afterRendering, this, [this]() {
+  m_renderConnections.afterRender = connect(w, &QQuickWindow::afterRendering, this, [this]() {
     m_frameAck.rendered();
     m_layers.registry.afterRendering();
   }, Qt::DirectConnection);
 }
 
 UnifiedGridRenderer::~UnifiedGridRenderer() {
+  if (m_renderConnections.beforeSync) disconnect(m_renderConnections.beforeSync);
+  if (m_renderConnections.afterRender) disconnect(m_renderConnections.afterRender);
   if (m_glidePolishTimer) {
     m_glidePolishTimer->stop();
     disconnect(m_glidePolishTimer, nullptr, this, nullptr);
@@ -156,7 +159,6 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
   // unbind the window now, while they exist.
   disconnect(this, &QQuickItem::windowChanged, this, nullptr);
   if (m_screenChangedConn) disconnect(m_screenChangedConn);
-  if (m_beforeSyncConn) disconnect(m_beforeSyncConn);
   if (m_heatmapPort) m_heatmapPort->detach();
   m_layers.heatmap.gpu.reset(); // destroys its controller on the heatmap-data thread
   // Queued processor callbacks may still use getDataProcessor() until the join.

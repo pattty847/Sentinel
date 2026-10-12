@@ -36,7 +36,9 @@ void HeatmapLayer::updateNodes(const ChartFrame& sync, LayerNodeContext&) {
         }, *gate_, *tile_, tileFrame);
 }
 void HeatmapLayer::afterRendering() {
-    finishHeatmapFrame(tileStats_, m_gpuLabelsIncomplete, queueUpdate, queueLabelCheck);
+    finishHeatmapFrame(tileStats_, m_gpuLabelsIncomplete,
+        [this] { if (queueUpdate) queueUpdate(); },
+        [this] { if (queueLabelCheck) queueLabelCheck(); });
 }
 bool HeatmapLayer::labelsChangedSinceDraw() const {
     return gpu && gpu->labelSignature() != m_gpuLabelSignature.load();

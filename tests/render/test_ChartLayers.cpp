@@ -148,3 +148,14 @@ TEST(TradeBubbleFeed, TapeSettingsAndPublicationStayTogether) {
     feed.disableFrame(); EXPECT_FALSE(frame->enabled);
     feed.clear(); EXPECT_TRUE(frame->tape->samples().empty());
 }
+
+TEST(HeatmapLayer, AfterRenderingWithoutHostCallbacksConsumesFrameRequest) {
+    chart::HeatmapLayer layer;
+    EXPECT_NO_THROW(layer.afterRendering());
+    layer.initialize();
+    auto stats = layer.gpu->tileStatsPtr();
+    stats->wantsFrame.store(true);
+    EXPECT_NO_THROW(layer.afterRendering());
+    EXPECT_FALSE(stats->wantsFrame.load());
+    EXPECT_NO_THROW(layer.afterRendering());
+}

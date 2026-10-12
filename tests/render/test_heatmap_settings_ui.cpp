@@ -1269,6 +1269,33 @@ TEST(TradeBubbleControls, LayerOrderUsesRealQmlBindingAndPersistedChartApiSettin
     EXPECT_TRUE(check->isEnabled()) << "one renderer (S8a): always enabled";
 }
 
+TEST(ChartRenderConnections, DisconnectedBeforeHeatmapDependencyDestruction) {
+    QQuickWindow window;
+    auto* renderer = new UnifiedGridRenderer(window.contentItem());
+    bool inspected = false;
+    QObject::connect(renderer->gpuHeatmapLayer(), &QObject::destroyed, &window, [&] {
+        inspected = true;
+        // This runs inside the UGR destructor body, before QObject's automatic
+        // receiver cleanup. A true return would reveal a still-live connection.
+        EXPECT_FALSE(QObject::disconnect(&window, &QQuickWindow::beforeSynchronizing, renderer, nullptr));
+        EXPECT_FALSE(QObject::disconnect(&window, &QQuickWindow::afterRendering, renderer, nullptr));
+    }, Qt::DirectConnection);
+    delete renderer;
+    EXPECT_TRUE(inspected);
+}
+
+TEST(ChartRenderConnections, RebindingDropsBothOldWindowRenderConnections) {
+    QQuickWindow first, second;
+    auto* renderer = new UnifiedGridRenderer(first.contentItem());
+    renderer->setParentItem(second.contentItem());
+    EXPECT_FALSE(QObject::disconnect(&first, &QQuickWindow::beforeSynchronizing, renderer, nullptr));
+    EXPECT_FALSE(QObject::disconnect(&first, &QQuickWindow::afterRendering, renderer, nullptr));
+    // The replacement window must still have both callbacks wired.
+    EXPECT_TRUE(QObject::disconnect(&second, &QQuickWindow::beforeSynchronizing, renderer, nullptr));
+    EXPECT_TRUE(QObject::disconnect(&second, &QQuickWindow::afterRendering, renderer, nullptr));
+    delete renderer;
+}
+
 TEST(TradeBubbleControls, PublishKeepsTapeSettingsAndSignalOrder) {
     UnifiedGridRenderer renderer;
     renderer.setActiveSymbol("BTC-USD");

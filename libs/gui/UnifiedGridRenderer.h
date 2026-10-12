@@ -143,7 +143,7 @@ private:
     enum class ReactionPhase { Heatmap, ViewState, Ready };
     void bindViewReactions(ReactionPhase phase);
     QTimer* m_glidePolishTimer = nullptr;
-    QMetaObject::Connection m_beforeSyncConn;
+    struct { QMetaObject::Connection beforeSync, afterRender; } m_renderConnections;
     // Render thread: this sync's frame (context, tick, raster camera), prepared in
     // beforeSynchronizing and drawn by updatePaintNode in the same sync.
     chart::FrameProducer m_frameProducer;
