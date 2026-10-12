@@ -14,7 +14,7 @@ final class Monitor: ObservableObject {
         Service(name: "capture :8091", url: URL(string: "http://127.0.0.1:8091/metrics"), critical: true),
         Service(name: "GUI host :17190", url: URL(string: "http://127.0.0.1:17190/status"), critical: false)
     ]
-    @Published var budget: [String]? = nil
+    @Published var budget: [BudgetEntry]? = nil
     @Published var budgetLoaded = false
     @Published var events: [Milestone] = []
     @Published var agentEvents: [Milestone] = []
@@ -36,14 +36,20 @@ final class Monitor: ObservableObject {
     private var selectedPlanPath: String?
 
     var blockers: [Milestone] { EventParser.unresolved(events) }
-    var activity: [Milestone] {
+    var runningAgentCount: Int {
+        AgentCounter.runningCount(agents.map { job -> AgentRunState in
+            job.idle ? (job.subagent ? .subagentIdle : .idle) : .running
+        })
+    }
+    var activity: [ActivityGroup] {
         let gitEvents = landings.filter { landing in
             !events.contains { $0.kind == "landed" && $0.text.contains(landing.id) }
         }.map { landing in
             Milestone(at: landing.at, kind: "landed", text: "\(landing.slice) landed · \(landing.id)",
                       tone: "ok", slice: landing.slice, branch: nil)
         }
-        return Array((events + gitEvents + agentEvents).sorted { $0.at > $1.at }.prefix(15))
+        let ordered = (events + gitEvents + agentEvents).sorted { $0.at > $1.at }
+        return Array(ActivityFolder.fold(ordered).prefix(15))
     }
     var alert: Bool {
         services.contains { $0.critical && $0.up == false } ||
@@ -122,7 +128,9 @@ final class Monitor: ObservableObject {
         let parentPIDs = Set(fresh.filter { !$0.subagent }.map(\.pid))
         let scannedIDs = Set(fresh.map(\.id))
         for child in agents where child.subagent && !scannedIDs.contains(child.id) &&
-            parentPIDs.contains(child.pid) && scan.terminalSubagents[child.id] == nil {
+            parentPIDs.contains(child.pid) && scan.terminalSubagents[child.id] == nil &&
+            SubagentLifecycle.decide(parentAlive: true, state: child.transcriptState,
+                secondsSinceActivity: child.lastActive.map { Date().timeIntervalSince($0) } ?? 0) == .active {
             fresh.append(child)
         }
         let ids = Set(fresh.map(\.id))
@@ -205,13 +213,13 @@ final class Monitor: ObservableObject {
         }.value
         if head != mainHead {
             let pinned = pinnedPlan
-            let data = await Task.detached { () -> ([Landing], Plan?) in
+            let data = await Task.detached { () -> ([Landing], (path: String, plan: Plan)?) in
                 let landed = Probes.landings(repo: path)
-                return (landed, Probes.plan(repo: path, pinned: pinned, landings: landed))
+                return (landed, Probes.plan(repo: path, pinned: pinned))
             }.value
             landings = data.0
-            plan = data.1
-            selectedPlanPath = pinned.isEmpty ? data.0.compactMap(\.plan).first : pinned
+            plan = data.1?.plan
+            selectedPlanPath = data.1?.path
             mainHead = head
         }
     }

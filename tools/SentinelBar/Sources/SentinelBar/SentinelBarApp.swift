@@ -17,7 +17,7 @@ struct SentinelBarApp: App {
                 if let glyph = menuGlyph(alert: monitor.alert) {
                     Image(nsImage: glyph).resizable().frame(width: 18, height: 18)
                 }
-                if !monitor.agents.isEmpty { Text("\(monitor.agents.count)") }
+                if monitor.runningAgentCount > 0 { Text("\(monitor.runningAgentCount)") }
             }
         }
         .menuBarExtraStyle(.window)
@@ -34,49 +34,79 @@ struct SentinelBarApp: App {
 struct StatusPanel: View {
     @EnvironmentObject var monitor: Monitor
     @State private var showWorktrees = false
+    // MenuBarExtra windows size to the ScrollView's ideal height, which is ~0: measure the content instead.
+    @State private var contentHeight: CGFloat = 400
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    if let glyph = panelGlyph() {
+                        Image(nsImage: glyph).resizable().frame(width: 20, height: 20)
+                    }
+                    Text("Sentinel").font(.title3.bold())
+                    Spacer()
+                    if let updated = monitor.lastRefresh {
+                        Text("updated \(updated.formatted(date: .omitted, time: .shortened))")
+                            .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                    }
+                }
                 if !monitor.queue.isEmpty || monitor.builds.contains(where: \.outsideQueue) {
                     section("Running now") {
                         ForEach(monitor.queue.filter(\.running)) { item in
                             HStack(alignment: .top) {
-                                Image(systemName: "hammer.fill")
-                                VStack(alignment: .leading) {
-                                    Text(item.label).bold()
-                                    Text(item.command ?? "building").font(.caption).lineLimit(1)
+                                Image(systemName: "hammer.fill").foregroundStyle(.secondary)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(item.label).font(.callout.bold())
+                                    Text(item.command ?? "building").font(.caption.monospaced())
+                                        .foregroundStyle(.secondary).lineLimit(1)
                                     if let next = monitor.queue.first(where: { !$0.running }) {
                                         Text("next: \(next.label)").font(.caption).foregroundStyle(.secondary)
                                     }
                                 }
                                 Spacer()
                                 Text(monitor.runningSince[item.id] ?? item.queuedAt, style: .timer)
-                                    .monospacedDigit()
+                                    .font(.title3).monospacedDigit()
                             }
                         }
                         ForEach(monitor.builds.filter(\.outsideQueue)) { build in
                             Label("outside queue · \(build.command)", systemImage: "exclamationmark.triangle")
-                                .font(.caption).foregroundStyle(.orange).lineLimit(2)
+                                .font(.caption.monospaced()).foregroundStyle(.orange).lineLimit(2)
                         }
                     }
                 }
-                section("Plan") {
+                let planDone = monitor.plan?.phases.flatMap(\.slices).filter { monitor.landing($0.id) != nil }.count ?? 0
+                let planCount = monitor.plan?.phases.flatMap(\.slices).count ?? 0
+                section("Plan", caption: monitor.plan == nil ? nil : "\(planDone)/\(planCount)") {
                     if let plan = monitor.plan {
-                        Text(plan.title).bold().lineLimit(2)
-                        let done = plan.phases.flatMap(\.slices).filter { monitor.landing($0.id) != nil }.count
-                        let count = plan.phases.flatMap(\.slices).count
-                        Text("\(phaseName(plan)) · \(done)/\(count)")
+                        Text(plan.title).font(.subheadline.bold()).lineLimit(2)
+                        Text("\(phaseName(plan)) · \(planDone)/\(planCount)")
                             .font(.caption).foregroundStyle(.secondary)
+                        CapsuleBar(fraction: planCount == 0 ? 0 : Double(planDone) / Double(planCount),
+                                   color: .accentColor, height: 6)
+                        let currentPhase = plan.phases.first {
+                            !$0.slices.allSatisfy { monitor.landing($0.id) != nil }
+                        }?.id
                         ForEach(plan.phases) { phase in
                             let completed = phase.slices.allSatisfy { monitor.landing($0.id) != nil }
                             if completed {
                                 Text("✓ \(phase.title) · \(phase.slices.count)/\(phase.slices.count)")
                                     .font(.subheadline).foregroundStyle(.secondary)
-                            } else {
+                            } else if phase.id == currentPhase {
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(phase.title).font(.subheadline).bold()
                                     ForEach(phase.slices) { slice in sliceRow(slice) }
+                                }
+                            } else {
+                                DisclosureGroup {
+                                    ForEach(phase.slices) { slice in sliceRow(slice) }
+                                } label: {
+                                    HStack {
+                                        Text(phase.title).font(.subheadline.bold())
+                                        Spacer()
+                                        Text("\(phase.slices.count) slices")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    }
                                 }
                             }
                         }
@@ -92,22 +122,31 @@ struct StatusPanel: View {
                         }
                     }
                 }
-                section("Agents") {
+                section("Agents", caption: "\(monitor.runningAgentCount) running · \(monitor.agents.count) total") {
                     if monitor.agents.isEmpty { dim("none running") }
-                    ForEach(monitor.agents) { agent in
-                        AgentCard(job: agent, worktrees: monitor.worktrees, role: role(for: agent))
+                    ForEach(monitor.agents.indices, id: \.self) { index in
+                        if index > 0 { Divider() }
+                        AgentCard(job: monitor.agents[index], worktrees: monitor.worktrees,
+                                  role: role(for: monitor.agents[index]))
                     }
                 }
                 section("Activity") {
-                    if monitor.activity.isEmpty { dim("No activity yet") }
-                    ForEach(monitor.activity) { event in
+                    let activity = monitor.activity
+                    if activity.isEmpty { dim("No activity yet") }
+                    ForEach(activity) { group in
                         HStack(alignment: .firstTextBaseline) {
-                            Text(event.at, style: .time).monospacedDigit().foregroundStyle(.secondary)
-                            Text(event.text).lineLimit(2)
+                            if group.count == 1 {
+                                Text(group.latest.at, style: .time)
+                                    .monospacedDigit().foregroundStyle(.secondary)
+                            } else {
+                                Text(activityTimeRange(group))
+                                    .monospacedDigit().foregroundStyle(.secondary).lineLimit(1)
+                            }
+                            Text(group.text).lineLimit(2)
                         }.font(.caption)
                     }
                 }
-                section("Infra") {
+                section("Infra", caption: "\(monitor.worktrees.count) worktrees") {
                     DisclosureGroup("Worktrees (\(monitor.worktrees.count))", isExpanded: $showWorktrees) {
                         ForEach(monitor.worktrees) { tree in
                             HStack {
@@ -115,32 +154,39 @@ struct StatusPanel: View {
                                 Spacer()
                                 if tree.missing { Text("offline") }
                                 if let ahead = tree.ahead { Text("+\(ahead)") }
-                                Text(tree.head).monospaced()
+                                Text(tree.head).font(.caption.monospaced())
                             }.font(.caption).foregroundStyle(.secondary).help(tree.path)
                         }
                     }
-                    ForEach(monitor.services) { service in
-                        HStack {
-                            Circle().fill(service.up == nil ? .gray : service.up == true ? .green : .red)
-                                .frame(width: 7, height: 7)
-                            Text(service.name)
-                            Spacer()
-                            Text(service.up == nil ? "…" : service.up == true ? "up" : "down")
-                                .foregroundStyle(.secondary)
-                        }.font(.caption)
-                    }
+                    HStack(spacing: 10) {
+                        ForEach(monitor.services) { service in
+                            HStack(spacing: 4) {
+                                Circle().fill(service.up == nil ? .gray : service.up == true ? .green : .red)
+                                    .frame(width: 7, height: 7)
+                                Text("\(service.name) \(service.up == nil ? "…" : service.up == true ? "up" : "down")")
+                                    .lineLimit(1).minimumScaleFactor(0.8)
+                            }
+                        }
+                    }.font(.caption2).foregroundStyle(.secondary)
+                }
+                section("Budget") {
                     if !monitor.budgetLoaded { dim("Budget loading…") }
                     else if let budget = monitor.budget {
-                        ForEach(budget, id: \.self) { Text($0).font(.caption.monospaced()) }
+                        ForEach(budget.indices, id: \.self) { index in
+                            budgetRow(budget[index])
+                        }
                     } else { dim("Budget unavailable") }
                 }
                 Divider()
                 footer
             }
             .padding(12)
+            .background(GeometryReader { proxy in
+                Color.clear.preference(key: PanelHeightKey.self, value: proxy.size.height)
+            })
         }
-        .frame(width: 420)
-        .frame(maxHeight: 640)
+        .frame(width: 420, height: min(max(contentHeight, 120), 640))
+        .onPreferenceChange(PanelHeightKey.self) { contentHeight = $0 }
         .sheet(isPresented: $monitor.showSettings) {
             SettingsPanel(monitor: monitor)
         }
@@ -162,12 +208,13 @@ struct StatusPanel: View {
         let landed = monitor.landing(slice.id)
         let agent = monitor.agentForSlice(slice.id)
         return VStack(alignment: .leading, spacing: 1) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(landed != nil ? "✓" : agent != nil ? "◐" : "○")
-                Text("\(slice.id): \(slice.title)").lineLimit(2)
-                Spacer()
-                if let landed { Text(landed.id).font(.caption.monospaced()).foregroundStyle(.secondary) }
-            }.font(.caption)
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                Text(landed != nil ? "✓" : agent != nil ? "◐" : "○").font(.caption)
+                Text(slice.id).font(.caption.monospaced().bold())
+                Text(slice.title).font(.callout).lineLimit(2)
+                Spacer(minLength: 4)
+                if let landed { Text(landed.id).font(.caption2.monospaced()).foregroundStyle(.secondary) }
+            }
             if let agent {
                 Text("\(agent.kind == "codex" ? "⌘" : "✦") \(agent.model ?? agent.kind) · \(agent.idle ? "idle" : "running") · \(agent.step ?? "working")")
                     .font(.caption2).foregroundStyle(.secondary).lineLimit(2).padding(.leading, 20)
@@ -193,23 +240,101 @@ struct StatusPanel: View {
                 Button("Refresh") { Task { await monitor.refresh() } }
                 Button("Quit") { NSApp.terminate(nil) }
                 Spacer()
-                if let updated = monitor.lastRefresh {
-                    Text("updated \(updated.formatted(date: .omitted, time: .standard))")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
             }
-        }.font(.caption)
+        }.font(.caption).buttonStyle(.bordered).controlSize(.small)
     }
 
-    private func section<C: View>(_ title: String, @ViewBuilder content: () -> C) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(title).font(.headline)
+    private func section<C: View>(_ title: String, caption: String? = nil,
+                                  @ViewBuilder content: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(title).font(.headline)
+                Spacer()
+                if let caption { Text(caption).font(.caption).foregroundStyle(.secondary).monospacedDigit() }
+            }
             content()
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10)
+            .fill(Color(nsColor: .quaternaryLabelColor).opacity(0.5)))
     }
 
     private func dim(_ text: String) -> some View { Text(text).foregroundStyle(.secondary).font(.caption) }
+
+    private func panelGlyph() -> NSImage? {
+        let name = monitor.alert ? "MenuGlyphAlert" : "MenuGlyph"
+        guard let image = Bundle.main.image(forResource: name) else { return nil }
+        image.isTemplate = true
+        return image
+    }
+
+    private func activityTimeRange(_ group: ActivityGroup) -> String {
+        let formatter = DateIntervalFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter.string(from: group.earliestAt, to: group.latest.at)
+    }
+
+    @ViewBuilder private func budgetRow(_ entry: BudgetEntry) -> some View {
+        switch entry {
+        case .window(let window):
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("\(window.provider.capitalized) · \(window.window)").font(.headline)
+                    Spacer()
+                    Text("\(window.percentLeft)% left").font(.headline).monospacedDigit()
+                }
+                if let reset = window.reset {
+                    HStack {
+                        Spacer()
+                        Text("Resets in \(BudgetGuide.duration(reset) ?? reset)")
+                            .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                    }
+                }
+                CapsuleBar(fraction: Double(window.percentLeft) / 100,
+                           color: window.provider == "codex" ? .teal : .orange,
+                           height: 8,
+                           expected: BudgetGuide.evenPaceLeft(window: window.window, reset: window.reset))
+                if let pace = window.pace {
+                    let label = pace.kind == .deficit ? "in deficit" : "in reserve"
+                    Text("\(abs(pace.percent))% \(label)" +
+                         (pace.runsOut.map { " · runs out in \(BudgetGuide.duration($0) ?? $0)" } ?? ""))
+                        .font(.caption)
+                        .foregroundStyle(pace.kind == .deficit ? Color.red : Color.green)
+                }
+            }.padding(.vertical, 3)
+        case .credits(let provider, let count):
+            Text("\(provider.capitalized) · \(count) credit\(count == 1 ? "" : "s") held by owner")
+                .font(.caption).foregroundStyle(.secondary)
+        case .raw(let line):
+            Text(line).font(.caption.monospaced()).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     private func open(_ url: URL) { NSWorkspace.shared.open(url) }
+}
+
+private struct CapsuleBar: View {
+    let fraction: Double
+    let color: Color
+    let height: CGFloat
+    var expected: Double? = nil
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.primary.opacity(0.1))
+                Capsule().fill(color)
+                    .frame(width: proxy.size.width * min(1, max(0, fraction)))
+                if let expected {
+                    Rectangle().fill(Color.primary.opacity(0.8))
+                        .frame(width: 1, height: height)
+                        .offset(x: min(proxy.size.width - 1, proxy.size.width * expected))
+                }
+            }
+        }.frame(height: height)
+    }
 }
 
 struct AgentCard: View {
@@ -218,27 +343,38 @@ struct AgentCard: View {
     let role: String?
 
     var body: some View {
-        Button {
+        let details = [job.subagent ? "subagent" : nil, role,
+                       job.tokens.map { "\($0) tokens" }].compactMap { $0 }
+        return Button {
             if NSApp.currentEvent?.modifierFlags.contains(.option) == true, let transcript = job.transcript {
                 NSWorkspace.shared.open(transcript)
             } else if let tree = worktrees.first(where: { $0.branch == job.branch }) {
                 openTerminal(tree.path)
             }
         } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
                     Image(systemName: job.kind == "codex" ? "chevron.left.forwardslash.chevron.right" : "sparkle")
-                    Text(job.model ?? job.kind).bold()
-                    if job.subagent { Text("subagent") }
-                    if let role { Text(role) }
-                    Text(job.branch ?? "unmanaged").lineLimit(1).truncationMode(.middle)
+                    Text(job.model ?? job.kind).font(.callout.bold()).lineLimit(1)
+                    Text(job.branch ?? "unmanaged")
+                        .font(.caption2).lineLimit(1).truncationMode(.middle)
+                        .frame(maxWidth: 128)
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(Capsule().fill(.quaternary))
+                        .fixedSize()
                     Spacer()
-                    if let time = job.lastActive { Text(time, style: .relative).monospacedDigit() }
+                    if let time = job.lastActive {
+                        Text(time, style: .relative).font(.caption)
+                            .monospacedDigit().foregroundStyle(.secondary)
+                    }
                 }
                 Text("\(job.idle ? "idle" : "running") · \(job.step ?? "no transcript step")")
-                    .lineLimit(2).foregroundStyle(.secondary)
-                if let tokens = job.tokens { Text("\(tokens) tokens").foregroundStyle(.secondary) }
-            }.font(.caption).frame(maxWidth: .infinity, alignment: .leading)
+                    .font(.caption).lineLimit(2).foregroundStyle(.secondary)
+                if !details.isEmpty {
+                    Text(details.joined(separator: " · "))
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading)
         }.buttonStyle(.plain).help("Click: Terminal · Option-click: transcript")
     }
 }
@@ -298,4 +434,9 @@ struct NotificationToggle: View {
             enabled = (defaults.object(forKey: "notify." + kind) as? Bool) ?? (kind != "agent started")
         }.onChange(of: enabled) { defaults.set($0, forKey: "notify." + kind) }
     }
+}
+
+private struct PanelHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }

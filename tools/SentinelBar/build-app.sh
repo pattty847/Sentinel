@@ -31,10 +31,19 @@ PLIST
 codesign --force --sign - "$app"
 echo "built $PWD/$app"
 if [ "${1:-}" = --install ]; then
-    pkill -x SentinelBar 2>/dev/null || true
+    # Wait for the old instance to exit (up to 10 s): reopening too soon fails with LaunchServices -600.
+    if pkill -x SentinelBar 2>/dev/null; then
+        for _ in $(seq 50); do pgrep -x SentinelBar >/dev/null || break; sleep 0.2; done
+        pgrep -x SentinelBar >/dev/null && { echo "error: old SentinelBar did not exit" >&2; exit 1; }
+    fi
     rm -rf "$HOME/Applications/SentinelBar.app"
     mkdir -p "$HOME/Applications"
     cp -R "$app" "$HOME/Applications/"
-    open "$HOME/Applications/SentinelBar.app"
+    # A freshly copied bundle can fail with LaunchServices -600 until it is registered: retry.
+    for try in 1 2 3 4 5; do
+        err=$(open "$HOME/Applications/SentinelBar.app" 2>&1) && break
+        [ "$try" = 5 ] && { echo "error: open failed 5 times: $err" >&2; exit 1; }
+        sleep 1
+    done
     echo "installed ~/Applications/SentinelBar.app"
 fi

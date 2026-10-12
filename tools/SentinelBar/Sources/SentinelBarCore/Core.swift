@@ -15,17 +15,111 @@ public enum SubagentDisposition: Equatable {
     case active
     case finished
     case failed
+    case stale
 
-    public var shouldNotify: Bool { self != .active }
+    public var shouldNotify: Bool { self == .finished || self == .failed }
 }
 
 public enum SubagentLifecycle {
-    /// Activity age affects the idle label, not whether an agent is alive.
     public static func decide(parentAlive: Bool, state: TranscriptState,
                               secondsSinceActivity: TimeInterval) -> SubagentDisposition {
         if state.failed { return .failed }
-        if state.completed || !parentAlive { return .finished }
+        if state.completed { return .finished }
+        if secondsSinceActivity > 30 * 60 { return .stale }
+        if !parentAlive { return .finished }
         return .active
+    }
+}
+
+public struct AgentProcess {
+    public let pid: Int32
+    public let kind: String
+    public let cwd: String
+    public let args: [String]
+    public let hasWorktree: Bool
+
+    public init(pid: Int32, kind: String, cwd: String, args: [String], hasWorktree: Bool) {
+        self.pid = pid; self.kind = kind; self.cwd = cwd; self.args = args; self.hasWorktree = hasWorktree
+    }
+}
+
+public struct AgentTranscript {
+    public let path: String
+    public let cwd: String
+    public let kind: String
+    public let modified: Date
+
+    public init(path: String, cwd: String, kind: String, modified: Date) {
+        self.path = path; self.cwd = cwd; self.kind = kind; self.modified = modified
+    }
+}
+
+public struct AgentMatch {
+    public let pid: Int32
+    public let transcript: AgentTranscript?
+}
+
+public enum AgentRunState: Equatable {
+    case running
+    case idle
+    case subagentIdle
+}
+
+public enum AgentCounter {
+    public static func runningCount(_ states: [AgentRunState]) -> Int {
+        states.filter { $0 == .running }.count
+    }
+}
+
+public enum AgentMatcher {
+    public static func cwd(for process: AgentProcess) -> String {
+        guard process.kind == "codex", let path = argument(process.args, names: ["-C", "--cd"]) else {
+            return process.cwd
+        }
+        let full = path.hasPrefix("/") ? path : process.cwd + "/" + path
+        return URL(fileURLWithPath: full).standardizedFileURL.path
+    }
+
+    public static func modelArgument(_ args: [String]) -> String? {
+        guard let model = argument(args, names: ["-m", "--model"]), model != "default" else { return nil }
+        return model
+    }
+
+    public static func select(processes: [AgentProcess], transcripts: [AgentTranscript], now: Date) -> [AgentMatch] {
+        var used: Set<String> = []
+        var selected: [Int32: AgentTranscript] = [:]
+        let ordered = transcripts.sorted { $0.modified == $1.modified ? $0.path < $1.path : $0.modified > $1.modified }
+        // A pinned Claude session takes precedence over cwd-based assignment.
+        for process in processes where process.kind == "claude" {
+            guard let id = argument(process.args, names: ["--resume", "-r", "--session-id"]),
+                  let transcript = ordered.first(where: { $0.kind == "claude" && $0.cwd == cwd(for: process) &&
+                      URL(fileURLWithPath: $0.path).lastPathComponent == id + ".jsonl" && !used.contains($0.path) }) else { continue }
+            selected[process.pid] = transcript
+            used.insert(transcript.path)
+        }
+        for process in processes where selected[process.pid] == nil {
+            if process.kind == "claude" &&
+                argument(process.args, names: ["--resume", "-r", "--session-id"]) != nil { continue }
+            guard let transcript = ordered.first(where: { $0.kind == process.kind && $0.cwd == cwd(for: process) &&
+                !used.contains($0.path) && (process.kind != "claude" ||
+                    $0.modified >= now.addingTimeInterval(-24 * 3600)) }) else { continue }
+            selected[process.pid] = transcript
+            used.insert(transcript.path)
+        }
+        return processes.compactMap { process in
+            let transcript = selected[process.pid]
+            return transcript != nil || process.hasWorktree ? AgentMatch(pid: process.pid, transcript: transcript) : nil
+        }
+    }
+
+    private static func argument(_ args: [String], names: [String]) -> String? {
+        for (index, arg) in args.enumerated() {
+            if names.contains(arg), index + 1 < args.count { return args[index + 1] }
+            for name in names where name.hasPrefix("--") && arg.hasPrefix(name + "=") {
+                return String(arg.dropFirst(name.count + 1))
+            }
+        }
+        return nil
     }
 }
 
@@ -139,6 +233,17 @@ public struct Plan: Equatable {
 }
 
 public enum PlanParser {
+    public static func select(_ candidates: [(path: String, document: String)], pinned: Bool = false)
+        -> (path: String, plan: Plan)? {
+        for candidate in candidates {
+            let plan = parse(candidate.document)
+            if pinned || plan.phases.contains(where: { !$0.slices.isEmpty }) {
+                return (candidate.path, plan)
+            }
+        }
+        return nil
+    }
+
     public static func parse(_ document: String) -> Plan {
         let lines = document.components(separatedBy: .newlines)
         let title = lines.first { $0.hasPrefix("# ") }.map { String($0.dropFirst(2)) } ?? "Plan"
@@ -183,6 +288,103 @@ public enum PlanParser {
     }
 }
 
+public struct BudgetWindow: Equatable {
+    public let provider: String
+    public let window: String
+    public let percentLeft: Int
+    public let reset: String?
+    public let pace: BudgetPace?
+}
+
+public struct BudgetPace: Equatable {
+    public enum Kind: Equatable { case deficit, reserve }
+    public let kind: Kind
+    public let percent: Int
+    public let runsOut: String?
+}
+
+public enum BudgetEntry: Equatable {
+    case window(BudgetWindow)
+    case credits(provider: String, count: Int)
+    case raw(String)
+}
+
+public enum BudgetParser {
+    private static let windowPattern = try! NSRegularExpression(
+        pattern: #"^\s*(claude|codex)\s+(.+?)\s+(-?\d+)% left(?:\s+resets in (\S+))?(?:\s+\|\s+([+-]\d+)% (DEFICIT|reserve)(?:, runs out in (\S+))?)?\s*$"#)
+    private static let creditsPattern = try! NSRegularExpression(
+        pattern: #"^\s*(claude|codex)\s+resets\s+(\d+) credit\(s\) held by the owner\s*$"#)
+
+    public static func parse(_ lines: [String]) -> [BudgetEntry] {
+        lines.map(parseLine)
+    }
+
+    private static func parseLine(_ line: String) -> BudgetEntry {
+        let range = NSRange(line.startIndex..<line.endIndex, in: line)
+        if let match = creditsPattern.firstMatch(in: line, range: range),
+           let provider = field(1, in: line, match: match),
+           let count = field(2, in: line, match: match).flatMap(Int.init) {
+            return .credits(provider: provider, count: count)
+        }
+        guard let match = windowPattern.firstMatch(in: line, range: range),
+              let provider = field(1, in: line, match: match),
+              let window = field(2, in: line, match: match),
+              let percentLeft = field(3, in: line, match: match).flatMap(Int.init) else { return .raw(line) }
+        let pace: BudgetPace?
+        if let percent = field(5, in: line, match: match).flatMap(Int.init),
+           let label = field(6, in: line, match: match) {
+            pace = BudgetPace(kind: label == "DEFICIT" ? .deficit : .reserve,
+                              percent: percent, runsOut: field(7, in: line, match: match))
+        } else {
+            pace = nil
+        }
+        return .window(BudgetWindow(provider: provider, window: window, percentLeft: percentLeft,
+                                    reset: field(4, in: line, match: match), pace: pace))
+    }
+
+    private static func field(_ index: Int, in line: String, match: NSTextCheckingResult) -> String? {
+        guard let range = Range(match.range(at: index), in: line) else { return nil }
+        return String(line[range])
+    }
+}
+
+public enum BudgetGuide {
+    public static func evenPaceLeft(window: String, reset: String?) -> Double? {
+        guard let reset, let hours = hoursUntilReset(reset) else { return nil }
+        let length: Double
+        switch window.lowercased() {
+        case "weekly": length = 7 * 24
+        case "session": length = 5
+        default: return nil
+        }
+        return min(1, max(0, hours / length))
+    }
+
+    public static func duration(_ raw: String) -> String? {
+        guard let hours = hoursUntilReset(raw) else { return nil }
+        if hours >= 24 {
+            let roundedHours = Int(hours.rounded())
+            let days = roundedHours / 24
+            let remainingHours = roundedHours % 24
+            return remainingHours == 0 ? "\(days)d" : "\(days)d \(remainingHours)h"
+        }
+        let minutes = Int((hours * 60).rounded())
+        let wholeHours = minutes / 60
+        let remainingMinutes = minutes % 60
+        if wholeHours == 0 { return "\(remainingMinutes)m" }
+        return remainingMinutes == 0 ? "\(wholeHours)h" : "\(wholeHours)h \(remainingMinutes)m"
+    }
+
+    private static func hoursUntilReset(_ raw: String) -> Double? {
+        guard let unit = raw.last, let value = Double(raw.dropLast()), value.isFinite, value >= 0 else { return nil }
+        switch unit {
+        case "d": return value * 24
+        case "h": return value
+        default: return nil
+        }
+    }
+}
+
 public struct Ticket: Equatable, Identifiable {
     public let id: String
     public let label: String
@@ -214,6 +416,33 @@ public struct Milestone: Equatable, Identifiable {
     public var id: String { "\(at.timeIntervalSince1970):\(kind):\(text)" }
     public init(at: Date, kind: String, text: String, tone: String, slice: String?, branch: String?) {
         self.at = at; self.kind = kind; self.text = text; self.tone = tone; self.slice = slice; self.branch = branch
+    }
+}
+
+public struct ActivityGroup: Identifiable {
+    public let latest: Milestone
+    public var earliestAt: Date
+    public var count: Int
+    public var id: String { latest.id }
+    public var text: String { count == 1 ? latest.text : "\(latest.text) ×\(count)" }
+}
+
+public enum ActivityFolder {
+    /// Input order is preserved; only adjacent events with the same identity are grouped.
+    public static func fold(_ events: [Milestone]) -> [ActivityGroup] {
+        var groups: [ActivityGroup] = []
+        for event in events {
+            if let index = groups.indices.last,
+               groups[index].latest.kind == event.kind,
+               groups[index].latest.text == event.text,
+               groups[index].latest.branch == event.branch {
+                groups[index].earliestAt = event.at
+                groups[index].count += 1
+            } else {
+                groups.append(ActivityGroup(latest: event, earliestAt: event.at, count: 1))
+            }
+        }
+        return groups
     }
 }
 
