@@ -349,3 +349,9 @@ target_include_directories(test_ViewCommands PRIVATE ${CMAKE_SOURCE_DIR}/libs/gu
 target_link_libraries(test_ViewCommands PRIVATE GTest::gtest_main sentinel_chart_core Qt6::Core)
 add_test(NAME ViewCommandsTests COMMAND test_ViewCommands)
 set_tests_properties(ViewCommandsTests PROPERTIES LABELS "render;fast")
+
+add_executable(test_FrameProducer test_frame_producer.cpp)
+target_include_directories(test_FrameProducer PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_FrameProducer PRIVATE GTest::gtest_main sentinel_chart_core Qt6::Core)
+add_test(NAME FrameProducerTests COMMAND test_FrameProducer)
+set_tests_properties(FrameProducerTests PROPERTIES LABELS "render;fast")

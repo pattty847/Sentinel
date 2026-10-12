@@ -29,6 +29,8 @@
 // ── Extracted services ───────────────────────────────────────────────────────
 #include "render/AxisTextService.hpp"
 #include "render/FrameProfiler.hpp"
+#include "chart/core/FrameProducer.hpp"
+#include "chart/core/FrameAck.hpp"
 #include "render/FrameContext.hpp"
 #include "render/TimeAuthority.hpp"
 #include "chart/core/PublishedFrame.hpp"
@@ -132,13 +134,6 @@ private:
     bool m_volumeProfileLayerEnabled = false;
 
     chart::PublishedFrame m_published;
-    // Render thread: what rasterChanged() last announced.
-    struct RasterSurface {
-        chart_raster::RasterStep step;
-        double dpr = 0, tick = 0;
-        int widthDev = 0, heightDev = 0;
-        bool operator==(const RasterSurface&) const = default;
-    } m_rasterAnnounced;
     QMetaObject::Connection m_screenChangedConn;
     std::function<qint64()> m_zoomClock;
     qint64 zoomNowMs() const;
@@ -151,14 +146,7 @@ private:
     QMetaObject::Connection m_beforeSyncConn;
     // Render thread: this sync's frame (context, tick, raster camera), prepared in
     // beforeSynchronizing and drawn by updatePaintNode in the same sync.
-    struct SyncFrame {
-        FrameContext frame;
-        bool drawHeatmap = false;
-        // Smooth zoom: coverage gamma (0 at rest) and a glide's bin extent.
-        float coverageGamma = 0.0f;
-        std::optional<chart::BinView> binView;
-        bool ready = false;
-    } m_sync;
+    chart::FrameProducer m_frameProducer;
 
     ChartTextAtlas m_chartTextAtlas;
     bool m_chartTextAtlasBuilt = false;
@@ -183,24 +171,15 @@ private:
     int m_tpoTimeframeMs = 1800000;           // 30m brackets (config tpo.period_minutes)
     int m_tpoSessionType = 4;                 // SessionManager::SessionType::H24
 
-    std::atomic<uint64_t> m_controlRevision{0};
-    std::atomic<uint64_t> m_controlSelectionEpoch{0};
-    std::atomic<uint64_t> m_controlViewportVersion{0};
-    std::atomic<uint64_t> m_renderedRevision{0};
-    std::atomic<uint64_t> m_renderedFrameId{0};
-    uint64_t m_nextFrameId = 0; // render thread only
-    uint64_t m_pendingFrameRevision = 0; // render thread only
-    uint64_t m_pendingFrameId = 0; // render thread only
+    chart::FrameAck m_frameAck;
 
 public:
     void setAgentControlRevision(uint64_t revision, uint64_t selectionEpoch, uint64_t viewportVersion) {
-        m_controlSelectionEpoch.store(selectionEpoch, std::memory_order_release);
-        m_controlViewportVersion.store(viewportVersion, std::memory_order_release);
-        m_controlRevision.store(revision, std::memory_order_release);
+        m_frameAck.setAgentControlRevision(revision, selectionEpoch, viewportVersion);
         update();
     }
-    uint64_t renderedControlRevision() const { return m_renderedRevision.load(std::memory_order_acquire); }
-    uint64_t renderedFrameId() const { return m_renderedFrameId.load(std::memory_order_acquire); }
+    uint64_t renderedControlRevision() const { return m_frameAck.renderedControlRevision(); }
+    uint64_t renderedFrameId() const { return m_frameAck.renderedFrameId(); }
     explicit UnifiedGridRenderer(QQuickItem* parent = nullptr);
     ~UnifiedGridRenderer();
     
@@ -422,7 +401,6 @@ private:
     void updateGpuLabels(const FrameContext& frame, bool prepared);
     // The frame's raster camera and its TimeAxisMapping (whole-pixel mapping, once
     // per frame, at the layer's tick for this frame).
-    void computeGpuFrameMapping(FrameContext& frame);
     void prepareSyncFrame();
     void renderTradeOverlays(QSGNode* parent, const FrameContext& frame, bool drawFootprint, bool drawTpo,
                              std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads);
@@ -432,7 +410,6 @@ private:
     void syncGpuSurface();
     void syncGpuTone();
     void bindWindow(QQuickWindow* window);
-    void publishFrameContext(const FrameContext& frame);
     void setPriceAxisSource(QObject* source);
     void setTimeAxisSource(QObject* source);
 

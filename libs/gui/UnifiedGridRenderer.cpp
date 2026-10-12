@@ -153,8 +153,7 @@ void UnifiedGridRenderer::bindWindow(QQuickWindow* w) {
   auto tileStats = m_gpuLayer ? m_gpuLayer->tileStatsPtr() : nullptr;
   connect(w, &QQuickWindow::afterRendering, this, [this, tileStats]() {
     // Direct render-thread callback: fixed-size frame snapshot only.
-    m_renderedFrameId.store(m_pendingFrameId, std::memory_order_release);
-    m_renderedRevision.store(m_pendingFrameRevision, std::memory_order_release);
+    m_frameAck.rendered();
     // GPU heatmap work left after this frame (budgeted uploads, a crossfade,
     // live paging): ask for the next frame; an idle node stops asking.
     if (tileStats && tileStats->wantsFrame.exchange(false))

@@ -4,6 +4,7 @@
 // selected QRhi backend (lab::OffscreenQuick) and skip with the reason when it
 // cannot create one: a skipped case is no result.
 #include "UnifiedGridRenderer.h"
+#include "chart/shell/HeatmapChartPort.hpp"
 #include "datasources/CandleSeriesBuffer.hpp"
 #include "lab/LabData.hpp"
 #include "lab/OffscreenQuick.hpp"
@@ -3185,6 +3186,17 @@ void identicalReturnToLive(UnifiedGridRenderer& chart, const std::function<void(
     chart.followLiveForTest(L + 10 * minute);
     EXPECT_EQ(view->getVisibleTimeEnd(), end + 5 * minute) << "next bucket uses nominal 300s padding";
     chart.setHeatmapService(nullptr);
+}
+
+TEST(HeatmapChartPortCpu, DetachedTickAuthorityIsSafe) {
+    UnifiedGridRenderer chart;
+    chart::HeatmapChartPort port{chart, *chart.gpuHeatmapLayer()};
+    ASSERT_TRUE(port.attached());
+    port.detach();
+    ASSERT_FALSE(port.attached());
+    port.chooseTickForView({1000, 2000, 100, 140});
+    port.noteRaster(8, 20, 8.0);
+    EXPECT_DOUBLE_EQ(port.tickPrice(), 0.0);
 }
 
 TEST(UgrPlacementCpu, AnIdenticalReturnToLiveInvalidatesKeptPadding) {

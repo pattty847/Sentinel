@@ -42,6 +42,14 @@ public:
     virtual std::optional<heatmap::gpu::ViewWindow> restView() const = 0;
 };
 
+class ITickAuthority {
+public:
+    virtual ~ITickAuthority() = default;
+    virtual void chooseTickForView(const heatmap::gpu::ViewWindow& view) = 0;
+    virtual double tickPrice() const = 0;
+    virtual void noteRaster(int rowPx, int colPx, double rowPxContinuous) = 0;
+};
+
 class ITickOracle {
 public:
     virtual ~ITickOracle() = default;

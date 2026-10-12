@@ -173,6 +173,10 @@ add_library(sentinel_chart_core STATIC
     render/FrameContext.hpp
     render/FrameContextBuilder.hpp
     render/FrameContextBuilder.cpp
+    chart/core/ChartFrame.hpp
+    chart/core/FrameProducer.hpp
+    chart/core/FrameProducer.cpp
+    chart/core/FrameAck.hpp
     chart/core/ChartCamera.hpp
     chart/core/ChartCamera.cpp
     chart/core/ChartSession.hpp

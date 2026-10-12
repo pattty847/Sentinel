@@ -1,6 +1,7 @@
 #pragma once
 
 #include "chart/core/ChartCamera.hpp"
+#include "chart/core/ChartFrame.hpp"
 #include "chart/core/ViewCommands.hpp"
 #include "chart/core/LivePlacement.hpp"
 #include "chart/core/PriceFitter.hpp"
@@ -15,6 +16,8 @@
 #include <QString>
 #include <cstdint>
 #include <memory>
+
+class QElapsedTimer;
 
 namespace chart {
 
@@ -51,6 +54,9 @@ public:
 
     ZoomGlide& zoomGlide() { return zoomGlide_; }
     void advanceFrame(qint64 now) { zoomGlide_.advanceZoomGlide(now); }
+
+    FrameInputs frameInputs(const QRectF& bounds, double dpr, const QElapsedTimer& clock,
+                            const TimeAuthority& time, FrameContext::OverlayActivationSet overlays) const;
 
     void applyGpuLimits();
     void syncGpuView();
