@@ -82,12 +82,9 @@ Rectangle {
         candleBuffer: dataSource ? dataSource.candleBuffer : null
         z: 1
         
-        Connections {
-          target: unifiedGridRenderer.view
-          function onTimeframeChanged() {
+        view.onTimeframeChanged: {
             root.currentActiveTimeframe = unifiedGridRenderer.view.timeframeMs
             console.log(" Timeframe changed to:", root.currentActiveTimeframe, "ms")
-          }
         }
         
         Component.onCompleted: {

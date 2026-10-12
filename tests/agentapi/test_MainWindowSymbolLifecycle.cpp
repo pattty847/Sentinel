@@ -3,6 +3,7 @@
 #include "config/AgentHostMode.hpp"
 #include "datasources/IGridDataSource.hpp"
 #include "datasources/RemoteGridDataSource.hpp"
+#include "datasources/CandleBackfillState.hpp"
 #include "models/MarketHealth.hpp"
 #include "widgets/StatusBar.hpp"
 #include "widgets/HeatmapTelemetryDock.hpp"
@@ -36,6 +37,7 @@
 #include <QTreeView>
 #include <QStandardItemModel>
 #include <QSettings>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QStatusBar>
 #include <QTemporaryDir>
@@ -87,6 +89,75 @@ QStandardItem* watchItem(WatchlistDock* rail, const QString& symbol) {
     for (int i = 0; i < rows->rowCount(); ++i)
         if (rows->item(i)->data(WatchlistDock::TickerRole).toString() == symbol) return rows->item(i);
     return nullptr;
+}
+
+TEST(ChartAgentPin, StartupTimeframeNotificationOrder) {
+    MainWindowGPU window;
+    auto* renderer = MainWindowSymbolLifecyclePeer::renderer(window);
+    ASSERT_TRUE(renderer);
+    auto* root = renderer->parentItem();
+    auto* overlay = root->findChild<CandlestickOverlayItem*>();
+    ASSERT_TRUE(overlay);
+    int rootTimeframeAtCandleChange = 0;
+    QObject::connect(overlay, &CandlestickOverlayItem::timeframeSecChanged, &window, [&] {
+        rootTimeframeAtCandleChange = root->property("currentActiveTimeframe").toInt();
+    });
+    renderer->view()->setTimeframe(60000);
+    EXPECT_EQ(rootTimeframeAtCandleChange, 60000);
+    EXPECT_EQ(overlay->timeframeSec(), 60);
+}
+
+TEST(ChartAgentPin, ControlledStartupHistoryAndViewport) {
+    const auto labelPx = qgetenv("SENTINEL_AXIS_LABEL_PX");
+    const auto restoreLabelPx = qScopeGuard([&] {
+        if (labelPx.isNull()) qunsetenv("SENTINEL_AXIS_LABEL_PX");
+        else qputenv("SENTINEL_AXIS_LABEL_PX", labelPx);
+    });
+    qputenv("SENTINEL_AXIS_LABEL_PX", "13");
+    MainWindowGPU window;
+    auto* renderer = MainWindowSymbolLifecyclePeer::renderer(window);
+    ASSERT_TRUE(renderer);
+    auto* root = renderer->parentItem();
+    auto* controller = renderer->findChild<chart::ChartViewController*>();
+    ASSERT_TRUE(controller);
+    // No window, network delivery or render timing enters this fixture.
+    constexpr qint64 now = 1791782235000;
+    controller->livePlacement().setTimingForTest([] { return now; }, {});
+    renderer->view()->setTimeframe(60000);
+    root->setSize({504, 931});
+    auto* state = renderer->getViewState();
+    const auto initialVersion = state->getViewportVersion();
+    QSignalSpy commits(state, &GridViewState::viewportChanged);
+    CandleBackfillState history;
+    std::vector<std::pair<qint64, int>> requests;
+    qint64 oldest = 0, clock = now;
+    const auto updateHistory = [&] {
+        history.setViewport("BTC-USD", 60, state->getVisibleTimeStart(), state->getVisibleTimeEnd());
+    };
+    QObject::connect(renderer->view(), &chart::ChartViewQml::viewportChanged, &window, updateHistory);
+    const auto page = [&] {
+        clock += 100;
+        const auto request = history.next(oldest, false, clock);
+        if (!request) return;
+        requests.emplace_back(request->endSec, request->limit);
+        oldest = request->startSec * 1000;
+        EXPECT_TRUE(history.accept("BTC-USD", 60, request->startSec, request->endSec, oldest, clock));
+        auto* buffer = qobject_cast<CandleSeriesBuffer*>(renderer->candleBuffer());
+        ASSERT_TRUE(buffer);
+        buffer->applyHistory("BTC-USD", 60, {
+            {oldest, oldest + 60000, 84000, 84100, 83900, 84000, 1, true},
+            {request->endSec * 1000 - 60000, request->endSec * 1000, 84000, 84100, 83900, 84000, 1, true}});
+    };
+    renderer->setLiveBookTop(84088.2, 84088.4);
+    page();
+    root->setSize({1150, 931});
+    page();
+    page();
+    renderer->view()->setViewport(1791769440000, 1791777600000, 83000, 84600);
+    page();
+    EXPECT_EQ(commits.count(), 5);
+    EXPECT_EQ(state->getViewportVersion() - initialVersion, 8U);
+    EXPECT_EQ(requests, (std::vector<std::pair<qint64, int>>{{1791782280, 102}, {1791776160, 162}, {1791766440, 86}}));
 }
 
 TEST(ChartAgentPin, FixedSceneViewportBytes) {

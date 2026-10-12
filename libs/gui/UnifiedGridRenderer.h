@@ -75,14 +75,13 @@ class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider, 
     Q_PROPERTY(int timeAxisHeightPx READ timeAxisHeightPx NOTIFY axisLayoutChanged)
     Q_PROPERTY(QObject* candleBuffer READ candleBuffer WRITE setCandleBuffer NOTIFY candleBufferChanged)
 
-    Q_PROPERTY(QObject* view READ viewObject CONSTANT)
+    Q_PROPERTY(chart::ChartViewQml* view READ view CONSTANT)
     Q_PROPERTY(QObject* candles READ candlesObject CONSTANT)
     Q_PROPERTY(QObject* tpo READ tpoObject CONSTANT)
     Q_PROPERTY(QObject* layers READ layersObject CONSTANT)
     Q_PROPERTY(QObject* debug READ debugObject CONSTANT)
 
 public:
-    QObject* viewObject() { return view(); }
     chart::ChartViewQml* view() { return &m_qml.view; }
     const chart::ChartViewQml* view() const { return &m_qml.view; }
     QObject* candlesObject() { return candles(); }
