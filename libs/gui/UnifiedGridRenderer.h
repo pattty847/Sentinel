@@ -37,6 +37,8 @@
 #include "chart/core/ChartViewController.hpp"
 // ── Overlay renderers (owned inline) ─────────────────────────────────────────
 #include "chart/layers/ChartLayers.hpp"
+#include "chart/shell/LayerVisibility.hpp"
+#include "chart/shell/ChartLookSettings.hpp"
 #include "chart/feeds/TradeOverlayFeeds.hpp"
 #include "render/FootprintOverlayRenderer.hpp"
 #include "chart/feeds/TradeBubbleFeed.hpp"
@@ -112,11 +114,6 @@ private:
     bool m_showGpuStatsOverlay = false;
     bool m_showDataPipelineOverlay = false;
     bool m_showViewportMathOverlay = false;
-    int m_candleStyle = 0;
-    QColor m_candleUpColor{"#2EBD85"}, m_candleDownColor{"#F6465D"};
-    QString m_candleWickColor = "auto"; // each wick follows its body
-    double m_candleBodyOpacity = 1;
-    int m_candleWickWidth = 1;
 
     FrameProfiler m_frameProfiler;  // SENTINEL_FRAME_PROFILE=1, render thread only
     // Per-chart GPU heatmap state, read in updatePaintNode while the GUI is blocked.
@@ -124,14 +121,6 @@ private:
     // overlay's boundary sequence reads it through currentFrameContext()).
     QElapsedTimer m_frameClock;
     TimeAuthority m_timeAuthority;
-    double m_heatmapGamma = 1.05;
-    double m_heatmapContrast = 1.15;
-    double m_heatmapShaderFloor = 0.01;
-    int m_primaryField = 0;
-    bool m_heatmapLayerEnabled = true;
-    bool m_footprintLayerEnabled = false;
-    bool m_tpoLayerEnabled = false;
-    bool m_volumeProfileLayerEnabled = false;
 
     chart::PublishedFrame m_published;
     QMetaObject::Connection m_screenChangedConn;
@@ -150,8 +139,8 @@ private:
 
     chart::TradeBubbleFeed m_bubbles;
     chart::ChartLayers m_layers;
-    int m_tpoTimeframeMs = 1800000;           // 30m brackets (config tpo.period_minutes)
-    int m_tpoSessionType = 4;                 // SessionManager::SessionType::H24
+    chart::LayerVisibility m_visibility;
+    chart::ChartLookSettings m_look{m_layers};
 
     chart::FrameAck m_frameAck;
 
@@ -166,24 +155,24 @@ public:
     ~UnifiedGridRenderer();
     
     bool autoScrollEnabled() const { return getViewState() ? getViewState()->isAutoScrollEnabled() : false; }
-    int candleStyle() const { return m_candleStyle; }
+    int candleStyle() const { return m_look.candleStyle(); }
     void setCandleStyle(int style);
-    QColor candleUpColor() const { return m_candleUpColor; }
-    QColor candleDownColor() const { return m_candleDownColor; }
-    QString candleWickColor() const { return m_candleWickColor; }
-    double candleBodyOpacity() const { return m_candleBodyOpacity; }
-    int candleWickWidth() const { return m_candleWickWidth; }
+    QColor candleUpColor() const { return m_look.candleUpColor(); }
+    QColor candleDownColor() const { return m_look.candleDownColor(); }
+    QString candleWickColor() const { return m_look.candleWickColor(); }
+    double candleBodyOpacity() const { return m_look.candleBodyOpacity(); }
+    int candleWickWidth() const { return m_look.candleWickWidth(); }
     void setCandleAppearance(const heatmap::HeatmapChartSettings& settings);
-    double heatmapGamma() const { return m_heatmapGamma; }
-    double heatmapContrast() const { return m_heatmapContrast; }
-    double heatmapShaderFloor() const { return m_heatmapShaderFloor; }
-    int primaryField() const { return m_primaryField; }
-    bool heatmapLayerEnabled() const { return m_heatmapLayerEnabled; }
-    bool footprintLayerEnabled() const { return m_footprintLayerEnabled; }
-    bool tpoLayerEnabled() const { return m_tpoLayerEnabled; }
-    bool volumeProfileLayerEnabled() const { return m_volumeProfileLayerEnabled; }
-    int tpoTimeframeMs() const { return m_tpoTimeframeMs; }
-    int tpoSessionType() const { return m_tpoSessionType; }
+    double heatmapGamma() const { return m_look.gamma(); }
+    double heatmapContrast() const { return m_look.contrast(); }
+    double heatmapShaderFloor() const { return m_look.shaderFloor(); }
+    int primaryField() const { return m_visibility.primaryField(); }
+    bool heatmapLayerEnabled() const { return m_visibility.heatmapEnabled(); }
+    bool footprintLayerEnabled() const { return m_visibility.footprintEnabled(); }
+    bool tpoLayerEnabled() const { return m_visibility.tpoEnabled(); }
+    bool volumeProfileLayerEnabled() const { return m_visibility.volumeProfileEnabled(); }
+    int tpoTimeframeMs() const { return m_look.tpoTimeframeMs(); }
+    int tpoSessionType() const { return m_look.tpoSessionType(); }
     Q_INVOKABLE void setVolumeProfileLayerEnabled(bool enabled);
     Q_INVOKABLE void setTpoTimeframeMs(int timeframeMs);
     Q_INVOKABLE void setTpoSessionType(int sessionType);
@@ -192,7 +181,7 @@ public:
     Q_INVOKABLE void setTpoTheme(const QString& theme);
     QString tpoLayout() const;
     QString tpoTheme() const;
-    int tpoSessions() const { return m_layers.tpo.renderer.style().maxSessions; }
+    int tpoSessions() const { return m_look.tpoSessions(); }
     
     GridViewState* getViewState() const { return m_view ? m_view->viewPtr() : nullptr; }
     QObject* viewState() const { return getViewState(); }
@@ -383,7 +372,6 @@ private:
     chart::CandleBufferSource m_candleSource;
     QMetaObject::Connection m_candleDirtyConn;
     void syncGpuSurface();
-    void syncGpuTone();
     void bindWindow(QQuickWindow* window);
     void setPriceAxisSource(QObject* source);
     void setTimeAxisSource(QObject* source);

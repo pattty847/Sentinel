@@ -19,7 +19,7 @@ void UnifiedGridRenderer::prepareSyncFrame() {
     if (profile) m_frameProfiler.beginFrame();
     const auto inputs = m_view->frameInputs(
         boundingRect(), window() ? window()->effectiveDevicePixelRatio() : 1.0,
-        m_frameClock, m_timeAuthority, {m_heatmapLayerEnabled, m_footprintLayerEnabled, m_tpoLayerEnabled, m_volumeProfileLayerEnabled});
+        m_frameClock, m_timeAuthority, {m_visibility.heatmapEnabled(), m_visibility.footprintEnabled(), m_visibility.tpoEnabled(), m_visibility.volumeProfileEnabled()});
     if (profile) m_frameProfiler.mark(FrameProfiler::Context);
     const auto& frame = m_frameProducer.produce(inputs, *m_heatmapPort, m_published);
     if (frame.rasterChanged) {

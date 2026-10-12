@@ -42,6 +42,43 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem *parent)
   setAcceptedMouseButtons(Qt::LeftButton | Qt::RightButton);
   setFlag(ItemAcceptsInputMethod, true);
 
+  m_visibility.report = [this](std::string_view field, bool enabled, bool unchanged) {
+    if (field == "primaryField") {
+      sLog_Render("layers: primaryField=" << m_visibility.primaryField()
+                  << " -> heatmap=" << m_visibility.heatmapEnabled()
+                  << " footprint=" << m_visibility.footprintEnabled()
+                  << " tpo=" << m_visibility.tpoEnabled()
+                  << " volumeProfile=" << m_visibility.volumeProfileEnabled());
+    } else if (unchanged) {
+      sLog_Render("layers: set " << field.data() << "=" << enabled << " unchanged");
+    } else {
+      sLog_Render("layers: set " << field.data() << "=" << enabled
+                  << " -> heatmap=" << m_visibility.heatmapEnabled()
+                  << " footprint=" << m_visibility.footprintEnabled()
+                  << " tpo=" << m_visibility.tpoEnabled()
+                  << " volumeProfile=" << m_visibility.volumeProfileEnabled());
+    }
+  };
+  m_visibility.requestUpdate = [this] { update(); };
+  m_visibility.primaryFieldChanged = [this] { emit primaryFieldChanged(); };
+  m_visibility.visibilityChanged = [this] { emit layerVisibilityChanged(); };
+  m_look.requestUpdate = [this] { update(); };
+  m_look.onViewportChanged = [this] { onViewportChanged(); };
+  m_look.applyTone = [this](float gamma, float contrast, float floor) {
+    if (m_layers.heatmap.gpu) m_layers.heatmap.gpu->setTone({gamma, contrast, floor});
+  };
+  m_look.notify = [this](chart::ChartLookSettings::Notice notice) {
+    switch (notice) {
+      case chart::ChartLookSettings::Notice::TpoConfig: emit tpoConfigChanged(); break;
+      case chart::ChartLookSettings::Notice::TpoStyle: emit tpoStyleChanged(); break;
+      case chart::ChartLookSettings::Notice::Gamma: emit heatmapGammaChanged(); break;
+      case chart::ChartLookSettings::Notice::Contrast: emit heatmapContrastChanged(); break;
+      case chart::ChartLookSettings::Notice::ShaderFloor: emit heatmapShaderFloorChanged(); break;
+      case chart::ChartLookSettings::Notice::CandleStyle: emit candleStyleChanged(); break;
+      case chart::ChartLookSettings::Notice::CandleAppearance: emit candleAppearanceChanged(); break;
+    }
+  };
+
   m_layers.heatmap.queueUpdate = [this] {
       QMetaObject::invokeMethod(this, [this] { update(); }, Qt::QueuedConnection);
   };
@@ -300,267 +337,8 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
 
 // The configured TPO style, session and bracket (startup, and the settings
 // dialog's TPO reset).
-void UnifiedGridRenderer::applyTpoConfig(const ClientTpoConfig& config) {
-  TpoOverlayRenderer::Style style = m_layers.tpo.renderer.style();
-  style.layout = tpo::parseLayout(config.layout, tpo::Layout::Collapsed);
-  style.theme = tpo::parseTheme(config.theme, tpo::Theme::Rainbow);
-  style.rowPx = config.rowPx;
-  style.maxSessions = config.sessions;
-  m_layers.tpo.renderer.setStyle(style);
-  const int sessionType = tpo::parseSessionType(config.session, 4);
-  const int period = static_cast<int>(tpo::resolvePeriodMs(
-      sessionType, static_cast<int64_t>(std::max(1, config.periodMinutes)) * 60000));
-  if (sessionType != m_tpoSessionType || period != m_tpoTimeframeMs) {
-    m_tpoSessionType = sessionType;
-    m_tpoTimeframeMs = period;
-    emit tpoConfigChanged();
-  }
-  sLog_Render("TPO config: layout=" << tpo::layoutName(style.layout)
-              << " theme=" << tpo::themeName(style.theme)
-              << " session=" << tpo::sessionTypeName(sessionType)
-              << " periodMs=" << period << " sessions=" << m_layers.tpo.renderer.style().maxSessions
-              << " rowPx=" << m_layers.tpo.renderer.style().rowPx);
-  update();
-}
-
-void UnifiedGridRenderer::setTpoTimeframeMs(int timeframeMs) {
-  const int resolved = static_cast<int>(tpo::resolvePeriodMs(m_tpoSessionType, timeframeMs));
-  if (m_tpoTimeframeMs == resolved) {
-    return;
-  }
-  m_tpoTimeframeMs = resolved;
-  emit tpoConfigChanged();
-}
-
-void UnifiedGridRenderer::setTpoSessionType(int sessionType) {
-  const int clamped = (sessionType >= 0 &&
-                       sessionType <= static_cast<int>(SessionManager::SessionType::M1)) ? sessionType : 4;
-  const int period = static_cast<int>(tpo::resolvePeriodMs(clamped, m_tpoTimeframeMs));
-  if (m_tpoSessionType == clamped && m_tpoTimeframeMs == period) {
-    return;
-  }
-  m_tpoSessionType = clamped;
-  m_tpoTimeframeMs = period;
-  emit tpoConfigChanged();
-}
-
-void UnifiedGridRenderer::setTpoLayout(const QString& layout) {
-  auto style = m_layers.tpo.renderer.style();
-  const auto next = tpo::parseLayout(layout.toStdString(), style.layout);
-  if (next == style.layout) return;
-  style.layout = next;
-  m_layers.tpo.renderer.setStyle(style);
-  sLog_Render("TPO layout=" << tpo::layoutName(next));
-  update();
-  emit tpoStyleChanged();
-}
-
-void UnifiedGridRenderer::setTpoTheme(const QString& theme) {
-  auto style = m_layers.tpo.renderer.style();
-  const auto next = tpo::parseTheme(theme.toStdString(), style.theme);
-  if (next == style.theme) return;
-  style.theme = next;
-  m_layers.tpo.renderer.setStyle(style);
-  sLog_Render("TPO theme=" << tpo::themeName(next));
-  update();
-  emit tpoStyleChanged();
-}
-
-QString UnifiedGridRenderer::tpoLayout() const {
-  return QString::fromLatin1(tpo::layoutName(m_layers.tpo.renderer.style().layout));
-}
-
-QString UnifiedGridRenderer::tpoTheme() const {
-  return QString::fromLatin1(tpo::themeName(m_layers.tpo.renderer.style().theme));
-}
-
-void UnifiedGridRenderer::setVolumeProfileLayerEnabled(bool enabled) {
-  const bool newHeatmapEnabled = enabled ? false : m_heatmapLayerEnabled;
-  const bool newFootprintEnabled = enabled ? false : m_footprintLayerEnabled;
-  const bool newTpoEnabled = enabled ? false : m_tpoLayerEnabled;
-  if (m_volumeProfileLayerEnabled == enabled &&
-      m_heatmapLayerEnabled == newHeatmapEnabled &&
-      m_footprintLayerEnabled == newFootprintEnabled &&
-      m_tpoLayerEnabled == newTpoEnabled) {
-    return;
-  }
-  m_volumeProfileLayerEnabled = enabled;
-  if (enabled) {
-    m_heatmapLayerEnabled = false;
-    m_footprintLayerEnabled = false;
-    m_tpoLayerEnabled = false;
-  }
-  sLog_Render("layers: set volumeProfile=" << enabled
-              << " -> heatmap=" << m_heatmapLayerEnabled
-              << " footprint=" << m_footprintLayerEnabled
-              << " tpo=" << m_tpoLayerEnabled
-              << " volumeProfile=" << m_volumeProfileLayerEnabled);
-  update();
-  emit layerVisibilityChanged();
-}
-
 void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
   m_view->setTimeframe(timeframe_ms);
-}
-
-void UnifiedGridRenderer::setHeatmapGamma(double gamma) {
-  const double clamped = std::clamp(gamma, 0.1, 5.0);
-  if (std::abs(m_heatmapGamma - clamped) < 1e-6) {
-    return;
-  }
-  m_heatmapGamma = clamped;
-  syncGpuTone();
-  update();
-  emit heatmapGammaChanged();
-}
-
-void UnifiedGridRenderer::setHeatmapContrast(double contrast) {
-  const double clamped = std::clamp(contrast, 0.1, 5.0);
-  if (std::abs(m_heatmapContrast - clamped) < 1e-6) {
-    return;
-  }
-  m_heatmapContrast = clamped;
-  syncGpuTone();
-  update();
-  emit heatmapContrastChanged();
-}
-
-void UnifiedGridRenderer::setHeatmapShaderFloor(double floor) {
-  const double clamped = std::clamp(floor, 0.0, 0.5);
-  if (std::abs(m_heatmapShaderFloor - clamped) < 1e-6) {
-    return;
-  }
-  m_heatmapShaderFloor = clamped;
-  syncGpuTone();
-  update();
-  emit heatmapShaderFloorChanged();
-}
-
-void UnifiedGridRenderer::setCandleStyle(int style) {
-    style = std::clamp(style, 0, 2);
-    if (m_candleStyle == style) return;
-    m_candleStyle = style;
-    emit candleStyleChanged();
-}
-
-void UnifiedGridRenderer::setCandleAppearance(const heatmap::HeatmapChartSettings& settings) {
-    const QColor up(QString::fromStdString(settings.candleUpColor));
-    const QColor down(QString::fromStdString(settings.candleDownColor));
-    const QString wick = QString::fromStdString(settings.candleWickColor);
-    if (m_candleUpColor == up && m_candleDownColor == down && m_candleWickColor == wick &&
-        m_candleBodyOpacity == settings.candleBodyOpacity && m_candleWickWidth == settings.candleWickWidth) return;
-    m_candleUpColor = up;
-    m_candleDownColor = down;
-    m_candleWickColor = wick;
-    m_candleBodyOpacity = settings.candleBodyOpacity;
-    m_candleWickWidth = settings.candleWickWidth;
-    emit candleAppearanceChanged();
-}
-
-void UnifiedGridRenderer::setPrimaryField(int field) {
-  if (m_primaryField == field) {
-    return;
-  }
-  m_primaryField = field;
-  if (field == 0) {
-    m_heatmapLayerEnabled = true;
-    m_tpoLayerEnabled = false;
-    m_volumeProfileLayerEnabled = false;
-  } else if (field == 1) {
-    m_footprintLayerEnabled = true;
-    m_tpoLayerEnabled = false;
-    m_volumeProfileLayerEnabled = false;
-  } else if (field == 2) {
-    m_tpoLayerEnabled = true;
-    m_heatmapLayerEnabled = false;
-    m_footprintLayerEnabled = false;
-    m_volumeProfileLayerEnabled = false;
-  } else if (field == 3) {
-    m_volumeProfileLayerEnabled = true;
-    m_tpoLayerEnabled = false;
-    m_heatmapLayerEnabled = false;
-    m_footprintLayerEnabled = false;
-  }
-  sLog_Render("layers: primaryField=" << m_primaryField
-              << " -> heatmap=" << m_heatmapLayerEnabled
-              << " footprint=" << m_footprintLayerEnabled
-              << " tpo=" << m_tpoLayerEnabled
-              << " volumeProfile=" << m_volumeProfileLayerEnabled);
-  update();
-  emit primaryFieldChanged();
-  emit layerVisibilityChanged();
-}
-
-void UnifiedGridRenderer::setHeatmapLayerEnabled(bool enabled) {
-  const bool newTpoEnabled = enabled ? false : m_tpoLayerEnabled;
-  const bool newVpEnabled = enabled ? false : m_volumeProfileLayerEnabled;
-  if (m_heatmapLayerEnabled == enabled && m_tpoLayerEnabled == newTpoEnabled &&
-      m_volumeProfileLayerEnabled == newVpEnabled) {
-    sLog_Render("layers: set heatmap=" << enabled << " unchanged");
-    return;
-  }
-  m_heatmapLayerEnabled = enabled;
-  if (enabled) {
-    m_tpoLayerEnabled = false;
-    m_volumeProfileLayerEnabled = false;
-  }
-  sLog_Render("layers: set heatmap=" << enabled
-              << " -> heatmap=" << m_heatmapLayerEnabled
-              << " footprint=" << m_footprintLayerEnabled
-              << " tpo=" << m_tpoLayerEnabled
-              << " volumeProfile=" << m_volumeProfileLayerEnabled);
-  update();
-  emit layerVisibilityChanged();
-}
-
-void UnifiedGridRenderer::setFootprintLayerEnabled(bool enabled) {
-  const bool newTpoEnabled = enabled ? false : m_tpoLayerEnabled;
-  const bool newVpEnabled = enabled ? false : m_volumeProfileLayerEnabled;
-  if (m_footprintLayerEnabled == enabled &&
-      m_tpoLayerEnabled == newTpoEnabled &&
-      m_volumeProfileLayerEnabled == newVpEnabled) {
-    sLog_Render("layers: set footprint=" << enabled << " unchanged");
-    return;
-  }
-  m_footprintLayerEnabled = enabled;
-  if (enabled) {
-    m_tpoLayerEnabled = false;
-    m_volumeProfileLayerEnabled = false;
-  }
-  sLog_Render("layers: set footprint=" << enabled
-              << " -> heatmap=" << m_heatmapLayerEnabled
-              << " footprint=" << m_footprintLayerEnabled
-              << " tpo=" << m_tpoLayerEnabled
-              << " volumeProfile=" << m_volumeProfileLayerEnabled);
-  update();
-  emit layerVisibilityChanged();
-}
-
-void UnifiedGridRenderer::setTpoLayerEnabled(bool enabled) {
-  const bool newHeatmapEnabled = enabled ? false : m_heatmapLayerEnabled;
-  const bool newFootprintEnabled = enabled ? false : m_footprintLayerEnabled;
-  const bool newVolumeProfileEnabled =
-      enabled ? false : m_volumeProfileLayerEnabled;
-  if (m_tpoLayerEnabled == enabled &&
-      m_heatmapLayerEnabled == newHeatmapEnabled &&
-      m_footprintLayerEnabled == newFootprintEnabled &&
-      m_volumeProfileLayerEnabled == newVolumeProfileEnabled) {
-    sLog_Render("layers: set tpo=" << enabled << " unchanged");
-    return;
-  }
-  m_tpoLayerEnabled = enabled;
-  if (enabled) {
-    m_heatmapLayerEnabled = false;
-    m_footprintLayerEnabled = false;
-    m_volumeProfileLayerEnabled = false;
-  }
-  sLog_Render("layers: set tpo=" << enabled
-              << " -> heatmap=" << m_heatmapLayerEnabled
-              << " footprint=" << m_footprintLayerEnabled
-              << " tpo=" << m_tpoLayerEnabled
-              << " volumeProfile=" << m_volumeProfileLayerEnabled);
-  update();
-  emit layerVisibilityChanged();
 }
 
 void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
@@ -590,14 +368,6 @@ void UnifiedGridRenderer::setHeatmapChartSettings(const heatmap::HeatmapChartSet
 
 void UnifiedGridRenderer::setHeatmapTickMemory(const heatmap::ManualTickMemory& memory) {
   if (m_layers.heatmap.gpu) m_layers.heatmap.gpu->setTickMemory(memory);
-}
-
-// The GPU palette's tone mapping: gamma, contrast and shader floor.
-void UnifiedGridRenderer::syncGpuTone() {
-  if (m_layers.heatmap.gpu) {
-    m_layers.heatmap.gpu->setTone({static_cast<float>(m_heatmapGamma), static_cast<float>(m_heatmapContrast),
-                         static_cast<float>(m_heatmapShaderFloor)});
-  }
 }
 
 void UnifiedGridRenderer::syncGpuSurface() {
@@ -639,30 +409,6 @@ QString UnifiedGridRenderer::applyViewportRequest(const ViewportRequest& request
 
 bool UnifiedGridRenderer::resetView() { return m_view->commands().resetView(); }
 
-
-void UnifiedGridRenderer::applyClientConfig(const ClientConfig &config) {
-  setHeatmapGamma(config.heatmap.gamma);
-  setHeatmapContrast(config.heatmap.contrast);
-  setHeatmapShaderFloor(config.heatmap.shaderFloor);
-  syncGpuTone();
-  m_view->initialViewSettings().columnPx = std::clamp(config.heatmap.initialColumnPx, 2, 64);
-  m_view->initialViewSettings().pricePct = std::clamp(config.heatmap.initialPricePct, 0, 100);
-  if (m_layers.text.axes) {
-    m_layers.text.axes->setAxisLabelPxOverride(config.gui.axisLabelPx);
-    m_layers.text.axes->refreshAxisLayout();
-  }
-  applyTpoConfig(config.tpo);
-  onViewportChanged();
-  update();
-}
-
-void UnifiedGridRenderer::applyServerConfig(const ServerConfig &config) {
-  int64_t forcedTf = config.chart.defaultTimeframeMs;
-  if (forcedTf <= 0 && !config.chart.timeframesMs.empty()) {
-    forcedTf = config.chart.timeframesMs.front();
-  }
-  if (forcedTf > 0) setTimeframe(static_cast<int>(forcedTf));
-}
 
 QString UnifiedGridRenderer::getMsdfAtlasMemory() const { return m_layers.text.getMsdfAtlasMemory(); }
 
@@ -809,3 +555,24 @@ void UnifiedGridRenderer::panLeft() { m_view->commands().panLeft(); }
 void UnifiedGridRenderer::panRight() { m_view->commands().panRight(); }
 void UnifiedGridRenderer::panUp() { m_view->commands().panUp(); }
 void UnifiedGridRenderer::panDown() { m_view->commands().panDown(); }
+
+
+void UnifiedGridRenderer::applyTpoConfig(const ClientTpoConfig& config) { m_look.applyTpoConfig(config); }
+void UnifiedGridRenderer::setTpoTimeframeMs(int ms) { m_look.setTpoTimeframeMs(ms); }
+void UnifiedGridRenderer::setTpoSessionType(int type) { m_look.setTpoSessionType(type); }
+void UnifiedGridRenderer::setTpoLayout(const QString& layout) { m_look.setTpoLayout(layout); }
+void UnifiedGridRenderer::setTpoTheme(const QString& theme) { m_look.setTpoTheme(theme); }
+QString UnifiedGridRenderer::tpoLayout() const { return m_look.tpoLayout(); }
+QString UnifiedGridRenderer::tpoTheme() const { return m_look.tpoTheme(); }
+void UnifiedGridRenderer::setVolumeProfileLayerEnabled(bool enabled) { m_visibility.setVolumeProfileEnabled(enabled); }
+void UnifiedGridRenderer::setHeatmapGamma(double gamma) { m_look.setHeatmapGamma(gamma); }
+void UnifiedGridRenderer::setHeatmapContrast(double contrast) { m_look.setHeatmapContrast(contrast); }
+void UnifiedGridRenderer::setHeatmapShaderFloor(double floor) { m_look.setHeatmapShaderFloor(floor); }
+void UnifiedGridRenderer::setCandleStyle(int style) { m_look.setCandleStyle(style); }
+void UnifiedGridRenderer::setCandleAppearance(const heatmap::HeatmapChartSettings& settings) { m_look.setCandleAppearance(settings); }
+void UnifiedGridRenderer::setPrimaryField(int field) { m_visibility.setPrimaryField(field); }
+void UnifiedGridRenderer::setHeatmapLayerEnabled(bool enabled) { m_visibility.setHeatmapEnabled(enabled); }
+void UnifiedGridRenderer::setFootprintLayerEnabled(bool enabled) { m_visibility.setFootprintEnabled(enabled); }
+void UnifiedGridRenderer::setTpoLayerEnabled(bool enabled) { m_visibility.setTpoEnabled(enabled); }
+void UnifiedGridRenderer::applyClientConfig(const ClientConfig& config) { m_look.applyClientConfig(config, *m_view, m_layers.text.axes.get()); }
+void UnifiedGridRenderer::applyServerConfig(const ServerConfig& config) { m_look.applyServerConfig(config, *m_view); }

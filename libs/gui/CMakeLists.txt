@@ -60,6 +60,9 @@ set(GRID_CORE_SOURCES
     chart/feeds/TradeOverlayFeeds.cpp
     chart/shell/HeatmapChartPort.hpp
     chart/shell/HeatmapChartPort.cpp
+    chart/shell/LayerVisibility.hpp
+    chart/shell/ChartLookSettings.hpp
+    chart/shell/ChartLookSettings.cpp
 
     # Axis models for QML integration
     models/DomModel.cpp

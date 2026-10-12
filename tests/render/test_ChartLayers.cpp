@@ -42,6 +42,7 @@ TEST(LayerRegistry, DispatchPreservesRegistrationOrder) {
 }
 TEST(ChartLayerSet, RegistersHeatmapFootprintVpTpoText) {
     chart::ChartLayers layers;
+    ASSERT_TRUE(layers.registry.precedes("heatmap", "text"));
     layers.heatmap.initialize();
     QSGNode root;
     layers.registry.onRootRebuilt(&root);

@@ -11,9 +11,7 @@ void UnifiedGridRenderer::init() {
     const auto defaultTimeframeMs = store.hasServerConfig() && store.serverConfig().chart.defaultTimeframeMs > 0
                                         ? store.serverConfig().chart.defaultTimeframeMs : 100;
     const auto& client = store.clientConfig();
-    m_heatmapGamma = client.heatmap.gamma;
-    m_heatmapContrast = client.heatmap.contrast;
-    m_heatmapShaderFloor = client.heatmap.shaderFloor;
+    m_look.setInitialTone(client);
     qRegisterMetaType<Trade>("Trade");
     m_frameClock.start();
     m_timeAuthority.setActiveTimeframeMs(defaultTimeframeMs);
@@ -23,8 +21,7 @@ void UnifiedGridRenderer::init() {
     bindLivePlacement();
     bindTimeframeSwitch();
     m_view->session().timeframeMs = defaultTimeframeMs;
-    m_layers.heatmap.gpu->setTone({static_cast<float>(m_heatmapGamma), static_cast<float>(m_heatmapContrast),
-                         static_cast<float>(m_heatmapShaderFloor)});
+    m_look.syncGpuTone();
     bindViewReactions(ReactionPhase::Heatmap);
     connect(m_layers.heatmap.gpu.get(), &heatmap::gpu::HeatmapGpuLayer::labelsChanged, this, [this] { update(); });
     connect(m_layers.heatmap.gpu.get(), &heatmap::gpu::HeatmapGpuLayer::buildFailed, this, [](const QString& message) {
