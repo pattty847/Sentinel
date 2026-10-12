@@ -3,7 +3,7 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-12 ~03:10 UTC. main `af18e7a` (+ this STATUS commit). Chart-core S0a-S13 landed; S14/S15 next in a fresh Mac session (owner, 2026-10-12 02:31Z).
+- **Updated:** 2026-10-12 ~03:55 UTC. main `96e4f2f` (+ this STATUS commit). Audits docs landed `39ab704`; slice E landed `96e4f2f` and deployed (pid 37884). Chart-core S0a-S13 landed; S14 `lt-sol/s14-input-router` @ `68039a2` waits for conductor review; S15 parked until the conductor says go.
 - **Conductor:** the cloud Claude Opus thread "Chart-core refactor". **Mac operator:** a Claude session on the owner's Mac executes for it (worktrees, Codex dispatch, builds through the queue, native Metal runs, lands, pushes, deploys) under the owner's standing authorization of 2026-10-11 05:23Z: land conductor-reviewed branches with `agent-worktree.sh land`, push main after a secret scan, deploy the server with `deploy-runtime.sh` plus a smoke check. Anything else (service restarts, Grafana, data, owner looks) needs the owner's typed OK in the thread (a card tap relayed by the conductor does not pass the operator's permission check; a typed message does).
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high-risk (S3, S10, S11, S12, S15). Fallback to Codex-on-Codex only once Claude weekly < 5%. ma-panel token trailers are not readable from the operator session and are left out rather than estimated.
 
@@ -38,42 +38,29 @@ UGR after S13: `UnifiedGridRenderer.cpp` 578 lines (S14 cap 450), `.h` 391 (cap 
 
 ## One-world: what's left
 
-Done through S8b (deployed 2026-10-11 09:52Z, server pid 45525). Left:
-1. **Slice E** `lt-astra/slice-e` @ `a68237c` (on `10ad08c`): Fable PASS after fix round + rebase onto the incremental shadow oracle. Changes the anchor sidecar section format to version 2 (derived cache under `/Volumes/T7/sentinel-data/hmc2`; v1 files are ignored before any journal read; rollback cheap both ways). **Waits for the owner's typed format OK and a deploy window with the owner present.** Its land will rebase over main (possible small conflict in `tests/roller/CMakeLists.txt` TIMEOUT line / `test_corrupt_blocks.cpp`).
-2. Final deploy, owner at the Mac: slice E, smoke, then the rest of `data/market` to the Trash (owner empties it).
-3. README/ARCHITECTURE pass.
+Done through slice E (landed `96e4f2f` 2026-10-12, owner typed format OK 03:16Z; server deployed by the owner 03:45Z, pid 37884). Left:
+1. The rest of `data/market` to the Trash (owner empties it). Needs the owner's own typed OK and the owner at the Mac.
+2. README/ARCHITECTURE pass.
 
 ## Services (owner's Mac, launchd)
 
 
-- **Recorder/server:** S8b build `110e970`, pid 45525, deployed 2026-10-11 09:52Z. Smoke: live_feed_up 1 for all 7, no `sentinel_mdc_*`, roller lag max 1.9 s, fanout_clients 7, candles/trades advancing, 0 W/E/F log lines, `data/heatmap` (251 MB) no longer written and left untouched. Live history-chunk serving was not exercised (no GUI connected); tell the conductor if scrollback looks off. **Do not roll back** with `deploy-runtime.sh rollback server`: the previous binary does not match main's `config/server_config.yaml` (moved keys) or the server_config schema 2; fix forward instead. A GUI built before `110e970` does not match this server.
+- **Recorder/server:** slice E build `96e4f2f`, pid 37884, deployed 2026-10-12 03:45Z (anchor sidecar format v2). Smoke: 0 E/F lines; 14 W lines in the first 4 s: 7 expected `Roller anchor fallback ... section schema/version` (v1 sidecars ignored) and 7 `Shadow journal invalidated ... reason=journal boundary` (pid 45525 logged these only at 00Z, here at restart; conductor to judge). v2 anchors written within 20 s, anchor_failures_total 0 for all 7, live_feed_up 1 for all 7, no `sentinel_mdc_*`, shadow lag 0.47-1.04 s, `up` 1 for all 5 jobs. Fanout not checked (no client connected). **Do not roll back** with `deploy-runtime.sh rollback server`: older binaries do not match main's `config/server_config.yaml`; fix forward instead.
 - **Capture** deployed 2026-10-03 22:13; 7 products; fan-out to the server. Rollback: `deploy-runtime.sh rollback capture`.
 - **Monitoring:** VictoriaMetrics :8428, Grafana :3000 (restarted 2026-10-11 07:06Z; A1b is "A1b live feed down" on `sentinel_live_feed_up`, 7 series Normal). GUI host :17190.
 - **Shadow self-check (incremental since bae9a85, owner: keep it):** each hourly check rolls only the new hour per product; a fresh midnight replay happens only for 00Z and after an oracle reset. Hours 2-24 resume from the oracle's own hourly anchor, so an anchor-resume defect would also show as a mismatch. The oracle lives at `hmc2/shadow-oracle/<product>/<dayMs>` (~150-250 MB, current day only; exclude it from backups). `Shadow oracle reset` in the server log means a reset happened.
 
-## In flight (T7 worktrees, Codex threads)
-
-- `lt-sol/s2-controller` (S2, medium; holds UGR/MainWindowGpu): Sol thread `01a12a70-f3a8-7482-908a-c1cbee6036b1`, base `e803f9d`. Reviewer: the conductor.
-- `lt-sol/fm261-fade-clock` (inject the fade clock in `test_heatmap_live_node.cpp`; also removes HeatmapLiveNodeTests from `_sentinel_run_serial`): Sol thread `01a12a47-2550-72f1-b4b3-7f239a8a9d28`, base `999bdae`.
-- Queued: FM-262 slice (deadline wait in `test_corrupt_blocks.cpp` -> condition or injected clock; removes RollerCorruptBlockTests from the list); slice E; test-hygiene leftovers that were blocked by S8b's files (ShadowTest benchmark opt-in, stream-client sleeps) and LabOutputGuard input size (tests/render).
-- Open FMs from this wave: FM-256 (TP/SL exit order left New), FM-259 (trade bubbles may not draw when the overlay attaches before trades; unverified in the app), FM-260 (overlay dangling mapping provider at teardown), FM-261, FM-262.
-
-## Waiting on the owner
-
-1. The audits docs branch `lt-claude/code-health-audits` (`3a8b827`, conductor-written, docs only) needs the owner's typed OK to land (the operator's permission check treats conductor-written + conductor-reviewed as self-approval).
-2. Slice E's final deploy sitting (see One-world).
-3. Parked: nightly copy of `/Volumes/T7/sentinel-data` to the MacBook Pro over Tailscale (needs Remote Login + SSH key).
-
 ## In flight
 
-- None. Writer threads (Codex, resumable with `codex exec resume <id> -m <model>` + sandbox flags): slice E Astra `01a12a74-cf8b-7750-9bab-23008bfe18af`; S13 Sol `01a12de7-ff21-7d73-aaf7-402d38294129`; S12 Astra `01a12db6-1509-7a71-8cec-e7f2f3b11cff`.
+- S14 `lt-sol/s14-input-router` @ `68039a2` (pushed): native Metal evidence 17/17 with SENTINEL_REQUIRE_GPU=1, ChartGolden PASS, chart-health FINAL PASS; waits for conductor review, then land. Sol thread `01a12e1c-0a73-75d0-b3e2-88d6958b299e`.
+- Writer threads (Codex, resumable with `codex exec resume <id> -m <model>` + sandbox flags): slice E Astra `01a12a74-cf8b-7750-9bab-23008bfe18af` (done); S13 Sol `01a12de7-ff21-7d73-aaf7-402d38294129`; S12 Astra `01a12db6-1509-7a71-8cec-e7f2f3b11cff`.
 - Open FMs: FM-256 (TP/SL exit order left New), FM-259 (bubbles may not draw if the overlay attaches before trades), FM-260 (overlay dangling provider at teardown), FM-267 (startup auto tick 100 -> 500 -> 100 bounce: candle flicker, and the settled tick/price rows vary run to run on main itself; do not chase price-row diffs in screenshots; fix after S15, owner-visible), FM-268 (binner self-test zero-readback flake).
-- Test-hygiene leftover: ShadowTest.HandoffLatencyBenchmark opt-in (test_shadow.cpp, after slice E lands).
+- Test-hygiene leftover: ShadowTest.HandoffLatencyBenchmark opt-in (test_shadow.cpp; slice E has landed, so it is unblocked).
 
 ## Waiting on the owner
 
-1. Slice E format OK + deploy sitting.
-2. The audits docs branch `lt-claude/code-health-audits` (`3a8b827`) needs a typed OK to land (conductor-written and -reviewed; the operator's permission check calls it self-approval).
+1. `data/market` to the Trash (typed OK, owner at the Mac).
+2. Parked: nightly copy of `/Volumes/T7/sentinel-data` to the MacBook Pro over Tailscale (needs Remote Login + SSH key).
 
 ## Owner constraints in force
 
