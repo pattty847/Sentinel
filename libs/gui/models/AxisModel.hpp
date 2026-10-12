@@ -5,9 +5,9 @@
 #include <QQuickItem>
 #include <vector>
 #include "../render/ChartRaster.hpp"
+#include "../chart/shell/IChartCameraSource.hpp"
 
 class GridViewState;
-class UnifiedGridRenderer;
 
 class AxisModel : public QAbstractListModel {
     Q_OBJECT
@@ -86,8 +86,8 @@ protected:
     GridViewState* m_viewState = nullptr;
     std::vector<TickInfo> m_ticks;
     std::vector<TickInfo> m_ticksScratch;  // swap buffer — avoids heap alloc in hot path
-    UnifiedGridRenderer* m_renderer = nullptr;
-    UnifiedGridRenderer* renderer() const { return m_renderer; }
+    chart::IChartCameraSource* m_renderer = nullptr;
+    chart::IChartCameraSource* renderer() const { return m_renderer; }
     // Whole-pixel mapping: the renderer's raster camera for this calculation (the
     // drawn window; positions are its device pixels / dpr). Invalid without a
     // renderer: the committed viewport maps continuously.

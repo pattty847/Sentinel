@@ -1,6 +1,5 @@
 #include "AxisModel.hpp"
 #include "../render/GridViewState.hpp"
-#include "../UnifiedGridRenderer.h"
 #include <QDebug>
 #include <cmath>
 #include <algorithm>
@@ -15,7 +14,7 @@ void AxisModel::setTarget(QQuickItem* target) {
     
     m_target = target;
     emit targetChanged();
-    m_renderer = qobject_cast<UnifiedGridRenderer*>(target);
+    m_renderer = dynamic_cast<chart::IChartCameraSource*>(target);
     if (!m_renderer) {
         setGridViewState(nullptr);
         return;
@@ -24,19 +23,17 @@ void AxisModel::setTarget(QQuickItem* target) {
     GridViewState* viewState = m_renderer->getViewState();
     if (viewState) {
         setGridViewState(viewState);
-        connect(m_renderer, &QQuickItem::widthChanged, this, [this]() {
-            setViewportSize(m_renderer->width(), m_renderer->height());
+        connect(target, &QQuickItem::widthChanged, this, [this]() {
+            setViewportSize(m_renderer->chartWidth(), m_renderer->chartHeight());
         });
-        connect(m_renderer, &QQuickItem::heightChanged, this, [this]() {
-            setViewportSize(m_renderer->width(), m_renderer->height());
+        connect(target, &QQuickItem::heightChanged, this, [this]() {
+            setViewportSize(m_renderer->chartWidth(), m_renderer->chartHeight());
         });
         // The drawn pixels per row/column, the drawn tick or the device pixel ratio
         // changed without a viewport change.
-        connect(m_renderer, &UnifiedGridRenderer::rasterChanged, this, &AxisModel::onViewportChanged,
-                Qt::UniqueConnection);
-        connect(m_renderer, &UnifiedGridRenderer::heatmapTickSizeChanged, this, &AxisModel::onViewportChanged,
-                Qt::UniqueConnection);
-        setViewportSize(m_renderer->width(), m_renderer->height());
+        connect(target, SIGNAL(rasterChanged()), this, SLOT(onViewportChanged()), Qt::UniqueConnection);
+        connect(target, SIGNAL(heatmapTickSizeChanged()), this, SLOT(onViewportChanged()), Qt::UniqueConnection);
+        setViewportSize(m_renderer->chartWidth(), m_renderer->chartHeight());
     }
 }
 

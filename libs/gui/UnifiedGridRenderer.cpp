@@ -10,6 +10,8 @@
 #include "render/heatmap/HeatmapGpuLayer.hpp"
 #include "render/heatmap/HeatmapSettingsStore.hpp"
 #include "chart/shell/HeatmapChartPort.hpp"
+#include "chart/shell/ChartDebugText.hpp"
+#include "chart/shell/ChartInputRouter.hpp"
 #include "servermodel/RecordingCodec.hpp"
 #include "../core/servermodel/SessionManager.hpp"
 #include <QDateTime>
@@ -150,33 +152,33 @@ void UnifiedGridRenderer::bindWindow(QQuickWindow* w) {
     m_layers.text.axes->bindAxisLayoutWindow(w);
   }
   syncGpuSurface(); // the device pixel ratio sets the 1 column/px clamp
-  if (m_screenChangedConn) disconnect(m_screenChangedConn);
-  if (m_renderConnections.beforeSync) disconnect(m_renderConnections.beforeSync);
-  if (m_renderConnections.afterRender) disconnect(m_renderConnections.afterRender);
+  if (m_connections.screenChanged) disconnect(m_connections.screenChanged);
+  if (m_connections.render.beforeSync) disconnect(m_connections.render.beforeSync);
+  if (m_connections.render.afterRender) disconnect(m_connections.render.afterRender);
   if (!w) return;
   // The frame's raster camera is computed and published before any item syncs
   // (render thread, GUI blocked; prepareSyncFrame).
-  m_renderConnections.beforeSync = connect(w, &QQuickWindow::beforeSynchronizing, this, [this] { prepareSyncFrame(); },
+  m_connections.render.beforeSync = connect(w, &QQuickWindow::beforeSynchronizing, this, [this] { prepareSyncFrame(); },
                              Qt::DirectConnection);
   // A move to a screen of another device pixel ratio: the clamps follow it, and the
   // controller's drawn window (the raster camera re-rounds in the next frame).
-  m_screenChangedConn = connect(w, &QQuickWindow::screenChanged, this, [this] {
+  m_connections.screenChanged = connect(w, &QQuickWindow::screenChanged, this, [this] {
     syncGpuSurface();
     m_view->syncGpuView();
     update();
   });
-  m_renderConnections.afterRender = connect(w, &QQuickWindow::afterRendering, this, [this]() {
-    m_frameAck.rendered();
+  m_connections.render.afterRender = connect(w, &QQuickWindow::afterRendering, this, [this]() {
+    m_frames.ack.rendered();
     m_layers.registry.afterRendering();
   }, Qt::DirectConnection);
 }
 
 UnifiedGridRenderer::~UnifiedGridRenderer() {
-  if (m_renderConnections.beforeSync) disconnect(m_renderConnections.beforeSync);
-  if (m_renderConnections.afterRender) disconnect(m_renderConnections.afterRender);
-  if (m_glidePolishTimer) {
-    m_glidePolishTimer->stop();
-    disconnect(m_glidePolishTimer, nullptr, this, nullptr);
+  if (m_connections.render.beforeSync) disconnect(m_connections.render.beforeSync);
+  if (m_connections.render.afterRender) disconnect(m_connections.render.afterRender);
+  if (m_clock.glidePolish) {
+    m_clock.glidePolish->stop();
+    disconnect(m_clock.glidePolish, nullptr, this, nullptr);
   }
   if (m_view) {
     m_view->zoom().stop();
@@ -195,7 +197,7 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
   // ~QQuickItem leaves the window (windowChanged) after this class's members are gone:
   // unbind the window now, while they exist.
   disconnect(this, &QQuickItem::windowChanged, this, nullptr);
-  if (m_screenChangedConn) disconnect(m_screenChangedConn);
+  if (m_connections.screenChanged) disconnect(m_connections.screenChanged);
   if (m_heatmapPort) m_heatmapPort->detach();
   m_layers.heatmap.gpu.reset(); // destroys its controller on the heatmap-data thread
   // Queued processor callbacks may still use getDataProcessor() until the join.
@@ -276,24 +278,15 @@ void UnifiedGridRenderer::componentComplete() {
 }
 
 void UnifiedGridRenderer::setShowGpuStatsOverlay(bool show) {
-  if (m_showGpuStatsOverlay != show) {
-    m_showGpuStatsOverlay = show;
-    emit showGpuStatsOverlayChanged();
-  }
+  if (m_debugFlags.gpuStats != show) { m_debugFlags.gpuStats = show; emit showGpuStatsOverlayChanged(); }
 }
 
 void UnifiedGridRenderer::setShowDataPipelineOverlay(bool show) {
-  if (m_showDataPipelineOverlay != show) {
-    m_showDataPipelineOverlay = show;
-    emit showDataPipelineOverlayChanged();
-  }
+  if (m_debugFlags.dataPipeline != show) { m_debugFlags.dataPipeline = show; emit showDataPipelineOverlayChanged(); }
 }
 
 void UnifiedGridRenderer::setShowViewportMathOverlay(bool show) {
-  if (m_showViewportMathOverlay != show) {
-    m_showViewportMathOverlay = show;
-    emit showViewportMathOverlayChanged();
-  }
+  if (m_debugFlags.viewportMath != show) { m_debugFlags.viewportMath = show; emit showViewportMathOverlayChanged(); }
 }
 
 void UnifiedGridRenderer::clearData() {
@@ -383,13 +376,13 @@ QObject* UnifiedGridRenderer::candleBuffer() const { return m_candleSource.buffe
 void UnifiedGridRenderer::setCandleBuffer(QObject* buffer) {
   auto* candles = qobject_cast<CandleSeriesBuffer*>(buffer);
   if (m_candleSource.buffer() == candles) return;
-  if (m_candleDirtyConn) disconnect(m_candleDirtyConn);
+  if (m_connections.candleDirty) disconnect(m_connections.candleDirty);
   m_candleSource.setBuffer(candles);
   m_view->priceFitter().setCandleSource(candles ? &m_candleSource : nullptr);
   if (candles) {
     // Auto price scale: a candle update or history page in view refits price (a few
     // compares when it is off or out of view; a bump only when the fit changed).
-    m_candleDirtyConn = connect(candles, &CandleSeriesBuffer::candlesDirty, this,
+    m_connections.candleDirty = connect(candles, &CandleSeriesBuffer::candlesDirty, this,
                                 [this](const QString& symbol, int64_t timeframeSec, qint64 dirtyStart,
                                        qint64 dirtyEnd) {
                                   m_view->priceFitter().candlesDirty(symbol, timeframeSec, dirtyStart, dirtyEnd);
@@ -398,151 +391,30 @@ void UnifiedGridRenderer::setCandleBuffer(QObject* buffer) {
   refitAutoPrice();
   emit candleBufferChanged();
 }
-
 void UnifiedGridRenderer::refitAutoPrice() { m_view->priceFitter().refitAutoPrice(); }
-
 void UnifiedGridRenderer::setAutoPriceScale(bool enabled) { m_view->commands().setAutoPriceScale(enabled); }
-
 bool UnifiedGridRenderer::fitView(bool time, bool price) { return m_view->commands().fitView(time, price); }
-
 QString UnifiedGridRenderer::applyViewportRequest(const ViewportRequest& request) { return m_view->commands().applyViewportRequest(request); }
-
 bool UnifiedGridRenderer::resetView() { return m_view->commands().resetView(); }
-
-
 QString UnifiedGridRenderer::getMsdfAtlasMemory() const { return m_layers.text.getMsdfAtlasMemory(); }
+void UnifiedGridRenderer::mousePressEvent(QMouseEvent* event) { chart::ChartInputRouter(*this, *m_view).mousePress(event); }
+void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent* event) { chart::ChartInputRouter(*this, *m_view).mouseMove(event); }
+void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) { chart::ChartInputRouter(*this, *m_view).mouseRelease(event); }
+void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) { chart::ChartInputRouter(*this, *m_view).wheel(event); }
+qint64 UnifiedGridRenderer::getVisibleTimeStart() const { return getViewState() ? getViewState()->getVisibleTimeStart() : 0; }
+qint64 UnifiedGridRenderer::getVisibleTimeEnd() const { return getViewState() ? getViewState()->getVisibleTimeEnd() : 0; }
+double UnifiedGridRenderer::getMinPrice() const { return getViewState() ? getViewState()->getMinPrice() : 0.0; }
+double UnifiedGridRenderer::getMaxPrice() const { return getViewState() ? getViewState()->getMaxPrice() : 0.0; }
+QPointF UnifiedGridRenderer::getPanVisualOffset() const { return getViewState() ? getViewState()->getPanVisualOffset() : QPointF(0, 0); }
+MappingFrameContext UnifiedGridRenderer::currentFrameContext() const { return m_frames.published.current(); }
+TimeAxisMapping UnifiedGridRenderer::currentTimeAxisMapping() const { return currentFrameContext().mapping; }
+QString UnifiedGridRenderer::getViewportMathDebug() const { return chart::formatViewportMath(currentTimeAxisMapping(), getViewState() && getViewState()->isDragging()); }
 
-void UnifiedGridRenderer::mousePressEvent(QMouseEvent *event) {
-  if (getViewState() && isVisible() && event->button() == Qt::LeftButton) {
-    if (getViewState()->isAutoScrollEnabled()) {
-      getViewState()->enableAutoScroll(false);
-      sLog_Render("auto-scroll enabled=false reason=mouse_pan");
-    }
-    getViewState()->handlePanStart(event->position());
-    event->accept();
-  } else
-    event->ignore();
-}
+QString UnifiedGridRenderer::getDataPipelineDebug() const { return chart::formatDataPipeline(m_layers.heatmap.gpu.get()); }
 
-void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent *event) {
-  if (getViewState()) {
-    getViewState()->handlePanMove(event->position());
-    event->accept();
-    update();
-  } else
-    event->ignore();
-}
+QString UnifiedGridRenderer::getPerformanceStats() const { return PerformanceMonitor::instance().frameStatsText(); }
 
-void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent *event) {
-  if (getViewState()) {
-    endPanAt();
-    event->accept();
-  }
-}
-
-void UnifiedGridRenderer::wheelEvent(QWheelEvent *event) {
-  if (!getViewState() || !isVisible() || !getViewState()->isTimeWindowValid()) {
-    event->ignore();
-    return;
-  }
-  // Shift+wheel scales price only; macOS delivers it as a
-  // horizontal delta, so whichever axis moved is used. A price zoom takes price over.
-  const bool shift = event->modifiers() & Qt::ShiftModifier;
-  const int angle = shift && event->angleDelta().y() == 0 ? event->angleDelta().x() : event->angleDelta().y();
-  if (shift) getViewState()->setAutoPriceScale(false);
-  const QPointF at = event->position();
-  m_view->zoom().wheelZoom(angle, event->pixelDelta().isNull(), event->phase(),
-            event->source() == Qt::MouseEventSynthesizedBySystem,
-            at.x(), at.y(), !shift, true, chart::ZoomController::WheelRoute::Chart);
-  update();
-  event->accept();
-}
-
-qint64 UnifiedGridRenderer::getVisibleTimeStart() const {
-  return getViewState() ? getViewState()->getVisibleTimeStart() : 0;
-}
-qint64 UnifiedGridRenderer::getVisibleTimeEnd() const {
-  return getViewState() ? getViewState()->getVisibleTimeEnd() : 0;
-}
-double UnifiedGridRenderer::getMinPrice() const {
-  return getViewState() ? getViewState()->getMinPrice() : 0.0;
-}
-double UnifiedGridRenderer::getMaxPrice() const {
-  return getViewState() ? getViewState()->getMaxPrice() : 0.0;
-}
-QPointF UnifiedGridRenderer::getPanVisualOffset() const {
-  return getViewState() ? getViewState()->getPanVisualOffset() : QPointF(0, 0);
-}
-
-MappingFrameContext UnifiedGridRenderer::currentFrameContext() const {
-  return m_published.current();
-}
-
-TimeAxisMapping UnifiedGridRenderer::currentTimeAxisMapping() const {
-  return currentFrameContext().mapping;
-}
-
-// The last frame's TimeAxisMapping (viewport columns at the drawn tick).
-QString UnifiedGridRenderer::getViewportMathDebug() const {
-  const TimeAxisMapping m = currentTimeAxisMapping();
-  if (!m.valid) return "Viewport Math\nmapping: N/A";
-  QStringList lines;
-  lines << "Viewport Math"
-        << QString("view.time: %1 → %2 (%3 ms)")
-               .arg(static_cast<qint64>(m.viewStartMs))
-               .arg(static_cast<qint64>(m.viewEndMs))
-               .arg(static_cast<qint64>(std::max(0.0, m.viewEndMs - m.viewStartMs)))
-        << QString("view.price: %1 → %2 (Δ%3)")
-               .arg(m.viewMinPrice, 0, 'f', 4)
-               .arg(m.viewMaxPrice, 0, 'f', 4)
-               .arg(std::max(0.0, m.viewMaxPrice - m.viewMinPrice), 0, 'f', 4)
-        << QString("tick: %1  grid: %2x%3  append: %4")
-               .arg(m.tickSize, 0, 'f', 6)
-               .arg(m.gridWidth)
-               .arg(m.gridHeight)
-               .arg(static_cast<qint64>(m.appendMs))
-        << QString("drawRect: x%1 y%2 w%3 h%4")
-               .arg(m.drawRect.x(), 0, 'f', 1)
-               .arg(m.drawRect.y(), 0, 'f', 1)
-               .arg(m.drawRect.width(), 0, 'f', 1)
-               .arg(m.drawRect.height(), 0, 'f', 1)
-        << QString("srcRect: x%1 y%2 w%3 h%4")
-               .arg(m.srcRect.x(), 0, 'f', 2)
-               .arg(m.srcRect.y(), 0, 'f', 2)
-               .arg(m.srcRect.width(), 0, 'f', 2)
-               .arg(m.srcRect.height(), 0, 'f', 2)
-        << QString("cell: %1 x %2 px").arg(m.cellW, 0, 'f', 2).arg(m.cellH, 0, 'f', 2)
-        << QString("dragging: %1").arg(getViewState() && getViewState()->isDragging() ? "yes" : "no");
-  return lines.join('\n');
-}
-
-// The GPU layer's live and draw state (heatmap/state in the Agent API has it all).
-QString UnifiedGridRenderer::getDataPipelineDebug() const {
-  QStringList lines;
-  lines << "Data Pipeline";
-  if (!m_layers.heatmap.gpu) {
-    lines << "layer: N/A";
-    return lines.join('\n');
-  }
-  const qint64 received = m_layers.heatmap.gpu->liveReceivedAtMs();
-  const qint64 now = QDateTime::currentMSecsSinceEpoch();
-  lines << QString("symbol: %1  tf: %2 ms  tick: %3")
-               .arg(QString::fromStdString(m_layers.heatmap.gpu->symbol()))
-               .arg(m_layers.heatmap.gpu->tfMs())
-               .arg(m_layers.heatmap.gpu->tickPrice(), 0, 'f', 6)
-        << QString("live open end: %1  age: %2 ms")
-               .arg(m_layers.heatmap.gpu->liveOpenEndMs())
-               .arg(received > 0 ? now - received : -1)
-        << QString("controller: %1").arg(m_layers.heatmap.gpu->controller() ? "yes" : "no");
-  return lines.join('\n');
-}
-QString UnifiedGridRenderer::getPerformanceStats() const {
-  return PerformanceMonitor::instance().frameStatsText();
-}
-
-void UnifiedGridRenderer::addTrade(const Trade &trade) {
-  onTradeReceived(trade);
-}
+void UnifiedGridRenderer::addTrade(const Trade &trade) { onTradeReceived(trade); }
 void UnifiedGridRenderer::setViewport(qint64 timeStart, qint64 timeEnd,
                                       double priceMin, double priceMax) { m_view->commands().setViewport(timeStart, timeEnd, priceMin, priceMax); }
 void UnifiedGridRenderer::zoomIn() { zoomClicks(1, width() / 2, height() / 2); }

@@ -13,15 +13,15 @@
 // algo, paper trading) maps through the camera the heatmap draws in this frame, in
 // whatever order Qt syncs the items. Qt notifications stay outside the producer.
 void UnifiedGridRenderer::prepareSyncFrame() {
-    m_frameProducer.frame().ready = false;
+    m_frames.producer.frame().ready = false;
     if (width() <= 0 || height() <= 0 || !m_layers.heatmap.gpu) return;
     const bool profile = FrameProfiler::enabled();
     if (profile) m_frameProfiler.beginFrame();
     const auto inputs = m_view->frameInputs(
         boundingRect(), window() ? window()->effectiveDevicePixelRatio() : 1.0,
-        m_frameClock, m_timeAuthority, {m_visibility.heatmapEnabled(), m_visibility.footprintEnabled(), m_visibility.tpoEnabled(), m_visibility.volumeProfileEnabled()});
+        m_clock.frame, m_timeAuthority, {m_visibility.heatmapEnabled(), m_visibility.footprintEnabled(), m_visibility.tpoEnabled(), m_visibility.volumeProfileEnabled()});
     if (profile) m_frameProfiler.mark(FrameProfiler::Context);
-    const auto& frame = m_frameProducer.produce(inputs, *m_heatmapPort, m_published);
+    const auto& frame = m_frames.producer.produce(inputs, *m_heatmapPort, m_frames.published);
     if (frame.rasterChanged) {
         const auto& cam = frame.rest;
         const auto& in = inputs.camera.raster;
@@ -45,12 +45,12 @@ QSGNode* UnifiedGridRenderer::updateGpuPaintNode(QSGNode* oldNode, FrameContext&
         root = new QSGNode();
         m_layers.registry.onRootRebuilt(root);
     }
-    const auto& sync = m_frameProducer.frame();
+    const auto& sync = m_frames.producer.frame();
     m_layers.registry.sync(sync);
     m_bubbles.publish(frame.mapping);
     m_layers.registry.updateNodes(sync, {window(), root, m_layers.text.renderer, m_layers.text.atlas,
                                          m_layers.text.atlasBuilt, profile ? &m_frameProfiler : nullptr});
-    m_frameAck.submitted(frame);
+    m_frames.ack.submitted(frame);
     if (profile) {
         const QString report = m_frameProfiler.endFrame();
         if (!report.isEmpty()) sLog_Render(report);
@@ -63,14 +63,14 @@ QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     Q_UNUSED(data)
     m_bubbles.disableFrame(); // Also covers invalid surfaces.
     if (width() <= 0 || height() <= 0 || !m_layers.heatmap.gpu) {
-        m_frameProducer.frame().ready = false;
+        m_frames.producer.frame().ready = false;
         return oldNode;
     }
     // This sync's frame from beforeSynchronizing; built here when the window did not
     // announce the sync (an item just added to a window).
-    if (!m_frameProducer.frame().ready) prepareSyncFrame();
-    m_frameProducer.frame().ready = false;
-    FrameContext& frame = m_frameProducer.frame().context;
-    m_frameAck.stamp(frame);
+    if (!m_frames.producer.frame().ready) prepareSyncFrame();
+    m_frames.producer.frame().ready = false;
+    FrameContext& frame = m_frames.producer.frame().context;
+    m_frames.ack.stamp(frame);
     return updateGpuPaintNode(oldNode, frame, FrameProfiler::enabled()); // the one root path
 }

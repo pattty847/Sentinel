@@ -3473,6 +3473,50 @@ protected:
     }
 };
 
+TEST_F(UgrWheelCpu, InputRouterPressDoesNotRequestPaint) {
+    resetWheelView();
+    auto* item = QQuickItemPrivate::get(&chart);
+    item->dirtyAttributes &= ~QQuickItemPrivate::Content;
+    QMouseEvent press(QEvent::MouseButtonPress, {320, 160}, {320, 160},
+                      Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(&chart, &press);
+    EXPECT_TRUE(press.isAccepted());
+    EXPECT_EQ(item->dirtyAttributes & QQuickItemPrivate::Content, 0u);
+}
+
+TEST_F(UgrWheelCpu, InputRouterMacNotchAndTrackpadRouteDifferently) {
+    resetWheelView();
+    const auto version = chart.getViewState()->getViewportVersion();
+    wheel(Chart, 120, 2, Qt::NoScrollPhase, Qt::MouseEventNotSynthesized);
+    EXPECT_EQ(chart.getViewState()->getViewportVersion(), version + 1);
+    EXPECT_FALSE(chart.zoomGesturing());
+    resetWheelView();
+    wheel(Chart, 30, 15, Qt::ScrollUpdate, Qt::MouseEventSynthesizedBySystem,
+          QInputDevice::DeviceType::TouchPad);
+    EXPECT_TRUE(chart.zoomGesturing());
+    EXPECT_TRUE(chart.gestureSettlePending());
+}
+
+TEST_F(UgrWheelCpu, InputRouterNativeZoomAndEndSettle) {
+    resetWheelView();
+    const auto version = chart.getViewState()->getViewportVersion();
+    QNativeGestureEvent pan(Qt::PanNativeGesture, QPointingDevice::primaryPointingDevice(), 2,
+                            {320, 160}, {320, 160}, {320, 160}, .2, {}, 0);
+    QCoreApplication::sendEvent(&chart, &pan);
+    EXPECT_FALSE(chart.zoomGesturing());
+    EXPECT_EQ(chart.getViewState()->getViewportVersion(), version);
+    QNativeGestureEvent zoom(Qt::ZoomNativeGesture, QPointingDevice::primaryPointingDevice(), 2,
+                             {320, 160}, {320, 160}, {320, 160}, .2, {}, 1);
+    QCoreApplication::sendEvent(&chart, &zoom);
+    EXPECT_TRUE(zoom.isAccepted());
+    EXPECT_TRUE(chart.zoomGesturing());
+    QNativeGestureEvent end(Qt::EndNativeGesture, QPointingDevice::primaryPointingDevice(), 2,
+                            {320, 160}, {320, 160}, {320, 160}, 0, {}, 2);
+    QCoreApplication::sendEvent(&chart, &end);
+    EXPECT_TRUE(end.isAccepted());
+    EXPECT_FALSE(chart.zoomGesturing());
+}
+
 TEST_F(UgrWheelCpu, MacMousePixelsStillMoveOneRungPerNotchOnEveryRoute) {
     for (const auto route : {Chart, TimeAxis, PriceAxis}) {
         SCOPED_TRACE(route);

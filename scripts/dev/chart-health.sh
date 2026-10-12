@@ -56,7 +56,7 @@ def self_test(script):
             return 1
         path = root / "libs/gui/UnifiedGridRenderer.cpp"
         code = path.read_text()
-        needle = "UnifiedGridRenderer::wheelEvent(QWheelEvent *event)"
+        needle = "UnifiedGridRenderer::wheelEvent(QWheelEvent* event)"
         start = code.find(needle)
         if start < 0:
             print("chart-health: self-test function missing", file=sys.stderr)
@@ -214,15 +214,14 @@ def check():
             new_lines = len(current.splitlines())
             if new_lines > old_lines:
                 fail("UGR-lines", name, old_lines, new_lines)
-            if os.getenv("CHART_HEALTH_FINAL") == "1":
-                cap = 350 if name.endswith(".h") else 450 if name.endswith(".cpp") else None
-                if cap is not None and new_lines > cap:
-                    fail("UGR-final-lines", name, cap, new_lines)
+            cap = 350 if name.endswith(".h") else 450 if name.endswith(".cpp") else None
+            if cap is not None and new_lines > cap:
+                fail("UGR-final-lines", name, cap, new_lines)
             if name == "libs/gui/UnifiedGridRenderer.h":
                 before = members(old or "")
                 after = members(current)
                 if after > before: fail("UGR-members", name, before, after)
-                if os.getenv("CHART_HEALTH_FINAL") == "1" and after > 15:
+                if after > 15:
                     fail("UGR-final-members", name, 15, after)
         if name.startswith("libs/gui/chart/"):
             lines = len(current.splitlines())
