@@ -28,10 +28,9 @@ FrameContext build(const QRectF& boundingRect,
                    const QElapsedTimer& frameClock,
                    const TimeAuthority& timeAuthority,
                    const GridViewState* viewState,
-                   bool heatmapEnabled,
-                   bool footprintEnabled,
-                   bool tpoEnabled) {
+                   FrameContext::OverlayActivationSet overlays) {
     FrameContext frame;
+    frame.itemBounds = boundingRect;
     frame.surfaceDpr = dpr;
     // The whole device pixels of the item (the raster camera's surface): every layer
     // that interpolates the view over surfaceBounds stays on the camera's slopes.
@@ -42,9 +41,7 @@ FrameContext build(const QRectF& boundingRect,
     const qint64 steadyNowMs = frameClock.isValid() ? frameClock.elapsed() : 0;
     frame.time = timeAuthority.snapshot(steadyNowMs);
     frame.presentationTimeMs = frame.time.nowPresentationMs;
-    frame.overlays.heatmap = heatmapEnabled;
-    frame.overlays.footprint = footprintEnabled;
-    frame.overlays.tpo = tpoEnabled;
+    frame.overlays = overlays;
     frame.viewport = viewportSnapshot(viewState);
     return frame;
 }

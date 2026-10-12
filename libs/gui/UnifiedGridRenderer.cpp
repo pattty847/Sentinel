@@ -22,36 +22,6 @@
 #include <QStringList>
 #include <QTimer>
 
-namespace {
-bool envFloatValue(const char *name, float &out) {
-  const QByteArray value = qgetenv(name);
-  if (value.isEmpty()) {
-    return false;
-  }
-  bool ok = false;
-  const float parsed = value.toFloat(&ok);
-  if (!ok) {
-    return false;
-  }
-  out = parsed;
-  return true;
-}
-
-bool envIntValue(const char *name, int &out) {
-  const QByteArray value = qgetenv(name);
-  if (value.isEmpty()) {
-    return false;
-  }
-  bool ok = false;
-  const int parsed = value.toInt(&ok);
-  if (!ok) {
-    return false;
-  }
-  out = parsed;
-  return true;
-}
-} // namespace
-
 chart::SurfaceFacts chart::HeatmapChartPort::surface() const {
   if (!layer_) return {};
   return {item_.width(), item_.height(), item_.window() ? item_.window()->effectiveDevicePixelRatio() : 1.0};
@@ -72,6 +42,14 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem *parent)
   setAcceptedMouseButtons(Qt::LeftButton | Qt::RightButton);
   setFlag(ItemAcceptsInputMethod, true);
 
+  m_layers.heatmap.queueUpdate = [this] {
+      QMetaObject::invokeMethod(this, [this] { update(); }, Qt::QueuedConnection);
+  };
+  m_layers.heatmap.queueLabelCheck = [this] {
+      QMetaObject::invokeMethod(this, [this] {
+          if (m_layers.heatmap.labelsChangedSinceDraw()) update();
+      }, Qt::QueuedConnection);
+  };
   setAcceptHoverEvents(false); // Reduce event capture
   connect(this, &QQuickItem::windowChanged, this, [this](QQuickWindow* w) { bindWindow(w); });
 
@@ -93,16 +71,16 @@ void UnifiedGridRenderer::bindViewReactions(ReactionPhase phase) {
     connect(commands, &chart::ViewCommands::heatmapTickSizeChanged, this, &UnifiedGridRenderer::heatmapTickSizeChanged, Qt::DirectConnection);
     connect(commands, &chart::ViewCommands::viewportChanged, this, &UnifiedGridRenderer::viewportChanged, Qt::DirectConnection);
     connect(commands, &chart::ViewCommands::autoPriceScaleChanged, this, &UnifiedGridRenderer::autoPriceScaleChanged, Qt::DirectConnection);
-    connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::snapshotChanged, commands, &chart::ViewCommands::onHeatmapSnapshot, Qt::DirectConnection);
-    connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::liveChanged, commands, &chart::ViewCommands::onHeatmapLive, Qt::DirectConnection);
-    connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::tickChanged, commands, &chart::ViewCommands::onHeatmapTick, Qt::DirectConnection);
-    connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::limitsChanged, commands, &chart::ViewCommands::onHeatmapLimits, Qt::DirectConnection);
+    connect(m_layers.heatmap.gpu.get(), &heatmap::gpu::HeatmapGpuLayer::snapshotChanged, commands, &chart::ViewCommands::onHeatmapSnapshot, Qt::DirectConnection);
+    connect(m_layers.heatmap.gpu.get(), &heatmap::gpu::HeatmapGpuLayer::liveChanged, commands, &chart::ViewCommands::onHeatmapLive, Qt::DirectConnection);
+    connect(m_layers.heatmap.gpu.get(), &heatmap::gpu::HeatmapGpuLayer::tickChanged, commands, &chart::ViewCommands::onHeatmapTick, Qt::DirectConnection);
+    connect(m_layers.heatmap.gpu.get(), &heatmap::gpu::HeatmapGpuLayer::limitsChanged, commands, &chart::ViewCommands::onHeatmapLimits, Qt::DirectConnection);
   } else if (phase == ReactionPhase::ViewState) {
     connect(getViewState(), &GridViewState::autoPriceScaleChanged, commands, &chart::ViewCommands::onAutoPriceScaleChanged, Qt::DirectConnection);
   } else {
     connect(getViewState(), &GridViewState::autoPriceScaleChanged, commands, &chart::ViewCommands::clearAutoPriceTick, Qt::DirectConnection);
-    connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::snapshotChanged, this, &UnifiedGridRenderer::refitAutoPrice);
-    connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::liveChanged, this, &UnifiedGridRenderer::refitAutoPrice);
+    connect(m_layers.heatmap.gpu.get(), &heatmap::gpu::HeatmapGpuLayer::snapshotChanged, this, &UnifiedGridRenderer::refitAutoPrice);
+    connect(m_layers.heatmap.gpu.get(), &heatmap::gpu::HeatmapGpuLayer::liveChanged, this, &UnifiedGridRenderer::refitAutoPrice);
   }
 }
 
@@ -117,7 +95,7 @@ void UnifiedGridRenderer::bindLivePlacement() {
 void UnifiedGridRenderer::bindTimeframeSwitch() {
   m_view->timeframeSwitch().setHooks(
       [this](int tf) { m_timeAuthority.setActiveTimeframeMs(tf); },
-      [this](int tf) { m_gpuLayer->setTimeframeMs(tf); });
+      [this](int tf) { m_layers.heatmap.gpu->setTimeframeMs(tf); });
   connect(m_view.get(), &chart::ChartViewController::liveRenderTick, this,
           &UnifiedGridRenderer::liveRenderTick, Qt::DirectConnection);
   connect(m_view.get(), &chart::ChartViewController::timeframeChanged, this, [this](int tf) {
@@ -131,8 +109,8 @@ void UnifiedGridRenderer::bindTimeframeSwitch() {
 }
 
 void UnifiedGridRenderer::bindWindow(QQuickWindow* w) {
-  if (m_axisTextService) {
-    m_axisTextService->bindAxisLayoutWindow(w);
+  if (m_layers.text.axes) {
+    m_layers.text.axes->bindAxisLayoutWindow(w);
   }
   syncGpuSurface(); // the device pixel ratio sets the 1 column/px clamp
   if (m_screenChangedConn) disconnect(m_screenChangedConn);
@@ -149,23 +127,9 @@ void UnifiedGridRenderer::bindWindow(QQuickWindow* w) {
     m_view->syncGpuView();
     update();
   });
-  // The GPU tile node's stats outlive this connection (shared).
-  auto tileStats = m_gpuLayer ? m_gpuLayer->tileStatsPtr() : nullptr;
-  connect(w, &QQuickWindow::afterRendering, this, [this, tileStats]() {
-    // Direct render-thread callback: fixed-size frame snapshot only.
-    m_layers.registry.afterRendering();
+  connect(w, &QQuickWindow::afterRendering, this, [this]() {
     m_frameAck.rendered();
-    // GPU heatmap work left after this frame (budgeted uploads, a crossfade,
-    // live paging): ask for the next frame; an idle node stops asking.
-    if (tileStats && tileStats->wantsFrame.exchange(false))
-      QMetaObject::invokeMethod(this, [this] { update(); }, Qt::QueuedConnection);
-    // Labels held back by a transition (a crossfade's last frame, a picture not
-    // yet matched): once this frame's prepare() has moved the node on, redraw
-    // only if the labels would now draw differently after the transition.
-    if (m_gpuLabelsIncomplete.exchange(false))
-      QMetaObject::invokeMethod(this, [this] {
-        if (m_gpuLayer && m_gpuLayer->labelSignature() != m_gpuLabelSignature.load()) update();
-      }, Qt::QueuedConnection);
+    m_layers.registry.afterRendering();
   }, Qt::DirectConnection);
 }
 
@@ -178,7 +142,7 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
     m_view->zoom().stop();
     disconnect(&m_view->zoom(), nullptr, this, nullptr);
     m_view->priceCarry().stop();
-    disconnect(m_gpuLayer.get(), nullptr, &m_view->commands(), nullptr);
+    disconnect(m_layers.heatmap.gpu.get(), nullptr, &m_view->commands(), nullptr);
     disconnect(getViewState(), nullptr, &m_view->commands(), nullptr);
     disconnect(&m_view->commands(), nullptr, this, nullptr);
     disconnect(m_view.get(), nullptr, this, nullptr);
@@ -194,7 +158,7 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
   if (m_screenChangedConn) disconnect(m_screenChangedConn);
   if (m_beforeSyncConn) disconnect(m_beforeSyncConn);
   if (m_heatmapPort) m_heatmapPort->detach();
-  m_gpuLayer.reset(); // destroys its controller on the heatmap-data thread
+  m_layers.heatmap.gpu.reset(); // destroys its controller on the heatmap-data thread
   // Queued processor callbacks may still use getDataProcessor() until the join.
   m_feeds->shutdown();
   m_feeds.reset();
@@ -202,8 +166,7 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
 
 void UnifiedGridRenderer::onTradeReceived(const Trade &trade) {
   if (m_view->session().symbol == QLatin1String(trade.product_id.data(), qsizetype(trade.product_id.size()))) {
-    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(trade.timestamp.time_since_epoch()).count();
-    if (m_tradeBubbleTape->append({ms, trade.price, trade.size, trade.side, trade.trade_id}) && m_showTrades)
+    if (m_bubbles.append(trade))
       update(); // Qt coalesces trade bursts into one scene synchronization
   }
   m_view->livePlacement().onTrade(trade.product_id, trade.price);
@@ -219,14 +182,14 @@ void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs,
 void UnifiedGridRenderer::onViewportChanged() { m_view->commands().onViewportChanged(); }
 
 void UnifiedGridRenderer::setPriceAxisSource(QObject *source) {
-  if (m_axisTextService) {
-    m_axisTextService->setPriceAxisSource(source);
+  if (m_layers.text.axes) {
+    m_layers.text.axes->setPriceAxisSource(source);
   }
 }
 
 void UnifiedGridRenderer::setTimeAxisSource(QObject *source) {
-  if (m_axisTextService) {
-    m_axisTextService->setTimeAxisSource(source);
+  if (m_layers.text.axes) {
+    m_layers.text.axes->setTimeAxisSource(source);
   }
 }
 
@@ -242,8 +205,8 @@ void UnifiedGridRenderer::geometryChange(const QRectF &newGeometry,
     if (getViewState()) {
       getViewState()->setViewportSize(newGeometry.width(), newGeometry.height());
     }
-    if (m_axisTextService) {
-      m_axisTextService->refreshAxisLayout();
+    if (m_layers.text.axes) {
+      m_layers.text.axes->refreshAxisLayout();
     }
     // Whole-pixel mapping: layers align item-relative; absolute alignment also needs
     // the item origin on a device pixel.
@@ -262,14 +225,14 @@ void UnifiedGridRenderer::geometryChange(const QRectF &newGeometry,
 void UnifiedGridRenderer::componentComplete() {
   QQuickItem::componentComplete();
 
-  if (m_axisTextService) {
-    m_axisTextService->bindAxisLayoutWindow(window());
+  if (m_layers.text.axes) {
+    m_layers.text.axes->bindAxisLayoutWindow(window());
   }
   if (getViewState() && width() > 0 && height() > 0) {
     getViewState()->setViewportSize(width(), height());
   }
-  if (m_axisTextService) {
-    m_axisTextService->refreshAxisLayout();
+  if (m_layers.text.axes) {
+    m_layers.text.axes->refreshAxisLayout();
   }
 }
 
@@ -295,7 +258,7 @@ void UnifiedGridRenderer::setShowViewportMathOverlay(bool show) {
 }
 
 void UnifiedGridRenderer::clearData() {
-  m_tradeBubbleTape->clear();
+  m_bubbles.clear();
   if (getViewState()) {
     getViewState()->resetZoom();
   }
@@ -321,7 +284,7 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
   // Reseed first: the layer's limitsChanged (setSymbol) must not apply a pending carry
   // before the new symbol has a price of its own.
   m_view->flags().reseedPrice = true;
-  if (m_gpuLayer) m_gpuLayer->setSymbol(normalized.toStdString());
+  if (m_layers.heatmap.gpu) m_layers.heatmap.gpu->setSymbol(normalized.toStdString());
   clearData();
   refitAutoPrice(); // auto price scale on: the new symbol's candles when already held
   if (getDataProcessor()) {
@@ -604,51 +567,41 @@ void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
 
 // ── GPU heatmap renderer ──
 double UnifiedGridRenderer::heatmapTickSize() const {
-  return m_gpuLayer ? m_gpuLayer->tickPrice() : 0.0;
+  return m_layers.heatmap.gpu ? m_layers.heatmap.gpu->tickPrice() : 0.0;
 }
 
 void UnifiedGridRenderer::setHeatmapService(heatmap::HeatmapDataService* service) {
-  if (!m_gpuLayer) return;
-  m_gpuLayer->setService(service);
+  if (!m_layers.heatmap.gpu) return;
+  m_layers.heatmap.gpu->setService(service);
   m_view->livePlacement().bootstrapGpuTimeView(); // no view yet: wait for this service's availability
 }
 
 void UnifiedGridRenderer::setHeatmapChartSettings(const heatmap::HeatmapChartSettings& settings,
                                                   bool explicitManualTick) {
-  if (!m_gpuLayer) return;
-  m_gpuLayer->setSettings(settings, explicitManualTick);
+  if (!m_layers.heatmap.gpu) return;
+  m_layers.heatmap.gpu->setSettings(settings, explicitManualTick);
   refitAutoPrice();
-  const auto gradients = heatmap::gpu::gradientsFor(settings);
-  m_showTrades = settings.showTrades;
-  if (m_tradesAboveCandles != settings.tradesAboveCandles) {
-    m_tradesAboveCandles = settings.tradesAboveCandles;
-    emit tradeBubbleSettingsChanged();
-  }
-  m_tradeMinNotional = settings.tradeMinNotional;
-  const auto& bid = gradients.bid.back();
-  const auto& ask = gradients.ask.back();
-  m_tradeBuyColor = QColor(bid.r, bid.g, bid.b);
-  m_tradeSellColor = QColor(ask.r, ask.g, ask.b);
+  m_bubbles.setSettings(settings, [this] { emit tradeBubbleSettingsChanged(); });
   m_view->applyGpuLimits();
   update();
 }
 
 void UnifiedGridRenderer::setHeatmapTickMemory(const heatmap::ManualTickMemory& memory) {
-  if (m_gpuLayer) m_gpuLayer->setTickMemory(memory);
+  if (m_layers.heatmap.gpu) m_layers.heatmap.gpu->setTickMemory(memory);
 }
 
 // The GPU palette's tone mapping: gamma, contrast and shader floor.
 void UnifiedGridRenderer::syncGpuTone() {
-  if (m_gpuLayer) {
-    m_gpuLayer->setTone({static_cast<float>(m_heatmapGamma), static_cast<float>(m_heatmapContrast),
+  if (m_layers.heatmap.gpu) {
+    m_layers.heatmap.gpu->setTone({static_cast<float>(m_heatmapGamma), static_cast<float>(m_heatmapContrast),
                          static_cast<float>(m_heatmapShaderFloor)});
   }
 }
 
 void UnifiedGridRenderer::syncGpuSurface() {
-  if (!m_gpuLayer) return;
+  if (!m_layers.heatmap.gpu) return;
   const double dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
-  m_gpuLayer->setSurface(width(), height(), dpr);
+  m_layers.heatmap.gpu->setSurface(width(), height(), dpr);
   refitAutoPrice(); // raw row height and candidate pixel phases follow the surface
 }
 
@@ -684,58 +637,6 @@ QString UnifiedGridRenderer::applyViewportRequest(const ViewportRequest& request
 
 bool UnifiedGridRenderer::resetView() { return m_view->commands().resetView(); }
 
-void UnifiedGridRenderer::buildMsdfAtlas() {
-  if (m_chartTextAtlasBuilt) {
-    return;
-  }
-  ChartTextAtlas::BuildParams params;
-  params.fontFamily = "Roboto Mono";
-  params.fontPx = 64;
-  params.pxRange = 4.0f;
-  params.charset = QStringLiteral(
-      " 0123456789.+-,:/"
-      "$%kMBABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
-  params.resourceFont =
-      QStringLiteral(":/fonts/RobotoMono/RobotoMono-Regular.ttf");
-  const QByteArray envFont = qgetenv("SENTINEL_MSDF_FONT");
-  if (!envFont.isEmpty()) {
-    params.fontPath = QString::fromUtf8(envFont);
-  } else {
-    const auto &client = GuiConfigStore::instance().clientConfig();
-    if (!client.gui.msdfFontPath.empty()) {
-      params.fontPath = QString::fromStdString(client.gui.msdfFontPath);
-    }
-  }
-  envIntValue("SENTINEL_CHART_TEXT_FONT_PX", params.fontPx);
-  envFloatValue("SENTINEL_CHART_TEXT_PX_RANGE", params.pxRange);
-  sLog_Probe("text.atlas",
-             "build fontPx=" << params.fontPx << " pxRange=" << params.pxRange
-             << " charset=" << params.charset.size()
-             << " fontPath=" << params.fontPath);
-  if (!m_chartTextAtlas.build(params)) {
-    sLog_Warning("Chart text atlas build failed; chart text disabled: fontPath="
-                 << params.fontPath << " resourceFont=" << params.resourceFont
-                 << " fontPx=" << params.fontPx);
-  } else {
-    if (qEnvironmentVariableIsSet("SENTINEL_DUMP_GLYPH_ATLAS")) {
-      m_chartTextAtlas.image().save("/tmp/sentinel_msdf_atlas.png");
-      const MsdfAtlas::Glyph &glyph = m_chartTextAtlas.glyph(QChar('$'));
-      if (!glyph.uv.isNull()) {
-        const QImage &atlas = m_chartTextAtlas.image();
-        const QRect cropRect(
-            static_cast<int>(std::floor(glyph.uv.x() * atlas.width())),
-            static_cast<int>(std::floor(glyph.uv.y() * atlas.height())),
-            std::max(1, static_cast<int>(
-                            std::ceil(glyph.uv.width() * atlas.width()))),
-            std::max(1, static_cast<int>(
-                            std::ceil(glyph.uv.height() * atlas.height()))));
-        atlas.copy(cropRect.intersected(atlas.rect()))
-            .save("/tmp/sentinel_msdf_glyph_dollar.png");
-      }
-    }
-    m_chartTextAtlasBuilt = true;
-  }
-}
 
 void UnifiedGridRenderer::applyClientConfig(const ClientConfig &config) {
   setHeatmapGamma(config.heatmap.gamma);
@@ -744,9 +645,9 @@ void UnifiedGridRenderer::applyClientConfig(const ClientConfig &config) {
   syncGpuTone();
   m_view->initialViewSettings().columnPx = std::clamp(config.heatmap.initialColumnPx, 2, 64);
   m_view->initialViewSettings().pricePct = std::clamp(config.heatmap.initialPricePct, 0, 100);
-  if (m_axisTextService) {
-    m_axisTextService->setAxisLabelPxOverride(config.gui.axisLabelPx);
-    m_axisTextService->refreshAxisLayout();
+  if (m_layers.text.axes) {
+    m_layers.text.axes->setAxisLabelPxOverride(config.gui.axisLabelPx);
+    m_layers.text.axes->refreshAxisLayout();
   }
   applyTpoConfig(config.tpo);
   onViewportChanged();
@@ -761,18 +662,7 @@ void UnifiedGridRenderer::applyServerConfig(const ServerConfig &config) {
   if (forcedTf > 0) setTimeframe(static_cast<int>(forcedTf));
 }
 
-QString UnifiedGridRenderer::getMsdfAtlasMemory() const {
-  if (!m_chartTextAtlas.isBuilt()) {
-    return "MSDF atlas: N/A";
-  }
-  const QImage &image = m_chartTextAtlas.image();
-  if (image.isNull()) {
-    return "MSDF atlas: N/A";
-  }
-  const double mb =
-      static_cast<double>(image.sizeInBytes()) / (1024.0 * 1024.0);
-  return QString("MSDF atlas: %1 MB").arg(mb, 0, 'f', 2);
-}
+QString UnifiedGridRenderer::getMsdfAtlasMemory() const { return m_layers.text.getMsdfAtlasMemory(); }
 
 void UnifiedGridRenderer::mousePressEvent(QMouseEvent *event) {
   if (getViewState() && isVisible() && event->button() == Qt::LeftButton) {
@@ -882,20 +772,20 @@ QString UnifiedGridRenderer::getViewportMathDebug() const {
 QString UnifiedGridRenderer::getDataPipelineDebug() const {
   QStringList lines;
   lines << "Data Pipeline";
-  if (!m_gpuLayer) {
+  if (!m_layers.heatmap.gpu) {
     lines << "layer: N/A";
     return lines.join('\n');
   }
-  const qint64 received = m_gpuLayer->liveReceivedAtMs();
+  const qint64 received = m_layers.heatmap.gpu->liveReceivedAtMs();
   const qint64 now = QDateTime::currentMSecsSinceEpoch();
   lines << QString("symbol: %1  tf: %2 ms  tick: %3")
-               .arg(QString::fromStdString(m_gpuLayer->symbol()))
-               .arg(m_gpuLayer->tfMs())
-               .arg(m_gpuLayer->tickPrice(), 0, 'f', 6)
+               .arg(QString::fromStdString(m_layers.heatmap.gpu->symbol()))
+               .arg(m_layers.heatmap.gpu->tfMs())
+               .arg(m_layers.heatmap.gpu->tickPrice(), 0, 'f', 6)
         << QString("live open end: %1  age: %2 ms")
-               .arg(m_gpuLayer->liveOpenEndMs())
+               .arg(m_layers.heatmap.gpu->liveOpenEndMs())
                .arg(received > 0 ? now - received : -1)
-        << QString("controller: %1").arg(m_gpuLayer->controller() ? "yes" : "no");
+        << QString("controller: %1").arg(m_layers.heatmap.gpu->controller() ? "yes" : "no");
   return lines.join('\n');
 }
 QString UnifiedGridRenderer::getPerformanceStats() const {

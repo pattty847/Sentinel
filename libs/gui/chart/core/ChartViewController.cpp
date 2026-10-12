@@ -7,8 +7,7 @@ FrameInputs ChartViewController::frameInputs(const QRectF& bounds, double dpr, c
                                            const TimeAuthority& time, FrameContext::OverlayActivationSet overlays) const {
     FrameInputs inputs;
     inputs.context = FrameContextBuilder::build(bounds, dpr, clock, time, view_.get(),
-                                                overlays.heatmap, overlays.footprint, overlays.tpo);
-    inputs.context.overlays.volumeProfile = overlays.volumeProfile;
+                                                overlays);
     inputs.camera.raster = camera_.rasterInputs(inputs.context.viewport, 0, {bounds.width(), bounds.height(), dpr});
     inputs.camera.glide = glide_;
     inputs.timeframeMs = session_.timeframeMs;

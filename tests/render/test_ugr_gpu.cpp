@@ -1381,10 +1381,11 @@ TEST_F(UgrGpu, LateEnableKeepsRegistryOrderAndTextLast) {
 TEST(TradeLayerNodes, LateEnableKeepsRegistryOrderAndTextLast) {
     QQuickWindow window;
     QSGNode root;
-    chart::TradeLayers layers;
+    chart::ChartLayers layers;
+    layers.heatmap.initialize();
     layers.registry.onRootRebuilt(&root);
-    ChartTextAtlas atlas;
-    ChartTextRenderer text;
+    auto& atlas = layers.text.atlas;
+    auto& text = layers.text.renderer;
     chart::ChartFrame snapshotFrame;
     auto& context = snapshotFrame.context;
     context.surfaceBounds = QRectF(0, 0, 640, 320);
@@ -1396,8 +1397,6 @@ TEST(TradeLayerNodes, LateEnableKeepsRegistryOrderAndTextLast) {
         context.overlays.footprint = enableFootprint;
         layers.registry.sync(snapshotFrame);
         layers.registry.updateNodes(snapshotFrame, {&window, &root, text, atlas, false});
-        text.beginFrame(&root, &window, atlas);
-        text.endFrame();
     };
     frame(false, false);
     auto* textRoot = root.lastChild();
@@ -1415,14 +1414,46 @@ TEST(TradeLayerNodes, LateEnableKeepsRegistryOrderAndTextLast) {
         for (auto* child = node->firstChild(); child; child = child->nextSibling())
             std::cout << typeid(*child).name() << ",";
         std::cout << "] ";
-        const std::string name = node == textRoot ? "text" : hasNode<FootprintIntensityNode>(node) ? "footprint" :
+        const std::string name = node == root.firstChild() ? "heatmap" : node == textRoot ? "text" : hasNode<FootprintIntensityNode>(node) ? "footprint" :
             hasNode<QSGClipNode>(node) ? "TPO" : hasNode<QSGGeometryNode>(node) ? "VP" : "unknown";
         if (order.empty() || order.back() != name) order.push_back(name);
     }
     std::cout << "\nnode-only late-enable order:";
     for (const auto& name : order) std::cout << " " << name;
     std::cout << std::endl;
-    EXPECT_EQ(order, (std::vector<std::string>{"footprint", "VP", "TPO", "text"}));
+    EXPECT_EQ(order, (std::vector<std::string>{"heatmap", "footprint", "VP", "TPO", "text"}));
+}
+
+TEST(TradeLayerNodes, FixedHeatmapVpLabelsStructure) {
+    QQuickWindow window;
+    QSGNode root;
+    chart::ChartLayers layers;
+    layers.heatmap.initialize();
+    layers.registry.onRootRebuilt(&root);
+    auto& atlas = layers.text.atlas;
+    auto& text = layers.text.renderer;
+    chart::ChartFrame frame;
+    frame.context.surfaceBounds = QRectF(0, 0, 640, 320);
+    frame.context.mapping.viewStartMs = 0; frame.context.mapping.viewEndMs = 60000;
+    frame.context.mapping.viewMinPrice = 100; frame.context.mapping.viewMaxPrice = 200;
+    frame.context.overlays.volumeProfile = true;
+    VolumeProfileState::Snapshot snapshot;
+    snapshot.minPrice = 100; snapshot.maxPrice = 200; snapshot.tickSize = 10; snapshot.gridHeight = 10;
+    layers.vp.renderer.enqueue(std::vector<float>(10, 1.0f), snapshot);
+    layers.registry.sync(frame);
+    layers.registry.updateNodes(frame, {&window, &root, text, atlas, false});
+    root.lastChild()->appendChildNode(new ChartTextNode()); // fixed label node, no Metal texture needed
+    std::cout << "fixed heatmap/VP/labels root: ";
+    for (auto* node = root.firstChild(); node; node = node->nextSibling()) {
+        std::cout << typeid(*node).name() << "(" << int(node->type()) << ") [";
+        for (auto* child = node->firstChild(); child; child = child->nextSibling())
+            std::cout << typeid(*child).name() << ",";
+        std::cout << "] ";
+    }
+    std::cout << std::endl;
+    EXPECT_EQ(root.childCount(), 5);
+    EXPECT_EQ(root.firstChild()->type(), QSGNode::OpacityNodeType);
+    EXPECT_TRUE(hasNode<ChartTextNode>(root.lastChild()));
 }
 
 // S8a: the chart has exactly one root path, the GPU one, from its first frame (no

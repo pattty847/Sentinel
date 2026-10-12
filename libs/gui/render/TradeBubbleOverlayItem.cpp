@@ -1,6 +1,6 @@
 #include "TradeBubbleOverlayItem.hpp"
 #include "TradeBubbleNode.hpp"
-#include "../UnifiedGridRenderer.h"
+#include "chart/feeds/TradeBubbleFeed.hpp"
 #include <QQuickWindow>
 
 namespace {
@@ -40,7 +40,7 @@ void TradeBubbleOverlayItem::setRenderer(QObject* renderer) {
     if (m_renderer == renderer && renderer) return;
     disconnect(m_destroyConnection);
     m_renderer = renderer;
-    auto* chart = qobject_cast<UnifiedGridRenderer*>(renderer);
+    auto* chart = dynamic_cast<chart::ITradeBubbleFrameSource*>(renderer);
     m_link->frame = chart ? chart->tradeBubbleRenderFrame() : nullptr;
     ++m_link->providerRevision;
     if (renderer) m_destroyConnection = connect(renderer, &QObject::destroyed, this, [this] { setRenderer(nullptr); });

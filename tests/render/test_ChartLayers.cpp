@@ -1,14 +1,15 @@
-#include "chart/layers/ChartLayerSet.hpp"
+#include "chart/layers/ChartLayers.hpp"
+#include "render/heatmap/HeatmapGpuLayer.hpp"
 #include "chart/feeds/TradeOverlaySequence.hpp"
 #include <gtest/gtest.h>
+#include "render/FrameContextBuilder.hpp"
+#include <QElapsedTimer>
 #include <memory>
 #include <string>
 #include <vector>
 
-// Opaque values suffice: these contracts never inspect frame, atlas or text.
-namespace chart { struct ChartFrame {}; }
-class ChartTextRenderer {};
-class ChartTextAtlas {};
+#include "chart/core/ChartFrame.hpp"
+#include "render/ChartTextRenderer.hpp"
 
 namespace {
 using Calls = std::vector<std::string>;
@@ -39,13 +40,14 @@ TEST(LayerRegistry, DispatchPreservesRegistrationOrder) {
     registry.afterRendering();
     EXPECT_EQ(calls, (Calls{"sync:b", "sync:a", "b", "a", "after:b", "after:a"}));
 }
-TEST(ChartLayerSet, RegistersFootprintVpTpo) {
-    Calls calls;
-    Layer footprint("footprint", calls), vp("VP", calls), tpo("TPO", calls);
-    chart::LayerRegistry registry;
-    chart::registerChartLayers(registry, footprint, vp, tpo);
-    update(registry);
-    EXPECT_EQ(calls, (Calls{"footprint", "VP", "TPO"}));
+TEST(ChartLayerSet, RegistersHeatmapFootprintVpTpoText) {
+    chart::ChartLayers layers;
+    layers.heatmap.initialize();
+    QSGNode root;
+    layers.registry.onRootRebuilt(&root);
+    EXPECT_EQ(root.childCount(), 5);
+    EXPECT_EQ(root.firstChild()->type(), QSGNode::OpacityNodeType);
+    EXPECT_EQ(root.firstChild()->firstChild()->type(), QSGNode::RenderNodeType);
 }
 struct Processor {
     Calls& calls;
@@ -95,3 +97,54 @@ TEST(TradeOverlayFeeds, ClearQueuesProcessorBeforeMailboxesAndNeutralReset) {
     EXPECT_EQ(calls, (Calls{"clear footprint", "clear VP", "neutral footprint"}));
 }
 } // namespace
+
+TEST(FrameContextBuilder, CapturesEveryOverlayFlag) {
+    QElapsedTimer clock;
+    TimeAuthority time;
+    for (int bits = 0; bits < 16; ++bits) {
+        const FrameContext::OverlayActivationSet flags{bool(bits & 1), bool(bits & 2), bool(bits & 4), bool(bits & 8)};
+        const auto frame = FrameContextBuilder::build({}, 1, clock, time, nullptr, flags);
+        EXPECT_EQ(frame.overlays.heatmap, flags.heatmap);
+        EXPECT_EQ(frame.overlays.footprint, flags.footprint);
+        EXPECT_EQ(frame.overlays.tpo, flags.tpo);
+        EXPECT_EQ(frame.overlays.volumeProfile, flags.volumeProfile);
+    }
+}
+TEST(HeatmapLabelSequence, DrawSignature) {
+    heatmap::LabelCells labels;
+    labels.key.serial = 10;
+    const std::vector<uint8_t> columns{1, 0, 1};
+    using Layer = heatmap::gpu::HeatmapGpuLayer;
+    const auto signature = Layer::labelSignature(&labels, columns, 2);
+    EXPECT_EQ(signature, Layer::labelSignature(&labels, columns, 2));
+    EXPECT_NE(signature, Layer::labelSignature(&labels, {1, 1, 1}, 3));
+    EXPECT_EQ(Layer::labelSignature(nullptr, columns, 2), 0u);
+
+}
+
+#include "chart/feeds/TradeBubbleFeed.hpp"
+TEST(TradeBubbleFeed, TapeSettingsAndPublicationStayTogether) {
+    chart::TradeBubbleFeed feed;
+    Trade trade{};
+    trade.trade_id = "one"; trade.price = 10; trade.size = 2;
+    trade.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(100));
+    EXPECT_FALSE(feed.append(trade)); // hidden tape still ingests
+    const auto frame = feed.tradeBubbleRenderFrame();
+    ASSERT_EQ(frame->tape->samples().size(), 1u);
+    EXPECT_FALSE(feed.append(trade));
+    EXPECT_EQ(frame->tape->samples().size(), 1u);
+    heatmap::HeatmapChartSettings settings;
+    settings.showTrades = true; settings.tradeMinNotional = 30;
+    settings.tradesAboveCandles = false;
+    int notified = 0;
+    feed.setSettings(settings, [&] { ++notified; EXPECT_FALSE(feed.tradesAboveCandles()); });
+    feed.setSettings(settings, [&] { ++notified; });
+    EXPECT_EQ(notified, 1);
+    TimeAxisMapping mapping; mapping.viewStartMs = 42;
+    feed.publish(mapping);
+    EXPECT_EQ(feed.tradeBubbleRenderFrame(), frame);
+    EXPECT_TRUE(frame->enabled); EXPECT_EQ(frame->minNotional, 30);
+    EXPECT_EQ(frame->mapping.viewStartMs, 42);
+    feed.disableFrame(); EXPECT_FALSE(frame->enabled);
+    feed.clear(); EXPECT_TRUE(frame->tape->samples().empty());
+}

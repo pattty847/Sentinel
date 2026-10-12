@@ -20,6 +20,7 @@ public:
     };
 
     void onRootRebuilt();
+    QSGNode* createRoot();
     void beginFrame(QSGNode* parentNode, QQuickWindow* window, const ChartTextAtlas& atlas);
     void submitRun(const ChartTextRun& run, Priority priority);
     void submitGlyphs(const std::vector<ChartGlyphInstance>& glyphs, Priority priority);

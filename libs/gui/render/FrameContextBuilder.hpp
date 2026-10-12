@@ -18,8 +18,6 @@ FrameContext build(const QRectF& boundingRect,
                    const QElapsedTimer& frameClock,
                    const TimeAuthority& timeAuthority,
                    const GridViewState* viewState,
-                   bool heatmapEnabled,
-                   bool footprintEnabled,
-                   bool tpoEnabled);
+                   FrameContext::OverlayActivationSet overlays);
 
 } // namespace FrameContextBuilder

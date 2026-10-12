@@ -36,6 +36,7 @@ struct FrameContext {
         bool volumeProfile = false;
     };
     TimeAuthority::Snapshot time;
+    QRectF itemBounds; // unsnapped item extent for axis text
     QRectF surfaceBounds;
     double surfaceDpr = 1.0;
     qint64 presentationTimeMs = 0;

@@ -1,5 +1,6 @@
 #pragma once
 #include "HeatmapCellQuery.hpp"
+#include "LabelRetryPolicy.hpp"
 // The main chart's GPU heatmap layer (S6b, docs/research/2026-10-s6-plan.md
 // section 2): LabItem without view ownership. UnifiedGridRenderer owns one per
 // chart (GUI thread) and gives it the symbol, timeframe, the committed view of
@@ -31,18 +32,6 @@
 #include <vector>
 
 namespace heatmap::gpu {
-// The label request retry (S7b): a posted request that got no result (or lost
-// it to HeatmapCellQuery::cancel()) is asked again after delayMs(), which doubles
-// per failure up to kMaxMs and returns to kFirstMs after a result.
-struct LabelRetryPolicy {
-    static constexpr int kFirstMs = 2000, kMaxMs = 30000;
-    int delayMs() const { return delay_; }
-    void failed() { delay_ = std::min(delay_ * 2, kMaxMs); }
-    void succeeded() { delay_ = kFirstMs; }
-private:
-    int delay_ = kFirstMs;
-};
-
 // Median best-bid/best-ask midpoint over the newest columns (the price a fresh
 // view centres on). 0 when none.
 double medianRecentMid(const SparseColumns &data);
