@@ -55,6 +55,8 @@ set(GRID_CORE_SOURCES
     chart/layers/HeatmapLayer.cpp
     chart/layers/ChartTextLayer.cpp
     chart/feeds/TradeBubbleFeed.cpp
+    chart/shell/ChartDebugText.cpp
+    chart/shell/ChartInputRouter.cpp
     chart/layers/ChartLayerSet.cpp
     chart/layers/TradeLayers.cpp
     chart/feeds/TradeOverlayFeeds.cpp

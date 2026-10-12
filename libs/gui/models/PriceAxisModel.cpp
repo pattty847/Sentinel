@@ -1,6 +1,5 @@
 #include "PriceAxisModel.hpp"
 #include "../render/GridViewState.hpp"
-#include "../UnifiedGridRenderer.h"
 #include <QDebug>
 #include "SentinelLogging.hpp"
 #include "servermodel/PriceLadder.hpp"

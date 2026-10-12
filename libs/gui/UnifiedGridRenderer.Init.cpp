@@ -13,11 +13,11 @@ void UnifiedGridRenderer::init() {
     const auto& client = store.clientConfig();
     m_look.setInitialTone(client);
     qRegisterMetaType<Trade>("Trade");
-    m_frameClock.start();
+    m_clock.frame.start();
     m_timeAuthority.setActiveTimeframeMs(defaultTimeframeMs);
     m_layers.heatmap.initialize();
     m_heatmapPort = std::make_unique<chart::HeatmapChartPort>(*this, *m_layers.heatmap.gpu);
-    m_view = std::make_unique<chart::ChartViewController>(*m_heatmapPort, *m_heatmapPort, *m_heatmapPort, m_published, this);
+    m_view = std::make_unique<chart::ChartViewController>(*m_heatmapPort, *m_heatmapPort, *m_heatmapPort, m_frames.published, this);
     bindLivePlacement();
     bindTimeframeSwitch();
     m_view->session().timeframeMs = defaultTimeframeMs;

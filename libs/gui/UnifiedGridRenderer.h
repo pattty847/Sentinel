@@ -42,9 +42,9 @@
 #include "chart/feeds/TradeOverlayFeeds.hpp"
 #include "render/FootprintOverlayRenderer.hpp"
 #include "chart/feeds/TradeBubbleFeed.hpp"
+#include "chart/shell/IChartCameraSource.hpp"
 #include "render/TpoOverlayRenderer.hpp"
 #include "render/VolumeProfileRenderer.hpp"
-
 class DataProcessor;
 namespace heatmap {
 class HeatmapDataService;
@@ -59,16 +59,13 @@ struct ViewWindow;
 class QQuickWindow;
 class QScreen;
 namespace chart { class HeatmapChartPort; }
-
-class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider, public chart::ITradeBubbleFrameSource {
+class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider, public chart::ITradeBubbleFrameSource, public chart::IChartCameraSource {
     friend struct TradeBubbleRendererTest;
     friend class chart::HeatmapChartPort;
     Q_OBJECT
     Q_INTERFACES(ITimeAxisMappingProvider)
     QML_ELEMENT
-    
     Q_PROPERTY(bool autoScrollEnabled READ autoScrollEnabled WRITE enableAutoScroll NOTIFY autoScrollEnabledChanged)
-    
     Q_PROPERTY(double heatmapGamma READ heatmapGamma WRITE setHeatmapGamma NOTIFY heatmapGammaChanged)
     Q_PROPERTY(double heatmapContrast READ heatmapContrast WRITE setHeatmapContrast NOTIFY heatmapContrastChanged)
     Q_PROPERTY(double heatmapShaderFloor READ heatmapShaderFloor WRITE setHeatmapShaderFloor NOTIFY heatmapShaderFloorChanged)
@@ -79,20 +76,16 @@ class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider, 
     Q_PROPERTY(bool volumeProfileLayerEnabled READ volumeProfileLayerEnabled NOTIFY layerVisibilityChanged)
     Q_PROPERTY(int tpoTimeframeMs READ tpoTimeframeMs WRITE setTpoTimeframeMs NOTIFY tpoConfigChanged)
     Q_PROPERTY(int tpoSessionType READ tpoSessionType WRITE setTpoSessionType NOTIFY tpoConfigChanged)
-    
     Q_PROPERTY(bool showGpuStatsOverlay READ showGpuStatsOverlay WRITE setShowGpuStatsOverlay NOTIFY showGpuStatsOverlayChanged)
     Q_PROPERTY(bool showDataPipelineOverlay READ showDataPipelineOverlay WRITE setShowDataPipelineOverlay NOTIFY showDataPipelineOverlayChanged)
     Q_PROPERTY(bool showViewportMathOverlay READ showViewportMathOverlay WRITE setShowViewportMathOverlay NOTIFY showViewportMathOverlayChanged)
-
     Q_PROPERTY(qint64 visibleTimeStart READ getVisibleTimeStart NOTIFY viewportChanged)
     Q_PROPERTY(qint64 visibleTimeEnd READ getVisibleTimeEnd NOTIFY viewportChanged)
     Q_PROPERTY(double minPrice READ getMinPrice NOTIFY viewportChanged)
     Q_PROPERTY(double maxPrice READ getMaxPrice NOTIFY viewportChanged)
     Q_PROPERTY(double heatmapTickSize READ heatmapTickSize NOTIFY heatmapTickSizeChanged)
     Q_PROPERTY(bool tradesAboveCandles READ tradesAboveCandles NOTIFY tradeBubbleSettingsChanged)
-
     Q_PROPERTY(int timeframeMs READ getCurrentTimeframe WRITE setTimeframe NOTIFY timeframeChanged)
-
     Q_PROPERTY(QPointF panVisualOffset READ getPanVisualOffset NOTIFY panVisualOffsetChanged)
     Q_PROPERTY(int candleStyle READ candleStyle WRITE setCandleStyle NOTIFY candleStyleChanged)
     Q_PROPERTY(QColor candleUpColor READ candleUpColor NOTIFY candleAppearanceChanged)
@@ -106,54 +99,18 @@ class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider, 
     Q_PROPERTY(double effectiveAxisLabelPx READ effectiveAxisLabelPx NOTIFY axisLayoutChanged)
     Q_PROPERTY(int priceAxisWidthPx READ priceAxisWidthPx NOTIFY axisLayoutChanged)
     Q_PROPERTY(int timeAxisHeightPx READ timeAxisHeightPx NOTIFY axisLayoutChanged)
-    // The chart's candle series (auto-fit reads the visible candles' high/low).
     Q_PROPERTY(QObject* candleBuffer READ candleBuffer WRITE setCandleBuffer NOTIFY candleBufferChanged)
     Q_PROPERTY(bool autoPriceScale READ autoPriceScale WRITE setAutoPriceScale NOTIFY autoPriceScaleChanged)
 
-private:
-    bool m_showGpuStatsOverlay = false;
-    bool m_showDataPipelineOverlay = false;
-    bool m_showViewportMathOverlay = false;
-
-    FrameProfiler m_frameProfiler;  // SENTINEL_FRAME_PROFILE=1, render thread only
-    // Per-chart GPU heatmap state, read in updatePaintNode while the GUI is blocked.
-    // The chart's frame clock and timeframe cadence (FrameContext::time; the candle
-    // overlay's boundary sequence reads it through currentFrameContext()).
-    QElapsedTimer m_frameClock;
-    TimeAuthority m_timeAuthority;
-
-    chart::PublishedFrame m_published;
-    QMetaObject::Connection m_screenChangedConn;
-    std::function<qint64()> m_zoomClock;
-    qint64 zoomNowMs() const;
-    void bindZoomGlide();
-    void bindLivePlacement();
-    void bindTimeframeSwitch();
-    enum class ReactionPhase { Heatmap, ViewState, Ready };
-    void bindViewReactions(ReactionPhase phase);
-    QTimer* m_glidePolishTimer = nullptr;
-    struct { QMetaObject::Connection beforeSync, afterRender; } m_renderConnections;
-    // Render thread: this sync's frame (context, tick, raster camera), prepared in
-    // beforeSynchronizing and drawn by updatePaintNode in the same sync.
-    chart::FrameProducer m_frameProducer;
-
-    chart::TradeBubbleFeed m_bubbles;
-    chart::ChartLayers m_layers;
-    chart::LayerVisibility m_visibility;
-    chart::ChartLookSettings m_look{m_layers};
-
-    chart::FrameAck m_frameAck;
-
 public:
     void setAgentControlRevision(uint64_t revision, uint64_t selectionEpoch, uint64_t viewportVersion) {
-        m_frameAck.setAgentControlRevision(revision, selectionEpoch, viewportVersion);
+        m_frames.ack.setAgentControlRevision(revision, selectionEpoch, viewportVersion);
         update();
     }
-    uint64_t renderedControlRevision() const { return m_frameAck.renderedControlRevision(); }
-    uint64_t renderedFrameId() const { return m_frameAck.renderedFrameId(); }
+    uint64_t renderedControlRevision() const { return m_frames.ack.renderedControlRevision(); }
+    uint64_t renderedFrameId() const { return m_frames.ack.renderedFrameId(); }
     explicit UnifiedGridRenderer(QQuickItem* parent = nullptr);
     ~UnifiedGridRenderer();
-    
     bool autoScrollEnabled() const { return getViewState() ? getViewState()->isAutoScrollEnabled() : false; }
     int candleStyle() const { return m_look.candleStyle(); }
     void setCandleStyle(int style);
@@ -176,34 +133,30 @@ public:
     Q_INVOKABLE void setVolumeProfileLayerEnabled(bool enabled);
     Q_INVOKABLE void setTpoTimeframeMs(int timeframeMs);
     Q_INVOKABLE void setTpoSessionType(int sessionType);
-    // TPO look: layout "split"|"collapsed", theme "rainbow"|"calm"|"sage". Unknown names are ignored.
     Q_INVOKABLE void setTpoLayout(const QString& layout);
     Q_INVOKABLE void setTpoTheme(const QString& theme);
     QString tpoLayout() const;
     QString tpoTheme() const;
     int tpoSessions() const { return m_look.tpoSessions(); }
-    
-    GridViewState* getViewState() const { return m_view ? m_view->viewPtr() : nullptr; }
+    GridViewState* getViewState() const override { return m_view ? m_view->viewPtr() : nullptr; }
+    double chartWidth() const override { return width(); }
+    double chartHeight() const override { return height(); }
+    void connectCameraChanged(QObject* context, std::function<void()> onChange) override;
     QObject* viewState() const { return getViewState(); }
     QObject* priceAxisSource() const { return m_layers.text.axes ? m_layers.text.axes->priceAxisSource() : nullptr; }
     QObject* timeAxisSource() const { return m_layers.text.axes ? m_layers.text.axes->timeAxisSource() : nullptr; }
     double effectiveAxisLabelPx() const { return m_layers.text.axes ? m_layers.text.axes->effectiveAxisLabelPx() : AxisLayout::kAutoAxisLabelBasePx; }
     int priceAxisWidthPx() const { return m_layers.text.axes ? m_layers.text.axes->priceAxisWidthPx() : 90; }
     int timeAxisHeightPx() const { return m_layers.text.axes ? m_layers.text.axes->timeAxisHeightPx() : 30; }
-    
-    bool showGpuStatsOverlay() const { return m_showGpuStatsOverlay; }
-    bool showDataPipelineOverlay() const { return m_showDataPipelineOverlay; }
-    bool showViewportMathOverlay() const { return m_showViewportMathOverlay; }
-
+    bool showGpuStatsOverlay() const { return m_debugFlags.gpuStats; }
+    bool showDataPipelineOverlay() const { return m_debugFlags.dataPipeline; }
+    bool showViewportMathOverlay() const { return m_debugFlags.viewportMath; }
     Q_INVOKABLE qint64 getVisibleTimeStart() const;
-    Q_INVOKABLE qint64 getVisibleTimeEnd() const; 
+    Q_INVOKABLE qint64 getVisibleTimeEnd() const;
     Q_INVOKABLE double getMinPrice() const;
     Q_INVOKABLE double getMaxPrice() const;
-    
     int getCurrentTimeframe() const { return static_cast<int>(m_view->session().timeframeMs); }
-    
     Q_INVOKABLE QPointF getPanVisualOffset() const;
-    // The drawn tick (the GPU layer's).
     double heatmapTickSize() const;
 
     // ── GPU heatmap renderer ──
@@ -213,17 +166,11 @@ public:
     bool tradesAboveCandles() const { return m_bubbles.tradesAboveCandles(); }
     // GUI-thread binding only; render callbacks retain the plain C++ state.
     std::shared_ptr<trade_bubbles::RenderFrame> tradeBubbleRenderFrame() const override { return m_bubbles.tradeBubbleRenderFrame(); }
-    // Chart settings (tick policy, palette, sensitivity, budgets).
     void setHeatmapChartSettings(const heatmap::HeatmapChartSettings& settings, bool explicitManualTick = false);
     void setHeatmapTickMemory(const heatmap::ManualTickMemory& memory);
     heatmap::gpu::HeatmapGpuLayer* gpuHeatmapLayer() const { return m_layers.heatmap.gpu.get(); }
-    // Tests: the label layout of the last GPU frame and its glyphs.
-    const heatmap::gpu::HeatmapLabelLayout& gpuLabelLayout() const { return m_layers.heatmap.labelLayout(); }
-    const std::vector<ChartGlyphInstance>& gpuLabelGlyphs() const { return m_layers.heatmap.labelGlyphs(); }
-    uint64_t gpuLabelSerial() const { return m_layers.heatmap.labelSerial(); } // the LabelCells serial drawn (0: none)
 
     // ── Auto price scale and fits ──
-    // View and fit behavior: docs/ARCHITECTURE.md, "Coordinate system: TimeAxisMapping".
     bool autoPriceScale() const { return getViewState() && getViewState()->autoPriceScale(); }
     void setAutoPriceScale(bool enabled);
     Q_INVOKABLE bool fitView(bool time, bool price);
@@ -235,40 +182,28 @@ public:
     QString applyViewportRequest(const ViewportRequest& request);
     QObject* candleBuffer() const;
     void setCandleBuffer(QObject* buffer);
-
     Q_INVOKABLE void addTrade(const Trade& trade);
     Q_INVOKABLE void setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax);
     Q_INVOKABLE void clearData();
     void setActiveSymbol(const QString& symbol);
     void setLiveBookTop(double bestBid, double bestAsk);
-    
     Q_INVOKABLE QString getViewportMathDebug() const;
     Q_INVOKABLE QString getDataPipelineDebug() const;
-    
     Q_INVOKABLE QString getPerformanceStats() const;
-
     Q_INVOKABLE QString getMsdfAtlasMemory() const;
     MappingFrameContext currentFrameContext() const override;
     TimeAxisMapping currentTimeAxisMapping() const override;
-    // GUI thread: the raster camera the next frame computes from the current view
-    // (same inputs and hysteresis state; a tick change in that frame aside). The axis
-    // models, the drawn window posted to the controller and the pan commit use it;
-    // hit tests use the published frame (currentFrameContext().raster).
-    chart_raster::RasterCamera rasterCameraNow(bool includeDrag = true) const;
+    chart_raster::RasterCamera rasterCameraNow(bool includeDrag = true) const override;
     void applyClientConfig(const ClientConfig& config);
     void applyTpoConfig(const ClientTpoConfig& tpo);
     void applyServerConfig(const ServerConfig& config);
-
     Q_INVOKABLE void setTimeframe(int timeframe_ms);
-    
-    
-    // Whole-pixel smooth zoom (slice A2, docs/ARCHITECTURE.md). A click (mouse wheel
+    // A click (mouse wheel
     // notch, keyboard, toolbar) moves to the next rung, a view with whole device pixels
     // per column and per row, by a kZoomGlideMs eased glide drawn with coverage; a
     // pinch or trackpad scroll zooms continuously and settles on the nearest rung.
     // Item coordinates (logical px); time/price select the axes.
     Q_INVOKABLE void zoomClicks(int clicks, double x, double y, bool time = true, bool price = true);
-    // factor > 1 zooms in; the gesture settles on a rung at endZoomGesture() or after a pause.
     Q_INVOKABLE void zoomContinuous(double factor, double x, double y, bool time = true, bool price = true);
     Q_INVOKABLE void endZoomGesture();
     // The axes (QML). Unphased mouse notches are clicks (pixel deltas may be present); a
@@ -283,14 +218,7 @@ public:
     bool zoomGliding() const { Q_ASSERT(m_view); return m_view->glide().time.active || m_view->glide().price.active; }
     bool timeGliding() const { Q_ASSERT(m_view); return m_view->glide().time.active; }
     bool priceGliding() const { Q_ASSERT(m_view); return m_view->glide().price.active; }
-    int glideRebasesForTest() const { return m_view->glide().rebases; }
-    // Tests: a follow-live update for a live open end (the fixtures have no live feed).
-    void followLiveForTest(qint64 openEndMs) { m_view->livePlacement().followGpuLiveTo(openEndMs); }
     bool zoomGesturing() const { Q_ASSERT(m_view); return m_view->glide().gesture; }
-    // Tests: inspect the actual settle timer without depending on its duration.
-    bool gestureSettlePending() const { return m_view->zoom().gestureSettlePending(); }
-    // Tests: the glide clock (ms); default the chart's frame clock.
-    void setZoomClockForTest(std::function<qint64()> clock) { m_zoomClock = std::move(clock); }
     // The camera the next frame draws without a zoom transition (the rest camera of
     // the stored view; a glide's target).
     chart_raster::RasterCamera restCameraNow(bool includeDrag = true) const;
@@ -305,7 +233,6 @@ public:
     Q_INVOKABLE void panUp();
     Q_INVOKABLE void panDown();
     Q_INVOKABLE void enableAutoScroll(bool enabled);
-    
     void setHeatmapGamma(double gamma);
     void setHeatmapContrast(double contrast);
     void setHeatmapShaderFloor(double floor);
@@ -313,11 +240,19 @@ public:
     Q_INVOKABLE void setHeatmapLayerEnabled(bool enabled);
     Q_INVOKABLE void setFootprintLayerEnabled(bool enabled);
     Q_INVOKABLE void setTpoLayerEnabled(bool enabled);
-
-public:
     void onTradeReceived(const Trade& trade);
     void onViewChanged(qint64 startTimeMs, qint64 endTimeMs, double minPrice, double maxPrice);
     void onViewportChanged();
+
+    // Test hooks (forwarders only)
+    const heatmap::gpu::HeatmapLabelLayout& gpuLabelLayout() const { return m_layers.heatmap.labelLayout(); }
+    const std::vector<ChartGlyphInstance>& gpuLabelGlyphs() const { return m_layers.heatmap.labelGlyphs(); }
+    uint64_t gpuLabelSerial() const { return m_layers.heatmap.labelSerial(); }
+    int glideRebasesForTest() const { return m_view->glide().rebases; }
+    void followLiveForTest(qint64 openEndMs) { m_view->livePlacement().followGpuLiveTo(openEndMs); }
+    bool gestureSettlePending() const { return m_view->zoom().gestureSettlePending(); }
+    void setZoomClockForTest(std::function<qint64()> clock) { m_clock.zoom = std::move(clock); }
+    // End test hooks
 
 signals:
     void autoScrollEnabledChanged();
@@ -352,7 +287,6 @@ protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) override;
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
     void componentComplete() override;
-    
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
@@ -361,16 +295,18 @@ protected:
     void updatePolish() override;        // a zoom glide advances once per frame (GUI thread)
 
 private:
+    qint64 zoomNowMs() const;
+    void bindZoomGlide();
+    void bindLivePlacement();
+    void bindTimeframeSwitch();
+    enum class ReactionPhase { Heatmap, ViewState, Ready };
+    void bindViewReactions(ReactionPhase phase);
     // The one root: a plain QSGNode whose first child is an opacity node holding
     // the HeatmapTileNode (opacity 0 blocks it while the heatmap layer is off);
     // overlays and text follow it as later children (drawn on top).
     QSGNode* updateGpuPaintNode(QSGNode* oldNode, FrameContext& frame, bool profile);
-    // The frame's raster camera and its TimeAxisMapping (whole-pixel mapping, once
-    // per frame, at the layer's tick for this frame).
     void prepareSyncFrame();
     void refitAutoPrice();
-    chart::CandleBufferSource m_candleSource;
-    QMetaObject::Connection m_candleDirtyConn;
     void syncGpuSurface();
     void bindWindow(QQuickWindow* window);
     void setPriceAxisSource(QObject* source);
@@ -380,12 +316,35 @@ private:
     void setShowGpuStatsOverlay(bool show);
     void setShowDataPipelineOverlay(bool show);
     void setShowViewportMathOverlay(bool show);
-
-    std::unique_ptr<chart::HeatmapChartPort> m_heatmapPort;
-    std::unique_ptr<chart::ChartViewController> m_view;
-    std::unique_ptr<chart::TradeOverlayFeeds> m_feeds;
     void init();
 
 public:
     DataProcessor* getDataProcessor() const { return m_feeds ? m_feeds->processor() : nullptr; }
+
+private:
+    struct DebugFlags { bool gpuStats = false, dataPipeline = false, viewportMath = false; } m_debugFlags;
+    FrameProfiler m_frameProfiler;
+    TimeAuthority m_timeAuthority;
+    struct Connections {
+        QMetaObject::Connection screenChanged, candleDirty;
+        struct { QMetaObject::Connection beforeSync, afterRender; } render;
+    } m_connections;
+    struct ClockState {
+        QElapsedTimer frame;
+        std::function<qint64()> zoom;
+        QTimer* glidePolish = nullptr;
+    } m_clock;
+    chart::TradeBubbleFeed m_bubbles;
+    chart::ChartLayers m_layers;
+    chart::LayerVisibility m_visibility;
+    chart::ChartLookSettings m_look{m_layers};
+    struct Frames {
+        chart::PublishedFrame published;
+        chart::FrameProducer producer;
+        chart::FrameAck ack;
+    } m_frames;
+    chart::CandleBufferSource m_candleSource;
+    std::unique_ptr<chart::HeatmapChartPort> m_heatmapPort;
+    std::unique_ptr<chart::ChartViewController> m_view;
+    std::unique_ptr<chart::TradeOverlayFeeds> m_feeds;
 };

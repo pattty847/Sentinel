@@ -1,6 +1,5 @@
 #include "TimeAxisModel.hpp"
 #include "../render/GridViewState.hpp"
-#include "../UnifiedGridRenderer.h"
 #include <QDebug>
 #include <cmath>
 #include <algorithm>

@@ -1,9 +1,7 @@
 // Qt event adaptation and frame scheduling for chart zoom policies.
 #include "UnifiedGridRenderer.h"
-#include <QNativeGestureEvent>
+#include "chart/shell/ChartInputRouter.hpp"
 #include <QTimer>
-static_assert(int(Qt::NoScrollPhase) == chart::WheelInterpreter::kNoScrollPhase);
-static_assert(int(Qt::ScrollEnd) == chart::WheelInterpreter::kScrollEnd);
 void UnifiedGridRenderer::bindZoomGlide() {
   connect(&m_view->zoom(), &chart::ZoomController::updateRequested, this, [this] { update(); }, Qt::DirectConnection);
   auto& glide = m_view->zoomGlide();
@@ -15,7 +13,7 @@ void UnifiedGridRenderer::bindZoomGlide() {
 }
 
 qint64 UnifiedGridRenderer::zoomNowMs() const {
-  return m_zoomClock ? m_zoomClock() : (m_frameClock.isValid() ? m_frameClock.elapsed() : 0);
+  return m_clock.zoom ? m_clock.zoom() : (m_clock.frame.isValid() ? m_clock.frame.elapsed() : 0);
 }
 
 chart_raster::RasterCamera UnifiedGridRenderer::rasterCameraNow(bool includeDrag) const {
@@ -28,22 +26,27 @@ chart_raster::RasterCamera UnifiedGridRenderer::restCameraNow(bool includeDrag) 
   return m_view->camera().restCameraNow(includeDrag);
 }
 
+void UnifiedGridRenderer::connectCameraChanged(QObject* context, std::function<void()> onChange) {
+  connect(this, &UnifiedGridRenderer::rasterChanged, context, onChange);
+  connect(this, &UnifiedGridRenderer::heatmapTickSizeChanged, context, onChange);
+}
+
 void UnifiedGridRenderer::updatePolish() {
   QQuickItem::updatePolish();
   if (zoomGliding()) m_view->advanceFrame(zoomNowMs());
   if (!zoomGliding()) return;
-  if (!m_glidePolishTimer) {
-    m_glidePolishTimer = new QTimer(this);
-    m_glidePolishTimer->setSingleShot(true);
-    m_glidePolishTimer->setInterval(0);
-    connect(m_glidePolishTimer, &QTimer::timeout, this, [this] {
+  if (!m_clock.glidePolish) {
+    m_clock.glidePolish = new QTimer(this);
+    m_clock.glidePolish->setSingleShot(true);
+    m_clock.glidePolish->setInterval(0);
+    connect(m_clock.glidePolish, &QTimer::timeout, this, [this] {
       if (zoomGliding()) {
         polish();
         update();
       }
     });
   }
-  m_glidePolishTimer->start();
+  m_clock.glidePolish->start();
 }
 
 void UnifiedGridRenderer::zoomClicks(int clicks, double x, double y, bool time, bool price) {
@@ -83,28 +86,5 @@ void UnifiedGridRenderer::zoomPriceClicks(int clicks, double y) {
 }
 
 bool UnifiedGridRenderer::event(QEvent* e) {
-  if (e->type() == QEvent::NativeGesture) {
-    auto* gesture = static_cast<QNativeGestureEvent*>(e);
-    switch (gesture->gestureType()) {
-    case Qt::ZoomNativeGesture: {
-      const QPointF at = gesture->position();
-      const bool shift = gesture->modifiers() & Qt::ShiftModifier;
-      if (shift && getViewState()) getViewState()->setAutoPriceScale(false);
-      m_view->zoom().zoomContinuousFor(1.0 + gesture->value(), at.x(), at.y(), !shift, true,
-                                      chart::ZoomController::kGestureSafetyMs);
-      gesture->accept();
-      return true;
-    }
-    case Qt::EndNativeGesture:
-      endZoomGesture();
-      gesture->accept();
-      return true;
-    case Qt::BeginNativeGesture:
-      gesture->accept();
-      return true;
-    default:
-      break;
-    }
-  }
-  return QQuickItem::event(e);
+  return chart::ChartInputRouter(*this, *m_view).nativeGesture(e) || QQuickItem::event(e);
 }
