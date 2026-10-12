@@ -26,6 +26,11 @@ chart_raster::RasterCamera UnifiedGridRenderer::restCameraNow(bool includeDrag) 
   return m_view->camera().restCameraNow(includeDrag);
 }
 
+void UnifiedGridRenderer::connectCameraChanged(QObject* context, std::function<void()> onChange) {
+  connect(this, &UnifiedGridRenderer::rasterChanged, context, onChange);
+  connect(this, &UnifiedGridRenderer::heatmapTickSizeChanged, context, onChange);
+}
+
 void UnifiedGridRenderer::updatePolish() {
   QQuickItem::updatePolish();
   if (zoomGliding()) m_view->advanceFrame(zoomNowMs());

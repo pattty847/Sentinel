@@ -3350,6 +3350,30 @@ class CpuZoomChart : public UnifiedGridRenderer {
 public:
     using UnifiedGridRenderer::updatePolish;
 };
+class CountingPriceAxisModel : public PriceAxisModel {
+public:
+    int calculations = 0;
+protected:
+    void calculateTicks() override {
+        ++calculations;
+        PriceAxisModel::calculateTicks();
+    }
+};
+
+TEST(UgrCpu, CameraSourceSignalsRecalculateAxis) {
+    CpuZoomChart chart;
+    chart.setSize({640, 320});
+    chart.setViewport(1000, 2000, 100, 140);
+    CountingPriceAxisModel axis;
+    axis.setTarget(&chart);
+    ASSERT_GT(axis.calculations, 0);
+    const int initial = axis.calculations;
+    chart.rasterChanged();
+    EXPECT_EQ(axis.calculations, initial + 1);
+    chart.heatmapTickSizeChanged();
+    EXPECT_EQ(axis.calculations, initial + 2);
+}
+
 class UgrZoomCpu : public testing::Test {
 protected:
     CpuZoomChart chart;

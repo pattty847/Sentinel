@@ -141,6 +141,7 @@ public:
     GridViewState* getViewState() const override { return m_view ? m_view->viewPtr() : nullptr; }
     double chartWidth() const override { return width(); }
     double chartHeight() const override { return height(); }
+    void connectCameraChanged(QObject* context, std::function<void()> onChange) override;
     QObject* viewState() const { return getViewState(); }
     QObject* priceAxisSource() const { return m_layers.text.axes ? m_layers.text.axes->priceAxisSource() : nullptr; }
     QObject* timeAxisSource() const { return m_layers.text.axes ? m_layers.text.axes->timeAxisSource() : nullptr; }

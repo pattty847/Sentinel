@@ -31,8 +31,7 @@ void AxisModel::setTarget(QQuickItem* target) {
         });
         // The drawn pixels per row/column, the drawn tick or the device pixel ratio
         // changed without a viewport change.
-        connect(target, SIGNAL(rasterChanged()), this, SLOT(onViewportChanged()), Qt::UniqueConnection);
-        connect(target, SIGNAL(heatmapTickSizeChanged()), this, SLOT(onViewportChanged()), Qt::UniqueConnection);
+        m_renderer->connectCameraChanged(this, [this] { onViewportChanged(); });
         setViewportSize(m_renderer->chartWidth(), m_renderer->chartHeight());
     }
 }
