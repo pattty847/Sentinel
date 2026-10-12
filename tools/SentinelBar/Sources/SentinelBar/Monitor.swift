@@ -36,14 +36,20 @@ final class Monitor: ObservableObject {
     private var selectedPlanPath: String?
 
     var blockers: [Milestone] { EventParser.unresolved(events) }
-    var activity: [Milestone] {
+    var runningAgentCount: Int {
+        AgentCounter.runningCount(agents.map { job -> AgentRunState in
+            job.idle ? (job.subagent ? .subagentIdle : .idle) : .running
+        })
+    }
+    var activity: [ActivityGroup] {
         let gitEvents = landings.filter { landing in
             !events.contains { $0.kind == "landed" && $0.text.contains(landing.id) }
         }.map { landing in
             Milestone(at: landing.at, kind: "landed", text: "\(landing.slice) landed · \(landing.id)",
                       tone: "ok", slice: landing.slice, branch: nil)
         }
-        return Array((events + gitEvents + agentEvents).sorted { $0.at > $1.at }.prefix(15))
+        let ordered = (events + gitEvents + agentEvents).sorted { $0.at > $1.at }
+        return Array(ActivityFolder.fold(ordered).prefix(15))
     }
     var alert: Bool {
         services.contains { $0.critical && $0.up == false } ||

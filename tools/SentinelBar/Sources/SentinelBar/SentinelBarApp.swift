@@ -17,7 +17,7 @@ struct SentinelBarApp: App {
                 if let glyph = menuGlyph(alert: monitor.alert) {
                     Image(nsImage: glyph).resizable().frame(width: 18, height: 18)
                 }
-                if !monitor.agents.isEmpty { Text("\(monitor.agents.count)") }
+                if monitor.runningAgentCount > 0 { Text("\(monitor.runningAgentCount)") }
             }
         }
         .menuBarExtraStyle(.window)
@@ -122,7 +122,7 @@ struct StatusPanel: View {
                         }
                     }
                 }
-                section("Agents", caption: "\(monitor.agents.count)") {
+                section("Agents", caption: "\(monitor.runningAgentCount) running · \(monitor.agents.count) total") {
                     if monitor.agents.isEmpty { dim("none running") }
                     ForEach(monitor.agents.indices, id: \.self) { index in
                         if index > 0 { Divider() }
@@ -131,11 +131,18 @@ struct StatusPanel: View {
                     }
                 }
                 section("Activity") {
-                    if monitor.activity.isEmpty { dim("No activity yet") }
-                    ForEach(monitor.activity) { event in
+                    let activity = monitor.activity
+                    if activity.isEmpty { dim("No activity yet") }
+                    ForEach(activity) { group in
                         HStack(alignment: .firstTextBaseline) {
-                            Text(event.at, style: .time).monospacedDigit().foregroundStyle(.secondary)
-                            Text(event.text).lineLimit(2)
+                            if group.count == 1 {
+                                Text(group.latest.at, style: .time)
+                                    .monospacedDigit().foregroundStyle(.secondary)
+                            } else {
+                                Text(activityTimeRange(group))
+                                    .monospacedDigit().foregroundStyle(.secondary).lineLimit(1)
+                            }
+                            Text(group.text).lineLimit(2)
                         }.font(.caption)
                     }
                 }
@@ -262,6 +269,13 @@ struct StatusPanel: View {
         return image
     }
 
+    private func activityTimeRange(_ group: ActivityGroup) -> String {
+        let formatter = DateIntervalFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter.string(from: group.earliestAt, to: group.latest.at)
+    }
+
     @ViewBuilder private func budgetRow(_ entry: BudgetEntry) -> some View {
         switch entry {
         case .window(let window):
@@ -344,9 +358,10 @@ struct AgentCard: View {
                     Text(job.model ?? job.kind).font(.callout.bold()).lineLimit(1)
                     Text(job.branch ?? "unmanaged")
                         .font(.caption2).lineLimit(1).truncationMode(.middle)
-                        .frame(maxWidth: 125)
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(Capsule().fill(Color(nsColor: .quaternaryLabelColor).opacity(0.5)))
+                        .frame(maxWidth: 128)
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(Capsule().fill(.quaternary))
+                        .fixedSize()
                     Spacer()
                     if let time = job.lastActive {
                         Text(time, style: .relative).font(.caption)

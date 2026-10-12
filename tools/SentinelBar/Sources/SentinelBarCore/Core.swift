@@ -59,6 +59,18 @@ public struct AgentMatch {
     public let transcript: AgentTranscript?
 }
 
+public enum AgentRunState: Equatable {
+    case running
+    case idle
+    case subagentIdle
+}
+
+public enum AgentCounter {
+    public static func runningCount(_ states: [AgentRunState]) -> Int {
+        states.filter { $0 == .running }.count
+    }
+}
+
 public enum AgentMatcher {
     public static func cwd(for process: AgentProcess) -> String {
         guard process.kind == "codex", let path = argument(process.args, names: ["-C", "--cd"]) else {
@@ -404,6 +416,33 @@ public struct Milestone: Equatable, Identifiable {
     public var id: String { "\(at.timeIntervalSince1970):\(kind):\(text)" }
     public init(at: Date, kind: String, text: String, tone: String, slice: String?, branch: String?) {
         self.at = at; self.kind = kind; self.text = text; self.tone = tone; self.slice = slice; self.branch = branch
+    }
+}
+
+public struct ActivityGroup: Identifiable {
+    public let latest: Milestone
+    public var earliestAt: Date
+    public var count: Int
+    public var id: String { latest.id }
+    public var text: String { count == 1 ? latest.text : "\(latest.text) ×\(count)" }
+}
+
+public enum ActivityFolder {
+    /// Input order is preserved; only adjacent events with the same identity are grouped.
+    public static func fold(_ events: [Milestone]) -> [ActivityGroup] {
+        var groups: [ActivityGroup] = []
+        for event in events {
+            if let index = groups.indices.last,
+               groups[index].latest.kind == event.kind,
+               groups[index].latest.text == event.text,
+               groups[index].latest.branch == event.branch {
+                groups[index].earliestAt = event.at
+                groups[index].count += 1
+            } else {
+                groups.append(ActivityGroup(latest: event, earliestAt: event.at, count: 1))
+            }
+        }
+        return groups
     }
 }
 

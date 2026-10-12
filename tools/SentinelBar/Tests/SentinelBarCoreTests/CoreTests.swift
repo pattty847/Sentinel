@@ -116,6 +116,11 @@ struct CoreTests {
         #expect(unpinned.allSatisfy { $0.transcript == nil })
     }
 
+    @Test func runningAgentCountExcludesIdleSessionsAndIdleSubagents() {
+        #expect(AgentCounter.runningCount([.running, .idle, .subagentIdle, .running]) == 2)
+        #expect(AgentCounter.runningCount([.idle, .subagentIdle]) == 0)
+    }
+
     @Test func planSkipsNewestZeroSliceDocumentUnlessPinned() {
         let empty = "# SentinelBar\n## Goal\nNo slices here."
         let slices = "# Chart plan\n### Phase One\n**S0a: Camera**"
@@ -205,5 +210,22 @@ struct CoreTests {
         #expect(events.count == 3)
         #expect(EventParser.unresolved(events).isEmpty)
         #expect(events.last?.branch == "lt-sol/example")
+    }
+
+    @Test func activityFoldsOnlyConsecutiveMatchingEvents() {
+        func event(_ second: TimeInterval, kind: String = "build_failed", text: String = "s10 exited 1",
+                   branch: String = "lt-astra/s10") -> Milestone {
+            Milestone(at: Date(timeIntervalSince1970: second), kind: kind, text: text,
+                      tone: "bad", slice: nil, branch: branch)
+        }
+        let events = [event(10), event(9), event(8, text: "s10 exited 139"), event(7),
+                      event(6, branch: "other"), event(5, kind: "review")]
+        let groups = ActivityFolder.fold(events)
+        #expect(groups.map(\.count) == [2, 1, 1, 1, 1])
+        #expect(groups.map(\.text) == ["s10 exited 1 ×2", "s10 exited 139", "s10 exited 1",
+                                       "s10 exited 1", "s10 exited 1"])
+        #expect(groups[0].latest.at == events[0].at)
+        #expect(groups[0].earliestAt == events[1].at)
+        #expect(groups[2].latest.at == events[3].at)
     }
 }
