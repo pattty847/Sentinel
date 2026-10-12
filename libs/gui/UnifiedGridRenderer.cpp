@@ -1,5 +1,6 @@
 // Slots on main thread, paint on render thread.
 #include "UnifiedGridRenderer.h"
+#include "mainwindow/ChartAgentPort.hpp"
 #include "PerformanceMonitor.hpp"
 #include "SentinelLogging.hpp"
 #include "config/GuiConfigStore.hpp"
@@ -40,6 +41,10 @@ std::optional<heatmap::gpu::ViewWindow> chart::HeatmapChartPort::restView() cons
 
 UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem *parent)
     : QQuickItem(parent) {
+  m_qml.view.setParent(this);
+  m_qml.debug.setParent(this);
+  m_visibility.setParent(this);
+  m_look.setParent(this);
   setFlag(ItemHasContents, true);
   setAcceptedMouseButtons(Qt::LeftButton | Qt::RightButton);
   setFlag(ItemAcceptsInputMethod, true);
@@ -62,24 +67,12 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem *parent)
     }
   };
   m_visibility.requestUpdate = [this] { update(); };
-  m_visibility.primaryFieldChanged = [this] { emit primaryFieldChanged(); };
-  m_visibility.visibilityChanged = [this] { emit layerVisibilityChanged(); };
   m_look.requestUpdate = [this] { update(); };
   m_look.onViewportChanged = [this] { onViewportChanged(); };
   m_look.applyTone = [this](float gamma, float contrast, float floor) {
     if (m_layers.heatmap.gpu) m_layers.heatmap.gpu->setTone({gamma, contrast, floor});
   };
-  m_look.notify = [this](chart::ChartLookSettings::Notice notice) {
-    switch (notice) {
-      case chart::ChartLookSettings::Notice::TpoConfig: emit tpoConfigChanged(); break;
-      case chart::ChartLookSettings::Notice::TpoStyle: emit tpoStyleChanged(); break;
-      case chart::ChartLookSettings::Notice::Gamma: emit heatmapGammaChanged(); break;
-      case chart::ChartLookSettings::Notice::Contrast: emit heatmapContrastChanged(); break;
-      case chart::ChartLookSettings::Notice::ShaderFloor: emit heatmapShaderFloorChanged(); break;
-      case chart::ChartLookSettings::Notice::CandleStyle: emit candleStyleChanged(); break;
-      case chart::ChartLookSettings::Notice::CandleAppearance: emit candleAppearanceChanged(); break;
-    }
-  };
+
 
   m_layers.heatmap.queueUpdate = [this] {
       QMetaObject::invokeMethod(this, [this] { update(); }, Qt::QueuedConnection);
@@ -93,6 +86,9 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem *parent)
   connect(this, &QQuickItem::windowChanged, this, [this](QQuickWindow* w) { bindWindow(w); });
 
   init();
+  m_qml.view.bind(*m_view, *m_heatmapPort);
+  m_qml.debug.bind(m_layers, m_frames.published, getViewState());
+  m_look.tradesAboveCandlesSource = [this] { return m_bubbles.tradesAboveCandles(); };
   bindZoomGlide();
   bindViewReactions(ReactionPhase::Ready);
   // An item constructed with a parent already in a window (C++ hosts, tests)
@@ -107,9 +103,9 @@ void UnifiedGridRenderer::bindViewReactions(ReactionPhase phase) {
   if (phase == ReactionPhase::Heatmap) {
     connect(commands, &chart::ViewCommands::updateRequested, this, &QQuickItem::update, Qt::DirectConnection);
     connect(commands, &chart::ViewCommands::liveRenderTick, this, &UnifiedGridRenderer::liveRenderTick, Qt::DirectConnection);
-    connect(commands, &chart::ViewCommands::heatmapTickSizeChanged, this, &UnifiedGridRenderer::heatmapTickSizeChanged, Qt::DirectConnection);
-    connect(commands, &chart::ViewCommands::viewportChanged, this, &UnifiedGridRenderer::viewportChanged, Qt::DirectConnection);
-    connect(commands, &chart::ViewCommands::autoPriceScaleChanged, this, &UnifiedGridRenderer::autoPriceScaleChanged, Qt::DirectConnection);
+    connect(commands, &chart::ViewCommands::heatmapTickSizeChanged, view(), &chart::ChartViewQml::heatmapTickSizeChanged, Qt::DirectConnection);
+    connect(commands, &chart::ViewCommands::viewportChanged, view(), &chart::ChartViewQml::viewportChanged, Qt::DirectConnection);
+    connect(commands, &chart::ViewCommands::autoPriceScaleChanged, view(), &chart::ChartViewQml::autoPriceScaleChanged, Qt::DirectConnection);
     connect(m_layers.heatmap.gpu.get(), &heatmap::gpu::HeatmapGpuLayer::snapshotChanged, commands, &chart::ViewCommands::onHeatmapSnapshot, Qt::DirectConnection);
     connect(m_layers.heatmap.gpu.get(), &heatmap::gpu::HeatmapGpuLayer::liveChanged, commands, &chart::ViewCommands::onHeatmapLive, Qt::DirectConnection);
     connect(m_layers.heatmap.gpu.get(), &heatmap::gpu::HeatmapGpuLayer::tickChanged, commands, &chart::ViewCommands::onHeatmapTick, Qt::DirectConnection);
@@ -127,7 +123,7 @@ void UnifiedGridRenderer::bindLivePlacement() {
   m_view->priceFitter().setRequestUpdate([this] { update(); });
   auto& live = m_view->livePlacement();
   connect(&live, &chart::LivePlacement::liveRenderTick, this, &UnifiedGridRenderer::liveRenderTick, Qt::DirectConnection);
-  connect(&live, &chart::LivePlacement::autoScrollEnabledChanged, this, &UnifiedGridRenderer::autoScrollEnabledChanged, Qt::DirectConnection);
+  connect(&live, &chart::LivePlacement::autoScrollEnabledChanged, view(), &chart::ChartViewQml::autoScrollEnabledChanged, Qt::DirectConnection);
   connect(&live, &chart::LivePlacement::updateRequested, this, &QQuickItem::update, Qt::DirectConnection);
 }
 
@@ -143,7 +139,7 @@ void UnifiedGridRenderer::bindTimeframeSwitch() {
           [this, tf]() { getDataProcessor()->setTimeframe(tf); }, Qt::QueuedConnection);
     }
     update();
-    emit timeframeChanged();
+    emit view()->timeframeChanged();
   }, Qt::DirectConnection);
 }
 
@@ -187,11 +183,15 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
     disconnect(m_layers.heatmap.gpu.get(), nullptr, &m_view->commands(), nullptr);
     disconnect(getViewState(), nullptr, &m_view->commands(), nullptr);
     disconnect(&m_view->commands(), nullptr, this, nullptr);
+    disconnect(&m_view->commands(), nullptr, view(), nullptr);
     disconnect(m_view.get(), nullptr, this, nullptr);
     m_view->livePlacement().stopBootstrap();
     disconnect(&m_view->livePlacement(), nullptr, this, nullptr);
+    disconnect(&m_view->livePlacement(), nullptr, view(), nullptr);
     disconnect(&m_view->zoomGlide(), nullptr, this, nullptr);
+    disconnect(&m_view->zoomGlide(), nullptr, view(), nullptr);
     disconnect(getViewState(), nullptr, this, nullptr);
+    disconnect(getViewState(), nullptr, view(), nullptr);
     getViewState()->setPanShift({});
   }
   // ~QQuickItem leaves the window (windowChanged) after this class's members are gone:
@@ -277,18 +277,6 @@ void UnifiedGridRenderer::componentComplete() {
   }
 }
 
-void UnifiedGridRenderer::setShowGpuStatsOverlay(bool show) {
-  if (m_debugFlags.gpuStats != show) { m_debugFlags.gpuStats = show; emit showGpuStatsOverlayChanged(); }
-}
-
-void UnifiedGridRenderer::setShowDataPipelineOverlay(bool show) {
-  if (m_debugFlags.dataPipeline != show) { m_debugFlags.dataPipeline = show; emit showDataPipelineOverlayChanged(); }
-}
-
-void UnifiedGridRenderer::setShowViewportMathOverlay(bool show) {
-  if (m_debugFlags.viewportMath != show) { m_debugFlags.viewportMath = show; emit showViewportMathOverlayChanged(); }
-}
-
 void UnifiedGridRenderer::clearData() {
   m_bubbles.clear();
   if (getViewState()) {
@@ -328,21 +316,7 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
   }
 }
 
-// The configured TPO style, session and bracket (startup, and the settings
-// dialog's TPO reset).
-void UnifiedGridRenderer::setTimeframe(int timeframe_ms) {
-  m_view->setTimeframe(timeframe_ms);
-}
-
-void UnifiedGridRenderer::enableAutoScroll(bool enabled) {
-  m_view->livePlacement().enableAutoScroll(enabled);
-}
-
 // ── GPU heatmap renderer ──
-double UnifiedGridRenderer::heatmapTickSize() const {
-  return m_layers.heatmap.gpu ? m_layers.heatmap.gpu->tickPrice() : 0.0;
-}
-
 void UnifiedGridRenderer::setHeatmapService(heatmap::HeatmapDataService* service) {
   if (!m_layers.heatmap.gpu) return;
   m_layers.heatmap.gpu->setService(service);
@@ -354,7 +328,7 @@ void UnifiedGridRenderer::setHeatmapChartSettings(const heatmap::HeatmapChartSet
   if (!m_layers.heatmap.gpu) return;
   m_layers.heatmap.gpu->setSettings(settings, explicitManualTick);
   refitAutoPrice();
-  m_bubbles.setSettings(settings, [this] { emit tradeBubbleSettingsChanged(); });
+  m_bubbles.setSettings(settings, [this] { emit candles()->tradeBubbleSettingsChanged(); });
   m_view->applyGpuLimits();
   update();
 }
@@ -392,59 +366,17 @@ void UnifiedGridRenderer::setCandleBuffer(QObject* buffer) {
   emit candleBufferChanged();
 }
 void UnifiedGridRenderer::refitAutoPrice() { m_view->priceFitter().refitAutoPrice(); }
-void UnifiedGridRenderer::setAutoPriceScale(bool enabled) { m_view->commands().setAutoPriceScale(enabled); }
-bool UnifiedGridRenderer::fitView(bool time, bool price) { return m_view->commands().fitView(time, price); }
-QString UnifiedGridRenderer::applyViewportRequest(const ViewportRequest& request) { return m_view->commands().applyViewportRequest(request); }
-bool UnifiedGridRenderer::resetView() { return m_view->commands().resetView(); }
-QString UnifiedGridRenderer::getMsdfAtlasMemory() const { return m_layers.text.getMsdfAtlasMemory(); }
 void UnifiedGridRenderer::mousePressEvent(QMouseEvent* event) { chart::ChartInputRouter(*this, *m_view).mousePress(event); }
 void UnifiedGridRenderer::mouseMoveEvent(QMouseEvent* event) { chart::ChartInputRouter(*this, *m_view).mouseMove(event); }
 void UnifiedGridRenderer::mouseReleaseEvent(QMouseEvent* event) { chart::ChartInputRouter(*this, *m_view).mouseRelease(event); }
 void UnifiedGridRenderer::wheelEvent(QWheelEvent* event) { chart::ChartInputRouter(*this, *m_view).wheel(event); }
-qint64 UnifiedGridRenderer::getVisibleTimeStart() const { return getViewState() ? getViewState()->getVisibleTimeStart() : 0; }
-qint64 UnifiedGridRenderer::getVisibleTimeEnd() const { return getViewState() ? getViewState()->getVisibleTimeEnd() : 0; }
-double UnifiedGridRenderer::getMinPrice() const { return getViewState() ? getViewState()->getMinPrice() : 0.0; }
-double UnifiedGridRenderer::getMaxPrice() const { return getViewState() ? getViewState()->getMaxPrice() : 0.0; }
-QPointF UnifiedGridRenderer::getPanVisualOffset() const { return getViewState() ? getViewState()->getPanVisualOffset() : QPointF(0, 0); }
 MappingFrameContext UnifiedGridRenderer::currentFrameContext() const { return m_frames.published.current(); }
 TimeAxisMapping UnifiedGridRenderer::currentTimeAxisMapping() const { return currentFrameContext().mapping; }
-QString UnifiedGridRenderer::getViewportMathDebug() const { return chart::formatViewportMath(currentTimeAxisMapping(), getViewState() && getViewState()->isDragging()); }
-
-QString UnifiedGridRenderer::getDataPipelineDebug() const { return chart::formatDataPipeline(m_layers.heatmap.gpu.get()); }
-
-QString UnifiedGridRenderer::getPerformanceStats() const { return PerformanceMonitor::instance().frameStatsText(); }
-
 void UnifiedGridRenderer::addTrade(const Trade &trade) { onTradeReceived(trade); }
-void UnifiedGridRenderer::setViewport(qint64 timeStart, qint64 timeEnd,
-                                      double priceMin, double priceMax) { m_view->commands().setViewport(timeStart, timeEnd, priceMin, priceMax); }
-void UnifiedGridRenderer::zoomIn() { zoomClicks(1, width() / 2, height() / 2); }
-void UnifiedGridRenderer::zoomOut() { zoomClicks(-1, width() / 2, height() / 2); }
-void UnifiedGridRenderer::resetZoom() { m_view->commands().resetZoom(); }
-void UnifiedGridRenderer::beginPanAt(double x, double y) { m_view->commands().beginPanAt(x, y); }
-void UnifiedGridRenderer::updatePanAt(double x, double y) { m_view->commands().updatePanAt(x, y); }
-void UnifiedGridRenderer::endPanAt() { m_view->commands().endPanAt(); }
-void UnifiedGridRenderer::panLeft() { m_view->commands().panLeft(); }
-void UnifiedGridRenderer::panRight() { m_view->commands().panRight(); }
-void UnifiedGridRenderer::panUp() { m_view->commands().panUp(); }
-void UnifiedGridRenderer::panDown() { m_view->commands().panDown(); }
-
-
-void UnifiedGridRenderer::applyTpoConfig(const ClientTpoConfig& config) { m_look.applyTpoConfig(config); }
-void UnifiedGridRenderer::setTpoTimeframeMs(int ms) { m_look.setTpoTimeframeMs(ms); }
-void UnifiedGridRenderer::setTpoSessionType(int type) { m_look.setTpoSessionType(type); }
-void UnifiedGridRenderer::setTpoLayout(const QString& layout) { m_look.setTpoLayout(layout); }
-void UnifiedGridRenderer::setTpoTheme(const QString& theme) { m_look.setTpoTheme(theme); }
-QString UnifiedGridRenderer::tpoLayout() const { return m_look.tpoLayout(); }
-QString UnifiedGridRenderer::tpoTheme() const { return m_look.tpoTheme(); }
-void UnifiedGridRenderer::setVolumeProfileLayerEnabled(bool enabled) { m_visibility.setVolumeProfileEnabled(enabled); }
-void UnifiedGridRenderer::setHeatmapGamma(double gamma) { m_look.setHeatmapGamma(gamma); }
-void UnifiedGridRenderer::setHeatmapContrast(double contrast) { m_look.setHeatmapContrast(contrast); }
-void UnifiedGridRenderer::setHeatmapShaderFloor(double floor) { m_look.setHeatmapShaderFloor(floor); }
-void UnifiedGridRenderer::setCandleStyle(int style) { m_look.setCandleStyle(style); }
-void UnifiedGridRenderer::setCandleAppearance(const heatmap::HeatmapChartSettings& settings) { m_look.setCandleAppearance(settings); }
-void UnifiedGridRenderer::setPrimaryField(int field) { m_visibility.setPrimaryField(field); }
-void UnifiedGridRenderer::setHeatmapLayerEnabled(bool enabled) { m_visibility.setHeatmapEnabled(enabled); }
-void UnifiedGridRenderer::setFootprintLayerEnabled(bool enabled) { m_visibility.setFootprintEnabled(enabled); }
-void UnifiedGridRenderer::setTpoLayerEnabled(bool enabled) { m_visibility.setTpoEnabled(enabled); }
 void UnifiedGridRenderer::applyClientConfig(const ClientConfig& config) { m_look.applyClientConfig(config, *m_view, m_layers.text.axes.get()); }
 void UnifiedGridRenderer::applyServerConfig(const ServerConfig& config) { m_look.applyServerConfig(config, *m_view); }
+
+ChartAgentPort UnifiedGridRenderer::agentPort() {
+  return {*m_view, m_frames.published, m_frames.ack,
+          [this] { update(); }};
+}

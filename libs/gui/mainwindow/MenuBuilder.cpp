@@ -127,7 +127,7 @@ void MenuBuilder::buildDebugMenu() {
         if (m_heatmapDock && m_heatmapDock->qquickView()) {
             QObject* renderer = m_heatmapDock->qquickView()->rootObject()->findChild<QObject*>("unifiedGridRenderer");
             if (renderer) {
-                renderer->setProperty("showGpuStatsOverlay", checked);
+                renderer->property("debug").value<QObject*>()->setProperty("showGpuStatsOverlay", checked);
             }
         }
     });
@@ -139,7 +139,7 @@ void MenuBuilder::buildDebugMenu() {
         if (m_heatmapDock && m_heatmapDock->qquickView()) {
             QObject* renderer = m_heatmapDock->qquickView()->rootObject()->findChild<QObject*>("unifiedGridRenderer");
             if (renderer) {
-                renderer->setProperty("showDataPipelineOverlay", checked);
+                renderer->property("debug").value<QObject*>()->setProperty("showDataPipelineOverlay", checked);
             }
         }
     });
@@ -151,7 +151,7 @@ void MenuBuilder::buildDebugMenu() {
         if (m_heatmapDock && m_heatmapDock->qquickView()) {
             QObject* renderer = m_heatmapDock->qquickView()->rootObject()->findChild<QObject*>("unifiedGridRenderer");
             if (renderer) {
-                renderer->setProperty("showViewportMathOverlay", checked);
+                renderer->property("debug").value<QObject*>()->setProperty("showViewportMathOverlay", checked);
             }
         }
     });

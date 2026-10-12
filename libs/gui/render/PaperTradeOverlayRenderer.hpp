@@ -24,7 +24,7 @@ class PaperTradeOverlayRenderer : public QQuickItem {
 
     Q_PROPERTY(QObject* mappingProvider READ mappingProvider WRITE setMappingProvider NOTIFY mappingProviderChanged)
     Q_PROPERTY(QObject* overlayModel READ overlayModel WRITE setOverlayModel NOTIFY overlayModelChanged)
-    Q_PROPERTY(bool enabled READ enabled WRITE setEnabled NOTIFY enabledChanged)
+    Q_PROPERTY(bool enabled READ enabled WRITE setEnabled NOTIFY enabledChanged FINAL)
     Q_PROPERTY(qulonglong mappingRevision READ mappingRevision NOTIFY mappingRevisionChanged)
 
 public:

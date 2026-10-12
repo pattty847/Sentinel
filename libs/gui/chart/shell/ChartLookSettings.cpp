@@ -167,3 +167,16 @@ void ChartLookSettings::applyServerConfig(const ServerConfig& config, ChartViewC
     if (forcedTf > 0) view.setTimeframe(static_cast<int>(forcedTf));
 }
 } // namespace chart
+
+void chart::ChartLookSettings::changed(Notice notice) {
+    switch (notice) {
+      case Notice::TpoConfig: emit tpo.tpoConfigChanged(); break;
+      case Notice::TpoStyle: emit tpo.tpoStyleChanged(); break;
+      case Notice::Gamma: emit heatmapGammaChanged(); break;
+      case Notice::Contrast: emit heatmapContrastChanged(); break;
+      case Notice::ShaderFloor: emit heatmapShaderFloorChanged(); break;
+      case Notice::CandleStyle: emit candleStyleChanged(); break;
+      case Notice::CandleAppearance: emit candleAppearanceChanged(); break;
+    }
+    if (notify) notify(notice);
+}

@@ -36,6 +36,7 @@ struct MappingFrameContext {
 class ITimeAxisMappingProvider {
 public:
     virtual ~ITimeAxisMappingProvider() = default;
+    virtual QObject* viewNotifications() = 0;
     virtual MappingFrameContext currentFrameContext() const = 0;
     virtual TimeAxisMapping currentTimeAxisMapping() const = 0;
 };

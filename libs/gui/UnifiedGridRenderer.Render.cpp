@@ -33,7 +33,7 @@ void UnifiedGridRenderer::prepareSyncFrame() {
         // The axis models and sibling overlays follow the newly drawn surface.
         QMetaObject::invokeMethod(this, [this] {
             emit rasterChanged();
-            emit viewportChanged();
+            emit view()->viewportChanged();
         }, Qt::QueuedConnection);
     }
     if (profile) m_frameProfiler.mark(FrameProfiler::Mapping);

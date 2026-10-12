@@ -90,7 +90,7 @@ public:
         chart.setSize({640, 320});
         chart.setHeatmapService(&lab::LabData::instance().service());
         chart.setActiveSymbol("BTC-USD");
-        chart.setTimeframe(int(minute));
+        chart.view()->setTimeframe(int(minute));
         heatmap::HeatmapChartSettings settings;
         settings.palettePreset = "Fire";
         settings.sensitivityMin = 0.001;
@@ -128,7 +128,7 @@ public:
                                 !snapshot->resolution.columns.empty() && !snapshot->spans.empty() &&
                                 std::all_of(snapshot->spans.begin(), snapshot->spans.end(),
                                             [](const auto& s) { return s.complete; });
-            if ((!needSource || source) && (!needSource || chart.heatmapTickSize() > 0)) return;
+            if ((!needSource || source) && (!needSource || chart.view()->heatmapTickSize() > 0)) return;
         } while (elapsed.elapsed() < 10000);
         throw std::runtime_error("source/tick did not become ready");
     }
@@ -140,8 +140,8 @@ public:
         appendInt(line, "end", v->getVisibleTimeEnd());
         appendDouble(line, "min", v->getMinPrice());
         appendDouble(line, "max", v->getMaxPrice());
-        appendInt(line, "autoScroll", chart.autoScrollEnabled());
-        appendInt(line, "autoPriceScale", chart.autoPriceScale());
+        appendInt(line, "autoScroll", chart.view()->autoScrollEnabled());
+        appendInt(line, "autoPriceScale", chart.view()->autoPriceScale());
         const auto anchor = v->rasterAnchor();
         appendDouble(line, "rasterAnchor.x", anchor.fracX);
         appendDouble(line, "rasterAnchor.y", anchor.fracY);
@@ -162,40 +162,40 @@ public:
     void advance(qint64 delta, const char* name) { clock += delta; step(name); }
     void run() {
         step("cold-bootstrap", false);
-        chart.setViewport(centre - 20 * minute, centre + 20 * minute, 99800, 100500);
+        chart.view()->setViewport(centre - 20 * minute, centre + 20 * minute, 99800, 100500);
         ready();
-        chart.setViewport(centre - 4 * minute, centre + 4 * minute, 100120, 100180);
-        chart.setAutoPriceScale(true);
+        chart.view()->setViewport(centre - 4 * minute, centre + 4 * minute, 100120, 100180);
+        chart.view()->setAutoPriceScale(true);
         step("initial");
         const double points[][2] = {{120, 70}, {320, 160}, {520, 250}};
         for (int i = 0; i < 3; ++i) {
             const auto* view = chart.getViewState();
             const qint64 before = view->getVisibleTimeEnd() - view->getVisibleTimeStart();
-            chart.zoomClicks(1, points[i][0], points[i][1]);
+            chart.view()->zoomClicks(1, points[i][0], points[i][1]);
             if (view->getVisibleTimeEnd() - view->getVisibleTimeStart() >= before)
                 throw std::runtime_error("wheel-in did not change the time span");
             step("wheel-in-0"); advance(65, "wheel-in-65"); advance(65, "wheel-in-130"); advance(170, "wheel-in-300");
-            chart.zoomClicks(-1, points[i][0], points[i][1]);
+            chart.view()->zoomClicks(-1, points[i][0], points[i][1]);
             step("wheel-out-0"); advance(65, "wheel-out-65"); advance(65, "wheel-out-130"); advance(170, "wheel-out-300");
         }
-        chart.zoomContinuous(1.13, 290, 140);
+        chart.view()->zoomContinuous(1.13, 290, 140);
         step("trackpad");
-        chart.endZoomGesture(); advance(300, "trackpad-settle");
-        chart.zoomTimeDrag(34, 230); step("time-drag");
-        chart.endZoomGesture(); advance(300, "time-drag-settle");
-        chart.zoomPriceDrag(-27, 130); step("price-drag");
-        chart.endZoomGesture(); advance(300, "price-drag-settle");
-        chart.zoomClicks(1, 240, 130); advance(65, "pan-glide");
-        chart.beginPanAt(250, 150); chart.updatePanAt(279, 160); step("pan-active");
+        chart.view()->endZoomGesture(); advance(300, "trackpad-settle");
+        chart.view()->zoomTimeDrag(34, 230); step("time-drag");
+        chart.view()->endZoomGesture(); advance(300, "time-drag-settle");
+        chart.view()->zoomPriceDrag(-27, 130); step("price-drag");
+        chart.view()->endZoomGesture(); advance(300, "price-drag-settle");
+        chart.view()->zoomClicks(1, 240, 130); advance(65, "pan-glide");
+        chart.view()->beginPanAt(250, 150); chart.view()->updatePanAt(279, 160); step("pan-active");
         if (chart.rasterCameraNow().drawnStartMs == chart.rasterCameraNow(false).drawnStartMs)
             throw std::runtime_error("pan drag did not shift the raster camera");
-        chart.endPanAt(); step("pan-release"); advance(300, "pan-settle");
-        chart.enableAutoScroll(true);
+        chart.view()->endPanAt(); step("pan-release"); advance(300, "pan-settle");
+        chart.view()->enableAutoScroll(true);
         {
             auto* view = chart.getViewState();
             const qint64 span = view->getVisibleTimeEnd() - view->getVisibleTimeStart();
             const qint64 end = epoch + 2 * kHourMs + 30 * minute;
-            chart.setViewport(end - span, end, view->getMinPrice(), view->getMaxPrice());
+            chart.view()->setViewport(end - span, end, view->getMinPrice(), view->getMaxPrice());
         }
         step("follow-base");
         const qint64 beforeFollow = chart.getViewState()->getVisibleTimeEnd();
@@ -204,26 +204,26 @@ public:
         chart.followLiveForTest(epoch + 3 * kHourMs + 5 * minute); step("follow-2");
         if (afterFirstFollow <= beforeFollow || chart.getViewState()->getVisibleTimeEnd() <= afterFirstFollow)
             throw std::runtime_error("follow-live steps did not advance the view");
-        chart.setTimeframe(int(15 * minute)); step("tf-15m-follow");
-        chart.setTimeframe(int(minute)); step("tf-1m-follow");
-        chart.enableAutoScroll(false); chart.setViewport(centre - 8 * minute, centre + 8 * minute, 100100, 100200);
-        chart.setTimeframe(int(15 * minute)); step("tf-15m-history");
-        chart.setTimeframe(int(minute)); step("tf-1m-history");
-        chart.setAutoPriceScale(false); chart.setActiveSymbol("TINY-USD"); symbol = "TINY-USD"; step("symbol-tiny");
+        chart.view()->setTimeframe(int(15 * minute)); step("tf-15m-follow");
+        chart.view()->setTimeframe(int(minute)); step("tf-1m-follow");
+        chart.view()->enableAutoScroll(false); chart.view()->setViewport(centre - 8 * minute, centre + 8 * minute, 100100, 100200);
+        chart.view()->setTimeframe(int(15 * minute)); step("tf-15m-history");
+        chart.view()->setTimeframe(int(minute)); step("tf-1m-history");
+        chart.view()->setAutoPriceScale(false); chart.setActiveSymbol("TINY-USD"); symbol = "TINY-USD"; step("symbol-tiny");
         chart.setActiveSymbol("BTC-USD"); symbol = "BTC-USD"; step("symbol-btc");
-        chart.fitView(true, false); step("fit-time");
-        chart.fitView(false, true); step("fit-price");
-        chart.fitView(true, true); step("fit-both");
-        chart.resetView(); step("reset");
-        UnifiedGridRenderer::ViewportRequest request;
+        chart.view()->fitView(true, false); step("fit-time");
+        chart.view()->fitView(false, true); step("fit-price");
+        chart.view()->fitView(true, true); step("fit-both");
+        chart.view()->resetView(); step("reset");
+        chart::ViewportRequest request;
         request.startMs = centre - 3 * minute; request.endMs = centre + 3 * minute;
-        chart.applyViewportRequest(request); step("request-time");
+        chart.view()->controller().commands().applyViewportRequest(request); step("request-time");
         request = {}; request.priceMin = 100000; request.priceMax = 100300;
-        chart.applyViewportRequest(request); step("request-price");
+        chart.view()->controller().commands().applyViewportRequest(request); step("request-price");
         request = {}; request.autoScale = true; request.followLive = true;
-        chart.applyViewportRequest(request); step("request-flags");
+        chart.view()->controller().commands().applyViewportRequest(request); step("request-flags");
         request = {}; request.fit = "default";
-        chart.applyViewportRequest(request); step("request-default");
+        chart.view()->controller().commands().applyViewportRequest(request); step("request-default");
     }
     const std::string& text() const { return output; }
 };

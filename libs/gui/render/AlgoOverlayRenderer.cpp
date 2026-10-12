@@ -23,12 +23,14 @@ void AlgoOverlayRenderer::setMappingProvider(QObject* provider) {
 
     m_mappingProvider = provider;
     if (m_mappingProvider) {
+        auto* mapping = qobject_cast<ITimeAxisMappingProvider*>(provider);
+        auto* view = mapping ? mapping->viewNotifications() : nullptr;
         m_mappingConnections.push_back(QObject::connect(
-            m_mappingProvider, SIGNAL(viewportChanged()), this, SLOT(onMappingChanged())));
+            view, SIGNAL(viewportChanged()), this, SLOT(onMappingChanged())));
         m_mappingConnections.push_back(QObject::connect(
-            m_mappingProvider, SIGNAL(timeframeChanged()), this, SLOT(onMappingChanged())));
+            view, SIGNAL(timeframeChanged()), this, SLOT(onMappingChanged())));
         m_mappingConnections.push_back(QObject::connect(
-            m_mappingProvider, SIGNAL(panVisualOffsetChanged()), this, SLOT(onMappingChanged())));
+            view, SIGNAL(panVisualOffsetChanged()), this, SLOT(onMappingChanged())));
         m_mappingConnections.push_back(QObject::connect(
             m_mappingProvider, SIGNAL(liveRenderTick()), this, SLOT(onMappingChanged())));
     }

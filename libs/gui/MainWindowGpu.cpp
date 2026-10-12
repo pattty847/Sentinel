@@ -17,6 +17,7 @@
 #include <QUuid>
 #include "ChartModeController.h"
 #include "MainWindowGpu.h"
+#include "mainwindow/ChartAgentPort.hpp"
 #include "UnifiedGridRenderer.h"
 #include "render/DataProcessor.hpp"
 #include "SentinelLogging.hpp"
@@ -79,7 +80,7 @@ std::function<MarketHealth::ChartFacts()> chartHealthProvider(UnifiedGridRendere
     QPointer<MarketHealth> model = health;
     return [chart, model] {
         MarketHealth::ChartFacts facts;
-        if (!chart || !model || model->activeSymbol().isEmpty() || !chart->heatmapLayerEnabled()) return facts;
+        if (!chart || !model || model->activeSymbol().isEmpty() || !chart->layers()->heatmapEnabled()) return facts;
         const auto *layer = chart->gpuHeatmapLayer();
         if (!layer || !layer->active() || !layer->controller()) return facts;
         facts.symbol = model->activeSymbol();
@@ -197,7 +198,7 @@ MainWindowGPU::MainWindowGPU(QWidget* parent, int symbolSwitchTimeoutMs)
                 renderer->applyServerConfig(config);
                 if (m_heatmapDock && m_heatmapDock->toolbar()) {
                     m_heatmapDock->toolbar()->setAvailableTimeframes(config.chart.servedTimeframesMs);
-                    m_heatmapDock->toolbar()->setTimeframeMs(renderer->getCurrentTimeframe());
+                    m_heatmapDock->toolbar()->setTimeframeMs(renderer->view()->getCurrentTimeframe());
                 }
             }
         }
@@ -272,13 +273,13 @@ MainWindowGPU::MainWindowGPU(QWidget* parent, int symbolSwitchTimeoutMs)
     setupConnections();
     if (m_qmlController) {
         if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
-            connect(renderer, &UnifiedGridRenderer::timeframeChanged, this, [this]() {
+            connect(renderer->view(), &chart::ChartViewQml::timeframeChanged, this, [this]() {
                 ++m_agentApiSelectionEpoch;
                 m_candlesReceivedAtMs.reset();
                 m_footprintReceivedAtMs.reset(); // footprint columns follow the chart timeframe
                 requestCandleHistoryForSymbol(m_currentSymbol);
             });
-            connect(renderer, &UnifiedGridRenderer::viewportChanged, this, [this]() {
+            connect(renderer->view(), &chart::ChartViewQml::viewportChanged, this, [this]() {
                 requestCandleHistoryForSymbol(m_currentSymbol);
             });
         }
@@ -387,19 +388,19 @@ void MainWindowGPU::setupUI() {
         connect(m_heatmapDock->toolbar(), &TopToolbar::heatmapToggled, this, [this](bool enabled) {
             if (!m_qmlController) return;
             if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
-                renderer->setHeatmapLayerEnabled(enabled);
+                renderer->layers()->setHeatmapEnabled(enabled);
             }
         });
         connect(m_heatmapDock->toolbar(), &TopToolbar::footprintToggled, this, [this](bool enabled) {
             if (!m_qmlController) return;
             if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
-                renderer->setFootprintLayerEnabled(enabled);
+                renderer->layers()->setFootprintEnabled(enabled);
             }
         });
         connect(m_heatmapDock->toolbar(), &TopToolbar::tpoToggled, this, [this](bool enabled) {
             if (!m_qmlController) return;
             if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
-                renderer->setTpoLayerEnabled(enabled);
+                renderer->layers()->setTpoEnabled(enabled);
             }
             if (enabled && m_connected && m_userSubscribed) {
                 requestTpoHistoryForSymbol(m_currentSymbol);
@@ -408,7 +409,7 @@ void MainWindowGPU::setupUI() {
         connect(m_heatmapDock->toolbar(), &TopToolbar::volumeProfileToggled, this, [this](bool enabled) {
             if (!m_qmlController) return;
             if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
-                renderer->setVolumeProfileLayerEnabled(enabled);
+                renderer->layers()->setVolumeProfileEnabled(enabled);
             }
             if (enabled && m_connected && m_userSubscribed) {
                 requestTpoHistoryForSymbol(m_currentSymbol);
@@ -638,7 +639,7 @@ void MainWindowGPU::setupGuiApiServer() {
     m_guiApiServer = std::make_unique<GuiApiServer>(this,
                                                     m_heatmapDock ? m_heatmapDock->qquickView() : nullptr,
                                                     [this]() { return agentApiStateSnapshot(); },
-                                                    [this]() { return agentApiViewportSnapshot(); },
+                                                    [this]() { return chartAgentPort().snapshot(agentApiMetadata()); },
                                                     [this](const AgentApi::ValidationResult& q) { return agentApiCandlesSnapshot(q); },
                                                     [this](int levels) { return agentApiBookSnapshot(levels); },
                                                     [this](qint64 windowMs, int limit) { return agentApiTradesSnapshot(windowMs, limit); },
@@ -654,15 +655,9 @@ void MainWindowGPU::setupGuiApiServer() {
                                                         renderer->gpuHeatmapLayer()->scanWalls(query, std::move(complete));
                                                     },
                                                     [this](const QString& kind, const AgentApi::ControlBody& body) { return agentApiApplyControl(kind, body); },
-                                                    [this]() {
-                                                        auto* r = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
-                                                        return std::pair<quint64, quint64>{r ? r->renderedControlRevision() : 0,
-                                                                                          r ? r->renderedFrameId() : 0};
-                                                    },
+                                                    [this]() { return chartAgentPort().rendered(); },
                                                     [this](quint64 revision) {
-                                                        if (auto* r = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr)
-                                                            r->setAgentControlRevision(revision, m_agentApiSelectionEpoch,
-                                                                                       agentApiViewportSnapshot().viewportVersion.value_or(0));
+                                                        chartAgentPort().setControlRevision(revision, m_agentApiSelectionEpoch);
                                                     },
                                                     this);
     m_guiApiServer->setHeatmapSnapshot([this] { return agentApiHeatmapSnapshot(); });
@@ -941,7 +936,7 @@ void MainWindowGPU::selectTimeframe(int ms) {
     auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
     if (!renderer) return;
     sLog_App("ui: timeframe selected tfMs=" << ms << " symbol=" << m_currentSymbol);
-    renderer->setTimeframe(ms);
+    renderer->view()->setTimeframe(ms);
     if (m_heatmapDock && m_heatmapDock->toolbar()) m_heatmapDock->toolbar()->setTimeframeMs(ms);
     if (m_connected && m_userSubscribed) {
         requestCandleHistoryForSymbol(m_currentSymbol);
@@ -995,7 +990,7 @@ void MainWindowGPU::requestFootprintHistoryForSymbol(const QString& symbol) {
     int64_t timeframeMs = 0;
     if (m_qmlController) {
         if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
-            timeframeMs = renderer->getCurrentTimeframe();
+            timeframeMs = renderer->view()->getCurrentTimeframe();
         }
     }
     const auto& overlays = GuiConfigStore::instance().serverConfig().tradeOverlays;
@@ -1015,9 +1010,9 @@ void MainWindowGPU::requestTpoHistoryForSymbol(const QString& symbol) {
     int sessions = 5;
     if (m_qmlController) {
         if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
-            timeframeMs = renderer->tpoTimeframeMs();
-            sessionType = renderer->tpoSessionType();
-            sessions = renderer->tpoSessions();
+            timeframeMs = renderer->tpo()->tpoTimeframeMs();
+            sessionType = renderer->tpo()->tpoSessionType();
+            sessions = renderer->tpo()->tpoSessions();
         }
     }
     timeframeMs = tpo::resolvePeriodMs(sessionType, timeframeMs);
@@ -1078,13 +1073,13 @@ void MainWindowGPU::sendTpoHistoryPage(const std::optional<tpo::HistoryPager::Re
 void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
     auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
     if (!renderer || !m_dataSource) return;
-    const int64_t tfSec = std::max<int64_t>(1, (renderer->getCurrentTimeframe() + 999LL) / 1000);
+    const int64_t tfSec = std::max<int64_t>(1, (renderer->view()->getCurrentTimeframe() + 999LL) / 1000);
     const bool ready = canRequestConfiguredHistoryForSymbol(symbol);
     // Selection is updated even before readiness/viewport initialization, so a
     // queued reply from the previous selection can never enter the new series.
     m_dataSource->setCandleHistoryViewport(symbol, tfSec,
-        ready ? renderer->getVisibleTimeStart() : 0,
-        ready ? renderer->getVisibleTimeEnd() : 0);
+        ready ? renderer->view()->getVisibleTimeStart() : 0,
+        ready ? renderer->view()->getVisibleTimeEnd() : 0);
 }
 
 void MainWindowGPU::closeEvent(QCloseEvent* event) {
@@ -1186,27 +1181,27 @@ void MainWindowGPU::connectMarketDataSignals() {
             tf = serverConfig.chart.timeframesMs.front();
         }
         if (tf > 0) {
-            unifiedGridRenderer->setTimeframe(static_cast<int>(tf));
+            unifiedGridRenderer->view()->setTimeframe(static_cast<int>(tf));
         }
         if (m_serverConfigReady) {
             m_heatmapDock->toolbar()->setAvailableTimeframes(serverConfig.chart.servedTimeframesMs);
         }
-        m_heatmapDock->toolbar()->setTimeframeMs(unifiedGridRenderer->getCurrentTimeframe());
+        m_heatmapDock->toolbar()->setTimeframeMs(unifiedGridRenderer->view()->getCurrentTimeframe());
         sLog_App("Chart timeframe init: serverTfMs=" << tf
-                 << " rendererTfMs=" << unifiedGridRenderer->getCurrentTimeframe());
+                 << " rendererTfMs=" << unifiedGridRenderer->view()->getCurrentTimeframe());
         auto* toolbar = m_heatmapDock->toolbar();
-        toolbar->setLayerToggleStates(unifiedGridRenderer->heatmapLayerEnabled(),
-                                      unifiedGridRenderer->footprintLayerEnabled(),
-                                      unifiedGridRenderer->tpoLayerEnabled(),
-                                      unifiedGridRenderer->volumeProfileLayerEnabled());
-        connect(unifiedGridRenderer,
-                &UnifiedGridRenderer::layerVisibilityChanged,
+        toolbar->setLayerToggleStates(unifiedGridRenderer->layers()->heatmapEnabled(),
+                                      unifiedGridRenderer->layers()->footprintEnabled(),
+                                      unifiedGridRenderer->layers()->tpoEnabled(),
+                                      unifiedGridRenderer->layers()->volumeProfileEnabled());
+        connect(unifiedGridRenderer->layers(),
+                &chart::LayerVisibility::layerVisibilityChanged,
                 this,
                 [toolbar, unifiedGridRenderer]() {
-                    toolbar->setLayerToggleStates(unifiedGridRenderer->heatmapLayerEnabled(),
-                                                  unifiedGridRenderer->footprintLayerEnabled(),
-                                                  unifiedGridRenderer->tpoLayerEnabled(),
-                                                  unifiedGridRenderer->volumeProfileLayerEnabled());
+                    toolbar->setLayerToggleStates(unifiedGridRenderer->layers()->heatmapEnabled(),
+                                                  unifiedGridRenderer->layers()->footprintEnabled(),
+                                                  unifiedGridRenderer->layers()->tpoEnabled(),
+                                                  unifiedGridRenderer->layers()->volumeProfileEnabled());
                 },
                 Qt::QueuedConnection);
     }
@@ -1219,14 +1214,14 @@ void MainWindowGPU::connectMarketDataSignals() {
     if (m_modeController) {
         connect(m_modeController,
                 &ChartModeController::primaryFieldChanged,
-                unifiedGridRenderer,
-                &UnifiedGridRenderer::setPrimaryField,
+                unifiedGridRenderer->layers(),
+                &chart::LayerVisibility::setPrimaryField,
                 Qt::QueuedConnection);
-        unifiedGridRenderer->setPrimaryField(m_modeController->primaryField());
+        unifiedGridRenderer->layers()->setPrimaryField(m_modeController->primaryField());
     }
 
-    connect(unifiedGridRenderer,
-            &UnifiedGridRenderer::tpoConfigChanged,
+    connect(unifiedGridRenderer->tpo(),
+            &chart::ChartTpoQml::tpoConfigChanged,
             this,
             [this]() {
                 if (!m_connected || !m_userSubscribed) {
@@ -1589,47 +1584,21 @@ AgentApi::StateSnapshot MainWindowGPU::agentApiStateSnapshot() const {
     s.volumeProfileReceivedAtMs = m_volumeProfileReceivedAtMs;
     if (m_qmlController) {
         if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
-            s.heatmapLayer = renderer->heatmapLayerEnabled();
-            s.footprintLayer = renderer->footprintLayerEnabled();
-            s.tpoLayer = renderer->tpoLayerEnabled();
-            s.tpoLayout = renderer->tpoLayout();
-            s.tpoTheme = renderer->tpoTheme();
-            s.volumeProfileLayer = renderer->volumeProfileLayerEnabled();
+            s.heatmapLayer = renderer->layers()->heatmapEnabled();
+            s.footprintLayer = renderer->layers()->footprintEnabled();
+            s.tpoLayer = renderer->layers()->tpoEnabled();
+            s.tpoLayout = renderer->tpo()->tpoLayout();
+            s.tpoTheme = renderer->tpo()->tpoTheme();
+            s.volumeProfileLayer = renderer->layers()->volumeProfileEnabled();
         }
     }
     if (m_modeController) s.candlesLayer = m_modeController->candlesEnabled();
     return s;
 }
 
-AgentApi::ViewportSnapshot MainWindowGPU::agentApiViewportSnapshot() const {
-    AgentApi::ViewportSnapshot s;
-    s.meta = agentApiMetadata();
-    if (!m_qmlController) return s;
-    auto* renderer = m_qmlController->getUnifiedGridRenderer();
-    if (!renderer) return s;
-    const int64_t tf = renderer->getCurrentTimeframe();
-    if (tf > 0) {
-        s.heatmapTimeframeMs = tf;
-        s.candleTimeframeMs = tf; // v1 QML links candle cadence to renderer cadence.
-    }
-    s.followLive = renderer->autoScrollEnabled();
-    s.autoScale = renderer->autoPriceScale();
-    auto* view = renderer->getViewState();
-    if (!view || !view->isTimeWindowValid()) return s;
-    const qint64 start = view->getVisibleTimeStart();
-    const qint64 end = view->getVisibleTimeEnd();
-    const double low = view->getMinPrice();
-    const double high = view->getMaxPrice();
-    if (end > start) { s.startMs = start; s.endMs = end; }
-    if (std::isfinite(low) && std::isfinite(high) && high > low) { s.priceMin = low; s.priceMax = high; }
-    s.viewportVersion = view->getViewportVersion();
-    if (renderer->width() > 0) s.widthPx = renderer->width();
-    if (renderer->height() > 0) s.heightPx = renderer->height();
-    // What the last frame drew (the raster camera; the bounds above are the stored view).
-    if (const auto cam = renderer->currentFrameContext().raster; cam.valid)
-        s.drawn = AgentApi::ViewportSnapshot::Drawn{cam.drawnStartMs, cam.drawnEndMs, cam.drawnMinPrice,
-                                                    cam.drawnMaxPrice, cam.rowPx,    cam.colPx, cam.dpr};
-    return s;
+ChartAgentPort MainWindowGPU::chartAgentPort() const {
+    auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
+    return renderer ? renderer->agentPort() : ChartAgentPort{};
 }
 
 QJsonObject MainWindowGPU::agentApiHeatmapSnapshot() const {
@@ -1668,7 +1637,7 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
         const bool persist = AgentHostMode::dockChangesPersist(body.persistDocks);
         out.data["visible"] = m_dockVisibility->apply(body.dockVisible, body.dockFocus, persist);
         out.data["persist"] = persist;
-        out.viewportVersion = agentApiViewportSnapshot().viewportVersion.value_or(0);
+        out.viewportVersion = chartAgentPort().snapshot(agentApiMetadata()).viewportVersion.value_or(0);
         return out;
     }
     auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
@@ -1705,38 +1674,22 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
         out.data["heatmapTimeframeMs"] = body.timeframeMs;
         out.data["candleTimeframeMs"] = body.timeframeMs;
     } else if (kind == "viewport") {
-        const auto current = agentApiViewportSnapshot();
-        if (!current.startMs || !current.endMs || !current.priceMin || !current.priceMax) {
-            out.status = 503; out.code = "viewport_unavailable"; out.message = "Chart viewport is not ready";
-            return out;
-        }
-        const QString error = renderer->applyViewportRequest(
-            {body.startMs, body.endMs, body.priceMin, body.priceMax, body.followLive, body.autoScale, body.fit});
-        if (error == "fit_unavailable") {
-            out.status = 409; out.code = "fit_unavailable";
-            out.message = "Auto-fit needs known data (a live anchor or a price)";
-            return out;
-        }
-        if (!body.fit.isEmpty()) out.data["fit"] = body.fit;
-        const auto after = agentApiViewportSnapshot();
-        out.viewportVersion = after.viewportVersion.value_or(0);
-        out.data["viewportVersion"] = QString::number(out.viewportVersion);
-        out.data["followLive"] = after.followLive.value_or(false);
-        out.data["autoScale"] = after.autoScale.value_or(false);
+        out = chartAgentPort().applyViewport(body);
+        if (out.status != 200) return out;
     } else if (kind == "layers") {
         auto* toolbar = m_heatmapDock ? m_heatmapDock->toolbar() : nullptr;
         for (auto it = body.layers.begin(); it != body.layers.end(); ++it) {
             const bool enabled = it.value().toBool();
-            if (it.key() == "tpoLayout") { renderer->setTpoLayout(it.value().toString()); continue; }
-            if (it.key() == "tpoTheme") { renderer->setTpoTheme(it.value().toString()); continue; }
-            if (it.key() == "heatmap") { if (toolbar) emit toolbar->heatmapToggled(enabled); else renderer->setHeatmapLayerEnabled(enabled); }
-            else if (it.key() == "footprint") { if (toolbar) emit toolbar->footprintToggled(enabled); else renderer->setFootprintLayerEnabled(enabled); }
-            else if (it.key() == "tpo") { if (toolbar) emit toolbar->tpoToggled(enabled); else renderer->setTpoLayerEnabled(enabled); }
-            else if (it.key() == "volumeProfile") { if (toolbar) emit toolbar->volumeProfileToggled(enabled); else renderer->setVolumeProfileLayerEnabled(enabled); }
+            if (it.key() == "tpoLayout") { renderer->tpo()->setTpoLayout(it.value().toString()); continue; }
+            if (it.key() == "tpoTheme") { renderer->tpo()->setTpoTheme(it.value().toString()); continue; }
+            if (it.key() == "heatmap") { if (toolbar) emit toolbar->heatmapToggled(enabled); else renderer->layers()->setHeatmapEnabled(enabled); }
+            else if (it.key() == "footprint") { if (toolbar) emit toolbar->footprintToggled(enabled); else renderer->layers()->setFootprintEnabled(enabled); }
+            else if (it.key() == "tpo") { if (toolbar) emit toolbar->tpoToggled(enabled); else renderer->layers()->setTpoEnabled(enabled); }
+            else if (it.key() == "volumeProfile") { if (toolbar) emit toolbar->volumeProfileToggled(enabled); else renderer->layers()->setVolumeProfileEnabled(enabled); }
             else if (it.key() == "candles" && m_modeController) m_modeController->setCandlesEnabled(enabled);
         }
-        if (toolbar) toolbar->setLayerToggleStates(renderer->heatmapLayerEnabled(), renderer->footprintLayerEnabled(),
-                                                   renderer->tpoLayerEnabled(), renderer->volumeProfileLayerEnabled());
+        if (toolbar) toolbar->setLayerToggleStates(renderer->layers()->heatmapEnabled(), renderer->layers()->footprintEnabled(),
+                                                   renderer->layers()->tpoEnabled(), renderer->layers()->volumeProfileEnabled());
         const auto state = agentApiStateSnapshot();
         out.data["layers"] = QJsonObject{{"heatmap", state.heatmapLayer.value_or(false)},
                                           {"candles", state.candlesLayer.value_or(false)},
@@ -1746,7 +1699,7 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
                                           {"tpoLayout", state.tpoLayout.value_or(QString())},
                                           {"tpoTheme", state.tpoTheme.value_or(QString())}};
     }
-    if (!out.viewportVersion) out.viewportVersion = agentApiViewportSnapshot().viewportVersion.value_or(0);
+    if (!out.viewportVersion) out.viewportVersion = chartAgentPort().snapshot(agentApiMetadata()).viewportVersion.value_or(0);
     return out;
 }
 

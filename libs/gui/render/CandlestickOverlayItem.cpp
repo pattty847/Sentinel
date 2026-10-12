@@ -214,15 +214,17 @@ void CandlestickOverlayItem::setMappingProvider(QObject* provider) {
     m_mappingProvider = qobject_cast<ITimeAxisMappingProvider*>(provider);
     m_lastBoundarySequence = std::numeric_limits<qint64>::min();
     if (m_mappingProviderObject) {
-        m_mappingViewportConn = QObject::connect(m_mappingProviderObject.data(),
+        auto* mapping = qobject_cast<ITimeAxisMappingProvider*>(provider);
+        auto* view = mapping ? mapping->viewNotifications() : nullptr;
+        m_mappingViewportConn = QObject::connect(view,
                                                  SIGNAL(viewportChanged()),
                                                  this,
                                                  SLOT(update()));
-        m_mappingPanConn = QObject::connect(m_mappingProviderObject.data(),
+        m_mappingPanConn = QObject::connect(view,
                                             SIGNAL(panVisualOffsetChanged()),
                                             this,
                                             SLOT(onPanVisualOffsetChanged()));
-        m_mappingTimeframeConn = QObject::connect(m_mappingProviderObject.data(),
+        m_mappingTimeframeConn = QObject::connect(view,
                                                   SIGNAL(timeframeChanged()),
                                                   this,
                                                   SLOT(update()));

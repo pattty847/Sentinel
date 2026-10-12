@@ -79,12 +79,14 @@ void PaperTradeOverlayRenderer::setMappingProvider(QObject* provider) {
     m_mappingProviderObject = provider;
     m_mappingProvider = qobject_cast<ITimeAxisMappingProvider*>(provider);
     if (m_mappingProviderObject) {
+        auto* mapping = qobject_cast<ITimeAxisMappingProvider*>(provider);
+        auto* view = mapping ? mapping->viewNotifications() : nullptr;
         m_mappingConnections.push_back(QObject::connect(
-            m_mappingProviderObject.data(), SIGNAL(viewportChanged()), this, SLOT(onMappingChanged())));
+            view, SIGNAL(viewportChanged()), this, SLOT(onMappingChanged())));
         m_mappingConnections.push_back(QObject::connect(
-            m_mappingProviderObject.data(), SIGNAL(timeframeChanged()), this, SLOT(onMappingChanged())));
+            view, SIGNAL(timeframeChanged()), this, SLOT(onMappingChanged())));
         m_mappingConnections.push_back(QObject::connect(
-            m_mappingProviderObject.data(), SIGNAL(panVisualOffsetChanged()), this, SLOT(onMappingChanged())));
+            view, SIGNAL(panVisualOffsetChanged()), this, SLOT(onMappingChanged())));
         m_mappingConnections.push_back(QObject::connect(
             m_mappingProviderObject.data(), SIGNAL(liveRenderTick()), this, SLOT(onMappingChanged())));
     }

@@ -50,10 +50,10 @@ void UnifiedGridRenderer::init() {
     if (width() > 0 && height() > 0) {
         getViewState()->setViewportSize(width(), height());
     }
-    connect(getViewState(), &GridViewState::viewportChanged, this, &UnifiedGridRenderer::viewportChanged);
+    connect(getViewState(), &GridViewState::viewportChanged, view(), &chart::ChartViewQml::viewportChanged);
     connect(getViewState(), &GridViewState::viewportChanged, this, &UnifiedGridRenderer::onViewportChanged);
-    connect(getViewState(), &GridViewState::panVisualOffsetChanged, this, &UnifiedGridRenderer::panVisualOffsetChanged);
-    connect(getViewState(), &GridViewState::autoScrollEnabledChanged, this, &UnifiedGridRenderer::autoScrollEnabledChanged);
+    connect(getViewState(), &GridViewState::panVisualOffsetChanged, view(), &chart::ChartViewQml::panVisualOffsetChanged);
+    connect(getViewState(), &GridViewState::autoScrollEnabledChanged, view(), &chart::ChartViewQml::autoScrollEnabledChanged);
     bindViewReactions(ReactionPhase::ViewState);
     // Auto price scale (gpu): every setViewport takes its price from the visible candles.
     getViewState()->setPriceFit([this](qint64 start, qint64 end, double& priceMin, double& priceMax) {

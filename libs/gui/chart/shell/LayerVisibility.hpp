@@ -1,12 +1,19 @@
 #pragma once
 #include <functional>
+#include <QObject>
 #include <string_view>
 
 namespace chart {
-class LayerVisibility {
+class LayerVisibility : public QObject {
+    Q_OBJECT
+    Q_PROPERTY(int primaryField READ primaryField NOTIFY primaryFieldChanged)
+    Q_PROPERTY(bool heatmapLayerEnabled READ heatmapEnabled NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(bool footprintLayerEnabled READ footprintEnabled NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(bool tpoLayerEnabled READ tpoEnabled NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(bool volumeProfileLayerEnabled READ volumeProfileEnabled NOTIFY layerVisibilityChanged)
 public:
     std::function<void(std::string_view, bool, bool)> report;
-    std::function<void()> requestUpdate, primaryFieldChanged, visibilityChanged;
+    std::function<void()> requestUpdate;
 
     int primaryField() const { return primaryField_; }
     bool heatmapEnabled() const { return heatmap_; }
@@ -38,11 +45,11 @@ public:
         }
         if (report) report("primaryField", false, false);
         if (requestUpdate) requestUpdate();
-        if (primaryFieldChanged) primaryFieldChanged();
-        if (visibilityChanged) visibilityChanged();
+        emit primaryFieldChanged();
+        emit layerVisibilityChanged();
     }
 
-    void setVolumeProfileEnabled(bool enabled) {
+    Q_INVOKABLE void setVolumeProfileEnabled(bool enabled) {
         const bool newHeatmapEnabled = enabled ? false : heatmap_;
         const bool newFootprintEnabled = enabled ? false : footprint_;
         const bool newTpoEnabled = enabled ? false : tpo_;
@@ -57,7 +64,7 @@ public:
         changed("volumeProfile", enabled);
     }
 
-    void setHeatmapEnabled(bool enabled) {
+    Q_INVOKABLE void setHeatmapEnabled(bool enabled) {
         const bool newTpoEnabled = enabled ? false : tpo_;
         const bool newVpEnabled = enabled ? false : volumeProfile_;
         if (heatmap_ == enabled && tpo_ == newTpoEnabled && volumeProfile_ == newVpEnabled) {
@@ -72,7 +79,7 @@ public:
         changed("heatmap", enabled);
     }
 
-    void setFootprintEnabled(bool enabled) {
+    Q_INVOKABLE void setFootprintEnabled(bool enabled) {
         const bool newTpoEnabled = enabled ? false : tpo_;
         const bool newVpEnabled = enabled ? false : volumeProfile_;
         if (footprint_ == enabled && tpo_ == newTpoEnabled && volumeProfile_ == newVpEnabled) {
@@ -87,7 +94,7 @@ public:
         changed("footprint", enabled);
     }
 
-    void setTpoEnabled(bool enabled) {
+    Q_INVOKABLE void setTpoEnabled(bool enabled) {
         const bool newHeatmapEnabled = enabled ? false : heatmap_;
         const bool newFootprintEnabled = enabled ? false : footprint_;
         const bool newVolumeProfileEnabled = enabled ? false : volumeProfile_;
@@ -104,11 +111,14 @@ public:
         }
         changed("tpo", enabled);
     }
+signals:
+    void primaryFieldChanged();
+    void layerVisibilityChanged();
 private:
     void changed(std::string_view field, bool enabled) {
         if (report) report(field, enabled, false);
         if (requestUpdate) requestUpdate();
-        if (visibilityChanged) visibilityChanged();
+        emit layerVisibilityChanged();
     }
     int primaryField_ = 0;
     bool heatmap_ = true;

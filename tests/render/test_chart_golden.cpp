@@ -150,7 +150,7 @@ struct Harness {
         ugr->setSize(QSizeF(640, 320));
         ugr->setHeatmapService(&lab::LabData::instance().service());
         ugr->setActiveSymbol("BTC-USD");
-        ugr->setTimeframe(int(minute));
+        ugr->view()->setTimeframe(int(minute));
         setSettings(false, false);
         ugr->setZoomClockForTest([this] { return clock; });
         std::vector<CandleSeriesBuffer::CandleBar> bars;
@@ -230,7 +230,7 @@ struct Harness {
         }
         throw Failure(std::string("did not settle: ") + what);
     }
-    void view(int64_t lo, int64_t hi, double pmin, double pmax) { ugr->setViewport(lo, hi, pmin, pmax); }
+    void view(int64_t lo, int64_t hi, double pmin, double pmax) { ugr->view()->setViewport(lo, hi, pmin, pmax); }
 };
 
 struct Scene {
@@ -246,7 +246,7 @@ TradeOverlayGrid gridOf(int64_t start, int64_t end, double maxPrice, double tick
 
 void rest(Harness& h) {
     h.view(viewLo, viewHi, 99'900, 100'300);
-    h.ugr->setAutoPriceScale(true);
+    h.ugr->view()->setAutoPriceScale(true);
     h.settle("rest");
 }
 void useViewport(Harness& h) { h.view(viewLo, viewHi, 99'900, 100'300); h.settle("viewport"); }
@@ -266,28 +266,28 @@ std::vector<Scene> scenes() {
     }});
     s.push_back({"03.mid-glide-65ms", [](Harness& h) {
         useViewport(h);
-        h.ugr->zoomClicks(1, 320, 160);
+        h.ugr->view()->zoomClicks(1, 320, 160);
         h.clock += 65;
         h.settle("mid-glide", true, true);
         if (!h.ugr->zoomGliding()) throw Failure("scene 3 is not mid-glide at 65 ms");
     }});
     s.push_back({"04.drag-0.3px", [](Harness& h) {
         useViewport(h);
-        h.ugr->beginPanAt(320, 160);
-        h.ugr->updatePanAt(320.3, 160);
+        h.ugr->view()->beginPanAt(320, 160);
+        h.ugr->view()->updatePanAt(320.3, 160);
         h.settle("drag");
     }});
     s.push_back({"05.follow-live-step", [](Harness& h) {
         useViewport(h);
-        h.ugr->enableAutoScroll(true);
+        h.ugr->view()->enableAutoScroll(true);
         h.ugr->followLiveForTest(epoch + 2 * kHourMs + 45 * minute);
         h.settle("follow live");
     }});
     for (const char* layout : {"split", "collapsed"}) {
         s.push_back({layout[0] == 's' ? "06a.tpo-split" : "06b.tpo-collapsed", [layout](Harness& h) {
             useViewport(h);
-            h.ugr->setTpoLayout(layout);
-            h.ugr->setTpoLayerEnabled(true);
+            h.ugr->tpo()->setTpoLayout(layout);
+            h.ugr->layers()->setTpoEnabled(true);
             h.settle("tpo plain", false);
             const QByteArray plain = pixels(h.image);
             const auto grid = gridOf(viewLo, viewLo + 24 * kHourMs, 100'300, 10);
@@ -302,7 +302,7 @@ std::vector<Scene> scenes() {
     }
     s.push_back({"07.volume-profile", [](Harness& h) {
         useViewport(h);
-        h.ugr->setVolumeProfileLayerEnabled(true);
+        h.ugr->layers()->setVolumeProfileEnabled(true);
         h.settle("vp plain", false);
         const QByteArray plain = pixels(h.image);
         std::vector<float> bins(40);
@@ -319,7 +319,7 @@ std::vector<Scene> scenes() {
     }});
     s.push_back({"08.footprint", [](Harness& h) {
         useViewport(h);
-        h.ugr->setFootprintLayerEnabled(true);
+        h.ugr->layers()->setFootprintEnabled(true);
         h.settle("footprint plain", false);
         const QByteArray plain = pixels(h.image);
         const auto grid = gridOf(viewLo, viewLo + 40 * minute, 100'300, 4);
@@ -363,7 +363,7 @@ std::vector<Scene> scenes() {
     }});
     s.push_back({"11.after-1m-to-15m", [](Harness& h) {
         useViewport(h);
-        h.ugr->setTimeframe(int(15 * minute));
+        h.ugr->view()->setTimeframe(int(15 * minute));
         h.settle("15m");
     }});
     s.push_back({"12.rest-dpr2", [](Harness& h) {

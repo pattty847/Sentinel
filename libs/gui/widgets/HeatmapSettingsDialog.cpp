@@ -287,16 +287,16 @@ void HeatmapSettingsDialog::setRenderer(UnifiedGridRenderer *renderer) {
     if (renderer) {
         // Renderer-backed controls follow changes made elsewhere (toolbar, chart
         // menu, Agent API) without echoing them back.
-        connect(renderer, &UnifiedGridRenderer::candleStyleChanged, this, [this] {
+        connect(renderer->candles(), &chart::ChartLookSettings::candleStyleChanged, this, [this] {
             if (!m_renderer) return;
             const QSignalBlocker block(m_candleStyle);
-            m_candleStyle->setCurrentIndex(std::clamp(m_renderer->candleStyle(), 0, 2));
+            m_candleStyle->setCurrentIndex(std::clamp(m_renderer->candles()->candleStyle(), 0, 2));
         });
-        connect(renderer, &UnifiedGridRenderer::tpoStyleChanged, this, [this] {
+        connect(renderer->tpo(), &chart::ChartTpoQml::tpoStyleChanged, this, [this] {
             if (!m_renderer) return;
             const QSignalBlocker a(m_tpoLayoutCombo), b(m_tpoThemeCombo);
-            m_tpoLayoutCombo->setCurrentIndex(std::max(0, m_tpoLayoutCombo->findData(m_renderer->tpoLayout())));
-            m_tpoThemeCombo->setCurrentIndex(std::max(0, m_tpoThemeCombo->findData(m_renderer->tpoTheme())));
+            m_tpoLayoutCombo->setCurrentIndex(std::max(0, m_tpoLayoutCombo->findData(m_renderer->tpo()->tpoLayout())));
+            m_tpoThemeCombo->setCurrentIndex(std::max(0, m_tpoThemeCombo->findData(m_renderer->tpo()->tpoTheme())));
         });
     }
     refreshFromRenderer();
@@ -366,11 +366,11 @@ QPushButton *HeatmapSettingsDialog::resetButton(const QString &tab, QWidget *par
         // Renderer-backed controls return to their configured values too.
         if (tab == "Look" && m_renderer) {
             const auto &d = m_model->configDefaults();
-            m_renderer->setHeatmapGamma(d.gamma);
-            m_renderer->setHeatmapContrast(d.contrast);
-            m_renderer->setHeatmapShaderFloor(d.shaderFloor);
+            m_renderer->candles()->setHeatmapGamma(d.gamma);
+            m_renderer->candles()->setHeatmapContrast(d.contrast);
+            m_renderer->candles()->setHeatmapShaderFloor(d.shaderFloor);
         }
-        if (tab == "TPO" && m_renderer) m_renderer->applyTpoConfig(m_tpoDefaults);
+        if (tab == "TPO" && m_renderer) m_renderer->tpo()->applyTpoConfig(m_tpoDefaults);
         refreshFromRenderer();
         if (!error.isEmpty() || !budgetError.isEmpty()) showStatus(error.isEmpty() ? budgetError : error, true);
         else showStatus(tab + " reset to defaults", false);
@@ -458,7 +458,7 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
         apply({{"labelMinPx", std::min(v, m_labelMinPx->value())}, {"labelMaxPx", v}});
     });
     connect(m_candleStyle, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
-        if (m_renderer && index >= 0 && !m_loading) m_renderer->setCandleStyle(index);
+        if (m_renderer && index >= 0 && !m_loading) m_renderer->candles()->setCandleStyle(index);
     });
     auto pick = [this](QPushButton *button, const char *key) {
         connect(button, &QPushButton::clicked, this, [this, key] {
@@ -606,15 +606,15 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     });
     connect(m_gammaSlider, &QSlider::valueChanged, this, [this](int v) {
         m_gammaLabel->setText(QString::number(v / 100.0, 'f', 2));
-        if (m_renderer && !m_loading) m_renderer->setHeatmapGamma(v / 100.0);
+        if (m_renderer && !m_loading) m_renderer->candles()->setHeatmapGamma(v / 100.0);
     });
     connect(m_contrastSlider, &QSlider::valueChanged, this, [this](int v) {
         m_contrastLabel->setText(QString::number(v / 100.0, 'f', 2));
-        if (m_renderer && !m_loading) m_renderer->setHeatmapContrast(v / 100.0);
+        if (m_renderer && !m_loading) m_renderer->candles()->setHeatmapContrast(v / 100.0);
     });
     connect(m_floorSlider, &QSlider::valueChanged, this, [this](int v) {
         m_floorLabel->setText(QString::number(v / 100.0, 'f', 3));
-        if (m_renderer && !m_loading) m_renderer->setHeatmapShaderFloor(v / 100.0);
+        if (m_renderer && !m_loading) m_renderer->candles()->setHeatmapShaderFloor(v / 100.0);
     });
     return page;
 }
@@ -717,16 +717,16 @@ QWidget *HeatmapSettingsDialog::buildTpoTab() {
     describe(form, m_tpoLayoutCombo, "Collapsed packs each price row into a profile; Split keeps brackets in separate time columns. Use Split to follow the session's sequence, this session only.");
     describe(form, m_tpoThemeCombo, "Choose the TPO cell colours, including value-area and point-of-control highlights. Change it for clearer period or profile contrast; this session only.");
     connect(m_tpoTimeframeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int idx) {
-        if (m_renderer && idx >= 0 && !m_loading) m_renderer->setTpoTimeframeMs(m_tpoTimeframeCombo->itemData(idx).toInt());
+        if (m_renderer && idx >= 0 && !m_loading) m_renderer->tpo()->setTpoTimeframeMs(m_tpoTimeframeCombo->itemData(idx).toInt());
     });
     connect(m_tpoSessionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int idx) {
-        if (m_renderer && idx >= 0 && !m_loading) m_renderer->setTpoSessionType(m_tpoSessionCombo->itemData(idx).toInt());
+        if (m_renderer && idx >= 0 && !m_loading) m_renderer->tpo()->setTpoSessionType(m_tpoSessionCombo->itemData(idx).toInt());
     });
     connect(m_tpoLayoutCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int idx) {
-        if (m_renderer && idx >= 0 && !m_loading) m_renderer->setTpoLayout(m_tpoLayoutCombo->itemData(idx).toString());
+        if (m_renderer && idx >= 0 && !m_loading) m_renderer->tpo()->setTpoLayout(m_tpoLayoutCombo->itemData(idx).toString());
     });
     connect(m_tpoThemeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int idx) {
-        if (m_renderer && idx >= 0 && !m_loading) m_renderer->setTpoTheme(m_tpoThemeCombo->itemData(idx).toString());
+        if (m_renderer && idx >= 0 && !m_loading) m_renderer->tpo()->setTpoTheme(m_tpoThemeCombo->itemData(idx).toString());
     });
     return page;
 }
@@ -838,17 +838,17 @@ void HeatmapSettingsDialog::refreshFromRenderer() {
     if (!m_renderer) return;
     const bool was = m_loading;
     m_loading = true;
-    m_gammaSlider->setValue(static_cast<int>(m_renderer->heatmapGamma() * 100));
-    m_contrastSlider->setValue(static_cast<int>(m_renderer->heatmapContrast() * 100));
-    m_floorSlider->setValue(static_cast<int>(m_renderer->heatmapShaderFloor() * 100));
-    m_gammaLabel->setText(QString::number(m_renderer->heatmapGamma(), 'f', 2));
-    m_contrastLabel->setText(QString::number(m_renderer->heatmapContrast(), 'f', 2));
-    m_floorLabel->setText(QString::number(m_renderer->heatmapShaderFloor(), 'f', 3));
-    m_candleStyle->setCurrentIndex(std::clamp(m_renderer->candleStyle(), 0, 2));
-    if (const int i = m_tpoTimeframeCombo->findData(m_renderer->tpoTimeframeMs()); i >= 0) m_tpoTimeframeCombo->setCurrentIndex(i);
-    if (const int i = m_tpoSessionCombo->findData(m_renderer->tpoSessionType()); i >= 0) m_tpoSessionCombo->setCurrentIndex(i);
-    m_tpoLayoutCombo->setCurrentIndex(std::max(0, m_tpoLayoutCombo->findData(m_renderer->tpoLayout())));
-    m_tpoThemeCombo->setCurrentIndex(std::max(0, m_tpoThemeCombo->findData(m_renderer->tpoTheme())));
+    m_gammaSlider->setValue(static_cast<int>(m_renderer->candles()->gamma() * 100));
+    m_contrastSlider->setValue(static_cast<int>(m_renderer->candles()->contrast() * 100));
+    m_floorSlider->setValue(static_cast<int>(m_renderer->candles()->shaderFloor() * 100));
+    m_gammaLabel->setText(QString::number(m_renderer->candles()->gamma(), 'f', 2));
+    m_contrastLabel->setText(QString::number(m_renderer->candles()->contrast(), 'f', 2));
+    m_floorLabel->setText(QString::number(m_renderer->candles()->shaderFloor(), 'f', 3));
+    m_candleStyle->setCurrentIndex(std::clamp(m_renderer->candles()->candleStyle(), 0, 2));
+    if (const int i = m_tpoTimeframeCombo->findData(m_renderer->tpo()->tpoTimeframeMs()); i >= 0) m_tpoTimeframeCombo->setCurrentIndex(i);
+    if (const int i = m_tpoSessionCombo->findData(m_renderer->tpo()->tpoSessionType()); i >= 0) m_tpoSessionCombo->setCurrentIndex(i);
+    m_tpoLayoutCombo->setCurrentIndex(std::max(0, m_tpoLayoutCombo->findData(m_renderer->tpo()->tpoLayout())));
+    m_tpoThemeCombo->setCurrentIndex(std::max(0, m_tpoThemeCombo->findData(m_renderer->tpo()->tpoTheme())));
     m_loading = was;
 }
 
@@ -864,6 +864,6 @@ void HeatmapSettingsDialog::logSettings() const {
         sLog_App("Heatmap settings chart=" << m_model->chartId() << " "
                  << QJsonDocument(heatmap::settingsJson(m_model->settings())).toJson(QJsonDocument::Compact));
     if (m_renderer)
-        sLog_App("Heatmap tone: gamma=" << m_renderer->heatmapGamma() << " contrast=" << m_renderer->heatmapContrast()
-                 << " shader_floor=" << m_renderer->heatmapShaderFloor());
+        sLog_App("Heatmap tone: gamma=" << m_renderer->candles()->gamma() << " contrast=" << m_renderer->candles()->contrast()
+                 << " shader_floor=" << m_renderer->candles()->shaderFloor());
 }

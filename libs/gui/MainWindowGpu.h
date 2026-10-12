@@ -55,6 +55,8 @@ class QDoubleSpinBox;
 namespace AgentApi { struct ControlBody; }
 namespace heatmap { class HeatmapDataService; }
 
+class ChartAgentPort;
+
 class MainWindowGPU : public QMainWindow {
     Q_OBJECT
 
@@ -108,7 +110,7 @@ private:
     QJsonObject agentApiHeatmapSnapshot() const;
     AgentApi::Metadata agentApiMetadata() const;
     AgentApi::StateSnapshot agentApiStateSnapshot() const;
-    AgentApi::ViewportSnapshot agentApiViewportSnapshot() const;
+    ChartAgentPort chartAgentPort() const;
     std::optional<AgentApi::CandleSnapshot> agentApiCandlesSnapshot(const AgentApi::ValidationResult& query) const;
     AgentApi::BookSnapshot agentApiBookSnapshot(int levels) const;
     AgentApi::TradesSnapshot agentApiTradesSnapshot(qint64 windowMs, int limit) const;

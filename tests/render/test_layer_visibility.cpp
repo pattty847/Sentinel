@@ -10,8 +10,8 @@ TEST(LayerVisibility, PrimaryFieldAndExclusionRules) {
     Events events;
     layers.report = [&](std::string_view, bool, bool) { events.emplace_back("log"); };
     layers.requestUpdate = [&] { events.emplace_back("update"); };
-    layers.primaryFieldChanged = [&] { events.emplace_back("primary"); };
-    layers.visibilityChanged = [&] { events.emplace_back("visibility"); };
+    QObject::connect(&layers, &chart::LayerVisibility::primaryFieldChanged, [&] { events.emplace_back("primary"); });
+    QObject::connect(&layers, &chart::LayerVisibility::layerVisibilityChanged, [&] { events.emplace_back("visibility"); });
     EXPECT_TRUE(layers.heatmapEnabled());
     layers.setPrimaryField(1);
     EXPECT_TRUE(layers.heatmapEnabled());
@@ -41,7 +41,7 @@ TEST(LayerVisibility, IndividualSettersKeepHeatmapAndFootprintCoexistence) {
         events.emplace_back(std::string(name) + (enabled ? "+" : "-") + (unchanged ? "=" : "!"));
     };
     layers.requestUpdate = [&] { events.emplace_back("update"); };
-    layers.visibilityChanged = [&] { events.emplace_back("visibility"); };
+    QObject::connect(&layers, &chart::LayerVisibility::layerVisibilityChanged, [&] { events.emplace_back("visibility"); });
     layers.setFootprintEnabled(true);
     EXPECT_TRUE(layers.heatmapEnabled());
     EXPECT_TRUE(layers.footprintEnabled());

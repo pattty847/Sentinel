@@ -27,7 +27,7 @@ class AlgoOverlayRenderer : public QQuickItem {
     QML_ELEMENT
 
     Q_PROPERTY(QObject* mappingProvider READ mappingProvider WRITE setMappingProvider NOTIFY mappingProviderChanged)
-    Q_PROPERTY(bool enabled READ enabled WRITE setEnabled NOTIFY enabledChanged)
+    Q_PROPERTY(bool enabled READ enabled WRITE setEnabled NOTIFY enabledChanged FINAL)
 
 public:
     static constexpr int kMaxEvents = 2000; // rolling buffer size
