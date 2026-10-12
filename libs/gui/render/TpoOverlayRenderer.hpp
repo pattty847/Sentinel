@@ -3,7 +3,6 @@
 #include "ChartRaster.hpp"
 
 #include "ChartTextPrimitives.hpp"
-#include "IOverlayRenderer.hpp"
 #include "TpoProfileModel.hpp"
 
 #include <QByteArray>
@@ -46,7 +45,7 @@ class TpoRootNode;
  * Threading: enqueue()/setStyle() on the GUI thread; everything else on the
  * render thread inside updatePaintNode.
  */
-class TpoOverlayRenderer : public IOverlayRenderer {
+class TpoOverlayRenderer {
 public:
     struct PendingUpload {
         int x = 0;              // period index within the session
@@ -65,7 +64,7 @@ public:
     };
 
     TpoOverlayRenderer();
-    ~TpoOverlayRenderer() override;
+    ~TpoOverlayRenderer();
 
     /// Thread-safe enqueue (GUI thread).
     void enqueue(PendingUpload upload);
@@ -73,8 +72,7 @@ public:
     void setStyle(const Style& style);
     Style style() const;
 
-    void onRootRebuilt() override;
-    int zOrder() const override { return 2; }
+    void onRootRebuilt();
 
     // World -> screen uses the published frame camera; DPR and per-axis snapping also
     // participate in the cached layout. No integer time-bound conversion.

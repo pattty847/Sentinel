@@ -3,8 +3,6 @@
 
 #include "SentinelLogging.hpp"
 #include "chart/shell/HeatmapChartPort.hpp"
-#include "render/CandlePixelGeometry.hpp"
-#include "render/VolumeProfileState.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
 #include "render/heatmap/HeatmapTileNode.hpp"
 
@@ -12,42 +10,6 @@
 #include <QSGOpacityNode>
 #include <algorithm>
 #include <cmath>
-
-// Footprint, volume profile and TPO under `parent`, after its heatmap content.
-void UnifiedGridRenderer::renderTradeOverlays(
-    QSGNode* parent,
-    const FrameContext& frame,
-    bool drawFootprint,
-    bool drawTpo,
-    std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads) {
-    m_footprintOverlay.render(window(),
-                              parent,
-                              drawFootprint,
-                              frame.mapping.viewStartMs, frame.mapping.viewEndMs,
-                              frame.mapping.viewMinPrice, frame.mapping.viewMaxPrice, frame.surfaceBounds,
-                              footprintUploads);
-    // ── TPO / VP dispatch ──────────────────────────────────────────────────
-    std::vector<float> localBins;
-    VolumeProfileState::Snapshot localSnap;
-    m_vpRenderer.drainPending(localBins, localSnap);
-
-    const auto snap = candle_pixels::axisSnap(frame.raster);
-    m_vpRenderer.render(parent,
-                        m_volumeProfileLayerEnabled && !localBins.empty(),
-                        frame.surfaceBounds,
-                        frame.mapping.viewMinPrice,
-                        frame.mapping.viewMaxPrice,
-                        localBins,
-                        localSnap, frame.surfaceDpr, snap.y);
-
-    // TPO uses the same drawn camera, including fractional glide time.
-    m_tpoOverlay.render(window(),
-                        parent,
-                        drawTpo,
-                        m_chartTextAtlas,
-                        m_chartTextAtlasBuilt,
-                        frame.raster, frame.surfaceDpr, snap.x, snap.y, frame.surfaceBounds);
-}
 
 // ── GPU heatmap ──
 QSGNode* UnifiedGridRenderer::ensureGpuRootNode(QSGNode* oldNode, heatmap::gpu::HeatmapTileNode** tile) {
@@ -57,8 +19,7 @@ QSGNode* UnifiedGridRenderer::ensureGpuRootNode(QSGNode* oldNode, heatmap::gpu::
         auto* gate = new QSGOpacityNode();
         gate->appendChildNode(new heatmap::gpu::HeatmapTileNode(m_gpuLayer->tileStatsPtr()));
         root->appendChildNode(gate);
-        for (auto* overlay : m_overlays)
-            overlay->onRootRebuilt();
+        m_layers.registry.onRootRebuilt(root);
         m_chartTextRenderer.onRootRebuilt();
     }
     *tile = static_cast<heatmap::gpu::HeatmapTileNode*>(root->firstChild()->firstChild());
@@ -114,7 +75,7 @@ void UnifiedGridRenderer::prepareSyncFrame() {
     if (profile) m_frameProfiler.beginFrame();
     const auto inputs = m_view->frameInputs(
         boundingRect(), window() ? window()->effectiveDevicePixelRatio() : 1.0,
-        m_frameClock, m_timeAuthority, {m_heatmapLayerEnabled, m_footprintLayerEnabled, m_tpoLayerEnabled});
+        m_frameClock, m_timeAuthority, {m_heatmapLayerEnabled, m_footprintLayerEnabled, m_tpoLayerEnabled, m_volumeProfileLayerEnabled});
     if (profile) m_frameProfiler.mark(FrameProfiler::Context);
     const auto& frame = m_frameProducer.produce(inputs, *m_heatmapPort, m_published);
     if (frame.rasterChanged) {
@@ -155,13 +116,13 @@ QSGNode* UnifiedGridRenderer::updateGpuPaintNode(QSGNode* oldNode, FrameContext&
     if (prepared) tile->setFrame(std::move(tileFrame));
     m_frameAck.submitted(frame);
 
-    std::vector<FootprintOverlayRenderer::PendingUpload> footprintUploads;
-    m_footprintOverlay.drainPending(footprintUploads);
+    m_layers.registry.sync(sync);
     if (profile) m_frameProfiler.mark(FrameProfiler::Uploads);
     // Qt blocks the GUI thread here: read chart-owned tape/settings only,
     // never traverse the QObject graph from the node or its shader.
     publishTradeBubbleFrame(frame.mapping);
-    renderTradeOverlays(root, frame, frame.overlays.footprint, frame.overlays.tpo, footprintUploads);
+    m_layers.registry.updateNodes(sync, {window(), root, m_chartTextRenderer, m_chartTextAtlas,
+                                         m_chartTextAtlasBuilt, profile ? &m_frameProfiler : nullptr});
     if (profile) m_frameProfiler.mark(FrameProfiler::Overlays);
 
     m_chartTextRenderer.beginFrame(root, window(), m_chartTextAtlas);
