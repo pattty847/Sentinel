@@ -407,7 +407,7 @@ groups:
         annotations:
           summary: "Shadow roller persistent fault"
           description: >-
-            Identical shadow failures persisted for at least two minutes without new durable progress and entered a ten-minute probe cadence. Repair the logged storage/journal/socket fault; primary recording and clients remain authoritative. A successful new checkpoint clears cooldown. Do not restart capture to repair a shadow consumer.
+            Identical shadow failures persisted for at least two minutes without new durable progress and entered a ten-minute probe cadence. Repair the logged storage/journal/socket fault; live serving depends on the roller recovering. A successful new checkpoint clears cooldown. Do not restart capture to repair a shadow consumer.
         data:
           - refId: A
             relativeTimeRange: { from: 7200, to: 0 }

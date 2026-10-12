@@ -12,7 +12,7 @@ struct Hmc2Record;
 }
 namespace sentinel::roller {
 struct JournalRecord;
-// recording.live_feed: journal (slice D-b1): the server's live model follows
+// Journal live feed: the server's live model follows
 // the capture journal instead of a Coinbase WebSocket. Installed by the server,
 // never read from config and not part of configHash. Every call is made on the
 // product's roller worker and must be one queued hand-off to the model's thread.
@@ -46,7 +46,7 @@ struct ShadowConfig {
   std::string socketPath; // empty: ~/Sentinel-runtime/run/capture.sock
   // Required explicit UTC start on first deployment; checkpoints retain it.
   std::string from;
-  std::vector<std::string> protectedRoots; // configured primary/fallback roots
+  std::vector<std::string> protectedRoots; // configured archival recording/fallback roots
   std::chrono::milliseconds retryMin{1000}, retryMax{60000};
   std::chrono::milliseconds compareInterval{3600000};
   // Three identical faults without new durable progress enter a slow probe
@@ -60,7 +60,7 @@ struct ShadowConfig {
   // predicate.
   std::function<void()> beforeCompareWaitForTest;
   size_t pendingBytes = 32 * 1024 * 1024;
-  // Receive/apply instrumentation, shadow thread only; no primary hook.
+  // Receive/apply instrumentation, shadow thread only; no model hook.
   std::function<void(const JournalRecord &, bool applied)> observeForTest;
   // roller_shadow.products; empty = the server's default_symbols. Products
   // without a matching journal are refused at startup (no worker).
@@ -83,7 +83,7 @@ struct ShadowConfig {
   int64_t livePublishMs = 500;
   // Wall clock (epoch ms) for lead ticks every 250 ms; tests inject.
   std::function<int64_t()> liveNowForTest;
-  // recording.live_feed: journal. Empty: the model is fed by the engine.
+  // Journal live feed. Empty for offline consumers without a live model.
   ModelSink model;
   // With model: no socket record for this long at the tip invalidates the
   // model's book and reports connected=false (on the liveNowForTest clock).

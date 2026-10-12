@@ -73,9 +73,8 @@ trade_overlays:
 recording:                # recording v2: near and deep order-book layers (docs/research/2026-09-recording-v2.md)
   enabled: true
   source: roller           # required; primary has no feed and is refused at startup
-  live_feed: journal       # ignored; retained for the previous binary until slice E
-  dir: /Volumes/T7/sentinel-data/recording # protected primary root, unused for serving
-  fallback_dir: data/recording   # protected fallback root; primary code removed in slice E
+  dir: /Volumes/T7/sentinel-data/recording # protected archival root, unused for serving
+  fallback_dir: data/recording   # protected archival fallback root
   near_tick: 1              # $ rows within near_pct of the mid
   near_pct: 0.05
   deep_tick: 5              # $ rows across [mid*deep_low_frac, mid*deep_high_mult]
@@ -96,7 +95,12 @@ mdc:
 
 `recording.live_publish_ms` (default 500, clamped to [250, 5000]) is how often the recorder publishes each layer's open minute to live subscribers (owner decision 2026-10-01: 500 ms, 2 Hz). The live worker paces subscriptions at half of it, so each publication is sent at the next worker turn; refused sends back off from there up to 5 s. It does not change what is recorded on disk. Recorder-thread cost: about 0.4 ms per publication for a BTC-USD book (~23,500 near+deep entries), 0.08% of a core at 2 Hz (`recording_live_bench --publish`).
 
-Changing `recording.deep_tick` from $10 to $5 changes the recording config hash and starts a new HMC2 generation; existing files stay in the same series. Display ticks use `{1,2,2.5,5} x 10^k` restricted to native-tick multiples, so the $5 layer supports $25 rows. Pages spanning old $10 and new $5 generations serve both at common multiples (for example $50); at $25, output buckets containing $10 records are unknown while compatible buckets still serve. History and live projection use the same rule.
+The roller derives each product's daily native grid and size scale from the journal
+metadata and first valid two-sided snapshot (see [ROLLER.md](ROLLER.md)). The
+retained `recording.near_tick`, `near_pct`, `deep_tick`, `deep_low_frac`,
+`deep_high_mult`, `price_scale` and `lateness_ms` values do not configure the
+roller. Display ticks remain native-grid multiples; incompatible historical
+generations are represented as unknown rather than resampled onto an invalid grid.
 
 The server's only live source is the capture journal through the roller. It requires
 `recording.source: roller` and `roller_shadow.enabled: true`; `primary` is refused.
@@ -105,9 +109,10 @@ to normalized `default_symbols`); there is no GUI feed cap or upstream acquisiti
 
 `ssl_ca_bundle` may appear beside or inside `mdc`, at the YAML root or under `server`.
 The nested value overrides its sibling. All former WebSocket keys (`host`, `port`,
-`target`, `use_jwt`, timeout keys, `max_connections`) and `recording.live_feed` are
-ignored. Keep `recording.live_feed: journal` in the deployed YAML until slice E so
-a rollback to the preceding binary cannot open its default engine feed.
+`target`, `use_jwt`, timeout keys, `max_connections`) are ignored.
+There is no `recording.live_feed` setting; the capture journal is always the live source.
+The hourly self-check compares the live roller with a re-roll of the same journal;
+there is no independent primary recorder comparison.
 
 Public market data (level2, market_trades, candles) does not require a key; the server runs without `key.json` by default.
 

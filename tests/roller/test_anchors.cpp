@@ -13,6 +13,7 @@
 #include <fstream>
 #include <iostream>
 #include <numeric>
+#include <zstd.h>
 
 using namespace sentinel;
 using namespace sentinel::roller;
@@ -89,7 +90,7 @@ TEST(AnchorStore, RejectsCorruptionVersionsIdentityAndFuturePositions) {
     ceiling=a.pos; ceiling.run="other"; EXPECT_FALSE(AnchorStore::read(path,a.identity,a.boundaryMs,ceiling));
     EXPECT_FALSE(AnchorStore::read(path,a.identity,a.boundaryMs-1));
     EXPECT_FALSE(AnchorStore::read(path.string()+"missing",a.identity,a.boundaryMs));
-    a.feed.version=2; EXPECT_THROW(AnchorStore::encode(a),std::runtime_error);
+    a.feed.version=0; EXPECT_THROW(AnchorStore::encode(a),std::runtime_error);
 }
 TEST(RecorderState, SyntheticContinuationPreservesEveryFieldAndOutput) {
     QTemporaryDir tmp; const fs::path root=tmp.path().toStdString();
@@ -127,9 +128,8 @@ TEST(RecorderState, InvalidOneSidedAndPublicationBoundaries) {
         QTemporaryDir tmp; const fs::path root=tmp.path().toStdString();
         auto cfg=deriveGrid(meta(),100000).config(root/"a");
         cfg.commitFloorMs=Epoch;
-        std::atomic<size_t> publishes{0}, invalidations{0};
+        std::atomic<size_t> publishes{0};
         cfg.publisher=[&](auto) { ++publishes; };
-        cfg.onSelfInvalidated=[&](const auto&,const auto&) { ++invalidations; };
         BookRecorder a(cfg);
         a.onSnapshotAt("BTC-USD",Epoch,Epoch+177,{{true,99999,0.125},{false,100001,3}});
         a.onUpdatesAt("BTC-USD",Epoch+60001,Epoch+60178,{{false,100001,0}});
@@ -137,9 +137,9 @@ TEST(RecorderState, InvalidOneSidedAndPublicationBoundaries) {
         if(mode==2) a.onTick(Epoch+67000);
         const auto state=a.exportState(); copyPrefix(root/"a",root/"b");
         cfg.root=root/"b"; BookRecorder b(cfg);
-        const auto before=std::pair(publishes.load(),invalidations.load());
+        const auto before=publishes.load();
         b.importState(state);
-        EXPECT_EQ(before,std::pair(publishes.load(),invalidations.load()));
+        EXPECT_EQ(before,publishes.load());
         EXPECT_EQ(state,b.exportState()) << "mode=" << mode;
         for (auto* r:{&a,&b}) {
             r->onTick(Epoch+91000);
@@ -175,10 +175,10 @@ TEST(RecorderState, RejectsBadStateWithoutInstallingOrPublishing) {
     BookRecorder dst(cfg); const auto empty=dst.exportState();
     auto bad=state; bad[bad.size()-1]^=1; EXPECT_THROW(dst.importState(bad),std::runtime_error);
     EXPECT_EQ(dst.exportState(),empty);
-    auto j=json::from_cbor(state.begin(),state.end()-4); j["version"]=2;
+    auto j=json::from_cbor(state.begin(),state.end()-4); j["version"]=1; // obsolete primary-recorder anchor state is a cache miss
     bad=json::to_cbor(j); bad.resize(bad.size()+4); fixStateCrc(bad);
     EXPECT_THROW(dst.importState(bad),std::runtime_error); EXPECT_EQ(dst.exportState(),empty);
-    j["version"]=1; j["symbols"]["BTC-USD"]["layers"][1]["header"]["configHash"]=0;
+    j["version"]=2; j["symbols"]["BTC-USD"]["layers"][1]["header"]["configHash"]=0;
     bad=json::to_cbor(j); bad.resize(bad.size()+4); fixStateCrc(bad);
     EXPECT_THROW(dst.importState(bad),std::runtime_error); EXPECT_EQ(dst.exportState(),empty);
     dst.importState(state); EXPECT_EQ(publications,0); EXPECT_EQ(dst.exportState(),state);
@@ -381,13 +381,20 @@ TEST(AnchorReplay, CorruptMissingAndAheadCandidatesFallbackIdentically) {
     RollOptions baseline{root/"raw",root/"full","BTC-USD",Epoch,Epoch+2*3'600'000}; roll(baseline);
     const auto candidates=AnchorStore::candidates(root/"full","BTC-USD",Epoch);
     const auto original=AnchorStore::load(candidates.back());
-    for (const auto* mode:{"truncated","crc","policy","missing-midnight","ahead","feed","recorder"}) {
+    for (const auto* mode:{"truncated","crc","policy","missing-midnight","ahead","feed","recorder","obsolete-recorder"}) {
         auto o=baseline; o.outputRoot=root/mode; o.writeAnchors=false;
         auto a=original;
         if(std::string_view(mode)=="policy") ++a.identity.configHash;
         if(std::string_view(mode)=="ahead") a.pos.block+=100000;
         if(std::string_view(mode)=="feed") a.feed.bytes={0};
         if(std::string_view(mode)=="recorder") a.recorder.bytes.back()^=1;
+        if(std::string_view(mode)=="obsolete-recorder") {
+            auto state=json::from_cbor(a.recorder.bytes.begin(),a.recorder.bytes.end()-4);
+            state["version"]=1;
+            a.recorder.bytes=json::to_cbor(state);
+            a.recorder.bytes.resize(a.recorder.bytes.size()+4);
+            fixStateCrc(a.recorder.bytes);
+        }
         if(std::string_view(mode)!="missing-midnight") {
             AnchorStore::write(o.outputRoot,a); const auto path=AnchorStore::path(o.outputRoot,a);
             if(std::string_view(mode)=="truncated") fs::resize_file(path,20);
@@ -653,15 +660,15 @@ TEST(AnchorReplay, UnwritableLiveFixtureCacheDoesNotAbort) {
 TEST(AnchorReplay, ExportExceptionsAndDegradedStateAreCacheMisses) {
     QTemporaryDir tmp; const fs::path root=tmp.path().toStdString(); replayFixture(root/"raw",2*Quarter);
     RollOptions base{root/"raw",root/"baseline","BTC-USD",Epoch,Epoch+2*Quarter}; base.writeAnchors=false; roll(base);
-    for(int mode=0;mode<4;++mode) {
+    for(int mode=0;mode<3;++mode) {
         auto cfg=deriveGrid(meta(),100000).config(root/("degraded"+std::to_string(mode)));
-        cfg.blockingQueue=false; cfg.maxQueuedLevels=mode==2?1:100;
-        if(mode==3) { fs::create_directories(cfg.root); std::ofstream(cfg.root/"BTC-USD")<<"blocks recorder product writes"; }
+
+        if(mode==2) { fs::create_directories(cfg.root); std::ofstream(cfg.root/"BTC-USD")<<"blocks recorder product writes"; }
         BookRecorder degraded(cfg);
         degraded.onSnapshotAt("BTC-USD",Epoch,Epoch,{{true,99999,1},{false,100001,1}});
         degraded.onTick(Epoch+123000); degraded.drain();
         if(mode>=2) {
-            EXPECT_GT(mode==2?degraded.stats().queueDrops:degraded.stats().diskErrors,0);
+            EXPECT_GT(degraded.stats().diskErrors,0);
             EXPECT_TRUE(degraded.exportState().empty());
         }
         auto o=base; o.outputRoot=root/("out"+std::to_string(mode)); o.writeAnchors=true;
@@ -696,6 +703,58 @@ TEST(AnchorReplay, WriteTimingAndStrictRebuildFailures) {
         "--products","BTC-USD","--from","2026-10-05T00:00:00Z","--to","2026-10-05T00:30:00Z","--config",(root/"config.yaml").string()};
     std::vector<char*> argv; for(auto& arg:args) argv.push_back(arg.data());
     EXPECT_EQ(rollMain(int(argv.size()),argv.data()),1);
+}
+TEST(AnchorReplay, ObsoleteSectionsNeverOpenCandidateJournalAndFallBackToCheckpoint) {
+    QTemporaryDir tmp; const fs::path root=tmp.path().toStdString(); replayFixture(root/"raw",2*Quarter);
+    RollOptions full{root/"raw",root/"full","BTC-USD",Epoch,Epoch+2*Quarter}; roll(full);
+    const auto candidates=AnchorStore::candidates(full.outputRoot,"BTC-USD",Epoch);
+    ASSERT_EQ(candidates.size(),2u);
+    // Reframe genuine anchors with obsolete section and recorder-state versions.
+    // Bypass the current writer's validation while retaining valid compression/CRC.
+    for (const auto& path:candidates) {
+        auto a=AnchorStore::load(path);
+        auto state=json::from_cbor(a.recorder.bytes.begin(),a.recorder.bytes.end()-4);
+        state["version"]=1; a.recorder.bytes=json::to_cbor(state);
+        a.recorder.bytes.resize(a.recorder.bytes.size()+4); fixStateCrc(a.recorder.bytes);
+        const auto encoded=AnchorStore::encode(a);
+        const auto length=ZSTD_getFrameContentSize(encoded.data()+20,encoded.size()-24);
+        ASSERT_NE(length,ZSTD_CONTENTSIZE_ERROR); ASSERT_LE(length,AnchorStore::MaxBytes);
+        std::vector<uint8_t> raw(length);
+        ASSERT_EQ(ZSTD_decompress(raw.data(),raw.size(),encoded.data()+20,encoded.size()-24),raw.size());
+        auto payload=json::from_cbor(raw);
+        for (const auto* name:{"feed","book","recorder"}) payload[name]["version"]=1;
+        raw=json::to_cbor(payload);
+        std::vector<uint8_t> packed(ZSTD_compressBound(raw.size()));
+        const auto size=ZSTD_compress(packed.data(),packed.size(),raw.data(),raw.size(),3);
+        ASSERT_FALSE(ZSTD_isError(size));
+        std::vector<uint8_t> bytes(encoded.begin(),encoded.begin()+12);
+        for (auto n:{uint32_t(raw.size()),uint32_t(size)})
+            for (unsigned i=0;i<4;++i) bytes.push_back(uint8_t(n>>(8*i)));
+        bytes.insert(bytes.end(),packed.begin(),packed.begin()+size);
+        bytes.resize(bytes.size()+4); fixStateCrc(bytes);
+        std::ofstream out(path,std::ios::binary);
+        out.write(reinterpret_cast<const char*>(bytes.data()),bytes.size());
+    }
+    json withoutAnchors;
+    for (bool useAnchors:{false,true}) {
+        auto o=full; o.outputRoot=root/(useAnchors?"obsolete":"baseline");
+        copyPrefix(full.outputRoot,o.outputRoot);
+        fs::copy_file(full.outputRoot/"BTC-USD"/"roller.json",o.outputRoot/"BTC-USD"/"roller.json");
+        o.anchorRoot=full.outputRoot; o.useAnchors=useAnchors; o.writeAnchors=false;
+        unsigned candidateJournalOpens=0;
+        o.anchorReaderForTest=[&](const JournalPos& pos) {
+            ++candidateJournalOpens;
+            return std::make_unique<JournalReader>(o.journalRoot,o.product,pos);
+        };
+        const auto report=roll(o);
+        EXPECT_EQ(candidateJournalOpens,0u); // zero opens means zero journal bytes for rejected candidates
+        EXPECT_FALSE(report["days"][0].contains("anchorBoundaryMs"));
+        if (useAnchors) {
+            EXPECT_EQ(report["days"][0]["anchorCandidatesDecoded"],2);
+            EXPECT_EQ(report["decodedRecords"],withoutAnchors["decodedRecords"]);
+        } else withoutAnchors=report;
+        parity(full.outputRoot,o.outputRoot,"BTC-USD",o.toMs);
+    }
 }
 TEST(AnchorReplay, ThrowingOverlapReaderRejectsOlderCandidates) {
     QTemporaryDir tmp; const fs::path root=tmp.path().toStdString(); replayFixture(root/"raw");

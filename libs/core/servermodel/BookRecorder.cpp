@@ -10,7 +10,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <limits>
@@ -85,17 +84,8 @@ struct Symbol {
     double mid = 0, midOpen = 0, midMin = 0, midMax = 0, midClose = 0;
     uint64_t serial = 0;
     std::deque<Hmc2Record> pending;
-    // Set while invalid by the recorder's own decision; cleared by an accepted
-    // snapshot or an upstream invalidation (whose reconnect brings a snapshot).
-    std::string selfInvalidReason;
-    int64_t nextResnapshotLocal = 0, resnapshotIntervalMs = 0; // 0 = cfg start interval
-    int64_t validSinceLocal = 0;
     int64_t oneSidedSince = -1; // integration clock when a side emptied, -1 = two-sided
 };
-int64_t systemNow() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
-        .count();
-}
 uint16_t encode(long double v, const SizeScale &scale, uint32_t &flags) {
     if (v <= 0)
         return 0;
@@ -154,11 +144,7 @@ StateJson statePolicy(const RecorderConfig& c) {
     j["latenessMs"] = c.latenessMs;
     j["maxQueuedLevels"] = c.maxQueuedLevels;
     j["livePublishMs"] = c.livePublishMs;
-    j["resnapshotIntervalMs"] = c.resnapshotIntervalMs;
-    j["resnapshotMaxIntervalMs"] = c.resnapshotMaxIntervalMs;
-    j["resnapshotStableMs"] = c.resnapshotStableMs;
     j["oneSidedGraceMs"] = c.oneSidedGraceMs;
-    j["blockingQueue"] = c.blockingQueue;
     j["deterministicResume"] = c.deterministicResume;
     j["commitFloorMs"] = c.commitFloorMs;
     j["commitCeilingMs"] = c.commitCeilingMs;
@@ -286,10 +272,6 @@ StateJson packSymbol(const Symbol& v) {
     j["midMax"] = v.midMax;
     j["midClose"] = v.midClose;
     j["serial"] = v.serial;
-    j["selfInvalidReason"] = v.selfInvalidReason;
-    j["nextResnapshotLocal"] = v.nextResnapshotLocal;
-    j["resnapshotIntervalMs"] = v.resnapshotIntervalMs;
-    j["validSinceLocal"] = v.validSinceLocal;
     j["oneSidedSince"] = v.oneSidedSince;
     j["bids"] = v.bids; j["asks"] = v.asks;
     j["pending"] = StateJson::array(); j["layers"] = StateJson::array();
@@ -337,10 +319,6 @@ std::unique_ptr<Symbol> unpackSymbol(const StateJson& j, const std::string& name
     j.at("midMax").get_to(v.midMax);
     j.at("midClose").get_to(v.midClose);
     j.at("serial").get_to(v.serial);
-    j.at("selfInvalidReason").get_to(v.selfInvalidReason);
-    j.at("nextResnapshotLocal").get_to(v.nextResnapshotLocal);
-    j.at("resnapshotIntervalMs").get_to(v.resnapshotIntervalMs);
-    j.at("validSinceLocal").get_to(v.validSinceLocal);
     j.at("oneSidedSince").get_to(v.oneSidedSince);
     stateRequire(v.clock >= 0 && v.clock <= kMaxTime && v.minute >= 0 && v.minute % kMinute == 0 &&
         v.clock >= v.minute && v.clock < v.minute + kMinute && v.observed <= kMinute &&
@@ -404,9 +382,8 @@ std::unique_ptr<Symbol> unpackSymbol(const StateJson& j, const std::string& name
 
 struct BookRecorder::Impl {
     RecorderConfig cfg;
-    std::function<int64_t()> localClock;
     std::optional<Hmc2Store> store; // absent for Publication::Lead
-    enum class Kind { Snapshot, Updates, Invalid, InvalidEnvelope, Tick, Release };
+    enum class Kind { Snapshot, Updates, Invalid, Tick };
     struct Message {
         Kind kind = Kind::Tick;
         std::shared_ptr<const std::string> symbolName;
@@ -417,11 +394,9 @@ struct BookRecorder::Impl {
         }
         int64_t time = 0, local = 0;
         std::vector<Level> levels;
-        bool upstream = false;        // Invalid from onInvalid(), not the recorder's own overflow control
-        bool droppedSnapshot = false; // InvalidEnvelope that replaced a snapshot
     };
     // Only the producer accesses this map. Queued messages keep names alive
-    // across release; repeated data enqueues do not allocate symbol strings.
+    // for the recorder lifetime; data enqueues do not allocate symbol strings.
     std::map<std::string, std::shared_ptr<const std::string>, std::less<>> producerSymbols;
     std::shared_ptr<const std::string> internSymbol(const std::string &name) {
         auto it = producerSymbols.find(name);
@@ -434,8 +409,7 @@ struct BookRecorder::Impl {
     std::mutex mutex;
     std::condition_variable wake, drained, space;
     size_t head = 0, count = 0, queuedLevels = 0;
-    bool stopping = false, busy = false, emergency = false, releaseWaiting = false;
-    int64_t emergencyLocal = 0;
+    bool stopping = false, busy = false;
     std::thread worker;
     std::map<std::string, std::unique_ptr<Symbol>> symbols;
     int64_t workerLocal = 0; // local time of the newest accepted message; worker only
@@ -444,15 +418,14 @@ struct BookRecorder::Impl {
     uint64_t openFailuresSuppressed = 0;                                   // worker only
     mutable std::mutex watermarksMutex;
     std::map<std::pair<std::string, std::string>, BookRecorder::Watermarks> watermarksBySeries;
-    std::atomic<uint64_t> columnsWritten{0}, lateEvents{0}, backwardSteps{0}, queueDrops{0}, invalidations{0},
+    std::atomic<uint64_t> columnsWritten{0}, lateEvents{0}, backwardSteps{0}, invalidations{0},
         diskErrors{0};
 
     static RecorderConfig validateConfig(RecorderConfig c) {
         if (c.root.empty() || !std::isfinite(c.priceScale) || c.priceScale <= 0 || !std::isfinite(c.sizeScale.floor) ||
             c.sizeScale.floor <= 0 || !std::isfinite(c.sizeScale.codesPerOctave) || c.sizeScale.codesPerOctave <= 0 ||
             c.latenessMs < 0 || c.latenessMs > kHour || c.maxQueuedLevels == 0 || c.layers.empty() ||
-            c.resnapshotIntervalMs <= 0 || c.resnapshotMaxIntervalMs < c.resnapshotIntervalMs ||
-            c.resnapshotStableMs < 0 || c.oneSidedGraceMs < 0 || c.livePublishMs <= 0 ||
+            c.oneSidedGraceMs < 0 || c.livePublishMs <= 0 ||
             c.commitFloorMs < 0 || c.commitFloorMs > c.commitCeilingMs || c.commitCeilingMs > kHmc2EndMs)
             throw std::invalid_argument("BookRecorder: invalid config");
         std::set<std::string> names;
@@ -467,10 +440,7 @@ struct BookRecorder::Impl {
         }
         return c;
     }
-    Impl(RecorderConfig c, std::function<int64_t()> clock)
-        : cfg(validateConfig(std::move(c))), localClock(std::move(clock)) {
-        if (!localClock)
-            throw std::invalid_argument("BookRecorder: missing local clock");
+    explicit Impl(RecorderConfig c) : cfg(validateConfig(std::move(c))) {
         if (!lead())
             store.emplace(cfg.root, cfg.deterministicResume, cfg.writerProduct);
         worker = std::thread([this] { run(); });
@@ -482,7 +452,7 @@ struct BookRecorder::Impl {
             stopping = true;
         }
         wake.notify_one();
-        if (cfg.blockingQueue) space.notify_all();
+        space.notify_all();
     }
     ~Impl() {
         requestStop();
@@ -491,42 +461,17 @@ struct BookRecorder::Impl {
     }
     void enqueue(Message m) {
         std::unique_lock lock(mutex);
-        if (cfg.blockingQueue) {
-            // An oversized atomic snapshot is admitted alone, bounded by RAWL2's
-            // record cap. Splitting it would change atomic peak semantics.
-            const auto ready = [&] {
-                return stopping || (count < kQueueSlots - 1 &&
-                    (m.levels.size() <= cfg.maxQueuedLevels
-                        ? queuedLevels <= cfg.maxQueuedLevels - m.levels.size()
-                        : queuedLevels == 0));
-            };
-            if (!ready() && cfg.beforeQueueWaitForTest) cfg.beforeQueueWaitForTest();
-            space.wait(lock, ready);
-            if (stopping) throw std::runtime_error("recorder stopped");
-        } else if (m.kind == Kind::Release && (count == kQueueSlots || emergency)) {
-            // A release must never turn into an overflow invalidation: that would
-            // retain the symbol forever. Only lifecycle control can backpressure.
-            releaseWaiting = true;
-            space.wait(lock, [&] { return count < kQueueSlots && !emergency; });
-            releaseWaiting = false;
-        }
-        if (emergency || count == kQueueSlots) {
-            ++queueDrops;
-            if (!emergency) {
-                emergency = true;
-                emergencyLocal = m.local;
-            }
-            wake.notify_one();
-            return;
-        }
-        const bool data = m.kind == Kind::Snapshot || m.kind == Kind::Updates;
-        if (!cfg.blockingQueue && data && (m.levels.size() > cfg.maxQueuedLevels - queuedLevels || count >= kQueueSlots - 1)) {
-            ++queueDrops;
-            m.droppedSnapshot = m.kind == Kind::Snapshot;
-            m.kind = Kind::InvalidEnvelope;
-            m.reason = "queue level/slot overflow";
-            std::vector<Level>{}.swap(m.levels);
-        }
+        // An oversized atomic snapshot is admitted alone, bounded by RAWL2's
+        // record cap. Splitting it would change atomic peak semantics.
+        const auto ready = [&] {
+            return stopping || (count < kQueueSlots - 1 &&
+                (m.levels.size() <= cfg.maxQueuedLevels
+                    ? queuedLevels <= cfg.maxQueuedLevels - m.levels.size()
+                    : queuedLevels == 0));
+        };
+        if (!ready() && cfg.beforeQueueWaitForTest) cfg.beforeQueueWaitForTest();
+        space.wait(lock, ready);
+        if (stopping) throw std::runtime_error("recorder stopped");
         queuedLevels += m.levels.size();
         queue[(head + count) % kQueueSlots] = std::move(m);
         ++count;
@@ -538,23 +483,15 @@ struct BookRecorder::Impl {
             Message m;
             {
                 std::unique_lock lock(mutex);
-                wake.wait(lock, [&] { return count || emergency || stopping; });
-                if (!count && !emergency && stopping)
+                wake.wait(lock, [&] { return count || stopping; });
+                if (!count && stopping)
                     break;
                 busy = true;
-                if (count) {
-                    m = std::move(queue[head]);
-                    head = (head + 1) % kQueueSlots;
-                    --count;
-                    queuedLevels -= m.levels.size();
-                    if (cfg.blockingQueue) space.notify_one();
-                } else {
-                    m.kind = Kind::Invalid;
-                    m.time = emergencyLocal;
-                    m.local = emergencyLocal;
-                    m.reason = "queue control overflow";
-                    emergency = false;
-                }
+                m = std::move(queue[head]);
+                head = (head + 1) % kQueueSlots;
+                --count;
+                queuedLevels -= m.levels.size();
+                space.notify_one();
             }
             try {
                 process(m);
@@ -568,8 +505,7 @@ struct BookRecorder::Impl {
             {
                 std::lock_guard lock(mutex);
                 busy = false;
-                if (releaseWaiting && !emergency) space.notify_one();
-                if (!count && !emergency)
+                if (!count)
                     drained.notify_all();
             }
         }
@@ -587,23 +523,7 @@ struct BookRecorder::Impl {
         }
         return *symbols.emplace(name, std::move(next)).first->second;
     }
-    void requestResnapshot(const std::string &name, Symbol &s) {
-        if (!cfg.onSelfInvalidated || s.selfInvalidReason.empty() || workerLocal < s.nextResnapshotLocal)
-            return;
-        // Exponential: a persistent cause must not reconnect the shared socket every interval.
-        const int64_t interval = s.resnapshotIntervalMs ? s.resnapshotIntervalMs : cfg.resnapshotIntervalMs;
-        s.nextResnapshotLocal = workerLocal + interval;
-        s.resnapshotIntervalMs = std::min(interval * 2, std::max(cfg.resnapshotMaxIntervalMs, interval));
-        sLog_Warning("BookRecorder: requesting resnapshot symbol=" << name << " reason=" << s.selfInvalidReason
-                                                                   << " time=" << s.clock << " nextInMs=" << interval);
-        try {
-            cfg.onSelfInvalidated(name, s.selfInvalidReason);
-        } catch (const std::exception &e) {
-            sLog_Error("BookRecorder: resnapshot request failed symbol=" << name << " error=" << e.what());
-        }
-    }
-    // upstream: reported via onInvalid; the source already owes a snapshot.
-    void invalidate(const std::string &name, Symbol &s, const std::string &reason, bool upstream = false) {
+    void invalidate(const std::string &name, Symbol &s, const std::string &reason) {
         for (auto &layer : s.layers) {
             for (auto &[_, row] : layer.rows) {
                 if (s.valid)
@@ -621,20 +541,9 @@ struct BookRecorder::Impl {
         s.asks.clear();
         ++invalidations;
         sLog_Data("BookRecorder: invalid symbol=" << name << " time=" << s.clock << " reason=" << reason);
-        if (upstream) {
-            s.selfInvalidReason.clear();
-        } else {
-            s.selfInvalidReason = reason;
-            requestResnapshot(name, s);
-        }
-    }
-    // The backoff resets only after a snapshot has stayed valid for resnapshotStableMs.
-    void noteStable(Symbol &s) {
-        if (s.valid && s.resnapshotIntervalMs && workerLocal - s.validSinceLocal >= cfg.resnapshotStableMs)
-            s.resnapshotIntervalMs = s.nextResnapshotLocal = 0;
     }
     // A side that stays empty beyond the grace is a book we can no longer trust to
-    // place the window: close observation at the grace end and ask for a snapshot.
+    // place the window: close observation at the grace end until the next journal snapshot.
     void expireOneSided(const std::string &name, Symbol &s, int64_t target) {
         if (!s.valid || s.oneSidedSince < 0 || target - s.oneSidedSince <= cfg.oneSidedGraceMs)
             return;
@@ -686,10 +595,10 @@ struct BookRecorder::Impl {
         }
     }
     void publishOpen(Symbol &s) {
-        if (!cfg.publisher || cfg.publication == RecorderConfig::Publication::Finals || !s.observed ||
+        if (!cfg.publisher || !lead() || !s.observed ||
             s.clock - s.lastPublish < cfg.livePublishMs)
             return;
-        // An invalid book (resnapshot loop, expired one-sided grace, upstream
+        // An invalid book (expired one-sided grace, upstream
         // outage) integrates nothing while its clock moves: republishing would
         // bump the live revision every interval for an unchanged frame. Publish
         // again once an input changes (validity, observation, flags, cutoff, minute).
@@ -706,7 +615,7 @@ struct BookRecorder::Impl {
                 auto r = std::make_shared<Hmc2Record>();
                 r->header = layer.header;
                 r->bucketStartMs = s.minute;
-                r->committedThroughMs = lead() ? 0 : s.closedThrough;
+                r->committedThroughMs = 0;
                 r->observedMs = s.observed;
                 r->flags = s.flags | kProvisional | (s.observed < kMinute ? kPartial : 0);
                 r->midOpen = s.midOpen; r->midClose = s.midClose;
@@ -776,8 +685,8 @@ struct BookRecorder::Impl {
                 std::sort(r.entries.begin(), r.entries.end(),
                           [](const auto &a, const auto &b) { return Key{a.row, a.isAsk} < Key{b.row, b.isAsk}; });
                 s.pending.push_back(std::move(r));
-                if (cfg.publication != RecorderConfig::Publication::Finals)
-                    publishCopy(s.pending.back(), lead() ? 0 : s.closedThrough, true);
+                if (lead())
+                    publishCopy(s.pending.back(), 0, true);
             }
         }
     }
@@ -947,8 +856,8 @@ struct BookRecorder::Impl {
             }
         }
     }
-    void commit(Symbol &s, bool releasing = false) {
-        while (!s.pending.empty() && (releasing || s.pending.front().bucketStartMs + kMinute + cfg.latenessMs <= s.clock)) {
+    void commit(Symbol &s) {
+        while (!s.pending.empty() && s.pending.front().bucketStartMs + kMinute + cfg.latenessMs <= s.clock) {
             auto r = std::move(s.pending.front());
             s.pending.pop_front();
             if (lead()) continue; // the history recorder owns persistence and finals
@@ -1116,50 +1025,11 @@ struct BookRecorder::Impl {
                 row->peak = std::max(row->peak, row->size);
         if (m.kind == Kind::Snapshot) {
             s.valid = true;
-            s.selfInvalidReason.clear();
-            s.validSinceLocal = workerLocal;
             sLog_Data("BookRecorder: snapshot symbol=" << m.symbol() << " time=" << s.clock
                                                        << " levels=" << m.levels.size());
         }
     }
-    void release(const Message &m) {
-        const auto it = symbols.find(m.symbol());
-        if (it != symbols.end()) {
-            auto &s = *it->second;
-            try {
-                if (s.initialized) {
-                    const auto t = std::clamp(m.time - s.offset, int64_t{0}, kMaxTime);
-                    expireOneSided(m.symbol(), s, t);
-                    advance(s, t);
-                    invalidate(m.symbol(), s, "feed released", true);
-                    // No future event belongs to this lifetime. Commit the tail
-                    // now without advancing observation or waiting for lateness.
-                    finishMinute(s);
-                    commit(s, true);
-                    for (size_t li = 0; li < s.layers.size(); ++li)
-                        if (cfg.layers[li].hourlyRollup && !s.layers[li].hourMinutes.empty())
-                            writeHour(s.layers[li]);
-                }
-            } catch (const std::exception &e) {
-                ++diskErrors;
-                sLog_Error("BookRecorder: release failed symbol=" << m.symbol() << " error=" << e.what());
-            }
-            // Cleanup also on persistence/publication failure; never resume a
-            // released frozen book on the next timer tick.
-            symbols.erase(it);
-        }
-        if (store) store->releaseSymbol(m.symbol());
-        {
-            std::lock_guard lock(watermarksMutex);
-            std::erase_if(watermarksBySeries, [&](const auto &entry) { return entry.first.first == m.symbol(); });
-        }
-        if (cfg.onReleased) cfg.onReleased(m.symbol());
-    }
     void process(const Message &m) {
-        if (m.kind == Kind::Release) {
-            release(m);
-            return;
-        }
         if (m.time < kHmc2MinMs || m.time > kMaxTime || m.local < kHmc2MinMs || m.local > kMaxTime) {
             sLog_Warning("BookRecorder: rejected timestamp time=" << m.time);
             for (auto &[name, s] : symbols)
@@ -1172,33 +1042,19 @@ struct BookRecorder::Impl {
                 if (m.kind == Kind::Invalid && !m.symbol().empty() && name != m.symbol())
                     continue;
                 auto &s = *ptr;
-                if (!s.initialized) {
-                    // No observation yet; a lost first snapshot still needs a retry.
-                    if (m.kind == Kind::Invalid)
-                        s.selfInvalidReason = m.upstream ? std::string() : m.reason;
-                    requestResnapshot(name, s);
-                    continue;
-                }
+                if (!s.initialized) continue;
                 const auto t = std::clamp(m.time - s.offset, int64_t{0}, kMaxTime);
                 expireOneSided(name, s, t);
                 advance(s, t);
                 if (m.kind == Kind::Invalid)
-                    invalidate(name, s, m.reason, m.upstream);
-                else if (!s.valid)
-                    requestResnapshot(name, s); // repeats while still invalid, with backoff
-                noteStable(s);
+                    invalidate(name, s, m.reason);
                 publishOpen(s);
             }
             return;
         }
-        if (m.kind != Kind::Snapshot && !m.droppedSnapshot && !symbols.contains(m.symbol())) return;
+        if (m.kind != Kind::Snapshot && !symbols.contains(m.symbol())) return;
         auto &s = getSymbol(m.symbol());
         if (!s.initialized) {
-            if (m.kind == Kind::InvalidEnvelope && m.droppedSnapshot) {
-                sLog_Warning("BookRecorder: first snapshot dropped symbol=" << m.symbol() << " reason=" << m.reason);
-                s.selfInvalidReason = m.reason;
-                requestResnapshot(m.symbol(), s);
-            }
             if (m.kind != Kind::Snapshot)
                 return;
             s.initialized = true;
@@ -1222,32 +1078,16 @@ struct BookRecorder::Impl {
         advance(s, t);
         if (late)
             s.flags |= kLateEvents;
-        if (m.kind == Kind::InvalidEnvelope) {
-            sLog_Warning("BookRecorder: queue overflow symbol=" << m.symbol());
-            invalidate(m.symbol(), s, m.reason);
-            return;
-        }
         if (m.kind == Kind::Snapshot || s.valid)
             apply(s, m);
-        noteStable(s);
         publishOpen(s);
         sLog_Probe("recording.event", "symbol=" << m.symbol() << " envelope=" << m.time << " clock=" << s.clock
                                                 << " valid=" << s.valid << " levels=" << m.levels.size());
     }
 };
-BookRecorder::BookRecorder(RecorderConfig cfg) : BookRecorder(std::move(cfg), systemNow) {}
-BookRecorder::BookRecorder(RecorderConfig cfg, std::function<int64_t()> clock)
-    : impl_(std::make_unique<Impl>(std::move(cfg), std::move(clock))) {}
+BookRecorder::BookRecorder(RecorderConfig cfg) : impl_(std::make_unique<Impl>(std::move(cfg))) {}
 BookRecorder::~BookRecorder() = default;
 void BookRecorder::requestStop() { impl_->requestStop(); }
-void BookRecorder::onSnapshot(const std::string &symbol, int64_t time, std::vector<Level> levels) {
-    impl_->enqueue(
-        {Impl::Kind::Snapshot, impl_->internSymbol(symbol), {}, time, impl_->localClock(), std::move(levels)});
-}
-void BookRecorder::onUpdates(const std::string &symbol, int64_t time, std::vector<Level> levels) {
-    impl_->enqueue(
-        {Impl::Kind::Updates, impl_->internSymbol(symbol), {}, time, impl_->localClock(), std::move(levels)});
-}
 void BookRecorder::onSnapshotAt(const std::string &symbol, int64_t time, int64_t local, std::vector<Level> levels) {
     impl_->enqueue({Impl::Kind::Snapshot, impl_->internSymbol(symbol), {}, time, local, std::move(levels)});
 }
@@ -1255,11 +1095,7 @@ void BookRecorder::onUpdatesAt(const std::string &symbol, int64_t time, int64_t 
     impl_->enqueue({Impl::Kind::Updates, impl_->internSymbol(symbol), {}, time, local, std::move(levels)});
 }
 void BookRecorder::onInvalid(const std::string &symbol, int64_t local, std::string reason) {
-    impl_->enqueue({Impl::Kind::Invalid, impl_->internSymbol(symbol), std::move(reason), local, local, {}, true});
-}
-void BookRecorder::releaseSymbol(const std::string &symbol, int64_t local) {
-    impl_->enqueue({Impl::Kind::Release, impl_->internSymbol(symbol), {}, local, local, {}});
-    impl_->producerSymbols.erase(symbol);
+    impl_->enqueue({Impl::Kind::Invalid, impl_->internSymbol(symbol), std::move(reason), local, local, {}});
 }
 void BookRecorder::onTick(int64_t local) {
     impl_->enqueue({Impl::Kind::Tick, {}, {}, local, local, {}});
@@ -1267,16 +1103,12 @@ void BookRecorder::onTick(int64_t local) {
 BookRecorder::Stats BookRecorder::stats() const {
     const auto &i = *impl_;
     return {i.columnsWritten.load(), i.lateEvents.load(),    i.backwardSteps.load(),
-            i.queueDrops.load(),     i.invalidations.load(), i.diskErrors.load()};
+            i.invalidations.load(), i.diskErrors.load()};
 }
 BookRecorder::Watermarks BookRecorder::watermarks(const std::string &symbol, const std::string &layer) const {
     std::lock_guard lock(impl_->watermarksMutex);
     const auto it = impl_->watermarksBySeries.find({symbol, layer});
     return it == impl_->watermarksBySeries.end() ? Watermarks{} : it->second;
-}
-size_t BookRecorder::retainedSymbolStatesForTest() {
-    drainForTest();
-    return impl_->symbols.size() + impl_->producerSymbols.size();
 }
 void BookRecorder::drainForTest() { drain(); }
 std::unique_ptr<BookRecorder> BookRecorder::forkLead(std::function<void(std::shared_ptr<const Hmc2Record>)> publisher,
@@ -1291,11 +1123,9 @@ std::unique_ptr<BookRecorder> BookRecorder::forkLead(std::function<void(std::sha
     c.deterministicResume = false;
     c.minuteColumnsCounter = nullptr;
     c.writeErrorsCounter = nullptr;
-    c.onSelfInvalidated = {};
-    c.onReleased = {};
     c.beforePublicationForTest = {};
     c.beforeQueueWaitForTest = {};
-    auto out = std::make_unique<BookRecorder>(std::move(c), src.localClock);
+    auto out = std::make_unique<BookRecorder>(std::move(c));
     auto &dst = *out->impl_;
     // The new worker touches symbols only after dequeuing a message under this mutex.
     std::lock_guard lock(dst.mutex);
@@ -1334,10 +1164,6 @@ std::unique_ptr<BookRecorder> BookRecorder::forkLead(std::function<void(std::sha
         to->midClose = from->midClose;
         to->serial = from->serial;
         to->pending = from->pending;
-        to->selfInvalidReason = from->selfInvalidReason;
-        to->nextResnapshotLocal = from->nextResnapshotLocal;
-        to->resnapshotIntervalMs = from->resnapshotIntervalMs;
-        to->validSinceLocal = from->validSinceLocal;
         to->oneSidedSince = from->oneSidedSince;
         dst.symbols.emplace(name, std::move(to));
     }
@@ -1347,15 +1173,15 @@ std::unique_ptr<BookRecorder> BookRecorder::forkLead(std::function<void(std::sha
 std::vector<uint8_t> BookRecorder::exportState() {
     drain(); // producer-only, same synchronization contract as forkLead()
     auto& src = *impl_;
-    if (src.diskErrors || src.queueDrops) return {}; // degraded recorder has no usable cache state
-    StateJson j = {{"version",1},{"policy",statePolicy(src.cfg)},
+    if (src.diskErrors) return {}; // degraded recorder has no usable cache state
+    StateJson j = {{"version",2},{"policy",statePolicy(src.cfg)},
         {"floatDigits",std::numeric_limits<long double>::digits},
         {"floatExponent",std::numeric_limits<long double>::max_exponent},
         {"workerLocal",src.workerLocal},{"openFailureLogLocal",src.openFailureLogLocal},
         {"openFailuresSuppressed",src.openFailuresSuppressed},{"symbols",StateJson::object()},
         {"watermarks",StateJson::array()},
         {"stats",{src.columnsWritten.load(),src.lateEvents.load(),src.backwardSteps.load(),
-                   src.queueDrops.load(),src.invalidations.load(),src.diskErrors.load()}}};
+                   src.invalidations.load(),src.diskErrors.load()}}};
     for (const auto& [name,s] : src.symbols) j["symbols"][name] = packSymbol(*s);
     {
         std::lock_guard lock(src.watermarksMutex);
@@ -1377,7 +1203,7 @@ void BookRecorder::importState(const std::vector<uint8_t>& bytes) {
     const auto j = StateJson::from_cbor(bytes.begin(),bytes.end()-4);
     finiteState(j);
     auto& dst = *impl_;
-    stateRequire(j.at("version") == 1 && j.at("policy") == statePolicy(dst.cfg) &&
+    stateRequire(j.at("version") == 2 && j.at("policy") == statePolicy(dst.cfg) &&
         j.at("floatDigits") == std::numeric_limits<long double>::digits &&
         j.at("floatExponent") == std::numeric_limits<long double>::max_exponent, "state version/policy/float mismatch");
     // Construct and validate everything off to the side. No partially installed
@@ -1400,8 +1226,8 @@ void BookRecorder::importState(const std::vector<uint8_t>& bytes) {
         stateRequire(mark.minuteThroughMs >= 0 && mark.hourThroughMs >= 0 && mark.lastColumnMs >= 0 &&
             watermarks.emplace(std::pair(symbol,layer),mark).second, "invalid/duplicate watermark");
     }
-    const auto stats = j.at("stats").get<std::array<uint64_t,6>>();
-    stateRequire(!stats[3] && !stats[5], "failed state");
+    const auto stats = j.at("stats").get<std::array<uint64_t,5>>();
+    stateRequire(!stats[4], "failed state");
     const auto local = j.at("workerLocal").get<int64_t>();
     const auto failureLocal = j.at("openFailureLogLocal").get<int64_t>();
     const auto failures = j.at("openFailuresSuppressed").get<uint64_t>();
@@ -1409,14 +1235,14 @@ void BookRecorder::importState(const std::vector<uint8_t>& bytes) {
     std::scoped_lock lock(dst.mutex,dst.watermarksMutex);
     stateRequire(dst.symbols.empty() && dst.producerSymbols.empty() && dst.watermarksBySeries.empty() &&
         !dst.count && !dst.busy && !dst.stopping && !dst.columnsWritten && !dst.invalidations &&
-        !dst.queueDrops && !dst.diskErrors && dst.workerLocal == 0, "import requires fresh recorder");
+        !dst.diskErrors && dst.workerLocal == 0, "import requires fresh recorder");
     dst.symbols.swap(symbols); dst.watermarksBySeries.swap(watermarks);
     dst.workerLocal = local; dst.openFailureLogLocal = failureLocal; dst.openFailuresSuppressed = failures;
     dst.columnsWritten = stats[0]; dst.lateEvents = stats[1]; dst.backwardSteps = stats[2];
-    dst.queueDrops = stats[3]; dst.invalidations = stats[4]; dst.diskErrors = stats[5];
+    dst.invalidations = stats[3]; dst.diskErrors = stats[4];
 }
 void BookRecorder::drain() {
     std::unique_lock lock(impl_->mutex);
-    impl_->drained.wait(lock, [&] { return !impl_->count && !impl_->emergency && !impl_->busy; });
+    impl_->drained.wait(lock, [&] { return !impl_->count && !impl_->busy; });
 }
 } // namespace recording

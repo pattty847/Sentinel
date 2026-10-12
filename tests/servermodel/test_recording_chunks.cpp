@@ -453,8 +453,8 @@ TEST_F(ChunkTest, RecorderLevelWatermarksKeepUnwrittenHourNotLoaded) {
     int64_t local = epoch;
     RecorderConfig cfg{root(), 100., {}, {{"deep", 500, .5, 2., true}}, 2000, 2'000'000};
     cfg.publisher = [&](RecordPtr r) { live.publish(std::move(r)); };
-    BookRecorder recorder(std::move(cfg), [&] { return local; });
-    recorder.onSnapshot("BTC-USD", local, {{true, 99., 2.}, {false, 101., 4.}});
+    BookRecorder recorder(std::move(cfg));
+    recorder.onSnapshotAt("BTC-USD", local, local, {{true, 99., 2.}, {false, 101., 4.}});
     recorder.drainForTest();
     const ChunkKey hourKey{"BTC-USD", "hmc2.deep", kHourMs, epoch};
     local = epoch + kHourMs + 1999;

@@ -211,7 +211,7 @@ public:
       failed("apply", e);
     }
   }
-  // Socket waits: wall-clock ticks advance the forming minute like the primary
+  // Socket waits: wall-clock ticks advance the forming minute using the
   // recorder's 250 ms timer.
   void idle() {
     if (!lead)
@@ -223,7 +223,7 @@ public:
     }
   }
 };
-// recording.live_feed: journal (slice D-b1), roller worker thread only. The
+// Journal live feed, roller worker thread only. The
 // server's live model follows this product's journal through cfg.model:
 // - `durable` follows the history feed (durable records, catch-up included;
 //   RollOptions::onFeed chains its callbacks, so nothing is parsed twice);
@@ -953,7 +953,7 @@ struct ShadowRoller::Impl {
     metrics::Counter *minuteColumns = nullptr;
     bool refused = false;
     bool healthy = false; // readyMutex
-    // recording.live_feed: journal: the model asked for a fresh snapshot.
+    // Journal live feed: the model asked for a fresh snapshot.
     std::atomic<bool> reseed{false};
     // Served watermarks (chunk workers): the current day's history recorder
     // while it exists, merged into the newest values ever served.
@@ -975,7 +975,6 @@ struct ShadowRoller::Impl {
     std::thread worker;
   };
   ShadowConfig cfg;
-  fs::path primary;
   std::vector<std::unique_ptr<Product>> products;
   std::atomic<bool> stopping{false};
   std::mutex readyMutex;
@@ -983,9 +982,9 @@ struct ShadowRoller::Impl {
   std::mutex mutex;
   std::condition_variable wake;
   std::thread checker;
-  Impl(ShadowConfig c, std::vector<std::string> names, fs::path root,
+  Impl(ShadowConfig c, std::vector<std::string> names,
        metrics::MetricsRegistry &registry)
-      : cfg(std::move(c)), primary(std::move(root)) {
+      : cfg(std::move(c)) {
     for (auto &name : names) {
       auto p = std::make_unique<Product>();
       p->name = std::move(name);
@@ -1012,8 +1011,7 @@ struct ShadowRoller::Impl {
       p->writeErrors = &registry.counter(
           "sentinel_roller_write_errors_total",
           "Roller HMC2 append failures (minutes and rollups).", labels);
-      // Shadow-only runs must not collide with primary recorder samplers or
-      // add shadow writes to the primary recording throughput.
+      // Only serving runs contribute to recording throughput.
       if (cfg.publisher)
         p->minuteColumns = &registry.counter(
             "sentinel_recorder_columns_written_total",
@@ -1100,11 +1098,10 @@ struct ShadowRoller::Impl {
     });
   }
   void validate() {
-    if (cfg.outputRoot.empty() || primary.empty() || cfg.journalRoot.empty() ||
-        overlaps(cfg.outputRoot, primary) ||
+    if (cfg.outputRoot.empty() || cfg.journalRoot.empty() ||
         overlaps(cfg.outputRoot, cfg.journalRoot))
       throw std::runtime_error(
-          "shadow output must be disjoint from primary and journal roots");
+          "roller output must be disjoint from the journal root");
     for (const auto &root : cfg.protectedRoots)
       if (!root.empty() && overlaps(cfg.outputRoot, root))
         throw std::runtime_error(
@@ -1371,7 +1368,7 @@ struct ShadowRoller::Impl {
           const auto end =
               std::min(p->committed.load(), nowMs() - 2000) / Hour * Hour;
           // One hour at a time, sequential across products; no work on
-          // the source workers, primary path, or metrics scrape thread.
+          // the source workers or metrics scrape thread.
           while (p->compared < end && !stopping) {
             const auto begin = p->compared;
             const auto day = begin / Day * Day;
@@ -1386,7 +1383,7 @@ struct ShadowRoller::Impl {
               metrics::Counter nearDelta, deepDelta;
               for (const auto *layer : {"near", "deep"}) {
                 auto report = compareShadow(
-                    cfg.outputRoot, oracleRoot, primary, p->name, layer,
+                    cfg.outputRoot, oracleRoot, p->name, layer,
                     p->compared, p->compared + Hour,
                     std::string_view(layer) == "near" ? nearDelta : deepDelta);
                 sLog_Data("Shadow roller comparison " << report.dump());
@@ -1426,9 +1423,9 @@ struct ShadowRoller::Impl {
   }
 };
 ShadowRoller::ShadowRoller(ShadowConfig c, std::vector<std::string> p,
-                           fs::path root, metrics::MetricsRegistry &r) {
+                           metrics::MetricsRegistry &r) {
   if (c.enabled)
-    m = std::make_unique<Impl>(std::move(c), std::move(p), std::move(root), r);
+    m = std::make_unique<Impl>(std::move(c), std::move(p), r);
 }
 ShadowRoller::~ShadowRoller() = default;
 recording::BookRecorder::Watermarks

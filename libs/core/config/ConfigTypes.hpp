@@ -89,10 +89,8 @@ struct ServerRecordingConfig {
     // loader clamps it to [kLivePublishMinMs, kLivePublishMaxMs].
     static constexpr int64_t kLivePublishMinMs = 250, kLivePublishMaxMs = 5000;
     int64_t livePublishMs = 500;
-    // recording.source: "primary" (this process's own BookRecorder writes dir)
-    // or "roller" (the journal roller's roller_shadow.dir is served, history and
-    // live minute; no primary recorder). Any other value serves nothing.
-    std::string source = "primary";
+    // Explicitly required at startup; the journal roller is the only source.
+    std::string source;
 };
 
 struct ServerConfig {
@@ -138,7 +136,7 @@ inline std::vector<std::string> rollerProducts(const ServerConfig& config) {
 inline std::string recordingSourceProblem(const ServerConfig& config) {
     if (config.recording.source != "roller")
         return "recording.source must be roller (source=" + config.recording.source +
-               "); the primary recorder has no feed since D-b2";
+               ")";
     if (!config.rollerShadow.enabled)
         return "recording.source=roller requires roller_shadow.enabled=true";
     return {};

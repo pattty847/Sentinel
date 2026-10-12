@@ -43,14 +43,8 @@ struct ShadowServerTestAccess {
   static void checkProgress(SentinelServerApp &app, int64_t nowMs) {
     app.m_serverModel->checkRecorderProgress(nowMs);
   }
-  static bool hasPrimaryRecorder(SentinelServerApp &app) {
-    return app.m_serverModel->m_recorder != nullptr;
-  }
   static ServerDataModel &model(SentinelServerApp &app) {
     return *app.m_serverModel;
-  }
-  static void tick(SentinelServerApp &app, int64_t ms) {
-    app.m_serverModel->m_recorder->onTick(ms);
   }
   static std::string metrics(SentinelServerApp &app) {
     return app.m_metrics.render();
@@ -247,7 +241,7 @@ struct ShadowTest : testing::Test {
   void start() {
     metrics = std::make_unique<metrics::MetricsRegistry>();
     shadow = std::make_unique<ShadowRoller>(cfg, std::vector{Product},
-                                            root / "primary", *metrics);
+                                            *metrics);
   }
   bool has(const std::string &line) {
     return metrics->render().find(line + "\n") != std::string::npos;
@@ -720,8 +714,7 @@ TEST_F(ShadowTest, IndependentProductsShareRootWithTheirOwnGrids) {
     eth.append(record(t * 1000));
   eth.flush();
   shadow = std::make_unique<ShadowRoller>(
-      cfg, std::vector<std::string>{Product, "ETH-USD"}, root / "primary",
-      *metrics);
+      cfg, std::vector<std::string>{Product, "ETH-USD"}, *metrics);
   ASSERT_TRUE(eventually([&] { return count() == 128; }));
   shadow.reset();
   writer->close();
@@ -764,74 +757,6 @@ TEST_F(ShadowTest, EofDiscardsProvisionalAndRecoversJournal) {
   expectOrderedLive();
   EXPECT_GT(expectFinalsMatch(root / "batch"), 0u);
 }
-TEST_F(ShadowTest, StalledAndFailingShadowDoesNotDelayServerPrimary) {
-  initial(125);
-  std::atomic<bool> entered{false}, stalled{false};
-  cfg.observeForTest = [&](const auto &, bool applied) {
-    if (applied && !entered.exchange(true)) {
-      stalled = true;
-      std::this_thread::sleep_for(1500ms);
-      stalled = false;
-    }
-  };
-  ServerConfig config;
-  config.defaultSymbols = {Product};
-  config.recording.enabled = true;
-  config.recording.dir = (root / "primary").string();
-  config.recording.fallbackDir.clear();
-  config.rollerShadow = cfg;
-  SentinelServerApp app(config);
-  ShadowServerTestAccess::prepare(app, root);
-  auto &model = ShadowServerTestAccess::model(app);
-  ASSERT_TRUE(model.recordingAvailable());
-  std::atomic<int> deliveries{0};
-  auto subscription = model.recordingLive()->subscribeRaw(
-      {Product, {"hmc2.near"}, 1, 0},
-      [&](const auto &, const auto &, const auto &) {
-        ++deliveries;
-        return true;
-      });
-  ASSERT_TRUE(subscription);
-  const auto start = std::chrono::steady_clock::now();
-  ShadowServerTestAccess::start(app);
-  EXPECT_LT(std::chrono::steady_clock::now() - start, 1s);
-  ASSERT_TRUE(eventually([&] { return entered.load(); }));
-  ASSERT_TRUE(stalled.load());
-  const auto now = QDateTime::currentMSecsSinceEpoch();
-  model.onLiveOrderBookInitialized("BTC-USD", {{99999, 2}}, {{100001, 3}}, now);
-  const auto boundary = now / 60000 * 60000 + 120000;
-  const auto append = [&](int64_t through) {
-    const auto began = std::chrono::steady_clock::now();
-    ShadowServerTestAccess::tick(app, through + 3000);
-    EXPECT_TRUE(eventually([&] {
-      return model.recordingWatermarks(Product, "near").minuteThroughMs >=
-             through;
-    }));
-    EXPECT_LT(std::chrono::steady_clock::now() - began, 1s);
-    EXPECT_FALSE(recording::Hmc2Store::readRange(root / "primary", Product,
-                                                 "near", 60000, through - 60000,
-                                                 through)
-                     .empty());
-  };
-  append(boundary);
-  EXPECT_TRUE(stalled.load());
-  EXPECT_TRUE(eventually([&] { return deliveries.load() > 0; }));
-  // A checkpoint write fault in the same running shadow and ownership graph.
-  // The first snapshot already created provenance before the instrumentation.
-  const auto checkpoint = root / "shadow" / Product / "roller.json";
-  ASSERT_TRUE(fs::remove(checkpoint));
-  fs::create_directory(checkpoint); // QSaveFile cannot rename over a directory
-  {
-    std::ofstream blocker(checkpoint / "blocker");
-    blocker << "blocked";
-  }
-  ASSERT_TRUE(eventually([&] {
-    return ShadowServerTestAccess::metrics(app).find(
-               "sentinel_roller_shadow_setup_failures_total{product=\"BTC-"
-               "USD\"} 0\n") == std::string::npos;
-  }));
-  append(boundary + 60000);
-}
 TEST_F(ShadowTest, MalformedRecordInvalidatesAndContinuesLikeBatch) {
   initial();
   start();
@@ -864,7 +789,7 @@ TEST_F(ShadowTest, StopWakesCheckerAcrossPredicateWaitTransition) {
     std::this_thread::sleep_for(100ms);
   };
   shadow = std::make_unique<ShadowRoller>(cfg, std::vector<std::string>{},
-                                          root / "primary", *metrics);
+                                          *metrics);
   ASSERT_TRUE(eventually([&] { return entered.load(); }));
   const auto began = std::chrono::steady_clock::now();
   auto done = std::async(std::launch::async, [&] {
@@ -1079,7 +1004,7 @@ TEST_F(ShadowTest, CorruptOracleCheckpointResetsAndStillCompares) {
   roll({cfg.journalRoot, root / "clean", Product, Epoch, Epoch + 7200000});
   for (const auto *layer : {"near", "deep"}) {
     metrics::Counter mismatch;
-    compareShadow(root / "clean", oracle, root / "primary", Product, layer,
+    compareShadow(root / "clean", oracle, Product, layer,
                   Epoch, Epoch + 7200000, mismatch);
     EXPECT_EQ(mismatch.value(), 0);
   }
@@ -1135,11 +1060,12 @@ TEST_F(ShadowTest, OracleRemovesPreviousDayAtRollover) {
   EXPECT_TRUE(fs::exists(productOracle / std::to_string(next) / Product /
                          "roller.json"));
 }
-TEST_F(ShadowTest, RefusesAliasedPrimaryRoot) {
+TEST_F(ShadowTest, RefusesAliasedProtectedRoot) {
   initial();
   fs::create_directories(root / "primary");
   fs::create_directory_symlink(root / "primary", root / "alias");
   cfg.outputRoot = (root / "alias").string();
+  cfg.protectedRoots = {(root / "primary").string()};
   start();
   ASSERT_TRUE(eventually([&] {
     return !has(
@@ -1147,19 +1073,17 @@ TEST_F(ShadowTest, RefusesAliasedPrimaryRoot) {
   }));
   EXPECT_TRUE(fs::is_empty(root / "primary"));
 }
-TEST_F(ShadowTest, MismatchMetricIsStrictAndCrossConnectionInformational) {
+TEST_F(ShadowTest, MismatchMetricChecksOnlySameJournal) {
   initial(125);
   writer->close();
   roll({cfg.journalRoot, root / "batch", Product, Epoch, Epoch + 120000});
   fs::copy(root / "batch", root / "shadow", fs::copy_options::recursive);
-  fs::copy(root / "batch", root / "primary", fs::copy_options::recursive);
   auto &mismatch =
       metrics->counter("sentinel_roller_shadow_mismatch_total", "test",
                        {{"product", Product}, {"layer", "near"}});
-  // A missing primary side never gates independent-connection acceptance.
-  fs::remove_all(root / "primary" / Product / "near-60000");
-  compareShadow(root / "shadow", root / "batch", root / "primary", Product,
+  const auto report = compareShadow(root / "shadow", root / "batch", Product,
                 "near", Epoch, Epoch + 120000, mismatch);
+  EXPECT_FALSE(report.contains("crossConnectionInformational"));
   EXPECT_EQ(mismatch.value(), 0);
   // An actual decoded-content difference also increments the strict gate.
   auto rows = recording::Hmc2Store::readRange(root / "shadow", Product, "near",
@@ -1171,12 +1095,12 @@ TEST_F(ShadowTest, MismatchMetricIsStrictAndCrossConnectionInformational) {
     recording::Hmc2Store divergent(root / "shadow");
     divergent.append(rows.back());
   }
-  compareShadow(root / "shadow", root / "batch", root / "primary", Product,
+  compareShadow(root / "shadow", root / "batch", Product,
                 "near", Epoch, Epoch + 120000, mismatch);
   EXPECT_EQ(mismatch.value(), 1);
   // Missing shadow buckets count, even though legacy diff excluded them.
   fs::remove_all(root / "shadow" / Product / "near-60000");
-  compareShadow(root / "shadow", root / "batch", root / "primary", Product,
+  compareShadow(root / "shadow", root / "batch", Product,
                 "near", Epoch, Epoch + 120000, mismatch);
   EXPECT_EQ(mismatch.value(), 3);
 }
@@ -1729,8 +1653,7 @@ TEST_F(ShadowTest, ServingReadinessNeedsEveryProductHealthyAtOnce) {
   auto ethLease =
       std::make_unique<recording::Hmc2Store>(root / "shadow", true, "ETH-USD");
   shadow = std::make_unique<ShadowRoller>(
-      cfg, std::vector<std::string>{Product, "ETH-USD"}, root / "primary",
-      *metrics);
+      cfg, std::vector<std::string>{Product, "ETH-USD"}, *metrics);
   ASSERT_TRUE(eventually([&] {
     return logcapture::seen("Roller writer healthy product=BTC-USD");
   }));
@@ -1874,7 +1797,7 @@ TEST_F(ShadowTest, ListedProductWithoutJournalIsRefusedWithoutWorker) {
   eth.flush();
   shadow = std::make_unique<ShadowRoller>(
       cfg, std::vector<std::string>{Product, "ETH-USD", "ADA-USD"},
-      root / "primary", *metrics);
+      *metrics);
   ASSERT_TRUE(eventually([&] {
     return has("sentinel_roller_shadow_running{product=\"BTC-USD\"} 1") &&
            has("sentinel_roller_shadow_running{product=\"ETH-USD\"} 1");
@@ -1943,8 +1866,7 @@ TEST_F(ShadowTest, MidnightRotationKeepsHistoryAndLiveForTwoProducts) {
   };
   append(from, Day - 30000);
   shadow = std::make_unique<ShadowRoller>(
-      cfg, std::vector<std::string>{Product, "ETH-USD"}, root / "primary",
-      *metrics);
+      cfg, std::vector<std::string>{Product, "ETH-USD"}, *metrics);
   roller = shadow.get();
   ASSERT_TRUE(
       eventually([&] { return forks() == 1 && forks("ETH-USD") == 1; }));
@@ -2001,7 +1923,7 @@ TEST_F(ShadowTest, LowPriceProductLiveAndHistoryRowsBelowHalfACent) {
     pepe.append(record(t * 1000));
   pepe.flush();
   shadow = std::make_unique<ShadowRoller>(
-      cfg, std::vector<std::string>{"PEPE-USD"}, root / "primary", *metrics);
+      cfg, std::vector<std::string>{"PEPE-USD"}, *metrics);
   ASSERT_TRUE(eventually([&] { return forks("PEPE-USD") == 1; }));
   for (int t = 64; t <= 125; ++t)
     pepe.append(record(t * 1000));
@@ -2077,7 +1999,6 @@ TEST_F(ShadowTest, ServingRollerReplacesPrimaryRecorderForNonDefaultProduct) {
   EXPECT_EQ(*model.recordingDir(),
             fs::path(cfg.outputRoot)); // served == roller output
   ASSERT_NE(model.recordingLive(), nullptr);
-  EXPECT_FALSE(ShadowServerTestAccess::hasPrimaryRecorder(app));
   EXPECT_FALSE(model.recordingAvailable()); // until the roller attaches
   std::mutex framesMutex;
   std::vector<heatmap::ChunkFrame> frames;
@@ -2093,7 +2014,6 @@ TEST_F(ShadowTest, ServingRollerReplacesPrimaryRecorderForNonDefaultProduct) {
   ASSERT_TRUE(raw);
   ShadowServerTestAccess::start(app);
   EXPECT_TRUE(model.recordingAvailable()); // A4: no primary recorder
-  EXPECT_FALSE(ShadowServerTestAccess::hasPrimaryRecorder(app));
   const auto text = [&] { return ShadowServerTestAccess::metrics(app); };
   // A5: no self-alias refusal of the served root.
   ASSERT_TRUE(eventually([&] {
@@ -2173,7 +2093,7 @@ TEST(ShadowConfig, ProductsAndRecordingSourceKeys) {
            "  products: [btc-usd, PEPE-USD, PEPE-USD]\n";
   }
   ServerConfig c;
-  EXPECT_EQ(c.recording.source, "primary");
+  EXPECT_TRUE(c.recording.source.empty());
   EXPECT_EQ(rollerProducts(c), std::vector<std::string>{"BTC-USD"});
   ASSERT_TRUE(ConfigLoader::loadServerConfig(p.string(), &c));
   EXPECT_EQ(c.recording.source, "roller");
@@ -2505,8 +2425,7 @@ TEST_F(ShadowTest, JournalTapMidnightReseedsOnceWithoutInvalidation) {
   };
   append(from, Day - 30000);
   shadow = std::make_unique<ShadowRoller>(
-      cfg, std::vector<std::string>{Product, "ETH-USD"}, root / "primary",
-      *metrics);
+      cfg, std::vector<std::string>{Product, "ETH-USD"}, *metrics);
   ASSERT_TRUE(eventually([&] {
     return modelCount("snapshot") == 1 && modelCount("snapshot", "ETH-USD") == 1;
   }));
@@ -2751,7 +2670,7 @@ TEST_F(ShadowTest, DISABLED_JournalTapCatchupCostSevenProducts) {
       const auto c0 = cpu();
       const auto w0 = std::chrono::steady_clock::now();
       metrics = std::make_unique<metrics::MetricsRegistry>();
-      shadow = std::make_unique<ShadowRoller>(cfg, products, root / "primary", *metrics);
+      shadow = std::make_unique<ShadowRoller>(cfg, products, *metrics);
       const auto until = std::chrono::steady_clock::now() + 120s;
       while ((count() < products.size() * records ||
               (tapped && seeds.load() < int(products.size()))) &&
@@ -2811,14 +2730,15 @@ struct JournalServer {
   std::vector<Book> books;
   std::vector<Trade> trades;
   int bars = 0, bookUpdates = 0;
-  explicit JournalServer(ShadowTest &test) : t(test) {
+  explicit JournalServer(ShadowTest &test,
+                         std::vector<std::string> products = {"PEPE-USD"}) : t(test) {
     t.fanout.reset();
     t.writer.reset();
     t.fanoutMetrics = std::make_unique<metrics::MetricsRegistry>();
     capture::FanoutConfig fc;
     fc.socketPath = QString::fromStdString(t.cfg.socketPath);
     t.fanout = std::make_unique<capture::CaptureFanout>(
-        fc, std::vector<std::string>{"PEPE-USD"}, *t.fanoutMetrics,
+        fc, std::move(products), *t.fanoutMetrics,
         [this](const auto &) { ++t.resnapshots; });
     capture::WriterConfig wc;
     wc.root = QString::fromStdString(t.cfg.journalRoot);
@@ -2845,12 +2765,15 @@ struct JournalServer {
     config.rollerShadow.liveNowForTest = [&test] { return test.liveNow.load(); };
     qputenv("SENTINEL_HEALTH_PORT", "0"); // bind an ephemeral port without a probe/close race
   }
-  bool initialize() {
+  bool initialize(bool listen = true) {
     app = std::make_unique<SentinelServerApp>(config);
-    const bool ok = app->initialize();
-    if (!ok)
-      return false;
-    EXPECT_GT(ShadowServerTestAccess::healthPort(*app), 0);
+    if (listen) {
+      if (!app->initialize()) return false;
+      EXPECT_GT(ShadowServerTestAccess::healthPort(*app), 0);
+    } else {
+      ShadowServerTestAccess::prepare(*app, t.root);
+      ShadowServerTestAccess::start(*app);
+    }
     auto &m = model();
     QObject::connect(&m, &ServerDataModel::bookSnapshotBroadcast,
                      [this](const QString &id,
@@ -2917,6 +2840,54 @@ struct JournalServer {
     return std::string::npos;
   }
 };
+TEST_F(ShadowTest, StalledRollerWorkerDoesNotBlockOtherProductModelAndLiveDelivery) {
+  JournalServer s(*this, {"PEPE-USD", Product});
+  // BTC has its own durable input but its worker will stop on the first record.
+  capture::WriterConfig wc;
+  wc.root = QString::fromStdString(cfg.journalRoot);
+  wc.fsyncBlocks = 1;
+  wc.onJournal = [&](const capture::JournalEvent &e) { fanout->publish(1, e); };
+  capture::Writer btc(wc, meta());
+  btc.append(record(0, snapshot()));
+  for (int t = 1; t <= 63; ++t) btc.append(record(t * 1000));
+  btc.close();
+  s.config.rollerShadow.products = {Product, "PEPE-USD"};
+  std::promise<void> release;
+  const auto gate = release.get_future().share();
+  std::atomic<bool> stalled{false}, delivered{false};
+  s.config.rollerShadow.observeForTest = [&](const JournalRecord &r, bool applied) {
+    if (applied && r.pos.product == Product && !stalled.exchange(true))
+      gate.wait();
+  };
+  // Release before app teardown even when an assertion fails; no timeout ends
+  // the stall and accidentally permits the delivery assertions to pass.
+  struct Unblock {
+    std::promise<void> &release;
+    std::unique_ptr<SentinelServerApp> &app;
+    ~Unblock() { release.set_value(); app.reset(); }
+  } unblock{release, s.app};
+  ASSERT_TRUE(s.initialize(false));
+  ASSERT_TRUE(eventually([&] { return stalled.load(); }));
+  ASSERT_TRUE(eventuallyQt([&] {
+    return s.status("ready") != std::string::npos && s.connected(true);
+  }));
+  auto subscription = s.model().recordingLive()->subscribeRaw(
+      {"PEPE-USD", {"hmc2.near"}, 1, 0},
+      [&](const auto &, const std::string &, const recording::RawTailFrame &f) {
+        if (f.bytes)
+          for (const auto &c : heatmap::decodeChunk(*f.bytes).columns.columns)
+            if (c.bucketStartMs == Epoch + 120000) delivered = true;
+        return true;
+      });
+  ASSERT_TRUE(subscription);
+  const auto updates = s.bookUpdates;
+  s.pepe->append(record(64000, pepeLevel("offer", "0.00001002", "123")));
+  for (int t = 65; t <= 125; ++t) s.pepe->append(record(t * 1000));
+  s.pepe->flush();
+  ASSERT_TRUE(eventuallyQt([&] { return s.bookUpdates > updates; }));
+  ASSERT_TRUE(eventuallyQt([&] { return delivered.load(); }));
+  EXPECT_TRUE(stalled.load());
+}
 // A5 and A3: no MarketDataFeeds; captured products only; PEPE's tick comes
 // from the journal header (no REST) and a far move re-seeds instead of
 // waiting for an upstream snapshot.

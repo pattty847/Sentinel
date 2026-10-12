@@ -346,7 +346,9 @@ TEST(RecordingServerStop, SessionPrioritizesRawLiveAndReleasesSlotOnBeginClose) 
     ASSERT_TRUE(dir.isValid());
     ServerConfig config;
     config.recording.enabled = true;
-    config.recording.dir = dir.path().toStdString();
+    config.recording.source = "roller";
+    config.rollerShadow.enabled = true;
+    config.rollerShadow.outputRoot = dir.path().toStdString();
     ServerDataModel model(config);
     ASSERT_NE(model.recordingLive(), nullptr);
     RecordingServerStopTest::checkRawLiveSlotRelease(model);
@@ -360,7 +362,9 @@ TEST(RecordingServerStop, ActiveDeliveryIsJoinedBeforeDelayedExecutorDrain) {
     QTemporaryDir dir;
     ServerConfig config;
     config.recording.enabled = true;
-    config.recording.dir = dir.path().toStdString();
+    config.recording.source = "roller";
+    config.rollerShadow.enabled = true;
+    config.rollerShadow.outputRoot = dir.path().toStdString();
     ServerDataModel model(config);
     ASSERT_NE(model.recordingLive(), nullptr);
     Authenticator auth(dir.path().toStdString() + "/no-credentials");
@@ -402,53 +406,21 @@ TEST(RecordingServerStop, ActiveDeliveryIsJoinedBeforeDelayedExecutorDrain) {
     EXPECT_EQ(stopped.wait_for(std::chrono::seconds(3)), std::future_status::ready);
 }
 
-TEST(RecordingServerStop, FailedRecorderStartReleasesItsLiveService) {
+
+TEST(RecordingServerStop, PrimarySourceCannotCreateARecorderOrLiveService) {
     int argc = 1;
-    char name[] = "recording-failure";
+    char name[] = "removed-primary";
     char* argv[] = {name, nullptr};
     QCoreApplication app(argc, argv);
     QTemporaryDir dir;
-    recording::Hmc2Store locked(dir.path().toStdString());
     ServerConfig config;
     config.recording.enabled = true;
-    config.recording.dir = dir.path().toStdString();
+    config.recording.source = "primary";
+    config.recording.dir = dir.filePath("must-not-exist").toStdString();
     ServerDataModel model(config);
     EXPECT_FALSE(model.recordingAvailable());
     EXPECT_EQ(model.recordingLive(), nullptr);
-}
-
-// Production handoff: a recorder self-invalidation (here a one-sided snapshot)
-// reaches recordingResnapshotRequested on the model's (main) thread, which
-// SentinelServerApp connects to MarketDataCoreEngine::requestResnapshot.
-TEST(RecordingServerStop, SelfInvalidationIsHandedToTheMainThread) {
-    int argc = 1;
-    char name[] = "recording-resnapshot";
-    char* argv[] = {name, nullptr};
-    QCoreApplication app(argc, argv);
-    QTemporaryDir dir;
-    ServerConfig config;
-    config.recording.enabled = true;
-    config.recording.dir = dir.path().toStdString();
-    ServerDataModel model(config);
-    ASSERT_TRUE(model.recordingAvailable());
-    std::vector<std::pair<QString, QString>> requests;
-    bool onMainThread = false;
-    QObject::connect(&model, &ServerDataModel::recordingResnapshotRequested,
-                     [&](const QString& symbol, const QString& reason) {
-                         requests.emplace_back(symbol, reason);
-                         onMainThread = QThread::currentThread() == app.thread();
-                     });
-    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-    model.onLiveOrderBookInitialized("BTC-USD", {{100.0, 2.0}}, {}, nowMs);
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (requests.empty() && std::chrono::steady_clock::now() < deadline) {
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    ASSERT_EQ(requests.size(), 1u);
-    EXPECT_EQ(requests[0].first, "BTC-USD");
-    EXPECT_EQ(requests[0].second, "missing two-sided mid");
-    EXPECT_TRUE(onMainThread);
+    EXPECT_FALSE(std::filesystem::exists(config.recording.dir));
 }
 
 TEST(RecordingServerStop, ActualServerStartStopStartRestoresLiveDelivery) {
@@ -459,7 +431,9 @@ TEST(RecordingServerStop, ActualServerStartStopStartRestoresLiveDelivery) {
     QTemporaryDir dir;
     ServerConfig config;
     config.recording.enabled = true;
-    config.recording.dir = dir.path().toStdString();
+    config.recording.source = "roller";
+    config.rollerShadow.enabled = true;
+    config.rollerShadow.outputRoot = dir.path().toStdString();
     config.tls.certFile = dir.path().toStdString() + "/cert.pem";
     config.tls.keyFile = dir.path().toStdString() + "/key.pem";
     ASSERT_TRUE(writeSelfSignedCert(config.tls.certFile, config.tls.keyFile));

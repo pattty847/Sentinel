@@ -20,10 +20,10 @@ def command(args, expected=0):
     return p.stdout
 
 def build():
-    command(['cmake', '--build', '--preset', 'mac-clang', '-j', '4', '--target', 'test_roller', 'test_roller_live_fixture'])
+    command(['cmake', '--build', '--preset', 'mac-clang', '-j', '4', '--target', 'test_roller'])
 
 def test(name, expect_failure=False):
-    target = 'test_roller_live_fixture' if name.startswith('RollerLiveFixture.') else 'test_roller'
+    target = 'test_roller'
     output = command([f'build/mac-clang/tests/roller/{target}', '--gtest_filter=' + name], 1 if expect_failure else 0)
     if expect_failure and '[  FAILED  ]' not in output:
         raise RuntimeError('mutation failed outside the assertion harness')
@@ -47,10 +47,10 @@ review_mutations = [
   'sequence_ = seq; // Re-anchor sequence tracking', 'if (!discontinuity) sequence_ = seq; // Re-anchor sequence tracking',
   'Roller.SequenceErrorAllowsFollowingSnapshotWithoutTransportUp'),
  ('stop broadcast', 'libs/core/servermodel/BookRecorder.cpp',
-  'if (cfg.blockingQueue) space.notify_all();', 'if (cfg.blockingQueue) space.notify_one();',
+  'space.notify_all();', 'space.notify_one();',
   'Roller.StopWakesBlockedProducerBeforeWorkerDrains'),
  ('large delta resume', 'libs/core/roller/Grid.cpp',
-  'c.blockingQueue = c.deterministicResume = true;', 'c.blockingQueue = true; c.deterministicResume = false;',
+  'c.deterministicResume = true;', 'c.deterministicResume = false;',
   'Roller.RealJournalCrashResumeRestoresLargeDeltaBase'),
  ('delta histogram', 'libs/core/roller/Diff.cpp',
   'std::to_string(it->second.first-value.first)', 'std::to_string(value.first-it->second.first)',
@@ -58,9 +58,6 @@ review_mutations = [
  ('total TWAP delta', 'libs/core/roller/Diff.cpp',
   'const auto delta=totalB-totalA;', 'const auto delta=totalA-totalB;',
   'Roller.DiffQualifiesMasksLateAndDetectsContent'),
- ('controlled fixture bands', 'libs/core/roller/JournalFeed.cpp',
-  'levels.push_back({l.isBid,l.price,l.quantity});', 'levels.push_back({l.isBid,l.price,l.quantity*1.01});',
-  'RollerLiveFixture.ControlledTickScheduleStaysWithinBands'),
 ]
 mutations = [
  ('superseding run', 'libs/core/roller/JournalReader.cpp',
@@ -76,19 +73,17 @@ mutations = [
  ('record ticks', 'libs/core/roller/JournalFeed.cpp',
   'if (onTick) onTick(local);', 'if (false && onTick) onTick(local);', 'Roller.FeedFiltersProductsClocksAndLifecycle'),
  ('deterministic resume', 'libs/core/roller/Grid.cpp',
-  'c.blockingQueue = c.deterministicResume = true;', 'c.blockingQueue = true; c.deterministicResume = false;', 'Roller.RunIdentityCrashResumeAndIdempotence'),
+  'c.deterministicResume = true;', 'c.deterministicResume = false;', 'Roller.RunIdentityCrashResumeAndIdempotence'),
  ('checkpoint', 'libs/core/roller/Roller.cpp',
   'checkpoint(cpPath,cp);', '// checkpoint disabled by mutation', 'Roller.RunIdentityCrashResumeAndIdempotence'),
  ('dry run', 'libs/core/roller/Roller.cpp',
   'if (o.dryRun) return;', 'if (false) return;', 'Roller.DryRunAndEofDoNotInventTime'),
- ('blocking admission', 'libs/core/roller/Grid.cpp',
-  'c.blockingQueue = c.deterministicResume = true;', 'c.blockingQueue = false; c.deterministicResume = true;', 'Roller.BlockingQueueAdmitsAtomicOversizedSnapshot'),
+ ('blocking admission', 'libs/core/servermodel/BookRecorder.cpp',
+  'space.wait(lock, ready);', 'if (!ready()) return;', 'Roller.BlockingQueueAdmitsAtomicOversizedSnapshot'),
  ('commit floor', 'libs/core/servermodel/BookRecorder.cpp',
   '<= cfg.commitFloorMs', '<= 0', 'Roller.CommitFloorAndCeiling'),
  ('lateness mask', 'libs/core/roller/Diff.cpp',
   'r.flags & ~recording::kLateEvents', 'r.flags', 'Roller.DiffQualifiesMasksLateAndDetectsContent'),
- ('shared parsing/live golden', 'libs/core/marketdata/dispatch/BookParser.hpp',
-  'return std::isfinite(price)', 'quantity *= 1.01; return std::isfinite(price)', 'RollerLiveFixture.RecordedInputPreservesLiveBytes'),
  ('timestamp fallback', 'libs/core/Cpp20Utils.hpp',
   'return fallback ? *fallback : std::chrono::system_clock::now();',
   'return std::chrono::system_clock::now();', 'Roller.FeedFiltersProductsClocksAndLifecycle'),

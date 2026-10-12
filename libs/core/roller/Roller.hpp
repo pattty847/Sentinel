@@ -29,7 +29,7 @@ struct RollOptions {
     // Live-lead seam, on the calling thread: the day's recorder and journal feed
     // once both exist, then (nullptr, nullptr, 0) before either is destroyed.
     std::function<void(recording::BookRecorder*, const JournalFeed*, int64_t dayEndMs)> onRecorder;
-    // Model-tap seam (recording.live_feed: journal), on the calling thread: the
+    // Model-tap seam (Journal live feed), on the calling thread: the
     // day's feed after roll() installed its callbacks, before the first record.
     // The tap may chain them (observing levels before the recorder takes them).
     // The feed lives until onRecorder(nullptr, nullptr, 0). Not policy.
@@ -44,8 +44,9 @@ struct RollOptions {
     std::function<std::pair<JournalBook,bool>()> anchorBook;
     std::function<void(int64_t)> afterAnchorForTest;
     bool anchorFailuresFatal = false; // rebuild-anchors: sidecars are the requested product
-    // Boundary/error-path injection only; never used on the primary record hot path.
+    // Boundary/error-path injection only; never used on the journal record hot path.
     std::function<std::vector<uint8_t>(recording::BookRecorder&)> anchorExportForTest;
+    std::function<std::unique_ptr<JournalReader>(const JournalPos&)> anchorReaderForTest;
     std::function<bool(JournalReader&, JournalRecord&)> anchorOverlapReadForTest;
 
 };
