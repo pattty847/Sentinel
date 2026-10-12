@@ -367,6 +367,18 @@ set_tests_properties(TradeLayerNodeOrderTests PROPERTIES LABELS "render" TIMEOUT
 add_test(NAME ChartLateEnableGpuTests COMMAND test_ugr_gpu "--gtest_filter=UgrGpu.LateEnableKeepsRegistryOrderAndTextLast")
 set_tests_properties(ChartLateEnableGpuTests PROPERTIES LABELS "render;heatmap" TIMEOUT 60)
 
+add_executable(test_ChartLookSettings test_chart_look_settings.cpp)
+target_include_directories(test_ChartLookSettings PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_ChartLookSettings PRIVATE GTest::gtest_main sentinel_gui_lib)
+add_test(NAME ChartLookSettingsTests COMMAND test_ChartLookSettings)
+set_tests_properties(ChartLookSettingsTests PROPERTIES LABELS "render;fast")
+
+add_executable(test_LayerVisibility test_layer_visibility.cpp)
+target_include_directories(test_LayerVisibility PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_LayerVisibility PRIVATE GTest::gtest_main)
+add_test(NAME LayerVisibilityTests COMMAND test_LayerVisibility)
+set_tests_properties(LayerVisibilityTests PROPERTIES LABELS "render;fast")
+
 add_executable(test_ChartRenderSequence test_chart_render_sequence.cpp)
 set_target_properties(test_ChartRenderSequence PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
 target_include_directories(test_ChartRenderSequence PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)

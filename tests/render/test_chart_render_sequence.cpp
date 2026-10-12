@@ -53,6 +53,8 @@ TEST(HeatmapLabelSequence, SamePictureAndMarginSuppressRepost) {
     EXPECT_FALSE(heatmap::gpu::labelRequestCovers(p, changed, window));
     changed = same; changed.tick *= 2;
     EXPECT_FALSE(heatmap::gpu::labelRequestCovers(p, changed, window));
+    changed = same; changed.priceScale *= 2;
+    EXPECT_FALSE(heatmap::gpu::labelRequestCovers(p, changed, window));
     changed = same; ++changed.spanVersion;
     EXPECT_FALSE(heatmap::gpu::labelRequestCovers(p, changed, window));
     changed = same; ++changed.liveVersion;
