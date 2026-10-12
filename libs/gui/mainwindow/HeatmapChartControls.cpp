@@ -43,13 +43,13 @@ void HeatmapChartControls::setRenderer(UnifiedGridRenderer *renderer) {
     }
     renderer->setHeatmapTickMemory(m_model->manualTicks());
     renderer->setHeatmapChartSettings(m_model->settings());
-    renderer->setCandleAppearance(m_model->settings());
-    connect(renderer, &UnifiedGridRenderer::timeframeChanged, this, &HeatmapChartControls::scheduleSync);
-    connect(renderer, &UnifiedGridRenderer::viewportChanged, this, &HeatmapChartControls::scheduleIndicator);
-    connect(renderer, &UnifiedGridRenderer::layerVisibilityChanged, this, &HeatmapChartControls::scheduleSync);
-    connect(renderer, &UnifiedGridRenderer::tpoConfigChanged, this, &HeatmapChartControls::scheduleSync);
-    connect(renderer, &UnifiedGridRenderer::tpoStyleChanged, this, &HeatmapChartControls::scheduleSync);
-    connect(renderer, &UnifiedGridRenderer::candleStyleChanged, this, &HeatmapChartControls::scheduleSync);
+    renderer->candles()->setCandleAppearance(m_model->settings());
+    connect(renderer->view(), &chart::ChartViewQml::timeframeChanged, this, &HeatmapChartControls::scheduleSync);
+    connect(renderer->view(), &chart::ChartViewQml::viewportChanged, this, &HeatmapChartControls::scheduleIndicator);
+    connect(renderer->layers(), &chart::LayerVisibility::layerVisibilityChanged, this, &HeatmapChartControls::scheduleSync);
+    connect(renderer->tpo(), &chart::ChartTpoQml::tpoConfigChanged, this, &HeatmapChartControls::scheduleSync);
+    connect(renderer->tpo(), &chart::ChartTpoQml::tpoStyleChanged, this, &HeatmapChartControls::scheduleSync);
+    connect(renderer->candles(), &chart::ChartLookSettings::candleStyleChanged, this, &HeatmapChartControls::scheduleSync);
     if (auto *layer = renderer->gpuHeatmapLayer()) {
         using Layer = heatmap::gpu::HeatmapGpuLayer;
         connect(layer, &Layer::tickChanged, this, &HeatmapChartControls::scheduleSync);
@@ -72,10 +72,10 @@ void HeatmapChartControls::setToolbar(TopToolbar *toolbar) {
     connect(toolbar, &TopToolbar::liquidityLabelModeChanged, this, [this](int mode) { requestLabelCurrency(mode == 1); });
     connect(toolbar, &TopToolbar::candlesToggled, this, &HeatmapChartControls::scheduleSync);
     connect(toolbar, &TopToolbar::tpoSessionSelected, this, [this](int session) {
-        if (m_renderer) m_renderer->setTpoSessionType(session);
+        if (m_renderer) m_renderer->tpo()->setTpoSessionType(session);
     });
     connect(toolbar, &TopToolbar::tpoLayoutSelected, this, [this](const QString &layout) {
-        if (m_renderer) m_renderer->setTpoLayout(layout);
+        if (m_renderer) m_renderer->tpo()->setTpoLayout(layout);
     });
     connect(toolbar, &TopToolbar::chartTypeSelected, this, [this, toolbar](const QString &style) {
         requestCandleStyle(toolbar->chartTypeCombo()->findText(style));
@@ -92,10 +92,10 @@ void HeatmapChartControls::setMenuHooks(MenuHooks hooks) {
 TopToolbar::ModeState HeatmapChartControls::modeState() const {
     TopToolbar::ModeState mode;
     if (m_renderer) {
-        mode.heatmap = m_renderer->heatmapLayerEnabled();
-        mode.footprint = m_renderer->footprintLayerEnabled();
-        mode.tpo = m_renderer->tpoLayerEnabled();
-        mode.volumeProfile = m_renderer->volumeProfileLayerEnabled();
+        mode.heatmap = m_renderer->layers()->heatmapEnabled();
+        mode.footprint = m_renderer->layers()->footprintEnabled();
+        mode.tpo = m_renderer->layers()->tpoEnabled();
+        mode.volumeProfile = m_renderer->layers()->volumeProfileEnabled();
     }
     mode.candles = m_toolbar ? m_toolbar->candlesChecked() : true;
     return mode;
@@ -126,7 +126,7 @@ void HeatmapChartControls::requestLabelSize(double minPx, double maxPx) {
 }
 
 void HeatmapChartControls::requestCandleStyle(int style) {
-    if (m_renderer) m_renderer->setCandleStyle(std::clamp(style, 0, 2));
+    if (m_renderer) m_renderer->candles()->setCandleStyle(std::clamp(style, 0, 2));
     syncNow();
 }
 
@@ -275,7 +275,7 @@ void HeatmapChartControls::refreshChartMenu() {
             const auto &p = kLabelSizes[a->data().toInt()];
             a->setChecked(p.minPx == s.labelMinPx && p.maxPx == s.labelMaxPx);
         } else if (name == "chartMenuCandleStylePreset") {
-            a->setChecked(m_renderer && m_renderer->candleStyle() == a->data().toInt());
+            a->setChecked(m_renderer && m_renderer->candles()->candleStyle() == a->data().toInt());
             a->setEnabled(bool(m_renderer));
         }
     }
@@ -334,7 +334,7 @@ void HeatmapChartControls::onModelChanged(bool explicitManualTick) {
     const auto &s = m_model->settings();
     if (m_renderer) {
         m_renderer->setHeatmapChartSettings(s, explicitManualTick);
-        m_renderer->setCandleAppearance(s);
+        m_renderer->candles()->setCandleAppearance(s);
     }
     syncTelemetryVisibility();
     syncNow(); // the toolbar and dialog follow every change at once (API, dialog, toolbar)
@@ -385,10 +385,10 @@ void HeatmapChartControls::syncNow() {
         m_toolbar->tpoSessionCombo()->setEnabled(bool(m_renderer));
         m_toolbar->tpoLayoutCombo()->setEnabled(bool(m_renderer));
         if (m_renderer) {
-            m_toolbar->setTpoState(m_renderer->tpoSessionType(), m_renderer->tpoLayout());
-            if (auto *combo = m_toolbar->chartTypeCombo(); combo && combo->currentIndex() != m_renderer->candleStyle()) {
+            m_toolbar->setTpoState(m_renderer->tpo()->tpoSessionType(), m_renderer->tpo()->tpoLayout());
+            if (auto *combo = m_toolbar->chartTypeCombo(); combo && combo->currentIndex() != m_renderer->candles()->candleStyle()) {
                 const QSignalBlocker block(combo);
-                combo->setCurrentIndex(m_renderer->candleStyle());
+                combo->setCurrentIndex(m_renderer->candles()->candleStyle());
             }
         }
     }

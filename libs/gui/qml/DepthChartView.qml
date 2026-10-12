@@ -53,7 +53,7 @@ Rectangle {
     }
 
     Connections {
-        target: unifiedGridRenderer
+        target: unifiedGridRenderer.view
         function onViewportChanged() {}
         function onTimeframeChanged() {}
         function onPanVisualOffsetChanged() {}
@@ -82,13 +82,13 @@ Rectangle {
         candleBuffer: dataSource ? dataSource.candleBuffer : null
         z: 1
         
-        onTimeframeChanged: {
-            root.currentActiveTimeframe = unifiedGridRenderer.timeframeMs
+        view.onTimeframeChanged: {
+            root.currentActiveTimeframe = unifiedGridRenderer.view.timeframeMs
             console.log(" Timeframe changed to:", root.currentActiveTimeframe, "ms")
         }
         
         Component.onCompleted: {
-            root.currentActiveTimeframe = unifiedGridRenderer.timeframeMs
+            root.currentActiveTimeframe = unifiedGridRenderer.view.timeframeMs
         }
     }
 
@@ -100,13 +100,13 @@ Rectangle {
         mappingProvider: unifiedGridRenderer
         candleBuffer: dataSource ? dataSource.candleBuffer : null
         symbol: root.symbol
-        timeframeSec: Math.max(1, Math.round(unifiedGridRenderer.timeframeMs / 1000))
-        candleStyle: unifiedGridRenderer.candleStyle
-        upColor: unifiedGridRenderer.candleUpColor
-        downColor: unifiedGridRenderer.candleDownColor
-        wickColor: unifiedGridRenderer.candleWickColor
-        bodyOpacity: unifiedGridRenderer.candleBodyOpacity
-        wickWidth: unifiedGridRenderer.candleWickWidth
+        timeframeSec: Math.max(1, Math.round(unifiedGridRenderer.view.timeframeMs / 1000))
+        candleStyle: unifiedGridRenderer.candles.candleStyle
+        upColor: unifiedGridRenderer.candles.candleUpColor
+        downColor: unifiedGridRenderer.candles.candleDownColor
+        wickColor: unifiedGridRenderer.candles.candleWickColor
+        bodyOpacity: unifiedGridRenderer.candles.candleBodyOpacity
+        wickWidth: unifiedGridRenderer.candles.candleWickWidth
         z: 2
     }
 
@@ -114,7 +114,7 @@ Rectangle {
         objectName: "tradeBubbleOverlay"
         anchors.fill: unifiedGridRenderer
         renderer: unifiedGridRenderer
-        z: unifiedGridRenderer.tradesAboveCandles ? 2.5 : 1.5
+        z: unifiedGridRenderer.candles.tradesAboveCandles ? 2.5 : 1.5
     }
 
     AlgoOverlayRenderer {
@@ -568,11 +568,11 @@ Rectangle {
         Accessible.description: "Drag or scroll to zoom price. Up/Down zoom; Home fits visible prices."
         Keys.onPressed: function(event) {
             if (event.key === Qt.Key_Up || event.key === Qt.Key_Down) {
-                unifiedGridRenderer.zoomPriceClicks(event.key === Qt.Key_Up ? 1 : -1,
+                unifiedGridRenderer.view.zoomPriceClicks(event.key === Qt.Key_Up ? 1 : -1,
                                                     unifiedGridRenderer.height / 2)
                 event.accepted = true
             } else if (event.key === Qt.Key_Home) {
-                unifiedGridRenderer.fitPriceToData()
+                unifiedGridRenderer.view.fitPriceToData()
                 event.accepted = true
             }
         }
@@ -586,7 +586,7 @@ Rectangle {
         PriceAxisModel {
             id: priceAxisModel
             target: unifiedGridRenderer
-            tickSize: unifiedGridRenderer.heatmapTickSize
+            tickSize: unifiedGridRenderer.view.heatmapTickSize
         }
 
         MouseArea {
@@ -610,12 +610,12 @@ Rectangle {
                 const deltaY = mouse.y - lastY
                 lastY = mouse.y
                 // Continuous while dragging; the release settles on a zoom rung.
-                unifiedGridRenderer.zoomPriceDrag(-deltaY * 24.0, p.y)
+                unifiedGridRenderer.view.zoomPriceDrag(-deltaY * 24.0, p.y)
             }
             // Auto price scale on: fit the visible candles (live price when none).
-            onDoubleClicked: unifiedGridRenderer.fitPriceToData()
-            onReleased: unifiedGridRenderer.endZoomGesture()
-            onCanceled: unifiedGridRenderer.endZoomGesture()
+            onDoubleClicked: unifiedGridRenderer.view.fitPriceToData()
+            onReleased: unifiedGridRenderer.view.endZoomGesture()
+            onCanceled: unifiedGridRenderer.view.endZoomGesture()
         }
         ToolTip.visible: priceAxisMouse.containsMouse
         ToolTip.delay: 550
@@ -627,7 +627,7 @@ Rectangle {
 
             onWheel: function(event) {
                 const p = root.mapPriceAxisPoint(priceAxis, event.x, event.y)
-                unifiedGridRenderer.zoomPriceWheel(event.angleDelta.y, event.pixelDelta.y,
+                unifiedGridRenderer.view.zoomPriceWheel(event.angleDelta.y, event.pixelDelta.y,
                                                    event.phase, p.y)
                 event.accepted = true
             }
@@ -660,11 +660,11 @@ Rectangle {
         Accessible.description: "Drag or scroll to zoom time. Left/Right zoom; Home resets the live view."
         Keys.onPressed: function(event) {
             if (event.key === Qt.Key_Right || event.key === Qt.Key_Left) {
-                unifiedGridRenderer.zoomTimeClicks(event.key === Qt.Key_Right ? 1 : -1,
+                unifiedGridRenderer.view.zoomTimeClicks(event.key === Qt.Key_Right ? 1 : -1,
                                                    unifiedGridRenderer.width / 2)
                 event.accepted = true
             } else if (event.key === Qt.Key_Home) {
-                unifiedGridRenderer.resetView()
+                unifiedGridRenderer.view.resetView()
                 event.accepted = true
             }
         }
@@ -701,12 +701,12 @@ Rectangle {
                 const deltaX = mouse.x - lastX
                 lastX = mouse.x
                 // Continuous while dragging; the release settles on a zoom rung.
-                unifiedGridRenderer.zoomTimeDrag(deltaX * 24.0, p.x)
+                unifiedGridRenderer.view.zoomTimeDrag(deltaX * 24.0, p.x)
             }
             // The default view: initial span at the live edge, follow-live, auto price scale.
-            onDoubleClicked: unifiedGridRenderer.resetView()
-            onReleased: unifiedGridRenderer.endZoomGesture()
-            onCanceled: unifiedGridRenderer.endZoomGesture()
+            onDoubleClicked: unifiedGridRenderer.view.resetView()
+            onReleased: unifiedGridRenderer.view.endZoomGesture()
+            onCanceled: unifiedGridRenderer.view.endZoomGesture()
         }
         ToolTip.visible: timeAxisMouse.containsMouse
         ToolTip.delay: 550
@@ -718,7 +718,7 @@ Rectangle {
 
             onWheel: function(event) {
                 const p = root.mapTimeAxisPoint(timeAxis, event.x, event.y)
-                unifiedGridRenderer.zoomTimeWheel(event.angleDelta.y, event.pixelDelta.y,
+                unifiedGridRenderer.view.zoomTimeWheel(event.angleDelta.y, event.pixelDelta.y,
                                                   event.phase, p.x)
                 event.accepted = true
             }
@@ -751,21 +751,21 @@ Rectangle {
             height: width
             radius: 3
             activeFocusOnTab: true
-            color: unifiedGridRenderer.autoPriceScale ? "#2962ff" : "transparent"
+            color: unifiedGridRenderer.view.autoPriceScale ? "#2962ff" : "transparent"
             border.width: 1
             border.color: activeFocus || autoPriceScaleMouse.containsMouse ? "#9cc8ff" : "#5a6370"
             Accessible.role: Accessible.Button
             Accessible.checkable: true
-            Accessible.checked: unifiedGridRenderer.autoPriceScale
+            Accessible.checked: unifiedGridRenderer.view.autoPriceScale
             Accessible.name: "Auto price scale"
             Accessible.description: "Fit price to visible candles. Press P to toggle. Independent of follow live time."
-            Accessible.onPressAction: unifiedGridRenderer.autoPriceScale = !unifiedGridRenderer.autoPriceScale
+            Accessible.onPressAction: unifiedGridRenderer.view.autoPriceScale = !unifiedGridRenderer.view.autoPriceScale
             Text {
                 anchors.centerIn: parent
                 text: "P"
                 font.pixelSize: 11
                 font.bold: true
-                color: unifiedGridRenderer.autoPriceScale ? "#ffffff" : "#9aa4b2"
+                color: unifiedGridRenderer.view.autoPriceScale ? "#ffffff" : "#9aa4b2"
             }
             MouseArea {
                 id: autoPriceScaleMouse
@@ -774,7 +774,7 @@ Rectangle {
                 cursorShape: Qt.PointingHandCursor
                 onClicked: {
                     autoPriceScaleButton.forceActiveFocus()
-                    unifiedGridRenderer.autoPriceScale = !unifiedGridRenderer.autoPriceScale
+                    unifiedGridRenderer.view.autoPriceScale = !unifiedGridRenderer.view.autoPriceScale
                 }
             }
             ToolTip.visible: autoPriceScaleMouse.containsMouse
@@ -782,7 +782,7 @@ Rectangle {
             ToolTip.text: "P · Auto price scale: fit visible candles"
             Keys.onPressed: function(event) {
                 if (event.key === Qt.Key_Space || event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                    unifiedGridRenderer.autoPriceScale = !unifiedGridRenderer.autoPriceScale
+                    unifiedGridRenderer.view.autoPriceScale = !unifiedGridRenderer.view.autoPriceScale
                     event.accepted = true
                 }
             }
@@ -794,21 +794,21 @@ Rectangle {
             height: width
             radius: 3
             activeFocusOnTab: true
-            color: unifiedGridRenderer.autoScrollEnabled ? "#2962ff" : "transparent"
+            color: unifiedGridRenderer.view.autoScrollEnabled ? "#2962ff" : "transparent"
             border.width: 1
             border.color: activeFocus || followLiveMouse.containsMouse ? "#9cc8ff" : "#5a6370"
             Accessible.role: Accessible.Button
             Accessible.checkable: true
-            Accessible.checked: unifiedGridRenderer.autoScrollEnabled
+            Accessible.checked: unifiedGridRenderer.view.autoScrollEnabled
             Accessible.name: "Follow live time"
             Accessible.description: "Keep the newest time at the right edge. Press A to toggle. Independent of auto price scale."
-            Accessible.onPressAction: unifiedGridRenderer.enableAutoScroll(!unifiedGridRenderer.autoScrollEnabled)
+            Accessible.onPressAction: unifiedGridRenderer.view.enableAutoScroll(!unifiedGridRenderer.view.autoScrollEnabled)
             Text {
                 anchors.centerIn: parent
                 text: "L"
                 font.pixelSize: 11
                 font.bold: true
-                color: unifiedGridRenderer.autoScrollEnabled ? "#ffffff" : "#9aa4b2"
+                color: unifiedGridRenderer.view.autoScrollEnabled ? "#ffffff" : "#9aa4b2"
             }
             MouseArea {
                 id: followLiveMouse
@@ -817,7 +817,7 @@ Rectangle {
                 cursorShape: Qt.PointingHandCursor
                 onClicked: {
                     followLiveButton.forceActiveFocus()
-                    unifiedGridRenderer.enableAutoScroll(!unifiedGridRenderer.autoScrollEnabled)
+                    unifiedGridRenderer.view.enableAutoScroll(!unifiedGridRenderer.view.autoScrollEnabled)
                 }
             }
             ToolTip.visible: followLiveMouse.containsMouse
@@ -825,7 +825,7 @@ Rectangle {
             ToolTip.text: "A · Follow live time: keep newest data in view"
             Keys.onPressed: function(event) {
                 if (event.key === Qt.Key_Space || event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                    unifiedGridRenderer.enableAutoScroll(!unifiedGridRenderer.autoScrollEnabled)
+                    unifiedGridRenderer.view.enableAutoScroll(!unifiedGridRenderer.view.autoScrollEnabled)
                     event.accepted = true
                 }
             }
@@ -841,7 +841,7 @@ Rectangle {
         color: Qt.rgba(0, 0, 0, 0.45)
         radius: 4
         z: 10
-        visible: unifiedGridRenderer.showGpuStatsOverlay
+        visible: unifiedGridRenderer.debug.showGpuStatsOverlay
         width: Math.max(fpsText.implicitWidth, debugText.implicitWidth) + 12
         height: fpsText.implicitHeight + debugText.implicitHeight + 10
 
@@ -870,12 +870,12 @@ Rectangle {
             repeat: true
             running: fpsOverlay.visible
             onTriggered: {
-                fpsText.text = unifiedGridRenderer.getPerformanceStats();
-                var t0 = unifiedGridRenderer.getVisibleTimeStart();
-                var t1 = unifiedGridRenderer.getVisibleTimeEnd();
-                var p0 = unifiedGridRenderer.getMinPrice();
-                var p1 = unifiedGridRenderer.getMaxPrice();
-                var pan = unifiedGridRenderer.getPanVisualOffset();
+                fpsText.text = unifiedGridRenderer.debug.getPerformanceStats();
+                var t0 = unifiedGridRenderer.view.getVisibleTimeStart();
+                var t1 = unifiedGridRenderer.view.getVisibleTimeEnd();
+                var p0 = unifiedGridRenderer.view.getMinPrice();
+                var p1 = unifiedGridRenderer.view.getMaxPrice();
+                var pan = unifiedGridRenderer.view.getPanVisualOffset();
                 debugText.text =
                     "Time: " + t0 + "→" + t1 +
                     "  Price: " + p0.toFixed(2) + "→" + p1.toFixed(2) +
@@ -893,7 +893,7 @@ Rectangle {
         color: Qt.rgba(0, 0, 0, 0.45)
         radius: 4
         z: 10
-        visible: unifiedGridRenderer.showGpuStatsOverlay
+        visible: unifiedGridRenderer.debug.showGpuStatsOverlay
         width: gpuStatsColumn.implicitWidth + 12
         height: gpuStatsColumn.implicitHeight + 10
 
@@ -922,7 +922,7 @@ Rectangle {
             repeat: true
             running: gpuStatsOverlay.visible
             onTriggered: {
-                msdfAtlasText.text = unifiedGridRenderer.getMsdfAtlasMemory();
+                msdfAtlasText.text = unifiedGridRenderer.debug.getMsdfAtlasMemory();
             }
         }
     }
@@ -938,7 +938,7 @@ Rectangle {
         color: Qt.rgba(0, 0, 0, 0.45)
         radius: 4
         z: 10
-        visible: unifiedGridRenderer.showDataPipelineOverlay
+        visible: unifiedGridRenderer.debug.showDataPipelineOverlay
         width: dataPipelineText.implicitWidth + 12
         height: dataPipelineText.implicitHeight + 10
 
@@ -956,7 +956,7 @@ Rectangle {
             repeat: true
             running: dataPipelineOverlay.visible
             onTriggered: {
-                dataPipelineText.text = unifiedGridRenderer.getDataPipelineDebug();
+                dataPipelineText.text = unifiedGridRenderer.debug.getDataPipelineDebug();
             }
         }
     }
@@ -970,7 +970,7 @@ Rectangle {
         color: Qt.rgba(0, 0, 0, 0.45)
         radius: 4
         z: 10
-        visible: unifiedGridRenderer.showViewportMathOverlay
+        visible: unifiedGridRenderer.debug.showViewportMathOverlay
         width: viewportMathText.implicitWidth + 12
         height: viewportMathText.implicitHeight + 10
 
@@ -988,7 +988,7 @@ Rectangle {
             repeat: true
             running: viewportMathOverlay.visible
             onTriggered: {
-                viewportMathText.text = unifiedGridRenderer.getViewportMathDebug();
+                viewportMathText.text = unifiedGridRenderer.debug.getViewportMathDebug();
             }
         }
     }
@@ -996,17 +996,17 @@ Rectangle {
     focus: true
     Keys.onPressed: function(event) {
         switch(event.key) {
-            case Qt.Key_R: unifiedGridRenderer.resetZoom(); event.accepted = true; break;
-            case Qt.Key_A: unifiedGridRenderer.enableAutoScroll(!unifiedGridRenderer.autoScrollEnabled); event.accepted = true; break;
-            case Qt.Key_P: unifiedGridRenderer.autoPriceScale = !unifiedGridRenderer.autoPriceScale; event.accepted = true; break;
+            case Qt.Key_R: unifiedGridRenderer.view.resetZoom(); event.accepted = true; break;
+            case Qt.Key_A: unifiedGridRenderer.view.enableAutoScroll(!unifiedGridRenderer.view.autoScrollEnabled); event.accepted = true; break;
+            case Qt.Key_P: unifiedGridRenderer.view.autoPriceScale = !unifiedGridRenderer.view.autoPriceScale; event.accepted = true; break;
             case Qt.Key_Plus:
-            case Qt.Key_Equal: unifiedGridRenderer.zoomIn(); event.accepted = true; break;
+            case Qt.Key_Equal: unifiedGridRenderer.view.zoomIn(); event.accepted = true; break;
             case Qt.Key_Minus:
-            case Qt.Key_Underscore: unifiedGridRenderer.zoomOut(); event.accepted = true; break;
-            case Qt.Key_Left: unifiedGridRenderer.panLeft(); event.accepted = true; break;
-            case Qt.Key_Right: unifiedGridRenderer.panRight(); event.accepted = true; break;
-            case Qt.Key_Up: unifiedGridRenderer.panUp(); event.accepted = true; break;
-            case Qt.Key_Down: unifiedGridRenderer.panDown(); event.accepted = true; break;
+            case Qt.Key_Underscore: unifiedGridRenderer.view.zoomOut(); event.accepted = true; break;
+            case Qt.Key_Left: unifiedGridRenderer.view.panLeft(); event.accepted = true; break;
+            case Qt.Key_Right: unifiedGridRenderer.view.panRight(); event.accepted = true; break;
+            case Qt.Key_Up: unifiedGridRenderer.view.panUp(); event.accepted = true; break;
+            case Qt.Key_Down: unifiedGridRenderer.view.panDown(); event.accepted = true; break;
             case Qt.Key_G: 
                 if (event.modifiers & Qt.ControlModifier) {
                     root.showTimeGrid = !root.showTimeGrid;

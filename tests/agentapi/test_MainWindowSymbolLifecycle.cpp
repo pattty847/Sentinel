@@ -3,6 +3,7 @@
 #include "config/AgentHostMode.hpp"
 #include "datasources/IGridDataSource.hpp"
 #include "datasources/RemoteGridDataSource.hpp"
+#include "datasources/CandleBackfillState.hpp"
 #include "models/MarketHealth.hpp"
 #include "widgets/StatusBar.hpp"
 #include "widgets/HeatmapTelemetryDock.hpp"
@@ -14,6 +15,8 @@
 #include "widgets/ChartDock.hpp"
 #include "widgets/ServiceLocator.hpp"
 #include "mainwindow/GuiApiServer.h"
+#include "mainwindow/AgentApiCodec.hpp"
+#include "mainwindow/ChartAgentPort.hpp"
 #include "UnifiedGridRenderer.h"
 #include "models/TimeAxisModel.hpp"
 #include "models/PriceAxisModel.hpp"
@@ -34,6 +37,7 @@
 #include <QTreeView>
 #include <QStandardItemModel>
 #include <QSettings>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QStatusBar>
 #include <QTemporaryDir>
@@ -46,6 +50,7 @@
 #include <gtest/gtest.h>
 
 struct MainWindowSymbolLifecyclePeer {
+    static AgentApi::ViewportSnapshot viewport(const MainWindowGPU& window) { return window.chartAgentPort().snapshot(window.agentApiMetadata()); }
     static UnifiedGridRenderer* renderer(const MainWindowGPU& window) { return window.m_qmlController->getUnifiedGridRenderer(); }
     static void clearChartScene(MainWindowGPU& window) { window.m_qquickView->setSource(QUrl{}); }
     static void arrange(MainWindowGPU& window) { window.m_layoutOrchestrator->arrangeDefaultLayout(window.getDockWidgets()); }
@@ -84,6 +89,137 @@ QStandardItem* watchItem(WatchlistDock* rail, const QString& symbol) {
     for (int i = 0; i < rows->rowCount(); ++i)
         if (rows->item(i)->data(WatchlistDock::TickerRole).toString() == symbol) return rows->item(i);
     return nullptr;
+}
+
+TEST(ChartAgentPin, StartupTimeframeNotificationOrder) {
+    MainWindowGPU window;
+    auto* renderer = MainWindowSymbolLifecyclePeer::renderer(window);
+    ASSERT_TRUE(renderer);
+    auto* root = renderer->parentItem();
+    auto* overlay = root->findChild<CandlestickOverlayItem*>();
+    ASSERT_TRUE(overlay);
+    int rootTimeframeAtCandleChange = 0;
+    QObject::connect(overlay, &CandlestickOverlayItem::timeframeSecChanged, &window, [&] {
+        rootTimeframeAtCandleChange = root->property("currentActiveTimeframe").toInt();
+    });
+    renderer->view()->setTimeframe(60000);
+    EXPECT_EQ(rootTimeframeAtCandleChange, 60000);
+    EXPECT_EQ(overlay->timeframeSec(), 60);
+}
+
+TEST(ChartAgentPin, ControlledStartupHistoryAndViewport) {
+    const auto labelPx = qgetenv("SENTINEL_AXIS_LABEL_PX");
+    const auto restoreLabelPx = qScopeGuard([&] {
+        if (labelPx.isNull()) qunsetenv("SENTINEL_AXIS_LABEL_PX");
+        else qputenv("SENTINEL_AXIS_LABEL_PX", labelPx);
+    });
+    qputenv("SENTINEL_AXIS_LABEL_PX", "13");
+    MainWindowGPU window;
+    auto* renderer = MainWindowSymbolLifecyclePeer::renderer(window);
+    ASSERT_TRUE(renderer);
+    auto* root = renderer->parentItem();
+    auto* controller = renderer->findChild<chart::ChartViewController*>();
+    ASSERT_TRUE(controller);
+    // No window, network delivery or render timing enters this fixture.
+    constexpr qint64 now = 1791782235000;
+    controller->livePlacement().setTimingForTest([] { return now; }, {});
+    renderer->view()->setTimeframe(60000);
+    root->setSize({504, 931});
+    auto* state = renderer->getViewState();
+    const auto initialVersion = state->getViewportVersion();
+    QSignalSpy commits(state, &GridViewState::viewportChanged);
+    CandleBackfillState history;
+    std::vector<std::pair<qint64, int>> requests;
+    qint64 oldest = 0, clock = now;
+    const auto updateHistory = [&] {
+        history.setViewport("BTC-USD", 60, state->getVisibleTimeStart(), state->getVisibleTimeEnd());
+    };
+    QObject::connect(renderer->view(), &chart::ChartViewQml::viewportChanged, &window, updateHistory);
+    const auto page = [&] {
+        clock += 100;
+        const auto request = history.next(oldest, false, clock);
+        if (!request) return;
+        requests.emplace_back(request->endSec, request->limit);
+        oldest = request->startSec * 1000;
+        EXPECT_TRUE(history.accept("BTC-USD", 60, request->startSec, request->endSec, oldest, clock));
+        auto* buffer = qobject_cast<CandleSeriesBuffer*>(renderer->candleBuffer());
+        ASSERT_TRUE(buffer);
+        buffer->applyHistory("BTC-USD", 60, {
+            {oldest, oldest + 60000, 84000, 84100, 83900, 84000, 1, true},
+            {request->endSec * 1000 - 60000, request->endSec * 1000, 84000, 84100, 83900, 84000, 1, true}});
+    };
+    renderer->setLiveBookTop(84088.2, 84088.4);
+    page();
+    root->setSize({1150, 931});
+    page();
+    page();
+    renderer->view()->setViewport(1791769440000, 1791777600000, 83000, 84600);
+    page();
+    EXPECT_EQ(commits.count(), 5);
+    EXPECT_EQ(state->getViewportVersion() - initialVersion, 8U);
+    EXPECT_EQ(requests, (std::vector<std::pair<qint64, int>>{{1791782280, 102}, {1791776160, 162}, {1791766440, 86}}));
+}
+
+TEST(ChartAgentPin, FixedSceneViewportBytes) {
+    MainWindowGPU window;
+    auto* renderer = MainWindowSymbolLifecyclePeer::renderer(window);
+    ASSERT_TRUE(renderer);
+    renderer->parentItem()->setSize({1000, 600});
+    renderer->view()->setTimeframe(60000);
+    renderer->view()->setAutoPriceScale(false);
+    renderer->view()->enableAutoScroll(false);
+    renderer->view()->setViewport(120000, 6120000, 100, 200);
+    auto snapshot = MainWindowSymbolLifecyclePeer::viewport(window);
+    snapshot.meta = {"fixed", "BTC-USD", 7, 123456, false, "unknown", false};
+    const auto bytes = QJsonDocument(AgentApi::viewportJson(snapshot)).toJson(QJsonDocument::Compact);
+    EXPECT_EQ(bytes, QByteArray(R"PIN({"data":{"autoScale":false,"candleTimeframeMs":60000,"drawn":null,"endMs":6120000,"followLive":false,"heatmapTimeframeMs":60000,"heightPx":570,"priceMax":200,"priceMin":100,"startMs":120000,"viewportVersion":"4","widthPx":930,"zoom":{"msPerPx":6451.612903225807,"pricePerPx":0.17543859649122806}},"meta":{"coverage":"unknown","observedAtMs":123456,"selectionEpoch":"7","sessionId":"fixed","source":"gui-cache","stale":false,"symbol":"BTC-USD","truncated":false},"ok":true})PIN")) << bytes.constData();
+}
+
+TEST(ChartAgentPin, StoredDrawnAndCompletedRevisionStaySeparate) {
+    UnifiedGridRenderer renderer;
+    renderer.setSize({800, 600});
+    renderer.view()->setTimeframe(60000);
+    renderer.view()->setAutoPriceScale(false);
+    renderer.view()->enableAutoScroll(false);
+    renderer.view()->setViewport(120000, 6120000, 100, 200);
+    chart::PublishedFrame published;
+    MappingFrameContext drawn;
+    drawn.raster.valid = true;
+    drawn.raster.drawnStartMs = 150000;
+    drawn.raster.drawnEndMs = 6000000;
+    drawn.raster.drawnMinPrice = 110;
+    drawn.raster.drawnMaxPrice = 190;
+    drawn.raster.rowPx = 2;
+    drawn.raster.colPx = 3;
+    drawn.raster.dpr = 2;
+    published.publish(drawn);
+    chart::FrameAck ack;
+    int updates = 0;
+    ChartAgentPort port(renderer.view()->controller(), published, ack, [&] { ++updates; });
+    const auto snapshot = port.snapshot();
+    EXPECT_EQ(snapshot.startMs, 120000);
+    EXPECT_EQ(snapshot.priceMin, 100);
+    ASSERT_TRUE(snapshot.drawn);
+    EXPECT_EQ(QJsonDocument(AgentApi::viewportJson(snapshot)["data"].toObject()["drawn"].toObject()).toJson(QJsonDocument::Compact),
+              QByteArray(R"({"colPx":3,"dpr":2,"endMs":6000000,"priceMax":190,"priceMin":110,"rowPx":2,"startMs":150000})"));
+    AgentApi::ControlBody body;
+    body.priceMin = 120; body.priceMax = 180;
+    const auto applied = port.applyViewport(body);
+    EXPECT_EQ(applied.status, 200);
+    EXPECT_EQ(applied.viewportVersion, snapshot.viewportVersion.value() + 1);
+    EXPECT_EQ(port.snapshot().drawn->priceMin, 110);
+    port.setControlRevision(9, 7);
+    EXPECT_EQ(updates, 1);
+    FrameContext frame;
+    ack.stamp(frame);
+    EXPECT_EQ(frame.controlRevision, 9);
+    EXPECT_EQ(frame.selectionEpoch, 7);
+    EXPECT_EQ(frame.viewportVersion, applied.viewportVersion);
+    ack.submitted(frame);
+    EXPECT_EQ(port.rendered().first, 0);
+    ack.rendered();
+    EXPECT_EQ(port.rendered(), (std::pair<quint64, quint64>{9, frame.frameId}));
+    EXPECT_EQ(ChartAgentPort{}.applyViewport(body).status, 503);
 }
 
 TEST(MainWindowHealthIntegration, AckRefusalSupersedeTimeoutAndReconnectAgreeAcrossConsumers) {
@@ -200,7 +336,7 @@ TEST(MainWindowHealthIntegration, ChartProviderKeepsMissingOldAndUnrenderedFacts
     // Use the actual asynchronous controller publication, with no recorded
     // availability. Only the render-thread output atoms are injected; no GPU is
     // available here, and the test never interprets these as visual proof.
-    renderer->setViewport(1'000'000, 1'600'000, 100, 102);
+    renderer->view()->setViewport(1'000'000, 1'600'000, 100, 102);
     const auto waitSnapshot = [&](const QString& symbol, int64_t tf) {
         QElapsedTimer timer; timer.start();
         while (timer.elapsed() < 2000) {
@@ -230,7 +366,7 @@ TEST(MainWindowHealthIntegration, ChartProviderKeepsMissingOldAndUnrenderedFacts
         EXPECT_TRUE(health->snapshot().coverage.contains("unknown"));
         EXPECT_FALSE(health->snapshot().heatmapAgeMs);
     }
-    renderer->setViewport(1'100'000, 1'700'000, 100, 102);
+    renderer->view()->setViewport(1'100'000, 1'700'000, 100, 102);
     health->refreshChartState();
     EXPECT_FALSE(health->snapshot().partial.has_value()) << "the previous viewport cannot describe the new one";
 
@@ -244,7 +380,7 @@ TEST(MainWindowHealthIntegration, ChartProviderKeepsMissingOldAndUnrenderedFacts
     health->refreshChartState();
     EXPECT_FALSE(health->snapshot().holding.has_value());
     const auto oldTf = layer->tfMs();
-    renderer->setTimeframe(int(oldTf * 5));
+    renderer->view()->setTimeframe(int(oldTf * 5));
     health->refreshChartState();
     EXPECT_FALSE(health->snapshot().loading.has_value());
     EXPECT_FALSE(health->snapshot().holding.has_value());
@@ -260,7 +396,7 @@ TEST(MainWindowHealthIntegration, ChartProviderKeepsMissingOldAndUnrenderedFacts
     EXPECT_FALSE(health->snapshot().loading.has_value());
     EXPECT_FALSE(health->snapshot().holding.has_value());
     EXPECT_FALSE(health->snapshot().partial.has_value());
-    renderer->setHeatmapLayerEnabled(false); // no heatmap drawn: no chart facts
+    renderer->layers()->setHeatmapEnabled(false); // no heatmap drawn: no chart facts
     health->refreshChartState();
     EXPECT_FALSE(health->snapshot().loading.has_value());
     EXPECT_TRUE(health->snapshot().coverage.isEmpty());
@@ -290,10 +426,10 @@ TEST(MainWindowHealthIntegration, NewPublicationAndCapacityRefusalDoNotClaimRend
         return transport;
     });
     renderer->setHeatmapService(&fixture);
-    renderer->setTimeframe(int(heatmap::kMinuteMs));
+    renderer->view()->setTimeframe(int(heatmap::kMinuteMs));
     constexpr auto tile = heatmap::tiles::kTileColumns * heatmap::kMinuteMs;
     constexpr auto start = ((recording::kHmc2MinMs / tile) + 3) * tile;
-    renderer->setViewport(start, start + 8 * tile, 100, 102);
+    renderer->view()->setViewport(start, start + 8 * tile, 100, 102);
     auto* layer = renderer->gpuHeatmapLayer();
     const auto publishAvailability = [&](int64_t end) {
         fixture.onData([&] {

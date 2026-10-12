@@ -701,10 +701,10 @@ TEST(CandleStyleTest, ModelChangesReachTheChartProperties) {
     controls.setRenderer(&renderer);
     ASSERT_TRUE(model.apply({{"candleUpColor", "#123ABC"}, {"candleWickColor", "#FEDCBA"},
                              {"candleBodyOpacity", 0.4}, {"candleWickWidth", 2}}).isEmpty());
-    EXPECT_EQ(renderer.candleUpColor().name(), "#123abc");
-    EXPECT_EQ(renderer.candleWickColor(), "#FEDCBA");
-    EXPECT_DOUBLE_EQ(renderer.candleBodyOpacity(), 0.4);
-    EXPECT_EQ(renderer.candleWickWidth(), 2);
+    EXPECT_EQ(renderer.candles()->candleUpColor().name(), "#123abc");
+    EXPECT_EQ(renderer.candles()->candleWickColor(), "#FEDCBA");
+    EXPECT_DOUBLE_EQ(renderer.candles()->candleBodyOpacity(), 0.4);
+    EXPECT_EQ(renderer.candles()->candleWickWidth(), 2);
 }
 
 TEST(HeatmapSettingsModelTest, NamedWorkspacesRestoreButLastSessionNever) {
@@ -960,27 +960,27 @@ TEST(HeatmapSettingsDialogTest, ResetCoversRendererBackedControls) {
     t.config.shaderFloor = 0.02;
     HeatmapSettingsModel model(t.store, "main", t.config);
     UnifiedGridRenderer ugr;
-    ugr.setHeatmapGamma(2.5);
-    ugr.setHeatmapContrast(3.0);
-    ugr.setHeatmapShaderFloor(0.3);
-    ugr.setTpoLayout("split");
-    ugr.setTpoTheme("sage");
-    ugr.setTpoSessionType(0);
-    ugr.setTpoTimeframeMs(3'600'000);
+    ugr.candles()->setHeatmapGamma(2.5);
+    ugr.candles()->setHeatmapContrast(3.0);
+    ugr.candles()->setHeatmapShaderFloor(0.3);
+    ugr.tpo()->setTpoLayout("split");
+    ugr.tpo()->setTpoTheme("sage");
+    ugr.tpo()->setTpoSessionType(0);
+    ugr.tpo()->setTpoTimeframeMs(3'600'000);
     HeatmapSettingsDialog dialog(&model, &ugr);
     ClientTpoConfig tpo; // collapsed, rainbow, 24h, 30m
     dialog.setTpoDefaults(tpo);
     child<QPushButton>(dialog, "resetLook")->click();
-    EXPECT_NEAR(ugr.heatmapGamma(), 0.9, 1e-9);
-    EXPECT_NEAR(ugr.heatmapContrast(), 1.4, 1e-9);
-    EXPECT_NEAR(ugr.heatmapShaderFloor(), 0.02, 1e-9);
-    EXPECT_EQ(ugr.tpoLayout(), "split"); // other tabs untouched
+    EXPECT_NEAR(ugr.candles()->gamma(), 0.9, 1e-9);
+    EXPECT_NEAR(ugr.candles()->contrast(), 1.4, 1e-9);
+    EXPECT_NEAR(ugr.candles()->shaderFloor(), 0.02, 1e-9);
+    EXPECT_EQ(ugr.tpo()->tpoLayout(), "split"); // other tabs untouched
     child<QPushButton>(dialog, "resetTPO")->click();
-    EXPECT_EQ(ugr.tpoLayout(), "collapsed");
-    EXPECT_EQ(ugr.tpoTheme(), "rainbow");
-    EXPECT_EQ(ugr.tpoSessionType(), 4);
-    EXPECT_EQ(ugr.tpoTimeframeMs(), 30 * 60'000);
-    EXPECT_NEAR(ugr.heatmapGamma(), 0.9, 1e-9);
+    EXPECT_EQ(ugr.tpo()->tpoLayout(), "collapsed");
+    EXPECT_EQ(ugr.tpo()->tpoTheme(), "rainbow");
+    EXPECT_EQ(ugr.tpo()->tpoSessionType(), 4);
+    EXPECT_EQ(ugr.tpo()->tpoTimeframeMs(), 30 * 60'000);
+    EXPECT_NEAR(ugr.candles()->gamma(), 0.9, 1e-9);
 }
 
 TEST(HeatmapSettingsDialogTest, EveryWidgetWritesItsSettingLiveAndSaved) {
@@ -1228,7 +1228,7 @@ TEST(TradeBubbleControls, LayerOrderUsesRealQmlBindingAndPersistedChartApiSettin
     auto* check=child<QCheckBox>(dialog,"tradesAboveCandles");
     ASSERT_NE(check,nullptr);
     EXPECT_TRUE(check->isChecked());
-    EXPECT_TRUE(renderer.tradesAboveCandles());
+    EXPECT_TRUE(renderer.candles()->tradesAboveCandles());
     QFile source(QStringLiteral(SENTINEL_SOURCE_DIR "/libs/gui/qml/DepthChartView.qml"));
     ASSERT_TRUE(source.open(QIODevice::ReadOnly));
     const auto qml=source.readAll();
@@ -1249,7 +1249,7 @@ TEST(TradeBubbleControls, LayerOrderUsesRealQmlBindingAndPersistedChartApiSettin
     check->setChecked(false);
     EXPECT_FALSE(model.settings().tradesAboveCandles);
     EXPECT_FALSE(t.reload().tradesAboveCandles);
-    EXPECT_FALSE(renderer.tradesAboveCandles());
+    EXPECT_FALSE(renderer.candles()->tradesAboveCandles());
     EXPECT_DOUBLE_EQ(overlay->z(),1.5);
     const AgentApi::Request request{"POST","/api/v1/heatmap/settings",{},
         R"({"tradesAboveCandles":true,"persist":false})"};
@@ -1308,11 +1308,11 @@ TEST(TradeBubbleControls, PublishKeepsTapeSettingsAndSignalOrder) {
     const auto tape = frame->tape;
     ASSERT_EQ(tape->samples().size(), 1u);
     int signalCount = 0;
-    QObject::connect(&renderer, &UnifiedGridRenderer::tradeBubbleSettingsChanged, &renderer, [&] {
+    QObject::connect(renderer.candles(), &chart::ChartLookSettings::tradeBubbleSettingsChanged, &renderer, [&] {
         ++signalCount;
         EXPECT_TRUE(TradeBubbleRendererTest::enabled(renderer));
         EXPECT_EQ(TradeBubbleRendererTest::threshold(renderer), 0);
-        EXPECT_FALSE(renderer.tradesAboveCandles());
+        EXPECT_FALSE(renderer.candles()->tradesAboveCandles());
     });
     heatmap::HeatmapChartSettings settings;
     settings.showTrades = true; settings.tradeMinNotional = 1234; settings.tradesAboveCandles = false;
@@ -1350,7 +1350,7 @@ TEST(TradeBubbleControls, GuiIngestionKeepsHiddenSessionTradesAndIsolatesSymbols
     EXPECT_TRUE(TradeBubbleRendererTest::enabled(renderer));
     EXPECT_EQ(TradeBubbleRendererTest::threshold(renderer), 1000);
     EXPECT_EQ(TradeBubbleRendererTest::count(renderer), 1);
-    renderer.setTimeframe(300000);
+    renderer.view()->setTimeframe(300000);
     EXPECT_EQ(TradeBubbleRendererTest::count(renderer), 1);
     t.product_id = "ETH-USD";
     renderer.onTradeReceived(t);
@@ -1511,7 +1511,7 @@ protected:
         ugr->setSize(QSizeF(640, 320));
         ugr->setHeatmapService(&lab::LabData::instance().service());
         ugr->setActiveSymbol("BTC-USD");
-        ugr->setTimeframe(int(minute));
+        ugr->view()->setTimeframe(int(minute));
         temp = std::make_unique<TempStore>();
         model = std::make_unique<HeatmapSettingsModel>(temp->store, "main", temp->config);
         controls = std::make_unique<HeatmapChartControls>(model.get());
@@ -1527,7 +1527,7 @@ protected:
         scene.reset();
     }
     heatmap::gpu::HeatmapGpuLayer &layer() const { return *ugr->gpuHeatmapLayer(); }
-    void gpuOn() { ugr->setViewport(viewLo, viewHi, 99'900, 100'300); }
+    void gpuOn() { ugr->view()->setViewport(viewLo, viewHi, 99'900, 100'300); }
     template <class Done> bool pump(int ms, Done done) {
         QElapsedTimer timer;
         timer.start();
@@ -1602,7 +1602,7 @@ TEST_F(HeatmapChartUi, AutoShowsTheDrawnTickAndPresetsFollowTheLoadedData) {
     EXPECT_EQ(offered.front(), 100);
     for (const int64_t u : offered) EXPECT_EQ(u % 100, 0) << u;
     // Zooming out in price makes Auto coarser; the toolbar follows the drawn tick.
-    ugr->setViewport(viewLo, viewHi, 95'000, 105'000);
+    ugr->view()->setViewport(viewLo, viewHi, 95'000, 105'000);
     ASSERT_TRUE(settle()) << error.toStdString();
     syncUi();
     EXPECT_GT(layer().tickUnits(), drawn);
@@ -1622,14 +1622,14 @@ TEST_F(HeatmapChartUi, ManualLockIsRememberedPerSymbolAndTimeframe) {
     EXPECT_EQ(toolbar->tickModeCombo()->currentIndex(), 1);
     EXPECT_EQ(toolbar->tickPresetCombo()->currentData().toLongLong(), 500);
 
-    ugr->setTimeframe(int(5 * minute));
+    ugr->view()->setTimeframe(int(5 * minute));
     syncUi();
     pick(1000);
-    ugr->setTimeframe(int(minute)); // back: this timeframe's lock
+    ugr->view()->setTimeframe(int(minute)); // back: this timeframe's lock
     syncUi();
     EXPECT_EQ(layer().manualTickUnits(), 500);
     EXPECT_EQ(toolbar->tickPresetCombo()->currentData().toLongLong(), 500);
-    ugr->setTimeframe(int(5 * minute));
+    ugr->view()->setTimeframe(int(5 * minute));
     syncUi();
     EXPECT_EQ(toolbar->tickPresetCombo()->currentData().toLongLong(), 1000);
     const auto saved = temp->reloadTicks(); // shared by every chart (owner decision 5)
@@ -1645,7 +1645,7 @@ TEST_F(HeatmapChartUi, TheToolbarNamesVeiledAvailability) {
     syncUi();
     EXPECT_FALSE(toolbar->tickVeilLabel()->isVisibleTo(toolbar.get()));
     pick(100);
-    ugr->setViewport(viewLo, viewHi, 100'400, 100'700); // above the near band, inside the deep book
+    ugr->view()->setViewport(viewLo, viewHi, 100'400, 100'700); // above the near band, inside the deep book
     ASSERT_TRUE(settle()) << error.toStdString();
     syncUi();
     const QString indicator = layer().resolutionIndicator();
@@ -1688,7 +1688,7 @@ TEST_F(HeatmapChartUi, DialogTickActionsAreTheToolbars) {
     EXPECT_EQ(layer().manualTickUnits(), 2000);
     // 5m has nothing remembered: entering Manual from the dialog locks the drawn tick.
     mode->setCurrentIndex(0);
-    ugr->setTimeframe(int(5 * minute));
+    ugr->view()->setTimeframe(int(5 * minute));
     ASSERT_TRUE(settle()) << error.toStdString();
     const int64_t drawn = layer().tickUnits();
     ASSERT_GT(drawn, 0);

@@ -1,6 +1,8 @@
 #pragma once
 #include "config/ConfigTypes.hpp"
 #include <QColor>
+#include <QObject>
+#include "ChartTpoQml.hpp"
 #include <QString>
 #include <functional>
 
@@ -12,8 +14,22 @@ class ChartViewController;
 class AxisTextService;
 
 namespace chart {
-class ChartLookSettings {
+class ChartLookSettings : public QObject {
+    Q_OBJECT
+    Q_PROPERTY(double heatmapGamma READ gamma WRITE setHeatmapGamma NOTIFY heatmapGammaChanged)
+    Q_PROPERTY(double heatmapContrast READ contrast WRITE setHeatmapContrast NOTIFY heatmapContrastChanged)
+    Q_PROPERTY(double heatmapShaderFloor READ shaderFloor WRITE setHeatmapShaderFloor NOTIFY heatmapShaderFloorChanged)
+    Q_PROPERTY(bool tradesAboveCandles READ tradesAboveCandles NOTIFY tradeBubbleSettingsChanged)
+    Q_PROPERTY(int candleStyle READ candleStyle WRITE setCandleStyle NOTIFY candleStyleChanged)
+    Q_PROPERTY(QColor candleUpColor READ candleUpColor NOTIFY candleAppearanceChanged)
+    Q_PROPERTY(QColor candleDownColor READ candleDownColor NOTIFY candleAppearanceChanged)
+    Q_PROPERTY(QString candleWickColor READ candleWickColor NOTIFY candleAppearanceChanged)
+    Q_PROPERTY(double candleBodyOpacity READ candleBodyOpacity NOTIFY candleAppearanceChanged)
+    Q_PROPERTY(int candleWickWidth READ candleWickWidth NOTIFY candleAppearanceChanged)
 public:
+    ChartTpoQml tpo{*this};
+    std::function<bool()> tradesAboveCandlesSource;
+    bool tradesAboveCandles() const { return tradesAboveCandlesSource ? tradesAboveCandlesSource() : true; }
     enum class Notice { TpoConfig, TpoStyle, Gamma, Contrast, ShaderFloor, CandleStyle, CandleAppearance };
     explicit ChartLookSettings(ChartLayers& layers) : layers_(layers) {}
     std::function<void()> requestUpdate, onViewportChanged;
@@ -49,8 +65,15 @@ public:
     void setTpoTheme(const QString& theme);
     void applyClientConfig(const ClientConfig& config, ChartViewController& view, AxisTextService* axes);
     void applyServerConfig(const ServerConfig& config, ChartViewController& view);
+signals:
+    void candleStyleChanged();
+    void candleAppearanceChanged();
+    void heatmapGammaChanged();
+    void heatmapContrastChanged();
+    void heatmapShaderFloorChanged();
+    void tradeBubbleSettingsChanged();
 private:
-    void changed(Notice notice) { if (notify) notify(notice); }
+    void changed(Notice notice);
     void update() { if (requestUpdate) requestUpdate(); }
     ChartLayers& layers_;
     double gamma_ = 1.05;

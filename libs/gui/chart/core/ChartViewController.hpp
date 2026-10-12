@@ -21,11 +21,21 @@ class QElapsedTimer;
 
 namespace chart {
 
+struct ViewSnapshot {
+    qint64 start = 0, end = 0, timeframeMs = 0;
+    double low = 0, high = 0, width = 0, height = 0;
+    uint64_t viewportVersion = 0;
+    bool timeWindowValid = false, followLive = false, autoScale = false;
+};
+
 class ChartViewController : public QObject {
     Q_OBJECT
 public:
     ChartViewController(IChartEnvironment& environment, IHeatmapViewSink& sink,
                         ITickOracle& ticks, const PublishedFrame& published, QObject* parent = nullptr);
+
+    ViewSnapshot snapshot() const;
+    QString applyViewportRequest(const ViewportRequest& request) { return commands_.applyViewportRequest(request); }
 
     GridViewState* viewPtr() const { return view_.get(); }
     ChartSession& session() { return session_; }

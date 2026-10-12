@@ -844,19 +844,19 @@ TEST(ChartToolbarFixture, NativeSyntheticScreenshots) {
         return composed.save(QDir(output).filePath(name + "-synthetic-fixture.png"));
     };
     for (const QString mode : {QString("heatmap"), QString("tpo"), QString("volume")}) {
-        if (mode == "heatmap") renderer.setHeatmapLayerEnabled(true);
-        else if (mode == "tpo") renderer.setTpoLayerEnabled(true);
-        else renderer.setVolumeProfileLayerEnabled(true);
-        renderer.setTpoSessionType(4);
-        renderer.setTpoLayout("split");
+        if (mode == "heatmap") renderer.layers()->setHeatmapEnabled(true);
+        else if (mode == "tpo") renderer.layers()->setTpoEnabled(true);
+        else renderer.layers()->setVolumeProfileEnabled(true);
+        renderer.tpo()->setTpoSessionType(4);
+        renderer.tpo()->setTpoLayout("split");
         QCoreApplication::processEvents();
         controls.syncNow();
         // MainWindow supplies this synchronization in production whenever the
         // renderer's mutually exclusive layer state changes.
-        toolbar->setLayerToggleStates(renderer.heatmapLayerEnabled(),
-                                      renderer.footprintLayerEnabled(),
-                                      renderer.tpoLayerEnabled(),
-                                      renderer.volumeProfileLayerEnabled());
+        toolbar->setLayerToggleStates(renderer.layers()->heatmapEnabled(),
+                                      renderer.layers()->footprintEnabled(),
+                                      renderer.layers()->tpoEnabled(),
+                                      renderer.layers()->volumeProfileEnabled());
         auto* controlsMenu = toolbar->controlsMenu();
         emit controlsMenu->aboutToShow();
         auto* heatmapAction = menuAction(controlsMenu, "controlsHeatmap");
@@ -912,6 +912,43 @@ TEST(ChartToolbarFixture, NativeSyntheticScreenshots) {
     }
 }
 
+class QmlRuntimeWarnings {
+public:
+    explicit QmlRuntimeWarnings(QStringList& warnings) : previous_(qInstallMessageHandler(capture)) { warnings_ = &warnings; }
+    ~QmlRuntimeWarnings() { qInstallMessageHandler(previous_); warnings_ = nullptr; }
+private:
+    static inline QStringList* warnings_ = nullptr;
+    QtMessageHandler previous_;
+    static void capture(QtMsgType type, const QMessageLogContext& context, const QString& message) {
+        const QByteArray category(context.category);
+        if (type == QtWarningMsg && (category == "qt.core.qobject.connect" ||
+            category.startsWith("qt.qml") || message.contains("ReferenceError") || message.contains("TypeError")))
+            warnings_->append(message);
+    }
+};
+
+TEST(ChartQmlPin, ProductionSceneHasNoWarnings) {
+    QQmlEngine engine;
+    QStringList warnings;
+    QObject::connect(&engine, &QQmlEngine::warnings, &engine, [&](const QList<QQmlError>& errors) {
+        for (const auto& error : errors) warnings.append(error.toString());
+    });
+    engine.addImportPath("qrc:/qt/qml");
+    engine.rootContext()->setContextProperty("uiTheme", QVariant::fromValue<QObject *>(nullptr));
+    engine.rootContext()->setContextProperty("dataSource", QVariant::fromValue<QObject *>(nullptr));
+    QmlRuntimeWarnings runtimeWarnings(warnings);
+    QQmlComponent component(&engine, QUrl("qrc:/qt/qml/Sentinel/Charts/qml/DepthChartView.qml"));
+    ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+    std::unique_ptr<QObject> shell(component.create());
+    ASSERT_TRUE(shell) << component.errorString().toStdString();
+    shell->setProperty("width", 960);
+    shell->setProperty("height", 640);
+    QCoreApplication::processEvents();
+    shell.reset();
+    QCoreApplication::processEvents();
+    EXPECT_TRUE(warnings.isEmpty()) << warnings.join('\n').toStdString();
+}
+
 // Load the actual production shell without opening a window or starting a feed.
 // This catches QML/accessibility errors and tests the independent P/A controls.
 TEST(ChartShell, AxisControlsHaveKeyboardActionsAndIndependentFollowStates) {
@@ -929,23 +966,23 @@ TEST(ChartShell, AxisControlsHaveKeyboardActionsAndIndependentFollowStates) {
     auto *price = shell->findChild<QQuickItem *>("autoPriceScaleButton");
     auto *live = shell->findChild<QQuickItem *>("followLiveButton");
     ASSERT_TRUE(renderer && price && live);
-    renderer->setAutoPriceScale(false);
-    renderer->enableAutoScroll(false);
+    renderer->view()->setAutoPriceScale(false);
+    renderer->view()->enableAutoScroll(false);
     const auto press = [](QObject *target, int key) {
         QKeyEvent event(QEvent::KeyPress, key, Qt::NoModifier);
         QCoreApplication::sendEvent(target, &event);
     };
     press(price, Qt::Key_Space);
-    EXPECT_TRUE(renderer->autoPriceScale());
-    EXPECT_FALSE(renderer->autoScrollEnabled());
+    EXPECT_TRUE(renderer->view()->autoPriceScale());
+    EXPECT_FALSE(renderer->view()->autoScrollEnabled());
     press(live, Qt::Key_Return);
-    EXPECT_TRUE(renderer->autoScrollEnabled());
-    EXPECT_TRUE(renderer->autoPriceScale());
+    EXPECT_TRUE(renderer->view()->autoScrollEnabled());
+    EXPECT_TRUE(renderer->view()->autoPriceScale());
     press(shell.get(), Qt::Key_P);
-    EXPECT_FALSE(renderer->autoPriceScale());
-    EXPECT_TRUE(renderer->autoScrollEnabled());
+    EXPECT_FALSE(renderer->view()->autoPriceScale());
+    EXPECT_TRUE(renderer->view()->autoScrollEnabled());
     press(shell.get(), Qt::Key_A);
-    EXPECT_FALSE(renderer->autoScrollEnabled());
+    EXPECT_FALSE(renderer->view()->autoScrollEnabled());
     for (const char *name : {"priceAxisControl", "timeAxisControl"}) {
         auto *axis = shell->findChild<QQuickItem *>(name);
         ASSERT_TRUE(axis);
@@ -1061,7 +1098,7 @@ TEST_F(ChartControls, RangeSliderKeepsItsDragDomainWhileDataChanges) {
 
 TEST_F(ChartControls, HiddenComboSubmenusRoundTripInlineAndChartState) {
     UnifiedGridRenderer renderer;
-    renderer.setTpoLayerEnabled(true);
+    renderer.layers()->setTpoEnabled(true);
     controls->setRenderer(&renderer);
     toolbar->resize(280, 44);
     QTest::qWait(20);
@@ -1078,7 +1115,7 @@ TEST_F(ChartControls, HiddenComboSubmenusRoundTripInlineAndChartState) {
     });
     EXPECT_EQ(styles.size(), 1);
     EXPECT_EQ(toolbar->chartTypeCombo()->currentIndex(), 1);
-    EXPECT_EQ(renderer.candleStyle(), 1);
+    EXPECT_EQ(renderer.candles()->candleStyle(), 1);
     useOverflow(*toolbar, [&](QMenu *menu) {
         auto *sessionsMenu = menu->findChild<QMenu *>("controlsTpoSession");
         ASSERT_TRUE(sessionsMenu);
@@ -1086,18 +1123,18 @@ TEST_F(ChartControls, HiddenComboSubmenusRoundTripInlineAndChartState) {
     });
     EXPECT_EQ(sessions.size(), 1);
     EXPECT_EQ(toolbar->tpoSessionCombo()->currentData().toInt(), 1);
-    EXPECT_EQ(renderer.tpoSessionType(), 1);
+    EXPECT_EQ(renderer.tpo()->tpoSessionType(), 1);
     toolbar->chartTypeCombo()->setCurrentIndex(2);
-    EXPECT_EQ(renderer.candleStyle(), 2);
+    EXPECT_EQ(renderer.candles()->candleStyle(), 2);
     toolbar->tpoSessionCombo()->setCurrentIndex(2);
     emit toolbar->tpoSessionCombo()->activated(2);
-    EXPECT_EQ(renderer.tpoSessionType(), 2);
+    EXPECT_EQ(renderer.tpo()->tpoSessionType(), 2);
     useOverflow(*toolbar, [&](QMenu *menu) {
         EXPECT_TRUE(menu->findChild<QMenu *>("controlsCandleStyles")->actions()[2]->isChecked());
         EXPECT_TRUE(menu->findChild<QMenu *>("controlsTpoSession")->actions()[2]->isChecked());
     });
-    renderer.setCandleStyle(0);
-    renderer.setTpoSessionType(4);
+    renderer.candles()->setCandleStyle(0);
+    renderer.tpo()->setTpoSessionType(4);
     controls->syncNow();
     useOverflow(*toolbar, [&](QMenu *menu) {
         EXPECT_EQ(toolbar->chartTypeCombo()->currentIndex(), 0);
@@ -1266,13 +1303,13 @@ TEST_F(ChartControls, CandleStyleMenuAndComboReachTheExistingRenderer) {
     UnifiedGridRenderer renderer;
     controls->setRenderer(&renderer);
     toolbar->chartTypeCombo()->setCurrentIndex(1);
-    EXPECT_EQ(renderer.candleStyle(), 1);
+    EXPECT_EQ(renderer.candles()->candleStyle(), 1);
     auto *styles = toolbar->controlsMenu()->findChild<QMenu *>("controlsCandleStyles");
     ASSERT_TRUE(styles);
     styles->actions().at(2)->trigger();
-    EXPECT_EQ(renderer.candleStyle(), 2);
+    EXPECT_EQ(renderer.candles()->candleStyle(), 2);
     EXPECT_EQ(toolbar->chartTypeCombo()->currentIndex(), 2);
-    renderer.setCandleStyle(0);
+    renderer.candles()->setCandleStyle(0);
     QCoreApplication::processEvents();
     EXPECT_EQ(toolbar->chartTypeCombo()->currentIndex(), 0);
     controls->setRenderer(nullptr);
@@ -1464,7 +1501,7 @@ protected:
         ugr->setSize(QSizeF(640, 320));
         ugr->setHeatmapService(&lab::LabData::instance().service());
         ugr->setActiveSymbol("BTC-USD");
-        ugr->setTimeframe(int(minute));
+        ugr->view()->setTimeframe(int(minute));
         model = std::make_unique<HeatmapSettingsModel>(t.store, "main", t.config);
         // Bright fixture colours (sizes 0.01..0.53), Manual $1, no crossfade unless a case asks.
         ASSERT_TRUE(model->apply({{"renderer", "gpu"}, {"palettePreset", "Fire"}, {"sensitivityMin", 0.001},
@@ -1485,7 +1522,7 @@ protected:
     }
     heatmap::gpu::HeatmapGpuLayer &layer() const { return *ugr->gpuHeatmapLayer(); }
     // 10 minutes x $16 over 640 x 320: $1 cells of 64 x 20 px.
-    void zoomIn(double priceLo = 100'000) { ugr->setViewport(viewLo, viewLo + 10 * minute, priceLo, priceLo + 16); }
+    void zoomIn(double priceLo = 100'000) { ugr->view()->setViewport(viewLo, viewLo + 10 * minute, priceLo, priceLo + 16); }
     // onFrame runs after every frame (invariants), done ends the pump.
     template <class Done, class OnFrame> bool pump(int ms, Done done, OnFrame onFrame) {
         QElapsedTimer timer;
@@ -1562,7 +1599,7 @@ TEST_F(ChartLabels, LabelsDrawOnColouredCellsAtTheDrawnTick) {
 
 // The gate: with more than kMaxLabelCells visible cells nothing is posted.
 TEST_F(ChartLabels, ZoomedOutPostsNoLabelRequest) {
-    ugr->setViewport(viewLo, viewLo + 120 * minute, 99'900, 100'300); // 120 x 400 $1 cells
+    ugr->view()->setViewport(viewLo, viewLo + 120 * minute, 99'900, 100'300); // 120 x 400 $1 cells
     const auto before = layer().labelCounters().posted;
     pump(1500, [] { return false; }, [&] { checkFrame(); });
     EXPECT_EQ(layer().labelCounters().posted, before);
@@ -1673,7 +1710,7 @@ TEST_F(ChartLabels, ToolbarFollowsTheChartsLayers) {
     EXPECT_TRUE(toolbar->shownControls().rangeSlider);
     EXPECT_TRUE(toolbar->shownControls().tickSelector);
     EXPECT_FALSE(toolbar->shownControls().tpoSession);
-    ugr->setTpoLayerEnabled(true); // exclusive today: the heatmap goes off
+    ugr->layers()->setTpoEnabled(true); // exclusive today: the heatmap goes off
     pump(300, [] { return false; });
     auto shown = toolbar->shownControls();
     EXPECT_FALSE(shown.tickSelector);
@@ -1686,11 +1723,11 @@ TEST_F(ChartLabels, ToolbarFollowsTheChartsLayers) {
     const int split = toolbar->tpoLayoutCombo()->findData("split");
     toolbar->tpoLayoutCombo()->setCurrentIndex(split);
     emit toolbar->tpoLayoutCombo()->activated(split);
-    EXPECT_EQ(ugr->tpoLayout().toStdString(), "split");
-    ugr->setTpoLayout("collapsed"); // the dialog or the API: tpoStyleChanged, normal event processing
+    EXPECT_EQ(ugr->tpo()->tpoLayout().toStdString(), "split");
+    ugr->tpo()->setTpoLayout("collapsed"); // the dialog or the API: tpoStyleChanged, normal event processing
     pump(100, [] { return false; });
     EXPECT_EQ(toolbar->tpoLayoutCombo()->currentData().toString(), "collapsed");
-    ugr->setHeatmapLayerEnabled(true);
+    ugr->layers()->setHeatmapEnabled(true);
     pump(300, [] { return false; });
     shown = toolbar->shownControls();
     EXPECT_TRUE(shown.tickSelector);
@@ -1728,16 +1765,16 @@ TEST_F(ChartLabels, RendererBackedControlsFollowTheRendererThroughEvents) {
     HeatmapSettingsDialog dialog(model.get(), ugr);
     controls->setDialog(&dialog);
     pump(100, [] { return false; });
-    QSignalSpy styleSignals(ugr, &UnifiedGridRenderer::candleStyleChanged);
-    ugr->setCandleStyle(2);
-    ugr->setTpoLayout("split");
+    QSignalSpy styleSignals(ugr->candles(), &chart::ChartLookSettings::candleStyleChanged);
+    ugr->candles()->setCandleStyle(2);
+    ugr->tpo()->setTpoLayout("split");
     pump(200, [] { return false; });
     EXPECT_EQ(dialog.findChild<QComboBox *>("candleStyle")->currentIndex(), 2);
     EXPECT_EQ(toolbar->chartTypeCombo()->currentIndex(), 2);
     EXPECT_EQ(toolbar->tpoLayoutCombo()->currentData().toString(), "split");
     EXPECT_EQ(dialog.findChild<QComboBox *>("tpoLayout")->currentData().toString(), "split");
     EXPECT_EQ(styleSignals.count(), 1) << "no echo from the controls back to the renderer";
-    ugr->setCandleStyle(0);
+    ugr->candles()->setCandleStyle(0);
     pump(200, [] { return false; });
     EXPECT_EQ(dialog.findChild<QComboBox *>("candleStyle")->currentIndex(), 0);
     EXPECT_EQ(toolbar->chartTypeCombo()->currentIndex(), 0);

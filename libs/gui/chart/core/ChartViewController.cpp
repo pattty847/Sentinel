@@ -76,3 +76,11 @@ double ChartViewController::gpuLivePrice() const {
 }
 
 } // namespace chart
+
+chart::ViewSnapshot chart::ChartViewController::snapshot() const {
+    const auto size = environment_.surface();
+    return {view_->getVisibleTimeStart(), view_->getVisibleTimeEnd(), session_.timeframeMs,
+            view_->getMinPrice(), view_->getMaxPrice(), size.widthLogical, size.heightLogical,
+            view_->getViewportVersion(), view_->isTimeWindowValid(), view_->isAutoScrollEnabled(),
+            view_->autoPriceScale()};
+}

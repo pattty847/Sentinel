@@ -30,6 +30,8 @@ set(GRID_CORE_SOURCES
     mainwindow/ShortcutBinder.h
     mainwindow/AgentApiInput.cpp
     mainwindow/AgentApiInput.hpp
+    mainwindow/ChartAgentPort.cpp
+    mainwindow/ChartAgentPort.hpp
     mainwindow/AgentApiCodec.cpp
     mainwindow/AgentApiCodec.hpp
     mainwindow/AgentApiOperations.cpp
@@ -62,6 +64,12 @@ set(GRID_CORE_SOURCES
     chart/feeds/TradeOverlayFeeds.cpp
     chart/shell/HeatmapChartPort.hpp
     chart/shell/HeatmapChartPort.cpp
+    chart/shell/ChartViewQml.hpp
+    chart/shell/ChartViewQml.cpp
+    chart/shell/ChartDebugQml.hpp
+    chart/shell/ChartDebugQml.cpp
+    chart/shell/ChartTpoQml.hpp
+    chart/shell/ChartTpoQml.cpp
     chart/shell/LayerVisibility.hpp
     chart/shell/ChartLookSettings.hpp
     chart/shell/ChartLookSettings.cpp

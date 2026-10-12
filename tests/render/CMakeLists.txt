@@ -375,7 +375,7 @@ set_tests_properties(ChartLookSettingsTests PROPERTIES LABELS "render;fast")
 
 add_executable(test_LayerVisibility test_layer_visibility.cpp)
 target_include_directories(test_LayerVisibility PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
-target_link_libraries(test_LayerVisibility PRIVATE GTest::gtest_main)
+target_link_libraries(test_LayerVisibility PRIVATE GTest::gtest_main sentinel_gui_lib)
 add_test(NAME LayerVisibilityTests COMMAND test_LayerVisibility)
 set_tests_properties(LayerVisibilityTests PROPERTIES LABELS "render;fast")
 
