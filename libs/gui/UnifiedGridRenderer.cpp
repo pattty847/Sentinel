@@ -121,9 +121,9 @@ void UnifiedGridRenderer::bindTimeframeSwitch() {
   connect(m_view.get(), &chart::ChartViewController::liveRenderTick, this,
           &UnifiedGridRenderer::liveRenderTick, Qt::DirectConnection);
   connect(m_view.get(), &chart::ChartViewController::timeframeChanged, this, [this](int tf) {
-    if (m_dataProcessor) {
-      QMetaObject::invokeMethod(m_dataProcessor.get(),
-          [this, tf]() { m_dataProcessor->setTimeframe(tf); }, Qt::QueuedConnection);
+    if (getDataProcessor()) {
+      QMetaObject::invokeMethod(getDataProcessor(),
+          [this, tf]() { getDataProcessor()->setTimeframe(tf); }, Qt::QueuedConnection);
     }
     update();
     emit timeframeChanged();
@@ -153,6 +153,7 @@ void UnifiedGridRenderer::bindWindow(QQuickWindow* w) {
   auto tileStats = m_gpuLayer ? m_gpuLayer->tileStatsPtr() : nullptr;
   connect(w, &QQuickWindow::afterRendering, this, [this, tileStats]() {
     // Direct render-thread callback: fixed-size frame snapshot only.
+    m_layers.registry.afterRendering();
     m_frameAck.rendered();
     // GPU heatmap work left after this frame (budgeted uploads, a crossfade,
     // live paging): ask for the next frame; an idle node stops asking.
@@ -194,27 +195,9 @@ UnifiedGridRenderer::~UnifiedGridRenderer() {
   if (m_beforeSyncConn) disconnect(m_beforeSyncConn);
   if (m_heatmapPort) m_heatmapPort->detach();
   m_gpuLayer.reset(); // destroys its controller on the heatmap-data thread
-  if (m_dataProcessor) {
-    if (m_dataProcessorThread && m_dataProcessorThread->isRunning()) {
-      QMetaObject::invokeMethod(m_dataProcessor.get(),
-                                &DataProcessor::stopProcessing,
-                                Qt::BlockingQueuedConnection);
-    } else {
-      m_dataProcessor->stopProcessing();
-    }
-    disconnect(m_dataProcessor.get(), nullptr, this, nullptr);
-  }
-
-  if (m_dataProcessorThread && m_dataProcessorThread->isRunning()) {
-    m_dataProcessorThread->quit();
-    if (!m_dataProcessorThread->wait(5000)) {
-      m_dataProcessorThread->terminate();
-      m_dataProcessorThread->wait(1000);
-    }
-  }
-
-  m_dataProcessor.reset();
-  m_dataProcessorThread.reset();
+  // Queued processor callbacks may still use getDataProcessor() until the join.
+  m_feeds->shutdown();
+  m_feeds.reset();
 }
 
 void UnifiedGridRenderer::onTradeReceived(const Trade &trade) {
@@ -316,13 +299,7 @@ void UnifiedGridRenderer::clearData() {
   if (getViewState()) {
     getViewState()->resetZoom();
   }
-  if (m_dataProcessor) {
-    QMetaObject::invokeMethod(m_dataProcessor.get(), &DataProcessor::clearData,
-                              Qt::QueuedConnection);
-  }
-  m_footprintOverlay.clearPending();
-  m_vpRenderer.clearPending();
-  m_footprintOverlay.requestNeutralReset();
+  m_feeds->clearData();
   update();
 }
 
@@ -347,9 +324,9 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
   if (m_gpuLayer) m_gpuLayer->setSymbol(normalized.toStdString());
   clearData();
   refitAutoPrice(); // auto price scale on: the new symbol's candles when already held
-  if (m_dataProcessor) {
-    QMetaObject::invokeMethod(m_dataProcessor.get(),
-                              [processor = m_dataProcessor.get(), normalized]() {
+  if (getDataProcessor()) {
+    QMetaObject::invokeMethod(getDataProcessor(),
+                              [processor = getDataProcessor(), normalized]() {
                                 processor->setActiveSymbol(normalized);
                               },
                               Qt::QueuedConnection);
@@ -359,12 +336,12 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
 // The configured TPO style, session and bracket (startup, and the settings
 // dialog's TPO reset).
 void UnifiedGridRenderer::applyTpoConfig(const ClientTpoConfig& config) {
-  TpoOverlayRenderer::Style style = m_tpoOverlay.style();
+  TpoOverlayRenderer::Style style = m_layers.tpo.renderer.style();
   style.layout = tpo::parseLayout(config.layout, tpo::Layout::Collapsed);
   style.theme = tpo::parseTheme(config.theme, tpo::Theme::Rainbow);
   style.rowPx = config.rowPx;
   style.maxSessions = config.sessions;
-  m_tpoOverlay.setStyle(style);
+  m_layers.tpo.renderer.setStyle(style);
   const int sessionType = tpo::parseSessionType(config.session, 4);
   const int period = static_cast<int>(tpo::resolvePeriodMs(
       sessionType, static_cast<int64_t>(std::max(1, config.periodMinutes)) * 60000));
@@ -376,8 +353,8 @@ void UnifiedGridRenderer::applyTpoConfig(const ClientTpoConfig& config) {
   sLog_Render("TPO config: layout=" << tpo::layoutName(style.layout)
               << " theme=" << tpo::themeName(style.theme)
               << " session=" << tpo::sessionTypeName(sessionType)
-              << " periodMs=" << period << " sessions=" << m_tpoOverlay.style().maxSessions
-              << " rowPx=" << m_tpoOverlay.style().rowPx);
+              << " periodMs=" << period << " sessions=" << m_layers.tpo.renderer.style().maxSessions
+              << " rowPx=" << m_layers.tpo.renderer.style().rowPx);
   update();
 }
 
@@ -403,33 +380,33 @@ void UnifiedGridRenderer::setTpoSessionType(int sessionType) {
 }
 
 void UnifiedGridRenderer::setTpoLayout(const QString& layout) {
-  auto style = m_tpoOverlay.style();
+  auto style = m_layers.tpo.renderer.style();
   const auto next = tpo::parseLayout(layout.toStdString(), style.layout);
   if (next == style.layout) return;
   style.layout = next;
-  m_tpoOverlay.setStyle(style);
+  m_layers.tpo.renderer.setStyle(style);
   sLog_Render("TPO layout=" << tpo::layoutName(next));
   update();
   emit tpoStyleChanged();
 }
 
 void UnifiedGridRenderer::setTpoTheme(const QString& theme) {
-  auto style = m_tpoOverlay.style();
+  auto style = m_layers.tpo.renderer.style();
   const auto next = tpo::parseTheme(theme.toStdString(), style.theme);
   if (next == style.theme) return;
   style.theme = next;
-  m_tpoOverlay.setStyle(style);
+  m_layers.tpo.renderer.setStyle(style);
   sLog_Render("TPO theme=" << tpo::themeName(next));
   update();
   emit tpoStyleChanged();
 }
 
 QString UnifiedGridRenderer::tpoLayout() const {
-  return QString::fromLatin1(tpo::layoutName(m_tpoOverlay.style().layout));
+  return QString::fromLatin1(tpo::layoutName(m_layers.tpo.renderer.style().layout));
 }
 
 QString UnifiedGridRenderer::tpoTheme() const {
-  return QString::fromLatin1(tpo::themeName(m_tpoOverlay.style().theme));
+  return QString::fromLatin1(tpo::themeName(m_layers.tpo.renderer.style().theme));
 }
 
 void UnifiedGridRenderer::setVolumeProfileLayerEnabled(bool enabled) {

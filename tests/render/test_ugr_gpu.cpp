@@ -18,6 +18,9 @@
 #include "render/CandlestickOverlayItem.hpp"
 #include "render/CandlePixelGeometry.hpp"
 #include "render/DataProcessor.hpp"
+#include "render/FootprintIntensityNode.hpp"
+#include <QSGClipNode>
+#include <typeinfo>
 #include "render/PaperTradeOverlayModel.hpp"
 #include "render/PaperTradeOverlayRenderer.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
@@ -1318,6 +1321,108 @@ TEST_F(UgrGpu, TpoOverlayDrawsOnTopOfTheGpuRoot) {
     EXPECT_EQ(root->firstChild()->type(), QSGNode::OpacityNodeType) << "the tile node is the first (bottom) child";
     EXPECT_EQ(static_cast<QSGOpacityNode *>(root->firstChild())->opacity(), 0.0) << "heatmap layer off: gated";
     EXPECT_GE(root->childCount(), 2) << "overlays follow the tile node";
+}
+
+// Inspect actual root children, including containers, without coupling to registry implementation.
+template <class Node> bool hasNode(QSGNode* node) {
+    if (dynamic_cast<Node*>(node)) return true;
+    for (auto* child = node->firstChild(); child; child = child->nextSibling())
+        if (hasNode<Node>(child)) return true;
+    return false;
+}
+
+TEST_F(UgrGpu, LateEnableKeepsRegistryOrderAndTextLast) {
+    gpuOn();
+    auto* axis = new PriceAxisModel(ugr);
+    axis->setTarget(ugr);
+    ASSERT_TRUE(ugr->setProperty("priceAxisSource", QVariant::fromValue<QObject*>(axis)));
+    ASSERT_TRUE(settle()) << error.toStdString();
+    auto* root = paintRoot(ugr);
+    ASSERT_NE(root, nullptr);
+    auto* text = root->lastChild();
+    ASSERT_NE(text, root->firstChild());
+    ASSERT_TRUE(hasNode<ChartTextNode>(text)) << "chart text must exist before enabling overlays";
+    const auto dump = [&] {
+        for (auto* node = root->firstChild(); node; node = node->nextSibling()) {
+            std::cout << typeid(*node).name() << "(" << int(node->type()) << ") [";
+            for (auto* child = node->firstChild(); child; child = child->nextSibling())
+                std::cout << typeid(*child).name() << ",";
+            std::cout << "] ";
+        }
+        std::cout << std::endl;
+    };
+    std::cout << "late-enable initial: "; dump();
+    ugr->setVolumeProfileLayerEnabled(true);
+    VolumeProfileState::Snapshot vp;
+    vp.minPrice = 99'900; vp.maxPrice = 100'300; vp.tickSize = 10; vp.gridHeight = 40;
+    emit ugr->getDataProcessor()->volumeProfileReady(std::vector<float>(40, 1.0f), vp);
+    ASSERT_TRUE(frames(5)) << error.toStdString();
+    ugr->setFootprintLayerEnabled(true);
+    ASSERT_TRUE(frames(5)) << error.toStdString();
+    std::cout << "late-enable final: "; dump();
+    std::vector<std::string> order;
+    for (auto* node = root->firstChild()->nextSibling(); node; node = node->nextSibling()) {
+        std::string name;
+        if (node == text) name = "text";
+        else if (hasNode<FootprintIntensityNode>(node)) name = "footprint";
+        else if (hasNode<QSGClipNode>(node)) name = "TPO";
+        else if (hasNode<QSGGeometryNode>(node)) name = "VP";
+        else name = "unknown";
+        // VP has three siblings before containers are introduced.
+        if (order.empty() || order.back() != name) order.push_back(name);
+    }
+    std::cout << "late-enable order:";
+    for (const auto& name : order) std::cout << " " << name;
+    std::cout << std::endl;
+    EXPECT_EQ(order, (std::vector<std::string>{"footprint", "VP", "TPO", "text"}));
+}
+
+// Node construction itself needs a window but no initialized RHI or GPU draw.
+TEST(TradeLayerNodes, LateEnableKeepsRegistryOrderAndTextLast) {
+    QQuickWindow window;
+    QSGNode root;
+    chart::TradeLayers layers;
+    layers.registry.onRootRebuilt(&root);
+    ChartTextAtlas atlas;
+    ChartTextRenderer text;
+    chart::ChartFrame snapshotFrame;
+    auto& context = snapshotFrame.context;
+    context.surfaceBounds = QRectF(0, 0, 640, 320);
+    context.mapping.viewStartMs = 0; context.mapping.viewEndMs = 60000;
+    context.mapping.viewMinPrice = 100; context.mapping.viewMaxPrice = 200;
+    VolumeProfileState::Snapshot snapshot;
+    const auto frame = [&](bool enableVp, bool enableFootprint) {
+        context.overlays.volumeProfile = enableVp;
+        context.overlays.footprint = enableFootprint;
+        layers.registry.sync(snapshotFrame);
+        layers.registry.updateNodes(snapshotFrame, {&window, &root, text, atlas, false});
+        text.beginFrame(&root, &window, atlas);
+        text.endFrame();
+    };
+    frame(false, false);
+    auto* textRoot = root.lastChild();
+    ASSERT_NE(textRoot, nullptr);
+    // A chart glyph node is already in the text subtree before either late enable.
+    textRoot->appendChildNode(new ChartTextNode());
+    snapshot.minPrice = 100; snapshot.maxPrice = 200; snapshot.tickSize = 10; snapshot.gridHeight = 10;
+    layers.vp.renderer.enqueue(std::vector<float>(10, 1.0f), snapshot);
+    frame(true, false);
+    frame(false, true);
+    std::vector<std::string> order;
+    std::cout << "node-only late-enable types: ";
+    for (auto* node = root.firstChild(); node; node = node->nextSibling()) {
+        std::cout << typeid(*node).name() << "(" << int(node->type()) << ") [";
+        for (auto* child = node->firstChild(); child; child = child->nextSibling())
+            std::cout << typeid(*child).name() << ",";
+        std::cout << "] ";
+        const std::string name = node == textRoot ? "text" : hasNode<FootprintIntensityNode>(node) ? "footprint" :
+            hasNode<QSGClipNode>(node) ? "TPO" : hasNode<QSGGeometryNode>(node) ? "VP" : "unknown";
+        if (order.empty() || order.back() != name) order.push_back(name);
+    }
+    std::cout << "\nnode-only late-enable order:";
+    for (const auto& name : order) std::cout << " " << name;
+    std::cout << std::endl;
+    EXPECT_EQ(order, (std::vector<std::string>{"footprint", "VP", "TPO", "text"}));
 }
 
 // S8a: the chart has exactly one root path, the GPU one, from its first frame (no

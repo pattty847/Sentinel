@@ -27,7 +27,6 @@
  */
 #pragma once
 
-#include "IOverlayRenderer.hpp"
 #include "VolumeProfileState.hpp"
 
 #include <QColor>
@@ -39,7 +38,7 @@ class QQuickWindow;
 class QSGNode;
 class QSGGeometryNode;
 
-class VolumeProfileRenderer : public IOverlayRenderer {
+class VolumeProfileRenderer {
 public:
     /// Thread-safe enqueue (called from GUI thread).
     void enqueue(std::vector<float> bins, VolumeProfileState::Snapshot snap);
@@ -60,8 +59,7 @@ public:
     void setPocColor(const QColor& color);
 
     // ── Lifecycle ──────────────────────────────────────────────────────────
-    void onRootRebuilt() override;
-    int zOrder() const override { return 3; }
+    void onRootRebuilt();
 
     // ── Hot path ──────────────────────────────────────────────────────────
     // Called once per frame from the render thread.

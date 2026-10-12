@@ -2,7 +2,6 @@
 #pragma once
 #include "TradeOverlayMapping.hpp"
 
-#include "IOverlayRenderer.hpp"
 
 #include <QByteArray>
 #include <QImage>
@@ -17,7 +16,7 @@ class FootprintIntensityNode;
 
 
 class HeatmapColumnTexture;
-class FootprintOverlayRenderer : public IOverlayRenderer {
+class FootprintOverlayRenderer {
 public:
     struct PendingUpload {
         int x = 0;
@@ -34,8 +33,7 @@ public:
     /// Clear all pending uploads (called from GUI thread on clearData).
     void clearPending();
 
-    void onRootRebuilt() override;
-    int zOrder() const override { return 1; }
+    void onRootRebuilt();
     void requestNeutralReset();
 
     void render(QQuickWindow* window,

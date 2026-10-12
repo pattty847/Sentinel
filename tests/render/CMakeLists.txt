@@ -355,3 +355,15 @@ target_include_directories(test_FrameProducer PRIVATE ${CMAKE_SOURCE_DIR}/libs/g
 target_link_libraries(test_FrameProducer PRIVATE GTest::gtest_main sentinel_chart_core Qt6::Core)
 add_test(NAME FrameProducerTests COMMAND test_FrameProducer)
 set_tests_properties(FrameProducerTests PROPERTIES LABELS "render;fast")
+
+add_executable(test_ChartLayers test_ChartLayers.cpp
+    ${CMAKE_SOURCE_DIR}/libs/gui/chart/layers/ChartLayerSet.cpp)
+set_target_properties(test_ChartLayers PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+target_include_directories(test_ChartLayers PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_ChartLayers PRIVATE GTest::gtest_main)
+add_test(NAME ChartLayersTests COMMAND test_ChartLayers)
+set_tests_properties(ChartLayersTests PROPERTIES LABELS "render")
+add_test(NAME TradeLayerNodeOrderTests COMMAND test_ugr_gpu "--gtest_filter=TradeLayerNodes.*")
+set_tests_properties(TradeLayerNodeOrderTests PROPERTIES LABELS "render" TIMEOUT 60)
+add_test(NAME ChartLateEnableGpuTests COMMAND test_ugr_gpu "--gtest_filter=UgrGpu.LateEnableKeepsRegistryOrderAndTextLast")
+set_tests_properties(ChartLateEnableGpuTests PROPERTIES LABELS "render;heatmap" TIMEOUT 60)

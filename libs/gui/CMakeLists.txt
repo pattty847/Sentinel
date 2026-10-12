@@ -51,6 +51,10 @@ set(GRID_CORE_SOURCES
     UnifiedGridRenderer.Render.cpp
     UnifiedGridRenderer.Zoom.cpp
     UnifiedGridRenderer.h
+    chart/layers/LayerRegistry.cpp
+    chart/layers/ChartLayerSet.cpp
+    chart/layers/TradeLayers.cpp
+    chart/feeds/TradeOverlayFeeds.cpp
     chart/shell/HeatmapChartPort.hpp
     chart/shell/HeatmapChartPort.cpp
 
@@ -90,7 +94,6 @@ set(GRID_CORE_SOURCES
     render/AxisLayout.cpp
     render/AxisTextService.hpp
     render/AxisTextService.cpp
-    render/IOverlayRenderer.hpp
     render/ChartTextPrimitives.hpp
     render/ChartTextAtlas.hpp
     render/ChartTextAtlas.cpp

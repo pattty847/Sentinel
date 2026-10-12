@@ -36,7 +36,8 @@
 #include "chart/core/PublishedFrame.hpp"
 #include "chart/core/ChartViewController.hpp"
 // ── Overlay renderers (owned inline) ─────────────────────────────────────────
-#include "render/IOverlayRenderer.hpp"
+#include "chart/layers/TradeLayers.hpp"
+#include "chart/feeds/TradeOverlayFeeds.hpp"
 #include "render/FootprintOverlayRenderer.hpp"
 #include "render/TradeBubbleFrame.hpp"
 #include "render/TpoOverlayRenderer.hpp"
@@ -164,10 +165,7 @@ private:
     bool m_showTrades = false;
     double m_tradeMinNotional = 0;
     QColor m_tradeBuyColor, m_tradeSellColor;
-    FootprintOverlayRenderer m_footprintOverlay;
-    TpoOverlayRenderer m_tpoOverlay;
-    VolumeProfileRenderer m_vpRenderer;
-    std::vector<IOverlayRenderer*> m_overlays;  // non-owning; points to inline members above
+    chart::TradeLayers m_layers;
     int m_tpoTimeframeMs = 1800000;           // 30m brackets (config tpo.period_minutes)
     int m_tpoSessionType = 4;                 // SessionManager::SessionType::H24
 
@@ -210,7 +208,7 @@ public:
     Q_INVOKABLE void setTpoTheme(const QString& theme);
     QString tpoLayout() const;
     QString tpoTheme() const;
-    int tpoSessions() const { return m_tpoOverlay.style().maxSessions; }
+    int tpoSessions() const { return m_layers.tpo.renderer.style().maxSessions; }
     
     GridViewState* getViewState() const { return m_view ? m_view->viewPtr() : nullptr; }
     QObject* viewState() const { return getViewState(); }
@@ -391,7 +389,6 @@ protected:
 
 private:
     void buildMsdfAtlas();
-    void connectDataProcessorSignals();
     void publishTradeBubbleFrame(const TimeAxisMapping& mapping);
     // The one root: a plain QSGNode whose first child is an opacity node holding
     // the HeatmapTileNode (opacity 0 blocks it while the heatmap layer is off);
@@ -402,8 +399,6 @@ private:
     // The frame's raster camera and its TimeAxisMapping (whole-pixel mapping, once
     // per frame, at the layer's tick for this frame).
     void prepareSyncFrame();
-    void renderTradeOverlays(QSGNode* parent, const FrameContext& frame, bool drawFootprint, bool drawTpo,
-                             std::vector<FootprintOverlayRenderer::PendingUpload>& footprintUploads);
     void refitAutoPrice();
     chart::CandleBufferSource m_candleSource;
     QMetaObject::Connection m_candleDirtyConn;
@@ -420,10 +415,9 @@ private:
 
     std::unique_ptr<chart::HeatmapChartPort> m_heatmapPort;
     std::unique_ptr<chart::ChartViewController> m_view;
-    std::unique_ptr<DataProcessor> m_dataProcessor;
-    std::unique_ptr<QThread> m_dataProcessorThread;
+    std::unique_ptr<chart::TradeOverlayFeeds> m_feeds;
     void init();
 
 public:
-    DataProcessor* getDataProcessor() const { return m_dataProcessor.get(); }
+    DataProcessor* getDataProcessor() const { return m_feeds ? m_feeds->processor() : nullptr; }
 };

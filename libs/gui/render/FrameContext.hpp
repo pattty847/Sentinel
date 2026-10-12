@@ -33,6 +33,7 @@ struct FrameContext {
         bool heatmap = false;
         bool footprint = false;
         bool tpo = false;
+        bool volumeProfile = false;
     };
     TimeAuthority::Snapshot time;
     QRectF surfaceBounds;
