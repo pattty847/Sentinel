@@ -34,6 +34,11 @@ void ChartTextRenderer::onRootRebuilt() {
     }
 }
 
+QSGNode* ChartTextRenderer::createRoot() {
+    m_root = new QSGNode();
+    return m_root;
+}
+
 void ChartTextRenderer::beginFrame(QSGNode* parentNode, QQuickWindow* window, const ChartTextAtlas& atlas) {
     m_window = window;
     m_atlas = &atlas;
@@ -44,8 +49,7 @@ void ChartTextRenderer::beginFrame(QSGNode* parentNode, QQuickWindow* window, co
     m_debugGlyphs.clear();
 
     if (!m_root) {
-        m_root = new QSGNode();
-        parentNode->appendChildNode(m_root);
+        parentNode->appendChildNode(createRoot());
     }
 
     for (Bucket& bucket : m_buckets) {

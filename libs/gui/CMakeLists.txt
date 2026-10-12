@@ -52,6 +52,9 @@ set(GRID_CORE_SOURCES
     UnifiedGridRenderer.Zoom.cpp
     UnifiedGridRenderer.h
     chart/layers/LayerRegistry.cpp
+    chart/layers/HeatmapLayer.cpp
+    chart/layers/ChartTextLayer.cpp
+    chart/feeds/TradeBubbleFeed.cpp
     chart/layers/ChartLayerSet.cpp
     chart/layers/TradeLayers.cpp
     chart/feeds/TradeOverlayFeeds.cpp

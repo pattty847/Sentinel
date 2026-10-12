@@ -7,10 +7,10 @@ class DataProcessor;
 class QThread;
 
 namespace chart {
-struct TradeLayers;
+struct ChartLayers;
 class TradeOverlayFeeds : public QObject {
 public:
-    explicit TradeOverlayFeeds(TradeLayers& layers, QObject* context, std::function<void()> update);
+    explicit TradeOverlayFeeds(ChartLayers& layers, QObject* context, std::function<void()> update);
     ~TradeOverlayFeeds() override;
     DataProcessor* processor() const { return processor_.get(); }
     void connectDataProcessorSignals();
@@ -19,7 +19,7 @@ public:
     void clearData();
     void shutdown();
 private:
-    TradeLayers& layers_;
+    ChartLayers& layers_;
     QObject* context_;
     std::function<void()> update_;
     std::unique_ptr<DataProcessor> processor_;

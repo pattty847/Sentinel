@@ -1,5 +1,5 @@
 #pragma once
-#include "chart/layers/ChartLayerSet.hpp"
+#include "chart/layers/IChartLayer.hpp"
 #include "render/FootprintOverlayRenderer.hpp"
 #include "render/VolumeProfileRenderer.hpp"
 #include "render/TpoOverlayRenderer.hpp"
@@ -28,12 +28,5 @@ public:
     void onRootRebuilt() override { renderer.onRootRebuilt(); }
     void updateNodes(const ChartFrame&, LayerNodeContext&) override;
     TpoOverlayRenderer renderer;
-};
-struct TradeLayers {
-    FootprintLayer footprint;
-    TpoLayer tpo;
-    VolumeProfileLayer vp;
-    LayerRegistry registry;
-    TradeLayers() { registerChartLayers(registry, footprint, vp, tpo); }
 };
 } // namespace chart

@@ -1,4 +1,5 @@
 #include "HeatmapGpuLayer.hpp"
+#include "LabelRequestCoverage.hpp"
 #include "HeatmapGpuSelfTest.hpp"
 #include "SentinelLogging.hpp"
 #include "heatmap/HeatmapSpanPlanner.hpp"
@@ -524,10 +525,8 @@ void HeatmapGpuLayer::postLabels(const ViewWindow &view) {
     if (!(c1 > c0) || !(r1 > r0) || c0 < 0 || (c1 - c0) * (r1 - r0) > double(kMaxLabelCells)) return; // gate closed
     const bool live = live_ && live_->tfMs == tf && live_->symbol == symbol_;
     const auto &p = postedLabels_;
-    if (labelsPosted_ && p.tfMs == tf && p.tickUnits == tick && p.priceScale == snapshot_->priceScale &&
-        p.spanVersion == snapshot_->version && p.liveVersion == (live ? live_->version : 0) &&
-        double(p.firstBucket) <= c0 && double(p.firstBucket + p.columns) >= c1 && double(p.firstBin) <= r0 &&
-        double(p.firstBin + p.rows) >= r1)
+    if (labelsPosted_ && labelRequestCovers(p, {tf, tick, snapshot_->priceScale, snapshot_->version, live ? live_->version : 0},
+                                            {c0, c1, r0, r1}))
         return; // the requested window still covers the view of the same picture
     // The view plus a margin on each side (pans inside it are layout only), at
     // most kMaxLabelCells cells.

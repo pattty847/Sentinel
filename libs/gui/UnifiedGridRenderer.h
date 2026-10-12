@@ -36,10 +36,10 @@
 #include "chart/core/PublishedFrame.hpp"
 #include "chart/core/ChartViewController.hpp"
 // ── Overlay renderers (owned inline) ─────────────────────────────────────────
-#include "chart/layers/TradeLayers.hpp"
+#include "chart/layers/ChartLayers.hpp"
 #include "chart/feeds/TradeOverlayFeeds.hpp"
 #include "render/FootprintOverlayRenderer.hpp"
-#include "render/TradeBubbleFrame.hpp"
+#include "chart/feeds/TradeBubbleFeed.hpp"
 #include "render/TpoOverlayRenderer.hpp"
 #include "render/VolumeProfileRenderer.hpp"
 
@@ -58,7 +58,7 @@ class QQuickWindow;
 class QScreen;
 namespace chart { class HeatmapChartPort; }
 
-class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider {
+class UnifiedGridRenderer : public QQuickItem, public ITimeAxisMappingProvider, public chart::ITradeBubbleFrameSource {
     friend struct TradeBubbleRendererTest;
     friend class chart::HeatmapChartPort;
     Q_OBJECT
@@ -120,7 +120,6 @@ private:
 
     FrameProfiler m_frameProfiler;  // SENTINEL_FRAME_PROFILE=1, render thread only
     // Per-chart GPU heatmap state, read in updatePaintNode while the GUI is blocked.
-    std::unique_ptr<heatmap::gpu::HeatmapGpuLayer> m_gpuLayer;
     // The chart's frame clock and timeframe cadence (FrameContext::time; the candle
     // overlay's boundary sequence reads it through currentFrameContext()).
     QElapsedTimer m_frameClock;
@@ -144,28 +143,13 @@ private:
     enum class ReactionPhase { Heatmap, ViewState, Ready };
     void bindViewReactions(ReactionPhase phase);
     QTimer* m_glidePolishTimer = nullptr;
-    QMetaObject::Connection m_beforeSyncConn;
+    struct { QMetaObject::Connection beforeSync, afterRender; } m_renderConnections;
     // Render thread: this sync's frame (context, tick, raster camera), prepared in
     // beforeSynchronizing and drawn by updatePaintNode in the same sync.
     chart::FrameProducer m_frameProducer;
 
-    ChartTextAtlas m_chartTextAtlas;
-    bool m_chartTextAtlasBuilt = false;
-    ChartTextRenderer m_chartTextRenderer;
-    std::vector<ChartGlyphInstance> m_heatmapLabelGlyphs;
-    heatmap::gpu::HeatmapLabelLayout m_gpuLabels; // render thread (updatePaintNode)
-    uint64_t m_gpuLabelSerial = 0;
-    std::vector<uint8_t> m_gpuLabelColumns;          // render thread: matched label columns (reused)
-    std::atomic<uint64_t> m_gpuLabelSignature{0};    // what the last frame's labels drew
-    std::atomic<bool> m_gpuLabelsIncomplete{false};  // ...while some were held back (transition)
-    std::unique_ptr<AxisTextService> m_axisTextService;
-    std::shared_ptr<trade_bubbles::Tape> m_tradeBubbleTape = std::make_shared<trade_bubbles::Tape>();
-    std::shared_ptr<trade_bubbles::RenderFrame> m_tradeBubbleFrame = std::make_shared<trade_bubbles::RenderFrame>(m_tradeBubbleTape);
-    bool m_tradesAboveCandles = true;
-    bool m_showTrades = false;
-    double m_tradeMinNotional = 0;
-    QColor m_tradeBuyColor, m_tradeSellColor;
-    chart::TradeLayers m_layers;
+    chart::TradeBubbleFeed m_bubbles;
+    chart::ChartLayers m_layers;
     int m_tpoTimeframeMs = 1800000;           // 30m brackets (config tpo.period_minutes)
     int m_tpoSessionType = 4;                 // SessionManager::SessionType::H24
 
@@ -212,11 +196,11 @@ public:
     
     GridViewState* getViewState() const { return m_view ? m_view->viewPtr() : nullptr; }
     QObject* viewState() const { return getViewState(); }
-    QObject* priceAxisSource() const { return m_axisTextService ? m_axisTextService->priceAxisSource() : nullptr; }
-    QObject* timeAxisSource() const { return m_axisTextService ? m_axisTextService->timeAxisSource() : nullptr; }
-    double effectiveAxisLabelPx() const { return m_axisTextService ? m_axisTextService->effectiveAxisLabelPx() : AxisLayout::kAutoAxisLabelBasePx; }
-    int priceAxisWidthPx() const { return m_axisTextService ? m_axisTextService->priceAxisWidthPx() : 90; }
-    int timeAxisHeightPx() const { return m_axisTextService ? m_axisTextService->timeAxisHeightPx() : 30; }
+    QObject* priceAxisSource() const { return m_layers.text.axes ? m_layers.text.axes->priceAxisSource() : nullptr; }
+    QObject* timeAxisSource() const { return m_layers.text.axes ? m_layers.text.axes->timeAxisSource() : nullptr; }
+    double effectiveAxisLabelPx() const { return m_layers.text.axes ? m_layers.text.axes->effectiveAxisLabelPx() : AxisLayout::kAutoAxisLabelBasePx; }
+    int priceAxisWidthPx() const { return m_layers.text.axes ? m_layers.text.axes->priceAxisWidthPx() : 90; }
+    int timeAxisHeightPx() const { return m_layers.text.axes ? m_layers.text.axes->timeAxisHeightPx() : 30; }
     
     bool showGpuStatsOverlay() const { return m_showGpuStatsOverlay; }
     bool showDataPipelineOverlay() const { return m_showDataPipelineOverlay; }
@@ -237,17 +221,17 @@ public:
     // The process service (MainWindowGPU owns it; it outlives this item). nullptr
     // detaches the layer's controller (teardown).
     void setHeatmapService(heatmap::HeatmapDataService* service);
-    bool tradesAboveCandles() const { return m_tradesAboveCandles; }
+    bool tradesAboveCandles() const { return m_bubbles.tradesAboveCandles(); }
     // GUI-thread binding only; render callbacks retain the plain C++ state.
-    std::shared_ptr<trade_bubbles::RenderFrame> tradeBubbleRenderFrame() const { return m_tradeBubbleFrame; }
+    std::shared_ptr<trade_bubbles::RenderFrame> tradeBubbleRenderFrame() const override { return m_bubbles.tradeBubbleRenderFrame(); }
     // Chart settings (tick policy, palette, sensitivity, budgets).
     void setHeatmapChartSettings(const heatmap::HeatmapChartSettings& settings, bool explicitManualTick = false);
     void setHeatmapTickMemory(const heatmap::ManualTickMemory& memory);
-    heatmap::gpu::HeatmapGpuLayer* gpuHeatmapLayer() const { return m_gpuLayer.get(); }
+    heatmap::gpu::HeatmapGpuLayer* gpuHeatmapLayer() const { return m_layers.heatmap.gpu.get(); }
     // Tests: the label layout of the last GPU frame and its glyphs.
-    const heatmap::gpu::HeatmapLabelLayout& gpuLabelLayout() const { return m_gpuLabels; }
-    const std::vector<ChartGlyphInstance>& gpuLabelGlyphs() const { return m_heatmapLabelGlyphs; }
-    uint64_t gpuLabelSerial() const { return m_gpuLabelSerial; } // the LabelCells serial drawn (0: none)
+    const heatmap::gpu::HeatmapLabelLayout& gpuLabelLayout() const { return m_layers.heatmap.labelLayout(); }
+    const std::vector<ChartGlyphInstance>& gpuLabelGlyphs() const { return m_layers.heatmap.labelGlyphs(); }
+    uint64_t gpuLabelSerial() const { return m_layers.heatmap.labelSerial(); } // the LabelCells serial drawn (0: none)
 
     // ── Auto price scale and fits ──
     // View and fit behavior: docs/ARCHITECTURE.md, "Coordinate system: TimeAxisMapping".
@@ -388,14 +372,10 @@ protected:
     void updatePolish() override;        // a zoom glide advances once per frame (GUI thread)
 
 private:
-    void buildMsdfAtlas();
-    void publishTradeBubbleFrame(const TimeAxisMapping& mapping);
     // The one root: a plain QSGNode whose first child is an opacity node holding
     // the HeatmapTileNode (opacity 0 blocks it while the heatmap layer is off);
     // overlays and text follow it as later children (drawn on top).
-    QSGNode* ensureGpuRootNode(QSGNode* oldNode, heatmap::gpu::HeatmapTileNode** tile);
     QSGNode* updateGpuPaintNode(QSGNode* oldNode, FrameContext& frame, bool profile);
-    void updateGpuLabels(const FrameContext& frame, bool prepared);
     // The frame's raster camera and its TimeAxisMapping (whole-pixel mapping, once
     // per frame, at the layer's tick for this frame).
     void prepareSyncFrame();

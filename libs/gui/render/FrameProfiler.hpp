@@ -26,6 +26,7 @@ public:
         if (!m_window.isValid()) m_window.start();
         m_frame.start();
         m_lastNs = 0;
+        m_stageFrameNs.fill(0);
     }
 
     // Charges the time since the previous mark (or beginFrame) to `stage`.
@@ -34,7 +35,8 @@ public:
         const qint64 spent = now - m_lastNs;
         m_lastNs = now;
         m_sumNs[stage] += spent;
-        if (spent > m_maxNs[stage]) m_maxNs[stage] = spent;
+        m_stageFrameNs[stage] += spent;
+        if (m_stageFrameNs[stage] > m_maxNs[stage]) m_maxNs[stage] = m_stageFrameNs[stage];
     }
 
     // Returns a report once per second, otherwise an empty string.
@@ -66,6 +68,7 @@ private:
     QElapsedTimer m_window;
     QElapsedTimer m_frame;
     qint64 m_lastNs = 0;
+    std::array<qint64, StageCount> m_stageFrameNs{};
     std::array<qint64, StageCount> m_sumNs{};
     std::array<qint64, StageCount> m_maxNs{};
     qint64 m_totalSumNs = 0;

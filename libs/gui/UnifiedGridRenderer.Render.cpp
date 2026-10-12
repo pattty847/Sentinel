@@ -4,64 +4,8 @@
 #include "SentinelLogging.hpp"
 #include "chart/shell/HeatmapChartPort.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
-#include "render/heatmap/HeatmapTileNode.hpp"
 
 #include <QQuickWindow>
-#include <QSGOpacityNode>
-#include <algorithm>
-#include <cmath>
-
-// ── GPU heatmap ──
-QSGNode* UnifiedGridRenderer::ensureGpuRootNode(QSGNode* oldNode, heatmap::gpu::HeatmapTileNode** tile) {
-    auto* root = oldNode;
-    if (!root) {
-        root = new QSGNode();
-        auto* gate = new QSGOpacityNode();
-        gate->appendChildNode(new heatmap::gpu::HeatmapTileNode(m_gpuLayer->tileStatsPtr()));
-        root->appendChildNode(gate);
-        m_layers.registry.onRootRebuilt(root);
-        m_chartTextRenderer.onRootRebuilt();
-    }
-    *tile = static_cast<heatmap::gpu::HeatmapTileNode*>(root->firstChild()->firstChild());
-    return root;
-}
-
-// Liquidity labels: the layer's matched LabelCells, laid out by the reused
-// HeatmapLabelLayout (no per-frame allocation), submitted as low-priority text.
-void UnifiedGridRenderer::updateGpuLabels(const FrameContext& frame, bool prepared) {
-    if (m_heatmapLabelGlyphs.capacity() < heatmap::gpu::HeatmapLabelLayout::kMaxGlyphs)
-        m_heatmapLabelGlyphs.reserve(heatmap::gpu::HeatmapLabelLayout::kMaxGlyphs);
-    const auto labels = prepared && m_chartTextAtlasBuilt && window() ? m_gpuLayer->labelsForFrame() : nullptr;
-    m_gpuLabelSerial = labels ? labels->key.serial : 0;
-    if (!labels) {
-        m_heatmapLabelGlyphs.clear();
-        m_gpuLabelSignature.store(0);
-        // Held back by a transition: after the frame, check whether they can draw.
-        m_gpuLabelsIncomplete.store(prepared && m_gpuLayer->labelsPending());
-        return;
-    }
-    // Only the columns showing the picture the labels describe (drawn last frame
-    // and this frame's target: the node prepares after this layout).
-    if (m_gpuLabelColumns.capacity() < heatmap::gpu::HeatmapGpuLayer::kMaxLabelCells)
-        m_gpuLabelColumns.reserve(heatmap::gpu::HeatmapGpuLayer::kMaxLabelCells);
-    const size_t matched = m_gpuLayer->matchLabelColumns(*labels, m_gpuLabelColumns);
-    const auto& settings = m_gpuLayer->settings();
-    heatmap::gpu::LabelStyle style;
-    style.usd = settings.labelCurrency != "asset";
-    style.minPx = settings.labelMinPx;
-    style.maxPx = settings.labelMaxPx;
-    style.window = {m_gpuLayer->drawStyle().codeFloor, m_gpuLayer->drawStyle().codeRange};
-    style.palette = m_gpuLayer->palette();
-    m_gpuLabels.layout(labels, m_chartTextAtlas, frame.mapping, window()->effectiveDevicePixelRatio(), style,
-                       m_heatmapLabelGlyphs, &m_gpuLabelColumns);
-    const auto& st = m_gpuLabels.stats();
-    m_gpuLabelSignature.store(heatmap::gpu::HeatmapGpuLayer::labelSignature(labels.get(), m_gpuLabelColumns, matched));
-    m_gpuLabelsIncomplete.store(st.unmatched > 0);
-    sLog_Probe("heatmap.labels.layout", "serial=" << labels->key.serial << " labels=" << st.labels
-               << " glyphs=" << st.glyphs << " sizePx=" << st.sizePx << " narrow=" << st.tooNarrow
-               << " dropped=" << st.droppedBudget << " unmatched=" << st.unmatched << " matchedColumns=" << matched);
-    m_chartTextRenderer.submitGlyphs(m_heatmapLabelGlyphs, ChartTextRenderer::Priority::Low);
-}
 
 // Prepare and publish the frame on the render thread with the GUI blocked,
 // before any item syncs (beforeSynchronizing): every
@@ -70,7 +14,7 @@ void UnifiedGridRenderer::updateGpuLabels(const FrameContext& frame, bool prepar
 // whatever order Qt syncs the items. Qt notifications stay outside the producer.
 void UnifiedGridRenderer::prepareSyncFrame() {
     m_frameProducer.frame().ready = false;
-    if (width() <= 0 || height() <= 0 || !m_gpuLayer) return;
+    if (width() <= 0 || height() <= 0 || !m_layers.heatmap.gpu) return;
     const bool profile = FrameProfiler::enabled();
     if (profile) m_frameProfiler.beginFrame();
     const auto inputs = m_view->frameInputs(
@@ -96,63 +40,29 @@ void UnifiedGridRenderer::prepareSyncFrame() {
 }
 
 QSGNode* UnifiedGridRenderer::updateGpuPaintNode(QSGNode* oldNode, FrameContext& frame, bool profile) {
-    heatmap::gpu::HeatmapTileNode* tile = nullptr;
-    QSGNode* root = ensureGpuRootNode(oldNode, &tile);
-    // The node draws the camera's window: rows and columns on device pixel edges.
-    heatmap::gpu::HeatmapTileNode::Frame tileFrame;
-    const auto& cam = frame.raster;
-    const auto& sync = m_frameProducer.frame();
-    std::optional<heatmap::gpu::ViewWindow> binView;
-    if (sync.binView) binView = heatmap::gpu::ViewWindow{sync.binView->timeLo, sync.binView->timeHi,
-                                                      sync.binView->priceLo, sync.binView->priceHi};
-    const bool prepared =
-        sync.drawHeatmap && cam.valid &&
-        m_gpuLayer->prepareFrame(tileFrame, frame.surfaceBounds,
-                                 {cam.drawnStartMs, cam.drawnEndMs, cam.drawnMinPrice, cam.drawnMaxPrice},
-                                 sync.coverageGamma, binView);
-    auto* gate = static_cast<QSGOpacityNode*>(root->firstChild());
-    const double opacity = prepared ? 1.0 : 0.0; // 0 blocks the subtree: no prepare(), no draw
-    if (gate->opacity() != opacity) gate->setOpacity(opacity);
-    if (prepared) tile->setFrame(std::move(tileFrame));
-    m_frameAck.submitted(frame);
-
-    m_layers.registry.sync(sync);
-    if (profile) m_frameProfiler.mark(FrameProfiler::Uploads);
-    // Qt blocks the GUI thread here: read chart-owned tape/settings only,
-    // never traverse the QObject graph from the node or its shader.
-    publishTradeBubbleFrame(frame.mapping);
-    m_layers.registry.updateNodes(sync, {window(), root, m_chartTextRenderer, m_chartTextAtlas,
-                                         m_chartTextAtlasBuilt, profile ? &m_frameProfiler : nullptr});
-    if (profile) m_frameProfiler.mark(FrameProfiler::Overlays);
-
-    m_chartTextRenderer.beginFrame(root, window(), m_chartTextAtlas);
-    if (m_axisTextService) {
-        m_axisTextService->submitAxisText(m_chartTextRenderer, m_chartTextAtlas, width(), height());
+    auto* root = oldNode;
+    if (!root) {
+        root = new QSGNode();
+        m_layers.registry.onRootRebuilt(root);
     }
-    if (profile) m_frameProfiler.mark(FrameProfiler::AxisText);
-    updateGpuLabels(frame, prepared);
-    if (profile) m_frameProfiler.mark(FrameProfiler::Labels);
-    m_chartTextRenderer.endFrame();
+    const auto& sync = m_frameProducer.frame();
+    m_layers.registry.sync(sync);
+    m_bubbles.publish(frame.mapping);
+    m_layers.registry.updateNodes(sync, {window(), root, m_layers.text.renderer, m_layers.text.atlas,
+                                         m_layers.text.atlasBuilt, profile ? &m_frameProfiler : nullptr});
+    m_frameAck.submitted(frame);
     if (profile) {
-        m_frameProfiler.mark(FrameProfiler::TextEnd);
         const QString report = m_frameProfiler.endFrame();
         if (!report.isEmpty()) sLog_Render(report);
     }
     return root;
 }
 
-void UnifiedGridRenderer::publishTradeBubbleFrame(const TimeAxisMapping& mapping) {
-    m_tradeBubbleFrame->mapping = mapping;
-    m_tradeBubbleFrame->enabled = m_showTrades;
-    m_tradeBubbleFrame->minNotional = m_tradeMinNotional;
-    m_tradeBubbleFrame->buy = m_tradeBuyColor;
-    m_tradeBubbleFrame->sell = m_tradeSellColor;
-}
 
 QSGNode* UnifiedGridRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) {
     Q_UNUSED(data)
-    m_tradeBubbleFrame->enabled = false; // Also covers invalid surfaces.
-    if (width() <= 0 || height() <= 0 || !m_gpuLayer) {
+    m_bubbles.disableFrame(); // Also covers invalid surfaces.
+    if (width() <= 0 || height() <= 0 || !m_layers.heatmap.gpu) {
         m_frameProducer.frame().ready = false;
         return oldNode;
     }

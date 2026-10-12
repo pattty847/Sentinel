@@ -1,13 +1,13 @@
 #include "chart/feeds/TradeOverlayFeeds.hpp"
 #include "chart/feeds/TradeOverlaySequence.hpp"
-#include "chart/layers/TradeLayers.hpp"
+#include "chart/layers/ChartLayers.hpp"
 #include "render/DataProcessor.hpp"
 #include "SentinelLogging.hpp"
 #include <QThread>
 #include <limits>
 
 namespace chart {
-TradeOverlayFeeds::TradeOverlayFeeds(TradeLayers& layers, QObject* context, std::function<void()> update)
+TradeOverlayFeeds::TradeOverlayFeeds(ChartLayers& layers, QObject* context, std::function<void()> update)
     : layers_(layers), context_(context), update_(std::move(update)) {
     thread_ = std::make_unique<QThread>();
     thread_->setObjectName(QStringLiteral("DataProcessor"));

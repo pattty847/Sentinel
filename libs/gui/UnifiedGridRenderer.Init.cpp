@@ -17,28 +17,28 @@ void UnifiedGridRenderer::init() {
     qRegisterMetaType<Trade>("Trade");
     m_frameClock.start();
     m_timeAuthority.setActiveTimeframeMs(defaultTimeframeMs);
-    m_gpuLayer = std::make_unique<heatmap::gpu::HeatmapGpuLayer>();
-    m_heatmapPort = std::make_unique<chart::HeatmapChartPort>(*this, *m_gpuLayer);
+    m_layers.heatmap.initialize();
+    m_heatmapPort = std::make_unique<chart::HeatmapChartPort>(*this, *m_layers.heatmap.gpu);
     m_view = std::make_unique<chart::ChartViewController>(*m_heatmapPort, *m_heatmapPort, *m_heatmapPort, m_published, this);
     bindLivePlacement();
     bindTimeframeSwitch();
     m_view->session().timeframeMs = defaultTimeframeMs;
-    m_gpuLayer->setTone({static_cast<float>(m_heatmapGamma), static_cast<float>(m_heatmapContrast),
+    m_layers.heatmap.gpu->setTone({static_cast<float>(m_heatmapGamma), static_cast<float>(m_heatmapContrast),
                          static_cast<float>(m_heatmapShaderFloor)});
     bindViewReactions(ReactionPhase::Heatmap);
-    connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::labelsChanged, this, [this] { update(); });
-    connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::buildFailed, this, [](const QString& message) {
+    connect(m_layers.heatmap.gpu.get(), &heatmap::gpu::HeatmapGpuLayer::labelsChanged, this, [this] { update(); });
+    connect(m_layers.heatmap.gpu.get(), &heatmap::gpu::HeatmapGpuLayer::buildFailed, this, [](const QString& message) {
         sLog_Warning("GPU heatmap span build failed: " << message);
     });
-    buildMsdfAtlas();
-    m_axisTextService = std::make_unique<AxisTextService>(m_chartTextAtlas, this);
-    connect(m_axisTextService.get(), &AxisTextService::axisSourcesChanged,
+    m_layers.text.buildMsdfAtlas();
+    m_layers.text.axes = std::make_unique<AxisTextService>(m_layers.text.atlas, this);
+    connect(m_layers.text.axes.get(), &AxisTextService::axisSourcesChanged,
             this, &UnifiedGridRenderer::axisSourcesChanged);
-    connect(m_axisTextService.get(), &AxisTextService::layoutChanged,
+    connect(m_layers.text.axes.get(), &AxisTextService::layoutChanged,
             this, &UnifiedGridRenderer::axisLayoutChanged);
-    connect(m_axisTextService.get(), &AxisTextService::needsUpdate,
+    connect(m_layers.text.axes.get(), &AxisTextService::needsUpdate,
             this, [this]() { update(); });
-    m_axisTextService->refreshAxisLayout();
+    m_layers.text.axes->refreshAxisLayout();
     m_feeds = std::make_unique<chart::TradeOverlayFeeds>(m_layers, this, [this] { update(); });
     applyClientConfig(store.clientConfig());
     if (store.hasServerConfig()) {
@@ -76,9 +76,9 @@ void UnifiedGridRenderer::init() {
     // The GPU heatmap is active from construction: the default view model is the
     // auto price scale; the first view comes from the service's availability, a
     // book top, a trade or the API (bootstrapGpuTimeView, seedGpuViewport).
-    m_gpuLayer->setSymbol(m_view->session().symbol.toStdString());
-    m_gpuLayer->setTimeframeMs(m_view->session().timeframeMs);
-    m_gpuLayer->setActive(true);
+    m_layers.heatmap.gpu->setSymbol(m_view->session().symbol.toStdString());
+    m_layers.heatmap.gpu->setTimeframeMs(m_view->session().timeframeMs);
+    m_layers.heatmap.gpu->setActive(true);
     getViewState()->setAutoPriceScale(true);
     m_view->applyGpuLimits();
     m_view->livePlacement().bootstrapGpuTimeView();

@@ -61,11 +61,11 @@
 #include <iostream>
 
 struct TradeBubbleRendererTest {
-    static void publish(UnifiedGridRenderer& r, const TimeAxisMapping& m) { r.publishTradeBubbleFrame(m); }
-    static size_t count(const UnifiedGridRenderer& r) { return r.m_tradeBubbleTape->samples().size(); }
-    static int64_t firstTime(const UnifiedGridRenderer& r) { return r.m_tradeBubbleTape->samples().front().timeMs; }
-    static bool enabled(const UnifiedGridRenderer& r) { return r.m_showTrades; }
-    static double threshold(const UnifiedGridRenderer& r) { return r.m_tradeMinNotional; }
+    static void publish(UnifiedGridRenderer& r, const TimeAxisMapping& m) { r.m_bubbles.publish(m); }
+    static size_t count(const UnifiedGridRenderer& r) { return r.m_bubbles.tape_->samples().size(); }
+    static int64_t firstTime(const UnifiedGridRenderer& r) { return r.m_bubbles.tape_->samples().front().timeMs; }
+    static bool enabled(const UnifiedGridRenderer& r) { return r.m_bubbles.show_; }
+    static double threshold(const UnifiedGridRenderer& r) { return r.m_bubbles.minimum_; }
 };
 
 struct TradeBubbleOverlayTest {
@@ -1267,6 +1267,69 @@ TEST(TradeBubbleControls, LayerOrderUsesRealQmlBindingAndPersistedChartApiSettin
     EXPECT_TRUE(t.reload().tradesAboveCandles);
     EXPECT_FALSE(model.apply({{"renderer","legacy"}},false).isEmpty());
     EXPECT_TRUE(check->isEnabled()) << "one renderer (S8a): always enabled";
+}
+
+TEST(ChartRenderConnections, DisconnectedBeforeHeatmapDependencyDestruction) {
+    QQuickWindow window;
+    auto* renderer = new UnifiedGridRenderer(window.contentItem());
+    bool inspected = false;
+    QObject::connect(renderer->gpuHeatmapLayer(), &QObject::destroyed, &window, [&] {
+        inspected = true;
+        // This runs inside the UGR destructor body, before QObject's automatic
+        // receiver cleanup. A true return would reveal a still-live connection.
+        EXPECT_FALSE(QObject::disconnect(&window, &QQuickWindow::beforeSynchronizing, renderer, nullptr));
+        EXPECT_FALSE(QObject::disconnect(&window, &QQuickWindow::afterRendering, renderer, nullptr));
+    }, Qt::DirectConnection);
+    delete renderer;
+    EXPECT_TRUE(inspected);
+}
+
+TEST(ChartRenderConnections, RebindingDropsBothOldWindowRenderConnections) {
+    QQuickWindow first, second;
+    auto* renderer = new UnifiedGridRenderer(first.contentItem());
+    renderer->setParentItem(second.contentItem());
+    EXPECT_FALSE(QObject::disconnect(&first, &QQuickWindow::beforeSynchronizing, renderer, nullptr));
+    EXPECT_FALSE(QObject::disconnect(&first, &QQuickWindow::afterRendering, renderer, nullptr));
+    // The replacement window must still have both callbacks wired.
+    EXPECT_TRUE(QObject::disconnect(&second, &QQuickWindow::beforeSynchronizing, renderer, nullptr));
+    EXPECT_TRUE(QObject::disconnect(&second, &QQuickWindow::afterRendering, renderer, nullptr));
+    delete renderer;
+}
+
+TEST(TradeBubbleControls, PublishKeepsTapeSettingsAndSignalOrder) {
+    UnifiedGridRenderer renderer;
+    renderer.setActiveSymbol("BTC-USD");
+    Trade trade{};
+    trade.product_id = "BTC-USD"; trade.price = 100; trade.size = 2;
+    trade.trade_id = "feed-sequence";
+    trade.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(1791030896789LL));
+    renderer.onTradeReceived(trade);
+    const auto frame = renderer.tradeBubbleRenderFrame();
+    const auto tape = frame->tape;
+    ASSERT_EQ(tape->samples().size(), 1u);
+    int signalCount = 0;
+    QObject::connect(&renderer, &UnifiedGridRenderer::tradeBubbleSettingsChanged, &renderer, [&] {
+        ++signalCount;
+        EXPECT_TRUE(TradeBubbleRendererTest::enabled(renderer));
+        EXPECT_EQ(TradeBubbleRendererTest::threshold(renderer), 0);
+        EXPECT_FALSE(renderer.tradesAboveCandles());
+    });
+    heatmap::HeatmapChartSettings settings;
+    settings.showTrades = true; settings.tradeMinNotional = 1234; settings.tradesAboveCandles = false;
+    renderer.setHeatmapChartSettings(settings);
+    EXPECT_EQ(signalCount, 1);
+    renderer.setHeatmapChartSettings(settings);
+    EXPECT_EQ(signalCount, 1);
+    TimeAxisMapping mapping;
+    mapping.viewStartMs = 100; mapping.viewEndMs = 200;
+    mapping.viewMinPrice = 90; mapping.viewMaxPrice = 110;
+    TradeBubbleRendererTest::publish(renderer, mapping);
+    EXPECT_EQ(frame, renderer.tradeBubbleRenderFrame());
+    EXPECT_EQ(frame->tape, tape);
+    EXPECT_TRUE(frame->enabled);
+    EXPECT_EQ(frame->minNotional, 1234);
+    EXPECT_EQ(frame->mapping.viewStartMs, 100);
+    EXPECT_EQ(frame->mapping.viewMaxPrice, 110);
 }
 
 TEST(TradeBubbleControls, GuiIngestionKeepsHiddenSessionTradesAndIsolatesSymbols) {
