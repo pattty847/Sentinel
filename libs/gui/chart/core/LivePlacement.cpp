@@ -108,8 +108,7 @@ void LivePlacement::seedGpuViewport(double bestBid, double bestAsk) {
   const double lo = mid - span * 0.5, hi = mid + span * 0.5;
   const bool carry = controller_.priceFitter().priceCarry() && timeValid && controller_.flags().reseedPrice;
   if (!carry) controller_.priceFitter().priceCarry().reset();
-  controller_.flags().priceKnown = true;
-  controller_.flags().reseedPrice = false;
+  controller_.flags().markPriceKnown();
   sLog_Render("GPU heatmap viewport seeded from the book top: mid=" << mid << " time=[" << start << ".." << end
               << "] carry=" << carry << " autoPriceScale=" << controller_.viewPtr()->autoPriceScale());
   // A symbol switch with auto price scale off: the carried zoom; else the default band
@@ -185,14 +184,20 @@ void LivePlacement::setLiveBookTop(double bestBid, double bestAsk) {
     controller_.session().bookMid = (bestBid + bestAsk) * 0.5;
   seedGpuViewport(bestBid, bestAsk);
 }
+bool LivePlacement::matchesUtf8Product(QStringView symbol, std::string_view product) {
+  // QString::fromUtf8 consumes one initial BOM; the non-owning UTF-8 comparison
+  // otherwise uses the same decoder, including replacement of malformed bytes.
+  if (product.starts_with("\xef\xbb\xbf")) product.remove_prefix(3);
+  return symbol == QUtf8StringView(product.data(), static_cast<qsizetype>(product.size()));
+}
+
 void LivePlacement::onTrade(const std::string& product, double price) {
   // The live price for auto-fit compares the ASCII product id without conversion.
-  // The separate seed comparison below converts to QString and may allocate.
   if (std::isfinite(price) && price > 0 &&
       controller_.session().symbol == QLatin1String(product.data(), static_cast<qsizetype>(product.size())))
     controller_.session().lastTrade = price;
   // A trade seeds the price window only when no book top has (yet) for this symbol.
-  if ((controller_.flags().reseedPrice || !controller_.flags().priceKnown) && QString::fromStdString(product) == controller_.session().symbol)
+  if ((controller_.flags().reseedPrice || !controller_.flags().priceKnown) && matchesUtf8Product(controller_.session().symbol, product))
     seedGpuViewport(price, price);
 }
 

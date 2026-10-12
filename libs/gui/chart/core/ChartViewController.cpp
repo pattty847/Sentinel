@@ -17,14 +17,13 @@ ChartViewController::ChartViewController(IChartEnvironment& environment, IHeatma
     : QObject(parent), environment_(environment), sink_(sink), view_(std::make_unique<GridViewState>(parent)),
       camera_(*view_, session_, environment, ticks, published, glide_), zoomGlide_(glide_, camera_), zoom_(*this, environment),
       priceFitter_(*this, environment, ticks), livePlacement_(*this, environment),
-      priceCarry_(*this, environment), timeframeSwitch_(*this, environment, published) {
+      priceCarry_(*this, environment), timeframeSwitch_(*this, environment, published), commands_(*this, environment, ticks) {
     livePlacement_.setApplyPriceCarry([this](double mid) { return priceCarry_.apply(mid); });
 }
 
 void ChartViewController::setTimeframe(int next) {
     if (!timeframeSwitch_.request(next)) return;
-    zoomGlide_.endZoomGlide();
-    glide_.gesture = false;
+    zoomGlide_.land();
     const auto inputs = timeframeSwitch_.capture(next);
     timeframeSwitch_.updateLimits(inputs);
     const auto plan = timeframeSwitch_.plan(inputs);

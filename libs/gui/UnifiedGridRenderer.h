@@ -145,6 +145,8 @@ private:
     void bindZoomGlide();
     void bindLivePlacement();
     void bindTimeframeSwitch();
+    enum class ReactionPhase { Heatmap, ViewState, Ready };
+    void bindViewReactions(ReactionPhase phase);
     QTimer* m_glidePolishTimer = nullptr;
     QMetaObject::Connection m_beforeSyncConn;
     // Render thread: this sync's frame (context, tick, raster camera), prepared in
@@ -279,12 +281,7 @@ public:
     Q_INVOKABLE bool fitPriceToData() { return fitView(false, true); }
     Q_INVOKABLE bool resetView();
     static constexpr double kFitPriceMargin = chart::PriceFitter::kFitPriceMargin;
-    struct ViewportRequest {
-        std::optional<qint64> startMs, endMs;
-        std::optional<double> priceMin, priceMax;
-        std::optional<bool> followLive, autoScale;
-        QString fit;
-    };
+    using ViewportRequest = chart::ViewportRequest;
     QString applyViewportRequest(const ViewportRequest& request);
     QObject* candleBuffer() const;
     void setCandleBuffer(QObject* buffer);

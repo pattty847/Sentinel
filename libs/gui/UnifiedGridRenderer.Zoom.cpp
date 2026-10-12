@@ -1,9 +1,9 @@
 // Qt event adaptation and frame scheduling for chart zoom policies.
 #include "UnifiedGridRenderer.h"
-
 #include <QNativeGestureEvent>
 #include <QTimer>
-
+static_assert(int(Qt::NoScrollPhase) == chart::WheelInterpreter::kNoScrollPhase);
+static_assert(int(Qt::ScrollEnd) == chart::WheelInterpreter::kScrollEnd);
 void UnifiedGridRenderer::bindZoomGlide() {
   connect(&m_view->zoom(), &chart::ZoomController::updateRequested, this, [this] { update(); }, Qt::DirectConnection);
   auto& glide = m_view->zoomGlide();

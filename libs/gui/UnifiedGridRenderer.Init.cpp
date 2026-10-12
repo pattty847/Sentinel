@@ -30,34 +30,7 @@ void UnifiedGridRenderer::init() {
     m_view->session().timeframeMs = defaultTimeframeMs;
     m_gpuLayer->setTone({static_cast<float>(m_heatmapGamma), static_cast<float>(m_heatmapContrast),
                          static_cast<float>(m_heatmapShaderFloor)});
-    connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::snapshotChanged, this, [this] {
-        // No book top yet (or a symbol switch): centre on the decoded data instead.
-        if ((!m_view->flags().priceKnown || m_view->flags().reseedPrice) && getViewState()->isTimeWindowValid()) {
-            if (const double mid = m_gpuLayer->recentMidPrice(); mid > 0) m_view->livePlacement().seedGpuViewport(mid, mid);
-        }
-        update();
-    });
-    connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::liveChanged, this, [this] {
-        m_view->livePlacement().followGpuLive();
-        emit liveRenderTick();
-        update();
-    });
-    connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::tickChanged, this, [this] {
-        m_view->applyGpuLimits();
-        refitAutoPrice(); // the fit's min/max price spans follow the tick
-        m_view->syncGpuView();    // the drawn rows (and so the drawn price window) follow it too
-        // Before the frame that draws the new tick: the axis models recalculate on
-        // heatmapTickSizeChanged, the sibling overlays (candles, paper, algo) redraw on
-        // viewportChanged; all of them sync with the new raster camera in that frame.
-        emit heatmapTickSizeChanged();
-        emit viewportChanged();
-        update();
-    });
-    connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::limitsChanged, this, [this] {
-        m_view->applyGpuLimits();
-        m_view->priceCarry().limitsChanged();
-        refitAutoPrice(); // e.g. a new symbol's tick: its min/max price spans
-    });
+    bindViewReactions(ReactionPhase::Heatmap);
     connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::labelsChanged, this, [this] { update(); });
     connect(m_gpuLayer.get(), &heatmap::gpu::HeatmapGpuLayer::buildFailed, this, [](const QString& message) {
         sLog_Warning("GPU heatmap span build failed: " << message);
@@ -93,11 +66,7 @@ void UnifiedGridRenderer::init() {
     connect(getViewState(), &GridViewState::viewportChanged, this, &UnifiedGridRenderer::onViewportChanged);
     connect(getViewState(), &GridViewState::panVisualOffsetChanged, this, &UnifiedGridRenderer::panVisualOffsetChanged);
     connect(getViewState(), &GridViewState::autoScrollEnabledChanged, this, &UnifiedGridRenderer::autoScrollEnabledChanged);
-    connect(getViewState(), &GridViewState::autoPriceScaleChanged, this, [this]() {
-        sLog_Render("auto price scale=" << getViewState()->autoPriceScale());
-        if (getViewState()->autoPriceScale()) m_view->priceFitter().priceCarry().reset(); // on: the candles fit
-        emit autoPriceScaleChanged();
-    });
+    bindViewReactions(ReactionPhase::ViewState);
     // Auto price scale (gpu): every setViewport takes its price from the visible candles.
     getViewState()->setPriceFit([this](qint64 start, qint64 end, double& priceMin, double& priceMax) {
         return m_view->priceFitter().autoPriceFit(start, end, priceMin, priceMax);

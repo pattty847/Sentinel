@@ -343,3 +343,9 @@ target_include_directories(test_ZoomController PRIVATE ${CMAKE_SOURCE_DIR}/libs/
 target_link_libraries(test_ZoomController PRIVATE GTest::gtest_main sentinel_chart_core Qt6::Core)
 add_test(NAME ZoomControllerTests COMMAND test_ZoomController)
 set_tests_properties(ZoomControllerTests PROPERTIES LABELS "render;fast")
+
+add_executable(test_ViewCommands test_view_commands.cpp)
+target_include_directories(test_ViewCommands PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_ViewCommands PRIVATE GTest::gtest_main sentinel_chart_core Qt6::Core)
+add_test(NAME ViewCommandsTests COMMAND test_ViewCommands)
+set_tests_properties(ViewCommandsTests PROPERTIES LABELS "render;fast")

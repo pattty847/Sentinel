@@ -10,6 +10,11 @@ namespace chart {
 ZoomGlide::ZoomGlide(ZoomGlideState& state, const ChartCamera& camera)
     : state_(state), camera_(camera) {}
 
+void ZoomGlide::land() {
+    endZoomGlide();
+    state_.gesture = false;
+}
+
 void ZoomGlide::endZoomGlide(bool time, bool price) {
   bool ended = false;
   if (time && state_.time.active) ended = true, state_.time.active = false;
