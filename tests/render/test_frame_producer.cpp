@@ -1,4 +1,6 @@
 #include "chart/core/ChartViewController.hpp"
+#include "chart/core/FrameProducer.hpp"
+#include "chart/core/FrameAck.hpp"
 #include "chart/core/PublishedFrame.hpp"
 #include <QElapsedTimer>
 #include <gtest/gtest.h>
@@ -34,8 +36,6 @@ struct TickFake : chart::ITickAuthority {
     double tickPrice() const override { ++reads; return tick; }
     void noteRaster(int r, int c, double continuous) override { ++notes; row = r; col = c; continuousRow = continuous; }
 };
-#include "chart/core/FrameProducer.hpp"
-#include "chart/core/FrameAck.hpp"
 
 namespace {
 struct Environment final : chart::IChartEnvironment, chart::ITickOracle, chart::IHeatmapViewSink {

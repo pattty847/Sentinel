@@ -37,11 +37,11 @@ void HeatmapChartPort::setView(const heatmap::gpu::ViewWindow& drawn, bool price
 }
 
 void HeatmapChartPort::chooseTickForView(const heatmap::gpu::ViewWindow& view) {
-    layer_->chooseTickForView(view);
+    if (layer_) layer_->chooseTickForView(view);
 }
-double HeatmapChartPort::tickPrice() const { return layer_->tickPrice(); }
+double HeatmapChartPort::tickPrice() const { return layer_ ? layer_->tickPrice() : 0.0; }
 void HeatmapChartPort::noteRaster(int rowPx, int colPx, double rowPxContinuous) {
-    layer_->noteRaster(rowPx, colPx, rowPxContinuous);
+    if (layer_) layer_->noteRaster(rowPx, colPx, rowPxContinuous);
 }
 
 } // namespace chart
