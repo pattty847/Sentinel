@@ -3446,6 +3446,72 @@ protected:
     }
 };
 
+TEST_F(UgrZoomCpu, LiveChangedFitsOnceAndRefitsWithoutFollowShift) {
+    FakeChunkTransport *transport = nullptr;
+    heatmap::HeatmapDataService service([&](QObject *) -> heatmap::ChunkTransport * { return transport = new FakeChunkTransport; }, {}, [](heatmap::ChunkTransport &t) { static_cast<FakeChunkTransport &>(t).goOnline(); });
+    chart.setHeatmapService(&service);
+    auto *v = chart.getViewState();
+    v->setAutoPriceScale(false);
+    v->setViewport(centre - 3 * minute, centre + minute, 100120, 100180);
+    v->enableAutoScroll(false);
+    heatmap::ChunkAvailability availability;
+    availability.symbol = "BTC-USD";
+    availability.chunkWireVersion = heatmap::kChunkWireVersion;
+    protocol::chunkwire::SourceInfo source;
+    source.id = "hmc2.deep";
+    source.latestGrid = protocol::chunkwire::GridInfo{};
+    source.latestGrid->priceScale = 100;
+    source.levels.push_back({minute, kHourMs, centre, epoch, centre - minute});
+    availability.sources.push_back(source);
+    service.onData([&] { transport->push(availability); });
+    ASSERT_TRUE(waitFor([&] {
+        bool subscribed = false;
+        service.onData([&] { subscribed = !transport->liveRequests.empty(); });
+        return subscribed;
+    }));
+    auto live = std::make_shared<heatmap::ChunkFrame>();
+    live->kind = heatmap::ChunkKind::LiveColumn;
+    live->key = {"BTC-USD", source.id, minute, centre / kHourMs * kHourMs};
+    live->state = {false, centre, 1};
+    live->columns = {"BTC-USD", "deep", minute, centre - 4 * minute, centre + minute, {}, {}};
+    for (qint64 t = live->columns.startMs; t < live->columns.endMs; t += minute) {
+        heatmap::NativeColumn column;
+        column.grid = {1, 100, 100};
+        column.baseRow = 99900;
+        column.observedMs = minute;
+        column.coverage[0] = {{99900, 100500, minute}};
+        column.coverage[1] = column.coverage[0];
+        column.entries = {{0, recording::encodeSize(3)}};
+        live->columns.columns.push_back({t, minute, t >= centre ? recording::kProvisional : 0u, {std::move(column)}});
+    }
+    live->columns.scannedRanges = {{live->columns.startMs, live->columns.endMs}};
+    service.onData([&] { transport->replyLive(transport->liveRequests.back().id, live); });
+    auto *layer = chart.gpuHeatmapLayer();
+    ASSERT_TRUE(waitFor([&] { return layer->liveOpenEndMs() == centre + minute && layer->hasCurrentResolution(); }));
+    v->setViewport(centre - 4 * minute, centre, 100120, 100180);
+    // Prime the live revision while auto fit is off, then measure the actual connections.
+    layer->liveChanged();
+    v->enableAutoScroll(true);
+    v->setAutoPriceScale(true);
+    auto &fitter = chart.view()->controller().priceFitter();
+    const auto before = fitter.autoPriceSolveCountForTest();
+    layer->liveChanged();
+    EXPECT_EQ(fitter.autoPriceSolveCountForTest() - before, 1);
+    ASSERT_GT(v->getVisibleTimeEnd(), centre);
+    const auto end = v->getVisibleTimeEnd();
+    const double high = v->getMaxPrice();
+    const bool blocked = candles.blockSignals(true);
+    candles.applyUpdate("BTC-USD", 60,
+                        {centre, centre + minute, 100150, 100350, 100130, 100150, 1, false, 0, false}, 1, false);
+    candles.blockSignals(blocked);
+    const auto beforeRefit = fitter.autoPriceSolveCountForTest();
+    layer->liveChanged();
+    EXPECT_EQ(fitter.autoPriceSolveCountForTest() - beforeRefit, 1);
+    EXPECT_EQ(v->getVisibleTimeEnd(), end);
+    EXPECT_GT(v->getMaxPrice(), high);
+    chart.setHeatmapService(nullptr);
+}
+
 TEST_F(UgrZoomCpu, ControllerDestroyJudgesAutoTickFreshOnNextFrame) {
     heatmap::gpu::HeatmapGpuLayer layer;
     const heatmap::gpu::ViewWindow view{double(centre - 2 * minute), double(centre + 2 * minute), 100120, 100180};
