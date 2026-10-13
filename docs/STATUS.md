@@ -35,7 +35,7 @@ Plan: `docs/research/2026-10-11-chart-core-architecture.md` rows B1-B8 (line ~77
 
 State checked against main `544c6fe` on 2026-10-13:
 - B1 one live-end formula (`liveEndCeil`, owner-approved): open. Policy test per the plan row.
-- B2 candle-interval rule: BLOCKED on the owner. Three sites round tfMs to seconds differently (`PriceFitter.cpp:35,95,236` and `PriceCarryPolicy.cpp:49` `(tf+500)/1000`; history request in `MainWindowGpu.cpp` `(tf+999)/1000`; `DepthChartView.qml:103` `Math.round`). Sub-second timeframes silently show 1 s candles. Options put to the owner: (A) real sub-second candles from trades, live + journal, (B) no candles below 1 s, (C) 1 s candles labelled honestly; conductor recommends A with B as fallback. Writer first verifies which granularities the candle-history path accepts.
+- B2 candle-interval rule: owner chose option A (2026-10-13): real sub-second candles (25-500 ms) built from trades, live and from the journal; tfMs in milliseconds end to end, nothing rounds it; seconds only at a boundary that truly speaks seconds, where an unrepresentable interval is refused with a logged reason, never rounded; ranges the journal does not cover show no candles (option B as fallback). Today three sites round differently (`PriceFitter.cpp:35,95,236`, `PriceCarryPolicy.cpp:49` `(tf+500)/1000`; `MainWindowGpu.cpp` history request `(tf+999)/1000`; `DepthChartView.qml:103` `Math.round`). Larger than the other B items and likely crosses the server candle path: first a short plan (where sub-second candles are built, history granularities the server accepts, cost), owner sign-off, then its own slice.
 - B3 reset `autoPriceTick_` in `HeatmapGpuLayer::destroyController` / `forgetService`: open (only `setSymbol`/`setTimeframeMs` reset it, `HeatmapGpuLayer.cpp:141,154`).
 - B4 rename `UgrZoomCpu.SymbolSwitchBeforeFirstSnapshotUsesPlainFitSilently` -> `...PublishesRawBoundsSilently` (`tests/render/test_ugr_gpu.cpp`): open, trivial.
 - B5 one auto-fit per live tick (count `solveAutoPriceFit` calls == 1): open, perf.
@@ -43,7 +43,7 @@ State checked against main `544c6fe` on 2026-10-13:
 - B7 `SENTINEL_DUMP_GLYPH_ATLAS` `/tmp` dump in `libs/gui/chart/layers/ChartTextLayer.cpp`: owner leans delete (2026-10-13); confirm, then delete.
 - B8: done in S11 (`d231a11`). Nothing to do.
 
-Suggested dispatch: one low-risk branch B1+B3+B4+B5+B6 (+B7 once confirmed), Codex writer (Sol), Claude reviewer; each fix with a Qt-free policy test that fails without it (AGENTS 3a). B2 is its own slice after the owner's spec. Conflicts: the owner's Windows test-cleanup PR touches `tests/render/test_ugr_gpu.cpp` (B4); land it first or rebase B4 after. PR 44 (docs move to Sentinel-Private, rework requested) changes AGENTS.md and the plan path; it is docs-only and does not conflict with B code.
+Suggested dispatch: one low-risk branch B1+B3+B4+B5+B6 (+B7 once confirmed), Codex writer (Sol), Claude reviewer; each fix with a Qt-free policy test that fails without it (AGENTS 3a). B2 is its own slice after the owner's spec. Also hand over: PR 44 (docs to Sentinel-Private) review and land when the Windows Codex rework reports READY. Conflicts: the owner's Windows test-cleanup PR touches `tests/render/test_ugr_gpu.cpp` (B4); land it first or rebase B4 after. PR 44 (docs move to Sentinel-Private, rework requested) changes AGENTS.md and the plan path; it is docs-only and does not conflict with B code.
 
 ## In flight
 

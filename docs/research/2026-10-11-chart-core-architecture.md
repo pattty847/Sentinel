@@ -876,3 +876,5 @@ The original questions and defaults follow for the record.
 - Whether `AxisModel` can follow an interface without a `QObject` base (S14).
 - Whether deleting the always-0 `candleGeneration` comparison in `CandlestickOverlayItem.cpp:373-388` changes any rebuild decision (S0c review; reading says no).
 - The `jscpd` version used in the 2026-10-11 tool scan (not recorded).
+
+- **2026-10-13 owner decision (B2):** option A. The candle interval is `tfMs` end to end; sub-second timeframes (25-500 ms) get real candles built from trades, live and from the journal; a boundary that speaks seconds refuses unrepresentable intervals with a logged reason, never rounds; ranges without journal coverage show no candles.
