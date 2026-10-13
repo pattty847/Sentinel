@@ -1,5 +1,4 @@
-// Whole-pixel chart mapping (docs/research/2026-10-08-whole-pixel-mapping.md section 5,
-// checks A1-A8): the raster camera (render/ChartRaster.hpp) puts row and column edges on
+// Whole-pixel chart mapping: the raster camera (render/ChartRaster.hpp) puts row and column edges on
 // device pixel edges, moves a drag by whole device pixels, steps the integer pixels per
 // row/column with a 0.1 px band, keeps the zoom anchor across a step, follows the device
 // pixel ratio, never draws 0 px cells, commits a drag exactly as drawn (with

@@ -125,7 +125,7 @@ Each feature is a self-contained block. Use this template:
 - **2026-03-15** - Persistence audit found durable raw trade logs on disk, but heatmap history remains in-memory only and is cleared on band recenter/reset. Future direction: keep the live one-quad GPU path, but persist world-time history outside the renderer and page visible columns into the bounded ring.
 - **2026-03-17** - Captured the next architectural issue explicitly: chart layers need a larger persisted world-history model with a bounded GPU window, so long-range heatmap/TPO browsing can feel infinite without fixed-grid hard stops.
 - **2026-03-26** - Implemented scroll-past-cache fetch: UGR.onViewportChanged detects when visibleTimeStart < oldest cached slice, debounces 300ms, emits heatmapHistoryNeeded(tfMs, endTimeMs, count). MainWindowGpu wires it to requestHeatmapHistory with current symbol. Full project builds clean.
-- **2026-05-07** - Drafted full persistence design: `docs/private/plans/F1_HEATMAP_PERSISTENCE.md`. 6-phase plan covering on-disk `.hmcol` format (fixed-stride per (symbol,tf,day), per-record CRC, additive over existing protocol), writer hook into `HeatmapTwapStreamer::storeHistory`, server bootstrap via `primeRing`, range-query disk fallthrough in `getHeatmapHistory`, restart story for hot iteration. Existing `TickBinaryLogger` left untouched as raw-tape audit source. Awaiting review before any code change.
+- **2026-05-07** - Drafted full persistence design: `../Sentinel-Private/private/plans/F1_HEATMAP_PERSISTENCE.md`. 6-phase plan covering on-disk `.hmcol` format (fixed-stride per (symbol,tf,day), per-record CRC, additive over existing protocol), writer hook into `HeatmapTwapStreamer::storeHistory`, server bootstrap via `primeRing`, range-query disk fallthrough in `getHeatmapHistory`, restart story for hot iteration. Existing `TickBinaryLogger` left untouched as raw-tape audit source. Awaiting review before any code change.
 - **2026-05-08** - Owner clarified scope: v1 is 1m-only, no rollup engine, no compression. Slot-addressed idempotent writes (not pure append). OS-level exclusive lock for single-writer enforcement. Recenter explicitly handled by per-column self-describing price range — no transform at persistence. First milestone: kill server, rebuild, restart, see yesterday's 1m heatmap. Plan updated.
 - **2026-05-08** - F1 v1 shipped end-to-end across phases 1-5a (commits `5789f0c`, `33105c3`, `c6c6135`, `70e8fd6`, `a237cdd`, `fa901e2`, `4eeadd9`). 42 servermodel tests green. First milestone validated by user on real BTC-USD data: kill server, restart, log shows "primed 6 column(s) for BTC-USD tf=60000 from data/heatmap" before live timer fires; `heatmap_history_request` now falls through to disk past the in-RAM ring; protocol additions are backward-compatible. zstd compression (phase 5b) deferred — adds external dep + reader-path rewrite, not worth taking on autonomously.
 - **2026-09-04** - FORGE re-entry restored a clean build, bounded server session lifetimes and queues, enabled durable one-minute collection, and added 1,024-column historical GPU paging. Older replies now use a separate page path, recentered price bands are resampled, history-floor and stale-response checks stop redundant or incorrect loads, and returning to auto-scroll reloads the newest page. A separate coverage mask shades missing buckets while leaving recorded zero-liquidity columns unshaded. The chart reports page loading and shows the storage floor only when the manual viewport reaches it. Persisted page reads and JSON/base64 encoding now run on a two-worker pool capped at eight pending jobs instead of the single network I/O thread. Full automated suite passes; live visual soak remains.
@@ -360,7 +360,7 @@ Each feature is a self-contained block. Use this template:
 **Created:** 2026-02-11
 **Updated:** 2026-03-26
 
-> Full plan: `docs/private/plans/SCREENER_AND_LAB.md`
+> Full plan: `../Sentinel-Private/private/plans/SCREENER_AND_LAB.md`
 
 #### Now
 - [x] Wire crypto row click → heatmap symbol subscription in MainWindowGPU (already done via ScreenerDock::rowSelected → onAssetSymbolSelected)
@@ -382,7 +382,7 @@ Each feature is a self-contained block. Use this template:
 **Created:** 2026-03-14
 **Updated:** 2026-03-26
 
-> Design details are retained in the private planning archive.
+> Design details are retained in the sibling Sentinel-Private repository.
 
 #### Now
 - [ ] Manual paper-trading polish pass for TP/SL visuals and interaction smoothing

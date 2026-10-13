@@ -185,7 +185,7 @@ draw mapping. `HeatmapTileNode` records compute passes in
 `tests/render/test_qsg_compute_spike.cpp` guards that mechanism. Display ticks
 must be multiples of `commonTick()` (LCM of the native ticks). Not yet wired
 into `UnifiedGridRenderer` (S6). Results and limits:
-Integration measurements are retained in the private research archive.
+Integration measurements are retained in the sibling Sentinel-Private research repository.
 
 ### Heatmap span planning and source controller (slice S5b)
 

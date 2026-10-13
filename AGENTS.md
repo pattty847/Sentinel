@@ -9,7 +9,7 @@ Avoid praise unless it is explicitly earned and relevant.
 Optimize for truth, clarity, and usefulness—never for likability.
 
 Source of truth for every coding agent on Sentinel. All coding agents must read this file directly;
-edit rules here, never in provider-specific copies. Live state is in `docs/STATUS.md`.
+CLAUDE.md is a local untracked file containing only `@AGENTS.md`. Edit rules here, never in copies. Live state is in `docs/STATUS.md`.
 How-to detail (GUI host, Codex CLI, lessons) is in `docs/AGENT_WORKFLOW.md`; read it when a task needs it.
 Default goal: make the requested change safely.
 
@@ -25,8 +25,8 @@ Modes:
 Rules:
 - Start with targeted search (`rg -n`, `rg --files`), not broad file reads.
 - For docs, start with `docs/README.md` and the relevant maintained reference. Normal searches
-  respect `.rgignore`; do not use `--no-ignore` across the repo. Search plans/evidence only when
-  needed, with an explicit path: `rg --no-ignore -n '<pattern>' docs/research` (or the exact file).
+  search the public checkout normally. Private plans live in the sibling `../Sentinel-Private`
+  repository; read only the file a task names, never preload or search that repository broadly.
 - Before first concrete action, read at most ~200 lines total unless the user asks for a deep review.
 - If the request is ambiguous, start in Lite mode and escalate only if needed.
 - **Read-only scope** (review, audit, investigation): edit nothing, including `_agent/`, docs and memory. Report durable findings to whoever asked. An explicit owner scope always overrides the write rules in this file.
@@ -69,7 +69,7 @@ changes behaviour, data or looks (owner decisions) or needs an approval listed i
 
 ## 3a) Chart core: where chart behaviour goes (owner, 2026-10-11)
 
-`UnifiedGridRenderer` (UGR) is a Qt Quick shell. It changes only for item lifecycle, window/sync wiring and `QQuickItem` overrides. The completed migration plan is kept in the private local research archive; current architecture is in `docs/ARCHITECTURE.md`. S15 has landed and the chart-view feature freeze has ended (see STATUS).
+`UnifiedGridRenderer` (UGR) is a Qt Quick shell. It changes only for item lifecycle, window/sync wiring and `QQuickItem` overrides. The completed migration plan is `../Sentinel-Private/research/2026-10-11-chart-core-architecture.md`; current architecture is in `docs/ARCHITECTURE.md`. S15 has landed and the chart-view feature freeze has ended (see STATUS).
 
 - View behaviour (camera, zoom, glide, fit, follow-live, placement, timeframe or symbol switch) goes in a policy class in `libs/gui/chart/core/` once that directory exists, never as new UGR members. `ChartViewController` only sequences policies: no arithmetic or branching on prices, times or pixels.
 - `sentinel_chart_core` links QtCore only: no QtGui, QtQuick, QSG, QML or `QQuickWindow` (the build and `chart-health.sh` enforce it). It never includes `HeatmapGpuLayer.hpp`, the source controller or recording types; it talks through `ChartPorts.hpp`.
@@ -222,14 +222,16 @@ Update the relevant canonical doc in the same change:
 - New durable invariant/regression guardrail → `_agent/INVARIANTS.md` or `_agent/FAILURE_MODES.md`
 - Non-trivial design decision → `_agent/DECISIONS.md` (vault detail optional)
 
-`docs/research/*` files are dated plans and evidence. Owner decisions are appended when a plan is
+`../Sentinel-Private/research/*` files are dated plans and evidence. Owner decisions are appended when a plan is
 approved; after the work lands the file is frozen and nobody maintains it. Current truth is the code,
 this file and `docs/STATUS.md`. Do not refresh old plans to match new code. An explicit planning
 task can create or amend its named plan; a general code or documentation cleanup task cannot.
-Research, initiatives and planning snapshots are private local files excluded by `.gitignore`;
-never force-add them or copy their full contents into public docs. Their local catalog is
-`docs/private/INTERNAL_INDEX.md`, which is not shipped in public checkouts. Ask for a private copy
-only when the task requires that plan; otherwise use the code and maintained public references.
+Research, initiatives, private notes and planning snapshots are versioned in the separate PRIVATE
+repository `https://github.com/pattty847/Sentinel-Private`, cloned as `../Sentinel-Private`.
+Read only the file a task names; its index is `../Sentinel-Private/private/INTERNAL_INDEX.md`.
+Commit private document changes there, never in Sentinel; never copy full plan contents into public
+docs. `_agent/` remains local Sentinel memory and must not be added to the private repository.
+Public checkouts do not require private docs to build or test.
 
 ## 8a) Commits and Git
 

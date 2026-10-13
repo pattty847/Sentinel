@@ -1,10 +1,8 @@
 #pragma once
-// The GPU heatmap lab chart, on the production path the main chart takes in S6
-// (slice S5c, docs/research/2026-09-s5-plan.md):
+// The GPU heatmap lab chart, using the production path:
 //   LocalChunkTransport -> ChunkFetcher -> ChunkStore -> HeatmapSourceController
 //   (all on the "heatmap-data" thread, LabData) -> SpanSet -> HeatmapTileNode.
-// The item owns the view and the tick policy (interaction spec,
-// docs/research/2026-09-heatmap-interaction-spec.md):
+// The item owns the view and the tick policy:
 // - a column is exactly the selected timeframe; time zoom-out clamps at one
 //   column per physical pixel;
 // - Auto tick (default): the smallest preset whose rows are at least minRowPx

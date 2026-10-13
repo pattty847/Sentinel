@@ -1,6 +1,6 @@
 #pragma once
 #include "heatmap/DrawPieces.hpp"
-// Production heatmap scene-graph node (slice S5c, docs/research/2026-09-s5-plan.md).
+// Production heatmap scene-graph node.
 // Render thread only. It consumes the controller's immutable, tick-free SpanSet
 // (HeatmapSourceController) and owns every piece of GPU content it draws:
 //
@@ -38,7 +38,7 @@
 //   HeatmapCapacity::report(cap - resident, uploaded keys, lost, missing keys);
 //   lost is reported after the QRhi was lost or recreated (and when the node is
 //   destroyed while it held content).
-// - Live edge (S5L-c, docs/research/2026-09-s5l-plan.md section 3). The
+// - Live edge. The
 //   controller's LiveSnapshot (Frame::live) is uploaded only when its version
 //   (client-local; never the server revision) changes: each source into a
 //   resident buffer set the node refills in place (HeatmapGpuBinner::

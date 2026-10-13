@@ -1,6 +1,5 @@
 #pragma once
-// Multi-source span planning and the resolution summary (plan
-// docs/research/2026-09-s5-plan.md sections 2-3, slice S5b). Extends HeatmapTiles
+// Multi-source span planning and the resolution summary. Extends HeatmapTiles
 // (chunksFor, tilesCovering) from one source to several per span.
 // - A span is one epoch-aligned tile (tiles::kTileColumns columns of the tf).
 //   Each span keeps one source per source id; the node bins the coarsest source

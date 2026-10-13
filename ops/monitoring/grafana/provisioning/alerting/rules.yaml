@@ -1,5 +1,4 @@
-# Alerts A1 and A3 of docs/research/2026-10-observability.md section 3 (slice 1),
-# and the capture alerts A4/A4b (per-symbol connections slice 2).
+# Alerts for service availability, overdue recording columns and capture connections.
 # A2 (product L2 silent while connected) waits for the per-product L2 age metric;
 # the rest of A4 (T7 below 50 GB, recorder disk errors) is not built yet.
 #
