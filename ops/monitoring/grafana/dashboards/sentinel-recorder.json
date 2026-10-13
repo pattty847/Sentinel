@@ -711,7 +711,7 @@
       "id": 22,
       "type": "timeseries",
       "title": "Capture reconnects per hour",
-      "description": "Reconnects per product in the last hour. The gauge is the established connection id, so each reconnect adds 1. Normal is 0-3 per hour.",
+      "description": "Reconnects per product in the last hour. The gauge is the established connection id, so each reconnect adds 1. Normal is 0-3 per hour. A capture restart or deploy resets the id and shows as one extra reconnect per product at that hour; compare with changes(process_start_time_seconds{job=\"sentinel-capture\"}[1h]).",
       "datasource": {
         "type": "prometheus",
         "uid": "sentinel-vm"
@@ -757,7 +757,7 @@
       "id": 23,
       "type": "timeseries",
       "title": "Fan-out ingress drops and overflow (per 5 min)",
-      "description": "Record or control events that fan-out ingress refused (forces a socket resume; journal records are not dropped), and client disconnects with reason ingress_overflow. Scrape interval is 15 s, so a spike shorter than one scrape is invisible here.",
+      "description": "Record or control events that fan-out ingress refused (forces a socket resume; journal records are not dropped), and client disconnects with reason ingress_overflow.",
       "datasource": {
         "type": "prometheus",
         "uid": "sentinel-vm"
