@@ -306,9 +306,15 @@ void ViewCommands::onHeatmapSnapshot() {
 }
 
 void ViewCommands::onHeatmapLive() {
-        controller_.livePlacement().followGpuLive();
-        emit liveRenderTick();
-        emit updateRequested();
+  livePriceFitRevision_ = controller_.priceFitter().autoPriceFitRevision();
+  controller_.livePlacement().followGpuLive();
+  emit liveRenderTick();
+  emit updateRequested();
+}
+
+void ViewCommands::refitAfterHeatmapLive() {
+  if (controller_.priceFitter().autoPriceFitRevision() == livePriceFitRevision_)
+    controller_.priceFitter().refitAutoPrice();
 }
 
 void ViewCommands::onHeatmapTick() {

@@ -188,6 +188,7 @@ void PriceFitter::solveAutoRows(PriceRange& range, const FitContext& context, in
   // Solve from the raw candle bounds and check coverage for each candidate's
   // fitted window; publish its tick before setViewport notifies the renderer.
   const auto &settings = ticks_.autoTickParams();
+  ++autoPriceSolveCount_;
   const auto fit = chart_raster::solveAutoPriceFit(lo, hi, H, ticks_.autoTickState(), environment_.priceScale(),
       {settings.minRowPx, settings.hysteresis}, [&](int64_t units, double low, double high) {
         return ticks_.buildsTick(units, {drawnStart, drawnEnd, low, high});
@@ -206,6 +207,7 @@ void PriceFitter::solveAutoRows(PriceRange& range, const FitContext& context, in
 }
 
 bool PriceFitter::autoPriceFit(qint64 start, qint64 end, double& priceMin, double& priceMax) {
+  ++autoPriceFitRevision_;
   if (!environment_.attached() || !controller_.viewPtr()) return false;
   const auto window = gpuFitPriceWindow(start, end, true);
   if (!window) {

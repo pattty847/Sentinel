@@ -28,13 +28,7 @@ LivePlacement::LivePlacement(ChartViewController& controller, IChartEnvironment&
       timerFactory_([](std::function<void()> timeout) { return std::make_unique<BootstrapTimer>(std::move(timeout)); }) {}
 
 int64_t LivePlacement::liveEndCeil(int64_t x, int64_t tf) {
-    // FLAG: differs at bucket boundary: follow keeps a boundary as the current live end.
     return recording::floorDiv(x + tf - 1, tf) * tf;
-}
-
-int64_t LivePlacement::nextBucketEnd(int64_t x, int64_t tf) {
-    // FLAG: differs at bucket boundary: seed and bootstrap advance into the next bucket.
-    return recording::floorDiv(x, tf) * tf + tf;
 }
 
 void LivePlacement::setTimingForTest(std::function<qint64()> clock, TimerFactory timerFactory) {
@@ -97,7 +91,7 @@ void LivePlacement::seedGpuViewport(double bestBid, double bestAsk) {
     const int64_t span = gpuInitialSpanMs(environment_.surface().widthLogical);
     const int64_t now = clock_();
     controller_.flags().pristine = true;
-    end = nextBucketEnd(now, tf) +
+    end = liveEndCeil(now, tf) +
           std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(span) * kAutoScrollPaddingFrac));
     start = end - span;
   }
@@ -151,7 +145,7 @@ void LivePlacement::bootstrapGpuTimeView() {
   }
   if (bootstrapTimer_) bootstrapTimer_->stop();
   const int64_t span = gpuInitialSpanMs(environment_.surface().widthLogical);
-  const int64_t end = nextBucketEnd(anchor, tf) +
+  const int64_t end = liveEndCeil(anchor, tf) +
                       std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(span) * kAutoScrollPaddingFrac));
   sLog_Render("GPU heatmap time-only bootstrap from availability: anchor=" << anchor << " time=[" << end - span
               << ".." << end << "] (price from the first decoded data)");

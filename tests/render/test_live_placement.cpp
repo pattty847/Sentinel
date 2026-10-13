@@ -82,7 +82,7 @@ TEST_F(LivePlacementTest, FollowTarget) {
 }
 TEST_F(LivePlacementTest, SeedViewport) {
     live.seedGpuViewport(99, 101);
-    window(-81000, 19000);
+    window(-82000, 18000);
     EXPECT_DOUBLE_EQ(view.getMinPrice(), 100 - 102.4 * .5);
     EXPECT_DOUBLE_EQ(view.getMaxPrice(), 100 + 102.4 * .5);
     EXPECT_TRUE(controller.flags().priceKnown);
@@ -105,7 +105,7 @@ TEST_F(LivePlacementTest, ReturnToLive) {
 }
 TEST_F(LivePlacementTest, BootstrapTimeView) {
     live.bootstrapGpuTimeView();
-    window(-81000, 19000);
+    window(-82000, 18000);
     EXPECT_FALSE(controller.flags().priceKnown);
     EXPECT_TRUE(controller.flags().pristine);
     EXPECT_EQ(view.getMinPrice(), 0);
@@ -167,10 +167,10 @@ TEST_F(LivePlacementTest, TradeAndBookSeed) {
 TEST_F(LivePlacementTest, PristineResize) {
     live.seedGpuViewport(99, 101);
     live.resize(400);
-    window(-31000, 19000);
+    window(-32000, 18000);
     controller.flags().pristine = false;
     live.resize(100);
-    window(-31000, 19000);
+    window(-32000, 18000);
 }
 TEST_F(LivePlacementTest, EnableAutoScroll) {
     view.setViewport(30000, 40000, 90, 110);
@@ -183,14 +183,40 @@ TEST_F(LivePlacementTest, EnableAutoScroll) {
     EXPECT_FALSE(view.isAutoScrollEnabled());
     EXPECT_EQ(events, (std::vector<std::string>{"update", "changed"}));
 }
+TEST_F(LivePlacementTest, SeedMatchesFollowAtBucketBoundary) {
+    live.seedGpuViewport(99, 101);
+    const qint64 seedEnd = view.getVisibleTimeEnd();
+    const qint64 span = live.gpuInitialSpanMs(800);
+    view.setViewport(-span, 0, 90, 110);
+    view.enableAutoScroll(true);
+    live.followGpuLiveTo(10000);
+    EXPECT_EQ(seedEnd, view.getVisibleTimeEnd());
+    EXPECT_EQ(seedEnd, 18000);
+}
+TEST_F(LivePlacementTest, BootstrapMatchesFollowAtBucketBoundary) {
+    live.bootstrapGpuTimeView();
+    const qint64 bootstrapEnd = view.getVisibleTimeEnd();
+    const qint64 span = live.gpuInitialSpanMs(800);
+    view.setViewport(-span, 0, 90, 110);
+    view.enableAutoScroll(true);
+    live.followGpuLiveTo(env.anchor);
+    EXPECT_EQ(bootstrapEnd, view.getVisibleTimeEnd());
+}
+TEST_F(LivePlacementTest, NonBoundarySeedAndBootstrapAreUnchanged) {
+    live.setTimingForTest([] { return 10001; }, {});
+    live.seedGpuViewport(99, 101);
+    window(-81000, 19000);
+    chart::ChartViewController bootstrap{env, env, env, published};
+    bootstrap.session().timeframeMs = 1000;
+    env.anchor = 10001;
+    bootstrap.livePlacement().bootstrapGpuTimeView();
+    EXPECT_EQ(bootstrap.viewPtr()->getVisibleTimeStart(), -81000);
+    EXPECT_EQ(bootstrap.viewPtr()->getVisibleTimeEnd(), 19000);
+}
 TEST_F(LivePlacementTest, LiveEndHelpers) {
     EXPECT_EQ(Placement::liveEndCeil(10000, 1000), 10000);
-    EXPECT_EQ(Placement::nextBucketEnd(10000, 1000), 11000);
     EXPECT_EQ(Placement::liveEndCeil(10001, 1000), 11000);
-    EXPECT_EQ(Placement::nextBucketEnd(10001, 1000), 11000);
     EXPECT_EQ(Placement::liveEndCeil(-1000, 1000), -1000);
-    EXPECT_EQ(Placement::nextBucketEnd(-1000, 1000), 0);
     EXPECT_EQ(Placement::liveEndCeil(-1001, 1000), -1000);
-    EXPECT_EQ(Placement::nextBucketEnd(-1001, 1000), -1000);
 }
 } // namespace

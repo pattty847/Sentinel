@@ -71,6 +71,7 @@ void HeatmapGpuLayer::setService(HeatmapDataService *service) {
 void HeatmapGpuLayer::forgetService() {
     if (controller_) QObject::disconnect(controller_, nullptr, this, nullptr);
     controller_ = nullptr;
+    autoPriceTick_.reset();
     capacity_.reset();
     snapshot_.reset();
     live_.reset();
@@ -118,6 +119,7 @@ void HeatmapGpuLayer::createController() {
 }
 
 void HeatmapGpuLayer::destroyController() {
+    autoPriceTick_.reset();
     if (!controller_) return;
     QObject::disconnect(controller_, nullptr, this, nullptr);
     if (service_) service_->destroyController(controller_);

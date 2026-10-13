@@ -5,7 +5,6 @@
 #include "render/FrameProfiler.hpp"
 #include "config/GuiConfigStore.hpp"
 #include "SentinelLogging.hpp"
-#include <cmath>
 
 namespace {
 bool envFloatValue(const char *name, float &out) {
@@ -83,22 +82,6 @@ void ChartTextLayer::buildMsdfAtlas() {
                  << params.fontPath << " resourceFont=" << params.resourceFont
                  << " fontPx=" << params.fontPx);
   } else {
-    if (qEnvironmentVariableIsSet("SENTINEL_DUMP_GLYPH_ATLAS")) {
-      atlas.image().save("/tmp/sentinel_msdf_atlas.png");
-      const MsdfAtlas::Glyph &glyph = atlas.glyph(QChar('$'));
-      if (!glyph.uv.isNull()) {
-        const QImage &atlas = this->atlas.image();
-        const QRect cropRect(
-            static_cast<int>(std::floor(glyph.uv.x() * atlas.width())),
-            static_cast<int>(std::floor(glyph.uv.y() * atlas.height())),
-            std::max(1, static_cast<int>(
-                            std::ceil(glyph.uv.width() * atlas.width()))),
-            std::max(1, static_cast<int>(
-                            std::ceil(glyph.uv.height() * atlas.height()))));
-        atlas.copy(cropRect.intersected(atlas.rect()))
-            .save("/tmp/sentinel_msdf_glyph_dollar.png");
-      }
-    }
     atlasBuilt = true;
   }
 }
