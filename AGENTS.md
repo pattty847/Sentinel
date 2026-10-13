@@ -8,8 +8,8 @@ If uncertain, state uncertainty instead of guessing.
 Avoid praise unless it is explicitly earned and relevant.
 Optimize for truth, clarity, and usefulness—never for likability.
 
-Source of truth for every coding agent on Sentinel. Claude Code and Codex both read this file
-(`CLAUDE.md` only imports it); edit rules here, never in a copy. Live state is in `docs/STATUS.md`.
+Source of truth for every coding agent on Sentinel. All coding agents must read this file directly;
+edit rules here, never in provider-specific copies. Live state is in `docs/STATUS.md`.
 How-to detail (GUI host, Codex CLI, lessons) is in `docs/AGENT_WORKFLOW.md`; read it when a task needs it.
 Default goal: make the requested change safely.
 
@@ -24,6 +24,9 @@ Modes:
 
 Rules:
 - Start with targeted search (`rg -n`, `rg --files`), not broad file reads.
+- For docs, start with `docs/README.md` and the relevant maintained reference. Normal searches
+  respect `.rgignore`; do not use `--no-ignore` across the repo. Search plans/evidence only when
+  needed, with an explicit path: `rg --no-ignore -n '<pattern>' docs/research` (or the exact file).
 - Before first concrete action, read at most ~200 lines total unless the user asks for a deep review.
 - If the request is ambiguous, start in Lite mode and escalate only if needed.
 - **Read-only scope** (review, audit, investigation): edit nothing, including `_agent/`, docs and memory. Report durable findings to whoever asked. An explicit owner scope always overrides the write rules in this file.
@@ -204,7 +207,13 @@ Do not reorder or renumber feature blocks.
 
 ## 8) Canonical Docs to Update When Needed
 
-Update only the relevant canonical doc in the same change:
+`docs/README.md` owns the documentation catalog, maintenance status and links. Keep that index in
+sync when adding, moving, deleting or changing the maintenance status of a doc. Update only the
+relevant file in its **Maintained documents** section when the change affects that file's contract;
+a matching keyword in another doc is not a reason to edit it. Supporting references and existing
+plans/evidence are read-only unless the owner explicitly asks to change or promote them.
+
+Update the relevant canonical doc in the same change:
 - Protocol / wire / DTO semantics → `docs/MARKETDATA.md`
 - Architecture / ownership / dependency direction → `docs/ARCHITECTURE.md`
 - Feature scope/progress → `docs/TODO.md`
@@ -215,7 +224,8 @@ Update only the relevant canonical doc in the same change:
 
 `docs/research/*` files are dated plans and evidence. Owner decisions are appended when a plan is
 approved; after the work lands the file is frozen and nobody maintains it. Current truth is the code,
-this file and `docs/STATUS.md`.
+this file and `docs/STATUS.md`. Do not refresh old plans to match new code. An explicit planning
+task can create or amend its named plan; a general code or documentation cleanup task cannot.
 
 ## 8a) Commits and Git
 
