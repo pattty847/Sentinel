@@ -3,9 +3,9 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-12 ~22:45 UTC. main `9c4909f`. Chart-core refactor (S0a-S15) and one-world (through slice E) are complete. Focus now: test-suite cleanup and the workflow audit, then B1, B3-B7 (B2 waits for the owner's candle-interval spec).
+- **Updated:** 2026-10-13 ~04:55 UTC. main `f95fbbd`. Phase 5 B batch dispatched (see In flight). Chart-core refactor (S0a-S15) and one-world (through slice E) are complete. Focus now: test-suite cleanup and the workflow audit, then B1, B3-B7 (B2 waits for the owner's candle-interval spec).
 - **Conductor:** a Claude Opus session on the owner's Mac (AGENTS.md section 10). The cloud Projects conductor + Mac operator trial (2026-10-11/12) is ended (owner, 2026-10-12).
-- **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high-risk. Claude weekly is under 5% until its reset (~2026-10-13 00:00Z): Codex writes and reviews, Claude only conducts. Codex weekly 17% with a deficit (owner holds 3 reset credits). Landing trailers include `*-Tokens` from ma-panel again.
+- **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high-risk. 2026-10-13 04:45Z: Claude weekly 100% (reset); Codex weekly 13% with a deficit. Owner: keep Codex writing down to ~1%, then the owner spends a reset credit (holds 3); Claude subagents may be used for other work. Landing trailers include `*-Tokens` from ma-panel again.
 
 ## Land gate
 
@@ -40,13 +40,14 @@ State checked against main `544c6fe` on 2026-10-13:
 - B4 rename `UgrZoomCpu.SymbolSwitchBeforeFirstSnapshotUsesPlainFitSilently` -> `...PublishesRawBoundsSilently` (`tests/render/test_ugr_gpu.cpp`): open, trivial.
 - B5 one auto-fit per live tick (count `solveAutoPriceFit` calls == 1): open, perf.
 - B6 dead null checks: mostly gone with the refactor; ~5 `m_viewState` checks left in `libs/gui`.
-- B7 `SENTINEL_DUMP_GLYPH_ATLAS` `/tmp` dump in `libs/gui/chart/layers/ChartTextLayer.cpp`: owner leans delete (2026-10-13); confirm, then delete.
+- B7 `SENTINEL_DUMP_GLYPH_ATLAS` `/tmp` dump in `libs/gui/chart/layers/ChartTextLayer.cpp`: owner confirmed delete (2026-10-13).
 - B8: done in S11 (`d231a11`). Nothing to do.
 
 Suggested dispatch: one low-risk branch B1+B3+B4+B5+B6 (+B7 once confirmed), Codex writer (Sol), Claude reviewer; each fix with a Qt-free policy test that fails without it (AGENTS 3a). B2 is its own slice after the owner's spec. Also hand over: PR 44 (docs to Sentinel-Private) review and land when the Windows Codex rework reports READY. Conflicts: the owner's Windows test-cleanup PR touches `tests/render/test_ugr_gpu.cpp` (B4); land it first or rebase B4 after. PR 44 (docs move to Sentinel-Private, rework requested) changes AGENTS.md and the plan path; it is docs-only and does not conflict with B code.
 
 ## In flight
 
+- **Phase 5 B batch** (B1, B3, B4, B5, B6, B7; low risk): branch `lt-sol/phase5-b-batch`, worktree `/Volumes/T7/sentinel-worktrees/lt-sol-phase5-b-batch`, base `f95fbbd`. Writer Codex `gpt-6.1-sol` thread `01a13399-1087-7070-a95a-23fc190d386a` (sandboxed: conductor commits). Reviewer: Claude (not yet dispatched). Before land: native Metal ChartGolden/UgrGpu run; B1 may change the first view on an exact bucket boundary (re-bless only if named). B2 parked: short plan first (where sub-second candles are built, server history granularities, cost), then owner sign-off.
 - Read-only Codex Astra audits (2026-10-12, reports to the conductor, then a docs/research file): tests (re-check `docs/research/2026-10-11-code-health/audit-tests.md`, scan S0-S15 tests; thread `01a13321-9031-70b3-a3ef-7bcda74bed58`) and workflow (30-day trailers, review yield, conductor token cost, conductor hand-off rule; thread `01a13321-9031-7ce0-b709-54d79b8c710b`). A Windows Codex thread is also pruning redundant tests and will open a PR; reconcile by gtest name.
 - Neutrality evidence: main's startup `viewportVersion` and candle-history paging (request count and limits) vary run to run (12/17/15 and 2-3 requests in three fresh-profile runs on 2026-10-12). Do not use them as neutrality pins; use the heatmap target hash plus pin tests. The `window` target is never byte-stable (live clock and status).
 - Open check: at the next server restart, confirm the 7 startup `Shadow journal invalidated ... reason=journal boundary` warnings seen after the slice E deploy (pid 37884) do not recur (likely the one-time v1-anchor fallback).
