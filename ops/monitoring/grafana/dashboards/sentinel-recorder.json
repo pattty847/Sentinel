@@ -711,7 +711,7 @@
       "id": 22,
       "type": "timeseries",
       "title": "Capture reconnects per hour",
-      "description": "Reconnects per product in the last hour. The gauge is the established connection id, so each reconnect adds 1. Normal is 0-3 per hour. A capture restart or deploy resets the id and shows as one extra reconnect per product at that hour; compare with changes(process_start_time_seconds{job=\"sentinel-capture\"}[1h]).",
+      "description": "Reconnects per product in the last hour. The gauge is the established connection id, so each reconnect adds 1. Normal is 0-3 per hour. A capture restart or deploy can show as one extra reconnect per product at that hour (when the connection id falls back to 1); compare with changes(process_start_time_seconds{job=\"sentinel-capture\"}[1h]).",
       "datasource": {
         "type": "prometheus",
         "uid": "sentinel-vm"
