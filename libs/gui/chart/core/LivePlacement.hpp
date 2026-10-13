@@ -61,7 +61,6 @@ public:
     void onTrade(const std::string& product, double price);
     void resize(double width);
     static int64_t liveEndCeil(int64_t x, int64_t tf);
-    static int64_t nextBucketEnd(int64_t x, int64_t tf);
 signals:
     void liveRenderTick();
     void autoScrollEnabledChanged();

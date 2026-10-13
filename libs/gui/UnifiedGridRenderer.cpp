@@ -115,7 +115,7 @@ void UnifiedGridRenderer::bindViewReactions(ReactionPhase phase) {
   } else {
     connect(getViewState(), &GridViewState::autoPriceScaleChanged, commands, &chart::ViewCommands::clearAutoPriceTick, Qt::DirectConnection);
     connect(m_layers.heatmap.gpu.get(), &heatmap::gpu::HeatmapGpuLayer::snapshotChanged, this, &UnifiedGridRenderer::refitAutoPrice);
-    connect(m_layers.heatmap.gpu.get(), &heatmap::gpu::HeatmapGpuLayer::liveChanged, this, &UnifiedGridRenderer::refitAutoPrice);
+    connect(m_layers.heatmap.gpu.get(), &heatmap::gpu::HeatmapGpuLayer::liveChanged, commands, &chart::ViewCommands::refitAfterHeatmapLive);
   }
 }
 

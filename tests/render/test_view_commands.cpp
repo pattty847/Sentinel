@@ -70,7 +70,10 @@ struct CommandsTest : testing::Test {
         v.setPanShift([this](QPointF p, qint64& time, double& price) { return c.camera().panShift(p,time,price); });
     }
     void snapshot() { cmd.onHeatmapSnapshot(); c.priceFitter().refitAutoPrice(); }
-    void live() { cmd.onHeatmapLive(); c.priceFitter().refitAutoPrice(); }
+    void live() {
+        cmd.onHeatmapLive();
+        cmd.refitAfterHeatmapLive();
+    }
     // Fixed old-shell checkpoints: time/price bounds (hex floats), anchors, version,
     // auto/follow/placement/carry/gesture flags, drag offset, then ordered effects.
     void snap() {
@@ -245,12 +248,12 @@ TEST_F(CommandsTest, HeatmapLive) {
     live(); snap();
     v.enableAutoScroll(true); events.clear(); live(); snap();
     env.live = 150000; v.setAutoPriceScale(true); events.clear(); live(); snap();
-    v.handlePanStart({0,0}); live(); snap(); pin(
+    v.handlePanStart({0,0}); live(); snap();
+    pin(
         "0:100000:0x1.9p+5:0x1.2cp+7:0x1p-2:0x1.8p-1:3:000000000:0x0p+0:0x0p+0:live,update,|"
         "8000:108000:0x1.9p+5:0x1.2cp+7:0x1p+0:0x1.8p-1:4:010000000:0x0p+0:0x0p+0:viewport,update,sink,live,live,update,|"
-        "58000:158000:0x1.9p+5:0x1.2cp+7:0x1p+0:0x1.8p-1:5:110000000:0x0p+0:0x0p+0:autoTick,update,viewport,update,sink,live,live,update,autoTick,update,|"
-        "58000:158000:0x1.9p+5:0x1.2cp+7:0x1p+0:0x1.8p-1:5:110000001:0x0p+0:0x0p+0:live,update,autoTick,update,|"
-    );
+        "58000:158000:0x1.9p+5:0x1.2cp+7:0x1p+0:0x1.8p-1:5:110000000:0x0p+0:0x0p+0:autoTick,update,viewport,update,sink,live,live,update,|"
+        "58000:158000:0x1.9p+5:0x1.2cp+7:0x1p+0:0x1.8p-1:5:110000001:0x0p+0:0x0p+0:live,update,autoTick,update,|");
 }
 TEST_F(CommandsTest, HeatmapTick) {
     env.spanLimits = {1000, 50000, 10, 50}; cmd.onHeatmapTick(); snap();

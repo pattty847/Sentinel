@@ -1,20 +1,21 @@
-#include "render/heatmap/HeatmapDataService.hpp"
-#include "render/heatmap/HeatmapSettingsStore.hpp"
+#include "../servermodel/FakeChunkTransport.hpp"
+#include "ConfigLoader.hpp"
 #include "lab/LabData.hpp"
 #include "protocol/SentinelStreamClient.hpp"
 #include "protocol/SentinelStreamClientTransport.hpp"
-#include "ConfigLoader.hpp"
-#include "../servermodel/FakeChunkTransport.hpp"
+#include "render/heatmap/HeatmapDataService.hpp"
+#include "render/heatmap/HeatmapGpuLayer.hpp"
+#include "render/heatmap/HeatmapSettingsStore.hpp"
 #include <QCoreApplication>
+#include <QDir>
 #include <QEvent>
-#include <QTemporaryDir>
 #include <QFile>
 #include <QJsonArray>
-#include <QDir>
 #include <QPointer>
-#include <stdexcept>
+#include <QTemporaryDir>
 #include <gtest/gtest.h>
 #include <limits>
+#include <stdexcept>
 
 namespace {
 using namespace heatmap;
@@ -42,6 +43,23 @@ protected:
         return a;
     }
 };
+TEST_F(HeatmapPlumbing, ServiceShutdownForgetsPendingAutoPriceTick) {
+    gpu::HeatmapGpuLayer layer;
+    auto service = std::make_unique<HeatmapDataService>([](QObject *) { return new FakeChunkTransport; });
+    layer.setService(service.get());
+    layer.setActive(true);
+    ASSERT_NE(layer.controller(), nullptr);
+    ASSERT_TRUE(layer.setAutoPriceTick(500));
+    ASSERT_FALSE(layer.setAutoPriceTick(500));
+    service.reset();
+    EXPECT_EQ(layer.service(), nullptr);
+    EXPECT_EQ(layer.controller(), nullptr);
+    EXPECT_TRUE(layer.setAutoPriceTick(500)) << "the old decision must have been forgotten";
+    service = std::make_unique<HeatmapDataService>([](QObject *) { return new FakeChunkTransport; });
+    layer.setService(service.get());
+    EXPECT_TRUE(layer.setAutoPriceTick(500)) << "a service swap clears a decision even without a controller";
+}
+
 TEST_F(HeatmapPlumbing, AttachBeforeConnectSeesConnectionAndAvailabilityWithNoCharts) {
     SentinelStreamClient client("127.0.0.1", "1", "");
     HeatmapDataService service([&](QObject *) { return new protocol::SentinelStreamClientTransport(client); });

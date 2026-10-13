@@ -78,6 +78,35 @@ struct PriceFitterTest : testing::Test {
     }
 };
 
+TEST_F(PriceFitterTest, LiveStepSolvesAutoPriceOnce) {
+    bar(4000, 80, 120);
+    view.setPriceFit([this](qint64 start, qint64 end, double &lo, double &hi) {
+        return fitter.autoPriceFit(start, end, lo, hi);
+    });
+    view.enableAutoScroll(true);
+    env.anchor = 12000;
+    const auto before = fitter.autoPriceSolveCountForTest();
+    controller.commands().onHeatmapLive();
+    const double lo = view.getMinPrice(), hi = view.getMaxPrice();
+    controller.commands().refitAfterHeatmapLive();
+    EXPECT_EQ(fitter.autoPriceSolveCountForTest() - before, 1);
+    EXPECT_EQ(view.getVisibleTimeEnd(), 13000);
+    EXPECT_DOUBLE_EQ(view.getMinPrice(), lo);
+    EXPECT_DOUBLE_EQ(view.getMaxPrice(), hi);
+    EXPECT_DOUBLE_EQ(lo, 75);
+    EXPECT_DOUBLE_EQ(hi, 125);
+    // A live revision inside the same bucket still refits changed candle bounds.
+    candles.bars.front().low = 70;
+    controller.commands().onHeatmapLive();
+    controller.commands().refitAfterHeatmapLive();
+    EXPECT_EQ(fitter.autoPriceSolveCountForTest() - before, 2);
+    EXPECT_LT(view.getMinPrice(), lo);
+    view.enableAutoScroll(false);
+    controller.commands().onHeatmapLive();
+    controller.commands().refitAfterHeatmapLive();
+    EXPECT_EQ(fitter.autoPriceSolveCountForTest() - before, 3);
+}
+
 TEST_F(PriceFitterTest, AutoVisibleBars) {
     bar(0, 1, 1000); // ends at the drawn left edge
     bar(1000, 90, 110);

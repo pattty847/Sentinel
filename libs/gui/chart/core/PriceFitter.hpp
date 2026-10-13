@@ -26,6 +26,8 @@ public:
                                                             std::optional<double> anchorFracX = std::nullopt);
     bool autoPriceFit(qint64 start, qint64 end, double& priceMin, double& priceMax);
     void refitAutoPrice();
+    uint64_t autoPriceFitRevision() const { return autoPriceFitRevision_; }
+    uint64_t autoPriceSolveCountForTest() const { return autoPriceSolveCount_; }
     void candlesDirty(const QString& symbol, int64_t timeframeSec, qint64 dirtyStart, qint64 dirtyEnd);
 
 private:
@@ -44,6 +46,8 @@ private:
     std::pair<double, double> onePriceRows(double centre, double current) const;
     void solveAutoRows(PriceRange& range, const FitContext& context, int H, double tick);
 
+    uint64_t autoPriceFitRevision_ = 0;
+    uint64_t autoPriceSolveCount_ = 0;
     ChartViewController& controller_;
     IChartEnvironment& environment_;
     ITickOracle& ticks_;

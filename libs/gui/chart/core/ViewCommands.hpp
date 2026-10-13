@@ -33,6 +33,7 @@ public:
     void onViewportChanged();
     void onHeatmapSnapshot();
     void onHeatmapLive();
+    void refitAfterHeatmapLive();
     void onHeatmapTick();
     void onHeatmapLimits();
     void onAutoPriceScaleChanged();
@@ -56,6 +57,7 @@ private:
     bool resolveFlags(const ViewportRequest& request);
     RequestWindow resolveWindow(const ViewportRequest& request, qint64 start0, qint64 end0, bool follow);
     void commit(const RequestWindow& window);
+    uint64_t livePriceFitRevision_ = 0;
     ChartViewController& controller_;
     IChartEnvironment& environment_;
     ITickOracle& ticks_;

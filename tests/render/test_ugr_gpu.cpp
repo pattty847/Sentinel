@@ -3446,6 +3446,32 @@ protected:
     }
 };
 
+TEST_F(UgrZoomCpu, ControllerDestroyJudgesAutoTickFreshOnNextFrame) {
+    heatmap::gpu::HeatmapGpuLayer layer;
+    const heatmap::gpu::ViewWindow view{double(centre - 2 * minute), double(centre + 2 * minute), 100120, 100180};
+    layer.setSymbol("BTC-USD");
+    layer.setTimeframeMs(minute);
+    layer.setSurface(640, 320, 1);
+    layer.setView(view, true);
+    layer.setService(&lab::LabData::instance().service());
+    layer.setActive(true);
+    ASSERT_TRUE(waitFor([&] {
+        layer.chooseTickForView(view);
+        return layer.hasCurrentResolution() && layer.predictTickUnits(view) > 0;
+    }));
+    const auto fresh = layer.predictTickUnits(view);
+    const auto stale = fresh == 500 ? 1000 : 500;
+    layer.setAutoPriceTick(stale);
+    EXPECT_EQ(layer.predictTickUnits(view), stale);
+    layer.setActive(false);
+    layer.setActive(true);
+    ASSERT_TRUE(waitFor([&] {
+        layer.chooseTickForView(view);
+        return layer.hasCurrentResolution() && layer.predictTickUnits(view) > 0;
+    }));
+    EXPECT_EQ(layer.predictTickUnits(view), fresh);
+}
+
 // Exercise the chart QWheelEvent and the same C++ axis entries called by QML,
 // without QRhi. Fixed Manual ticks make the one-rung assertion independent of Auto.
 class UgrWheelCpu : public UgrZoomCpu {
@@ -3742,7 +3768,7 @@ private:
     static inline QtMessageHandler previous = nullptr;
 };
 
-TEST_F(UgrZoomCpu, SymbolSwitchBeforeFirstSnapshotUsesPlainFitSilently) {
+TEST_F(UgrZoomCpu, SymbolSwitchBeforeFirstSnapshotPublishesRawBoundsSilently) {
     candles.applyHistory("A3-NO-SNAPSHOT", 60,
         {{centre, centre + minute, 100150, 100170, 100130, 100150, 1, false, 0, false}});
     AutoFitWarnings warnings;
