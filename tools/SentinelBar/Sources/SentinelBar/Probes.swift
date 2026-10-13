@@ -124,21 +124,21 @@ enum Probes {
         }
     }
 
-    static func plan(repo: String, pinned: String?) -> (path: String, plan: Plan)? {
+    static func plan(directory: URL, pinned: String?, references: [String]) -> (path: String, plan: Plan)? {
         let isPinned = !(pinned ?? "").isEmpty
-        let paths = isPinned ? [pinned!] : planTrailers(repo: repo)
+        let paths = isPinned ? [pinned!] : references
         var seen: Set<String> = []
         for path in paths where seen.insert(path).inserted {
-            let url = path.hasPrefix("/") ? URL(fileURLWithPath: path) : URL(fileURLWithPath: repo).appendingPathComponent(path)
+            let url = PlanLocation.resolve(path, directory: directory, pinned: isPinned)
             guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
-            if let selected = PlanParser.select([(path: path, document: text)], pinned: isPinned) {
+            if let selected = PlanParser.select([(path: url.path, document: text)], pinned: isPinned) {
                 return selected
             }
         }
         return nil
     }
 
-    private static func planTrailers(repo: String) -> [String] {
+    static func planTrailers(repo: String) -> [String] {
         guard let output = Shell.run("/usr/bin/git", ["-C", repo, "log", "--first-parent", "main",
             "--format=%(trailers:only,unfold)%x1e"]) else { return [] }
         return output.components(separatedBy: "\u{1e}").flatMap { record in

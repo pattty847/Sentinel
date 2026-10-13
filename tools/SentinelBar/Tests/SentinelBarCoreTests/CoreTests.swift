@@ -168,6 +168,23 @@ struct CoreTests {
         #expect(BudgetGuide.duration("unknown") == nil)
     }
 
+    @Test func privatePlanDirectoryAndTrailerResolution() {
+        let directory = PlanLocation.researchDirectory(repository: "/workspace/Sentinel")
+        #expect(directory.path == "/workspace/Sentinel-Private/research")
+        #expect(PlanLocation.researchDirectory(repository: "/workspace/Sentinel",
+            configured: "../Other-Private/research").path == "/workspace/Other-Private/research")
+        let custom = PlanLocation.researchDirectory(repository: "/workspace/Sentinel",
+            configured: "/custom/plans")
+        #expect(custom.path == "/custom/plans")
+        #expect(PlanLocation.resolve("docs/research/example.md", directory: custom).path == "/custom/plans/example.md")
+        #expect(PlanLocation.resolve("../Sentinel-Private/research/audit/example.md", directory: custom).path
+            == "/custom/plans/audit/example.md")
+        #expect(PlanLocation.resolve("example.md", directory: directory, pinned: true).path
+            == "/workspace/Sentinel-Private/research/example.md")
+        #expect(PlanLocation.resolve("/explicit/example.md", directory: custom, pinned: true).path
+            == "/explicit/example.md")
+    }
+
     @Test func planSliceTableAndBugRows() {
         let plan = PlanParser.parse("""
         # Example feature plan

@@ -1,8 +1,7 @@
 #pragma once
 #include "HeatmapCellQuery.hpp"
 #include "LabelRetryPolicy.hpp"
-// The main chart's GPU heatmap layer (S6b, docs/research/2026-10-s6-plan.md
-// section 2): LabItem without view ownership. UnifiedGridRenderer owns one per
+// The main chart's GPU heatmap layer: LabItem without view ownership. UnifiedGridRenderer owns one per
 // chart (GUI thread) and gives it the symbol, timeframe, the committed view of
 // its GridViewState and the chart settings; the layer owns:
 // - a controller handle from the process HeatmapDataService (one per chart),

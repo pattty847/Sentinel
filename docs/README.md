@@ -1,7 +1,7 @@
 # Sentinel documentation index
 
 Start with the maintained document for the area you are changing. This catalog covers tracked
-project Markdown outside retired Cursor commands; private local notes and generated dependency
+project Markdown outside retired Cursor commands; the separate private repository and generated dependency
 documentation are excluded. The code, AGENTS.md and STATUS.md establish current behavior and rules.
 A link here preserves access; it does not certify that every older statement is still correct.
 
@@ -52,23 +52,22 @@ explicitly asks; promotion means moving its entry into Maintained documents afte
 
 ## Private planning documents
 
-Research, initiative briefs and the older feature/re-entry/trading-simulation snapshots are kept
-locally and excluded from future public commits. They are not part of a public checkout. Their
-optional private catalog is `docs/private/INTERNAL_INDEX.md`; ask the owner for a copy only when the
-task needs a named plan. Existing public Git history and deletion diffs still contain older versions.
+Research, initiative briefs, personal notes and older planning snapshots are versioned in the
+separate PRIVATE repository [Sentinel-Private](https://github.com/pattty847/Sentinel-Private).
+Clone it as a sibling of the Sentinel checkout, `../Sentinel-Private`. Its layout is `research/`,
+`initiatives/`, `private/` and the top-level planning snapshots. Its catalog is
+`../Sentinel-Private/private/INTERNAL_INDEX.md`; read only the file a task names.
+Commit edits to private plans in that repository. `_agent/` stays local to Sentinel.
+Sentinel builds and tests do not require the private repository. Older public history still
+contains the moved documents; this change does not rewrite that history.
 
 ## Searching documentation
 
-`.rgignore` excludes private planning material from normal ripgrep searches, and `.gitignore` keeps
-it out of future commits. Neither changes older Git history. Do not force-add private docs. Avoid
-repository-wide `--no-ignore`, which also includes build output and dependencies.
+Normal searches in Sentinel contain only public documentation. No `.rgignore` layer is needed.
+Do not search the sibling private repository unless the task names a relevant file.
 
 ```bash
-# Public docs and supporting references, respecting normal ignore rules
 rg -n '<pattern>' docs
-# A private local research copy, only when the task requires it
-rg --no-ignore -n '<pattern>' docs/research
+# A named private plan, explicitly required by the task
+rg -n '<pattern>' ../Sentinel-Private/research/<named-plan>.md
 ```
-
-Other search tools need equivalent exclusions; `.rgignore` controls ripgrep only. Positive include
-globs such as `-g '*.md'` can override file exclusions; use the commands above for the normal scope.

@@ -143,12 +143,6 @@ _agent
 
 # Private and historical local documentation
 /docs/private/
-/docs/research/
-/docs/initiatives/
-/docs/FEATURES.md
-/docs/REENTRY_REVIEW.md
-/docs/TRADING_SIMULATION_BLUEPRINT.md
-/docs/FEATURE_ARCHIVE.md
 docs/REFACTOR_PLAN.md
 /_agent/
 

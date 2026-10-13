@@ -1,5 +1,5 @@
 #pragma once
-// Heatmap resolution policy (interaction spec docs/research/2026-09-heatmap-interaction-spec.md).
+// Heatmap resolution policy: whole-pixel columns and buildable price-tick presets.
 // - Timeframe: chosen by the user only. A column is exactly the timeframe; zoom never
 //   changes it (there is no auto-timeframe). Time zoom-out clamps at one column per pixel.
 // - Tick: Auto (smallest preset at least minRowPx tall, with hysteresis) or Manual

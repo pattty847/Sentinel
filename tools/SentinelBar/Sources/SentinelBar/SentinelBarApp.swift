@@ -390,6 +390,7 @@ struct SettingsPanel: View {
     @Environment(\.dismiss) private var dismiss
     @State private var repo: String = ""
     @State private var pinned: String = ""
+    @State private var research: String = ""
     @State private var login = SMAppService.mainApp.status == .enabled
     private let kinds = ["agent started", "agent finished", "agent failed", "slice landed",
                          "land failed", "review", "blocker raised", "blocker resolved",
@@ -399,6 +400,7 @@ struct SettingsPanel: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("SentinelBar settings").font(.headline)
             TextField("Repository", text: $repo)
+            TextField("Research directory (blank: sibling Sentinel-Private/research)", text: $research)
             TextField("Pinned plan (optional)", text: $pinned)
             Toggle("Open at login", isOn: $login).onChange(of: login) { enabled in
                 do {
@@ -415,12 +417,13 @@ struct SettingsPanel: View {
                 Button("Done") {
                     monitor.setRepo(repo)
                     monitor.setPlan(pinned)
+                    monitor.setResearchPath(research)
                     dismiss()
                 }
             }
         }
         .padding(16).frame(width: 380)
-        .onAppear { repo = monitor.repo; pinned = monitor.pinnedPlan }
+        .onAppear { repo = monitor.repo; pinned = monitor.pinnedPlan; research = monitor.researchPath }
     }
 }
 

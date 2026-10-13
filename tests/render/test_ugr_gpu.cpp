@@ -1804,7 +1804,7 @@ TEST_F(UgrGpu, PriceFitCountsTheCandleUnderTheLeftEdge) {
     ugr->setCandleBuffer(nullptr);
 }
 
-// ── Auto price scale (docs/research/2026-10-viewport-autoscale.md) ─────────────
+// ── Auto price scale ──────────────────────────────────────────────────────
 // Candles every tf over [from, to): bar i has low base + i * step and high low + 50.
 std::vector<CandleSeriesBuffer::CandleBar> risingBars(int64_t from, int64_t to, int64_t tf, double base,
                                                       double step = 10) {

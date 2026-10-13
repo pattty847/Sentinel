@@ -839,4 +839,4 @@ with a client connected at SIGTERM, and journal continuity/recovery while an
 unusable socket directory is repaired. No test uses production data or Coinbase.
 
 Measurements (including append-to-receive p50/p95), validation and the deploy
-watch list are retained in the private research archive.
+watch list are retained in the sibling Sentinel-Private research repository.

@@ -24,6 +24,7 @@ final class Monitor: ObservableObject {
     @Published var showSettings = false
     @Published var repo: String
     @Published var pinnedPlan: String
+    @Published var researchPath: String
 
     let queueDir = ProcessInfo.processInfo.environment["SENTINEL_BUILD_QUEUE"] ?? "/tmp/sentinel-build-queue"
     let launchAt = Date()
@@ -34,6 +35,7 @@ final class Monitor: ObservableObject {
     private var lastNotified: [String: Date] = [:]
     private var mainHead: String?
     private var selectedPlanPath: String?
+    private var planReferences: [String] = []
 
     var blockers: [Milestone] { EventParser.unresolved(events) }
     var runningAgentCount: Int {
@@ -60,6 +62,7 @@ final class Monitor: ObservableObject {
         self.defaults = defaults
         repo = defaults.string(forKey: "repoPath") ?? NSHomeDirectory() + "/Programming/Sentinel"
         pinnedPlan = defaults.string(forKey: "pinnedPlan") ?? ""
+        researchPath = defaults.string(forKey: "researchPath") ?? ""
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         Task {
             while !Task.isCancelled {
@@ -105,6 +108,12 @@ final class Monitor: ObservableObject {
         pinnedPlan = path
         defaults.set(path, forKey: "pinnedPlan")
         mainHead = nil
+        Task { await refreshWorktreesAndPlan() }
+    }
+
+    func setResearchPath(_ path: String) {
+        researchPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        defaults.set(researchPath, forKey: "researchPath")
         Task { await refreshWorktreesAndPlan() }
     }
 
@@ -212,16 +221,21 @@ final class Monitor: ObservableObject {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         }.value
         if head != mainHead {
-            let pinned = pinnedPlan
-            let data = await Task.detached { () -> ([Landing], (path: String, plan: Plan)?) in
-                let landed = Probes.landings(repo: path)
-                return (landed, Probes.plan(repo: path, pinned: pinned))
+            let data = await Task.detached {
+                (Probes.landings(repo: path), Probes.planTrailers(repo: path))
             }.value
             landings = data.0
-            plan = data.1?.plan
-            selectedPlanPath = data.1?.path
+            planReferences = data.1
             mainHead = head
         }
+        let directory = PlanLocation.researchDirectory(repository: path, configured: researchPath)
+        let pinned = pinnedPlan
+        let references = planReferences
+        let selected = await Task.detached {
+            Probes.plan(directory: directory, pinned: pinned, references: references)
+        }.value
+        plan = selected?.plan
+        selectedPlanPath = selected?.path
     }
 
     private func refreshBudget() async {
@@ -234,14 +248,14 @@ final class Monitor: ObservableObject {
         guard let selectedPlanPath else { return nil }
         return landings.first {
             guard let source = $0.plan else { return false }
-            return normalizedPlan(source) == normalizedPlan(selectedPlanPath) &&
+            return normalizedPlan(source) == URL(fileURLWithPath: selectedPlanPath).standardizedFileURL.path &&
                 PlanParser.sliceIDs(in: $0.slice).contains(slice.lowercased())
         }
     }
 
     private func normalizedPlan(_ path: String) -> String {
-        let full = path.hasPrefix("/") ? path : repo + "/" + path
-        return URL(fileURLWithPath: full).standardizedFileURL.path
+        let directory = PlanLocation.researchDirectory(repository: repo, configured: researchPath)
+        return PlanLocation.resolve(path, directory: directory).path
     }
 
     func agentForSlice(_ slice: String) -> AgentJob? {
