@@ -253,7 +253,7 @@ Limits on the 16 GB Mac:
 - Run `scripts/dev/budget.sh` (CodexBar) before a dispatch batch and route to the subscription with room. Tell the owner when Codex is near 0 (they hold reset credits). Exact token and agent status come from the owner's local `ma-panel` (`.claude/skills/ma-panel/`); agents build no other usage tracking.
 - Conductor: report the plan, dispatches, phase changes, review findings and landings to the panel with `workflow_update` (intent, not numbers); STATUS stays the durable record.
 
-Task packet (the dispatch prompt, self-contained): base commit; branch and worktree; files owned and files another agent is touching; interfaces; frozen UX spec for UI work; acceptance checks (each must fail without its fix); validation scope; risk class; for GUI runs, its own API port and scratch directory; the hand-off format. Point at this file and only the plan sections that apply. A delegated agent does not delegate further unless the packet allows it.
+Task packet (the dispatch prompt, self-contained): base commit; branch and worktree; files owned and files another agent is touching; interfaces; frozen UX spec for UI work; acceptance checks (each must fail without its fix); validation scope; risk class; for GUI runs, its own API port and scratch directory; the hand-off format; "writers never edit `docs/STATUS.md`" (conductor only). Point at this file and only the plan sections that apply. A delegated agent does not delegate further unless the packet allows it.
 
 Hand-off protocol:
 1. The conductor creates the worktree from current `main`: `scripts/dev/agent-worktree.sh create <branch>` (`lt-sol/...`, `lt-astra/...`, `lt-claude/...`).

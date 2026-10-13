@@ -235,3 +235,11 @@ golden or a GUI probe line `candles.empty` absent at 100 ms).
 - `TimeframeAggregator` silently drops sub-second entries from `timeframes_ms` with a warning
   (`TimeframeAggregator.cpp:18-23`); adding 100 to the config does nothing today.
 - The Agent API candle query (`AgentApiCodec.cpp:251`) is a seconds boundary that does not need to be one.
+
+## Owner decisions and review (2026-10-13)
+
+- Review: Codex Astra, REVISE (blocker=2 major=5 minor=1), text in `.claude/acting-orchestrator/b2-plan/astra-review-r1.md` (not tracked). A revision must answer all eight findings.
+- Scope: option A is a feature, not a bug fix, and is deferred. Option B ships now: `tfMs` end to end in the GUI, nothing rounds, sub-second and non-whole-second timeframes get no history request (logged reason) and no candles.
+- Q1: live sub-second bars are built in the GUI from the trade stream (on a worker thread, per Astra 6). Nothing new is stored on the server. Open for the revision: serving history from the existing 24 h in-RAM tape (no new storage, needs Astra 4) versus live-only bars since the chart opened.
+- Q2: no custom timeframes. Whole seconds and above; below 1 s only multiples of 100 ms, and only 100 ms is offered now. Correction to sections 1-2: 25/50/250/500 ms in `TimeAxisModel.cpp:8` are axis label steps, not offered timeframes; served timeframes come from `config/server_config.yaml` `timeframes_ms`.
+- Q3: no sub-second history older than 24 h; no journal reads for sub-second candles.
