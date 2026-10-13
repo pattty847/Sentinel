@@ -46,9 +46,7 @@ explicitly asks; promotion means moving its entry into Maintained documents afte
 | Document | Scope |
 | --- | --- |
 | [docs/COORDINATE_SYSTEMS.md](COORDINATE_SYSTEMS.md) | Coordinate/render contracts; verify against current chart code |
-| [docs/UI_ARCHITECTURE.md](UI_ARCHITECTURE.md) | GUI architecture overview; verify against current chart architecture |
 | [docs/PAPER_TRADING_QUICKSTART.md](PAPER_TRADING_QUICKSTART.md) | Paper-trading walkthrough |
-| [scripts/setup/WINDOWS_SETUP.md](../scripts/setup/WINDOWS_SETUP.md) | Earlier Windows/WSL migration guide; use README and WINDOWS_GPU_TESTS for current setup |
 
 ## Private planning documents
 
