@@ -8,9 +8,21 @@
 #include <algorithm>
 #include <cerrno>
 #include <filesystem>
+#ifdef _WIN32
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace {
+bool recordingDirectoryAccessible(const std::filesystem::path& dir) {
+#ifdef _WIN32
+    return ::_waccess(dir.c_str(), 6) == 0; // read/write; Windows has no execute access mode
+#else
+    return ::access(dir.c_str(), R_OK | W_OK | X_OK) == 0;
+#endif
+}
+
 template <typename T, typename Fn>
 void safeInvoke(QPointer<T> ptr, Fn&& fn) {
     QMetaObject::invokeMethod(ptr.data(), [ptr, fn = std::forward<Fn>(fn)]() mutable {
@@ -205,7 +217,7 @@ std::string SentinelServerApp::requiredRecordingProblem(ServerConfig& config) {
     std::error_code ec;
     const bool usable = !dir.empty() && !recording::resolveRecordingDir(dir, {}).dir.empty() &&
                         std::filesystem::is_directory(dir, ec) && !ec &&
-                        ::access(dir.c_str(), R_OK | W_OK | X_OK) == 0;
+                        recordingDirectoryAccessible(dir);
     if (!usable)
         return dir + " is not mounted or accessible (errno=" + std::to_string(errno) + ")";
     return {};

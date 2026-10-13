@@ -145,20 +145,29 @@ Maintainers: reproducible bundles from source use **`cmake --preset mac-clang-re
 
 #### Windows
 
+Install Visual Studio 2022's C++ workload, CMake, vcpkg, and open-source Qt for MSVC. Adjust `QT_MSVC` to your installed Qt directory.
+
 ```powershell
-setx QT_MSVC C:\Qt\6.9.3\msvc2022_64
-setx VCPKG_ROOT C:\dev\vcpkg
+$env:QT_MSVC = "C:\Qt\6.9.3\msvc2022_64"
+$env:VCPKG_ROOT = "C:\dev\vcpkg"
 
 git clone https://github.com/pattty847/Sentinel.git
 cd Sentinel
-cmake --preset windows-msvc
-cmake --build --preset windows-msvc -j
+cmake --preset windows-msvc-vs
+cmake --build --preset windows-msvc-vs --config Release --parallel 6
 ```
 
 Run:
 
 ```powershell
-build/windows-msvc/apps/sentinel-gui/Release/sentinel-gui.exe
+.\build\windows-msvc-vs\apps\sentinel-gui\Release\sentinel-gui.exe
+```
+
+For the Python backends (SEC, screener, and stock candles), install `uv`, clone the sibling dependency if it is absent, and sync from the Sentinel root:
+
+```powershell
+git clone https://github.com/pattty847/CopeTech-Edgar.git ..\CopeTech-Edgar
+uv sync --project scripts --locked
 ```
 
 ---
