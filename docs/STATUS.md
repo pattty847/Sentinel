@@ -3,46 +3,23 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-12 ~15:30 UTC. main `f5982b9` (+ this STATUS commit). The chart-core refactor is complete (S0a-S15 landed) and the chart-view feature freeze has ended. Next: B1, B3-B7 (B2 waits for the owner's candle-interval spec).
-- **Conductor:** the cloud Claude Opus thread "Chart-core refactor". **Mac operator:** a Claude session on the owner's Mac executes for it (worktrees, Codex dispatch, builds through the queue, native Metal runs, lands, pushes, deploys) under the owner's standing authorization of 2026-10-11 05:23Z: land conductor-reviewed branches with `agent-worktree.sh land`, push main after a secret scan, deploy the server with `deploy-runtime.sh` plus a smoke check. Anything else (service restarts, Grafana, data, owner looks) needs the owner's typed OK in the thread (a card tap relayed by the conductor does not pass the operator's permission check; a typed message does).
-- **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high-risk (S3, S10, S11, S12, S15). Fallback to Codex-on-Codex only once Claude weekly < 5%. ma-panel token trailers are not readable from the operator session and are left out rather than estimated.
+- **Updated:** 2026-10-12 ~22:45 UTC. main `9c4909f`. Chart-core refactor (S0a-S15) and one-world (through slice E) are complete. Focus now: test-suite cleanup and the workflow audit, then B1, B3-B7 (B2 waits for the owner's candle-interval spec).
+- **Conductor:** a Claude Opus session on the owner's Mac (AGENTS.md section 10). The cloud Projects conductor + Mac operator trial (2026-10-11/12) is ended (owner, 2026-10-12).
+- **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high-risk. Claude weekly is under 5% until its reset (~2026-10-13 00:00Z): Codex writes and reviews, Claude only conducts. Codex weekly 17% with a deficit (owner holds 3 reset credits). Landing trailers include `*-Tokens` from ma-panel again.
 
 ## Land gate
 
 `agent-worktree.sh land` runs chart-health, the build, then `ctest -j 4` with `SENTINEL_REQUIRE_GPU=1` (an unavailable GPU is fatal). Resource locks, labels and `PROCESSORS` live in `tests/TestResources.cmake` (CMake >= 3.28; older CMake only loses them). No RUN_SERIAL list remains (FM-261 resolved `30c09cf`, FM-262 resolved `d87aa13`; RollerCorruptBlockTests TIMEOUT 300, `2cdb8ed`). The land removes the worktree and its `.land-ctest.log`: tee it during the land to quote the ChartGolden/UgrGpu/ChartUi lines. `lizard` is at `~/.local/bin/lizard` (uv tool).
 
-## Chart-core refactor (plan `docs/research/2026-10-11-chart-core-architecture.md`)
+## Chart-core refactor (complete; plan `docs/research/2026-10-11-chart-core-architecture.md`)
 
-| Slice | Merge | Notes |
-|---|---|---|
-| S0a+S0f view trace + chart-health | `9e32fe4` | |
-| S0b Metal golden | `067a072` | 12 scenes, key Metal:Apple M4 |
-| S0c dead surface | `9c80e6d` | owner-approved debug menu removal |
-| S0d dead QML | `265af53` | |
-| S0e comments | `d32c7d8` | |
-| S1 chart core target | `e803f9d` | |
-| S2 controller | `69f20af` | |
-| S3 ChartCamera | `148d88b` | Fable |
-| S4 ZoomGlide | `b6746bd` | |
-| S5 PriceFitter | `567ced5` | |
-| S6 LivePlacement | `2ec42ea` | |
-| S7 TimeframeSwitch + PriceCarry | `401fd26` | |
-| S8 ZoomController + Wheel | `24c17e1` | |
-| S9 view commands | `5d6e239` | |
-| S10 FrameProducer/FrameAck | `8e0eeb1` | Fable |
-| S11 layers + feeds | `d231a11` | Fable; visible change owner-approved: overlays always under chart text (DECISIONS 2026-10-12) |
-| S12 heatmap/text layers, bubble feed | `c56feac` | Fable; render-thread teardown disconnects (FM-270 resolved) |
-| S13 LayerVisibility + ChartLookSettings | `af18e7a` | |
-| S14 ChartInputRouter, header regroup, axis decoupling | `5f26152` | Sol; 1 review round (major: string SIGNAL/SLOT connects in AxisModel -> typed connectCameraChanged); AxisModel uses non-QObject IChartCameraSource; final caps now unconditional in chart-health |
-| S15 grouped QML objects + ChartAgentPort | `f5982b9` | Astra, Fable PASS; 1 fix round (major: DepthChartView timeframe handler moved into a Connections block and ran after the candle timeframeSec binding; restored inline, pinned by ChartAgentPin.StartupTimeframeNotificationOrder); declared non-visual: overlay `enabled` FINAL; owner typed OK 14:57Z |
+S0a `9e32fe4` through S15 `f5982b9`, one merge per slice (`git log --first-parent`); Fable reviewed S3, S10, S11, S12, S15. S11 carried the one owner-approved visible change (overlays always under chart text, DECISIONS 2026-10-12).
 
 UGR after S15: `UnifiedGridRenderer.cpp` 382 lines (cap 450), `.h` 228 (cap 350), `m_` 14 (cap 15). QML reaches the chart through the `view`, `candles`, `tpo`, `debug` and `layers` groups; the Agent API viewport goes through `mainwindow/ChartAgentPort`. Every slice so far: Metal goldens byte-identical, no re-bless. Pre-land evidence for chart slices: native `SENTINEL_REQUIRE_GPU=1` run of ChartGolden/ChartUi/UgrGpu (+ GuardMalloc teardowns for render-path slices); high-risk slices add isolated GUI-host screenshots main vs branch and 3 interleaved settled samples per side (only when the owner is away, input idle >= 10 min and screen unlocked, or on a typed OK).
 
-## One-world: what's left
+## One-world (complete through slice E `96e4f2f`)
 
-Done through slice E (landed `96e4f2f` 2026-10-12, owner typed format OK 03:16Z; server deployed by the owner 03:45Z, pid 37884). Left:
-1. The rest of `data/market` to the Trash (owner empties it). Needs the owner's own typed OK and the owner at the Mac.
-2. README/ARCHITECTURE pass.
+Left: README/ARCHITECTURE pass (`data/market` deleted by the owner 2026-10-12).
 
 ## Services (owner's Mac, launchd)
 
@@ -54,18 +31,15 @@ Done through slice E (landed `96e4f2f` 2026-10-12, owner typed format OK 03:16Z;
 
 ## In flight
 
-- None. The chart-core refactor is complete; next B1, B3-B7.
+- Read-only Codex Astra audits (2026-10-12, reports to the conductor, then a docs/research file): tests (re-check `docs/research/2026-10-11-code-health/audit-tests.md`, scan S0-S15 tests; thread `01a13321-9031-70b3-a3ef-7bcda74bed58`) and workflow (30-day trailers, review yield, conductor token cost, conductor hand-off rule; thread `01a13321-9031-7ce0-b709-54d79b8c710b`). A Windows Codex thread is also pruning redundant tests and will open a PR; reconcile by gtest name.
 - Neutrality evidence: main's startup `viewportVersion` and candle-history paging (request count and limits) vary run to run (12/17/15 and 2-3 requests in three fresh-profile runs on 2026-10-12). Do not use them as neutrality pins; use the heatmap target hash plus pin tests. The `window` target is never byte-stable (live clock and status).
 - Open check: at the next server restart, confirm the 7 startup `Shadow journal invalidated ... reason=journal boundary` warnings seen after the slice E deploy (pid 37884) do not recur (likely the one-time v1-anchor fallback).
-- S15 Astra thread `01a12e6f-5feb-7ad2-86a2-4ed11f60e665` (done); S14 Sol thread `01a12e1c-0a73-75d0-b3e2-88d6958b299e` (done).
-- Writer threads (Codex, resumable with `codex exec resume <id> -m <model>` + sandbox flags): slice E Astra `01a12a74-cf8b-7750-9bab-23008bfe18af` (done); S13 Sol `01a12de7-ff21-7d73-aaf7-402d38294129`; S12 Astra `01a12db6-1509-7a71-8cec-e7f2f3b11cff`.
 - Open FMs: FM-256 (TP/SL exit order left New), FM-259 (bubbles may not draw if the overlay attaches before trades), FM-260 (overlay dangling provider at teardown), FM-267 (startup auto tick 100 -> 500 -> 100 bounce: candle flicker, and the settled tick/price rows vary run to run on main itself; do not chase price-row diffs in screenshots; fix after S15, owner-visible), FM-268 (binner self-test zero-readback flake).
 - Test-hygiene leftover: ShadowTest.HandoffLatencyBenchmark opt-in (test_shadow.cpp; slice E has landed, so it is unblocked).
 
 ## Waiting on the owner
 
-1. `data/market` to the Trash (typed OK, owner at the Mac).
-2. Parked: nightly copy of `/Volumes/T7/sentinel-data` to the MacBook Pro over Tailscale (needs Remote Login + SSH key).
+1. Parked: nightly copy of `/Volumes/T7/sentinel-data` to the MacBook Pro over Tailscale (needs Remote Login + SSH key).
 
 ## Owner constraints in force
 
@@ -75,10 +49,7 @@ Done through slice E (landed `96e4f2f` 2026-10-12, owner typed format OK 03:16Z;
 
 ## Next (priority order)
 
-0. Chart-core refactor: complete (S0a-S15, see the table above); the chart-view feature freeze has ended. Next B1, B3-B7 (B2 waits for the owner's candle-interval spec), still one branch at a time on `UnifiedGridRenderer*` / `MainWindowGpu.cpp`. Not decided: FM-246, the theme registry.
-1. Wave 3 complete (2026-10-06): overflow redesign `66e39b2`, retained fonts `fac62a0`, settings with hover tooltips `542be4d`; each owner-approved, full suite 96/96.
-2. One-world: see "One-world: what's left" at the top (6 steps, 2 owner sittings).
-2a. S8a LANDED 2026-10-06 `8cb2e5f` (legacy heatmap deleted from GUI/client, -9.4k lines; Astra review PASS with one deferred minor; fixed history views pixel-identical; live age p50/p95 109/497 ms vs 100/510 before). R2's legacy-renderer blocker is gone. S8b (server legacy production) goes with slice E. Plan: `docs/research/2026-10-s8-legacy-deletion.md`. Original note: dispatch after D-a lands, during the R1 48 h soak (GUI files only; no overlap with roller/server files). First step of the packet: one final legacy-vs-gpu A/B capture with the same steps as `docs/research/2026-10-s6-plan.md` "Sequence and timings", kept as the before/after record. Writer Claude (needs Metal), reviewer `gpt-6-astra` high (GPU heatmap core). Removes the D-a legacy-renderer limit (the legacy page path cannot drop a withdrawn live column). Packet must cite FM-079 (removing legacy heatmap production once stopped live footprint, TPO and volume profile).
+0. Test cleanup from the Astra audit, then B1, B3-B7 (B2 waits for the owner's candle-interval spec), one branch at a time on `UnifiedGridRenderer*` / `MainWindowGpu.cpp`. Not decided: FM-246, the theme registry.
 3. After D-b: candles for the recorded period built from our own journal trades: 1m kept forever (about 25 MB per product per year), 1s kept for a rolling 5 days (about 20 MB per product) and rebuilt from the journal on demand beyond that; REST serves only pre-recording history and odd timeframes (owner decisions 2026-10-06). Chart history requests may ask for 1,000+ bars in one request; the server answers from its cache or fans out 350-bar Coinbase pages in parallel within the rate limit. After D: change-driven live publishing with a per-client max update rate (see the owner decisions block). Then EATEN vs PULLED liquidity, ABSORPTION and REPLENISHMENT (levels refilled after being hit: algos defending a price), drawn at sub-minute resolution from the raw journal, since a 1-minute TWAP column cannot show the order of events (owner's strongest direction, restated 2026-10-06 while watching a live dump): Fable plan after slice D. It crosses
    roller, HMC2, wire and renderer.
 3b. Long-term direction (owner 2026-10-07): several Sentinel servers that talk to each other and serve many clients, as TradingView does. Foundations: self-contained days (anchors), journal replication between servers, a fan-out above 8 clients (FM-207), client auto-reconnect, and authentication (the GUI Agent API is unauthenticated). This needs its own architecture plan after one-world.
