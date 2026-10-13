@@ -3,7 +3,7 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-13 ~04:55 UTC. main `f95fbbd`. Phase 5 B batch dispatched (see In flight). Chart-core refactor (S0a-S15) and one-world (through slice E) are complete. Focus now: test-suite cleanup and the workflow audit, then B1, B3-B7 (B2 waits for the owner's candle-interval spec).
+- **Updated:** 2026-10-13 ~04:55 UTC. main `f8026ad`. Phase 5: B1, B3-B7 landed (`f8026ad`); only B2 is left (plan first, then owner sign-off). Chart-core refactor (S0a-S15) and one-world (through slice E) are complete. Focus now: test-suite cleanup and the workflow audit, then B1, B3-B7 (B2 waits for the owner's candle-interval spec).
 - **Conductor:** a Claude Opus session on the owner's Mac (AGENTS.md section 10). The cloud Projects conductor + Mac operator trial (2026-10-11/12) is ended (owner, 2026-10-12).
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high-risk. 2026-10-13 04:45Z: Claude weekly 100% (reset); Codex weekly 13% with a deficit. Owner: keep Codex writing down to ~1%, then the owner spends a reset credit (holds 3); Claude subagents may be used for other work. Landing trailers include `*-Tokens` from ma-panel again.
 
@@ -33,21 +33,15 @@ Left: README/ARCHITECTURE pass (`data/market` deleted by the owner 2026-10-12).
 
 Plan: `docs/research/2026-10-11-chart-core-architecture.md` rows B1-B8 (line ~771) and section 6 Q3 (line ~845). After PR 44 lands it moves to `../Sentinel-Private/research/` (same file name). SentinelBar shows 21/29; the true count is 21/28 (B8 was done inside S11; the bar only counts trailers).
 
-State checked against main `544c6fe` on 2026-10-13:
-- B1 one live-end formula (`liveEndCeil`, owner-approved): open. Policy test per the plan row.
+State after `f8026ad` (2026-10-13):
+- Landed in `f8026ad` (Codex Sol writer, Opus reviewer, 2 rounds, 1 minor fixed): B1 (seed/bootstrap use `liveEndCeil`, `nextBucketEnd` deleted), B3 (`autoPriceTick_` reset on controller destroy and `forgetService`), B4 (test rename), B5 (one auto fit per live step: `ViewCommands::refitAfterHeatmapLive` skips when follow already fitted; depends on the `liveChanged` connect order, pinned by `UgrZoomCpu.LiveChangedFitsOnceAndRefitsWithoutFollowShift`), B7 (glyph-atlas dump deleted). B6: nothing to remove (`AxisModel::setTarget` can detach the view state, so its checks are live). Metal goldens unchanged, no re-bless.
 - B2 candle-interval rule: owner chose option A (2026-10-13): real sub-second candles (25-500 ms) built from trades, live and from the journal; tfMs in milliseconds end to end, nothing rounds it; seconds only at a boundary that truly speaks seconds, where an unrepresentable interval is refused with a logged reason, never rounded; ranges the journal does not cover show no candles (option B as fallback). Today three sites round differently (`PriceFitter.cpp:35,95,236`, `PriceCarryPolicy.cpp:49` `(tf+500)/1000`; `MainWindowGpu.cpp` history request `(tf+999)/1000`; `DepthChartView.qml:103` `Math.round`). Larger than the other B items and likely crosses the server candle path: first a short plan (where sub-second candles are built, history granularities the server accepts, cost), owner sign-off, then its own slice.
-- B3 reset `autoPriceTick_` in `HeatmapGpuLayer::destroyController` / `forgetService`: open (only `setSymbol`/`setTimeframeMs` reset it, `HeatmapGpuLayer.cpp:141,154`).
-- B4 rename `UgrZoomCpu.SymbolSwitchBeforeFirstSnapshotUsesPlainFitSilently` -> `...PublishesRawBoundsSilently` (`tests/render/test_ugr_gpu.cpp`): open, trivial.
-- B5 one auto-fit per live tick (count `solveAutoPriceFit` calls == 1): open, perf.
-- B6 dead null checks: mostly gone with the refactor; ~5 `m_viewState` checks left in `libs/gui`.
-- B7 `SENTINEL_DUMP_GLYPH_ATLAS` `/tmp` dump in `libs/gui/chart/layers/ChartTextLayer.cpp`: owner confirmed delete (2026-10-13).
-- B8: done in S11 (`d231a11`). Nothing to do.
+- B8: done in S11 (`d231a11`).
 
-Suggested dispatch: one low-risk branch B1+B3+B4+B5+B6 (+B7 once confirmed), Codex writer (Sol), Claude reviewer; each fix with a Qt-free policy test that fails without it (AGENTS 3a). B2 is its own slice after the owner's spec. Also hand over: PR 44 (docs to Sentinel-Private) review and land when the Windows Codex rework reports READY. Conflicts: the owner's Windows test-cleanup PR touches `tests/render/test_ugr_gpu.cpp` (B4); land it first or rebase B4 after. PR 44 (docs move to Sentinel-Private, rework requested) changes AGENTS.md and the plan path; it is docs-only and does not conflict with B code.
+Next: the B2 plan (a Claude subagent may write it; owner allows Claude for non-writer work). Also hand over: PR 44 (docs to Sentinel-Private) review and land when the Windows Codex rework reports READY. Conflicts: the owner's Windows test-cleanup PR touches `tests/render/test_ugr_gpu.cpp` (B4); land it first or rebase B4 after. PR 44 (docs move to Sentinel-Private, rework requested) changes AGENTS.md and the plan path; it is docs-only and does not conflict with B code.
 
 ## In flight
 
-- **Phase 5 B batch** (B1, B3, B4, B5, B6, B7; low risk): branch `lt-sol/phase5-b-batch`, worktree `/Volumes/T7/sentinel-worktrees/lt-sol-phase5-b-batch`, base `f95fbbd`. Writer Codex `gpt-6.1-sol` thread `01a13399-1087-7070-a95a-23fc190d386a` (sandboxed: conductor commits). Reviewer: Claude (not yet dispatched). Before land: native Metal ChartGolden/UgrGpu run; B1 may change the first view on an exact bucket boundary (re-bless only if named). B2 parked: short plan first (where sub-second candles are built, server history granularities, cost), then owner sign-off.
 - Read-only Codex Astra audits (2026-10-12, reports to the conductor, then a docs/research file): tests (re-check `docs/research/2026-10-11-code-health/audit-tests.md`, scan S0-S15 tests; thread `01a13321-9031-70b3-a3ef-7bcda74bed58`) and workflow (30-day trailers, review yield, conductor token cost, conductor hand-off rule; thread `01a13321-9031-7ce0-b709-54d79b8c710b`). A Windows Codex thread is also pruning redundant tests and will open a PR; reconcile by gtest name.
 - Neutrality evidence: main's startup `viewportVersion` and candle-history paging (request count and limits) vary run to run (12/17/15 and 2-3 requests in three fresh-profile runs on 2026-10-12). Do not use them as neutrality pins; use the heatmap target hash plus pin tests. The `window` target is never byte-stable (live clock and status).
 - Open check: at the next server restart, confirm the 7 startup `Shadow journal invalidated ... reason=journal boundary` warnings seen after the slice E deploy (pid 37884) do not recur (likely the one-time v1-anchor fallback).
@@ -66,7 +60,7 @@ Suggested dispatch: one low-risk branch B1+B3+B4+B5+B6 (+B7 once confirmed), Cod
 
 ## Next (priority order)
 
-0. Test cleanup from the Astra audit, then B1, B3-B7 (B2 waits for the owner's candle-interval spec), one branch at a time on `UnifiedGridRenderer*` / `MainWindowGpu.cpp`. Not decided: FM-246, the theme registry.
+0. Test cleanup from the Astra audit, then the B2 plan for owner sign-off, one branch at a time on `UnifiedGridRenderer*` / `MainWindowGpu.cpp`. Not decided: FM-246, the theme registry.
 3. After D-b: candles for the recorded period built from our own journal trades: 1m kept forever (about 25 MB per product per year), 1s kept for a rolling 5 days (about 20 MB per product) and rebuilt from the journal on demand beyond that; REST serves only pre-recording history and odd timeframes (owner decisions 2026-10-06). Chart history requests may ask for 1,000+ bars in one request; the server answers from its cache or fans out 350-bar Coinbase pages in parallel within the rate limit. After D: change-driven live publishing with a per-client max update rate (see the owner decisions block). Then EATEN vs PULLED liquidity, ABSORPTION and REPLENISHMENT (levels refilled after being hit: algos defending a price), drawn at sub-minute resolution from the raw journal, since a 1-minute TWAP column cannot show the order of events (owner's strongest direction, restated 2026-10-06 while watching a live dump): Fable plan after slice D. It crosses
    roller, HMC2, wire and renderer.
 3b. Long-term direction (owner 2026-10-07): several Sentinel servers that talk to each other and serve many clients, as TradingView does. Foundations: self-contained days (anchors), journal replication between servers, a fan-out above 8 clients (FM-207), client auto-reconnect, and authentication (the GUI Agent API is unauthenticated). This needs its own architecture plan after one-world.
