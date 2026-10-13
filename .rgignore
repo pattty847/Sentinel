@@ -1,0 +1,10 @@
+# Keep planning/evidence out of default ripgrep searches; Git still tracks it.
+# To search history explicitly: rg --no-ignore -n '<pattern>' docs/research
+/docs/research/
+/docs/private/
+/docs/archive/
+/docs/initiatives/
+/docs/FEATURES.md
+/docs/REENTRY_REVIEW.md
+/docs/TRADING_SIMULATION_BLUEPRINT.md
+/scripts/setup/WINDOWS_SETUP.md
