@@ -52,7 +52,7 @@ explicitly asks; promotion means moving its entry into Maintained documents afte
 
 Research, initiative briefs, personal notes and older planning snapshots are versioned in the
 separate PRIVATE repository [Sentinel-Private](https://github.com/pattty847/Sentinel-Private).
-Clone it as a sibling of the Sentinel checkout, `../Sentinel-Private`. Its layout is `research/`,
+Clone it as a sibling of the main Sentinel checkout, `../Sentinel-Private` (agent worktrees live elsewhere; see AGENTS.md section 0 for the path from a worktree). Its layout is `research/`,
 `initiatives/`, `private/` and the top-level planning snapshots. Its catalog is
 `../Sentinel-Private/private/INTERNAL_INDEX.md`; read only the file a task names.
 Commit edits to private plans in that repository. `_agent/` stays local to Sentinel.
