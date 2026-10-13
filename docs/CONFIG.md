@@ -70,7 +70,7 @@ chart:
 trade_overlays:
   retention_columns: 8192
 
-recording:                # recording v2: near and deep order-book layers (docs/research/2026-09-recording-v2.md)
+recording:                # recording v2: near and deep order-book layers
   enabled: true
   source: roller           # required; primary has no feed and is refused at startup
   dir: /Volumes/T7/sentinel-data/recording # protected archival root, unused for serving

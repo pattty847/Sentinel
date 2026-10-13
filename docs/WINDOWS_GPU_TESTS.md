@@ -1,7 +1,6 @@
 # Windows GPU tests
 
 How to run the GPU heatmap path (S4, and the B1 tile path) on Windows and read the result.
-Background: `docs/research/2026-09-gpu-heatmap-integration-plan.md`, S4.
 
 What is under test:
 

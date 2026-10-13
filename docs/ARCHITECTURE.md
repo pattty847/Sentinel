@@ -128,7 +128,6 @@ for labels/walls.
 
 ### Heatmap tick and zoom contract (integration slice T)
 
-Product contract: [heatmap interaction spec](research/2026-09-heatmap-interaction-spec.md).
 `HeatmapResolution.hpp` holds the pure policy in integer price units: the preset
 ladder `{1, 2, 2.5, 5} x 10^k`, Auto (`autoTickUnits`: smallest preset that is a
 multiple of the common tick of the data in view and at least `minRowPx` tall;
@@ -186,7 +185,7 @@ draw mapping. `HeatmapTileNode` records compute passes in
 `tests/render/test_qsg_compute_spike.cpp` guards that mechanism. Display ticks
 must be multiples of `commonTick()` (LCM of the native ticks). Not yet wired
 into `UnifiedGridRenderer` (S6). Results and limits:
-[GPU heatmap integration plan](research/2026-09-gpu-heatmap-integration-plan.md), S4.
+Integration measurements are retained in the private research archive.
 
 ### Heatmap span planning and source controller (slice S5b)
 
@@ -351,8 +350,8 @@ Cross-thread communication uses `Qt::QueuedConnection` exclusively.
 | `docs/COORDINATE_SYSTEMS.md` | Coordinate spaces and renderer contracts |
 | `docs/CONFIG.md` | Server and client config files and options |
 | `docs/PAPER_TRADING_QUICKSTART.md` | Paper trading setup and usage |
-| `docs/FEATURES.md` | Feature overview and notable changes |
-| `docs/TRADING_SIMULATION_BLUEPRINT.md` | Long-term plan for shared live paper trading, replay, and future book-aware execution |
+| `docs/README.md` | Documentation index and maintenance scope |
+| `docs/TODO.md` | Feature scope and current priorities |
 
 ## Trade overlays and recording heatmaps
 

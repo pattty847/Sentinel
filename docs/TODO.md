@@ -2,7 +2,7 @@
 
 > Personal feature tracker. Append new features, check off tasks, keep moving.
 
-> FORGE re-entry initiative (2026-09-04): [Continuous History brief](initiatives/continuous-history/VISION.md) coordinates F1, F4, and F8. Baseline, server lifecycle, one-minute durability, bounded heatmap paging, coverage/status UI, and off-I/O heatmap reads have landed; footprint, TPO, and overview rollups remain.
+> FORGE re-entry initiative (2026-09-04): the continuous-history initiative coordinates F1, F4, and F8. Baseline, server lifecycle, one-minute durability, bounded heatmap paging, coverage/status UI, and off-I/O heatmap reads have landed; footprint, TPO, and overview rollups remain. Its planning brief is retained privately.
 
 ### Format guide (for agents & future-me)
 
@@ -366,7 +366,7 @@ Each feature is a self-contained block. Use this template:
 **Created:** 2026-03-14
 **Updated:** 2026-03-26
 
-> Blueprint: `docs/TRADING_SIMULATION_BLUEPRINT.md`
+> Design details are retained in the private planning archive.
 
 #### Now
 - [ ] Manual paper-trading polish pass for TP/SL visuals and interaction smoothing

@@ -1,7 +1,6 @@
 # Sentinel monitoring
 
-Metrics, dashboards and phone alerts for the always-on services. The plan and the owner
-decisions are in `docs/research/2026-10-observability.md`. Logs remain the detailed view
+Metrics, dashboards and phone alerts for the always-on services. Logs remain the detailed view
 (`AGENTS.md` section 4a). Metrics answer the quick questions: is the service up, is it
 recording, and did anything drop.
 

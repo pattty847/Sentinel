@@ -50,85 +50,25 @@ explicitly asks; promotion means moving its entry into Maintained documents afte
 | [docs/PAPER_TRADING_QUICKSTART.md](PAPER_TRADING_QUICKSTART.md) | Paper-trading walkthrough |
 | [scripts/setup/WINDOWS_SETUP.md](../scripts/setup/WINDOWS_SETUP.md) | Earlier Windows/WSL migration guide; use README and WINDOWS_GPU_TESTS for current setup |
 
-## Plans and historical evidence
+## Private planning documents
 
-These are design proposals, snapshots and investigations, not a parallel set of current docs.
-An unfinished proposal may still be useful; STATUS.md and the owner's task identify active work.
-Completed plans remain frozen. Do not rewrite them when related code changes. An explicit planning
-task may amend its named active plan. To delete an obsolete document, remove its entry and fix live
-incoming links rather than leaving a dangling reference.
-
-| Document | Scope |
-| --- | --- |
-| [docs/FEATURES.md](FEATURES.md) | Older feature snapshot; contains a link to missing FEATURE_ARCHIVE.md |
-| [docs/REENTRY_REVIEW.md](REENTRY_REVIEW.md) | September 2026 source review |
-| [docs/TRADING_SIMULATION_BLUEPRINT.md](TRADING_SIMULATION_BLUEPRINT.md) | Trading-simulation design and phases |
-| [docs/initiatives/continuous-history/VISION.md](initiatives/continuous-history/VISION.md) | Continuous-history initiative brief |
-
-### Dated research catalog
-
-Open only the plan or evidence named by the task or relevant maintained reference.
-
-- [docs/research/2026-09-agent-api-v1-spec.md](research/2026-09-agent-api-v1-spec.md)
-- [docs/research/2026-09-agentic-prediction-evaluation.md](research/2026-09-agentic-prediction-evaluation.md)
-- [docs/research/2026-09-b1-whole-chunk-benchmark.md](research/2026-09-b1-whole-chunk-benchmark.md)
-- [docs/research/2026-09-gpu-bin-lab-followup.md](research/2026-09-gpu-bin-lab-followup.md)
-- [docs/research/2026-09-gpu-bin-lab-parity.md](research/2026-09-gpu-bin-lab-parity.md)
-- [docs/research/2026-09-gpu-bin-lab-round4.md](research/2026-09-gpu-bin-lab-round4.md)
-- [docs/research/2026-09-gpu-heatmap-integration-plan.md](research/2026-09-gpu-heatmap-integration-plan.md)
-- [docs/research/2026-09-heatmap-interaction-spec.md](research/2026-09-heatmap-interaction-spec.md)
-- [docs/research/2026-09-legacy-heatmap-removal-inventory.md](research/2026-09-legacy-heatmap-removal-inventory.md)
-- [docs/research/2026-09-marketlens-har.md](research/2026-09-marketlens-har.md)
-- [docs/research/2026-09-recording-serve.md](research/2026-09-recording-serve.md)
-- [docs/research/2026-09-recording-v2.md](research/2026-09-recording-v2.md)
-- [docs/research/2026-09-s5-plan.md](research/2026-09-s5-plan.md)
-- [docs/research/2026-09-s5l-plan.md](research/2026-09-s5l-plan.md)
-- [docs/research/2026-09-storage-pyramid.md](research/2026-09-storage-pyramid.md)
-- [docs/research/2026-10-07-audit-triage.md](research/2026-10-07-audit-triage.md)
-- [docs/research/2026-10-07-db2-packet.md](research/2026-10-07-db2-packet.md)
-- [docs/research/2026-10-07-s8b-config-map.md](research/2026-10-07-s8b-config-map.md)
-- [docs/research/2026-10-08-whole-pixel-mapping.md](research/2026-10-08-whole-pixel-mapping.md)
-- [docs/research/2026-10-11-chart-core-architecture.md](research/2026-10-11-chart-core-architecture.md)
-- [docs/research/2026-10-11-chart-core-packets.md](research/2026-10-11-chart-core-packets.md)
-- [docs/research/2026-10-11-code-health/audit-heatmap-mainwindow.md](research/2026-10-11-code-health/audit-heatmap-mainwindow.md)
-- [docs/research/2026-10-11-code-health/audit-repo-sweep.md](research/2026-10-11-code-health/audit-repo-sweep.md)
-- [docs/research/2026-10-11-code-health/audit-tests.md](research/2026-10-11-code-health/audit-tests.md)
-- [docs/research/2026-10-11-code-health/audit-ugr.md](research/2026-10-11-code-health/audit-ugr.md)
-- [docs/research/2026-10-11-code-health/tool-scan-2026-10-11.md](research/2026-10-11-code-health/tool-scan-2026-10-11.md)
-- [docs/research/2026-10-11-s8-zoom-evidence.md](research/2026-10-11-s8-zoom-evidence.md)
-- [docs/research/2026-10-11-sentinelbar.md](research/2026-10-11-sentinelbar.md)
-- [docs/research/2026-10-copenet-boundary.md](research/2026-10-copenet-boundary.md)
-- [docs/research/2026-10-dom-validation.md](research/2026-10-dom-validation.md)
-- [docs/research/2026-10-journal-anchors-audit.md](research/2026-10-journal-anchors-audit.md)
-- [docs/research/2026-10-observability.md](research/2026-10-observability.md)
-- [docs/research/2026-10-one-world-db-packet.md](research/2026-10-one-world-db-packet.md)
-- [docs/research/2026-10-one-world-pipeline.md](research/2026-10-one-world-pipeline.md)
-- [docs/research/2026-10-per-symbol-connections.md](research/2026-10-per-symbol-connections.md)
-- [docs/research/2026-10-s6-plan.md](research/2026-10-s6-plan.md)
-- [docs/research/2026-10-s7-plan.md](research/2026-10-s7-plan.md)
-- [docs/research/2026-10-s8-legacy-deletion.md](research/2026-10-s8-legacy-deletion.md)
-- [docs/research/2026-10-viewport-autoscale.md](research/2026-10-viewport-autoscale.md)
-- [docs/research/2026-10-widget-audit.md](research/2026-10-widget-audit.md)
-- [docs/research/2026-10-widget-pass-directive.md](research/2026-10-widget-pass-directive.md)
-- [docs/research/2026-10-widget-pass-plan.md](research/2026-10-widget-pass-plan.md)
-- [docs/research/2026-10-workflow-audit.md](research/2026-10-workflow-audit.md)
+Research, initiative briefs and the older feature/re-entry/trading-simulation snapshots are kept
+locally and excluded from future public commits. They are not part of a public checkout. Their
+optional private catalog is `docs/private/INTERNAL_INDEX.md`; ask the owner for a copy only when the
+task needs a named plan. Existing public Git history and deletion diffs still contain older versions.
 
 ## Searching documentation
 
-`.rgignore` excludes research, initiatives, private/archive folders and the older snapshots above
-from default ripgrep searches. It does not delete them or change what Git tracks. Avoid repository
-wide `--no-ignore`, which also includes build output and dependencies.
+`.rgignore` excludes private planning material from normal ripgrep searches, and `.gitignore` keeps
+it out of future commits. Neither changes older Git history. Do not force-add private docs. Avoid
+repository-wide `--no-ignore`, which also includes build output and dependencies.
 
 ```bash
-# Current docs and supporting references, respecting normal ignore rules
+# Public docs and supporting references, respecting normal ignore rules
 rg -n '<pattern>' docs
-# Historical plans/evidence, explicitly requested
+# A private local research copy, only when the task requires it
 rg --no-ignore -n '<pattern>' docs/research
-# A specific older reference
-rg --no-ignore -n '<pattern>' docs/TRADING_SIMULATION_BLUEPRINT.md
 ```
 
-The index keeps links to excluded files so they remain discoverable without loading their contents.
-Other search tools need equivalent exclusions; `.rgignore` controls ripgrep only.
-Positive include globs such as `-g '*.md'` can override file exclusions; use the commands above for
-the normal documentation search scope.
+Other search tools need equivalent exclusions; `.rgignore` controls ripgrep only. Positive include
+globs such as `-g '*.md'` can override file exclusions; use the commands above for the normal scope.
