@@ -601,6 +601,260 @@
           "sort": "desc"
         }
       }
+    },
+    {
+      "id": 19,
+      "type": "row",
+      "title": "Ingest (capture)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 40
+      },
+      "panels": []
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Capture queue bytes per product",
+      "description": "Bytes each product has queued for its disk worker. Scrape interval is 15 s, so a spike shorter than one scrape is invisible here.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sentinel-vm"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 41
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sentinel-vm"
+          },
+          "expr": "sentinel_capture_queue_bytes{job=\"sentinel-capture\"}",
+          "legendFormat": "{{product}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Capture queue pool usage",
+      "description": "Share of the shared capture queue pool in use. The capture exits when the pool is full (alert A4b fires above 50%). Scrape interval is 15 s, so a spike shorter than one scrape is invisible here.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sentinel-vm"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 41
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sentinel-vm"
+          },
+          "expr": "100 * sum(sentinel_capture_queue_used_bytes{job=\"sentinel-capture\"}) / max(sentinel_capture_queue_pool_bytes{job=\"sentinel-capture\"})",
+          "legendFormat": "pool used",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Capture reconnects per hour",
+      "description": "Reconnects per product in the last hour. The gauge is the established connection id, so each reconnect adds 1. Normal is 0-3 per hour.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sentinel-vm"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 49
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sentinel-vm"
+          },
+          "expr": "increase(sentinel_capture_connection{job=\"sentinel-capture\"}[1h])",
+          "legendFormat": "{{product}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Fan-out ingress drops and overflow (per 5 min)",
+      "description": "Record or control events that fan-out ingress refused (forces a socket resume; journal records are not dropped), and client disconnects with reason ingress_overflow. Scrape interval is 15 s, so a spike shorter than one scrape is invisible here.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sentinel-vm"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 49
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sentinel-vm"
+          },
+          "expr": "increase(sentinel_fanout_ingress_drops_total{job=\"sentinel-capture\"}[5m])",
+          "legendFormat": "drops {{product}}",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sentinel-vm"
+          },
+          "expr": "increase(sentinel_fanout_disconnects_total{job=\"sentinel-capture\",reason=\"ingress_overflow\"}[5m])",
+          "legendFormat": "ingress_overflow disconnects",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "Fan-out client queue bytes",
+      "description": "Largest pending wire byte count over the 8 fan-out client slots. Scrape interval is 15 s, so a spike shorter than one scrape is invisible here.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sentinel-vm"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 49
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "sentinel-vm"
+          },
+          "expr": "max(sentinel_fanout_queue_bytes{job=\"sentinel-capture\"})",
+          "legendFormat": "max client queue",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     }
   ]
 }
