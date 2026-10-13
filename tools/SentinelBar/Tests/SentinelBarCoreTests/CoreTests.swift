@@ -168,18 +168,27 @@ struct CoreTests {
         #expect(BudgetGuide.duration("unknown") == nil)
     }
 
-    @Test func chartPlanSlicesAndBugRows() throws {
-        let path = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("docs/research/2026-10-11-chart-core-architecture.md")
-        let plan = PlanParser.parse(try String(contentsOf: path, encoding: .utf8))
+    @Test func planSliceTableAndBugRows() {
+        let plan = PlanParser.parse("""
+        # Example feature plan
+        ### Phase 1: Foundation
+        **S0a: Establish baseline**
+        **S0f (review): Validate baseline**
+        ### Phase 2: Implementation
+        **S1: Implement policy**
+        **S15: Complete integration**
+        ### Phase 3: Follow-up bugs
+        | ID | Issue | Acceptance |
+        | --- | --- | --- |
+        | B1 | Boundary condition | Reproduction passes |
+        | B7 | Teardown | Cleanup completes |
+        """)
         let ids = Set(plan.phases.flatMap(\.slices).map(\.id))
-        for id in ["S0a", "S0b", "S0c", "S0d", "S0e", "S0f"] + (1...15).map({ "S\($0)" })
-            + (1...7).map({ "B\($0)" }) {
-            #expect(ids.contains(id), "missing \(id)")
-        }
-        #expect(plan.title.hasPrefix("Chart core architecture"))
+        #expect(ids == Set(["S0a", "S0f", "S1", "S15", "B1", "B7"]))
+        #expect(plan.title == "Example feature plan")
+        #expect(plan.phases.count == 3)
+        #expect(plan.phases.first?.slices.first?.title == "Establish baseline")
+        #expect(plan.phases.last?.slices.first?.title == "Boundary condition")
     }
 
     @Test func trailersAndBranchBoundaries() {

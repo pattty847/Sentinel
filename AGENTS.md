@@ -69,7 +69,7 @@ changes behaviour, data or looks (owner decisions) or needs an approval listed i
 
 ## 3a) Chart core: where chart behaviour goes (owner, 2026-10-11)
 
-`UnifiedGridRenderer` (UGR) is a Qt Quick shell. It changes only for item lifecycle, window/sync wiring and `QQuickItem` overrides. The migration plan is `docs/research/2026-10-11-chart-core-architecture.md`; until S15 lands, chart-view features are frozen (bug fixes land in the slice that owns the code).
+`UnifiedGridRenderer` (UGR) is a Qt Quick shell. It changes only for item lifecycle, window/sync wiring and `QQuickItem` overrides. The completed migration plan is kept in the private local research archive; current architecture is in `docs/ARCHITECTURE.md`. S15 has landed and the chart-view feature freeze has ended (see STATUS).
 
 - View behaviour (camera, zoom, glide, fit, follow-live, placement, timeframe or symbol switch) goes in a policy class in `libs/gui/chart/core/` once that directory exists, never as new UGR members. `ChartViewController` only sequences policies: no arithmetic or branching on prices, times or pixels.
 - `sentinel_chart_core` links QtCore only: no QtGui, QtQuick, QSG, QML or `QQuickWindow` (the build and `chart-health.sh` enforce it). It never includes `HeatmapGpuLayer.hpp`, the source controller or recording types; it talks through `ChartPorts.hpp`.
@@ -226,6 +226,10 @@ Update the relevant canonical doc in the same change:
 approved; after the work lands the file is frozen and nobody maintains it. Current truth is the code,
 this file and `docs/STATUS.md`. Do not refresh old plans to match new code. An explicit planning
 task can create or amend its named plan; a general code or documentation cleanup task cannot.
+Research, initiatives and planning snapshots are private local files excluded by `.gitignore`;
+never force-add them or copy their full contents into public docs. Their local catalog is
+`docs/private/INTERNAL_INDEX.md`, which is not shipped in public checkouts. Ask for a private copy
+only when the task requires that plan; otherwise use the code and maintained public references.
 
 ## 8a) Commits and Git
 

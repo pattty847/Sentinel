@@ -4,7 +4,7 @@
 
 A desktop workstation for viewing market structure, order flow, and real-time data. A headless server ingests and records Coinbase market data. A Qt client draws it on the GPU. Orders are simulated: Sentinel has paper trading only and sends no real orders.
 
-Documentation: [current references and plan archive](docs/README.md).
+Documentation: [documentation index](docs/README.md).
 
 <div align="center">
   <img src="https://img.shields.io/badge/C%2B%2B-20-blue" />
