@@ -1,10 +1,12 @@
 #include <gtest/gtest.h>
 #include "datasources/RemoteGridDataSource.hpp"
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QEvent>
 #include <QEventLoop>
 #include <QTemporaryDir>
 #include <QScopeGuard>
+#include <QStringList>
 #include "config/AgentHostMode.hpp"
 #include <chrono>
 #include <thread>
@@ -20,6 +22,8 @@ struct CandleDataSourceTest : testing::Test {
     QCoreApplication app{argc, argv};
     RemoteGridDataSource source{"127.0.0.1", "1"};
 
+    bool candleRetryActive() const { return source.m_candleBackfillTimer.isActive(); }
+    qint64 candleRetryDelay() const { return source.m_candleBackfill.retryDelayMs(QDateTime::currentMSecsSinceEpoch()); }
     SentinelStreamClient& client() { return *source.streamClient(); }
     void deliver() { QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall); }
     size_t pendingBookCount() const { return source.m_pendingBookSnapshots.size(); }
@@ -99,12 +103,12 @@ struct CandleDataSourceTest : testing::Test {
     CandleSeriesBuffer::CandleBar cached(qint64 startMinute) {
         auto* buffer = qobject_cast<CandleSeriesBuffer*>(source.candleBuffer());
         std::vector<CandleSeriesBuffer::CandleBar> bars;
-        EXPECT_TRUE(buffer->getVisibleSlice("BTC-USD", 60, startMinute * minute,
+        EXPECT_TRUE(buffer->getVisibleSlice("BTC-USD", 60000, startMinute * minute,
                                            startMinute * minute + 1, bars));
         return bars.empty() ? CandleSeriesBuffer::CandleBar{} : bars.front();
     }
     void warm(qint64 start = 1000, qint64 end = 1010) {
-        source.setCandleHistoryViewport("BTC-USD", 60, start * minute, end * minute);
+        source.setCandleHistoryViewport("BTC-USD", 60000, start * minute, end * minute);
         qint64 boundary = end;
         const qint64 target = start - (end - start);
         while (boundary > target) {
@@ -122,7 +126,7 @@ struct CandleDataSourceTest : testing::Test {
         client().connected();
         deliver();
         // This is the configured-history readiness callback used by MainWindowGPU.
-        source.setCandleHistoryViewport("BTC-USD", 60, start * minute, end * minute);
+        source.setCandleHistoryViewport("BTC-USD", 60000, start * minute, end * minute);
     }
 };
 
@@ -155,16 +159,16 @@ TEST_F(CandleDataSourceTest, SelectionReentryRefreshRejectsAlreadyQueuedLiveBars
     live("BTC-USD", 60, 1005, 1, 50, true);
     deliver();
     live("BTC-USD", 60, 1005, 666, 51, false); // queued under old A generation
-    source.setCandleHistoryViewport("ETH-USD", 60, 0, 0);
-    source.setCandleHistoryViewport("BTC-USD", 60, 1000 * minute, 1010 * minute);
+    source.setCandleHistoryViewport("ETH-USD", 60000, 0, 0);
+    source.setCandleHistoryViewport("BTC-USD", 60000, 1000 * minute, 1010 * minute);
     live("ETH-USD", 60, 1005, 777, 52, false); // current generation, wrong symbol
     live("BTC-USD", 300, 1005, 888, 53, true); // current generation, wrong timeframe
     deliver();
     EXPECT_EQ(cached(1005).seq, 0); // old queued A cannot reclaim ownership after A -> B -> A
     auto* buffer = qobject_cast<CandleSeriesBuffer*>(source.candleBuffer());
     std::vector<CandleSeriesBuffer::CandleBar> wrongSelection;
-    EXPECT_FALSE(buffer->getVisibleSlice("ETH-USD", 60, 1005 * minute, 1006 * minute, wrongSelection));
-    EXPECT_FALSE(buffer->getVisibleSlice("BTC-USD", 300, 1005 * minute, 1006 * minute, wrongSelection));
+    EXPECT_FALSE(buffer->getVisibleSlice("ETH-USD", 60000, 1005 * minute, 1006 * minute, wrongSelection));
+    EXPECT_FALSE(buffer->getVisibleSlice("BTC-USD", 300000, 1005 * minute, 1006 * minute, wrongSelection));
     const auto refresh = takeRequest();
     ASSERT_FALSE(refresh.is_null());
     EXPECT_EQ(refresh.at("end_time_sec"), 1010 * 60);
@@ -181,8 +185,8 @@ TEST_F(CandleDataSourceTest, SelectionReentryRefreshRejectsAlreadyQueuedLiveBars
 TEST_F(CandleDataSourceTest, TimeframeReentryAlsoRefreshesAndRejectsQueuedClose) {
     warm();
     live("BTC-USD", 60, 1009, 666, 51, true); // old queued close must also be rejected
-    source.setCandleHistoryViewport("BTC-USD", 300, 0, 0);
-    source.setCandleHistoryViewport("BTC-USD", 60, 1000 * minute, 1010 * minute);
+    source.setCandleHistoryViewport("BTC-USD", 300000, 0, 0);
+    source.setCandleHistoryViewport("BTC-USD", 60000, 1000 * minute, 1010 * minute);
     deliver();
     EXPECT_EQ(cached(1009).seq, 0);
     const auto refresh = takeRequest();
@@ -201,7 +205,7 @@ TEST_F(CandleDataSourceTest, WideRefreshPagesNewestFirstThenResumesOlderBackfill
         EXPECT_EQ(request.at("end_time_sec"), end * 60);
         EXPECT_EQ(request.at("limit"), limit);
         if (end == 1400)
-            source.setCandleHistoryViewport("BTC-USD", 60, 950 * minute, 1400 * minute);
+            source.setCandleHistoryViewport("BTC-USD", 60000, 950 * minute, 1400 * minute);
         EXPECT_TRUE(takeRequest(110).is_null());
         reply(request, Json::array({candle(end - limit, 5), candle(end - 1, 5)}));
     }
@@ -405,7 +409,7 @@ TEST_F(CandleDataSourceTest, StaleL2RequestsFreshSnapshotsWithBoundedBackoff) {
 }
 
 TEST_F(CandleDataSourceTest, FifteenMinuteViewportSendsNativeBarPageThroughRealClientQueue) {
-    source.setCandleHistoryViewport("BTC-USD", 900, 1000 * 900000LL, 2344 * 900000LL);
+    source.setCandleHistoryViewport("BTC-USD", 900000, 1000 * 900000LL, 2344 * 900000LL);
     const auto request = takeRequest();
     ASSERT_FALSE(request.is_null());
     EXPECT_EQ(request.at("type"), "candle_history_request");
@@ -452,4 +456,49 @@ TEST_F(CandleDataSourceTest, DisconnectClearsReplicaBeforeGuardedStartupResubscr
     bookSnapshot(400.0, 401.0);
     deliver();
     EXPECT_FALSE(source.getDirectLiveOrderBook("BTC-USD").isEmpty());
+}
+
+namespace {
+QStringList* refusalMessages = nullptr;
+void captureCandleRefusal(QtMsgType, const QMessageLogContext&, const QString& message) {
+    if (refusalMessages && message.contains("Candle history refused:")) refusalMessages->push_back(message);
+}
+}
+TEST_F(CandleDataSourceTest, RefusedMillisecondsSendNothingLogOnceAndNeverRetry) {
+    QStringList messages;
+    refusalMessages = &messages;
+    const auto previous = qInstallMessageHandler(captureCandleRefusal);
+    const auto restore = qScopeGuard([&] { qInstallMessageHandler(previous); refusalMessages = nullptr; });
+    for (qint64 tfMs : {100, 1500}) {
+        source.setCandleHistoryViewport("BTC-USD", tfMs, 0, 0);
+        const int before = messages.size();
+        EXPECT_EQ(before, tfMs == 100 ? 1 : 2);
+        for (int i = 0; i < 3; ++i)
+            source.setCandleHistoryViewport("BTC-USD", tfMs, (1000 + i) * minute, (1010 + i) * minute);
+        EXPECT_TRUE(takeRequest(30).is_null());
+        EXPECT_EQ(messages.size(), before);
+        ASSERT_FALSE(messages.isEmpty());
+        EXPECT_TRUE(messages.back().contains("symbol=BTC-USD"));
+        EXPECT_TRUE(messages.back().contains("tfMs=" + QString::number(tfMs)));
+        EXPECT_TRUE(messages.back().contains("reason=timeframe_not_positive_whole_seconds"));
+        client().candleHistoryFailed("BTC-USD");
+        live("BTC-USD", 1, 1005, 99, 1, false);
+        deliver();
+        EXPECT_FALSE(candleRetryActive());
+        EXPECT_EQ(candleRetryDelay(), 0);
+        EXPECT_TRUE(takeRequest(30).is_null());
+    }
+    source.setCandleHistoryViewport("ETH-USD", 1500, 1000 * minute, 1010 * minute);
+    EXPECT_EQ(messages.size(), 3);
+    source.setCandleHistoryViewport("BTC-USD", 1000, 1000 * minute, 1010 * minute);
+    const auto whole = takeRequest();
+    ASSERT_FALSE(whole.is_null());
+    EXPECT_EQ(whole.at("timeframe_sec"), 1);
+    source.setCandleHistoryViewport("BTC-USD", 100, 1000 * minute, 1010 * minute);
+    client().candleHistoryFailed("BTC-USD");
+    deliver();
+    EXPECT_FALSE(candleRetryActive());
+    EXPECT_EQ(candleRetryDelay(), 0);
+    EXPECT_TRUE(takeRequest(30).is_null());
+    EXPECT_EQ(messages.size(), 4);
 }

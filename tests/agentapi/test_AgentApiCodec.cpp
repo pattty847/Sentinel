@@ -349,7 +349,7 @@ TEST(AgentApiCodec, CandleHalfOpenAndPageLimit) {
         b.volume = 2; b.isClosed = true; b.seq = t;
         fixture.push_back(b);
     }
-    buffer.applyHistory("BTC-USD", 1, fixture);
+    buffer.applyHistory("BTC-USD", 1000, fixture);
     Metadata meta{"s", "BTC-USD", 1, 4000, false, "unknown", false};
     auto first = captureCandles(buffer, "BTC-USD", 1000, 3000, 1000, 1, meta);
     ASSERT_TRUE(first);
@@ -535,4 +535,14 @@ TEST(AgentApiCodec, TradeEvidencePreservesEventTimeSeparatelyFromReceiveWindow) 
     ASSERT_EQ(s.trades.size(), 1);
     EXPECT_EQ(data["timeBasis"].toString(), "received");
     EXPECT_EQ(data["trades"].toArray()[0].toObject()["eventTimeMs"].toInteger(), 1000);
+}
+
+TEST(AgentApiSnapshots, NonWholeSecondQueryDoesNotTruncateToWholeSecondSeries) {
+    CandleSeriesBuffer buffer;
+    for (int64_t tfMs : {1000, 2000})
+        buffer.applyHistory("BTC-USD", tfMs, {{3000, 3000 + tfMs, 10, 10, 10, 10, 1, true, 0, false}});
+    for (int64_t tfMs : {100, 1500}) {
+        const auto snapshot = AgentApi::captureCandles(buffer, "BTC-USD", 0, 10000, tfMs, 10, {});
+        EXPECT_TRUE(!snapshot || snapshot->bars.empty());
+    }
 }

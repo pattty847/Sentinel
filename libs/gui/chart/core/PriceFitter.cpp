@@ -32,7 +32,7 @@ std::optional<std::pair<qint64, qint64>> PriceFitter::gpuFitTimeWindow() const {
   if (anchor <= 0) return std::nullopt;
   int64_t oldest = environment_.oldestAvailableMs();
   if (oldest <= 0 && candles_)
-    oldest = candles_->oldestTimeMs(controller_.session().symbol, std::max<int64_t>(1, (tf + 500) / 1000));
+    oldest = candles_->oldestTimeMs(controller_.session().symbol, tf);
   const int64_t dataEnd = recording::floorDiv(anchor + tf - 1, tf) * tf; // the live bucket's end
   const int64_t dataStart = oldest > 0 ? recording::floorDiv(oldest, tf) * tf : 0;
   const double maxTime = controller_.viewPtr()->maxTimeSpanMs();
@@ -92,7 +92,7 @@ PriceFitter::VisibleBars PriceFitter::collectVisibleBars(int64_t tf, double draw
   auto& bars = bars_; // reused: the auto price scale runs this on every change in view
   bars.clear();
   if (candles_ && last > first)
-    candles_->visibleBars(controller_.session().symbol, std::max<int64_t>(1, (tf + 500) / 1000), alignedStart, last, bars);
+    candles_->visibleBars(controller_.session().symbol, tf, alignedStart, last, bars);
   size_t used = 0;
   double newestClose = 0;
   qint64 newestStart = 0;
@@ -230,12 +230,12 @@ void PriceFitter::refitAutoPrice() {
   if (controller_.flags().priceKnown != known) controller_.syncGpuView();
 }
 
-void PriceFitter::candlesDirty(const QString& symbol, int64_t timeframeSec, qint64 dirtyStart, qint64 dirtyEnd) {
+void PriceFitter::candlesDirty(const QString& symbol, int64_t timeframeMs, qint64 dirtyStart, qint64 dirtyEnd) {
   if (!controller_.viewPtr() || !controller_.viewPtr()->autoPriceScale() ||
       !controller_.viewPtr()->isTimeWindowValid() || symbol != controller_.session().symbol)
     return;
   const int64_t tf = std::max<int64_t>(1, controller_.session().timeframeMs);
-  if (timeframeSec != std::max<int64_t>(1, (tf + 500) / 1000)) return;
+  if (timeframeMs != tf) return;
   // The window drawn on screen (a drag commits only at release).
   const auto [shownStart, shownEnd] = controller_.viewPtr()->displayedTimeWindow();
   const auto [drawnStart, drawnEnd] = controller_.camera().drawnTimeWindow(shownStart, shownEnd);

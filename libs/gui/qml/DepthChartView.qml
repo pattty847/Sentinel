@@ -100,7 +100,7 @@ Rectangle {
         mappingProvider: unifiedGridRenderer
         candleBuffer: dataSource ? dataSource.candleBuffer : null
         symbol: root.symbol
-        timeframeSec: Math.max(1, Math.round(unifiedGridRenderer.view.timeframeMs / 1000))
+        timeframeMs: unifiedGridRenderer.view.timeframeMs
         candleStyle: unifiedGridRenderer.candles.candleStyle
         upColor: unifiedGridRenderer.candles.candleUpColor
         downColor: unifiedGridRenderer.candles.candleDownColor

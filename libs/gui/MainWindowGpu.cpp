@@ -1073,11 +1073,11 @@ void MainWindowGPU::sendTpoHistoryPage(const std::optional<tpo::HistoryPager::Re
 void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
     auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
     if (!renderer || !m_dataSource) return;
-    const int64_t tfSec = std::max<int64_t>(1, (renderer->view()->getCurrentTimeframe() + 999LL) / 1000);
+    const int64_t tfMs = renderer->view()->getCurrentTimeframe();
     const bool ready = canRequestConfiguredHistoryForSymbol(symbol);
     // Selection is updated even before readiness/viewport initialization, so a
     // queued reply from the previous selection can never enter the new series.
-    m_dataSource->setCandleHistoryViewport(symbol, tfSec,
+    m_dataSource->setCandleHistoryViewport(symbol, tfMs,
         ready ? renderer->view()->getVisibleTimeStart() : 0,
         ready ? renderer->view()->getVisibleTimeEnd() : 0);
 }

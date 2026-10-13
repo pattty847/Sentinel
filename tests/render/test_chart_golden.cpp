@@ -161,13 +161,13 @@ struct Harness {
             const qint64 t = viewLo + i * minute;
             bars.push_back({t, t + minute, open, high, low, close, 1, true, 0, false});
         }
-        buffer.applyHistory("BTC-USD", 60, bars);
+        buffer.applyHistory("BTC-USD", 60000, bars);
         candles = new CandlestickOverlayItem(scene.window()->contentItem());
         candles->setSize(ugr->size());
         candles->setMappingProvider(ugr);
         candles->setCandleBuffer(&buffer);
         candles->setSymbol("BTC-USD");
-        candles->setTimeframeSec(60);
+        candles->setTimeframeMs(60000);
         candles->setZ(2);
     }
     void addBubbles() {

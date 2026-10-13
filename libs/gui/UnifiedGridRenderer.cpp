@@ -357,9 +357,9 @@ void UnifiedGridRenderer::setCandleBuffer(QObject* buffer) {
     // Auto price scale: a candle update or history page in view refits price (a few
     // compares when it is off or out of view; a bump only when the fit changed).
     m_connections.candleDirty = connect(candles, &CandleSeriesBuffer::candlesDirty, this,
-                                [this](const QString& symbol, int64_t timeframeSec, qint64 dirtyStart,
+                                [this](const QString& symbol, int64_t timeframeMs, qint64 dirtyStart,
                                        qint64 dirtyEnd) {
-                                  m_view->priceFitter().candlesDirty(symbol, timeframeSec, dirtyStart, dirtyEnd);
+                                  m_view->priceFitter().candlesDirty(symbol, timeframeMs, dirtyStart, dirtyEnd);
                                 });
   }
   refitAutoPrice();

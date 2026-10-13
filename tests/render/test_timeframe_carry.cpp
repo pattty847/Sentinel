@@ -196,9 +196,11 @@ TEST_F(TimeframeCarryTest, InvalidWindowSkipsColumnSolve) {
 }
 struct Candles final : chart::ICandleSource {
     mutable int reads = 0;
+    mutable int64_t interval = 0;
+    int64_t expectedInterval = 1000;
     void visibleBars(const QString& symbol, int64_t tf, int64_t start, int64_t end,
                      std::vector<chart::CandleBar>& out) const override {
-        EXPECT_EQ(symbol, "TEST"); EXPECT_EQ(tf, 1); EXPECT_EQ(start, 0); EXPECT_EQ(end, 10000);
+        EXPECT_EQ(symbol, "TEST"); EXPECT_EQ(tf, expectedInterval); interval = tf; EXPECT_EQ(start, 0); EXPECT_EQ(end, 10000);
         ++reads;
         out.resize(3); out[0].close = 90; out[1].close = 100;
         out[2].close = std::numeric_limits<double>::quiet_NaN();
@@ -288,3 +290,17 @@ TEST_F(TimeframeCarryTest, InvalidCarryAndTimerReseedGuard) {
     EXPECT_FALSE(c.priceFitter().priceCarry());
 }
 } // namespace
+
+TEST_F(TimeframeCarryTest, CandleFallbackKeepsNonWholeSecondMilliseconds) {
+    Candles candles;
+    f.candles = &candles;
+    env.mid = 0;
+    for (int64_t tf : {100, 1500}) {
+        c.session().timeframeMs = tf;
+        candles.expectedInterval = tf;
+        f.capture();
+        EXPECT_EQ(candles.interval, tf);
+        ASSERT_TRUE(c.priceFitter().priceCarry());
+        EXPECT_DOUBLE_EQ(c.priceFitter().priceCarry()->spanRatio, .2);
+    }
+}

@@ -28,7 +28,7 @@ public:
     void refitAutoPrice();
     uint64_t autoPriceFitRevision() const { return autoPriceFitRevision_; }
     uint64_t autoPriceSolveCountForTest() const { return autoPriceSolveCount_; }
-    void candlesDirty(const QString& symbol, int64_t timeframeSec, qint64 dirtyStart, qint64 dirtyEnd);
+    void candlesDirty(const QString& symbol, int64_t timeframeMs, qint64 dirtyStart, qint64 dirtyEnd);
 
 private:
     struct PriceRange { double lo = 0, hi = 0, centre = 0, span = 0; };

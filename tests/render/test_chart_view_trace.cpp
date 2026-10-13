@@ -104,7 +104,7 @@ public:
             const qint64 t = centre + i * minute;
             bars.push_back({t, t + minute, 100150, 100150 + radius, 100150 - radius, 100150, 1, true, 0, false});
         }
-        candles.applyHistory("BTC-USD", 60, bars);
+        candles.applyHistory("BTC-USD", 60000, bars);
         chart.setCandleBuffer(&candles);
     }
     ~Trace() {

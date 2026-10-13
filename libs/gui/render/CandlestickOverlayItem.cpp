@@ -4,6 +4,7 @@ GPU-batched candlestick overlay (demo data only).
 */
 #include "CandlestickOverlayItem.hpp"
 #include "CandlePixelGeometry.hpp"
+#include "../chart/core/CandleInterval.hpp"
 #include "../datasources/CandleSeriesBuffer.hpp"
 #include "SentinelLogging.hpp"
 
@@ -237,21 +238,21 @@ void CandlestickOverlayItem::setSymbol(const QString& symbol) {
     if (m_symbol == symbol) {
         return;
     }
-    sLog_Render("Candle overlay symbol: " << m_symbol << "->" << symbol << " tfSec=" << m_timeframeSec);
+    sLog_Render("Candle overlay symbol: " << m_symbol << "->" << symbol << " tfMs=" << m_timeframeMs);
     m_symbol = symbol;
     markGeometryDirty();
     emit symbolChanged();
 }
 
-void CandlestickOverlayItem::setTimeframeSec(int sec) {
-    if (m_timeframeSec == sec || sec <= 0) {
+void CandlestickOverlayItem::setTimeframeMs(int ms) {
+    if (m_timeframeMs == ms) {
         return;
     }
-    sLog_Render("Candle overlay timeframe: tfSec=" << m_timeframeSec << "->" << sec << " symbol=" << m_symbol);
-    m_timeframeSec = sec;
+    sLog_Render("Candle overlay timeframe: tfMs=" << m_timeframeMs << "->" << ms << " symbol=" << m_symbol);
+    m_timeframeMs = ms;
     m_lastBoundarySequence = std::numeric_limits<qint64>::min();
     markGeometryDirty();
-    emit timeframeSecChanged();
+    emit timeframeMsChanged();
 }
 
 void CandlestickOverlayItem::setCandleStyle(int style) {
@@ -297,10 +298,10 @@ void CandlestickOverlayItem::connectCandleSignals() {
     m_candleDirtyConn = connect(m_candleBuffer, &CandleSeriesBuffer::candlesDirty,
                                 this,
                                 [this](const QString& symbol,
-                                       int64_t timeframeSec,
+                                       int64_t timeframeMs,
                                        qint64 dirtyStartMs,
                                        qint64 dirtyEndMs) {
-                                    if (symbol != m_symbol || timeframeSec != m_timeframeSec) {
+                                    if (symbol != m_symbol || timeframeMs != m_timeframeMs) {
                                         return;
                                     }
                                     if (!m_mappingProvider) {
@@ -347,7 +348,8 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         root = new CandleOverlayNode();
     }
 
-    if (!m_mappingProvider) {
+    if (!m_mappingProvider || !chart::candleTimeframeSeconds(m_timeframeMs)) {
+        m_geometryDirty = true;
         root->setCounts(0, 0);
         root->wickNode->markDirty(QSGNode::DirtyGeometry);
         root->bodyNode->markDirty(QSGNode::DirtyGeometry);
@@ -364,7 +366,9 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         m_lastMapping = mapping;
         m_geometryDirty = true;
     }
-    if (!mapping.valid || !frame.viewportValid) {
+    if (!mapping.valid || !frame.viewportValid ||
+        (frame.activeTimeframeMs > 0 && !chart::candleTimeframeSeconds(frame.activeTimeframeMs))) {
+        m_geometryDirty = true;
         root->setCounts(0, 0);
         root->wickNode->markDirty(QSGNode::DirtyGeometry);
         root->bodyNode->markDirty(QSGNode::DirtyGeometry);
@@ -372,7 +376,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     }
 
     const QSizeF currentSize(width(), height());
-    const qint64 expectedTfMs = static_cast<qint64>(m_timeframeSec) * 1000;
+    const qint64 expectedTfMs = m_timeframeMs;
     const bool cadenceMatches = (expectedTfMs > 0 && frame.activeTimeframeMs == expectedTfMs);
     if (cadenceMatches && frame.boundarySequence != m_lastBoundarySequence) {
         // Boundary progression comes from TimeAuthority and may advance with sparse/no-event windows.
@@ -397,7 +401,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
 
     bool hasData = false;
     m_visibleCandles.clear();
-    if (m_candleBuffer && !m_symbol.isEmpty() && m_timeframeSec > 0) {
+    if (m_candleBuffer && !m_symbol.isEmpty() && m_timeframeMs > 0) {
         m_bufferSlice.clear();
         // gpu renderer: from the bucket under the (drag-panned) left edge, so the candle
         // that starts before the view and ends inside it is drawn (the slice selects by
@@ -409,7 +413,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
             sliceEnd = static_cast<qint64>(std::ceil(mapping.viewEndMs));
         }
         hasData = m_candleBuffer->getVisibleSlice(m_symbol,
-                                                  m_timeframeSec,
+                                                  m_timeframeMs,
                                                   sliceStart,
                                                   sliceEnd,
                                                   m_bufferSlice);
@@ -428,7 +432,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         }
     }
     if (!hasData) {
-        sLog_Probe("candles.empty", "symbol=" << m_symbol << " tfSec=" << m_timeframeSec
+        sLog_Probe("candles.empty", "symbol=" << m_symbol << " tfMs=" << m_timeframeMs
                    << " view=[" << timeStart << ".." << timeEnd << "] buffer=" << (m_candleBuffer != nullptr));
         root->setCounts(0, 0);
         root->wickNode->markDirty(QSGNode::DirtyGeometry);
@@ -486,9 +490,9 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
             const qint64 visFirst = (visibleCount > 0) ? drawBars.front().timeStartMs : 0;
             const qint64 visLast = (visibleCount > 0) ? drawBars.back().timeStartMs : 0;
             const bool autoScroll = frame.viewportAutoScrollEnabled;
-            sLog_Probe("candles.frame", QString("overlay: symbol=%1 tfSec=%2 view=[%3..%4] visible=%5 base_visible=%6 synthetic=%7 source=%8 cadence_match=%9 boundary_seq=%10 boundary_start=%11")
+            sLog_Probe("candles.frame", QString("overlay: symbol=%1 tfMs=%2 view=[%3..%4] visible=%5 base_visible=%6 synthetic=%7 source=%8 cadence_match=%9 boundary_seq=%10 boundary_start=%11")
                        .arg(m_symbol)
-                       .arg(m_timeframeSec)
+                       .arg(m_timeframeMs)
                        .arg(timeStart)
                        .arg(timeEnd)
                        .arg(visibleCount)

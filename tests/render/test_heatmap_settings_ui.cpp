@@ -222,12 +222,12 @@ TEST(CandleStyleTest, SubmittedBodiesMatchRasterEdgesAtRestAndDuringGlide) {
     CandleGeometryItem item;
     CandleSeriesBuffer buffer;
     constexpr qint64 tf = 60'000, time = 600'000;
-    buffer.applyHistory("BTC-USD", 60, {{time, time + tf, 104, 111, 98, 108, 1, true, 0, false}});
+    buffer.applyHistory("BTC-USD", 60000, {{time, time + tf, 104, 111, 98, 108, 1, true, 0, false}});
     item.setSize({640, 320});
     item.setMappingProvider(&provider);
     item.setCandleBuffer(&buffer);
     item.setSymbol("BTC-USD");
-    item.setTimeframeSec(60);
+    item.setTimeframeMs(60000);
     QSGNode* root = nullptr;
     const auto submit = [&](const chart_raster::RasterCamera& camera) {
         auto& f = provider.frame;
@@ -502,13 +502,13 @@ void checkIndependentAxisGeometry(bool timeFree) {
             provider.frame.viewportTimeStart = in.timeStart;
             provider.frame.viewportTimeEnd = in.timeEnd;
             CandleSeriesBuffer buffer;
-            buffer.applyHistory("BTC-USD", 60, {{bucket, bucket + 60'000, open, 111, 98, close, 1, true, 0, false}});
+            buffer.applyHistory("BTC-USD", 60000, {{bucket, bucket + 60'000, open, 111, 98, close, 1, true, 0, false}});
             CandleGeometryItem item;
             item.setSize({640, 320});
             item.setMappingProvider(&provider);
             item.setCandleBuffer(&buffer);
             item.setSymbol("BTC-USD");
-            item.setTimeframeSec(60);
+            item.setTimeframeMs(60000);
             std::unique_ptr<QSGNode> root(item.updatePaintNode(nullptr, nullptr));
             const auto* geometry = static_cast<QSGGeometryNode*>(root->lastChild())->geometry();
             ASSERT_EQ(geometry->vertexCount(), 6);
