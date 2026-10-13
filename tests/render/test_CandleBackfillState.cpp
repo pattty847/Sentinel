@@ -13,6 +13,13 @@ bool accept(CandleBackfillState& state, const CandleBackfillState::Request& requ
             qint64 oldestMs, qint64 at = now) {
     return state.accept(request.symbol, request.timeframeMs, request.startMs, request.endMs, oldestMs, at);
 }
+bool acceptWireReply(CandleBackfillState& state, const CandleBackfillState::Request& request,
+                     qint64 oldestMs, qint64 at = now) {
+    const qint64 endSec = request.endMs / 1000;
+    const qint64 startSec = endSec - request.timeframeMs / 1000 * request.limit;
+    return state.accept(request.symbol, request.timeframeMs, startSec * 1000, endSec * 1000, oldestMs, at);
+}
+
 }
 
 TEST(CandleBackfillState, PrefetchesOneScreenBeforeViewportAndStopsInsideCoverage) {
@@ -21,8 +28,8 @@ TEST(CandleBackfillState, PrefetchesOneScreenBeforeViewportAndStopsInsideCoverag
     EXPECT_FALSE(state.next(900 * minute, false, now));
     auto request = state.next(950 * minute, false, now);
     ASSERT_TRUE(request);
-    EXPECT_EQ((request->startMs / 1000), 900 * 60);
-    EXPECT_EQ((request->endMs / 1000), 950 * 60);
+    EXPECT_EQ(request->startMs, 900 * minute);
+    EXPECT_EQ(request->endMs, 950 * minute);
     EXPECT_EQ(request->limit, 50);
     EXPECT_FALSE(state.next(950 * minute, false, now + 1000)); // one flight, even after throttle
 }
@@ -33,13 +40,13 @@ TEST(CandleBackfillState, CapsPagesAndContinuesUntilLatestViewportIsCovered) {
     auto first = state.next(2000 * minute, false, now);
     ASSERT_TRUE(first);
     EXPECT_EQ(first->limit, 350);
-    EXPECT_TRUE(accept(state, *first, (first->startMs / 1000) * 1000));
-    auto second = state.next((first->startMs / 1000) * 1000, false, now + 100);
+    EXPECT_TRUE(accept(state, *first, first->startMs));
+    auto second = state.next(first->startMs, false, now + 100);
     ASSERT_TRUE(second);
-    EXPECT_EQ((second->endMs / 1000), (first->startMs / 1000));
+    EXPECT_EQ(second->endMs, first->startMs);
     view(state, 1900, 2000); // target changed, reply identity did not
-    EXPECT_TRUE(accept(state, *second, (second->startMs / 1000) * 1000, now + 100));
-    EXPECT_FALSE(state.next((second->startMs / 1000) * 1000, false, now + 200));
+    EXPECT_TRUE(accept(state, *second, second->startMs, now + 100));
+    EXPECT_FALSE(state.next(second->startMs, false, now + 200));
 }
 
 TEST(CandleBackfillState, EmptyAndOverlapOnlyWindowsStepBackToOlderBars) {
@@ -48,30 +55,30 @@ TEST(CandleBackfillState, EmptyAndOverlapOnlyWindowsStepBackToOlderBars) {
         view(state);
         auto first = state.next(950 * minute, false, now);
         ASSERT_TRUE(first);
-        EXPECT_TRUE(accept(state, *first, overlap ? (first->endMs / 1000) * 1000 : 0));
+        EXPECT_TRUE(accept(state, *first, overlap ? first->endMs : 0));
         EXPECT_FALSE(state.scanPaused());
         auto second = state.next(950 * minute, false, now + 100);
         ASSERT_TRUE(second); // probe beyond an empty window, even beyond the prefetch target
-        EXPECT_EQ((second->endMs / 1000), (first->startMs / 1000));
+        EXPECT_EQ(second->endMs, first->startMs);
         EXPECT_EQ(second->limit, 350);
-        EXPECT_TRUE(accept(state, *second, (second->startMs / 1000) * 1000, now + 100));
+        EXPECT_TRUE(accept(state, *second, second->startMs, now + 100));
         EXPECT_FALSE(state.scanPaused());
-        EXPECT_FALSE(state.next((second->startMs / 1000) * 1000, false, now + 200));
+        EXPECT_FALSE(state.next(second->startMs, false, now + 200));
         view(state, 400, 700);
-        EXPECT_TRUE(state.next((second->startMs / 1000) * 1000, false, now + 200));
+        EXPECT_TRUE(state.next(second->startMs, false, now + 200));
     }
 }
 
 TEST(CandleBackfillState, EmptyScanResumesFromSavedCursorAfterCooldown) {
     CandleBackfillState state;
     view(state, 4000, 4100);
-    qint64 expectedEnd = 4050 * 60;
+    qint64 expectedEnd = 4050 * minute;
     for (int i = 0; i < CandleBackfillState::kMaxEmptyPages; ++i) {
         auto request = state.next(4050 * minute, false, now + i * 100);
         ASSERT_TRUE(request);
-        EXPECT_EQ((request->endMs / 1000), expectedEnd);
+        EXPECT_EQ(request->endMs, expectedEnd);
         EXPECT_TRUE(accept(state, *request, 0, now + i * 100));
-        expectedEnd = (request->startMs / 1000);
+        expectedEnd = request->startMs;
     }
     EXPECT_TRUE(state.scanPaused());
     EXPECT_FALSE(state.next(4050 * minute, false, now + 300));
@@ -80,7 +87,7 @@ TEST(CandleBackfillState, EmptyScanResumesFromSavedCursorAfterCooldown) {
     EXPECT_FALSE(state.next(4050 * minute, false, now + 500)); // preserved per selection
     auto retry = state.next(4050 * minute, false, now + 200 + CandleBackfillState::kFloorRetryMs);
     ASSERT_TRUE(retry);
-    EXPECT_EQ((retry->endMs / 1000), expectedEnd); // resume beyond all three empty windows
+    EXPECT_EQ(retry->endMs, expectedEnd); // resume beyond all three empty windows
 }
 
 TEST(CandleBackfillState, ErrorAfterEmptyPageRetriesSameWindowWithBackoff) {
@@ -97,9 +104,9 @@ TEST(CandleBackfillState, ErrorAfterEmptyPageRetriesSameWindowWithBackoff) {
     EXPECT_FALSE(state.next(950 * minute, false, now + 2099));
     auto retry = state.next(950 * minute, false, now + 2100);
     ASSERT_TRUE(retry);
-    EXPECT_EQ((retry->startMs / 1000), (second->startMs / 1000));
-    EXPECT_EQ((retry->endMs / 1000), (second->endMs / 1000));
-    EXPECT_TRUE(accept(state, *retry, (retry->startMs / 1000) * 1000, now + 2100));
+    EXPECT_EQ(retry->startMs, second->startMs);
+    EXPECT_EQ(retry->endMs, second->endMs);
+    EXPECT_TRUE(accept(state, *retry, retry->startMs, now + 2100));
 }
 
 TEST(CandleBackfillState, SelectionChangeDropsStaleReplyEvenAfterReturningToSamePair) {
@@ -115,7 +122,7 @@ TEST(CandleBackfillState, SelectionChangeDropsStaleReplyEvenAfterReturningToSame
     EXPECT_FALSE(accept(state, *request, 0, now + 100));
     auto next = state.next(950 * minute, false, now + 100);
     ASSERT_TRUE(next);
-    EXPECT_EQ((next->endMs / 1000), (request->endMs / 1000)); // stale empty reply did not advance the cursor
+    EXPECT_EQ(next->endMs, request->endMs); // stale empty reply did not advance the cursor
 }
 
 TEST(CandleBackfillState, TimeframeChangeDropsStaleReply) {
@@ -127,7 +134,7 @@ TEST(CandleBackfillState, TimeframeChangeDropsStaleReply) {
     EXPECT_FALSE(accept(state, *request, 900 * minute));
     auto next = state.next(0, false, now + 100);
     ASSERT_TRUE(next);
-    EXPECT_EQ((next->timeframeMs / 1000), 300);
+    EXPECT_EQ(next->timeframeMs, 300000);
 }
 
 TEST(CandleBackfillState, InvalidViewportFullCacheAndFutureViewportDoNotRequest) {
@@ -141,7 +148,7 @@ TEST(CandleBackfillState, InvalidViewportFullCacheAndFutureViewportDoNotRequest)
     view(state, 9990, 10010);
     auto request = state.next(0, false, now);
     ASSERT_TRUE(request);
-    EXPECT_EQ((request->endMs / 1000), 10001 * 60);
+    EXPECT_EQ(request->endMs, 10001 * minute);
 }
 
 TEST(CandleBackfillState, SustainedFastPanSendsLeadingAndPeriodicRequests) {
@@ -153,8 +160,8 @@ TEST(CandleBackfillState, SustainedFastPanSendsLeadingAndPeriodicRequests) {
         auto request = state.next(oldest, false, now + elapsed);
         if (!request) continue;
         sentAt.push_back(elapsed);
-        EXPECT_TRUE(accept(state, *request, (request->startMs / 1000) * 1000, now + elapsed));
-        oldest = (request->startMs / 1000) * 1000;
+        EXPECT_TRUE(accept(state, *request, request->startMs, now + elapsed));
+        oldest = request->startMs;
     }
     EXPECT_EQ(sentAt, (std::vector<int>{0, 100, 200}));
     // Trailing request consumes the final viewport after movement stops.
@@ -169,8 +176,8 @@ TEST(CandleBackfillState, SlowReplyPreventsOverlapButDoesNotAddAnotherDebounce) 
     auto request = state.next(2000 * minute, false, now);
     ASSERT_TRUE(request);
     EXPECT_FALSE(state.next(2000 * minute, false, now + 500));
-    EXPECT_TRUE(accept(state, *request, (request->startMs / 1000) * 1000, now + 500));
-    EXPECT_TRUE(state.next((request->startMs / 1000) * 1000, false, now + 500));
+    EXPECT_TRUE(accept(state, *request, request->startMs, now + 500));
+    EXPECT_TRUE(state.next(request->startMs, false, now + 500));
 }
 
 TEST(CandleBackfillState, OneSecondClientUsesInclusiveEndWithoutOverlapAndAcceptsSparseBars) {
@@ -178,14 +185,14 @@ TEST(CandleBackfillState, OneSecondClientUsesInclusiveEndWithoutOverlapAndAccept
     state.setViewport(btc, 1000, 900'000, 1'000'000);
     auto request = state.next(950'000, false, now);
     ASSERT_TRUE(request);
-    EXPECT_EQ((request->endMs / 1000), 949);
+    EXPECT_EQ(request->endMs, 949'000);
     EXPECT_EQ(request->limit, 150); // visible remainder and prefetch fit one page
     // Retained-bar pages can extend earlier than start_time_sec across a gap.
     EXPECT_TRUE(accept(state, *request, 750'000));
     state.setViewport(btc, 1000, 700'000, 800'000);
     auto next = state.next(750'000, false, now + 100);
     ASSERT_TRUE(next);
-    EXPECT_EQ((next->endMs / 1000), 749);
+    EXPECT_EQ(next->endMs, 749'000);
 }
 
 TEST(CandleBackfillState, CoarsePagesCountOutputBarsAndReconnectRearmsSameViewport) {
@@ -218,10 +225,10 @@ TEST(CandleBackfillState, StationaryViewportCrossesLongGapWithTimedPausesAndNoSt
             }
             auto request = state.next(oldest, false, clock);
             ASSERT_TRUE(request) << "page=" << page << " tf=" << tfSec;
-            if (previousStart > 0) EXPECT_LT((request->endMs / 1000), previousStart + (tfSec == 1 ? 0 : 1));
-            previousStart = (request->startMs / 1000);
+            if (previousStart > 0) EXPECT_LT(request->endMs, previousStart + (tfSec == 1 ? 0 : 1000));
+            previousStart = request->startMs;
             EXPECT_FALSE(state.next(oldest, false, clock + 500)); // no second flight
-            const qint64 replyOldest = page == 7 ? (request->startMs / 1000) * 1000 : 0;
+            const qint64 replyOldest = page == 7 ? request->startMs : 0;
             ASSERT_TRUE(accept(state, *request, replyOldest, clock));
         }
         EXPECT_EQ(pauses, 2); // eight pages require two full 60s pauses, with no viewport updates
@@ -241,12 +248,12 @@ TEST(CandleBackfillState, OneSecondEmptyLookbackIsBoundedAcrossPauses) {
         clock += state.retryDelayMs(clock);
         auto request = state.next(oldest, false, clock);
         ASSERT_TRUE(request);
-        scannedStart = (request->startMs / 1000);
-        EXPECT_GE(scannedStart, oldest / 1000 - budgetSec);
+        scannedStart = request->startMs;
+        EXPECT_GE(scannedStart, oldest - budgetSec * 1000);
         ASSERT_TRUE(accept(state, *request, 0, clock));
         ++pages;
     }
-    EXPECT_EQ(scannedStart, oldest / 1000 - budgetSec);
+    EXPECT_EQ(scannedStart, oldest - budgetSec * 1000);
     EXPECT_EQ(pages, 6);
     EXPECT_FALSE(state.needsOlderData(oldest, false, clock + 10 * CandleBackfillState::kFloorRetryMs));
     EXPECT_FALSE(state.next(oldest, false, clock + 10 * CandleBackfillState::kFloorRetryMs));
@@ -275,8 +282,8 @@ TEST(CandleBackfillState, ExplicitRefreshBypassesCoveredFullCacheThenStops) {
     auto refresh = state.next(800 * minute, true, now);
     ASSERT_TRUE(refresh);
     EXPECT_TRUE(refresh->refresh);
-    EXPECT_EQ((refresh->endMs / 1000), 1100 * 60);
-    EXPECT_EQ((refresh->startMs / 1000), 900 * 60);
+    EXPECT_EQ(refresh->endMs, 1100 * minute);
+    EXPECT_EQ(refresh->startMs, 900 * minute);
     EXPECT_FALSE(state.next(800 * minute, true, now + 1000));
     ASSERT_TRUE(accept(state, *refresh, 900 * minute, now + 1000));
     EXPECT_FALSE(state.next(800 * minute, true, now + 1100));
@@ -294,15 +301,15 @@ TEST(CandleBackfillState, NativePagesCrossVisibleBoundaryWithoutAnExtraRoundTrip
             auto request = state.next(oldest, refresh, clock);
             ASSERT_TRUE(request);
             EXPECT_EQ(request->limit, 350);
-            EXPECT_EQ((request->endMs / 1000), end - page * 350 * tfSec);
-            EXPECT_EQ((request->startMs / 1000), end - (page + 1) * 350 * tfSec);
-            ASSERT_TRUE(accept(state, *request, (request->startMs / 1000) * 1000, clock));
-            oldest = (request->startMs / 1000) * 1000;
+            EXPECT_EQ(request->endMs, (end - page * 350 * tfSec) * 1000);
+            EXPECT_EQ(request->startMs, (end - (page + 1) * 350 * tfSec) * 1000);
+            ASSERT_TRUE(accept(state, *request, request->startMs, clock));
+            oldest = request->startMs;
             clock += 100;
         }
         auto prefetch = state.next(oldest, refresh, clock);
         ASSERT_TRUE(prefetch);
-        EXPECT_EQ((prefetch->endMs / 1000), end - 1400 * tfSec);
+        EXPECT_EQ(prefetch->endMs, (end - 1400 * tfSec) * 1000);
         EXPECT_EQ(prefetch->limit, 350);
     }
 }
@@ -317,7 +324,7 @@ TEST(CandleBackfillState, UsesFullPagesAcrossVisibleAndPrefetchRanges) {
             ASSERT_TRUE(request);
             const qint64 expected = std::min<qint64>(350, visibleBars * 2);
             EXPECT_EQ(request->limit, expected);
-            EXPECT_EQ((request->startMs / 1000), (1000 + visibleBars - expected) * 60);
+            EXPECT_EQ(request->startMs, (1000 + visibleBars - expected) * minute);
         }
     }
 }
@@ -345,4 +352,45 @@ TEST(CandleBackfillState, OldFlightFailureDoesNotRetryRefusedSelection) {
         EXPECT_EQ(state.retryDelayMs(now + 1), 0);
         EXPECT_FALSE(state.next(0, false, now + 2001));
     }
+}
+
+class CandleBackfillUnaligned : public testing::TestWithParam<qint64> {};
+
+TEST_P(CandleBackfillUnaligned, OldestBarPagesThroughExactWireReplies) {
+    const qint64 tfMs = GetParam();
+    CandleBackfillState state;
+    state.setViewport(btc, tfMs, 900'000, 1'000'000);
+    const auto first = state.next(949'500, false, now);
+    ASSERT_TRUE(first);
+    EXPECT_EQ(first->boundaryMs, tfMs == 1000 ? 949'000 : 900'000);
+    EXPECT_EQ(first->endMs, tfMs == 1000 ? 948'000 : 900'000);
+    EXPECT_EQ(first->startMs, tfMs == 1000 ? 799'000 : 780'000);
+    EXPECT_TRUE(acceptWireReply(state, *first, first->startMs + 500));
+    state.setViewport(btc, tfMs, 700'000, 800'000);
+    const auto second = state.next(first->startMs + 500, false, now + 100);
+    ASSERT_TRUE(second);
+    EXPECT_EQ(second->boundaryMs, tfMs == 1000 ? 799'000 : 780'000);
+    EXPECT_EQ(second->endMs, tfMs == 1000 ? 798'000 : 780'000);
+    EXPECT_EQ(second->startMs, tfMs == 1000 ? 599'000 : 600'000);
+    EXPECT_TRUE(acceptWireReply(state, *second, second->startMs, now + 100));
+    EXPECT_FALSE(state.next(second->startMs, false, now + 200));
+}
+
+INSTANTIATE_TEST_SUITE_P(WholeSeconds, CandleBackfillUnaligned, testing::Values(1000LL, 60000LL));
+
+TEST(CandleBackfillState, UnalignedRefreshReplyKeepsNextPageIdentityExact) {
+    CandleBackfillState state;
+    state.setViewport(btc, 1000, 900'000, 1'000'000);
+    state.requestRefresh();
+    const auto first = state.next(949'500, false, now);
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(first->refresh);
+    ASSERT_TRUE(acceptWireReply(state, *first, 949'500));
+    const auto second = state.next(949'500, false, now + 100);
+    ASSERT_TRUE(second);
+    EXPECT_EQ(second->boundaryMs, 949'000);
+    EXPECT_EQ(second->endMs, 948'000);
+    EXPECT_EQ(second->startMs, 799'000);
+    EXPECT_TRUE(acceptWireReply(state, *second, 800'500, now + 100));
+    EXPECT_FALSE(state.next(800'500, false, now + 200));
 }

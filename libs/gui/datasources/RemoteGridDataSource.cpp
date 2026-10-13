@@ -290,7 +290,6 @@ void RemoteGridDataSource::setCandleHistoryViewport(const QString& symbol, int64
     if (refresh) m_candleBackfill.requestRefresh();
     if (viewportChanged || refresh) {
         if (m_candleHistoryReady) requestNextCandlePage();
-        else m_candleBackfillTimer.stop();
     }
 }
 
