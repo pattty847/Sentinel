@@ -29,6 +29,22 @@ Left: README/ARCHITECTURE pass (`data/market` deleted by the owner 2026-10-12).
 - **Monitoring:** VictoriaMetrics :8428, Grafana :3000 (restarted 2026-10-11 07:06Z; A1b is "A1b live feed down" on `sentinel_live_feed_up`, 7 series Normal). GUI host :17190.
 - **Shadow self-check (incremental since bae9a85, owner: keep it):** each hourly check rolls only the new hour per product; a fresh midnight replay happens only for 00Z and after an oracle reset. Hours 2-24 resume from the oracle's own hourly anchor, so an anchor-resume defect would also show as a mismatch. The oracle lives at `hmc2/shadow-oracle/<product>/<dayMs>` (about 19 MB per hour, so about 450 MB at the 23Z peak; current day only; exclude it from backups). `Shadow oracle reset` in the server log means a reset happened.
 
+## Hand-off: chart-core Phase 5 (B items), written 2026-10-13 by the outgoing conductor
+
+Plan: `docs/research/2026-10-11-chart-core-architecture.md` rows B1-B8 (line ~771) and section 6 Q3 (line ~845). After PR 44 lands it moves to `../Sentinel-Private/research/` (same file name). SentinelBar shows 21/29; the true count is 21/28 (B8 was done inside S11; the bar only counts trailers).
+
+State checked against main `544c6fe` on 2026-10-13:
+- B1 one live-end formula (`liveEndCeil`, owner-approved): open. Policy test per the plan row.
+- B2 candle-interval rule: BLOCKED on the owner. Three sites round tfMs to seconds differently (`PriceFitter.cpp:35,95,236` and `PriceCarryPolicy.cpp:49` `(tf+500)/1000`; history request in `MainWindowGpu.cpp` `(tf+999)/1000`; `DepthChartView.qml:103` `Math.round`). Sub-second timeframes silently show 1 s candles. Options put to the owner: (A) real sub-second candles from trades, live + journal, (B) no candles below 1 s, (C) 1 s candles labelled honestly; conductor recommends A with B as fallback. Writer first verifies which granularities the candle-history path accepts.
+- B3 reset `autoPriceTick_` in `HeatmapGpuLayer::destroyController` / `forgetService`: open (only `setSymbol`/`setTimeframeMs` reset it, `HeatmapGpuLayer.cpp:141,154`).
+- B4 rename `UgrZoomCpu.SymbolSwitchBeforeFirstSnapshotUsesPlainFitSilently` -> `...PublishesRawBoundsSilently` (`tests/render/test_ugr_gpu.cpp`): open, trivial.
+- B5 one auto-fit per live tick (count `solveAutoPriceFit` calls == 1): open, perf.
+- B6 dead null checks: mostly gone with the refactor; ~5 `m_viewState` checks left in `libs/gui`.
+- B7 `SENTINEL_DUMP_GLYPH_ATLAS` `/tmp` dump in `libs/gui/chart/layers/ChartTextLayer.cpp`: owner leans delete (2026-10-13); confirm, then delete.
+- B8: done in S11 (`d231a11`). Nothing to do.
+
+Suggested dispatch: one low-risk branch B1+B3+B4+B5+B6 (+B7 once confirmed), Codex writer (Sol), Claude reviewer; each fix with a Qt-free policy test that fails without it (AGENTS 3a). B2 is its own slice after the owner's spec. Conflicts: the owner's Windows test-cleanup PR touches `tests/render/test_ugr_gpu.cpp` (B4); land it first or rebase B4 after. PR 44 (docs move to Sentinel-Private, rework requested) changes AGENTS.md and the plan path; it is docs-only and does not conflict with B code.
+
 ## In flight
 
 - Read-only Codex Astra audits (2026-10-12, reports to the conductor, then a docs/research file): tests (re-check `docs/research/2026-10-11-code-health/audit-tests.md`, scan S0-S15 tests; thread `01a13321-9031-70b3-a3ef-7bcda74bed58`) and workflow (30-day trailers, review yield, conductor token cost, conductor hand-off rule; thread `01a13321-9031-7ce0-b709-54d79b8c710b`). A Windows Codex thread is also pruning redundant tests and will open a PR; reconcile by gtest name.
