@@ -3,9 +3,9 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-13 ~04:55 UTC. main `f8026ad`. Phase 5: B1, B3-B7 landed (`f8026ad`); only B2 is left (plan first, then owner sign-off). Chart-core refactor (S0a-S15) and one-world (through slice E) are complete. Focus now: test-suite cleanup and the workflow audit, then B1, B3-B7 (B2 waits for the owner's candle-interval spec).
+- **Updated:** 2026-10-13 ~07:30 UTC. main `49b4c9a`. Chart-core Phase 5 is complete except B2 option A (a feature, deferred). This conductor ended at its wave boundary; nothing in flight.
 - **Conductor:** a Claude Opus session on the owner's Mac (AGENTS.md section 10). The cloud Projects conductor + Mac operator trial (2026-10-11/12) is ended (owner, 2026-10-12).
-- **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high-risk. 2026-10-13 04:45Z: Claude weekly 100% (reset); Codex weekly 13% with a deficit. Owner: keep Codex writing down to ~1%, then the owner spends a reset credit (holds 3); Claude subagents may be used for other work. Landing trailers include `*-Tokens` from ma-panel again.
+- **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high-risk. 2026-10-13: both weekly windows reset (Codex ~95%+, Claude ~100%). Owner: use Codex down to ~1% before spending a reset credit (holds 3).
 
 ## Land gate
 
@@ -35,10 +35,11 @@ Plan: `docs/research/2026-10-11-chart-core-architecture.md` rows B1-B8 (line ~77
 
 State after `f8026ad` (2026-10-13):
 - Landed in `f8026ad` (Codex Sol writer, Opus reviewer, 2 rounds, 1 minor fixed): B1 (seed/bootstrap use `liveEndCeil`, `nextBucketEnd` deleted), B3 (`autoPriceTick_` reset on controller destroy and `forgetService`), B4 (test rename), B5 (one auto fit per live step: `ViewCommands::refitAfterHeatmapLive` skips when follow already fitted; depends on the `liveChanged` connect order, pinned by `UgrZoomCpu.LiveChangedFitsOnceAndRefitsWithoutFollowShift`), B7 (glyph-atlas dump deleted). B6: nothing to remove (`AxisModel::setTarget` can detach the view state, so its checks are live). Metal goldens unchanged, no re-bless.
-- B2 candle-interval rule: owner chose option A (2026-10-13): real sub-second candles (25-500 ms) built from trades, live and from the journal; tfMs in milliseconds end to end, nothing rounds it; seconds only at a boundary that truly speaks seconds, where an unrepresentable interval is refused with a logged reason, never rounded; ranges the journal does not cover show no candles (option B as fallback). Today three sites round differently (`PriceFitter.cpp:35,95,236`, `PriceCarryPolicy.cpp:49` `(tf+500)/1000`; `MainWindowGpu.cpp` history request `(tf+999)/1000`; `DepthChartView.qml:103` `Math.round`). Larger than the other B items and likely crosses the server candle path: first a short plan (where sub-second candles are built, history granularities the server accepts, cost), owner sign-off, then its own slice.
+- B2 option B landed `49b4c9a` (Codex Sol writer, Opus reviewer, 2 rounds, 5 minors: 3 fixed, 2 deferred). The candle interval is ms across the GUI; `CandleInterval.hpp` converts to wire seconds exactly or refuses; a refused timeframe (100 ms today) sends no history request, logs once per switch, never retries and draws no candles; auto price fit and price carry then use the live price (no candle fallback). Deferred minors: replace the MainWindow/QML source-grep test `UgrCandleCpu.WindowAndQmlPassUnroundedMilliseconds` with a fake `IGridDataSource`; one startup refusal log line for the 100 ms session default. Metal goldens unchanged.
+- B2 option A (real sub-second candles) is a feature for later: plan `docs/research/2026-10-13-b2-subsecond-candles.md` + owner answers at its end; Astra REVISE r1 in `.claude/acting-orchestrator/b2-plan/astra-review-r1.md` (2 blockers, 5 majors). Fable revises in a new thread with both before any slice.
 - B8: done in S11 (`d231a11`).
 
-Next: the B2 plan (a Claude subagent may write it; owner allows Claude for non-writer work). Also hand over: PR 44 (docs to Sentinel-Private) review and land when the Windows Codex rework reports READY. Conflicts: the owner's Windows test-cleanup PR touches `tests/render/test_ugr_gpu.cpp` (B4); land it first or rebase B4 after. PR 44 (docs move to Sentinel-Private, rework requested) changes AGENTS.md and the plan path; it is docs-only and does not conflict with B code.
+Also hand over: PR 44 (docs to Sentinel-Private) review and land when the Windows Codex rework reports READY. Conflicts: the owner's Windows test-cleanup PR touches `tests/render/test_ugr_gpu.cpp` (B4); land it first or rebase B4 after. PR 44 (docs move to Sentinel-Private, rework requested) changes AGENTS.md and the plan path; it is docs-only and does not conflict with B code.
 
 ## In flight
 
@@ -60,6 +61,8 @@ Next: the B2 plan (a Claude subagent may write it; owner allows Claude for non-w
 
 ## Next (priority order; pull the next item FIFO from `docs/TODO.md` "Queue")
 
-1. B2 option B (in flight or next): `tfMs` end to end in the GUI, nothing rounds; a timeframe that is not a whole second gets no history request (logged reason) and draws no candles; no retry loop. Owner 2026-10-13.
-2. Test cleanup from the Astra audit.
-3. B2 option A is a feature for a later date: revise `docs/research/2026-10-13-b2-subsecond-candles.md` with the Astra review (`.claude/acting-orchestrator/b2-plan/astra-review-r1.md`, REVISE 2/5/1) and the owner answers recorded in the plan, then schedule.
+1. Test cleanup from the Astra audit (see In flight).
+2. The two deferred option B minors (small, one Codex Sol branch; touches `tests/render/test_ugr_gpu.cpp`, so coordinate with the owner's Windows test-cleanup PR).
+3. B2 option A plan revision (later date, owner's call when).
+
+Conductor notes from 2026-10-13 (owner discussion, not yet policy): fix rounds that only add a small test may go to a fresh short Codex thread instead of resuming a long one (resume re-reads the whole thread: 7-8M input tokens per round here); `scripts/dev/chart-health.sh` should check uncommitted diffs so sandboxed writers stop building temporary committed copies; planners must cite file:line for every number or mark it unmeasured, and include a threads/locks/failure section (Fable's B2 plan assumed 8 history workers; there are 2).
