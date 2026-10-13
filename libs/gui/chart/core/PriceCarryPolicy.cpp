@@ -46,7 +46,7 @@ double PriceCarryPolicy::capturePrice() {
         const int64_t tf = std::max<int64_t>(1, controller_.session().timeframeMs);
         auto* view = controller_.viewPtr();
         auto& bars = controller_.priceFitter().scratchBars();
-        candles->visibleBars(controller_.session().symbol, std::max<int64_t>(1, (tf + 500) / 1000),
+        candles->visibleBars(controller_.session().symbol, tf,
                              recording::floorDiv(view->getVisibleTimeStart(), tf) * tf,
                              view->getVisibleTimeEnd(), bars);
         for (auto it = bars.rbegin(); it != bars.rend() && !(now > 0); ++it)

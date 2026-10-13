@@ -28,7 +28,7 @@ public:
                            int count,
                            const QString& requestId) override;
     void cancelTpoHistory(const QString& symbol, const QString& requestId) override;
-    void setCandleHistoryViewport(const QString& symbol, int64_t timeframeSec,
+    void setCandleHistoryViewport(const QString& symbol, int64_t timeframeMs,
                                  qint64 startMs, qint64 endMs) override;
     void sendTradeCommand(const trading::TradeCommand& command) override;
     void sendAlgoCommand(const std::string& algoId, const std::string& action, const std::string& symbol, const trading::AlgoParams& params) override;
@@ -94,7 +94,7 @@ private:
     std::unordered_map<std::string, uint64_t> m_bookVersions;
     std::unordered_set<std::string> m_activeBookSymbols;
     QString m_candleSymbol;
-    int64_t m_candleTimeframeSec = 0;
+    int64_t m_candleTimeframeMs = 0;
     bool m_candleHistoryReady = false;
     bool m_connectionActive = false; // GUI-thread mirror of connected/disconnected signals
     quint64 m_candleDeliveryGeneration = 0;

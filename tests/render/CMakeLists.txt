@@ -53,6 +53,12 @@ target_link_libraries(test_ChartViewController PRIVATE GTest::gtest_main sentine
 add_test(NAME ChartViewControllerTests COMMAND test_ChartViewController)
 set_tests_properties(ChartViewControllerTests PROPERTIES LABELS "render;fast")
 
+add_executable(test_CandleInterval test_candle_interval.cpp)
+target_include_directories(test_CandleInterval PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_CandleInterval PRIVATE GTest::gtest_main)
+add_test(NAME CandleIntervalTests COMMAND test_CandleInterval)
+set_tests_properties(CandleIntervalTests PROPERTIES LABELS "render;fast")
+
 add_executable(test_CandleBackfillState test_CandleBackfillState.cpp)
 target_include_directories(test_CandleBackfillState PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
 target_link_libraries(test_CandleBackfillState PRIVATE GTest::gtest_main Qt6::Core)
@@ -203,6 +209,9 @@ target_compile_definitions(test_chart_golden PRIVATE SENTINEL_SOURCE_DIR="${CMAK
                            SENTINEL_GOLDEN_OUT_DIR="${CMAKE_BINARY_DIR}/golden-out")
 add_test(NAME ChartGoldenTests COMMAND test_chart_golden)
 set_tests_properties(ChartGoldenTests PROPERTIES LABELS "render;heatmap" TIMEOUT 600 SKIP_RETURN_CODE 77)
+add_test(NAME CandleOverlayCpuTests COMMAND test_ugr_gpu "--gtest_filter=UgrCandleCpu.*")
+set_tests_properties(CandleOverlayCpuTests PROPERTIES LABELS "render;fast" TIMEOUT 30)
+
 add_test(NAME UgrGpuTests COMMAND test_ugr_gpu)
 set_tests_properties(UgrGpuTests PROPERTIES LABELS "render;heatmap" TIMEOUT 300)
 # Review blocker 1 under Guard Malloc: the data service dies before the chart.

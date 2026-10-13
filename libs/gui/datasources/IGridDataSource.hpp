@@ -40,7 +40,7 @@ public:
                                    int count,
                                    const QString& requestId) = 0;
     virtual void cancelTpoHistory(const QString& symbol, const QString& requestId) = 0;
-    virtual void setCandleHistoryViewport(const QString& symbol, int64_t timeframeSec,
+    virtual void setCandleHistoryViewport(const QString& symbol, int64_t timeframeMs,
                                          qint64 startMs, qint64 endMs) = 0;
     virtual void sendTradeCommand(const trading::TradeCommand& command) = 0;
     virtual void sendAlgoCommand(const std::string& algoId, const std::string& action, const std::string& symbol, const trading::AlgoParams& params) = 0;

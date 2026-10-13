@@ -19,7 +19,7 @@ std::optional<CandleSnapshot> captureCandles(const CandleSeriesBuffer& buffer,
     std::vector<CandleSeriesBuffer::CandleBar> bars;
     bool hasMore = false;
     qint64 nextStartMs = 0;
-    if (!buffer.getBoundedSlice(symbol, timeframeMs / 1000, startMs, endMs, limit, bars, hasMore, nextStartMs))
+    if (!buffer.getBoundedSlice(symbol, timeframeMs, startMs, endMs, limit, bars, hasMore, nextStartMs))
         return std::nullopt;
     CandleSnapshot out;
     out.meta = std::move(meta);

@@ -384,13 +384,13 @@ TEST_F(UgrGpu, CandlesAlignWithHeatmapColumns) {
     std::vector<CandleSeriesBuffer::CandleBar> bars;
     for (int64_t t = (lo / minute - 2) * minute; t < lo + 44 * minute; t += minute)
         bars.push_back({t, t + minute, open, 100'400, 99'800, close, 1.0, true, 0, false});
-    buffer.applyHistory("BTC-USD", 60, bars);
+    buffer.applyHistory("BTC-USD", 60000, bars);
     auto *candles = new CandlestickOverlayItem(scene->window()->contentItem());
     candles->setSize(ugr->size());
     candles->setMappingProvider(ugr);
     candles->setCandleBuffer(&buffer);
     candles->setSymbol("BTC-USD");
-    candles->setTimeframeSec(60);
+    candles->setTimeframeMs(60000);
 
     auto check = [&](const char *label) {
         SCOPED_TRACE(label);
@@ -508,7 +508,7 @@ TEST_F(UgrGpu, CandleBodyEdgesAtEveryColumnWidthAndDeviceRatio) {
     candles->setMappingProvider(ugr);
     candles->setCandleBuffer(&buffer);
     candles->setSymbol("BTC-USD");
-    candles->setTimeframeSec(60);
+    candles->setTimeframeMs(60000);
     for (double dpr : {1.0, 2.0}) {
         ASSERT_TRUE(scene->setDevicePixelRatio(dpr, &error)) << error.toStdString();
         emit scene->window()->screenChanged(scene->window()->screen());
@@ -522,7 +522,7 @@ TEST_F(UgrGpu, CandleBodyEdgesAtEveryColumnWidthAndDeviceRatio) {
             std::vector<CandleSeriesBuffer::CandleBar> bars;
             for (qint64 t = lo / minute * minute; t < view->getVisibleTimeEnd() + minute; t += minute)
                 bars.push_back({t, t + minute, open, close, open, close, 1, true, 0, false});
-            buffer.applyHistory("BTC-USD", 60, bars);
+            buffer.applyHistory("BTC-USD", 60000, bars);
             ugr->view()->beginPanAt(320, 160);
             ugr->view()->updatePanAt(320 + 0.3 / dpr, 160 + 0.3 / dpr);
             ASSERT_TRUE(frames(3)) << error.toStdString();
@@ -576,13 +576,13 @@ TEST_F(UgrGpu, APanMovesEveryLayerByTheSameWholePixels) {
         const double base = 100'000 + double((t / minute) % 9) * 13.7;
         bars.push_back({t, t + minute, base, base + 61.3, base - 47.9, base + 22.1, 1.0, true, 0, false});
     }
-    buffer.applyHistory("BTC-USD", 60, bars);
+    buffer.applyHistory("BTC-USD", 60000, bars);
     auto *candles = new CandlestickOverlayItem(scene->window()->contentItem());
     candles->setSize(ugr->size());
     candles->setMappingProvider(ugr);
     candles->setCandleBuffer(&buffer);
     candles->setSymbol("BTC-USD");
-    candles->setTimeframeSec(60);
+    candles->setTimeframeMs(60000);
     PriceAxisModel priceAxis;
     TimeAxisModel timeAxis;
     priceAxis.setTarget(ugr);
@@ -903,13 +903,13 @@ TEST_F(UgrGpu, ATickChangeMovesEveryLayerInTheSameFrame) {
     const double open = 100'050, close = 100'150;
     for (int64_t t = (lo / minute - 2) * minute; t < lo + 44 * minute; t += minute)
         bars.push_back({t, t + minute, open, 100'250, 99'950, close, 1.0, true, 0, false});
-    buffer.applyHistory("BTC-USD", 60, bars);
+    buffer.applyHistory("BTC-USD", 60000, bars);
     auto *candles = new CandlestickOverlayItem(scene->window()->contentItem());
     candles->setSize(ugr->size());
     candles->setMappingProvider(ugr);
     candles->setCandleBuffer(&buffer);
     candles->setSymbol("BTC-USD");
-    candles->setTimeframeSec(60);
+    candles->setTimeframeMs(60000);
     PriceAxisModel priceAxis;
     priceAxis.setTarget(ugr);
     ASSERT_TRUE(settle()) << error.toStdString();
@@ -963,18 +963,93 @@ class CandleTickGeometryItem : public CandlestickOverlayItem {
 public:
     using CandlestickOverlayItem::updatePaintNode;
 };
+TEST(UgrCandleCpu, RefusedIntervalsClearExistingGeometryAndSuppressMismatchedBars) {
+    CandleTickFrameProvider provider;
+    CandleTickGeometryItem candles;
+    CandleSeriesBuffer buffer;
+    constexpr qint64 bucket = 1'200'000;
+    const CandleSeriesBuffer::CandleBar bar{bucket, bucket + 1000, 100, 110, 90, 105, 1, true, 0, false};
+    buffer.applyHistory("BTC-USD", 1000, {bar});
+    // Even mis-keyed one-second bars cannot bypass the renderer's refusal.
+    buffer.applyHistory("BTC-USD", 100, {bar});
+    buffer.applyHistory("BTC-USD", 1500, {bar});
+    candles.setSize({640, 320});
+    candles.setMappingProvider(&provider);
+    candles.setCandleBuffer(&buffer);
+    candles.setSymbol("BTC-USD");
+    chart_raster::RasterInputs in;
+    in.timeStart = bucket; in.timeEnd = bucket + 10'000;
+    in.minPrice = 80; in.maxPrice = 120;
+    in.tfMs = 1000; in.tick = 1;
+    in.itemWidthLogical = 640; in.itemHeightLogical = 320; in.dpr = 1;
+    provider.frame.raster = chart_raster::computeRaster(in, {});
+    provider.frame.mapping = chart_raster::toMapping(provider.frame.raster);
+    provider.frame.viewportValid = true;
+    provider.frame.viewportTimeStart = in.timeStart;
+    provider.frame.viewportTimeEnd = in.timeEnd;
+    provider.frame.activeTimeframeMs = 1000;
+    provider.frame.currentBoundaryStartMs = bucket + 5000;
+    const auto vertices = [](QSGNode* root) {
+        int count = 0;
+        for (auto* child = root->firstChild(); child; child = child->nextSibling())
+            count += static_cast<QSGGeometryNode*>(child)->geometry()->vertexCount();
+        return count;
+    };
+    QSGNode* root = nullptr;
+    for (int style : {0, 1, 2}) {
+        candles.setCandleStyle(style);
+        candles.setTimeframeMs(1000);
+        provider.frame.activeTimeframeMs = 1000;
+        root = candles.updatePaintNode(root, nullptr);
+        EXPECT_GT(vertices(root), 0);
+        for (int tfMs : {100, 1500, 0, -1000}) {
+            candles.setTimeframeMs(tfMs);
+            provider.frame.activeTimeframeMs = tfMs;
+            root = candles.updatePaintNode(root, nullptr);
+            EXPECT_EQ(vertices(root), 0) << "style=" << style << " tfMs=" << tfMs;
+        }
+        candles.setTimeframeMs(1000);
+        provider.frame.activeTimeframeMs = 1000;
+        root = candles.updatePaintNode(root, nullptr);
+        EXPECT_GT(vertices(root), 0);
+        provider.frame.activeTimeframeMs = 100; // QML may still hold the old selection during sync.
+        root = candles.updatePaintNode(root, nullptr);
+        EXPECT_EQ(vertices(root), 0);
+        provider.frame.activeTimeframeMs = 1000;
+        root = candles.updatePaintNode(root, nullptr);
+        EXPECT_GT(vertices(root), 0);
+    }
+    delete root;
+}
+
+TEST(UgrCandleCpu, WindowAndQmlPassUnroundedMilliseconds) {
+    const auto read = [](const char* relative) {
+        QFile file(QStringLiteral(SENTINEL_SOURCE_DIR) + QLatin1Char('/') + relative);
+        if (!file.open(QIODevice::ReadOnly)) return QByteArray{};
+        return file.readAll();
+    };
+    const auto qml = read("libs/gui/qml/DepthChartView.qml");
+    ASSERT_FALSE(qml.isEmpty());
+    EXPECT_TRUE(qml.contains("timeframeMs: unifiedGridRenderer.view.timeframeMs"));
+    EXPECT_FALSE(qml.contains("Math.round(unifiedGridRenderer.view.timeframeMs"));
+    const auto window = read("libs/gui/MainWindowGpu.cpp");
+    ASSERT_FALSE(window.isEmpty());
+    EXPECT_TRUE(window.contains("const int64_t tfMs = renderer->view()->getCurrentTimeframe();"));
+    EXPECT_TRUE(window.contains("setCandleHistoryViewport(symbol, tfMs,"));
+}
+
 TEST(UgrCandleCpu, ATickChangeBodyOracleRejectsPreviousFrameGeometry) {
     CandleTickFrameProvider provider;
     CandleTickGeometryItem candles;
     CandleSeriesBuffer buffer;
     constexpr qint64 bucket = 1'200'000;
     constexpr double open = 100'050, close = 100'150;
-    buffer.applyHistory("BTC-USD", 60, {{bucket, bucket + minute, open, 100'250, 99'950, close, 1, true, 0, false}});
+    buffer.applyHistory("BTC-USD", 60000, {{bucket, bucket + minute, open, 100'250, 99'950, close, 1, true, 0, false}});
     candles.setSize({640, 320});
     candles.setMappingProvider(&provider);
     candles.setCandleBuffer(&buffer);
     candles.setSymbol("BTC-USD");
-    candles.setTimeframeSec(60);
+    candles.setTimeframeMs(60000);
     QSGNode* root = nullptr;
     for (double dpr : {1.0, 2.0}) {
         chart_raster::RasterInputs in;
@@ -1037,7 +1112,7 @@ TEST_F(UgrGpu, PriceFitCoversCandlesDrawnOutsideTheStoredWindow) {
     for (int64_t t = centre - 170 * minute; t < centre + 170 * minute; t += minute)
         bars.push_back(t == outlier ? CandleSeriesBuffer::CandleBar{t, t + minute, 100'000, 101'500, 99'000, 100'050, 1.0, true, 0, false}
                                     : CandleSeriesBuffer::CandleBar{t, t + minute, 100'000, 100'100, 100'000, 100'050, 1.0, true, 0, false});
-    buffer.applyHistory("BTC-USD", 60, bars);
+    buffer.applyHistory("BTC-USD", 60000, bars);
     ugr->setCandleBuffer(&buffer);
     const auto *view = ugr->getViewState();
     const auto cam = ugr->rasterCameraNow(false);
@@ -1652,7 +1727,7 @@ TEST_F(UgrGpu, PriceAxisFitLandsTheVisibleCandlesInView) {
     }
     // A candle outside the view does not count.
     bars.push_back({viewHi + 10 * minute, viewHi + 11 * minute, 90'000, 120'000, 80'000, 90'000, 1.0, true, 0, false});
-    buffer.applyHistory("BTC-USD", 60, bars);
+    buffer.applyHistory("BTC-USD", 60000, bars);
     ugr->setCandleBuffer(&buffer);
     const auto *view = ugr->getViewState();
     const uint64_t before = view->getViewportVersion();
@@ -1711,7 +1786,7 @@ TEST_F(UgrGpu, PriceAxisFitUnderTheManualClampCentresTheCurrentPrice) {
         const double close = 100'000 + 5000.0 * (i + 1) / 40;
         bars.push_back({t, t + minute, close - 125, close, close - 125, close, 1.0, true, 0, false});
     }
-    buffer.applyHistory("BTC-USD", 60, bars);
+    buffer.applyHistory("BTC-USD", 60000, bars);
     ugr->setCandleBuffer(&buffer);
     auto centre = [&] { return (view->getMinPrice() + view->getMaxPrice()) / 2; };
     // No book or trade yet: the newest close.
@@ -1796,7 +1871,7 @@ TEST_F(UgrGpu, PriceFitCountsTheCandleUnderTheLeftEdge) {
         const double low = t == viewLo ? 95'000 : 100'000; // the extreme in the first candle
         bars.push_back({t, t + minute, 100'100, 100'200, low, 100'150, 1.0, true, 0, false});
     }
-    buffer.applyHistory("BTC-USD", 60, bars);
+    buffer.applyHistory("BTC-USD", 60000, bars);
     ugr->setCandleBuffer(&buffer);
     ugr->view()->setViewport(viewLo + 30'000, viewLo + 30'000 + 39 * minute, 99'900, 100'300);
     ASSERT_TRUE(ugr->view()->fitPriceToData());
@@ -1834,7 +1909,7 @@ TEST_F(UgrGpu, AutoScaleFollowsTheVisibleCandlesAcrossTimeChanges) {
     ASSERT_FALSE(ugr->view()->autoPriceScale()) << "an explicit price range turns it off";
     CandleSeriesBuffer buffer;
     const auto bars = risingBars(viewLo - 4 * kHourMs, viewHi + kHourMs, minute, 90'000);
-    buffer.applyHistory("BTC-USD", 60, bars);
+    buffer.applyHistory("BTC-USD", 60000, bars);
     ugr->setCandleBuffer(&buffer);
     const auto *view = ugr->getViewState();
     auto expectFitted = [&](const char *what) {
@@ -1891,14 +1966,14 @@ TEST_F(UgrGpu, AutoScaleRefitsOnCandleUpdatesOnlyWhenTheFitChanges) {
     gpuOn();
     CandleSeriesBuffer buffer;
     auto bars = risingBars(viewLo, viewHi, minute, 100'000);
-    buffer.applyHistory("BTC-USD", 60, bars);
+    buffer.applyHistory("BTC-USD", 60000, bars);
     ugr->setCandleBuffer(&buffer);
     ugr->view()->setAutoPriceScale(true);
     const auto *view = ugr->getViewState();
     const double lo0 = view->getMinPrice(), hi0 = view->getMaxPrice();
     uint64_t v = view->getViewportVersion();
     auto update = [&](int64_t t, double low, double high, uint64_t seq, const char *symbol = "BTC-USD") {
-        buffer.applyUpdate(symbol, 60, {t, t + minute, low, high, low, high, 1.0, false, 0, false}, seq, false);
+        buffer.applyUpdate(symbol, 60000, {t, t + minute, low, high, low, high, 1.0, false, 0, false}, seq, false);
     };
     update(viewLo + 10 * minute, 100'120, 100'140, 1); // inside the range
     EXPECT_EQ(view->getViewportVersion(), v) << "no new extreme: no viewport change";
@@ -1927,9 +2002,9 @@ TEST_F(UgrGpu, PriceZoomTurnsAutoScaleOffAndTheRangeSurvivesATimeframeSwitch) {
     gpuOn();
     CandleSeriesBuffer buffer;
     const int64_t tf5 = 5 * minute, tf15 = 15 * minute;
-    buffer.applyHistory("BTC-USD", 60, risingBars(viewLo - kHourMs, viewHi + kHourMs, minute, 100'000));
+    buffer.applyHistory("BTC-USD", 60000, risingBars(viewLo - kHourMs, viewHi + kHourMs, minute, 100'000));
     const auto bars5 = risingBars(viewHi - 60 * tf5, viewHi + 10 * tf5, tf5, 105'000, 20);
-    buffer.applyHistory("BTC-USD", 300, bars5);
+    buffer.applyHistory("BTC-USD", 300000, bars5);
     ugr->setCandleBuffer(&buffer);
     ugr->view()->setAutoPriceScale(true);
     const auto *view = ugr->getViewState();
@@ -1966,7 +2041,7 @@ TEST_F(UgrGpu, PriceZoomTurnsAutoScaleOffAndTheRangeSurvivesATimeframeSwitch) {
     EXPECT_EQ(view->getMinPrice(), plo);
     const auto bars15 = risingBars(view->getVisibleTimeStart(), view->getVisibleTimeEnd(), tf15, 98'000, 0);
     v = view->getViewportVersion();
-    buffer.applyHistory("BTC-USD", 900, bars15);
+    buffer.applyHistory("BTC-USD", 900000, bars15);
     EXPECT_EQ(view->getViewportVersion() - v, 1u);
     const auto [flo, fhi] = expectedFit(bars15, drawnWindow().first, drawnWindow().second);
     EXPECT_NEAR(view->getMinPrice(), flo, 1e-6);
@@ -1984,8 +2059,8 @@ TEST_F(UgrGpu, SymbolSwitchKeepsTheAutoScaleState) {
     std::vector<CandleSeriesBuffer::CandleBar> tiny;
     for (int64_t t = viewLo - kHourMs; t < viewHi + kHourMs; t += minute)
         tiny.push_back({t, t + minute, 0.0000100, 0.0000104, 0.0000097, 0.0000101, 1.0, true, 0, false});
-    buffer.applyHistory("BTC-USD", 60, btc);
-    buffer.applyHistory("TINY-USD", 60, tiny);
+    buffer.applyHistory("BTC-USD", 60000, btc);
+    buffer.applyHistory("TINY-USD", 60000, tiny);
     ugr->setCandleBuffer(&buffer);
     const auto *view = ugr->getViewState();
     const int64_t t0 = view->getVisibleTimeStart(), t1 = view->getVisibleTimeEnd();
@@ -2033,7 +2108,7 @@ TEST_F(UgrGpu, AutoScaleFitsTheDisplayedWindowDuringADrag) {
     gpuOn();
     CandleSeriesBuffer buffer;
     const auto bars = risingBars(viewLo - 4 * kHourMs, viewHi + kHourMs, minute, 90'000);
-    buffer.applyHistory("BTC-USD", 60, bars);
+    buffer.applyHistory("BTC-USD", 60000, bars);
     ugr->setCandleBuffer(&buffer);
     ugr->view()->setAutoPriceScale(true);
     auto *view = ugr->getViewState();
@@ -2050,7 +2125,7 @@ TEST_F(UgrGpu, AutoScaleFitsTheDisplayedWindowDuringADrag) {
         EXPECT_NEAR(view->getMaxPrice(), hi, 1e-6);
     }
     auto update = [&](int64_t t, double low, double high, uint64_t seq) {
-        buffer.applyUpdate("BTC-USD", 60, {t, t + minute, low, high, low, high, 1.0, false, 0, false}, seq, false);
+        buffer.applyUpdate("BTC-USD", 60000, {t, t + minute, low, high, low, high, 1.0, false, 0, false}, seq, false);
     };
     uint64_t v = view->getViewportVersion();
     update(t0 + 2 * minute, 50'000, 150'000, 1); // committed, no longer on screen
@@ -2079,7 +2154,7 @@ TEST_F(UgrGpu, ViewportRequestsResolveFlagsAndCommitOnce) {
     gpuOn();
     CandleSeriesBuffer buffer;
     const auto bars = risingBars(viewLo - 4 * kHourMs, epoch + 5 * kHourMs, minute, 90'000);
-    buffer.applyHistory("BTC-USD", 60, bars);
+    buffer.applyHistory("BTC-USD", 60000, bars);
     ugr->setCandleBuffer(&buffer);
     auto *view = ugr->getViewState();
     using Request = chart::ViewportRequest;
@@ -2205,7 +2280,7 @@ TEST_F(UgrGpu, SymbolSwitchCarryAcrossPriceScalesAndUnpricedSwitches) {
     // BTC -> ETH (no price this time; candles at $3,000 held) -> TINY: BTC's carry, not
     // one computed from ETH's candles against BTC-priced bounds.
     CandleSeriesBuffer buffer;
-    buffer.applyHistory("ETH-USD", 60, risingBars(t0, t1, minute, 3'000, 0));
+    buffer.applyHistory("ETH-USD", 60000, risingBars(t0, t1, minute, 3'000, 0));
     ugr->setCandleBuffer(&buffer);
     ugr->setActiveSymbol("ETH-USD");
     ugr->setActiveSymbol("TINY-USD");
@@ -2375,14 +2450,14 @@ TEST_F(UgrGpu, CandleUnderTheLeftEdgeIsDrawn) {
     std::vector<CandleSeriesBuffer::CandleBar> bars;
     for (int64_t t = viewLo; t < lo + 41 * minute; t += minute)
         bars.push_back({t, t + minute, 99'800, 100'400, 99'800, 100'400, 1.0, true, 0, false});
-    buffer.applyHistory("BTC-USD", 60, bars);
+    buffer.applyHistory("BTC-USD", 60000, bars);
     ASSERT_TRUE(frames(3)) << error.toStdString(); // the chart publishes its mapping first
     auto *candles = new CandlestickOverlayItem(scene->window()->contentItem());
     candles->setSize(ugr->size());
     candles->setMappingProvider(ugr);
     candles->setCandleBuffer(&buffer);
     candles->setSymbol("BTC-USD");
-    candles->setTimeframeSec(60);
+    candles->setTimeframeMs(60000);
     ASSERT_TRUE(frames(5)) << error.toStdString();
     int lit = 0;
     for (int x = 0; x < 4; ++x) lit += image.pixel(x, 160) != qRgb(0, 0, 0);
@@ -2470,13 +2545,13 @@ TEST_F(UgrGpu, AGlideLandsOnTheRestFrameOfItsTarget) {
     std::vector<CandleSeriesBuffer::CandleBar> bars;
     for (qint64 t = viewLo - 20 * minute; t < viewHi + 20 * minute; t += minute)
         bars.push_back({t, t + minute, 100'000, 100'130, 99'980, 100'100, 1, true, 0, false});
-    buffer.applyHistory("BTC-USD", 60, bars);
+    buffer.applyHistory("BTC-USD", 60000, bars);
     auto* candles = new CandlestickOverlayItem(scene->window()->contentItem());
     candles->setSize(ugr->size());
     candles->setMappingProvider(ugr);
     candles->setCandleBuffer(&buffer);
     candles->setSymbol("BTC-USD");
-    candles->setTimeframeSec(60);
+    candles->setTimeframeMs(60000);
     ASSERT_TRUE(frames(2)) << error.toStdString();
     const auto start = drawn();
     const qint64 s0 = view->getVisibleTimeStart(), e0 = view->getVisibleTimeEnd();
@@ -3203,7 +3278,7 @@ TEST_F(UgrGpu, AutoPriceFitGlidesStraightToItsSolvedRange) {
         const int64_t t = centre + i * minute;
         bars.push_back({t, t + minute, 100150, 100150 + r, 100150 - r, 100150, 1, true, 0, false});
     }
-    buffer.applyHistory("BTC-USD", 60, bars);
+    buffer.applyHistory("BTC-USD", 60000, bars);
     ugr->setCandleBuffer(&buffer);
     ugr->view()->setViewport(centre - 2 * minute, centre + 2 * minute, 100120, 100180);
     ugr->view()->setAutoPriceScale(true);
@@ -3241,7 +3316,7 @@ TEST_F(UgrGpu, AutoPriceFitGlidesStraightToItsSolvedRange) {
         if (inFlight) {
             // Restore the deep candle window so the click changes the price end,
             // not just time: the revision must exercise an active price glide.
-            buffer.applyUpdate("BTC-USD", 60,
+            buffer.applyUpdate("BTC-USD", 60000,
                 {centre, centre + minute, 100150, 100165, 100143, 100150, 1, false, 0, false}, ++revision, false);
             ugr->view()->setViewport(centre - 2 * minute, centre + 2 * minute, v->getMinPrice(), v->getMaxPrice());
             const auto resetClock = clockMs;
@@ -3252,7 +3327,7 @@ TEST_F(UgrGpu, AutoPriceFitGlidesStraightToItsSolvedRange) {
         const auto version = v->getViewportVersion();
         const int rebases = ugr->glideRebasesForTest();
         const double high = inFlight ? 100650 : 100350;
-        buffer.applyUpdate("BTC-USD", 60,
+        buffer.applyUpdate("BTC-USD", 60000,
             {centre, centre + minute, 100150, high, 100143, 100150, 1, false, 0, false}, ++revision, false);
         EXPECT_EQ(v->getViewportVersion(), version + 1);
         const double lo = v->getMinPrice(), hi = v->getMaxPrice();
@@ -3395,7 +3470,7 @@ protected:
             const int64_t t = centre + i * minute;
             bars.push_back({t, t + minute, 100150, 100150 + radius, 100150 - radius, 100150, 1, true, 0, false});
         }
-        candles.applyHistory("BTC-USD", 60, bars);
+        candles.applyHistory("BTC-USD", 60000, bars);
         chart.setCandleBuffer(&candles);
         chart.view()->setViewport(centre - 20 * minute, centre + 20 * minute, 99800, 100500);
         ASSERT_TRUE(waitFor([&] {
@@ -3501,7 +3576,7 @@ TEST_F(UgrZoomCpu, LiveChangedFitsOnceAndRefitsWithoutFollowShift) {
     const auto end = v->getVisibleTimeEnd();
     const double high = v->getMaxPrice();
     const bool blocked = candles.blockSignals(true);
-    candles.applyUpdate("BTC-USD", 60,
+    candles.applyUpdate("BTC-USD", 60000,
                         {centre, centre + minute, 100150, 100350, 100130, 100150, 1, false, 0, false}, 1, false);
     candles.blockSignals(blocked);
     const auto beforeRefit = fitter.autoPriceSolveCountForTest();
@@ -3835,7 +3910,7 @@ private:
 };
 
 TEST_F(UgrZoomCpu, SymbolSwitchBeforeFirstSnapshotPublishesRawBoundsSilently) {
-    candles.applyHistory("A3-NO-SNAPSHOT", 60,
+    candles.applyHistory("A3-NO-SNAPSHOT", 60000,
         {{centre, centre + minute, 100150, 100170, 100130, 100150, 1, false, 0, false}});
     AutoFitWarnings warnings;
     chart.setActiveSymbol("A3-NO-SNAPSHOT");
@@ -3844,7 +3919,7 @@ TEST_F(UgrZoomCpu, SymbolSwitchBeforeFirstSnapshotPublishesRawBoundsSilently) {
     auto* v = chart.getViewState();
     for (int i = 1; i <= 16; ++i) {
         const double radius = 20 + i;
-        candles.applyUpdate("A3-NO-SNAPSHOT", 60,
+        candles.applyUpdate("A3-NO-SNAPSHOT", 60000,
             {centre, centre + minute, 100150, 100150 + radius, 100150 - radius, 100150,
              double(i), false, 0, false}, i, false);
         double lo = 100150 - radius * 1.12, hi = 100150 + radius * 1.12;
@@ -3860,7 +3935,7 @@ TEST_F(UgrZoomCpu, SinglePrintStaircaseFitsBothPricesWithMargin) {
     const double span = v->getMaxPrice() - v->getMinPrice();
     const double low = 100150 - span, high = 100150 + span;
     CandleSeriesBuffer staircase;
-    staircase.applyHistory("BTC-USD", 60, {
+    staircase.applyHistory("BTC-USD", 60000, {
         {centre - minute, centre, low, low, low, low, 1, false, 0, false},
         {centre, centre + minute, high, high, high, high, 1, false, 0, false}});
     chart.setCandleBuffer(&staircase);
@@ -3875,7 +3950,7 @@ TEST_F(UgrZoomCpu, SymbolSwitchToOnePriceLeavesTheTickDecisionToTheFrame) {
     auto* layer = chart.gpuHeatmapLayer();
     const auto oldTick = layer->tickUnits();
     constexpr double price = .0010015;
-    candles.applyHistory("TINY-USD", 60,
+    candles.applyHistory("TINY-USD", 60000,
         {{centre, centre + minute, price, price, price, price, 1, false, 0, false}});
     chart.setActiveSymbol("TINY-USD");
     EXPECT_FALSE(layer->autoPriceTickUnits());
@@ -3891,7 +3966,7 @@ TEST_F(UgrZoomCpu, SymbolSwitchToOnePriceLeavesTheTickDecisionToTheFrame) {
     // Queue the frame's Auto proposal, then refit before its queued commit runs.
     layer->chooseTickForView({double(v->getVisibleTimeStart()), double(v->getVisibleTimeEnd()),
                              v->getMinPrice(), v->getMaxPrice()});
-    candles.applyUpdate("TINY-USD", 60,
+    candles.applyUpdate("TINY-USD", 60000,
         {centre, centre + minute, price, price, price, price, 2, false, 0, false}, 1, false);
     EXPECT_FALSE(layer->autoPriceTickUnits());
     QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
@@ -3906,12 +3981,12 @@ TEST_F(UgrZoomCpu, FlatCandlesKeepSpanAndTickAcrossRevisionsTranslationsAndClick
     const auto tick = chart.gpuHeatmapLayer()->autoPriceTickUnits();
     const double row = chart.gpuHeatmapLayer()->tickPrice();
     CandleSeriesBuffer flat;
-    flat.applyHistory("BTC-USD", 60,
+    flat.applyHistory("BTC-USD", 60000,
         {{centre, centre + minute, 100150, 100150, 100150, 100150, 1, false, 0, false}});
     chart.setCandleBuffer(&flat);
     checkSettle();
     for (int i = 1; i <= 16; ++i) {
-        flat.applyUpdate("BTC-USD", 60,
+        flat.applyUpdate("BTC-USD", 60000,
             {centre, centre + minute, 100150, 100150, 100150, 100150, double(i), false, 0, false}, i, false);
         frame();
         EXPECT_EQ(v->getViewportVersion(), version);
@@ -3932,7 +4007,7 @@ TEST_F(UgrZoomCpu, FlatCandlesKeepSpanAndTickAcrossRevisionsTranslationsAndClick
         const double price = i == 0 ? high + 2 * span : high - .03 * span;
         const double shift = std::round((price - (low + high) * .5) / row) * row;
         const auto before = v->getViewportVersion();
-        flat.applyUpdate("BTC-USD", 60,
+        flat.applyUpdate("BTC-USD", 60000,
             {centre, centre + minute, price, price, price, price, 20. + i, false, 0, false}, 20 + i, false);
         EXPECT_EQ(v->getViewportVersion(), before + 1);
         EXPECT_EQ(v->getMinPrice(), low + shift);
@@ -3942,7 +4017,7 @@ TEST_F(UgrZoomCpu, FlatCandlesKeepSpanAndTickAcrossRevisionsTranslationsAndClick
         checkSettle();
     }
     const double price = (v->getMinPrice() + v->getMaxPrice()) * .5;
-    flat.applyUpdate("BTC-USD", 60,
+    flat.applyUpdate("BTC-USD", 60000,
         {centre, centre + minute, price, price + span, price - span, price, 30, false, 0, false}, 30, false);
     EXPECT_GT(v->getMaxPrice() - v->getMinPrice(), span); // first range resumes normal fitting
     checkSettle();
@@ -3954,7 +4029,7 @@ TEST_F(UgrZoomCpu, ClickIntoAFlatWindowKeepsTheStoredSpanAndPendingTick) {
     chart.view()->setAutoPriceScale(true);
     checkSettle();
     CandleSeriesBuffer flat;
-    flat.applyHistory("BTC-USD", 60, {
+    flat.applyHistory("BTC-USD", 60000, {
         {centre, centre + minute, 100150, 100150, 100150, 100150, 1, false, 0, false},
         {centre + 4 * minute, centre + 5 * minute, 100150, 100400, 99900, 100150, 1, false, 0, false}});
     chart.setCandleBuffer(&flat); // the extreme selects a new tick, not committed yet
@@ -3981,7 +4056,7 @@ TEST_F(UgrZoomCpu, SixteenLiveRevisionsAfterClicksDoNotRefit) {
     uint64_t version = v->getViewportVersion();
     int changes = 0;
     for (int i = 1; i <= 16; ++i) {
-        candles.applyUpdate("BTC-USD", 60,
+        candles.applyUpdate("BTC-USD", 60000,
             {centre, centre + minute, 100150, 100157 + .1 * i, 100143, 100150, 1, false, 0, false}, i, false);
         for (int j = 0; j < 3; ++j) frame();
         changes += v->getViewportVersion() != version;
@@ -4001,7 +4076,7 @@ TEST_F(UgrZoomCpu, NewExtremeDuringGlideRebasesOnceBeforeTickCommit) {
     const auto version = v->getViewportVersion();
     const int rebases = chart.glideRebasesForTest();
     const double tick = chart.view()->heatmapTickSize();
-    candles.applyUpdate("BTC-USD", 60,
+    candles.applyUpdate("BTC-USD", 60000,
         {centre, centre + minute, 100150, 100350, 100143, 100150, 1, false, 0, false}, 1, false);
     EXPECT_EQ(v->getViewportVersion(), version + 1);
     chart.updatePolish(); // observe the revised end before the frame's tick proposal
@@ -4010,7 +4085,7 @@ TEST_F(UgrZoomCpu, NewExtremeDuringGlideRebasesOnceBeforeTickCommit) {
     checkSettle();
     EXPECT_NE(chart.view()->heatmapTickSize(), tick);
     const auto settled = v->getViewportVersion();
-    candles.applyUpdate("BTC-USD", 60,
+    candles.applyUpdate("BTC-USD", 60000,
         {centre, centre + minute, 100150, 100350, 100143, 100151, 2, false, 0, false}, 2, false);
     EXPECT_EQ(v->getViewportVersion(), settled);
     EXPECT_EQ(chart.glideRebasesForTest(), rebases + 1);
@@ -4022,7 +4097,7 @@ TEST_F(UgrZoomCpu, NewExtremeAtRestFitsOnceBeforeTickCommit) {
     auto* v = chart.getViewState();
     const auto version = v->getViewportVersion();
     const double tick = chart.view()->heatmapTickSize();
-    candles.applyUpdate("BTC-USD", 60,
+    candles.applyUpdate("BTC-USD", 60000,
         {centre, centre + minute, 100150, 100350, 100143, 100150, 1, false, 0, false}, 1, false);
     EXPECT_EQ(v->getViewportVersion(), version + 1);
     EXPECT_GE(v->getMaxPrice(), 100350 + (100350 - 100121) * .06);
@@ -4193,7 +4268,7 @@ TEST_F(UgrGlide, AConstantScaleRefitMidGlideContinuesFromTheDrawnRows) {
     gpuOn();
     ASSERT_TRUE(settle()) << error.toStdString();
     CandleSeriesBuffer buffer;
-    buffer.applyHistory("BTC-USD", 60, risingBars(viewLo - kHourMs, viewHi + kHourMs, minute, 99'000, 4));
+    buffer.applyHistory("BTC-USD", 60000, risingBars(viewLo - kHourMs, viewHi + kHourMs, minute, 99'000, 4));
     ugr->setCandleBuffer(&buffer);
     ugr->view()->setAutoPriceScale(true);
     ASSERT_TRUE(settle()) << error.toStdString();
@@ -4206,7 +4281,7 @@ TEST_F(UgrGlide, AConstantScaleRefitMidGlideContinuesFromTheDrawnRows) {
     const auto restBefore = ugr->restCameraNow(false);
     uint64_t seq = 1;
     for (const auto &bar : risingBars(viewLo - kHourMs, viewHi + kHourMs, minute, 99'230, 4)) // every bar $230 up
-        buffer.applyUpdate("BTC-USD", 60, bar, seq++, false);
+        buffer.applyUpdate("BTC-USD", 60000, bar, seq++, false);
     const auto restAfter = ugr->restCameraNow(false);
     ASSERT_EQ(restAfter.tick, restBefore.tick);
     ASSERT_EQ(restAfter.rowPx, restBefore.rowPx) << "the refit keeps the scale";
@@ -4529,7 +4604,7 @@ TEST(UgrInput, InputRouteReachesTheChartAndAxisAreasOncePerWheel) {
     std::vector<CandleSeriesBuffer::CandleBar> bars;
     for (int64_t t = epoch; t < epoch + 4 * kHourMs; t += minute)
         bars.push_back({t, t + minute, 101'000, 101'200, 100'800, 101'000, 1.0, true, 0, false});
-    buffer.applyHistory("BTC-USD", 60, bars);
+    buffer.applyHistory("BTC-USD", 60000, bars);
     ugr->setCandleBuffer(&buffer);
     ASSERT_FALSE(ugr->view()->autoPriceScale()) << "the axis zooms turned it off";
     int before = changes;

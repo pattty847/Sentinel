@@ -72,9 +72,9 @@ class ICandleSource {
 public:
     virtual ~ICandleSource() = default;
     virtual bool available() const { return true; }
-    virtual void visibleBars(const QString& symbol, int64_t tfSec, int64_t start, int64_t end,
+    virtual void visibleBars(const QString& symbol, int64_t tfMs, int64_t start, int64_t end,
                              std::vector<CandleBar>& out) const = 0;
-    virtual int64_t oldestTimeMs(const QString& symbol, int64_t tfSec) const = 0;
+    virtual int64_t oldestTimeMs(const QString& symbol, int64_t tfMs) const = 0;
 };
 
 } // namespace chart

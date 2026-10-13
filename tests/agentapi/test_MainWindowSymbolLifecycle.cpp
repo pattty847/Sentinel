@@ -99,12 +99,12 @@ TEST(ChartAgentPin, StartupTimeframeNotificationOrder) {
     auto* overlay = root->findChild<CandlestickOverlayItem*>();
     ASSERT_TRUE(overlay);
     int rootTimeframeAtCandleChange = 0;
-    QObject::connect(overlay, &CandlestickOverlayItem::timeframeSecChanged, &window, [&] {
+    QObject::connect(overlay, &CandlestickOverlayItem::timeframeMsChanged, &window, [&] {
         rootTimeframeAtCandleChange = root->property("currentActiveTimeframe").toInt();
     });
     renderer->view()->setTimeframe(60000);
     EXPECT_EQ(rootTimeframeAtCandleChange, 60000);
-    EXPECT_EQ(overlay->timeframeSec(), 60);
+    EXPECT_EQ(overlay->timeframeMs(), 60000);
 }
 
 TEST(ChartAgentPin, ControlledStartupHistoryAndViewport) {
@@ -132,21 +132,21 @@ TEST(ChartAgentPin, ControlledStartupHistoryAndViewport) {
     std::vector<std::pair<qint64, int>> requests;
     qint64 oldest = 0, clock = now;
     const auto updateHistory = [&] {
-        history.setViewport("BTC-USD", 60, state->getVisibleTimeStart(), state->getVisibleTimeEnd());
+        history.setViewport("BTC-USD", 60000, state->getVisibleTimeStart(), state->getVisibleTimeEnd());
     };
     QObject::connect(renderer->view(), &chart::ChartViewQml::viewportChanged, &window, updateHistory);
     const auto page = [&] {
         clock += 100;
         const auto request = history.next(oldest, false, clock);
         if (!request) return;
-        requests.emplace_back(request->endSec, request->limit);
-        oldest = request->startSec * 1000;
-        EXPECT_TRUE(history.accept("BTC-USD", 60, request->startSec, request->endSec, oldest, clock));
+        requests.emplace_back(request->endMs / 1000, request->limit);
+        oldest = request->startMs;
+        EXPECT_TRUE(history.accept("BTC-USD", 60000, request->startMs, request->endMs, oldest, clock));
         auto* buffer = qobject_cast<CandleSeriesBuffer*>(renderer->candleBuffer());
         ASSERT_TRUE(buffer);
-        buffer->applyHistory("BTC-USD", 60, {
+        buffer->applyHistory("BTC-USD", 60000, {
             {oldest, oldest + 60000, 84000, 84100, 83900, 84000, 1, true},
-            {request->endSec * 1000 - 60000, request->endSec * 1000, 84000, 84100, 83900, 84000, 1, true}});
+            {request->endMs - 60000, request->endMs, 84000, 84100, 83900, 84000, 1, true}});
     };
     renderer->setLiveBookTop(84088.2, 84088.4);
     page();

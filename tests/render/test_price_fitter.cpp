@@ -40,13 +40,13 @@ struct Environment final : chart::IChartEnvironment, chart::ITickOracle, chart::
 struct Candles final : chart::ICandleSource {
     std::vector<chart::CandleBar> bars;
     mutable qint64 from = 0, to = 0;
-    mutable int64_t interval = 0;
+    mutable int64_t interval = 0, oldestInterval = 0;
     void visibleBars(const QString&, int64_t tf, int64_t start, int64_t end,
                      std::vector<chart::CandleBar>& out) const override {
         from = start; to = end; interval = tf;
         out = bars;
     }
-    int64_t oldestTimeMs(const QString&, int64_t) const override { return 1000; }
+    int64_t oldestTimeMs(const QString&, int64_t tf) const override { oldestInterval = tf; return 1000; }
 };
 struct PriceFitterTest : testing::Test {
     Environment env;
@@ -115,7 +115,7 @@ TEST_F(PriceFitterTest, AutoVisibleBars) {
     expectFit(75, 125);
     EXPECT_EQ(candles.from, 1000);
     EXPECT_EQ(candles.to, 11000);
-    EXPECT_EQ(candles.interval, 1);
+    EXPECT_EQ(candles.interval, 1000);
     EXPECT_EQ(env.decision, 1);
     EXPECT_EQ(env.updates, 1);
 }
@@ -188,15 +188,15 @@ TEST_F(PriceFitterTest, CandleDirtyRefitHook) {
     fitter.priceCarry().emplace();
     controller.flags().reseedPrice = true;
     const auto version = view.getViewportVersion();
-    fitter.candlesDirty("OTHER", 1, 1000, 2000);
-    fitter.candlesDirty("TEST", 2, 1000, 2000);
-    fitter.candlesDirty("TEST", 1, 0, 1000);
-    fitter.candlesDirty("TEST", 1, 11000, 12000);
+    fitter.candlesDirty("OTHER", 1000, 1000, 2000);
+    fitter.candlesDirty("TEST", 2000, 1000, 2000);
+    fitter.candlesDirty("TEST", 1000, 0, 1000);
+    fitter.candlesDirty("TEST", 1000, 11000, 12000);
     controller.flags().limitsDeferred = true;
-    fitter.candlesDirty("TEST", 1, 1000, 2000);
+    fitter.candlesDirty("TEST", 1000, 1000, 2000);
     EXPECT_EQ(view.getViewportVersion(), version);
     controller.flags().limitsDeferred = false;
-    fitter.candlesDirty("TEST", 1, 1000, 1000); // fallback end = start + tf
+    fitter.candlesDirty("TEST", 1000, 1000, 1000); // fallback end = start + tf
     EXPECT_EQ(view.getViewportVersion(), version + 1);
     EXPECT_EQ(view.getMinPrice(), 75);
     EXPECT_EQ(view.getMaxPrice(), 125);
@@ -204,11 +204,11 @@ TEST_F(PriceFitterTest, CandleDirtyRefitHook) {
     EXPECT_FALSE(controller.flags().reseedPrice);
     EXPECT_FALSE(fitter.priceCarry());
     EXPECT_EQ(env.syncs, 1);
-    fitter.candlesDirty("TEST", 1, 1000, 2000);
+    fitter.candlesDirty("TEST", 1000, 1000, 2000);
     EXPECT_EQ(view.getViewportVersion(), version + 1);
     view.setAutoPriceScale(false);
     bar(2000, 1, 1000);
-    fitter.candlesDirty("TEST", 1, 1000, 2000);
+    fitter.candlesDirty("TEST", 1000, 1000, 2000);
     EXPECT_EQ(view.getViewportVersion(), version + 1);
 }
 
@@ -224,5 +224,24 @@ TEST_F(PriceFitterTest, TimeFitPaddingAndLimits) {
     EXPECT_EQ(fitter.gpuFitTimeWindow(), fit);
     env.anchor = 0;
     EXPECT_FALSE(fitter.gpuFitTimeWindow());
+}
+TEST_F(PriceFitterTest, NonWholeSecondIntervalsRemainMilliseconds) {
+    view.setPriceFit([this](qint64 start, qint64 end, double& lo, double& hi) {
+        return fitter.autoPriceFit(start, end, lo, hi);
+    });
+    bar(4000, 80, 120);
+    for (int64_t tf : {100, 1500}) {
+        controller.session().timeframeMs = tf;
+        ASSERT_TRUE(fitter.gpuFitPriceWindow(1000, 11000, true));
+        EXPECT_EQ(candles.interval, tf);
+        env.oldest = 0;
+        ASSERT_TRUE(fitter.gpuFitTimeWindow());
+        EXPECT_EQ(candles.oldestInterval, tf);
+        const auto before = fitter.autoPriceSolveCountForTest();
+        fitter.candlesDirty("TEST", tf, 4000, 5000);
+        EXPECT_EQ(fitter.autoPriceSolveCountForTest(), before + 1);
+        fitter.candlesDirty("TEST", tf == 100 ? 1000 : 2000, 4000, 5000);
+        EXPECT_EQ(fitter.autoPriceSolveCountForTest(), before + 1);
+    }
 }
 } // namespace

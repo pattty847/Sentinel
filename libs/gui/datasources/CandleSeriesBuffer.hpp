@@ -30,7 +30,7 @@ public:
     explicit CandleSeriesBuffer(QObject* parent = nullptr);
 
     void applyUpdate(const QString& symbol,
-                     int64_t timeframeSec,
+                     int64_t timeframeMs,
                      const CandleBar& bar,
                      int64_t seq,
                      bool isClosed);
@@ -38,48 +38,48 @@ public:
     // Merges history by start time. Live-owned buckets always win, including
     // against "closed" REST snapshots; the live seq stream is not touched.
     void applyHistory(const QString& symbol,
-                      int64_t timeframeSec,
+                      int64_t timeframeMs,
                       const std::vector<CandleBar>& bars);
 
     // New sessions/selections revoke all cached live ownership. Fresh history
     // can correct closed cached bars; the new live stream re-establishes ownership.
     void resetSequences();
-    void resetSeriesForSelection(const QString& symbol, int64_t timeframeSec);
+    void resetSeriesForSelection(const QString& symbol, int64_t timeframeMs);
 
-    qint64 oldestTimeMs(const QString& symbol, int64_t timeframeSec) const;
-    bool historyCapacityReached(const QString& symbol, int64_t timeframeSec) const;
+    qint64 oldestTimeMs(const QString& symbol, int64_t timeframeMs) const;
+    bool historyCapacityReached(const QString& symbol, int64_t timeframeMs) const;
 
     bool getVisibleSlice(const QString& symbol,
-                         int64_t timeframeSec,
+                         int64_t timeframeMs,
                          qint64 timeStartMs,
                          qint64 timeEndMs,
                          std::vector<CandleBar>& out) const;
 
     // Copies at most limit bars for API pagination. The end is exclusive.
     // Returns false when this symbol/timeframe has no local series.
-    bool getBoundedSlice(const QString& symbol, int64_t timeframeSec,
+    bool getBoundedSlice(const QString& symbol, int64_t timeframeMs,
                          qint64 startMs, qint64 endMs, size_t limit,
                          std::vector<CandleBar>& out, bool& hasMore,
                          qint64& nextStartMs) const;
 
 signals:
     void candlesDirty(const QString& symbol,
-                      int64_t timeframeSec,
+                      int64_t timeframeMs,
                       qint64 dirtyStartMs,
                       qint64 dirtyEndMs);
 
 private:
     struct SeriesKey {
         QString symbol;
-        int64_t timeframeSec = 0;
+        int64_t timeframeMs = 0;
         bool operator==(const SeriesKey& other) const {
-            return timeframeSec == other.timeframeSec && symbol == other.symbol;
+            return timeframeMs == other.timeframeMs && symbol == other.symbol;
         }
     };
 
     struct SeriesKeyHash {
         size_t operator()(const SeriesKey& key) const noexcept {
-            return qHash(key.symbol) ^ (static_cast<size_t>(key.timeframeSec) << 1);
+            return qHash(key.symbol) ^ (static_cast<size_t>(key.timeframeMs) << 1);
         }
     };
 
@@ -91,7 +91,7 @@ private:
         int64_t lastSeq = 0;
     };
 
-    static size_t capacityFor(int64_t timeframeSec);
+    static size_t capacityFor(int64_t timeframeMs);
     static void resetOwnership(Series& series);
     static const CandleBar& getAt(const Series& series, size_t index);
     static CandleBar& getAt(Series& series, size_t index);
@@ -100,7 +100,7 @@ private:
     static std::vector<CandleBar> linearize(const Series& series);
     // Replaces the ring with time-sorted bars, keeping the newest `capacity`.
     static void rebuild(Series& series, std::vector<CandleBar>&& sorted);
-    Series& seriesFor(const QString& symbol, int64_t timeframeSec);
+    Series& seriesFor(const QString& symbol, int64_t timeframeMs);
 
     std::unordered_map<SeriesKey, Series, SeriesKeyHash> m_series;
 };
