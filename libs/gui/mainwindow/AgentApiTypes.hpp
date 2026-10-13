@@ -6,7 +6,6 @@
 #include <QJsonObject>
 #include <QtGlobal>
 #include <optional>
-#include <array>
 #include <vector>
 #include "../render/heatmap/HeatmapWalls.hpp"
 
@@ -188,7 +187,8 @@ public:
     void append(TradeRow row);
     TradesSnapshot snapshot(Metadata meta, qint64 windowMs, size_t limit) const;
 private:
-    std::array<TradeRow, Capacity> m_rows{};
+    // Allocate the fixed-capacity ring once, outside the caller's stack.
+    std::vector<TradeRow> m_rows = std::vector<TradeRow>(Capacity);
     size_t m_head = 0, m_count = 0;
     qint64 m_lastEvictedAtMs = 0;
     quint64 m_epoch = 0;

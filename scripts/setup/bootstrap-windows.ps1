@@ -19,6 +19,6 @@ if (-not $env:QT_MSVC) {
 
 Write-Host "Environment looks good."
 Write-Host "Run the following to configure:"
-Write-Host "  cmake --preset windows-msvc"
+Write-Host "  cmake --preset windows-msvc-vs"
 Write-Host "Then build with:"
-Write-Host "  cmake --build --preset windows-msvc"
+Write-Host "  cmake --build --preset windows-msvc-vs --config Release --parallel 6"

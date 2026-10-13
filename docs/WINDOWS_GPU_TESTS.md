@@ -95,8 +95,6 @@ only (`StoreTest.ReaderAssertsWorkerOwnershipInDebugBuilds`), opt-in real data o
   setx VCPKG_ROOT C:\dev\vcpkg
   ```
 
-Note: `README.md` names a preset `windows-msvc`. That preset does not exist. Use `windows-msvc-vs`.
-
 ## Build and run
 
 PowerShell, repository root:

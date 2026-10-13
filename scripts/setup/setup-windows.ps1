@@ -7,7 +7,6 @@
       - Verify MSVC Build Tools + Windows 10 SDK
       - Verify VCPKG_ROOT and QT_MSVC
       - Run vcpkg install (manifest-based) for all dependencies
-      - Generate CMakeUserPresets.json if missing
       - Configure CMake using the "windows-msvc-vs" preset
 #>
 
@@ -25,10 +24,10 @@ function Fail($message) {
 }
 
 # ---------------------------------------------------------------------------
-# Locate repo root (script lives in scripts/)
+# Locate repo root (script lives in scripts/setup/)
 # ---------------------------------------------------------------------------
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$repoRoot  = Resolve-Path (Join-Path $scriptDir "..")
+$repoRoot  = Resolve-Path (Join-Path $scriptDir "../..")
 Set-Location $repoRoot
 
 Write-Host "Repo root: $repoRoot"
@@ -96,35 +95,13 @@ Write-Host "  VCPKG_ROOT = $($env:VCPKG_ROOT)"
 Write-Host "  QT_MSVC    = $($env:QT_MSVC)"
 
 # ---------------------------------------------------------------------------
-# vcpkg manifest install
+# CMake installs the manifest into its build directory through the toolchain.
 # ---------------------------------------------------------------------------
-if (-not $SkipVcpkgInstall) {
-    Write-Host "`nRunning vcpkg manifest install (triplet: x64-windows)..."
-    & $vcpkgExe install --triplet x64-windows
-    if ($LASTEXITCODE -ne 0) {
-        Fail "vcpkg install failed. See output above."
-    }
-} else {
+if ($SkipVcpkgInstall) {
     Write-Host "`nSkipping vcpkg install (--SkipVcpkgInstall specified)."
-}
-
-# ---------------------------------------------------------------------------
-# Generate CMakeUserPresets.json if missing
-# ---------------------------------------------------------------------------
-$userPresetsPath = Join-Path $repoRoot "CMakeUserPresets.json"
-
-if (-not (Test-Path $userPresetsPath)) {
-    Write-Host "`nCreating minimal CMakeUserPresets.json..."
-    $userPresets = @{
-        version = 3
-        configurePresets = @()
-        buildPresets     = @()
-        testPresets      = @()
-    } | ConvertTo-Json -Depth 5
-
-    $userPresets | Out-File -FilePath $userPresetsPath -Encoding UTF8 -NoNewline
+    $manifestInstall = "OFF"
 } else {
-    Write-Host "`nCMakeUserPresets.json already exists; leaving it untouched."
+    $manifestInstall = "ON"
 }
 
 # ---------------------------------------------------------------------------
@@ -132,7 +109,7 @@ if (-not (Test-Path $userPresetsPath)) {
 # ---------------------------------------------------------------------------
 Write-Host "`nConfiguring CMake with preset: windows-msvc-vs"
 
-& cmake --preset windows-msvc-vs
+& cmake --preset windows-msvc-vs "-DVCPKG_MANIFEST_INSTALL=$manifestInstall"
 if ($LASTEXITCODE -ne 0) {
     Fail "CMake configuration with preset 'windows-msvc-vs' failed."
 }
@@ -142,6 +119,6 @@ Write-Host "Next steps:"
 Write-Host "  1) Build Debug:"
 Write-Host "       cmake --build --preset windows-msvc-vs --config Debug"
 Write-Host "  2) Run the GUI:"
-Write-Host "       build\\windows-msvc-vs\\apps\\sentinel_gui\\Debug\\sentinel_gui.exe"
+Write-Host "       .\build\windows-msvc-vs\apps\sentinel-gui\Debug\sentinel-gui.exe"
 
 

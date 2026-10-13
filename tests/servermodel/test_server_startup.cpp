@@ -58,7 +58,12 @@ struct ServerProcess {
     }
 
     QByteArray log() const {
-        QFile file(scratch.filePath("logs/sentinel-server-latest.log"));
+        const QDir logs(scratch.filePath("logs"));
+        // Windows does not create the optional latest-log symlink.
+        const auto runs = logs.entryList({"sentinel-server-*.log"},
+                                         QDir::Files | QDir::NoSymLinks, QDir::Time);
+        if (runs.isEmpty()) return {};
+        QFile file(logs.filePath(runs.front()));
         if (!file.open(QIODevice::ReadOnly)) return {};
         return file.readAll();
     }
