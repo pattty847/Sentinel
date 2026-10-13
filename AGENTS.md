@@ -271,3 +271,10 @@ Continuity:
 - Keep unfinished writer and reviewer threads alive for fix rounds; record their thread IDs and tips in STATUS.
 - STATUS holds current facts only and is replaced, not appended. History is `git log --first-parent` and `_agent/`.
 - Handover: the outgoing conductor stops dispatching and brings STATUS up to date; the owner names the incoming conductor.
+- Conductor lifetime (owner, 2026-10-12): a conductor serves one wave, not a whole plan. Context cost is context size x turns, so end early rather than late.
+  - At a completed wave, checkpoint STATUS and end before dispatching the next wave.
+  - Soft limit 200k context (the `context-meter` hook reports it): finish the active review or landing; dispatch nothing new.
+  - Hard limit 250k: write the hand-off, ping the owner, end. Do not compact instead: a planned hand-off keeps what matters, a compaction guesses.
+  - Never end in the middle of a build, land, deploy or a non-resumable agent; finish it or record exactly where it stopped.
+  - Wait for completion notifications instead of polling; each poll re-sends the whole context.
+  - The hand-off goes in STATUS: main SHA; plan path and next section; active branches with tip, worktree, writer and reviewer thread IDs and phase; review verdicts with reviewed SHA and open findings; validation run and log paths; owner approvals and pending decisions; the next action.
