@@ -3,7 +3,7 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-14. main `737fe4a`. Conductor: Opus session of 2026-10-14 (memory and tracker cleanup wave).
+- **Updated:** 2026-10-14. main `787453b`. Conductor: Opus session of 2026-10-14 (memory and tracker cleanup wave).
 - **Conductor:** a Claude Opus session on the owner's Mac (AGENTS.md section 10).
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high-risk. Owner: use Codex down to ~1% before spending a reset credit (holds 3).
 
@@ -22,7 +22,8 @@ Pre-land evidence for chart slices: native `SENTINEL_REQUIRE_GPU=1` run of Chart
 
 ## In flight
 
-- **FAILURE_MODES pruning** (owner go 2026-10-14; was Next 0). Rules: entry <= ~300 chars; archive when code is gone or a test enforces the guardrail and the entry adds nothing; product bugs to TODO; target < 25 KB active. Keep test: would a future agent repeat the mistake before a test catches it. No tag format yet (owner is designing "LOD for docs" across threads). Done: FM-023, 036, 037, 050, 124, 129, 222 archived to `../Sentinel-Private/archive/agent/FAILURE_MODES.md` (269 active, 120 KB). Running: Fable writer classifies every entry into `../Sentinel-Private/research/2026-10-14-fm-pruning/` (proposal only); then gpt-6-astra reviews; then the conductor applies. INVARIANTS and DECISIONS get the same treatment after.
+- **FAILURE_MODES pruning** (owner go 2026-10-14; was Next 0). Rules: entry <= ~300 chars; archive when code is gone or a test enforces the guardrail and the entry adds nothing; product bugs to TODO; target < 25 KB active. Keep test: would a future agent repeat the mistake before a test catches it. No tag format yet (owner is designing "LOD for docs" across threads). Done: FM-023, 036, 037, 050, 124, 129, 222 archived to `../Sentinel-Private/archive/agent/FAILURE_MODES.md` (269 active, 120 KB). Running: Fable writer classifies every entry into `../Sentinel-Private/research/2026-10-14-fm-pruning/` (proposal only); then gpt-6-astra reviews; then the conductor applies. Fable also adds an area column (input for the owner's LOD design, decision on hold). Next: INVARIANTS, then DECISIONS trimmed to decisions in force (owner 2026-10-14: nothing ancient).
+- **doc-health gate** (owner go 2026-10-14): branch `lt-sol/doc-health`, worktree `/Volumes/T7/sentinel-worktrees/lt-sol-doc-health`, base `787453b`. Writer Codex gpt-6.1-sol (running); reviewer a Claude model after READY. Ratcheted size caps (STATUS 8 KB, TODO 12 KB, each _agent file 25 KB), 350-char limit on new entries, unique and never-reused ids, dead-pointer warnings; waiver trailer `Doc-Health-Waiver`.
 - Audit reports from 2026-10-12 (tests, workflow) are in `../Sentinel-Private/research/2026-10-12-audits/`. A Windows Codex thread is pruning redundant tests and will open a PR; reconcile by gtest name.
 - Workflow review with GPT-6 (owner relays): dossier `../Sentinel-Private/research/2026-10-13-agentops-dossier.md`; section 12 proposals, section 13 open owner questions. **Nothing in it is policy until the owner adopts it.** AgentOps S2-S4 need a new owner decision. S1 known gaps: SentinelBar does not see sandbox events until land; read-only reviewers write no events; no appender lock; Codex candidates are branch matches only.
 - Neutrality evidence: main's startup `viewportVersion` and candle-history paging vary run to run; do not use them as neutrality pins; use the heatmap target hash plus pin tests. The `window` target is never byte-stable.
