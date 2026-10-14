@@ -1,6 +1,5 @@
 #pragma once
-// Per-chart heatmap source controller and the process-wide span-source cache
-// (plan docs/research/2026-09-s5-plan.md, slice S5b).
+// Per-chart heatmap source controller and the process-wide span-source cache.
 //
 // QtCore only: no QSG, QRhi, QtGui or render-thread types, so it tests without a
 // GPU. It lives in libs/gui (not core) because it builds gpu::GpuSource upload

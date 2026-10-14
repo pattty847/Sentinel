@@ -2,7 +2,7 @@
 
 `sentinel-capture` opens its own Coinbase Advanced Trade WebSockets through
 `MarketDataFeeds`. Each requested product has its own connection, engine and RAWL2
-v1 stream (`docs/research/2026-10-per-symbol-connections.md`). Each connection
+v1 stream. Each connection
 subscribes `level2`, `market_trades` and `heartbeats` for its one product. One
 process holds all products; they share one I/O thread and one disk queue pool.
 It has no dependency on sentinel-server, its recorder or the GUI. Its local Unix
@@ -839,4 +839,4 @@ with a client connected at SIGTERM, and journal continuity/recovery while an
 unusable socket directory is repaired. No test uses production data or Coinbase.
 
 Measurements (including append-to-receive p50/p95), validation and the deploy
-watch list are in [Slice B as built](research/2026-10-one-world-pipeline.md#slice-b-as-built).
+watch list are retained in the sibling Sentinel-Private research repository.

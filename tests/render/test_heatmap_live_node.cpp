@@ -1,5 +1,4 @@
-// Slice S5L-c: the live edge in HeatmapTileNode (docs/research/2026-09-s5l-plan.md
-// sections 3-5). GPU cases run on the selected QRhi backend (lab::HeadlessRhi /
+// The live edge in HeatmapTileNode. GPU cases run on the selected QRhi backend (lab::HeadlessRhi /
 // OffscreenQuick) and skip cleanly when it cannot create a QRhi with compute.
 // Deterministic: hand-made SpanSets and LiveSnapshots (the fake controller, built
 // with the production composer and GPU source builder), or the real controller on

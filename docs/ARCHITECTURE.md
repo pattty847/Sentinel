@@ -32,7 +32,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 - The GUI layer exclusively owns rendering logic, QSG node generation, and visual widget behavior. It heavily employs Qt6, QML, and QSG.
 - **`sentinel_chart_core`:** QtCore-only chart state, raster mapping, time authority, frame construction, and the `PublishedFrame` GUI/render handoff. `sentinel_gui_lib` links it publicly; the Quick shell supplies surface DPR and keeps QSG ownership.
 - **`datasources`:** Acts as the ingress point from the Core network layer. `RemoteGridDataSource` receives book, trade, candle and trade-overlay messages and dispatches them to the renderer; the heatmap arrives through `HeatmapDataService` (chunks and the live raw tail).
-- **`render`:** The performance-critical hot-path. Owns the generation of QSG structures (e.g., `HeatmapTileNode`, `MsdfGlyphNode`). Must avoid manipulating `QObject` trees on the render thread to ensure low-lag performance. Coordinated entirely by the `UnifiedGridRenderer`. See `docs/UI_ARCHITECTURE.md` for a deep-dive into the GUI structure.
+- **`render`:** The performance-critical hot-path. Owns the generation of QSG structures (e.g., `HeatmapTileNode`, `MsdfGlyphNode`). Must avoid manipulating `QObject` trees on the render thread to ensure low-lag performance. The Qt Quick shell delegates frame construction to `chart/core/ChartViewController` and publication to `chart/core/FrameProducer`; see the chart-core section below for ownership.
 - **`lab`:** Isolated QRhi compute/render path for measuring client-side binning over recording entries. It is not wired into `UnifiedGridRenderer` or the server stream.
 - **`qml` & `widgets`:** Owns the declarative scenes (e.g., `DepthChartView`) and the dockable window management (e.g., `ChartDock`, `OrderBookDock`).
 - **DOM (`models/DomModel`, `widgets/OrderBookDock`):** the datasource ingests every book delta; the dock stores every active-symbol trade in a fixed 1,000-event ring even before a book arrives or while hidden. A visible, non-minimized 67 ms timer publishes 2,001 contiguous integer price buckets to a retained table model, including empty levels; scrolling pins the price window and Recenter / follow restores automatic centering. The ladder fits a 180 px dock with Bid / Price / Ask; buy/sell count columns collapse first, leaving a slim signed delta at intermediate widths, then delta collapses at the narrowest widths. The default layout requests a compact 260 px DOM (Qt may adjust for neighboring dock constraints). Numeric quantities use complete compact formats with full-value tooltips; prices retain tick precision. There is no horizontal scrollbar. Two single-line metadata rows carry tick/units, bucketed spread and freshness; full book-top/count-window details remain in tooltips. Resting quantities use base units; prices/tick and bucketed spread use quote units. Executions are counts, with unknown aggressors retained in the window but excluded from buy/sell/delta. Freshness uses retained connection and snapshot-stale state; quiet books remain connected, with last-change age displayed separately. Identical L2 updates and trades do not reset that displayed change age. Every product's replica uses the server's configured order-book tick unchanged, preserving shared resolution for chart book-top lines and the Agent API; per-product tick derivation belongs to the planned server slice. The GUI datasource has no roller dependency. Effective ticks above 1% of midpoint or best levels collapsed to zero suppress the ladder and spread with an explicit server-aggregation explanation; the client cannot recover precision lost upstream. This small freshness policy is replaceable by W2a's shared health model. No hub visibility hook, core throttling, or per-event table-item construction is used.
@@ -128,7 +128,6 @@ for labels/walls.
 
 ### Heatmap tick and zoom contract (integration slice T)
 
-Product contract: [heatmap interaction spec](research/2026-09-heatmap-interaction-spec.md).
 `HeatmapResolution.hpp` holds the pure policy in integer price units: the preset
 ladder `{1, 2, 2.5, 5} x 10^k`, Auto (`autoTickUnits`: smallest preset that is a
 multiple of the common tick of the data in view and at least `minRowPx` tall;
@@ -186,7 +185,7 @@ draw mapping. `HeatmapTileNode` records compute passes in
 `tests/render/test_qsg_compute_spike.cpp` guards that mechanism. Display ticks
 must be multiples of `commonTick()` (LCM of the native ticks). Not yet wired
 into `UnifiedGridRenderer` (S6). Results and limits:
-[GPU heatmap integration plan](research/2026-09-gpu-heatmap-integration-plan.md), S4.
+Integration measurements are retained in the sibling Sentinel-Private research repository.
 
 ### Heatmap span planning and source controller (slice S5b)
 
@@ -351,8 +350,8 @@ Cross-thread communication uses `Qt::QueuedConnection` exclusively.
 | `docs/COORDINATE_SYSTEMS.md` | Coordinate spaces and renderer contracts |
 | `docs/CONFIG.md` | Server and client config files and options |
 | `docs/PAPER_TRADING_QUICKSTART.md` | Paper trading setup and usage |
-| `docs/FEATURES.md` | Feature overview and notable changes |
-| `docs/TRADING_SIMULATION_BLUEPRINT.md` | Long-term plan for shared live paper trading, replay, and future book-aware execution |
+| `docs/README.md` | Documentation index and maintenance scope |
+| `docs/TODO.md` | Feature scope and current priorities |
 
 ## Trade overlays and recording heatmaps
 

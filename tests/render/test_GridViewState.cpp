@@ -58,7 +58,7 @@ TEST(GridViewStateClamps, WithoutLimitsNothingIsClamped) {
     EXPECT_DOUBLE_EQ(v.price(), 899'999);
 }
 
-// Auto price scale (docs/research/2026-10-viewport-autoscale.md): the fit replaces the
+// Auto price scale: the fit replaces the
 // price inside setViewport (one change), drags and keyboard pans are time only; off,
 // drags pan price again.
 struct AutoView : View {

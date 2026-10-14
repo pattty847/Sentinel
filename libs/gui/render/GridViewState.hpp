@@ -47,7 +47,7 @@ public:
     double minTimeSpanMs() const { return m_minTimeSpanMs; }
     double minPriceSpan() const { return m_minPriceSpan; }
     void setViewportSize(double width, double height);
-    // Auto price scale (docs/research/2026-10-viewport-autoscale.md; off by default,
+    // Auto price scale (off by default,
     // the gpu renderer turns it on). While on, setViewport takes its price range from
     // the price fit for the new time range (so a time change and its refit are ONE
     // viewport change), chart drags and keyboard pans move time only, and the chart

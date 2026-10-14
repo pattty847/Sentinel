@@ -11,7 +11,7 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 `agent-worktree.sh land` runs chart-health, the build, then `ctest -j 4` with `SENTINEL_REQUIRE_GPU=1` (an unavailable GPU is fatal). Resource locks, labels and `PROCESSORS` live in `tests/TestResources.cmake` (CMake >= 3.28; older CMake only loses them). No RUN_SERIAL list remains (FM-261 resolved `30c09cf`, FM-262 resolved `d87aa13`; RollerCorruptBlockTests TIMEOUT 300, `2cdb8ed`). The land removes the worktree and its `.land-ctest.log`: tee it during the land to quote the ChartGolden/UgrGpu/ChartUi lines. `lizard` is at `~/.local/bin/lizard` (uv tool).
 
-## Chart-core refactor (complete; plan `docs/research/2026-10-11-chart-core-architecture.md`)
+## Chart-core refactor (complete; plan `../Sentinel-Private/research/2026-10-11-chart-core-architecture.md`)
 
 S0a `9e32fe4` through S15 `f5982b9`, one merge per slice (`git log --first-parent`); Fable reviewed S3, S10, S11, S12, S15. S11 carried the one owner-approved visible change (overlays always under chart text, DECISIONS 2026-10-12).
 
@@ -31,19 +31,19 @@ Left: README/ARCHITECTURE pass (`data/market` deleted by the owner 2026-10-12).
 
 ## Hand-off: chart-core Phase 5 (B items), written 2026-10-13 by the outgoing conductor
 
-Plan: `docs/research/2026-10-11-chart-core-architecture.md` rows B1-B8 (line ~771) and section 6 Q3 (line ~845). After PR 44 lands it moves to `../Sentinel-Private/research/` (same file name). SentinelBar shows 21/29; the true count is 21/28 (B8 was done inside S11; the bar only counts trailers).
+Plan: `../Sentinel-Private/research/2026-10-11-chart-core-architecture.md` rows B1-B8 (line ~771) and section 6 Q3 (line ~845). SentinelBar shows 21/29; the true count is 21/28 (B8 was done inside S11; the bar only counts trailers).
 
 State after `f8026ad` (2026-10-13):
 - Landed in `f8026ad` (Codex Sol writer, Opus reviewer, 2 rounds, 1 minor fixed): B1 (seed/bootstrap use `liveEndCeil`, `nextBucketEnd` deleted), B3 (`autoPriceTick_` reset on controller destroy and `forgetService`), B4 (test rename), B5 (one auto fit per live step: `ViewCommands::refitAfterHeatmapLive` skips when follow already fitted; depends on the `liveChanged` connect order, pinned by `UgrZoomCpu.LiveChangedFitsOnceAndRefitsWithoutFollowShift`), B7 (glyph-atlas dump deleted). B6: nothing to remove (`AxisModel::setTarget` can detach the view state, so its checks are live). Metal goldens unchanged, no re-bless.
 - B2 option B landed `49b4c9a` (Codex Sol writer, Opus reviewer, 2 rounds, 5 minors: 3 fixed, 2 deferred). The candle interval is ms across the GUI; `CandleInterval.hpp` converts to wire seconds exactly or refuses; a refused timeframe (100 ms today) sends no history request, logs once per switch, never retries and draws no candles; auto price fit and price carry then use the live price (no candle fallback). Deferred minors: replace the MainWindow/QML source-grep test `UgrCandleCpu.WindowAndQmlPassUnroundedMilliseconds` with a fake `IGridDataSource`; one startup refusal log line for the 100 ms session default. Metal goldens unchanged.
-- B2 option A (real sub-second candles) is a feature for later: plan `docs/research/2026-10-13-b2-subsecond-candles.md` + owner answers at its end; Astra REVISE r1 in `.claude/acting-orchestrator/b2-plan/astra-review-r1.md` (2 blockers, 5 majors). Fable revises in a new thread with both before any slice.
+- B2 option A (real sub-second candles) is a feature for later: plan `../Sentinel-Private/research/2026-10-13-b2-subsecond-candles.md` + owner answers at its end; Astra REVISE r1 in `.claude/acting-orchestrator/b2-plan/astra-review-r1.md` (2 blockers, 5 majors). Fable revises in a new thread with both before any slice.
 - B8: done in S11 (`d231a11`).
 
 Also hand over: PR 44 (docs to Sentinel-Private) review and land when the Windows Codex rework reports READY. Conflicts: the owner's Windows test-cleanup PR touches `tests/render/test_ugr_gpu.cpp` (B4); land it first or rebase B4 after. PR 44 (docs move to Sentinel-Private, rework requested) changes AGENTS.md and the plan path; it is docs-only and does not conflict with B code.
 
 ## In flight
 
-- Read-only Codex Astra audits (2026-10-12, reports to the conductor, then a docs/research file): tests (re-check `docs/research/2026-10-11-code-health/audit-tests.md`, scan S0-S15 tests; thread `01a13321-9031-70b3-a3ef-7bcda74bed58`) and workflow (30-day trailers, review yield, conductor token cost, conductor hand-off rule; thread `01a13321-9031-7ce0-b709-54d79b8c710b`). A Windows Codex thread is also pruning redundant tests and will open a PR; reconcile by gtest name.
+- Read-only Codex Astra audits (2026-10-12, reports to the conductor, then a private research file): tests (re-check `../Sentinel-Private/research/2026-10-11-code-health/audit-tests.md`, scan S0-S15 tests; thread `01a13321-9031-70b3-a3ef-7bcda74bed58`) and workflow (30-day trailers, review yield, conductor token cost, conductor hand-off rule; thread `01a13321-9031-7ce0-b709-54d79b8c710b`). A Windows Codex thread is also pruning redundant tests and will open a PR; reconcile by gtest name.
 - Neutrality evidence: main's startup `viewportVersion` and candle-history paging (request count and limits) vary run to run (12/17/15 and 2-3 requests in three fresh-profile runs on 2026-10-12). Do not use them as neutrality pins; use the heatmap target hash plus pin tests. The `window` target is never byte-stable (live clock and status).
 - Open check: at the next server restart, confirm the 7 startup `Shadow journal invalidated ... reason=journal boundary` warnings seen after the slice E deploy (pid 37884) do not recur (likely the one-time v1-anchor fallback).
 - Open FMs: FM-256 (TP/SL exit order left New), FM-259 (bubbles may not draw if the overlay attaches before trades), FM-260 (overlay dangling provider at teardown), FM-267 (startup auto tick 100 -> 500 -> 100 bounce: candle flicker, and the settled tick/price rows vary run to run on main itself; do not chase price-row diffs in screenshots; fix after S15, owner-visible), FM-268 (binner self-test zero-readback flake).

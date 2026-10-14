@@ -8,7 +8,7 @@ AGENTS.md. Remove a note here when it stops being true.
 
 1. **Discuss.** The owner raises a goal or problem; the conductor investigates (or dispatches a read-only
    investigation) and returns the cause and options with a recommended default.
-2. **Plan.** Anything cross-cutting gets a plan in `docs/research/` with the real decisions listed. The owner
+2. **Plan.** Anything cross-cutting gets a private plan in the sibling `../Sentinel-Private/research/` repository with the real decisions listed. The owner
    answers; the answers are appended as "Owner decisions (approved)". No dispatch before agreement on
    anything that changes behaviour, data or looks.
 3. **Dispatch** one task packet per writer (AGENTS.md section 10).

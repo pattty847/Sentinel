@@ -1,6 +1,6 @@
 /*
 Sentinel — RecordingCodec
-Role: fixed-scale size codes and varints for recording v2 (docs/research/2026-09-recording-v2.md).
+Role: fixed-scale size codes and varints for recording v2.
 A size maps to a 15-bit log code on one scale forever, so sizes recorded months
 apart compare directly. Bit 15 carries the side (1 = ask), matching the heatmap's
 existing bid/ask-by-high-bit convention.

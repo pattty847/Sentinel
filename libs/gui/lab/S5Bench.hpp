@@ -2,10 +2,8 @@
 #include <QString>
 
 namespace lab {
-// Slice S5c headless benchmark of the production heatmap path (LabData ->
-// HeatmapSourceController -> HeatmapTileNode) against the B1 hybrid numbers
-// (docs/research/2026-09-b1-whole-chunk-benchmark.md, results in
-// docs/research/2026-09-s5-plan.md "S5c results"). Real recorded data (pin the
+// Headless benchmark of the production heatmap path (LabData ->
+// HeatmapSourceController -> HeatmapTileNode). Real recorded data (pin the
 // range with --end-utc), a real scene graph (OffscreenQuick) paced at 60 Hz,
 // fresh charts per session. For DPR 1x/2x (physical 1500x880 / 3000x1760),
 // timeframes 1m/5m/1h and fixed Manual ticks $1/$10/$100 it runs one session:

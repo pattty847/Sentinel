@@ -1,4 +1,4 @@
-// Whole-pixel chart mapping (owner decision 2026-10-08, docs/research/2026-10-08-whole-pixel-mapping.md).
+// Whole-pixel chart mapping: row and column edges align to device pixels.
 //
 // The continuous camera is what GridViewState stores (exact, never rounded back from
 // pixels). The raster camera is what the chart draws: an integer number of device

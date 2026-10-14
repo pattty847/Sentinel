@@ -168,18 +168,44 @@ struct CoreTests {
         #expect(BudgetGuide.duration("unknown") == nil)
     }
 
-    @Test func chartPlanSlicesAndBugRows() throws {
-        let path = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("docs/research/2026-10-11-chart-core-architecture.md")
-        let plan = PlanParser.parse(try String(contentsOf: path, encoding: .utf8))
+    @Test func privatePlanDirectoryAndTrailerResolution() {
+        let directory = PlanLocation.researchDirectory(repository: "/workspace/Sentinel")
+        #expect(directory.path == "/workspace/Sentinel-Private/research")
+        #expect(PlanLocation.researchDirectory(repository: "/workspace/Sentinel",
+            configured: "../Other-Private/research").path == "/workspace/Other-Private/research")
+        let custom = PlanLocation.researchDirectory(repository: "/workspace/Sentinel",
+            configured: "/custom/plans")
+        #expect(custom.path == "/custom/plans")
+        #expect(PlanLocation.resolve("docs/research/example.md", directory: custom).path == "/custom/plans/example.md")
+        #expect(PlanLocation.resolve("../Sentinel-Private/research/audit/example.md", directory: custom).path
+            == "/custom/plans/audit/example.md")
+        #expect(PlanLocation.resolve("example.md", directory: directory, pinned: true).path
+            == "/workspace/Sentinel-Private/research/example.md")
+        #expect(PlanLocation.resolve("/explicit/example.md", directory: custom, pinned: true).path
+            == "/explicit/example.md")
+    }
+
+    @Test func planSliceTableAndBugRows() {
+        let plan = PlanParser.parse("""
+        # Example feature plan
+        ### Phase 1: Foundation
+        **S0a: Establish baseline**
+        **S0f (review): Validate baseline**
+        ### Phase 2: Implementation
+        **S1: Implement policy**
+        **S15: Complete integration**
+        ### Phase 3: Follow-up bugs
+        | ID | Issue | Acceptance |
+        | --- | --- | --- |
+        | B1 | Boundary condition | Reproduction passes |
+        | B7 | Teardown | Cleanup completes |
+        """)
         let ids = Set(plan.phases.flatMap(\.slices).map(\.id))
-        for id in ["S0a", "S0b", "S0c", "S0d", "S0e", "S0f"] + (1...15).map({ "S\($0)" })
-            + (1...7).map({ "B\($0)" }) {
-            #expect(ids.contains(id), "missing \(id)")
-        }
-        #expect(plan.title.hasPrefix("Chart core architecture"))
+        #expect(ids == Set(["S0a", "S0f", "S1", "S15", "B1", "B7"]))
+        #expect(plan.title == "Example feature plan")
+        #expect(plan.phases.count == 3)
+        #expect(plan.phases.first?.slices.first?.title == "Establish baseline")
+        #expect(plan.phases.last?.slices.first?.title == "Boundary condition")
     }
 
     @Test func trailersAndBranchBoundaries() {

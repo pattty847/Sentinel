@@ -1,6 +1,5 @@
 #pragma once
-// Liquidity labels on the GPU main chart (S7b, docs/research/2026-10-s7-plan.md
-// sections 3-4 and owner decisions 1-2). Render thread only (updatePaintNode,
+// Liquidity labels on the GPU main chart. Render thread only (updatePaintNode,
 // GUI thread blocked).
 //
 // Input: the HeatmapCellQuery LabelCells that HeatmapGpuLayer::labelsForFrame()

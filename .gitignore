@@ -50,11 +50,11 @@ config.json
 # Generated TLS certs (use certs/gen-certs.ps1 or gen-certs.sh to recreate)
 certs/*.crt
 certs/*.key
-certs/*.crt
 .env
 .env.local
 .env.*.local
-.sentinel.yaml  # User-specific config overrides
+# User-specific config overrides
+.sentinel.yaml
 
 # Log files
 *.log
@@ -141,14 +141,11 @@ GEMINI.md
 _agent
 .cursor/
 
-# Documentation subdirectories (keep only base docs/)
+# Private and historical local documentation
 /docs/private/
-/docs/TODO.md
-/docs/FEATURE_ARCHIVE.md
 docs/REFACTOR_PLAN.md
 /_agent/
 
-data/
 screenshots/
 
 # Headless GUI runs (scripts/dev/cloud-gui.sh)

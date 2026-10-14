@@ -66,7 +66,7 @@ struct ServerTlsConfig {
     std::string keyFile  = "certs/sentinel-server.key";
 };
 
-// Recording v2 (docs/research/2026-09-recording-v2.md). Ticks are in quote
+// Recording v2. Ticks are in quote
 // currency; one set of values for now (BTC-USD). Per-asset ticks come later.
 struct ServerRecordingConfig {
     bool enabled = false;

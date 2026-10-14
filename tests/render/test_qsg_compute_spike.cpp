@@ -2,7 +2,7 @@
 // ordinary Qt Quick scene graph records a COMPUTE pass in prepare() (outside
 // the scene graph's main render pass) and draws the compute output in render().
 // If a Qt upgrade breaks this, HeatmapTileNode must fall back to
-// QQuickWindow::beforeRendering (see docs/research/2026-09-gpu-heatmap-integration-plan.md, S4).
+// QQuickWindow::beforeRendering.
 #include "lab/OffscreenQuick.hpp"
 #include "lab/RhiBackend.hpp"
 #include <QFile>

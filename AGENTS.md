@@ -8,8 +8,8 @@ If uncertain, state uncertainty instead of guessing.
 Avoid praise unless it is explicitly earned and relevant.
 Optimize for truth, clarity, and usefulness—never for likability.
 
-Source of truth for every coding agent on Sentinel. Claude Code and Codex both read this file
-(`CLAUDE.md` only imports it); edit rules here, never in a copy. Live state is in `docs/STATUS.md`.
+Source of truth for every coding agent on Sentinel. All coding agents must read this file directly;
+CLAUDE.md is a local untracked file containing only `@AGENTS.md`. Edit rules here, never in copies. Live state is in `docs/STATUS.md`.
 How-to detail (GUI host, Codex CLI, lessons) is in `docs/AGENT_WORKFLOW.md`; read it when a task needs it.
 Default goal: make the requested change safely.
 
@@ -24,6 +24,11 @@ Modes:
 
 Rules:
 - Start with targeted search (`rg -n`, `rg --files`), not broad file reads.
+- For docs, start with `docs/README.md` and the relevant maintained reference. Normal searches
+  search the public checkout normally. Private plans live in the sibling `../Sentinel-Private`
+  repository (a sibling of the MAIN checkout, not of a worktree: from any worktree it is
+  `"$(git rev-parse --path-format=absolute --git-common-dir)/../../Sentinel-Private"`; task packets give
+  the absolute path); read only the file a task names, never preload or search that repository broadly.
 - Before first concrete action, read at most ~200 lines total unless the user asks for a deep review.
 - If the request is ambiguous, start in Lite mode and escalate only if needed.
 - **Read-only scope** (review, audit, investigation): edit nothing, including `_agent/`, docs and memory. Report durable findings to whoever asked. An explicit owner scope always overrides the write rules in this file.
@@ -66,7 +71,7 @@ changes behaviour, data or looks (owner decisions) or needs an approval listed i
 
 ## 3a) Chart core: where chart behaviour goes (owner, 2026-10-11)
 
-`UnifiedGridRenderer` (UGR) is a Qt Quick shell. It changes only for item lifecycle, window/sync wiring and `QQuickItem` overrides. The migration plan is `docs/research/2026-10-11-chart-core-architecture.md`; until S15 lands, chart-view features are frozen (bug fixes land in the slice that owns the code).
+`UnifiedGridRenderer` (UGR) is a Qt Quick shell. It changes only for item lifecycle, window/sync wiring and `QQuickItem` overrides. The migration plan is `../Sentinel-Private/research/2026-10-11-chart-core-architecture.md` (S0-S15 landed; open rows are in STATUS); current architecture is in `docs/ARCHITECTURE.md`. The chart-view feature freeze ended when S15 landed.
 
 - View behaviour (camera, zoom, glide, fit, follow-live, placement, timeframe or symbol switch) goes in a policy class in `libs/gui/chart/core/` once that directory exists, never as new UGR members. `ChartViewController` only sequences policies: no arithmetic or branching on prices, times or pixels.
 - `sentinel_chart_core` links QtCore only: no QtGui, QtQuick, QSG, QML or `QQuickWindow` (the build and `chart-health.sh` enforce it). It never includes `HeatmapGpuLayer.hpp`, the source controller or recording types; it talks through `ChartPorts.hpp`.
@@ -204,7 +209,13 @@ Do not reorder or renumber feature blocks.
 
 ## 8) Canonical Docs to Update When Needed
 
-Update only the relevant canonical doc in the same change:
+`docs/README.md` owns the documentation catalog, maintenance status and links. Keep that index in
+sync when adding, moving, deleting or changing the maintenance status of a doc. Update only the
+relevant file in its **Maintained documents** section when the change affects that file's contract;
+a matching keyword in another doc is not a reason to edit it. Supporting references and existing
+plans/evidence are read-only unless the owner explicitly asks to change or promote them.
+
+Update the relevant canonical doc in the same change:
 - Protocol / wire / DTO semantics → `docs/MARKETDATA.md`
 - Architecture / ownership / dependency direction → `docs/ARCHITECTURE.md`
 - Feature scope/progress → `docs/TODO.md`
@@ -213,9 +224,17 @@ Update only the relevant canonical doc in the same change:
 - New durable invariant/regression guardrail → `_agent/INVARIANTS.md` or `_agent/FAILURE_MODES.md`
 - Non-trivial design decision → `_agent/DECISIONS.md` (vault detail optional)
 
-`docs/research/*` files are dated plans and evidence. Owner decisions are appended when a plan is
+`../Sentinel-Private/research/*` files are dated plans and evidence. Owner decisions are appended when a plan is
 approved; after the work lands the file is frozen and nobody maintains it. Current truth is the code,
-this file and `docs/STATUS.md`.
+this file and `docs/STATUS.md`. Do not refresh old plans to match new code. An explicit planning
+task can create or amend its named plan; a general code or documentation cleanup task cannot.
+Research, initiatives, private notes and planning snapshots are versioned in the separate PRIVATE
+repository `https://github.com/pattty847/Sentinel-Private`, cloned as a sibling of the main checkout
+(`../Sentinel-Private` from there; see section 0 for the path from a worktree).
+Read only the file a task names; its index is `../Sentinel-Private/private/INTERNAL_INDEX.md`.
+Commit private document changes there, never in Sentinel; never copy full plan contents into public
+docs. `_agent/` remains local Sentinel memory and must not be added to the private repository.
+Public checkouts do not require private docs to build or test.
 
 ## 8a) Commits and Git
 
