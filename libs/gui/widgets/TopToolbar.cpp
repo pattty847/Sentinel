@@ -165,6 +165,7 @@ TopToolbar::TopToolbar(QWidget* parent)
     for (int i = 0; i < m_timeframeCombo->count(); ++i) {
         m_timeframeCombo->setItemData(i, static_cast<qlonglong>(timeframesMs[i]), Qt::UserRole);
     }
+    m_timeframeCombo->setItemData(0, QStringLiteral("Heatmap only: candles at 100 ms are not built yet"), Qt::ToolTipRole);
     m_timeframeCombo->setCurrentIndex(m_timeframeCombo->findData(static_cast<qlonglong>(1000)));
     m_timeframeCombo->setFixedWidth(70);
     addWidget(m_timeframeCombo);

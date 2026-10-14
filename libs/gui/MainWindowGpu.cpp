@@ -72,7 +72,6 @@
 #include <QRegularExpression>
 #include <algorithm>
 #include <cmath>
-#include <unordered_map>
 
 namespace {
 std::function<MarketHealth::ChartFacts()> chartHealthProvider(UnifiedGridRenderer *renderer, MarketHealth *health) {

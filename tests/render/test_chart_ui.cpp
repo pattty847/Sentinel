@@ -341,8 +341,9 @@ TEST(ChartToolbar, HundredMsTimeframeIsAlwaysOfferedAndRoundTrips) {
     auto *combo = toolbar.findChild<QComboBox *>("chartTimeframeCombo");
     ASSERT_TRUE(combo);
     QSignalSpy timeframe(&toolbar, &TopToolbar::timeframeSelected);
-    toolbar.setAvailableTimeframes({1000, 60000, 300000});
     ASSERT_EQ(combo->itemText(0), "100ms");
+    EXPECT_TRUE(combo->itemData(0, Qt::ToolTipRole).toString().contains("Heatmap only"));
+    toolbar.setAvailableTimeframes({1000, 60000, 300000});
     ASSERT_EQ(combo->itemData(0, Qt::UserRole).toLongLong(), 100);
     auto *model = qobject_cast<QStandardItemModel *>(combo->model());
     ASSERT_TRUE(model);
