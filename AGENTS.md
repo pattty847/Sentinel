@@ -91,6 +91,8 @@ Reviewers of any `libs/gui/UnifiedGridRenderer*` or `libs/gui/chart/**` diff rej
 
 ## 4) Commands and Testing
 
+`scripts/dev/doc-health.sh` runs after chart-health in `agent-worktree.sh land`; it ratchets STATUS/TODO sizes, caps memory files and checks entries (INVARIANTS and DECISIONS are temporarily exempt from size caps until pruned, per `DOC_HEALTH_PENDING_PRUNE` in the script), with exit 1 waivable by `Doc-Health-Waiver: <reason>` and `--report` for curation.
+
 Build (owner's Mac): `scripts/dev/build-queue.sh --label <branch> -- cmake --build --preset mac-clang -j 6`
 - Every build, ctest run or benchmark on the Mac goes through the FIFO build queue, one at a time.
 - Use `-j 6` (owner, 2026-10-08: Mac mini M4, 10 cores, 16 GB). The queue keeps it to one build at a time. Do not go higher without the owner: ninja's default (12 jobs) can exhaust 16 GB with Qt/Boost translation units, and the desktop froze under heavier load on 2026-10-05.

@@ -119,6 +119,7 @@ AGENTS.md. Remove a note here when it stops being true.
   worktree removal failed: the worktree is kept; read `evidence_problems`, then finish with
   `agent-worktree.sh remove <branch>`; never land it again); any other code is `land_failed` and nothing was merged.
   Land assumes no writer is still appending to the worktree being landed.
+- `land` runs `scripts/dev/doc-health.sh` after chart-health; exit 1 needs a `Doc-Health-Waiver: <reason>` trailer to proceed, other errors are fatal, and `--report` prints sizes and findings without failing for curation.
 - The conductor rebases agent branches (during `land`); nobody merges `main` into them (they are local and short-lived). Stack a dependent task
   and rebase with `--update-refs`. Merging `main` is right only for long-lived branches others have pulled.
 - Sandboxed CMake regeneration can try to lock the shared vcpkg root even when dependencies are unchanged. After
