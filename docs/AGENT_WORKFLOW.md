@@ -107,6 +107,15 @@ AGENTS.md. Remove a note here when it stops being true.
 - `scripts/dev/agent-worktree.sh create <branch>` puts the worktree on the T7 drive when mounted, supplies
   `VCPKG_ROOT` and ninja, and configures the build; ccache makes the first build fast. `land` uses the queue.
   `remove <branch>` cleans up.
+- Every `land` attempt keeps its evidence in its own directory,
+  `~/Library/Logs/Sentinel/land/<UTC time>-<branch>-<pid>/` (`SENTINEL_LAND_EVIDENCE_DIR` overrides): `build.log`,
+  `ctest.log` and `landing.json` (outcome, gate timings, SHAs before and after, trailers, ctest summary, event
+  transfer, Codex sessions whose rollout names the branch; candidates only, no role). Attempts older than 180 days
+  or beyond the newest 300 are deleted at the next land. Exit codes: 0 `landed`; 3 `land_review` (range-diff
+  stop); 4 `landed_evidence_incomplete` (merged, but any evidence problem, the outcome event, event transfer or
+  worktree removal failed: the worktree is kept; read `evidence_problems`, then finish with
+  `agent-worktree.sh remove <branch>`; never land it again); any other code is `land_failed` and nothing was merged.
+  Land assumes no writer is still appending to the worktree being landed.
 - The conductor rebases agent branches (during `land`); nobody merges `main` into them (they are local and short-lived). Stack a dependent task
   and rebase with `--update-refs`. Merging `main` is right only for long-lived branches others have pulled.
 - Sandboxed CMake regeneration can try to lock the shared vcpkg root even when dependencies are unchanged. After
@@ -188,4 +197,11 @@ The conductor records only meaningful changes with
 `scripts/dev/sentinel-event.sh <kind> <tone> <text> [--slice S0b] [--branch branch]`.
 Use `review` once per review round with blocker/major/minor counts, `blocker`
 when work stops, and `plan` for a new plan or phase change. The build and land
-scripts emit failures and successful landings automatically.
+scripts emit failures and successful landings automatically. Each line carries a
+unique `id`. Lines go to `~/Library/Application Support/Sentinel/events.jsonl`
+(`SENTINEL_EVENTS_FILE` overrides, for tests); where that is not writable (Codex
+sandbox) they go to `.sentinel-events.jsonl` at the top of the linked worktree,
+and `land` moves them into the journal, skipping ids it already has, before it
+removes the worktree. Any line SentinelBar cannot parse blocks the whole transfer
+(the source is kept and land exits 4). There is no `/tmp` fallback: with no writable target the
+script prints an error and exits 1.
