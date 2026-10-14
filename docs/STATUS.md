@@ -3,13 +3,13 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-13 ~23:30 UTC. main `8aacec9` (pushed). Since the last hand-off: Grafana ingest panels landed `19f7099`; PR 44 (docs index, plans and evidence moved to Sentinel-Private) landed `8aacec9`; PRs 43 and 44 closed on GitHub. This conductor ended past its 200k soft limit at the owner's request; nothing in flight.
+- **Updated:** 2026-10-14 ~05:00 UTC. main `ed32d17` (AgentOps S1 landed). Conductor: Opus session started 2026-10-14; S1 only (owner authorization 2026-10-14), stop after S1.
 - **Conductor:** a Claude Opus session on the owner's Mac (AGENTS.md section 10). The cloud Projects conductor + Mac operator trial (2026-10-11/12) is ended (owner, 2026-10-12).
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high-risk. 2026-10-13: both weekly windows reset (Codex ~95%+, Claude ~100%). Owner: use Codex down to ~1% before spending a reset credit (holds 3).
 
 ## Land gate
 
-`agent-worktree.sh land` runs chart-health, the build, then `ctest -j 4` with `SENTINEL_REQUIRE_GPU=1` (an unavailable GPU is fatal). Resource locks, labels and `PROCESSORS` live in `tests/TestResources.cmake` (CMake >= 3.28; older CMake only loses them). No RUN_SERIAL list remains (FM-261 resolved `30c09cf`, FM-262 resolved `d87aa13`; RollerCorruptBlockTests TIMEOUT 300, `2cdb8ed`). The land removes the worktree and its `.land-ctest.log`: tee it during the land to quote the ChartGolden/UgrGpu/ChartUi lines. `lizard` is at `~/.local/bin/lizard` (uv tool).
+`agent-worktree.sh land` runs chart-health, the build, then `ctest -j 4` with `SENTINEL_REQUIRE_GPU=1` (an unavailable GPU is fatal). Resource locks, labels and `PROCESSORS` live in `tests/TestResources.cmake` (CMake >= 3.28; older CMake only loses them). No RUN_SERIAL list remains (FM-261 resolved `30c09cf`, FM-262 resolved `d87aa13`; RollerCorruptBlockTests TIMEOUT 300, `2cdb8ed`). Since S1 (`ed32d17`) every land attempt keeps `landing.json`, `build.log` and `ctest.log` in `~/Library/Logs/Sentinel/land/<attempt-id>/` (180 days / newest 300); the land prints the paths. Exit 4 = merged but evidence incomplete: worktree kept, finish with `agent-worktree.sh remove <branch>`, never re-land. `lizard` is at `~/.local/bin/lizard` (uv tool).
 
 ## Chart-core refactor (complete; plan `../Sentinel-Private/research/2026-10-11-chart-core-architecture.md`)
 
@@ -29,6 +29,10 @@ Left: README/ARCHITECTURE pass (`data/market` deleted by the owner 2026-10-12).
 - **Monitoring:** VictoriaMetrics :8428, Grafana :3000 (A1b "live feed down" on `sentinel_live_feed_up`). Grafana is shared on the owner's tailnet only: `https://patricks-mac-mini.taildf7d06.ts.net:3000` (`tailscale serve`, anonymous Viewer; off: `tailscale serve --https=3000 off`). The public Funnel on :8443 was turned off 2026-10-13 (owner). The recorder dashboard has an "Ingest (capture)" row: queue bytes, pool %, reconnects/h, fan-out drops/overflow, client queue bytes. GUI host :17190.
 - **Shadow self-check (incremental since bae9a85, owner: keep it):** each hourly check rolls only the new hour per product; a fresh midnight replay happens only for 00Z and after an oracle reset. Hours 2-24 resume from the oracle's own hourly anchor, so an anchor-resume defect would also show as a mismatch. The oracle lives at `hmc2/shadow-oracle/<product>/<dayMs>` (about 19 MB per hour, so about 450 MB at the 23Z peak; current day only; exclude it from backups). `Shadow oracle reset` in the server log means a reset happened.
 
+## AgentOps S1 (landed `ed32d17`, 2026-10-14)
+
+Writer Claude Opus subagent, reviewer Codex gpt-6-astra (thread `01a138a6`), 3 rounds (6 major, 1 minor, all fixed or triaged), PASS on `4c1eadf`; full ctest 111/111. First evidence: `~/Library/Logs/Sentinel/land/20261014T044127Z-lt-claude-agentops-s1-26068/`. Sandboxed writers' events now go to `<worktree>/.sentinel-events.jsonl` and land drains them (deduped by `id`). Known gaps: SentinelBar does not see sandbox events until land (S2); read-only reviewers write no events; no appender lock (land assumes no live writer); Codex candidates are branch matches only (the S1 land matched the reviewer). S2-S4 need a new owner decision.
+
 ## Hand-off (2026-10-13, outgoing conductor)
 
 - Chart-core Phase 5 is done except B2 option A, which is a feature for later. Its plan is `../Sentinel-Private/research/2026-10-13-b2-subsecond-candles.md` with the owner's answers; Astra REVISE r1 is in `.claude/acting-orchestrator/b2-plan/astra-review-r1.md`. Fable revises in a new thread before any slice. Two minors from option B (`49b4c9a`) are deferred:
@@ -44,11 +48,13 @@ Left: README/ARCHITECTURE pass (`data/market` deleted by the owner 2026-10-12).
 - Neutrality evidence: main's startup `viewportVersion` and candle-history paging (request count and limits) vary run to run (12/17/15 and 2-3 requests in three fresh-profile runs on 2026-10-12). Do not use them as neutrality pins; use the heatmap target hash plus pin tests. The `window` target is never byte-stable (live clock and status).
 - Open check: at the next server restart, confirm the 7 startup `Shadow journal invalidated ... reason=journal boundary` warnings seen after the slice E deploy (pid 37884) do not recur (likely the one-time v1-anchor fallback).
 - Open FMs: FM-256 (TP/SL exit order left New), FM-259 (bubbles may not draw if the overlay attaches before trades), FM-260 (overlay dangling provider at teardown), FM-267 (startup auto tick 100 -> 500 -> 100 bounce: candle flicker, and the settled tick/price rows vary run to run on main itself; do not chase price-row diffs in screenshots; fix after S15, owner-visible), FM-268 (binner self-test zero-readback flake).
+- Stale: local branch `tpo-footprint-v1` (2026-03-29, unmerged, not in any plan); auto-memory points at STATUS "Resume steps", which does not exist.
 - Test-hygiene leftover: ShadowTest.HandoffLatencyBenchmark opt-in (test_shadow.cpp; slice E has landed, so it is unblocked).
 
 ## Waiting on the owner
 
-1. Parked: nightly copy of `/Volumes/T7/sentinel-data` to the MacBook Pro over Tailscale (needs Remote Login + SSH key).
+1. `/tmp/sentinel-events.jsonl` holds 96 old sandbox `build_failed` events (no ids) that never reached the primary journal: migrate them (dedup by content) or let `/tmp` clear them.
+2. Parked: nightly copy of `/Volumes/T7/sentinel-data` to the MacBook Pro over Tailscale (needs Remote Login + SSH key).
 
 ## Owner constraints in force
 
