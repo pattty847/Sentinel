@@ -3,7 +3,7 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-14 ~06:15 UTC. Wave done (TODO rebuild, FM pruning, doc-health); conductor ending at the context soft limit. Conductor: Opus session of 2026-10-14 (memory and tracker cleanup wave).
+- **Updated:** 2026-10-14 evening. Wave: B2 sub-second candles overnight (owner go 2026-10-14). Conductor: Opus session of 2026-10-14 evening.
 - **Conductor:** a Claude Opus session on the owner's Mac (AGENTS.md section 10).
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high-risk. Owner: use Codex down to ~1% before spending a reset credit (holds 3).
 
@@ -22,6 +22,8 @@ Pre-land evidence for chart slices: native `SENTINEL_REQUIRE_GPU=1` run of Chart
 
 ## In flight
 
+- **B2-0 (100 ms toolbar entry, heatmap only):** writer Claude Sonnet subagent, branch `lt-claude/b2-0-100ms-toolbar`, worktree `/Volumes/T7/sentinel-worktrees/lt-claude-b2-0-100ms-toolbar`, base `ca8893e`, risk low; reviewer Codex Sol. The toolbar never offered 100 ms; the combo shows "1s" for any unlabelled tf and a re-pick of "1s" emits nothing.
+- **B2 option A plan r2:** Fable revising `../Sentinel-Private/research/2026-10-13-b2-subsecond-candles.md` against r1 (`../Sentinel-Private/research/2026-10-13-b2-reviews/plan-r1-astra.md`); then gpt-6-astra (high) re-review; slices start only on PASS. Owner 2026-10-14: sub-second history from the server's 24 h in-RAM tape; only 100 ms and whole-second tfs (no fractional custom tfs); land overnight if clean, do not force it; server deploy in the morning with the owner (wire change breaks an old GUI).
 - **FAILURE_MODES pruning: done** (2026-10-14): 80 active entries (23.8 KB) from 269 (120 KB); 196 in `../Sentinel-Private/archive/agent/FAILURE_MODES.md`. Writer Fable, reviewer gpt-6-astra thread `01a138f1-8481-7972-9fcc-221be91375bc` (r1 REVISE 3 major/8 minor, r2 REVISE 1 major, r3 PASS). Proposal and `classification.md` (per-entry `area` column, input for the owner's LOD design) stay in `../Sentinel-Private/research/2026-10-14-fm-pruning/`. Next: INVARIANTS, then DECISIONS (decisions in force only).
 - **doc-health gate: landed** `8c0d35f` (2026-10-14; writer gpt-6.1-sol, reviewer Sonnet, 2 rounds; full ctest 112/112; evidence `~/Library/Logs/Sentinel/land/20261014T055640Z-lt-sol-doc-health-52548/`). The script landed without its executable bit (that land ran main's pre-merge `agent-worktree.sh`, so the gate itself did not run); fixed on main right after. First land that runs it: the next one. Remove a name from `DOC_HEALTH_PENDING_PRUNE` when INVARIANTS or DECISIONS is pruned.
 - Audit reports from 2026-10-12 (tests, workflow) are in `../Sentinel-Private/research/2026-10-12-audits/`. A Windows Codex thread is pruning redundant tests and will open a PR; reconcile by gtest name.
@@ -45,7 +47,7 @@ Pre-land evidence for chart slices: native `SENTINEL_REQUIRE_GPU=1` run of Chart
 ## Next (priority order; pull the next item FIFO from `docs/TODO.md` "Queue")
 
 1. Test cleanup from the Astra tests audit (see In flight).
-2. The two deferred option B minors (`49b4c9a`; small, one Codex Sol branch): replace the source-grep test `UgrCandleCpu.WindowAndQmlPassUnroundedMilliseconds` with a fake `IGridDataSource`; remove the one startup refusal log line for the 100 ms default. Touches `tests/render/test_ugr_gpu.cpp`: coordinate with the owner's Windows test-cleanup PR.
-3. B2 option A (sub-second candles) plan revision: `../Sentinel-Private/research/2026-10-13-b2-subsecond-candles.md` with the owner's answers; Astra REVISE r1 in `.claude/acting-orchestrator/b2-plan/astra-review-r1.md`; Fable revises in a new thread before any slice. Owner's call when.
+2. The two deferred option B minors (`49b4c9a`; small, one Codex Sol branch): replace the source-grep test `UgrCandleCpu.WindowAndQmlPassUnroundedMilliseconds` with a fake `IGridDataSource`; remove the one startup refusal log line for the 100 ms default. Touches `tests/render/test_ugr_gpu.cpp`.
+3. B2 option A: in flight (see above).
 
 Conductor notes from 2026-10-13 (owner discussion, not yet policy): fix rounds that only add a small test may go to a fresh short Codex thread instead of resuming a long one (resume re-reads the whole thread: 7-8M input tokens per round); `scripts/dev/chart-health.sh` should check uncommitted diffs so sandboxed writers stop building temporary committed copies; planners must cite file:line for every number or mark it unmeasured, and include a threads/locks/failure section.
