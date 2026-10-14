@@ -2,7 +2,7 @@
 # Tests for agent-worktree.sh land evidence and sentinel-event.sh.
 #   bash scripts/dev/test_agent_worktree.sh [source-root]
 # Every case runs in a throwaway git repo under a temp dir with stub build-queue,
-# chart-health, cmake and ctest; HOME, CODEX_HOME, the worktree root, the evidence
+# chart-health, doc-health, cmake and ctest; HOME, CODEX_HOME, the worktree root, the evidence
 # root and the event journal all point into that temp dir.
 set -uo pipefail
 SRC=$(cd "${1:-$(dirname "$0")/../..}" && pwd)
@@ -43,6 +43,7 @@ EOF
     cp "$SRC/.gitignore" "$repo/.gitignore"
     printf '#!/usr/bin/env bash\nwhile [[ $# -gt 0 && $1 != -- ]]; do shift; done; shift; exec "$@"\n' > "$repo/scripts/dev/build-queue.sh"
     printf '#!/bin/sh\nexit 0\n' > "$repo/scripts/dev/chart-health.sh"
+    printf '#!/bin/sh\nexit "${STUB_DOC_HEALTH_STATUS:-0}"\n' > "$repo/scripts/dev/doc-health.sh"
     chmod +x "$repo/scripts/dev/"*.sh
     seq 1 10 > "$repo/file.txt"
     git -C "$repo" add -A && git -C "$repo" commit -q -m base
@@ -53,6 +54,25 @@ EOF
 }
 
 land() { (cd "$repo" && scripts/dev/agent-worktree.sh land feat/x "$@") > "$T/land.out" 2>&1; }
+
+# Doc-health breaches block land; only exit 1 can be waived.
+setup_case doc-health
+original_main=$(git -C "$repo" rev-parse main)
+STUB_DOC_HEALTH_STATUS=1 land; rc=$?
+expect "doc-health blocks land" [ "$rc" -eq 1 ]
+expect "main unchanged" [ "$(git -C "$repo" rev-parse main)" = "$original_main" ]
+expect "doc-health failure reported" grep -q 'doc-health failed (exit 1)' "$T/land.out"
+load dirs
+rec="${dirs[0]:-/missing}/landing.json"
+expect "doc-health recorded as failing gate" [ "$(jget "$rec" 'v["gate_reached"]')" = doc-health ]
+expect "build not reached" [ ! -e "${dirs[0]:-/missing}/build.log" ]
+STUB_DOC_HEALTH_STATUS=2 land --trailer 'Doc-Health-Waiver: fixture'; rc=$?
+expect "tool errors cannot be waived" [ "$rc" -eq 2 ]
+expect "main unchanged after tool error" [ "$(git -C "$repo" rev-parse main)" = "$original_main" ]
+STUB_DOC_HEALTH_STATUS=1 land --trailer 'Doc-Health-Waiver: fixture'; rc=$?
+expect "doc-health waiver permits land: $(tail -5 "$T/land.out")" [ "$rc" -eq 0 ]
+expect "waiver reported" grep -q 'doc-health: waived by Doc-Health-Waiver trailer' "$T/land.out"
+expect "waived feature merged" [ "$(git -C "$repo" rev-parse main)" != "$original_main" ]
 
 # 1 + 9: successful land keeps logs and landing.json; Codex candidates by branch only.
 setup_case success

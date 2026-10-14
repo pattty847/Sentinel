@@ -439,6 +439,17 @@ case "$cmd" in
                 exit "$health_status"
             fi
         fi
+        gate doc-health
+        health_status=0
+        (cd "$dir" && "$dir/scripts/dev/doc-health.sh") || health_status=$?
+        if [[ "$health_status" -ne 0 ]]; then
+            if [[ "$health_status" -eq 1 ]] && grep -q '^Doc-Health-Waiver: ' <<< "$trailers"; then
+                echo "doc-health: waived by Doc-Health-Waiver trailer"
+            else
+                echo "error: doc-health failed (exit $health_status)" >&2
+                exit "$health_status"
+            fi
+        fi
         echo "building and testing $branch at $new_tip..."
         gate build
         logs+="build.log"$'\n'
