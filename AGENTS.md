@@ -200,12 +200,12 @@ Rules:
 ## 7) Task Tracking (`docs/TODO.md`) — Only When Relevant
 
 Read/update `docs/TODO.md` only when:
-- user asks for TODO / feature / session-log work
+- user asks for TODO / feature work
 - task changes scope or priorities
-- ending session and log update is needed
+- a TODO item lands or is dropped
 
 Use targeted reads, not full dumps.
-Do not reorder or renumber feature blocks.
+Keep the Queue order; delete an item when it lands or is dropped (git log is the history).
 
 ## 8) Canonical Docs to Update When Needed
 
