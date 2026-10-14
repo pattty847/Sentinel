@@ -60,7 +60,7 @@ path_of_branch() {
 # Land evidence. JSON work (landing.json, event transfer, Codex session scan,
 # retention) is in this one Python block; the land flow below stays in bash.
 LAND_PY=$(cat <<'PY'
-import fcntl, glob, hashlib, json, os, re, shutil, sys, tempfile, time
+import fcntl, glob, hashlib, json, math, os, re, shutil, sys, tempfile, time
 from datetime import datetime, timedelta, timezone
 
 def iso(epoch):
@@ -99,14 +99,18 @@ def record(path):
         f.write('\n')
     os.replace(tmp, path)
 
-def valid_event(obj):  # SentinelBar EventParser rules
-    return (isinstance(obj, dict) and isinstance(obj.get('at'), (int, float)) and not isinstance(obj.get('at'), bool)
+def valid_event(obj):  # SentinelBar EventParser rules; `at` a finite number, never a bool
+    at = obj.get('at') if isinstance(obj, dict) else None
+    return (isinstance(at, (int, float)) and not isinstance(at, bool) and (isinstance(at, int) or math.isfinite(at))
             and isinstance(obj.get('kind'), str) and isinstance(obj.get('text'), str)
             and obj.get('tone') in ('info', 'ok', 'warn', 'bad'))
 
+def reject_constant(name):  # NaN / Infinity are not JSON; SentinelBar rejects them
+    raise ValueError(name)
+
 def parse(line):
     try:
-        return json.loads(line)
+        return json.loads(line, parse_constant=reject_constant)
     except ValueError:
         return None
 
@@ -266,7 +270,10 @@ scan_codex() {  # Codex sessions whose rollout names the branch (candidates only
 
 send_event() {  # $1 kind $2 tone $3 text
     local slice event_args=(--branch "$branch")
-    slice=$(sed -n 's/^Slice: //p' <<< "$trailers" | head -1)
+    while IFS= read -r slice; do
+        if [[ "$slice" == "Slice: "* ]]; then break; fi
+    done <<< "$trailers"
+    if [[ "$slice" == "Slice: "* ]]; then slice=${slice#Slice: }; else slice=""; fi
     [[ -z "$slice" ]] || event_args+=(--slice "$slice")
     if "$REPO/scripts/dev/sentinel-event.sh" "$1" "$2" "$3" "${event_args[@]}"; then
         events_sent+="$1 "
@@ -284,8 +291,10 @@ verify_record() {  # landing.json parses, its logs exist, the transfer succeeded
 land_finish() {  # EXIT trap of land: outcome event and final landing.json for every attempt
     local rc=$1 result=failed
     set +e
-    if [[ -z "$outcome" || "$outcome" == running ]]; then
-        if [[ $merged -eq 1 ]]; then outcome=landed_evidence_incomplete; else outcome=land_failed; fi
+    if [[ $merged -eq 1 && $land_complete -eq 0 ]]; then
+        outcome=landed_evidence_incomplete  # merged but removal not finished, whatever stopped it
+    elif [[ -z "$outcome" || "$outcome" == running ]]; then
+        outcome=land_failed
     fi
     final_rc=$rc
     if [[ $merged -eq 0 ]]; then
@@ -373,7 +382,7 @@ case "$cmd" in
         [[ "$evidence_root" == /* ]] || evidence_root="$PWD/$evidence_root"
         attempt_id="" evidence="" land_gate="" gate_started="" gates="" outcome="" final_rc="" problems=""
         merged=0 merge_sha="" merge_short="" main_tip="" old_tip="" old_base="" new_tip="" dir="" changed=0
-        trailers="" ctest_summary="" logs="" transfer="" codex="" events_sent=""
+        trailers="" ctest_summary="" logs="" transfer="" codex="" events_sent="" land_complete=0
         trap 'land_finish $?' EXIT
         gate arguments
         { mkdir -p "$evidence_root" && attempt_id=$(new_attempt "$evidence_root" "$branch"); } ||
@@ -490,6 +499,7 @@ case "$cmd" in
         fi
         [[ -z "$problems" ]] || { outcome=landed_evidence_incomplete; exit 4; }
         "$0" remove "$branch" || { add_problem "worktree remove failed"; outcome=landed_evidence_incomplete; exit 4; }
+        land_complete=1
         echo "queue rule: rebase and retest every other READY branch before it lands (run land on each)."
         ;;
     list)

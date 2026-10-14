@@ -189,13 +189,14 @@ expect "no landed event" [ "$(events_with '"kind":"landed"')" -eq 0 ]
 expect "record failure on stderr" grep -q "landing.json" "$T/land.out"
 
 # 4e: invalid sandbox event lines: nothing transferred, source kept, merged attempt exits 4.
-for variant in truncated missing-field bad-tone; do
+for variant in truncated missing-field bad-tone nan; do
     setup_case "invalid-$variant"
     good='{"id":"evt-good","at":1000,"kind":"review","text":"ok","tone":"info"}'
     case $variant in
         truncated) printf '%s\n{"id":"evt-cut","at":2000,"kind":"rev' "$good" ;;
         missing-field) printf '%s\n{"id":"evt-nokind","at":2000,"text":"t","tone":"info"}\n' "$good" ;;
         bad-tone) printf '%s\n{"id":"evt-tone","at":2000,"kind":"k","text":"t","tone":"loud"}\n' "$good" ;;
+        nan) printf '%s\n{"id":"bad-number","at":NaN,"kind":"review","text":"note","tone":"info"}\n' "$good" ;;
     esac > "$wt/.sentinel-events.jsonl"
     cp "$wt/.sentinel-events.jsonl" "$T/source.copy"
     land; rc=$?
@@ -207,6 +208,31 @@ for variant in truncated missing-field bad-tone; do
     expect "source kept unchanged" cmp -s "$wt/.sentinel-events.jsonl" "$T/source.copy"
     expect "worktree kept" [ -d "$wt" ]
 done
+
+# 4f: unexpected failure after the merge, before removal (a `date` stub fails on the gate-remove
+# call; a post-merge hook arms it) -> merged attempt is never reported landed or land_failed.
+setup_case unexpected-fault
+printf '#!/bin/sh\ntouch "%s"\n' "$T/merged" > "$repo/.git/hooks/post-merge"
+cat > "$T/bin/date" <<EOF
+#!/bin/sh
+# Second date call after the merge is gate remove (gate evidence is the first).
+if [ -e "$T/merged" ]; then
+    n=\$(( \$(cat "$T/merged.count" 2>/dev/null || echo 0) + 1 )); echo \$n > "$T/merged.count"
+    [ \$n -eq 2 ] && exit 1
+fi
+exec /bin/date "\$@"
+EOF
+chmod +x "$repo/.git/hooks/post-merge" "$T/bin/date"
+land; rc=$?
+expect "date stub fired" [ "$(cat "$T/merged.count" 2>/dev/null || echo 0)" -ge 2 ]
+expect "exit 4 (got $rc)" [ "$rc" -eq 4 ]
+expect "exactly one merge on main" [ "$(git -C "$repo" rev-list --merges --count main)" -eq 1 ]
+expect "worktree kept" [ -d "$wt" ]
+expect "no land_failed event" [ "$(events_with '"kind":"land_failed"')" -eq 0 ]
+expect "warn event" [ "$(events_with '"kind":"landed_evidence_incomplete"')" -eq 1 ]
+load dirs
+rec="${dirs[0]:-/missing}/landing.json"
+expect "outcome landed_evidence_incomplete" [ "$(jget "$rec" 'v["outcome"]')" = landed_evidence_incomplete ]
 
 # 2b: the embedded helper never imports modules from the caller's cwd or PYTHONPATH.
 setup_case python-isolation
@@ -270,13 +296,15 @@ case_name=journal-format
 SENTINEL_EVENTS_FILE="$scratch/success/home/events.jsonl" "$SRC/scripts/dev/sentinel-event.sh" note info $'tab\there "q" \\ back\x01ctl\nline' > /dev/null 2>&1 ||
     fail "control-character event not written"
 python3 - "$scratch" <<'PY' || fail "journal lines do not parse"
-import glob, json, sys
+import glob, json, math, sys
 files = glob.glob(sys.argv[1] + '/*/home/events.jsonl')
 count = 0
 for path in files:
     for line in open(path):
-        obj = json.loads(line)
-        assert isinstance(obj['at'], (int, float)) and not isinstance(obj['at'], bool), line
+        obj = json.loads(line, parse_constant=lambda name: (_ for _ in ()).throw(ValueError(name)))
+        at = obj['at']
+        assert isinstance(at, (int, float)) and not isinstance(at, bool), line
+        assert isinstance(at, int) or math.isfinite(at), line
         assert isinstance(obj['kind'], str) and isinstance(obj['text'], str), line
         assert obj['tone'] in ('info', 'ok', 'warn', 'bad'), line
         if obj['text'] != 'no id':  # the id-less fixture line is kept as given
