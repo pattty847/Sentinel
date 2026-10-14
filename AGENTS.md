@@ -91,7 +91,7 @@ Reviewers of any `libs/gui/UnifiedGridRenderer*` or `libs/gui/chart/**` diff rej
 
 ## 4) Commands and Testing
 
-`scripts/dev/doc-health.sh` runs after chart-health in `agent-worktree.sh land`; it ratchets doc sizes and checks memory entries, with exit 1 waivable by `Doc-Health-Waiver: <reason>` and `--report` for curation.
+`scripts/dev/doc-health.sh` runs after chart-health in `agent-worktree.sh land`; it ratchets STATUS/TODO sizes, caps memory files and checks entries (INVARIANTS and DECISIONS are temporarily exempt from size caps until pruned, per `DOC_HEALTH_PENDING_PRUNE` in the script), with exit 1 waivable by `Doc-Health-Waiver: <reason>` and `--report` for curation.
 
 Build (owner's Mac): `scripts/dev/build-queue.sh --label <branch> -- cmake --build --preset mac-clang -j 6`
 - Every build, ctest run or benchmark on the Mac goes through the FIFO build queue, one at a time.

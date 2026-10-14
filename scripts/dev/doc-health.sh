@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Documentation ratchets. Run from any checkout; --report never blocks curation.
+# Documentation caps and ratchets. Run from any checkout; --report never blocks curation.
 set -euo pipefail
 exec python3 - "$@" <<'PY'
 from collections import Counter
@@ -18,13 +18,16 @@ INVARIANTS_CAP = 25 * 1024
 DECISIONS_CAP = 25 * 1024
 REPO_MAP_CAP = 5 * 1024
 ENTRY_CAP = 350
+DOC_HEALTH_PENDING_PRUNE = "INVARIANTS.md DECISIONS.md"
 
 ENTRY = re.compile(r"^- (?:FM-|INV-|\d{4}-\d{2}-\d{2} \||AREA:)")
-ID = re.compile(r"^- ((?:FM|INV)-\d+)(?=\s|\||$)")
+ID = re.compile(r"^- ((?:FM|INV)-\d+)(?![\w-])")
 POINTER = re.compile(
     r"(?:[\w.-]+/)+[\w.-]+\.[\w]+(?::\d+)?"
     r"|[\w.-]+\.[\w]+:\d+"
-    r"|\b[A-Za-z_]\w*\.[A-Za-z_]\w*\b"
+    r"|(?<![\w.])[A-Z]\w*\.[A-Za-z_]\w*(?![\w.])"
+    r"|\b[A-Za-z_]\w*::\w+(?:\(\))?"
+    r"|\b\w+\(\)"
 )
 GTEST = re.compile(r"\b(?:TEST(?:_F|_P)?|TYPED_TEST(?:_P)?)\s*\(\s*(\w+)\s*,\s*(\w+)\s*\)")
 REPORT = sys.argv[1:] == ["--report"]
@@ -50,6 +53,22 @@ def entry_label(line, name, number):
     if match:
         return match[1]
     return line.split("|", 1)[0].removeprefix("- ").strip() or f"{name}:{number}"
+
+
+def entry_blocks(text):
+    """Blank lines end entries; other non-entry lines continue the current one."""
+    block = []
+    start = 0
+    for number, line in enumerate(text.splitlines(), 1):
+        if ENTRY.match(line) or not line.strip():
+            if block:
+                yield start, tuple(block)
+            block = [line] if ENTRY.match(line) else []
+            start = number
+        elif block:
+            block.append(line)
+    if block:
+        yield start, tuple(block)
 
 
 def check():
@@ -92,15 +111,21 @@ def check():
         data = path.read_bytes()
         grew = old is None or len(data) > len(old)
         over = len(data) > cap
-        state = "FAIL" if over and grew else "over cap, ratchet holds" if over else "OK"
+        exempt = is_memory and path.name in DOC_HEALTH_PENDING_PRUNE.split()
+        breach = over and (not exempt if is_memory else grew)
+        state = ("FAIL" if breach else "over cap (pending prune)" if over and exempt
+                 else "over cap, ratchet holds" if over else "OK")
         old_size = "missing" if old is None else str(len(old))
-        print(f"doc-health: size {name}: {len(data)} bytes (cap={cap}, baseline={old_size}) {state}")
-        if over and grew:
-            failures.append(f"size {name}: {len(data)} > {cap} bytes and baseline {old_size}")
+        details = f"cap={cap}" + ("" if is_memory else f", baseline={old_size}")
+        print(f"doc-health: size {name}: {len(data)} bytes ({details}) {state}")
+        if breach:
+            failures.append(f"size {name}: {len(data)} > {cap} bytes"
+                            + ("" if is_memory else f" and baseline {old_size}"))
         if not is_memory:
             continue
         text = data.decode("utf-8", errors="surrogateescape")
-        old_lines = Counter((old or b"").decode("utf-8", errors="surrogateescape").splitlines())
+        old_entries = Counter(block for _, block in entry_blocks(
+            (old or b"").decode("utf-8", errors="surrogateescape")))
         ids = Counter()
         archive = private / "archive/agent" / path.name
         archived_ids = set()
@@ -112,20 +137,26 @@ def check():
         for number, line in enumerate(text.splitlines(), 1):
             if not line.isascii():
                 failures.append(f"ASCII {name}:{number}: non-ASCII content")
-            unchanged = old_lines[line] > 0
+        for number, block in entry_blocks(text):
+            unchanged = old_entries[block] > 0
             if unchanged:
-                old_lines[line] -= 1
-            if not ENTRY.match(line):
-                continue
+                old_entries[block] -= 1
+            line = block[0]
             label = entry_label(line, name, number)
-            if not unchanged and len(line) > ENTRY_CAP:
-                failures.append(f"entry {name}:{number} {label}: {len(line)} > {ENTRY_CAP} characters")
+            length = sum(len(part) for part in block)
+            if not unchanged and length > ENTRY_CAP:
+                failures.append(f"entry {name}:{number} {label}: {length} > {ENTRY_CAP} characters")
             match = ID.match(line)
             if match:
                 ids[match[1]] += 1
                 if match[1] in archived_ids:
                     failures.append(f"archive {name}:{number}: {match[1]} also appears in archive/agent/{path.name}")
-            tokens = set(re.findall(r"`([^`\n]+)`", line)) | set(POINTER.findall(line))
+            content = "\n".join(block)
+            tokens = set(re.findall(r"`([^`\n]+)`", content)) | set(POINTER.findall(content))
+            # Lowercase dotted identifiers are config keys, not gtest names.
+            # Preserve a quoted filename when it actually exists in the checkout.
+            tokens = {token for token in tokens
+                      if not re.fullmatch(r"[a-z_]\w*(?:\.\w+)+", token) or (root / token).exists()}
             entries.append((name, label, tokens))
         for ident, count in sorted(ids.items()):
             if count > 1:
@@ -133,7 +164,9 @@ def check():
 
     # Paths resolve only within this checkout. Other tokens share one fixed-string
     # rg scan over source directories, avoiding a process/tree walk per entry.
-    tokens = set().union(*(item[2] for item in entries)) if entries else set()
+    raw_tokens = set().union(*(item[2] for item in entries)) if entries else set()
+    normalized = {token: token.removesuffix("()") for token in raw_tokens}
+    tokens = set(normalized.values())
     resolved = set()
     for token in tokens:
         path = (root / re.sub(r":\d+(?::\d+)?$", "", token)).resolve()
@@ -146,7 +179,7 @@ def check():
         with tempfile.TemporaryDirectory(prefix="doc-health-") as scratch:
             patterns = Path(scratch) / "pointers"
             suites = {token.split(".", 1)[0] for token in pending
-                      if re.fullmatch(r"[A-Za-z_]\w*\.[A-Za-z_]\w*", token)}
+                      if re.fullmatch(r"[A-Z]\w*\.[A-Za-z_]\w*", token)}
             patterns.write_text("\n".join(sorted(pending | suites)) + "\n", errors="surrogateescape")
             result = subprocess.run(["rg", "--no-heading", "--no-filename", "--no-line-number",
                                      "--fixed-strings", "--file", str(patterns), "--", *dirs],
@@ -162,8 +195,13 @@ def check():
                 resolved.update(contained[match[1]])
             for suite, case in GTEST.findall(result.stdout):
                 resolved.add(f"{suite}.{case}")
-    dead = [f"{name}:{label}" for name, label, pointers in entries if not pointers & resolved]
-    print(f"doc-health: warning: unresolved pointers in {len(dead)} entries"
+    no_pointer = [item for item in entries if not item[2]]
+    live = [item for item in entries if any(normalized[token] in resolved for token in item[2])]
+    dead = [f"{name}:{label} {sorted(pointers)[0]}" for name, label, pointers in entries
+            if pointers and not any(normalized[token] in resolved for token in pointers)]
+    print(f"doc-health: no pointer: {len(no_pointer)}")
+    print(f"doc-health: resolved pointers: {len(live)}")
+    print(f"doc-health: warning: dead pointers: {len(dead)}"
           + (" (up to 20): " + ", ".join(dead[:20]) if dead else ""))
     for failure in failures:
         print(f"doc-health: FAIL {failure}")
