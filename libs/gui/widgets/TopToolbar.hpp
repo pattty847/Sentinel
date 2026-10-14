@@ -116,7 +116,7 @@ signals:
     void tpoToggled(bool enabled);
     void volumeProfileToggled(bool enabled);
     void candlesToggled(bool enabled);
-    void timeframeSelected(const QString& timeframe);
+    void timeframeSelected(qlonglong timeframeMs);
     void chartTypeSelected(const QString& chartType);
     void indicatorsRequested();
     void layoutsRequested();

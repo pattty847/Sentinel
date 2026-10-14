@@ -26,6 +26,7 @@
 #include <QMainWindow>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QStandardItemModel>
 #include <QDoubleSpinBox>
 #include <QDir>
 #include <QLabel>
@@ -319,9 +320,9 @@ TEST(ChartToolbar, ControlsMenuReachesLayersTimeframeTickAndSearch) {
     EXPECT_FALSE(menuAction(menu, "controlsHeatmap")->isChecked());
     auto *timeframes = menu->findChild<QMenu *>("controlsTimeframes");
     ASSERT_TRUE(timeframes);
-    timeframes->actions().at(2)->trigger();
+    timeframes->actions().at(3)->trigger();
     ASSERT_EQ(timeframe.size(), 1);
-    EXPECT_EQ(timeframe.at(0).at(0).toString(), "5m");
+    EXPECT_EQ(timeframe.at(0).at(0).toLongLong(), 300000);
     TopToolbar::TickSelectorState state;
     state.enabled = true;
     state.offeredUnits = {10, 20};
@@ -333,6 +334,36 @@ TEST(ChartToolbar, ControlsMenuReachesLayersTimeframeTickAndSearch) {
     EXPECT_TRUE(tick.at(0).at(0).toBool());
     menuAction(menu, "chartQuickSearchAction")->trigger();
     EXPECT_EQ(search.size(), 1);
+}
+
+TEST(ChartToolbar, HundredMsTimeframeIsAlwaysOfferedAndRoundTrips) {
+    TopToolbar toolbar;
+    auto *combo = toolbar.findChild<QComboBox *>("chartTimeframeCombo");
+    ASSERT_TRUE(combo);
+    QSignalSpy timeframe(&toolbar, &TopToolbar::timeframeSelected);
+    toolbar.setAvailableTimeframes({1000, 60000, 300000});
+    ASSERT_EQ(combo->itemText(0), "100ms");
+    ASSERT_EQ(combo->itemData(0, Qt::UserRole).toLongLong(), 100);
+    auto *model = qobject_cast<QStandardItemModel *>(combo->model());
+    ASSERT_TRUE(model);
+    EXPECT_TRUE(model->item(0)->isEnabled());
+    EXPECT_TRUE(combo->itemData(0, Qt::ToolTipRole).toString().contains("Heatmap only"));
+    EXPECT_FALSE(model->item(combo->findData(3600000))->isEnabled());
+
+    combo->setCurrentIndex(0);
+    ASSERT_EQ(timeframe.size(), 1);
+    EXPECT_EQ(timeframe.at(0).at(0).toLongLong(), 100);
+
+    toolbar.setTimeframeMs(100);
+    EXPECT_EQ(combo->currentText(), "100ms");
+    toolbar.setTimeframeMs(1000);
+    toolbar.setTimeframeMs(100);
+    combo->setCurrentIndex(combo->findData(1000));
+    ASSERT_EQ(timeframe.size(), 2);
+    EXPECT_EQ(timeframe.at(1).at(0).toLongLong(), 1000);
+    combo->setCurrentIndex(0);
+    ASSERT_EQ(timeframe.size(), 3);
+    EXPECT_EQ(timeframe.at(2).at(0).toLongLong(), 100);
 }
 
 TEST(ChartToolbar, NarrowTickMenuRetainsUnavailableValueAndResolutionWarning) {

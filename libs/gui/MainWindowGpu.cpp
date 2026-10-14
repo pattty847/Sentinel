@@ -122,23 +122,6 @@ void setLiquidityRangeUnits(HeatmapSettingsDialog *dialog, const QString &symbol
         }
     }
 }
-
-int timeframeMsFromLabel(const QString& label) {
-    static const std::unordered_map<std::string, int> map{
-        {"1s", 1000},
-        {"1m", 60000},
-        {"5m", 300000},
-        {"15m", 900000},
-        {"1h", 3600000},
-        {"4h", 14400000},
-        {"1D", 86400000},
-    };
-    auto it = map.find(label.toStdString());
-    if (it == map.end()) {
-        return 0;
-    }
-    return it->second;
-}
 }
 
 MainWindowGPU::MainWindowGPU(QWidget* parent, int symbolSwitchTimeoutMs)
@@ -475,13 +458,8 @@ void MainWindowGPU::setupUI() {
         hooks.resetLayout = [this]() { onResetLayout(); };
         hooks.fontSettings = [this]() { onOpenFontSettings(); };
         m_heatmapControls->setMenuHooks(std::move(hooks));
-        connect(m_heatmapDock->toolbar(), &TopToolbar::timeframeSelected, this, [this](const QString& label) {
-            const int ms = timeframeMsFromLabel(label);
-            if (ms <= 0) {
-                sLog_Warning("Unknown timeframe label ignored: label=" << label);
-                return;
-            }
-            selectTimeframe(ms);
+        connect(m_heatmapDock->toolbar(), &TopToolbar::timeframeSelected, this, [this](qlonglong ms) {
+            selectTimeframe(static_cast<int>(ms));
         });
     }
     
