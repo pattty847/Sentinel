@@ -46,6 +46,11 @@ Detail belongs in the linked plan or file, not in the item.
 
 ## Backlog (bugs and small fixes)
 
+- Startup candle flicker: the auto tick commits 100 -> 500 -> 100 within ~60 ms around the first snapshot, so the settled tick differs run to run; do not commit an auto tick until the first snapshot and price window settle (owner-visible). Until fixed, do not chase price-row diffs in screenshots.
+- Overlay teardown crash: `CandlestickOverlayItem`/`TradeBubbleOverlayItem` keep a dangling mapping provider/renderer after `UnifiedGridRenderer` is deleted (tests null them first); use a QPointer or disconnect on UGR destruction.
+- `HeatmapGpuBinner` precision self-test intermittently reads back all zeros (1 of 6 starts) and silently drops the fast kernel; suspect readback before dispatch completion in `driveSelfTest`.
+- Roller reconnect catch-up may retry forever if the already-applied cursor block is corrupt (LiveSource requires the first reopened record to equal the saved cursor; a recovering JournalReader can return a successor with gapBefore). Unverified.
+- An anchor-resumed JournalFeed can re-emit a pre-anchor trade_id on a reconnect snapshot (the v1 anchor sidecar omits the trade-ID window); the fix changes on-disk state and needs owner approval.
 - `config/client_config.yaml` top-level `server:` is ignored (only `client.server` is read); nearly pointed an agent GUI at :8080.
 - Straight RGB into a premultiplied material (as the VP had): `CandlestickBatched.cpp` volume bars draw brighter than their alpha; `CandlestickOverlayItem.cpp` body opacity and wick alpha. Fixing changes looks (owner).
 - PEPE at its native 1e-8 tick draws ~200 px rows and logs "native rows exceed int32". Direction: readable price units for tiny prices (as exchanges list 1000PEPE), a minimum visible price span or row-height cap in auto-scale; no fake sub-tick grid.
@@ -68,14 +73,14 @@ Detail belongs in the linked plan or file, not in the item.
 - **Candles over heatmap:** body opacity control when the heatmap is visible; wick-only mode; candle aggregation synced with heatmap resolution.
 - **Footprint:** bid/ask vs delta modes; cluster vs profile styles; rotation-aware width scaling; GPU-batched per-cell numbers.
 - **Order book profile overlay** beside the heatmap, with normalization modes and labels.
-- **Trade and liquidation bubbles** (size = volume; liquidations styled apart; toggles). FM-259: bubbles may not draw if the overlay attaches before trades.
+- **Trade and liquidation bubbles** (size = volume; liquidations styled apart; toggles). Bubbles may never draw when the overlay exists before any trades (suspected `setVertexCount(0)` at construction, `TradeBubbleNode.cpp:47`; ChartGoldenTests scene 10 works around it).
 - **Text:** LOD (numbers -> hints -> none); colour-coded numeric overlays.
 - **TPO:** stable letter assignment per timeframe/session slice; column alignment with the shared time/price mapping; 24H vs 1W end to end; regression checks for session and timeframe switching.
 - **Interaction:** consistent right-click menus; unified settings panel; keyboard shortcuts for major toggles.
 - **History:** footprint and TPO history persistence and overview rollups (the heatmap has HMC2; these two do not).
 - **Candles:** roll 1m up to custom timeframes on demand (may fold into Queue 1).
 - **Lab:** pure candle viewer (`CandlestickBatched` on live data).
-- **Paper trading:** TP/SL visual and interaction polish. FM-256: a TP/SL exit order can be left New.
+- **Paper trading:** TP/SL visual and interaction polish. A TP/SL exit order stays New when a bad TP or slippage config gives a non-positive exit price (`TradingEngine.cpp:193`): validate before the upsert.
 - **Look vs TapeSurf:** volume bars at the bottom, live depth edge on the right, high/low price tags, relative time axis.
 - **Code safety:** `DockablePanel` init-order guard (FM-029); raw `new` audit in `libs/gui/render/`; strong typedefs for coordinate systems; protocol round-trip and DataProcessor validation tests.
 - Learning session: how HFT-grade terminals structure data paths and rendering, applied to Sentinel.

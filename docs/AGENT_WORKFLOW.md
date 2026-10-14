@@ -12,6 +12,9 @@ AGENTS.md. Remove a note here when it stops being true.
    answers; the answers are appended as "Owner decisions (approved)". No dispatch before agreement on
    anything that changes behaviour, data or looks.
 3. **Dispatch** one task packet per writer (AGENTS.md section 10).
+   Packet checks: `rg tests/` for every file and script the packet owns and list each existing test in the
+   targeted set (DeployRuntimeDryRun was once missed for `deploy-runtime.sh`); for every file or symbol the
+   packet deletes, `rg tests/` for its include and name and say whether the test moves or stays test-only.
 4. **Review** the frozen tip (`git diff main...<tip>`). Findings ranked blocker/major/minor, each with a
    failure scenario. Fixes go to the same writer thread (Codex `exec resume`, Claude `SendMessage`); the same
    reviewer checks closure.
