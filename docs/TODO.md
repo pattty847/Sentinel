@@ -51,6 +51,7 @@ Detail belongs in the linked plan or file, not in the item.
 - `HeatmapGpuBinner` precision self-test intermittently reads back all zeros (1 of 6 starts) and silently drops the fast kernel; suspect readback before dispatch completion in `driveSelfTest`.
 - Roller reconnect catch-up may retry forever if the already-applied cursor block is corrupt (LiveSource requires the first reopened record to equal the saved cursor; a recovering JournalReader can return a successor with gapBefore). Unverified.
 - An anchor-resumed JournalFeed can re-emit a pre-anchor trade_id on a reconnect snapshot (the v1 anchor sidecar omits the trade-ID window); the fix changes on-disk state and needs owner approval.
+- doc-health: bare `file.cpp:123` pointers (no directory) report as dead although the file exists (`MainWindowGpu.cpp:973`, `TopToolbar.cpp:90`); resolve by basename via `git ls-files`. Warning only.
 - `config/client_config.yaml` top-level `server:` is ignored (only `client.server` is read); nearly pointed an agent GUI at :8080.
 - Straight RGB into a premultiplied material (as the VP had): `CandlestickBatched.cpp` volume bars draw brighter than their alpha; `CandlestickOverlayItem.cpp` body opacity and wick alpha. Fixing changes looks (owner).
 - PEPE at its native 1e-8 tick draws ~200 px rows and logs "native rows exceed int32". Direction: readable price units for tiny prices (as exchanges list 1000PEPE), a minimum visible price span or row-height cap in auto-scale; no fake sub-tick grid.

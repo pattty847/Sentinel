@@ -3,7 +3,7 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-14. main `787453b`. Conductor: Opus session of 2026-10-14 (memory and tracker cleanup wave).
+- **Updated:** 2026-10-14 ~06:15 UTC. Wave done (TODO rebuild, FM pruning, doc-health); conductor ending at the context soft limit. Conductor: Opus session of 2026-10-14 (memory and tracker cleanup wave).
 - **Conductor:** a Claude Opus session on the owner's Mac (AGENTS.md section 10).
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high-risk. Owner: use Codex down to ~1% before spending a reset credit (holds 3).
 
@@ -23,7 +23,7 @@ Pre-land evidence for chart slices: native `SENTINEL_REQUIRE_GPU=1` run of Chart
 ## In flight
 
 - **FAILURE_MODES pruning: done** (2026-10-14): 80 active entries (23.8 KB) from 269 (120 KB); 196 in `../Sentinel-Private/archive/agent/FAILURE_MODES.md`. Writer Fable, reviewer gpt-6-astra thread `01a138f1-8481-7972-9fcc-221be91375bc` (r1 REVISE 3 major/8 minor, r2 REVISE 1 major, r3 PASS). Proposal and `classification.md` (per-entry `area` column, input for the owner's LOD design) stay in `../Sentinel-Private/research/2026-10-14-fm-pruning/`. Next: INVARIANTS, then DECISIONS (decisions in force only).
-- **doc-health gate** (owner go 2026-10-14): branch `lt-sol/doc-health` at `defde65` (conductor-committed r0), worktree `/Volumes/T7/sentinel-worktrees/lt-sol-doc-health`, base `787453b`. Writer Codex gpt-6.1-sol thread `01a138ee-beb4-7370-8fb0-b818ee7f8338`: fix round 1 running (pointer check reports only dead pointers, `::`/`()` extraction, continuation lines, `_agent` absolute caps with `DOC_HEALTH_PENDING_PRUNE="INVARIANTS.md DECISIONS.md"`). Reviewer: Claude Sonnet subagent, r1 REVISE (1 major, 3 minor); re-check the fix in the same reviewer after READY, then the conductor commits the diff and lands with trailers (Risk low-medium, Writer gpt-6.1-sol, Reviewer sonnet).
+- **doc-health gate: landed** `8c0d35f` (2026-10-14; writer gpt-6.1-sol, reviewer Sonnet, 2 rounds; full ctest 112/112; evidence `~/Library/Logs/Sentinel/land/20261014T055640Z-lt-sol-doc-health-52548/`). The script landed without its executable bit (that land ran main's pre-merge `agent-worktree.sh`, so the gate itself did not run); fixed on main right after. First land that runs it: the next one. Remove a name from `DOC_HEALTH_PENDING_PRUNE` when INVARIANTS or DECISIONS is pruned.
 - Audit reports from 2026-10-12 (tests, workflow) are in `../Sentinel-Private/research/2026-10-12-audits/`. A Windows Codex thread is pruning redundant tests and will open a PR; reconcile by gtest name.
 - Workflow review with GPT-6 (owner relays): dossier `../Sentinel-Private/research/2026-10-13-agentops-dossier.md`; section 12 proposals, section 13 open owner questions. **Nothing in it is policy until the owner adopts it.** AgentOps S2-S4 need a new owner decision. S1 known gaps: SentinelBar does not see sandbox events until land; read-only reviewers write no events; no appender lock; Codex candidates are branch matches only.
 - Neutrality evidence: main's startup `viewportVersion` and candle-history paging vary run to run; do not use them as neutrality pins; use the heatmap target hash plus pin tests. The `window` target is never byte-stable.
