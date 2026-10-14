@@ -182,7 +182,7 @@ Before editing hot paths, explicitly check for per-frame risk:
 
 ## 6) Agent Memory (`_agent/`) — Durable, Minimal, One-Line
 
-Path: `_agent/` (gitignored AI scratchpad, shared by every worktree and agent). Write tasks only.
+Path: `_agent/`, a symlink to `../Sentinel-Private/_agent` (versioned in the private repo since 2026-10-13; shared by every worktree and agent). Agents edit it in place; the conductor commits `_agent/` changes in Sentinel-Private at landings and hand-offs. Write tasks only.
 
 Files:
 - `_agent/INVARIANTS.md` → `- INV-### | <statement>`

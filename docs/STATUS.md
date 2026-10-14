@@ -58,6 +58,15 @@ Left: README/ARCHITECTURE pass (`data/market` deleted by the owner 2026-10-12).
 
 ## Next (priority order; pull the next item FIFO from `docs/TODO.md` "Queue")
 
+0. Agent-memory pruning. The owner approved this on 2026-10-13. He is designing a long-term "LOD for docs" system with GPT-6 and may replace this item; ask first.
+   - `_agent/` now lives in Sentinel-Private (`7092015`); FAILURE_MODES is 123 KB with 282 entries.
+   - Approved rules:
+     - one entry is at most ~300 characters;
+     - archive an entry when its code is gone or a test or script enforces its guardrail, keeping the FM id and moving it to an archive file in Sentinel-Private;
+     - product bugs go to the tracker, not `_agent/`;
+     - give INVARIANTS and DECISIONS the same treatment.
+   - Target: under 25 KB of active FMs.
+   - Process: one Sonnet writer classifies every entry (keep, archive or tracker) and cites a file, test or commit for each; a Codex reviewer spot-checks the archive pile.
 1. Test cleanup from the Astra tests audit (see In flight).
 2. The two deferred option B minors (small, one Codex Sol branch; touches `tests/render/test_ugr_gpu.cpp`, so coordinate with the owner's Windows test-cleanup PR).
 3. B2 option A plan revision (later date, owner's call when).
