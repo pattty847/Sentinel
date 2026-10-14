@@ -18,7 +18,7 @@ AGENTS.md. Remove a note here when it stops being true.
 5. **Land** with `scripts/dev/agent-worktree.sh land <branch>`, one branch at a time.
 6. **Deploy** services only through `scripts/dev/deploy-runtime.sh` (AGENTS.md section 4b), then watch the run
    log and metrics against the reviewer's watch list.
-7. **Record.** Failure modes and invariants go to `_agent/`; current state replaces the old state in STATUS;
+7. **Record.** Curate the writers' `MEMORY:` lines into `_agent/` (AGENTS.md section 6); current state replaces the old state in STATUS;
    the owner gets one short digest.
 
 ## Running and seeing the app
@@ -136,8 +136,8 @@ Verified 2026-09-27 with codex-cli 0.158; 0.160 was installed by 2026-10-05. Re-
   run ask to leave the sandbox and another model may approve.
 - Sandbox: `workspace-write` has network (localhost, HTTPS, Coinbase WebSockets) and can read the whole home
   directory; it only limits writes. No window server or Metal. `.git` stays read-only even inside a writable
-  root, so it cannot stage, commit or rebase in a linked worktree (`index.lock: Operation not permitted`);
-  `--add-dir <repo>/_agent` does let it append to `_agent/`.
+  root, so it cannot stage, commit or rebase in a linked worktree (`index.lock: Operation not permitted`).
+  Writers do not need `_agent/` write access: they propose entries as `MEMORY:` hand-off lines.
   Tested 2026-10-06 with `codex sandbox` (no model use): adding `<repo>/.git` to `writable_roots` is still
   blocked, but a clone made with `git clone --shared --separate-git-dir=<dir not named .git>` commits when that
   dir is a writable root, and it still cannot write the main repo, push to it or repoint its `.git` file.

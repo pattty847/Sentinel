@@ -32,7 +32,7 @@ Rules:
 - Before first concrete action, read at most ~200 lines total unless the user asks for a deep review.
 - If the request is ambiguous, start in Lite mode and escalate only if needed.
 - **Read-only scope** (review, audit, investigation): edit nothing, including `_agent/`, docs and memory. Report durable findings to whoever asked. An explicit owner scope always overrides the write rules in this file.
-- Write tasks: if you discover a durable invariant/failure mode/decision, update `_agent/` before stopping.
+- Write tasks: if you discover a durable invariant/failure mode/decision, propose it in a `MEMORY:` line of your hand-off (section 6). Do not edit `_agent/`.
 
 ## 1) Sentinel Non-Negotiables (Core Identity)
 
@@ -182,7 +182,7 @@ Before editing hot paths, explicitly check for per-frame risk:
 
 ## 6) Agent Memory (`_agent/`) — Durable, Minimal, One-Line
 
-Path: `_agent/`, a symlink to `../Sentinel-Private/_agent` (versioned in the private repo since 2026-10-13; shared by every worktree and agent). Agents edit it in place; the conductor commits `_agent/` changes in Sentinel-Private at landings and hand-offs. Write tasks only.
+Path: `_agent/`, a symlink to `../Sentinel-Private/_agent` (versioned in the private repo since 2026-10-13; shared by every worktree and agent). Only the conductor edits it. Writers propose entries in their hand-off as `MEMORY: <file> | <entry text>` lines (section 10); the conductor curates them in at landing and commits in Sentinel-Private.
 
 Files:
 - `_agent/INVARIANTS.md` → `- INV-### | <statement>`
@@ -193,8 +193,10 @@ Files:
 Rules:
 - One line per entry, ASCII only
 - Do not add new `_agent` files unless user asks
-- Re-read the file tail right before appending and take the next free id (`rg -o '^- FM-[0-9]+' _agent/FAILURE_MODES.md | sort -V | tail -1`)
-- Prefer durable guardrails over session chatter; when an entry you touch says "open" and the fix has landed, mark it resolved with the commit
+- Keep test: an entry stays only if a future agent editing that area would repeat the mistake before a test catches it. One entry is at most ~300 characters with one pointer (test, `file:line` or commit); no incident narrative (dates, counts, pids, slice or reviewer names).
+- Archive, never delete: when an entry's code is gone, or a test or script enforces its guardrail, move the original line plus ` | Archived YYYY-MM-DD: <reason>` to `../Sentinel-Private/archive/agent/<same file name>`. Ids are never reused. The archive is the history of agent mistakes; it is not searched by default.
+- Open product bugs go to `docs/TODO.md`, not `_agent/`. DECISIONS holds only decisions still in force; a superseded decision is archived with a pointer to the one that replaced it.
+- Conductor: re-read the file tail right before appending and take the next free id (`rg -o '^- FM-[0-9]+' _agent/FAILURE_MODES.md | sort -V | tail -1`)
 - Qdrant indexing is directory-targeted only (`libs/`, `docs/`, optional source dirs), never repo root, never `build/`
 
 ## 7) Task Tracking (`docs/TODO.md`) — Only When Relevant
@@ -221,8 +223,8 @@ Update the relevant canonical doc in the same change:
 - Feature scope/progress → `docs/TODO.md`
 - Config keys/defaults/semantics → config docs (if present)
 - Live state (conductor, services, in-flight branches, waiting decisions) → `docs/STATUS.md` (conductor only)
-- New durable invariant/regression guardrail → `_agent/INVARIANTS.md` or `_agent/FAILURE_MODES.md`
-- Non-trivial design decision → `_agent/DECISIONS.md` (vault detail optional)
+- New durable invariant/regression guardrail → `_agent/INVARIANTS.md` or `_agent/FAILURE_MODES.md` (writers: a `MEMORY:` hand-off line)
+- Non-trivial design decision → `_agent/DECISIONS.md` (writers: a `MEMORY:` hand-off line)
 
 `../Sentinel-Private/research/*` files are dated plans and evidence. Owner decisions are appended when a plan is
 approved; after the work lands the file is frozen and nobody maintains it. Current truth is the code,
@@ -233,7 +235,7 @@ repository `https://github.com/pattty847/Sentinel-Private`, cloned as a sibling 
 (`../Sentinel-Private` from there; see section 0 for the path from a worktree).
 Read only the file a task names; its index is `../Sentinel-Private/private/INTERNAL_INDEX.md`.
 Commit private document changes there, never in Sentinel; never copy full plan contents into public
-docs. `_agent/` remains local Sentinel memory and must not be added to the private repository.
+docs. `_agent/` is versioned in the private repository (section 6); never add it to Sentinel.
 Public checkouts do not require private docs to build or test.
 
 ## 8a) Commits and Git
@@ -277,12 +279,12 @@ Task packet (the dispatch prompt, self-contained): base commit; branch and workt
 Hand-off protocol:
 1. The conductor creates the worktree from current `main`: `scripts/dev/agent-worktree.sh create <branch>` (`lt-sol/...`, `lt-astra/...`, `lt-claude/...`).
 2. The writer works on that base (no rebase, no merging `main`), builds and runs focused checks through the build queue.
-3. The writer finishes with `READY: <branch>` and its tip (or "uncommitted diff" when sandboxed), what changed and why, the checks run with their summary lines, and what it could not verify. Last line: `WORKFLOW: <what cost time, surprised you, or the docs got wrong; or none>`. Use `BLOCKED: <branch>` with the reason if it cannot finish.
+3. The writer finishes with `READY: <branch>` and its tip (or "uncommitted diff" when sandboxed), what changed and why, the checks run with their summary lines, and what it could not verify. Then one `MEMORY: <file> | <entry text>` line per proposed `_agent/` entry, or `MEMORY: none`. Last line: `WORKFLOW: <what cost time, surprised you, or the docs got wrong; or none>`. Use `BLOCKED: <branch>` with the reason if it cannot finish.
 4. After review PASS (and owner approval where required), the conductor lands with `scripts/dev/agent-worktree.sh land <branch>`, stamping audit trailers with repeated `--trailer 'Key: value'`: `Slice`, `Plan`, `Risk`, `Writer`, `Reviewer`, `Review-Rounds`, `Findings: blocker=N major=N minor=N`, `Deferred`, `Writer-Tokens`, `Reviewer-Tokens`, `Planner-Tokens` (exact, from `ma-panel`), `Evidence`: rebase onto `main`, build, full ctest, `git range-diff` gate, `--no-ff` merge, worktree removal. One branch at a time; every other READY branch re-runs `land` before it lands. Bisect with `git bisect --first-parent`.
 
 Codex CLI (hard rules; usage and quirks in `docs/AGENT_WORKFLOW.md`):
 - Binary: `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex` (`codex` is only a zsh alias).
-- Lieutenants always run sandboxed: `-s workspace-write` (writers, with `--add-dir <repo>/_agent`) or `-s read-only` (reviews), always `-c approval_policy='"never"'`, stdin closed (`< /dev/null`). Never pass `--dangerously-bypass-approvals-and-sandbox`.
+- Lieutenants always run sandboxed: `-s workspace-write` (writers) or `-s read-only` (reviews), always `-c approval_policy='"never"'`, stdin closed (`< /dev/null`). Never pass `--dangerously-bypass-approvals-and-sandbox`.
 - `codex exec resume` keeps neither model nor sandbox: pass `-m` and the sandbox settings again.
 
 Continuity:
