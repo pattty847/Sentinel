@@ -3,7 +3,7 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-13 ~07:30 UTC. main `49b4c9a`. Chart-core Phase 5 is complete except B2 option A (a feature, deferred). This conductor ended at its wave boundary; nothing in flight.
+- **Updated:** 2026-10-13 ~23:30 UTC. main `8aacec9` (pushed). Since the last hand-off: Grafana ingest panels landed `19f7099`; PR 44 (docs index, plans and evidence moved to Sentinel-Private) landed `8aacec9`; PRs 43 and 44 closed on GitHub. This conductor ended past its 200k soft limit at the owner's request; nothing in flight.
 - **Conductor:** a Claude Opus session on the owner's Mac (AGENTS.md section 10). The cloud Projects conductor + Mac operator trial (2026-10-11/12) is ended (owner, 2026-10-12).
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high-risk. 2026-10-13: both weekly windows reset (Codex ~95%+, Claude ~100%). Owner: use Codex down to ~1% before spending a reset credit (holds 3).
 
@@ -26,24 +26,21 @@ Left: README/ARCHITECTURE pass (`data/market` deleted by the owner 2026-10-12).
 
 - **Recorder/server:** slice E build `96e4f2f`, pid 37884, deployed 2026-10-12 03:45Z (anchor sidecar format v2). Smoke: 0 E/F lines; 14 W lines in the first 4 s: 7 expected `Roller anchor fallback ... section schema/version` (v1 sidecars ignored) and 7 `Shadow journal invalidated ... reason=journal boundary` (pid 45525 logged these only at 00Z, here at restart; conductor to judge). v2 anchors written within 20 s, anchor_failures_total 0 for all 7, live_feed_up 1 for all 7, no `sentinel_mdc_*`, shadow lag 0.47-1.04 s, `up` 1 for all 5 jobs. Fanout not checked (no client connected). **Do not roll back** with `deploy-runtime.sh rollback server`: older binaries do not match main's `config/server_config.yaml`; fix forward instead.
 - **Capture** deployed 2026-10-03 22:13; 7 products; fan-out to the server. Rollback: `deploy-runtime.sh rollback capture`.
-- **Monitoring:** VictoriaMetrics :8428, Grafana :3000 (restarted 2026-10-11 07:06Z; A1b is "A1b live feed down" on `sentinel_live_feed_up`, 7 series Normal). GUI host :17190.
+- **Monitoring:** VictoriaMetrics :8428, Grafana :3000 (A1b "live feed down" on `sentinel_live_feed_up`). Grafana is shared on the owner's tailnet only: `https://patricks-mac-mini.taildf7d06.ts.net:3000` (`tailscale serve`, anonymous Viewer; off: `tailscale serve --https=3000 off`). The public Funnel on :8443 was turned off 2026-10-13 (owner). The recorder dashboard has an "Ingest (capture)" row: queue bytes, pool %, reconnects/h, fan-out drops/overflow, client queue bytes. GUI host :17190.
 - **Shadow self-check (incremental since bae9a85, owner: keep it):** each hourly check rolls only the new hour per product; a fresh midnight replay happens only for 00Z and after an oracle reset. Hours 2-24 resume from the oracle's own hourly anchor, so an anchor-resume defect would also show as a mismatch. The oracle lives at `hmc2/shadow-oracle/<product>/<dayMs>` (about 19 MB per hour, so about 450 MB at the 23Z peak; current day only; exclude it from backups). `Shadow oracle reset` in the server log means a reset happened.
 
-## Hand-off: chart-core Phase 5 (B items), written 2026-10-13 by the outgoing conductor
+## Hand-off (2026-10-13, outgoing conductor)
 
-Plan: `../Sentinel-Private/research/2026-10-11-chart-core-architecture.md` rows B1-B8 (line ~771) and section 6 Q3 (line ~845). SentinelBar shows 21/29; the true count is 21/28 (B8 was done inside S11; the bar only counts trailers).
-
-State after `f8026ad` (2026-10-13):
-- Landed in `f8026ad` (Codex Sol writer, Opus reviewer, 2 rounds, 1 minor fixed): B1 (seed/bootstrap use `liveEndCeil`, `nextBucketEnd` deleted), B3 (`autoPriceTick_` reset on controller destroy and `forgetService`), B4 (test rename), B5 (one auto fit per live step: `ViewCommands::refitAfterHeatmapLive` skips when follow already fitted; depends on the `liveChanged` connect order, pinned by `UgrZoomCpu.LiveChangedFitsOnceAndRefitsWithoutFollowShift`), B7 (glyph-atlas dump deleted). B6: nothing to remove (`AxisModel::setTarget` can detach the view state, so its checks are live). Metal goldens unchanged, no re-bless.
-- B2 option B landed `49b4c9a` (Codex Sol writer, Opus reviewer, 2 rounds, 5 minors: 3 fixed, 2 deferred). The candle interval is ms across the GUI; `CandleInterval.hpp` converts to wire seconds exactly or refuses; a refused timeframe (100 ms today) sends no history request, logs once per switch, never retries and draws no candles; auto price fit and price carry then use the live price (no candle fallback). Deferred minors: replace the MainWindow/QML source-grep test `UgrCandleCpu.WindowAndQmlPassUnroundedMilliseconds` with a fake `IGridDataSource`; one startup refusal log line for the 100 ms session default. Metal goldens unchanged.
-- B2 option A (real sub-second candles) is a feature for later: plan `../Sentinel-Private/research/2026-10-13-b2-subsecond-candles.md` + owner answers at its end; Astra REVISE r1 in `.claude/acting-orchestrator/b2-plan/astra-review-r1.md` (2 blockers, 5 majors). Fable revises in a new thread with both before any slice.
-- B8: done in S11 (`d231a11`).
-
-Also hand over: PR 44 (docs to Sentinel-Private) review and land when the Windows Codex rework reports READY. Conflicts: the owner's Windows test-cleanup PR touches `tests/render/test_ugr_gpu.cpp` (B4); land it first or rebase B4 after. PR 44 (docs move to Sentinel-Private, rework requested) changes AGENTS.md and the plan path; it is docs-only and does not conflict with B code.
+- Chart-core Phase 5 is done except B2 option A, which is a feature for later. Its plan is `../Sentinel-Private/research/2026-10-13-b2-subsecond-candles.md` with the owner's answers; Astra REVISE r1 is in `.claude/acting-orchestrator/b2-plan/astra-review-r1.md`. Fable revises in a new thread before any slice. Two minors from option B (`49b4c9a`) are deferred:
+  - replace the source-grep test `UgrCandleCpu.WindowAndQmlPassUnroundedMilliseconds` with a fake `IGridDataSource`;
+  - remove the one startup refusal log line for the 100 ms default.
+- Workflow review with GPT-6 (owner relays messages; owner-initiated, read-only so far): the dossier is `../Sentinel-Private/research/2026-10-13-agentops-dossier.md` (Sentinel-Private `e2d6fe1`). Section 12 has proposals and section 13 open owner questions. **Nothing in it is policy until the owner adopts it.** Continue in a fresh conductor.
+- Private plans repo: a sibling of the main checkout. From a worktree: `"$(git rev-parse --path-format=absolute --git-common-dir)/../../Sentinel-Private"` (AGENTS section 0).
+- Deferred from PR 44 review: SentinelBar `PlanLocation.resolve` misses `initiatives/` trailers and relative pinned paths outside `research/` (minor).
 
 ## In flight
 
-- Read-only Codex Astra audits (2026-10-12, reports to the conductor, then a private research file): tests (re-check `../Sentinel-Private/research/2026-10-11-code-health/audit-tests.md`, scan S0-S15 tests; thread `01a13321-9031-70b3-a3ef-7bcda74bed58`) and workflow (30-day trailers, review yield, conductor token cost, conductor hand-off rule; thread `01a13321-9031-7ce0-b709-54d79b8c710b`). A Windows Codex thread is also pruning redundant tests and will open a PR; reconcile by gtest name.
+- Audit reports from 2026-10-12 (tests, workflow) are in `../Sentinel-Private/research/2026-10-12-audits/`. Nobody has acted on them yet. Test cleanup is Next 1. A Windows Codex thread is pruning redundant tests and will open a PR; reconcile by gtest name.
 - Neutrality evidence: main's startup `viewportVersion` and candle-history paging (request count and limits) vary run to run (12/17/15 and 2-3 requests in three fresh-profile runs on 2026-10-12). Do not use them as neutrality pins; use the heatmap target hash plus pin tests. The `window` target is never byte-stable (live clock and status).
 - Open check: at the next server restart, confirm the 7 startup `Shadow journal invalidated ... reason=journal boundary` warnings seen after the slice E deploy (pid 37884) do not recur (likely the one-time v1-anchor fallback).
 - Open FMs: FM-256 (TP/SL exit order left New), FM-259 (bubbles may not draw if the overlay attaches before trades), FM-260 (overlay dangling provider at teardown), FM-267 (startup auto tick 100 -> 500 -> 100 bounce: candle flicker, and the settled tick/price rows vary run to run on main itself; do not chase price-row diffs in screenshots; fix after S15, owner-visible), FM-268 (binner self-test zero-readback flake).
@@ -61,7 +58,7 @@ Also hand over: PR 44 (docs to Sentinel-Private) review and land when the Window
 
 ## Next (priority order; pull the next item FIFO from `docs/TODO.md` "Queue")
 
-1. Test cleanup from the Astra audit (see In flight).
+1. Test cleanup from the Astra tests audit (see In flight).
 2. The two deferred option B minors (small, one Codex Sol branch; touches `tests/render/test_ugr_gpu.cpp`, so coordinate with the owner's Windows test-cleanup PR).
 3. B2 option A plan revision (later date, owner's call when).
 
