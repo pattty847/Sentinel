@@ -33,9 +33,9 @@ Pre-land evidence for chart slices: native `SENTINEL_REQUIRE_GPU=1` run of Chart
 
 ## Waiting on the owner
 
-1. Archive `_agent/VAULT.md` (old Obsidian vault workflow, CRLF, contradicts the MEMORY: hand-off)? Conductor recommends yes.
-2. Decision explained, to revisit: whole-pixel rows and columns (DECISIONS 2026-10-08; landed as slices A, A2, A3, B).
-3. Parked: nightly copy of `/Volumes/T7/sentinel-data` to the MacBook Pro over Tailscale (needs Remote Login + SSH key).
+1. Parked: nightly copy of `/Volumes/T7/sentinel-data` to the MacBook Pro over Tailscale (needs Remote Login + SSH key).
+
+- Docs archive on the T7: `/Volumes/T7/sentinel-backup/docs-archive/` (owner 2026-10-14; `_agent/VAULT.md`, the old Obsidian vault workflow, moved there).
 
 ## Owner constraints in force
 

@@ -187,8 +187,9 @@ Before editing hot paths, explicitly check for per-frame risk:
 Path: `_agent/`, a symlink to `../Sentinel-Private/_agent` (versioned in the private repo since 2026-10-13; shared by every worktree and agent). Only the conductor edits it. Writers propose entries in their hand-off as `MEMORY: <file> | <entry text>` lines (section 10); the conductor curates them in at landing and commits in Sentinel-Private.
 
 Files:
-- `_agent/INVARIANTS.md` → `- INV-### | <statement>`
-- `_agent/FAILURE_MODES.md` → `- FM-### | Symptom: <...> | Root: <...> | Guardrail: <...>`
+- `_agent/INVARIANTS.md` → `- INV-### | YYYY-MM-DD | <statement>`
+- `_agent/FAILURE_MODES.md` → `- FM-### | YYYY-MM-DD | Symptom: <...> | Root: <...> | Guardrail: <...>`
+- The date is when the entry was added (owner 2026-10-14: a time series of agent mistakes). Entries older than 2026-10-14 have none; do not backfill.
 - `_agent/REPO_MAP.md` → `- AREA: <path> | Owns: <...> | Touch with: <...> | Notes: <...>`
 - `_agent/DECISIONS.md` → `- YYYY-MM-DD | Decision | Why: <...> | Rejected: <...>`
 
