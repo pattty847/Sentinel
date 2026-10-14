@@ -161,6 +161,64 @@ expect "exactly one merge on main" [ "$(git -C "$repo" rev-list --merges --count
 expect "worktree kept" [ -d "$wt" ]
 expect "no land_failed event" [ "$(events_with '"kind":"land_failed"')" -eq 0 ]
 
+# 4c: journal unwritable and no sandbox events: the landed event cannot be recorded -> exit 4, worktree kept.
+setup_case journal-unwritable
+mkdir -p "$T/ro"; chmod 555 "$T/ro"
+SENTINEL_EVENTS_FILE="$T/ro/events.jsonl" land; rc=$?
+expect "exit 4 (got $rc)" [ "$rc" -eq 4 ]
+load dirs
+rec="${dirs[0]:-/missing}/landing.json"
+expect "outcome landed_evidence_incomplete" [ "$(jget "$rec" 'v["outcome"]')" = landed_evidence_incomplete ]
+expect "event problem recorded" [ "$(jget "$rec" 'any("outcome event landed" in p for p in v["evidence_problems"])')" = true ]
+expect "exactly one merge on main" [ "$(git -C "$repo" rev-list --merges --count main)" -eq 1 ]
+expect "worktree kept" [ -d "$wt" ]
+
+# 4d: record write fails after the merge (post-merge hook makes the attempt dir read-only) -> exit 4.
+setup_case record-fault
+printf '#!/bin/sh
+chmod 555 "$SENTINEL_LAND_EVIDENCE_DIR"/*
+' > "$repo/.git/hooks/post-merge"
+chmod +x "$repo/.git/hooks/post-merge"
+land; rc=$?
+chmod -R u+w "$SENTINEL_LAND_EVIDENCE_DIR"
+expect "exit 4 (got $rc)" [ "$rc" -eq 4 ]
+expect "exactly one merge on main" [ "$(git -C "$repo" rev-list --merges --count main)" -eq 1 ]
+expect "worktree kept" [ -d "$wt" ]
+expect "no land_failed event" [ "$(events_with '"kind":"land_failed"')" -eq 0 ]
+expect "no landed event" [ "$(events_with '"kind":"landed"')" -eq 0 ]
+expect "record failure on stderr" grep -q "landing.json" "$T/land.out"
+
+# 4e: invalid sandbox event lines: nothing transferred, source kept, merged attempt exits 4.
+for variant in truncated missing-field bad-tone; do
+    setup_case "invalid-$variant"
+    good='{"id":"evt-good","at":1000,"kind":"review","text":"ok","tone":"info"}'
+    case $variant in
+        truncated) printf '%s\n{"id":"evt-cut","at":2000,"kind":"rev' "$good" ;;
+        missing-field) printf '%s\n{"id":"evt-nokind","at":2000,"text":"t","tone":"info"}\n' "$good" ;;
+        bad-tone) printf '%s\n{"id":"evt-tone","at":2000,"kind":"k","text":"t","tone":"loud"}\n' "$good" ;;
+    esac > "$wt/.sentinel-events.jsonl"
+    cp "$wt/.sentinel-events.jsonl" "$T/source.copy"
+    land; rc=$?
+    expect "exit 4 (got $rc)" [ "$rc" -eq 4 ]
+    load dirs
+    rec="${dirs[0]:-/missing}/landing.json"
+    expect "transfer failed" [ "$(jget "$rec" 'v["events_transfer"]["status"]')" = failed ]
+    expect "nothing appended" [ "$(events_with '"id":"evt-good"')" -eq 0 ]
+    expect "source kept unchanged" cmp -s "$wt/.sentinel-events.jsonl" "$T/source.copy"
+    expect "worktree kept" [ -d "$wt" ]
+done
+
+# 2b: the embedded helper never imports modules from the caller's cwd or PYTHONPATH.
+setup_case python-isolation
+mkdir -p "$T/pypath"
+for mod in json glob; do
+    printf 'open(%s, "a").write("%s\\n")\n' "'$T/imported.marker'" "$mod" > "$repo/$mod.py"
+    cp "$repo/$mod.py" "$T/pypath/$mod.py"
+done
+PYTHONPATH="$T/pypath" land; rc=$?
+expect "land exit 0 (got $rc): $(tail -3 "$T/land.out")" [ "$rc" -eq 0 ]
+expect "no shadow module imported" [ ! -e "$T/imported.marker" ]
+
 # 6: sandbox: primary journal unwritable -> worktree file; land moves it into the journal.
 setup_case sandbox
 if legacy_tmp_fallback; then
@@ -173,7 +231,8 @@ else
     id=$(python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).readline())["id"])' "$wt/.sentinel-events.jsonl" 2>/dev/null)
     land; rc=$?
     expect "land exit 0 (got $rc): $(tail -3 "$T/land.out")" [ "$rc" -eq 0 ]
-    expect "event id in primary journal" [ -n "$id" ] && [ "$(events_with "\"id\":\"$id\"")" -eq 1 ]
+    expect "fallback event has an id" [ -n "$id" ]
+    expect "event id in primary journal" [ "$(events_with "\"id\":\"${id:-none}\"")" -eq 1 ]
     expect "worktree removed" [ ! -e "$wt" ]
 fi
 
@@ -187,7 +246,8 @@ else
     expect "outside a worktree exits non-zero" [ "$rc" -ne 0 ]
     expect "stderr names the problem" grep -q "sentinel-event: cannot write" <<< "$err"
     err=$(cd "$repo" && SENTINEL_EVENTS_FILE="$T/ro2/nowhere/events.jsonl" scripts/dev/sentinel-event.sh note info "lost" 2>&1 >/dev/null); rc=$?
-    expect "main checkout is not a fallback" [ "$rc" -ne 0 ] && [ ! -e "$repo/.sentinel-events.jsonl" ]
+    expect "main checkout exits non-zero" [ "$rc" -ne 0 ]
+    expect "main checkout is not a fallback" [ ! -e "$repo/.sentinel-events.jsonl" ]
 fi
 
 # 10: range-diff stop still exits 3 with outcome land_review and no merge.

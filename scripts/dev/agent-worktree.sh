@@ -60,7 +60,7 @@ path_of_branch() {
 # Land evidence. JSON work (landing.json, event transfer, Codex session scan,
 # retention) is in this one Python block; the land flow below stays in bash.
 LAND_PY=$(cat <<'PY'
-import glob, hashlib, json, os, re, shutil, sys, tempfile, time
+import fcntl, glob, hashlib, json, os, re, shutil, sys, tempfile, time
 from datetime import datetime, timedelta, timezone
 
 def iso(epoch):
@@ -99,44 +99,66 @@ def record(path):
         f.write('\n')
     os.replace(tmp, path)
 
-def event_key(line):
+def valid_event(obj):  # SentinelBar EventParser rules
+    return (isinstance(obj, dict) and isinstance(obj.get('at'), (int, float)) and not isinstance(obj.get('at'), bool)
+            and isinstance(obj.get('kind'), str) and isinstance(obj.get('text'), str)
+            and obj.get('tone') in ('info', 'ok', 'warn', 'bad'))
+
+def parse(line):
     try:
-        obj = json.loads(line)
-        event_id = obj.get('id') if isinstance(obj, dict) else None
+        return json.loads(line)
     except ValueError:
-        event_id = None
+        return None
+
+def event_key(line, obj):
+    event_id = obj.get('id') if isinstance(obj, dict) else None
     if isinstance(event_id, str) and event_id:
         return 'id:' + event_id
     return 'sha256:' + hashlib.sha256(line.encode()).hexdigest()
 
-def transfer(src, dst):
+def transfer(src, dst, previous=''):
+    # All or nothing: every source line must be a valid event ending in a newline, else nothing is
+    # appended. The destination is locked (flock) across read, dedup and the single append.
     res = {'source': src, 'destination': dst, 'lines_read': 0, 'appended': 0,
            'duplicates_skipped': 0, 'status': 'none'}
+    earlier = json.loads(previous).get('appended', 0) if previous else 0
     if os.path.exists(src):
         try:
-            with open(src) as f:
-                lines = [line.rstrip('\n') for line in f if line.strip()]
-            res['lines_read'] = len(lines)
-            seen, tail = set(), '\n'
-            if os.path.exists(dst):
-                with open(dst) as f:
-                    for line in f:
-                        tail = line[-1:]
-                        if line.strip():
-                            seen.add(event_key(line.rstrip('\n')))
-            new = []
-            for line in lines:
-                key = event_key(line)
-                if key in seen:
-                    res['duplicates_skipped'] += 1
-                else:
-                    seen.add(key)
-                    new.append(line)
-            if new:
+            with open(src, encoding='utf-8', errors='replace') as f:
+                raw = f.read()
+            rows, bad = [], []
+            for number, line in enumerate(raw.split('\n'), 1):
+                if line.strip():
+                    obj = parse(line)
+                    ok = valid_event(obj) and (raw.endswith('\n') or number < raw.count('\n') + 1)
+                    (rows.append((line, obj)) if ok else bad.append(number))
+            res['lines_read'] = len(rows) + len(bad)
+            if bad:
+                res['status'], res['error'] = 'failed', 'invalid event lines %s; nothing transferred' % bad
+            else:
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
-                with open(dst, 'a') as f:
-                    f.write(('' if tail == '\n' else '\n') + ''.join(line + '\n' for line in new))
-            res['appended'], res['status'] = len(new), 'ok'
+                fd = os.open(dst, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o644)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                    with open(dst, encoding='utf-8', errors='replace') as f:
+                        existing = f.read()
+                    seen = {event_key(l, parse(l)) for l in existing.split('\n') if l.strip()}
+                    new = []
+                    for line, obj in rows:
+                        key = event_key(line, obj)
+                        if key not in seen:
+                            seen.add(key)
+                            new.append(line)
+                    if new:
+                        data = ('' if not existing or existing.endswith('\n') else '\n') + ''.join(l + '\n' for l in new)
+                        data = data.encode()
+                        while data:
+                            data = data[os.write(fd, data):]
+                finally:
+                    os.close(fd)
+                res['appended'] = earlier + len(new)
+                res['duplicates_skipped'] = max(0, len(rows) - len(new) - earlier)
+                res['status'] = 'ok'
         except OSError as exc:
             res['status'], res['error'] = 'failed', str(exc)
     print(json.dumps(res))
@@ -191,7 +213,8 @@ def retain(root, current):
 sys.exit(globals()[sys.argv[1]](*sys.argv[2:]) or 0)
 PY
 )
-land_py() { python3 -c "$LAND_PY" "$@"; }
+# -I: no cwd, PYTHONPATH or user site on sys.path; cd /: the helper takes absolute paths only.
+land_py() { (cd / && python3 -I -c "$LAND_PY" "$@"); }
 
 add_problem() { echo "evidence: $1" >&2; problems+="$1"$'\n'; }
 
@@ -225,46 +248,77 @@ write_record() {  # $1: result of the stage still open
         land_py record "$evidence/landing.json"
 }
 
-collect_evidence() {  # sandbox events into the primary journal (dedup by id); Codex session candidates
-    if [[ -z "$transfer" && -n "$dir" ]]; then
-        transfer=$(land_py transfer "$dir/.sentinel-events.jsonl" "$primary_events") || {
-            [[ -n "$transfer" ]] || transfer='{"status": "failed"}'
-            add_problem "event transfer from $dir/.sentinel-events.jsonl failed"
-        }
-    fi
-    if [[ -z "$codex" ]]; then
-        codex=$(land_py codex "$branch" "${CODEX_HOME:-$HOME/.codex}") || { codex='[]'; add_problem "codex session scan failed"; }
+transfer_events() {  # sandbox events into the primary journal; idempotent (dedup by id)
+    [[ -n "$dir" ]] || return 0
+    local out
+    if out=$(land_py transfer "$dir/.sentinel-events.jsonl" "$primary_events" "$transfer"); then
+        transfer=$out
+    else
+        transfer=${out:-'{"status": "failed"}'}
+        add_problem "event transfer from $dir/.sentinel-events.jsonl failed"
     fi
 }
 
+scan_codex() {  # Codex sessions whose rollout names the branch (candidates only)
+    [[ -z "$codex" ]] || return 0
+    codex=$(land_py codex "$branch" "$codex_home") || { codex='[]'; add_problem "codex session scan failed"; }
+}
+
+send_event() {  # $1 kind $2 tone $3 text
+    local slice event_args=(--branch "$branch")
+    slice=$(sed -n 's/^Slice: //p' <<< "$trailers" | head -1)
+    [[ -z "$slice" ]] || event_args+=(--slice "$slice")
+    if "$REPO/scripts/dev/sentinel-event.sh" "$1" "$2" "$3" "${event_args[@]}"; then
+        events_sent+="$1 "
+    else
+        add_problem "outcome event $1 not recorded"
+    fi
+}
+
+verify_record() {  # landing.json parses, its logs exist, the transfer succeeded
+    local out p
+    out=$(land_py verify "$evidence") ||
+        while IFS= read -r p; do add_problem "$p"; done <<< "${out:-landing.json verify failed}"
+}
+
 land_finish() {  # EXIT trap of land: outcome event and final landing.json for every attempt
-    local rc=$1 kind tone text result=failed slice
+    local rc=$1 result=failed
     set +e
     if [[ -z "$outcome" || "$outcome" == running ]]; then
         if [[ $merged -eq 1 ]]; then outcome=landed_evidence_incomplete; else outcome=land_failed; fi
     fi
     final_rc=$rc
-    case "$outcome" in
-        landed) final_rc=0 result=ok kind=landed tone=ok text="$branch landed as $merge_short" ;;
-        landed_evidence_incomplete)
-            final_rc=4 kind=$outcome tone=warn
-            text="land $branch merged as $merge_short but evidence is incomplete; worktree kept; see $evidence"
-            echo "warning: $branch is merged ($merge_short) but its land evidence is incomplete (see $evidence)." >&2
-            echo "The worktree is kept. Do not land again; finish with: scripts/dev/agent-worktree.sh remove $branch" >&2 ;;
-        land_review) final_rc=3 result=stopped kind=land_review tone=warn
-            text="land $branch changed $changed commit(s); review then rerun with --yes" ;;
-        *) kind=land_failed tone=bad text="land $branch failed at $land_gate (exit $rc)" ;;
-    esac
-    collect_evidence
-    slice=$(sed -n 's/^Slice: //p' <<< "$trailers" | head -1)
-    local event_args=(--branch "$branch")
-    [[ -z "$slice" ]] || event_args+=(--slice "$slice")
-    "$REPO/scripts/dev/sentinel-event.sh" "$kind" "$tone" "$text" "${event_args[@]}" ||
-        add_problem "outcome event $kind not recorded"
-    if [[ -n "$evidence" ]]; then
-        write_record "$result" || echo "error: could not write $evidence/landing.json" >&2
-        echo "land evidence: $evidence ($outcome)"
+    if [[ $merged -eq 0 ]]; then
+        [[ -n "$transfer" ]] || transfer_events
+        scan_codex
     fi
+    if [[ "$outcome" == landed ]]; then
+        # Worktree already removed: the landed event was sent before; only the record remains.
+        final_rc=0
+        write_record ok || {
+            echo "error: could not rewrite $evidence/landing.json after removing the worktree" >&2
+            outcome=landed_evidence_incomplete
+        }
+    fi
+    case "$outcome" in
+        landed) ;;
+        landed_evidence_incomplete)
+            final_rc=4
+            echo "warning: $branch is merged ($merge_short) but its land evidence is incomplete (see $evidence)." >&2
+            echo "Do not land again. Read evidence_problems in landing.json, then finish with: scripts/dev/agent-worktree.sh remove $branch" >&2
+            send_event landed_evidence_incomplete warn \
+                "land $branch merged as $merge_short but evidence is incomplete; see $evidence"
+            [[ -z "$evidence" ]] || write_record failed || echo "error: could not write $evidence/landing.json" >&2 ;;
+        land_review)
+            final_rc=3 result=stopped
+            send_event land_review warn "land $branch changed $changed commit(s); review then rerun with --yes" ;;
+        *)
+            send_event land_failed bad "land $branch failed at $land_gate (exit $rc)" ;;
+    esac
+    if [[ "$outcome" == land_review || "$outcome" == land_failed ]] && [[ -n "$evidence" ]]; then
+        write_record "$result" || echo "error: could not write $evidence/landing.json" >&2
+    fi
+    [[ -z "$evidence" ]] || echo "land evidence: $evidence ($outcome)"
     exit "$final_rc"
 }
 
@@ -313,9 +367,13 @@ case "$cmd" in
         land_started=$(date +%s)
         evidence_root=${SENTINEL_LAND_EVIDENCE_DIR:-$HOME/Library/Logs/Sentinel/land}
         primary_events=${SENTINEL_EVENTS_FILE:-"$HOME/Library/Application Support/Sentinel/events.jsonl"}
+        codex_home=${CODEX_HOME:-$HOME/.codex}
+        [[ "$primary_events" == /* ]] || primary_events="$PWD/$primary_events"
+        [[ "$codex_home" == /* ]] || codex_home="$PWD/$codex_home"
+        [[ "$evidence_root" == /* ]] || evidence_root="$PWD/$evidence_root"
         attempt_id="" evidence="" land_gate="" gate_started="" gates="" outcome="" final_rc="" problems=""
         merged=0 merge_sha="" merge_short="" main_tip="" old_tip="" old_base="" new_tip="" dir="" changed=0
-        trailers="" ctest_summary="" logs="" transfer="" codex=""
+        trailers="" ctest_summary="" logs="" transfer="" codex="" events_sent=""
         trap 'land_finish $?' EXIT
         gate arguments
         { mkdir -p "$evidence_root" && attempt_id=$(new_attempt "$evidence_root" "$branch"); } ||
@@ -413,19 +471,24 @@ case "$cmd" in
         merge_sha=$(git -C "$REPO" rev-parse HEAD)
         merge_short=$(git -C "$REPO" rev-parse --short HEAD)
         echo "landed $branch as $merge_short"
+        # Everything that can be finished happens before the worktree goes; any evidence
+        # problem (including earlier ones) keeps the worktree and exits 4.
         gate evidence
-        collect_evidence
+        scan_codex
+        transfer_events
         outcome=landed final_rc=0
-        verify_out=""
-        if ! write_record running; then
-            add_problem "landing.json not written before worktree removal"
-            outcome=landed_evidence_incomplete
-        elif ! verify_out=$(land_py verify "$evidence"); then
-            while IFS= read -r p; do add_problem "$p"; done <<< "$verify_out"
-            outcome=landed_evidence_incomplete
-        fi
-        [[ "$outcome" == landed ]] || exit 4
         gate remove
+        [[ -n "$problems" ]] || write_record pending || add_problem "landing.json not written"
+        [[ -n "$problems" ]] || send_event landed ok "$branch landed as $merge_short"
+        [[ -n "$problems" ]] || verify_record
+        # Last step before removal: drain events appended since the first transfer.
+        transferred=$transfer
+        [[ -n "$problems" ]] || transfer_events
+        if [[ -z "$problems" && "$transfer" != "$transferred" ]]; then
+            write_record pending || add_problem "landing.json not written"
+            [[ -n "$problems" ]] || verify_record
+        fi
+        [[ -z "$problems" ]] || { outcome=landed_evidence_incomplete; exit 4; }
         "$0" remove "$branch" || { add_problem "worktree remove failed"; outcome=landed_evidence_incomplete; exit 4; }
         echo "queue rule: rebase and retest every other READY branch before it lands (run land on each)."
         ;;
