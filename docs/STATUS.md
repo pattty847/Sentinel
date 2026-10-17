@@ -3,7 +3,7 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-14 evening. Wave ended: B2-0 landed; B2 option A stopped after three plan REVISE rounds, waiting on the owner. Conductor: Opus session of 2026-10-14 evening.
+- **Updated:** 2026-10-17. Wave: B2 server-side 100 ms plan. Conductor: Opus session started 2026-10-14 evening.
 - **Conductor:** a Claude Opus session on the owner's Mac (AGENTS.md section 10).
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high-risk. Owner: use Codex down to ~1% before spending a reset credit (holds 3).
 
@@ -23,7 +23,7 @@ Pre-land evidence for chart slices: native `SENTINEL_REQUIRE_GPU=1` run of Chart
 ## In flight
 
 - **B2-0 landed** `154fa90` (100 ms toolbar entry, heatmap only; combo emits ms; full ctest 112/112; evidence `~/Library/Logs/Sentinel/land/20261014T065744Z-lt-claude-b2-0-100ms-toolbar-38520/`). Owner rebuilds the GUI to use it; not yet looked at live.
-- **B2 option A: STOPPED for an owner decision.** Plan `../Sentinel-Private/research/2026-10-13-b2-subsecond-candles.md` r3 (`b3c02f6`); reviews r1-r3 all REVISE (r3: blocker=1 major=7 minor=2) in `../Sentinel-Private/research/2026-10-13-b2-reviews/`; not converging. Diagnosis and an unreviewed simpler alternative (server-side 100 ms bars, reuse the 1 s path) in `conductor-diagnosis-after-r3.md` there. Owner picks: (a) server-side 100 ms (recommended), (b) pull from the tape (r3), (c) push (r2). Then one plan round + one review. Threads: Fable planner = Claude subagent of the 2026-10-14 evening session (gone with it); Astra reviewer `01a13930-9727-7472-8e72-e840b3e44370`. Owner decisions in force: only 100 ms and whole-second tfs; trade-free 100 ms buckets draw nothing; GUI and server deploy together after the last slice.
+- **B2 option A, new direction (owner 2026-10-17): server-side 100 ms bars, reusing the 1 s path.** 100 ms is one more server timeframe (TimeframeAggregator, live bar wire, in-RAM history); 30 min of 100 ms history (config); all 7 products; wire carries ms; trade-free 100 ms buckets draw nothing and feed gaps must not look like quiet stretches; a late-trade drop counter. Late trades measured 0 on 2026-10-16 (`../Sentinel-Private/research/2026-10-13-b2-reviews/late-trade-measurement-2026-10-16.md`). Old push/pull plans r1-r3 superseded. Flow: Fable plan `../Sentinel-Private/research/2026-10-17-b2-server-100ms.md` -> Astra review -> owner reads -> overnight build only on owner OK.
 - **FAILURE_MODES pruning: done** (2026-10-14): 80 active entries (23.8 KB) from 269 (120 KB); 196 in `../Sentinel-Private/archive/agent/FAILURE_MODES.md`. Writer Fable, reviewer gpt-6-astra thread `01a138f1-8481-7972-9fcc-221be91375bc` (r1 REVISE 3 major/8 minor, r2 REVISE 1 major, r3 PASS). Proposal and `classification.md` (per-entry `area` column, input for the owner's LOD design) stay in `../Sentinel-Private/research/2026-10-14-fm-pruning/`. Next: INVARIANTS, then DECISIONS (decisions in force only).
 - **doc-health gate: landed** `8c0d35f` (2026-10-14; writer gpt-6.1-sol, reviewer Sonnet, 2 rounds; full ctest 112/112; evidence `~/Library/Logs/Sentinel/land/20261014T055640Z-lt-sol-doc-health-52548/`). The script landed without its executable bit (that land ran main's pre-merge `agent-worktree.sh`, so the gate itself did not run); fixed on main right after. First land that runs it: the next one. Remove a name from `DOC_HEALTH_PENDING_PRUNE` when INVARIANTS or DECISIONS is pruned.
 - Audit reports from 2026-10-12 (tests, workflow) are in `../Sentinel-Private/research/2026-10-12-audits/`. A Windows Codex thread is pruning redundant tests and will open a PR; reconcile by gtest name.
@@ -35,7 +35,7 @@ Pre-land evidence for chart slices: native `SENTINEL_REQUIRE_GPU=1` run of Chart
 
 ## Waiting on the owner
 
-1. B2 option A direction (see In flight): server-side 100 ms (recommended), pull, or push. Also: rebuild the GUI and try the 100 ms toolbar entry (B2-0).
+1. B2 server-side 100 ms plan: owner reads it after review. Also: rebuild the GUI and try the 100 ms toolbar entry (B2-0).
 2. Parked: nightly copy of `/Volumes/T7/sentinel-data` to the MacBook Pro over Tailscale (needs Remote Login + SSH key).
 
 - Docs archive on the T7: `/Volumes/T7/sentinel-backup/docs-archive/` (owner 2026-10-14; `_agent/VAULT.md`, the old Obsidian vault workflow, moved there).
