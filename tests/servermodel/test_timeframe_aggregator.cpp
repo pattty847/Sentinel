@@ -7,6 +7,8 @@
 #include <QtGlobal>
 #include <chrono>
 #include <cstdio>
+#include <functional>
+#include <optional>
 #include <tuple>
 
 namespace {
@@ -270,4 +272,244 @@ TEST(TimeframeAggregatorHundredMs, HistoryPageEndsAtOrBeforeEnd) {
     ASSERT_EQ(page.size(), 100u);
     EXPECT_EQ(page.front().timestamp_ms, t0);
     EXPECT_TRUE(aggregator.getHistory("BTC-USD", 100, t0 - 1, 350).empty());
+}
+
+namespace {
+constexpr int64_t kNoon = 1'798'761'600'000 + 12 * 3'600'000; // 2027-01-01 12:00:00 UTC
+constexpr int64_t at(int minute, int second, int milli = 0) {
+    return kNoon + minute * 60'000 + second * 1'000 + milli;
+}
+OHLCVBar bar(int64_t ts, double price, uint32_t count, bool closed) {
+    OHLCVBar b;
+    b.timestamp_ms = ts;
+    b.open = b.high = b.low = b.close = price;
+    b.volume = count;
+    b.count = count;
+    b.is_closed = closed;
+    return b;
+}
+bool hasBar(const OHLCVBar& b) { return b.count != 0 || b.timestamp_ms != 0; }
+} // namespace
+
+TEST(TimeframeAggregatorRestore, InstallsClosedAndActiveWithoutEmitting) {
+    TimeframeAggregator aggregator({100, 1'000, 60'000});
+    Recorder recorder(aggregator, {100, 1'000, 60'000});
+    TimeframeAggregator::Series series;
+    series.closed = {bar(at(0, 0), 10, 1, true), bar(at(0, 1), 11, 2, true)};
+    series.active = bar(at(0, 2), 12, 2, false);
+    ASSERT_TRUE(aggregator.restoreSeries("BTC-USD", 1'000, series));
+    EXPECT_TRUE(recorder.events.empty());
+    EXPECT_FALSE(aggregator.restoreSeries("BTC-USD", 1'000, series)); // history present
+    EXPECT_FALSE(aggregator.restoreSeries("BTC-USD", 300'000, series)); // not a trade timeframe
+    TimeframeAggregator closedOnly({100, 1'000, 60'000});
+    TimeframeAggregator::Series closedSeries;
+    closedSeries.closed = series.closed;
+    ASSERT_TRUE(closedOnly.restoreSeries("BTC-USD", 1'000, closedSeries));
+    EXPECT_FALSE(closedOnly.restoreSeries("BTC-USD", 1'000, closedSeries)); // closed bars, no open bar
+    EXPECT_TRUE(closedOnly.restoreSeries("BTC-USD", 100, closedSeries));   // other timeframes are separate
+    expectSameHistory(aggregator.getHistory("BTC-USD", 1'000), series.closed, 1'000);
+    // The next trade closes the restored open bar with its count.
+    aggregator.onTrade(tradeAt(at(0, 3, 500), 13, 1));
+    auto history = aggregator.getHistory("BTC-USD", 1'000);
+    ASSERT_EQ(history.size(), 3u);
+    EXPECT_TRUE(sameBar(history.back(), bar(at(0, 2), 12, 2, true)));
+    EXPECT_EQ(aggregator.exportSeries("BTC-USD", 1'000).active.count, 1u);
+
+    // A watermark after a restored carried bar continues the carry.
+    TimeframeAggregator carried({100, 1'000, 60'000});
+    TimeframeAggregator::Series quiet;
+    quiet.active = bar(at(0, 2), 12, 0, false);
+    quiet.active.volume = 0;
+    ASSERT_TRUE(carried.restoreSeries("BTC-USD", 1'000, quiet));
+    EXPECT_FALSE(carried.restoreSeries("BTC-USD", 1'000, {})); // open bar present
+    carried.advance("BTC-USD", at(0, 5));
+    history = carried.getHistory("BTC-USD", 1'000);
+    ASSERT_EQ(history.size(), 3u);
+    for (size_t i = 0; i < history.size(); ++i) {
+        EXPECT_EQ(history[i].timestamp_ms, at(0, 2 + int(i)));
+        EXPECT_DOUBLE_EQ(history[i].close, 12);
+    }
+    EXPECT_EQ(carried.exportSeries("BTC-USD", 1'000).active.timestamp_ms, at(0, 5));
+
+    // Export round-trips bars and the floor.
+    TimeframeAggregator source({100, 1'000, 60'000});
+    source.seedJournalFloor("BTC-USD", at(0, 59), {100});
+    source.onTrade(tradeAt(at(1, 0, 250), 20, 1));
+    source.advance("BTC-USD", at(1, 1));
+    const auto exported = source.exportSeries("BTC-USD", 100);
+    ASSERT_EQ(exported.floorMs, std::optional<int64_t>(at(1, 0, 200))); // the first trade's bucket
+    TimeframeAggregator target({100, 1'000, 60'000});
+    ASSERT_TRUE(target.restoreSeries("BTC-USD", 100, exported));
+    const auto back = target.exportSeries("BTC-USD", 100);
+    expectSameHistory(back.closed, exported.closed, 100);
+    EXPECT_TRUE(sameBar(back.active, exported.active));
+    EXPECT_EQ(back.floorMs, exported.floorMs);
+    // A floor that is on refuses a second install even with no bars.
+    TimeframeAggregator floored({100, 1'000, 60'000});
+    floored.seedJournalFloor("BTC-USD", at(0, 59), {1'000});
+    EXPECT_FALSE(floored.restoreSeries("BTC-USD", 1'000, {}));
+}
+
+TEST(TimeframeAggregatorRestore, JournalFloorDropsStaleTradesBeforeTheFirstBar) {
+    for (const bool watermarkFirst : {false, true}) {
+        SCOPED_TRACE(watermarkFirst ? "advance between seed and trade" : "seed then trade");
+        TimeframeAggregator aggregator({100, 1'000, 60'000});
+        aggregator.seedJournalFloor("BTC-USD", at(0, 59), {100, 1'000});
+        const int64_t floor = watermarkFirst ? at(1, 30) : at(0, 59);
+        if (watermarkFirst) aggregator.advance("BTC-USD", at(1, 30));
+        aggregator.onTrade(tradeAt(at(-2, 0), 200, 1)); // 11:58:00, delayed
+        for (const int64_t tf : {100, 1'000}) {
+            EXPECT_TRUE(aggregator.getHistory("BTC-USD", tf).empty()) << tf;
+            const auto series = aggregator.exportSeries("BTC-USD", tf);
+            EXPECT_FALSE(hasBar(series.active)) << tf;
+            EXPECT_EQ(series.floorMs, std::optional<int64_t>(floor)) << tf;
+            EXPECT_EQ(lateDropsOf(aggregator, "BTC-USD", tf), 1u) << tf;
+        }
+        // The unseeded minute accepts it as today.
+        EXPECT_EQ(aggregator.exportSeries("BTC-USD", 60'000).active.count, 1u);
+        EXPECT_EQ(aggregator.exportSeries("BTC-USD", 60'000).floorMs, std::nullopt);
+        EXPECT_EQ(lateDropsOf(aggregator, "BTC-USD", 60'000), 0u);
+        // An older watermark never lowers the floor.
+        aggregator.advance("BTC-USD", at(0, 30));
+        EXPECT_EQ(aggregator.exportSeries("BTC-USD", 1'000).floorMs, std::optional<int64_t>(floor));
+        aggregator.advance("BTC-USD", at(1, 30));
+        aggregator.onTrade(tradeAt(at(1, 31), 300, 1));
+        const auto second = aggregator.exportSeries("BTC-USD", 1'000);
+        EXPECT_TRUE(sameBar(second.active, bar(at(1, 31), 300, 1, false)));
+        EXPECT_TRUE(sameBar(aggregator.exportSeries("BTC-USD", 100).active,
+                            bar(at(1, 31), 300, 1, false)));
+        // With a bar present the floor is neither written nor read.
+        aggregator.advance("BTC-USD", at(1, 40));
+        for (const int64_t tf : {100, 1'000})
+            EXPECT_EQ(aggregator.exportSeries("BTC-USD", tf).floorMs, std::optional<int64_t>(at(1, 31)))
+                << tf; // raised to the first accepted trade's bucket, then frozen
+        aggregator.onTrade(tradeAt(at(1, 0), 400, 1)); // dropped by the bar test
+        for (const int64_t tf : {100, 1'000})
+            EXPECT_EQ(lateDropsOf(aggregator, "BTC-USD", tf), 2u) << tf;
+    }
+}
+
+TEST(TimeframeAggregatorRestore, FloorTravelsWithAnEmptySeries) {
+    TimeframeAggregator source({100, 1'000, 60'000});
+    source.seedJournalFloor("BTC-USD", at(0, 59), {100, 1'000});
+    source.advance("BTC-USD", at(1, 30));
+    TimeframeAggregator target({100, 1'000, 60'000});
+    for (const int64_t tf : {100, 1'000}) {
+        const auto series = source.exportSeries("BTC-USD", tf);
+        ASSERT_FALSE(hasBar(series.active));
+        ASSERT_EQ(series.floorMs, std::optional<int64_t>(at(1, 30)));
+        ASSERT_TRUE(target.restoreSeries("BTC-USD", tf, series));
+    }
+    target.onTrade(tradeAt(at(-2, 0), 200, 1));
+    for (const int64_t tf : {100, 1'000}) {
+        EXPECT_FALSE(hasBar(target.exportSeries("BTC-USD", tf).active)) << tf;
+        EXPECT_EQ(lateDropsOf(target, "BTC-USD", tf), 1u) << tf;
+    }
+    target.onTrade(tradeAt(at(1, 31), 300, 1));
+    for (const int64_t tf : {100, 1'000})
+        EXPECT_EQ(target.exportSeries("BTC-USD", tf).active.count, 1u) << tf;
+
+    // An unseeded series carries no floor and installs none.
+    TimeframeAggregator unseeded({100, 1'000, 60'000});
+    const auto none = unseeded.exportSeries("BTC-USD", 1'000);
+    EXPECT_EQ(none.floorMs, std::nullopt);
+    TimeframeAggregator plain({100, 1'000, 60'000});
+    ASSERT_TRUE(plain.restoreSeries("BTC-USD", 1'000, none));
+    plain.advance("BTC-USD", at(1, 30));
+    plain.onTrade(tradeAt(at(-2, 0), 200, 1));
+    EXPECT_EQ(plain.exportSeries("BTC-USD", 1'000).active.count, 1u);
+    EXPECT_EQ(lateDropsOf(plain, "BTC-USD", 1'000), 0u);
+    EXPECT_EQ(plain.exportSeries("BTC-USD", 1'000).floorMs, std::nullopt);
+}
+
+TEST(TimeframeAggregatorRestore, UnseededLivePathIsUnchanged) {
+    TimeframeAggregator aggregator({100, 1'000, 60'000});
+    aggregator.advance("BTC-USD", at(1, 30));
+    aggregator.onTrade(tradeAt(at(-2, 0), 200, 1));
+    for (const int64_t tf : {100, 1'000, 60'000}) {
+        const auto series = aggregator.exportSeries("BTC-USD", tf);
+        EXPECT_EQ(series.active.count, 1u) << tf;
+        EXPECT_EQ(series.floorMs, std::nullopt) << tf;
+        EXPECT_EQ(lateDropsOf(aggregator, "BTC-USD", tf), 0u) << tf;
+    }
+}
+
+// Restoring 100 ms and 1 s leaves the minute and its rollups unfloored: a
+// delayed trade after the restore opens the minute exactly as in a fresh
+// aggregator, while the restored timeframes drop it as the continuous one does.
+TEST(TimeframeAggregatorRestore, ShortSeriesInstallLeavesMinuteUnfloored) {
+    const std::vector<int64_t> tfs{100, 1'000, 60'000, 300'000};
+    TimeframeAggregator continuous(tfs);
+    int64_t sent = INT64_MIN;
+    const auto watermark = [&](TimeframeAggregator& a, int64_t receiveMs) {
+        if (receiveMs / 1000 > sent) {
+            sent = receiveMs / 1000;
+            a.advance("BTC-USD", receiveMs - 1'000);
+        }
+    };
+    for (int k = 0; k < 60; ++k) {
+        continuous.onTrade(tradeAt(at(0, k, 300), 100 + k, 1));
+        watermark(continuous, at(0, k, 400));
+    }
+    // Restored state at a record received 12:00:59.900 (active bars at 12:00:59).
+    TimeframeAggregator restored(tfs);
+    for (const int64_t tf : {100, 1'000}) {
+        auto series = continuous.exportSeries("BTC-USD", tf);
+        ASSERT_EQ(series.active.timestamp_ms, at(0, 59, tf == 100 ? 300 : 0));
+        ASSERT_TRUE(restored.restoreSeries("BTC-USD", tf, std::move(series)));
+    }
+    TimeframeAggregator fresh(tfs); // the live minute starts empty after a restart
+    const auto feed = [&](const std::function<void(TimeframeAggregator&)>& step) {
+        for (auto* a : {&continuous, &restored, &fresh}) step(*a);
+    };
+    feed([](TimeframeAggregator& a) { a.advance("BTC-USD", at(1, 0)); }); // heartbeat 12:01:01
+    feed([](TimeframeAggregator& a) { a.onTrade(tradeAt(at(0, 59, 900), 500, 2)); });
+    EXPECT_EQ(lateDropsOf(restored, "BTC-USD", 60'000), 0u);
+    for (const int64_t tf : {100, 1'000}) {
+        EXPECT_EQ(lateDropsOf(restored, "BTC-USD", tf), 1u) << tf;
+        EXPECT_EQ(lateDropsOf(restored, "BTC-USD", tf), lateDropsOf(continuous, "BTC-USD", tf) ) << tf;
+    }
+    feed([](TimeframeAggregator& a) { a.advance("BTC-USD", at(3, 0)); });
+    const auto minutes = restored.getHistory("BTC-USD", 60'000);
+    ASSERT_EQ(minutes.size(), 3u); // 12:00 (one trade) and two carried minutes
+    EXPECT_EQ(minutes[0].timestamp_ms, at(0, 0));
+    EXPECT_EQ(minutes[0].count, 1u);
+    EXPECT_DOUBLE_EQ(minutes[0].open, 500);
+    expectSameHistory(minutes, fresh.getHistory("BTC-USD", 60'000), 60'000);
+    EXPECT_TRUE(sameBar(restored.exportSeries("BTC-USD", 300'000).active,
+                        fresh.exportSeries("BTC-USD", 300'000).active));
+    for (const int64_t tf : {100, 1'000}) {
+        expectSameHistory(restored.getHistory("BTC-USD", tf, 100'000),
+                          continuous.getHistory("BTC-USD", tf, 100'000), tf);
+        EXPECT_EQ(restored.exportSeries("BTC-USD", tf).floorMs, std::nullopt) << tf;
+    }
+}
+
+// The floor guards only a timeframe without a bar: seeding after the first bar
+// changes nothing, and an installed floor above the open bar is never read.
+TEST(TimeframeAggregatorRestore, FloorIsNeitherSeededNorReadOnceABarExists) {
+    TimeframeAggregator aggregator({100, 1'000, 60'000});
+    aggregator.seedJournalFloor("BTC-USD", at(0, 59), {1'000});
+    aggregator.onTrade(tradeAt(at(1, 31), 300, 1));
+    const auto before = aggregator.exportSeries("BTC-USD", 1'000).floorMs;
+    ASSERT_EQ(before, std::optional<int64_t>(at(1, 31)));
+    aggregator.seedJournalFloor("BTC-USD", at(2, 0), {1'000});
+    EXPECT_EQ(aggregator.exportSeries("BTC-USD", 1'000).floorMs, before);
+    aggregator.onTrade(tradeAt(at(1, 31, 500), 310, 1));
+    EXPECT_EQ(aggregator.exportSeries("BTC-USD", 1'000).active.count, 2u);
+    EXPECT_EQ(lateDropsOf(aggregator, "BTC-USD", 1'000), 0u);
+    // An unseeded timeframe with a bar is not turned on by a seed either.
+    aggregator.seedJournalFloor("BTC-USD", at(2, 0), {100});
+    EXPECT_EQ(aggregator.exportSeries("BTC-USD", 100).floorMs, std::nullopt);
+
+    // A hand-built series whose floor lies above its open bar: the bar test
+    // alone decides once a bar exists.
+    TimeframeAggregator installed({100, 1'000, 60'000});
+    TimeframeAggregator::Series series;
+    series.active = bar(at(1, 31), 300, 1, false);
+    series.floorMs = at(2, 0);
+    ASSERT_TRUE(installed.restoreSeries("BTC-USD", 1'000, series));
+    installed.onTrade(tradeAt(at(1, 31, 500), 310, 1));
+    EXPECT_EQ(installed.exportSeries("BTC-USD", 1'000).active.count, 2u);
+    EXPECT_EQ(lateDropsOf(installed, "BTC-USD", 1'000), 0u);
 }

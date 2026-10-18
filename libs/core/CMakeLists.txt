@@ -4,6 +4,7 @@ add_library(sentinel_core
     roller/AnchorStore.cpp
     roller/JournalReader.cpp
     roller/JournalFeed.cpp
+    roller/CandleRestore.cpp
     roller/Grid.cpp
     roller/Roller.cpp
     roller/ShadowRoller.cpp

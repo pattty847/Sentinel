@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -51,6 +52,27 @@ public:
     };
     std::vector<LateDrops> lateDrops() const;
 
+    // One timeframe's state for a bulk restore. floorMs is set iff that
+    // timeframe's journal floor is on, and then holds its value.
+    struct Series {
+        std::vector<OHLCVBar> closed;
+        OHLCVBar active;
+        std::optional<int64_t> floorMs;
+    };
+    Series exportSeries(const std::string& symbol, int64_t timeframeMs) const;
+    // Installs closed bars, the open bar and the floor for one configured trade
+    // timeframe (100 ms, 1 s or 1 m). Refused (false) unless that timeframe has
+    // no history, no open bar and no floor. Emits nothing.
+    bool restoreSeries(const std::string& symbol, int64_t timeframeMs, Series series);
+    // Opt-in journal floor for the listed configured trade timeframes: while a
+    // timeframe has no bar, a trade whose bucket starts before the floor is
+    // dropped as late. The floor only rises: to the watermark's bucket here and
+    // at every later watermark or trade time while no bar exists. A timeframe
+    // never seeded or restored has no floor; nothing turns a floor off. A
+    // listed timeframe that already has a bar is left unchanged.
+    void seedJournalFloor(const std::string& symbol, int64_t watermarkMs,
+                          const std::vector<int64_t>& timeframesMs);
+
 signals:
     void barClosed(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar);
     void barUpdated(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar);
@@ -60,6 +82,8 @@ private:
         std::unordered_map<int64_t, OHLCVBar> activeBars;
         std::unordered_map<int64_t, std::vector<OHLCVBar>> history;
         std::array<uint64_t, 3> lateDrops{}; // indexed like kTradeTimeframes
+        std::array<bool, 3> floorOn{};
+        std::array<int64_t, 3> floorMs{};
     };
     // Timeframes built from trades; coarser ones roll up from the minute.
     static constexpr std::array<int64_t, 3> kTradeTimeframes{100, 1'000, 60'000};
@@ -70,11 +94,13 @@ private:
     std::array<bool, 3> m_tradeTimeframeOn{}; // kTradeTimeframes[i] is configured
 
     static int64_t bucketStart(int64_t timestampMs, int64_t timeframeMs);
+    // Index into kTradeTimeframes, or -1.
+    static int tradeIndex(int64_t timeframeMs);
     void closeBar(SymbolState& state, const std::string& symbol, int64_t timeframeMs,
                   OHLCVBar& bar);
     void addMinuteToRollups(SymbolState& state, const std::string& symbol,
                             const OHLCVBar& minute);
     void closeElapsed(SymbolState& state, const std::string& symbol, int64_t nowMs);
-    void updateTradeBar(SymbolState& state, const std::string& symbol,
-                        int64_t timeframeMs, const Trade& trade, int64_t tradeTsMs);
+    void updateTradeBar(SymbolState& state, const std::string& symbol, size_t index,
+                        const Trade& trade, int64_t tradeTsMs);
 };
