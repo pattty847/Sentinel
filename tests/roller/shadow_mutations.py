@@ -272,12 +272,12 @@ mutations = [
      'm_pendingReseeds.insert(symbol);', ';',
      'ShadowTest.JournalLiveFeedServerCoalescesReseedsInsideTheThrottle'),
     # D-b1 fix round 2: candles of a journal product close on its journal time.
-    ('db1-r2 the wall-clock timer never closes a journal product', 'libs/core/servermodel/TimeframeAggregator.cpp',
-     'if (!m_journal.contains(symbol)) closeElapsed(state, symbol, nowMs);', 'closeElapsed(state, symbol, nowMs);',
-     'JournalLiveFeedModel.DelayedOutageDetectionKeepsCandlesIdentical'),
     ('db1-r2 a trade closes the buckets before it on journal time', 'libs/core/servermodel/TimeframeAggregator.cpp',
-     'if (journal) closeElapsed(state, trade.product_id, tsMs);', '',
+     'closeElapsed(state, trade.product_id, tsMs);', '',
      'JournalLiveFeedModel.DelayedOutageDetectionKeepsCandlesIdentical'),
+    ('db1-r2 a trade closes quiet buckets before the next watermark', 'libs/core/servermodel/TimeframeAggregator.cpp',
+     'closeElapsed(state, trade.product_id, tsMs);', '',
+     'JournalLiveFeedModel.TradeClosesQuietBucketsBeforeTheNextWatermark'),
     ('db1-r2 the watermark closes quiet buckets', 'libs/core/servermodel/TimeframeAggregator.cpp',
      'if (state != m_states.end()) closeElapsed(state->second, symbol, watermarkMs);', '',
      'JournalLiveFeedModel.HeartbeatsCloseBarsWithoutTrades'),
@@ -285,7 +285,7 @@ mutations = [
      'm_aggregator->advance(symbol, journalMs - kJournalCandleLagMs);', 'm_aggregator->advance(symbol, journalMs);',
      'JournalLiveFeedModel.HeartbeatsCloseBarsWithoutTrades'),
     ('db1-r2 a closed journal bucket is never reopened', 'libs/core/servermodel/TimeframeAggregator.cpp',
-     'if (start < bar.timestamp_ms && (bar.count > 0 || journal)) {',
+     'if (start < bar.timestamp_ms) {',
      'if (start < bar.timestamp_ms && bar.count > 0) {',
      'JournalLiveFeedModel.HeartbeatsCloseBarsWithoutTrades'),
     ('db1-r2 the tap hands over the journal watermark', SR,
@@ -357,8 +357,11 @@ if "--slice-d" in sys.argv:
 if "--db1" in sys.argv:
     mutations = [m for m in mutations if m[0].startswith('db1')]
 for arg in sys.argv:
-    if arg.startswith('--skip='):
-        mutations = mutations[int(arg[7:]):]
+    if arg.startswith('--from='):  # resume at a mutation by name, stable across list edits
+        names = [m[0] for m in mutations]
+        if arg[7:] not in names:
+            raise SystemExit(f'--from: no mutation named {arg[7:]!r}')
+        mutations = mutations[names.index(arg[7:]):]
 if "--r1" in sys.argv:
     mutations = [m for m in mutations if m[0].startswith(('r1-', 'r2-', 'r3-', 'A9', 'A11'))]
 for entry in mutations:

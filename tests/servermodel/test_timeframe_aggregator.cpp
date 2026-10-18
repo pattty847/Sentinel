@@ -113,7 +113,7 @@ TEST(TimeframeAggregatorRollup, LiveFiveMinuteClosesFromMinuteAnchor) {
     aggregator.onTrade(tradeAt(60'000, 10, 2));
     aggregator.onTrade(tradeAt(119'000, 12, 3));
     aggregator.onTrade(tradeAt(120'000, 11, 4));
-    aggregator.tick(300'000);
+    aggregator.advance("BTC-USD", 300'000);
     const auto minutes = aggregator.getHistory("BTC-USD", 60'000);
     const auto five = aggregator.getHistory("BTC-USD", 300'000);
     ASSERT_EQ(five.size(), 1u);
@@ -127,10 +127,9 @@ TEST(TimeframeAggregatorRollup, LiveFiveMinuteClosesFromMinuteAnchor) {
     EXPECT_EQ(five[0].count, expected[0].count);
 }
 
-// One journal-clocked input: trades at 100 ms offsets (some quiet buckets,
+// One journal input: trades at 100 ms offsets (some quiet buckets,
 // one late trade) with watermark advances in between.
 void feedJournal(TimeframeAggregator& aggregator) {
-    aggregator.setJournalClock("BTC-USD");
     constexpr int64_t t0 = 1'700'000'000'000;
     int64_t t = t0;
     double price = 100;
@@ -164,7 +163,6 @@ TEST(TimeframeAggregatorHundredMs, BarsAndUnchangedSecondAndMinute) {
 
     // Exact 100 ms OHLCV from a small sequence.
     TimeframeAggregator small({100, 1'000});
-    small.setJournalClock("BTC-USD");
     small.onTrade(tradeAt(1'000'010, 10, 1));
     small.onTrade(tradeAt(1'000'050, 12, 2));
     small.onTrade(tradeAt(1'000'090, 9, 3));
@@ -209,19 +207,21 @@ TEST(TimeframeAggregatorHundredMs, PerTimeframeRetention) {
         EXPECT_EQ(kept.back().timestamp_ms, t0 + 100 * 19'800);
     }
     {
-        // One trade per minute: every trade closes one bar of each timeframe.
-        TimeframeAggregator aggregator({100, 1'000, 60'000}, {{100, 18'000}});
-        for (int k = 0; k <= 10'001; ++k) aggregator.onTrade(tradeAt(t0 + 60'000 * k, 1, 1));
-        EXPECT_EQ(aggregator.getHistory("BTC-USD", 100, 1'000'000).size(), 10'001u);
-        EXPECT_EQ(aggregator.getHistory("BTC-USD", 1'000, 1'000'000).size(), 9'001u);
-        EXPECT_EQ(aggregator.getHistory("BTC-USD", 60'000, 1'000'000).size(), 9'001u);
+        // A timeframe without a cap keeps at most 10,000, trimmed by 1,000,
+        // while another is capped. One trade per second (and per minute):
+        // every trade closes exactly one bar, with no quiet bucket to carry.
+        TimeframeAggregator seconds({1'000}, {{100, 18'000}});
+        for (int k = 0; k <= 10'001; ++k) seconds.onTrade(tradeAt(t0 + 1'000 * k, 1, 1));
+        EXPECT_EQ(seconds.getHistory("BTC-USD", 1'000, 1'000'000).size(), 9'001u);
+        TimeframeAggregator minutes({60'000}, {{100, 18'000}});
+        for (int k = 0; k <= 10'001; ++k) minutes.onTrade(tradeAt(t0 + 60'000 * k, 1, 1));
+        EXPECT_EQ(minutes.getHistory("BTC-USD", 60'000, 1'000'000).size(), 9'001u);
     }
 }
 
 TEST(TimeframeAggregatorHundredMs, CarriesAtMostThreeHundredThenJumps) {
     constexpr int64_t t0 = 1'000'000;
     TimeframeAggregator aggregator({100, 1'000});
-    aggregator.setJournalClock("BTC-USD");
     aggregator.onTrade(tradeAt(t0 + 10, 5, 1));
     aggregator.advance("BTC-USD", t0 + 100 * 500);
     auto bars = aggregator.getHistory("BTC-USD", 100, 1'000);
@@ -237,7 +237,6 @@ TEST(TimeframeAggregatorHundredMs, CarriesAtMostThreeHundredThenJumps) {
 
 TEST(TimeframeAggregatorHundredMs, LateTradesCountedPerTimeframe) {
     TimeframeAggregator aggregator({100, 1'000, 60'000});
-    aggregator.setJournalClock("BTC-USD");
     aggregator.onTrade(tradeAt(1'001'250, 10, 1));
     aggregator.onTrade(tradeAt(1'001'150, 11, 1)); // older than open 100 ms bucket, same 1 s bucket
     EXPECT_EQ(lateDropsOf(aggregator, "BTC-USD", 100), 1u);
@@ -271,42 +270,4 @@ TEST(TimeframeAggregatorHundredMs, HistoryPageEndsAtOrBeforeEnd) {
     ASSERT_EQ(page.size(), 100u);
     EXPECT_EQ(page.front().timestamp_ms, t0);
     EXPECT_TRUE(aggregator.getHistory("BTC-USD", 100, t0 - 1, 350).empty());
-}
-
-// Wall-clock history can be out of order: an empty carried bar accepts an
-// older trade. The endMs page must still hold only bars at or before endMs.
-TEST(TimeframeAggregatorHundredMs, WallClockHistoryPageFiltersUnsortedBars) {
-    constexpr int64_t t = 1'000'000;
-    TimeframeAggregator aggregator({100});
-    aggregator.onTrade(tradeAt(t + 10, 1, 1));
-    aggregator.tick(t + 500);
-    aggregator.onTrade(tradeAt(t + 150, 2, 1));
-    aggregator.tick(t + 600);
-    std::vector<int64_t> offsets;
-    for (const auto& bar : aggregator.getHistory("BTC-USD", 100, 100)) offsets.push_back(bar.timestamp_ms - t);
-    ASSERT_EQ(offsets, (std::vector<int64_t>{0, 100, 200, 300, 400, 100, 200, 300, 400, 500}));
-    offsets.clear();
-    for (const auto& bar : aggregator.getHistory("BTC-USD", 100, t + 150, 350)) offsets.push_back(bar.timestamp_ms - t);
-    EXPECT_EQ(offsets, (std::vector<int64_t>{0, 100, 100}));
-    offsets.clear();
-    for (const auto& bar : aggregator.getHistory("BTC-USD", 100, t + 150, 2)) offsets.push_back(bar.timestamp_ms - t);
-    EXPECT_EQ(offsets, (std::vector<int64_t>{100, 100}));
-}
-
-// Switching to the journal clock does not sort history that the wall clock
-// closed out of order; the endMs page must stay correct.
-TEST(TimeframeAggregatorHundredMs, JournalClockAfterWallClockKeepsHistoryPageCorrect) {
-    constexpr int64_t t = 1'000'000;
-    TimeframeAggregator aggregator({100});
-    aggregator.onTrade(tradeAt(t + 10, 1, 1));
-    aggregator.tick(t + 500);
-    aggregator.onTrade(tradeAt(t + 150, 2, 1));
-    aggregator.tick(t + 600);
-    aggregator.setJournalClock("BTC-USD");
-    std::vector<int64_t> offsets;
-    for (const auto& bar : aggregator.getHistory("BTC-USD", 100, t + 150, 350)) offsets.push_back(bar.timestamp_ms - t);
-    EXPECT_EQ(offsets, (std::vector<int64_t>{0, 100, 100}));
-    offsets.clear();
-    for (const auto& bar : aggregator.getHistory("BTC-USD", 100, t + 150, 2)) offsets.push_back(bar.timestamp_ms - t);
-    EXPECT_EQ(offsets, (std::vector<int64_t>{100, 100}));
 }

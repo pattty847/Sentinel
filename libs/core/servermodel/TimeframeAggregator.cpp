@@ -86,12 +86,12 @@ void TimeframeAggregator::addMinuteToRollups(SymbolState& state, const std::stri
 
 void TimeframeAggregator::updateTradeBar(SymbolState& state, const std::string& symbol,
                                          int64_t timeframeMs, const Trade& trade,
-                                         int64_t tradeTsMs, bool journal) {
+                                         int64_t tradeTsMs) {
     const int64_t start = bucketStart(tradeTsMs, timeframeMs);
     auto& bar = state.activeBars[timeframeMs];
-    // Stale trade (older than the open bucket), or on the journal clock a
-    // bucket the watermark already closed, which is never reopened.
-    if (start < bar.timestamp_ms && (bar.count > 0 || journal)) {
+    // Stale trade: older than the open bucket, or in a bucket the watermark
+    // already closed, which is never reopened.
+    if (start < bar.timestamp_ms) {
         for (size_t i = 0; i < kTradeTimeframes.size(); ++i)
             if (kTradeTimeframes[i] == timeframeMs) ++state.lateDrops[i];
         return;
@@ -121,31 +121,18 @@ void TimeframeAggregator::onTrade(const Trade& trade) {
     const int64_t tsMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         trade.timestamp.time_since_epoch()).count();
     auto& state = m_states[trade.product_id];
-    // Journal clock: the trade's own time closes the buckets before it,
-    // carrying quiet ones, so bars depend only on the delivered sequence.
-    const bool journal = m_journal.contains(trade.product_id);
-    if (journal) closeElapsed(state, trade.product_id, tsMs);
+    // The trade's own time closes the buckets before it, carrying quiet
+    // ones, so bars depend only on the delivered sequence.
+    closeElapsed(state, trade.product_id, tsMs);
     for (size_t i = 0; i < kTradeTimeframes.size(); ++i)
         if (m_tradeTimeframeOn[i])
-            updateTradeBar(state, trade.product_id, kTradeTimeframes[i], trade, tsMs, journal);
-}
-
-void TimeframeAggregator::setJournalClock(const std::string& symbol) {
-    std::unique_lock lock(m_mutex);
-    m_journal.insert(symbol);
+            updateTradeBar(state, trade.product_id, kTradeTimeframes[i], trade, tsMs);
 }
 
 void TimeframeAggregator::advance(const std::string& symbol, int64_t watermarkMs) {
     std::unique_lock lock(m_mutex);
-    if (!m_journal.contains(symbol)) return;
     const auto state = m_states.find(symbol);
     if (state != m_states.end()) closeElapsed(state->second, symbol, watermarkMs);
-}
-
-void TimeframeAggregator::tick(int64_t nowMs) {
-    std::unique_lock lock(m_mutex);
-    for (auto& [symbol, state] : m_states)
-        if (!m_journal.contains(symbol)) closeElapsed(state, symbol, nowMs);
 }
 
 // Closes the symbol's bars that end at or before nowMs, carrying quiet buckets.
@@ -234,8 +221,7 @@ std::vector<OHLCVBar> TimeframeAggregator::getHistory(const std::string& symbol,
     const auto found = state->second.history.find(timeframeMs);
     if (found == state->second.history.end()) return {};
     const auto& hist = found->second;
-    // History is not guaranteed sorted (a wall-clock bar can take an older
-    // trade), so scan from the newest close; at most one page is copied.
+    // Scan from the newest close; at most one page is copied.
     std::vector<OHLCVBar> out;
     out.reserve(std::min(limit, hist.size()));
     for (auto it = hist.rbegin(); it != hist.rend() && out.size() < limit; ++it)

@@ -251,13 +251,13 @@ TEST(CandleSeriesBuffer, NativeHistoryAndLiveAggregatorMeetWithoutGapOrOverlapIn
         trade.product_id = "BTC-USD"; trade.price = 20; trade.size = 2;
         trade.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(seam + 1000));
         aggregator.onTrade(trade);
-        aggregator.tick(seam + 60'000); // coarse live updates consume closed anchor minutes
+        aggregator.advance("BTC-USD", seam + 60'000); // coarse live updates consume closed anchor minutes
         if (!historyFirst) merge();
-        aggregator.tick(seam + tfMs);
+        aggregator.advance("BTC-USD", seam + tfMs);
         trade.timestamp += std::chrono::milliseconds(tfMs);
         trade.price = 30;
         aggregator.onTrade(trade);
-        aggregator.tick(seam + tfMs + 60'000);
+        aggregator.advance("BTC-USD", seam + tfMs + 60'000);
         merge(); // delayed native reply cannot duplicate or overwrite live ownership
         std::vector<Bar> bars;
         buffer.getVisibleSlice(kSym, tfMs, seam - 2 * tfMs, seam + 2 * tfMs, bars);

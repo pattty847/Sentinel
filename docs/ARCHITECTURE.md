@@ -57,7 +57,7 @@ Exchange → capture → RAWL2 journal + fan-out → roller → ServerDataModel 
 - **MarketDataCoreEngine** — Capture-only exchange connections, feed parsing, order book updates. See `docs/MARKETDATA.md`.
 - **ServerDataModel** — Central hub for all symbols; coordinates persistence and streaming.
 - **JournalTradeEventSource** — Reads RAWL2 trades for backtests independently of the book feed, preserving IDs and converting maker sides to aggressor sides. No legacy tick files are read or written.
-- **TimeframeAggregator** — Journal-clock aggregation (e.g. 100 ms, 1 s); captured products never close bars on the wall-clock timer.
+- **TimeframeAggregator** — Journal-clock aggregation (e.g. 100 ms, 1 s): bars close only on the product's journal time (its trades and the feed watermark); there is no wall-clock candle timer.
 - **SentinelStreamServer** — Broadcasts pre-aggregated heatmap columns and related streams to clients. Each client session is owned until explicit teardown, serializes model events on its Asio executor, and enforces bounded event/write backlogs. Live subscriptions accept captured products only; chart lifetimes do not acquire or release upstream feeds.
 
 ### Client

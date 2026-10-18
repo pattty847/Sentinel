@@ -6,7 +6,6 @@
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 #include "../marketdata/model/TradeData.h"
 
@@ -30,15 +29,12 @@ public:
     explicit TimeframeAggregator(const std::vector<int64_t>& timeframesMs = {},
                                  std::map<int64_t, int> historyBars = {},
                                  QObject* parent = nullptr);
-    void onTrade(const Trade& trade);
-    void tick(int64_t nowMs);
-    // Journal live feed. The symbol's bars close on its own journal
-    // time, never the wall clock: tick() skips it; advance() closes buckets
+    // Bars close on the symbol's journal time only: advance() closes buckets
     // ending at or before the watermark, and each trade closes those before it.
     // Bars are then a function of the delivered sequence alone, so a recovery
     // replay builds exactly what uninterrupted delivery would. Quiet buckets
     // are carried, at most 300 per timeframe (100 ms, 1 s and 1 m) per advance.
-    void setJournalClock(const std::string& symbol);
+    void onTrade(const Trade& trade);
     void advance(const std::string& symbol, int64_t watermarkMs);
     static std::vector<OHLCVBar> rollupMinutes(const std::vector<OHLCVBar>& minutes,
                                                 int64_t timeframeMs);
@@ -70,7 +66,6 @@ private:
     mutable std::shared_mutex m_mutex;
     std::unordered_map<std::string, SymbolState> m_states;
     std::vector<int64_t> m_timeframesMs;
-    std::unordered_set<std::string> m_journal;
     std::map<int64_t, size_t> m_historyBars;
     std::array<bool, 3> m_tradeTimeframeOn{}; // kTradeTimeframes[i] is configured
 
@@ -81,6 +76,5 @@ private:
                             const OHLCVBar& minute);
     void closeElapsed(SymbolState& state, const std::string& symbol, int64_t nowMs);
     void updateTradeBar(SymbolState& state, const std::string& symbol,
-                        int64_t timeframeMs, const Trade& trade, int64_t tradeTsMs,
-                        bool journal = false);
+                        int64_t timeframeMs, const Trade& trade, int64_t tradeTsMs);
 };
