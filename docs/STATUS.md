@@ -47,6 +47,9 @@ Pre-land evidence for chart slices: native `SENTINEL_REQUIRE_GPU=1` run of Chart
 
 ## Waiting on the owner
 
+Owner away 2026-10-18 to about 2026-10-21 (three days). Until then: B2-R r4 and the B2-R1/B2-R2 slices, the B2-3 visual run, B2-4 and the flake fix may proceed; nothing deploys, and B2-2..B2-4 stay held for the owner's deploy OK.
+
+
 1. B2: the production deploy OK once B2-2..B2-4 are READY (landing option B).
 2. Parked: nightly copy of `/Volumes/T7/sentinel-data` to the MacBook Pro over Tailscale (needs Remote Login + SSH key).
 
