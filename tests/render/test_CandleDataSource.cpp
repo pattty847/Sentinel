@@ -96,6 +96,20 @@ struct CandleDataSourceTest : testing::Test {
              {"candles", candles}});
         deliver();
     }
+    // The server's reply while its startup 100 ms / 1 s rebuild runs.
+    void warmingReply(const Json& request) {
+        client().handleCandleHistoryChunkMessage(
+            {{"type", "candle_history_chunk"},
+             {"schema_version", protocol::SentinelProtocol::kCandleSchemaVersion},
+             {"symbol", request.at("symbol")},
+             {"timeframe_ms", request.at("timeframe_ms")},
+             {"start_time_ms", request.at("end_time_ms").get<qint64>() -
+                                   request.at("limit").get<int>() * request.at("timeframe_ms").get<qint64>()},
+             {"end_time_ms", request.at("end_time_ms")},
+             {"status", "warming"},
+             {"candles", Json::array()}});
+        deliver();
+    }
     void live(const char* symbol, qint64 tf, qint64 startMinute, double close, qint64 seq, bool closed) {
         client().handleCandleBarMessage(closed ? protocol::MessageType::CandleBarClosed
                                                : protocol::MessageType::CandleBarUpdate,
@@ -486,4 +500,64 @@ TEST_F(CandleDataSourceTest, HundredMillisecondsRequestsAndAppliesMilliseconds) 
     ASSERT_EQ(bars.size(), 1);
     EXPECT_EQ(bars.front().timeEndMs, 60100);
     EXPECT_EQ(bars.front().close, 5);
+}
+
+namespace {
+nlohmann::json second(qint64 startMs, double close) {
+    return {{"time_start_ms", startMs}, {"time_end_ms", startMs + 1000}, {"open", close}, {"high", close},
+            {"low", close}, {"close", close}, {"volume", 1}, {"is_closed", true}};
+}
+} // namespace
+
+// Warming on A, then a ready B: B's request goes out at once; back to A, a
+// fresh A request (the held one and its 2 s deadline are gone).
+TEST_F(CandleDataSourceTest, WarmingSelectionSwitchSendsTheOtherRequestAtOnce) {
+    source.setCandleHistoryViewport("BTC-USD", 1000, 600000, 610000);
+    const auto a = takeRequest();
+    ASSERT_FALSE(a.is_null());
+    EXPECT_EQ(a.at("timeframe_ms"), 1000);
+    warmingReply(a);
+    EXPECT_TRUE(candleRetryActive());
+    EXPECT_GT(candleRetryDelay(), 1500);
+    const auto sentB = std::chrono::steady_clock::now();
+    source.setCandleHistoryViewport("ETH-USD", 1000, 600000, 610000);
+    const auto b = takeRequest();
+    ASSERT_FALSE(b.is_null());
+    EXPECT_EQ(b.at("symbol"), "ETH-USD");
+    EXPECT_LT(std::chrono::steady_clock::now() - sentB, std::chrono::milliseconds(500));
+    reply(b, nlohmann::json::array({second(605000, 3)}));
+    source.setCandleHistoryViewport("BTC-USD", 1000, 600000, 610000);
+    const auto again = takeRequest(500);
+    ASSERT_FALSE(again.is_null());
+    EXPECT_EQ(again.at("symbol"), "BTC-USD");
+    EXPECT_EQ(again.at("end_time_ms"), a.at("end_time_ms"));
+    EXPECT_EQ(again.at("limit"), a.at("limit"));
+}
+
+// Warming on A: a viewport that needs no older data stops the retry and sends
+// nothing; scrolling back resends the held request verbatim at its deadline.
+// The warming chunk applies no history; the reply to the resend does.
+TEST_F(CandleDataSourceTest, WarmingRequestParksOutsideItsNeedAndResendsVerbatim) {
+    source.setCandleHistoryViewport("BTC-USD", 1000, 600000, 610000);
+    const auto a = takeRequest();
+    ASSERT_FALSE(a.is_null());
+    warmingReply(a);
+    auto* buffer = qobject_cast<CandleSeriesBuffer*>(source.candleBuffer());
+    std::vector<CandleSeriesBuffer::CandleBar> bars;
+    EXPECT_FALSE(buffer->getVisibleSlice("BTC-USD", 1000, 590000, 610000, bars));
+    const qint64 future = QDateTime::currentMSecsSinceEpoch() + 600000;
+    source.setCandleHistoryViewport("BTC-USD", 1000, future, future + 10000);
+    EXPECT_FALSE(candleRetryActive());
+    EXPECT_TRUE(takeRequest(150).is_null());
+    const auto held = std::chrono::steady_clock::now();
+    source.setCandleHistoryViewport("BTC-USD", 1000, 600000, 610000);
+    EXPECT_TRUE(candleRetryActive());
+    const auto resent = takeRequest(3000);
+    ASSERT_FALSE(resent.is_null());
+    EXPECT_GE(std::chrono::steady_clock::now() - held, std::chrono::milliseconds(1500));
+    EXPECT_EQ(resent, a);
+    reply(resent, nlohmann::json::array({second(595000, 4), second(600000, 5)}));
+    ASSERT_TRUE(buffer->getVisibleSlice("BTC-USD", 1000, 595000, 601000, bars));
+    ASSERT_EQ(bars.size(), 2u);
+    EXPECT_DOUBLE_EQ(bars.back().close, 5);
 }

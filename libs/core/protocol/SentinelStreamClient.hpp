@@ -158,6 +158,9 @@ signals:
     void candleHistoryReceived(const QString &symbol, int64_t timeframeMs, int64_t startTimeMs, int64_t endTimeMs,
                                const QVector<CandleBar> &candles);
     void candleHistoryFailed(const QString& symbol);
+    // The server answered a 100 ms / 1 s request before its startup candle
+    // rebuild ended; the window echoes the request.
+    void candleHistoryWarming(const QString& symbol, int64_t timeframeMs, int64_t startTimeMs, int64_t endTimeMs);
     void candleBarUpdateReceived(const QString &symbol, int64_t timeframeMs, int64_t bucketStartMs, int64_t seq,
                                  const CandleBar &candle, quint64 deliveryGeneration);
     void candleBarClosedReceived(const QString &symbol, int64_t timeframeMs, int64_t bucketStartMs, int64_t seq,

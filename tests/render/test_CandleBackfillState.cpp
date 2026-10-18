@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "datasources/CandleBackfillState.hpp"
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -407,4 +408,95 @@ TEST(CandleBackfillState, HundredMillisecondsPagesRetainedBars) {
     ASSERT_TRUE(next);
     EXPECT_EQ(next->endMs, 59900);
     EXPECT_EQ(next->limit, 11);
+}
+
+// A "warming" reply (the server is still rebuilding 100 ms / 1 s history) is
+// not a page: the request is held and resent verbatim after 2 s.
+TEST(CandleBackfillState, WarmingHoldsTheRequestAndResendsItVerbatim) {
+    CandleBackfillState state;
+    view(state);
+    const auto request = state.next(950 * minute, false, now);
+    ASSERT_TRUE(request);
+    EXPECT_FALSE(state.warming(btc, 60000, request->startMs + 1, request->endMs, now)); // not this request
+    EXPECT_TRUE(state.warming(btc, 60000, request->startMs, request->endMs, now));
+    EXPECT_FALSE(state.warming(btc, 60000, request->startMs, request->endMs, now)); // held, not in flight
+    EXPECT_EQ(state.retryDelayMs(now), CandleBackfillState::kWarmingRetryMs);
+    EXPECT_FALSE(state.scanPaused());
+    EXPECT_TRUE(state.needsOlderData(950 * minute, false, now));
+    EXPECT_FALSE(state.next(950 * minute, false, now + 1999));
+    // The viewport moved and live bars arrived meanwhile: the same request.
+    view(state, 1001, 1101);
+    const auto again = state.next(960 * minute, false, now + 2000);
+    ASSERT_TRUE(again);
+    EXPECT_EQ(std::tie(again->symbol, again->timeframeMs, again->startMs, again->endMs, again->limit,
+                       again->generation, again->boundaryMs, again->refresh, again->held, again->retryAtMs),
+              std::tie(request->symbol, request->timeframeMs, request->startMs, request->endMs, request->limit,
+                       request->generation, request->boundaryMs, request->refresh, request->held, request->retryAtMs));
+    EXPECT_FALSE(state.next(960 * minute, false, now + 2200)); // in flight again
+    // Repeated warming never counts as an empty page.
+    for (int i = 0; i < CandleBackfillState::kMaxEmptyPages + 1; ++i) {
+        EXPECT_TRUE(state.warming(btc, 60000, request->startMs, request->endMs, now + 2200 + i * 2000));
+        EXPECT_FALSE(state.scanPaused());
+        const auto resent = state.next(960 * minute, false, now + 4200 + i * 2000);
+        ASSERT_TRUE(resent);
+        EXPECT_EQ(resent->endMs, request->endMs);
+    }
+    EXPECT_TRUE(accept(state, *request, 920 * minute, now + 20000));
+    const auto older = state.next(920 * minute, false, now + 20100);
+    ASSERT_TRUE(older);
+    EXPECT_LT(older->endMs, request->endMs);
+}
+
+TEST(CandleBackfillState, SelectionChangeDropsTheHeldRequestAndItsDeadline) {
+    CandleBackfillState state;
+    view(state);
+    const auto request = state.next(950 * minute, false, now);
+    ASSERT_TRUE(request);
+    ASSERT_TRUE(state.warming(btc, 60000, request->startMs, request->endMs, now));
+    state.setViewport("ETH-USD", 60000, 1000 * minute, 1100 * minute);
+    EXPECT_EQ(state.retryDelayMs(now + 100), 0);
+    const auto eth = state.next(0, false, now + 100);
+    ASSERT_TRUE(eth);
+    EXPECT_EQ(eth->symbol, "ETH-USD");
+    EXPECT_TRUE(accept(state, *eth, 0, now + 150));
+    // Back to BTC: a fresh request for the same window, no 2 s wait.
+    view(state);
+    EXPECT_EQ(state.retryDelayMs(now + 250), 0);
+    const auto fresh = state.next(950 * minute, false, now + 250);
+    ASSERT_TRUE(fresh);
+    EXPECT_EQ(fresh->endMs, request->endMs);
+    EXPECT_GT(fresh->generation, request->generation);
+}
+
+// A -> B -> A: a warming reply to the old A request only releases the flight;
+// the new A selection pages at once and its history is untouched.
+TEST(CandleBackfillState, StaleWarmingReplyReleasesWithoutDelayOrHistoryChange) {
+    CandleBackfillState state;
+    view(state);
+    const auto request = state.next(950 * minute, false, now);
+    ASSERT_TRUE(request);
+    state.setViewport("ETH-USD", 300000, 1000 * minute, 1100 * minute);
+    view(state);
+    EXPECT_FALSE(state.next(950 * minute, false, now + 100)); // the old request is still in flight
+    EXPECT_TRUE(state.warming(btc, 60000, request->startMs, request->endMs, now + 100));
+    EXPECT_EQ(state.retryDelayMs(now + 100), 0);
+    EXPECT_FALSE(state.scanPaused());
+    const auto next = state.next(950 * minute, false, now + 100);
+    ASSERT_TRUE(next);
+    EXPECT_EQ(next->endMs, request->endMs); // no cursor moved
+    EXPECT_FALSE(next->held);
+}
+
+TEST(CandleBackfillState, DisconnectDropsTheHeldRequest) {
+    CandleBackfillState state;
+    view(state);
+    const auto request = state.next(950 * minute, false, now);
+    ASSERT_TRUE(request);
+    ASSERT_TRUE(state.warming(btc, 60000, request->startMs, request->endMs, now));
+    state.disconnect();
+    view(state);
+    EXPECT_EQ(state.retryDelayMs(now + 100), 0);
+    const auto fresh = state.next(950 * minute, false, now + 100);
+    ASSERT_TRUE(fresh);
+    EXPECT_GT(fresh->generation, request->generation);
 }

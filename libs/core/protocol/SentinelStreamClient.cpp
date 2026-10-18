@@ -975,6 +975,13 @@ void SentinelStreamClient::handleCandleHistoryChunkMessage(const nlohmann::json&
     const int64_t timeframeMs = msg.value("timeframe_ms", static_cast<int64_t>(0));
     const int64_t startTimeMs = msg.value("start_time_ms", static_cast<int64_t>(0));
     const int64_t endTimeMs = msg.value("end_time_ms", static_cast<int64_t>(0));
+    if (msg.value("status", "") == "warming") {
+        // The server is still rebuilding this window: not a page.
+        sLog_Probe("candles.warming", "symbol=" << symbol << " tfMs=" << timeframeMs << " startMs=" << startTimeMs
+                                                << " endMs=" << endTimeMs);
+        emit candleHistoryWarming(QString::fromStdString(symbol), timeframeMs, startTimeMs, endTimeMs);
+        return;
+    }
     const auto candles = msg.value("candles", nlohmann::json::array());
 
     QVector<CandleBar> out;

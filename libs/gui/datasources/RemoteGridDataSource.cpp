@@ -109,6 +109,13 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             this, &RemoteGridDataSource::onCandleBarClosedReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::candleHistoryReceived,
             this, &RemoteGridDataSource::onCandleHistoryReceived, Qt::QueuedConnection);
+    // The server is still rebuilding the window: retry the same request later.
+    connect(&m_client, &SentinelStreamClient::candleHistoryWarming, this,
+            [this](const QString& symbol, int64_t timeframeMs, int64_t startMs, int64_t endMs) {
+                if (m_candleBackfill.warming(symbol, timeframeMs, startMs, endMs, QDateTime::currentMSecsSinceEpoch()))
+                    requestNextCandlePage();
+            },
+            Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::serverConfigReceived,
             this, &RemoteGridDataSource::onServerConfigReceived, Qt::QueuedConnection);
 

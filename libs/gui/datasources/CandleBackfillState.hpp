@@ -15,6 +15,8 @@ public:
     static constexpr int kMaxEmptyPages = 3;
     static constexpr qint64 kFloorRetryMs = 60'000;
     static constexpr qint64 kDefaultEmptyLookbackMs = 7 * 24 * 60 * 60 * 1000LL;
+    // A request the server answered "warming" is resent verbatim after this.
+    static constexpr qint64 kWarmingRetryMs = 2000;
     explicit CandleBackfillState(qint64 emptyLookbackMs = kDefaultEmptyLookbackMs)
         : m_emptyLookbackMs(std::max<qint64>(2000, emptyLookbackMs)) {}
     struct Request {
@@ -26,11 +28,17 @@ public:
         quint64 generation = 0;
         qint64 boundaryMs = 0; // exclusive progress boundary, independent of wire end
         bool refresh = false;
+        // Answered "warming": not in flight, resent verbatim at retryAtMs.
+        bool held = false;
+        qint64 retryAtMs = 0;
     };
 
     bool setViewport(const QString& symbol, qint64 tfMs, qint64 startMs, qint64 endMs) {
         bool changed = symbol != m_symbol || tfMs != m_tfMs;
         if (changed) {
+            // A held request belongs to the old selection; an in-flight one
+            // stays until its reply arrives.
+            if (m_pending && m_pending->held) m_pending.reset();
             ++m_generation;
             m_refreshPending = false;
             m_refreshCursorMs = 0;
@@ -58,6 +66,14 @@ public:
     }
 
     std::optional<Request> next(qint64 oldestMs, bool cacheFull, qint64 nowMs) {
+        if (m_pending && m_pending->held && m_pending->generation != m_generation) m_pending.reset();
+        if (m_pending && m_pending->held) {
+            if (!needsOlderData(oldestMs, cacheFull, nowMs) || retryDelayMs(nowMs) > 0) return std::nullopt;
+            m_pending->held = false;
+            m_pending->retryAtMs = 0;
+            m_nextSendMs = nowMs + kThrottleMs;
+            return m_pending;
+        }
         if (m_pending || !needsOlderData(oldestMs, cacheFull, nowMs) ||
             retryDelayMs(nowMs) > 0) return std::nullopt;
         if (m_refreshPending) {
@@ -142,6 +158,21 @@ public:
         return true;
     }
 
+    // A "warming" reply to the request in flight: it is no page and moves no
+    // cursor. The current selection's request is held for kWarmingRetryMs; a
+    // stale one is released. False when no request in flight matches.
+    bool warming(const QString& symbol, qint64 tfMs, qint64 startMs, qint64 endMs, qint64 nowMs) {
+        if (!m_pending || m_pending->held || m_pending->symbol != symbol || m_pending->timeframeMs != tfMs ||
+            m_pending->startMs != startMs || m_pending->endMs != endMs) return false;
+        if (m_pending->generation != m_generation) {
+            m_pending.reset();
+            return true;
+        }
+        m_pending->held = true;
+        m_pending->retryAtMs = nowMs + kWarmingRetryMs;
+        return true;
+    }
+
     bool scanPaused() const {
         const auto it = m_history.find({m_symbol, m_tfMs});
         return it != m_history.end() && it->second.emptyPages >= kMaxEmptyPages;
@@ -157,6 +188,8 @@ public:
     qint64 retryDelayMs(qint64 nowMs) const {
         if (m_tfMs <= 0) return 0;
         qint64 deadline = std::max(m_retryAfterMs, m_nextSendMs);
+        if (m_pending && m_pending->held && m_pending->generation == m_generation)
+            deadline = std::max(deadline, m_pending->retryAtMs);
         const auto it = m_history.find({m_symbol, m_tfMs});
         if (!m_refreshPending && it != m_history.end() && !emptyLookbackExhausted(it->second))
             deadline = std::max(deadline, it->second.retryAfterMs);
