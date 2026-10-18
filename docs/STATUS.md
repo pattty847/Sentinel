@@ -3,7 +3,7 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-18 03:30 EDT. Conductor (Opus, started 00:40) handing off at the 200k soft limit; no agent running. Next conductor, in order: (1) B2-R plan r4 with a FRESH Fable planner (r3 + `b2r-plan-r3-astra.md` REVISE 0/2/2 + the conductor diagnosis), Astra thread `01a14d29-c354-7272-9744-2f690c18652a` for r4; (2) B2-3 visual run (plan section 7) when the owner is idle >= 10 min; (3) B2-4 on top of `e97adc3a`. Main `72d7a4ef`+, local, not pushed.
+- **Updated:** 2026-10-18 (conductor Opus, new session). Running: B2-R plan r4 Fable planner (after conductor diagnosis `.../b2r-plan-r3-conductor-diagnosis.md`, Sentinel-Private `51a2336`: invariant-first rules, per-slice verdicts); flake-fix writer (Sonnet, `lt-claude/selftest-exit-flake`, worktree `/Volumes/T7/sentinel-worktrees/lt-claude-selftest-exit-flake`); B2-3 visual run (Opus subagent, isolated GUI host + `candle_fixture_server`); B2-4 writer (Opus, `lt-claude/b2-4-config` from `e97adc3a`, worktree `/Volumes/T7/sentinel-worktrees/lt-claude-b2-4-config`). Next: Astra r4 review on thread `01a14d29-c354-7272-9744-2f690c18652a`, then B2-R1/B2-R2. Main `b9d2febc`, local, not pushed.
 - **Conductor:** a Claude Opus session on the owner's Mac (AGENTS.md section 10).
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high-risk. Owner: use Codex down to ~1% before spending a reset credit (holds 3).
 
