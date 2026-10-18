@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 #include <set>
@@ -15,6 +16,9 @@ struct ServerChartConfig {
     // Empty means the server did not advertise availability.
     std::vector<int64_t> servedTimeframesMs;
     int64_t defaultTimeframeMs = 0;
+    // chart.history_bars: closed bars kept in RAM per timeframe; no entry = default trim.
+    static constexpr int kHistoryBarsMin = 350, kHistoryBarsMax = 200'000;
+    std::map<int64_t, int> historyBars;
 };
 
 struct ServerTradeOverlayConfig {

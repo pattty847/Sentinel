@@ -90,6 +90,29 @@ std::vector<int64_t> parseTimeframes(const YAML::Node& node) {
     return out;
 }
 
+// chart.history_bars: {tfMs: bars}. Keys must be configured timeframes; values clamp.
+std::map<int64_t, int> parseHistoryBars(const YAML::Node& node, const std::vector<int64_t>& timeframesMs) {
+    std::map<int64_t, int> out;
+    if (!node.IsMap()) {
+        sLog_Warning("Ignored chart.history_bars: expected a map of timeframe_ms to bars");
+        return out;
+    }
+    for (const auto& entry : node) {
+        const auto tf = entry.first.as<int64_t>();
+        const auto bars = entry.second.as<int64_t>();
+        if (std::find(timeframesMs.begin(), timeframesMs.end(), tf) == timeframesMs.end()) {
+            sLog_Warning("Ignored chart.history_bars." << tf << ": not in chart.timeframes_ms");
+            continue;
+        }
+        const auto clamped = std::clamp<int64_t>(bars, ServerChartConfig::kHistoryBarsMin,
+                                                 ServerChartConfig::kHistoryBarsMax);
+        if (clamped != bars)
+            sLog_Warning("Clamped chart.history_bars." << tf << "=" << bars << " to " << clamped);
+        out[tf] = static_cast<int>(clamped);
+    }
+    return out;
+}
+
 void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
     YAML::Node root = YAML::LoadFile(filePath);
     YAML::Node serverNode = root["server"];
@@ -99,6 +122,8 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
             readScalar(chart, "default_timeframe_ms", cfg.chart.defaultTimeframeMs);
             auto parsed = parseTimeframes(chart["timeframes_ms"]);
             if (!parsed.empty()) cfg.chart.timeframesMs = std::move(parsed);
+            if (const auto bars = chart["history_bars"])
+                cfg.chart.historyBars = parseHistoryBars(bars, cfg.chart.timeframesMs);
         }
         readScalar(serverRoot, "stream_port", cfg.streamPort);
         readScalar(serverRoot, "bind_address", cfg.bindAddress);

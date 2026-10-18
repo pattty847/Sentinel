@@ -98,7 +98,8 @@ void ServerDataModel::updateExchangeOffsetMs(int64_t exchangeMs) {
 ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
     : QObject(parent)
     , m_serverConfig(config)
-    , m_aggregator(std::make_unique<TimeframeAggregator>(m_serverConfig.chart.timeframesMs))
+    , m_aggregator(std::make_unique<TimeframeAggregator>(m_serverConfig.chart.timeframesMs,
+                                                         m_serverConfig.chart.historyBars))
 {
     for (const auto& symbol : rollerProducts(m_serverConfig)) m_feeds.try_emplace(symbol);
     m_reseedTimer.setSingleShot(true);
@@ -315,6 +316,14 @@ void ServerDataModel::registerMetrics(sentinel::metrics::MetricsRegistry& r) {
                sampleFeeds([](const FeedState& f) { return f.downs; }));
     r.gaugeFn("sentinel_exchange_clock_offset_ms", "Smoothed local minus exchange clock in ms (0 = not yet measured).", {},
               [this]() -> Value { return double(m_exchangeOffsetMs.load(std::memory_order_relaxed)); });
+    r.familyFn("sentinel_candle_late_trades_total", "Trades the candle aggregator dropped as older than its open bucket.",
+               Registry::Type::Counter, [this] {
+                   std::vector<Registry::Sample> samples;
+                   for (const auto& drops : m_aggregator->lateDrops())
+                       samples.push_back({{{"product", drops.symbol}, {"timeframe_ms", std::to_string(drops.timeframeMs)}},
+                                          double(drops.count)});
+                   return samples;
+               });
     r.gaugeFn("sentinel_recorder_running", "1 when the journal roller is attached.", {},
               [this]() -> Value { return recordingAvailable() ? 1.0 : 0.0; });
     if (!m_servesRoller) return;
@@ -366,6 +375,12 @@ std::vector<OHLCVBar> ServerDataModel::getHistory(const std::string& symbol, int
     if (m_aggregator) {
         return m_aggregator->getHistory(symbol, timeframeMs, limit);
     }
+    return {};
+}
+
+std::vector<OHLCVBar> ServerDataModel::getHistory(const std::string& symbol, int64_t timeframeMs,
+                                                  int64_t endMs, size_t limit) const {
+    if (m_aggregator) return m_aggregator->getHistory(symbol, timeframeMs, endMs, limit);
     return {};
 }
 

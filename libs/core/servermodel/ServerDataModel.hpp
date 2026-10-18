@@ -45,6 +45,8 @@ public:
     
     // History Accessor
     std::vector<OHLCVBar> getHistory(const std::string& symbol, int64_t timeframeMs, size_t limit = 1000) const;
+    std::vector<OHLCVBar> getHistory(const std::string& symbol, int64_t timeframeMs, int64_t endMs,
+                                     size_t limit) const;
     bool collectOverlayTrades(const std::string& symbol, int64_t startMs, int64_t endMs,
                               size_t limit, std::vector<FootprintTradeSample>& out,
                               int64_t* retainedFromMs = nullptr) const;

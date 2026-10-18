@@ -220,6 +220,37 @@ TEST(ServerMetrics, RecorderOffExportsOnlyItsState) {
     EXPECT_EQ(text.find("sentinel_recorder_columns_written_total"), std::string::npos);
 }
 
+// Candle late drops per (product, timeframe), sampled from the aggregator at scrape.
+TEST(ServerMetrics, CandleLateTradesPerProductAndTimeframe) {
+    int argc = 1;
+    char name[] = "server-metrics-late";
+    char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    QTemporaryDir dir;
+    ServerConfig config = recordingConfig(dir);
+    config.recording.enabled = false;
+    config.chart.timeframesMs = {100, 1'000, 60'000};
+    ServerDataModel model(config);
+    MetricsRegistry registry;
+    model.registerMetrics(registry);
+    const auto trade = [&](int64_t ms) {
+        Trade t{};
+        t.product_id = "BTC-USD";
+        t.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(ms));
+        t.price = 100;
+        t.size = 1;
+        model.onTrade(t);
+    };
+    trade(1'700'000'001'250);
+    trade(1'700'000'001'150); // late for 100 ms only
+    trade(1'700'000'000'500); // late for 100 ms and 1 s
+    const std::string text = registry.render();
+    EXPECT_TRUE(has(text, "# TYPE sentinel_candle_late_trades_total counter")) << text;
+    EXPECT_TRUE(has(text, "sentinel_candle_late_trades_total{product=\"BTC-USD\",timeframe_ms=\"100\"} 2")) << text;
+    EXPECT_TRUE(has(text, "sentinel_candle_late_trades_total{product=\"BTC-USD\",timeframe_ms=\"1000\"} 1"));
+    EXPECT_TRUE(has(text, "sentinel_candle_late_trades_total{product=\"BTC-USD\",timeframe_ms=\"60000\"} 0"));
+}
+
 namespace {
 // Real RAWL2 -> durable fanout -> ShadowRoller -> HMC2, all under /tmp.
 // No provider, owner socket, settings or recording root is used.

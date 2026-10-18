@@ -116,6 +116,7 @@ scrape. VictoriaMetrics adds `job` and `instance` to every series.
 | `sentinel_recorder_live_publish_drops_total` | counter | - | Live publications that were refused (series limit or stale). |
 | `sentinel_live_feed_up` | gauge | product | 1 while the captured product's live journal feed is up; follows transport records and the 30 s tip-silence guard. |
 | `sentinel_live_feed_up_total` / `sentinel_live_feed_down_total` | counter | product | Live journal feed transitions in this server process. |
+| `sentinel_candle_late_trades_total` | counter | product, timeframe_ms | Trades the candle aggregator dropped as older than the open bucket of that timeframe (out of order, or below a bucket the journal watermark already closed). One series per traded product and trade-built timeframe (100, 1000, 60000 when configured); resets with the process. |
 | `sentinel_exchange_clock_offset_ms` | gauge | - | Smoothed local clock minus exchange clock. 0 means not yet measured. |
 | `sentinel_stream_sessions` | gauge | - | Open client stream sessions (GUIs). |
 | `sentinel_server_event_loop_lag_ms` | gauge | quantile | Main-thread queue wait in ms over the last 60 s; quantile=`0.5`, `0.95`, `0.99` or `max`. Absent until a probe is delivered, or if no delivered sample remains in the window. |
