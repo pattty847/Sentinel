@@ -292,3 +292,21 @@ TEST(TimeframeAggregatorHundredMs, WallClockHistoryPageFiltersUnsortedBars) {
     for (const auto& bar : aggregator.getHistory("BTC-USD", 100, t + 150, 2)) offsets.push_back(bar.timestamp_ms - t);
     EXPECT_EQ(offsets, (std::vector<int64_t>{100, 100}));
 }
+
+// Switching to the journal clock does not sort history that the wall clock
+// closed out of order; the endMs page must stay correct.
+TEST(TimeframeAggregatorHundredMs, JournalClockAfterWallClockKeepsHistoryPageCorrect) {
+    constexpr int64_t t = 1'000'000;
+    TimeframeAggregator aggregator({100});
+    aggregator.onTrade(tradeAt(t + 10, 1, 1));
+    aggregator.tick(t + 500);
+    aggregator.onTrade(tradeAt(t + 150, 2, 1));
+    aggregator.tick(t + 600);
+    aggregator.setJournalClock("BTC-USD");
+    std::vector<int64_t> offsets;
+    for (const auto& bar : aggregator.getHistory("BTC-USD", 100, t + 150, 350)) offsets.push_back(bar.timestamp_ms - t);
+    EXPECT_EQ(offsets, (std::vector<int64_t>{0, 100, 100}));
+    offsets.clear();
+    for (const auto& bar : aggregator.getHistory("BTC-USD", 100, t + 150, 2)) offsets.push_back(bar.timestamp_ms - t);
+    EXPECT_EQ(offsets, (std::vector<int64_t>{100, 100}));
+}
