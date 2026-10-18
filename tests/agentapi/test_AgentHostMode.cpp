@@ -6,6 +6,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QSettings>
+#include <QScopeGuard>
 #include <QTemporaryDir>
 #include <gtest/gtest.h>
 
@@ -70,6 +71,53 @@ TEST_F(AgentHostModeTest, ScreenshotDirIsFixedInsideTheSessionDirAndCreated) {
     const QString canonical = QFileInfo(dir.path()).canonicalFilePath();
     EXPECT_EQ(AgentHostMode::screenshotDir(), canonical + "/screenshots");
     EXPECT_TRUE(QFileInfo(AgentHostMode::screenshotDir()).isDir());
+}
+
+TEST_F(AgentHostModeTest, DataDirIsCreatedInsideTheSessionAndEmptyWhenInactive) {
+    EXPECT_TRUE(AgentHostMode::dataDir().isEmpty());
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    QString error;
+    ASSERT_TRUE(AgentHostMode::activate(dir.path(), {}, &error)) << qPrintable(error);
+    EXPECT_EQ(AgentHostMode::dataDir(), QFileInfo(dir.path()).canonicalFilePath() + "/data");
+    EXPECT_TRUE(QFileInfo(AgentHostMode::dataDir()).isDir());
+    AgentHostMode::resetForTests();
+    EXPECT_TRUE(AgentHostMode::dataDir().isEmpty());
+}
+
+TEST_F(AgentHostModeTest, RefusesDataDirResolvingIntoPreferencesBeforeCreatingDirectories) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QByteArray oldHome = qgetenv("HOME");
+    const auto restoreHome = qScopeGuard([&] { qputenv("HOME", oldHome); });
+    qputenv("HOME", dir.path().toUtf8());
+    ASSERT_EQ(QDir::homePath(), dir.path());
+    const QString preferences = dir.path() + "/Library/Preferences";
+    ASSERT_TRUE(QDir().mkpath(preferences));
+    ASSERT_TRUE(QDir().mkpath(dir.path() + "/session"));
+    ASSERT_TRUE(QFile::link(preferences, dir.path() + "/session/data"));
+    QString error;
+    EXPECT_FALSE(AgentHostMode::activate(dir.path() + "/session", {}, &error));
+    EXPECT_TRUE(error.contains("data directory must not be under ~/Library/Preferences")) << qPrintable(error);
+    EXPECT_FALSE(AgentHostMode::active());
+    EXPECT_TRUE(AgentHostMode::dataDir().isEmpty());
+    EXPECT_FALSE(QFileInfo::exists(dir.path() + "/session/settings"));
+    EXPECT_FALSE(QFileInfo::exists(dir.path() + "/session/screenshots"));
+    EXPECT_TRUE(QDir(preferences).isEmpty());
+}
+
+TEST_F(AgentHostModeTest, DataDirGetsTheSessionForbiddenRootChecksBeforeCreatingDirectories) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QString forbidden = dir.path() + "/repo";
+    ASSERT_TRUE(QDir().mkpath(forbidden));
+    ASSERT_TRUE(QDir().mkpath(dir.path() + "/session"));
+    ASSERT_TRUE(QFile::link(forbidden, dir.path() + "/session/data"));
+    QString error;
+    EXPECT_FALSE(AgentHostMode::activate(dir.path() + "/session", {forbidden}, &error));
+    EXPECT_FALSE(AgentHostMode::active());
+    EXPECT_FALSE(QFileInfo::exists(dir.path() + "/session/settings"));
+    EXPECT_TRUE(QDir(forbidden).isEmpty());
 }
 
 TEST_F(AgentHostModeTest, SettingsAreIsolatedIntoTheSessionDirNotTheOwnersDomain) {

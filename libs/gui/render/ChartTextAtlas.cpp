@@ -1,5 +1,6 @@
 #include "ChartTextAtlas.hpp"
 #include "SentinelLogging.hpp"
+#include "config/AgentHostMode.hpp"
 
 #include <QCryptographicHash>
 #include <QDir>
@@ -64,7 +65,8 @@ QString ChartTextAtlas::ensureFontFile(const BuildParams& params) const {
 }
 
 QString ChartTextAtlas::runtimeDir() const {
-    QString base = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+    QString base = AgentHostMode::active() ? AgentHostMode::dataDir()
+                                          : QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
     if (base.isEmpty()) {
         base = QDir::current().filePath(QStringLiteral("data"));
     }

@@ -6,7 +6,15 @@
 #include "render/ChartTextNode.hpp"
 #include "render/ChartTextRenderer.hpp"
 #include "render/heatmap/HeatmapLabelLayout.hpp"
+#include "config/AgentHostMode.hpp"
+#include <QDir>
+#include <QDirIterator>
+#include <QFile>
+#include <QFileInfo>
 #include <QGuiApplication>
+#include <QScopeGuard>
+#include <QStandardPaths>
+#include <QTemporaryDir>
 #include <gtest/gtest.h>
 #include <cmath>
 #include <map>
@@ -31,6 +39,125 @@ const ChartTextAtlas &atlas() {
         return out;
     }();
     return a;
+}
+
+class AtlasCacheTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        ASSERT_TRUE(home.isValid());
+        oldHome = qgetenv("HOME");
+        oldCfHome = qgetenv("CFFIXED_USER_HOME");
+        oldTestMode = QStandardPaths::isTestModeEnabled();
+        qputenv("HOME", home.path().toUtf8());
+        // macOS standard directories come from CoreFoundation, independently of HOME.
+        qputenv("CFFIXED_USER_HOME", home.path().toUtf8());
+        QStandardPaths::setTestModeEnabled(true);
+        AgentHostMode::resetForTests();
+        standardData = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+        // Refuse to run the write checks if Qt did not honor the temporary home.
+        ASSERT_TRUE(standardData.startsWith(home.path() + '/')) << qPrintable(standardData);
+        ASSERT_TRUE(filesUnder(standardData).isEmpty());
+    }
+
+    void TearDown() override {
+        AgentHostMode::resetForTests();
+        QStandardPaths::setTestModeEnabled(oldTestMode);
+        qputenv("HOME", oldHome);
+        if (oldCfHome.isNull()) qunsetenv("CFFIXED_USER_HOME");
+        else qputenv("CFFIXED_USER_HOME", oldCfHome);
+    }
+
+    static QStringList filesUnder(const QString& dir) {
+        QStringList files;
+        QDirIterator it(dir, QDir::Files, QDirIterator::Subdirectories);
+        while (it.hasNext()) files << it.next();
+        files.sort();
+        return files;
+    }
+
+    void checkColdCache(bool hosted) {
+        const QString session = home.path() + "/session";
+        QString error;
+        if (hosted) ASSERT_TRUE(AgentHostMode::activate(session, {}, &error)) << qPrintable(error);
+        const QString data = hosted ? AgentHostMode::dataDir() : standardData;
+        ASSERT_TRUE(filesUnder(data).isEmpty());
+
+        ChartTextAtlas::BuildParams params;
+        params.fontFamily = "Roboto Mono";
+        params.fontPath = home.path() + "/missing.ttf";
+        params.resourceFont = ":/fonts/RobotoMono/RobotoMono-Regular.ttf";
+        params.charset = "0123";
+        params.fontPx = 32;
+        ASSERT_TRUE(QFile::exists(params.resourceFont));
+        const QString realFont = home.path() + "/real.ttf";
+        ASSERT_TRUE(QFile::copy(params.resourceFont, realFont));
+
+        QStringList messages;
+        capturedMessages = &messages;
+        const auto previous = qInstallMessageHandler(captureMessage);
+        const auto restoreHandler = qScopeGuard([&] {
+            qInstallMessageHandler(previous);
+            capturedMessages = nullptr;
+        });
+        ChartTextAtlas embedded;
+        ASSERT_TRUE(embedded.build(params));
+        const auto fonts = filesUnder(data + "/fonts/msdf");
+        ASSERT_EQ(fonts.size(), 1);
+        EXPECT_TRUE(fonts.front().endsWith("_RobotoMono-Regular.ttf"));
+        QFile extracted(fonts.front());
+        QFile resource(params.resourceFont);
+        ASSERT_TRUE(extracted.open(QIODevice::ReadOnly));
+        ASSERT_TRUE(resource.open(QIODevice::ReadOnly));
+        EXPECT_EQ(extracted.readAll(), resource.readAll());
+
+        ChartTextAtlas direct;
+        params.fontPath = realFont;
+        ASSERT_TRUE(direct.build(params));
+        const QString cache = data + "/glyph-cache/msdf";
+        const auto cacheFiles = filesUnder(cache);
+        ASSERT_EQ(cacheFiles.size(), 4);
+        EXPECT_EQ(QDir(cache).entryList({"*.json"}, QDir::Files).size(), 2);
+        EXPECT_EQ(QDir(cache).entryList({"*.png"}, QDir::Files).size(), 2);
+        for (const auto& path : cacheFiles) EXPECT_GT(QFileInfo(path).size(), 0) << qPrintable(path);
+        EXPECT_EQ(messages.filter("MSDF atlas built:").size(), 2);
+        EXPECT_TRUE(messages.filter("MSDF atlas loaded from cache:").isEmpty());
+
+        messages.clear();
+        ChartTextAtlas directCached;
+        ASSERT_TRUE(directCached.build(params));
+        params.fontPath = home.path() + "/missing.ttf";
+        ChartTextAtlas embeddedCached;
+        ASSERT_TRUE(embeddedCached.build(params));
+        EXPECT_EQ(messages.filter("MSDF atlas loaded from cache:").size(), 2);
+        EXPECT_TRUE(messages.filter("MSDF atlas built:").isEmpty());
+        EXPECT_EQ(filesUnder(cache), cacheFiles);
+        if (hosted) {
+            EXPECT_EQ(data, QFileInfo(session).canonicalFilePath() + "/data");
+            EXPECT_TRUE(filesUnder(standardData).isEmpty()) << qPrintable(filesUnder(standardData).join('\n'));
+        } else {
+            EXPECT_EQ(filesUnder(standardData).size(), 5);
+            EXPECT_FALSE(QFileInfo::exists(session));
+        }
+    }
+
+private:
+    static void captureMessage(QtMsgType, const QMessageLogContext&, const QString& message) {
+        capturedMessages->append(message);
+    }
+    inline static QStringList* capturedMessages = nullptr;
+    QTemporaryDir home;
+    QByteArray oldHome;
+    QByteArray oldCfHome;
+    bool oldTestMode = false;
+    QString standardData;
+};
+
+TEST_F(AtlasCacheTest, HostedColdCacheAndEmbeddedFontStayInTheSession) {
+    checkColdCache(true);
+}
+
+TEST_F(AtlasCacheTest, InactiveColdCacheAndEmbeddedFontUseAppLocalData) {
+    checkColdCache(false);
 }
 
 std::string text(double value, bool usd) {
@@ -378,8 +505,18 @@ TEST_F(LabelLayout, TextSubmissionAndGeometryGrowGeometrically) {
 } // namespace
 
 int main(int argc, char **argv) {
+    QTemporaryDir home;
+    if (!home.isValid()) return 1;
+    qputenv("HOME", home.path().toUtf8());
+    qputenv("CFFIXED_USER_HOME", home.path().toUtf8());
+    QStandardPaths::setTestModeEnabled(true);
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "offscreen");
     QGuiApplication app(argc, argv);
+    const auto data = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+    if (!data.startsWith(home.path() + '/')) {
+        qCritical() << "Test data directory escaped the temporary home:" << data;
+        return 1;
+    }
     Q_INIT_RESOURCE(sentinel_ui_fonts);
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

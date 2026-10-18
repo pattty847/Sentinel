@@ -51,8 +51,10 @@ AGENTS.md. Remove a note here when it stops being true.
 - `AgentHostMode`: the host passes `--agent-host <session dir>` and `--agent-host-symbols <list>` (default: seven
   recorded products, override with `GUI_HOST_SYMBOLS`). `--agent-host` without a symbol list means an empty
   allowlist: startup stays unsubscribed and every symbol-named request is refused. In this mode `target=main`,
-  retired `lab`/`aiCommentary` and unknown targets are refused; screenshots and general QSettings stay in the
-  fresh session dir; no trade command or algo start/stop is sent (choke point `RemoteGridDataSource`:
+  retired `lab`/`aiCommentary` and unknown targets are refused. General QSettings, screenshots and font caches
+  stay in the fresh session dir; the docks profile is shared across sessions at `gui-host/profile/docks.ini`,
+  and run logs stay in `~/Library/Logs/Sentinel/`. No trade command or algo start/stop is sent (choke point
+  `RemoteGridDataSource`:
   `sendTradeCommand`, `sendAlgoCommand`; note `/api/v1/input` can reach the chart's TP/SL controls); no outbound
   request names a symbol outside the list (enforced at the `RemoteGridDataSource` send boundary, including
   startup and reconnect resubscribes; a source-scan test fails when a new `m_client.<sender>` is unguarded).

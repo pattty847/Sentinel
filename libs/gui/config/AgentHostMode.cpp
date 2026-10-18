@@ -9,6 +9,7 @@ namespace {
 
 bool g_active = false;
 QString g_screenshotDir;
+QString g_dataDir;
 QString g_dockProfileFile;
 QStringList g_symbols;
 
@@ -68,10 +69,15 @@ bool activate(const QString& dir, const QStringList& forbiddenRoots, QString* er
     const QString preferences = resolveMaybeMissing(QDir::homePath() + "/Library/Preferences");
     if (!preferences.isEmpty() && underOrEqual(profile, preferences))
         return fail("--agent-host dock profile must not be under ~/Library/Preferences: " + profile);
+    const QString data = safePath(canonical + "/data");
+    if (data.isEmpty()) return false;
+    if (!preferences.isEmpty() && underOrEqual(data, preferences))
+        return fail("--agent-host data directory must not be under ~/Library/Preferences: " + data);
     if (!QDir().mkpath(canonical)) return fail("cannot create --agent-host directory: " + canonical);
     const QString shots = canonical + "/screenshots";
-    if (!QDir().mkpath(shots) || !QDir().mkpath(settings) || !QDir().mkpath(QFileInfo(profile).path()))
-        return fail("cannot create screenshots/settings for " + canonical);
+    if (!QDir().mkpath(shots) || !QDir().mkpath(settings) || !QDir().mkpath(data) ||
+        !QDir().mkpath(QFileInfo(profile).path()))
+        return fail("cannot create screenshots/settings/data for " + canonical);
 
     // Every QSettings("org", "app") in the GUI uses the process default format; point it at INI
     // files under this session, so no run touches the owner's preferences plist.
@@ -80,6 +86,7 @@ bool activate(const QString& dir, const QStringList& forbiddenRoots, QString* er
     QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, settings);
 
     g_screenshotDir = shots;
+    g_dataDir = data;
     g_dockProfileFile = profile;
     g_active = true;
     return true;
@@ -87,6 +94,7 @@ bool activate(const QString& dir, const QStringList& forbiddenRoots, QString* er
 
 bool active() { return g_active; }
 QString screenshotDir() { return g_active ? g_screenshotDir : QString(); }
+QString dataDir() { return g_active ? g_dataDir : QString(); }
 QString dockProfileFile() { return g_active ? g_dockProfileFile : QString(); }
 bool dockChangesPersist(bool requested) { return g_active || requested; }
 bool tradingAllowed() { return !g_active; }
@@ -113,6 +121,7 @@ bool screenshotTargetAllowed(const QString& target) {
 void resetForTests() {
     g_active = false;
     g_screenshotDir.clear();
+    g_dataDir.clear();
     g_dockProfileFile.clear();
     g_symbols.clear();
     QSettings::setDefaultFormat(QSettings::NativeFormat);
