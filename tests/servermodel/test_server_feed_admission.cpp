@@ -177,6 +177,47 @@ TEST(ServerFeedConfig, BindAddressDefaultsFlatWrappedAndOverride) {
     EXPECT_EQ(config.bindAddress, "invalid-address");
 }
 
+namespace {
+QStringList* g_configWarnings = nullptr;
+}
+
+TEST(ServerFeedConfig, HistoryBarsParseClampAndIgnoreUnconfigured) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const auto path = dir.filePath("server.yaml");
+    QStringList warnings;
+    g_configWarnings = &warnings;
+    const auto previous = qInstallMessageHandler([](QtMsgType type, const QMessageLogContext&, const QString& text) {
+        if (type == QtWarningMsg && g_configWarnings) g_configWarnings->push_back(text);
+    });
+    const auto restore = qScopeGuard([&] { qInstallMessageHandler(previous); g_configWarnings = nullptr; });
+    const auto load = [&](const QByteArray& bars) {
+        warnings.clear();
+        ServerConfig config;
+        QFile file(path);
+        EXPECT_TRUE(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        file.write("server:\n  chart:\n    timeframes_ms: [100, 1000, 60000]\n" + bars);
+        file.close();
+        EXPECT_TRUE(ConfigLoader::loadServerConfig(path.toStdString(), &config));
+        return config.chart.historyBars;
+    };
+    const auto warned = [&](const QString& text) {
+        return std::any_of(warnings.begin(), warnings.end(), [&](const QString& w) { return w.contains(text); });
+    };
+    EXPECT_EQ(load("    history_bars: {100: 18000}\n"), (std::map<int64_t, int>{{100, 18'000}}));
+    EXPECT_FALSE(warned("history_bars"));
+    for (const QByteArray low : {"10", "0", "-5"}) {
+        EXPECT_EQ(load("    history_bars: {100: " + low + "}\n"), (std::map<int64_t, int>{{100, 350}})) << low.toStdString();
+        EXPECT_TRUE(warned("Clamped chart.history_bars.100=" + QString::fromLatin1(low) + " to 350")) << low.toStdString();
+    }
+    EXPECT_EQ(load("    history_bars: {100: 500000}\n"), (std::map<int64_t, int>{{100, 200'000}}));
+    EXPECT_TRUE(warned("Clamped chart.history_bars.100=500000 to 200000"));
+    EXPECT_TRUE(load("    history_bars: {250: 5000}\n").empty());
+    EXPECT_TRUE(warned("Ignored chart.history_bars.250: not in chart.timeframes_ms"));
+    EXPECT_TRUE(load("").empty()); // absent key: no entry, so the default trim rule applies
+    EXPECT_FALSE(warned("history_bars"));
+}
+
 TEST(ServerFeedConfig, CheckedInConfigDefaultsToLoopback) {
     ServerConfig config;
     // Distinguish loading the file's value from retaining the struct default.

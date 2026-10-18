@@ -233,6 +233,22 @@ positive durations, sorts and deduplicates them, and keeps defaults for an empty
 result. `chart.default_timeframe_ms` defaults to 0 (use the first configured
 candidate); the checked-in configuration selects 60000.
 
+`chart.timeframes_ms` accepts 100 (100 ms candles), 1000 and minute multiples;
+the aggregator rejects any other value with a warning.
+
+`chart.history_bars` maps a configured candle timeframe in ms to the number of
+closed bars the server guarantees to keep in RAM for it (only 100 and 1000 are
+served from RAM). A key that is not in `timeframes_ms` is ignored with a warning.
+A timeframe with an entry keeps between the value and the value + 10 percent
+once populated: when it holds more than value + value/10 bars, the oldest are
+dropped down to the value. A timeframe without an entry keeps the default: at
+most 10,000 bars, trimmed to 9,001 once full (9,001..10,000 once populated).
+Absent key = no entry, not a default value. Values are clamped to
+[350, 200000] with a warning (350 is one history page; 200,000 bounds the
+element count at about 12 MB per product before a trim, allocation up to about
+twice that). The value takes effect at the next server start; RAM history is
+empty after every restart.
+
 `trade_overlays.retention_columns` defaults to 5120 (8192 in the checked-in config).
 Retained execution history uses exactly
 `clamp(2 * max(1000, default_timeframe_ms, timeframes_ms...) * max(1024, retention_columns), 300000, 86400000)`
