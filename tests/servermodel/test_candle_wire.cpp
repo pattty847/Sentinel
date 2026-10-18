@@ -238,48 +238,6 @@ struct RawCandleClient : StalledCandleClient {
     }
 };
 
-TEST(CandleWireWarming, WarmingReplyEchoesTheWindowUntilTheRebuildEnds) {
-    int argc = 1;
-    char name[] = "candle-warming";
-    char *argv[] = {name, nullptr};
-    QCoreApplication app(argc, argv);
-    CandleFixture fixture;
-    fixture.model->setCandleHistoryWarming({"BTC-USD"});
-    EXPECT_FALSE(fixture.model->candleHistoryReady("BTC-USD"));
-    EXPECT_TRUE(fixture.model->candleHistoryReady("ETH-USD")); // not warming
-    for (int i = 0; i < 30; ++i) tradeAt(*fixture.model, 100000 + i * 100);
-    fixture.model->onFeedWatermark("BTC-USD", 105000);
-    fixture.start();
-    RawCandleClient client(fixture.port());
-    auto sessions = RecordingServerStopTest::sessions(*fixture.server);
-    ASSERT_EQ(sessions.size(), 1);
-    ASSERT_TRUE(spinUntil([&] { return fixture.subscribed(sessions.front()); }));
-    for (const int64_t tf : {int64_t{100}, int64_t{1000}}) {
-        const auto reply = client.request(tf, 103000);
-        EXPECT_EQ(reply.value("type", ""), "candle_history_chunk") << tf;
-        EXPECT_EQ(reply.value("status", ""), "warming") << tf;
-        EXPECT_EQ(reply.value("schema_version", 0), protocol::SentinelProtocol::kCandleSchemaVersion);
-        EXPECT_EQ(reply.value("symbol", ""), "BTC-USD");
-        EXPECT_EQ(reply.value("timeframe_ms", int64_t{0}), tf);
-        EXPECT_EQ(reply.value("start_time_ms", int64_t{0}), std::max<int64_t>(0, 103000 - tf * 350));
-        EXPECT_EQ(reply.value("end_time_ms", int64_t{0}), 103000);
-        ASSERT_TRUE(reply.contains("candles"));
-        EXPECT_TRUE(reply["candles"].is_array() && reply["candles"].empty()) << tf;
-    }
-    // 1 m pages from REST and never warms (here the REST stub refuses).
-    const auto minute = client.request(60000, 172860000);
-    EXPECT_FALSE(minute.contains("status"));
-    // The rebuild ended (here: failed): normal replies, without a status.
-    fixture.model->onCandleHistoryRestored("BTC-USD", std::nullopt);
-    EXPECT_TRUE(fixture.model->candleHistoryReady("BTC-USD"));
-    for (const int64_t tf : {int64_t{100}, int64_t{1000}}) {
-        const auto reply = client.request(tf, 103000);
-        EXPECT_EQ(reply.value("type", ""), "candle_history_chunk") << tf;
-        EXPECT_FALSE(reply.contains("status")) << tf;
-        EXPECT_FALSE(reply["candles"].empty()) << tf; // the live bars
-    }
-}
-
 sentinel::roller::CandleRestore restoreOf(std::map<int64_t, std::vector<int64_t>> closed) {
     sentinel::roller::CandleRestore r;
     r.product = "BTC-USD";
@@ -301,6 +259,62 @@ sentinel::roller::CandleRestore restoreOf(std::map<int64_t, std::vector<int64_t>
         series.active.count = series.active.timestamp_ms ? 1 : 0;
     }
     return r;
+}
+
+TEST(CandleWireWarming, WarmingReplyEchoesTheWindowUntilTheRebuildEnds) {
+    int argc = 1;
+    char name[] = "candle-warming";
+    char *argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    CandleFixture fixture;
+    fixture.model->setCandleHistoryWarming({"BTC-USD"});
+    EXPECT_FALSE(fixture.model->candleHistoryReady("BTC-USD"));
+    EXPECT_TRUE(fixture.model->candleHistoryReady("ETH-USD")); // not warming
+    fixture.start();
+    RawCandleClient client(fixture.port());
+    auto sessions = RecordingServerStopTest::sessions(*fixture.server);
+    ASSERT_EQ(sessions.size(), 1);
+    ASSERT_TRUE(spinUntil([&] { return fixture.subscribed(sessions.front()); }));
+    for (const int64_t tf : {int64_t{100}, int64_t{1000}}) {
+        const auto reply = client.request(tf, 103000);
+        EXPECT_EQ(reply.value("type", ""), "candle_history_chunk") << tf;
+        EXPECT_EQ(reply.value("status", ""), "warming") << tf;
+        EXPECT_EQ(reply.value("schema_version", 0), protocol::SentinelProtocol::kCandleSchemaVersion);
+        EXPECT_EQ(reply.value("symbol", ""), "BTC-USD");
+        EXPECT_EQ(reply.value("timeframe_ms", int64_t{0}), tf);
+        EXPECT_EQ(reply.value("start_time_ms", int64_t{0}), std::max<int64_t>(0, 103000 - tf * 350));
+        EXPECT_EQ(reply.value("end_time_ms", int64_t{0}), 103000);
+        ASSERT_TRUE(reply.contains("candles"));
+        EXPECT_TRUE(reply["candles"].is_array() && reply["candles"].empty()) << tf;
+    }
+    // 1 m pages from REST and never warms (here the REST stub refuses).
+    const auto minute = client.request(60000, 172860000);
+    EXPECT_FALSE(minute.contains("status"));
+    // The rebuild ended: normal replies, without a status, with exactly the
+    // newest restored closed bars at or before the requested end.
+    std::vector<int64_t> hundreds, seconds;
+    for (int64_t t = 60000; t < 103000; t += 100) hundreds.push_back(t);
+    for (int64_t t = 60000; t < 103000; t += 1000) seconds.push_back(t);
+    fixture.model->onCandleHistoryRestored("BTC-USD", restoreOf({{100, hundreds}, {1000, seconds}}));
+    EXPECT_TRUE(fixture.model->candleHistoryReady("BTC-USD"));
+    for (const auto &[tf, starts] : {std::pair{int64_t{100}, hundreds}, std::pair{int64_t{1000}, seconds}}) {
+        const auto reply = client.request(tf, 100000);
+        EXPECT_EQ(reply.value("type", ""), "candle_history_chunk") << tf;
+        EXPECT_FALSE(reply.contains("status")) << tf;
+        std::vector<int64_t> expected;
+        for (const int64_t t : starts)
+            if (t <= 100000) expected.push_back(t);
+        if (expected.size() > 350) expected.erase(expected.begin(), expected.end() - 350);
+        const auto &candles = reply["candles"];
+        ASSERT_EQ(candles.size(), expected.size()) << tf;
+        for (size_t i = 0; i < expected.size(); ++i) {
+            EXPECT_EQ(candles[i].value("time_start_ms", int64_t{0}), expected[i]) << tf << " at " << i;
+            EXPECT_EQ(candles[i].value("time_end_ms", int64_t{0}), expected[i] + tf) << tf << " at " << i;
+            EXPECT_DOUBLE_EQ(candles[i].value("close", 0.0), 7) << tf;
+            EXPECT_DOUBLE_EQ(candles[i].value("volume", 0.0), 1) << tf;
+            EXPECT_TRUE(candles[i].value("is_closed", false)) << tf;
+        }
+    }
 }
 
 // The install goes only into empty series, both timeframes or neither, never
