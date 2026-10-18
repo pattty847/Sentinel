@@ -117,6 +117,9 @@ scrape. VictoriaMetrics adds `job` and `instance` to every series.
 | `sentinel_live_feed_up` | gauge | product | 1 while the captured product's live journal feed is up; follows transport records and the 30 s tip-silence guard. |
 | `sentinel_live_feed_up_total` / `sentinel_live_feed_down_total` | counter | product | Live journal feed transitions in this server process. |
 | `sentinel_candle_late_trades_total` | counter | product, timeframe_ms | Trades the candle aggregator dropped as older than the open bucket of that timeframe (out of order, or below a bucket the journal watermark already closed). One series per traded product and trade-built timeframe (100, 1000, 60000 when configured); resets with the process. |
+| `sentinel_candle_history_warming` | gauge | product | 1 while the product's startup rebuild of its 100 ms / 1 s candle window has not ended (history requests reply `warming`); 0 after. Absent when the rebuild is off (no 100 ms or 1 s timeframe configured). Normal: 0 for every product within seconds of start. |
+| `sentinel_candle_history_restore_failures_total` | counter | product | Startup candle rebuilds that failed, refused products included (the product serves an empty window). Expected 0; resets with the process. |
+| `sentinel_candle_history_restore_partial_total` | counter | product | Startup candle rebuilds without an initial state inside the 4-file cap (installed; history begins at the first trade in the window). Expected 0 except on a journal younger than the window. |
 | `sentinel_exchange_clock_offset_ms` | gauge | - | Smoothed local clock minus exchange clock. 0 means not yet measured. |
 | `sentinel_stream_sessions` | gauge | - | Open client stream sessions (GUIs). |
 | `sentinel_server_event_loop_lag_ms` | gauge | quantile | Main-thread queue wait in ms over the last 60 s; quantile=`0.5`, `0.95`, `0.99` or `max`. Absent until a probe is delivered, or if no delivered sample remains in the window. |

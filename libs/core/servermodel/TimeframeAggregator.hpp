@@ -64,6 +64,8 @@ public:
     // timeframe (100 ms, 1 s or 1 m). Refused (false) unless that timeframe has
     // no history, no open bar and no floor. Emits nothing.
     bool restoreSeries(const std::string& symbol, int64_t timeframeMs, Series series);
+    // restoreSeries would install into this timeframe now.
+    bool canRestoreSeries(const std::string& symbol, int64_t timeframeMs) const;
     // Opt-in journal floor for the listed configured trade timeframes: while a
     // timeframe has no bar, a trade whose bucket starts before the floor is
     // dropped as late. The floor only rises: to the watermark's bucket here and
@@ -101,6 +103,8 @@ private:
     void addMinuteToRollups(SymbolState& state, const std::string& symbol,
                             const OHLCVBar& minute);
     void closeElapsed(SymbolState& state, const std::string& symbol, int64_t nowMs);
+    // Under m_mutex: the timeframe has no history, no open bar and no floor.
+    bool restorable(const std::string& symbol, int64_t timeframeMs) const;
     void updateTradeBar(SymbolState& state, const std::string& symbol, size_t index,
                         const Trade& trade, int64_t tradeTsMs);
 };

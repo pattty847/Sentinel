@@ -22,6 +22,7 @@
 #include "RecorderStallMonitor.hpp"
 #include "../marketdata/model/TradeData.h"
 #include "../config/ConfigTypes.hpp"
+#include "../roller/CandleRestore.hpp"
 
 namespace sentinel::metrics { class MetricsRegistry; }
 
@@ -91,6 +92,17 @@ public:
     static constexpr int64_t kJournalCandleLagMs = 1000;
     void onFeedWatermark(const std::string& symbol, int64_t journalMs);
     void setReseedHandler(std::function<void(const std::string&)> handler);
+    // Startup candle rebuild. Main thread, once, before any stream session:
+    // these products page their 100 ms / 1 s history only after their
+    // rebuild ends. A product never listed is ready (a bare model never warms).
+    void setCandleHistoryWarming(const std::vector<std::string>& products);
+    // Main thread: installs the rebuilt window into an empty series (else
+    // refused, live bars kept) and marks the product ready, whatever the
+    // outcome (nullopt: failed or refused, the window stays empty).
+    void onCandleHistoryRestored(const std::string& symbol,
+                                 std::optional<sentinel::roller::CandleRestore> restore);
+    // Any thread.
+    bool candleHistoryReady(const std::string& symbol) const;
 
 public slots:
     void onTrade(const Trade& trade);
@@ -153,6 +165,8 @@ private:
     std::function<bool(const std::string&)> m_rollerRunning;
     std::function<void(const std::string&)> m_reseed;
     std::map<std::string, int64_t> m_nextReseedMs;
+    // Keys fixed by setCandleHistoryWarming before sessions; values flip once.
+    std::map<std::string, std::atomic<bool>> m_candleHistoryReady;
     // Throttled requests are coalesced, never dropped: delivered at the deadline.
     std::set<std::string> m_pendingReseeds;
     QTimer m_reseedTimer;

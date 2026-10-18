@@ -251,8 +251,10 @@ bars; 18,000 contiguous buckets are 30 minutes) and has no 1000 entry, so 1 s ke
 cap. Values are clamped to
 [350, 200000] with a warning (350 is one history page; 200,000 bounds the
 element count at about 12 MB per product before a trim, allocation up to about
-twice that). The value takes effect at the next server start; RAM history is
-empty after every restart.
+twice that). The value takes effect at the next server start. At every start the
+server rebuilds the newest 30 minutes of 100 ms and 1 s bars from the capture
+journal (when those timeframes are configured) with these retentions; coarser
+RAM history is empty after a restart. There is no knob for the rebuild.
 
 `trade_overlays.retention_columns` defaults to 5120 (8192 in the checked-in config).
 Retained execution history uses exactly

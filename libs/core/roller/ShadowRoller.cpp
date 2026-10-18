@@ -1,4 +1,5 @@
 #include "ShadowRoller.hpp"
+#include "CandleRestore.hpp"
 #include "SentinelLogging.hpp"
 #include "capture/CaptureFanout.hpp"
 #include <QDir>
@@ -11,6 +12,7 @@
 #include <fstream>
 #include <map>
 #include <thread>
+#include <unordered_set>
 
 namespace sentinel::roller {
 namespace fs = std::filesystem;
@@ -253,6 +255,16 @@ class ModelTap {
   std::unique_ptr<JournalFeed> feed;
   // Newest journal position whose trades reached the model.
   std::optional<JournalPos> delivered;
+  // After a candle restore: the restored trade ids plus every nonempty id
+  // delivered since, until TradeIdWindowCapacity nonempty ids were delivered.
+  // Survives feed replacement (retries, day rotation, recovery); inactive it
+  // passes every trade, as without a restore.
+  struct TradeGate {
+    std::unordered_set<std::string> ids;
+    uint64_t delivered = 0;
+    bool active = false;
+    uint64_t drops = 0;
+  } gate;
   std::string lastRun;
   json sentMetadata;
   int64_t lastRecordMs = 0;
@@ -323,6 +335,27 @@ class ModelTap {
     if (cfg.model.watermark)
       cfg.model.watermark(product, ms);
   }
+  // Every trade of an applied record goes through here (history and live).
+  void deliver(const Trade &t) {
+    if (!tradeHere)
+      return;
+    if (gate.active && !t.trade_id.empty()) {
+      if (!gate.ids.insert(t.trade_id).second) {
+        ++gate.drops;
+        sLog_Probe("journal.gate", "product=" << product << " drop=" << t.trade_id
+                                              << " drops=" << gate.drops);
+        return;
+      }
+      if (++gate.delivered >= JournalFeed::TradeIdWindowCapacity) {
+        gate.active = false;
+        gate.ids = {};
+        sLog_Data("Journal trade gate expired product="
+                  << product << " delivered=" << gate.delivered
+                  << " drops=" << gate.drops);
+      }
+    }
+    cfg.model.trade(t);
+  }
   void unseed() {
     seeded = false;
     feed.reset();
@@ -372,11 +405,20 @@ public:
       if (next)
         next(t, reason);
     };
-    f.onTrade = [this](const Trade &t) {
-      if (tradeHere)
-        cfg.model.trade(t);
-    };
+    f.onTrade = [this](const Trade &t) { deliver(t); };
     f.onConnection = [this](bool up) { durableUp = up; };
+  }
+  // Once per process, before roll(): the model holds the rebuilt window
+  // through r.through, so trades start right after it and the restored ids
+  // are not delivered again.
+  void handoff(CandleRestore &r) {
+    if (!delivered)
+      delivered = r.through;
+    sentSecond = std::max(sentSecond, r.sentSecond);
+    gate.ids = std::move(r.tradeIds);
+    gate.delivered = 0;
+    gate.active = true;
+    gate.drops = 0;
   }
   std::pair<JournalBook,bool> anchorBook() const { return {durable,durableUp}; }
   void restoreAnchor(const JournalBook& book, bool up) {
@@ -430,10 +472,7 @@ public:
       live.clear();
       hide(reason);
     };
-    feed->onTrade = [this](const Trade &t) {
-      if (tradeHere)
-        cfg.model.trade(t);
-    };
+    feed->onTrade = [this](const Trade &t) { deliver(t); };
     feed->onConnection = [this](bool up) {
       liveUp = up;
       report();
@@ -450,7 +489,9 @@ public:
     sLog_Data("Journal live seed product="
               << product << " valid=" << live.valid
               << " bids=" << live.bids.size() << " asks=" << live.asks.size()
-              << " provisional=" << pending.size() << " seedUs="
+              << " provisional=" << pending.size()
+              << " gate=" << (gate.active ? gate.ids.size() : 0)
+              << " gateDrops=" << gate.drops << " seedUs="
               << std::chrono::duration_cast<std::chrono::microseconds>(
                      std::chrono::steady_clock::now() - began)
                      .count());
@@ -720,6 +761,9 @@ public:
   }
   LiveSource(const LiveSource &) = delete;
   LiveSource &operator=(const LiveSource &) = delete;
+  // The durable handshake ceiling: roll() replays exactly through it.
+  const JournalPos &durableCeiling() const { return *diskTarget; }
+  bool beyond(const JournalPos &p) { return !older(p, *diskTarget); }
   bool anchorAllowed(const JournalPos& p) {
     return diskTarget && older(p,*diskTarget);
   }
@@ -951,7 +995,12 @@ struct ShadowRoller::Impl {
     metrics::Counter *records, *failures, *compareFailures, *cooldowns,
         *leadForks, *invalidations, *writeErrors;
     metrics::Counter *minuteColumns = nullptr;
+    metrics::Counter *candleRestoreFailures = nullptr,
+                     *candleRestorePartial = nullptr;
     bool refused = false;
+    // The one candle rebuild of this process reached a terminal outcome or
+    // started (worker only after construction).
+    bool candlesRestored = false;
     bool healthy = false; // readyMutex
     // Journal live feed: the model asked for a fresh snapshot.
     std::atomic<bool> reseed{false};
@@ -1025,6 +1074,16 @@ struct ShadowRoller::Impl {
       p->compareFailures = &registry.counter(
           "sentinel_roller_shadow_comparison_failures_total",
           "Hourly parity checks that could not complete.", labels);
+      p->candleRestoreFailures = &registry.counter(
+          "sentinel_candle_history_restore_failures_total",
+          "Startup candle rebuilds that failed (product ready with an empty "
+          "100 ms / 1 s window), refused products included.",
+          labels);
+      p->candleRestorePartial = &registry.counter(
+          "sentinel_candle_history_restore_partial_total",
+          "Startup candle rebuilds without an initial state inside the file "
+          "cap (installed; history begins at the first trade in the window).",
+          labels);
       p->leadForks = &registry.counter(
           "sentinel_roller_shadow_live_lead_forks_total",
           "Live forming-minute leads forked from durable history state "
@@ -1058,6 +1117,12 @@ struct ShadowRoller::Impl {
         sLog_Error("Roller refused product="
                    << p->name << " reason=no journal with product_id under "
                    << cfg.journalRoot);
+        if (restoreEnabled()) {
+          // Never attempted: the product is ready with an empty window.
+          p->candlesRestored = true;
+          p->candleRestoreFailures->inc();
+          cfg.model.candleRestore(p->name, std::nullopt);
+        }
       }
       products.push_back(std::move(p));
     }
@@ -1073,6 +1138,91 @@ struct ShadowRoller::Impl {
     }
   }
   ~Impl() { stop(); }
+  bool restoreEnabled() const {
+    return cfg.model.candleRestore && cfg.candleRestoreForTest &&
+           !cfg.candleTimeframesMs.empty();
+  }
+  static const char *outcomeName(RestoreOutcome o) {
+    return o == RestoreOutcome::complete ? "complete" : "partial";
+  }
+  // One rebuild through the handshake ceiling, before roll() replays to it.
+  // Ends complete or partial (installed, then the tap continues after
+  // `through`), cancelled (nothing posted) or failed (an empty window).
+  // Never throws.
+  void restoreCandles(Product &p, LiveSource &source, ModelTap &tap) noexcept {
+    bool posted = false, counted = false;
+    try {
+      CandleRestoreInput in;
+      in.root = cfg.journalRoot;
+      in.product = p.name;
+      in.through = source.durableCeiling();
+      in.beyond = [&source](const JournalPos &pos) { return source.beyond(pos); };
+      in.stopping = &stopping;
+      in.timeframesMs = cfg.candleTimeframesMs;
+      in.historyBars = cfg.candleHistoryBars;
+      if (cfg.candleRestoreAfterRecordForTest)
+        in.afterRecordForTest = [this](const JournalRecord &r) {
+          cfg.candleRestoreAfterRecordForTest(r, stopping);
+        };
+      std::string failure;
+      in.failure = &failure;
+      sLog_App("Candle history restore start product="
+               << p.name << " through=" << in.through.run << "/"
+               << in.through.block << "/" << in.through.record);
+      auto restore = rebuildCandles(in);
+      if (!restore && stopping) {
+        sLog_App("Candle history restore cancelled product=" << p.name);
+        return;
+      }
+      if (!restore) {
+        p.candleRestoreFailures->inc();
+        counted = true;
+        sLog_Error("Candle history restore failed product="
+                   << p.name << " reason=" << failure);
+        cfg.model.candleRestore(p.name, std::nullopt);
+        posted = true;
+        return;
+      }
+      if (restore->outcome == RestoreOutcome::partial)
+        p.candleRestorePartial->inc();
+      const auto bars = [&](int64_t tf) {
+        const auto it = restore->series.find(tf);
+        return it == restore->series.end() ? size_t(0) : it->second.closed.size();
+      };
+      sLog_App("Candle history restored product="
+               << p.name << " outcome=" << outcomeName(restore->outcome)
+               << " through=" << restore->through.run << "/"
+               << restore->through.block << "/" << restore->through.record
+               << " throughMs=" << restore->throughMs
+               << " startFile=" << restore->startFile
+               << " files=" << restore->files << " records=" << restore->records
+               << " trades=" << restore->trades
+               << " lateDrops=" << restore->lateDrops
+               << " clockRegressions=" << restore->clockRegressions
+               << " deepRegressions=" << restore->deepRegressions
+               << " bars100=" << bars(100) << " bars1000=" << bars(1000)
+               << " tradeIds=" << restore->tradeIds.size()
+               << " readMs=" << restore->readMs);
+      // The gate takes the ids; the model takes the bars. Both precede
+      // roll(), so the install reaches the model before any trade.
+      if (tap.enabled())
+        tap.handoff(*restore);
+      cfg.model.candleRestore(p.name, std::move(restore));
+      posted = true;
+    } catch (...) {
+      sLog_Error("Candle history restore failed product="
+                 << p.name << " reason=exception");
+      if (posted || stopping)
+        return;
+      // Never leave the product warming.
+      if (!counted)
+        p.candleRestoreFailures->inc();
+      try {
+        cfg.model.candleRestore(p.name, std::nullopt);
+      } catch (...) {
+      }
+    }
+  }
   void stop() {
     {
       // The predicate and wait transition share this mutex: never lose a stop
@@ -1192,6 +1342,8 @@ struct ShadowRoller::Impl {
         LiveSource source(cfg, p.name, stopping, checkpoint, retry,
                           lead.enabled() ? &lead : nullptr,
                           tap.enabled() ? &tap : nullptr);
+        if (restoreEnabled() && !std::exchange(p.candlesRestored, true))
+          restoreCandles(p, source, tap);
         RollOptions o{cfg.journalRoot, cfg.outputRoot, p.name, day, day + Day};
         o.publisher = cfg.publisher;
         o.minuteColumnsCounter = p.minuteColumns;

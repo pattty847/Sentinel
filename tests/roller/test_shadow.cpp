@@ -4,6 +4,7 @@
 #include "capture/CaptureSession.hpp"
 #include "heatmap/ChunkCodec.hpp"
 #include "heatmap/LiveEdge.hpp"
+#include "roller/CandleRestore.hpp"
 #include "roller/ShadowRoller.hpp"
 #include "servermodel/ChunkService.hpp"
 #include <QCoreApplication>
@@ -12,6 +13,8 @@
 #include <QHostAddress>
 #include <QTcpSocket>
 #include <QTemporaryDir>
+#include <cstdio>
+#include <ctime>
 #include <fstream>
 #include <sys/resource.h>
 #include <future>
@@ -460,6 +463,15 @@ struct ShadowTest : testing::Test {
       e.kind = "metadata";
       e.product = p;
       e.metadata = m;
+      push(std::move(e));
+    };
+    // Rebuilds only with cfg.candleTimeframesMs set (else bypassed).
+    cfg.model.candleRestore = [push](const std::string &p,
+                                     std::optional<CandleRestore> r) {
+      ModelEvent e;
+      e.kind = "candleRestore";
+      e.product = p;
+      e.reason = r ? "restored" : "none";
       push(std::move(e));
     };
   }
@@ -3332,4 +3344,601 @@ TEST_F(ShadowTest, JournalTapRestoresBatchRebuiltAnchor) {
 TEST_F(ShadowTest, AnchorFailureMetricRegisteredAtStartup) {
   start();
   EXPECT_TRUE(metrics->hasSeries("sentinel_roller_anchor_failures_total", {{"product", Product}}));
+}
+
+// ---------------------------------------------------------------------------
+// Restart reconstruction of 100 ms and 1 s candles: the production graph
+// rebuilds the newest 30 minutes from the journal at the first handshake,
+// installs them before any trade and hands the journal position over exactly.
+// ---------------------------------------------------------------------------
+namespace {
+std::string isoAt(int64_t ms) {
+  const int64_t t = Epoch + ms;
+  const time_t s = static_cast<time_t>(t / 1000);
+  tm g{};
+  gmtime_r(&s, &g);
+  char buf[40];
+  std::snprintf(buf, sizeof buf, "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+                g.tm_year + 1900, g.tm_mon + 1, g.tm_mday, g.tm_hour, g.tm_min,
+                g.tm_sec, int(t % 1000));
+  return buf;
+}
+json pepeTrade(int64_t exchangeMs, const std::string &id,
+               const std::string &price = "0.00001000") {
+  return {{"trade_id", id},          {"product_id", "PEPE-USD"},
+          {"price", price},          {"size", "1000"},
+          {"side", "BUY"},           {"time", isoAt(exchangeMs)}};
+}
+std::string pepeTrades(const std::vector<json> &list,
+                       const char *type = "update") {
+  return json({{"channel", "market_trades"},
+               {"events", json::array({{{"type", type}, {"trades", list}}})}})
+      .dump();
+}
+// One trade received 250 ms after its exchange time.
+capture::Record tradeAt(int64_t ms, const std::string &id,
+                        const std::string &price = "0.00001000") {
+  return record(ms, pepeTrades({pepeTrade(ms - 250, id, price)}));
+}
+std::string priceOf(int i) {
+  char buf[16];
+  std::snprintf(buf, sizeof buf, "0.0000%04d", 1000 + i % 17);
+  return buf;
+}
+// A capture reconnect: transport down/up, a book snapshot and a market_trades
+// snapshot repeating the given trades.
+void resend(capture::Writer &w, int64_t ms, const std::vector<json> &list) {
+  w.append(lifecycle(ms, capture::Kind::TransportDown));
+  w.append(lifecycle(ms, capture::Kind::TransportUp));
+  w.append(record(ms, pepeSnapshot()));
+  w.append(record(ms, pepeTrades(list, "snapshot")));
+}
+// Uninterrupted path over the whole journal: reader -> feed -> aggregator,
+// one lagged watermark per journal second (the model's own rule).
+struct CandleReference {
+  TimeframeAggregator aggregator{{100, 1000, 60000}, {{100, 60000}, {1000, 10000}}};
+  explicit CandleReference(const std::string &root) {
+    JournalReader reader(root, "PEPE-USD");
+    JournalFeed feed("PEPE-USD");
+    feed.onTrade = [this](const Trade &t) { aggregator.onTrade(t); };
+    int64_t sent = INT64_MIN;
+    JournalRecord r;
+    while (reader.next(r)) {
+      feed.apply(r);
+      const int64_t ms = r.record.time.systemNs / 1000000;
+      if (ms / 1000 > sent) {
+        sent = ms / 1000;
+        aggregator.advance("PEPE-USD", ms - ServerDataModel::kJournalCandleLagMs);
+      }
+    }
+  }
+};
+// Closed bars of the model at or after fromMs equal the reference's, bar for
+// bar, up to the model's newest closed bar. Returns the bars compared.
+size_t expectSameBars(const ServerDataModel &m, const CandleReference &ref,
+                      int64_t fromMs) {
+  size_t compared = 0;
+  for (const int64_t tf : {int64_t{100}, int64_t{1000}}) {
+    const auto got = m.getHistory("PEPE-USD", tf, 100000);
+    const auto all = ref.aggregator.getHistory("PEPE-USD", tf, 100000);
+    EXPECT_FALSE(got.empty()) << tf;
+    if (got.empty())
+      continue;
+    const int64_t from = std::max(fromMs, got.front().timestamp_ms);
+    std::vector<OHLCVBar> mine, want;
+    for (const auto &b : got)
+      if (b.timestamp_ms >= from)
+        mine.push_back(b);
+    for (const auto &b : all)
+      if (b.timestamp_ms >= from && b.timestamp_ms <= got.back().timestamp_ms)
+        want.push_back(b);
+    EXPECT_EQ(mine.size(), want.size()) << tf;
+    for (size_t i = 0; i < std::min(mine.size(), want.size()); ++i) {
+      EXPECT_EQ(std::tie(mine[i].timestamp_ms, mine[i].open, mine[i].high,
+                         mine[i].low, mine[i].close, mine[i].volume,
+                         mine[i].count),
+                std::tie(want[i].timestamp_ms, want[i].open, want[i].high,
+                         want[i].low, want[i].close, want[i].volume,
+                         want[i].count))
+          << tf << " at " << i;
+      if (::testing::Test::HasFailure())
+        return compared;
+    }
+    compared += mine.size();
+  }
+  return compared;
+}
+// Captures the log for one test; restores the previous handler at scope end.
+struct LogCapture {
+  LogCapture() {
+    clear();
+    logcapture::previous = qInstallMessageHandler(logcapture::handler);
+  }
+  ~LogCapture() { qInstallMessageHandler(logcapture::previous); }
+  static void clear() {
+    std::lock_guard lock(logcapture::mutex);
+    logcapture::lines.clear();
+  }
+  static size_t count(const std::string &text) {
+    std::lock_guard lock(logcapture::mutex);
+    return std::count_if(logcapture::lines.begin(), logcapture::lines.end(),
+                         [&](const auto &l) { return l.find(text) != std::string::npos; });
+  }
+  static std::string line(const std::string &text) {
+    std::lock_guard lock(logcapture::mutex);
+    for (const auto &l : logcapture::lines)
+      if (l.find(text) != std::string::npos)
+        return l;
+    return {};
+  }
+};
+// Restores owner_all on a directory even when an assertion fails.
+struct ReadOnly {
+  fs::path dir;
+  explicit ReadOnly(fs::path d) : dir(std::move(d)) {
+    fs::permissions(dir, fs::perms::owner_read | fs::perms::owner_exec);
+  }
+  void restore() { fs::permissions(dir, fs::perms::owner_all); }
+  ~ReadOnly() { restore(); }
+};
+int64_t committedThrough(const fs::path &dir) {
+  try {
+    return load(dir / "roller.json").value("committedThroughMs", int64_t{0});
+  } catch (const std::exception &) {
+    return 0;
+  }
+}
+// A restore-enabled production server: 100 ms, 1 s and 1 m served from RAM
+// with the checked-in 30 min retention at 100 ms.
+struct RestoreServer : JournalServer {
+  explicit RestoreServer(ShadowTest &t, std::vector<std::string> products = {"PEPE-USD"})
+      : JournalServer(t, std::move(products)) {
+    config.chart.timeframesMs = {100, 1000, 60000};
+    config.chart.historyBars = {{100, 18000}};
+  }
+  size_t broadcasts(const std::string &id) const {
+    return std::count_if(trades.begin(), trades.end(),
+                         [&](const Trade &x) { return x.trade_id == id; });
+  }
+  size_t footprintAt(int64_t exchangeMs, double price) {
+    std::vector<ServerDataModel::FootprintTradeSample> out;
+    model().collectFootprintTrades("PEPE-USD", Epoch + exchangeMs - 1,
+                                   Epoch + exchangeMs + 1, out);
+    return std::count_if(out.begin(), out.end(),
+                         [&](const auto &f) { return std::abs(f.price - price) < 1e-12; });
+  }
+  bool has(const std::string &line) {
+    return metrics().find(line + "\n") != std::string::npos;
+  }
+};
+} // namespace
+
+// The restart path end to end: 35 min of one trade per second crossing an
+// hour (the rebuild reads both files), a checkpointed first process, a
+// restart. The second process installs the window before its first trade and
+// then extends it live exactly like an uninterrupted run.
+TEST_F(ShadowTest, CandleRestoreAfterRestartAcrossAnHourMatchesUninterruptedBars) {
+  LogCapture logs;
+  RestoreServer s(*this);
+  for (int t = 70; t < 1800; t += 10)
+    s.pepe->append(record(t * 1000));
+  int id = 0;
+  for (int t = 1800; t <= 3605; ++t, ++id)
+    s.pepe->append(tradeAt(t * 1000, "t" + std::to_string(id), priceOf(id)));
+  s.pepe->flush();
+  ASSERT_TRUE(s.initialize());
+  const auto dir = root / "shadow" / "PEPE-USD";
+  ASSERT_TRUE(eventuallyQt([&] { return committedThrough(dir) >= Epoch + 3540000; }));
+  s.app.reset();
+  logs.clear();
+  s.trades.clear();
+  s.books.clear();
+  ASSERT_TRUE(s.initialize());
+  std::optional<bool> readyAtFirstTrade;
+  QObject::connect(&s.model(), &ServerDataModel::tradeBroadcast, [&](const Trade &) {
+    if (!readyAtFirstTrade)
+      readyAtFirstTrade = s.model().candleHistoryReady("PEPE-USD");
+  });
+  ASSERT_TRUE(eventuallyQt([&] {
+    return LogCapture::count("Candle history ready symbol=PEPE-USD restored=complete") == 1;
+  }));
+  const auto restored = LogCapture::line("Candle history restored product=PEPE-USD");
+  EXPECT_NE(restored.find("outcome=complete"), std::string::npos) << restored;
+  EXPECT_NE(restored.find("files=2"), std::string::npos) << restored;
+  EXPECT_TRUE(s.model().candleHistoryReady("PEPE-USD"));
+  EXPECT_TRUE(s.trades.empty()); // nothing at or before the ceiling is replayed
+  const int64_t windowStart = Epoch + 3605000 - kRestoreWindowMs;
+  {
+    CandleReference ref(cfg.journalRoot);
+    EXPECT_GT(expectSameBars(s.model(), ref, windowStart), 18000u);
+  }
+  ASSERT_TRUE(eventuallyQt([&] {
+    return LogCapture::count("Journal live seed product=PEPE-USD") >= 1;
+  }));
+  for (int t = 3606; t <= 3640; ++t, ++id)
+    s.pepe->append(tradeAt(t * 1000, "t" + std::to_string(id), priceOf(id)));
+  s.pepe->flush();
+  ASSERT_TRUE(eventuallyQt([&] {
+    const auto h = s.model().getHistory("PEPE-USD", 1000, 1);
+    return !h.empty() && h.back().timestamp_ms >= Epoch + 3638000;
+  }));
+  ASSERT_TRUE(readyAtFirstTrade.has_value());
+  EXPECT_TRUE(*readyAtFirstTrade);
+  EXPECT_EQ(s.trades.size(), 35u);
+  CandleReference ref(cfg.journalRoot);
+  expectSameBars(s.model(), ref, windowStart);
+  EXPECT_EQ(LogCapture::count("Candle history restored product=PEPE-USD"), 1u);
+  EXPECT_EQ(LogCapture::count("Candle history ready symbol=PEPE-USD"), 1u);
+  EXPECT_TRUE(s.has("sentinel_candle_history_warming{product=\"PEPE-USD\"} 0"));
+  EXPECT_TRUE(s.has("sentinel_candle_history_restore_failures_total{product=\"PEPE-USD\"} 0"));
+  EXPECT_TRUE(s.has("sentinel_candle_history_restore_partial_total{product=\"PEPE-USD\"} 0"));
+}
+
+// A journal younger than the window has no bar before it: the rebuild is
+// partial, installed anyway (Q2') and the product is ready.
+TEST_F(ShadowTest, CandleRestorePartialWindowIsInstalledAndReady) {
+  LogCapture logs;
+  RestoreServer s(*this);
+  for (int t = 64; t <= 120; ++t)
+    s.pepe->append(tradeAt(t * 1000, "p" + std::to_string(t), priceOf(t)));
+  s.pepe->flush();
+  ASSERT_TRUE(s.initialize());
+  ASSERT_TRUE(eventuallyQt([&] {
+    return LogCapture::count("Candle history ready symbol=PEPE-USD restored=partial") == 1;
+  }));
+  EXPECT_TRUE(s.trades.empty());
+  const auto seconds = s.model().getHistory("PEPE-USD", 1000, 1000);
+  ASSERT_FALSE(seconds.empty()); // installed, no live trade yet
+  EXPECT_EQ(seconds.front().timestamp_ms, Epoch + 63000); // the first trade's second
+  CandleReference ref(cfg.journalRoot);
+  expectSameBars(s.model(), ref, 0);
+  EXPECT_TRUE(s.has("sentinel_candle_history_restore_partial_total{product=\"PEPE-USD\"} 1"));
+  EXPECT_TRUE(s.has("sentinel_candle_history_restore_failures_total{product=\"PEPE-USD\"} 0"));
+  EXPECT_TRUE(s.has("sentinel_candle_history_warming{product=\"PEPE-USD\"} 0"));
+}
+
+// A capture file rotation while the rebuild reads: the file list is fixed at
+// its start and `through` is the handshake ceiling. Trades journaled during the
+// read reach the model exactly once, after the install; none at or before
+// `through` does.
+TEST_F(ShadowTest, CandleRestoreHandsOverExactlyAcrossARotationDuringTheRead) {
+  LogCapture logs;
+  RestoreServer s(*this);
+  for (int t = 64; t <= 400; ++t)
+    s.pepe->append(tradeAt(t * 1000, "h" + std::to_string(t), priceOf(t)));
+  s.pepe->flush();
+  std::promise<void> entered, release;
+  auto releasing = release.get_future().share();
+  std::atomic<int> calls{0};
+  s.config.rollerShadow.candleRestoreAfterRecordForTest =
+      [&](const JournalRecord &, const std::atomic<bool> &) {
+        if (calls++ == 0) {
+          entered.set_value();
+          releasing.wait();
+        }
+      };
+  struct Unblock {
+    std::promise<void> &release;
+    bool done = false;
+    void operator()() { if (!std::exchange(done, true)) release.set_value(); }
+    ~Unblock() { (*this)(); }
+  } unblock{release};
+  ASSERT_TRUE(s.initialize());
+  ASSERT_EQ(entered.get_future().wait_for(8s), std::future_status::ready);
+  s.pepe->sealSegment();
+  for (int t = 401; t <= 410; ++t)
+    s.pepe->append(tradeAt(t * 1000, "late" + std::to_string(t), priceOf(t)));
+  s.pepe->flush();
+  unblock();
+  ASSERT_TRUE(eventuallyQt([&] {
+    return LogCapture::count("Candle history ready symbol=PEPE-USD restored=") == 1;
+  }));
+  ASSERT_TRUE(eventuallyQt([&] { return s.trades.size() >= 10; }));
+  std::this_thread::sleep_for(100ms);
+  QCoreApplication::processEvents();
+  std::vector<std::string> ids;
+  for (const auto &t : s.trades)
+    ids.push_back(t.trade_id);
+  std::vector<std::string> expected;
+  for (int t = 401; t <= 410; ++t)
+    expected.push_back("late" + std::to_string(t));
+  EXPECT_EQ(ids, expected);
+  EXPECT_NE(LogCapture::line("Candle history restored product=PEPE-USD").find("files=1"),
+            std::string::npos);
+  CandleReference ref(cfg.journalRoot);
+  ASSERT_TRUE(eventuallyQt([&] {
+    const auto h = s.model().getHistory("PEPE-USD", 1000, 1);
+    return !h.empty() && h.back().timestamp_ms >= Epoch + 408000;
+  }));
+  expectSameBars(s.model(), ref, 0);
+}
+
+// Reconnect resends against a full gate (16,384 restored ids in the window):
+// the roller restarts from an anchor that precedes none of the restored ids,
+// so its own ring holds none of them. The gate drops resent restored ids,
+// counts only nonempty ids, and expires after exactly 16,384 delivered ones;
+// a resend after that passes as without a restore.
+TEST_F(ShadowTest, CandleRestoreGateDropsReconnectResendsUntilItExpires) {
+  LogCapture logs;
+  RestoreServer s(*this);
+  const std::string aPrice = "0.00001077";
+  for (int k = 0; k < 128; ++k) {
+    std::vector<json> list;
+    const int64_t ms = 100000 + k * 6000;
+    for (int j = 0; j < 128; ++j) {
+      const int n = k * 128 + j;
+      list.push_back(pepeTrade(ms - 250, "a" + std::to_string(n),
+                               n == 16383 ? aPrice : "0.00001000"));
+    }
+    s.pepe->append(record(ms, pepeTrades(list)));
+  }
+  // The 15:00 anchor holds no restored id in its ring; minute 14 commits
+  // at the 16:00 minute fence.
+  for (int t = 870; t <= 965; t += 5)
+    s.pepe->append(record(t * 1000));
+  s.pepe->flush();
+  ASSERT_TRUE(s.initialize());
+  ASSERT_TRUE(eventuallyQt([&] {
+    return LogCapture::count("Roller anchor written product=PEPE-USD boundaryMs=" +
+                             std::to_string(Epoch + 900000)) == 1 &&
+           committedThrough(root / "shadow" / "PEPE-USD") >= Epoch + 900000;
+  }));
+  s.app.reset();
+  logs.clear();
+  s.trades.clear();
+  ASSERT_TRUE(s.initialize());
+  ASSERT_TRUE(eventuallyQt([&] {
+    return LogCapture::count("Journal live seed product=PEPE-USD") == 1 &&
+           LogCapture::count("Candle history ready symbol=PEPE-USD") == 1;
+  }));
+  EXPECT_EQ(LogCapture::count("Roller anchor restored product=PEPE-USD"), 1u);
+  EXPECT_NE(LogCapture::line("Candle history restored product=PEPE-USD").find("tradeIds=16384"),
+            std::string::npos);
+  const json a = pepeTrade(862000 - 250, "a16383", aPrice);
+  const auto deliveredOnce = [&](const std::string &id) {
+    return eventuallyQt([&] { return s.broadcasts(id) == 1; });
+  };
+  // Resend of a restored id: dropped at the tap; a new id passes.
+  resend(*s.pepe, 970000, {a});
+  s.pepe->append(tradeAt(971000, "x", "0.00001055"));
+  ASSERT_TRUE(deliveredOnce("x"));
+  EXPECT_EQ(s.broadcasts("a16383"), 0u);
+  EXPECT_EQ(s.footprintAt(862000 - 250, 0.00001077), 0u);
+  EXPECT_EQ(s.footprintAt(971000 - 250, 0.00001055), 1u);
+  // 256 empty ids: delivered, never counted or stored.
+  for (int k = 0; k < 2; ++k) {
+    std::vector<json> list;
+    for (int j = 0; j < 128; ++j)
+      list.push_back(pepeTrade(972000 + k * 100 + j / 2 - 250, ""));
+    s.pepe->append(record(972000 + k * 100, pepeTrades(list)));
+  }
+  // 16,382 more nonempty ids: 16,383 delivered since the handoff, still active.
+  int n = 0;
+  for (int k = 0; n < 16382; ++k) {
+    std::vector<json> list;
+    for (int j = 0; j < 128 && n < 16382; ++j, ++n)
+      list.push_back(pepeTrade(974000 + k * 100 - 250, "n" + std::to_string(n)));
+    s.pepe->append(record(974000 + k * 100, pepeTrades(list)));
+  }
+  resend(*s.pepe, 989000, {a});
+  s.pepe->append(tradeAt(990000, "last")); // the 16,384th: the gate expires
+  ASSERT_TRUE(deliveredOnce("last"));
+  EXPECT_EQ(s.broadcasts("a16383"), 0u);
+  EXPECT_EQ(s.broadcasts(""), 256u);
+  EXPECT_EQ(s.broadcasts("n16381"), 1u);
+  // Expired: a restored id the roller's own ring never held passes again,
+  // exactly as a process that never restored would deliver it.
+  resend(*s.pepe, 991000, {pepeTrade(100000 - 250, "a100")});
+  s.pepe->append(tradeAt(992000, "after"));
+  ASSERT_TRUE(deliveredOnce("after"));
+  EXPECT_EQ(s.broadcasts("a100"), 1u);
+  EXPECT_EQ(s.broadcasts("x"), 1u);
+  const auto seconds = s.model().getHistory("PEPE-USD", 1000, 100000);
+  const auto bucket = std::find_if(seconds.begin(), seconds.end(), [](const OHLCVBar &b) {
+    return b.timestamp_ms == Epoch + 970000;
+  });
+  ASSERT_NE(bucket, seconds.end());
+  EXPECT_EQ(bucket->count, 1u); // x alone
+  EXPECT_EQ(LogCapture::count("Journal trade gate expired product=PEPE-USD"), 1u);
+}
+
+// An outer retry after the install (a checkpoint write fails) rebuilds the
+// roller's feeds from an anchor after X with empty trade rings. The model
+// keeps the one install; the gate still knows X, so a reconnect resend of X is
+// dropped. Without the restore the same sequence delivers X twice (today).
+void outerRetryAfterRestore(ShadowTest &t, bool restore, size_t expectedX) {
+  LogCapture logs;
+  RestoreServer s(t);
+  s.config.rollerShadow.candleRestoreForTest = restore;
+  ASSERT_TRUE(s.initialize());
+  ASSERT_TRUE(eventuallyQt([&] {
+    return LogCapture::count("Journal live seed product=PEPE-USD") == 1;
+  }));
+  s.pepe->append(tradeAt(64000, "X", "0.00001033"));
+  ASSERT_TRUE(eventuallyQt([&] { return s.broadcasts("X") == 1; }));
+  // Minute 14 commits at the 16:00 minute fence, after the 15:00 anchor.
+  for (int sec = 65; sec <= 965; ++sec)
+    s.pepe->append(record(sec * 1000));
+  s.pepe->flush();
+  const auto dir = t.root / "shadow" / "PEPE-USD";
+  ASSERT_TRUE(eventuallyQt([&] {
+    return LogCapture::count("Roller anchor written product=PEPE-USD boundaryMs=" +
+                             std::to_string(Epoch + 900000)) == 1 &&
+           committedThrough(dir) >= Epoch + 900000;
+  }));
+  size_t seeds = 0;
+  {
+    ReadOnly guard(dir);
+    for (int sec = 966; sec <= 1025; ++sec)
+      s.pepe->append(record(sec * 1000));
+    s.pepe->flush();
+    ASSERT_TRUE(eventuallyQt([&] {
+      return LogCapture::count("Shadow roller retry product=PEPE-USD") >= 1;
+    }));
+    EXPECT_FALSE(s.has("sentinel_roller_shadow_setup_failures_total{product=\"PEPE-USD\"} 0"));
+    seeds = LogCapture::count("Journal live seed product=PEPE-USD");
+    guard.restore();
+  }
+  ASSERT_TRUE(eventuallyQt([&] {
+    return LogCapture::count("Journal live seed product=PEPE-USD") > seeds;
+  }));
+  EXPECT_GE(LogCapture::count("Roller started product=PEPE-USD"), 2u);
+  EXPECT_GE(LogCapture::count("Roller anchor restored product=PEPE-USD"), 1u);
+  resend(*s.pepe, 1030000, {pepeTrade(64000 - 250, "X", "0.00001033")});
+  s.pepe->append(tradeAt(1031000, "marker"));
+  ASSERT_TRUE(eventuallyQt([&] { return s.broadcasts("marker") == 1; }));
+  EXPECT_EQ(s.broadcasts("X"), expectedX);
+  EXPECT_EQ(s.trades.size(), expectedX + 1);
+  EXPECT_EQ(LogCapture::count("Candle history restored product=PEPE-USD"), restore ? 1u : 0u);
+  EXPECT_EQ(LogCapture::count("Candle history ready symbol=PEPE-USD"), restore ? 1u : 0u);
+  EXPECT_EQ(LogCapture::count("Candle history restore start product=PEPE-USD"), restore ? 1u : 0u);
+  // The recorder's output is the batch roll of the same journal.
+  ASSERT_TRUE(eventuallyQt([&] { return committedThrough(dir) >= Epoch + 960000; }));
+  s.app.reset();
+  roll({t.cfg.journalRoot, t.root / "batch", "PEPE-USD", Epoch, committedThrough(dir)});
+  EXPECT_TRUE(contents(t.cfg.outputRoot) == contents(t.root / "batch"));
+}
+TEST_F(ShadowTest, CandleRestoreOuterRetryKeepsTheInstallAndDropsAResentId) {
+  outerRetryAfterRestore(*this, true, 1);
+}
+TEST_F(ShadowTest, CandleRestoreBypassedOuterRetryRedeliversAResentId) {
+  outerRetryAfterRestore(*this, false, 2);
+}
+
+// Q2': a rebuild that cannot read its window (here: more files than the cap)
+// ends warming with an empty window; live trades build bars as before.
+TEST_F(ShadowTest, CandleRestoreFailureMarksReadyWithAnEmptyWindow) {
+  LogCapture logs;
+  RestoreServer s(*this);
+  for (int k = 0; k < 5; ++k) {
+    s.pepe->sealSegment();
+    s.pepe->append(tradeAt(64000 + k * 1000, "f" + std::to_string(k)));
+  }
+  s.pepe->flush();
+  ASSERT_TRUE(s.initialize());
+  ASSERT_TRUE(eventuallyQt([&] {
+    return LogCapture::count("Candle history ready symbol=PEPE-USD restored=none") == 1;
+  }));
+  EXPECT_EQ(LogCapture::count("Candle history restore failed product=PEPE-USD reason=file span"), 1u);
+  EXPECT_EQ(LogCapture::count("Candle history restored product=PEPE-USD"), 0u);
+  EXPECT_TRUE(s.model().getHistory("PEPE-USD", 1000, 1000).empty());
+  EXPECT_TRUE(s.model().candleHistoryReady("PEPE-USD"));
+  EXPECT_TRUE(s.has("sentinel_candle_history_restore_failures_total{product=\"PEPE-USD\"} 1"));
+  EXPECT_TRUE(s.has("sentinel_candle_history_restore_partial_total{product=\"PEPE-USD\"} 0"));
+  EXPECT_TRUE(s.has("sentinel_candle_history_warming{product=\"PEPE-USD\"} 0"));
+  ASSERT_TRUE(eventuallyQt([&] {
+    return LogCapture::count("Journal live seed product=PEPE-USD") == 1;
+  }));
+  EXPECT_TRUE(s.trades.empty()); // the tip's trades are history, as without a restore
+  s.pepe->append(tradeAt(70000, "live"));
+  for (int sec = 71; sec <= 73; ++sec)
+    s.pepe->append(record(sec * 1000));
+  ASSERT_TRUE(eventuallyQt([&] {
+    return s.broadcasts("live") == 1 && !s.model().getHistory("PEPE-USD", 1000, 10).empty();
+  }));
+}
+
+// A listed product without a journal is refused before its worker starts: one
+// terminal post, ready at once, no rebuild attempt.
+TEST_F(ShadowTest, CandleRestoreRefusedProductIsReadyWithoutAnAttempt) {
+  LogCapture logs;
+  RestoreServer s(*this);
+  s.config.rollerShadow.products = {"PEPE-USD", "XRP-USD"};
+  ASSERT_TRUE(s.initialize());
+  ASSERT_TRUE(eventuallyQt([&] {
+    return LogCapture::count("Candle history ready symbol=XRP-USD restored=none") == 1 &&
+           LogCapture::count("Candle history ready symbol=PEPE-USD") == 1;
+  }));
+  EXPECT_TRUE(s.model().candleHistoryReady("XRP-USD"));
+  EXPECT_EQ(LogCapture::count("Candle history restore start product=XRP-USD"), 0u);
+  EXPECT_EQ(LogCapture::count("Candle history restore failed product=XRP-USD"), 0u);
+  EXPECT_TRUE(s.has("sentinel_candle_history_restore_failures_total{product=\"XRP-USD\"} 1"));
+  EXPECT_TRUE(s.has("sentinel_candle_history_warming{product=\"XRP-USD\"} 0"));
+  EXPECT_TRUE(s.has("sentinel_candle_history_restore_failures_total{product=\"PEPE-USD\"} 0"));
+}
+
+// Bypass: the switch off, or no RAM-served trade timeframe, rebuilds nothing,
+// posts nothing and never warms.
+void bypassedRestore(ShadowTest &t, bool forTest, std::vector<int64_t> timeframes) {
+  LogCapture logs;
+  RestoreServer s(t);
+  s.config.rollerShadow.candleRestoreForTest = forTest;
+  s.config.chart.timeframesMs = std::move(timeframes);
+  for (int sec = 64; sec <= 70; ++sec)
+    s.pepe->append(tradeAt(sec * 1000, "b" + std::to_string(sec)));
+  s.pepe->flush();
+  ASSERT_TRUE(s.initialize());
+  EXPECT_TRUE(s.model().candleHistoryReady("PEPE-USD"));
+  ASSERT_TRUE(eventuallyQt([&] {
+    return LogCapture::count("Journal live seed product=PEPE-USD") == 1;
+  }));
+  s.pepe->append(tradeAt(71000, "live"));
+  ASSERT_TRUE(eventuallyQt([&] { return s.broadcasts("live") == 1; }));
+  EXPECT_EQ(s.trades.size(), 1u);
+  EXPECT_EQ(LogCapture::count("Candle history"), 0u);
+  EXPECT_EQ(LogCapture::count("Candle restore"), 0u);
+  EXPECT_EQ(s.metrics().find("sentinel_candle_history_warming{"), std::string::npos);
+  EXPECT_TRUE(s.has("sentinel_candle_history_restore_failures_total{product=\"PEPE-USD\"} 0"));
+  EXPECT_TRUE(s.has("sentinel_candle_history_restore_partial_total{product=\"PEPE-USD\"} 0"));
+  if (std::find(s.config.chart.timeframesMs.begin(), s.config.chart.timeframesMs.end(), 1000) !=
+      s.config.chart.timeframesMs.end())
+    EXPECT_TRUE(s.model().getHistory("PEPE-USD", 1000, 1000).empty()); // nothing installed
+}
+TEST_F(ShadowTest, CandleRestoreSwitchedOffNeverWarms) {
+  bypassedRestore(*this, false, {100, 1000, 60000});
+}
+TEST_F(ShadowTest, CandleRestoreWithoutRamTimeframesNeverWarms) {
+  bypassedRestore(*this, true, {60000, 300000});
+}
+
+// Server stop during the rebuild: the read ends within one record, nothing is
+// posted or counted, and the worker exits without a second attempt.
+TEST_F(ShadowTest, CandleRestoreCancelledAtShutdownPostsNothing) {
+  LogCapture logs;
+  tapModel();
+  cfg.candleTimeframesMs = {100, 1000};
+  initial();
+  std::promise<void> entered;
+  std::atomic<int> records{0};
+  cfg.candleRestoreAfterRecordForTest = [&](const JournalRecord &,
+                                            const std::atomic<bool> &stopping) {
+    if (records++ == 0)
+      entered.set_value();
+    while (!stopping.load())
+      std::this_thread::sleep_for(1ms);
+  };
+  start();
+  ASSERT_EQ(entered.get_future().wait_for(8s), std::future_status::ready);
+  shadow->stop(); // sets stopping, then joins the worker
+  EXPECT_EQ(records.load(), 1);
+  EXPECT_EQ(LogCapture::count("Candle history restore cancelled product=BTC-USD"), 1u);
+  EXPECT_EQ(LogCapture::count("Candle history restored"), 0u);
+  EXPECT_EQ(LogCapture::count("Candle history restore failed"), 0u);
+  EXPECT_EQ(modelCount("candleRestore"), 0u);
+  EXPECT_EQ(modelCount("trade"), 0u);
+  EXPECT_EQ(LogCapture::count("Roller started product=BTC-USD"), 1u);
+  EXPECT_TRUE(has("sentinel_candle_history_restore_failures_total{product=\"BTC-USD\"} 0"));
+  EXPECT_TRUE(has("sentinel_candle_history_restore_partial_total{product=\"BTC-USD\"} 0"));
+}
+
+// The restore applied the watermark of `through`'s journal second: a record
+// later in that second sends none, as uninterrupted delivery would not.
+TEST_F(ShadowTest, CandleRestoreHandoffKeepsTheWatermarkSecond) {
+  tapModel();
+  cfg.candleTimeframesMs = {100, 1000};
+  initial();
+  start();
+  ASSERT_TRUE(eventually([&] { return modelCount("snapshot") == 1; }));
+  EXPECT_EQ(modelCount("candleRestore"), 1u);
+  writer->append(record(63500));
+  writer->append(record(64000));
+  ASSERT_TRUE(eventually([&] { return modelCount("watermark") >= 1; }));
+  std::this_thread::sleep_for(100ms);
+  const auto marks = modelLog("watermark");
+  ASSERT_EQ(marks.size(), 1u);
+  EXPECT_EQ(std::chrono::duration_cast<std::chrono::milliseconds>(
+                marks.front().trade.timestamp.time_since_epoch()).count(),
+            Epoch + 64000);
+  shadow.reset();
+  writer->close();
 }

@@ -206,11 +206,9 @@ TimeframeAggregator::Series TimeframeAggregator::exportSeries(const std::string&
     return out;
 }
 
-bool TimeframeAggregator::restoreSeries(const std::string& symbol, int64_t timeframeMs,
-                                        Series series) {
+bool TimeframeAggregator::restorable(const std::string& symbol, int64_t timeframeMs) const {
     const int i = tradeIndex(timeframeMs);
     if (i < 0 || !m_tradeTimeframeOn[i]) return false;
-    std::unique_lock lock(m_mutex);
     if (const auto found = m_states.find(symbol); found != m_states.end()) {
         const auto& existing = found->second;
         const auto hist = existing.history.find(timeframeMs);
@@ -221,6 +219,19 @@ bool TimeframeAggregator::restoreSeries(const std::string& symbol, int64_t timef
             existing.floorOn[i])
             return false;
     }
+    return true;
+}
+
+bool TimeframeAggregator::canRestoreSeries(const std::string& symbol, int64_t timeframeMs) const {
+    std::shared_lock lock(m_mutex);
+    return restorable(symbol, timeframeMs);
+}
+
+bool TimeframeAggregator::restoreSeries(const std::string& symbol, int64_t timeframeMs,
+                                        Series series) {
+    std::unique_lock lock(m_mutex);
+    if (!restorable(symbol, timeframeMs)) return false;
+    const int i = tradeIndex(timeframeMs);
     auto& state = m_states[symbol];
     state.history[timeframeMs] = std::move(series.closed);
     state.activeBars[timeframeMs] = series.active;

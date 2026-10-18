@@ -217,4 +217,136 @@ TEST(CandleWireLimits, StalledReaderHitsWriteBytesWithExecutorDraining) {
     EXPECT_LT(RecordingServerStopTest::peakModelEvents(*session), 256);
     EXPECT_TRUE(spinUntil([&] { return RecordingServerStopTest::closing(*session); }));
 }
+
+// A synchronous raw client: the reply exactly as the server wrote it.
+struct RawCandleClient : StalledCandleClient {
+    using StalledCandleClient::StalledCandleClient;
+    Json request(int64_t tf, int64_t end) {
+        ws.write(net::buffer(Json{{"type", "candle_history_request"},
+                                  {"symbol", "BTC-USD"},
+                                  {"timeframe_ms", tf},
+                                  {"end_time_ms", end},
+                                  {"limit", 350}}
+                                 .dump()));
+        for (;;) {
+            beast::flat_buffer b;
+            ws.read(b);
+            auto m = Json::parse(beast::buffers_to_string(b.data()));
+            const auto type = m.value("type", "");
+            if (type == "candle_history_chunk" || type == "error") return m;
+        }
+    }
+};
+
+TEST(CandleWireWarming, WarmingReplyEchoesTheWindowUntilTheRebuildEnds) {
+    int argc = 1;
+    char name[] = "candle-warming";
+    char *argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    CandleFixture fixture;
+    fixture.model->setCandleHistoryWarming({"BTC-USD"});
+    EXPECT_FALSE(fixture.model->candleHistoryReady("BTC-USD"));
+    EXPECT_TRUE(fixture.model->candleHistoryReady("ETH-USD")); // not warming
+    for (int i = 0; i < 30; ++i) tradeAt(*fixture.model, 100000 + i * 100);
+    fixture.model->onFeedWatermark("BTC-USD", 105000);
+    fixture.start();
+    RawCandleClient client(fixture.port());
+    auto sessions = RecordingServerStopTest::sessions(*fixture.server);
+    ASSERT_EQ(sessions.size(), 1);
+    ASSERT_TRUE(spinUntil([&] { return fixture.subscribed(sessions.front()); }));
+    for (const int64_t tf : {int64_t{100}, int64_t{1000}}) {
+        const auto reply = client.request(tf, 103000);
+        EXPECT_EQ(reply.value("type", ""), "candle_history_chunk") << tf;
+        EXPECT_EQ(reply.value("status", ""), "warming") << tf;
+        EXPECT_EQ(reply.value("schema_version", 0), protocol::SentinelProtocol::kCandleSchemaVersion);
+        EXPECT_EQ(reply.value("symbol", ""), "BTC-USD");
+        EXPECT_EQ(reply.value("timeframe_ms", int64_t{0}), tf);
+        EXPECT_EQ(reply.value("start_time_ms", int64_t{0}), std::max<int64_t>(0, 103000 - tf * 350));
+        EXPECT_EQ(reply.value("end_time_ms", int64_t{0}), 103000);
+        ASSERT_TRUE(reply.contains("candles"));
+        EXPECT_TRUE(reply["candles"].is_array() && reply["candles"].empty()) << tf;
+    }
+    // 1 m pages from REST and never warms (here the REST stub refuses).
+    const auto minute = client.request(60000, 172860000);
+    EXPECT_FALSE(minute.contains("status"));
+    // The rebuild ended (here: failed): normal replies, without a status.
+    fixture.model->onCandleHistoryRestored("BTC-USD", std::nullopt);
+    EXPECT_TRUE(fixture.model->candleHistoryReady("BTC-USD"));
+    for (const int64_t tf : {int64_t{100}, int64_t{1000}}) {
+        const auto reply = client.request(tf, 103000);
+        EXPECT_EQ(reply.value("type", ""), "candle_history_chunk") << tf;
+        EXPECT_FALSE(reply.contains("status")) << tf;
+        EXPECT_FALSE(reply["candles"].empty()) << tf; // the live bars
+    }
+}
+
+sentinel::roller::CandleRestore restoreOf(std::map<int64_t, std::vector<int64_t>> closed) {
+    sentinel::roller::CandleRestore r;
+    r.product = "BTC-USD";
+    r.outcome = sentinel::roller::RestoreOutcome::complete;
+    for (const auto &[tf, starts] : closed) {
+        auto &series = r.series[tf];
+        for (const int64_t start : starts) {
+            OHLCVBar bar;
+            bar.timestamp_ms = start;
+            bar.open = bar.high = bar.low = bar.close = 7;
+            bar.volume = 1;
+            bar.count = 1;
+            bar.is_closed = true;
+            series.closed.push_back(bar);
+        }
+        series.active.timestamp_ms = starts.empty() ? 0 : starts.back() + tf;
+        series.active.open = series.active.high = series.active.low = series.active.close = 7;
+        series.active.volume = 1;
+        series.active.count = series.active.timestamp_ms ? 1 : 0;
+    }
+    return r;
+}
+
+// The install goes only into empty series, both timeframes or neither, never
+// emits a bar, and ends warming whatever the outcome.
+TEST(CandleWireRestore, InstallsIntoEmptySeriesOnlyAndAlwaysEndsWarming) {
+    int argc = 1;
+    char name[] = "candle-restore";
+    char *argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    CandleFixture fixture;
+    auto &model = *fixture.model;
+    int emitted = 0;
+    QObject::connect(&model, &ServerDataModel::barClosed, [&](auto &&...) { ++emitted; });
+    QObject::connect(&model, &ServerDataModel::barUpdated, [&](auto &&...) { ++emitted; });
+    EXPECT_TRUE(model.candleHistoryReady("BTC-USD")); // a bare model never warms
+    model.setCandleHistoryWarming({"BTC-USD", "ETH-USD"});
+    EXPECT_FALSE(model.candleHistoryReady("BTC-USD"));
+    EXPECT_FALSE(model.candleHistoryReady("ETH-USD"));
+    model.onCandleHistoryRestored("BTC-USD", restoreOf({{100, {500, 600}}, {1000, {0}}}));
+    EXPECT_TRUE(model.candleHistoryReady("BTC-USD"));
+    EXPECT_EQ(emitted, 0);
+    const auto hundred = model.getHistory("BTC-USD", 100, 100);
+    ASSERT_EQ(hundred.size(), 2u);
+    EXPECT_EQ(hundred.front().timestamp_ms, 500);
+    EXPECT_EQ(model.getHistory("BTC-USD", 1000, 100).size(), 1u);
+    // ETH: its 1 s series is already populated, so neither timeframe installs.
+    auto first = restoreOf({{1000, {0}}});
+    first.product = "ETH-USD";
+    model.onCandleHistoryRestored("ETH-USD", std::move(first));
+    EXPECT_TRUE(model.candleHistoryReady("ETH-USD"));
+    auto second = restoreOf({{100, {500}}, {1000, {1000}}});
+    second.product = "ETH-USD";
+    model.onCandleHistoryRestored("ETH-USD", std::move(second));
+    EXPECT_TRUE(model.getHistory("ETH-USD", 100, 100).empty());
+    const auto seconds = model.getHistory("ETH-USD", 1000, 100);
+    ASSERT_EQ(seconds.size(), 1u);
+    EXPECT_EQ(seconds.front().timestamp_ms, 0);
+    // A product that never warmed: logged, nothing installed.
+    model.onCandleHistoryRestored("SOL-USD", restoreOf({{100, {500}}}));
+    EXPECT_TRUE(model.getHistory("SOL-USD", 100, 100).empty());
+    EXPECT_EQ(emitted, 0);
+    // The restored open bar continues through the unchanged live path.
+    tradeAt(model, 800);
+    const auto after = model.getHistory("BTC-USD", 100, 100);
+    ASSERT_EQ(after.size(), 3u);
+    EXPECT_EQ(after.back().timestamp_ms, 700);
+    EXPECT_EQ(after.back().count, 1u);
+}
 } // namespace

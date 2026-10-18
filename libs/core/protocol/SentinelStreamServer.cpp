@@ -945,6 +945,25 @@ public:
                     return;
                 }
                 if (candleHistoryFromMemory(timeframeMs)) {
+                    if (!model_.candleHistoryReady(symbol)) {
+                        // The startup rebuild has not ended: the client keeps
+                        // the request and retries it; live bars still flow.
+                        const int64_t startTimeMs =
+                            std::max<int64_t>(0, endTimeMs - timeframeMs * static_cast<int64_t>(limit));
+                        sLog_Probe("candles.warming", "symbol=" << symbol << " tfMs=" << timeframeMs
+                                                                << " endMs=" << endTimeMs);
+                        do_write(nlohmann::json{{"type", "candle_history_chunk"},
+                                                {"schema_version",
+                                                 protocol::SentinelProtocol::kCandleSchemaVersion},
+                                                {"symbol", symbol},
+                                                {"timeframe_ms", timeframeMs},
+                                                {"start_time_ms", startTimeMs},
+                                                {"end_time_ms", endTimeMs},
+                                                {"status", "warming"},
+                                                {"candles", nlohmann::json::array()}}
+                                     .dump());
+                        return;
+                    }
                     const auto history = model_.getHistory(symbol, timeframeMs, endTimeMs, limit);
                     const int64_t nowMs = static_cast<int64_t>(
                         std::chrono::duration_cast<std::chrono::milliseconds>(
