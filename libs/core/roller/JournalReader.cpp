@@ -128,7 +128,8 @@ bool JournalReader::next(JournalRecord& out) {
         const auto& result = reader_->result();
         pending_ = !f.superseded && !result.indexed;
         gap_ = gap_ || result.tornTail || (f.superseded && !result.indexed);
-        if (f.superseded && result.tornTail) ++damaged_;
+        // Once per file: without its index a superseded file cannot prove its suffix.
+        if (f.superseded && (result.tornTail || !result.indexed)) ++damaged_;
         nextBlock_ = f.header.at("first_block_ordinal").get<uint64_t>() + result.index.size();
         ++file_;
         if (file_ < files_.size()) {

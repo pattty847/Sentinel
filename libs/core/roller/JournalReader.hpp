@@ -48,10 +48,10 @@ public:
     const std::vector<JournalFile>& files() const { return files_; }
     bool pending() const { return pending_; }
     uint64_t decodedRecords() const { return anchorDecoded_ + decoded_ + (reader_ ? reader_->result().decodedRecords : 0); }
-    // Observed damage in the scanned interval: corrupt regions, a torn tail of a
-    // superseded file, a same-run ordinal/segment gap, or a run entered after the
-    // start file whose first file is not segment 0. Observational only; recovery
-    // does not read it. Anchor scans do not count.
+    // Observed damage in the scanned interval: corrupt regions, a superseded file
+    // with a torn tail or no closing index, a same-run ordinal/segment gap, or a
+    // run entered after the start file whose first file is not segment 0.
+    // Observational only; recovery does not read it. Anchor scans do not count.
     uint64_t damaged() const { return damaged_; }
     // Latest snapshot <= receive time, including earlier hours/runs for warmup.
     std::optional<JournalPos> anchor(int64_t receiveMs) const;

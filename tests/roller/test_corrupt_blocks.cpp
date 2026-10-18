@@ -375,8 +375,8 @@ void framingCase(const std::string& kind, bool unsealed = false) {
     const auto block = kind == "last-header" ? scan.index.back() : scan.index[75]; const auto& last = scan.index.back();
     const auto footer = last.offset + 48 + last.compressedBytes;
     if (unsealed) save(p, original.substr(0, footer));
-    // A superseded file that ends cleanly without its index is not counted.
-    EXPECT_EQ(readerDamage(root/"raw"), 0u);
+    // A superseded file without its index cannot prove its suffix is complete.
+    EXPECT_EQ(readerDamage(root/"raw"), unsealed ? 1u : 0u);
     RollOptions o{root/"raw", root/"clean", "BTC-USD", FramingStart, FramingStart+480'000}; roll(o);
     auto b = original;
     if (kind == "header" || kind == "last-header") b[block.offset+44] ^= 1;
@@ -566,6 +566,25 @@ TEST(JournalReaderDamage, SameRunSegmentGapIsDamage) {
     const auto s = readAll(root/"raw");
     EXPECT_EQ(s.damaged, 1u); // one discontinuity: ordinal and segment
     EXPECT_EQ(s.ms, seconds({{0, 20}, {40, 60}}));
+}
+// Run A's last file lost whole trailing blocks and its index, ending exactly on
+// a block boundary (no torn tail); run B's segment 0 follows. The missing suffix
+// is observed through the superseded file's absent index.
+TEST(JournalReaderDamage, UnindexedSupersededSuffixLossIsDamage) {
+    QTemporaryDir temp; ASSERT_TRUE(temp.isValid()); const fs::path root = temp.path().toStdString();
+    fs::path a0;
+    { auto a = runWriter(root/"raw"); a0 = appendSeconds(*a, 0, 60); a->close(); }
+    { auto b = runWriter(root/"raw"); appendSeconds(*b, 120, 180); b->close(); }
+    const auto before = readAll(root/"raw");
+    EXPECT_EQ(before.damaged, 0u);
+    const auto scan = capture::scan(qpath(a0)); ASSERT_EQ(scan.index.size(), 60u);
+    save(a0, bytes(a0).substr(0, scan.index[50].offset)); // drop blocks 50.. and the index
+    const auto s = readAll(root/"raw");
+    EXPECT_EQ(s.damaged, 1u);
+    EXPECT_EQ(s.ms, seconds({{0, 50}, {120, 180}})); // recovery unchanged
+    ASSERT_EQ(s.gaps.size(), 110u);
+    EXPECT_TRUE(s.gaps[0]); EXPECT_TRUE(s.gaps[50]);
+    EXPECT_EQ(std::count(s.gaps.begin(), s.gaps.end(), true), 2);
 }
 // Only a superseded file's torn tail is damage; the live file's is pending.
 TEST(JournalReaderDamage, TornTailOfSupersededFileIsDamage) {
