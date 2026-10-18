@@ -992,7 +992,7 @@ TEST(ServerChartConfig, WireUsesNeutralFieldsAndRetainsCapabilityFilter) {
     EXPECT_EQ(wire.at("chart").at("timeframes_ms"), config.chart.timeframesMs);
     EXPECT_EQ(wire.at("chart").at("default_timeframe_ms"), 60000);
     EXPECT_EQ(wire.at("chart").at("served_timeframes_ms"),
-              (std::vector<int64_t>{60000, 300000, 3600000, 5400000, 7200000}));
+              (std::vector<int64_t>{1000, 60000, 300000, 3600000, 5400000, 7200000}));
     EXPECT_EQ(wire.at("trade_overlays").at("retention_columns"), 8192);
     const auto& capability = wire.at("recording");
     EXPECT_TRUE(capability.at("available"));
@@ -1003,8 +1003,26 @@ TEST(ServerChartConfig, WireUsesNeutralFieldsAndRetainsCapabilityFilter) {
     config.chart.defaultTimeframeMs = 0;
     const auto fallback = buildServerConfigPayload(config, false, false);
     EXPECT_FALSE(fallback.at("chart").contains("default_timeframe_ms"));
-    EXPECT_EQ(fallback.at("chart").at("served_timeframes_ms"), (std::vector<int64_t>{1000}));
+    EXPECT_EQ(fallback.at("chart").at("served_timeframes_ms"), wire.at("chart").at("served_timeframes_ms"));
     EXPECT_FALSE(fallback.at("recording").at("available"));
+}
+
+// The served list is every configured timeframe the candle handlers answer: 100 ms and 1 s
+// from RAM, minute multiples from REST. The default timeframe does not narrow it, so the
+// production default 60000 still offers the sub-minute RAM timeframes.
+TEST(ServerChartConfig, ServedTimeframesAreEveryConfiguredTimeframeTheServerAnswers) {
+    ServerConfig config;
+    config.chart.timeframesMs = {100, 1000, 60000, 300000, 900000, 3600000, 14400000, 86400000};
+    for (const int64_t defaultTf : {int64_t(60000), int64_t(1000), int64_t(0)}) {
+        config.chart.defaultTimeframeMs = defaultTf;
+        EXPECT_EQ(buildServerConfigPayload(config, true, true).at("chart").at("served_timeframes_ms"),
+                  config.chart.timeframesMs) << "default=" << defaultTf;
+    }
+    // Configured values no candle handler answers are not advertised.
+    config.chart.timeframesMs = {100, 250, 1000, 1500, 2000, 60000, 90000, 120000};
+    config.chart.defaultTimeframeMs = 60000;
+    EXPECT_EQ(buildServerConfigPayload(config, true, true).at("chart").at("served_timeframes_ms"),
+              (std::vector<int64_t>{100, 1000, 60000, 120000}));
 }
 
 TEST(TradeOverlayServer, RetainedTradesPublishAllThreeOverlaysWithoutLegacyProducer) {

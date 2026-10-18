@@ -133,10 +133,11 @@ owns each product's recording lifetime and its per-product stall deadline.
 
 `server_config` schema 2 advertises `chart.timeframes_ms` (the configured
 candidate list), optional `chart.default_timeframe_ms`, and derived
-`chart.served_timeframes_ms`. The served list contains the selected default (or
-first candidate); when that is 60000 it also contains configured multiples of
-60000 above one minute. The toolbar disables choices outside this list. An
-absent served list means unknown availability. Recording capability retains its
+`chart.served_timeframes_ms`. The served list contains every configured
+timeframe the candle handlers answer: 100 ms and 1 s from memory, multiples of
+60000 from REST; the default does not narrow it. The toolbar disables choices
+outside this list, except 100 ms, which it always offers. An absent served list
+means unknown availability. Recording capability retains its
 minute/hour-alignment filter in `recording.timeframes_ms`. Server and client use
 schema 2 together; the retired server `heatmap` fields have no fallback aliases.
 

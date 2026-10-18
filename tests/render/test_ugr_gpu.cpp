@@ -1013,6 +1013,62 @@ TEST(UgrCandleCpu, NonPositiveIntervalsClearExistingGeometry) {
     delete root;
 }
 
+// 100 ms draws only traded buckets and synthesizes no quiet bars; whole seconds keep
+// the trade-free buckets and the synthesized carry bars (gaps and the live boundary).
+TEST(UgrCandleCpu, HundredMsDrawsOnlyTradedBucketsWholeSecondsKeepCarryBars) {
+    constexpr qint64 bucket = 1'200'000;
+    const auto counts = [](QSGNode* root) {
+        auto* wicks = static_cast<QSGGeometryNode*>(root->firstChild());
+        auto* bodies = static_cast<QSGGeometryNode*>(root->firstChild()->nextSibling());
+        return std::pair{wicks->geometry()->vertexCount() / 6, bodies->geometry()->vertexCount() / 6};
+    };
+    for (const qint64 tf : {qint64(100), qint64(1000)}) {
+        CandleTickFrameProvider provider;
+        CandleTickGeometryItem candles;
+        CandleSeriesBuffer buffer;
+        // Slots 0..8 with gaps at 4 and 7: three traded bars (0, 3, 8), four volume-0 bars.
+        std::vector<CandleSeriesBuffer::CandleBar> bars;
+        const std::pair<int, double> layout[] = {{0, 2}, {1, 0}, {2, 0}, {3, 5}, {5, 0}, {6, 0}, {8, 1}};
+        double close = 100;
+        for (const auto& [slot, volume] : layout) {
+            const qint64 start = bucket + slot * tf;
+            const double open = close;
+            if (volume > 0) close += 4;
+            bars.push_back({start, start + tf, open, std::max(open, close) + (volume > 0 ? 2 : 0),
+                            std::min(open, close) - (volume > 0 ? 2 : 0), close, volume, true, 0, false});
+        }
+        buffer.applyHistory("BTC-USD", tf, bars);
+        candles.setSize({640, 320});
+        candles.setMappingProvider(&provider);
+        candles.setCandleBuffer(&buffer);
+        candles.setSymbol("BTC-USD");
+        candles.setTimeframeMs(int(tf));
+        chart_raster::RasterInputs in;
+        in.timeStart = bucket; in.timeEnd = bucket + 20 * tf;
+        in.minPrice = 80; in.maxPrice = 130;
+        in.tfMs = tf; in.tick = 1;
+        in.itemWidthLogical = 640; in.itemHeightLogical = 320; in.dpr = 1;
+        provider.frame.raster = chart_raster::computeRaster(in, {});
+        provider.frame.mapping = chart_raster::toMapping(provider.frame.raster);
+        provider.frame.viewportValid = true;
+        provider.frame.viewportTimeStart = in.timeStart;
+        provider.frame.viewportTimeEnd = in.timeEnd;
+        provider.frame.activeTimeframeMs = tf;
+        provider.frame.currentBoundaryStartMs = bucket + 10 * tf;
+        QSGNode* root = candles.updatePaintNode(nullptr, nullptr);
+        const auto [wicks, bodies] = counts(root);
+        if (tf == 100) {
+            EXPECT_EQ(wicks, 3) << "100 ms draws only the traded buckets";
+            EXPECT_EQ(bodies, 3);
+        } else {
+            // 7 buffered bars + gap slots 4 and 7 + slot 9 up to the live boundary.
+            EXPECT_EQ(wicks, 10) << "whole seconds keep trade-free and synthesized carry bars";
+            EXPECT_EQ(bodies, 10);
+        }
+        delete root;
+    }
+}
+
 TEST(UgrCandleCpu, WindowAndQmlPassUnroundedMilliseconds) {
     const auto read = [](const char* relative) {
         QFile file(QStringLiteral(SENTINEL_SOURCE_DIR) + QLatin1Char('/') + relative);

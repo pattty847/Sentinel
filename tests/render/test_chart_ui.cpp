@@ -342,13 +342,13 @@ TEST(ChartToolbar, HundredMsTimeframeIsAlwaysOfferedAndRoundTrips) {
     ASSERT_TRUE(combo);
     QSignalSpy timeframe(&toolbar, &TopToolbar::timeframeSelected);
     ASSERT_EQ(combo->itemText(0), "100ms");
-    EXPECT_TRUE(combo->itemData(0, Qt::ToolTipRole).toString().contains("Heatmap only"));
+    EXPECT_TRUE(combo->itemData(0, Qt::ToolTipRole).toString().isEmpty());
     toolbar.setAvailableTimeframes({1000, 60000, 300000});
     ASSERT_EQ(combo->itemData(0, Qt::UserRole).toLongLong(), 100);
     auto *model = qobject_cast<QStandardItemModel *>(combo->model());
     ASSERT_TRUE(model);
     EXPECT_TRUE(model->item(0)->isEnabled());
-    EXPECT_TRUE(combo->itemData(0, Qt::ToolTipRole).toString().contains("Heatmap only"));
+    EXPECT_TRUE(combo->itemData(0, Qt::ToolTipRole).toString().isEmpty());
     EXPECT_FALSE(model->item(combo->findData(3600000))->isEnabled());
 
     combo->setCurrentIndex(0);
@@ -365,6 +365,22 @@ TEST(ChartToolbar, HundredMsTimeframeIsAlwaysOfferedAndRoundTrips) {
     combo->setCurrentIndex(0);
     ASSERT_EQ(timeframe.size(), 3);
     EXPECT_EQ(timeframe.at(2).at(0).toLongLong(), 100);
+}
+
+// The list a server with the production default (60000) and 100/1000 configured now
+// advertises (ServerChartConfig.ServedTimeframesAreEveryConfiguredTimeframeTheServerAnswers).
+TEST(ChartToolbar, OneSecondIsSelectableWhenTheServerAdvertisesIt) {
+    TopToolbar toolbar;
+    auto *combo = toolbar.findChild<QComboBox *>("chartTimeframeCombo");
+    ASSERT_TRUE(combo);
+    auto *model = qobject_cast<QStandardItemModel *>(combo->model());
+    ASSERT_TRUE(model);
+    toolbar.setAvailableTimeframes({100, 1000, 60000, 300000, 900000, 3600000, 14400000, 86400000});
+    for (int i = 0; i < combo->count(); ++i) {
+        EXPECT_TRUE(model->item(i)->isEnabled()) << combo->itemText(i).toStdString();
+        EXPECT_TRUE(combo->itemData(i, Qt::ToolTipRole).toString().isEmpty()) << combo->itemText(i).toStdString();
+    }
+    EXPECT_EQ(combo->currentText(), "1s");
 }
 
 TEST(ChartToolbar, NarrowTickMenuRetainsUnavailableValueAndResolutionWarning) {

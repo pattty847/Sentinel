@@ -417,8 +417,10 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
                                                   sliceEnd,
                                                   m_bufferSlice);
         if (hasData) {
+            const bool tradeFreeDrawn = chart::drawsTradeFreeBuckets(m_timeframeMs);
             m_visibleCandles.reserve(m_bufferSlice.size());
             for (const auto& bar : m_bufferSlice) {
+                if (!tradeFreeDrawn && bar.volume <= 0) continue;
                 CandleOverlayBar out;
                 out.timeStartMs = bar.timeStartMs;
                 out.timeEndMs = bar.timeEndMs;
@@ -426,6 +428,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
                 out.high = bar.high;
                 out.low = bar.low;
                 out.close = bar.close;
+                out.volume = bar.volume;
                 m_visibleCandles.push_back(out);
             }
         }
@@ -465,10 +468,12 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     const int baseVisibleCount = static_cast<int>(filtered.size());
     const int64_t tfMs = static_cast<int64_t>(std::llround(mapping.appendMs));
     const int maxColumns = std::max(0, mapping.gridWidth);
-    if (cadenceMatches && tfMs > 0 && maxColumns > 0) {
+    const bool synthesize = cadenceMatches && tfMs > 0 && maxColumns > 0 &&
+                            chart::synthesizesQuietBars(m_timeframeMs);
+    if (synthesize) {
         buildContinuousBars(filtered, tfMs, frame.currentBoundaryStartMs, maxColumns, m_continuousCandles);
     }
-    const auto& drawBars = (cadenceMatches && tfMs > 0 && maxColumns > 0) ? m_continuousCandles : filtered;
+    const auto& drawBars = synthesize ? m_continuousCandles : filtered;
     const int visibleCount = static_cast<int>(drawBars.size());
     const int syntheticCount = std::max(0, visibleCount - baseVisibleCount);
 

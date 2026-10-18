@@ -128,19 +128,18 @@ int64_t tradeTimestampMs(const Trade& trade) {
         std::chrono::duration_cast<std::chrono::milliseconds>(trade.timestamp.time_since_epoch()).count());
 }
 
+// The candle history handler answers these from the aggregator's RAM history...
+constexpr bool candleHistoryFromMemory(int64_t tfMs) { return tfMs == 100 || tfMs == 1000; }
+// ...and these from REST; every other configured value is refused.
+constexpr bool candleHistoryFromRest(int64_t tfMs) { return tfMs >= 60'000 && tfMs % 60'000 == 0; }
+
 nlohmann::json buildServerConfigPayload(const ServerConfig& cfg, bool recordingAvailable, bool liveAvailable) {
     nlohmann::json payload;
     payload["type"] = "server_config";
     payload["schema_version"] = protocol::SentinelProtocol::kServerConfigSchemaVersion;
-    const int64_t servedTimeframeMs = cfg.chart.defaultTimeframeMs > 0
-        ? cfg.chart.defaultTimeframeMs
-        : (cfg.chart.timeframesMs.empty() ? 0 : cfg.chart.timeframesMs.front());
     std::vector<int64_t> servedTimeframes;
-    if (servedTimeframeMs > 0) servedTimeframes.push_back(servedTimeframeMs);
-    if (servedTimeframeMs == 60'000) {
-        for (const auto tf : cfg.chart.timeframesMs) {
-            if (tf > 60'000 && tf % 60'000 == 0) servedTimeframes.push_back(tf);
-        }
+    for (const auto tf : cfg.chart.timeframesMs) {
+        if (candleHistoryFromMemory(tf) || candleHistoryFromRest(tf)) servedTimeframes.push_back(tf);
     }
     payload["trade_overlays"] = {
         {"retention_columns", cfg.tradeOverlays.retentionColumns},
@@ -945,7 +944,7 @@ public:
                     send_error("candle_history_request", symbol, "unsupported timeframe_ms");
                     return;
                 }
-                if (timeframeMs == 100 || timeframeMs == 1000) {
+                if (candleHistoryFromMemory(timeframeMs)) {
                     const auto history = model_.getHistory(symbol, timeframeMs, endTimeMs, limit);
                     const int64_t nowMs = static_cast<int64_t>(
                         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -977,7 +976,7 @@ public:
                     return;
                 }
 
-                if (timeframeMs < 60'000 || timeframeMs % 60'000 != 0) {
+                if (!candleHistoryFromRest(timeframeMs)) {
                     send_error("candle_history_request", symbol, "unsupported timeframe_ms");
                     return;
                 }
