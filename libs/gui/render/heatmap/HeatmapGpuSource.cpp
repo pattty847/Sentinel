@@ -183,8 +183,10 @@ TickCoverage tickCoverage(const GpuSource& source, int64_t firstBucket, int64_t 
 }
 
 const std::vector<FloatFloat>& cachedEncodeThresholds(const recording::SizeScale& scale) {
-    static std::mutex mutex;
-    static std::map<std::pair<double, double>, std::vector<FloatFloat>> cache;
+    // Leaked on purpose: the self-test worker thread can still call this while the process exits,
+    // and an exit-time destructor would free the mutex and map under it.
+    static auto& mutex = *new std::mutex;
+    static auto& cache = *new std::map<std::pair<double, double>, std::vector<FloatFloat>>;
     std::scoped_lock lock(mutex);
     auto& entry = cache[{scale.floor, scale.codesPerOctave}];
     if (entry.empty()) entry = encodeThresholds(scale);
