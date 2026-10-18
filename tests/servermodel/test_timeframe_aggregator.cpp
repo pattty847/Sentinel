@@ -272,3 +272,23 @@ TEST(TimeframeAggregatorHundredMs, HistoryPageEndsAtOrBeforeEnd) {
     EXPECT_EQ(page.front().timestamp_ms, t0);
     EXPECT_TRUE(aggregator.getHistory("BTC-USD", 100, t0 - 1, 350).empty());
 }
+
+// Wall-clock history can be out of order: an empty carried bar accepts an
+// older trade. The endMs page must still hold only bars at or before endMs.
+TEST(TimeframeAggregatorHundredMs, WallClockHistoryPageFiltersUnsortedBars) {
+    constexpr int64_t t = 1'000'000;
+    TimeframeAggregator aggregator({100});
+    aggregator.onTrade(tradeAt(t + 10, 1, 1));
+    aggregator.tick(t + 500);
+    aggregator.onTrade(tradeAt(t + 150, 2, 1));
+    aggregator.tick(t + 600);
+    std::vector<int64_t> offsets;
+    for (const auto& bar : aggregator.getHistory("BTC-USD", 100, 100)) offsets.push_back(bar.timestamp_ms - t);
+    ASSERT_EQ(offsets, (std::vector<int64_t>{0, 100, 200, 300, 400, 100, 200, 300, 400, 500}));
+    offsets.clear();
+    for (const auto& bar : aggregator.getHistory("BTC-USD", 100, t + 150, 350)) offsets.push_back(bar.timestamp_ms - t);
+    EXPECT_EQ(offsets, (std::vector<int64_t>{0, 100, 100}));
+    offsets.clear();
+    for (const auto& bar : aggregator.getHistory("BTC-USD", 100, t + 150, 2)) offsets.push_back(bar.timestamp_ms - t);
+    EXPECT_EQ(offsets, (std::vector<int64_t>{100, 100}));
+}

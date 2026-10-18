@@ -234,11 +234,21 @@ std::vector<OHLCVBar> TimeframeAggregator::getHistory(const std::string& symbol,
     const auto found = state->second.history.find(timeframeMs);
     if (found == state->second.history.end()) return {};
     const auto& hist = found->second;
-    const auto end = std::partition_point(hist.begin(), hist.end(), [endMs](const OHLCVBar& bar) {
-        return bar.timestamp_ms <= endMs;
-    });
-    const auto available = static_cast<size_t>(end - hist.begin());
-    return {end - static_cast<std::ptrdiff_t>(std::min(limit, available)), end};
+    if (m_journal.contains(symbol)) {
+        // Journal clock never reopens an older bucket, so its history is sorted.
+        const auto end = std::partition_point(hist.begin(), hist.end(), [endMs](const OHLCVBar& bar) {
+            return bar.timestamp_ms <= endMs;
+        });
+        const auto available = static_cast<size_t>(end - hist.begin());
+        return {end - static_cast<std::ptrdiff_t>(std::min(limit, available)), end};
+    }
+    // Wall clock: an empty active bar can take an older trade, so the history
+    // may be out of order. Keep the newest `limit` closes that start <= endMs.
+    std::vector<OHLCVBar> out;
+    for (auto it = hist.rbegin(); it != hist.rend() && out.size() < limit; ++it)
+        if (it->timestamp_ms <= endMs) out.push_back(*it);
+    std::reverse(out.begin(), out.end());
+    return out;
 }
 
 std::vector<TimeframeAggregator::LateDrops> TimeframeAggregator::lateDrops() const {
