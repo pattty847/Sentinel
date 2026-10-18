@@ -336,20 +336,28 @@ TEST(ChartToolbar, ControlsMenuReachesLayersTimeframeTickAndSearch) {
     EXPECT_EQ(search.size(), 1);
 }
 
-TEST(ChartToolbar, HundredMsTimeframeIsAlwaysOfferedAndRoundTrips) {
+TEST(ChartToolbar, HundredMsTimeframeIsOfferedOnlyWhenServedAndRoundTrips) {
     TopToolbar toolbar;
     auto *combo = toolbar.findChild<QComboBox *>("chartTimeframeCombo");
     ASSERT_TRUE(combo);
-    QSignalSpy timeframe(&toolbar, &TopToolbar::timeframeSelected);
-    ASSERT_EQ(combo->itemText(0), "100ms");
-    EXPECT_TRUE(combo->itemData(0, Qt::ToolTipRole).toString().isEmpty());
-    toolbar.setAvailableTimeframes({1000, 60000, 300000});
-    ASSERT_EQ(combo->itemData(0, Qt::UserRole).toLongLong(), 100);
     auto *model = qobject_cast<QStandardItemModel *>(combo->model());
     ASSERT_TRUE(model);
+    QSignalSpy timeframe(&toolbar, &TopToolbar::timeframeSelected);
+    ASSERT_EQ(combo->itemText(0), "100ms");
+    ASSERT_EQ(combo->itemData(0, Qt::UserRole).toLongLong(), 100);
+    EXPECT_TRUE(combo->itemData(0, Qt::ToolTipRole).toString().isEmpty());
+
+    // A server that does not serve 100 ms disables it like any other unserved timeframe.
+    toolbar.setAvailableTimeframes({1000, 60000, 300000});
+    EXPECT_FALSE(model->item(0)->isEnabled());
+    EXPECT_FALSE(combo->itemData(0, Qt::ToolTipRole).toString().isEmpty());
+    EXPECT_FALSE(model->item(combo->findData(3600000))->isEnabled());
+    EXPECT_EQ(combo->currentText(), "1s");
+
+    toolbar.setAvailableTimeframes({100, 1000, 60000, 300000});
     EXPECT_TRUE(model->item(0)->isEnabled());
     EXPECT_TRUE(combo->itemData(0, Qt::ToolTipRole).toString().isEmpty());
-    EXPECT_FALSE(model->item(combo->findData(3600000))->isEnabled());
+    ASSERT_TRUE(timeframe.isEmpty());
 
     combo->setCurrentIndex(0);
     ASSERT_EQ(timeframe.size(), 1);
@@ -365,6 +373,11 @@ TEST(ChartToolbar, HundredMsTimeframeIsAlwaysOfferedAndRoundTrips) {
     combo->setCurrentIndex(0);
     ASSERT_EQ(timeframe.size(), 3);
     EXPECT_EQ(timeframe.at(2).at(0).toLongLong(), 100);
+
+    // Reconnecting to a server without 100 ms moves a 100 ms selection to the first served one.
+    toolbar.setAvailableTimeframes({1000, 60000});
+    EXPECT_FALSE(model->item(0)->isEnabled());
+    EXPECT_EQ(combo->currentText(), "1s");
 }
 
 // The list a server with the production default (60000) and 100/1000 configured now

@@ -135,9 +135,9 @@ owns each product's recording lifetime and its per-product stall deadline.
 candidate list), optional `chart.default_timeframe_ms`, and derived
 `chart.served_timeframes_ms`. The served list contains every configured
 timeframe the candle handlers answer: 100 ms and 1 s from memory, multiples of
-60000 from REST; the default does not narrow it. The toolbar disables choices
-outside this list, except 100 ms, which it always offers. An absent served list
-means unknown availability. Recording capability retains its
+60000 from REST; the default does not narrow it. The toolbar disables every
+choice outside this list, 100 ms included. An absent served list means unknown
+availability. Recording capability retains its
 minute/hour-alignment filter in `recording.timeframes_ms`. Server and client use
 schema 2 together; the retired server `heatmap` fields have no fallback aliases.
 
@@ -149,7 +149,7 @@ Candle history follows the visible time range with one additional screen of olde
 
 An empty or overlap-only successful page advances the scan cursor to the previous window; it does not prove that older history is exhausted. Three consecutive empty windows pause that symbol/timeframe for 60 seconds. While the viewport still needs older data, a timer resumes from the saved scan cursor, including for a stationary viewport; it never restarts at the loaded edge after a pause. Empty 100ms and 1s scans have a seven-day total time lookback from their first empty window, preserved across pauses; REST timeframes have no additional empty-lookback cap and remain paged and paused. Finding older bars starts a new empty-scan budget. Returning to loaded coverage, filling local capacity, or exhausting the memory-history lookback cancels the retry timer. Transport errors preserve the cursor and retry the same window after 2 seconds. Backfill stops at the existing local retention capacity (60,000 bars at 100ms and 1s, 20,000 through 1m, 10,000 coarser), so pages cannot loop after immediate cache eviction.
 
-Candle schema version 2 carries timeframes and history boundaries in integer milliseconds. The server's configured 100ms and 1s history contract is an inclusive `end_time_ms` with `limit` counting retained bars (capped at 350), drawn from per-timeframe `chart.history_bars` retention (defaults: 18,000 at 100ms, 10,000 otherwise). For sparse series, returned bars may predate the nominal `start_time_ms = max(0, end_time_ms - timeframe_ms * limit)` metadata; that field is not a lower filter bound. The client pages backward with `end_time_ms = oldest_loaded_ms - timeframe_ms` to exclude overlap. Coarser history uses REST time windows.
+Candle schema version 2 carries timeframes and history boundaries in integer milliseconds. The server's configured 100ms and 1s history contract is an inclusive `end_time_ms` with `limit` counting retained bars (capped at 350), drawn from per-timeframe RAM retention: a timeframe with a `chart.history_bars` entry keeps between the value and the value + 10 percent closed bars once populated, and a timeframe without an entry keeps the 10,000-bar cap (9,001..10,000 once populated). The checked-in configuration serves 100ms with an entry of 18,000 (30 minutes of contiguous buckets) and 1s with no entry. RAM history is empty after every server restart. For sparse series, returned bars may predate the nominal `start_time_ms = max(0, end_time_ms - timeframe_ms * limit)` metadata; that field is not a lower filter bound. The client pages backward with `end_time_ms = oldest_loaded_ms - timeframe_ms` to exclude overlap. Coarser history uses REST time windows.
 
 ## Heatmap history transport
 

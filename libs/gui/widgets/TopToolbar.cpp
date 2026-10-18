@@ -23,11 +23,6 @@
 #include <QWindow>
 #include <QScopedValueRollback>
 
-namespace {
-// Offered even when a server does not advertise it: the heatmap draws at 100 ms on any server.
-constexpr int64_t kAlwaysOfferedTimeframeMs = 100;
-}
-
 TopToolbar::TopToolbar(QWidget* parent)
     : QToolBar(parent)
 {
@@ -162,7 +157,7 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_timeframeCombo->setObjectName("chartTimeframeCombo");
     m_timeframeCombo->setAccessibleName("Chart timeframe");
     m_timeframeCombo->addItems({"100ms", "1s", "1m", "5m", "15m", "1h", "4h", "1D"});
-    const int64_t timeframesMs[] = {kAlwaysOfferedTimeframeMs, 1000, 60000, 300000, 900000, 3600000, 14400000, 86400000};
+    const int64_t timeframesMs[] = {100, 1000, 60000, 300000, 900000, 3600000, 14400000, 86400000};
     for (int i = 0; i < m_timeframeCombo->count(); ++i) {
         m_timeframeCombo->setItemData(i, static_cast<qlonglong>(timeframesMs[i]), Qt::UserRole);
     }
@@ -1025,14 +1020,13 @@ void TopToolbar::setAvailableTimeframes(const std::vector<int64_t>& servedTimefr
     int firstAvailable = -1;
     for (int i = 0; i < m_timeframeCombo->count(); ++i) {
         const int64_t tf = m_timeframeCombo->itemData(i, Qt::UserRole).toLongLong();
-        const bool alwaysOffered = tf == kAlwaysOfferedTimeframeMs;
-        const bool available = alwaysOffered || servedTimeframesMs.empty() ||
+        const bool available = servedTimeframesMs.empty() ||
             std::find(servedTimeframesMs.begin(), servedTimeframesMs.end(), tf) != servedTimeframesMs.end();
         model->item(i)->setEnabled(available);
         m_timeframeCombo->setItemData(i,
             available ? QString() : QStringLiteral("Not built yet: larger timeframes will be rolled up from 1m"),
             Qt::ToolTipRole);
-        if (available && !alwaysOffered && firstAvailable < 0) {
+        if (available && firstAvailable < 0) {
             firstAvailable = i;
         }
     }

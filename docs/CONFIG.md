@@ -230,7 +230,9 @@ that accepts session type 6.
 and advertised chart/recording timeframes. Its default is
 `[1000, 60000, 300000, 900000, 3600000, 14400000, 86400000]`; the loader keeps
 positive durations, sorts and deduplicates them, and keeps defaults for an empty
-result. `chart.default_timeframe_ms` defaults to 0 (use the first configured
+result. The checked-in configuration adds 100:
+`[100, 1000, 60000, 300000, 900000, 3600000, 14400000, 86400000]`.
+`chart.default_timeframe_ms` defaults to 0 (use the first configured
 candidate); the checked-in configuration selects 60000.
 
 `chart.timeframes_ms` accepts 100 (100 ms candles), 1000 and minute multiples;
@@ -241,9 +243,12 @@ closed bars the server guarantees to keep in RAM for it (only 100 and 1000 are
 served from RAM). A key that is not in `timeframes_ms` is ignored with a warning.
 A timeframe with an entry keeps between the value and the value + 10 percent
 once populated: when it holds more than value + value/10 bars, the oldest are
-dropped down to the value. A timeframe without an entry keeps the default: at
-most 10,000 bars, trimmed to 9,001 once full (9,001..10,000 once populated).
-Absent key = no entry, not a default value. Values are clamped to
+dropped down to the value. A timeframe without an entry keeps the 10,000-bar
+cap: at most 10,000 bars, trimmed to 9,001 once full (9,001..10,000 once
+populated). An absent key means no entry; there is no default value. The
+checked-in configuration sets `{100: 18000}` (100 ms keeps 18,000..19,800
+bars; 18,000 contiguous buckets are 30 minutes) and has no 1000 entry, so 1 s keeps the 10,000-bar
+cap. Values are clamped to
 [350, 200000] with a warning (350 is one history page; 200,000 bounds the
 element count at about 12 MB per product before a trim, allocation up to about
 twice that). The value takes effect at the next server start; RAM history is
