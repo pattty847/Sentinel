@@ -1,24 +1,29 @@
 // Restart cost of the startup candle rebuild in the production server graph,
-// against SCRATCH journal and roller copies only. Two processes, as in
-// production: a capture side (fan-out and one Writer per product) and the
-// server (SentinelServerApp ownership graph, no listener, lag sampler on).
+// against SCRATCH copies only (a journal copy and the recorder state copied
+// before it: roller.json, checkpoints, anchors, HMC2). Two processes, as in
+// production: a capture side and the server (SentinelServerApp ownership
+// graph, no listener, lag sampler on).
 //
-//   candle_startup_bench capture <runDir> <seconds> <product>...
-//       Journals into <runDir>/raw-l2 after its newest record: per product a
-//       book snapshot and a heartbeat at T0 (the durable ceiling the server
-//       finds), then one trade every 100 ms and a heartbeat every second at
-//       the original pace for <seconds>. Writes <runDir>/capture.json when the
-//       ceiling is durable, <runDir>/capture.done when it stops appending, and
-//       exits after <runDir>/server.done.
-//   candle_startup_bench server <runDir> <restore|baseline> <seconds> <product>...
-//       Serves <runDir>/raw-l2 into <runDir>/hmc2 (roller.json and anchors from
-//       an earlier run), samples the main-thread lag every second, and prints
-//       per product the startup milestones (ms since process start), the
-//       install time, readiness at the first trade, and overall lag, RSS and
-//       an HMC2 digest. baseline = the same binary and chart config with the
+//   candle_startup_bench replay <runDir> <seconds> <product>...
+//       Picks a durable ceiling per product <seconds> + 10 s before the end of
+//       <runDir>/raw-l2 (the last record of a block), announces it, then
+//       replays the journal's own records after it at their original pace:
+//       each record as fan-out provisional input, each block end as durable,
+//       and every record also into a scratch Writer (capture's disk load).
+//       Writes <runDir>/capture.json when the ceilings are announced and
+//       <runDir>/capture.done when the replay ends; exits after server.done.
+//   candle_startup_bench server <runDir> <restore|baseline> <seconds> <config> <product>...
+//       Loads <config> (the checked-in server config), points it at the run
+//       directory, serves until the replay ended and commits settled, and
+//       prints per product the startup milestones (ms since process start),
+//       the rebuild, the install time, readiness at the first trade and, with
+//       the rebuild, the 100 ms / 1 s bars compared with a continuous pass over
+//       the same journal; then lag, late ticks, RSS and a digest of the HMC2
+//       files the run wrote. baseline = the same binary and config with the
 //       rebuild switched off (candleRestoreForTest = false).
 // Never point it at a live recording root.
 #include "../../apps/sentinel-server/SentinelServerApp.hpp"
+#include "ConfigLoader.hpp"
 #include "capture/CaptureFanout.hpp"
 #include "roller/JournalFeed.hpp"
 #include <QCoreApplication>
@@ -28,7 +33,6 @@
 #include <sys/resource.h>
 #include <chrono>
 #include <cstdio>
-#include <ctime>
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -65,80 +69,13 @@ namespace {
 const Clock::time_point Began = Clock::now();
 double sinceStartMs() { return std::chrono::duration<double, std::milli>(Clock::now() - Began).count(); }
 int64_t wallMs() { return QDateTime::currentMSecsSinceEpoch(); }
+int64_t receiveMs(const JournalRecord& r) { return r.record.time.systemNs / 1'000'000; }
 
 void refuseLiveRoot(const fs::path& root) {
     const auto canonical = fs::weakly_canonical(root).string();
-    for (const char* live : {"/Volumes/T7/sentinel-data", "/Users/copeharder/Programming/Sentinel/data"})
+    for (const char* live : {"/Volumes/T7/sentinel-data", "/Users/copeharder/Programming/Sentinel/data",
+                             "/Users/copeharder/Sentinel-runtime"})
         if (canonical.starts_with(live)) throw std::runtime_error("refusing a live data root");
-}
-
-std::string iso(int64_t ms) {
-    const time_t s = static_cast<time_t>(ms / 1000);
-    tm g{};
-    gmtime_r(&s, &g);
-    char buf[40];
-    std::snprintf(buf, sizeof buf, "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", g.tm_year + 1900, g.tm_mon + 1,
-                  g.tm_mday, g.tm_hour, g.tm_min, g.tm_sec, int(ms % 1000));
-    return buf;
-}
-std::string priceText(double p) {
-    char buf[32];
-    std::snprintf(buf, sizeof buf, "%.8f", p);
-    return buf;
-}
-
-struct Tail {
-    json metadata;
-    int64_t lastMs = 0;
-    double lastPrice = 0;
-};
-// The newest file of a product: its header metadata, last receive time and
-// last trade price.
-Tail tail(const fs::path& root, const std::string& product) {
-    JournalReader all(root, product);
-    if (all.files().empty()) throw std::runtime_error("no journal for " + product);
-    const auto& header = all.files().back().header;
-    Tail t;
-    t.metadata = header.at("product_metadata");
-    JournalReader reader(root, product,
-                         JournalPos{product, header.at("run_id").get<std::string>(),
-                                    header.at("first_block_ordinal").get<uint64_t>(), 0});
-    JournalFeed feed(product);
-    feed.onTrade = [&](const Trade& trade) { t.lastPrice = trade.price; };
-    JournalRecord r;
-    while (reader.next(r)) {
-        feed.apply(r);
-        t.lastMs = std::max(t.lastMs, r.record.time.systemNs / 1'000'000);
-    }
-    if (t.lastPrice <= 0) t.lastPrice = 1;
-    return t;
-}
-
-capture::Record frame(int64_t ms, std::string payload) {
-    return {capture::Kind::Frame, {ms * 1'000'000, capture::Stamp::now().steadyNs}, 1, std::move(payload)};
-}
-std::string snapshot(const std::string& product, double price) {
-    return json{{"channel", "l2_data"},
-                {"events", json::array({{{"type", "snapshot"},
-                                         {"product_id", product},
-                                         {"updates", json::array({{{"side", "bid"},
-                                                                   {"price_level", priceText(price * 0.9999)},
-                                                                   {"new_quantity", "5"}},
-                                                                  {{"side", "offer"},
-                                                                   {"price_level", priceText(price * 1.0001)},
-                                                                   {"new_quantity", "5"}}})}}})}}
-        .dump();
-}
-std::string trade(const std::string& product, const std::string& id, int64_t ms, double price) {
-    return json{{"channel", "market_trades"},
-                {"events", json::array({{{"type", "update"},
-                                         {"trades", json::array({{{"trade_id", id},
-                                                                  {"product_id", product},
-                                                                  {"price", priceText(price)},
-                                                                  {"size", "0.01"},
-                                                                  {"side", "BUY"},
-                                                                  {"time", iso(ms - 150)}}})}}})}}
-        .dump();
 }
 
 void writeJson(const fs::path& path, const json& j) {
@@ -149,67 +86,165 @@ void writeJson(const fs::path& path, const json& j) {
     }
     fs::rename(temp, path);
 }
+json readJson(const fs::path& path) {
+    std::ifstream in(path);
+    json j;
+    in >> j;
+    return j;
+}
 
-int runCapture(const fs::path& dir, int seconds, const std::vector<std::string>& products) {
+// The record as capture frames it for the fan-out (length prefix included).
+std::string framed(const capture::Record& r) {
+    std::string s;
+    const auto put = [&](uint64_t v, int n) {
+        for (int i = 0; i < n; ++i) s += char(v >> (8 * i));
+    };
+    put(28 + r.payload.size(), 4);
+    put(uint32_t(r.kind), 4);
+    put(uint64_t(r.time.systemNs), 8);
+    put(uint64_t(r.time.steadyNs), 8);
+    put(r.connection, 8);
+    return s + r.payload;
+}
+
+// Start of the newest journal file opened at or before ms (else the first).
+JournalPos fileStartBefore(const JournalReader& all, const std::string& product, int64_t ms) {
+    size_t at = 0;
+    for (size_t i = 0; i < all.files().size(); ++i)
+        if (all.files()[i].header.at("opened_system_ns").get<int64_t>() / 1'000'000 <= ms) at = i;
+    const auto& h = all.files()[at].header;
+    return {product, h.at("run_id").get<std::string>(), h.at("first_block_ordinal").get<uint64_t>(), 0};
+}
+
+struct Replay {
+    std::string product;
+    JournalPos ceiling;
+    int64_t ceilingMs = 0;
+    std::vector<JournalRecord> records; // after the ceiling, in journal order
+    std::vector<bool> blockEnd;          // records[i] is the last of its block
+};
+
+int64_t lastReceiveMs(const fs::path& root, const std::string& product) {
+    JournalReader all(root, product);
+    if (all.files().empty()) throw std::runtime_error("no journal for " + product);
+    const auto& h = all.files().back().header;
+    JournalReader reader(root, product,
+                         JournalPos{product, h.at("run_id").get<std::string>(),
+                                    h.at("first_block_ordinal").get<uint64_t>(), 0});
+    JournalRecord r;
+    int64_t last = 0;
+    while (reader.next(r)) last = std::max(last, receiveMs(r));
+    return last;
+}
+
+// The last block end at or before cutMs is the ceiling; the records after it
+// through cutMs + seconds are replayed.
+Replay plan(const fs::path& root, const std::string& product, int64_t cutMs, int seconds) {
+    Replay out;
+    out.product = product;
+    JournalReader all(root, product);
+    JournalReader reader(root, product, fileStartBefore(all, product, cutMs - 600'000));
+    std::vector<JournalRecord> kept; // from shortly before the cut on
+    JournalRecord r;
+    const int64_t endMs = cutMs + int64_t(seconds) * 1000;
+    while (reader.next(r)) {
+        if (receiveMs(r) < cutMs - 30'000) continue;
+        if (!kept.empty() && receiveMs(kept.back()) > endMs &&
+            (r.pos.run != kept.back().pos.run || r.pos.block != kept.back().pos.block))
+            break;
+        kept.push_back(r);
+    }
+    const auto endsBlock = [&](size_t i) {
+        return i + 1 == kept.size() || kept[i + 1].pos.run != kept[i].pos.run ||
+               kept[i + 1].pos.block != kept[i].pos.block;
+    };
+    std::optional<size_t> ceiling;
+    for (size_t i = 0; i < kept.size(); ++i)
+        if (receiveMs(kept[i]) <= cutMs && endsBlock(i)) ceiling = i;
+    if (!ceiling || *ceiling + 1 >= kept.size()) throw std::runtime_error("no replay window for " + product);
+    out.ceiling = kept[*ceiling].pos;
+    out.ceilingMs = receiveMs(kept[*ceiling]);
+    for (size_t i = *ceiling + 1; i < kept.size(); ++i) {
+        out.records.push_back(kept[i]);
+        out.blockEnd.push_back(endsBlock(i));
+    }
+    return out;
+}
+
+// The copied recorder state must not be ahead of the ceiling.
+void checkCheckpoint(const fs::path& dir, const Replay& rp) {
+    const auto cp = readJson(dir / "hmc2" / rp.product / "roller.json");
+    const auto pos = cp.at("pos").get<JournalPos>();
+    if (pos.run == rp.ceiling.run && std::pair(pos.block, pos.record) > std::pair(rp.ceiling.block, rp.ceiling.record))
+        throw std::runtime_error("copied checkpoint is newer than the ceiling for " + rp.product);
+}
+
+int runReplay(const fs::path& dir, int seconds, const std::vector<std::string>& products) {
     const auto root = dir / "raw-l2";
     refuseLiveRoot(root);
-    std::vector<Tail> tails;
-    int64_t t0 = 0;
+    int64_t cutMs = INT64_MAX;
+    for (const auto& p : products) cutMs = std::min(cutMs, lastReceiveMs(root, p) - int64_t(seconds + 10) * 1000);
+    std::vector<Replay> replays;
     for (const auto& p : products) {
-        tails.push_back(tail(root, p));
-        t0 = std::max(t0, tails.back().lastMs);
+        replays.push_back(plan(root, p, cutMs, seconds));
+        checkCheckpoint(dir, replays.back());
     }
-    t0 = (t0 / 1000 + 1) * 1000;
     metrics::MetricsRegistry registry;
-    // The fan-out refuses sockets on volumes: a private directory under /tmp.
     const fs::path socketDir = "/tmp/b2r3-bench-" + dir.filename().string();
-    fs::remove_all(socketDir);
     fs::create_directories(socketDir);
     fs::permissions(socketDir, fs::perms::owner_all);
     const auto socket = (socketDir / "capture.sock").string();
+    if (fs::exists(socket)) fs::remove(socket);
     capture::FanoutConfig fc;
     fc.socketPath = QString::fromStdString(socket);
     capture::CaptureFanout fanout(fc, products, registry, [](const auto&) {});
-    std::vector<std::unique_ptr<capture::Writer>> writers;
-    for (size_t i = 0; i < products.size(); ++i) {
+    std::vector<std::unique_ptr<capture::Writer>> sinks;
+    json ceilings = json::object();
+    for (size_t i = 0; i < replays.size(); ++i) {
+        auto& rp = replays[i];
+        fanout.publish(i, {capture::JournalEventKind::Durable, rp.ceiling.run, rp.ceiling.block, rp.ceiling.record,
+                           true, {}});
         capture::WriterConfig wc;
-        wc.root = QString::fromStdString(root.string());
+        wc.root = QString::fromStdString((dir / "capture-sink").string());
         wc.symbol = products[i];
         wc.fsyncBlocks = 1;
-        wc.onJournal = [&fanout, i](const capture::JournalEvent& e) { fanout.publish(i, e); };
-        writers.push_back(std::make_unique<capture::Writer>(wc, json{{"product_metadata", tails[i].metadata}}));
-        writers[i]->append(frame(t0, snapshot(products[i], tails[i].lastPrice)));
-        writers[i]->append(frame(t0, "{\"channel\":\"heartbeats\"}"));
-        writers[i]->flush();
+        sinks.push_back(std::make_unique<capture::Writer>(wc, json{{"product_metadata", rp.records.front().metadata}}));
+        ceilings[products[i]] = {{"pos", rp.ceiling}, {"ms", rp.ceilingMs}, {"records", rp.records.size()},
+                                 {"last", rp.records.back().pos}, {"lastMs", receiveMs(rp.records.back())}};
     }
+    for (int i = 0; i < 20; ++i) QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
     const int64_t wallStart = wallMs();
-    writeJson(dir / "capture.json", {{"t0Ms", t0}, {"wallStartMs", wallStart}, {"socket", socket}});
-    std::cout << "capture t0Ms=" << t0 << " products=" << products.size() << std::endl;
-    int64_t k = 1, records = 0;
-    const int64_t last = int64_t(seconds) * 10;
-    int64_t flushedSecond = 0;
-    while (k <= last) {
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
-        const int64_t due = (wallMs() - wallStart) / 100;
-        for (; k <= std::min(due, last); ++k) {
-            const int64_t ms = t0 + k * 100;
-            for (size_t i = 0; i < products.size(); ++i) {
-                const double price = tails[i].lastPrice * (1 + 0.0001 * double(k % 7));
-                writers[i]->append(frame(ms, trade(products[i], "bench-" + std::to_string(t0) + "-" + std::to_string(k), ms, price)));
-                if (k % 10 == 0) writers[i]->append(frame(ms, "{\"channel\":\"heartbeats\"}"));
-                ++records;
+    writeJson(dir / "capture.json",
+              {{"t0Ms", cutMs}, {"wallStartMs", wallStart}, {"socket", socket}, {"products", ceilings}});
+    std::cout << "replay cutMs=" << cutMs << " " << ceilings.dump() << std::endl;
+    std::vector<size_t> next(replays.size(), 0);
+    size_t done = 0, published = 0;
+    while (done < replays.size()) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
+        const int64_t due = cutMs + (wallMs() - wallStart);
+        done = 0;
+        for (size_t i = 0; i < replays.size(); ++i) {
+            auto& rp = replays[i];
+            for (; next[i] < rp.records.size() && receiveMs(rp.records[next[i]]) <= due; ++next[i]) {
+                const auto& r = rp.records[next[i]];
+                const auto bytes = framed(r.record);
+                fanout.publish(i, {capture::JournalEventKind::Record, r.pos.run, r.pos.block, r.pos.record, true, bytes});
+                sinks[i]->append(r.record);
+                ++published;
+                if (rp.blockEnd[next[i]]) {
+                    fanout.publish(i, {capture::JournalEventKind::Durable, r.pos.run, r.pos.block, r.pos.record,
+                                       true, {}});
+                    sinks[i]->flush();
+                }
             }
+            if (next[i] == rp.records.size()) ++done;
         }
-        if (k / 10 > flushedSecond) {
-            flushedSecond = k / 10;
-            for (auto& w : writers) w->flush();
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
-    for (auto& w : writers) w->close();
-    writeJson(dir / "capture.done", {{"records", records}, {"lastMs", t0 + last * 100}});
-    std::cout << "capture done records=" << records << " lastMs=" << t0 + last * 100 << std::endl;
-    const auto until = Clock::now() + std::chrono::seconds(180);
+    for (auto& w : sinks) w->close();
+    writeJson(dir / "capture.done", {{"published", published}});
+    std::cout << "replay done published=" << published << std::endl;
+    const auto until = Clock::now() + std::chrono::seconds(240);
     while (!fs::exists(dir / "server.done") && Clock::now() < until) {
         QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -226,23 +261,21 @@ void handler(QtMsgType type, const QMessageLogContext&, const QString& message) 
     if (type == QtWarningMsg || type == QtCriticalMsg || type == QtFatalMsg)
         std::cerr << int(lines.back().first) << " " << lines.back().second << "\n";
 }
-// Time of the first line containing every part, or -1.
+bool matches(const std::string& line, std::initializer_list<std::string> parts) {
+    for (const auto& p : parts)
+        if (line.find(p) == std::string::npos) return false;
+    return true;
+}
 double at(std::initializer_list<std::string> parts) {
     std::lock_guard lock(mutex);
-    for (const auto& [ms, line] : lines) {
-        bool all = true;
-        for (const auto& p : parts) all = all && line.find(p) != std::string::npos;
-        if (all) return ms;
-    }
+    for (const auto& [ms, line] : lines)
+        if (matches(line, parts)) return ms;
     return -1;
 }
 std::string line(std::initializer_list<std::string> parts) {
     std::lock_guard lock(mutex);
-    for (const auto& [ms, l] : lines) {
-        bool all = true;
-        for (const auto& p : parts) all = all && l.find(p) != std::string::npos;
-        if (all) return l;
-    }
+    for (const auto& [ms, l] : lines)
+        if (matches(l, parts)) return l;
     return {};
 }
 std::string field(const std::string& line, const std::string& key) {
@@ -259,19 +292,17 @@ double metric(const std::string& text, const std::string& series) {
 }
 int64_t committed(const fs::path& dir) {
     try {
-        std::ifstream in(dir / "roller.json");
-        json j;
-        in >> j;
-        return j.value("committedThroughMs", int64_t{0});
+        return readJson(dir / "roller.json").value("committedThroughMs", int64_t{0});
     } catch (const std::exception&) {
         return 0;
     }
 }
-std::string digest(const fs::path& root) {
+// HMC2 files this run wrote (the checker's oracle excluded: it depends on
+// when the hourly check ran).
+std::string digest(const fs::path& root, fs::file_time_type since) {
     std::vector<fs::path> files;
-    // The recorder's output only: the hourly checker's oracle depends on when it ran.
     for (const auto& e : fs::recursive_directory_iterator(root))
-        if (e.path().extension() == ".hmc2" &&
+        if (e.path().extension() == ".hmc2" && e.last_write_time() >= since &&
             fs::relative(e.path(), root).string().find("shadow-oracle") == std::string::npos)
             files.push_back(e.path());
     std::sort(files.begin(), files.end());
@@ -283,41 +314,86 @@ std::string digest(const fs::path& root) {
         hash.addData(QByteArrayView(name.data(), qsizetype(name.size())));
         hash.addData(QByteArrayView(bytes.data(), qsizetype(bytes.size())));
     }
-    return hash.result().toHex().left(16).toStdString();
+    return std::to_string(files.size()) + ":" + hash.result().toHex().left(16).toStdString();
 }
 
-int runServer(const fs::path& dir, bool restore, int seconds, const std::vector<std::string>& products) {
+// Continuous pass over the run's journal from about an hour before the window
+// through the last replayed record; closed 100 ms and 1 s bars of the model at
+// or after windowStartMs must equal it. Returns {compared, differing}.
+std::pair<size_t, size_t> compareBars(const fs::path& root, const std::string& product, int64_t windowStartMs,
+                                      const JournalPos& last, const std::map<int64_t, std::vector<OHLCVBar>>& model) {
+    TimeframeAggregator aggregator({100, 1000, 60000}, {{100, 60000}, {1000, 10000}});
+    JournalReader all(root, product);
+    JournalReader reader(root, product, fileStartBefore(all, product, windowStartMs - 3'600'000));
+    JournalFeed feed(product);
+    feed.onTrade = [&](const Trade& t) { aggregator.onTrade(t); };
+    int64_t sent = INT64_MIN;
+    JournalRecord r;
+    while (reader.next(r)) {
+        feed.apply(r);
+        const int64_t ms = receiveMs(r);
+        if (ms / 1000 > sent) {
+            sent = ms / 1000;
+            aggregator.advance(product, ms - ServerDataModel::kJournalCandleLagMs);
+        }
+        if (r.pos == last) break;
+    }
+    size_t compared = 0, differing = 0;
+    for (const auto& [tf, bars] : model) {
+        if (bars.empty()) {
+            ++differing;
+            continue;
+        }
+        std::map<int64_t, OHLCVBar> want;
+        for (const auto& b : aggregator.getHistory(product, tf, 100000)) want[b.timestamp_ms] = b;
+        const int64_t newest = bars.back().timestamp_ms;
+        size_t seen = 0;
+        for (const auto& b : bars) {
+            if (b.timestamp_ms < windowStartMs) continue;
+            ++compared;
+            ++seen;
+            const auto it = want.find(b.timestamp_ms);
+            if (it == want.end() ||
+                std::tie(b.open, b.high, b.low, b.close, b.volume, b.count) !=
+                    std::tie(it->second.open, it->second.high, it->second.low, it->second.close, it->second.volume,
+                             it->second.count))
+                ++differing;
+        }
+        size_t expected = 0;
+        for (const auto& [ts, b] : want)
+            if (ts >= windowStartMs && ts <= newest) ++expected;
+        differing += expected > seen ? expected - seen : seen - expected;
+    }
+    return {compared, differing};
+}
+
+int runServer(const fs::path& dir, bool restore, int seconds, const std::string& configPath,
+              const std::vector<std::string>& products) {
     refuseLiveRoot(dir / "raw-l2");
     refuseLiveRoot(dir / "hmc2");
-    fs::create_directories(dir / "hmc2");
     fs::create_directories(dir / "primary");
-    const auto until = Clock::now() + std::chrono::seconds(60);
+    const auto runStart = fs::file_time_type::clock::now();
+    ServerConfig config;
+    if (!ConfigLoader::loadServerConfig(configPath, &config)) throw std::runtime_error("config " + configPath);
+    const auto until = Clock::now() + std::chrono::seconds(120);
     while (!fs::exists(dir / "capture.json") && Clock::now() < until)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    json clock;
-    {
-        std::ifstream in(dir / "capture.json");
-        in >> clock;
-    }
+    const json clock = readJson(dir / "capture.json");
     const int64_t t0 = clock.at("t0Ms"), wallStart = clock.at("wallStartMs");
     const double startMs = sinceStartMs();
     QDir::setCurrent(QString::fromStdString(dir.string()));
     qInstallMessageHandler(logs::handler);
-    ServerConfig config;
     config.defaultSymbols = products;
     config.streamPort = 0;
     config.recording.enabled = true;
     config.recording.source = "roller";
     config.recording.dir = (dir / "primary").string();
     config.recording.fallbackDir.clear();
-    config.chart.timeframesMs = {100, 1000, 60000, 300000, 900000, 3600000, 14400000, 86400000};
-    config.chart.historyBars = {{100, 18000}};
     auto& shadow = config.rollerShadow;
     shadow.enabled = true;
     shadow.journalRoot = (dir / "raw-l2").string();
     shadow.outputRoot = (dir / "hmc2").string();
     shadow.socketPath = clock.at("socket").get<std::string>();
-    shadow.from = iso(t0 / 86'400'000 * 86'400'000).substr(0, 19) + "Z";
     shadow.products = products;
     shadow.liveNowForTest = [t0, wallStart] { return t0 + (wallMs() - wallStart); };
     shadow.candleRestoreForTest = restore;
@@ -331,17 +407,14 @@ int runServer(const fs::path& dir, bool restore, int seconds, const std::vector<
         if (seen < 0) seen = model.candleHistoryReady(t.product_id) ? 1 : 0;
     });
     const auto lateBefore = metric(ShadowServerTestAccess::metrics(*app), "sentinel_server_event_loop_late_ticks_total");
-    if (!ShadowServerTestAccess::start(*app, products)) {
-        std::cerr << "server start failed" << std::endl;
-        return 2;
-    }
+    if (!ShadowServerTestAccess::start(*app, products)) throw std::runtime_error("server start failed");
     double lagMax = 0, p99After60 = 0;
     std::vector<std::pair<double, double>> samples;
     auto nextSample = Clock::now() + std::chrono::seconds(1);
     const auto measuredUntil = Clock::now() + std::chrono::seconds(seconds);
     std::map<std::string, int64_t> stable;
     auto stableSince = Clock::now();
-    const auto hardStop = Clock::now() + std::chrono::seconds(seconds + 90);
+    const auto hardStop = Clock::now() + std::chrono::seconds(seconds + 150);
     for (;;) {
         QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -349,11 +422,10 @@ int runServer(const fs::path& dir, bool restore, int seconds, const std::vector<
         if (now >= nextSample) {
             nextSample += std::chrono::seconds(1);
             const double p99 = ShadowServerTestAccess::lag(*app, 0.99), max = ShadowServerTestAccess::lag(*app, 1);
-            const double t = sinceStartMs() - startMs;
             samples.emplace_back(p99, max);
             if (now <= measuredUntil) {
                 lagMax = std::max(lagMax, max);
-                if (t >= 60'000) p99After60 = std::max(p99After60, p99);
+                if (sinceStartMs() - startMs >= 60'000) p99After60 = std::max(p99After60, p99);
             }
         }
         if (now < measuredUntil) continue;
@@ -364,58 +436,65 @@ int runServer(const fs::path& dir, bool restore, int seconds, const std::vector<
         if (c != stable) {
             stable = c;
             stableSince = now;
-        } else if (now - stableSince > std::chrono::seconds(5)) {
+        } else if (now - stableSince > std::chrono::seconds(8)) {
             break;
         }
     }
     const auto text = ShadowServerTestAccess::metrics(*app);
     const auto lateAfter = metric(text, "sentinel_server_event_loop_late_ticks_total");
     const double servingReady = logs::at({"Roller serving ready products="});
-    std::vector<std::string> out;
+    std::map<std::string, std::map<int64_t, std::vector<OHLCVBar>>> bars;
+    for (const auto& p : products)
+        for (const int64_t tf : {int64_t{100}, int64_t{1000}}) bars[p][tf] = model.getHistory(p, tf, 100000);
+    double failures = 0;
+    for (const auto& p : products)
+        failures += std::max(0.0, metric(text, "sentinel_candle_history_restore_failures_total{product=\"" + p + "\"}"));
+    app.reset();
+    rusage usage{};
+    getrusage(RUSAGE_SELF, &usage);
+    const json ceilings = clock.at("products");
+    size_t differingTotal = 0;
     for (const auto& p : products) {
         const auto restored = logs::line({"Candle history restored product=" + p + " "});
         const auto ready = logs::line({"Candle history ready symbol=" + p + " "});
-        std::ostringstream s;
-        s << "product=" << p << " mode=" << (restore ? "restore" : "baseline")
-          << " startedMs=" << logs::at({"Roller started product=" + p + " "})
-          << " restoreStartMs=" << logs::at({"Candle history restore start product=" + p + " "})
-          << " restoredMs=" << logs::at({"Candle history restored product=" + p + " "})
-          << " readyMs=" << logs::at({"Candle history ready symbol=" + p + " "})
-          << " seedMs=" << logs::at({"Journal live seed product=" + p + " "})
-          << " healthyMs=" << logs::at({"Roller writer healthy product=" + p})
-          << " outcome=" << logs::field(restored, "outcome") << " files=" << logs::field(restored, "files")
-          << " records=" << logs::field(restored, "records") << " trades=" << logs::field(restored, "trades")
-          << " bars100=" << logs::field(restored, "bars100") << " bars1000=" << logs::field(restored, "bars1000")
-          << " readMs=" << logs::field(restored, "readMs") << " installUs=" << logs::field(ready, "installUs")
-          << " restored=" << logs::field(ready, "restored") << " readyAtFirstTrade=" << readyAtFirstTrade[p]
-          << " committedMs=" << stable[p];
-        out.push_back(s.str());
-    }
-    rusage usage{};
-    getrusage(RUSAGE_SELF, &usage);
-    const double failures = [&] {
-        double sum = 0;
-        for (const auto& p : products) {
-            sum += std::max(0.0, metric(text, "sentinel_candle_history_restore_failures_total{product=\"" + p + "\"}"));
+        std::string cmp = "n/a";
+        if (restore && !restored.empty()) {
+            const int64_t throughMs = std::stoll(logs::field(restored, "throughMs"));
+            const auto [compared, differing] = compareBars(dir / "raw-l2", p, throughMs - kRestoreWindowMs,
+                                                           ceilings.at(p).at("last").get<JournalPos>(), bars[p]);
+            differingTotal += differing;
+            cmp = std::to_string(compared) + "/" + std::to_string(differing);
         }
-        return sum;
-    }();
-    app.reset();
-    writeJson(dir / "server.done", {{"ok", true}});
+        std::cout << "product=" << p << " mode=" << (restore ? "restore" : "baseline")
+                  << " startedMs=" << logs::at({"Roller started product=" + p + " "})
+                  << " restoreStartMs=" << logs::at({"Candle history restore start product=" + p + " "})
+                  << " restoredMs=" << logs::at({"Candle history restored product=" + p + " "})
+                  << " readyMs=" << logs::at({"Candle history ready symbol=" + p + " "})
+                  << " seedMs=" << logs::at({"Journal live seed product=" + p + " "})
+                  << " healthyMs=" << logs::at({"Roller writer healthy product=" + p})
+                  << " outcome=" << logs::field(restored, "outcome") << " files=" << logs::field(restored, "files")
+                  << " records=" << logs::field(restored, "records") << " trades=" << logs::field(restored, "trades")
+                  << " bars100=" << logs::field(restored, "bars100")
+                  << " bars1000=" << logs::field(restored, "bars1000") << " readMs=" << logs::field(restored, "readMs")
+                  << " installUs=" << logs::field(ready, "installUs") << " restored=" << logs::field(ready, "restored")
+                  << " readyAtFirstTrade=" << readyAtFirstTrade[p] << " barsComparedDiffering=" << cmp
+                  << " committedMs=" << stable[p] << std::endl;
+    }
+    std::cout << "total mode=" << (restore ? "restore" : "baseline") << " products=" << products.size()
+              << " servingReadyMs=" << servingReady << " lagMaxMs=" << lagMax << " lagP99After60sMs=" << p99After60
+              << " lateTicks=" << (lateAfter - std::max(0.0, lateBefore))
+              << " maxRssMb=" << double(usage.ru_maxrss) / (1024.0 * 1024.0) << " restoreFailures=" << failures
+              << " differingBars=" << (restore ? std::to_string(differingTotal) : "n/a")
+              << " hmc2=" << digest(dir / "hmc2", runStart) << std::endl;
+    std::cout << "lag per second (p99,max):";
+    for (const auto& [p99, max] : samples) std::cout << " " << p99 << "," << max;
+    std::cout << std::endl;
     {
         std::ofstream log(dir / "server.log");
         std::lock_guard lock(logs::mutex);
         for (const auto& [ms, l] : logs::lines) log << int64_t(ms) << " " << l << "\n";
     }
-    for (const auto& l : out) std::cout << l << std::endl;
-    std::cout << "total mode=" << (restore ? "restore" : "baseline") << " products=" << products.size()
-              << " servingReadyMs=" << servingReady << " lagMaxMs=" << lagMax << " lagP99After60sMs=" << p99After60
-              << " lateTicks=" << (lateAfter - std::max(0.0, lateBefore)) << " maxRssMb="
-              << double(usage.ru_maxrss) / (1024.0 * 1024.0) << " restoreFailures=" << failures
-              << " hmc2=" << digest(dir / "hmc2") << std::endl;
-    std::cout << "lag per second (p99,max):";
-    for (const auto& [p99, max] : samples) std::cout << " " << p99 << "," << max;
-    std::cout << std::endl;
+    writeJson(dir / "server.done", {{"ok", true}});
     return 0;
 }
 } // namespace
@@ -424,16 +503,17 @@ int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     try {
         const std::vector<std::string> args(argv + 1, argv + argc);
-        if (args.size() >= 4 && args[0] == "capture")
-            return runCapture(args[1], std::stoi(args[2]), {args.begin() + 3, args.end()});
-        if (args.size() >= 5 && args[0] == "server" && (args[2] == "restore" || args[2] == "baseline"))
-            return runServer(args[1], args[2] == "restore", std::stoi(args[3]), {args.begin() + 4, args.end()});
+        if (args.size() >= 4 && args[0] == "replay")
+            return runReplay(args[1], std::stoi(args[2]), {args.begin() + 3, args.end()});
+        if (args.size() >= 6 && args[0] == "server" && (args[2] == "restore" || args[2] == "baseline"))
+            return runServer(args[1], args[2] == "restore", std::stoi(args[3]), args[4],
+                             {args.begin() + 5, args.end()});
     } catch (const std::exception& e) {
         std::cerr << "candle_startup_bench: " << e.what() << std::endl;
         return 1;
     }
-    std::cerr << "usage: candle_startup_bench capture <runDir> <seconds> <product>...\n"
-                 "       candle_startup_bench server <runDir> <restore|baseline> <seconds> <product>..."
+    std::cerr << "usage: candle_startup_bench replay <runDir> <seconds> <product>...\n"
+                 "       candle_startup_bench server <runDir> <restore|baseline> <seconds> <config> <product>..."
               << std::endl;
     return 1;
 }
