@@ -106,6 +106,7 @@ bool JournalReader::next(JournalRecord& out) {
             start_ ? std::optional<uint64_t>(start_->block) : std::nullopt,
             [this, &f](const capture::BlockIndex& block, const char* reason) {
                 reportCorruption(product_, f, block, reason);
+                ++damaged_;
                 gap_ = true;
                 // A saved cursor in a now-damaged block cannot be delivered;
                 // return its first readable successor with a gap.
@@ -127,13 +128,17 @@ bool JournalReader::next(JournalRecord& out) {
         const auto& result = reader_->result();
         pending_ = !f.superseded && !result.indexed;
         gap_ = gap_ || result.tornTail || (f.superseded && !result.indexed);
+        if (f.superseded && result.tornTail) ++damaged_;
         nextBlock_ = f.header.at("first_block_ordinal").get<uint64_t>() + result.index.size();
         ++file_;
         if (file_ < files_.size()) {
             const auto& next = files_[file_].header;
-            gap_ = gap_ || next.at("run_id") != f.header.at("run_id") ||
-                next.at("first_block_ordinal").get<uint64_t>() != nextBlock_ ||
+            const bool sameRun = next.at("run_id") == f.header.at("run_id");
+            const bool discontinuous = next.at("first_block_ordinal").get<uint64_t>() != nextBlock_ ||
                 next.at("segment").get<uint64_t>() != f.header.at("segment").get<uint64_t>() + 1;
+            gap_ = gap_ || !sameRun || discontinuous;
+            // A different run entered inside the scan must start at its segment 0.
+            if (sameRun ? discontinuous : next.at("segment").get<uint64_t>() != 0) ++damaged_;
         }
         decoded_ += result.decodedRecords;
         reader_.reset();

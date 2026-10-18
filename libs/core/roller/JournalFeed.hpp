@@ -36,6 +36,9 @@ public:
     // 16K IDs cover many 100-trade reconnect snapshots while capping per-product memory.
     static constexpr size_t TradeIdWindowCapacity = 16'384;
     size_t retainedTradeIds() const { return tradeIds_.size(); }
+    // Read-only view of the retained nonempty IDs (at most the window capacity);
+    // copy it to keep it past further apply() calls.
+    const std::unordered_set<std::string>& tradeIds() const { return tradeIds_; }
 private:
     std::string product_, run_;
     uint64_t connection_ = 0;
