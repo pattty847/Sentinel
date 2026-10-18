@@ -3538,41 +3538,88 @@ std::map<std::string, std::string> anchors(const fs::path &root) {
       }
   return result;
 }
+// Boundary of an anchor from its path (<product>/anchors/<UTC day>/<HHmm>.anchor).
+int64_t anchorBoundaryMs(const std::string &name) {
+  const fs::path p(name);
+  const auto day = p.parent_path().filename().string();
+  const auto hhmm = p.stem().string();
+  return parseTime(day + "T" + hhmm.substr(0, 2) + ":" + hhmm.substr(2, 2) + ":00Z");
+}
+using Anchors = std::map<std::string, std::string>;
+// Problems comparing every anchor through boundaryMs: the same set on both
+// sides, byte-equal, and the required boundary present on both. Empty = equal.
+std::vector<std::string> anchorProblems(const Anchors &served, const Anchors &bypass, int64_t boundaryMs,
+                                        int64_t requiredMs) {
+  std::vector<std::string> out;
+  const auto upTo = [&](const Anchors &a) {
+    Anchors r;
+    for (const auto &[name, bytes] : a)
+      if (anchorBoundaryMs(name) <= boundaryMs)
+        r.emplace(name, bytes);
+    return r;
+  };
+  const auto x = upTo(served), y = upTo(bypass);
+  for (const auto &[name, bytes] : x) {
+    const auto it = y.find(name);
+    if (it == y.end())
+      out.push_back("missing in bypass: " + name);
+    else if (it->second != bytes)
+      out.push_back("bytes differ: " + name);
+  }
+  for (const auto &[name, bytes] : y)
+    if (!x.contains(name))
+      out.push_back("missing in served: " + name);
+  for (const auto *side : {&x, &y})
+    if (std::none_of(side->begin(), side->end(),
+                     [&](const auto &e) { return anchorBoundaryMs(e.first) == requiredMs; }))
+      out.push_back("required anchor missing at " + std::to_string(requiredMs));
+  return out;
+}
 // The recorder's output equals a batch roll of the same journal through the
-// served checkpoint, and its anchors equal those of a served replay of that
-// journal with the rebuild switched off (batch anchors carry no tap book).
-void expectRecorderMatchesBatch(ShadowTest &t, JournalServer &s) {
+// served checkpoint. Its anchors through the served checkpoint's last
+// quarter-hour fence (the required one included) equal those of a served
+// replay of that journal with the rebuild switched off, which is run until it
+// has written the anchor at that fence (atomically renamed) and committed
+// through it (batch anchors carry no tap book, so they are not
+// byte-comparable).
+void expectRecorderMatchesBatch(ShadowTest &t, JournalServer &s, int64_t requiredMs) {
   const auto dir = t.root / "shadow" / "PEPE-USD";
   const auto committed = committedThrough(dir);
-  ASSERT_GT(committed, 0);
+  ASSERT_GT(committed, requiredMs);
   roll({t.cfg.journalRoot, t.root / "batch", "PEPE-USD", Epoch, committed});
   EXPECT_TRUE(contents(t.cfg.outputRoot) == contents(t.root / "batch"));
+  const auto served = anchors(t.cfg.outputRoot);
+  int64_t boundary = INT64_MIN;
+  for (const auto &[name, bytes] : served)
+    if (anchorBoundaryMs(name) < committed)
+      boundary = std::max(boundary, anchorBoundaryMs(name));
+  ASSERT_GE(boundary, requiredMs);
   s.config.rollerShadow.outputRoot = (t.root / "bypass").string();
   s.config.rollerShadow.candleRestoreForTest = false;
   ASSERT_TRUE(s.initialize());
-  // The replay commits what its last fence proves, at most the served value.
-  int64_t last = -1;
-  auto stableSince = std::chrono::steady_clock::now();
+  const auto bypassDir = t.root / "bypass" / "PEPE-USD";
   ASSERT_TRUE(eventuallyQt([&] {
-    const auto c = committedThrough(t.root / "bypass" / "PEPE-USD");
-    if (c != last) {
-      last = c;
-      stableSince = std::chrono::steady_clock::now();
-    }
-    return c > 0 && std::chrono::steady_clock::now() - stableSince > 2s;
-  }, 60s));
+    const auto b = anchors(t.root / "bypass");
+    return committedThrough(bypassDir) >= boundary &&
+           std::any_of(b.begin(), b.end(), [&](const auto &e) { return anchorBoundaryMs(e.first) == boundary; });
+  }, 60s)) << "bypassed replay never passed the fence at " << boundary;
   s.app.reset();
-  const auto served = anchors(t.cfg.outputRoot), bypass = anchors(t.root / "bypass");
-  EXPECT_FALSE(served.empty());
-  size_t compared = 0;
-  for (const auto &[name, bytes] : served) {
-    const auto it = bypass.find(name);
-    if (it == bypass.end())
-      continue; // a fence the bypassed replay has not reached
-    EXPECT_TRUE(it->second == bytes) << name;
-    ++compared;
+  const auto bypass = anchors(t.root / "bypass");
+  const auto problems = anchorProblems(served, bypass, boundary, requiredMs);
+  EXPECT_TRUE(problems.empty()) << ::testing::PrintToString(problems);
+  // The comparison itself fails when the required anchor is gone or altered.
+  for (const bool drop : {true, false}) {
+    auto broken = bypass;
+    for (auto it = broken.begin(); it != broken.end(); ++it)
+      if (anchorBoundaryMs(it->first) == requiredMs) {
+        if (drop)
+          broken.erase(it);
+        else
+          it->second.back() ^= 1;
+        break;
+      }
+    EXPECT_FALSE(anchorProblems(served, broken, boundary, requiredMs).empty()) << (drop ? "drop" : "alter");
   }
-  EXPECT_GE(compared, 2u);
 }
 // A raw-CRC flip in one block, its header re-checksummed (test_corrupt_blocks).
 void corruptBlock(const fs::path &p, const capture::BlockIndex &block) {
@@ -4074,7 +4121,7 @@ TEST_F(ShadowTest, CandleRestoreAcrossMidnightKeepsTheGateAndTheRecorder) {
     expectSameBars(s.model(), ref, 0);
   }
   s.app.reset();
-  expectRecorderMatchesBatch(*this, s);
+  expectRecorderMatchesBatch(*this, s, Epoch + Day); // the midnight anchor
 }
 
 // Transport recovery after a restart from an anchor (so the roller's own rings
@@ -4135,7 +4182,7 @@ TEST_F(ShadowTest, CandleRestoreTransportRecoveryDeliversTheGapOnce) {
     expectSameBars(s.model(), ref, 0);
   }
   s.app.reset();
-  expectRecorderMatchesBatch(*this, s);
+  expectRecorderMatchesBatch(*this, s, Epoch + 900000); // the anchor the restart restored
 }
 
 // The handoff inside one journal second: `through` at x.100 s, a heartbeat at
