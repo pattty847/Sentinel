@@ -34,3 +34,9 @@ set_tests_properties(CandleRestoreTests PROPERTIES LABELS "roller" TIMEOUT 120)
 
 add_executable(candle_restore_bench candle_restore_bench.cpp)
 target_link_libraries(candle_restore_bench PRIVATE sentinel_core Qt6::Core)
+
+# Startup cost of the candle rebuild in the production graph (scratch copies only; not a ctest).
+add_executable(candle_startup_bench candle_startup_bench.cpp
+    ../../apps/sentinel-server/SentinelServerApp.cpp
+    ../../apps/sentinel-server/SentinelServerApp.hpp)
+target_link_libraries(candle_startup_bench PRIVATE sentinel_core Qt6::Core Qt6::Network)
