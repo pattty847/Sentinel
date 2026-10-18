@@ -64,10 +64,10 @@ struct PriceFitterTest : testing::Test {
         fitter.setCandleSource(&candles);
         fitter.setRequestUpdate([this] { ++env.updates; });
     }
-    void bar(qint64 start, double lo, double hi, double close = 100) {
+    void bar(qint64 start, double lo, double hi, double close = 100, double volume = 0) {
         chart::CandleBar b;
-        b.timeStartMs = start; b.timeEndMs = start + 1000;
-        b.low = lo; b.high = hi; b.close = close;
+        b.timeStartMs = start; b.timeEndMs = start + controller.session().timeframeMs;
+        b.low = lo; b.high = hi; b.close = close; b.volume = volume;
         candles.bars.push_back(b);
     }
     void expectFit(double lo, double hi, bool only = true) {
@@ -118,6 +118,36 @@ TEST_F(PriceFitterTest, AutoVisibleBars) {
     EXPECT_EQ(candles.interval, 1000);
     EXPECT_EQ(env.decision, 1);
     EXPECT_EQ(env.updates, 1);
+}
+
+// The fit sees what the overlay draws: at 100 ms trade-free buckets are not drawn, so
+// their carried price neither widens the fit nor makes a quiet window non-empty.
+// Whole seconds draw them and keep fitting them.
+TEST_F(PriceFitterTest, HundredMsFitIgnoresTradeFreeBuckets) {
+    const auto fitWith = [this](int64_t tf, bool carries) {
+        controller.session().timeframeMs = tf;
+        candles.bars.clear();
+        if (carries)
+            for (qint64 t = 2000; t < 2500; t += 100) bar(t, 100, 100, 100);
+        bar(3000, 108, 112, 110, 1);
+        bar(3100, 109, 113, 111, 2);
+        return fitter.gpuFitPriceWindow(1000, 11000, true);
+    };
+    const auto traded = fitWith(100, false);
+    ASSERT_TRUE(traded);
+    const auto mixed = fitWith(100, true);
+    ASSERT_TRUE(mixed);
+    EXPECT_EQ(*mixed, *traded) << "100 ms carry bars must not widen the fit";
+    const auto wholeSecond = fitWith(1000, true);
+    ASSERT_TRUE(wholeSecond);
+    EXPECT_LT(wholeSecond->first, 100) << "1 s still fits the drawn trade-free buckets";
+
+    controller.session().timeframeMs = 100;
+    candles.bars.clear();
+    for (qint64 t = 2000; t < 2500; t += 100) bar(t, 100, 100, 100);
+    EXPECT_FALSE(fitter.gpuFitPriceWindow(1000, 11000, true)) << "an all-quiet 100 ms window is empty";
+    controller.session().timeframeMs = 1000;
+    EXPECT_TRUE(fitter.gpuFitPriceWindow(1000, 11000, true));
 }
 
 TEST_F(PriceFitterTest, ManualRowRule) {
@@ -229,7 +259,7 @@ TEST_F(PriceFitterTest, NonWholeSecondIntervalsRemainMilliseconds) {
     view.setPriceFit([this](qint64 start, qint64 end, double& lo, double& hi) {
         return fitter.autoPriceFit(start, end, lo, hi);
     });
-    bar(4000, 80, 120);
+    bar(4000, 80, 120, 100, 1); // traded: drawn at every interval
     for (int64_t tf : {100, 1500}) {
         controller.session().timeframeMs = tf;
         ASSERT_TRUE(fitter.gpuFitPriceWindow(1000, 11000, true));

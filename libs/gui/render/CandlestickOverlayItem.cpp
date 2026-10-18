@@ -417,10 +417,9 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
                                                   sliceEnd,
                                                   m_bufferSlice);
         if (hasData) {
-            const bool tradeFreeDrawn = chart::drawsTradeFreeBuckets(m_timeframeMs);
             m_visibleCandles.reserve(m_bufferSlice.size());
             for (const auto& bar : m_bufferSlice) {
-                if (!tradeFreeDrawn && bar.volume <= 0) continue;
+                if (!chart::drawsCandle(m_timeframeMs, bar.volume)) continue;
                 CandleOverlayBar out;
                 out.timeStartMs = bar.timeStartMs;
                 out.timeEndMs = bar.timeEndMs;

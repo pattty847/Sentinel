@@ -15,3 +15,12 @@ TEST(CandleInterval, QuietBucketsStartAtOneSecond) {
         EXPECT_TRUE(chart::synthesizesQuietBars(tf));
     }
 }
+TEST(CandleInterval, TradeFreeBarsAreDrawnOnlyFromOneSecond) {
+    EXPECT_TRUE(chart::drawsCandle(100, 0.5));
+    EXPECT_FALSE(chart::drawsCandle(100, 0));
+    EXPECT_FALSE(chart::drawsCandle(100, -1));
+    for (int64_t tf : {1000, 60000}) {
+        EXPECT_TRUE(chart::drawsCandle(tf, 0));
+        EXPECT_TRUE(chart::drawsCandle(tf, 2));
+    }
+}

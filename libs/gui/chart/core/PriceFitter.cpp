@@ -1,5 +1,6 @@
 #include "chart/core/PriceFitter.hpp"
 #include "chart/core/ChartViewController.hpp"
+#include "chart/core/CandleInterval.hpp"
 #include "SentinelLogging.hpp"
 #include "servermodel/RecordingCodec.hpp"
 #include <algorithm>
@@ -11,7 +12,7 @@ namespace {
 bool skipBar(const CandleBar& bar, int64_t tf, double drawnStart, double drawnEnd) {
     const qint64 barEnd = bar.timeEndMs > bar.timeStartMs ? bar.timeEndMs : bar.timeStartMs + tf;
     return double(bar.timeStartMs) >= drawnEnd || double(barEnd) <= drawnStart || !std::isfinite(bar.high) ||
-        !std::isfinite(bar.low) || !(bar.low > 0) || bar.high < bar.low;
+        !std::isfinite(bar.low) || !(bar.low > 0) || bar.high < bar.low || !drawsCandle(tf, bar.volume);
 }
 } // namespace
 
