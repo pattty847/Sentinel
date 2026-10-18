@@ -3243,17 +3243,6 @@ TEST(JournalLiveFeedModel, HeartbeatsCloseBarsWithoutTrades) {
   EXPECT_EQ(seconds.front().timestamp_ms, JournalCandles::T0 + 10'000);
   // Last journal record 130.12 s, lag 1 s: seconds through 128 are closed.
   EXPECT_EQ(seconds.back().timestamp_ms, JournalCandles::T0 + 128'000);
-  // A trade closes the buckets before it at once, without waiting for the
-  // next watermark: the open 2 m minute and seconds through 184 close.
-  c.steady->onTrade(Trade{std::chrono::system_clock::time_point(
-                              std::chrono::milliseconds(JournalCandles::T0 + 185'000)),
-                          "PEPE-USD", "next", AggressorSide::Buy, 2.0, 1.0});
-  const auto traded = c.steady->getHistory("PEPE-USD", 60000, 100);
-  ASSERT_EQ(traded.size(), 3u);
-  EXPECT_EQ(traded[2].timestamp_ms, JournalCandles::T0 + 120'000);
-  EXPECT_EQ(traded[2].count, 0u);
-  EXPECT_EQ(c.steady->getHistory("PEPE-USD", 1000, 1000).back().timestamp_ms,
-            JournalCandles::T0 + 184'000);
   // A late trade for a bucket journal time already closed never reopens it.
   c.steady->onTrade(Trade{std::chrono::system_clock::time_point(
                               std::chrono::milliseconds(JournalCandles::T0 + 50'000)),
@@ -3265,6 +3254,25 @@ TEST(JournalLiveFeedModel, HeartbeatsCloseBarsWithoutTrades) {
     EXPECT_EQ(after[i].timestamp_ms, JournalCandles::T0 + int64_t(i) * 60'000) << i;
     EXPECT_NE(after[i].high, 9.0) << i;
   }
+}
+// A trade closes the quiet buckets before it at once, without waiting for
+// the next watermark (which lags receive time by kJournalCandleLagMs).
+TEST(JournalLiveFeedModel, TradeClosesQuietBucketsBeforeTheNextWatermark) {
+  JournalCandles c;
+  c.record({{10'000, 1.0}}, 130'000);
+  int64_t sent = INT64_MIN;
+  for (const auto &r : c.journal)
+    JournalCandles::deliver(*c.steady, r, sent);
+  ASSERT_EQ(c.steady->getHistory("PEPE-USD", 60000, 100).size(), 2u); // 2 m is open
+  c.steady->onTrade(Trade{std::chrono::system_clock::time_point(
+                              std::chrono::milliseconds(JournalCandles::T0 + 185'000)),
+                          "PEPE-USD", "next", AggressorSide::Buy, 2.0, 1.0});
+  const auto minutes = c.steady->getHistory("PEPE-USD", 60000, 100);
+  ASSERT_EQ(minutes.size(), 3u);
+  EXPECT_EQ(minutes[2].timestamp_ms, JournalCandles::T0 + 120'000);
+  EXPECT_EQ(minutes[2].count, 0u); // carried quiet minute
+  EXPECT_EQ(c.steady->getHistory("PEPE-USD", 1000, 1000).back().timestamp_ms,
+            JournalCandles::T0 + 184'000);
 }
 } // namespace
 
