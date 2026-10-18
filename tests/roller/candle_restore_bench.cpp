@@ -100,6 +100,7 @@ struct Options {
     int threads = 1, fileBack = 0, minute = 50;
     int64_t windowMs = 0;
     bool forceReread = false, cmp = false;
+    bool dropResentIdForTest = false; // cmp must then report one missing id
 };
 
 JournalPos findThrough(const Options& o, const std::string& product) {
@@ -126,7 +127,28 @@ double threadCpuMs() {
 
 struct Cmp {
     uint64_t differing = 0, compared = 0, sliver = 0, idsMissing = 0, idsExtra = 0, idsResent = 0;
+    size_t idsMet = 0, idsExpected = 0;
 };
+
+// Every nonempty trade id of `product` in a frame, before any feed dedupe.
+void collectTradeIds(const JournalRecord& r, const std::string& product,
+                     std::unordered_set<std::string>& out) {
+    if (r.record.kind != capture::Kind::Frame || r.record.payload.find("market_trades") == std::string::npos)
+        return;
+    const auto j = nlohmann::json::parse(r.record.payload, nullptr, false);
+    if (!j.is_object() || j.value("channel", "") != "market_trades") return;
+    const auto take = [&](const nlohmann::json& trades) {
+        if (!trades.is_array()) return;
+        for (const auto& t : trades) {
+            if (!t.is_object() || t.value("product_id", "") != product) continue;
+            const std::string id = t.value("trade_id", "");
+            if (!id.empty()) out.insert(id);
+        }
+    };
+    if (j.contains("trades")) take(j["trades"]);
+    if (j.contains("events") && j["events"].is_array())
+        for (const auto& e : j["events"]) if (e.is_object() && e.contains("trades")) take(e["trades"]);
+}
 
 uint64_t lateOf(const TimeframeAggregator& a, const std::string& product, int64_t tf) {
     for (const auto& d : a.lateDrops())
@@ -144,7 +166,7 @@ Cmp compare(const Options& o, const CandleRestore& restore) {
                               start.header.at("first_block_ordinal").get<uint64_t>(), 0};
     TimeframeAggregator continuous(Tfs, Caps);
     std::unique_ptr<TimeframeAggregator> mirror;
-    std::unordered_set<std::string> seen;
+    std::unordered_set<std::string> seen, met; // delivered in the read; met in the read
     Cmp out;
     JournalFeed feed(product);
     feed.onTrade = [&](const Trade& t) {
@@ -170,6 +192,7 @@ Cmp compare(const Options& o, const CandleRestore& restore) {
             mirror = std::make_unique<TimeframeAggregator>(Tfs, Caps);
             mirror->seedJournalFloor(product, restore.seedWatermarkMs, Tfs);
         }
+        if (mirror) collectTradeIds(r, product, met);
         feed.apply(r);
         const int64_t ms = r.record.time.systemNs / 1'000'000;
         const int64_t second = ms / 1000 - (ms % 1000 < 0);
@@ -202,14 +225,26 @@ Cmp compare(const Options& o, const CandleRestore& restore) {
                 ++out.differing;
         }
     }
+    // Expected: the continuous retained set restricted to ids met in the read,
+    // resends the continuous feed suppressed included.
+    std::unordered_set<std::string> expected;
     for (const auto& id : feed.tradeIds())
-        if (seen.contains(id) && !restore.tradeIds.contains(id)) ++out.idsMissing;
-    // An id the continuous feed first saw before the read and the read saw
-    // again (a resend) is in both sets; count it separately.
-    for (const auto& id : restore.tradeIds) {
-        if (!feed.tradeIds().contains(id)) ++out.idsExtra;
-        else if (!seen.contains(id)) ++out.idsResent;
+        if (met.contains(id)) expected.insert(id);
+    auto restored = restore.tradeIds;
+    if (o.dropResentIdForTest)
+        for (const auto& id : expected)
+            if (!seen.contains(id) && restored.erase(id)) {
+                std::cout << "dropped pre-read resend id=" << id << " from the rebuild\n";
+                break;
+            }
+    for (const auto& id : expected)
+        if (!restored.contains(id)) ++out.idsMissing;
+    for (const auto& id : restored) {
+        if (!expected.contains(id)) ++out.idsExtra;
+        else if (!seen.contains(id)) ++out.idsResent; // diagnostic: resent, first seen before the read
     }
+    out.idsMet = met.size();
+    out.idsExpected = expected.size();
     return out;
 }
 
@@ -252,7 +287,8 @@ bool runProduct(const Options& o, const std::string& product) {
                       restore->outcome == RestoreOutcome::complete;
     std::cout << "cmp product=" << product << " comparedBars=" << c.compared << " differingBars=" << c.differing
               << " sliverTrades=" << c.sliver << " idsMissing=" << c.idsMissing << " idsExtra=" << c.idsExtra
-              << " idsResentFromBeforeRead=" << c.idsResent << " " << (pass ? "PASS" : "FAIL") << "\n";
+              << " idsResentFromBeforeRead=" << c.idsResent << " idsMet=" << c.idsMet
+              << " idsExpected=" << c.idsExpected << " restoredIds=" << restore->tradeIds.size() << " " << (pass ? "PASS" : "FAIL") << "\n";
     return pass;
 }
 
@@ -299,6 +335,7 @@ int main(int argc, char** argv) try {
         else if (args[i] == "--window-ms") o.windowMs = std::stoll(value());
         else if (args[i] == "--force-reread") o.forceReread = true;
         else if (args[i] == "--cmp") o.cmp = true;
+        else if (args[i] == "--drop-resent-id-for-test") o.dropResentIdForTest = true;
         else products.push_back(args[i]);
     }
     if (o.windowMs > 0)

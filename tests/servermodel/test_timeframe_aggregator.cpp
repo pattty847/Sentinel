@@ -484,3 +484,32 @@ TEST(TimeframeAggregatorRestore, ShortSeriesInstallLeavesMinuteUnfloored) {
         EXPECT_EQ(restored.exportSeries("BTC-USD", tf).floorMs, std::nullopt) << tf;
     }
 }
+
+// The floor guards only a timeframe without a bar: seeding after the first bar
+// changes nothing, and an installed floor above the open bar is never read.
+TEST(TimeframeAggregatorRestore, FloorIsNeitherSeededNorReadOnceABarExists) {
+    TimeframeAggregator aggregator({100, 1'000, 60'000});
+    aggregator.seedJournalFloor("BTC-USD", at(0, 59), {1'000});
+    aggregator.onTrade(tradeAt(at(1, 31), 300, 1));
+    const auto before = aggregator.exportSeries("BTC-USD", 1'000).floorMs;
+    ASSERT_EQ(before, std::optional<int64_t>(at(1, 31)));
+    aggregator.seedJournalFloor("BTC-USD", at(2, 0), {1'000});
+    EXPECT_EQ(aggregator.exportSeries("BTC-USD", 1'000).floorMs, before);
+    aggregator.onTrade(tradeAt(at(1, 31, 500), 310, 1));
+    EXPECT_EQ(aggregator.exportSeries("BTC-USD", 1'000).active.count, 2u);
+    EXPECT_EQ(lateDropsOf(aggregator, "BTC-USD", 1'000), 0u);
+    // An unseeded timeframe with a bar is not turned on by a seed either.
+    aggregator.seedJournalFloor("BTC-USD", at(2, 0), {100});
+    EXPECT_EQ(aggregator.exportSeries("BTC-USD", 100).floorMs, std::nullopt);
+
+    // A hand-built series whose floor lies above its open bar: the bar test
+    // alone decides once a bar exists.
+    TimeframeAggregator installed({100, 1'000, 60'000});
+    TimeframeAggregator::Series series;
+    series.active = bar(at(1, 31), 300, 1, false);
+    series.floorMs = at(2, 0);
+    ASSERT_TRUE(installed.restoreSeries("BTC-USD", 1'000, series));
+    installed.onTrade(tradeAt(at(1, 31, 500), 310, 1));
+    EXPECT_EQ(installed.exportSeries("BTC-USD", 1'000).active.count, 2u);
+    EXPECT_EQ(lateDropsOf(installed, "BTC-USD", 1'000), 0u);
+}

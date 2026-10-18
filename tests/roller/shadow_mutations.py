@@ -386,9 +386,17 @@ mutations.extend([
     ('b2r2 rebuild seeds the floor', CR,
      'aggregator.seedJournalFloor(in.product, out.seedMs, in.timeframesMs);', ';',
      'CandleRestore.InitialStateExtendsOneFileBackOrIsPartial', RESTORE),
-    ('b2r2 stopping is checked per record', CR,
-     'if (in.stopping && in.stopping->load()) return std::nullopt;', ';',
+    ('b2r2 stopping is checked after each record, through included', CR,
+     '// Checked after every record, `through` included.\n        if (in.stopping && in.stopping->load()) return std::nullopt;', ';',
      'CandleRestore.StoppingAbortsWithinOneRecord', RESTORE),
+    ('b2r2 seed leaves a timeframe with a bar unchanged', TA,
+     'bar != state.activeBars.end() && (bar->second.count != 0 || bar->second.timestamp_ms != 0))',
+     'false)',
+     'TimeframeAggregatorRestore.FloorIsNeitherSeededNorReadOnceABarExists', AGG),
+    ('b2r2 floor read only without a bar', TA,
+     '(state.floorOn[index] && bar.count == 0 && bar.timestamp_ms == 0 &&',
+     '(state.floorOn[index] &&',
+     'TimeframeAggregatorRestore.FloorIsNeitherSeededNorReadOnceABarExists', AGG),
 ])
 if "--db2" in sys.argv:
     mutations = [m for m in mutations if m[0].startswith('db2-')]

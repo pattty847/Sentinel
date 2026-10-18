@@ -340,6 +340,18 @@ TEST(CandleRestore, StoppingAbortsWithinOneRecord) {
     EXPECT_FALSE(rebuildCandles(in).has_value());
     EXPECT_EQ(calls, 1);
     EXPECT_EQ(failure, "cancelled");
+
+    // Cancelled while the terminal record is processed: still no result.
+    stopping = false;
+    failure.clear();
+    calls = 0;
+    in.afterRecordForTest = [&](const JournalRecord& r) {
+        ++calls;
+        if (r.pos == in.through) stopping = true;
+    };
+    EXPECT_FALSE(rebuildCandles(in).has_value());
+    EXPECT_GT(calls, 1);
+    EXPECT_EQ(failure, "cancelled");
 }
 
 TEST(CandleRestore, CountsReceiveClockRegressionsWithoutChangingTheOutcome) {

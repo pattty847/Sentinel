@@ -236,6 +236,10 @@ void TimeframeAggregator::seedJournalFloor(const std::string& symbol, int64_t wa
     for (const int64_t tf : timeframesMs) {
         const int i = tradeIndex(tf);
         if (i < 0 || !m_tradeTimeframeOn[i]) continue;
+        // A timeframe with a bar is guarded by it; the floor stays as it is.
+        if (const auto bar = state.activeBars.find(tf);
+            bar != state.activeBars.end() && (bar->second.count != 0 || bar->second.timestamp_ms != 0))
+            continue;
         state.floorMs[i] = state.floorOn[i]
             ? std::max(state.floorMs[i], bucketStart(watermarkMs, tf))
             : bucketStart(watermarkMs, tf);

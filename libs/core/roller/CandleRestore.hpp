@@ -27,7 +27,7 @@ struct CandleRestoreInput {
     // True for a position past `through` (reaching one first is a failure).
     // Empty: past `through` in this reader's journal order.
     std::function<bool(const JournalPos&)> beyond;
-    const std::atomic<bool>* stopping = nullptr; // checked before every record
+    const std::atomic<bool>* stopping = nullptr; // checked after every record
     std::vector<int64_t> timeframesMs{100, 1'000}; // trade timeframes below 1 m only
     // Closed-bar retention as configured live; each rebuilt timeframe keeps at
     // least the window plus the lead-in while reading.

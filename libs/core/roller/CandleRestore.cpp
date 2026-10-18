@@ -102,7 +102,6 @@ std::optional<Read> readFrom(const Plan& plan, size_t start) {
     JournalRecord r;
     int64_t maxSeenMs = INT64_MIN;
     for (;;) {
-        if (in.stopping && in.stopping->load()) return std::nullopt;
         if (!reader.next(r)) throw Failure("journal ended before through");
         if (r.pos != in.through && plan.beyond(r.pos)) throw Failure("read passed through");
         const int64_t ms = receiveMs(r);
@@ -116,6 +115,8 @@ std::optional<Read> readFrom(const Plan& plan, size_t start) {
         }
         countRegression(out, maxSeenMs, ms, in.product);
         if (in.afterRecordForTest) in.afterRecordForTest(r);
+        // Checked after every record, `through` included.
+        if (in.stopping && in.stopping->load()) return std::nullopt;
         if (r.pos == in.through) break;
     }
     if (reader.damaged() != 0) throw Failure("damaged journal prefix");
@@ -229,6 +230,7 @@ std::optional<CandleRestore> rebuild(const CandleRestoreInput& in, Clock::time_p
     out.startFile = start;
     out.files = span(start);
     out.readMs = std::chrono::duration<double, std::milli>(Clock::now() - began).count();
+    if (in.stopping && in.stopping->load()) return std::nullopt;
     return out;
 }
 } // namespace

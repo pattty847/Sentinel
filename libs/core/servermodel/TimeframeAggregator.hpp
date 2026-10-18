@@ -68,7 +68,8 @@ public:
     // timeframe has no bar, a trade whose bucket starts before the floor is
     // dropped as late. The floor only rises: to the watermark's bucket here and
     // at every later watermark or trade time while no bar exists. A timeframe
-    // never seeded or restored has no floor; nothing turns a floor off.
+    // never seeded or restored has no floor; nothing turns a floor off. A
+    // listed timeframe that already has a bar is left unchanged.
     void seedJournalFloor(const std::string& symbol, int64_t watermarkMs,
                           const std::vector<int64_t>& timeframesMs);
 
