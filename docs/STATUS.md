@@ -26,6 +26,7 @@ Pre-land evidence for chart slices: native `SENTINEL_REQUIRE_GPU=1` run of Chart
   - **B2-P landed** `f3f57107` (writer Codex `gpt-6.1-sol` thread `01a14ba9-1d92-7600-b251-c4e8a865175b`; reviewer Claude Sonnet PASS 0/0/1, deferred cosmetic minor: `docs/AGENT_WORKFLOW.md` GUI-host paragraph rewrap and relative `docks.ini` path; full ctest 112/112; evidence `~/Library/Logs/Sentinel/land/20261018T025650Z-lt-sol-b2-p-cache-isolation-5978/`; hosted session `611f22e4` wrote `data/glyph-cache/msdf/*`, owner cache unchanged).
   - **Step A half done.** X = `f3f57107`. Done: main-checkout build at X; `~/Sentinel-runtime/gui-pre-b2/sentinel-gui` + `REVISION` (sha256 `35b36cfa...e277aa`) + `build.log`. **Next:** `agent-worktree.sh create rollback/pre-b2` at X, build it through the queue, `gui-shot.sh launch --build <it>` (owner OK'd hosted GUI windows while at the Mac; ping before), confirm `QML source: url=file://<rollback worktree>/...` and 1 s candles against production, `gui-shot.sh stop`. GUI host is running (started 22:55 from the main checkout).
   - **B2-1 not dispatched.** Worktree `/Volumes/T7/sentinel-worktrees/lt-claude-b2-1-aggregator` exists, empty, from `f3f57107`. Writer: Claude Opus subagent; reviewer `gpt-6-astra` high (HIGH risk). Packet: plan section 4 B2-1 + section 1 S1-S6, S13 + section 6; add evidence: 1 s and 1 m bar equivalence vs main on a real journal window (reuse the investigation harness, below). Plan line numbers are at `0992fae` and still hold (only B2-P files changed).
+  - **B2-R owner decision (2026-10-17):** ship B2 first; plan B2-R (option (a), 100 ms and 1 s only) after the B2 deploy, no rush. Not part of the B2-2..B2-4 batch.
   - **Reconstruction investigation done** (report `../Sentinel-Private/research/2026-10-17-b2-server-100ms-reviews/restart-reconstruction-investigation.md`, Sentinel-Private `6c8a456`; harness in `/Volumes/T7/sentinel-worktrees/lt-claude-b2-recon-investigation`, uncommitted, never lands; remove it after B2-R is planned). Recommends option (a): per-product journal read before `roll()`, bulk install, warming reply; ~250-400 lines, HIGH. Proposed MEMORY (not yet curated): `FAILURE_MODES.md | Symptom: trade-only journal pass loses most trades | Root: v1 JournalFeed requires sequence_num +1 across all channels; skipping l2 frames trips the gap check (JournalFeed.cpp:117-125) | Guardrail: replay every frame through JournalFeed`.
   - T7 incident 2026-10-17: every new T7 path lookup (any app) blocked in `__WAITING_ON_APPROVAL_FROM_SANDBOXD__` from ~17:03 while the screen was locked; open files kept writing; owner restarted at ~22:49 (gap ~1-2 min). A restart wipes `/tmp` (scratch dirs, ccache).
 - **B2-0 landed** `154fa90` (100 ms toolbar entry, heatmap only; combo emits ms; full ctest 112/112; evidence `~/Library/Logs/Sentinel/land/20261014T065744Z-lt-claude-b2-0-100ms-toolbar-38520/`). Owner rebuilds the GUI to use it; not yet looked at live.
@@ -41,9 +42,8 @@ Pre-land evidence for chart slices: native `SENTINEL_REQUIRE_GPU=1` run of Chart
 
 ## Waiting on the owner
 
-1. B2-R (restart reconstruction) decisions, sent 2026-10-17: approve option (a) as slice B2-R (recommended yes); rebuild 100 ms and 1 s only (recommended); write after B2-2, land with the B2-2..B2-4 batch if reviewed in time, else a follow-up deploy (recommended).
-2. B2: the production deploy OK once B2-2..B2-4 are READY (landing option B).
-3. Parked: nightly copy of `/Volumes/T7/sentinel-data` to the MacBook Pro over Tailscale (needs Remote Login + SSH key).
+1. B2: the production deploy OK once B2-2..B2-4 are READY (landing option B).
+2. Parked: nightly copy of `/Volumes/T7/sentinel-data` to the MacBook Pro over Tailscale (needs Remote Login + SSH key).
 
 - Docs archive on the T7: `/Volumes/T7/sentinel-backup/docs-archive/` (owner 2026-10-14; `_agent/VAULT.md`, the old Obsidian vault workflow, moved there).
 
