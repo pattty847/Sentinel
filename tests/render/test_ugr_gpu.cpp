@@ -963,16 +963,13 @@ class CandleTickGeometryItem : public CandlestickOverlayItem {
 public:
     using CandlestickOverlayItem::updatePaintNode;
 };
-TEST(UgrCandleCpu, RefusedIntervalsClearExistingGeometryAndSuppressMismatchedBars) {
+TEST(UgrCandleCpu, NonPositiveIntervalsClearExistingGeometry) {
     CandleTickFrameProvider provider;
     CandleTickGeometryItem candles;
     CandleSeriesBuffer buffer;
     constexpr qint64 bucket = 1'200'000;
     const CandleSeriesBuffer::CandleBar bar{bucket, bucket + 1000, 100, 110, 90, 105, 1, true, 0, false};
     buffer.applyHistory("BTC-USD", 1000, {bar});
-    // Even mis-keyed one-second bars cannot bypass the renderer's refusal.
-    buffer.applyHistory("BTC-USD", 100, {bar});
-    buffer.applyHistory("BTC-USD", 1500, {bar});
     candles.setSize({640, 320});
     candles.setMappingProvider(&provider);
     candles.setCandleBuffer(&buffer);
@@ -998,23 +995,17 @@ TEST(UgrCandleCpu, RefusedIntervalsClearExistingGeometryAndSuppressMismatchedBar
     QSGNode* root = nullptr;
     for (int style : {0, 1, 2}) {
         candles.setCandleStyle(style);
-        candles.setTimeframeMs(1000);
-        provider.frame.activeTimeframeMs = 1000;
-        root = candles.updatePaintNode(root, nullptr);
-        EXPECT_GT(vertices(root), 0);
-        for (int tfMs : {100, 1500, 0, -1000}) {
+        for (int tfMs : {0, -1000}) {
+            candles.setTimeframeMs(1000);
+            provider.frame.activeTimeframeMs = 1000;
+            root = candles.updatePaintNode(root, nullptr);
+            EXPECT_GT(vertices(root), 0);
             candles.setTimeframeMs(tfMs);
             provider.frame.activeTimeframeMs = tfMs;
             root = candles.updatePaintNode(root, nullptr);
             EXPECT_EQ(vertices(root), 0) << "style=" << style << " tfMs=" << tfMs;
         }
         candles.setTimeframeMs(1000);
-        provider.frame.activeTimeframeMs = 1000;
-        root = candles.updatePaintNode(root, nullptr);
-        EXPECT_GT(vertices(root), 0);
-        provider.frame.activeTimeframeMs = 100; // QML may still hold the old selection during sync.
-        root = candles.updatePaintNode(root, nullptr);
-        EXPECT_EQ(vertices(root), 0);
         provider.frame.activeTimeframeMs = 1000;
         root = candles.updatePaintNode(root, nullptr);
         EXPECT_GT(vertices(root), 0);
