@@ -3,6 +3,7 @@ Sentinel — MsdfAtlas
 */
 #include "MsdfAtlas.hpp"
 #include "SentinelLogging.hpp"
+#include "config/AgentHostMode.hpp"
 
 #include <QCryptographicHash>
 #include <QDir>
@@ -289,7 +290,8 @@ QString MsdfAtlas::resolveFontPath(const BuildParams& params) const {
 }
 
 QString MsdfAtlas::cacheDirPath() const {
-    QString base = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+    QString base = AgentHostMode::active() ? AgentHostMode::dataDir()
+                                          : QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
     if (base.isEmpty()) {
         base = QDir::current().filePath("data");
     }

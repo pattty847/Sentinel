@@ -8,6 +8,7 @@
 //   - refuses screenshots that grab screen pixels (target=main; FM-120) and every unknown target,
 //   - writes screenshots only to <dir>/screenshots (config and SENTINEL_GUI_SCREENSHOT_DIR ignored),
 //   - keeps general QSettings in <dir>/settings (INI) and only docks in a separate profile file,
+//   - keeps font caches in <dir>/data,
 //   - sends no trade commands (/api/v1/input can drive the chart's TP/SL controls into the server's
 //     trading session) and only switches to allowlisted symbols (a symbol change makes the recorder
 //     subscribe upstream).
@@ -24,6 +25,7 @@ bool activate(const QString& dir, const QStringList& forbiddenRoots, QString* er
 
 bool active();
 QString screenshotDir();          // <dir>/screenshots (canonical); empty when inactive
+QString dataDir();                // <dir>/data (canonical); empty when inactive
 QString dockProfileFile();         // persistent docks-only INI; empty when inactive
 bool dockChangesPersist(bool requested); // hosted changes always persist; owner changes only on request
 bool tradingAllowed();            // false when active: drop every TradeCommand at the data source
