@@ -348,12 +348,56 @@ mutations.extend([
      'expr: min by (product) (sentinel_mdc_connected{pinned="1"})',
      'ServerFeedAlerts.A1bSelectsEachCapturedProductForFiveMinutes', ADMISSION),
 ])
+# B2-R2: journal floor, bulk restore and candle rebuild.
+TA = 'libs/core/servermodel/TimeframeAggregator.cpp'
+CR = 'libs/core/roller/CandleRestore.cpp'
+AGG, RESTORE = 'servermodel/test_timeframe_aggregator', 'test_candle_restore'
+mutations.extend([
+    ('b2r2 floor compare', TA,
+     'start < state.floorMs[index])) {', 'false)) {',
+     'TimeframeAggregatorRestore.JournalFloorDropsStaleTradesBeforeTheFirstBar', AGG),
+    ('b2r2 floor compare reaches the rebuild', TA,
+     'start < state.floorMs[index])) {', 'false)) {',
+     'CandleRestore.InitialStateExtendsOneFileBackOrIsPartial', RESTORE),
+    ('b2r2 floor is monotonic', TA,
+     'state.floorMs[i] = std::max(state.floorMs[i], bucketStart(nowMs, tf));',
+     'state.floorMs[i] = bucketStart(nowMs, tf);',
+     'TimeframeAggregatorRestore.JournalFloorDropsStaleTradesBeforeTheFirstBar', AGG),
+    ('b2r2 floor written only without a bar', TA,
+     'if (bar.count == 0 && bar.timestamp_ms == 0) { if (state.floorOn[i])',
+     'if (state.floorOn[i]) state.floorMs[i] = std::max(state.floorMs[i], bucketStart(nowMs, tf));'
+     ' if (bar.count == 0 && bar.timestamp_ms == 0) { if (false)',
+     'TimeframeAggregatorRestore.JournalFloorDropsStaleTradesBeforeTheFirstBar', AGG),
+    ('b2r2 restore refuses an enabled floor', TA,
+     'existing.floorOn[i])', 'existing.floorOn[i] && false)',
+     'TimeframeAggregatorRestore.InstallsClosedAndActiveWithoutEmitting', AGG),
+    ('b2r2 restore refuses existing history', TA,
+     '!hist->second.empty()', 'false',
+     'TimeframeAggregatorRestore.InstallsClosedAndActiveWithoutEmitting', AGG),
+    ('b2r2 regression guard', CR,
+     'return i == 0 ? 0 : i - 1;', 'break;',
+     'CandleRestore.RegressionGuardStartsBeforeAClockAheadFile', RESTORE),
+    ('b2r2 deep regression boundary', CR,
+     'if (maxSeenMs - ms > kRestoreLeadInMs)', 'if (maxSeenMs - ms >= kRestoreLeadInMs)',
+     'CandleRestore.CountsReceiveClockRegressionsWithoutChangingTheOutcome', RESTORE),
+    ('b2r2 lead-in extension', CR,
+     'const bool extend = !ok && start > 0', 'const bool extend = false && start > 0',
+     'CandleRestore.InitialStateExtendsOneFileBackOrIsPartial', RESTORE),
+    ('b2r2 rebuild seeds the floor', CR,
+     'aggregator.seedJournalFloor(in.product, out.seedMs, in.timeframesMs);', ';',
+     'CandleRestore.InitialStateExtendsOneFileBackOrIsPartial', RESTORE),
+    ('b2r2 stopping is checked per record', CR,
+     'if (in.stopping && in.stopping->load()) return std::nullopt;', ';',
+     'CandleRestore.StoppingAbortsWithinOneRecord', RESTORE),
+])
 if "--db2" in sys.argv:
     mutations = [m for m in mutations if m[0].startswith('db2-')]
 if "--round1" in sys.argv:
     mutations = mutations[5:]
 if "--slice-d" in sys.argv:
     mutations = mutations[13:]
+if "--b2r2" in sys.argv:
+    mutations = [m for m in mutations if m[0].startswith('b2r2')]
 if "--db1" in sys.argv:
     mutations = [m for m in mutations if m[0].startswith('db1')]
 for arg in sys.argv:

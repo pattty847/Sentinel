@@ -25,3 +25,12 @@ target_compile_definitions(test_journal_anchors PRIVATE ANCHOR_LIVE_FIXTURE="${C
 target_link_libraries(test_journal_anchors PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
 add_test(NAME JournalAnchorTests COMMAND test_journal_anchors)
 set_tests_properties(JournalAnchorTests PROPERTIES LABELS "roller" TIMEOUT 180)
+
+add_executable(test_candle_restore test_candle_restore.cpp)
+target_link_libraries(test_candle_restore PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+target_compile_definitions(test_candle_restore PRIVATE ROLLER_TEST_ROOT="${CMAKE_CURRENT_BINARY_DIR}")
+add_test(NAME CandleRestoreTests COMMAND test_candle_restore)
+set_tests_properties(CandleRestoreTests PROPERTIES LABELS "roller" TIMEOUT 120)
+
+add_executable(candle_restore_bench candle_restore_bench.cpp)
+target_link_libraries(candle_restore_bench PRIVATE sentinel_core Qt6::Core)

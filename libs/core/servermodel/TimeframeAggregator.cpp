@@ -84,16 +84,24 @@ void TimeframeAggregator::addMinuteToRollups(SymbolState& state, const std::stri
     }
 }
 
+int TimeframeAggregator::tradeIndex(int64_t timeframeMs) {
+    for (size_t i = 0; i < kTradeTimeframes.size(); ++i)
+        if (kTradeTimeframes[i] == timeframeMs) return static_cast<int>(i);
+    return -1;
+}
+
 void TimeframeAggregator::updateTradeBar(SymbolState& state, const std::string& symbol,
-                                         int64_t timeframeMs, const Trade& trade,
-                                         int64_t tradeTsMs) {
+                                         size_t index, const Trade& trade, int64_t tradeTsMs) {
+    const int64_t timeframeMs = kTradeTimeframes[index];
     const int64_t start = bucketStart(tradeTsMs, timeframeMs);
     auto& bar = state.activeBars[timeframeMs];
     // Stale trade: older than the open bucket, or in a bucket the watermark
-    // already closed, which is never reopened.
-    if (start < bar.timestamp_ms) {
-        for (size_t i = 0; i < kTradeTimeframes.size(); ++i)
-            if (kTradeTimeframes[i] == timeframeMs) ++state.lateDrops[i];
+    // already closed, which is never reopened. With no bar yet, an enabled
+    // journal floor stands in for the open bucket.
+    if (start < bar.timestamp_ms ||
+        (state.floorOn[index] && bar.count == 0 && bar.timestamp_ms == 0 &&
+         start < state.floorMs[index])) {
+        ++state.lateDrops[index];
         return;
     }
     if ((bar.count > 0 || bar.timestamp_ms != 0) && start > bar.timestamp_ms) {
@@ -125,8 +133,7 @@ void TimeframeAggregator::onTrade(const Trade& trade) {
     // ones, so bars depend only on the delivered sequence.
     closeElapsed(state, trade.product_id, tsMs);
     for (size_t i = 0; i < kTradeTimeframes.size(); ++i)
-        if (m_tradeTimeframeOn[i])
-            updateTradeBar(state, trade.product_id, kTradeTimeframes[i], trade, tsMs);
+        if (m_tradeTimeframeOn[i]) updateTradeBar(state, trade.product_id, i, trade, tsMs);
 }
 
 void TimeframeAggregator::advance(const std::string& symbol, int64_t watermarkMs) {
@@ -142,8 +149,12 @@ void TimeframeAggregator::closeElapsed(SymbolState& state, const std::string& sy
             if (!m_tradeTimeframeOn[i]) continue;
             const int64_t tf = kTradeTimeframes[i];
             auto& bar = state.activeBars[tf];
-            if ((bar.count == 0 && bar.timestamp_ms == 0) ||
-                bucketStart(nowMs, tf) <= bar.timestamp_ms) continue;
+            if (bar.count == 0 && bar.timestamp_ms == 0) {
+                if (state.floorOn[i])
+                    state.floorMs[i] = std::max(state.floorMs[i], bucketStart(nowMs, tf));
+                continue;
+            }
+            if (bucketStart(nowMs, tf) <= bar.timestamp_ms) continue;
             const double lastClose = bar.close;
             int64_t nextStart = bar.timestamp_ms + tf;
             closeBar(state, symbol, tf, bar);
@@ -175,6 +186,60 @@ void TimeframeAggregator::closeElapsed(SymbolState& state, const std::string& sy
                 state.activeBars.erase(found);
             }
         }
+    }
+}
+
+TimeframeAggregator::Series TimeframeAggregator::exportSeries(const std::string& symbol,
+                                                              int64_t timeframeMs) const {
+    std::shared_lock lock(m_mutex);
+    Series out;
+    const auto state = m_states.find(symbol);
+    if (state == m_states.end()) return out;
+    if (const auto hist = state->second.history.find(timeframeMs);
+        hist != state->second.history.end())
+        out.closed = hist->second;
+    if (const auto bar = state->second.activeBars.find(timeframeMs);
+        bar != state->second.activeBars.end())
+        out.active = bar->second;
+    if (const int i = tradeIndex(timeframeMs); i >= 0 && state->second.floorOn[i])
+        out.floorMs = state->second.floorMs[i];
+    return out;
+}
+
+bool TimeframeAggregator::restoreSeries(const std::string& symbol, int64_t timeframeMs,
+                                        Series series) {
+    const int i = tradeIndex(timeframeMs);
+    if (i < 0 || !m_tradeTimeframeOn[i]) return false;
+    std::unique_lock lock(m_mutex);
+    if (const auto found = m_states.find(symbol); found != m_states.end()) {
+        const auto& existing = found->second;
+        const auto hist = existing.history.find(timeframeMs);
+        const auto bar = existing.activeBars.find(timeframeMs);
+        if ((hist != existing.history.end() && !hist->second.empty()) ||
+            (bar != existing.activeBars.end() &&
+             (bar->second.count != 0 || bar->second.timestamp_ms != 0)) ||
+            existing.floorOn[i])
+            return false;
+    }
+    auto& state = m_states[symbol];
+    state.history[timeframeMs] = std::move(series.closed);
+    state.activeBars[timeframeMs] = series.active;
+    state.floorOn[i] = series.floorMs.has_value();
+    state.floorMs[i] = series.floorMs.value_or(0);
+    return true;
+}
+
+void TimeframeAggregator::seedJournalFloor(const std::string& symbol, int64_t watermarkMs,
+                                           const std::vector<int64_t>& timeframesMs) {
+    std::unique_lock lock(m_mutex);
+    auto& state = m_states[symbol];
+    for (const int64_t tf : timeframesMs) {
+        const int i = tradeIndex(tf);
+        if (i < 0 || !m_tradeTimeframeOn[i]) continue;
+        state.floorMs[i] = state.floorOn[i]
+            ? std::max(state.floorMs[i], bucketStart(watermarkMs, tf))
+            : bucketStart(watermarkMs, tf);
+        state.floorOn[i] = true;
     }
 }
 
