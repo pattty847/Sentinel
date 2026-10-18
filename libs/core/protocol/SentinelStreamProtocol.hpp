@@ -8,7 +8,7 @@ namespace protocol {
 
 namespace SentinelProtocol {
 constexpr int kServerConfigSchemaVersion = 2;
-constexpr int kCandleSchemaVersion = 1;
+constexpr int kCandleSchemaVersion = 2;
 constexpr int kFootprintSchemaVersion = 1;
 constexpr int kTpoSchemaVersion = 1;
 constexpr int kVolumeProfileSchemaVersion = 1;

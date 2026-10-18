@@ -348,7 +348,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         root = new CandleOverlayNode();
     }
 
-    if (!m_mappingProvider || !chart::candleTimeframeSeconds(m_timeframeMs)) {
+    if (!m_mappingProvider || m_timeframeMs <= 0) {
         m_geometryDirty = true;
         root->setCounts(0, 0);
         root->wickNode->markDirty(QSGNode::DirtyGeometry);
@@ -366,8 +366,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         m_lastMapping = mapping;
         m_geometryDirty = true;
     }
-    if (!mapping.valid || !frame.viewportValid ||
-        (frame.activeTimeframeMs > 0 && !chart::candleTimeframeSeconds(frame.activeTimeframeMs))) {
+    if (!mapping.valid || !frame.viewportValid) {
         m_geometryDirty = true;
         root->setCounts(0, 0);
         root->wickNode->markDirty(QSGNode::DirtyGeometry);

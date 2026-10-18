@@ -242,15 +242,21 @@ struct RecordingServerStopTest {
         EXPECT_EQ(session->write_queue_.size(), 1);
     }
     static void checkCandlePages(ServerDataModel& model) {
+        ServerConfig config;
+        Authenticator auth("/nonexistent-candle-credentials");
+        SentinelStreamServer server(model, auth, config, 0);
         net::io_context ioc;
         ssl::context ctx(ssl::context::tls_server);
-        auto session = std::make_shared<Session>(tcp::socket(ioc), ctx, model, nullptr);
+        auto session = std::make_shared<Session>(tcp::socket(ioc), ctx, model, &server);
         // Hold a fake write in flight so posted replies stay inspectable without a socket.
         session->write_queue_.push_back({"in-flight", false});
         session->pendingWriteBytes_ = 9;
-        const auto fetch = [&](const char* symbol, int endSec, int limit) {
-            nlohmann::json request = {{"type", "candle_history_request"}, {"symbol", symbol},
-                {"timeframe_sec", 1}, {"end_time_sec", endSec}, {"limit", limit}};
+        const auto fetch = [&](const char *symbol, int endSec, int limit) {
+            nlohmann::json request = {{"type", "candle_history_request"},
+                                      {"symbol", symbol},
+                                      {"timeframe_ms", 1000},
+                                      {"end_time_ms", endSec * 1000LL},
+                                      {"limit", limit}};
             session->handle_message(request.dump());
             ioc.restart();
             ioc.poll();
@@ -260,7 +266,7 @@ struct RecordingServerStopTest {
         for (const auto [endSec, expectedCount] : {std::pair{1000, 350}, {650, 350}, {300, 300}, {1, 1}}) {
             const auto reply = fetch("BTC-USD", endSec, 350);
             ASSERT_EQ(reply.at("type"), "candle_history_chunk");
-            EXPECT_EQ(reply.at("end_time_sec"), endSec);
+            EXPECT_EQ(reply.at("end_time_ms"), endSec * 1000LL);
             const auto& candles = reply.at("candles");
             ASSERT_EQ(candles.size(), expectedCount);
             EXPECT_EQ(candles.back().at("time_start_ms"), endSec * 1000LL);
@@ -274,7 +280,7 @@ struct RecordingServerStopTest {
         // Journal time carries quiet buckets forward before the next trade.
         EXPECT_EQ(candles[0].at("time_start_ms"), 19'000);
         EXPECT_EQ(candles[1].at("time_start_ms"), 20'000);
-        EXPECT_EQ(sparse.at("start_time_sec"), 18); // metadata, not a sparse-bar lower bound
+        EXPECT_EQ(sparse.at("start_time_ms"), 18000); // metadata, not a sparse-bar lower bound
         EXPECT_TRUE(fetch("UNKNOWN-USD", 20, 2).at("candles").empty());
         session->beginClose("candle paging test");
     }
@@ -292,7 +298,8 @@ struct RecordingServerStopTest {
         net::post(server.m_ioc, [&] {
             auto session = std::make_shared<Session>(tcp::socket(server.m_ioc), server.m_sslCtx, model, &server);
             server.registerSession(session);
-            session->handle_message(R"({"type":"candle_history_request","symbol":"BTC-USD","timeframe_sec":60,"end_time_sec":172860,"limit":1})");
+            session->handle_message(
+                R"({"type":"candle_history_request","symbol":"BTC-USD","timeframe_ms":60000,"end_time_ms":172860000,"limit":1})");
             created.set_value(session);
         });
         return future.get();

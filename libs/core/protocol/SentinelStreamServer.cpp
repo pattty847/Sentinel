@@ -234,6 +234,14 @@ class Session : public std::enable_shared_from_this<Session> {
     uint64_t m_tradingBroadcasterId = 0;
     bool m_tradingBroadcasterRegistered = false;
 
+#ifdef SENTINEL_CANDLE_TEST
+    std::atomic<size_t> peakModelEvents_{0}, peakWriteBytes_{0};
+    static void recordPeak(std::atomic<size_t> &peak, size_t value) {
+        auto old = peak.load(std::memory_order_relaxed);
+        while (old < value && !peak.compare_exchange_weak(old, value, std::memory_order_relaxed)) {
+        }
+    }
+#endif
     static constexpr size_t kMaxPendingWriteBytes = 16U * 1024U * 1024U;
     static constexpr size_t kMaxPendingModelEvents = 2048U;
     // Heatmap chunk budget (executor-only counters). A job is admitted only while
@@ -305,6 +313,9 @@ class Session : public std::enable_shared_from_this<Session> {
             return;
         }
 
+#ifdef SENTINEL_CANDLE_TEST
+        recordPeak(peakModelEvents_, queued + 1);
+#endif
         auto weak = weak_from_this();
         net::post(ws_.get_executor(),
                   [weak, callback = std::forward<Callback>(callback)]() mutable {
@@ -907,12 +918,12 @@ public:
                 cancelOverlayHistory(j);
             } else if (type == "candle_history_request") {
                 std::string symbol = j.value("symbol", "");
-                const int64_t timeframeSec = j.value("timeframe_sec", static_cast<int64_t>(0));
-                int64_t endTimeSec = j.value("end_time_sec", static_cast<int64_t>(0));
+                const int64_t timeframeMs = j.value("timeframe_ms", static_cast<int64_t>(0));
+                int64_t endTimeMs = j.value("end_time_ms", static_cast<int64_t>(0));
                 int limit = j.value("limit", 350);
 
-                if (symbol.empty() || timeframeSec <= 0) {
-                    send_error("candle_history_request", symbol, "missing symbol or timeframe_sec");
+                if (symbol.empty() || timeframeMs <= 0) {
+                    send_error("candle_history_request", symbol, "missing symbol or timeframe_ms");
                     return;
                 }
 
@@ -923,125 +934,92 @@ public:
                     limit = 350;
                 }
 
-                if (endTimeSec <= 0) {
-                    endTimeSec = static_cast<int64_t>(
-                        std::chrono::duration_cast<std::chrono::seconds>(
-                            std::chrono::system_clock::now().time_since_epoch()).count());
+                if (endTimeMs <= 0) {
+                    endTimeMs = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                         std::chrono::system_clock::now().time_since_epoch())
+                                                         .count());
                 }
 
-                if (timeframeSec == 1) {
-                    const int64_t endMs = endTimeSec * 1000;
-                    if (limit > 10000) {
-                        limit = 10000;
-                    }
-                    // Page the retained 1s series, not just its newest `limit`
-                    // bars; otherwise the second backward page appears empty.
-                    const auto history = model_.getHistory(symbol, 1000, 10000);
-                    std::vector<OHLCVBar> filtered;
-                    filtered.reserve(history.size());
-                    for (const auto& bar : history) {
-                        if (bar.timestamp_ms <= endMs) {
-                            filtered.push_back(bar);
-                        }
-                    }
-                    // Existing contract: inclusive end and limit counts retained
-                    // bars, not seconds. Sparse series may span a wider interval.
-                    if (filtered.size() > static_cast<size_t>(limit))
-                        filtered.erase(filtered.begin(), filtered.end() - limit);
-
-                    const int64_t tfMs = 1000;
+                const auto &configured = owner_->serverConfig().chart.timeframesMs;
+                if (std::find(configured.begin(), configured.end(), timeframeMs) == configured.end()) {
+                    send_error("candle_history_request", symbol, "unsupported timeframe_ms");
+                    return;
+                }
+                if (timeframeMs == 100 || timeframeMs == 1000) {
+                    const auto history = model_.getHistory(symbol, timeframeMs, endTimeMs, limit);
                     const int64_t nowMs = static_cast<int64_t>(
                         std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::system_clock::now().time_since_epoch()).count());
 
-                    int64_t startTimeSec = endTimeSec - (timeframeSec * static_cast<int64_t>(limit));
-                    if (startTimeSec < 0) {
-                        startTimeSec = 0;
+                    int64_t startTimeMs = endTimeMs - (timeframeMs * static_cast<int64_t>(limit));
+                    if (startTimeMs < 0) {
+                        startTimeMs = 0;
                     }
 
                     nlohmann::json payload;
                     payload["type"] = "candle_history_chunk";
                     payload["schema_version"] = protocol::SentinelProtocol::kCandleSchemaVersion;
                     payload["symbol"] = symbol;
-                    payload["timeframe_sec"] = timeframeSec;
-                    payload["start_time_sec"] = startTimeSec;
-                    payload["end_time_sec"] = endTimeSec;
+                    payload["timeframe_ms"] = timeframeMs;
+                    payload["start_time_ms"] = startTimeMs;
+                    payload["end_time_ms"] = endTimeMs;
                     auto arr = nlohmann::json::array();
-                    for (const auto& bar : filtered) {
-                        const bool isClosed = (bar.timestamp_ms + tfMs) <= nowMs;
-                        nlohmann::json item;
-                        item["time_start_ms"] = bar.timestamp_ms;
-                        item["time_end_ms"] = bar.timestamp_ms + tfMs;
-                        item["open"] = bar.open;
-                        item["high"] = bar.high;
-                        item["low"] = bar.low;
-                        item["close"] = bar.close;
-                        item["volume"] = bar.volume;
-                        item["is_closed"] = isClosed;
+                    for (const auto &bar : history) {
+                        const bool isClosed = (bar.timestamp_ms + timeframeMs) <= nowMs;
+                        auto item = candleItem(bar, timeframeMs, isClosed);
                         arr.push_back(std::move(item));
                     }
-                    sLog_Data("Candle history sent: symbol=" << symbol << " tfSec=1 source=memory"
-                              << " endSec=" << endTimeSec << " limit=" << limit
-                              << " candles=" << arr.size());
+                    sLog_Data("Candle history sent: symbol=" << symbol << " tfMs=" << timeframeMs << " source=memory"
+                                                             << " endMs=" << endTimeMs << " limit=" << limit
+                                                             << " candles=" << arr.size());
                     payload["candles"] = std::move(arr);
                     do_write(payload.dump());
                     return;
                 }
 
-                const int64_t timeframeMs = timeframeSec * 1000;
-                if (timeframeMs < 60'000 || timeframeMs % 60'000 != 0 ||
-                    std::find(owner_->serverConfig().chart.timeframesMs.begin(),
-                              owner_->serverConfig().chart.timeframesMs.end(),
-                              timeframeMs) == owner_->serverConfig().chart.timeframesMs.end()) {
-                    send_error("candle_history_request", symbol, "unsupported timeframe_sec");
+                if (timeframeMs < 60'000 || timeframeMs % 60'000 != 0) {
+                    send_error("candle_history_request", symbol, "unsupported timeframe_ms");
                     return;
                 }
 
-                const int64_t startTimeSec = endTimeSec - (timeframeSec * static_cast<int64_t>(limit));
-                if (startTimeSec <= 0) {
+                const int64_t startTimeMs = endTimeMs - (timeframeMs * static_cast<int64_t>(limit));
+                if (startTimeMs <= 0) {
                     send_error("candle_history_request", symbol, "invalid start time");
                     return;
                 }
 
                 auto self = shared_from_this();
-                const bool queued = owner_->submitHistoryTask([self, symbol, timeframeSec, endTimeSec, startTimeSec, limit]() {
+                const bool queued = owner_->submitHistoryTask([self, symbol, timeframeMs, endTimeMs, startTimeMs,
+                                                               limit]() {
                     sentinel::logging::setCurrentThreadName("candle-fetch");
                     const auto cancelled = [self] {
                         return self->closing_.load() || self->closePosted_.load() || !self->owner_->m_running.load();
                     };
                     auto res = self->owner_->restClient().fetchClosedCandleHistory(
-                        symbol, timeframeSec, startTimeSec, endTimeSec, cancelled);
+                        symbol, timeframeMs / 1000, startTimeMs / 1000, endTimeMs / 1000, cancelled);
                     if (cancelled()) return;
                     if (!res.ok) {
                         self->send_error("candle_history_request", symbol, std::string("fetch failed: ") + res.error);
                         return;
                     }
 
-                    const int64_t tfMs = timeframeSec * 1000;
 
                     nlohmann::json payload;
                     payload["type"] = "candle_history_chunk";
                     payload["schema_version"] = protocol::SentinelProtocol::kCandleSchemaVersion;
                     payload["symbol"] = symbol;
-                    payload["timeframe_sec"] = timeframeSec;
-                    payload["start_time_sec"] = startTimeSec;
-                    payload["end_time_sec"] = endTimeSec;
+                    payload["timeframe_ms"] = timeframeMs;
+                    payload["start_time_ms"] = startTimeMs;
+                    payload["end_time_ms"] = endTimeMs;
                     auto arr = nlohmann::json::array();
                     for (auto& bar : res.candles) {
-                        nlohmann::json item;
-                        item["time_start_ms"] = bar.timestamp_ms;
-                        item["time_end_ms"] = bar.timestamp_ms + tfMs;
-                        item["open"] = bar.open;
-                        item["high"] = bar.high;
-                        item["low"] = bar.low;
-                        item["close"] = bar.close;
-                        item["volume"] = bar.volume;
-                        item["is_closed"] = bar.is_closed;
+                        auto item = candleItem(bar, timeframeMs, bar.is_closed);
                         arr.push_back(std::move(item));
                     }
-                    sLog_Data("Candle history sent: symbol=" << symbol << " tfSec=" << timeframeSec
-                              << " source=rest window=[" << startTimeSec << ".." << endTimeSec << "]"
-                              << " limit=" << limit << " candles=" << arr.size());
+                    sLog_Data("Candle history sent: symbol=" << symbol << " tfMs=" << timeframeMs
+                                                             << " source=rest window=[" << startTimeMs << ".."
+                                                             << endTimeMs << "]"
+                                                             << " limit=" << limit << " candles=" << arr.size());
                     payload["candles"] = std::move(arr);
 
                     self->do_write(payload.dump());
@@ -1277,33 +1255,46 @@ public:
         do_write(j.dump());
     }
 
-    static bool should_emit_update(const OHLCVBar& bar,
-                                   const CandleStreamState& state,
-                                   const ServerCandleGateConfig& cfg,
-                                   const ServerOrderBookConfig& obConfig,
-                                   int64_t tfSec,
-                                   int64_t nowMs) {
+    static nlohmann::json candleItem(const OHLCVBar &bar, int64_t tfMs, bool isClosed) {
+        nlohmann::json item;
+        item["time_start_ms"] = bar.timestamp_ms;
+        item["time_end_ms"] = bar.timestamp_ms + tfMs;
+        item["open"] = bar.open;
+        item["high"] = bar.high;
+        item["low"] = bar.low;
+        item["close"] = bar.close;
+        item["volume"] = bar.volume;
+        item["is_closed"] = isClosed;
+        return item;
+    }
+
+    static bool should_emit_update(const OHLCVBar &bar, const CandleStreamState &state,
+                                   const ServerCandleGateConfig &cfg, const ServerOrderBookConfig &obConfig,
+                                   int64_t timeframeMs, int64_t nowMs) {
         if (!state.hasLast) {
             return true;
         }
 
         const OHLCVBar& last = state.lastBar;
+        if (timeframeMs < 1000 && (bar.timestamp_ms != last.timestamp_ms || (last.volume <= 0 && bar.volume > 0))) {
+            return true;
+        }
         const bool highChanged = bar.high > last.high;
         const bool lowChanged = bar.low < last.low;
 
         const double closeDelta = std::abs(bar.close - last.close);
         const double tickSize = (cfg.tickSize > 0.0) ? cfg.tickSize : obConfig.tickSize;
-        const int tickMultiplier = (tfSec <= 1) ? cfg.tickMultFast : cfg.tickMultSlow;
-        const double bpsThreshold = (tfSec <= 1) ? cfg.bpsFast : cfg.bpsSlow;
+        const int tickMultiplier = (timeframeMs <= 1000) ? cfg.tickMultFast : cfg.tickMultSlow;
+        const double bpsThreshold = (timeframeMs <= 1000) ? cfg.bpsFast : cfg.bpsSlow;
         const double priceThreshold = std::max(tickSize * tickMultiplier,
                                                bar.close * bpsThreshold);
         const bool closeMoved = closeDelta >= priceThreshold;
 
         const double volumeDelta = bar.volume - last.volume;
-        const double volumeThreshold = (tfSec <= 1) ? cfg.volumeFast : cfg.volumeSlow;
+        const double volumeThreshold = (timeframeMs <= 1000) ? cfg.volumeFast : cfg.volumeSlow;
         const bool volumeMoved = volumeThreshold > 0.0 && volumeDelta >= volumeThreshold;
 
-        const int64_t maxSilenceMs = (tfSec <= 1) ? cfg.silenceMsFast : cfg.silenceMsSlow;
+        const int64_t maxSilenceMs = (timeframeMs <= 1000) ? cfg.silenceMsFast : cfg.silenceMsSlow;
         const bool silence = (nowMs - state.lastSentMs) >= maxSilenceMs;
 
         return highChanged || lowChanged || closeMoved || volumeMoved || silence;
@@ -1313,8 +1304,7 @@ public:
         const std::string sym = symbol.toStdString();
         if (subscriptions_.find(sym) == subscriptions_.end()) return;
 
-        const int64_t tfSec = (timeframeMs / 1000);
-        const std::string key = sym + "|" + std::to_string(tfSec);
+        const std::string key = sym + "|" + std::to_string(timeframeMs);
         const int64_t nowMs = static_cast<int64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count());
@@ -1323,8 +1313,8 @@ public:
         {
             std::lock_guard<std::mutex> lock(candle_mutex_);
             auto& entry = candleStates_[key];
-            if (!should_emit_update(bar, entry, owner_->serverConfig().candles,
-                                    owner_->serverConfig().orderbook, tfSec, nowMs)) {
+            if (!should_emit_update(bar, entry, owner_->serverConfig().candles, owner_->serverConfig().orderbook,
+                                    timeframeMs, nowMs)) {
                 return;
             }
             entry.seq++;
@@ -1333,30 +1323,18 @@ public:
             entry.hasLast = true;
             state = entry;
         }
-        sLog_Probe("candles.update",
-                   "symbol=" << sym
-                   << " tfSec=" << tfSec
-                   << " start=" << bar.timestamp_ms
-                   << " end=" << (bar.timestamp_ms + tfSec * 1000)
-                   << " now=" << nowMs
-                   << " seq=" << state.seq
-                   << " closed=" << (bar.is_closed ? "true" : "false"));
+        sLog_Probe("candles.update", "symbol=" << sym << " tfMs=" << timeframeMs << " start=" << bar.timestamp_ms
+                                               << " end=" << (bar.timestamp_ms + timeframeMs) << " now=" << nowMs
+                                               << " seq=" << state.seq
+                                               << " closed=" << (bar.is_closed ? "true" : "false"));
 
-        nlohmann::json item;
-        item["time_start_ms"] = bar.timestamp_ms;
-        item["time_end_ms"] = bar.timestamp_ms + tfSec * 1000;
-        item["open"] = bar.open;
-        item["high"] = bar.high;
-        item["low"] = bar.low;
-        item["close"] = bar.close;
-        item["volume"] = bar.volume;
-        item["is_closed"] = bar.is_closed;
+        auto item = candleItem(bar, timeframeMs, bar.is_closed);
 
         nlohmann::json payload;
         payload["type"] = "candle_bar_update";
         payload["schema_version"] = protocol::SentinelProtocol::kCandleSchemaVersion;
         payload["symbol"] = sym;
-        payload["timeframe_sec"] = tfSec;
+        payload["timeframe_ms"] = timeframeMs;
         payload["bucket_start_ms"] = bar.timestamp_ms;
         payload["seq"] = state.seq;
         payload["candle"] = std::move(item);
@@ -1368,8 +1346,7 @@ public:
         const std::string sym = symbol.toStdString();
         if (subscriptions_.find(sym) == subscriptions_.end()) return;
 
-        const int64_t tfSec = (timeframeMs / 1000);
-        const std::string key = sym + "|" + std::to_string(tfSec);
+        const std::string key = sym + "|" + std::to_string(timeframeMs);
         CandleStreamState state;
         {
             std::lock_guard<std::mutex> lock(candle_mutex_);
@@ -1382,29 +1359,17 @@ public:
             entry.hasLast = true;
             state = entry;
         }
-        sLog_Probe("candles.closed",
-                   "symbol=" << sym
-                   << " tfSec=" << tfSec
-                   << " start=" << bar.timestamp_ms
-                   << " end=" << (bar.timestamp_ms + tfSec * 1000)
-                   << " now=" << state.lastSentMs
-                   << " seq=" << state.seq);
+        sLog_Probe("candles.closed", "symbol=" << sym << " tfMs=" << timeframeMs << " start=" << bar.timestamp_ms
+                                               << " end=" << (bar.timestamp_ms + timeframeMs)
+                                               << " now=" << state.lastSentMs << " seq=" << state.seq);
 
-        nlohmann::json item;
-        item["time_start_ms"] = bar.timestamp_ms;
-        item["time_end_ms"] = bar.timestamp_ms + tfSec * 1000;
-        item["open"] = bar.open;
-        item["high"] = bar.high;
-        item["low"] = bar.low;
-        item["close"] = bar.close;
-        item["volume"] = bar.volume;
-        item["is_closed"] = true;
+        auto item = candleItem(bar, timeframeMs, true);
 
         nlohmann::json payload;
         payload["type"] = "candle_bar_closed";
         payload["schema_version"] = protocol::SentinelProtocol::kCandleSchemaVersion;
         payload["symbol"] = sym;
-        payload["timeframe_sec"] = tfSec;
+        payload["timeframe_ms"] = timeframeMs;
         payload["bucket_start_ms"] = bar.timestamp_ms;
         payload["seq"] = state.seq;
         payload["candle"] = std::move(item);
@@ -1502,6 +1467,9 @@ public:
             }
             if (pendingWriteBytes_.compare_exchange_weak(
                     pending, pending + bytes, std::memory_order_relaxed)) {
+#ifdef SENTINEL_CANDLE_TEST
+                recordPeak(peakWriteBytes_, pending + bytes);
+#endif
                 break;
             }
         }

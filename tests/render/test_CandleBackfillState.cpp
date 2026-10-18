@@ -187,7 +187,7 @@ TEST(CandleBackfillState, OneSecondClientUsesInclusiveEndWithoutOverlapAndAccept
     ASSERT_TRUE(request);
     EXPECT_EQ(request->endMs, 949'000);
     EXPECT_EQ(request->limit, 150); // visible remainder and prefetch fit one page
-    // Retained-bar pages can extend earlier than start_time_sec across a gap.
+    // Retained-bar pages can extend earlier than start_time_ms across a gap.
     EXPECT_TRUE(accept(state, *request, 750'000));
     state.setViewport(btc, 1000, 700'000, 800'000);
     auto next = state.next(750'000, false, now + 100);
@@ -330,7 +330,7 @@ TEST(CandleBackfillState, UsesFullPagesAcrossVisibleAndPrefetchRanges) {
 }
 
 TEST(CandleBackfillState, RefusedIntervalsNeverPageRefreshOrRetry) {
-    for (qint64 tfMs : {100, 1500, 999, 0, -1000}) {
+    for (qint64 tfMs : {0, -1000}) {
         CandleBackfillState state;
         state.setViewport(btc, tfMs, 900'000, 1'000'000);
         EXPECT_FALSE(state.needsOlderData(0, false, now));
@@ -343,7 +343,7 @@ TEST(CandleBackfillState, RefusedIntervalsNeverPageRefreshOrRetry) {
 }
 
 TEST(CandleBackfillState, OldFlightFailureDoesNotRetryRefusedSelection) {
-    for (qint64 tfMs : {100, 1500}) {
+    for (qint64 tfMs : {0, -1000}) {
         CandleBackfillState state;
         state.setViewport(btc, 1000, 900'000, 1'000'000);
         ASSERT_TRUE(state.next(0, false, now));
@@ -393,4 +393,18 @@ TEST(CandleBackfillState, UnalignedRefreshReplyKeepsNextPageIdentityExact) {
     EXPECT_EQ(second->startMs, 799'000);
     EXPECT_TRUE(acceptWireReply(state, *second, 800'500, now + 100));
     EXPECT_FALSE(state.next(800'500, false, now + 200));
+}
+
+TEST(CandleBackfillState, HundredMillisecondsPagesRetainedBars) {
+    CandleBackfillState state;
+    state.setViewport(btc, 100, 60000, 61001);
+    const auto first = state.next(0, false, now);
+    ASSERT_TRUE(first);
+    EXPECT_EQ(first->endMs, 61000);
+    EXPECT_EQ(first->limit, 22);
+    EXPECT_TRUE(state.accept(btc, 100, first->startMs, first->endMs, 60000, now));
+    const auto next = state.next(60000, false, now + 100);
+    ASSERT_TRUE(next);
+    EXPECT_EQ(next->endMs, 59900);
+    EXPECT_EQ(next->limit, 11);
 }

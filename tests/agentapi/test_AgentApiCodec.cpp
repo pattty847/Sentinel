@@ -444,7 +444,7 @@ TEST(AgentApiCodec, TradeTapeRetentionEpochAndSummary) {
 TEST(AgentApiCodec, SnapshotQueryValidation) {
     EXPECT_EQ(validateQuery({"GET", "/api/v1/candles", "startMs=1&endMs=1&timeframeMs=1000"}, "BTC-USD").code, "invalid_range");
     EXPECT_EQ(validateQuery({"GET", "/api/v1/candles", "startMs=1&endMs=2"}, "BTC-USD").code, "missing_parameter");
-    EXPECT_EQ(validateQuery({"GET", "/api/v1/candles", "startMs=1&endMs=2&timeframeMs=1001"}, "BTC-USD").code, "invalid_timeframe");
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/candles", "startMs=1&endMs=200&timeframeMs=100"}, "BTC-USD").status, 200);
     EXPECT_EQ(validateQuery({"GET", "/api/v1/candles", "startMs=1&endMs=2&timeframeMs=1000&limit=2001"}, "BTC-USD").code, "invalid_limit");
     EXPECT_EQ(validateQuery({"GET", "/api/v1/book", "levels=201"}, "BTC-USD").code, "invalid_levels");
     EXPECT_EQ(validateQuery({"GET", "/api/v1/trades", "windowMs=900001"}, "BTC-USD").code, "invalid_window");
@@ -537,12 +537,10 @@ TEST(AgentApiCodec, TradeEvidencePreservesEventTimeSeparatelyFromReceiveWindow) 
     EXPECT_EQ(data["trades"].toArray()[0].toObject()["eventTimeMs"].toInteger(), 1000);
 }
 
-TEST(AgentApiSnapshots, NonWholeSecondQueryDoesNotTruncateToWholeSecondSeries) {
+TEST(AgentApiSnapshots, HundredMillisecondsQueryReadsItsOwnSeries) {
     CandleSeriesBuffer buffer;
-    for (int64_t tfMs : {1000, 2000})
-        buffer.applyHistory("BTC-USD", tfMs, {{3000, 3000 + tfMs, 10, 10, 10, 10, 1, true, 0, false}});
-    for (int64_t tfMs : {100, 1500}) {
-        const auto snapshot = AgentApi::captureCandles(buffer, "BTC-USD", 0, 10000, tfMs, 10, {});
-        EXPECT_TRUE(!snapshot || snapshot->bars.empty());
-    }
+    buffer.applyHistory("BTC-USD", 100, {{3000, 3100, 10, 10, 10, 10, 1, true, 0, false}});
+    const auto snapshot = AgentApi::captureCandles(buffer, "BTC-USD", 0, 10000, 100, 10, {});
+    ASSERT_TRUE(snapshot);
+    ASSERT_EQ(snapshot->bars.size(), 1);
 }

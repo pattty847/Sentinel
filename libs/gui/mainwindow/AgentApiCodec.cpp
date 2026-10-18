@@ -248,8 +248,6 @@ ValidationResult validateQuery(const Request& request, const QString& activeSymb
                 return reject(422, "missing_parameter", "startMs, endMs and timeframeMs are required");
             if (result.startMs >= result.endMs)
                 return reject(422, "invalid_range", "startMs must precede endMs");
-            if (result.timeframeMs % 1000 != 0)
-                return reject(422, "invalid_timeframe", "timeframeMs must be whole seconds");
         }
         if (!candles && !book && result.windowMs > 900000)
             return reject(422, "invalid_window", "windowMs exceeds 900000");
