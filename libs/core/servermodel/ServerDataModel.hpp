@@ -140,7 +140,6 @@ private:
     mutable std::mutex m_footprintTradeMutex;
     std::unordered_map<std::string, std::deque<FootprintTradeSample>> m_recentFootprintTrades;
     int64_t m_footprintTradeRetentionMs = 300'000;
-    QTimer m_candleTimer;
     // Recording v2 (null when recording.enabled is false or no usable dir).
     std::shared_ptr<recording::LiveService> m_recordingLive;
     std::optional<std::filesystem::path> m_recordingDir;

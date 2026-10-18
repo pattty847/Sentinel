@@ -115,18 +115,8 @@ ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
 
     // Candles close on each product's journal
     // time (onFeedWatermark and its trades), never this process's wall clock.
-    for (const auto& symbol : rollerProducts(m_serverConfig)) m_aggregator->setJournalClock(symbol);
     connect(m_aggregator.get(), &TimeframeAggregator::barClosed, this, &ServerDataModel::barClosed);
     connect(m_aggregator.get(), &TimeframeAggregator::barUpdated, this, &ServerDataModel::barUpdated);
-
-    m_candleTimer.setTimerType(Qt::PreciseTimer);
-    m_candleTimer.setInterval(250);
-    connect(&m_candleTimer, &QTimer::timeout, this, [this]() {
-        if (m_aggregator) {
-            m_aggregator->tick(exchangeNowMs());
-        }
-    });
-    m_candleTimer.start();
 
     startRollerServing();
 }

@@ -49,10 +49,6 @@ struct ShadowServerTestAccess {
   static std::string metrics(SentinelServerApp &app) {
     return app.m_metrics.render();
   }
-  static void stopCandleTimer(ServerDataModel &m) { m.m_candleTimer.stop(); }
-  static void tickCandles(ServerDataModel &m, int64_t ms) {
-    m.m_aggregator->tick(ms);
-  }
   static quint16 healthPort(SentinelServerApp &app) { return app.m_httpServer->port(); }
   static SentinelStreamServer &server(SentinelServerApp &app) {
     return *app.m_server;
@@ -3133,7 +3129,7 @@ TEST_F(ShadowTest, JournalLiveFeedAdmissionAcceptsAllCapturedProducts) {
   EXPECT_EQ(s.metrics().find("sentinel_mdc_"), std::string::npos);
 }
 // Fix round 2 (finding 2): candles of a journal product close on its journal
-// time only. Two production models run the 250 ms wall-clock candle timer; one
+// time only. Two production models are stepped every 250 ms; one
 // gets every record on time, the other loses the fan-out at +50 s without
 // noticing (capture journals trades at +55 s and +65 s; the wall clock passes
 // +60 s) and recovers the journal gap at +80 s. Closed 1 s / 1 m / 5 m bars are
@@ -3186,8 +3182,6 @@ struct JournalCandles {
   // Outage: records received in (stallFrom, recoverAt) reach `outage` only at
   // recoverAt (detection plus journal catch-up), in order.
   void run(int64_t stallFrom, int64_t recoverAt, int64_t end) {
-    for (auto *m : {steady.get(), outage.get()})
-      ShadowServerTestAccess::stopCandleTimer(*m);
     size_t a = 0, b = 0;
     int64_t sentA = INT64_MIN, sentB = INT64_MIN;
     for (int64_t now = T0; now <= T0 + end; now += 250) {
@@ -3196,8 +3190,6 @@ struct JournalCandles {
       const bool stalled = now > T0 + stallFrom && now < T0 + recoverAt;
       for (; !stalled && b < journal.size() && journal[b].receiveMs <= now; ++b)
         deliver(*outage, journal[b], sentB);
-      ShadowServerTestAccess::tickCandles(*steady, now); // the wall-clock timer
-      ShadowServerTestAccess::tickCandles(*outage, now);
     }
   }
   void expectIdentical() {
@@ -3238,13 +3230,9 @@ TEST(JournalLiveFeedModel, DelayedOutageDetectionKeepsCandlesIdentical) {
 TEST(JournalLiveFeedModel, HeartbeatsCloseBarsWithoutTrades) {
   JournalCandles c;
   c.record({{10'000, 1.0}}, 130'000);
-  for (auto *m : {c.steady.get(), c.outage.get()})
-    ShadowServerTestAccess::stopCandleTimer(*m);
   int64_t sent = INT64_MIN;
   for (const auto &r : c.journal)
     JournalCandles::deliver(*c.steady, r, sent);
-  // The wall clock is far ahead and closes nothing for a journal product.
-  ShadowServerTestAccess::tickCandles(*c.steady, JournalCandles::T0 + 3'600'000);
   const auto minutes = c.steady->getHistory("PEPE-USD", 60000, 100);
   ASSERT_EQ(minutes.size(), 2u); // 0..1 m closed at 129.12 s; 2 m is open
   EXPECT_EQ(minutes[0].count, 1u);
@@ -3255,6 +3243,17 @@ TEST(JournalLiveFeedModel, HeartbeatsCloseBarsWithoutTrades) {
   EXPECT_EQ(seconds.front().timestamp_ms, JournalCandles::T0 + 10'000);
   // Last journal record 130.12 s, lag 1 s: seconds through 128 are closed.
   EXPECT_EQ(seconds.back().timestamp_ms, JournalCandles::T0 + 128'000);
+  // A trade closes the buckets before it at once, without waiting for the
+  // next watermark: the open 2 m minute and seconds through 184 close.
+  c.steady->onTrade(Trade{std::chrono::system_clock::time_point(
+                              std::chrono::milliseconds(JournalCandles::T0 + 185'000)),
+                          "PEPE-USD", "next", AggressorSide::Buy, 2.0, 1.0});
+  const auto traded = c.steady->getHistory("PEPE-USD", 60000, 100);
+  ASSERT_EQ(traded.size(), 3u);
+  EXPECT_EQ(traded[2].timestamp_ms, JournalCandles::T0 + 120'000);
+  EXPECT_EQ(traded[2].count, 0u);
+  EXPECT_EQ(c.steady->getHistory("PEPE-USD", 1000, 1000).back().timestamp_ms,
+            JournalCandles::T0 + 184'000);
   // A late trade for a bucket journal time already closed never reopens it.
   c.steady->onTrade(Trade{std::chrono::system_clock::time_point(
                               std::chrono::milliseconds(JournalCandles::T0 + 50'000)),
