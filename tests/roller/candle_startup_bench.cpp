@@ -210,7 +210,9 @@ int runReplay(const fs::path& dir, int seconds, const std::vector<std::string>& 
         wc.fsyncBlocks = 1;
         sinks.push_back(std::make_unique<capture::Writer>(wc, json{{"product_metadata", rp.records.front().metadata}}));
         ceilings[products[i]] = {{"pos", rp.ceiling}, {"ms", rp.ceilingMs}, {"records", rp.records.size()},
-                                 {"last", rp.records.back().pos}, {"lastMs", receiveMs(rp.records.back())}};
+                                 {"last", rp.records.back().pos}, {"lastMs", receiveMs(rp.records.back())},
+                                 {"prev", rp.records.size() > 1 ? json(rp.records[rp.records.size() - 2].pos)
+                                                                : json(rp.ceiling)}};
     }
     for (int i = 0; i < 20; ++i) QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
     const int64_t wallStart = wallMs();
@@ -374,15 +376,14 @@ size_t differences(const Reference& ref, int64_t windowStartMs, const std::map<i
     if (ref.window.size() != 2) ++differing;
     return differing;
 }
-// The model has processed the last replayed record when its newest closed
-// bars equal the reference's newest at that record (positive signal).
-bool modelAtTerminal(ServerDataModel& model, const std::string& product, const Reference& ref) {
-    for (const auto& [tf, want] : ref.window) {
-        const auto got = model.getHistory(product, tf, 1);
-        if (want.empty() || got.empty() || !sameBar(got.back(), want.back())) return false;
-    }
-    return ref.window.size() == 2;
-}
+// Completion markers, main thread only. The roller's durable observer
+// (ShadowConfig::observeForTest, after tap.durableApplied() and its model
+// posts) queues one per product when it applies the replay's exact last
+// record, and one at the record before it (the negative check).
+struct Marks {
+    bool terminal = false, prefixSeen = false, prefixBeforeTerminal = false;
+    std::map<int64_t, OHLCVBar> prefixNewest; // model's newest closed bars at the prefix marker
+};
 
 int runServer(const fs::path& dir, bool restore, int seconds, const std::string& configPath,
               const std::vector<std::string>& products) {
@@ -414,9 +415,40 @@ int runServer(const fs::path& dir, bool restore, int seconds, const std::string&
     shadow.products = products;
     shadow.liveNowForTest = [t0, wallStart] { return t0 + (wallMs() - wallStart); };
     shadow.candleRestoreForTest = restore;
+    std::map<std::string, std::pair<JournalPos, JournalPos>> ends; // product -> (prev, last)
+    for (const auto& p : products)
+        ends[p] = {clock.at("products").at(p).at("prev").get<JournalPos>(),
+                   clock.at("products").at(p).at("last").get<JournalPos>()};
+    auto receiver = std::make_shared<std::atomic<ServerDataModel*>>(nullptr);
+    std::map<std::string, Marks> marks;
+    for (const auto& p : products) marks[p];
+    shadow.observeForTest = [receiver, ends, &marks](const JournalRecord& r, bool applied) {
+        if (!applied) return;
+        const auto it = ends.find(r.pos.product);
+        if (it == ends.end()) return;
+        const bool last = r.pos == it->second.second, prev = r.pos == it->second.first;
+        auto* model = receiver->load();
+        if (!model || !(last || prev)) return;
+        const std::string product = r.pos.product;
+        QMetaObject::invokeMethod(
+            model,
+            [model, product, last, &marks] {
+                auto& m = marks[product];
+                if (last) {
+                    m.terminal = true;
+                    return;
+                }
+                m.prefixSeen = true;
+                m.prefixBeforeTerminal = !m.terminal;
+                for (const int64_t tf : {int64_t{100}, int64_t{1000}})
+                    if (const auto h = model->getHistory(product, tf, 1); !h.empty()) m.prefixNewest[tf] = h.back();
+            },
+            Qt::QueuedConnection);
+    };
     auto app = std::make_unique<SentinelServerApp>(config);
     ShadowServerTestAccess::prepare(*app, dir);
     auto& model = ShadowServerTestAccess::model(*app);
+    receiver->store(&model);
     std::map<std::string, int> readyAtFirstTrade; // -1 not seen, 0 false, 1 true
     for (const auto& p : products) readyAtFirstTrade[p] = -1;
     QObject::connect(&model, &ServerDataModel::tradeBroadcast, [&](const Trade& t) {
@@ -478,11 +510,22 @@ int runServer(const fs::path& dir, bool restore, int seconds, const std::string&
         }
         const int64_t windowStartMs = std::stoll(logs::field(restored, "throughMs")) - kRestoreWindowMs;
         const auto ref = reference(dir / "raw-l2", p, windowStartMs, ceilings.at(p).at("last").get<JournalPos>());
-        // Keep the model's event loop running until it reaches the terminal state.
+        // Wait for the marker queued after the model posts of the exact last record.
         const auto deadline = Clock::now() + std::chrono::seconds(60);
-        bool terminal = false;
-        while (ref.reachedLast && !(terminal = modelAtTerminal(model, p, ref)) && Clock::now() < deadline)
+        while (!marks[p].terminal && Clock::now() < deadline)
             QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        const bool terminal = marks[p].terminal;
+        // Negative check: at the record before the last one the marker had not
+        // completed; report whether its closed bars already equalled the final
+        // ones (the state an equal-newest-bar signal would have accepted).
+        const auto& mk = marks[p];
+        bool prefixBarsEqual = mk.prefixSeen && ref.window.size() == 2;
+        for (const auto& [tf, want] : ref.window) {
+            const auto it = mk.prefixNewest.find(tf);
+            prefixBarsEqual = prefixBarsEqual && !want.empty() && it != mk.prefixNewest.end() &&
+                              sameBar(it->second, want.back());
+        }
+        const bool negative = mk.prefixSeen && mk.prefixBeforeTerminal;
         std::map<int64_t, std::vector<OHLCVBar>> bars;
         for (const int64_t tf : {int64_t{100}, int64_t{1000}}) bars[tf] = model.getHistory(p, tf, 100000);
         const size_t differing = differences(ref, windowStartMs, bars);
@@ -490,11 +533,12 @@ int runServer(const fs::path& dir, bool restore, int seconds, const std::string&
         auto shorter = bars;
         if (!shorter[1000].empty()) shorter[1000].pop_back();
         const bool selfCheck = differences(ref, windowStartMs, shorter) > 0;
-        strictOk = strictOk && ref.reachedLast && terminal && selfCheck;
+        strictOk = strictOk && ref.reachedLast && terminal && selfCheck && negative;
         differingTotal += differing;
         cmp[p] = std::to_string(ref.window.at(100).size() + ref.window.at(1000).size()) + "/" +
                  std::to_string(differing) + " reachedLast=" + (ref.reachedLast ? "1" : "0") +
                  " terminal=" + (terminal ? "1" : "0") + " selfCheck=" + (selfCheck ? "1" : "0") +
+                 " prefixIncomplete=" + (negative ? "1" : "0") + " prefixBarsEqual=" + (prefixBarsEqual ? "1" : "0") +
                  " newest1000=" + std::to_string(ref.window.at(1000).back().timestamp_ms);
     }
     app.reset();
