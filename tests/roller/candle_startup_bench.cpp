@@ -318,15 +318,22 @@ std::string digest(const fs::path& root, fs::file_time_type since) {
 }
 
 // Continuous pass over the run's journal from about an hour before the window
-// through the last replayed record; closed 100 ms and 1 s bars of the model at
-// or after windowStartMs must equal it. Returns {compared, differing}.
-std::pair<size_t, size_t> compareBars(const fs::path& root, const std::string& product, int64_t windowStartMs,
-                                      const JournalPos& last, const std::map<int64_t, std::vector<OHLCVBar>>& model) {
-    TimeframeAggregator aggregator({100, 1000, 60000}, {{100, 60000}, {1000, 10000}});
+// through the last replayed record (it must be reached).
+struct Reference {
+    std::unique_ptr<TimeframeAggregator> aggregator;
+    bool reachedLast = false;
+    // Closed bars per timeframe at or after the window start: the complete
+    // window the model must hold once it has processed the last record.
+    std::map<int64_t, std::vector<OHLCVBar>> window;
+};
+Reference reference(const fs::path& root, const std::string& product, int64_t windowStartMs, const JournalPos& last) {
+    Reference out;
+    out.aggregator = std::make_unique<TimeframeAggregator>(std::vector<int64_t>{100, 1000, 60000},
+                                                           std::map<int64_t, int>{{100, 60000}, {1000, 10000}});
     JournalReader all(root, product);
     JournalReader reader(root, product, fileStartBefore(all, product, windowStartMs - 3'600'000));
     JournalFeed feed(product);
-    feed.onTrade = [&](const Trade& t) { aggregator.onTrade(t); };
+    feed.onTrade = [&](const Trade& t) { out.aggregator->onTrade(t); };
     int64_t sent = INT64_MIN;
     JournalRecord r;
     while (reader.next(r)) {
@@ -334,37 +341,47 @@ std::pair<size_t, size_t> compareBars(const fs::path& root, const std::string& p
         const int64_t ms = receiveMs(r);
         if (ms / 1000 > sent) {
             sent = ms / 1000;
-            aggregator.advance(product, ms - ServerDataModel::kJournalCandleLagMs);
+            out.aggregator->advance(product, ms - ServerDataModel::kJournalCandleLagMs);
         }
-        if (r.pos == last) break;
+        if (r.pos == last) {
+            out.reachedLast = true;
+            break;
+        }
     }
-    size_t compared = 0, differing = 0;
-    for (const auto& [tf, bars] : model) {
-        if (bars.empty()) {
-            ++differing;
-            continue;
-        }
-        std::map<int64_t, OHLCVBar> want;
-        for (const auto& b : aggregator.getHistory(product, tf, 100000)) want[b.timestamp_ms] = b;
-        const int64_t newest = bars.back().timestamp_ms;
-        size_t seen = 0;
-        for (const auto& b : bars) {
-            if (b.timestamp_ms < windowStartMs) continue;
-            ++compared;
-            ++seen;
-            const auto it = want.find(b.timestamp_ms);
-            if (it == want.end() ||
-                std::tie(b.open, b.high, b.low, b.close, b.volume, b.count) !=
-                    std::tie(it->second.open, it->second.high, it->second.low, it->second.close, it->second.volume,
-                             it->second.count))
-                ++differing;
-        }
-        size_t expected = 0;
-        for (const auto& [ts, b] : want)
-            if (ts >= windowStartMs && ts <= newest) ++expected;
-        differing += expected > seen ? expected - seen : seen - expected;
+    for (const int64_t tf : {int64_t{100}, int64_t{1000}})
+        for (const auto& b : out.aggregator->getHistory(product, tf, 100000))
+            if (b.timestamp_ms >= windowStartMs) out.window[tf].push_back(b);
+    return out;
+}
+bool sameBar(const OHLCVBar& a, const OHLCVBar& b) {
+    return std::tie(a.timestamp_ms, a.open, a.high, a.low, a.close, a.volume, a.count) ==
+           std::tie(b.timestamp_ms, b.open, b.high, b.low, b.close, b.volume, b.count);
+}
+// Differences between the model's closed bars at or after the window start
+// and the reference window, bounded by the reference only: a missing or extra
+// bar, the newest included, counts.
+size_t differences(const Reference& ref, int64_t windowStartMs, const std::map<int64_t, std::vector<OHLCVBar>>& model) {
+    size_t differing = 0;
+    for (const auto& [tf, want] : ref.window) {
+        std::vector<OHLCVBar> got;
+        if (const auto it = model.find(tf); it != model.end())
+            for (const auto& b : it->second)
+                if (b.timestamp_ms >= windowStartMs) got.push_back(b);
+        const size_t n = std::max(got.size(), want.size());
+        for (size_t i = 0; i < n; ++i)
+            if (i >= got.size() || i >= want.size() || !sameBar(got[i], want[i])) ++differing;
     }
-    return {compared, differing};
+    if (ref.window.size() != 2) ++differing;
+    return differing;
+}
+// The model has processed the last replayed record when its newest closed
+// bars equal the reference's newest at that record (positive signal).
+bool modelAtTerminal(ServerDataModel& model, const std::string& product, const Reference& ref) {
+    for (const auto& [tf, want] : ref.window) {
+        const auto got = model.getHistory(product, tf, 1);
+        if (want.empty() || got.empty() || !sameBar(got.back(), want.back())) return false;
+    }
+    return ref.window.size() == 2;
 }
 
 int runServer(const fs::path& dir, bool restore, int seconds, const std::string& configPath,
@@ -440,31 +457,50 @@ int runServer(const fs::path& dir, bool restore, int seconds, const std::string&
             break;
         }
     }
+    // Peak RSS of the serving run, before any comparison work or copy.
+    rusage usage{};
+    getrusage(RUSAGE_SELF, &usage);
     const auto text = ShadowServerTestAccess::metrics(*app);
     const auto lateAfter = metric(text, "sentinel_server_event_loop_late_ticks_total");
     const double servingReady = logs::at({"Roller serving ready products="});
-    std::map<std::string, std::map<int64_t, std::vector<OHLCVBar>>> bars;
-    for (const auto& p : products)
-        for (const int64_t tf : {int64_t{100}, int64_t{1000}}) bars[p][tf] = model.getHistory(p, tf, 100000);
     double failures = 0;
     for (const auto& p : products)
         failures += std::max(0.0, metric(text, "sentinel_candle_history_restore_failures_total{product=\"" + p + "\"}"));
-    app.reset();
-    rusage usage{};
-    getrusage(RUSAGE_SELF, &usage);
     const json ceilings = clock.at("products");
+    std::map<std::string, std::string> cmp;
     size_t differingTotal = 0;
+    bool strictOk = true;
+    for (const auto& p : products) {
+        const auto restored = logs::line({"Candle history restored product=" + p + " "});
+        if (!restore || restored.empty()) {
+            cmp[p] = "n/a";
+            continue;
+        }
+        const int64_t windowStartMs = std::stoll(logs::field(restored, "throughMs")) - kRestoreWindowMs;
+        const auto ref = reference(dir / "raw-l2", p, windowStartMs, ceilings.at(p).at("last").get<JournalPos>());
+        // Keep the model's event loop running until it reaches the terminal state.
+        const auto deadline = Clock::now() + std::chrono::seconds(60);
+        bool terminal = false;
+        while (ref.reachedLast && !(terminal = modelAtTerminal(model, p, ref)) && Clock::now() < deadline)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        std::map<int64_t, std::vector<OHLCVBar>> bars;
+        for (const int64_t tf : {int64_t{100}, int64_t{1000}}) bars[tf] = model.getHistory(p, tf, 100000);
+        const size_t differing = differences(ref, windowStartMs, bars);
+        // The comparison fails without the model's newest bar.
+        auto shorter = bars;
+        if (!shorter[1000].empty()) shorter[1000].pop_back();
+        const bool selfCheck = differences(ref, windowStartMs, shorter) > 0;
+        strictOk = strictOk && ref.reachedLast && terminal && selfCheck;
+        differingTotal += differing;
+        cmp[p] = std::to_string(ref.window.at(100).size() + ref.window.at(1000).size()) + "/" +
+                 std::to_string(differing) + " reachedLast=" + (ref.reachedLast ? "1" : "0") +
+                 " terminal=" + (terminal ? "1" : "0") + " selfCheck=" + (selfCheck ? "1" : "0") +
+                 " newest1000=" + std::to_string(ref.window.at(1000).back().timestamp_ms);
+    }
+    app.reset();
     for (const auto& p : products) {
         const auto restored = logs::line({"Candle history restored product=" + p + " "});
         const auto ready = logs::line({"Candle history ready symbol=" + p + " "});
-        std::string cmp = "n/a";
-        if (restore && !restored.empty()) {
-            const int64_t throughMs = std::stoll(logs::field(restored, "throughMs"));
-            const auto [compared, differing] = compareBars(dir / "raw-l2", p, throughMs - kRestoreWindowMs,
-                                                           ceilings.at(p).at("last").get<JournalPos>(), bars[p]);
-            differingTotal += differing;
-            cmp = std::to_string(compared) + "/" + std::to_string(differing);
-        }
         std::cout << "product=" << p << " mode=" << (restore ? "restore" : "baseline")
                   << " startedMs=" << logs::at({"Roller started product=" + p + " "})
                   << " restoreStartMs=" << logs::at({"Candle history restore start product=" + p + " "})
@@ -477,7 +513,7 @@ int runServer(const fs::path& dir, bool restore, int seconds, const std::string&
                   << " bars100=" << logs::field(restored, "bars100")
                   << " bars1000=" << logs::field(restored, "bars1000") << " readMs=" << logs::field(restored, "readMs")
                   << " installUs=" << logs::field(ready, "installUs") << " restored=" << logs::field(ready, "restored")
-                  << " readyAtFirstTrade=" << readyAtFirstTrade[p] << " barsComparedDiffering=" << cmp
+                  << " readyAtFirstTrade=" << readyAtFirstTrade[p] << " barsExpectedDiffering=" << cmp[p]
                   << " committedMs=" << stable[p] << std::endl;
     }
     std::cout << "total mode=" << (restore ? "restore" : "baseline") << " products=" << products.size()
@@ -485,6 +521,7 @@ int runServer(const fs::path& dir, bool restore, int seconds, const std::string&
               << " lateTicks=" << (lateAfter - std::max(0.0, lateBefore))
               << " maxRssMb=" << double(usage.ru_maxrss) / (1024.0 * 1024.0) << " restoreFailures=" << failures
               << " differingBars=" << (restore ? std::to_string(differingTotal) : "n/a")
+              << " strict=" << (restore ? (strictOk ? "ok" : "FAIL") : "n/a")
               << " hmc2=" << digest(dir / "hmc2", runStart) << std::endl;
     std::cout << "lag per second (p99,max):";
     for (const auto& [p99, max] : samples) std::cout << " " << p99 << "," << max;
