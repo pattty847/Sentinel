@@ -237,6 +237,31 @@ TEST(Roller, FeedTradeIdWindowIsBoundedAndEvictsOldest) {
     EXPECT_EQ(emitted,unique+1);
     EXPECT_EQ(lastId,"1");
     EXPECT_EQ(feed.retainedTradeIds(),capacity);
+    // The view is exactly the retained window: the re-emitted "1" evicted the
+    // oldest survivor, capacity+4, so capacity+5..unique remain.
+    std::unordered_set<std::string> expected{"1"};
+    for(size_t id=capacity+5;id<=unique;++id) expected.insert(std::to_string(id));
+    ASSERT_EQ(expected.size(),capacity);
+    EXPECT_EQ(feed.tradeIds(),expected);
+    const auto stateBefore=feed.exportState();
+    const auto copy=feed.tradeIds();
+    auto blank=trade(0);blank["trade_id"]="";
+    feed.apply({record(3000,capture::Kind::Frame,json({{"channel","market_trades"},
+        {"trades",json::array({trade(unique+1),blank,blank})}}).dump()),input.pos,input.metadata,false,input.version});
+    EXPECT_EQ(emitted,unique+4); // Empty IDs never dedupe.
+    EXPECT_EQ(copy,expected); // Independent of later input.
+    EXPECT_EQ(feed.retainedTradeIds(),capacity);
+    EXPECT_TRUE(feed.tradeIds().contains(std::to_string(unique+1)));
+    EXPECT_FALSE(feed.tradeIds().contains(std::to_string(capacity+5)));
+    EXPECT_FALSE(feed.tradeIds().contains(""));
+    // Serialization never carries the ID window.
+    auto stateAfter=feed.exportState();
+    EXPECT_EQ(stateAfter.at("lastLocal").get<int64_t>(),Epoch+3000);
+    stateAfter["lastLocal"]=stateBefore.at("lastLocal");
+    EXPECT_EQ(stateAfter,stateBefore);
+    EXPECT_EQ(stateBefore.size(),7u);
+    JournalFeed restored("BTC-USD");restored.importState(stateBefore);
+    EXPECT_TRUE(restored.tradeIds().empty());
 }
 TEST(Roller, RunIdentityCrashResumeAndIdempotence) {
     QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); fs::path root=temp.path().toStdString(); fixture(root/"raw",3665);
