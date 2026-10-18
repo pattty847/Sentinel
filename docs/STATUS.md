@@ -3,7 +3,7 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends.
 
-- **Updated:** 2026-10-18 00:35 EDT. Conductor (Opus, started 2026-10-17 23:15) handing off at the soft limit; no agent running. Next conductor, in order: Fable review of B2-2 (`7ee81fd1`); B2-R plan r2 with a fresh Fable planner (r1 + Astra review); wall-clock removal slice; B2-3 stacked on B2-2. Main `c852038d` + STATUS commits, local, not pushed.
+- **Updated:** 2026-10-18 EDT. New conductor (Opus) started; running: Fable review of B2-2 (`7ee81fd1`), fresh Fable planner for B2-R r2, Opus writer for wall-clock removal (`lt-claude/wallclock-removal`, worktree `/Volumes/T7/sentinel-worktrees/lt-claude-wallclock-removal`, reviewer Astra). Next: B2-3 stacked on B2-2 after the B2-2 PASS. Main `c852038d` + STATUS commits, local, not pushed.
 - **Conductor:** a Claude Opus session on the owner's Mac (AGENTS.md section 10).
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high-risk. Owner: use Codex down to ~1% before spending a reset credit (holds 3).
 
