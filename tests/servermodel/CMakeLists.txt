@@ -192,3 +192,18 @@ target_link_libraries(test_candle_history PRIVATE sentinel_core GTest::gtest_mai
 add_test(NAME CandleHistoryCacheTests COMMAND test_candle_history)
 set_tests_properties(CandleHistoryCacheTests PROPERTIES LABELS "servermodel" TIMEOUT 15)
 add_dependencies(servermodel_tests test_candle_history)
+
+add_executable(test_candle_wire test_candle_wire.cpp)
+target_include_directories(test_candle_wire PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_candle_wire PRIVATE sentinel_core GTest::gtest_main Qt6::Core Qt6::Network)
+add_test(NAME CandleWireTests COMMAND test_candle_wire --gtest_filter=-*Limit*:CandleWireLimits.*)
+set_tests_properties(CandleWireTests PROPERTIES LABELS "servermodel" TIMEOUT 30)
+add_test(NAME CandleModelEventLimitTests COMMAND test_candle_wire --gtest_filter=CandleWire.ModelEventLimitClosesOn2049thPost)
+add_test(NAME CandleWriteByteLimitTests COMMAND test_candle_wire --gtest_filter=CandleWireLimits.*)
+set_tests_properties(CandleModelEventLimitTests CandleWriteByteLimitTests PROPERTIES LABELS "servermodel" TIMEOUT 10)
+add_dependencies(servermodel_tests test_candle_wire)
+
+# Isolated synthetic server and opt-in cost measurement; never registered with ctest.
+add_executable(candle_fixture_server candle_fixture_server.cpp)
+target_include_directories(candle_fixture_server PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(candle_fixture_server PRIVATE sentinel_core Qt6::Core Qt6::Network)

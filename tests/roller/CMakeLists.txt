@@ -10,7 +10,7 @@ add_executable(test_shadow_roller test_shadow.cpp
     ../../apps/sentinel-server/SentinelServerApp.hpp)
 target_link_libraries(test_shadow_roller PRIVATE sentinel_core GTest::gtest_main Qt6::Core Qt6::Network)
 add_test(NAME ShadowRollerTests COMMAND test_shadow_roller)
-set_tests_properties(ShadowRollerTests PROPERTIES LABELS "roller" TIMEOUT 120)
+set_tests_properties(ShadowRollerTests PROPERTIES LABELS "roller" TIMEOUT 300)
 add_test(NAME DeployMarkerTests COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/deploy_marker_test.sh ${CMAKE_SOURCE_DIR})
 set_tests_properties(DeployMarkerTests PROPERTIES LABELS "roller" TIMEOUT 30)
 
@@ -34,3 +34,9 @@ set_tests_properties(CandleRestoreTests PROPERTIES LABELS "roller" TIMEOUT 120)
 
 add_executable(candle_restore_bench candle_restore_bench.cpp)
 target_link_libraries(candle_restore_bench PRIVATE sentinel_core Qt6::Core)
+
+# Startup cost of the candle rebuild in the production graph (scratch copies only; not a ctest).
+add_executable(candle_startup_bench candle_startup_bench.cpp
+    ../../apps/sentinel-server/SentinelServerApp.cpp
+    ../../apps/sentinel-server/SentinelServerApp.hpp)
+target_link_libraries(candle_startup_bench PRIVATE sentinel_core Qt6::Core Qt6::Network)

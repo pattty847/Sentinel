@@ -620,24 +620,19 @@ void SentinelStreamClient::cancelTpoHistory(const std::string& symbol, const std
     });
 }
 
-void SentinelStreamClient::requestCandleHistory(const std::string& symbol,
-                                                int64_t timeframeSec,
-                                                int64_t endTimeSec,
+void SentinelStreamClient::requestCandleHistory(const std::string &symbol, int64_t timeframeMs, int64_t endTimeMs,
                                                 int limit) {
-    if (symbol.empty() || timeframeSec <= 0) {
-        sLog_Warning("Candle history request not sent: invalid args symbol=" << symbol
-                     << " tfSec=" << timeframeSec);
+    if (symbol.empty() || timeframeMs <= 0) {
+        sLog_Warning("Candle history request not sent: invalid args symbol=" << symbol << " tfMs=" << timeframeMs);
         return;
     }
-    sLog_Data("Candle history request: symbol=" << symbol << " tfSec=" << timeframeSec
-              << " endSec=" << endTimeSec << " limit=" << limit);
-    nlohmann::json msg = {
-        {"type", "candle_history_request"},
-        {"symbol", symbol},
-        {"timeframe_sec", timeframeSec},
-        {"end_time_sec", endTimeSec},
-        {"limit", limit}
-    };
+    sLog_Data("Candle history request: symbol=" << symbol << " tfMs=" << timeframeMs << " endMs=" << endTimeMs
+                                                << " limit=" << limit);
+    nlohmann::json msg = {{"type", "candle_history_request"},
+                          {"symbol", symbol},
+                          {"timeframe_ms", timeframeMs},
+                          {"end_time_ms", endTimeMs},
+                          {"limit", limit}};
 
     std::string str = msg.dump();
     net::post(m_strand, [this, payload = std::move(str)]() mutable {
@@ -977,9 +972,16 @@ void SentinelStreamClient::handleCandleHistoryChunkMessage(const nlohmann::json&
     if (symbol.empty()) {
         return;
     }
-    const int64_t timeframeSec = msg.value("timeframe_sec", static_cast<int64_t>(0));
-    const int64_t startTimeSec = msg.value("start_time_sec", static_cast<int64_t>(0));
-    const int64_t endTimeSec = msg.value("end_time_sec", static_cast<int64_t>(0));
+    const int64_t timeframeMs = msg.value("timeframe_ms", static_cast<int64_t>(0));
+    const int64_t startTimeMs = msg.value("start_time_ms", static_cast<int64_t>(0));
+    const int64_t endTimeMs = msg.value("end_time_ms", static_cast<int64_t>(0));
+    if (msg.value("status", "") == "warming") {
+        // The server is still rebuilding this window: not a page.
+        sLog_Probe("candles.warming", "symbol=" << symbol << " tfMs=" << timeframeMs << " startMs=" << startTimeMs
+                                                << " endMs=" << endTimeMs);
+        emit candleHistoryWarming(QString::fromStdString(symbol), timeframeMs, startTimeMs, endTimeMs);
+        return;
+    }
     const auto candles = msg.value("candles", nlohmann::json::array());
 
     QVector<CandleBar> out;
@@ -994,12 +996,12 @@ void SentinelStreamClient::handleCandleHistoryChunkMessage(const nlohmann::json&
         const int count = out.size();
         const int64_t first = count > 0 ? out.front().timeStartMs : 0;
         const int64_t last = count > 0 ? out.back().timeStartMs : 0;
-        sLog_Data("Candle history recv: symbol=" << symbol << " tfSec=" << timeframeSec
-                  << " count=" << count << " first=" << first << " last=" << last
-                  << " startSec=" << startTimeSec << " endSec=" << endTimeSec);
+        sLog_Data("Candle history recv: symbol=" << symbol << " tfMs=" << timeframeMs << " count=" << count
+                                                 << " first=" << first << " last=" << last << " startMs=" << startTimeMs
+                                                 << " endMs=" << endTimeMs);
     }
 
-    emit candleHistoryReceived(QString::fromStdString(symbol), timeframeSec, startTimeSec, endTimeSec, out);
+    emit candleHistoryReceived(QString::fromStdString(symbol), timeframeMs, startTimeMs, endTimeMs, out);
 }
 
 void SentinelStreamClient::handleCandleBarMessage(protocol::MessageType type, const nlohmann::json& msg) {
@@ -1014,7 +1016,7 @@ void SentinelStreamClient::handleCandleBarMessage(protocol::MessageType type, co
     if (symbol.empty()) {
         return;
     }
-    const int64_t timeframeSec = msg.value("timeframe_sec", static_cast<int64_t>(0));
+    const int64_t timeframeMs = msg.value("timeframe_ms", static_cast<int64_t>(0));
     const int64_t bucketStartMs = msg.value("bucket_start_ms", static_cast<int64_t>(0));
     const int64_t seq = msg.value("seq", static_cast<int64_t>(0));
     const auto item = msg.value("candle", nlohmann::json::object());
@@ -1022,9 +1024,9 @@ void SentinelStreamClient::handleCandleBarMessage(protocol::MessageType type, co
 
     const auto symbolQ = QString::fromStdString(symbol);
     if (type == protocol::MessageType::CandleBarClosed) {
-        emit candleBarClosedReceived(symbolQ, timeframeSec, bucketStartMs, seq, bar, generation);
+        emit candleBarClosedReceived(symbolQ, timeframeMs, bucketStartMs, seq, bar, generation);
     } else {
-        emit candleBarUpdateReceived(symbolQ, timeframeSec, bucketStartMs, seq, bar, generation);
+        emit candleBarUpdateReceived(symbolQ, timeframeMs, bucketStartMs, seq, bar, generation);
     }
 }
 

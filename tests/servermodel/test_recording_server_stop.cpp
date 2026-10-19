@@ -242,15 +242,21 @@ struct RecordingServerStopTest {
         EXPECT_EQ(session->write_queue_.size(), 1);
     }
     static void checkCandlePages(ServerDataModel& model) {
+        ServerConfig config;
+        Authenticator auth("/nonexistent-candle-credentials");
+        SentinelStreamServer server(model, auth, config, 0);
         net::io_context ioc;
         ssl::context ctx(ssl::context::tls_server);
-        auto session = std::make_shared<Session>(tcp::socket(ioc), ctx, model, nullptr);
+        auto session = std::make_shared<Session>(tcp::socket(ioc), ctx, model, &server);
         // Hold a fake write in flight so posted replies stay inspectable without a socket.
         session->write_queue_.push_back({"in-flight", false});
         session->pendingWriteBytes_ = 9;
-        const auto fetch = [&](const char* symbol, int endSec, int limit) {
-            nlohmann::json request = {{"type", "candle_history_request"}, {"symbol", symbol},
-                {"timeframe_sec", 1}, {"end_time_sec", endSec}, {"limit", limit}};
+        const auto fetch = [&](const char *symbol, int endSec, int limit) {
+            nlohmann::json request = {{"type", "candle_history_request"},
+                                      {"symbol", symbol},
+                                      {"timeframe_ms", 1000},
+                                      {"end_time_ms", endSec * 1000LL},
+                                      {"limit", limit}};
             session->handle_message(request.dump());
             ioc.restart();
             ioc.poll();
@@ -260,7 +266,7 @@ struct RecordingServerStopTest {
         for (const auto [endSec, expectedCount] : {std::pair{1000, 350}, {650, 350}, {300, 300}, {1, 1}}) {
             const auto reply = fetch("BTC-USD", endSec, 350);
             ASSERT_EQ(reply.at("type"), "candle_history_chunk");
-            EXPECT_EQ(reply.at("end_time_sec"), endSec);
+            EXPECT_EQ(reply.at("end_time_ms"), endSec * 1000LL);
             const auto& candles = reply.at("candles");
             ASSERT_EQ(candles.size(), expectedCount);
             EXPECT_EQ(candles.back().at("time_start_ms"), endSec * 1000LL);
@@ -274,7 +280,7 @@ struct RecordingServerStopTest {
         // Journal time carries quiet buckets forward before the next trade.
         EXPECT_EQ(candles[0].at("time_start_ms"), 19'000);
         EXPECT_EQ(candles[1].at("time_start_ms"), 20'000);
-        EXPECT_EQ(sparse.at("start_time_sec"), 18); // metadata, not a sparse-bar lower bound
+        EXPECT_EQ(sparse.at("start_time_ms"), 18000); // metadata, not a sparse-bar lower bound
         EXPECT_TRUE(fetch("UNKNOWN-USD", 20, 2).at("candles").empty());
         session->beginClose("candle paging test");
     }
@@ -292,7 +298,8 @@ struct RecordingServerStopTest {
         net::post(server.m_ioc, [&] {
             auto session = std::make_shared<Session>(tcp::socket(server.m_ioc), server.m_sslCtx, model, &server);
             server.registerSession(session);
-            session->handle_message(R"({"type":"candle_history_request","symbol":"BTC-USD","timeframe_sec":60,"end_time_sec":172860,"limit":1})");
+            session->handle_message(
+                R"({"type":"candle_history_request","symbol":"BTC-USD","timeframe_ms":60000,"end_time_ms":172860000,"limit":1})");
             created.set_value(session);
         });
         return future.get();
@@ -985,7 +992,7 @@ TEST(ServerChartConfig, WireUsesNeutralFieldsAndRetainsCapabilityFilter) {
     EXPECT_EQ(wire.at("chart").at("timeframes_ms"), config.chart.timeframesMs);
     EXPECT_EQ(wire.at("chart").at("default_timeframe_ms"), 60000);
     EXPECT_EQ(wire.at("chart").at("served_timeframes_ms"),
-              (std::vector<int64_t>{60000, 300000, 3600000, 5400000, 7200000}));
+              (std::vector<int64_t>{1000, 60000, 300000, 3600000, 5400000, 7200000}));
     EXPECT_EQ(wire.at("trade_overlays").at("retention_columns"), 8192);
     const auto& capability = wire.at("recording");
     EXPECT_TRUE(capability.at("available"));
@@ -996,8 +1003,26 @@ TEST(ServerChartConfig, WireUsesNeutralFieldsAndRetainsCapabilityFilter) {
     config.chart.defaultTimeframeMs = 0;
     const auto fallback = buildServerConfigPayload(config, false, false);
     EXPECT_FALSE(fallback.at("chart").contains("default_timeframe_ms"));
-    EXPECT_EQ(fallback.at("chart").at("served_timeframes_ms"), (std::vector<int64_t>{1000}));
+    EXPECT_EQ(fallback.at("chart").at("served_timeframes_ms"), wire.at("chart").at("served_timeframes_ms"));
     EXPECT_FALSE(fallback.at("recording").at("available"));
+}
+
+// The served list is every configured timeframe the candle handlers answer: 100 ms and 1 s
+// from RAM, minute multiples from REST. The default timeframe does not narrow it, so the
+// production default 60000 still offers the sub-minute RAM timeframes.
+TEST(ServerChartConfig, ServedTimeframesAreEveryConfiguredTimeframeTheServerAnswers) {
+    ServerConfig config;
+    config.chart.timeframesMs = {100, 1000, 60000, 300000, 900000, 3600000, 14400000, 86400000};
+    for (const int64_t defaultTf : {int64_t(60000), int64_t(1000), int64_t(0)}) {
+        config.chart.defaultTimeframeMs = defaultTf;
+        EXPECT_EQ(buildServerConfigPayload(config, true, true).at("chart").at("served_timeframes_ms"),
+                  config.chart.timeframesMs) << "default=" << defaultTf;
+    }
+    // Configured values no candle handler answers are not advertised.
+    config.chart.timeframesMs = {100, 250, 1000, 1500, 2000, 60000, 90000, 120000};
+    config.chart.defaultTimeframeMs = 60000;
+    EXPECT_EQ(buildServerConfigPayload(config, true, true).at("chart").at("served_timeframes_ms"),
+              (std::vector<int64_t>{100, 1000, 60000, 120000}));
 }
 
 TEST(TradeOverlayServer, RetainedTradesPublishAllThreeOverlaysWithoutLegacyProducer) {

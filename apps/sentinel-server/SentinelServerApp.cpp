@@ -165,6 +165,14 @@ sentinel::roller::ModelSink SentinelServerApp::journalModelSink() {
     sink.metadata = [modelPtr](const std::string& product, const nlohmann::json& metadata) {
         safeInvoke(modelPtr, [product, metadata](ServerDataModel& model) { model.onFeedMetadata(product, metadata); });
     };
+    sink.candleRestore = [modelPtr](const std::string& product,
+                                    std::optional<sentinel::roller::CandleRestore> restore) {
+        // Shared so the queued functor stays copyable without copying the bars.
+        auto held = std::make_shared<std::optional<sentinel::roller::CandleRestore>>(std::move(restore));
+        safeInvoke(modelPtr, [product, held](ServerDataModel& model) {
+            model.onCandleHistoryRestored(product, std::move(*held));
+        });
+    };
     return sink;
 }
 
@@ -185,6 +193,17 @@ bool SentinelServerApp::startShadow(const std::vector<std::string>& symbols) {
         }
         shadow.model = journalModelSink();
         const auto products = shadow.products.empty() ? symbols : rollerProducts(m_serverConfig);
+        // Restart rebuild of the RAM-served trade timeframes (100 ms, 1 s).
+        shadow.candleTimeframesMs.clear();
+        for (const int64_t tf : {int64_t{100}, int64_t{1000}})
+            if (std::find(m_serverConfig.chart.timeframesMs.begin(), m_serverConfig.chart.timeframesMs.end(), tf) !=
+                m_serverConfig.chart.timeframesMs.end())
+                shadow.candleTimeframesMs.push_back(tf);
+        shadow.candleHistoryBars = m_serverConfig.chart.historyBars;
+        // Same condition as the roller's rebuild: every product it rebuilds
+        // (or refuses) posts exactly once, which ends its warming.
+        if (shadow.model.candleRestore && shadow.candleRestoreForTest && !shadow.candleTimeframesMs.empty())
+            m_serverModel->setCandleHistoryWarming(products);
         m_shadowRoller = std::make_unique<sentinel::roller::ShadowRoller>(shadow, products, m_metrics);
         if (serving && m_shadowRoller->active()) {
             auto* roller = m_shadowRoller.get();

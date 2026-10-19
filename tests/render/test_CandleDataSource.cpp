@@ -85,20 +85,40 @@ struct CandleDataSourceTest : testing::Test {
                 {"volume", close}, {"is_closed", closed}};
     }
     void reply(const Json& request, const Json& candles) {
-        client().handleCandleHistoryChunkMessage({
-            {"type", "candle_history_chunk"}, {"schema_version", protocol::SentinelProtocol::kCandleSchemaVersion},
-            {"symbol", request.at("symbol")}, {"timeframe_sec", request.at("timeframe_sec")},
-            {"start_time_sec", request.at("end_time_sec").get<qint64>() -
-                request.at("limit").get<int>() * request.at("timeframe_sec").get<qint64>()},
-            {"end_time_sec", request.at("end_time_sec")}, {"candles", candles}});
+        client().handleCandleHistoryChunkMessage(
+            {{"type", "candle_history_chunk"},
+             {"schema_version", protocol::SentinelProtocol::kCandleSchemaVersion},
+             {"symbol", request.at("symbol")},
+             {"timeframe_ms", request.at("timeframe_ms")},
+             {"start_time_ms", request.at("end_time_ms").get<qint64>() -
+                                   request.at("limit").get<int>() * request.at("timeframe_ms").get<qint64>()},
+             {"end_time_ms", request.at("end_time_ms")},
+             {"candles", candles}});
+        deliver();
+    }
+    // The server's reply while its startup 100 ms / 1 s rebuild runs.
+    void warmingReply(const Json& request) {
+        client().handleCandleHistoryChunkMessage(
+            {{"type", "candle_history_chunk"},
+             {"schema_version", protocol::SentinelProtocol::kCandleSchemaVersion},
+             {"symbol", request.at("symbol")},
+             {"timeframe_ms", request.at("timeframe_ms")},
+             {"start_time_ms", request.at("end_time_ms").get<qint64>() -
+                                   request.at("limit").get<int>() * request.at("timeframe_ms").get<qint64>()},
+             {"end_time_ms", request.at("end_time_ms")},
+             {"status", "warming"},
+             {"candles", Json::array()}});
         deliver();
     }
     void live(const char* symbol, qint64 tf, qint64 startMinute, double close, qint64 seq, bool closed) {
         client().handleCandleBarMessage(closed ? protocol::MessageType::CandleBarClosed
-                                             : protocol::MessageType::CandleBarUpdate,
-            {{"schema_version", protocol::SentinelProtocol::kCandleSchemaVersion},
-             {"symbol", symbol}, {"timeframe_sec", tf}, {"bucket_start_ms", startMinute * minute},
-             {"seq", seq}, {"candle", candle(startMinute, close, closed)}});
+                                               : protocol::MessageType::CandleBarUpdate,
+                                        {{"schema_version", protocol::SentinelProtocol::kCandleSchemaVersion},
+                                         {"symbol", symbol},
+                                         {"timeframe_ms", tf},
+                                         {"bucket_start_ms", startMinute * minute},
+                                         {"seq", seq},
+                                         {"candle", candle(startMinute, close, closed)}});
     }
     CandleSeriesBuffer::CandleBar cached(qint64 startMinute) {
         auto* buffer = qobject_cast<CandleSeriesBuffer*>(source.candleBuffer());
@@ -115,9 +135,10 @@ struct CandleDataSourceTest : testing::Test {
             const auto request = takeRequest();
             ASSERT_FALSE(request.is_null());
             ASSERT_EQ(request.at("type"), "candle_history_request");
-            ASSERT_EQ(request.at("end_time_sec"), boundary * 60);
+            ASSERT_EQ(request.at("end_time_ms"), boundary * minute);
             boundary -= request.at("limit").get<int>();
-            reply(request, Json::array({candle(boundary, 1), candle(request.at("end_time_sec").get<qint64>() / 60 - 1, 1)}));
+            reply(request,
+                  Json::array({candle(boundary, 1), candle(request.at("end_time_ms").get<qint64>() / minute - 1, 1)}));
         }
     }
     void reconnect(qint64 start = 1000, qint64 end = 1010) {
@@ -132,15 +153,15 @@ struct CandleDataSourceTest : testing::Test {
 
 TEST_F(CandleDataSourceTest, ReconnectRefreshesCoveredCacheAndPreservesNewLiveOwnership) {
     warm();
-    live("BTC-USD", 60, 1005, 1, 50, true);
+    live("BTC-USD", 60000, 1005, 1, 50, true);
     deliver();
     reconnect();
     const auto refresh = takeRequest();
     ASSERT_FALSE(refresh.is_null()); // oldest=990 already covers viewport+prefetch
-    EXPECT_EQ(refresh.at("end_time_sec"), 1010 * 60);
+    EXPECT_EQ(refresh.at("end_time_ms"), 1010 * minute);
     EXPECT_EQ(refresh.at("limit"), 20);
     EXPECT_TRUE(takeRequest(120).is_null()); // same single-flight guard during refresh
-    live("BTC-USD", 60, 1009, 9, 1, false);
+    live("BTC-USD", 60000, 1009, 9, 1, false);
     deliver();
     reply(refresh, Json::array({candle(990, 5), candle(1005, 5), candle(1009, 2)}));
     EXPECT_DOUBLE_EQ(cached(1005).close, 5);
@@ -148,7 +169,7 @@ TEST_F(CandleDataSourceTest, ReconnectRefreshesCoveredCacheAndPreservesNewLiveOw
     EXPECT_DOUBLE_EQ(cached(1009).close, 9);
     EXPECT_EQ(cached(1009).seq, 1);
     EXPECT_FALSE(cached(1009).isClosed);
-    live("BTC-USD", 60, 1009, 10, 2, false);
+    live("BTC-USD", 60000, 1009, 10, 2, false);
     deliver();
     EXPECT_DOUBLE_EQ(cached(1009).close, 10);
     EXPECT_TRUE(takeRequest(120).is_null()); // refresh finishes, coverage needs no backfill
@@ -156,13 +177,13 @@ TEST_F(CandleDataSourceTest, ReconnectRefreshesCoveredCacheAndPreservesNewLiveOw
 
 TEST_F(CandleDataSourceTest, SelectionReentryRefreshRejectsAlreadyQueuedLiveBars) {
     warm();
-    live("BTC-USD", 60, 1005, 1, 50, true);
+    live("BTC-USD", 60000, 1005, 1, 50, true);
     deliver();
-    live("BTC-USD", 60, 1005, 666, 51, false); // queued under old A generation
+    live("BTC-USD", 60000, 1005, 666, 51, false); // queued under old A generation
     source.setCandleHistoryViewport("ETH-USD", 60000, 0, 0);
     source.setCandleHistoryViewport("BTC-USD", 60000, 1000 * minute, 1010 * minute);
-    live("ETH-USD", 60, 1005, 777, 52, false); // current generation, wrong symbol
-    live("BTC-USD", 300, 1005, 888, 53, true); // current generation, wrong timeframe
+    live("ETH-USD", 60000, 1005, 777, 52, false); // current generation, wrong symbol
+    live("BTC-USD", 300000, 1005, 888, 53, true); // current generation, wrong timeframe
     deliver();
     EXPECT_EQ(cached(1005).seq, 0); // old queued A cannot reclaim ownership after A -> B -> A
     auto* buffer = qobject_cast<CandleSeriesBuffer*>(source.candleBuffer());
@@ -171,11 +192,11 @@ TEST_F(CandleDataSourceTest, SelectionReentryRefreshRejectsAlreadyQueuedLiveBars
     EXPECT_FALSE(buffer->getVisibleSlice("BTC-USD", 300000, 1005 * minute, 1006 * minute, wrongSelection));
     const auto refresh = takeRequest();
     ASSERT_FALSE(refresh.is_null());
-    EXPECT_EQ(refresh.at("end_time_sec"), 1010 * 60);
+    EXPECT_EQ(refresh.at("end_time_ms"), 1010 * minute);
     EXPECT_EQ(refresh.at("limit"), 20);
     reply(refresh, Json::array({candle(990, 5), candle(1005, 5), candle(1009, 5)}));
     EXPECT_DOUBLE_EQ(cached(1005).close, 5);
-    live("BTC-USD", 60, 1005, 6, 1, false);
+    live("BTC-USD", 60000, 1005, 6, 1, false);
     deliver();
     EXPECT_DOUBLE_EQ(cached(1005).close, 6);
     EXPECT_EQ(cached(1005).seq, 1);
@@ -184,7 +205,7 @@ TEST_F(CandleDataSourceTest, SelectionReentryRefreshRejectsAlreadyQueuedLiveBars
 
 TEST_F(CandleDataSourceTest, TimeframeReentryAlsoRefreshesAndRejectsQueuedClose) {
     warm();
-    live("BTC-USD", 60, 1009, 666, 51, true); // old queued close must also be rejected
+    live("BTC-USD", 60000, 1009, 666, 51, true); // old queued close must also be rejected
     source.setCandleHistoryViewport("BTC-USD", 300000, 0, 0);
     source.setCandleHistoryViewport("BTC-USD", 60000, 1000 * minute, 1010 * minute);
     deliver();
@@ -202,7 +223,7 @@ TEST_F(CandleDataSourceTest, WideRefreshPagesNewestFirstThenResumesOlderBackfill
     for (const auto [end, limit] : {std::pair{1400, 350}, {1050, 350}, {700, 100}}) {
         const auto request = takeRequest();
         ASSERT_FALSE(request.is_null());
-        EXPECT_EQ(request.at("end_time_sec"), end * 60);
+        EXPECT_EQ(request.at("end_time_ms"), end * minute);
         EXPECT_EQ(request.at("limit"), limit);
         if (end == 1400)
             source.setCandleHistoryViewport("BTC-USD", 60000, 950 * minute, 1400 * minute);
@@ -212,7 +233,7 @@ TEST_F(CandleDataSourceTest, WideRefreshPagesNewestFirstThenResumesOlderBackfill
     EXPECT_DOUBLE_EQ(cached(600).close, 5);
     const auto backfill = takeRequest();
     ASSERT_FALSE(backfill.is_null()); // newer viewport now needs history before cached oldest
-    EXPECT_EQ(backfill.at("end_time_sec"), 600 * 60);
+    EXPECT_EQ(backfill.at("end_time_ms"), 600 * minute);
     EXPECT_EQ(backfill.at("limit"), 100);
     reply(backfill, Json::array({candle(500, 5)}));
     EXPECT_TRUE(takeRequest(120).is_null());
@@ -413,9 +434,9 @@ TEST_F(CandleDataSourceTest, FifteenMinuteViewportSendsNativeBarPageThroughRealC
     const auto request = takeRequest();
     ASSERT_FALSE(request.is_null());
     EXPECT_EQ(request.at("type"), "candle_history_request");
-    EXPECT_EQ(request.at("timeframe_sec"), 900);
+    EXPECT_EQ(request.at("timeframe_ms"), 900000);
     EXPECT_EQ(request.at("limit"), 350);
-    EXPECT_EQ(request.at("end_time_sec"), 2344 * 900);
+    EXPECT_EQ(request.at("end_time_ms"), 2344 * 900000);
 }
 
 TEST_F(CandleDataSourceTest, DisconnectClearsReplicaBeforeGuardedStartupResubscribe) {
@@ -458,47 +479,85 @@ TEST_F(CandleDataSourceTest, DisconnectClearsReplicaBeforeGuardedStartupResubscr
     EXPECT_FALSE(source.getDirectLiveOrderBook("BTC-USD").isEmpty());
 }
 
+TEST_F(CandleDataSourceTest, HundredMillisecondsRequestsAndAppliesMilliseconds) {
+    source.setCandleHistoryViewport("BTC-USD", 100, 60000, 61000);
+    const auto request = takeRequest();
+    ASSERT_FALSE(request.is_null());
+    EXPECT_EQ(request.at("timeframe_ms"), 100);
+    EXPECT_EQ(request.at("end_time_ms"), 60900);
+    EXPECT_EQ(request.at("limit"), 20);
+    reply(request, Json::array({{{"time_start_ms", 60000},
+                                 {"time_end_ms", 60100},
+                                 {"open", 5},
+                                 {"high", 5},
+                                 {"low", 5},
+                                 {"close", 5},
+                                 {"volume", 1},
+                                 {"is_closed", true}}}));
+    auto *buffer = qobject_cast<CandleSeriesBuffer *>(source.candleBuffer());
+    std::vector<CandleSeriesBuffer::CandleBar> bars;
+    ASSERT_TRUE(buffer->getVisibleSlice("BTC-USD", 100, 60000, 60100, bars));
+    ASSERT_EQ(bars.size(), 1);
+    EXPECT_EQ(bars.front().timeEndMs, 60100);
+    EXPECT_EQ(bars.front().close, 5);
+}
+
 namespace {
-QStringList* refusalMessages = nullptr;
-void captureCandleRefusal(QtMsgType, const QMessageLogContext&, const QString& message) {
-    if (refusalMessages && message.contains("Candle history refused:")) refusalMessages->push_back(message);
+nlohmann::json second(qint64 startMs, double close) {
+    return {{"time_start_ms", startMs}, {"time_end_ms", startMs + 1000}, {"open", close}, {"high", close},
+            {"low", close}, {"close", close}, {"volume", 1}, {"is_closed", true}};
 }
+} // namespace
+
+// Warming on A, then a ready B: B's request goes out at once; back to A, a
+// fresh A request (the held one and its 2 s deadline are gone).
+TEST_F(CandleDataSourceTest, WarmingSelectionSwitchSendsTheOtherRequestAtOnce) {
+    source.setCandleHistoryViewport("BTC-USD", 1000, 600000, 610000);
+    const auto a = takeRequest();
+    ASSERT_FALSE(a.is_null());
+    EXPECT_EQ(a.at("timeframe_ms"), 1000);
+    warmingReply(a);
+    EXPECT_TRUE(candleRetryActive());
+    EXPECT_GT(candleRetryDelay(), 1500);
+    const auto sentB = std::chrono::steady_clock::now();
+    source.setCandleHistoryViewport("ETH-USD", 1000, 600000, 610000);
+    const auto b = takeRequest();
+    ASSERT_FALSE(b.is_null());
+    EXPECT_EQ(b.at("symbol"), "ETH-USD");
+    EXPECT_LT(std::chrono::steady_clock::now() - sentB, std::chrono::milliseconds(500));
+    reply(b, nlohmann::json::array({second(605000, 3)}));
+    source.setCandleHistoryViewport("BTC-USD", 1000, 600000, 610000);
+    const auto again = takeRequest(500);
+    ASSERT_FALSE(again.is_null());
+    EXPECT_EQ(again.at("symbol"), "BTC-USD");
+    EXPECT_EQ(again.at("end_time_ms"), a.at("end_time_ms"));
+    EXPECT_EQ(again.at("limit"), a.at("limit"));
 }
-TEST_F(CandleDataSourceTest, RefusedMillisecondsSendNothingLogOnceAndNeverRetry) {
-    QStringList messages;
-    refusalMessages = &messages;
-    const auto previous = qInstallMessageHandler(captureCandleRefusal);
-    const auto restore = qScopeGuard([&] { qInstallMessageHandler(previous); refusalMessages = nullptr; });
-    for (qint64 tfMs : {100, 1500}) {
-        source.setCandleHistoryViewport("BTC-USD", tfMs, 0, 0);
-        const int before = messages.size();
-        EXPECT_EQ(before, tfMs == 100 ? 1 : 2);
-        for (int i = 0; i < 3; ++i)
-            source.setCandleHistoryViewport("BTC-USD", tfMs, (1000 + i) * minute, (1010 + i) * minute);
-        EXPECT_TRUE(takeRequest(30).is_null());
-        EXPECT_EQ(messages.size(), before);
-        ASSERT_FALSE(messages.isEmpty());
-        EXPECT_TRUE(messages.back().contains("symbol=BTC-USD"));
-        EXPECT_TRUE(messages.back().contains("tfMs=" + QString::number(tfMs)));
-        EXPECT_TRUE(messages.back().contains("reason=timeframe_not_positive_whole_seconds"));
-        client().candleHistoryFailed("BTC-USD");
-        live("BTC-USD", 1, 1005, 99, 1, false);
-        deliver();
-        EXPECT_FALSE(candleRetryActive());
-        EXPECT_EQ(candleRetryDelay(), 0);
-        EXPECT_TRUE(takeRequest(30).is_null());
-    }
-    source.setCandleHistoryViewport("ETH-USD", 1500, 1000 * minute, 1010 * minute);
-    EXPECT_EQ(messages.size(), 3);
-    source.setCandleHistoryViewport("BTC-USD", 1000, 1000 * minute, 1010 * minute);
-    const auto whole = takeRequest();
-    ASSERT_FALSE(whole.is_null());
-    EXPECT_EQ(whole.at("timeframe_sec"), 1);
-    source.setCandleHistoryViewport("BTC-USD", 100, 1000 * minute, 1010 * minute);
-    client().candleHistoryFailed("BTC-USD");
-    deliver();
+
+// Warming on A: a viewport that needs no older data stops the retry and sends
+// nothing; scrolling back resends the held request verbatim at its deadline.
+// The warming chunk applies no history; the reply to the resend does.
+TEST_F(CandleDataSourceTest, WarmingRequestParksOutsideItsNeedAndResendsVerbatim) {
+    source.setCandleHistoryViewport("BTC-USD", 1000, 600000, 610000);
+    const auto a = takeRequest();
+    ASSERT_FALSE(a.is_null());
+    warmingReply(a);
+    auto* buffer = qobject_cast<CandleSeriesBuffer*>(source.candleBuffer());
+    std::vector<CandleSeriesBuffer::CandleBar> bars;
+    EXPECT_FALSE(buffer->getVisibleSlice("BTC-USD", 1000, 590000, 610000, bars));
+    const qint64 future = QDateTime::currentMSecsSinceEpoch() + 600000;
+    source.setCandleHistoryViewport("BTC-USD", 1000, future, future + 10000);
     EXPECT_FALSE(candleRetryActive());
-    EXPECT_EQ(candleRetryDelay(), 0);
-    EXPECT_TRUE(takeRequest(30).is_null());
-    EXPECT_EQ(messages.size(), 4);
+    EXPECT_TRUE(takeRequest(150).is_null());
+    const auto held = std::chrono::steady_clock::now();
+    source.setCandleHistoryViewport("BTC-USD", 1000, 600000, 610000);
+    EXPECT_TRUE(candleRetryActive());
+    const auto resent = takeRequest(3000);
+    ASSERT_FALSE(resent.is_null());
+    EXPECT_GE(std::chrono::steady_clock::now() - held, std::chrono::milliseconds(1500));
+    EXPECT_EQ(resent, a);
+    reply(resent, nlohmann::json::array({second(595000, 4), second(600000, 5)}));
+    ASSERT_TRUE(buffer->getVisibleSlice("BTC-USD", 1000, 595000, 601000, bars));
+    ASSERT_EQ(bars.size(), 2u);
+    EXPECT_DOUBLE_EQ(bars.back().close, 5);
 }

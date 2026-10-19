@@ -963,16 +963,13 @@ class CandleTickGeometryItem : public CandlestickOverlayItem {
 public:
     using CandlestickOverlayItem::updatePaintNode;
 };
-TEST(UgrCandleCpu, RefusedIntervalsClearExistingGeometryAndSuppressMismatchedBars) {
+TEST(UgrCandleCpu, NonPositiveIntervalsClearExistingGeometry) {
     CandleTickFrameProvider provider;
     CandleTickGeometryItem candles;
     CandleSeriesBuffer buffer;
     constexpr qint64 bucket = 1'200'000;
     const CandleSeriesBuffer::CandleBar bar{bucket, bucket + 1000, 100, 110, 90, 105, 1, true, 0, false};
     buffer.applyHistory("BTC-USD", 1000, {bar});
-    // Even mis-keyed one-second bars cannot bypass the renderer's refusal.
-    buffer.applyHistory("BTC-USD", 100, {bar});
-    buffer.applyHistory("BTC-USD", 1500, {bar});
     candles.setSize({640, 320});
     candles.setMappingProvider(&provider);
     candles.setCandleBuffer(&buffer);
@@ -998,11 +995,11 @@ TEST(UgrCandleCpu, RefusedIntervalsClearExistingGeometryAndSuppressMismatchedBar
     QSGNode* root = nullptr;
     for (int style : {0, 1, 2}) {
         candles.setCandleStyle(style);
-        candles.setTimeframeMs(1000);
-        provider.frame.activeTimeframeMs = 1000;
-        root = candles.updatePaintNode(root, nullptr);
-        EXPECT_GT(vertices(root), 0);
-        for (int tfMs : {100, 1500, 0, -1000}) {
+        for (int tfMs : {0, -1000}) {
+            candles.setTimeframeMs(1000);
+            provider.frame.activeTimeframeMs = 1000;
+            root = candles.updatePaintNode(root, nullptr);
+            EXPECT_GT(vertices(root), 0);
             candles.setTimeframeMs(tfMs);
             provider.frame.activeTimeframeMs = tfMs;
             root = candles.updatePaintNode(root, nullptr);
@@ -1012,14 +1009,64 @@ TEST(UgrCandleCpu, RefusedIntervalsClearExistingGeometryAndSuppressMismatchedBar
         provider.frame.activeTimeframeMs = 1000;
         root = candles.updatePaintNode(root, nullptr);
         EXPECT_GT(vertices(root), 0);
-        provider.frame.activeTimeframeMs = 100; // QML may still hold the old selection during sync.
-        root = candles.updatePaintNode(root, nullptr);
-        EXPECT_EQ(vertices(root), 0);
-        provider.frame.activeTimeframeMs = 1000;
-        root = candles.updatePaintNode(root, nullptr);
-        EXPECT_GT(vertices(root), 0);
     }
     delete root;
+}
+
+// 100 ms draws only traded buckets and synthesizes no quiet bars; whole seconds keep
+// the trade-free buckets and the synthesized carry bars (gaps and the live boundary).
+TEST(UgrCandleCpu, HundredMsDrawsOnlyTradedBucketsWholeSecondsKeepCarryBars) {
+    constexpr qint64 bucket = 1'200'000;
+    const auto counts = [](QSGNode* root) {
+        auto* wicks = static_cast<QSGGeometryNode*>(root->firstChild());
+        auto* bodies = static_cast<QSGGeometryNode*>(root->firstChild()->nextSibling());
+        return std::pair{wicks->geometry()->vertexCount() / 6, bodies->geometry()->vertexCount() / 6};
+    };
+    for (const qint64 tf : {qint64(100), qint64(1000)}) {
+        CandleTickFrameProvider provider;
+        CandleTickGeometryItem candles;
+        CandleSeriesBuffer buffer;
+        // Slots 0..8 with gaps at 4 and 7: three traded bars (0, 3, 8), four volume-0 bars.
+        std::vector<CandleSeriesBuffer::CandleBar> bars;
+        const std::pair<int, double> layout[] = {{0, 2}, {1, 0}, {2, 0}, {3, 5}, {5, 0}, {6, 0}, {8, 1}};
+        double close = 100;
+        for (const auto& [slot, volume] : layout) {
+            const qint64 start = bucket + slot * tf;
+            const double open = close;
+            if (volume > 0) close += 4;
+            bars.push_back({start, start + tf, open, std::max(open, close) + (volume > 0 ? 2 : 0),
+                            std::min(open, close) - (volume > 0 ? 2 : 0), close, volume, true, 0, false});
+        }
+        buffer.applyHistory("BTC-USD", tf, bars);
+        candles.setSize({640, 320});
+        candles.setMappingProvider(&provider);
+        candles.setCandleBuffer(&buffer);
+        candles.setSymbol("BTC-USD");
+        candles.setTimeframeMs(int(tf));
+        chart_raster::RasterInputs in;
+        in.timeStart = bucket; in.timeEnd = bucket + 20 * tf;
+        in.minPrice = 80; in.maxPrice = 130;
+        in.tfMs = tf; in.tick = 1;
+        in.itemWidthLogical = 640; in.itemHeightLogical = 320; in.dpr = 1;
+        provider.frame.raster = chart_raster::computeRaster(in, {});
+        provider.frame.mapping = chart_raster::toMapping(provider.frame.raster);
+        provider.frame.viewportValid = true;
+        provider.frame.viewportTimeStart = in.timeStart;
+        provider.frame.viewportTimeEnd = in.timeEnd;
+        provider.frame.activeTimeframeMs = tf;
+        provider.frame.currentBoundaryStartMs = bucket + 10 * tf;
+        QSGNode* root = candles.updatePaintNode(nullptr, nullptr);
+        const auto [wicks, bodies] = counts(root);
+        if (tf == 100) {
+            EXPECT_EQ(wicks, 3) << "100 ms draws only the traded buckets";
+            EXPECT_EQ(bodies, 3);
+        } else {
+            // 7 buffered bars + gap slots 4 and 7 + slot 9 up to the live boundary.
+            EXPECT_EQ(wicks, 10) << "whole seconds keep trade-free and synthesized carry bars";
+            EXPECT_EQ(bodies, 10);
+        }
+        delete root;
+    }
 }
 
 TEST(UgrCandleCpu, WindowAndQmlPassUnroundedMilliseconds) {

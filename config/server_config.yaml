@@ -2,7 +2,8 @@ schema_version: 1
 bind_address: "127.0.0.1" # server.bind_address; local clients only by default
 # bind_address: "100.89.99.21" # Example Mac Tailscale address for remote tailnet clients; use your own local address.
 chart:
-  timeframes_ms: [1000, 60000, 300000, 900000, 3600000, 14400000, 86400000]
+  timeframes_ms: [100, 1000, 60000, 300000, 900000, 3600000, 14400000, 86400000]
+  history_bars: {100: 18000} # closed bars kept in RAM; 18,000 at 100 ms = 30 min; no 1000 entry: 1 s keeps the 10,000-bar cap
   default_timeframe_ms: 60000
 trade_overlays:
   retention_columns: 8192

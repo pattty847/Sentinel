@@ -398,6 +398,91 @@ mutations.extend([
      '(state.floorOn[index] &&',
      'TimeframeAggregatorRestore.FloorIsNeitherSeededNorReadOnceABarExists', AGG),
 ])
+# B2-R3: restart candle reconstruction activated (server and GUI).
+SDM = 'libs/core/servermodel/ServerDataModel.cpp'
+SSS = 'libs/core/protocol/SentinelStreamServer.cpp'
+SSC = 'libs/core/protocol/SentinelStreamClient.cpp'
+CBS = 'libs/gui/datasources/CandleBackfillState.hpp'
+RGD = 'libs/gui/datasources/RemoteGridDataSource.cpp'
+WIRE, BACKFILL, SOURCE = 'servermodel/test_candle_wire', 'render/test_CandleBackfillState', 'render/test_CandleDataSource'
+GATE = 'ShadowTest.CandleRestoreGateDropsReconnectResendsUntilItExpires'
+mutations.extend([
+    ('b2r3 gate dedupe', SR,
+     'if (!gate.ids.insert(t.trade_id).second) {', 'if (!gate.ids.insert(t.trade_id).second && false) {', GATE),
+    ('b2r3 gate expires at TradeIdWindowCapacity', SR,
+     'if (++gate.delivered >= JournalFeed::TradeIdWindowCapacity) {',
+     'if (++gate.delivered > JournalFeed::TradeIdWindowCapacity) {', GATE),
+    ('b2r3 gate skips empty ids', SR,
+     'if (gate.active && !t.trade_id.empty()) {', 'if (gate.active) {', GATE),
+    ('b2r3 gate survives an outer retry', SR,
+     'gate.active = true;', 'gate.active = false;',
+     'ShadowTest.CandleRestoreOuterRetryKeepsTheInstallAndDropsAResentId'),
+    ('b2r3 handoff delivered rule', SR,
+     'if (!delivered) delivered = r.through;', ';',
+     'ShadowTest.CandleRestoreHandsOverExactlyAcrossARotationDuringTheRead'),
+    ('b2r3 handoff watermark second', SR,
+     'sentSecond = std::max(sentSecond, r.sentSecond);', ';',
+     'ShadowTest.CandleRestoreHandoffKeepsTheWatermarkSecond'),
+    ('b2r3 install precedes roll', SR,
+     'if (restoreEnabled() && !std::exchange(p.candlesRestored, true)) restoreCandles(p, source, tap);', ';',
+     'ShadowTest.CandleRestoreAfterRestartAcrossAnHourMatchesUninterruptedBars'),
+    ('b2r3 one attempt per process', SR,
+     'if (restoreEnabled() && !std::exchange(p.candlesRestored, true))', 'if (restoreEnabled())',
+     'ShadowTest.CandleRestoreOuterRetryKeepsTheInstallAndDropsAResentId'),
+    ('b2r3 failure still ends warming', SR,
+     'counted = true; sLog_Error("Candle history restore failed product=" << p.name << " reason=" << failure); cfg.model.candleRestore(p.name, std::nullopt);',
+     'counted = true;', 'ShadowTest.CandleRestoreFailureMarksReadyWithAnEmptyWindow'),
+    ('b2r3 refused product ends warming', SR,
+     'p->candleRestoreFailures->inc(); cfg.model.candleRestore(p->name, std::nullopt);',
+     'p->candleRestoreFailures->inc();', 'ShadowTest.CandleRestoreRefusedProductIsReadyWithoutAnAttempt'),
+    ('b2r3 cancellation posts nothing', SR,
+     'if (!restore && stopping) {', 'if (false) {',
+     'ShadowTest.CandleRestoreCancelledAtShutdownPostsNothing'),
+    ('b2r3 readiness flip', SDM,
+     'it->second.store(true, std::memory_order_release);', ';',
+     'CandleWireRestore.InstallsIntoEmptySeriesOnlyAndAlwaysEndsWarming', WIRE),
+    ('b2r3 refusal of a non-empty series', SDM,
+     'empty = empty && m_aggregator->canRestoreSeries(symbol, tf);', ';',
+     'CandleWireRestore.InstallsIntoEmptySeriesOnlyAndAlwaysEndsWarming', WIRE),
+    ('b2r3 warming reply', SSS,
+     'if (!model_.candleHistoryReady(symbol)) {', 'if (false) {',
+     'CandleWireWarming.WarmingReplyEchoesTheWindowUntilTheRebuildEnds', WIRE),
+    ('b2r3 gate survives the day rotation', SR,
+     'void detach() { history = nullptr; unseed(); }', 'void detach() { history = nullptr; gate = {}; unseed(); }',
+     'ShadowTest.CandleRestoreAcrossMidnightKeepsTheGateAndTheRecorder'),
+    ('b2r3 gate survives transport recovery', SR,
+     'void unseed() { seeded = false;', 'void unseed() { gate = {}; seeded = false;',
+     'ShadowTest.CandleRestoreTransportRecoveryDeliversTheGapOnce'),
+    ('b2r3 a failed handshake leaves the attempt ahead', SR,
+     'LiveLead lead(cfg, p.name, *p.leadForks,', 'if (restoreEnabled()) p.candlesRestored = true; LiveLead lead(cfg, p.name, *p.leadForks,',
+     'ShadowTest.CandleRestoreWaitsForTheSocketThenRebuildsOnce'),
+    ('b2r3 damage discards the rebuild', CR,
+     'if (reader.damaged() != 0) throw Failure("damaged journal prefix");', ';',
+     'ShadowTest.CandleRestoreCorruptBlockDiscardsTheRebuild'),
+    ('b2r3 within-second handoff keeps the bucket', SR,
+     'sentSecond = std::max(sentSecond, r.sentSecond);', ';',
+     'ShadowTest.CandleRestoreWithinSecondHandoffKeepsTheDelayedTradesBucket'),
+    ('b2r3 warming gauge', SDM,
+     "ready.load(std::memory_order_acquire) ? 0.0 : 1.0", '1.0',
+     'ShadowTest.CandleRestoreAfterRestartAcrossAnHourMatchesUninterruptedBars'),
+])
+# The GUI half (commit 2): absent before it, so listed only when present.
+if (ROOT / CBS).read_text().find('kWarmingRetryMs') >= 0:
+    mutations.extend([
+        ('b2r3 client reports warming', SSC,
+         'if (msg.value("status", "") == "warming") {', 'if (false) {',
+         'CandleDataSourceTest.WarmingRequestParksOutsideItsNeedAndResendsVerbatim', SOURCE),
+        ('b2r3 held-request retry deadline', CBS,
+         'deadline = std::max(deadline, m_pending->retryAtMs);', ';',
+         'CandleBackfillState.WarmingHoldsTheRequestAndResendsItVerbatim', BACKFILL),
+        ('b2r3 held request resent verbatim', CBS,
+         'm_pending->held = false; m_pending->retryAtMs = 0; m_nextSendMs = nowMs + kThrottleMs; return m_pending;',
+         'm_pending.reset();',
+         'CandleBackfillState.WarmingHoldsTheRequestAndResendsItVerbatim', BACKFILL),
+        ('b2r3 data source retries on warming', RGD,
+         'if (m_candleBackfill.warming(symbol, timeframeMs, startMs, endMs, QDateTime::currentMSecsSinceEpoch()))',
+         'if (false)', 'CandleDataSourceTest.WarmingSelectionSwitchSendsTheOtherRequestAtOnce', SOURCE),
+    ])
 if "--db2" in sys.argv:
     mutations = [m for m in mutations if m[0].startswith('db2-')]
 if "--round1" in sys.argv:
@@ -406,6 +491,8 @@ if "--slice-d" in sys.argv:
     mutations = mutations[13:]
 if "--b2r2" in sys.argv:
     mutations = [m for m in mutations if m[0].startswith('b2r2')]
+if "--b2r3" in sys.argv:
+    mutations = [m for m in mutations if m[0].startswith('b2r3')]
 if "--db1" in sys.argv:
     mutations = [m for m in mutations if m[0].startswith('db1')]
 for arg in sys.argv:

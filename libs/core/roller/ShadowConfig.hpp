@@ -1,10 +1,13 @@
 #pragma once
 #include "marketdata/model/TradeData.h"
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <functional>
+#include <map>
 #include <memory>
 #include <nlohmann/json_fwd.hpp>
+#include <optional>
 #include <string>
 #include <vector>
 namespace recording {
@@ -12,6 +15,7 @@ struct Hmc2Record;
 }
 namespace sentinel::roller {
 struct JournalRecord;
+struct CandleRestore;
 // Journal live feed: the server's live model follows
 // the capture journal instead of a Coinbase WebSocket. Installed by the server,
 // never read from config and not part of configHash. Every call is made on the
@@ -37,6 +41,13 @@ struct ModelSink {
   // The journal header's Coinbase product JSON (no REST).
   std::function<void(const std::string &product, const nlohmann::json &)>
       metadata;
+  // The product's rebuilt 100 ms / 1 s candle window, posted before any
+  // trade or watermark of the attempt that built it; nullopt when the rebuild
+  // failed or the product was refused. At most once per product per process.
+  // Optional: absent, nothing is rebuilt.
+  std::function<void(const std::string &product,
+                     std::optional<CandleRestore> restore)>
+      candleRestore;
   explicit operator bool() const { return bool(snapshot); }
 };
 struct ShadowConfig {
@@ -88,5 +99,17 @@ struct ShadowConfig {
   // With model: no socket record for this long at the tip invalidates the
   // model's book and reports connected=false (on the liveNowForTest clock).
   int64_t tipSilenceMs = 30000;
+  // With model.candleRestore: the trade timeframes (subset of 100 and 1000)
+  // rebuilt from the journal at the first handshake, and the live model's
+  // closed-bar retention. Installed by the server, never read from config.
+  std::vector<int64_t> candleTimeframesMs;
+  std::map<int64_t, int> candleHistoryBars;
+  // Benchmark and test switch: false skips the rebuild with the same chart
+  // configuration (the model then never warms).
+  bool candleRestoreForTest = true;
+  // Called on the roller worker after every record of the rebuild, with the
+  // supervisor's stop flag.
+  std::function<void(const JournalRecord &, const std::atomic<bool> &stopping)>
+      candleRestoreAfterRecordForTest;
 };
 } // namespace sentinel::roller

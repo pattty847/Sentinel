@@ -74,6 +74,11 @@ class Client:
                     return json.loads(message)
 
 
+def history_request(timeframe, end, count):
+    return {'type': 'candle_history_request', 'symbol': 'BTC-USD',
+            'timeframe_ms': timeframe, 'end_time_ms': end, 'limit': count}
+
+
 def measure(client, end, timeframe, bars, log):
     before = log.read_text().count('[candles.rest.request]')
     started = time.monotonic()
@@ -89,8 +94,7 @@ def measure(client, end, timeframe, bars, log):
         time.sleep(max(0, next_send - time.monotonic()))
         next_send = time.monotonic() + .1
         count = min(350, remaining + bars)  # one-screen prefetch; no visible-boundary cut
-        request = {'type': 'candle_history_request', 'symbol': 'BTC-USD',
-                   'timeframe_sec': timeframe, 'end_time_sec': cursor, 'limit': count}
+        request = history_request(timeframe, cursor, count)
         client.send(json.dumps(request).encode())
         requests += 1
         while True:
@@ -99,11 +103,11 @@ def measure(client, end, timeframe, bars, log):
                 raise RuntimeError(response)
             if response['type'] == 'candle_history_chunk':
                 break
-        assert response['end_time_sec'] == cursor, response
+        assert response['end_time_ms'] == cursor, response
         page = response['candles']
         assert len(page) == count, (cursor, count, len(page))
         assert all(bar['is_closed'] for bar in page)
-        expected = list(range((cursor - count * timeframe) * 1000, cursor * 1000, timeframe * 1000))
+        expected = list(range(cursor - count * timeframe, cursor, timeframe))
         assert [bar['time_start_ms'] for bar in page] == expected
         timestamps += expected
         elapsed = (time.monotonic() - started) * 1000
@@ -130,20 +134,29 @@ def measure(client, end, timeframe, bars, log):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--worktree', type=Path, required=True)
+    parser.add_argument('--worktree', type=Path, required=False)
     parser.add_argument('--port', type=int, default=18088)
     parser.add_argument('--health-port', type=int, default=18098)
     parser.add_argument('--offline-mdc-port', type=int, default=18089)
-    parser.add_argument('--end', type=int, default=1791342900, help='Exclusive, closed UTC page boundary')
-    parser.add_argument('--timeframe', type=int, default=900)
+    parser.add_argument('--end', type=int, default=1791342900000, help='Exclusive, closed UTC page boundary in ms')
+    parser.add_argument('--timeframe', type=int, default=900000)
     parser.add_argument('--bars', type=int, default=1344)
     parser.add_argument('--runs', type=int, default=3)
+    parser.add_argument('--self-test', action='store_true')
     args = parser.parse_args()
+    if args.self_test:
+        assert history_request(100, 172860000, 350) == {
+            'type': 'candle_history_request', 'symbol': 'BTC-USD',
+            'timeframe_ms': 100, 'end_time_ms': 172860000, 'limit': 350}
+        print('candle history request self-test PASS')
+        return
+    if args.worktree is None:
+        parser.error('--worktree is required without --self-test')
     assert args.runs > 0
     assert len({args.port, args.health_port, args.offline_mdc_port}) == 3
     assert all(p not in (8080, 8090, 8091, 17100, 17190) and 1024 < p < 65536
                for p in (args.port, args.health_port, args.offline_mdc_port))
-    assert args.end % args.timeframe == 0 and args.end <= time.time()
+    assert args.end % args.timeframe == 0 and args.end <= time.time() * 1000
     root = args.worktree.resolve()
     binary = root / 'build/mac-clang/apps/sentinel-server/sentinel-server'
     scratch = Path(tempfile.mkdtemp(prefix='sentinel-candle-history-', dir='/tmp'))

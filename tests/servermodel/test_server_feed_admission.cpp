@@ -227,6 +227,19 @@ TEST(ServerFeedConfig, CheckedInConfigDefaultsToLoopback) {
     EXPECT_EQ(config.bindAddress, "127.0.0.1");
 }
 
+TEST(ServerFeedConfig, CheckedInConfigServesHundredMsCandlesFromThirtyMinutesOfRam) {
+    ServerConfig config;
+    ASSERT_TRUE(ConfigLoader::loadServerConfig(std::string(SENTINEL_SOURCE_DIR) +
+                                               "/config/server_config.yaml", &config));
+    const auto& tfs = config.chart.timeframesMs;
+    EXPECT_NE(std::find(tfs.begin(), tfs.end(), 100), tfs.end());
+    EXPECT_NE(std::find(tfs.begin(), tfs.end(), 1000), tfs.end());
+    ASSERT_EQ(config.chart.historyBars.count(100), 1u);
+    EXPECT_EQ(config.chart.historyBars.at(100), 18000);
+    // 1 s retention is unchanged: no entry keeps the 10,000-bar cap.
+    EXPECT_EQ(config.chart.historyBars.count(1000), 0u);
+}
+
 TEST(ServerFeedConfig, OnlyRestCaBundleIsReadFromMdc) {
     QTemporaryDir dir;
     const auto path = dir.filePath("server.yaml");

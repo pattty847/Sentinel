@@ -246,6 +246,49 @@ void ServerDataModel::onFeedWatermark(const std::string& symbol, int64_t journal
     // that ended kJournalCandleLagMs before it, so in-flight trades still land.
     m_aggregator->advance(symbol, journalMs - kJournalCandleLagMs);
 }
+void ServerDataModel::setCandleHistoryWarming(const std::vector<std::string>& products) {
+    for (const auto& product : products) m_candleHistoryReady.try_emplace(product, false);
+    sLog_App("Candle history warming products=" << m_candleHistoryReady.size());
+}
+bool ServerDataModel::candleHistoryReady(const std::string& symbol) const {
+    const auto it = m_candleHistoryReady.find(symbol);
+    return it == m_candleHistoryReady.end() || it->second.load(std::memory_order_acquire);
+}
+void ServerDataModel::onCandleHistoryRestored(const std::string& symbol,
+                                              std::optional<sentinel::roller::CandleRestore> restore) {
+    const auto it = m_candleHistoryReady.find(symbol);
+    if (it == m_candleHistoryReady.end()) {
+        sLog_Error("Candle history restore for a product that is not warming symbol=" << symbol);
+        return;
+    }
+    const char* restored = "none";
+    size_t bars100 = 0, bars1000 = 0;
+    int64_t installUs = 0;
+    if (restore && m_aggregator) {
+        const auto began = std::chrono::steady_clock::now();
+        bool empty = true;
+        for (const auto& [tf, series] : restore->series)
+            empty = empty && m_aggregator->canRestoreSeries(symbol, tf);
+        if (empty) {
+            restored = restore->outcome == sentinel::roller::RestoreOutcome::complete ? "complete" : "partial";
+            for (auto& [tf, series] : restore->series) {
+                (tf == 100 ? bars100 : bars1000) += series.closed.size();
+                m_aggregator->restoreSeries(symbol, tf, std::move(series));
+            }
+        } else {
+            restored = "refused";
+            sLog_Error("Candle history restore refused: series not empty symbol=" << symbol);
+        }
+        installUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - began).count();
+    }
+    it->second.store(true, std::memory_order_release);
+    const auto through = restore ? restore->through : sentinel::roller::JournalPos{};
+    sLog_App("Candle history ready symbol=" << symbol << " restored=" << restored << " bars100=" << bars100
+             << " bars1000=" << bars1000 << " through=" << through.run << "/" << through.block << "/"
+             << through.record << " throughMs=" << (restore ? restore->throughMs : 0)
+             << " readMs=" << (restore ? restore->readMs : 0.0) << " installUs=" << installUs);
+}
 void ServerDataModel::setReseedHandler(std::function<void(const std::string&)> handler) {
     m_reseed = std::move(handler);
     if (!m_reseed) {
@@ -312,6 +355,15 @@ void ServerDataModel::registerMetrics(sentinel::metrics::MetricsRegistry& r) {
                    for (const auto& drops : m_aggregator->lateDrops())
                        samples.push_back({{{"product", drops.symbol}, {"timeframe_ms", std::to_string(drops.timeframeMs)}},
                                           double(drops.count)});
+                   return samples;
+               });
+    r.familyFn("sentinel_candle_history_warming",
+               "1 while this product's startup 100 ms / 1 s candle rebuild has not ended (history requests "
+               "reply warming).",
+               Registry::Type::Gauge, [this] {
+                   std::vector<Registry::Sample> samples;
+                   for (const auto& [symbol, ready] : m_candleHistoryReady)
+                       samples.push_back({{{"product", symbol}}, ready.load(std::memory_order_acquire) ? 0.0 : 1.0});
                    return samples;
                });
     r.gaugeFn("sentinel_recorder_running", "1 when the journal roller is attached.", {},

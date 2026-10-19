@@ -50,21 +50,12 @@ private slots:
     void onFootprintSliceReceived(const FootprintSlice& slice);
     void onTpoSliceReceived(const TpoSlice& slice);
     void onVolumeProfileSliceReceived(const VolumeProfileSlice& slice);
-    void onCandleBarUpdateReceived(const QString& symbol,
-                                   int64_t timeframeSec,
-                                   int64_t bucketStartMs,
-                                   int64_t seq,
-                                   const SentinelStreamClient::CandleBar& bar, quint64 deliveryGeneration);
-    void onCandleBarClosedReceived(const QString& symbol,
-                                   int64_t timeframeSec,
-                                   int64_t bucketStartMs,
-                                   int64_t seq,
-                                   const SentinelStreamClient::CandleBar& bar, quint64 deliveryGeneration);
-    void onCandleHistoryReceived(const QString& symbol,
-                                 int64_t timeframeSec,
-                                 int64_t startTimeSec,
-                                 int64_t endTimeSec,
-                                 const QVector<SentinelStreamClient::CandleBar>& candles);
+    void onCandleBarUpdateReceived(const QString &symbol, int64_t timeframeMs, int64_t bucketStartMs, int64_t seq,
+                                   const SentinelStreamClient::CandleBar &bar, quint64 deliveryGeneration);
+    void onCandleBarClosedReceived(const QString &symbol, int64_t timeframeMs, int64_t bucketStartMs, int64_t seq,
+                                   const SentinelStreamClient::CandleBar &bar, quint64 deliveryGeneration);
+    void onCandleHistoryReceived(const QString &symbol, int64_t timeframeMs, int64_t startTimeMs, int64_t endTimeMs,
+                                 const QVector<SentinelStreamClient::CandleBar> &candles);
     void onServerConfigReceived(const ServerConfig& config);
     void onAlgoOrderEventReceived(const trading::AlgoOrderEvent& event);
     void onPnlSnapshotReceived(const trading::PnlSnapshot& snapshot);

@@ -348,7 +348,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         root = new CandleOverlayNode();
     }
 
-    if (!m_mappingProvider || !chart::candleTimeframeSeconds(m_timeframeMs)) {
+    if (!m_mappingProvider || m_timeframeMs <= 0) {
         m_geometryDirty = true;
         root->setCounts(0, 0);
         root->wickNode->markDirty(QSGNode::DirtyGeometry);
@@ -366,8 +366,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         m_lastMapping = mapping;
         m_geometryDirty = true;
     }
-    if (!mapping.valid || !frame.viewportValid ||
-        (frame.activeTimeframeMs > 0 && !chart::candleTimeframeSeconds(frame.activeTimeframeMs))) {
+    if (!mapping.valid || !frame.viewportValid) {
         m_geometryDirty = true;
         root->setCounts(0, 0);
         root->wickNode->markDirty(QSGNode::DirtyGeometry);
@@ -420,6 +419,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         if (hasData) {
             m_visibleCandles.reserve(m_bufferSlice.size());
             for (const auto& bar : m_bufferSlice) {
+                if (!chart::drawsCandle(m_timeframeMs, bar.volume)) continue;
                 CandleOverlayBar out;
                 out.timeStartMs = bar.timeStartMs;
                 out.timeEndMs = bar.timeEndMs;
@@ -427,6 +427,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
                 out.high = bar.high;
                 out.low = bar.low;
                 out.close = bar.close;
+                out.volume = bar.volume;
                 m_visibleCandles.push_back(out);
             }
         }
@@ -466,10 +467,12 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     const int baseVisibleCount = static_cast<int>(filtered.size());
     const int64_t tfMs = static_cast<int64_t>(std::llround(mapping.appendMs));
     const int maxColumns = std::max(0, mapping.gridWidth);
-    if (cadenceMatches && tfMs > 0 && maxColumns > 0) {
+    const bool synthesize = cadenceMatches && tfMs > 0 && maxColumns > 0 &&
+                            chart::synthesizesQuietBars(m_timeframeMs);
+    if (synthesize) {
         buildContinuousBars(filtered, tfMs, frame.currentBoundaryStartMs, maxColumns, m_continuousCandles);
     }
-    const auto& drawBars = (cadenceMatches && tfMs > 0 && maxColumns > 0) ? m_continuousCandles : filtered;
+    const auto& drawBars = synthesize ? m_continuousCandles : filtered;
     const int visibleCount = static_cast<int>(drawBars.size());
     const int syntheticCount = std::max(0, visibleCount - baseVisibleCount);
 

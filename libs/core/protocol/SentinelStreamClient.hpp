@@ -105,10 +105,7 @@ public:
                            const std::string& requestId);
     // Stops an abandoned or superseded page on the server; its reply, if any, is dropped.
     void cancelTpoHistory(const std::string& symbol, const std::string& requestId);
-    void requestCandleHistory(const std::string& symbol,
-                              int64_t timeframeSec,
-                              int64_t endTimeSec,
-                              int limit);
+    void requestCandleHistory(const std::string &symbol, int64_t timeframeMs, int64_t endTimeMs, int limit);
     // Local delivery tag, captured on the network thread before queuing a bar.
     void setCandleDeliveryGeneration(quint64 generation) {
         m_candleDeliveryGeneration.store(generation, std::memory_order_release);
@@ -158,22 +155,16 @@ signals:
     void heatmapChunkFailed(const SentinelStreamClient::HeatmapChunkError& error);
     // Sent on subscribe and whenever it changes. Refused on a wire-version mismatch.
     void heatmapAvailabilityReceived(const protocol::chunkwire::Availability& availability);
-    void candleHistoryReceived(const QString& symbol,
-                               int64_t timeframeSec,
-                               int64_t startTimeSec,
-                               int64_t endTimeSec,
-                               const QVector<CandleBar>& candles);
+    void candleHistoryReceived(const QString &symbol, int64_t timeframeMs, int64_t startTimeMs, int64_t endTimeMs,
+                               const QVector<CandleBar> &candles);
     void candleHistoryFailed(const QString& symbol);
-    void candleBarUpdateReceived(const QString& symbol,
-                                 int64_t timeframeSec,
-                                 int64_t bucketStartMs,
-                                 int64_t seq,
-                                 const CandleBar& candle, quint64 deliveryGeneration);
-    void candleBarClosedReceived(const QString& symbol,
-                                 int64_t timeframeSec,
-                                 int64_t bucketStartMs,
-                                 int64_t seq,
-                                 const CandleBar& candle, quint64 deliveryGeneration);
+    // The server answered a 100 ms / 1 s request before its startup candle
+    // rebuild ended; the window echoes the request.
+    void candleHistoryWarming(const QString& symbol, int64_t timeframeMs, int64_t startTimeMs, int64_t endTimeMs);
+    void candleBarUpdateReceived(const QString &symbol, int64_t timeframeMs, int64_t bucketStartMs, int64_t seq,
+                                 const CandleBar &candle, quint64 deliveryGeneration);
+    void candleBarClosedReceived(const QString &symbol, int64_t timeframeMs, int64_t bucketStartMs, int64_t seq,
+                                 const CandleBar &candle, quint64 deliveryGeneration);
     // Emitted when the server returns a screener_update in response to screener_request.
     // rows is the raw JSON array as a QByteArray (UTF-8); asset is "crypto" or "stock".
     void screenerUpdateReceived(const QString& asset, int rowCount, const QByteArray& rowsJson);

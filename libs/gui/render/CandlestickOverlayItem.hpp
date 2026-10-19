@@ -24,6 +24,7 @@ struct CandleOverlayBar {
     double high = 0.0;
     double low = 0.0;
     double close = 0.0;
+    double volume = 0.0;
 };
 
 class CandlestickOverlayItem : public QQuickItem {

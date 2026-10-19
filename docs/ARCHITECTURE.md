@@ -20,7 +20,7 @@ Sentinel is rigidly divided into three main operational theaters: **Core**, **GU
 **Ownership & Boundaries:**
 - The Core may use QtCore (QObject/signals, QTimer, QByteArray, QString). It cannot have any Qt GUI, Quick, QML or scene-graph dependencies.
 - **`marketdata` / `coinbase`:** Owns the exchange connections and feed parsing (`MarketDataCoreEngine`).
-- **`servermodel`:** Owns the central state of the server. It aggregates journal-fed trades into candles via `TimeframeAggregator`, retains execution history for the independent trade-overlay publisher, and serves recording chunks and raw live tails.
+- **`servermodel`:** Owns the central state of the server. It aggregates journal-fed trades into candles via `TimeframeAggregator` (100 ms and 1 s windows are rebuilt from the journal by the roller worker at startup and installed once, `roller/CandleRestore`), retains execution history for the independent trade-overlay publisher, and serves recording chunks and raw live tails.
 - **`roller`:** Offline RAWL2 v1/v2 reading, shared journal feed parsing, daily product grids and deterministic BookRecorder driving/checkpoints. Capture owns the exchange connections; both live serving and batch conversion consume its journal. See [ROLLER.md](ROLLER.md).
 - **`heatmap`:** GUI-independent sparse heatmap model (`SparseColumns`, `TimeComposer`, `binCell`/`binColumn` CPU reference, `ChunkCodec`, `HeatmapResolution`); see "Sparse heatmap core model" below.
 - **`network` / `protocol`:** Owns the client-server websocket communication (`SentinelStreamClient`, `SentinelStreamServer`). See `docs/SENTINEL_STREAM_CLIENT.md` for the stream client’s role in prepping render objects.
