@@ -97,7 +97,9 @@ struct ShadowConfig {
   // within 20 s of its last forwarded one, so the minimum stays above that in
   // production. Grace: after a wait begins and after each connection change
   // (a new connection normally starts with a snapshot). Live window: the
-  // newest record at the live tip must be this recent. Installed defaults,
+  // newest durable record at the live tip must be this recent; keep it below
+  // the grace, or a connection change's own record counts as activity once
+  // the grace ends. Installed defaults,
   // not server config.
   std::chrono::milliseconds resnapshotRetryMin{30000},
       resnapshotRetryMax{600000}, resnapshotReset{60000},

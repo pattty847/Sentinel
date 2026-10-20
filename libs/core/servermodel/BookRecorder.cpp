@@ -1031,7 +1031,10 @@ struct BookRecorder::Impl {
             if (s.oneSidedSince < 0) {
                 s.oneSidedSince = s.clock;
                 sLog_Data("BookRecorder: one-sided book symbol=" << m.symbol()
-                                                                << " empty=" << (s.bids.empty() ? "bid" : "ask")
+                                                                << " empty="
+                                                                << (s.bids.empty() && s.asks.empty() ? "both"
+                                                                    : s.bids.empty()                ? "bid"
+                                                                                                    : "ask")
                                                                 << " time=" << s.clock);
             }
         } else {

@@ -209,6 +209,7 @@ struct ShadowTest : testing::Test {
   }
   // Fan-out "resnapshot" requests (capture reconnects); the roller sends none.
   std::atomic<int> resnapshots{0};
+  std::atomic<size_t> appliedAtFirstResnapshot{0};
   void startFanout(size_t ringBytes = 32 * 1024 * 1024,
                    size_t clientBytes = 16 * 1024 * 1024) {
     capture::FanoutConfig c;
@@ -218,7 +219,10 @@ struct ShadowTest : testing::Test {
     fanoutMetrics = std::make_unique<metrics::MetricsRegistry>();
     fanout = std::make_unique<capture::CaptureFanout>(
         c, std::vector{Product}, *fanoutMetrics,
-        [this](const auto &) { ++resnapshots; });
+        [this](const auto &) {
+          if (resnapshots++ == 0)
+            appliedAtFirstResnapshot = count();
+        });
   }
   void startWriter() {
     capture::WriterConfig c;
@@ -1329,6 +1333,8 @@ TEST_F(ShadowTest, ServingReplayThatEndsSelfInvalidRequestsResnapshotAtTheTip) {
   start();
   int64_t ms = 72000;
   ASSERT_TRUE(pumpUntil(*this, ms, [&] { return resnapshots.load() == 1; }));
+  // Asked from the live tip: the whole durable prefix was applied first.
+  EXPECT_GE(appliedAtFirstResnapshot.load(), 73u);
   EXPECT_EQ(resnapshotRequests(*this), 1); // next retry after 30 s
   shadow.reset();
   writer->close();
@@ -1435,6 +1441,10 @@ TEST_F(ShadowTest, ServingRestartAfterTransportUpWaitsForTheReconnectSnapshot) {
   ASSERT_TRUE(eventually([&] { return resnapshotWaiting(*this) == 1; }));
   EXPECT_LE(count(), 1u); // restored at or just before the TransportUp
   int64_t ms = 905000;
+  // Live and waiting for 1 s (four polls): the grace, not the live window,
+  // holds the request.
+  EXPECT_FALSE(pumpFor(*this, ms, 1s, [&] { return resnapshots.load() != 0; }, 2));
+  EXPECT_EQ(resnapshotRequests(*this), 0);
   writer->append(recordOn(ms += 1000, 2, snapshot()));
   writer->flush();
   ASSERT_TRUE(pumpUntil(*this, ms, [&] { return resnapshotWaiting(*this) == 0; }, 8s, 2));
@@ -1469,6 +1479,47 @@ TEST_F(ShadowTest, ServingRetryWaitsForTheGraceAfterAReconnect) {
   ASSERT_TRUE(pumpUntil(*this, ms, [&] { return resnapshotWaiting(*this) == 0; }, 8s, 2));
   EXPECT_FALSE(pumpFor(*this, ms, 1500ms, [&] { return resnapshotRequests(*this) != 1; }, 2));
   EXPECT_EQ(resnapshots.load(), 1);
+  shadow.reset();
+  writer->close();
+}
+// r3: the new connection's TransportUp and records reach the roller
+// provisionally (published, not yet durable) after a retry fell due. They are
+// no activity evidence: the connection change is seen only with durability, so
+// no command goes out before it, and the grace then starts from it.
+TEST_F(ShadowTest, ServingRetryIgnoresProvisionalRecordsOfANewConnection) {
+  serve();
+  cfg.resnapshotRetryMin = 300ms;
+  cfg.resnapshotRetryMax = 300ms;
+  cfg.resnapshotGrace = 1000ms;
+  cfg.resnapshotLiveWindow = 600ms; // below the grace, as in production
+  initial();
+  start();
+  ASSERT_TRUE(eventually([&] { return count() == 64; }));
+  oneSidedJournal(*this);
+  int64_t ms = 72000;
+  ASSERT_TRUE(pumpUntil(*this, ms, [&] { return resnapshotRequests(*this) == 1; }));
+  writer->append(recordOn(ms += 1000, 1, "{}", capture::Kind::TransportDown));
+  writer->flush();
+  std::this_thread::sleep_for(1200ms); // retry due; grace and window lapsed
+  const auto applied = count();
+  // Provisional only: append publishes to the fan-out, flush makes durable.
+  // One steady stamp keeps the writer's 1 s block interval from closing it.
+  const auto frozen = capture::Stamp::now().steadyNs;
+  const auto provisional = [&](capture::Record r) {
+    r.time.steadyNs = frozen;
+    writer->append(r);
+  };
+  provisional(recordOn(ms += 1000, 2, "{}", capture::Kind::TransportUp));
+  for (int i = 0; i < 12; ++i) { // 1.2 s: several polls
+    provisional(recordOn(ms += 1000, 2));
+    std::this_thread::sleep_for(100ms);
+    EXPECT_EQ(resnapshotRequests(*this), 1) << "poll " << i;
+  }
+  EXPECT_EQ(count(), applied); // nothing became durable
+  const auto durableAt = std::chrono::steady_clock::now();
+  writer->flush();
+  ASSERT_TRUE(pumpUntil(*this, ms, [&] { return resnapshotRequests(*this) == 2; }, 8s, 2));
+  EXPECT_GE(std::chrono::steady_clock::now() - durableAt, 1000ms);
   shadow.reset();
   writer->close();
 }

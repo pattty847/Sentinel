@@ -137,8 +137,10 @@ these hold: the day's history recorder reports a wait
 usable snapshot"); 10 s have passed since both the wait began and the newest
 connection change in the history feed (TransportUp, TransportDown/CaptureStopped,
 a new run or connection id, a journal boundary, including after a damaged block);
-a record for P arrived at the live tip within the last 5 s (a down or
-reconnecting product sends none, and capture's engine would ignore the request);
+the history feed applied a durable record for P at the live tip within the last
+5 s, the same ordered stream that reports connection changes (activity evidence
+only, not proof that the connection is ready: a down or reconnecting product
+journals none, and capture's engine would ignore the request);
 and the backoff deadline passed. The wait's provenance (the recorder's own
 invalidation such as `one-sided book`, an anchor imported invalid, or an
 upstream/journal invalidation) is logged but does not change the timing. Only an

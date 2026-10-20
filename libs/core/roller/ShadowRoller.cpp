@@ -566,6 +566,7 @@ class Resnapshots {
   Clock::time_point lastPoll{};
   std::string reason;
   unsigned attempts = 0;
+  bool live = false; // LiveSource is at the live tip
 
 public:
   Resnapshots(const ShadowConfig &c, std::string p, metrics::Counter &r,
@@ -575,9 +576,19 @@ public:
                 c.resnapshotGrace, c.resnapshotLiveWindow}) {}
   void attach(recording::BookRecorder *h) { history = h; }
   void connectionChanged() { policy.connectionChanged(Clock::now()); }
-  void frame() { policy.frame(Clock::now()); }
+  // Activity evidence: a durable record the history feed applied while the
+  // source is live, the same ordered stream that reports connection changes
+  // (a provisional record can precede its connection change by ~1 s).
+  void applied() {
+    if (live)
+      policy.frame(Clock::now());
+  }
+  void online() { live = true; }
   // Leaving the live tip: publish "not waiting"; the policy keeps its state.
-  void offline() { waiting.set(0); }
+  void offline() {
+    live = false;
+    waiting.set(0);
+  }
   // The command to write now, if one is due. Polls at most every 250 ms.
   std::optional<std::string> due() {
     const auto now = Clock::now();
@@ -743,8 +754,6 @@ class LiveSource {
         lead->apply(pending.back());
       if (tap)
         tap->apply(pending.back());
-      if (resnapshots && live)
-        resnapshots->frame();
     } else {
       if (!raw.empty())
         throw std::runtime_error("fanout control with raw suffix");
@@ -771,6 +780,7 @@ class LiveSource {
   void requestResnapshot() {
     if (!resnapshots || !live)
       return;
+    resnapshots->online();
     const auto command = resnapshots->due();
     if (!command)
       return;
@@ -1532,6 +1542,8 @@ struct ShadowRoller::Impl {
           return true;
         };
         o.onApplied = [&](const JournalRecord &input) {
+          if (resnapshots)
+            resnapshots->applied();
           if (tap.enabled())
             tap.durableApplied(input);
           p.last->store(input.record.time.systemNs / 1000000);
