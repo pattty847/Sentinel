@@ -1,4 +1,5 @@
 #include "roller/Roller.hpp"
+#include "roller/ResnapshotPolicy.hpp"
 #include "marketdata/dispatch/BookParser.hpp"
 #include "legacy_v2_fixture.hpp"
 #include <gtest/gtest.h>
@@ -621,4 +622,68 @@ TEST(Roller, CapturedHourBoundaryWaitsForCommittedWatermark) {
     const auto checkpoint=contents(o.outputRoot/"BTC-USD"/"roller.json");
     EXPECT_EQ(roll(o)["columnsWritten"],0);
     EXPECT_EQ(files(o.outputRoot),before);EXPECT_EQ(contents(o.outputRoot/"BTC-USD"/"roller.json"),checkpoint);
+}
+
+// FM-121 request timing, on an injected clock.
+namespace {
+using Policy = ResnapshotPolicy;
+using Wait = Policy::Wait;
+using Act = Policy::Action;
+using namespace std::chrono_literals;
+const Policy::Clock::time_point T0{std::chrono::hours(1)};
+} // namespace
+TEST(ResnapshotPolicy, RecorderWaitIsDueAtOnceAndForwardedRepliesDoubleTheDelay) {
+    Policy p({1s, 4s, 60s, 10s});
+    EXPECT_EQ(p.poll(T0, Wait::Recorder, true), Act::Request);
+    EXPECT_EQ(p.retryDelay(), 1s);
+    EXPECT_EQ(p.poll(T0 + 999ms, Wait::Recorder, true), Act::None);
+    p.forwarded(); // 2 s for the request after next
+    EXPECT_EQ(p.poll(T0 + 1s, Wait::Recorder, true), Act::Request);
+    p.forwarded(); // 4 s
+    EXPECT_EQ(p.poll(T0 + 2999ms, Wait::Recorder, true), Act::None);
+    EXPECT_EQ(p.poll(T0 + 3s, Wait::Recorder, true), Act::Request);
+    p.forwarded(); // capped at 4 s
+    EXPECT_EQ(p.retryDelay(), 4s);
+    EXPECT_EQ(p.poll(T0 + 6999ms, Wait::Recorder, true), Act::None);
+    // A refused reply keeps the delay.
+    EXPECT_EQ(p.poll(T0 + 7s, Wait::Recorder, true), Act::Request);
+    EXPECT_EQ(p.poll(T0 + 10999ms, Wait::Recorder, true), Act::None);
+    EXPECT_EQ(p.poll(T0 + 11s, Wait::Recorder, true), Act::Request);
+}
+// After a long backoff and a recovery longer than `reset`, a new episode asks
+// at once; a short recovery keeps the pending deadline.
+TEST(ResnapshotPolicy, HealthyResetClearsThePendingDeadline) {
+    Policy p({30s, 600s, 60s, 10s});
+    auto t = T0;
+    for (int i = 0; i < 6; ++i) { // 30, 60, ... 600 s
+        ASSERT_EQ(p.poll(t, Wait::Recorder, true), Act::Request);
+        t += p.retryDelay();
+        p.forwarded();
+    }
+    ASSERT_EQ(p.poll(t, Wait::Recorder, true), Act::Request); // next at t + 600 s
+    EXPECT_EQ(p.retryDelay(), 600s);
+    EXPECT_EQ(p.poll(t + 1s, Wait::None, true), Act::Satisfied);
+    EXPECT_TRUE(!p.waiting());
+    // Short recovery: backoff and deadline stay.
+    EXPECT_EQ(p.poll(t + 30s, Wait::Recorder, true), Act::None);
+    EXPECT_EQ(p.poll(t + 31s, Wait::None, true), Act::Satisfied);
+    EXPECT_EQ(p.poll(t + 91s, Wait::None, true), Act::None); // 60 s valid: reset
+    EXPECT_EQ(p.poll(t + 92s, Wait::Recorder, true), Act::Request);
+    EXPECT_EQ(p.retryDelay(), 30s);
+}
+TEST(ResnapshotPolicy, UpstreamWaitWaitsForTheGraceWithTheTransportUp) {
+    Policy p({1s, 4s, 60s, 10s});
+    EXPECT_EQ(p.poll(T0, Wait::Upstream, true), Act::None);
+    EXPECT_TRUE(p.waiting());
+    EXPECT_EQ(p.poll(T0 + 9999ms, Wait::Upstream, true), Act::None);
+    p.transportChanged(); // a reconnect restarts the grace
+    EXPECT_EQ(p.poll(T0 + 10s, Wait::Upstream, false), Act::None); // down: capture reconnects
+    p.transportChanged();
+    EXPECT_EQ(p.poll(T0 + 20s, Wait::Upstream, true), Act::None);
+    EXPECT_EQ(p.poll(T0 + 29999ms, Wait::Upstream, true), Act::None);
+    EXPECT_EQ(p.poll(T0 + 30s, Wait::Upstream, true), Act::Request);
+    // A recorder wait never waits for the grace, but never asks while down.
+    Policy q({1s, 4s, 60s, 10s});
+    EXPECT_EQ(q.poll(T0, Wait::Recorder, false), Act::None);
+    EXPECT_EQ(q.poll(T0 + 1ms, Wait::Recorder, true), Act::Request);
 }

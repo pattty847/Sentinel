@@ -1,5 +1,6 @@
 #include "ShadowRoller.hpp"
 #include "CandleRestore.hpp"
+#include "ResnapshotPolicy.hpp"
 #include "SentinelLogging.hpp"
 #include "capture/CaptureFanout.hpp"
 #include <QDir>
@@ -546,72 +547,79 @@ public:
     report();
   }
 };
-// Serving path only, roller worker thread only (FM-121). While the day's
-// history recorder (the production column writer) reports a book that only a
-// fresh upstream snapshot can cure (BookRecorder::awaitingSnapshot), LiveSource
-// asks capture for one over its fan-out connection at the socket tip, never
-// during replay. The first request of an episode goes out at once (or when the
-// previous delay ends); every request schedules the next one after the current
-// delay, and a forwarded request doubles the delay up to resnapshotRetryMax.
-// A refused one (rate_limited, global_rate_limited, unavailable) keeps it.
-// The delay returns to resnapshotRetryMin once the book stayed valid for
-// resnapshotReset. History replays, the hourly oracle and shadow-only runs
-// construct no requester.
+// Serving path only, roller worker thread only (FM-121). LiveSource polls it
+// at the live socket tip, never during replay or a handshake, and writes the
+// command it returns on this product's fan-out connection. The decision is
+// ResnapshotPolicy's, from the day's history recorder (the production column
+// writer; none yet means no usable snapshot) and the history feed's transport
+// state. History replays, the hourly oracle and shadow-only runs construct no
+// requester.
 class Resnapshots {
-  using Clock = std::chrono::steady_clock;
-  const ShadowConfig &cfg;
+  using Clock = ResnapshotPolicy::Clock;
   const std::string product;
   metrics::Counter &requests;
+  metrics::Gauge &waiting;
+  ResnapshotPolicy policy;
   recording::BookRecorder *history = nullptr;
-  std::chrono::milliseconds delay;
-  Clock::time_point nextAt = Clock::time_point::min(), lastPoll{};
-  std::optional<Clock::time_point> validSince;
-  std::string reason; // non-empty while an episode is open
+  bool transportUp = true;
+  Clock::time_point lastPoll{};
+  std::string reason;
   unsigned attempts = 0;
 
 public:
-  Resnapshots(const ShadowConfig &c, std::string p, metrics::Counter &r)
-      : cfg(c), product(std::move(p)), requests(r),
-        delay(c.resnapshotRetryMin) {}
+  Resnapshots(const ShadowConfig &c, std::string p, metrics::Counter &r,
+              metrics::Gauge &w)
+      : product(std::move(p)), requests(r), waiting(w),
+        policy({c.resnapshotRetryMin, c.resnapshotRetryMax, c.resnapshotReset,
+                c.resnapshotUpstreamGrace}) {}
   void attach(recording::BookRecorder *h) { history = h; }
-  // The command to write now, if one is due. Polls the recorder at most
-  // every 250 ms.
+  // The history feed's connection state (journal transport records, anchor).
+  void transport(bool up) {
+    if (std::exchange(transportUp, up) != up)
+      policy.transportChanged();
+  }
+  // The command to write now, if one is due. Polls at most every 250 ms.
   std::optional<std::string> due() {
     const auto now = Clock::now();
     if (now - lastPoll < std::chrono::milliseconds(250))
       return std::nullopt;
     lastPoll = now;
-    auto awaiting = history ? history->awaitingSnapshot(product) : std::string{};
-    if (awaiting.empty()) {
-      if (!reason.empty())
-        sLog_Data("Recording resnapshot satisfied: symbol="
-                  << product << " requests=" << attempts);
-      reason.clear();
-      if (!validSince)
-        validSince = now;
-      else if (now - *validSince >= cfg.resnapshotReset)
-        delay = cfg.resnapshotRetryMin;
-      return std::nullopt;
-    }
-    validSince.reset();
-    if (reason.empty())
+    auto wait = history ? history->snapshotWait(product)
+                        : recording::BookRecorder::SnapshotWait{
+                              "no usable snapshot", true};
+    const auto kind = wait.reason.empty() ? ResnapshotPolicy::Wait::None
+                      : wait.upstream     ? ResnapshotPolicy::Wait::Upstream
+                                          : ResnapshotPolicy::Wait::Recorder;
+    if (kind != ResnapshotPolicy::Wait::None && !policy.waiting())
       attempts = 0;
-    reason = std::move(awaiting);
-    if (now < nextAt)
+    const auto action = policy.poll(now, kind, transportUp);
+    waiting.set(policy.waiting() ? 1 : 0);
+    if (action == ResnapshotPolicy::Action::Satisfied && attempts)
+      sLog_Data("Recording resnapshot satisfied: symbol="
+                << product << " requests=" << attempts);
+    if (action != ResnapshotPolicy::Action::Request)
       return std::nullopt;
-    nextAt = now + delay;
+    reason = std::move(wait.reason);
+    return json({{"type", "resnapshot"}, {"product", product}}).dump() + "\n";
+  }
+  // After the write of the command due() returned.
+  void sent(bool ok, const QString &error) {
+    if (!ok) {
+      sLog_Warning("Recording resnapshot request write failed symbol="
+                   << product << " error=" << error.toStdString());
+      return;
+    }
     ++attempts;
     requests.inc();
     sLog_Warning("Recording resnapshot request: symbol="
                  << product << " reason=" << reason << " attempt=" << attempts
-                 << " nextRetryMs=" << delay.count());
-    return json({{"type", "resnapshot"}, {"product", product}}).dump() + "\n";
+                 << " nextRetryMs=" << policy.retryDelay().count());
   }
   void reply(const std::string &status) {
     sLog_Data("Recording resnapshot reply: symbol=" << product
                                                     << " status=" << status);
     if (status == "forwarded")
-      delay = std::min(cfg.resnapshotRetryMax, delay * 2);
+      policy.forwarded();
   }
 };
 // A bounded synchronous socket, owned by this product's worker only. Timeouts
@@ -766,11 +774,10 @@ class LiveSource {
     const auto command = resnapshots->due();
     if (!command)
       return;
-    if (socket.write(command->data(), command->size()) !=
-            qint64(command->size()) ||
-        !socket.waitForBytesWritten(1000))
-      sLog_Warning("Recording resnapshot request write failed symbol="
-                   << product << " error=" << socket.errorString().toStdString());
+    const bool ok = socket.write(command->data(), command->size()) ==
+                        qint64(command->size()) &&
+                    socket.waitForBytesWritten(1000);
+    resnapshots->sent(ok, socket.errorString());
   }
   void discardProvisional() {
     live = false;
@@ -1092,6 +1099,7 @@ struct ShadowRoller::Impl {
         *leadForks, *invalidations, *writeErrors;
     metrics::Counter *minuteColumns = nullptr;
     metrics::Counter *resnapshotRequests = nullptr; // serving only
+    metrics::Gauge *resnapshotWaiting = nullptr;    // serving only
     metrics::Counter *candleRestoreFailures = nullptr,
                      *candleRestorePartial = nullptr;
     bool refused = false;
@@ -1164,8 +1172,13 @@ struct ShadowRoller::Impl {
             "Minute columns the serving roller committed across products and layers.");
         p->resnapshotRequests = &registry.counter(
             "sentinel_recorder_resnapshot_requests_total",
-            "Capture resnapshot commands the serving roller sent for a book "
-            "only a fresh snapshot can cure.",
+            "Capture resnapshot commands the serving roller wrote to its "
+            "fan-out connection for a history book that waits for a snapshot.",
+            labels);
+        p->resnapshotWaiting = &registry.gauge(
+            "sentinel_recorder_resnapshot_waiting",
+            "1 while the serving roller is live at the socket tip and its "
+            "history book waits for a snapshot.",
             labels);
       }
       p->cooldown = &registry.gauge(
@@ -1365,7 +1378,8 @@ struct ShadowRoller::Impl {
         cfg.failureCooldown < cfg.retryMax ||
         cfg.resnapshotRetryMin.count() <= 0 ||
         cfg.resnapshotRetryMax < cfg.resnapshotRetryMin ||
-        cfg.resnapshotReset.count() < 0)
+        cfg.resnapshotReset.count() < 0 ||
+        cfg.resnapshotUpstreamGrace.count() < 0)
       throw std::runtime_error("invalid shadow retry/comparison interval");
   }
   void run(Product &p) noexcept {
@@ -1380,7 +1394,8 @@ struct ShadowRoller::Impl {
     ModelTap tap(cfg, p.name, p.reseed);
     std::optional<Resnapshots> resnapshots;
     if (p.resnapshotRequests)
-      resnapshots.emplace(cfg, p.name, *p.resnapshotRequests);
+      resnapshots.emplace(cfg, p.name, *p.resnapshotRequests,
+                          *p.resnapshotWaiting);
     const auto retry = [&](const std::string &reason) {
       if (tap.enabled())
         tap.drop(reason);
@@ -1478,12 +1493,25 @@ struct ShadowRoller::Impl {
           if (!h && !f)
             tap.detach();
         };
-        if (tap.enabled())
-          o.onFeed = [&](JournalFeed &f) { tap.observe(f); };
+        if (tap.enabled() || resnapshots)
+          o.onFeed = [&](JournalFeed &f) {
+            if (tap.enabled())
+              tap.observe(f);
+            if (!resnapshots)
+              return;
+            resnapshots->transport(true); // a new day's feed, as ModelTap
+            f.onConnection = [next = std::move(f.onConnection),
+                              r = &*resnapshots](bool up) {
+              if (next)
+                next(up);
+              r->transport(up);
+            };
+          };
         o.anchorAllowed = [&](const JournalPos& pos) { return source.anchorAllowed(pos); };
         o.onAnchorRestore = [&](const JournalPos& pos, const JournalBook& book, bool up, bool cursorApplied, int64_t receiveMs) {
           source.restoreAnchor(pos,cursorApplied);
           if (tap.enabled()) tap.restoreAnchor(book,up);
+          if (resnapshots) resnapshots->transport(up);
           p.last->store(receiveMs);
           p.running->set(1);
         };

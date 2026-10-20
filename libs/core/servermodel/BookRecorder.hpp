@@ -97,14 +97,19 @@ class BookRecorder {
     Stats stats() const;
     // Safe to query from chunk workers; one cutoff per persisted native level.
     Watermarks watermarks(const std::string &symbol, const std::string &layer) const;
-    // Thread-safe. Non-empty (the invalidation reason) while the symbol's book is
-    // invalid and only a fresh upstream snapshot can cure it: a recorder
-    // self-invalidation (one-sided book, malformed L2, row size overflow,
-    // unrepresentable or missing two-sided mid, invalid timestamp, worker
-    // exception) or a book that importState() installed invalid. onInvalid
-    // (transport and journal boundaries, which a snapshot follows) never sets
-    // it; only an accepted snapshot clears it. Reflects processed messages.
-    std::string awaitingSnapshot(const std::string &symbol) const;
+    // Why the symbol's invalidated book waits for a snapshot; empty reason while
+    // valid (or never invalidated). upstream: every invalidation since the last
+    // accepted snapshot came through onInvalid (transport or journal boundary).
+    // A recorder self-invalidation (one-sided book, malformed L2, row size
+    // overflow, unrepresentable or missing two-sided mid, invalid timestamp,
+    // worker exception) or a book importState() installed invalid sets
+    // upstream=false, and a later onInvalid keeps it. Only an accepted snapshot
+    // clears it. Thread-safe; reflects processed messages.
+    struct SnapshotWait {
+        std::string reason;
+        bool upstream = false;
+    };
+    SnapshotWait snapshotWait(const std::string &symbol) const;
     // Waits for all preceding enqueues and disk writes, without advancing time.
     void drainForTest();
 

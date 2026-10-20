@@ -1244,6 +1244,10 @@ double resnapshotRequests(ShadowTest &t) {
   return t.counter("sentinel_recorder_resnapshot_requests_total{product=\"" +
                    Product + "\"}");
 }
+double resnapshotWaiting(ShadowTest &t) {
+  return t.counter("sentinel_recorder_resnapshot_waiting{product=\"" +
+                   Product + "\"}");
+}
 TEST_F(ShadowTest, ServingRollerRequestsResnapshotForSelfInvalidBook) {
   serve();
   cfg.resnapshotRetryMin = 100ms;
@@ -1252,6 +1256,7 @@ TEST_F(ShadowTest, ServingRollerRequestsResnapshotForSelfInvalidBook) {
   start();
   ASSERT_TRUE(eventually([&] { return count() == 64; }));
   EXPECT_EQ(resnapshotRequests(*this), 0);
+  EXPECT_EQ(resnapshotWaiting(*this), 0);
   oneSidedJournal(*this);
   ASSERT_TRUE(eventually([&] { return count() == 73; }));
   // Capture forwards one request per product per 20 s; the roller keeps
@@ -1267,7 +1272,8 @@ TEST_F(ShadowTest, ServingRollerRequestsResnapshotForSelfInvalidBook) {
   writer->append(record(74000));
   writer->flush();
   ASSERT_TRUE(eventually([&] { return count() == 75; }));
-  std::this_thread::sleep_for(600ms);
+  // Fence: the requester saw the recorder accept the snapshot.
+  ASSERT_TRUE(eventually([&] { return resnapshotWaiting(*this) == 0; }));
   const auto settled = resnapshotRequests(*this);
   std::this_thread::sleep_for(1s); // five retry delays
   EXPECT_EQ(resnapshotRequests(*this), settled);
@@ -1288,7 +1294,71 @@ TEST_F(ShadowTest, ServingReplayThatEndsSelfInvalidRequestsResnapshotAtTheTip) {
   shadow.reset();
   writer->close();
 }
-// Shadow-only runs never write production columns and never ask capture.
+namespace {
+// A raw-CRC flip in one block, its header re-checksummed (test_corrupt_blocks).
+void corruptBlock(const fs::path &p, const capture::BlockIndex &block) {
+  std::string b;
+  {
+    std::ifstream in(p, std::ios::binary);
+    b.assign(std::istreambuf_iterator<char>(in), {});
+  }
+  b[block.offset + 40] ^= 1;
+  const uint32_t crc = sentinel::crc32(reinterpret_cast<const uint8_t *>(b.data() + block.offset), 44);
+  for (int i = 0; i < 4; ++i)
+    b[block.offset + 44 + i] = static_cast<char>(crc >> (8 * i));
+  std::ofstream out(p, std::ios::binary);
+  out.write(b.data(), b.size());
+}
+}
+// Journal-local loss: a damaged block makes the reader report a gap, the feed
+// drops continuity, and the healthy capture connection never resends a
+// snapshot. After the upstream grace the serving roller asks.
+TEST_F(ShadowTest, ServingRollerRequestsResnapshotAfterJournalGapWithoutSnapshot) {
+  serve();
+  cfg.resnapshotUpstreamGrace = 200ms;
+  writer->append(record(0, snapshot()));
+  writer->flush();
+  for (int t = 1; t <= 63; ++t) {
+    writer->append(record(t * 1000, offer(std::to_string(100100 + t), "1")));
+    writer->flush();
+  }
+  const fs::path sealed = writer->currentPath().toStdString();
+  writer->sealSegment();
+  for (int t = 64; t <= 70; ++t)
+    writer->append(record(t * 1000));
+  writer->flush();
+  const auto scan = capture::scan(QString::fromStdString(sealed.string()));
+  ASSERT_GT(scan.index.size(), 40u);
+  corruptBlock(sealed, scan.index[30]);
+  start();
+  ASSERT_TRUE(eventually([&] { return resnapshots.load() == 1; }));
+  EXPECT_EQ(resnapshotRequests(*this), 1);
+  EXPECT_EQ(resnapshotWaiting(*this), 1);
+  shadow.reset();
+  writer->close();
+}
+// No usable snapshot since the replay start (the first one has asks only), so
+// no history recorder exists; updates keep flowing on the same connection.
+TEST_F(ShadowTest, ServingRollerRequestsResnapshotWithoutAUsableFirstSnapshot) {
+  serve();
+  cfg.resnapshotUpstreamGrace = 200ms;
+  writer->append(record(0, json({{"channel", "l2_data"},
+      {"events", json::array({{{"type", "snapshot"}, {"product_id", Product},
+          {"updates", json::array({{{"side", "offer"}, {"price_level", "100001"},
+                                    {"new_quantity", "3"}}})}}})}}).dump()));
+  for (int t = 1; t <= 20; ++t)
+    writer->append(record(t * 1000, offer(std::to_string(100100 + t), "1")));
+  writer->flush();
+  start();
+  ASSERT_TRUE(eventually([&] { return resnapshots.load() == 1; }));
+  EXPECT_EQ(count(), 21);
+  EXPECT_EQ(resnapshotRequests(*this), 1);
+  shadow.reset();
+  writer->close();
+}
+// Shadow-only runs never write production columns and never ask capture. The
+// same journal makes the serving roller ask (the tests above): this guards the
+// serving gate, so it can fail only against code that asks.
 TEST_F(ShadowTest, ShadowOnlyRollerNeverRequestsResnapshot) {
   cfg.resnapshotRetryMin = 100ms;
   cfg.resnapshotRetryMax = 200ms;
@@ -3694,20 +3764,6 @@ void expectRecorderMatchesBatch(ShadowTest &t, JournalServer &s, int64_t require
       }
     EXPECT_FALSE(anchorProblems(served, broken, boundary, requiredMs).empty()) << (drop ? "drop" : "alter");
   }
-}
-// A raw-CRC flip in one block, its header re-checksummed (test_corrupt_blocks).
-void corruptBlock(const fs::path &p, const capture::BlockIndex &block) {
-  std::string b;
-  {
-    std::ifstream in(p, std::ios::binary);
-    b.assign(std::istreambuf_iterator<char>(in), {});
-  }
-  b[block.offset + 40] ^= 1;
-  const uint32_t crc = sentinel::crc32(reinterpret_cast<const uint8_t *>(b.data() + block.offset), 44);
-  for (int i = 0; i < 4; ++i)
-    b[block.offset + 44 + i] = static_cast<char>(crc >> (8 * i));
-  std::ofstream out(p, std::ios::binary);
-  out.write(b.data(), b.size());
 }
 } // namespace
 
