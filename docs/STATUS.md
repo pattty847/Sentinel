@@ -31,7 +31,8 @@ Pre-land evidence for chart slices: native `SENTINEL_REQUIRE_GPU=1` run of Chart
 
 ## Services (owner's Mac, launchd)
 
-- **Recorder/server:** slice E build `96e4f2f`, pid 37884, deployed 2026-10-12. **Do not roll back** with `deploy-runtime.sh rollback server`: older binaries do not match main's `config/server_config.yaml`; fix forward.
+- **Recorder/server:** build `2adbf88f`, pid 60222, restarted 2026-10-20 12:27 EDT (same binary) for the ETH/SOL stall. **Do not roll back** with `deploy-runtime.sh rollback server`: older binaries do not match main's `config/server_config.yaml`; fix forward.
+- **Incident 2026-10-20:** ETH-USD and SOL-USD bid sides went empty in the journal at 12:18:28 EDT (both connections within 0.6 s, as on 2026-10-08); BookRecorder invalidated both (`one-sided book`) and nothing requested a snapshot (wiring lost in D-b2b `28c933c4`). A server restart replays into the same invalidation. Recovered 12:33 by a manual fanout `resnapshot` for each product; columns 12:18-12:33 are invalid. Fix writer: `lt-claude/recorder-resnapshot` (Opus subagent, HIGH; reviewer gpt-6-astra high).
 - **Capture** deployed 2026-10-03; 7 products; fan-out to the server. Rollback: `deploy-runtime.sh rollback capture`.
 - **Monitoring:** VictoriaMetrics :8428, Grafana :3000 (A1b "live feed down" on `sentinel_live_feed_up`), shared on the tailnet only: `https://patricks-mac-mini.taildf7d06.ts.net:3000` (`tailscale serve`, anonymous Viewer; off: `tailscale serve --https=3000 off`). Public Funnel is off (owner 2026-10-13). GUI host :17190.
 - **Shadow self-check (incremental, owner: keep it):** hourly checks roll only the new hour; a fresh midnight replay only for 00Z and after an oracle reset. Oracle at `hmc2/shadow-oracle/<product>/<dayMs>` (~19 MB/hour, ~450 MB at 23Z; current day only; exclude from backups). `Shadow oracle reset` in the server log means a reset happened.
