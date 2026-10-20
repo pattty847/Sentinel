@@ -220,8 +220,11 @@ struct ShadowTest : testing::Test {
     fanout = std::make_unique<capture::CaptureFanout>(
         c, std::vector{Product}, *fanoutMetrics,
         [this](const auto &) {
-          if (resnapshots++ == 0)
-            appliedAtFirstResnapshot = count();
+          // Observe first, then publish the count the tests wait on.
+          const auto applied = count();
+          if (resnapshots.load() == 0)
+            appliedAtFirstResnapshot = applied;
+          ++resnapshots;
         });
   }
   void startWriter() {
@@ -1293,7 +1296,8 @@ TEST_F(ShadowTest, ServingRollerRequestsResnapshotForSelfInvalidBook) {
   serve();
   cfg.resnapshotRetryMin = 100ms;
   cfg.resnapshotRetryMax = 200ms;
-  cfg.resnapshotGrace = 200ms;
+  cfg.resnapshotGrace = 400ms;
+  cfg.resnapshotLiveWindow = 300ms;
   initial();
   start();
   ASSERT_TRUE(eventually([&] { return count() == 64; }));
@@ -1327,13 +1331,15 @@ TEST_F(ShadowTest, ServingRollerRequestsResnapshotForSelfInvalidBook) {
 // exists, so the request goes out once replay hands over to the live tip.
 TEST_F(ShadowTest, ServingReplayThatEndsSelfInvalidRequestsResnapshotAtTheTip) {
   serve();
-  cfg.resnapshotGrace = 200ms;
+  cfg.resnapshotGrace = 400ms;
+  cfg.resnapshotLiveWindow = 300ms;
   initial();
   oneSidedJournal(*this);
   start();
   int64_t ms = 72000;
   ASSERT_TRUE(pumpUntil(*this, ms, [&] { return resnapshots.load() == 1; }));
-  // Asked from the live tip: the whole durable prefix was applied first.
+  // Coarse smoke check only (the fixture holds no socket during replay, so
+  // this cannot prove the live-tip gate): the prefix was applied by then.
   EXPECT_GE(appliedAtFirstResnapshot.load(), 73u);
   EXPECT_EQ(resnapshotRequests(*this), 1); // next retry after 30 s
   shadow.reset();
@@ -1367,7 +1373,8 @@ void corruptOrdinal(const fs::path &p, uint64_t ordinal) {
 // snapshot. After the grace the serving roller asks.
 TEST_F(ShadowTest, ServingRollerRequestsResnapshotAfterJournalGapWithoutSnapshot) {
   serve();
-  cfg.resnapshotGrace = 200ms;
+  cfg.resnapshotGrace = 400ms;
+  cfg.resnapshotLiveWindow = 300ms;
   writer->append(record(0, snapshot()));
   writer->flush();
   for (int t = 1; t <= 63; ++t) {
@@ -1395,7 +1402,8 @@ TEST_F(ShadowTest, ServingRollerRequestsResnapshotAfterJournalGapWithoutSnapshot
 // event is ever seen, yet the product is live: the roller asks.
 TEST_F(ShadowTest, ServingRollerRequestsResnapshotWhenTheNewConnectionsUpIsLost) {
   serve();
-  cfg.resnapshotGrace = 200ms;
+  cfg.resnapshotGrace = 400ms;
+  cfg.resnapshotLiveWindow = 300ms;
   writer->append(record(0, snapshot()));
   writer->flush();
   for (int t = 1; t <= 20; ++t) {
@@ -1429,6 +1437,7 @@ TEST_F(ShadowTest, ServingRollerRequestsResnapshotWhenTheNewConnectionsUpIsLost)
 TEST_F(ShadowTest, ServingRestartAfterTransportUpWaitsForTheReconnectSnapshot) {
   serve();
   cfg.resnapshotGrace = 1500ms;
+  cfg.resnapshotLiveWindow = 300ms;
   writer->append(record(0, snapshot()));
   for (int t = 1; t <= 850; ++t)
     writer->append(record(t * 1000));
@@ -1523,10 +1532,66 @@ TEST_F(ShadowTest, ServingRetryIgnoresProvisionalRecordsOfANewConnection) {
   shadow.reset();
   writer->close();
 }
+// r4: recent durable activity of the old connection, no durable TransportDown,
+// and the new connection's TransportUp still provisional across the retry
+// deadline. No command until it is durable; the grace then restarts from it.
+TEST_F(ShadowTest, ServingRetryWaitsWhileANewConnectionIsProvisional) {
+  serve();
+  cfg.resnapshotRetryMin = 1500ms;
+  cfg.resnapshotRetryMax = 1500ms;
+  cfg.resnapshotGrace = 1000ms;
+  cfg.resnapshotLiveWindow = 600ms;
+  initial();
+  start();
+  ASSERT_TRUE(eventually([&] { return count() == 64; }));
+  oneSidedJournal(*this);
+  int64_t ms = 72000;
+  ASSERT_TRUE(pumpUntil(*this, ms, [&] { return resnapshotRequests(*this) == 1; }));
+  // Old connection, durable: activity stays eligible ~600 ms past the pump.
+  EXPECT_FALSE(pumpFor(*this, ms, 1200ms, [&] { return resnapshotRequests(*this) != 1; }));
+  const auto frozen = capture::Stamp::now().steadyNs;
+  const auto provisional = [&](capture::Record r) {
+    r.time.steadyNs = frozen; // keeps the writer's block open (not durable)
+    writer->append(r);
+  };
+  const auto applied = count();
+  provisional(recordOn(ms += 1000, 2, "{}", capture::Kind::TransportUp));
+  for (int i = 0; i < 15; ++i) { // 1.5 s: spans the retry deadline
+    provisional(recordOn(ms += 1000, 2));
+    std::this_thread::sleep_for(100ms);
+    EXPECT_EQ(resnapshotRequests(*this), 1) << "poll " << i;
+  }
+  EXPECT_EQ(count(), applied); // nothing became durable
+  const auto durableAt = std::chrono::steady_clock::now();
+  writer->flush();
+  ASSERT_TRUE(pumpUntil(*this, ms, [&] { return resnapshotRequests(*this) == 2; }, 8s, 2));
+  EXPECT_GE(std::chrono::steady_clock::now() - durableAt, 1000ms);
+  shadow.reset();
+  writer->close();
+}
+// The live window must be shorter than the grace, and the grace positive:
+// otherwise a connection change's own record is activity when its grace ends.
+TEST_F(ShadowTest, ResnapshotTimingRuleIsValidated) {
+  serve();
+  for (const auto &[grace, window] :
+       {std::pair{1000ms, 1000ms}, std::pair{1000ms, 2000ms},
+        std::pair{0ms, 1ms}}) {
+    cfg.resnapshotGrace = grace;
+    cfg.resnapshotLiveWindow = window;
+    start();
+    EXPECT_TRUE(eventually([&] {
+      return counter("sentinel_roller_shadow_setup_failures_total{product=\"" +
+                     Product + "\"}") >= 1;
+    })) << grace.count() << "/" << window.count();
+    EXPECT_FALSE(shadow->running(Product));
+    shadow.reset();
+  }
+}
 // r2 C: leaving the live tip publishes "not waiting"; the wait itself remains.
 TEST_F(ShadowTest, ResnapshotWaitingGaugeClearsWhenTheFanoutDisconnects) {
   serve();
-  cfg.resnapshotGrace = 200ms;
+  cfg.resnapshotGrace = 400ms;
+  cfg.resnapshotLiveWindow = 300ms;
   initial();
   start();
   ASSERT_TRUE(eventually([&] { return count() == 64; }));
@@ -1544,7 +1609,8 @@ TEST_F(ShadowTest, ResnapshotWaitingGaugeClearsWhenTheFanoutDisconnects) {
 // no history recorder exists; updates keep flowing on the same connection.
 TEST_F(ShadowTest, ServingRollerRequestsResnapshotWithoutAUsableFirstSnapshot) {
   serve();
-  cfg.resnapshotGrace = 200ms;
+  cfg.resnapshotGrace = 400ms;
+  cfg.resnapshotLiveWindow = 300ms;
   writer->append(record(0, json({{"channel", "l2_data"},
       {"events", json::array({{{"type", "snapshot"}, {"product_id", Product},
           {"updates", json::array({{{"side", "offer"}, {"price_level", "100001"},
@@ -1565,7 +1631,8 @@ TEST_F(ShadowTest, ServingRollerRequestsResnapshotWithoutAUsableFirstSnapshot) {
 TEST_F(ShadowTest, ShadowOnlyRollerNeverRequestsResnapshot) {
   cfg.resnapshotRetryMin = 100ms;
   cfg.resnapshotRetryMax = 200ms;
-  cfg.resnapshotGrace = 200ms;
+  cfg.resnapshotGrace = 400ms;
+  cfg.resnapshotLiveWindow = 300ms;
   initial();
   oneSidedJournal(*this);
   start();

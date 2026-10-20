@@ -648,6 +648,13 @@ class LiveSource {
   bool atTip = false;
   // Handshake done and durable replay finished: the source is live.
   bool live = false;
+  // Connection of the newest applied / received record (unknown after an
+  // anchor restore), and the newest received record that starts a capture
+  // connection transition: a lifecycle record, or a new connection or run.
+  // While it is still provisional no resnapshot is sent (O(1) per poll).
+  std::optional<std::pair<std::string, uint64_t>> appliedConnection,
+      receivedConnection;
+  std::optional<JournalPos> pendingTransition;
   std::function<void(const std::string &)> retry;
   LiveLead *lead;
   ModelTap *tap;
@@ -746,6 +753,17 @@ class LiveSource {
              (p.block == received->block + 1 && p.record == 0))))
         throw std::runtime_error("fanout discontinuity; resume journal");
       received = p;
+      {
+        const auto k = capture::Kind(kind);
+        const std::pair<std::string, uint64_t> connection{p.run,
+                                                          r.record.connection};
+        if (k == capture::Kind::TransportUp ||
+            k == capture::Kind::TransportDown ||
+            k == capture::Kind::CaptureStopped || !receivedConnection ||
+            *receivedConnection != connection)
+          pendingTransition = p;
+        receivedConnection = connection;
+      }
       pendingSize += raw.size();
       if (pendingSize > cfg.pendingBytes)
         throw std::runtime_error("shadow pending queue full");
@@ -777,10 +795,26 @@ class LiveSource {
   // Never during replay or a handshake: capture drops a client that asks
   // before it subscribed. A failed write is retried after the delay; the read
   // path detects a broken socket.
+  // A capture connection transition that history has not applied yet: the
+  // durable connection change (and its grace) is still to come.
+  bool transitionPending() {
+    if (!pendingTransition)
+      return false;
+    try {
+      if (applied && older(*pendingTransition, *applied)) {
+        pendingTransition.reset();
+        return false;
+      }
+    } catch (const std::exception &) {
+    }
+    return true;
+  }
   void requestResnapshot() {
     if (!resnapshots || !live)
       return;
     resnapshots->online();
+    if (transitionPending())
+      return;
     const auto command = resnapshots->due();
     if (!command)
       return;
@@ -796,6 +830,8 @@ class LiveSource {
     atTip = false;
     pending.clear();
     pendingSize = 0;
+    pendingTransition.reset();
+    receivedConnection = appliedConnection;
     if (lead)
       lead->discard();
   }
@@ -884,6 +920,7 @@ public:
   }
   void restoreAnchor(const JournalPos& p, bool cursorApplied) {
     if (!anchorAllowed(p)) throw std::runtime_error("anchor crosses durable handshake ceiling");
+    appliedConnection.reset();
     if (!cursorApplied) { applied.reset(); diskDone = false; return; }
     applied = p;
     diskDone = p == *diskTarget;
@@ -913,6 +950,7 @@ public:
         // next() is called again only after JournalFeed applied this record.
         // Retaining that state allows transport recovery without anchor replay.
         applied = out.pos;
+        appliedConnection.emplace(out.pos.run, out.record.connection);
         return true;
       } catch (const ShadowStopped &) {
         return false;
@@ -1393,8 +1431,9 @@ struct ShadowRoller::Impl {
         cfg.resnapshotRetryMin.count() <= 0 ||
         cfg.resnapshotRetryMax < cfg.resnapshotRetryMin ||
         cfg.resnapshotReset.count() < 0 ||
-        cfg.resnapshotGrace.count() < 0 ||
-        cfg.resnapshotLiveWindow.count() <= 0)
+        cfg.resnapshotGrace.count() <= 0 ||
+        cfg.resnapshotLiveWindow.count() <= 0 ||
+        cfg.resnapshotLiveWindow >= cfg.resnapshotGrace)
       throw std::runtime_error("invalid shadow retry/comparison interval");
   }
   void run(Product &p) noexcept {

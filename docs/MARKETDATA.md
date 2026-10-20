@@ -138,10 +138,13 @@ usable snapshot"); 10 s have passed since both the wait began and the newest
 connection change in the history feed (TransportUp, TransportDown/CaptureStopped,
 a new run or connection id, a journal boundary, including after a damaged block);
 the history feed applied a durable record for P at the live tip within the last
-5 s, the same ordered stream that reports connection changes (activity evidence
-only, not proof that the connection is ready: a down or reconnecting product
-journals none, and capture's engine would ignore the request);
-and the backoff deadline passed. The wait's provenance (the recorder's own
+5 s; no provisional connection transition (a lifecycle record, or a new
+connection or run) is still waiting in the fan-out for history to apply it; and
+the backoff deadline passed. Recent records are activity evidence only, not
+proof that the connection is ready: a down or reconnecting product journals
+lifecycle records but usually no frames, every lifecycle record is a connection
+change that restarts the grace, and the grace stays longer than the window
+(validated). Capture's engine would ignore a request while it reconnects. The wait's provenance (the recorder's own
 invalidation such as `one-sided book`, an anchor imported invalid, or an
 upstream/journal invalidation) is logged but does not change the timing. Only an
 accepted snapshot ends a wait, so a replay that ends invalid asks from the tip.
