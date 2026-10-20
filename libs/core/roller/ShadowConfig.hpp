@@ -92,6 +92,12 @@ struct ShadowConfig {
                      std::shared_ptr<const recording::Hmc2Record>)>
       ensureLiveFinal;
   int64_t livePublishMs = 500;
+  // With publisher: capture resnapshot requests for a history book that only a
+  // fresh snapshot can cure (ShadowRoller.cpp Resnapshots). Capture refuses a
+  // product's request within 20 s of its last forwarded one, so the minimum
+  // stays above that in production. Installed defaults, not server config.
+  std::chrono::milliseconds resnapshotRetryMin{30000},
+      resnapshotRetryMax{600000}, resnapshotReset{60000};
   // Wall clock (epoch ms) for lead ticks every 250 ms; tests inject.
   std::function<int64_t()> liveNowForTest;
   // Journal live feed. Empty for offline consumers without a live model.

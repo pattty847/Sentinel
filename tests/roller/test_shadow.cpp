@@ -1228,6 +1228,80 @@ TEST_F(ShadowTest, LeadPublishesProvisionalRecordBeforeItsDurableMarker) {
     if (provisional(*r))
       EXPECT_EQ(r->committedThroughMs, 0);
 }
+// FM-121 (2026-10-20 incident): a self-invalidated history book only recovers
+// with a fresh snapshot. The serving roller asks capture for one over its
+// fan-out connection: 64 s empties the bid side, 70 s ends the 5 s grace.
+void oneSidedJournal(ShadowTest &t) {
+  t.writer->append(record(64000, json({{"channel", "l2_data"},
+      {"events", json::array({{{"type", "update"}, {"product_id", Product},
+          {"updates", json::array({{{"side", "bid"}, {"price_level", "99999"},
+                                    {"new_quantity", "0"}}})}}})}}).dump()));
+  for (int s = 65; s <= 72; ++s)
+    t.writer->append(record(s * 1000));
+  t.writer->flush();
+}
+double resnapshotRequests(ShadowTest &t) {
+  return t.counter("sentinel_recorder_resnapshot_requests_total{product=\"" +
+                   Product + "\"}");
+}
+TEST_F(ShadowTest, ServingRollerRequestsResnapshotForSelfInvalidBook) {
+  serve();
+  cfg.resnapshotRetryMin = 100ms;
+  cfg.resnapshotRetryMax = 200ms;
+  initial();
+  start();
+  ASSERT_TRUE(eventually([&] { return count() == 64; }));
+  EXPECT_EQ(resnapshotRequests(*this), 0);
+  oneSidedJournal(*this);
+  ASSERT_TRUE(eventually([&] { return count() == 73; }));
+  // Capture forwards one request per product per 20 s; the roller keeps
+  // asking after each rate_limited reply on the same connection.
+  ASSERT_TRUE(eventually([&] { return resnapshots.load() == 1; }));
+  ASSERT_TRUE(eventually([&] { return resnapshotRequests(*this) >= 3; }));
+  EXPECT_EQ(resnapshots.load(), 1);
+  EXPECT_EQ(counter("sentinel_roller_shadow_setup_failures_total{product=\"" +
+                    Product + "\"}"),
+            0); // replies parsed; the socket was never recovered
+  // The journaled snapshot ends the episode.
+  writer->append(record(73000, snapshot()));
+  writer->append(record(74000));
+  writer->flush();
+  ASSERT_TRUE(eventually([&] { return count() == 75; }));
+  std::this_thread::sleep_for(600ms);
+  const auto settled = resnapshotRequests(*this);
+  std::this_thread::sleep_for(1s); // five retry delays
+  EXPECT_EQ(resnapshotRequests(*this), settled);
+  EXPECT_EQ(resnapshots.load(), 1);
+  shadow.reset();
+  writer->close();
+}
+// A restart replays the invalidation from the journal; no later snapshot
+// exists, so the request goes out once replay hands over to the live tip.
+TEST_F(ShadowTest, ServingReplayThatEndsSelfInvalidRequestsResnapshotAtTheTip) {
+  serve();
+  initial();
+  oneSidedJournal(*this);
+  start();
+  ASSERT_TRUE(eventually([&] { return resnapshots.load() == 1; }));
+  EXPECT_EQ(count(), 73);
+  EXPECT_EQ(resnapshotRequests(*this), 1); // next retry after 30 s
+  shadow.reset();
+  writer->close();
+}
+// Shadow-only runs never write production columns and never ask capture.
+TEST_F(ShadowTest, ShadowOnlyRollerNeverRequestsResnapshot) {
+  cfg.resnapshotRetryMin = 100ms;
+  cfg.resnapshotRetryMax = 200ms;
+  initial();
+  oneSidedJournal(*this);
+  start();
+  ASSERT_TRUE(eventually([&] { return count() == 73; }));
+  std::this_thread::sleep_for(1s);
+  EXPECT_EQ(resnapshots.load(), 0);
+  EXPECT_EQ(resnapshotRequests(*this), -1); // not registered
+  shadow.reset();
+  writer->close();
+}
 // A quiet product's forming minute still advances: wall-clock ticks every
 // 250 ms, like the primary recorder's timer (live age, owner gate).
 TEST_F(ShadowTest, LeadWallTicksAdvanceQuietFormingMinute) {

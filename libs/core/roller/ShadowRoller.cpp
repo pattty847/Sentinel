@@ -546,6 +546,74 @@ public:
     report();
   }
 };
+// Serving path only, roller worker thread only (FM-121). While the day's
+// history recorder (the production column writer) reports a book that only a
+// fresh upstream snapshot can cure (BookRecorder::awaitingSnapshot), LiveSource
+// asks capture for one over its fan-out connection at the socket tip, never
+// during replay. The first request of an episode goes out at once (or when the
+// previous delay ends); every request schedules the next one after the current
+// delay, and a forwarded request doubles the delay up to resnapshotRetryMax.
+// A refused one (rate_limited, global_rate_limited, unavailable) keeps it.
+// The delay returns to resnapshotRetryMin once the book stayed valid for
+// resnapshotReset. History replays, the hourly oracle and shadow-only runs
+// construct no requester.
+class Resnapshots {
+  using Clock = std::chrono::steady_clock;
+  const ShadowConfig &cfg;
+  const std::string product;
+  metrics::Counter &requests;
+  recording::BookRecorder *history = nullptr;
+  std::chrono::milliseconds delay;
+  Clock::time_point nextAt = Clock::time_point::min(), lastPoll{};
+  std::optional<Clock::time_point> validSince;
+  std::string reason; // non-empty while an episode is open
+  unsigned attempts = 0;
+
+public:
+  Resnapshots(const ShadowConfig &c, std::string p, metrics::Counter &r)
+      : cfg(c), product(std::move(p)), requests(r),
+        delay(c.resnapshotRetryMin) {}
+  void attach(recording::BookRecorder *h) { history = h; }
+  // The command to write now, if one is due. Polls the recorder at most
+  // every 250 ms.
+  std::optional<std::string> due() {
+    const auto now = Clock::now();
+    if (now - lastPoll < std::chrono::milliseconds(250))
+      return std::nullopt;
+    lastPoll = now;
+    auto awaiting = history ? history->awaitingSnapshot(product) : std::string{};
+    if (awaiting.empty()) {
+      if (!reason.empty())
+        sLog_Data("Recording resnapshot satisfied: symbol="
+                  << product << " requests=" << attempts);
+      reason.clear();
+      if (!validSince)
+        validSince = now;
+      else if (now - *validSince >= cfg.resnapshotReset)
+        delay = cfg.resnapshotRetryMin;
+      return std::nullopt;
+    }
+    validSince.reset();
+    if (reason.empty())
+      attempts = 0;
+    reason = std::move(awaiting);
+    if (now < nextAt)
+      return std::nullopt;
+    nextAt = now + delay;
+    ++attempts;
+    requests.inc();
+    sLog_Warning("Recording resnapshot request: symbol="
+                 << product << " reason=" << reason << " attempt=" << attempts
+                 << " nextRetryMs=" << delay.count());
+    return json({{"type", "resnapshot"}, {"product", product}}).dump() + "\n";
+  }
+  void reply(const std::string &status) {
+    sLog_Data("Recording resnapshot reply: symbol=" << product
+                                                    << " status=" << status);
+    if (status == "forwarded")
+      delay = std::min(cfg.resnapshotRetryMax, delay * 2);
+  }
+};
 // A bounded synchronous socket, owned by this product's worker only. Timeouts
 // periodically check cancellation; no Qt event loop or main-thread invocation.
 class LiveSource {
@@ -561,9 +629,12 @@ class LiveSource {
   // At the socket with every returned record applied by history: the lead
   // may fork there.
   bool atTip = false;
+  // Handshake done and durable replay finished: the source is live.
+  bool live = false;
   std::function<void(const std::string &)> retry;
   LiveLead *lead;
   ModelTap *tap;
+  Resnapshots *resnapshots;
   std::unique_ptr<JournalReader> catchup;
   std::map<std::string, json> metadata;
   std::map<std::string, size_t> runOrder;
@@ -614,6 +685,7 @@ class LiveSource {
       }
       if (tap)
         tap->idle();
+      requestResnapshot();
       if (socket.bytesAvailable() == 0)
         socket.waitForReadyRead(50);
       bytes += socket.read(capture::MaxRecordBytes + 4100 - bytes.size());
@@ -673,6 +745,10 @@ class LiveSource {
         if (ceiling && p.run == ceiling->run && !beforeOrEqual(*ceiling, p))
           throw std::runtime_error("durability regression");
         ceiling = p;
+      } else if (type == "resnapshot" && resnapshots) {
+        if (j.at("product").get<std::string>() != product)
+          throw std::runtime_error("fanout product mismatch");
+        resnapshots->reply(j.at("status").get<std::string>());
       } else if (type == "retract" || type == "disconnect") {
         // Recovery discards provisional state and retains the fully applied
         // durable prefix in the existing JournalFeed/BookRecorder.
@@ -681,7 +757,23 @@ class LiveSource {
         throw std::runtime_error("unexpected fanout control: " + type);
     }
   }
+  // Never during replay or a handshake: capture drops a client that asks
+  // before it subscribed. A failed write is retried after the delay; the read
+  // path detects a broken socket.
+  void requestResnapshot() {
+    if (!resnapshots || !live)
+      return;
+    const auto command = resnapshots->due();
+    if (!command)
+      return;
+    if (socket.write(command->data(), command->size()) !=
+            qint64(command->size()) ||
+        !socket.waitForBytesWritten(1000))
+      sLog_Warning("Recording resnapshot request write failed symbol="
+                   << product << " error=" << socket.errorString().toStdString());
+  }
   void discardProvisional() {
+    live = false;
     atTip = false;
     pending.clear();
     pendingSize = 0;
@@ -733,9 +825,11 @@ public:
              const std::atomic<bool> &stop,
              const std::optional<JournalPos> &checkpoint,
              std::function<void(const std::string &)> onRetry,
-             LiveLead *liveLead = nullptr, ModelTap *modelTap = nullptr)
+             LiveLead *liveLead = nullptr, ModelTap *modelTap = nullptr,
+             Resnapshots *requests = nullptr)
       : cfg(c), product(std::move(p)), stopping(stop),
-        retry(std::move(onRetry)), lead(liveLead), tap(modelTap) {
+        retry(std::move(onRetry)), lead(liveLead), tap(modelTap),
+        resnapshots(requests) {
     handshake(checkpoint);
     if (tap)
       tap->bind(
@@ -867,6 +961,8 @@ private:
       }
       if (tap && applied)
         tap->ensure(pending, *applied);
+      live = true;
+      requestResnapshot();
       controlOrRecord();
     }
     return false;
@@ -995,6 +1091,7 @@ struct ShadowRoller::Impl {
     metrics::Counter *records, *failures, *compareFailures, *cooldowns,
         *leadForks, *invalidations, *writeErrors;
     metrics::Counter *minuteColumns = nullptr;
+    metrics::Counter *resnapshotRequests = nullptr; // serving only
     metrics::Counter *candleRestoreFailures = nullptr,
                      *candleRestorePartial = nullptr;
     bool refused = false;
@@ -1061,10 +1158,16 @@ struct ShadowRoller::Impl {
           "sentinel_roller_write_errors_total",
           "Roller HMC2 append failures (minutes and rollups).", labels);
       // Only serving runs contribute to recording throughput.
-      if (cfg.publisher)
+      if (cfg.publisher) {
         p->minuteColumns = &registry.counter(
             "sentinel_recorder_columns_written_total",
             "Minute columns the serving roller committed across products and layers.");
+        p->resnapshotRequests = &registry.counter(
+            "sentinel_recorder_resnapshot_requests_total",
+            "Capture resnapshot commands the serving roller sent for a book "
+            "only a fresh snapshot can cure.",
+            labels);
+      }
       p->cooldown = &registry.gauge(
           "sentinel_roller_shadow_fault_cooldown",
           "Product is probing a persistent fault at slow cadence.", labels);
@@ -1259,7 +1362,10 @@ struct ShadowRoller::Impl {
     if (cfg.retryMin.count() <= 0 || cfg.retryMax < cfg.retryMin ||
         cfg.compareInterval.count() <= 0 || cfg.failureThreshold == 0 ||
         cfg.failureMinDuration.count() <= 0 ||
-        cfg.failureCooldown < cfg.retryMax)
+        cfg.failureCooldown < cfg.retryMax ||
+        cfg.resnapshotRetryMin.count() <= 0 ||
+        cfg.resnapshotRetryMax < cfg.resnapshotRetryMin ||
+        cfg.resnapshotReset.count() < 0)
       throw std::runtime_error("invalid shadow retry/comparison interval");
   }
   void run(Product &p) noexcept {
@@ -1272,6 +1378,9 @@ struct ShadowRoller::Impl {
     // Outlives each day's source and feed: a day rotation re-seeds the model
     // without invalidating it.
     ModelTap tap(cfg, p.name, p.reseed);
+    std::optional<Resnapshots> resnapshots;
+    if (p.resnapshotRequests)
+      resnapshots.emplace(cfg, p.name, *p.resnapshotRequests);
     const auto retry = [&](const std::string &reason) {
       if (tap.enabled())
         tap.drop(reason);
@@ -1341,7 +1450,8 @@ struct ShadowRoller::Impl {
                       [&p] { return p.committed.load(); });
         LiveSource source(cfg, p.name, stopping, checkpoint, retry,
                           lead.enabled() ? &lead : nullptr,
-                          tap.enabled() ? &tap : nullptr);
+                          tap.enabled() ? &tap : nullptr,
+                          resnapshots ? &*resnapshots : nullptr);
         if (restoreEnabled() && !std::exchange(p.candlesRestored, true))
           restoreCandles(p, source, tap);
         RollOptions o{cfg.journalRoot, cfg.outputRoot, p.name, day, day + Day};
@@ -1363,6 +1473,8 @@ struct ShadowRoller::Impl {
           } else
             unhealthy(p, "writer closed");
           lead.attach(h, f);
+          if (resnapshots)
+            resnapshots->attach(h);
           if (!h && !f)
             tap.detach();
         };

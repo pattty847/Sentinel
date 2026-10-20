@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 
 namespace recording {
 namespace {
@@ -85,6 +86,7 @@ struct Symbol {
     uint64_t serial = 0;
     std::deque<Hmc2Record> pending;
     int64_t oneSidedSince = -1; // integration clock when a side emptied, -1 = two-sided
+    bool awaitingResnapshot = false; // worker mirror of Impl::awaiting; never exported or forked
 };
 uint16_t encode(long double v, const SizeScale &scale, uint32_t &flags) {
     if (v <= 0)
@@ -418,6 +420,9 @@ struct BookRecorder::Impl {
     uint64_t openFailuresSuppressed = 0;                                   // worker only
     mutable std::mutex watermarksMutex;
     std::map<std::pair<std::string, std::string>, BookRecorder::Watermarks> watermarksBySeries;
+    // awaitingSnapshot(): symbol -> reason. The worker locks only on a change.
+    mutable std::mutex awaitingMutex;
+    std::map<std::string, std::string, std::less<>> awaiting;
     std::atomic<uint64_t> columnsWritten{0}, lateEvents{0}, backwardSteps{0}, invalidations{0},
         diskErrors{0};
 
@@ -523,7 +528,10 @@ struct BookRecorder::Impl {
         }
         return *symbols.emplace(name, std::move(next)).first->second;
     }
-    void invalidate(const std::string &name, Symbol &s, const std::string &reason) {
+    // `upstream`: onInvalid (transport or journal boundary), which a journal
+    // snapshot follows. Every other invalidation is the recorder's own: no
+    // snapshot comes unless someone asks capture for one.
+    void invalidate(const std::string &name, Symbol &s, const std::string &reason, bool upstream = false) {
         for (auto &layer : s.layers) {
             for (auto &[_, row] : layer.rows) {
                 if (s.valid)
@@ -541,6 +549,19 @@ struct BookRecorder::Impl {
         s.asks.clear();
         ++invalidations;
         sLog_Data("BookRecorder: invalid symbol=" << name << " time=" << s.clock << " reason=" << reason);
+        if (!upstream)
+            awaitSnapshot(name, s, reason);
+    }
+    void awaitSnapshot(const std::string &name, Symbol &s, const std::string &reason) {
+        s.awaitingResnapshot = true;
+        std::lock_guard lock(awaitingMutex);
+        awaiting[name] = reason;
+    }
+    void snapshotAccepted(const std::string &name, Symbol &s) {
+        if (!std::exchange(s.awaitingResnapshot, false))
+            return;
+        std::lock_guard lock(awaitingMutex);
+        awaiting.erase(name);
     }
     // A side that stays empty beyond the grace is a book we can no longer trust to
     // place the window: close observation at the grace end until the next journal snapshot.
@@ -1025,6 +1046,7 @@ struct BookRecorder::Impl {
                 row->peak = std::max(row->peak, row->size);
         if (m.kind == Kind::Snapshot) {
             s.valid = true;
+            snapshotAccepted(m.symbol(), s);
             sLog_Data("BookRecorder: snapshot symbol=" << m.symbol() << " time=" << s.clock
                                                        << " levels=" << m.levels.size());
         }
@@ -1047,7 +1069,7 @@ struct BookRecorder::Impl {
                 expireOneSided(name, s, t);
                 advance(s, t);
                 if (m.kind == Kind::Invalid)
-                    invalidate(name, s, m.reason);
+                    invalidate(name, s, m.reason, true);
                 publishOpen(s);
             }
             return;
@@ -1109,6 +1131,11 @@ BookRecorder::Watermarks BookRecorder::watermarks(const std::string &symbol, con
     std::lock_guard lock(impl_->watermarksMutex);
     const auto it = impl_->watermarksBySeries.find({symbol, layer});
     return it == impl_->watermarksBySeries.end() ? Watermarks{} : it->second;
+}
+std::string BookRecorder::awaitingSnapshot(const std::string &symbol) const {
+    std::lock_guard lock(impl_->awaitingMutex);
+    const auto it = impl_->awaiting.find(symbol);
+    return it == impl_->awaiting.end() ? std::string{} : it->second;
 }
 void BookRecorder::drainForTest() { drain(); }
 std::unique_ptr<BookRecorder> BookRecorder::forkLead(std::function<void(std::shared_ptr<const Hmc2Record>)> publisher,
@@ -1236,6 +1263,15 @@ void BookRecorder::importState(const std::vector<uint8_t>& bytes) {
     stateRequire(dst.symbols.empty() && dst.producerSymbols.empty() && dst.watermarksBySeries.empty() &&
         !dst.count && !dst.busy && !dst.stopping && !dst.columnsWritten && !dst.invalidations &&
         !dst.diskErrors && dst.workerLocal == 0, "import requires fresh recorder");
+    // The state does not carry why a book is invalid. A book that is still
+    // invalid when replay reaches the live tip has had no snapshot since this
+    // boundary either, so treat it as the recorder's own invalidation.
+    for (auto& [name,s] : symbols)
+        if (s->initialized && !s->valid) {
+            s->awaitingResnapshot = true;
+            std::lock_guard awaitingLock(dst.awaitingMutex);
+            dst.awaiting[name] = "restored invalid book";
+        }
     dst.symbols.swap(symbols); dst.watermarksBySeries.swap(watermarks);
     dst.workerLocal = local; dst.openFailureLogLocal = failureLocal; dst.openFailuresSuppressed = failures;
     dst.columnsWritten = stats[0]; dst.lateEvents = stats[1]; dst.backwardSteps = stats[2];

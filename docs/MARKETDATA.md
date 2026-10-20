@@ -128,6 +128,24 @@ Subscriptions select captured products and release only their own client views;
 they never acquire an upstream feed or start, stop or flush a recorder. The roller
 owns each product's recording lifetime and its per-product stall deadline.
 
+Recording resnapshot requests: only the serving roller (`recording.source: roller`)
+sends capture's fan-out `{"type":"resnapshot","product":P}` command, on that
+product's own subscribed connection and only at the live socket tip, never during
+replay or a handshake. It sends one while the day's history recorder reports
+`BookRecorder::awaitingSnapshot(P)`: the recorder invalidated the book itself
+(one-sided beyond the grace, malformed L2, row size overflow, missing or
+unrepresentable mid, invalid timestamp, worker exception), or anchor import
+installed it invalid. Transport and journal-boundary invalidations (`onInvalid`)
+never request one; only an accepted snapshot ends a request episode, so a replay
+that ends self-invalid requests at the tip. The first request is immediate; the
+next follows after 30 s, doubling after each `forwarded` reply up to 10 min
+(refused replies keep the delay); the delay resets after 60 s with a valid book.
+Each request logs `Recording resnapshot request: symbol=... reason=...` and
+counts `sentinel_recorder_resnapshot_requests_total{product}`; each reply logs
+`Recording resnapshot reply: symbol=... status=...`. Shadow-only runs, the hourly
+oracle and offline replays never send one. The model's await-snapshot paths use
+`requestReseed` (a synthesized roller snapshot), never a capture resnapshot.
+
 
 ## Heatmap timeframes
 
@@ -256,7 +274,7 @@ The server runs paper execution (no real broker); fills use last trade price plu
 
 ## Recording v2 core (HMC2)
 
-`recording::BookRecorder` and `Hmc2Store` live in `libs/core/servermodel` and do not depend on GUI Qt. The recorder takes full, unclipped absolute L2 batches from one producer, and performs integration, compression and disk I/O on its own worker. `onInvalid` ends observation; only an accepted snapshot resumes it. An invalid interval preserves the minute's earlier numerator and peaks. Zero-observation minutes are omitted. The roller supplies envelope and capture-receive time explicitly through `onSnapshotAt` / `onUpdatesAt`; `drain()` fences deterministic replay. The model owns no recorder and never requests capture resnapshots.
+`recording::BookRecorder` and `Hmc2Store` live in `libs/core/servermodel` and do not depend on GUI Qt. The recorder takes full, unclipped absolute L2 batches from one producer, and performs integration, compression and disk I/O on its own worker. `onInvalid` ends observation; only an accepted snapshot resumes it. An invalid interval preserves the minute's earlier numerator and peaks. Zero-observation minutes are omitted. The roller supplies envelope and capture-receive time explicitly through `onSnapshotAt` / `onUpdatesAt`; `drain()` fences deterministic replay. The model owns no recorder and never requests capture resnapshots; the serving roller does (see Server integration boundary).
 
 Each side has an ordered, pooled price map (O(log levels) updates, O(1) best bid/ask access). Each layer has a pooled hash map keyed by `(integer row, side)`, with lazily advanced integrals and a reused touched-row buffer. One message is applied in full before its final row sizes update peaks. Malformed prices/sizes invalidate the whole batch's book continuity. Prices use checked nearest rounding in integer price units; an inclusion window tests the row's lower price edge, so bounds are `ceil(minMid * lowFrac * priceScale / rowTickUnits)` through `floor(maxMid * highMult * priceScale / rowTickUnits)`, inclusive on both sides. Empty entries inside minute bounds mean observed zero, not a missing book.
 
