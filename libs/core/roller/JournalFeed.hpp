@@ -29,6 +29,10 @@ public:
     std::function<void(const Trade&)> onTrade;
     std::function<void(bool)> onConnection;
     std::function<void(int64_t)> onTick;
+    // A capture connection change: a journal boundary (new run or connection
+    // id, or a gap), TransportUp, TransportDown or CaptureStopped. Not state:
+    // never exported, imported or replayed by itself.
+    std::function<void()> onConnectionChange;
     void apply(const JournalRecord& input);
     // Boundary-only, validated before installation; never emits an event.
     nlohmann::json exportState() const;

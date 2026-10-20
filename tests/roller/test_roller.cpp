@@ -627,63 +627,77 @@ TEST(Roller, CapturedHourBoundaryWaitsForCommittedWatermark) {
 // FM-121 request timing, on an injected clock.
 namespace {
 using Policy = ResnapshotPolicy;
-using Wait = Policy::Wait;
 using Act = Policy::Action;
 using namespace std::chrono_literals;
 const Policy::Clock::time_point T0{std::chrono::hours(1)};
+// Polls with a fresh frame first (the product is live).
+Act livePoll(Policy &p, Policy::Clock::time_point t, bool wait = true) {
+    p.frame(t);
+    return p.poll(t, wait);
+}
 } // namespace
-TEST(ResnapshotPolicy, RecorderWaitIsDueAtOnceAndForwardedRepliesDoubleTheDelay) {
-    Policy p({1s, 4s, 60s, 10s});
-    EXPECT_EQ(p.poll(T0, Wait::Recorder, true), Act::Request);
+TEST(ResnapshotPolicy, ForwardedRepliesDoubleTheDelayAndRefusedOnesKeepIt) {
+    Policy p({1s, 4s, 60s, 0s, 5s});
+    EXPECT_EQ(livePoll(p, T0), Act::Request);
     EXPECT_EQ(p.retryDelay(), 1s);
-    EXPECT_EQ(p.poll(T0 + 999ms, Wait::Recorder, true), Act::None);
+    EXPECT_EQ(livePoll(p, T0 + 999ms), Act::None);
     p.forwarded(); // 2 s for the request after next
-    EXPECT_EQ(p.poll(T0 + 1s, Wait::Recorder, true), Act::Request);
+    EXPECT_EQ(livePoll(p, T0 + 1s), Act::Request);
     p.forwarded(); // 4 s
-    EXPECT_EQ(p.poll(T0 + 2999ms, Wait::Recorder, true), Act::None);
-    EXPECT_EQ(p.poll(T0 + 3s, Wait::Recorder, true), Act::Request);
+    EXPECT_EQ(livePoll(p, T0 + 2999ms), Act::None);
+    EXPECT_EQ(livePoll(p, T0 + 3s), Act::Request);
     p.forwarded(); // capped at 4 s
     EXPECT_EQ(p.retryDelay(), 4s);
-    EXPECT_EQ(p.poll(T0 + 6999ms, Wait::Recorder, true), Act::None);
-    // A refused reply keeps the delay.
-    EXPECT_EQ(p.poll(T0 + 7s, Wait::Recorder, true), Act::Request);
-    EXPECT_EQ(p.poll(T0 + 10999ms, Wait::Recorder, true), Act::None);
-    EXPECT_EQ(p.poll(T0 + 11s, Wait::Recorder, true), Act::Request);
+    EXPECT_EQ(livePoll(p, T0 + 6999ms), Act::None);
+    EXPECT_EQ(livePoll(p, T0 + 7s), Act::Request); // refused: delay kept
+    EXPECT_EQ(livePoll(p, T0 + 10999ms), Act::None);
+    EXPECT_EQ(livePoll(p, T0 + 11s), Act::Request);
 }
 // After a long backoff and a recovery longer than `reset`, a new episode asks
-// at once; a short recovery keeps the pending deadline.
+// as soon as its grace ends; a short recovery keeps the pending deadline.
 TEST(ResnapshotPolicy, HealthyResetClearsThePendingDeadline) {
-    Policy p({30s, 600s, 60s, 10s});
+    Policy p({30s, 600s, 60s, 0s, 5s});
     auto t = T0;
     for (int i = 0; i < 6; ++i) { // 30, 60, ... 600 s
-        ASSERT_EQ(p.poll(t, Wait::Recorder, true), Act::Request);
+        ASSERT_EQ(livePoll(p, t), Act::Request);
         t += p.retryDelay();
         p.forwarded();
     }
-    ASSERT_EQ(p.poll(t, Wait::Recorder, true), Act::Request); // next at t + 600 s
+    ASSERT_EQ(livePoll(p, t), Act::Request); // next at t + 600 s
     EXPECT_EQ(p.retryDelay(), 600s);
-    EXPECT_EQ(p.poll(t + 1s, Wait::None, true), Act::Satisfied);
-    EXPECT_TRUE(!p.waiting());
-    // Short recovery: backoff and deadline stay.
-    EXPECT_EQ(p.poll(t + 30s, Wait::Recorder, true), Act::None);
-    EXPECT_EQ(p.poll(t + 31s, Wait::None, true), Act::Satisfied);
-    EXPECT_EQ(p.poll(t + 91s, Wait::None, true), Act::None); // 60 s valid: reset
-    EXPECT_EQ(p.poll(t + 92s, Wait::Recorder, true), Act::Request);
+    EXPECT_EQ(livePoll(p, t + 1s, false), Act::Satisfied);
+    EXPECT_FALSE(p.waiting());
+    EXPECT_EQ(livePoll(p, t + 30s), Act::None); // short recovery: deadline kept
+    EXPECT_EQ(livePoll(p, t + 31s, false), Act::Satisfied);
+    EXPECT_EQ(livePoll(p, t + 91s, false), Act::None); // 60 s valid: reset
+    EXPECT_EQ(livePoll(p, t + 92s), Act::Request);
     EXPECT_EQ(p.retryDelay(), 30s);
 }
-TEST(ResnapshotPolicy, UpstreamWaitWaitsForTheGraceWithTheTransportUp) {
-    Policy p({1s, 4s, 60s, 10s});
-    EXPECT_EQ(p.poll(T0, Wait::Upstream, true), Act::None);
+// The grace runs from the later of the wait start and the newest connection
+// change, for every wait; a change after a request restarts it before a retry.
+TEST(ResnapshotPolicy, GraceFollowsTheWaitStartAndEveryConnectionChange) {
+    Policy p({1s, 4s, 60s, 10s, 5s});
+    EXPECT_EQ(livePoll(p, T0), Act::None);
     EXPECT_TRUE(p.waiting());
-    EXPECT_EQ(p.poll(T0 + 9999ms, Wait::Upstream, true), Act::None);
-    p.transportChanged(); // a reconnect restarts the grace
-    EXPECT_EQ(p.poll(T0 + 10s, Wait::Upstream, false), Act::None); // down: capture reconnects
-    p.transportChanged();
-    EXPECT_EQ(p.poll(T0 + 20s, Wait::Upstream, true), Act::None);
-    EXPECT_EQ(p.poll(T0 + 29999ms, Wait::Upstream, true), Act::None);
-    EXPECT_EQ(p.poll(T0 + 30s, Wait::Upstream, true), Act::Request);
-    // A recorder wait never waits for the grace, but never asks while down.
-    Policy q({1s, 4s, 60s, 10s});
-    EXPECT_EQ(q.poll(T0, Wait::Recorder, false), Act::None);
-    EXPECT_EQ(q.poll(T0 + 1ms, Wait::Recorder, true), Act::Request);
+    EXPECT_EQ(livePoll(p, T0 + 9999ms), Act::None);
+    EXPECT_EQ(livePoll(p, T0 + 10s), Act::Request);
+    p.connectionChanged(T0 + 12s); // retry due at T0 + 11 s, now held
+    EXPECT_EQ(livePoll(p, T0 + 12s), Act::None);
+    EXPECT_EQ(livePoll(p, T0 + 21999ms), Act::None);
+    EXPECT_EQ(livePoll(p, T0 + 22s), Act::Request);
+    // A change before the wait began does not shorten the wait's own grace.
+    Policy q({1s, 4s, 60s, 10s, 5s});
+    q.connectionChanged(T0);
+    EXPECT_EQ(livePoll(q, T0 + 20s), Act::None);
+    EXPECT_EQ(livePoll(q, T0 + 30s), Act::Request);
+}
+// No record at the live tip within the window (down or reconnecting): none.
+TEST(ResnapshotPolicy, NoRecentFrameNoRequest) {
+    Policy p({1s, 4s, 60s, 0s, 5s});
+    EXPECT_EQ(p.poll(T0, true), Act::None); // never a frame
+    p.frame(T0);
+    EXPECT_EQ(p.poll(T0 + 5001ms, true), Act::None); // frame too old
+    EXPECT_EQ(p.poll(T0 + 6s, true), Act::None);
+    p.frame(T0 + 7s);
+    EXPECT_EQ(p.poll(T0 + 7s, true), Act::Request);
 }

@@ -94,12 +94,15 @@ void JournalFeed::apply(const JournalRecord& input) {
     if (input.gapBefore || run_ != input.pos.run || connection_ != r.connection) {
         invalid(lastLocal_ ? lastLocal_ : local, "journal boundary"); sequence_.reset();
         run_ = input.pos.run; connection_ = r.connection;
+        if (onConnectionChange) onConnectionChange();
     }
     if (r.kind == Kind::TransportUp) {
         invalid(local, "transport up"); sequence_.reset();
+        if (onConnectionChange) onConnectionChange();
         if (onConnection) onConnection(true);
     } else if (r.kind == Kind::TransportDown || r.kind == Kind::CaptureStopped) {
         invalid(local, "transport down/stop");
+        if (onConnectionChange) onConnectionChange();
         if (onConnection) onConnection(false);
     } else if (r.kind == Kind::BookInvalidated || r.kind == Kind::ResyncRequested) {
         const auto j = nlohmann::json::parse(r.payload);

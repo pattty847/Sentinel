@@ -131,27 +131,28 @@ owns each product's recording lifetime and its per-product stall deadline.
 Recording resnapshot requests: only the serving roller (`recording.source: roller`)
 sends capture's fan-out `{"type":"resnapshot","product":P}` command, on that
 product's own subscribed connection and only at the live socket tip, never during
-replay or a handshake (`ResnapshotPolicy.hpp`). It reads the day's history
-recorder through `BookRecorder::snapshotWait(P)` and the history feed's transport
-state, and never asks while the journal transport is down (capture is
-reconnecting). A recorder wait (the recorder invalidated the book itself: one-sided
-beyond the grace, malformed L2, row size overflow, missing or unrepresentable
-mid, invalid timestamp, worker exception; or anchor import installed it invalid)
-asks at once. An upstream wait (transport or journal-boundary invalidation,
-including journal-local loss such as a damaged block, or no history recorder
-because no usable snapshot arrived since the replay start) asks only after 10 s
-with the transport up, so an ordinary reconnect-then-snapshot does not; each
-transport change restarts that grace. Only an accepted snapshot ends a wait, so
-a replay that ends invalid asks at the tip. The next request follows after 30 s,
-doubling after each `forwarded` reply up to 10 min (refused replies keep the
-delay); after 60 s with a valid book the delay and any pending deadline reset.
-Each written request logs `Recording resnapshot request: symbol=... reason=...`
-and counts `sentinel_recorder_resnapshot_requests_total{product}`; each reply
-logs `Recording resnapshot reply: symbol=... status=...`;
-`sentinel_recorder_resnapshot_waiting{product}` is 1 while the live roller's
-book waits. Shadow-only runs, the hourly oracle and offline replays never send
-one. The model's await-snapshot paths use `requestReseed` (a synthesized roller
-snapshot), never a capture resnapshot.
+replay or a handshake (`ResnapshotPolicy.hpp`). A request is due only when all of
+these hold: the day's history recorder reports a wait
+(`BookRecorder::snapshotWait(P)`; no history recorder yet also counts, as "no
+usable snapshot"); 10 s have passed since both the wait began and the newest
+connection change in the history feed (TransportUp, TransportDown/CaptureStopped,
+a new run or connection id, a journal boundary, including after a damaged block);
+a record for P arrived at the live tip within the last 5 s (a down or
+reconnecting product sends none, and capture's engine would ignore the request);
+and the backoff deadline passed. The wait's provenance (the recorder's own
+invalidation such as `one-sided book`, an anchor imported invalid, or an
+upstream/journal invalidation) is logged but does not change the timing. Only an
+accepted snapshot ends a wait, so a replay that ends invalid asks from the tip.
+The next request follows after 30 s, doubling after each `forwarded` reply up to
+10 min (refused replies keep the delay); a connection change restarts the grace
+before a retry; after 60 s with a valid book the delay and any pending deadline
+reset. Each written request logs `Recording resnapshot request: symbol=...
+reason=...` and counts `sentinel_recorder_resnapshot_requests_total{product}`;
+each reply logs `Recording resnapshot reply: symbol=... status=...`;
+`sentinel_recorder_resnapshot_waiting{product}` is 1 while the live roller's book
+waits and 0 off the live tip. Shadow-only runs, the hourly oracle and offline
+replays never send one. The model's await-snapshot paths use `requestReseed` (a
+synthesized roller snapshot), never a capture resnapshot.
 
 
 ## Heatmap timeframes

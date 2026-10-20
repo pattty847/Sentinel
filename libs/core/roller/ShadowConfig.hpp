@@ -95,11 +95,13 @@ struct ShadowConfig {
   // With publisher: capture resnapshot requests for a history book that waits
   // for a snapshot (ResnapshotPolicy.hpp). Capture refuses a product's request
   // within 20 s of its last forwarded one, so the minimum stays above that in
-  // production. upstreamGrace covers a normal reconnect-then-snapshot after an
-  // upstream invalidation. Installed defaults, not server config.
+  // production. Grace: after a wait begins and after each connection change
+  // (a new connection normally starts with a snapshot). Live window: the
+  // newest record at the live tip must be this recent. Installed defaults,
+  // not server config.
   std::chrono::milliseconds resnapshotRetryMin{30000},
       resnapshotRetryMax{600000}, resnapshotReset{60000},
-      resnapshotUpstreamGrace{10000};
+      resnapshotGrace{10000}, resnapshotLiveWindow{5000};
   // Wall clock (epoch ms) for lead ticks every 250 ms; tests inject.
   std::function<int64_t()> liveNowForTest;
   // Journal live feed. Empty for offline consumers without a live model.

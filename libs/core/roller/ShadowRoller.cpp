@@ -189,6 +189,7 @@ public:
       feed->onTick = [this](int64_t t) { lead->onTick(t); };
       feed->onTrade = {};
       feed->onConnection = {};
+      feed->onConnectionChange = {};
       forks.inc();
       sLog_Data("Roller live lead forked product="
                 << product << " provisional=" << pending.size() << " forkUs="
@@ -479,6 +480,7 @@ public:
       report();
     };
     feed->onTick = {};
+    feed->onConnectionChange = {}; // the history feed's copy
     seeded = true;
     if (!delivered || undelivered(applied))
       delivered = applied; // the durable tip's trades are history
@@ -551,9 +553,9 @@ public:
 // at the live socket tip, never during replay or a handshake, and writes the
 // command it returns on this product's fan-out connection. The decision is
 // ResnapshotPolicy's, from the day's history recorder (the production column
-// writer; none yet means no usable snapshot) and the history feed's transport
-// state. History replays, the hourly oracle and shadow-only runs construct no
-// requester.
+// writer; none yet means no usable snapshot), the history feed's connection
+// changes and records arriving at the live tip. History replays, the hourly
+// oracle and shadow-only runs construct no requester.
 class Resnapshots {
   using Clock = ResnapshotPolicy::Clock;
   const std::string product;
@@ -561,7 +563,6 @@ class Resnapshots {
   metrics::Gauge &waiting;
   ResnapshotPolicy policy;
   recording::BookRecorder *history = nullptr;
-  bool transportUp = true;
   Clock::time_point lastPoll{};
   std::string reason;
   unsigned attempts = 0;
@@ -571,13 +572,12 @@ public:
               metrics::Gauge &w)
       : product(std::move(p)), requests(r), waiting(w),
         policy({c.resnapshotRetryMin, c.resnapshotRetryMax, c.resnapshotReset,
-                c.resnapshotUpstreamGrace}) {}
+                c.resnapshotGrace, c.resnapshotLiveWindow}) {}
   void attach(recording::BookRecorder *h) { history = h; }
-  // The history feed's connection state (journal transport records, anchor).
-  void transport(bool up) {
-    if (std::exchange(transportUp, up) != up)
-      policy.transportChanged();
-  }
+  void connectionChanged() { policy.connectionChanged(Clock::now()); }
+  void frame() { policy.frame(Clock::now()); }
+  // Leaving the live tip: publish "not waiting"; the policy keeps its state.
+  void offline() { waiting.set(0); }
   // The command to write now, if one is due. Polls at most every 250 ms.
   std::optional<std::string> due() {
     const auto now = Clock::now();
@@ -587,19 +587,17 @@ public:
     auto wait = history ? history->snapshotWait(product)
                         : recording::BookRecorder::SnapshotWait{
                               "no usable snapshot", true};
-    const auto kind = wait.reason.empty() ? ResnapshotPolicy::Wait::None
-                      : wait.upstream     ? ResnapshotPolicy::Wait::Upstream
-                                          : ResnapshotPolicy::Wait::Recorder;
-    if (kind != ResnapshotPolicy::Wait::None && !policy.waiting())
+    const bool waits = !wait.reason.empty();
+    if (waits && !policy.waiting())
       attempts = 0;
-    const auto action = policy.poll(now, kind, transportUp);
+    const auto action = policy.poll(now, waits);
     waiting.set(policy.waiting() ? 1 : 0);
     if (action == ResnapshotPolicy::Action::Satisfied && attempts)
       sLog_Data("Recording resnapshot satisfied: symbol="
                 << product << " requests=" << attempts);
     if (action != ResnapshotPolicy::Action::Request)
       return std::nullopt;
-    reason = std::move(wait.reason);
+    reason = (wait.upstream ? "upstream " : "recorder ") + wait.reason;
     return json({{"type", "resnapshot"}, {"product", product}}).dump() + "\n";
   }
   // After the write of the command due() returned.
@@ -745,6 +743,8 @@ class LiveSource {
         lead->apply(pending.back());
       if (tap)
         tap->apply(pending.back());
+      if (resnapshots && live)
+        resnapshots->frame();
     } else {
       if (!raw.empty())
         throw std::runtime_error("fanout control with raw suffix");
@@ -781,6 +781,8 @@ class LiveSource {
   }
   void discardProvisional() {
     live = false;
+    if (resnapshots)
+      resnapshots->offline();
     atTip = false;
     pending.clear();
     pendingSize = 0;
@@ -857,6 +859,8 @@ public:
     received.reset();
   }
   ~LiveSource() {
+    if (resnapshots)
+      resnapshots->offline();
     if (tap)
       tap->bind({}, {});
   }
@@ -1379,7 +1383,8 @@ struct ShadowRoller::Impl {
         cfg.resnapshotRetryMin.count() <= 0 ||
         cfg.resnapshotRetryMax < cfg.resnapshotRetryMin ||
         cfg.resnapshotReset.count() < 0 ||
-        cfg.resnapshotUpstreamGrace.count() < 0)
+        cfg.resnapshotGrace.count() < 0 ||
+        cfg.resnapshotLiveWindow.count() <= 0)
       throw std::runtime_error("invalid shadow retry/comparison interval");
   }
   void run(Product &p) noexcept {
@@ -1497,21 +1502,15 @@ struct ShadowRoller::Impl {
           o.onFeed = [&](JournalFeed &f) {
             if (tap.enabled())
               tap.observe(f);
-            if (!resnapshots)
-              return;
-            resnapshots->transport(true); // a new day's feed, as ModelTap
-            f.onConnection = [next = std::move(f.onConnection),
-                              r = &*resnapshots](bool up) {
-              if (next)
-                next(up);
-              r->transport(up);
-            };
+            if (resnapshots)
+              f.onConnectionChange = [r = &*resnapshots] {
+                r->connectionChanged();
+              };
           };
         o.anchorAllowed = [&](const JournalPos& pos) { return source.anchorAllowed(pos); };
         o.onAnchorRestore = [&](const JournalPos& pos, const JournalBook& book, bool up, bool cursorApplied, int64_t receiveMs) {
           source.restoreAnchor(pos,cursorApplied);
           if (tap.enabled()) tap.restoreAnchor(book,up);
-          if (resnapshots) resnapshots->transport(up);
           p.last->store(receiveMs);
           p.running->set(1);
         };
