@@ -376,6 +376,42 @@ TEST(AnchorReplay, EveryQuarterBoundedResumeAndIndependentMidnight) {
     parity(full.outputRoot,resumed.outputRoot,"BTC-USD",full.toMs);
     std::cout<<"ANCHOR_SYNTHETIC every_quarter=8 decoded_bound=950 midnight_independent=true hmc2_diff=0\n";
 }
+TEST(AnchorReplay, OldOneSidedPolicyRejectsStateAndReplaysWithExistingCheckpoint) {
+    QTemporaryDir tmp; const fs::path root=tmp.path().toStdString();
+    const auto oldPolicy=[](BookRecorder& recorder) {
+        auto bytes=recorder.exportState();
+        auto state=json::from_cbor(bytes.begin(),bytes.end()-4);
+        state["policy"].erase("oneSidedSuspectMs");
+        state["policy"]["oneSidedGraceMs"]=5000;
+        bytes=json::to_cbor(state); bytes.resize(bytes.size()+4); fixStateCrc(bytes);
+        return bytes;
+    };
+    auto cfg=deriveGrid(meta(),100000).config(root/"source");
+    BookRecorder source(cfg);
+    source.onSnapshotAt("BTC-USD",Epoch,Epoch,{{true,99999,2},{false,100001,3}});
+    const auto obsolete=oldPolicy(source);
+    cfg.root=root/"restored";
+    BookRecorder restored(cfg); const auto empty=restored.exportState();
+    EXPECT_THROW(restored.importState(obsolete),std::runtime_error);
+    EXPECT_EQ(restored.exportState(),empty);
+
+    replayFixture(root/"raw",2*Quarter);
+    RollOptions o{root/"raw",root/"out","BTC-USD",Epoch,Epoch+2*Quarter};
+    o.anchorExportForTest=oldPolicy;
+    roll(o);
+    ASSERT_FALSE(AnchorStore::candidates(o.outputRoot,o.product,Epoch).empty());
+    ASSERT_TRUE(fs::exists(o.outputRoot/o.product/"roller.json"));
+    const auto before=files(o.outputRoot);
+    ASSERT_FALSE(before.empty());
+    o.writeAnchors=false;
+    json report;
+    ASSERT_NO_THROW(report=roll(o));
+    EXPECT_FALSE(report["days"][0].contains("anchorBoundaryMs"));
+    EXPECT_NE(report["days"][0].at("anchorRejection").get<std::string>().find(
+                  "state version/policy/float mismatch"),std::string::npos);
+    EXPECT_GT(report.at("decodedRecords").get<uint64_t>(),0u);
+    EXPECT_EQ(files(o.outputRoot),before);
+}
 TEST(AnchorReplay, CorruptMissingAndAheadCandidatesFallbackIdentically) {
     QTemporaryDir tmp; const fs::path root=tmp.path().toStdString(); replayFixture(root/"raw");
     RollOptions baseline{root/"raw",root/"full","BTC-USD",Epoch,Epoch+2*3'600'000}; roll(baseline);

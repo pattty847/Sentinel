@@ -54,9 +54,11 @@ void writeCheckpoint(const fs::path& path, const json& j) {
 }
 namespace {
 uint64_t configHash(const recording::RecorderConfig& c) {
-    // Stable semantic hash, with the complete policy/version in the checkpoint.
+    // Roller checkpoint identity is frozen: this literal belongs to existing
+    // checkpoints and anchors, not a live setting. The one-sided policy lives
+    // in replay-state policy; a change there falls back to journal replay.
     json j = {{"version",Version},{"scale",c.priceScale},{"floor",c.sizeScale.floor},
-              {"codes",c.sizeScale.codesPerOctave},{"lateness",c.latenessMs},{"oneSidedSuspect",c.oneSidedSuspectMs}};
+              {"codes",c.sizeScale.codesPerOctave},{"lateness",c.latenessMs},{"grace",5000}};
     for (const auto& l : c.layers) j["layers"].push_back({l.name,l.rowTickUnits,l.lowFrac,l.highMult,l.hourlyRollup});
     uint64_t h = 14695981039346656037ull;
     for (unsigned char ch : j.dump()) { h ^= ch; h *= 1099511628211ull; }
