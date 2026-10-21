@@ -1237,12 +1237,12 @@ TEST_F(ShadowTest, LeadPublishesProvisionalRecordBeforeItsDurableMarker) {
 }
 // FM-121 (2026-10-20 incident): a self-invalidated history book only recovers
 // with a fresh snapshot. The serving roller asks capture for one over its
-// fan-out connection: 64 s empties the bid side, 70 s ends the 5 s grace.
-void oneSidedJournal(ShadowTest &t) {
+// fan-out connection: the malformed update at 64 s breaks continuity.
+void selfInvalidJournal(ShadowTest &t) {
   t.writer->append(record(64000, json({{"channel", "l2_data"},
       {"events", json::array({{{"type", "update"}, {"product_id", Product},
           {"updates", json::array({{{"side", "bid"}, {"price_level", "99999"},
-                                    {"new_quantity", "0"}}})}}})}}).dump()));
+                                    {"new_quantity", "-1"}}})}}})}}).dump()));
   for (int s = 65; s <= 72; ++s)
     t.writer->append(record(s * 1000));
   t.writer->flush();
@@ -1303,7 +1303,7 @@ TEST_F(ShadowTest, ServingRollerRequestsResnapshotForSelfInvalidBook) {
   ASSERT_TRUE(eventually([&] { return count() == 64; }));
   EXPECT_EQ(resnapshotRequests(*this), 0);
   EXPECT_EQ(resnapshotWaiting(*this), 0);
-  oneSidedJournal(*this);
+  selfInvalidJournal(*this);
   ASSERT_TRUE(eventually([&] { return count() == 73; }));
   int64_t ms = 72000;
   // Capture forwards one request per product per 20 s; the roller keeps
@@ -1327,6 +1327,35 @@ TEST_F(ShadowTest, ServingRollerRequestsResnapshotForSelfInvalidBook) {
   shadow.reset();
   writer->close();
 }
+// A suspect continuous book satisfies the same requester by refilling in updates.
+TEST_F(ShadowTest, OneSidedSuspectRefillStopsRequestsWithoutSnapshot) {
+  serve();
+  cfg.resnapshotRetryMin = 100ms;
+  cfg.resnapshotRetryMax = 200ms;
+  cfg.resnapshotGrace = 400ms;
+  cfg.resnapshotLiveWindow = 300ms;
+  initial();
+  start();
+  ASSERT_TRUE(eventually([&] { return count() == 64; }));
+  auto clear = json::parse(snapshot());
+  clear["events"][0]["type"] = "update";
+  for (auto &level : clear["events"][0]["updates"])
+    if (level["side"] == "bid") level["new_quantity"] = "0";
+  writer->append(record(64000, clear.dump()));
+  for (int s = 65; s <= 95; ++s) writer->append(record(s * 1000));
+  writer->flush();
+  int64_t ms = 95000;
+  ASSERT_TRUE(pumpUntil(*this, ms, [&] { return resnapshotRequests(*this) >= 1; }));
+  auto refill = json::parse(snapshot());
+  refill["events"][0]["type"] = "update";
+  writer->append(record(ms += 1000, refill.dump()));
+  writer->flush();
+  ASSERT_TRUE(pumpUntil(*this, ms, [&] { return resnapshotWaiting(*this) == 0; }));
+  const auto settled = resnapshotRequests(*this);
+  EXPECT_FALSE(pumpFor(*this, ms, 1s, [&] { return resnapshotRequests(*this) != settled; }));
+  shadow.reset();
+  writer->close();
+}
 // A restart replays the invalidation from the journal; no later snapshot
 // exists, so the request goes out once replay hands over to the live tip.
 TEST_F(ShadowTest, ServingReplayThatEndsSelfInvalidRequestsResnapshotAtTheTip) {
@@ -1334,7 +1363,7 @@ TEST_F(ShadowTest, ServingReplayThatEndsSelfInvalidRequestsResnapshotAtTheTip) {
   cfg.resnapshotGrace = 400ms;
   cfg.resnapshotLiveWindow = 300ms;
   initial();
-  oneSidedJournal(*this);
+  selfInvalidJournal(*this);
   start();
   int64_t ms = 72000;
   ASSERT_TRUE(pumpUntil(*this, ms, [&] { return resnapshots.load() == 1; }));
@@ -1473,7 +1502,7 @@ TEST_F(ShadowTest, ServingRetryWaitsForTheGraceAfterAReconnect) {
   initial();
   start();
   ASSERT_TRUE(eventually([&] { return count() == 64; }));
-  oneSidedJournal(*this);
+  selfInvalidJournal(*this);
   int64_t ms = 72000;
   ASSERT_TRUE(pumpUntil(*this, ms, [&] { return resnapshotRequests(*this) == 1; }));
   writer->append(recordOn(ms += 1000, 1, "{}", capture::Kind::TransportDown));
@@ -1504,7 +1533,7 @@ TEST_F(ShadowTest, ServingRetryIgnoresProvisionalRecordsOfANewConnection) {
   initial();
   start();
   ASSERT_TRUE(eventually([&] { return count() == 64; }));
-  oneSidedJournal(*this);
+  selfInvalidJournal(*this);
   int64_t ms = 72000;
   ASSERT_TRUE(pumpUntil(*this, ms, [&] { return resnapshotRequests(*this) == 1; }));
   writer->append(recordOn(ms += 1000, 1, "{}", capture::Kind::TransportDown));
@@ -1544,7 +1573,7 @@ TEST_F(ShadowTest, ServingRetryWaitsWhileANewConnectionIsProvisional) {
   initial();
   start();
   ASSERT_TRUE(eventually([&] { return count() == 64; }));
-  oneSidedJournal(*this);
+  selfInvalidJournal(*this);
   int64_t ms = 72000;
   ASSERT_TRUE(pumpUntil(*this, ms, [&] { return resnapshotRequests(*this) == 1; }));
   // Old connection, durable: activity stays eligible ~600 ms past the pump.
@@ -1595,7 +1624,7 @@ TEST_F(ShadowTest, ResnapshotWaitingGaugeClearsWhenTheFanoutDisconnects) {
   initial();
   start();
   ASSERT_TRUE(eventually([&] { return count() == 64; }));
-  oneSidedJournal(*this);
+  selfInvalidJournal(*this);
   int64_t ms = 72000;
   ASSERT_TRUE(pumpUntil(*this, ms, [&] {
     return resnapshots.load() == 1 && resnapshotWaiting(*this) == 1;
@@ -1634,7 +1663,7 @@ TEST_F(ShadowTest, ShadowOnlyRollerNeverRequestsResnapshot) {
   cfg.resnapshotGrace = 400ms;
   cfg.resnapshotLiveWindow = 300ms;
   initial();
-  oneSidedJournal(*this);
+  selfInvalidJournal(*this);
   start();
   ASSERT_TRUE(eventually([&] { return count() == 73; }));
   int64_t ms = 72000;

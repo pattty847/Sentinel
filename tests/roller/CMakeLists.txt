@@ -40,3 +40,7 @@ add_executable(candle_startup_bench candle_startup_bench.cpp
     ../../apps/sentinel-server/SentinelServerApp.cpp
     ../../apps/sentinel-server/SentinelServerApp.hpp)
 target_link_libraries(candle_startup_bench PRIVATE sentinel_core Qt6::Core Qt6::Network)
+
+# Read-only incident replay; run explicitly with a scratch report path, never in ctest.
+add_executable(one_sided_replay one_sided_replay.cpp)
+target_link_libraries(one_sided_replay PRIVATE sentinel_core Qt6::Core)
