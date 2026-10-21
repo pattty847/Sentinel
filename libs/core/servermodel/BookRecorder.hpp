@@ -33,7 +33,7 @@ struct RecorderConfig {
     // Deterministic allocation-failure seam, before building any publication
     // (open-minute records and pending/committed copies). Tests only.
     std::function<void(bool provisional)> beforePublicationForTest;
-    // Continuous empty/one-sided books stay reconstructible but unobserved.
+    // Continuous empty, one-sided or crossed books stay reconstructible but unobserved.
     // After this integration-clock duration, request a precautionary snapshot.
     int64_t oneSidedSuspectMs = 30'000;
     // Test synchronization only, called under the queue mutex before blocking.

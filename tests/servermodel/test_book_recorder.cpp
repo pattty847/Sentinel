@@ -819,7 +819,7 @@ TEST_F(RecorderTest, OneSidedSuspectWaitClearsOnRefillOrSnapshot) {
         tick(*r, 39999);
         EXPECT_EQ(waitOf(*r, "BTC-USD"), "");
         tick(*r, 40000);
-        EXPECT_EQ(waitOf(*r, "BTC-USD"), "recorder:one-sided suspect");
+        EXPECT_EQ(waitOf(*r, "BTC-USD"), "recorder:unobserved suspect");
         EXPECT_EQ(r->stats().invalidations, 0);
         if (snapshot) snap(*r, 41000);
         else update(*r, 41000, {{true, 99, 2}});
@@ -848,17 +848,45 @@ TEST_F(RecorderTest, CrossedAndLockedUpdatesSuspendUntilUncrossed) {
     value(rows[0], 101, true, 4, 4);
     EXPECT_EQ(r->stats().invalidations, 0);
 }
-TEST_F(RecorderTest, BriefEmptySideThenCrossedDoesNotRaiseOneSidedWait) {
+TEST_F(RecorderTest, CrossedOrLockedBookRaisesUnobservedWaitAfterThirtySeconds) {
+    for (const double bid : {101.0, 102.0}) {
+        SCOPED_TRACE(bid);
+        auto r = make(config());
+        snap(*r, 0);
+        update(*r, 10000, {{true, bid, 2}});
+        tick(*r, 39999);
+        EXPECT_EQ(waitOf(*r, "BTC-USD"), "");
+        tick(*r, 40000);
+        EXPECT_EQ(waitOf(*r, "BTC-USD"), "recorder:unobserved suspect");
+        EXPECT_EQ(r->stats().invalidations, 0);
+        update(*r, 41000, {{true, bid, 0}});
+        EXPECT_EQ(waitOf(*r, "BTC-USD"), "");
+    }
+}
+TEST_F(RecorderTest, OneSidedThenCrossedKeepsUnobservedTimerThroughRestore) {
     auto r = make(config());
     snap(*r, 0);
     update(*r, 10000, {{true, 99, 0}});
     update(*r, 20000, {{true, 102, 2}});
-    tick(*r, 60000);
-    EXPECT_EQ(waitOf(*r, "BTC-USD"), "");
-    EXPECT_EQ(r->stats().invalidations, 0);
+    const auto state = r->exportState();
+    QTemporaryDir output;
+    auto c = config();
+    c.root = output.path().toStdString();
+    auto restored = make(c);
+    restored->importState(state);
+    for (auto *recorder : {r.get(), restored.get()}) {
+        tick(*recorder, 39999);
+        EXPECT_EQ(waitOf(*recorder, "BTC-USD"), "");
+        tick(*recorder, 40000);
+        EXPECT_EQ(waitOf(*recorder, "BTC-USD"), "recorder:unobserved suspect");
+        EXPECT_EQ(recorder->stats().invalidations, 0);
+        update(*recorder, 41000, {{true, 102, 0}, {true, 99, 2}});
+        EXPECT_EQ(waitOf(*recorder, "BTC-USD"), "");
+        tick(*recorder, 60000);
+    }
     const auto rows = read();
     ASSERT_EQ(rows.size(), 1);
-    EXPECT_EQ(rows[0].observedMs, 10000);
+    EXPECT_EQ(rows[0].observedMs, 29000);
 }
 TEST_F(RecorderTest, SuspectWaitSurvivesCrossedRefillAndRestoredState) {
     auto r = make(config());
@@ -866,14 +894,14 @@ TEST_F(RecorderTest, SuspectWaitSurvivesCrossedRefillAndRestoredState) {
     update(*r, 10000, {{true, 99, 0}});
     tick(*r, 40000);
     update(*r, 41000, {{true, 102, 2}});
-    EXPECT_EQ(waitOf(*r, "BTC-USD"), "recorder:one-sided suspect");
+    EXPECT_EQ(waitOf(*r, "BTC-USD"), "recorder:unobserved suspect");
     const auto state = r->exportState();
     QTemporaryDir output;
     auto c = config();
     c.root = output.path().toStdString();
     auto restored = make(c);
     restored->importState(state);
-    EXPECT_EQ(waitOf(*restored, "BTC-USD"), "recorder:one-sided suspect");
+    EXPECT_EQ(waitOf(*restored, "BTC-USD"), "recorder:unobserved suspect");
     update(*restored, 42000, {{true, 102, 0}, {true, 99, 2}});
     EXPECT_EQ(waitOf(*restored, "BTC-USD"), "");
     tick(*restored, 60000);
@@ -986,7 +1014,7 @@ TEST_F(RecorderTest, SuspendedVisibleSideNeverMovesRecordedWindow) {
     EXPECT_DOUBLE_EQ(rows[0].midMax, 100);
     EXPECT_EQ(r->stats().invalidations, 0);
     value(rows[0], 99, false, 2, 2);
-    EXPECT_EQ(waitOf(*r, "BTC-USD"), "recorder:one-sided suspect");
+    EXPECT_EQ(waitOf(*r, "BTC-USD"), "recorder:unobserved suspect");
 }
 TEST_F(RecorderTest, SuspendedStateRestoresAndForksWithoutObservationOrLostWait) {
     auto r = make(config());
@@ -999,7 +1027,7 @@ TEST_F(RecorderTest, SuspendedStateRestoresAndForksWithoutObservationOrLostWait)
     c.root = restoredRoot.path().toStdString();
     auto restored = make(c);
     restored->importState(state);
-    EXPECT_EQ(waitOf(*restored, "BTC-USD"), "recorder:one-sided suspect");
+    EXPECT_EQ(waitOf(*restored, "BTC-USD"), "recorder:unobserved suspect");
     std::vector<std::shared_ptr<const Hmc2Record>> publications;
     auto lead = r->forkLead([&](auto p) { publications.push_back(std::move(p)); }, 500);
     tick(*lead, 41000);

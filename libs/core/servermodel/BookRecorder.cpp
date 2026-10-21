@@ -86,7 +86,7 @@ struct Symbol {
     double mid = 0, midOpen = 0, midMin = 0, midMax = 0, midClose = 0;
     uint64_t serial = 0;
     std::deque<Hmc2Record> pending;
-    int64_t oneSidedSince = -1; // empty-side episode; retained until a raised wait is satisfied
+    int64_t unobservedSince = -1; // continuous interval without a usable midpoint
     // Worker mirror of Impl::awaiting; never exported or forked.
     enum class Wait : uint8_t { None, Upstream, Recorder } wait = Wait::None;
 };
@@ -148,8 +148,7 @@ StateJson statePolicy(const RecorderConfig& c) {
     j["latenessMs"] = c.latenessMs;
     j["maxQueuedLevels"] = c.maxQueuedLevels;
     j["livePublishMs"] = c.livePublishMs;
-    // Keep the replay-policy wire key; its value now identifies the suspect timeout.
-    j["oneSidedGraceMs"] = c.oneSidedSuspectMs;
+    j["oneSidedSuspectMs"] = c.oneSidedSuspectMs;
     j["deterministicResume"] = c.deterministicResume;
     j["commitFloorMs"] = c.commitFloorMs;
     j["commitCeilingMs"] = c.commitCeilingMs;
@@ -277,7 +276,7 @@ StateJson packSymbol(const Symbol& v) {
     j["midMax"] = v.midMax;
     j["midClose"] = v.midClose;
     j["serial"] = v.serial;
-    j["oneSidedSince"] = v.oneSidedSince;
+    j["unobservedSince"] = v.unobservedSince;
     j["bids"] = v.bids; j["asks"] = v.asks;
     j["pending"] = StateJson::array(); j["layers"] = StateJson::array();
     for (const auto& r : v.pending) j["pending"].push_back(pack(r));
@@ -324,7 +323,7 @@ std::unique_ptr<Symbol> unpackSymbol(const StateJson& j, const std::string& name
     j.at("midMax").get_to(v.midMax);
     j.at("midClose").get_to(v.midClose);
     j.at("serial").get_to(v.serial);
-    j.at("oneSidedSince").get_to(v.oneSidedSince);
+    j.at("unobservedSince").get_to(v.unobservedSince);
     stateRequire(v.clock >= 0 && v.clock <= kMaxTime && v.minute >= 0 && v.minute % kMinute == 0 &&
         v.clock >= v.minute && v.clock < v.minute + kMinute && v.observed <= kMinute &&
         v.closedThrough >= 0 && v.closedThrough <= v.clock && (!v.valid || v.initialized), "invalid symbol clock/validity");
@@ -552,7 +551,7 @@ struct BookRecorder::Impl {
         }
         s.valid = false;
         s.observing = false;
-        s.oneSidedSince = -1;
+        s.unobservedSince = -1;
         s.bids.clear();
         s.asks.clear();
         ++invalidations;
@@ -574,11 +573,11 @@ struct BookRecorder::Impl {
         std::lock_guard lock(awaitingMutex);
         awaiting.erase(name);
     }
-    void checkOneSided(const std::string &name, Symbol &s, int64_t target) {
-        if (!s.valid || s.oneSidedSince < 0 || s.wait != Symbol::Wait::None ||
-            target - s.oneSidedSince < cfg.oneSidedSuspectMs)
+    void checkUnobserved(const std::string &name, Symbol &s, int64_t target) {
+        if (!s.valid || s.unobservedSince < 0 || s.wait != Symbol::Wait::None ||
+            target - s.unobservedSince < cfg.oneSidedSuspectMs)
             return;
-        awaitSnapshot(name, s, "one-sided suspect", false);
+        awaitSnapshot(name, s, "unobserved suspect", false);
     }
     bool trackMid(Symbol &s) {
         if (s.bids.empty() || s.asks.empty() || s.bids.rbegin()->first >= s.asks.begin()->first)
@@ -1032,35 +1031,27 @@ struct BookRecorder::Impl {
                 }
             }
         }
-        if (s.bids.empty() || s.asks.empty()) {
-            // A snapshot must seed a mid. Continuous updates retain the exact
-            // book even when empty, but cannot contribute midpoint-based data.
-            if (m.kind == Kind::Snapshot) {
-                invalidate(m.symbol(), s, "missing two-sided mid");
-                return;
-            }
-            if (s.oneSidedSince < 0) {
-                s.oneSidedSince = s.clock;
-                sLog_Data("BookRecorder: one-sided book symbol=" << m.symbol()
-                                                                << " empty="
-                                                                << (s.bids.empty() && s.asks.empty() ? "both"
-                                                                    : s.bids.empty()                ? "bid"
-                                                                                                    : "ask")
-                                                                << " time=" << s.clock);
-            }
+        if (m.kind == Kind::Snapshot && (s.bids.empty() || s.asks.empty())) {
+            invalidate(m.symbol(), s, "missing two-sided mid");
+            return;
         }
         const bool usable = trackMid(s);
-        // A crossed refill stops the empty-side timer, but cannot satisfy an
-        // already-raised wait. Retain its timer so replay restore keeps that wait.
-        if (s.oneSidedSince >= 0 && (usable ||
-            (!s.bids.empty() && !s.asks.empty() && s.wait == Symbol::Wait::None))) {
-            sLog_Data("BookRecorder: two-sided again symbol=" << m.symbol() << " time=" << s.clock
-                                                              << " durationMs=" << (s.clock - s.oneSidedSince));
-            s.oneSidedSince = -1;
-        }
         if (m.kind == Kind::Snapshot && !usable) {
             invalidate(m.symbol(), s, "unrepresentable or crossed mid");
             return;
+        }
+        if (s.valid && !usable && s.unobservedSince < 0) {
+            s.unobservedSince = s.clock;
+            const char *cause = s.bids.empty() && s.asks.empty() ? "empty"
+                              : s.bids.empty() || s.asks.empty() ? "one-sided"
+                              : s.bids.rbegin()->first >= s.asks.begin()->first ? "crossed"
+                              : "unrepresentable mid";
+            sLog_Data("BookRecorder: observation suspended symbol=" << m.symbol()
+                         << " cause=" << cause << " time=" << s.clock);
+        } else if (usable && s.unobservedSince >= 0) {
+            sLog_Data("BookRecorder: observation resumed symbol=" << m.symbol() << " time=" << s.clock
+                         << " durationMs=" << (s.clock - s.unobservedSince));
+            s.unobservedSince = -1;
         }
         s.observing = usable;
         if (wasObserving != s.observing) {
@@ -1103,7 +1094,7 @@ struct BookRecorder::Impl {
                 auto &s = *ptr;
                 if (!s.initialized) continue;
                 const auto t = std::clamp(m.time - s.offset, int64_t{0}, kMaxTime);
-                checkOneSided(name, s, t);
+                checkUnobserved(name, s, t);
                 advance(s, t);
                 if (m.kind == Kind::Invalid)
                     invalidate(name, s, m.reason, true);
@@ -1133,7 +1124,7 @@ struct BookRecorder::Impl {
         // envelope; advance() independently clamps the integration clock.
         const int64_t t = std::max(m.time, s.clock);
         s.offset = m.local - m.time;
-        checkOneSided(m.symbol(), s, t);
+        checkUnobserved(m.symbol(), s, t);
         advance(s, t);
         if (late)
             s.flags |= kLateEvents;
@@ -1229,7 +1220,7 @@ std::unique_ptr<BookRecorder> BookRecorder::forkLead(std::function<void(std::sha
         to->midClose = from->midClose;
         to->serial = from->serial;
         to->pending = from->pending;
-        to->oneSidedSince = from->oneSidedSince;
+        to->unobservedSince = from->unobservedSince;
         dst.symbols.emplace(name, std::move(to));
     }
     return out;
@@ -1310,7 +1301,7 @@ void BookRecorder::importState(const std::vector<uint8_t>& bytes) {
             std::lock_guard awaitingLock(dst.awaitingMutex);
             dst.awaiting[name] = {"restored invalid book", false};
         } else {
-            dst.checkOneSided(name, *s, s->clock);
+            dst.checkUnobserved(name, *s, s->clock);
         }
     dst.symbols.swap(symbols); dst.watermarksBySeries.swap(watermarks);
     dst.workerLocal = local; dst.openFailureLogLocal = failureLocal; dst.openFailuresSuppressed = failures;

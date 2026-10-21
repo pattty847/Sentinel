@@ -1,4 +1,5 @@
-// Offline journal regression probe. Inputs are read-only; all output is scratch.
+// Incident evidence tooling: read-only on journals, with all output in scratch.
+// This executable is never part of ctest.
 #include "roller/Grid.hpp"
 #include "roller/JournalFeed.hpp"
 #include "servermodel/Hmc2Store.hpp"
