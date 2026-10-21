@@ -1,180 +1,156 @@
 # Sentinel
 
-**GPU-accelerated trading terminal** built with **C++20** and **Qt 6**.
+**A GPU-rendered order-flow terminal for Coinbase spot markets**, written in C++20 and Qt 6.
 
-A desktop workstation for viewing market structure, order flow, and real-time data. A headless server ingests and records Coinbase market data. A Qt client draws it on the GPU. Orders are simulated: Sentinel has paper trading only and sends no real orders.
+Sentinel records the full level 2 order book and trade tape of the products you choose, keeps that
+recording as a gap-aware history, and draws it live as an order book heatmap with candles and
+volume overlays. Orders are simulated. Sentinel has paper trading only and sends no real orders.
 
-Documentation: [documentation index](docs/README.md).
+Status: alpha (`3.0.0-alpha`). It runs around the clock on the maintainer's Mac and records
+seven products. Documentation index: [docs/README.md](docs/README.md).
 
 <div align="center">
   <img src="https://img.shields.io/badge/C%2B%2B-20-blue" />
   <img src="https://img.shields.io/badge/Qt-6-green" />
-  <img src="https://img.shields.io/badge/GPU-Accelerated-purple" />
-  <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" />
+  <img src="https://img.shields.io/badge/GPU-Metal%20%7C%20D3D12%20%7C%20Vulkan-purple" />
+  <img src="https://img.shields.io/badge/Primary%20platform-macOS-lightgrey" />
   <img src="https://img.shields.io/badge/License-AGPL--3.0-blue" />
 </div>
 
 ---
 
-## Showcase
+## Screenshots
 
-### GPU Heatmap Rendering
+These were captured with a March 2026 build. The chart and docks have changed since then: the
+heatmap now also draws the recorded history, and the controls are different. New captures are
+pending.
 
-Order book heatmap with live updates, pan, and zoom.
-
-![Heatmap render demo](docs/assets/gifs/heatmap-render.gif)
-
----
-
-### Stock Chart + SEC Insider Signals
-
-Equity charting with insider transaction overlays and signals from SEC filings.
-
-![Stock chart insider signals demo](docs/assets/gifs/stock-chart-insiders.gif)
+| Stock Chart with SEC insider signals | Screener |
+| --- | --- |
+| ![Stock chart insider signals demo](docs/assets/gifs/stock-chart-insiders.gif) | ![Stock screener demo](docs/assets/gifs/stock-screener.gif) |
 
 ---
 
-### Screener Workflow
+## What it does
 
-Screener rows open on the charts: crypto pairs on the main chart, stocks on the Stock Chart.
+### Recording
 
-![Stock screener demo](docs/assets/gifs/stock-screener.gif)
+- **`sentinel-capture`** opens one Coinbase Advanced Trade WebSocket per product and writes every
+  frame (level 2, trades, heartbeats) to a compressed, checksummed journal (RAWL2). It needs no API
+  key. A local socket streams the same records to the server as they arrive.
+- **The server rolls the journal into a heatmap history** (HMC2): one-minute columns for each
+  product, with hourly rollups. A missing or invalid stretch is stored as a gap, not as guessed data.
+- **Hourly self-check.** The server re-rolls each completed hour from the same journal and compares
+  it with what it recorded live. Mismatches are counted and raise an alert.
+- **Book recovery.** If the recorder has to mark a book invalid, the server asks capture for a fresh
+  snapshot. It asks only once the connection has been stable for a grace period and is still
+  delivering records, and it backs off between requests, so it does not break a new connection
+  that is about to send its own snapshot.
+- **Restart rebuild.** At startup the server rebuilds the last 30 minutes of 100 ms and 1 s candles
+  from the journal, so short timeframes have history right after a restart.
+- **Metrics** for Prometheus on `127.0.0.1:8090` (server) and `:8091` (capture), with Grafana
+  dashboards and alert rules in [ops/monitoring](ops/monitoring/README.md).
 
----
+### Charting (GPU)
 
-## Overview
+- **Order book heatmap**: recorded history plus a live edge, binned on the GPU at the chart's tick
+  size (Auto or Manual). A test checks that GPU cells equal the CPU reference exactly.
+- **Candles**: Candle, Hollow and Line styles. Timeframes 100 ms, 1 s, 1 m, 5 m, 15 m, 1 h, 4 h and
+  1 d. 100 ms and 1 s bars are built by the server from the journal (30 minutes of 100 ms history
+  in memory). 1 m and longer load from Coinbase in pages of 350 bars as you pan back; the server
+  caches them.
+- **Overlays**: trade bubbles, Footprint, TPO and Volume Profile, switched from the chart toolbar.
+- **Text** is drawn from an MSDF glyph atlas on the GPU; there is no per-cell QML.
+- Backends: Metal on macOS; Direct3D 12 or Vulkan on Windows (Direct3D 11 is refused, see
+  [docs/WINDOWS_GPU_TESTS.md](docs/WINDOWS_GPU_TESTS.md)).
 
-Sentinel is built around a single constraint:
+### Market tools
 
-> dense market data should remain fluid, interactive, and interpretable under load
+- Order book (DOM) ladder dock.
+- Stock Chart dock (daily equity candles) with SEC Form 4 insider overlays from EDGAR.
+- TradingView screener dock for crypto and stocks; watchlists. Crypto rows open on the main chart,
+  stocks on the Stock Chart.
 
-The system combines:
+### Paper trading and backtests
 
-- GPU-first rendering
-- Real-time streaming data pipelines
-- Recorded order book history
-- Desktop workstation UI (Qt Widgets docks, QML, Qt Scene Graph)
-- Paper trading and simulation
+- Server-side paper trading: market and limit orders, positions, PnL, and TP/SL brackets that the
+  server holds and triggers. Hotkeys `B` (buy), `S` (sell), `F` (flatten) and `C` (cancel all).
+- `sentinel-backtest` replays journal trades or a CSV file through the same simulation core. The
+  Paper Trading dock has a Backtest tab and runs the AvendellaMM market-making algo in paper mode.
+- Walkthrough: [docs/PAPER_TRADING_QUICKSTART.md](docs/PAPER_TRADING_QUICKSTART.md).
 
----
+### Automation
 
-## Core Capabilities
+- The GUI serves a local Agent API (HTTP on `127.0.0.1:17100`) to read chart, book, trade and
+  heatmap state and to drive the chart. See [docs/AGENT_API.md](docs/AGENT_API.md). It has no
+  authentication: keep it on loopback.
 
-### Rendering & Charting
+## In progress
 
-- GPU order book heatmap with recorded history and a live edge
-- Heatmap binned on the GPU at the chart's tick size (Auto or Manual)
-- Liquidity range slider (sizes in the base asset) and labels on heatmap cells in Asset or USD units
-- Candle, hollow, and line chart modes
-- Trade bubbles for executions
-- Footprint, TPO, and Volume Profile layers, switched on from the chart toolbar
-- Axis label models of fixed size, so pan and zoom do not add or remove label items
-- Consistent viewport mapping across overlays
+Written and reviewed, not yet on `main`:
 
----
+- **Gap-free empty or one-sided books.** Today the recorder invalidates a book whose bid or ask side
+  stays empty for more than 5 s, then waits for a new snapshot. Coinbase can clear a whole book and
+  refill it with ordinary updates. The new rule keeps such a book valid while its update sequence
+  is continuous, so a few seconds of exchange glitch stay a few seconds of thin data instead of a
+  long recording gap. Reviewed; waiting on a deploy decision.
 
-### Market Tools
+Open issue: server CPU rises slowly with uptime (from about 4 % to 12 % of one core over 35 hours;
+a restart resets it). It is being profiled.
 
-- Heatmap chart with candle overlays aligned to the heatmap mapping
-- Stock Chart dock (daily candles for equities)
-- SEC insider signal overlays (Form 4 filings from SEC EDGAR)
-- Watchlists: crypto pairs open on the main chart, stocks on the Stock Chart
-- TradingView screener dock (crypto and stocks)
-- Order book (DOM) ladder dock
+## Performance
 
----
+Measured on the maintainer's always-on setup unless a row says otherwise: Mac mini M4 (10 cores,
+16 GB), macOS 26, services built from `main`, recording seven products (BTC, ETH, SOL, FARTCOIN,
+PEPE, DOGE and AVAX against USD), journal on an external USB SSD. Production rows come from
+Prometheus metrics scraped every 15 s over the 7 days to 2026-10-21. CPU is a share of one core.
+Every number, with its query or command and its date, is in
+[docs/README_CLAIMS.md](docs/README_CLAIMS.md).
 
-### Trading & Simulation
+| What | Result |
+| --- | --- |
+| Capture process (7 WebSockets, journal writer) | CPU median 3.7 %, p95 5.2 %; resident memory median 27 MB |
+| Server process (roller, recorder, self-check, stream) | CPU median 5.2 %, p95 9.1 % (see the open issue above) |
+| Journal volume, all 7 products | about 82 frames/s; 0.98 GB/day on disk |
+| Live feed availability at the server | 99.96-99.98 % of scrapes per product, restarts and deploys included |
+| Server main-thread queue wait | per-minute p99: median 0.08 ms; worst single wait 53 ms; none over 100 ms |
+| Hourly self-check | 0 mismatching buckets in about 168 hourly comparisons per product |
+| Restart to serving (3 restarts, 19-21 Oct) | 2.6-6.7 s; 30 min of 100 ms and 1 s candles rebuilt for all 7 products, slowest product 1.1-4.8 s |
+| Capture journal append to fan-out client receive (synthetic bench: 100 frames/s of 1.5 KB, one client, 3 runs of 65 s) | p50 93-99 µs, p95 150-157 µs, worst 1.0-2.4 ms |
+| Test suite at the last landing | 116 CTest tests pass with a real GPU required (Metal) |
 
-- Paper trading on the server: market and limit orders, positions, and PnL. No real orders are sent.
-- Trade hotkeys (B, S, F, C) and a Paper Trading dock
-- TP/SL brackets on an open position, held and triggered by the server
-- Backtesting: `sentinel-backtest` replays a trade file (CSV or binary trade log) through the same simulation core. The Paper Trading dock has a Backtest tab for it.
-- Algo: a market-making algo (Avendella MM) runs in paper mode. Start and stop it from the Paper Trading dock.
+The client's frame rate and frame time are not in this table: there is no repeatable GUI benchmark
+yet ([docs/TODO.md](docs/TODO.md)).
 
----
+## Architecture
 
-### Platform Architecture
-
-- Client/server split
-- Custom stream protocol over WebSocket
-- Client and server talk over TLS (WSS). The server listens on 127.0.0.1 by default.
-- Config-driven runtime (YAML server and client configs)
-
----
-
-## Recent Platform Expansion
-
-Changes that landed in September and October 2026:
-
-- The GPU heatmap is the only heatmap renderer. The client bins recorded and live order book data on the GPU and draws it. The earlier renderer is removed from the GUI and client.
-- `sentinel-capture` is a separate process that records a raw Coinbase level 2 journal, with one connection per product. `sentinel-roll` builds heatmap history files from that journal.
-- Candle history loads from Coinbase in pages of 350 bars as you pan back. The server caches closed bars.
-- Chart controls: Auto or Manual tick size, a liquidity range slider, liquidity labels, trade bubbles, and an auto price scale toggle.
-- Footprint, TPO, and Volume Profile are drawn in the GUI. Switch them on with the chart toolbar buttons. TPO and Volume Profile replace the heatmap while they are on.
-
----
-
-## Quick Start
-
-### Run a Release (recommended)
-
-1. Download the latest **[release](https://github.com/pattty847/Sentinel-Trading-Terminal/releases)** artifact for your platform. Maintainers publish macOS archives from `./scripts/release_macos.sh` (under `dist/`; see **`docs/RELEASE_CHECKLIST.md`**) and Windows folders via **`scripts/release/windows-package-release.ps1`** (see **`scripts/release/README.md`**).
-2. **macOS Zip:** unzip, then `./run.sh` from that folder. This starts **`SentinelServer.app`** plus **`Sentinel.app`** (`SENTINEL_QML_PATH` is set by the launcher). **Windows package:** **`run.cmd`** from the unpacked folder (**`scripts/release/README.md`**).
-
-   No API keys are required for **live Coinbase public** market data (`BTC-USD` is configured by default).
-
-3. Pick a Coinbase spot symbol and stream from the GUI (magnifying glass / symbol entry) — the fastest demo path is the **public** websocket (no signup).
-
-Automated sanity for a staged folder (maintainers): `./scripts/smoke_macos.sh`
-
-**See it in motion:** Showcase GIFs are in **[Showcase](#showcase)** below (heatmap, stock chart + SEC insiders, screener).
-
-**After launch — what should work**
-
-| Item | Notes |
-|------|--------|
-| Server starts | `./run.sh` or `scripts/smoke_macos.sh`; health pings `127.0.0.1` (default HTTP health port configurable via **`SENTINEL_HEALTH_PORT`**) |
-| GUI window opens | If it does not, check TLS certs and `resources/certs/ca-bundle.crt` |
-| Coinbase spot stream | Public symbols (**no credentials**) — subscribe in client |
-| Python-backed features | SEC overlays, candle fetch via `uv`-managed `scripts/` — run **`brew install uv`**, **`(cd scripts && uv sync)`** inside the unpacked folder if overlays fail |
-
-Maintainers: reproducible bundles from source use **`cmake --preset mac-clang-release`**, **`./scripts/release_macos.sh`** (see **`scripts/release/README.md`**).
-
----
-
-### Build from Source
-
-#### Windows
-
-Install Visual Studio 2022's C++ workload, CMake, vcpkg, and open-source Qt for MSVC. Adjust `QT_MSVC` to your installed Qt directory.
-
-```powershell
-$env:QT_MSVC = "C:\Qt\6.9.3\msvc2022_64"
-$env:VCPKG_ROOT = "C:\dev\vcpkg"
-
-git clone https://github.com/pattty847/Sentinel.git
-cd Sentinel
-cmake --preset windows-msvc-vs
-cmake --build --preset windows-msvc-vs --config Release --parallel 6
+```
+Coinbase WS ──> sentinel-capture ──> RAWL2 journal (disk) ─┐
+                      └── local fan-out socket ────────────┤
+                                                           v
+                    sentinel-server: roller ─> HMC2 history, candles, book, trades
+                                                           │  TLS WebSocket (127.0.0.1:8080)
+                                                           v
+                    sentinel-gui: stream client ─> chart core ─> Qt Scene Graph ─> GPU
 ```
 
-Run:
+| Path | Owns |
+| --- | --- |
+| `libs/core` | Capture, journal, roller, server model, protocol, paper trading. QtCore only. |
+| `libs/gui` | Qt Quick, QML and scene graph rendering, docks and widgets. |
+| `apps/` | Thin executables: `sentinel-capture`, `sentinel-server`, `sentinel-gui`, `sentinel-roll`, `sentinel-backtest`, `sentinel-lab`. |
 
-```powershell
-.\build\windows-msvc-vs\apps\sentinel-gui\Release\sentinel-gui.exe
-```
-
-For the Python backends (SEC, screener, and stock candles), install `uv`, clone the sibling dependency if it is absent, and sync from the Sentinel root:
-
-```powershell
-git clone https://github.com/pattty847/CopeTech-Edgar.git ..\CopeTech-Edgar
-uv sync --project scripts --locked
-```
+Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/RAW_CAPTURE.md](docs/RAW_CAPTURE.md),
+[docs/ROLLER.md](docs/ROLLER.md), [docs/MARKETDATA.md](docs/MARKETDATA.md).
 
 ---
 
-#### macOS
+## Build from source
+
+Dependencies come from vcpkg (`VCPKG_ROOT`) and an installed Qt 6; each preset reads the Qt path
+from an environment variable.
+
+**macOS** (primary platform):
 
 ```bash
 brew install qt cmake ninja
@@ -184,85 +160,89 @@ export VCPKG_ROOT=$HOME/vcpkg
 git clone https://github.com/pattty847/Sentinel.git
 cd Sentinel
 cmake --preset mac-clang
-cmake --build --preset mac-clang -j
+cmake --build --preset mac-clang -j 6
 ```
 
----
+**Windows** (Visual Studio 2022 C++ workload, CMake, vcpkg, Qt for MSVC):
 
-#### Linux
+```powershell
+$env:QT_MSVC = "C:\Qt\6.9.3\msvc2022_64"   # your Qt directory
+$env:VCPKG_ROOT = "C:\dev\vcpkg"
+cmake --preset windows-msvc-vs
+cmake --build --preset windows-msvc-vs --config Release --parallel 6
+```
+
+**Linux**: the `linux-gcc` preset (`QT_LINUX`, `VCPKG_ROOT`, GCC, Ninja). It is not tested
+regularly.
+
+Binaries land in `build/<preset>/apps/<name>/` (plus `<Config>/` with Visual Studio), for example
+`build/mac-clang/apps/sentinel-server/sentinel-server`.
+
+**Python backends** (SEC, screener, stock candles) use [uv](https://docs.astral.sh/uv/) and a
+sibling `CopeTech-Edgar` checkout; see [scripts/README.md](scripts/README.md):
 
 ```bash
-sudo apt install build-essential cmake ninja-build qt6-base-dev qt6-declarative-dev
-export QT_LINUX=/usr/lib/qt6
-export VCPKG_ROOT=$HOME/vcpkg
-
-git clone https://github.com/pattty847/Sentinel.git
-cd Sentinel
-cmake --preset linux-gcc
-cmake --build --preset linux-gcc -j
+git clone https://github.com/pattty847/CopeTech-Edgar.git ../CopeTech-Edgar
+uv sync --project scripts --locked
 ```
 
----
+## Run
 
-## Run (from source build tree)
+Run everything from the repository root. The server's only live source is the capture journal, so
+start capture first.
 
-CMake uses output name **`sentinel-gui`** and **`sentinel-server`** under **`build/<preset>/apps/sentinel-gui/<Config>/`** and **`apps/sentinel-server/<Config>/`** (exact path depends on platform and preset). Adjust paths accordingly — example:
+1. Create the stream server's self-signed TLS pair once (it is never committed):
+   `bash certs/gen-certs.sh` (Windows: `certs/gen-certs.ps1`).
+2. Point the server at your own data directories; the tracked config uses the maintainer's paths.
+   Create `config/.server_config.yaml` (untracked; its keys override `config/server_config.yaml`):
 
-```bash
-./build/linux-gcc/apps/sentinel-server/Release/sentinel-server
-./build/linux-gcc/apps/sentinel-gui/Release/sentinel-gui
-```
+   ```yaml
+   roller_shadow:
+     journal_dir: /path/to/sentinel-data/raw-l2
+     dir: /path/to/sentinel-data/hmc2
+     products: [BTC-USD]
+   ```
 
-Start **server before client**, from the repository root.
+3. Start capture, then the server, then the GUI:
 
-The stream server uses TLS with a per-machine self-signed pair that is never committed. Generate it once before the first run:
+   ```bash
+   ./build/mac-clang/apps/sentinel-capture/sentinel-capture --root /path/to/sentinel-data/raw-l2 --symbols BTC-USD
+   ./build/mac-clang/apps/sentinel-server/sentinel-server
+   ./build/mac-clang/apps/sentinel-gui/sentinel-gui
+   ```
 
-```bash
-bash certs/gen-certs.sh
-```
+The stream listens on `127.0.0.1:8080` and has no client authentication; read
+[docs/CONFIG.md](docs/CONFIG.md) before you change `bind_address`. Without the TLS pair the server
+logs `SentinelStreamServer start failed` and keeps recording, but clients cannot connect. Each run
+writes a log file (macOS: `~/Library/Logs/Sentinel/`). Capture options, verification and shutdown
+are in [docs/RAW_CAPTURE.md](docs/RAW_CAPTURE.md).
 
-(Windows: `certs/gen-certs.ps1`.) Without it the server logs `SentinelStreamServer start failed` and clients cannot connect, but the process keeps recording. A port already in use has the same behaviour. Invalid `server.bind_address` configuration instead exits before recording or feeds start.
-
-For **macOS bundles** produced off this repo see **`scripts/release_macos.sh`** and **`LAUNCH_README.md`** bundled with releases.
-
----
+**Releases.** The only published release (`v2.1.0-alpha`, March 2026) predates the capture and
+roller design. Build from source for the current version. Packaging scripts for maintainers:
+[scripts/release/README.md](scripts/release/README.md).
 
 ## Configuration
 
+Server: `config/server_config.yaml`; client: `config/client_config.yaml`. Each has an untracked
+override (`config/.server_config.yaml`, `config/.client_config.yaml`). Every key is documented in
+[docs/CONFIG.md](docs/CONFIG.md).
+
+## Tests
+
 ```bash
-cp config/server_config.yaml config/.server_config.yaml
-cp config/client_config.yaml config/.client_config.yaml
+ctest --test-dir build/mac-clang --output-on-failure -j 4
 ```
 
-Example:
+Set `SENTINEL_REQUIRE_GPU=1` to make a missing GPU fail the GPU tests instead of skipping them.
+Render tests include CPU view-trace goldens and Metal frame-hash goldens. See
+[tests/README.md](tests/README.md).
 
-```yaml
-heatmap:
-  timeframe: 1000
-  grid_width: 2048
-  grid_height: 1024
+## Contributing
 
-server:
-  default_symbols: BTC-USD
-
-gui:
-  api_port: 17100
-```
-
----
-
-## Architecture
-
-```
-libs/core/    Data layer (protocol, market data, simulation)
-libs/gui/     Qt rendering + UI system
-apps/         Client, server, tools
-```
-
-Single authoritative viewport shared across all rendering layers.
-
----
+Most changes are written and cross-reviewed by coding agents under the rules in
+[AGENTS.md](AGENTS.md). The ownership boundaries there (core stays free of GUI Qt) apply to every
+change.
 
 ## License
 
-AGPL-3.0
+[AGPL-3.0](LICENSE)
