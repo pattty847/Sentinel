@@ -33,9 +33,9 @@ struct RecorderConfig {
     // Deterministic allocation-failure seam, before building any publication
     // (open-minute records and pending/committed copies). Tests only.
     std::function<void(bool provisional)> beforePublicationForTest;
-    // A valid book may stay one-sided this long (integration clock) before it is
-    // invalidated as "one-sided book": a lasting empty side freezes the mid window.
-    int64_t oneSidedGraceMs = 5'000;
+    // Continuous empty/one-sided books stay reconstructible but unobserved.
+    // After this integration-clock duration, request a precautionary snapshot.
+    int64_t oneSidedSuspectMs = 30'000;
     // Test synchronization only, called under the queue mutex before blocking.
     std::function<void()> beforeQueueWaitForTest;
     // Optional process counters; registry must outlive the recorder. Worker
@@ -97,14 +97,12 @@ class BookRecorder {
     Stats stats() const;
     // Safe to query from chunk workers; one cutoff per persisted native level.
     Watermarks watermarks(const std::string &symbol, const std::string &layer) const;
-    // Why the symbol's invalidated book waits for a snapshot; empty reason while
-    // valid (or never invalidated). upstream: every invalidation since the last
-    // accepted snapshot came through onInvalid (transport or journal boundary).
-    // A recorder self-invalidation (one-sided book, malformed L2, row size
-    // overflow, unrepresentable or missing two-sided mid, invalid timestamp,
-    // worker exception) or a book importState() installed invalid sets
-    // upstream=false, and a later onInvalid keeps it. Only an accepted snapshot
-    // clears it. Thread-safe; reflects processed messages.
+    // Snapshot recovery for broken continuity, or precautionary recovery after
+    // oneSidedSuspectMs. upstream means onInvalid (transport/journal); recorder
+    // failures and suspicious continuous books use upstream=false. An accepted
+    // snapshot clears any wait. A continuous book also clears its precautionary
+    // wait when updates restore a two-sided, uncrossed, representable midpoint.
+    // Thread-safe; reflects processed messages.
     struct SnapshotWait {
         std::string reason;
         bool upstream = false;

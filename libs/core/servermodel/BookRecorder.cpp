@@ -77,6 +77,7 @@ struct Symbol {
     std::pmr::map<int64_t, double> bids{&pool}, asks{&pool};
     std::vector<Layer> layers;
     bool initialized = false, valid = false;
+    bool observing = false; // derived from continuity and book; not serialized
     int64_t clock = 0, minute = 0, closedThrough = 0, offset = 0;
     int64_t minuteThroughMs = 0;
     bool minuteWatermarkBlocked = false;
@@ -85,7 +86,7 @@ struct Symbol {
     double mid = 0, midOpen = 0, midMin = 0, midMax = 0, midClose = 0;
     uint64_t serial = 0;
     std::deque<Hmc2Record> pending;
-    int64_t oneSidedSince = -1; // integration clock when a side emptied, -1 = two-sided
+    int64_t oneSidedSince = -1; // empty-side episode; retained until a raised wait is satisfied
     // Worker mirror of Impl::awaiting; never exported or forked.
     enum class Wait : uint8_t { None, Upstream, Recorder } wait = Wait::None;
 };
@@ -147,7 +148,8 @@ StateJson statePolicy(const RecorderConfig& c) {
     j["latenessMs"] = c.latenessMs;
     j["maxQueuedLevels"] = c.maxQueuedLevels;
     j["livePublishMs"] = c.livePublishMs;
-    j["oneSidedGraceMs"] = c.oneSidedGraceMs;
+    // Keep the replay-policy wire key; its value now identifies the suspect timeout.
+    j["oneSidedGraceMs"] = c.oneSidedSuspectMs;
     j["deterministicResume"] = c.deterministicResume;
     j["commitFloorMs"] = c.commitFloorMs;
     j["commitCeilingMs"] = c.commitCeilingMs;
@@ -379,6 +381,10 @@ std::unique_ptr<Symbol> unpackSymbol(const StateJson& j, const std::string& name
             out.bucketStartMs < v.minute && (v.pending.empty() || v.pending.back().bucketStartMs <= out.bucketStartMs), "pending identity/order");
         v.pending.push_back(std::move(out));
     }
+    v.observing = v.valid && !v.bids.empty() && !v.asks.empty() &&
+        v.bids.rbegin()->first < v.asks.begin()->first &&
+        std::isfinite(std::midpoint(static_cast<double>(v.bids.rbegin()->first) / cfg.priceScale,
+                                  static_cast<double>(v.asks.begin()->first) / cfg.priceScale));
     return symbol;
 }
 } // namespace
@@ -431,7 +437,7 @@ struct BookRecorder::Impl {
         if (c.root.empty() || !std::isfinite(c.priceScale) || c.priceScale <= 0 || !std::isfinite(c.sizeScale.floor) ||
             c.sizeScale.floor <= 0 || !std::isfinite(c.sizeScale.codesPerOctave) || c.sizeScale.codesPerOctave <= 0 ||
             c.latenessMs < 0 || c.latenessMs > kHour || c.maxQueuedLevels == 0 || c.layers.empty() ||
-            c.oneSidedGraceMs < 0 || c.livePublishMs <= 0 ||
+            c.oneSidedSuspectMs < 0 || c.livePublishMs <= 0 ||
             c.commitFloorMs < 0 || c.commitFloorMs > c.commitCeilingMs || c.commitCeilingMs > kHmc2EndMs)
             throw std::invalid_argument("BookRecorder: invalid config");
         std::set<std::string> names;
@@ -535,7 +541,7 @@ struct BookRecorder::Impl {
     void invalidate(const std::string &name, Symbol &s, const std::string &reason, bool upstream = false) {
         for (auto &layer : s.layers) {
             for (auto &[_, row] : layer.rows) {
-                if (s.valid)
+                if (s.observing)
                     accrue(row, s.clock);
                 // A rejected resnapshot may have installed provisional levels
                 // while validity was already false. Never retain those levels.
@@ -545,6 +551,7 @@ struct BookRecorder::Impl {
             }
         }
         s.valid = false;
+        s.observing = false;
         s.oneSidedSince = -1;
         s.bids.clear();
         s.asks.clear();
@@ -561,22 +568,20 @@ struct BookRecorder::Impl {
         std::lock_guard lock(awaitingMutex);
         awaiting[name] = {reason, upstream};
     }
-    void snapshotAccepted(const std::string &name, Symbol &s) {
+    void clearSnapshotWait(const std::string &name, Symbol &s) {
         if (std::exchange(s.wait, Symbol::Wait::None) == Symbol::Wait::None)
             return;
         std::lock_guard lock(awaitingMutex);
         awaiting.erase(name);
     }
-    // A side that stays empty beyond the grace is a book we can no longer trust to
-    // place the window: close observation at the grace end until the next journal snapshot.
-    void expireOneSided(const std::string &name, Symbol &s, int64_t target) {
-        if (!s.valid || s.oneSidedSince < 0 || target - s.oneSidedSince <= cfg.oneSidedGraceMs)
+    void checkOneSided(const std::string &name, Symbol &s, int64_t target) {
+        if (!s.valid || s.oneSidedSince < 0 || s.wait != Symbol::Wait::None ||
+            target - s.oneSidedSince < cfg.oneSidedSuspectMs)
             return;
-        advance(s, s.oneSidedSince + cfg.oneSidedGraceMs);
-        invalidate(name, s, "one-sided book");
+        awaitSnapshot(name, s, "one-sided suspect", false);
     }
     bool trackMid(Symbol &s) {
-        if (s.bids.empty() || s.asks.empty())
+        if (s.bids.empty() || s.asks.empty() || s.bids.rbegin()->first >= s.asks.begin()->first)
             return false;
         const double mid = std::midpoint(static_cast<double>(s.bids.rbegin()->first) / cfg.priceScale,
                                          static_cast<double>(s.asks.begin()->first) / cfg.priceScale);
@@ -595,9 +600,8 @@ struct BookRecorder::Impl {
         s.observed = 0;
         s.flags = 0;
         s.midOpen = s.midMin = s.midMax = s.midClose = 0;
-        // A valid one-sided book has no mid: the window keeps the last two-sided one.
-        if (s.valid && !trackMid(s))
-            s.midOpen = s.midMin = s.midMax = s.midClose = s.mid;
+        if (s.observing)
+            trackMid(s);
     }
     void publish(std::shared_ptr<const Hmc2Record> record) {
         if (!cfg.publisher) return;
@@ -623,15 +627,14 @@ struct BookRecorder::Impl {
         if (!cfg.publisher || !lead() || !s.observed ||
             s.clock - s.lastPublish < cfg.livePublishMs)
             return;
-        // An invalid book (expired one-sided grace, upstream
-        // outage) integrates nothing while its clock moves: republishing would
+        // An unobserved book integrates nothing while its clock moves: republishing would
         // bump the live revision every interval for an unchanged frame. Publish
         // again once an input changes (validity, observation, flags, cutoff, minute).
         const Layer::OpenKey key{s.minute, s.closedThrough, s.observed, s.flags};
         bool attempted = false;
         for (size_t li = 0; li < s.layers.size(); ++li) {
             auto &layer = s.layers[li];
-            if (!s.valid && layer.publishedOpen == key) continue;
+            if (!s.observing && layer.publishedOpen == key) continue;
             attempted = true;
             // Same contract as publishCopy: a failed publication is skipped and
             // retried next interval; it must never reach run() and invalidate books.
@@ -650,7 +653,7 @@ struct BookRecorder::Impl {
                 r->bidRowHi = r->askRowHi = hi;
                 r->entries.reserve(layer.rows.size());
                 for (const auto &[k, row] : layer.rows) {
-                    const auto integral = row.integral + (s.valid ? row.size * (s.clock - row.last) : 0);
+                    const auto integral = row.integral + (s.observing ? row.size * (s.clock - row.last) : 0);
                     if (k.first >= lo && k.first <= hi && (integral > 0 || row.peak > 0))
                         r->entries.push_back({k.first, k.second,
                             encode(integral / r->observedMs, cfg.sizeScale, r->flags),
@@ -693,14 +696,17 @@ struct BookRecorder::Impl {
             r.entries.reserve(layer.rows.size());
             for (auto it = layer.rows.begin(); it != layer.rows.end();) {
                 auto &[key, row] = *it;
-                accrue(row, s.clock);
+                if (s.observing)
+                    accrue(row, s.clock);
+                else
+                    row.last = s.clock;
                 if (r.observedMs && key.first >= lo && key.first <= hi && (row.integral > 0 || row.peak > 0)) {
                     r.entries.push_back({key.first, key.second,
                                          encode(row.integral / r.observedMs, cfg.sizeScale, r.flags),
                                          encode(row.peak, cfg.sizeScale, r.flags)});
                 }
                 row.integral = 0;
-                row.peak = row.size;
+                row.peak = s.observing ? row.size : 0;
                 if (row.size == 0)
                     it = layer.rows.erase(it);
                 else
@@ -719,7 +725,7 @@ struct BookRecorder::Impl {
         target = std::max(target, s.clock);
         while (s.minute + kMinute <= target) {
             const auto end = s.minute + kMinute;
-            if (s.valid)
+            if (s.observing)
                 s.observed += static_cast<uint32_t>(end - s.clock);
             s.clock = end;
             finishMinute(s);
@@ -727,7 +733,7 @@ struct BookRecorder::Impl {
             resetMinute(s);
             commit(s);
             // Skip unknown gaps in O(1). Never materialize zero-observation columns.
-            if (!s.valid && target >= s.minute + kMinute) {
+            if (!s.observing && target >= s.minute + kMinute) {
                 s.minute = floorDiv(target, kMinute) * kMinute;
                 s.clock = s.minute;
                 for (auto &layer : s.layers)
@@ -735,7 +741,7 @@ struct BookRecorder::Impl {
                         row.last = s.clock;
             }
         }
-        if (s.valid)
+        if (s.observing)
             s.observed += static_cast<uint32_t>(target - s.clock);
         s.clock = target;
         commit(s);
@@ -968,10 +974,13 @@ struct BookRecorder::Impl {
                 return;
             }
         }
+        const bool wasObserving = s.observing;
         if (m.kind == Kind::Snapshot) {
             for (auto &layer : s.layers)
                 for (auto &[_, row] : layer.rows) {
-                    accrue(row, s.clock);
+                    if (wasObserving)
+                        accrue(row, s.clock);
+                    row.last = s.clock;
                     row.size = 0;
                     row.levels = 0;
                 }
@@ -1004,7 +1013,10 @@ struct BookRecorder::Impl {
                 if (added)
                     row.last = s.clock;
                 if (row.touched != s.serial) {
-                    accrue(row, s.clock);
+                    if (wasObserving)
+                        accrue(row, s.clock);
+                    else
+                        row.last = s.clock;
                     row.touched = s.serial;
                     l.touched.push_back(&row);
                 }
@@ -1021,9 +1033,8 @@ struct BookRecorder::Impl {
             }
         }
         if (s.bids.empty() || s.asks.empty()) {
-            // A snapshot must seed a mid. After a valid update, a one-sided book is
-            // still the exact, continuous book: keep it and integrate (2026-09-30:
-            // treating it as invalid stopped the recorder until the next reconnect).
+            // A snapshot must seed a mid. Continuous updates retain the exact
+            // book even when empty, but cannot contribute midpoint-based data.
             if (m.kind == Kind::Snapshot) {
                 invalidate(m.symbol(), s, "missing two-sided mid");
                 return;
@@ -1037,23 +1048,42 @@ struct BookRecorder::Impl {
                                                                                                     : "ask")
                                                                 << " time=" << s.clock);
             }
-        } else {
-            if (s.oneSidedSince >= 0) {
-                sLog_Data("BookRecorder: two-sided again symbol=" << m.symbol() << " time=" << s.clock
-                                                                  << " durationMs=" << (s.clock - s.oneSidedSince));
-                s.oneSidedSince = -1;
-            }
-            if (!trackMid(s)) {
-                invalidate(m.symbol(), s, "unrepresentable mid");
-                return;
-            }
         }
-        for (auto &l : s.layers)
-            for (auto *row : l.touched)
-                row->peak = std::max(row->peak, row->size);
+        const bool usable = trackMid(s);
+        // A crossed refill stops the empty-side timer, but cannot satisfy an
+        // already-raised wait. Retain its timer so replay restore keeps that wait.
+        if (s.oneSidedSince >= 0 && (usable ||
+            (!s.bids.empty() && !s.asks.empty() && s.wait == Symbol::Wait::None))) {
+            sLog_Data("BookRecorder: two-sided again symbol=" << m.symbol() << " time=" << s.clock
+                                                              << " durationMs=" << (s.clock - s.oneSidedSince));
+            s.oneSidedSince = -1;
+        }
+        if (m.kind == Kind::Snapshot && !usable) {
+            invalidate(m.symbol(), s, "unrepresentable or crossed mid");
+            return;
+        }
+        s.observing = usable;
+        if (wasObserving != s.observing) {
+            // Lazy row integrals must stop at suspension, and restart at refill.
+            // Scan only on transitions; updates otherwise touch changed rows only.
+            for (auto &l : s.layers)
+                for (auto &[_, row] : l.rows) {
+                    if (wasObserving)
+                        accrue(row, s.clock);
+                    else {
+                        row.last = s.clock;
+                        row.peak = std::max(row.peak, row.size);
+                    }
+                }
+        }
+        if (s.observing) {
+            for (auto &l : s.layers)
+                for (auto *row : l.touched)
+                    row->peak = std::max(row->peak, row->size);
+            clearSnapshotWait(m.symbol(), s);
+        }
         if (m.kind == Kind::Snapshot) {
             s.valid = true;
-            snapshotAccepted(m.symbol(), s);
             sLog_Data("BookRecorder: snapshot symbol=" << m.symbol() << " time=" << s.clock
                                                        << " levels=" << m.levels.size());
         }
@@ -1073,7 +1103,7 @@ struct BookRecorder::Impl {
                 auto &s = *ptr;
                 if (!s.initialized) continue;
                 const auto t = std::clamp(m.time - s.offset, int64_t{0}, kMaxTime);
-                expireOneSided(name, s, t);
+                checkOneSided(name, s, t);
                 advance(s, t);
                 if (m.kind == Kind::Invalid)
                     invalidate(name, s, m.reason, true);
@@ -1103,7 +1133,7 @@ struct BookRecorder::Impl {
         // envelope; advance() independently clamps the integration clock.
         const int64_t t = std::max(m.time, s.clock);
         s.offset = m.local - m.time;
-        expireOneSided(m.symbol(), s, t);
+        checkOneSided(m.symbol(), s, t);
         advance(s, t);
         if (late)
             s.flags |= kLateEvents;
@@ -1182,6 +1212,7 @@ std::unique_ptr<BookRecorder> BookRecorder::forkLead(std::function<void(std::sha
         }
         to->initialized = from->initialized;
         to->valid = from->valid;
+        to->observing = from->observing;
         to->clock = from->clock;
         to->minute = from->minute;
         to->closedThrough = from->closedThrough;
@@ -1278,6 +1309,8 @@ void BookRecorder::importState(const std::vector<uint8_t>& bytes) {
             s->wait = Symbol::Wait::Recorder;
             std::lock_guard awaitingLock(dst.awaitingMutex);
             dst.awaiting[name] = {"restored invalid book", false};
+        } else {
+            dst.checkOneSided(name, *s, s->clock);
         }
     dst.symbols.swap(symbols); dst.watermarksBySeries.swap(watermarks);
     dst.workerLocal = local; dst.openFailureLogLocal = failureLocal; dst.openFailuresSuppressed = failures;

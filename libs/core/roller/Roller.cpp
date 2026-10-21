@@ -56,7 +56,7 @@ namespace {
 uint64_t configHash(const recording::RecorderConfig& c) {
     // Stable semantic hash, with the complete policy/version in the checkpoint.
     json j = {{"version",Version},{"scale",c.priceScale},{"floor",c.sizeScale.floor},
-              {"codes",c.sizeScale.codesPerOctave},{"lateness",c.latenessMs},{"grace",c.oneSidedGraceMs}};
+              {"codes",c.sizeScale.codesPerOctave},{"lateness",c.latenessMs},{"oneSidedSuspect",c.oneSidedSuspectMs}};
     for (const auto& l : c.layers) j["layers"].push_back({l.name,l.rowTickUnits,l.lowFrac,l.highMult,l.hourlyRollup});
     uint64_t h = 14695981039346656037ull;
     for (unsigned char ch : j.dump()) { h ^= ch; h *= 1099511628211ull; }

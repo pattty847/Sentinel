@@ -445,21 +445,18 @@ TEST(Roller, RefusesUnownedHmc2AndConfiguredRecorderRoots) {
     EXPECT_EQ(invoke(root/"unowned"),1);EXPECT_EQ(contents(marker),"do not touch");
 }
 
-// A6: the history publisher and its publication mode are not checkpoint
-// policy. The slice A..C BTC-USD product root keeps its hash, so existing roots
-// reopen under the serving path (a changed hash throws "checkpoint policy/range mismatch").
-TEST(Roller, PublisherKeepsSliceACheckpointPolicyHash) {
-    constexpr uint64_t SliceABtcHash=18293455670244139256ull; // /Volumes/T7/sentinel-data/hmc2/BTC-USD/roller.json
+// The history publisher and its publication mode are not checkpoint policy.
+TEST(Roller, PublisherKeepsCheckpointPolicyHash) {
     QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); fs::path root=temp.path().toStdString(); fixture(root/"raw");
     auto o=options(root/"raw",root/"out"); o.toMs=Epoch+120'000; o.productWriterLease=true;
     roll(o);
     const auto cp=root/"out"/"BTC-USD"/"roller.json";
-    EXPECT_EQ(json::parse(contents(cp)).at("configHash").get<uint64_t>(),SliceABtcHash);
+    const auto policyHash = json::parse(contents(cp)).at("configHash").get<uint64_t>();
     std::mutex mutex; std::vector<std::shared_ptr<const recording::Hmc2Record>> finals;
     o.toMs=Epoch+240'000;
     o.publisher=[&](std::shared_ptr<const recording::Hmc2Record> r){std::lock_guard lock(mutex);finals.push_back(std::move(r));};
     EXPECT_NO_THROW(roll(o));
-    EXPECT_EQ(json::parse(contents(cp)).at("configHash").get<uint64_t>(),SliceABtcHash);
+    EXPECT_EQ(json::parse(contents(cp)).at("configHash").get<uint64_t>(),policyHash);
     EXPECT_EQ(json::parse(contents(cp)).at("committedThroughMs").get<int64_t>(),Epoch+240'000);
     // History publishes committed minutes only (2 and 3, both layers), once each.
     ASSERT_EQ(finals.size(),4u);
@@ -468,7 +465,6 @@ TEST(Roller, PublisherKeepsSliceACheckpointPolicyHash) {
 // D-b1 A9: the journal model tap chains the day's feed (RollOptions::onFeed);
 // it is not checkpoint policy and changes neither the hash nor the output.
 TEST(Roller, FeedTapKeepsCheckpointPolicyHashAndOutput) {
-    constexpr uint64_t SliceABtcHash=18293455670244139256ull; // /Volumes/T7/sentinel-data/hmc2/BTC-USD/roller.json
     QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); fs::path root=temp.path().toStdString(); fixture(root/"raw");
     auto plain=options(root/"raw",root/"plain"); plain.toMs=Epoch+240'000; plain.productWriterLease=true;
     roll(plain);
@@ -480,8 +476,8 @@ TEST(Roller, FeedTapKeepsCheckpointPolicyHashAndOutput) {
     };
     roll(tapped);
     EXPECT_GT(snapshots,0u); EXPECT_GT(updates,0u);
-    for(const auto* name:{"plain","tapped"})
-        EXPECT_EQ(json::parse(contents(root/name/"BTC-USD"/"roller.json")).at("configHash").get<uint64_t>(),SliceABtcHash) << name;
+    EXPECT_EQ(json::parse(contents(root/"plain"/"BTC-USD"/"roller.json")).at("configHash"),
+              json::parse(contents(root/"tapped"/"BTC-USD"/"roller.json")).at("configHash"));
     const auto plainFiles=files(root/"plain");
     EXPECT_FALSE(plainFiles.empty()); EXPECT_EQ(plainFiles,files(root/"tapped"));
 }

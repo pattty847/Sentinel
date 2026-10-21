@@ -706,7 +706,7 @@ TEST_F(RecorderTest, OneSidedUpdateDoesNotStopRecordingAcrossUtcDay) {
     auto rows = read(60000, "near", 2 * D);
     // Before the fix: 3 rows, observedMs 30000/60000/28559, invalidations=1.
     const std::vector<int64_t> buckets{D - 180000, D - 120000, D - 60000, D, D + 60000, D + 120000};
-    const std::vector<uint32_t> observed{30000, 60000, 60000, 60000, 60000, 60000};
+    const std::vector<uint32_t> observed{30000, 60000, 59559, 60000, 60000, 60000};
     for (size_t i = 0; i < std::min(rows.size(), buckets.size()); ++i) {
         EXPECT_EQ(rows[i].bucketStartMs, buckets[i]) << i;
         EXPECT_EQ(rows[i].observedMs, observed[i]) << i;
@@ -714,16 +714,15 @@ TEST_F(RecorderTest, OneSidedUpdateDoesNotStopRecordingAcrossUtcDay) {
     EXPECT_EQ(r->stats().invalidations, 0);
     ASSERT_EQ(rows.size(), 6);
     value(rows[2], 99, false, 2, 2);
-    value(rows[2], 101, true, 4.0 * 59559 / 60000, 4);
+    value(rows[2], 101, true, 4, 4);
     EXPECT_DOUBLE_EQ(rows[2].midMin, 100);
     value(rows[3], 99, false, 2.5, 3);
     value(rows[3], 101, true, 4, 4);
     EXPECT_TRUE(std::filesystem::exists(dir.path().toStdString() + "/BTC-USD/near-60000/2000-01-02.hmc2"));
     EXPECT_EQ(r->watermarks("BTC-USD", "near").lastColumnMs, kEpoch + D + 120000); // feeds the stall warning
 }
-// A one-sided book that crosses a minute boundary (inside the grace) keeps the
-// last two-sided mid for the new window (no mid from an empty side, no UB).
-TEST_F(RecorderTest, EmptySideAcrossMinuteBoundaryKeepsLastMid) {
+// An unobserved minute starts its midpoint window only when observation resumes.
+TEST_F(RecorderTest, EmptySideAcrossMinuteBoundaryResumesMidOnRefill) {
     auto r = make(config());
     snap(*r, 0);
     update(*r, 58000, {{false, 101, 0}});
@@ -731,32 +730,18 @@ TEST_F(RecorderTest, EmptySideAcrossMinuteBoundaryKeepsLastMid) {
     tick(*r, 180000);
     auto rows = read();
     ASSERT_EQ(rows.size(), 3);
-    for (const auto &row : rows)
-        EXPECT_EQ(row.observedMs, 60000);
+    EXPECT_EQ(rows[0].observedMs, 58000);
+    EXPECT_EQ(rows[1].observedMs, 58000);
+    EXPECT_EQ(rows[2].observedMs, 60000);
     EXPECT_EQ(r->stats().invalidations, 0);
-    value(rows[0], 101, true, 4.0 * 58000 / 60000, 4);
-    EXPECT_DOUBLE_EQ(rows[1].midOpen, 100);
-    EXPECT_DOUBLE_EQ(rows[1].midMin, 100);
+    value(rows[0], 101, true, 4, 4);
+    EXPECT_DOUBLE_EQ(rows[1].midOpen, 100.5);
+    EXPECT_DOUBLE_EQ(rows[1].midMin, 100.5);
     EXPECT_DOUBLE_EQ(rows[1].midClose, 100.5);
-    value(rows[1], 102, true, 5.0 * 58000 / 60000, 5);
+    value(rows[1], 102, true, 5, 5);
     value(rows[1], 99, false, 2, 2);
     EXPECT_DOUBLE_EQ(rows[2].midOpen, 100.5);
     value(rows[2], 102, true, 5, 5);
-}
-// A side that never refills must not be integrated forever with a frozen mid.
-TEST_F(RecorderTest, OneSidedBeyondGraceInvalidates) {
-    auto c = config();
-    auto r = make(c);
-    snap(*r, 0);
-    update(*r, 10000, {{false, 101, 0}});
-    tick(*r, 20000);
-    EXPECT_EQ(r->stats().invalidations, 1);
-    tick(*r, 60000);
-    auto rows = read();
-    ASSERT_EQ(rows.size(), 1);
-    EXPECT_EQ(rows[0].observedMs, 15000); // closed at the 5 s grace end
-    value(rows[0], 99, false, 2, 2);
-    value(rows[0], 101, true, 4.0 * 10000 / 15000, 4);
 }
 // FM-121: the recorder's own invalidations wait as "recorder" (only a requested
 // snapshot cures them); onInvalid ones as "upstream" (normally followed by one).
@@ -764,19 +749,174 @@ std::string waitOf(const BookRecorder &r, const std::string &symbol) {
     const auto w = r.snapshotWait(symbol);
     return w.reason.empty() ? "" : (w.upstream ? "upstream:" : "recorder:") + w.reason;
 }
+// Both clear shapes reproduce the exchange's update-only refill after nine seconds.
+TEST_F(RecorderTest, EmptyAndBidOnlyClearResumeWithoutSnapshot) {
+    const auto check = [&](bool both) {
+        SCOPED_TRACE(both ? "both sides" : "bids only");
+        QTemporaryDir output, referenceOutput;
+        auto c = config();
+        c.root = output.path().toStdString();
+        auto r = make(c);
+        snap(*r, 0);
+        std::vector<Level> clear{{true, 99, 0}};
+        if (both) clear.push_back({false, 101, 0});
+        update(*r, 10000, clear);
+        tick(*r, 18000);
+        EXPECT_EQ(r->stats().invalidations, 0);
+        EXPECT_EQ(waitOf(*r, "BTC-USD"), "");
+        // A visible-side spike during suspension must never enter peaks or TWAP.
+        update(*r, 18500, {{false, 101, 400}});
+        update(*r, 19000, {{true, 99, 6}, {false, 101, 8}});
+        tick(*r, 60000);
+        auto rows = Hmc2Store::readRange(c.root, "BTC-USD", "near", 60000, kEpoch, kEpoch + 120000);
+        ASSERT_EQ(rows.size(), 1);
+        EXPECT_EQ(rows[0].observedMs, 51000);
+        EXPECT_NE(rows[0].flags & kPartial, 0);
+        value(rows[0], 99, false, (2.0 * 10000 + 6.0 * 41000) / 51000, 6);
+        value(rows[0], 101, true, (4.0 * 10000 + 8.0 * 41000) / 51000, 8);
+        EXPECT_EQ(r->stats().invalidations, 0);
+        EXPECT_EQ(waitOf(*r, "BTC-USD"), "");
+        c.root = referenceOutput.path().toStdString();
+        auto reference = make(c);
+        snap(*reference, 60000, {{true, 99, 6}, {false, 101, 8}});
+        update(*r, 90000, {{true, 99, 3}, {false, 101, 7}});
+        update(*reference, 90000, {{true, 99, 3}, {false, 101, 7}});
+        tick(*r, 120000);
+        tick(*reference, 120000);
+        rows = Hmc2Store::readRange(output.path().toStdString(), "BTC-USD", "near", 60000,
+                                    kEpoch + 60000, kEpoch + 120000);
+        auto expected = Hmc2Store::readRange(c.root, "BTC-USD", "near", 60000,
+                                            kEpoch + 60000, kEpoch + 120000);
+        ASSERT_EQ(rows.size(), 1);
+        ASSERT_EQ(expected.size(), 1);
+        EXPECT_EQ(rows[0].observedMs, expected[0].observedMs);
+        EXPECT_DOUBLE_EQ(rows[0].midOpen, expected[0].midOpen);
+        EXPECT_DOUBLE_EQ(rows[0].midClose, expected[0].midClose);
+        EXPECT_DOUBLE_EQ(rows[0].midMin, expected[0].midMin);
+        EXPECT_DOUBLE_EQ(rows[0].midMax, expected[0].midMax);
+        EXPECT_EQ(rows[0].bidRowLo, expected[0].bidRowLo);
+        EXPECT_EQ(rows[0].bidRowHi, expected[0].bidRowHi);
+        EXPECT_EQ(rows[0].askRowLo, expected[0].askRowLo);
+        EXPECT_EQ(rows[0].askRowHi, expected[0].askRowHi);
+        // The reference's seed snapshot alone adds kResynced in this minute.
+        EXPECT_EQ(rows[0].flags, expected[0].flags & ~kResynced);
+        ASSERT_EQ(rows[0].entries.size(), expected[0].entries.size());
+        for (size_t i = 0; i < rows[0].entries.size(); ++i) {
+            EXPECT_EQ(rows[0].entries[i].row, expected[0].entries[i].row);
+            EXPECT_EQ(rows[0].entries[i].isAsk, expected[0].entries[i].isAsk);
+            EXPECT_EQ(rows[0].entries[i].twapCode, expected[0].entries[i].twapCode);
+            EXPECT_EQ(rows[0].entries[i].peakCode, expected[0].entries[i].peakCode);
+        }
+    };
+    check(false);
+    check(true);
+}
+TEST_F(RecorderTest, OneSidedSuspectWaitClearsOnRefillOrSnapshot) {
+    for (const bool snapshot : {false, true}) {
+        auto r = make(config());
+        snap(*r, 0);
+        update(*r, 10000, {{true, 99, 0}});
+        tick(*r, 39999);
+        EXPECT_EQ(waitOf(*r, "BTC-USD"), "");
+        tick(*r, 40000);
+        EXPECT_EQ(waitOf(*r, "BTC-USD"), "recorder:one-sided suspect");
+        EXPECT_EQ(r->stats().invalidations, 0);
+        if (snapshot) snap(*r, 41000);
+        else update(*r, 41000, {{true, 99, 2}});
+        EXPECT_EQ(waitOf(*r, "BTC-USD"), "");
+        tick(*r, 60000);
+        const auto rows = read();
+        ASSERT_EQ(rows.size(), 1);
+        EXPECT_EQ(rows[0].observedMs, 29000);
+        value(rows[0], 101, true, 4, 4);
+    }
+}
+TEST_F(RecorderTest, CrossedAndLockedUpdatesSuspendUntilUncrossed) {
+    auto r = make(config());
+    snap(*r, 0);
+    update(*r, 10000, {{true, 102, 500}});
+    tick(*r, 18000);
+    update(*r, 19000, {{true, 102, 0}, {true, 101, 500}}); // locked still unobserved
+    update(*r, 20000, {{true, 101, 0}});
+    tick(*r, 60000);
+    const auto rows = read();
+    ASSERT_EQ(rows.size(), 1);
+    EXPECT_EQ(rows[0].observedMs, 50000);
+    EXPECT_NE(rows[0].flags & kPartial, 0);
+    EXPECT_EQ(rows[0].entries.size(), 2);
+    value(rows[0], 99, false, 2, 2);
+    value(rows[0], 101, true, 4, 4);
+    EXPECT_EQ(r->stats().invalidations, 0);
+}
+TEST_F(RecorderTest, BriefEmptySideThenCrossedDoesNotRaiseOneSidedWait) {
+    auto r = make(config());
+    snap(*r, 0);
+    update(*r, 10000, {{true, 99, 0}});
+    update(*r, 20000, {{true, 102, 2}});
+    tick(*r, 60000);
+    EXPECT_EQ(waitOf(*r, "BTC-USD"), "");
+    EXPECT_EQ(r->stats().invalidations, 0);
+    const auto rows = read();
+    ASSERT_EQ(rows.size(), 1);
+    EXPECT_EQ(rows[0].observedMs, 10000);
+}
+TEST_F(RecorderTest, SuspectWaitSurvivesCrossedRefillAndRestoredState) {
+    auto r = make(config());
+    snap(*r, 0);
+    update(*r, 10000, {{true, 99, 0}});
+    tick(*r, 40000);
+    update(*r, 41000, {{true, 102, 2}});
+    EXPECT_EQ(waitOf(*r, "BTC-USD"), "recorder:one-sided suspect");
+    const auto state = r->exportState();
+    QTemporaryDir output;
+    auto c = config();
+    c.root = output.path().toStdString();
+    auto restored = make(c);
+    restored->importState(state);
+    EXPECT_EQ(waitOf(*restored, "BTC-USD"), "recorder:one-sided suspect");
+    update(*restored, 42000, {{true, 102, 0}, {true, 99, 2}});
+    EXPECT_EQ(waitOf(*restored, "BTC-USD"), "");
+    tick(*restored, 60000);
+    const auto rows = Hmc2Store::readRange(c.root, "BTC-USD", "near", 60000, kEpoch, kEpoch + 60000);
+    ASSERT_EQ(rows.size(), 1);
+    EXPECT_EQ(rows[0].observedMs, 28000);
+    value(rows[0], 101, true, 4, 4);
+}
+TEST_F(RecorderTest, ContinuityLossDuringOneSidedStillRequiresSnapshot) {
+    for (const bool malformed : {false, true}) {
+        auto r = make(config());
+        snap(*r, 0);
+        update(*r, 10000, {{true, 99, 0}});
+        if (malformed) update(*r, 20000, {{false, 101, -1}});
+        else {
+            r->onInvalid("BTC-USD", kEpoch + 20000, "sequence gap");
+            r->drainForTest();
+        }
+        EXPECT_EQ(r->stats().invalidations, 1);
+        const auto reason = malformed ? "recorder:malformed L2" : "upstream:sequence gap";
+        EXPECT_EQ(waitOf(*r, "BTC-USD"), reason);
+        update(*r, 21000, {{true, 99, 2}, {false, 101, 4}});
+        EXPECT_EQ(waitOf(*r, "BTC-USD"), reason);
+        snap(*r, 40000);
+        EXPECT_EQ(waitOf(*r, "BTC-USD"), "");
+        tick(*r, 60000);
+        const auto rows = read();
+        ASSERT_EQ(rows.size(), 1);
+        EXPECT_EQ(rows[0].observedMs, 30000);
+        value(rows[0], 101, true, 4, 4);
+    }
+}
 TEST_F(RecorderTest, SelfInvalidationAwaitsSnapshotUntilOneIsAccepted) {
     auto r = make(config());
     EXPECT_EQ(waitOf(*r, "BTC-USD"), "");
     snap(*r, 0);
-    update(*r, 10000, {{true, 99, 0}});
-    tick(*r, 14000); // inside the 5 s grace: still valid
-    EXPECT_EQ(waitOf(*r, "BTC-USD"), "");
+    update(*r, 10000, {{true, 99, -1}});
     tick(*r, 20000);
-    EXPECT_EQ(waitOf(*r, "BTC-USD"), "recorder:one-sided book");
+    EXPECT_EQ(waitOf(*r, "BTC-USD"), "recorder:malformed L2");
     // An upstream invalidation neither clears nor replaces the reason.
     r->onInvalid("BTC-USD", kEpoch + 21000, "transport up");
     r->drainForTest();
-    EXPECT_EQ(waitOf(*r, "BTC-USD"), "recorder:one-sided book");
+    EXPECT_EQ(waitOf(*r, "BTC-USD"), "recorder:malformed L2");
     snap(*r, 22000, {{true, 99, 2}}); // rejected: no two-sided mid
     EXPECT_EQ(waitOf(*r, "BTC-USD"), "recorder:missing two-sided mid");
     snap(*r, 23000);
@@ -808,7 +948,7 @@ TEST_F(RecorderTest, MalformedL2AwaitsSnapshot) {
 TEST_F(RecorderTest, ImportedInvalidBookAwaitsSnapshot) {
     auto r = make(config());
     snap(*r, 0);
-    update(*r, 10000, {{true, 99, 0}});
+    update(*r, 10000, {{true, 99, -1}});
     tick(*r, 20000);
     const auto state = r->exportState();
     ASSERT_FALSE(state.empty());
@@ -831,21 +971,56 @@ TEST_F(RecorderTest, ImportedInvalidBookAwaitsSnapshot) {
     again->importState(valid->exportState());
     EXPECT_EQ(waitOf(*again, "BTC-USD"), "");
 }
-TEST_F(RecorderTest, OneSidedBookAcrossNearWindowMidMoveStopsAtGrace) {
+TEST_F(RecorderTest, SuspendedVisibleSideNeverMovesRecordedWindow) {
     auto c = config();
     c.layers[0].lowFrac = 0.95;
     c.layers[0].highMult = 1.05;
     auto r = make(c);
     snap(*r, 0);
     update(*r, 10000, {{false, 101, 0}});
-    update(*r, 12000, {{true, 99, 0}, {true, 110, 5}}); // bids move > 5% above the frozen mid
-    tick(*r, 16000);
+    update(*r, 12000, {{true, 99, 0}, {true, 110, 5}});
     tick(*r, 60000);
-    auto rows = read();
+    const auto rows = read();
     ASSERT_EQ(rows.size(), 1);
-    EXPECT_EQ(rows[0].observedMs, 15000);
+    EXPECT_EQ(rows[0].observedMs, 10000);
     EXPECT_DOUBLE_EQ(rows[0].midMax, 100);
-    EXPECT_EQ(r->stats().invalidations, 1);
+    EXPECT_EQ(r->stats().invalidations, 0);
+    value(rows[0], 99, false, 2, 2);
+    EXPECT_EQ(waitOf(*r, "BTC-USD"), "recorder:one-sided suspect");
+}
+TEST_F(RecorderTest, SuspendedStateRestoresAndForksWithoutObservationOrLostWait) {
+    auto r = make(config());
+    snap(*r, 0);
+    update(*r, 10000, {{true, 99, 0}});
+    tick(*r, 40000);
+    const auto state = r->exportState();
+    QTemporaryDir restoredRoot;
+    auto c = config();
+    c.root = restoredRoot.path().toStdString();
+    auto restored = make(c);
+    restored->importState(state);
+    EXPECT_EQ(waitOf(*restored, "BTC-USD"), "recorder:one-sided suspect");
+    std::vector<std::shared_ptr<const Hmc2Record>> publications;
+    auto lead = r->forkLead([&](auto p) { publications.push_back(std::move(p)); }, 500);
+    tick(*lead, 41000);
+    ASSERT_EQ(publications.size(), 1);
+    EXPECT_EQ(publications.back()->observedMs, 10000);
+    tick(*lead, 42000);
+    EXPECT_EQ(publications.size(), 1); // no repeated unobserved publication
+    for (auto *book : {r.get(), restored.get(), lead.get()}) {
+        update(*book, 43000, {{true, 99, 2}});
+        EXPECT_EQ(waitOf(*book, "BTC-USD"), "");
+        tick(*book, 60000);
+        EXPECT_EQ(book->stats().invalidations, 0);
+    }
+    const auto original = read();
+    const auto resumed = Hmc2Store::readRange(c.root, "BTC-USD", "near", 60000, kEpoch, kEpoch + 60000);
+    ASSERT_EQ(original.size(), 1);
+    ASSERT_EQ(resumed.size(), 1);
+    EXPECT_EQ(original[0].observedMs, 27000);
+    EXPECT_EQ(resumed[0].observedMs, 27000);
+    EXPECT_EQ(publications.back()->observedMs, 27000);
+    value(resumed[0], 101, true, 4, 4);
 }
 // Watermarks follow each layer's own appends; a near failure is not hidden by deep.
 TEST_F(RecorderTest, LayerWatermarksTrackOwnPersistenceAndStallFlagsFailedLayer) {
