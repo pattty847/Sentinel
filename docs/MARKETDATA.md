@@ -128,6 +128,37 @@ Subscriptions select captured products and release only their own client views;
 they never acquire an upstream feed or start, stop or flush a recorder. The roller
 owns each product's recording lifetime and its per-product stall deadline.
 
+Recording resnapshot requests: only the serving roller (`recording.source: roller`)
+sends capture's fan-out `{"type":"resnapshot","product":P}` command, on that
+product's own subscribed connection and only at the live socket tip, never during
+replay or a handshake (`ResnapshotPolicy.hpp`). A request is due only when all of
+these hold: the day's history recorder reports a wait
+(`BookRecorder::snapshotWait(P)`; no history recorder yet also counts, as "no
+usable snapshot"); 10 s have passed since both the wait began and the newest
+connection change in the history feed (TransportUp, TransportDown/CaptureStopped,
+a new run or connection id, a journal boundary, including after a damaged block);
+the history feed applied a durable record for P at the live tip within the last
+5 s; no provisional connection transition (a lifecycle record, or a new
+connection or run) is still waiting in the fan-out for history to apply it; and
+the backoff deadline passed. Recent records are activity evidence only, not
+proof that the connection is ready: a down or reconnecting product journals
+lifecycle records but usually no frames, every lifecycle record is a connection
+change that restarts the grace, and the grace stays longer than the window
+(validated). Capture's engine would ignore a request while it reconnects. The wait's provenance (the recorder's own
+invalidation such as `one-sided book`, an anchor imported invalid, or an
+upstream/journal invalidation) is logged but does not change the timing. Only an
+accepted snapshot ends a wait, so a replay that ends invalid asks from the tip.
+The next request follows after 30 s, doubling after each `forwarded` reply up to
+10 min (refused replies keep the delay); a connection change restarts the grace
+before a retry; after 60 s with a valid book the delay and any pending deadline
+reset. Each written request logs `Recording resnapshot request: symbol=...
+reason=...` and counts `sentinel_recorder_resnapshot_requests_total{product}`;
+each reply logs `Recording resnapshot reply: symbol=... status=...`;
+`sentinel_recorder_resnapshot_waiting{product}` is 1 while the live roller's book
+waits and 0 off the live tip. Shadow-only runs, the hourly oracle and offline
+replays never send one. The model's await-snapshot paths use `requestReseed` (a
+synthesized roller snapshot), never a capture resnapshot.
+
 
 ## Heatmap timeframes
 
@@ -256,7 +287,7 @@ The server runs paper execution (no real broker); fills use last trade price plu
 
 ## Recording v2 core (HMC2)
 
-`recording::BookRecorder` and `Hmc2Store` live in `libs/core/servermodel` and do not depend on GUI Qt. The recorder takes full, unclipped absolute L2 batches from one producer, and performs integration, compression and disk I/O on its own worker. `onInvalid` ends observation; only an accepted snapshot resumes it. An invalid interval preserves the minute's earlier numerator and peaks. Zero-observation minutes are omitted. The roller supplies envelope and capture-receive time explicitly through `onSnapshotAt` / `onUpdatesAt`; `drain()` fences deterministic replay. The model owns no recorder and never requests capture resnapshots.
+`recording::BookRecorder` and `Hmc2Store` live in `libs/core/servermodel` and do not depend on GUI Qt. The recorder takes full, unclipped absolute L2 batches from one producer, and performs integration, compression and disk I/O on its own worker. `onInvalid` ends observation; only an accepted snapshot resumes it. An invalid interval preserves the minute's earlier numerator and peaks. Zero-observation minutes are omitted. The roller supplies envelope and capture-receive time explicitly through `onSnapshotAt` / `onUpdatesAt`; `drain()` fences deterministic replay. The model owns no recorder and never requests capture resnapshots; the serving roller does (see Server integration boundary).
 
 Each side has an ordered, pooled price map (O(log levels) updates, O(1) best bid/ask access). Each layer has a pooled hash map keyed by `(integer row, side)`, with lazily advanced integrals and a reused touched-row buffer. One message is applied in full before its final row sizes update peaks. Malformed prices/sizes invalidate the whole batch's book continuity. Prices use checked nearest rounding in integer price units; an inclusion window tests the row's lower price edge, so bounds are `ceil(minMid * lowFrac * priceScale / rowTickUnits)` through `floor(maxMid * highMult * priceScale / rowTickUnits)`, inclusive on both sides. Empty entries inside minute bounds mean observed zero, not a missing book.
 

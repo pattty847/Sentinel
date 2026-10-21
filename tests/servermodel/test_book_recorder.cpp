@@ -758,6 +758,79 @@ TEST_F(RecorderTest, OneSidedBeyondGraceInvalidates) {
     value(rows[0], 99, false, 2, 2);
     value(rows[0], 101, true, 4.0 * 10000 / 15000, 4);
 }
+// FM-121: the recorder's own invalidations wait as "recorder" (only a requested
+// snapshot cures them); onInvalid ones as "upstream" (normally followed by one).
+std::string waitOf(const BookRecorder &r, const std::string &symbol) {
+    const auto w = r.snapshotWait(symbol);
+    return w.reason.empty() ? "" : (w.upstream ? "upstream:" : "recorder:") + w.reason;
+}
+TEST_F(RecorderTest, SelfInvalidationAwaitsSnapshotUntilOneIsAccepted) {
+    auto r = make(config());
+    EXPECT_EQ(waitOf(*r, "BTC-USD"), "");
+    snap(*r, 0);
+    update(*r, 10000, {{true, 99, 0}});
+    tick(*r, 14000); // inside the 5 s grace: still valid
+    EXPECT_EQ(waitOf(*r, "BTC-USD"), "");
+    tick(*r, 20000);
+    EXPECT_EQ(waitOf(*r, "BTC-USD"), "recorder:one-sided book");
+    // An upstream invalidation neither clears nor replaces the reason.
+    r->onInvalid("BTC-USD", kEpoch + 21000, "transport up");
+    r->drainForTest();
+    EXPECT_EQ(waitOf(*r, "BTC-USD"), "recorder:one-sided book");
+    snap(*r, 22000, {{true, 99, 2}}); // rejected: no two-sided mid
+    EXPECT_EQ(waitOf(*r, "BTC-USD"), "recorder:missing two-sided mid");
+    snap(*r, 23000);
+    EXPECT_EQ(waitOf(*r, "BTC-USD"), "");
+    EXPECT_EQ(waitOf(*r, "ETH-USD"), "");
+}
+TEST_F(RecorderTest, UpstreamInvalidationWaitsAsUpstreamUntilASnapshot) {
+    auto r = make(config());
+    snap(*r, 0);
+    r->onInvalid("BTC-USD", kEpoch + 1000, "transport down/stop");
+    r->drainForTest();
+    EXPECT_EQ(r->stats().invalidations, 1);
+    EXPECT_EQ(waitOf(*r, "BTC-USD"), "upstream:transport down/stop");
+    update(*r, 2000, {{false, 101, -1}}); // ignored while invalid
+    r->onInvalid("BTC-USD", kEpoch + 3000, "journal boundary");
+    r->drainForTest();
+    EXPECT_EQ(waitOf(*r, "BTC-USD"), "upstream:transport down/stop");
+    snap(*r, 4000);
+    EXPECT_EQ(waitOf(*r, "BTC-USD"), "");
+}
+TEST_F(RecorderTest, MalformedL2AwaitsSnapshot) {
+    auto r = make(config());
+    snap(*r, 0);
+    update(*r, 1000, {{false, 101, -1}});
+    EXPECT_EQ(waitOf(*r, "BTC-USD"), "recorder:malformed L2");
+}
+// A replay that restarts from an anchor taken after the invalidation never
+// re-runs it: the imported invalid book still waits for a resnapshot.
+TEST_F(RecorderTest, ImportedInvalidBookAwaitsSnapshot) {
+    auto r = make(config());
+    snap(*r, 0);
+    update(*r, 10000, {{true, 99, 0}});
+    tick(*r, 20000);
+    const auto state = r->exportState();
+    ASSERT_FALSE(state.empty());
+    QTemporaryDir other;
+    auto c = config();
+    c.root = other.path().toStdString();
+    auto restored = make(c);
+    restored->importState(state);
+    EXPECT_EQ(waitOf(*restored, "BTC-USD"), "recorder:restored invalid book");
+    restored->onSnapshotAt("BTC-USD", kEpoch + 21000, kEpoch + 21000, {{true, 99, 2}, {false, 101, 4}});
+    restored->drainForTest();
+    EXPECT_EQ(waitOf(*restored, "BTC-USD"), "");
+    // A valid book imports without a request.
+    QTemporaryDir third, fourth;
+    c.root = third.path().toStdString();
+    auto valid = make(c);
+    snap(*valid, 0);
+    c.root = fourth.path().toStdString();
+    auto again = make(c);
+    again->importState(valid->exportState());
+    EXPECT_EQ(waitOf(*again, "BTC-USD"), "");
+}
 TEST_F(RecorderTest, OneSidedBookAcrossNearWindowMidMoveStopsAtGrace) {
     auto c = config();
     c.layers[0].lowFrac = 0.95;
