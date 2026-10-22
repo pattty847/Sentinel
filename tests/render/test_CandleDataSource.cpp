@@ -604,3 +604,18 @@ TEST_F(CandleDataSourceTest, ReturnToOlderViewportRequestsEveryUnfetchedSpan) {
     EXPECT_TRUE(coverage->coversRange(2890 * minute, 3020 * minute));
     EXPECT_TRUE(takeRequest(150).is_null());
 }
+
+// History reached the live edge and no live bar came (a quiet symbol): the
+// stream covers the time after it, so the tail keeps its carry bars and nothing
+// is asked again.
+TEST_F(CandleDataSourceTest, QuietLiveEdgeKeepsTheTailCoveredWithoutRequests) {
+    warm(1000, 1010);
+    stepCandleClock(10 * minute);
+    const auto* coverage = qobject_cast<CandleSeriesBuffer*>(source.candleBuffer())->coverage("BTC-USD", 60000);
+    ASSERT_NE(coverage, nullptr);
+    EXPECT_TRUE(coverage->coversRange(990 * minute, 1020 * minute));
+    source.setCandleHistoryViewport("BTC-USD", 60000, 1010 * minute, 1020 * minute);
+    EXPECT_TRUE(takeRequest(250).is_null());
+    source.setCandleHistoryViewport("BTC-USD", 300000, 0, 0); // leaving ends the stream's claim
+    EXPECT_FALSE(coverage->covers(1015 * minute));
+}

@@ -60,6 +60,7 @@ public:
             m_refreshPending = false;
             m_refreshCursorMs = 0;
             m_liveFetchedMs = 0;
+            m_fetched.clear();
         }
         m_symbol = symbol;
         m_tfMs = tfMs;
@@ -111,6 +112,11 @@ public:
         m_pending.reset();
         if (!current) return false;
         m_accepted = completed;
+        // Answered, whatever it proved: this selection does not ask for it again. A
+        // memory page may hold more retained bars below its oldest one; that part stays open.
+        m_fetched.add(chart::candleHistoryFromMemory(tfMs) && oldestReplyMs > 0 ? std::max(startMs, oldestReplyMs)
+                                                                               : startMs,
+                      completed.coverEndMs);
         if (completed.liveEdge) m_liveFetchedMs = std::max(m_liveFetchedMs, completed.coverEndMs);
         if (completed.refresh) {
             // Empty refresh windows still advance; they are not older-history floors.
@@ -134,18 +140,28 @@ public:
         return true;
     }
 
-    // The time the page accept() just took proves, as [startMs, endMs). A REST page
-    // proves its whole window (a bucket it lacks had no trades). A memory page holds
-    // the newest `limit` retained bars up to its inclusive end: a full one proves back
-    // to its oldest bar, a short one back to its start.
-    bool acceptedCoverage(int replyCount, qint64 oldestReplyMs, qint64& startMs, qint64& endMs) const {
+    // The time the page accept() just took proves for quiet-bar synthesis, as
+    // [startMs, endMs). A REST page proves its whole window (a bucket it lacks had no
+    // trades). A memory page only returns the bars the server retained, which does not
+    // prove the server saw the time before its oldest bar (restart, retention): it
+    // proves from its oldest bar on, and an empty one proves nothing. What was asked
+    // is remembered separately, so an unproven window is not asked again.
+    bool acceptedCoverage(qint64 oldestReplyMs, qint64& startMs, qint64& endMs) const {
         if (!m_accepted) return false;
         const Request& page = *m_accepted;
         startMs = page.startMs;
-        if (chart::candleHistoryFromMemory(page.timeframeMs) && oldestReplyMs > 0)
-            startMs = replyCount >= page.limit ? oldestReplyMs : std::min(startMs, oldestReplyMs);
+        if (chart::candleHistoryFromMemory(page.timeframeMs)) {
+            if (oldestReplyMs <= 0) return false;
+            startMs = oldestReplyMs;
+        }
         endMs = page.coverEndMs;
         return endMs > startMs;
+    }
+
+    // Where the live stream takes over after the page accept() just took, or 0 when
+    // that page did not reach the live edge.
+    qint64 acceptedLiveFromMs() const {
+        return m_accepted && m_accepted->liveEdge ? m_accepted->coverEndMs : 0;
     }
 
     // A "warming" reply to the request in flight: it is no page and moves no
@@ -207,6 +223,7 @@ public:
         m_refreshPending = false;
         m_refreshCursorMs = 0;
         m_liveFetchedMs = 0;
+        m_fetched.clear();
     }
 
 private:
@@ -236,19 +253,26 @@ private:
 
     std::optional<Target> plan(const Loaded& loaded, qint64 nowMs) const {
         if (m_symbol.isEmpty() || m_tfMs <= 0 || m_endMs <= m_startMs) return std::nullopt;
-        const CandleCoverage& coverage = loaded.coverage;
+        // What the buffer proves plus what this selection already asked for, in whole
+        // buckets: a bucket counts once any of it is known.
+        CandleCoverage coverage = loaded.coverage;
+        for (const CandleCoverage* known : {&loaded.coverage, &m_fetched})
+            for (int i = 0; i < known->spanCount(); ++i)
+                coverage.add(floorBucket(known->span(i).startMs), ceilBucket(known->span(i).endMs));
+        // A full ring evicts its oldest bars: a page older than them would be dropped at once.
+        const qint64 floor = loaded.cacheFull ? std::max(m_startMs, loaded.oldestBarMs) : m_startMs;
         // The open bucket is the live stream's. Once a page reached the live edge in this
         // selection, the stream covers what follows it until its first bar arrives.
         qint64 liveTop = liveEdgeMs(nowMs);
         if (m_liveFetchedMs > 0 && coverage.liveFromMs() == 0) liveTop = std::min(liveTop, m_liveFetchedMs);
         const qint64 top = std::min(m_endMs, liveTop);
         qint64 lo = 0, hi = 0;
-        if (coverage.newestGap(m_startMs, top, lo, hi)) {
-            if (lo > m_startMs) return Target{floorBucket(lo), ceilBucket(hi), false};
-            if (!loaded.cacheFull)
-                if (auto bottom = bottomTarget(hi, nowMs)) return bottom;
+        if (coverage.newestGap(floor, top, lo, hi)) {
+            if (lo > m_startMs || loaded.cacheFull) return Target{floorBucket(lo), ceilBucket(hi), false};
+            if (auto bottom = bottomTarget(hi, nowMs)) return bottom;
         }
-        if (coverage.newestGap(top, liveTop, lo, hi)) return Target{floorBucket(lo), ceilBucket(hi), false};
+        if (coverage.newestGap(std::max(top, floor), liveTop, lo, hi))
+            return Target{floorBucket(lo), ceilBucket(hi), false};
         // Past the window only while it holds no bar (an empty-page scan).
         if (loaded.cacheFull || (loaded.oldestBarMs > 0 && loaded.oldestBarMs <= m_startMs)) return std::nullopt;
         const auto it = m_history.find({m_symbol, m_tfMs});
@@ -353,5 +377,6 @@ private:
     qint64 m_liveFetchedMs = 0; // this selection's live-edge pages proved time up to here
     std::optional<Request> m_pending;
     std::optional<Request> m_accepted;
+    CandleCoverage m_fetched; // windows this selection asked for and got an answer to
     std::map<std::pair<QString, qint64>, History> m_history;
 };

@@ -2,6 +2,7 @@
 
 #include "datasources/CandleSeriesBuffer.hpp"
 #include "datasources/RemoteGridDataSource.hpp"
+#include "datasources/CandleBackfillState.hpp"
 #include <QCoreApplication>
 #include <QEvent>
 
@@ -310,4 +311,81 @@ TEST(CandleSeriesBuffer, EvictedBarsTakeTheirCoverageAlong) {
     EXPECT_TRUE(coverage->covers(1'010 * 60'000));
     buffer.applyUpdate(kSym, kTfMs, bar(1'000 + capacity + 10, 1, false), 1, false);
     EXPECT_FALSE(coverage->covers(1'010 * 60'000)) << "the ring wrapped over the oldest bar";
+}
+
+namespace {
+// The paging loop of RemoteGridDataSource against the real buffer and a fake
+// server that answers full REST pages (every closed bucket of the window).
+struct PagingLoop {
+    CandleSeriesBuffer& buffer;
+    qint64 tf;
+    qint64 clock;
+    CandleBackfillState state{CandleBackfillState::kDefaultEmptyLookbackMs};
+    std::vector<std::pair<qint64, qint64>> sent;
+
+    // Pages until idle or `cap` requests; returns the number sent.
+    int run(int cap) {
+        const CandleCoverage none;
+        for (int pages = 0; pages < cap; ++pages) {
+            const CandleCoverage* coverage = buffer.coverage(kSym, tf);
+            const CandleBackfillState::Loaded loaded{coverage ? *coverage : none, buffer.oldestTimeMs(kSym, tf),
+                                                     buffer.historyCapacityReached(kSym, tf)};
+            if (!state.needsHistory(loaded, clock)) return pages;
+            clock += state.retryDelayMs(loaded, clock);
+            const auto request = state.next(loaded, clock);
+            if (!request) return pages;
+            sent.emplace_back(request->startMs, request->endMs);
+            std::vector<Bar> bars;
+            for (qint64 t = request->startMs; t < std::min(request->endMs, clock / tf * tf); t += tf)
+                bars.push_back({t, t + tf, 1, 1, 1, 1, 1, true, 0, false});
+            clock += 50;
+            EXPECT_TRUE(state.accept(kSym, tf, request->startMs, request->endMs, bars.empty() ? 0 : bars.front().timeStartMs,
+                                     clock));
+            qint64 start = 0, end = 0;
+            if (!state.acceptedCoverage(bars.empty() ? 0 : bars.front().timeStartMs, start, end)) start = end = 0;
+            buffer.applyHistory(kSym, tf, bars, start, end);
+        }
+        return cap;
+    }
+};
+constexpr qint64 kFiveMin = 300'000;
+} // namespace
+
+// A full ring keeps its newest bars. A viewport before the oldest kept bar asks
+// for nothing: any page there, or between it and the kept bars, is evicted at once.
+TEST(CandleSeriesBuffer, FullRingAsksNothingOlderThanItsOldestBar) {
+    CandleSeriesBuffer buffer;
+    const qint64 nowMs = 2'000'000'100'000, liveEdge = nowMs / kFiveMin * kFiveMin;
+    std::vector<Bar> page;
+    for (qint64 i = 10'000; i > 0; --i) {
+        const qint64 t = liveEdge - i * kFiveMin;
+        page.push_back({t, t + kFiveMin, 1, 1, 1, 1, 1, true, 0, false});
+    }
+    buffer.applyHistory(kSym, kFiveMin, page, page.front().timeStartMs, liveEdge);
+    buffer.openLiveCoverage(kSym, kFiveMin, liveEdge);
+    ASSERT_TRUE(buffer.historyCapacityReached(kSym, kFiveMin));
+    PagingLoop loop{buffer, kFiveMin, nowMs};
+    const qint64 oldest = buffer.oldestTimeMs(kSym, kFiveMin);
+    loop.state.setViewport(kSym, kFiveMin, oldest - 2'000 * kFiveMin, oldest - 1'000 * kFiveMin);
+    EXPECT_EQ(loop.run(30), 0) << "first request ends at " << (loop.sent.empty() ? 0 : loop.sent.front().second);
+    EXPECT_EQ(buffer.oldestTimeMs(kSym, kFiveMin), oldest);
+}
+
+// Sixteen separate spans fill the coverage set; a page older than all of them must
+// keep its coverage so paging moves on instead of asking for it again.
+TEST(CandleSeriesBuffer, PageOlderThanAFullCoverageSetIsKeptAndPagingSettles) {
+    CandleSeriesBuffer buffer;
+    const qint64 nowMs = 2'000'000'100'000, liveEdge = nowMs / kFiveMin * kFiveMin;
+    for (int i = 0; i < CandleCoverage::kMaxSpans; ++i) {
+        const qint64 t = liveEdge - (CandleCoverage::kMaxSpans - i) * 20 * kFiveMin;
+        buffer.applyHistory(kSym, kFiveMin, {{t, t + kFiveMin, 1, 1, 1, 1, 1, true, 0, false}}, t, t + 10 * kFiveMin);
+    }
+    buffer.openLiveCoverage(kSym, kFiveMin, liveEdge);
+    ASSERT_EQ(buffer.coverage(kSym, kFiveMin)->spanCount(), CandleCoverage::kMaxSpans);
+    PagingLoop loop{buffer, kFiveMin, nowMs};
+    const qint64 viewEnd = liveEdge - 2'000 * kFiveMin;
+    loop.state.setViewport(kSym, kFiveMin, viewEnd - 100 * kFiveMin, viewEnd);
+    const int pages = loop.run(60);
+    EXPECT_LT(pages, 60) << "paging repeats a page";
+    EXPECT_TRUE(buffer.coverage(kSym, kFiveMin)->coversRange(viewEnd - 200 * kFiveMin, liveEdge));
 }

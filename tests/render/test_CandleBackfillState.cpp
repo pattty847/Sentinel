@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "datasources/CandleBackfillState.hpp"
+#include <algorithm>
 #include <limits>
 #include <map>
 #include <tuple>
@@ -463,6 +464,8 @@ TEST(CandleBackfillState, WarmingHoldsTheRequestAndResendsItVerbatim) {
         EXPECT_EQ(resent->endMs, request->endMs);
     }
     EXPECT_TRUE(accept(state, *request, 920 * minute, now + 20000));
+    // The answered window [900, 950) is known; paging goes on once the view needs older bars.
+    view(state, 850, 950);
     const auto older = nextPage(state, 920 * minute, false, now + 20100);
     ASSERT_TRUE(older);
     EXPECT_LT(older->endMs, request->endMs);
@@ -545,6 +548,16 @@ TEST(CandleCoverage, MergesAdjacentSpansAndReportsTheNewestGap) {
     EXPECT_EQ(coverage.nextCovered(400), std::numeric_limits<int64_t>::max());
 }
 
+TEST(CandleCoverage, AFullSetKeepsANewOlderSpanAndForgetsTheShortestOther) {
+    CandleCoverage coverage;
+    for (int i = 0; i < CandleCoverage::kMaxSpans; ++i) coverage.add(1000 + i * 100, 1000 + i * 100 + (i == 5 ? 10 : 50));
+    coverage.add(100, 200); // older than every span, disjoint
+    EXPECT_EQ(coverage.spanCount(), CandleCoverage::kMaxSpans);
+    EXPECT_TRUE(coverage.coversRange(100, 200)) << "the page just accepted must stay";
+    EXPECT_FALSE(coverage.covers(1505)) << "the shortest span went";
+    EXPECT_TRUE(coverage.covers(1005));
+}
+
 TEST(CandleCoverage, LiveRunIsOpenUntilClosedAndCapacityDropsTheOldestSpan) {
     CandleCoverage coverage;
     coverage.add(0 + 10, 20);
@@ -611,7 +624,7 @@ struct Replay {
                                  count > 0 ? oldest : 0, clock));
         qint64 coverStart = 0, coverEnd = 0;
         auto& s = series[tf];
-        if (state.acceptedCoverage(count, count > 0 ? oldest : 0, coverStart, coverEnd))
+        if (state.acceptedCoverage(count > 0 ? oldest : 0, coverStart, coverEnd))
             s.coverage.add(coverStart, coverEnd);
         if (count > 0) {
             s.coverage.add(oldest, newest + tf);
@@ -662,8 +675,8 @@ TEST(CandleBackfillState, EmptyPastViewportRequestsUpToTheLiveEdge) {
 
 // Coverage [A, now) exists; a return to a viewport ending at B < A fills [B, A).
 TEST(CandleBackfillState, ReturnToAnOlderViewportFillsTheSpanUpToLoadedBars) {
-    const qint64 nowMs = 1'792'640'500'000, tf = 5 * minute;
-    const qint64 a = nowMs - 2 * day, b = nowMs - 4 * day;
+    const qint64 nowMs = 1'792'640'400'000 + 20'000, tf = 5 * minute; // A and B on bucket starts, as bars are
+    const qint64 a = nowMs / tf * tf - 2 * day, b = nowMs / tf * tf - 4 * day;
     CandleBackfillState state;
     CandleCoverage coverage;
     coverage.add(a, nowMs / tf * tf);
@@ -680,7 +693,7 @@ TEST(CandleBackfillState, ReturnToAnOlderViewportFillsTheSpanUpToLoadedBars) {
         requested.emplace_back(request->startMs, request->endMs);
         ASSERT_TRUE(state.accept(btc, tf, request->startMs, request->endMs, request->startMs, clock));
         qint64 start = 0, end = 0;
-        ASSERT_TRUE(state.acceptedCoverage(request->limit, request->startMs, start, end));
+        ASSERT_TRUE(state.acceptedCoverage(request->startMs, start, end));
         coverage.add(start, end);
     }
     ASSERT_FALSE(requested.empty());
@@ -722,4 +735,41 @@ TEST(CandleBackfillState, OwnerTimeframeSequenceLeavesNoHoles) {
         EXPECT_TRUE(replay.contiguousToLiveEdge())
             << "tf=" << visit.tf << " oldest=" << replay.series[visit.tf].oldestBarMs;
     }
+}
+
+// 100 ms / 1 s history returns retained bars only: it proves nothing before its
+// oldest bar (a restart or retention hole is not quiet time), and an answered
+// window is still not asked again in this selection.
+TEST(CandleBackfillState, MemoryRepliesProveOnlyFromTheirOldestBarAndAreNotAskedAgain) {
+    CandleBackfillState state;
+    constexpr qint64 tf = 1000, nowMs = 2'000'000'000;
+    CandleCoverage coverage;
+    coverage.add(nowMs - 1000 * tf, nowMs - 600 * tf);
+    coverage.extendLive(nowMs - 10 * tf, nowMs - 9 * tf);
+    state.setViewport(btc, tf, nowMs - 300 * tf, nowMs - 200 * tf);
+    qint64 clock = nowMs;
+    std::vector<qint64> ends;
+    for (int page = 0; page < 20; ++page) {
+        const CandleBackfillState::Loaded loaded{coverage, nowMs - 1000 * tf, false};
+        clock += state.retryDelayMs(loaded, clock);
+        const auto request = state.next(loaded, clock);
+        if (!request) break;
+        ends.push_back(request->endMs);
+        // The first page holds one retained bar in the middle of its window; the rest hold none.
+        const qint64 oldest = page == 0 ? request->endMs - 20 * tf : 0;
+        ASSERT_TRUE(state.accept(btc, tf, request->startMs, request->endMs, oldest, clock));
+        qint64 start = 0, end = 0;
+        if (page == 0) {
+            ASSERT_TRUE(state.acceptedCoverage(oldest, start, end));
+            EXPECT_EQ(start, oldest) << "a short page does not prove its window before its oldest bar";
+            coverage.add(start, end);
+        } else {
+            EXPECT_FALSE(state.acceptedCoverage(0, start, end)) << "an empty page proves nothing";
+        }
+    }
+    ASSERT_FALSE(ends.empty());
+    EXPECT_LT(ends.size(), 20u) << "paging settles";
+    std::sort(ends.begin(), ends.end());
+    EXPECT_EQ(std::adjacent_find(ends.begin(), ends.end()), ends.end()) << "no window is asked twice";
+    EXPECT_FALSE(coverage.covers(nowMs - 400 * tf)) << "the unproven span stays a hole";
 }

@@ -237,6 +237,12 @@ void CandleSeriesBuffer::endLiveCoverage() {
     for (auto& [key, series] : m_series) series.coverage.closeLive();
 }
 
+void CandleSeriesBuffer::openLiveCoverage(const QString& symbol, int64_t timeframeMs, qint64 liveFromMs) {
+    if (symbol.isEmpty() || timeframeMs <= 0) return;
+    seriesFor(symbol, timeframeMs).coverage.openLive(liveFromMs);
+    emit candlesDirty(symbol, timeframeMs, liveFromMs, liveFromMs + timeframeMs);
+}
+
 const CandleCoverage* CandleSeriesBuffer::coverage(const QString& symbol, int64_t timeframeMs) const {
     const auto it = m_series.find(SeriesKey{symbol, timeframeMs});
     return it == m_series.end() ? nullptr : &it->second.coverage;

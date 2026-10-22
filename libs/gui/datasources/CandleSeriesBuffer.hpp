@@ -53,6 +53,9 @@ public:
     // The live stream for this series (or for every series) stopped; its coverage ends at the last live bar.
     void endLiveCoverage(const QString& symbol, int64_t timeframeMs);
     void endLiveCoverage();
+    // History reached the live edge at liveFromMs before a live bar: the selected
+    // stream covers the time after it until the stream ends.
+    void openLiveCoverage(const QString& symbol, int64_t timeframeMs, qint64 liveFromMs);
 
     // Fetched time of this series; nullptr when it has no series. Does not allocate.
     const CandleCoverage* coverage(const QString& symbol, int64_t timeframeMs) const;

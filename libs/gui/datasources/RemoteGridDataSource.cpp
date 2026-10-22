@@ -607,9 +607,11 @@ void RemoteGridDataSource::onCandleHistoryReceived(const QString &symbol, int64_
         bars.push_back(out);
     }
     qint64 coverStartMs = 0, coverEndMs = 0;
-    if (!m_candleBackfill.acceptedCoverage(static_cast<int>(candles.size()), oldestReplyMs, coverStartMs, coverEndMs))
+    if (!m_candleBackfill.acceptedCoverage(oldestReplyMs, coverStartMs, coverEndMs))
         coverStartMs = coverEndMs = 0;
     m_candleBuffer->applyHistory(symbol, timeframeMs, bars, coverStartMs, coverEndMs);
+    if (const qint64 liveFromMs = m_candleBackfill.acceptedLiveFromMs())
+        m_candleBuffer->openLiveCoverage(symbol, timeframeMs, liveFromMs);
     sLog_Probe("candles.history", "applied symbol=" << symbol << " tfMs=" << timeframeMs << " t=[" << startTimeMs
                                                     << ".." << endTimeMs << "]"
                                                     << " count=" << candles.size() << " covered=[" << coverStartMs << ".." << coverEndMs << ")");

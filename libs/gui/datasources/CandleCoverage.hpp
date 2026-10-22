@@ -32,11 +32,14 @@ public:
             ++j;
         }
         if (i == j && m_count == kMaxSpans) {
-            // Full: forget the oldest span. A forgotten span only draws as a hole and is fetched again.
-            if (i == 0) return;
-            std::move(m_spans.begin() + 1, m_spans.begin() + m_count, m_spans.begin());
+            // Full: the new span always stays (paging must see its own page land);
+            // forget the shortest other span, which draws as a hole and is fetched again.
+            int k = 0;
+            for (int n = 1; n < m_count; ++n)
+                if (m_spans[n].endMs - m_spans[n].startMs < m_spans[k].endMs - m_spans[k].startMs) k = n;
+            std::move(m_spans.begin() + k + 1, m_spans.begin() + m_count, m_spans.begin() + k);
             --m_count;
-            --i;
+            if (k < i) --i;
             j = i;
         }
         const int removed = j - i;
@@ -55,6 +58,13 @@ public:
         if (startMs <= 0 || endMs <= startMs) return;
         if (m_liveFromMs == 0 || startMs < m_liveFromMs) m_liveFromMs = startMs;
         m_liveToMs = std::max(m_liveToMs, endMs);
+    }
+
+    // History reached the live edge at ms before any live bar: the stream of this
+    // selection covers the time after it. Closing keeps only what live bars delivered.
+    void openLive(int64_t ms) {
+        if (ms <= 0 || m_liveFromMs > 0) return;
+        m_liveFromMs = m_liveToMs = ms;
     }
 
     // The live stream stopped (session, selection or disconnect): keep what it delivered.
