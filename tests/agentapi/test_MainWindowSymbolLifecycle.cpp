@@ -48,6 +48,7 @@
 #include <QQuickView>
 #include <QtQml/qqml.h>
 #include <gtest/gtest.h>
+#include <limits>
 
 struct MainWindowSymbolLifecyclePeer {
     static AgentApi::ViewportSnapshot viewport(const MainWindowGPU& window) { return window.chartAgentPort().snapshot(window.agentApiMetadata()); }
@@ -137,7 +138,9 @@ TEST(ChartAgentPin, ControlledStartupHistoryAndViewport) {
     QObject::connect(renderer->view(), &chart::ChartViewQml::viewportChanged, &window, updateHistory);
     const auto page = [&] {
         clock += 100;
-        const auto request = history.next(oldest, false, clock);
+        CandleCoverage covered; // contiguous from the oldest bar on
+        if (oldest > 0) covered.add(oldest, std::numeric_limits<qint64>::max() / 4);
+        const auto request = history.next({covered, oldest, false}, clock);
         if (!request) return;
         requests.emplace_back(request->endMs / 1000, request->limit);
         oldest = request->startMs;

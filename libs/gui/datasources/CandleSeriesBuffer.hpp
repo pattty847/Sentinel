@@ -8,6 +8,7 @@ Threading: GUI thread only.
 #include <QObject>
 #include <QString>
 #include <QHash>
+#include "CandleCoverage.hpp"
 #include <unordered_map>
 #include <vector>
 
@@ -37,14 +38,24 @@ public:
 
     // Merges history by start time. Live-owned buckets always win, including
     // against "closed" REST snapshots; the live seq stream is not touched.
+    // The page covers [coverStartMs, coverEndMs) (its wire window, also when it
+    // is empty) and at least the span from its first to its last bar.
     void applyHistory(const QString& symbol,
                       int64_t timeframeMs,
-                      const std::vector<CandleBar>& bars);
+                      const std::vector<CandleBar>& bars,
+                      qint64 coverStartMs = 0,
+                      qint64 coverEndMs = 0);
 
     // New sessions/selections revoke all cached live ownership. Fresh history
     // can correct closed cached bars; the new live stream re-establishes ownership.
     void resetSequences();
     void resetSeriesForSelection(const QString& symbol, int64_t timeframeMs);
+    // The live stream for this series (or for every series) stopped; its coverage ends at the last live bar.
+    void endLiveCoverage(const QString& symbol, int64_t timeframeMs);
+    void endLiveCoverage();
+
+    // Fetched time of this series; nullptr when it has no series. Does not allocate.
+    const CandleCoverage* coverage(const QString& symbol, int64_t timeframeMs) const;
 
     qint64 oldestTimeMs(const QString& symbol, int64_t timeframeMs) const;
     bool historyCapacityReached(const QString& symbol, int64_t timeframeMs) const;
@@ -89,6 +100,7 @@ private:
         size_t count = 0;
         size_t capacity = 0;
         int64_t lastSeq = 0;
+        CandleCoverage coverage;
     };
 
     static size_t capacityFor(int64_t timeframeMs);
@@ -100,6 +112,7 @@ private:
     static std::vector<CandleBar> linearize(const Series& series);
     // Replaces the ring with time-sorted bars, keeping the newest `capacity`.
     static void rebuild(Series& series, std::vector<CandleBar>&& sorted);
+    static void trimEvictedCoverage(Series& series);
     Series& seriesFor(const QString& symbol, int64_t timeframeMs);
 
     std::unordered_map<SeriesKey, Series, SeriesKeyHash> m_series;

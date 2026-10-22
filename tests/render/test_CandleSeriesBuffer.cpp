@@ -270,3 +270,44 @@ TEST(CandleSeriesBuffer, NativeHistoryAndLiveAggregatorMeetWithoutGapOrOverlapIn
         EXPECT_EQ(bars[3].close, 30);
     }
 }
+
+TEST(CandleSeriesBuffer, CoverageFollowsPagesLiveBarsAndEviction) {
+    CandleSeriesBuffer buffer;
+    EXPECT_EQ(buffer.coverage(kSym, kTfMs), nullptr);
+    // A page proves its window, also where it has no bar; an empty page still proves its window.
+    buffer.applyHistory(kSym, kTfMs, {bar(105, 1, true)}, 100 * 60'000, 110 * 60'000);
+    buffer.applyHistory(kSym, kTfMs, {}, 90 * 60'000, 95 * 60'000);
+    const CandleCoverage* coverage = buffer.coverage(kSym, kTfMs);
+    ASSERT_NE(coverage, nullptr);
+    EXPECT_TRUE(coverage->coversRange(100 * 60'000, 110 * 60'000));
+    EXPECT_TRUE(coverage->coversRange(90 * 60'000, 95 * 60'000));
+    EXPECT_FALSE(coverage->covers(97 * 60'000));
+    // Without a window, a page proves the span between its first and last bar.
+    buffer.applyHistory(kSym, kTfMs, {bar(120, 1, true), bar(130, 1, true)});
+    EXPECT_TRUE(coverage->coversRange(120 * 60'000, 131 * 60'000));
+    EXPECT_FALSE(coverage->covers(115 * 60'000));
+    // Live bars cover from the first one on until the stream ends.
+    buffer.applyUpdate(kSym, kTfMs, bar(140, 2, false), 1, false);
+    EXPECT_TRUE(coverage->covers(10'000 * 60'000));
+    buffer.endLiveCoverage(kSym, kTfMs);
+    EXPECT_TRUE(coverage->covers(140 * 60'000));
+    EXPECT_FALSE(coverage->covers(141 * 60'000));
+    buffer.applyUpdate(kSym, kTfMs, bar(150, 2, false), 2, false);
+    buffer.resetSeriesForSelection(kSym, kTfMs); // a new stream starts its own run
+    EXPECT_FALSE(coverage->covers(151 * 60'000));
+}
+
+TEST(CandleSeriesBuffer, EvictedBarsTakeTheirCoverageAlong) {
+    CandleSeriesBuffer buffer;
+    constexpr qint64 capacity = 20'000; // 1m series
+    std::vector<Bar> page;
+    for (qint64 m = 0; m < capacity + 10; ++m) page.push_back(bar(1'000 + m, 1, true));
+    buffer.applyHistory(kSym, kTfMs, page, 900 * 60'000, (1'000 + capacity + 10) * 60'000);
+    const CandleCoverage* coverage = buffer.coverage(kSym, kTfMs);
+    ASSERT_NE(coverage, nullptr);
+    EXPECT_EQ(buffer.oldestTimeMs(kSym, kTfMs), 1'010 * 60'000);
+    EXPECT_FALSE(coverage->covers(1'009 * 60'000));
+    EXPECT_TRUE(coverage->covers(1'010 * 60'000));
+    buffer.applyUpdate(kSym, kTfMs, bar(1'000 + capacity + 10, 1, false), 1, false);
+    EXPECT_FALSE(coverage->covers(1'010 * 60'000)) << "the ring wrapped over the oldest bar";
+}

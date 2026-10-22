@@ -98,8 +98,37 @@ inline void addLineSegment(QSGGeometry::ColoredPoint2D*& v,
     v += 6;
 }
 
+CandleOverlayBar carryBar(qint64 t, int64_t timeframeMs, double close) {
+    CandleOverlayBar synthetic;
+    synthetic.timeStartMs = t;
+    synthetic.timeEndMs = t + timeframeMs;
+    synthetic.open = synthetic.high = synthetic.low = synthetic.close = close;
+    return synthetic;
+}
+
+// Appends flat carry bars for the empty buckets after `from` up to `until`, only
+// where the series was fetched: a covered empty bucket had no trades, an uncovered
+// one was never loaded and draws nothing.
+void appendCarryBars(const CandleOverlayBar& from, qint64 until, int64_t timeframeMs,
+                     const CandleCoverage& coverage, int maxColumns, int& budget,
+                     std::vector<CandleOverlayBar>& out) {
+    qint64 t = from.timeStartMs + timeframeMs;
+    while (t < until && budget > 0 && static_cast<int>(out.size()) < maxColumns) {
+        if (!coverage.covers(t)) {
+            const int64_t next = coverage.nextCovered(t);
+            if (next >= until) return;
+            t += (next - t + timeframeMs - 1) / timeframeMs * timeframeMs;
+            continue;
+        }
+        out.push_back(carryBar(t, timeframeMs, from.close));
+        --budget;
+        t += timeframeMs;
+    }
+}
+
 void buildContinuousBars(const std::vector<CandleOverlayBar>& source,
                          int64_t timeframeMs, qint64 boundaryStartMs,
+                         const CandleCoverage& coverage,
                          int maxColumns, std::vector<CandleOverlayBar>& out) {
     out.clear();
     if (source.empty() || timeframeMs <= 0 || maxColumns <= 0) {
@@ -116,41 +145,15 @@ void buildContinuousBars(const std::vector<CandleOverlayBar>& source,
 
     pushBar(source.front());
     for (size_t i = 1; i < source.size() && static_cast<int>(out.size()) < maxColumns; ++i) {
-        const CandleOverlayBar& prev = source[i - 1];
-        const CandleOverlayBar& cur = source[i];
-        for (qint64 t = prev.timeStartMs + timeframeMs;
-             t < cur.timeStartMs && syntheticBudget > 0 && static_cast<int>(out.size()) < maxColumns;
-             t += timeframeMs) {
-            CandleOverlayBar synthetic;
-            synthetic.timeStartMs = t;
-            synthetic.timeEndMs = t + timeframeMs;
-            synthetic.open = prev.close;
-            synthetic.high = prev.close;
-            synthetic.low = prev.close;
-            synthetic.close = prev.close;
-            out.push_back(synthetic);
-            --syntheticBudget;
-        }
-        pushBar(cur);
+        appendCarryBars(source[i - 1], source[i].timeStartMs, timeframeMs, coverage, maxColumns,
+                        syntheticBudget, out);
+        pushBar(source[i]);
     }
 
     if (boundaryStartMs > 0 && !out.empty() && syntheticBudget > 0) {
         const CandleOverlayBar anchor = out.back();
-        for (qint64 t = anchor.timeStartMs + timeframeMs;
-             t < boundaryStartMs && syntheticBudget > 0 && static_cast<int>(out.size()) < maxColumns;
-             t += timeframeMs) {
-            CandleOverlayBar synthetic;
-            synthetic.timeStartMs = t;
-            synthetic.timeEndMs = t + timeframeMs;
-            synthetic.open = anchor.close;
-            synthetic.high = anchor.close;
-            synthetic.low = anchor.close;
-            synthetic.close = anchor.close;
-            out.push_back(synthetic);
-            --syntheticBudget;
-        }
+        appendCarryBars(anchor, boundaryStartMs, timeframeMs, coverage, maxColumns, syntheticBudget, out);
     }
-
 }
 
 bool mappingChanged(const TimeAxisMapping& a, const TimeAxisMapping& b) {
@@ -470,7 +473,10 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     const bool synthesize = cadenceMatches && tfMs > 0 && maxColumns > 0 &&
                             chart::synthesizesQuietBars(m_timeframeMs);
     if (synthesize) {
-        buildContinuousBars(filtered, tfMs, frame.currentBoundaryStartMs, maxColumns, m_continuousCandles);
+        static const CandleCoverage kNoCoverage;
+        const CandleCoverage* coverage = m_candleBuffer ? m_candleBuffer->coverage(m_symbol, m_timeframeMs) : nullptr;
+        buildContinuousBars(filtered, tfMs, frame.currentBoundaryStartMs, coverage ? *coverage : kNoCoverage,
+                            maxColumns, m_continuousCandles);
     }
     const auto& drawBars = synthesize ? m_continuousCandles : filtered;
     const int visibleCount = static_cast<int>(drawBars.size());
