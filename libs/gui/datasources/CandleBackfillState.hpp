@@ -112,11 +112,10 @@ public:
         m_pending.reset();
         if (!current) return false;
         m_accepted = completed;
-        // Answered, whatever it proved: this selection does not ask for it again. A
-        // memory page may hold more retained bars below its oldest one; that part stays open.
-        m_fetched.add(chart::candleHistoryFromMemory(tfMs) && oldestReplyMs > 0 ? std::max(startMs, oldestReplyMs)
-                                                                               : startMs,
-                      completed.coverEndMs);
+        // An empty memory page proves nothing (acceptedCoverage) but was answered: this
+        // selection does not ask for it again. Every other page's proof is buffer coverage;
+        // the part of a short memory page below its oldest bar is asked once more.
+        if (chart::candleHistoryFromMemory(tfMs) && oldestReplyMs <= 0) m_fetched.add(startMs, completed.coverEndMs);
         if (completed.liveEdge) m_liveFetchedMs = std::max(m_liveFetchedMs, completed.coverEndMs);
         if (completed.refresh) {
             // Empty refresh windows still advance; they are not older-history floors.
@@ -253,12 +252,7 @@ private:
 
     std::optional<Target> plan(const Loaded& loaded, qint64 nowMs) const {
         if (m_symbol.isEmpty() || m_tfMs <= 0 || m_endMs <= m_startMs) return std::nullopt;
-        // What the buffer proves plus what this selection already asked for, in whole
-        // buckets: a bucket counts once any of it is known.
-        CandleCoverage coverage = loaded.coverage;
-        for (const CandleCoverage* known : {&loaded.coverage, &m_fetched})
-            for (int i = 0; i < known->spanCount(); ++i)
-                coverage.add(floorBucket(known->span(i).startMs), ceilBucket(known->span(i).endMs));
+        const CandleCoverage& coverage = loaded.coverage;
         // A full ring evicts its oldest bars: a page older than them would be dropped at once.
         const qint64 floor = loaded.cacheFull ? std::max(m_startMs, loaded.oldestBarMs) : m_startMs;
         // The open bucket is the live stream's. Once a page reached the live edge in this
@@ -267,17 +261,50 @@ private:
         if (m_liveFetchedMs > 0 && coverage.liveFromMs() == 0) liveTop = std::min(liveTop, m_liveFetchedMs);
         const qint64 top = std::min(m_endMs, liveTop);
         qint64 lo = 0, hi = 0;
-        if (coverage.newestGap(floor, top, lo, hi)) {
+        if (newestUnknown(coverage, floor, top, lo, hi)) {
             if (lo > m_startMs || loaded.cacheFull) return Target{floorBucket(lo), ceilBucket(hi), false};
             if (auto bottom = bottomTarget(hi, nowMs)) return bottom;
         }
-        if (coverage.newestGap(std::max(top, floor), liveTop, lo, hi))
+        if (newestUnknown(coverage, std::max(top, floor), liveTop, lo, hi))
             return Target{floorBucket(lo), ceilBucket(hi), false};
         // Past the window only while it holds no bar (an empty-page scan).
         if (loaded.cacheFull || (loaded.oldestBarMs > 0 && loaded.oldestBarMs <= m_startMs)) return std::nullopt;
         const auto it = m_history.find({m_symbol, m_tfMs});
         if (it == m_history.end() || it->second.emptyScanStartMs == 0) return std::nullopt;
-        return bottomTarget(coverage.runStart(m_startMs), nowMs);
+        return bottomTarget(knownRunStart(coverage, m_startMs), nowMs);
+    }
+
+    // Known time: what the buffer proves plus this selection's unproven memory answers,
+    // read from both sorted lists directly, in whole buckets (a bucket counts once any
+    // of it is known). Newest unknown part [gapLo, gapHi) of [lo, hi).
+    bool newestUnknown(const CandleCoverage& proven, qint64 lo, qint64 hi, qint64& gapLo, qint64& gapHi) const {
+        if (proven.liveFromMs() > 0) hi = std::min(hi, floorBucket(proven.liveFromMs()));
+        while (hi > lo) {
+            const qint64 below = knownStartBelow(proven, hi);
+            if (below >= hi) break;
+            hi = below;
+        }
+        if (hi <= lo) return false;
+        gapLo = std::max({lo, proven.lastEndAtOrBefore(hi - 1), m_fetched.lastEndAtOrBefore(hi - 1)});
+        gapHi = hi;
+        return true;
+    }
+
+    // Start of the known run that ends at ms (the bucket of the lowest span holding
+    // ms - 1), or ms when ms - 1 is unknown.
+    qint64 knownStartBelow(const CandleCoverage& proven, qint64 ms) const {
+        qint64 next = ms;
+        if (proven.liveFromMs() > 0 && ms - 1 >= proven.liveFromMs()) next = proven.liveFromMs();
+        if (const auto* s = proven.spanContaining(ms - 1)) next = std::min(next, s->startMs);
+        if (const auto* s = m_fetched.spanContaining(ms - 1)) next = std::min(next, s->startMs);
+        return next < ms ? floorBucket(next) : ms;
+    }
+
+    qint64 knownRunStart(const CandleCoverage& proven, qint64 ms) const {
+        qint64 start = ms;
+        for (qint64 below = knownStartBelow(proven, start); below < start; below = knownStartBelow(proven, start))
+            start = below;
+        return start;
     }
 
     // Pages down from the oldest covered point; past the window only after empty pages.
@@ -377,6 +404,6 @@ private:
     qint64 m_liveFetchedMs = 0; // this selection's live-edge pages proved time up to here
     std::optional<Request> m_pending;
     std::optional<Request> m_accepted;
-    CandleCoverage m_fetched; // windows this selection asked for and got an answer to
+    CandleCoverage m_fetched; // empty memory windows this selection asked for: answered, unproven
     std::map<std::pair<QString, qint64>, History> m_history;
 };

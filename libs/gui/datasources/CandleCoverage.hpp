@@ -1,56 +1,50 @@
 #pragma once
 
-#include <array>
 #include <algorithm>
 #include <cstdint>
+#include <iterator>
+#include <vector>
 
-// The time a candle series has been fetched for, as half-open spans [startMs, endMs).
-// A history page covers its whole wire window; the live stream covers everything from its
-// first bucket on while it flows. A bucket inside coverage without a bar had no trades; a
-// bucket outside coverage was never fetched. Fixed capacity: no allocation, cheap to copy.
+// The time a candle series is proven for, as sorted, merged, half-open spans
+// [startMs, endMs). A REST page proves its whole wire window; a memory page proves
+// from its oldest retained bar; the live stream proves everything from its first
+// bucket on while it flows. A bucket inside coverage without a bar had no trades; a
+// bucket outside it was never proven and draws nothing.
+//
+// No cap and no lossy eviction: only ring eviction removes coverage (trimBefore).
+// Spans change on the GUI thread when a page, live bar or live run arrives, never per
+// frame; every query is a read that does not allocate.
 class CandleCoverage {
 public:
-    static constexpr int kMaxSpans = 16;
     struct Span {
         int64_t startMs = 0;
         int64_t endMs = 0;
     };
 
+    CandleCoverage() { m_spans.reserve(16); }
+
     void clear() {
-        m_count = 0;
+        m_spans.clear();
         m_liveFromMs = m_liveToMs = 0;
     }
 
     void add(int64_t startMs, int64_t endMs) {
         if (endMs <= startMs) return;
-        int i = 0;
-        while (i < m_count && m_spans[i].endMs < startMs) ++i;
-        int j = i;
-        while (j < m_count && m_spans[j].startMs <= endMs) {
-            startMs = std::min(startMs, m_spans[j].startMs);
-            endMs = std::max(endMs, m_spans[j].endMs);
-            ++j;
+        // First span that ends at or after startMs (touching spans merge).
+        auto first = std::lower_bound(m_spans.begin(), m_spans.end(), startMs,
+                                      [](const Span& s, int64_t ms) { return s.endMs < ms; });
+        auto last = first;
+        while (last != m_spans.end() && last->startMs <= endMs) {
+            startMs = std::min(startMs, last->startMs);
+            endMs = std::max(endMs, last->endMs);
+            ++last;
         }
-        if (i == j && m_count == kMaxSpans) {
-            // Full: the new span always stays (paging must see its own page land);
-            // forget the shortest other span, which draws as a hole and is fetched again.
-            int k = 0;
-            for (int n = 1; n < m_count; ++n)
-                if (m_spans[n].endMs - m_spans[n].startMs < m_spans[k].endMs - m_spans[k].startMs) k = n;
-            std::move(m_spans.begin() + k + 1, m_spans.begin() + m_count, m_spans.begin() + k);
-            --m_count;
-            if (k < i) --i;
-            j = i;
+        if (first == last) {
+            m_spans.insert(first, Span{startMs, endMs});
+            return;
         }
-        const int removed = j - i;
-        if (removed == 0) {
-            std::move_backward(m_spans.begin() + i, m_spans.begin() + m_count, m_spans.begin() + m_count + 1);
-            ++m_count;
-        } else if (removed > 1) {
-            std::move(m_spans.begin() + j, m_spans.begin() + m_count, m_spans.begin() + i + 1);
-            m_count -= removed - 1;
-        }
-        m_spans[i] = {startMs, endMs};
+        *first = {startMs, endMs};
+        m_spans.erase(first + 1, last);
     }
 
     // A live bar [startMs, endMs) arrived: coverage is open-ended from the first one.
@@ -75,26 +69,29 @@ public:
 
     // Bars older than ms were evicted: their coverage no longer has bars behind it.
     void trimBefore(int64_t ms) {
-        int drop = 0;
-        while (drop < m_count && m_spans[drop].endMs <= ms) ++drop;
-        if (drop > 0) {
-            std::move(m_spans.begin() + drop, m_spans.begin() + m_count, m_spans.begin());
-            m_count -= drop;
-        }
-        if (m_count > 0) m_spans[0].startMs = std::max(m_spans[0].startMs, ms);
+        auto keep = std::find_if(m_spans.begin(), m_spans.end(), [ms](const Span& s) { return s.endMs > ms; });
+        m_spans.erase(m_spans.begin(), keep);
+        if (!m_spans.empty()) m_spans.front().startMs = std::max(m_spans.front().startMs, ms);
         if (m_liveFromMs > 0 && m_liveFromMs < ms) m_liveFromMs = ms;
     }
 
-    bool covers(int64_t ms) const {
-        if (m_liveFromMs > 0 && ms >= m_liveFromMs) return true;
-        for (int i = 0; i < m_count; ++i) {
-            if (ms < m_spans[i].startMs) return false;
-            if (ms < m_spans[i].endMs) return true;
-        }
-        return false;
+    // The span that contains ms, or nullptr. The live run is not a span.
+    const Span* spanContaining(int64_t ms) const {
+        const auto it = firstEndingAfter(ms);
+        return it != m_spans.end() && it->startMs <= ms ? &*it : nullptr;
     }
 
-    // True when every bucket start in [startMs, endMs) is covered.
+    // The largest span end at or before ms, or INT64_MIN when there is none.
+    int64_t lastEndAtOrBefore(int64_t ms) const {
+        const auto it = firstEndingAfter(ms);
+        return it == m_spans.begin() ? INT64_MIN : std::prev(it)->endMs;
+    }
+
+    bool covers(int64_t ms) const {
+        return (m_liveFromMs > 0 && ms >= m_liveFromMs) || spanContaining(ms) != nullptr;
+    }
+
+    // True when every time in [startMs, endMs) is covered.
     bool coversRange(int64_t startMs, int64_t endMs) const {
         int64_t lo = 0, hi = 0;
         return !newestGap(startMs, endMs, lo, hi);
@@ -103,48 +100,44 @@ public:
     // Smallest covered time >= ms, or INT64_MAX when nothing at or after ms is covered.
     int64_t nextCovered(int64_t ms) const {
         int64_t best = m_liveFromMs > 0 ? std::max(ms, m_liveFromMs) : INT64_MAX;
-        for (int i = 0; i < m_count; ++i) {
-            if (ms < m_spans[i].endMs) return std::min(best, std::max(ms, m_spans[i].startMs));
-        }
+        const auto it = firstEndingAfter(ms);
+        if (it != m_spans.end()) best = std::min(best, std::max(ms, it->startMs));
         return best;
     }
 
-    // Start of the covered run that contains ms, or ms when it is not covered.
+    // Start of the covered run that contains ms (a span touching the live run joins
+    // it), or ms when it is not covered.
     int64_t runStart(int64_t ms) const {
         int64_t start = ms;
         if (m_liveFromMs > 0 && ms >= m_liveFromMs) start = m_liveFromMs;
-        for (int i = m_count - 1; i >= 0; --i) {
-            if (m_spans[i].startMs <= start && start <= m_spans[i].endMs) start = m_spans[i].startMs;
-        }
+        if (const Span* s = spanContaining(start)) return s->startMs;
+        if (start > 0 && start == m_liveFromMs)
+            if (const Span* s = spanContaining(start - 1)) return s->startMs;
         return start;
     }
 
     // Newest uncovered part [gapLo, gapHi) of [lo, hi); false when [lo, hi) is covered.
     bool newestGap(int64_t lo, int64_t hi, int64_t& gapLo, int64_t& gapHi) const {
         if (m_liveFromMs > 0) hi = std::min(hi, m_liveFromMs);
-        for (int i = m_count - 1; i >= 0 && hi > lo; --i) {
-            const Span& s = m_spans[i];
-            if (s.startMs >= hi) continue;
-            if (s.endMs < hi) {
-                gapLo = std::max(lo, s.endMs);
-                gapHi = hi;
-                return true;
-            }
-            hi = s.startMs; // [s.startMs, hi) is covered
-        }
         if (hi <= lo) return false;
-        gapLo = lo;
+        if (const Span* s = spanContaining(hi - 1)) hi = s->startMs; // merged: nothing touches it
+        if (hi <= lo) return false;
+        gapLo = std::max(lo, lastEndAtOrBefore(hi - 1));
         gapHi = hi;
         return true;
     }
 
-    bool empty() const { return m_count == 0 && m_liveFromMs == 0; }
+    bool empty() const { return m_spans.empty() && m_liveFromMs == 0; }
     int64_t liveFromMs() const { return m_liveFromMs; }
-    int spanCount() const { return m_count; }
+    int spanCount() const { return static_cast<int>(m_spans.size()); }
     const Span& span(int i) const { return m_spans[static_cast<size_t>(i)]; }
 
 private:
-    std::array<Span, kMaxSpans> m_spans{};
-    int m_count = 0;
+    std::vector<Span>::const_iterator firstEndingAfter(int64_t ms) const {
+        return std::upper_bound(m_spans.begin(), m_spans.end(), ms,
+                                [](int64_t t, const Span& s) { return t < s.endMs; });
+    }
+
+    std::vector<Span> m_spans;
     int64_t m_liveFromMs = 0, m_liveToMs = 0;
 };

@@ -548,17 +548,24 @@ TEST(CandleCoverage, MergesAdjacentSpansAndReportsTheNewestGap) {
     EXPECT_EQ(coverage.nextCovered(400), std::numeric_limits<int64_t>::max());
 }
 
-TEST(CandleCoverage, AFullSetKeepsANewOlderSpanAndForgetsTheShortestOther) {
+TEST(CandleCoverage, HasNoCapAndForgetsNothingOnItsOwn) {
     CandleCoverage coverage;
-    for (int i = 0; i < CandleCoverage::kMaxSpans; ++i) coverage.add(1000 + i * 100, 1000 + i * 100 + (i == 5 ? 10 : 50));
-    coverage.add(100, 200); // older than every span, disjoint
-    EXPECT_EQ(coverage.spanCount(), CandleCoverage::kMaxSpans);
-    EXPECT_TRUE(coverage.coversRange(100, 200)) << "the page just accepted must stay";
-    EXPECT_FALSE(coverage.covers(1505)) << "the shortest span went";
-    EXPECT_TRUE(coverage.covers(1005));
+    constexpr int kSpans = 5000;
+    for (int i = kSpans - 1; i >= 0; --i) coverage.add(1000 + i * 100, 1000 + i * 100 + 50); // newest first
+    coverage.add(100, 200); // older than every span
+    ASSERT_EQ(coverage.spanCount(), kSpans + 1);
+    for (int i = 0; i < kSpans; ++i) ASSERT_TRUE(coverage.covers(1000 + i * 100 + 10)) << i;
+    EXPECT_TRUE(coverage.coversRange(100, 200));
+    EXPECT_FALSE(coverage.covers(1060));
+    coverage.add(1050, 1100); // bridges two spans
+    EXPECT_EQ(coverage.spanCount(), kSpans);
+    EXPECT_TRUE(coverage.coversRange(1000, 1150));
+    qint64 lo = 0, hi = 0;
+    ASSERT_TRUE(coverage.newestGap(0, 1000 + kSpans * 100, lo, hi));
+    EXPECT_EQ(std::make_pair(lo, hi), (std::pair<qint64, qint64>{1000 + (kSpans - 1) * 100 + 50, 1000 + kSpans * 100}));
 }
 
-TEST(CandleCoverage, LiveRunIsOpenUntilClosedAndCapacityDropsTheOldestSpan) {
+TEST(CandleCoverage, LiveRunIsOpenUntilClosedAndEvictionTrimsOnlyBelowTheOldestBar) {
     CandleCoverage coverage;
     coverage.add(0 + 10, 20);
     coverage.extendLive(50, 60);
@@ -568,13 +575,12 @@ TEST(CandleCoverage, LiveRunIsOpenUntilClosedAndCapacityDropsTheOldestSpan) {
     EXPECT_FALSE(coverage.covers(60));
     EXPECT_TRUE(coverage.covers(55));
     coverage.clear();
-    for (int i = 0; i < CandleCoverage::kMaxSpans + 2; ++i) coverage.add(i * 10, i * 10 + 5);
-    EXPECT_EQ(coverage.spanCount(), CandleCoverage::kMaxSpans);
-    EXPECT_FALSE(coverage.covers(0)); // the oldest spans went first
-    EXPECT_TRUE(coverage.covers((CandleCoverage::kMaxSpans + 1) * 10));
+    for (int i = 0; i < 20; ++i) coverage.add(i * 10, i * 10 + 5);
     coverage.trimBefore(100);
     EXPECT_FALSE(coverage.covers(95));
     EXPECT_TRUE(coverage.covers(100));
+    EXPECT_TRUE(coverage.covers(190));
+    EXPECT_EQ(coverage.spanCount(), 10);
 }
 
 namespace {
