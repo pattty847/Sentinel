@@ -8,6 +8,7 @@
 #include <QScopeGuard>
 #include <QStringList>
 #include "config/AgentHostMode.hpp"
+#include <algorithm>
 #include <chrono>
 #include <thread>
 
@@ -23,7 +24,9 @@ struct CandleDataSourceTest : testing::Test {
     RemoteGridDataSource source{"127.0.0.1", "1"};
 
     bool candleRetryActive() const { return source.m_candleBackfillTimer.isActive(); }
-    qint64 candleRetryDelay() const { return source.m_candleBackfill.retryDelayMs(QDateTime::currentMSecsSinceEpoch()); }
+    qint64 candleNow() const { return source.candleNow(); }
+    void stepCandleClock(qint64 ms) { source.m_candleClockOffsetMs += ms; }
+    qint64 candleRetryDelay() const { return source.m_candleBackfill.retryDelayMs(source.candleLoaded(), source.candleNow()); }
     SentinelStreamClient& client() { return *source.streamClient(); }
     void deliver() { QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall); }
     size_t pendingBookCount() const { return source.m_pendingBookSnapshots.size(); }
@@ -127,7 +130,9 @@ struct CandleDataSourceTest : testing::Test {
                                            startMinute * minute + 1, bars));
         return bars.empty() ? CandleSeriesBuffer::CandleBar{} : bars.front();
     }
+    // The viewport ends at the live edge: the open bucket is `end`.
     void warm(qint64 start = 1000, qint64 end = 1010) {
+        source.m_candleClockOffsetMs = end * minute + 30'000 - QDateTime::currentMSecsSinceEpoch();
         source.setCandleHistoryViewport("BTC-USD", 60000, start * minute, end * minute);
         qint64 boundary = end;
         const qint64 target = start - (end - start);
@@ -560,4 +565,57 @@ TEST_F(CandleDataSourceTest, WarmingRequestParksOutsideItsNeedAndResendsVerbatim
     ASSERT_TRUE(buffer->getVisibleSlice("BTC-USD", 1000, 595000, 601000, bars));
     ASSERT_EQ(bars.size(), 2u);
     EXPECT_DOUBLE_EQ(bars.back().close, 5);
+}
+
+// Back to an interval at an older viewport: the real data source requests the
+// window, the span up to the bars it already holds and the span since it left.
+TEST_F(CandleDataSourceTest, ReturnToOlderViewportRequestsEveryUnfetchedSpan) {
+    const auto fullReply = [this](const Json& request) {
+        const qint64 end = request.at("end_time_ms").get<qint64>() / minute;
+        const qint64 start = end - request.at("limit").get<int>();
+        const qint64 liveEdge = candleNow() / minute;
+        Json bars = Json::array();
+        for (qint64 m = start; m < std::min(end, liveEdge); ++m) bars.push_back(candle(m, 5));
+        reply(request, bars);
+        return std::pair{start, end};
+    };
+    warm(2990, 3000);
+    live("BTC-USD", 60000, 3000, 5, 1, false);
+    deliver();
+    EXPECT_TRUE(takeRequest(150).is_null());
+    source.setCandleHistoryViewport("BTC-USD", 300000, 0, 0);
+    stepCandleClock(20 * minute); // away for 20 minutes
+    source.setCandleHistoryViewport("BTC-USD", 60000, 2900 * minute, 2910 * minute);
+    std::vector<std::pair<qint64, qint64>> requested;
+    for (int page = 0; page < 10; ++page) {
+        const auto request = takeRequest(300);
+        if (request.is_null()) break;
+        requested.push_back(fullReply(request));
+    }
+    const auto requestedSpan = [&](qint64 from, qint64 to) {
+        return std::any_of(requested.begin(), requested.end(),
+                           [&](const auto& r) { return r.first <= from && r.second >= to; });
+    };
+    EXPECT_TRUE(requestedSpan(2890, 2910)) << "the window";
+    EXPECT_TRUE(requestedSpan(2910, 2980)) << "up to the bars loaded before";
+    EXPECT_TRUE(requestedSpan(3001, 3020)) << "the time away, up to the live edge";
+    const auto* coverage = qobject_cast<CandleSeriesBuffer*>(source.candleBuffer())->coverage("BTC-USD", 60000);
+    ASSERT_NE(coverage, nullptr);
+    EXPECT_TRUE(coverage->coversRange(2890 * minute, 3020 * minute));
+    EXPECT_TRUE(takeRequest(150).is_null());
+}
+
+// History reached the live edge and no live bar came (a quiet symbol): the
+// stream covers the time after it, so the tail keeps its carry bars and nothing
+// is asked again.
+TEST_F(CandleDataSourceTest, QuietLiveEdgeKeepsTheTailCoveredWithoutRequests) {
+    warm(1000, 1010);
+    stepCandleClock(10 * minute);
+    const auto* coverage = qobject_cast<CandleSeriesBuffer*>(source.candleBuffer())->coverage("BTC-USD", 60000);
+    ASSERT_NE(coverage, nullptr);
+    EXPECT_TRUE(coverage->coversRange(990 * minute, 1020 * minute));
+    source.setCandleHistoryViewport("BTC-USD", 60000, 1010 * minute, 1020 * minute);
+    EXPECT_TRUE(takeRequest(250).is_null());
+    source.setCandleHistoryViewport("BTC-USD", 300000, 0, 0); // leaving ends the stream's claim
+    EXPECT_FALSE(coverage->covers(1015 * minute));
 }

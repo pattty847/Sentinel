@@ -105,8 +105,10 @@ void CandleSeriesBuffer::applyUpdate(const QString& symbol,
         } else {
             series.ring[series.head] = updated;
             series.head = (series.head + 1) % series.capacity;
+            trimEvictedCoverage(series);
         }
     }
+    series.coverage.extendLive(updated.timeStartMs, updated.timeEndMs);
 
     emit candlesDirty(symbol, timeframeMs, updated.timeStartMs, updated.timeEndMs);
 
@@ -138,18 +140,33 @@ std::vector<CandleSeriesBuffer::CandleBar> CandleSeriesBuffer::linearize(const S
 }
 
 void CandleSeriesBuffer::rebuild(Series& series, std::vector<CandleBar>&& sorted) {
-    if (sorted.size() > series.capacity) {
+    const bool evicts = sorted.size() > series.capacity;
+    if (evicts) {
         sorted.erase(sorted.begin(), sorted.end() - static_cast<std::ptrdiff_t>(series.capacity));
     }
     std::copy(sorted.begin(), sorted.end(), series.ring.begin());
     series.head = 0;
     series.count = sorted.size();
+    if (evicts) trimEvictedCoverage(series);
+}
+
+void CandleSeriesBuffer::trimEvictedCoverage(Series& series) {
+    if (series.count > 0) series.coverage.trimBefore(getAt(series, 0).timeStartMs);
 }
 
 void CandleSeriesBuffer::applyHistory(const QString& symbol,
                                       int64_t timeframeMs,
-                                      const std::vector<CandleBar>& history) {
-    if (symbol.isEmpty() || timeframeMs <= 0 || history.empty()) {
+                                      const std::vector<CandleBar>& history,
+                                      qint64 coverStartMs,
+                                      qint64 coverEndMs) {
+    if (symbol.isEmpty() || timeframeMs <= 0) {
+        return;
+    }
+    if (history.empty()) {
+        if (coverEndMs <= coverStartMs) return;
+        auto& series = seriesFor(symbol, timeframeMs);
+        series.coverage.add(coverStartMs, coverEndMs);
+        emit candlesDirty(symbol, timeframeMs, coverStartMs, coverEndMs);
         return;
     }
     auto& series = seriesFor(symbol, timeframeMs);
@@ -183,13 +200,16 @@ void CandleSeriesBuffer::applyHistory(const QString& symbol,
         }
     }
     while (existing < series.count) merged.push_back(getAt(series, existing++));
+    if (!page.empty()) series.coverage.add(page.front().timeStartMs, page.back().timeEndMs);
+    series.coverage.add(coverStartMs, coverEndMs);
     rebuild(series, std::move(merged));
     if (series.count == 0) {
         return;
     }
     const qint64 first = getAt(series, 0).timeStartMs;
     const qint64 last = getAt(series, series.count - 1).timeEndMs;
-    emit candlesDirty(symbol, timeframeMs, first, last);
+    emit candlesDirty(symbol, timeframeMs, std::min(first, coverStartMs > 0 ? coverStartMs : first),
+                      std::max(last, coverEndMs));
     sLog_Probe("candles.buffer",
                "history symbol=" << symbol << " tfMs=" << timeframeMs
                << " merged=" << history.size() << " count=" << series.count
@@ -208,7 +228,28 @@ void CandleSeriesBuffer::resetSeriesForSelection(const QString& symbol, int64_t 
     if (it != m_series.end()) resetOwnership(it->second);
 }
 
+void CandleSeriesBuffer::endLiveCoverage(const QString& symbol, int64_t timeframeMs) {
+    const auto it = m_series.find(SeriesKey{symbol, timeframeMs});
+    if (it != m_series.end()) it->second.coverage.closeLive();
+}
+
+void CandleSeriesBuffer::endLiveCoverage() {
+    for (auto& [key, series] : m_series) series.coverage.closeLive();
+}
+
+void CandleSeriesBuffer::openLiveCoverage(const QString& symbol, int64_t timeframeMs, qint64 liveFromMs) {
+    if (symbol.isEmpty() || timeframeMs <= 0) return;
+    seriesFor(symbol, timeframeMs).coverage.openLive(liveFromMs);
+    emit candlesDirty(symbol, timeframeMs, liveFromMs, liveFromMs + timeframeMs);
+}
+
+const CandleCoverage* CandleSeriesBuffer::coverage(const QString& symbol, int64_t timeframeMs) const {
+    const auto it = m_series.find(SeriesKey{symbol, timeframeMs});
+    return it == m_series.end() ? nullptr : &it->second.coverage;
+}
+
 void CandleSeriesBuffer::resetOwnership(Series& series) {
+    series.coverage.closeLive(); // a new stream starts its own live run
     series.lastSeq = 0;
     for (size_t i = 0; i < series.count; ++i) {
         auto& bar = getAt(series, i);

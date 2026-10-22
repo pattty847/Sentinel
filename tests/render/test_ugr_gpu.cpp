@@ -969,7 +969,8 @@ TEST(UgrCandleCpu, NonPositiveIntervalsClearExistingGeometry) {
     CandleSeriesBuffer buffer;
     constexpr qint64 bucket = 1'200'000;
     const CandleSeriesBuffer::CandleBar bar{bucket, bucket + 1000, 100, 110, 90, 105, 1, true, 0, false};
-    buffer.applyHistory("BTC-USD", 1000, {bar});
+    // Covered up to the live boundary: the carry bars give the line style a segment.
+    buffer.applyHistory("BTC-USD", 1000, {bar}, bucket, bucket + 5000);
     candles.setSize({640, 320});
     candles.setMappingProvider(&provider);
     candles.setCandleBuffer(&buffer);
@@ -1037,7 +1038,8 @@ TEST(UgrCandleCpu, HundredMsDrawsOnlyTradedBucketsWholeSecondsKeepCarryBars) {
             bars.push_back({start, start + tf, open, std::max(open, close) + (volume > 0 ? 2 : 0),
                             std::min(open, close) - (volume > 0 ? 2 : 0), close, volume, true, 0, false});
         }
-        buffer.applyHistory("BTC-USD", tf, bars);
+        // The page proves its window up to the live boundary (slot 10).
+        buffer.applyHistory("BTC-USD", tf, bars, bucket, bucket + 10 * tf);
         candles.setSize({640, 320});
         candles.setMappingProvider(&provider);
         candles.setCandleBuffer(&buffer);
@@ -1067,6 +1069,85 @@ TEST(UgrCandleCpu, HundredMsDrawsOnlyTradedBucketsWholeSecondsKeepCarryBars) {
         }
         delete root;
     }
+}
+
+// A bucket without a bar draws as a flat carry bar only where history or the
+// stream covered it: a span that was never fetched draws nothing.
+TEST(UgrCandleCpu, CarryBarsFillOnlyFetchedBuckets) {
+    constexpr qint64 tf = 60'000, t0 = 1'792'000'020'000 / tf * tf;
+    const auto bodies = [](QSGNode* root) {
+        auto* node = static_cast<QSGGeometryNode*>(root->firstChild()->nextSibling());
+        return node->geometry()->vertexCount() / 6;
+    };
+    CandleTickFrameProvider provider;
+    CandleTickGeometryItem candles;
+    CandleSeriesBuffer buffer;
+    // Two separate pages: nothing proves the 99 buckets between them.
+    buffer.applyHistory("BTC-USD", tf, {{t0, t0 + tf, 100, 104, 98, 102, 1, true, 0, false}});
+    buffer.applyHistory("BTC-USD", tf, {{t0 + 100 * tf, t0 + 101 * tf, 102, 106, 101, 105, 1, true, 0, false}});
+    candles.setSize({1280, 320});
+    candles.setMappingProvider(&provider);
+    candles.setCandleBuffer(&buffer);
+    candles.setSymbol("BTC-USD");
+    candles.setTimeframeMs(int(tf));
+    chart_raster::RasterInputs in;
+    in.timeStart = t0 - 5 * tf; in.timeEnd = t0 + 110 * tf;
+    in.minPrice = 90; in.maxPrice = 110;
+    in.tfMs = tf; in.tick = 1;
+    in.itemWidthLogical = 1280; in.itemHeightLogical = 320; in.dpr = 1;
+    provider.frame.raster = chart_raster::computeRaster(in, {});
+    provider.frame.mapping = chart_raster::toMapping(provider.frame.raster);
+    provider.frame.viewportValid = true;
+    provider.frame.viewportTimeStart = in.timeStart;
+    provider.frame.viewportTimeEnd = in.timeEnd;
+    provider.frame.activeTimeframeMs = tf;
+    provider.frame.currentBoundaryStartMs = t0 + 101 * tf;
+    ASSERT_GE(provider.frame.mapping.gridWidth, 101);
+    QSGNode* root = candles.updatePaintNode(nullptr, nullptr);
+    EXPECT_EQ(bodies(root), 2) << "an unfetched hole is not a quiet stretch";
+    // An empty page that proves the hole had no trades.
+    buffer.applyHistory("BTC-USD", tf, {}, t0 + tf, t0 + 100 * tf);
+    root = candles.updatePaintNode(root, nullptr);
+    EXPECT_EQ(bodies(root), 101) << "99 carry bars between the two real bars";
+    delete root;
+}
+
+// Line style: no segment crosses a span that was never fetched.
+TEST(UgrCandleCpu, LineBreaksAcrossUnfetchedSpans) {
+    constexpr qint64 tf = 60'000, t0 = 1'792'000'020'000 / tf * tf;
+    const auto segments = [](QSGNode* root) {
+        auto* node = static_cast<QSGGeometryNode*>(root->firstChild()->nextSibling());
+        return node->geometry()->vertexCount() / 6;
+    };
+    CandleTickFrameProvider provider;
+    CandleTickGeometryItem candles;
+    CandleSeriesBuffer buffer;
+    buffer.applyHistory("BTC-USD", tf, {{t0, t0 + tf, 100, 104, 98, 102, 1, true, 0, false}});
+    buffer.applyHistory("BTC-USD", tf, {{t0 + 100 * tf, t0 + 101 * tf, 102, 106, 101, 105, 1, true, 0, false}});
+    candles.setSize({1280, 320});
+    candles.setMappingProvider(&provider);
+    candles.setCandleBuffer(&buffer);
+    candles.setSymbol("BTC-USD");
+    candles.setTimeframeMs(int(tf));
+    candles.setCandleStyle(2);
+    chart_raster::RasterInputs in;
+    in.timeStart = t0 - 5 * tf; in.timeEnd = t0 + 110 * tf;
+    in.minPrice = 90; in.maxPrice = 110;
+    in.tfMs = tf; in.tick = 1;
+    in.itemWidthLogical = 1280; in.itemHeightLogical = 320; in.dpr = 1;
+    provider.frame.raster = chart_raster::computeRaster(in, {});
+    provider.frame.mapping = chart_raster::toMapping(provider.frame.raster);
+    provider.frame.viewportValid = true;
+    provider.frame.viewportTimeStart = in.timeStart;
+    provider.frame.viewportTimeEnd = in.timeEnd;
+    provider.frame.activeTimeframeMs = tf;
+    provider.frame.currentBoundaryStartMs = t0 + 101 * tf;
+    QSGNode* root = candles.updatePaintNode(nullptr, nullptr);
+    EXPECT_EQ(segments(root), 0) << "two closes 100 buckets apart, nothing fetched between";
+    buffer.applyHistory("BTC-USD", tf, {}, t0 + tf, t0 + 100 * tf);
+    root = candles.updatePaintNode(root, nullptr);
+    EXPECT_EQ(segments(root), 100) << "a quiet span joins through its carry bars";
+    delete root;
 }
 
 TEST(UgrCandleCpu, WindowAndQmlPassUnroundedMilliseconds) {

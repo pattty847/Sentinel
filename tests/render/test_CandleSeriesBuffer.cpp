@@ -2,9 +2,11 @@
 
 #include "datasources/CandleSeriesBuffer.hpp"
 #include "datasources/RemoteGridDataSource.hpp"
+#include "datasources/CandleBackfillState.hpp"
 #include <QCoreApplication>
 #include <QEvent>
 
+#include <algorithm>
 #include <vector>
 #include "marketdata/rest/CoinbaseRestClient.hpp"
 
@@ -269,4 +271,174 @@ TEST(CandleSeriesBuffer, NativeHistoryAndLiveAggregatorMeetWithoutGapOrOverlapIn
         EXPECT_FALSE(bars[3].isClosed);
         EXPECT_EQ(bars[3].close, 30);
     }
+}
+
+TEST(CandleSeriesBuffer, CoverageFollowsPagesLiveBarsAndEviction) {
+    CandleSeriesBuffer buffer;
+    EXPECT_EQ(buffer.coverage(kSym, kTfMs), nullptr);
+    // A page proves its window, also where it has no bar; an empty page still proves its window.
+    buffer.applyHistory(kSym, kTfMs, {bar(105, 1, true)}, 100 * 60'000, 110 * 60'000);
+    buffer.applyHistory(kSym, kTfMs, {}, 90 * 60'000, 95 * 60'000);
+    const CandleCoverage* coverage = buffer.coverage(kSym, kTfMs);
+    ASSERT_NE(coverage, nullptr);
+    EXPECT_TRUE(coverage->coversRange(100 * 60'000, 110 * 60'000));
+    EXPECT_TRUE(coverage->coversRange(90 * 60'000, 95 * 60'000));
+    EXPECT_FALSE(coverage->covers(97 * 60'000));
+    // Without a window, a page proves the span between its first and last bar.
+    buffer.applyHistory(kSym, kTfMs, {bar(120, 1, true), bar(130, 1, true)});
+    EXPECT_TRUE(coverage->coversRange(120 * 60'000, 131 * 60'000));
+    EXPECT_FALSE(coverage->covers(115 * 60'000));
+    // Live bars cover from the first one on until the stream ends.
+    buffer.applyUpdate(kSym, kTfMs, bar(140, 2, false), 1, false);
+    EXPECT_TRUE(coverage->covers(10'000 * 60'000));
+    buffer.endLiveCoverage(kSym, kTfMs);
+    EXPECT_TRUE(coverage->covers(140 * 60'000));
+    EXPECT_FALSE(coverage->covers(141 * 60'000));
+    buffer.applyUpdate(kSym, kTfMs, bar(150, 2, false), 2, false);
+    buffer.resetSeriesForSelection(kSym, kTfMs); // a new stream starts its own run
+    EXPECT_FALSE(coverage->covers(151 * 60'000));
+}
+
+TEST(CandleSeriesBuffer, EvictedBarsTakeTheirCoverageAlong) {
+    CandleSeriesBuffer buffer;
+    constexpr qint64 capacity = 20'000; // 1m series
+    std::vector<Bar> page;
+    for (qint64 m = 0; m < capacity + 10; ++m) page.push_back(bar(1'000 + m, 1, true));
+    buffer.applyHistory(kSym, kTfMs, page, 900 * 60'000, (1'000 + capacity + 10) * 60'000);
+    const CandleCoverage* coverage = buffer.coverage(kSym, kTfMs);
+    ASSERT_NE(coverage, nullptr);
+    EXPECT_EQ(buffer.oldestTimeMs(kSym, kTfMs), 1'010 * 60'000);
+    EXPECT_FALSE(coverage->covers(1'009 * 60'000));
+    EXPECT_TRUE(coverage->covers(1'010 * 60'000));
+    buffer.applyUpdate(kSym, kTfMs, bar(1'000 + capacity + 10, 1, false), 1, false);
+    EXPECT_FALSE(coverage->covers(1'010 * 60'000)) << "the ring wrapped over the oldest bar";
+}
+
+namespace {
+// The paging loop of RemoteGridDataSource against the real buffer and a fake
+// server that answers full REST pages (every closed bucket of the window).
+struct PagingLoop {
+    CandleSeriesBuffer& buffer;
+    qint64 tf;
+    qint64 clock;
+    CandleBackfillState state{CandleBackfillState::kDefaultEmptyLookbackMs};
+    std::vector<std::pair<qint64, qint64>> sent;
+    bool sparse = false; // pages hold only their first and last bucket (quiet in between)
+
+    // Pages until idle or `cap` requests; returns the number sent.
+    int run(int cap) {
+        const CandleCoverage none;
+        for (int pages = 0; pages < cap; ++pages) {
+            const CandleCoverage* coverage = buffer.coverage(kSym, tf);
+            const CandleBackfillState::Loaded loaded{coverage ? *coverage : none, buffer.oldestTimeMs(kSym, tf),
+                                                     buffer.historyCapacityReached(kSym, tf)};
+            if (!state.needsHistory(loaded, clock)) return pages;
+            clock += state.retryDelayMs(loaded, clock);
+            const auto request = state.next(loaded, clock);
+            if (!request) return pages;
+            sent.emplace_back(request->startMs, request->endMs);
+            std::vector<Bar> bars;
+            for (qint64 t = request->startMs; t < std::min(request->endMs, clock / tf * tf); t += tf)
+                bars.push_back({t, t + tf, 1, 1, 1, 1, 1, true, 0, false});
+            if (sparse && bars.size() > 2) bars.erase(bars.begin() + 1, bars.end() - 1);
+            clock += 50;
+            EXPECT_TRUE(state.accept(kSym, tf, request->startMs, request->endMs, bars.empty() ? 0 : bars.front().timeStartMs,
+                                     clock));
+            qint64 start = 0, end = 0;
+            if (!state.acceptedCoverage(bars.empty() ? 0 : bars.front().timeStartMs, start, end)) start = end = 0;
+            buffer.applyHistory(kSym, tf, bars, start, end);
+        }
+        return cap;
+    }
+};
+constexpr qint64 kFiveMin = 300'000;
+} // namespace
+
+// A full ring keeps its newest bars. A viewport before the oldest kept bar asks
+// for nothing: any page there, or between it and the kept bars, is evicted at once.
+TEST(CandleSeriesBuffer, FullRingAsksNothingOlderThanItsOldestBar) {
+    CandleSeriesBuffer buffer;
+    const qint64 nowMs = 2'000'000'100'000, liveEdge = nowMs / kFiveMin * kFiveMin;
+    std::vector<Bar> page;
+    for (qint64 i = 10'000; i > 0; --i) {
+        const qint64 t = liveEdge - i * kFiveMin;
+        page.push_back({t, t + kFiveMin, 1, 1, 1, 1, 1, true, 0, false});
+    }
+    buffer.applyHistory(kSym, kFiveMin, page, page.front().timeStartMs, liveEdge);
+    buffer.openLiveCoverage(kSym, kFiveMin, liveEdge);
+    ASSERT_TRUE(buffer.historyCapacityReached(kSym, kFiveMin));
+    PagingLoop loop{buffer, kFiveMin, nowMs};
+    const qint64 oldest = buffer.oldestTimeMs(kSym, kFiveMin);
+    loop.state.setViewport(kSym, kFiveMin, oldest - 2'000 * kFiveMin, oldest - 1'000 * kFiveMin);
+    EXPECT_EQ(loop.run(30), 0) << "first request ends at " << (loop.sent.empty() ? 0 : loop.sent.front().second);
+    EXPECT_EQ(buffer.oldestTimeMs(kSym, kFiveMin), oldest);
+}
+
+namespace {
+// Fifteen separate 30-bucket spans in the last few days, and the live run.
+qint64 seedSpans(CandleSeriesBuffer& buffer, qint64 liveEdge) {
+    for (int i = 0; i < 15; ++i) {
+        const qint64 t = liveEdge - (15 - i) * 60 * kFiveMin;
+        buffer.applyHistory(kSym, kFiveMin, {{t, t + kFiveMin, 1, 1, 1, 1, 1, true, 0, false}}, t, t + 30 * kFiveMin);
+    }
+    buffer.openLiveCoverage(kSym, kFiveMin, liveEdge);
+    return liveEdge - 15 * 60 * kFiveMin; // the oldest span
+}
+bool noRepeats(std::vector<std::pair<qint64, qint64>> sent) {
+    std::sort(sent.begin(), sent.end());
+    return std::adjacent_find(sent.begin(), sent.end()) == sent.end();
+}
+} // namespace
+
+// Many separate spans and a page older than all of them: the page keeps its
+// coverage and paging settles.
+TEST(CandleSeriesBuffer, PageOlderThanManySpansIsKeptAndPagingSettles) {
+    CandleSeriesBuffer buffer;
+    const qint64 nowMs = 2'000'000'100'000, liveEdge = nowMs / kFiveMin * kFiveMin;
+    seedSpans(buffer, liveEdge);
+    PagingLoop loop{buffer, kFiveMin, nowMs};
+    const qint64 viewEnd = liveEdge - 2'000 * kFiveMin;
+    loop.state.setViewport(kSym, kFiveMin, viewEnd - 100 * kFiveMin, viewEnd);
+    const int pages = loop.run(60);
+    EXPECT_LT(pages, 60) << "paging repeats a page";
+    EXPECT_TRUE(noRepeats(loop.sent));
+    EXPECT_TRUE(buffer.coverage(kSym, kFiveMin)->coversRange(viewEnd - 200 * kFiveMin, liveEdge));
+}
+
+// Review r2-1: Y is fetched, then the view pans to an older X in the same selection
+// before paging goes on. X is never asked for twice.
+TEST(CandleSeriesBuffer, PanToAnOlderWindowAfterOnePageNeverRepeatsIt) {
+    CandleSeriesBuffer buffer;
+    const qint64 nowMs = 2'000'000'100'000, liveEdge = nowMs / kFiveMin * kFiveMin;
+    const qint64 oldestSpan = seedSpans(buffer, liveEdge);
+    PagingLoop loop{buffer, kFiveMin, nowMs};
+    const qint64 yEnd = oldestSpan - 100 * kFiveMin, xEnd = oldestSpan - 400 * kFiveMin;
+    loop.state.setViewport(kSym, kFiveMin, yEnd - 10 * kFiveMin, yEnd); // a 20-bucket window
+    ASSERT_EQ(loop.run(1), 1);
+    loop.state.setViewport(kSym, kFiveMin, xEnd - 5 * kFiveMin, xEnd); // a 10-bucket window
+    EXPECT_LT(loop.run(60), 60);
+    EXPECT_TRUE(noRepeats(loop.sent));
+    EXPECT_TRUE(buffer.coverage(kSym, kFiveMin)->coversRange(xEnd - 10 * kFiveMin, liveEdge));
+}
+
+// Review r2-2: a sparse REST page Y next to the live run, another page X, then back
+// to Y: paging completes and Y keeps the coverage its quiet buckets draw from.
+TEST(CandleSeriesBuffer, ReturnToASparseRestPageKeepsItsQuietBuckets) {
+    CandleSeriesBuffer buffer;
+    const qint64 nowMs = 2'000'000'100'000, liveEdge = nowMs / kFiveMin * kFiveMin;
+    const qint64 oldestSpan = seedSpans(buffer, liveEdge);
+    PagingLoop loop{buffer, kFiveMin, nowMs};
+    loop.sparse = true;
+    // Y: the 10 buckets before the live run, apart from every seeded span (the newest ends 30 buckets back).
+    loop.state.setViewport(kSym, kFiveMin, liveEdge - 5 * kFiveMin, liveEdge);
+    ASSERT_EQ(loop.run(1), 1);
+    const auto y = loop.sent.back();
+    ASSERT_EQ(y.first, liveEdge - 10 * kFiveMin);
+    const qint64 xEnd = oldestSpan - 400 * kFiveMin;
+    loop.state.setViewport(kSym, kFiveMin, xEnd - 5 * kFiveMin, xEnd);
+    ASSERT_EQ(loop.run(1), 1);
+    loop.state.setViewport(kSym, kFiveMin, liveEdge - 5 * kFiveMin, liveEdge);
+    EXPECT_LT(loop.run(60), 60);
+    EXPECT_TRUE(noRepeats(loop.sent));
+    EXPECT_TRUE(buffer.coverage(kSym, kFiveMin)->coversRange(y.first, y.second)) << "Y's quiet buckets lost their proof";
 }

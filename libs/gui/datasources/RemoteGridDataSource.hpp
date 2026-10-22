@@ -3,6 +3,7 @@
 #include "CandleSeriesBuffer.hpp"
 #include "CandleBackfillState.hpp"
 #include "../models/MarketHealth.hpp"
+#include <QDateTime>
 #include <QTimer>
 #include <unordered_set>
 #include "../../core/protocol/SentinelStreamClient.hpp"
@@ -67,6 +68,8 @@ private:
                               double tickSize, quint64 deliveryGeneration, qint64 nowMs,
                               uint64_t bookVersion = 0);
     void requestNextCandlePage();
+    CandleBackfillState::Loaded candleLoaded() const;
+    qint64 candleNow() const { return QDateTime::currentMSecsSinceEpoch() + m_candleClockOffsetMs; }
     void advanceCandleDeliveryGeneration();
     MarketHealth m_marketHealth;
     SentinelStreamClient m_client;
@@ -89,6 +92,7 @@ private:
     bool m_candleHistoryReady = false;
     bool m_connectionActive = false; // GUI-thread mirror of connected/disconnected signals
     quint64 m_candleDeliveryGeneration = 0;
+    qint64 m_candleClockOffsetMs = 0; // tests place the live edge next to their viewport
     // We need to maintain a local LiveOrderBook replica if we want to return refs
     // Or we might change the interface to not return references?
     // IGridDataSource::getDirectLiveOrderBook returns const ref.
