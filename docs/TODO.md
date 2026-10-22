@@ -46,6 +46,8 @@ Detail belongs in the linked plan or file, not in the item.
 
 ## Backlog (bugs and small fixes)
 
+- Candle restart-partial bars: the 1m bar and the 5m..1d rollup bars open at a server restart lose their pre-restart part (only 100 ms and 1 s are restored); a GUI keeps the partial closed bar. Owner to confirm it matches the 4h/1d report.
+- `CandleCoverage`: barless spans (empty REST pages) and `m_fetched` empty memory answers are not bounded by ring retention; repeated panning across disjoint empty history grows them until restart (review r3 minor, deferred at `65a81a53`).
 - Startup candle flicker: the auto tick commits 100 -> 500 -> 100 within ~60 ms around the first snapshot, so the settled tick differs run to run; do not commit an auto tick until the first snapshot and price window settle (owner-visible). Until fixed, do not chase price-row diffs in screenshots.
 - Overlay teardown crash: `CandlestickOverlayItem`/`TradeBubbleOverlayItem` keep a dangling mapping provider/renderer after `UnifiedGridRenderer` is deleted (tests null them first); use a QPointer or disconnect on UGR destruction.
 - `HeatmapGpuBinner` precision self-test intermittently reads back all zeros (1 of 6 starts) and silently drops the fast kernel; suspect readback before dispatch completion in `driveSelfTest`.
