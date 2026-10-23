@@ -22,7 +22,7 @@ Detail belongs in the linked plan or file, not in the item.
    - local-time axis labels: `TimeAxisModel` has a `timezone` property no control sets; `HeatmapGpuLayer.cpp` hard-codes UTC; add a setting and route every time label through one timezone;
    - zoom-to-footprint: candles widen into bid/ask footprint cells, then numbers appear (extends Footprint and text LOD below);
    - order book imbalance strip from the Coinbase book.
-4. **Render performance pass**: `CandlestickBatched.cpp` allocates every frame; `VolumeProfileRenderer` rebuilds all geometry and copies bins every frame (AGENTS 5); fold in the drift check from item 3.
+4. **Heatmap/candle zoom drift**: heatmap and candles drift apart slightly on wheel zoom-out (moved from the landed render performance pass, `3a54b829`; see item 3).
 5. **Repeatable performance benchmark** on the owner's machines; cite its numbers in the README (the old 110 FPS figure was removed 2026-10-07).
 6. **README + ARCHITECTURE pass** for the finished one-world architecture; also fix `docs/MARKETDATA.md` (TLS described as optional, single-quad heatmap, 110 FPS).
 7. **CI** for macOS, Windows, Linux (no `.github/workflows` today). Hosted runners have no GPU, so GPU tests skip and report Passed; GPU coverage needs self-hosted runners on the Mac and the Windows machine.
@@ -46,6 +46,8 @@ Detail belongs in the linked plan or file, not in the item.
 
 ## Backlog (bugs and small fixes)
 
+- Agent API `POST /api/v1/layers {"volumeProfile":true}` also turns the heatmap layer off, on main too; docs call it a partial map (found in the render-perf review 2026-10-23).
+- Render-perf deferred minors (`3a54b829`): apply `finiteCandle()` in `CandlestickBatched::recomputeViewport`/`updatePriceRange`; candle allocation test cannot see `QSGGeometry::allocate` (malloc).
 - Candle restart-partial bars: the 1m bar and the 5m..1d rollup bars open at a server restart lose their pre-restart part (only 100 ms and 1 s are restored); a GUI keeps the partial closed bar. Owner to confirm it matches the 4h/1d report.
 - `CandleCoverage`: barless spans (empty REST pages) and `m_fetched` empty memory answers are not bounded by ring retention; repeated panning across disjoint empty history grows them until restart (review r3 minor, deferred at `65a81a53`).
 - Startup candle flicker: the auto tick commits 100 -> 500 -> 100 within ~60 ms around the first snapshot, so the settled tick differs run to run; do not commit an auto tick until the first snapshot and price window settle (owner-visible). Until fixed, do not chase price-row diffs in screenshots.
@@ -63,7 +65,6 @@ Detail belongs in the linked plan or file, not in the item.
 - GUI RSS ~1.5 GB after 10 min (unprofiled).
 - FPS readout shows ~20 when idle (render on demand) and 110-125 while panning; show frame time or "idle" instead.
 - S15 minors (Fable): delete the test-only `ChartLookSettings::notify` std::function (tests should QSignalSpy the group signals); fix the indentation in `ChartAgentPort.cpp:36-53`.
-- Opt-in `ShadowTest.HandoffLatencyBenchmark` (`test_shadow.cpp`).
 - SentinelBar `PlanLocation.resolve` misses `initiatives/` trailers and relative pinned paths outside `research/` (PR 44 review, minor).
 - W2d live GUI display and the Windows runtime are unverified.
 - Unverified since 2026-09-28 (owner's first look at recording mode): candles overlap the price axis when panned next to it (clip to the plot area); price-axis tick steps disagree with heatmap cell size; confirm the theme dropdown applies to recording mode.
