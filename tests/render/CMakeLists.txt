@@ -106,11 +106,18 @@ add_test(NAME PriceAxisModelTests COMMAND test_PriceAxisModel)
 set_tests_properties(PriceAxisModelTests PROPERTIES LABELS "render")
 
 
-add_executable(test_TradeOverlay test_TradeOverlay.cpp)
+add_executable(test_TradeOverlay test_TradeOverlay.cpp test_TradeOverlayBudget.cpp)
 target_include_directories(test_TradeOverlay PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_TradeOverlay PRIVATE sentinel_gui_lib GTest::gtest_main)
 add_test(NAME TradeOverlayTests COMMAND test_TradeOverlay)
 set_tests_properties(TradeOverlayTests PROPERTIES LABELS "render;servermodel")
+
+# Selection is standard C++ and can be tested without linking any Qt library.
+add_executable(test_TradeOverlaySelection test_TradeOverlaySelection.cpp)
+target_include_directories(test_TradeOverlaySelection PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_TradeOverlaySelection PRIVATE GTest::gtest_main)
+add_test(NAME TradeOverlaySelectionTests COMMAND test_TradeOverlaySelection)
+set_tests_properties(TradeOverlaySelectionTests PROPERTIES LABELS "servermodel")
 
 # Compute recorded in QSGRenderNode::prepare() inside a real
 # scene graph (headless via QQuickRenderControl). Skips without a Metal device.

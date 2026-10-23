@@ -1,5 +1,6 @@
 #pragma once
 #include "RecordingLive.hpp"
+#include "OverlayTradeSelection.hpp"
 #include <map>
 #include <set>
 #include <unordered_map>
@@ -48,9 +49,13 @@ public:
     std::vector<OHLCVBar> getHistory(const std::string& symbol, int64_t timeframeMs, size_t limit = 1000) const;
     std::vector<OHLCVBar> getHistory(const std::string& symbol, int64_t timeframeMs, int64_t endMs,
                                      size_t limit) const;
+    // Newest is for TPO history only: retainedFromMs becomes the complete-tape
+    // cutoff for candle fallback; budgetExceeded reports a truncated selection.
     bool collectOverlayTrades(const std::string& symbol, int64_t startMs, int64_t endMs,
                               size_t limit, std::vector<FootprintTradeSample>& out,
-                              int64_t* retainedFromMs = nullptr) const;
+                              int64_t* retainedFromMs = nullptr,
+                              OverlayTradeBudget budget = OverlayTradeBudget::Reject,
+                              bool* budgetExceeded = nullptr) const;
     bool collectFootprintTrades(const std::string& symbol,
                                 int64_t startTimeMs,
                                 int64_t endTimeMs,

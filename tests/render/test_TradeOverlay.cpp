@@ -191,6 +191,13 @@ TEST_F(TradeOverlay, SnapshotBudgetsOnlyRequestedWindowAndSortsOnlyMatches) {
     EXPECT_TRUE(trades.empty());
     EXPECT_FALSE(model.collectOverlayTrades("BTC-USD", day, day + 120000, kMaxTrades, trades));
     EXPECT_TRUE(trades.empty());
+    bool limited = false;
+    ASSERT_TRUE(model.collectOverlayTrades("BTC-USD", day, day + 120000, kMaxTrades, trades,
+                                          &retainedFrom, OverlayTradeBudget::Newest, &limited));
+    EXPECT_TRUE(limited); ASSERT_EQ(trades.size(), kMaxTrades);
+    EXPECT_EQ(retainedFrom, day + 1);
+    EXPECT_EQ(trades.back().timestampMs, day + 119999);
+    EXPECT_EQ(trades[trades.size() - 2].timestampMs, day + 60000);
     auto q = request(); q.kind = Kind::FootprintHistory;
     EXPECT_EQ(tradeWindow(q).startMs, day); EXPECT_EQ(tradeWindow(q).endMs, day + 120000);
 }

@@ -430,28 +430,26 @@ std::vector<OHLCVBar> ServerDataModel::getHistory(const std::string& symbol, int
 bool ServerDataModel::collectOverlayTrades(const std::string& symbol, int64_t startMs,
                                           int64_t endMs, size_t limit,
                                           std::vector<FootprintTradeSample>& out,
-                                          int64_t* retainedFromMs) const {
-    out.clear();
+                                          int64_t* retainedFromMs, OverlayTradeBudget budget,
+                                          bool* budgetExceeded) const {
+    OverlayTradeSelection selection(startMs, endMs, limit, out, budget);
     if (retainedFromMs) *retainedFromMs = 0;
+    if (budgetExceeded) *budgetExceeded = false;
     if (endMs <= startMs) return true;
     {
         std::lock_guard<std::mutex> lock(m_footprintTradeMutex);
         const auto it = m_recentFootprintTrades.find(symbol);
         if (it == m_recentFootprintTrades.end()) return true;
-        // Arrival order need not match exchange time. Inspect every timestamp,
-        // but only copy and budget the requested half-open window.
         for (const auto& trade : it->second) {
-            if (retainedFromMs && (*retainedFromMs == 0 || trade.timestampMs < *retainedFromMs))
-                *retainedFromMs = trade.timestampMs;
-            if (trade.timestampMs < startMs || trade.timestampMs >= endMs) continue;
-            if (out.size() == limit) {
-                out.clear(); // Never expose an over-budget partial snapshot.
+            if (!selection.add(trade)) {
+                if (retainedFromMs) *retainedFromMs = selection.retainedFromMs();
                 return false;
             }
-            out.push_back(trade);
         }
     }
-    std::stable_sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.timestampMs < b.timestampMs; });
+    selection.finish();
+    if (retainedFromMs) *retainedFromMs = selection.retainedFromMs();
+    if (budgetExceeded) *budgetExceeded = selection.budgetExceeded();
     return true;
 }
 

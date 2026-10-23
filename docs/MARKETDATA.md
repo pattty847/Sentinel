@@ -504,8 +504,12 @@ late replies, and selection generations prevent obsolete grids from publishing.
 
 Each job copies at most 250,000 trades inside its requested half-open time window
 and produces at most 8 MiB. Trades outside that window do not consume the budget;
-only matching trades are sorted. An oversized window fails explicitly instead of
-producing a partial profile. History
+only matching trades are sorted. Oversized live and footprint windows fail explicitly
+instead of producing a partial profile. TPO history keeps the newest 250,000 trades
+by exchange timestamp and extends the existing approximate candle-range fallback
+through the last omitted timestamp (including timestamp ties at candle boundaries).
+The seven-day candle input budget remains in force, and each limited page logs its
+symbol, window and kept trade count. History
 pages contain at most 512 columns. Saturation rejects history requests with a
 `trade_overlay` error; live refreshes coalesce until the next timer turn. A live
 refresh sends the forming bucket and, when a boundary was crossed, the preceding
@@ -542,10 +546,11 @@ shorter (NY, London, Asia, Australia, H24); for W1 and M1 it covers the current
 UTC day, because the live trade tape is retained for at most 24 hours.
 
 Live overlays and footprint history derive from the retained server trade tape.
-TPO history additionally fills price rows from REST minute-candle high/low ranges
-before the oldest retained trade, including its partially retained minute. With
+TPO history additionally approximates older price rows from REST candle high/low
+ranges before the complete selected tape, including a partially covered boundary
+candle. This covers both pre-retention time and trades omitted by the budget. With
 no retained tape (for example after restart), candles cover the entire requested
-history window. Fetches run on the history worker, in pages of at most 350 minutes;
+history window. Fetches run on the history worker, in pages of at most 350 candles;
 fetch errors fail the request explicitly. Every REST call has one 10-second total
 network deadline covering DNS, connect, TLS and HTTP, including any auth fallback.
 Timeouts return a failed result and log a warning. Overlay jobs check cancellation
