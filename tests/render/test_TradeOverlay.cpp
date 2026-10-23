@@ -12,6 +12,7 @@
 #include <QSGGeometryNode>
 #include <cmath>
 #include <utility>
+#include <tuple>
 #include "render/FootprintStreamState.hpp"
 #include "render/TpoStreamState.hpp"
 #include "render/DataProcessor.hpp"
@@ -53,7 +54,119 @@ protected:
     int argc = 1; char name[5] = "test"; char* argv[2] = {name, nullptr};
     QCoreApplication app{argc, argv};
 };
+class TradeOverlayModel : public TradeOverlay {
+protected:
+    QTemporaryDir directory;
+    QString previousDirectory = QDir::currentPath();
+    std::unique_ptr<ServerDataModel> model;
+    void SetUp() override {
+        ASSERT_TRUE(directory.isValid());
+        ASSERT_TRUE(QDir::setCurrent(directory.path()));
+        ServerConfig config; config.recording.enabled = false;
+        model = std::make_unique<ServerDataModel>(config);
+    }
+    void TearDown() override {
+        model.reset();
+        QDir::setCurrent(previousDirectory);
+    }
+};
 }
+TEST(TradeOverlayBudget, OnlyTpoHistoryUsesNewestBudget) {
+    EXPECT_EQ(overlayBudgetFor(Kind::TpoHistory), OverlayTradeBudget::Newest);
+    EXPECT_EQ(overlayBudgetFor(Kind::FootprintHistory), OverlayTradeBudget::Reject);
+    EXPECT_EQ(overlayBudgetFor(Kind::Live), OverlayTradeBudget::Reject);
+}
+
+TEST_F(TradeOverlayModel, OrderedMillionTradeTapeNeedsOnlyOneHeapify) {
+    using Trade = ServerDataModel::FootprintTradeSample;
+    constexpr size_t count = 4 * kMaxTrades;
+    std::deque<Trade> retained;
+    for (size_t i = 0; i < count; ++i)
+        retained.push_back({day + static_cast<int64_t>(i), 115, 1, AggressorSide::Buy});
+    TradeOverlayModelTest::seed(*model, "BTC-USD", std::move(retained));
+    std::vector<Trade> trades;
+    int64_t retainedFrom = 0;
+    bool limited = false;
+    size_t heapOperations = 0;
+    ASSERT_TRUE(model->collectOverlayTrades("BTC-USD", day, day + count, kMaxTrades, trades,
+                                           &retainedFrom, OverlayTradeBudget::Newest, &limited,
+                                           &heapOperations));
+    ASSERT_TRUE(limited);
+    ASSERT_EQ(trades.size(), kMaxTrades);
+    EXPECT_EQ(trades.front().timestampMs, day + count - kMaxTrades);
+    EXPECT_EQ(trades.back().timestampMs, day + count - 1);
+    EXPECT_EQ(retainedFrom, trades.front().timestampMs);
+    // One O(k) make_heap and no pop/push pairs; forward scanning needs 1,500,001 calls.
+    EXPECT_EQ(heapOperations, 1);
+}
+
+TEST_F(TradeOverlayModel, UnderAndAtBudgetMatchRejectTradesCandlesAndPageBytes) {
+    using Trade = ServerDataModel::FootprintTradeSample;
+    using FetchCall = std::tuple<int64_t, int64_t, int64_t, int>;
+    constexpr int64_t hour = 3600000;
+    for (const size_t count : {size_t{0}, size_t{3}, kMaxTrades}) {
+        SCOPED_TRACE(count);
+        auto q = request(); q.kind = Kind::TpoHistory;
+        q.footprintMs = hour; q.tpoMs = hour; q.nowMs = day + 2 * hour;
+        q.previousMs = q.nowMs - 1;
+        std::deque<Trade> retained;
+        for (size_t i = count; i > 0; --i) {
+            const auto timestamp = i == count ? day + hour / 2 : day + hour + (i % 2) * 30000;
+            retained.push_back({static_cast<int64_t>(timestamp), 111.0 + i % 3, 1.0 + i % 5,
+                                i % 2 ? AggressorSide::Buy : AggressorSide::Sell});
+        }
+        retained.push_front({day + 3 * hour, 119, 9, AggressorSide::Buy});
+        retained.push_back({day + 2 * hour, 117, 8, AggressorSide::Sell});
+        TradeOverlayModelTest::seed(*model, q.symbol, std::move(retained));
+        const auto window = tradeWindow(q);
+        std::vector<Trade> original, selected;
+        int64_t originalFrom = 0, selectedFrom = 0;
+        bool limited = true;
+        ASSERT_TRUE(model->collectOverlayTrades(q.symbol, window.startMs, window.endMs, kMaxTrades,
+                                               original, &originalFrom, OverlayTradeBudget::Reject));
+        ASSERT_TRUE(model->collectOverlayTrades(q.symbol, window.startMs, window.endMs, kMaxTrades,
+                                               selected, &selectedFrom, OverlayTradeBudget::Newest, &limited));
+        ASSERT_FALSE(limited);
+        ASSERT_EQ(original.size(), count);
+        ASSERT_EQ(selected.size(), original.size());
+        EXPECT_EQ(selectedFrom, originalFrom);
+        for (size_t i = 0; i < original.size(); ++i) {
+            ASSERT_EQ(selected[i].timestampMs, original[i].timestampMs);
+            ASSERT_EQ(selected[i].price, original[i].price);
+            ASSERT_EQ(selected[i].size, original[i].size);
+            ASSERT_EQ(selected[i].side, original[i].side);
+        }
+        const auto fetch = [&](int64_t cutoff, std::vector<FetchCall>& calls) {
+            return fetchTpoCandles(q, cutoff, [&](int64_t start, int64_t end, int64_t granularity, int limit) {
+                calls.emplace_back(start, end, granularity, limit);
+                CandleFetchResult result; result.ok = true;
+                for (auto t = start * 1000; t < end * 1000; t += granularity * 1000) {
+                    OHLCVBar bar; bar.timestamp_ms = t; bar.high = 117; bar.low = 113; bar.close = 115;
+                    result.candles.push_back(bar);
+                }
+                return result;
+            });
+        };
+        std::vector<FetchCall> originalCalls, selectedCalls;
+        const auto originalCandles = fetch(originalFrom, originalCalls);
+        const auto selectedCandles = fetch(selectedFrom, selectedCalls);
+        ASSERT_TRUE(originalCandles.ok); ASSERT_TRUE(selectedCandles.ok);
+        ASSERT_FALSE(originalCandles.candles.empty());
+        EXPECT_EQ(selectedCalls, originalCalls);
+        const int candleCount = count == 0 ? 2 : 1;
+        EXPECT_EQ(originalCalls, (std::vector<FetchCall>{{day / 1000, (day + candleCount * hour) / 1000,
+                                                       hour / 1000, candleCount}}));
+        for (const auto kind : {Kind::TpoHistory, Kind::FootprintHistory, Kind::Live}) {
+            q.kind = kind;
+            const auto expected = build(q, original, originalCandles.candles, originalFrom);
+            const auto actual = build(q, selected, selectedCandles.candles, selectedFrom);
+            ASSERT_TRUE(expected.error.empty()) << expected.error;
+            EXPECT_EQ(actual.error, expected.error);
+            EXPECT_EQ(actual.messages, expected.messages);
+        }
+    }
+}
+
 TEST_F(TradeOverlay, CadenceClosesPreviousThenRefreshesFormingWithoutBacklog) {
     EXPECT_EQ(liveBuckets(120001, 119001, 60000), (std::vector<int64_t>{60000,120000}));
     EXPECT_EQ(liveBuckets(121001, 120001, 60000), (std::vector<int64_t>{120000}));
@@ -191,6 +304,13 @@ TEST_F(TradeOverlay, SnapshotBudgetsOnlyRequestedWindowAndSortsOnlyMatches) {
     EXPECT_TRUE(trades.empty());
     EXPECT_FALSE(model.collectOverlayTrades("BTC-USD", day, day + 120000, kMaxTrades, trades));
     EXPECT_TRUE(trades.empty());
+    bool limited = false;
+    ASSERT_TRUE(model.collectOverlayTrades("BTC-USD", day, day + 120000, kMaxTrades, trades,
+                                          &retainedFrom, OverlayTradeBudget::Newest, &limited));
+    EXPECT_TRUE(limited); ASSERT_EQ(trades.size(), kMaxTrades);
+    EXPECT_EQ(retainedFrom, day + 1);
+    EXPECT_EQ(trades.back().timestampMs, day + 119999);
+    EXPECT_EQ(trades[trades.size() - 2].timestampMs, day + 60000);
     auto q = request(); q.kind = Kind::FootprintHistory;
     EXPECT_EQ(tradeWindow(q).startMs, day); EXPECT_EQ(tradeWindow(q).endMs, day + 120000);
 }

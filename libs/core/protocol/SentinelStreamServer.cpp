@@ -521,12 +521,20 @@ class Session : public std::enable_shared_from_this<Session> {
                 std::vector<ServerDataModel::FootprintTradeSample> trades;
                 const auto window = trade_overlay::tradeWindow(q);
                 int64_t retainedFromMs = 0;
+                bool budgetExceeded = false;
+                const auto budget = trade_overlay::overlayBudgetFor(q.kind);
                 if (stopped()) {
                     result.error = "overlay history cancelled";
                 } else if (!model->collectOverlayTrades(q.symbol, window.startMs, window.endMs,
-                                                 trade_overlay::kMaxTrades, trades, &retainedFromMs)) {
+                                                 trade_overlay::kMaxTrades, trades, &retainedFromMs,
+                                                 budget, &budgetExceeded)) {
                     result.error = "overlay trade budget exceeded";
                 } else {
+                    if (budgetExceeded)
+                        sLog_Data("TPO history trade budget: symbol=" << q.symbol
+                                  << " window_start_ms=" << window.startMs << " window_end_ms=" << window.endMs
+                                  << " trades_kept=" << trades.size() << " retained_from_ms=" << retainedFromMs
+                                  << " request_id=" << q.requestId);
                     const auto candles = trade_overlay::fetchTpoCandles(q, retainedFromMs,
                         [rest, &q](int64_t startSec, int64_t endSec, int64_t granularitySec, int limit) {
                             const char* name = trade_overlay::candleGranularityName(granularitySec);

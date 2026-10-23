@@ -23,6 +23,9 @@ struct Grid {
     bool valid() const;
 };
 enum class Kind { Live, FootprintHistory, TpoHistory };
+constexpr OverlayTradeBudget overlayBudgetFor(Kind kind) {
+    return kind == Kind::TpoHistory ? OverlayTradeBudget::Newest : OverlayTradeBudget::Reject;
+}
 struct Request {
     std::string symbol;
     Kind kind = Kind::Live;
@@ -54,7 +57,7 @@ const char* candleGranularityName(int64_t granularitySec);  // nullptr when unsu
 // session open, so every candle lies inside one period and a period's letter
 // range is exactly the high/low of its candles. Falls back to one minute.
 int64_t tpoCandleGranularityMs(int64_t periodMs, int64_t sessionStartMs);
-// Worker-only REST paging for TPO history preceding the retained tape, at
+// Worker-only REST paging for TPO history preceding the complete selected tape, at
 // tpoCandleGranularityMs (a 7-day page at 30-minute periods is one call). Empty
 // tape (retainedFromMs == 0) backfills the entire requested historical window.
 CandleFetchResult fetchTpoCandles(const Request& request, int64_t retainedFromMs,
