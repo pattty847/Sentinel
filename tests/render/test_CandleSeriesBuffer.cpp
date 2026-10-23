@@ -442,3 +442,125 @@ TEST(CandleSeriesBuffer, ReturnToASparseRestPageKeepsItsQuietBuckets) {
     EXPECT_TRUE(noRepeats(loop.sent));
     EXPECT_TRUE(buffer.coverage(kSym, kFiveMin)->coversRange(y.first, y.second)) << "Y's quiet buckets lost their proof";
 }
+
+namespace {
+struct EmptyPagingLoop {
+    CandleSeriesBuffer buffer;
+    CandleBackfillState state;
+    qint64 tf;
+    qint64 clock = 2'000'000'000'000;
+    std::vector<std::pair<qint64, qint64>> sent;
+
+    explicit EmptyPagingLoop(qint64 timeframe) : tf(timeframe) {
+        // Keep the bar count fixed and avoid an unrelated scan below the viewport.
+        buffer.applyHistory(kSym, tf, {{tf, 2 * tf, 1, 1, 1, 1, 1, true, 0, false}});
+        buffer.openLiveCoverage(kSym, tf, clock / tf * tf);
+    }
+
+    bool step() {
+        const CandleBackfillState::Loaded loaded{*buffer.coverage(kSym, tf), buffer.oldestTimeMs(kSym, tf), false};
+        clock += state.retryDelayMs(loaded, clock);
+        const auto request = state.next(loaded, clock);
+        if (!request) return false;
+        sent.emplace_back(request->startMs, request->endMs);
+        EXPECT_TRUE(state.accept(kSym, tf, request->startMs, request->endMs, 0, clock));
+        qint64 start = 0, end = 0;
+        if (state.acceptedCoverage(0, start, end)) buffer.applyHistory(kSym, tf, {}, start, end);
+        return true;
+    }
+
+    void pan(qint64 end) { state.setViewport(kSym, tf, end - 5 * tf, end); }
+
+    void seed(int count) {
+        for (int i = 0; i < count; ++i) {
+            pan((1000 + 20 * i) * tf);
+            state.requestRefresh();
+            ASSERT_TRUE(step());
+            ASSERT_LE(buffer.coverage(kSym, tf)->spanCount(), CandleCoverage::kMaxBarlessSpans + 1);
+            ASSERT_LE(state.fetchedSpanCount(), CandleCoverage::kMaxBarlessSpans);
+        }
+    }
+};
+} // namespace
+
+TEST(CandleSeriesBuffer, ThousandsOfDisjointEmptyAnswersHaveBoundedRetention) {
+    for (qint64 tf : {100LL, 1000LL, 60'000LL}) {
+        SCOPED_TRACE(tf);
+        EmptyPagingLoop loop(tf);
+        loop.seed(5000);
+        ASSERT_EQ(loop.sent.size(), 5000u);
+        std::vector<Bar> bars;
+        ASSERT_TRUE(loop.buffer.getVisibleSlice(kSym, tf, 0, loop.clock, bars));
+        EXPECT_EQ(bars.size(), 1u);
+        EXPECT_TRUE(loop.buffer.coverage(kSym, tf)->covers(tf)) << "retained bars pin their proof";
+        if (tf > 1000) {
+            EXPECT_FALSE(loop.buffer.coverage(kSym, tf)->covers(995 * tf)) << "old empty proof was discarded";
+            EXPECT_TRUE(loop.buffer.coverage(kSym, tf)->covers((995 + 20 * 4999) * tf));
+        } else {
+            EXPECT_FALSE(loop.buffer.coverage(kSym, tf)->covers((995 + 20 * 4999) * tf))
+                << "memory answers must never become render proof";
+        }
+    }
+}
+
+TEST(CandleSeriesBuffer, BoundedEmptyAnswersSettleAfterOlderPanAndReturn) {
+    for (qint64 tf : {100LL, 1000LL, 60'000LL}) {
+        SCOPED_TRACE(tf);
+        EmptyPagingLoop loop(tf);
+        loop.seed(5000);
+        // Put the live edge just above the seeded windows, keeping this repro small.
+        const qint64 live = 102'000 * tf;
+        loop.buffer.endLiveCoverage(kSym, tf);
+        loop.buffer.openLiveCoverage(kSym, tf, live);
+        loop.pan(1000 * tf); // the first seeded answer was evicted, so it is requestable again
+        ASSERT_TRUE(loop.step());
+        EXPECT_EQ(loop.sent.back().second, (tf <= 1000 ? 999 : 1000) * tf);
+        loop.pan(800 * tf); // older than every cached answer
+        ASSERT_TRUE(loop.step());
+        loop.pan(500 * tf); // pan again while the first viewport is only partly loaded
+        loop.sent.clear();
+        int pages = 0;
+        while (pages < 2000 && loop.step()) ++pages;
+        EXPECT_LT(pages, 2000);
+        EXPECT_TRUE(noRepeats(loop.sent));
+        EXPECT_LE(loop.buffer.coverage(kSym, tf)->spanCount(), CandleCoverage::kMaxBarlessSpans + 1);
+        EXPECT_LE(loop.state.fetchedSpanCount(), CandleCoverage::kMaxBarlessSpans);
+        for (qint64 end : {800 * tf, 500 * tf, 50'000 * tf, 100'980 * tf}) {
+            loop.pan(end);
+            for (int i = 0; i < 5; ++i) EXPECT_FALSE(loop.step()) << "settled viewport requested again";
+        }
+        if (tf > 1000)
+            EXPECT_TRUE(loop.buffer.coverage(kSym, tf)->coversRange(490 * tf, live))
+                << "completed REST proof, including quiet buckets, must survive paging";
+    }
+}
+
+TEST(CandleSeriesBuffer, BoundedMemoryAnswersJoinThroughRetainedBarIslands) {
+    for (qint64 tf : {100LL, 1000LL}) {
+        SCOPED_TRACE(tf);
+        EmptyPagingLoop loop(tf);
+        for (int i = 0; i < 1000; ++i) {
+            const qint64 start = (1000 + 20 * i) * tf;
+            std::vector<Bar> bars;
+            for (int j = 0; j < 5; ++j) {
+                const qint64 t = start + j * tf;
+                bars.push_back({t, t + tf, 1, 1, 1, 1, 1, true, 0, false});
+            }
+            loop.buffer.applyHistory(kSym, tf, bars);
+        }
+        const qint64 live = 22'000 * tf;
+        loop.buffer.endLiveCoverage(kSym, tf);
+        loop.buffer.openLiveCoverage(kSym, tf, live);
+        loop.state.setViewport(kSym, tf, 11'500 * tf, live); // prefetch starts at 1000 buckets
+        int pages = 0;
+        while (pages < 2000 && loop.step()) {
+            ASSERT_LE(loop.state.fetchedSpanCount(), CandleCoverage::kMaxBarlessSpans);
+            ++pages;
+        }
+        EXPECT_GT(pages, CandleCoverage::kMaxBarlessSpans);
+        EXPECT_LT(pages, 2000);
+        EXPECT_TRUE(noRepeats(loop.sent));
+        for (int i = 0; i < 5; ++i) EXPECT_FALSE(loop.step());
+        EXPECT_FALSE(loop.buffer.coverage(kSym, tf)->covers(1010 * tf));
+    }
+}

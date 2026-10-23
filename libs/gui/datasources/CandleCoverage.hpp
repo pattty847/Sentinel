@@ -11,14 +11,17 @@
 // bucket on while it flows. A bucket inside coverage without a bar had no trades; a
 // bucket outside it was never proven and draws nothing.
 //
-// No cap and no lossy eviction: only ring eviction removes coverage (trimBefore).
+// Owners may bound barless spans with limitBarlessSpans; spans backed by retained
+// bars are removed only by ring eviction (trimBefore).
 // Spans change on the GUI thread when a page, live bar or live run arrives, never per
 // frame; every query is a read that does not allocate.
 class CandleCoverage {
 public:
+    static constexpr int kMaxBarlessSpans = 256;
     struct Span {
         int64_t startMs = 0;
         int64_t endMs = 0;
+        uint64_t extended = 0;
     };
 
     CandleCoverage() { m_spans.reserve(16); }
@@ -26,6 +29,7 @@ public:
     void clear() {
         m_spans.clear();
         m_liveFromMs = m_liveToMs = 0;
+        m_extension = 0;
     }
 
     void add(int64_t startMs, int64_t endMs) {
@@ -40,11 +44,26 @@ public:
             ++last;
         }
         if (first == last) {
-            m_spans.insert(first, Span{startMs, endMs});
+            m_spans.insert(first, Span{startMs, endMs, ++m_extension});
             return;
         }
-        *first = {startMs, endMs};
+        *first = {startMs, endMs, ++m_extension};
         m_spans.erase(first + 1, last);
+    }
+
+    // Keep the most recently extended barless runs. Newest-first paging extends
+    // one run per phase (viewport, bridge to live, older scan); never evict its
+    // just-answered window. Bar-backed spans are pinned by the owner.
+    template <typename HasBar>
+    void limitBarlessSpans(HasBar hasBar) {
+        int count = 0;
+        for (const auto& span : m_spans) count += !hasBar(span);
+        while (count-- > kMaxBarlessSpans) {
+            auto victim = m_spans.end();
+            for (auto it = m_spans.begin(); it != m_spans.end(); ++it)
+                if (!hasBar(*it) && (victim == m_spans.end() || it->extended < victim->extended)) victim = it;
+            m_spans.erase(victim);
+        }
     }
 
     // A live bar [startMs, endMs) arrived: coverage is open-ended from the first one.
@@ -139,5 +158,6 @@ private:
     }
 
     std::vector<Span> m_spans;
+    uint64_t m_extension = 0;
     int64_t m_liveFromMs = 0, m_liveToMs = 0;
 };
