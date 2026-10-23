@@ -42,6 +42,7 @@ public:
         // Reaches the live edge: the live stream covers the time after coverEndMs.
         bool liveEdge = false;
         qint64 coverEndMs = 0; // exclusive end of the time this page proves
+        qint64 knownEndMs = 0; // already-known run above this gap, captured before sending
     };
     // What the buffer holds for the selected series.
     struct Loaded {
@@ -112,10 +113,16 @@ public:
         m_pending.reset();
         if (!current) return false;
         m_accepted = completed;
-        // An empty memory page proves nothing (acceptedCoverage) but was answered: this
-        // selection does not ask for it again. Every other page's proof is buffer coverage;
-        // the part of a short memory page below its oldest bar is asked once more.
-        if (chart::candleHistoryFromMemory(tfMs) && oldestReplyMs <= 0) m_fetched.add(startMs, completed.coverEndMs);
+        // Memory answers are not proof. Join the answer to the known run above
+        // its gap, including any intervening buffer proof. This keeps a backward
+        // scan in one recently extended span even across sparse retained bars;
+        // bounding the cache cannot evict the scan's completed prefix. Safe only
+        // while memory-timeframe buffer coverage stays bar-backed.
+        if (chart::candleHistoryFromMemory(tfMs)) {
+            m_fetched.add(oldestReplyMs > 0 ? oldestReplyMs : startMs,
+                          std::max(completed.coverEndMs, completed.knownEndMs));
+            m_fetched.limitBarlessSpans([](const CandleCoverage::Span&) { return false; });
+        }
         if (completed.liveEdge) m_liveFetchedMs = std::max(m_liveFetchedMs, completed.coverEndMs);
         if (completed.refresh) {
             // Empty refresh windows still advance; they are not older-history floors.
@@ -162,6 +169,8 @@ public:
     qint64 acceptedLiveFromMs() const {
         return m_accepted && m_accepted->liveEdge ? m_accepted->coverEndMs : 0;
     }
+
+    int fetchedSpanCount() const { return m_fetched.spanCount(); }
 
     // A "warming" reply to the request in flight: it is no page and moves no
     // cursor. The current selection's request is held for kWarmingRetryMs; a
@@ -232,6 +241,7 @@ private:
         qint64 loMs = 0;
         qint64 hiMs = 0;
         bool bottom = false;
+        qint64 knownEndMs = 0;
     };
     struct History {
         qint64 cursorMs = 0;
@@ -262,16 +272,16 @@ private:
         const qint64 top = std::min(m_endMs, liveTop);
         qint64 lo = 0, hi = 0;
         if (newestUnknown(coverage, floor, top, lo, hi)) {
-            if (lo > m_startMs || loaded.cacheFull) return Target{floorBucket(lo), ceilBucket(hi), false};
-            if (auto bottom = bottomTarget(hi, nowMs)) return bottom;
+            if (lo > m_startMs || loaded.cacheFull) return Target{floorBucket(lo), ceilBucket(hi), false, top};
+            if (auto bottom = bottomTarget(hi, nowMs, top)) return bottom;
         }
         if (newestUnknown(coverage, std::max(top, floor), liveTop, lo, hi))
-            return Target{floorBucket(lo), ceilBucket(hi), false};
+            return Target{floorBucket(lo), ceilBucket(hi), false, liveTop};
         // Past the window only while it holds no bar (an empty-page scan).
         if (loaded.cacheFull || (loaded.oldestBarMs > 0 && loaded.oldestBarMs <= m_startMs)) return std::nullopt;
         const auto it = m_history.find({m_symbol, m_tfMs});
         if (it == m_history.end() || it->second.emptyScanStartMs == 0) return std::nullopt;
-        return bottomTarget(knownRunStart(coverage, m_startMs), nowMs);
+        return bottomTarget(knownRunStart(coverage, m_startMs), nowMs, m_startMs);
     }
 
     // Known time: what the buffer proves plus this selection's unproven memory answers,
@@ -308,7 +318,7 @@ private:
     }
 
     // Pages down from the oldest covered point; past the window only after empty pages.
-    std::optional<Target> bottomTarget(qint64 hiMs, qint64 nowMs) const {
+    std::optional<Target> bottomTarget(qint64 hiMs, qint64 nowMs, qint64 knownEndMs) const {
         const auto it = m_history.find({m_symbol, m_tfMs});
         const History history = it == m_history.end() ? History{} : it->second;
         if (emptyLookbackExhausted(history)) return std::nullopt;
@@ -316,11 +326,15 @@ private:
         if (history.emptyScanStartMs > 0 && history.cursorMs > 0) boundary = std::min(boundary, history.cursorMs);
         boundary = floorBucket(boundary);
         if (boundary <= m_startMs && history.emptyScanStartMs == 0) return std::nullopt;
-        return Target{m_startMs, boundary, true};
+        // A saved empty-scan cursor may skip below this viewport's gap. It does
+        // not establish knowledge between that cursor and the current gap.
+        return Target{m_startMs, boundary, true, boundary < hiMs ? boundary : knownEndMs};
     }
 
     std::optional<Request> page(const Target& target, qint64 nowMs) {
-        return target.bottom ? bottomPage(target, nowMs) : spanPage(target, nowMs);
+        auto request = target.bottom ? bottomPage(target, nowMs) : spanPage(target, nowMs);
+        if (request) request->knownEndMs = target.knownEndMs;
+        return request;
     }
 
     // Marks what a page proves; the open bucket is left to the live stream.
@@ -404,6 +418,6 @@ private:
     qint64 m_liveFetchedMs = 0; // this selection's live-edge pages proved time up to here
     std::optional<Request> m_pending;
     std::optional<Request> m_accepted;
-    CandleCoverage m_fetched; // empty memory windows this selection asked for: answered, unproven
+    CandleCoverage m_fetched; // bounded memory answers joined through known runs; never render proof
     std::map<std::pair<QString, qint64>, History> m_history;
 };

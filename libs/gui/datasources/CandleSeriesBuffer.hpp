@@ -116,6 +116,7 @@ private:
     // Replaces the ring with time-sorted bars, keeping the newest `capacity`.
     static void rebuild(Series& series, std::vector<CandleBar>&& sorted);
     static void trimEvictedCoverage(Series& series);
+    static void limitBarlessCoverage(Series& series);
     Series& seriesFor(const QString& symbol, int64_t timeframeMs);
 
     std::unordered_map<SeriesKey, Series, SeriesKeyHash> m_series;

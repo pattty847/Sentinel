@@ -154,6 +154,13 @@ void CandleSeriesBuffer::trimEvictedCoverage(Series& series) {
     if (series.count > 0) series.coverage.trimBefore(getAt(series, 0).timeStartMs);
 }
 
+void CandleSeriesBuffer::limitBarlessCoverage(Series& series) {
+    series.coverage.limitBarlessSpans([&series](const CandleCoverage::Span& span) {
+        const size_t index = lowerBound(series, span.startMs);
+        return index < series.count && getAt(series, index).timeStartMs < span.endMs;
+    });
+}
+
 void CandleSeriesBuffer::applyHistory(const QString& symbol,
                                       int64_t timeframeMs,
                                       const std::vector<CandleBar>& history,
@@ -166,6 +173,7 @@ void CandleSeriesBuffer::applyHistory(const QString& symbol,
         if (coverEndMs <= coverStartMs) return;
         auto& series = seriesFor(symbol, timeframeMs);
         series.coverage.add(coverStartMs, coverEndMs);
+        limitBarlessCoverage(series);
         emit candlesDirty(symbol, timeframeMs, coverStartMs, coverEndMs);
         return;
     }
@@ -203,6 +211,7 @@ void CandleSeriesBuffer::applyHistory(const QString& symbol,
     if (!page.empty()) series.coverage.add(page.front().timeStartMs, page.back().timeEndMs);
     series.coverage.add(coverStartMs, coverEndMs);
     rebuild(series, std::move(merged));
+    limitBarlessCoverage(series);
     if (series.count == 0) {
         return;
     }
@@ -230,11 +239,17 @@ void CandleSeriesBuffer::resetSeriesForSelection(const QString& symbol, int64_t 
 
 void CandleSeriesBuffer::endLiveCoverage(const QString& symbol, int64_t timeframeMs) {
     const auto it = m_series.find(SeriesKey{symbol, timeframeMs});
-    if (it != m_series.end()) it->second.coverage.closeLive();
+    if (it != m_series.end()) {
+        it->second.coverage.closeLive();
+        limitBarlessCoverage(it->second);
+    }
 }
 
 void CandleSeriesBuffer::endLiveCoverage() {
-    for (auto& [key, series] : m_series) series.coverage.closeLive();
+    for (auto& [key, series] : m_series) {
+        series.coverage.closeLive();
+        limitBarlessCoverage(series);
+    }
 }
 
 void CandleSeriesBuffer::openLiveCoverage(const QString& symbol, int64_t timeframeMs, qint64 liveFromMs) {
@@ -250,6 +265,7 @@ const CandleCoverage* CandleSeriesBuffer::coverage(const QString& symbol, int64_
 
 void CandleSeriesBuffer::resetOwnership(Series& series) {
     series.coverage.closeLive(); // a new stream starts its own live run
+    limitBarlessCoverage(series);
     series.lastSeq = 0;
     for (size_t i = 0; i < series.count; ++i) {
         auto& bar = getAt(series, i);
