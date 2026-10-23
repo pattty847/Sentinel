@@ -15,13 +15,11 @@ void FootprintLayer::updateNodes(const ChartFrame& snapshot, LayerNodeContext& c
 }
 void VolumeProfileLayer::updateNodes(const ChartFrame& snapshot, LayerNodeContext& context) {
     const auto& frame = snapshot.context;
-    std::vector<float> localBins;
-    VolumeProfileState::Snapshot localSnap;
-    renderer.drainPending(localBins, localSnap);
+    renderer.drainPending(bins_, snap_);
     const auto snap = candle_pixels::axisSnap(frame.raster);
-    renderer.render(context.root, frame.overlays.volumeProfile && !localBins.empty(), frame.surfaceBounds,
-                    frame.mapping.viewMinPrice, frame.mapping.viewMaxPrice, localBins,
-                    localSnap, frame.surfaceDpr, snap.y);
+    renderer.render(context.root, frame.overlays.volumeProfile && !bins_.empty(), frame.surfaceBounds,
+                    frame.mapping.viewMinPrice, frame.mapping.viewMaxPrice, bins_,
+                    snap_, frame.surfaceDpr, snap.y);
 }
 void TpoLayer::updateNodes(const ChartFrame& snapshot, LayerNodeContext& context) {
     const auto& frame = snapshot.context;

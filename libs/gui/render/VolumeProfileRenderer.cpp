@@ -97,23 +97,34 @@ inline double priceToY(double price, double viewMinPrice, double viewMaxPrice,
 // ─────────────────────────────────────────────────────────────────────────────
 
 void VolumeProfileRenderer::setWidthFraction(float frac) {
-    m_widthFraction = std::clamp(frac, 0.02f, 0.50f);
+    frac = std::clamp(frac, 0.02f, 0.50f);
+    if (m_widthFraction == frac) return;
+    m_widthFraction = frac;
+    m_inputsValid = false;
 }
 
 void VolumeProfileRenderer::setOverlay(bool overlay) {
+    if (m_overlay == overlay) return;
     m_overlay = overlay;
+    m_inputsValid = false;
 }
 
 void VolumeProfileRenderer::setBarColor(const QColor& color) {
+    if (m_barColor == color) return;
     m_barColor = color;
+    m_inputsValid = false;
 }
 
 void VolumeProfileRenderer::setVaColor(const QColor& color) {
+    if (m_vaColor == color) return;
     m_vaColor = color;
+    m_inputsValid = false;
 }
 
 void VolumeProfileRenderer::setPocColor(const QColor& color) {
+    if (m_pocColor == color) return;
     m_pocColor = color;
+    m_inputsValid = false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -129,10 +140,11 @@ void VolumeProfileRenderer::enqueue(std::vector<float> bins, VolumeProfileState:
 
 bool VolumeProfileRenderer::drainPending(std::vector<float>& bins, VolumeProfileState::Snapshot& snap) {
     std::lock_guard<std::mutex> lock(m_pendingMutex);
-    if (m_pendingDirty || !m_pendingBins.empty()) {
-        bins = m_pendingBins;
+    if (m_pendingDirty) {
+        bins.swap(m_pendingBins);
         snap = m_pendingSnap;
         m_pendingDirty = false;
+        ++m_deliveryRevision;
         return true;
     }
     return false;
@@ -142,7 +154,7 @@ void VolumeProfileRenderer::clearPending() {
     std::lock_guard<std::mutex> lock(m_pendingMutex);
     m_pendingBins.clear();
     m_pendingSnap = {};
-    m_pendingDirty = false;
+    m_pendingDirty = true;
 }
 
 void VolumeProfileRenderer::onRootRebuilt() {
@@ -150,6 +162,7 @@ void VolumeProfileRenderer::onRootRebuilt() {
     m_barsNode = nullptr;
     m_pocNode  = nullptr;
     m_barCapacity = 0;
+    m_inputsValid = false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -168,13 +181,29 @@ void VolumeProfileRenderer::render(QSGNode* parentNode,
         return;
     }
 
+    const GeometryInputs inputs{
+        {drawRect.x(), drawRect.y(), drawRect.width(), drawRect.height()},
+        viewMinPrice, viewMaxPrice, dpr, snap.minPrice, snap.tickSize,
+        snap.va.valPrice, snap.va.vahPrice, snap.va.pocPrice,
+        snap.generation, m_deliveryRevision, bins.size(), snap.gridHeight,
+        drawVp, snapY, snap.va.valid};
+    if (m_inputsValid && m_inputs == inputs) return;
+    m_inputs = inputs;
+    m_inputsValid = true;
+
     if (!drawVp || bins.empty() || snap.gridHeight <= 0 || snap.tickSize <= 0.0 ||
-        drawRect.isEmpty() || viewMaxPrice <= viewMinPrice) {
+        drawRect.isEmpty() || viewMaxPrice <= viewMinPrice ||
+        !std::isfinite(viewMinPrice) || !std::isfinite(viewMaxPrice) ||
+        !std::isfinite(snap.minPrice) || !std::isfinite(snap.tickSize) ||
+        !std::isfinite(drawRect.x()) || !std::isfinite(drawRect.y()) ||
+        !std::isfinite(drawRect.width()) || !std::isfinite(drawRect.height()) ||
+        !std::isfinite(m_widthFraction)) {
         clearGeometry();
         return;
     }
 
     ensureNodes(parentNode);
+    ++m_geometryRebuilds;
     rebuildGeometry(drawRect, viewMinPrice, viewMaxPrice, bins, snap, dpr, snapY);
 }
 
@@ -185,6 +214,7 @@ void VolumeProfileRenderer::render(QSGNode* parentNode,
 void VolumeProfileRenderer::ensureNodes(QSGNode* parentNode) {
     // VA band
     if (!m_vaNode) {
+        ++m_geometryAllocations;
         m_vaNode = new QSGGeometryNode();
         auto* geo = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), 4, 6);
         geo->setDrawingMode(QSGGeometry::DrawTriangles);
@@ -200,6 +230,7 @@ void VolumeProfileRenderer::ensureNodes(QSGNode* parentNode) {
     if (!m_barsNode) {
         // Pre-allocate for 4096 bins (each bin = 2 triangles = 4 verts + 6 idx)
         m_barCapacity = 4096;
+        ++m_geometryAllocations;
         m_barsNode = new QSGGeometryNode();
         auto* geo = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(),
                                     m_barCapacity * 4, m_barCapacity * 6);
@@ -215,6 +246,7 @@ void VolumeProfileRenderer::ensureNodes(QSGNode* parentNode) {
     }
     // POC line node
     if (!m_pocNode) {
+        ++m_geometryAllocations;
         m_pocNode = new QSGGeometryNode();
         auto* geo = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), 4, 6);
         geo->setDrawingMode(QSGGeometry::DrawTriangles);
@@ -266,7 +298,7 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
     // Find max bin for normalisation (avoid zero-division).
     float maxVol = 0.0f;
     for (int i = 0; i < n; ++i) {
-        if (bins[static_cast<size_t>(i)] > maxVol) maxVol = bins[static_cast<size_t>(i)];
+        if (std::isfinite(bins[static_cast<size_t>(i)]) && bins[static_cast<size_t>(i)] > maxVol) maxVol = bins[static_cast<size_t>(i)];
     }
     if (maxVol <= 0.0f) {
         clearGeometry();
@@ -279,7 +311,7 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
                << " viewMaxPrice=" << viewMaxPrice);
 
     // ── 1. VA band ─────────────────────────────────────────────────────────
-    if (snap.va.valid && m_vaNode) {
+    if (snap.va.valid && std::isfinite(snap.va.vahPrice) && std::isfinite(snap.va.valPrice) && m_vaNode) {
         const float yVah = priceEdge(snap.va.vahPrice);
         const float yVal = priceEdge(snap.va.valPrice);
         const QRectF vaRect(static_cast<double>(vpLeft),
@@ -304,6 +336,7 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
         // Count visible bins first to size the geometry.
         int visCount = 0;
         for (int i = 0; i < n && visCount < kMaxIndexedBars; ++i) {
+            if (!std::isfinite(bins[static_cast<size_t>(i)])) continue;
             const double binTop    = gridMaxPrice - static_cast<double>(i)       * snap.tickSize;
             const double binBottom = gridMaxPrice - static_cast<double>(i + 1)   * snap.tickSize;
             if (binTop < viewMinPrice || binBottom > viewMaxPrice) continue;
@@ -313,6 +346,7 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
         auto* geo = m_barsNode->geometry();
         if (visCount > m_barCapacity) {
             m_barCapacity = std::min(kMaxIndexedBars, std::max(visCount, m_barCapacity * 2));
+            ++m_geometryAllocations;
             geo->allocate(m_barCapacity * 4, m_barCapacity * 6);
         }
         auto* vdata = geo->vertexDataAsColoredPoint2D();
@@ -326,6 +360,7 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
 
         for (int i = 0; i < n && vi / 4 < visCount; ++i) {
             const float vol = bins[static_cast<size_t>(i)];
+            if (!std::isfinite(bins[static_cast<size_t>(i)])) continue;
             const double binTop    = gridMaxPrice - static_cast<double>(i)     * snap.tickSize;
             const double binBottom = gridMaxPrice - static_cast<double>(i + 1) * snap.tickSize;
             if (binTop < viewMinPrice || binBottom > viewMaxPrice) continue;
@@ -362,7 +397,7 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
     }
 
     // ── 3. POC line ────────────────────────────────────────────────────────
-    if (snap.va.valid && m_pocNode) {
+    if (snap.va.valid && std::isfinite(snap.va.pocPrice) && m_pocNode) {
         const double yPoc = priceToY(snap.va.pocPrice, viewMinPrice, viewMaxPrice, drawRect);
         constexpr float kPocLineHalfH = 1.5f;
         const QRectF pocRect(static_cast<double>(vpLeft),

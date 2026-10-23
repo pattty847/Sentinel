@@ -142,6 +142,11 @@ protected:
     void geometryChange(const QRectF& newGeometry, const QRectF& oldGeometry) override;
 
 private:
+    friend struct RenderPerformanceTestAccess;
+    quint64 m_geometryRevision = 1;
+    quint64 m_geometryRebuilds = 0;
+    quint64 m_geometryAllocations = 0;
+
     void markDirty();
     int candleAtX(float x) const;
     void updatePriceRange();

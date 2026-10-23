@@ -22,8 +22,7 @@
  *   - m_barsNode   : per-bin volume bars (QSGGeometryNode, vertex-color)
  *   - m_pocNode    : POC horizontal line
  *
- * All geometry is rebuilt each frame (cost: O(gridHeight) geometry update).
- * Grid heights are typically 2048; at 110 fps this is well within budget.
+ * Geometry is retained until bins, mapping or style changes.
  */
 #pragma once
 
@@ -31,6 +30,7 @@
 
 #include <QColor>
 #include <QRectF>
+#include <array>
 #include <mutex>
 #include <vector>
 
@@ -42,7 +42,8 @@ class VolumeProfileRenderer {
 public:
     /// Thread-safe enqueue (called from GUI thread).
     void enqueue(std::vector<float> bins, VolumeProfileState::Snapshot snap);
-    /// Drain pending data into local copies (called from render thread).
+    /// Swap new pending data into retained render-thread storage.
+    /// With no update, the caller's bins and snapshot remain unchanged.
     /// Returns true if new data was available.
     bool drainPending(std::vector<float>& bins, VolumeProfileState::Snapshot& snap);
     /// Clear all pending data (called from GUI thread on clearData).
@@ -67,6 +68,8 @@ public:
     // viewMinPrice: bottom of the visible price range
     // viewMaxPrice: top  of the visible price range
     // bins        : volume per price bin (top→bottom, may be empty = no data)
+    //               Direct callers must advance snap.generation when bins change;
+    //               drainPending also invalidates on every delivered update/clear.
     // snap        : snapshot from VolumeProfileState (price range, VA, etc.)
     // dpr / snapY : frame surface ratio and whether the camera price axis is whole-pixel
     void render(QSGNode* parentNode,
@@ -79,6 +82,22 @@ public:
                 double dpr, bool snapY);
 
 private:
+    friend struct RenderPerformanceTestAccess;
+    struct GeometryInputs {
+        std::array<double, 4> rect;
+        double viewMin, viewMax, dpr, minPrice, tickSize, val, vah, poc;
+        uint64_t generation, deliveryRevision;
+        size_t binCount;
+        int gridHeight;
+        bool draw, snapY, validVa;
+        bool operator==(const GeometryInputs&) const = default;
+    };
+    GeometryInputs m_inputs{};
+    bool m_inputsValid = false;
+    uint64_t m_deliveryRevision = 0; // render thread only
+    uint64_t m_geometryRebuilds = 0;
+    uint64_t m_geometryAllocations = 0;
+
     void ensureNodes(QSGNode* parentNode);
     void clearGeometry();
     // Rebuild all three geometry nodes from the current bins + snap.
