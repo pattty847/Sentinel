@@ -431,25 +431,38 @@ bool ServerDataModel::collectOverlayTrades(const std::string& symbol, int64_t st
                                           int64_t endMs, size_t limit,
                                           std::vector<FootprintTradeSample>& out,
                                           int64_t* retainedFromMs, OverlayTradeBudget budget,
-                                          bool* budgetExceeded) const {
+                                          bool* budgetExceeded, size_t* heapOperations) const {
     OverlayTradeSelection selection(startMs, endMs, limit, out, budget);
     if (retainedFromMs) *retainedFromMs = 0;
     if (budgetExceeded) *budgetExceeded = false;
+    if (heapOperations) *heapOperations = 0;
     if (endMs <= startMs) return true;
     {
         std::lock_guard<std::mutex> lock(m_footprintTradeMutex);
         const auto it = m_recentFootprintTrades.find(symbol);
         if (it == m_recentFootprintTrades.end()) return true;
-        for (const auto& trade : it->second) {
-            if (!selection.add(trade)) {
-                if (retainedFromMs) *retainedFromMs = selection.retainedFromMs();
-                return false;
+        if (budget == OverlayTradeBudget::Newest) {
+            // The tape is nearly chronological. Starting at the newest end
+            // avoids a heap replacement per trade while holding the ingest lock.
+            for (auto trade = it->second.rbegin(); trade != it->second.rend(); ++trade)
+                selection.add(*trade);
+        } else {
+            for (const auto& trade : it->second) {
+                if (!selection.add(trade)) {
+                    if (retainedFromMs) *retainedFromMs = selection.retainedFromMs();
+                    return false;
+                }
             }
         }
     }
+    // Restore arrival order before the stable sort so timestamp ties remain
+    // identical to Reject when the whole window fits the budget.
+    if (budget == OverlayTradeBudget::Newest && !selection.budgetExceeded())
+        std::reverse(out.begin(), out.end());
     selection.finish();
     if (retainedFromMs) *retainedFromMs = selection.retainedFromMs();
     if (budgetExceeded) *budgetExceeded = selection.budgetExceeded();
+    if (heapOperations) *heapOperations = selection.heapOperations();
     return true;
 }
 

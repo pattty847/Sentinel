@@ -23,6 +23,9 @@ struct Grid {
     bool valid() const;
 };
 enum class Kind { Live, FootprintHistory, TpoHistory };
+constexpr OverlayTradeBudget overlayBudgetFor(Kind kind) {
+    return kind == Kind::TpoHistory ? OverlayTradeBudget::Newest : OverlayTradeBudget::Reject;
+}
 struct Request {
     std::string symbol;
     Kind kind = Kind::Live;

@@ -21,7 +21,10 @@ public:
         if (trade.timestampMs < startMs_ || trade.timestampMs >= endMs_) return true;
         if (out_.size() < limit_) { out_.push_back(trade); return true; }
         if (budget_ == OverlayTradeBudget::Reject) { out_.clear(); return false; }
-        if (!limited_) std::make_heap(out_.begin(), out_.end(), newer);
+        if (!limited_) {
+            std::make_heap(out_.begin(), out_.end(), newer);
+            ++heapOperations_;
+        }
         limited_ = true;
         int64_t droppedMs = trade.timestampMs;
         if (!out_.empty() && trade.timestampMs > out_.front().timestampMs) {
@@ -29,6 +32,7 @@ public:
             std::pop_heap(out_.begin(), out_.end(), newer);
             out_.back() = trade;
             std::push_heap(out_.begin(), out_.end(), newer);
+            heapOperations_ += 2;
         }
         // Include the candle containing the last dropped timestamp, even when
         // it lies exactly on a candle boundary or ties a kept trade's timestamp.
@@ -44,6 +48,8 @@ public:
         return limited_ ? std::max(retainedFromMs_, droppedThroughMs_) : retainedFromMs_;
     }
     bool budgetExceeded() const { return limited_; }
+    // Counts heap algorithm calls: one linear heapify, then pop/push pairs.
+    size_t heapOperations() const { return heapOperations_; }
 private:
     static bool newer(const Trade& a, const Trade& b) { return a.timestampMs > b.timestampMs; }
     int64_t startMs_, endMs_;
@@ -52,4 +58,5 @@ private:
     OverlayTradeBudget budget_;
     int64_t retainedFromMs_ = 0, droppedThroughMs_ = 0;
     bool limited_ = false;
+    size_t heapOperations_ = 0;
 };

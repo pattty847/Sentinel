@@ -55,7 +55,8 @@ public:
                               size_t limit, std::vector<FootprintTradeSample>& out,
                               int64_t* retainedFromMs = nullptr,
                               OverlayTradeBudget budget = OverlayTradeBudget::Reject,
-                              bool* budgetExceeded = nullptr) const;
+                              bool* budgetExceeded = nullptr,
+                              size_t* heapOperations = nullptr) const;
     bool collectFootprintTrades(const std::string& symbol,
                                 int64_t startTimeMs,
                                 int64_t endTimeMs,

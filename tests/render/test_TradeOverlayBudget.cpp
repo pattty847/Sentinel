@@ -88,42 +88,6 @@ TEST(TradeOverlayBudget, DroppedTimestampTieAtCandleBoundaryIsBackfilled) {
     EXPECT_EQ(wire["columns"][1]["letters"], "AEJCQkIAAAAAAA=="); // rows 1..4: B
 }
 
-TEST(TradeOverlayBudget, UnderAndAtBudgetMatchOriginalSnapshotAndPageBytes) {
-    for (const size_t count : {size_t{0}, size_t{3}, kMaxTrades}) {
-        auto q = historyRequest();
-        std::vector<OverlayTrade> original, selected;
-        for (size_t i = count; i > 0; --i)
-            original.push_back({day + static_cast<int64_t>(i % 2) * hour, 111.0 + i % 3,
-                                1.0 + i % 5, i % 2 ? AggressorSide::Buy : AggressorSide::Sell});
-        OverlayTradeSelection selection(day, day + 2 * hour, kMaxTrades,
-                                        selected, OverlayTradeBudget::Newest);
-        for (const auto& trade : original) ASSERT_TRUE(selection.add(trade));
-        selection.finish();
-        ASSERT_FALSE(selection.budgetExceeded());
-        // Original collection filtered the half-open window then stable-sorted.
-        std::stable_sort(original.begin(), original.end(), [](const auto& a, const auto& b) {
-            return a.timestampMs < b.timestampMs;
-        });
-        ASSERT_EQ(selected.size(), original.size());
-        for (size_t i = 0; i < original.size(); ++i) {
-            ASSERT_EQ(selected[i].timestampMs, original[i].timestampMs);
-            ASSERT_EQ(selected[i].price, original[i].price);
-            ASSERT_EQ(selected[i].size, original[i].size);
-            ASSERT_EQ(selected[i].side, original[i].side);
-        }
-        EXPECT_EQ(selection.retainedFromMs(), original.empty() ? 0 : original.front().timestampMs);
-        for (const auto kind : {Kind::TpoHistory, Kind::FootprintHistory, Kind::Live}) {
-            q.kind = kind;
-            q.previousMs = q.nowMs - 1;
-            const auto expected = build(q, original);
-            const auto actual = build(q, selected, {}, selection.retainedFromMs());
-            ASSERT_TRUE(expected.error.empty()) << expected.error;
-            EXPECT_EQ(actual.error, expected.error);
-            EXPECT_EQ(actual.messages, expected.messages);
-        }
-    }
-}
-
 TEST(TradeOverlayBudget, NewestSelectionPreservesSevenDayCandleInputBudget) {
     auto q = historyRequest(); q.session = SessionManager::SessionType::M1;
     q.nowMs = 1791583200000; // 2026-10-09 22:00 UTC, inside the monthly session

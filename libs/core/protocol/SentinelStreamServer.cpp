@@ -522,8 +522,7 @@ class Session : public std::enable_shared_from_this<Session> {
                 const auto window = trade_overlay::tradeWindow(q);
                 int64_t retainedFromMs = 0;
                 bool budgetExceeded = false;
-                const auto budget = q.kind == trade_overlay::Kind::TpoHistory
-                    ? OverlayTradeBudget::Newest : OverlayTradeBudget::Reject;
+                const auto budget = trade_overlay::overlayBudgetFor(q.kind);
                 if (stopped()) {
                     result.error = "overlay history cancelled";
                 } else if (!model->collectOverlayTrades(q.symbol, window.startMs, window.endMs,
