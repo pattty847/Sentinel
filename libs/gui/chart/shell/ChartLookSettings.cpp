@@ -178,5 +178,4 @@ void chart::ChartLookSettings::changed(Notice notice) {
       case Notice::CandleStyle: emit candleStyleChanged(); break;
       case Notice::CandleAppearance: emit candleAppearanceChanged(); break;
     }
-    if (notify) notify(notice);
 }

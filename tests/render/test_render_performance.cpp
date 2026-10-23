@@ -29,6 +29,9 @@ void operator delete(void* p) noexcept { std::free(p); }
 void operator delete[](void* p) noexcept { std::free(p); }
 
 struct RenderPerformanceTestAccess {
+    static std::array<double, 2> priceRange(const CandlestickBatched& item) {
+        return {item.m_priceMin, item.m_priceMax};
+    }
     template<class Renderer>
     static std::array<quint64, 2> stats(const Renderer& renderer) {
         return {renderer.m_geometryRebuilds, renderer.m_geometryAllocations};
@@ -72,6 +75,35 @@ void expectGeometry(const std::string& name, QSGNode* root) {
         EXPECT_EQ(g->drawingMode(), QSGGeometry::DrawTriangles);
     }
     EXPECT_EQ(i, 3);
+}
+
+TEST(RenderPerformance, CandlePriceRangesSkipNonFiniteCandles) {
+    for (double invalid : {std::numeric_limits<double>::quiet_NaN(),
+                           std::numeric_limits<double>::infinity()}) {
+        for (bool invalidFirst : {true, false}) {
+            Candles item;
+            item.setSize(QSizeF(128, 240));
+            const auto addInvalid = [&] { item.addCandle(1, invalid, 1000, -1000, 100, 10); };
+            if (invalidFirst) addInvalid();
+            item.addCandle(2, 100, 108, 96, 105, 30);
+            item.addCandle(3, 106, 110, 98, 101, 20);
+            if (!invalidFirst) addInvalid();
+            EXPECT_DOUBLE_EQ(item.visiblePriceMin(), 95.3);
+            EXPECT_DOUBLE_EQ(item.visiblePriceMax(), 110.7);
+            const auto range = RenderPerformanceTestAccess::priceRange(item);
+            EXPECT_DOUBLE_EQ(range[0], 95.3);
+            EXPECT_DOUBLE_EQ(range[1], 110.7);
+        }
+    }
+}
+
+TEST(RenderPerformance, AllInvalidCandlesUseEmptyPriceRange) {
+    Candles item;
+    item.setSize(QSizeF(128, 240));
+    item.addCandle(1, 100, std::numeric_limits<double>::quiet_NaN(), 90, 100, 10);
+    EXPECT_DOUBLE_EQ(item.visiblePriceMin(), 0);
+    EXPECT_DOUBLE_EQ(item.visiblePriceMax(), 1);
+    EXPECT_EQ(RenderPerformanceTestAccess::priceRange(item), (std::array<double, 2>{0, 1}));
 }
 
 TEST(RenderPerformance, CandleVertexBytesMatchBase) {

@@ -355,9 +355,18 @@ void CandlestickBatched::recomputeViewport() {
     m_firstVis = first;
     m_lastVis  = last;
 
-    double vMin = m_candles[first].low;
-    double vMax = m_candles[first].high;
-    for (int i = first; i <= last; ++i) {
+    int firstValid = first;
+    while (firstValid <= last && !finiteCandle(m_candles[firstValid])) ++firstValid;
+    if (firstValid > last) {
+        m_visMin = 0.0;
+        m_visMax = 1.0;
+        emit visibleRangeChanged();
+        return;
+    }
+    double vMin = m_candles[firstValid].low;
+    double vMax = m_candles[firstValid].high;
+    for (int i = firstValid; i <= last; ++i) {
+        if (!finiteCandle(m_candles[i])) continue;
         vMin = std::min(vMin, m_candles[i].low);
         vMax = std::max(vMax, m_candles[i].high);
     }
@@ -378,14 +387,17 @@ void CandlestickBatched::geometryChange(const QRectF& newGeometry, const QRectF&
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 void CandlestickBatched::updatePriceRange() {
-    if (m_candles.empty()) {
+    const auto firstValid = std::find_if(m_candles.begin(), m_candles.end(), finiteCandle);
+    if (firstValid == m_candles.end()) {
         m_priceMin = 0.0;
         m_priceMax = 1.0;
         return;
     }
-    m_priceMin = m_candles[0].low;
-    m_priceMax = m_candles[0].high;
-    for (const auto& c : m_candles) {
+    m_priceMin = firstValid->low;
+    m_priceMax = firstValid->high;
+    for (auto it = firstValid; it != m_candles.end(); ++it) {
+        const auto& c = *it;
+        if (!finiteCandle(c)) continue;
         m_priceMin = std::min(m_priceMin, c.low);
         m_priceMax = std::max(m_priceMax, c.high);
     }
