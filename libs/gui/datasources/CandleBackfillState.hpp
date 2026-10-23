@@ -116,7 +116,8 @@ public:
         // Memory answers are not proof. Join the answer to the known run above
         // its gap, including any intervening buffer proof. This keeps a backward
         // scan in one recently extended span even across sparse retained bars;
-        // bounding the cache cannot evict the scan's completed prefix.
+        // bounding the cache cannot evict the scan's completed prefix. Safe only
+        // while memory-timeframe buffer coverage stays bar-backed.
         if (chart::candleHistoryFromMemory(tfMs)) {
             m_fetched.add(oldestReplyMs > 0 ? oldestReplyMs : startMs,
                           std::max(completed.coverEndMs, completed.knownEndMs));

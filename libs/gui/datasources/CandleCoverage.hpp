@@ -51,7 +51,7 @@ public:
         m_spans.erase(first + 1, last);
     }
 
-    // Keep the most recently extended barless runs. Newest-first paging extends
+    // Keep the most recently added-to barless runs. Newest-first paging extends
     // one run per phase (viewport, bridge to live, older scan); never evict its
     // just-answered window. Bar-backed spans are pinned by the owner.
     template <typename HasBar>
