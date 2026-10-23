@@ -160,7 +160,8 @@ TEST(AgentApiWallsRoute, GpuReturns200ValidatesPeriodAndKeepsSelectionEpoch409) 
     };
     const auto ok = get("from_ms=100&to_ms=200&tick=5");
     EXPECT_TRUE(ok.startsWith("HTTP/1.1 200")) << ok.toStdString();
-    EXPECT_TRUE(ok.contains("\"renderer\":\"gpu\"")); EXPECT_EQ(scans, 1);
+    EXPECT_TRUE(ok.contains("\"tick\":5"));
+    EXPECT_EQ(scans, 1);
     for (const auto* bad : {"from_ms=100", "from_ms=200&to_ms=100", "tick=0", "tick=nan"}) {
         const auto rejected = get(bad);
         EXPECT_TRUE(rejected.startsWith("HTTP/1.1 422")) << rejected.toStdString();

@@ -1555,7 +1555,7 @@ protected:
         ugr->view()->setTimeframe(int(minute));
         model = std::make_unique<HeatmapSettingsModel>(t.store, "main", t.config);
         // Bright fixture colours (sizes 0.01..0.53), Manual $1, no crossfade unless a case asks.
-        ASSERT_TRUE(model->apply({{"renderer", "gpu"}, {"palettePreset", "Fire"}, {"sensitivityMin", 0.001},
+        ASSERT_TRUE(model->apply({{"palettePreset", "Fire"}, {"sensitivityMin", 0.001},
                                   {"sensitivityMax", 1.0}, {"tickMode", "manual"}, {"manualTick", 100},
                                   {"crossfadeMs", 0}}, false)
                         .isEmpty());

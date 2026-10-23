@@ -643,7 +643,6 @@ QJsonObject wallsJson(const WallsSnapshot& s) {
         {"note", "Aggregated resting size per cell, not individual orders"}, {"walls", rows}});
     {
         auto data = out.value("data").toObject();
-        data.insert("renderer", "gpu"); // the constant "gpu" since S8a (goes in S8b)
         data.insert("tick", s.data.bandTick);
         data.insert("unknownRows", s.data.unknownRows);
         data.insert("range", QJsonObject{{"from_ms", qint64(s.data.rangeStartMs)}, {"to_ms", qint64(s.data.rangeEndMs)},

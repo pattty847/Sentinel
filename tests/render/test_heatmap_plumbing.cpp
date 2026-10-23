@@ -142,7 +142,7 @@ TEST_F(HeatmapPlumbing, SettingsRoundTripWorkspaceAndSharedTickMemory) {
     QSettings ini(dir.filePath("test.ini"), QSettings::IniFormat);
     HeatmapSettingsStore store(ini);
     auto s = chartDefaults({});
-    ASSERT_TRUE(applySettingsPatch(s, {{"renderer", "gpu"}, {"tickMode", "manual"}, {"manualTick", 250},
+    ASSERT_TRUE(applySettingsPatch(s, {{"tickMode", "manual"}, {"manualTick", 250},
         {"minRowPx", 3.5}, {"hysteresis", 0.4}, {"crossfadeMs", 0}, {"showBandEdges", true},
         {"palettePreset", "Custom"}, {"bidGradient", QJsonArray{QJsonObject{{"position", 0}, {"color", "#112233"}}, QJsonObject{{"position", 1}, {"color", "#aabbccdd"}}}},
         {"sensitivityMin", 100}, {"sensitivityMax", 1000}, {"opacity", 0.6},
@@ -161,8 +161,33 @@ TEST_F(HeatmapPlumbing, SettingsRoundTripWorkspaceAndSharedTickMemory) {
     EXPECT_EQ(again.load("main", {}), s);
     EXPECT_EQ(again.loadManualTicks().get("BTC-USD", kMinuteMs), 100);
     EXPECT_EQ(again.loadManualTicks().get("BTC-USD", kHourMs), 2500);
-    EXPECT_TRUE(ini.contains("layouts/work/heatmap/main/renderer"));
     EXPECT_TRUE(ini.contains("heatmap/manualTick/BTC-USD/60000"));
+}
+TEST_F(HeatmapPlumbing, RetiredSavedKeyPreservesChartAndWorkspaceSettings) {
+    QTemporaryDir dir;
+    QSettings ini(dir.filePath("test.ini"), QSettings::IniFormat);
+    ini.setValue("heatmap/main/renderer", "gpu");
+    ini.setValue("heatmap/main/tickMode", "manual");
+    ini.setValue("heatmap/main/manualTick", 250);
+    ini.setValue("heatmap/main/opacity", 0.6);
+    ini.setValue("layouts/work/heatmap/main/renderer", "gpu");
+    ini.setValue("layouts/work/heatmap/main/tickMode", "manual");
+    ini.setValue("layouts/work/heatmap/main/manualTick", 500);
+    ini.setValue("layouts/work/heatmap/main/opacity", 0.4);
+    ini.sync();
+    ASSERT_EQ(ini.status(), QSettings::NoError);
+
+    QSettings reread(dir.filePath("test.ini"), QSettings::IniFormat);
+    HeatmapSettingsStore store(reread);
+    auto expected = chartDefaults({});
+    expected.tickMode = TickMode::Manual;
+    expected.manualTick = 250;
+    expected.opacity = 0.6;
+    EXPECT_EQ(store.load("main", {}), expected);
+    expected.manualTick = 500;
+    expected.opacity = 0.4;
+    EXPECT_EQ(store.restoreLayout("work", "main", {}), expected);
+    EXPECT_EQ(store.load("main", {}), expected);
 }
 TEST_F(HeatmapPlumbing, DefaultsComeFromYamlAndEveryNumericFieldClamps) {
     QTemporaryDir dir;
