@@ -120,8 +120,7 @@ TEST(MarketHealthWidgets, VisiblePaperDetachImmediatelyWithdrawsHealth) {
     dock.show();
     auto* label = dock.findChild<QLabel*>("paperMarketHealth");
     ASSERT_TRUE(label);
-    QTRY_VERIFY_WITH_TIMEOUT(label->text().startsWith("Live"), 1000);
-    EXPECT_TRUE(label->text().startsWith("Live"));
+    ASSERT_TRUE(QTest::qWaitFor([&] { return label->text().startsWith("Live"); }, 1000));
     EXPECT_FALSE(label->toolTip().isEmpty());
     dock.setDataSource(nullptr);
     EXPECT_EQ(label->text(), "Unavailable");
@@ -239,7 +238,7 @@ TEST(MarketHealth, AcceptedHeatmapPathRejectsExpiredIdsWrongSourcesAndOldRevisio
     client.heatmapLiveReceived(2, healthLiveFrame(9)); drainHealth();
     EXPECT_EQ(accepted.count(), 1);
     EXPECT_EQ(h.snapshot("BTC-USD", sampleAt).heatmapAgeMs, 10'000);
-    QTRY_VERIFY_WITH_TIMEOUT(QDateTime::currentMSecsSinceEpoch() > acceptedAt, 1000);
+    ASSERT_TRUE(QTest::qWaitFor([&] { return QDateTime::currentMSecsSinceEpoch() > acceptedAt; }, 1000));
     client.heatmapLiveReceived(2, healthLiveFrame(11)); drainHealth();
     ASSERT_EQ(accepted.count(), 2);
     EXPECT_GT(accepted.at(1).at(1).toLongLong(), acceptedAt);
@@ -306,7 +305,7 @@ TEST(MarketHealthWidgets, StatusAndTelemetryStopPollingWhileHiddenAndKeepUnknown
     bar.setMarketHealth(&health);
     EXPECT_EQ(reads, 0);
     bar.show();
-    QTRY_VERIFY_WITH_TIMEOUT(reads > 0, 1000);
+    ASSERT_TRUE(QTest::qWaitFor([&] { return reads > 0; }, 1000));
     EXPECT_EQ(bar.findChild<QLabel*>("marketState")->text(), "Live");
     EXPECT_GT(reads, 0);
     bar.hide(); const int hiddenReads = reads;
@@ -323,7 +322,7 @@ TEST(MarketHealthWidgets, StatusAndTelemetryStopPollingWhileHiddenAndKeepUnknown
     dock.setProvider([&]() -> std::optional<QVariantMap> { ++polls; return QVariantMap{{"tick", 5.0}}; });
     EXPECT_EQ(polls, 0);
     dock.show();
-    QTRY_COMPARE_WITH_TIMEOUT(dock.valueText("tick"), QString("$5"), 1000);
+    ASSERT_TRUE(QTest::qWaitFor([&] { return dock.valueText("tick") == "$5"; }, 1000));
     EXPECT_EQ(dock.valueText("tick"), "$5");
     EXPECT_EQ(dock.valueText("residentBytes"), "Unknown");
     EXPECT_EQ(dock.valueText("holding"), "Unknown");

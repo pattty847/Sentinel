@@ -94,7 +94,7 @@ TEST(AgentApiInput, BoundsAndDragSequenceAreValidatedBeforeSending) {
     EXPECT_EQ(dispatcher.apply(&view, {0, 0, 600, 450}, c).status, 200);
     EXPECT_EQ(events.presses, 2); EXPECT_EQ(events.releases, 2);
 }
-// S6a review minor 6: an agent that dies mid-drag never leaves the button down.
+// an agent that dies mid-drag never leaves the button down.
 TEST(AgentApiInput, AnAbandonedDragIsReleasedAfterTheTimeout) {
     QQuickView view;
     view.resize(640, 480);

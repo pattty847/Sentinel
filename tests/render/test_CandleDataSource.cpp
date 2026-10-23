@@ -244,7 +244,7 @@ TEST_F(CandleDataSourceTest, WideRefreshPagesNewestFirstThenResumesOlderBackfill
     EXPECT_TRUE(takeRequest(120).is_null());
 }
 
-// Review item 8 (pre-existing): on a re-subscription the replica kept from the earlier
+// On a re-subscription the replica kept from the earlier
 // subscription had stopped updating; the first L2 update landed on its stale levels and
 // the chart seeded from a top ~$600 off before the fresh snapshot. The replica is
 // cleared on subscribe: nothing derives a top from it until the new snapshot.

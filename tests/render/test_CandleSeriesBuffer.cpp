@@ -405,7 +405,7 @@ TEST(CandleSeriesBuffer, PageOlderThanManySpansIsKeptAndPagingSettles) {
     EXPECT_TRUE(buffer.coverage(kSym, kFiveMin)->coversRange(viewEnd - 200 * kFiveMin, liveEdge));
 }
 
-// Review r2-1: Y is fetched, then the view pans to an older X in the same selection
+// Y is fetched, then the view pans to an older X in the same selection
 // before paging goes on. X is never asked for twice.
 TEST(CandleSeriesBuffer, PanToAnOlderWindowAfterOnePageNeverRepeatsIt) {
     CandleSeriesBuffer buffer;
@@ -421,7 +421,7 @@ TEST(CandleSeriesBuffer, PanToAnOlderWindowAfterOnePageNeverRepeatsIt) {
     EXPECT_TRUE(buffer.coverage(kSym, kFiveMin)->coversRange(xEnd - 10 * kFiveMin, liveEdge));
 }
 
-// Review r2-2: a sparse REST page Y next to the live run, another page X, then back
+// A sparse REST page Y next to the live run, another page X, then back
 // to Y: paging completes and Y keeps the coverage its quiet buckets draw from.
 TEST(CandleSeriesBuffer, ReturnToASparseRestPageKeepsItsQuietBuckets) {
     CandleSeriesBuffer buffer;

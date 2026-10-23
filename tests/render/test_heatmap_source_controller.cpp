@@ -14,7 +14,7 @@
 #include <map>
 #include <set>
 
-// Fake-node tests for slice S5b: FakeChunkTransport, a manual build executor
+// Fake-node tests: FakeChunkTransport, a manual build executor
 // (jobs run only when the test says), no GPU and no sleeps.
 namespace {
 using namespace heatmap;
@@ -872,7 +872,7 @@ TEST_F(SourceController, BudgetsAreConfigurableAndATinyCpuTierKeepsOnlyTheView) 
 }
 
 
-// Review fix 1: a decoded budget smaller than one chunk must not refetch forever.
+// A decoded budget smaller than one chunk must not refetch forever.
 TEST_F(SourceController, ChunksLargerThanTheDecodedBudgetAreFetchedOnce) {
     store.setMaxBytes(1);
     auto &a = chart();
@@ -922,7 +922,7 @@ TEST_F(SourceController, ReturningToATimeframeRestartsACancelledRebuild) {
     EXPECT_TRUE(checked);
 }
 
-// Review fix 3: claimed images are bounded by the CPU tier across charts.
+// Claimed images are bounded by the CPU tier across charts.
 TEST_F(SourceController, CpuTierDropsTheLowestRanksAcrossCharts) {
     size_t spanBytes = 0; // CPU size of one 1m span (both sources), measured
     {
@@ -961,7 +961,7 @@ TEST_F(SourceController, CpuTierDropsTheLowestRanksAcrossCharts) {
     EXPECT_EQ(cache->stats().builds, built);
 }
 
-// Review fix 3 (S5c hook): uploaded images are released and rebuilt after loss.
+// Uploaded images are released and rebuilt after loss.
 TEST_F(SourceController, UploadedImagesAreReleasedAndRebuiltAfterGpuLoss) {
     auto &a = chart();
     view(a);
@@ -989,7 +989,7 @@ TEST_F(SourceController, UploadedImagesAreReleasedAndRebuiltAfterGpuLoss) {
         for (const auto &source : span.sources) EXPECT_TRUE(source.build && source.build->gpu);
 }
 
-// S5c: a full node (no credit) still admits prefetch on the side the view moves
+// a full node (no credit) still admits prefetch on the side the view moves
 // to, by evicting strictly lower-ranked prefetch left behind (the node frees
 // what the snapshot stops listing). Without it the stale side kept the cap full.
 TEST_F(SourceController, CreditBlockedPrefetchEvictsLowerRankedPrefetchAfterAPan) {
@@ -1012,7 +1012,7 @@ TEST_F(SourceController, CreditBlockedPrefetchEvictsLowerRankedPrefetchAfterAPan
     EXPECT_GT(a.stats().evictions, 0u);
 }
 
-// S5c node contract addition: a source the node reports missing (its GPU cap
+// a source the node reports missing (its GPU cap
 // evicted it after the upload, or a new node never held it) is rebuilt from the
 // local chunks when the image was released; the others are untouched.
 TEST_F(SourceController, MissingSourcesAreRebuiltFromLocalChunks) {
@@ -1046,8 +1046,7 @@ TEST_F(SourceController, MissingSourcesAreRebuiltFromLocalChunks) {
 }
 
 // Once the node reports a source uploaded, nothing on the CPU keeps its image:
-// not the slot, not the snapshot, not the span-source LRU (plan section 4: "the
-// lab keeps them alive after upload; S5 does not"). Every image still alive is
+// not the slot, not the snapshot, not the span-source LRU. Every image still alive is
 // claimed, and the ledger covers what is pinned: claims, reservations and the
 // wanted decoded chunks. Before the fix the LRU kept every uploaded image as an
 // unclaimed entry (up to the 256 MiB tier) that no ledger counted.
@@ -1083,7 +1082,7 @@ TEST_F(SourceController, UploadedImagesLeaveTheCacheAndTheLedgerCoversWhatStaysP
     covered();
 }
 
-// Re-review: a key two charts claim. Once one chart's node uploaded it, the LRU
+// A key two charts claim. Once one chart's node uploaded it, the LRU
 // never keeps it, whether the other chart uploads later or closes first; its
 // own reference keeps the image only while it needs it. No cache shrinking.
 TEST_F(SourceController, ASharedImageUploadedByOneChartDiesWhenTheOtherLetsGo) {
@@ -1114,7 +1113,7 @@ TEST_F(SourceController, ASharedImageUploadedByOneChartDiesWhenTheOtherLetsGo) {
     }
 }
 
-// Review fix 4: surviving slots take their new ranks before admission.
+// Surviving slots take their new ranks before admission.
 TEST_F(SourceController, NewlyVisibleSlotsAreNotEvictedWhenTheViewExpands) {
     constexpr size_t estimate = 64 * 1024, span = 2 * estimate, need = span + (span + 9) / 10;
     // Room for the visible span and four prefetch spans, by estimate.
@@ -1168,7 +1167,7 @@ TEST_F(SourceController, DemotedFallbackIsEvictableInTheSameReconcile) {
     EXPECT_GE(a.stats().evictions, 1u);
 }
 
-// Review fix 5: hour chunks only where the hour level has data.
+// Hour chunks only where the hour level has data.
 TEST_F(SourceController, HourChunksStartWhereHourRollupsStart) {
     const int64_t day = (availableStart / kDayMs + 1) * kDayMs; // first day start after the oldest minute
     hourOldest = day + 5 * kHourMs;
@@ -1197,7 +1196,7 @@ TEST_F(SourceController, HourChunksStartWhereHourRollupsStart) {
     EXPECT_TRUE(checked);
 }
 
-// Review fix 6: builds smaller than their estimates return credit at once.
+// Builds smaller than their estimates return credit at once.
 TEST_F(SourceController, SmallerBuildsReturnCreditWithoutANewNodeReport) {
     constexpr size_t estimate = 64 * 1024, span = 2 * estimate, need = span + (span + 9) / 10;
     auto &a = chart(64ull << 20, estimate);
@@ -1213,7 +1212,7 @@ TEST_F(SourceController, SmallerBuildsReturnCreditWithoutANewNodeReport) {
     EXPECT_EQ(a.capacity()->capacityEpoch.load(), epochNow);
 }
 
-// Review fix 7: a refused replacement must not let the obsolete build publish.
+// A refused replacement must not let the obsolete build publish.
 TEST_F(SourceController, SupersededQueuedBuildReleasesAdmissionForItsReplacement) {
     makeCache(256ull << 20, 1);
     auto &a = chart();
@@ -1303,7 +1302,7 @@ TEST_F(SourceController, DestructionWithBuildsInFlightOnTheRealPool) {
     SUCCEED();
 }
 
-// Re-review P1: the process-wide CPU ceiling refuses the farthest visible spans.
+// The process-wide CPU ceiling refuses the farthest visible spans.
 TEST_F(SourceController, CpuCeilingRefusesTheFarthestVisibleSpansAcrossCharts) {
     size_t spanBytes = 0; // CPU size of one built 1m span's images, measured
     {
@@ -1392,7 +1391,7 @@ TEST_F(SourceController, ASpanLargerThanTheWholeCeilingIsAdmittedAlone) {
     EXPECT_GT(a.stats().refusals, 0u);
 }
 
-// Re-review P1: decoded chunks stay wanted only while a build needs them.
+// Decoded chunks stay wanted only while a build needs them.
 TEST_F(SourceController, BuiltSpansUnwantTheirSealedChunksAndGpuLossWantsThemAgain) {
     auto &a = chart();
     view(a);
@@ -1416,8 +1415,7 @@ TEST_F(SourceController, BuiltSpansUnwantTheirSealedChunksAndGpuLossWantsThemAga
 
 // A source made ready from the cache after demand was computed must not leave
 // its chunks wanted (one more reconcile follows a cache hit).
-// (S5c: uploaded images no longer stay in the LRU, so a loss rebuilds them from
-// the local chunks, as plan section 4 says.)
+// Uploaded images leave the LRU, so GPU loss rebuilds them from local chunks.
 TEST_F(SourceController, LossRebuildsFromLocalChunksAndLeavesNothingWanted) {
     auto &a = chart();
     view(a);
@@ -1435,7 +1433,7 @@ TEST_F(SourceController, LossRebuildsFromLocalChunksAndLeavesNothingWanted) {
     EXPECT_EQ(store.stats().wantedBytes, 0u);
 }
 
-// Re-review P2: a GPU loss rebuilds the drawn fallback, drops recent-tf.
+// A GPU loss rebuilds the drawn fallback, drops recent-tf.
 TEST_F(SourceController, GpuLossRebuildsFallbackAndDropsReleasedRecentTimeframe) {
     auto &a = chart();
     view(a, kMinuteMs);
@@ -1474,7 +1472,7 @@ TEST_F(SourceController, GpuLossRebuildsFallbackAndDropsReleasedRecentTimeframe)
     }
 }
 
-// Re-review P2: an availability advance invalidates the build in flight.
+// An availability advance invalidates the build in flight.
 TEST_F(SourceController, PlanChangeInvalidatesABuildInFlightBeforeItsNewChunkArrives) {
     const int64_t h0 = epoch / kHourMs * kHourMs;
     transport.push(availability(h0 + kHourMs));
@@ -1501,7 +1499,7 @@ TEST_F(SourceController, PlanChangeInvalidatesABuildInFlightBeforeItsNewChunkArr
     EXPECT_TRUE(visibleComplete(*a.latestSnapshot()));
 }
 
-// Re-review P2: freed CPU wakes another chart suppressed for CPU room.
+// Freed CPU wakes another chart suppressed for CPU room.
 TEST_F(SourceController, FreedCpuCapacityWakesASuppressedChart) {
     auto &a = chart();
     view(a);

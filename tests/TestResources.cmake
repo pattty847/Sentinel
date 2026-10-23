@@ -39,7 +39,10 @@ set(_sentinel_fast_tests
     RecordingPageTests PriceLadderTests
     ChunkFetcherTests HeatmapSpanPlannerTests CandleHistoryCacheTests
     FrameStatsWindowTests TimeAxisMappingTests ChartRasterTests
-    ChartViewControllerTests ChartCameraTests
+    ChartViewControllerTests ChartCameraTests CandleIntervalTests CandleOverlayCpuTests
+    PriceFitterTests LivePlacementTests TimeframeCarryTests TimeframeSwitchTests
+    ZoomControllerTests ViewCommandsTests FrameProducerTests ChartLayersTests
+    ChartLookSettingsTests LayerVisibilityTests ChartRenderSequenceTests
     GridViewStateTests CandleBackfillStateTests CandleDataSourceTests
     CandleSeriesBufferTests AxisLayoutTests PriceAxisModelTests
     TpoProfileModelTests HeatmapCellQueryTests HeatmapLabelLayoutTests
@@ -52,7 +55,8 @@ foreach(_sentinel_area IN ITEMS core marketdata capture roller render agentapi
     get_property(_sentinel_tests DIRECTORY "${_sentinel_dir}" PROPERTY TESTS)
     foreach(_sentinel_test IN LISTS _sentinel_tests)
         get_property(_sentinel_labels TEST "${_sentinel_test}" DIRECTORY "${_sentinel_dir}" PROPERTY LABELS)
-        if(_sentinel_test IN_LIST _sentinel_fast_tests)
+        if(_sentinel_test IN_LIST _sentinel_fast_tests OR "fast" IN_LIST _sentinel_labels)
+            list(REMOVE_ITEM _sentinel_labels slow)
             list(APPEND _sentinel_labels fast)
         else()
             list(APPEND _sentinel_labels slow)

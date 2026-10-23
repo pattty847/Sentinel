@@ -1,4 +1,4 @@
-// Slice S7b (labels and the liquidity range on the GPU main chart) and the chart
+// Labels and the liquidity range on the GPU main chart, plus the chart
 // UI follow-ups (owner request 2026-10-02): the toolbar adapts to the chart's
 // layers, the chart settings menu and dialog Chart tab round-trip their settings.
 //
@@ -237,7 +237,7 @@ TEST(ChartToolbar, ControlVisibilityRulesPerMode) {
         Mode mode;
         Shown shown;
     };
-    // One renderer since S8a: no gpu/legacy mode, no legacy threshold slider.
+    // All chart modes share one renderer.
     const std::vector<Case> cases{
         {"heatmap + candles", {true, false, false, false, true},
          {true, false, false, true, true, false, false, false}},
@@ -560,9 +560,7 @@ TEST(ChartToolbar, OpenOverflowEditorSurvivesFitChangesAndRebuildsAfterHide) {
     EXPECT_FALSE(editor) << "the closed popup must rebuild the old editor";
     const auto after = menuEntries(toolbar.controlsButton()->menu());
     EXPECT_FALSE(after.contains("Liquidity range"));
-    EXPECT_FALSE(after.contains("Liquidity threshold")) << "the legacy threshold went in S8a";
     useOverflow(toolbar, [&](QMenu *menu) {
-        EXPECT_FALSE(menu->findChild<QSlider *>("overflowThresholdSlider"));
         EXPECT_FALSE(menu->findChild<LiquidityRangeSlider *>("overflowRangeSlider"));
     });
 }
@@ -829,37 +827,29 @@ TEST(ChartToolbar, OverflowDownTraversesSliderRowsWithoutEditingAndEscapeCloses)
     toolbar.show();
     QTest::qWait(20);
     toolbar.resize(220, 44);
-    for (bool gpu : {true}) { // one renderer since S8a: the range slider row
-        toolbar.setModeState({true, false, false, false, true});
-        QTest::qWait(20);
-        useOverflow(toolbar, [&](QMenu *menu) {
-            ASSERT_TRUE(QTest::qWaitFor([&] { return menu->hasFocus(); }, 1000));
-            auto *range = menu->findChild<LiquidityRangeSlider *>("overflowRangeSlider");
-            auto *threshold = menu->findChild<QSlider *>("overflowThresholdSlider");
-            ASSERT_EQ(bool(range), gpu);
-            ASSERT_EQ(bool(threshold), !gpu);
-            const double low = range ? range->low() : 0;
-            const double high = range ? range->high() : 0;
-            const int strength = threshold ? threshold->value() : 0;
-            QList<QAction *> entries;
-            for (auto *action : menu->actions())
-                if (action->isVisible() && action->isEnabled() && !action->isSeparator()) entries << action;
-            ASSERT_GT(entries.size(), 2);
-            menu->setActiveAction(entries.first());
-            for (int i = 1; i < entries.size(); ++i) {
-                QTest::keyClick(menu->windowHandle(), Qt::Key_Down);
-                EXPECT_EQ(menu->activeAction(), entries[i]) << "row " << i;
-            }
-            EXPECT_EQ(menu->activeAction(), entries.last());
-            if (range) {
-                EXPECT_DOUBLE_EQ(range->low(), low);
-                EXPECT_DOUBLE_EQ(range->high(), high);
-            }
-            if (threshold) EXPECT_EQ(threshold->value(), strength);
-            QTest::keyClick(menu->windowHandle(), Qt::Key_Escape);
-            EXPECT_FALSE(menu->isVisible());
-        });
-    }
+    toolbar.setModeState({true, false, false, false, true});
+    QTest::qWait(20);
+    useOverflow(toolbar, [&](QMenu *menu) {
+        ASSERT_TRUE(QTest::qWaitFor([&] { return menu->hasFocus(); }, 1000));
+        auto *range = menu->findChild<LiquidityRangeSlider *>("overflowRangeSlider");
+        ASSERT_TRUE(range);
+        const double low = range->low();
+        const double high = range->high();
+        QList<QAction *> entries;
+        for (auto *action : menu->actions())
+            if (action->isVisible() && action->isEnabled() && !action->isSeparator()) entries << action;
+        ASSERT_GT(entries.size(), 2);
+        menu->setActiveAction(entries.first());
+        for (int i = 1; i < entries.size(); ++i) {
+            QTest::keyClick(menu->windowHandle(), Qt::Key_Down);
+            EXPECT_EQ(menu->activeAction(), entries[i]) << "row " << i;
+        }
+        EXPECT_EQ(menu->activeAction(), entries.last());
+        EXPECT_DOUBLE_EQ(range->low(), low);
+        EXPECT_DOUBLE_EQ(range->high(), high);
+        QTest::keyClick(menu->windowHandle(), Qt::Key_Escape);
+        EXPECT_FALSE(menu->isVisible());
+    });
 }
 
 // Opt-in own-widget captures only. This fixture has synthetic tick availability
@@ -1051,7 +1041,7 @@ TEST(ChartShell, AxisControlsHaveKeyboardActionsAndIndependentFollowStates) {
     }
 }
 
-// The label request retry (S7b review): repeated no-result failures double the
+// The label request retry : repeated no-result failures double the
 // delay up to 30 s; a result resets it.
 TEST(ChartLabelRetry, BackoffDoublesToTheCapAndResetsAfterAResult) {
     heatmap::gpu::LabelRetryPolicy retry;
@@ -1464,8 +1454,8 @@ TEST_F(ChartControls, ChartMenuRoundTripsTheLabelSettings) {
     EXPECT_EQ(model->settings().labelCurrency, "asset");
 }
 
-// S8a: one renderer, so the Labels toggle is always in the gear menu (it was
-// hidden with the legacy renderer), and the currency stays an appearance entry.
+// one renderer, so the Labels toggle is always in the gear menu (it was
+// hidden in other chart modes), and the currency stays an appearance entry.
 TEST_F(ChartControls, LabelsToggleAndCurrencyAreAlwaysInTheAppearanceMenu) {
     controls->syncNow();
     EXPECT_FALSE(toolbar->shownControls().liquidity) << "currency is secondary appearance, not primary-strip chrome";
@@ -1794,10 +1784,6 @@ TEST_F(ChartLabels, ToolbarFollowsTheChartsLayers) {
     EXPECT_TRUE(shown.tickSelector);
     EXPECT_TRUE(shown.rangeSlider);
     EXPECT_FALSE(shown.tpoSession);
-    // A renderer patch can only name gpu now (S8a): legacy is refused, nothing changes.
-    EXPECT_FALSE(model->apply({{"renderer", "legacy"}}, false).isEmpty());
-    pump(300, [] { return false; });
-    EXPECT_TRUE(toolbar->shownControls().rangeSlider);
     emit toolbar->chartMenu()->aboutToShow();
     EXPECT_TRUE(menuAction(toolbar->chartMenu(), "chartMenuLabels")->isVisible()) << "the Labels toggle is always shown";
     EXPECT_FALSE(shown.liquidity) << "appearance stays in the gear menu";

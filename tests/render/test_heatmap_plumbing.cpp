@@ -168,13 +168,13 @@ TEST_F(HeatmapPlumbing, DefaultsComeFromYamlAndEveryNumericFieldClamps) {
     QTemporaryDir dir;
     QFile yaml(dir.filePath("client.yaml"));
     ASSERT_TRUE(yaml.open(QIODevice::WriteOnly));
-    yaml.write("heatmap:\n  renderer: legacy\n  tick_mode: manual\n  manual_tick: 250\n  min_row_px: 4\n  hysteresis: 0.6\n  crossfade_ms: 350\n  show_band_edges: true\n  palette_preset: Fire\n  bid_gradient: [{position: 0, color: \"#123456\"}, {position: 1, color: \"#abcdef\"}]\n  opacity: 0.7\n  sensitivity_min: 1\n  sensitivity_max: 100\n  gpu_cap_bytes: 67108864\n  upload_budget_bytes: 2097152\n  prefetch_tiles: 3\n  live_min_interval_ms: 800\n  show_telemetry: true\n  decoded_chunk_bytes: 33554432\n  span_source_bytes: 16777216\n  cpu_ceiling_bytes: 67108864\n");
+    yaml.write("heatmap:\n  tick_mode: manual\n  manual_tick: 250\n  min_row_px: 4\n  hysteresis: 0.6\n  crossfade_ms: 350\n  show_band_edges: true\n  palette_preset: Fire\n  bid_gradient: [{position: 0, color: \"#123456\"}, {position: 1, color: \"#abcdef\"}]\n  opacity: 0.7\n  sensitivity_min: 1\n  sensitivity_max: 100\n  gpu_cap_bytes: 67108864\n  upload_budget_bytes: 2097152\n  prefetch_tiles: 3\n  live_min_interval_ms: 800\n  show_telemetry: true\n  decoded_chunk_bytes: 33554432\n  span_source_bytes: 16777216\n  cpu_ceiling_bytes: 67108864\n");
     yaml.close();
     ClientConfig config;
     ASSERT_TRUE(ConfigLoader::loadClientConfig(yaml.fileName().toStdString(), &config));
     QSettings ini(dir.filePath("test.ini"), QSettings::IniFormat);
     HeatmapSettingsStore store(ini);
-    auto s = store.load("main", config.heatmap); // renderer: legacy in the YAML is ignored (S8a)
+    auto s = store.load("main", config.heatmap);
     EXPECT_EQ(s.tickMode, TickMode::Manual); EXPECT_EQ(s.manualTick, 250);
     EXPECT_EQ(s.minRowPx, 4); EXPECT_EQ(s.hysteresis, 0.6); EXPECT_EQ(s.crossfadeMs, 350);
     EXPECT_TRUE(s.showBandEdges); EXPECT_EQ(s.palettePreset, "Fire"); EXPECT_EQ(s.opacity, 0.7);
@@ -197,25 +197,11 @@ TEST_F(HeatmapPlumbing, DefaultsComeFromYamlAndEveryNumericFieldClamps) {
     clampSettings(s);
     EXPECT_EQ(s.opacity, 1); EXPECT_EQ(s.minRowPx, 2);
     ini.setValue("heatmap/main/opacity", "bad");
-    ini.setValue("heatmap/main/renderer", "legacy"); // saved by a pre-S8a binary: ignored
     ini.setValue("heatmap/main/minRowPx", 6);
     EXPECT_EQ(store.load("main", config.heatmap).opacity, 0.7);
     EXPECT_EQ(store.load("main", config.heatmap).minRowPx, 6) << "the other saved fields still load";
     ini.setValue("heatmap/budgets/cpuCeiling", 1);
     EXPECT_TRUE(store.loadBudgets(config.heatmap).valid());
-}
-// S8a: the client config has no renderer or source keys any more; a file that
-// still names them (renderer: legacy, source: recording) loads, the keys ignored.
-TEST_F(HeatmapPlumbing, RetiredRendererAndSourceYamlKeysAreIgnored) {
-    QTemporaryDir dir;
-    QFile yaml(dir.filePath("client.yaml"));
-    ASSERT_TRUE(yaml.open(QIODevice::WriteOnly | QIODevice::Truncate));
-    yaml.write("heatmap:\n  renderer: legacy\n  source: recording\n  label_px: 13\n  gamma: 1.3\n  opacity: 0.6\n");
-    yaml.close();
-    ClientConfig config;
-    ASSERT_TRUE(ConfigLoader::loadClientConfig(yaml.fileName().toStdString(), &config));
-    EXPECT_DOUBLE_EQ(config.heatmap.gamma, 1.3);
-    EXPECT_DOUBLE_EQ(config.heatmap.opacity, 0.6);
 }
 TEST_F(HeatmapPlumbing, LastSessionNeverOverwritesLiveSettingsOrSnapshotsOverrides) {
     QTemporaryDir dir;
@@ -224,7 +210,7 @@ TEST_F(HeatmapPlumbing, LastSessionNeverOverwritesLiveSettingsOrSnapshotsOverrid
     auto current = chartDefaults({});
     store.save("main", current);
     store.saveLayout("work", "main", {});
-    // A snapshot left by an older binary, before a live POST and a crash.
+    // A workspace snapshot predating a live POST and a crash.
     ini.setValue("layouts/_last_session/heatmap/main/opacity", 0.1);
     ASSERT_TRUE(store.applyChartPatch("main", current, {{"opacity", 0.7}}, true, {}, "BTC-USD", kMinuteMs).isEmpty());
     current = store.load("main", {}); // fresh process after an unclean shutdown
@@ -239,29 +225,6 @@ TEST_F(HeatmapPlumbing, LastSessionNeverOverwritesLiveSettingsOrSnapshotsOverrid
     store.restoreLayoutInto("work", "main", current, {});
     EXPECT_EQ(current.opacity, 1); // explicit named workspace still restores
     EXPECT_EQ(store.load("main", {}).opacity, 1);
-}
-// S8a acceptance 1: POST /api/v1/heatmap/settings {"renderer":"legacy"} is refused
-// (MainWindowGPU maps the patch error to 422 invalid_settings), persisted or not,
-// and nothing changes or is written; "gpu" stays accepted as a no-op; the
-// reported renderer is the constant "gpu".
-TEST_F(HeatmapPlumbing, LegacyRendererPatchIsRefusedAndGpuIsTheConstant) {
-    QTemporaryDir dir;
-    QSettings ini(dir.filePath("test.ini"), QSettings::IniFormat);
-    HeatmapSettingsStore store(ini);
-    auto current = store.load("main", {});
-    const auto before = current;
-    for (const bool persist : {false, true}) {
-        for (const auto& value : {QJsonValue("legacy"), QJsonValue("bad"), QJsonValue(1)}) {
-            const auto error = store.applyChartPatch("main", current, {{"renderer", value}, {"opacity", 0.4}}, persist,
-                                                     {}, "BTC-USD", kMinuteMs);
-            EXPECT_FALSE(error.isEmpty()) << persist;
-            EXPECT_EQ(current, before);
-        }
-    }
-    EXPECT_TRUE(ini.allKeys().isEmpty()) << "nothing written";
-    ASSERT_TRUE(store.applyChartPatch("main", current, {{"renderer", "gpu"}}, false, {}, "BTC-USD", kMinuteMs).isEmpty());
-    EXPECT_EQ(current, before);
-    EXPECT_EQ(settingsJson(current).value("renderer").toString(), "gpu");
 }
 TEST_F(HeatmapPlumbing, EnteringManualAlonePreservesTheRememberedSymbolTick) {
     QTemporaryDir dir;
@@ -327,7 +290,7 @@ TEST_F(HeatmapPlumbing, FactoryFailuresCleanUpOnTheWorkerAndJoinBeforeRethrowing
         EXPECT_TRUE(deletedOnWorker);
     }
 }
-// S6a review minor 7: a malformed gradient in YAML (non-numeric position, a map
+// a malformed gradient in YAML (non-numeric position, a map
 // color, a non-map stop) keeps the default gradient; the rest of the file loads.
 TEST_F(HeatmapPlumbing, MalformedGradientStopsKeepTheDefaultAndTheRestLoads) {
     QTemporaryDir dir;

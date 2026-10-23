@@ -92,7 +92,7 @@ struct Spans {
     Recording rec;
     FakeSpans fake; // assembles SpanSets; availability set per step
     std::map<std::tuple<int64_t, int64_t, std::string, int64_t>, SpanSourceBuildPtr> builds;
-    HeldChunks held; // the chunks of the builds (S7b: the label oracle reads them)
+    HeldChunks held; // the chunks of the builds (the label oracle reads them)
     SpanSourceBuildPtr build(int64_t tf, int64_t tile, const std::string &source, int64_t cutoff) {
         auto &slot = builds[{tf, tile, source, cutoff}];
         if (slot) return slot;
@@ -315,7 +315,7 @@ TEST_F(LiveNode, DrawClipCoversEachBucketOnceAndMatchesTheComposedOracle) {
             frame().capture.reset();
             const auto segments = layer0(stats());
             const int64_t liveEnd = ceilTo(open + minute, tf);
-            // S7a: the pure clip consumed by labels equals the actual node's
+            // The pure clip consumed by labels equals the actual node's
             // pieces, including its timeframe-rounded live end.
             std::vector<DrawSpan> clipSpans;
             for (const auto& span : frame().spans->spans) {
@@ -353,7 +353,7 @@ TEST_F(LiveNode, DrawClipCoversEachBucketOnceAndMatchesTheComposedOracle) {
     }
 }
 
-// S7b (plan section 6 item 2): the label words (HeatmapCellQuery's oracle on the
+// The label words (HeatmapCellQuery's oracle on the
 // drawn picture: the same SpanSet, live snapshot, timeframe and tick) equal the
 // cells the node draws, read back from the GPU, for every bucket of the current
 // picture: span bins with the fine source's fill pass, the live bin with its
@@ -477,7 +477,7 @@ TEST_F(LiveNode, LabelWordsEqualTheDrawnBins) {
     EXPECT_EQ(stats().errors.load(), 0u);
 }
 
-// S7b review: labels must describe the picture on screen. A new live version
+// labels must describe the picture on screen. A new live version
 // pages in over several frames (a small upload budget) while the node keeps
 // drawing the previous one, and then a span revision (a later complete end) does
 // the same through slot fallback. Each frame, as the chart does, the matched
@@ -735,8 +735,8 @@ TEST_F(LiveNode, RolloverSequenceNeverShrinksDrawnCoverage) {
     EXPECT_EQ(stats().errors.load(), 0u);
 }
 
-// L advances only after every source of the live-edge span reported its upload
-// (S5L-b). Where the view does not overlap a finer source's band nothing bins
+// L advances only after every source of the live-edge span reported its upload.
+// Where the view does not overlap a finer source's band nothing bins
 // it, so the node acknowledges it without an upload (no GPU memory); once the
 // view moves into the band the released image is reported missing, so the
 // controller rebuilds it. Elsewhere a finer source out of its band just waits.
@@ -784,7 +784,7 @@ TEST_F(LiveNode, LiveEdgeSpansAcknowledgeOutOfBandSourcesWithoutUploadingThem) {
     EXPECT_FALSE(missing.contains({tile1, kCoarse})) << "the coarse source is held";
 }
 
-// Review fix 1: a live replacement pages in within the frame's upload budget
+// A live replacement pages in within the frame's upload budget
 // (shared with span sources) and the previous live picture keeps drawing until
 // all of its sources are resident. A 45-minute bridge (about 1 MB over two
 // sources) at a 64 KiB budget takes many frames, none above the budget.
@@ -822,7 +822,7 @@ TEST_F(LiveNode, LiveUploadsStayWithinTheFrameBudgetWhileThePreviousVersionDraws
     EXPECT_EQ(stats().errors.load(), 0u);
 }
 
-// Review fix 3: live residency follows GPU pressure. A long bridge (L lagging)
+// Live residency follows GPU pressure. A long bridge (L lagging)
 // grows the live buffer sets; once the window is small again and the node is
 // over a tight cap, the oversized spare goes and the next refill right-sizes the
 // set it reuses, so resident bytes come back under the cap and the capacity
@@ -859,7 +859,7 @@ TEST_F(LiveNode, LiveCapacityRecoversAfterALargeWindowShrinksUnderATightCap) {
     EXPECT_EQ(stats().errors.load(), 0u);
 }
 
-// Review fix 4: A -> B -> A -> C before the fades end, with a new live version
+// A -> B -> A -> C before the fades end, with a new live version
 // after the first A: every picture keeps its own live content at its own
 // opacity. The first A picture still shows version 1 (the second A got a live
 // bin of its own instead of re-binning the one a fading layer draws).

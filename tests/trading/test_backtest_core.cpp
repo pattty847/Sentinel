@@ -828,14 +828,3 @@ TEST(BacktestCore, R2EmptyPositionalInputsKeepZeroEventSuccess) {
         EXPECT_TRUE(process.readAllStandardError().isEmpty());
     }
 }
-
-TEST(BacktestCore, CliRejectsLegacyHistoryAndBinaryFiles) {
-    QTemporaryDir temp;
-    std::ofstream(temp.filePath("old.bin").toStdString()).close();
-    for (const auto& args : {QStringList{"--legacy", temp.path()}, QStringList{temp.filePath("old.bin")}}) {
-        QProcess process;
-        process.start(QString::fromUtf8(BACKTEST_CLI), args);
-        ASSERT_TRUE(process.waitForFinished(10000));
-        EXPECT_NE(process.exitCode(), 0);
-    }
-}

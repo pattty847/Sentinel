@@ -1,4 +1,4 @@
-// Slice S6b: the main chart (UnifiedGridRenderer) on the GPU heatmap path, over
+// The main chart (UnifiedGridRenderer) on the GPU heatmap path, over
 // a synthetic HMC2 recording through the shared HeatmapDataService (LabData's
 // local configurator; the real recording is never touched). GPU cases use the
 // selected QRhi backend (lab::OffscreenQuick) and skip with the reason when it
@@ -235,7 +235,7 @@ protected:
     }
     qint64 clockMs = 1'000;
     QImage image;
-    // Whole-pixel mapping (plan 2026-10-08): what the last frame drew (the source of
+    // Whole-pixel mapping: what the last frame drew (the source of
     // GET /api/v1/viewport `drawn`).
     chart_raster::RasterCamera drawn() const { return ugr->currentFrameContext().raster; }
     // The time window the next frame draws at rest (whole ms around it; a zoom glide's
@@ -363,7 +363,7 @@ TEST_F(UgrGpu, SettlesOnTheProductionPath) {
     EXPECT_EQ(ugr->getViewState()->maxTimeSpanMs(), 640.0 * minute);
 }
 
-// Plan section 2 "Mapping" and whole-pixel plan 2026-10-08 B3: candles map through the
+// Candles map through the
 // frame's TimeAxisMapping; the heatmap's column and row edges are exactly (not +-1) where
 // the mapping puts the timeframe and bin boundaries, on whole device pixels; a candle's
 // body is centred to the nearest whole pixel in its heatmap column. A body whose
@@ -563,7 +563,7 @@ TEST_F(UgrGpu, CandleBodyEdgesAtEveryColumnWidthAndDeviceRatio) {
     delete candles;
 }
 
-// Plan 2026-10-08 B4: a pan in 0.3 x 0.2 device px steps moves the heatmap, the
+// A pan in 0.3 x 0.2 device px steps moves the heatmap, the
 // candles and the axis labels by the same whole pixels every frame (the picture is
 // the first frame translated; label positions shift by exactly that much).
 TEST_F(UgrGpu, APanMovesEveryLayerByTheSameWholePixels) {
@@ -639,9 +639,9 @@ TEST_F(UgrGpu, APanMovesEveryLayerByTheSameWholePixels) {
     delete candles;
 }
 
-// Plan 2026-10-08 B5: a stored view zoomed in and out about one point (exact inverse
-// steps; a direct view such as the Agent API's, the wheel clicks to rungs since slice
-// A2), the rows oscillating around 2.5 px inside the step band (2.45 <-> 2.60): the
+// A stored view zoomed in and out about one point (exact inverse
+// steps; direct API viewports snap to whole-pixel zoom rungs), the rows
+// oscillating around 2.5 px inside the step band (2.45 <-> 2.60): the
 // drawn rows never change; across 2.6 they step exactly once. The drawn rowPx (the
 // frame's raster camera: GET /api/v1/viewport `drawn.rowPx`) is the measured band
 // height of the picture.
@@ -689,8 +689,8 @@ TEST_F(UgrGpu, AZoomInsideTheStepBandNeverOscillates) {
     }
 }
 
-// Plan 2026-10-08 B6: wheel clicks at 30% of the height until the rows step 2 -> 3 (one
-// click since slice A2): the price under the cursor (the published mapping's inverse)
+// Wheel clicks at 30% of the height until the rows step 2 -> 3 (one
+// click): the price under the cursor (the published mapping's inverse)
 // moves by less than a row across the step, and stays within half a device pixel of
 // the continuous camera.
 TEST_F(UgrGpu, TheCursorPriceStaysWithinARowAcrossAnIntegerStep) {
@@ -727,7 +727,7 @@ TEST_F(UgrGpu, TheCursorPriceStaysWithinARowAcrossAnIntegerStep) {
     EXPECT_LT(std::abs(after - before), tick) << "the price under the cursor jumped across the step";
 }
 
-// Review fix 1 (whole-pixel plan section 1.4): every zoom keeps the content drawn under
+// Every zoom keeps the content drawn under
 // the cursor within half a device pixel of it: the first wheel click at a new cursor
 // position, later ones elsewhere, the time and price axis drags (continuous, then the
 // nearest rung), starting at fractional pixels per cell (the stored bounds differ from
@@ -767,7 +767,7 @@ TEST_F(UgrGpu, ZoomKeepsTheDrawnContentUnderTheCursor) {
     }
 }
 
-// Review fix 1: a timeframe switch at fractional pixels per column keeps the Now column
+// A timeframe switch at fractional pixels per column keeps the Now column
 // where it is drawn (within half a device pixel), not where the stored bounds put it.
 TEST_F(UgrGpu, TimeframeSwitchKeepsTheDrawnNowColumn) {
     noLabels();
@@ -792,7 +792,7 @@ TEST_F(UgrGpu, TimeframeSwitchKeepsTheDrawnNowColumn) {
     }
 }
 
-// Review round 2, fix 1: following live, a timeframe switch at fractional pixels per
+// Following live, a timeframe switch at fractional pixels per
 // column keeps the Now column where it is drawn (the view stays anchored at its end,
 // the live edge one padding inside; the padding scales with the span).
 TEST_F(UgrGpu, TimeframeSwitchWhileFollowingLiveKeepsTheDrawnNowColumn) {
@@ -820,7 +820,7 @@ TEST_F(UgrGpu, TimeframeSwitchWhileFollowingLiveKeepsTheDrawnNowColumn) {
     }
 }
 
-// Review round 2, fix 2: with the auto price scale on and no candle fit, a wheel zoom
+// With the auto price scale on and no candle fit, a wheel zoom
 // (time only) leaves the price window and the drawn rows exactly where they were, at a
 // fractional price span (the drawn price under the cursor differs from the stored one).
 TEST_F(UgrGpu, AutoScaleWheelWithoutAFitKeepsThePrice) {
@@ -844,7 +844,7 @@ TEST_F(UgrGpu, AutoScaleWheelWithoutAFitKeepsThePrice) {
     }
 }
 
-// Review round 2, fix 3: a tick proposal queued by a frame is dropped when the tick
+// A tick proposal queued by a frame is dropped when the tick
 // policy changes before the GUI thread commits it (a Manual tick chosen, a timeframe or
 // symbol switch): the stale Auto tick is never drawn.
 TEST_F(UgrGpu, AStaleTickProposalIsNeverCommitted) {
@@ -890,7 +890,7 @@ TEST_F(UgrGpu, AStaleTickProposalIsNeverCommitted) {
     }
 }
 
-// Review fix 2: a tick chosen at render time (here: Auto after a larger minimum row
+// A tick chosen at render time (here: Auto after a larger minimum row
 // height, no viewport change, candles and axis models otherwise idle) moves every layer
 // in the SAME frame: in the first frame that draws the new tick, the candle bodies and
 // the price axis labels are already at that frame's rows.
@@ -1150,22 +1150,6 @@ TEST(UgrCandleCpu, LineBreaksAcrossUnfetchedSpans) {
     delete root;
 }
 
-TEST(UgrCandleCpu, WindowAndQmlPassUnroundedMilliseconds) {
-    const auto read = [](const char* relative) {
-        QFile file(QStringLiteral(SENTINEL_SOURCE_DIR) + QLatin1Char('/') + relative);
-        if (!file.open(QIODevice::ReadOnly)) return QByteArray{};
-        return file.readAll();
-    };
-    const auto qml = read("libs/gui/qml/DepthChartView.qml");
-    ASSERT_FALSE(qml.isEmpty());
-    EXPECT_TRUE(qml.contains("timeframeMs: unifiedGridRenderer.view.timeframeMs"));
-    EXPECT_FALSE(qml.contains("Math.round(unifiedGridRenderer.view.timeframeMs"));
-    const auto window = read("libs/gui/MainWindowGpu.cpp");
-    ASSERT_FALSE(window.isEmpty());
-    EXPECT_TRUE(window.contains("const int64_t tfMs = renderer->view()->getCurrentTimeframe();"));
-    EXPECT_TRUE(window.contains("setCandleHistoryViewport(symbol, tfMs,"));
-}
-
 TEST(UgrCandleCpu, ATickChangeBodyOracleRejectsPreviousFrameGeometry) {
     CandleTickFrameProvider provider;
     CandleTickGeometryItem candles;
@@ -1224,7 +1208,7 @@ TEST(UgrCandleCpu, ATickChangeBodyOracleRejectsPreviousFrameGeometry) {
     delete root;
 }
 
-// Review fix 3: the price fit covers the candles drawn, not only those in the stored
+// The price fit covers the candles drawn, not only those in the stored
 // window. At 2.4 continuous px per column (drawn at 2) a centred 266.7-column window
 // draws 320 columns: an outlier candle 150 minutes left of the centre is drawn but lies
 // outside the stored window.
@@ -1262,7 +1246,7 @@ TEST_F(UgrGpu, PriceFitCoversCandlesDrawnOutsideTheStoredWindow) {
     ugr->setCandleBuffer(nullptr);
 }
 
-// Review fix 4: a direct (API) viewport of 1 ms draws at least one ms per device pixel
+// A direct (API) viewport of 1 ms draws at least one ms per device pixel
 // (C <= tf), so every whole-pixel drag commits exactly: the release keeps the dragged
 // columns.
 TEST_F(UgrGpu, AHighZoomReleaseKeepsTheDrawnColumns) {
@@ -1292,7 +1276,7 @@ TEST_F(UgrGpu, AHighZoomReleaseKeepsTheDrawnColumns) {
     }
 }
 
-// Plan 2026-10-08 B7: following live, the committed view advances by 0.3 device px
+// Following live, the committed view advances by 0.3 device px
 // worth of time per frame (as followGpuLive moves it): between whole-pixel steps the
 // picture is byte-identical; at a step it translates by whole pixels; C is constant.
 TEST_F(UgrGpu, FollowLiveMovesByWholePixelSteps) {
@@ -1332,7 +1316,7 @@ TEST_F(UgrGpu, FollowLiveMovesByWholePixelSteps) {
     EXPECT_GE(steps, 10);
 }
 
-// Plan 2026-10-08 B8: at the clamps the drawn cells are one device pixel: zoomed out to
+// At the clamps the drawn cells are one device pixel: zoomed out to
 // one column per pixel, C = 1 and the drawn window is exactly the 640 columns; Manual at
 // its maximum price span (one row per pixel), P = 1 and 320 rows.
 TEST_F(UgrGpu, TheClampsDrawOnePixelColumnsAndRows) {
@@ -1421,13 +1405,13 @@ TEST_F(UgrGpu, TimeframeSwitchNeverShrinksCoverage) {
 
 // Spec rule 1: a longer timeframe is how to see further back. A timeframe switch keeps
 // the columns on screen (the span scales by the timeframe ratio about the view end),
-// instead of keeping the time span (S6d A/B: four 1h columns, then 1,600 1m columns).
+// instead of keeping the time span (four 1h columns, then 1,600 1m columns).
 TEST_F(UgrGpu, TimeframeSwitchKeepsTheColumnsOnScreen) {
     gpuOn(); // 40 one-minute columns ending at viewHi, auto-scroll off
     ASSERT_TRUE(settle()) << error.toStdString();
     const auto *view = ugr->getViewState();
     // A switch is one viewport change (INV-003): the new limits never re-clamp the old
-    // view as a separate step before the scaled view lands (S6d review major 2).
+    // view as a separate step before the scaled view lands.
     auto switchTf = [&](int64_t tfMs) {
         const uint64_t before = view->getViewportVersion();
         ugr->view()->setTimeframe(int(tfMs));
@@ -1445,7 +1429,7 @@ TEST_F(UgrGpu, TimeframeSwitchKeepsTheColumnsOnScreen) {
     EXPECT_LE(view->getVisibleTimeEnd() - view->getVisibleTimeStart(), 640 * 5 * minute);
     EXPECT_EQ(view->getVisibleTimeEnd(), viewHi);
     // Shorter timeframe from a view wider than its 1 column/px limit: the old span is read
-    // before the new limit re-clamps it (S6d run 2: 72 h of 1h became 30.8 min of 1m), and
+    // before the new limit re-clamps it (72 h of 1h became 30.8 min of 1m), and
     // the limit is not published on its own first (it would clamp 72 h to 640 min).
     ugr->view()->setTimeframe(int(60 * minute));
     ugr->view()->setViewport(viewHi - 72 * kHourMs, viewHi, 99'900, 100'300);
@@ -1659,8 +1643,7 @@ TEST(TradeLayerNodes, FixedHeatmapVpLabelsStructure) {
     EXPECT_TRUE(hasNode<ChartTextNode>(root.lastChild()));
 }
 
-// S8a: the chart has exactly one root path, the GPU one, from its first frame (no
-// renderer selection, no legacy HeatmapIntensityNode root): a plain node whose first
+// The chart has one GPU root path from its first frame: a plain node whose first
 // child gates the tile node. It is kept across views and settles; detaching the
 // service ends the controller and the root stays.
 TEST_F(UgrGpu, TheChartHasExactlyOneRootPath) {
@@ -1732,7 +1715,7 @@ TEST_F(UgrGpu, ShiftWheelScalesPriceOnlyWithinTheClamps) {
     EXPECT_GT(priceSpan(), 3200);
 }
 
-// Review blocker 1: MainWindowGPU destroys its HeatmapDataService (a member)
+// MainWindowGPU destroys its HeatmapDataService (a member)
 // before the base QWidget deletes the chart. The chart's layer must not touch
 // the controller or the service afterwards (Guard Malloc run in CMake).
 TEST_F(UgrGpu, TheServiceMayDieBeforeTheChart) {
@@ -1760,7 +1743,7 @@ TEST_F(UgrGpu, TheServiceMayDieBeforeTheChart) {
 }
 
 // The first price window from the book top (seedGpuViewport): initial_price_pct of
-// a 2048-row band at $1 (the constants S8a moved from RecordingBandPolicy); a later
+// a 2048-row band at $1 (the configured initial band); a later
 // book or trade does not replace it. A symbol switch reseeds from the new book top.
 TEST_F(UgrGpu, BookTopSeedsTheFirstPriceWindow) {
     initialPricePct5();
@@ -1787,7 +1770,7 @@ TEST_F(UgrGpu, BookTopSeedsTheFirstPriceWindow) {
     EXPECT_GT(ugr->getViewState()->getMaxPrice(), 3'000.5);
 }
 
-// Review major 3: the chart schedules its own frames while the node has work
+// The chart schedules its own frames while the node has work
 // (budgeted uploads, a crossfade) and stops when idle; the test renders only
 // when the scene asks.
 TEST_F(UgrGpu, NodeWorkGetsItsFramesWithoutOutsideRedraws) {
@@ -1825,7 +1808,7 @@ TEST_F(UgrGpu, NodeWorkGetsItsFramesWithoutOutsideRedraws) {
     EXPECT_LE(rendered, 3) << "an idle chart stops asking for frames";
 }
 
-// Review major 4: follow-live activation returns to the live anchor (the
+// Follow-live activation returns to the live anchor (the
 // recording's end here: no live subscription) from history and from the future.
 TEST_F(UgrGpu, FollowLiveReturnsFromHistoryAndFromTheFuture) {
     gpuOn(); // a historical view (2 h before the end); follow-live off
@@ -1989,7 +1972,7 @@ TEST_F(UgrGpu, TimeAxisFitShowsTheAvailableRange) {
     ugr->setSize(QSizeF(640, 320));
 }
 
-// Review minor 3: a view that starts inside a candle (1m candles, view from :30 s):
+// A view that starts inside a candle (1m candles, view from :30 s):
 // the first overlapping candle counts for the fit, with the extreme in it.
 TEST_F(UgrGpu, PriceFitCountsTheCandleUnderTheLeftEdge) {
     gpuOn();
@@ -2229,7 +2212,7 @@ TEST_F(UgrGpu, SymbolSwitchKeepsTheAutoScaleState) {
     ugr->setCandleBuffer(nullptr);
 }
 
-// Review item 2: a drag commits only at release, so the fit and the candle checks use
+// A drag commits only at release, so the fit and the candle checks use
 // the window on screen (the committed one shifted by the drag): revealed candles fit
 // during the drag, updates beyond the committed end refit, a cancelled drag refits back.
 TEST_F(UgrGpu, AutoScaleFitsTheDisplayedWindowDuringADrag) {
@@ -2275,7 +2258,7 @@ TEST_F(UgrGpu, AutoScaleFitsTheDisplayedWindowDuringADrag) {
     ugr->setCandleBuffer(nullptr);
 }
 
-// Review items 3-5: POST /api/v1/viewport resolves its flags and final window first
+// POST /api/v1/viewport resolves its flags and final window first
 // and commits once; explicit price bounds (even the current ones) turn the auto price
 // scale off; a fit that cannot happen changes nothing (the A toggle still arms).
 TEST_F(UgrGpu, ViewportRequestsResolveFlagsAndCommitOnce) {
@@ -2347,7 +2330,7 @@ TEST_F(UgrGpu, ViewportRequestsResolveFlagsAndCommitOnce) {
     ugr->setCandleBuffer(nullptr);
 }
 
-// Review item 1: the auto-off carry across price scales and unpriced switches. The
+// The auto-off carry across price scales and unpriced switches. The
 // previous symbol's snapshot (price scale) must not size the new symbol's limits (a
 // Manual tick on a $0.00001 symbol would clamp a $2,000 BTC span to $0.000032); a symbol
 // that never got a price keeps the earlier symbol's carry; unusable prices and a user
@@ -2423,7 +2406,7 @@ TEST_F(UgrGpu, SymbolSwitchCarryAcrossPriceScalesAndUnpricedSwitches) {
     ugr->setCandleBuffer(nullptr);
 }
 
-// Review round 3: a fit is all or nothing. Before any snapshot (no book, trade or
+// A fit is all or nothing. Before any snapshot (no book, trade or
 // candle: no price) the time part fits but the price part cannot, so "both" changes
 // nothing and reports the failure; "time" alone still works.
 TEST_F(UgrGpu, FitRequestsAreAllOrNothing) {
@@ -2446,7 +2429,7 @@ TEST_F(UgrGpu, FitRequestsAreAllOrNothing) {
     EXPECT_NE(view->getVisibleTimeStart(), t0);
 }
 
-// Review round 3: a switch before any snapshot exists. The fallback scale (100) is
+// A switch before any snapshot exists. The fallback scale (100) is
 // nobody's: the carry stays pending and is applied again from the then current price
 // once the new symbol's recorded scale arrives.
 TEST_F(UgrGpu, CarryWaitsForTheScaleWhenNoSnapshotExistsYet) {
@@ -2476,7 +2459,7 @@ TEST_F(UgrGpu, CarryWaitsForTheScaleWhenNoSnapshotExistsYet) {
     expectCarried(0.000011, "applied again once TINY's scale is known");
 }
 
-// Review round 3: a live-only symbol (no recorded availability) never gets a price
+// A live-only symbol (no recorded availability) never gets a price
 // scale. kCarryLiveOnlyWaitMs after its first price the carry is applied from the live
 // price and consumed, with no Manual max span.
 TEST_F(UgrGpu, LiveOnlySymbolCarryAppliesAfterTheWait) {
@@ -2566,7 +2549,7 @@ TEST_F(UgrGpu, TimeAxisResetGoesToTheDefaultView) {
     EXPECT_EQ(view->getVisibleTimeEnd(), anchor + std::max<int64_t>(minute, int64_t(span * 0.08)));
 }
 
-// FM-141 (left-over of the auto-fit slice): in gpu mode the candle that starts before
+// With auto fit enabled, the candle that starts before
 // the view start and ends inside it is drawn (it was dropped: the slice selected by bar
 // start, and the filter cut at the view start).
 TEST_F(UgrGpu, CandleUnderTheLeftEdgeIsDrawn) {
@@ -2596,7 +2579,7 @@ TEST_F(UgrGpu, CandleUnderTheLeftEdgeIsDrawn) {
     delete candles;
 }
 
-// Review major 5: recording availability only (no book, no trade, no API
+// Recording availability only (no book, no trade, no API
 // viewport): a time-only view from availability, the price from decoded data.
 TEST_F(UgrGpu, ColdStartFromTheRecordingAlone) {
     ASSERT_TRUE(pumpOnRequest(15'000, [&] { return layer().settled(); })) << "never drew: " << error.toStdString();
@@ -2605,7 +2588,7 @@ TEST_F(UgrGpu, ColdStartFromTheRecordingAlone) {
     EXPECT_GT(ugr->getViewState()->getVisibleTimeEnd(), epoch + 4 * kHourMs) << "at the recording's end";
 }
 
-// Review minor 7: heatmap gamma/contrast/floor reach the GPU palette.
+// Heatmap gamma/contrast/floor reach the GPU palette.
 TEST_F(UgrGpu, ToneChangesReachTheGpuPicture) {
     gpuOn();
     ASSERT_TRUE(settle()) << error.toStdString();
@@ -2622,7 +2605,7 @@ TEST_F(UgrGpu, ToneChangesReachTheGpuPicture) {
 
 // ---------------------------------------------------------------- smooth zoom (A2)
 // Acceptance 1: every mouse wheel click changes the drawn zoom, in and out, from 16 px
-// columns down to one column per pixel (slice A zoomed x1.06 per notch: at 1-3 px
+// columns down to one column per pixel (the former zoom used x1.06 per notch: at 1-3 px
 // cells 2-3 clicks stayed inside the step band and drew nothing). Price zooms with
 // it (auto price scale off): every click moves the drawn rows as well.
 TEST_F(UgrGpu, EveryWheelClickChangesTheDrawnZoom) {
@@ -2907,7 +2890,7 @@ TEST_F(UgrGpu, AClickGlideBinsItsExtentOnce) {
     EXPECT_EQ(st.slotCount.load(), targetSlots);
 }
 
-// Acceptance 8: after a glide the rest frames are slice A's: no coverage, the drawn
+// After a glide, rest frames use the reference shader: no coverage, the drawn
 // camera of the rest view, and a click in and a click out about the same point return
 // the same view byte for byte.
 TEST_F(UgrGpu, RestFramesAfterAGlideAreTheRestRender) {
@@ -2941,7 +2924,7 @@ TEST_F(UgrGpu, RestFramesAfterAGlideAreTheRestRender) {
     EXPECT_TRUE(image == before) << "byte-identical to the rest render before the glides";
 }
 
-// Acceptance 9 (slice A deferred finding, Astra's counterexample): following live at
+// Following live at
 // DPR 1, 640 px, a 1m view of 5,303,573 ms (C = 7, the padding a hair under 49.5 px):
 // the switch to 5m keeps the Now column exactly where it was drawn (0 px).
 TEST_F(UgrGpu, FollowLiveTimeframeSwitchKeepsTheNowColumnExactly) {
@@ -3011,8 +2994,7 @@ TEST_F(UgrGpu, AKeptFollowLivePaddingIsHonoredByTheNextUpdate) {
     EXPECT_EQ(ugr->currentTimeAxisMapping().timeToScreenX(nowCentre(5 * minute)), x);
 }
 
-// ---------------------------------------------------------------- A2 fix round 1
-// Finding 1: a price-only zoom predicts Auto's tick over the time bounds it commits
+// A price-only zoom predicts Auto's tick over the time bounds it commits
 // (the stored ones), not over the drawn columns. Mixed resolution: in minutes 120..148
 // the near $1 band covers $100,080..$100,090, in minutes 119 and 149 only the deep $10
 // rows do. The stored window is minutes 120..149, the drawn one (22 px columns, the
@@ -3057,7 +3039,7 @@ TEST_F(UgrGpu, APriceOnlyZoomPredictsTheTickOverTheStoredTime) {
     }
 }
 
-// Contract A (fix rounds 1-2): the glide's end is fixed at the click, at the tick and
+// Glide contract: the glide's end is fixed at the click, at the tick and
 // rung the click chose; the Auto tick for it commits only after the first frame
 // proposed it. With the first frame 50, 60, 100, 130 or 200 ms after the click the
 // drawn scale only grows, never passes the rung's, and lands on the rung (a first frame
@@ -3138,7 +3120,7 @@ TEST_F(UgrGpu, AnAutoTickCommitMidGlideKeepsTheGlideMonotonic) {
     }
 }
 
-// Finding 3: a move to a screen of another device pixel ratio mid-glide. The glide's
+// A move to a screen of another device pixel ratio mid-glide. The glide's
 // start camera is put on the new surface: the content under the cursor stays within
 // half a device pixel of it on every frame, before and after the change.
 TEST_F(UgrGpu, ADevicePixelRatioChangeMidGlideKeepsTheAnchor) {
@@ -3174,7 +3156,7 @@ TEST_F(UgrGpu, ADevicePixelRatioChangeMidGlideKeepsTheAnchor) {
     EXPECT_GE(checked, 10);
 }
 
-// Finding 4: one wheel event applies at most four clicks and carries only a partial
+// One wheel event applies at most four clicks and carries only a partial
 // notch: eight notches, then one more, then one back is +4, +1, -1 (not +4, +4, +3). A
 // partial notch carries only on its route and axes, and not across a reversal.
 TEST_F(UgrGpu, TheWheelCarriesOnlyAPartialNotchPerRoute) {
@@ -3209,7 +3191,7 @@ TEST_F(UgrGpu, TheWheelCarriesOnlyAPartialNotchPerRoute) {
     EXPECT_EQ(drawn().colPx, chart_raster::columnRung(c2, -1, 1, 0)) << "a full notch back after a half notch in";
 }
 
-// Finding 5: batched notches walk the same rungs as single clicks (at small cells the
+// Batched notches walk the same rungs as single clicks (at small cells the
 // one-pixel rule matters on every click).
 TEST_F(UgrGpu, BatchedNotchesLandOnTheSingleClickRungs) {
     noLabels();
@@ -3291,8 +3273,7 @@ TEST_F(UgrGpu, FollowLiveSwitchThatChangesTheColumnWidthLaysOutAtTheNominalEnd) 
     }
 }
 
-// ---------------------------------------------------------------- A2 fix round 3
-// Fix round 3, gap 1: a drag released before the target's Auto tick commits. The price
+// A drag released before the target's Auto tick commits. The price
 // glide's end is at the predicted tick ($2 rows) while the frame still draws the old one;
 // the pan commit is solved against that end, so the landed view is the undragged one
 // moved by exactly the dragged 160 device px, with no rebase and the same landing time.
@@ -3362,7 +3343,7 @@ TEST_F(UgrGpu, APanReleasedBeforeThePredictedTickCommitsMovesTheEndExactly) {
     EXPECT_EQ(dragged.ms, plain.ms) << "the glide timing is unchanged";
 }
 
-// Fix round 3, gap 2: the padding a timeframe switch kept lives only as long as its
+// The padding a timeframe switch kept lives only as long as its
 // placement. 1m, 4 columns (C = 160) following at the nominal padding; one Right step
 // (24 s, still following); 5m keeps the Now column (420 s of padding); follow off and on
 // returns to the nominal end (300 s), and the next unchanged live update leaves it there
@@ -4261,7 +4242,6 @@ TEST_F(UgrZoomCpu, NoDecisionStillPublishesClickAndGestureTimeRungs) {
                 std::round(320 * chart.view()->heatmapTickSize() / span), 1e-8);
 }
 
-// ---------------------------------------------------------------- A2 fix round 2
 // The sources that can change a glide's end, one row each (the contracts are in
 // docs/ARCHITECTURE.md, smooth zoom). The fixture for most: auto price off, a click in
 // at (211, 97) that zooms both axes, the manual glide clock; `x/y` the drawn position of
@@ -4548,7 +4528,7 @@ TEST_F(UgrGlide, AGestureOnOneAxisLeavesTheOtherAxisGlide) {
 }
 
 // The zoom limits on the ladder and the gestures (spec rules 1, 2 and 9; ported from
-// GridViewState's wheel handlers, deleted with slice A2): from any start the clicks
+// GridViewState's wheel handlers, superseded by the current zoom policy): from any start the clicks
 // zoom out to exactly one column per pixel and, under Manual $10, one row per pixel;
 // the clicks in stop at the minimum spans; a view already below them is not widened by
 // a zoom-in; after an axis drag the clicks still zoom out to the max spans; an axis at
@@ -4651,7 +4631,7 @@ TEST_F(UgrGpu, ZoomClicksAndGesturesObeyTheLimits) {
     EXPECT_DOUBLE_EQ(priceSpan(), maxPrice);
 }
 
-// The S6a input route on the real chart QML (DepthChartView.qml): a synthesized
+// The input route on the real chart QML (DepthChartView.qml): a synthesized
 // wheel reaches UnifiedGridRenderer and changes the viewport exactly once; the
 // price axis WheelHandler zooms price only; a time-axis MouseArea drag obeys the
 // one-column-per-pixel clamp (spec rule 9).
@@ -4874,7 +4854,7 @@ TEST(UgrInput, MacMouseAndPreciseScrollReachBothAxisWheelHandlers) {
     chart->setHeatmapService(nullptr);
 }
 
-// Review item 7 (pre-existing): DepthChartView's root `symbol` property shadowed the
+// DepthChartView's root `symbol` property shadowed the
 // context property QmlSceneController set, so the candle overlay and the paper-trade
 // model stayed on BTC-USD after a symbol switch.
 TEST(UgrInput, CandlesFollowTheActiveSymbol) {

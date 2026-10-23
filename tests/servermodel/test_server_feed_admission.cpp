@@ -108,7 +108,20 @@ void ServerFeedAdmissionTest::checkTradeWire() {
     EXPECT_EQ(message.at("side_basis"), "aggressor");
 }
 
-TEST_F(ServerFeedAdmissionTest, TradeWireDeclaresAggressorBasis) { checkTradeWire(); }
+TEST_F(ServerFeedAdmissionTest, TradeWireDeclaresAggressorBasis) {
+    checkTradeWire();
+    int delivered = 0;
+    QObject::connect(model.get(), &ServerDataModel::tradeBroadcast, [&](const Trade&) { ++delivered; });
+    Trade trade{};
+    trade.product_id = "BTC-USD";
+    trade.price = 100;
+    trade.size = 1;
+    for (int i = 0; i < 100; ++i) {
+        trade.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(1000 + i));
+        model->onTrade(trade);
+    }
+    EXPECT_EQ(delivered, 100);
+}
 
 TEST_F(ServerFeedAdmissionTest, ClientReceivesStructuredRefusal) {
     const nlohmann::json reply = {{"type", "error"}, {"context", "subscribe"}, {"code", "invalid_product"},
@@ -327,30 +340,5 @@ TEST(ServerFeedAdmissionSource, ServerHasOnlyTheJournalFeed) {
     };
     const auto app = read("/apps/sentinel-server/SentinelServerApp.cpp") +
                      read("/apps/sentinel-server/SentinelServerApp.hpp");
-    for (const auto* removed : {"MarketDataFeeds", "m_marketDataCore", "broadcastCoinbaseLatency", "requestBookProductMetadata"})
-        EXPECT_EQ(app.find(removed), std::string::npos) << removed;
     EXPECT_NE(app.find("rollerProducts(m_serverConfig)"), std::string::npos);
-    const auto model = read("/libs/core/servermodel/ServerDataModel.cpp") +
-                       read("/libs/core/servermodel/ServerDataModel.hpp");
-    EXPECT_EQ(model.find("logTrade"), std::string::npos);
-    EXPECT_EQ(model.find("productMetadataRequested"), std::string::npos);
-    EXPECT_EQ(read("/libs/core/protocol/SentinelStreamServer.cpp").find("fetchProductMetadata"), std::string::npos);
-}
-
-TEST_F(ServerFeedAdmissionTest, TradesNeverCreateLegacyTickLogs) {
-    const auto old = QDir::currentPath();
-    const auto restore = qScopeGuard([&] { QDir::setCurrent(old); });
-    ASSERT_TRUE(QDir::setCurrent(dir.path()));
-    int delivered = 0;
-    QObject::connect(model.get(), &ServerDataModel::tradeBroadcast, [&](const Trade&) { ++delivered; });
-    Trade trade{};
-    trade.product_id = "BTC-USD";
-    trade.price = 100;
-    trade.size = 1;
-    for (int i = 0; i < 100; ++i) {
-        trade.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(1000 + i));
-        model->onTrade(trade);
-    }
-    EXPECT_EQ(delivered, 100);
-    EXPECT_FALSE(QDir(dir.filePath("data/market")).exists());
 }

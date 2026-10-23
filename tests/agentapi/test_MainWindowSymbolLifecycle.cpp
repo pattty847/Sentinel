@@ -49,8 +49,15 @@
 #include <QtQml/qqml.h>
 #include <gtest/gtest.h>
 #include <limits>
+#include <utility>
 
 struct MainWindowSymbolLifecyclePeer {
+    static std::unique_ptr<IGridDataSource> replaceSource(MainWindowGPU& window, std::unique_ptr<IGridDataSource> source) {
+        return std::exchange(window.m_dataSource, std::move(source));
+    }
+    static void historyReady(MainWindowGPU& window) {
+        window.m_connected = window.m_userSubscribed = window.m_serverConfigReady = true;
+    }
     static AgentApi::ViewportSnapshot viewport(const MainWindowGPU& window) { return window.chartAgentPort().snapshot(window.agentApiMetadata()); }
     static UnifiedGridRenderer* renderer(const MainWindowGPU& window) { return window.m_qmlController->getUnifiedGridRenderer(); }
     static void clearChartScene(MainWindowGPU& window) { window.m_qquickView->setSource(QUrl{}); }
@@ -90,6 +97,61 @@ QStandardItem* watchItem(WatchlistDock* rail, const QString& symbol) {
     for (int i = 0; i < rows->rowCount(); ++i)
         if (rows->item(i)->data(WatchlistDock::TickerRole).toString() == symbol) return rows->item(i);
     return nullptr;
+}
+
+class CandleViewportSource final : public IGridDataSource {
+public:
+    struct Request { QString symbol; int64_t timeframeMs; qint64 startMs; qint64 endMs; };
+    std::vector<Request> requests;
+    void subscribe(const QString&) override {}
+    void unsubscribe(const QString&) override {}
+    void requestFootprintHistory(const QString&, int64_t, int64_t, int) override {}
+    void requestTpoHistory(const QString&, int64_t, int, int64_t, int, const QString&) override {}
+    void cancelTpoHistory(const QString&, const QString&) override {}
+    void setCandleHistoryViewport(const QString& symbol, int64_t tfMs, qint64 start, qint64 end) override {
+        requests.push_back({symbol, tfMs, start, end});
+    }
+    void sendTradeCommand(const trading::TradeCommand&) override {}
+    void sendAlgoCommand(const std::string&, const std::string&, const std::string&, const trading::AlgoParams&) override {}
+    const LiveOrderBook& getDirectLiveOrderBook(const std::string&) const override { return book_; }
+private:
+    LiveOrderBook book_;
+};
+
+TEST(UgrCandleCpu, WindowAndQmlPassUnroundedMilliseconds) {
+    MainWindowGPU window;
+    auto* renderer = MainWindowSymbolLifecyclePeer::renderer(window);
+    ASSERT_TRUE(renderer);
+    auto* overlay = renderer->parentItem()->findChild<CandlestickOverlayItem*>();
+    ASSERT_TRUE(overlay);
+    auto source = std::make_unique<CandleViewportSource>();
+    auto* captured = source.get();
+    auto original = MainWindowSymbolLifecyclePeer::replaceSource(window, std::move(source));
+    const auto restore = qScopeGuard([&] {
+        MainWindowSymbolLifecyclePeer::replaceSource(window, std::move(original));
+    });
+    MainWindowSymbolLifecyclePeer::historyReady(window);
+    renderer->parentItem()->setSize({1000, 600});
+    renderer->view()->setAutoPriceScale(false);
+    renderer->view()->enableAutoScroll(false);
+    // Both a supported subsecond interval and a non-whole-second value catch
+    // conversion through rounded seconds in either the window or QML binding.
+    for (const int tfMs : {100, 1501, 1000}) {
+        captured->requests.clear();
+        renderer->view()->setTimeframe(tfMs);
+        renderer->view()->setViewport(1'800'000'000'123, 1'800'000'120'456, 100, 200);
+        ASSERT_FALSE(captured->requests.empty()) << tfMs;
+        for (const auto& request : captured->requests) {
+            EXPECT_EQ(request.symbol, "BTC-USD");
+            EXPECT_EQ(request.timeframeMs, tfMs);
+        }
+        const auto& request = captured->requests.back();
+        EXPECT_EQ(request.startMs, renderer->view()->getVisibleTimeStart());
+        EXPECT_EQ(request.endMs, renderer->view()->getVisibleTimeEnd());
+        EXPECT_GT(request.endMs, request.startMs);
+        EXPECT_EQ(overlay->timeframeMs(), tfMs);
+        EXPECT_EQ(renderer->parentItem()->property("currentActiveTimeframe").toInt(), tfMs);
+    }
 }
 
 TEST(ChartAgentPin, StartupTimeframeNotificationOrder) {

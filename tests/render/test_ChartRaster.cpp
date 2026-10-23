@@ -297,7 +297,7 @@ TEST(ChartRaster, A7_AReleaseCommitsExactlyWhatTheDragDrew) {
     }
 }
 
-// Review fix 4: a 1 ms stored window (any direct viewport is accepted) draws at least
+// A 1 ms stored window (any direct viewport is accepted) draws at least
 // one ms per device pixel (C <= tf), and every whole-pixel drag then has an exact
 // whole-ms commit.
 TEST(ChartRaster, A7_HighZoomDragsStillCommitExactly) {
@@ -505,7 +505,7 @@ TEST(ChartRasterZoom, AGlideKeepsTheAnchorAndLandsOnTheRestCamera) {
     EXPECT_NEAR(moved.yDev(p) - half.yDev(p), -3, 1e-9);
 }
 
-// Fix round 1, finding 5: batched clicks walk the same rungs as single clicks, in both
+// Batched clicks walk the same rungs as single clicks, in both
 // directions, at every small size (the one-pixel rule applies per click).
 TEST(ChartRasterZoom, BatchedClicksWalkTheSingleClickLadder) {
     const TickAt fixed = [](double) { return 10.0; };
@@ -525,7 +525,7 @@ TEST(ChartRasterZoom, BatchedClicksWalkTheSingleClickLadder) {
     EXPECT_EQ(columnRung(3, 4, 1, 5), 5) << "a batch stops at the limit";
 }
 
-// Fix round 1, finding 3: a glide whose start was drawn at another device pixel ratio
+// A glide whose start was drawn at another device pixel ratio
 // (a move to another screen) puts the start on the target's surface: the anchor keeps
 // its logical position (it is not interpolated across two device coordinate systems).
 TEST(ChartRasterZoom, AGlideAcrossADevicePixelRatioChangeKeepsTheAnchor) {
