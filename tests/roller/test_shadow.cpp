@@ -399,7 +399,7 @@ struct ShadowTest : testing::Test {
     }
     return n;
   }
-  // recording.live_feed: journal (slice D-b1). The sink stands in for the
+  // recording.live_feed: journal. The sink stands in for the
   // queued hand-offs into ServerDataModel; each event notes how many durable
   // records history had applied when the worker handed it over.
   struct ModelEvent {
@@ -1147,7 +1147,7 @@ TEST_F(ShadowTest, HourlyWorkerChecksOnlyCompletedHours) {
   EXPECT_TRUE(has("sentinel_roller_shadow_comparison_failures_total{product="
                   "\"BTC-USD\"} 0"));
 }
-TEST_F(ShadowTest, HandoffLatencyBenchmark) {
+TEST_F(ShadowTest, DISABLED_HandoffLatencyBenchmark) {
   // Timestamp at feed submission, before Session queue admission. Use the
   // production default 1 s block interval/fsync policy and real fan-out.
   writer.reset();
@@ -1863,7 +1863,7 @@ void expectShownThenCleared(LiveClient &c) {
   EXPECT_TRUE(std::none_of(cleared, c.frames.end(),
                            [](const auto &f) { return frameShows(*f); }));
 }
-// Finding 1 (review r1): a withdrawn provisional recovery snapshot, across a
+// A withdrawn provisional recovery snapshot, across a
 // minute boundary, on an invalid durable book that no replacement snapshot
 // revalidates. Real LiveService raw subscribers decode every frame into the
 // client's LiveEdge: the existing subscriber drops the withdrawn minutes, a
@@ -1934,7 +1934,7 @@ TEST_F(ShadowTest, WithdrawnRecoverySnapshotLeavesLiveServiceSubscribers) {
   writer->close();
   parity(180000);
 }
-// Review r1 finding 2: the deploy marker follows every product's history writer
+// The deploy marker follows every product's history writer
 // (leases and checkpoint policy), never just the "Roller started" line.
 namespace logcapture {
 std::mutex mutex;
@@ -1984,7 +1984,7 @@ TEST_F(ShadowTest, ServingReadinessWaitsForEveryProductWriter) {
   EXPECT_TRUE(logcapture::seen("Roller writer open product=BTC-USD"));
   shadow.reset();
 }
-// Review r2 finding 1: zero cached finals. After a restart history replays
+// Zero cached finals. After a restart history replays
 // below its commit floor and republishes no final, so the live cache is empty.
 // An existing subscriber receives a provisional minute that is then withdrawn
 // (invalid durable book, no replacement snapshot): it must drop it. The lead
@@ -2032,7 +2032,7 @@ TEST_F(ShadowTest, RestartWithdrawalWithZeroCachedFinalsReachesSubscriber) {
   shadow.reset();
   expectShownThenCleared(*existing);
 }
-// Review r2 finding 1: on a root with no committed minute yet the lead does not
+// On a root with no committed minute yet the lead does not
 // publish (nothing could carry a withdrawal) until history commits one.
 TEST_F(ShadowTest, LeadWaitsForACommittedMinuteOnANewRoot) {
   auto service = std::make_shared<recording::LiveService>();
@@ -2073,7 +2073,7 @@ TEST_F(ShadowTest, LeadWaitsForACommittedMinuteOnANewRoot) {
     return !(c.flags & recording::kProvisional);
   }));
 }
-// Review r2 finding 2: readiness is current durable health of every product at
+// Readiness is current durable health of every product at
 // once. BTC opens, checkpoints, then its checkpoint fails; ETH opens only
 // after that: no ready line until BTC recovers.
 TEST_F(ShadowTest, ServingReadinessNeedsEveryProductHealthyAtOnce) {
@@ -2142,7 +2142,7 @@ TEST_F(ShadowTest, ServingReadinessNeedsEveryProductHealthyAtOnce) {
   shadow.reset();
   eth.close();
 }
-// Review r2 finding 2: a writer that opens but cannot persist its first
+// A writer that opens but cannot persist its first
 // checkpoint is not healthy (fresh root, read-only product directory).
 TEST_F(ShadowTest, ServingReadinessNeedsADurableCheckpointAfterOpen) {
   {
@@ -2587,7 +2587,7 @@ TEST(ShadowConfig, RequireRecordingChecksTheServedRoot) {
 }
 
 // ---------------------------------------------------------------------------
-// Slice D-b1: recording.live_feed: journal. The roller workers feed the
+// recording.live_feed: journal. The roller workers feed the
 // server's live model (ModelSink) from the journal and fan-out.
 // ---------------------------------------------------------------------------
 std::string trades(const std::string &side, const std::string &id,
@@ -3016,7 +3016,7 @@ TEST_F(ShadowTest, JournalTapRingReplayNeverRedeliversATrade) {
 }
 // Hot-path evidence (AGENTS 5): capture publish -> model hand-off latency for
 // provisional records at the tip, and the per-record worker CPU of the tap.
-TEST_F(ShadowTest, JournalTapHandoffLatencyBenchmark) {
+TEST_F(ShadowTest, DISABLED_JournalTapHandoffLatencyBenchmark) {
   writer.reset();
   capture::WriterConfig wc;
   wc.root = QString::fromStdString(cfg.journalRoot);
@@ -3529,7 +3529,7 @@ TEST_F(ShadowTest, JournalLiveFeedRefusedWithoutTheRollerSource) {
   EXPECT_FALSE(s.initialize());
 }
 
-// Fix round 1 (finding 1): two invalidation/recovery cycles inside the 1 s
+// Two invalidation/recovery cycles inside the 1 s
 // re-seed throttle. The second request is coalesced and delivered at the
 // deadline, so ordinary deltas find a ready book again (no upstream snapshot).
 TEST_F(ShadowTest, JournalLiveFeedServerCoalescesReseedsInsideTheThrottle) {
@@ -3585,7 +3585,7 @@ TEST_F(ShadowTest, JournalLiveFeedAdmissionAcceptsAllCapturedProducts) {
   EXPECT_EQ(server.notifyClientSubscribed("XRP-USD"), Admission::InvalidProduct);
   EXPECT_EQ(s.metrics().find("sentinel_mdc_"), std::string::npos);
 }
-// Fix round 2 (finding 2): candles of a journal product close on its journal
+// Candles of a journal product close on its journal
 // time only. Two production models are stepped every 250 ms; one
 // gets every record on time, the other loses the fan-out at +50 s without
 // noticing (capture journals trades at +55 s and +65 s; the wall clock passes

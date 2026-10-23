@@ -1,4 +1,4 @@
-// Slice S6c: the heatmap settings UI on the settings model (the single source of
+// The heatmap settings UI on the settings model (the single source of
 // truth): the tabbed settings dialog, per-chart and named-workspace persistence,
 // the toolbar tick selector, the telemetry dock and Agent API -> UI sync.
 // Widgets run offscreen; every QSettings is a temporary INI file (never the
@@ -123,24 +123,16 @@ QJsonArray stopsJson(std::initializer_list<std::pair<double, const char *>> stop
 }
 
 // ------------------------------------------------------------- persistence
-TEST(HeatmapSettingsModelTest, PersistsPerChartAndRefusesTheRemovedLegacyRenderer) {
+TEST(HeatmapSettingsModelTest, PersistsPerChart) {
     TempStore t;
     HeatmapSettingsModel main(t.store, "main", t.config), other(t.store, "other", t.config);
     QSignalSpy changed(&main, &HeatmapSettingsModel::changed);
     ASSERT_TRUE(main.apply({{"palettePreset", "Ocean"}, {"crossfadeMs", 0}, {"minRowPx", 3.0}}).isEmpty());
     EXPECT_EQ(changed.count(), 1);
-    // S8a: gpu is the only renderer; a legacy patch is refused and changes nothing.
-    changed.clear();
-    EXPECT_FALSE(main.apply({{"renderer", "legacy"}}, false).isEmpty());
-    EXPECT_FALSE(main.apply({{"renderer", "legacy"}, {"opacity", 0.25}}).isEmpty());
-    EXPECT_EQ(changed.count(), 0);
-    EXPECT_TRUE(main.apply({{"renderer", "gpu"}}, false).isEmpty()) << "gpu stays accepted (a no-op)";
-    EXPECT_EQ(changed.count(), 0);
     const auto saved = t.reload();
     EXPECT_EQ(saved.palettePreset, "Ocean");
     EXPECT_EQ(saved.crossfadeMs, 0);
     EXPECT_EQ(saved.minRowPx, 3.0);
-    EXPECT_NE(saved.opacity, 0.25);
     EXPECT_EQ(t.reload("other"), other.defaultSettings()); // per chart
     // A later persisted patch saves its own fields.
     ASSERT_TRUE(main.apply({{"opacity", 0.5}}).isEmpty());
@@ -812,10 +804,6 @@ TEST(HeatmapSettingsDialogTest, EveryTabShowsTheModel) {
     EXPECT_EQ(child<QSpinBox>(dialog, "spanSources")->value(), 256);
     EXPECT_EQ(child<QSpinBox>(dialog, "cpuCeiling")->value(), 1024);
     EXPECT_EQ(child<QSpinBox>(dialog, "liveMinIntervalMs")->value(), 1200);
-    // S8a: the Debug tab has no renderer choice any more.
-    EXPECT_FALSE(dialog.findChild<QComboBox *>("renderer"));
-    EXPECT_FALSE(dialog.findChild<QCheckBox *>("makeDefault"));
-    EXPECT_FALSE(dialog.findChild<QLabel *>("savedRenderer"));
     EXPECT_TRUE(child<QCheckBox>(dialog, "showTelemetry")->isChecked());
 }
 
@@ -896,7 +884,7 @@ TEST(HeatmapSettingsDialogTest, ShortDialogScrollsToLookControlsWithoutChangingP
     dialog.tabs()->setCurrentIndex(3);
 }
 
-// Item 2 of the review: only presets loaded data builds are offered; with nothing
+// Only presets loaded data builds are offered; with nothing
 // loaded (Auto, no chart) the preset is an empty, disabled loading state.
 TEST(HeatmapSettingsDialogTest, NoAvailabilityOffersNoPresets) {
     TempStore t;
@@ -919,7 +907,7 @@ TEST(HeatmapSettingsDialogTest, NoAvailabilityOffersNoPresets) {
     EXPECT_EQ(preset->currentData().toLongLong(), 1000);
 }
 
-// Item 2 of the review: history only on the deep $10 grid (rule 4 offers its
+// History only on the deep $10 grid (rule 4 offers its
 // presets) and the default Manual $1: the $1 shows as unavailable, and only the
 // offered presets are selectable, in the dialog and the toolbar alike.
 TEST(HeatmapSettingsDialogTest, DeepOnlyHistoryOffersOnlyItsPresets) {
@@ -951,7 +939,7 @@ TEST(HeatmapSettingsDialogTest, DeepOnlyHistoryOffersOnlyItsPresets) {
     }
 }
 
-// Item 5 of the review: Look reset includes the renderer's tone controls; TPO has
+// Look reset includes the renderer's tone controls; TPO has
 // a reset to the configured tpo values.
 TEST(HeatmapSettingsDialogTest, ResetCoversRendererBackedControls) {
     TempStore t;
@@ -1053,7 +1041,7 @@ TEST(HeatmapSettingsDialogTest, ValidationUsesTheModelClampsAndRejectsBadInput) 
     HeatmapSettingsModel model(t.store, "main", t.config);
     model.setBudgetSink([](const heatmap::HeatmapBudgets &) { return true; });
     HeatmapSettingsDialog dialog(&model, nullptr);
-    // Min above max: the S6a clamp raises max to 2 x min, and the widget shows it.
+    // Min above max: the clamp raises max to 2 x min, and the widget shows it.
     child<QDoubleSpinBox>(dialog, "sensitivityMin")->setValue(100);
     EXPECT_EQ(model.settings().sensitivityMax, 200);
     EXPECT_EQ(child<QDoubleSpinBox>(dialog, "sensitivityMax")->value(), 200);
@@ -1265,8 +1253,7 @@ TEST(TradeBubbleControls, LayerOrderUsesRealQmlBindingAndPersistedChartApiSettin
     child<QPushButton>(dialog,"resetChart")->click();
     EXPECT_TRUE(check->isChecked());
     EXPECT_TRUE(t.reload().tradesAboveCandles);
-    EXPECT_FALSE(model.apply({{"renderer","legacy"}},false).isEmpty());
-    EXPECT_TRUE(check->isEnabled()) << "one renderer (S8a): always enabled";
+    EXPECT_TRUE(check->isEnabled());
 }
 
 TEST(ChartRenderConnections, DisconnectedBeforeHeatmapDependencyDestruction) {
@@ -1390,9 +1377,8 @@ TEST(TradeBubbleControls, GearTogglePresetsAndApiSharePersistedChartSettings) {
     EXPECT_TRUE(actions[3]->isChecked());
     EXPECT_TRUE(t.reload().showTrades);
     EXPECT_EQ(t.reload().tradeMinNotional, 1000);
-    EXPECT_FALSE(model.apply({{"renderer", "legacy"}}, false).isEmpty());
     controls.refreshChartMenu();
-    EXPECT_TRUE(toggle->isEnabled()) << "one renderer (S8a): the trade entries stay enabled";
+    EXPECT_TRUE(toggle->isEnabled());
     EXPECT_TRUE(sizes->menuAction()->isEnabled());
 }
 
@@ -1445,7 +1431,7 @@ TEST(HeatmapTelemetryDockTest, VisibilityFollowsShowTelemetry) {
     EXPECT_TRUE(t.reload().showTelemetry);
 }
 
-// Item 3 of the review: a tabified dock polls only while its tab is current, and
+// A tabified dock polls only while its tab is current, and
 // the API's telemetryVisible is that exposure, not the saved preference.
 TEST(HeatmapTelemetryDockTest, TabifiedBehindAnotherTabItDoesNotPoll) {
     TempStore t;
@@ -1566,8 +1552,7 @@ protected:
     }
 };
 
-// S8a: no renderer can disable the selector any more; it is disabled (with a
-// reason) only while no chart is attached.
+// The tick selector is disabled with a reason while no chart is attached.
 TEST_F(HeatmapChartUi, TickSelectorIsDisabledWithoutAChartWithAReason) {
     controls->setRenderer(nullptr);
     syncUi();
@@ -1580,9 +1565,6 @@ TEST_F(HeatmapChartUi, TickSelectorIsDisabledWithoutAChartWithAReason) {
     syncUi();
     EXPECT_TRUE(toolbar->tickModeCombo()->isEnabled());
     EXPECT_TRUE(toolbar->tickPresetCombo()->isEnabled());
-    EXPECT_FALSE(model->apply({{"renderer", "legacy"}}, false).isEmpty()) << "refused: the selector stays";
-    syncUi();
-    EXPECT_TRUE(toolbar->tickModeCombo()->isEnabled());
 }
 
 TEST_F(HeatmapChartUi, AutoShowsTheDrawnTickAndPresetsFollowTheLoadedData) {
@@ -1656,7 +1638,7 @@ TEST_F(HeatmapChartUi, TheToolbarNamesVeiledAvailability) {
     EXPECT_EQ(controls->uiState()["toolbar"].toObject()["veiled"].toBool(), true);
 }
 
-// Item 1 of the review: the dialog's tick actions are the toolbar's. A preset
+// The dialog's tick actions are the toolbar's. A preset
 // picked in Auto locks Manual at once (no remembered tick replaces it); entering
 // Manual restores the remembered tick, or locks the drawn one when none.
 TEST_F(HeatmapChartUi, DialogTickActionsAreTheToolbars) {

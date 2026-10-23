@@ -614,7 +614,7 @@ TEST_F(RecorderTest, PublisherFailureDoesNotLoseCommittedMinuteOrHourRollup) {
     EXPECT_EQ(read(3600000).size(), 1);
 }
 
-// Fable review 2026-10-01: an invalid book's clock moves but nothing integrates.
+// An invalid book's clock moves but nothing integrates.
 // Republishing the same open-minute record every interval bumped the live
 // revision at 2 Hz, so the live worker re-sent and every GUI recomposed it.
 TEST_F(RecorderTest, InvalidBookPublishesUnchangedOpenMinuteOnlyOnce) {
@@ -665,7 +665,7 @@ TEST_F(RecorderTest, InvalidBookPublishesUnchangedOpenMinuteOnlyOnce) {
     EXPECT_EQ(pubs.back()->observedMs, 500);
 }
 
-// Fable review 2026-10-01: a bad_alloc while building an open-minute record
+// A bad_alloc while building an open-minute record
 // reached run(), counted a disk error and invalidated every symbol's book.
 TEST_F(RecorderTest, OpenPublicationAllocationFailureInvalidatesNoBook) {
     size_t opens = 0, finals = 0;

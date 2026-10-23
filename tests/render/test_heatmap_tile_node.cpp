@@ -1,4 +1,4 @@
-// Slice S5c: the production HeatmapTileNode on the controller's SpanSet, and the
+// The production HeatmapTileNode on the controller's SpanSet, and the
 // bin kernel's fill pass. GPU cases run on the selected QRhi backend
 // (SENTINEL_RHI_BACKEND; lab::HeadlessRhi / OffscreenQuick) and skip cleanly
 // when it cannot create a QRhi with compute: a skipped case is no result.
@@ -98,7 +98,7 @@ uint64_t uploadResident(QRhi *rhi, HeatmapGpuBinner &binner, const std::shared_p
 // Direct display-pass readback: upload known packed cells so the floor-path
 // checks exercise the production shaders independently of price binning. Cells are
 // row-major, top row first (`columns` per row). The fragment shader defaults to the
-// production one; the slice A reference (tests/render/shaders) checks the rest path.
+// production one; the reference shader (tests/render/shaders) checks the rest path.
 class DisplayReadback {
 public:
     explicit DisplayReadback(QRhi *rhi) : rhi_(rhi) {}
@@ -425,8 +425,8 @@ TEST(HeatmapDisplayRaster, EveryDrawnRowHasTheSameHeight) {
 }
 
 // ---------------------------------------------------------------- smooth zoom (A2)
-// Whole-pixel smooth zoom (slice A2): at rest the display shader draws the single cell
-// under each pixel centre exactly as slice A did; during a zoom transition it covers
+// Whole-pixel smooth zoom: at rest the display shader draws the single cell
+// under each pixel centre exactly as the reference shader does; during a zoom transition it covers
 // the pixel footprint in rows AND columns with coverage in linear light (gamma 2.2).
 double decodeSrgb(int byte) {
     const double c = byte / 255.0;
@@ -443,7 +443,7 @@ double decodedLight(const QImage &image, int x0, int y0, int x1, int y1) {
 }
 
 // Rest bytes: the production shader with coverage gamma 0 renders exactly what the
-// slice A shader (tests/render/shaders/heatmap_display_slice_a.frag) renders, for every
+// reference shader (tests/render/shaders/heatmap_display_slice_a.frag) renders, for every
 // cell state, codes on both sides, whole and fractional mappings, clamped and not.
 TEST(HeatmapDisplayZoom, RestPathRendersTheSliceAShaderBytes) {
     Headless gpu;
@@ -693,11 +693,11 @@ TEST(HeatmapTileNodeScene, DrawsTheCellStatesAndPansWithoutRebinning) {
     EXPECT_NE(loadA, QColor(Qt::black));
 }
 
-// S6b palette parity (owner decision 4): the node draws a valid cell with the
+// Palette parity: the node draws a valid cell with the
 // chart's palette texture and the legacy tone mapping, so a preset gives the same
 // colour for the same recording code as heatmap_intensity.frag. The reference is
 // legacyRecordingColor on the shared palette image (the colours of the retired
-// legacy renderer, deleted in S8a, which built the same image with paletteTexels).
+// palette texture used to build the reference image).
 TEST(HeatmapTileNodeScene, PresetPaletteMatchesTheLegacyColourForEachCode) {
     if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty()) GTEST_SKIP() << "GPU case skipped: " << why.toStdString();
     Scene scene;
@@ -972,7 +972,7 @@ TEST(HeatmapTileNodeScene, SceneGraphInvalidationAfterTheFirstFrameIsClean) {
     }
 }
 
-// Review fix 1: the QRhi dies first (scene graph invalidation). Its cleanup
+// The QRhi dies first (scene graph invalidation). Its cleanup
 // traversal runs the nodes' callbacks and the binners' callbacks in hash order;
 // no callback may destroy an object that owns a callback (the binner), or its
 // destructor removes a callback from the hash the QRhi is iterating. Several
@@ -993,7 +993,7 @@ TEST(HeatmapTileNodeScene, QRhiDestroyedFirstLeavesTheCleanupTraversalIntact) {
     nodes.clear(); // after the QRhi: must not call into it
 }
 
-// Review fix 2: the cap is enforced before a frame records uploads, and never
+// The cap is enforced before a frame records uploads, and never
 // releases a source the same frame uploaded into (its commands still reference
 // the buffers). Here one frame uploads a prefetch span, then the visible bin
 // pushes residency over the cap.
@@ -1023,7 +1023,7 @@ TEST(HeatmapTileNodeScene, CapEvictionNeverReleasesWhatTheFrameUploaded) {
     EXPECT_TRUE(st.complete.load());
 }
 
-// Review fix 3: a visible span whose sources all failed terminally is resolved,
+// A visible span whose sources all failed terminally is resolved,
 // not pending: a timeframe change finishes (that span draws loading) instead of
 // holding the old picture forever.
 TEST(HeatmapTileNodeScene, ASpanWhoseSourcesAllFailedDoesNotHoldATransition) {
@@ -1050,7 +1050,7 @@ TEST(HeatmapTileNodeScene, ASpanWhoseSourcesAllFailedDoesNotHoldATransition) {
     EXPECT_FALSE(scene.host->stats->complete.load()) << "but the view is not complete";
 }
 
-// Review fix 4: a raised GPU cap is new free bytes even when nothing moves: the
+// A raised GPU cap is new free bytes even when nothing moves: the
 // node reports it, so suppressed prefetch can come back.
 TEST(HeatmapTileNodeScene, ARaisedCapIsReportedWithNothingMoving) {
     if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty()) GTEST_SKIP() << "GPU case skipped: " << why.toStdString();

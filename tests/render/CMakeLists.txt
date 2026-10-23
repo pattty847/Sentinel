@@ -27,14 +27,14 @@ target_link_libraries(test_TimeAxisMapping PRIVATE
 add_test(NAME TimeAxisMappingTests COMMAND test_TimeAxisMapping)
 set_tests_properties(TimeAxisMappingTests PROPERTIES LABELS "render")
 
-# Whole-pixel chart mapping (raster camera), plan 2026-10-08 checks A1-A8.
+# Whole-pixel chart mapping and raster camera behaviour.
 add_executable(test_ChartRaster test_ChartRaster.cpp)
 target_include_directories(test_ChartRaster PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
 target_link_libraries(test_ChartRaster PRIVATE GTest::gtest sentinel_gui_lib Qt6::Core Qt6::Gui)
 add_test(NAME ChartRasterTests COMMAND test_ChartRaster)
 set_tests_properties(ChartRasterTests PROPERTIES LABELS "render")
 
-# S6b: GridViewState clamps (spec rules 1, 2, 9): wheel, axis drags and direct viewports.
+# GridViewState clamps: wheel, axis drags and direct viewports.
 add_executable(test_GridViewState test_GridViewState.cpp)
 target_include_directories(test_GridViewState PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
 target_link_libraries(test_GridViewState PRIVATE GTest::gtest sentinel_gui_lib Qt6::Core Qt6::Gui)
@@ -112,7 +112,7 @@ target_link_libraries(test_TradeOverlay PRIVATE sentinel_gui_lib GTest::gtest_ma
 add_test(NAME TradeOverlayTests COMMAND test_TradeOverlay)
 set_tests_properties(TradeOverlayTests PROPERTIES LABELS "render;servermodel")
 
-# S4 spike guard: compute recorded in QSGRenderNode::prepare() inside a real
+# Compute recorded in QSGRenderNode::prepare() inside a real
 # scene graph (headless via QQuickRenderControl). Skips without a Metal device.
 find_package(Qt6 REQUIRED COMPONENTS GuiPrivate Quick)
 add_executable(test_qsg_compute_spike test_qsg_compute_spike.cpp)
@@ -130,7 +130,7 @@ qt_add_shaders(test_qsg_compute_spike spike_shaders
 add_test(NAME QsgComputeSpikeTests COMMAND test_qsg_compute_spike)
 set_tests_properties(QsgComputeSpikeTests PROPERTIES LABELS "render")
 
-# S4: GPU price binning parity vs heatmap::binColumn and grid/threshold unit
+# GPU price binning parity vs heatmap::binColumn and grid/threshold unit
 # tests. GPU cases skip without a compute-capable QRhi;
 # SENTINEL_HEATMAP_REAL_PARITY=1 adds the real-recording comparison.
 add_executable(test_heatmap_gpu_binner test_heatmap_gpu_binner.cpp)
@@ -149,12 +149,12 @@ qt_add_shaders(test_heatmap_gpu_binner test_unguarded_kernel
     OUTPUTS heatmap_bin_unguarded.comp.qsb
 )
 add_test(NAME HeatmapGpuBinnerTests COMMAND test_heatmap_gpu_binner)
-# S5c: HeatmapTileNode on the SpanSet (retention, cap, capacity reports, QRhi
+# HeatmapTileNode on the SpanSet (retention, cap, capacity reports, QRhi
 # loss, never-blank transitions) and the bin kernel's fill pass vs the CPU oracle.
 add_executable(test_heatmap_tile_node test_heatmap_tile_node.cpp ${CMAKE_SOURCE_DIR}/libs/gui/render/ChartRaster.cpp)
 target_include_directories(test_heatmap_tile_node PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_heatmap_tile_node PRIVATE sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::Quick)
-# Whole-pixel smooth zoom (slice A2): the display shader as slice A shipped it, the
+# Whole-pixel smooth zoom: the reference display shader and the
 # reference for the production shader's rest path (byte-identical).
 qt_add_shaders(test_heatmap_tile_node slice_a_display_shader
     GLSL "440"
@@ -173,22 +173,22 @@ target_link_libraries(test_heatmap_palette PRIVATE sentinel_heatmap_gpu GTest::g
 target_compile_definitions(test_heatmap_palette PRIVATE SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME HeatmapPaletteTests COMMAND test_heatmap_palette)
 set_tests_properties(HeatmapPaletteTests PROPERTIES LABELS "render;heatmap")
-# S5L-c: the live edge in the node (draw clip E/L vs the composed oracle, partial
+# The live edge in the node (draw clip E/L vs the composed oracle, partial
 # column, rollover coverage, held/fading retention, no buffer churn, disconnect).
 add_executable(test_heatmap_live_node test_heatmap_live_node.cpp)
 target_include_directories(test_heatmap_live_node PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_heatmap_live_node PRIVATE sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::Quick)
 add_test(NAME HeatmapLiveNodeTests COMMAND test_heatmap_live_node)
 set_tests_properties(HeatmapLiveNodeTests PROPERTIES LABELS "render;heatmap")
-# S5c: the lab chart on the production path over a synthetic HMC2 recording.
+# The lab chart on the production path over a synthetic HMC2 recording.
 add_executable(test_lab_item test_lab_item.cpp)
 target_include_directories(test_lab_item PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_lab_item PRIVATE sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::Quick)
 add_test(NAME LabItemTests COMMAND test_lab_item)
 set_tests_properties(LabItemTests PROPERTIES LABELS "render;heatmap;lab")
-# S6b: the main chart (UnifiedGridRenderer) on the GPU heatmap path over a
+# The main chart (UnifiedGridRenderer) on the GPU heatmap path over a
 # synthetic HMC2 recording: settles, column/candle alignment, tf switch coverage,
-# QRhi recreation, TPO hosting, renderer flips, clamps, legacy palette parity and
+# QRhi recreation, TPO hosting, clamps, palette parity and
 # the Agent API input route on the real DepthChartView.qml.
 find_package(Qt6 REQUIRED COMPONENTS QuickPrivate)
 add_executable(test_ugr_gpu test_ugr_gpu.cpp)
@@ -201,7 +201,7 @@ target_link_libraries(test_chart_view_trace PRIVATE sentinel_gui_lib sentinel_la
 target_compile_definitions(test_chart_view_trace PRIVATE SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME ChartViewTraceTests COMMAND test_chart_view_trace)
 set_tests_properties(ChartViewTraceTests PROPERTIES LABELS "render" TIMEOUT 300)
-# S0b: Metal frame-hash golden (golden/frames.json). Exit 77 (skip) only off the owner's Mac.
+# Metal frame-hash golden (golden/frames.json). Exit 77 (skip) only off the owner's Mac.
 add_executable(test_chart_golden test_chart_golden.cpp)
 target_include_directories(test_chart_golden PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_chart_golden PRIVATE sentinel_gui_lib sentinel_lab_lib Qt6::GuiPrivate Qt6::QuickPrivate Qt6::Quick)
@@ -212,15 +212,15 @@ set_tests_properties(ChartGoldenTests PROPERTIES LABELS "render;heatmap" TIMEOUT
 add_test(NAME CandleOverlayCpuTests COMMAND test_ugr_gpu "--gtest_filter=UgrCandleCpu.*")
 set_tests_properties(CandleOverlayCpuTests PROPERTIES LABELS "render;fast" TIMEOUT 30)
 
-add_test(NAME UgrGpuTests COMMAND test_ugr_gpu)
+add_test(NAME UgrGpuTests COMMAND test_ugr_gpu "--gtest_filter=-UgrCandleCpu.*")
 set_tests_properties(UgrGpuTests PROPERTIES LABELS "render;heatmap" TIMEOUT 300)
-# Review blocker 1 under Guard Malloc: the data service dies before the chart.
+# Guard Malloc regression: the data service dies before the chart.
 if(APPLE AND EXISTS /usr/lib/libgmalloc.dylib)
     add_test(NAME UgrGpuServiceTeardownGuardMalloc COMMAND test_ugr_gpu "--gtest_filter=UgrGpu.TheServiceMayDieBeforeTheChart")
     set_tests_properties(UgrGpuServiceTeardownGuardMalloc PROPERTIES LABELS "render;heatmap" TIMEOUT 300
                          ENVIRONMENT "DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib")
 endif()
-# S6c: the settings dialog, persistence, the toolbar tick selector, the telemetry
+# The settings dialog, persistence, the toolbar tick selector, the telemetry
 # dock and API -> UI sync on the settings model (offscreen widgets, temporary INI
 # settings, the synthetic HMC2 recording for the GPU chart cases).
 find_package(Qt6 REQUIRED COMPONENTS Test Widgets)
@@ -259,7 +259,7 @@ target_link_libraries(test_TpoProfileModel PRIVATE sentinel_gui_lib GTest::gtest
 add_test(NAME TpoProfileModelTests COMMAND test_TpoProfileModel)
 set_tests_properties(TpoProfileModelTests PROPERTIES LABELS "render")
 
-# S7a cell oracle and local-recording benchmark (QCoreApplication, no GPU runs).
+# Cell oracle and local-recording benchmark (QCoreApplication, no GPU runs).
 add_executable(test_heatmap_cell_query test_heatmap_cell_query.cpp)
 target_link_libraries(test_heatmap_cell_query PRIVATE sentinel_heatmap_gpu GTest::gtest_main)
 add_test(NAME HeatmapCellQueryTests COMMAND test_heatmap_cell_query)
@@ -268,7 +268,7 @@ set_tests_properties(HeatmapCellQueryTests PROPERTIES LABELS "render;heatmap")
 add_executable(heatmap_cell_query_bench heatmap_cell_query_bench.cpp)
 target_link_libraries(heatmap_cell_query_bench PRIVATE sentinel_heatmap_gpu)
 
-# S5b CPU controller: compile only CPU sources, link QtCore (no GPU required).
+# compile only CPU sources, link QtCore (no GPU required).
 add_executable(test_heatmap_source_controller
     test_heatmap_source_controller.cpp
     test_heatmap_live_client.cpp
@@ -283,21 +283,21 @@ target_link_libraries(test_heatmap_source_controller PRIVATE sentinel_core GTest
 add_test(NAME HeatmapSourceControllerTests COMMAND test_heatmap_source_controller)
 set_tests_properties(HeatmapSourceControllerTests PROPERTIES LABELS "render;heatmap" TIMEOUT 45)
 
-# S6a service lifecycle, ordering, settings; CPU only, no recording/live dependency.
+# Service lifecycle, ordering, settings; CPU only, no recording/live dependency.
 add_executable(test_heatmap_plumbing test_heatmap_plumbing.cpp)
 target_include_directories(test_heatmap_plumbing PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
 target_link_libraries(test_heatmap_plumbing PRIVATE sentinel_lab_lib GTest::gtest_main Qt6::Core)
 add_test(NAME HeatmapPlumbingTests COMMAND test_heatmap_plumbing)
 set_tests_properties(HeatmapPlumbingTests PROPERTIES LABELS "render;heatmap" TIMEOUT 30)
 
-# S7b: liquidity label layout (pure CPU, the bundled MSDF font) and label text.
+# Liquidity label layout (pure CPU, the bundled MSDF font) and label text.
 add_executable(test_heatmap_label_layout test_heatmap_label_layout.cpp)
 target_include_directories(test_heatmap_label_layout PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_heatmap_label_layout PRIVATE sentinel_gui_lib GTest::gtest Qt6::Gui)
 add_test(NAME HeatmapLabelLayoutTests COMMAND test_heatmap_label_layout)
 set_tests_properties(HeatmapLabelLayoutTests PROPERTIES LABELS "render;heatmap")
 
-# S7b + chart UI: GPU chart labels (gate, cancel/retry, tick/crossfade, symbol
+# GPU chart labels (gate, cancel/retry, tick/crossfade, symbol
 # switch, lifecycle), toolbar modes, range slider, chart menu and Chart tab.
 add_executable(test_chart_ui test_chart_ui.cpp)
 target_include_directories(test_chart_ui PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
@@ -371,10 +371,6 @@ target_include_directories(test_ChartLayers PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui
 target_link_libraries(test_ChartLayers PRIVATE GTest::gtest_main sentinel_gui_lib)
 add_test(NAME ChartLayersTests COMMAND test_ChartLayers)
 set_tests_properties(ChartLayersTests PROPERTIES LABELS "render")
-add_test(NAME TradeLayerNodeOrderTests COMMAND test_ugr_gpu "--gtest_filter=TradeLayerNodes.*")
-set_tests_properties(TradeLayerNodeOrderTests PROPERTIES LABELS "render" TIMEOUT 60)
-add_test(NAME ChartLateEnableGpuTests COMMAND test_ugr_gpu "--gtest_filter=UgrGpu.LateEnableKeepsRegistryOrderAndTextLast")
-set_tests_properties(ChartLateEnableGpuTests PROPERTIES LABELS "render;heatmap" TIMEOUT 60)
 
 add_executable(test_ChartLookSettings test_chart_look_settings.cpp)
 target_include_directories(test_ChartLookSettings PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)

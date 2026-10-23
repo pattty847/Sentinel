@@ -445,8 +445,8 @@ TEST(Roller, RefusesUnownedHmc2AndConfiguredRecorderRoots) {
     EXPECT_EQ(invoke(root/"unowned"),1);EXPECT_EQ(contents(marker),"do not touch");
 }
 
-// A6: the history publisher and its publication mode are not checkpoint
-// policy. The slice A..C BTC-USD product root keeps its hash, so existing roots
+// The history publisher and its publication mode are not checkpoint
+// policy. The existing BTC-USD product root keeps its hash, so existing roots
 // reopen under the serving path (a changed hash throws "checkpoint policy/range mismatch").
 TEST(Roller, PublisherKeepsSliceACheckpointPolicyHash) {
     constexpr uint64_t SliceABtcHash=18293455670244139256ull; // /Volumes/T7/sentinel-data/hmc2/BTC-USD/roller.json
@@ -549,7 +549,7 @@ TEST(Roller, RollCliProductLeaseMayWriteRollerServedRoot) {
     EXPECT_FALSE(recording::Hmc2Store::readRange(root/"hmc2","BTC-USD","near",60'000,Epoch,Epoch+240'000).empty());
 }
 
-// Review r1 finding 3: the served root comes from the merged server config
+// The served root comes from the merged server config
 // (config/server_config.yaml, then the private config/.server_config.yaml).
 TEST(Roller, RollCliRefusesRollerRootFromSplitOverride) {
     QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/roots-XXXXXX"));ASSERT_TRUE(temp.isValid());
