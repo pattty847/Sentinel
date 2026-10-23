@@ -209,7 +209,7 @@ TEST(AgentApiWalls, GpuPeriodTickAndPersistenceMetadata) {
     snapshot.data.unknownRows = true;
     snapshot.data.walls.push_back({100, 95, 100, false, 2, 195, true, 1.5, 100, 150, 2});
     const auto data = wallsJson(snapshot)["data"].toObject();
-    EXPECT_EQ(data["renderer"], "gpu"); EXPECT_EQ(data["tick"], 5);
+    EXPECT_EQ(data["tick"], 5);
     EXPECT_EQ(data["range"].toObject()["from_ms"].toDouble(), 100);
     EXPECT_TRUE(data["unknownRows"].toBool());
     const auto wall = data["walls"].toArray().first().toObject();
@@ -493,9 +493,9 @@ TEST(AgentApiHeatmap, NewRoutesAndStrictInputKinds) {
 }
 TEST(AgentApiHeatmap, SettingsPartialTypesAndGradientValidation) {
     const auto check = [](const char *json) { return validateControl({"POST", "/api/v1/heatmap/settings", {}, json}, {}); };
-    EXPECT_EQ(check(R"({"renderer":"gpu","manualTick":250,"opacity":0.5})").body.heatmapSettings.size(), 3);
+    EXPECT_EQ(check(R"({"manualTick":250,"opacity":0.5})").body.heatmapSettings.size(), 2);
     EXPECT_EQ(check(R"({"opacity":-2})").status, 200); // numeric limits clamp in the settings model
-    for (const char *bad : {R"({"renderer":"bad"})", R"({"tickMode":"AUTO"})", R"({"manualTick":1.5})",
+    for (const char *bad : {R"({"tickMode":"AUTO"})", R"({"manualTick":1.5})",
         R"({"opacity":null})", R"({"showTelemetry":1})", R"({"unknown":1})", R"({"palettePreset":"bad"})",
         R"({"bidGradient":[{"position":0,"color":"red"},{"position":1,"color":"#ffffff"}]})",
         R"({"askGradient":[{"position":0.5,"color":"#000000"},{"position":1,"color":"#ffffff"}]})",
@@ -516,14 +516,14 @@ TEST(AgentApiHeatmap, CandleSettingsAreExposedAndValidated) {
 
 TEST(AgentApiHeatmap, ProcessOnlySettingsFlagIsStrictAndRemovedFromThePatch) {
     const auto check = [](const char *json) { return validateControl({"POST", "/api/v1/heatmap/settings", {}, json}, {}); };
-    auto c = check(R"({"renderer":"gpu","persist":false})");
+    auto c = check(R"({"opacity":0.4,"persist":false})");
     ASSERT_EQ(c.status, 200);
     EXPECT_FALSE(c.body.persistHeatmapSettings);
     EXPECT_EQ(c.body.heatmapSettings.size(), 1);
-    EXPECT_EQ(c.body.heatmapSettings["renderer"], "gpu");
+    EXPECT_EQ(c.body.heatmapSettings["opacity"], 0.4);
     EXPECT_TRUE(check(R"({"opacity":0.4})").body.persistHeatmapSettings);
     EXPECT_TRUE(check(R"({"opacity":0.4,"persist":true})").body.persistHeatmapSettings);
-    for (const auto *body : {R"({"persist":false})", R"({"renderer":"gpu","persist":0})", R"({"renderer":"gpu","persist":"false"})"})
+    for (const auto *body : {R"({"persist":false})", R"({"opacity":0.4,"persist":0})", R"({"opacity":0.4,"persist":"false"})"})
         EXPECT_EQ(check(body).status, 422);
 }
 

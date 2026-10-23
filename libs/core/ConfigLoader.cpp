@@ -217,12 +217,6 @@ void parseClientConfig(const std::string& filePath, ClientConfig& cfg) {
     }
 
     if (heatmapNode) {
-        // S8a removed the legacy renderer and its keys (renderer, source, label_px,
-        // client_cache_columns, target_row_px, cell_aspect): an old file still loads.
-        if (const auto renderer = heatmapNode["renderer"];
-            renderer && renderer.IsScalar() && renderer.Scalar() != "gpu")
-            sLog_Warning("Ignored heatmap.renderer: " << renderer.Scalar()
-                         << " (the legacy renderer was removed; gpu is the only renderer)");
         readScalar(heatmapNode, "tick_mode", cfg.heatmap.tickMode);
         readScalar(heatmapNode, "manual_tick", cfg.heatmap.manualTick);
         readScalar(heatmapNode, "min_row_px", cfg.heatmap.minRowPx);

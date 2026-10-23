@@ -142,7 +142,7 @@ TEST_F(HeatmapPlumbing, SettingsRoundTripWorkspaceAndSharedTickMemory) {
     QSettings ini(dir.filePath("test.ini"), QSettings::IniFormat);
     HeatmapSettingsStore store(ini);
     auto s = chartDefaults({});
-    ASSERT_TRUE(applySettingsPatch(s, {{"renderer", "gpu"}, {"tickMode", "manual"}, {"manualTick", 250},
+    ASSERT_TRUE(applySettingsPatch(s, {{"tickMode", "manual"}, {"manualTick", 250},
         {"minRowPx", 3.5}, {"hysteresis", 0.4}, {"crossfadeMs", 0}, {"showBandEdges", true},
         {"palettePreset", "Custom"}, {"bidGradient", QJsonArray{QJsonObject{{"position", 0}, {"color", "#112233"}}, QJsonObject{{"position", 1}, {"color", "#aabbccdd"}}}},
         {"sensitivityMin", 100}, {"sensitivityMax", 1000}, {"opacity", 0.6},
@@ -161,7 +161,6 @@ TEST_F(HeatmapPlumbing, SettingsRoundTripWorkspaceAndSharedTickMemory) {
     EXPECT_EQ(again.load("main", {}), s);
     EXPECT_EQ(again.loadManualTicks().get("BTC-USD", kMinuteMs), 100);
     EXPECT_EQ(again.loadManualTicks().get("BTC-USD", kHourMs), 2500);
-    EXPECT_TRUE(ini.contains("layouts/work/heatmap/main/renderer"));
     EXPECT_TRUE(ini.contains("heatmap/manualTick/BTC-USD/60000"));
 }
 TEST_F(HeatmapPlumbing, DefaultsComeFromYamlAndEveryNumericFieldClamps) {

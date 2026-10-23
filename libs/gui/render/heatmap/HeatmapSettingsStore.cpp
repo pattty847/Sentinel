@@ -104,7 +104,6 @@ HeatmapChartSettings chartDefaults(const ClientHeatmapConfig &c) {
 }
 QJsonObject settingsJson(const HeatmapChartSettings &s) {
     return {
-        {"renderer", "gpu"}, // the constant "gpu" since S8a (the key goes in S8b)
         {"manualTick", qint64(s.manualTick)},
         {"minRowPx", s.minRowPx},
         {"hysteresis", s.hysteresis},
@@ -147,8 +146,6 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
         if (v.isDouble() && (!std::isfinite(v.toDouble()) || std::abs(v.toDouble()) > 9007199254740991.0))
             return "Expected a finite safe number: " + key;
         if (integers.contains(key) && std::floor(v.toDouble()) != v.toDouble()) return "Expected an integer: " + key;
-        if (key == "renderer" && v != "gpu")
-            return "renderer must be gpu (the legacy heatmap renderer was removed)";
         if (key == "tickMode" && v != "auto" && v != "manual") return "tickMode must be auto or manual";
         if (key == "palettePreset" && !palettes.contains(v.toString())) return "Unknown palettePreset";
         if (key == "labelCurrency" && v != "usd" && v != "asset") return "labelCurrency must be usd or asset";

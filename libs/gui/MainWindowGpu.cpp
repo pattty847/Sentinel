@@ -1583,9 +1583,7 @@ QJsonObject MainWindowGPU::agentApiHeatmapSnapshot() const {
     const QJsonValue missing(QJsonValue::Null);
     auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
     const auto* layer = renderer ? renderer->gpuHeatmapLayer() : nullptr;
-    // renderer/activeRenderer: the constant "gpu" since S8a (the fields go in S8b).
-    QJsonObject out{{"renderer", "gpu"}, {"activeRenderer", "gpu"},
-        {"tickMode", s.tickMode == heatmap::TickMode::Auto ? "auto" : "manual"},
+    QJsonObject out{{"tickMode", s.tickMode == heatmap::TickMode::Auto ? "auto" : "manual"},
         {"tickUnits", s.tickMode == heatmap::TickMode::Manual ? QJsonValue(qint64(s.manualTick)) : missing},
         {"offeredPresets", missing}, {"settled", missing}, {"drawnTimeframeMs", missing},
         {"drawnTickUnits", missing}, {"indicatorText", missing}, {"residentBytes", missing},

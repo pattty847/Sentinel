@@ -441,6 +441,5 @@ QJsonObject HeatmapChartControls::uiState() const {
             {"settingsDialogOpen", m_dialog && m_dialog->isVisible()},
             {"budgets", QJsonObject{{"decodedChunkBytes", qint64(b.decodedChunks)},
                                     {"spanSourceBytes", qint64(b.spanSources)},
-                                    {"cpuCeilingBytes", qint64(b.cpuCeiling)}}},
-            {"savedRenderer", "gpu"}}; // the constant "gpu" since S8a (goes in S8b)
+                                    {"cpuCeilingBytes", qint64(b.cpuCeiling)}}}};
 }
