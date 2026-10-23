@@ -16,7 +16,7 @@ Detail belongs in the linked plan or file, not in the item.
 3. **GUI polish** (owner, 2026-10-06):
    - heatmap chunk loading after a timeframe change (1m->15m) or fast zoom-out is too slow for a local server (S6 A/B: 1h settle 509-1297 ms); profile the chunk request path before guessing;
    - put explanatory hover tooltips behind a "learning mode" setting (an order book tooltip covers the chart);
-   - TPO history starts 2026-10-03 although built from REST candles (GUI log: "TPO history budget refusal");
+   - TPO history depth: diagnosed 2026-10-23, not a refusal: the GUI asks for `tpoSessions` (default 5, clamp 1..8 at `TpoOverlayRenderer.cpp:95`) h24 sessions, so it showed back to 10-03 on 10-08. Owner decides: deeper history (raise the clamp and `kMaxHistoryPages`), and whether REST-candle columns before the 24 h trade tape are labelled approximate (INV-039 target) or INV-030/039 are amended. Separate bug: `collectOverlayTrades` fails the whole page with "overlay trade budget exceeded" above 250k trades in a window (seen 10-07/08 on BTC); cap the window or fall back to candle columns instead.
    - inline volume bars on the market chart (only the Stock Chart dock's `CandlestickBatched` has them);
    - heatmap and candles drift apart slightly on wheel zoom-out; both mappings have the same slopes, cause unknown; the owner's note on direction decides the next look (FM-001, INV-004);
    - local-time axis labels: `TimeAxisModel` has a `timezone` property no control sets; `HeatmapGpuLayer.cpp` hard-codes UTC; add a setting and route every time label through one timezone;
