@@ -263,8 +263,8 @@ its existing availability callback replans that pending view.
 
 `HeatmapChartSettings` is a core value type with no GUI types; validation,
 QSettings storage, layout snapshots and the GUI-thread synthetic input adapter
-belong to GUI. Since S8a the chart has one renderer (gpu); the API's renderer
-fields are the constant `"gpu"` until S8b removes them.
+belong to GUI. The chart has one GPU renderer; the API no longer exposes
+renderer selection fields in chart settings, heatmap state, UI state or walls responses.
 
 ### Heatmap tile node (slice S5c)
 

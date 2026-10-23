@@ -163,6 +163,32 @@ TEST_F(HeatmapPlumbing, SettingsRoundTripWorkspaceAndSharedTickMemory) {
     EXPECT_EQ(again.loadManualTicks().get("BTC-USD", kHourMs), 2500);
     EXPECT_TRUE(ini.contains("heatmap/manualTick/BTC-USD/60000"));
 }
+TEST_F(HeatmapPlumbing, RetiredSavedKeyPreservesChartAndWorkspaceSettings) {
+    QTemporaryDir dir;
+    QSettings ini(dir.filePath("test.ini"), QSettings::IniFormat);
+    ini.setValue("heatmap/main/renderer", "gpu");
+    ini.setValue("heatmap/main/tickMode", "manual");
+    ini.setValue("heatmap/main/manualTick", 250);
+    ini.setValue("heatmap/main/opacity", 0.6);
+    ini.setValue("layouts/work/heatmap/main/renderer", "gpu");
+    ini.setValue("layouts/work/heatmap/main/tickMode", "manual");
+    ini.setValue("layouts/work/heatmap/main/manualTick", 500);
+    ini.setValue("layouts/work/heatmap/main/opacity", 0.4);
+    ini.sync();
+    ASSERT_EQ(ini.status(), QSettings::NoError);
+
+    QSettings reread(dir.filePath("test.ini"), QSettings::IniFormat);
+    HeatmapSettingsStore store(reread);
+    auto expected = chartDefaults({});
+    expected.tickMode = TickMode::Manual;
+    expected.manualTick = 250;
+    expected.opacity = 0.6;
+    EXPECT_EQ(store.load("main", {}), expected);
+    expected.manualTick = 500;
+    expected.opacity = 0.4;
+    EXPECT_EQ(store.restoreLayout("work", "main", {}), expected);
+    EXPECT_EQ(store.load("main", {}), expected);
+}
 TEST_F(HeatmapPlumbing, DefaultsComeFromYamlAndEveryNumericFieldClamps) {
     QTemporaryDir dir;
     QFile yaml(dir.filePath("client.yaml"));
