@@ -21,6 +21,9 @@ public:
     void onRootRebuilt() override { renderer.onRootRebuilt(); }
     void updateNodes(const ChartFrame&, LayerNodeContext&) override;
     VolumeProfileRenderer renderer;
+private:
+    std::vector<float> bins_;
+    VolumeProfileState::Snapshot snap_;
 };
 class TpoLayer final : public IChartLayer {
 public:

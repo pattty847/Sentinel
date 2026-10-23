@@ -5,6 +5,7 @@ per-candle SEC signal color overrides, and exposed visible-range properties
 for QML price/time axes.
 */
 #include "CandlestickBatched.hpp"
+#include "CandlePixelGeometry.hpp"
 
 #include <QSGGeometryNode>
 #include <QSGVertexColorMaterial>
@@ -43,6 +44,11 @@ public:
         appendChildNode(bodyNode);
     }
 
+    quint64 revision = 0;
+    float width = 0, height = 0;
+    bool hasGeometry = false;
+    int volCapacity = 0, wickCapacity = 0, bodyCapacity = 0;
+
     QSGGeometryNode*        volNode  = nullptr;
     QSGGeometryNode*        wickNode = nullptr;
     QSGGeometryNode*        bodyNode = nullptr;
@@ -53,6 +59,11 @@ public:
     QSGVertexColorMaterial* wickMaterial = nullptr;
     QSGVertexColorMaterial* bodyMaterial = nullptr;
 };
+
+bool finiteCandle(const CandleData& candle) {
+    return std::isfinite(candle.open) && std::isfinite(candle.high) &&
+           std::isfinite(candle.low) && std::isfinite(candle.close) && std::isfinite(candle.volume);
+}
 
 inline void addQuad(QSGGeometry::ColoredPoint2D*& v,
                     float x0, float y0, float x1, float y1,
@@ -435,21 +446,41 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
     const float w = static_cast<float>(width());
     const float h = static_cast<float>(height());
 
+    if (root->revision == m_geometryRevision && root->width == w && root->height == h) {
+        if (root->hasGeometry) emit renderTimeChanged(timer.nsecsElapsed() / 1.0e6);
+        return root;
+    }
+    root->revision = m_geometryRevision;
+    root->width = w;
+    root->height = h;
+    ++m_geometryRebuilds;
+
+    auto setCount = [&](QSGGeometry* geometry, int& capacity, int count) {
+        if (count > capacity) ++m_geometryAllocations;
+        candle_pixels::setGeometryCount(*geometry, capacity, count);
+    };
     auto clearAll = [&]() {
-        root->volGeometry->allocate(0);
-        root->wickGeometry->allocate(0);
-        root->bodyGeometry->allocate(0);
+        root->hasGeometry = false;
+        setCount(root->volGeometry, root->volCapacity, 0);
+        setCount(root->wickGeometry, root->wickCapacity, 0);
+        setCount(root->bodyGeometry, root->bodyCapacity, 0);
         root->volNode->markDirty(QSGNode::DirtyGeometry);
         root->wickNode->markDirty(QSGNode::DirtyGeometry);
         root->bodyNode->markDirty(QSGNode::DirtyGeometry);
     };
 
-    if (w <= 0.0f || h <= 0.0f || m_candles.empty()) { clearAll(); return root; }
+    if (!std::isfinite(w) || !std::isfinite(h) || w <= 0.0f || h <= 0.0f || m_candles.empty()) {
+        clearAll();
+        return root;
+    }
 
     const int n = static_cast<int>(m_candles.size());
     const float totalWidth = (m_candleWidth + m_candleSpacing) * m_zoomScale;
     const float scaledBody = m_candleWidth * m_zoomScale;
     const float startX = w - static_cast<float>(n) * totalWidth + m_viewOffset;
+
+    if (!std::isfinite(totalWidth) || totalWidth <= 0 || !std::isfinite(startX) ||
+        !std::isfinite(scaledBody)) { clearAll(); return root; }
 
     const int firstVisible = std::max(0, static_cast<int>(std::floor((-startX) / totalWidth)));
     const int lastVisible  = std::min(n - 1, static_cast<int>(std::floor((w - startX) / totalWidth)));
@@ -458,9 +489,13 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
     if (visCount == 0) { clearAll(); return root; }
 
     // ── Price range over visible candles ──────────────────────────────────────
-    double visMin = m_candles[firstVisible].low;
-    double visMax = m_candles[firstVisible].high;
+    int firstValid = firstVisible;
+    while (firstValid <= lastVisible && !finiteCandle(m_candles[firstValid])) ++firstValid;
+    if (firstValid > lastVisible) { clearAll(); return root; }
+    double visMin = m_candles[firstValid].low;
+    double visMax = m_candles[firstValid].high;
     for (int i = firstVisible; i <= lastVisible; ++i) {
+        if (!finiteCandle(m_candles[i])) continue;
         visMin = std::min(visMin, m_candles[i].low);
         visMax = std::max(visMax, m_candles[i].high);
     }
@@ -469,6 +504,7 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
     visMin -= visRange * 0.05;
     visMax += visRange * 0.05;
     visRange = visMax - visMin;
+    if (!std::isfinite(visRange) || visRange <= 0) { clearAll(); return root; }
 
     // ── Layout: top (1-kVolFraction) for candles, bottom kVolFraction for volume ──
     const float candleAreaH = h * (1.0f - kVolFraction);
@@ -482,8 +518,9 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
 
     // ── Volume bar metrics ────────────────────────────────────────────────────
     double maxVol = 0.0;
-    for (int i = firstVisible; i <= lastVisible; ++i)
-        maxVol = std::max(maxVol, m_candles[i].volume);
+    for (int i = firstVisible; i <= lastVisible; ++i) {
+        if (finiteCandle(m_candles[i])) maxVol = std::max(maxVol, m_candles[i].volume);
+    }
     if (maxVol < 1.0) maxVol = 1.0;
 
     const float volAreaTop  = candleAreaH + 2.0f;   // 2px separator gap
@@ -493,9 +530,9 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
     // Hollow bullish bodies need 4 border quads (24 verts) instead of 1 filled (6 verts).
     const bool isHollow = (m_candleStyle == CandleStyle::Hollow);
     const bool isLine   = (m_candleStyle == CandleStyle::Line);
-    root->volGeometry->allocate(visCount * 6);
-    root->wickGeometry->allocate(isLine ? 0 : visCount * 6);
-    root->bodyGeometry->allocate(isHollow ? visCount * 24 : visCount * 6);
+    setCount(root->volGeometry, root->volCapacity, visCount * 6);
+    setCount(root->wickGeometry, root->wickCapacity, isLine ? 0 : visCount * 6);
+    setCount(root->bodyGeometry, root->bodyCapacity, isHollow ? visCount * 24 : visCount * 6);
 
     auto* volVerts  = root->volGeometry->vertexDataAsColoredPoint2D();
     auto* wickVerts = isLine ? nullptr : root->wickGeometry->vertexDataAsColoredPoint2D();
@@ -508,6 +545,13 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
 
     for (int i = firstVisible; i <= lastVisible; ++i) {
         const auto& c = m_candles[i];
+        if (!finiteCandle(c)) {
+            addQuad(volVerts, 0, 0, 0, 0, 0, 0, 0, 0);
+            if (!isLine) addQuad(wickVerts, 0, 0, 0, 0, 0, 0, 0, 0);
+            for (int q = 0; q < (isHollow ? 4 : 1); ++q)
+                addQuad(bodyVerts, 0, 0, 0, 0, 0, 0, 0, 0);
+            continue;
+        }
         const bool bullish = c.close >= c.open;
         const bool hovered = (i == m_hoveredCandle);
 
@@ -523,8 +567,8 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
 
         // ── Body — SEC signal color override ─────────────────────────────────
         QColor bodyColor;
-        const auto it = m_signalOverrides.find(i);
-        if (it != m_signalOverrides.end()) {
+        const auto it = m_signalOverrides.constFind(i);
+        if (it != m_signalOverrides.cend()) {
             switch (it.value()) {
                 case SignalType::Buy:   bodyColor = m_buySignalColor;   break;
                 case SignalType::Sell:  bodyColor = m_sellSignalColor;  break;
@@ -586,8 +630,9 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
     root->wickNode->markDirty(QSGNode::DirtyGeometry);
     root->bodyNode->markDirty(QSGNode::DirtyGeometry);
 
+    root->hasGeometry = true;
     emit renderTimeChanged(timer.nsecsElapsed() / 1.0e6);
     return root;
 }
 
-void CandlestickBatched::markDirty() { update(); }
+void CandlestickBatched::markDirty() { ++m_geometryRevision; update(); }
