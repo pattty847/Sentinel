@@ -1657,11 +1657,13 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
             const bool enabled = it.value().toBool();
             if (it.key() == "tpoLayout") { renderer->tpo()->setTpoLayout(it.value().toString()); continue; }
             if (it.key() == "tpoTheme") { renderer->tpo()->setTpoTheme(it.value().toString()); continue; }
-            if (it.key() == "heatmap") { if (toolbar) emit toolbar->heatmapToggled(enabled); else renderer->layers()->setHeatmapEnabled(enabled); }
-            else if (it.key() == "footprint") { if (toolbar) emit toolbar->footprintToggled(enabled); else renderer->layers()->setFootprintEnabled(enabled); }
-            else if (it.key() == "tpo") { if (toolbar) emit toolbar->tpoToggled(enabled); else renderer->layers()->setTpoEnabled(enabled); }
-            else if (it.key() == "volumeProfile") { if (toolbar) emit toolbar->volumeProfileToggled(enabled); else renderer->layers()->setVolumeProfileEnabled(enabled); }
-            else if (it.key() == "candles" && m_modeController) m_modeController->setCandlesEnabled(enabled);
+            if (it.key() == "candles") {
+                if (m_modeController) m_modeController->setCandlesEnabled(enabled);
+            } else {
+                renderer->layers()->setLayerEnabled(it.key().toStdString(), enabled);
+            }
+            if (enabled && (it.key() == "tpo" || it.key() == "volumeProfile") && m_connected && m_userSubscribed)
+                requestTpoHistoryForSymbol(m_currentSymbol);
         }
         if (toolbar) toolbar->setLayerToggleStates(renderer->layers()->heatmapEnabled(), renderer->layers()->footprintEnabled(),
                                                    renderer->layers()->tpoEnabled(), renderer->layers()->volumeProfileEnabled());

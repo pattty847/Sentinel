@@ -35,24 +35,24 @@ AgentApi::ViewportSnapshot ChartAgentPort::snapshot(AgentApi::Metadata meta) con
 
 AgentApi::ControlApply ChartAgentPort::applyViewport(const AgentApi::ControlBody& body) const {
     AgentApi::ControlApply out;
-        const auto current = snapshot();
-        if (!current.startMs || !current.endMs || !current.priceMin || !current.priceMax) {
-            out.status = 503; out.code = "viewport_unavailable"; out.message = "Chart viewport is not ready";
-            return out;
-        }
-        const QString error = applyViewportRequest(
-            {body.startMs, body.endMs, body.priceMin, body.priceMax, body.followLive, body.autoScale, body.fit});
-        if (error == "fit_unavailable") {
-            out.status = 409; out.code = "fit_unavailable";
-            out.message = "Auto-fit needs known data (a live anchor or a price)";
-            return out;
-        }
-        if (!body.fit.isEmpty()) out.data["fit"] = body.fit;
-        const auto after = snapshot();
-        out.viewportVersion = after.viewportVersion.value_or(0);
-        out.data["viewportVersion"] = QString::number(out.viewportVersion);
-        out.data["followLive"] = after.followLive.value_or(false);
-        out.data["autoScale"] = after.autoScale.value_or(false);
+    const auto current = snapshot();
+    if (!current.startMs || !current.endMs || !current.priceMin || !current.priceMax) {
+        out.status = 503; out.code = "viewport_unavailable"; out.message = "Chart viewport is not ready";
+        return out;
+    }
+    const QString error = applyViewportRequest(
+        {body.startMs, body.endMs, body.priceMin, body.priceMax, body.followLive, body.autoScale, body.fit});
+    if (error == "fit_unavailable") {
+        out.status = 409; out.code = "fit_unavailable";
+        out.message = "Auto-fit needs known data (a live anchor or a price)";
+        return out;
+    }
+    if (!body.fit.isEmpty()) out.data["fit"] = body.fit;
+    const auto after = snapshot();
+    out.viewportVersion = after.viewportVersion.value_or(0);
+    out.data["viewportVersion"] = QString::number(out.viewportVersion);
+    out.data["followLive"] = after.followLive.value_or(false);
+    out.data["autoScale"] = after.autoScale.value_or(false);
     return out;
 }
 

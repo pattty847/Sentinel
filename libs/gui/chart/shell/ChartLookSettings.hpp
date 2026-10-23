@@ -33,7 +33,6 @@ public:
     enum class Notice { TpoConfig, TpoStyle, Gamma, Contrast, ShaderFloor, CandleStyle, CandleAppearance };
     explicit ChartLookSettings(ChartLayers& layers) : layers_(layers) {}
     std::function<void()> requestUpdate, onViewportChanged;
-    std::function<void(Notice)> notify;
     std::function<void(float, float, float)> applyTone;
 
     double gamma() const { return gamma_; }

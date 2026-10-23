@@ -49,6 +49,19 @@ public:
         emit layerVisibilityChanged();
     }
 
+    // Independent layer patches preserve every other layer; primary-field UI
+    // selection continues to use the exclusive setters below.
+    void setLayerEnabled(std::string_view name, bool enabled) {
+        bool* layer = nullptr;
+        if (name == "heatmap") layer = &heatmap_;
+        else if (name == "footprint") layer = &footprint_;
+        else if (name == "tpo") layer = &tpo_;
+        else if (name == "volumeProfile") layer = &volumeProfile_;
+        if (!layer || *layer == enabled) return;
+        *layer = enabled;
+        changed(name, enabled);
+    }
+
     Q_INVOKABLE void setVolumeProfileEnabled(bool enabled) {
         const bool newHeatmapEnabled = enabled ? false : heatmap_;
         const bool newFootprintEnabled = enabled ? false : footprint_;

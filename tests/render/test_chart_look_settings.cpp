@@ -4,10 +4,18 @@
 #include "chart/core/PublishedFrame.hpp"
 #include "heatmap/HeatmapChartSettings.hpp"
 #include <gtest/gtest.h>
+#include <QSignalSpy>
 #include <string>
 #include <vector>
 
 namespace {
+template<class T>
+concept HasNotifyHook = requires(T& settings) { settings.notify; };
+
+TEST(ChartLookSettings, UsesGroupSignalsWithoutTestOnlyNotifyHook) {
+    EXPECT_FALSE(HasNotifyHook<chart::ChartLookSettings>);
+}
+
 struct Ports final : chart::IChartEnvironment, chart::ITickOracle, chart::IHeatmapViewSink {
     bool attached() const override { return false; }
     chart::SurfaceFacts surface() const override { return {}; }
@@ -34,9 +42,10 @@ TEST(ChartLookSettings, TpoConfigAndStyleKeepNoticeOrder) {
     chart::ChartLayers layers;
     chart::ChartLookSettings look(layers);
     std::vector<std::string> calls;
-    look.notify = [&](auto notice) {
-        calls.push_back(notice == chart::ChartLookSettings::Notice::TpoConfig ? "config" : "style");
-    };
+    QSignalSpy configSignals(&look.tpo, &chart::ChartTpoQml::tpoConfigChanged);
+    QSignalSpy styleSignals(&look.tpo, &chart::ChartTpoQml::tpoStyleChanged);
+    QObject::connect(&look.tpo, &chart::ChartTpoQml::tpoConfigChanged, [&] { calls.push_back("config"); });
+    QObject::connect(&look.tpo, &chart::ChartTpoQml::tpoStyleChanged, [&] { calls.push_back("style"); });
     look.requestUpdate = [&] { calls.push_back("update"); };
     ClientTpoConfig config;
     config.layout = "split"; config.theme = "sage"; config.session = "ny";
@@ -59,6 +68,8 @@ TEST(ChartLookSettings, TpoConfigAndStyleKeepNoticeOrder) {
     EXPECT_EQ(look.tpoSessionType(), 4);
     look.setTpoTimeframeMs(3'600'000);
     EXPECT_EQ(look.tpoTimeframeMs(), 3'600'000);
+    EXPECT_EQ(configSignals.count(), 3);
+    EXPECT_EQ(styleSignals.count(), 2);
 }
 
 TEST(ChartLookSettings, ToneAndCandleLookKeepClampsAndNotices) {
@@ -71,9 +82,16 @@ TEST(ChartLookSettings, ToneAndCandleLookKeepClampsAndNotices) {
         EXPECT_FLOAT_EQ(floor, static_cast<float>(look.shaderFloor()));
     };
     look.requestUpdate = [&] { calls.push_back("update"); };
-    look.notify = [&](auto notice) {
-        calls.push_back(notice == chart::ChartLookSettings::Notice::CandleAppearance ? "appearance" : "notice");
-    };
+    QSignalSpy gammaSignals(&look, &chart::ChartLookSettings::heatmapGammaChanged);
+    QSignalSpy contrastSignals(&look, &chart::ChartLookSettings::heatmapContrastChanged);
+    QSignalSpy floorSignals(&look, &chart::ChartLookSettings::heatmapShaderFloorChanged);
+    QSignalSpy styleSignals(&look, &chart::ChartLookSettings::candleStyleChanged);
+    QSignalSpy appearanceSignals(&look, &chart::ChartLookSettings::candleAppearanceChanged);
+    QObject::connect(&look, &chart::ChartLookSettings::heatmapGammaChanged, [&] { calls.push_back("notice"); });
+    QObject::connect(&look, &chart::ChartLookSettings::heatmapContrastChanged, [&] { calls.push_back("notice"); });
+    QObject::connect(&look, &chart::ChartLookSettings::heatmapShaderFloorChanged, [&] { calls.push_back("notice"); });
+    QObject::connect(&look, &chart::ChartLookSettings::candleStyleChanged, [&] { calls.push_back("notice"); });
+    QObject::connect(&look, &chart::ChartLookSettings::candleAppearanceChanged, [&] { calls.push_back("appearance"); });
     look.setHeatmapGamma(9);
     EXPECT_DOUBLE_EQ(look.gamma(), 5);
     EXPECT_EQ(calls, (std::vector<std::string>{"tone", "update", "notice"}));
@@ -99,6 +117,11 @@ TEST(ChartLookSettings, ToneAndCandleLookKeepClampsAndNotices) {
     EXPECT_EQ(calls, (std::vector<std::string>{"notice", "appearance"}));
     calls.clear(); look.setCandleAppearance(settings);
     EXPECT_TRUE(calls.empty());
+    EXPECT_EQ(gammaSignals.count(), 1);
+    EXPECT_EQ(contrastSignals.count(), 1);
+    EXPECT_EQ(floorSignals.count(), 1);
+    EXPECT_EQ(styleSignals.count(), 1);
+    EXPECT_EQ(appearanceSignals.count(), 1);
 }
 
 TEST(ChartLookSettings, ClientAndServerConfigKeepSequencingAndExtraToneCall) {
@@ -109,7 +132,12 @@ TEST(ChartLookSettings, ClientAndServerConfigKeepSequencingAndExtraToneCall) {
     chart::ChartViewController view(ports, ports, ports, published);
     std::vector<std::string> calls;
     look.applyTone = [&](float, float, float) { calls.push_back("tone"); };
-    look.notify = [&](auto) { calls.push_back("notice"); };
+    QSignalSpy gammaSignals(&look, &chart::ChartLookSettings::heatmapGammaChanged);
+    QSignalSpy contrastSignals(&look, &chart::ChartLookSettings::heatmapContrastChanged);
+    QSignalSpy floorSignals(&look, &chart::ChartLookSettings::heatmapShaderFloorChanged);
+    QObject::connect(&look, &chart::ChartLookSettings::heatmapGammaChanged, [&] { calls.push_back("notice"); });
+    QObject::connect(&look, &chart::ChartLookSettings::heatmapContrastChanged, [&] { calls.push_back("notice"); });
+    QObject::connect(&look, &chart::ChartLookSettings::heatmapShaderFloorChanged, [&] { calls.push_back("notice"); });
     look.requestUpdate = [&] { calls.push_back("update"); };
     look.onViewportChanged = [&] { calls.push_back("viewport"); };
     ClientConfig config;
@@ -126,6 +154,9 @@ TEST(ChartLookSettings, ClientAndServerConfigKeepSequencingAndExtraToneCall) {
     EXPECT_EQ(view.initialViewSettings().pricePct, 100);
     calls.clear(); look.applyClientConfig(config, view, nullptr);
     EXPECT_EQ(calls, (std::vector<std::string>{"tone", "update", "viewport", "update"}));
+    EXPECT_EQ(gammaSignals.count(), 1);
+    EXPECT_EQ(contrastSignals.count(), 1);
+    EXPECT_EQ(floorSignals.count(), 1);
     ServerConfig server;
     server.chart.defaultTimeframeMs = 60000;
     look.applyServerConfig(server, view);

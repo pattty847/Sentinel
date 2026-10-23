@@ -1041,7 +1041,7 @@ TEST(ChartShell, AxisControlsHaveKeyboardActionsAndIndependentFollowStates) {
     }
 }
 
-// The label request retry : repeated no-result failures double the
+// The label request retry: repeated no-result failures double the
 // delay up to 30 s; a result resets it.
 TEST(ChartLabelRetry, BackoffDoublesToTheCapAndResetsAfterAResult) {
     heatmap::gpu::LabelRetryPolicy retry;
@@ -1454,7 +1454,7 @@ TEST_F(ChartControls, ChartMenuRoundTripsTheLabelSettings) {
     EXPECT_EQ(model->settings().labelCurrency, "asset");
 }
 
-// one renderer, so the Labels toggle is always in the gear menu (it was
+// One renderer, so the Labels toggle is always in the gear menu (it was
 // hidden in other chart modes), and the currency stays an appearance entry.
 TEST_F(ChartControls, LabelsToggleAndCurrencyAreAlwaysInTheAppearanceMenu) {
     controls->syncNow();

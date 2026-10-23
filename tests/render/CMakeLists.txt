@@ -381,7 +381,7 @@ set_tests_properties(ChartLayersTests PROPERTIES LABELS "render")
 
 add_executable(test_ChartLookSettings test_chart_look_settings.cpp)
 target_include_directories(test_ChartLookSettings PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
-target_link_libraries(test_ChartLookSettings PRIVATE GTest::gtest_main sentinel_gui_lib)
+target_link_libraries(test_ChartLookSettings PRIVATE GTest::gtest_main sentinel_gui_lib Qt6::Test)
 add_test(NAME ChartLookSettingsTests COMMAND test_ChartLookSettings)
 set_tests_properties(ChartLookSettingsTests PROPERTIES LABELS "render;fast")
 

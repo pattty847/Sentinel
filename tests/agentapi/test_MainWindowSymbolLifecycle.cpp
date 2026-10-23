@@ -71,6 +71,9 @@ struct MainWindowSymbolLifecyclePeer {
         window.m_symbolSwitchTimer->stop();
         QMetaObject::invokeMethod(window.m_symbolSwitchTimer, "timeout", Qt::DirectConnection);
     }
+    static AgentApi::ControlApply applyLayers(MainWindowGPU& window, const AgentApi::ControlBody& body) {
+        return window.agentApiApplyControl("layers", body);
+    }
     static quint16 apiPort(const MainWindowGPU& window) { return window.m_guiApiServer->port(); }
     static void fireRetry(MainWindowGPU& window) {
         window.m_heldRetryTimer->stop();
@@ -118,7 +121,7 @@ private:
     LiveOrderBook book_;
 };
 
-TEST(UgrCandleCpu, WindowAndQmlPassUnroundedMilliseconds) {
+TEST(MainWindowCandleViewport, WindowAndQmlPassUnroundedMilliseconds) {
     MainWindowGPU window;
     auto* renderer = MainWindowSymbolLifecyclePeer::renderer(window);
     ASSERT_TRUE(renderer);
@@ -682,6 +685,56 @@ struct LocalApiPort {
     }
     ~LocalApiPort() { GuiConfigStore::instance().setClientConfig(saved); }
 };
+
+TEST(MainWindowLayers, PartialMapKeepsUnspecifiedLayers) {
+    MainWindowGPU window;
+    auto* renderer = MainWindowSymbolLifecyclePeer::renderer(window);
+    ASSERT_TRUE(renderer);
+    renderer->layers()->setHeatmapEnabled(true);
+    AgentApi::Request request;
+    request.method = "POST";
+    request.path = "/api/v1/layers";
+    request.body = R"({"volumeProfile":true})";
+    const auto validated = AgentApi::validateControl(request, std::nullopt);
+    ASSERT_EQ(validated.status, 200);
+    const auto applied = MainWindowSymbolLifecyclePeer::applyLayers(window, validated.body);
+    ASSERT_EQ(applied.status, 200);
+    EXPECT_TRUE(renderer->layers()->volumeProfileEnabled());
+    EXPECT_TRUE(renderer->layers()->heatmapEnabled());
+    EXPECT_TRUE(applied.data.value("layers").toObject().value("heatmap").toBool());
+
+    request.body = R"({"heatmap":true,"footprint":true,"tpo":true})";
+    const auto mixed = AgentApi::validateControl(request, std::nullopt);
+    ASSERT_EQ(mixed.status, 200);
+    ASSERT_EQ(MainWindowSymbolLifecyclePeer::applyLayers(window, mixed.body).status, 200);
+    EXPECT_TRUE(renderer->layers()->heatmapEnabled());
+    EXPECT_TRUE(renderer->layers()->footprintEnabled());
+    EXPECT_TRUE(renderer->layers()->tpoEnabled());
+    EXPECT_TRUE(renderer->layers()->volumeProfileEnabled());
+
+    request.body = R"({"footprint":false})";
+    const auto disable = AgentApi::validateControl(request, std::nullopt);
+    ASSERT_EQ(disable.status, 200);
+    ASSERT_EQ(MainWindowSymbolLifecyclePeer::applyLayers(window, disable.body).status, 200);
+    EXPECT_FALSE(renderer->layers()->footprintEnabled());
+    EXPECT_TRUE(renderer->layers()->heatmapEnabled());
+    EXPECT_TRUE(renderer->layers()->tpoEnabled());
+    EXPECT_TRUE(renderer->layers()->volumeProfileEnabled());
+}
+
+TEST(MainWindowLayers, PostVolumeProfileKeepsHeatmap) {
+    LocalApiPort api;
+    if (!api.port) GTEST_SKIP() << "Loopback sockets blocked by sandbox";
+    MainWindowGPU window;
+    auto* renderer = MainWindowSymbolLifecyclePeer::renderer(window);
+    ASSERT_TRUE(renderer);
+    renderer->layers()->setHeatmapEnabled(true);
+    const auto response = apiRequest(api.port, "POST", "/api/v1/layers", R"({"volumeProfile":true})");
+    ASSERT_TRUE(response.startsWith("HTTP/1.1 200")) << response.constData();
+    EXPECT_TRUE(renderer->layers()->volumeProfileEnabled());
+    EXPECT_TRUE(renderer->layers()->heatmapEnabled());
+    EXPECT_TRUE(responseField(response, "data").value("layers").toObject().value("heatmap").toBool());
+}
 
 TEST(MainWindowSymbolLifecycle, AcknowledgementRefusalTimeoutAndReconnect) {
     MainWindowGPU window(nullptr, 40);
