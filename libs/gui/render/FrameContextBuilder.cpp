@@ -31,6 +31,7 @@ FrameContext build(const QRectF& boundingRect,
                    FrameContext::OverlayActivationSet overlays) {
     FrameContext frame;
     frame.itemBounds = boundingRect;
+    frame.rightGutterPx = overlays.ladderPx;
     frame.surfaceDpr = dpr;
     // The whole device pixels of the item (the raster camera's surface): every layer
     // that interpolates the view over surfaceBounds stays on the camera's slopes.

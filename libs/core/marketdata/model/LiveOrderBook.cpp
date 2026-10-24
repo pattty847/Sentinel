@@ -13,6 +13,11 @@ void appendSnapshotSide(const std::vector<double>& levels, double minPrice, doub
     }
 }
 
+struct SideScan {
+    size_t known = 0; // bids: lowest known index; asks: end of the known indices
+    bool capped = false;
+};
+
 size_t captureSide(bool isBid, const std::vector<uint64_t>& present,
                    const std::vector<double>& levels,
                    std::vector<std::pair<uint32_t, double>>& out,
@@ -31,6 +36,21 @@ size_t captureSide(bool isBid, const std::vector<uint64_t>& present,
         }
     }
     return scanned;
+}
+
+// Known indices of one side after a capture (`remaining`: set slots not captured).
+SideScan sideKnown(bool isBid, size_t slotCount, size_t words, size_t scannedWords, size_t remaining,
+                   std::span<const std::pair<uint32_t, double>> captured, size_t maxPerSide) {
+    SideScan scan{isBid ? 0 : slotCount, false};
+    if (remaining == 0) return scan;
+    if (captured.size() >= maxPerSide) {
+        scan.capped = true;
+        const size_t last = captured.empty() ? (isBid ? slotCount : 0) : captured.back().first;
+        scan.known = isBid ? last : (captured.empty() ? 0 : last + 1);
+        return scan;
+    }
+    scan.known = isBid ? (words - scannedWords) * 64 : std::min(slotCount, scannedWords * 64);
+    return scan;
 }
 
 void accumulateSide(bool isBid, const std::vector<double>& levels,
@@ -236,6 +256,15 @@ LiveOrderBook::DenseBookSnapshotView LiveOrderBook::captureDenseNonZero(
     view.askLevels = std::span<const std::pair<uint32_t, double>>(askBuffer.data(), askBuffer.size());
     view.scanLimited = (bidBuffer.size() < maxPerSide && m_nonZeroBidCount > bidBuffer.size() && bidScanned >= maxScanWordsPerSide) ||
                        (askBuffer.size() < maxPerSide && m_nonZeroAskCount > askBuffer.size() && askScanned >= maxScanWordsPerSide);
+    view.slotCount = m_bids.size();
+    const auto bid = sideKnown(true, view.slotCount, m_bidPresent.size(), bidScanned,
+                               m_nonZeroBidCount - bidBuffer.size(), view.bidLevels, maxPerSide);
+    const auto ask = sideKnown(false, view.slotCount, m_askPresent.size(), askScanned,
+                               m_nonZeroAskCount - askBuffer.size(), view.askLevels, maxPerSide);
+    view.bidKnownLo = bid.known;
+    view.askKnownEnd = ask.known;
+    view.bidCapped = bid.capped;
+    view.askCapped = ask.capped;
     return view;
 }
 

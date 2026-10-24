@@ -145,7 +145,11 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
                 m_pendingBookSnapshots.clear();
                 m_bookVersions.clear();
                 for (auto& [symbol, book] : m_replicaBooks) {
-                    if (book) book->clear();
+                    if (!book) continue;
+                    const bool held = book->getTickSize() > 0;
+                    book->clear();
+                    // Consumers withdraw cached rows and top (an empty update is no receive).
+                    if (held) emit liveOrderBookUpdated(QString::fromStdString(symbol), {});
                 }
                 m_candleBackfill.disconnect();
                 if (m_candleBuffer) m_candleBuffer->endLiveCoverage();

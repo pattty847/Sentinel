@@ -40,8 +40,8 @@ namespace chart {
 void ChartTextLayer::updateNodes(const ChartFrame& frame, LayerNodeContext& context) {
     submitChartText(context.text,
         [&] { context.text.beginFrame(context.root, context.window, context.atlas); },
-        [&] { if (axes) axes->submitAxisText(context.text, context.atlas,
-                                            frame.context.itemBounds.width(), frame.context.itemBounds.height()); },
+        [&] { if (axes) axes->submitAxisText(context.text, context.atlas, frame.context.itemBounds.width(),
+                                            frame.context.itemBounds.height(), frame.context.rightGutterPx); },
         [&] { heatmap_.submitLabels(frame, context); },
         [&](int stage) {
             if (context.profiler && stage < 2)

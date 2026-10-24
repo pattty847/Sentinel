@@ -43,7 +43,8 @@ public:
     void submitAxisText(ChartTextRenderer& renderer,
                         const ChartTextAtlas& atlas,
                         qreal canvasWidth,
-                        qreal canvasHeight);
+                        qreal canvasHeight,
+                        qreal priceGutter = 0.0); // price labels start this far right of the canvas
 
     QObject* priceAxisSource() const { return m_priceAxisSource; }
     QObject* timeAxisSource() const { return m_timeAxisSource; }

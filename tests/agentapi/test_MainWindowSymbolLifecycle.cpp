@@ -1,4 +1,5 @@
 #include "MainWindowGpu.h"
+#include "../render/BookTopFixture.hpp"
 #include "config/GuiConfigStore.hpp"
 #include "config/AgentHostMode.hpp"
 #include "datasources/IGridDataSource.hpp"
@@ -216,7 +217,7 @@ TEST(ChartAgentPin, ControlledStartupHistoryAndViewport) {
             {oldest, oldest + 60000, 84000, 84100, 83900, 84000, 1, true},
             {request->endMs - 60000, request->endMs, 84000, 84100, 83900, 84000, 1, true}});
     };
-    renderer->setLiveBookTop(84088.2, 84088.4);
+    renderer->setLiveBook(bookWithTop(84088.2, 84088.4));
     page();
     root->setSize({1150, 931});
     page();
@@ -720,6 +721,17 @@ TEST(MainWindowLayers, PartialMapKeepsUnspecifiedLayers) {
     EXPECT_TRUE(renderer->layers()->heatmapEnabled());
     EXPECT_TRUE(renderer->layers()->tpoEnabled());
     EXPECT_TRUE(renderer->layers()->volumeProfileEnabled());
+
+    EXPECT_FALSE(renderer->layers()->ladderEnabled()) << "the ladder is off by default";
+    EXPECT_FALSE(applied.data.value("layers").toObject().value("ladder").toBool());
+    request.body = R"({"ladder":true})";
+    const auto ladder = AgentApi::validateControl(request, std::nullopt);
+    ASSERT_EQ(ladder.status, 200);
+    const auto ladderOn = MainWindowSymbolLifecyclePeer::applyLayers(window, ladder.body);
+    ASSERT_EQ(ladderOn.status, 200);
+    EXPECT_TRUE(renderer->layers()->ladderEnabled());
+    EXPECT_TRUE(ladderOn.data.value("layers").toObject().value("ladder").toBool());
+    EXPECT_TRUE(renderer->layers()->heatmapEnabled()) << "independent of the primary layers";
 }
 
 TEST(MainWindowLayers, PostVolumeProfileKeepsHeatmap) {

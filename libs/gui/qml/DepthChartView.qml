@@ -62,10 +62,24 @@ Rectangle {
     Rectangle {
         id: heatmapBackground
         anchors.fill: parent
-        anchors.rightMargin: unifiedGridRenderer.priceAxisWidthPx
+        anchors.rightMargin: unifiedGridRenderer.priceAxisWidthPx + ladderStrip.width
         anchors.bottomMargin: unifiedGridRenderer.timeAxisHeightPx
         color: root.color
         visible: true
+        z: 0
+    }
+
+    // The book ladder's strip between the chart and the price axis (inert; the
+    // renderer draws its bars here, on the chart's rows). Width 0 while it is off.
+    Rectangle {
+        id: ladderStrip
+        objectName: "ladderStrip"
+        anchors.right: priceAxisChrome.left
+        anchors.top: parent.top
+        anchors.bottom: timeAxisChrome.top
+        width: unifiedGridRenderer.layers.ladderWidthPx
+        visible: width > 0
+        color: root.color
         z: 0
     }
 
@@ -73,7 +87,7 @@ Rectangle {
         id: unifiedGridRenderer
         objectName: "unifiedGridRenderer"
         anchors.fill: parent
-        anchors.rightMargin: priceAxisChrome.width
+        anchors.rightMargin: priceAxisChrome.width + ladderStrip.width
         anchors.bottomMargin: timeAxisChrome.height
         // No clip here: the renderer draws the price/time axis text into the gutters.
         visible: true

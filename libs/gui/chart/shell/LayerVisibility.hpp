@@ -11,7 +11,11 @@ class LayerVisibility : public QObject {
     Q_PROPERTY(bool footprintLayerEnabled READ footprintEnabled NOTIFY layerVisibilityChanged)
     Q_PROPERTY(bool tpoLayerEnabled READ tpoEnabled NOTIFY layerVisibilityChanged)
     Q_PROPERTY(bool volumeProfileLayerEnabled READ volumeProfileEnabled NOTIFY layerVisibilityChanged)
+    // The book ladder strip (independent of the primary field; off by default).
+    Q_PROPERTY(bool ladderLayerEnabled READ ladderEnabled NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(int ladderWidthPx READ ladderWidthPx NOTIFY layerVisibilityChanged)
 public:
+    static constexpr int kLadderWidthPx = 72;
     std::function<void(std::string_view, bool, bool)> report;
     std::function<void()> requestUpdate;
 
@@ -20,6 +24,8 @@ public:
     bool footprintEnabled() const { return footprint_; }
     bool tpoEnabled() const { return tpo_; }
     bool volumeProfileEnabled() const { return volumeProfile_; }
+    bool ladderEnabled() const { return ladder_; }
+    int ladderWidthPx() const { return ladder_ ? kLadderWidthPx : 0; }
 
     void setPrimaryField(int field) {
         if (primaryField_ == field) return;
@@ -57,10 +63,13 @@ public:
         else if (name == "footprint") layer = &footprint_;
         else if (name == "tpo") layer = &tpo_;
         else if (name == "volumeProfile") layer = &volumeProfile_;
+        else if (name == "ladder") layer = &ladder_;
         if (!layer || *layer == enabled) return;
         *layer = enabled;
         changed(name, enabled);
     }
+
+    Q_INVOKABLE void setLadderEnabled(bool enabled) { setLayerEnabled("ladder", enabled); }
 
     Q_INVOKABLE void setVolumeProfileEnabled(bool enabled) {
         const bool newHeatmapEnabled = enabled ? false : heatmap_;
@@ -138,5 +147,6 @@ private:
     bool footprint_ = false;
     bool tpo_ = false;
     bool volumeProfile_ = false;
+    bool ladder_ = false;
 };
 } // namespace chart

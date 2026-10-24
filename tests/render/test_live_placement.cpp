@@ -3,6 +3,8 @@
 #include "chart/core/PublishedFrame.hpp"
 #include <gtest/gtest.h>
 #include <limits>
+#include <utility>
+#include <vector>
 
 namespace {
 struct Environment final : chart::IChartEnvironment, chart::ITickOracle, chart::IHeatmapViewSink {
@@ -163,6 +165,29 @@ TEST_F(LivePlacementTest, TradeAndBookSeed) {
     EXPECT_DOUBLE_EQ(view.getMinPrice(), 248.8);
     live.onTrade("TEST", std::numeric_limits<double>::quiet_NaN());
     EXPECT_EQ(controller.session().lastTrade, 100);
+}
+// A non-finite or crossed book top neither seeds nor consumes a symbol switch's pending
+// carry: the viewport, the reseed state and the carry wait for a valid top.
+TEST_F(LivePlacementTest, ANonFiniteTopKeepsThePendingCarryAndReseed) {
+    view.setViewport(1000, 11000, 90, 110);
+    controller.flags().markPriceKnown();
+    controller.flags().reseedPrice = true; // a symbol switch
+    controller.priceFitter().priceCarry() = chart::PriceFitter::PriceCarry{0.02, 0.25};
+    const auto version = view.getViewportVersion();
+    constexpr double nan = std::numeric_limits<double>::quiet_NaN(), inf = std::numeric_limits<double>::infinity();
+    for (const auto& [bid, ask] : std::vector<std::pair<double, double>>{{nan, 1}, {1, nan}, {inf, inf}, {201, 199}}) {
+        live.setLiveBookTop(bid, ask);
+        EXPECT_EQ(view.getViewportVersion(), version) << bid << " " << ask;
+        EXPECT_TRUE(controller.flags().reseedPrice);
+        ASSERT_TRUE(controller.priceFitter().priceCarry().has_value()) << "the carry is still pending";
+        EXPECT_EQ(controller.session().bookMid, 0.0);
+    }
+    EXPECT_DOUBLE_EQ(view.getMinPrice(), 90);
+    live.setLiveBookTop(199, 201);
+    EXPECT_FALSE(controller.flags().reseedPrice);
+    EXPECT_NE(view.getViewportVersion(), version);
+    EXPECT_NEAR(view.getMaxPrice() - view.getMinPrice(), 4.0, 1e-9) << "the carried span ratio at mid 200";
+    EXPECT_NEAR(view.getMinPrice(), 199.0, 1e-9);
 }
 TEST_F(LivePlacementTest, PristineResize) {
     live.seedGpuViewport(99, 101);

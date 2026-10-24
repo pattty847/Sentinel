@@ -1282,15 +1282,8 @@ void MainWindowGPU::connectMarketDataSignals() {
                 if (symbol != m_currentSymbol) return;
                 if (!deltas.empty()) m_bookReceivedAtMs = QDateTime::currentMSecsSinceEpoch();
                 auto* renderer = m_qmlController ? m_qmlController->getUnifiedGridRenderer() : nullptr;
-                if (!renderer) return;
-                thread_local std::vector<std::pair<uint32_t, double>> bids, asks;
-                const auto view = m_dataSource->getDirectLiveOrderBook(symbol.toStdString())
-                                      .captureDenseNonZero(bids, asks, 1, 16384);
-                const double bid = view.bidLevels.empty() ? 0.0
-                    : view.minPrice + view.bidLevels.front().first * view.tickSize;
-                const double ask = view.askLevels.empty() ? 0.0
-                    : view.minPrice + view.askLevels.front().first * view.tickSize;
-                renderer->setLiveBookTop(bid, ask);
+                // The chart takes the global top on every update and bins rows only while its ladder is on.
+                if (renderer) renderer->setLiveBook(m_dataSource->getDirectLiveOrderBook(symbol.toStdString()));
             });
     if (auto* remote = dynamic_cast<RemoteGridDataSource*>(m_dataSource.get())) {
         connect(remote->streamClient(), &SentinelStreamClient::candleBarUpdateReceived, this,
@@ -1567,6 +1560,7 @@ AgentApi::StateSnapshot MainWindowGPU::agentApiStateSnapshot() const {
             s.tpoLayout = renderer->tpo()->tpoLayout();
             s.tpoTheme = renderer->tpo()->tpoTheme();
             s.volumeProfileLayer = renderer->layers()->volumeProfileEnabled();
+            s.ladderLayer = renderer->layers()->ladderEnabled();
         }
     }
     if (m_modeController) s.candlesLayer = m_modeController->candlesEnabled();
@@ -1673,6 +1667,7 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
                                           {"footprint", state.footprintLayer.value_or(false)},
                                           {"tpo", state.tpoLayer.value_or(false)},
                                           {"volumeProfile", state.volumeProfileLayer.value_or(false)},
+                                          {"ladder", state.ladderLayer.value_or(false)},
                                           {"tpoLayout", state.tpoLayout.value_or(QString())},
                                           {"tpoTheme", state.tpoTheme.value_or(QString())}};
     }

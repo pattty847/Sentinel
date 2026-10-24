@@ -7,6 +7,9 @@
 // cannot create one: a skipped case is no result. Toolbar/menu cases need no GPU.
 // Every QSettings is a temporary INI file (never the owner's).
 #include "UnifiedGridRenderer.h"
+#include "marketdata/model/TradeData.h"
+#include "datasources/RemoteGridDataSource.hpp"
+#include "chart/feeds/BookLadderFeed.hpp"
 #include "models/PriceAxisModel.hpp"
 #include "models/TimeAxisModel.hpp"
 #include "lab/LabData.hpp"
@@ -1039,6 +1042,220 @@ TEST(ChartShell, AxisControlsHaveKeyboardActionsAndIndependentFollowStates) {
         ASSERT_TRUE(axis);
         EXPECT_TRUE(axis->activeFocusOnTab());
     }
+}
+
+// The book ladder's strip sits between the chart and the price axis: the renderer
+// gives up the strip's width, the axis keeps its place and its controls.
+TEST(ChartShell, LadderStripReservesItsWidthBeforeThePriceAxis) {
+    QQmlEngine engine;
+    engine.addImportPath("qrc:/qt/qml");
+    engine.rootContext()->setContextProperty("uiTheme", QVariant::fromValue<QObject *>(nullptr));
+    engine.rootContext()->setContextProperty("dataSource", QVariant::fromValue<QObject *>(nullptr));
+    QQmlComponent component(&engine, QUrl("qrc:/qt/qml/Sentinel/Charts/qml/DepthChartView.qml"));
+    ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+    std::unique_ptr<QObject> shell(component.create());
+    ASSERT_TRUE(shell) << component.errorString().toStdString();
+    shell->setProperty("width", 960);
+    shell->setProperty("height", 640);
+    QCoreApplication::processEvents();
+    auto *renderer = shell->findChild<UnifiedGridRenderer *>("unifiedGridRenderer");
+    auto *strip = shell->findChild<QQuickItem *>("ladderStrip");
+    auto *axis = shell->findChild<QQuickItem *>("priceAxisControl");
+    ASSERT_TRUE(renderer && strip && axis);
+    const double width = renderer->width(), axisX = axis->x(), axisWidth = axis->width();
+    EXPECT_EQ(strip->width(), 0.0) << "off by default: no change";
+    EXPECT_DOUBLE_EQ(renderer->x() + width, axisX);
+    renderer->layers()->setLadderEnabled(true);
+    QCoreApplication::processEvents();
+    const double gutter = chart::LayerVisibility::kLadderWidthPx;
+    EXPECT_DOUBLE_EQ(renderer->width(), width - gutter);
+    EXPECT_DOUBLE_EQ(axis->x(), axisX) << "the price axis keeps its place";
+    EXPECT_DOUBLE_EQ(axis->width(), axisWidth);
+    EXPECT_DOUBLE_EQ(strip->x(), renderer->x() + renderer->width());
+    EXPECT_DOUBLE_EQ(strip->x() + strip->width(), axisX);
+    EXPECT_TRUE(strip->isVisible());
+    // The price-axis control still owns the axis area and still zooms price.
+    renderer->view()->setViewport(1'000'000, 1'000'000 + 600'000, 100, 200);
+    renderer->view()->setAutoPriceScale(true);
+    const QPointF axisCentre = axis->mapToItem(qobject_cast<QQuickItem *>(shell.get()), QPointF(axisWidth / 2, 100));
+    EXPECT_GT(axisCentre.x(), strip->x() + strip->width());
+    QKeyEvent up(QEvent::KeyPress, Qt::Key_Up, Qt::NoModifier);
+    QCoreApplication::sendEvent(axis, &up);
+    EXPECT_FALSE(renderer->view()->autoPriceScale()) << "an axis zoom takes the price scale";
+    // Resize keeps the bindings.
+    shell->setProperty("width", 1200);
+    QCoreApplication::processEvents();
+    EXPECT_DOUBLE_EQ(renderer->width(), 1200 - axis->width() - gutter);
+    EXPECT_DOUBLE_EQ(strip->x() + strip->width(), axis->x());
+    EXPECT_DOUBLE_EQ(axis->x() + axis->width(), 1200);
+    renderer->layers()->setLadderEnabled(false);
+    QCoreApplication::processEvents();
+    EXPECT_DOUBLE_EQ(renderer->width(), 1200 - axis->width()) << "off restores the width";
+    EXPECT_EQ(strip->width(), 0.0);
+    EXPECT_FALSE(strip->isVisible());
+}
+
+// Rendered shell: bars only inside the strip, on the chart's rows, price labels
+// still in the axis, at DPR 1 and after a change to DPR 2; a symbol switch drops them.
+namespace {
+bool barColour(QRgb c) {
+    const auto near = [](int a, int b) { return std::abs(a - b) <= 12; };
+    return (near(qRed(c), 34) && near(qGreen(c), 150) && near(qBlue(c), 139)) ||
+           (near(qRed(c), 215) && near(qGreen(c), 75) && near(qBlue(c), 72));
+}
+bool labelColour(QRgb c) { return qRed(c) > 180 && qGreen(c) > 180 && qBlue(c) > 180; }
+} // namespace
+
+// The production shell on Metal with the ladder on: $1 rows of a dark heatmap (every
+// fixture cell under the colour floor, no labels), so any bar colour outside the strip
+// is a leak.
+class LadderShellGpu : public testing::Test {
+protected:
+    std::unique_ptr<lab::OffscreenQuick> scene;
+    QString error;
+    QQmlEngine engine;
+    std::unique_ptr<QQuickItem> shell;
+    UnifiedGridRenderer *ugr = nullptr;
+    QImage image;
+    void SetUp() override {
+        if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty())
+            GTEST_SKIP() << "GPU case skipped: " << why.toStdString();
+        scene = std::make_unique<lab::OffscreenQuick>();
+        ASSERT_TRUE(scene->create(QSize(960, 640), &error)) << error.toStdString();
+        scene->window()->setColor(Qt::black);
+        engine.addImportPath("qrc:/qt/qml");
+        engine.rootContext()->setContextProperty("uiTheme", QVariant::fromValue<QObject *>(nullptr));
+        engine.rootContext()->setContextProperty("dataSource", QVariant::fromValue<QObject *>(nullptr));
+        QQmlComponent component(&engine, QUrl("qrc:/qt/qml/Sentinel/Charts/qml/DepthChartView.qml"));
+        ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+        shell.reset(qobject_cast<QQuickItem *>(component.create()));
+        ASSERT_TRUE(shell);
+        shell->setParentItem(scene->window()->contentItem());
+        shell->setSize(QSizeF(960, 640));
+        ugr = shell->findChild<UnifiedGridRenderer *>("unifiedGridRenderer");
+        ASSERT_TRUE(ugr);
+        ugr->setHeatmapService(&lab::LabData::instance().service());
+        ugr->setActiveSymbol("BTC-USD");
+        ugr->view()->setTimeframe(int(minute));
+        heatmap::HeatmapChartSettings settings;
+        settings.tickMode = heatmap::TickMode::Manual;
+        settings.manualTick = 100; // $1 rows (the ladder bins on the heatmap's drawn rows)
+        settings.sensitivityMin = 1000;
+        settings.sensitivityMax = 2000;
+        settings.showLabels = false;
+        ugr->setHeatmapChartSettings(settings, true);
+        ugr->layers()->setLadderEnabled(true);
+        const int64_t viewLo = epoch + 2 * kHourMs;
+        ugr->view()->setViewport(viewLo, viewLo + 10 * minute, 100'000, 100'016);
+    }
+    void TearDown() override {
+        shell.reset();
+        if (scene) scene->renderFrame(&error);
+    }
+    void render(int frames) {
+        for (int i = 0; i < frames; ++i) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+            ugr->update();
+            image = scene->renderFrame(&error);
+        }
+    }
+    int barPixels() const {
+        int bars = 0;
+        for (int y = 0; y < image.height(); ++y)
+            for (int x = 0; x < image.width(); ++x) bars += barColour(image.pixel(x, y));
+        return bars;
+    }
+    bool waitForBars(int ms = 5000) {
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < ms) {
+            render(1);
+            if (image.isNull()) return false;
+            for (int y = 0; y < image.height(); y += 2)
+                if (barColour(image.pixel(int(ugr->width()) + 36, y))) return true;
+        }
+        return false;
+    }
+};
+
+TEST_F(LadderShellGpu, BarsDrawInTheStripOnTheChartRows) {
+    LiveOrderBook book("BTC-USD");
+    book.initialize(99'900, 100'100, 0.01);
+    const std::vector<BookLevelUpdate> levels{{true, 100'003.50, 2}, {true, 100'003.99, 1}, {false, 100'008.00, 3}};
+    book.applyUpdates(levels, std::chrono::system_clock::now(), nullptr);
+    const auto check = [&](double dpr) {
+        SCOPED_TRACE(dpr);
+        const auto cam = ugr->currentFrameContext().raster;
+        ASSERT_TRUE(cam.valid);
+        ASSERT_DOUBLE_EQ(cam.tick, 1.0);
+        ASSERT_EQ(cam.dpr, dpr);
+        const int stripLo = int(std::lround(ugr->width() * dpr)), stripHi = int(std::lround((ugr->width() + 72) * dpr));
+        const int height = int(std::lround(ugr->height() * dpr));
+        int bars = 0, outside = 0, labelsInStrip = 0, labelsInAxis = 0;
+        for (int y = 0; y < height; ++y)
+            for (int x = 0; x < image.width(); ++x) {
+                const QRgb c = image.pixel(x, y);
+                const bool inStrip = x >= stripLo && x < stripHi;
+                if (barColour(c)) (inStrip ? bars : outside) += 1;
+                if (labelColour(c) && inStrip) ++labelsInStrip;
+                if (labelColour(c) && x >= stripHi) ++labelsInAxis;
+            }
+        EXPECT_GT(bars, 0) << "bars in the strip";
+        EXPECT_EQ(outside, 0) << "no bar outside the strip's clip";
+        EXPECT_EQ(labelsInStrip, 0) << "the price labels do not cover the strip";
+        EXPECT_GT(labelsInAxis, 0) << "the price labels are drawn in the axis";
+        // The bid bar of bin $100,003 spans exactly that heatmap row.
+        const int column = (stripLo + stripHi) / 2 - int(4 * dpr);
+        int top = -1, bottom = -1;
+        for (int y = 0; y < height; ++y)
+            if (barColour(image.pixel(column, y)) && qGreen(image.pixel(column, y)) > 100) {
+                if (top < 0) top = y;
+                bottom = y + 1;
+            }
+        EXPECT_EQ(top, int(std::lround(cam.yDev(100'004))));
+        EXPECT_EQ(bottom, int(std::lround(cam.yDev(100'003))));
+    };
+    ugr->setLiveBook(book);
+    ASSERT_TRUE(waitForBars()) << "the ladder never drew " << error.toStdString();
+    render(2);
+    check(1.0);
+    ASSERT_TRUE(scene->setDevicePixelRatio(2.0, &error)) << error.toStdString();
+    emit scene->window()->screenChanged(scene->window()->screen());
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < 3000 && ugr->currentFrameContext().raster.dpr != 2.0) render(1);
+    render(6);
+    check(2.0);
+    ugr->setActiveSymbol("ETH-USD"); // no ETH book ever arrives
+    render(2);
+    EXPECT_EQ(barPixels(), 0) << "no BTC rows survive the symbol switch";
+}
+
+// The replica as production feeds it (RemoteGridDataSource, MainWindowGPU's forwarding):
+// a disconnect clears the replica and the ladder withdraws at the next frame, with an
+// unchanged viewport and no further delta.
+TEST_F(LadderShellGpu, ADisconnectWithdrawsTheBars) {
+    RemoteGridDataSource source("127.0.0.1", "1");
+    auto *client = source.streamClient();
+    const auto deliver = [&] { QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall); };
+    QObject::connect(&source, &IGridDataSource::liveOrderBookUpdated, ugr,
+                     [&](const QString &symbol, const std::vector<BookDelta> &) {
+                         ugr->setLiveBook(source.getDirectLiveOrderBook(symbol.toStdString()));
+                     });
+    client->connected(); deliver();
+    source.subscribe("BTC-USD");
+    client->subscriptionAcknowledged("BTC-USD"); deliver();
+    const auto generation = client->bookDeliveryGeneration("BTC-USD");
+    client->snapshotReceived("BTC-USD", {{100'003.5, 2}}, {{100'008.0, 3}}, 0.1, generation, "ready", 1); deliver();
+    ASSERT_TRUE(waitForBars()) << "the ladder never drew " << error.toStdString();
+    QTest::qWait(3 * chart::BookLadderFeed::kIntervalMs); // the feed's timer drains
+    render(2);
+    ASSERT_GT(barPixels(), 0);
+    const auto version = ugr->getViewState()->getViewportVersion();
+    client->disconnected(); deliver();
+    render(1);
+    EXPECT_EQ(ugr->getViewState()->getViewportVersion(), version) << "no camera change triggered it";
+    EXPECT_EQ(barPixels(), 0) << "no stale bars after the replica was cleared";
 }
 
 // The label request retry: repeated no-result failures double the
