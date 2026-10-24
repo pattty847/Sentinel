@@ -1,4 +1,5 @@
 #include "DomModel.hpp"
+#include "SentinelLogging.hpp"
 #include <QColor>
 #include <QDateTime>
 #include <QLocale>
@@ -196,6 +197,8 @@ void DomModel::clear(const QString& symbol)
     m_rows.fill({});
     m_textValid.fill(0);
     m_depthKey.reset();
+    ++m_pulseSeries;
+    resetPulse();
     // No rows: nothing to rescale until the view reports a range for new rows.
     m_firstVisible = m_lastVisible = -1;
     m_visibleChanged = false;
@@ -241,6 +244,8 @@ bool DomModel::needsRepublish(qint64 nowMs) const
 {
     if (m_visibleChanged) return true;
     if (m_nextExpiryMs > 0 && nowMs >= m_nextExpiryMs) return true;
+    // Liquidity Pulse: fading flashes repaint each tick, then their cleared rows once.
+    if (m_pulseLive > 0 || m_repaintFirst <= m_repaintLast) return true;
     return std::any_of(m_scales.begin(), m_scales.end(), [](const Scale& s) { return s.shown != s.target; });
 }
 
@@ -265,6 +270,7 @@ void DomModel::withdrawScaleWork()
     m_lastScaleMs = 0;
     m_visibleChanged = false;
     m_depthKey.reset();
+    clearFlashes(false);
 }
 
 bool DomModel::updateScales(qint64 nowMs)
@@ -404,6 +410,9 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
     const qint64 top = first || follow ? std::max<qint64>(Rows - 1, m_center + Rows / 2)
         : newTick ? std::max<qint64>(Rows - 1, std::llround(m_top * m_tick / tick)) : m_top;
     const bool moved = top != m_top || newTick;
+    // Flashes stay on their price: shift with the window, drop on a new grid.
+    if (first || newTick) clearFlashes(false);
+    else if (top != m_top) shiftFlashes(top - m_top);
     if (first) {
         beginInsertRows({}, 0, Rows - 1);
         m_textValid.fill(0);
@@ -448,11 +457,13 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
     for (int r = 0; r < Rows; ++r) {
         const bool valueChanged = moved || !(m_next[r] == m_rows[r]);
         if (valueChanged) m_textValid[r] &= uint8_t(~textChanges(m_rows[r], m_next[r], moved));
-        if (valueChanged || scaleChanged) {
+        if (valueChanged || scaleChanged || pulseRepaint(r)) {
             firstChanged = std::min(firstChanged, r);
             lastChanged = r;
         }
     }
+    m_repaintFirst = Rows;
+    m_repaintLast = -1;
     m_rows.swap(m_next);
     if (first) endInsertRows();
     else if (lastChanged >= firstChanged) emit dataChanged(index(firstChanged, 0), index(lastChanged, Columns - 1));
@@ -487,4 +498,203 @@ QString DomModel::summary(bool compact) const
     const QString spread = m_bestBid > 0 && m_bestAsk > 0 ? priceText(m_bestAsk - m_bestBid, m_tick) : "—";
     if (compact) return QString("Spr %1").arg(spread);
     return QStringLiteral("Bid %1 · Ask %2 · Bucketed spread %3 %4").arg(bid, ask, spread, m_quote);
+}
+
+void DomModel::clearFlashes(bool repaint)
+{
+    if (repaint && m_pulseLive > 0) {
+        for (int r = 0; r < Rows; ++r)
+            if (m_flash[r][0].change || m_flash[r][0].eaten || m_flash[r][1].change || m_flash[r][1].eaten) markPulseRepaint(r);
+    }
+    if (!repaint) {
+        m_repaintFirst = Rows;
+        m_repaintLast = -1;
+    }
+    m_flash.fill({});
+    m_pulseTextValid.fill(0);
+    m_pulseLive = 0;
+}
+
+void DomModel::shiftFlashes(qint64 rows)
+{
+    // A window move by `rows` keys: old row r shows the price of new row r + rows.
+    if (m_pulseLive == 0) return;
+    if (rows >= Rows || rows <= -Rows) {
+        clearFlashes(false);
+        return;
+    }
+    const int d = int(rows);
+    const auto moveRows = [&](auto& values, int stride) {
+        if (d > 0) {
+            std::move_backward(values.begin(), values.end() - size_t(d) * stride, values.end());
+            std::fill(values.begin(), values.begin() + size_t(d) * stride, typename std::decay_t<decltype(values)>::value_type{});
+        } else {
+            std::move(values.begin() + size_t(-d) * stride, values.end(), values.begin());
+            std::fill(values.end() - size_t(-d) * stride, values.end(), typename std::decay_t<decltype(values)>::value_type{});
+        }
+    };
+    moveRows(m_flash, 1);
+    moveRows(m_pulseText, 4);
+    moveRows(m_pulseTextValid, 1);
+    m_pulseLive = 0;
+    for (const auto& row : m_flash)
+        for (const auto& side : row) m_pulseLive += (side.change != 0) + (side.eaten != 0);
+}
+
+void DomModel::markPulseRepaint(int row)
+{
+    m_repaintFirst = std::min(m_repaintFirst, row);
+    m_repaintLast = std::max(m_repaintLast, row);
+}
+
+bool DomModel::pulseRepaint(int row) const
+{
+    if (row >= m_repaintFirst && row <= m_repaintLast) return true;
+    const auto& f = m_flash[row];
+    return f[0].change || f[0].eaten || f[1].change || f[1].eaten;
+}
+
+void DomModel::expireFlashes(qint64 nowMs)
+{
+    if (m_pulseLive == 0) return;
+    m_pulseLive = 0;
+    for (int r = 0; r < Rows; ++r) {
+        for (auto& f : m_flash[r]) {
+            if (f.change && nowMs - f.changeAt >= PulseFadeMs) { f.change = 0; markPulseRepaint(r); }
+            if (f.eaten && nowMs - f.eatenAt >= PulseFadeMs) { f.eaten = 0; markPulseRepaint(r); }
+            m_pulseLive += (f.change != 0) + (f.eaten != 0);
+        }
+    }
+}
+
+void DomModel::resetPulse()
+{
+    m_classifier.reset();
+    clearFlashes(m_ready);
+    m_pulseWarned = false;
+    m_pulseLastRow = -1;
+    updatePulseVersion();
+}
+
+double DomModel::pulseThreshold(bool bid) const
+{
+    return PulseThresholdShare * m_scales[scaleIndex(bid, false)].target;
+}
+
+void DomModel::pulseStep(qint64 nowMs, std::span<const sentinel::book::Trade> trades)
+{
+    using namespace sentinel::book;
+    ++m_pulseSteps;
+    m_pulseNow = nowMs;
+    expireFlashes(nowMs);
+    Snapshot snapshot{m_pulseSeries, m_tick, 0, {}, nowMs};
+    m_pulseLastRow = -1;
+    if (m_ready && m_tick > 0) {
+        // The rows the view shows plus a margin; rows ascend by price, the model's descend.
+        const int center = centerRow();
+        int first = m_firstVisible < 0 ? center - PulseMaxRows / 4 : m_firstVisible - PulseMarginRows;
+        int last = m_lastVisible < 0 ? center + PulseMaxRows / 4 : m_lastVisible + PulseMarginRows;
+        first = std::clamp(first, 0, Rows - 1);
+        last = std::clamp(last, first, std::min(Rows - 1, first + PulseMaxRows - 1));
+        const int count = last - first + 1;
+        for (int i = 0; i < count; ++i) m_pulseRows[i] = {m_rows[last - i].bid, m_rows[last - i].ask};
+        snapshot.firstPrice = double(m_top - last) * m_tick;
+        snapshot.rows = std::span<const LevelSizes>(m_pulseRows.data(), size_t(count));
+        m_pulseLastRow = last;
+    }
+    const auto status = m_classifier.update(snapshot, trades);
+    if ((status == UpdateStatus::InvalidInput || status == UpdateStatus::CapacityExceeded) && !m_pulseWarned) {
+        m_pulseWarned = true; // once per series
+        sLog_Warning("DOM pulse update rejected status=" << (status == UpdateStatus::InvalidInput ? "invalid_input" : "capacity_exceeded")
+                     << " symbol=" << m_symbol << " tick=" << m_tick << " rows=" << snapshot.rows.size()
+                     << " t=" << nowMs);
+    }
+    if (status == UpdateStatus::Accepted) recordPulseEvents(nowMs);
+    updatePulseVersion();
+    sLog_Probe("dom.pulse", "status=" << int(status) << " rows=" << snapshot.rows.size() << " trades=" << trades.size()
+               << " events=" << m_classifier.events().size() << " live=" << m_pulseLive
+               << " outOfInterval=" << m_classifier.outOfIntervalTradesThisUpdate()
+               << " outOfIntervalTotal=" << m_classifier.outOfIntervalTradesTotal());
+}
+
+void DomModel::recordPulseEvents(qint64 nowMs)
+{
+    using sentinel::book::EventKind;
+    for (const auto& event : m_classifier.events()) {
+        const int row = m_pulseLastRow - int(event.row);
+        if (row < 0 || row >= Rows) continue;
+        const bool bid = event.side == sentinel::book::Side::Bid;
+        if (event.size < pulseThreshold(bid)) continue;
+        auto& f = m_flash[row][bid ? 0 : 1];
+        if (event.kind == EventKind::Eaten) {
+            m_pulseLive += f.eaten == 0;
+            f.eaten = event.size;
+            f.eatenAt = nowMs;
+            m_pulseTextValid[row] &= uint8_t(~(1u << ((bid ? 0 : 2) + 1)));
+        } else {
+            m_pulseLive += f.change == 0;
+            f.change = event.kind == EventKind::Added ? event.size : -event.size;
+            f.changeAt = nowMs;
+            m_pulseTextValid[row] &= uint8_t(~(1u << (bid ? 0 : 2)));
+        }
+        markPulseRepaint(row);
+    }
+}
+
+void DomModel::updatePulseVersion()
+{
+    const auto& t = m_classifier.totals();
+    const std::array<double, 8> signature{t.side[0].pulled, t.side[0].eaten, t.side[1].pulled, t.side[1].eaten,
+        t.side[0].added, t.side[1].added, t.largestPull ? t.largestPull->size : 0, t.largestPull ? t.largestPull->price : 0};
+    if (signature == m_pulseSignature) return;
+    m_pulseSignature = signature;
+    ++m_pulseVersion;
+}
+
+DomPulseCell DomModel::pulse(int row, bool bid) const
+{
+    DomPulseCell cell;
+    if (!m_ready || row < 0 || row >= Rows || m_pulseLive == 0) return cell;
+    const auto& f = m_flash[row][bid ? 0 : 1];
+    const auto alpha = [&](qint64 at) { return std::clamp(1.0 - double(m_pulseNow - at) / PulseFadeMs, 0.0, 1.0); };
+    if (f.change) {
+        cell.change = f.change;
+        cell.changeAlpha = alpha(f.changeAt);
+        cell.grow = std::clamp(double(m_pulseNow - f.changeAt + PulseGrowMs / 3) / PulseGrowMs, 0.0, 1.0);
+    }
+    if (f.eaten) {
+        cell.eaten = f.eaten;
+        cell.eatenAlpha = alpha(f.eatenAt);
+    }
+    return cell;
+}
+
+const QString& DomModel::pulseTag(int row, bool bid, bool eaten) const
+{
+    static const QString none;
+    if (row < 0 || row >= Rows) return none;
+    const int slot = (bid ? 0 : 2) + (eaten ? 1 : 0);
+    QString& text = m_pulseText[size_t(row) * 4 + slot];
+    if (m_pulseTextValid[row] & (1u << slot)) return text;
+    m_pulseTextValid[row] |= uint8_t(1u << slot);
+    const auto& f = m_flash[row][bid ? 0 : 1];
+    const double value = eaten ? f.eaten : f.change;
+    if (value == 0) text.clear();
+    else text = (eaten ? QStringLiteral("×") : value > 0 ? QStringLiteral("+") : QStringLiteral("-")) + sizeText(std::abs(value));
+    return text;
+}
+
+QString DomModel::pulseSummary(bool compact) const
+{
+    const auto& t = m_classifier.totals();
+    const auto& bid = t.side[sentinel::book::sideIndex(sentinel::book::Side::Bid)];
+    const auto& ask = t.side[sentinel::book::sideIndex(sentinel::book::Side::Ask)];
+    QString text = compact
+        ? QStringLiteral("Ask pull %1 eat %2 · Bid pull %3 eat %4")
+        : QStringLiteral("Asks pulled %1 eaten %2 · Bids pulled %3 eaten %4");
+    text = text.arg(sizeText(ask.pulled), sizeText(ask.eaten), sizeText(bid.pulled), sizeText(bid.eaten));
+    if (t.largestPull && m_tick > 0)
+        text += (compact ? QStringLiteral(" · max %1 @ %2") : QStringLiteral(" · biggest pull %1 @ %2"))
+            .arg(sizeText(t.largestPull->size), priceText(t.largestPull->price, m_tick));
+    return text;
 }

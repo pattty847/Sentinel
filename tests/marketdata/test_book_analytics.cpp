@@ -1,6 +1,10 @@
+// Qt GUI code includes these headers after Qt's `emit` keyword macro (empty):
+// no declaration here may use that name. Compiling this file is the check.
+#define emit
 #include "marketdata/analytics/BookDiffClassifier.hpp"
 #include "marketdata/analytics/BookHistoryRing.hpp"
 #include "marketdata/analytics/LevelTracker.hpp"
+#undef emit
 
 #include <gtest/gtest.h>
 #include <array>

@@ -116,16 +116,16 @@ void BookDiffClassifier::classifySide(const Snapshot& s, std::size_t row,
     if (!validSize(before) || !validSize(after))
         return;
     if (after > before) {
-        emit(s, row, side, EventKind::Added, after - before);
+        emitEvent(s, row, side, EventKind::Added, after - before);
         return;
     }
     const double drop = before - after;
     const double eaten = std::min(drop, traded_[previous].size(side));
-    emit(s, row, side, EventKind::Eaten, eaten);
-    emit(s, row, side, EventKind::Pulled, drop - eaten);
+    emitEvent(s, row, side, EventKind::Eaten, eaten);
+    emitEvent(s, row, side, EventKind::Pulled, drop - eaten);
 }
 
-void BookDiffClassifier::emit(const Snapshot& s, std::size_t row, Side side,
+void BookDiffClassifier::emitEvent(const Snapshot& s, std::size_t row, Side side,
                              EventKind kind, double size)
 {
     if (size > 0 && size >= config_.minimumSize)
