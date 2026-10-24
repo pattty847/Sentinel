@@ -14,19 +14,28 @@ class DomTradeWindow {
 public:
     static constexpr int Capacity = 8192;
     static constexpr qint64 WindowMs = 60000;
+    // Exchange stamps may run slightly ahead of this clock; beyond this a trade waits for its time.
+    static constexpr qint64 SkewMs = 1000;
+    // The one eligibility rule for volumes and the summary: nowMs - WindowMs < t <= nowMs + SkewMs.
+    static bool inWindow(qint64 timeMs, qint64 nowMs)
+    {
+        return timeMs > 0 && timeMs > nowMs - WindowMs && timeMs <= nowMs + SkewMs;
+    }
     struct Entry {
         double price = 0, size = 0;
         qint64 timeMs = 0; // 0: the trade carried no exchange time
         AggressorSide side = AggressorSide::Unknown;
     };
     void ingest(const Trade& trade);
-    void clear() { m_next = m_size = 0; }
+    void clear() { m_next = m_size = 0; m_evictedMaxMs = 0; }
     int size() const { return m_size; }
     const auto& entries() const { return m_entries; }
-    // Exchange time of the oldest retained entry; 0 when empty.
-    qint64 oldestMs() const { return m_size ? m_entries[m_size < Capacity ? 0 : m_next].timeMs : 0; }
+    // Latest exchange time among evicted entries (0: none). Volume at or before it may be
+    // missing, whatever order or timestamps the retained entries have.
+    qint64 evictedMaxMs() const { return m_evictedMaxMs; }
 private:
     std::array<Entry, Capacity> m_entries{};
+    qint64 m_evictedMaxMs = 0;
     int m_next = 0;
     int m_size = 0;
 };
@@ -64,6 +73,8 @@ public:
     // Paint-path reads without QVariant/QString work.
     bool isBest(int row, bool bid) const { return m_ready && row >= 0 && row < Rows && (bid ? m_rows[row].bestBid : m_rows[row].bestAsk); }
     double size(int row, bool bid, bool cumulativeSeries) const;
+    // Replica entries the last publication summed beyond the window edge (test hook).
+    qint64 lastDepthSteps() const { return m_depthSteps; }
     // Rows the view shows; bars scale to these. A negative bound means every row.
     void setVisibleRows(int first, int last);
     // Cumulative mode shows size summed from the touch outward in Bid/Ask.
@@ -79,7 +90,10 @@ public:
     QString aggregation(bool compact = false) const;
     static QString priceText(double price, double tick);
     // Three significant digits, leading zero dropped, k/m/b suffixes: .634, 5.87, 13.6, 1.36k.
+    // Positive dust below 1e-4 shows "<.0001".
     static QString sizeText(double value);
+    // Signed (delta) form: +1.25, -.5; magnitudes below 1e-4, including exact cancellation, show "≈0".
+    static QString signedSizeText(double value);
     // Tooltip text: the precision of the server's float sizes, without float noise.
     static QString fullSizeText(double value);
 private:
@@ -95,6 +109,8 @@ private:
     static int scaleIndex(bool bid, bool cumulativeSeries) { return (bid ? 0 : 1) + (cumulativeSeries ? 2 : 0); }
     static std::optional<qint64> bucket(double price, double tick);
     void accumulateDepth(const LiveOrderBook& book, qint64 origin);
+    void withdrawScaleWork();
+    const QString& cachedText(int row, int col) const;
     void addTrades(const DomTradeWindow& trades, const LiveOrderBook::DenseBookSnapshotView& view,
                    qint64 origin, qint64 nowMs);
     bool updateScales(qint64 nowMs);
@@ -108,8 +124,21 @@ private:
     std::array<Scale, 4> m_scales{};
     int m_firstVisible = -1, m_lastVisible = -1;
     bool m_visibleChanged = false;
+    // Depth beyond a pinned window edge, reused while book, grid and window are unchanged.
+    struct DepthKey {
+        uint64_t version = 0;
+        qint64 origin = 0, top = 0, bestBid = 0, bestAsk = 0;
+        double tick = 0;
+        bool operator==(const DepthKey&) const = default;
+    };
+    std::optional<DepthKey> m_depthKey;
+    double m_outsideBid = 0, m_outsideAsk = 0;
+    qint64 m_depthSteps = 0;
+    // Display strings per cell, formatted on first paint after their value changes.
+    mutable std::array<QString, Rows * Columns> m_text;
+    mutable std::array<uint8_t, Rows> m_textValid{}; // bit per column
     qint64 m_lastScaleMs = 0, m_nextExpiryMs = 0;
     double m_bestBid = 0, m_bestAsk = 0;
-    int m_windowTrades = 0, m_unknown = 0, m_untimed = 0;
+    int m_windowTrades = 0, m_unknown = 0, m_untimed = 0, m_ahead = 0;
     qint64 m_coveredMs = DomTradeWindow::WindowMs;
 };

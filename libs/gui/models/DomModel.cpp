@@ -11,6 +11,7 @@ void DomTradeWindow::ingest(const Trade& trade)
     // Keep every event in the ring, including unknown/invalid-price executions.
     // Invalid prices cannot be placed on the ladder; a missing exchange time keeps 0.
     const qint64 timeMs = std::chrono::duration_cast<std::chrono::milliseconds>(trade.timestamp.time_since_epoch()).count();
+    if (m_size == Capacity) m_evictedMaxMs = std::max(m_evictedMaxMs, m_entries[m_next].timeMs);
     m_entries[m_next] = {trade.price, trade.size, std::max<qint64>(0, timeMs), trade.side};
     m_next = (m_next + 1) % Capacity;
     m_size = std::min(m_size + 1, Capacity);
@@ -57,7 +58,7 @@ QString DomModel::sizeText(double value)
 {
     if (!std::isfinite(value)) return {};
     // Dust (a 1e-07 BTC trade) would print in e-notation; the tooltip keeps the value.
-    if (value != 0 && std::abs(value) < 1e-4) return value < 0 ? QStringLiteral("-<.0001") : QStringLiteral("<.0001");
+    if (value > 0 && value < 1e-4) return QStringLiteral("<.0001");
     static constexpr const char* suffixes[] = {"", "k", "m", "b"};
     double scaled = std::abs(value);
     int suffix = 0;
@@ -70,6 +71,13 @@ QString DomModel::sizeText(double value)
     if (text.startsWith(QLatin1String("0."))) text.remove(0, 1);
     text += QLatin1String(suffixes[suffix]);
     return value < 0 ? QLatin1Char('-') + text : text;
+}
+
+QString DomModel::signedSizeText(double value)
+{
+    if (!std::isfinite(value)) return {};
+    if (std::abs(value) < 1e-4) return QStringLiteral("≈0");
+    return value > 0 ? QLatin1Char('+') + sizeText(value) : sizeText(value);
 }
 
 QString DomModel::fullSizeText(double value)
@@ -141,22 +149,34 @@ QVariant DomModel::data(const QModelIndex& index, int role) const
                  fullSizeText(bid ? row.cumBid : row.cumAsk), executionSummary());
     }
     if (role != Qt::DisplayRole) return {};
+    return cachedText(index.row(), col);
+}
+
+const QString& DomModel::cachedText(int r, int col) const
+{
+    // Paint asks for every visible cell each repaint; format only after a change.
+    QString& text = m_text[size_t(r) * Columns + col];
+    if (m_textValid[r] & (1u << col)) return text;
+    m_textValid[r] |= uint8_t(1u << col);
+    const auto& row = m_rows[r];
+    const double delta = row.buys - row.sells;
     switch (col) {
     case Bid: {
         const double value = m_cumulative ? row.cumBid : row.bid;
-        return value > 0 ? sizeText(value) : QString();
+        text = value > 0 ? sizeText(value) : QString();
+        break;
     }
     case Ask: {
         const double value = m_cumulative ? row.cumAsk : row.ask;
-        return value > 0 ? sizeText(value) : QString();
+        text = value > 0 ? sizeText(value) : QString();
+        break;
     }
-    case Price: return priceText((m_top - index.row()) * m_tick, m_tick);
-    case Buys: return row.buys > 0 ? sizeText(row.buys) : QString();
-    case Sells: return row.sells > 0 ? sizeText(row.sells) : QString();
-    default:
-        if (row.buys <= 0 && row.sells <= 0) return QString();
-        return delta > 0 ? QLatin1Char('+') + sizeText(delta) : delta < 0 ? sizeText(delta) : QStringLiteral("0");
+    case Price: text = priceText((m_top - r) * m_tick, m_tick); break;
+    case Buys: text = row.buys > 0 ? sizeText(row.buys) : QString(); break;
+    case Sells: text = row.sells > 0 ? sizeText(row.sells) : QString(); break;
+    default: text = row.buys <= 0 && row.sells <= 0 ? QString() : signedSizeText(delta); break;
     }
+    return text;
 }
 
 void DomModel::clear(const QString& symbol)
@@ -169,11 +189,16 @@ void DomModel::clear(const QString& symbol)
     m_ready = false;
     m_aggregationIssue.clear();
     m_tick = m_bestBid = m_bestAsk = 0;
-    m_windowTrades = m_unknown = m_untimed = 0;
+    m_windowTrades = m_unknown = m_untimed = m_ahead = 0;
     m_coveredMs = DomTradeWindow::WindowMs;
     m_nextExpiryMs = m_lastScaleMs = 0;
     m_scales.fill({});
     m_rows.fill({});
+    m_textValid.fill(0);
+    m_depthKey.reset();
+    // No rows: nothing to rescale until the view reports a range for new rows.
+    m_firstVisible = m_lastVisible = -1;
+    m_visibleChanged = false;
     endResetModel();
     emit headerDataChanged(Qt::Horizontal, 0, Columns - 1);
 }
@@ -193,6 +218,7 @@ void DomModel::setCumulative(bool on)
 {
     if (on == m_cumulative) return;
     m_cumulative = on;
+    for (auto& valid : m_textValid) valid &= uint8_t(~((1u << Bid) | (1u << Ask)));
     emit headerDataChanged(Qt::Horizontal, Bid, Ask);
     if (m_ready) emit dataChanged(index(0, Bid), index(Rows - 1, Ask));
 }
@@ -216,6 +242,16 @@ bool DomModel::needsRepublish(qint64 nowMs) const
     if (m_visibleChanged) return true;
     if (m_nextExpiryMs > 0 && nowMs >= m_nextExpiryMs) return true;
     return std::any_of(m_scales.begin(), m_scales.end(), [](const Scale& s) { return s.shown != s.target; });
+}
+
+void DomModel::withdrawScaleWork()
+{
+    // Without a ladder there is nothing to scale: settle every request so the
+    // dock does not republish each tick until rows return.
+    m_scales.fill({});
+    m_lastScaleMs = 0;
+    m_visibleChanged = false;
+    m_depthKey.reset();
 }
 
 bool DomModel::updateScales(qint64 nowMs)
@@ -246,21 +282,28 @@ void DomModel::accumulateDepth(const LiveOrderBook& book, qint64 origin)
 {
     // Cumulative size from the touch outward. Levels between the touch and a
     // pinned window edge count too, so the sums never depend on the scroll.
-    const auto& bids = book.getBids();
-    const auto& asks = book.getAsks();
-    const auto sum = [&](const std::vector<double>& side, qint64 fromKey, qint64 toKey) {
-        double total = 0;
-        for (qint64 key = fromKey; key <= toKey; ++key) {
-            const qint64 source = key - origin;
-            if (source >= 0 && source < static_cast<qint64>(side.size()) && std::isfinite(side[source]) && side[source] > 0)
-                total += side[source];
-        }
-        return total;
-    };
+    // That walk only reads replica entries (never keys outside the band) and is
+    // reused while book version, grid and window are unchanged.
     const qint64 bottom = m_top - (Rows - 1);
     const auto bestBid = bucket(m_bestBid, m_tick), bestAsk = bucket(m_bestAsk, m_tick);
-    double bidTotal = m_bestBid > 0 && bestBid && *bestBid > m_top ? sum(bids, m_top + 1, *bestBid) : 0;
-    double askTotal = m_bestAsk > 0 && bestAsk && *bestAsk < bottom ? sum(asks, *bestAsk, bottom - 1) : 0;
+    const DepthKey key{book.stateVersion(), origin, m_top, bestBid.value_or(0), bestAsk.value_or(0), m_tick};
+    m_depthSteps = 0;
+    if (!m_depthKey || !(*m_depthKey == key)) {
+        const auto sum = [&](const std::vector<double>& side, qint64 fromKey, qint64 toKey) {
+            const qint64 from = std::max<qint64>(fromKey - origin, 0);
+            const qint64 to = std::min<qint64>(toKey - origin, static_cast<qint64>(side.size()) - 1);
+            double total = 0;
+            for (qint64 source = from; source <= to; ++source) {
+                if (std::isfinite(side[source]) && side[source] > 0) total += side[source];
+            }
+            m_depthSteps += std::max<qint64>(0, to - from + 1);
+            return total;
+        };
+        m_outsideBid = m_bestBid > 0 && bestBid && *bestBid > m_top ? sum(book.getBids(), m_top + 1, *bestBid) : 0;
+        m_outsideAsk = m_bestAsk > 0 && bestAsk && *bestAsk < bottom ? sum(book.getAsks(), *bestAsk, bottom - 1) : 0;
+        m_depthKey = key;
+    }
+    double bidTotal = m_outsideBid, askTotal = m_outsideAsk;
     for (int r = 0; r < Rows; ++r) {
         bidTotal += m_next[r].bid;
         m_next[r].cumBid = bidTotal;
@@ -272,11 +315,10 @@ void DomModel::accumulateDepth(const LiveOrderBook& book, qint64 origin)
 void DomModel::addTrades(const DomTradeWindow& trades, const LiveOrderBook::DenseBookSnapshotView& view,
                          qint64 origin, qint64 nowMs)
 {
-    const qint64 cutoff = nowMs - DomTradeWindow::WindowMs;
     const double tick = view.tickSize;
     for (int i = 0; i < trades.size(); ++i) {
         const auto& trade = trades.entries()[i];
-        if (trade.timeMs <= cutoff || !std::isfinite(trade.size) || trade.size <= 0) continue;
+        if (!DomTradeWindow::inWindow(trade.timeMs, nowMs) || !std::isfinite(trade.size) || trade.size <= 0) continue;
         if (trade.side != AggressorSide::Buy && trade.side != AggressorSide::Sell) continue;
         // Place executions in the same containing bucket as the book replica.
         if (!std::isfinite(trade.price) || trade.price < view.minPrice || trade.price > view.maxPrice) continue;
@@ -294,20 +336,25 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
 {
     if (nowMs < 0) nowMs = QDateTime::currentMSecsSinceEpoch();
     const qint64 cutoff = nowMs - DomTradeWindow::WindowMs;
-    m_windowTrades = m_unknown = m_untimed = 0;
+    m_windowTrades = m_unknown = m_untimed = m_ahead = 0;
     m_nextExpiryMs = 0;
+    const auto wakeAt = [&](qint64 ms) { m_nextExpiryMs = m_nextExpiryMs ? std::min(m_nextExpiryMs, ms) : ms; };
     for (int i = 0; i < trades.size(); ++i) {
         const auto& trade = trades.entries()[i];
         if (trade.timeMs <= 0) { ++m_untimed; continue; }
-        if (trade.timeMs <= cutoff) continue;
+        if (trade.timeMs > nowMs + DomTradeWindow::SkewMs) {
+            ++m_ahead; // stamped ahead of this clock: enters when its time comes
+            wakeAt(trade.timeMs - DomTradeWindow::SkewMs);
+            continue;
+        }
+        if (!DomTradeWindow::inWindow(trade.timeMs, nowMs)) continue;
         ++m_windowTrades;
         if (trade.side != AggressorSide::Buy && trade.side != AggressorSide::Sell) ++m_unknown;
-        const qint64 expiry = trade.timeMs + DomTradeWindow::WindowMs;
-        m_nextExpiryMs = m_nextExpiryMs ? std::min(m_nextExpiryMs, expiry) : expiry;
+        wakeAt(trade.timeMs + DomTradeWindow::WindowMs);
     }
-    // A full ring whose oldest entry is inside the window covers less than WindowMs.
-    m_coveredMs = trades.size() == DomTradeWindow::Capacity && trades.oldestMs() > cutoff
-        ? std::max<qint64>(0, nowMs - trades.oldestMs()) : DomTradeWindow::WindowMs;
+    // Evicted trades inside the window mean volume is missing up to the newest of them.
+    m_coveredMs = trades.evictedMaxMs() > cutoff
+        ? std::clamp<qint64>(nowMs - trades.evictedMaxMs(), 0, DomTradeWindow::WindowMs) : DomTradeWindow::WindowMs;
     const auto view = book.captureDenseNonZero(m_bidBuffer, m_askBuffer, 1);
     const double tick = view.tickSize;
     const auto origin = bucket(view.minPrice, tick);
@@ -325,6 +372,7 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
         }
         m_bestBid = m_bestAsk = 0;
         m_tick = tick;
+        withdrawScaleWork();
         m_aggregationIssue = !origin ? QStringLiteral("Aggregation unavailable for %1").arg(m_symbol)
             : QStringLiteral("Server aggregation %1 %2 is too coarse for %3").arg(priceText(tick, tick), m_quote, m_symbol);
         return;
@@ -332,6 +380,7 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
     const auto center = bucket(mid, tick);
     if ((!center || mid <= 0) && !m_ready) {
         m_tick = tick;
+        withdrawScaleWork();
         return;
     }
     if (center && mid > 0) m_center = *center;
@@ -340,7 +389,10 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
     const qint64 top = first || follow ? std::max<qint64>(Rows - 1, m_center + Rows / 2)
         : newTick ? std::max<qint64>(Rows - 1, std::llround(m_top * m_tick / tick)) : m_top;
     const bool moved = top != m_top || newTick;
-    if (first) beginInsertRows({}, 0, Rows - 1);
+    if (first) {
+        beginInsertRows({}, 0, Rows - 1);
+        m_textValid.fill(0);
+    }
     m_top = top;
     m_tick = tick;
     m_ready = true;
@@ -379,7 +431,9 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
     const bool scaleChanged = updateScales(nowMs);
     int firstChanged = Rows, lastChanged = -1;
     for (int r = 0; r < Rows; ++r) {
-        if (moved || scaleChanged || !(m_next[r] == m_rows[r])) {
+        const bool valueChanged = moved || !(m_next[r] == m_rows[r]);
+        if (valueChanged) m_textValid[r] = 0;
+        if (valueChanged || scaleChanged) {
             firstChanged = std::min(firstChanged, r);
             lastChanged = r;
         }
@@ -406,6 +460,8 @@ QString DomModel::executionSummary() const
         text += QStringLiteral(" · ring-limited: the last %1 trades cover only %2 s")
             .arg(QLocale(QLocale::English).toString(DomTradeWindow::Capacity)).arg(m_coveredMs / 1000.0, 0, 'f', 1);
     if (m_untimed > 0) text += QStringLiteral(" · %1 without trade time not counted").arg(m_untimed);
+    if (m_ahead > 0) text += QStringLiteral(" · %1 stamped more than %2 s ahead of this clock, not yet counted")
+        .arg(m_ahead).arg(DomTradeWindow::SkewMs / 1000);
     return text;
 }
 QString DomModel::summary(bool compact) const

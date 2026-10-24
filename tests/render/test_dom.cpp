@@ -159,8 +159,174 @@ TEST(DomModel, RingEvictsOldestAndLabelsAWindowItCannotCover) {
     EXPECT_DOUBLE_EQ(vol(model, r, DomModel::Buys), 0);
     EXPECT_NEAR(vol(model, r, DomModel::Sells), DomTradeWindow::Capacity * .001, 1e-9);
     const auto summary = model.executionSummary();
-    EXPECT_TRUE(summary.contains("ring-limited: the last 8,192 trades cover only 4.0 s")) << summary.toStdString();
+    EXPECT_TRUE(summary.contains("ring-limited: the last 8,192 trades cover only 5.0 s")) << summary.toStdString();
     EXPECT_FALSE(summary.contains("without trade time"));
+}
+
+TEST(DomModel, FutureStampedTradesWaitForTheirTimeAndCountOnce) {
+    const qint64 now = 1'800'000'000'000;
+    DomTradeWindow trades;
+    trades.ingest(tradeAt(now + 500, 200, AggressorSide::Buy, 1));        // within the skew tolerance
+    trades.ingest(tradeAt(now + 300000, 200, AggressorSide::Sell, 4));    // five minutes ahead
+    LiveOrderBook book;
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, 4}, {false, 200.1, 7}});
+    DomModel model;
+    model.clear("BTC-USD");
+    model.publish(book, trades, true, now);
+    const int r = rowAt(model, 2000);
+    EXPECT_DOUBLE_EQ(vol(model, r, DomModel::Buys), 1);
+    EXPECT_DOUBLE_EQ(vol(model, r, DomModel::Sells), 0);
+    EXPECT_TRUE(model.executionSummary().contains("1 trades"));
+    EXPECT_TRUE(model.executionSummary().contains("1 stamped more than 1 s ahead"));
+    EXPECT_TRUE(model.needsRepublish(now + 60500)); // the near-future buy leaves 60 s after its stamp
+    model.publish(book, trades, true, now + 60500);
+    EXPECT_DOUBLE_EQ(vol(model, r, DomModel::Buys), 0);
+    EXPECT_FALSE(model.needsRepublish(now + 298000));
+    EXPECT_TRUE(model.needsRepublish(now + 299000)); // the far one enters at its stamp minus the tolerance
+    model.publish(book, trades, true, now + 299000);
+    EXPECT_DOUBLE_EQ(vol(model, r, DomModel::Sells), 4);
+    model.publish(book, trades, true, now + 300000 + DomTradeWindow::WindowMs); // and leaves 60 s after its stamp
+    EXPECT_DOUBLE_EQ(vol(model, r, DomModel::Sells), 0);
+    EXPECT_TRUE(DomTradeWindow::inWindow(now + DomTradeWindow::SkewMs, now));
+    EXPECT_FALSE(DomTradeWindow::inWindow(now + DomTradeWindow::SkewMs + 1, now));
+    EXPECT_FALSE(DomTradeWindow::inWindow(now - DomTradeWindow::WindowMs, now));
+}
+
+TEST(DomModel, RingCoverageWarningSurvivesUntimedAndOutOfOrderHeads) {
+    const qint64 now = 1'800'000'000'000;
+    for (const qint64 headTime : {qint64(0), now - 3'600'000}) { // untimed head, then an hour-old late arrival
+        SCOPED_TRACE(headTime);
+        DomTradeWindow trades;
+        for (int i = 0; i < 10; ++i) trades.ingest(tradeAt(now - 2000, 200, AggressorSide::Sell, 100)); // evicted below
+        trades.ingest(tradeAt(headTime, 200, AggressorSide::Buy, 1));
+        for (int i = 0; i < DomTradeWindow::Capacity - 1; ++i) trades.ingest(tradeAt(now - 1000, 200, AggressorSide::Buy, .001));
+        // The retained head is now that untimed or late entry; the evicted sells were inside the minute.
+        LiveOrderBook book;
+        book.initialize(0, 400, 0.1);
+        apply(book, {{true, 200, 4}, {false, 200.1, 7}});
+        DomModel model;
+        model.publish(book, trades, true, now);
+        EXPECT_DOUBLE_EQ(vol(model, rowAt(model, 2000), DomModel::Sells), 0); // the evicted sells are gone...
+        // ...and the summary says the minute is incomplete back to the newest evicted stamp.
+        EXPECT_TRUE(model.executionSummary().contains("ring-limited: the last 8,192 trades cover only 2.0 s"))
+            << model.executionSummary().toStdString();
+    }
+    DomTradeWindow untimedOnly; // evicting only untimed entries loses nothing in the window
+    for (int i = 0; i < DomTradeWindow::Capacity + 5; ++i) untimedOnly.ingest(tradeAt(i < 5 ? 0 : now - 1000, 200, AggressorSide::Buy, 1));
+    EXPECT_EQ(untimedOnly.evictedMaxMs(), 0);
+}
+
+TEST(DomModel, PublicationRequestsSettleWhenTheLadderGoesAway) {
+    const qint64 now = 1'800'000'000'000;
+    DomTradeWindow trades;
+    LiveOrderBook book;
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, 16}, {true, 195, 400}, {false, 200.1, 9}});
+    DomModel model;
+    model.clear("TEST-USD");
+    const auto decaying = [&] {
+        model.publish(book, trades, true, now);
+        const int touch = rowAt(model, 2000);
+        model.setVisibleRows(touch, touch + 60);
+        model.publish(book, trades, true, now + 67);
+        model.setVisibleRows(touch - 20, touch + 20);
+        model.publish(book, trades, true, now + 134);
+        ASSERT_TRUE(model.needsRepublish(now + 134)); // mid-decay
+    };
+    // 1. Withdrawal (INV-130 empty event clears the replica), then the view reports no rows.
+    decaying();
+    book.clear();
+    model.publish(book, trades, true, now + 201);
+    EXPECT_EQ(model.rowCount(), 0);
+    model.setVisibleRows(-1, -1);
+    EXPECT_TRUE(model.needsRepublish(now + 268));
+    model.publish(book, trades, true, now + 268);
+    EXPECT_FALSE(model.needsRepublish(now + 335));
+    // 2. A coarse product replaces a decaying ladder.
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, 16}, {true, 195, 400}, {false, 200.1, 9}});
+    model.setVisibleRows(-1, -1);
+    decaying();
+    book.initialize(0, 200, 5);
+    apply(book, {{true, 100, 7}, {false, 105, 9}});
+    model.publish(book, trades, true, now + 201);
+    EXPECT_EQ(model.rowCount(), 0);
+    model.setVisibleRows(-1, -1);
+    model.publish(book, trades, true, now + 268);
+    EXPECT_FALSE(model.needsRepublish(now + 335));
+    // 3. A symbol switch clears the model during decay.
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, 16}, {true, 195, 400}, {false, 200.1, 9}});
+    model.publish(book, trades, true, now + 400);
+    decaying();
+    model.clear("OTHER-USD");
+    EXPECT_FALSE(model.needsRepublish(now + 201));
+}
+
+TEST(DomModel, PinnedCumulativeReadsOnlyTheReplicaAndReusesItsSum) {
+    LiveOrderBook book;
+    book.initialize(0, 500, 0.1);
+    apply(book, {{true, 200, 4}, {false, 200.1, 7}});
+    DomModel model;
+    DomTradeWindow trades;
+    model.publish(book, trades, true);
+    const auto top = model.index(0, 0).data(DomModel::BucketRole).toLongLong();
+    // A replacement band far above the pinned window: keys 10,000,000+ against a top near 3,000.
+    book.initialize(1'000'000, 1'000'050, 0.1);
+    apply(book, {{true, 1'000'020, 5}, {true, 1'000'010, 3}, {false, 1'000'020.1, 6}});
+    model.publish(book, trades, false);
+    ASSERT_EQ(model.index(0, 0).data(DomModel::BucketRole).toLongLong(), top);
+    EXPECT_DOUBLE_EQ(model.index(0, DomModel::Bid).data(DomModel::CumulativeRole).toDouble(), 8);
+    EXPECT_GT(model.lastDepthSteps(), 0);
+    EXPECT_LE(model.lastDepthSteps(), static_cast<qint64>(book.getBids().size())); // never the price distance
+    model.publish(book, trades, false); // trade-only or decay publication: no rescan
+    EXPECT_EQ(model.lastDepthSteps(), 0);
+    EXPECT_DOUBLE_EQ(model.index(0, DomModel::Bid).data(DomModel::CumulativeRole).toDouble(), 8);
+    apply(book, {{true, 1'000'030, 2}}); // book change: one bounded rescan
+    model.publish(book, trades, false);
+    EXPECT_DOUBLE_EQ(model.index(0, DomModel::Bid).data(DomModel::CumulativeRole).toDouble(), 10);
+    EXPECT_LE(model.lastDepthSteps(), static_cast<qint64>(book.getBids().size()));
+    // A tick change rescales the pinned window and still sums only replica levels.
+    book.initialize(999'990, 1'000'050, 0.01);
+    apply(book, {{true, 1'000'020, 5}, {false, 1'000'020.01, 6}});
+    model.publish(book, trades, false);
+    EXPECT_DOUBLE_EQ(model.tick(), 0.01);
+    EXPECT_DOUBLE_EQ(model.index(0, DomModel::Bid).data(DomModel::CumulativeRole).toDouble(), 5);
+    EXPECT_LE(model.lastDepthSteps(), static_cast<qint64>(book.getBids().size()));
+}
+
+TEST(DomModel, DisplayStringsAreFormattedOnceUntilTheirValueChanges) {
+    const qint64 now = 1'800'000'000'000;
+    LiveOrderBook book;
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, 4.5}, {true, 195, 400}, {false, 200.1, 7}});
+    DomModel model;
+    DomTradeWindow trades;
+    model.publish(book, trades, true, now);
+    const int r = rowAt(model, 2000);
+    const auto text = [&](int col) { return model.index(r, col).data().toString(); };
+    const QString bid = text(DomModel::Bid), price = text(DomModel::Price);
+    const QString neighbour = model.index(rowAt(model, 2010), DomModel::Price).data().toString();
+    EXPECT_EQ(bid, "4.5");
+    EXPECT_EQ(text(DomModel::Bid).constData(), bid.constData()); // repaint: the same shared string
+    // A scale-only publication (the wall scrolls out: decay) repaints without reformatting.
+    model.setVisibleRows(r - 20, r + 20);
+    model.publish(book, trades, true, now + 67);
+    model.setVisibleRows(r, r + 60);
+    model.publish(book, trades, true, now + 134);
+    model.setVisibleRows(r - 20, r + 20);
+    model.publish(book, trades, true, now + 201);
+    ASSERT_TRUE(model.needsRepublish(now + 201));
+    EXPECT_EQ(text(DomModel::Bid).constData(), bid.constData());
+    EXPECT_EQ(text(DomModel::Price).constData(), price.constData());
+    apply(book, {{true, 200, 5.5}});
+    model.publish(book, trades, true, now + 268);
+    EXPECT_EQ(text(DomModel::Bid), "5.5");
+    EXPECT_EQ(model.index(rowAt(model, 2010), DomModel::Price).data().toString().constData(), neighbour.constData()); // unchanged rows keep theirs
+    model.setCumulative(true);
+    EXPECT_EQ(text(DomModel::Bid), "5.5");
+    EXPECT_EQ(model.index(rowAt(model, 1950), DomModel::Bid).data().toString(), "406");
 }
 
 TEST(DomModel, BarsScaleToVisibleRowsWithSquareRootAndSmoothedMaximum) {
@@ -247,7 +413,15 @@ TEST(DomModel, SizesShowThreeSignificantDigitsWithoutFloatNoise) {
     EXPECT_EQ(DomModel::sizeText(-.25), "-.25");
     EXPECT_EQ(DomModel::sizeText(.000284), ".000284");
     EXPECT_EQ(DomModel::sizeText(2.92e-6), "<.0001"); // dust, never e-notation
-    EXPECT_EQ(DomModel::sizeText(-1e-7), "-<.0001");
+    EXPECT_EQ(DomModel::sizeText(1e-4), ".0001");
+    // Signed (Δ) values: never "-<.0001"; dust and exact cancellation read as about zero.
+    EXPECT_EQ(DomModel::signedSizeText(1.25), "+1.25");
+    EXPECT_EQ(DomModel::signedSizeText(-.5), "-.5");
+    EXPECT_EQ(DomModel::signedSizeText(1e-4), "+.0001");
+    EXPECT_EQ(DomModel::signedSizeText(-1e-4), "-.0001");
+    EXPECT_EQ(DomModel::signedSizeText(9.99e-5), "≈0");
+    EXPECT_EQ(DomModel::signedSizeText(-1e-7), "≈0");
+    EXPECT_EQ(DomModel::signedSizeText(0), "≈0");
     // The server sends float sizes widened to double: 0.0032f is 0.0031999999191612.
     const double noisy = double(0.0032f);
     EXPECT_EQ(DomModel::sizeText(noisy), ".0032");
