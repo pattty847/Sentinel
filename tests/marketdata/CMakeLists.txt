@@ -108,3 +108,10 @@ target_compile_definitions(test_market_data_engine_connect_timeout PRIVATE SENTI
 add_test(NAME MarketDataEngineConnectTimeoutTests COMMAND test_market_data_engine_connect_timeout)
 set_tests_properties(MarketDataEngineConnectTimeoutTests PROPERTIES LABELS "marketdata" TIMEOUT 60)
 add_dependencies(marketdata_tests test_market_data_engine_connect_timeout)
+
+add_executable(test_book_analytics test_book_analytics.cpp test_book_analytics_allocation.cpp)
+target_link_libraries(test_book_analytics PRIVATE sentinel_book_analytics GTest::gtest_main)
+set_target_properties(test_book_analytics PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+add_test(NAME BookAnalyticsTests COMMAND test_book_analytics)
+set_tests_properties(BookAnalyticsTests PROPERTIES LABELS "marketdata")
+add_dependencies(marketdata_tests test_book_analytics)

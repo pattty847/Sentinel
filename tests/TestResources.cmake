@@ -29,7 +29,7 @@ set(_sentinel_processors_two
     JournalAnchorTests)
 set(_sentinel_fast_tests
     LogThrottleTests LogSinkTests MetricsRegistryTests
-    LiveOrderBookTests MessageDispatcherTests SubscriptionManagerTests
+    BookAnalyticsTests LiveOrderBookTests MessageDispatcherTests SubscriptionManagerTests
     ProtocolValidationTests SentinelStreamClientParseHelperTests
     RecordingHistoryWireTests CoinbaseRestDeadlineTests
     CaptureRoutingTests TradingCoreTests AlgoTradingTests
