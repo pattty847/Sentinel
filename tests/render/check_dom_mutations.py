@@ -2,6 +2,7 @@
 """Fail-without-fix checks. Run inside build-queue; restores source in finally.
 
 python3 tests/render/check_dom_mutations.py [build/mac-clang]
+DOM_MUTANTS=pulse_ limits the run to mutants whose name starts with that prefix.
 Uses installed dependencies; each mutant must COMPILE and fail its behavior test.
 """
 from pathlib import Path
@@ -143,6 +144,89 @@ mutants = [
      [('std::chrono::duration_cast<std::chrono::milliseconds>(book.getLastUpdate().time_since_epoch()).count()',
        'QDateTime::currentMSecsSinceEpoch()')],
      'DomDock.QuietConnectedBookRetainsLastChangeAgeAndDetectsDisconnect'),
+    # Liquidity Pulse
+    ('pulse_threshold_ignored', model,
+     [('        if (event.size < pulseThreshold(bid)) continue;\n', '')],
+     'DomPulse.AddedPulledAndEatenFlashOnTheirRowsWithTagsAndSmallChangesHide'),
+    ('pulse_rows_not_reversed', model,
+     [('m_pulseRows[i] = {m_rows[last - i].bid, m_rows[last - i].ask};',
+       'm_pulseRows[i] = {m_rows[first + i].bid, m_rows[first + i].ask};')],
+     'DomPulse.AddedPulledAndEatenFlashOnTheirRowsWithTagsAndSmallChangesHide'),
+    ('pulse_trades_not_matched', model,
+     [('const auto status = m_classifier.update(snapshot, trades);', 'const auto status = m_classifier.update(snapshot);')],
+     'DomPulse.AddedPulledAndEatenFlashOnTheirRowsWithTagsAndSmallChangesHide'),
+    ('pulse_fades_in_three_seconds', header,
+     [('static constexpr qint64 PulseFadeMs = 1200;', 'static constexpr qint64 PulseFadeMs = 3000;')],
+     'DomPulse.FlashesFadeWithinTheFadeTimeAndRepublishSettles'),
+    ('pulse_never_expires', model,
+     [('if (f.change && nowMs - f.changeAt >= PulseFadeMs) {', 'if (false) {')],
+     'DomPulse.FlashesFadeWithinTheFadeTimeAndRepublishSettles'),
+    ('pulse_repaint_never_settles', model,
+     [('    m_repaintFirst = Rows;\n    m_repaintLast = -1;\n    m_rows.swap(m_next);', '    m_rows.swap(m_next);')],
+     'DomPulse.FlashesFadeWithinTheFadeTimeAndRepublishSettles'),
+    ('pulse_fade_not_repainted', model,
+     [('if (valueChanged || scaleChanged || pulseRepaint(r)) {', 'if (valueChanged || scaleChanged) {')],
+     'DomPulse.FlashesFadeWithinTheFadeTimeAndRepublishSettles'),
+    ('pulse_prices_by_row', model,
+     [('snapshot.firstPrice = double(m_top - last) * m_tick;', 'snapshot.firstPrice = double(Rows - 1 - last) * m_tick;')],
+     'DomPulse.ScrollFollowShiftSymbolSwitchAndWithdrawalProduceNoEvents'),
+    ('pulse_symbol_switch_keeps_baseline', model,
+     [('    ++m_pulseSeries;\n    resetPulse();\n', '')],
+     'DomPulse.ScrollFollowShiftSymbolSwitchAndWithdrawalProduceNoEvents'),
+    ('pulse_withdrawal_not_fed', model,
+     [('    const auto status = m_classifier.update(snapshot, trades);',
+       '    if (snapshot.rows.empty()) return;\n    const auto status = m_classifier.update(snapshot, trades);')],
+     'DomPulse.ScrollFollowShiftSymbolSwitchAndWithdrawalProduceNoEvents'),
+    ('pulse_footer_without_biggest_pull', model,
+     [('    if (t.largestPull && m_tick > 0)', '    if (false)')],
+     'DomPulse.FooterSumsEachKindPerSideAndNamesTheBiggestPull'),
+    ('pulse_tag_formatted_every_call', model,
+     [('    if (m_pulseTextValid[row] & (1u << slot)) return text;\n', '')],
+     'DomPulse.PublishAndStepAllocateNothingAfterWarmUp'),
+    ('pulse_only_when_dirty', dock,
+     [('quiet book.\n        if (m_pulseActive) {', 'quiet book.\n        if (m_pulseActive && m_dirty) {')],
+     'DomPulseDock.QuietBookTotalsExpireOnScheduleFedEveryTick'),
+    ('pulse_stamped_by_exchange_time', dock,
+     [('m_pulseTrades.push_back({trade.price, trade.size, aggressor, pulseClock(false)});',
+       'm_pulseTrades.push_back({trade.price, trade.size, aggressor, std::chrono::duration_cast<std::chrono::milliseconds>(trade.timestamp.time_since_epoch()).count()});')],
+     'DomPulseDock.TradesAreStampedOnReceiptAndEatTheNextSnapshot'),
+    ('pulse_same_millisecond_trade_dropped', dock,
+     [('m_lastPulseMs + 1);', 'm_lastPulseMs);')],
+     'DomPulseDock.TradesAreStampedOnReceiptAndEatTheNextSnapshot'),
+    ('pulse_no_rebaseline', dock,
+     [('    m_model->resetPulse();\n    m_footerVersion = UINT64_MAX;', '    m_footerVersion = UINT64_MAX;')],
+     'DomPulseDock.HiddenOrDisabledPulseDoesNoWorkAndStartsFromAFreshBaseline'),
+    ('pulse_ignores_toggle', dock,
+     [('const bool active = m_displayActive && m_pulseOn;', 'const bool active = m_displayActive;')],
+     'DomPulseDock.HiddenOrDisabledPulseDoesNoWorkAndStartsFromAFreshBaseline'),
+    ('pulse_unpersisted', dock,
+     [('    m_pulseOn = settings.value("OrderBookDock/pulse", true).toBool();\n', '')],
+     'DomPulseDock.PulseTogglePersistsAndRestores'),
+    ('pulse_eaten_in_level_colour', dock,
+     [('QColor color = barColor(!bidLevel, 1);', 'QColor color = barColor(bidLevel, 1);')],
+     'DomPulseDock.FlashesPaintInTheirColours'),
+    ('pulse_pulled_outline_missing', dock,
+     [('            painter->fillRect(QRect(x, box.top(), w, 1), grey);\n', '')],
+     'DomPulseDock.FlashesPaintInTheirColours'),
+    ('pulse_tag_reallocated_per_event', model,
+     [('    text.truncate(0);\n    text.append(QLatin1StringView(buffer, length));', '    text = QString::fromLatin1(buffer, length);')],
+     'DomPulseDock.FreshFlashesAndTheirPaintAllocateNothingAfterWarmUp'),
+    ('pulse_tag_drawn_as_text', dock,
+     [('        painter->drawImage(QRectF(x, y, w, glyphs.height), strip,\n                           QRectF(glyphs.offset[i] * scale, 0, w * scale, glyphs.height * scale));',
+       '        painter->drawText(QPointF(x, y + glyphs.ascent), QString(c));')],
+     'DomPulseDock.FreshFlashesAndTheirPaintAllocateNothingAfterWarmUp'),
+    ('pulse_tag_not_drawn', dock,
+     [('        painter->drawImage(QRectF(x, y, w, glyphs.height), strip,', '        if (false) painter->drawImage(QRectF(x, y, w, glyphs.height), strip,')],
+     'DomPulseDock.FlashesPaintInTheirColours'),
+    ('pulse_expiry_keeps_tag', model,
+     [('                m_pulseTextValid[r] &= uint8_t(~(1u << side));\n', '')],
+     'DomPulse.FlashesFadeWithinTheFadeTimeAndRepublishSettles'),
+    ('pulse_exponent_glyph_missing', header,
+     [('static constexpr char TagAlphabet[] = "0123456789.+-e<kmb\\xD7";', 'static constexpr char TagAlphabet[] = "0123456789.+-<kmb\\xD7";')],
+     'DomPulse.TagAlphabetCoversEverythingFormatSizeEmits'),
+    ('pulse_exponent_glyph_not_drawn', header,
+     [('static constexpr char TagAlphabet[] = "0123456789.+-e<kmb\\xD7";', 'static constexpr char TagAlphabet[] = "0123456789.+-<kmb\\xD7";')],
+     'DomPulseDock.ExponentTagsRenderEveryGlyph'),
 ]
 env = dict(os.environ, CCACHE_READONLY='1', CCACHE_TEMPDIR='/tmp')
 output = build / 'dom-validation'
@@ -155,6 +239,7 @@ def compile_target(name):
                        cwd=root, env=env, stdout=stream, stderr=subprocess.STDOUT, check=True)
 
 
+mutants = [m for m in mutants if m[0].startswith(os.environ.get('DOM_MUTANTS', ''))]
 try:
     for name, path, replacements, test in mutants:
         changed = original[path]

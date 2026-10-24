@@ -68,7 +68,7 @@ private:
     std::uint64_t matchTrades(const Snapshot& snapshot, std::span<const Trade> trades);
     void classify(const Snapshot& snapshot, std::int64_t firstTick);
     void classifySide(const Snapshot& snapshot, std::size_t row, std::size_t previous, Side side);
-    void emit(const Snapshot& snapshot, std::size_t row, Side side, EventKind kind, double size);
+    void emitEvent(const Snapshot& snapshot, std::size_t row, Side side, EventKind kind, double size);
     void expire(Milliseconds now);
     void refreshTotals();
     Step summarize(Milliseconds now) const;

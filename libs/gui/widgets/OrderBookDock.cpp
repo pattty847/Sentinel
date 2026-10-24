@@ -1,5 +1,6 @@
 #include "OrderBookDock.hpp"
 #include "ServiceLocator.hpp"
+#include "SentinelLogging.hpp"
 #include "../datasources/IGridDataSource.hpp"
 #include "../datasources/RemoteGridDataSource.hpp"
 #include "../render/heatmap/HeatmapPalette.hpp"
@@ -69,6 +70,134 @@ int DomBarDelegate::dimPrefixLength(const QString& price)
     return 0;
 }
 
+QColor DomBarDelegate::eatenColor(bool bidLevel, double alpha)
+{
+    // Sellers eat bids (ask colour), buyers eat asks (bid colour).
+    QColor color = barColor(!bidLevel, 1);
+    color.setAlpha(int(std::lround(150 * std::clamp(alpha, 0.0, 1.0))));
+    return color;
+}
+
+QColor DomBarDelegate::addedColor(bool bid, double alpha)
+{
+    QColor color = sizeTextColor(bid, 1);
+    color.setAlpha(int(std::lround(235 * std::clamp(alpha, 0.0, 1.0))));
+    return color;
+}
+
+QColor DomBarDelegate::pulledColor(double alpha)
+{
+    return QColor(170, 174, 180, int(std::lround(230 * std::clamp(alpha, 0.0, 1.0))));
+}
+
+const DomBarDelegate::TagGlyphs& DomBarDelegate::tagGlyphs(const QFont& font, qreal scale) const
+{
+    if (m_tags.scale == scale && m_tags.font == font) return m_tags;
+    static constexpr const char* charset = DomModel::TagAlphabet;
+    static_assert(sizeof DomModel::TagAlphabet - 1 <= std::tuple_size_v<decltype(TagGlyphs::offset)>);
+    const QFontMetrics metrics(font);
+    m_tags.font = font;
+    m_tags.scale = scale;
+    m_tags.height = metrics.height();
+    m_tags.ascent = metrics.ascent();
+    m_tags.index.fill(-1);
+    int total = 0;
+    for (int i = 0; charset[i]; ++i) {
+        const QChar c = QLatin1Char(charset[i]);
+        m_tags.index[uchar(charset[i])] = int8_t(i);
+        m_tags.offset[i] = total;
+        m_tags.width[i] = metrics.horizontalAdvance(c);
+        total += m_tags.width[i] + 1; // a gap keeps neighbouring glyphs from bleeding
+        m_tags.fallback = std::max(m_tags.fallback, m_tags.width[i]);
+    }
+    const std::array<QColor, TagGlyphs::Colours> colours{sizeTextColor(true, 1), sizeTextColor(false, 1),
+        pulledColor(1), barColor(true, 1), barColor(false, 1)};
+    for (int k = 0; k < TagGlyphs::Colours; ++k) {
+        QImage strip(int(std::ceil(total * scale)), int(std::ceil(m_tags.height * scale)), QImage::Format_ARGB32_Premultiplied);
+        strip.setDevicePixelRatio(scale);
+        strip.fill(Qt::transparent);
+        QPainter glyphs(&strip);
+        glyphs.setFont(font);
+        QColor colour = colours[k];
+        colour.setAlpha(255);
+        glyphs.setPen(colour);
+        for (int i = 0; charset[i]; ++i)
+            glyphs.drawText(QPointF(m_tags.offset[i], m_tags.ascent), QString(QLatin1Char(charset[i])));
+        glyphs.end();
+        m_tags.strips[k] = std::move(strip);
+    }
+    return m_tags;
+}
+
+int DomBarDelegate::tagWidth(const TagGlyphs& glyphs, const QString& text) const
+{
+    int width = 0;
+    for (const QChar c : text) {
+        const int i = c.unicode() < 256 ? glyphs.index[c.unicode()] : -1;
+        width += i >= 0 ? glyphs.width[i] : glyphs.fallback;
+    }
+    return width;
+}
+
+void DomBarDelegate::paintPulse(QPainter* painter, const QStyleOptionViewItem& opt, int row, bool bid,
+                                const QRect& area, double value, bool cumulative, const QString& label) const
+{
+    const DomPulseCell pulse = m_model->pulse(row, bid);
+    const int span = std::max(0, area.width());
+    // A bar extent [inner, outer] in fractions of the cell, drawn from the price side.
+    const auto extent = [&](double inner, double outer) {
+        const int a = int(std::lround(std::clamp(inner, 0.0, 1.0) * span));
+        const int b = int(std::lround(std::clamp(outer, 0.0, 1.0) * span));
+        return bid ? QRect(area.right() - b + 1, area.top(), std::max(1, b - a), area.height())
+                   : QRect(area.left() + a, area.top(), std::max(1, b - a), area.height());
+    };
+    if (pulse.change > 0 && pulse.changeAlpha > 0) {
+        // Added: a bright segment that grows outward from the old bar end.
+        const double inner = m_model->barFraction(std::max(0.0, value - pulse.change), bid, cumulative);
+        const double outer = m_model->barFraction(value, bid, cumulative);
+        painter->fillRect(extent(inner, inner + (outer - inner) * pulse.grow), addedColor(bid, pulse.changeAlpha));
+    } else if (pulse.change < 0 && pulse.changeAlpha > 0) {
+        // Pulled: a dashed outline of the removed size beyond the bar.
+        const double inner = m_model->barFraction(value, bid, cumulative);
+        const double outer = value > 0 ? m_model->barFraction(value - pulse.change, bid, cumulative)
+                                       : m_model->barFraction(-pulse.change, bid, false);
+        const QRect box = extent(inner, std::max(outer, inner + 2.0 / std::max(1, span)));
+        const QColor grey = pulledColor(pulse.changeAlpha);
+        for (int x = box.left(); x <= box.right(); x += 5) {
+            const int w = std::min(3, box.right() - x + 1);
+            painter->fillRect(QRect(x, box.top(), w, 1), grey);
+            painter->fillRect(QRect(x, box.bottom(), w, 1), grey);
+        }
+        painter->fillRect(QRect(bid ? box.left() : box.right(), box.top(), 1, box.height()), grey);
+    }
+    // One tag per cell, the newer flash; left-aligned, opposite the right-aligned size.
+    const bool eaten = pulse.eatenAlpha > 0 && pulse.eatenAlpha >= pulse.changeAlpha;
+    const double alpha = eaten ? pulse.eatenAlpha : pulse.changeAlpha;
+    if (alpha <= 0) return;
+    const QString& tag = m_model->pulseTag(row, bid, eaten);
+    if (tag.isEmpty()) return;
+    const auto& glyphs = tagGlyphs(opt.font, painter->device()->devicePixelRatioF());
+    const int needed = tagWidth(glyphs, tag) + (label.isEmpty() ? 0 : tagWidth(glyphs, label) + 6);
+    if (needed > opt.rect.width() - 6) return; // a cramped cell keeps the bar effect only
+    // Eaten: the aggressor's colour (buyers eat asks: bid colour); added: the side's tint; pulled: grey.
+    const int colour = eaten ? (bid ? 4 : 3) : pulse.change > 0 ? (bid ? 0 : 1) : 2;
+    const QImage& strip = glyphs.strips[colour];
+    const qreal scale = glyphs.scale;
+    qreal x = opt.rect.left() + 3;
+    const qreal y = opt.rect.top() + (opt.rect.height() - glyphs.height) / 2;
+    painter->setOpacity(alpha);
+    for (const QChar c : tag) {
+        const int i = c.unicode() < 256 ? glyphs.index[c.unicode()] : -1;
+        Q_ASSERT_X(i >= 0, "DomBarDelegate::paintPulse", "tag character missing from DomModel::TagAlphabet");
+        if (i < 0) continue;
+        const int w = glyphs.width[i];
+        painter->drawImage(QRectF(x, y, w, glyphs.height), strip,
+                           QRectF(glyphs.offset[i] * scale, 0, w * scale, glyphs.height * scale));
+        x += w;
+    }
+    painter->setOpacity(1);
+}
+
 void DomBarDelegate::drawFitted(QPainter* painter, const QStyleOptionViewItem& opt, const QString& text, const QColor& color)
 {
     if (text.isEmpty()) return;
@@ -106,6 +235,7 @@ void DomBarDelegate::paintSize(QPainter* painter, const QStyleOptionViewItem& op
         painter->fillRect(bar, fill);
         text = sizeTextColor(bid, fraction);
     }
+    paintPulse(painter, opt, row, bid, area, value, cumulative, label);
     if (!cumulative && !best) {
         // Faint depth line: cumulative size from the touch, on the cumulative scale.
         const double depth = m_model->barFraction(m_model->size(row, bid, true), bid, true);
@@ -149,6 +279,11 @@ void DomBarDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option
     const auto* style = opt.widget ? opt.widget->style() : QApplication::style();
     style->drawControl(QStyle::CE_ItemViewItem, &opt, painter, opt.widget);
     painter->save();
+    // Eaten: the whole row flashes in the aggressor's colour while it fades.
+    for (const bool bidLevel : {true, false}) {
+        const double eaten = m_model->pulse(index.row(), bidLevel).eatenAlpha;
+        if (eaten > 0) painter->fillRect(opt.rect, eatenColor(bidLevel, eaten));
+    }
     switch (index.column()) {
     case DomModel::Bid:
     case DomModel::Ask: paintSize(painter, opt, index, text); break;
@@ -164,6 +299,8 @@ void DomBarDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option
 OrderBookDock::OrderBookDock(QWidget* parent, IGridDataSource* source)
     : DockablePanel("orderbook", "Order Book", parent), m_source(source ? source : ServiceLocator::dataSource())
 {
+    m_pulseTrades.reserve(PulseTradeCapacity);
+    m_pulseElapsed.start();
     buildUi();
     m_timer.setParent(this);
     m_timer.setObjectName("domPublishTimer");
@@ -223,7 +360,17 @@ void OrderBookDock::buildUi()
     m_cumulative->setToolTip("Cumulative size: Bid and Ask show size summed from the touch outward.\n"
                              "Off: per-row size, with a faint cumulative depth line inside the bars.");
     connect(m_cumulative, &QToolButton::toggled, this, &OrderBookDock::setCumulative);
+    m_pulse = new QToolButton(m_contentWidget);
+    m_pulse->setText("Pulse");
+    m_pulse->setObjectName("domPulse");
+    m_pulse->setAccessibleName("Liquidity Pulse");
+    m_pulse->setCheckable(true);
+    m_pulse->setToolTip("Liquidity Pulse: each book change flashes as what it was.\n"
+                        "Bright segment +size: added. Grey dashed outline -size: pulled (cancelled).\n"
+                        "Row flash ×size in the aggressor's colour: eaten by trades.\n"
+                        "Changes under 5% of the side's largest visible level are not flashed.");
     heading->addWidget(m_symbolLabel, 1);
+    heading->addWidget(m_pulse);
     heading->addWidget(m_cumulative);
     heading->addWidget(m_recenter);
     layout->addLayout(heading);
@@ -271,9 +418,45 @@ void OrderBookDock::buildUi()
     m_table->installEventFilter(this);
     m_table->verticalScrollBar()->installEventFilter(this);
     layout->addWidget(m_table, 1);
+    m_pulseFooter = label("domPulseFooter");
+    layout->addWidget(m_pulseFooter);
     // Same settings store and format as the other docks (AGENTS 4b: never a native-format QSettings).
     QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
     m_cumulative->setChecked(settings.value("OrderBookDock/cumulative", false).toBool());
+    m_pulseOn = settings.value("OrderBookDock/pulse", true).toBool();
+    m_pulse->setChecked(m_pulseOn);
+    m_pulseFooter->setVisible(m_pulseOn);
+    connect(m_pulse, &QToolButton::toggled, this, &OrderBookDock::setPulse);
+}
+
+void OrderBookDock::setPulse(bool on)
+{
+    m_pulseOn = on;
+    m_pulseFooter->setVisible(on);
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
+    settings.setValue("OrderBookDock/pulse", on);
+    updatePulseActive();
+}
+
+void OrderBookDock::updatePulseActive()
+{
+    // Hidden or off: no classification; any return starts from a fresh baseline.
+    const bool active = m_displayActive && m_pulseOn;
+    if (active == m_pulseActive) return;
+    m_pulseActive = active;
+    m_pulseTrades.clear();
+    m_model->resetPulse();
+    m_footerVersion = UINT64_MAX;
+    m_dirty = true;
+}
+
+qint64 OrderBookDock::pulseClock(bool snapshot)
+{
+    // Strictly after the last snapshot: a trade received in the same millisecond
+    // as a snapshot belongs to the next one, and snapshots strictly increase.
+    const qint64 now = std::max(m_pulseClockSource ? m_pulseClockSource() : m_pulseElapsed.elapsed(), m_lastPulseMs + 1);
+    if (snapshot) m_lastPulseMs = now;
+    return now;
 }
 
 void OrderBookDock::setCumulative(bool on)
@@ -297,6 +480,7 @@ void OrderBookDock::onSymbolChanged(const QString& symbol)
     m_symbol = symbol;
     m_symbolId = symbol.toStdString();
     m_trades.clear();
+    m_pulseTrades.clear();
     const auto connected = m_freshness.connected;
     m_freshness = {};
     m_freshness.connected = m_source ? m_source->connectionState() : connected;
@@ -318,6 +502,17 @@ void OrderBookDock::onTradeReceived(const Trade& trade)
 {
     if (m_symbol.isEmpty() || trade.product_id != m_symbolId) return;
     m_trades.ingest(trade); // Also before the first book, and while hidden.
+    if (m_pulseActive) {
+        if (m_pulseTrades.size() < m_pulseTrades.capacity()) {
+            const auto aggressor = trade.side == AggressorSide::Buy ? sentinel::book::Aggressor::Buy
+                : trade.side == AggressorSide::Sell ? sentinel::book::Aggressor::Sell : sentinel::book::Aggressor::Unknown;
+            m_pulseTrades.push_back({trade.price, trade.size, aggressor, pulseClock(false)});
+        } else if (!m_pulseOverflowWarned) {
+            m_pulseOverflowWarned = true;
+            sLog_Warning("DOM pulse trade batch full capacity=" << PulseTradeCapacity << " symbol=" << m_symbol
+                         << ": later trades in this tick are not matched");
+        }
+    }
     m_dirty = true;
 }
 
@@ -348,6 +543,7 @@ void OrderBookDock::updateDisplayTimer()
         m_dirty = true;
         m_timer.start();
     } else m_timer.stop();
+    updatePulseActive();
 }
 
 void OrderBookDock::showEvent(QShowEvent* event)
@@ -425,6 +621,11 @@ void OrderBookDock::refreshDisplay()
         // Scale decay, visible-range changes and trades leaving the window need a publish too.
         if (m_model->needsRepublish(now)) m_dirty = true;
         if (m_dirty) m_model->publish(book, m_trades, m_follow, now);
+        // Every exposed tick, changed or not, so the 10 s totals keep moving on a quiet book.
+        if (m_pulseActive) {
+            m_model->pulseStep(pulseClock(true), m_pulseTrades);
+            m_pulseTrades.clear();
+        }
     }
     if (m_dirty) {
         m_recenter->setText(m_follow ? "Following" : "Recenter");
@@ -494,4 +695,23 @@ void OrderBookDock::updateSummary()
     m_aggregation->setToolTip(m_model->aggregation() + "\n" + m_model->executionSummary());
     m_summary->setText(m_model->summary(!wide));
     m_summary->setToolTip(m_model->summary() + "\n" + m_model->executionSummary());
+    updatePulseFooter();
+}
+
+void OrderBookDock::updatePulseFooter()
+{
+    if (!m_pulseOn) return;
+    const int width = m_pulseFooter->width();
+    if (m_model->pulseTotalsVersion() == m_footerVersion && width == m_footerWidth) return;
+    m_footerVersion = m_model->pulseTotalsVersion();
+    m_footerWidth = width;
+    const QString full = m_model->pulseSummary();
+    const bool fits = m_pulseFooter->fontMetrics().horizontalAdvance(full) <= width;
+    m_pulseFooter->setText(fits ? full : m_model->pulseSummary(true));
+    const auto& totals = m_model->pulseTotals();
+    m_pulseFooter->setToolTip(QStringLiteral("Book changes over the last %1 s in the rows on screen (plus %2 rows each way), all sizes:\n%3\n"
+                                             "Added: asks %4 · bids %5 %6. Pulled = cancelled before price got there; eaten = removed by trades.")
+        .arg(DomModel::PulseWindowMs / 1000).arg(DomModel::PulseMarginRows).arg(full)
+        .arg(DomModel::sizeText(totals.side[1].added), DomModel::sizeText(totals.side[0].added),
+             m_symbol.section('-', 0, 0)));
 }

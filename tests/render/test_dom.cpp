@@ -25,8 +25,56 @@
 #include <QTest>
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
 #include <iostream>
+#include <new>
 #include <numeric>
+
+// Allocation counter for the pulse publish/step assertions (test binary only).
+namespace {
+std::atomic<bool> gCounting{false};
+std::atomic<size_t> gAllocations{0};
+void* counted(std::size_t n) {
+    if (gCounting.load(std::memory_order_relaxed)) gAllocations.fetch_add(1, std::memory_order_relaxed);
+    if (void* p = std::malloc(n ? n : 1)) return p;
+    throw std::bad_alloc();
+}
+} // namespace
+void* operator new(std::size_t n) { return counted(n); }
+void* operator new[](std::size_t n) { return counted(n); }
+void* operator new(std::size_t n, const std::nothrow_t&) noexcept { if (gCounting) gAllocations++; return std::malloc(n ? n : 1); }
+void* operator new[](std::size_t n, const std::nothrow_t&) noexcept { if (gCounting) gAllocations++; return std::malloc(n ? n : 1); }
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+
+// Qt containers (QString, QArrayData) allocate through malloc, which the operator new counter
+// cannot see. On macOS libmalloc calls the exported malloc_logger hook (the one malloc stack
+// logging uses) for every allocation and reallocation in the process, whichever image or zone made
+// it: Qt frameworks, libc++ and this executable alike. Counted on the main thread only. It does
+// not see stack memory or memory a library obtains with mmap/vm_allocate instead of malloc.
+#if defined(__APPLE__)
+#include <pthread.h>
+using MallocLogger = void(uint32_t type, uintptr_t, uintptr_t, uintptr_t, uintptr_t result, uint32_t);
+extern "C" MallocLogger* malloc_logger;
+namespace {
+std::atomic<size_t> gMallocs{0};
+void countMallocs(uint32_t type, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uint32_t) {
+    constexpr uint32_t allocate = 2; // MALLOC_LOG_TYPE_ALLOCATE, also set on realloc
+    if ((type & allocate) && gCounting.load(std::memory_order_relaxed) && pthread_main_np())
+        gMallocs.fetch_add(1, std::memory_order_relaxed);
+}
+struct MallocHook {
+    MallocHook() { malloc_logger = &countMallocs; }
+} gMallocHook;
+} // namespace
+constexpr bool kMallocCounted = true;
+#else
+namespace { std::atomic<size_t> gMallocs{0}; }
+constexpr bool kMallocCounted = false;
+#endif
 
 namespace {
 Trade trade(double price, AggressorSide side, double size = 1) {
@@ -760,6 +808,214 @@ TEST(DomModel, LockedAndCrossedBooksRetainUniqueSideRows) {
     }
 }
 
+namespace sb = sentinel::book;
+// Book, model and the pulse's monotonic clock, stepped like the dock's 67 ms timer.
+struct PulseRig {
+    LiveOrderBook book;
+    DomModel model;
+    DomTradeWindow trades;
+    qint64 wall = 1'800'000'000'000, t = 1000;
+    PulseRig() {
+        book.initialize(0, 400, 0.1);
+        model.clear("BTC-USD");
+        apply(book, {{true, 200, 10}, {true, 199.9, 4}, {true, 199.8, 4}, {true, 199.7, 4},
+                     {false, 200.1, 10}, {false, 200.2, 4}, {false, 200.3, 4}, {false, 200.4, 4}});
+    }
+    // A trade received after the last step: inside the next step's interval.
+    sb::Trade received(double price, double size, sb::Aggressor side) const { return {price, size, side, t + 1}; }
+    void step(std::span<const sb::Trade> received = {}, bool follow = true) {
+        wall += 67;
+        t += 67;
+        model.publish(book, trades, follow, wall);
+        model.pulseStep(t, received);
+    }
+    int row(qint64 key) { return rowAt(model, key); }
+    DomPulseCell cell(qint64 key, bool bid) { return model.pulse(row(key), bid); }
+};
+
+TEST(DomPulse, AddedPulledAndEatenFlashOnTheirRowsWithTagsAndSmallChangesHide) {
+    PulseRig rig;
+    rig.step();
+    ASSERT_EQ(rig.model.lastPulseEvents(), 0u); // first step only observes
+    const std::array trades{rig.received(200.1, 2.5, sb::Aggressor::Buy)};
+    apply(rig.book, {{true, 199.9, 6}, {false, 200.2, 1}, {false, 200.1, 7.5}, {true, 199.8, 4.1}});
+    rig.step(trades);
+    EXPECT_EQ(rig.model.lastPulseEvents(), 4u); // the classifier sees the 0.1 change too
+    const auto added = rig.cell(1999, true), pulled = rig.cell(2002, false), eaten = rig.cell(2001, false);
+    EXPECT_DOUBLE_EQ(added.change, 2);
+    EXPECT_DOUBLE_EQ(added.changeAlpha, 1);
+    EXPECT_LT(added.grow, 1); // the segment grows outward over the first ticks
+    EXPECT_EQ(rig.model.pulseTag(rig.row(1999), true, false), "+2");
+    EXPECT_DOUBLE_EQ(pulled.change, -3);
+    EXPECT_EQ(rig.model.pulseTag(rig.row(2002), false, false), "-3");
+    EXPECT_DOUBLE_EQ(eaten.eaten, 2.5);
+    EXPECT_DOUBLE_EQ(eaten.change, 0); // the drop was traded, not pulled
+    EXPECT_EQ(rig.model.pulseTag(rig.row(2001), false, true), "×2.5");
+    // 0.1 is under 5% of the largest visible bid (10): no flash.
+    EXPECT_DOUBLE_EQ(rig.model.pulseThreshold(true), 0.5);
+    EXPECT_DOUBLE_EQ(rig.cell(1998, true).change, 0);
+    for (qint64 key : {1997, 2000, 2003}) {
+        EXPECT_EQ(rig.cell(key, true).change + rig.cell(key, false).change, 0) << key;
+        EXPECT_EQ(rig.cell(key, true).eaten + rig.cell(key, false).eaten, 0) << key;
+    }
+}
+
+TEST(DomPulse, FlashesFadeWithinTheFadeTimeAndRepublishSettles) {
+    PulseRig rig;
+    rig.step();
+    apply(rig.book, {{false, 200.2, 1}});
+    rig.step();
+    const int row = rig.row(2002);
+    ASSERT_DOUBLE_EQ(rig.cell(2002, false).change, -3);
+    ASSERT_EQ(rig.model.pulseTag(row, false, false), "-3"); // cached while live
+    QSignalSpy changed(&rig.model, &QAbstractItemModel::dataChanged);
+    double alpha = 1;
+    // Unchanged book: the fading row still repaints every tick.
+    constexpr qint64 fadeMs = 1200; // owner spec, not the constant under test
+    for (qint64 age = 67; age < fadeMs; age += 67) {
+        ASSERT_TRUE(rig.model.needsRepublish(rig.wall + 67)) << age;
+        const int before = changed.count();
+        rig.step();
+        ASSERT_EQ(changed.count(), before + 1) << age;
+        EXPECT_LE(changed.last().at(0).value<QModelIndex>().row(), row);
+        EXPECT_GE(changed.last().at(1).value<QModelIndex>().row(), row);
+        const double now = rig.cell(2002, false).changeAlpha;
+        EXPECT_LT(now, alpha) << age;
+        EXPECT_GT(now, 0) << age;
+        alpha = now;
+    }
+    rig.step(); // 1,206 ms: gone
+    EXPECT_DOUBLE_EQ(rig.cell(2002, false).change, 0);
+    EXPECT_TRUE(rig.model.pulseTag(row, false, false).isEmpty());
+    ASSERT_TRUE(rig.model.needsRepublish(rig.wall + 67)); // repaint the cleared row once
+    const int before = changed.count();
+    rig.step();
+    EXPECT_EQ(changed.count(), before + 1);
+    EXPECT_FALSE(rig.model.needsRepublish(rig.wall + 67));
+    rig.step();
+    EXPECT_FALSE(rig.model.needsRepublish(rig.wall + 67));
+}
+
+TEST(DomPulse, ScrollFollowShiftSymbolSwitchAndWithdrawalProduceNoEvents) {
+    PulseRig rig;
+    apply(rig.book, {{true, 199.6, 4}, {true, 199.5, 4}, {true, 199.4, 4}, {false, 200.5, 4}, {false, 200.6, 4}});
+    const auto flashes = [&] {
+        int live = 0;
+        for (int r = 0; r < rig.model.rowCount(); ++r)
+            for (bool bid : {true, false}) live += rig.model.pulse(r, bid).change != 0 || rig.model.pulse(r, bid).eaten != 0;
+        return live;
+    };
+    rig.step();
+    const int center = rig.model.centerRow();
+    // Scroll: the visible window moves by 12 rows, the book does not.
+    rig.model.setVisibleRows(center - 30, center - 6);
+    rig.step({}, false);
+    EXPECT_EQ(rig.model.lastPulseEvents(), 0u);
+    // Follow: the mid falls three ticks; only the five pulled bids are events.
+    rig.model.setVisibleRows(center - 12, center + 12);
+    rig.step();
+    const auto top = rig.model.index(0, 0).data(DomModel::BucketRole).toLongLong();
+    apply(rig.book, {{true, 200, 0}, {true, 199.9, 0}, {true, 199.8, 0}, {true, 199.7, 0}, {true, 199.6, 0}});
+    rig.step();
+    ASSERT_NE(rig.model.index(0, 0).data(DomModel::BucketRole).toLongLong(), top);
+    EXPECT_EQ(rig.model.lastPulseEvents(), 5u);
+    EXPECT_EQ(flashes(), 5);
+    for (qint64 key : {2000, 1999, 1998, 1997, 1996}) EXPECT_LT(rig.cell(key, true).change, 0) << key;
+    // Pinned, then Recenter with an unchanged book: a window move alone.
+    rig.step({}, false);
+    apply(rig.book, {{false, 200.1, 0}, {false, 200.2, 0}, {false, 200.3, 0}});
+    rig.step({}, false);
+    EXPECT_EQ(rig.model.lastPulseEvents(), 3u);
+    const auto pinned = rig.model.index(0, 0).data(DomModel::BucketRole).toLongLong();
+    rig.step({}, true);
+    ASSERT_NE(rig.model.index(0, 0).data(DomModel::BucketRole).toLongLong(), pinned);
+    EXPECT_EQ(rig.model.lastPulseEvents(), 0u);
+    // Symbol switch: another product's book at the same prices is a fresh baseline.
+    rig.model.clear("ETH-USD");
+    EXPECT_EQ(flashes(), 0);
+    apply(rig.book, {{true, 199.5, 40}, {true, 199.4, 1}, {false, 200.5, 30}, {false, 200.6, 1}});
+    rig.step();
+    EXPECT_EQ(rig.model.lastPulseEvents(), 0u);
+    EXPECT_EQ(flashes(), 0);
+    // Withdrawal (INV-130 empty update clears the replica), then different sizes return.
+    rig.book.clear();
+    rig.step();
+    EXPECT_EQ(rig.model.rowCount(), 0);
+    EXPECT_EQ(rig.model.lastPulseEvents(), 0u);
+    rig.book.initialize(0, 400, 0.1);
+    apply(rig.book, {{true, 199.5, 2}, {true, 199.4, 9}, {false, 200.5, 1}, {false, 200.6, 9}});
+    rig.step();
+    EXPECT_EQ(rig.model.lastPulseEvents(), 0u);
+    EXPECT_EQ(flashes(), 0);
+    EXPECT_FALSE(rig.model.needsRepublish(rig.wall + 67));
+}
+
+TEST(DomPulse, FooterSumsEachKindPerSideAndNamesTheBiggestPull) {
+    PulseRig rig;
+    rig.step();
+    EXPECT_EQ(rig.model.pulseSummary(), "Asks pulled 0 eaten 0 · Bids pulled 0 eaten 0");
+    const std::array first{rig.received(200.1, 1.1, sb::Aggressor::Buy), rig.received(200, 2, sb::Aggressor::Sell)};
+    apply(rig.book, {{false, 200.1, 8.9}, {true, 200, 8}, {false, 200.3, 0}, {false, 200.4, 1.2}});
+    rig.step(first);
+    apply(rig.book, {{true, 199.7, 3.6}, {false, 200.2, 4.5}});
+    rig.step();
+    // Asks pulled 4 + 2.8, bids 0.4; the largest single pull is the 4 at 200.3.
+    EXPECT_EQ(rig.model.pulseSummary(), "Asks pulled 6.8 eaten 1.1 · Bids pulled .4 eaten 2 · biggest pull 4 @ 200.3");
+    EXPECT_EQ(rig.model.pulseSummary(true), "Ask pull 6.8 eat 1.1 · Bid pull .4 eat 2 · max 4 @ 200.3");
+    EXPECT_DOUBLE_EQ(rig.model.pulseTotals().side[1].added, 0.5);
+    const auto version = rig.model.pulseTotalsVersion();
+    rig.step();
+    EXPECT_EQ(rig.model.pulseTotalsVersion(), version); // unchanged numbers: no footer rebuild
+}
+
+TEST(DomPulse, PublishAndStepAllocateNothingAfterWarmUp) {
+    PulseRig rig;
+    std::array<sb::Trade, 4> received{};
+    int tags = 0;
+    const auto cycle = [&](int i) {
+        received[0] = rig.received(200.1, 0.5, sb::Aggressor::Buy);
+        rig.step(std::span(received.data(), 1), i % 7 != 0);
+        for (int r = rig.model.centerRow() - 6; r <= rig.model.centerRow() + 6; ++r)
+            for (bool bid : {true, false}) {
+                const auto cell = rig.model.pulse(r, bid);
+                if (cell.change) tags += !rig.model.pulseTag(r, bid, false).isEmpty();
+                if (cell.eaten) tags += !rig.model.pulseTag(r, bid, true).isEmpty();
+            }
+        (void)rig.model.needsRepublish(rig.wall);
+        (void)rig.model.pulseTotals();
+    };
+    for (int i = 0; i < 40; ++i) cycle(i);
+    std::vector<std::array<BookLevelUpdate, 2>> changes;
+    for (int i = 0; i < 60; ++i) changes.push_back({BookLevelUpdate{false, 200.1, 10.0 - i % 3}, BookLevelUpdate{true, 199.9, 4.0 + i % 5}});
+    size_t allocations = 0;
+    for (int i = 0; i < 60; ++i) {
+        rig.book.applyUpdates(std::span(changes[i]), std::chrono::system_clock::now(), nullptr); // replica work, not counted
+        gAllocations = 0;
+        gCounting = true;
+        cycle(i);
+        // Fading frames repaint flashes and tags without new events.
+        cycle(i);
+        gCounting = false;
+        allocations += gAllocations;
+    }
+    EXPECT_EQ(allocations, 0u); // operator new: classifier, model and std containers
+    EXPECT_GT(tags, 200); // the counted cycles read live tags
+    // Qt strings allocate through malloc, outside that counter: a fading tag is the same
+    // shared string on every repaint, formatted once when its flash starts.
+    apply(rig.book, {{true, 199.8, 9}});
+    rig.step();
+    const int row = rig.row(1998);
+    const QChar* tag = rig.model.pulseTag(row, true, false).constData();
+    ASSERT_EQ(rig.model.pulseTag(row, true, false), "+5");
+    const auto formats = rig.model.pulseTagFormats();
+    for (int i = 0; i < 10; ++i) {
+        rig.step();
+        ASSERT_GT(rig.model.pulse(row, true).changeAlpha, 0);
+        EXPECT_EQ(rig.model.pulseTag(row, true, false).constData(), tag) << i;
+    }
+    EXPECT_EQ(rig.model.pulseTagFormats(), formats); // formatted once, when the flash started
+}
+
 TEST(DomFreshness, LiveQuietBookHasChangeAgeButDoesNotBecomeStale) {
     DomFreshness state;
     EXPECT_TRUE(state.text(10000).startsWith("Waiting"));
@@ -1104,6 +1360,269 @@ TEST_F(DomDock, TradesLeaveTheWindowWithoutAnyNewEvent) {
     EXPECT_DOUBLE_EQ(vol(*model, rowAt(*model, 2000), DomModel::Buys), 2);
     QTest::qWait(600); // the dock's own 67 ms timer, no book or trade event
     EXPECT_DOUBLE_EQ(vol(*model, rowAt(*model, 2000), DomModel::Buys), 0);
+}
+
+struct DomPulseDock : DomDock {
+    qint64 clock = 5000;
+    QTimer* timer = nullptr;
+    void SetUp() override {
+        DomDock::SetUp();
+        dock.setPulseClock([this] { return clock; });
+        source.update({{true, 200, 10}, {true, 199.9, 5}, {false, 200.1, 10}, {false, 200.2, 4}});
+        show();
+        timer = dock.findChild<QTimer*>("domPublishTimer");
+        timer->stop();
+        tick();
+    }
+    void tick(qint64 ms = 67) {
+        flushEvents();
+        clock += ms;
+        QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection);
+    }
+    QToolButton* toggle() { return dock.findChild<QToolButton*>("domPulse"); }
+    DomPulseCell cell(qint64 key, bool bid) { return model->pulse(rowAt(*model, key), bid); }
+};
+
+TEST_F(DomPulseDock, QuietBookTotalsExpireOnScheduleFedEveryTick) {
+    ASSERT_TRUE(toggle()->isChecked()); // default on
+    source.update({{true, 199.9, 0}});
+    tick();
+    const auto footer = dock.findChild<QLabel*>("domPulseFooter");
+    ASSERT_TRUE(footer->isVisible());
+    EXPECT_EQ(footer->text(), "Asks pulled 0 eaten 0 · Bids pulled 5 eaten 0 · biggest pull 5 @ 199.9");
+    EXPECT_TRUE(footer->toolTip().contains("last 10 s"));
+    // The bar scale decays in wall time: let it settle so only the pulse clock moves.
+    QTest::qWait(700);
+    // No book change for ten seconds: the totals still move, from the timer alone.
+    for (int i = 1; i < 149; ++i) tick();
+    EXPECT_EQ(footer->text(), "Asks pulled 0 eaten 0 · Bids pulled 5 eaten 0 · biggest pull 5 @ 199.9");
+    tick(); // 9,983 ms after the pull
+    EXPECT_TRUE(footer->text().contains("Bids pulled 5"));
+    tick(); // 10,050 ms
+    EXPECT_EQ(footer->text(), "Asks pulled 0 eaten 0 · Bids pulled 0 eaten 0");
+}
+
+TEST_F(DomPulseDock, TradesAreStampedOnReceiptAndEatTheNextSnapshot) {
+    // Received in the same millisecond as the last snapshot, carrying an old exchange time.
+    source.send(tradeAt(1000, 200.1, AggressorSide::Buy, 2));
+    source.update({{false, 200.1, 8}});
+    tick();
+    EXPECT_DOUBLE_EQ(cell(2001, false).eaten, 2);
+    EXPECT_DOUBLE_EQ(cell(2001, false).change, 0);
+    for (int i = 0; i < 20; ++i) {
+        source.send(trade(200, AggressorSide::Sell, 0.5));
+        source.update({{true, 200, 10.0 - 0.5 * (i + 1)}});
+        tick(i % 3 ? 67 : 0); // also a tick in the same millisecond
+        EXPECT_DOUBLE_EQ(cell(2000, true).eaten, 0.5) << i;
+    }
+    EXPECT_EQ(model->pulseOutOfIntervalTotal(), 0u);
+}
+
+TEST_F(DomPulseDock, HiddenOrDisabledPulseDoesNoWorkAndStartsFromAFreshBaseline) {
+    const auto noFlashes = [&] {
+        for (qint64 key : {1999, 2000, 2001, 2002})
+            for (bool bid : {true, false}) EXPECT_EQ(cell(key, bid).change + cell(key, bid).eaten, 0) << key << bid;
+    };
+    dock.hide();
+    const auto steps = model->pulseSteps();
+    source.update({{true, 199.9, 0}, {false, 200.2, 40}});
+    source.send(trade(200.1, AggressorSide::Buy, 3));
+    source.update({{false, 200.1, 7}});
+    tick();
+    QTest::qWait(160);
+    EXPECT_EQ(model->pulseSteps(), steps);
+    show();
+    timer->stop();
+    tick();
+    EXPECT_EQ(model->lastPulseEvents(), 0u); // no burst of what changed while hidden
+    noFlashes();
+    toggle()->click();
+    EXPECT_FALSE(dock.findChild<QLabel*>("domPulseFooter")->isVisible());
+    const auto off = model->pulseSteps();
+    source.update({{true, 199.9, 6}, {false, 200.2, 1}});
+    for (int i = 0; i < 5; ++i) tick();
+    EXPECT_EQ(model->pulseSteps(), off);
+    noFlashes();
+    toggle()->click();
+    tick();
+    EXPECT_EQ(model->lastPulseEvents(), 0u);
+    noFlashes();
+    source.update({{true, 199.9, 9}});
+    tick();
+    EXPECT_DOUBLE_EQ(cell(1999, true).change, 3);
+}
+
+TEST_F(DomPulseDock, PulseTogglePersistsAndRestores) {
+    ASSERT_TRUE(toggle()->isChecked());
+    toggle()->click();
+    {
+        Source other;
+        OrderBookDock reopened{nullptr, &other};
+        EXPECT_FALSE(reopened.findChild<QToolButton*>("domPulse")->isChecked());
+    }
+    toggle()->click();
+    Source other;
+    OrderBookDock reopened{nullptr, &other};
+    EXPECT_TRUE(reopened.findChild<QToolButton*>("domPulse")->isChecked());
+}
+
+TEST_F(DomPulseDock, FlashesPaintInTheirColours) {
+    source.send(trade(200.1, AggressorSide::Buy, 3));
+    source.update({{false, 200.1, 7}, {true, 199.9, 0}});
+    tick();
+    const QImage image = table->viewport()->grab().toImage();
+    const auto pixel = [&](qint64 key, int col, double x, double y = 0.5) {
+        const QRect cell = table->visualRect(model->index(rowAt(*model, key), col));
+        return image.pixelColor(cell.left() + int(cell.width() * x), cell.top() + int(cell.height() * y));
+    };
+    // Eaten ask row: a buyer's flash (bid colour) across the row, the price cell included.
+    const QColor eaten = pixel(2001, DomModel::Price, 0.1);
+    EXPECT_GT(eaten.blue(), eaten.red() + 40);
+    // Pulled bid (5 of a visible 10): a grey dashed outline where the bar was, nothing inside.
+    const QColor inside = pixel(1999, DomModel::Bid, 0.85);
+    EXPECT_LT(std::abs(inside.blue() - inside.red()), 12);
+    // Its top edge is dashed grey; the same pixels of an untouched row are plain background.
+    const QRect cell = table->visualRect(model->index(rowAt(*model, 1999), DomModel::Bid));
+    const QRect plain = table->visualRect(model->index(rowAt(*model, 1990), DomModel::Bid));
+    int dashes = 0;
+    for (int x = cell.right() - 6; x > cell.right() - 60; --x) {
+        const QColor c = image.pixelColor(x, cell.top() + 2);
+        dashes += c != image.pixelColor(x, plain.top() + 2) && std::abs(c.red() - c.blue()) < 20 && c.red() > 90;
+    }
+    EXPECT_GT(dashes, 15);
+    EXPECT_LT(dashes, 45);
+    // Its "-5" tag sits at the cell's outer (left) edge in grey glyphs from the tag strip.
+    int ink = 0;
+    for (int x = cell.left() + 3; x < cell.left() + 30; ++x)
+        for (int y = cell.top() + 4; y < cell.bottom() - 4; ++y) {
+            const QColor c = image.pixelColor(x, y);
+            ink += c != image.pixelColor(x, plain.top() + (y - cell.top())) && std::abs(c.red() - c.blue()) < 20;
+        }
+    EXPECT_GT(ink, 8);
+}
+
+TEST(DomPulse, InPlaceTagDigitsMatchTheLadderSizeText) {
+    for (double v : {0.0, 0.00005, 0.0001, 0.000123, 0.0032, 0.4, 0.634, 1.0, 2.5, 2.8, 6.8, 13.6, 100.0, 999.4,
+                     999.5, 1360.0, 12345.0, 999'500.0, 2.5e9, 7.1e12}) {
+        char buffer[DomModel::PulseTagCapacity];
+        const int n = DomModel::formatSize(buffer, DomModel::PulseTagCapacity, v);
+        EXPECT_EQ(QString::fromLatin1(buffer, n), DomModel::sizeText(v)) << v;
+    }
+}
+
+TEST(DomPulse, TagAlphabetCoversEverythingFormatSizeEmits) {
+    const std::string alphabet = DomModel::TagAlphabet;
+    std::vector<double> values{0, 1e-5, 0.0001, 7.1e12, -7.1e12, 9.99e14, 1e300, -2.5};
+    for (double v = 1e-4; v < 1e18; v *= 1.37) values.push_back(v);
+    for (double v : values) {
+        char buffer[DomModel::PulseTagCapacity];
+        const int n = DomModel::formatSize(buffer, DomModel::PulseTagCapacity - 1, v);
+        ASSERT_GT(n + (v == 0 ? 1 : 0), 0) << v;
+        for (int i = 0; i < n; ++i) EXPECT_NE(alphabet.find(buffer[i]), std::string::npos) << v << " '" << buffer[i] << "'";
+    }
+    for (char prefix : {'+', '-', '\xD7'}) EXPECT_NE(alphabet.find(prefix), std::string::npos);
+}
+
+TEST_F(DomPulseDock, ExponentTagsRenderEveryGlyph) {
+    source.update({{true, 199.9, 7.1e12}});
+    for (int i = 0; i < 20; ++i) tick(); // the add fades
+    source.update({{true, 199.9, 0}});
+    tick();
+    const int row = rowAt(*model, 1999);
+    ASSERT_EQ(model->pulseTag(row, true, false), "-7.1e+03b");
+    const QImage image = table->viewport()->grab().toImage();
+    const QRect cell = table->visualRect(model->index(row, DomModel::Bid));
+    const QRect plain = table->visualRect(model->index(rowAt(*model, 1990), DomModel::Bid));
+    const int expected = QFontMetrics(table->font()).horizontalAdvance(model->pulseTag(row, true, false));
+    int right = -1;
+    for (int x = cell.left() + 3; x < std::min(cell.right(), cell.left() + 3 + expected + 12); ++x)
+        for (int y = cell.top() + 4; y < cell.bottom() - 4; ++y)
+            if (image.pixelColor(x, y) != image.pixelColor(x, plain.top() + (y - cell.top()))) right = x;
+    const int glyph = QFontMetrics(table->font()).horizontalAdvance(QLatin1Char('e'));
+    // Inked to within half a glyph of the full text: a dropped character would end a glyph short.
+    EXPECT_GT(right - (cell.left() + 3) + 1, expected - glyph / 2);
+}
+
+TEST_F(DomPulseDock, FreshFlashesAndTheirPaintAllocateNothingAfterWarmUp) {
+    // The dock's own model and delegate, driven directly (the dock tick also refreshes labels).
+    // Every frame changes four rows. Pulse frames classify them (fresh added, pulled and eaten
+    // flashes with new tags each frame); plain frames paint the same book cycle with no pulse.
+    QImage image(table->viewport()->size(), QImage::Format_ARGB32_Premultiplied);
+    QPainter painter(&image);
+    auto* delegate = table->itemDelegate();
+    QStyleOptionViewItem option;
+    option.initFrom(table->viewport());
+    option.font = table->font();
+    option.fontMetrics = QFontMetrics(option.font);
+    option.widget = table;
+    DomTradeWindow none;
+    qint64 wall = QDateTime::currentMSecsSinceEpoch(), t = 100000;
+    std::array<sb::Trade, 1> received{};
+    std::vector<QModelIndex> cells;
+    std::vector<QRect> rects;
+    for (int r = rowAt(*model, 2004); r <= rowAt(*model, 1995); ++r)
+        for (int c : {int(DomModel::Bid), int(DomModel::Price), int(DomModel::Ask)}) {
+            cells.push_back(model->index(r, c));
+            rects.push_back(table->visualRect(cells.back()));
+            if (c != DomModel::Price) ASSERT_GT(rects.back().width(), 90); // room for a tag beside the size
+        }
+    struct Count { size_t news = 0, mallocs = 0; };
+    std::array<Count, 2> paint{}; // [plain, pulse]
+    Count model_{};
+    size_t freshTags = 0;
+    const auto frame = [&](int i, bool counted, bool pulse) {
+        const double k = 1 + i % 4;
+        source.update({{true, 200, 10 + k}, {true, 199.9, 5 - k}, {false, 200.1, 10 - k}, {false, 200.2, 4 + k}});
+        flushEvents();
+        received[0] = {200.1, 0.5, sb::Aggressor::Buy, t + 1};
+        wall += 67;
+        t += 67;
+        gAllocations = 0;
+        gMallocs = 0;
+        gCounting = counted;
+        model->publish(source.book, none, true, wall);
+        if (pulse) model->pulseStep(t, received);
+        model_.news += gAllocations;
+        model_.mallocs += gMallocs;
+        gAllocations = 0;
+        gMallocs = 0;
+        for (size_t c = 0; c < cells.size(); ++c) {
+            option.rect = rects[c];
+            delegate->paint(&painter, option, cells[c]);
+        }
+        gCounting = false;
+        paint[pulse].news += gAllocations;
+        paint[pulse].mallocs += gMallocs;
+        if (pulse && counted)
+            for (const auto& cell : cells)
+                for (bool bid : {true, false})
+                    freshTags += cell.column() == DomModel::Price && model->pulse(cell.row(), bid).changeAlpha == 1;
+    };
+    for (int i = 0; i < 64; ++i) frame(i, false, true);
+    if (kMallocCounted) { // the instrument sees Qt's own string allocations
+        gMallocs = 0;
+        gCounting = true;
+        const QString probe = QString::number(1.25);
+        gCounting = false;
+        ASSERT_GT(gMallocs.load(), 0u);
+    } else {
+        std::cout << "malloc hook unavailable on this platform: Qt allocations unchecked\n";
+    }
+    model_ = {};
+    paint = {};
+    for (int i = 64; i < 96; ++i) frame(i, true, true);
+    EXPECT_GE(freshTags, 32u * 3); // three or more fresh flashes in each pulse frame
+    model->resetPulse();
+    for (int i = 96; i < 128; ++i) frame(i, false, false); // warm the plain path too
+    for (int i = 128; i < 160; ++i) frame(i, true, false);
+    EXPECT_EQ(model_.news, 0u);
+    EXPECT_EQ(model_.mallocs, 0u);
+    // Delegate painting allocates inside Qt's style code on every frame (OB0 path); the pulse's
+    // fills, outlines and tags must add nothing to it.
+    EXPECT_EQ(paint[1].news, paint[0].news);
+    EXPECT_EQ(paint[1].mallocs, paint[0].mallocs);
+    std::cout << "PULSE_ALLOC per 32 frames: plain paint news=" << paint[0].news << " mallocs=" << paint[0].mallocs
+              << " · pulse paint news=" << paint[1].news << " mallocs=" << paint[1].mallocs << '\n';
 }
 
 // Opt-in measurement: sustained wall-clock 10,000 books + 10,000 trades/s,

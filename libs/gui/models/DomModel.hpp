@@ -1,9 +1,11 @@
 #pragma once
 
 #include "../../core/marketdata/model/TradeData.h"
+#include "../../core/marketdata/analytics/BookDiffClassifier.hpp"
 #include <QAbstractTableModel>
 #include <array>
 #include <optional>
+#include <span>
 
 // Ingestion state, deliberately independent of the view/model and its visibility.
 // A fixed ring of the latest executions with size and exchange trade time. The
@@ -48,6 +50,14 @@ struct DomFreshness {
     bool awaitingBook = false;
     qint64 lastChangeMs = 0;
     QString text(qint64 nowMs) const;
+};
+
+// Liquidity Pulse display state of one side of one row: the latest added (+) or
+// pulled (-) size and the latest eaten size, each with its alpha in [0, 1].
+struct DomPulseCell {
+    double change = 0, eaten = 0;
+    double changeAlpha = 0, eatenAlpha = 0;
+    double grow = 1; // share of an added segment drawn so far, in (0, 1]
 };
 
 // GUI-thread only. Retained, contiguous integer buckets (including empty rows).
@@ -96,6 +106,40 @@ public:
     static QString signedSizeText(double value);
     // Tooltip text: the precision of the server's float sizes, without float noise.
     static QString fullSizeText(double value);
+    // sizeText into a Latin-1 buffer without allocating; returns the length (0 if it does not fit).
+    static int formatSize(char* out, int capacity, double value);
+    // Every character formatSize can emit (exponent form included: 7.1e+03b), plus the
+    // tag prefixes. Glyph strips that draw tags must cover all of it.
+    static constexpr char TagAlphabet[] = "0123456789.+-e<kmb\xD7";
+
+    // Liquidity Pulse. pulseStep classifies the rows just published (visible rows
+    // plus a margin) against the previous step with trades stamped on receipt, all
+    // in one monotonic clock; call it on every display tick, after publish.
+    static constexpr qint64 PulseFadeMs = 1200;
+    static constexpr qint64 PulseGrowMs = 200;
+    static constexpr qint64 PulseWindowMs = 10000;
+    static constexpr int PulseMaxRows = 256;
+    static constexpr int PulseMarginRows = 8;
+    // Flashes below this share of the side's visible maximum level are not shown.
+    static constexpr double PulseThresholdShare = 0.05;
+    void pulseStep(qint64 monotonicMs, std::span<const sentinel::book::Trade> trades);
+    // Fresh baseline: no flashes, no totals; the next step only observes.
+    void resetPulse();
+    DomPulseCell pulse(int row, bool bid) const;
+    // Tag text ("+1.2", "-4.2", "×.5"), formatted on first use after its flash starts,
+    // in place into per-slot strings whose capacity is reserved at construction.
+    static constexpr int PulseTagCapacity = 16;
+    const QString& pulseTag(int row, bool bid, bool eaten) const;
+    double pulseThreshold(bool bid) const;
+    const sentinel::book::RollingTotals& pulseTotals() const { return m_classifier.totals(); }
+    // Changes whenever the footer's numbers change.
+    uint64_t pulseTotalsVersion() const { return m_pulseVersion; }
+    QString pulseSummary(bool compact = false) const;
+    uint64_t pulseOutOfIntervalTotal() const { return m_classifier.outOfIntervalTradesTotal(); }
+    // Test hooks: steps classified and the events the last step produced (before the threshold).
+    qint64 pulseSteps() const { return m_pulseSteps; }
+    size_t lastPulseEvents() const { return m_classifier.events().size(); }
+    qint64 pulseTagFormats() const { return m_pulseTagFormats; }
 private:
     struct Row {
         double bid = 0, ask = 0, cumBid = 0, cumAsk = 0;
@@ -142,4 +186,29 @@ private:
     double m_bestBid = 0, m_bestAsk = 0;
     int m_windowTrades = 0, m_unknown = 0, m_untimed = 0, m_ahead = 0;
     qint64 m_coveredMs = DomTradeWindow::WindowMs;
+
+    struct PulseFlash {
+        double change = 0, eaten = 0; // change > 0 added, < 0 pulled
+        qint64 changeAt = 0, eatenAt = 0;
+    };
+    void clearFlashes(bool repaint);
+    void shiftFlashes(qint64 rows);
+    void expireFlashes(qint64 nowMs);
+    void recordPulseEvents(qint64 nowMs);
+    bool pulseRepaint(int row) const;
+    void markPulseRepaint(int row);
+    void updatePulseVersion();
+    sentinel::book::BookDiffClassifier m_classifier{{PulseMaxRows, 2048, PulseWindowMs, 0}};
+    std::array<sentinel::book::LevelSizes, PulseMaxRows> m_pulseRows{};
+    std::array<std::array<PulseFlash, 2>, Rows> m_flash{};
+    mutable std::array<QString, Rows * 4> m_pulseText;
+    mutable std::array<uint8_t, Rows> m_pulseTextValid{}; // bit per (side, slot)
+    uint64_t m_pulseSeries = 1, m_pulseVersion = 0;
+    std::array<double, 8> m_pulseSignature{};
+    qint64 m_pulseNow = 0, m_pulseSteps = 0;
+    mutable qint64 m_pulseTagFormats = 0;
+    int m_pulseLastRow = -1;
+    int m_pulseLive = 0;
+    int m_repaintFirst = Rows, m_repaintLast = -1;
+    bool m_pulseWarned = false;
 };
