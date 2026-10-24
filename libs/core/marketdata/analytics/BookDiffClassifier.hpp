@@ -38,6 +38,12 @@ struct DiffConfig {
 // a bid decrease (eat/pull) plus an ask add. Buy aggression eats asks, sell eats
 // bids; unknown aggression is ignored. Supply each trade batch once, on the next
 // snapshot, in the same monotonic clock, in (previous timestamp, current timestamp].
+// outOfIntervalTradesThisUpdate/Total count trades rejected by that time filter
+// (independent of size/price validity), to reveal feeder clock mismatches. Counts
+// include accepted comparison updates only, saturate at UINT64_MAX, and reset on
+// reset/symbol/tick/withdrawal. The per-update count is zero on a rejected update
+// or fresh baseline (which has no trade interval). Other ignored trades are not
+// included in these timestamp diagnostics.
 // A refill without a net drop is not eaten. Threshold applies to each classified
 // component after splitting. Invalid sizes break that side's comparison baseline.
 // Totals cover (now-windowMs, now], advanced on accepted snapshots. Max pull ties
@@ -51,13 +57,15 @@ public:
     void reset();
     std::span<const BookEvent> events() const { return events_; }
     const RollingTotals& totals() const { return totals_; }
+    std::uint64_t outOfIntervalTradesThisUpdate() const { return rejectedThisUpdate_; }
+    std::uint64_t outOfIntervalTradesTotal() const { return rejectedTotal_; }
 
 private:
     struct Step {
         Milliseconds timestamp = 0;
         RollingTotals totals;
     };
-    void matchTrades(const Snapshot& snapshot, std::span<const Trade> trades);
+    std::uint64_t matchTrades(const Snapshot& snapshot, std::span<const Trade> trades);
     void classify(const Snapshot& snapshot, std::int64_t firstTick);
     void classifySide(const Snapshot& snapshot, std::size_t row, std::size_t previous, Side side);
     void emit(const Snapshot& snapshot, std::size_t row, Side side, EventKind kind, double size);
@@ -74,6 +82,8 @@ private:
     std::size_t head_ = 0;
     std::size_t count_ = 0;
     RollingTotals totals_;
+    std::uint64_t rejectedThisUpdate_ = 0;
+    std::uint64_t rejectedTotal_ = 0;
 };
 
 } // namespace sentinel::book

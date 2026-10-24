@@ -31,6 +31,7 @@ void BookHistoryRing::reset()
 {
     window_ = {};
     next_ = count_ = 0;
+    slotTime_ = 0;
 }
 
 UpdateStatus BookHistoryRing::update(const Snapshot& s)
@@ -45,7 +46,7 @@ UpdateStatus BookHistoryRing::update(const Snapshot& s)
     if (check.newSeries)
         reset();
     window_.accept(s, check);
-    if (count_ > 0 && s.timestampMs - columns_[index(0)].timestamp < config_.sampleIntervalMs)
+    if (!advanceGrid(s.timestampMs))
         return UpdateStatus::NotSampled;
     sample(s);
     return UpdateStatus::Accepted;
@@ -56,6 +57,30 @@ void BookHistoryRing::sample(const Snapshot& s)
     columns_[next_] = {window_.firstTick, s.rows.size(), s.timestampMs};
     for (std::size_t row = 0; row < s.rows.size(); ++row)
         cells_[next_ * config_.maxRows + row] = {knownSize(s.rows[row].bid), knownSize(s.rows[row].ask)};
+    advanceColumn();
+}
+
+bool BookHistoryRing::advanceGrid(Milliseconds now)
+{
+    if (count_ == 0) {
+        slotTime_ = now;
+        return true;
+    }
+    const auto elapsedSlots = (now - slotTime_) / config_.sampleIntervalMs;
+    if (elapsedSlots == 0)
+        return false;
+    // Use the last due time, not next due, so INT64_MAX timestamps cannot overflow.
+    slotTime_ += elapsedSlots * config_.sampleIntervalMs;
+    const auto missing = std::min(elapsedSlots - 1, static_cast<Milliseconds>(columns_.size()));
+    for (Milliseconds i = 0; i < missing; ++i) {
+        columns_[next_] = {}; // Zero rows explicitly mark an unobserved slot.
+        advanceColumn();
+    }
+    return true;
+}
+
+void BookHistoryRing::advanceColumn()
+{
     next_ = (next_ + 1) % columns_.size();
     count_ = std::min(count_ + 1, columns_.size());
 }
@@ -67,7 +92,7 @@ std::size_t BookHistoryRing::index(std::size_t columnsAgo) const
 
 std::optional<Milliseconds> BookHistoryRing::timestamp(std::size_t columnsAgo) const
 {
-    if (columnsAgo >= count_)
+    if (columnsAgo >= count_ || columns_[index(columnsAgo)].rows == 0)
         return std::nullopt;
     return columns_[index(columnsAgo)].timestamp;
 }

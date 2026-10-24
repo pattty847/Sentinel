@@ -16,9 +16,12 @@ struct HistoryConfig {
 // visible window, even when that update was not due for sampling. Out-of-window
 // cells are nullopt, never fabricated zero liquidity. Invalid individual sizes
 // are stored as NaN (unknown); validSize() distinguishes them from real zero.
-// First observation samples immediately. Subsequent samples are >= interval
-// apart; missed intervals are NOT filled with fabricated observations. Column 0
-// is newest. Sample timestamp is actual observation time. Wrap overwrites oldest.
+// The first observation anchors a fixed interval grid and samples immediately.
+// Each later update samples the current grid slot once, without shifting future
+// due times. Skipped slots occupy missing columns: timestamp() and cell() return
+// nullopt for them. size() includes missing slots. Column 0 is newest; timestamps
+// are actual observation times, not nominal slot times. Wrap overwrites oldest.
+// Catch-up work is bounded by column capacity, even after arbitrarily long gaps.
 class BookHistoryRing {
 public:
     explicit BookHistoryRing(HistoryConfig config = {});
@@ -36,6 +39,8 @@ private:
     };
     std::size_t index(std::size_t columnsAgo) const;
     void sample(const Snapshot& snapshot);
+    bool advanceGrid(Milliseconds now);
+    void advanceColumn();
 
     HistoryConfig config_;
     detail::WindowState window_;
@@ -43,6 +48,7 @@ private:
     std::vector<LevelSizes> cells_;
     std::size_t next_ = 0;
     std::size_t count_ = 0;
+    Milliseconds slotTime_ = 0;
 };
 
 } // namespace sentinel::book

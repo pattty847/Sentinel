@@ -44,12 +44,12 @@ TEST(BookAnalytics, UpdatesQueriesAndResetsAllocateNothingAfterConstruction)
         const auto count = static_cast<std::size_t>(40 + step % 81);
         for (auto& row : rows)
             row = {step % 3 == 0 ? 0.0 : 20.0, step % 2 == 0 ? 10.0 : 30.0};
-        trades = {Trade{first, 3, Aggressor::Sell, now}, Trade{first, 4, Aggressor::Buy, now}};
+        trades = {Trade{first, 3, Aggressor::Sell, now - 100}, Trade{first, 4, Aggressor::Buy, now}};
         const Snapshot snapshot{static_cast<std::uint64_t>(step / 200), 1, first,
                                 std::span<const LevelSizes>(rows.data(), count), now};
         accepted &= classifier.update(snapshot, trades) == UpdateStatus::Accepted;
         accepted &= tracker.update(snapshot) == UpdateStatus::Accepted;
-        history.update(snapshot);
+        history.update({snapshot.symbolId, 1, first, snapshot.rows, step * 50000LL});
         (void)classifier.totals();
         (void)tracker.isLarge(0, Side::Bid);
         (void)tracker.level(0, Side::Ask);

@@ -199,6 +199,79 @@ TEST(BookDiff, RollingExpiryAndLargestPullAcrossSides)
     EXPECT_DOUBLE_EQ(classifier.totals().side[0].pulled, 0);
 }
 
+TEST(BookDiff, LargestPullTiesKeepOldestEventUntilItExpires)
+{
+    BookDiffClassifier classifier({.windowMs = 100});
+    Input input;
+    classifier.update(input.at(0));
+    input.rows[0].bid = 5;
+    classifier.update(input.at(10));
+    input.rows[0].ask = 15;
+    classifier.update(input.at(20));
+    ASSERT_TRUE(classifier.totals().largestPull);
+    EXPECT_EQ(classifier.totals().largestPull->timestampMs, 10);
+    EXPECT_EQ(classifier.totals().largestPull->side, Side::Bid);
+    classifier.update(input.at(110));
+    ASSERT_TRUE(classifier.totals().largestPull);
+    EXPECT_EQ(classifier.totals().largestPull->timestampMs, 20);
+    EXPECT_EQ(classifier.totals().largestPull->side, Side::Ask);
+}
+
+TEST(BookDiff, CountsTradesOutsideSnapshotClockInterval)
+{
+    BookDiffClassifier classifier;
+    Input input;
+    classifier.update(input.at(100));
+    input.rows[0].ask = 10;
+    const std::array trades{
+        Trade{100, 50, Aggressor::Buy, 99}, Trade{100, 50, Aggressor::Buy, 100},
+        Trade{100, 50, Aggressor::Buy, 201}, Trade{100, 50, Aggressor::Buy, 1700000000000},
+        Trade{100, 2, Aggressor::Buy, 199}, Trade{100, 3, Aggressor::Buy, 200},
+        Trade{100, -1, Aggressor::Buy, 150}};
+    classifier.update(input.at(200), trades);
+    EXPECT_EQ(classifier.outOfIntervalTradesThisUpdate(), 4u);
+    EXPECT_EQ(classifier.outOfIntervalTradesTotal(), 4u);
+    EXPECT_DOUBLE_EQ(classifier.totals().side[1].eaten, 5);
+    EXPECT_DOUBLE_EQ(classifier.totals().side[1].pulled, 5);
+    const std::array stale{Trade{100, 5, Aggressor::Buy, 200}};
+    classifier.update(input.at(300), stale);
+    EXPECT_EQ(classifier.outOfIntervalTradesThisUpdate(), 1u);
+    EXPECT_EQ(classifier.outOfIntervalTradesTotal(), 5u);
+    classifier.update(input.at(400));
+    EXPECT_EQ(classifier.outOfIntervalTradesThisUpdate(), 0u);
+    EXPECT_EQ(classifier.outOfIntervalTradesTotal(), 5u);
+    EXPECT_EQ(classifier.update(input.at(399), stale), UpdateStatus::InvalidInput);
+    EXPECT_EQ(classifier.outOfIntervalTradesThisUpdate(), 0u);
+    EXPECT_EQ(classifier.outOfIntervalTradesTotal(), 5u);
+}
+
+TEST(BookDiff, RejectedTradeCountsResetWithSeriesAndExcludeRejectedUpdates)
+{
+    BookDiffClassifier classifier({.maxSteps = 1});
+    Input input;
+    for (int series = 0; series < 4; ++series) {
+        const Milliseconds now = series * 100;
+        const std::array stale{Trade{100, 1, Aggressor::Buy, now}};
+        classifier.update(input.at(now), stale); // Fresh baseline has no interval.
+        EXPECT_EQ(classifier.outOfIntervalTradesThisUpdate(), 0u);
+        EXPECT_EQ(classifier.outOfIntervalTradesTotal(), 0u);
+        input.rows[0].bid += 1;
+        classifier.update(input.at(now + 10), stale);
+        EXPECT_EQ(classifier.outOfIntervalTradesThisUpdate(), 1u);
+        EXPECT_EQ(classifier.outOfIntervalTradesTotal(), 1u);
+        input.rows[0].bid += 1;
+        EXPECT_EQ(classifier.update(input.at(now + 20), stale), UpdateStatus::CapacityExceeded);
+        EXPECT_EQ(classifier.outOfIntervalTradesThisUpdate(), 0u);
+        EXPECT_EQ(classifier.outOfIntervalTradesTotal(), 1u);
+        if (series == 0) ++input.symbol;
+        else if (series == 1) input.tick = 0.5;
+        else classifier.update({});
+    }
+    classifier.reset();
+    EXPECT_EQ(classifier.outOfIntervalTradesThisUpdate(), 0u);
+    EXPECT_EQ(classifier.outOfIntervalTradesTotal(), 0u);
+}
+
 TEST(BookDiff, RingCapacityRejectsAtomicallyAndReusesExpiredSlots)
 {
     BookDiffClassifier classifier({.maxSteps = 1, .windowMs = 100});
@@ -238,6 +311,39 @@ TEST(BookAnalytics, TickAndSymbolChangesResetEveryConsumer)
         EXPECT_EQ(history.size(), 2u);
         if (series == 0) input.tick = 0.5;
         else ++input.symbol;
+    }
+}
+
+TEST(LevelTracker, NewSeriesClearsAgeAndFlickersDespiteOverlappingKeysAndLaterTime)
+{
+    for (const bool changeTick : {false, true}) {
+        LevelTracker tracker;
+        Input input{{{10, 20}, {10, 20}}, 1};
+        tracker.update(input.at(100));
+        input.rows = {{0, 0}, {0, 0}};
+        tracker.update(input.at(110));
+        input.rows = {{10, 20}, {10, 20}};
+        tracker.update(input.at(120));
+        tracker.update(input.at(130));
+        for (const auto side : sides) {
+            EXPECT_EQ(tracker.level(0, side).seenForMs, 10);
+            EXPECT_EQ(tracker.level(0, side).flickers, 1u);
+        }
+        if (changeTick) {
+            // Old prices 1,2; new prices 2,4. Price 2 and integer keys 1,2 overlap.
+            input.tick = 2;
+            input.first = 2;
+        } else {
+            ++input.symbol;
+        }
+        ASSERT_EQ(tracker.update(input.at(200)), UpdateStatus::Accepted);
+        for (std::size_t row = 0; row < input.rows.size(); ++row) {
+            for (const auto side : sides) {
+                EXPECT_TRUE(tracker.level(row, side).present);
+                EXPECT_EQ(tracker.level(row, side).seenForMs, 0);
+                EXPECT_EQ(tracker.level(row, side).flickers, 0u);
+            }
+        }
     }
 }
 
@@ -478,7 +584,7 @@ TEST(BookHistory, AlignsColumnsToLatestWindowEvenBetweenSamples)
     EXPECT_FALSE(history.cell(0, 2));
 }
 
-TEST(BookHistory, WrapsAtCapacityAndDoesNotInventGapSamples)
+TEST(BookHistory, WrapsAtCapacityAndMarksMissedSlotsMissing)
 {
     BookHistoryRing history({.columns = 2, .sampleIntervalMs = 5000});
     Input input;
@@ -490,11 +596,81 @@ TEST(BookHistory, WrapsAtCapacityAndDoesNotInventGapSamples)
     history.update(input.at(20000));
     EXPECT_EQ(history.size(), 2u);
     EXPECT_EQ(history.timestamp(0), 20000);
-    EXPECT_EQ(history.timestamp(1), 5000);
+    EXPECT_FALSE(history.timestamp(1));
     EXPECT_FALSE(history.timestamp(2));
     EXPECT_DOUBLE_EQ(history.cell(0, 0)->bid, 30);
-    EXPECT_DOUBLE_EQ(history.cell(1, 0)->bid, 10);
+    EXPECT_FALSE(history.cell(1, 0));
     EXPECT_FALSE(history.cell(2, 0));
+}
+
+TEST(BookHistory, CallerCadenceDoesNotDriftSamplingGrid)
+{
+    BookHistoryRing history({.columns = 16});
+    Input input;
+    constexpr Milliseconds anchor = 17;
+    history.update(input.at(anchor));
+    Milliseconds previousSlot = 0;
+    for (Milliseconds elapsed = 67; elapsed <= 2010; elapsed += 67) {
+        const auto slot = elapsed / 250;
+        const auto result = history.update(input.at(anchor + elapsed));
+        EXPECT_EQ(result, slot == previousSlot ? UpdateStatus::NotSampled : UpdateStatus::Accepted);
+        if (slot != previousSlot)
+            EXPECT_EQ(history.timestamp(0), anchor + elapsed);
+        previousSlot = slot;
+    }
+    ASSERT_EQ(history.size(), 9u);
+    EXPECT_EQ(history.timestamp(0), anchor + 2010);
+    EXPECT_EQ(history.timestamp(1), anchor + 1809);
+    EXPECT_EQ(history.timestamp(4), anchor + 1005); // Not the drifting 1072 ms sample.
+    EXPECT_EQ(history.timestamp(8), anchor);
+}
+
+TEST(BookHistory, MissingSlotsRemainDistinctAndAlignedByPrice)
+{
+    BookHistoryRing history({.maxRows = 2, .columns = 8});
+    Input input{{{10, 1}, {20, 2}}};
+    history.update(input.at(17));
+    history.update(input.at(285)); // Slot due at 267.
+    input.first = 101;
+    input.rows = {{30, 3}, {40, 4}};
+    history.update(input.at(1089)); // Current slot 1017; 517 and 767 were missed.
+    ASSERT_EQ(history.size(), 5u);
+    EXPECT_EQ(history.timestamp(0), 1089);
+    EXPECT_DOUBLE_EQ(history.cell(0, 0)->bid, 30);
+    for (std::size_t slot = 1; slot <= 2; ++slot) {
+        EXPECT_FALSE(history.timestamp(slot));
+        EXPECT_FALSE(history.cell(slot, 0));
+    }
+    EXPECT_EQ(history.timestamp(3), 285);
+    ASSERT_TRUE(history.cell(3, 0));
+    EXPECT_DOUBLE_EQ(history.cell(3, 0)->bid, 20);
+    EXPECT_FALSE(history.cell(3, 1));
+    EXPECT_EQ(history.update(input.at(1266)), UpdateStatus::NotSampled);
+    EXPECT_EQ(history.update(input.at(1267)), UpdateStatus::Accepted);
+    EXPECT_FALSE(history.timestamp(2));
+    EXPECT_EQ(history.timestamp(4), 285);
+}
+
+TEST(BookHistory, HugeGapsAreBoundedAndTimestampLimitDoesNotOverflow)
+{
+    BookHistoryRing history({.columns = 3, .sampleIntervalMs = 1});
+    Input input;
+    history.update(input.at(0));
+    const auto last = std::numeric_limits<Milliseconds>::max();
+    EXPECT_EQ(history.update(input.at(last - 1)), UpdateStatus::Accepted);
+    ASSERT_EQ(history.size(), 3u);
+    EXPECT_EQ(history.timestamp(0), last - 1);
+    EXPECT_FALSE(history.timestamp(1));
+    EXPECT_FALSE(history.timestamp(2));
+    EXPECT_FALSE(history.cell(2, 0));
+    EXPECT_EQ(history.update(input.at(last)), UpdateStatus::Accepted);
+    EXPECT_EQ(history.timestamp(0), last);
+    EXPECT_EQ(history.timestamp(1), last - 1);
+    EXPECT_FALSE(history.timestamp(2));
+    history.update({});
+    history.update(input.at(100));
+    EXPECT_EQ(history.size(), 1u);
+    EXPECT_EQ(history.timestamp(0), 100);
 }
 
 TEST(BookAnalytics, InvalidConfigurationIsRejectedAtConstruction)

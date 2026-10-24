@@ -34,11 +34,13 @@ void BookDiffClassifier::reset()
     head_ = count_ = 0;
     events_.clear();
     totals_ = {};
+    rejectedThisUpdate_ = rejectedTotal_ = 0;
 }
 
 UpdateStatus BookDiffClassifier::update(const Snapshot& s, std::span<const Trade> trades)
 {
     events_.clear();
+    rejectedThisUpdate_ = 0;
     const auto check = window_.inspect(s, config_.maxRows);
     if (check.status == UpdateStatus::Reset) {
         reset();
@@ -48,8 +50,9 @@ UpdateStatus BookDiffClassifier::update(const Snapshot& s, std::span<const Trade
         return check.status;
     if (check.newSeries)
         reset();
+    std::uint64_t rejected = 0;
     if (window_.active) {
-        matchTrades(s, trades);
+        rejected = matchTrades(s, trades);
         classify(s, check.firstTick);
     }
     // Check space before changing any persistent state, including expiration.
@@ -58,6 +61,8 @@ UpdateStatus BookDiffClassifier::update(const Snapshot& s, std::span<const Trade
         events_.clear();
         return UpdateStatus::CapacityExceeded;
     }
+    rejectedThisUpdate_ = rejected;
+    rejectedTotal_ += std::min(rejected, std::numeric_limits<std::uint64_t>::max() - rejectedTotal_);
     expire(s.timestampMs);
     if (!events_.empty()) {
         steps_[(head_ + count_) % steps_.size()] = summarize(s.timestampMs);
@@ -69,12 +74,16 @@ UpdateStatus BookDiffClassifier::update(const Snapshot& s, std::span<const Trade
     return UpdateStatus::Accepted;
 }
 
-void BookDiffClassifier::matchTrades(const Snapshot& s, std::span<const Trade> trades)
+std::uint64_t BookDiffClassifier::matchTrades(const Snapshot& s, std::span<const Trade> trades)
 {
+    std::uint64_t rejected = 0;
     std::fill(traded_.begin(), traded_.end(), LevelSizes{});
     for (const auto& trade : trades) {
-        if (!validSize(trade.size) || trade.timestampMs <= window_.timestamp
-            || trade.timestampMs > s.timestampMs)
+        if (trade.timestampMs <= window_.timestamp || trade.timestampMs > s.timestampMs) {
+            ++rejected;
+            continue;
+        }
+        if (!validSize(trade.size))
             continue;
         const auto key = detail::priceTick(trade.price, s.tickSize, false);
         const auto row = key ? window_.rowAt(*key) : std::nullopt;
@@ -85,6 +94,7 @@ void BookDiffClassifier::matchTrades(const Snapshot& s, std::span<const Trade> t
         else if (trade.aggressor == Aggressor::Sell)
             addFinite(traded_[*row].bid, trade.size);
     }
+    return rejected;
 }
 
 void BookDiffClassifier::classify(const Snapshot& s, std::int64_t firstTick)
