@@ -21,7 +21,6 @@ Detail belongs in the linked plan or file, not in the item.
    - heatmap and candles drift apart slightly on wheel zoom-out; both mappings have the same slopes, cause unknown; the owner's note on direction decides the next look (FM-001, INV-004);
    - local-time axis labels: `TimeAxisModel` has a `timezone` property no control sets; `HeatmapGpuLayer.cpp` hard-codes UTC; add a setting and route every time label through one timezone;
    - zoom-to-footprint: candles widen into bid/ask footprint cells, then numbers appear (extends Footprint and text LOD below);
-   - order book imbalance strip from the Coinbase book.
 4. **Heatmap/candle zoom drift**: heatmap and candles drift apart slightly on wheel zoom-out (moved from the landed render performance pass, `3a54b829`; see item 3).
 5. **Repeatable performance benchmark** on the owner's machines; cite its numbers in the README (the old 110 FPS figure was removed 2026-10-07).
 6. **README + ARCHITECTURE pass** for the finished one-world architecture; also fix `docs/MARKETDATA.md` (TLS described as optional, single-quad heatmap, 110 FPS).

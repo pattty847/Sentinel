@@ -132,6 +132,19 @@ gui:
   screenshot_dir: ./screenshots
 ```
 
+### Order Book dock
+
+`OrderBookDock/lean` in the `Sentinel` / `SentinelTerminal` QSettings store is a boolean,
+default `true`. The heading's Lean toggle shows four native-book imbalance bands at
+quote-price distances 5, 15, 50 and 100 from mid, mirrored cumulative depth over 100,
+and two minutes of 15-band history sampled about every 500 ms. The strip collapses below
+280 px dock width without changing the saved preference. Hidden, collapsed or disabled
+strips do no analytics work and reset their history. Symbol/tick changes, withdrawal,
+and invalid grids also reset history; a one-sided book uses its remaining touch.
+A locked native bucket top is valid: mid is that slot and its bid/ask sizes count in every
+band. A crossed top retains the last bands, depth and history, marked stale, without
+adding samples. Valid updates resume sampling; no retained values cross symbol/tick resets.
+
 ### Heatmap chart settings (S6)
 
 The main chart draws the heatmap through `HeatmapGpuLayer`/`HeatmapTileNode` (S6b), the only renderer since S8a: on-chart liquidity labels come from the S7a cell query (S7b, below), walls use the S7a CPU cell query on request (defaulting to the viewport with optional period and tick), and the chart's GridViewState clamps zoom-out at one column per pixel (and one row per pixel in Manual). A timeframe change keeps the columns on screen: the time span scales by the timeframe ratio about the view end (1m -> 1h shows 60x more history), inside the clamps (S6d, FM-134).

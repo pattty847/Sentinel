@@ -1,4 +1,5 @@
 #include "OrderBookDock.hpp"
+#include "LeanGaugeWidget.hpp"
 #include "ServiceLocator.hpp"
 #include "SentinelLogging.hpp"
 #include "../datasources/IGridDataSource.hpp"
@@ -300,6 +301,8 @@ OrderBookDock::OrderBookDock(QWidget* parent, IGridDataSource* source)
     : DockablePanel("orderbook", "Order Book", parent), m_source(source ? source : ServiceLocator::dataSource())
 {
     m_pulseTrades.reserve(PulseTradeCapacity);
+    m_leanBids.reserve(1);
+    m_leanAsks.reserve(1);
     m_pulseElapsed.start();
     buildUi();
     m_timer.setParent(this);
@@ -307,6 +310,7 @@ OrderBookDock::OrderBookDock(QWidget* parent, IGridDataSource* source)
     m_timer.setInterval(67); // ~15 Hz; events only update ingestion state/dirty flags.
     m_timer.setTimerType(Qt::PreciseTimer);
     connect(&m_timer, &QTimer::timeout, this, &OrderBookDock::refreshDisplay);
+    connect(&m_timer, &QTimer::timeout, this, &OrderBookDock::refreshLean);
     connect(this, &QDockWidget::visibilityChanged, this, &OrderBookDock::setDisplayActive);
     installEventFilter(this);
     connect(this, &QDockWidget::topLevelChanged, this, [this] { watchWindow(); updateDisplayTimer(); });
@@ -331,15 +335,11 @@ OrderBookDock::OrderBookDock(QWidget* parent, IGridDataSource* source)
     });
 }
 
-void OrderBookDock::buildUi()
+QHBoxLayout* OrderBookDock::buildHeading()
 {
-    if (m_table) return;
-    auto* layout = new QVBoxLayout(m_contentWidget);
-    layout->setContentsMargins(4, 4, 4, 4);
-    setMinimumWidth(180);
-    layout->setSpacing(2);
     auto* heading = new QHBoxLayout;
     m_symbolLabel = new QLabel("No symbol", m_contentWidget);
+    m_symbolLabel->setObjectName("domSymbol");
     QFont font = m_symbolLabel->font();
     font.setBold(true);
     m_symbolLabel->setFont(font);
@@ -373,27 +373,11 @@ void OrderBookDock::buildUi()
     heading->addWidget(m_pulse);
     heading->addWidget(m_cumulative);
     heading->addWidget(m_recenter);
-    layout->addLayout(heading);
-    auto label = [&](const char* name) {
-        auto* result = new QLabel(m_contentWidget);
-        result->setObjectName(name);
-        result->setWordWrap(false);
-        result->setMinimumWidth(0);
-        result->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-        result->setTextFormat(Qt::PlainText);
-        return result;
-    };
-    m_aggregation = label("domAggregation");
-    m_summary = label("domBookSummary");
-    m_status = label("domFreshness");
-    layout->addWidget(m_aggregation);
-    auto* summaryLine = new QHBoxLayout;
-    summaryLine->setSpacing(4);
-    summaryLine->addWidget(m_summary, 1);
-    summaryLine->addWidget(m_status, 2);
-    m_status->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    layout->addLayout(summaryLine);
-    m_status->setText("Waiting for book");
+    return heading;
+}
+
+void OrderBookDock::buildLadder(QVBoxLayout* layout)
+{
     m_model = new DomModel(this);
     m_table = new QTableView(m_contentWidget);
     m_table->setObjectName("domLadder");
@@ -418,6 +402,44 @@ void OrderBookDock::buildUi()
     m_table->installEventFilter(this);
     m_table->verticalScrollBar()->installEventFilter(this);
     layout->addWidget(m_table, 1);
+}
+
+void OrderBookDock::buildUi()
+{
+    if (m_table) return;
+    auto* layout = new QVBoxLayout(m_contentWidget);
+    layout->setContentsMargins(4, 4, 4, 4);
+    setMinimumWidth(180);
+    layout->setSpacing(2);
+    auto* heading = buildHeading();
+    auto* headingWidget = new QWidget(m_contentWidget);
+    headingWidget->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    heading->setContentsMargins(0, 0, 0, 0);
+    heading->setSizeConstraint(QLayout::SetNoConstraint);
+    headingWidget->setLayout(heading);
+    layout->addWidget(headingWidget);
+    auto label = [&](const char* name) {
+        auto* result = new QLabel(m_contentWidget);
+        result->setObjectName(name);
+        result->setWordWrap(false);
+        result->setMinimumWidth(0);
+        result->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+        result->setTextFormat(Qt::PlainText);
+        return result;
+    };
+    m_aggregation = label("domAggregation");
+    m_summary = label("domBookSummary");
+    m_status = label("domFreshness");
+    layout->addWidget(m_aggregation);
+    auto* summaryLine = new QHBoxLayout;
+    summaryLine->setSpacing(4);
+    summaryLine->addWidget(m_summary, 1);
+    summaryLine->addWidget(m_status, 2);
+    m_status->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    layout->addLayout(summaryLine);
+    m_status->setText("Waiting for book");
+    buildLean(heading, layout);
+    buildLadder(layout);
     m_pulseFooter = label("domPulseFooter");
     layout->addWidget(m_pulseFooter);
     // Same settings store and format as the other docks (AGENTS 4b: never a native-format QSettings).
@@ -427,6 +449,76 @@ void OrderBookDock::buildUi()
     m_pulse->setChecked(m_pulseOn);
     m_pulseFooter->setVisible(m_pulseOn);
     connect(m_pulse, &QToolButton::toggled, this, &OrderBookDock::setPulse);
+}
+
+void OrderBookDock::buildLean(QHBoxLayout* heading, QVBoxLayout* layout)
+{
+    m_lean = new QToolButton(m_contentWidget);
+    m_lean->setObjectName("domLean");
+    m_lean->setText("Lean");
+    m_lean->setAccessibleName("Lean Gauge");
+    m_lean->setCheckable(true);
+    m_lean->setToolTip("Book imbalance, depth and two minute history; expands at 280 px dock width.");
+    heading->insertWidget(2, m_lean);
+    m_heading = heading;
+    m_leanStrip = new LeanGaugeWidget(m_leanGauge, m_contentWidget);
+    layout->addWidget(m_leanStrip);
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
+    m_lean->setChecked(settings.value("OrderBookDock/lean", true).toBool());
+    connect(m_lean, &QToolButton::toggled, this, [this](bool on) {
+        QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
+        settings.setValue("OrderBookDock/lean", on);
+        m_leanGauge.reset();
+        updateLeanVisibility();
+    });
+    updateLeanVisibility();
+}
+
+void OrderBookDock::fitHeading()
+{
+    // Measure the unmodified theme before deciding whether compact padding is needed.
+    m_heading->setSpacing(-1);
+    m_recenter->setStyleSheet({});
+    int needed = 4 * m_heading->spacing();
+    for (auto* button : {m_pulse, m_lean, m_cumulative}) {
+        button->setStyleSheet({});
+        button->ensurePolished();
+        needed += button->sizeHint().width();
+    }
+    m_recenter->ensurePolished();
+    needed += m_recenter->sizeHint().width();
+    if (needed <= width() - 8) return;
+    m_heading->setSpacing(0);
+    for (auto* button : {m_pulse, m_lean, m_cumulative})
+        button->setStyleSheet("QToolButton { padding: 1px; }");
+    m_recenter->setStyleSheet("QPushButton { padding: 1px; }");
+}
+
+void OrderBookDock::updateLeanVisibility()
+{
+    fitHeading();
+    const bool visible = m_lean->isChecked() && width() >= 280;
+    m_leanStrip->setVisible(visible);
+    if (!visible) m_leanGauge.reset();
+}
+
+void OrderBookDock::refreshLean()
+{
+    if (!m_displayActive || minimized() || !isVisible()) return;
+    if (!m_source || m_symbol.isEmpty()) return;
+    if (m_lean->isChecked() && !m_leanStrip->isHidden())
+        stepLean(m_source->getDirectLiveOrderBook(m_symbolId));
+}
+
+void OrderBookDock::stepLean(const LiveOrderBook& book)
+{
+    const auto top = book.captureDenseNonZero(m_leanBids, m_leanAsks, 1);
+    const sentinel::book::LeanBook view{book.getBids(), book.getAsks(), top.minPrice, top.tickSize,
+        m_leanBids.empty() ? -1 : std::ptrdiff_t(m_leanBids.front().first),
+        m_leanAsks.empty() ? -1 : std::ptrdiff_t(m_leanAsks.front().first)};
+    m_leanGauge.update(view, m_leanGeneration, m_pulseElapsed.elapsed());
+    ++m_leanSteps;
+    m_leanStrip->update();
 }
 
 void OrderBookDock::setPulse(bool on)
@@ -479,6 +571,9 @@ void OrderBookDock::onSymbolChanged(const QString& symbol)
     if (symbol == m_symbol) return;
     m_symbol = symbol;
     m_symbolId = symbol.toStdString();
+    ++m_leanGeneration;
+    m_leanGauge.reset();
+    m_leanStrip->update();
     m_trades.clear();
     m_pulseTrades.clear();
     const auto connected = m_freshness.connected;
@@ -495,6 +590,7 @@ void OrderBookDock::onOrderBookUpdated(const QString& symbol, const std::vector<
     if (symbol != m_symbol) return;
     // The datasource already applied ALL deltas. Do not rescan it per event.
     m_freshness.awaitingBook = deltas.empty();
+    if (deltas.empty()) { m_leanGauge.reset(); m_leanStrip->update(); }
     m_dirty = m_bookDirty = true;
 }
 
@@ -544,6 +640,7 @@ void OrderBookDock::updateDisplayTimer()
         m_timer.start();
     } else m_timer.stop();
     updatePulseActive();
+    if (!m_displayActive) m_leanGauge.reset();
 }
 
 void OrderBookDock::showEvent(QShowEvent* event)
@@ -556,6 +653,12 @@ void OrderBookDock::hideEvent(QHideEvent* event)
 {
     setDisplayActive(false);
     DockablePanel::hideEvent(event);
+}
+
+void OrderBookDock::resizeEvent(QResizeEvent* event)
+{
+    DockablePanel::resizeEvent(event);
+    if (m_leanStrip) updateLeanVisibility();
 }
 
 void OrderBookDock::stopFollowing()
@@ -596,6 +699,30 @@ void OrderBookDock::recenter()
     refreshDisplay();
 }
 
+void OrderBookDock::refreshBook()
+{
+    if (!m_source || m_symbol.isEmpty()) return;
+    const auto& book = m_source->getDirectLiveOrderBook(m_symbolId);
+    // Capture the replica timestamp only after a change notification (or
+    // initial symbol hydration). Unchanged L2 messages also touch that
+    // timestamp, but must not keep resetting the displayed last-change age.
+    if (book.getTickSize() > 0 && m_bookDirty) {
+        m_freshness.lastChangeMs = std::chrono::duration_cast<std::chrono::milliseconds>(book.getLastUpdate().time_since_epoch()).count();
+    }
+    if (book.getTickSize() <= 0) m_freshness.awaitingBook = true;
+    m_bookDirty = false;
+    updateVisibleRows();
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    // Scale decay, visible-range changes and trades leaving the window need a publish too.
+    if (m_model->needsRepublish(now)) m_dirty = true;
+    if (m_dirty) m_model->publish(book, m_trades, m_follow, now);
+    // Every exposed tick, changed or not, so the 10 s totals keep moving on a quiet book.
+    if (m_pulseActive) {
+        m_model->pulseStep(pulseClock(true), m_pulseTrades);
+        m_pulseTrades.clear();
+    }
+}
+
 void OrderBookDock::refreshDisplay()
 {
     if (!m_displayActive || !isVisible() || minimized()) return;
@@ -606,27 +733,7 @@ void OrderBookDock::refreshDisplay()
         m_symbolLabel->setText(m_symbol.isEmpty() ? "No symbol" : m_symbol);
         m_symbolDirty = false;
     }
-    if (m_source && !m_symbol.isEmpty()) {
-        const auto& book = m_source->getDirectLiveOrderBook(m_symbolId);
-        // Capture the replica timestamp only after a change notification (or
-        // initial symbol hydration). Unchanged L2 messages also touch that
-        // timestamp, but must not keep resetting the displayed last-change age.
-        if (book.getTickSize() > 0 && m_bookDirty) {
-            m_freshness.lastChangeMs = std::chrono::duration_cast<std::chrono::milliseconds>(book.getLastUpdate().time_since_epoch()).count();
-        }
-        if (book.getTickSize() <= 0) m_freshness.awaitingBook = true;
-        m_bookDirty = false;
-        updateVisibleRows();
-        const qint64 now = QDateTime::currentMSecsSinceEpoch();
-        // Scale decay, visible-range changes and trades leaving the window need a publish too.
-        if (m_model->needsRepublish(now)) m_dirty = true;
-        if (m_dirty) m_model->publish(book, m_trades, m_follow, now);
-        // Every exposed tick, changed or not, so the 10 s totals keep moving on a quiet book.
-        if (m_pulseActive) {
-            m_model->pulseStep(pulseClock(true), m_pulseTrades);
-            m_pulseTrades.clear();
-        }
-    }
+    refreshBook();
     if (m_dirty) {
         m_recenter->setText(m_follow ? "Following" : "Recenter");
         m_recenter->setChecked(m_follow);

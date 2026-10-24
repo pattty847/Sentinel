@@ -115,3 +115,9 @@ set_target_properties(test_book_analytics PROPERTIES AUTOMOC OFF AUTOUIC OFF AUT
 add_test(NAME BookAnalyticsTests COMMAND test_book_analytics)
 set_tests_properties(BookAnalyticsTests PROPERTIES LABELS "marketdata")
 add_dependencies(marketdata_tests test_book_analytics)
+
+add_executable(test_lean_gauge test_lean_gauge.cpp)
+target_link_libraries(test_lean_gauge PRIVATE sentinel_book_analytics GTest::gtest_main)
+set_target_properties(test_lean_gauge PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+add_test(NAME LeanGaugeTests COMMAND test_lean_gauge)
+set_tests_properties(LeanGaugeTests PROPERTIES LABELS "marketdata")

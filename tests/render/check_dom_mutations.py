@@ -16,8 +16,95 @@ model = root / 'libs/gui/models/DomModel.cpp'
 header = root / 'libs/gui/models/DomModel.hpp'
 dock = root / 'libs/gui/widgets/OrderBookDock.cpp'
 replica = root / 'libs/gui/datasources/RemoteGridDataSource.cpp'
-original = {p: p.read_text() for p in (model, header, dock, replica)}
+lean = root / 'libs/core/marketdata/analytics/LeanGauge.cpp'
+lean_header = root / 'libs/core/marketdata/analytics/LeanGauge.hpp'
+lean_widget = root / 'libs/gui/widgets/LeanGaugeWidget.cpp'
+original = {p: p.read_text() for p in (model, header, dock, replica, lean, lean_header, lean_widget)}
 mutants = [
+    ('lean_crossed_erases_history', lean,
+     [('if (m_state == State::Crossed) return;', 'if (m_state == State::Crossed) { reset(); m_state = State::Crossed; return; }')],
+     'LeanFixture.CrossedBookHoldsValuesAndHistoryUntilRecovery'),
+    ('lean_pinned_stops_sampling', dock,
+     [('    if (!m_displayActive || minimized() || !isVisible()) return;', '    if (!m_displayActive || minimized() || !isVisible() || !m_follow) return;')],
+     'DomDock.LeanIgnoresPinnedLadderAndUsesNativeTick'),
+    ('lean_depth_floor', lean,
+     [('std::ceil(distance - 1e-8)', 'std::floor(distance - 1e-8)')],
+     'LeanFixture.FractionalDistanceDepthDoesNotJumpEarly'),
+    ('lean_one_sided_wrong_mid', lean,
+     [('double(bid ? book.bidTop : book.askTop)', '0.0')],
+     'LeanFixture.EmptyOneSidedLockedCrossedAndNonfinite'),
+    ('lean_nonfinite_size', lean,
+     [('!std::isfinite(size) || size <= 0', 'size <= 0')],
+     'LeanFixture.EmptyOneSidedLockedCrossedAndNonfinite'),
+    ('lean_font_too_small', lean_widget,
+     [('const QFont textFont = font();', 'QFont textFont = font(); textFont.setPixelSize(10);')],
+     'DomLean.InheritsLargeFontAndMarksCrossedValuesStale'),
+    ('lean_stale_status_missing', lean_widget,
+     [('!stale && m_gauge.disagreement()', 'm_gauge.disagreement()')],
+     'DomLean.InheritsLargeFontAndMarksCrossedValuesStale'),
+    ('lean_heading_always_compact', dock,
+     [('if (needed <= width() - 8) return;', 'if (false) return;')],
+     'DomDock.LeanTogglePersistsAndCollapsesAt180'),
+    ('lean_recenter_samples', dock,
+     [('    m_follow = true;\n    m_dirty = true;\n    refreshDisplay();', '    m_follow = true;\n    m_dirty = true;\n    refreshDisplay();\n    refreshLean();')],
+     'DomDock.LeanOnlyWorksOnExposedTicksAndResets'),
+    ('lean_percent_invisible', lean_widget,
+     [('DomBarDelegate::sizeTextColor(i >= 0, 1)', 'QColor(Qt::black)')],
+     'DomLean.PaintMirrorsBidLeftAskRightAndDrawsHistory'),
+    ('lean_depth_not_painted', lean_widget,
+     [('    paintDepth(painter);', '')],
+     'DomLean.PaintMirrorsBidLeftAskRightAndDrawsHistory'),
+    ('lean_history_not_painted', lean_widget,
+     [('    paintHistory(painter);', '')],
+     'DomLean.PaintMirrorsBidLeftAskRightAndDrawsHistory'),
+    ('lean_disagreement_missing', lean_header,
+     [('m_bands[0].imbalance * m_bands[3].imbalance < 0', 'false')],
+     'LeanFixture.ExactBoundariesAndDisagreement'),
+    ('lean_ring_wrap_wrong', lean_header,
+     [('m_history[(m_head + i) % HistoryCapacity]', 'm_history[i % HistoryCapacity]')],
+     'LeanFixture.CadenceWrapAndTimeWindow'),
+    ('lean_boundary_excluded', lean,
+     [('distance <= Distances[b] + 1e-8', 'distance < Distances[b] - 1e-8')],
+     'LeanFixture.ExactBoundariesAndDisagreement'),
+    ('lean_depth_not_cumulative', lean,
+     [('for (size_t i = 1; i < depth.size(); ++i)', 'for (size_t i = depth.size(); i < depth.size(); ++i)')],
+     'LeanFixture.DepthIsMonotonicAndMirrored'),
+    ('lean_sample_every_tick', lean,
+     [('now - history(m_count - 1).time < 500', 'now - history(m_count - 1).time < 0')],
+     'LeanFixture.CadenceWrapAndTimeWindow'),
+    ('lean_history_never_expires', lean,
+     [('while (m_count && now - history(0).time > 120000)', 'while (false)')],
+     'LeanFixture.CadenceWrapAndTimeWindow'),
+    ('lean_symbol_history_retained', lean,
+     [('generation != m_generation || book.tick != m_tick', 'book.tick != m_tick')],
+     'LeanFixture.SymbolTickAndWithdrawalResetHistory'),
+    ('lean_tick_history_retained', lean,
+     [('generation != m_generation || book.tick != m_tick', 'generation != m_generation')],
+     'LeanFixture.SymbolTickAndWithdrawalResetHistory'),
+    ('lean_withdrawal_history_retained', lean,
+     [('        const auto state = m_state;\n        reset();', '        const auto state = m_state;')],
+     'LeanFixture.SymbolTickAndWithdrawalResetHistory'),
+    ('lean_locked_rejected', lean,
+     [('book.bidTop > book.askTop', 'book.bidTop >= book.askTop')],
+     'LeanFixture.LockedNativeBucketCountsZeroDistanceAndKeepsHistory'),
+    ('lean_one_side_missing', lean,
+     [('if (!bid && !ask)', 'if (!bid || !ask)')],
+     'LeanFixture.EmptyOneSidedLockedCrossedAndNonfinite'),
+    ('lean_unpersisted', dock,
+     [('settings.value("OrderBookDock/lean", true)', 'settings.value("OrderBookDock/lean-wrong", true)')],
+     'DomDock.LeanTogglePersistsAndCollapsesAt180'),
+    ('lean_narrow_not_collapsed', dock,
+     [('m_lean->isChecked() && width() >= 280', 'm_lean->isChecked()')],
+     'DomDock.LeanTogglePersistsAndCollapsesAt180'),
+    ('lean_off_still_works', dock,
+     [('if (m_lean->isChecked() && !m_leanStrip->isHidden())', 'if (true)')],
+     'DomDock.LeanOnlyWorksOnExposedTicksAndResets'),
+    ('lean_hidden_still_works', dock,
+     [('    if (!m_displayActive || minimized() || !isVisible()) return;', '')],
+     'DomDock.LeanOnlyWorksOnExposedTicksAndResets'),
+    ('lean_text_cache_rebuilt', lean_widget,
+     [('if (m_scale > 0) return;', 'if (false) return;')],
+     'DomLean.ChangingDataAndPaintAllocateNothingAfterWarmup'),
     ('fixed_dom_columns', dock,
      [('const int core = width - (counts ? countWidth * 3 : delta ? countWidth : 0);', 'const int core = 600;')],
      'DomDock.NarrowLadderFitsWithoutScrollingAndRestoresExecutionColumns'),
@@ -184,7 +271,7 @@ mutants = [
      [('    if (m_pulseTextValid[row] & (1u << slot)) return text;\n', '')],
      'DomPulse.PublishAndStepAllocateNothingAfterWarmUp'),
     ('pulse_only_when_dirty', dock,
-     [('quiet book.\n        if (m_pulseActive) {', 'quiet book.\n        if (m_pulseActive && m_dirty) {')],
+     [('quiet book.\n    if (m_pulseActive) {', 'quiet book.\n        if (m_pulseActive && m_dirty) {')],
      'DomPulseDock.QuietBookTotalsExpireOnScheduleFedEveryTick'),
     ('pulse_stamped_by_exchange_time', dock,
      [('m_pulseTrades.push_back({trade.price, trade.size, aggressor, pulseClock(false)});',
@@ -235,7 +322,7 @@ output.mkdir(exist_ok=True)
 
 def compile_target(name):
     with (output / f'{name}-build.txt').open('w') as stream:
-        subprocess.run(['cmake', '--build', str(build), '-j', '4', '--target', 'test_dom'],
+        subprocess.run(['cmake', '--build', str(build), '-j', '6', '--target', 'test_dom', 'test_lean_gauge'],
                        cwd=root, env=env, stdout=stream, stderr=subprocess.STDOUT, check=True)
 
 
@@ -248,7 +335,8 @@ try:
             changed = changed.replace(before, after)
         path.write_text(changed)
         compile_target(name)
-        result = subprocess.run([str(build / 'tests/render/test_dom'), f'--gtest_filter={test}'],
+        binary = 'tests/marketdata/test_lean_gauge' if test.startswith('LeanFixture.') else 'tests/render/test_dom'
+        result = subprocess.run([str(build / binary), f'--gtest_filter={test}'],
                                 cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         (output / f'{name}-test.txt').write_text(result.stdout)
         assert result.returncode == 1 and '[  FAILED  ]' in result.stdout, (name, result.returncode, result.stdout)
@@ -260,4 +348,5 @@ finally:
     compile_target('restored')
 
 subprocess.run([str(build / 'tests/render/test_dom')], cwd=root, env=env, check=True)
+subprocess.run([str(build / 'tests/marketdata/test_lean_gauge')], cwd=root, env=env, check=True)
 print(f'MUTATION_SUMMARY {len(mutants)}/{len(mutants)} rejected; restored suite passed', flush=True)

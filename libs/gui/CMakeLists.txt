@@ -158,6 +158,7 @@ set(WIDGET_SOURCES
     "widgets/ChartDock.cpp"
     "widgets/LayoutManager.cpp"
     "widgets/OrderBookDock.cpp"
+    "widgets/LeanGaugeWidget.cpp"
     "widgets/SecApiClient.cpp"
     "widgets/SecFilingDock.cpp"
     "widgets/ScreenerDock.cpp"

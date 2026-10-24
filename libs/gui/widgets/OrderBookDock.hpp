@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DockablePanel.hpp"
+#include "marketdata/analytics/LeanGauge.hpp"
 #include "../models/DomModel.hpp"
 #include <QElapsedTimer>
 #include <QImage>
@@ -10,8 +11,11 @@
 #include <functional>
 #include <vector>
 
+class LeanGaugeWidget;
 class IGridDataSource;
 class MarketHealth;
+class QHBoxLayout;
+class QVBoxLayout;
 class QLabel;
 class QPushButton;
 class QToolButton;
@@ -67,11 +71,14 @@ public:
     void onSymbolChanged(const QString& symbol) override;
     // Test hook: the pulse's monotonic clock in ms (default: a QElapsedTimer).
     void setPulseClock(std::function<qint64()> clock) { m_pulseClockSource = std::move(clock); }
+    const sentinel::book::LeanGauge& leanGauge() const { return m_leanGauge; }
+    uint64_t leanSteps() const { return m_leanSteps; }
     static constexpr int PulseTradeCapacity = 4096;
 
 protected:
     void showEvent(QShowEvent* event) override;
     void hideEvent(QHideEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private slots:
@@ -81,10 +88,18 @@ private slots:
     void recenter();
 
 private:
+    QHBoxLayout* buildHeading();
+    void buildLadder(QVBoxLayout* layout);
+    void refreshBook();
     void setDisplayActive(bool active);
     void stopFollowing();
     void setCumulative(bool on);
     void setPulse(bool on);
+    void buildLean(QHBoxLayout* heading, QVBoxLayout* layout);
+    void updateLeanVisibility();
+    void fitHeading();
+    void refreshLean();
+    void stepLean(const LiveOrderBook& book);
     void updatePulseActive();
     qint64 pulseClock(bool snapshot);
     void updatePulseFooter();
@@ -119,6 +134,12 @@ private:
     uint64_t m_footerVersion = UINT64_MAX;
     int m_footerWidth = -1;
     bool m_pulseOn = true, m_pulseActive = false, m_pulseOverflowWarned = false;
+    sentinel::book::LeanGauge m_leanGauge;
+    LeanGaugeWidget* m_leanStrip = nullptr;
+    QToolButton* m_lean = nullptr;
+    QHBoxLayout* m_heading = nullptr;
+    std::vector<std::pair<uint32_t, double>> m_leanBids, m_leanAsks;
+    uint64_t m_leanGeneration = 0, m_leanSteps = 0;
     QTimer m_timer;
     bool m_dirty = true, m_symbolDirty = true, m_bookDirty = true;
     bool m_exposed = false;
