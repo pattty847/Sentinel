@@ -4,7 +4,9 @@
 #include <QDateTime>
 #include <QLocale>
 #include <algorithm>
+#include <charconv>
 #include <cmath>
+#include <cstring>
 #include <limits>
 
 void DomTradeWindow::ingest(const Trade& trade)
@@ -34,6 +36,8 @@ DomModel::DomModel(QObject* parent) : QAbstractTableModel(parent)
 {
     m_bidBuffer.reserve(1);
     m_askBuffer.reserve(1);
+    // One-time: tags are refilled in place, so fresh flashes never allocate.
+    for (auto& tag : m_pulseText) tag.reserve(PulseTagCapacity);
 }
 
 std::optional<qint64> DomModel::bucket(double price, double tick)
@@ -72,6 +76,39 @@ QString DomModel::sizeText(double value)
     if (text.startsWith(QLatin1String("0."))) text.remove(0, 1);
     text += QLatin1String(suffixes[suffix]);
     return value < 0 ? QLatin1Char('-') + text : text;
+}
+
+int DomModel::formatSize(char* out, int capacity, double value)
+{
+    // The same text as sizeText, through locale-independent std::to_chars.
+    if (!std::isfinite(value) || capacity <= 0) return 0;
+    if (value > 0 && value < 1e-4) {
+        static constexpr char dust[] = "<.0001";
+        if (capacity < int(sizeof dust) - 1) return 0;
+        std::memcpy(out, dust, sizeof dust - 1);
+        return int(sizeof dust - 1);
+    }
+    static constexpr char suffixes[] = {0, 'k', 'm', 'b'};
+    double scaled = std::abs(value);
+    int suffix = 0;
+    while (suffix < 3 && scaled >= 999.5) {
+        scaled /= 1000;
+        ++suffix;
+    }
+    char* const end = out + capacity;
+    char* at = out;
+    if (value < 0) *at++ = '-';
+    const auto result = std::to_chars(at, end, scaled, std::chars_format::general, 3);
+    if (result.ec != std::errc{}) return 0;
+    if (result.ptr - at >= 2 && at[0] == '0' && at[1] == '.') {
+        std::memmove(at, at + 1, size_t(result.ptr - at - 1));
+        at = result.ptr - 1;
+    } else at = result.ptr;
+    if (suffix > 0) {
+        if (at == end) return 0;
+        *at++ = suffixes[suffix];
+    }
+    return int(at - out);
 }
 
 QString DomModel::signedSizeText(double value)
@@ -524,18 +561,22 @@ void DomModel::shiftFlashes(qint64 rows)
         return;
     }
     const int d = int(rows);
-    const auto moveRows = [&](auto& values, int stride) {
-        if (d > 0) {
-            std::move_backward(values.begin(), values.end() - size_t(d) * stride, values.end());
-            std::fill(values.begin(), values.begin() + size_t(d) * stride, typename std::decay_t<decltype(values)>::value_type{});
-        } else {
-            std::move(values.begin() + size_t(-d) * stride, values.end(), values.begin());
-            std::fill(values.end() - size_t(-d) * stride, values.end(), typename std::decay_t<decltype(values)>::value_type{});
-        }
+    // Rotation, never assignment: every tag string keeps its reserved buffer.
+    const auto rotateRows = [&](auto& values, int stride) {
+        const size_t n = size_t(std::abs(d)) * stride;
+        if (d > 0) std::rotate(values.begin(), values.end() - n, values.end());
+        else std::rotate(values.begin(), values.begin() + n, values.end());
     };
-    moveRows(m_flash, 1);
-    moveRows(m_pulseText, 4);
-    moveRows(m_pulseTextValid, 1);
+    rotateRows(m_flash, 1);
+    rotateRows(m_pulseText, 4);
+    rotateRows(m_pulseTextValid, 1);
+    // Rows that entered the window hold no flash and no valid tag.
+    const int vacated = std::abs(d);
+    for (int i = 0; i < vacated; ++i) {
+        const int r = d > 0 ? i : Rows - 1 - i;
+        m_flash[r] = {};
+        m_pulseTextValid[r] = 0;
+    }
     m_pulseLive = 0;
     for (const auto& row : m_flash)
         for (const auto& side : row) m_pulseLive += (side.change != 0) + (side.eaten != 0);
@@ -560,8 +601,17 @@ void DomModel::expireFlashes(qint64 nowMs)
     m_pulseLive = 0;
     for (int r = 0; r < Rows; ++r) {
         for (auto& f : m_flash[r]) {
-            if (f.change && nowMs - f.changeAt >= PulseFadeMs) { f.change = 0; markPulseRepaint(r); }
-            if (f.eaten && nowMs - f.eatenAt >= PulseFadeMs) { f.eaten = 0; markPulseRepaint(r); }
+            const int side = &f == &m_flash[r][0] ? 0 : 2;
+            if (f.change && nowMs - f.changeAt >= PulseFadeMs) {
+                f.change = 0;
+                m_pulseTextValid[r] &= uint8_t(~(1u << side));
+                markPulseRepaint(r);
+            }
+            if (f.eaten && nowMs - f.eatenAt >= PulseFadeMs) {
+                f.eaten = 0;
+                m_pulseTextValid[r] &= uint8_t(~(1u << (side + 1)));
+                markPulseRepaint(r);
+            }
             m_pulseLive += (f.change != 0) + (f.eaten != 0);
         }
     }
@@ -677,10 +727,19 @@ const QString& DomModel::pulseTag(int row, bool bid, bool eaten) const
     QString& text = m_pulseText[size_t(row) * 4 + slot];
     if (m_pulseTextValid[row] & (1u << slot)) return text;
     m_pulseTextValid[row] |= uint8_t(1u << slot);
+    ++m_pulseTagFormats;
     const auto& f = m_flash[row][bid ? 0 : 1];
     const double value = eaten ? f.eaten : f.change;
-    if (value == 0) text.clear();
-    else text = (eaten ? QStringLiteral("×") : value > 0 ? QStringLiteral("+") : QStringLiteral("-")) + sizeText(std::abs(value));
+    char buffer[PulseTagCapacity];
+    int length = 0;
+    if (value != 0) {
+        buffer[0] = eaten ? '\xD7' : value > 0 ? '+' : '-'; // U+00D7 multiplication sign
+        const int digits = formatSize(buffer + 1, PulseTagCapacity - 1, std::abs(value));
+        length = digits > 0 ? digits + 1 : 0;
+    }
+    // Refill in place: truncate keeps the reserved capacity of an unshared string.
+    text.truncate(0);
+    text.append(QLatin1StringView(buffer, length));
     return text;
 }
 

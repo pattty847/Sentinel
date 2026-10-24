@@ -90,6 +90,54 @@ QColor DomBarDelegate::pulledColor(double alpha)
     return QColor(170, 174, 180, int(std::lround(230 * std::clamp(alpha, 0.0, 1.0))));
 }
 
+const DomBarDelegate::TagGlyphs& DomBarDelegate::tagGlyphs(const QFont& font, qreal scale) const
+{
+    if (m_tags.scale == scale && m_tags.font == font) return m_tags;
+    static constexpr char charset[] = "0123456789.+-<kmb\xD7";
+    const QFontMetrics metrics(font);
+    m_tags.font = font;
+    m_tags.scale = scale;
+    m_tags.height = metrics.height();
+    m_tags.ascent = metrics.ascent();
+    m_tags.index.fill(-1);
+    int total = 0;
+    for (int i = 0; charset[i]; ++i) {
+        const QChar c = QLatin1Char(charset[i]);
+        m_tags.index[uchar(charset[i])] = int8_t(i);
+        m_tags.offset[i] = total;
+        m_tags.width[i] = metrics.horizontalAdvance(c);
+        total += m_tags.width[i] + 1; // a gap keeps neighbouring glyphs from bleeding
+        m_tags.fallback = std::max(m_tags.fallback, m_tags.width[i]);
+    }
+    const std::array<QColor, TagGlyphs::Colours> colours{sizeTextColor(true, 1), sizeTextColor(false, 1),
+        pulledColor(1), barColor(true, 1), barColor(false, 1)};
+    for (int k = 0; k < TagGlyphs::Colours; ++k) {
+        QImage strip(int(std::ceil(total * scale)), int(std::ceil(m_tags.height * scale)), QImage::Format_ARGB32_Premultiplied);
+        strip.setDevicePixelRatio(scale);
+        strip.fill(Qt::transparent);
+        QPainter glyphs(&strip);
+        glyphs.setFont(font);
+        QColor colour = colours[k];
+        colour.setAlpha(255);
+        glyphs.setPen(colour);
+        for (int i = 0; charset[i]; ++i)
+            glyphs.drawText(QPointF(m_tags.offset[i], m_tags.ascent), QString(QLatin1Char(charset[i])));
+        glyphs.end();
+        m_tags.strips[k] = std::move(strip);
+    }
+    return m_tags;
+}
+
+int DomBarDelegate::tagWidth(const TagGlyphs& glyphs, const QString& text) const
+{
+    int width = 0;
+    for (const QChar c : text) {
+        const int i = c.unicode() < 256 ? glyphs.index[c.unicode()] : -1;
+        width += i >= 0 ? glyphs.width[i] : glyphs.fallback;
+    }
+    return width;
+}
+
 void DomBarDelegate::paintPulse(QPainter* painter, const QStyleOptionViewItem& opt, int row, bool bid,
                                 const QRect& area, double value, bool cumulative, const QString& label) const
 {
@@ -127,13 +175,25 @@ void DomBarDelegate::paintPulse(QPainter* painter, const QStyleOptionViewItem& o
     if (alpha <= 0) return;
     const QString& tag = m_model->pulseTag(row, bid, eaten);
     if (tag.isEmpty()) return;
-    const int needed = opt.fontMetrics.horizontalAdvance(tag) + (label.isEmpty() ? 0 : opt.fontMetrics.horizontalAdvance(label) + 6);
+    const auto& glyphs = tagGlyphs(opt.font, painter->device()->devicePixelRatioF());
+    const int needed = tagWidth(glyphs, tag) + (label.isEmpty() ? 0 : tagWidth(glyphs, label) + 6);
     if (needed > opt.rect.width() - 6) return; // a cramped cell keeps the bar effect only
-    QColor color = eaten ? barColor(!bid, 1) : pulse.change > 0 ? sizeTextColor(bid, 1) : pulledColor(1);
-    color.setAlpha(int(std::lround(255 * alpha)));
-    painter->setFont(opt.font);
-    painter->setPen(color);
-    painter->drawText(opt.rect.adjusted(3, 0, -3, 0), Qt::AlignLeft | Qt::AlignVCenter, tag);
+    // Eaten: the aggressor's colour (buyers eat asks: bid colour); added: the side's tint; pulled: grey.
+    const int colour = eaten ? (bid ? 4 : 3) : pulse.change > 0 ? (bid ? 0 : 1) : 2;
+    const QImage& strip = glyphs.strips[colour];
+    const qreal scale = glyphs.scale;
+    qreal x = opt.rect.left() + 3;
+    const qreal y = opt.rect.top() + (opt.rect.height() - glyphs.height) / 2;
+    painter->setOpacity(alpha);
+    for (const QChar c : tag) {
+        const int i = c.unicode() < 256 ? glyphs.index[c.unicode()] : -1;
+        if (i < 0) continue;
+        const int w = glyphs.width[i];
+        painter->drawImage(QRectF(x, y, w, glyphs.height), strip,
+                           QRectF(glyphs.offset[i] * scale, 0, w * scale, glyphs.height * scale));
+        x += w;
+    }
+    painter->setOpacity(1);
 }
 
 void DomBarDelegate::drawFitted(QPainter* painter, const QStyleOptionViewItem& opt, const QString& text, const QColor& color)

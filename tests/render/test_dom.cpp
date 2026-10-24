@@ -50,6 +50,32 @@ void operator delete[](void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
 
+// Qt containers (QString, QArrayData) allocate through malloc, which the operator new counter
+// cannot see. On macOS libmalloc calls the exported malloc_logger hook (the one malloc stack
+// logging uses) for every allocation and reallocation in the process, whichever image or zone made
+// it: Qt frameworks, libc++ and this executable alike. Counted on the main thread only. It does
+// not see stack memory or memory a library obtains with mmap/vm_allocate instead of malloc.
+#if defined(__APPLE__)
+#include <pthread.h>
+using MallocLogger = void(uint32_t type, uintptr_t, uintptr_t, uintptr_t, uintptr_t result, uint32_t);
+extern "C" MallocLogger* malloc_logger;
+namespace {
+std::atomic<size_t> gMallocs{0};
+void countMallocs(uint32_t type, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uint32_t) {
+    constexpr uint32_t allocate = 2; // MALLOC_LOG_TYPE_ALLOCATE, also set on realloc
+    if ((type & allocate) && gCounting.load(std::memory_order_relaxed) && pthread_main_np())
+        gMallocs.fetch_add(1, std::memory_order_relaxed);
+}
+struct MallocHook {
+    MallocHook() { malloc_logger = &countMallocs; }
+} gMallocHook;
+} // namespace
+constexpr bool kMallocCounted = true;
+#else
+namespace { std::atomic<size_t> gMallocs{0}; }
+constexpr bool kMallocCounted = false;
+#endif
+
 namespace {
 Trade trade(double price, AggressorSide side, double size = 1) {
     return {std::chrono::system_clock::now(), "BTC-USD", "", side, price, size};
@@ -841,6 +867,7 @@ TEST(DomPulse, FlashesFadeWithinTheFadeTimeAndRepublishSettles) {
     rig.step();
     const int row = rig.row(2002);
     ASSERT_DOUBLE_EQ(rig.cell(2002, false).change, -3);
+    ASSERT_EQ(rig.model.pulseTag(row, false, false), "-3"); // cached while live
     QSignalSpy changed(&rig.model, &QAbstractItemModel::dataChanged);
     double alpha = 1;
     // Unchanged book: the fading row still repaints every tick.
@@ -980,11 +1007,13 @@ TEST(DomPulse, PublishAndStepAllocateNothingAfterWarmUp) {
     const int row = rig.row(1998);
     const QChar* tag = rig.model.pulseTag(row, true, false).constData();
     ASSERT_EQ(rig.model.pulseTag(row, true, false), "+5");
+    const auto formats = rig.model.pulseTagFormats();
     for (int i = 0; i < 10; ++i) {
         rig.step();
         ASSERT_GT(rig.model.pulse(row, true).changeAlpha, 0);
         EXPECT_EQ(rig.model.pulseTag(row, true, false).constData(), tag) << i;
     }
+    EXPECT_EQ(rig.model.pulseTagFormats(), formats); // formatted once, when the flash started
 }
 
 TEST(DomFreshness, LiveQuietBookHasChangeAgeButDoesNotBecomeStale) {
@@ -1462,6 +1491,105 @@ TEST_F(DomPulseDock, FlashesPaintInTheirColours) {
     }
     EXPECT_GT(dashes, 15);
     EXPECT_LT(dashes, 45);
+    // Its "-5" tag sits at the cell's outer (left) edge in grey glyphs from the tag strip.
+    int ink = 0;
+    for (int x = cell.left() + 3; x < cell.left() + 30; ++x)
+        for (int y = cell.top() + 4; y < cell.bottom() - 4; ++y) {
+            const QColor c = image.pixelColor(x, y);
+            ink += c != image.pixelColor(x, plain.top() + (y - cell.top())) && std::abs(c.red() - c.blue()) < 20;
+        }
+    EXPECT_GT(ink, 8);
+}
+
+TEST(DomPulse, InPlaceTagDigitsMatchTheLadderSizeText) {
+    for (double v : {0.0, 0.00005, 0.0001, 0.000123, 0.0032, 0.4, 0.634, 1.0, 2.5, 2.8, 6.8, 13.6, 100.0, 999.4,
+                     999.5, 1360.0, 12345.0, 999'500.0, 2.5e9, 7.1e12}) {
+        char buffer[DomModel::PulseTagCapacity];
+        const int n = DomModel::formatSize(buffer, DomModel::PulseTagCapacity, v);
+        EXPECT_EQ(QString::fromLatin1(buffer, n), DomModel::sizeText(v)) << v;
+    }
+}
+
+TEST_F(DomPulseDock, FreshFlashesAndTheirPaintAllocateNothingAfterWarmUp) {
+    // The dock's own model and delegate, driven directly (the dock tick also refreshes labels).
+    // Every frame changes four rows. Pulse frames classify them (fresh added, pulled and eaten
+    // flashes with new tags each frame); plain frames paint the same book cycle with no pulse.
+    QImage image(table->viewport()->size(), QImage::Format_ARGB32_Premultiplied);
+    QPainter painter(&image);
+    auto* delegate = table->itemDelegate();
+    QStyleOptionViewItem option;
+    option.initFrom(table->viewport());
+    option.font = table->font();
+    option.fontMetrics = QFontMetrics(option.font);
+    option.widget = table;
+    DomTradeWindow none;
+    qint64 wall = QDateTime::currentMSecsSinceEpoch(), t = 100000;
+    std::array<sb::Trade, 1> received{};
+    std::vector<QModelIndex> cells;
+    std::vector<QRect> rects;
+    for (int r = rowAt(*model, 2004); r <= rowAt(*model, 1995); ++r)
+        for (int c : {int(DomModel::Bid), int(DomModel::Price), int(DomModel::Ask)}) {
+            cells.push_back(model->index(r, c));
+            rects.push_back(table->visualRect(cells.back()));
+            if (c != DomModel::Price) ASSERT_GT(rects.back().width(), 90); // room for a tag beside the size
+        }
+    struct Count { size_t news = 0, mallocs = 0; };
+    std::array<Count, 2> paint{}; // [plain, pulse]
+    Count model_{};
+    size_t freshTags = 0;
+    const auto frame = [&](int i, bool counted, bool pulse) {
+        const double k = 1 + i % 4;
+        source.update({{true, 200, 10 + k}, {true, 199.9, 5 - k}, {false, 200.1, 10 - k}, {false, 200.2, 4 + k}});
+        flushEvents();
+        received[0] = {200.1, 0.5, sb::Aggressor::Buy, t + 1};
+        wall += 67;
+        t += 67;
+        gAllocations = 0;
+        gMallocs = 0;
+        gCounting = counted;
+        model->publish(source.book, none, true, wall);
+        if (pulse) model->pulseStep(t, received);
+        model_.news += gAllocations;
+        model_.mallocs += gMallocs;
+        gAllocations = 0;
+        gMallocs = 0;
+        for (size_t c = 0; c < cells.size(); ++c) {
+            option.rect = rects[c];
+            delegate->paint(&painter, option, cells[c]);
+        }
+        gCounting = false;
+        paint[pulse].news += gAllocations;
+        paint[pulse].mallocs += gMallocs;
+        if (pulse && counted)
+            for (const auto& cell : cells)
+                for (bool bid : {true, false})
+                    freshTags += cell.column() == DomModel::Price && model->pulse(cell.row(), bid).changeAlpha == 1;
+    };
+    for (int i = 0; i < 64; ++i) frame(i, false, true);
+    if (kMallocCounted) { // the instrument sees Qt's own string allocations
+        gMallocs = 0;
+        gCounting = true;
+        const QString probe = QString::number(1.25);
+        gCounting = false;
+        ASSERT_GT(gMallocs.load(), 0u);
+    } else {
+        std::cout << "malloc hook unavailable on this platform: Qt allocations unchecked\n";
+    }
+    model_ = {};
+    paint = {};
+    for (int i = 64; i < 96; ++i) frame(i, true, true);
+    EXPECT_GE(freshTags, 32u * 3); // three or more fresh flashes in each pulse frame
+    model->resetPulse();
+    for (int i = 96; i < 128; ++i) frame(i, false, false); // warm the plain path too
+    for (int i = 128; i < 160; ++i) frame(i, true, false);
+    EXPECT_EQ(model_.news, 0u);
+    EXPECT_EQ(model_.mallocs, 0u);
+    // Delegate painting allocates inside Qt's style code on every frame (OB0 path); the pulse's
+    // fills, outlines and tags must add nothing to it.
+    EXPECT_EQ(paint[1].news, paint[0].news);
+    EXPECT_EQ(paint[1].mallocs, paint[0].mallocs);
+    std::cout << "PULSE_ALLOC per 32 frames: plain paint news=" << paint[0].news << " mallocs=" << paint[0].mallocs
+              << " · pulse paint news=" << paint[1].news << " mallocs=" << paint[1].mallocs << '\n';
 }
 
 // Opt-in measurement: sustained wall-clock 10,000 books + 10,000 trades/s,

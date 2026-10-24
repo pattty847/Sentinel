@@ -106,6 +106,8 @@ public:
     static QString signedSizeText(double value);
     // Tooltip text: the precision of the server's float sizes, without float noise.
     static QString fullSizeText(double value);
+    // sizeText into a Latin-1 buffer without allocating; returns the length (0 if it does not fit).
+    static int formatSize(char* out, int capacity, double value);
 
     // Liquidity Pulse. pulseStep classifies the rows just published (visible rows
     // plus a margin) against the previous step with trades stamped on receipt, all
@@ -121,7 +123,9 @@ public:
     // Fresh baseline: no flashes, no totals; the next step only observes.
     void resetPulse();
     DomPulseCell pulse(int row, bool bid) const;
-    // Tag text ("+1.2", "-4.2", "×.5"), formatted on first use after its flash starts.
+    // Tag text ("+1.2", "-4.2", "×.5"), formatted on first use after its flash starts,
+    // in place into per-slot strings whose capacity is reserved at construction.
+    static constexpr int PulseTagCapacity = 16;
     const QString& pulseTag(int row, bool bid, bool eaten) const;
     double pulseThreshold(bool bid) const;
     const sentinel::book::RollingTotals& pulseTotals() const { return m_classifier.totals(); }
@@ -132,6 +136,7 @@ public:
     // Test hooks: steps classified and the events the last step produced (before the threshold).
     qint64 pulseSteps() const { return m_pulseSteps; }
     size_t lastPulseEvents() const { return m_classifier.events().size(); }
+    qint64 pulseTagFormats() const { return m_pulseTagFormats; }
 private:
     struct Row {
         double bid = 0, ask = 0, cumBid = 0, cumAsk = 0;
@@ -198,6 +203,7 @@ private:
     uint64_t m_pulseSeries = 1, m_pulseVersion = 0;
     std::array<double, 8> m_pulseSignature{};
     qint64 m_pulseNow = 0, m_pulseSteps = 0;
+    mutable qint64 m_pulseTagFormats = 0;
     int m_pulseLastRow = -1;
     int m_pulseLive = 0;
     int m_repaintFirst = Rows, m_repaintLast = -1;

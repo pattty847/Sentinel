@@ -208,6 +208,19 @@ mutants = [
     ('pulse_pulled_outline_missing', dock,
      [('            painter->fillRect(QRect(x, box.top(), w, 1), grey);\n', '')],
      'DomPulseDock.FlashesPaintInTheirColours'),
+    ('pulse_tag_reallocated_per_event', model,
+     [('    text.truncate(0);\n    text.append(QLatin1StringView(buffer, length));', '    text = QString::fromLatin1(buffer, length);')],
+     'DomPulseDock.FreshFlashesAndTheirPaintAllocateNothingAfterWarmUp'),
+    ('pulse_tag_drawn_as_text', dock,
+     [('        painter->drawImage(QRectF(x, y, w, glyphs.height), strip,\n                           QRectF(glyphs.offset[i] * scale, 0, w * scale, glyphs.height * scale));',
+       '        painter->drawText(QPointF(x, y + glyphs.ascent), QString(c));')],
+     'DomPulseDock.FreshFlashesAndTheirPaintAllocateNothingAfterWarmUp'),
+    ('pulse_tag_not_drawn', dock,
+     [('        painter->drawImage(QRectF(x, y, w, glyphs.height), strip,', '        if (false) painter->drawImage(QRectF(x, y, w, glyphs.height), strip,')],
+     'DomPulseDock.FlashesPaintInTheirColours'),
+    ('pulse_expiry_keeps_tag', model,
+     [('                m_pulseTextValid[r] &= uint8_t(~(1u << side));\n', '')],
+     'DomPulse.FlashesFadeWithinTheFadeTimeAndRepublishSettles'),
 ]
 env = dict(os.environ, CCACHE_READONLY='1', CCACHE_TEMPDIR='/tmp')
 output = build / 'dom-validation'

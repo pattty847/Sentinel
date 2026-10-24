@@ -3,6 +3,7 @@
 #include "DockablePanel.hpp"
 #include "../models/DomModel.hpp"
 #include <QElapsedTimer>
+#include <QImage>
 #include <QPointer>
 #include <QStyledItemDelegate>
 #include <QTimer>
@@ -36,12 +37,26 @@ public:
     static QColor addedColor(bool bid, double alpha);
     static QColor pulledColor(double alpha);
 private:
+    // Pulse tags are drawn from glyph strips rendered once per font, scale and colour:
+    // drawText, setPen(QColor) and setFont allocate in Qt on every call; drawImage does not.
+    struct TagGlyphs {
+        static constexpr int Colours = 5; // added bid, added ask, pulled, eaten by buyers, eaten by sellers
+        QFont font;
+        qreal scale = 0;
+        int height = 0, ascent = 0, fallback = 0;
+        std::array<QImage, Colours> strips;
+        std::array<int8_t, 256> index{};
+        std::array<int, 32> offset{}, width{};
+    };
+    const TagGlyphs& tagGlyphs(const QFont& font, qreal scale) const;
+    int tagWidth(const TagGlyphs& glyphs, const QString& text) const;
     void paintPulse(QPainter* painter, const QStyleOptionViewItem& opt, int row, bool bid,
                     const QRect& area, double value, bool cumulative, const QString& label) const;
     void paintSize(QPainter* painter, const QStyleOptionViewItem& opt, const QModelIndex& index, const QString& text) const;
     void paintPrice(QPainter* painter, const QStyleOptionViewItem& opt, const QString& text) const;
     static void drawFitted(QPainter* painter, const QStyleOptionViewItem& opt, const QString& text, const QColor& color);
     DomModel* m_model;
+    mutable TagGlyphs m_tags;
 };
 
 class OrderBookDock : public DockablePanel {
