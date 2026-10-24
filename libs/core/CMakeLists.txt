@@ -1,5 +1,7 @@
 project(sentinel_core)
 
+add_subdirectory(marketdata/analytics)
+
 add_library(sentinel_core
     roller/AnchorStore.cpp
     roller/JournalReader.cpp
@@ -152,6 +154,7 @@ target_include_directories(sentinel_core PUBLIC
 
 target_link_libraries(sentinel_core
     PUBLIC
+        sentinel_book_analytics
         Qt6::Core
         Boost::headers         # header-only components
         Boost::system          # required by beast
