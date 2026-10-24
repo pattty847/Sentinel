@@ -20,7 +20,6 @@ core).
 | Capture CPU median 3.7 %, p95 5.2 % | `Q(quantile_over_time(0.5, rate(process_cpu_seconds_total[5m])[7d:5m]))` capture 0.0375; same with 0.95: 0.0516 | 2026-10-21 |
 | Capture resident memory median 27 MB | `Q(quantile_over_time(0.5, process_resident_memory_bytes[7d]))` capture 27,344,896 B | 2026-10-21 |
 | Server CPU median 5.2 %, p95 9.1 % | same CPU queries, server 0.0522 and 0.0908 | 2026-10-21 |
-| Server CPU rises from about 4 % to 12 % over 35 h; a restart resets it | `rate(process_cpu_seconds_total{job="sentinel-server"}[1h])` at local times: 10-19 02:00 0.044, 10-19 12:00 0.065, 10-20 00:00 0.068, 10-20 12:00 0.116 (process started 10-19 00:50); after the 10-21 01:17 restart: 03:00 0.046, 16:00 0.064 | 2026-10-21 |
 | Journal about 82 frames/s | `Q(sum(rate(sentinel_capture_stored_frames_total[7d])))` 82.26 (1 h: 83.4) | 2026-10-21 |
 | Journal 0.98 GB/day on disk | `Q(sum(increase(sentinel_capture_file_bytes_total[7d]))/7)` 983,031,477 B (last 24 h: 1,006,566,879) | 2026-10-21 |
 | Live feed availability 99.96-99.98 % per product | `Q(avg_over_time(sentinel_live_feed_up[7d]))` per product 0.99955 (BTC) to 0.99975 (DOGE) | 2026-10-21 |
@@ -58,7 +57,6 @@ core).
 | Hotkeys B, S, F, C | `libs/gui/TradeInputManager.cpp:18-21` |
 | Backtest tab, AvendellaMM | `libs/gui/widgets/PaperTradingDock.cpp:143-145, 292` |
 | Agent API on 127.0.0.1:17100, no authentication | `docs/AGENT_API.md:3`; `docs/TODO.md` Security |
-| In progress: gap-free empty or one-sided book | branch `lt-astra/one-sided-book` (`18e8fd54`, `f1007d01`), not merged into `main` at `70aa0a0c`; `docs/STATUS.md` In flight; current 5 s grace `libs/core/servermodel/BookRecorder.hpp:38` |
 | Stream on 127.0.0.1:8080 without client auth | `config/server_config.yaml:2`; server log `streamPort=8080`; `docs/CONFIG.md:24-25` |
 | `SentinelStreamServer start failed` without TLS pair | `docs/CONFIG.md:18-20`; `SentinelStreamServer.cpp:1739` |
 | Only release is `v2.1.0-alpha` (March 2026) | `gh release list -R pattty847/Sentinel`: one pre-release, 2026-03-06 |

@@ -85,19 +85,6 @@ pending.
   heatmap state and to drive the chart. See [docs/AGENT_API.md](docs/AGENT_API.md). It has no
   authentication: keep it on loopback.
 
-## In progress
-
-Written and reviewed, not yet on `main`:
-
-- **Gap-free empty or one-sided books.** Today the recorder invalidates a book whose bid or ask side
-  stays empty for more than 5 s, then waits for a new snapshot. Coinbase can clear a whole book and
-  refill it with ordinary updates. The new rule keeps such a book valid while its update sequence
-  is continuous, so a few seconds of exchange glitch stay a few seconds of thin data instead of a
-  long recording gap. Reviewed; waiting on a deploy decision.
-
-Open issue: server CPU rises slowly with uptime (from about 4 % to 12 % of one core over 35 hours;
-a restart resets it). It is being profiled.
-
 ## Performance
 
 Measured on the maintainer's always-on setup unless a row says otherwise: Mac mini M4 (10 cores,
