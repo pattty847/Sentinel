@@ -93,7 +93,8 @@ QColor DomBarDelegate::pulledColor(double alpha)
 const DomBarDelegate::TagGlyphs& DomBarDelegate::tagGlyphs(const QFont& font, qreal scale) const
 {
     if (m_tags.scale == scale && m_tags.font == font) return m_tags;
-    static constexpr char charset[] = "0123456789.+-<kmb\xD7";
+    static constexpr const char* charset = DomModel::TagAlphabet;
+    static_assert(sizeof DomModel::TagAlphabet - 1 <= std::tuple_size_v<decltype(TagGlyphs::offset)>);
     const QFontMetrics metrics(font);
     m_tags.font = font;
     m_tags.scale = scale;
@@ -187,6 +188,7 @@ void DomBarDelegate::paintPulse(QPainter* painter, const QStyleOptionViewItem& o
     painter->setOpacity(alpha);
     for (const QChar c : tag) {
         const int i = c.unicode() < 256 ? glyphs.index[c.unicode()] : -1;
+        Q_ASSERT_X(i >= 0, "DomBarDelegate::paintPulse", "tag character missing from DomModel::TagAlphabet");
         if (i < 0) continue;
         const int w = glyphs.width[i];
         painter->drawImage(QRectF(x, y, w, glyphs.height), strip,

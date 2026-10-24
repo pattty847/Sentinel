@@ -1510,6 +1510,39 @@ TEST(DomPulse, InPlaceTagDigitsMatchTheLadderSizeText) {
     }
 }
 
+TEST(DomPulse, TagAlphabetCoversEverythingFormatSizeEmits) {
+    const std::string alphabet = DomModel::TagAlphabet;
+    std::vector<double> values{0, 1e-5, 0.0001, 7.1e12, -7.1e12, 9.99e14, 1e300, -2.5};
+    for (double v = 1e-4; v < 1e18; v *= 1.37) values.push_back(v);
+    for (double v : values) {
+        char buffer[DomModel::PulseTagCapacity];
+        const int n = DomModel::formatSize(buffer, DomModel::PulseTagCapacity - 1, v);
+        ASSERT_GT(n + (v == 0 ? 1 : 0), 0) << v;
+        for (int i = 0; i < n; ++i) EXPECT_NE(alphabet.find(buffer[i]), std::string::npos) << v << " '" << buffer[i] << "'";
+    }
+    for (char prefix : {'+', '-', '\xD7'}) EXPECT_NE(alphabet.find(prefix), std::string::npos);
+}
+
+TEST_F(DomPulseDock, ExponentTagsRenderEveryGlyph) {
+    source.update({{true, 199.9, 7.1e12}});
+    for (int i = 0; i < 20; ++i) tick(); // the add fades
+    source.update({{true, 199.9, 0}});
+    tick();
+    const int row = rowAt(*model, 1999);
+    ASSERT_EQ(model->pulseTag(row, true, false), "-7.1e+03b");
+    const QImage image = table->viewport()->grab().toImage();
+    const QRect cell = table->visualRect(model->index(row, DomModel::Bid));
+    const QRect plain = table->visualRect(model->index(rowAt(*model, 1990), DomModel::Bid));
+    const int expected = QFontMetrics(table->font()).horizontalAdvance(model->pulseTag(row, true, false));
+    int right = -1;
+    for (int x = cell.left() + 3; x < std::min(cell.right(), cell.left() + 3 + expected + 12); ++x)
+        for (int y = cell.top() + 4; y < cell.bottom() - 4; ++y)
+            if (image.pixelColor(x, y) != image.pixelColor(x, plain.top() + (y - cell.top()))) right = x;
+    const int glyph = QFontMetrics(table->font()).horizontalAdvance(QLatin1Char('e'));
+    // Inked to within half a glyph of the full text: a dropped character would end a glyph short.
+    EXPECT_GT(right - (cell.left() + 3) + 1, expected - glyph / 2);
+}
+
 TEST_F(DomPulseDock, FreshFlashesAndTheirPaintAllocateNothingAfterWarmUp) {
     // The dock's own model and delegate, driven directly (the dock tick also refreshes labels).
     // Every frame changes four rows. Pulse frames classify them (fresh added, pulled and eaten

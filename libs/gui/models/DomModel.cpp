@@ -733,7 +733,7 @@ const QString& DomModel::pulseTag(int row, bool bid, bool eaten) const
     char buffer[PulseTagCapacity];
     int length = 0;
     if (value != 0) {
-        buffer[0] = eaten ? '\xD7' : value > 0 ? '+' : '-'; // U+00D7 multiplication sign
+        buffer[0] = eaten ? '\xD7' : value > 0 ? '+' : '-'; // U+00D7 multiplication sign, in TagAlphabet
         const int digits = formatSize(buffer + 1, PulseTagCapacity - 1, std::abs(value));
         length = digits > 0 ? digits + 1 : 0;
     }

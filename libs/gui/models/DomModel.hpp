@@ -108,6 +108,9 @@ public:
     static QString fullSizeText(double value);
     // sizeText into a Latin-1 buffer without allocating; returns the length (0 if it does not fit).
     static int formatSize(char* out, int capacity, double value);
+    // Every character formatSize can emit (exponent form included: 7.1e+03b), plus the
+    // tag prefixes. Glyph strips that draw tags must cover all of it.
+    static constexpr char TagAlphabet[] = "0123456789.+-e<kmb\xD7";
 
     // Liquidity Pulse. pulseStep classifies the rows just published (visible rows
     // plus a margin) against the previous step with trades stamped on receipt, all

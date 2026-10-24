@@ -221,6 +221,12 @@ mutants = [
     ('pulse_expiry_keeps_tag', model,
      [('                m_pulseTextValid[r] &= uint8_t(~(1u << side));\n', '')],
      'DomPulse.FlashesFadeWithinTheFadeTimeAndRepublishSettles'),
+    ('pulse_exponent_glyph_missing', header,
+     [('static constexpr char TagAlphabet[] = "0123456789.+-e<kmb\\xD7";', 'static constexpr char TagAlphabet[] = "0123456789.+-<kmb\\xD7";')],
+     'DomPulse.TagAlphabetCoversEverythingFormatSizeEmits'),
+    ('pulse_exponent_glyph_not_drawn', header,
+     [('static constexpr char TagAlphabet[] = "0123456789.+-e<kmb\\xD7";', 'static constexpr char TagAlphabet[] = "0123456789.+-<kmb\\xD7";')],
+     'DomPulseDock.ExponentTagsRenderEveryGlyph'),
 ]
 env = dict(os.environ, CCACHE_READONLY='1', CCACHE_TEMPDIR='/tmp')
 output = build / 'dom-validation'
