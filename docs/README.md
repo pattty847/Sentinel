@@ -15,6 +15,7 @@ This index itself is maintained; AGENTS.md controls which tasks may update STATU
 | --- | --- |
 | [AGENTS.md](../AGENTS.md) | Agent rules and ownership boundaries |
 | [README.md](../README.md) | Project overview and developer quick start |
+| [docs/README_CLAIMS.md](README_CLAIMS.md) | Evidence ledger for every README claim; update with the README |
 | [docs/STATUS.md](STATUS.md) | Live facts, conductor and in-flight work; conductor only |
 | [docs/TODO.md](TODO.md) | Feature scope and priorities; read only for relevant tasks |
 | [docs/ARCHITECTURE.md](ARCHITECTURE.md) | System architecture and dependency direction |
