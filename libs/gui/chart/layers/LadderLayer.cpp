@@ -14,7 +14,7 @@ namespace {
 constexpr int kVerticesPerBar = 6;
 constexpr int kMaxVertices = LadderSnapshot::kMaxRows * 2 * kVerticesPerBar;
 struct Rgba { uchar r, g, b, a; };
-// Premultiplied (QSGVertexColorMaterial); plain b1 look.
+// Premultiplied (QSGVertexColorMaterial): plain bid and ask colours.
 constexpr Rgba kBid{34, 150, 139, 230};
 constexpr Rgba kAsk{215, 75, 72, 230};
 

@@ -217,7 +217,7 @@ TEST(ChartAgentPin, ControlledStartupHistoryAndViewport) {
             {oldest, oldest + 60000, 84000, 84100, 83900, 84000, 1, true},
             {request->endMs - 60000, request->endMs, 84000, 84100, 83900, 84000, 1, true}});
     };
-    renderer->setLiveBook(*bookWithTop(84088.2, 84088.4));
+    renderer->setLiveBook(bookWithTop(84088.2, 84088.4));
     page();
     root->setSize({1150, 931});
     page();

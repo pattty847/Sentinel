@@ -1750,13 +1750,13 @@ TEST_F(UgrGpu, TheServiceMayDieBeforeTheChart) {
 // book or trade does not replace it. A symbol switch reseeds from the new book top.
 TEST_F(UgrGpu, BookTopSeedsTheFirstPriceWindow) {
     initialPricePct5();
-    ugr->setLiveBook(*bookWithTop(100'100, 100'101));
+    ugr->setLiveBook(bookWithTop(100'100, 100'101));
     ASSERT_TRUE(ugr->getViewState()->isTimeWindowValid());
     const qint64 start = ugr->getViewState()->getVisibleTimeStart(), end = ugr->getViewState()->getVisibleTimeEnd();
     EXPECT_NEAR(priceSpan(), 102.4, 1e-9) << "the seed: 5% of a 2048-row $1 band";
     ASSERT_TRUE(frames(3)) << error.toStdString();
     const double lo = ugr->getViewState()->getMinPrice();
-    ugr->setLiveBook(*bookWithTop(100'120, 100'121));
+    ugr->setLiveBook(bookWithTop(100'120, 100'121));
     Trade trade{};
     trade.product_id = "BTC-USD";
     trade.price = 100'125;
@@ -1767,7 +1767,7 @@ TEST_F(UgrGpu, BookTopSeedsTheFirstPriceWindow) {
     EXPECT_EQ(ugr->getViewState()->getVisibleTimeStart(), start);
     EXPECT_EQ(ugr->getViewState()->getVisibleTimeEnd(), end);
     ugr->setActiveSymbol("ETH-USD");
-    ugr->setLiveBook(*bookWithTop(3'000, 3'000.5));
+    ugr->setLiveBook(bookWithTop(3'000, 3'000.5));
     EXPECT_NEAR(priceSpan(), 102.4, 1e-9);
     EXPECT_LT(ugr->getViewState()->getMinPrice(), 3'000);
     EXPECT_GT(ugr->getViewState()->getMaxPrice(), 3'000.5);
@@ -1915,7 +1915,7 @@ TEST_F(UgrGpu, PriceAxisFitUnderTheManualClampCentresTheCurrentPrice) {
     ASSERT_TRUE(ugr->view()->fitPriceToData());
     EXPECT_NEAR(centre(), 104'200, row) << "centred on the last trade";
     // A book: its mid wins.
-    ugr->setLiveBook(*bookWithTop(103'499, 103'501));
+    ugr->setLiveBook(bookWithTop(103'499, 103'501));
     ASSERT_TRUE(ugr->view()->fitPriceToData());
     EXPECT_NEAR(centre(), 103'500, row) << "centred on the book mid";
     EXPECT_DOUBLE_EQ(view->getMaxPrice() - view->getMinPrice(), 3200);
@@ -1927,7 +1927,7 @@ TEST_F(UgrGpu, PriceAxisFitUnderTheManualClampCentresTheCurrentPrice) {
 // No visible candle: the price axis fit keeps the span and centres the live price.
 TEST_F(UgrGpu, PriceAxisFitWithoutCandlesCentresTheLivePrice) {
     gpuOn();
-    ugr->setLiveBook(*bookWithTop(101'999, 102'001));
+    ugr->setLiveBook(bookWithTop(101'999, 102'001));
     const auto *view = ugr->getViewState();
     const double span = priceSpan();
     const uint64_t before = view->getViewportVersion();
@@ -2198,10 +2198,10 @@ TEST_F(UgrGpu, SymbolSwitchKeepsTheAutoScaleState) {
     // Off: 85,500..87,500 with the book at 86,000 (a quarter up the view).
     ugr->view()->setViewport(t0, t1, 85'500, 87'500);
     ASSERT_FALSE(ugr->view()->autoPriceScale());
-    ugr->setLiveBook(*bookWithTop(85'999, 86'001));
+    ugr->setLiveBook(bookWithTop(85'999, 86'001));
     ugr->setActiveSymbol("TINY-USD");
     EXPECT_FALSE(ugr->view()->autoPriceScale());
-    ugr->setLiveBook(*bookWithTop(0.0000099, 0.0000101));
+    ugr->setLiveBook(bookWithTop(0.0000099, 0.0000101));
     const double mid = 0.00001, span = mid * 2'000 / 86'000;
     EXPECT_NEAR(view->getMaxPrice() - view->getMinPrice(), span, span * 1e-9) << "the same span / price";
     EXPECT_NEAR(view->getMinPrice(), mid - 0.25 * span, span * 1e-9) << "the price at the same height";
@@ -2209,7 +2209,7 @@ TEST_F(UgrGpu, SymbolSwitchKeepsTheAutoScaleState) {
     EXPECT_EQ(view->getVisibleTimeEnd(), t1);
     // And back: the carry works both ways.
     ugr->setActiveSymbol("BTC-USD");
-    ugr->setLiveBook(*bookWithTop(85'999, 86'001));
+    ugr->setLiveBook(bookWithTop(85'999, 86'001));
     EXPECT_NEAR(view->getMinPrice(), 85'500, 1e-6);
     EXPECT_NEAR(view->getMaxPrice(), 87'500, 1e-6);
     ugr->setCandleBuffer(nullptr);
@@ -2356,13 +2356,13 @@ TEST_F(UgrGpu, SymbolSwitchCarryAcrossPriceScalesAndUnpricedSwitches) {
         EXPECT_EQ(view->getVisibleTimeEnd(), t1) << what;
     };
     ugr->view()->setViewport(t0, t1, 99'500, 101'500); // auto off; the book a quarter up
-    ugr->setLiveBook(*bookWithTop(99'999, 100'001));
+    ugr->setLiveBook(bookWithTop(99'999, 100'001));
     // BTC -> TINY (price scale 1e10, recorded).
     ugr->setActiveSymbol("TINY-USD");
     EXPECT_FALSE(layer().priceScaleCurrent());
     EXPECT_EQ(view->maxPriceSpan(), 0.0) << "TINY's limits are unknown, not BTC's";
-    ugr->setLiveBook(*bookWithTop(0, 0));             // unusable tops do not consume the carry
-    ugr->setLiveBook(*bookWithTop(0.0000099, 0.0000101));
+    ugr->setLiveBook(bookWithTop(0, 0));             // unusable tops do not consume the carry
+    ugr->setLiveBook(bookWithTop(0.0000099, 0.0000101));
     expectCarried(0.00001, "TINY before its snapshot");
     ASSERT_TRUE(pump(30'000, [&] { return layer().priceScaleCurrent() && view->maxPriceSpan() > 0; }))
         << "TINY's snapshot never arrived: current=" << layer().priceScaleCurrent() << " max=" << view->maxPriceSpan()
@@ -2373,7 +2373,7 @@ TEST_F(UgrGpu, SymbolSwitchCarryAcrossPriceScalesAndUnpricedSwitches) {
     // availability, still at TINY's price scale; they must not size ETH's limits (a
     // $0.000032 Manual limit would clamp the carried $60).
     ugr->setActiveSymbol("ETH-USD");
-    ugr->setLiveBook(*bookWithTop(2'999, 3'001));
+    ugr->setLiveBook(bookWithTop(2'999, 3'001));
     expectCarried(3'000, "ETH before its first snapshot");
     ASSERT_TRUE(pump(30'000, [&] {
         const auto snapshot = layer().snapshot();
@@ -2386,7 +2386,7 @@ TEST_F(UgrGpu, SymbolSwitchCarryAcrossPriceScalesAndUnpricedSwitches) {
     // ETH -> BTC: ETH's snapshot is still the newest; no limit from it clamps BTC.
     ugr->setActiveSymbol("BTC-USD");
     EXPECT_EQ(view->maxPriceSpan(), 0.0);
-    ugr->setLiveBook(*bookWithTop(99'999, 100'001));
+    ugr->setLiveBook(bookWithTop(99'999, 100'001));
     expectCarried(100'000, "BTC before its snapshot");
     ASSERT_TRUE(pump(30'000, [&] { return layer().priceScaleCurrent() && view->maxPriceSpan() == 3200; }));
     expectCarried(100'000, "BTC after its snapshot");
@@ -2397,12 +2397,12 @@ TEST_F(UgrGpu, SymbolSwitchCarryAcrossPriceScalesAndUnpricedSwitches) {
     ugr->setCandleBuffer(&buffer);
     ugr->setActiveSymbol("ETH-USD");
     ugr->setActiveSymbol("TINY-USD");
-    ugr->setLiveBook(*bookWithTop(0.0000099, 0.0000101));
+    ugr->setLiveBook(bookWithTop(0.0000099, 0.0000101));
     expectCarried(0.00001, "TINY after an unpriced ETH");
     // A user price action before the new symbol's price cancels the pending carry.
     ugr->setActiveSymbol("BTC-USD");
     ugr->view()->zoomPriceClicks(-1, 160); // a zoom-out (TINY's window is far below BTC's zoom-in floor)
-    ugr->setLiveBook(*bookWithTop(99'999, 100'001));
+    ugr->setLiveBook(bookWithTop(99'999, 100'001));
     EXPECT_GT(std::abs((view->getMaxPrice() - view->getMinPrice()) - 2'000), 100) << "the default seed, no carry";
     EXPECT_NEAR((view->getMaxPrice() + view->getMinPrice()) / 2, 100'000, 1e-6);
     ugr->setCandleBuffer(nullptr);
@@ -2446,16 +2446,16 @@ TEST_F(UgrGpu, CarryWaitsForTheScaleWhenNoSnapshotExistsYet) {
     EXPECT_EQ(view->maxPriceSpan(), 0.0) << "no snapshot: the limits are unknown";
     const int64_t t0 = view->getVisibleTimeStart(), t1 = view->getVisibleTimeEnd();
     ugr->view()->setViewport(t0, t1, 99'500, 101'500);
-    ugr->setLiveBook(*bookWithTop(99'999, 100'001));
+    ugr->setLiveBook(bookWithTop(99'999, 100'001));
     ugr->setActiveSymbol("TINY-USD");
-    ugr->setLiveBook(*bookWithTop(0.0000099, 0.0000101));
+    ugr->setLiveBook(bookWithTop(0.0000099, 0.0000101));
     auto expectCarried = [&](double mid, const char *what) {
         const double span = mid * 0.02;
         EXPECT_NEAR(view->getMaxPrice() - view->getMinPrice(), span, span * 1e-6) << what;
         EXPECT_NEAR(view->getMinPrice(), mid - 0.25 * span, span * 1e-6) << what;
     };
     expectCarried(0.00001, "at the first price");
-    ugr->setLiveBook(*bookWithTop(0.0000109, 0.0000111)); // the price moves before the scale is known
+    ugr->setLiveBook(bookWithTop(0.0000109, 0.0000111)); // the price moves before the scale is known
     ASSERT_TRUE(pump(30'000, [&] { return layer().priceScaleCurrent() && view->maxPriceSpan() > 0; }));
     ASSERT_TRUE(frames(3)) << error.toStdString();
     expectCarried(0.000011, "applied again once TINY's scale is known");
@@ -2473,16 +2473,16 @@ TEST_F(UgrGpu, LiveOnlySymbolCarryAppliesAfterTheWait) {
     auto *view = ugr->getViewState();
     const int64_t t0 = view->getVisibleTimeStart(), t1 = view->getVisibleTimeEnd();
     ugr->view()->setViewport(t0, t1, 99'500, 101'500);
-    ugr->setLiveBook(*bookWithTop(99'999, 100'001));
+    ugr->setLiveBook(bookWithTop(99'999, 100'001));
     ugr->setActiveSymbol("ETH-USD"); // not recorded
-    ugr->setLiveBook(*bookWithTop(2'999, 3'001));
+    ugr->setLiveBook(bookWithTop(2'999, 3'001));
     auto expectCarried = [&](double mid, const char *what) {
         const double span = mid * 0.02;
         EXPECT_NEAR(view->getMaxPrice() - view->getMinPrice(), span, span * 1e-6) << what;
         EXPECT_NEAR(view->getMinPrice(), mid - 0.25 * span, span * 1e-6) << what;
     };
     expectCarried(3'000, "at the first price (pending)");
-    ugr->setLiveBook(*bookWithTop(3'099, 3'101));
+    ugr->setLiveBook(bookWithTop(3'099, 3'101));
     auto wait = [&](int ms) {
         QElapsedTimer timer;
         timer.start();
@@ -2493,7 +2493,7 @@ TEST_F(UgrGpu, LiveOnlySymbolCarryAppliesAfterTheWait) {
     expectCarried(3'100, "applied from the live price after the wait");
     EXPECT_EQ(view->maxPriceSpan(), 0.0) << "no Manual max span without a scale";
     // Consumed: later prices do not move the view.
-    ugr->setLiveBook(*bookWithTop(3'199, 3'201));
+    ugr->setLiveBook(bookWithTop(3'199, 3'201));
     wait(chart::PriceCarryPolicy::kCarryLiveOnlyWaitMs + 600);
     expectCarried(3'100, "consumed");
 }
