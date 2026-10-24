@@ -339,6 +339,7 @@ QHBoxLayout* OrderBookDock::buildHeading()
 {
     auto* heading = new QHBoxLayout;
     m_symbolLabel = new QLabel("No symbol", m_contentWidget);
+    m_symbolLabel->setObjectName("domSymbol");
     QFont font = m_symbolLabel->font();
     font.setBold(true);
     m_symbolLabel->setFont(font);
@@ -411,7 +412,12 @@ void OrderBookDock::buildUi()
     setMinimumWidth(180);
     layout->setSpacing(2);
     auto* heading = buildHeading();
-    layout->addLayout(heading);
+    auto* headingWidget = new QWidget(m_contentWidget);
+    headingWidget->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    heading->setContentsMargins(0, 0, 0, 0);
+    heading->setSizeConstraint(QLayout::SetNoConstraint);
+    headingWidget->setLayout(heading);
+    layout->addWidget(headingWidget);
     auto label = [&](const char* name) {
         auto* result = new QLabel(m_contentWidget);
         result->setObjectName(name);
@@ -454,12 +460,7 @@ void OrderBookDock::buildLean(QHBoxLayout* heading, QVBoxLayout* layout)
     m_lean->setCheckable(true);
     m_lean->setToolTip("Book imbalance, depth and two minute history; expands at 280 px dock width.");
     heading->insertWidget(2, m_lean);
-    // Keep all four controls reachable at the 180 px minimum.
-    heading->setSpacing(0);
-    for (auto* button : {m_pulse, m_lean, m_cumulative})
-        button->setStyleSheet("QToolButton { padding: 1px; color: #E8E8E8; }"
-                              "QToolButton:checked { background-color: #2A2D31; border-color: #3A3D42; }");
-    m_recenter->setStyleSheet("QPushButton { padding: 1px; }");
+    m_heading = heading;
     m_leanStrip = new LeanGaugeWidget(m_leanGauge, m_contentWidget);
     layout->addWidget(m_leanStrip);
     QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
@@ -473,9 +474,29 @@ void OrderBookDock::buildLean(QHBoxLayout* heading, QVBoxLayout* layout)
     updateLeanVisibility();
 }
 
+void OrderBookDock::fitHeading()
+{
+    // Measure the unmodified theme before deciding whether compact padding is needed.
+    m_heading->setSpacing(-1);
+    m_recenter->setStyleSheet({});
+    int needed = 4 * m_heading->spacing();
+    for (auto* button : {m_pulse, m_lean, m_cumulative}) {
+        button->setStyleSheet({});
+        button->ensurePolished();
+        needed += button->sizeHint().width();
+    }
+    m_recenter->ensurePolished();
+    needed += m_recenter->sizeHint().width();
+    if (needed <= width() - 8) return;
+    m_heading->setSpacing(0);
+    for (auto* button : {m_pulse, m_lean, m_cumulative})
+        button->setStyleSheet("QToolButton { padding: 1px; }");
+    m_recenter->setStyleSheet("QPushButton { padding: 1px; }");
+}
+
 void OrderBookDock::updateLeanVisibility()
 {
-    m_symbolLabel->setVisible(width() >= 280);
+    fitHeading();
     const bool visible = m_lean->isChecked() && width() >= 280;
     m_leanStrip->setVisible(visible);
     if (!visible) m_leanGauge.reset();

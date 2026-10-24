@@ -15,10 +15,11 @@ class LeanGauge {
 public:
     static constexpr std::array<double, 4> Distances{5, 15, 50, 100};
     static constexpr size_t DepthPoints = 101, HistoryCapacity = 241;
-    enum class State { Empty, TwoSided, BidOnly, AskOnly, Invalid };
+    enum class State { Empty, TwoSided, BidOnly, AskOnly, Invalid, Crossed };
     struct Band { double bid = 0, ask = 0, imbalance = 0; };
     struct Sample { int64_t time = 0; double value = 0; };
-    // generation changes on symbol switch. Invalid/withdrawn books clear history.
+    // Generation changes on symbol switch. Invalid/withdrawn books clear history;
+    // crossed books hold the last values and history without adding a sample.
     void update(const LeanBook& book, uint64_t generation, int64_t now);
     void reset();
     State state() const { return m_state; }

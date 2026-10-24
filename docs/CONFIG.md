@@ -140,7 +140,10 @@ quote-price distances 5, 15, 50 and 100 from mid, mirrored cumulative depth over
 and two minutes of 15-band history sampled about every 500 ms. The strip collapses below
 280 px dock width without changing the saved preference. Hidden, collapsed or disabled
 strips do no analytics work and reset their history. Symbol/tick changes, withdrawal,
-and locked/crossed books also reset history; a one-sided book uses its remaining touch.
+and invalid grids also reset history; a one-sided book uses its remaining touch.
+A locked native bucket top is valid: mid is that slot and its bid/ask sizes count in every
+band. A crossed top retains the last bands, depth and history, marked stale, without
+adding samples. Valid updates resume sampling; no retained values cross symbol/tick resets.
 
 ### Heatmap chart settings (S6)
 

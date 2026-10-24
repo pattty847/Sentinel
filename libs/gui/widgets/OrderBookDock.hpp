@@ -97,6 +97,7 @@ private:
     void setPulse(bool on);
     void buildLean(QHBoxLayout* heading, QVBoxLayout* layout);
     void updateLeanVisibility();
+    void fitHeading();
     void refreshLean();
     void stepLean(const LiveOrderBook& book);
     void updatePulseActive();
@@ -136,6 +137,7 @@ private:
     sentinel::book::LeanGauge m_leanGauge;
     LeanGaugeWidget* m_leanStrip = nullptr;
     QToolButton* m_lean = nullptr;
+    QHBoxLayout* m_heading = nullptr;
     std::vector<std::pair<uint32_t, double>> m_leanBids, m_leanAsks;
     uint64_t m_leanGeneration = 0, m_leanSteps = 0;
     QTimer m_timer;

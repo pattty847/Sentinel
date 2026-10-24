@@ -29,7 +29,7 @@ bool LeanGauge::reference(const LeanBook& book, double& mid)
         m_state = State::Invalid;
         return false;
     }
-    if (bid && ask && book.bidTop >= book.askTop) { m_state = State::Invalid; return false; }
+    if (bid && ask && book.bidTop > book.askTop) { m_state = State::Crossed; return false; }
     // Work in native slots: decimal boundary prices must not fall outside a band.
     mid = bid && ask ? double(book.bidTop) / 2 + double(book.askTop) / 2
                     : double(bid ? book.bidTop : book.askTop);
@@ -79,11 +79,17 @@ void LeanGauge::update(const LeanBook& book, uint64_t generation, int64_t now)
     if (generation != m_generation || book.tick != m_tick) reset();
     m_generation = generation;
     m_tick = book.tick;
+    double mid = 0;
+    if (!reference(book, mid)) {
+        if (m_state == State::Crossed) return;
+        const auto state = m_state;
+        reset();
+        m_state = state;
+        return;
+    }
     m_bands = {};
     m_bidDepth = {};
     m_askDepth = {};
-    double mid = 0;
-    if (!reference(book, mid)) { m_head = m_count = 0; return; }
     if (book.bidTop >= 0) accumulate(book.bids, book, mid, true);
     if (book.askTop >= 0) accumulate(book.asks, book, mid, false);
     for (auto& band : m_bands) {

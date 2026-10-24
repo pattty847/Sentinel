@@ -15,6 +15,7 @@
 #include <QImage>
 #include <QHeaderView>
 #include <QLabel>
+#include <QLayout>
 #include <QPainter>
 #include <QPushButton>
 #include <QScrollBar>
@@ -1094,7 +1095,7 @@ TEST_F(DomDock, NarrowLadderFitsWithoutScrollingAndRestoresExecutionColumns) {
         const auto* freshness = dock.findChild<QLabel*>("domFreshness");
         EXPECT_FALSE(aggregation->wordWrap());
         EXPECT_EQ(summary->y(), freshness->y());
-        EXPECT_LT(table->y() - (dock.findChild<QWidget*>("domLeanStrip")->isVisible() ? 80 : 0), 110); // heading + two metadata lines, not a seven-line paragraph.
+        EXPECT_LT(table->y() - (dock.findChild<QWidget*>("domLeanStrip")->isVisible() ? dock.findChild<QWidget*>("domLeanStrip")->height() + 2 : 0), 110); // heading + two metadata lines, not a seven-line paragraph.
         EXPECT_TRUE(aggregation->text().contains("USD"));
         EXPECT_TRUE(aggregation->text().contains("BTC"));
         EXPECT_TRUE(table->horizontalHeader()->toolTip().contains("last 60 s by trade time"));
@@ -1681,7 +1682,7 @@ TEST_F(DomDock, LeanTogglePersistsAndCollapsesAt180) {
     auto* toggle = dock.findChild<QToolButton*>("domLean");
     auto* strip = dock.findChild<QWidget*>("domLeanStrip");
     ASSERT_TRUE(toggle->isChecked());
-    show(); EXPECT_TRUE(strip->isVisible()); EXPECT_EQ(strip->height(), 78);
+    show(); EXPECT_TRUE(strip->isVisible()); EXPECT_EQ(strip->height(), strip->sizeHint().height());
     toggle->setChecked(false); EXPECT_TRUE(strip->isHidden());
     { OrderBookDock reopened(nullptr, &source); EXPECT_FALSE(reopened.findChild<QToolButton*>("domLean")->isChecked()); }
     toggle->setChecked(true);
@@ -1695,23 +1696,42 @@ TEST_F(DomDock, LeanTogglePersistsAndCollapsesAt180) {
         EXPECT_GE(button->mapTo(&dock, QPoint()).x(), 0);
         EXPECT_LE(button->mapTo(&dock, QPoint(button->width(), 0)).x(), 180);
     }
+    EXPECT_TRUE(dock.findChild<QLabel*>("domSymbol")->isVisible());
     dock.resize(650, 600); QCoreApplication::processEvents(); EXPECT_TRUE(strip->isVisible());
+    for (const char* name : {"domLean", "domPulse", "domCumulative", "domRecenter"})
+        EXPECT_TRUE(dock.findChild<QWidget*>(name)->styleSheet().isEmpty());
+    EXPECT_GT(dock.findChild<QLabel*>("domSymbol")->parentWidget()->layout()->spacing(), 0);
 }
 
 TEST_F(DomDock, LeanDarkThemeLayoutAndOptionalSnapshots) {
     const QString previousStyle = qApp->styleSheet();
     qApp->setStyleSheet(DarkTheme{}.stylesheet());
-    source.update({{true, 199, 3}, {false, 201, 1}, {true, 195, 5}, {false, 300, 50}});
+    source.update({{true, 200, 3}, {false, 200, 1}, {true, 195, 5}, {false, 300, 50}});
     dock.resize(400, 600); show();
     auto* strip = dock.findChild<QWidget*>("domLeanStrip");
     EXPECT_TRUE(strip->isVisible()); EXPECT_EQ(dock.width(), 400);
     // Optional diagnostic artifacts stay outside the checkout's tracked sources.
     const QString directory = qEnvironmentVariable("DOM_LEAN_SHOT_DIR");
     if (!directory.isEmpty()) EXPECT_TRUE(dock.grab().save(directory + "/lean-wide-synthetic.png"));
+    EXPECT_EQ(dock.leanGauge().state(), sentinel::book::LeanGauge::State::TwoSided);
+    source.update({{true, 200.1, 7}}); flushEvents();
+    QMetaObject::invokeMethod(dock.findChild<QTimer*>("domPublishTimer"), "timeout", Qt::DirectConnection);
+    EXPECT_EQ(dock.leanGauge().state(), sentinel::book::LeanGauge::State::Crossed);
+    if (!directory.isEmpty()) EXPECT_TRUE(dock.grab().save(directory + "/lean-crossed-synthetic.png"));
     dock.resize(180, 600); QCoreApplication::processEvents();
     EXPECT_EQ(dock.width(), 180); EXPECT_TRUE(strip->isHidden());
     EXPECT_EQ(table->horizontalScrollBar()->maximum(), 0);
     if (!directory.isEmpty()) EXPECT_TRUE(dock.grab().save(directory + "/lean-narrow-synthetic.png"));
+    dock.resize(600, 600);
+    source.update({{true, 200.1, 0}}); flushEvents();
+    const QFont previousFont = qApp->font();
+    QFont large = previousFont; large.setPixelSize(18); qApp->setFont(large);
+    qApp->setStyleSheet(qApp->styleSheet()); // FontManager refreshes the stylesheet after changing the app font.
+    QCoreApplication::processEvents();
+    QMetaObject::invokeMethod(dock.findChild<QTimer*>("domPublishTimer"), "timeout", Qt::DirectConnection);
+    EXPECT_EQ(strip->font().pixelSize(), 18);
+    if (!directory.isEmpty()) EXPECT_TRUE(dock.grab().save(directory + "/lean-large-synthetic.png"));
+    qApp->setFont(previousFont);
     qApp->setStyleSheet(previousStyle);
 }
 
@@ -1745,30 +1765,40 @@ TEST_F(DomDock, LeanIgnoresPinnedLadderAndUsesNativeTick) {
                       QPoint(), QPoint(0, 120), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
     QApplication::sendEvent(table->viewport(), &wheel);
     table->verticalScrollBar()->setValue(0);
-    QMetaObject::invokeMethod(&dock, "refreshDisplay", Qt::DirectConnection);
-    EXPECT_DOUBLE_EQ(dock.leanGauge().bands()[0].bid, 8);
-    EXPECT_DOUBLE_EQ(dock.leanGauge().bands()[3].ask, 51);
+    const auto steps = dock.leanSteps();
+    source.update({{true, 195, 11}, {false, 300, 80}});
+    flushEvents();
+    QMetaObject::invokeMethod(dock.findChild<QTimer*>("domPublishTimer"), "timeout", Qt::DirectConnection);
+    EXPECT_EQ(dock.leanSteps(), steps + 1);
+    EXPECT_DOUBLE_EQ(dock.leanGauge().bands()[0].bid, 14);
+    EXPECT_DOUBLE_EQ(dock.leanGauge().bands()[3].ask, 81);
     EXPECT_TRUE(dock.leanGauge().disagreement());
 }
 
 TEST(DomLean, ChangingDataAndPaintAllocateNothingAfterWarmup) {
     std::array<double, 401> bids{}, asks{};
     sentinel::book::LeanGauge gauge;
-    LeanGaugeWidget widget(gauge); widget.resize(400, 78);
-    QImage image(400, 78, QImage::Format_ARGB32_Premultiplied);
-    QPainter painter(&image);
-    const auto frame = [&](int i) {
-        bids[199] = 1 + i % 37; asks[201] = 1 + i % 11;
-        bids[100] = 30; asks[300] = 40;
-        gauge.update({bids, asks, 0, 1, 199, 201}, 0, i * 500);
-        widget.paint(painter);
-    };
-    for (int i = 0; i < 300; ++i) frame(i);
-    gAllocations = 0; gMallocs = 0; gCounting = true;
-    for (int i = 300; i < 332; ++i) frame(i);
-    gCounting = false;
-    EXPECT_EQ(gAllocations, 0u); EXPECT_EQ(gMallocs, 0u);
-    std::cout << "LEAN_ALLOC 32 changed frames: new=" << gAllocations << " malloc=" << gMallocs << '\n';
+    LeanGaugeWidget widget(gauge); widget.resize(400, widget.sizeHint().height());
+    const QFont originalFont = widget.font();
+    for (int pixelSize : {0, 20}) {
+        QFont selected = originalFont;
+        if (pixelSize) selected.setPixelSize(pixelSize);
+        widget.setFont(selected);
+        QImage image(widget.size(), QImage::Format_ARGB32_Premultiplied);
+        QPainter painter(&image);
+        const auto frame = [&](int i) {
+            bids[199] = 1 + i % 37; asks[201] = 1 + i % 11;
+            bids[100] = 30; asks[300] = 40;
+            gauge.update({bids, asks, 0, 1, 199, 201}, 0, i * 500);
+            widget.paint(painter);
+        };
+        for (int i = 0; i < 300; ++i) frame(i);
+        gAllocations = 0; gMallocs = 0; gCounting = true;
+        for (int i = 300; i < 332; ++i) frame(i);
+        gCounting = false;
+        EXPECT_EQ(gAllocations, 0u); EXPECT_EQ(gMallocs, 0u);
+        std::cout << "LEAN_ALLOC 32 changed frames: new=" << gAllocations << " malloc=" << gMallocs << '\n';
+    }
     if (kMallocCounted) {
         gMallocs = 0; gCounting = true;
         QString probe(1000, QLatin1Char('x'));
@@ -1776,31 +1806,65 @@ TEST(DomLean, ChangingDataAndPaintAllocateNothingAfterWarmup) {
     }
 }
 
+TEST(DomLean, InheritsLargeFontAndMarksCrossedValuesStale) {
+    std::array<double, 401> bids{}, asks{};
+    bids[199] = 3; asks[201] = 1; asks[300] = 10;
+    sentinel::book::LeanGauge gauge;
+    gauge.update({bids, asks, 0, 1, 199, 201}, 0, 0);
+    QWidget parent;
+    QFont large = parent.font(); large.setPixelSize(20); parent.setFont(large);
+    LeanGaugeWidget widget(gauge, &parent); widget.resize(500, widget.sizeHint().height());
+    EXPECT_EQ(widget.font(), parent.font());
+    const auto render = [&] {
+        QImage image(widget.size(), QImage::Format_ARGB32_Premultiplied); image.fill(Qt::black);
+        QPainter painter(&image); widget.paint(painter); return image;
+    };
+    const QImage fresh = render();
+    const QFontMetrics fm(large);
+    const int left = 250 - fm.horizontalAdvance("-100%") - 4;
+    int first = fm.height(), last = -1;
+    for (int y = 0; y < fm.height(); ++y)
+        for (int x = left; x < 250; ++x)
+            if (fresh.pixelColor(x, y).lightness() > 150) { first = std::min(first, y); last = y; }
+    EXPECT_GE(last - first + 1, fm.capHeight() - 2);
+    EXPECT_GT(widget.height(), 78);
+    gauge.update({bids, asks, 0, 1, 202, 201}, 0, 500);
+    ASSERT_EQ(gauge.state(), sentinel::book::LeanGauge::State::Crossed);
+    const QImage stale = render();
+    const QRect status(2, 2 * std::max(14, fm.height()) + 14, 230, fm.height());
+    EXPECT_NE(fresh.copy(status), stale.copy(status)); // stale must override near/far disagreement
+    EXPECT_EQ(fresh.copy(0, 0, 500, 2 * fm.height()), stale.copy(0, 0, 500, 2 * fm.height()));
+}
+
 TEST(DomLean, PaintMirrorsBidLeftAskRightAndDrawsHistory) {
     std::array<double, 401> bids{}, asks{};
     bids[199] = 3; asks[201] = 1; asks[300] = 10;
     sentinel::book::LeanGauge gauge;
     for (int i = 0; i < 241; ++i) gauge.update({bids, asks, 0, 1, 199, 201}, 0, i * 500);
-    LeanGaugeWidget widget(gauge); widget.resize(400, 78);
-    QImage image(400, 78, QImage::Format_ARGB32_Premultiplied); image.fill(Qt::black);
+    LeanGaugeWidget widget(gauge); widget.resize(400, widget.sizeHint().height());
+    QImage image(widget.size(), QImage::Format_ARGB32_Premultiplied); image.fill(Qt::black);
     QPainter painter(&image); widget.paint(painter); painter.end();
     const QColor bid = DomBarDelegate::barColor(true, 1), ask = DomBarDelegate::barColor(false, 1);
     int brightDigits = 0;
     for (int y = 0; y < 13; ++y)
         for (int x = 163; x < 199; ++x) brightDigits += image.pixelColor(x, y).lightness() > 150;
     EXPECT_GT(brightDigits, 20);
-    EXPECT_EQ(image.pixelColor(80, 6), bid); // +50%, left of the first bar's centre (95)
-    EXPECT_EQ(image.pixelColor(305, 21), ask); // negative far band, right of centre (295)
+    const QFontMetrics fm(widget.font());
+    const int row = std::max(14, fm.height());
+    const int label = fm.horizontalAdvance("±100") + 4, value = fm.horizontalAdvance("-100%") + 4;
+    const int center = label + (200 - label - value) / 2;
+    EXPECT_EQ(image.pixelColor(center - 10, row / 2), bid);
+    EXPECT_EQ(image.pixelColor(center + 210, row + row / 2), ask);
     const auto countColour = [&](const QRect& area, const QColor& colour) {
         int count = 0;
         for (int y = area.top(); y <= area.bottom(); ++y)
             for (int x = area.left(); x <= area.right(); ++x) count += image.pixelColor(x, y) == colour;
         return count;
     };
-    EXPECT_GT(countColour(QRect(0, 32, 200, 16), bid), 100);
-    EXPECT_EQ(countColour(QRect(200, 32, 200, 16), bid), 0);
-    EXPECT_GT(countColour(QRect(200, 32, 200, 16), ask), 100);
-    EXPECT_GT(countColour(QRect(55, 58, 342, 17), bid), 200);
+    EXPECT_GT(countColour(QRect(0, 2 * row, 200, 14), bid), 100);
+    EXPECT_EQ(countColour(QRect(200, 2 * row, 200, 14), bid), 0);
+    EXPECT_GT(countColour(QRect(200, 2 * row, 200, 14), ask), 100);
+    EXPECT_GT(countColour(QRect(100, 3 * row + 14, 297, std::max(16, row)), bid), 200);
 }
 
 } // namespace
