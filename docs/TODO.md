@@ -12,7 +12,7 @@ Detail belongs in the linked plan or file, not in the item.
    - history requests may ask 1,000+ bars; the server answers from cache or fans out 350-bar Coinbase pages within the rate limit;
    - change-driven live publishing with a per-client max update rate;
    - EATEN vs PULLED liquidity, ABSORPTION, REPLENISHMENT at sub-minute resolution from the raw journal (a 1-minute TWAP column cannot show event order).
-2. **Order book widget pass** (owner reports 2026-10-06): following cannot keep the mid centred in a fast dump (`OrderBookDock.cpp` follow/recenter; DECISIONS 2026-10-03, 67 ms over a 2001-tick window); BTC rows under the best bid looked empty at 0.1 tick (thin book or display bug, unverified); cumulative-size mode; one tick size shared with the heatmap (today separate, and the order book tick control is hard to find).
+2. **Order book widget pass** (owner reports 2026-10-06): following cannot keep the mid centred in a fast dump (`OrderBookDock.cpp` follow/recenter; DECISIONS 2026-10-03, 67 ms over a 2001-tick window); BTC rows under the best bid looked empty at 0.1 tick (thin book or display bug, unverified); one tick size shared with the heatmap (today separate, and the order book tick control is hard to find).
 3. **GUI polish** (owner, 2026-10-06):
    - heatmap chunk loading after a timeframe change (1m->15m) or fast zoom-out is too slow for a local server (S6 A/B: 1h settle 509-1297 ms); profile the chunk request path before guessing;
    - put explanatory hover tooltips behind a "learning mode" setting (an order book tooltip covers the chart);

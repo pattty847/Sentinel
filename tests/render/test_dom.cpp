@@ -2,6 +2,7 @@
 #include "mainwindow/AgentApiSnapshots.hpp"
 #include "themes/DarkTheme.hpp"
 #include "widgets/OrderBookDock.hpp"
+#include "render/heatmap/HeatmapPalette.hpp"
 #include "datasources/IGridDataSource.hpp"
 #include "datasources/RemoteGridDataSource.hpp"
 #include <QMainWindow>
@@ -16,8 +17,11 @@
 #include <QPainter>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QSettings>
 #include <QSignalSpy>
+#include <QTemporaryDir>
 #include <QTableView>
+#include <QToolButton>
 #include <QTest>
 #include <gtest/gtest.h>
 #include <algorithm>
@@ -28,6 +32,9 @@ namespace {
 Trade trade(double price, AggressorSide side, double size = 1) {
     return {std::chrono::system_clock::now(), "BTC-USD", "", side, price, size};
 }
+Trade tradeAt(qint64 timeMs, double price, AggressorSide side, double size) {
+    return {std::chrono::system_clock::time_point(std::chrono::milliseconds(timeMs)), "BTC-USD", "", side, price, size};
+}
 void apply(LiveOrderBook& book, std::initializer_list<BookLevelUpdate> updates, qint64 receiveMs = 0) {
     const auto at = receiveMs ? std::chrono::system_clock::time_point(std::chrono::milliseconds(receiveMs)) : std::chrono::system_clock::now();
     book.applyUpdates(std::span(updates.begin(), updates.size()), at, nullptr);
@@ -37,7 +44,8 @@ int rowAt(DomModel& model, qint64 key) {
         if (model.index(r, DomModel::Price).data(DomModel::BucketRole).toLongLong() == key) return r;
     return -1;
 }
-int count(DomModel& model, int row, int col) { return model.index(row, col).data().toInt(); }
+// Full traded volume (base units) behind a Buy/Sell/Delta cell.
+double vol(DomModel& model, int row, int col) { return model.index(row, col).data(DomModel::QuantityRole).toDouble(); }
 
 TEST(DomModel, SameBucketUniqueBestAskStableEmptyRowsAndAlignment) {
     LiveOrderBook book;
@@ -81,7 +89,7 @@ TEST(DomModel, EmptyBookAndUnchangedPublicationDoNotInventRowsOrChurn) {
     model.publish(book, trades, true);
     EXPECT_EQ(model.rowCount(), 0);
     EXPECT_TRUE(model.aggregation().contains("0.1"));
-    EXPECT_TRUE(model.executionSummary().contains("(1 received)"));
+    EXPECT_TRUE(model.executionSummary().contains("1 trades"));
     apply(book, {{true, 200, 1}, {false, 201, 1}});
     model.publish(book, trades, true);
     QSignalSpy changed(&model, &QAbstractItemModel::dataChanged);
@@ -91,31 +99,373 @@ TEST(DomModel, EmptyBookAndUnchangedPublicationDoNotInventRowsOrChurn) {
     model.publish(book, trades, false);
     EXPECT_EQ(model.rowCount(), DomModel::Rows);
     EXPECT_EQ(model.index(rowAt(model, 2000), DomModel::Bid).data(DomModel::QuantityRole).toDouble(), 0);
-    EXPECT_EQ(count(model, rowAt(model, 2000), DomModel::Buys), 1);
+    EXPECT_EQ(vol(model, rowAt(model, 2000), DomModel::Buys), 1);
     EXPECT_TRUE(model.summary().contains("Bid — · Ask —"));
 }
 
-TEST(DomModel, RingCountsEveryEventUnknownNeverSellsAndCountsAreNotVolume) {
+TEST(DomModel, TradesAreVolumeOverTheTrailingMinuteByTradeTimeUnknownNeverSells) {
+    const qint64 now = 1'800'000'000'000;
     DomTradeWindow trades;
-    for (int i = 0; i < 1250; ++i) trades.ingest(trade(200, AggressorSide::Buy, 100000));
-    for (int i = 0; i < 300; ++i) trades.ingest(trade(200, AggressorSide::Sell, 0.0001));
-    for (int i = 0; i < 50; ++i) trades.ingest(trade(200, AggressorSide::Unknown));
+    for (int i = 0; i < 3; ++i) trades.ingest(tradeAt(now - 10000, 200, AggressorSide::Buy, .5));
+    trades.ingest(tradeAt(now - 59000, 200, AggressorSide::Sell, .25));
+    trades.ingest(tradeAt(now - 61000, 200, AggressorSide::Sell, 100)); // outside the minute
+    trades.ingest(tradeAt(now - 1000, 200, AggressorSide::Unknown, 7));
+    trades.ingest(tradeAt(0, 200, AggressorSide::Buy, 9)); // no exchange time: never windowed
     LiveOrderBook book;
     book.initialize(0, 400, 0.1);
     apply(book, {{true, 200, 4}, {false, 200.1, 7}});
     DomModel model;
-    model.publish(book, trades, true);
+    model.clear("BTC-USD");
+    model.publish(book, trades, true, now);
     const int r = rowAt(model, 2000);
-    EXPECT_EQ(trades.size(), 1000);
-    EXPECT_EQ(count(model, r, DomModel::Buys), 650);
-    EXPECT_EQ(count(model, r, DomModel::Sells), 300);
-    EXPECT_EQ(count(model, r, DomModel::Delta), 350);
-    EXPECT_TRUE(model.executionSummary().contains("last 1,000 trades (1000 received)"));
-    EXPECT_TRUE(model.executionSummary().contains("unknown: 50"));
+    EXPECT_DOUBLE_EQ(vol(model, r, DomModel::Buys), 1.5);
+    EXPECT_DOUBLE_EQ(vol(model, r, DomModel::Sells), .25);
+    EXPECT_DOUBLE_EQ(vol(model, r, DomModel::Delta), 1.25);
+    EXPECT_EQ(model.index(r, DomModel::Buys).data().toString(), "1.5");
+    EXPECT_EQ(model.index(r, DomModel::Sells).data().toString(), ".25");
+    EXPECT_EQ(model.index(r, DomModel::Delta).data().toString(), "+1.25");
+    const auto summary = model.executionSummary();
+    EXPECT_TRUE(summary.contains("Traded volume in BTC · last 60 s by trade time · 5 trades")) << summary.toStdString();
+    EXPECT_TRUE(summary.contains("unknown side: 1"));
+    EXPECT_TRUE(summary.contains("1 without trade time"));
+    EXPECT_FALSE(summary.contains("ring-limited"));
     for (int c = DomModel::Buys; c < DomModel::Columns; ++c) {
-        EXPECT_TRUE(model.headerData(c, Qt::Horizontal, Qt::ToolTipRole).toString().contains("counts"));
-        EXPECT_FALSE(model.headerData(c, Qt::Horizontal, Qt::DisplayRole).toString().contains("volume"));
+        EXPECT_TRUE(model.headerData(c, Qt::Horizontal, Qt::ToolTipRole).toString().contains("Traded volume"));
+        EXPECT_TRUE(model.headerData(c, Qt::Horizontal, Qt::DisplayRole).toString().contains("vol"));
     }
+    // The sell at now-59 s leaves the window first; the model asks to republish then.
+    EXPECT_FALSE(model.needsRepublish(now + 900));
+    EXPECT_TRUE(model.needsRepublish(now + 1000));
+    model.publish(book, trades, true, now + 1000);
+    EXPECT_DOUBLE_EQ(vol(model, r, DomModel::Sells), 0);
+    EXPECT_EQ(model.index(r, DomModel::Delta).data().toString(), "+1.5");
+    model.publish(book, trades, true, now + 51000);
+    EXPECT_DOUBLE_EQ(vol(model, r, DomModel::Buys), 0);
+    EXPECT_TRUE(model.index(r, DomModel::Delta).data().toString().isEmpty());
+}
+
+TEST(DomModel, RingEvictsOldestAndLabelsAWindowItCannotCover) {
+    const qint64 now = 1'800'000'000'000;
+    DomTradeWindow trades;
+    for (int i = 0; i < 100; ++i) trades.ingest(tradeAt(now - 5000, 200, AggressorSide::Buy, 1000));
+    for (int i = 0; i < DomTradeWindow::Capacity; ++i) trades.ingest(tradeAt(now - 4000, 200, AggressorSide::Sell, .001));
+    EXPECT_EQ(trades.size(), DomTradeWindow::Capacity);
+    LiveOrderBook book;
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, 4}, {false, 200.1, 7}});
+    DomModel model;
+    model.publish(book, trades, true, now);
+    const int r = rowAt(model, 2000);
+    EXPECT_DOUBLE_EQ(vol(model, r, DomModel::Buys), 0);
+    EXPECT_NEAR(vol(model, r, DomModel::Sells), DomTradeWindow::Capacity * .001, 1e-9);
+    const auto summary = model.executionSummary();
+    EXPECT_TRUE(summary.contains("ring-limited: the last 8,192 trades cover only 5.0 s")) << summary.toStdString();
+    EXPECT_FALSE(summary.contains("without trade time"));
+}
+
+TEST(DomModel, FutureStampedTradesWaitForTheirTimeAndCountOnce) {
+    const qint64 now = 1'800'000'000'000;
+    DomTradeWindow trades;
+    trades.ingest(tradeAt(now + 500, 200, AggressorSide::Buy, 1));        // within the skew tolerance
+    trades.ingest(tradeAt(now + 300000, 200, AggressorSide::Sell, 4));    // five minutes ahead
+    LiveOrderBook book;
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, 4}, {false, 200.1, 7}});
+    DomModel model;
+    model.clear("BTC-USD");
+    model.publish(book, trades, true, now);
+    const int r = rowAt(model, 2000);
+    EXPECT_DOUBLE_EQ(vol(model, r, DomModel::Buys), 1);
+    EXPECT_DOUBLE_EQ(vol(model, r, DomModel::Sells), 0);
+    EXPECT_TRUE(model.executionSummary().contains("1 trades"));
+    EXPECT_TRUE(model.executionSummary().contains("1 stamped more than 1 s ahead"));
+    EXPECT_TRUE(model.needsRepublish(now + 60500)); // the near-future buy leaves 60 s after its stamp
+    model.publish(book, trades, true, now + 60500);
+    EXPECT_DOUBLE_EQ(vol(model, r, DomModel::Buys), 0);
+    EXPECT_FALSE(model.needsRepublish(now + 298000));
+    EXPECT_TRUE(model.needsRepublish(now + 299000)); // the far one enters at its stamp minus the tolerance
+    model.publish(book, trades, true, now + 299000);
+    EXPECT_DOUBLE_EQ(vol(model, r, DomModel::Sells), 4);
+    model.publish(book, trades, true, now + 300000 + DomTradeWindow::WindowMs); // and leaves 60 s after its stamp
+    EXPECT_DOUBLE_EQ(vol(model, r, DomModel::Sells), 0);
+    EXPECT_TRUE(DomTradeWindow::inWindow(now + DomTradeWindow::SkewMs, now));
+    EXPECT_FALSE(DomTradeWindow::inWindow(now + DomTradeWindow::SkewMs + 1, now));
+    EXPECT_FALSE(DomTradeWindow::inWindow(now - DomTradeWindow::WindowMs, now));
+}
+
+TEST(DomModel, RingCoverageWarningSurvivesUntimedAndOutOfOrderHeads) {
+    const qint64 now = 1'800'000'000'000;
+    for (const qint64 headTime : {qint64(0), now - 3'600'000}) { // untimed head, then an hour-old late arrival
+        SCOPED_TRACE(headTime);
+        DomTradeWindow trades;
+        for (int i = 0; i < 10; ++i) trades.ingest(tradeAt(now - 2000, 200, AggressorSide::Sell, 100)); // evicted below
+        trades.ingest(tradeAt(headTime, 200, AggressorSide::Buy, 1));
+        for (int i = 0; i < DomTradeWindow::Capacity - 1; ++i) trades.ingest(tradeAt(now - 1000, 200, AggressorSide::Buy, .001));
+        // The retained head is now that untimed or late entry; the evicted sells were inside the minute.
+        LiveOrderBook book;
+        book.initialize(0, 400, 0.1);
+        apply(book, {{true, 200, 4}, {false, 200.1, 7}});
+        DomModel model;
+        model.publish(book, trades, true, now);
+        EXPECT_DOUBLE_EQ(vol(model, rowAt(model, 2000), DomModel::Sells), 0); // the evicted sells are gone...
+        // ...and the summary says the minute is incomplete back to the newest evicted stamp.
+        EXPECT_TRUE(model.executionSummary().contains("ring-limited: the last 8,192 trades cover only 2.0 s"))
+            << model.executionSummary().toStdString();
+    }
+    DomTradeWindow untimedOnly; // evicting only untimed entries loses nothing in the window
+    for (int i = 0; i < DomTradeWindow::Capacity + 5; ++i) untimedOnly.ingest(tradeAt(i < 5 ? 0 : now - 1000, 200, AggressorSide::Buy, 1));
+    EXPECT_EQ(untimedOnly.evictedMaxMs(), 0);
+}
+
+TEST(DomModel, CoverageWarningEndsWhenTheNewestEvictedTradeLeavesTheMinute) {
+    const qint64 now = 1'800'000'000'000;
+    DomTradeWindow trades;
+    trades.ingest(tradeAt(now - 2000, 200, AggressorSide::Sell, 100)); // evicted next
+    for (int i = 0; i < DomTradeWindow::Capacity; ++i) trades.ingest(tradeAt(0, 200, AggressorSide::Buy, 1)); // untimed only
+    LiveOrderBook book;
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, 4}, {false, 200.1, 7}});
+    DomModel model;
+    model.publish(book, trades, true, now);
+    EXPECT_TRUE(model.executionSummary().contains("ring-limited"));
+    const qint64 expiry = now - 2000 + DomTradeWindow::WindowMs;
+    EXPECT_FALSE(model.needsRepublish(expiry - 1));
+    EXPECT_TRUE(model.needsRepublish(expiry));
+    model.publish(book, trades, true, expiry);
+    EXPECT_FALSE(model.executionSummary().contains("ring-limited"));
+    EXPECT_FALSE(model.needsRepublish(expiry + 600000)); // settled
+}
+
+TEST(DomModel, PublicationRequestsSettleWhenTheLadderGoesAway) {
+    const qint64 now = 1'800'000'000'000;
+    DomTradeWindow trades;
+    LiveOrderBook book;
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, 16}, {true, 195, 400}, {false, 200.1, 9}});
+    DomModel model;
+    model.clear("TEST-USD");
+    const auto decaying = [&] {
+        model.publish(book, trades, true, now);
+        const int touch = rowAt(model, 2000);
+        model.setVisibleRows(touch, touch + 60);
+        model.publish(book, trades, true, now + 67);
+        model.setVisibleRows(touch - 20, touch + 20);
+        model.publish(book, trades, true, now + 134);
+        ASSERT_TRUE(model.needsRepublish(now + 134)); // mid-decay
+    };
+    // 1. Withdrawal (INV-130 empty event clears the replica), then the view reports no rows.
+    decaying();
+    book.clear();
+    model.publish(book, trades, true, now + 201);
+    EXPECT_EQ(model.rowCount(), 0);
+    model.setVisibleRows(-1, -1);
+    EXPECT_TRUE(model.needsRepublish(now + 268));
+    model.publish(book, trades, true, now + 268);
+    EXPECT_FALSE(model.needsRepublish(now + 335));
+    // 2. A coarse product replaces a decaying ladder.
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, 16}, {true, 195, 400}, {false, 200.1, 9}});
+    model.setVisibleRows(-1, -1);
+    decaying();
+    book.initialize(0, 200, 5);
+    apply(book, {{true, 100, 7}, {false, 105, 9}});
+    model.publish(book, trades, true, now + 201);
+    EXPECT_EQ(model.rowCount(), 0);
+    model.setVisibleRows(-1, -1);
+    model.publish(book, trades, true, now + 268);
+    EXPECT_FALSE(model.needsRepublish(now + 335));
+    // 3. A symbol switch clears the model during decay.
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, 16}, {true, 195, 400}, {false, 200.1, 9}});
+    model.publish(book, trades, true, now + 400);
+    decaying();
+    model.clear("OTHER-USD");
+    EXPECT_FALSE(model.needsRepublish(now + 201));
+}
+
+TEST(DomModel, PinnedCumulativeReadsOnlyTheReplicaAndReusesItsSum) {
+    LiveOrderBook book;
+    book.initialize(0, 500, 0.1);
+    apply(book, {{true, 200, 4}, {false, 200.1, 7}});
+    DomModel model;
+    DomTradeWindow trades;
+    model.publish(book, trades, true);
+    const auto top = model.index(0, 0).data(DomModel::BucketRole).toLongLong();
+    // A replacement band far above the pinned window: keys 10,000,000+ against a top near 3,000.
+    book.initialize(1'000'000, 1'000'050, 0.1);
+    apply(book, {{true, 1'000'020, 5}, {true, 1'000'010, 3}, {false, 1'000'020.1, 6}});
+    model.publish(book, trades, false);
+    ASSERT_EQ(model.index(0, 0).data(DomModel::BucketRole).toLongLong(), top);
+    EXPECT_DOUBLE_EQ(model.index(0, DomModel::Bid).data(DomModel::CumulativeRole).toDouble(), 8);
+    EXPECT_GT(model.lastDepthSteps(), 0);
+    EXPECT_LE(model.lastDepthSteps(), static_cast<qint64>(book.getBids().size())); // never the price distance
+    model.publish(book, trades, false); // trade-only or decay publication: no rescan
+    EXPECT_EQ(model.lastDepthSteps(), 0);
+    EXPECT_DOUBLE_EQ(model.index(0, DomModel::Bid).data(DomModel::CumulativeRole).toDouble(), 8);
+    apply(book, {{true, 1'000'030, 2}}); // book change: one bounded rescan
+    model.publish(book, trades, false);
+    EXPECT_DOUBLE_EQ(model.index(0, DomModel::Bid).data(DomModel::CumulativeRole).toDouble(), 10);
+    EXPECT_LE(model.lastDepthSteps(), static_cast<qint64>(book.getBids().size()));
+    // A tick change rescales the pinned window and still sums only replica levels.
+    book.initialize(999'990, 1'000'050, 0.01);
+    apply(book, {{true, 1'000'020, 5}, {false, 1'000'020.01, 6}});
+    model.publish(book, trades, false);
+    EXPECT_DOUBLE_EQ(model.tick(), 0.01);
+    EXPECT_DOUBLE_EQ(model.index(0, DomModel::Bid).data(DomModel::CumulativeRole).toDouble(), 5);
+    EXPECT_LE(model.lastDepthSteps(), static_cast<qint64>(book.getBids().size()));
+}
+
+TEST(DomModel, DisplayStringsAreFormattedOnceUntilTheirValueChanges) {
+    const qint64 now = 1'800'000'000'000;
+    LiveOrderBook book;
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, 4.5}, {true, 195, 400}, {false, 200.1, 7}});
+    DomModel model;
+    DomTradeWindow trades;
+    model.publish(book, trades, true, now);
+    const int r = rowAt(model, 2000);
+    const auto text = [&](int col) { return model.index(r, col).data().toString(); };
+    const QString bid = text(DomModel::Bid), price = text(DomModel::Price);
+    const QString neighbour = model.index(rowAt(model, 2010), DomModel::Price).data().toString();
+    const QString deepPrice = model.index(rowAt(model, 1950), DomModel::Price).data().toString();
+    const QString deepSize = model.index(rowAt(model, 1950), DomModel::Bid).data().toString();
+    EXPECT_EQ(deepSize, "400");
+    EXPECT_EQ(bid, "4.5");
+    EXPECT_EQ(text(DomModel::Bid).constData(), bid.constData()); // repaint: the same shared string
+    // A scale-only publication (the wall scrolls out: decay) repaints without reformatting.
+    model.setVisibleRows(r - 20, r + 20);
+    model.publish(book, trades, true, now + 67);
+    model.setVisibleRows(r, r + 60);
+    model.publish(book, trades, true, now + 134);
+    model.setVisibleRows(r - 20, r + 20);
+    model.publish(book, trades, true, now + 201);
+    ASSERT_TRUE(model.needsRepublish(now + 201));
+    EXPECT_EQ(text(DomModel::Bid).constData(), bid.constData());
+    EXPECT_EQ(text(DomModel::Price).constData(), price.constData());
+    apply(book, {{true, 200, 5.5}});
+    model.publish(book, trades, true, now + 268);
+    EXPECT_EQ(text(DomModel::Bid), "5.5");
+    EXPECT_EQ(model.index(rowAt(model, 2010), DomModel::Price).data().toString().constData(), neighbour.constData()); // unchanged rows keep theirs
+    // Rows below the touch change only cumulative depth: their price and normal-mode size stay.
+    EXPECT_EQ(model.index(rowAt(model, 1950), DomModel::Price).data().toString().constData(), deepPrice.constData());
+    EXPECT_EQ(model.index(rowAt(model, 1950), DomModel::Bid).data().toString().constData(), deepSize.constData());
+    EXPECT_EQ(text(DomModel::Price).constData(), price.constData()); // touch row: its price did not change either
+    model.setCumulative(true);
+    EXPECT_EQ(text(DomModel::Bid), "5.5");
+    EXPECT_EQ(model.index(rowAt(model, 1950), DomModel::Bid).data().toString(), "406");
+}
+
+TEST(DomModel, BarsScaleToVisibleRowsWithSquareRootAndSmoothedMaximum) {
+    const qint64 now = 1'800'000'000'000;
+    LiveOrderBook book;
+    book.initialize(0, 400, 0.1);
+    // A 400 wall 50 ticks below the touch; 16 at the touch, 4 one tick down.
+    apply(book, {{true, 200, 16}, {true, 199.9, 4}, {true, 195, 400}, {false, 200.1, 9}});
+    DomModel model;
+    DomTradeWindow trades;
+    model.publish(book, trades, true, now);
+    EXPECT_DOUBLE_EQ(model.scaleMax(true, false), 400); // no view range yet: every row
+    const int touch = rowAt(model, 2000);
+    model.setVisibleRows(touch - 20, touch + 20);
+    EXPECT_TRUE(model.needsRepublish(now));
+    model.publish(book, trades, true, now + 67);
+    EXPECT_DOUBLE_EQ(model.scaleMax(true, false), 16); // first reported range applies at once
+    EXPECT_DOUBLE_EQ(model.barFraction(16, true, false), 1);
+    EXPECT_DOUBLE_EQ(model.barFraction(4, true, false), .5); // square root of 1/4
+    EXPECT_DOUBLE_EQ(model.scaleMax(false, false), 9);
+    EXPECT_DOUBLE_EQ(model.scaleMax(true, true), 20); // cumulative at the lowest visible row
+    EXPECT_FALSE(model.needsRepublish(now + 67));
+    model.setVisibleRows(touch, touch + 60); // the wall scrolls into view: jump up
+    model.publish(book, trades, true, now + 134);
+    EXPECT_DOUBLE_EQ(model.scaleMax(true, false), 400);
+    model.setVisibleRows(touch - 20, touch + 20); // and out again: decay, no jump
+    qint64 t = now + 134;
+    model.publish(book, trades, true, t += 67);
+    const double afterOneTick = model.scaleMax(true, false);
+    EXPECT_GT(afterOneTick, 16);
+    EXPECT_LT(afterOneTick, 400);
+    EXPECT_TRUE(model.needsRepublish(t));
+    QSignalSpy changed(&model, &QAbstractItemModel::dataChanged);
+    while (model.needsRepublish(t) && t < now + 5000) model.publish(book, trades, true, t += 67);
+    EXPECT_DOUBLE_EQ(model.scaleMax(true, false), 16);
+    EXPECT_GE(t - (now + 134), 300); // settles over roughly 300-500 ms of 67 ms ticks
+    EXPECT_LE(t - (now + 134), 600);
+    EXPECT_GE(changed.count(), 4);
+}
+
+TEST(DomModel, CumulativeSumsFromTheTouchOutwardIncludingLevelsBeyondAPinnedWindow) {
+    LiveOrderBook book;
+    book.initialize(0, 500, 0.1);
+    apply(book, {{true, 200, 4}, {true, 199.9, 3}, {true, 199.5, 2}, {false, 200.1, 7}, {false, 200.3, 1}});
+    DomModel model;
+    DomTradeWindow trades;
+    model.publish(book, trades, true);
+    const auto cum = [&](qint64 key, int col) { return model.index(rowAt(model, key), col).data(DomModel::CumulativeRole).toDouble(); };
+    EXPECT_DOUBLE_EQ(cum(2001, DomModel::Bid), 0);
+    EXPECT_DOUBLE_EQ(cum(2000, DomModel::Bid), 4);
+    EXPECT_DOUBLE_EQ(cum(1999, DomModel::Bid), 7);
+    EXPECT_DOUBLE_EQ(cum(1995, DomModel::Bid), 9);
+    EXPECT_DOUBLE_EQ(cum(1500, DomModel::Bid), 9);
+    EXPECT_DOUBLE_EQ(cum(2000, DomModel::Ask), 0);
+    EXPECT_DOUBLE_EQ(cum(2001, DomModel::Ask), 7);
+    EXPECT_DOUBLE_EQ(cum(2003, DomModel::Ask), 8);
+    EXPECT_DOUBLE_EQ(cum(2500, DomModel::Ask), 8);
+    const int row = rowAt(model, 1995);
+    EXPECT_EQ(model.index(row, DomModel::Bid).data().toString(), "2");
+    QSignalSpy changed(&model, &QAbstractItemModel::dataChanged);
+    model.setCumulative(true);
+    EXPECT_EQ(changed.count(), 1);
+    EXPECT_EQ(model.index(row, DomModel::Bid).data().toString(), "9");
+    EXPECT_DOUBLE_EQ(model.index(row, DomModel::Bid).data(DomModel::QuantityRole).toDouble(), 2); // data keeps per-row size
+    EXPECT_EQ(model.headerData(DomModel::Bid, Qt::Horizontal, Qt::DisplayRole).toString(), "Σ Bid");
+    // The market leaves the pinned window: levels between the touch and the window still count.
+    apply(book, {{false, 200.1, 0}, {false, 200.3, 0}, {true, 350, 5}, {true, 340, 1}, {false, 350.1, 6}});
+    const auto top = model.index(0, 0).data(DomModel::BucketRole);
+    model.publish(book, trades, false);
+    EXPECT_EQ(model.index(0, 0).data(DomModel::BucketRole), top); // window pinned below the touch
+    EXPECT_DOUBLE_EQ(cum(2000, DomModel::Bid), 10);
+    EXPECT_DOUBLE_EQ(cum(1995, DomModel::Bid), 15);
+}
+
+TEST(DomModel, SizesShowThreeSignificantDigitsWithoutFloatNoise) {
+    EXPECT_EQ(DomModel::sizeText(.634), ".634");
+    EXPECT_EQ(DomModel::sizeText(5.8712), "5.87");
+    EXPECT_EQ(DomModel::sizeText(13.64), "13.6");
+    EXPECT_EQ(DomModel::sizeText(136.4), "136");
+    EXPECT_EQ(DomModel::sizeText(999.6), "1k");
+    EXPECT_EQ(DomModel::sizeText(1364.2), "1.36k");
+    EXPECT_EQ(DomModel::sizeText(12345678.9), "12.3m");
+    EXPECT_EQ(DomModel::sizeText(.0634), ".0634");
+    EXPECT_EQ(DomModel::sizeText(-.25), "-.25");
+    EXPECT_EQ(DomModel::sizeText(.000284), ".000284");
+    EXPECT_EQ(DomModel::sizeText(2.92e-6), "<.0001"); // dust, never e-notation
+    EXPECT_EQ(DomModel::sizeText(1e-4), ".0001");
+    // Signed (Δ) values: never "-<.0001"; dust and exact cancellation read as about zero.
+    EXPECT_EQ(DomModel::signedSizeText(1.25), "+1.25");
+    EXPECT_EQ(DomModel::signedSizeText(-.5), "-.5");
+    EXPECT_EQ(DomModel::signedSizeText(1e-4), "+.0001");
+    EXPECT_EQ(DomModel::signedSizeText(-1e-4), "-.0001");
+    EXPECT_EQ(DomModel::signedSizeText(9.99e-5), "≈0");
+    EXPECT_EQ(DomModel::signedSizeText(-1e-7), "≈0");
+    EXPECT_EQ(DomModel::signedSizeText(0), "≈0");
+    // The server sends float sizes widened to double: 0.0032f is 0.0031999999191612.
+    const double noisy = double(0.0032f);
+    EXPECT_EQ(DomModel::sizeText(noisy), ".0032");
+    EXPECT_EQ(DomModel::fullSizeText(noisy), "0.0032");
+    LiveOrderBook book;
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, noisy}, {false, 200.1, double(1.2345678f)}});
+    DomModel model;
+    model.clear("BTC-USD");
+    model.publish(book, {}, true);
+    const auto bid = model.index(rowAt(model, 2000), DomModel::Bid);
+    EXPECT_EQ(bid.data().toString(), ".0032");
+    EXPECT_DOUBLE_EQ(bid.data(DomModel::QuantityRole).toDouble(), noisy); // full value stays in data
+    const auto tip = bid.data(Qt::ToolTipRole).toString();
+    EXPECT_TRUE(tip.startsWith("0.0032 BTC resting bid")) << tip.toStdString();
+    EXPECT_FALSE(tip.contains("0.00319999"));
+    EXPECT_TRUE(model.index(rowAt(model, 2001), DomModel::Ask).data(Qt::ToolTipRole).toString().startsWith("1.234568 BTC"));
+    EXPECT_EQ(model.index(rowAt(model, 2001), DomModel::Ask).data().toString(), "1.23");
 }
 
 TEST(DomModel, ManualAnchorAndRecenterAcrossRapidBookMoves) {
@@ -148,17 +498,17 @@ TEST(DomModel, ExecutionsUseContainingBucketAndGridChangesRebucketTheRawRing) {
     trades.ingest(trade(std::numeric_limits<double>::quiet_NaN(), AggressorSide::Buy));
     DomModel model;
     model.publish(book, trades, true);
-    EXPECT_EQ(count(model, rowAt(model, 2000), DomModel::Buys), 1);
-    EXPECT_EQ(count(model, rowAt(model, 2001), DomModel::Sells), 1);
+    EXPECT_EQ(vol(model, rowAt(model, 2000), DomModel::Buys), 1);
+    EXPECT_EQ(vol(model, rowAt(model, 2001), DomModel::Sells), 1);
     book.initialize(100, 300, 0.2);
     apply(book, {{true, 200, 4}, {false, 200.4, 7}});
     model.publish(book, trades, false);
-    EXPECT_EQ(count(model, rowAt(model, 1000), DomModel::Buys), 1);
-    EXPECT_EQ(count(model, rowAt(model, 1000), DomModel::Sells), 1);
+    EXPECT_EQ(vol(model, rowAt(model, 1000), DomModel::Buys), 1);
+    EXPECT_EQ(vol(model, rowAt(model, 1000), DomModel::Sells), 1);
     int buyCount = 0, sellCount = 0;
     for (int r = 0; r < model.rowCount(); ++r) {
-        buyCount += count(model, r, DomModel::Buys);
-        sellCount += count(model, r, DomModel::Sells);
+        buyCount += vol(model, r, DomModel::Buys);
+        sellCount += vol(model, r, DomModel::Sells);
     }
     EXPECT_EQ(buyCount, 1);
     EXPECT_EQ(sellCount, 1);
@@ -380,13 +730,14 @@ TEST(DomModel, ExecutionsMatchReplicaTruncationAtDecimalBoundariesWithNonzeroOri
     apply(book, {{true, price, 7}, {false, 100.5, 9}});
     DomTradeWindow trades;
     trades.ingest(trade(price, AggressorSide::Buy));
+    trades.ingest(trade(price + .09, AggressorSide::Buy)); // same containing bucket, never rounded up
     DomModel model;
     model.publish(book, trades, true);
     int hits = 0;
     for (int r = 0; r < model.rowCount(); ++r) {
         if (model.index(r, DomModel::Bid).data(DomModel::QuantityRole).toDouble() > 0) {
             ++hits;
-            EXPECT_EQ(count(model, r, DomModel::Buys), 1);
+            EXPECT_EQ(vol(model, r, DomModel::Buys), 2);
         }
     }
     EXPECT_EQ(hits, 1);
@@ -489,23 +840,35 @@ TEST_F(DomDock, NarrowLadderFitsWithoutScrollingAndRestoresExecutionColumns) {
         EXPECT_LT(table->y(), 110); // heading + two metadata lines, not a seven-line paragraph.
         EXPECT_TRUE(aggregation->text().contains("USD"));
         EXPECT_TRUE(aggregation->text().contains("BTC"));
-        EXPECT_TRUE(table->horizontalHeader()->toolTip().contains("last 1,000 trades"));
+        EXPECT_TRUE(table->horizontalHeader()->toolTip().contains("last 60 s by trade time"));
         EXPECT_TRUE(table->horizontalHeader()->toolTip().contains("unknown"));
     }
 }
 
-TEST(DomDelegate, CompactNumbersAreWholeValuesAndPricesKeepTheirPrecision) {
-    QFont font = QApplication::font();
-    QFontMetrics fm(font);
-    const int width = fm.horizontalAdvance("0.0353");
-    EXPECT_EQ(DomBarDelegate::fittedQuantity(.035294567, fm, width), "0.0353");
-    EXPECT_EQ(DomBarDelegate::fittedQuantity(1234.567, fm, fm.horizontalAdvance("1.23k")), "1.23k");
-    for (double value : {0.000000034567, 12.345678, 12345678.9}) {
-        const auto text = DomBarDelegate::fittedQuantity(value, fm, width);
-        EXPECT_FALSE(text.contains(QChar(0x2026)));
-        EXPECT_LE(fm.horizontalAdvance(text), width);
-        EXPECT_NE(text, "0");
-    }
+TEST(DomDelegate, HeatmapRampPriceDigitsAndSizeTextTint) {
+    // Samples of the heatmap's own default palette image (Electric): no invented colours.
+    const auto texels = heatmap::gpu::paletteTexels(heatmap::gpu::gradientsFor(heatmap::HeatmapChartSettings{}));
+    const auto texel = [&](int i) { return QColor(texels[i * 4], texels[i * 4 + 1], texels[i * 4 + 2]); };
+    EXPECT_EQ(DomBarDelegate::barColor(true, 1), texel(255));
+    EXPECT_EQ(DomBarDelegate::barColor(false, 1), texel(511));
+    EXPECT_EQ(DomBarDelegate::barColor(true, 0), texel(140));
+    EXPECT_EQ(DomBarDelegate::barColor(false, 0), texel(396));
+    EXPECT_EQ(DomBarDelegate::barColor(false, 1), QColor(255, 200, 0));
+    const QColor lowBid = DomBarDelegate::barColor(true, 0), midBid = DomBarDelegate::barColor(true, .5);
+    EXPECT_EQ(lowBid.red(), 0);
+    EXPECT_GT(lowBid.blue(), lowBid.green()); // navy
+    EXPECT_GT(lowBid.blue(), 0);
+    EXPECT_LT(lowBid.blue(), midBid.blue());
+    EXPECT_LT(midBid.green(), 255);
+    const QColor lowAsk = DomBarDelegate::barColor(false, 0);
+    EXPECT_GT(lowAsk.red(), lowAsk.green());
+    EXPECT_LT(lowAsk.red(), DomBarDelegate::barColor(false, .5).red());
+    EXPECT_LT(DomBarDelegate::sizeTextColor(true, .1).alpha(), DomBarDelegate::sizeTextColor(true, .9).alpha());
+    EXPECT_GT(DomBarDelegate::sizeTextColor(true, .5).red(), DomBarDelegate::barColor(true, .5).red()); // lighter tint
+    EXPECT_EQ(DomBarDelegate::dimPrefixLength("84123.4"), 3);   // 841 | 23.4
+    EXPECT_EQ(DomBarDelegate::dimPrefixLength("84123.45"), 4);  // 8412 | 3.45
+    EXPECT_EQ(DomBarDelegate::dimPrefixLength("0.20002"), 4);   // 0.20 | 002
+    EXPECT_EQ(DomBarDelegate::dimPrefixLength("12"), 0);
 }
 
 TEST_F(DomDock, HiddenIngestsAllTradesButDoesNoModelOrReplicaReadWork) {
@@ -520,8 +883,8 @@ TEST_F(DomDock, HiddenIngestsAllTradesButDoesNoModelOrReplicaReadWork) {
     EXPECT_EQ(source.reads, 0);
     EXPECT_EQ(changed.count() + reset.count() + inserted.count(), 0);
     show();
-    EXPECT_EQ(count(*model, rowAt(*model, 2000), DomModel::Buys), 900);
-    EXPECT_TRUE(table->horizontalHeader()->toolTip().contains("unknown: 100"));
+    EXPECT_EQ(vol(*model, rowAt(*model, 2000), DomModel::Buys), 1400);
+    EXPECT_TRUE(table->horizontalHeader()->toolTip().contains("unknown side: 100"));
     const int reads = source.reads;
     dock.hide();
     const int notifications = changed.count() + reset.count() + inserted.count();
@@ -531,7 +894,7 @@ TEST_F(DomDock, HiddenIngestsAllTradesButDoesNoModelOrReplicaReadWork) {
     EXPECT_EQ(source.reads, reads);
     EXPECT_EQ(changed.count() + reset.count() + inserted.count(), notifications);
     show();
-    EXPECT_EQ(count(*model, rowAt(*model, 2000), DomModel::Sells), 1);
+    EXPECT_EQ(vol(*model, rowAt(*model, 2000), DomModel::Sells), 1);
     EXPECT_DOUBLE_EQ(model->index(rowAt(*model, 2000), DomModel::Bid).data(DomModel::QuantityRole).toDouble(), 9999);
 }
 
@@ -576,7 +939,7 @@ TEST_F(DomDock, VisibleUpdatesCoalesceAtFifteenHz) {
         QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection);
         EXPECT_EQ(changed.count(), before + 1) << "One publication per timer tick";
     }
-    EXPECT_EQ(count(*model, rowAt(*model, 2000), DomModel::Buys), 1000);
+    EXPECT_EQ(vol(*model, rowAt(*model, 2000), DomModel::Buys), 2500);
 }
 
 TEST_F(DomDock, QuietConnectedBookRetainsLastChangeAgeAndDetectsDisconnect) {
@@ -653,7 +1016,7 @@ TEST(DomWindow, MinimizedMainWindowStopsTimerAndRetainsTradeIngestion) {
     QTest::qWait(90);
     EXPECT_TRUE(timer->isActive());
     auto* model = static_cast<DomModel*>(dock->findChild<QTableView*>("domLadder")->model());
-    EXPECT_EQ(count(*model, rowAt(*model, 2000), DomModel::Sells), 1);
+    EXPECT_EQ(vol(*model, rowAt(*model, 2000), DomModel::Sells), 1);
 }
 
 TEST_F(DomDock, TabVisibilityStopsPublicationWithoutLosingEvents) {
@@ -670,7 +1033,7 @@ TEST_F(DomDock, TabVisibilityStopsPublicationWithoutLosingEvents) {
     EXPECT_EQ(changed.count(), 0);
     emit dock.visibilityChanged(true);
     QTest::qWait(90);
-    EXPECT_EQ(count(*model, rowAt(*model, 2000), DomModel::Sells), 1);
+    EXPECT_EQ(vol(*model, rowAt(*model, 2000), DomModel::Sells), 1);
 }
 
 TEST_F(DomDock, SymbolChangeWhileHiddenClearsOldRowsAndCountsOnShow) {
@@ -684,8 +1047,63 @@ TEST_F(DomDock, SymbolChangeWhileHiddenClearsOldRowsAndCountsOnShow) {
     QTest::qWait(90);
     EXPECT_EQ(reset.count(), 0);
     show();
-    EXPECT_EQ(count(*model, rowAt(*model, 2000), DomModel::Buys), 0);
+    EXPECT_EQ(vol(*model, rowAt(*model, 2000), DomModel::Buys), 0);
     EXPECT_TRUE(model->headerData(DomModel::Bid, Qt::Horizontal, Qt::ToolTipRole).toString().contains("ETH"));
+}
+
+TEST_F(DomDock, CumulativeToggleSwitchesTheSizeColumnsAndPersists) {
+    source.update({{true, 200, 1}, {true, 199.9, 2}, {false, 200.1, 1}});
+    show();
+    auto* toggle = dock.findChild<QToolButton*>("domCumulative");
+    ASSERT_NE(toggle, nullptr);
+    EXPECT_TRUE(toggle->isCheckable());
+    EXPECT_FALSE(toggle->isChecked());
+    const int row = rowAt(*model, 1999);
+    EXPECT_EQ(model->index(row, DomModel::Bid).data().toString(), "2");
+    toggle->click();
+    EXPECT_TRUE(model->cumulative());
+    EXPECT_EQ(model->index(row, DomModel::Bid).data().toString(), "3");
+    {
+        Source other;
+        OrderBookDock reopened{nullptr, &other};
+        EXPECT_TRUE(reopened.findChild<QToolButton*>("domCumulative")->isChecked());
+        auto* reopenedModel = static_cast<DomModel*>(reopened.findChild<QTableView*>("domLadder")->model());
+        EXPECT_TRUE(reopenedModel->cumulative());
+    }
+    toggle->click();
+    EXPECT_FALSE(model->cumulative());
+    OrderBookDock reopened{nullptr, &source};
+    EXPECT_FALSE(reopened.findChild<QToolButton*>("domCumulative")->isChecked());
+}
+
+TEST_F(DomDock, BestCellsFillInTheSideColourAndBarsUseTheRamp) {
+    // An 800 wall 500 ticks down, far outside the viewport, must not shrink the visible bars.
+    source.update({{true, 200, 8}, {true, 199.9, 2}, {true, 150, 800}, {false, 200.1, 5}});
+    show();
+    for (int i = 0; i < 2; ++i) QMetaObject::invokeMethod(&dock, "refreshDisplay", Qt::DirectConnection);
+    const QImage image = table->viewport()->grab().toImage();
+    const auto pixel = [&](int row, int col, double x) {
+        const QRect cell = table->visualRect(model->index(row, col));
+        return image.pixelColor(cell.left() + int(cell.width() * x), cell.center().y());
+    };
+    const int best = rowAt(*model, 2000), next = rowAt(*model, 1999), ask = rowAt(*model, 2001);
+    EXPECT_DOUBLE_EQ(model->scaleMax(true, false), 8);
+    EXPECT_EQ(pixel(best, DomModel::Bid, .1), DomBarDelegate::bestFill(true));
+    EXPECT_EQ(pixel(ask, DomModel::Ask, .1), DomBarDelegate::bestFill(false));
+    // A 2 next to an 8 on the visible scale: half-length bar (square root), drawn from the price side.
+    const QColor near = pixel(next, DomModel::Bid, .8), far = pixel(next, DomModel::Bid, .2);
+    EXPECT_GT(near.blue(), near.red() + 40); // ramp colour, not the neutral cell background
+    EXPECT_LT(std::abs(far.blue() - far.red()), 10);
+    EXPECT_NE(pixel(next, DomModel::Bid, .45), pixel(next, DomModel::Bid, .55));
+}
+
+TEST_F(DomDock, TradesLeaveTheWindowWithoutAnyNewEvent) {
+    source.update({{true, 200, 1}, {false, 200.1, 1}});
+    source.send(tradeAt(QDateTime::currentMSecsSinceEpoch() - DomTradeWindow::WindowMs + 300, 200, AggressorSide::Buy, 2));
+    show();
+    EXPECT_DOUBLE_EQ(vol(*model, rowAt(*model, 2000), DomModel::Buys), 2);
+    QTest::qWait(600); // the dock's own 67 ms timer, no book or trade event
+    EXPECT_DOUBLE_EQ(vol(*model, rowAt(*model, 2000), DomModel::Buys), 0);
 }
 
 // Opt-in measurement: sustained wall-clock 10,000 books + 10,000 trades/s,
@@ -721,8 +1139,8 @@ TEST_F(DomDock, DISABLED_SustainedUpdateAndRasterPaintBenchmark) {
         }
         QThread::msleep(1);
     }
-    int total = 0;
-    for (int r = 0; r < model->rowCount(); ++r) total += count(*model, r, DomModel::Buys) + count(*model, r, DomModel::Sells);
+    double total = 0;
+    for (int r = 0; r < model->rowCount(); ++r) total += vol(*model, r, DomModel::Buys) + vol(*model, r, DomModel::Sells);
     EXPECT_EQ(total, DomTradeWindow::Capacity);
     std::sort(timings.begin(), timings.end());
     ASSERT_GT(timings.size(), 60u);
@@ -739,6 +1157,9 @@ TEST_F(DomDock, DISABLED_SustainedUpdateAndRasterPaintBenchmark) {
 int main(int argc, char** argv) {
     qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication app(argc, argv);
+    QTemporaryDir settings; // never the owner's settings
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

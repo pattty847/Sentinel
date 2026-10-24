@@ -2,6 +2,7 @@
 #include "ServiceLocator.hpp"
 #include "../datasources/IGridDataSource.hpp"
 #include "../datasources/RemoteGridDataSource.hpp"
+#include "../render/heatmap/HeatmapPalette.hpp"
 #include <QApplication>
 #include <QDateTime>
 #include <QHeaderView>
@@ -12,61 +13,151 @@
 #include <QPainter>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QSettings>
 #include <QShowEvent>
+#include <QToolButton>
 #include <QTableView>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <array>
 #include <cmath>
+
+namespace {
+// Bars use the upper part of each side's palette ramp: its low end is black,
+// which would vanish on the dark ladder.
+constexpr double RampStart = 0.55;
+const std::array<QColor, heatmap::gpu::kPaletteWidth>& paletteRamp()
+{
+    // The heatmap's default palette image: bids in the left half, asks in the right.
+    static const auto ramp = [] {
+        const auto texels = heatmap::gpu::paletteTexels(heatmap::gpu::gradientsFor(heatmap::HeatmapChartSettings{}));
+        std::array<QColor, heatmap::gpu::kPaletteWidth> out;
+        for (int i = 0; i < heatmap::gpu::kPaletteWidth; ++i)
+            out[i] = QColor(texels[i * 4], texels[i * 4 + 1], texels[i * 4 + 2]);
+        return out;
+    }();
+    return ramp;
+}
+} // namespace
 
 DomBarDelegate::DomBarDelegate(DomModel* model, QObject* parent)
     : QStyledItemDelegate(parent), m_model(model) {}
 
-QString DomBarDelegate::fittedQuantity(double value, const QFontMetrics& metrics, int width)
+QColor DomBarDelegate::barColor(bool bid, double fraction)
 {
-    QString full = QString::number(value, 'g', 8);
-    if (metrics.horizontalAdvance(full) <= width) return full;
-    double scaled = value;
-    QString suffix;
-    if (std::abs(value) >= 1e9) { scaled /= 1e9; suffix = "b"; }
-    else if (std::abs(value) >= 1e6) { scaled /= 1e6; suffix = "m"; }
-    else if (std::abs(value) >= 1e3) { scaled /= 1e3; suffix = "k"; }
-    for (int precision = 3; precision >= 1; --precision) {
-        const auto text = QString::number(scaled, 'g', precision) + suffix;
-        if (metrics.horizontalAdvance(text) <= width) return text;
+    constexpr int half = heatmap::gpu::kPaletteWidth / 2;
+    const double position = RampStart + (1 - RampStart) * std::clamp(fraction, 0.0, 1.0);
+    return paletteRamp()[(bid ? 0 : half) + int(std::lround(position * (half - 1)))];
+}
+
+QColor DomBarDelegate::sizeTextColor(bool bid, double fraction)
+{
+    const QColor bar = barColor(bid, fraction);
+    const auto tint = [](int channel) { return channel + (255 - channel) * 7 / 10; };
+    return QColor(tint(bar.red()), tint(bar.green()), tint(bar.blue()),
+                  int(std::lround(255 * (0.5 + 0.5 * std::clamp(fraction, 0.0, 1.0)))));
+}
+
+QColor DomBarDelegate::bestFill(bool bid) { return barColor(bid, 0.75); }
+
+int DomBarDelegate::dimPrefixLength(const QString& price)
+{
+    int digits = 0;
+    for (int i = price.size() - 1; i >= 0; --i) {
+        if (price[i].isDigit() && ++digits == 3) return i;
     }
-    return QString::number(value, 'e', 1); // Complete number; paint scales only this last fallback.
+    return 0;
+}
+
+void DomBarDelegate::drawFitted(QPainter* painter, const QStyleOptionViewItem& opt, const QString& text, const QColor& color)
+{
+    if (text.isEmpty()) return;
+    // Exceptional long values only: a smaller font, never a truncated number.
+    QFont font = opt.font;
+    const int width = std::max(1, opt.rect.width() - 6);
+    const int measured = opt.fontMetrics.horizontalAdvance(text);
+    if (measured > width) font.setPixelSize(std::max(1, int(opt.fontMetrics.height() * 0.8 * width / measured)));
+    painter->setFont(font);
+    painter->setPen(color);
+    painter->drawText(opt.rect.adjusted(3, 0, -3, 0), Qt::AlignRight | Qt::AlignVCenter, text);
+}
+
+void DomBarDelegate::paintSize(QPainter* painter, const QStyleOptionViewItem& opt, const QModelIndex& index, const QString& label) const
+{
+    const bool bid = index.column() == DomModel::Bid;
+    const bool cumulative = m_model->cumulative();
+    const int row = index.row();
+    const double value = m_model->size(row, bid, cumulative);
+    const bool best = m_model->isBest(row, bid);
+    const QRect area = opt.rect.adjusted(2, 2, -2, -2);
+    const int span = std::max(0, area.width());
+    QColor text = sizeTextColor(bid, 0);
+    if (best) {
+        painter->fillRect(area, bestFill(bid));
+        text = QColor(10, 14, 18);
+    } else if (value > 0) {
+        const double fraction = m_model->barFraction(value, bid, cumulative);
+        const int width = int(std::lround(fraction * span));
+        QRect bar = area;
+        if (bid) bar.setLeft(area.right() - width + 1);
+        else bar.setWidth(width);
+        QColor fill = barColor(bid, fraction);
+        fill.setAlpha(150);
+        painter->fillRect(bar, fill);
+        text = sizeTextColor(bid, fraction);
+    }
+    if (!cumulative && !best) {
+        // Faint depth line: cumulative size from the touch, on the cumulative scale.
+        const double depth = m_model->barFraction(m_model->size(row, bid, true), bid, true);
+        if (depth > 0) {
+            const int offset = int(std::lround(depth * (span - 1)));
+            QColor line = sizeTextColor(bid, depth);
+            line.setAlpha(70);
+            painter->fillRect(QRect(bid ? area.right() - offset : area.left() + offset, opt.rect.top(), 1, opt.rect.height()), line);
+        }
+    }
+    drawFitted(painter, opt, label, text);
+}
+
+void DomBarDelegate::paintPrice(QPainter* painter, const QStyleOptionViewItem& opt, const QString& text) const
+{
+    // Leading digits dim, the last three bright: the eye reads the changing part.
+    const int split = dimPrefixLength(text);
+    const QColor bright = opt.palette.color(QPalette::Text);
+    QColor dim = bright;
+    dim.setAlpha(105);
+    const QRect area = opt.rect.adjusted(3, 0, -3, 0);
+    // One string drawn twice and clipped: no per-row substrings on the paint path.
+    const int tailWidth = opt.fontMetrics.horizontalAdvance(text) - opt.fontMetrics.horizontalAdvance(text, split);
+    painter->setFont(opt.font);
+    painter->setClipRect(QRect(opt.rect.left(), opt.rect.top(), area.right() - tailWidth + 1 - opt.rect.left(), opt.rect.height()));
+    painter->setPen(dim);
+    painter->drawText(area, Qt::AlignRight | Qt::AlignVCenter, text);
+    painter->setClipRect(QRect(area.right() - tailWidth + 1, opt.rect.top(), tailWidth + 3, opt.rect.height()));
+    painter->setPen(bright);
+    painter->drawText(area, Qt::AlignRight | Qt::AlignVCenter, text);
 }
 
 void DomBarDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option,
                            const QModelIndex& index) const
 {
-    // Paint native background/selection, then the liquidity bar, then native text.
+    // Paint native background/selection, then the column's own content.
     QStyleOptionViewItem opt(option);
     initStyleOption(&opt, index);
-    QString text = opt.text;
+    const QString text = opt.text;
     opt.text.clear();
     const auto* style = opt.widget ? opt.widget->style() : QApplication::style();
     style->drawControl(QStyle::CE_ItemViewItem, &opt, painter, opt.widget);
-    const bool bid = index.column() == DomModel::Bid;
-    const double maximum = bid ? m_model->maxBid() : m_model->maxAsk();
-    const double qty = index.data(DomModel::QuantityRole).toDouble();
-    if (maximum > 0 && qty > 0) {
-        const int width = int(std::min(1.0, qty / maximum) * std::max(0, opt.rect.width() - 8));
-        QRect bar = opt.rect.adjusted(4, 3, -4, -3);
-        if (bid) bar.setLeft(bar.right() - width + 1);
-        else bar.setWidth(width);
-        painter->fillRect(bar, bid ? QColor(40, 125, 135, 100) : QColor(160, 115, 40, 100));
-    }
-    const int textWidth = std::max(1, opt.rect.width() - 6);
-    if (qty > 0) text = fittedQuantity(qty, opt.fontMetrics, textWidth);
-    if (index.column() >= DomModel::Buys && index.data().toInt() == 0) text.clear();
-    // Price and count digits stay intact. Only exceptional long values need a smaller font.
-    const int measured = opt.fontMetrics.horizontalAdvance(text);
-    if (measured > textWidth) opt.font.setPixelSize(std::max(1, int(opt.fontMetrics.height() * 0.8 * textWidth / measured)));
     painter->save();
-    painter->setFont(opt.font);
-    painter->setPen(opt.palette.color(QPalette::Text));
-    painter->drawText(opt.rect.adjusted(3, 0, -3, 0), Qt::AlignRight | Qt::AlignVCenter, text);
+    switch (index.column()) {
+    case DomModel::Bid:
+    case DomModel::Ask: paintSize(painter, opt, index, text); break;
+    case DomModel::Price: paintPrice(painter, opt, text); break;
+    default: {
+        const QVariant foreground = index.data(Qt::ForegroundRole);
+        drawFitted(painter, opt, text, foreground.isValid() ? foreground.value<QColor>() : opt.palette.color(QPalette::Text));
+    }
+    }
     painter->restore();
 }
 
@@ -116,13 +207,24 @@ void OrderBookDock::buildUi()
     font.setBold(true);
     m_symbolLabel->setFont(font);
     m_symbolLabel->setMinimumWidth(0);
+    // The symbol yields width so the symbol, Σ and Recenter fit the 180 px minimum dock.
+    m_symbolLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_recenter = new QPushButton("Recenter", m_contentWidget);
     m_recenter->setObjectName("domRecenter");
     m_recenter->setAccessibleName("Recenter and follow the market");
     m_recenter->setCheckable(true);
     m_recenter->setToolTip("Follow the market. Scrolling pauses follow and pins the price ladder.");
     connect(m_recenter, &QPushButton::clicked, this, &OrderBookDock::recenter);
+    m_cumulative = new QToolButton(m_contentWidget);
+    m_cumulative->setText("Σ");
+    m_cumulative->setObjectName("domCumulative");
+    m_cumulative->setAccessibleName("Cumulative size");
+    m_cumulative->setCheckable(true);
+    m_cumulative->setToolTip("Cumulative size: Bid and Ask show size summed from the touch outward.\n"
+                             "Off: per-row size, with a faint cumulative depth line inside the bars.");
+    connect(m_cumulative, &QToolButton::toggled, this, &OrderBookDock::setCumulative);
     heading->addWidget(m_symbolLabel, 1);
+    heading->addWidget(m_cumulative);
     heading->addWidget(m_recenter);
     layout->addLayout(heading);
     auto label = [&](const char* name) {
@@ -169,6 +271,24 @@ void OrderBookDock::buildUi()
     m_table->installEventFilter(this);
     m_table->verticalScrollBar()->installEventFilter(this);
     layout->addWidget(m_table, 1);
+    // Same settings store and format as the other docks (AGENTS 4b: never a native-format QSettings).
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
+    m_cumulative->setChecked(settings.value("OrderBookDock/cumulative", false).toBool());
+}
+
+void OrderBookDock::setCumulative(bool on)
+{
+    m_model->setCumulative(on);
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
+    settings.setValue("OrderBookDock/cumulative", on);
+}
+
+void OrderBookDock::updateVisibleRows()
+{
+    // Bars scale to what the viewport shows, never to the whole 2,001-row window.
+    const int first = m_table->rowAt(0);
+    const int last = m_table->rowAt(m_table->viewport()->height() - 1);
+    m_model->setVisibleRows(first, last < 0 && first >= 0 ? m_model->rowCount() - 1 : last);
 }
 
 void OrderBookDock::onSymbolChanged(const QString& symbol)
@@ -300,7 +420,11 @@ void OrderBookDock::refreshDisplay()
         }
         if (book.getTickSize() <= 0) m_freshness.awaitingBook = true;
         m_bookDirty = false;
-        if (m_dirty) m_model->publish(book, m_trades, m_follow);
+        updateVisibleRows();
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        // Scale decay, visible-range changes and trades leaving the window need a publish too.
+        if (m_model->needsRepublish(now)) m_dirty = true;
+        if (m_dirty) m_model->publish(book, m_trades, m_follow, now);
     }
     if (m_dirty) {
         m_recenter->setText(m_follow ? "Following" : "Recenter");
@@ -326,7 +450,7 @@ void OrderBookDock::fitColumns()
     const QFontMetrics fm(m_table->font());
     const int priceWidth = std::max(54, fm.horizontalAdvance(m_model->index(0, DomModel::Price).data().toString()) + 8);
     const int sizeWidth = fm.horizontalAdvance("0.0353") + 8;
-    const int countWidth = fm.horizontalAdvance("Sell #") + 10;
+    const int countWidth = std::max(fm.horizontalAdvance("Sell vol"), fm.horizontalAdvance("+88.8k")) + 10;
     const bool counts = width >= priceWidth + sizeWidth * 2 + countWidth * 3;
     const bool delta = width >= priceWidth + sizeWidth * 2 + countWidth;
     for (int col = DomModel::Buys; col < DomModel::Columns; ++col) {
