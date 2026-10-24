@@ -244,6 +244,19 @@ bool DomModel::needsRepublish(qint64 nowMs) const
     return std::any_of(m_scales.begin(), m_scales.end(), [](const Scale& s) { return s.shown != s.target; });
 }
 
+uint8_t DomModel::textChanges(const Row& before, const Row& after, bool moved) const
+{
+    // Display strings by dependency: price on grid and window only; Bid/Ask on
+    // the value the current mode shows; executions on their own volumes.
+    if (moved) return 0xff;
+    uint8_t bits = 0;
+    if (m_cumulative ? before.cumBid != after.cumBid : before.bid != after.bid) bits |= 1u << Bid;
+    if (m_cumulative ? before.cumAsk != after.cumAsk : before.ask != after.ask) bits |= 1u << Ask;
+    if (before.buys != after.buys || before.sells != after.sells)
+        bits |= (1u << Buys) | (1u << Sells) | (1u << Delta);
+    return bits;
+}
+
 void DomModel::withdrawScaleWork()
 {
     // Without a ladder there is nothing to scale: settle every request so the
@@ -355,6 +368,8 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
     // Evicted trades inside the window mean volume is missing up to the newest of them.
     m_coveredMs = trades.evictedMaxMs() > cutoff
         ? std::clamp<qint64>(nowMs - trades.evictedMaxMs(), 0, DomTradeWindow::WindowMs) : DomTradeWindow::WindowMs;
+    // The warning ends when the newest evicted trade leaves the minute: publish then.
+    if (trades.evictedMaxMs() > cutoff) wakeAt(trades.evictedMaxMs() + DomTradeWindow::WindowMs);
     const auto view = book.captureDenseNonZero(m_bidBuffer, m_askBuffer, 1);
     const double tick = view.tickSize;
     const auto origin = bucket(view.minPrice, tick);
@@ -432,7 +447,7 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
     int firstChanged = Rows, lastChanged = -1;
     for (int r = 0; r < Rows; ++r) {
         const bool valueChanged = moved || !(m_next[r] == m_rows[r]);
-        if (valueChanged) m_textValid[r] = 0;
+        if (valueChanged) m_textValid[r] &= uint8_t(~textChanges(m_rows[r], m_next[r], moved));
         if (valueChanged || scaleChanged) {
             firstChanged = std::min(firstChanged, r);
             lastChanged = r;

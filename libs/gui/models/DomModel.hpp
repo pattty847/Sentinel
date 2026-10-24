@@ -110,6 +110,7 @@ private:
     static std::optional<qint64> bucket(double price, double tick);
     void accumulateDepth(const LiveOrderBook& book, qint64 origin);
     void withdrawScaleWork();
+    uint8_t textChanges(const Row& before, const Row& after, bool moved) const;
     const QString& cachedText(int row, int col) const;
     void addTrades(const DomTradeWindow& trades, const LiveOrderBook::DenseBookSnapshotView& view,
                    qint64 origin, qint64 nowMs);

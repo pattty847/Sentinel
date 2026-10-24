@@ -217,6 +217,25 @@ TEST(DomModel, RingCoverageWarningSurvivesUntimedAndOutOfOrderHeads) {
     EXPECT_EQ(untimedOnly.evictedMaxMs(), 0);
 }
 
+TEST(DomModel, CoverageWarningEndsWhenTheNewestEvictedTradeLeavesTheMinute) {
+    const qint64 now = 1'800'000'000'000;
+    DomTradeWindow trades;
+    trades.ingest(tradeAt(now - 2000, 200, AggressorSide::Sell, 100)); // evicted next
+    for (int i = 0; i < DomTradeWindow::Capacity; ++i) trades.ingest(tradeAt(0, 200, AggressorSide::Buy, 1)); // untimed only
+    LiveOrderBook book;
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, 4}, {false, 200.1, 7}});
+    DomModel model;
+    model.publish(book, trades, true, now);
+    EXPECT_TRUE(model.executionSummary().contains("ring-limited"));
+    const qint64 expiry = now - 2000 + DomTradeWindow::WindowMs;
+    EXPECT_FALSE(model.needsRepublish(expiry - 1));
+    EXPECT_TRUE(model.needsRepublish(expiry));
+    model.publish(book, trades, true, expiry);
+    EXPECT_FALSE(model.executionSummary().contains("ring-limited"));
+    EXPECT_FALSE(model.needsRepublish(expiry + 600000)); // settled
+}
+
 TEST(DomModel, PublicationRequestsSettleWhenTheLadderGoesAway) {
     const qint64 now = 1'800'000'000'000;
     DomTradeWindow trades;
@@ -308,6 +327,9 @@ TEST(DomModel, DisplayStringsAreFormattedOnceUntilTheirValueChanges) {
     const auto text = [&](int col) { return model.index(r, col).data().toString(); };
     const QString bid = text(DomModel::Bid), price = text(DomModel::Price);
     const QString neighbour = model.index(rowAt(model, 2010), DomModel::Price).data().toString();
+    const QString deepPrice = model.index(rowAt(model, 1950), DomModel::Price).data().toString();
+    const QString deepSize = model.index(rowAt(model, 1950), DomModel::Bid).data().toString();
+    EXPECT_EQ(deepSize, "400");
     EXPECT_EQ(bid, "4.5");
     EXPECT_EQ(text(DomModel::Bid).constData(), bid.constData()); // repaint: the same shared string
     // A scale-only publication (the wall scrolls out: decay) repaints without reformatting.
@@ -324,6 +346,10 @@ TEST(DomModel, DisplayStringsAreFormattedOnceUntilTheirValueChanges) {
     model.publish(book, trades, true, now + 268);
     EXPECT_EQ(text(DomModel::Bid), "5.5");
     EXPECT_EQ(model.index(rowAt(model, 2010), DomModel::Price).data().toString().constData(), neighbour.constData()); // unchanged rows keep theirs
+    // Rows below the touch change only cumulative depth: their price and normal-mode size stay.
+    EXPECT_EQ(model.index(rowAt(model, 1950), DomModel::Price).data().toString().constData(), deepPrice.constData());
+    EXPECT_EQ(model.index(rowAt(model, 1950), DomModel::Bid).data().toString().constData(), deepSize.constData());
+    EXPECT_EQ(text(DomModel::Price).constData(), price.constData()); // touch row: its price did not change either
     model.setCumulative(true);
     EXPECT_EQ(text(DomModel::Bid), "5.5");
     EXPECT_EQ(model.index(rowAt(model, 1950), DomModel::Bid).data().toString(), "406");
