@@ -1,0 +1,81 @@
+#include "marketdata/analytics/LeanGauge.hpp"
+#include <gtest/gtest.h>
+#include <limits>
+#include <cmath>
+using namespace sentinel::book;
+namespace {
+struct LeanFixture : testing::Test {
+    std::array<double, 501> bids{}, asks{};
+    LeanBook book{bids, asks, 0, 1, 199, 201};
+    LeanGauge gauge;
+    void update(int64_t time = 0, uint64_t symbol = 0) { gauge.update(book, symbol, time); }
+};
+TEST_F(LeanFixture, ExactBoundariesAndDisagreement) {
+    bids[199] = 1; asks[201] = 1;
+    bids[195] = 3; bids[185] = 5; bids[150] = 7; bids[100] = 11;
+    asks[205] = 1; asks[215] = 2; asks[250] = 13; asks[300] = 17;
+    bids[99] = asks[301] = 1000;
+    update();
+    const std::array<double, 4> b{4, 9, 16, 27}, a{2, 4, 17, 34};
+    for (size_t i = 0; i < 4; ++i) {
+        EXPECT_DOUBLE_EQ(gauge.bands()[i].bid, b[i]);
+        EXPECT_DOUBLE_EQ(gauge.bands()[i].ask, a[i]);
+        EXPECT_NEAR(gauge.bands()[i].imbalance, (b[i] - a[i]) / (b[i] + a[i]), 1e-14);
+    }
+    EXPECT_TRUE(gauge.disagreement());
+    asks[300] = 0; update(); EXPECT_FALSE(gauge.disagreement());
+    // Decimal native grid: exact ±5 stays included.
+    book.tick = .1; book.bidTop = 199; book.askTop = 201;
+    update(); EXPECT_DOUBLE_EQ(gauge.bands()[0].bid, 16);
+    bids.fill(0); asks.fill(0); book.tick = 2; book.bidTop = 199; book.askTop = 200;
+    bids[199] = asks[200] = 1; bids[197] = 3; asks[202] = 2;
+    update(); // half-slot mid: the levels at 197 and 202 are exactly five away
+    EXPECT_EQ(gauge.bands()[0].bid, 4); EXPECT_EQ(gauge.bands()[0].ask, 3);
+}
+TEST_F(LeanFixture, DepthIsMonotonicAndMirrored) {
+    bids[199] = asks[201] = 2; bids[185] = asks[215] = 8; bids[100] = asks[300] = 10;
+    update();
+    EXPECT_EQ(gauge.bidDepth()[0], 0);
+    EXPECT_EQ(gauge.bidDepth()[14], 2);
+    EXPECT_EQ(gauge.bidDepth()[15], 10);
+    EXPECT_EQ(gauge.bidDepth()[100], 20);
+    for (size_t i = 1; i < LeanGauge::DepthPoints; ++i) {
+        EXPECT_GE(gauge.bidDepth()[i], gauge.bidDepth()[i - 1]);
+        EXPECT_EQ(gauge.bidDepth()[i], gauge.askDepth()[i]);
+    }
+}
+TEST_F(LeanFixture, CadenceWrapAndTimeWindow) {
+    bids[199] = 3; asks[201] = 1;
+    update(); update(499); EXPECT_EQ(gauge.historySize(), 1u);
+    update(500); EXPECT_EQ(gauge.historySize(), 2u);
+    for (int i = 2; i <= 500; ++i) update(i * 500);
+    ASSERT_EQ(gauge.historySize(), 241u);
+    EXPECT_EQ(gauge.history(0).time, 130000);
+    EXPECT_EQ(gauge.history(240).time, 250000);
+    EXPECT_DOUBLE_EQ(gauge.history(0).value, .5);
+    update(500000); EXPECT_EQ(gauge.historySize(), 1u);
+    update(0); EXPECT_EQ(gauge.historySize(), 1u);
+}
+TEST_F(LeanFixture, SymbolTickAndWithdrawalResetHistory) {
+    bids[199] = asks[201] = 1;
+    update(); update(500); ASSERT_EQ(gauge.historySize(), 2u);
+    update(1000, 1); EXPECT_EQ(gauge.historySize(), 1u);
+    update(1500, 1); book.tick = .1; update(2000, 1); EXPECT_EQ(gauge.historySize(), 1u);
+    book.bidTop = book.askTop = -1; update(2500, 1);
+    EXPECT_EQ(gauge.historySize(), 0u); EXPECT_EQ(gauge.state(), LeanGauge::State::Empty);
+    EXPECT_EQ(gauge.bands()[3].bid, 0); EXPECT_EQ(gauge.bidDepth().back(), 0);
+}
+TEST_F(LeanFixture, EmptyOneSidedLockedCrossedAndNonfinite) {
+    book.bidTop = book.askTop = -1; update(); EXPECT_EQ(gauge.state(), LeanGauge::State::Empty);
+    book.bidTop = 199; bids[199] = 3; update();
+    EXPECT_EQ(gauge.state(), LeanGauge::State::BidOnly); EXPECT_EQ(gauge.bands()[0].imbalance, 1);
+    book.bidTop = -1; book.askTop = 201; asks[201] = 7; update();
+    EXPECT_EQ(gauge.state(), LeanGauge::State::AskOnly); EXPECT_EQ(gauge.bands()[0].imbalance, -1);
+    book.bidTop = 201; update(); EXPECT_EQ(gauge.state(), LeanGauge::State::Invalid);
+    EXPECT_EQ(gauge.historySize(), 0u);
+    book.bidTop = 202; update(); EXPECT_EQ(gauge.state(), LeanGauge::State::Invalid);
+    book.bidTop = 199; bids[199] = std::numeric_limits<double>::infinity(); update();
+    EXPECT_TRUE(std::isfinite(gauge.bands()[0].imbalance));
+    book.tick = 0; update(); EXPECT_EQ(gauge.state(), LeanGauge::State::Invalid);
+}
+}

@@ -1,4 +1,5 @@
 add_library(sentinel_book_analytics STATIC
+    LeanGauge.hpp LeanGauge.cpp
     BookAnalyticsTypes.hpp
     WindowState.hpp WindowState.cpp
     BookDiffClassifier.hpp BookDiffClassifier.cpp
