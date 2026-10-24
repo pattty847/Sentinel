@@ -46,6 +46,8 @@ TEST(AgentApiControls, BodiesAndBounds) {
     EXPECT_EQ(check("/api/v1/layers", R"({"tpo":true,"tpoLayout":"split","tpoTheme":"calm"})").body.layers.size(), 3);
     EXPECT_EQ(check("/api/v1/layers", R"({"tpoLayout":"sideways"})").status, 422);
     EXPECT_EQ(check("/api/v1/layers", R"({"tpoTheme":true})").status, 422);
+    EXPECT_EQ(check("/api/v1/layers", R"({"ladder":true})").body.layers.size(), 1);
+    EXPECT_EQ(check("/api/v1/layers", R"({"ladder":"on"})").status, 422);
 }
 
 TEST(AgentApiControls, PostParserAndWaitValidation) {
@@ -245,6 +247,9 @@ TEST(AgentApiCodec, EnvelopeAndUnknowns) {
     EXPECT_EQ(received.value("tpo").toInteger(), 12);
     EXPECT_EQ(received.value("volumeProfile").toInteger(), 13);
     EXPECT_TRUE(data.value("layers").toObject().value("heatmap").isNull());
+    EXPECT_TRUE(data.value("layers").toObject().value("ladder").isNull());
+    s.ladderLayer = true;
+    EXPECT_TRUE(stateJson(s).value("data").toObject().value("layers").toObject().value("ladder").toBool());
     EXPECT_TRUE(data.value("render").toObject().value("frameP50Ms").isNull());
     EXPECT_TRUE(data.value("lastSubscriptionRefusal").isNull());
     s.lastSubscriptionRefusal = {{"symbol", "ETH-USD"}, {"maxConnections", 8}, {"message", "cap reached"}};

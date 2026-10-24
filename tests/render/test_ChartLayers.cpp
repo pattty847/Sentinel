@@ -40,13 +40,17 @@ TEST(LayerRegistry, DispatchPreservesRegistrationOrder) {
     registry.afterRendering();
     EXPECT_EQ(calls, (Calls{"sync:b", "sync:a", "b", "a", "after:b", "after:a"}));
 }
-TEST(ChartLayerSet, RegistersHeatmapFootprintVpTpoText) {
+TEST(ChartLayerSet, RegistersHeatmapFootprintVpTpoLadderText) {
     chart::ChartLayers layers;
     ASSERT_TRUE(layers.registry.precedes("heatmap", "text"));
+    EXPECT_TRUE(layers.registry.precedes("TPO", "ladder"));
+    EXPECT_TRUE(layers.registry.precedes("ladder", "text")) << "chart text draws over the ladder";
+    EXPECT_FALSE(layers.registry.precedes("ladder", "TPO"));
     layers.heatmap.initialize();
     QSGNode root;
     layers.registry.onRootRebuilt(&root);
-    EXPECT_EQ(root.childCount(), 5);
+    EXPECT_EQ(root.childCount(), 6);
+    EXPECT_EQ(root.childAtIndex(4)->type(), QSGNode::OpacityNodeType) << "the ladder's gate";
     EXPECT_EQ(root.firstChild()->type(), QSGNode::OpacityNodeType);
     EXPECT_EQ(root.firstChild()->firstChild()->type(), QSGNode::RenderNodeType);
 }

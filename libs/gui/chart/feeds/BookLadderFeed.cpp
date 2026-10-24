@@ -1,0 +1,185 @@
+#include "chart/feeds/BookLadderFeed.hpp"
+#include "chart/layers/LadderGrid.hpp"
+#include "marketdata/model/TradeData.h"
+#include "SentinelLogging.hpp"
+#include <QElapsedTimer>
+#include <algorithm>
+#include <cmath>
+
+namespace chart {
+namespace {
+// The integer m with x == m * unit within 1e-6 units, else false.
+bool wholeMultiple(double x, double unit, int64_t& m) {
+    const double ratio = x / unit;
+    m = std::llround(ratio);
+    return std::abs(ratio - double(m)) < 1e-6;
+}
+int64_t ceilDiv(int64_t a, int64_t b) { return -floorDiv(-a, b); }
+double priceAt(const LiveOrderBook::DenseBookSnapshotView& view, std::span<const std::pair<uint32_t, double>> side) {
+    return side.empty() ? 0.0 : view.minPrice + side.front().first * view.tickSize;
+}
+// Bins wholly inside what the capture knows on both sides (server-level indices
+// [base + bidKnownLo, base + min(askKnownEnd, slotCount))).
+LadderBins knownBins(const LiveOrderBook::DenseBookSnapshotView& view, int64_t base, int64_t group) {
+    const int64_t lo = base + int64_t(view.bidKnownLo);
+    const int64_t end = base + int64_t(std::min(view.askKnownEnd, view.slotCount));
+    return {ceilDiv(lo, group), floorDiv(end, group) - 1};
+}
+const char* incompleteReason(const LiveOrderBook::DenseBookSnapshotView& view, LadderBins window,
+                             int64_t base, int64_t group) {
+    const int64_t lo = window.lo * group - base, end = (window.hi + 1) * group - base;
+    if (lo < 0 || end > int64_t(view.slotCount)) return "band";
+    if (lo < int64_t(view.bidKnownLo)) return view.bidCapped ? "levels" : "scan";
+    return view.askCapped ? "levels" : "scan";
+}
+} // namespace
+
+BookLadderFeed::BookLadderFeed(LadderMailbox& mailbox) : mailbox_(mailbox) {
+    timer_.setSingleShot(true);
+    connect(&timer_, &QTimer::timeout, this, [this] { publishRows(); });
+}
+
+void BookLadderFeed::publish(const LiveOrderBook& book) {
+    book_ = &book;
+    const auto view = book.captureDenseNonZero(top_.bids, top_.asks, 1, kMaxScanWords);
+    bestBid_ = priceAt(view, view.bidLevels);
+    bestAsk_ = priceAt(view, view.askLevels);
+    if (ports_.top) ports_.top(bestBid_, bestAsk_);
+    const double tick = book.getTickSize();
+    if (!(tick > 0)) { // a cleared replica: withdraw, keep the receive time
+        timer_.stop();
+        lastTick_ = 0;
+        if (active()) withdraw("withdrawn");
+        return;
+    }
+    receivedAtMs_ = ports_.clock ? ports_.clock() : 0;
+    if (lastTick_ > 0 && tick != lastTick_ && active()) withdraw("tick");
+    lastTick_ = tick;
+    if (active()) arm(kIntervalMs);
+}
+
+void BookLadderFeed::beginGeneration() {
+    ++generation_;
+    timer_.stop();
+    book_ = nullptr;
+    lastTick_ = 0;
+    receivedAtMs_ = 0;
+    bestBid_ = bestAsk_ = 0;
+    withdraw("generation");
+}
+
+void BookLadderFeed::setEnabled(bool enabled) {
+    if (enabled_ == enabled) return;
+    const bool was = active();
+    enabled_ = enabled;
+    activeChanged(was);
+}
+
+void BookLadderFeed::setExposed(bool exposed) {
+    if (exposed_ == exposed) return;
+    const bool was = active();
+    exposed_ = exposed;
+    activeChanged(was);
+}
+
+void BookLadderFeed::activeChanged(bool wasActive) {
+    if (wasActive == active()) return;
+    if (active()) {
+        arm(0);
+        return;
+    }
+    timer_.stop();
+    withdraw("suspended"); // no rows survive a suspension
+}
+
+void BookLadderFeed::onFrameChanged() {
+    if (active()) arm(kIntervalMs);
+}
+
+void BookLadderFeed::arm(int ms) {
+    if (!timer_.isActive()) timer_.start(ms);
+}
+
+LadderSnapshot& BookLadderFeed::begin(const MappingFrameContext& frame) {
+    auto& s = mailbox_.back();
+    s.generation = generation_;
+    s.serial = ++serial_;
+    s.valid = s.complete = false;
+    s.serverTick = 0;
+    s.group = s.binLo = 0;
+    s.rowCount = 0;
+    const auto& cam = frame.raster;
+    s.evalTick = cam.valid && cam.tick > 0 ? cam.tick : 0;
+    const auto window = s.evalTick > 0 ? ladderWindow(cam.drawnMinPrice, cam.drawnMaxPrice, cam.tick) : LadderBins{};
+    s.evalLo = window.lo;
+    s.evalHi = window.hi;
+    s.bestBid = bestBid_;
+    s.bestAsk = bestAsk_;
+    s.receivedAtMs = receivedAtMs_;
+    return s;
+}
+
+void BookLadderFeed::post() {
+    mailbox_.post();
+    if (ports_.update) ports_.update();
+}
+
+void BookLadderFeed::withdraw(const char* reason) {
+    begin(ports_.frame ? ports_.frame() : MappingFrameContext{});
+    reason_ = reason;
+    sLog_Probe("ladder.withdraw", "gen=" << generation_ << " serial=" << serial_ << " reason=" << reason);
+    post();
+}
+
+void BookLadderFeed::publishRows() {
+    if (!active()) return;
+    QElapsedTimer elapsed;
+    elapsed.start();
+    const auto frame = ports_.frame ? ports_.frame() : MappingFrameContext{};
+    auto& s = begin(frame);
+    reason_ = fill(s, frame.raster);
+    ++rowPublications_;
+    sLog_Probe("ladder.publish", "gen=" << generation_ << " serial=" << serial_ << " valid=" << s.valid
+               << " complete=" << s.complete << " reason=" << reason_ << " rows=" << s.rowCount
+               << " bidLevels=" << rows_.bids.size() << " askLevels=" << rows_.asks.size()
+               << " us=" << double(elapsed.nsecsElapsed()) / 1000.0);
+    post();
+}
+
+const char* BookLadderFeed::fill(LadderSnapshot& s, const chart_raster::RasterCamera& cam) {
+    rows_.bids.clear();
+    rows_.asks.clear();
+    if (!(s.evalTick > 0)) return "raster";
+    if (!book_ || !(book_->getTickSize() > 0)) return "book";
+    const double serverTick = book_->getTickSize();
+    int64_t base = 0, group = 0;
+    if (!wholeMultiple(book_->getMinPrice(), serverTick, base) || !wholeMultiple(cam.tick, serverTick, group) ||
+        group < 1)
+        return "grid";
+    const auto window = ladderWindow(cam.drawnMinPrice, cam.drawnMaxPrice, double(group) * serverTick);
+    const int64_t bins = window.hi - window.lo + 1;
+    if (bins > LadderSnapshot::kMaxRows) return "wide";
+    const auto view = book_->captureDenseNonZero(rows_.bids, rows_.asks, kMaxLevels, kMaxScanWords);
+    // Rows: the window plus a margin of a quarter window each side (a drag between
+    // publications keeps its bars), limited to what the capture knows.
+    const int64_t margin = std::min<int64_t>(std::max<int64_t>(1, bins / 4), (LadderSnapshot::kMaxRows - bins) / 2);
+    const auto known = knownBins(view, base, group);
+    s.binLo = std::min(window.lo, std::max(window.lo - margin, known.lo));
+    const int64_t binHi = std::max(window.hi, std::min(window.hi + margin, known.hi));
+    s.rowCount = int(binHi - s.binLo + 1);
+    s.serverTick = serverTick;
+    s.group = group;
+    std::fill_n(s.rows.begin(), s.rowCount, LadderRow{});
+    const auto add = [&](std::span<const std::pair<uint32_t, double>> levels, float LadderRow::*side) {
+        for (const auto& [index, qty] : levels) {
+            const int64_t row = floorDiv(base + int64_t(index), group) - s.binLo;
+            if (row >= 0 && row < s.rowCount) s.rows[size_t(row)].*side += float(qty);
+        }
+    };
+    add(view.bidLevels, &LadderRow::bid);
+    add(view.askLevels, &LadderRow::ask);
+    s.valid = true;
+    s.complete = window.lo >= known.lo && window.hi <= known.hi;
+    return s.complete ? "ok" : incompleteReason(view, window, base, group);
+}
+} // namespace chart

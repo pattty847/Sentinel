@@ -1,8 +1,7 @@
 // UnifiedGridRenderer initialization and data-thread wiring.
 #include "UnifiedGridRenderer.h"
-
 #include "SentinelLogging.hpp"
-
+#include "chart/shell/LadderBinding.hpp"
 #include "config/GuiConfigStore.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
 #include "chart/shell/HeatmapChartPort.hpp"
@@ -67,9 +66,10 @@ void UnifiedGridRenderer::init() {
     connect(getViewState(), &GridViewState::priceInteracted, this, [this]() {
         m_view->priceCarry().priceInteracted();
     });
-    
+    chart::bindLadder({*this, m_layers, m_visibility, *getViewState(), m_frames.published,
+                       [this](double bid, double ask) { m_view->livePlacement().setLiveBookTop(bid, ask); }});
+    connect(this, &UnifiedGridRenderer::rasterChanged, &m_layers.ladderFeed, &chart::BookLadderFeed::onFrameChanged);
     m_feeds->startProcessing();
-
     // The GPU heatmap is active from construction: the default view model is the
     // auto price scale; the first view comes from the service's availability, a
     // book top, a trade or the API (bootstrapGpuTimeView, seedGpuViewport).

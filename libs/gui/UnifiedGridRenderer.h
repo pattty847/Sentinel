@@ -126,7 +126,7 @@ public:
     void addTrade(const Trade& trade);
     void clearData();
     void setActiveSymbol(const QString& symbol);
-    void setLiveBookTop(double bestBid, double bestAsk);
+    void setLiveBook(const LiveOrderBook& book); // the global top, and the ladder's rows
     QObject* viewNotifications() override { return view(); }
     MappingFrameContext currentFrameContext() const override;
     TimeAxisMapping currentTimeAxisMapping() const override;

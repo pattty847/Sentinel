@@ -103,6 +103,13 @@ public:
         std::span<const std::pair<uint32_t, double>> askLevels; // (index, quantity)
         bool scanLimited = false;
         double maxPrice = 0.0;
+        // What the capture knows (captured or known empty), in book indices: bids
+        // [bidKnownLo, slotCount), asks [0, askKnownEnd). The whole band for a side that was
+        // scanned to the end or has no set slot left; a side that stopped at maxPerSide
+        // with set slots left (capped) is known down/up to its last captured level, and
+        // a word-budget stop to the last scanned word.
+        size_t slotCount = 0, bidKnownLo = 0, askKnownEnd = 0;
+        bool bidCapped = false, askCapped = false;
     };
 
     DenseBookSnapshotView captureDenseNonZero(

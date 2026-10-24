@@ -19,7 +19,7 @@ void UnifiedGridRenderer::prepareSyncFrame() {
     if (profile) m_frameProfiler.beginFrame();
     const auto inputs = m_view->frameInputs(
         boundingRect(), window() ? window()->effectiveDevicePixelRatio() : 1.0,
-        m_clock.frame, m_timeAuthority, {m_visibility.heatmapEnabled(), m_visibility.footprintEnabled(), m_visibility.tpoEnabled(), m_visibility.volumeProfileEnabled()});
+        m_clock.frame, m_timeAuthority, {m_visibility.heatmapEnabled(), m_visibility.footprintEnabled(), m_visibility.tpoEnabled(), m_visibility.volumeProfileEnabled(), double(m_visibility.ladderWidthPx())});
     if (profile) m_frameProfiler.mark(FrameProfiler::Context);
     const auto& frame = m_frames.producer.produce(inputs, *m_heatmapPort, m_frames.published);
     if (frame.rasterChanged) {

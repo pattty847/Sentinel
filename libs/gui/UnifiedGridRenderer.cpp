@@ -55,7 +55,7 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem *parent)
                   << " -> heatmap=" << m_visibility.heatmapEnabled()
                   << " footprint=" << m_visibility.footprintEnabled()
                   << " tpo=" << m_visibility.tpoEnabled()
-                  << " volumeProfile=" << m_visibility.volumeProfileEnabled());
+                  << " volumeProfile=" << m_visibility.volumeProfileEnabled() << " ladder=" << m_visibility.ladderEnabled());
     } else if (unchanged) {
       sLog_Render("layers: set " << field.data() << "=" << enabled << " unchanged");
     } else {
@@ -63,7 +63,7 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem *parent)
                   << " -> heatmap=" << m_visibility.heatmapEnabled()
                   << " footprint=" << m_visibility.footprintEnabled()
                   << " tpo=" << m_visibility.tpoEnabled()
-                  << " volumeProfile=" << m_visibility.volumeProfileEnabled());
+                  << " volumeProfile=" << m_visibility.volumeProfileEnabled() << " ladder=" << m_visibility.ladderEnabled());
     }
   };
   m_visibility.requestUpdate = [this] { update(); };
@@ -72,8 +72,6 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem *parent)
   m_look.applyTone = [this](float gamma, float contrast, float floor) {
     if (m_layers.heatmap.gpu) m_layers.heatmap.gpu->setTone({gamma, contrast, floor});
   };
-
-
   m_layers.heatmap.queueUpdate = [this] {
       QMetaObject::invokeMethod(this, [this] { update(); }, Qt::QueuedConnection);
   };
@@ -213,8 +211,8 @@ void UnifiedGridRenderer::onTradeReceived(const Trade &trade) {
   m_view->livePlacement().onTrade(trade.product_id, trade.price);
 }
 
-void UnifiedGridRenderer::setLiveBookTop(double bestBid, double bestAsk) {
-  m_view->livePlacement().setLiveBookTop(bestBid, bestAsk);
+void UnifiedGridRenderer::setLiveBook(const LiveOrderBook& book) {
+  m_layers.ladderFeed.publish(book);
 }
 
 void UnifiedGridRenderer::onViewChanged(qint64 startTimeMs, qint64 endTimeMs,
@@ -297,6 +295,7 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
   m_view->priceCarry().capture();
   m_view->session().symbol = normalized;
   m_view->session().bookMid = m_view->session().lastTrade = 0.0;
+  m_layers.ladderFeed.beginGeneration(); // no rows of the previous symbol survive the switch
   // The controller serial switches the heatmap (the node holds the old picture
   // until the new spans are ready); clearData() resets the trade overlays. The
   // next book top centres the new price.

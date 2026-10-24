@@ -385,6 +385,12 @@ target_link_libraries(test_ChartLookSettings PRIVATE GTest::gtest_main sentinel_
 add_test(NAME ChartLookSettingsTests COMMAND test_ChartLookSettings)
 set_tests_properties(ChartLookSettingsTests PROPERTIES LABELS "render;fast")
 
+add_executable(test_Ladder test_ladder.cpp)
+target_include_directories(test_Ladder PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_Ladder PRIVATE GTest::gtest sentinel_gui_lib Qt6::Test Qt6::Quick)
+add_test(NAME LadderTests COMMAND test_Ladder)
+set_tests_properties(LadderTests PROPERTIES LABELS "render;fast")
+
 add_executable(test_LayerVisibility test_layer_visibility.cpp)
 target_include_directories(test_LayerVisibility PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
 target_link_libraries(test_LayerVisibility PRIVATE GTest::gtest_main sentinel_gui_lib)

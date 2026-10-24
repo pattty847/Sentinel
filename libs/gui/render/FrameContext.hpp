@@ -34,9 +34,11 @@ struct FrameContext {
         bool footprint = false;
         bool tpo = false;
         bool volumeProfile = false;
+        double ladderPx = 0.0; // the book ladder's strip width (0: off)
     };
     TimeAuthority::Snapshot time;
     QRectF itemBounds; // unsnapped item extent for axis text
+    double rightGutterPx = 0.0; // logical px reserved right of the item before the price axis
     QRectF surfaceBounds;
     double surfaceDpr = 1.0;
     qint64 presentationTimeMs = 0;

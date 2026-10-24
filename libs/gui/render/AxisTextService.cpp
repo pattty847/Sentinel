@@ -202,7 +202,8 @@ void AxisTextService::refreshAxisLayout() {
 void AxisTextService::submitAxisText(ChartTextRenderer& renderer,
                                      const ChartTextAtlas& atlas,
                                      qreal canvasWidth,
-                                     qreal canvasHeight) {
+                                     qreal canvasHeight,
+                                     qreal priceGutter) {
     if (atlas.fontPx() <= 0) {
         return;
     }
@@ -295,7 +296,7 @@ void AxisTextService::submitAxisText(ChartTextRenderer& renderer,
             };
             if (!priceTicks.empty()) {
                 logSample("price", priceTicks.front().label,
-                          QPointF(canvasWidth + 6.0, priceTicks.front().position));
+                          QPointF(canvasWidth + priceGutter + 6.0, priceTicks.front().position));
             }
             if (!timeTicks.empty()) {
                 logSample("time", timeTicks.front().label,
@@ -311,7 +312,7 @@ void AxisTextService::submitAxisText(ChartTextRenderer& renderer,
     const qreal timeInsetTop = 2.0;
     const qreal timeInsetBottom = 2.0;
     const QRectF priceSafeRect(
-        canvasWidth + priceInsetLeft, 0.0,
+        canvasWidth + priceGutter + priceInsetLeft, 0.0,
         std::max(0.0, static_cast<double>(axisLayout.priceAxisWidthPx) -
                           (priceInsetLeft + priceInsetRight)),
         canvasHeight);

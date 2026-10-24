@@ -18,7 +18,7 @@ The GUI listens on `127.0.0.1` at `gui.api_port` (default `17100`). `api_port=0`
 | POST | `/api/v1/symbol` | JSON `{"symbol":"ETH-USD"}`; subscribes through the chart's symbol path. |
 | POST | `/api/v1/timeframe` | JSON with `heatmapTimeframeMs` and/or `candleTimeframeMs`; v1 links them and requires an advertised served timeframe. |
 | POST | `/api/v1/viewport` | JSON with paired `startMs,endMs`, paired `priceMin,priceMax`, `followLive` and/or `autoScale` (the auto price scale, the "A" toggle); or `{"fit":"time"|"price"|"both"|"default"}` (the axis double-click actions). |
-| POST | `/api/v1/layers` | Partial boolean map for `heatmap`, `candles`, `footprint`, `tpo`, `volumeProfile`; optional TPO look strings `tpoLayout` (`split`, `collapsed`) and `tpoTheme` (`rainbow`, `calm`, `sage`). State `layers` reports both. |
+| POST | `/api/v1/layers` | Partial boolean map for `heatmap`, `candles`, `footprint`, `tpo`, `volumeProfile`, `ladder` (the chart-edge book ladder strip, independent of the primary layers, off by default); optional TPO look strings `tpoLayout` (`split`, `collapsed`) and `tpoTheme` (`rainbow`, `calm`, `sage`). State `layers` reports both. |
 | POST | `/api/v1/docks` | `{"visible":{"orderBook":false,"watchlist":false}}` or `{"focus":"heatmap"}`; optional `persist` boolean. |
 | GET | `/api/v1/operations/<id>?waitMs=5000` | Current operation state; waits at most five seconds for a rendered frame. |
 | GET | `/screenshot?name=review&target=main` | Legacy screenshot route and response, retained for existing agents. |

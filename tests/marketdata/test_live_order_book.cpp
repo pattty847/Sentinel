@@ -63,6 +63,41 @@ TEST(LiveOrderBookTest, SnapshotAndDenseViewPreserveSideOrderAndLimits) {
     EXPECT_TRUE(view.scanLimited);
 }
 
+// What a capture knows: the whole band for a fully scanned side (also exactly at the
+// level cap), down/up to the last captured level over the cap, and the scanned words
+// after a word-budget stop.
+TEST(LiveOrderBookTest, DenseCaptureReportsTheKnownRangePerSide) {
+    LiveOrderBook book;
+    seed(book); // 7 slots; bids 101, 104; asks 102, 105, 106
+    std::vector<std::pair<uint32_t, double>> bids, asks;
+    auto view = book.captureDenseNonZero(bids, asks, 2);
+    EXPECT_EQ(view.slotCount, 7u);
+    EXPECT_EQ(view.bidKnownLo, 0u) << "exactly at the cap with nothing left: complete";
+    EXPECT_FALSE(view.bidCapped);
+    EXPECT_TRUE(view.askCapped) << "106 was not captured";
+    EXPECT_EQ(view.askKnownEnd, 6u) << "known up to the last captured ask (105)";
+    view = book.captureDenseNonZero(bids, asks, 1);
+    EXPECT_TRUE(view.bidCapped);
+    EXPECT_EQ(view.bidKnownLo, 4u) << "known down to the last captured bid (104)";
+    view = book.captureDenseNonZero(bids, asks, 8);
+    EXPECT_EQ(view.bidKnownLo, 0u);
+    EXPECT_EQ(view.askKnownEnd, 7u);
+
+    LiveOrderBook wide;
+    wide.initialize(0.0, 200.0, 1.0); // 201 slots, 4 words
+    const std::array<BookLevelUpdate, 2> levels{{{true, 10.0, 1.0}, {false, 20.0, 1.0}}};
+    wide.applyUpdates(levels, timestamp, nullptr);
+    view = wide.captureDenseNonZero(bids, asks, 8, 1);
+    EXPECT_TRUE(view.scanLimited);
+    EXPECT_FALSE(view.bidCapped);
+    EXPECT_EQ(view.bidKnownLo, 192u) << "the top word [192, 201) only";
+    EXPECT_EQ(view.askKnownEnd, 201u) << "the ask side found its only level: nothing left";
+    LiveOrderBook empty;
+    view = empty.captureDenseNonZero(bids, asks, 8);
+    EXPECT_EQ(view.bidKnownLo, 0u);
+    EXPECT_EQ(view.askKnownEnd, view.slotCount);
+}
+
 TEST(LiveOrderBookTest, RangeAndSplitClampBothEndsAndKeepBestPrices) {
     LiveOrderBook book;
     seed(book);

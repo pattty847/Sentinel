@@ -1,4 +1,5 @@
 #include "chart/shell/LayerVisibility.hpp"
+#include <QVariant>
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
@@ -74,5 +75,25 @@ TEST(LayerVisibility, IndividualSettersKeepHeatmapAndFootprintCoexistence) {
     layers.setFootprintEnabled(false);
     EXPECT_FALSE(layers.heatmapEnabled());
     EXPECT_FALSE(layers.footprintEnabled());
+}
+// The book ladder is independent of the primary field and off by default; its strip
+// width is reserved only while it is on.
+TEST(LayerVisibility, LadderIsIndependentAndReservesItsStripOnlyWhenOn) {
+    chart::LayerVisibility layers;
+    Events events;
+    layers.report = [&](std::string_view name, bool enabled, bool) { events.emplace_back(std::string(name) + (enabled ? "+" : "-")); };
+    EXPECT_FALSE(layers.ladderEnabled());
+    EXPECT_EQ(layers.ladderWidthPx(), 0);
+    EXPECT_EQ(layers.property("ladderWidthPx").toInt(), 0);
+    layers.setLadderEnabled(true);
+    EXPECT_TRUE(layers.ladderEnabled());
+    EXPECT_EQ(layers.ladderWidthPx(), chart::LayerVisibility::kLadderWidthPx);
+    EXPECT_EQ(layers.property("ladderLayerEnabled").toBool(), true);
+    EXPECT_TRUE(layers.heatmapEnabled()) << "the primary layers are untouched";
+    layers.setPrimaryField(2);
+    EXPECT_TRUE(layers.ladderEnabled()) << "a primary field change keeps the ladder";
+    layers.setLayerEnabled("ladder", false);
+    EXPECT_EQ(layers.ladderWidthPx(), 0);
+    EXPECT_EQ(events, (std::vector<std::string>{"ladder+", "primaryField-", "ladder-"}));
 }
 } // namespace
