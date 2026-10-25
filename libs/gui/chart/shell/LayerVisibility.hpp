@@ -15,7 +15,7 @@ class LayerVisibility : public QObject {
     Q_PROPERTY(bool ladderLayerEnabled READ ladderEnabled NOTIFY layerVisibilityChanged)
     Q_PROPERTY(int ladderWidthPx READ ladderWidthPx NOTIFY layerVisibilityChanged)
 public:
-    static constexpr int kLadderWidthPx = 72;
+    static constexpr int kLadderWidthPx = 120, kLadderMinWidthPx = 60, kLadderMaxWidthPx = 240;
     std::function<void(std::string_view, bool, bool)> report;
     std::function<void()> requestUpdate;
 
@@ -25,7 +25,17 @@ public:
     bool tpoEnabled() const { return tpo_; }
     bool volumeProfileEnabled() const { return volumeProfile_; }
     bool ladderEnabled() const { return ladder_; }
-    int ladderWidthPx() const { return ladder_ ? kLadderWidthPx : 0; }
+    int ladderWidthPx() const { return ladder_ ? ladderWidth_ : 0; }
+    // The strip width while the ladder is on, clamped to [kLadderMinWidthPx, kLadderMaxWidthPx].
+    int ladderWidthSetting() const { return ladderWidth_; }
+    void setLadderWidthPx(int px) {
+        px = px < kLadderMinWidthPx ? kLadderMinWidthPx : px > kLadderMaxWidthPx ? kLadderMaxWidthPx : px;
+        if (px == ladderWidth_) return;
+        ladderWidth_ = px;
+        if (!ladder_) return;
+        if (requestUpdate) requestUpdate();
+        emit layerVisibilityChanged();
+    }
 
     void setPrimaryField(int field) {
         if (primaryField_ == field) return;
@@ -148,5 +158,6 @@ private:
     bool tpo_ = false;
     bool volumeProfile_ = false;
     bool ladder_ = false;
+    int ladderWidth_ = kLadderWidthPx;
 };
 } // namespace chart

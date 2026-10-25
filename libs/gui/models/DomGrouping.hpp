@@ -1,0 +1,109 @@
+#pragma once
+// DOM row grouping, client side. A grouped row sums `group` native book levels on the
+// absolute grid [k * group, (k + 1) * group) of native level indices (lower inclusive,
+// upper exclusive), as the chart-edge ladder bins (BookLadderFeed). Qt-free; GUI thread.
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <span>
+
+namespace dom {
+// Coarsest row Auto and the fixed menu offer, in native levels (BTC 0.1 -> $100): a short
+// menu and a bounded Auto search (20 rows x group levels per candidate). Link has no cap.
+constexpr int64_t MaxGroup = 1000;
+// Integer bounds of the ladder (DomModel). A native level key (book origin + slot) is below
+// MaxNativeKey or the book has no ladder; a group is at most the replica band's level count
+// (a coarser row would show the same whole book), so group <= MaxNativeKey too; the window
+// top is clamped to keyOf(band top) + WindowRows. Every product DomModel forms, group x
+// grouped key, is then at most MaxNativeKey + group x (WindowRows + 2), and the Pulse
+// classifier's price keys (grouped keys) stay below its 2^50 limit.
+constexpr int64_t MaxNativeKey = int64_t(1) << 49;
+constexpr int64_t WindowRows = 2001; // DomModel::Rows
+static_assert(MaxNativeKey + MaxNativeKey * (WindowRows + 2) < std::numeric_limits<int64_t>::max() / 2,
+              "group x grouped key overflows int64");
+static_assert(MaxNativeKey + WindowRows < (int64_t(1) << 50), "Pulse price keys out of range");
+// A row coarser than this share of the mid is the DOM's too-coarse state (DomModel).
+constexpr double MaxShareOfMid = 0.01;
+
+inline int64_t floorDiv(int64_t a, int64_t b) {
+    const int64_t q = a / b;
+    return (a % b != 0 && ((a < 0) != (b < 0))) ? q - 1 : q;
+}
+
+struct GroupChoices {
+    static constexpr int Capacity = 32;
+    std::array<int64_t, Capacity> groups{};
+    int count = 0;
+    std::span<const int64_t> list() const { return {groups.data(), size_t(count)}; }
+    bool contains(int64_t group) const;
+    // The choice closest to `group` by ratio (1 when empty); ties take the finer one.
+    int64_t nearest(double group) const;
+};
+// Native (1) first, then every heatmap tick preset ({1, 2, 2.5, 5} x 10^k,
+// heatmap::presetLadderUnits) that is a whole multiple of the native tick, at most
+// MaxGroup levels and, with a known mid, at most MaxShareOfMid of it.
+GroupChoices groupChoices(double nativeTick, double mid);
+
+// The integer m with x == m * unit within 1e-6 units; 0 if there is none (small ratios:
+// the preset list and the native tick's decimal digits, never the Link test).
+int64_t wholeMultiple(double x, double unit);
+// Link's input space: a native tick that is an exact decimal with at most MaxNativeDigits
+// fractional digits (relative round-trip 1e-12) and a heatmap price scale that is an
+// integer in [1, MaxPriceScale]. The common scale is then at most 1e18 (fits int64).
+constexpr int MaxNativeDigits = 9;
+constexpr int64_t MaxPriceScale = 1'000'000'000;
+// The native tick as units / 10^digits at the smallest digits; false outside the space.
+bool nativeDecimal(double nativeTick, int64_t& units, int64_t& scale);
+
+struct LinkGroup {
+    // WholeBook: the tick is coarser than the replica band (set by the dock: one row shows
+    // the whole book). Unsupported: the native tick or the price scale is outside Link's
+    // input space, or the integer conversion would overflow.
+    enum class Fallback { None, NoTick, NotMultiple, WholeBook, Unsupported };
+    int64_t group = 1;
+    bool exact = false; // false: not the heatmap tick's own size, for `fallback`
+    Fallback fallback = Fallback::NoTick;
+};
+// The heatmap's tick (heatmapUnits / priceScale, the heatmap's integer price units) as a
+// group. The whole-multiple test is exact integer arithmetic on a common power-of-ten
+// scale, never a double quotient: any whole multiple is followed (owner, 2026-10-25: no
+// MaxGroup or share-of-mid cap); a non-multiple (heatmap layer off, INV-178) falls back to
+// the nearest choice; inputs outside the space fall back with Unsupported.
+LinkGroup linkGroup(int64_t heatmapUnits, double priceScale, double nativeTick, const GroupChoices& choices);
+
+// Dense replica view: native slot i is level base + i; tops are slot indices, -1 if absent.
+struct AutoBook {
+    std::span<const double> bids, asks;
+    int64_t base = 0;
+    std::ptrdiff_t bidTop = -1, askTop = -1;
+};
+// Auto target: the smallest choice at which at least TargetFill of the RowsPerSide
+// rows on each present side, counted from the touch row outward, hold size. A size
+// finer than `current` needs FinerFill (hysteresis: live BTC sits near 60% between
+// $1 and $2 rows, and a hold alone still switched about 12 times a minute). None:
+// the coarsest choice. An empty book has no target (0).
+struct AutoGroupRule {
+    static constexpr int RowsPerSide = 20;
+    static constexpr double TargetFill = 0.6;
+    static constexpr double FinerFill = 0.7;
+    static int64_t target(const AutoBook& book, const GroupChoices& choices, int64_t current = 0);
+    // Rows of the RowsPerSide from the touch row that hold size, on one side.
+    static int filledRows(const AutoBook& book, bool bid, int64_t group);
+};
+
+// A hold: a new target replaces the current group only after HoldMs unchanged, so
+// a book or zoom near a threshold does not flip between two sizes. The first target
+// (after reset) applies at once; a target <= 0 keeps the current group.
+class GroupHold {
+public:
+    static constexpr int64_t HoldMs = 750;
+    int64_t step(int64_t target, int64_t nowMs);
+    void reset() { m_current = m_pending = 0; }
+    int64_t current() const { return m_current; }
+    uint64_t changes() const { return m_changes; }
+private:
+    int64_t m_current = 0, m_pending = 0, m_since = 0;
+    uint64_t m_changes = 0;
+};
+} // namespace dom

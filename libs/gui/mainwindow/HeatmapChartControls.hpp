@@ -22,6 +22,8 @@
 #include <QObject>
 #include <QPointer>
 #include <functional>
+#include <optional>
+#include <utility>
 
 class UnifiedGridRenderer;
 class HeatmapSettingsDialog;
@@ -72,11 +74,22 @@ public:
     // Applies the model to every bound piece now (also the coalesced path).
     void syncNow();
 
+signals:
+    // The tick the selector shows (Manual: the locked preset; Auto: the drawn tick) as
+    // integer price units at priceScale, 0 without a chart; emitted when it changes (the
+    // DOM's Link grouping tests whole multiples on these integers).
+    void heatmapTickShown(qint64 units, double priceScale, bool manual);
+
 private:
     void onModelChanged(bool explicitManualTick);
     void scheduleSync();
     void scheduleIndicator();
     void syncTelemetryVisibility();
+    // The persisted ladder toggle and width reach the layers only when they change, so a
+    // process-only Agent API layer patch survives unrelated settings changes.
+    void applyLadderSettings();
+    void requestLadder(bool on);
+    void requestLadderWidth(int px);
     void buildChartMenu();
 
     heatmap::HeatmapSettingsModel *m_model = nullptr;
@@ -87,4 +100,8 @@ private:
     QTimer *m_syncTimer = nullptr;      // 0 ms: coalesces bursts of tick/preset signals
     QTimer *m_indicatorTimer = nullptr; // kIndicatorMs: view/data-driven refresh, throttled
     MenuHooks m_hooks;
+    qint64 m_shownUnits = -1;
+    double m_shownScale = 0;
+    bool m_shownManual = false;
+    std::optional<std::pair<bool, int>> m_appliedLadder; // showLadder, ladderWidthPx last applied to the layers
 };

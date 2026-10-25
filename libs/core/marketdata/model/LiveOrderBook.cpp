@@ -95,6 +95,11 @@ void LiveOrderBook::initialize(double min_price, double max_price, double tick_s
     m_asks.assign(size, 0.0);
     m_bidPresent.assign((size + 63) / 64, 0);
     m_askPresent.assign((size + 63) / 64, 0);
+    const size_t blocks = (size + SumBlockSlots - 1) / SumBlockSlots;
+    m_bidBlockSum.assign(blocks, 0.0);
+    m_askBlockSum.assign(blocks, 0.0);
+    m_bidBlockDirty.assign(blocks, 0);
+    m_askBlockDirty.assign(blocks, 0);
 
     m_nonZeroBidCount = 0;
     m_nonZeroAskCount = 0;
@@ -109,6 +114,10 @@ void LiveOrderBook::clear() {
     m_asks.clear();
     m_bidPresent.clear();
     m_askPresent.clear();
+    m_bidBlockSum.clear();
+    m_askBlockSum.clear();
+    m_bidBlockDirty.clear();
+    m_askBlockDirty.clear();
     m_min_price = m_max_price = m_tick_size = 0.0;
     m_nonZeroBidCount = m_nonZeroAskCount = 0;
     m_totalBidVolume = m_totalAskVolume = 0.0;
@@ -172,6 +181,43 @@ bool LiveOrderBook::isEmpty() const {
     return m_nonZeroBidCount == 0 && m_nonZeroAskCount == 0;
 }
 
+double LiveOrderBook::sumRange(bool bid, size_t lo, size_t hi, size_t* slotReads) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const auto& side = bid ? m_bids : m_asks;
+    auto& sums = bid ? m_bidBlockSum : m_askBlockSum;
+    auto& dirty = bid ? m_bidBlockDirty : m_askBlockDirty;
+    size_t reads = 0;
+    double total = 0;
+    const auto direct = [&](size_t from, size_t to) { // [from, to)
+        double sum = 0;
+        for (size_t i = from; i < to; ++i)
+            if (std::isfinite(side[i]) && side[i] > 0) sum += side[i];
+        reads += to - from;
+        return sum;
+    };
+    if (!side.empty() && lo <= hi && lo < side.size()) {
+        hi = std::min(hi, side.size() - 1);
+        size_t at = lo;
+        while (at <= hi) {
+            const size_t block = at / SumBlockSlots, start = block * SumBlockSlots;
+            const size_t end = std::min(start + SumBlockSlots, side.size()); // exclusive
+            if (at == start && end - 1 <= hi) { // a whole block: its cached sum
+                if (dirty[block]) {
+                    sums[block] = direct(start, end);
+                    dirty[block] = 0;
+                }
+                total += sums[block];
+                ++reads;
+            } else {
+                total += direct(at, std::min(end, hi + 1));
+            }
+            at = end;
+        }
+    }
+    if (slotReads) *slotReads = reads;
+    return total;
+}
+
 bool LiveOrderBook::applyLevelLocked(bool isBid,
                                      double price,
                                      double quantity,
@@ -220,6 +266,7 @@ bool LiveOrderBook::applyLevelLocked(bool isBid,
     }
 
     slot = newValue;
+    (isBid ? m_bidBlockDirty : m_askBlockDirty)[index / SumBlockSlots] = 1;
 
     if (totalVolume < 0.0) {
         totalVolume = 0.0;

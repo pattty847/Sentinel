@@ -1,4 +1,5 @@
 #include "models/DomModel.hpp"
+#include "models/DomGrouping.hpp"
 #include "mainwindow/AgentApiSnapshots.hpp"
 #include "themes/DarkTheme.hpp"
 #include "widgets/OrderBookDock.hpp"
@@ -15,6 +16,7 @@
 #include <QImage>
 #include <QHeaderView>
 #include <QLabel>
+#include <QMenu>
 #include <QLayout>
 #include <QPainter>
 #include <QPushButton>
@@ -963,7 +965,7 @@ TEST(DomPulse, FooterSumsEachKindPerSideAndNamesTheBiggestPull) {
     rig.step();
     // Asks pulled 4 + 2.8, bids 0.4; the largest single pull is the 4 at 200.3.
     EXPECT_EQ(rig.model.pulseSummary(), "Asks pulled 6.8 eaten 1.1 · Bids pulled .4 eaten 2 · biggest pull 4 @ 200.3");
-    EXPECT_EQ(rig.model.pulseSummary(true), "Ask pull 6.8 eat 1.1 · Bid pull .4 eat 2 · max 4 @ 200.3");
+    EXPECT_EQ(rig.model.pulseSummary(DomModel::PulseText::Compact), "Ask pull 6.8 eat 1.1 · Bid pull .4 eat 2 · max 4 @ 200.3");
     EXPECT_DOUBLE_EQ(rig.model.pulseTotals().side[1].added, 0.5);
     const auto version = rig.model.pulseTotalsVersion();
     rig.step();
@@ -1066,7 +1068,8 @@ struct DomDock : testing::Test {
     OrderBookDock dock{nullptr, &source};
     QTableView* table = dock.findChild<QTableView*>("domLadder");
     DomModel* model = static_cast<DomModel*>(table->model());
-    void SetUp() override { dock.resize(650, 600); dock.onSymbolChanged("BTC-USD"); }
+    // The scripted books are a few levels: native rows unless a test picks a grouping.
+    void SetUp() override { dock.setGrouping(OrderBookDock::Grouping::Fixed, 0.1); dock.resize(650, 600); dock.onSymbolChanged("BTC-USD"); }
     void show() { dock.show(); QTest::qWait(90); }
     void flushEvents() { QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall); }
     QString label(const char* name) { auto* label = dock.findChild<QLabel*>(name); return QString(name) == "domFreshness" ? label->toolTip().section('\n', 0, 0) : label->text(); }
@@ -1254,6 +1257,7 @@ TEST(DomWindow, MinimizedMainWindowStopsTimerAndRetainsTradeIngestion) {
     Source source;
     QMainWindow window;
     auto* dock = new OrderBookDock(&window, &source);
+    dock->setGrouping(OrderBookDock::Grouping::Fixed, 0.1); // a two-level book: native rows
     window.addDockWidget(Qt::LeftDockWidgetArea, dock);
     dock->onSymbolChanged("BTC-USD");
     source.update({{true, 200, 1}, {false, 200.1, 1}});
@@ -1865,6 +1869,620 @@ TEST(DomLean, PaintMirrorsBidLeftAskRightAndDrawsHistory) {
     EXPECT_EQ(countColour(QRect(200, 2 * row, 200, 14), bid), 0);
     EXPECT_GT(countColour(QRect(200, 2 * row, 200, 14), ask), 100);
     EXPECT_GT(countColour(QRect(100, 3 * row + 14, 297, std::max(16, row)), bid), 200);
+}
+
+// ---- Row grouping (client side) ----
+// Native 0.1 levels 199.9, 200.0, 200.9, 201.0 sit in $1 rows 199, 200, 200, 201:
+// absolute bins [k, k+1), lower inclusive, never rounded across a boundary.
+TEST(DomGroup, AbsoluteGridBinsVolumesCumulativeAndLabels) {
+    LiveOrderBook book;
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 199.9, 1}, {true, 200.0, 2}, {true, 199.5, 4}, {false, 200.9, 8}, {false, 201.0, 16}, {false, 200.1, 32}});
+    DomTradeWindow trades;
+    trades.ingest(trade(200.05, AggressorSide::Buy));
+    trades.ingest(trade(200.95, AggressorSide::Buy, 2));
+    trades.ingest(trade(201.0, AggressorSide::Sell, 4));
+    DomModel model;
+    model.clear("BTC-USD");
+    model.setGroup(10);
+    model.publish(book, trades, true);
+    ASSERT_EQ(model.group(), 10);
+    EXPECT_DOUBLE_EQ(model.tick(), 1.0);
+    const auto q = [&](qint64 key, int col) { return model.index(rowAt(model, key), col).data(DomModel::QuantityRole).toDouble(); };
+    EXPECT_DOUBLE_EQ(q(199, DomModel::Bid), 5);  // 199.5 + 199.9
+    EXPECT_DOUBLE_EQ(q(200, DomModel::Bid), 2);  // 200.0 opens row 200
+    EXPECT_DOUBLE_EQ(q(200, DomModel::Ask), 40); // 200.1 + 200.9
+    EXPECT_DOUBLE_EQ(q(201, DomModel::Ask), 16); // 201.0 opens row 201
+    EXPECT_DOUBLE_EQ(q(200, DomModel::Buys), 3); // 200.05 and 200.95
+    EXPECT_DOUBLE_EQ(q(201, DomModel::Sells), 4);
+    EXPECT_DOUBLE_EQ(q(200, DomModel::Sells), 0);
+    // Σ over grouped rows from the touch outward.
+    const auto cum = [&](qint64 key, int col) { return model.index(rowAt(model, key), col).data(DomModel::CumulativeRole).toDouble(); };
+    EXPECT_DOUBLE_EQ(cum(200, DomModel::Bid), 2);
+    EXPECT_DOUBLE_EQ(cum(199, DomModel::Bid), 7);
+    EXPECT_DOUBLE_EQ(cum(200, DomModel::Ask), 40);
+    EXPECT_DOUBLE_EQ(cum(201, DomModel::Ask), 56);
+    // The price column shows each row's lower edge at the row precision.
+    EXPECT_EQ(model.index(rowAt(model, 200), DomModel::Price).data().toString(), "200");
+    model.setGroup(25); // $2.5 rows: one decimal
+    model.publish(book, trades, true);
+    EXPECT_EQ(model.index(rowAt(model, 80), DomModel::Price).data().toString(), "200.0");
+    EXPECT_DOUBLE_EQ(q(80, DomModel::Bid), 2);
+    EXPECT_DOUBLE_EQ(q(79, DomModel::Bid), 5);
+    // Best cells keep their filled marking in whichever row holds the touch.
+    EXPECT_EQ(model.index(rowAt(model, 80), 0).data(DomModel::BestSideRole).toString(), "Bid / Ask");
+}
+
+TEST(DomGroup, PanningAnUnchangedBookKeepsTheBinsAndCostStaysNearTheView) {
+    // Prices high enough that a $10 window does not touch zero (the window top is at least row 2000).
+    LiveOrderBook book;
+    book.initialize(19000, 21000, 0.1);
+    for (int i = 1; i <= 300; ++i) apply(book, {{true, 20000 - i * 0.1, double(i)}, {false, 20000 + i * 0.1, double(i)}});
+    DomModel model;
+    DomTradeWindow trades;
+    model.setGroup(10);
+    model.publish(book, trades, true);
+    const int touch = rowAt(model, 19999);
+    model.setVisibleRows(touch - 20, touch + 20);
+    model.publish(book, trades, false);
+    std::vector<double> before;
+    for (qint64 key = 19975; key <= 20025; ++key) before.push_back(model.index(rowAt(model, key), DomModel::Bid).data(DomModel::QuantityRole).toDouble()
+                                                               + model.index(rowAt(model, key), DomModel::Ask).data(DomModel::QuantityRole).toDouble());
+    model.setVisibleRows(touch - 16, touch + 24); // scroll four rows
+    model.publish(book, trades, false);
+    for (qint64 key = 19975; key <= 20025; ++key)
+        EXPECT_DOUBLE_EQ(model.index(rowAt(model, key), DomModel::Bid).data(DomModel::QuantityRole).toDouble()
+                         + model.index(rowAt(model, key), DomModel::Ask).data(DomModel::QuantityRole).toDouble(), before[size_t(key - 19975)]) << key;
+    // $10 rows read the rows on screen plus a margin, not the 2,001-row window.
+    model.setGroup(100);
+    model.publish(book, trades, true);
+    const int c = model.centerRow();
+    model.setVisibleRows(c - 20, c + 20);
+    model.publish(book, trades, true);
+    EXPECT_LT(model.filledLast() - model.filledFirst() + 1, 200);
+    EXPECT_LE(model.filledFirst(), c - 20 - 8);
+    EXPECT_GE(model.filledLast(), c + 20 + 8);
+    EXPECT_LE(model.lastGroupLevels(), qint64(model.filledLast() - model.filledFirst() + 1) * 100);
+    EXPECT_LT(model.lastGroupLevels(), 20000);
+}
+
+TEST(DomGroup, PinnedLevelsAboveTheFilledRowsStillCountInTheSum) {
+    LiveOrderBook book;
+    book.initialize(0, 5000, 0.1);
+    apply(book, {{true, 3000, 5}, {true, 2900, 3}, {true, 2000, 7}, {false, 3000.1, 1}});
+    DomModel model;
+    DomTradeWindow trades;
+    model.setGroup(100);
+    model.publish(book, trades, true);
+    // Scroll 80 $10 rows below the touch: the filled rows no longer reach it.
+    const int row = rowAt(model, 220);
+    model.setVisibleRows(row - 10, row + 10);
+    model.publish(book, trades, false);
+    ASSERT_GT(rowAt(model, 300), -1);
+    ASSERT_LT(rowAt(model, 300), model.filledFirst());
+    EXPECT_DOUBLE_EQ(model.index(row, DomModel::Bid).data(DomModel::CumulativeRole).toDouble(), 8);
+    EXPECT_DOUBLE_EQ(model.index(rowAt(model, 200), DomModel::Bid).data(DomModel::CumulativeRole).toDouble(), 15);
+}
+
+TEST(DomGroup, FarPinnedCumulativeCostIsBoundedOnEveryBookChange) {
+    // A 1,000,001-slot band with every level resting: bids below 50,000, asks above.
+    LiveOrderBook book;
+    book.initialize(0, 100000, 0.1);
+    std::vector<BookLevelUpdate> levels;
+    for (int i = 1; i <= 499'990; ++i) levels.push_back({true, 50000 - i * 0.1, 1.0});
+    for (int i = 1; i <= 499'990; ++i) levels.push_back({false, 50000 + i * 0.1, 1.0});
+    levels.push_back({true, 50000, 1.0});
+    book.applyUpdates(levels, std::chrono::system_clock::now(), nullptr);
+    DomModel model;
+    DomTradeWindow trades;
+    model.setGroup(1000); // $100 rows
+    model.publish(book, trades, true);
+    // Pinned on $5,000: about 420,000 native levels between the filled rows and the touch.
+    const int row = rowAt(model, 50);
+    ASSERT_GE(row, 0);
+    model.setVisibleRows(row - 10, row + 10);
+    model.publish(book, trades, false);
+    ASSERT_LT(model.filledFirst(), row);
+    const auto expected = [&](int r) { // bids at or above the row's lower edge: (50000 - edge) / 0.1 + 1
+        const double edge = double(model.index(r, 0).data(DomModel::BucketRole).toLongLong()) * 100;
+        return std::round((50000 - edge) / 0.1) + 1;
+    };
+    EXPECT_DOUBLE_EQ(model.index(row, DomModel::Bid).data(DomModel::CumulativeRole).toDouble(), expected(row));
+    qint64 worst = 0;
+    QElapsedTimer cost;
+    qint64 worstNs = 0;
+    for (int i = 0; i < 20; ++i) {
+        apply(book, {{true, 49999.9 - i * 0.1, 2.0 + i}}); // a change near the touch, every publication
+        cost.start();
+        model.publish(book, trades, false);
+        worstNs = std::max(worstNs, cost.nsecsElapsed());
+        worst = std::max(worst, model.lastDepthSteps());
+    }
+    EXPECT_DOUBLE_EQ(model.index(row, DomModel::Bid).data(DomModel::CumulativeRole).toDouble(),
+                     expected(row) + 20 * 1.0 + (19 * 20) / 2.0); // the 20 changes each added 1 + i
+    EXPECT_GT(worst, 0);
+    EXPECT_LT(worst, 8000) << "edges plus one read per 64-slot block, never the 420,000 levels";
+    std::cout << "DOM_FAR_PINNED depthReads_max=" << worst << " publish_us_max=" << worstNs / 1000.0 << '\n';
+}
+
+TEST(DomGroup, CoarseLinkedRowsStayBoundedAndExact) {
+    // $250 rows on a 0.1 book (2,500 levels a row), every level resting.
+    LiveOrderBook book;
+    book.initialize(0, 100000, 0.1);
+    std::vector<BookLevelUpdate> levels;
+    for (int i = 0; i <= 499'990; ++i) levels.push_back({true, 50000 - i * 0.1, 1.0});
+    for (int i = 1; i <= 499'990; ++i) levels.push_back({false, 50000 + i * 0.1, 1.0});
+    book.applyUpdates(levels, std::chrono::system_clock::now(), nullptr);
+    DomModel model;
+    model.setGroup(2500);
+    model.publish(book, {}, true);
+    ASSERT_EQ(model.group(), 2500);
+    const int c = model.centerRow();
+    model.setVisibleRows(c - 20, c + 20);
+    QElapsedTimer cost;
+    cost.start();
+    model.publish(book, {}, true);
+    const qint64 ns = cost.nsecsElapsed();
+    // Row 199 ($49,750..$50,000): 2,500 bids; row 200 holds the bid at 50,000 and 2,499 asks.
+    const auto q = [&](qint64 key, int col) { return model.index(rowAt(model, key), col).data(DomModel::QuantityRole).toDouble(); };
+    EXPECT_DOUBLE_EQ(q(199, DomModel::Bid), 2500);
+    EXPECT_DOUBLE_EQ(q(200, DomModel::Bid), 1);
+    EXPECT_DOUBLE_EQ(q(200, DomModel::Ask), 2499);
+    EXPECT_EQ(model.index(rowAt(model, 200), DomModel::Price).data().toString(), "50000");
+    const int rows = model.filledLast() - model.filledFirst() + 1;
+    EXPECT_LE(rows, 41 + 2 * DomModel::GroupMarginRows);
+    // Per row: two partial edge blocks plus one read per 64-level block, never 2,500 levels.
+    EXPECT_LT(model.lastGroupLevels(), qint64(rows) * (2 * 64 + 2500 / 64 + 2));
+    std::cout << "DOM_COARSE_LINK rows=" << rows << " levels=" << model.lastGroupLevels() << " (direct: "
+              << qint64(rows) * 2500 << ") publish_us=" << ns / 1000.0 << '\n';
+}
+
+TEST(DomGroup, AGroupCoarserThanTheBandShowsTheWholeBookInOneRow) {
+    LiveOrderBook book;
+    book.initialize(0, 100000, 0.1);
+    apply(book, {{true, 50000, 2}, {true, 100, 3}, {false, 50000.1, 5}, {false, 99000, 7}});
+    DomModel model;
+    model.setGroup(2'000'000'000); // $200,000,000 rows on a 1,000,001-level band
+    model.publish(book, {}, true);
+    ASSERT_EQ(model.group(), 1'000'001) << "never coarser than the band: the same whole book";
+    EXPECT_FALSE(model.needsRepublish(QDateTime::currentMSecsSinceEpoch())) << "a bounded request settles";
+    const int row = rowAt(model, 0);
+    ASSERT_GE(row, 0);
+    EXPECT_DOUBLE_EQ(model.index(row, DomModel::Bid).data(DomModel::QuantityRole).toDouble(), 5);
+    EXPECT_DOUBLE_EQ(model.index(row, DomModel::Ask).data(DomModel::QuantityRole).toDouble(), 12);
+    EXPECT_EQ(model.index(row, 0).data(DomModel::BestSideRole).toString(), "Bid / Ask");
+    EXPECT_LT(model.lastGroupLevels(), 100000) << "block sums, not 1,000,001 levels a row";
+}
+
+TEST(DomGroup, RegroupsPinsAndTickChangesNeverDriftTheWindowPastTheBand) {
+    // A low-priced book (the window top is clamped up at coarse rows): alternating $100 and
+    // native rows with pinned anchors, viewport moves, a server tick change and Pulse steps.
+    PulseRig rig;
+    const auto limit = [&] {
+        const int64_t g = rig.model.group();
+        return dom::floorDiv(int64_t(rig.book.getBids().size()) - 1, g) + DomModel::Rows;
+    };
+    rig.step();
+    std::vector<qint64> fineTops;
+    for (int i = 0; i < 16; ++i) {
+        rig.model.setGroup(i % 2 ? 1000 : 1);
+        const int c = rig.model.centerRow();
+        rig.model.setVisibleRows(std::clamp(c - 40 + 13 * i, 0, DomModel::Rows - 41), std::clamp(c + 13 * i, 40, DomModel::Rows - 1));
+        if (i == 8) { // the server tick changes
+            rig.book.initialize(0, 400, 0.05);
+            apply(rig.book, {{true, 200, 10}, {true, 199.95, 4}, {false, 200.05, 10}, {false, 200.1, 4}});
+        }
+        rig.step({}, false);
+        const qint64 top = rig.model.index(0, 0).data(DomModel::BucketRole).toLongLong();
+        EXPECT_LE(top, limit()) << i;
+        EXPECT_GE(top, DomModel::Rows - 1) << i;
+        EXPECT_EQ(rig.model.lastPulseEvents(), 0u) << i; // each new grid is a fresh baseline
+        if (i % 2 == 0) fineTops.push_back(top);
+    }
+    // No growth across regroups: the last native-row top is no higher than the band allows.
+    EXPECT_LE(fineTops.back(), qint64(rig.book.getBids().size()) - 1 + DomModel::Rows);
+    rig.step({}, false); // Pulse keeps classifying on the final grid
+    EXPECT_GE(rig.model.pulseSteps(), 18);
+}
+
+TEST(DomGroup, ServerTickChangeKeepsTheMiddleVisiblePrice) {
+    LiveOrderBook book;
+    book.initialize(19000, 21000, 0.1);
+    apply(book, {{true, 20000, 1}, {false, 20000.1, 1}});
+    DomModel model;
+    model.publish(book, {}, true);
+    const int center = model.centerRow();
+    model.setVisibleRows(center + 100, center + 140); // pinned 120 ticks below the touch
+    model.publish(book, {}, false);
+    const int middle = center + 120;
+    const double before = model.index(middle, 0).data(DomModel::BucketRole).toLongLong() * model.tick();
+    book.initialize(19000, 21000, 0.05); // the server tick changes
+    apply(book, {{true, 20000, 1}, {false, 20000.05, 1}});
+    model.publish(book, {}, false);
+    ASSERT_DOUBLE_EQ(model.tick(), 0.05);
+    const double after = model.index(middle, 0).data(DomModel::BucketRole).toLongLong() * model.tick();
+    EXPECT_NEAR(after, before, 1e-6) << "the middle visible row keeps its price";
+}
+
+// Opt-in measurement: LiveOrderBook::applyUpdates cost per level change (block flagging included).
+TEST(DomGroup, DISABLED_BookUpdateCostBenchmark) {
+    LiveOrderBook book;
+    book.initialize(0, 100000, 0.1);
+    std::vector<BookLevelUpdate> updates;
+    uint32_t x = 12345;
+    for (int i = 0; i < 2'000'000; ++i) {
+        x = x * 1664525u + 1013904223u;
+        updates.push_back({(x >> 31) != 0, 40000 + (x % 200000) * 0.1, double(1 + (x >> 8) % 50)});
+    }
+    double best = 1e18;
+    for (int round = 0; round < 5; ++round) {
+        QElapsedTimer t;
+        t.start();
+        for (size_t i = 0; i < updates.size(); i += 50)
+            book.applyUpdates(std::span(updates.data() + i, 50), std::chrono::system_clock::now(), nullptr);
+        best = std::min(best, double(t.nsecsElapsed()) / updates.size());
+    }
+    std::cout << "BOOK_UPDATE_NS_PER_LEVEL best_of_5=" << best << '\n';
+}
+
+TEST(DomGroup, ChoicesAreTheHeatmapPresetsThatAreWholeMultiples) {
+    const auto list = [](const dom::GroupChoices& c) { return std::vector<int64_t>(c.list().begin(), c.list().end()); };
+    EXPECT_EQ(list(dom::groupChoices(0.1, 110000)), (std::vector<int64_t>{1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000}));
+    EXPECT_EQ(list(dom::groupChoices(0.1, 200)), (std::vector<int64_t>{1, 2, 5, 10, 20})); // 1% of the mid
+    EXPECT_EQ(list(dom::groupChoices(0.3, 1000)), (std::vector<int64_t>{1}));
+    EXPECT_EQ(list(dom::groupChoices(0.01, 4000)), (std::vector<int64_t>{1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000}));
+    const auto choices = dom::groupChoices(0.1, 110000);
+    // Heatmap ticks arrive as integer price units at the heatmap's price scale (100: cents).
+    const auto link = [&](int64_t units, double scale, double native) { return dom::linkGroup(units, scale, native, choices); };
+    EXPECT_EQ(link(100, 100, 0.1).group, 10);
+    EXPECT_TRUE(link(100, 100, 0.1).exact);
+    EXPECT_EQ(link(15, 100, 0.1).group, 2); // not a whole multiple: nearest
+    EXPECT_FALSE(link(15, 100, 0.1).exact);
+    EXPECT_EQ(link(15, 100, 0.1).fallback, dom::LinkGroup::Fallback::NotMultiple);
+    // Link follows any whole multiple exactly, beyond the menu's list and caps (owner 2026-10-25).
+    EXPECT_EQ(link(30, 100, 0.1).group, 3);
+    EXPECT_TRUE(link(30, 100, 0.1).exact);
+    EXPECT_EQ(link(25'000, 100, 0.1).group, 2500); // $250
+    EXPECT_EQ(link(20'000'000'000, 100, 0.1).group, 2'000'000'000); // $200,000,000 (the dock bounds it by the band)
+    EXPECT_TRUE(link(20'000'000'000, 100, 0.1).exact);
+    // Integer test, not a double quotient: 250000 / 0.00001 is 24999999999.999996 in binary64.
+    EXPECT_EQ(link(25'000'000'000, 1e5, 0.00001).group, 25'000'000'000);
+    EXPECT_TRUE(link(25'000'000'000, 1e5, 0.00001).exact);
+    EXPECT_EQ(link(250'000'000'000, 1e6, 0.00001).group, 25'000'000'000); // the same tick at another scale
+    // 250000.000001 next to it is a genuine non-multiple of 0.00001.
+    EXPECT_EQ(link(250'000'000'001, 1e6, 0.00001).fallback, dom::LinkGroup::Fallback::NotMultiple);
+    // Ordinary server ticks are exact decimals.
+    EXPECT_EQ(link(1, 100, 0.01).group, 1);
+    EXPECT_EQ(link(1, 100'000, 0.00001).group, 1);
+    EXPECT_EQ(link(100, 100'000'000, 1e-8).group, 100);
+    EXPECT_TRUE(link(100, 100'000'000, 1e-8).exact);
+    EXPECT_EQ(link(100, 1e9, 1e-9).group, 100); // the largest price scale
+    // Outside Link's input space: Unsupported, never exact, no overflow (checked arithmetic).
+    const auto unsupported = [&](int64_t units, double scale, double native) {
+        const auto r = link(units, scale, native);
+        return !r.exact && r.fallback == dom::LinkGroup::Fallback::Unsupported;
+    };
+    EXPECT_TRUE(unsupported(25'000, 100, 1.0000000001)); // not a decimal of at most 9 digits
+    EXPECT_TRUE(unsupported(100, 1'000'000'000'001.0, 1e-9)); // coprime scale above 1e9
+    EXPECT_TRUE(unsupported(10'000'000'000, 1e10, 0.1)); // integer scale, but above 1e9
+    EXPECT_TRUE(unsupported(100, 100.5, 0.1)); // not an integer scale
+    EXPECT_TRUE(unsupported(std::numeric_limits<int64_t>::max() / 2, 1, 0.00001)); // units overflow on the common scale
+    EXPECT_EQ(link(0, 100, 0.1).fallback, dom::LinkGroup::Fallback::NoTick);
+}
+
+TEST(DomGroup, AutoPicksTheSmallestFilledSizeOnScriptedBooks) {
+    const auto choices = dom::groupChoices(0.1, 110000);
+    std::vector<double> bids(20000), asks(20000);
+    const auto target = [&](std::ptrdiff_t bidTop, std::ptrdiff_t askTop) {
+        return dom::AutoGroupRule::target({bids, asks, 1'000'000, bidTop, askTop}, choices);
+    };
+    // Thick: every native level on both sides.
+    for (int i = 0; i < 2000; ++i) { bids[10000 - i] = 1; asks[10001 + i] = 1; }
+    EXPECT_EQ(target(10000, 10001), 1);
+    // Thin: a level every 0.5 -> $0.5 rows are the first that are 60% full.
+    std::fill(bids.begin(), bids.end(), 0); std::fill(asks.begin(), asks.end(), 0);
+    for (int i = 0; i < 2000; i += 5) { bids[10000 - i] = 1; asks[10000 + i] = 1; }
+    EXPECT_EQ(target(10000, 10000), 5);
+    // Per side: thick bids, asks every $1 -> the asks decide ($1).
+    for (int i = 0; i < 2000; ++i) bids[10000 - i] = 1;
+    std::fill(asks.begin(), asks.end(), 0);
+    for (int i = 0; i < 4000; i += 10) asks[10001 + i] = 1;
+    EXPECT_EQ(target(10000, 10001), 10);
+    // One-sided: only the present side counts.
+    EXPECT_EQ(target(10000, -1), 1);
+    // Exactly 12 of 20 rows is enough; 11 is not.
+    std::fill(bids.begin(), bids.end(), 0);
+    for (int j = 0; j < 12; ++j) bids[10000 - j] = 1;
+    EXPECT_EQ(dom::AutoGroupRule::filledRows({bids, asks, 1'000'000, 10000, -1}, true, 1), 12);
+    EXPECT_EQ(target(10000, -1), 1);
+    bids[10000 - 11] = 0;
+    EXPECT_GT(target(10000, -1), 1);
+    // Hysteresis: 13 of every 20 levels (65%). From $0.2 rows the native size needs 14 (70%).
+    std::fill(bids.begin(), bids.end(), 0);
+    for (int j = 0; j < 2000; ++j) bids[10000 - j] = j % 20 < 13 ? 1 : 0;
+    EXPECT_EQ(dom::AutoGroupRule::target({bids, asks, 1'000'000, 10000, -1}, choices, 1), 1);
+    EXPECT_EQ(dom::AutoGroupRule::target({bids, asks, 1'000'000, 10000, -1}, choices, 2), 2);
+    bids[10000 - 13] = 1;
+    EXPECT_EQ(dom::AutoGroupRule::target({bids, asks, 1'000'000, 10000, -1}, choices, 2), 1);
+    // Nothing anywhere near: the coarsest; an empty book has no target.
+    std::fill(bids.begin(), bids.end(), 0);
+    bids[100] = 1;
+    EXPECT_EQ(target(100, -1), 1000);
+    EXPECT_EQ(target(-1, -1), 0);
+}
+
+TEST(DomGroup, HoldStopsFlipFlopAndAppliesASteadyChange) {
+    dom::GroupHold hold;
+    EXPECT_EQ(hold.step(5, 0), 5); // first target at once
+    for (qint64 t = 300; t <= 10000; t += 300) EXPECT_EQ(hold.step((t / 300) % 2 ? 10 : 5, t), 5) << t;
+    EXPECT_EQ(hold.changes(), 0u);
+    EXPECT_EQ(hold.step(5, 10100), 5);
+    EXPECT_EQ(hold.step(10, 20000), 5);
+    EXPECT_EQ(hold.step(10, 20000 + dom::GroupHold::HoldMs - 1), 5);
+    EXPECT_EQ(hold.step(10, 20000 + dom::GroupHold::HoldMs), 10);
+    EXPECT_EQ(hold.changes(), 1u);
+    EXPECT_EQ(hold.step(0, 30000), 10); // no evidence keeps the size
+}
+
+TEST(DomGroup, GroupingChangeKeepsThePinnedPriceAndRebaselinesPulse) {
+    PulseRig rig;
+    rig.book.initialize(19000, 21000, 0.1); // a $1 window must not reach zero
+    // Every level from 19990 to 20010 rests, with sizes that differ level to level.
+    for (int i = 0; i < 100; ++i)
+        apply(rig.book, {{true, 20000 - i * 0.1, 1.0 + i % 3}, {false, 20000.1 + i * 0.1, 1.0 + i % 4}});
+    rig.step();
+    const int center = rig.model.centerRow();
+    rig.model.setVisibleRows(center - 40, center + 40); // pinned on the touch
+    rig.step({}, false);
+    const int middle = center;
+    const double before = rig.model.index(middle, 0).data(DomModel::BucketRole).toLongLong() * rig.model.tick();
+    // $0.2 rows: the grouped rows overlap the native prices, so a classifier fed them as
+    // if nothing changed would see different sizes at the same prices.
+    rig.model.setGroup(2);
+    ASSERT_TRUE(rig.model.needsRepublish(rig.wall + 67));
+    rig.step({}, false);
+    ASSERT_EQ(rig.model.group(), 2);
+    EXPECT_EQ(rig.model.lastPulseEvents(), 0u) << "a new grid is a fresh baseline";
+    const double after = rig.model.index(middle, 0).data(DomModel::BucketRole).toLongLong() * rig.model.tick();
+    EXPECT_LE(after, before + 1e-9);
+    EXPECT_GT(after, before - 0.2 - 1e-9); // the same price, now its row's lower edge
+    rig.model.setGroup(10);
+    rig.step({}, false);
+    EXPECT_EQ(rig.model.lastPulseEvents(), 0u);
+    const double ten = rig.model.index(middle, 0).data(DomModel::BucketRole).toLongLong() * rig.model.tick();
+    EXPECT_LE(ten, before + 1e-9);
+    EXPECT_GT(ten, before - 1.0);
+    EXPECT_EQ(rig.model.lastPulseEvents(), 0u) << "a new grid is a fresh baseline";
+    rig.step({}, false);
+    EXPECT_EQ(rig.model.lastPulseEvents(), 0u);
+    apply(rig.book, {{true, 19999.8, 9}}); // a real change on the grouped rows still classifies
+    rig.step({}, false);
+    EXPECT_EQ(rig.model.lastPulseEvents(), 1u);
+}
+
+TEST(DomGroup, HeaderSpreadIsTheNativeSpreadUnderGrouping) {
+    LiveOrderBook book;
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, 4}, {false, 200.1, 7}});
+    DomModel model;
+    model.clear("BTC-USD");
+    model.setGroup(100);
+    model.publish(book, {}, true);
+    EXPECT_TRUE(model.summary().contains("Bid 200.0 · Ask 200.1 · Bucketed spread 0.1 USD")) << model.summary().toStdString();
+    EXPECT_EQ(model.summary(true), "Spr 0.1");
+    EXPECT_TRUE(model.aggregation(true).startsWith("Rows 10 USD · tick 0.1")) << model.aggregation(true).toStdString();
+}
+
+TEST(DomGroup, GroupedPublishAndStepAllocateNothingAfterWarmUp) {
+    PulseRig rig;
+    std::array<sb::Trade, 1> received{};
+    std::vector<std::pair<uint32_t, double>> topBids, topAsks;
+    topBids.reserve(1); topAsks.reserve(1);
+    dom::GroupHold hold;
+    int64_t group = 10;
+    const auto cycle = [&](int i) {
+        const auto top = rig.book.captureDenseNonZero(topBids, topAsks, 1);
+        const auto choices = dom::groupChoices(top.tickSize, 200);
+        const dom::AutoBook view{rig.book.getBids(), rig.book.getAsks(), 0,
+            topBids.empty() ? -1 : std::ptrdiff_t(topBids.front().first), topAsks.empty() ? -1 : std::ptrdiff_t(topAsks.front().first)};
+        (void)hold.step(dom::AutoGroupRule::target(view, choices), rig.t);
+        rig.model.setGroup(i % 9 == 0 ? (group = group == 10 ? 20 : 10) : group);
+        received[0] = rig.received(200.1, 0.5, sb::Aggressor::Buy);
+        rig.step(std::span(received.data(), 1), i % 7 != 0);
+        (void)rig.model.needsRepublish(rig.wall);
+    };
+    const int c = rig.model.centerRow();
+    rig.model.setVisibleRows(c - 20, c + 20);
+    for (int i = 0; i < 60; ++i) cycle(i);
+    std::vector<std::array<BookLevelUpdate, 2>> changes;
+    for (int i = 0; i < 60; ++i) changes.push_back({BookLevelUpdate{false, 200.1, 10.0 - i % 3}, BookLevelUpdate{true, 199.9, 4.0 + i % 5}});
+    size_t news = 0, mallocs = 0;
+    for (int i = 0; i < 60; ++i) {
+        rig.book.applyUpdates(std::span(changes[i]), std::chrono::system_clock::now(), nullptr);
+        gAllocations = 0; gMallocs = 0; gCounting = true;
+        cycle(i);
+        gCounting = false;
+        news += gAllocations; mallocs += gMallocs;
+    }
+    EXPECT_EQ(news, 0u);
+    EXPECT_EQ(mallocs, 0u);
+}
+
+TEST_F(DomDock, GroupingMenuFixedPersistsAndLinkFollowsTheHeatmapTick) {
+    qint64 clock = 1000;
+    dock.setPulseClock([&] { return clock; });
+    source.update({{true, 200, 1}, {true, 199.9, 2}, {false, 200.1, 1}});
+    show();
+    auto* timer = dock.findChild<QTimer*>("domPublishTimer");
+    timer->stop();
+    const auto tick = [&](qint64 ms = 67) { flushEvents(); clock += ms; QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection); };
+    auto* button = dock.findChild<QToolButton*>("domGrouping");
+    ASSERT_NE(button, nullptr);
+    auto* menu = dock.findChild<QMenu*>("domGroupingMenu");
+    emit menu->aboutToShow();
+    QAction* dollar = nullptr;
+    for (QAction* a : menu->actions()) if (a->text() == "1") dollar = a;
+    ASSERT_NE(dollar, nullptr);
+    dollar->trigger();
+    tick();
+    EXPECT_EQ(dock.grouping(), OrderBookDock::Grouping::Fixed);
+    EXPECT_EQ(model->group(), 10);
+    EXPECT_EQ(button->text(), "Fixed ▾");
+    EXPECT_TRUE(dock.findChild<QLabel*>("domAggregation")->text().startsWith("Rows 1 USD"));
+    {
+        Source other;
+        OrderBookDock reopened{nullptr, &other};
+        EXPECT_EQ(reopened.grouping(), OrderBookDock::Grouping::Fixed);
+        EXPECT_DOUBLE_EQ(reopened.fixedGroupTick(), 1.0);
+    }
+    dock.setGrouping(OrderBookDock::Grouping::Link);
+    dock.setHeatmapTick(100, 100, true); // $1 in cents
+    tick();
+    EXPECT_EQ(model->group(), 10);
+    dock.setHeatmapTick(200, 100, true); // a locked heatmap tick applies at once
+    tick();
+    EXPECT_EQ(model->group(), 20);
+    EXPECT_EQ(button->text(), "Link ▾");
+    EXPECT_TRUE(button->toolTip().startsWith("Row size 2 (20 server ticks)")) << button->toolTip().toStdString();
+    dock.setHeatmapTick(50, 100, false); // heatmap Auto: the same hold
+    tick();
+    EXPECT_EQ(model->group(), 20);
+    tick(dom::GroupHold::HoldMs + 10);
+    EXPECT_EQ(model->group(), 5);
+    dock.setHeatmapTick(25'000, 100, true); // $250: 2,500 levels, inside the 5,001-level band: exact
+    tick();
+    EXPECT_EQ(model->group(), 2500);
+    EXPECT_TRUE(button->toolTip().contains("Linked to the heatmap tick.")) << button->toolTip().toStdString();
+    dock.setHeatmapTick(20'000'000'000, 100, true); // $200,000,000: coarser than the whole book
+    tick();
+    EXPECT_EQ(model->group(), 5001);
+    EXPECT_TRUE(button->toolTip().contains("coarser than the whole book (5001 server ticks): one row"))
+        << button->toolTip().toStdString();
+    EXPECT_FALSE(button->toolTip().contains("not a whole multiple"));
+    dock.setHeatmapTick(15, 100, true); // not a whole multiple (heatmap layer off): nearest, said in the tooltip
+    tick();
+    EXPECT_EQ(model->group(), 2);
+    EXPECT_TRUE(button->toolTip().contains("not a whole multiple")) << button->toolTip().toStdString();
+    EXPECT_TRUE(button->toolTip().contains("0.15"));
+    dock.setHeatmapTick(16, 100, true); // the same fallback size: the tooltip names the new tick
+    tick();
+    EXPECT_EQ(model->group(), 2);
+    EXPECT_TRUE(button->toolTip().contains("0.16")) << button->toolTip().toStdString();
+    dock.setGrouping(OrderBookDock::Grouping::Auto);
+    tick();
+    EXPECT_EQ(dock.grouping(), OrderBookDock::Grouping::Auto);
+    EXPECT_EQ(button->text(), "Auto ▾");
+}
+
+TEST_F(DomDock, PageScrollAndScrollbarJumpFillExposedGroupedRowsBeforePaint) {
+    source.update({{true, 200, 1}, {false, 200.1, 1}, {false, 480.5, 7}, {true, 50.3, 3}});
+    dock.setGrouping(OrderBookDock::Grouping::Fixed, 1.0); // $1 rows: about 409 rows filled
+    show();
+    auto* timer = dock.findChild<QTimer*>("domPublishTimer");
+    timer->stop();
+    QMetaObject::invokeMethod(&dock, "refreshDisplay", Qt::DirectConnection);
+    ASSERT_EQ(model->group(), 10);
+    QWheelEvent wheel(QPointF(20, 20), table->viewport()->mapToGlobal(QPoint(20, 20)),
+                      QPoint(), QPoint(0, 120), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+    QApplication::sendEvent(table->viewport(), &wheel); // the user scrolls: follow stops
+    const auto q = [&](qint64 key, int col, int role) { return model->index(rowAt(*model, key), col).data(role).toDouble(); };
+    // A scrollbar jump 280 rows up: no timer tick before the check.
+    const int far = rowAt(*model, 480);
+    ASSERT_LT(far, model->filledFirst());
+    table->verticalScrollBar()->setValue(table->rowViewportPosition(far) + table->verticalScrollBar()->value());
+    EXPECT_TRUE(model->fillsVisibleRows());
+    EXPECT_DOUBLE_EQ(q(480, DomModel::Ask, DomModel::QuantityRole), 7);
+    EXPECT_DOUBLE_EQ(q(480, DomModel::Ask, DomModel::CumulativeRole), 8);
+    // Page steps back down past the filled rows of the new view.
+    const int target = rowAt(*model, 50);
+    for (int i = 0; i < 200 && table->rowAt(table->viewport()->height() / 2) < target; ++i) {
+        table->verticalScrollBar()->triggerAction(QAbstractSlider::SliderPageStepAdd);
+        EXPECT_TRUE(model->fillsVisibleRows()) << i;
+    }
+    EXPECT_DOUBLE_EQ(q(50, DomModel::Bid, DomModel::QuantityRole), 3);
+    EXPECT_DOUBLE_EQ(q(50, DomModel::Bid, DomModel::CumulativeRole), 4);
+}
+
+TEST_F(DomDock, CheckedTogglesLookDifferentInTheDarkTheme) {
+    const QString previousStyle = qApp->styleSheet();
+    qApp->setStyleSheet(DarkTheme{}.stylesheet());
+    show();
+    for (const char* name : {"domPulse", "domLean", "domCumulative"}) {
+        auto* button = dock.findChild<QToolButton*>(name);
+        const bool was = button->isChecked(); // persisted: restore it for later tests
+        button->setChecked(false);
+        const QImage off = button->grab().toImage();
+        button->setChecked(true);
+        const QImage on = button->grab().toImage();
+        const QPoint corner(3, button->height() / 2); // background beside the text
+        EXPECT_NE(off.pixelColor(corner), on.pixelColor(corner)) << name;
+        button->setChecked(was);
+    }
+    qApp->setStyleSheet(previousStyle);
+}
+
+TEST_F(DomDock, HeadingRestylesOnlyWhenCompactModeFlips) {
+    const QString previousStyle = qApp->styleSheet();
+    qApp->setStyleSheet(DarkTheme{}.stylesheet());
+    show();
+    struct Counter : QObject {
+        int styles = 0;
+        bool eventFilter(QObject*, QEvent* e) override { styles += e->type() == QEvent::StyleChange; return false; }
+    } counter;
+    auto* pulse = dock.findChild<QToolButton*>("domPulse");
+    pulse->installEventFilter(&counter);
+    for (int width : {640, 600, 520, 450}) { dock.resize(width, 600); QCoreApplication::processEvents(); }
+    EXPECT_EQ(counter.styles, 0) << "wide resizes keep the styles";
+    dock.resize(180, 600); QCoreApplication::processEvents();
+    EXPECT_GT(counter.styles, 0);
+    EXPECT_FALSE(pulse->styleSheet().isEmpty());
+    const int compact = counter.styles;
+    for (int width : {185, 190, 182}) { dock.resize(width, 600); QCoreApplication::processEvents(); }
+    EXPECT_EQ(counter.styles, compact);
+    qApp->setStyleSheet(previousStyle);
+}
+
+TEST_F(DomDock, HeadingButtonsKeepTheirWholeTextFrom180To650) {
+    const QString previousStyle = qApp->styleSheet();
+    qApp->setStyleSheet(DarkTheme{}.stylesheet());
+    source.update({{true, 200, 1}, {false, 200.1, 1}});
+    show();
+    for (const auto& [mode, tick] : {std::pair{OrderBookDock::Grouping::Fixed, 0.1}, std::pair{OrderBookDock::Grouping::Fixed, 1.0},
+                                     std::pair{OrderBookDock::Grouping::Auto, 0.0}}) {
+        dock.setGrouping(mode, tick);
+        for (int width : {650, 400, 260, 220, 180}) {
+            dock.resize(width, 600);
+            QCoreApplication::processEvents();
+            ASSERT_TRUE(QMetaObject::invokeMethod(&dock, "refreshDisplay", Qt::DirectConnection));
+            QCoreApplication::processEvents();
+            for (const char* name : {"domGrouping", "domPulse", "domLean", "domCumulative", "domRecenter", "domSymbol"}) {
+                if (QString(name) == "domSymbol") continue; // the symbol yields its width
+                auto* button = dock.findChild<QWidget*>(name);
+                EXPECT_GE(button->width(), button->sizeHint().width()) << name << " at " << width;
+                EXPECT_LE(button->mapTo(&dock, QPoint(button->width(), 0)).x(), width) << name << " at " << width;
+            }
+            EXPECT_TRUE(dock.findChild<QToolButton*>("domGrouping")->toolTip().startsWith(
+                mode == OrderBookDock::Grouping::Auto ? "Row size" : tick == 1.0 ? "Row size 1 (10" : "Row size 0.1 (1"))
+                << dock.findChild<QToolButton*>("domGrouping")->toolTip().toStdString();
+        }
+    }
+    qApp->setStyleSheet(previousStyle);
+}
+
+TEST_F(DomPulseDock, FooterNeverCutsANumberAt180To400) {
+    source.update({{true, 199.9, 0}, {false, 200.2, 1364.2}}); // a pull and a large add
+    tick();
+    source.update({{false, 200.2, 0}});
+    tick();
+    auto* footer = dock.findChild<QLabel*>("domPulseFooter");
+    for (int width = 180; width <= 400; width += 20) {
+        dock.resize(width, 600);
+        QCoreApplication::processEvents();
+        tick();
+        const QString text = footer->text();
+        EXPECT_LE(footer->fontMetrics().horizontalAdvance(text), footer->width()) << width << " " << text.toStdString();
+        EXPECT_FALSE(text.isEmpty());
+    }
 }
 
 } // namespace

@@ -10,6 +10,7 @@
 #include <QJsonArray>
 #include <QMenu>
 #include <QTimer>
+#include <algorithm>
 
 HeatmapChartControls::HeatmapChartControls(heatmap::HeatmapSettingsModel *model, QObject *parent)
     : QObject(parent), m_model(model) {
@@ -58,7 +59,30 @@ void HeatmapChartControls::setRenderer(UnifiedGridRenderer *renderer) {
         connect(layer, &Layer::liquidityRangeChanged, this, &HeatmapChartControls::scheduleIndicator);
     }
     if (m_dock) setTelemetryDock(m_dock); // the provider reads the new renderer
+    m_appliedLadder.reset();
+    applyLadderSettings();
     syncNow();
+}
+
+void HeatmapChartControls::applyLadderSettings() {
+    if (!m_renderer) return;
+    const auto &s = m_model->settings();
+    const std::pair<bool, int> want{s.showLadder, s.ladderWidthPx};
+    if (m_appliedLadder == want) return;
+    m_appliedLadder = want;
+    m_renderer->layers()->setLadderWidthPx(s.ladderWidthPx);
+    m_renderer->layers()->setLayerEnabled("ladder", s.showLadder);
+}
+
+void HeatmapChartControls::requestLadder(bool on) {
+    if (m_renderer) m_renderer->layers()->setLayerEnabled("ladder", on); // also when the setting already says so
+    if (const auto error = m_model->apply({{"showLadder", on}}); !error.isEmpty())
+        sLog_Warning("Ladder toggle rejected: " << error);
+}
+
+void HeatmapChartControls::requestLadderWidth(int px) {
+    if (const auto error = m_model->apply({{"ladderWidthPx", px}}); !error.isEmpty())
+        sLog_Warning("Ladder width rejected: " << error);
 }
 
 void HeatmapChartControls::setToolbar(TopToolbar *toolbar) {
@@ -140,6 +164,7 @@ struct SizePreset {
 constexpr SizePreset kLabelSizes[] = {{"Small (12-15 px)", 12, 15}, {"Medium (14-18 px)", 14, 18},
                                       {"Large (16-20 px)", 16, 20}};
 const char *kCandleStyles[] = {"Candle", "Hollow", "Line"};
+constexpr int kLadderWidths[] = {60, 90, 120, 180, 240};
 } // namespace
 
 void HeatmapChartControls::buildChartMenu() {
@@ -195,6 +220,20 @@ void HeatmapChartControls::buildChartMenu() {
         a->setCheckable(true);
         a->setData(value);
         tradeGroup->addAction(a);
+    }
+    QAction *ladder = add(menu, "Order book ladder", "chartMenuLadder", [this] {
+        requestLadder(!(m_renderer && m_renderer->layers()->ladderEnabled()));
+    });
+    ladder->setCheckable(true);
+    ladder->setToolTip("Resting book size per chart row in a strip at the right edge (needs the heatmap tick grid).");
+    QMenu *ladderWidth = menu->addMenu("Ladder width");
+    ladderWidth->setObjectName("chartMenuLadderWidth");
+    auto *ladderGroup = new QActionGroup(ladderWidth);
+    for (int px : kLadderWidths) {
+        QAction *a = add(ladderWidth, QString("%1 px").arg(px), "chartMenuLadderWidthPreset", [this, px] { requestLadderWidth(px); });
+        a->setCheckable(true);
+        a->setData(px);
+        ladderGroup->addAction(a);
     }
     QAction *labels = add(menu, "Liquidity labels", "chartMenuLabels", [this] {
         requestLabels(!m_model->settings().showLabels);
@@ -268,6 +307,11 @@ void HeatmapChartControls::refreshChartMenu() {
             a->setChecked(s.tradeMinNotional == a->data().toDouble());
         } else if (name == "chartMenuLabels") {
             a->setChecked(s.showLabels);
+        } else if (name == "chartMenuLadder") {
+            a->setChecked(m_renderer && m_renderer->layers()->ladderEnabled());
+            a->setEnabled(bool(m_renderer));
+        } else if (name == "chartMenuLadderWidthPreset") {
+            a->setChecked(s.ladderWidthPx == a->data().toInt());
         }
         else if (name == "chartMenuCurrencyUsd") a->setChecked(s.labelCurrency == "usd");
         else if (name == "chartMenuCurrencyAsset") a->setChecked(s.labelCurrency == "asset");
@@ -336,6 +380,7 @@ void HeatmapChartControls::onModelChanged(bool explicitManualTick) {
         m_renderer->setHeatmapChartSettings(s, explicitManualTick);
         m_renderer->candles()->setCandleAppearance(s);
     }
+    applyLadderSettings();
     syncTelemetryVisibility();
     syncNow(); // the toolbar and dialog follow every change at once (API, dialog, toolbar)
 }
@@ -393,6 +438,13 @@ void HeatmapChartControls::syncNow() {
         }
     }
     if (m_dialog) m_dialog->setTickSelectorState(st);
+    const int64_t shown = st.enabled && st.priceScale > 0 ? std::max<int64_t>(0, st.manual ? st.manualUnits : st.drawnUnits) : 0;
+    if (shown != m_shownUnits || st.priceScale != m_shownScale || st.manual != m_shownManual) {
+        m_shownUnits = shown;
+        m_shownScale = st.priceScale;
+        m_shownManual = st.manual;
+        emit heatmapTickShown(qint64(shown), st.priceScale, st.manual);
+    }
 }
 
 void HeatmapChartControls::requestTickMode(bool manual) {

@@ -1088,6 +1088,12 @@ TEST(ChartShell, LadderStripReservesItsWidthBeforeThePriceAxis) {
     EXPECT_DOUBLE_EQ(renderer->width(), 1200 - axis->width() - gutter);
     EXPECT_DOUBLE_EQ(strip->x() + strip->width(), axis->x());
     EXPECT_DOUBLE_EQ(axis->x() + axis->width(), 1200);
+    // The width setting moves the strip and the plot edge.
+    renderer->layers()->setLadderWidthPx(200);
+    QCoreApplication::processEvents();
+    EXPECT_DOUBLE_EQ(strip->width(), 200);
+    EXPECT_DOUBLE_EQ(renderer->width(), 1200 - axis->width() - 200);
+    EXPECT_DOUBLE_EQ(strip->x() + strip->width(), axis->x());
     renderer->layers()->setLadderEnabled(false);
     QCoreApplication::processEvents();
     EXPECT_DOUBLE_EQ(renderer->width(), 1200 - axis->width()) << "off restores the width";
@@ -1189,7 +1195,7 @@ TEST_F(LadderShellGpu, BarsDrawInTheStripOnTheChartRows) {
         ASSERT_TRUE(cam.valid);
         ASSERT_DOUBLE_EQ(cam.tick, 1.0);
         ASSERT_EQ(cam.dpr, dpr);
-        const int stripLo = int(std::lround(ugr->width() * dpr)), stripHi = int(std::lround((ugr->width() + 72) * dpr));
+        const int stripLo = int(std::lround(ugr->width() * dpr)), stripHi = int(std::lround((ugr->width() + chart::LayerVisibility::kLadderWidthPx) * dpr));
         const int height = int(std::lround(ugr->height() * dpr));
         int bars = 0, outside = 0, labelsInStrip = 0, labelsInAxis = 0;
         for (int y = 0; y < height; ++y)

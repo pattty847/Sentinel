@@ -357,6 +357,7 @@ void MainWindowGPU::setupUI() {
     connect(this, &MainWindowGPU::symbolChanged, m_heatmapDock, &ChartDock::onSymbolChanged);
     if (m_orderBookDock) {
         connect(this, &MainWindowGPU::symbolChanged, m_orderBookDock, &OrderBookDock::onSymbolChanged);
+        connect(m_heatmapControls, &HeatmapChartControls::heatmapTickShown, m_orderBookDock, &OrderBookDock::setHeatmapTick);
     }
     if (m_paperTradingDock) {
         connect(this, &MainWindowGPU::symbolChanged, m_paperTradingDock, &PaperTradingDock::setSymbol, Qt::QueuedConnection);

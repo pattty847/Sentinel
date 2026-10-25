@@ -80,6 +80,8 @@ set(GRID_CORE_SOURCES
     # Axis models for QML integration
     models/DomModel.cpp
     models/DomModel.hpp
+    models/DomGrouping.cpp
+    models/DomGrouping.hpp
     models/MarketHealth.cpp
     models/MarketHealth.hpp
     models/AxisModel.hpp

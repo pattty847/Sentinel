@@ -196,6 +196,13 @@ QString DarkTheme::stylesheet() const {
         QToolButton:pressed {
             background-color: #202328;
         }
+
+        /* Order book toggles: the on state is visible (selection colours) */
+        QToolButton#domPulse:checked, QToolButton#domLean:checked, QToolButton#domCumulative:checked {
+            background-color: #2A4A6A;
+            border-color: #3A6A9A;
+            color: #FFFFFF;
+        }
         
         /* Scroll Bars */
         QScrollBar:vertical {

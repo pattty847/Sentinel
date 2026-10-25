@@ -1,4 +1,5 @@
 #include "DomModel.hpp"
+#include "DomGrouping.hpp"
 #include "SentinelLogging.hpp"
 #include <QColor>
 #include <QDateTime>
@@ -44,8 +45,9 @@ std::optional<qint64> DomModel::bucket(double price, double tick)
 {
     if (!std::isfinite(price) || !std::isfinite(tick) || price < 0 || tick <= 0) return {};
     const double key = price / tick;
-    // Reserve headroom for window arithmetic and avoid llround overflow.
-    if (!std::isfinite(key) || key > static_cast<double>(std::numeric_limits<qint64>::max() / 2)) return {};
+    // Keys stay below dom::MaxNativeKey: every group x key product of the window then fits
+    // int64 and the Pulse classifier's price keys stay in range (DomGrouping.hpp).
+    if (!std::isfinite(key) || key >= static_cast<double>(dom::MaxNativeKey)) return {};
     return std::llround(key);
 }
 
@@ -134,7 +136,8 @@ QVariant DomModel::headerData(int section, Qt::Orientation orientation, int role
     if (role == Qt::TextAlignmentRole) return int(Qt::AlignRight | Qt::AlignVCenter);
     if (role == Qt::ToolTipRole) {
         if (section >= Buys) return executionSummary();
-        if (section == Price) return QString("Price in %1; aggregation %2").arg(m_quote, priceText(m_tick, m_tick));
+        if (section == Price) return QString("Price in %1: each row's lower edge; rows of %2, server tick %3")
+            .arg(m_quote, priceText(m_tick, m_tick), priceText(m_nativeTick, m_nativeTick));
         return QString("Resting %1 size in %2%3").arg(section == Bid ? "bid" : "ask", m_base,
             m_cumulative ? QStringLiteral(", cumulative from the touch outward") : QString());
     }
@@ -226,7 +229,8 @@ void DomModel::clear(const QString& symbol)
     m_quote = parts.size() == 2 ? parts[1] : QStringLiteral("quote");
     m_ready = false;
     m_aggregationIssue.clear();
-    m_tick = m_bestBid = m_bestAsk = 0;
+    m_tick = m_nativeTick = m_bestBid = m_bestAsk = 0;
+    m_appliedRequest = m_requestedGroup;
     m_windowTrades = m_unknown = m_untimed = m_ahead = 0;
     m_coveredMs = DomTradeWindow::WindowMs;
     m_nextExpiryMs = m_lastScaleMs = 0;
@@ -279,7 +283,7 @@ double DomModel::barFraction(double value, bool bid, bool cumulativeSeries) cons
 
 bool DomModel::needsRepublish(qint64 nowMs) const
 {
-    if (m_visibleChanged) return true;
+    if (m_visibleChanged || m_requestedGroup != m_appliedRequest) return true;
     if (m_nextExpiryMs > 0 && nowMs >= m_nextExpiryMs) return true;
     // Liquidity Pulse: fading flashes repaint each tick, then their cleared rows once.
     if (m_pulseLive > 0 || m_repaintFirst <= m_repaintLast) return true;
@@ -306,6 +310,7 @@ void DomModel::withdrawScaleWork()
     m_scales.fill({});
     m_lastScaleMs = 0;
     m_visibleChanged = false;
+    m_appliedRequest = m_requestedGroup; // applies with the next ladder
     m_depthKey.reset();
     clearFlashes(false);
 }
@@ -338,33 +343,37 @@ void DomModel::accumulateDepth(const LiveOrderBook& book, qint64 origin)
 {
     // Cumulative size from the touch outward. Levels between the touch and a
     // pinned window edge count too, so the sums never depend on the scroll.
-    // That walk only reads replica entries (never keys outside the band) and is
-    // reused while book version, grid and window are unchanged.
-    const qint64 bottom = m_top - (Rows - 1);
-    const auto bestBid = bucket(m_bestBid, m_tick), bestAsk = bucket(m_bestAsk, m_tick);
-    const DepthKey key{book.stateVersion(), origin, m_top, bestBid.value_or(0), bestAsk.value_or(0), m_tick};
+    // Those sums read only replica entries (never keys outside the band) through
+    // LiveOrderBook::sumRange (cached per 64-slot block, so a far-pinned window
+    // costs its edges plus one read per block) and are reused while book version,
+    // grid and window are unchanged.
+    // Grouped keys of the filled rows' edges; the touch and the replica are native.
+    const qint64 rangeTop = m_top - m_rangeFirst, rangeBottom = m_top - m_rangeLast;
+    const int64_t g = m_group;
+    const auto bestBid = bucket(m_bestBid, m_nativeTick), bestAsk = bucket(m_bestAsk, m_nativeTick);
+    const DepthKey key{book.stateVersion(), origin, rangeTop, rangeBottom, bestBid.value_or(0), bestAsk.value_or(0),
+                       m_nativeTick, g};
     m_depthSteps = 0;
     if (!m_depthKey || !(*m_depthKey == key)) {
-        const auto sum = [&](const std::vector<double>& side, qint64 fromKey, qint64 toKey) {
+        const auto sum = [&](bool bid, qint64 fromKey, qint64 toKey) {
             const qint64 from = std::max<qint64>(fromKey - origin, 0);
-            const qint64 to = std::min<qint64>(toKey - origin, static_cast<qint64>(side.size()) - 1);
-            double total = 0;
-            for (qint64 source = from; source <= to; ++source) {
-                if (std::isfinite(side[source]) && side[source] > 0) total += side[source];
-            }
-            m_depthSteps += std::max<qint64>(0, to - from + 1);
+            const qint64 to = toKey - origin;
+            if (to < from) return 0.0;
+            size_t reads = 0;
+            const double total = book.sumRange(bid, size_t(from), size_t(to), &reads);
+            m_depthSteps += qint64(reads);
             return total;
         };
-        m_outsideBid = m_bestBid > 0 && bestBid && *bestBid > m_top ? sum(book.getBids(), m_top + 1, *bestBid) : 0;
-        m_outsideAsk = m_bestAsk > 0 && bestAsk && *bestAsk < bottom ? sum(book.getAsks(), *bestAsk, bottom - 1) : 0;
+        m_outsideBid = m_bestBid > 0 && bestBid && *bestBid >= (rangeTop + 1) * g ? sum(true, (rangeTop + 1) * g, *bestBid) : 0;
+        m_outsideAsk = m_bestAsk > 0 && bestAsk && *bestAsk < rangeBottom * g ? sum(false, *bestAsk, rangeBottom * g - 1) : 0;
         m_depthKey = key;
     }
     double bidTotal = m_outsideBid, askTotal = m_outsideAsk;
-    for (int r = 0; r < Rows; ++r) {
+    for (int r = m_rangeFirst; r <= m_rangeLast; ++r) {
         bidTotal += m_next[r].bid;
         m_next[r].cumBid = bidTotal;
-        askTotal += m_next[Rows - 1 - r].ask;
-        m_next[Rows - 1 - r].cumAsk = askTotal;
+        askTotal += m_next[m_rangeLast + m_rangeFirst - r].ask;
+        m_next[m_rangeLast + m_rangeFirst - r].cumAsk = askTotal;
     }
 }
 
@@ -381,8 +390,9 @@ void DomModel::addTrades(const DomTradeWindow& trades, const LiveOrderBook::Dens
         const size_t offset = LiveOrderBook::bucketIndex(trade.price, view.minPrice, tick);
         if (offset >= static_cast<size_t>(std::numeric_limits<qint64>::max() / 2)) continue;
         const qint64 key = origin + static_cast<qint64>(offset);
-        if (m_top - key < 0 || m_top - key >= Rows) continue;
-        auto& row = m_next[m_top - key];
+        const qint64 rowKey = dom::floorDiv(key, m_group); // the grouped row holding the trade price
+        if (m_top - rowKey < 0 || m_top - rowKey >= Rows) continue;
+        auto& row = m_next[m_top - rowKey];
         if (trade.side == AggressorSide::Buy) row.buys += trade.size;
         else row.sells += trade.size;
     }
@@ -415,7 +425,10 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
     if (trades.evictedMaxMs() > cutoff) wakeAt(trades.evictedMaxMs() + DomTradeWindow::WindowMs);
     const auto view = book.captureDenseNonZero(m_bidBuffer, m_askBuffer, 1);
     const double tick = view.tickSize;
-    const auto origin = bucket(view.minPrice, tick);
+    // The whole band's keys must be below dom::MaxNativeKey (no ladder otherwise).
+    auto origin = bucket(view.minPrice, tick);
+    const qint64 bandLevels = qint64(std::min(book.getBids().size(), book.getAsks().size()));
+    if (origin && *origin > dom::MaxNativeKey - bandLevels) origin.reset();
     m_aggregationIssue.clear();
     m_bestBid = view.bidLevels.empty() ? 0 : view.minPrice + view.bidLevels.front().first * tick;
     m_bestAsk = view.askLevels.empty() ? 0 : view.minPrice + view.askLevels.front().first * tick;
@@ -429,7 +442,7 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
             endRemoveRows();
         }
         m_bestBid = m_bestAsk = 0;
-        m_tick = tick;
+        m_tick = m_nativeTick = tick;
         withdrawScaleWork();
         m_aggregationIssue = !origin ? QStringLiteral("Aggregation unavailable for %1").arg(m_symbol)
             : QStringLiteral("Server aggregation %1 %2 is too coarse for %3").arg(priceText(tick, tick), m_quote, m_symbol);
@@ -437,43 +450,50 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
     }
     const auto center = bucket(mid, tick);
     if ((!center || mid <= 0) && !m_ready) {
-        m_tick = tick;
+        m_tick = m_nativeTick = tick;
         withdrawScaleWork();
         return;
     }
-    if (center && mid > 0) m_center = *center;
+    // A row as wide as the band already shows the whole book: never coarser (the bound
+    // every product below relies on).
+    const int64_t group = std::clamp<int64_t>(m_requestedGroup, 1, std::max<qint64>(1, bandLevels));
+    m_appliedRequest = m_requestedGroup;
+    if (center && mid > 0) m_center = dom::floorDiv(*center, group);
     const bool first = !m_ready;
-    const bool newTick = tick != m_tick;
-    const qint64 top = first || follow ? std::max<qint64>(Rows - 1, m_center + Rows / 2)
-        : newTick ? std::max<qint64>(Rows - 1, std::llround(m_top * m_tick / tick)) : m_top;
-    const bool moved = top != m_top || newTick;
-    // Flashes stay on their price: shift with the window, drop on a new grid.
-    if (first || newTick) clearFlashes(false);
+    const bool newGrid = tick != m_nativeTick || group != m_group;
+    // The window top never leaves the band by more than a window, whatever sequence of
+    // regroups, pins and tick changes came before (no drift, products bounded).
+    const qint64 topLimit = std::max<qint64>(Rows - 1, dom::floorDiv(*origin + bandLevels - 1, group) + Rows);
+    const qint64 top = std::clamp<qint64>(first || follow ? m_center + Rows / 2
+        : newGrid ? anchoredTop(tick, group) : m_top, Rows - 1, topLimit);
+    const bool moved = top != m_top || newGrid;
+    // Flashes stay on their price: shift with the window, drop on a new grid. A new
+    // grid is a new Pulse series: the next step only observes (no events across grids).
+    if (newGrid && !first) ++m_pulseSeries;
+    if (first || newGrid) clearFlashes(false);
     else if (top != m_top) shiftFlashes(top - m_top);
     if (first) {
         beginInsertRows({}, 0, Rows - 1);
         m_textValid.fill(0);
     }
     m_top = top;
-    m_tick = tick;
+    m_nativeTick = tick;
+    m_group = group;
+    m_tick = double(group) * tick;
     m_ready = true;
     m_next.fill({});
     // The datasource's replica and this publisher both belong to the GUI thread.
     // Index by integer bucket, never floating subtraction/floor at row boundaries.
-    const auto& bids = book.getBids();
-    const auto& asks = book.getAsks();
+    groupRange(group);
+    fillRows(book, *origin, group);
     const auto bestBid = bucket(m_bestBid, tick), bestAsk = bucket(m_bestAsk, tick);
-    for (int r = 0; r < Rows; ++r) {
-        const qint64 key = m_top - r;
-        const qint64 source = key - *origin;
-        auto& row = m_next[r];
-        if (source >= 0 && source < static_cast<qint64>(bids.size())) {
-            if (std::isfinite(bids[source]) && bids[source] > 0) row.bid = bids[source];
-            if (std::isfinite(asks[source]) && asks[source] > 0) row.ask = asks[source];
-        }
-        row.bestBid = m_bestBid > 0 && bestBid == key;
-        row.bestAsk = m_bestAsk > 0 && bestAsk == key;
-    }
+    const auto markBest = [&](std::optional<qint64> native, bool bid) {
+        if (!native || (bid ? m_bestBid : m_bestAsk) <= 0) return;
+        const qint64 r = m_top - dom::floorDiv(*native, group);
+        if (r >= 0 && r < Rows) (bid ? m_next[r].bestBid : m_next[r].bestAsk) = true;
+    };
+    markBest(bestBid, true);
+    markBest(bestAsk, false);
     accumulateDepth(book, *origin);
     addTrades(trades, view, *origin, nowMs);
     // Scale targets: the maxima over the rows the view shows (all rows until it reports them).
@@ -506,14 +526,90 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
     else if (lastChanged >= firstChanged) emit dataChanged(index(firstChanged, 0), index(lastChanged, Columns - 1));
 }
 
+void DomModel::setGroup(int64_t group)
+{
+    m_requestedGroup = std::clamp<int64_t>(group, 1, dom::MaxNativeKey);
+}
+
+qint64 DomModel::anchoredTop(double nativeTick, int64_t group) const
+{
+    // A new grid keeps the price at the middle of the rows on screen on its screen row.
+    const int anchor = m_firstVisible >= 0
+        ? (std::clamp(m_firstVisible, 0, Rows - 1) + std::clamp(m_lastVisible, 0, Rows - 1)) / 2 : Rows / 2;
+    const qint64 old = m_top - anchor;
+    // old <= the previous top limit, so old x m_group stays within the bound of DomGrouping.hpp;
+    // the caller clamps the result to the new top limit.
+    const double scaled = double(old) * m_tick / (double(group) * nativeTick);
+    const qint64 key = nativeTick == m_nativeTick ? dom::floorDiv(old * m_group, group)
+        : std::isfinite(scaled) && std::abs(scaled) < double(dom::MaxNativeKey) ? std::llround(scaled) : 0;
+    return key + anchor;
+}
+
+void DomModel::groupRange(int64_t group)
+{
+    // Bounded by the rows on screen plus a margin, never the whole window, once rows sum levels.
+    if (group <= 1) {
+        m_rangeFirst = 0;
+        m_rangeLast = Rows - 1;
+        return;
+    }
+    const int center = int(std::clamp<qint64>(m_top - m_center, 0, Rows - 1));
+    const int first = std::clamp(m_firstVisible >= 0 ? m_firstVisible : center - PulseMaxRows / 4, 0, Rows - 1);
+    const int last = std::clamp(m_lastVisible >= 0 ? m_lastVisible : center + PulseMaxRows / 4, first, Rows - 1);
+    const qint64 shown = last - first + 1;
+    const qint64 span = std::min<qint64>(Rows, std::max<qint64>(shown + 2 * GroupMarginRows, GroupBudgetLevels / group));
+    const int extra = int(span - shown);
+    m_rangeFirst = std::max(0, first - extra / 2);
+    m_rangeLast = std::min(Rows - 1, last + (extra - extra / 2));
+}
+
+void DomModel::fillRows(const LiveOrderBook& book, qint64 origin, int64_t group)
+{
+    // One pass over the native slots of the filled rows: slot s is level origin + s,
+    // in row m_top - floorDiv(origin + s, group).
+    const auto& bids = book.getBids();
+    const auto& asks = book.getAsks();
+    const qint64 size = static_cast<qint64>(std::min(bids.size(), asks.size()));
+    const qint64 lo = std::max<qint64>((m_top - m_rangeLast) * group - origin, 0);
+    const qint64 hi = std::min<qint64>((m_top - m_rangeFirst + 1) * group - origin, size);
+    m_groupLevels = 0;
+    if (group > qint64(2 * LiveOrderBook::SumBlockSlots)) {
+        // Coarse rows (a linked $250 tick is 2,500 levels): per-row block sums, so a row
+        // costs its two edges plus one read per block, not every level.
+        for (int r = m_rangeFirst; r <= m_rangeLast; ++r) {
+            const qint64 from = std::max<qint64>((m_top - r) * group - origin, 0);
+            const qint64 to = std::min<qint64>((m_top - r + 1) * group - origin, size) - 1;
+            if (to < from) continue;
+            size_t bidReads = 0, askReads = 0;
+            m_next[size_t(r)].bid = book.sumRange(true, size_t(from), size_t(to), &bidReads);
+            m_next[size_t(r)].ask = book.sumRange(false, size_t(from), size_t(to), &askReads);
+            m_groupLevels += qint64(std::max(bidReads, askReads));
+        }
+        return;
+    }
+    m_groupLevels = std::max<qint64>(0, hi - lo);
+    for (qint64 source = lo; source < hi; ++source) {
+        auto& row = m_next[size_t(m_top - dom::floorDiv(origin + source, group))];
+        if (std::isfinite(bids[source]) && bids[source] > 0) row.bid += bids[source];
+        if (std::isfinite(asks[source]) && asks[source] > 0) row.ask += asks[source];
+    }
+}
+
 int DomModel::centerRow() const { return m_ready ? int(std::clamp<qint64>(m_top - m_center, 0, Rows - 1)) : -1; }
 QString DomModel::aggregation(bool compact) const
 {
     if (!m_aggregationIssue.isEmpty()) return compact
         ? (m_tick > 0 ? QString("Coarse: %1 %2").arg(priceText(m_tick, m_tick), m_quote) : QString("No aggregation"))
         : m_aggregationIssue;
-    if (compact) return QString("Tick %1 %2 · %3 size").arg(m_tick > 0 ? priceText(m_tick, m_tick) : "—", m_quote, m_base);
-    return QStringLiteral("Aggregation: %1 %2 · resting size: %3").arg(m_tick > 0 ? priceText(m_tick, m_tick) : "—", m_quote, m_base);
+    const QString native = m_nativeTick > 0 ? priceText(m_nativeTick, m_nativeTick) : QStringLiteral("—");
+    if (m_group > 1 && m_nativeTick > 0) {
+        const QString rows = priceText(m_tick, m_tick);
+        if (compact) return QString("Rows %1 %2 · tick %3 · %4").arg(rows, m_quote, native, m_base);
+        return QStringLiteral("Aggregation: rows of %1 %2 (%3 server ticks of %4) · resting size: %5")
+            .arg(rows, m_quote).arg(m_group).arg(native, m_base);
+    }
+    if (compact) return QString("Tick %1 %2 · %3 size").arg(native, m_quote, m_base);
+    return QStringLiteral("Aggregation: %1 %2 · resting size: %3").arg(native, m_quote, m_base);
 }
 QString DomModel::executionSummary() const
 {
@@ -530,9 +626,10 @@ QString DomModel::executionSummary() const
 QString DomModel::summary(bool compact) const
 {
     if (!m_aggregationIssue.isEmpty()) return {};
-    const QString bid = m_bestBid > 0 ? priceText(m_bestBid, m_tick) : "—";
-    const QString ask = m_bestAsk > 0 ? priceText(m_bestAsk, m_tick) : "—";
-    const QString spread = m_bestBid > 0 && m_bestAsk > 0 ? priceText(m_bestAsk - m_bestBid, m_tick) : "—";
+    // The native top, whatever the row grouping.
+    const QString bid = m_bestBid > 0 ? priceText(m_bestBid, m_nativeTick) : "—";
+    const QString ask = m_bestAsk > 0 ? priceText(m_bestAsk, m_nativeTick) : "—";
+    const QString spread = m_bestBid > 0 && m_bestAsk > 0 ? priceText(m_bestAsk - m_bestBid, m_nativeTick) : "—";
     if (compact) return QString("Spr %1").arg(spread);
     return QStringLiteral("Bid %1 · Ask %2 · Bucketed spread %3 %4").arg(bid, ask, spread, m_quote);
 }
@@ -743,17 +840,20 @@ const QString& DomModel::pulseTag(int row, bool bid, bool eaten) const
     return text;
 }
 
-QString DomModel::pulseSummary(bool compact) const
+QString DomModel::pulseSummary(PulseText form) const
 {
     const auto& t = m_classifier.totals();
     const auto& bid = t.side[sentinel::book::sideIndex(sentinel::book::Side::Bid)];
     const auto& ask = t.side[sentinel::book::sideIndex(sentinel::book::Side::Ask)];
-    QString text = compact
-        ? QStringLiteral("Ask pull %1 eat %2 · Bid pull %3 eat %4")
-        : QStringLiteral("Asks pulled %1 eaten %2 · Bids pulled %3 eaten %4");
+    if (form == PulseText::Tiny)
+        return QStringLiteral("Ask %1/%2 · Bid %3/%4")
+            .arg(sizeText(ask.pulled), sizeText(ask.eaten), sizeText(bid.pulled), sizeText(bid.eaten));
+    QString text = form == PulseText::Full
+        ? QStringLiteral("Asks pulled %1 eaten %2 · Bids pulled %3 eaten %4")
+        : QStringLiteral("Ask pull %1 eat %2 · Bid pull %3 eat %4");
     text = text.arg(sizeText(ask.pulled), sizeText(ask.eaten), sizeText(bid.pulled), sizeText(bid.eaten));
-    if (t.largestPull && m_tick > 0)
-        text += (compact ? QStringLiteral(" · max %1 @ %2") : QStringLiteral(" · biggest pull %1 @ %2"))
+    if (t.largestPull && m_tick > 0 && form != PulseText::NoMax)
+        text += (form == PulseText::Compact ? QStringLiteral(" · max %1 @ %2") : QStringLiteral(" · biggest pull %1 @ %2"))
             .arg(sizeText(t.largestPull->size), priceText(t.largestPull->price, m_tick));
     return text;
 }

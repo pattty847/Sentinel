@@ -78,6 +78,7 @@ void clampSettings(HeatmapChartSettings &s) {
     if (s.candleWickColor != "auto" && !candleColor.match(QString::fromStdString(s.candleWickColor)).hasMatch()) s.candleWickColor = d.candleWickColor;
     s.candleBodyOpacity = finiteClamp(s.candleBodyOpacity, 0, 1, d.candleBodyOpacity);
     s.candleWickWidth = std::clamp(s.candleWickWidth, 1, 3);
+    s.ladderWidthPx = std::clamp(s.ladderWidthPx, 60, 240);
 }
 HeatmapChartSettings chartDefaults(const ClientHeatmapConfig &c) {
     HeatmapChartSettings s;
@@ -130,6 +131,8 @@ QJsonObject settingsJson(const HeatmapChartSettings &s) {
         {"candleWickColor", QString::fromStdString(s.candleWickColor)},
         {"candleBodyOpacity", s.candleBodyOpacity},
         {"candleWickWidth", s.candleWickWidth},
+        {"showLadder", s.showLadder},
+        {"ladderWidthPx", s.ladderWidthPx},
         {"tickMode", s.tickMode == TickMode::Auto ? "auto" : "manual"},
         {"bidGradient", gradientJson(s.bidGradient)}, {"askGradient", gradientJson(s.askGradient)}
     };
@@ -137,7 +140,7 @@ QJsonObject settingsJson(const HeatmapChartSettings &s) {
 QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     const auto schema = settingsJson(HeatmapChartSettings{});
     auto merged = settingsJson(s);
-    const QStringList integers{"manualTick", "crossfadeMs", "gpuCapBytes", "uploadBudgetBytes", "prefetchTiles", "liveMinIntervalMs", "candleWickWidth"};
+    const QStringList integers{"manualTick", "crossfadeMs", "gpuCapBytes", "uploadBudgetBytes", "prefetchTiles", "liveMinIntervalMs", "candleWickWidth", "ladderWidthPx"};
     for (auto it = patch.begin(); it != patch.end(); ++it) {
         const auto &key = it.key();
         const auto v = it.value();
@@ -183,6 +186,8 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     out.candleWickColor = merged["candleWickColor"].toString().toStdString();
     out.candleBodyOpacity = merged["candleBodyOpacity"].toDouble();
     out.candleWickWidth = merged["candleWickWidth"].toInt();
+    out.showLadder = merged["showLadder"].toBool();
+    out.ladderWidthPx = int(std::clamp(merged["ladderWidthPx"].toDouble(), -2147483647.0, 2147483647.0));
     out.tickMode = merged["tickMode"] == "manual" ? TickMode::Manual : TickMode::Auto;
     out.bidGradient = gradient(merged["bidGradient"]);
     out.askGradient = gradient(merged["askGradient"]);
