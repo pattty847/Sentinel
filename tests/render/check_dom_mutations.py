@@ -334,7 +334,7 @@ mutants = [
      [('const qint64 r = m_top - dom::floorDiv(*native, group);', 'const qint64 r = m_top - *native;')],
      'DomGroup.AbsoluteGridBinsVolumesCumulativeAndLabels'),
     ('group_outside_native_keys', model,
-     [('sum(book.getBids(), (rangeTop + 1) * g, *bestBid)', 'sum(book.getBids(), rangeTop + 1, *bestBid)')],
+     [('sum(true, (rangeTop + 1) * g, *bestBid)', 'sum(true, rangeTop + 1, *bestBid)')],
      'DomGroup.PinnedLevelsAboveTheFilledRowsStillCountInTheSum'),
     ('group_whole_window', model,
      [('    if (group <= 1) {', '    if (group >= 1) {')],
