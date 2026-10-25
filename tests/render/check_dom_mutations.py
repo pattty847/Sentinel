@@ -369,7 +369,7 @@ mutants = [
      [('(mid > 0 && double(group) * nativeTick > mid * MaxShareOfMid)', 'false')],
      'DomGroup.ChoicesAreTheHeatmapPresetsThatAreWholeMultiples'),
     ('group_link_capped_to_choices', grouping,
-     [('if (group > 0 && group <= MaxModelGroup) return {group, true};', 'if (group > 0 && choices.contains(group)) return {group, true};')],
+     [('nativeTick); group > 0) return {group, true, Fallback::None};', 'nativeTick); group > 0 && choices.contains(group)) return {group, true, Fallback::None};')],
      'DomGroup.ChoicesAreTheHeatmapPresetsThatAreWholeMultiples'),
     ('group_link_capped_at_a_billion', grouping_header,
      [("constexpr int64_t MaxModelGroup = 1'000'000'000'000'000;", "constexpr int64_t MaxModelGroup = 1'000'000'000;")],
