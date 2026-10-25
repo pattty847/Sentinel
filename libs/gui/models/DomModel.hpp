@@ -190,7 +190,7 @@ private:
     bool updateScales(qint64 nowMs);
     QString m_base = "base", m_quote = "quote", m_symbol = "this product";
     double m_tick = 0, m_nativeTick = 0;
-    int64_t m_group = 1, m_requestedGroup = 1;
+    int64_t m_group = 1, m_requestedGroup = 1, m_appliedRequest = 1;
     int m_rangeFirst = 0, m_rangeLast = Rows - 1;
     qint64 m_groupLevels = 0;
     qint64 m_top = 0, m_center = 0;

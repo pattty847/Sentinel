@@ -559,10 +559,12 @@ void OrderBookDock::setGrouping(Grouping mode, double fixedTick)
     updateGroupButton();
 }
 
-void OrderBookDock::setHeatmapTick(double tick, bool manual)
+void OrderBookDock::setHeatmapTick(qint64 units, double priceScale, bool manual)
 {
-    if (tick == m_linkTick && manual == m_linkManual) return;
-    m_linkTick = tick;
+    if (units == m_linkUnits && priceScale == m_linkScale && manual == m_linkManual) return;
+    m_linkUnits = units;
+    m_linkScale = priceScale;
+    m_linkTick = units > 0 && priceScale > 0 ? double(units) / priceScale : 0; // display only
     m_linkManual = manual;
     if (m_groupMode == Grouping::Link) m_dirty = true;
 }
@@ -613,7 +615,12 @@ void OrderBookDock::updateGrouping(const LiveOrderBook& book)
     if (m_groupMode == Grouping::Fixed) {
         group = m_choices.nearest(m_fixedTick > 0 ? m_fixedTick / native : 1);
     } else if (m_groupMode == Grouping::Link) {
-        const auto link = dom::linkGroup(m_linkTick, native, m_choices);
+        auto link = dom::linkGroup(m_linkUnits, m_linkScale, native, m_choices);
+        // A row as wide as the replica band already shows the whole book in one row (two
+        // when the band straddles a bin edge); a coarser tick would draw the same.
+        m_bandLevels = qint64(book.getBids().size());
+        if (link.group > m_bandLevels && m_bandLevels > 0)
+            link = {m_bandLevels, false, dom::LinkGroup::Fallback::WholeBook};
         m_linkExact = link.exact;
         m_linkFallback = link.fallback;
         if (m_linkManual) m_linkHold.reset(); // a locked heatmap tick applies at once
@@ -639,7 +646,8 @@ void OrderBookDock::updateGroupButton()
     // Text and tooltip change only with the size or mode (no per-tick string work).
     const int64_t group = m_model->requestedGroup();
     if (group == m_shownGroup && m_groupMode == m_shownMode && m_linkExact == m_shownExact &&
-        m_groupNative == m_shownNative && m_linkTick == m_shownLinkTick) return;
+        m_groupNative == m_shownNative && m_linkTick == m_shownLinkTick && m_linkFallback == m_shownFallback) return;
+    m_shownFallback = m_linkFallback;
     m_shownGroup = group;
     m_shownLinkTick = m_linkTick;
     m_shownNative = m_groupNative;
@@ -657,10 +665,9 @@ void OrderBookDock::updateGroupButton()
                    .arg(dom::AutoGroupRule::RowsPerSide).arg(dom::GroupHold::HoldMs / 1000.0);
     else if (m_groupMode == Grouping::Link)
         tip += m_linkExact ? QStringLiteral("Linked to the heatmap tick.")
-            : m_linkFallback == dom::LinkGroup::Fallback::TooCoarse
-                ? QStringLiteral("Linked: the heatmap tick %1 is more than %2 server ticks, beyond what the ladder "
-                                 "can index; the coarsest offered size is used.")
-                      .arg(QString::number(m_linkTick, 'g', 12)).arg(double(dom::MaxModelGroup), 0, 'g', 3)
+            : m_linkFallback == dom::LinkGroup::Fallback::WholeBook
+                ? QStringLiteral("Linked: the heatmap tick %1 is coarser than the whole book (%2 server ticks): one row.")
+                      .arg(QString::number(m_linkTick, 'g', 12)).arg(m_bandLevels)
             : m_linkFallback == dom::LinkGroup::Fallback::NotMultiple
                 ? QStringLiteral("Linked: the heatmap tick %1 is not a whole multiple of the server tick "
                                  "(heatmap layer off?); the nearest offered size is used.")

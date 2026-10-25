@@ -45,8 +45,9 @@ std::optional<qint64> DomModel::bucket(double price, double tick)
 {
     if (!std::isfinite(price) || !std::isfinite(tick) || price < 0 || tick <= 0) return {};
     const double key = price / tick;
-    // Reserve headroom for window arithmetic and avoid llround overflow.
-    if (!std::isfinite(key) || key > static_cast<double>(std::numeric_limits<qint64>::max() / 2)) return {};
+    // Keys stay below dom::MaxNativeKey: every group x key product of the window then fits
+    // int64 and the Pulse classifier's price keys stay in range (DomGrouping.hpp).
+    if (!std::isfinite(key) || key >= static_cast<double>(dom::MaxNativeKey)) return {};
     return std::llround(key);
 }
 
@@ -229,7 +230,7 @@ void DomModel::clear(const QString& symbol)
     m_ready = false;
     m_aggregationIssue.clear();
     m_tick = m_nativeTick = m_bestBid = m_bestAsk = 0;
-    m_group = m_requestedGroup;
+    m_appliedRequest = m_requestedGroup;
     m_windowTrades = m_unknown = m_untimed = m_ahead = 0;
     m_coveredMs = DomTradeWindow::WindowMs;
     m_nextExpiryMs = m_lastScaleMs = 0;
@@ -282,7 +283,7 @@ double DomModel::barFraction(double value, bool bid, bool cumulativeSeries) cons
 
 bool DomModel::needsRepublish(qint64 nowMs) const
 {
-    if (m_visibleChanged || m_requestedGroup != m_group) return true;
+    if (m_visibleChanged || m_requestedGroup != m_appliedRequest) return true;
     if (m_nextExpiryMs > 0 && nowMs >= m_nextExpiryMs) return true;
     // Liquidity Pulse: fading flashes repaint each tick, then their cleared rows once.
     if (m_pulseLive > 0 || m_repaintFirst <= m_repaintLast) return true;
@@ -309,7 +310,7 @@ void DomModel::withdrawScaleWork()
     m_scales.fill({});
     m_lastScaleMs = 0;
     m_visibleChanged = false;
-    m_group = m_requestedGroup; // applies with the next ladder
+    m_appliedRequest = m_requestedGroup; // applies with the next ladder
     m_depthKey.reset();
     clearFlashes(false);
 }
@@ -424,7 +425,10 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
     if (trades.evictedMaxMs() > cutoff) wakeAt(trades.evictedMaxMs() + DomTradeWindow::WindowMs);
     const auto view = book.captureDenseNonZero(m_bidBuffer, m_askBuffer, 1);
     const double tick = view.tickSize;
-    const auto origin = bucket(view.minPrice, tick);
+    // The whole band's keys must be below dom::MaxNativeKey (no ladder otherwise).
+    auto origin = bucket(view.minPrice, tick);
+    const qint64 bandLevels = qint64(std::min(book.getBids().size(), book.getAsks().size()));
+    if (origin && *origin > dom::MaxNativeKey - bandLevels) origin.reset();
     m_aggregationIssue.clear();
     m_bestBid = view.bidLevels.empty() ? 0 : view.minPrice + view.bidLevels.front().first * tick;
     m_bestAsk = view.askLevels.empty() ? 0 : view.minPrice + view.askLevels.front().first * tick;
@@ -450,12 +454,18 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
         withdrawScaleWork();
         return;
     }
-    const int64_t group = m_requestedGroup;
+    // A row as wide as the band already shows the whole book: never coarser (the bound
+    // every product below relies on).
+    const int64_t group = std::clamp<int64_t>(m_requestedGroup, 1, std::max<qint64>(1, bandLevels));
+    m_appliedRequest = m_requestedGroup;
     if (center && mid > 0) m_center = dom::floorDiv(*center, group);
     const bool first = !m_ready;
     const bool newGrid = tick != m_nativeTick || group != m_group;
-    const qint64 top = first || follow ? std::max<qint64>(Rows - 1, m_center + Rows / 2)
-        : newGrid ? anchoredTop(tick, group) : m_top;
+    // The window top never leaves the band by more than a window, whatever sequence of
+    // regroups, pins and tick changes came before (no drift, products bounded).
+    const qint64 topLimit = std::max<qint64>(Rows - 1, dom::floorDiv(*origin + bandLevels - 1, group) + Rows);
+    const qint64 top = std::clamp<qint64>(first || follow ? m_center + Rows / 2
+        : newGrid ? anchoredTop(tick, group) : m_top, Rows - 1, topLimit);
     const bool moved = top != m_top || newGrid;
     // Flashes stay on their price: shift with the window, drop on a new grid. A new
     // grid is a new Pulse series: the next step only observes (no events across grids).
@@ -518,7 +528,7 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
 
 void DomModel::setGroup(int64_t group)
 {
-    m_requestedGroup = std::clamp<int64_t>(group, 1, dom::MaxModelGroup);
+    m_requestedGroup = std::clamp<int64_t>(group, 1, dom::MaxNativeKey);
 }
 
 qint64 DomModel::anchoredTop(double nativeTick, int64_t group) const
@@ -527,9 +537,12 @@ qint64 DomModel::anchoredTop(double nativeTick, int64_t group) const
     const int anchor = m_firstVisible >= 0
         ? (std::clamp(m_firstVisible, 0, Rows - 1) + std::clamp(m_lastVisible, 0, Rows - 1)) / 2 : Rows / 2;
     const qint64 old = m_top - anchor;
+    // old <= the previous top limit, so old x m_group stays within the bound of DomGrouping.hpp;
+    // the caller clamps the result to the new top limit.
+    const double scaled = double(old) * m_tick / (double(group) * nativeTick);
     const qint64 key = nativeTick == m_nativeTick ? dom::floorDiv(old * m_group, group)
-        : std::llround(double(old) * m_tick / (double(group) * nativeTick));
-    return std::max<qint64>(Rows - 1, key + anchor);
+        : std::isfinite(scaled) && std::abs(scaled) < double(dom::MaxNativeKey) ? std::llround(scaled) : 0;
+    return key + anchor;
 }
 
 void DomModel::groupRange(int64_t group)

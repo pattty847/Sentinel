@@ -10,6 +10,7 @@
 #include <QJsonArray>
 #include <QMenu>
 #include <QTimer>
+#include <algorithm>
 
 HeatmapChartControls::HeatmapChartControls(heatmap::HeatmapSettingsModel *model, QObject *parent)
     : QObject(parent), m_model(model) {
@@ -437,12 +438,12 @@ void HeatmapChartControls::syncNow() {
         }
     }
     if (m_dialog) m_dialog->setTickSelectorState(st);
-    const int64_t shown = st.manual ? st.manualUnits : st.drawnUnits;
-    const double tick = st.enabled && shown > 0 && st.priceScale > 0 ? double(shown) / st.priceScale : 0;
-    if (tick != m_shownTick || st.manual != m_shownManual) {
-        m_shownTick = tick;
+    const int64_t shown = st.enabled && st.priceScale > 0 ? std::max<int64_t>(0, st.manual ? st.manualUnits : st.drawnUnits) : 0;
+    if (shown != m_shownUnits || st.priceScale != m_shownScale || st.manual != m_shownManual) {
+        m_shownUnits = shown;
+        m_shownScale = st.priceScale;
         m_shownManual = st.manual;
-        emit heatmapTickShown(tick, st.manual);
+        emit heatmapTickShown(qint64(shown), st.priceScale, st.manual);
     }
 }
 

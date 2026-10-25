@@ -85,7 +85,7 @@ public:
     const dom::GroupChoices& groupChoices() const { return m_choices; }
     uint64_t autoGroupChanges() const { return m_autoHold.changes(); }
     // Heatmap tick shown now (Manual: the locked preset; Auto: the drawn tick), in quote units.
-    void setHeatmapTick(double tick, bool manual);
+    void setHeatmapTick(qint64 units, double priceScale, bool manual);
 
 protected:
     void showEvent(QShowEvent* event) override;
@@ -162,9 +162,10 @@ private:
     QToolButton* m_grouping = nullptr;
     QMenu* m_groupMenu = nullptr;
     Grouping m_groupMode = Grouping::Auto;
-    double m_fixedTick = 0, m_linkTick = 0, m_groupNative = 0, m_shownNative = -1, m_shownLinkTick = -1;
+    double m_fixedTick = 0, m_linkTick = 0, m_linkScale = 0, m_groupNative = 0, m_shownNative = -1, m_shownLinkTick = -1;
+    qint64 m_linkUnits = 0, m_bandLevels = 0;
     bool m_linkManual = false, m_linkExact = true;
-    dom::LinkGroup::Fallback m_linkFallback = dom::LinkGroup::Fallback::None;
+    dom::LinkGroup::Fallback m_linkFallback = dom::LinkGroup::Fallback::None, m_shownFallback = dom::LinkGroup::Fallback::None;
     dom::GroupChoices m_choices;
     dom::GroupHold m_autoHold, m_linkHold;
     int64_t m_shownGroup = 0;

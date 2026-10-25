@@ -2,6 +2,8 @@
 #include "heatmap/HeatmapResolution.hpp"
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <numeric>
 
 namespace dom {
 bool GroupChoices::contains(int64_t group) const
@@ -29,7 +31,7 @@ int64_t wholeMultiple(double x, double unit)
 {
     if (!std::isfinite(x) || !std::isfinite(unit) || !(unit > 0) || !(x > 0)) return 0;
     const double ratio = x / unit;
-    if (ratio > double(MaxModelGroup)) return 0;
+    if (ratio > 1e15) return 0;
     const int64_t m = std::llround(ratio);
     return std::abs(ratio - double(m)) < 1e-6 ? m : 0;
 }
@@ -54,16 +56,41 @@ GroupChoices groupChoices(double nativeTick, double mid)
     return out;
 }
 
-LinkGroup linkGroup(double heatmapTick, double nativeTick, const GroupChoices& choices)
+bool nativeDecimal(double nativeTick, int64_t& units, int64_t& scale)
+{
+    if (!std::isfinite(nativeTick) || !(nativeTick > 0)) return false;
+    scale = 1;
+    for (int digits = 0; digits <= 15; ++digits, scale *= 10) {
+        const double v = nativeTick * double(scale);
+        if (v >= 0x1p53) return false;
+        const double r = std::round(v);
+        if (r >= 1 && std::abs(v - r) <= 1e-9 * r) {
+            units = int64_t(r);
+            return true;
+        }
+    }
+    return false;
+}
+
+LinkGroup linkGroup(int64_t heatmapUnits, double priceScale, double nativeTick, const GroupChoices& choices)
 {
     using Fallback = LinkGroup::Fallback;
-    if (!std::isfinite(heatmapTick) || !(heatmapTick > 0) || !std::isfinite(nativeTick) || !(nativeTick > 0))
+    int64_t nativeUnits = 0, nativeScale = 0;
+    const double roundedScale = std::round(priceScale);
+    if (heatmapUnits <= 0 || !std::isfinite(priceScale) || !(roundedScale >= 1) || roundedScale >= 0x1p53 ||
+        std::abs(priceScale - roundedScale) > 1e-9 * roundedScale || !nativeDecimal(nativeTick, nativeUnits, nativeScale))
         return {choices.nearest(1), false, Fallback::NoTick};
-    const double ratio = heatmapTick / nativeTick;
-    if (!(ratio <= double(MaxModelGroup)))
-        return {choices.groups[size_t(std::max(0, choices.count - 1))], false, Fallback::TooCoarse};
-    if (const int64_t group = wholeMultiple(heatmapTick, nativeTick); group > 0) return {group, true, Fallback::None};
-    return {choices.nearest(ratio), false, Fallback::NotMultiple};
+    // Both ticks on one integer scale: lcm(heatmap scale, 10^digits of the native tick).
+    const int64_t heatmapScale = int64_t(roundedScale);
+    const int64_t common = std::lcm(heatmapScale, nativeScale);
+    int64_t h = 0, n = 0;
+    if (common / heatmapScale > std::numeric_limits<int64_t>::max() / heatmapUnits ||
+        common / nativeScale > std::numeric_limits<int64_t>::max() / nativeUnits)
+        return {std::numeric_limits<int64_t>::max(), false, Fallback::WholeBook};
+    h = heatmapUnits * (common / heatmapScale);
+    n = nativeUnits * (common / nativeScale);
+    if (h % n == 0) return {h / n, true, Fallback::None};
+    return {choices.nearest(double(h) / double(n)), false, Fallback::NotMultiple};
 }
 
 int AutoGroupRule::filledRows(const AutoBook& book, bool bid, int64_t group)

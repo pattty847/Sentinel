@@ -75,9 +75,10 @@ public:
     void syncNow();
 
 signals:
-    // The tick the selector shows (Manual: the locked preset; Auto: the drawn tick) in
-    // quote units, 0 without a chart; emitted when it changes (the DOM's Link grouping).
-    void heatmapTickShown(double tick, bool manual);
+    // The tick the selector shows (Manual: the locked preset; Auto: the drawn tick) as
+    // integer price units at priceScale, 0 without a chart; emitted when it changes (the
+    // DOM's Link grouping tests whole multiples on these integers).
+    void heatmapTickShown(qint64 units, double priceScale, bool manual);
 
 private:
     void onModelChanged(bool explicitManualTick);
@@ -99,7 +100,8 @@ private:
     QTimer *m_syncTimer = nullptr;      // 0 ms: coalesces bursts of tick/preset signals
     QTimer *m_indicatorTimer = nullptr; // kIndicatorMs: view/data-driven refresh, throttled
     MenuHooks m_hooks;
-    double m_shownTick = -1;
+    qint64 m_shownUnits = -1;
+    double m_shownScale = 0;
     bool m_shownManual = false;
     std::optional<std::pair<bool, int>> m_appliedLadder; // showLadder, ladderWidthPx last applied to the layers
 };

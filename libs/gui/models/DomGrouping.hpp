@@ -12,13 +12,17 @@ namespace dom {
 // Coarsest row Auto and the fixed menu offer, in native levels (BTC 0.1 -> $100): a short
 // menu and a bounded Auto search (20 rows x group levels per candidate). Link has no cap.
 constexpr int64_t MaxGroup = 1000;
-// The coarsest row the model accepts, set by overflow, not by taste: DomModel multiplies
-// the group by row keys of at most 4,096 (a window top of at least DomModel::Rows - 1, plus
-// the window) and by native slot indices, and wholeMultiple must resolve the ratio exactly
-// in a double (below 2^53). Link follows any whole multiple up to this.
-constexpr int64_t MaxModelGroup = 1'000'000'000'000'000;
-static_assert(MaxModelGroup < std::numeric_limits<int64_t>::max() / 4096, "group x row key overflows int64");
-static_assert(double(MaxModelGroup) < 0x1p53, "group not exact in a double");
+// Integer bounds of the ladder (DomModel). A native level key (book origin + slot) is below
+// MaxNativeKey or the book has no ladder; a group is at most the replica band's level count
+// (a coarser row would show the same whole book), so group <= MaxNativeKey too; the window
+// top is clamped to keyOf(band top) + WindowRows. Every product DomModel forms, group x
+// grouped key, is then at most MaxNativeKey + group x (WindowRows + 2), and the Pulse
+// classifier's price keys (grouped keys) stay below its 2^50 limit.
+constexpr int64_t MaxNativeKey = int64_t(1) << 49;
+constexpr int64_t WindowRows = 2001; // DomModel::Rows
+static_assert(MaxNativeKey + MaxNativeKey * (WindowRows + 2) < std::numeric_limits<int64_t>::max() / 2,
+              "group x grouped key overflows int64");
+static_assert(MaxNativeKey + WindowRows < (int64_t(1) << 50), "Pulse price keys out of range");
 // A row coarser than this share of the mid is the DOM's too-coarse state (DomModel).
 constexpr double MaxShareOfMid = 0.01;
 
@@ -41,19 +45,26 @@ struct GroupChoices {
 // MaxGroup levels and, with a known mid, at most MaxShareOfMid of it.
 GroupChoices groupChoices(double nativeTick, double mid);
 
-// The integer m with x == m * unit within 1e-6 units; 0 if there is none.
+// The integer m with x == m * unit within 1e-6 units; 0 if there is none (small ratios:
+// the preset list and the native tick's decimal digits, never the Link test).
 int64_t wholeMultiple(double x, double unit);
+// The native tick as an exact decimal: units / 10^digits (digits <= 15); false if it is not one.
+bool nativeDecimal(double nativeTick, int64_t& units, int64_t& scale);
 
 struct LinkGroup {
-    enum class Fallback { None, NoTick, NotMultiple, TooCoarse };
+    // WholeBook: the tick is coarser than the replica band (set by the dock: one row shows
+    // the whole book) or too coarse to express in int64 price units.
+    enum class Fallback { None, NoTick, NotMultiple, WholeBook };
     int64_t group = 1;
-    bool exact = false; // false: the nearest offered size is used, for `fallback`
+    bool exact = false; // false: not the heatmap tick's own size, for `fallback`
     Fallback fallback = Fallback::NoTick;
 };
-// The heatmap's tick as a group: any whole multiple of the native tick is followed
-// exactly (owner, 2026-10-25: no MaxGroup or share-of-mid cap). Only a tick that is not
-// a whole multiple (heatmap layer off, INV-178) falls back to the nearest choice.
-LinkGroup linkGroup(double heatmapTick, double nativeTick, const GroupChoices& choices);
+// The heatmap's tick (heatmapUnits / priceScale, the heatmap's integer price units) as a
+// group. The whole-multiple test is exact integer arithmetic on a common power-of-ten
+// scale, never a double quotient: any whole multiple is followed (owner, 2026-10-25: no
+// MaxGroup or share-of-mid cap); a non-multiple (heatmap layer off, INV-178) falls back to
+// the nearest choice; a tick beyond int64 units returns INT64_MAX with WholeBook.
+LinkGroup linkGroup(int64_t heatmapUnits, double priceScale, double nativeTick, const GroupChoices& choices);
 
 // Dense replica view: native slot i is level base + i; tops are slot indices, -1 if absent.
 struct AutoBook {
