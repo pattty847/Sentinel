@@ -48,13 +48,19 @@ GroupChoices groupChoices(double nativeTick, double mid);
 // The integer m with x == m * unit within 1e-6 units; 0 if there is none (small ratios:
 // the preset list and the native tick's decimal digits, never the Link test).
 int64_t wholeMultiple(double x, double unit);
-// The native tick as an exact decimal: units / 10^digits (digits <= 15); false if it is not one.
+// Link's input space: a native tick that is an exact decimal with at most MaxNativeDigits
+// fractional digits (relative round-trip 1e-12) and a heatmap price scale that is an
+// integer in [1, MaxPriceScale]. The common scale is then at most 1e18 (fits int64).
+constexpr int MaxNativeDigits = 9;
+constexpr int64_t MaxPriceScale = 1'000'000'000;
+// The native tick as units / 10^digits at the smallest digits; false outside the space.
 bool nativeDecimal(double nativeTick, int64_t& units, int64_t& scale);
 
 struct LinkGroup {
     // WholeBook: the tick is coarser than the replica band (set by the dock: one row shows
-    // the whole book) or too coarse to express in int64 price units.
-    enum class Fallback { None, NoTick, NotMultiple, WholeBook };
+    // the whole book). Unsupported: the native tick or the price scale is outside Link's
+    // input space, or the integer conversion would overflow.
+    enum class Fallback { None, NoTick, NotMultiple, WholeBook, Unsupported };
     int64_t group = 1;
     bool exact = false; // false: not the heatmap tick's own size, for `fallback`
     Fallback fallback = Fallback::NoTick;
@@ -63,7 +69,7 @@ struct LinkGroup {
 // group. The whole-multiple test is exact integer arithmetic on a common power-of-ten
 // scale, never a double quotient: any whole multiple is followed (owner, 2026-10-25: no
 // MaxGroup or share-of-mid cap); a non-multiple (heatmap layer off, INV-178) falls back to
-// the nearest choice; a tick beyond int64 units returns INT64_MAX with WholeBook.
+// the nearest choice; inputs outside the space fall back with Unsupported.
 LinkGroup linkGroup(int64_t heatmapUnits, double priceScale, double nativeTick, const GroupChoices& choices);
 
 // Dense replica view: native slot i is level base + i; tops are slot indices, -1 if absent.

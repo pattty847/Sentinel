@@ -2151,8 +2151,22 @@ TEST(DomGroup, ChoicesAreTheHeatmapPresetsThatAreWholeMultiples) {
     EXPECT_EQ(link(250'000'000'000, 1e6, 0.00001).group, 25'000'000'000); // the same tick at another scale
     // 250000.000001 next to it is a genuine non-multiple of 0.00001.
     EXPECT_EQ(link(250'000'000'001, 1e6, 0.00001).fallback, dom::LinkGroup::Fallback::NotMultiple);
-    // Beyond int64 price units: the whole book (the dock clamps to the band).
-    EXPECT_EQ(link(std::numeric_limits<int64_t>::max() / 2, 1, 0.00001).fallback, dom::LinkGroup::Fallback::WholeBook);
+    // Ordinary server ticks are exact decimals.
+    EXPECT_EQ(link(1, 100, 0.01).group, 1);
+    EXPECT_EQ(link(1, 100'000, 0.00001).group, 1);
+    EXPECT_EQ(link(100, 100'000'000, 1e-8).group, 100);
+    EXPECT_TRUE(link(100, 100'000'000, 1e-8).exact);
+    EXPECT_EQ(link(100, 1e9, 1e-9).group, 100); // the largest price scale
+    // Outside Link's input space: Unsupported, never exact, no overflow (checked arithmetic).
+    const auto unsupported = [&](int64_t units, double scale, double native) {
+        const auto r = link(units, scale, native);
+        return !r.exact && r.fallback == dom::LinkGroup::Fallback::Unsupported;
+    };
+    EXPECT_TRUE(unsupported(25'000, 100, 1.0000000001)); // not a decimal of at most 9 digits
+    EXPECT_TRUE(unsupported(100, 1'000'000'000'001.0, 1e-9)); // coprime scale above 1e9
+    EXPECT_TRUE(unsupported(10'000'000'000, 1e10, 0.1)); // integer scale, but above 1e9
+    EXPECT_TRUE(unsupported(100, 100.5, 0.1)); // not an integer scale
+    EXPECT_TRUE(unsupported(std::numeric_limits<int64_t>::max() / 2, 1, 0.00001)); // units overflow on the common scale
     EXPECT_EQ(link(0, 100, 0.1).fallback, dom::LinkGroup::Fallback::NoTick);
 }
 

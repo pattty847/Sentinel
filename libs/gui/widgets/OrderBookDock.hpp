@@ -162,7 +162,7 @@ private:
     QToolButton* m_grouping = nullptr;
     QMenu* m_groupMenu = nullptr;
     Grouping m_groupMode = Grouping::Auto;
-    double m_fixedTick = 0, m_linkTick = 0, m_linkScale = 0, m_groupNative = 0, m_shownNative = -1, m_shownLinkTick = -1;
+    double m_fixedTick = 0, m_linkTick = 0, m_linkScale = 0, m_groupNative = 0, m_shownNative = -1, m_shownLinkTick = -1, m_shownLinkScale = -1;
     qint64 m_linkUnits = 0, m_bandLevels = 0;
     bool m_linkManual = false, m_linkExact = true;
     dom::LinkGroup::Fallback m_linkFallback = dom::LinkGroup::Fallback::None, m_shownFallback = dom::LinkGroup::Fallback::None;

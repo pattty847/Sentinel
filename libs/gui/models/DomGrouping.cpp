@@ -58,13 +58,13 @@ GroupChoices groupChoices(double nativeTick, double mid)
 
 bool nativeDecimal(double nativeTick, int64_t& units, int64_t& scale)
 {
-    if (!std::isfinite(nativeTick) || !(nativeTick > 0)) return false;
+    // The smallest d <= MaxNativeDigits whose units / 10^d round-trips to the tick within a
+    // relative 1e-12: 0.1, 0.01, 0.00001 and 1e-8 qualify; 1.0000000001 does not.
+    if (!std::isfinite(nativeTick) || !(nativeTick > 0) || nativeTick >= 1e15) return false;
     scale = 1;
-    for (int digits = 0; digits <= 15; ++digits, scale *= 10) {
-        const double v = nativeTick * double(scale);
-        if (v >= 0x1p53) return false;
-        const double r = std::round(v);
-        if (r >= 1 && std::abs(v - r) <= 1e-9 * r) {
+    for (int digits = 0; digits <= MaxNativeDigits; ++digits, scale *= 10) {
+        const double r = std::round(nativeTick * double(scale));
+        if (r >= 1 && std::abs(r / double(scale) - nativeTick) <= 1e-12 * std::max(1.0, nativeTick)) {
             units = int64_t(r);
             return true;
         }
@@ -75,20 +75,22 @@ bool nativeDecimal(double nativeTick, int64_t& units, int64_t& scale)
 LinkGroup linkGroup(int64_t heatmapUnits, double priceScale, double nativeTick, const GroupChoices& choices)
 {
     using Fallback = LinkGroup::Fallback;
+    if (heatmapUnits <= 0) return {choices.nearest(1), false, Fallback::NoTick};
+    // Inputs are validated before any arithmetic; anything outside this space is Unsupported.
     int64_t nativeUnits = 0, nativeScale = 0;
-    const double roundedScale = std::round(priceScale);
-    if (heatmapUnits <= 0 || !std::isfinite(priceScale) || !(roundedScale >= 1) || roundedScale >= 0x1p53 ||
-        std::abs(priceScale - roundedScale) > 1e-9 * roundedScale || !nativeDecimal(nativeTick, nativeUnits, nativeScale))
-        return {choices.nearest(1), false, Fallback::NoTick};
-    // Both ticks on one integer scale: lcm(heatmap scale, 10^digits of the native tick).
-    const int64_t heatmapScale = int64_t(roundedScale);
-    const int64_t common = std::lcm(heatmapScale, nativeScale);
-    int64_t h = 0, n = 0;
-    if (common / heatmapScale > std::numeric_limits<int64_t>::max() / heatmapUnits ||
-        common / nativeScale > std::numeric_limits<int64_t>::max() / nativeUnits)
-        return {std::numeric_limits<int64_t>::max(), false, Fallback::WholeBook};
-    h = heatmapUnits * (common / heatmapScale);
-    n = nativeUnits * (common / nativeScale);
+    const bool scaleOk = std::isfinite(priceScale) && priceScale >= 1 && priceScale <= double(MaxPriceScale) &&
+        priceScale == std::floor(priceScale);
+    if (!scaleOk || !nativeDecimal(nativeTick, nativeUnits, nativeScale))
+        return {choices.nearest(1), false, Fallback::Unsupported};
+    // One integer scale for both ticks: lcm through the gcd with checked multiplication,
+    // then both ticks converted with checked multiplication (overflow: Unsupported).
+    const int64_t heatmapScale = int64_t(priceScale);
+    const int64_t gcd = std::gcd(heatmapScale, nativeScale);
+    int64_t common = 0, h = 0, n = 0;
+    if (__builtin_mul_overflow(heatmapScale / gcd, nativeScale, &common) ||
+        __builtin_mul_overflow(heatmapUnits, common / heatmapScale, &h) ||
+        __builtin_mul_overflow(nativeUnits, common / nativeScale, &n))
+        return {choices.nearest(1), false, Fallback::Unsupported};
     if (h % n == 0) return {h / n, true, Fallback::None};
     return {choices.nearest(double(h) / double(n)), false, Fallback::NotMultiple};
 }

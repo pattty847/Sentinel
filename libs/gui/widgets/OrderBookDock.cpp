@@ -646,7 +646,9 @@ void OrderBookDock::updateGroupButton()
     // Text and tooltip change only with the size or mode (no per-tick string work).
     const int64_t group = m_model->requestedGroup();
     if (group == m_shownGroup && m_groupMode == m_shownMode && m_linkExact == m_shownExact &&
-        m_groupNative == m_shownNative && m_linkTick == m_shownLinkTick && m_linkFallback == m_shownFallback) return;
+        m_groupNative == m_shownNative && m_linkTick == m_shownLinkTick && m_linkScale == m_shownLinkScale &&
+        m_linkFallback == m_shownFallback) return;
+    m_shownLinkScale = m_linkScale;
     m_shownFallback = m_linkFallback;
     m_shownGroup = group;
     m_shownLinkTick = m_linkTick;
@@ -668,6 +670,13 @@ void OrderBookDock::updateGroupButton()
             : m_linkFallback == dom::LinkGroup::Fallback::WholeBook
                 ? QStringLiteral("Linked: the heatmap tick %1 is coarser than the whole book (%2 server ticks): one row.")
                       .arg(QString::number(m_linkTick, 'g', 12)).arg(m_bandLevels)
+            : m_linkFallback == dom::LinkGroup::Fallback::Unsupported
+                ? QStringLiteral("Linked: the heatmap tick %1 (price scale %2) and the server tick %3 cannot be "
+                                 "compared exactly (a server tick with more than %4 decimals or a price scale "
+                                 "above %5); the nearest offered size is used.")
+                      .arg(QString::number(m_linkTick, 'g', 12), QString::number(m_linkScale, 'g', 15),
+                           QString::number(m_groupNative, 'g', 15)).arg(dom::MaxNativeDigits)
+                      .arg(double(dom::MaxPriceScale), 0, 'g', 3)
             : m_linkFallback == dom::LinkGroup::Fallback::NotMultiple
                 ? QStringLiteral("Linked: the heatmap tick %1 is not a whole multiple of the server tick "
                                  "(heatmap layer off?); the nearest offered size is used.")
