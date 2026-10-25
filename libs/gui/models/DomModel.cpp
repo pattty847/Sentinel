@@ -456,7 +456,9 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
     const qint64 top = first || follow ? std::max<qint64>(Rows - 1, m_center + Rows / 2)
         : newGrid ? anchoredTop(tick, group) : m_top;
     const bool moved = top != m_top || newGrid;
-    // Flashes stay on their price: shift with the window, drop on a new grid.
+    // Flashes stay on their price: shift with the window, drop on a new grid. A new
+    // grid is a new Pulse series: the next step only observes (no events across grids).
+    if (newGrid && !first) ++m_pulseSeries;
     if (first || newGrid) clearFlashes(false);
     else if (top != m_top) shiftFlashes(top - m_top);
     if (first) {
