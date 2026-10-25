@@ -2037,8 +2037,9 @@ TEST(DomGroup, HoldStopsFlipFlopAndAppliesASteadyChange) {
 TEST(DomGroup, GroupingChangeKeepsThePinnedPriceAndRebaselinesPulse) {
     PulseRig rig;
     rig.book.initialize(19000, 21000, 0.1); // a $1 window must not reach zero
-    apply(rig.book, {{true, 20000, 10}, {true, 19999.9, 4}, {true, 19999.8, 4}, {true, 19999.7, 4},
-                     {false, 20000.1, 10}, {false, 20000.2, 4}, {false, 20000.3, 4}, {false, 20000.4, 4}});
+    // Every level from 19990 to 20010 rests, with sizes that differ level to level.
+    for (int i = 0; i < 100; ++i)
+        apply(rig.book, {{true, 20000 - i * 0.1, 1.0 + i % 3}, {false, 20000.1 + i * 0.1, 1.0 + i % 4}});
     rig.step();
     const int center = rig.model.centerRow();
     rig.model.setVisibleRows(center - 40, center + 40); // pinned on the touch
@@ -2051,6 +2052,7 @@ TEST(DomGroup, GroupingChangeKeepsThePinnedPriceAndRebaselinesPulse) {
     ASSERT_TRUE(rig.model.needsRepublish(rig.wall + 67));
     rig.step({}, false);
     ASSERT_EQ(rig.model.group(), 2);
+    EXPECT_EQ(rig.model.lastPulseEvents(), 0u) << "a new grid is a fresh baseline";
     const double after = rig.model.index(middle, 0).data(DomModel::BucketRole).toLongLong() * rig.model.tick();
     EXPECT_LE(after, before + 1e-9);
     EXPECT_GT(after, before - 0.2 - 1e-9); // the same price, now its row's lower edge
