@@ -72,6 +72,17 @@ bool nativeDecimal(double nativeTick, int64_t& units, int64_t& scale)
     return false;
 }
 
+namespace {
+// Portable checked multiply of positive operands (MSVC has no __builtin_mul_overflow):
+// true on overflow, else out = a * b.
+bool mulOverflows(int64_t a, int64_t b, int64_t& out)
+{
+    if (a > 0 && b > std::numeric_limits<int64_t>::max() / a) return true;
+    out = a * b;
+    return false;
+}
+} // namespace
+
 LinkGroup linkGroup(int64_t heatmapUnits, double priceScale, double nativeTick, const GroupChoices& choices)
 {
     using Fallback = LinkGroup::Fallback;
@@ -87,9 +98,9 @@ LinkGroup linkGroup(int64_t heatmapUnits, double priceScale, double nativeTick, 
     const int64_t heatmapScale = int64_t(priceScale);
     const int64_t gcd = std::gcd(heatmapScale, nativeScale);
     int64_t common = 0, h = 0, n = 0;
-    if (__builtin_mul_overflow(heatmapScale / gcd, nativeScale, &common) ||
-        __builtin_mul_overflow(heatmapUnits, common / heatmapScale, &h) ||
-        __builtin_mul_overflow(nativeUnits, common / nativeScale, &n))
+    if (mulOverflows(heatmapScale / gcd, nativeScale, common) ||
+        mulOverflows(heatmapUnits, common / heatmapScale, h) ||
+        mulOverflows(nativeUnits, common / nativeScale, n))
         return {choices.nearest(1), false, Fallback::Unsupported};
     if (h % n == 0) return {h / n, true, Fallback::None};
     return {choices.nearest(double(h) / double(n)), false, Fallback::NotMultiple};

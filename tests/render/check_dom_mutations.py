@@ -385,7 +385,7 @@ mutants = [
      [('priceScale <= double(MaxPriceScale)', 'true')],
      'DomGroup.ChoicesAreTheHeatmapPresetsThatAreWholeMultiples'),
     ('group_units_unchecked', grouping,
-     [('__builtin_mul_overflow(heatmapUnits, common / heatmapScale, &h)', '(h = int64_t(uint64_t(heatmapUnits) * uint64_t(common / heatmapScale)), false)')],
+     [('mulOverflows(heatmapUnits, common / heatmapScale, h)', '(h = int64_t(uint64_t(heatmapUnits) * uint64_t(common / heatmapScale)), false)')],
      'DomGroup.ChoicesAreTheHeatmapPresetsThatAreWholeMultiples'),
     ('group_top_unclamped', model,
      [('Rows - 1, topLimit);', 'Rows - 1, std::numeric_limits<qint64>::max());')],
