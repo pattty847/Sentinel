@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -26,7 +27,12 @@ public:
     const auto& bands() const { return m_bands; }
     const auto& bidDepth() const { return m_bidDepth; }
     const auto& askDepth() const { return m_askDepth; }
-    bool disagreement() const { return m_bands[0].imbalance * m_bands[3].imbalance < 0; }
+    // Near and far lean opposite ways, each by at least DisagreeMin (a band that rounds to 0% never disagrees).
+    static constexpr double DisagreeMin = 0.005;
+    bool disagreement() const {
+        return m_bands[0].imbalance * m_bands[3].imbalance < 0 && std::abs(m_bands[0].imbalance) >= DisagreeMin &&
+               std::abs(m_bands[3].imbalance) >= DisagreeMin;
+    }
     size_t historySize() const { return m_count; }
     const Sample& history(size_t i) const { return m_history[(m_head + i) % HistoryCapacity]; }
 private:

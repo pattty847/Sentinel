@@ -32,6 +32,26 @@ TEST_F(LeanFixture, ExactBoundariesAndDisagreement) {
     update(); // half-slot mid: the levels at 197 and 202 are exactly five away
     EXPECT_EQ(gauge.bands()[0].bid, 4); EXPECT_EQ(gauge.bands()[0].ask, 3);
 }
+TEST_F(LeanFixture, DisagreementNeedsBothBandsAtLeastHalfAPercent) {
+    // Near (+-5) and far (+-100) bands with opposite signs; one band rounding to 0% is no disagreement.
+    const auto set = [&](double nearBid, double nearAsk, double farBid, double farAsk) {
+        bids.fill(0); asks.fill(0);
+        bids[199] = nearBid; asks[201] = nearAsk; bids[150] = farBid; asks[250] = farAsk;
+        update();
+    };
+    set(100.4, 99.6, 0, 50); // near +0.4%, far strongly ask
+    ASSERT_NEAR(gauge.bands()[0].imbalance, .004, 1e-12);
+    EXPECT_LT(gauge.bands()[3].imbalance, -.1);
+    EXPECT_FALSE(gauge.disagreement());
+    set(100.6, 99.4, 0, 50); // near +0.6%
+    ASSERT_NEAR(gauge.bands()[0].imbalance, .006, 1e-12);
+    EXPECT_TRUE(gauge.disagreement());
+    set(10, 1, 20, 29.24); // far: 30 bid vs 30.24 ask, -0.4%: rounds to 0%, no disagreement
+    EXPECT_GT(gauge.bands()[0].imbalance, .5);
+    EXPECT_GT(std::abs(gauge.bands()[3].imbalance), 0.);
+    EXPECT_LT(std::abs(gauge.bands()[3].imbalance), .005);
+    EXPECT_FALSE(gauge.disagreement());
+}
 TEST_F(LeanFixture, DepthIsMonotonicAndMirrored) {
     bids[199] = asks[201] = 2; bids[185] = asks[215] = 8; bids[100] = asks[300] = 10;
     update();

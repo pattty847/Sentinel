@@ -5,13 +5,16 @@
 #include "../datasources/IGridDataSource.hpp"
 #include "../datasources/RemoteGridDataSource.hpp"
 #include "../render/heatmap/HeatmapPalette.hpp"
+#include <QActionGroup>
 #include <QApplication>
+#include <QElapsedTimer>
 #include <QDateTime>
 #include <QHeaderView>
 #include <QHideEvent>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QLabel>
+#include <QMenu>
 #include <QPainter>
 #include <QPushButton>
 #include <QScrollBar>
@@ -303,6 +306,8 @@ OrderBookDock::OrderBookDock(QWidget* parent, IGridDataSource* source)
     m_pulseTrades.reserve(PulseTradeCapacity);
     m_leanBids.reserve(1);
     m_leanAsks.reserve(1);
+    m_groupBids.reserve(1);
+    m_groupAsks.reserve(1);
     m_pulseElapsed.start();
     buildUi();
     m_timer.setParent(this);
@@ -440,6 +445,7 @@ void OrderBookDock::buildUi()
     m_status->setText("Waiting for book");
     buildLean(heading, layout);
     buildLadder(layout);
+    buildGrouping(heading);
     m_pulseFooter = label("domPulseFooter");
     layout->addWidget(m_pulseFooter);
     // Same settings store and format as the other docks (AGENTS 4b: never a native-format QSettings).
@@ -474,24 +480,189 @@ void OrderBookDock::buildLean(QHBoxLayout* heading, QVBoxLayout* layout)
     updateLeanVisibility();
 }
 
+namespace {
+// The grouping button opens its menu on click; its arrow would cost heading width.
+const char* const GroupButtonStyle = "QToolButton::menu-indicator { image: none; width: 0px; }";
+const char* const GroupButtonCompactStyle =
+    "QToolButton { padding: 1px; } QToolButton::menu-indicator { image: none; width: 0px; }";
+} // namespace
+
+void OrderBookDock::applyHeadingStyle(bool compact)
+{
+    m_heading->setSpacing(compact ? 0 : -1);
+    for (auto* button : {m_pulse, m_lean, m_cumulative})
+        button->setStyleSheet(compact ? QStringLiteral("QToolButton { padding: 1px; }") : QString());
+    if (m_grouping) m_grouping->setStyleSheet(compact ? GroupButtonCompactStyle : GroupButtonStyle);
+    m_recenter->setStyleSheet(compact ? QStringLiteral("QPushButton { padding: 1px; }") : QString());
+}
+
 void OrderBookDock::fitHeading()
 {
-    // Measure the unmodified theme before deciding whether compact padding is needed.
-    m_heading->setSpacing(-1);
-    m_recenter->setStyleSheet({});
-    int needed = 4 * m_heading->spacing();
-    for (auto* button : {m_pulse, m_lean, m_cumulative}) {
-        button->setStyleSheet({});
-        button->ensurePolished();
-        needed += button->sizeHint().width();
+    // Restyling repolishes every button, so it happens only when compact mode flips. The
+    // unmodified width is measured again only after a font, style or button-text change.
+    if (m_headingNatural < 0) {
+        if (m_headingCompact) applyHeadingStyle(false);
+        m_headingCompact = false;
+        int needed = 5 * m_heading->spacing();
+        for (QWidget* button : {static_cast<QWidget*>(m_pulse), static_cast<QWidget*>(m_lean),
+                                static_cast<QWidget*>(m_cumulative), static_cast<QWidget*>(m_recenter),
+                                static_cast<QWidget*>(m_grouping)}) {
+            if (!button) continue;
+            button->ensurePolished();
+            needed += button->sizeHint().width();
+        }
+        m_headingNatural = needed;
     }
-    m_recenter->ensurePolished();
-    needed += m_recenter->sizeHint().width();
-    if (needed <= width() - 8) return;
-    m_heading->setSpacing(0);
-    for (auto* button : {m_pulse, m_lean, m_cumulative})
-        button->setStyleSheet("QToolButton { padding: 1px; }");
-    m_recenter->setStyleSheet("QPushButton { padding: 1px; }");
+    const bool compact = m_headingNatural > width() - 8;
+    if (compact == m_headingCompact) return;
+    m_headingCompact = compact;
+    applyHeadingStyle(compact);
+}
+
+void OrderBookDock::changeEvent(QEvent* event)
+{
+    DockablePanel::changeEvent(event);
+    if ((event->type() == QEvent::FontChange || event->type() == QEvent::StyleChange) && m_heading) {
+        m_headingNatural = -1;
+        fitHeading();
+    }
+}
+
+void OrderBookDock::buildGrouping(QHBoxLayout* heading)
+{
+    m_grouping = new QToolButton(m_contentWidget);
+    m_grouping->setObjectName("domGrouping");
+    m_grouping->setAccessibleName("Row grouping");
+    m_grouping->setPopupMode(QToolButton::InstantPopup);
+    m_grouping->setStyleSheet(GroupButtonStyle);
+    m_groupMenu = new QMenu(m_grouping);
+    m_groupMenu->setObjectName("domGroupingMenu");
+    m_grouping->setMenu(m_groupMenu);
+    connect(m_groupMenu, &QMenu::aboutToShow, this, &OrderBookDock::fillGroupMenu);
+    heading->insertWidget(1, m_grouping);
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
+    const QString mode = settings.value("OrderBookDock/grouping", "auto").toString();
+    m_groupMode = mode == "fixed" ? Grouping::Fixed : mode == "link" ? Grouping::Link : Grouping::Auto;
+    m_fixedTick = settings.value("OrderBookDock/groupTick", 0.0).toDouble();
+    updateGroupButton();
+    m_headingNatural = -1;
+    fitHeading();
+}
+
+void OrderBookDock::setGrouping(Grouping mode, double fixedTick)
+{
+    m_groupMode = mode;
+    if (mode == Grouping::Fixed) m_fixedTick = fixedTick;
+    m_autoHold.reset();
+    m_linkHold.reset();
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
+    settings.setValue("OrderBookDock/grouping", mode == Grouping::Fixed ? "fixed" : mode == Grouping::Link ? "link" : "auto");
+    if (mode == Grouping::Fixed) settings.setValue("OrderBookDock/groupTick", fixedTick);
+    m_dirty = true;
+    if (m_displayActive) refreshDisplay();
+    updateGroupButton();
+}
+
+void OrderBookDock::setHeatmapTick(double tick, bool manual)
+{
+    if (tick == m_linkTick && manual == m_linkManual) return;
+    m_linkTick = tick;
+    m_linkManual = manual;
+    if (m_groupMode == Grouping::Link) m_dirty = true;
+}
+
+void OrderBookDock::fillGroupMenu()
+{
+    // Built when the menu opens, never on the publish path.
+    m_groupMenu->clear();
+    auto* group = new QActionGroup(m_groupMenu);
+    const auto add = [&](const QString& text, bool checked, std::function<void()> apply) {
+        QAction* action = m_groupMenu->addAction(text);
+        action->setCheckable(true);
+        action->setChecked(checked);
+        group->addAction(action);
+        connect(action, &QAction::triggered, this, std::move(apply));
+        return action;
+    };
+    add("Auto", m_groupMode == Grouping::Auto, [this] { setGrouping(Grouping::Auto); })
+        ->setToolTip(QStringLiteral("The smallest row size at which %1% of the %2 rows each side of the touch hold size; "
+                                    "a new size applies after %3 s.")
+                         .arg(int(dom::AutoGroupRule::TargetFill * 100)).arg(dom::AutoGroupRule::RowsPerSide)
+                         .arg(dom::GroupHold::HoldMs / 1000.0));
+    add("Link to heatmap tick", m_groupMode == Grouping::Link, [this] { setGrouping(Grouping::Link); });
+    m_groupMenu->addSeparator();
+    const double native = m_groupNative;
+    for (const int64_t g : m_choices.list()) {
+        const double tick = double(g) * native;
+        const QString text = DomModel::priceText(tick, tick) + (g == 1 ? QStringLiteral(" (server tick)") : QString());
+        add(text, m_groupMode == Grouping::Fixed && m_model->requestedGroup() == g, [this, tick] { setGrouping(Grouping::Fixed, tick); });
+    }
+}
+
+void OrderBookDock::updateGrouping(const LiveOrderBook& book)
+{
+    const double native = book.getTickSize();
+    if (!(native > 0)) return;
+    const qint64 now = m_pulseClockSource ? m_pulseClockSource() : m_pulseElapsed.elapsed();
+    const auto top = book.captureDenseNonZero(m_groupBids, m_groupAsks, 1);
+    const double bid = m_groupBids.empty() ? 0 : top.minPrice + m_groupBids.front().first * top.tickSize;
+    const double ask = m_groupAsks.empty() ? 0 : top.minPrice + m_groupAsks.front().first * top.tickSize;
+    if (native != m_groupNative) { // a new product or server grid: no held size carries over
+        m_groupNative = native;
+        m_autoHold.reset();
+        m_linkHold.reset();
+    }
+    m_choices = dom::groupChoices(native, bid > 0 && ask > 0 ? (bid + ask) / 2 : bid + ask);
+    int64_t group = 1;
+    if (m_groupMode == Grouping::Fixed) {
+        group = m_choices.nearest(m_fixedTick > 0 ? m_fixedTick / native : 1);
+    } else if (m_groupMode == Grouping::Link) {
+        const auto link = dom::linkGroup(m_linkTick, native, m_choices);
+        m_linkExact = link.exact;
+        if (m_linkManual) m_linkHold.reset(); // a locked heatmap tick applies at once
+        group = m_linkHold.step(link.group, now);
+    } else {
+        const dom::AutoBook view{book.getBids(), book.getAsks(), std::llround(top.minPrice / native),
+            m_groupBids.empty() ? -1 : std::ptrdiff_t(m_groupBids.front().first),
+            m_groupAsks.empty() ? -1 : std::ptrdiff_t(m_groupAsks.front().first)};
+        const int64_t target = dom::AutoGroupRule::target(view, m_choices);
+        group = m_autoHold.step(target, now);
+        sLog_Probe("dom.group", "mode=auto target=" << target << " group=" << group << " changes=" << m_autoHold.changes()
+                   << " native=" << native);
+    }
+    if (group < 1 || !m_choices.contains(group)) group = m_choices.nearest(double(std::max<int64_t>(group, 1)));
+    m_model->setGroup(group);
+    updateGroupButton();
+}
+
+void OrderBookDock::updateGroupButton()
+{
+    // Text and tooltip change only with the size or mode (no per-tick string work).
+    const int64_t group = m_model->requestedGroup();
+    if (group == m_shownGroup && m_groupMode == m_shownMode && m_linkExact == m_shownExact && m_groupNative > 0) return;
+    m_shownGroup = group;
+    m_shownMode = m_groupMode;
+    m_shownExact = m_linkExact;
+    const double tick = double(group) * m_groupNative;
+    const QString size = m_groupNative > 0 ? DomModel::priceText(tick, tick) : QStringLiteral("—");
+    const QString prefix = m_groupMode == Grouping::Auto ? QStringLiteral("A ") : m_groupMode == Grouping::Link ? QStringLiteral("L ") : QString();
+    m_grouping->setText(prefix + size);
+    QString tip = QStringLiteral("Row size %1 (%2 server ticks). ").arg(size).arg(group);
+    if (m_groupMode == Grouping::Auto)
+        tip += QStringLiteral("Auto: the smallest size at which %1% of the %2 rows each side of the touch hold size; "
+                              "changes after %3 s.").arg(int(dom::AutoGroupRule::TargetFill * 100))
+                   .arg(dom::AutoGroupRule::RowsPerSide).arg(dom::GroupHold::HoldMs / 1000.0);
+    else if (m_groupMode == Grouping::Link)
+        tip += m_linkExact ? QStringLiteral("Linked to the heatmap tick.")
+                           : QStringLiteral("Linked: the heatmap tick %1 is not a whole multiple of the server tick "
+                                            "(heatmap layer off?); nearest size used.")
+                                 .arg(m_linkTick > 0 ? QString::number(m_linkTick, 'g', 12) : QStringLiteral("(none)"));
+    else tip += QStringLiteral("Fixed.");
+    m_grouping->setToolTip(tip + QStringLiteral("\nClick to choose Auto, Link to heatmap, or a fixed size. "
+                                                "The spread above is the server's, whatever the row size."));
+    if (group > 1 || m_groupNative > 0) sLog_App("DOM grouping mode=" << int(m_groupMode) << " group=" << group << " size=" << size);
+    m_headingNatural = -1;
+    fitHeading();
 }
 
 void OrderBookDock::updateLeanVisibility()
@@ -712,10 +883,18 @@ void OrderBookDock::refreshBook()
     if (book.getTickSize() <= 0) m_freshness.awaitingBook = true;
     m_bookDirty = false;
     updateVisibleRows();
+    updateGrouping(book);
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     // Scale decay, visible-range changes and trades leaving the window need a publish too.
     if (m_model->needsRepublish(now)) m_dirty = true;
-    if (m_dirty) m_model->publish(book, m_trades, m_follow, now);
+    if (m_dirty) {
+        QElapsedTimer cost;
+        cost.start();
+        m_model->publish(book, m_trades, m_follow, now);
+        sLog_Probe("dom.publish", "us=" << double(cost.nsecsElapsed()) / 1000.0 << " group=" << m_model->group()
+                   << " levels=" << m_model->lastGroupLevels() << " rows=" << m_model->filledFirst() << ".."
+                   << m_model->filledLast());
+    }
     // Every exposed tick, changed or not, so the 10 s totals keep moving on a quiet book.
     if (m_pulseActive) {
         m_model->pulseStep(pulseClock(true), m_pulseTrades);
@@ -813,8 +992,16 @@ void OrderBookDock::updatePulseFooter()
     m_footerVersion = m_model->pulseTotalsVersion();
     m_footerWidth = width;
     const QString full = m_model->pulseSummary();
-    const bool fits = m_pulseFooter->fontMetrics().horizontalAdvance(full) <= width;
-    m_pulseFooter->setText(fits ? full : m_model->pulseSummary(true));
+    // The longest form that fits; below that, whole " · " segments drop: never a cut number.
+    const auto fits = [&](const QString& text) { return m_pulseFooter->fontMetrics().horizontalAdvance(text) <= width; };
+    QString text = full;
+    for (const auto form : {DomModel::PulseText::Compact, DomModel::PulseText::NoMax, DomModel::PulseText::Tiny}) {
+        if (fits(text)) break;
+        text = m_model->pulseSummary(form);
+    }
+    while (!fits(text) && text.contains(QStringLiteral(" · ")))
+        text = text.left(text.lastIndexOf(QStringLiteral(" · "))) + QStringLiteral(" …");
+    m_pulseFooter->setText(text);
     const auto& totals = m_model->pulseTotals();
     m_pulseFooter->setToolTip(QStringLiteral("Book changes over the last %1 s in the rows on screen (plus %2 rows each way), all sizes:\n%3\n"
                                              "Added: asks %4 · bids %5 %6. Pulled = cancelled before price got there; eaten = removed by trades.")

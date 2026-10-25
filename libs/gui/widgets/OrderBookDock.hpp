@@ -3,6 +3,7 @@
 #include "DockablePanel.hpp"
 #include "marketdata/analytics/LeanGauge.hpp"
 #include "../models/DomModel.hpp"
+#include "../models/DomGrouping.hpp"
 #include <QElapsedTimer>
 #include <QImage>
 #include <QPointer>
@@ -17,6 +18,7 @@ class MarketHealth;
 class QHBoxLayout;
 class QVBoxLayout;
 class QLabel;
+class QMenu;
 class QPushButton;
 class QToolButton;
 class QTableView;
@@ -74,11 +76,22 @@ public:
     const sentinel::book::LeanGauge& leanGauge() const { return m_leanGauge; }
     uint64_t leanSteps() const { return m_leanSteps; }
     static constexpr int PulseTradeCapacity = 4096;
+    // Row grouping (heading menu): Auto (DomGrouping AutoGroupRule with a hold), a fixed
+    // row size in quote units (nearest offered choice), or Link (the heatmap's tick).
+    enum class Grouping { Auto, Fixed, Link };
+    void setGrouping(Grouping mode, double fixedTick = 0);
+    Grouping grouping() const { return m_groupMode; }
+    double fixedGroupTick() const { return m_fixedTick; }
+    const dom::GroupChoices& groupChoices() const { return m_choices; }
+    uint64_t autoGroupChanges() const { return m_autoHold.changes(); }
+    // Heatmap tick shown now (Manual: the locked preset; Auto: the drawn tick), in quote units.
+    void setHeatmapTick(double tick, bool manual);
 
 protected:
     void showEvent(QShowEvent* event) override;
     void hideEvent(QHideEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    void changeEvent(QEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private slots:
@@ -98,6 +111,11 @@ private:
     void buildLean(QHBoxLayout* heading, QVBoxLayout* layout);
     void updateLeanVisibility();
     void fitHeading();
+    void applyHeadingStyle(bool compact);
+    void buildGrouping(QHBoxLayout* heading);
+    void fillGroupMenu();
+    void updateGrouping(const LiveOrderBook& book);
+    void updateGroupButton();
     void refreshLean();
     void stepLean(const LiveOrderBook& book);
     void updatePulseActive();
@@ -138,6 +156,19 @@ private:
     LeanGaugeWidget* m_leanStrip = nullptr;
     QToolButton* m_lean = nullptr;
     QHBoxLayout* m_heading = nullptr;
+    int m_headingNatural = -1; // unmodified heading width; -1: measure again
+    bool m_headingCompact = false;
+    QToolButton* m_grouping = nullptr;
+    QMenu* m_groupMenu = nullptr;
+    Grouping m_groupMode = Grouping::Auto;
+    double m_fixedTick = 0, m_linkTick = 0, m_groupNative = 0;
+    bool m_linkManual = false, m_linkExact = true;
+    dom::GroupChoices m_choices;
+    dom::GroupHold m_autoHold, m_linkHold;
+    int64_t m_shownGroup = 0;
+    Grouping m_shownMode = Grouping::Auto;
+    bool m_shownExact = true;
+    std::vector<std::pair<uint32_t, double>> m_groupBids, m_groupAsks;
     std::vector<std::pair<uint32_t, double>> m_leanBids, m_leanAsks;
     uint64_t m_leanGeneration = 0, m_leanSteps = 0;
     QTimer m_timer;

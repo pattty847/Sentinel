@@ -79,7 +79,25 @@ public:
     // nowMs < 0 reads the wall clock. It anchors the trade window and the scale decay.
     void publish(const LiveOrderBook& book, const DomTradeWindow& trades, bool follow, qint64 nowMs = -1);
     int centerRow() const;
+    // Row tick: group x native tick (the price column's grid).
     double tick() const { return m_tick; }
+    double nativeTick() const { return m_nativeTick; }
+    // Grouping: each row sums `group` native levels on the absolute grid
+    // [k * group, (k + 1) * group) (DomGrouping.hpp). Applied at the next publish,
+    // which re-bins every row; a pinned window keeps the price on screen.
+    void setGroup(int64_t group);
+    int64_t group() const { return m_group; }
+    int64_t requestedGroup() const { return m_requestedGroup; }
+    // Mid of the last published native top (0 without one).
+    double mid() const { return m_bestBid > 0 && m_bestAsk > 0 ? (m_bestBid + m_bestAsk) / 2 : m_bestBid + m_bestAsk; }
+    // Grouped rows are filled only around the visible rows: a margin of GroupMarginRows each
+    // side, widened to GroupBudgetLevels native levels; at group 1 the whole window.
+    static constexpr int GroupMarginRows = 32;
+    static constexpr int64_t GroupBudgetLevels = 4096;
+    // Test hooks: the filled row range and the native levels the last publication read.
+    int filledFirst() const { return m_rangeFirst; }
+    int filledLast() const { return m_rangeLast; }
+    qint64 lastGroupLevels() const { return m_groupLevels; }
     // Paint-path reads without QVariant/QString work.
     bool isBest(int row, bool bid) const { return m_ready && row >= 0 && row < Rows && (bid ? m_rows[row].bestBid : m_rows[row].bestAsk); }
     double size(int row, bool bid, bool cumulativeSeries) const;
@@ -134,7 +152,10 @@ public:
     const sentinel::book::RollingTotals& pulseTotals() const { return m_classifier.totals(); }
     // Changes whenever the footer's numbers change.
     uint64_t pulseTotalsVersion() const { return m_pulseVersion; }
-    QString pulseSummary(bool compact = false) const;
+    // Footer text, longest first: Full, Compact, NoMax (the biggest pull only in the
+    // tooltip), Tiny ("Ask 6.8/1.1 · Bid .4/2", pulled/eaten).
+    enum class PulseText { Full, Compact, NoMax, Tiny };
+    QString pulseSummary(PulseText form = PulseText::Full) const;
     uint64_t pulseOutOfIntervalTotal() const { return m_classifier.outOfIntervalTradesTotal(); }
     // Test hooks: steps classified and the events the last step produced (before the threshold).
     qint64 pulseSteps() const { return m_pulseSteps; }
@@ -153,6 +174,9 @@ private:
     static int scaleIndex(bool bid, bool cumulativeSeries) { return (bid ? 0 : 1) + (cumulativeSeries ? 2 : 0); }
     static std::optional<qint64> bucket(double price, double tick);
     void accumulateDepth(const LiveOrderBook& book, qint64 origin);
+    qint64 anchoredTop(double nativeTick, int64_t group) const;
+    void groupRange(int64_t group);
+    void fillRows(const LiveOrderBook& book, qint64 origin, int64_t group);
     void withdrawScaleWork();
     uint8_t textChanges(const Row& before, const Row& after, bool moved) const;
     const QString& cachedText(int row, int col) const;
@@ -160,7 +184,10 @@ private:
                    qint64 origin, qint64 nowMs);
     bool updateScales(qint64 nowMs);
     QString m_base = "base", m_quote = "quote", m_symbol = "this product";
-    double m_tick = 0;
+    double m_tick = 0, m_nativeTick = 0;
+    int64_t m_group = 1, m_requestedGroup = 1;
+    int m_rangeFirst = 0, m_rangeLast = Rows - 1;
+    qint64 m_groupLevels = 0;
     qint64 m_top = 0, m_center = 0;
     bool m_ready = false, m_cumulative = false;
     QString m_aggregationIssue;
@@ -172,8 +199,9 @@ private:
     // Depth beyond a pinned window edge, reused while book, grid and window are unchanged.
     struct DepthKey {
         uint64_t version = 0;
-        qint64 origin = 0, top = 0, bestBid = 0, bestAsk = 0;
+        qint64 origin = 0, rangeTop = 0, rangeBottom = 0, bestBid = 0, bestAsk = 0;
         double tick = 0;
+        int64_t group = 1;
         bool operator==(const DepthKey&) const = default;
     };
     std::optional<DepthKey> m_depthKey;

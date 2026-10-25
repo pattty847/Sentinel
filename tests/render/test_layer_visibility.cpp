@@ -95,5 +95,15 @@ TEST(LayerVisibility, LadderIsIndependentAndReservesItsStripOnlyWhenOn) {
     layers.setLayerEnabled("ladder", false);
     EXPECT_EQ(layers.ladderWidthPx(), 0);
     EXPECT_EQ(events, (std::vector<std::string>{"ladder+", "primaryField-", "ladder-"}));
+    // The strip width setting: clamped, applied only while the ladder is on.
+    layers.setLadderWidthPx(200);
+    EXPECT_EQ(layers.ladderWidthPx(), 0);
+    layers.setLadderEnabled(true);
+    EXPECT_EQ(layers.property("ladderWidthPx").toInt(), 200);
+    layers.setLadderWidthPx(10);
+    EXPECT_EQ(layers.ladderWidthPx(), chart::LayerVisibility::kLadderMinWidthPx);
+    layers.setLadderWidthPx(1000);
+    EXPECT_EQ(layers.ladderWidthPx(), chart::LayerVisibility::kLadderMaxWidthPx);
+    EXPECT_EQ(chart::LayerVisibility::kLadderWidthPx, 120);
 }
 } // namespace

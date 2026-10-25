@@ -37,6 +37,9 @@ struct HeatmapChartSettings {
     std::string candleWickColor = "auto"; // auto follows each candle's body color
     double candleBodyOpacity = 1;
     int candleWickWidth = 1; // device pixels
+    // Chart-edge book ladder strip (chart menu); width in logical px, 60..240.
+    bool showLadder = false;
+    int ladderWidthPx = 120;
     bool operator==(const HeatmapChartSettings &) const = default;
 };
 } // namespace heatmap

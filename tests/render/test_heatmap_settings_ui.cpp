@@ -699,6 +699,50 @@ TEST(CandleStyleTest, ModelChangesReachTheChartProperties) {
     EXPECT_EQ(renderer.candles()->candleWickWidth(), 2);
 }
 
+TEST(LadderControls, ChartMenuToggleAndWidthPersistAndReachTheLayers) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    EXPECT_FALSE(model.settings().showLadder);
+    EXPECT_EQ(model.settings().ladderWidthPx, 120);
+    UnifiedGridRenderer renderer;
+    TopToolbar toolbar;
+    HeatmapChartControls controls(&model);
+    controls.setRenderer(&renderer);
+    controls.setToolbar(&toolbar);
+    QAction *toggle = nullptr;
+    QAction *wide = nullptr;
+    for (QAction *a : toolbar.chartMenu()->findChildren<QAction *>()) {
+        if (a->objectName() == "chartMenuLadder") toggle = a;
+        if (a->objectName() == "chartMenuLadderWidthPreset" && a->data().toInt() == 180) wide = a;
+    }
+    ASSERT_TRUE(toggle && wide);
+    EXPECT_FALSE(renderer.layers()->ladderEnabled());
+    toggle->trigger();
+    EXPECT_TRUE(renderer.layers()->ladderEnabled());
+    EXPECT_EQ(renderer.layers()->ladderWidthPx(), 120);
+    EXPECT_TRUE(t.reload().showLadder);
+    wide->trigger();
+    EXPECT_EQ(renderer.layers()->ladderWidthPx(), 180);
+    EXPECT_EQ(t.reload().ladderWidthPx, 180);
+    controls.refreshChartMenu();
+    EXPECT_TRUE(toggle->isChecked());
+    EXPECT_TRUE(wide->isChecked());
+    // Clamped to 60..240; a process-only layer patch (Agent API) survives an unrelated setting change.
+    ASSERT_TRUE(model.apply({{"ladderWidthPx", 500}}).isEmpty());
+    EXPECT_EQ(renderer.layers()->ladderWidthPx(), 240);
+    EXPECT_FALSE(model.apply({{"ladderWidthPx", 1.5}}).isEmpty());
+    renderer.layers()->setLayerEnabled("ladder", false);
+    ASSERT_TRUE(model.apply({{"palettePreset", "Fire"}}).isEmpty());
+    EXPECT_FALSE(renderer.layers()->ladderEnabled());
+    // A new chart starts from the persisted values.
+    UnifiedGridRenderer next;
+    HeatmapSettingsModel reloaded(t.store, "main", t.config);
+    HeatmapChartControls nextControls(&reloaded);
+    nextControls.setRenderer(&next);
+    EXPECT_TRUE(next.layers()->ladderEnabled());
+    EXPECT_EQ(next.layers()->ladderWidthPx(), 240);
+}
+
 TEST(HeatmapSettingsModelTest, NamedWorkspacesRestoreButLastSessionNever) {
     TempStore t;
     HeatmapSettingsModel model(t.store, "main", t.config);
