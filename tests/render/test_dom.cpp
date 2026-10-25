@@ -2001,8 +2001,80 @@ TEST(DomGroup, FarPinnedCumulativeCostIsBoundedOnEveryBookChange) {
     EXPECT_DOUBLE_EQ(model.index(row, DomModel::Bid).data(DomModel::CumulativeRole).toDouble(),
                      expected(row) + 20 * 1.0 + (19 * 20) / 2.0); // the 20 changes each added 1 + i
     EXPECT_GT(worst, 0);
-    EXPECT_LT(worst, 4000) << "edges plus one read per 1,024-slot block, never the 420,000 levels";
+    EXPECT_LT(worst, 8000) << "edges plus one read per 64-slot block, never the 420,000 levels";
     std::cout << "DOM_FAR_PINNED depthReads_max=" << worst << " publish_us_max=" << worstNs / 1000.0 << '\n';
+}
+
+TEST(DomGroup, CoarseLinkedRowsStayBoundedAndExact) {
+    // $250 rows on a 0.1 book (2,500 levels a row), every level resting.
+    LiveOrderBook book;
+    book.initialize(0, 100000, 0.1);
+    std::vector<BookLevelUpdate> levels;
+    for (int i = 0; i <= 499'990; ++i) levels.push_back({true, 50000 - i * 0.1, 1.0});
+    for (int i = 1; i <= 499'990; ++i) levels.push_back({false, 50000 + i * 0.1, 1.0});
+    book.applyUpdates(levels, std::chrono::system_clock::now(), nullptr);
+    DomModel model;
+    model.setGroup(2500);
+    model.publish(book, {}, true);
+    ASSERT_EQ(model.group(), 2500);
+    const int c = model.centerRow();
+    model.setVisibleRows(c - 20, c + 20);
+    QElapsedTimer cost;
+    cost.start();
+    model.publish(book, {}, true);
+    const qint64 ns = cost.nsecsElapsed();
+    // Row 199 ($49,750..$50,000): 2,500 bids; row 200 holds the bid at 50,000 and 2,499 asks.
+    const auto q = [&](qint64 key, int col) { return model.index(rowAt(model, key), col).data(DomModel::QuantityRole).toDouble(); };
+    EXPECT_DOUBLE_EQ(q(199, DomModel::Bid), 2500);
+    EXPECT_DOUBLE_EQ(q(200, DomModel::Bid), 1);
+    EXPECT_DOUBLE_EQ(q(200, DomModel::Ask), 2499);
+    EXPECT_EQ(model.index(rowAt(model, 200), DomModel::Price).data().toString(), "50000");
+    const int rows = model.filledLast() - model.filledFirst() + 1;
+    EXPECT_LE(rows, 41 + 2 * DomModel::GroupMarginRows);
+    // Per row: two partial edge blocks plus one read per 64-level block, never 2,500 levels.
+    EXPECT_LT(model.lastGroupLevels(), qint64(rows) * (2 * 64 + 2500 / 64 + 2));
+    std::cout << "DOM_COARSE_LINK rows=" << rows << " levels=" << model.lastGroupLevels() << " (direct: "
+              << qint64(rows) * 2500 << ") publish_us=" << ns / 1000.0 << '\n';
+}
+
+TEST(DomGroup, ServerTickChangeKeepsTheMiddleVisiblePrice) {
+    LiveOrderBook book;
+    book.initialize(19000, 21000, 0.1);
+    apply(book, {{true, 20000, 1}, {false, 20000.1, 1}});
+    DomModel model;
+    model.publish(book, {}, true);
+    const int center = model.centerRow();
+    model.setVisibleRows(center + 100, center + 140); // pinned 120 ticks below the touch
+    model.publish(book, {}, false);
+    const int middle = center + 120;
+    const double before = model.index(middle, 0).data(DomModel::BucketRole).toLongLong() * model.tick();
+    book.initialize(19000, 21000, 0.05); // the server tick changes
+    apply(book, {{true, 20000, 1}, {false, 20000.05, 1}});
+    model.publish(book, {}, false);
+    ASSERT_DOUBLE_EQ(model.tick(), 0.05);
+    const double after = model.index(middle, 0).data(DomModel::BucketRole).toLongLong() * model.tick();
+    EXPECT_NEAR(after, before, 1e-6) << "the middle visible row keeps its price";
+}
+
+// Opt-in measurement: LiveOrderBook::applyUpdates cost per level change (block flagging included).
+TEST(DomGroup, DISABLED_BookUpdateCostBenchmark) {
+    LiveOrderBook book;
+    book.initialize(0, 100000, 0.1);
+    std::vector<BookLevelUpdate> updates;
+    uint32_t x = 12345;
+    for (int i = 0; i < 2'000'000; ++i) {
+        x = x * 1664525u + 1013904223u;
+        updates.push_back({(x >> 31) != 0, 40000 + (x % 200000) * 0.1, double(1 + (x >> 8) % 50)});
+    }
+    double best = 1e18;
+    for (int round = 0; round < 5; ++round) {
+        QElapsedTimer t;
+        t.start();
+        for (size_t i = 0; i < updates.size(); i += 50)
+            book.applyUpdates(std::span(updates.data() + i, 50), std::chrono::system_clock::now(), nullptr);
+        best = std::min(best, double(t.nsecsElapsed()) / updates.size());
+    }
+    std::cout << "BOOK_UPDATE_NS_PER_LEVEL best_of_5=" << best << '\n';
 }
 
 TEST(DomGroup, ChoicesAreTheHeatmapPresetsThatAreWholeMultiples) {
@@ -2016,8 +2088,11 @@ TEST(DomGroup, ChoicesAreTheHeatmapPresetsThatAreWholeMultiples) {
     EXPECT_TRUE(dom::linkGroup(1.0, 0.1, choices).exact);
     EXPECT_EQ(dom::linkGroup(0.15, 0.1, choices).group, 2); // not a whole multiple: nearest
     EXPECT_FALSE(dom::linkGroup(0.15, 0.1, choices).exact);
-    EXPECT_EQ(dom::linkGroup(0.3, 0.1, choices).group, 2); // a multiple the list does not offer
-    EXPECT_FALSE(dom::linkGroup(0.3, 0.1, choices).exact);
+    // Link follows any whole multiple exactly, beyond the menu's list and caps (owner 2026-10-25).
+    EXPECT_EQ(dom::linkGroup(0.3, 0.1, choices).group, 3);
+    EXPECT_TRUE(dom::linkGroup(0.3, 0.1, choices).exact);
+    EXPECT_EQ(dom::linkGroup(250, 0.1, dom::groupChoices(0.1, 200)).group, 2500);
+    EXPECT_TRUE(dom::linkGroup(250, 0.1, dom::groupChoices(0.1, 200)).exact);
     EXPECT_EQ(dom::linkGroup(0, 0.1, choices).group, 1);
 }
 

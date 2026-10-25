@@ -57,7 +57,7 @@ GroupChoices groupChoices(double nativeTick, double mid)
 LinkGroup linkGroup(double heatmapTick, double nativeTick, const GroupChoices& choices)
 {
     const int64_t group = wholeMultiple(heatmapTick, nativeTick);
-    if (group > 0 && choices.contains(group)) return {group, true};
+    if (group > 0 && group <= MaxModelGroup) return {group, true};
     return {choices.nearest(nativeTick > 0 ? heatmapTick / nativeTick : 0), false};
 }
 

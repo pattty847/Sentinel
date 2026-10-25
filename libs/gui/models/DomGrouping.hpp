@@ -8,8 +8,11 @@
 #include <span>
 
 namespace dom {
-// Coarsest row the DOM offers, in native levels (BTC 0.1 -> $100).
+// Coarsest row Auto and the fixed menu offer, in native levels (BTC 0.1 -> $100): a short
+// menu and a bounded Auto search (20 rows x group levels per candidate). Link has no cap.
 constexpr int64_t MaxGroup = 1000;
+// Any row the model accepts (Link may follow any whole multiple of the native tick).
+constexpr int64_t MaxModelGroup = 1'000'000'000;
 // A row coarser than this share of the mid is the DOM's too-coarse state (DomModel).
 constexpr double MaxShareOfMid = 0.01;
 
@@ -39,8 +42,9 @@ struct LinkGroup {
     int64_t group = 1;
     bool exact = false; // false: the heatmap tick is not a valid choice; nearest used
 };
-// The heatmap's tick as a group. A tick that is not a whole multiple of the native
-// tick (heatmap layer off, INV-178), or not offered, falls back to the nearest choice.
+// The heatmap's tick as a group: any whole multiple of the native tick is followed
+// exactly (owner, 2026-10-25: no MaxGroup or share-of-mid cap). Only a tick that is not
+// a whole multiple (heatmap layer off, INV-178) falls back to the nearest choice.
 LinkGroup linkGroup(double heatmapTick, double nativeTick, const GroupChoices& choices);
 
 // Dense replica view: native slot i is level base + i; tops are slot indices, -1 if absent.

@@ -121,7 +121,7 @@ public:
     // Exact per-block sums of SumBlockSlots slots are cached and recomputed only after a
     // change inside that block, so a wide range costs its edges plus one read per block.
     // slotReads (optional) receives the slot reads this call made.
-    static constexpr size_t SumBlockSlots = 1024;
+    static constexpr size_t SumBlockSlots = 64;
     double sumRange(bool bid, size_t lo, size_t hi, size_t* slotReads = nullptr) const;
 
     void accumulateRange(double minPrice,

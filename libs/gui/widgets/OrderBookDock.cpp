@@ -626,7 +626,9 @@ void OrderBookDock::updateGrouping(const LiveOrderBook& book)
         sLog_Probe("dom.group", "mode=auto target=" << target << " group=" << group << " changes=" << m_autoHold.changes()
                    << " native=" << native);
     }
-    if (group < 1 || !m_choices.contains(group)) group = m_choices.nearest(double(std::max<int64_t>(group, 1)));
+    // Link follows any whole multiple exactly; Auto and fixed stay on the offered list.
+    if (group < 1 || (m_groupMode != Grouping::Link && !m_choices.contains(group)))
+        group = m_choices.nearest(double(std::max<int64_t>(group, 1)));
     m_model->setGroup(group);
     updateGroupButton();
 }
@@ -654,9 +656,10 @@ void OrderBookDock::updateGroupButton()
                    .arg(dom::AutoGroupRule::RowsPerSide).arg(dom::GroupHold::HoldMs / 1000.0);
     else if (m_groupMode == Grouping::Link)
         tip += m_linkExact ? QStringLiteral("Linked to the heatmap tick.")
-                           : QStringLiteral("Linked: the heatmap tick %1 is not a whole multiple of the server tick "
-                                            "(heatmap layer off?); nearest size used.")
-                                 .arg(m_linkTick > 0 ? QString::number(m_linkTick, 'g', 12) : QStringLiteral("(none)"));
+            : !(m_linkTick > 0) ? QStringLiteral("Linked: no heatmap tick yet; the nearest offered size is used.")
+            : QStringLiteral("Linked: the heatmap tick %1 is not a whole multiple of the server tick "
+                             "(heatmap layer off?); the nearest offered size is used.")
+                  .arg(QString::number(m_linkTick, 'g', 12));
     else tip += QStringLiteral("Fixed.");
     m_grouping->setToolTip(tip + QStringLiteral("\nClick to choose Auto, Link to heatmap, or a fixed size. "
                                                 "The spread above is the server's, whatever the row size."));

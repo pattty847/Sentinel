@@ -343,7 +343,7 @@ void DomModel::accumulateDepth(const LiveOrderBook& book, qint64 origin)
     // Cumulative size from the touch outward. Levels between the touch and a
     // pinned window edge count too, so the sums never depend on the scroll.
     // Those sums read only replica entries (never keys outside the band) through
-    // LiveOrderBook::sumRange (cached per 1,024-slot block, so a far-pinned window
+    // LiveOrderBook::sumRange (cached per 64-slot block, so a far-pinned window
     // costs its edges plus one read per block) and are reused while book version,
     // grid and window are unchanged.
     // Grouped keys of the filled rows' edges; the touch and the replica are native.
@@ -518,7 +518,7 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
 
 void DomModel::setGroup(int64_t group)
 {
-    m_requestedGroup = std::clamp<int64_t>(group, 1, dom::MaxGroup);
+    m_requestedGroup = std::clamp<int64_t>(group, 1, dom::MaxModelGroup);
 }
 
 qint64 DomModel::anchoredTop(double nativeTick, int64_t group) const
@@ -559,6 +559,21 @@ void DomModel::fillRows(const LiveOrderBook& book, qint64 origin, int64_t group)
     const qint64 size = static_cast<qint64>(std::min(bids.size(), asks.size()));
     const qint64 lo = std::max<qint64>((m_top - m_rangeLast) * group - origin, 0);
     const qint64 hi = std::min<qint64>((m_top - m_rangeFirst + 1) * group - origin, size);
+    m_groupLevels = 0;
+    if (group > qint64(2 * LiveOrderBook::SumBlockSlots)) {
+        // Coarse rows (a linked $250 tick is 2,500 levels): per-row block sums, so a row
+        // costs its two edges plus one read per block, not every level.
+        for (int r = m_rangeFirst; r <= m_rangeLast; ++r) {
+            const qint64 from = std::max<qint64>((m_top - r) * group - origin, 0);
+            const qint64 to = std::min<qint64>((m_top - r + 1) * group - origin, size) - 1;
+            if (to < from) continue;
+            size_t bidReads = 0, askReads = 0;
+            m_next[size_t(r)].bid = book.sumRange(true, size_t(from), size_t(to), &bidReads);
+            m_next[size_t(r)].ask = book.sumRange(false, size_t(from), size_t(to), &askReads);
+            m_groupLevels += qint64(std::max(bidReads, askReads));
+        }
+        return;
+    }
     m_groupLevels = std::max<qint64>(0, hi - lo);
     for (qint64 source = lo; source < hi; ++source) {
         auto& row = m_next[size_t(m_top - dom::floorDiv(origin + source, group))];
