@@ -5,14 +5,20 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <span>
 
 namespace dom {
 // Coarsest row Auto and the fixed menu offer, in native levels (BTC 0.1 -> $100): a short
 // menu and a bounded Auto search (20 rows x group levels per candidate). Link has no cap.
 constexpr int64_t MaxGroup = 1000;
-// Any row the model accepts (Link may follow any whole multiple of the native tick).
-constexpr int64_t MaxModelGroup = 1'000'000'000;
+// The coarsest row the model accepts, set by overflow, not by taste: DomModel multiplies
+// the group by row keys of at most 4,096 (a window top of at least DomModel::Rows - 1, plus
+// the window) and by native slot indices, and wholeMultiple must resolve the ratio exactly
+// in a double (below 2^53). Link follows any whole multiple up to this.
+constexpr int64_t MaxModelGroup = 1'000'000'000'000'000;
+static_assert(MaxModelGroup < std::numeric_limits<int64_t>::max() / 4096, "group x row key overflows int64");
+static_assert(double(MaxModelGroup) < 0x1p53, "group not exact in a double");
 // A row coarser than this share of the mid is the DOM's too-coarse state (DomModel).
 constexpr double MaxShareOfMid = 0.01;
 
@@ -39,8 +45,10 @@ GroupChoices groupChoices(double nativeTick, double mid);
 int64_t wholeMultiple(double x, double unit);
 
 struct LinkGroup {
+    enum class Fallback { None, NoTick, NotMultiple, TooCoarse };
     int64_t group = 1;
-    bool exact = false; // false: the heatmap tick is not a valid choice; nearest used
+    bool exact = false; // false: the nearest offered size is used, for `fallback`
+    Fallback fallback = Fallback::NoTick;
 };
 // The heatmap's tick as a group: any whole multiple of the native tick is followed
 // exactly (owner, 2026-10-25: no MaxGroup or share-of-mid cap). Only a tick that is not

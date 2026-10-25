@@ -164,6 +164,7 @@ private:
     Grouping m_groupMode = Grouping::Auto;
     double m_fixedTick = 0, m_linkTick = 0, m_groupNative = 0, m_shownNative = -1, m_shownLinkTick = -1;
     bool m_linkManual = false, m_linkExact = true;
+    dom::LinkGroup::Fallback m_linkFallback = dom::LinkGroup::Fallback::None;
     dom::GroupChoices m_choices;
     dom::GroupHold m_autoHold, m_linkHold;
     int64_t m_shownGroup = 0;

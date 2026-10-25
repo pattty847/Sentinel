@@ -29,7 +29,7 @@ int64_t wholeMultiple(double x, double unit)
 {
     if (!std::isfinite(x) || !std::isfinite(unit) || !(unit > 0) || !(x > 0)) return 0;
     const double ratio = x / unit;
-    if (ratio > 1e15) return 0;
+    if (ratio > double(MaxModelGroup)) return 0;
     const int64_t m = std::llround(ratio);
     return std::abs(ratio - double(m)) < 1e-6 ? m : 0;
 }
@@ -56,9 +56,14 @@ GroupChoices groupChoices(double nativeTick, double mid)
 
 LinkGroup linkGroup(double heatmapTick, double nativeTick, const GroupChoices& choices)
 {
-    const int64_t group = wholeMultiple(heatmapTick, nativeTick);
-    if (group > 0 && group <= MaxModelGroup) return {group, true};
-    return {choices.nearest(nativeTick > 0 ? heatmapTick / nativeTick : 0), false};
+    using Fallback = LinkGroup::Fallback;
+    if (!std::isfinite(heatmapTick) || !(heatmapTick > 0) || !std::isfinite(nativeTick) || !(nativeTick > 0))
+        return {choices.nearest(1), false, Fallback::NoTick};
+    const double ratio = heatmapTick / nativeTick;
+    if (!(ratio <= double(MaxModelGroup)))
+        return {choices.groups[size_t(std::max(0, choices.count - 1))], false, Fallback::TooCoarse};
+    if (const int64_t group = wholeMultiple(heatmapTick, nativeTick); group > 0) return {group, true, Fallback::None};
+    return {choices.nearest(ratio), false, Fallback::NotMultiple};
 }
 
 int AutoGroupRule::filledRows(const AutoBook& book, bool bid, int64_t group)

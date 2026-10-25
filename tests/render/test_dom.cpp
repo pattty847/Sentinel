@@ -2037,6 +2037,24 @@ TEST(DomGroup, CoarseLinkedRowsStayBoundedAndExact) {
               << qint64(rows) * 2500 << ") publish_us=" << ns / 1000.0 << '\n';
 }
 
+TEST(DomGroup, AGroupAboveOneBillionLevelsPublishesOneRowOfEverything) {
+    LiveOrderBook book;
+    book.initialize(0, 100000, 0.1);
+    apply(book, {{true, 50000, 2}, {true, 100, 3}, {false, 50000.1, 5}, {false, 99000, 7}});
+    DomModel model;
+    model.setGroup(2'000'000'000); // $200,000,000 rows
+    model.publish(book, {}, true);
+    ASSERT_EQ(model.group(), 2'000'000'000);
+    EXPECT_DOUBLE_EQ(model.tick(), 200'000'000);
+    const int row = rowAt(model, 0);
+    ASSERT_GE(row, 0);
+    EXPECT_DOUBLE_EQ(model.index(row, DomModel::Bid).data(DomModel::QuantityRole).toDouble(), 5);
+    EXPECT_DOUBLE_EQ(model.index(row, DomModel::Ask).data(DomModel::QuantityRole).toDouble(), 12);
+    EXPECT_EQ(model.index(row, DomModel::Price).data().toString(), "0");
+    EXPECT_EQ(model.index(row, 0).data(DomModel::BestSideRole).toString(), "Bid / Ask");
+    EXPECT_LT(model.lastGroupLevels(), 100000) << "block sums, not 1,000,001 levels a row";
+}
+
 TEST(DomGroup, ServerTickChangeKeepsTheMiddleVisiblePrice) {
     LiveOrderBook book;
     book.initialize(19000, 21000, 0.1);
@@ -2093,6 +2111,16 @@ TEST(DomGroup, ChoicesAreTheHeatmapPresetsThatAreWholeMultiples) {
     EXPECT_TRUE(dom::linkGroup(0.3, 0.1, choices).exact);
     EXPECT_EQ(dom::linkGroup(250, 0.1, dom::groupChoices(0.1, 200)).group, 2500);
     EXPECT_TRUE(dom::linkGroup(250, 0.1, dom::groupChoices(0.1, 200)).exact);
+    // Above one billion levels: still exact (a settings-API tick of 200,000,000 at price scale 100).
+    EXPECT_EQ(dom::linkGroup(200'000'000, 0.1, choices).group, 2'000'000'000);
+    EXPECT_TRUE(dom::linkGroup(200'000'000, 0.1, choices).exact);
+    EXPECT_EQ(dom::linkGroup(1e14, 0.1, choices).group, 1'000'000'000'000'000); // the indexable limit
+    // Only a group the ladder cannot index falls back, and says why.
+    const auto tooCoarse = dom::linkGroup(1e15, 0.1, choices);
+    EXPECT_FALSE(tooCoarse.exact);
+    EXPECT_EQ(tooCoarse.fallback, dom::LinkGroup::Fallback::TooCoarse);
+    EXPECT_EQ(tooCoarse.group, 1000);
+    EXPECT_EQ(dom::linkGroup(0.15, 0.1, choices).fallback, dom::LinkGroup::Fallback::NotMultiple);
     EXPECT_EQ(dom::linkGroup(0, 0.1, choices).group, 1);
 }
 
@@ -2275,6 +2303,16 @@ TEST_F(DomDock, GroupingMenuFixedPersistsAndLinkFollowsTheHeatmapTick) {
     EXPECT_EQ(model->group(), 20);
     tick(dom::GroupHold::HoldMs + 10);
     EXPECT_EQ(model->group(), 5);
+    dock.setHeatmapTick(200'000'000, true); // above one billion levels: still followed exactly
+    tick();
+    EXPECT_EQ(model->group(), 2'000'000'000);
+    EXPECT_DOUBLE_EQ(model->tick(), 200'000'000);
+    EXPECT_TRUE(button->toolTip().contains("Linked to the heatmap tick.")) << button->toolTip().toStdString();
+    dock.setHeatmapTick(1e15, true); // beyond what the ladder can index: coarsest offered, said so
+    tick();
+    EXPECT_EQ(model->group(), dock.groupChoices().list().back());
+    EXPECT_TRUE(button->toolTip().contains("beyond what the ladder can index")) << button->toolTip().toStdString();
+    EXPECT_FALSE(button->toolTip().contains("not a whole multiple"));
     dock.setHeatmapTick(0.15, true); // not a whole multiple (heatmap layer off): nearest, said in the tooltip
     tick();
     EXPECT_EQ(model->group(), 2);

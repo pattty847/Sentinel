@@ -615,6 +615,7 @@ void OrderBookDock::updateGrouping(const LiveOrderBook& book)
     } else if (m_groupMode == Grouping::Link) {
         const auto link = dom::linkGroup(m_linkTick, native, m_choices);
         m_linkExact = link.exact;
+        m_linkFallback = link.fallback;
         if (m_linkManual) m_linkHold.reset(); // a locked heatmap tick applies at once
         group = m_linkHold.step(link.group, now);
     } else {
@@ -656,10 +657,15 @@ void OrderBookDock::updateGroupButton()
                    .arg(dom::AutoGroupRule::RowsPerSide).arg(dom::GroupHold::HoldMs / 1000.0);
     else if (m_groupMode == Grouping::Link)
         tip += m_linkExact ? QStringLiteral("Linked to the heatmap tick.")
-            : !(m_linkTick > 0) ? QStringLiteral("Linked: no heatmap tick yet; the nearest offered size is used.")
-            : QStringLiteral("Linked: the heatmap tick %1 is not a whole multiple of the server tick "
-                             "(heatmap layer off?); the nearest offered size is used.")
-                  .arg(QString::number(m_linkTick, 'g', 12));
+            : m_linkFallback == dom::LinkGroup::Fallback::TooCoarse
+                ? QStringLiteral("Linked: the heatmap tick %1 is more than %2 server ticks, beyond what the ladder "
+                                 "can index; the coarsest offered size is used.")
+                      .arg(QString::number(m_linkTick, 'g', 12)).arg(double(dom::MaxModelGroup), 0, 'g', 3)
+            : m_linkFallback == dom::LinkGroup::Fallback::NotMultiple
+                ? QStringLiteral("Linked: the heatmap tick %1 is not a whole multiple of the server tick "
+                                 "(heatmap layer off?); the nearest offered size is used.")
+                      .arg(QString::number(m_linkTick, 'g', 12))
+            : QStringLiteral("Linked: no heatmap tick yet; the nearest offered size is used.");
     else tip += QStringLiteral("Fixed.");
     m_grouping->setToolTip(tip + QStringLiteral("\nClick to choose Auto, Link to heatmap, or a fixed size. "
                                                 "The spread above is the server's, whatever the row size."));
