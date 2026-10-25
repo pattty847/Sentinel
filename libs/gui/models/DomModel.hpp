@@ -95,6 +95,11 @@ public:
     static constexpr int GroupMarginRows = 32;
     static constexpr int64_t GroupBudgetLevels = 4096;
     // Test hooks: the filled row range and the native levels the last publication read.
+    // False when the reported visible rows reach past the filled rows (a page scroll or a
+    // scrollbar jump at a coarse group): the dock republishes before they paint.
+    bool fillsVisibleRows() const {
+        return !m_ready || m_firstVisible < 0 || (m_firstVisible >= m_rangeFirst && m_lastVisible <= m_rangeLast);
+    }
     int filledFirst() const { return m_rangeFirst; }
     int filledLast() const { return m_rangeLast; }
     qint64 lastGroupLevels() const { return m_groupLevels; }

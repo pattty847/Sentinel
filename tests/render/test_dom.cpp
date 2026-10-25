@@ -1964,6 +1964,47 @@ TEST(DomGroup, PinnedLevelsAboveTheFilledRowsStillCountInTheSum) {
     EXPECT_DOUBLE_EQ(model.index(rowAt(model, 200), DomModel::Bid).data(DomModel::CumulativeRole).toDouble(), 15);
 }
 
+TEST(DomGroup, FarPinnedCumulativeCostIsBoundedOnEveryBookChange) {
+    // A 1,000,001-slot band with every level resting: bids below 50,000, asks above.
+    LiveOrderBook book;
+    book.initialize(0, 100000, 0.1);
+    std::vector<BookLevelUpdate> levels;
+    for (int i = 1; i <= 499'990; ++i) levels.push_back({true, 50000 - i * 0.1, 1.0});
+    for (int i = 1; i <= 499'990; ++i) levels.push_back({false, 50000 + i * 0.1, 1.0});
+    levels.push_back({true, 50000, 1.0});
+    book.applyUpdates(levels, std::chrono::system_clock::now(), nullptr);
+    DomModel model;
+    DomTradeWindow trades;
+    model.setGroup(1000); // $100 rows
+    model.publish(book, trades, true);
+    // Pinned on $5,000: about 420,000 native levels between the filled rows and the touch.
+    const int row = rowAt(model, 50);
+    ASSERT_GE(row, 0);
+    model.setVisibleRows(row - 10, row + 10);
+    model.publish(book, trades, false);
+    ASSERT_LT(model.filledFirst(), row);
+    const auto expected = [&](int r) { // bids at or above the row's lower edge: (50000 - edge) / 0.1 + 1
+        const double edge = double(model.index(r, 0).data(DomModel::BucketRole).toLongLong()) * 100;
+        return std::round((50000 - edge) / 0.1) + 1;
+    };
+    EXPECT_DOUBLE_EQ(model.index(row, DomModel::Bid).data(DomModel::CumulativeRole).toDouble(), expected(row));
+    qint64 worst = 0;
+    QElapsedTimer cost;
+    qint64 worstNs = 0;
+    for (int i = 0; i < 20; ++i) {
+        apply(book, {{true, 49999.9 - i * 0.1, 2.0 + i}}); // a change near the touch, every publication
+        cost.start();
+        model.publish(book, trades, false);
+        worstNs = std::max(worstNs, cost.nsecsElapsed());
+        worst = std::max(worst, model.lastDepthSteps());
+    }
+    EXPECT_DOUBLE_EQ(model.index(row, DomModel::Bid).data(DomModel::CumulativeRole).toDouble(),
+                     expected(row) + 20 * 1.0 + (19 * 20) / 2.0); // the 20 changes each added 1 + i
+    EXPECT_GT(worst, 0);
+    EXPECT_LT(worst, 4000) << "edges plus one read per 1,024-slot block, never the 420,000 levels";
+    std::cout << "DOM_FAR_PINNED depthReads_max=" << worst << " publish_us_max=" << worstNs / 1000.0 << '\n';
+}
+
 TEST(DomGroup, ChoicesAreTheHeatmapPresetsThatAreWholeMultiples) {
     const auto list = [](const dom::GroupChoices& c) { return std::vector<int64_t>(c.list().begin(), c.list().end()); };
     EXPECT_EQ(list(dom::groupChoices(0.1, 110000)), (std::vector<int64_t>{1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000}));
@@ -2163,10 +2204,44 @@ TEST_F(DomDock, GroupingMenuFixedPersistsAndLinkFollowsTheHeatmapTick) {
     tick();
     EXPECT_EQ(model->group(), 2);
     EXPECT_TRUE(button->toolTip().contains("not a whole multiple")) << button->toolTip().toStdString();
+    EXPECT_TRUE(button->toolTip().contains("0.15"));
+    dock.setHeatmapTick(0.16, true); // the same fallback size: the tooltip names the new tick
+    tick();
+    EXPECT_EQ(model->group(), 2);
+    EXPECT_TRUE(button->toolTip().contains("0.16")) << button->toolTip().toStdString();
     dock.setGrouping(OrderBookDock::Grouping::Auto);
     tick();
     EXPECT_EQ(dock.grouping(), OrderBookDock::Grouping::Auto);
     EXPECT_EQ(button->text(), "Auto ▾");
+}
+
+TEST_F(DomDock, PageScrollAndScrollbarJumpFillExposedGroupedRowsBeforePaint) {
+    source.update({{true, 200, 1}, {false, 200.1, 1}, {false, 480.5, 7}, {true, 50.3, 3}});
+    dock.setGrouping(OrderBookDock::Grouping::Fixed, 1.0); // $1 rows: about 409 rows filled
+    show();
+    auto* timer = dock.findChild<QTimer*>("domPublishTimer");
+    timer->stop();
+    QMetaObject::invokeMethod(&dock, "refreshDisplay", Qt::DirectConnection);
+    ASSERT_EQ(model->group(), 10);
+    QWheelEvent wheel(QPointF(20, 20), table->viewport()->mapToGlobal(QPoint(20, 20)),
+                      QPoint(), QPoint(0, 120), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+    QApplication::sendEvent(table->viewport(), &wheel); // the user scrolls: follow stops
+    const auto q = [&](qint64 key, int col, int role) { return model->index(rowAt(*model, key), col).data(role).toDouble(); };
+    // A scrollbar jump 280 rows up: no timer tick before the check.
+    const int far = rowAt(*model, 480);
+    ASSERT_LT(far, model->filledFirst());
+    table->verticalScrollBar()->setValue(table->rowViewportPosition(far) + table->verticalScrollBar()->value());
+    EXPECT_TRUE(model->fillsVisibleRows());
+    EXPECT_DOUBLE_EQ(q(480, DomModel::Ask, DomModel::QuantityRole), 7);
+    EXPECT_DOUBLE_EQ(q(480, DomModel::Ask, DomModel::CumulativeRole), 8);
+    // Page steps back down past the filled rows of the new view.
+    const int target = rowAt(*model, 50);
+    for (int i = 0; i < 200 && table->rowAt(table->viewport()->height() / 2) < target; ++i) {
+        table->verticalScrollBar()->triggerAction(QAbstractSlider::SliderPageStepAdd);
+        EXPECT_TRUE(model->fillsVisibleRows()) << i;
+    }
+    EXPECT_DOUBLE_EQ(q(50, DomModel::Bid, DomModel::QuantityRole), 3);
+    EXPECT_DOUBLE_EQ(q(50, DomModel::Bid, DomModel::CumulativeRole), 4);
 }
 
 TEST_F(DomDock, CheckedTogglesLookDifferentInTheDarkTheme) {

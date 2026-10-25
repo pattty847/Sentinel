@@ -406,6 +406,9 @@ void OrderBookDock::buildLadder(QVBoxLayout* layout)
     m_table->viewport()->installEventFilter(this);
     m_table->installEventFilter(this);
     m_table->verticalScrollBar()->installEventFilter(this);
+    // Grouped rows are filled around the view only: rows a scroll exposes are filled
+    // before they paint (bounded: the same visible-plus-margin publication).
+    connect(m_table->verticalScrollBar(), &QScrollBar::valueChanged, this, &OrderBookDock::fillExposedRows);
     layout->addWidget(m_table, 1);
 }
 
@@ -632,8 +635,10 @@ void OrderBookDock::updateGroupButton()
 {
     // Text and tooltip change only with the size or mode (no per-tick string work).
     const int64_t group = m_model->requestedGroup();
-    if (group == m_shownGroup && m_groupMode == m_shownMode && m_linkExact == m_shownExact && m_groupNative == m_shownNative) return;
+    if (group == m_shownGroup && m_groupMode == m_shownMode && m_linkExact == m_shownExact &&
+        m_groupNative == m_shownNative && m_linkTick == m_shownLinkTick) return;
     m_shownGroup = group;
+    m_shownLinkTick = m_linkTick;
     m_shownNative = m_groupNative;
     m_shownMode = m_groupMode;
     m_shownExact = m_linkExact;
@@ -856,6 +861,14 @@ bool OrderBookDock::eventFilter(QObject* watched, QEvent* event)
     return DockablePanel::eventFilter(watched, event);
 }
 
+void OrderBookDock::fillExposedRows()
+{
+    if (m_programmaticScroll || m_follow || !m_displayActive || !m_source || m_symbol.isEmpty()) return;
+    updateVisibleRows();
+    if (m_model->fillsVisibleRows()) return;
+    m_model->publish(m_source->getDirectLiveOrderBook(m_symbolId), m_trades, false, QDateTime::currentMSecsSinceEpoch());
+}
+
 void OrderBookDock::recenter()
 {
     m_follow = true;
@@ -885,7 +898,7 @@ void OrderBookDock::refreshBook()
         cost.start();
         m_model->publish(book, m_trades, m_follow, now);
         sLog_Probe("dom.publish", "us=" << double(cost.nsecsElapsed()) / 1000.0 << " group=" << m_model->group()
-                   << " levels=" << m_model->lastGroupLevels() << " rows=" << m_model->filledFirst() << ".."
+                   << " levels=" << m_model->lastGroupLevels() << " depthReads=" << m_model->lastDepthSteps() << " rows=" << m_model->filledFirst() << ".."
                    << m_model->filledLast());
     }
     // Every exposed tick, changed or not, so the 10 s totals keep moving on a quiet book.

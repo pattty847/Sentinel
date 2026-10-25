@@ -117,6 +117,13 @@ public:
         std::vector<std::pair<uint32_t, double>>& askBuffer,
         size_t maxPerSide, size_t maxScanWordsPerSide = std::numeric_limits<size_t>::max()) const;
 
+    // Sum of the positive finite sizes in slots [lo, hi] of one side (clamped to the band).
+    // Exact per-block sums of SumBlockSlots slots are cached and recomputed only after a
+    // change inside that block, so a wide range costs its edges plus one read per block.
+    // slotReads (optional) receives the slot reads this call made.
+    static constexpr size_t SumBlockSlots = 1024;
+    double sumRange(bool bid, size_t lo, size_t hi, size_t* slotReads = nullptr) const;
+
     void accumulateRange(double minPrice,
                          double maxPrice,
                          double rowTickSize,
@@ -151,6 +158,9 @@ private:
     // Preallocated occupancy words keep top-level reads independent of dense band width.
     std::vector<uint64_t> m_bidPresent;
     std::vector<uint64_t> m_askPresent;
+    // sumRange cache: per-block sums and a changed flag per block (set on every level change).
+    mutable std::vector<double> m_bidBlockSum, m_askBlockSum;
+    mutable std::vector<uint8_t> m_bidBlockDirty, m_askBlockDirty;
 
     // Book structure configuration
     double m_min_price = 0.0;

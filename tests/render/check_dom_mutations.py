@@ -23,8 +23,9 @@ grouping = root / 'libs/gui/models/DomGrouping.cpp'
 grouping_header = root / 'libs/gui/models/DomGrouping.hpp'
 theme = root / 'libs/gui/themes/DarkTheme.cpp'
 controls = root / 'libs/gui/mainwindow/HeatmapChartControls.cpp'
+book = root / 'libs/core/marketdata/model/LiveOrderBook.cpp'
 original = {p: p.read_text() for p in (model, header, dock, replica, lean, lean_header, lean_widget, grouping,
-                                       grouping_header, theme, controls)}
+                                       grouping_header, theme, controls, book)}
 mutants = [
     ('lean_crossed_erases_history', lean,
      [('if (m_state == State::Crossed) return;', 'if (m_state == State::Crossed) { reset(); m_state = State::Crossed; return; }')],
@@ -174,9 +175,7 @@ mutants = [
        '    // dock does not republish each tick until rows return.\n')],
      'DomModel.PublicationRequestsSettleWhenTheLadderGoesAway'),
     ('depth_walks_price_distance', model,
-     [('const qint64 from = std::max<qint64>(fromKey - origin, 0);', 'const qint64 from = fromKey - origin;'),
-      ('                if (std::isfinite(side[source]) && side[source] > 0) total += side[source];',
-       '                if (source >= 0 && std::isfinite(side[source]) && side[source] > 0) total += side[source];')],
+     [('const qint64 from = std::max<qint64>(fromKey - origin, 0);', 'const qint64 from = fromKey - origin;')],
      'DomModel.PinnedCumulativeReadsOnlyTheReplicaAndReusesItsSum'),
     ('depth_rescanned_every_publish', model,
      [('if (!m_depthKey || !(*m_depthKey == key)) {', 'if (true) {')],
@@ -395,6 +394,18 @@ mutants = [
     ('group_control_in_heading', dock,
      [('    line->insertWidget(0, m_grouping);', '    m_heading->insertWidget(1, m_grouping);')],
      'DomDock.HeadingButtonsKeepTheirWholeTextFrom180To650'),
+    ('group_scroll_not_filled', dock,
+     [('    connect(m_table->verticalScrollBar(), &QScrollBar::valueChanged, this, &OrderBookDock::fillExposedRows);\n', '')],
+     'DomDock.PageScrollAndScrollbarJumpFillExposedGroupedRowsBeforePaint'),
+    ('group_sum_blocks_bypassed', book,
+     [('if (at == start && end - 1 <= hi) {', 'if (false) {')],
+     'DomGroup.FarPinnedCumulativeCostIsBoundedOnEveryBookChange'),
+    ('group_sum_block_never_dirty', book,
+     [('    (isBid ? m_bidBlockDirty : m_askBlockDirty)[index / SumBlockSlots] = 1;\n', '')],
+     'DomGroup.FarPinnedCumulativeCostIsBoundedOnEveryBookChange'),
+    ('group_link_tooltip_stale', dock,
+     [('m_groupNative == m_shownNative && m_linkTick == m_shownLinkTick) return;', 'm_groupNative == m_shownNative) return;')],
+     'DomDock.GroupingMenuFixedPersistsAndLinkFollowsTheHeatmapTick'),
     ('group_footer_compact_only', dock,
      [('{DomModel::PulseText::Compact, DomModel::PulseText::NoMax, DomModel::PulseText::Tiny}', '{DomModel::PulseText::Compact}'),
       ('while (!fits(text) && text.contains(QStringLiteral(" · ")))', 'while (false)')],

@@ -342,8 +342,10 @@ void DomModel::accumulateDepth(const LiveOrderBook& book, qint64 origin)
 {
     // Cumulative size from the touch outward. Levels between the touch and a
     // pinned window edge count too, so the sums never depend on the scroll.
-    // That walk only reads replica entries (never keys outside the band) and is
-    // reused while book version, grid and window are unchanged.
+    // Those sums read only replica entries (never keys outside the band) through
+    // LiveOrderBook::sumRange (cached per 1,024-slot block, so a far-pinned window
+    // costs its edges plus one read per block) and are reused while book version,
+    // grid and window are unchanged.
     // Grouped keys of the filled rows' edges; the touch and the replica are native.
     const qint64 rangeTop = m_top - m_rangeFirst, rangeBottom = m_top - m_rangeLast;
     const int64_t g = m_group;
@@ -352,18 +354,17 @@ void DomModel::accumulateDepth(const LiveOrderBook& book, qint64 origin)
                        m_nativeTick, g};
     m_depthSteps = 0;
     if (!m_depthKey || !(*m_depthKey == key)) {
-        const auto sum = [&](const std::vector<double>& side, qint64 fromKey, qint64 toKey) {
+        const auto sum = [&](bool bid, qint64 fromKey, qint64 toKey) {
             const qint64 from = std::max<qint64>(fromKey - origin, 0);
-            const qint64 to = std::min<qint64>(toKey - origin, static_cast<qint64>(side.size()) - 1);
-            double total = 0;
-            for (qint64 source = from; source <= to; ++source) {
-                if (std::isfinite(side[source]) && side[source] > 0) total += side[source];
-            }
-            m_depthSteps += std::max<qint64>(0, to - from + 1);
+            const qint64 to = toKey - origin;
+            if (to < from) return 0.0;
+            size_t reads = 0;
+            const double total = book.sumRange(bid, size_t(from), size_t(to), &reads);
+            m_depthSteps += qint64(reads);
             return total;
         };
-        m_outsideBid = m_bestBid > 0 && bestBid && *bestBid >= (rangeTop + 1) * g ? sum(book.getBids(), (rangeTop + 1) * g, *bestBid) : 0;
-        m_outsideAsk = m_bestAsk > 0 && bestAsk && *bestAsk < rangeBottom * g ? sum(book.getAsks(), *bestAsk, rangeBottom * g - 1) : 0;
+        m_outsideBid = m_bestBid > 0 && bestBid && *bestBid >= (rangeTop + 1) * g ? sum(true, (rangeTop + 1) * g, *bestBid) : 0;
+        m_outsideAsk = m_bestAsk > 0 && bestAsk && *bestAsk < rangeBottom * g ? sum(false, *bestAsk, rangeBottom * g - 1) : 0;
         m_depthKey = key;
     }
     double bidTotal = m_outsideBid, askTotal = m_outsideAsk;
