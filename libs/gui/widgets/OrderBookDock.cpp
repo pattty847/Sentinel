@@ -435,7 +435,12 @@ void OrderBookDock::buildUi()
     m_aggregation = label("domAggregation");
     m_summary = label("domBookSummary");
     m_status = label("domFreshness");
-    layout->addWidget(m_aggregation);
+    // The row-grouping menu leads the aggregation line: the heading has no room for a
+    // fifth control at the 180 px minimum (INV-125).
+    auto* aggregationLine = new QHBoxLayout;
+    aggregationLine->setSpacing(4);
+    aggregationLine->addWidget(m_aggregation, 1);
+    layout->addLayout(aggregationLine);
     auto* summaryLine = new QHBoxLayout;
     summaryLine->setSpacing(4);
     summaryLine->addWidget(m_summary, 1);
@@ -445,7 +450,7 @@ void OrderBookDock::buildUi()
     m_status->setText("Waiting for book");
     buildLean(heading, layout);
     buildLadder(layout);
-    buildGrouping(heading);
+    buildGrouping(aggregationLine);
     m_pulseFooter = label("domPulseFooter");
     layout->addWidget(m_pulseFooter);
     // Same settings store and format as the other docks (AGENTS 4b: never a native-format QSettings).
@@ -480,19 +485,11 @@ void OrderBookDock::buildLean(QHBoxLayout* heading, QVBoxLayout* layout)
     updateLeanVisibility();
 }
 
-namespace {
-// The grouping button opens its menu on click; its arrow would cost heading width.
-const char* const GroupButtonStyle = "QToolButton::menu-indicator { image: none; width: 0px; }";
-const char* const GroupButtonCompactStyle =
-    "QToolButton { padding: 1px; } QToolButton::menu-indicator { image: none; width: 0px; }";
-} // namespace
-
 void OrderBookDock::applyHeadingStyle(bool compact)
 {
     m_heading->setSpacing(compact ? 0 : -1);
     for (auto* button : {m_pulse, m_lean, m_cumulative})
         button->setStyleSheet(compact ? QStringLiteral("QToolButton { padding: 1px; }") : QString());
-    if (m_grouping) m_grouping->setStyleSheet(compact ? GroupButtonCompactStyle : GroupButtonStyle);
     m_recenter->setStyleSheet(compact ? QStringLiteral("QPushButton { padding: 1px; }") : QString());
 }
 
@@ -503,11 +500,9 @@ void OrderBookDock::fitHeading()
     if (m_headingNatural < 0) {
         if (m_headingCompact) applyHeadingStyle(false);
         m_headingCompact = false;
-        int needed = 5 * m_heading->spacing();
+        int needed = 4 * m_heading->spacing();
         for (QWidget* button : {static_cast<QWidget*>(m_pulse), static_cast<QWidget*>(m_lean),
-                                static_cast<QWidget*>(m_cumulative), static_cast<QWidget*>(m_recenter),
-                                static_cast<QWidget*>(m_grouping)}) {
-            if (!button) continue;
+                                static_cast<QWidget*>(m_cumulative), static_cast<QWidget*>(m_recenter)}) {
             button->ensurePolished();
             needed += button->sizeHint().width();
         }
@@ -528,25 +523,23 @@ void OrderBookDock::changeEvent(QEvent* event)
     }
 }
 
-void OrderBookDock::buildGrouping(QHBoxLayout* heading)
+void OrderBookDock::buildGrouping(QHBoxLayout* line)
 {
     m_grouping = new QToolButton(m_contentWidget);
     m_grouping->setObjectName("domGrouping");
     m_grouping->setAccessibleName("Row grouping");
     m_grouping->setPopupMode(QToolButton::InstantPopup);
-    m_grouping->setStyleSheet(GroupButtonStyle);
+    m_grouping->setStyleSheet("QToolButton { padding: 1px 3px; } QToolButton::menu-indicator { image: none; width: 0px; }");
     m_groupMenu = new QMenu(m_grouping);
     m_groupMenu->setObjectName("domGroupingMenu");
     m_grouping->setMenu(m_groupMenu);
     connect(m_groupMenu, &QMenu::aboutToShow, this, &OrderBookDock::fillGroupMenu);
-    heading->insertWidget(1, m_grouping);
+    line->insertWidget(0, m_grouping);
     QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
     const QString mode = settings.value("OrderBookDock/grouping", "auto").toString();
     m_groupMode = mode == "fixed" ? Grouping::Fixed : mode == "link" ? Grouping::Link : Grouping::Auto;
     m_fixedTick = settings.value("OrderBookDock/groupTick", 0.0).toDouble();
     updateGroupButton();
-    m_headingNatural = -1;
-    fitHeading();
 }
 
 void OrderBookDock::setGrouping(Grouping mode, double fixedTick)
@@ -625,7 +618,7 @@ void OrderBookDock::updateGrouping(const LiveOrderBook& book)
         const dom::AutoBook view{book.getBids(), book.getAsks(), std::llround(top.minPrice / native),
             m_groupBids.empty() ? -1 : std::ptrdiff_t(m_groupBids.front().first),
             m_groupAsks.empty() ? -1 : std::ptrdiff_t(m_groupAsks.front().first)};
-        const int64_t target = dom::AutoGroupRule::target(view, m_choices);
+        const int64_t target = dom::AutoGroupRule::target(view, m_choices, m_autoHold.current());
         group = m_autoHold.step(target, now);
         sLog_Probe("dom.group", "mode=auto target=" << target << " group=" << group << " changes=" << m_autoHold.changes()
                    << " native=" << native);
@@ -639,14 +632,16 @@ void OrderBookDock::updateGroupButton()
 {
     // Text and tooltip change only with the size or mode (no per-tick string work).
     const int64_t group = m_model->requestedGroup();
-    if (group == m_shownGroup && m_groupMode == m_shownMode && m_linkExact == m_shownExact && m_groupNative > 0) return;
+    if (group == m_shownGroup && m_groupMode == m_shownMode && m_linkExact == m_shownExact && m_groupNative == m_shownNative) return;
     m_shownGroup = group;
+    m_shownNative = m_groupNative;
     m_shownMode = m_groupMode;
     m_shownExact = m_linkExact;
     const double tick = double(group) * m_groupNative;
     const QString size = m_groupNative > 0 ? DomModel::priceText(tick, tick) : QStringLiteral("—");
-    const QString prefix = m_groupMode == Grouping::Auto ? QStringLiteral("A ") : m_groupMode == Grouping::Link ? QStringLiteral("L ") : QString();
-    m_grouping->setText(prefix + size);
+    // The mode names the button; the aggregation text beside it states the row size.
+    m_grouping->setText(m_groupMode == Grouping::Auto ? QStringLiteral("Auto ▾")
+                        : m_groupMode == Grouping::Link ? QStringLiteral("Link ▾") : QStringLiteral("Fixed ▾"));
     QString tip = QStringLiteral("Row size %1 (%2 server ticks). ").arg(size).arg(group);
     if (m_groupMode == Grouping::Auto)
         tip += QStringLiteral("Auto: the smallest size at which %1% of the %2 rows each side of the touch hold size; "
@@ -660,9 +655,7 @@ void OrderBookDock::updateGroupButton()
     else tip += QStringLiteral("Fixed.");
     m_grouping->setToolTip(tip + QStringLiteral("\nClick to choose Auto, Link to heatmap, or a fixed size. "
                                                 "The spread above is the server's, whatever the row size."));
-    if (group > 1 || m_groupNative > 0) sLog_App("DOM grouping mode=" << int(m_groupMode) << " group=" << group << " size=" << size);
-    m_headingNatural = -1;
-    fitHeading();
+    if (m_groupNative > 0) sLog_App("DOM grouping mode=" << int(m_groupMode) << " group=" << group << " size=" << size);
 }
 
 void OrderBookDock::updateLeanVisibility()

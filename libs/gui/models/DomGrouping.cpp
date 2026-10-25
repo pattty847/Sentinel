@@ -87,12 +87,12 @@ int AutoGroupRule::filledRows(const AutoBook& book, bool bid, int64_t group)
     return filled;
 }
 
-int64_t AutoGroupRule::target(const AutoBook& book, const GroupChoices& choices)
+int64_t AutoGroupRule::target(const AutoBook& book, const GroupChoices& choices, int64_t current)
 {
     const bool bid = book.bidTop >= 0, ask = book.askTop >= 0;
     if ((!bid && !ask) || choices.count == 0) return 0;
-    const int needed = int(std::ceil(TargetFill * RowsPerSide - 1e-9));
     for (const int64_t group : choices.list()) {
+        const int needed = int(std::ceil((group < current ? FinerFill : TargetFill) * RowsPerSide - 1e-9));
         if ((!bid || filledRows(book, true, group) >= needed) && (!ask || filledRows(book, false, group) >= needed))
             return group;
     }

@@ -1257,6 +1257,7 @@ TEST(DomWindow, MinimizedMainWindowStopsTimerAndRetainsTradeIngestion) {
     Source source;
     QMainWindow window;
     auto* dock = new OrderBookDock(&window, &source);
+    dock->setGrouping(OrderBookDock::Grouping::Fixed, 0.1); // a two-level book: native rows
     window.addDockWidget(Qt::LeftDockWidgetArea, dock);
     dock->onSymbolChanged("BTC-USD");
     source.update({{true, 200, 1}, {false, 200.1, 1}});
@@ -2006,6 +2007,13 @@ TEST(DomGroup, AutoPicksTheSmallestFilledSizeOnScriptedBooks) {
     EXPECT_EQ(target(10000, -1), 1);
     bids[10000 - 11] = 0;
     EXPECT_GT(target(10000, -1), 1);
+    // Hysteresis: 13 of every 20 levels (65%). From $0.2 rows the native size needs 14 (70%).
+    std::fill(bids.begin(), bids.end(), 0);
+    for (int j = 0; j < 2000; ++j) bids[10000 - j] = j % 20 < 13 ? 1 : 0;
+    EXPECT_EQ(dom::AutoGroupRule::target({bids, asks, 1'000'000, 10000, -1}, choices, 1), 1);
+    EXPECT_EQ(dom::AutoGroupRule::target({bids, asks, 1'000'000, 10000, -1}, choices, 2), 2);
+    bids[10000 - 13] = 1;
+    EXPECT_EQ(dom::AutoGroupRule::target({bids, asks, 1'000'000, 10000, -1}, choices, 2), 1);
     // Nothing anywhere near: the coarsest; an empty book has no target.
     std::fill(bids.begin(), bids.end(), 0);
     bids[100] = 1;
@@ -2119,7 +2127,8 @@ TEST_F(DomDock, GroupingMenuFixedPersistsAndLinkFollowsTheHeatmapTick) {
     tick();
     EXPECT_EQ(dock.grouping(), OrderBookDock::Grouping::Fixed);
     EXPECT_EQ(model->group(), 10);
-    EXPECT_EQ(button->text(), "1");
+    EXPECT_EQ(button->text(), "Fixed ▾");
+    EXPECT_TRUE(dock.findChild<QLabel*>("domAggregation")->text().startsWith("Rows 1 USD"));
     {
         Source other;
         OrderBookDock reopened{nullptr, &other};
@@ -2133,7 +2142,8 @@ TEST_F(DomDock, GroupingMenuFixedPersistsAndLinkFollowsTheHeatmapTick) {
     dock.setHeatmapTick(2.0, true); // a locked heatmap tick applies at once
     tick();
     EXPECT_EQ(model->group(), 20);
-    EXPECT_EQ(button->text(), "L 2");
+    EXPECT_EQ(button->text(), "Link ▾");
+    EXPECT_TRUE(button->toolTip().startsWith("Row size 2 (20 server ticks)")) << button->toolTip().toStdString();
     dock.setHeatmapTick(0.5, false); // heatmap Auto: the same hold
     tick();
     EXPECT_EQ(model->group(), 20);
@@ -2146,7 +2156,7 @@ TEST_F(DomDock, GroupingMenuFixedPersistsAndLinkFollowsTheHeatmapTick) {
     dock.setGrouping(OrderBookDock::Grouping::Auto);
     tick();
     EXPECT_EQ(dock.grouping(), OrderBookDock::Grouping::Auto);
-    EXPECT_TRUE(button->text().startsWith("A "));
+    EXPECT_EQ(button->text(), "Auto ▾");
 }
 
 TEST_F(DomDock, CheckedTogglesLookDifferentInTheDarkTheme) {
@@ -2185,6 +2195,33 @@ TEST_F(DomDock, HeadingRestylesOnlyWhenCompactModeFlips) {
     const int compact = counter.styles;
     for (int width : {185, 190, 182}) { dock.resize(width, 600); QCoreApplication::processEvents(); }
     EXPECT_EQ(counter.styles, compact);
+    qApp->setStyleSheet(previousStyle);
+}
+
+TEST_F(DomDock, HeadingButtonsKeepTheirWholeTextFrom180To650) {
+    const QString previousStyle = qApp->styleSheet();
+    qApp->setStyleSheet(DarkTheme{}.stylesheet());
+    source.update({{true, 200, 1}, {false, 200.1, 1}});
+    show();
+    for (const auto& [mode, tick] : {std::pair{OrderBookDock::Grouping::Fixed, 0.1}, std::pair{OrderBookDock::Grouping::Fixed, 1.0},
+                                     std::pair{OrderBookDock::Grouping::Auto, 0.0}}) {
+        dock.setGrouping(mode, tick);
+        for (int width : {650, 400, 260, 220, 180}) {
+            dock.resize(width, 600);
+            QCoreApplication::processEvents();
+            ASSERT_TRUE(QMetaObject::invokeMethod(&dock, "refreshDisplay", Qt::DirectConnection));
+            QCoreApplication::processEvents();
+            for (const char* name : {"domGrouping", "domPulse", "domLean", "domCumulative", "domRecenter", "domSymbol"}) {
+                if (QString(name) == "domSymbol") continue; // the symbol yields its width
+                auto* button = dock.findChild<QWidget*>(name);
+                EXPECT_GE(button->width(), button->sizeHint().width()) << name << " at " << width;
+                EXPECT_LE(button->mapTo(&dock, QPoint(button->width(), 0)).x(), width) << name << " at " << width;
+            }
+            EXPECT_TRUE(dock.findChild<QToolButton*>("domGrouping")->toolTip().startsWith(
+                mode == OrderBookDock::Grouping::Auto ? "Row size" : tick == 1.0 ? "Row size 1 (10" : "Row size 0.1 (1"))
+                << dock.findChild<QToolButton*>("domGrouping")->toolTip().toStdString();
+        }
+    }
     qApp->setStyleSheet(previousStyle);
 }
 

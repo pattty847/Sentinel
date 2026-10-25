@@ -50,12 +50,15 @@ struct AutoBook {
     std::ptrdiff_t bidTop = -1, askTop = -1;
 };
 // Auto target: the smallest choice at which at least TargetFill of the RowsPerSide
-// rows on each present side, counted from the touch row outward, hold size. None:
+// rows on each present side, counted from the touch row outward, hold size. A size
+// finer than `current` needs FinerFill (hysteresis: live BTC sits near 60% between
+// $1 and $2 rows, and a hold alone still switched about 12 times a minute). None:
 // the coarsest choice. An empty book has no target (0).
 struct AutoGroupRule {
     static constexpr int RowsPerSide = 20;
     static constexpr double TargetFill = 0.6;
-    static int64_t target(const AutoBook& book, const GroupChoices& choices);
+    static constexpr double FinerFill = 0.7;
+    static int64_t target(const AutoBook& book, const GroupChoices& choices, int64_t current = 0);
     // Rows of the RowsPerSide from the touch row that hold size, on one side.
     static int filledRows(const AutoBook& book, bool bid, int64_t group);
 };

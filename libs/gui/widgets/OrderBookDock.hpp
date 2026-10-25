@@ -112,7 +112,7 @@ private:
     void updateLeanVisibility();
     void fitHeading();
     void applyHeadingStyle(bool compact);
-    void buildGrouping(QHBoxLayout* heading);
+    void buildGrouping(QHBoxLayout* line);
     void fillGroupMenu();
     void updateGrouping(const LiveOrderBook& book);
     void updateGroupButton();
@@ -161,7 +161,7 @@ private:
     QToolButton* m_grouping = nullptr;
     QMenu* m_groupMenu = nullptr;
     Grouping m_groupMode = Grouping::Auto;
-    double m_fixedTick = 0, m_linkTick = 0, m_groupNative = 0;
+    double m_fixedTick = 0, m_linkTick = 0, m_groupNative = 0, m_shownNative = -1;
     bool m_linkManual = false, m_linkExact = true;
     dom::GroupChoices m_choices;
     dom::GroupHold m_autoHold, m_linkHold;
