@@ -2,6 +2,8 @@
 
 **A GPU-rendered order-flow terminal for Coinbase spot markets**, written in C++20 and Qt 6.
 
+![Sentinel: BTC-USD order book heatmap with recorded history and candles, and the Order Book dock in Σ cumulative mode with Pulse, Lean and grouped $5 rows](docs/assets/readme/terminal-2026-10-27.png)
+
 Sentinel records the full level 2 order book and trade tape of the products you choose, keeps that
 recording as a gap-aware history, and draws it live as an order book heatmap with candles and
 volume overlays. Orders are simulated. Sentinel has paper trading only and sends no real orders.
@@ -21,9 +23,9 @@ seven products. Documentation index: [docs/README.md](docs/README.md).
 
 ## Screenshots
 
-These were captured with a March 2026 build. The chart and docks have changed since then: the
-heatmap now also draws the recorded history, and the controls are different. New captures are
-pending.
+The image at the top is from 2026-10-27: hours of recorded BTC-USD heatmap history with candles,
+and the Order Book dock in cumulative (Σ) mode with Pulse, Lean and grouped rows. The two below were
+captured with a March 2026 build, and their controls have changed since.
 
 | Stock Chart with SEC insider signals | Screener |
 | --- | --- |
