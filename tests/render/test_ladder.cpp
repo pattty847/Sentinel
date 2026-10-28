@@ -1106,6 +1106,56 @@ TEST(WallRadar, APartlyKnownEdgeBinIsNoPartOfTheReference) {
     }
 }
 
+// The reference window starts at the bin of the real touch, even when that bin is only
+// partly known and the next levels lie further out: the window does not slide past a gap.
+// Native tick 1, display tick 10; the touch bin is partial, the window holds 10 and 30 and
+// the 1s just beyond it stay out (median 20, so neither 10 nor 30 is a wall at 4x).
+TEST(WallRadar, ThePartialTouchBinStillAnchorsTheReferenceWindow) {
+    { // bids: band ends at 1005, touch 1004 in bin 100 (partial); window bins 100..69
+        auto replica = book(0, 1005, 1, {{true, 1004, 100}, {true, 700, 10}, {true, 690, 30},
+                                         {true, 680, 1}, {true, 670, 1}, {true, 660, 1}});
+        RadarRig rig;
+        rig.view(camera(600, 800, 10));
+        const auto& s = rig.tick(*replica, 1000);
+        ASSERT_TRUE(s.valid && s.complete) << rig.feed.lastReason();
+        EXPECT_FLOAT_EQ(s.bidMedian, 20.0f) << "bins 70 and 69; a window re-anchored at bin 70 gives 1";
+        for (const int64_t k : {66, 67, 68, 69, 70}) EXPECT_FALSE(bidLarge(s, k)) << k;
+    }
+    { // asks: band starts at 5, touch 5 in bin 0 (partial); window bins 0..31
+        auto replica = book(5, 1010, 1, {{false, 5, 100}, {false, 300, 10}, {false, 310, 30},
+                                         {false, 320, 1}, {false, 330, 1}, {false, 340, 1}});
+        RadarRig rig;
+        rig.view(camera(250, 450, 10));
+        const auto& s = rig.tick(*replica, 1000);
+        ASSERT_TRUE(s.valid && s.complete) << rig.feed.lastReason();
+        EXPECT_FLOAT_EQ(s.askMedian, 20.0f) << "bins 30 and 31; a window re-anchored at bin 30 gives 1";
+        for (const int64_t k : {30, 31, 32, 33, 34}) EXPECT_FALSE(askLarge(s, k)) << k;
+    }
+}
+
+// A capped scan can stop inside a display bin: that bin, at the far end of what the
+// capture knows, is only partly known and stays out of the reference (as the touch's).
+TEST(WallRadar, APartlyKnownFarBinOfACappedScanIsNoPartOfTheReference) {
+    { // bids, three levels captured: known down to 699, so bin 69 ([690, 700)) is partial
+        auto replica = book(0, 1005, 1, {{true, 1004, 100}, {true, 700, 10}, {true, 699, 30}, {true, 695, 5}});
+        RadarRig rig;
+        rig.feed.setScanBudget(chart::BookLadderFeed::kMaxScanWords, 3);
+        rig.view(camera(720, 900, 10));
+        const auto& s = rig.tick(*replica, 1000);
+        ASSERT_TRUE(s.valid && s.complete) << rig.feed.lastReason();
+        EXPECT_FLOAT_EQ(s.bidMedian, 10.0f) << "bin 70 only; the partial bin 69 would make it 20";
+    }
+    { // asks (band from 5), three captured: known up to 300, so bin 30 ([300, 310)) is partial
+        auto replica = book(5, 1010, 1, {{false, 5, 100}, {false, 290, 10}, {false, 300, 30}, {false, 305, 5}});
+        RadarRig rig;
+        rig.feed.setScanBudget(chart::BookLadderFeed::kMaxScanWords, 3);
+        rig.view(camera(100, 250, 10));
+        const auto& s = rig.tick(*replica, 1000);
+        ASSERT_TRUE(s.valid && s.complete) << rig.feed.lastReason();
+        EXPECT_FLOAT_EQ(s.askMedian, 10.0f) << "bin 29 only; the partial bin 30 would make it 20";
+    }
+}
+
 // The age is how long the level has been a wall, not how long the bin had size.
 TEST(WallRadar, TheAgeCountsFromBecomingAWallAndSurvivesViewChangesOnTheSameGrid) {
     RadarRig rig;

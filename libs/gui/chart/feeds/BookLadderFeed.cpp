@@ -41,23 +41,20 @@ LadderBins sideBins(const LiveOrderBook::DenseBookSnapshotView& view, int64_t ba
     const int64_t end = base + int64_t(bid ? view.slotCount : std::min(view.askKnownEnd, view.slotCount));
     return {ceilDiv(lo, group), floorDiv(end, group) - 1};
 }
-// The median positive bin of one side's kWallReferenceBins display bins from its touch
-// outward, over the bins the capture knows wholly (sideBins): the touch is the best
-// wholly known bin, so a partly known bin at the band edge is skipped. Levels come best
+// The median positive bin of one side's kWallReferenceBins display bins from the bin of
+// its touch (its best level) outward, over the bins the capture knows wholly (sideBins):
+// a partly known bin keeps its place in the window but adds nothing. Levels come best
 // first.
 double touchMedian(std::span<const std::pair<uint32_t, double>> levels, int64_t base, int64_t group, bool bid,
                    LadderBins known) {
     std::array<double, BookLadderFeed::kWallReferenceBins> bins{};
-    int64_t touch = 0;
-    bool started = false;
+    if (levels.empty()) return 0;
+    const int64_t touch = floorDiv(base + int64_t(levels.front().first), group);
     for (const auto& [index, qty] : levels) {
         const int64_t bin = floorDiv(base + int64_t(index), group);
-        if (bid ? bin > known.hi : bin < known.lo) continue; // partly known, before the touch
-        if (bid ? bin < known.lo : bin > known.hi) break;
-        if (!started) touch = bin, started = true;
         const int64_t offset = bid ? touch - bin : bin - touch;
-        if (offset >= int64_t(bins.size())) break;
-        bins[size_t(offset)] += qty;
+        if (offset >= int64_t(bins.size()) || (bid ? bin < known.lo : bin > known.hi)) break; // past the window
+        if (bin >= known.lo && bin <= known.hi) bins[size_t(offset)] += qty; // else partly known
     }
     return sentinel::book::positiveMedian(bins);
 }
