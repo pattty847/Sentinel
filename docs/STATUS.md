@@ -69,7 +69,7 @@ Owner away 2026-10-18 to about 2026-10-21 (three days). Until then: B2-R r4 and 
 
 
 1. B2 GUI check: rebuild and restart the GUI from main; 100 ms and 1 s candles should show 30 min of history right after a server restart.
-2. Cleanup 2026-10-28: removed the shipped worktrees `rollback-pre-b2` (X = `f3f57107` is on main) and `lt-claude-b2-recon-investigation` (harness kept as tag `archive/b2-recon-harness`). Owner to decide (owner present: they hold recorded-data copies): delete `/Volumes/T7/sentinel-worktrees/lt-claude-b2r3-scratch` (417 GB of hmc2/raw-l2 test copies) and `lt-claude-b2-r2-restore-scratch` (677 MB raw-l2); keep or drop the unmerged `lt-claude/mac-release-v3` (7 commits, macOS 3.0.0-alpha bundle) and `stash@{0}` (check-arch-ref-plan).
+2. Cleanup 2026-10-28: removed the shipped worktrees `rollback-pre-b2` (X = `f3f57107` is on main) and `lt-claude-b2-recon-investigation` (harness kept as tag `archive/b2-recon-harness`). Owner 2026-10-28: KEEP `/Volumes/T7/sentinel-worktrees/lt-claude-b2r3-scratch` (417 GB of hmc2/raw-l2 copies from the B2 restore smoke tests) and `lt-claude-b2-r2-restore-scratch` (677 MB raw-l2); never delete them. Owner to decide: keep or drop the unmerged `lt-claude/mac-release-v3` (7 commits, macOS 3.0.0-alpha bundle) and `stash@{0}` (check-arch-ref-plan).
 3. Parked: nightly copy of `/Volumes/T7/sentinel-data` to the MacBook Pro over Tailscale (needs Remote Login + SSH key).
 
 - Docs archive on the T7: `/Volumes/T7/sentinel-backup/docs-archive/` (owner 2026-10-14; `_agent/VAULT.md`, the old Obsidian vault workflow, moved there).
