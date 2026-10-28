@@ -6,9 +6,10 @@
 
 namespace chart {
 class HeatmapLayer;
+class LadderLayer;
 class ChartTextLayer final : public IChartLayer {
 public:
-    explicit ChartTextLayer(HeatmapLayer& heatmap) : heatmap_(heatmap) {}
+    ChartTextLayer(HeatmapLayer& heatmap, LadderLayer& ladder) : heatmap_(heatmap), ladder_(ladder) {}
     std::string_view name() const override { return "text"; }
     void onRootRebuilt() override { renderer.onRootRebuilt(); }
     QSGNode* createContainer() override { return renderer.createRoot(); }
@@ -21,5 +22,6 @@ public:
     std::unique_ptr<AxisTextService> axes;
 private:
     HeatmapLayer& heatmap_;
+    LadderLayer& ladder_;
 };
 } // namespace chart

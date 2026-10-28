@@ -12,7 +12,7 @@ struct ChartLayers {
     VolumeProfileLayer vp;
     TpoLayer tpo;
     LadderLayer ladder;
-    ChartTextLayer text{heatmap};
+    ChartTextLayer text{heatmap, ladder};
     LayerRegistry registry;
     BookLadderFeed ladderFeed{ladder.mailbox()};
     ChartLayers() { registerChartLayers(registry, *this); }

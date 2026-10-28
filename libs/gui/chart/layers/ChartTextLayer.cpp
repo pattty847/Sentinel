@@ -1,5 +1,6 @@
 #include "chart/layers/ChartTextLayer.hpp"
 #include "chart/layers/HeatmapLayer.hpp"
+#include "chart/layers/LadderLayer.hpp"
 #include "chart/layers/RenderSequence.hpp"
 #include "chart/core/ChartFrame.hpp"
 #include "render/FrameProfiler.hpp"
@@ -42,7 +43,10 @@ void ChartTextLayer::updateNodes(const ChartFrame& frame, LayerNodeContext& cont
         [&] { context.text.beginFrame(context.root, context.window, context.atlas); },
         [&] { if (axes) axes->submitAxisText(context.text, context.atlas, frame.context.itemBounds.width(),
                                             frame.context.itemBounds.height(), frame.context.rightGutterPx); },
-        [&] { heatmap_.submitLabels(frame, context); },
+        [&] {
+            heatmap_.submitLabels(frame, context);
+            ladder_.submitLabels(frame, context);
+        },
         [&](int stage) {
             if (context.profiler && stage < 2)
                 context.profiler->mark(stage == 0 ? FrameProfiler::AxisText : FrameProfiler::Labels);
