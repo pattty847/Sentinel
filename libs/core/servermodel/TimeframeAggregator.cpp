@@ -7,6 +7,7 @@
 namespace {
 constexpr int64_t kMinuteMs = 60'000;
 constexpr int64_t kSecondMs = 1'000;
+constexpr int64_t kHundredMs = 100; // b2-recon throwaway
 }
 
 TimeframeAggregator::TimeframeAggregator(const std::vector<int64_t>& timeframesMs, QObject* parent)
@@ -17,7 +18,7 @@ TimeframeAggregator::TimeframeAggregator(const std::vector<int64_t>& timeframesM
     m_timeframesMs.push_back(kMinuteMs); // Canonical anchor even if omitted from config.
     m_timeframesMs.erase(std::remove_if(m_timeframesMs.begin(), m_timeframesMs.end(),
         [](int64_t tf) {
-            if (tf == kSecondMs || (tf >= kMinuteMs && tf % kMinuteMs == 0)) return false;
+            if (tf == kHundredMs || tf == kSecondMs || (tf >= kMinuteMs && tf % kMinuteMs == 0)) return false;
             sLog_Warning("TimeframeAggregator: unsupported timeframe_ms=" << tf);
             return true;
         }), m_timeframesMs.end());
@@ -37,7 +38,10 @@ void TimeframeAggregator::closeBar(SymbolState& state, const std::string& symbol
     bar.is_closed = true;
     auto& hist = state.history[timeframeMs];
     hist.push_back(bar);
-    if (hist.size() > 10000) hist.erase(hist.begin(), hist.begin() + 1000);
+    if (timeframeMs == kHundredMs) {
+        constexpr size_t cap = 18000;
+        if (hist.size() > cap + cap / 10) hist.erase(hist.begin(), hist.begin() + (hist.size() - cap));
+    } else if (hist.size() > 10000) hist.erase(hist.begin(), hist.begin() + 1000);
     emit barClosed(QString::fromStdString(symbol), timeframeMs, bar);
     if (timeframeMs == kMinuteMs) addMinuteToRollups(state, symbol, bar);
 }
@@ -106,8 +110,9 @@ void TimeframeAggregator::onTrade(const Trade& trade) {
     // carrying quiet ones, so bars depend only on the delivered sequence.
     const bool journal = m_journal.contains(trade.product_id);
     if (journal) closeElapsed(state, trade.product_id, tsMs);
-    if (std::binary_search(m_timeframesMs.begin(), m_timeframesMs.end(), kSecondMs))
-        updateTradeBar(state, trade.product_id, kSecondMs, trade, tsMs, journal);
+    for (const int64_t tf : {kHundredMs, kSecondMs})
+        if (std::binary_search(m_timeframesMs.begin(), m_timeframesMs.end(), tf))
+            updateTradeBar(state, trade.product_id, tf, trade, tsMs, journal);
     updateTradeBar(state, trade.product_id, kMinuteMs, trade, tsMs, journal);
 }
 
@@ -132,7 +137,7 @@ void TimeframeAggregator::tick(int64_t nowMs) {
 // Closes the symbol's bars that end at or before nowMs, carrying quiet buckets.
 void TimeframeAggregator::closeElapsed(SymbolState& state, const std::string& symbol, int64_t nowMs) {
     {
-        for (const int64_t tf : {kSecondMs, kMinuteMs}) {
+        for (const int64_t tf : {kHundredMs, kSecondMs, kMinuteMs}) {
             if (!std::binary_search(m_timeframesMs.begin(), m_timeframesMs.end(), tf)) continue;
             auto& bar = state.activeBars[tf];
             if ((bar.count == 0 && bar.timestamp_ms == 0) ||

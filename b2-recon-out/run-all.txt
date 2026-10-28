@@ -1,0 +1,57 @@
+build-queue: b2-recon's turn: /tmp/b2-recon/runall.sh
+22:54  up 5 mins, 1 user, load averages: 8.04 19.00 10.99
+mode=seq root=/tmp/b2-recon/raw-l2 windowStart=1792276200000 end=1792278000000 deliverFrom=1792276140000
+BTC-USD       v=1 records=153034 inWindow=38283 trades=6720 closes=20483 bars100=18594 bars1s=1859 late100=0 late1s=0 tradeLag>1s=0 wall=2929ms cpu=2875ms decode=1053ms feed=1867ms agg=2.7ms invalids=1 seqFrames=153034
+ETH-USD       v=1 records=133764 inWindow=32509 trades=3158 closes=20469 bars100=18581 bars1s=1858 late100=0 late1s=0 tradeLag>1s=0 wall=2756ms cpu=2733ms decode=952ms feed=1796ms agg=2.2ms invalids=1 seqFrames=133764
+SOL-USD       v=1 records=109206 inWindow=27028 trades=2135 closes=20482 bars100=18593 bars1s=1859 late100=0 late1s=0 tradeLag>1s=0 wall=1238ms cpu=1234ms decode=560ms feed=671ms agg=1.7ms invalids=1 seqFrames=109206
+FARTCOIN-USD  v=1 records=43482 inWindow=9219 trades=40 closes=18653 bars100=16931 bars1s=1694 late100=0 late1s=0 tradeLag>1s=0 wall=445ms cpu=442ms decode=211ms feed=229ms agg=1.2ms invalids=1 seqFrames=43482
+PEPE-USD      v=1 records=35678 inWindow=8212 trades=90 closes=20206 bars100=18342 bars1s=1834 late100=0 late1s=0 tradeLag>1s=0 wall=284ms cpu=283ms decode=159ms feed=121ms agg=1.2ms invalids=1 seqFrames=35678
+DOGE-USD      v=1 records=81288 inWindow=17610 trades=402 closes=20451 bars100=18564 bars1s=1857 late100=0 late1s=0 tradeLag>1s=0 wall=906ms cpu=903ms decode=418ms feed=482ms agg=1.3ms invalids=1 seqFrames=81288
+AVAX-USD      v=1 records=71081 inWindow=16530 trades=263 closes=20444 bars100=18558 bars1s=1856 late100=0 late1s=0 tradeLag>1s=0 wall=737ms cpu=735ms decode=334ms feed=397ms agg=1.2ms invalids=1 seqFrames=71081
+total wall=9296ms
+process: user=9114ms sys=112ms maxrss=39.2MB
+22:54  up 5 mins, 1 user, load averages: 7.27 18.48 10.90
+mode=par root=/tmp/b2-recon/raw-l2 windowStart=1792276200000 end=1792278000000 deliverFrom=1792276140000
+BTC-USD       v=1 records=153034 inWindow=38283 trades=6720 closes=20483 bars100=18594 bars1s=1859 late100=0 late1s=0 tradeLag>1s=0 wall=3411ms cpu=3407ms decode=1170ms feed=2231ms agg=2.7ms invalids=1 seqFrames=153034
+ETH-USD       v=1 records=133764 inWindow=32509 trades=3158 closes=20469 bars100=18581 bars1s=1858 late100=0 late1s=0 tradeLag>1s=0 wall=3337ms cpu=3332ms decode=1109ms feed=2220ms agg=2.1ms invalids=1 seqFrames=133764
+SOL-USD       v=1 records=109206 inWindow=27028 trades=2135 closes=20482 bars100=18593 bars1s=1859 late100=0 late1s=0 tradeLag>1s=0 wall=1770ms cpu=1763ms decode=762ms feed=1000ms agg=2.0ms invalids=1 seqFrames=109206
+FARTCOIN-USD  v=1 records=43482 inWindow=9219 trades=40 closes=18653 bars100=16931 bars1s=1694 late100=0 late1s=0 tradeLag>1s=0 wall=773ms cpu=768ms decode=350ms feed=417ms agg=1.9ms invalids=1 seqFrames=43482
+PEPE-USD      v=1 records=35678 inWindow=8212 trades=90 closes=20206 bars100=18342 bars1s=1834 late100=0 late1s=0 tradeLag>1s=0 wall=502ms cpu=500ms decode=265ms feed=230ms agg=1.9ms invalids=1 seqFrames=35678
+DOGE-USD      v=1 records=81288 inWindow=17610 trades=402 closes=20451 bars100=18564 bars1s=1857 late100=0 late1s=0 tradeLag>1s=0 wall=1350ms cpu=1347ms decode=587ms feed=756ms agg=1.5ms invalids=1 seqFrames=81288
+AVAX-USD      v=1 records=71081 inWindow=16530 trades=263 closes=20444 bars100=18558 bars1s=1856 late100=0 late1s=0 tradeLag>1s=0 wall=1165ms cpu=1160ms decode=495ms feed=664ms agg=1.6ms invalids=1 seqFrames=71081
+total wall=3411ms
+process: user=12136ms sys=158ms maxrss=80.1MB
+22:54  up 5 mins, 1 user, load averages: 7.27 18.48 10.90
+mode=prefilter root=/tmp/b2-recon/raw-l2 windowStart=1792276200000 end=1792278000000 deliverFrom=1792276140000
+BTC-USD       v=1 records=153034 inWindow=38283 trades=244 closes=20443 bars100=18557 bars1s=1856 late100=0 late1s=0 tradeLag>1s=0 wall=1078ms cpu=1077ms decode=958ms feed=95ms agg=1.5ms invalids=17178 seqFrames=153034
+ETH-USD       v=1 records=133764 inWindow=32509 trades=11 closes=16668 bars100=15130 bars1s=1513 late100=0 late1s=0 tradeLag>1s=0 wall=976ms cpu=975ms decode=906ms feed=45ms agg=1.1ms invalids=6880 seqFrames=133764
+SOL-USD       v=1 records=109206 inWindow=27028 trades=1 closes=17119 bars100=15540 bars1s=1554 late100=0 late1s=0 tradeLag>1s=0 wall=581ms cpu=580ms decode=540ms feed=30ms agg=1.1ms invalids=5257 seqFrames=109206
+FARTCOIN-USD  v=1 records=43482 inWindow=9219 trades=0 closes=0 bars100=0 bars1s=0 late100=0 late1s=0 tradeLag>1s=0 wall=207ms cpu=207ms decode=201ms feed=2ms agg=0.1ms invalids=256 seqFrames=43482
+PEPE-USD      v=1 records=35678 inWindow=8212 trades=0 closes=0 bars100=0 bars1s=0 late100=0 late1s=0 tradeLag>1s=0 wall=162ms cpu=162ms decode=158ms feed=2ms agg=0.1ms invalids=339 seqFrames=35678
+DOGE-USD      v=1 records=81288 inWindow=17610 trades=0 closes=0 bars100=0 bars1s=0 late100=0 late1s=0 tradeLag>1s=0 wall=422ms cpu=422ms decode=404ms feed=11ms agg=0.1ms invalids=1794 seqFrames=81288
+AVAX-USD      v=1 records=71081 inWindow=16530 trades=0 closes=0 bars100=0 bars1s=0 late100=0 late1s=0 tradeLag>1s=0 wall=348ms cpu=347ms decode=334ms feed=7ms agg=0.1ms invalids=1165 seqFrames=71081
+total wall=3773ms
+process: user=3697ms sys=88ms maxrss=30.7MB
+22:54  up 5 mins, 1 user, load averages: 6.93 18.22 10.85
+mode=par root=/tmp/b2-recon/h22only windowStart=1792276200000 end=1792278000000 deliverFrom=1792276140000
+BTC-USD       v=1 records=77196 inWindow=38283 trades=6720 closes=20483 bars100=18594 bars1s=1859 late100=0 late1s=0 tradeLag>1s=0 wall=1660ms cpu=1628ms decode=568ms feed=1086ms agg=2.7ms invalids=1 seqFrames=77196
+ETH-USD       v=1 records=65820 inWindow=32509 trades=3158 closes=20469 bars100=18581 bars1s=1858 late100=0 late1s=0 tradeLag>1s=0 wall=1506ms cpu=1473ms decode=520ms feed=980ms agg=2.0ms invalids=1 seqFrames=65820
+SOL-USD       v=1 records=54061 inWindow=27028 trades=2135 closes=20482 bars100=18593 bars1s=1859 late100=0 late1s=0 tradeLag>1s=0 wall=884ms cpu=863ms decode=390ms feed=489ms agg=2.1ms invalids=1 seqFrames=54061
+FARTCOIN-USD  v=1 records=20785 inWindow=9219 trades=40 closes=18653 bars100=16931 bars1s=1694 late100=0 late1s=0 tradeLag>1s=0 wall=389ms cpu=389ms decode=171ms feed=213ms agg=1.9ms invalids=1 seqFrames=20785
+PEPE-USD      v=1 records=16641 inWindow=8212 trades=90 closes=20206 bars100=18342 bars1s=1834 late100=0 late1s=0 tradeLag>1s=0 wall=246ms cpu=245ms decode=129ms feed=111ms agg=2.0ms invalids=1 seqFrames=16641
+DOGE-USD      v=1 records=38421 inWindow=17610 trades=402 closes=20451 bars100=18564 bars1s=1857 late100=0 late1s=0 tradeLag>1s=0 wall=671ms cpu=655ms decode=302ms feed=363ms agg=1.9ms invalids=1 seqFrames=38421
+AVAX-USD      v=1 records=35150 inWindow=16530 trades=263 closes=20444 bars100=18558 bars1s=1856 late100=0 late1s=0 tradeLag>1s=0 wall=571ms cpu=570ms decode=246ms feed=319ms agg=1.9ms invalids=1 seqFrames=35150
+total wall=1660ms
+process: user=5756ms sys=82ms maxrss=70.3MB
+22:54  up 5 mins, 1 user, load averages: 6.93 18.22 10.85
+mode=cmp root=/tmp/b2-recon/raw-l2 windowStart=1792276200000 end=1792278000000 deliverFrom=1792276140000
+BTC-USD       lead60s: diff100=0/17980 diff1s=0/1798 | noLead: diff100=0/17975 diff1s=0/1798 | ref trades=31361 late100=0 late1s=0
+ETH-USD       lead60s: diff100=0/17980 diff1s=0/1798 | noLead: diff100=0/17974 diff1s=0/1798 | ref trades=19546 late100=0 late1s=0
+SOL-USD       lead60s: diff100=0/17980 diff1s=0/1798 | noLead: diff100=0/17976 diff1s=0/1798 | ref trades=10442 late100=0 late1s=0
+FARTCOIN-USD  lead60s: diff100=0/16931 diff1s=0/1694 | noLead: diff100=0/16931 diff1s=0/1694 | ref trades=626 late100=0 late1s=0
+PEPE-USD      lead60s: diff100=0/17980 diff1s=0/1798 | noLead: diff100=0/17930 diff1s=0/1793 | ref trades=796 late100=0 late1s=0
+DOGE-USD      lead60s: diff100=0/17980 diff1s=0/1798 | noLead: diff100=0/17854 diff1s=0/1786 | ref trades=4160 late100=0 late1s=0
+AVAX-USD      lead60s: diff100=0/17980 diff1s=0/1798 | noLead: diff100=0/17919 diff1s=0/1792 | ref trades=2430 late100=0 late1s=0
+total wall=27628ms
+process: user=27232ms sys=372ms maxrss=44.2MB
+build-queue: b2-recon done (exit 0)

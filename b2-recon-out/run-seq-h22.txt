@@ -1,0 +1,13 @@
+22:53  up 5 mins, 1 user, load averages: 9.18 19.78 11.12
+build-queue: b2-recon's turn: nice -n 10 build/mac-clang/tests/servermodel/b2_recon_harness /tmp/b2-recon/h22only 1792278000000 seq
+mode=seq root=/tmp/b2-recon/h22only windowStart=1792276200000 end=1792278000000 deliverFrom=1792276140000
+BTC-USD       v=1 records=77196 inWindow=38283 trades=6720 closes=20483 bars100=18594 bars1s=1859 late100=0 late1s=0 tradeLag>1s=0 wall=1345ms cpu=1342ms decode=486ms feed=852ms agg=2.6ms invalids=1 seqFrames=77196
+ETH-USD       v=1 records=65820 inWindow=32509 trades=3158 closes=20469 bars100=18581 bars1s=1858 late100=0 late1s=0 tradeLag>1s=0 wall=1186ms cpu=1183ms decode=427ms feed=753ms agg=1.9ms invalids=1 seqFrames=65820
+SOL-USD       v=1 records=54061 inWindow=27028 trades=2135 closes=20482 bars100=18593 bars1s=1859 late100=0 late1s=0 tradeLag>1s=0 wall=574ms cpu=572ms decode=267ms feed=302ms agg=1.7ms invalids=1 seqFrames=54061
+FARTCOIN-USD  v=1 records=20785 inWindow=9219 trades=40 closes=18653 bars100=16931 bars1s=1694 late100=0 late1s=0 tradeLag>1s=0 wall=212ms cpu=211ms decode=101ms feed=108ms agg=1.1ms invalids=1 seqFrames=20785
+PEPE-USD      v=1 records=16641 inWindow=8212 trades=90 closes=20206 bars100=18342 bars1s=1834 late100=0 late1s=0 tradeLag>1s=0 wall=133ms cpu=131ms decode=75ms feed=54ms agg=1.1ms invalids=1 seqFrames=16641
+DOGE-USD      v=1 records=38421 inWindow=17610 trades=402 closes=20451 bars100=18564 bars1s=1857 late100=0 late1s=0 tradeLag>1s=0 wall=396ms cpu=393ms decode=190ms feed=201ms agg=1.2ms invalids=1 seqFrames=38421
+AVAX-USD      v=1 records=35150 inWindow=16530 trades=263 closes=20444 bars100=18558 bars1s=1856 late100=0 late1s=0 tradeLag>1s=0 wall=370ms cpu=356ms decode=178ms feed=187ms agg=1.5ms invalids=1 seqFrames=35150
+total wall=4217ms
+process: user=4163ms sys=64ms maxrss=32.5MB
+build-queue: b2-recon done (exit 0)

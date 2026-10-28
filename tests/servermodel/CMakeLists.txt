@@ -192,3 +192,8 @@ target_link_libraries(test_candle_history PRIVATE sentinel_core GTest::gtest_mai
 add_test(NAME CandleHistoryCacheTests COMMAND test_candle_history)
 set_tests_properties(CandleHistoryCacheTests PROPERTIES LABELS "servermodel" TIMEOUT 15)
 add_dependencies(servermodel_tests test_candle_history)
+
+# b2-recon throwaway harness (never lands)
+add_executable(b2_recon_harness b2_recon_harness.cpp)
+target_include_directories(b2_recon_harness PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(b2_recon_harness PRIVATE sentinel_core Qt6::Core)
