@@ -947,6 +947,22 @@ TEST(WallRadar, OffScreenWallsAreFoundAgainstAPositiveMedianOnly) {
     }
 }
 
+// The drawn window [90.6, 100.4) at display tick 1, snapped or fractional (free).
+chart_raster::RasterCamera partialCamera(bool glide) {
+    chart_raster::RasterInputs in;
+    in.timeEnd = 60 * kTf;
+    in.minPrice = 90.6;
+    in.maxPrice = 100.4;
+    in.tfMs = double(kTf);
+    in.tick = 1;
+    in.itemWidthLogical = 640;
+    in.itemHeightLogical = 320;
+    auto cam = glide ? chart_raster::continuousRaster(in) : chart_raster::computeRaster(in, {});
+    cam.drawnMinPrice = 90.6;
+    cam.drawnMaxPrice = 100.4;
+    return cam;
+}
+
 // r2 F4: off-screen by real price, not by bin (the edge bins are partial).
 TEST(WallRadar, PartialEdgeBinsClassifyByRealPrice) {
     using S = LadderSnapshot;
@@ -960,17 +976,7 @@ TEST(WallRadar, PartialEdgeBinsClassifyByRealPrice) {
             levels.push_back({false, 100.8, 1000});
             levels.push_back({true, 90.2, 1000});
             auto replica = book(50, 150, serverTick, levels);
-            chart_raster::RasterInputs in;
-            in.timeEnd = 60 * kTf;
-            in.minPrice = 90.6;
-            in.maxPrice = 100.4;
-            in.tfMs = double(kTf);
-            in.tick = 1;
-            in.itemWidthLogical = 640;
-            in.itemHeightLogical = 320;
-            auto cam = glide ? chart_raster::continuousRaster(in) : chart_raster::computeRaster(in, {});
-            cam.drawnMinPrice = 90.6;
-            cam.drawnMaxPrice = 100.4;
+            const auto cam = partialCamera(glide);
             if (glide) ASSERT_TRUE(cam.free);
             rig.view(cam);
             const auto& s = rig.tick(*replica, 1000);
@@ -981,6 +987,37 @@ TEST(WallRadar, PartialEdgeBinsClassifyByRealPrice) {
             EXPECT_TRUE(wall(s, S::kBid, S::kBelow).found);
             EXPECT_NEAR(wall(s, S::kBid, S::kBelow).price, 90.2, 1e-9);
         }
+    }
+}
+
+// Group 1 (server tick = display tick = 1): the edge bins 90 and 100 are partial
+// ([90.6, 100.4) drawn); 90 lies below the drawn window though its bin is window.lo.
+TEST(WallRadar, PartialEdgeBinsAtGroupOneClassifyByRealPrice) {
+    using S = LadderSnapshot;
+    for (const bool glide : {false, true}) {
+        SCOPED_TRACE(testing::Message() << "glide=" << glide);
+        RadarRig rig;
+        std::vector<BookLevelUpdate> levels;
+        for (int p = 91; p <= 95; ++p) levels.push_back({true, double(p), 1});
+        for (int p = 96; p <= 100; ++p) levels.push_back({false, double(p), 1});
+        levels.push_back({true, 90, 50});
+        levels.push_back({false, 101, 50});
+        auto replica = book(50, 150, 1, levels);
+        const auto cam = partialCamera(glide);
+        if (glide) ASSERT_TRUE(cam.free);
+        rig.view(cam);
+        const auto& s = rig.tick(*replica, 1000);
+        ASSERT_TRUE(s.valid && s.complete) << rig.feed.lastReason();
+        EXPECT_EQ(s.group, 1);
+        ASSERT_EQ(chart::ladderWindow(90.6, 100.4, 1).lo, 90) << "90 shares the bottom bin";
+        EXPECT_FLOAT_EQ(s.bidMedian, 1.0f);
+        EXPECT_FLOAT_EQ(s.askMedian, 1.0f);
+        EXPECT_TRUE(wall(s, S::kBid, S::kBelow).found);
+        EXPECT_DOUBLE_EQ(wall(s, S::kBid, S::kBelow).price, 90);
+        EXPECT_TRUE(wall(s, S::kAsk, S::kAbove).found);
+        EXPECT_DOUBLE_EQ(wall(s, S::kAsk, S::kAbove).price, 101);
+        EXPECT_FALSE(wall(s, S::kBid, S::kAbove).found);
+        EXPECT_FALSE(wall(s, S::kAsk, S::kBelow).found);
     }
 }
 
