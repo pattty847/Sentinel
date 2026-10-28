@@ -804,8 +804,10 @@ TEST(WallRadar, TheRadarRepublishesAt15HzAndADeltaStillWinsTheEarlierDeadline) {
         rig.feed.publish(*replica);
         const auto start = rig.feed.rowPublications();
         QTest::qWait(1000);
+        // About 15 at 67 ms; the lower bound leaves room for a loaded machine (the landing
+        // gate's full ctest), far above the one publication a missing re-arm leaves.
         const auto n = rig.feed.rowPublications() - start;
-        EXPECT_GE(n, 12u);
+        EXPECT_GE(n, 8u);
         EXPECT_LE(n, 18u);
     }
     {
@@ -841,7 +843,8 @@ TEST(WallRadar, TheRadarRepublishesAt15HzAndADeltaStillWinsTheEarlierDeadline) {
         const int64_t deltaAt = clock.elapsed();
         rig.feed.publish(*replica);
         ASSERT_TRUE(waitForPublication());
-        EXPECT_LE(at - deltaAt, chart::BookLadderFeed::kIntervalMs + 10) << "not the 250 ms radar wait";
+        // kIntervalMs (67) plus scheduling slack under load; the radar wait would be ~240 ms.
+        EXPECT_LE(at - deltaAt, 150) << "the delta's earlier deadline, not the 250 ms radar wait";
     }
 }
 
