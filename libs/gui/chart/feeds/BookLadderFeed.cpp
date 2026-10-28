@@ -33,21 +33,38 @@ const char* incompleteReason(const LiveOrderBook::DenseBookSnapshotView& view, L
     if (lo < int64_t(view.bidKnownLo)) return view.bidCapped ? "levels" : "scan";
     return view.askCapped ? "levels" : "scan";
 }
+// Display bins wholly inside what the capture knows of one side: bids [bidKnownLo,
+// slotCount), asks [0, min(askKnownEnd, slotCount)) in book indices, each bounded by the
+// band at both ends.
+LadderBins sideBins(const LiveOrderBook::DenseBookSnapshotView& view, int64_t base, int64_t group, bool bid) {
+    const int64_t lo = base + int64_t(bid ? view.bidKnownLo : 0);
+    const int64_t end = base + int64_t(bid ? view.slotCount : std::min(view.askKnownEnd, view.slotCount));
+    return {ceilDiv(lo, group), floorDiv(end, group) - 1};
+}
 // The median positive bin of one side's kWallReferenceBins display bins from its touch
-// outward (the touch bin included), over the bins the capture knows wholly: bids down
-// to known.lo, asks up to known.hi. Levels come best first.
+// outward, over the bins the capture knows wholly (sideBins): the touch is the best
+// wholly known bin, so a partly known bin at the band edge is skipped. Levels come best
+// first.
 double touchMedian(std::span<const std::pair<uint32_t, double>> levels, int64_t base, int64_t group, bool bid,
                    LadderBins known) {
     std::array<double, BookLadderFeed::kWallReferenceBins> bins{};
-    if (levels.empty()) return 0;
-    const int64_t touch = floorDiv(base + int64_t(levels.front().first), group);
+    int64_t touch = 0;
+    bool started = false;
     for (const auto& [index, qty] : levels) {
         const int64_t bin = floorDiv(base + int64_t(index), group);
+        if (bid ? bin > known.hi : bin < known.lo) continue; // partly known, before the touch
+        if (bid ? bin < known.lo : bin > known.hi) break;
+        if (!started) touch = bin, started = true;
         const int64_t offset = bid ? touch - bin : bin - touch;
-        if (offset >= int64_t(bins.size()) || (bid ? bin < known.lo : bin > known.hi)) break;
+        if (offset >= int64_t(bins.size())) break;
         bins[size_t(offset)] += qty;
     }
     return sentinel::book::positiveMedian(bins);
+}
+// Each side's wall reference (sideIndex order) from a complete capture.
+std::array<double, 2> touchMedians(const LiveOrderBook::DenseBookSnapshotView& view, int64_t base, int64_t group) {
+    return {touchMedian(view.bidLevels, base, group, true, sideBins(view, base, group, true)),
+            touchMedian(view.askLevels, base, group, false, sideBins(view, base, group, false))};
 }
 // "BTC-USD" -> "BTC" (at most 7 characters).
 void baseAsset(const std::string& product, char (&out)[8]) {
@@ -216,11 +233,8 @@ const char* BookLadderFeed::fill(LadderSnapshot& s, const chart_raster::RasterCa
     const int64_t margin = std::min<int64_t>(std::max<int64_t>(1, bins / 4), (LadderSnapshot::kMaxRows - bins) / 2);
     const auto known = knownBins(view, base, group);
     const bool complete = window.lo >= known.lo && window.hi <= known.hi;
-    if (radar_ && complete)
-        walls_.reference.medians = {touchMedian(view.bidLevels, base, group, true, known),
-                                    touchMedian(view.askLevels, base, group, false, known)};
-    else if (radar_)
-        walls_.reference.medians = tracker_.medians(); // not an observation: the last accepted
+    // An incomplete capture is no observation: it keeps the last accepted reference.
+    if (radar_) walls_.reference.medians = complete ? touchMedians(view, base, group) : tracker_.medians();
     s.binLo = std::min(window.lo, std::max(window.lo - margin, known.lo));
     const int64_t binHi = std::max(window.hi, std::min(window.hi + margin, known.hi));
     s.rowCount = int(binHi - s.binLo + 1);

@@ -1079,6 +1079,33 @@ TEST(WallRadar, TheReferenceIsTheMedianNearTheTouchNotEveryFedBin) {
     EXPECT_EQ(dustWalls, 40);
 }
 
+// A display bin only partly inside the band (an unaligned band edge) is not wholly known:
+// it never enters the reference, and the touch moves to the next wholly known bin.
+// Native tick 1, display tick 10. Bids: the band ends at 105 (slots 0..105), so bin 10
+// ([100, 110)) is partial. Asks: the band starts at 5, so bin 0 ([0, 10)) is partial.
+TEST(WallRadar, APartlyKnownEdgeBinIsNoPartOfTheReference) {
+    { // bids: 104 x 100 in the partial bin 10, then bins 9, 8 at 10 and bin 7 at 40
+        auto replica = book(0, 105, 1, {{true, 104, 100}, {true, 99, 10}, {true, 89, 10}, {true, 79, 40}});
+        RadarRig rig;
+        rig.view(camera(20, 90, 10));
+        const auto& s = rig.tick(*replica, 1000);
+        ASSERT_TRUE(s.valid && s.complete) << rig.feed.lastReason();
+        EXPECT_FLOAT_EQ(s.bidMedian, 10.0f) << "bins 9, 8, 7; the partial bin 10 would make it 25";
+        EXPECT_TRUE(bidLarge(s, 7)) << "40 is 4x the median";
+        EXPECT_FALSE(bidLarge(s, 8));
+    }
+    { // asks: 5 x 100 in the partial bin 0, then bins 1, 2 at 10 and bin 3 at 40
+        auto replica = book(5, 110, 1, {{false, 5, 100}, {false, 12, 10}, {false, 22, 10}, {false, 32, 40}});
+        RadarRig rig;
+        rig.view(camera(20, 90, 10));
+        const auto& s = rig.tick(*replica, 1000);
+        ASSERT_TRUE(s.valid && s.complete) << rig.feed.lastReason();
+        EXPECT_FLOAT_EQ(s.askMedian, 10.0f) << "bins 1, 2, 3; the partial bin 0 would make it 25";
+        EXPECT_TRUE(askLarge(s, 3)) << "40 is 4x the median";
+        EXPECT_FALSE(askLarge(s, 2));
+    }
+}
+
 // The age is how long the level has been a wall, not how long the bin had size.
 TEST(WallRadar, TheAgeCountsFromBecomingAWallAndSurvivesViewChangesOnTheSameGrid) {
     RadarRig rig;
