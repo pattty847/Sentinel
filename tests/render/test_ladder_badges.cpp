@@ -206,6 +206,11 @@ TEST(LadderBadges, AGlideFrameAtDpr2NeedsTheDrawnRowHeight) {
         rig.post();
         ASSERT_TRUE(rig.layer.drawing());
         EXPECT_EQ(rig.rowBadges(), height > 320 ? 1 : 0);
+        for (const auto& p : rig.pills()) {
+            EXPECT_NE(rig.cam.yDev(100.5) / 2.0 - chart::kPillH / 2, p.rect.top()) << "the centred top is fractional";
+            EXPECT_DOUBLE_EQ(p.rect.top() * 2.0, std::round(p.rect.top() * 2.0)) << "snapped to device pixels";
+            EXPECT_DOUBLE_EQ(p.textTop * 2.0, std::round(p.textTop * 2.0));
+        }
     }
 }
 

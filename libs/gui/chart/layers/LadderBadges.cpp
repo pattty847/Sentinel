@@ -73,6 +73,8 @@ int arrow(QSGGeometry::ColoredPoint2D* v, const BadgePill& p) {
     return n + stroke(v + n, corners[2], corners[0], c);
 }
 
+using EdgeSlots = std::array<std::array<const WallCandidate*, 2>, 2>;
+
 QRgb textColour(BadgePill::Colour c) { return c == BadgePill::Hot ? kHotText : c == BadgePill::Ask ? kAskText : kBidText; }
 } // namespace
 
@@ -181,32 +183,58 @@ void LadderBadges::finishPill(BadgePill& p, double right, double top, double dpr
     p.textTop = snap(y + 0.5 * (kPillH - boxH_), dpr);
 }
 
-// The largest found wall per [edge][side], placed by real price against this frame's
-// drawn window (the camera may have moved since the publish): on screen -> none.
-void LadderBadges::placeEdges(const LadderSnapshot& s, const FrameContext& f) {
-    const auto& cam = f.raster;
-    const WallCandidate* slot[2][2] = {}; // [top|bottom][side]
+namespace {
+// The largest found wall per [top|bottom edge][side], by real price against this
+// frame's drawn window (the camera may have moved since the publish): on screen -> none.
+EdgeSlots edgeSlots(const LadderSnapshot& s, const chart_raster::RasterCamera& cam) {
+    EdgeSlots slot{};
     for (int side = 0; side < 2; ++side)
         for (const WallCandidate& c : s.walls[size_t(side)]) {
             const int edge = c.price >= cam.drawnMaxPrice ? 0 : c.price < cam.drawnMinPrice ? 1 : -1;
             if (!c.found || edge < 0) continue;
-            const WallCandidate*& cell = slot[edge][side];
+            const WallCandidate*& cell = slot[size_t(edge)][size_t(side)];
             if (!cell || c.size > cell->size) cell = &c;
         }
+    return slot;
+}
+
+// Notional, then the distance from the drawn edge to the wall: $1.07M  +$61.0.
+BadgePill edgePill(const WallCandidate& c, int side, bool top, const chart_raster::RasterCamera& cam) {
+    BadgePill p;
+    p.colour = side == LadderSnapshot::kAsk ? BadgePill::Ask : BadgePill::Bid;
+    p.arrow = top ? 1 : -1;
+    p.hollow = c.capped;
+    p.length = formatMoney(double(c.size) * c.price, p.text);
+    p.length += append(p.text + p.length, top ? "  +" : "  -");
+    p.length += formatMoney(top ? c.price - cam.drawnMaxPrice : cam.drawnMinPrice - c.price, p.text + p.length);
+    return p;
+}
+
+// Notional, seen-for, then the flicker count or "new".
+void rowText(BadgePill& p, double usd, uint32_t seenMs, uint16_t flickers) {
+    p.length = formatMoney(usd, p.text);
+    p.length += append(p.text + p.length, "  ");
+    p.length += formatAge(seenMs, p.text + p.length);
+    if (flickers > 0) {
+        p.length += append(p.text + p.length, "  ");
+        p.length += formatFlickers(flickers, p.text + p.length);
+    } else if (seenMs < kNewMs) {
+        p.length += append(p.text + p.length, "  new");
+    }
+}
+
+} // namespace
+
+void LadderBadges::placeEdges(const LadderSnapshot& s, const FrameContext& f) {
+    const auto& cam = f.raster;
+    const EdgeSlots slot = edgeSlots(s, cam);
     const double right = snap(f.itemBounds.right() - kBadgeInsetPx, cam.dpr);
     for (int edge = 0; edge < 2; ++edge) {
         int stacked = 0; // the ask pill nearest the edge, the bid pill inward
         for (const int side : {LadderSnapshot::kAsk, LadderSnapshot::kBid}) {
-            const WallCandidate* c = slot[edge][side];
+            const WallCandidate* c = slot[size_t(edge)][size_t(side)];
             if (!c) continue;
-            BadgePill p;
-            p.colour = side == LadderSnapshot::kAsk ? BadgePill::Ask : BadgePill::Bid;
-            p.arrow = edge == 0 ? 1 : -1;
-            p.hollow = c->capped;
-            p.length = formatMoney(double(c->size) * c->price, p.text);
-            p.length += append(p.text + p.length, edge == 0 ? "  +" : "  -");
-            const double distance = edge == 0 ? c->price - cam.drawnMaxPrice : cam.drawnMinPrice - c->price;
-            p.length += formatMoney(distance, p.text + p.length);
+            BadgePill p = edgePill(*c, side, edge == 0, cam);
             const double offset = kEdgeInsetPx + stacked * (kPillH + kPillGapPx);
             const double y = edge == 0 ? f.surfaceBounds.top() + offset : f.surfaceBounds.bottom() - offset - kPillH;
             finishPill(p, right, y, cam.dpr);
@@ -248,19 +276,9 @@ bool LadderBadges::placeRow(const LadderSnapshot& s, const FrameContext& f, int 
     const double askUsd = (row.flags & LadderRow::kAskLarge) ? double(row.ask) * mid : -1;
     const bool ask = askUsd >= bidUsd;
     const bool hot = row.flags & (ask ? LadderRow::kAskHot : LadderRow::kBidHot);
-    const uint32_t seen = ask ? row.askSeenMs : row.bidSeenMs;
-    const uint16_t flickers = ask ? row.askFlickers : row.bidFlickers;
     BadgePill p;
     p.colour = hot ? BadgePill::Hot : ask ? BadgePill::Ask : BadgePill::Bid;
-    p.length = formatMoney(ask ? askUsd : bidUsd, p.text);
-    p.length += append(p.text + p.length, "  ");
-    p.length += formatAge(seen, p.text + p.length);
-    if (flickers > 0) {
-        p.length += append(p.text + p.length, "  ");
-        p.length += formatFlickers(flickers, p.text + p.length);
-    } else if (seen < kNewMs) {
-        p.length += append(p.text + p.length, "  new");
-    }
+    rowText(p, ask ? askUsd : bidUsd, ask ? row.askSeenMs : row.bidSeenMs, ask ? row.askFlickers : row.bidFlickers);
     finishPill(p, snap(f.itemBounds.right() - kBadgeInsetPx, cam.dpr), top, cam.dpr);
     for (int j = 0; j < stats_.edgePills; ++j)
         if (pills_[size_t(j)].rect.intersects(p.rect)) return false; // edge pills win
