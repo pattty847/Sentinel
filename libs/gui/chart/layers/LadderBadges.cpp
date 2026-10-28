@@ -172,15 +172,14 @@ double LadderBadges::textWidth(const BadgePill& p) const {
     return pen * scale_;
 }
 
-// Right-aligned at `right`, `top` snapped; the width rounds up to whole device pixels
-// so the right edge stays where the caller put it.
+// Right-aligned at `right` at `top` (both on device pixels: the callers snap them); the
+// width rounds up to whole device pixels so the right edge stays where it was put.
 void LadderBadges::finishPill(BadgePill& p, double right, double top, double dpr) {
     const double arrowW = p.arrow ? kArrowPx + kArrowGapPx : 0;
     const double width = std::ceil((2 * kBadgePadX + arrowW + textWidth(p)) * dpr) / dpr;
-    const double y = snap(top, dpr);
-    p.rect = QRectF(right - width, y, width, kPillH);
+    p.rect = QRectF(right - width, top, width, kPillH);
     p.textLeft = snap(p.rect.left() + kBadgePadX + arrowW, dpr);
-    p.textTop = snap(y + 0.5 * (kPillH - boxH_), dpr);
+    p.textTop = snap(top + 0.5 * (kPillH - boxH_), dpr);
 }
 
 namespace {
@@ -237,7 +236,7 @@ void LadderBadges::placeEdges(const LadderSnapshot& s, const FrameContext& f) {
             BadgePill p = edgePill(*c, side, edge == 0, cam);
             const double offset = kEdgeInsetPx + stacked * (kPillH + kPillGapPx);
             const double y = edge == 0 ? f.surfaceBounds.top() + offset : f.surfaceBounds.bottom() - offset - kPillH;
-            finishPill(p, right, y, cam.dpr);
+            finishPill(p, right, snap(y, cam.dpr), cam.dpr);
             pills_.push_back(p);
             ++stacked;
             ++stats_.edgePills;

@@ -338,6 +338,14 @@ TEST(LadderBadges, EdgePillsStackAskNearestTheEdgeAndFollowTheCurrentWindow) {
     EXPECT_EQ(rig.pills()[0].arrow, 1);
     EXPECT_EQ(rig.pills()[1].arrow, -1);
     EXPECT_EQ(rig.pills()[2].arrow, -1);
+    EXPECT_EQ(text(rig.pills()[2]).substr(0, 8), "$1.70k  ") << "the bid below (85 x 20), not the on-screen 115";
+
+    // An on-screen candidate with no rival on its side draws no pill at all.
+    rig.snapshot();
+    rig.candidate(S::kBid, S::kAbove, 115, 40);
+    rig.post();
+    EXPECT_EQ(rig.layer.badges().stats().edgePills, 0);
+    EXPECT_EQ(rig.layer.badgeVertexCount(), 0);
 }
 
 TEST(LadderBadges, ABidAboveTheWindowPointsUpAndAnEdgeKeepsTheLargerOfASide) {
