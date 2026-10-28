@@ -39,10 +39,12 @@ struct TestTls {
         X509_gmtime_adj(X509_getm_notBefore(cert.get()), -60);
         X509_gmtime_adj(X509_getm_notAfter(cert.get()), 3600);
         X509_set_pubkey(cert.get(), key.get());
-        auto* subject = X509_get_subject_name(cert.get());
-        X509_NAME_add_entry_by_txt(subject, "CN", MBSTRING_ASC,
+        // OpenSSL 4 returns a const subject name, so build the name separately.
+        std::unique_ptr<X509_NAME, decltype(&X509_NAME_free)> subject(X509_NAME_new(), X509_NAME_free);
+        X509_NAME_add_entry_by_txt(subject.get(), "CN", MBSTRING_ASC,
             reinterpret_cast<const unsigned char*>("localhost"), -1, -1, 0);
-        X509_set_issuer_name(cert.get(), subject);
+        X509_set_subject_name(cert.get(), subject.get());
+        X509_set_issuer_name(cert.get(), subject.get());
         X509_sign(cert.get(), key.get(), EVP_sha256());
         SSL_CTX_use_certificate(server.native_handle(), cert.get());
         SSL_CTX_use_PrivateKey(server.native_handle(), key.get());
