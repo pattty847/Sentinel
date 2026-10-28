@@ -4,6 +4,7 @@
 #include "SentinelLogging.hpp"
 #include <QElapsedTimer>
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace chart {
@@ -31,6 +32,22 @@ const char* incompleteReason(const LiveOrderBook::DenseBookSnapshotView& view, L
     if (lo < 0 || end > int64_t(view.slotCount)) return "band";
     if (lo < int64_t(view.bidKnownLo)) return view.bidCapped ? "levels" : "scan";
     return view.askCapped ? "levels" : "scan";
+}
+// The median positive bin of one side's kWallReferenceBins display bins from its touch
+// outward (the touch bin included), over the bins the capture knows wholly: bids down
+// to known.lo, asks up to known.hi. Levels come best first.
+double touchMedian(std::span<const std::pair<uint32_t, double>> levels, int64_t base, int64_t group, bool bid,
+                   LadderBins known) {
+    std::array<double, BookLadderFeed::kWallReferenceBins> bins{};
+    if (levels.empty()) return 0;
+    const int64_t touch = floorDiv(base + int64_t(levels.front().first), group);
+    for (const auto& [index, qty] : levels) {
+        const int64_t bin = floorDiv(base + int64_t(index), group);
+        const int64_t offset = bid ? touch - bin : bin - touch;
+        if (offset >= int64_t(bins.size()) || (bid ? bin < known.lo : bin > known.hi)) break;
+        bins[size_t(offset)] += qty;
+    }
+    return sentinel::book::positiveMedian(bins);
 }
 // "BTC-USD" -> "BTC" (at most 7 characters).
 void baseAsset(const std::string& product, char (&out)[8]) {
@@ -168,9 +185,9 @@ void BookLadderFeed::publishRows() {
     elapsed.start();
     const auto frame = ports_.frame ? ports_.frame() : MappingFrameContext{};
     auto& s = begin(frame);
-    walls_.begin(frame.raster.drawnMinPrice, frame.raster.drawnMaxPrice);
+    walls_.begin(frame.raster.drawnMinPrice, frame.raster.drawnMaxPrice, {{}, multiple_});
     reason_ = fill(s, frame.raster);
-    if (radar_) tracker_.publish(s, series(), monotonicMs(), multiple_, walls_);
+    if (radar_) tracker_.publish(s, series(), monotonicMs(), walls_);
     ++rowPublications_;
     sLog_Probe("ladder.publish", "gen=" << generation_ << " serial=" << serial_ << " valid=" << s.valid
                << " complete=" << s.complete << " reason=" << reason_ << " rows=" << s.rowCount
@@ -198,6 +215,12 @@ const char* BookLadderFeed::fill(LadderSnapshot& s, const chart_raster::RasterCa
     // publications keeps its bars), limited to what the capture knows.
     const int64_t margin = std::min<int64_t>(std::max<int64_t>(1, bins / 4), (LadderSnapshot::kMaxRows - bins) / 2);
     const auto known = knownBins(view, base, group);
+    const bool complete = window.lo >= known.lo && window.hi <= known.hi;
+    if (radar_ && complete)
+        walls_.reference.medians = {touchMedian(view.bidLevels, base, group, true, known),
+                                    touchMedian(view.askLevels, base, group, false, known)};
+    else if (radar_)
+        walls_.reference.medians = tracker_.medians(); // not an observation: the last accepted
     s.binLo = std::min(window.lo, std::max(window.lo - margin, known.lo));
     const int64_t binHi = std::max(window.hi, std::min(window.hi + margin, known.hi));
     s.rowCount = int(binHi - s.binLo + 1);
@@ -215,7 +238,7 @@ const char* BookLadderFeed::fill(LadderSnapshot& s, const chart_raster::RasterCa
     add(view.askLevels, &LadderRow::ask, LadderSnapshot::kAsk);
     walls_.setCapped(view.bidKnownLo > 0, view.askKnownEnd < view.slotCount);
     s.valid = true;
-    s.complete = window.lo >= known.lo && window.hi <= known.hi;
+    s.complete = complete;
     return s.complete ? "ok" : incompleteReason(view, window, base, group);
 }
 } // namespace chart

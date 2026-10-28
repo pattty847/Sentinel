@@ -24,11 +24,16 @@ struct LadderFeedPorts {
 // the chart exposed, it arms one coalescing timer that bins the replica onto the
 // drawn rows (native server-level indices) and posts a LadderSnapshot to the layer.
 // With the wall radar on it also tracks the rows (LadderTracker) and republishes every
-// radar interval while active, so ages advance on a quiet book.
+// radar interval while active, so ages advance on a quiet book. A side's wall reference
+// is the median size of its nonempty display bins among the kWallReferenceBins from its
+// touch outward, from the whole capture (not the published rows), so dust far from the
+// market at a wide zoom does not lower it and a view panned away from the market keeps
+// it. A publication that is no observation (an incomplete capture) keeps the last one.
 class BookLadderFeed final : public QObject {
 public:
     static constexpr int kIntervalMs = 67;
     static constexpr int kRadarIntervalMs = 67; // 15 Hz, the DOM's cadence
+    static constexpr int kWallReferenceBins = 32;
     static constexpr size_t kMaxLevels = 16384, kMaxScanWords = 16384;
     explicit BookLadderFeed(LadderMailbox& mailbox);
     void setPorts(LadderFeedPorts ports) { ports_ = std::move(ports); }

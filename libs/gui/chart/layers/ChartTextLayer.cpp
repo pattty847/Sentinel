@@ -45,7 +45,7 @@ void ChartTextLayer::updateNodes(const ChartFrame& frame, LayerNodeContext& cont
                                             frame.context.itemBounds.height(), frame.context.rightGutterPx); },
         [&] {
             heatmap_.submitLabels(frame, context);
-            ladder_.submitLabels(frame, context);
+            ladder_.submitLabels(frame, context, !heatmap_.labelGlyphs().empty());
         },
         [&](int stage) {
             if (context.profiler && stage < 2)

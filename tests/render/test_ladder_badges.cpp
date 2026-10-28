@@ -98,6 +98,7 @@ struct BadgeRig {
     chart_raster::RasterCamera cam;
     QQuickWindow* window = nullptr;
     bool atlasReady = true;
+    bool cellLabels = false; // the heatmap drew its cell value labels
     uint64_t serial = 0;
     explicit BadgeRig(const chart_raster::RasterCamera& c) : cam(c) { root.appendChildNode(layer.createContainer()); }
     // A fresh valid, complete radar snapshot covering bins [lo, lo + count) at bin 1.
@@ -118,7 +119,7 @@ struct BadgeRig {
     void wall(int64_t k, int side, float size, uint32_t seenMs = 60'000, uint16_t flickers = 0, bool hot = false) {
         auto& r = row(k);
         (side == S::kBid ? r.bid : r.ask) = size;
-        (side == S::kBid ? r.bidSeenMs : r.askSeenMs) = seenMs;
+        (side == S::kBid ? r.bidWallMs : r.askWallMs) = seenMs;
         (side == S::kBid ? r.bidFlickers : r.askFlickers) = flickers;
         r.flags |= side == S::kBid ? LadderRow::kBidLarge : LadderRow::kAskLarge;
         if (hot) r.flags |= side == S::kBid ? LadderRow::kBidHot : LadderRow::kAskHot;
@@ -142,7 +143,7 @@ struct BadgeRig {
         layer.sync(f);
         layer.updateNodes(f, context);
         text.beginFrame(&root, window, atlas());
-        layer.submitLabels(f, context);
+        layer.submitLabels(f, context, cellLabels);
         text.endFrame();
     }
     void post() {
@@ -253,6 +254,39 @@ TEST(LadderBadges, ABinWithBothSidesLargeGetsOneBadgeForTheLargerNotional) {
     EXPECT_EQ(rig.pills()[2].colour, BadgePill::Ask) << "bin 100: ask larger";
 }
 
+// With the heatmap's own cell value labels on screen the notional is redundant: the
+// badge keeps the age, the flicker count and "new"; edge pills keep theirs.
+TEST(LadderBadges, VisibleCellLabelsDropTheNotionalFromRowBadges) {
+    BadgeRig rig(camera(90, 110));
+    const auto fill = [&] {
+        rig.snapshot();
+        rig.wall(104, S::kAsk, 7, 60'000, 3, true);
+        rig.wall(102, S::kBid, 12, 5'000);
+        rig.wall(100, S::kBid, 12);
+        rig.candidate(S::kAsk, S::kAbove, 120, 50);
+        rig.post();
+    };
+    fill();
+    ASSERT_EQ(rig.pills().size(), 4u);
+    EXPECT_EQ(text(rig.pills()[1]), "$732  1m00s  x3");
+    EXPECT_EQ(text(rig.pills()[2]), "$1.23k  5s  new");
+    EXPECT_EQ(text(rig.pills()[3]), "$1.21k  1m00s");
+    const double wide = rig.pills()[3].rect.width();
+    rig.cellLabels = true;
+    rig.draw(); // the same snapshot and frame: the flag alone relays out
+    ASSERT_EQ(rig.pills().size(), 4u);
+    EXPECT_EQ(text(rig.pills()[0]), "$6.00k  +$10.0") << "the edge pill keeps its notional";
+    EXPECT_EQ(text(rig.pills()[1]), "1m00s  x3");
+    EXPECT_EQ(text(rig.pills()[2]), "5s  new");
+    EXPECT_EQ(text(rig.pills()[3]), "1m00s");
+    EXPECT_LT(rig.pills()[3].rect.width(), wide);
+    EXPECT_DOUBLE_EQ(rig.pills()[3].rect.right(), 640 - chart::kBadgeInsetPx);
+    for (int i = 1; i < 4; ++i) EXPECT_EQ(text(rig.pills()[size_t(i)]).find('$'), std::string::npos);
+    rig.cellLabels = false;
+    rig.draw();
+    EXPECT_EQ(text(rig.pills()[3]), "$1.21k  1m00s");
+}
+
 TEST(LadderBadges, ARowCutByTheEdgeOrUnderAnEdgePillHasNoBadge) {
     { // bin 110 is half above the top edge
         BadgeRig rig(camera(90.5, 110.5));
@@ -348,7 +382,7 @@ TEST(LadderBadges, EdgePillsStackAskNearestTheEdgeAndFollowTheCurrentWindow) {
     EXPECT_EQ(rig.layer.badgeVertexCount(), 0);
 }
 
-TEST(LadderBadges, ABidAboveTheWindowPointsUpAndAnEdgeKeepsTheLargerOfASide) {
+TEST(LadderBadges, ABidAboveTheWindowPointsUpAndAnEdgeKeepsTheNearerOfASide) {
     BadgeRig rig(camera(90, 110));
     rig.snapshot();
     rig.candidate(S::kBid, S::kAbove, 112, 5);
@@ -357,15 +391,21 @@ TEST(LadderBadges, ABidAboveTheWindowPointsUpAndAnEdgeKeepsTheLargerOfASide) {
     EXPECT_EQ(rig.pills()[0].colour, BadgePill::Bid);
     EXPECT_EQ(rig.pills()[0].arrow, 1);
     EXPECT_DOUBLE_EQ(rig.pills()[0].rect.top(), chart::kEdgeInsetPx) << "alone: at the edge";
-    // Both bid candidates above after a pan: one pill, the larger.
+    // Both bid candidates above after a pan: one pill, the nearer (not the larger).
     rig.snapshot();
     rig.candidate(S::kBid, S::kAbove, 112, 5);
-    rig.candidate(S::kBid, S::kBelow, 89, 9);
+    rig.candidate(S::kBid, S::kBelow, 89, 4);
     rig.post();
     rig.cam = camera(70, 88);
     rig.draw();
     ASSERT_EQ(rig.pills().size(), 1u);
-    EXPECT_EQ(text(rig.pills()[0]).substr(0, 6), "$801  ") << "89 x 9";
+    EXPECT_EQ(text(rig.pills()[0]).substr(0, 6), "$356  ") << "89 x 4, not 112 x 5";
+    // Both below after a pan the other way: the nearer is the higher price.
+    rig.cam = camera(120, 140);
+    rig.draw();
+    ASSERT_EQ(rig.pills().size(), 1u);
+    EXPECT_EQ(rig.pills()[0].arrow, -1);
+    EXPECT_EQ(text(rig.pills()[0]).substr(0, 6), "$560  ") << "112 x 5";
 }
 
 // ------------------------------------------------------------ (18) nodes
@@ -398,7 +438,7 @@ TEST(LadderBadges, TheTextStageSubmitsTheBadgeGlyphsAndUpdateNodesNone) {
     s.serial = 1;
     for (const int64_t k : {100, 103}) {
         s.rows[size_t(k)].bid = 10;
-        s.rows[size_t(k)].bidSeenMs = 61'000;
+        s.rows[size_t(k)].bidWallMs = 61'000;
         s.rows[size_t(k)].flags = LadderRow::kBidLarge;
     }
     s.walls[S::kAsk][S::kAbove] = {130, 2, true, false};
@@ -417,6 +457,8 @@ TEST(LadderBadges, TheTextStageSubmitsTheBadgeGlyphsAndUpdateNodesNone) {
     int ink = 0;
     for (const auto& p : layers.ladder.badges().pills()) ink += inkChars(p);
     ASSERT_EQ(layers.ladder.badges().pills().size(), 3u);
+    EXPECT_EQ(::text(layers.ladder.badges().pills()[1]).find('$'), 0u)
+        << "the heatmap drew no cell labels: the badge keeps its notional";
     EXPECT_GT(ink, 0);
     EXPECT_EQ(text.submittedGlyphs(), ink);
     EXPECT_EQ(int(layers.ladder.badges().glyphs().size()), ink);
@@ -596,7 +638,7 @@ TEST(LadderBadgesGpu, WarmedFramesAllocateNothingThroughEndFrame) {
         rig.layer.sync(frame);
         rig.layer.updateNodes(frame, context);
         rig.text.beginFrame(&root, rig.window, atlas());
-        rig.layer.submitLabels(frame, context);
+        rig.layer.submitLabels(frame, context, false);
         rig.text.endFrame();
     };
     gAllocations = 0;

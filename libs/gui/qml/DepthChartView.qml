@@ -15,6 +15,10 @@ Rectangle {
     property bool showCandles: candlesEnabled
 
     property int currentActiveTimeframe: 100
+    // The price axis column (axis and corner): the renderer's measured label width, but
+    // never narrower than the corner's P/L/M buttons with the corner's 3 px inset each side.
+    readonly property real priceAxisColumnPx: Math.max(unifiedGridRenderer.priceAxisWidthPx,
+                                                       axisCornerButtons.implicitWidth + 6)
 
     // Asset-specific volume ranges (BTC/ETH/DOGE differ by orders of magnitude)
     // TODO: Make dynamic
@@ -62,7 +66,7 @@ Rectangle {
     Rectangle {
         id: heatmapBackground
         anchors.fill: parent
-        anchors.rightMargin: unifiedGridRenderer.priceAxisWidthPx + ladderStrip.width
+        anchors.rightMargin: root.priceAxisColumnPx + ladderStrip.width
         anchors.bottomMargin: unifiedGridRenderer.timeAxisHeightPx
         color: root.color
         visible: true
@@ -561,7 +565,7 @@ Rectangle {
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.bottom: axisCorner.top
-        width: unifiedGridRenderer.priceAxisWidthPx
+        width: root.priceAxisColumnPx
         color: Qt.rgba(0.05, 0.05, 0.1, 0.85)
         border.color: Qt.rgba(1, 1, 1, 0.3)
         border.width: 1
@@ -743,7 +747,7 @@ Rectangle {
         id: axisCorner
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        width: unifiedGridRenderer.priceAxisWidthPx
+        width: root.priceAxisColumnPx
         height: unifiedGridRenderer.timeAxisHeightPx
         color: Qt.rgba(0.05, 0.05, 0.1, 0.85)
         border.color: Qt.rgba(1, 1, 1, 0.3)
@@ -756,6 +760,8 @@ Rectangle {
     // Lock to mid (M) replaces P (either turns the other off); a price-axis zoom,
     // a keyboard price pan or a price fit turns it off.
     Row {
+        id: axisCornerButtons
+        objectName: "axisCornerButtons"
         anchors.centerIn: axisCorner
         spacing: 3
         z: 6
