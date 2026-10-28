@@ -178,15 +178,15 @@ TEST_F(TimeframeCarryTest, FollowWithoutDrawnCameraOrLiveAnchor) {
     f.setTimeframe(2000);
     window(-10000, 10000);
 }
-TEST_F(TimeframeCarryTest, HundredMillisecondViewKeepsColumnsAndInvalidNextSkips) {
+TEST_F(TimeframeCarryTest, StartupAndInvalidNextSkipColumns) {
     c.session().timeframeMs = 100;
     f.setTimeframe(2000);
-    window(-94000, 106000);
+    window(0, 10000);
     ASSERT_FALSE(f.events.empty());
-    EXPECT_EQ(f.events.front(), "deferred");
+    EXPECT_EQ(f.events.front(), "immediate");
     f.events.clear();
     f.setTimeframe(0);
-    window(-94000, 106000);
+    window(0, 10000);
     EXPECT_EQ(f.events, (std::vector<std::string>{"processor", "update", "changed"}));
 }
 TEST_F(TimeframeCarryTest, InvalidWindowSkipsColumnSolve) {

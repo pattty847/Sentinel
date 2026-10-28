@@ -39,6 +39,7 @@ public:
         int64_t padMs = 0, startMs = 0, endMs = 0, tfMs = 0;
         uint64_t placement = 0;
     };
+    static constexpr int64_t kMaxTradeLeadMs = 5000;
     using TimerFactory = std::function<std::unique_ptr<ILivePlacementTimer>(std::function<void()>)>;
     LivePlacement(ChartViewController& controller, IChartEnvironment& environment);
     PlacementFlags& flags() { return flags_; }
@@ -68,6 +69,10 @@ signals:
 private:
     int64_t initialLiveEndMs() const;
     bool acceptTradeTime(int64_t timeMs);
+    bool tradeTimeAllowed(int64_t timeMs) const;
+    void followTrade(int64_t previousTradeMs);
+    void placeAtLive(bool automatic);
+    bool awaitingTimeframe() const;
     bool keepsFollowPadding(int64_t start, int64_t end, int64_t tf) const;
     bool shouldSeed(double bestBid, double bestAsk) const;
     static constexpr double kAutoScrollPaddingFrac = 0.08;

@@ -117,13 +117,20 @@ void LivePlacement::seedGpuViewport(double bestBid, double bestAsk) {
 }
 
 void LivePlacement::returnGpuToLive() {
+  placeAtLive(false);
+}
+
+void LivePlacement::placeAtLive(bool automatic) {
   if (!environment_.attached() || !controller_.viewPtr() || !controller_.viewPtr()->isTimeWindowValid()) return;
   const int64_t span = controller_.viewPtr()->getVisibleTimeEnd() - controller_.viewPtr()->getVisibleTimeStart();
   const int64_t end = controller_.priceFitter().gpuLiveEndMs(span);
   if (end <= 0) return; // nothing known yet: the next live frame steps forward
   sLog_Render("GPU heatmap returns to live: anchor=" << LiveEdge::anchorMs(controller_.session(), environment_, controller_.session().timeframeMs) << " end=" << end);
   controller_.viewPtr()->setRasterAnchor(1.0, controller_.viewPtr()->rasterAnchor().fracY); // the live edge
-  controller_.viewPtr()->setViewport(end - span, end, controller_.viewPtr()->getMinPrice(), controller_.viewPtr()->getMaxPrice());
+  if (automatic)
+    controller_.setGpuViewportSelf(end - span, end, controller_.viewPtr()->getMinPrice(), controller_.viewPtr()->getMaxPrice());
+  else
+    controller_.viewPtr()->setViewport(end - span, end, controller_.viewPtr()->getMinPrice(), controller_.viewPtr()->getMaxPrice());
   controller_.syncGpuView(); // publishes the view even when it was already there
   emit liveRenderTick();
 }
@@ -190,31 +197,49 @@ bool LivePlacement::matchesUtf8Product(QStringView symbol, std::string_view prod
 }
 
 void LivePlacement::onTrade(const std::string& product, double price, int64_t timeMs) {
+  if (!tradeTimeAllowed(timeMs)) return;
   // The live price for auto-fit compares the ASCII product id without conversion.
   if (std::isfinite(price) && price > 0 &&
       controller_.session().symbol == QLatin1String(product.data(), static_cast<qsizetype>(product.size())))
     controller_.session().lastTrade = price;
-  const bool firstTrade = controller_.session().lastTradeMs == 0;
+  const int64_t previousTradeMs = controller_.session().lastTradeMs;
   const bool accepted = std::isfinite(price) && price > 0 &&
       matchesUtf8Product(controller_.session().symbol, product) && acceptTradeTime(timeMs);
   // A trade seeds the price window only when no book top has (yet) for this symbol.
   if ((controller_.flags().reseedPrice || !controller_.flags().priceKnown) && matchesUtf8Product(controller_.session().symbol, product))
     seedGpuViewport(price, price);
-  if (accepted && controller_.session().timeframeMs < LiveEdge::kMinuteMs &&
-      controller_.viewPtr()->isAutoScrollEnabled() && !controller_.viewPtr()->isDragging()) {
-    if (firstTrade) returnGpuToLive(); // replace a provisional placement, even if it is ahead
-    else followGpuLive();
-  }
+  if (accepted) followTrade(previousTradeMs);
   controller_.midLock().targetChanged(); // the lock's target while the book is one-sided
+}
+
+void LivePlacement::followTrade(int64_t previousTradeMs) {
+  const auto& session = controller_.session();
+  const int64_t tf = session.timeframeMs;
+  if (tf <= 0 || tf >= LiveEdge::kMinuteMs || !controller_.viewPtr()->isAutoScrollEnabled() ||
+      controller_.viewPtr()->isDragging()) return;
+  if (previousTradeMs == 0) placeAtLive(true); // replace the clock placeholder, even backwards
+  else if (LiveEdge::bucketEnd(previousTradeMs, tf) != LiveEdge::bucketEnd(session.lastTradeMs, tf))
+    followGpuLive();
+}
+
+bool LivePlacement::awaitingTimeframe() const {
+  const auto& session = controller_.session();
+  return session.timeframeMs == 100 && !session.timeframeChosen;
 }
 
 int64_t LivePlacement::initialLiveEndMs() const {
   const auto& session = controller_.session();
   const int64_t tf = std::max<int64_t>(1, session.timeframeMs);
-  if (tf < LiveEdge::kMinuteMs && session.symbol.isEmpty()) return 0;
+  if (awaitingTimeframe() || (tf < LiveEdge::kMinuteMs && session.symbol.isEmpty())) return 0;
   const int64_t end = LiveEdge::endMs(session, environment_, tf);
   // No trade yet: a frozen provisional view, never a minute edge or a running clock.
   return end > 0 || tf >= LiveEdge::kMinuteMs ? end : LiveEdge::bucketEnd(clock_(), tf);
+}
+
+bool LivePlacement::tradeTimeAllowed(int64_t timeMs) const {
+  const int64_t now = clock_();
+  // Subtract unsigned only after ordering: also safe for a malformed INT64_MAX timestamp.
+  return timeMs <= now || uint64_t(timeMs) - uint64_t(now) <= uint64_t(kMaxTradeLeadMs);
 }
 
 bool LivePlacement::acceptTradeTime(int64_t timeMs) {
@@ -242,6 +267,7 @@ bool LivePlacement::keepsFollowPadding(int64_t start, int64_t end, int64_t tf) c
 bool LivePlacement::shouldSeed(double bestBid, double bestAsk) const {
   if (!controller_.viewPtr() || !std::isfinite(bestBid) || !std::isfinite(bestAsk) || bestBid <= 0 || bestAsk < bestBid) return false;
   const bool timeValid = controller_.viewPtr()->isTimeWindowValid();
+  if (!timeValid && awaitingTimeframe()) return false;
   if (timeValid && controller_.flags().priceKnown && !controller_.flags().reseedPrice) return false;
   return true;
 }

@@ -6,6 +6,7 @@
 #include "UnifiedGridRenderer.h"
 #include "BookTopFixture.hpp"
 #include "chart/shell/HeatmapChartPort.hpp"
+#include "chart/core/LiveEdge.hpp"
 #include "datasources/CandleSeriesBuffer.hpp"
 #include "lab/LabData.hpp"
 #include "lab/OffscreenQuick.hpp"
@@ -156,6 +157,14 @@ protected:
     }
     heatmap::gpu::HeatmapGpuLayer &layer() const { return *ugr->gpuHeatmapLayer(); }
     void gpuOn() { ugr->view()->setViewport(viewLo, viewHi, 99'900, 100'300); }
+    void liveTradeAt(int64_t timeMs) {
+        Trade trade{};
+        trade.product_id = "BTC-USD";
+        trade.price = 100'100;
+        trade.size = 1;
+        trade.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(timeMs));
+        ugr->onTradeReceived(trade);
+    }
     // Renders frames (offscreen rendering emits no frameSwapped: ask for each)
     // until done() holds or `ms` pass; onFrame runs after every frame.
     template <class Done, class OnFrame>
@@ -3262,11 +3271,16 @@ TEST_F(UgrGpu, FollowLiveSwitchThatChangesTheColumnWidthLaysOutAtTheNominalEnd) 
     gpuOn();
     ASSERT_TRUE(pump(10'000, [&] { return layer().liveAnchorMs() > 0; })) << "the recording's availability";
     const int64_t anchor = layer().liveAnchorMs();
+    const int64_t tradeMs = anchor - minute + 17321;
+    liveTradeAt(tradeMs);
+    auto liveEnd = [&](int64_t tf) {
+        return tf < minute ? chart::LiveEdge::bucketEnd(tradeMs, tf) : (anchor + tf - 1) / tf * tf;
+    };
     auto nominalEnd = [&](int64_t tf, int64_t span) {
-        return (anchor + tf - 1) / tf * tf + std::max<int64_t>(tf, int64_t(double(span) * 0.08));
+        return liveEnd(tf) + std::max<int64_t>(tf, int64_t(double(span) * 0.08));
     };
     auto nowX = [&](int64_t tf) {
-        return ugr->currentTimeAxisMapping().timeToScreenX(double((anchor + tf - 1) / tf * tf) - double(tf) / 2);
+        return ugr->currentTimeAxisMapping().timeToScreenX(double(liveEnd(tf)) - double(tf) / 2);
     };
     const int64_t second = 1000;
     for (const auto &[fromTf, toTf, fromC, toC] : {std::tuple{minute, second, 2000, 1000},
@@ -3286,11 +3300,34 @@ TEST_F(UgrGpu, FollowLiveSwitchThatChangesTheColumnWidthLaysOutAtTheNominalEnd) 
         const int64_t toSpan = timeSpan();
         const int64_t end = ugr->getViewState()->getVisibleTimeEnd();
         EXPECT_EQ(end, nominalEnd(toTf, toSpan)) << "the nominal live end of the new timeframe";
-        const double padPx = double(end - (anchor + toTf - 1) / toTf * toTf) * toC / double(toTf);
+        const double padPx = double(end - liveEnd(toTf)) * toC / double(toTf);
         EXPECT_EQ(nowX(toTf), 8000.0 - padPx - toC / 2.0) << "Now at the nominal placement";
-        ugr->followLiveForTest(anchor);
+        if (toTf == second) liveTradeAt(tradeMs + 1); // accepted, but the same trade bucket
+        else ugr->followLiveForTest(anchor);
         EXPECT_EQ(ugr->getViewState()->getVisibleTimeEnd(), end) << "no follow-live shift right after";
     }
+}
+
+TEST_F(UgrGpu, NoTradeMinuteToSecondKeepsEndUntilTheFirstTrade) {
+    noLabels();
+    gpuOn();
+    ASSERT_TRUE(pump(10'000, [&] { return layer().liveAnchorMs() > 0; })) << "the recording's availability";
+    const int64_t anchor = layer().liveAnchorMs();
+    const int64_t minuteEnd = anchor + minute;
+    ugr->view()->setViewport(minuteEnd - 4 * minute, minuteEnd, 99'900, 100'300);
+    ugr->view()->enableAutoScroll(true);
+    ugr->view()->setTimeframe(1000);
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    EXPECT_EQ(ugr->getViewState()->getVisibleTimeEnd(), minuteEnd);
+    const int64_t span = timeSpan(), tradeMs = anchor - minute + 17321;
+    liveTradeAt(tradeMs);
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    const int64_t expectedEnd = chart::LiveEdge::bucketEnd(tradeMs, 1000) +
+                               std::max<int64_t>(1000, int64_t(double(span) * 0.08));
+    EXPECT_EQ(ugr->getViewState()->getVisibleTimeEnd(), expectedEnd);
+    EXPECT_EQ(timeSpan(), span);
+    liveTradeAt(tradeMs + 1);
+    EXPECT_EQ(ugr->getViewState()->getVisibleTimeEnd(), expectedEnd);
 }
 
 // A drag released before the target's Auto tick commits. The price

@@ -84,7 +84,10 @@ void TimeframeSwitch::setHooks(std::function<void(int)> activeTimeframe, std::fu
 }
 
 bool TimeframeSwitch::request(int next) const {
-    if (controller_.session().timeframeMs == next) return false;
+    if (controller_.session().timeframeMs == next) {
+        controller_.session().timeframeChosen = true;
+        return false;
+    }
     sLog_Render("timeframe changed: prevMs=" << controller_.session().timeframeMs << " tfMs=" << next);
     return true;
 }
@@ -97,8 +100,14 @@ TimeframeSwitchInputs TimeframeSwitch::capture(int next) {
     controller_.session().timeframeMs = next;
     if (next > 0) activeTimeframe_(next);
     auto* view = controller_.viewPtr();
-    // Read the span BEFORE the new limits can clamp it.
-    in.keepColumns = environment_.attached() && next > 0 && in.previousTfMs > 0 && view && view->isTimeWindowValid();
+    // Read the span BEFORE the new limits can clamp it. An implicit startup
+    // timeframe and a pristine clock placeholder do not express chosen columns.
+    const bool chosen = in.previousTfMs >= 1000 || controller_.session().timeframeChosen;
+    const bool provisional = controller_.flags().pristine && controller_.session().lastTradeMs == 0 &&
+                             in.previousTfMs < LiveEdge::kMinuteMs;
+    in.keepColumns = environment_.attached() && next > 0 && in.previousTfMs > 0 && chosen && !provisional &&
+                     view && view->isTimeWindowValid();
+    controller_.session().timeframeChosen = true;
     in.oldStart = in.keepColumns ? view->getVisibleTimeStart() : 0;
     in.oldEnd = in.keepColumns ? view->getVisibleTimeEnd() : 0;
     in.previousLiveEndMs = LiveEdge::endMs(controller_.session(), environment_, in.previousTfMs);

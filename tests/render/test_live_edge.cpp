@@ -7,10 +7,12 @@
 namespace {
 struct Environment final : chart::IChartEnvironment, chart::ITickOracle, chart::IHeatmapViewSink {
     int64_t anchor = 180000;
+    chart::SurfaceFacts size{800, 400, 1};
     bool present = true;
+    mutable int cameraReads = 0;
     bool attached() const override { return present; }
-    chart::SurfaceFacts surface() const override { return {800, 400, 1}; }
-    double drawnTick() const override { return 1; }
+    chart::SurfaceFacts surface() const override { return size; }
+    double drawnTick() const override { ++cameraReads; return 1; }
     double priceScale() const override { return 1; }
     bool manualTick() const override { return true; }
     bool hasCurrentResolution() const override { return true; }
@@ -46,6 +48,7 @@ struct LiveEdgeTest : testing::TestWithParam<int64_t> {
     void SetUp() override {
         c.session().setSymbol("TEST");
         c.session().timeframeMs = tf();
+        c.setTimeframe(int(tf())); // an explicitly selected interval, including 100 ms
         view.setViewportSize(800, 400);
         view.setAutoPriceScale(false);
         view.enableAutoScroll(true);
@@ -230,11 +233,129 @@ TEST_P(LiveEdgeTest, MinuteFollowRemainsHeatmapDriven) {
     c.session().timeframeMs = 60000;
     view.setViewport(-420000, 180000, 90, 110);
     c.flags().markPriceKnown();
+    clock = 240000;
     trade(237321);
     EXPECT_EQ(end(), 180000); // trades never drive minute follow
     live.followGpuLiveTo(240000);
     EXPECT_EQ(end(), 300000); // exact heatmap boundary stays 240000, then 60000 padding
     EXPECT_EQ(c.priceFitter().gpuLiveEndMs(span()), 240000); // anchor still 180000
+}
+
+TEST_P(LiveEdgeTest, CappedSwitchUsesTradeEndAndNoSameBucketShift) {
+    env.size.widthLogical = 8000;
+    view.setViewportSize(8000, 400);
+    c.session().timeframeMs = 60000;
+    view.setViewport(0, 240000, 90, 110);
+    c.flags().markPriceKnown();
+    trade(137321);
+    ASSERT_EQ(c.camera().restCameraNow(false).colPx, 2000);
+    c.setTimeframe(int(tf()));
+    EXPECT_EQ(end(), padded(firstBucketEnd()));
+    const auto camera = c.camera().restCameraNow(false);
+    ASSERT_EQ(camera.colPx, tf()); // one millisecond per pixel caps the column width
+    const double padPx = double(end() - firstBucketEnd()) * camera.colPx / tf();
+    EXPECT_EQ(camera.xDev(firstBucketEnd() - tf() * .5), 8000.0 - padPx - camera.colPx * .5);
+    const auto beforeEnd = end();
+    trade(137322);
+    EXPECT_EQ(end(), beforeEnd);
+    c.setTimeframe(60000);
+    EXPECT_EQ(end(), 240000); // the minute leg still follows the heatmap anchor
+    EXPECT_EQ(c.camera().restCameraNow(false).colPx, 2000);
+}
+
+TEST_P(LiveEdgeTest, SameBucketTradesDoNoCameraOrViewportWork) {
+    placed();
+    trade(137321);
+    const int reads = env.cameraReads;
+    const auto version = view.getViewportVersion();
+    int writes = 0;
+    QObject::connect(&view, &GridViewState::viewportChanged, &c, [&] { ++writes; });
+    trade(137322, "TEST", 101);
+    EXPECT_EQ(c.session().lastTradeMs, 137322);
+    EXPECT_EQ(c.session().lastTrade, 101);
+    EXPECT_EQ(env.cameraReads, reads);
+    EXPECT_EQ(view.getViewportVersion(), version);
+    EXPECT_EQ(writes, 0);
+    trade(140000);
+    EXPECT_GT(env.cameraReads, reads);
+    EXPECT_EQ(writes, 1);
+}
+
+TEST_P(LiveEdgeTest, AutomaticFirstTradeKeepsPristineAndResizePlacement) {
+    QObject::connect(&view, &GridViewState::viewportChanged, &c.commands(), &chart::ViewCommands::onViewportChanged);
+    live.bootstrapGpuTimeView();
+    ASSERT_TRUE(c.flags().pristine);
+    trade(137321);
+    EXPECT_TRUE(c.flags().pristine);
+    EXPECT_EQ(end(), padded(firstBucketEnd()));
+    const auto beforeEnd = end();
+    live.resize(400);
+    EXPECT_EQ(span(), 50 * tf());
+    EXPECT_EQ(end(), beforeEnd);
+    view.setViewport(0, 10 * tf(), 90, 110);
+    ASSERT_FALSE(c.flags().pristine);
+    live.returnGpuToLive();
+    EXPECT_FALSE(c.flags().pristine) << "the user's return remains an explicit placement";
+}
+
+TEST_P(LiveEdgeTest, FutureTradeCannotPoisonTheAnchorOrConsumeTheFirstTrade) {
+    live.bootstrapGpuTimeView();
+    const auto provisional = end();
+    trade(clock + chart::LivePlacement::kMaxTradeLeadMs + 1, "TEST", 999);
+    EXPECT_EQ(c.session().lastTradeMs, 0);
+    EXPECT_EQ(c.session().lastTrade, 0);
+    EXPECT_EQ(end(), provisional);
+    trade(137321);
+    EXPECT_EQ(end(), padded(firstBucketEnd()));
+    trade(std::numeric_limits<int64_t>::max());
+    EXPECT_EQ(c.session().lastTradeMs, 137321);
+    trade(clock); // a valid trade still catches up after the malformed one
+    EXPECT_EQ(end(), padded(clock + tf()));
+    trade(clock + chart::LivePlacement::kMaxTradeLeadMs); // inclusive limit
+    EXPECT_EQ(c.session().lastTradeMs, clock + chart::LivePlacement::kMaxTradeLeadMs);
+    clock += 6000;
+    trade(clock);
+    EXPECT_EQ(end(), padded(clock + tf()));
+}
+
+TEST_P(LiveEdgeTest, NoTradeMinuteToSubMinuteHoldsUntilFirstTradeReplacesIt) {
+    c.session().timeframeMs = 60000;
+    view.setViewport(-420000, 240000, 90, 110);
+    c.flags().markPriceKnown();
+    c.setTimeframe(int(tf()));
+    EXPECT_EQ(end(), 240000) << "no sub-minute authority yet: keep the previous end";
+    const auto expectedSpan = 11 * tf();
+    EXPECT_EQ(span(), expectedSpan);
+    trade(137321);
+    EXPECT_EQ(end(), padded(firstBucketEnd()));
+    EXPECT_EQ(span(), expectedSpan);
+}
+
+TEST_P(LiveEdgeTest, StartupDefaultToPersistedMinuteMatchesMinuteBootstrap) {
+    c.session().timeframeMs = 100;
+    c.session().timeframeChosen = false;
+    live.bootstrapGpuTimeView();
+    live.setLiveBookTop(99, 101); // even a book cannot choose the implicit time window
+    EXPECT_FALSE(view.isTimeWindowValid());
+    c.setTimeframe(60000);
+    live.bootstrapGpuTimeView(); // the injected bootstrap timer's next tick
+    EXPECT_EQ(view.getVisibleTimeStart(), -5340000);
+    EXPECT_EQ(end(), 660000); // heatmap end 180000 + 8% of 100 minutes
+    EXPECT_TRUE(c.flags().pristine);
+    chart::ChartViewController baseline{env, env, env, published};
+    baseline.session().setSymbol("TEST");
+    baseline.session().timeframeMs = 60000;
+    baseline.livePlacement().bootstrapGpuTimeView();
+    EXPECT_EQ(view.getVisibleTimeStart(), baseline.viewPtr()->getVisibleTimeStart());
+    EXPECT_EQ(end(), baseline.viewPtr()->getVisibleTimeEnd());
+}
+
+TEST_P(LiveEdgeTest, PristineProvisionalTimeDoesNotExpressChosenColumns) {
+    live.bootstrapGpuTimeView();
+    const auto beforeStart = view.getVisibleTimeStart(), beforeEnd = end();
+    c.setTimeframe(2000);
+    EXPECT_EQ(view.getVisibleTimeStart(), beforeStart);
+    EXPECT_EQ(end(), beforeEnd);
 }
 
 INSTANTIATE_TEST_SUITE_P(SubMinute, LiveEdgeTest, testing::Values(100LL, 1000LL));
