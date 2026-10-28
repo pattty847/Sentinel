@@ -8,7 +8,7 @@ class ChartViewController;
 struct ViewportRequest {
     std::optional<qint64> startMs, endMs;
     std::optional<double> priceMin, priceMax;
-    std::optional<bool> followLive, autoScale;
+    std::optional<bool> followLive, autoScale, lockMid;
     QString fit;
 };
 
@@ -17,6 +17,9 @@ class ViewCommands : public QObject {
 public:
     ViewCommands(ChartViewController& controller, IChartEnvironment& environment, ITickOracle& ticks);
     void setAutoPriceScale(bool enabled);
+    // A user price action (price axis, explicit bounds): the auto price scale and the
+    // lock to mid let go of price; the window stays where it is.
+    void releasePrice(const char* reason);
     bool fitView(bool time, bool price);
     QString applyViewportRequest(const ViewportRequest& request);
     bool resetView();

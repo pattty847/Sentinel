@@ -3786,6 +3786,98 @@ TEST_F(UgrWheelCpu, InputRouterPressDoesNotRequestPaint) {
     EXPECT_EQ(item->dirtyAttributes & QQuickItemPrivate::Content, 0u);
 }
 
+// Lock to mid through the real chart: native input (ChartInputRouter) keeps the lock
+// on the chart routes (D1 drag: time only; D2 wheel and pinch: span about the
+// locked centre) and the QML axis entries release it (D3).
+TEST_F(UgrWheelCpu, LockToMidNativeChartRoutesKeepTheLockAxisRoutesRelease) {
+    resetWheelView();
+    auto* v = chart.getViewState();
+    auto centre = [v] { return (v->getMinPrice() + v->getMaxPrice()) * 0.5; };
+    const double pricePerDevPx = (v->getMaxPrice() - v->getMinPrice()) / 320;
+    chart.view()->setLockToMid(true);
+    ASSERT_TRUE(chart.view()->lockToMid());
+    double before = centre(), span0 = v->getMaxPrice() - v->getMinPrice();
+    const QPointingDevice device("lock test", 124, QInputDevice::DeviceType::Mouse, QPointingDevice::PointerType::Generic,
+                                 QInputDevice::Capability::Position, 1, 0);
+    QWheelEvent notch({320, 40}, {320, 40}, {}, {0, 120}, Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false,
+                      Qt::MouseEventNotSynthesized, &device);
+    QCoreApplication::sendEvent(&chart, &notch);
+    EXPECT_TRUE(chart.view()->lockToMid()) << "D2 chart wheel";
+    EXPECT_LT(v->getMaxPrice() - v->getMinPrice(), span0);
+    EXPECT_NEAR(centre(), before, pricePerDevPx) << "about the locked centre, not the cursor (y=40)";
+    ASSERT_TRUE(waitFor([&] { return !chart.zoomGliding(); }));
+    before = centre();
+    span0 = v->getMaxPrice() - v->getMinPrice();
+    for (auto [type, value] : {std::pair{Qt::ZoomNativeGesture, 0.2}, std::pair{Qt::EndNativeGesture, 0.0}}) {
+        QNativeGestureEvent pinch(type, QPointingDevice::primaryPointingDevice(), 2, {320, 280}, {320, 280}, {320, 280},
+                                  value, QPointF());
+        QCoreApplication::sendEvent(&chart, &pinch);
+    }
+    EXPECT_TRUE(chart.view()->lockToMid()) << "D2 pinch";
+    EXPECT_LT(v->getMaxPrice() - v->getMinPrice(), span0);
+    EXPECT_NEAR(centre(), before, 2 * pricePerDevPx);
+    ASSERT_TRUE(waitFor([&] { return !chart.zoomGliding(); }));
+    const double lo = v->getMinPrice(), hi = v->getMaxPrice();
+    const qint64 start = v->getVisibleTimeStart();
+    for (auto [type, at] : {std::pair{QEvent::MouseButtonPress, QPointF(320, 160)},
+                            std::pair{QEvent::MouseMove, QPointF(400, 260)},
+                            std::pair{QEvent::MouseButtonRelease, QPointF(400, 260)}}) {
+        QMouseEvent event(type, at, at, Qt::LeftButton, type == QEvent::MouseButtonRelease ? Qt::NoButton : Qt::LeftButton,
+                          Qt::NoModifier);
+        QCoreApplication::sendEvent(&chart, &event);
+    }
+    EXPECT_NE(v->getVisibleTimeStart(), start) << "D1 the drag pans time";
+    EXPECT_EQ(v->getMinPrice(), lo);
+    EXPECT_EQ(v->getMaxPrice(), hi);
+    EXPECT_TRUE(chart.view()->lockToMid()) << "D1 chart drag";
+    int unchecked = 0;
+    QObject::connect(chart.view(), &chart::ChartViewQml::lockToMidChanged, &chart, [&] { ++unchecked; });
+    wheel(PriceAxis, 120);
+    EXPECT_FALSE(chart.view()->lockToMid()) << "D3 price-axis wheel";
+    EXPECT_EQ(unchecked, 1) << "the QML toggle is told";
+    chart.view()->setLockToMid(true);
+    chart.view()->zoomPriceDrag(100, 160);
+    chart.view()->endZoomGesture();
+    EXPECT_FALSE(chart.view()->lockToMid()) << "D3 price-axis drag";
+}
+
+// The shell's polish loop runs while the spring moves and stops when it rests: no
+// frame is requested and nothing is written at rest.
+TEST_F(UgrWheelCpu, LockToMidPolishLoopRunsOnlyWhileMoving) {
+    resetWheelView();
+    auto* v = chart.getViewState();
+    auto& controller = chart.view()->controller();
+    auto pending = [&] {
+        int n = 0;
+        for (auto* timer : chart.findChildren<QTimer*>())
+            n += timer->isActive() && timer->isSingleShot() && timer->interval() == 0;
+        return n;
+    };
+    chart.view()->setLockToMid(true);
+    const double target = (v->getMinPrice() + v->getMaxPrice()) * 0.5 + 40; // 32 device px at $10 per 8 px
+    controller.livePlacement().setLiveBookTop(target - 5, target + 5);
+    ASSERT_TRUE(controller.framePending());
+    int frames = 0;
+    for (; frames < 200 && controller.framePending(); ++frames) {
+        clock += 16;
+        chart.updatePolish();
+        if (controller.framePending()) EXPECT_EQ(pending(), 1) << "frame " << frames << ": the next frame is asked for";
+        QCoreApplication::processEvents(); // the zero-interval timer: polish() and update()
+    }
+    EXPECT_FALSE(controller.framePending());
+    EXPECT_DOUBLE_EQ((v->getMinPrice() + v->getMaxPrice()) * 0.5, target);
+    EXPECT_GT(frames, 3);
+    const auto version = v->getViewportVersion();
+    for (int i = 0; i < 5; ++i) {
+        clock += 16;
+        chart.updatePolish();
+        EXPECT_EQ(pending(), 0) << "at rest no frame is asked for";
+        QCoreApplication::processEvents();
+    }
+    EXPECT_EQ(v->getViewportVersion(), version);
+    EXPECT_TRUE(chart.view()->lockToMid());
+}
+
 TEST_F(UgrWheelCpu, InputRouterMacNotchAndTrackpadRouteDifferently) {
     resetWheelView();
     const auto version = chart.getViewState()->getViewportVersion();

@@ -201,6 +201,36 @@ TEST_F(FrameProducerTest, ProduceAllocatesNothing) {
     std::printf("produce allocation count: %zu (first, unchanged, tick change)\n", allocations);
 }
 
+// Lock to mid: the spring's frame (advance, write through setViewport) allocates
+// nothing once the view exists (probes off).
+TEST(MidLockAllocation, AdvanceAllocatesNothing) {
+    Environment env;
+    chart::PublishedFrame published;
+    chart::ChartViewController controller{env, env, env, published};
+    auto& view = *controller.viewPtr();
+    controller.session().symbol = "TEST";
+    view.setViewportSize(100, 80);
+    view.setViewport(0, 100000, 50, 150);
+    controller.flags().markPriceKnown();
+    controller.midLock().setEnabled(true);
+    controller.livePlacement().setLiveBookTop(199.5, 200.5);
+    qint64 now = 0;
+    controller.advanceFrame(now += 16); // first frame outside the count
+    ASSERT_TRUE(controller.framePending());
+    allocations = 0;
+    countAllocations = true;
+    int frames = 0;
+    while (controller.framePending() && frames < 200) {
+        controller.advanceFrame(now += 16);
+        controller.livePlacement().setLiveBookTop(199.5, 200.5); // book updates while moving
+        ++frames;
+    }
+    countAllocations = false;
+    EXPECT_EQ(allocations, 0u);
+    EXPECT_EQ((view.getMinPrice() + view.getMaxPrice()) * 0.5, 200.0);
+    std::printf("mid lock advance allocation count: %zu over %d frames\n", allocations, frames);
+}
+
 TEST(FrameAckTest, ControlsSubmissionAndRenderedIdsStaySeparate) {
     chart::FrameAck ack;
     FrameContext frame;

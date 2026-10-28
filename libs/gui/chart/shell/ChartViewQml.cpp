@@ -1,5 +1,11 @@
 #include "ChartViewQml.hpp"
 namespace chart {
+void ChartViewQml::bind(ChartViewController& controller, IChartEnvironment& environment) {
+  controller_ = &controller;
+  environment_ = &environment;
+  connect(&controller.midLock(), &MidLock::enabledChanged, this, &ChartViewQml::lockToMidChanged, Qt::DirectConnection);
+}
+
 void ChartViewQml::zoomClicks(int clicks, double x, double y, bool time, bool price) {
   controller_->zoom().zoomClicks(clicks, x, y, time, price);
 }

@@ -1044,6 +1044,51 @@ TEST(ChartShell, AxisControlsHaveKeyboardActionsAndIndependentFollowStates) {
     }
 }
 
+// Lock to mid's corner toggle (M) reflects and drives view.lockToMid, replaces the
+// auto price scale, and goes unchecked when a price-axis route releases the lock.
+TEST(ChartShell, LockToMidToggleReflectsDrivesAndReleases) {
+    QQmlEngine engine;
+    engine.addImportPath("qrc:/qt/qml");
+    engine.rootContext()->setContextProperty("uiTheme", QVariant::fromValue<QObject *>(nullptr));
+    engine.rootContext()->setContextProperty("dataSource", QVariant::fromValue<QObject *>(nullptr));
+    QQmlComponent component(&engine, QUrl("qrc:/qt/qml/Sentinel/Charts/qml/DepthChartView.qml"));
+    ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+    std::unique_ptr<QObject> shell(component.create());
+    ASSERT_TRUE(shell) << component.errorString().toStdString();
+    shell->setProperty("width", 960);
+    shell->setProperty("height", 640);
+    QCoreApplication::processEvents();
+    auto *renderer = shell->findChild<UnifiedGridRenderer *>("unifiedGridRenderer");
+    auto *lock = shell->findChild<QQuickItem *>("lockToMidButton");
+    auto *price = shell->findChild<QQuickItem *>("autoPriceScaleButton");
+    ASSERT_TRUE(renderer && lock && price);
+    EXPECT_TRUE(lock->activeFocusOnTab());
+    const QColor off = lock->property("color").value<QColor>();
+    EXPECT_FALSE(renderer->view()->lockToMid()) << "off by default";
+    renderer->view()->setViewport(1'000'000, 1'000'000 + 600'000, 100, 200);
+    renderer->view()->setAutoPriceScale(true);
+    const auto press = [](QObject *target, int key) {
+        QKeyEvent event(QEvent::KeyPress, key, Qt::NoModifier);
+        QCoreApplication::sendEvent(target, &event);
+    };
+    press(lock, Qt::Key_Space); // drives
+    EXPECT_TRUE(renderer->view()->lockToMid());
+    EXPECT_FALSE(renderer->view()->autoPriceScale()) << "the lock replaces the auto price scale";
+    const QColor on = lock->property("color").value<QColor>();
+    EXPECT_NE(on, off) << "the checked state shows";
+    EXPECT_EQ(price->property("color").value<QColor>(), off);
+    renderer->view()->zoomPriceWheel(120, 0, 0, 100); // reflects a release
+    EXPECT_FALSE(renderer->view()->lockToMid());
+    EXPECT_EQ(lock->property("color").value<QColor>(), off);
+    press(shell.get(), Qt::Key_M);
+    EXPECT_TRUE(renderer->view()->lockToMid());
+    EXPECT_EQ(lock->property("color").value<QColor>(), on);
+    press(price, Qt::Key_Space); // P on releases M
+    EXPECT_TRUE(renderer->view()->autoPriceScale());
+    EXPECT_FALSE(renderer->view()->lockToMid());
+    EXPECT_EQ(lock->property("color").value<QColor>(), off);
+}
+
 // The book ladder's strip sits between the chart and the price axis: the renderer
 // gives up the strip's width, the axis keeps its place and its controls.
 TEST(ChartShell, LadderStripReservesItsWidthBeforeThePriceAxis) {

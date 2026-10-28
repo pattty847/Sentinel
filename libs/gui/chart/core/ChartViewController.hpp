@@ -4,6 +4,7 @@
 #include "chart/core/ChartFrame.hpp"
 #include "chart/core/ViewCommands.hpp"
 #include "chart/core/LivePlacement.hpp"
+#include "chart/core/MidLock.hpp"
 #include "chart/core/PriceFitter.hpp"
 #include "chart/core/PriceCarryPolicy.hpp"
 #include "chart/core/TimeframeSwitch.hpp"
@@ -25,7 +26,7 @@ struct ViewSnapshot {
     qint64 start = 0, end = 0, timeframeMs = 0;
     double low = 0, high = 0, width = 0, height = 0;
     uint64_t viewportVersion = 0;
-    bool timeWindowValid = false, followLive = false, autoScale = false;
+    bool timeWindowValid = false, followLive = false, autoScale = false, lockMid = false;
 };
 
 class ChartViewController : public QObject {
@@ -63,7 +64,12 @@ public:
     ZoomController& zoom() { return zoom_; }
 
     ZoomGlide& zoomGlide() { return zoomGlide_; }
-    void advanceFrame(qint64 now) { zoomGlide_.advanceZoomGlide(now); }
+    MidLock& midLock() { return midLock_; }
+    const MidLock& midLock() const { return midLock_; }
+    // One frame of the view policies (a zoom glide, the lock's spring) and whether
+    // another frame is needed (the shell's polish loop).
+    void advanceFrame(qint64 now) { zoomGlide_.advanceZoomGlide(now); midLock_.advance(now); }
+    bool framePending() const { return glide_.time.active || glide_.price.active || midLock_.moving(); }
 
     FrameInputs frameInputs(const QRectF& bounds, double dpr, const QElapsedTimer& clock,
                             const TimeAuthority& time, FrameContext::OverlayActivationSet overlays) const;
@@ -92,6 +98,7 @@ private:
     PriceCarryPolicy priceCarry_;
     TimeframeSwitch timeframeSwitch_;
     ViewCommands commands_;
+    MidLock midLock_;
 };
 
 } // namespace chart

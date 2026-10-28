@@ -753,6 +753,8 @@ Rectangle {
 
     // Price scale and live-time follow are independent viewport controls. A
     // price-axis drag turns P off; panning away from the right edge turns L off.
+    // Lock to mid (M) replaces P (either turns the other off); a price-axis zoom,
+    // a keyboard price pan or a price fit turns it off.
     Row {
         anchors.centerIn: axisCorner
         spacing: 3
@@ -840,6 +842,49 @@ Rectangle {
             Keys.onPressed: function(event) {
                 if (event.key === Qt.Key_Space || event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                     unifiedGridRenderer.view.enableAutoScroll(!unifiedGridRenderer.view.autoScrollEnabled)
+                    event.accepted = true
+                }
+            }
+        }
+        Rectangle {
+            id: lockToMidButton
+            objectName: "lockToMidButton"
+            width: Math.min(21, axisCorner.height - 6)
+            height: width
+            radius: 3
+            activeFocusOnTab: true
+            color: unifiedGridRenderer.view.lockToMid ? "#2962ff" : "transparent"
+            border.width: 1
+            border.color: activeFocus || lockToMidMouse.containsMouse ? "#9cc8ff" : "#5a6370"
+            Accessible.role: Accessible.Button
+            Accessible.checkable: true
+            Accessible.checked: unifiedGridRenderer.view.lockToMid
+            Accessible.name: "Lock to mid"
+            Accessible.description: "Keep the book mid centred. Press M to toggle. Replaces auto price scale; a price-axis zoom turns it off."
+            Accessible.onPressAction: unifiedGridRenderer.view.lockToMid = !unifiedGridRenderer.view.lockToMid
+            Text {
+                anchors.centerIn: parent
+                text: "M"
+                font.pixelSize: 11
+                font.bold: true
+                color: unifiedGridRenderer.view.lockToMid ? "#ffffff" : "#9aa4b2"
+            }
+            MouseArea {
+                id: lockToMidMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                    lockToMidButton.forceActiveFocus()
+                    unifiedGridRenderer.view.lockToMid = !unifiedGridRenderer.view.lockToMid
+                }
+            }
+            ToolTip.visible: lockToMidMouse.containsMouse
+            ToolTip.delay: 550
+            ToolTip.text: "M · Lock to mid: keep the book mid centred"
+            Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_Space || event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                    unifiedGridRenderer.view.lockToMid = !unifiedGridRenderer.view.lockToMid
                     event.accepted = true
                 }
             }
@@ -1013,6 +1058,7 @@ Rectangle {
             case Qt.Key_R: unifiedGridRenderer.view.resetZoom(); event.accepted = true; break;
             case Qt.Key_A: unifiedGridRenderer.view.enableAutoScroll(!unifiedGridRenderer.view.autoScrollEnabled); event.accepted = true; break;
             case Qt.Key_P: unifiedGridRenderer.view.autoPriceScale = !unifiedGridRenderer.view.autoPriceScale; event.accepted = true; break;
+            case Qt.Key_M: unifiedGridRenderer.view.lockToMid = !unifiedGridRenderer.view.lockToMid; event.accepted = true; break;
             case Qt.Key_Plus:
             case Qt.Key_Equal: unifiedGridRenderer.view.zoomIn(); event.accepted = true; break;
             case Qt.Key_Minus:

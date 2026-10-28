@@ -16,6 +16,7 @@ AgentApi::ViewportSnapshot ChartAgentPort::snapshot(AgentApi::Metadata meta) con
     }
     s.followLive = view.followLive;
     s.autoScale = view.autoScale;
+    s.lockMid = view.lockMid;
     if (!view.timeWindowValid) return s;
     const qint64 start = view.start;
     const qint64 end = view.end;
@@ -41,7 +42,7 @@ AgentApi::ControlApply ChartAgentPort::applyViewport(const AgentApi::ControlBody
         return out;
     }
     const QString error = applyViewportRequest(
-        {body.startMs, body.endMs, body.priceMin, body.priceMax, body.followLive, body.autoScale, body.fit});
+        {body.startMs, body.endMs, body.priceMin, body.priceMax, body.followLive, body.autoScale, body.lockMid, body.fit});
     if (error == "fit_unavailable") {
         out.status = 409; out.code = "fit_unavailable";
         out.message = "Auto-fit needs known data (a live anchor or a price)";
@@ -53,6 +54,7 @@ AgentApi::ControlApply ChartAgentPort::applyViewport(const AgentApi::ControlBody
     out.data["viewportVersion"] = QString::number(out.viewportVersion);
     out.data["followLive"] = after.followLive.value_or(false);
     out.data["autoScale"] = after.autoScale.value_or(false);
+    out.data["lockMid"] = after.lockMid.value_or(false);
     return out;
 }
 

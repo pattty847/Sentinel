@@ -168,8 +168,10 @@ void ZoomController::zoomClicks(int clicks, double x, double y, bool time, bool 
       getViewState()->isDragging())
     return;
   if (controller_.glide().gesture) endZoomGesture();
-  // The auto price scale owns price: the chart wheel zooms time only.
+  // The auto price scale owns price: the chart wheel zooms time only. The lock to mid
+  // keeps price centred: its span zooms about the locked centre.
   price = price && !getViewState()->autoPriceScale();
+  y = controller_.midLock().zoomAnchorY(y, height(), price);
   const auto drawn = controller_.camera().rasterCameraNow(false); // what is on screen now (a glide in flight included)
   if (!time && !price) return;
   if (!drawn.valid) {
@@ -243,6 +245,7 @@ void ZoomController::zoomContinuousFor(double factor, double x, double y, bool t
                                             int settleMs) {
   if (!canZoomContinuous(factor)) return;
   price = price && !getViewState()->autoPriceScale();
+  y = controller_.midLock().zoomAnchorY(y, height(), price); // the settle anchors there too
   if (!time && !price) return;
   const auto [fracX, fracY] = zoomFrac(x, y);
   // The camera on screen: before the gesture what is drawn (a rest view or a glide),
@@ -343,7 +346,7 @@ void ZoomController::zoomTimeWheel(int angleDelta, int pixelDelta, int phase, do
 }
 
 void ZoomController::zoomPriceWheel(int angleDelta, int pixelDelta, int phase, double y) {
-  if (getViewState() && angleDelta != 0) getViewState()->setAutoPriceScale(false);
+  if (angleDelta != 0) controller_.commands().releasePrice("price-axis wheel");
   wheelZoom(angleDelta, pixelDelta == 0, phase, false,
             width() / 2, y, false, true, WheelRoute::PriceAxis);
 }
@@ -353,14 +356,14 @@ void ZoomController::zoomTimeDrag(double delta, double x) {
 }
 
 void ZoomController::zoomPriceDrag(double delta, double y) {
-  if (getViewState()) getViewState()->setAutoPriceScale(false);
+  controller_.commands().releasePrice("price-axis drag");
   zoomContinuousFor(continuousFactor(delta), width() / 2, y, false, true, kGestureSafetyMs);
 }
 
 void ZoomController::zoomTimeClicks(int clicks, double x) { zoomClicks(clicks, x, height() / 2, true, false); }
 
 void ZoomController::zoomPriceClicks(int clicks, double y) {
-  if (getViewState()) getViewState()->setAutoPriceScale(false);
+  controller_.commands().releasePrice("price-axis clicks");
   zoomClicks(clicks, width() / 2, y, false, true);
 }
 

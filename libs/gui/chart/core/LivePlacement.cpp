@@ -174,9 +174,11 @@ void LivePlacement::enableAutoScroll(bool enabled) {
 
 void LivePlacement::setLiveBookTop(double bestBid, double bestAsk) {
   // The book top seeds the first viewport (and the price window after a symbol switch).
-  if (std::isfinite(bestBid) && std::isfinite(bestAsk) && bestBid > 0 && bestAsk >= bestBid)
-    controller_.session().bookMid = (bestBid + bestAsk) * 0.5;
+  auto& session = controller_.session();
+  session.bookMidValid = std::isfinite(bestBid) && std::isfinite(bestAsk) && bestBid > 0 && bestAsk >= bestBid;
+  if (session.bookMidValid) session.bookMid = (bestBid + bestAsk) * 0.5;
   seedGpuViewport(bestBid, bestAsk);
+  controller_.midLock().targetChanged();
 }
 bool LivePlacement::matchesUtf8Product(QStringView symbol, std::string_view product) {
   // QString::fromUtf8 consumes one initial BOM; the non-owning UTF-8 comparison
@@ -193,6 +195,7 @@ void LivePlacement::onTrade(const std::string& product, double price) {
   // A trade seeds the price window only when no book top has (yet) for this symbol.
   if ((controller_.flags().reseedPrice || !controller_.flags().priceKnown) && matchesUtf8Product(controller_.session().symbol, product))
     seedGpuViewport(price, price);
+  controller_.midLock().targetChanged(); // the lock's target while the book is one-sided
 }
 
 void LivePlacement::resize(double w) {

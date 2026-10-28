@@ -13,9 +13,11 @@ class ChartViewQml : public QObject {
     Q_PROPERTY(int timeframeMs READ getCurrentTimeframe WRITE setTimeframe NOTIFY timeframeChanged)
     Q_PROPERTY(QPointF panVisualOffset READ getPanVisualOffset NOTIFY panVisualOffsetChanged)
     Q_PROPERTY(bool autoPriceScale READ autoPriceScale WRITE setAutoPriceScale NOTIFY autoPriceScaleChanged)
+    // Lock to mid (price centred on the book mid; replaces the auto price scale).
+    Q_PROPERTY(bool lockToMid READ lockToMid WRITE setLockToMid NOTIFY lockToMidChanged)
     Q_PROPERTY(QObject* viewState READ viewState CONSTANT)
 public:
-    void bind(ChartViewController& controller, IChartEnvironment& environment) { controller_ = &controller; environment_ = &environment; }
+    void bind(ChartViewController& controller, IChartEnvironment& environment);
     ChartViewController& controller() const { return *controller_; }
     GridViewState* getViewState() const { return controller_ ? controller_->viewPtr() : nullptr; }
     QObject* viewState() const { return getViewState(); }
@@ -29,6 +31,8 @@ public:
     double heatmapTickSize() const;
     bool autoPriceScale() const { return getViewState() && getViewState()->autoPriceScale(); }
     void setAutoPriceScale(bool enabled);
+    bool lockToMid() const { return controller_ && controller_->midLock().enabled(); }
+    void setLockToMid(bool on) { controller_->midLock().setEnabled(on); }
     Q_INVOKABLE bool fitView(bool time, bool price);
     Q_INVOKABLE bool fitTimeToData() { return fitView(true, false); }
     Q_INVOKABLE bool fitPriceToData() { return fitView(false, true); }
@@ -66,6 +70,7 @@ public:
 signals:
     void autoScrollEnabledChanged();
     void autoPriceScaleChanged();
+    void lockToMidChanged();
     void viewportChanged();
     void timeframeChanged();
     void panVisualOffsetChanged();

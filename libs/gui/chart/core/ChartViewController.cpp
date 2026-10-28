@@ -30,7 +30,8 @@ ChartViewController::ChartViewController(IChartEnvironment& environment, IHeatma
     : QObject(parent), environment_(environment), sink_(sink), view_(std::make_unique<GridViewState>(parent)),
       camera_(*view_, session_, environment, ticks, published, glide_), zoomGlide_(glide_, camera_), zoom_(*this, environment),
       priceFitter_(*this, environment, ticks), livePlacement_(*this, environment),
-      priceCarry_(*this, environment), timeframeSwitch_(*this, environment, published), commands_(*this, environment, ticks) {
+      priceCarry_(*this, environment), timeframeSwitch_(*this, environment, published), commands_(*this, environment, ticks),
+      midLock_(*this, environment) {
     livePlacement_.setApplyPriceCarry([this](double mid) { return priceCarry_.apply(mid); });
 }
 
@@ -82,5 +83,5 @@ chart::ViewSnapshot chart::ChartViewController::snapshot() const {
     return {view_->getVisibleTimeStart(), view_->getVisibleTimeEnd(), session_.timeframeMs,
             view_->getMinPrice(), view_->getMaxPrice(), size.widthLogical, size.heightLogical,
             view_->getViewportVersion(), view_->isTimeWindowValid(), view_->isAutoScrollEnabled(),
-            view_->autoPriceScale()};
+            view_->autoPriceScale(), midLock_.enabled()};
 }
