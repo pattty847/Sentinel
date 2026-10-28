@@ -10,6 +10,7 @@
 #include "marketdata/model/TradeData.h"
 #include "datasources/RemoteGridDataSource.hpp"
 #include "chart/feeds/BookLadderFeed.hpp"
+#include "SentinelLogging.hpp"
 #include "models/PriceAxisModel.hpp"
 #include "models/TimeAxisModel.hpp"
 #include "lab/LabData.hpp"
@@ -1282,6 +1283,32 @@ TEST_F(LadderShellGpu, BarsDrawInTheStripOnTheChartRows) {
     EXPECT_EQ(barPixels(), 0) << "no BTC rows survive the symbol switch";
 }
 
+// Short price labels (whole dollars at a wide price span) measure a price axis narrower
+// than the corner's P/L/M buttons: the column widens to hold them, inside the corner.
+TEST_F(LadderShellGpu, TheCornerButtonsFitInsideTheAxisColumnAtANarrowAxis) {
+    heatmap::HeatmapChartSettings settings;
+    settings.showLabels = false;
+    ugr->setHeatmapChartSettings(settings, true); // auto tick: a wide span is allowed
+    const int64_t viewLo = epoch + 2 * kHourMs;
+    ugr->view()->setViewport(viewLo, viewLo + 10 * minute, 60'000, 140'000);
+    auto *buttons = shell->findChild<QQuickItem *>("axisCornerButtons");
+    auto *axis = shell->findChild<QQuickItem *>("priceAxisControl");
+    ASSERT_TRUE(buttons && axis);
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < 5000 && ugr->priceAxisWidthPx() >= buttons->implicitWidth() + 6) render(1);
+    ASSERT_LT(ugr->priceAxisWidthPx(), buttons->implicitWidth() + 6) << "the labels never measured narrow";
+    render(1);
+    const QRectF row = buttons->mapRectToItem(shell.get(), QRectF(0, 0, buttons->width(), buttons->height()));
+    const QRectF column = axis->mapRectToItem(shell.get(), QRectF(0, 0, axis->width(), axis->height()));
+    EXPECT_DOUBLE_EQ(column.width(), buttons->implicitWidth() + 6);
+    EXPECT_DOUBLE_EQ(column.right(), shell->width());
+    EXPECT_DOUBLE_EQ(row.left(), column.left() + 3) << "inside the corner, under the axis";
+    EXPECT_DOUBLE_EQ(row.right(), column.right() - 3);
+    EXPECT_DOUBLE_EQ(ugr->x() + ugr->width() + ugr->layers()->ladderWidthPx(), column.left())
+        << "the plot gives up the extra width";
+}
+
 // The replica as production feeds it (RemoteGridDataSource, MainWindowGPU's forwarding):
 // a disconnect clears the replica and the ladder withdraws at the next frame, with an
 // unchanged viewport and no further delta.
@@ -1926,6 +1953,51 @@ TEST_F(ChartLabels, ZoomedOutPostsNoLabelRequest) {
     EXPECT_TRUE(ugr->gpuLabelGlyphs().empty());
 }
 
+// The text stage tells the ladder whether the heatmap drew its cell value labels this
+// frame: while they draw, wall badges leave out the notional (the layout itself is
+// tested in LadderBadges; here the flag, read from the "ladder.badges" probe).
+QStringList *gBadgeProbes = nullptr;
+void captureBadgeProbe(QtMsgType, const QMessageLogContext &, const QString &message) {
+    if (gBadgeProbes && message.startsWith(QLatin1String("[ladder.badges]"))) gBadgeProbes->append(message);
+}
+TEST_F(ChartLabels, WallBadgesLearnWhetherTheCellLabelsDrew) {
+    ASSERT_TRUE(sentinel::logging::probeEnabled("ladder.badges")) << "main enables the probe";
+    QStringList probes;
+    gBadgeProbes = &probes;
+    const auto previous = qInstallMessageHandler(captureBadgeProbe);
+    LiveOrderBook book("BTC-USD");
+    book.initialize(99'900, 100'100, 0.01);
+    std::vector<BookLevelUpdate> levels;
+    for (int p = 100'000; p <= 100'007; ++p) levels.push_back({true, p + 0.5, p == 100'005 ? 10.0 : 1.0});
+    for (int p = 100'008; p <= 100'015; ++p) levels.push_back({false, p + 0.5, 1.0});
+    book.applyUpdates(levels, std::chrono::system_clock::now(), nullptr);
+    ugr->layers()->setLadderEnabled(true);
+    ugr->layers()->setWallRadarEnabled(true);
+    ugr->setLiveBook(book);
+    zoomIn();
+    // One wall badge (bin 100'005, 10x the near-touch median) with the cell flag as drawn.
+    QString last; // the newest badge probe line, for a failure message
+    const auto badge = [&](bool cellLabels) {
+        const QString flag = cellLabels ? QStringLiteral(" cellLabels=true ") : QStringLiteral(" cellLabels=false ");
+        return pump(20'000, [&] {
+            if (!probes.isEmpty()) last = probes.back();
+            if (labelsDrawn() != cellLabels) return false;
+            for (const auto &line : probes)
+                if (line.contains(QLatin1String(" rows=1 ")) && line.contains(flag)) return true;
+            probes.clear();
+            return false;
+        });
+    };
+    const bool drawn = badge(true);
+    ASSERT_TRUE(model->apply({{"showLabels", false}}, false).isEmpty());
+    probes.clear();
+    const bool hidden = badge(false);
+    qInstallMessageHandler(previous);
+    gBadgeProbes = nullptr;
+    EXPECT_TRUE(drawn) << "no badge laid out with cellLabels=true while the labels drew; last: " << last.toStdString();
+    EXPECT_TRUE(hidden) << "no badge laid out with cellLabels=false after the labels went off; last: " << last.toStdString();
+}
+
 // HeatmapCellQuery::cancel() drops its result without a signal: the chart must
 // not keep drawing a held copy, and it asks again (retry with backoff).
 TEST_F(ChartLabels, ACancelledQueryDrawsNoStaleLabelsAndRetries) {
@@ -2166,6 +2238,7 @@ TEST_F(ChartLabels, DialogAndMenuSurviveTheRendererBeingDestroyed) {
 
 int main(int argc, char **argv) {
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "offscreen");
+    qputenv("SENTINEL_PROBES", "ladder.badges");
     QApplication app(argc, argv);
     QTemporaryDir settingsDir;
     QSettings::setDefaultFormat(QSettings::IniFormat);

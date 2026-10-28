@@ -104,6 +104,7 @@ void LadderLayer::onRootRebuilt() {
     bars_ = nullptr;
     badges_ = nullptr;
     built_ = false;
+    badgesBuilt_ = false;
     reserved_ = false; // the text renderer drops its nodes with the root
 }
 
@@ -199,21 +200,22 @@ void LadderLayer::rebuild(const ChartFrame& frame) {
     }
     commitVertices(bars_, count * kVerticesPerBar, vertices_);
     ++dirtyMarks_;
-    rebuildBadges(frame);
+    badgesBuilt_ = false;
     ++rebuilds_;
 }
 
-void LadderLayer::rebuildBadges(const ChartFrame& frame) {
+void LadderLayer::rebuildBadges(const ChartFrame& frame, bool cellLabels) {
     QElapsedTimer timer;
     timer.start();
-    badgeLayout_.layout(*current_, frame.context, key_.atlas);
+    badgeLayout_.layout(*current_, frame.context, key_.atlas, cellLabels);
     commitVertices(badges_, badgeLayout_.writeGeometry(badges_->geometry()->vertexDataAsColoredPoint2D()),
                    badgeVertices_);
     ++dirtyMarks_;
     if (!current_->radar || !key_.atlas) return; // no layout ran
     const auto& st = badgeLayout_.stats();
     sLog_Probe("ladder.badges", "serial=" << current_->serial << " rows=" << st.rowBadges << " dropped=" << st.dropped
-               << " pills=" << st.edgePills << " glyphs=" << st.glyphs << " vertices=" << badgeVertices_
+               << " pills=" << st.edgePills << " glyphs=" << st.glyphs << " cellLabels=" << cellLabels
+               << " vertices=" << badgeVertices_
                << " ns=" << timer.nsecsElapsed());
 }
 
@@ -223,8 +225,14 @@ bool LadderLayer::reserveText(ChartTextRenderer& text) const {
            text.reserve(QColor::fromRgba(kHotText), kMaxBadgeGlyphs);
 }
 
-void LadderLayer::submitLabels(const ChartFrame&, LayerNodeContext& context) {
-    if (!gate_ || !drawing_ || !current_->radar || !context.atlasReady) return;
+void LadderLayer::submitLabels(const ChartFrame& frame, LayerNodeContext& context, bool cellLabels) {
+    if (!gate_ || !drawing_) return;
+    if (!badgesBuilt_ || cellLabels != cellLabels_) {
+        badgesBuilt_ = true;
+        cellLabels_ = cellLabels;
+        rebuildBadges(frame, cellLabels);
+    }
+    if (!current_->radar || !context.atlasReady) return;
     if (!reserved_) reserved_ = reserveText(context.text);
     if (!badgeLayout_.glyphs().empty())
         context.text.submitGlyphs(badgeLayout_.glyphs(), ChartTextRenderer::Priority::Low);

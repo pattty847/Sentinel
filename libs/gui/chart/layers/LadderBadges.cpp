@@ -155,13 +155,14 @@ bool LadderBadges::prepareAtlas(const ChartTextAtlas* atlas) {
     return true;
 }
 
-void LadderBadges::layout(const LadderSnapshot& s, const FrameContext& f, const ChartTextAtlas* atlas) {
+void LadderBadges::layout(const LadderSnapshot& s, const FrameContext& f, const ChartTextAtlas* atlas,
+                          bool cellLabels) {
     pills_.clear();
     glyphs_.clear();
     stats_ = {};
     if (!s.radar || !(f.raster.dpr > 0) || !prepareAtlas(atlas)) return;
     placeEdges(s, f);
-    placeRows(s, f);
+    placeRows(s, f, cellLabels);
     for (const BadgePill& p : pills_) compose(p);
     stats_.glyphs = int(glyphs_.size());
 }
@@ -183,7 +184,7 @@ void LadderBadges::finishPill(BadgePill& p, double right, double top, double dpr
 }
 
 namespace {
-// The largest found wall per [top|bottom edge][side], by real price against this
+// The nearest found wall per [top|bottom edge][side], by real price against this
 // frame's drawn window (the camera may have moved since the publish): on screen -> none.
 EdgeSlots edgeSlots(const LadderSnapshot& s, const chart_raster::RasterCamera& cam) {
     EdgeSlots slot{};
@@ -192,7 +193,7 @@ EdgeSlots edgeSlots(const LadderSnapshot& s, const chart_raster::RasterCamera& c
             const int edge = c.price >= cam.drawnMaxPrice ? 0 : c.price < cam.drawnMinPrice ? 1 : -1;
             if (!c.found || edge < 0) continue;
             const WallCandidate*& cell = slot[size_t(edge)][size_t(side)];
-            if (!cell || c.size > cell->size) cell = &c;
+            if (!cell || (edge == 0 ? c.price < cell->price : c.price > cell->price)) cell = &c;
         }
     return slot;
 }
@@ -209,10 +210,14 @@ BadgePill edgePill(const WallCandidate& c, int side, bool top, const chart_raste
     return p;
 }
 
-// Notional, seen-for, then the flicker count or "new".
-void rowText(BadgePill& p, double usd, uint32_t seenMs, uint16_t flickers) {
-    p.length = formatMoney(usd, p.text);
-    p.length += append(p.text + p.length, "  ");
+// Notional (unless the heatmap's cell labels show it), wall age, then the flicker count
+// or "new".
+void rowText(BadgePill& p, double usd, uint32_t seenMs, uint16_t flickers, bool notional) {
+    p.length = 0;
+    if (notional) {
+        p.length = formatMoney(usd, p.text);
+        p.length += append(p.text + p.length, "  ");
+    }
     p.length += formatAge(seenMs, p.text + p.length);
     if (flickers > 0) {
         p.length += append(p.text + p.length, "  ");
@@ -244,7 +249,7 @@ void LadderBadges::placeEdges(const LadderSnapshot& s, const FrameContext& f) {
     }
 }
 
-void LadderBadges::placeRows(const LadderSnapshot& s, const FrameContext& f) {
+void LadderBadges::placeRows(const LadderSnapshot& s, const FrameContext& f, bool cellLabels) {
     const auto& cam = f.raster;
     const auto window = ladderWindow(cam.drawnMinPrice, cam.drawnMaxPrice, s.binPrice());
     const int first = int(std::max<int64_t>(0, window.lo - s.binLo));
@@ -255,13 +260,13 @@ void LadderBadges::placeRows(const LadderSnapshot& s, const FrameContext& f) {
             ++stats_.dropped;
             continue;
         }
-        stats_.rowBadges += placeRow(s, f, i) ? 1 : 0;
+        stats_.rowBadges += placeRow(s, f, i, cellLabels) ? 1 : 0;
     }
 }
 
 // One badge per row: the larger notional's side when both are walls (tie: ask). Only on
 // a row at least kPillH tall, wholly inside the surface and clear of the edge pills.
-bool LadderBadges::placeRow(const LadderSnapshot& s, const FrameContext& f, int index) {
+bool LadderBadges::placeRow(const LadderSnapshot& s, const FrameContext& f, int index, bool cellLabels) {
     const auto& cam = f.raster;
     const LadderRow& row = s.rows[size_t(index)];
     const double bin = s.binPrice(), k = double(s.binLo + index);
@@ -277,7 +282,8 @@ bool LadderBadges::placeRow(const LadderSnapshot& s, const FrameContext& f, int 
     const bool hot = row.flags & (ask ? LadderRow::kAskHot : LadderRow::kBidHot);
     BadgePill p;
     p.colour = hot ? BadgePill::Hot : ask ? BadgePill::Ask : BadgePill::Bid;
-    rowText(p, ask ? askUsd : bidUsd, ask ? row.askSeenMs : row.bidSeenMs, ask ? row.askFlickers : row.bidFlickers);
+    rowText(p, ask ? askUsd : bidUsd, ask ? row.askWallMs : row.bidWallMs, ask ? row.askFlickers : row.bidFlickers,
+            !cellLabels);
     finishPill(p, snap(f.itemBounds.right() - kBadgeInsetPx, cam.dpr), top, cam.dpr);
     for (int j = 0; j < stats_.edgePills; ++j)
         if (pills_[size_t(j)].rect.intersects(p.rect)) return false; // edge pills win

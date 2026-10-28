@@ -29,6 +29,7 @@
 #include <cstdlib>
 #include <memory>
 #include <new>
+#include <tuple>
 #include <vector>
 
 // Allocation counter for the render-path assertions (test binary only).
@@ -407,6 +408,7 @@ TEST(LadderLayer, WarmedFramesAllocateNothingAndRewriteOnlyOnChange) {
     auto draw = [&](const chart::ChartFrame& frame) {
         rig.layer.sync(frame);
         rig.layer.updateNodes(frame, context);
+        rig.layer.submitLabels(frame, context, false); // the text stage lays out the badges
     };
     rig.view(rest);
     rig.feed.publish(*a);
@@ -584,30 +586,30 @@ TEST(WallRadar, FlagsMarkOnlyBinsAtTheMultipleOfTheirOwnSideMedian) {
 TEST(WallRadar, AgesAndFlickersFollowTheTrackerAndSurvivePansButNotATickChange) {
     RadarRig rig;
     auto replica = wallBook();
-    EXPECT_EQ(rowAt(rig.tick(*replica, 1000), 93).bidSeenMs, 0u);
-    EXPECT_EQ(rowAt(rig.tick(*replica, 2000), 93).bidSeenMs, 1000u);
+    EXPECT_EQ(rowAt(rig.tick(*replica, 1000), 93).bidWallMs, 0u);
+    EXPECT_EQ(rowAt(rig.tick(*replica, 2000), 93).bidWallMs, 1000u);
     const std::vector<BookLevelUpdate> gone{{true, 93.0, 0}}, back{{true, 93.0, 5}};
     replica->applyUpdates(gone, {}, nullptr);
-    EXPECT_EQ(rowAt(rig.tick(*replica, 2200), 93).bidSeenMs, 0u);
+    EXPECT_EQ(rowAt(rig.tick(*replica, 2200), 93).bidWallMs, 0u);
     replica->applyUpdates(back, {}, nullptr);
     const auto& returned = rig.tick(*replica, 2500);
     EXPECT_EQ(rowAt(returned, 93).bidFlickers, 1);
     EXPECT_TRUE(bidHot(returned, 93));
-    EXPECT_EQ(rowAt(returned, 93).bidSeenMs, 0u) << "the return restarts the age";
-    EXPECT_EQ(rowAt(rig.tick(*replica, 3500), 93).bidSeenMs, 1000u);
+    EXPECT_EQ(rowAt(returned, 93).bidWallMs, 1500u) << "a return within the flicker window keeps the wall age";
+    EXPECT_EQ(rowAt(rig.tick(*replica, 3500), 93).bidWallMs, 2500u);
     const auto& later = rig.tick(*replica, 2500 + chart::kFlickerHotMs + 1);
     EXPECT_EQ(rowAt(later, 93).bidFlickers, 1) << "cumulative";
     EXPECT_FALSE(bidHot(later, 93)) << "hot expires";
-    const uint32_t seen = rowAt(later, 93).bidSeenMs;
+    const uint32_t seen = rowAt(later, 93).bidWallMs;
     rig.view(chart_raster::shiftedRaster(rig.frame.raster, 0, 16)); // one bin
     const auto& panned = rig.tick(*replica, 2500 + chart::kFlickerHotMs + 101);
-    EXPECT_EQ(rowAt(panned, 93).bidSeenMs, seen + 100) << "a pan keeps the overlapping ages";
+    EXPECT_EQ(rowAt(panned, 93).bidWallMs, seen + 100) << "a pan keeps the overlapping ages";
     EXPECT_EQ(rowAt(panned, 93).bidFlickers, 1);
     rig.view(camera(90, 110, 2)); // display tick 2: every age restarts
     const auto& coarse = rig.tick(*replica, 2500 + chart::kFlickerHotMs + 201);
     ASSERT_TRUE(coarse.valid && coarse.complete);
     for (int i = 0; i < coarse.rowCount; ++i) {
-        EXPECT_EQ(coarse.rows[size_t(i)].bidSeenMs, 0u) << i;
+        EXPECT_EQ(coarse.rows[size_t(i)].bidWallMs, 0u) << i;
         EXPECT_EQ(coarse.rows[size_t(i)].bidFlickers, 0) << i;
     }
 }
@@ -616,7 +618,7 @@ TEST(WallRadar, SeenForAndFlickerCountsSaturate) {
     RadarRig rig;
     auto replica = wallBook();
     rig.tick(*replica, 0);
-    EXPECT_EQ(rowAt(rig.tick(*replica, (int64_t(1) << 32) + 5), 93).bidSeenMs, 0xffffffffu);
+    EXPECT_EQ(rowAt(rig.tick(*replica, (int64_t(1) << 32) + 5), 93).bidWallMs, 0xffffffffu);
     // 70 000 flickers of one row, straight into the tracker.
     auto s = std::make_unique<LadderSnapshot>();
     s->valid = s->complete = true;
@@ -630,12 +632,12 @@ TEST(WallRadar, SeenForAndFlickerCountsSaturate) {
     int64_t t = 0;
     for (int i = 0; i <= 70'000; ++i) {
         s->rows[0].bid = 1;
-        tracker.publish(*s, 7, ++t, 4, none);
+        tracker.publish(*s, 7, ++t, none);
         s->rows[0].bid = 0;
-        tracker.publish(*s, 7, ++t, 4, none);
+        tracker.publish(*s, 7, ++t, none);
     }
     s->rows[0].bid = 1;
-    tracker.publish(*s, 7, ++t, 4, none);
+    tracker.publish(*s, 7, ++t, none);
     EXPECT_EQ(s->rows[0].bidFlickers, 65535);
     EXPECT_EQ(tracker.rejectedUpdates(), 0u);
 }
@@ -681,7 +683,7 @@ TEST(WallRadar, AnIncompleteCaptureIsNoObservation) {
     rig.feed.setScanBudget(chart::BookLadderFeed::kMaxScanWords, chart::BookLadderFeed::kMaxLevels);
     const auto& t2 = rig.tick(*replica, 1134);
     ASSERT_TRUE(t2.complete);
-    EXPECT_EQ(rowAt(t2, 2000).bidSeenMs, 134u);
+    EXPECT_EQ(rowAt(t2, 2000).bidWallMs, 134u);
     EXPECT_EQ(rowAt(t2, 2000).bidFlickers, 0);
     EXPECT_FLOAT_EQ(t2.bidMedian, median);
 }
@@ -694,7 +696,7 @@ TEST(WallRadar, TheTrackerClockIsMonotonicAndStrictlyIncreasing) {
     rig.tick(*replica, 1000);
     rig.now = 5000; // the wall clock steps back 5 s
     const auto& s = rig.tick(*replica, 1500);
-    EXPECT_EQ(rowAt(s, 93).bidSeenMs, 500u) << "ages follow the monotonic port";
+    EXPECT_EQ(rowAt(s, 93).bidWallMs, 500u) << "ages follow the monotonic port";
     EXPECT_EQ(rig.layer.current().receivedAtMs, 5000) << "the receive time stays wall time";
     const auto accepted = rig.feed.tracker().acceptedUpdates();
     rig.feed.publishRows(); // the same monotonic millisecond, twice
@@ -708,12 +710,12 @@ TEST(WallRadar, TheTrackerClockIsMonotonicAndStrictlyIncreasing) {
 TEST(WallRadar, EverySeriesEndRestartsTheAges) {
     const auto aged = [](RadarRig& rig, LiveOrderBook& b, int64_t& t) {
         rig.tick(b, t += 1000);
-        return rowAt(rig.tick(b, t += 1000), 93).bidSeenMs;
+        return rowAt(rig.tick(b, t += 1000), 93).bidWallMs;
     };
     const auto fresh = [](RadarRig& rig, LiveOrderBook& b, int64_t& t) {
         const auto& s = rig.tick(b, t += 1000);
         EXPECT_TRUE(s.valid && s.complete) << rig.feed.lastReason();
-        return rowAt(s, 93).bidSeenMs;
+        return rowAt(s, 93).bidWallMs;
     };
     { // (a) a resnapshot of the same replica; a plain delta keeps the ages
         RadarRig rig;
@@ -848,26 +850,43 @@ TEST(WallRadar, TheRadarRepublishesAt15HzAndADeltaStillWinsTheEarlierDeadline) {
     }
 }
 
-TEST(WallRadar, CandidatesTakeTheLargestLevelPerSideBeyondEachDrawnEdge) {
+TEST(WallRadar, CandidatesTakeTheNearestWallPerSideBeyondEachDrawnEdge) {
     chart::WallCandidates walls;
-    walls.begin(100.0, 110.0);
-    walls.consider(LadderSnapshot::kAsk, 110.0, 3); // exactly the top edge: above
-    walls.consider(LadderSnapshot::kAsk, 112.0, 2);
+    walls.begin(100.0, 110.0, {{1.0, 1.0}, 2}); // a wall: at least 2
+    walls.consider(LadderSnapshot::kAsk, 112.0, 9);
+    walls.consider(LadderSnapshot::kAsk, 110.0, 3); // exactly the top edge: above, and nearer
+    walls.consider(LadderSnapshot::kAsk, 111.0, 1.5); // nearer but no wall
     walls.consider(LadderSnapshot::kAsk, 109.99, 50); // on screen
     walls.consider(LadderSnapshot::kAsk, 99.0, 4);
     walls.consider(LadderSnapshot::kBid, 100.0, 50); // exactly the bottom edge: on screen
-    walls.consider(LadderSnapshot::kBid, 99.99, 1);
+    walls.consider(LadderSnapshot::kBid, 99.99, 1);  // no wall
+    walls.consider(LadderSnapshot::kBid, 99.5, 2);   // exactly the multiple
+    walls.consider(LadderSnapshot::kBid, 90.0, 80);
     walls.consider(LadderSnapshot::kBid, 120.0, 7);
     walls.setCapped(false, true);
     const auto& c = walls.cells;
-    EXPECT_DOUBLE_EQ(c[LadderSnapshot::kAsk][LadderSnapshot::kAbove].price, 110.0);
-    EXPECT_FLOAT_EQ(c[LadderSnapshot::kAsk][LadderSnapshot::kAbove].size, 3);
+    const auto& askAbove = c[LadderSnapshot::kAsk][LadderSnapshot::kAbove];
+    EXPECT_TRUE(askAbove.found);
+    EXPECT_DOUBLE_EQ(askAbove.price, 110.0) << "the nearest wall, not the largest (112 x 9)";
+    EXPECT_FLOAT_EQ(askAbove.size, 3);
     EXPECT_DOUBLE_EQ(c[LadderSnapshot::kAsk][LadderSnapshot::kBelow].price, 99.0);
-    EXPECT_DOUBLE_EQ(c[LadderSnapshot::kBid][LadderSnapshot::kBelow].price, 99.99);
-    EXPECT_FLOAT_EQ(c[LadderSnapshot::kBid][LadderSnapshot::kBelow].size, 1);
+    EXPECT_DOUBLE_EQ(c[LadderSnapshot::kBid][LadderSnapshot::kBelow].price, 99.5);
+    EXPECT_FLOAT_EQ(c[LadderSnapshot::kBid][LadderSnapshot::kBelow].size, 2);
     EXPECT_DOUBLE_EQ(c[LadderSnapshot::kBid][LadderSnapshot::kAbove].price, 120.0);
-    EXPECT_TRUE(c[LadderSnapshot::kAsk][LadderSnapshot::kAbove].capped);
+    EXPECT_TRUE(askAbove.capped);
     EXPECT_FALSE(c[LadderSnapshot::kBid][LadderSnapshot::kAbove].capped);
+    // A higher multiple: the nearer walls fail and the farther ones show.
+    walls.begin(100.0, 110.0, {{1.0, 1.0}, 4});
+    walls.consider(LadderSnapshot::kAsk, 112.0, 9);
+    walls.consider(LadderSnapshot::kAsk, 110.0, 3);
+    EXPECT_DOUBLE_EQ(c[LadderSnapshot::kAsk][LadderSnapshot::kAbove].price, 112.0);
+    // None passes, or no positive median: no wall.
+    walls.begin(100.0, 110.0, {{1.0, 1.0}, 10});
+    walls.consider(LadderSnapshot::kAsk, 112.0, 9);
+    EXPECT_FALSE(c[LadderSnapshot::kAsk][LadderSnapshot::kAbove].found);
+    walls.begin(100.0, 110.0, {{0.0, 0.0}, 2});
+    walls.consider(LadderSnapshot::kAsk, 112.0, 9);
+    EXPECT_FALSE(c[LadderSnapshot::kAsk][LadderSnapshot::kAbove].found);
 }
 
 const chart::WallCandidate& wall(const LadderSnapshot& s, int side, int direction) {
@@ -930,23 +949,23 @@ TEST(WallRadar, OffScreenWallsAreFoundAgainstAPositiveMedianOnly) {
         for (int side = 0; side < 2; ++side)
             for (int d = 0; d < 2; ++d) EXPECT_FALSE(wall(s, side, d).found) << side << d;
     }
-    { // zero reference: no bids in the fed rows -> no bid arrow, and it does not linger
+    { // the reference is the book near the touch, not the fed rows: a view above the
+      // market still finds the bid wall below; a book without bids has none
         RadarRig rig(1.5);
         auto replica = sparseBook({{true, 70, 30}});
         rig.view(camera(130, 150, 1));
         const auto& above = rig.tick(*replica, 1000);
         ASSERT_TRUE(above.complete);
-        EXPECT_FLOAT_EQ(above.bidMedian, 0.0f);
-        EXPECT_FALSE(wall(above, S::kBid, S::kBelow).found);
-        rig.view(camera(85, 105, 1));
-        const auto& near = rig.tick(*replica, 2000);
-        EXPECT_GT(near.bidMedian, 0.0f);
-        EXPECT_TRUE(wall(near, S::kBid, S::kBelow).found);
-        EXPECT_DOUBLE_EQ(wall(near, S::kBid, S::kBelow).price, 70);
-        rig.view(camera(130, 150, 1));
-        const auto& away = rig.tick(*replica, 3000);
-        EXPECT_FLOAT_EQ(away.bidMedian, 0.0f);
-        EXPECT_FALSE(wall(away, S::kBid, S::kBelow).found);
+        EXPECT_FLOAT_EQ(above.bidMedian, 1.0f);
+        EXPECT_TRUE(wall(above, S::kBid, S::kBelow).found);
+        EXPECT_DOUBLE_EQ(wall(above, S::kBid, S::kBelow).price, 70);
+        std::vector<BookLevelUpdate> asksOnly;
+        for (int p = 100; p <= 119; ++p) asksOnly.push_back({false, double(p), 1});
+        auto noBids = book(0, 1000, 1, asksOnly);
+        const auto& empty = rig.tick(*noBids, 2000);
+        EXPECT_FLOAT_EQ(empty.bidMedian, 0.0f);
+        EXPECT_FALSE(wall(empty, S::kBid, S::kBelow).found);
+        EXPECT_FALSE(wall(empty, S::kBid, S::kAbove).found);
     }
 }
 
@@ -1029,6 +1048,168 @@ std::array<uchar, 4> barColour(const QSGGeometryNode* bars, int bar) {
     const auto* v = bars->geometry()->vertexDataAsColoredPoint2D() + bar * 6;
     for (int i = 1; i < 6; ++i) EXPECT_TRUE(v[i].r == v[0].r && v[i].g == v[0].g && v[i].b == v[0].b && v[i].a == v[0].a);
     return {v[0].r, v[0].g, v[0].b, v[0].a};
+}
+
+// The wall reference is the median of the 32 bins from each side's touch: dust bins far
+// from the market at a wide zoom do not make every real level a wall.
+TEST(WallRadar, TheReferenceIsTheMedianNearTheTouchNotEveryFedBin) {
+    std::vector<BookLevelUpdate> levels;
+    for (int p = 1; p <= 300; ++p) levels.push_back({true, double(p), 0.1}); // dust, far from the touch
+    for (int p = 361; p <= 400; ++p) levels.push_back({true, double(p), p == 395 ? 50.0 : p == 380 ? 30.0 : 10.0});
+    for (int p = 401; p <= 440; ++p) levels.push_back({false, double(p), 10.0});
+    auto replica = book(0, 1000, 1, levels);
+    RadarRig rig;
+    rig.view(camera(0, 450, 1, 1.0, 450)); // every level in the window
+    const auto& s = rig.tick(*replica, 1000);
+    ASSERT_TRUE(s.valid && s.complete) << rig.feed.lastReason();
+    EXPECT_FLOAT_EQ(s.bidMedian, 10.0f) << "bins 369..400";
+    EXPECT_FLOAT_EQ(s.askMedian, 10.0f);
+    std::vector<int64_t> walls;
+    for (int64_t k = 0; k <= 450; ++k)
+        if (bidLarge(s, k)) walls.push_back(k);
+    EXPECT_EQ(walls, std::vector<int64_t>{395}) << "5x the near median; 380 is 3x";
+    // The old reference (every fed bin) is the dust: every real level is a wall.
+    std::vector<sentinel::book::LevelSizes> rows;
+    for (int i = 0; i < s.rowCount; ++i) rows.push_back({s.rows[size_t(i)].bid, s.rows[size_t(i)].ask});
+    sentinel::book::LevelTracker allBins({.maxRows = 4096});
+    ASSERT_EQ(allBins.update({1, 1, double(s.binLo), rows, 1000}), sentinel::book::UpdateStatus::Accepted);
+    EXPECT_NEAR(allBins.median(sentinel::book::Side::Bid), 0.1, 1e-6);
+    int dustWalls = 0;
+    for (int i = 0; i < s.rowCount; ++i) dustWalls += allBins.isLarge(size_t(i), sentinel::book::Side::Bid, 4);
+    EXPECT_EQ(dustWalls, 40);
+}
+
+// A display bin only partly inside the band (an unaligned band edge) is not wholly known:
+// it never enters the reference, and the touch moves to the next wholly known bin.
+// Native tick 1, display tick 10. Bids: the band ends at 105 (slots 0..105), so bin 10
+// ([100, 110)) is partial. Asks: the band starts at 5, so bin 0 ([0, 10)) is partial.
+TEST(WallRadar, APartlyKnownEdgeBinIsNoPartOfTheReference) {
+    { // bids: 104 x 100 in the partial bin 10, then bins 9, 8 at 10 and bin 7 at 40
+        auto replica = book(0, 105, 1, {{true, 104, 100}, {true, 99, 10}, {true, 89, 10}, {true, 79, 40}});
+        RadarRig rig;
+        rig.view(camera(20, 90, 10));
+        const auto& s = rig.tick(*replica, 1000);
+        ASSERT_TRUE(s.valid && s.complete) << rig.feed.lastReason();
+        EXPECT_FLOAT_EQ(s.bidMedian, 10.0f) << "bins 9, 8, 7; the partial bin 10 would make it 25";
+        EXPECT_TRUE(bidLarge(s, 7)) << "40 is 4x the median";
+        EXPECT_FALSE(bidLarge(s, 8));
+    }
+    { // asks: 5 x 100 in the partial bin 0, then bins 1, 2 at 10 and bin 3 at 40
+        auto replica = book(5, 110, 1, {{false, 5, 100}, {false, 12, 10}, {false, 22, 10}, {false, 32, 40}});
+        RadarRig rig;
+        rig.view(camera(20, 90, 10));
+        const auto& s = rig.tick(*replica, 1000);
+        ASSERT_TRUE(s.valid && s.complete) << rig.feed.lastReason();
+        EXPECT_FLOAT_EQ(s.askMedian, 10.0f) << "bins 1, 2, 3; the partial bin 0 would make it 25";
+        EXPECT_TRUE(askLarge(s, 3)) << "40 is 4x the median";
+        EXPECT_FALSE(askLarge(s, 2));
+    }
+}
+
+// The reference window starts at the bin of the real touch, even when that bin is only
+// partly known and the next levels lie further out: the window does not slide past a gap.
+// Native tick 1, display tick 10; the touch bin is partial, the window holds 10 and 30 and
+// the 1s just beyond it stay out (median 20, so neither 10 nor 30 is a wall at 4x).
+TEST(WallRadar, ThePartialTouchBinStillAnchorsTheReferenceWindow) {
+    { // bids: band ends at 1005, touch 1004 in bin 100 (partial); window bins 100..69
+        auto replica = book(0, 1005, 1, {{true, 1004, 100}, {true, 700, 10}, {true, 690, 30},
+                                         {true, 680, 1}, {true, 670, 1}, {true, 660, 1}});
+        RadarRig rig;
+        rig.view(camera(600, 800, 10));
+        const auto& s = rig.tick(*replica, 1000);
+        ASSERT_TRUE(s.valid && s.complete) << rig.feed.lastReason();
+        EXPECT_FLOAT_EQ(s.bidMedian, 20.0f) << "bins 70 and 69; a window re-anchored at bin 70 gives 1";
+        for (const int64_t k : {66, 67, 68, 69, 70}) EXPECT_FALSE(bidLarge(s, k)) << k;
+    }
+    { // asks: band starts at 5, touch 5 in bin 0 (partial); window bins 0..31
+        auto replica = book(5, 1010, 1, {{false, 5, 100}, {false, 300, 10}, {false, 310, 30},
+                                         {false, 320, 1}, {false, 330, 1}, {false, 340, 1}});
+        RadarRig rig;
+        rig.view(camera(250, 450, 10));
+        const auto& s = rig.tick(*replica, 1000);
+        ASSERT_TRUE(s.valid && s.complete) << rig.feed.lastReason();
+        EXPECT_FLOAT_EQ(s.askMedian, 20.0f) << "bins 30 and 31; a window re-anchored at bin 30 gives 1";
+        for (const int64_t k : {30, 31, 32, 33, 34}) EXPECT_FALSE(askLarge(s, k)) << k;
+    }
+}
+
+// A capped scan can stop inside a display bin: that bin, at the far end of what the
+// capture knows, is only partly known and stays out of the reference (as the touch's).
+TEST(WallRadar, APartlyKnownFarBinOfACappedScanIsNoPartOfTheReference) {
+    { // bids, three levels captured: known down to 699, so bin 69 ([690, 700)) is partial
+        auto replica = book(0, 1005, 1, {{true, 1004, 100}, {true, 700, 10}, {true, 699, 30}, {true, 695, 5}});
+        RadarRig rig;
+        rig.feed.setScanBudget(chart::BookLadderFeed::kMaxScanWords, 3);
+        rig.view(camera(720, 900, 10));
+        const auto& s = rig.tick(*replica, 1000);
+        ASSERT_TRUE(s.valid && s.complete) << rig.feed.lastReason();
+        EXPECT_FLOAT_EQ(s.bidMedian, 10.0f) << "bin 70 only; the partial bin 69 would make it 20";
+    }
+    { // asks (band from 5), three captured: known up to 300, so bin 30 ([300, 310)) is partial
+        auto replica = book(5, 1010, 1, {{false, 5, 100}, {false, 290, 10}, {false, 300, 30}, {false, 305, 5}});
+        RadarRig rig;
+        rig.feed.setScanBudget(chart::BookLadderFeed::kMaxScanWords, 3);
+        rig.view(camera(100, 250, 10));
+        const auto& s = rig.tick(*replica, 1000);
+        ASSERT_TRUE(s.valid && s.complete) << rig.feed.lastReason();
+        EXPECT_FLOAT_EQ(s.askMedian, 10.0f) << "bin 29 only; the partial bin 30 would make it 20";
+    }
+}
+
+// The age is how long the level has been a wall, not how long the bin had size.
+TEST(WallRadar, TheAgeCountsFromBecomingAWallAndSurvivesViewChangesOnTheSameGrid) {
+    RadarRig rig;
+    auto replica = wallBook(); // bin 95 holds 1 (median 1)
+    const auto set95 = [&](double size) {
+        const std::vector<BookLevelUpdate> u{{true, 95.0, size}};
+        replica->applyUpdates(u, {}, nullptr);
+    };
+    rig.tick(*replica, 0);
+    EXPECT_FALSE(bidLarge(rig.tick(*replica, 60'000), 95));
+    set95(5); // a wall from 60 s
+    const auto& wall = rig.tick(*replica, 60'000 + 67);
+    ASSERT_TRUE(bidLarge(wall, 95));
+    EXPECT_EQ(rowAt(wall, 95).bidWallMs, 0u) << "not the 60 s of presence";
+    EXPECT_EQ(rowAt(rig.tick(*replica, 61'067), 95).bidWallMs, 1000u);
+    set95(2); // below the multiple, still present
+    EXPECT_FALSE(bidLarge(rig.tick(*replica, 62'000), 95));
+    set95(5); // back within the flicker window (1 s): the clock keeps
+    EXPECT_EQ(rowAt(rig.tick(*replica, 62'500), 95).bidWallMs, 2433u);
+    set95(2);
+    rig.tick(*replica, 63'000);
+    set95(5); // back after more than the flicker window: the clock restarts
+    EXPECT_EQ(rowAt(rig.tick(*replica, 64'001), 95).bidWallMs, 0u);
+    EXPECT_EQ(rowAt(rig.tick(*replica, 65'001), 95).bidWallMs, 1000u);
+    // View changes on the same bin grid keep the age: a pan, a price zoom, a resize.
+    rig.view(chart_raster::shiftedRaster(rig.frame.raster, 0, 48));
+    EXPECT_EQ(rowAt(rig.tick(*replica, 65'101), 95).bidWallMs, 1100u) << "pan";
+    rig.view(camera(80, 120, 1));
+    const auto& zoomed = rig.tick(*replica, 65'201);
+    ASSERT_DOUBLE_EQ(zoomed.binPrice(), 1.0);
+    EXPECT_EQ(rowAt(zoomed, 95).bidWallMs, 1200u) << "price zoom at the same tick";
+    rig.view(camera(80, 120, 1, 2.0, 640));
+    EXPECT_EQ(rowAt(rig.tick(*replica, 65'301), 95).bidWallMs, 1300u) << "resize and device ratio";
+    rig.view(camera(80, 120, 2)); // another bin size: a new series
+    rig.tick(*replica, 65'401);
+    rig.view(camera(80, 120, 1));
+    EXPECT_EQ(rowAt(rig.tick(*replica, 65'501), 95).bidWallMs, 0u);
+}
+
+// The edge pill names the nearest wall beyond the edge, so the multiple decides which.
+TEST(WallRadar, TheOffScreenWallIsTheNearestThatPassesTheMultiple) {
+    using S = LadderSnapshot;
+    auto replica = sparseBook({{false, 108, 5}, {false, 112, 20}}); // ask median 1
+    const std::tuple<double, bool, double> cases[] = {{4.0, true, 108.0}, {6.0, true, 112.0}, {25.0, false, 0.0}};
+    for (const auto& [multiple, found, price] : cases) {
+        SCOPED_TRACE(multiple);
+        RadarRig rig(multiple);
+        rig.view(camera(85, 105, 1));
+        const auto& s = rig.tick(*replica, 1000);
+        ASSERT_TRUE(s.complete);
+        const auto& w = wall(s, S::kAsk, S::kAbove);
+        EXPECT_EQ(w.found, found);
+        if (found) EXPECT_DOUBLE_EQ(w.price, price);
+    }
 }
 
 TEST(WallRadar, WallBarsUseThePremultipliedWallColours) {

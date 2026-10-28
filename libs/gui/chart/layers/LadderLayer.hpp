@@ -17,18 +17,20 @@ class ChartTextRenderer;
 
 namespace chart {
 // One display bin of the book on the chart's absolute row grid: price [k, k+1) * binPrice.
-// With the wall radar on, also its tracker state (seen-for and flicker counts saturate).
+// With the wall radar on, also its tracker state: how long the level has been a wall
+// (LevelTracker's large age) and its flicker count, both saturating.
 struct LadderRow {
     static constexpr uint8_t kBidLarge = 1, kAskLarge = 2, kBidHot = 4, kAskHot = 8;
     float bid = 0, ask = 0;
-    uint32_t bidSeenMs = 0, askSeenMs = 0;
+    uint32_t bidWallMs = 0, askWallMs = 0;
     uint16_t bidFlickers = 0, askFlickers = 0;
     uint8_t flags = 0;
 };
 
-// The largest native level on one side beyond one edge of the drawn window. found: at
-// least wallMultiple x that side's median (a positive median); capped: that side's scan
-// stopped before the band end, so a larger wall may lie farther out.
+// The nearest native level on one side beyond one edge of the drawn window that is a
+// wall: at least wallMultiple x that side's median (a positive median). found: there is
+// one; capped: that side's scan stopped before the band end (with none found, a wall
+// may still lie farther out).
 struct WallCandidate {
     double price = 0;
     float size = 0;
@@ -55,7 +57,7 @@ struct LadderSnapshot {
     // Wall radar (LadderTracker): off -> the fields below are zero.
     bool radar = false;
     double wallMultiple = 0;
-    float bidMedian = 0, askMedian = 0; // the tracker's last accepted medians
+    float bidMedian = 0, askMedian = 0; // the wall reference (BookLadderFeed: near the touch)
     char asset[8] = {};                 // the base asset ("BTC" for BTC-USD)
     std::array<std::array<WallCandidate, 2>, 2> walls{}; // [kBid|kAsk][kAbove|kBelow]
     std::array<LadderRow, kMaxRows> rows{};
@@ -84,7 +86,8 @@ private:
 // With the wall radar on, also the wall badges and edge pills over the chart, left of
 // the strip (LadderBadges): their backgrounds and arrows in a second node outside the
 // strip's clip, their text through the text stage (submitLabels, between the text
-// renderer's beginFrame and endFrame).
+// renderer's beginFrame and endFrame). The badges are laid out in the text stage, after
+// the heatmap's cell labels, because their text depends on whether those drew.
 class LadderLayer final : public IChartLayer {
 public:
     static constexpr float kInsetPx = 2.0f;
@@ -96,9 +99,11 @@ public:
     void sync(const ChartFrame&) override;
     void updateNodes(const ChartFrame&, LayerNodeContext&) override;
     void afterRendering() override;
-    // The text stage: the badge glyphs of the drawn snapshot. Reserves the badge colours'
-    // text nodes once per root, so a colour's first use later allocates nothing.
-    void submitLabels(const ChartFrame&, LayerNodeContext&);
+    // The text stage: lays out the badges when the drawn snapshot, frame or cellLabels
+    // (the heatmap drew its cell value labels this frame) changed, and submits their
+    // glyphs. Reserves the badge colours' text nodes once per root, so a colour's first
+    // use later allocates nothing.
+    void submitLabels(const ChartFrame&, LayerNodeContext&, bool cellLabels);
     LadderMailbox& mailbox() { return mailbox_; }
     // Called from afterRendering (render thread) when the snapshot was built for
     // another frame; the callback queues the republish on the GUI thread.
@@ -121,7 +126,7 @@ private:
     };
     bool drawable(const ChartFrame&) const;
     void rebuild(const ChartFrame&);
-    void rebuildBadges(const ChartFrame&);
+    void rebuildBadges(const ChartFrame&, bool cellLabels);
     bool reserveText(ChartTextRenderer& text) const;
     LadderMailbox mailbox_;
     std::unique_ptr<LadderSnapshot> current_;
@@ -133,7 +138,7 @@ private:
     QSGGeometryNode* bars_ = nullptr;
     QSGGeometryNode* badges_ = nullptr; // child of the gate, outside the strip's clip
     LadderBadges badgeLayout_;
-    bool drawing_ = false, built_ = false, reserved_ = false;
+    bool drawing_ = false, built_ = false, reserved_ = false, badgesBuilt_ = false, cellLabels_ = false;
     Key key_;
     uint64_t rebuilds_ = 0, dirtyMarks_ = 0, creations_ = 0;
     int vertices_ = 0, badgeVertices_ = 0;

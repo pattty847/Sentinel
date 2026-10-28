@@ -5,6 +5,21 @@
 
 namespace sentinel::book {
 
+double positiveMedian(std::span<double> values)
+{
+    const auto end = std::partition(values.begin(), values.end(),
+                                    [](double v) { return std::isfinite(v) && v > 0; });
+    const auto count = static_cast<std::size_t>(end - values.begin());
+    if (count == 0)
+        return 0;
+    std::sort(values.begin(), end);
+    const auto mid = count / 2;
+    double value = values[mid];
+    if (count % 2 == 0)
+        value = values[mid - 1] + (value - values[mid - 1]) / 2;
+    return value;
+}
+
 LevelTracker::LevelTracker(TrackerConfig config)
     : config_(config), states_(detail::checkedCapacity(config.maxRows)),
       scratch_(config.maxRows), sizes_(config.maxRows)
@@ -20,7 +35,14 @@ void LevelTracker::reset()
     medians_ = {};
 }
 
-UpdateStatus LevelTracker::update(const Snapshot& s)
+UpdateStatus LevelTracker::update(const Snapshot& s) { return update(s, nullptr); }
+
+UpdateStatus LevelTracker::update(const Snapshot& s, const LargeReference& reference)
+{
+    return update(s, &reference);
+}
+
+UpdateStatus LevelTracker::update(const Snapshot& s, const LargeReference* reference)
 {
     const auto check = window_.inspect(s, config_.maxRows);
     if (check.status == UpdateStatus::Reset) {
@@ -32,7 +54,11 @@ UpdateStatus LevelTracker::update(const Snapshot& s)
     if (check.newSeries)
         reset();
     trackRows(s, check.firstTick);
-    computeMedians(s);
+    if (reference)
+        medians_ = reference->medians;
+    else
+        computeMedians(s);
+    trackLarge(s, reference ? reference->multiple : 4);
     std::copy(s.rows.begin(), s.rows.end(), sizes_.begin());
     window_.accept(s, check);
     return UpdateStatus::Accepted;
@@ -75,21 +101,38 @@ void LevelTracker::computeMedians(const Snapshot& s)
 {
     for (const auto side : sides) {
         sorted_.clear();
-        for (const auto& row : s.rows) {
-            const double size = row.size(side);
-            if (validSize(size) && size > 0)
-                sorted_.push_back(size);
-        }
-        std::sort(sorted_.begin(), sorted_.end());
-        double value = 0;
-        if (!sorted_.empty()) {
-            const auto mid = sorted_.size() / 2;
-            value = sorted_[mid];
-            if (sorted_.size() % 2 == 0)
-                value = sorted_[mid - 1] + (value - sorted_[mid - 1]) / 2;
-        }
-        medians_[sideIndex(side)] = value;
+        for (const auto& row : s.rows)
+            sorted_.push_back(row.size(side));
+        medians_[sideIndex(side)] = positiveMedian(sorted_);
     }
+}
+
+void LevelTracker::trackLarge(const Snapshot& s, double multiple)
+{
+    for (std::size_t row = 0; row < s.rows.size(); ++row)
+        for (const auto side : sides)
+            observeLarge(states_[row][sideIndex(side)], largeSize(s.rows[row].size(side), side, multiple),
+                         s.timestampMs);
+}
+
+void LevelTracker::observeLarge(State& state, bool large, Milliseconds now) const
+{
+    if (large && !state.large) {
+        if (!state.largeLapsed || now - state.largeEnded > config_.flickerWindowMs)
+            state.largeSince = now;
+        state.largeLapsed = false;
+    } else if (!large && state.large) {
+        state.largeEnded = now;
+        state.largeLapsed = true;
+    }
+    state.large = large;
+}
+
+bool LevelTracker::largeSize(double size, Side side, double multiple) const
+{
+    const double reference = median(side);
+    return std::isfinite(multiple) && multiple > 0 && validSize(size) && size > 0 && std::isfinite(reference)
+        && reference > 0 && size / reference >= multiple;
 }
 
 LevelInfo LevelTracker::level(std::size_t row, Side side) const
@@ -98,16 +141,13 @@ LevelInfo LevelTracker::level(std::size_t row, Side side) const
         return {};
     const auto& state = states_[row][sideIndex(side)];
     return {state.present, state.present ? window_.timestamp - state.since : 0, state.flickers,
-            state.flickers > 0 ? window_.timestamp - state.lastFlicker : -1};
+            state.flickers > 0 ? window_.timestamp - state.lastFlicker : -1, state.large,
+            state.large ? window_.timestamp - state.largeSince : 0};
 }
 
 bool LevelTracker::isLarge(std::size_t row, Side side, double multiple) const
 {
-    if (!window_.active || row >= window_.rows || !std::isfinite(multiple) || multiple <= 0)
-        return false;
-    const double size = sizes_[row].size(side);
-    const double reference = median(side);
-    return validSize(size) && size > 0 && reference > 0 && size / reference >= multiple;
+    return window_.active && row < window_.rows && largeSize(sizes_[row].size(side), side, multiple);
 }
 
 } // namespace sentinel::book

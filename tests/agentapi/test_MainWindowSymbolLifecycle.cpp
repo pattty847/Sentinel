@@ -225,8 +225,10 @@ TEST(ChartAgentPin, ControlledStartupHistoryAndViewport) {
     page();
     renderer->view()->setViewport(1791769440000, 1791777600000, 83000, 84600);
     page();
-    EXPECT_EQ(commits.count(), 5);
-    EXPECT_EQ(state->getViewportVersion() - initialVersion, 8U);
+    // The measured price axis stays under the corner buttons' width, so the axis column
+    // keeps that width and the axis measurement commits no resize.
+    EXPECT_EQ(commits.count(), 4);
+    EXPECT_EQ(state->getViewportVersion() - initialVersion, 7U);
     EXPECT_EQ(requests, (std::vector<std::pair<qint64, int>>{{1791782280, 102}, {1791776160, 162}, {1791766440, 86}}));
 }
 
@@ -242,7 +244,7 @@ TEST(ChartAgentPin, FixedSceneViewportBytes) {
     auto snapshot = MainWindowSymbolLifecyclePeer::viewport(window);
     snapshot.meta = {"fixed", "BTC-USD", 7, 123456, false, "unknown", false};
     const auto bytes = QJsonDocument(AgentApi::viewportJson(snapshot)).toJson(QJsonDocument::Compact);
-    EXPECT_EQ(bytes, QByteArray(R"PIN({"data":{"autoScale":false,"candleTimeframeMs":60000,"drawn":null,"endMs":6120000,"followLive":false,"heatmapTimeframeMs":60000,"heightPx":570,"lockMid":false,"priceMax":200,"priceMin":100,"startMs":120000,"viewportVersion":"4","widthPx":930,"zoom":{"msPerPx":6451.612903225807,"pricePerPx":0.17543859649122806}},"meta":{"coverage":"unknown","observedAtMs":123456,"selectionEpoch":"7","sessionId":"fixed","source":"gui-cache","stale":false,"symbol":"BTC-USD","truncated":false},"ok":true})PIN")) << bytes.constData();
+    EXPECT_EQ(bytes, QByteArray(R"PIN({"data":{"autoScale":false,"candleTimeframeMs":60000,"drawn":null,"endMs":6120000,"followLive":false,"heatmapTimeframeMs":60000,"heightPx":570,"lockMid":false,"priceMax":200,"priceMin":100,"startMs":120000,"viewportVersion":"3","widthPx":925,"zoom":{"msPerPx":6486.486486486487,"pricePerPx":0.17543859649122806}},"meta":{"coverage":"unknown","observedAtMs":123456,"selectionEpoch":"7","sessionId":"fixed","source":"gui-cache","stale":false,"symbol":"BTC-USD","truncated":false},"ok":true})PIN")) << bytes.constData();
 }
 
 TEST(ChartAgentPin, StoredDrawnAndCompletedRevisionStaySeparate) {

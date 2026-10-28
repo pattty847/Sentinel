@@ -587,6 +587,64 @@ TEST(LevelTracker, LargeLevelsUsePerSideNonemptyMedianIncludingEvenCase)
     EXPECT_FALSE(tracker.isLarge(0, Side::Ask));
 }
 
+TEST(LevelTracker, ACallersReferenceDecidesLargeAndLargeAgeCountsFromTheCrossing)
+{
+    LevelTracker tracker({.flickerWindowMs = 100});
+    const LargeReference reference{{2, 10}, 4};
+    Input input{{{1, 10}, {9, 10}}};
+    ASSERT_EQ(tracker.update(input.at(0), reference), UpdateStatus::Accepted);
+    EXPECT_DOUBLE_EQ(tracker.median(Side::Bid), 2) << "the caller's median, not the rows' (5)";
+    EXPECT_TRUE(tracker.level(1, Side::Bid).large);
+    EXPECT_FALSE(tracker.level(0, Side::Bid).large);
+    EXPECT_TRUE(tracker.isLarge(1, Side::Bid));
+    EXPECT_FALSE(tracker.level(0, Side::Ask).large) << "1x the ask median";
+    input.rows[0].bid = 8; // present since 0, large from 500
+    tracker.update(input.at(500), reference);
+    EXPECT_EQ(tracker.level(0, Side::Bid).seenForMs, 500);
+    EXPECT_EQ(tracker.level(0, Side::Bid).largeForMs, 0);
+    tracker.update(input.at(700), reference);
+    EXPECT_EQ(tracker.level(0, Side::Bid).largeForMs, 200);
+    input.rows[0].bid = 0; // gone, back within the flicker window: the large age keeps
+    tracker.update(input.at(750), reference);
+    EXPECT_FALSE(tracker.level(0, Side::Bid).large);
+    EXPECT_EQ(tracker.level(0, Side::Bid).largeForMs, 0);
+    input.rows[0].bid = 8;
+    tracker.update(input.at(850), reference);
+    EXPECT_EQ(tracker.level(0, Side::Bid).largeForMs, 350);
+    EXPECT_EQ(tracker.level(0, Side::Bid).seenForMs, 0) << "presence age restarts";
+    EXPECT_EQ(tracker.level(0, Side::Bid).flickers, 1u);
+    input.rows[0].bid = 3; // below the multiple for longer than the window: restarts
+    tracker.update(input.at(900), reference);
+    input.rows[0].bid = 8;
+    tracker.update(input.at(1001), reference);
+    EXPECT_EQ(tracker.level(0, Side::Bid).largeForMs, 0);
+    tracker.update(input.at(1101), reference);
+    EXPECT_EQ(tracker.level(0, Side::Bid).largeForMs, 100);
+    // A scroll keeps it with the price; a higher reference ends it.
+    input.first = 99;
+    input.rows.insert(input.rows.begin(), LevelSizes{1, 10});
+    tracker.update(input.at(1201), reference);
+    EXPECT_EQ(tracker.level(1, Side::Bid).largeForMs, 200);
+    tracker.update(input.at(1301), LargeReference{{4, 10}, 4});
+    EXPECT_FALSE(tracker.level(1, Side::Bid).large);
+    EXPECT_FALSE(tracker.isLarge(1, Side::Bid));
+    // Without a reference: the rows' own medians at 4x, as before.
+    LevelTracker plain;
+    plain.update(Input{{{1, 1}, {1, 1}, {8, 1}}}.at(0));
+    EXPECT_TRUE(plain.level(2, Side::Bid).large);
+    EXPECT_EQ(plain.level(2, Side::Bid).largeForMs, 0);
+}
+
+TEST(LevelTracker, PositiveMedianSkipsZeroAndInvalidValues)
+{
+    std::array<double, 6> values{0, 4, std::numeric_limits<double>::quiet_NaN(), 1, -2, 3};
+    EXPECT_DOUBLE_EQ(positiveMedian(values), 3);
+    std::array<double, 5> even{2, 0, 8, 4, 6};
+    EXPECT_DOUBLE_EQ(positiveMedian(even), 5);
+    std::array<double, 3> none{0, 0, -1};
+    EXPECT_DOUBLE_EQ(positiveMedian(none), 0);
+}
+
 TEST(BookHistory, AlignsColumnsToLatestWindowEvenBetweenSamples)
 {
     BookHistoryRing history({.maxRows = 4, .columns = 3});

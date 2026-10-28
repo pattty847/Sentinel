@@ -4,6 +4,7 @@
 #include "SentinelLogging.hpp"
 #include <QElapsedTimer>
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace chart {
@@ -31,6 +32,36 @@ const char* incompleteReason(const LiveOrderBook::DenseBookSnapshotView& view, L
     if (lo < 0 || end > int64_t(view.slotCount)) return "band";
     if (lo < int64_t(view.bidKnownLo)) return view.bidCapped ? "levels" : "scan";
     return view.askCapped ? "levels" : "scan";
+}
+// Display bins wholly inside what the capture knows of one side: bids [bidKnownLo,
+// slotCount), asks [0, min(askKnownEnd, slotCount)) in book indices, each bounded by the
+// band at both ends.
+LadderBins sideBins(const LiveOrderBook::DenseBookSnapshotView& view, int64_t base, int64_t group, bool bid) {
+    const int64_t lo = base + int64_t(bid ? view.bidKnownLo : 0);
+    const int64_t end = base + int64_t(bid ? view.slotCount : std::min(view.askKnownEnd, view.slotCount));
+    return {ceilDiv(lo, group), floorDiv(end, group) - 1};
+}
+// The median positive bin of one side's kWallReferenceBins display bins from the bin of
+// its touch (its best level) outward, over the bins the capture knows wholly (sideBins):
+// a partly known bin keeps its place in the window but adds nothing. Levels come best
+// first.
+double touchMedian(std::span<const std::pair<uint32_t, double>> levels, int64_t base, int64_t group, bool bid,
+                   LadderBins known) {
+    std::array<double, BookLadderFeed::kWallReferenceBins> bins{};
+    if (levels.empty()) return 0;
+    const int64_t touch = floorDiv(base + int64_t(levels.front().first), group);
+    for (const auto& [index, qty] : levels) {
+        const int64_t bin = floorDiv(base + int64_t(index), group);
+        const int64_t offset = bid ? touch - bin : bin - touch;
+        if (offset >= int64_t(bins.size()) || (bid ? bin < known.lo : bin > known.hi)) break; // past the window
+        if (bin >= known.lo && bin <= known.hi) bins[size_t(offset)] += qty; // else partly known
+    }
+    return sentinel::book::positiveMedian(bins);
+}
+// Each side's wall reference (sideIndex order) from a complete capture.
+std::array<double, 2> touchMedians(const LiveOrderBook::DenseBookSnapshotView& view, int64_t base, int64_t group) {
+    return {touchMedian(view.bidLevels, base, group, true, sideBins(view, base, group, true)),
+            touchMedian(view.askLevels, base, group, false, sideBins(view, base, group, false))};
 }
 // "BTC-USD" -> "BTC" (at most 7 characters).
 void baseAsset(const std::string& product, char (&out)[8]) {
@@ -168,9 +199,9 @@ void BookLadderFeed::publishRows() {
     elapsed.start();
     const auto frame = ports_.frame ? ports_.frame() : MappingFrameContext{};
     auto& s = begin(frame);
-    walls_.begin(frame.raster.drawnMinPrice, frame.raster.drawnMaxPrice);
+    walls_.begin(frame.raster.drawnMinPrice, frame.raster.drawnMaxPrice, {{}, multiple_});
     reason_ = fill(s, frame.raster);
-    if (radar_) tracker_.publish(s, series(), monotonicMs(), multiple_, walls_);
+    if (radar_) tracker_.publish(s, series(), monotonicMs(), walls_);
     ++rowPublications_;
     sLog_Probe("ladder.publish", "gen=" << generation_ << " serial=" << serial_ << " valid=" << s.valid
                << " complete=" << s.complete << " reason=" << reason_ << " rows=" << s.rowCount
@@ -198,6 +229,9 @@ const char* BookLadderFeed::fill(LadderSnapshot& s, const chart_raster::RasterCa
     // publications keeps its bars), limited to what the capture knows.
     const int64_t margin = std::min<int64_t>(std::max<int64_t>(1, bins / 4), (LadderSnapshot::kMaxRows - bins) / 2);
     const auto known = knownBins(view, base, group);
+    const bool complete = window.lo >= known.lo && window.hi <= known.hi;
+    // An incomplete capture is no observation: it keeps the last accepted reference.
+    if (radar_) walls_.reference.medians = complete ? touchMedians(view, base, group) : tracker_.medians();
     s.binLo = std::min(window.lo, std::max(window.lo - margin, known.lo));
     const int64_t binHi = std::max(window.hi, std::min(window.hi + margin, known.hi));
     s.rowCount = int(binHi - s.binLo + 1);
@@ -215,7 +249,7 @@ const char* BookLadderFeed::fill(LadderSnapshot& s, const chart_raster::RasterCa
     add(view.askLevels, &LadderRow::ask, LadderSnapshot::kAsk);
     walls_.setCapped(view.bidKnownLo > 0, view.askKnownEnd < view.slotCount);
     s.valid = true;
-    s.complete = window.lo >= known.lo && window.hi <= known.hi;
+    s.complete = complete;
     return s.complete ? "ok" : incompleteReason(view, window, base, group);
 }
 } // namespace chart
