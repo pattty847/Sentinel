@@ -233,6 +233,29 @@ void ChartTextNode::updateGeometry(const std::vector<ChartGlyphInstance>& glyphs
     markDirty(QSGNode::DirtyGeometry);
 }
 
+void ChartTextNode::reserve(int glyphs) {
+    if (glyphs <= m_capacityGlyphs) {
+        return;
+    }
+    m_capacityGlyphs = glyphs;
+    m_geometry.allocate(m_capacityGlyphs * 6);
+    m_lastGlyphs = m_capacityGlyphs; // the whole new allocation is cleared by the next update
+    markDirty(QSGNode::DirtyGeometry);
+}
+
+bool ChartTextNode::vertexIsZero(int glyphIndex) const {
+    if (glyphIndex < 0 || (glyphIndex + 1) * 6 > m_geometry.vertexCount()) {
+        return false;
+    }
+    const auto* v = m_geometry.vertexDataAsTexturedPoint2D() + glyphIndex * 6;
+    for (int i = 0; i < 6; ++i) {
+        if (v[i].x != 0 || v[i].y != 0 || v[i].tx != 0 || v[i].ty != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void ChartTextNode::updateMaterial() {
     m_material.setTexture(m_texture);
     markDirty(QSGNode::DirtyMaterial);

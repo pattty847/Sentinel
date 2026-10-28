@@ -1,6 +1,9 @@
 #include "chart/layers/LadderLayer.hpp"
 #include "chart/layers/LadderGrid.hpp"
 #include "chart/core/ChartFrame.hpp"
+#include "render/ChartTextRenderer.hpp"
+#include "SentinelLogging.hpp"
+#include <QElapsedTimer>
 #include <QSGClipNode>
 #include <QSGGeometryNode>
 #include <QSGOpacityNode>
@@ -32,6 +35,38 @@ constexpr Rgba kHotWall = premultiply(kHotWallSrgb);
 Rgba barColour(const LadderSnapshot& s, uint8_t flags, uint8_t large, uint8_t hot, Rgba plain, Rgba wall) {
     if (!s.radar || !(flags & large)) return plain;
     return (flags & hot) ? kHotWall : wall;
+}
+
+// A vertex-colour triangle node of a fixed capacity, drawing nothing yet.
+QSGGeometryNode* colouredNode(int capacity) {
+    auto* node = new QSGGeometryNode();
+    auto* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), capacity);
+    geometry->setDrawingMode(QSGGeometry::DrawTriangles);
+    geometry->setVertexDataPattern(QSGGeometry::DynamicPattern);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+    geometry->setVertexCount(0);
+#else
+    std::memset(geometry->vertexData(), 0, size_t(capacity) * sizeof(QSGGeometry::ColoredPoint2D));
+#endif
+    node->setGeometry(geometry);
+    node->setFlag(QSGNode::OwnsGeometry);
+    node->setMaterial(new QSGVertexColorMaterial());
+    node->setFlag(QSGNode::OwnsMaterial);
+    return node;
+}
+
+// Draws `used` vertices: degenerate (zeroed) after them on Qt before 6.10.
+void commitVertices(QSGGeometryNode* node, int used, int& previous) {
+    auto* geometry = node->geometry();
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+    geometry->setVertexCount(used);
+#else
+    auto* v = geometry->vertexDataAsColoredPoint2D();
+    if (used < previous) std::memset(v + used, 0, size_t(previous - used) * sizeof(*v));
+#endif
+    previous = used;
+    geometry->markVertexDataDirty();
+    node->markDirty(QSGNode::DirtyGeometry);
 }
 
 void writeBar(QSGGeometry::ColoredPoint2D* v, float x0, float x1, float y0, float y1, Rgba c) {
@@ -67,7 +102,9 @@ void LadderLayer::onRootRebuilt() {
     gate_ = nullptr;
     clip_ = nullptr;
     bars_ = nullptr;
+    badges_ = nullptr;
     built_ = false;
+    reserved_ = false; // the text renderer drops its nodes with the root
 }
 
 QSGNode* LadderLayer::createContainer() {
@@ -79,22 +116,13 @@ QSGNode* LadderLayer::createContainer() {
     clip_->setGeometry(clipGeometry);
     clip_->setFlag(QSGNode::OwnsGeometry);
     clip_->setIsRectangular(true);
-    bars_ = new QSGGeometryNode();
-    auto* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), kMaxVertices);
-    geometry->setDrawingMode(QSGGeometry::DrawTriangles);
-    geometry->setVertexDataPattern(QSGGeometry::DynamicPattern);
-#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
-    geometry->setVertexCount(0);
-#else
-    std::memset(geometry->vertexData(), 0, size_t(kMaxVertices) * sizeof(QSGGeometry::ColoredPoint2D));
-#endif
-    bars_->setGeometry(geometry);
-    bars_->setFlag(QSGNode::OwnsGeometry);
-    bars_->setMaterial(new QSGVertexColorMaterial());
-    bars_->setFlag(QSGNode::OwnsMaterial);
+    bars_ = colouredNode(kMaxVertices);
     clip_->appendChildNode(bars_);
     gate_->appendChildNode(clip_);
+    badges_ = colouredNode(kMaxBadgeVertices); // over the chart: not under the strip's clip
+    gate_->appendChildNode(badges_);
     vertices_ = 0;
+    badgeVertices_ = 0;
     ++creations_;
     return gate_;
 }
@@ -123,7 +151,7 @@ void LadderLayer::sync(const ChartFrame& frame) {
     }
 }
 
-void LadderLayer::updateNodes(const ChartFrame& frame, LayerNodeContext&) {
+void LadderLayer::updateNodes(const ChartFrame& frame, LayerNodeContext& context) {
     if (!gate_) return;
     const double opacity = drawing_ ? 1.0 : 0.0;
     if (gate_->opacity() != opacity) gate_->setOpacity(opacity);
@@ -131,7 +159,7 @@ void LadderLayer::updateNodes(const ChartFrame& frame, LayerNodeContext&) {
     const auto& f = frame.context;
     const Key key{current_->serial, f.raster.topF, f.raster.rowPxF, f.raster.tick, f.raster.dpr,
                   f.itemBounds.x() + f.itemBounds.width(), f.rightGutterPx, f.surfaceBounds.top(),
-                  f.surfaceBounds.height()};
+                  f.surfaceBounds.height(), context.atlasReady ? &context.atlas : nullptr};
     if (built_ && key == key_) return;
     key_ = key;
     built_ = true;
@@ -155,8 +183,7 @@ void LadderLayer::rebuild(const ChartFrame& frame) {
     for (int i = first; i <= last; ++i) peak = std::max({peak, s.rows[size_t(i)].bid, s.rows[size_t(i)].ask});
     const float x0 = float(strip.left()) + kInsetPx, x1 = float(strip.right()) - kInsetPx;
     const float mid = 0.5f * (x0 + x1), half = std::max(0.0f, 0.5f * (x1 - x0));
-    auto* geometry = bars_->geometry();
-    auto* v = geometry->vertexDataAsColoredPoint2D();
+    auto* v = bars_->geometry()->vertexDataAsColoredPoint2D();
     int count = 0;
     for (int i = first; peak > 0 && i <= last; ++i) {
         const auto& row = s.rows[size_t(i)];
@@ -170,17 +197,37 @@ void LadderLayer::rebuild(const ChartFrame& frame) {
             writeBar(v + (count++) * kVerticesPerBar, mid, mid + half * row.ask / peak, yTop, yBottom,
                      barColour(s, row.flags, LadderRow::kAskLarge, LadderRow::kAskHot, kAsk, kAskWall));
     }
-    const int used = count * kVerticesPerBar;
-#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
-    geometry->setVertexCount(used);
-#else
-    if (used < vertices_) std::memset(v + used, 0, size_t(vertices_ - used) * sizeof(*v));
-#endif
-    vertices_ = used;
-    geometry->markVertexDataDirty();
-    bars_->markDirty(QSGNode::DirtyGeometry);
+    commitVertices(bars_, count * kVerticesPerBar, vertices_);
     ++dirtyMarks_;
+    rebuildBadges(frame);
     ++rebuilds_;
+}
+
+void LadderLayer::rebuildBadges(const ChartFrame& frame) {
+    QElapsedTimer timer;
+    timer.start();
+    badgeLayout_.layout(*current_, frame.context, key_.atlas);
+    commitVertices(badges_, badgeLayout_.writeGeometry(badges_->geometry()->vertexDataAsColoredPoint2D()),
+                   badgeVertices_);
+    ++dirtyMarks_;
+    if (!current_->radar || !key_.atlas) return; // no layout ran
+    const auto& st = badgeLayout_.stats();
+    sLog_Probe("ladder.badges", "serial=" << current_->serial << " rows=" << st.rowBadges << " dropped=" << st.dropped
+               << " pills=" << st.edgePills << " glyphs=" << st.glyphs << " vertices=" << badgeVertices_
+               << " ns=" << timer.nsecsElapsed());
+}
+
+bool LadderLayer::reserveText(ChartTextRenderer& text) const {
+    return text.reserve(QColor::fromRgba(kBidText), kMaxBadgeGlyphs) &&
+           text.reserve(QColor::fromRgba(kAskText), kMaxBadgeGlyphs) &&
+           text.reserve(QColor::fromRgba(kHotText), kMaxBadgeGlyphs);
+}
+
+void LadderLayer::submitLabels(const ChartFrame&, LayerNodeContext& context) {
+    if (!gate_ || !drawing_ || !current_->radar || !context.atlasReady) return;
+    if (!reserved_) reserved_ = reserveText(context.text);
+    if (!badgeLayout_.glyphs().empty())
+        context.text.submitGlyphs(badgeLayout_.glyphs(), ChartTextRenderer::Priority::Low);
 }
 
 void LadderLayer::afterRendering() {

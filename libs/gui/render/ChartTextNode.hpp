@@ -58,7 +58,12 @@ public:
     void setDistanceSign(float distanceSign);
     void setSprFloor(float sprFloor);
     void updateGeometry(const std::vector<ChartGlyphInstance>& glyphs);
+    // Room for `glyphs` glyphs now (no-op when it already has as much). The next update
+    // zeroes everything after its glyphs, so the new tail never draws stale quads.
+    void reserve(int glyphs);
     int capacityGlyphs() const { return m_capacityGlyphs; } // tests
+    bool hasTexture() const { return m_texture != nullptr; } // tests
+    bool vertexIsZero(int glyphIndex) const;                  // tests: the glyph's six vertices
 
 private:
     void updateMaterial();

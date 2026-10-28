@@ -1,5 +1,6 @@
 #pragma once
 #include "chart/layers/IChartLayer.hpp"
+#include "chart/layers/LadderBadges.hpp"
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -10,6 +11,9 @@
 class QSGOpacityNode;
 class QSGClipNode;
 class QSGGeometryNode;
+class QSGGeometry;
+class ChartTextAtlas;
+class ChartTextRenderer;
 
 namespace chart {
 // One display bin of the book on the chart's absolute row grid: price [k, k+1) * binPrice.
@@ -77,6 +81,10 @@ private:
 
 // Plain bid and ask bars in the strip right of the item (the reserved gutter before
 // the price axis), on the heatmap's rows. Off: opacity 0, no geometry work.
+// With the wall radar on, also the wall badges and edge pills over the chart, left of
+// the strip (LadderBadges): their backgrounds and arrows in a second node outside the
+// strip's clip, their text through the text stage (submitLabels, between the text
+// renderer's beginFrame and endFrame).
 class LadderLayer final : public IChartLayer {
 public:
     static constexpr float kInsetPx = 2.0f;
@@ -88,6 +96,9 @@ public:
     void sync(const ChartFrame&) override;
     void updateNodes(const ChartFrame&, LayerNodeContext&) override;
     void afterRendering() override;
+    // The text stage: the badge glyphs of the drawn snapshot. Reserves the badge colours'
+    // text nodes once per root, so a colour's first use later allocates nothing.
+    void submitLabels(const ChartFrame&, LayerNodeContext&);
     LadderMailbox& mailbox() { return mailbox_; }
     // Called from afterRendering (render thread) when the snapshot was built for
     // another frame; the callback queues the republish on the GUI thread.
@@ -99,14 +110,19 @@ public:
     uint64_t dirtyMarks() const { return dirtyMarks_; }
     uint64_t nodeCreations() const { return creations_; }
     int vertexCount() const { return vertices_; }
+    int badgeVertexCount() const { return badgeVertices_; }
+    const LadderBadges& badges() const { return badgeLayout_; }
 private:
     struct Key {
         uint64_t serial = 0;
         double topF = 0, rowPxF = 0, tick = 0, dpr = 0, left = 0, width = 0, top = 0, height = 0;
+        const ChartTextAtlas* atlas = nullptr;
         bool operator==(const Key&) const = default;
     };
     bool drawable(const ChartFrame&) const;
     void rebuild(const ChartFrame&);
+    void rebuildBadges(const ChartFrame&);
+    bool reserveText(ChartTextRenderer& text) const;
     LadderMailbox mailbox_;
     std::unique_ptr<LadderSnapshot> current_;
     std::function<void()> republish_;
@@ -115,9 +131,11 @@ private:
     QSGOpacityNode* gate_ = nullptr;
     QSGClipNode* clip_ = nullptr;
     QSGGeometryNode* bars_ = nullptr;
-    bool drawing_ = false, built_ = false;
+    QSGGeometryNode* badges_ = nullptr; // child of the gate, outside the strip's clip
+    LadderBadges badgeLayout_;
+    bool drawing_ = false, built_ = false, reserved_ = false;
     Key key_;
     uint64_t rebuilds_ = 0, dirtyMarks_ = 0, creations_ = 0;
-    int vertices_ = 0;
+    int vertices_ = 0, badgeVertices_ = 0;
 };
 } // namespace chart

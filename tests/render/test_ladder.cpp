@@ -421,7 +421,7 @@ TEST(LadderLayer, WarmedFramesAllocateNothingAndRewriteOnlyOnChange) {
     rig.view(chart_raster::shiftedRaster(rest, 0, 1));
     draw(rig.chartFrame());
     EXPECT_EQ(rig.layer.rebuildCount(), rebuilds + 1) << "a camera change";
-    EXPECT_EQ(rig.layer.dirtyMarks(), marks + 1);
+    EXPECT_EQ(rig.layer.dirtyMarks(), marks + 2) << "one per node: bars and badges";
     rig.feed.publish(*b);
     rig.feed.publishRows();
     draw(rig.chartFrame());

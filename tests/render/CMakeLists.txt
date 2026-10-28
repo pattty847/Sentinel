@@ -403,6 +403,13 @@ target_link_libraries(test_Ladder PRIVATE GTest::gtest sentinel_gui_lib Qt6::Tes
 add_test(NAME LadderTests COMMAND test_Ladder)
 set_tests_properties(LadderTests PROPERTIES LABELS "render;fast")
 
+# Wall radar badges and edge pills; the allocation case needs a GPU (skips without).
+add_executable(test_LadderBadges test_ladder_badges.cpp)
+target_include_directories(test_LadderBadges PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_LadderBadges PRIVATE GTest::gtest sentinel_gui_lib sentinel_lab_lib Qt6::Quick)
+add_test(NAME LadderBadgeTests COMMAND test_LadderBadges)
+set_tests_properties(LadderBadgeTests PROPERTIES LABELS "render;ui" TIMEOUT 300)
+
 add_executable(test_LayerVisibility test_layer_visibility.cpp)
 target_include_directories(test_LayerVisibility PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
 target_link_libraries(test_LayerVisibility PRIVATE GTest::gtest_main sentinel_gui_lib)

@@ -132,23 +132,12 @@ void ChartTextRenderer::endFrame() {
                    << " fontPx=" << m_atlas->fontPx());
     }
 
+    const ShaderParams params{sdfBias, distanceSign, sprFloor};
     for (Bucket& bucket : m_buckets) {
-        if (bucket.used && !bucket.node) {
-            bucket.node = new ChartTextNode();
-            m_root->appendChildNode(bucket.node);
-        }
-        if (!bucket.node) {
-            continue;
-        }
         if (bucket.used) {
-            bucket.node->setAtlas(m_atlas->image(), m_window);
-            bucket.node->setPxRange(m_atlas->pxRange());
-            bucket.node->setSdfBias(sdfBias);
-            bucket.node->setDistanceSign(distanceSign);
-            bucket.node->setSprFloor(sprFloor);
-            bucket.node->setColor(bucket.color);
-            bucket.node->updateGeometry(bucket.glyphs);
-        } else {
+            prepareNode(bucket, params);
+        }
+        if (bucket.node) {
             bucket.node->updateGeometry(bucket.glyphs);
         }
     }
@@ -162,6 +151,45 @@ void ChartTextRenderer::endFrame() {
     } else if (m_debugNode) {
         m_debugNode->updateGeometry({});
     }
+}
+
+// The bucket's node (made on first use), with this frame's atlas and material.
+void ChartTextRenderer::prepareNode(Bucket& bucket, const ShaderParams& params) {
+    if (!bucket.node) {
+        bucket.node = new ChartTextNode();
+        m_root->appendChildNode(bucket.node);
+    }
+    bucket.node->setAtlas(m_atlas->image(), m_window);
+    bucket.node->setPxRange(m_atlas->pxRange());
+    bucket.node->setSdfBias(params.sdfBias);
+    bucket.node->setDistanceSign(params.distanceSign);
+    bucket.node->setSprFloor(params.sprFloor);
+    bucket.node->setColor(bucket.color);
+}
+
+bool ChartTextRenderer::reserve(const QColor& color, int glyphs) {
+    if (!m_root || !m_window || !m_atlas || !m_atlas->isBuilt() || glyphs <= 0) {
+        return false;
+    }
+    Bucket* bucket = findOrCreateBucket(color);
+    reserveGrowing(bucket->glyphs, static_cast<size_t>(glyphs));
+    prepareNode(*bucket, {envFloatOrDefault("SENTINEL_CHART_TEXT_SDF_BIAS", 0.0f),
+                          envFloatOrDefault("SENTINEL_CHART_TEXT_DISTANCE_SIGN", -1.0f),
+                          envFloatOrDefault("SENTINEL_CHART_TEXT_SPR_FLOOR", 2.0f)});
+    bucket->node->reserve(glyphs);
+    return true;
+}
+
+int ChartTextRenderer::nodeCapacityGlyphs() const {
+    int glyphs = 0;
+    for (const Bucket& bucket : m_buckets) glyphs += bucket.node ? bucket.node->capacityGlyphs() : 0;
+    return glyphs;
+}
+
+int ChartTextRenderer::textureCount() const {
+    int textures = 0;
+    for (const Bucket& bucket : m_buckets) textures += bucket.node && bucket.node->hasTexture() ? 1 : 0;
+    return textures;
 }
 
 size_t ChartTextRenderer::capacityBytes() const {
