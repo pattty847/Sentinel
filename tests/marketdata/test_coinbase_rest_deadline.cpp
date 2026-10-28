@@ -53,10 +53,13 @@ protected:
         X509_gmtime_adj(X509_getm_notBefore(cert.get()), -60);
         X509_gmtime_adj(X509_getm_notAfter(cert.get()), 3600);
         X509_set_pubkey(cert.get(), key.get());
-        auto* subject = X509_get_subject_name(cert.get());
-        X509_NAME_add_entry_by_txt(subject, "CN", MBSTRING_ASC,
-            reinterpret_cast<const unsigned char*>("localhost"), -1, -1, 0);
-        X509_set_issuer_name(cert.get(), subject);
+        // OpenSSL 4 returns a const subject name, so build the name separately.
+        std::unique_ptr<X509_NAME, decltype(&X509_NAME_free)> subject(X509_NAME_new(), X509_NAME_free);
+        ASSERT_TRUE(subject);
+        ASSERT_EQ(X509_NAME_add_entry_by_txt(subject.get(), "CN", MBSTRING_ASC,
+            reinterpret_cast<const unsigned char*>("localhost"), -1, -1, 0), 1);
+        ASSERT_EQ(X509_set_subject_name(cert.get(), subject.get()), 1);
+        ASSERT_EQ(X509_set_issuer_name(cert.get(), subject.get()), 1);
         ASSERT_GT(X509_sign(cert.get(), key.get(), EVP_sha256()), 0);
         ASSERT_EQ(SSL_CTX_use_certificate(tls.native_handle(), cert.get()), 1);
         ASSERT_EQ(SSL_CTX_use_PrivateKey(tls.native_handle(), key.get()), 1);
