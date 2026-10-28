@@ -37,6 +37,7 @@ Detail belongs in the linked plan or file, not in the item.
 
 ## Direction (owner, needs its own plan)
 
+- Live sub-minute heatmap (owner 2026-10-28, another day): 1 s and 100 ms heatmap slices kept in RAM for the live edge, built client-side from the live book replica (no recording change; history stays minute columns). Today live heatmap requests need tf >= 1 min (`libs/gui/render/heatmap/HeatmapSourceController.cpp:882`), so 1 s / 100 ms show minute columns behind sub-second candles. HIGH (GPU heatmap core). Lock-to-mid a1 follows trades meanwhile.
 - Several Sentinel servers that replicate journals and serve many clients (owner 2026-10-07). Foundations: self-contained days (anchors), journal replication, fan-out above 8 clients (FM-207), client auto-reconnect, authentication.
 - Where Sentinel runs: Raspberry Pi 5 NAS with the 5 TB drive for backup/archive (roller HMC2 writes prefer an SSD); server on the Pi or the Windows machine serving remote clients over TLS.
 - On hold (owner 2026-10-06): TPO sessions become Session (New York, London, Asia, Australia drawn together, like ExoCharts), 24H, 1W, 1M. Needs a spec.
