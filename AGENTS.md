@@ -79,7 +79,7 @@ changes behaviour, data or looks (owner decisions) or needs an approval listed i
 - New QML knobs go on the owning sub-object (`view`, `candles`, `tpo`, `layers`, `debug`); new Agent API fields go in `ChartAgentPort`; new test hooks go on the policy under test, not on UGR.
 - New view behaviour ships with a Qt-free unit test of its policy that fails without the change. A GPU test alone is not enough.
 - `tests/render/golden/*` (CPU view trace, Metal frame hashes) is re-blessed only in a slice that declares a visible change; the hand-off names every changed scene and why. A slice labelled neutral with a re-bless is rejected. On the owner's Mac (M4, Metal) a missing or mismatched golden fails.
-- `scripts/dev/chart-health.sh` runs in `agent-worktree.sh land` and must pass. Writers run it before `READY`. It checks only the chart and UGR files the branch changed (`libs/gui/chart/**`, `libs/gui/UnifiedGridRenderer*`), against the branch's merge-base with `main`:
+- `scripts/dev/chart-health.sh` runs in `agent-worktree.sh land` and must pass. Writers run it before `READY`, on a committed tip (it diffs merge-base..HEAD, so an uncommitted diff passes unchecked). It checks only the chart and UGR files the branch changed (`libs/gui/chart/**`, `libs/gui/UnifiedGridRenderer*`), against the branch's merge-base with `main`:
   - file caps: no UGR file grows past its merge-base size; from S14, `UnifiedGridRenderer.cpp` <= 450 lines and `.h` <= 350; every `libs/gui/chart/**` file <= 500;
   - UGR `m_` member count never grows (<= 15 from S14);
   - new functions CCN <= 15, <= 60 NLOC, <= 6 parameters (`ChartViewController` CCN <= 10); a touched or moved existing function may not rise above max(15, its merge-base CCN);
