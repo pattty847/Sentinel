@@ -17,6 +17,22 @@ struct Rgba { uchar r, g, b, a; };
 // Premultiplied (QSGVertexColorMaterial): plain bid and ask colours.
 constexpr Rgba kBid{34, 150, 139, 230};
 constexpr Rgba kAsk{215, 75, 72, 230};
+// Wall radar bars (the owner tunes these straight colours and alphas live): the Electric
+// palette's top stops and the warn colour for a recent flicker, stored premultiplied.
+constexpr Rgba premultiply(Rgba c) {
+    return {uchar((c.r * c.a + 127) / 255), uchar((c.g * c.a + 127) / 255), uchar((c.b * c.a + 127) / 255), c.a};
+}
+constexpr Rgba kBidWallSrgb{0, 255, 255, 220};
+constexpr Rgba kAskWallSrgb{255, 200, 0, 220};
+constexpr Rgba kHotWallSrgb{255, 208, 77, 230};
+constexpr Rgba kBidWall = premultiply(kBidWallSrgb);
+constexpr Rgba kAskWall = premultiply(kAskWallSrgb);
+constexpr Rgba kHotWall = premultiply(kHotWallSrgb);
+
+Rgba barColour(const LadderSnapshot& s, uint8_t flags, uint8_t large, uint8_t hot, Rgba plain, Rgba wall) {
+    if (!s.radar || !(flags & large)) return plain;
+    return (flags & hot) ? kHotWall : wall;
+}
 
 void writeBar(QSGGeometry::ColoredPoint2D* v, float x0, float x1, float y0, float y1, Rgba c) {
     const float xs[kVerticesPerBar] = {x0, x1, x0, x0, x1, x1};
@@ -147,8 +163,12 @@ void LadderLayer::rebuild(const ChartFrame& frame) {
         const double k = double(s.binLo + i);
         const float yTop = float(f.surfaceBounds.top() + cam.yDev((k + 1) * bin) / cam.dpr);
         const float yBottom = float(f.surfaceBounds.top() + cam.yDev(k * bin) / cam.dpr);
-        if (row.bid > 0) writeBar(v + (count++) * kVerticesPerBar, mid - half * row.bid / peak, mid, yTop, yBottom, kBid);
-        if (row.ask > 0) writeBar(v + (count++) * kVerticesPerBar, mid, mid + half * row.ask / peak, yTop, yBottom, kAsk);
+        if (row.bid > 0)
+            writeBar(v + (count++) * kVerticesPerBar, mid - half * row.bid / peak, mid, yTop, yBottom,
+                     barColour(s, row.flags, LadderRow::kBidLarge, LadderRow::kBidHot, kBid, kBidWall));
+        if (row.ask > 0)
+            writeBar(v + (count++) * kVerticesPerBar, mid, mid + half * row.ask / peak, yTop, yBottom,
+                     barColour(s, row.flags, LadderRow::kAskLarge, LadderRow::kAskHot, kAsk, kAskWall));
     }
     const int used = count * kVerticesPerBar;
 #if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)

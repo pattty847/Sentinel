@@ -58,8 +58,10 @@ void LevelTracker::observe(State& state, double size, Milliseconds now)
     const bool present = size > 0 && size >= config_.minimumSize;
     if (present && !state.present) {
         if (state.vanished && now - state.disappeared <= config_.flickerWindowMs
-            && state.flickers < std::numeric_limits<std::uint64_t>::max())
+            && state.flickers < std::numeric_limits<std::uint64_t>::max()) {
             ++state.flickers;
+            state.lastFlicker = now;
+        }
         state.since = now;
         state.vanished = false;
     } else if (!present && state.present) {
@@ -95,7 +97,8 @@ LevelInfo LevelTracker::level(std::size_t row, Side side) const
     if (!window_.active || row >= window_.rows)
         return {};
     const auto& state = states_[row][sideIndex(side)];
-    return {state.present, state.present ? window_.timestamp - state.since : 0, state.flickers};
+    return {state.present, state.present ? window_.timestamp - state.since : 0, state.flickers,
+            state.flickers > 0 ? window_.timestamp - state.lastFlicker : -1};
 }
 
 bool LevelTracker::isLarge(std::size_t row, Side side, double multiple) const

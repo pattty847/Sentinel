@@ -1,4 +1,5 @@
 #pragma once
+#include <cmath>
 #include <functional>
 #include <QObject>
 #include <string_view>
@@ -14,8 +15,13 @@ class LayerVisibility : public QObject {
     // The book ladder strip (independent of the primary field; off by default).
     Q_PROPERTY(bool ladderLayerEnabled READ ladderEnabled NOTIFY layerVisibilityChanged)
     Q_PROPERTY(int ladderWidthPx READ ladderWidthPx NOTIFY layerVisibilityChanged)
+    // Wall radar on the ladder (works only while the ladder is on; off by default) and its
+    // threshold: a multiple of that side's median row size.
+    Q_PROPERTY(bool wallRadarEnabled READ wallRadarEnabled NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(double wallMultiple READ wallMultiple NOTIFY layerVisibilityChanged)
 public:
     static constexpr int kLadderWidthPx = 120, kLadderMinWidthPx = 60, kLadderMaxWidthPx = 240;
+    static constexpr double kWallMultiple = 4, kWallMinMultiple = 1.5, kWallMaxMultiple = 20;
     std::function<void(std::string_view, bool, bool)> report;
     std::function<void()> requestUpdate;
 
@@ -28,6 +34,17 @@ public:
     int ladderWidthPx() const { return ladder_ ? ladderWidth_ : 0; }
     // The strip width while the ladder is on, clamped to [kLadderMinWidthPx, kLadderMaxWidthPx].
     int ladderWidthSetting() const { return ladderWidth_; }
+    bool wallRadarEnabled() const { return wallRadar_; }
+    double wallMultiple() const { return wallMultiple_; }
+    // Clamped to [kWallMinMultiple, kWallMaxMultiple]; a non-finite value is ignored.
+    void setWallMultiple(double multiple) {
+        if (!std::isfinite(multiple)) return;
+        multiple = multiple < kWallMinMultiple ? kWallMinMultiple : multiple > kWallMaxMultiple ? kWallMaxMultiple : multiple;
+        if (multiple == wallMultiple_) return;
+        wallMultiple_ = multiple;
+        if (requestUpdate) requestUpdate();
+        emit layerVisibilityChanged();
+    }
     void setLadderWidthPx(int px) {
         px = px < kLadderMinWidthPx ? kLadderMinWidthPx : px > kLadderMaxWidthPx ? kLadderMaxWidthPx : px;
         if (px == ladderWidth_) return;
@@ -74,12 +91,14 @@ public:
         else if (name == "tpo") layer = &tpo_;
         else if (name == "volumeProfile") layer = &volumeProfile_;
         else if (name == "ladder") layer = &ladder_;
+        else if (name == "wallRadar") layer = &wallRadar_;
         if (!layer || *layer == enabled) return;
         *layer = enabled;
         changed(name, enabled);
     }
 
     Q_INVOKABLE void setLadderEnabled(bool enabled) { setLayerEnabled("ladder", enabled); }
+    Q_INVOKABLE void setWallRadarEnabled(bool enabled) { setLayerEnabled("wallRadar", enabled); }
 
     Q_INVOKABLE void setVolumeProfileEnabled(bool enabled) {
         const bool newHeatmapEnabled = enabled ? false : heatmap_;
@@ -159,5 +178,7 @@ private:
     bool volumeProfile_ = false;
     bool ladder_ = false;
     int ladderWidth_ = kLadderWidthPx;
+    bool wallRadar_ = false;
+    double wallMultiple_ = kWallMultiple;
 };
 } // namespace chart

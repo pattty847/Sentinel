@@ -79,6 +79,7 @@ void clampSettings(HeatmapChartSettings &s) {
     s.candleBodyOpacity = finiteClamp(s.candleBodyOpacity, 0, 1, d.candleBodyOpacity);
     s.candleWickWidth = std::clamp(s.candleWickWidth, 1, 3);
     s.ladderWidthPx = std::clamp(s.ladderWidthPx, 60, 240);
+    s.wallMultiple = finiteClamp(s.wallMultiple, 1.5, 20, d.wallMultiple);
 }
 HeatmapChartSettings chartDefaults(const ClientHeatmapConfig &c) {
     HeatmapChartSettings s;
@@ -133,6 +134,8 @@ QJsonObject settingsJson(const HeatmapChartSettings &s) {
         {"candleWickWidth", s.candleWickWidth},
         {"showLadder", s.showLadder},
         {"ladderWidthPx", s.ladderWidthPx},
+        {"showWallRadar", s.showWallRadar},
+        {"wallMultiple", s.wallMultiple},
         {"tickMode", s.tickMode == TickMode::Auto ? "auto" : "manual"},
         {"bidGradient", gradientJson(s.bidGradient)}, {"askGradient", gradientJson(s.askGradient)}
     };
@@ -188,6 +191,8 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     out.candleWickWidth = merged["candleWickWidth"].toInt();
     out.showLadder = merged["showLadder"].toBool();
     out.ladderWidthPx = int(std::clamp(merged["ladderWidthPx"].toDouble(), -2147483647.0, 2147483647.0));
+    out.showWallRadar = merged["showWallRadar"].toBool();
+    out.wallMultiple = merged["wallMultiple"].toDouble();
     out.tickMode = merged["tickMode"] == "manual" ? TickMode::Manual : TickMode::Auto;
     out.bidGradient = gradient(merged["bidGradient"]);
     out.askGradient = gradient(merged["askGradient"]);

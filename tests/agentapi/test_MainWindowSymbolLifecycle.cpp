@@ -72,6 +72,7 @@ struct MainWindowSymbolLifecyclePeer {
         window.m_symbolSwitchTimer->stop();
         QMetaObject::invokeMethod(window.m_symbolSwitchTimer, "timeout", Qt::DirectConnection);
     }
+    static AgentApi::StateSnapshot state(const MainWindowGPU& window) { return window.agentApiStateSnapshot(); }
     static AgentApi::ControlApply applyLayers(MainWindowGPU& window, const AgentApi::ControlBody& body) {
         return window.agentApiApplyControl("layers", body);
     }
@@ -733,6 +734,19 @@ TEST(MainWindowLayers, PartialMapKeepsUnspecifiedLayers) {
     EXPECT_TRUE(renderer->layers()->ladderEnabled());
     EXPECT_TRUE(ladderOn.data.value("layers").toObject().value("ladder").toBool());
     EXPECT_TRUE(renderer->layers()->heatmapEnabled()) << "independent of the primary layers";
+
+    EXPECT_FALSE(renderer->layers()->wallRadarEnabled()) << "the wall radar is off by default";
+    EXPECT_FALSE(ladderOn.data.value("layers").toObject().value("wallRadar").toBool());
+    request.body = R"({"wallRadar":true})";
+    const auto radar = AgentApi::validateControl(request, std::nullopt);
+    ASSERT_EQ(radar.status, 200);
+    const auto radarOn = MainWindowSymbolLifecyclePeer::applyLayers(window, radar.body);
+    ASSERT_EQ(radarOn.status, 200);
+    EXPECT_TRUE(renderer->layers()->wallRadarEnabled());
+    EXPECT_TRUE(radarOn.data.value("layers").toObject().value("wallRadar").toBool());
+    const auto state = AgentApi::stateJson(MainWindowSymbolLifecyclePeer::state(window));
+    EXPECT_TRUE(state.value("data").toObject().value("layers").toObject().value("wallRadar").toBool())
+        << "GET /api/v1/state reports it";
 }
 
 TEST(MainWindowLayers, PostVolumeProfileKeepsHeatmap) {

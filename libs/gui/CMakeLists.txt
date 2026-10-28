@@ -63,6 +63,7 @@ set(GRID_CORE_SOURCES
     chart/layers/TradeLayers.cpp
     chart/layers/LadderLayer.cpp
     chart/feeds/BookLadderFeed.cpp
+    chart/feeds/LadderTracker.cpp
     chart/shell/LadderBinding.cpp
     chart/feeds/TradeOverlayFeeds.cpp
     chart/shell/HeatmapChartPort.hpp

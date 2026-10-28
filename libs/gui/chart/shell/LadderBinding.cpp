@@ -49,9 +49,12 @@ void bindLadder(LadderWiring w) {
     });
     QObject::connect(&w.view, &GridViewState::viewportChanged, &feed, &BookLadderFeed::onFrameChanged);
     QObject::connect(&w.view, &GridViewState::panVisualOffsetChanged, &feed, &BookLadderFeed::onFrameChanged);
-    QObject::connect(&w.visibility, &LayerVisibility::layerVisibilityChanged, &feed,
-                     [&feed, &visibility = w.visibility] { feed.setEnabled(visibility.ladderEnabled()); });
-    feed.setEnabled(w.visibility.ladderEnabled());
+    const auto apply = [&feed, &visibility = w.visibility] {
+        feed.setEnabled(visibility.ladderEnabled());
+        feed.setRadar(visibility.wallRadarEnabled(), visibility.wallMultiple());
+    };
+    QObject::connect(&w.visibility, &LayerVisibility::layerVisibilityChanged, &feed, apply);
+    apply();
     new LadderExposure(w.item, feed);
 }
 } // namespace chart

@@ -13,13 +13,28 @@ class QSGGeometryNode;
 
 namespace chart {
 // One display bin of the book on the chart's absolute row grid: price [k, k+1) * binPrice.
+// With the wall radar on, also its tracker state (seen-for and flicker counts saturate).
 struct LadderRow {
+    static constexpr uint8_t kBidLarge = 1, kAskLarge = 2, kBidHot = 4, kAskHot = 8;
     float bid = 0, ask = 0;
+    uint32_t bidSeenMs = 0, askSeenMs = 0;
+    uint16_t bidFlickers = 0, askFlickers = 0;
+    uint8_t flags = 0;
+};
+
+// The largest native level on one side beyond one edge of the drawn window. found: at
+// least wallMultiple x that side's median (a positive median); capped: that side's scan
+// stopped before the band end, so a larger wall may lie farther out.
+struct WallCandidate {
+    double price = 0;
+    float size = 0;
+    bool found = false, capped = false;
 };
 
 // The book on the drawn rows, published by the GUI-thread feed (BookLadderFeed).
 struct LadderSnapshot {
     static constexpr int kMaxRows = 4096;
+    static constexpr int kBid = 0, kAsk = 1, kAbove = 0, kBelow = 1;
     uint64_t generation = 0; // symbol generation
     uint64_t serial = 0;     // the feed's publication count
     bool valid = false;      // false: withdrawn, no book, no raster, unsupported grid, too wide
@@ -33,6 +48,12 @@ struct LadderSnapshot {
     int64_t evalLo = 0, evalHi = 0;
     double bestBid = 0, bestAsk = 0;
     int64_t receivedAtMs = 0;
+    // Wall radar (LadderTracker): off -> the fields below are zero.
+    bool radar = false;
+    double wallMultiple = 0;
+    float bidMedian = 0, askMedian = 0; // the tracker's last accepted medians
+    char asset[8] = {};                 // the base asset ("BTC" for BTC-USD)
+    std::array<std::array<WallCandidate, 2>, 2> walls{}; // [kBid|kAsk][kAbove|kBelow]
     std::array<LadderRow, kMaxRows> rows{};
     double binPrice() const { return double(group) * serverTick; }
 };

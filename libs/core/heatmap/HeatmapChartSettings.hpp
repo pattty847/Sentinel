@@ -40,6 +40,10 @@ struct HeatmapChartSettings {
     // Chart-edge book ladder strip (chart menu); width in logical px, 60..240.
     bool showLadder = false;
     int ladderWidthPx = 120;
+    // Wall radar on the ladder (chart menu): bins at or above wallMultiple x the side's
+    // median row size are drawn as walls; 1.5..20.
+    bool showWallRadar = false;
+    double wallMultiple = 4;
     bool operator==(const HeatmapChartSettings &) const = default;
 };
 } // namespace heatmap

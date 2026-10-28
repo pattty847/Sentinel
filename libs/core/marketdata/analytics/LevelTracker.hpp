@@ -14,6 +14,7 @@ struct LevelInfo {
     bool present = false;
     Milliseconds seenForMs = 0;
     std::uint64_t flickers = 0;
+    Milliseconds sinceLastFlickerMs = -1; // -1: no flicker counted yet
 };
 
 // Presence means positive size >= minimumSize. Age is continuous observed time
@@ -39,6 +40,7 @@ private:
         bool vanished = false;
         Milliseconds since = 0;
         Milliseconds disappeared = 0;
+        Milliseconds lastFlicker = 0;
         std::uint64_t flickers = 0;
     };
     using RowState = std::array<State, 2>;

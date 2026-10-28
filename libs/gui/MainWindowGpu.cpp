@@ -1562,6 +1562,7 @@ AgentApi::StateSnapshot MainWindowGPU::agentApiStateSnapshot() const {
             s.tpoTheme = renderer->tpo()->tpoTheme();
             s.volumeProfileLayer = renderer->layers()->volumeProfileEnabled();
             s.ladderLayer = renderer->layers()->ladderEnabled();
+            s.wallRadarLayer = renderer->layers()->wallRadarEnabled();
         }
     }
     if (m_modeController) s.candlesLayer = m_modeController->candlesEnabled();
@@ -1669,6 +1670,7 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
                                           {"tpo", state.tpoLayer.value_or(false)},
                                           {"volumeProfile", state.volumeProfileLayer.value_or(false)},
                                           {"ladder", state.ladderLayer.value_or(false)},
+                                          {"wallRadar", state.wallRadarLayer.value_or(false)},
                                           {"tpoLayout", state.tpoLayout.value_or(QString())},
                                           {"tpoTheme", state.tpoTheme.value_or(QString())}};
     }

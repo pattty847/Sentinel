@@ -473,7 +473,7 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
                 continue;
             }
             if (key != "heatmap" && key != "candles" && key != "footprint" && key != "tpo" && key != "volumeProfile" &&
-                key != "ladder")
+                key != "ladder" && key != "wallRadar")
                 return reject("invalid_field", "Unknown layer");
             if (!v.isBool()) return reject("invalid_layer", "Layer values must be boolean");
             result.body.layers.insert(key, v);
@@ -573,6 +573,7 @@ QJsonObject stateJson(const StateSnapshot& s) {
         {"layers", QJsonObject{{"heatmap", boolean(s.heatmapLayer)}, {"candles", boolean(s.candlesLayer)},
             {"footprint", boolean(s.footprintLayer)}, {"tpo", boolean(s.tpoLayer)},
             {"volumeProfile", boolean(s.volumeProfileLayer)}, {"ladder", boolean(s.ladderLayer)},
+            {"wallRadar", boolean(s.wallRadarLayer)},
             {"tpoLayout", s.tpoLayout ? QJsonValue(*s.tpoLayout) : QJsonValue()},
             {"tpoTheme", s.tpoTheme ? QJsonValue(*s.tpoTheme) : QJsonValue()}}}
     };

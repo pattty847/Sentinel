@@ -60,6 +60,8 @@ public:
     };
     LevelsSnapshot snapshotLevels() const;
     uint64_t stateVersion() const { std::lock_guard<std::mutex> lock(m_mutex); return m_stateVersion; }
+    // Advances on every initialize() and clear(): a resnapshot of the same replica is a new series.
+    uint64_t epoch() const { std::lock_guard<std::mutex> lock(m_mutex); return m_epoch; }
     static size_t bucketIndex(double price, double minPrice, double tickSize) {
         // Decimal quote/tick multiples can land just below an integer in binary64.
         return static_cast<size_t>((price - minPrice) / tickSize + 1e-8);
@@ -167,6 +169,7 @@ private:
     double m_max_price = 0.0;
     double m_tick_size = 0.0;
     uint64_t m_stateVersion = 0; // protected by m_mutex; advances on reset and changed batch
+    uint64_t m_epoch = 0;        // protected by m_mutex; advances on initialize and clear
 
     size_t m_nonZeroBidCount = 0;
     size_t m_nonZeroAskCount = 0;
