@@ -212,6 +212,8 @@ add_library(sentinel_chart_core STATIC
     chart/core/TimeframeSwitch.cpp
     chart/core/PriceCarryPolicy.hpp
     chart/core/PriceCarryPolicy.cpp
+    chart/core/LiveEdge.hpp
+    chart/core/LiveEdge.cpp
     chart/core/LivePlacement.hpp
     chart/core/LivePlacement.cpp
     chart/core/MidLock.hpp

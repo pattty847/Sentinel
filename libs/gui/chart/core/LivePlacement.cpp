@@ -1,4 +1,5 @@
 #include "chart/core/LivePlacement.hpp"
+#include "chart/core/LiveEdge.hpp"
 #include "chart/core/ChartViewController.hpp"
 #include "servermodel/RecordingCodec.hpp"
 #include "SentinelLogging.hpp"
@@ -51,6 +52,7 @@ void LivePlacement::followGpuLiveTo(int64_t openEnd) {
       !controller_.viewPtr()->isAutoScrollEnabled() || controller_.viewPtr()->isDragging())
     return;
   const int64_t tf = controller_.session().timeframeMs;
+  if (tf < LiveEdge::kMinuteMs) openEnd = LiveEdge::endMs(controller_.session(), environment_, tf);
   if (openEnd <= 0 || tf <= 0) return;
   const int64_t start = controller_.viewPtr()->getVisibleTimeStart(), end = controller_.viewPtr()->getVisibleTimeEnd();
   const int64_t span = end - start;
@@ -89,9 +91,9 @@ void LivePlacement::seedGpuViewport(double bestBid, double bestAsk) {
   qint64 start = controller_.viewPtr()->getVisibleTimeStart(), end = controller_.viewPtr()->getVisibleTimeEnd();
   if (!timeValid) {
     const int64_t span = gpuInitialSpanMs(environment_.surface().widthLogical);
-    const int64_t now = clock_();
+    const int64_t liveEnd = tf >= LiveEdge::kMinuteMs ? liveEndCeil(clock_(), tf) : initialLiveEndMs();
     controller_.flags().pristine = true;
-    end = liveEndCeil(now, tf) +
+    end = liveEnd +
           std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(span) * kAutoScrollPaddingFrac));
     start = end - span;
   }
@@ -119,7 +121,7 @@ void LivePlacement::returnGpuToLive() {
   const int64_t span = controller_.viewPtr()->getVisibleTimeEnd() - controller_.viewPtr()->getVisibleTimeStart();
   const int64_t end = controller_.priceFitter().gpuLiveEndMs(span);
   if (end <= 0) return; // nothing known yet: the next live frame steps forward
-  sLog_Render("GPU heatmap returns to live: anchor=" << environment_.liveAnchorMs() << " end=" << end);
+  sLog_Render("GPU heatmap returns to live: anchor=" << LiveEdge::anchorMs(controller_.session(), environment_, controller_.session().timeframeMs) << " end=" << end);
   controller_.viewPtr()->setRasterAnchor(1.0, controller_.viewPtr()->rasterAnchor().fracY); // the live edge
   controller_.viewPtr()->setViewport(end - span, end, controller_.viewPtr()->getMinPrice(), controller_.viewPtr()->getMaxPrice());
   controller_.syncGpuView(); // publishes the view even when it was already there
@@ -131,7 +133,7 @@ void LivePlacement::bootstrapGpuTimeView() {
     if (bootstrapTimer_) bootstrapTimer_->stop();
     return;
   }
-  const int64_t anchor = environment_.liveAnchorMs();
+  const int64_t anchor = initialLiveEndMs();
   const int64_t tf = std::max<int64_t>(1, controller_.session().timeframeMs);
   if (anchor <= 0) {
     // Availability arrives on the data thread: look again shortly (stops once
@@ -145,9 +147,9 @@ void LivePlacement::bootstrapGpuTimeView() {
   }
   if (bootstrapTimer_) bootstrapTimer_->stop();
   const int64_t span = gpuInitialSpanMs(environment_.surface().widthLogical);
-  const int64_t end = liveEndCeil(anchor, tf) +
+  const int64_t end = anchor +
                       std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(span) * kAutoScrollPaddingFrac));
-  sLog_Render("GPU heatmap time-only bootstrap from availability: anchor=" << anchor << " time=[" << end - span
+  sLog_Render("GPU time-only bootstrap: liveEnd=" << anchor << " time=[" << end - span
               << ".." << end << "] (price from the first decoded data)");
   controller_.flags().priceKnown = false;
   controller_.flags().pristine = true;
@@ -187,15 +189,39 @@ bool LivePlacement::matchesUtf8Product(QStringView symbol, std::string_view prod
   return symbol == QUtf8StringView(product.data(), static_cast<qsizetype>(product.size()));
 }
 
-void LivePlacement::onTrade(const std::string& product, double price) {
+void LivePlacement::onTrade(const std::string& product, double price, int64_t timeMs) {
   // The live price for auto-fit compares the ASCII product id without conversion.
   if (std::isfinite(price) && price > 0 &&
       controller_.session().symbol == QLatin1String(product.data(), static_cast<qsizetype>(product.size())))
     controller_.session().lastTrade = price;
+  const bool firstTrade = controller_.session().lastTradeMs == 0;
+  const bool accepted = std::isfinite(price) && price > 0 &&
+      matchesUtf8Product(controller_.session().symbol, product) && acceptTradeTime(timeMs);
   // A trade seeds the price window only when no book top has (yet) for this symbol.
   if ((controller_.flags().reseedPrice || !controller_.flags().priceKnown) && matchesUtf8Product(controller_.session().symbol, product))
     seedGpuViewport(price, price);
+  if (accepted && controller_.session().timeframeMs < LiveEdge::kMinuteMs &&
+      controller_.viewPtr()->isAutoScrollEnabled() && !controller_.viewPtr()->isDragging()) {
+    if (firstTrade) returnGpuToLive(); // replace a provisional placement, even if it is ahead
+    else followGpuLive();
+  }
   controller_.midLock().targetChanged(); // the lock's target while the book is one-sided
+}
+
+int64_t LivePlacement::initialLiveEndMs() const {
+  const auto& session = controller_.session();
+  const int64_t tf = std::max<int64_t>(1, session.timeframeMs);
+  if (tf < LiveEdge::kMinuteMs && session.symbol.isEmpty()) return 0;
+  const int64_t end = LiveEdge::endMs(session, environment_, tf);
+  // No trade yet: a frozen provisional view, never a minute edge or a running clock.
+  return end > 0 || tf >= LiveEdge::kMinuteMs ? end : LiveEdge::bucketEnd(clock_(), tf);
+}
+
+bool LivePlacement::acceptTradeTime(int64_t timeMs) {
+  auto& session = controller_.session();
+  if (timeMs <= session.lastTradeMs) return false;
+  session.lastTradeMs = timeMs;
+  return true;
 }
 
 void LivePlacement::resize(double w) {

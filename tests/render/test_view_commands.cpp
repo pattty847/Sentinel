@@ -43,6 +43,7 @@ struct CommandsTest : testing::Test {
     std::string events;
     void SetUp() override {
         c.session().timeframeMs = 1000;
+        c.session().lastTradeMs = 99999;
         v.setViewportSize(800, 400);
         v.setAutoPriceScale(false);
         v.setViewport(0, 100000, 50, 150);
@@ -160,7 +161,7 @@ TEST_F(CommandsTest, RequestWindows) {
     r = {}; r.endMs = 95000; r.priceMin = 75; EXPECT_TRUE(cmd.applyViewportRequest(r).isEmpty()); snap();
     r = {}; r.priceMax = 200; r.autoScale = true; EXPECT_TRUE(cmd.applyViewportRequest(r).isEmpty()); snap();
     r = {}; r.followLive = true; EXPECT_TRUE(cmd.applyViewportRequest(r).isEmpty()); snap();
-    env.live = 0; EXPECT_TRUE(cmd.applyViewportRequest(r).isEmpty()); snap();
+    env.live = 0; c.session().lastTradeMs = 0; EXPECT_TRUE(cmd.applyViewportRequest(r).isEmpty()); snap();
     env.mid = 0; r.autoScale = true; EXPECT_TRUE(cmd.applyViewportRequest(r).isEmpty()); snap();
     pin(
         "1000:100000:0x1.9p+5:0x1.2cp+7:0x1p-1:0x1.8p-1:4:000000000:0x0p+0:0x0p+0:viewport,update,sink,sink,update,|"
@@ -175,7 +176,7 @@ TEST_F(CommandsTest, RequestFits) {
     for (const char* fit : {"time", "price", "both", "default", "unknown"}) {
         Request r; r.fit = fit; EXPECT_TRUE(cmd.applyViewportRequest(r).isEmpty()); snap();
     }
-    env.live = 0; Request r; r.fit = "time";
+    env.live = 0; c.session().lastTradeMs = 0; Request r; r.fit = "time";
     EXPECT_EQ(cmd.applyViewportRequest(r), "fit_unavailable"); snap();
     pin(
         "9999:107826:0x1.9p+5:0x1.2cp+7:0x1p+0:0x1.8p-1:4:000000000:0x0p+0:0x0p+0:viewport,update,sink,sink,update,|"
@@ -191,8 +192,8 @@ TEST_F(CommandsTest, FitView) {
     EXPECT_TRUE(cmd.fitView(true,false)); snap();
     EXPECT_TRUE(cmd.fitView(false,true)); snap();
     EXPECT_TRUE(cmd.fitView(true,true)); snap();
-    env.live = 0; EXPECT_FALSE(cmd.fitView(true,true)); snap();
-    env.live = 100000; env.mid = 0; EXPECT_FALSE(cmd.fitView(true,true)); snap();
+    env.live = 0; c.session().lastTradeMs = 0; EXPECT_FALSE(cmd.fitView(true,true)); snap();
+    env.live = 100000; c.session().lastTradeMs = 99999; env.mid = 0; EXPECT_FALSE(cmd.fitView(true,true)); snap();
     v.handlePanStart({0,0}); EXPECT_FALSE(cmd.fitView(false,true)); snap();
     pin(
         "0:100000:0x1.9p+5:0x1.2cp+7:0x1p-2:0x1.8p-1:3:000000000:0x0p+0:0x0p+0:|"
@@ -205,8 +206,8 @@ TEST_F(CommandsTest, FitView) {
     );
 }
 TEST_F(CommandsTest, ResetView) {
-    env.live = 0; EXPECT_FALSE(cmd.resetView()); snap();
-    env.live = 100000; EXPECT_TRUE(cmd.resetView()); snap();
+    env.live = 0; c.session().lastTradeMs = 0; EXPECT_FALSE(cmd.resetView()); snap();
+    env.live = 100000; c.session().lastTradeMs = 99999; EXPECT_TRUE(cmd.resetView()); snap();
     v.setMaxSpans(40000, 0); events.clear(); EXPECT_TRUE(cmd.resetView()); snap();
     env.mid = 0; EXPECT_TRUE(cmd.resetView()); snap();
     v.handlePanStart({0,0}); EXPECT_FALSE(cmd.resetView()); snap();
@@ -270,7 +271,7 @@ TEST_F(CommandsTest, HeatmapSnapshot) {
 TEST_F(CommandsTest, HeatmapLive) {
     live(); snap();
     v.enableAutoScroll(true); events.clear(); live(); snap();
-    env.live = 150000; v.setAutoPriceScale(true); events.clear(); live(); snap();
+    env.live = 150000; c.session().lastTradeMs = 149999; v.setAutoPriceScale(true); events.clear(); live(); snap();
     v.handlePanStart({0,0}); live(); snap();
     pin(
         "0:100000:0x1.9p+5:0x1.2cp+7:0x1p-2:0x1.8p-1:3:000000000:0x0p+0:0x0p+0:live,update,|"

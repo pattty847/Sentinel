@@ -52,6 +52,7 @@ struct LivePlacementTest : testing::Test {
     void SetUp() override {
         controller.session().symbol = "TEST";
         controller.session().timeframeMs = 1000;
+        controller.session().lastTradeMs = 9999;
         view.setViewportSize(800, 400);
         view.setAutoPriceScale(false);
         live.setTimingForTest([] { return 10000; }, [this](std::function<void()> timeout) {
@@ -72,12 +73,15 @@ struct LivePlacementTest : testing::Test {
 TEST_F(LivePlacementTest, FollowTarget) {
     view.setViewport(1000, 11000, 90, 110);
     view.enableAutoScroll(true);
+    controller.session().lastTradeMs = 11999;
     live.followGpuLiveTo(12000);
     window(3000, 13000);
     EXPECT_EQ(events, (std::vector<std::string>{"tick"}));
+    controller.session().lastTradeMs = 10999;
     live.followGpuLiveTo(11000); // never step backwards
     window(3000, 13000);
     view.enableAutoScroll(false);
+    controller.session().lastTradeMs = 19999;
     live.followGpuLiveTo(20000);
     window(3000, 13000);
     EXPECT_EQ(events.size(), 1);
@@ -117,6 +121,7 @@ TEST_F(LivePlacementTest, BootstrapTimeView) {
     EXPECT_EQ(env.syncs, 1);
 }
 TEST_F(LivePlacementTest, BootstrapTimer) {
+    controller.session().timeframeMs = 60000;
     env.anchor = 0;
     live.bootstrapGpuTimeView();
     ASSERT_NE(timer, nullptr);
@@ -128,7 +133,7 @@ TEST_F(LivePlacementTest, BootstrapTimer) {
     EXPECT_EQ(timer, firstTimer);
     env.anchor = 10001;
     timer->fire();
-    window(-81000, 19000);
+    window(-5460000, 540000);
     EXPECT_FALSE(timer->active);
 }
 TEST_F(LivePlacementTest, InitialSpan) {
@@ -143,18 +148,20 @@ TEST_F(LivePlacementTest, FollowPadding) {
     view.enableAutoScroll(true);
     live.followPadding() = Placement::FollowPadding{4000, 1000, 11000, 1000, view.placementVersion()};
     env.anchor = 12000;
+    controller.session().lastTradeMs = 11999;
     live.followGpuLive();
     window(6000, 16000);
     EXPECT_EQ(live.followPadding()->startMs, 6000);
     EXPECT_EQ(live.followPadding()->endMs, 16000);
     view.setViewport(6000, 16000, 90, 110); // explicit placement invalidates retained padding
+    controller.session().lastTradeMs = 17999;
     live.followGpuLiveTo(18000);
     window(9000, 19000);
 }
 TEST_F(LivePlacementTest, TradeAndBookSeed) {
-    live.onTrade("OTHER", 500);
+    live.onTrade("OTHER", 500, 10000);
     EXPECT_FALSE(view.isTimeWindowValid());
-    live.onTrade("TEST", 100);
+    live.onTrade("TEST", 100, 9999);
     EXPECT_EQ(controller.session().lastTrade, 100);
     EXPECT_DOUBLE_EQ(view.getMinPrice(), 48.8);
     live.setLiveBookTop(199, 201);
@@ -163,7 +170,7 @@ TEST_F(LivePlacementTest, TradeAndBookSeed) {
     controller.flags().reseedPrice = true;
     live.setLiveBookTop(299, 301);
     EXPECT_DOUBLE_EQ(view.getMinPrice(), 248.8);
-    live.onTrade("TEST", std::numeric_limits<double>::quiet_NaN());
+    live.onTrade("TEST", std::numeric_limits<double>::quiet_NaN(), 20000);
     EXPECT_EQ(controller.session().lastTrade, 100);
 }
 // A non-finite or crossed book top neither seeds nor consumes a symbol switch's pending
@@ -214,6 +221,7 @@ TEST_F(LivePlacementTest, SeedMatchesFollowAtBucketBoundary) {
     const qint64 span = live.gpuInitialSpanMs(800);
     view.setViewport(-span, 0, 90, 110);
     view.enableAutoScroll(true);
+    controller.session().lastTradeMs = 9999;
     live.followGpuLiveTo(10000);
     EXPECT_EQ(seedEnd, view.getVisibleTimeEnd());
     EXPECT_EQ(seedEnd, 18000);
@@ -228,11 +236,14 @@ TEST_F(LivePlacementTest, BootstrapMatchesFollowAtBucketBoundary) {
     EXPECT_EQ(bootstrapEnd, view.getVisibleTimeEnd());
 }
 TEST_F(LivePlacementTest, NonBoundarySeedAndBootstrapAreUnchanged) {
+    controller.session().lastTradeMs = 10000;
     live.setTimingForTest([] { return 10001; }, {});
     live.seedGpuViewport(99, 101);
     window(-81000, 19000);
     chart::ChartViewController bootstrap{env, env, env, published};
+    bootstrap.session().symbol = "TEST";
     bootstrap.session().timeframeMs = 1000;
+    bootstrap.session().lastTradeMs = 10000;
     env.anchor = 10001;
     bootstrap.livePlacement().bootstrapGpuTimeView();
     EXPECT_EQ(bootstrap.viewPtr()->getVisibleTimeStart(), -81000);

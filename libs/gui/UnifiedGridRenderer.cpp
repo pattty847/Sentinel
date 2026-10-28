@@ -208,7 +208,8 @@ void UnifiedGridRenderer::onTradeReceived(const Trade &trade) {
     if (m_bubbles.append(trade))
       update(); // Qt coalesces trade bursts into one scene synchronization
   }
-  m_view->livePlacement().onTrade(trade.product_id, trade.price);
+  m_view->livePlacement().onTrade(trade.product_id, trade.price,
+      std::chrono::duration_cast<std::chrono::milliseconds>(trade.timestamp.time_since_epoch()).count());
 }
 
 void UnifiedGridRenderer::setLiveBook(const LiveOrderBook& book) {
@@ -293,8 +294,7 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
               << " symbol=" << normalized);
   m_view->zoomGlide().land();
   m_view->priceCarry().capture();
-  m_view->session().symbol = normalized;
-  m_view->session().bookMid = m_view->session().lastTrade = 0.0;
+  m_view->session().setSymbol(normalized);
   m_layers.ladderFeed.beginGeneration(); // no rows of the previous symbol survive the switch
   // The controller serial switches the heatmap (the node holds the old picture
   // until the new spans are ready); clearData() resets the trade overlays. The

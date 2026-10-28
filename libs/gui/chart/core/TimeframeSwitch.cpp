@@ -2,19 +2,19 @@
 #include "chart/core/ChartViewController.hpp"
 #include "chart/core/PublishedFrame.hpp"
 #include "render/FrameContextBuilder.hpp"
-#include "servermodel/RecordingCodec.hpp"
+#include "chart/core/LiveEdge.hpp"
 #include "SentinelLogging.hpp"
 #include <algorithm>
 #include <cmath>
 
 namespace chart {
 namespace {
-double nowCentre(int64_t anchor, int64_t tf) {
-    return static_cast<double>(recording::floorDiv(anchor + tf - 1, tf) * tf) - static_cast<double>(tf) * 0.5;
+double nowCentre(int64_t end, int64_t tf) {
+    return static_cast<double>(end) - static_cast<double>(tf) * 0.5;
 }
 std::optional<double> rightFraction(const TimeframeSwitchInputs& in) {
-    if (in.liveAnchorMs > 0 && in.oldEnd > in.oldStart && !in.following) {
-        const double now = nowCentre(in.liveAnchorMs, in.previousTfMs);
+    if (in.previousLiveEndMs > 0 && in.nextLiveEndMs > 0 && in.oldEnd > in.oldStart && !in.following) {
+        const double now = nowCentre(in.previousLiveEndMs, in.previousTfMs);
         if (in.drawnBefore.valid) {
             const double x = in.drawnBefore.xDev(now) / in.drawnBefore.widthDev;
             if (x >= 0.0 && x <= 1.0) return 1.0 - x;
@@ -27,14 +27,14 @@ std::optional<double> rightFraction(const TimeframeSwitchInputs& in) {
 std::optional<LivePlacement::FollowPadding> followPadding(const TimeframeSwitchInputs& in, int64_t nominal,
                                                         int64_t span) {
     const auto& drawnBefore = in.drawnBefore;
-    const int64_t anchor = in.liveAnchorMs, previousTf = in.previousTfMs, tf = in.nextTfMs;
-    if (!drawnBefore.valid || anchor <= 0 || nominal <= 0) return std::nullopt;
+    const int64_t tf = in.nextTfMs;
+    if (!drawnBefore.valid || in.previousLiveEndMs <= 0 || in.nextLiveEndMs <= 0 || nominal <= 0) return std::nullopt;
     const auto dest = in.restAt(nominal, span);
     // A capped column width re-lays out at the nominal live end.
     if (!dest.valid || dest.colPx != drawnBefore.colPx) return std::nullopt;
-    const double oldLiveEnd = double(recording::floorDiv(anchor + previousTf - 1, previousTf) * previousTf);
+    const double oldLiveEnd = double(in.previousLiveEndMs);
     const double liveEndX = drawnBefore.xDev(oldLiveEnd);
-    const int64_t newLiveEnd = recording::floorDiv(anchor + tf - 1, tf) * tf;
+    const int64_t newLiveEnd = in.nextLiveEndMs;
     const double C = dest.colPx, W = dest.widthDev;
     int64_t e = newLiveEnd + std::llround((W - liveEndX) * double(tf) / C);
     for (const int64_t candidate : {e, e - 1, e + 1})
@@ -64,7 +64,7 @@ TimeframeSwitchPlan planTimeframeSwitch(const TimeframeSwitchInputs& in) {
         out.followPadding = followPadding(in, nominal, span);
         if (out.followPadding) end = out.followPadding->endMs;
     } else if (rightFrac) {
-        end = static_cast<int64_t>(std::llround(nowCentre(in.liveAnchorMs, in.nextTfMs) + *rightFrac * double(span)));
+        end = static_cast<int64_t>(std::llround(nowCentre(in.nextLiveEndMs, in.nextTfMs) + *rightFrac * double(span)));
         anchorX = 1.0 - *rightFrac;
     }
     out.apply = true;
@@ -97,12 +97,12 @@ TimeframeSwitchInputs TimeframeSwitch::capture(int next) {
     controller_.session().timeframeMs = next;
     if (next > 0) activeTimeframe_(next);
     auto* view = controller_.viewPtr();
-    // Read the span BEFORE the new limits can clamp it. The 100 ms startup default
-    // does not yet describe the number of columns the user chose.
-    in.keepColumns = environment_.attached() && next > 0 && in.previousTfMs >= 1000 && view && view->isTimeWindowValid();
+    // Read the span BEFORE the new limits can clamp it.
+    in.keepColumns = environment_.attached() && next > 0 && in.previousTfMs > 0 && view && view->isTimeWindowValid();
     in.oldStart = in.keepColumns ? view->getVisibleTimeStart() : 0;
     in.oldEnd = in.keepColumns ? view->getVisibleTimeEnd() : 0;
-    in.liveAnchorMs = in.keepColumns ? environment_.liveAnchorMs() : 0;
+    in.previousLiveEndMs = LiveEdge::endMs(controller_.session(), environment_, in.previousTfMs);
+    in.nextLiveEndMs = LiveEdge::endMs(controller_.session(), environment_, in.nextTfMs);
     in.following = view && view->isAutoScrollEnabled();
     return in;
 }

@@ -40,7 +40,7 @@ set(_sentinel_fast_tests
     ChunkFetcherTests HeatmapSpanPlannerTests CandleHistoryCacheTests
     FrameStatsWindowTests TimeAxisMappingTests ChartRasterTests
     ChartViewControllerTests ChartCameraTests CandleIntervalTests CandleOverlayCpuTests
-    PriceFitterTests LivePlacementTests TimeframeCarryTests TimeframeSwitchTests
+    PriceFitterTests LiveEdgeTests LivePlacementTests TimeframeCarryTests TimeframeSwitchTests
     ZoomControllerTests ViewCommandsTests FrameProducerTests ChartLayersTests
     ChartLookSettingsTests LayerVisibilityTests ChartRenderSequenceTests
     GridViewStateTests CandleBackfillStateTests CandleDataSourceTests

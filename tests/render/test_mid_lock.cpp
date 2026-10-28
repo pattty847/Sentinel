@@ -52,6 +52,7 @@ struct MidLockTest : testing::Test {
     void SetUp() override {
         c.session().symbol = "TEST";
         c.session().timeframeMs = 1000;
+        c.session().lastTradeMs = 99999;
         view.setViewportSize(800, 400);
         view.setAutoPriceScale(false);
         view.enableAutoScroll(false);
@@ -233,6 +234,7 @@ TEST_F(MidLockTest, FollowLiveIsUnchangedByTheLock) {
     for (int i = 0; i < 4; ++i) frame();
     const double v = lock.velocity();
     ASSERT_GT(v, 0.0);
+    c.session().lastTradeMs = 149999;
     c.livePlacement().followGpuLiveTo(150000);
     EXPECT_GT(view.getVisibleTimeEnd(), 100000) << "follow still steps time";
     double last = centre();
@@ -245,12 +247,35 @@ TEST_F(MidLockTest, FollowLiveIsUnchangedByTheLock) {
     EXPECT_TRUE(view.isAutoScrollEnabled());
 }
 
+TEST_F(MidLockTest, SubMinuteTradesMoveTimeWhileThePriceSpringKeepsItsVelocity) {
+    view.enableAutoScroll(true);
+    c.livePlacement().onTrade("TEST", 100, 100000);
+    book(100);
+    lock.setEnabled(true);
+    book(110);
+    for (int i = 0; i < 4; ++i) frame();
+    const double velocity = lock.velocity(), previousCentre = centre();
+    const auto previousEnd = view.getVisibleTimeEnd();
+    c.livePlacement().onTrade("TEST", 100, 150000);
+    EXPECT_GT(view.getVisibleTimeEnd(), previousEnd);
+    EXPECT_DOUBLE_EQ(lock.velocity(), velocity);
+    EXPECT_DOUBLE_EQ(centre(), previousCentre);
+    frame();
+    EXPECT_GT(centre(), previousCentre);
+    settle();
+    EXPECT_DOUBLE_EQ(centre(), 110);
+    const int previousPolishes = polishes;
+    c.livePlacement().onTrade("TEST", 100, 160000);
+    EXPECT_FALSE(c.framePending());
+    EXPECT_EQ(polishes, previousPolishes) << "a time step must not wake the settled spring";
+}
+
 // D7: a one-sided or withdrawn book centres on the last trade; the next two-sided
 // top returns to the mid; the lock never drops.
 TEST_F(MidLockTest, OneSidedBookFallsBackToLastTradeThenReturnsToMid) {
     lock.setEnabled(true);
     book(100);
-    c.livePlacement().onTrade("TEST", 120);
+    c.livePlacement().onTrade("TEST", 120, 100000);
     EXPECT_FALSE(c.framePending()) << "two-sided: the mid wins";
     c.livePlacement().setLiveBookTop(99.5, 0); // the ask side is gone
     ASSERT_TRUE(c.framePending());
@@ -258,7 +283,7 @@ TEST_F(MidLockTest, OneSidedBookFallsBackToLastTradeThenReturnsToMid) {
     EXPECT_EQ(centre(), 120.0);
     EXPECT_TRUE(lock.enabled());
     c.livePlacement().setLiveBookTop(0, 0); // withdrawn
-    c.livePlacement().onTrade("TEST", 125);
+    c.livePlacement().onTrade("TEST", 125, 101000);
     settle();
     EXPECT_EQ(centre(), 125.0);
     book(104);

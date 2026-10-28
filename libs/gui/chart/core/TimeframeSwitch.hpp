@@ -7,7 +7,8 @@ class ChartViewController;
 class PublishedFrame;
 
 struct TimeframeSwitchInputs {
-    int64_t previousTfMs = 0, nextTfMs = 0, oldStart = 0, oldEnd = 0, liveAnchorMs = 0;
+    int64_t previousTfMs = 0, nextTfMs = 0, oldStart = 0, oldEnd = 0;
+    int64_t previousLiveEndMs = 0, nextLiveEndMs = 0;
     bool following = false, keepColumns = false;
     double maxTimeSpanMs = 0;
     chart_raster::RasterCamera drawnBefore;

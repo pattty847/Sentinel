@@ -58,7 +58,7 @@ public:
     void enableAutoScroll(bool enabled);
     void setLiveBookTop(double bestBid, double bestAsk);
     static bool matchesUtf8Product(QStringView symbol, std::string_view product);
-    void onTrade(const std::string& product, double price);
+    void onTrade(const std::string& product, double price, int64_t timeMs);
     void resize(double width);
     static int64_t liveEndCeil(int64_t x, int64_t tf);
 signals:
@@ -66,6 +66,8 @@ signals:
     void autoScrollEnabledChanged();
     void updateRequested();
 private:
+    int64_t initialLiveEndMs() const;
+    bool acceptTradeTime(int64_t timeMs);
     bool keepsFollowPadding(int64_t start, int64_t end, int64_t tf) const;
     bool shouldSeed(double bestBid, double bestAsk) const;
     static constexpr double kAutoScrollPaddingFrac = 0.08;

@@ -93,6 +93,7 @@ struct TimeframeCarryTest : testing::Test {
     void SetUp() override {
         c.session().symbol = "TEST";
         c.session().timeframeMs = 1000;
+        c.session().lastTradeMs = 4999;
         v.setViewportSize(800, 400);
         v.setAutoPriceScale(false);
         v.setViewport(0, 10000, 90, 110);
@@ -137,6 +138,7 @@ TEST_F(TimeframeCarryTest, HistoricalOrMissingAnchorKeepsEnd) {
         c.session().timeframeMs = 1000;
         v.setViewport(0, 10000, 90, 110);
         env.anchor = anchor;
+        c.session().lastTradeMs = anchor > 0 ? anchor - 1 : 0;
         f.setTimeframe(2000);
         window(-10000, 10000);
         EXPECT_DOUBLE_EQ(v.rasterAnchor().fracX, 1);
@@ -172,18 +174,19 @@ TEST_F(TimeframeCarryTest, FollowWithoutDrawnCameraOrLiveAnchor) {
     c.session().timeframeMs = 1000;
     v.setViewport(0, 10000, 90, 110);
     env.anchor = 0;
+    c.session().lastTradeMs = 0;
     f.setTimeframe(2000);
     window(-10000, 10000);
 }
-TEST_F(TimeframeCarryTest, StartupAndInvalidNextSkipColumns) {
+TEST_F(TimeframeCarryTest, HundredMillisecondViewKeepsColumnsAndInvalidNextSkips) {
     c.session().timeframeMs = 100;
     f.setTimeframe(2000);
-    window(0, 10000);
+    window(-94000, 106000);
     ASSERT_FALSE(f.events.empty());
-    EXPECT_EQ(f.events.front(), "immediate");
+    EXPECT_EQ(f.events.front(), "deferred");
     f.events.clear();
     f.setTimeframe(0);
-    window(0, 10000);
+    window(-94000, 106000);
     EXPECT_EQ(f.events, (std::vector<std::string>{"processor", "update", "changed"}));
 }
 TEST_F(TimeframeCarryTest, InvalidWindowSkipsColumnSolve) {

@@ -58,6 +58,7 @@ struct PriceFitterTest : testing::Test {
     void SetUp() override {
         controller.session().symbol = "TEST";
         controller.session().timeframeMs = 1000;
+        controller.session().lastTradeMs = 9999;
         view.setViewportSize(100, 100);
         view.setViewport(1000, 11000, 90, 110);
         view.setAutoPriceScale(true);
@@ -85,6 +86,7 @@ TEST_F(PriceFitterTest, LiveStepSolvesAutoPriceOnce) {
     });
     view.enableAutoScroll(true);
     env.anchor = 12000;
+    controller.session().lastTradeMs = 11999;
     const auto before = fitter.autoPriceSolveCountForTest();
     controller.commands().onHeatmapLive();
     const double lo = view.getMinPrice(), hi = view.getMaxPrice();
@@ -253,6 +255,7 @@ TEST_F(PriceFitterTest, TimeFitPaddingAndLimits) {
     env.oldest = 0;
     EXPECT_EQ(fitter.gpuFitTimeWindow(), fit);
     env.anchor = 0;
+    controller.session().lastTradeMs = 0;
     EXPECT_FALSE(fitter.gpuFitTimeWindow());
 }
 TEST_F(PriceFitterTest, NonWholeSecondIntervalsRemainMilliseconds) {
