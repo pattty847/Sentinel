@@ -59,6 +59,24 @@
 #include <stdexcept>
 #include <tuple>
 #include <vector>
+#include <cstdlib>
+#include <new>
+
+// Allocation counter for the lock-to-mid frame test (off unless a test turns it on).
+namespace {
+thread_local bool gCountAllocations = false;
+thread_local size_t gAllocations = 0;
+} // namespace
+void* operator new(std::size_t size) {
+    if (gCountAllocations) ++gAllocations;
+    if (void* p = std::malloc(size ? size : 1)) return p;
+    throw std::bad_alloc();
+}
+void* operator new[](std::size_t size) { return ::operator new(size); }
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
 
 namespace {
 using namespace synthetic_hmc2;
@@ -3876,6 +3894,34 @@ TEST_F(UgrWheelCpu, LockToMidPolishLoopRunsOnlyWhileMoving) {
     }
     EXPECT_EQ(v->getViewportVersion(), version);
     EXPECT_TRUE(chart.view()->lockToMid());
+}
+
+// The spring's frames through the production wiring (viewportChanged ->
+// onViewportChanged -> syncGpuView -> HeatmapChartPort -> HeatmapGpuLayer::setView):
+// a price-only move allocates nothing (no queued controller request).
+TEST_F(UgrWheelCpu, LockToMidFramesAllocateNothingThroughTheViewportSink) {
+    resetWheelView();
+    auto* v = chart.getViewState();
+    auto& controller = chart.view()->controller();
+    chart.view()->setLockToMid(true);
+    const double target = (v->getMinPrice() + v->getMaxPrice()) * 0.5 + 40;
+    controller.livePlacement().setLiveBookTop(target - 5, target + 5);
+    controller.advanceFrame(clock += 16); // the first frame outside the count
+    QCoreApplication::processEvents();
+    const auto version = v->getViewportVersion();
+    int frames = 0;
+    gAllocations = 0;
+    gCountAllocations = true;
+    while (controller.framePending() && frames < 200) {
+        controller.advanceFrame(clock += 16);
+        ++frames;
+    }
+    gCountAllocations = false;
+    QCoreApplication::processEvents();
+    EXPECT_GT(v->getViewportVersion(), version + 3) << "the frames wrote the window";
+    EXPECT_EQ(gAllocations, 0u) << "over " << frames << " frames";
+    EXPECT_DOUBLE_EQ((v->getMinPrice() + v->getMaxPrice()) * 0.5, target);
+    std::printf("lock to mid connected frames: %d, allocations %zu\n", frames, gAllocations);
 }
 
 TEST_F(UgrWheelCpu, InputRouterMacNotchAndTrackpadRouteDifferently) {

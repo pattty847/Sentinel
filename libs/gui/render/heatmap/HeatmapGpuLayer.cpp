@@ -163,10 +163,14 @@ void HeatmapGpuLayer::setTimeframeMs(int64_t tfMs) {
 
 void HeatmapGpuLayer::setView(const ViewWindow &view, bool priceKnown) {
     if (hasView_ && view == view_ && priceKnown == priceKnown_) return;
+    // The controller's request carries only symbol, timeframe and time bounds: a
+    // price-only move (lock to mid, a price zoom) invalidates the view, posts nothing.
+    const bool timeChanged = !hasView_ || view.timeLoMs != view_.timeLoMs || view.timeHiMs != view_.timeHiMs;
     hasView_ = true;
     view_ = view;
     priceKnown_ = priceKnown;
-    viewChanged();
+    ++viewSerial_;
+    if (timeChanged) postView();
 }
 
 void HeatmapGpuLayer::setSurface(double widthPx, double heightPx, double dpr) {

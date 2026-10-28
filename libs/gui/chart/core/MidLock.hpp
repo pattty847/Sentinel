@@ -23,7 +23,7 @@ public:
     // Critically damped spring, angular frequency per second: about 0.3 s to cover
     // 90% of a step (the owner A/Bs the feel).
     static constexpr double kStiffnessPerSec = 14.0;
-    static constexpr double kDeadBandDevicePx = 0.5;
+    static constexpr double kDeadBandDevicePx = 0.5; // of the drawn camera's device pixels
     static constexpr qint64 kFirstStepMs = 16;  // a step that starts the spring from rest
     static constexpr qint64 kMaxStepMs = 50;    // a stalled frame does not jump the picture
 
@@ -48,6 +48,7 @@ signals:
     void polishRequested();
 
 private:
+    void wake();
     bool held() const;
     void adoptStoredWindow();
     double deadBand(double span) const;

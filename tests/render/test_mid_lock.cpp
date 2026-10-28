@@ -86,6 +86,15 @@ struct MidLockTest : testing::Test {
         while (frame() && n < maxFrames) ++n;
         return n;
     }
+    // Does a mid move of d from a settled centre wake the spring? (Back to rest after.)
+    bool wakesBy(double d) {
+        const double base = centre();
+        book(base + d);
+        const bool woke = c.framePending();
+        book(base);
+        settle();
+        return woke;
+    }
 };
 
 // CE-4 (1): enabling turns the auto price scale off and keeps the placement (no
@@ -312,6 +321,67 @@ TEST_F(MidLockTest, D2PinchZoomsSpanAndSettlesAboutTheLockedCentre) {
     EXPECT_LT(span(), span0);
 }
 
+// A chart zoom anchors at the drawn centre, which pixel rounding can move off the
+// committed one: the lock re-centres without waiting for a book or trade update.
+TEST_F(MidLockTest, ChartZoomResumesTheLockWithoutAMarketUpdate) {
+    for (int route = 0; route < 3; ++route) {
+        lock.setEnabled(false);
+        view.setViewport(0, 100000, 50.12, 150.12); // committed centre 0.48 device px off the drawn rows
+        lock.setEnabled(true);
+        book(100.12); // the mid is there: the lock is at rest
+        settle();
+        ASSERT_EQ(centre(), 100.12);
+        ASSERT_FALSE(c.framePending());
+        if (route == 0) c.zoom().wheelZoom(120, true, 0, false, 600, 40, true, true, chart::ZoomController::WheelRoute::Chart);
+        if (route == 1) c.zoom().wheelZoom(120, true, 0, false, 600, 40, false, true, chart::ZoomController::WheelRoute::Chart); // Shift+wheel
+        if (route == 2) {
+            c.zoom().zoomContinuousFor(1.3, 600, 40, true, true, chart::ZoomController::kGestureSafetyMs);
+            c.zoom().endZoomGesture(); // the settle commits the rung
+        }
+        ASSERT_LT(span(), 100.0) << "route " << route;
+        settle(); // no book or trade event
+        EXPECT_EQ(centre(), 100.12) << "route " << route << ": back on the unchanged mid";
+        EXPECT_TRUE(lock.enabled());
+    }
+}
+
+// The dead band is half a DRAWN device pixel (the camera's whole rows at its tick,
+// hysteresis included), not half a pixel of the stored window's scale.
+TEST_F(MidLockTest, DeadBandFollowsTheDrawnRows) {
+    lock.setEnabled(true);
+    const double s36 = 400 / 3.6; // 3.6 px per row stored: the camera draws 4
+    view.setViewport(0, 100000, 100 - s36 / 2, 100 + s36 / 2);
+    book(100);
+    settle();
+    ASSERT_EQ(c.camera().restCameraNow(false).rowPx, 4);
+    EXPECT_TRUE(wakesBy(0.13)) << "0.13 > half a drawn pixel (0.125)";
+    EXPECT_FALSE(wakesBy(0.12));
+    // Hysteresis: 4.55 px per row stays 4 coming from 4 and 5 coming from 5.
+    const double s455 = 400 / 4.55;
+    const int col = c.camera().restCameraNow(false).colPx;
+    for (int previous : {4, 5}) {
+        lock.setEnabled(false);
+        view.setViewport(0, 100000, 100 - s455 / 2, 100 + s455 / 2);
+        lock.setEnabled(true);
+        published.setStep({previous, col});
+        ASSERT_EQ(c.camera().restCameraNow(false).rowPx, previous);
+        EXPECT_EQ(wakesBy(0.115), previous == 5) << "from " << previous << ": band " << 0.5 / previous;
+    }
+    published.setStep({});
+    // Tick 0.3 at 100 price on 400 px: 1.2 px per row draws 1 (band 0.15, stored 0.125).
+    lock.setEnabled(false);
+    view.setViewport(0, 100000, 50, 150);
+    lock.setEnabled(true);
+    env.tick = 0.3;
+    EXPECT_FALSE(wakesBy(0.14));
+    EXPECT_TRUE(wakesBy(0.16));
+    // DPR 2: 800 device px, 8 per row of 1: band 0.0625.
+    env.tick = 1;
+    env.size.dpr = 2;
+    EXPECT_TRUE(wakesBy(0.07));
+    EXPECT_FALSE(wakesBy(0.06));
+}
+
 // D3: price-axis wheel, drag and clicks release the lock, then zoom price as before.
 TEST_F(MidLockTest, D3PriceAxisRoutesReleaseTheLock) {
     for (int route = 0; route < 3; ++route) {
@@ -341,6 +411,13 @@ TEST_F(MidLockTest, D4PricePansAndExplicitBoundsReleaseTheLock) {
     lock.setEnabled(true);
     c.commands().setViewport(0, 100000, 60, 90);
     EXPECT_FALSE(lock.enabled());
+    lock.setEnabled(true);
+    int notices = 0;
+    QObject::connect(&lock, &chart::MidLock::enabledChanged, &lock, [&] { ++notices; });
+    c.commands().setViewport(view.getVisibleTimeStart(), view.getVisibleTimeEnd(), view.getMinPrice(), view.getMaxPrice());
+    EXPECT_FALSE(lock.enabled()) << "equal explicit bounds are the user's price too (QML view.setViewport)";
+    EXPECT_EQ(notices, 1);
+    EXPECT_FALSE(c.snapshot().lockMid);
     lock.setEnabled(true);
     chart::ViewportRequest request;
     request.priceMin = 70;

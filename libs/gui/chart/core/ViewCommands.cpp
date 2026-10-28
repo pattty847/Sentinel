@@ -188,12 +188,13 @@ void ViewCommands::setViewport(qint64 timeStart, qint64 timeEnd,
     // seed replaces it.
     controller_.flags().markPriceKnown();
     controller_.priceFitter().priceCarry().reset();
+    controller_.midLock().release("explicit viewport"); // the user's price, equal or not
   }
   if (controller_.viewPtr() && (priceMin != controller_.viewPtr()->getMinPrice() ||
                       priceMax != controller_.viewPtr()->getMaxPrice())) {
-    // An explicit price range turns follow-live, the auto price scale and the lock to
-    // mid off (before the viewport moves: the auto fit would replace it).
-    releasePrice("explicit viewport");
+    // A changed explicit price range turns follow-live and the auto price scale off
+    // (before the viewport moves: the auto fit would replace it).
+    controller_.viewPtr()->setAutoPriceScale(false);
     controller_.viewPtr()->enableAutoScroll(false);
   }
   anchorExplicitViewport(timeStart, timeEnd, priceMin, priceMax);

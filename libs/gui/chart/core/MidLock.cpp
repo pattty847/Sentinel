@@ -15,6 +15,20 @@ MidLock::MidLock(ChartViewController& controller, IChartEnvironment& environment
     connect(controller_.viewPtr(), &GridViewState::autoPriceScaleChanged, this, [this] {
         if (controller_.viewPtr()->autoPriceScale()) release("auto price scale");
     });
+    // Another route committed a price window (a chart zoom about the drawn centre, a
+    // gesture's settle, a timeframe switch): the spring re-evaluates it without
+    // waiting for the market (the lock's own writes and time-only moves do not wake it).
+    connect(controller_.viewPtr(), &GridViewState::viewportChanged, this, [this] {
+        const auto* view = controller_.viewPtr();
+        if (view->getMinPrice() != writtenLo_ || view->getMaxPrice() != writtenHi_) wake();
+    });
+}
+
+void MidLock::wake() {
+    if (!enabled_ || moving_) return;
+    moving_ = true;
+    lastMs_ = -1;
+    emit polishRequested();
 }
 
 void MidLock::setEnabled(bool on) {
@@ -48,6 +62,10 @@ std::optional<double> MidLock::target() const {
 }
 
 double MidLock::deadBand(double span) const {
+    // Half a drawn device pixel: the camera's whole pixels per row at its tick
+    // (hysteresis included). Before a camera exists, the stored window's scale.
+    if (const auto cam = controller_.camera().restCameraNow(false); cam.valid && cam.rowPx > 0 && cam.tick > 0)
+        return kDeadBandDevicePx * cam.tick / double(cam.rowPx);
     const auto size = environment_.surface();
     const double heightDev = size.heightLogical * size.dpr;
     return heightDev > 0 ? kDeadBandDevicePx * span / heightDev : 0.0;
@@ -60,9 +78,7 @@ void MidLock::targetChanged() {
     if (!goal) return;
     const double lo = view->getMinPrice(), hi = view->getMaxPrice();
     if (std::abs(*goal - (lo + hi) * 0.5) <= deadBand(hi - lo)) return;
-    moving_ = true;
-    lastMs_ = -1;
-    emit polishRequested();
+    wake();
 }
 
 bool MidLock::held() const {
@@ -131,8 +147,10 @@ void MidLock::write() {
     auto* view = controller_.viewPtr();
     const double lo = centre_ - span_ * 0.5, hi = centre_ + span_ * 0.5;
     if (lo == view->getMinPrice() && hi == view->getMaxPrice()) return;
+    writtenLo_ = lo; // the change this write emits is the lock's own (no wake)
+    writtenHi_ = hi;
     controller_.setGpuViewportSelf(view->getVisibleTimeStart(), view->getVisibleTimeEnd(), lo, hi, true);
-    writtenLo_ = view->getMinPrice();
+    writtenLo_ = view->getMinPrice(); // after any span clamp
     writtenHi_ = view->getMaxPrice();
 }
 
