@@ -25,9 +25,16 @@ seven products. Documentation index: [docs/README.md](docs/README.md).
 
 ## Screenshots
 
-The image at the top is from 2026-10-27: hours of recorded BTC-USD heatmap history with candles,
-and the Order Book dock in cumulative (Σ) mode with Pulse, Lean and grouped rows. The two below were
-captured with a March 2026 build, and their controls have changed since.
+The clip at the top is from 2026-10-28: BTC-USD live, with dollar size labels on the heatmap and
+the Order Book dock updating in real time. The still under it is from 2026-10-27: hours of recorded
+heatmap history with candles, and the Order Book dock in cumulative (Σ) mode with Pulse, Lean and
+grouped rows.
+
+![TPO profiles: three days of BTC-USD on 15m candles with 24h TPO sessions in collapsed mode, one letter per period coloured by time, beside the Order Book dock](docs/assets/readme/tpo-2026-10-28.png)
+
+TPO (2026-10-28): 24-hour sessions over 15m candles in collapsed mode. Each letter is one time
+period at that price, coloured by when it printed. The two below were captured with a March 2026
+build, and their controls have changed since.
 
 | Stock Chart with SEC insider signals | Screener |
 | --- | --- |
