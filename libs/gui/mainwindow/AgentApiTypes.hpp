@@ -106,6 +106,7 @@ struct StateSnapshot {
     std::optional<bool> tpoLayer;
     std::optional<bool> volumeProfileLayer;
     std::optional<bool> ladderLayer;
+    std::optional<bool> wallRadarLayer;
     std::optional<QString> tpoLayout;
     std::optional<QString> tpoTheme;
 };

@@ -54,6 +54,8 @@ TEST(AgentApiControls, BodiesAndBounds) {
     EXPECT_EQ(check("/api/v1/layers", R"({"tpoTheme":true})").status, 422);
     EXPECT_EQ(check("/api/v1/layers", R"({"ladder":true})").body.layers.size(), 1);
     EXPECT_EQ(check("/api/v1/layers", R"({"ladder":"on"})").status, 422);
+    EXPECT_EQ(check("/api/v1/layers", R"({"wallRadar":true})").body.layers.size(), 1);
+    EXPECT_EQ(check("/api/v1/layers", R"({"wallRadar":"on"})").status, 422);
 }
 
 TEST(AgentApiControls, PostParserAndWaitValidation) {
@@ -254,8 +256,12 @@ TEST(AgentApiCodec, EnvelopeAndUnknowns) {
     EXPECT_EQ(received.value("volumeProfile").toInteger(), 13);
     EXPECT_TRUE(data.value("layers").toObject().value("heatmap").isNull());
     EXPECT_TRUE(data.value("layers").toObject().value("ladder").isNull());
+    EXPECT_TRUE(data.value("layers").toObject().value("wallRadar").isNull());
     s.ladderLayer = true;
     EXPECT_TRUE(stateJson(s).value("data").toObject().value("layers").toObject().value("ladder").toBool());
+    EXPECT_FALSE(stateJson(s).value("data").toObject().value("layers").toObject().value("wallRadar").toBool());
+    s.wallRadarLayer = true;
+    EXPECT_TRUE(stateJson(s).value("data").toObject().value("layers").toObject().value("wallRadar").toBool());
     EXPECT_TRUE(data.value("render").toObject().value("frameP50Ms").isNull());
     EXPECT_TRUE(data.value("lastSubscriptionRefusal").isNull());
     s.lastSubscriptionRefusal = {{"symbol", "ETH-USD"}, {"maxConnections", 8}, {"message", "cap reached"}};

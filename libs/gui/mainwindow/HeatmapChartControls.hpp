@@ -90,6 +90,9 @@ private:
     void applyLadderSettings();
     void requestLadder(bool on);
     void requestLadderWidth(int px);
+    // Turning the radar on also turns the ladder on (one click shows the walls).
+    void requestWallRadar(bool on);
+    void requestWallMultiple(double multiple);
     void buildChartMenu();
 
     heatmap::HeatmapSettingsModel *m_model = nullptr;
@@ -103,5 +106,12 @@ private:
     qint64 m_shownUnits = -1;
     double m_shownScale = 0;
     bool m_shownManual = false;
-    std::optional<std::pair<bool, int>> m_appliedLadder; // showLadder, ladderWidthPx last applied to the layers
+    struct AppliedLadder {
+        bool showLadder = false;
+        int ladderWidthPx = 0;
+        bool showWallRadar = false;
+        double wallMultiple = 0;
+        bool operator==(const AppliedLadder &) const = default;
+    };
+    std::optional<AppliedLadder> m_appliedLadder; // the ladder settings last applied to the layers
 };

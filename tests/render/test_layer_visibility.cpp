@@ -106,4 +106,32 @@ TEST(LayerVisibility, LadderIsIndependentAndReservesItsStripOnlyWhenOn) {
     EXPECT_EQ(layers.ladderWidthPx(), chart::LayerVisibility::kLadderMaxWidthPx);
     EXPECT_EQ(chart::LayerVisibility::kLadderWidthPx, 120);
 }
+
+// The wall radar is independent of the primary field and the ladder flag; its threshold clamps.
+TEST(LayerVisibility, WallRadarIsIndependentAndItsMultipleClamps) {
+    chart::LayerVisibility layers;
+    Events events;
+    layers.report = [&](std::string_view name, bool enabled, bool) { events.emplace_back(std::string(name) + (enabled ? "+" : "-")); };
+    int changes = 0;
+    QObject::connect(&layers, &chart::LayerVisibility::layerVisibilityChanged, [&] { ++changes; });
+    EXPECT_FALSE(layers.wallRadarEnabled());
+    EXPECT_DOUBLE_EQ(layers.wallMultiple(), 4);
+    layers.setWallRadarEnabled(true);
+    EXPECT_TRUE(layers.property("wallRadarEnabled").toBool());
+    EXPECT_FALSE(layers.ladderEnabled()) << "the layer flag does not turn the ladder on";
+    layers.setPrimaryField(2);
+    EXPECT_TRUE(layers.wallRadarEnabled());
+    layers.setLayerEnabled("wallRadar", false);
+    EXPECT_FALSE(layers.wallRadarEnabled());
+    EXPECT_EQ(events, (std::vector<std::string>{"wallRadar+", "primaryField-", "wallRadar-"}));
+    changes = 0;
+    layers.setWallMultiple(0.5);
+    EXPECT_DOUBLE_EQ(layers.wallMultiple(), chart::LayerVisibility::kWallMinMultiple);
+    layers.setWallMultiple(100);
+    EXPECT_DOUBLE_EQ(layers.property("wallMultiple").toDouble(), chart::LayerVisibility::kWallMaxMultiple);
+    layers.setWallMultiple(std::nan(""));
+    layers.setWallMultiple(chart::LayerVisibility::kWallMaxMultiple);
+    EXPECT_DOUBLE_EQ(layers.wallMultiple(), 20);
+    EXPECT_EQ(changes, 2) << "only real changes notify";
+}
 } // namespace

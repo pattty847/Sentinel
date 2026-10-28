@@ -75,6 +75,7 @@ void accumulateSide(bool isBid, const std::vector<double>& levels,
 
 void LiveOrderBook::initialize(double min_price, double max_price, double tick_size) {
     std::lock_guard<std::mutex> lock(m_mutex);
+    ++m_epoch;
 
     m_tick_size = tick_size;
     m_min_price = min_price;
@@ -110,6 +111,7 @@ void LiveOrderBook::initialize(double min_price, double max_price, double tick_s
 
 void LiveOrderBook::clear() {
     std::lock_guard<std::mutex> lock(m_mutex);
+    ++m_epoch;
     m_bids.clear();
     m_asks.clear();
     m_bidPresent.clear();

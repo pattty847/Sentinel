@@ -508,6 +508,30 @@ TEST(LevelTracker, FlickersRequireAnObservedDisappearanceAndRestartAge)
     EXPECT_EQ(tracker.level(0, Side::Bid).seenForMs, 9);
 }
 
+TEST(LevelTracker, SinceLastFlickerIsUnsetUntilAFlickerAndSurvivesAScroll)
+{
+    LevelTracker tracker({.flickerWindowMs = 100});
+    Input input{{{10, 0}}};
+    tracker.update(input.at(0));
+    EXPECT_EQ(tracker.level(0, Side::Bid).sinceLastFlickerMs, -1);
+    input.rows[0].bid = 0;
+    tracker.update(input.at(10));
+    EXPECT_EQ(tracker.level(0, Side::Bid).sinceLastFlickerMs, -1) << "a disappearance is no flicker";
+    input.rows[0].bid = 10;
+    tracker.update(input.at(50));
+    ASSERT_EQ(tracker.level(0, Side::Bid).flickers, 1u);
+    EXPECT_EQ(tracker.level(0, Side::Bid).sinceLastFlickerMs, 0);
+    tracker.update(input.at(80));
+    EXPECT_EQ(tracker.level(0, Side::Bid).sinceLastFlickerMs, 30);
+    input.first = 99; // the price 100 moves to row 1
+    input.rows = {{0, 0}, {10, 0}};
+    tracker.update(input.at(120));
+    EXPECT_EQ(tracker.level(1, Side::Bid).flickers, 1u);
+    EXPECT_EQ(tracker.level(1, Side::Bid).sinceLastFlickerMs, 70);
+    EXPECT_EQ(tracker.level(0, Side::Bid).sinceLastFlickerMs, -1);
+    EXPECT_EQ(tracker.level(0, Side::Ask).sinceLastFlickerMs, -1);
+}
+
 TEST(LevelTracker, ShiftPreservesOverlappingAgeButUnobservedReturnsStartFresh)
 {
     LevelTracker tracker;

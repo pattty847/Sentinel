@@ -67,17 +67,35 @@ void HeatmapChartControls::setRenderer(UnifiedGridRenderer *renderer) {
 void HeatmapChartControls::applyLadderSettings() {
     if (!m_renderer) return;
     const auto &s = m_model->settings();
-    const std::pair<bool, int> want{s.showLadder, s.ladderWidthPx};
+    const AppliedLadder want{s.showLadder, s.ladderWidthPx, s.showWallRadar, s.wallMultiple};
     if (m_appliedLadder == want) return;
     m_appliedLadder = want;
-    m_renderer->layers()->setLadderWidthPx(s.ladderWidthPx);
-    m_renderer->layers()->setLayerEnabled("ladder", s.showLadder);
+    auto *layers = m_renderer->layers();
+    layers->setLadderWidthPx(s.ladderWidthPx);
+    layers->setWallMultiple(s.wallMultiple);
+    layers->setLayerEnabled("wallRadar", s.showWallRadar);
+    layers->setLayerEnabled("ladder", s.showLadder);
 }
 
 void HeatmapChartControls::requestLadder(bool on) {
     if (m_renderer) m_renderer->layers()->setLayerEnabled("ladder", on); // also when the setting already says so
     if (const auto error = m_model->apply({{"showLadder", on}}); !error.isEmpty())
         sLog_Warning("Ladder toggle rejected: " << error);
+}
+
+void HeatmapChartControls::requestWallRadar(bool on) {
+    if (m_renderer) { // also when the settings already say so
+        m_renderer->layers()->setLayerEnabled("wallRadar", on);
+        if (on) m_renderer->layers()->setLayerEnabled("ladder", true);
+    }
+    QJsonObject patch{{"showWallRadar", on}};
+    if (on) patch["showLadder"] = true;
+    if (const auto error = m_model->apply(patch); !error.isEmpty()) sLog_Warning("Wall radar toggle rejected: " << error);
+}
+
+void HeatmapChartControls::requestWallMultiple(double multiple) {
+    if (const auto error = m_model->apply({{"wallMultiple", multiple}}); !error.isEmpty())
+        sLog_Warning("Wall threshold rejected: " << error);
 }
 
 void HeatmapChartControls::requestLadderWidth(int px) {
@@ -165,6 +183,7 @@ constexpr SizePreset kLabelSizes[] = {{"Small (12-15 px)", 12, 15}, {"Medium (14
                                       {"Large (16-20 px)", 16, 20}};
 const char *kCandleStyles[] = {"Candle", "Hollow", "Line"};
 constexpr int kLadderWidths[] = {60, 90, 120, 180, 240};
+constexpr double kWallMultiples[] = {2, 3, 4, 6, 8};
 } // namespace
 
 void HeatmapChartControls::buildChartMenu() {
@@ -234,6 +253,21 @@ void HeatmapChartControls::buildChartMenu() {
         a->setCheckable(true);
         a->setData(px);
         ladderGroup->addAction(a);
+    }
+    QAction *radar = add(menu, "Wall radar", "chartMenuWallRadar", [this] {
+        requestWallRadar(!(m_renderer && m_renderer->layers()->wallRadarEnabled()));
+    });
+    radar->setCheckable(true);
+    radar->setToolTip("Mark bins at or above the wall threshold; point at walls outside the window");
+    QMenu *wallMultiple = menu->addMenu("Wall threshold");
+    wallMultiple->setObjectName("chartMenuWallMultiple");
+    auto *wallGroup = new QActionGroup(wallMultiple);
+    for (double multiple : kWallMultiples) {
+        QAction *a = add(wallMultiple, QString("%1x side median").arg(multiple), "chartMenuWallMultiplePreset",
+                         [this, multiple] { requestWallMultiple(multiple); });
+        a->setCheckable(true);
+        a->setData(multiple);
+        wallGroup->addAction(a);
     }
     QAction *labels = add(menu, "Liquidity labels", "chartMenuLabels", [this] {
         requestLabels(!m_model->settings().showLabels);
@@ -312,6 +346,11 @@ void HeatmapChartControls::refreshChartMenu() {
             a->setEnabled(bool(m_renderer));
         } else if (name == "chartMenuLadderWidthPreset") {
             a->setChecked(s.ladderWidthPx == a->data().toInt());
+        } else if (name == "chartMenuWallRadar") {
+            a->setChecked(m_renderer && m_renderer->layers()->wallRadarEnabled());
+            a->setEnabled(bool(m_renderer));
+        } else if (name == "chartMenuWallMultiplePreset") {
+            a->setChecked(s.wallMultiple == a->data().toDouble());
         }
         else if (name == "chartMenuCurrencyUsd") a->setChecked(s.labelCurrency == "usd");
         else if (name == "chartMenuCurrencyAsset") a->setChecked(s.labelCurrency == "asset");

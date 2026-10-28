@@ -743,6 +743,71 @@ TEST(LadderControls, ChartMenuToggleAndWidthPersistAndReachTheLayers) {
     EXPECT_EQ(next.layers()->ladderWidthPx(), 240);
 }
 
+TEST(LadderControls, WallRadarTurnsTheLadderOnAndItsThresholdPersistsAndClamps) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    EXPECT_FALSE(model.settings().showWallRadar);
+    EXPECT_DOUBLE_EQ(model.settings().wallMultiple, 4);
+    UnifiedGridRenderer renderer;
+    TopToolbar toolbar;
+    HeatmapChartControls controls(&model);
+    controls.setRenderer(&renderer);
+    controls.setToolbar(&toolbar);
+    QAction *radar = nullptr;
+    QAction *six = nullptr;
+    int presets = 0;
+    for (QAction *a : toolbar.chartMenu()->findChildren<QAction *>()) {
+        if (a->objectName() == "chartMenuWallRadar") radar = a;
+        if (a->objectName() == "chartMenuWallMultiplePreset") {
+            ++presets;
+            if (a->data().toDouble() == 6) six = a;
+        }
+    }
+    ASSERT_TRUE(radar && six);
+    EXPECT_EQ(presets, 5);
+    EXPECT_FALSE(renderer.layers()->wallRadarEnabled()) << "off by default";
+    EXPECT_FALSE(renderer.layers()->ladderEnabled());
+    radar->trigger();
+    EXPECT_TRUE(renderer.layers()->wallRadarEnabled());
+    EXPECT_TRUE(renderer.layers()->ladderEnabled()) << "one click shows the walls";
+    EXPECT_TRUE(t.reload().showWallRadar);
+    EXPECT_TRUE(t.reload().showLadder);
+    six->trigger();
+    EXPECT_DOUBLE_EQ(renderer.layers()->wallMultiple(), 6);
+    EXPECT_DOUBLE_EQ(t.reload().wallMultiple, 6);
+    controls.refreshChartMenu();
+    EXPECT_TRUE(radar->isChecked());
+    EXPECT_TRUE(six->isChecked());
+    ASSERT_TRUE(model.apply({{"wallMultiple", 100}}).isEmpty());
+    EXPECT_DOUBLE_EQ(model.settings().wallMultiple, 20);
+    EXPECT_DOUBLE_EQ(renderer.layers()->wallMultiple(), 20);
+    EXPECT_FALSE(model.apply({{"wallMultiple", "x"}}).isEmpty());
+    EXPECT_FALSE(model.apply({{"showWallRadar", 1}}).isEmpty());
+    // The ladder off keeps the radar setting (inactive until the ladder is back).
+    QAction *ladder = nullptr;
+    for (QAction *a : toolbar.chartMenu()->findChildren<QAction *>())
+        if (a->objectName() == "chartMenuLadder") ladder = a;
+    ASSERT_TRUE(ladder);
+    ladder->trigger();
+    EXPECT_FALSE(renderer.layers()->ladderEnabled());
+    EXPECT_TRUE(renderer.layers()->wallRadarEnabled());
+    EXPECT_TRUE(t.reload().showWallRadar);
+    ladder->trigger();
+    // A second chart gets both on attach.
+    UnifiedGridRenderer next;
+    HeatmapSettingsModel reloaded(t.store, "main", t.config);
+    HeatmapChartControls nextControls(&reloaded);
+    nextControls.setRenderer(&next);
+    EXPECT_TRUE(next.layers()->wallRadarEnabled());
+    EXPECT_TRUE(next.layers()->ladderEnabled());
+    EXPECT_DOUBLE_EQ(next.layers()->wallMultiple(), 20);
+    // Turning the radar off leaves the ladder on.
+    radar->trigger();
+    EXPECT_FALSE(renderer.layers()->wallRadarEnabled());
+    EXPECT_TRUE(renderer.layers()->ladderEnabled());
+    EXPECT_FALSE(t.reload().showWallRadar);
+}
+
 TEST(HeatmapSettingsModelTest, NamedWorkspacesRestoreButLastSessionNever) {
     TempStore t;
     HeatmapSettingsModel model(t.store, "main", t.config);
