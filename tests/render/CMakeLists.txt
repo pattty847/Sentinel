@@ -360,6 +360,12 @@ target_link_libraries(test_ZoomController PRIVATE GTest::gtest_main sentinel_cha
 add_test(NAME ZoomControllerTests COMMAND test_ZoomController)
 set_tests_properties(ZoomControllerTests PROPERTIES LABELS "render;fast")
 
+add_executable(test_MidLock test_mid_lock.cpp)
+target_include_directories(test_MidLock PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_MidLock PRIVATE GTest::gtest_main sentinel_chart_core Qt6::Core)
+add_test(NAME MidLockTests COMMAND test_MidLock)
+set_tests_properties(MidLockTests PROPERTIES LABELS "render;fast")
+
 add_executable(test_ViewCommands test_view_commands.cpp)
 target_include_directories(test_ViewCommands PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
 target_link_libraries(test_ViewCommands PRIVATE GTest::gtest_main sentinel_chart_core Qt6::Core)

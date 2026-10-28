@@ -132,6 +132,29 @@ TEST_F(CommandsTest, RequestFlags) {
         "0:100000:0x1.9p+5:0x1.2cp+7:0x1p-1:0x1.8p-1:5:001000000:0x0p+0:0x0p+0:sink,update,|"
     );
 }
+// Lock to mid and the auto price scale are exclusive through the request flags.
+TEST_F(CommandsTest, LockMidRequestAndAutoScaleExcludeEachOther) {
+    v.setAutoPriceScale(true);
+    Request lockOn;
+    lockOn.lockMid = true;
+    EXPECT_TRUE(c.applyViewportRequest(lockOn).isEmpty());
+    EXPECT_TRUE(c.midLock().enabled());
+    EXPECT_FALSE(v.autoPriceScale());
+    EXPECT_TRUE(c.snapshot().lockMid);
+    Request autoOn;
+    autoOn.autoScale = true;
+    EXPECT_TRUE(c.applyViewportRequest(autoOn).isEmpty());
+    EXPECT_TRUE(v.autoPriceScale());
+    EXPECT_FALSE(c.midLock().enabled());
+    EXPECT_FALSE(c.snapshot().lockMid);
+    c.applyViewportRequest(lockOn);
+    Request lockOff;
+    lockOff.lockMid = false;
+    c.applyViewportRequest(lockOff);
+    EXPECT_FALSE(c.midLock().enabled());
+    EXPECT_FALSE(v.autoPriceScale()) << "turning the lock off leaves the auto price scale off";
+}
+
 TEST_F(CommandsTest, RequestWindows) {
     Request r; r.startMs = 1000; EXPECT_TRUE(cmd.applyViewportRequest(r).isEmpty()); snap();
     r = {}; r.endMs = 95000; r.priceMin = 75; EXPECT_TRUE(cmd.applyViewportRequest(r).isEmpty()); snap();

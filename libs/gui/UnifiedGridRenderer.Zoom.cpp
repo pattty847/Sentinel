@@ -9,6 +9,7 @@ void UnifiedGridRenderer::bindZoomGlide() {
   connect(&glide, &chart::ZoomGlide::rasterChanged, this, &UnifiedGridRenderer::rasterChanged, Qt::DirectConnection);
   connect(&glide, &chart::ZoomGlide::viewportChanged, view(), &chart::ChartViewQml::viewportChanged, Qt::DirectConnection);
   connect(&glide, &chart::ZoomGlide::polishRequested, this, [this] { polish(); }, Qt::DirectConnection);
+  connect(&m_view->midLock(), &chart::MidLock::polishRequested, this, [this] { polish(); }, Qt::DirectConnection);
   connect(&glide, &chart::ZoomGlide::updateRequested, this, [this] { update(); }, Qt::DirectConnection);
 }
 
@@ -33,14 +34,13 @@ void UnifiedGridRenderer::connectCameraChanged(QObject* context, std::function<v
 
 void UnifiedGridRenderer::updatePolish() {
   QQuickItem::updatePolish();
-  if (zoomGliding()) m_view->advanceFrame(zoomNowMs());
-  if (!zoomGliding()) return;
+  if (m_view->framePending()) m_view->advanceFrame(zoomNowMs());
+  if (!m_view->framePending()) return;
   if (!m_clock.glidePolish) {
-    m_clock.glidePolish = new QTimer(this);
+    m_clock.glidePolish = new QTimer(this); // interval 0: the next event loop pass
     m_clock.glidePolish->setSingleShot(true);
-    m_clock.glidePolish->setInterval(0);
     connect(m_clock.glidePolish, &QTimer::timeout, this, [this] {
-      if (zoomGliding()) {
+      if (m_view->framePending()) {
         polish();
         update();
       }

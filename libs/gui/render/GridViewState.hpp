@@ -62,6 +62,10 @@ public:
     std::pair<qint64, qint64> displayedTimeWindow() const;
     // Does not touch the viewport (the caller refits through setViewport).
     void setAutoPriceScale(bool enabled);
+    // A view policy (lock to mid) owns price: chart drags move time only, as under
+    // the auto price scale. Does not touch the viewport.
+    void setPriceLocked(bool locked) { m_priceLocked = locked; }
+    bool priceLocked() const { return m_priceLocked; }
     // Whole-pixel chart mapping (render/ChartRaster.hpp). The raster anchor is the
     // view point (fractions of the width from the left and of the height from the
     // top) that keeps its screen position when the drawn pixels per row or column
@@ -117,6 +121,7 @@ private:
     
     bool m_autoScrollEnabled = true;
     bool m_autoPriceScale = false;
+    bool m_priceLocked = false;
     PriceFit m_priceFit;
     PanShift m_panShift;
     RasterAnchor m_rasterAnchor{1.0, 0.5}; // follow-live (the default) anchors the view end

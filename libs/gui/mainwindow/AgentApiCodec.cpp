@@ -442,6 +442,9 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
             } else if (key == "autoScale") {
                 if (!v.isBool()) return reject("invalid_auto_scale", "autoScale must be boolean");
                 result.body.autoScale = v.toBool();
+            } else if (key == "lockMid") {
+                if (!v.isBool()) return reject("invalid_lock_mid", "lockMid must be boolean");
+                result.body.lockMid = v.toBool();
             } else if (key == "fit") {
                 static const QStringList kFits{"time", "price", "both", "default"};
                 if (!v.isString() || !kFits.contains(v.toString()))
@@ -488,8 +491,10 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
             return reject("invalid_range", "Price bounds must increase");
         if (b.followLive.value_or(false) && (b.startMs || b.priceMin))
             return reject("invalid_range", "Bounds cannot enable followLive");
-        if (!b.fit.isEmpty() && (b.startMs || b.priceMin || b.followLive || b.autoScale))
-            return reject("invalid_fit", "fit cannot be combined with bounds, followLive or autoScale");
+        if (!b.fit.isEmpty() && (b.startMs || b.priceMin || b.followLive || b.autoScale || b.lockMid))
+            return reject("invalid_fit", "fit cannot be combined with bounds, followLive, autoScale or lockMid");
+        if (b.lockMid.value_or(false) && (b.priceMin || b.autoScale.value_or(false)))
+            return reject("invalid_lock_mid", "Price bounds or autoScale cannot enable lockMid");
         if (b.autoScale.value_or(false) && b.priceMin)
             return reject("invalid_auto_scale", "Price bounds cannot enable autoScale");
     }
@@ -583,6 +588,7 @@ QJsonObject viewportJson(const ViewportSnapshot& s) {
         {"priceMin", number(s.priceMin)}, {"priceMax", number(s.priceMax)},
         {"heatmapTimeframeMs", integer(s.heatmapTimeframeMs)}, {"candleTimeframeMs", integer(s.candleTimeframeMs)},
         {"followLive", boolean(s.followLive)}, {"autoScale", boolean(s.autoScale)},
+        {"lockMid", boolean(s.lockMid)},
         {"viewportVersion", s.viewportVersion ? QJsonValue(QString::number(*s.viewportVersion)) : QJsonValue(QJsonValue::Null)},
         {"widthPx", number(s.widthPx)}, {"heightPx", number(s.heightPx)},
         {"zoom", QJsonObject{{"msPerPx", number(msPerPx)}, {"pricePerPx", number(pricePerPx)}}},

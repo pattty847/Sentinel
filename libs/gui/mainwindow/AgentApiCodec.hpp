@@ -22,6 +22,7 @@ struct ControlBody {
     std::optional<double> priceMin, priceMax;
     std::optional<bool> followLive;
     std::optional<bool> autoScale; // viewport: the auto price scale toggle
+    std::optional<bool> lockMid; // viewport: lock to mid (exclusive with autoScale:true and price bounds)
     QString fit; // viewport: "time" | "price" | "both" | "default", exclusive with bounds/followLive/autoScale
     QJsonObject layers;
     QJsonObject dockVisible;

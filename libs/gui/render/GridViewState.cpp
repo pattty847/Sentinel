@@ -144,7 +144,7 @@ void GridViewState::handlePanMove(const QPointF& position) {
     if (!m_isDragging) return;
     
     QPointF delta = position - m_lastMousePos;
-    if (m_autoPriceScale) delta.setY(0.0); // auto price scale: no vertical pan
+    if (m_autoPriceScale || m_priceLocked) delta.setY(0.0); // price owned by a policy: no vertical pan
     m_panVisualOffset += delta;
     m_lastMousePos = position;
     

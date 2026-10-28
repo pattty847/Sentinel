@@ -19,6 +19,12 @@ void ViewCommands::setAutoPriceScale(bool enabled) {
   if (!fitView(false, true)) controller_.viewPtr()->setAutoPriceScale(true);
 }
 
+void ViewCommands::releasePrice(const char* reason) {
+  if (!controller_.viewPtr()) return;
+  controller_.viewPtr()->setAutoPriceScale(false);
+  controller_.midLock().release(reason);
+}
+
 bool ViewCommands::fitView(bool time, bool price) {
   controller_.zoomGlide().land();
   if (fitUnavailable(time, price)) {
@@ -88,10 +94,12 @@ bool ViewCommands::resolveFlags(const ViewportRequest& request) {
   const bool explicitTime = request.startMs && request.endMs;
   // The flags first (no viewport change of their own), then one commit.
   if (explicitPrice) {
-    controller_.viewPtr()->setAutoPriceScale(false); // explicit bounds are the user's price, equal or not
+    releasePrice("explicit price bounds"); // the user's price, equal or not
     controller_.priceFitter().priceCarry().reset();
-  } else if (request.autoScale) {
-    controller_.viewPtr()->setAutoPriceScale(*request.autoScale);
+  } else {
+    // autoScale:true releases the lock; lockMid:true turns the auto price scale off.
+    if (request.autoScale) controller_.viewPtr()->setAutoPriceScale(*request.autoScale);
+    if (request.lockMid) controller_.midLock().setEnabled(*request.lockMid);
   }
   const bool follow = (explicitTime || explicitPrice) ? false : request.followLive.value_or(controller_.viewPtr()->isAutoScrollEnabled());
   controller_.viewPtr()->enableAutoScroll(follow);
@@ -180,11 +188,12 @@ void ViewCommands::setViewport(qint64 timeStart, qint64 timeEnd,
     // seed replaces it.
     controller_.flags().markPriceKnown();
     controller_.priceFitter().priceCarry().reset();
+    controller_.midLock().release("explicit viewport"); // the user's price, equal or not
   }
   if (controller_.viewPtr() && (priceMin != controller_.viewPtr()->getMinPrice() ||
                       priceMax != controller_.viewPtr()->getMaxPrice())) {
-    // An explicit price range turns follow-live and the auto price scale off (before
-    // the viewport moves: the auto fit would replace it).
+    // A changed explicit price range turns follow-live and the auto price scale off
+    // (before the viewport moves: the auto fit would replace it).
     controller_.viewPtr()->setAutoPriceScale(false);
     controller_.viewPtr()->enableAutoScroll(false);
   }
@@ -264,6 +273,7 @@ void ViewCommands::panRight() {
 
 void ViewCommands::panUp() {
   if (controller_.viewPtr()) {
+    controller_.midLock().release("keyboard price pan"); // the auto price scale ignores it
     controller_.viewPtr()->panUp();
     emit updateRequested();
   }
@@ -271,6 +281,7 @@ void ViewCommands::panUp() {
 
 void ViewCommands::panDown() {
   if (controller_.viewPtr()) {
+    controller_.midLock().release("keyboard price pan");
     controller_.viewPtr()->panDown();
     emit updateRequested();
   }
