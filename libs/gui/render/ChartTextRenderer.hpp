@@ -57,6 +57,7 @@ private:
     bool canAccept(int glyphCount, Priority priority);
 
     QSGNode* m_root = nullptr;
+    bool m_inFrame = false; // between beginFrame and endFrame (reserve is allowed only then)
     QQuickWindow* m_window = nullptr;
     const ChartTextAtlas* m_atlas = nullptr;
     std::vector<Bucket> m_buckets;

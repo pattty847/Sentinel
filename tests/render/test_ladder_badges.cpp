@@ -638,6 +638,34 @@ TEST(LadderBadgesGpu, AReservedNodeZeroesItsTailThroughTheRenderer) {
     poison(*node);
     text.endFrame(); // the colour is unused this frame
     EXPECT_TRUE(zeroFrom(*node, 0, 1000));
+
+    // Outside a frame (after endFrame, after a root recreation before the next
+    // beginFrame) reserve refuses and changes nothing.
+    const auto unchanged = [&](const char* when) {
+        SCOPED_TRACE(when);
+        const int capacity = text.nodeCapacityGlyphs(), textures = text.textureCount();
+        const size_t bytes = text.capacityBytes();
+        const int children = root.firstChild()->childCount();
+        EXPECT_FALSE(text.reserve(QColor(Qt::blue), 2000));
+        EXPECT_FALSE(text.reserve(QColor(Qt::red), 4000));
+        EXPECT_EQ(text.nodeCapacityGlyphs(), capacity);
+        EXPECT_EQ(text.textureCount(), textures);
+        EXPECT_EQ(text.capacityBytes(), bytes);
+        EXPECT_EQ(root.firstChild()->childCount(), children);
+    };
+    unchanged("after endFrame");
+    text.beginFrame(&root, scene.window(), atlas());
+    text.endFrame();
+    unchanged("after a second frame");
+    text.onRootRebuilt();
+    QSGNode root2;
+    root2.appendChildNode(text.createRoot());
+    EXPECT_FALSE(text.reserve(QColor(Qt::blue), 2000)) << "a new root before beginFrame";
+    EXPECT_EQ(root2.firstChild()->childCount(), 0);
+    EXPECT_EQ(text.nodeCapacityGlyphs(), 0);
+    text.beginFrame(&root2, scene.window(), atlas());
+    EXPECT_TRUE(text.reserve(QColor(Qt::blue), 2000)) << "inside the next frame";
+    text.endFrame();
 }
 } // namespace
 

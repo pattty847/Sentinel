@@ -26,6 +26,7 @@ float envFloatOrDefault(const char* name, float fallback) {
 
 void ChartTextRenderer::onRootRebuilt() {
     m_root = nullptr;
+    m_inFrame = false;
     m_debugNode = nullptr;
     for (Bucket& bucket : m_buckets) {
         bucket.node = nullptr;
@@ -42,6 +43,7 @@ QSGNode* ChartTextRenderer::createRoot() {
 void ChartTextRenderer::beginFrame(QSGNode* parentNode, QQuickWindow* window, const ChartTextAtlas& atlas) {
     m_window = window;
     m_atlas = &atlas;
+    m_inFrame = true;
     m_usedGlyphs = 0;
     m_droppedGlyphs = 0;
     m_droppedHighGlyphs = 0;
@@ -118,6 +120,7 @@ void ChartTextRenderer::submitGlyphs(const std::vector<ChartGlyphInstance>& glyp
 }
 
 void ChartTextRenderer::endFrame() {
+    m_inFrame = false; // every exit below ends the frame
     if (!m_root || !m_window || !m_atlas || !m_atlas->isBuilt()) {
         return;
     }
@@ -168,7 +171,7 @@ void ChartTextRenderer::prepareNode(Bucket& bucket, const ShaderParams& params) 
 }
 
 bool ChartTextRenderer::reserve(const QColor& color, int glyphs) {
-    if (!m_root || !m_window || !m_atlas || !m_atlas->isBuilt() || glyphs <= 0) {
+    if (!m_inFrame || !m_root || !m_window || !m_atlas || !m_atlas->isBuilt() || glyphs <= 0) {
         return false;
     }
     Bucket* bucket = findOrCreateBucket(color);
