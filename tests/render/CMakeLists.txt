@@ -336,6 +336,12 @@ target_link_libraries(test_PriceFitter PRIVATE GTest::gtest_main sentinel_chart_
 add_test(NAME PriceFitterTests COMMAND test_PriceFitter)
 set_tests_properties(PriceFitterTests PROPERTIES LABELS "render;fast")
 
+add_executable(test_LiveEdge test_live_edge.cpp)
+target_include_directories(test_LiveEdge PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_LiveEdge PRIVATE GTest::gtest_main sentinel_chart_core Qt6::Core)
+add_test(NAME LiveEdgeTests COMMAND test_LiveEdge)
+set_tests_properties(LiveEdgeTests PROPERTIES LABELS "render;fast")
+
 add_executable(test_LivePlacement test_live_placement.cpp)
 target_include_directories(test_LivePlacement PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
 target_link_libraries(test_LivePlacement PRIVATE GTest::gtest_main sentinel_chart_core Qt6::Core)

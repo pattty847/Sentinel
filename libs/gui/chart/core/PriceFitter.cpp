@@ -1,4 +1,5 @@
 #include "chart/core/PriceFitter.hpp"
+#include "chart/core/LiveEdge.hpp"
 #include "chart/core/ChartViewController.hpp"
 #include "chart/core/CandleInterval.hpp"
 #include "SentinelLogging.hpp"
@@ -20,21 +21,19 @@ PriceFitter::PriceFitter(ChartViewController& controller, IChartEnvironment& env
     : controller_(controller), environment_(environment), ticks_(ticks) {}
 
 qint64 PriceFitter::gpuLiveEndMs(qint64 spanMs) const {
-  const int64_t anchor = environment_.attached() ? environment_.liveAnchorMs() : 0;
   const int64_t tf = controller_.session().timeframeMs;
-  if (anchor <= 0 || tf <= 0) return 0;
-  const int64_t liveEnd = recording::floorDiv(anchor + tf - 1, tf) * tf;
+  const int64_t liveEnd = LiveEdge::endMs(controller_.session(), environment_, tf);
+  if (liveEnd <= 0) return 0;
   return liveEnd + std::max<int64_t>(tf, static_cast<int64_t>(static_cast<double>(spanMs) * kAutoScrollPaddingFrac));
 }
 
 std::optional<std::pair<qint64, qint64>> PriceFitter::gpuFitTimeWindow() const {
   const int64_t tf = std::max<int64_t>(1, controller_.session().timeframeMs);
-  const int64_t anchor = environment_.liveAnchorMs();
-  if (anchor <= 0) return std::nullopt;
+  const int64_t dataEnd = LiveEdge::endMs(controller_.session(), environment_, tf);
+  if (dataEnd <= 0) return std::nullopt;
   int64_t oldest = environment_.oldestAvailableMs();
   if (oldest <= 0 && candles_)
     oldest = candles_->oldestTimeMs(controller_.session().symbol, tf);
-  const int64_t dataEnd = recording::floorDiv(anchor + tf - 1, tf) * tf; // the live bucket's end
   const int64_t dataStart = oldest > 0 ? recording::floorDiv(oldest, tf) * tf : 0;
   const double maxTime = controller_.viewPtr()->maxTimeSpanMs();
   const int64_t maxSpan = maxTime > 0 ? std::max<int64_t>(1, static_cast<int64_t>(std::floor(maxTime))) : INT64_MAX / 4;

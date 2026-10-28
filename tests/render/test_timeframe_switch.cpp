@@ -9,7 +9,7 @@ namespace {
 chart::TimeframeSwitchInputs inputs() {
     chart::TimeframeSwitchInputs in;
     in.previousTfMs = 1000; in.nextTfMs = 2000;
-    in.oldStart = 0; in.oldEnd = 10000; in.liveAnchorMs = 5000;
+    in.oldStart = 0; in.oldEnd = 10000; in.previousLiveEndMs = 5000; in.nextLiveEndMs = 6000;
     in.keepColumns = true;
     in.nominalLiveEnd = [](int64_t) { return 8000; };
     in.restAt = [](int64_t end, int64_t span) {
@@ -42,7 +42,7 @@ TEST(TimeframeSwitchPlan, ManualDrawnAndStoredFractions) {
     in.drawnBefore.valid = false;
     p = chart::planTimeframeSwitch(in);
     EXPECT_EQ(p.end, 16000);
-    in.liveAnchorMs = 20000;
+    in.previousLiveEndMs = 20000;
     EXPECT_EQ(chart::planTimeframeSwitch(in).end, 10000);
     in.drawnBefore.valid = true;
     EXPECT_EQ(chart::planTimeframeSwitch(in).end, 10000);
