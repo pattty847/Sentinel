@@ -573,7 +573,8 @@ TEST(MainWindowHealthIntegration, NewPublicationAndCapacityRefusalDoNotClaimRend
 TEST(MainWindowHealthIntegration, LocalHostPolicyRefusalClearsOptimisticRailPendingWithoutCatalogClaim) {
     struct HostScope {
         ~HostScope() {
-            AgentHostMode::resetForTests();
+            AgentHostMode::resetForTests(); // also resets the default format to native (the owner's plist)
+            QSettings::setDefaultFormat(QSettings::IniFormat); // later tests stay on the isolated INI files
             QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, isolatedSettingsPath);
             QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, isolatedSettingsPath);
         }
