@@ -11,6 +11,8 @@
 //              records before midnight and the day end, inside invalid periods, warmup, right
 //              after snapshot resets) the recorder and C are exported to bytes, destroyed and
 //              re-imported in process before replay resumes.
+//     cost     C attached with its output discarded (no file, no row check): the
+//              recorder worker's CPU with C, against null, for paired cost runs.
 //   levelstore_replay compare A_OUT B_OUT REPORT.json
 //     Compares two level.bin files completely: the day image, every minute block (messages
 //     and changes), every derived per-level run (start, end, size), every observation
@@ -457,13 +459,13 @@ int main(int argc, char **argv) {
             return result.at("pass").get<bool>() ? 0 : 3;
         }
         if (argc != 7) {
-            std::cerr << "usage: levelstore_replay RAW OUT PRODUCT YYYY-MM-DD null|level|restore REPORT.json\n"
+            std::cerr << "usage: levelstore_replay RAW OUT PRODUCT YYYY-MM-DD null|level|restore|cost REPORT.json\n"
                          "       levelstore_replay compare A_OUT B_OUT REPORT.json\n";
             return 2;
         }
         const fs::path raw = fs::canonical(argv[1]), out = argv[2];
         const std::string product = argv[3], mode = argv[5];
-        if (mode != "null" && mode != "level" && mode != "restore") throw std::runtime_error("bad mode");
+        if (mode != "null" && mode != "level" && mode != "restore" && mode != "cost") throw std::runtime_error("bad mode");
         if (fs::exists(out) && !fs::is_empty(out)) throw std::runtime_error("OUT_ROOT must be new or empty");
         fs::create_directories(out / "hmc2");
         const auto source = raw.string() + "/", dest = fs::canonical(out).string() + "/";
@@ -491,7 +493,18 @@ int main(int argc, char **argv) {
         std::map<std::string, uint64_t> restoreKinds;
         std::string pendingKind;
         uint64_t restoreFailures = 0;
-        if (mode != "null") {
+        struct Discard final : LevelOutput {
+            void onDayStart(const DayBinding &, const BookImage &) override {}
+            void onBlock(const DayBinding &, const MinuteBlock &) override {}
+        } discard;
+        if (mode == "cost") {
+            o.levelOutput = &discard;
+            o.onLevelRecorder = [&](LevelRecorder *c) {
+                if (!c && current) finalStats = current->stats();
+                current = c;
+            };
+        }
+        if (mode == "level" || mode == "restore") {
             file = std::make_unique<BlockFile>(out / "level.bin");
             file->onImage = [&](const DayBinding &, const BookImage &image) { layers.image = image; };
             file->onMinute = [&](const MinuteBlock &b) { layers.onBlock(b); };
@@ -601,6 +614,9 @@ int main(int argc, char **argv) {
                        {"processCpuMs", processCpuMs() - cpu0}, {"workerCpuMs", workerNs / 1e6},
                        {"recorderStats", recorderStats}, {"roll", report}};
         bool pass = recorderStats.value("diskErrors", 1) == 0;
+        if (mode == "cost")
+            result["level"] = {{"stats", {{"messages", finalStats.messages}, {"changes", finalStats.changes},
+                                          {"blocks", finalStats.blocks}, {"failures", finalStats.failures}}}};
         if (file) {
             const auto &s = finalStats;
             result["level"] = {{"images", file->images}, {"blocks", file->blocks}, {"fileBytes", file->bytes},
