@@ -40,6 +40,9 @@ public:
     // 16K IDs cover many 100-trade reconnect snapshots while capping per-product memory.
     static constexpr size_t TradeIdWindowCapacity = 16'384;
     size_t retainedTradeIds() const { return tradeIds_.size(); }
+    // Sequence number of the frame being applied (inside a callback) or last
+    // applied; 0 when none. Diagnostics only (RecorderSink LevelChange::sequence).
+    uint64_t sequence() const { return sequence_.value_or(0); }
     // Read-only view of the retained nonempty IDs (at most the window capacity);
     // copy it to keep it past further apply() calls.
     const std::unordered_set<std::string>& tradeIds() const { return tradeIds_; }
@@ -60,6 +63,9 @@ private:
     };
     std::vector<PendingTrade> frameTrades_; // Reuse storage across frames.
     bool rememberTradeId(const std::string& id);
+    static void attachUpdateDecimals(const nlohmann::json& event, std::vector<recording::Level>& levels);
+    static void attachSnapshotDecimals(const nlohmann::json& event, std::vector<recording::Level>& levels,
+                                       size_t bidCount);
     void invalid(int64_t local, const std::string& reason);
 };
 } // namespace sentinel::roller

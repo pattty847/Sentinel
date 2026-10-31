@@ -62,6 +62,32 @@ std::optional<uint64_t> numericTradeId(const std::string& id) {
     return value;
 }
 }
+// Additive decimal identity: the double price and every parse decision above
+// stay exactly as dispatch::parseSnapshot/parseUpdates made them. These passes
+// only read each kept level's price text again and attach its exact decimal.
+void JournalFeed::attachUpdateDecimals(const nlohmann::json& event, std::vector<recording::Level>& levels) {
+    // parseUpdates succeeded: one level per update, in order, each with a string price.
+    const auto& updates = event["updates"];
+    for (size_t i = 0; i < levels.size(); ++i)
+        levels[i].decimal = recording::parsePriceDecimal(updates[i].find("price_level")->get_ref<const std::string&>());
+}
+void JournalFeed::attachSnapshotDecimals(const nlohmann::json& event, std::vector<recording::Level>& levels,
+                                         size_t bidCount) {
+    // parseSnapshot kept the levels with size > 0 and split them by side in input
+    // order; repeat exactly that selection with the same level parser.
+    size_t bid = 0, ask = bidCount;
+    for (const auto& update : event["updates"]) {
+        bool isBid; double price, size;
+        if (!dispatch::parseLevel(update, isBid, price, size) || !(size > 0)) continue;
+        const size_t at = isBid ? bid++ : ask++;
+        if (at >= levels.size() || levels[at].isBid != isBid || levels[at].price != price) {
+            // Unreachable while parseSnapshot keeps its selection; never guess an identity.
+            for (auto& l : levels) l.decimal = {};
+            return;
+        }
+        levels[at].decimal = recording::parsePriceDecimal(update.find("price_level")->get_ref<const std::string&>());
+    }
+}
 bool JournalFeed::rememberTradeId(const std::string& id) {
     // Missing IDs cannot identify a repeat; opaque nonempty IDs still dedupe.
     if (id.empty()) return true;
@@ -143,6 +169,7 @@ void JournalFeed::apply(const JournalRecord& input) {
                         levels.reserve(bids.size() + asks.size());
                         for (const auto& l : bids) levels.push_back({true,l.price,l.size});
                         for (const auto& l : asks) levels.push_back({false,l.price,l.size});
+                        attachSnapshotDecimals(event, levels, bids.size());
                         if (onSnapshot) {
                             try { onSnapshot(envelope, local, std::move(levels)); }
                             catch (const std::exception& e) { throw std::logic_error(e.what()); }
@@ -154,6 +181,7 @@ void JournalFeed::apply(const JournalRecord& input) {
                         if (!anchored_ || updates.empty()) continue;
                         levels.reserve(updates.size());
                         for (const auto& l : updates) levels.push_back({l.isBid,l.price,l.quantity});
+                        attachUpdateDecimals(event, levels);
                         if (onUpdates) {
                             try { onUpdates(envelope, local, std::move(levels)); }
                             catch (const std::exception& e) { throw std::logic_error(e.what()); }

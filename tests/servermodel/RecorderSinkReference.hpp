@@ -7,6 +7,7 @@
 #include "servermodel/RecordingCodec.hpp"
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -19,6 +20,17 @@
 #include <vector>
 
 namespace recording::sinkref {
+
+// Production levels carry their price text (JournalFeed). Test levels built from
+// doubles get the shortest fixed-notation text that round-trips to the same double.
+inline std::vector<Level> withPriceText(std::vector<Level> levels) {
+    for (auto &l : levels) {
+        char buf[64];
+        const auto r = std::to_chars(buf, buf + sizeof buf, l.price, std::chars_format::fixed);
+        l.decimal = r.ec == std::errc{} ? parsePriceDecimal(std::string_view(buf, size_t(r.ptr - buf))) : PriceDecimal{};
+    }
+    return levels;
+}
 
 class ReferenceConsumer final : public RecorderSink {
   public:
@@ -45,7 +57,7 @@ class ReferenceConsumer final : public RecorderSink {
     struct Counts {
         uint64_t resets = 0, levels = 0, applied = 0, invalid = 0, upstreamInvalid = 0, minutes = 0,
                  offGrid = 0, outsideDomain = 0, runsClosed = 0, suspensions = 0, resumptions = 0, validations = 0,
-                 minutesNotStored = 0;
+                 minutesNotStored = 0, inexactDecimal = 0;
     };
 
     bool keepRuns = false;
@@ -62,7 +74,9 @@ class ReferenceConsumer final : public RecorderSink {
         clearBook(b, clock);
     }
     void onImprecise(const std::string &, int64_t, const LevelChange &c) noexcept override {
-        ++(c.precision == Precision::OutsideDomain ? counts.outsideDomain : counts.offGrid);
+        if (c.precision == Precision::OutsideDomain) ++counts.outsideDomain;
+        else if (c.precision == Precision::OffGrid) ++counts.offGrid;
+        if (c.identity != DecimalIdentity::Exact) ++counts.inexactDecimal;
     }
     void onLevel(const std::string &symbol, int64_t clock, const LevelChange &c) noexcept override {
         auto &b = at(symbol, clock);

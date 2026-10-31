@@ -101,8 +101,8 @@ class RecorderSinkTest : public testing::Test {
     static void feed(BookRecorder &r, const Step &s) {
         const int64_t local = kEpoch + (s.local < 0 ? s.t : s.local);
         switch (s.kind) {
-        case Step::Snap: r.onSnapshotAt(kSym, kEpoch + s.t, local, s.levels); break;
-        case Step::Upd: r.onUpdatesAt(kSym, kEpoch + s.t, local, s.levels); break;
+        case Step::Snap: r.onSnapshotAt(kSym, kEpoch + s.t, local, sinkref::withPriceText(s.levels)); break;
+        case Step::Upd: r.onUpdatesAt(kSym, kEpoch + s.t, local, sinkref::withPriceText(s.levels)); break;
         case Step::Inv: r.onInvalid(kSym, local, "disconnect"); break;
         case Step::Tick: r.onTick(local); break;
         }
@@ -323,14 +323,14 @@ TEST_F(RecorderSinkTest, ForkLeadDoesNotCopyTheSink) {
     auto c = config(dirOn.path().toStdString());
     c.sink = &tee;
     BookRecorder rec(c);
-    rec.onSnapshotAt(kSym, kEpoch, kEpoch, kBook);
+    rec.onSnapshotAt(kSym, kEpoch, kEpoch, sinkref::withPriceText(kBook));
     auto lead = rec.forkLead([](std::shared_ptr<const Hmc2Record>) {}, 500);
     const auto before = tee.log.size();
-    lead->onUpdatesAt(kSym, kEpoch + 1'000, kEpoch + 1'000, {{true, 99, 8}});
+    lead->onUpdatesAt(kSym, kEpoch + 1'000, kEpoch + 1'000, sinkref::withPriceText({{true, 99, 8}}));
     lead->onTick(kEpoch + 2 * kMin);
     lead->drainForTest();
     EXPECT_EQ(tee.log.size(), before);
-    rec.onUpdatesAt(kSym, kEpoch + 1'000, kEpoch + 1'000, {{true, 99, 8}});
+    rec.onUpdatesAt(kSym, kEpoch + 1'000, kEpoch + 1'000, sinkref::withPriceText({{true, 99, 8}}));
     rec.drainForTest();
     EXPECT_EQ(tee.log.size(), before + 2);
 }
@@ -488,7 +488,7 @@ TEST_F(RecorderSinkTest, ForkLeadDoesNotCopyTheFinalisationFault) {
         if (bucket == kEpoch && failures-- > 0) throw std::runtime_error("injected finalisation failure");
     };
     BookRecorder rec(c);
-    rec.onSnapshotAt(kSym, kEpoch, kEpoch, kBook);
+    rec.onSnapshotAt(kSym, kEpoch, kEpoch, sinkref::withPriceText(kBook));
     rec.drainForTest();
     auto lead = rec.forkLead([](std::shared_ptr<const Hmc2Record>) {}, 500);
     lead->onTick(kEpoch + 65'000);

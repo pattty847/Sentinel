@@ -1,0 +1,548 @@
+#include "LevelRecorder.hpp"
+#include "Crc32.hpp"
+#include "SentinelLogging.hpp"
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <stdexcept>
+
+// Lifecycle (each case is handled at the place named here and tested in
+// tests/levelstore/test_level_recorder.cpp):
+// - Day recreation and midnight: roll() creates one LevelRecorder per UTC day with
+//   its history recorder (Roller.cpp makeLevel) and destroys it after that recorder.
+//   Output covers [floorMs, ceilingMs); the day's recorder runs on past the ceiling
+//   for its lateness tail, and those minutes are dropped here (onMinute): the next
+//   day's own recorder and LevelRecorder rebuild them from that day's warmup.
+// - Warmup: the recorder replays from the snapshot before the floor. Those events
+//   build C's book but their minutes are not output (onMinute). The day starts
+//   (startDay: one BookImage at floorMs) at the first minute end or event at or
+//   after the floor.
+// - Restore: exportState/importState below, at the recorder's drained checkpoint.
+//   The restored state includes the unfinished minute, the book, the recorder's
+//   validity and observation and any unobserved episode, so a restore during an
+//   invalid period, right after a reset, during warmup or at midnight continues
+//   exactly as without it.
+// - Snapshot resets (onReset): every level not re-sent ends, the rest continue
+//   unchanged if their size did not change (diffed in endMessage).
+// - Observation-invalid periods (onInvalid): every level ends (the recorder cleared
+//   its book) and nothing is observed; updates while invalid never reach the sink.
+// - forkLead: the lead recorder has no sink (BookRecorder::forkLead), so speculative
+//   live replay never reaches C.
+// - Unsupported prices (INTERIM fail-closed policy, owner 2026-10-31; revisit if real
+//   data shows unacceptable gaps): a price whose decimal identity is not Exact
+//   (finer than the product scale, a tick change to a finer tick, outside the domain,
+//   or no plain decimal text) is never rounded or merged here. From that message C
+//   records a clear and is unobserved until a snapshot whose prices are ALL exact and
+//   that the recorder applies as a valid book (onApplied valid after onReset). A
+//   snapshot with an unrepresentable price keeps or starts the episode. Earlier data
+//   stays; HMC2 is unaffected (it keeps its rounding). Recovery of the lost interval
+//   is an offline rebuild from RAWL2 once such prices are supported.
+
+namespace sentinel::levelstore {
+namespace {
+using recording::DecimalIdentity;
+constexpr int64_t kMinute = 60'000;
+constexpr size_t kMaxSymbol = 256;
+constexpr uint8_t kMagic[4] = {'L', 'S', 'C', '1'};
+void require(bool ok, const char *what) {
+    if (!ok) throw std::runtime_error(what);
+}
+} // namespace
+
+const char *unobservedName(LevelRecorder::Unobserved u) noexcept {
+    switch (u) {
+    case LevelRecorder::Unobserved::None: return "none";
+    case LevelRecorder::Unobserved::Unsupported: return "unsupported-price";
+    case LevelRecorder::Unobserved::Failed: return "failed";
+    case LevelRecorder::Unobserved::RestoreRefused: return "restore-refused";
+    }
+    return "?";
+}
+
+std::string decimalText(const recording::RecorderSink::LevelChange &level) {
+    char buf[96];
+    if (!level.decimal.exact) {
+        std::snprintf(buf, sizeof buf, "<no plain decimal text> price=%.17g", level.price);
+        return buf;
+    }
+    std::string digits = std::to_string(static_cast<uint64_t>(level.decimal.digits));
+    const size_t fraction = level.decimal.fraction;
+    if (fraction == 0) return digits;
+    if (digits.size() <= fraction) digits.insert(0, fraction - digits.size() + 1, '0');
+    digits.insert(digits.size() - fraction, 1, '.');
+    return digits;
+}
+
+LevelRecorder::LevelRecorder(DayBinding binding, LevelOutput *output)
+    : binding_(std::move(binding)), output_(output) {
+    if (!output_ || binding_.ceilingMs <= binding_.floorMs || binding_.floorMs % kMinute != 0)
+        throw std::invalid_argument("LevelRecorder: invalid binding or output");
+    touched_.reserve(1024);
+}
+
+bool LevelRecorder::mine(const std::string &symbol) noexcept {
+    if (symbol == binding_.symbol) return true;
+    ++stats_.foreignEvents;
+    return false;
+}
+
+void LevelRecorder::begin(int64_t clock) {
+    if (clock < lastClock_) throw std::logic_error("clock regression");
+    lastClock_ = clock;
+    if (!dayStarted_ && clock >= binding_.floorMs) startDay();
+    if (inMessage_) return;
+    inMessage_ = true;
+    if (++serial_ == 0) { // wrapped: no slot may keep a stale touch mark
+        for (auto &side : book_)
+            for (auto &[_, slot] : side) slot.touched = 0;
+        serial_ = 1;
+    }
+    messageReset_ = messageUnsupported_ = false;
+    touched_.clear();
+    levelsBefore_ = liveLevels();
+}
+
+// Warmup ends here: the first BookImage is C's state at the floor instant (nothing
+// changes between the last earlier event and the floor). Earlier minutes are dropped.
+void LevelRecorder::startDay() {
+    dayStarted_ = true;
+    open_.messages.clear();
+    open_.changes.clear();
+    open_.damaged = false;
+    open_.observedAtStart = observed_;
+    output_->onDayStart(binding_, BookImage{binding_.floorMs, observed_, book()});
+}
+
+void LevelRecorder::touch(bool isBid, int64_t units, double size) {
+    auto [it, added] = book_[isBid].try_emplace(units);
+    Slot &slot = it->second;
+    if (slot.touched != serial_) {
+        touched_.push_back({isBid, units, added ? 0.0 : slot.size});
+        slot.touched = serial_;
+    }
+    slot.size = size;
+}
+
+void LevelRecorder::unsupported(const LevelChange &level, int64_t clock) {
+    if (messageUnsupported_) return;
+    messageUnsupported_ = true;
+    if (unobserved_ == Unobserved::Unsupported) return; // the episode continues: logged at its start
+    ++stats_.unsupportedEpisodes;
+    sLog_Warning("levelstore: unsupported price, product unobserved until a valid exact snapshot symbol="
+                 << binding_.symbol << " decimal=" << decimalText(level)
+                 << " identity=" << recording::identityName(level.identity) << " side=" << (level.isBid ? "bid" : "ask")
+                 << " exchangeMs=" << level.envelopeMs << " sequence=" << level.sequence << " clock=" << clock
+                 << " priceDigits=" << binding_.priceDigits);
+}
+
+void LevelRecorder::onReset(const std::string &symbol, int64_t clock) noexcept {
+    if (!mine(symbol)) return;
+    try {
+        begin(clock);
+        messageReset_ = true;
+        // Every current level ends unless the snapshot re-sends it (diffed in endMessage).
+        // While unobserved the book is empty: the snapshot rebuilds it from nothing.
+        for (bool isBid : {true, false})
+            for (auto &[units, slot] : book_[isBid]) {
+                if (slot.touched != serial_) {
+                    touched_.push_back({isBid, units, slot.size});
+                    slot.touched = serial_;
+                }
+                slot.size = 0;
+            }
+    } catch (const std::exception &e) {
+        fail(e.what(), clock);
+    } catch (...) {
+        fail("unknown exception", clock);
+    }
+}
+
+void LevelRecorder::onImprecise(const std::string &symbol, int64_t clock, const LevelChange &level) noexcept {
+    if (!mine(symbol)) return;
+    try {
+        begin(clock);
+        if (level.identity == DecimalIdentity::Exact) return; // the double was judged OffGrid/Outside only
+        ++stats_.unsupportedPrices;
+        unsupported(level, clock);
+    } catch (const std::exception &e) {
+        fail(e.what(), clock);
+    } catch (...) {
+        fail("unknown exception", clock);
+    }
+}
+
+void LevelRecorder::onLevel(const std::string &symbol, int64_t clock, const LevelChange &level) noexcept {
+    if (!mine(symbol)) return;
+    try {
+        begin(clock);
+        if (level.identity != DecimalIdentity::Exact) { // counted in onImprecise, which precedes it
+            unsupported(level, clock);
+            return;
+        }
+        if (messageUnsupported_) return; // this message's state is not representable
+        if (unobserved_ != Unobserved::None && !messageReset_) return; // book unknown until a valid exact snapshot
+        touch(level.isBid, level.units, level.size);
+    } catch (const std::exception &e) {
+        fail(e.what(), clock);
+    } catch (...) {
+        fail("unknown exception", clock);
+    }
+}
+
+void LevelRecorder::onApplied(const std::string &symbol, int64_t clock, bool valid, bool observing) noexcept {
+    if (!mine(symbol)) return;
+    try {
+        begin(clock);
+        endMessage(clock, valid, observing, false);
+    } catch (const std::exception &e) {
+        fail(e.what(), clock);
+    } catch (...) {
+        fail("unknown exception", clock);
+    }
+}
+
+void LevelRecorder::onInvalid(const std::string &symbol, int64_t clock, const std::string &, bool) noexcept {
+    if (!mine(symbol)) return;
+    try {
+        begin(clock);
+        endMessage(clock, false, false, true);
+    } catch (const std::exception &e) {
+        fail(e.what(), clock);
+    } catch (...) {
+        fail("unknown exception", clock);
+    }
+}
+
+void LevelRecorder::endMessage(int64_t clock, bool valid, bool observing, bool invalidated) {
+    const bool wasObserved = observed_;
+    valid_ = valid;
+    recorderObserving_ = valid && observing;
+    ClearCause clear = ClearCause::None;
+    bool reset = false, discard = false;
+    if (messageUnsupported_) {
+        unobserved_ = Unobserved::Unsupported; // the episode starts or continues at this message
+        clear = ClearCause::Unsupported;
+    } else if (invalidated) {
+        clear = ClearCause::Invalid;
+    } else if (unobserved_ != Unobserved::None) {
+        // INTERIM recovery rule: only a snapshot with all prices exact that the recorder
+        // applied as a valid book (onApplied valid after onReset) ends the episode.
+        if (messageReset_ && valid) {
+            sLog_Data("levelstore: observed again at a valid exact snapshot symbol=" << binding_.symbol
+                      << " after=" << unobservedName(unobserved_) << " clock=" << clock);
+            unobserved_ = Unobserved::None;
+            reset = true;
+        } else {
+            discard = true; // nothing is tracked while unobserved
+        }
+    } else {
+        reset = messageReset_;
+    }
+    observed_ = recorderObserving_ && unobserved_ == Unobserved::None;
+    inMessage_ = false;
+    if (discard) {
+        clearBook();
+        return;
+    }
+    if (clear != ClearCause::None) {
+        const bool changed = levelsBefore_ > 0 || wasObserved;
+        clearBook();
+        if (!changed) return;
+        open_.messages.push_back({clock, observed_, false, clear});
+        ++stats_.messages;
+        ++stats_.clears;
+        return;
+    }
+    // Snapshot diffs come from hash order: sort them into the canonical book order.
+    if (reset)
+        std::sort(touched_.begin(), touched_.end(), [](const Touch &a, const Touch &b) {
+            return a.isBid != b.isBid ? a.isBid : a.units < b.units;
+        });
+    // Reserve before any append, so an allocation failure never leaves a change
+    // that points at a missing message.
+    open_.changes.reserve(open_.changes.size() + touched_.size());
+    open_.messages.reserve(open_.messages.size() + 1);
+    const auto message = static_cast<uint32_t>(open_.messages.size());
+    const size_t firstChange = open_.changes.size();
+    for (const auto &t : touched_) {
+        auto &side = book_[t.isBid];
+        const auto it = side.find(t.units);
+        const double now = it->second.size;
+        if (now != t.before) open_.changes.push_back({message, t.isBid, t.units, now});
+        if (now == 0) side.erase(it);
+    }
+    touched_.clear();
+    const size_t changes = open_.changes.size() - firstChange;
+    if (!changes && observed_ == wasObserved && !reset) return;
+    open_.messages.push_back({clock, observed_, reset, ClearCause::None});
+    ++stats_.messages;
+    stats_.changes += changes;
+    stats_.resets += reset;
+}
+
+void LevelRecorder::onMinute(const std::string &symbol, int64_t bucketStartMs, uint32_t observedMs,
+                             uint32_t flags) noexcept {
+    if (!mine(symbol)) return;
+    const int64_t end = bucketStartMs + kMinute;
+    try {
+        if (inMessage_) throw std::logic_error("minute inside a message");
+        if (end < lastClock_) throw std::logic_error("minute behind the clock");
+        if (!open_.messages.empty() && open_.messages.front().timeMs < bucketStartMs)
+            throw std::logic_error("message outside its minute");
+        lastClock_ = end;
+        bool lost = false;
+        if (bucketStartMs < binding_.floorMs) {
+            // Warmup minute: builds the book only.
+            if (end >= binding_.floorMs && !dayStarted_) startDay();
+        } else {
+            if (!dayStarted_) startDay(); // a skipped or snapshot-started warmup: state at the floor
+            if (bucketStartMs < binding_.ceilingMs) {
+                // Past the ceiling the minute belongs to the next day (dropped here).
+                open_.bucketStartMs = bucketStartMs;
+                open_.recorderObservedMs = observedMs;
+                open_.recorderFlags = flags;
+                try {
+                    output_->onBlock(binding_, open_);
+                    ++stats_.blocks;
+                } catch (...) {
+                    lost = true;
+                }
+            }
+        }
+        open_.messages.clear();
+        open_.changes.clear();
+        open_.damaged = false;
+        open_.observedAtStart = observed_;
+        if (lost) fail("output failed; minute lost", end);
+    } catch (const std::exception &e) {
+        fail(e.what(), end);
+    } catch (...) {
+        fail("unknown exception", end);
+    }
+}
+
+void LevelRecorder::clearBook() noexcept {
+    book_[0].clear();
+    book_[1].clear();
+    touched_.clear();
+}
+
+// Failure: C cannot trust its book. It records a clear (or marks the minute damaged
+// when even that fails) and stays unobserved until a valid exact snapshot.
+void LevelRecorder::fail(const char *what, int64_t clock) noexcept {
+    ++stats_.failures;
+    const bool had = liveLevels() > 0 || observed_;
+    inMessage_ = messageReset_ = messageUnsupported_ = false;
+    clearBook();
+    observed_ = false;
+    try {
+        if (unobserved_ != Unobserved::Failed)
+            sLog_Warning("levelstore: failed, product unobserved until a valid exact snapshot symbol="
+                         << binding_.symbol << " error=" << what << " clock=" << clock);
+    } catch (...) {
+    }
+    unobserved_ = Unobserved::Failed;
+    if (!had || !dayStarted_) return;
+    try {
+        const int64_t at = open_.messages.empty() ? clock : std::max(clock, open_.messages.back().timeMs);
+        open_.messages.push_back({at, false, false, ClearCause::Failed});
+        ++stats_.messages;
+        ++stats_.clears;
+    } catch (...) {
+        open_.damaged = true;
+    }
+}
+
+std::vector<BookLevel> LevelRecorder::book() const {
+    std::vector<BookLevel> out;
+    out.reserve(liveLevels());
+    for (bool isBid : {true, false}) {
+        const size_t first = out.size();
+        for (const auto &[units, slot] : book_[isBid])
+            if (slot.size > 0) out.push_back({isBid, units, slot.size});
+        std::sort(out.begin() + static_cast<std::ptrdiff_t>(first), out.end(),
+                  [](const BookLevel &a, const BookLevel &b) { return a.units < b.units; });
+    }
+    return out;
+}
+
+size_t LevelRecorder::memoryBytes() const {
+    // unordered_map: one node (key, slot, next pointer, cached hash) per level plus
+    // one bucket pointer per bucket; vectors by capacity.
+    size_t bytes = 0;
+    for (const auto &side : book_) bytes += side.size() * 48 + side.bucket_count() * sizeof(void *);
+    bytes += touched_.capacity() * sizeof(Touch);
+    bytes += open_.messages.capacity() * sizeof(TimelineMessage) + open_.changes.capacity() * sizeof(TimelineChange);
+    return bytes;
+}
+
+void LevelRecorder::resetFresh() noexcept {
+    clearBook();
+    serial_ = 0;
+    inMessage_ = messageReset_ = messageUnsupported_ = false;
+    levelsBefore_ = 0;
+    dayStarted_ = valid_ = recorderObserving_ = observed_ = false;
+    unobserved_ = Unobserved::None;
+    lastClock_ = INT64_MIN;
+    open_.messages.clear();
+    open_.changes.clear();
+    open_.damaged = false;
+    open_.observedAtStart = false;
+    open_.bucketStartMs = 0;
+    open_.recorderObservedMs = 0;
+    open_.recorderFlags = 0;
+    stats_ = {};
+}
+
+// Blob v1: "LSC1", u16 version, binding, the paired recorder checkpoint (clock and the
+// CRC32 of its exportState bytes), flags, episode, clock, stats, book, open minute,
+// then a CRC32 of everything before it. No floating-point accumulators: sizes are the
+// recorder's doubles stored bit-exact, times are integers.
+std::vector<uint8_t> LevelRecorder::exportState(std::optional<int64_t> recorderClock,
+                                                const std::vector<uint8_t> &recorderState) const {
+    if (inMessage_) throw std::logic_error("LevelRecorder::exportState inside a message (recorder not drained)");
+    if (recorderClock ? *recorderClock < lastClock_ : lastClock_ != INT64_MIN)
+        throw std::logic_error("LevelRecorder::exportState: checkpoint clock behind C's last event");
+    ByteWriter w;
+    for (uint8_t m : kMagic) w.u8(m);
+    w.u8(static_cast<uint8_t>(kStateVersion));
+    w.u8(static_cast<uint8_t>(kStateVersion >> 8));
+    w.str(binding_.symbol);
+    w.svarint(binding_.floorMs);
+    w.svarint(binding_.ceilingMs);
+    w.svarint(binding_.priceDigits);
+    w.u8(recorderClock ? 1 : 0);
+    w.svarint(recorderClock.value_or(0));
+    w.fixed32(sentinel::crc32(recorderState.data(), recorderState.size()));
+    w.u8(static_cast<uint8_t>((dayStarted_ ? 1 : 0) | (valid_ ? 2 : 0) | (recorderObserving_ ? 4 : 0) |
+                              (observed_ ? 8 : 0)));
+    w.u8(static_cast<uint8_t>(unobserved_));
+    w.u8(lastClock_ == INT64_MIN ? 0 : 1);
+    w.svarint(lastClock_ == INT64_MIN ? 0 : lastClock_);
+    for (uint64_t v : {stats_.messages, stats_.changes, stats_.blocks, stats_.resets, stats_.clears,
+                       stats_.unsupportedPrices, stats_.unsupportedEpisodes, stats_.failures, stats_.restoreRefusals,
+                       stats_.foreignEvents})
+        w.varint(v);
+    const auto levels = book();
+    for (bool isBid : {true, false}) {
+        const auto n = std::count_if(levels.begin(), levels.end(), [&](const BookLevel &l) { return l.isBid == isBid; });
+        w.varint(static_cast<uint64_t>(n));
+        int64_t units = 0;
+        for (const auto &l : levels)
+            if (l.isBid == isBid) {
+                w.svarint(l.units - units);
+                units = l.units;
+                w.f64(l.size);
+            }
+    }
+    encodeBlock(w, open_);
+    w.fixed32(sentinel::crc32(w.bytes.data(), w.bytes.size()));
+    return std::move(w.bytes);
+}
+
+LevelRecorder::ImportResult LevelRecorder::importState(const std::vector<uint8_t> &blob,
+                                                       std::optional<int64_t> recorderClock,
+                                                       const std::vector<uint8_t> &recorderState) noexcept {
+    std::string reason;
+    try {
+        require(lastClock_ == INT64_MIN && !dayStarted_ && !inMessage_ && liveLevels() == 0 &&
+                    open_.messages.empty() && stats_ == Stats{},
+                "import requires a fresh LevelRecorder");
+        require(blob.size() >= 4 + 2 + 4, "no state");
+        uint32_t crc = 0;
+        for (int i = 0; i < 4; ++i) crc |= static_cast<uint32_t>(blob[blob.size() - 4 + i]) << (8 * i);
+        require(crc == sentinel::crc32(blob.data(), blob.size() - 4), "state CRC mismatch");
+        ByteReader r(std::span<const uint8_t>(blob.data(), blob.size() - 4));
+        for (uint8_t m : kMagic) require(r.u8() == m, "not a levelstore state");
+        const uint16_t version = static_cast<uint16_t>(r.u8() | (r.u8() << 8));
+        require(version == kStateVersion, "state version mismatch");
+        DayBinding b;
+        b.symbol = r.str(kMaxSymbol);
+        b.floorMs = r.svarint();
+        b.ceilingMs = r.svarint();
+        b.priceDigits = static_cast<int>(r.svarint());
+        require(b == binding_, "state belongs to another product-day binding");
+        const uint8_t hasClock = r.u8();
+        const int64_t clock = r.svarint();
+        require(hasClock <= 1 && (hasClock ? std::optional<int64_t>(clock) : std::nullopt) == recorderClock,
+                "state checkpoint clock differs from the recorder's");
+        require(r.fixed32() == sentinel::crc32(recorderState.data(), recorderState.size()),
+                "state is not paired with this recorder state");
+        const uint8_t flags = r.u8();
+        require(flags <= 15, "state flags");
+        const uint8_t episode = r.u8();
+        require(episode <= static_cast<uint8_t>(Unobserved::RestoreRefused), "state episode");
+        const uint8_t hasLast = r.u8();
+        const int64_t last = r.svarint();
+        require(hasLast <= 1 && (!hasLast || (recorderClock && last <= *recorderClock)), "state clock");
+        Stats s;
+        for (uint64_t *v : {&s.messages, &s.changes, &s.blocks, &s.resets, &s.clears, &s.unsupportedPrices,
+                            &s.unsupportedEpisodes, &s.failures, &s.restoreRefusals, &s.foreignEvents})
+            *v = r.varint();
+        Side sides[2];
+        for (bool isBid : {true, false}) {
+            const uint64_t n = r.varint();
+            require(n <= r.remaining(), "state book count");
+            sides[isBid].reserve(static_cast<size_t>(n));
+            int64_t units = 0;
+            for (uint64_t i = 0; i < n; ++i) {
+                const int64_t d = r.svarint();
+                require(d > 0, "state book order");
+                units += d;
+                const double size = r.f64();
+                require(std::isfinite(size) && size > 0, "state book size");
+                sides[isBid].emplace(units, Slot{size, 0});
+            }
+        }
+        MinuteBlock open = decodeBlock(r);
+        require(r.done(), "state trailing bytes");
+        const bool dayStarted = flags & 1, valid = flags & 2, recorderObserving = flags & 4, observed = flags & 8;
+        const auto unobserved = static_cast<Unobserved>(episode);
+        require(!recorderObserving || valid, "state observation without validity");
+        require(observed == (recorderObserving && unobserved == Unobserved::None), "state observation");
+        require(unobserved == Unobserved::None || (sides[0].empty() && sides[1].empty()), "state episode with a book");
+        require(open.messages.empty() || (hasLast && open.messages.back().timeMs <= last), "state open minute clock");
+        require(open.changes.empty() || open.changes.back().message < open.messages.size(), "state open minute");
+        require(dayStarted || open.messages.empty() || !recorderClock || *recorderClock < binding_.floorMs,
+                "state warmup");
+        book_[0].swap(sides[0]);
+        book_[1].swap(sides[1]);
+        open_ = std::move(open);
+        dayStarted_ = dayStarted;
+        valid_ = valid;
+        recorderObserving_ = recorderObserving;
+        observed_ = observed;
+        unobserved_ = unobserved;
+        lastClock_ = hasLast ? last : INT64_MIN;
+        stats_ = s;
+        return {true, {}};
+    } catch (const std::exception &e) {
+        reason = e.what();
+    } catch (...) {
+        reason = "unknown exception";
+    }
+    // Refused: start empty and unobserved; never continue from a guessed state.
+    resetFresh();
+    unobserved_ = Unobserved::RestoreRefused;
+    stats_.restoreRefusals = 1;
+    lastClock_ = recorderClock.value_or(INT64_MIN);
+    dayStarted_ = recorderClock && *recorderClock >= binding_.floorMs;
+    if (dayStarted_) {
+        try {
+            open_.messages.push_back({*recorderClock, false, false, ClearCause::RestoreRefused});
+            ++stats_.messages;
+            ++stats_.clears;
+        } catch (...) {
+            open_.damaged = true;
+        }
+    }
+    try {
+        sLog_Warning("levelstore: checkpoint state refused, product unobserved until a valid exact snapshot symbol="
+                     << binding_.symbol << " reason=" << reason << " bytes=" << blob.size()
+                     << " recorderClock=" << recorderClock.value_or(-1));
+    } catch (...) {
+    }
+    return {false, reason};
+}
+
+} // namespace sentinel::levelstore

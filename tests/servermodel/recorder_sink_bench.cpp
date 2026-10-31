@@ -60,6 +60,10 @@ int main(int argc, char **argv) {
             l = {bid, (bid ? 10'000'000 - off : 10'000'000 + off) / 100.0, (rng() % 4) ? double(rng() % 1000) / 1000 : 0.0};
         }
     }
+    // Production levels carry their price text (JournalFeed): judge real decimals.
+    for (auto &m : stream)
+        for (auto &l : m) l.decimal = parsePriceDecimal(std::to_string(int64_t(std::llround(l.price * 100)) / 100) + "." +
+                                                         std::to_string(100 + int64_t(std::llround(l.price * 100)) % 100).substr(1));
     std::vector<Level> snapshot;
     for (int64_t i = 1; i <= 20'000; ++i) {
         snapshot.push_back({true, (10'000'000 - i * 10) / 100.0, 1.0});

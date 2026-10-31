@@ -1,5 +1,6 @@
 #include "Roller.hpp"
 #include "AnchorStore.hpp"
+#include "levelstore/LevelRecorder.hpp"
 #include "metrics/MetricsRegistry.hpp"
 #include <map>
 #include <mutex>
@@ -133,11 +134,18 @@ json roll(const RollOptions& o) {
         // snapshot until after candidates have been validated (bounded restart).
         std::unique_ptr<JournalReader> reader;
         JournalFeed feed(o.product);
+        // Architecture C for this day: declared before the recorder, so it is
+        // destroyed after it (the recorder's worker calls it until then).
+        std::unique_ptr<levelstore::LevelRecorder> level;
+        std::optional<Grid> dayGrid;
         std::unique_ptr<recording::BookRecorder> recorder;
         // Destroyed first: the live lead forgets this day's recorder and feed.
         struct Detach {
             const RollOptions& o;
-            ~Detach() { if (o.onRecorder) o.onRecorder(nullptr, nullptr, 0); }
+            ~Detach() {
+                if (o.onLevelRecorder) o.onLevelRecorder(nullptr);
+                if (o.onRecorder) o.onRecorder(nullptr, nullptr, 0);
+            }
         } detach{o};
         uint64_t hash = 0, checkpointColumns = 0, importedColumns = 0;
         bool gridReady = false;
@@ -183,6 +191,13 @@ json roll(const RollOptions& o) {
             cfg.sink = o.recorderSink;
             return cfg;
         };
+        // Day recreation: one LevelRecorder per day's recorder, bound to the same
+        // floor and ceiling the recorder commits HMC2 within and to its price scale.
+        const auto makeLevel = [&](const Grid& grid, int64_t floor) -> std::unique_ptr<levelstore::LevelRecorder> {
+            if (!o.levelOutput) return nullptr;
+            return std::make_unique<levelstore::LevelRecorder>(levelstore::DayBinding{o.product, floor,
+                o.allowGrowingEnd ? day + Day : end, recording::priceScaleDigits(grid.priceScale)}, o.levelOutput);
+        };
         const auto describeGrid = [&](const Grid& grid) {
             dayReport["grid"] = {{"priceScale",grid.priceScale},{"nearTick",grid.nearTick},
                                   {"deepTick",grid.deepTick},{"sizeFloor",grid.sizeFloor}};
@@ -224,15 +239,19 @@ json roll(const RollOptions& o) {
                 describeGrid(grid);
                 gridReady = true;
                 if (o.dryRun) return;
+                level = makeLevel(grid,recorderFloor);
+                if (level) cfg.sink = level.get();
+                dayGrid = grid;
                 recorder = std::make_unique<recording::BookRecorder>(std::move(cfg));
                 if (o.onRecorder) o.onRecorder(recorder.get(), &feed, end);
+                if (o.onLevelRecorder && level) o.onLevelRecorder(level.get());
                 claimProvenance();
             }
-            if (recorder) recorder->onSnapshotAt(o.product,exchange,local,std::move(levels));
+            if (recorder) recorder->onSnapshotAt(o.product,exchange,local,std::move(levels),feed.sequence());
         };
         feed.onUpdates = [&](int64_t t,int64_t local,std::vector<recording::Level> levels) {
             if (!o.anchorBook) book.apply(t,levels);
-            if (recorder) recorder->onUpdatesAt(o.product,t,local,std::move(levels));
+            if (recorder) recorder->onUpdatesAt(o.product,t,local,std::move(levels),feed.sequence());
         };
         feed.onInvalid = [&](int64_t t,const std::string& reason) { if (!o.anchorBook) book.clear(); if (o.onInvalid) o.onInvalid(reason); if (recorder) recorder->onInvalid(o.product,t,reason); };
         feed.onTick = [&](int64_t t) { if (recorder) recorder->onTick(t); };
@@ -341,13 +360,21 @@ json roll(const RollOptions& o) {
                 rejectedPrefix = false;
                 for (auto it=overlap.rbegin();it!=overlap.rend();++it)
                     candidateReader->putBack(std::move(*it));
-                auto candidate = std::make_unique<recording::BookRecorder>(configure(grid,floor));
+                auto candidateLevel = makeLevel(grid,floor);
+                auto candidateConfig = configure(grid,floor);
+                if (candidateLevel) candidateConfig.sink = candidateLevel.get();
+                auto candidate = std::make_unique<recording::BookRecorder>(std::move(candidateConfig));
                 candidate->importState(a.recorder.bytes);
+                // Durable anchors do not carry C state yet: C refuses (logged, counted)
+                // and stays unobserved until a valid exact snapshot. Never a silent restart.
+                if (candidateLevel)
+                    candidateLevel->importState({},candidate->checkpointClock(o.product),a.recorder.bytes);
                 // Everything above is validation on fresh, unpublished objects.
                 // Preserve installed callbacks: importing never invokes them.
                 feed.importState(state.at("feed"));
                 book = std::move(candidateBook); bookUp = candidateUp;
                 recorder = std::move(candidate); reader = std::move(candidateReader);
+                level = std::move(candidateLevel); dayGrid = grid;
                 gridReady = true; hash = expectedHash; recorderFloor = floor;
                 referenceMid = a.referenceMid; gridSnapshot = a.gridSnapshot; gridMetadata = a.metadata;
                 applied = a.pos; restoreCursor = cursorPos; restoreCursorApplied = !before;
@@ -379,6 +406,7 @@ json roll(const RollOptions& o) {
                 << " cursorRecord=" << restoreCursor.record << " cursorApplied=" << restoreCursorApplied);
             if (o.onAnchorRestore) o.onAnchorRestore(restoreCursor,book,bookUp,restoreCursorApplied,restoreLocal);
             if (o.onRecorder) o.onRecorder(recorder.get(), &feed, end);
+            if (o.onLevelRecorder && level) o.onLevelRecorder(level.get());
             // A restore exactly at the checkpoint can reach the socket tip
             // without processing another record. Reaffirm that durable progress
             // so serving readiness need not wait for a future minute commit.
@@ -400,6 +428,41 @@ json roll(const RollOptions& o) {
             }
             reader = std::make_unique<JournalReader>(o.journalRoot,o.product,inventory.anchor(day));
         }
+        // In-process checkpoint (RollOptions::restoreAfterRecordForTest): the recorder
+        // state was exported at this drained position; C exports against the same clock
+        // and bytes, both are destroyed and fresh ones import before the next record.
+        const auto restoreInProcess = [&](const std::vector<uint8_t>& recorderBytes, int64_t boundary) {
+            using clock = std::chrono::steady_clock;
+            const auto t0 = clock::now();
+            const auto checkpoint = recorder->checkpointClock(o.product);
+            std::vector<uint8_t> levelBytes;
+            if (level) levelBytes = level->exportState(checkpoint,recorderBytes);
+            const auto t1 = clock::now();
+            const size_t levelMemory = level ? level->memoryBytes() : 0;
+            if (o.onLevelRecorder && level) o.onLevelRecorder(nullptr);
+            if (o.onRecorder) o.onRecorder(nullptr, nullptr, 0);
+            recorder.reset(); // drained: drops only what the bytes hold
+            level.reset();
+            auto freshLevel = makeLevel(*dayGrid,recorderFloor);
+            auto cfg = configure(*dayGrid,recorderFloor);
+            if (freshLevel) cfg.sink = freshLevel.get();
+            auto fresh = std::make_unique<recording::BookRecorder>(std::move(cfg));
+            const auto t2 = clock::now();
+            fresh->importState(recorderBytes);
+            const auto t3 = clock::now();
+            levelstore::LevelRecorder::ImportResult imported{true, {}};
+            if (freshLevel) imported = freshLevel->importState(levelBytes,fresh->checkpointClock(o.product),recorderBytes);
+            const auto t4 = clock::now();
+            level = std::move(freshLevel); recorder = std::move(fresh);
+            if (o.onRecorder) o.onRecorder(recorder.get(), &feed, end);
+            if (o.onLevelRecorder && level) o.onLevelRecorder(level.get());
+            const auto ms = [](auto a, auto b) { return std::chrono::duration<double,std::milli>(b-a).count(); };
+            if (o.onInProcessRestoreForTest)
+                o.onInProcessRestoreForTest({{"boundaryMs",boundary},{"pos",applied},{"clock",checkpoint ? json(*checkpoint) : json()},
+                    {"recorderBytes",recorderBytes.size()},{"levelBytes",levelBytes.size()},{"levelMemoryBytes",levelMemory},
+                    {"levelExportMs",ms(t0,t1)},{"recorderImportMs",ms(t2,t3)},{"levelImportMs",ms(t3,t4)},
+                    {"levelImported",imported.ok},{"levelImportReason",imported.reason}});
+        };
         const auto saveAnchor = [&](int64_t boundary, const JournalRecord* resume = nullptr) {
             // Snapshot fallback may be warming up below an existing output
             // floor. Such a state cannot replace a standalone midnight anchor
@@ -407,11 +470,13 @@ json roll(const RollOptions& o) {
             if (!o.writeAnchors || !recorder || boundary < savedThrough ||
                 (boundary == day && recorderFloor != from)) return;
             bool degraded = false;
+            std::vector<uint8_t> exported;
             try {
                 const auto start = std::chrono::steady_clock::now();
                 ReplayAnchor a;
                 // Export drains and reports degraded state without serializing it.
                 a.recorder.bytes = o.anchorExportForTest ? o.anchorExportForTest(*recorder) : recorder->exportState();
+                if (o.restoreAtAnchorForTest) exported = a.recorder.bytes;
                 if (a.recorder.bytes.empty()) {
                     degraded = true;
                     throw std::runtime_error("degraded recorder: diskErrors");
@@ -440,6 +505,7 @@ json roll(const RollOptions& o) {
                 return;
             }
             if (o.afterAnchorForTest) o.afterAnchorForTest(boundary);
+            if (o.restoreAtAnchorForTest && o.restoreAtAnchorForTest(boundary)) restoreInProcess(exported,boundary);
         };
 
         const auto fence = [&] {
@@ -481,6 +547,10 @@ json roll(const RollOptions& o) {
                 while (nextBoundary < end && input.record.time.systemNs / 1'000'000 >= nextBoundary) {
                     saveAnchor(nextBoundary); nextBoundary += Quarter;
                 }
+            }
+            if (recorder && o.restoreAfterRecordForTest && o.restoreAfterRecordForTest(input)) {
+                const auto bytes = recorder->exportState();
+                if (!bytes.empty()) restoreInProcess(bytes,-1);
             }
             if (o.afterRecordForTest) o.afterRecordForTest(records);
             const auto minute = input.record.time.systemNs / 1'000'000 / Minute;

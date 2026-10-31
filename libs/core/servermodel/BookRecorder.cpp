@@ -402,6 +402,7 @@ struct BookRecorder::Impl {
         }
         int64_t time = 0, local = 0;
         std::vector<Level> levels;
+        uint64_t sequence = 0; // journal frame sequence for sink diagnostics only
     };
     // Only the producer accesses this map. Queued messages keep names alive
     // for the recorder lifetime; data enqueues do not allocate symbol strings.
@@ -451,7 +452,9 @@ struct BookRecorder::Impl {
         }
         return c;
     }
-    explicit Impl(RecorderConfig c) : cfg(validateConfig(std::move(c))) {
+    // 10^k grid of priceScale for the sink's decimal identity; -1 when it is not 10^k.
+    const int priceDigits;
+    explicit Impl(RecorderConfig c) : cfg(validateConfig(std::move(c))), priceDigits(priceScaleDigits(cfg.priceScale)) {
         if (!lead())
             store.emplace(cfg.root, cfg.deterministicResume, cfg.writerProduct);
         worker = std::thread([this] { run(); });
@@ -1000,10 +1003,13 @@ struct BookRecorder::Impl {
         for (const auto &level : m.levels) {
             const int64_t units = *priceUnits(level.price, cfg.priceScale);
             auto precision = RecorderSink::Precision::OnGrid;
+            auto identity = DecimalIdentity::NoText;
             if (sink) {
                 precision = pricePrecision(level.price, units, cfg.priceScale);
-                if (precision != RecorderSink::Precision::OnGrid)
-                    sink->onImprecise(m.symbol(), s.clock, {level.isBid, units, level.price, level.size, precision});
+                identity = decimalIdentity(level.decimal, priceDigits, units);
+                if (precision != RecorderSink::Precision::OnGrid || identity != DecimalIdentity::Exact)
+                    sink->onImprecise(m.symbol(), s.clock, {level.isBid, units, level.price, level.size, precision,
+                                                            level.decimal, identity, m.time, m.sequence});
             }
             auto &book = level.isBid ? s.bids : s.asks;
             const auto old = book.find(units);
@@ -1020,7 +1026,8 @@ struct BookRecorder::Impl {
             else
                 book.emplace(units, level.size);
             if (sink)
-                sink->onLevel(m.symbol(), s.clock, {level.isBid, units, level.price, level.size, precision});
+                sink->onLevel(m.symbol(), s.clock, {level.isBid, units, level.price, level.size, precision,
+                                                    level.decimal, identity, m.time, m.sequence});
             for (auto &l : s.layers) {
                 auto [it, added] = l.rows.try_emplace({floorDiv(units, l.header.rowTickUnits), !level.isBid});
                 auto &row = it->second;
@@ -1154,11 +1161,13 @@ struct BookRecorder::Impl {
 BookRecorder::BookRecorder(RecorderConfig cfg) : impl_(std::make_unique<Impl>(std::move(cfg))) {}
 BookRecorder::~BookRecorder() = default;
 void BookRecorder::requestStop() { impl_->requestStop(); }
-void BookRecorder::onSnapshotAt(const std::string &symbol, int64_t time, int64_t local, std::vector<Level> levels) {
-    impl_->enqueue({Impl::Kind::Snapshot, impl_->internSymbol(symbol), {}, time, local, std::move(levels)});
+void BookRecorder::onSnapshotAt(const std::string &symbol, int64_t time, int64_t local, std::vector<Level> levels,
+                                uint64_t sequence) {
+    impl_->enqueue({Impl::Kind::Snapshot, impl_->internSymbol(symbol), {}, time, local, std::move(levels), sequence});
 }
-void BookRecorder::onUpdatesAt(const std::string &symbol, int64_t time, int64_t local, std::vector<Level> levels) {
-    impl_->enqueue({Impl::Kind::Updates, impl_->internSymbol(symbol), {}, time, local, std::move(levels)});
+void BookRecorder::onUpdatesAt(const std::string &symbol, int64_t time, int64_t local, std::vector<Level> levels,
+                               uint64_t sequence) {
+    impl_->enqueue({Impl::Kind::Updates, impl_->internSymbol(symbol), {}, time, local, std::move(levels), sequence});
 }
 void BookRecorder::onInvalid(const std::string &symbol, int64_t local, std::string reason) {
     impl_->enqueue({Impl::Kind::Invalid, impl_->internSymbol(symbol), std::move(reason), local, local, {}});
@@ -1325,6 +1334,12 @@ void BookRecorder::importState(const std::vector<uint8_t>& bytes) {
     dst.workerLocal = local; dst.openFailureLogLocal = failureLocal; dst.openFailuresSuppressed = failures;
     dst.columnsWritten = stats[0]; dst.lateEvents = stats[1]; dst.backwardSteps = stats[2];
     dst.invalidations = stats[3]; dst.diskErrors = stats[4];
+}
+std::optional<int64_t> BookRecorder::checkpointClock(const std::string &symbol) {
+    drain(); // producer-only: the worker is idle, as in exportState()
+    const auto it = impl_->symbols.find(symbol);
+    if (it == impl_->symbols.end() || !it->second->initialized) return std::nullopt;
+    return it->second->clock;
 }
 void BookRecorder::drain() {
     std::unique_lock lock(impl_->mutex);
