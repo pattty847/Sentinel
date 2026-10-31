@@ -352,9 +352,16 @@ inline std::string compareBook(const std::vector<uint8_t> &state, const std::str
 // Normalised open-minute state against the recorder's own export at the same
 // drained point: covered ms equals the symbol's `observed`, and per-level
 // integrals summed into a layer's rows equal the rows accrued to the clock.
+// Tolerance: 1e-9 relative, plus the recorder's running-row-sum residue. Its row
+// size keeps cancellation error up to a few ulps of the largest size the row held
+// (bounded here by peak x 2^-40, i.e. 4096 ulps) over at most 60 s.
+struct OpenMinuteDiff {
+    size_t rows = 0, residueRows = 0; // residueRows: within tolerance only through the residue term
+    long double maxAbs = 0;
+};
 inline std::string compareOpenMinute(const nlohmann::json &state, const std::string &symbol,
                                      const ReferenceConsumer::Normalised &n, size_t layer, int64_t rowTickUnits,
-                                     size_t *rowsCompared = nullptr) {
+                                     size_t *rowsCompared = nullptr, OpenMinuteDiff *diff = nullptr) {
     const auto &s = state.at("symbols").at(symbol);
     if (s.at("clock").get<int64_t>() != n.clock) return "normalised clock differs from the export";
     if (s.at("observed").get<uint64_t>() != n.coveredMs)
@@ -362,7 +369,7 @@ inline std::string compareOpenMinute(const nlohmann::json &state, const std::str
                std::to_string(s.at("observed").get<uint64_t>());
     const bool observing = s.at("valid").get<bool>() && !s.at("bids").empty() && !s.at("asks").empty() &&
                            s.at("bids").back().at(0).get<int64_t>() < s.at("asks").front().at(0).get<int64_t>();
-    std::map<std::pair<int64_t, bool>, long double> mine, theirs;
+    std::map<std::pair<int64_t, bool>, long double> mine, theirs, peaks;
     for (const auto *levels : {&n.live, &n.removed})
         for (const auto &l : *levels)
             if (l.integral > 0) mine[{floorDiv(l.units, rowTickUnits), !l.isBid}] += l.integral;
@@ -371,15 +378,27 @@ inline std::string compareOpenMinute(const nlohmann::json &state, const std::str
         long double integral = std::stold(row.at(3).get<std::string>());
         const int64_t last = row.at(5).get<int64_t>();
         if (observing && n.clock > last) integral += size * (n.clock - last);
-        if (integral > 0) theirs[{row.at(0).get<int64_t>(), row.at(1).get<bool>()}] = integral;
+        if (integral > 0) {
+            theirs[{row.at(0).get<int64_t>(), row.at(1).get<bool>()}] = integral;
+            peaks[{row.at(0).get<int64_t>(), row.at(1).get<bool>()}] =
+                std::max(size, std::stold(row.at(4).get<std::string>()));
+        }
     }
     for (const auto &[key, v] : theirs) {
         const auto it = mine.find(key);
         const long double other = it == mine.end() ? 0 : it->second;
-        if (std::abs(v - other) > 1e-9L * std::max(v, other) + 1e-12L)
+        const long double delta = std::abs(v - other), relative = 1e-9L * std::max(v, other);
+        const long double residue = std::ldexp(peaks[key], -40) * 60'000;
+        if (delta > relative + residue)
             return "row " + std::to_string(key.first) + (key.second ? " ask" : " bid") + " recorder=" +
-                   std::to_string(double(v)) + " normalised=" + std::to_string(double(other));
+                   std::to_string(double(v)) + " normalised=" + std::to_string(double(other)) +
+                   " delta=" + std::to_string(double(delta));
         if (rowsCompared) ++*rowsCompared;
+        if (diff) {
+            ++diff->rows;
+            if (delta > relative) ++diff->residueRows;
+            diff->maxAbs = std::max(diff->maxAbs, delta);
+        }
     }
     for (const auto &[key, v] : mine)
         if (!theirs.contains(key)) return "row " + std::to_string(key.first) + " only in the normalised state";

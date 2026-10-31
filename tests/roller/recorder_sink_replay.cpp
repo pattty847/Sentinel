@@ -244,6 +244,7 @@ int main(int argc, char **argv) {
         json anchors = json::array();
         uint64_t bookChecks = 0, bookMismatches = 0, levelsCompared = 0, openMinuteMismatches = 0, openMinuteRows = 0;
         std::string firstOpenMinuteError;
+        sinkref::OpenMinuteDiff openDiff;
         std::string firstBookError;
         recording::BookRecorder *recorder = nullptr;
         json recorderStats;
@@ -308,7 +309,7 @@ int main(int argc, char **argv) {
                 if (has && stateJson["symbols"][product].at("initialized").get<bool>())
                     for (size_t li = 0; li < stateJson.at("policy").at("layers").size() && openError.empty(); ++li)
                         openError = sinkref::compareOpenMinute(stateJson, product, n, li,
-                            stateJson["policy"]["layers"][li].at(1).get<int64_t>(), &openRows);
+                            stateJson["policy"]["layers"][li].at(1).get<int64_t>(), &openRows, &openDiff);
                 if (!openError.empty()) {
                     ++openMinuteMismatches;
                     if (firstOpenMinuteError.empty()) firstOpenMinuteError = openError;
@@ -395,6 +396,8 @@ int main(int argc, char **argv) {
             result["bookCheck"] = {{"anchors", bookChecks}, {"mismatches", bookMismatches},
                                    {"levelsCompared", levelsCompared}, {"first", firstBookError}};
             result["openMinuteCheck"] = {{"mismatches", openMinuteMismatches}, {"rowsCompared", openMinuteRows},
+                                         {"residueRows", openDiff.residueRows}, {"maxAbsDiff", double(openDiff.maxAbs)},
+                                         {"maxResidueDiff", double(openDiff.maxResidue)},
                                          {"first", firstOpenMinuteError}};
             result["consumerErrors"] = consumer.errors.size();
             if (!consumer.errors.empty()) result["firstConsumerError"] = consumer.errors.front();
