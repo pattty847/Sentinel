@@ -242,7 +242,8 @@ int main(int argc, char **argv) {
         sinkref::RowCheck rows;
         std::map<int64_t, int> layersChecked;
         json anchors = json::array();
-        uint64_t bookChecks = 0, bookMismatches = 0, levelsCompared = 0;
+        uint64_t bookChecks = 0, bookMismatches = 0, levelsCompared = 0, openMinuteMismatches = 0, openMinuteRows = 0;
+        std::string firstOpenMinuteError;
         std::string firstBookError;
         recording::BookRecorder *recorder = nullptr;
         json recorderStats;
@@ -291,29 +292,28 @@ int main(int argc, char **argv) {
                 // open-minute integral; removed levels that still hold an integral; runs
                 // closed since the committed watermark; finished-but-unverified minutes;
                 // the covered-time cursor.
+                // Normalise against the recorder's exported clock, not the last sink event.
                 const int64_t committed = r.watermarks(product, "near").minuteThroughMs;
-                const auto bit = consumer.books.find(product);
+                const auto stateJson = json::from_cbor(state.begin(), state.end() - 4);
+                const bool has = stateJson.at("symbols").contains(product);
+                const int64_t clock = has ? stateJson["symbols"][product].at("clock").get<int64_t>() : 0;
+                const auto n = consumer.normalise(product, clock);
                 json add = {{"live", json::array()}, {"removed", json::array()}, {"tail", json::array()},
-                            {"pending", json::array()}, {"cursor", json::array()}};
-                uint64_t live = 0, removed = 0, tail = 0, pendingLevels = 0;
-                int64_t clock = 0;
-                if (bit != consumer.books.end()) {
-                    const auto &b = bit->second;
-                    clock = b.clock;
-                    for (int sd = 0; sd < 2; ++sd)
-                        for (const auto &[units, l] : b.side[sd]) {
-                            const long double integral =
-                                l.integral + (b.observing && clock > l.since ? (long double)l.size * (clock - l.since) : 0);
-                            if (l.size > 0) {
-                                ++live;
-                                add["live"].push_back({clock - l.runStart, double(integral)});
-                            } else if (integral > 0) {
-                                ++removed;
-                                add["removed"].push_back({sd, units, double(integral)});
-                            }
-                        }
-                    add["cursor"] = {b.observing, clock - b.obsSince, b.covered};
+                            {"pending", json::array()}, {"cursor", {n.observing, n.observingForMs, n.coveredMs}}};
+                uint64_t live = n.live.size(), removed = n.removed.size(), tail = 0, pendingLevels = 0;
+                for (const auto &l : n.live) add["live"].push_back({l.runStartAge, double(l.integral)});
+                for (const auto &l : n.removed) add["removed"].push_back({l.isBid, l.units, double(l.integral)});
+                std::string openError;
+                size_t openRows = 0;
+                if (has && stateJson["symbols"][product].at("initialized").get<bool>())
+                    for (size_t li = 0; li < stateJson.at("policy").at("layers").size() && openError.empty(); ++li)
+                        openError = sinkref::compareOpenMinute(stateJson, product, n, li,
+                            stateJson["policy"]["layers"][li].at(1).get<int64_t>(), &openRows);
+                if (!openError.empty()) {
+                    ++openMinuteMismatches;
+                    if (firstOpenMinuteError.empty()) firstOpenMinuteError = openError;
                 }
+                openMinuteRows += openRows;
                 for (const auto &run : consumer.runs)
                     if (run.end >= committed) {
                         ++tail;
@@ -328,7 +328,7 @@ int main(int argc, char **argv) {
                 consumer.runs.clear();
                 if (truth) t.compareAnchor(state);
                 const auto addCbor = json::to_cbor(add);
-                anchors.push_back({{"clock", clock}, {"committedMs", committed}, {"liveLevels", live},
+                anchors.push_back({{"clock", clock}, {"sinkClockLagMs", n.lagMs}, {"committedMs", committed}, {"liveLevels", live},
                                    {"recorderLevels", levels}, {"tailRuns", tail}, {"removedWithIntegral", removed},
                                    {"pendingMinutes", consumer.minutes.size()}, {"pendingMinuteLevels", pendingLevels},
                                    {"addRawBytes", live * 16 + removed * 17 + tail * 33 + pendingLevels * 17 + 24},
@@ -394,6 +394,8 @@ int main(int argc, char **argv) {
             result["unverifiedMinutes"] = {{"beforeDay", c.minutesNotStored}, {"afterDay", afterDay}, {"inDay", inDay}};
             result["bookCheck"] = {{"anchors", bookChecks}, {"mismatches", bookMismatches},
                                    {"levelsCompared", levelsCompared}, {"first", firstBookError}};
+            result["openMinuteCheck"] = {{"mismatches", openMinuteMismatches}, {"rowsCompared", openMinuteRows},
+                                         {"first", firstOpenMinuteError}};
             result["consumerErrors"] = consumer.errors.size();
             if (!consumer.errors.empty()) result["firstConsumerError"] = consumer.errors.front();
             result["anchors"] = anchors;
@@ -401,7 +403,7 @@ int main(int argc, char **argv) {
         std::ofstream(argv[6]) << result.dump(1) << '\n';
         std::cout << result.dump().substr(0, 2000) << '\n';
         const bool pass = !consumerMode || ((!truth || t.clean()) &&
-            rows.clean() && !bookMismatches && consumer.errors.empty() && result["unverifiedMinutes"]["inDay"] == 0);
+            rows.clean() && !bookMismatches && !openMinuteMismatches && consumer.errors.empty() && result["unverifiedMinutes"]["inDay"] == 0);
         return pass ? 0 : 3;
     } catch (const std::exception &e) {
         std::cerr << "recorder_sink_replay: " << e.what() << '\n';

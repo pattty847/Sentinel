@@ -1196,6 +1196,7 @@ std::unique_ptr<BookRecorder> BookRecorder::forkLead(std::function<void(std::sha
     c.writeErrorsCounter = nullptr;
     c.beforePublicationForTest = {};
     c.beforeQueueWaitForTest = {};
+    c.beforeMinuteFinalizeForTest = {};
     c.sink = nullptr; // the lead replays speculatively and never persists; only history decisions feed a sink
     auto out = std::make_unique<BookRecorder>(std::move(c));
     auto &dst = *out->impl_;

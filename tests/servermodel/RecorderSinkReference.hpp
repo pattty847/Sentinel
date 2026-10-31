@@ -126,6 +126,43 @@ class ReferenceConsumer final : public RecorderSink {
         else if (observedMs) minutes[{symbol, bucket}] = std::move(m);
     }
 
+    // Open-minute state normalised to a checkpoint clock: the recorder's exported
+    // clock, which can lead the last sink event (ticks and dropped updates move it
+    // silently; observation cannot change without an event, so the gap accrues).
+    struct Normalised {
+        struct LevelState {
+            bool isBid;
+            int64_t units;
+            double size;
+            int64_t runStartAge;  // clock - run start (live levels)
+            long double integral; // size x observed ms in the open minute, through clock
+        };
+        int64_t clock = 0, lagMs = 0; // lagMs: clock - last sink event clock
+        std::vector<LevelState> live, removed;
+        bool observing = false;
+        int64_t observingForMs = 0; // clock - start of the current observing interval
+        uint64_t coveredMs = 0;     // observed ms of the open minute, through clock
+    };
+    Normalised normalise(const std::string &symbol, int64_t clock) const {
+        Normalised n;
+        n.clock = clock;
+        const auto it = books.find(symbol);
+        if (it == books.end()) return n;
+        const auto &b = it->second;
+        n.lagMs = clock - b.clock;
+        n.observing = b.observing;
+        n.observingForMs = b.observing ? clock - b.obsSince : 0;
+        n.coveredMs = b.covered + uint64_t(n.observingForMs);
+        for (int sd = 0; sd < 2; ++sd)
+            for (const auto &[units, l] : b.side[sd]) {
+                const long double integral =
+                    l.integral + (b.observing && clock > l.since ? static_cast<long double>(l.size) * (clock - l.since) : 0);
+                if (l.size > 0) n.live.push_back({sd == 0, units, l.size, clock - l.runStart, integral});
+                else if (integral > 0) n.removed.push_back({sd == 0, units, 0, 0, integral});
+            }
+        return n;
+    }
+
     // Live levels (size > 0) per side, ascending units.
     std::vector<std::pair<int64_t, double>> live(const std::string &symbol, bool bids) const {
         std::vector<std::pair<int64_t, double>> out;
@@ -309,6 +346,43 @@ inline std::string compareBook(const std::vector<uint8_t> &state, const std::str
                            s.at("bids").back().at(0).get<int64_t>() < s.at("asks").front().at(0).get<int64_t>();
     if (it != c.books.end() && it->second.observing != observing) return "observation differs";
     if (it != c.books.end() && it->second.clock > s.at("clock").get<int64_t>()) return "sink clock ahead of recorder";
+    return "";
+}
+
+// Normalised open-minute state against the recorder's own export at the same
+// drained point: covered ms equals the symbol's `observed`, and per-level
+// integrals summed into a layer's rows equal the rows accrued to the clock.
+inline std::string compareOpenMinute(const nlohmann::json &state, const std::string &symbol,
+                                     const ReferenceConsumer::Normalised &n, size_t layer, int64_t rowTickUnits,
+                                     size_t *rowsCompared = nullptr) {
+    const auto &s = state.at("symbols").at(symbol);
+    if (s.at("clock").get<int64_t>() != n.clock) return "normalised clock differs from the export";
+    if (s.at("observed").get<uint64_t>() != n.coveredMs)
+        return "covered " + std::to_string(n.coveredMs) + " != recorder observed " +
+               std::to_string(s.at("observed").get<uint64_t>());
+    const bool observing = s.at("valid").get<bool>() && !s.at("bids").empty() && !s.at("asks").empty() &&
+                           s.at("bids").back().at(0).get<int64_t>() < s.at("asks").front().at(0).get<int64_t>();
+    std::map<std::pair<int64_t, bool>, long double> mine, theirs;
+    for (const auto *levels : {&n.live, &n.removed})
+        for (const auto &l : *levels)
+            if (l.integral > 0) mine[{floorDiv(l.units, rowTickUnits), !l.isBid}] += l.integral;
+    for (const auto &row : s.at("layers").at(layer).at("rows")) {
+        const long double size = std::stold(row.at(2).get<std::string>());
+        long double integral = std::stold(row.at(3).get<std::string>());
+        const int64_t last = row.at(5).get<int64_t>();
+        if (observing && n.clock > last) integral += size * (n.clock - last);
+        if (integral > 0) theirs[{row.at(0).get<int64_t>(), row.at(1).get<bool>()}] = integral;
+    }
+    for (const auto &[key, v] : theirs) {
+        const auto it = mine.find(key);
+        const long double other = it == mine.end() ? 0 : it->second;
+        if (std::abs(v - other) > 1e-9L * std::max(v, other) + 1e-12L)
+            return "row " + std::to_string(key.first) + (key.second ? " ask" : " bid") + " recorder=" +
+                   std::to_string(double(v)) + " normalised=" + std::to_string(double(other));
+        if (rowsCompared) ++*rowsCompared;
+    }
+    for (const auto &[key, v] : mine)
+        if (!theirs.contains(key)) return "row " + std::to_string(key.first) + " only in the normalised state";
     return "";
 }
 

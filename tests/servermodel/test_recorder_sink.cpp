@@ -11,6 +11,7 @@
 #include <cmath>
 #include <random>
 #include <algorithm>
+#include <atomic>
 #include <set>
 #include <sstream>
 
@@ -444,5 +445,58 @@ TEST(RowCheckItself, ZeroIntegralWithNonzeroCodeFails) {
     rc.check(r, m);
     EXPECT_EQ(rc.zeroNonzeroMismatches, 1u);
     EXPECT_FALSE(rc.clean());
+}
+} // namespace
+
+namespace {
+// A tick moves the recorder clock with no sink event. State normalised to the
+// exported clock must still equal the recorder's own open-minute rows and
+// observed time; normalising to the last sink event would lose the gap.
+TEST_F(RecorderSinkTest, SilentTickBeforeExportIsAccrued) {
+    Tee tee;
+    auto c = config(dirOn.path().toStdString());
+    c.sink = &tee;
+    BookRecorder rec(c);
+    for (const auto &s : std::vector<Step>{snap(0, kBook), upd(10'000, {{true, 99, 5}, {false, 101, 0}}),
+                                           upd(12'000, {{true, 98, 0}}), tick(25'000)}) {
+        feed(rec, s);
+        rec.drainForTest();
+    }
+    const auto bytes = rec.exportState();
+    const auto state = nlohmann::json::from_cbor(bytes.begin(), bytes.end() - 4);
+    const int64_t clock = state["symbols"][kSym]["clock"].get<int64_t>();
+    ASSERT_EQ(clock, kEpoch + 25'000);
+    const auto n = tee.ref.normalise(kSym, clock);
+    EXPECT_EQ(n.lagMs, 13'000);
+    EXPECT_EQ(n.coveredMs, 25'000u);
+    EXPECT_EQ(n.removed.size(), 2u); // 101 and 98 left this minute with integrals
+    for (size_t li = 0; li < c.layers.size(); ++li) {
+        size_t rows = 0;
+        EXPECT_EQ(sinkref::compareOpenMinute(state, kSym, n, li, c.layers[li].rowTickUnits, &rows), "") << li;
+        EXPECT_GT(rows, 0u);
+    }
+}
+
+// A history recorder's finalisation fault belongs to it: the lead neither runs
+// nor consumes it.
+TEST_F(RecorderSinkTest, ForkLeadDoesNotCopyTheFinalisationFault) {
+    auto c = config(dirOn.path().toStdString());
+    std::atomic<int> calls{0}, failures{1};
+    c.beforeMinuteFinalizeForTest = [&](int64_t bucket) {
+        ++calls;
+        if (bucket == kEpoch && failures-- > 0) throw std::runtime_error("injected finalisation failure");
+    };
+    BookRecorder rec(c);
+    rec.onSnapshotAt(kSym, kEpoch, kEpoch, kBook);
+    rec.drainForTest();
+    auto lead = rec.forkLead([](std::shared_ptr<const Hmc2Record>) {}, 500);
+    lead->onTick(kEpoch + 65'000);
+    lead->drainForTest();
+    EXPECT_EQ(calls.load(), 0) << "the lead ran the history recorder's hook";
+    rec.onTick(kEpoch + 65'000);
+    rec.drainForTest();
+    EXPECT_EQ(calls.load(), 1);
+    EXPECT_EQ(rec.stats().diskErrors, 1u) << "the history fault must still fire on the history recorder";
+    EXPECT_EQ(lead->stats().diskErrors, 0u);
 }
 } // namespace
