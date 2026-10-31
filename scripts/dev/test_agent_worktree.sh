@@ -61,6 +61,9 @@ verify() { (cd "$repo" && scripts/dev/agent-worktree.sh verify-gitdir feat/x) > 
 gd=$(git -C "$wt" rev-parse --absolute-git-dir)
 git -C "$repo" config extensions.worktreeConfig true
 expect "fresh gitdir passes" verify
+"$wt/scripts/dev/agent-worktree.sh" --export-gitdir-check > "$T/linked.out" 2>&1
+expect "linked tooling checkout refused" [ "$?" -ne 0 ]
+expect "linked tooling refusal explains required checkout" grep -q 'run from the main checkout' "$T/linked.out"
 printf '[core]\n fsmonitor = touch %s/executed\n' "$T" > "$gd/config.worktree"
 verify; expect "config.worktree rejected" [ "$?" -ne 0 ]
 expect "config named" grep -q config.worktree "$T/verify.out"

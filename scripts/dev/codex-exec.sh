@@ -2,6 +2,13 @@
 # Launch from trusted tooling; role fixes the sandbox, never bypasses it.
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
+SCRIPT_REPO=$(cd "$SCRIPT_DIR/../.." && pwd -P)
+# Check before sourcing defaults or exporting/evaluating the gitdir validator.
+[[ -d "$SCRIPT_REPO/.git" && ! -L "$SCRIPT_REPO/.git" ]] || {
+    echo 'codex-exec: run from the main checkout' >&2
+    exit 2
+}
+COMMON_DIR=$(cd "$SCRIPT_REPO/.git" && pwd -P)
 # shellcheck source=agents.env
 source "$SCRIPT_DIR/agents.env"
 worktree= role= resume= last=0 prompt_file= no_commit=0 dry_run=0
@@ -36,24 +43,8 @@ for value in "$CODEX_MODEL" "$CODEX_EFFORT" "$CODEX_BIN" "$resume"; do
 done
 realpath() { python3 -I -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve(strict=True))' "$1"; }
 worktree=$(realpath "$worktree")
-# Derive the common dir from this trusted script's checkout, never from the
-# target's mutable commondir. Capture the validator before the agent can edit it.
-COMMON_DIR=$(python3 -I - "$SCRIPT_DIR/../.." <<'PY'
-import pathlib, sys
-root = pathlib.Path(sys.argv[1]).resolve()
-p = root / '.git'
-if p.is_dir():
-    print(p.resolve())
-else:
-    text = p.read_text().strip()
-    if not text.startswith('gitdir: '):
-        sys.exit('codex-exec: invalid tooling checkout .git')
-    gd = (root / text[8:]).resolve(strict=True)
-    if gd.parent.name != 'worktrees':
-        sys.exit('codex-exec: expected linked tooling checkout')
-    print(gd.parent.parent)
-PY
-)
+[[ "$worktree" != "$SCRIPT_REPO" ]] || die 'main worktree is forbidden'
+# Capture the trusted validator before the agent can edit its target worktree.
 eval "$(bash "$SCRIPT_DIR/agent-worktree.sh" --export-gitdir-check)"
 verify_gitdir --path "$worktree" >/dev/null
 # Only now may Git load the target. Use its canonical paths for sandbox grants.

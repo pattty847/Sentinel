@@ -42,6 +42,15 @@ has() { grep -Fxq -- "$1" "$scratch/out" || fail "missing argv: $1"; }
 absent() { if grep -Fq -- "$1" "$scratch/out"; then fail "unexpected argv: $1"; fi; }
 dry() { "$wrapper" --worktree "$wt" --role writer --dry-run "$@" > "$scratch/out" 2> "$scratch/err"; }
 reject() { if "$wrapper" "$@" > "$scratch/out" 2> "$scratch/err"; then fail "accepted: $*"; fi; }
+# A linked tooling copy must reject before it sources agent-writable defaults.
+export WORKFLOW_TEST_MARKER="$scratch/defaults-loaded"
+printf '\ntouch "$WORKFLOW_TEST_MARKER"\n' >> "$wt/scripts/dev/agents.env"
+if "$wt/scripts/dev/codex-exec.sh" --worktree "$wt" --role writer --dry-run > "$scratch/out" 2> "$scratch/err"; then
+    fail 'linked tooling checkout accepted'
+fi
+grep -q 'run from the main checkout' "$scratch/err" || fail 'linked tooling refusal missing'
+[[ ! -e "$WORKFLOW_TEST_MARKER" ]] || fail 'linked defaults executed before refusal'
+cp "$repo/scripts/dev/agents.env" "$wt/scripts/dev/agents.env"
 dry
 has workspace-write
 has --add-dir
@@ -97,6 +106,7 @@ reject --worktree "$wt" --role reviewer --add-dir "$scratch/extra"
 reject --worktree "$wt" --role reviewer --no-commit
 reject --worktree "$wt" --role writer --resume a --last
 reject --worktree "$repo" --role writer --dry-run
+grep -q 'main worktree is forbidden' "$scratch/err" || fail 'main target not explicitly rejected'
 for branch in master plain; do
     git -C "$wt" switch -qc "$branch"
     reject --worktree "$wt" --role writer --dry-run

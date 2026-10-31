@@ -31,22 +31,11 @@ set -euo pipefail
 
 # Discover from the script's checkout without loading agent-writable Git config.
 SCRIPT_REPO=$(cd "$(dirname "$0")/../.." && pwd -P)
-COMMON_DIR=$(python3 -I - "$SCRIPT_REPO" <<'PYROOT'
-import pathlib, sys
-root = pathlib.Path(sys.argv[1])
-p = root / '.git'
-if p.is_dir():
-    print(p.resolve())
-else:
-    line = p.read_text().strip()
-    if not line.startswith('gitdir: '):
-        sys.exit('error: invalid checkout .git file')
-    gd = (root / line[8:]).resolve()
-    if gd.parent.name != 'worktrees':
-        sys.exit('error: expected a standard linked worktree gitdir')
-    print(gd.parent.parent)
-PYROOT
-)
+[[ -d "$SCRIPT_REPO/.git" && ! -L "$SCRIPT_REPO/.git" ]] || {
+    echo 'agent-worktree: run from the main checkout' >&2
+    exit 2
+}
+COMMON_DIR=$(cd "$SCRIPT_REPO/.git" && pwd -P)
 REPO=$(dirname "$COMMON_DIR")
 EXTERNAL_ROOT=${SENTINEL_WORKTREE_ROOT:-/Volumes/T7/sentinel-worktrees}
 export VCPKG_ROOT=${VCPKG_ROOT:-$HOME/vcpkg}
