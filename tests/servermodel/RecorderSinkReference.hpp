@@ -9,8 +9,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <limits>
 #include <map>
+#include <set>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -352,12 +354,18 @@ inline std::string compareBook(const std::vector<uint8_t> &state, const std::str
 // Normalised open-minute state against the recorder's own export at the same
 // drained point: covered ms equals the symbol's `observed`, and per-level
 // integrals summed into a layer's rows equal the rows accrued to the clock.
-// Tolerance: 1e-9 relative, plus the recorder's running-row-sum residue. Its row
-// size keeps cancellation error up to a few ulps of the largest size the row held
-// (bounded here by peak x 2^-40, i.e. 4096 ulps) over at most 60 s.
+//
+// Rows are compared with an empirical threshold, not a proven bound: the
+// recorder's running row size keeps cancellation residue from sizes that left
+// the row (possibly minutes earlier), so the two sums can differ slightly.
+// tolerance = 1e-9 x row integral + half the size floor held for 1 ms. Blind
+// spot: a missing or extra contribution below that tolerance is not detected,
+// e.g. any level smaller than half the floor present for 1 ms, or in a row
+// with integral I anything below 1e-9 x I. Exact agreement and tolerated
+// differences are counted separately.
 struct OpenMinuteDiff {
-    size_t rows = 0, residueRows = 0; // residueRows: within tolerance only through the residue term
-    long double maxAbs = 0;
+    size_t rows = 0, exactRows = 0, toleratedRows = 0;
+    long double maxToleratedAbs = 0, maxToleratedRelative = 0, maxTolerance = 0;
 };
 inline std::string compareOpenMinute(const nlohmann::json &state, const std::string &symbol,
                                      const ReferenceConsumer::Normalised &n, size_t layer, int64_t rowTickUnits,
@@ -369,7 +377,8 @@ inline std::string compareOpenMinute(const nlohmann::json &state, const std::str
                std::to_string(s.at("observed").get<uint64_t>());
     const bool observing = s.at("valid").get<bool>() && !s.at("bids").empty() && !s.at("asks").empty() &&
                            s.at("bids").back().at(0).get<int64_t>() < s.at("asks").front().at(0).get<int64_t>();
-    std::map<std::pair<int64_t, bool>, long double> mine, theirs, peaks;
+    const long double absolute = state.at("policy").at("sizeScale").at(0).get<double>() * 0.5L;
+    std::map<std::pair<int64_t, bool>, long double> mine, theirs;
     for (const auto *levels : {&n.live, &n.removed})
         for (const auto &l : *levels)
             if (l.integral > 0) mine[{floorDiv(l.units, rowTickUnits), !l.isBid}] += l.integral;
@@ -378,30 +387,34 @@ inline std::string compareOpenMinute(const nlohmann::json &state, const std::str
         long double integral = std::stold(row.at(3).get<std::string>());
         const int64_t last = row.at(5).get<int64_t>();
         if (observing && n.clock > last) integral += size * (n.clock - last);
-        if (integral > 0) {
-            theirs[{row.at(0).get<int64_t>(), row.at(1).get<bool>()}] = integral;
-            peaks[{row.at(0).get<int64_t>(), row.at(1).get<bool>()}] =
-                std::max(size, std::stold(row.at(4).get<std::string>()));
-        }
+        if (integral > 0) theirs[{row.at(0).get<int64_t>(), row.at(1).get<bool>()}] = integral;
     }
-    for (const auto &[key, v] : theirs) {
-        const auto it = mine.find(key);
-        const long double other = it == mine.end() ? 0 : it->second;
-        const long double delta = std::abs(v - other), relative = 1e-9L * std::max(v, other);
-        const long double residue = std::ldexp(peaks[key], -40) * 60'000;
-        if (delta > relative + residue)
-            return "row " + std::to_string(key.first) + (key.second ? " ask" : " bid") + " recorder=" +
-                   std::to_string(double(v)) + " normalised=" + std::to_string(double(other)) +
-                   " delta=" + std::to_string(double(delta));
+    const auto describe = [](const std::pair<int64_t, bool> &key, long double v, long double other, long double d) {
+        char buf[160];
+        std::snprintf(buf, sizeof buf, "row %lld %s recorder=%.17Lg normalised=%.17Lg delta=%.3Lg",
+                      static_cast<long long>(key.first), key.second ? "ask" : "bid", v, other, d);
+        return std::string(buf);
+    };
+    std::set<std::pair<int64_t, bool>> keys;
+    for (const auto &[key, v] : theirs) keys.insert(key);
+    for (const auto &[key, v] : mine) keys.insert(key);
+    for (const auto &key : keys) {
+        const auto a = theirs.find(key), b = mine.find(key);
+        const long double v = a == theirs.end() ? 0 : a->second, other = b == mine.end() ? 0 : b->second;
+        const long double delta = std::abs(v - other);
+        const long double tolerance = 1e-9L * std::max(v, other) + absolute;
+        if (delta > tolerance) return describe(key, v, other, delta);
         if (rowsCompared) ++*rowsCompared;
-        if (diff) {
-            ++diff->rows;
-            if (delta > relative) ++diff->residueRows;
-            diff->maxAbs = std::max(diff->maxAbs, delta);
+        if (!diff) continue;
+        ++diff->rows;
+        diff->maxTolerance = std::max(diff->maxTolerance, tolerance);
+        if (delta == 0) ++diff->exactRows;
+        else {
+            ++diff->toleratedRows;
+            diff->maxToleratedAbs = std::max(diff->maxToleratedAbs, delta);
+            diff->maxToleratedRelative = std::max(diff->maxToleratedRelative, delta / std::max(v, other));
         }
     }
-    for (const auto &[key, v] : mine)
-        if (!theirs.contains(key)) return "row " + std::to_string(key.first) + " only in the normalised state";
     return "";
 }
 

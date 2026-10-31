@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <atomic>
 #include <set>
+#include <tuple>
 #include <sstream>
 
 using namespace recording;
@@ -498,5 +499,57 @@ TEST_F(RecorderSinkTest, ForkLeadDoesNotCopyTheFinalisationFault) {
     EXPECT_EQ(calls.load(), 1);
     EXPECT_EQ(rec.stats().diskErrors, 1u) << "the history fault must still fire on the history recorder";
     EXPECT_EQ(lead->stats().diskErrors, 0u);
+}
+} // namespace
+
+namespace {
+nlohmann::json exported(BookRecorder &rec) {
+    const auto bytes = rec.exportState();
+    return nlohmann::json::from_cbor(bytes.begin(), bytes.end() - 4);
+}
+// The recorder's running row size keeps the residue of 1.0 + 1e-6 - 1.0 into the
+// next minute; the per-level sum does not. The checker tolerates it and reports
+// it as a tolerated (not exact) difference.
+TEST_F(RecorderSinkTest, OpenMinuteCheckToleratesRetainedResidue) {
+    Tee tee;
+    auto c = config(dirOn.path().toStdString());
+    c.sink = &tee;
+    BookRecorder rec(c);
+    for (const auto &s : std::vector<Step>{snap(0, {{true, 99, 1.0}, {true, 99.5, 1e-6}, {false, 101, 4}}),
+                                           upd(10'000, {{true, 99, 0}}), tick(90'000)}) {
+        feed(rec, s);
+        rec.drainForTest();
+    }
+    const auto state = exported(rec);
+    const auto n = tee.ref.normalise(kSym, state["symbols"][kSym]["clock"].get<int64_t>());
+    sinkref::OpenMinuteDiff diff;
+    EXPECT_EQ(sinkref::compareOpenMinute(state, kSym, n, 0, c.layers[0].rowTickUnits, nullptr, &diff), "");
+    EXPECT_GE(diff.toleratedRows, 1u) << "the residue row must be reported as tolerated, not exact";
+    EXPECT_GT(diff.maxToleratedAbs, 0);
+}
+// A removed level's open-minute integral that the state leaves out: detected
+// when it exceeds the threshold, inside the documented blind spot when not.
+TEST_F(RecorderSinkTest, OpenMinuteCheckMissingRemovedIntegral) {
+    for (const auto &[size, ms, detected] : std::vector<std::tuple<double, int64_t, bool>>{
+             {1e-6, 2'000, true},  // 2e-3 size x ms, far above the 5e-7 threshold
+             {1e-7, 3, false}}) {  // 3e-7 size x ms: below half the floor (1e-6) x 1 ms
+        QTemporaryDir dir;
+        Tee tee;
+        auto c = config(dir.path().toStdString());
+        c.sink = &tee;
+        BookRecorder rec(c);
+        for (const auto &s : std::vector<Step>{snap(0, {{true, 99, 2}, {true, 97.5, size}, {false, 101, 4}}),
+                                               upd(ms, {{true, 97.5, 0}}), tick(20'000)}) {
+            feed(rec, s);
+            rec.drainForTest();
+        }
+        const auto state = exported(rec);
+        auto n = tee.ref.normalise(kSym, state["symbols"][kSym]["clock"].get<int64_t>());
+        ASSERT_EQ(sinkref::compareOpenMinute(state, kSym, n, 0, c.layers[0].rowTickUnits), "");
+        ASSERT_EQ(n.removed.size(), 1u);
+        n.removed.clear();
+        const auto error = sinkref::compareOpenMinute(state, kSym, n, 0, c.layers[0].rowTickUnits);
+        EXPECT_EQ(!error.empty(), detected) << "size=" << size << " ms=" << ms << " error=" << error;
+    }
 }
 } // namespace

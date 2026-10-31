@@ -396,8 +396,10 @@ int main(int argc, char **argv) {
             result["bookCheck"] = {{"anchors", bookChecks}, {"mismatches", bookMismatches},
                                    {"levelsCompared", levelsCompared}, {"first", firstBookError}};
             result["openMinuteCheck"] = {{"mismatches", openMinuteMismatches}, {"rowsCompared", openMinuteRows},
-                                         {"residueRows", openDiff.residueRows}, {"maxAbsDiff", double(openDiff.maxAbs)},
-                                         {"maxResidueDiff", double(openDiff.maxResidue)},
+                                         {"exactRows", openDiff.exactRows}, {"toleratedRows", openDiff.toleratedRows},
+                                         {"maxToleratedAbs", double(openDiff.maxToleratedAbs)},
+                                         {"maxToleratedRelative", double(openDiff.maxToleratedRelative)},
+                                         {"maxTolerance", double(openDiff.maxTolerance)},
                                          {"first", firstOpenMinuteError}};
             result["consumerErrors"] = consumer.errors.size();
             if (!consumer.errors.empty()) result["firstConsumerError"] = consumer.errors.front();
