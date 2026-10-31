@@ -42,11 +42,11 @@ try:
             raise RuntimeError("workflow.pushBaseline is missing; conductor must run scripts/dev/install-hooks.sh")
         baseline = git("rev-parse", "--verify", baseline + "^{commit}").decode().strip()
         direct = set(config("workflow.directPaths", "docs/STATUS.md docs/TODO.md").split())
-        revision = local if zero(remote) else remote + ".." + local
-        commits = git("rev-list", "--first-parent", revision).decode().splitlines()
+        exclusions = ["^" + baseline]
+        if not zero(remote):
+            exclusions.append("^" + remote)
+        commits = git("rev-list", "--first-parent", local, *exclusions).decode().splitlines()
         for commit in commits:
-            if ancestor(commit, baseline):
-                continue
             parents = git("rev-list", "--parents", "-n", "1", commit).decode().split()[1:]
             if len(parents) > 1:
                 message = git("show", "-s", "--format=%B", commit)

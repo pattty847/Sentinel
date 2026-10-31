@@ -181,6 +181,23 @@ grep -q "$untrailered.*Writer, Reviewer, Risk" "$scratch/hook.out" || fail 'miss
 git -C "$repo" commit --amend -qm $'merge\n\nWriter: fixture\nReviewer: fixture\nRisk: high'
 trailered=$(git -C "$repo" rev-parse HEAD)
 hook_run "$trailered" "$status" || fail 'trailered merge rejected'
+# A new remote must exclude baseline history in one walk, without one ancestry
+# subprocess per historical commit. Existing remotes need just the FF check.
+for remote in "$zero" "$status"; do
+    trace="$scratch/hook.trace"
+    : > "$trace"
+    GIT_TRACE="$trace" hook_run "$trailered" "$remote" || fail 'traced main push rejected'
+    walks=$(grep -c 'built-in: git rev-list --first-parent ' "$trace" || true)
+    [[ "$walks" == 1 ]] || fail 'expected one first-parent walk'
+    grep -Fq -- "^$baseline" "$trace" || fail 'baseline not excluded from walk'
+    ancestry=$(grep -c 'built-in: git merge-base --is-ancestor ' "$trace" || true)
+    if [[ "$remote" == "$zero" ]]; then
+        [[ "$ancestry" == 0 ]] || fail 'new-remote push performed per-commit ancestry checks'
+    else
+        [[ "$ancestry" == 1 ]] || fail 'existing remote needs only one fast-forward ancestry check'
+        grep -Fq -- "^$remote" "$trace" || fail 'remote not excluded from walk'
+    fi
+done
 if hook_run "$status" "$trailered"; then fail 'non-fast-forward accepted'; fi
 if hook_run "$zero" "$trailered"; then fail 'main deletion accepted'; fi
 (cd "$repo" && printf 'refs/heads/feature/x %s refs/heads/feature/x %s\n' "$bad" "$zero" | "$hook") || fail 'other ref rejected'
