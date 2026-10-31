@@ -131,10 +131,15 @@ grep -q 'thread_id=fixture-thread' "$scratch/err" || fail 'thread id not announc
 [[ $(find "$CODEX_LOG_DIR" -name '*.last.txt' | wc -l) -eq 1 ]] || fail 'last message missing'
 FAKE_RC=7 "$wrapper" --worktree "$wt" --role reviewer < "$scratch/input" > "$scratch/events" 2> "$scratch/err" && fail 'failed Codex passed' || rc=$?
 [[ "$rc" == 7 ]] || fail 'Codex exit code not preserved'
-for code in 0 7; do
-    FAKE_RC=$code FAKE_TAMPER="$gd/config.worktree" "$wrapper" --worktree "$wt" --role writer --prompt-file "$scratch/input" > "$scratch/events" 2> "$scratch/err" && fail 'tampering passed' || true
-    grep -q 'GITDIR TAMPERING DETECTED' "$scratch/err" || fail 'post-run tampering not reported'
-    rm "$gd/config.worktree"
+# Unexpected metadata can be an interrupted operation, not deliberate tampering.
+for entry in config.worktree index.lock; do
+    for code in 0 7; do
+        FAKE_RC=$code FAKE_TAMPER="$gd/$entry" "$wrapper" --worktree "$wt" --role writer --prompt-file "$scratch/input" > "$scratch/events" 2> "$scratch/err" && fail 'invalid gitdir passed' || true
+        grep -Fq 'gitdir check failed: inspect before running git in this worktree' "$scratch/err" || fail 'post-run failure guidance missing'
+        grep -Fq "verify-gitdir: unexpected gitdir entry: $gd/$entry" "$scratch/err" || fail 'specific gitdir failure reason missing'
+        if grep -Fqi 'tampering' "$scratch/err"; then fail 'gitdir failure misreported as tampering'; fi
+        rm "$gd/$entry"
+    done
 done
 echo 'test_codex_exec: argv, refusals, streaming and post-run checks passed'
 
@@ -180,3 +185,16 @@ if hook_run "$status" "$trailered"; then fail 'non-fast-forward accepted'; fi
 if hook_run "$zero" "$trailered"; then fail 'main deletion accepted'; fi
 (cd "$repo" && printf 'refs/heads/feature/x %s refs/heads/feature/x %s\n' "$bad" "$zero" | "$hook") || fail 'other ref rejected'
 echo 'test_codex_exec: hook policy and idempotent installer passed'
+
+# Keep the documented sandbox limits explicit without using a live model.
+python3 -I - "$SRC/docs/AGENT_WORKFLOW.md" <<'PYDOC'
+import pathlib, sys
+section = pathlib.Path(sys.argv[1]).read_text().split('## Codex CLI\n', 1)[1].split('\n## ', 1)[0]
+text = ' '.join(section.split())
+for phrase in ('`packed-refs.lock`', '`git gc --auto`', '`pack-refs`', 'commit still succeeds',
+               '`git gc`', '`git stash`', '`refs/stash` is outside the grant',
+               '`git branch -d` of a packed ref', '`git fetch`',
+               'permission errors', 'expected, not sandbox bugs'):
+    assert phrase in text, 'missing sandbox-limit documentation: ' + phrase
+PYDOC
+echo 'test_codex_exec: sandbox-limit documentation passed'

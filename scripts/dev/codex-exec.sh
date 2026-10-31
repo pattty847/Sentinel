@@ -111,7 +111,7 @@ finish() {
     trap - EXIT
     rm -f "$prompt_tmp"
     if ! verify_gitdir "$branch" "$worktree" >/dev/null; then
-        echo 'CODEX-EXEC: GITDIR TAMPERING DETECTED. Do not run Git in this worktree; inspection required.' >&2
+        echo 'codex-exec: gitdir check failed: inspect before running git in this worktree' >&2
         rc=1
     fi
     exit "$rc"

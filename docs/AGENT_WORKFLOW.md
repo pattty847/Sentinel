@@ -154,6 +154,9 @@ scripts/dev/codex-exec.sh --worktree /path/to/linked-worktree --role writer \
   remain protected. The wrapper resolves real paths, requires a namespaced branch, and refuses the main
   worktree, main/master, detached HEAD and sandbox bypasses. Temporary directories are writable by default,
   so tests under `/tmp` do not establish sandbox isolation. Writers propose `_agent/` changes as `MEMORY:` lines.
+- Inside the sandbox, permission errors for `packed-refs.lock` after commits (`git gc --auto` trying
+  `pack-refs`; the commit still succeeds), `git gc`, `git stash` (`refs/stash` is outside the grant),
+  `git branch -d` of a packed ref, and `git fetch` are expected, not sandbox bugs.
 - `--resume <thread-id>` or `--last` re-passes model, effort, sandbox and approval and changes directory first.
   Resume has no `--add-dir`; the wrapper supplies `sandbox_workspace_write.writable_roots` through `-c`.
   Live resume verification belongs to the conductor. Re-check `~/.codex/models_cache.json` for available models.
