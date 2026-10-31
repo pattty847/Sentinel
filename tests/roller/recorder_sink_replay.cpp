@@ -192,7 +192,9 @@ struct Truth {
                                  {"updateEvents", c.updateEvents}, {"levels", c.levels},
                                  {"connectionBoundaries", c.connectionBoundaries}, {"transport", c.transport},
                                  {"captureInvalidations", c.captureInvalidations}, {"malformed", c.malformed},
-                                 {"droppedUpdates", c.droppedUpdates}}},
+                                 {"droppedUpdates", c.droppedUpdates}, {"v1Frames", c.v1Frames},
+                                 {"v2Frames", c.v2Frames}, {"frameReferences", c.frameReferences},
+                                 {"sequenceJumpsAnyVersion", c.sequenceJumpsAnyVersion}, {"jumps", indep.jumps}}},
                 {"droppedRecorderUpdates", droppedRecorderUpdates}, {"droppedRecorderLevels", droppedRecorderLevels}, {"independentSnapshotDiagnostics", indep.diagnostics},
                 {"anchorRebuild", {{"anchors", anchors}, {"mismatches", anchorMismatches},
                                    {"validityMismatches", validityMismatches}, {"levelsCompared", anchorLevels},
@@ -205,7 +207,8 @@ int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
     if (argc < 7 || argc % 2 == 0) {
         std::cerr << "usage: recorder_sink_replay RAW_ROOT OUT_ROOT PRODUCT YYYY-MM-DD null|noop|consumer|truth REPORT.json"
-                     " [--drop-recorder N] [--drop-independent N]\n";
+                     " [--drop-recorder N] [--drop-independent N] [--drop-recorder-at RECEIVE_MS]"
+                     " [--drop-independent-at RECEIVE_MS]\n";
         return 2;
     }
     try {
@@ -215,7 +218,7 @@ int main(int argc, char **argv) {
         // truth: the consumer checks plus exchange-snapshot agreement and the independent rebuild.
         const bool truth = mode == "truth", consumerMode = mode == "consumer" || truth;
         uint64_t dropRecorder = 0, dropIndependent = 0; // mutation seams, truth mode only
-        int64_t dropRecorderAt = 0, dropIndependentAt = 0; // envelope / receive ms
+        int64_t dropRecorderAt = 0, dropIndependentAt = 0; // receive ms
         for (int i = 7; i + 1 < argc; i += 2) {
             const std::string flag = argv[i];
             if (flag == "--drop-recorder") dropRecorder = std::stoull(argv[i + 1]);
@@ -318,16 +321,16 @@ int main(int argc, char **argv) {
                 auto updates = f.onUpdates;
                 auto invalid = f.onInvalid;
                 f.onInvalid = [&t, invalid](int64_t at, const std::string &reason) { ++t.feedInvalids; invalid(at, reason); };
-                f.onUpdates = [&t, &dropRecorder, &dropRecorderAt, updates](int64_t at, int64_t local, std::vector<Level> levels) {
+                f.onUpdates = [&, updates](int64_t at, int64_t local, std::vector<Level> levels) {
                     if (dropRecorder && ++t.updateMessages == dropRecorder) { ++t.droppedRecorderUpdates; return; }
-                    if (dropRecorderAt && at >= dropRecorderAt && !t.droppedRecorderUpdates) {
+                    if (dropRecorderAt && local >= dropRecorderAt && !t.droppedRecorderUpdates) {
                         ++t.droppedRecorderUpdates;
                         t.droppedRecorderLevels = levels.size();
                         return;
                     }
                     updates(at, local, std::move(levels));
                 };
-                f.onSnapshot = [&t, &recorder, &consumer, &day, snapshot](int64_t at, int64_t local, std::vector<Level> levels) {
+                f.onSnapshot = [&, snapshot](int64_t at, int64_t local, std::vector<Level> levels) {
                     t.snapshot(recorder, consumer, at, day, levels);
                     snapshot(at, local, std::move(levels));
                 };

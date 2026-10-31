@@ -50,12 +50,14 @@ class IndependentBook {
     std::map<std::string, std::string> side[2]; // [0] bids, [1] asks: canonical price -> canonical size
     bool valid = false;
     nlohmann::json diagnostics = nlohmann::json::array(); // snapshots taken while valid
+    nlohmann::json jumps = nlohmann::json::array();       // first sequence jumps (seq > previous + 1)
     uint64_t dropUpdateEvent = 0; // mutation seam: ignore the Nth update event (1-based), 0 = off
     int64_t dropAtReceiveMs = 0;  // mutation seam: ignore the first update event received at/after this
     struct Counts {
         uint64_t records = 0, frames = 0, snapshots = 0, updateEvents = 0, levels = 0, droppedUpdates = 0,
                  v1SequenceGaps = 0, sequenceRegressions = 0, routingGaps = 0, journalGaps = 0,
-                 connectionBoundaries = 0, transport = 0, captureInvalidations = 0, malformed = 0;
+                 connectionBoundaries = 0, transport = 0, captureInvalidations = 0, malformed = 0,
+                 v1Frames = 0, v2Frames = 0, frameReferences = 0, sequenceJumpsAnyVersion = 0;
     } counts;
     // Applies one record; returns true when it carried a sequence discontinuity
     // (v1 jump, regression, routing receipt gap or a framing gap).
@@ -89,6 +91,7 @@ class IndependentBook {
             return gap;
         }
         case Kind::FrameReference: {
+            ++counts.frameReferences;
             const auto j = nlohmann::json::parse(r.payload, nullptr, false);
             if (j.is_object() && j.value("sequence_gaps", uint64_t{0})) { ++counts.routingGaps; invalidate(); gap = true; }
             return gap;
@@ -97,11 +100,18 @@ class IndependentBook {
         default: return gap;
         }
         ++counts.frames;
+        ++(in.version == 1 ? counts.v1Frames : counts.v2Frames);
         if (watchLeft_ && !--watchLeft_) watch_.clear();
         const auto j = nlohmann::json::parse(r.payload, nullptr, false);
         if (!j.is_object()) { ++counts.malformed; invalidate(); return gap; }
         if (const auto s = j.find("sequence_num"); s != j.end() && s->is_number_integer()) {
             const auto seq = s->get<uint64_t>();
+            if (sequence_ && seq > *sequence_ + 1) {
+                ++counts.sequenceJumpsAnyVersion;
+                if (jumps.size() < 50)
+                    jumps.push_back({{"from", *sequence_}, {"to", seq}, {"version", in.version},
+                                     {"receiveMs", r.time.systemNs / 1'000'000}});
+            }
             if (sequence_ && seq <= *sequence_) { ++counts.sequenceRegressions; gap = true; }
             else if (sequence_ && in.version == 1 && seq != *sequence_ + 1) { ++counts.v1SequenceGaps; gap = true; }
             sequence_ = seq;
