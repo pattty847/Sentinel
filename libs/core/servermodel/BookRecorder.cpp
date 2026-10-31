@@ -556,6 +556,7 @@ struct BookRecorder::Impl {
         s.asks.clear();
         ++invalidations;
         sLog_Data("BookRecorder: invalid symbol=" << name << " time=" << s.clock << " reason=" << reason);
+        if (cfg.sink) cfg.sink->onInvalid(name, s.clock, reason, upstream);
         awaitSnapshot(name, s, reason, upstream);
     }
     // An upstream invalidation never replaces a pending wait (a self one is
@@ -678,6 +679,7 @@ struct BookRecorder::Impl {
         if (attempted) s.lastPublish = s.clock;
     }
     void finishMinute(Symbol &s) {
+        if (cfg.beforeMinuteFinalizeForTest) cfg.beforeMinuteFinalizeForTest(s.minute);
         for (size_t li = 0; li < s.layers.size(); ++li) {
             auto &layer = s.layers[li];
             Hmc2Record r;
@@ -728,8 +730,11 @@ struct BookRecorder::Impl {
                 s.observed += static_cast<uint32_t>(end - s.clock);
             s.clock = end;
             finishMinute(s);
+            const int64_t finished = s.minute;
+            const uint32_t observed = s.observed, flags = s.flags | (observed < kMinute ? kPartial : 0);
             s.minute = end;
             resetMinute(s);
+            if (cfg.sink) cfg.sink->onMinute(s.layers.front().header.symbol, finished, observed, flags);
             commit(s);
             // Skip unknown gaps in O(1). Never materialize zero-observation columns.
             if (!s.observing && target >= s.minute + kMinute) {
@@ -973,6 +978,7 @@ struct BookRecorder::Impl {
                 return;
             }
         }
+        RecorderSink *const sink = cfg.sink;
         const bool wasObserving = s.observing;
         if (m.kind == Kind::Snapshot) {
             for (auto &layer : s.layers)
@@ -986,12 +992,19 @@ struct BookRecorder::Impl {
             s.bids.clear();
             s.asks.clear();
             s.flags |= kResynced;
+            if (sink) sink->onReset(m.symbol(), s.clock);
         }
         ++s.serial;
         for (auto &l : s.layers)
             l.touched.clear();
         for (const auto &level : m.levels) {
             const int64_t units = *priceUnits(level.price, cfg.priceScale);
+            auto precision = RecorderSink::Precision::OnGrid;
+            if (sink) {
+                precision = pricePrecision(level.price, units, cfg.priceScale);
+                if (precision != RecorderSink::Precision::OnGrid)
+                    sink->onImprecise(m.symbol(), s.clock, {level.isBid, units, level.price, level.size, precision});
+            }
             auto &book = level.isBid ? s.bids : s.asks;
             const auto old = book.find(units);
             const double oldSize = old == book.end() ? 0 : old->second;
@@ -1006,6 +1019,8 @@ struct BookRecorder::Impl {
                 old->second = level.size;
             else
                 book.emplace(units, level.size);
+            if (sink)
+                sink->onLevel(m.symbol(), s.clock, {level.isBid, units, level.price, level.size, precision});
             for (auto &l : s.layers) {
                 auto [it, added] = l.rows.try_emplace({floorDiv(units, l.header.rowTickUnits), !level.isBid});
                 auto &row = it->second;
@@ -1078,6 +1093,7 @@ struct BookRecorder::Impl {
             sLog_Data("BookRecorder: snapshot symbol=" << m.symbol() << " time=" << s.clock
                                                        << " levels=" << m.levels.size());
         }
+        if (sink) sink->onApplied(m.symbol(), s.clock, s.valid, s.observing);
     }
     void process(const Message &m) {
         if (m.time < kHmc2MinMs || m.time > kMaxTime || m.local < kHmc2MinMs || m.local > kMaxTime) {
@@ -1180,6 +1196,8 @@ std::unique_ptr<BookRecorder> BookRecorder::forkLead(std::function<void(std::sha
     c.writeErrorsCounter = nullptr;
     c.beforePublicationForTest = {};
     c.beforeQueueWaitForTest = {};
+    c.beforeMinuteFinalizeForTest = {};
+    c.sink = nullptr; // the lead replays speculatively and never persists; only history decisions feed a sink
     auto out = std::make_unique<BookRecorder>(std::move(c));
     auto &dst = *out->impl_;
     // The new worker touches symbols only after dequeuing a message under this mutex.

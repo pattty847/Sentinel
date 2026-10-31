@@ -180,6 +180,7 @@ json roll(const RollOptions& o) {
             }
             cfg.minuteColumnsCounter = o.minuteColumnsCounter;
             cfg.writeErrorsCounter = o.writeErrorsCounter;
+            cfg.sink = o.recorderSink;
             return cfg;
         };
         const auto describeGrid = [&](const Grid& grid) {

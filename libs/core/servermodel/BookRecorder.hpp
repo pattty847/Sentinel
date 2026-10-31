@@ -1,5 +1,6 @@
 #pragma once
 #include "Hmc2Store.hpp"
+#include <cmath>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -16,6 +17,69 @@ struct LayerConfig {
     double highMult;
     bool hourlyRollup;
 };
+// The recorder's own book, observation and integration-clock decisions, called
+// synchronously on the worker thread in decision order. `clock` is the symbol's
+// integration clock (never decreases; backward and late envelopes are clamped).
+// Order within one message: onMinute for each minute advance() finishes, then:
+//   Tick: nothing more. Invalid: onInvalid(upstream=true).
+//   Snapshot/update applied: [onReset] then per input level [onImprecise] [onLevel],
+//   then exactly one of onApplied or onInvalid. A malformed batch gets onInvalid
+//   only, before any level; a one-sided or crossed snapshot, or a row overflow,
+//   gets onInvalid after its levels. A one-sided or crossed update only stops
+//   observation (onApplied observing=false). An update while invalid: nothing.
+//   A rejected timestamp or a worker exception invalidates every symbol
+//   (onInvalid upstream=false), possibly after some of the message's onLevel calls.
+// onLevel reports each accepted change (size differs) after the book holds it.
+// onReset and onInvalid clear the book; after onInvalid nothing integrates until
+// an accepted snapshot. Time integrates only while observing (onApplied).
+// onMinute fires after the minute is finalised (pending record built, clock and
+// minute advanced), before the next minute's events: once per bucket at most. A
+// failed finalisation reports onInvalid instead and the minute stays open. Minutes
+// it never reports observed nothing. importState and forkLead emit nothing.
+// Implementations must not throw or block and must outlive the recorder.
+//
+// Price domain: binary64 prices parsed from exchange decimal text and a priceScale
+// that is an exactly representable integer (the grid uses 10^k <= 1e15). Levels key
+// on llround(price * priceScale). The recorder sees only the double, so decimal-text
+// exactness ("99.0000000000000001" parses to 99.0) can only be judged where the text
+// exists, before parsing. pricePrecision() judges the double: OnGrid never flags an
+// on-grid decimal; for units < kPriceUnitsDomain every price more than 2^-9 of a unit
+// off the grid is OffGrid; units >= kPriceUnitsDomain are OutsideDomain (unknown).
+class RecorderSink {
+  public:
+    enum class Precision : uint8_t { OnGrid, OffGrid, OutsideDomain };
+    struct LevelChange {
+        bool isBid;
+        int64_t units; // nearest price unit at priceScale, the book key
+        double price;  // as received
+        double size;   // new size, 0 removes the level
+        Precision precision;
+    };
+    virtual ~RecorderSink() = default;
+    virtual void onReset(const std::string &symbol, int64_t clock) noexcept = 0;
+    // Every input level whose price is not OnGrid, before the zero-change check:
+    // also when its rounded key collides with an equal-size level and the book
+    // does not change.
+    virtual void onImprecise(const std::string &symbol, int64_t clock, const LevelChange &level) noexcept = 0;
+    virtual void onLevel(const std::string &symbol, int64_t clock, const LevelChange &level) noexcept = 0;
+    virtual void onApplied(const std::string &symbol, int64_t clock, bool valid, bool observing) noexcept = 0;
+    virtual void onInvalid(const std::string &symbol, int64_t clock, const std::string &reason,
+                           bool upstream) noexcept = 0;
+    // bucketStartMs + 60 s == clock. flags as HMC2 minute flags, without the
+    // per-layer kUnderflow encoding bit.
+    virtual void onMinute(const std::string &symbol, int64_t bucketStartMs, uint32_t observedMs,
+                          uint32_t flags) noexcept = 0;
+};
+inline constexpr int64_t kPriceUnitsDomain = int64_t{1} << 40;
+// An on-grid decimal's binary64 product is within 2^-52 |scaled| of its units
+// (input and product rounding); the 2^-50 bound leaves a 4x margin.
+inline RecorderSink::Precision pricePrecision(double price, int64_t units, double priceScale) {
+    if (units >= kPriceUnitsDomain) return RecorderSink::Precision::OutsideDomain;
+    const double scaled = price * priceScale;
+    return std::abs(scaled - static_cast<double>(units)) <= std::ldexp(std::abs(scaled), -50)
+               ? RecorderSink::Precision::OnGrid
+               : RecorderSink::Precision::OffGrid;
+}
 struct RecorderConfig {
     std::filesystem::path root;
     double priceScale = 100.0;
@@ -33,6 +97,8 @@ struct RecorderConfig {
     // Deterministic allocation-failure seam, before building any publication
     // (open-minute records and pending/committed copies). Tests only.
     std::function<void(bool provisional)> beforePublicationForTest;
+    // Deterministic minute-finalisation failure seam (bucket start). Tests only.
+    std::function<void(int64_t bucketStartMs)> beforeMinuteFinalizeForTest;
     // Continuous empty, one-sided or crossed books stay reconstructible but unobserved.
     // After this integration-clock duration, request a precautionary snapshot.
     int64_t oneSidedSuspectMs = 30'000;
@@ -53,6 +119,8 @@ struct RecorderConfig {
     // claim (committedThroughMs 0); normally created by forkLead().
     enum class Publication { Finals = 1, Lead = 2 };
     Publication publication = Publication::Finals;
+    // Optional decision feed (RecorderSink). Not policy; forkLead does not copy it.
+    RecorderSink *sink = nullptr;
 };
 struct Level {
     bool isBid;
