@@ -244,9 +244,9 @@ Public checkouts do not require private docs to build or test.
 ## 8a) Commits and Git
 
 - Commit a coherent, verified feature slice; do not sweep unrelated modified files into it. Messages say what changed and why at the feature level.
-- Writers whose harness can write `.git` may commit on their own branch. Sandboxed writers (Codex `workspace-write` cannot write a linked worktree's index) leave a clean diff and report it; the conductor commits for them.
+- Writers commit coherent steps on their own branch. Codex writers launch through `scripts/dev/codex-exec.sh`, which grants the scoped Git directories needed to commit; the conductor does not commit for them.
 - Writers never rebase onto `main`, merge or push. The conductor rebases during landing, lands and pushes.
-- Push `main` only after clean landings and a secret scan; never force.
+- Push `main` only after clean landings and a secret scan; never force. The pre-push hook requires land trailers on merges and permits direct commits only to `workflow.directPaths` (default `docs/STATUS.md docs/TODO.md`). The conductor runs `scripts/dev/install-hooks.sh` after landing hook changes; its absolute hooks path stays in the main checkout.
 - Never commit secrets (the ntfy topic lives only in `ops/monitoring/ntfy.env`), `.codex/`, screenshots, or changes the owner is making in parallel.
 - Line endings: LF everywhere (`.gitattributes` enforces it; `.ps1`/`.bat` check out as CRLF). Never write CRLF into other files.
 
@@ -259,7 +259,7 @@ Public checkouts do not require private docs to build or test.
 
 Roles:
 - **Owner:** decides behaviour, data and looks; picks the conductor; sets or ends policy overrides; approves visual defaults, cutovers, format changes and data deletions. Silence, elapsed time or a preselected option is never approval.
-- **Conductor:** one session per repo at a time, chosen by the owner. Claude Opus 5.5 is the default; Codex conducts when the owner hands over (for example for computer use or work outside a sandbox). Plans, dispatches, decides non-owner questions with a stated default, commits for sandboxed writers, lands, pushes, deploys (section 4b) and keeps `docs/STATUS.md` current. Other sessions answer questions only.
+- **Conductor:** one session per repo at a time, chosen by the owner. Claude Opus 5.5 is the default; Codex conducts when the owner hands over (for example for computer use or work outside a sandbox). Plans, dispatches, decides non-owner questions with a stated default, lands, pushes, deploys (section 4b) and keeps `docs/STATUS.md` current. Other sessions answer questions only.
 - **Writers and reviewers:** Claude subagents (`opus`, `sonnet`) or Codex (`gpt-6-sol` for bounded work, `gpt-6-astra` for harder work). Claude Fable (`fable`) for high-risk review and large cross-cutting plans.
 - Route by capability, not vendor. Visual or native-GPU work needs a harness that can run the GUI or Metal: Claude subagents run both; sandboxed Codex sees its own branch through the GUI host but cannot run Metal tests.
 
@@ -282,13 +282,14 @@ Task packet (the dispatch prompt, self-contained): base commit; branch and workt
 Hand-off protocol:
 1. The conductor creates the worktree from current `main`: `scripts/dev/agent-worktree.sh create <branch>` (`lt-sol/...`, `lt-astra/...`, `lt-claude/...`).
 2. The writer works on that base (no rebase, no merging `main`), builds and runs focused checks through the build queue.
-3. The writer finishes with `READY: <branch>` and its tip (or "uncommitted diff" when sandboxed), what changed and why, the checks run with their summary lines, and what it could not verify. Then one `MEMORY: <file> | <entry text>` line per proposed `_agent/` entry, or `MEMORY: none`. Last line: `WORKFLOW: <what cost time, surprised you, or the docs got wrong; or none>`. Use `BLOCKED: <branch>` with the reason if it cannot finish.
-4. After review PASS (and owner approval where required), the conductor lands with `scripts/dev/agent-worktree.sh land <branch>`, stamping audit trailers with repeated `--trailer 'Key: value'`: `Slice`, `Plan`, `Risk`, `Writer`, `Reviewer`, `Review-Rounds`, `Findings: blocker=N major=N minor=N`, `Deferred`, `Writer-Tokens`, `Reviewer-Tokens`, `Planner-Tokens` (exact, from `ma-panel`), `Evidence`: rebase onto `main`, build, full ctest, `git range-diff` gate, `--no-ff` merge, worktree removal. One branch at a time; every other READY branch re-runs `land` before it lands. Bisect with `git bisect --first-parent`.
+3. The writer finishes with `READY: <branch>` and its committed tip, what changed and why, the checks run with their summary lines, and what it could not verify. Then one `MEMORY: <file> | <entry text>` line per proposed `_agent/` entry, or `MEMORY: none`. Last line: `WORKFLOW: <what cost time, surprised you, or the docs got wrong; or none>`. Use `BLOCKED: <branch>` with the reason if it cannot finish.
+4. After review PASS (and owner approval where required), the conductor lands with `scripts/dev/agent-worktree.sh land <branch>`, with required nonempty `Writer`, `Reviewer` and `Risk` trailers (missing keys exit 2 before rebase/build), stamping audit trailers with repeated `--trailer 'Key: value'`: `Slice`, `Plan`, `Risk`, `Writer`, `Reviewer`, `Review-Rounds`, `Findings: blocker=N major=N minor=N`, `Deferred`, `Writer-Tokens`, `Reviewer-Tokens`, `Planner-Tokens` (exact, from `ma-panel`), `Evidence`: rebase onto `main`, build, full ctest, `git range-diff` gate, `--no-ff` merge, worktree removal. One branch at a time; every other READY branch re-runs `land` before it lands. Bisect with `git bisect --first-parent`.
 
 Codex CLI (hard rules; usage and quirks in `docs/AGENT_WORKFLOW.md`):
-- Binary: `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex` (`codex` is only a zsh alias).
-- Lieutenants always run sandboxed: `-s workspace-write` (writers) or `-s read-only` (reviews), always `-c approval_policy='"never"'`, stdin closed (`< /dev/null`). Never pass `--dangerously-bypass-approvals-and-sandbox`.
-- `codex exec resume` keeps neither model nor sandbox: pass `-m` and the sandbox settings again.
+- Launch only through `scripts/dev/codex-exec.sh` from trusted tooling. Defaults live in `scripts/dev/agents.env`; environment variables override defaults, flags override environment variables.
+- Lieutenants always run sandboxed: writer = `workspace-write`, reviewer = `read-only`. Approval defaults to `never` and can be explicitly changed with `--approval`. Never pass `--dangerously-*` flags or use `danger-full-access`.
+- The wrapper supplies prompts through file redirection, records JSONL/last-message logs, prints the thread id, and re-passes model, effort, sandbox and approval for `--resume`/`--last`.
+- Before any unsandboxed Git command in an agent worktree, run the main checkout's `scripts/dev/agent-worktree.sh verify-gitdir <branch>`. `land` and the wrapper enforce the check; failure requires inspection, never automatic repair. Do not run tooling from an agent-writable checkout outside the sandbox.
 
 Continuity:
 - Start a fresh conductor at a completed wave boundary. It reads this file and `docs/STATUS.md`, then only the plan sections the next task needs.
