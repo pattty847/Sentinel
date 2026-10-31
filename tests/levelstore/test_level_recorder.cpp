@@ -700,6 +700,16 @@ TEST(Checkpoint, ARefusedRestoreStaysUnobservedUntilAValidExactSnapshot) {
     ASSERT_EQ(b.messages.size(), 2u);
     EXPECT_EQ(b.messages[0], (TimelineMessage{kFloor + 2'000, false, false, ClearCause::RestoreRefused}));
     EXPECT_EQ(b.messages[1], (TimelineMessage{kFloor + 5'000, true, true, ClearCause::None}));
+    // The minute's part before the checkpoint is lost: the block says so and is
+    // read as unobserved; the next minute continues normally.
+    EXPECT_TRUE(b.damaged);
+    EXPECT_FALSE(b.observedAtStart);
+    EXPECT_FALSE(out.blocks[1].damaged);
+    const auto swept = sweep(out);
+    ASSERT_EQ(swept.size(), 2u);
+    EXPECT_EQ(swept[0].covered, 0);
+    for (const auto &r : swept[0].rows) EXPECT_EQ(std::tuple(r.integral, r.presenceMs, r.peak), std::tuple(0.0L, int64_t{0}, 0.0L));
+    EXPECT_EQ(swept[1].covered, kMin);
 }
 
 TEST(Failure, OutputFailureLosesTheMinuteClearsAndRecoversAtAValidExactSnapshot) {
@@ -719,6 +729,46 @@ TEST(Failure, OutputFailureLosesTheMinuteClearsAndRecoversAtAValidExactSnapshot)
     EXPECT_EQ(out.blocks[0].bucketStartMs, kFloor + kMin); // minute 0 is missing, never fabricated
     EXPECT_EQ(out.blocks[0].messages[0], (TimelineMessage{kFloor + kMin, false, false, ClearCause::Failed}));
     EXPECT_TRUE(out.blocks[0].messages[1].reset);
+    // The reader's book is stale after the lost minute: the next one starts unobserved.
+    EXPECT_FALSE(out.blocks[0].observedAtStart);
+    EXPECT_FALSE(out.blocks[0].damaged);
+    const auto swept = sweep(out);
+    ASSERT_EQ(swept.size(), 2u);
+    EXPECT_EQ(swept[0].covered, kMin - 3'000); // observed from the recovering snapshot
+}
+
+// A reader enforces observation continuity between consecutive whole minutes; it
+// accepts a block's own start state only after a damaged block or a missing minute.
+TEST(MessageStates, SweepContinuityDamagedBlocksAndGaps) {
+    BookImage image{kFloor, true, {{true, 9900, 2}}};
+    MinuteBlock a{kFloor, 60'000, 0, true, false, {}, {}};
+    MinuteBlock b = a;
+    b.bucketStartMs = kFloor + kMin;
+    b.observedAtStart = false; // does not continue a
+    std::vector<BinRow> rows;
+    int64_t covered = 0;
+    MinuteSweep s;
+    s.start(image);
+    s.apply(a, rows, covered);
+    EXPECT_EQ(covered, kMin);
+    EXPECT_THROW(s.apply(b, rows, covered), std::runtime_error);
+    MinuteSweep gap; // a missing minute in between: b's start state is taken as given
+    gap.start(image);
+    gap.apply(a, rows, covered);
+    b.bucketStartMs = kFloor + 2 * kMin;
+    gap.apply(b, rows, covered);
+    EXPECT_EQ(covered, 0);
+    MinuteSweep damaged; // a damaged block is unobserved and frees the next start state
+    damaged.start(image);
+    a.damaged = true;
+    damaged.apply(a, rows, covered);
+    EXPECT_EQ(covered, 0);
+    ASSERT_EQ(rows.size(), 1u);
+    EXPECT_EQ(std::tuple(rows[0].integral, rows[0].presenceMs, rows[0].peak, rows[0].last),
+              std::tuple(0.0L, int64_t{0}, 0.0L, 2.0L));
+    b.bucketStartMs = kFloor + kMin;
+    damaged.apply(b, rows, covered);
+    EXPECT_FALSE(damaged.observed());
 }
 
 TEST(Failure, AClockRegressionFailsClosedAndForeignSymbolsAreIgnored) {

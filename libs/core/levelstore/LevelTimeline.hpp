@@ -46,7 +46,8 @@ struct MinuteBlock {
     uint32_t recorderObservedMs = 0; // the recorder's own covered time (onMinute)
     uint32_t recorderFlags = 0;      // the recorder's minute flags (onMinute)
     bool observedAtStart = false;    // C's observation at bucketStartMs
-    bool damaged = false;            // C lost part of this minute (failure): read it as unobserved
+    bool damaged = false;            // C lost part of this minute (a failure or a refused restore):
+                                     // its changes and clears still apply, but it is read as unobserved
     std::vector<TimelineMessage> messages; // ascending timeMs (equal times are distinct states)
     std::vector<TimelineChange> changes;   // ascending message; one change per level per message
     bool operator==(const MinuteBlock &) const = default;

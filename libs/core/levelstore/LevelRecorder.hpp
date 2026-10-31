@@ -84,7 +84,8 @@ class LevelRecorder final : public recording::RecorderSink {
     // binding, or not paired with exactly this recorder state is refused: C starts
     // empty and unobserved (Unobserved::RestoreRefused), records a clear at the
     // checkpoint clock once the day has started, logs a warning and counts it. It
-    // becomes observed again only at a valid exact snapshot (as Unsupported).
+    // becomes observed again only at a valid exact snapshot (as Unsupported). The
+    // minute that contains the checkpoint is marked damaged (its earlier part is lost).
     struct ImportResult {
         bool ok = false;
         std::string reason;
@@ -122,7 +123,7 @@ class LevelRecorder final : public recording::RecorderSink {
     void unsupported(const LevelChange &level, int64_t clock);
     void endMessage(int64_t clock, bool valid, bool observing, bool invalidated);
     void startDay();
-    void fail(const char *what, int64_t clock) noexcept;
+    void fail(const char *what, int64_t clock, bool damagesMinute = true) noexcept;
     void clearBook() noexcept;
     void resetFresh() noexcept;
 

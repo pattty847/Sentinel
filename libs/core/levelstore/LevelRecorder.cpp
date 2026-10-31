@@ -312,8 +312,10 @@ void LevelRecorder::onMinute(const std::string &symbol, int64_t bucketStartMs, u
         open_.messages.clear();
         open_.changes.clear();
         open_.damaged = false;
-        open_.observedAtStart = observed_;
-        if (lost) fail("output failed; minute lost", end);
+        // After a lost minute the reader's book is stale: the next minute must not
+        // claim to start observed (fail() then records the clear at its start).
+        open_.observedAtStart = observed_ && !lost;
+        if (lost) fail("output failed; minute lost", end, false);
     } catch (const std::exception &e) {
         fail(e.what(), end);
     } catch (...) {
@@ -327,9 +329,11 @@ void LevelRecorder::clearBook() noexcept {
     touched_.clear();
 }
 
-// Failure: C cannot trust its book. It records a clear (or marks the minute damaged
-// when even that fails) and stays unobserved until a valid exact snapshot.
-void LevelRecorder::fail(const char *what, int64_t clock) noexcept {
+// Failure: C cannot trust its book. It records a clear and stays unobserved until a
+// valid exact snapshot. A failure inside an event may have lost part of the minute's
+// timeline (the failing message itself), so that minute is marked damaged: readers
+// take it as unobserved. A lost output minute damages nothing that is still emitted.
+void LevelRecorder::fail(const char *what, int64_t clock, bool damagesMinute) noexcept {
     ++stats_.failures;
     const bool had = liveLevels() > 0 || observed_;
     inMessage_ = messageReset_ = messageUnsupported_ = false;
@@ -342,6 +346,7 @@ void LevelRecorder::fail(const char *what, int64_t clock) noexcept {
     } catch (...) {
     }
     unobserved_ = Unobserved::Failed;
+    if (damagesMinute && dayStarted_) open_.damaged = true;
     if (!had || !dayStarted_) return;
     try {
         const int64_t at = open_.messages.empty() ? clock : std::max(clock, open_.messages.back().timeMs);
@@ -528,6 +533,8 @@ LevelRecorder::ImportResult LevelRecorder::importState(const std::vector<uint8_t
     lastClock_ = recorderClock.value_or(INT64_MIN);
     dayStarted_ = recorderClock && *recorderClock >= binding_.floorMs;
     if (dayStarted_) {
+        // The part of this minute before the checkpoint was in the refused state.
+        open_.damaged = true;
         try {
             open_.messages.push_back({*recorderClock, false, false, ClearCause::RestoreRefused});
             ++stats_.messages;

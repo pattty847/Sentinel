@@ -453,7 +453,12 @@ int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
     try {
         if (argc == 5 && std::string(argv[1]) == "compare") {
-            const auto result = compare(argv[2], argv[3]);
+            json result;
+            try {
+                result = compare(argv[2], argv[3]);
+            } catch (const std::exception &e) { // a stream that cannot be read is a difference, reported
+                result = {{"pass", false}, {"differingRows", nullptr}, {"error", e.what()}};
+            }
             std::ofstream(argv[4]) << result.dump(1) << '\n';
             std::cout << result.dump() << '\n';
             return result.at("pass").get<bool>() ? 0 : 3;
