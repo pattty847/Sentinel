@@ -46,7 +46,10 @@ add_executable(one_sided_replay one_sided_replay.cpp)
 target_link_libraries(one_sided_replay PRIVATE sentinel_core Qt6::Core)
 
 # Read-only sink evidence over real journals; scratch output only, never in ctest.
+# Mach thread CPU accounting: macOS only.
+if(APPLE)
 find_package(zstd CONFIG REQUIRED)
 add_executable(recorder_sink_replay recorder_sink_replay.cpp)
 target_link_libraries(recorder_sink_replay PRIVATE sentinel_core Qt6::Core
     $<IF:$<TARGET_EXISTS:zstd::libzstd_shared>,zstd::libzstd_shared,zstd::libzstd_static>)
+endif()

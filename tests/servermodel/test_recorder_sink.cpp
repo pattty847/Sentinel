@@ -8,6 +8,9 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <cmath>
+#include <random>
+#include <algorithm>
 #include <set>
 #include <sstream>
 
@@ -42,9 +45,18 @@ struct Tee final : RecorderSink {
         log.push_back("reset" + at(clock));
         ref.onReset(s, clock);
     }
+    static const char *precision(Precision p) {
+        return p == Precision::OnGrid ? "" : p == Precision::OffGrid ? " offgrid" : " outside";
+    }
+    void onImprecise(const std::string &s, int64_t clock, const LevelChange &c) noexcept override {
+        std::ostringstream o;
+        o << "imprecise " << (c.isBid ? "b " : "a ") << c.units << " " << c.size << precision(c.precision) << at(clock);
+        log.push_back(o.str());
+        ref.onImprecise(s, clock, c);
+    }
     void onLevel(const std::string &s, int64_t clock, const LevelChange &c) noexcept override {
         std::ostringstream o;
-        o << "level " << (c.isBid ? "b " : "a ") << c.units << " " << c.size << (c.exact ? "" : " inexact") << at(clock);
+        o << "level " << (c.isBid ? "b " : "a ") << c.units << " " << c.size << precision(c.precision) << at(clock);
         log.push_back(o.str());
         ref.onLevel(s, clock, c);
     }
@@ -175,7 +187,7 @@ TEST_F(RecorderSinkTest, SnapshotUpdatesDeletesAndRuns) {
            tee);
     EXPECT_EQ(tee.ref.counts.resets, 2u);
     EXPECT_EQ(tee.ref.counts.levels, 4u + 3 + 1 + 1 + 2 + 1);
-    EXPECT_EQ(tee.ref.counts.inexact, 0u);
+    EXPECT_EQ(tee.ref.counts.offGrid + tee.ref.counts.outsideDomain, 0u);
     // Bid 99: size 2 over [0,10s), size 5 over [10s,70s), reset at the snapshot.
     const auto run99 = [&](int64_t start) {
         return std::find_if(tee.ref.runs.begin(), tee.ref.runs.end(),
@@ -298,9 +310,10 @@ TEST_F(RecorderSinkTest, FinerTickPriceIsDetectedAndHmc2Unchanged) {
     Tee tee;
     std::vector<size_t> marks;
     verify({snap(0, kBook), upd(10'000, {{true, 99.004, 1}, {true, 97.1, 2}})}, tee, &marks);
-    EXPECT_EQ(tee.ref.counts.inexact, 1u);
-    EXPECT_EQ(tee.log[marks[0]], "level b 9900 1 inexact @10000"); // rounded onto 99.00
-    EXPECT_EQ(tee.log[marks[0] + 1], "level b 9710 2 @10000");
+    EXPECT_EQ(tee.ref.counts.offGrid, 1u);
+    EXPECT_EQ(tee.log[marks[0]], "imprecise b 9900 1 offgrid @10000"); // rounded onto 99.00
+    EXPECT_EQ(tee.log[marks[0] + 1], "level b 9900 1 offgrid @10000");
+    EXPECT_EQ(tee.log[marks[0] + 2], "level b 9710 2 @10000");
 }
 
 TEST_F(RecorderSinkTest, ForkLeadDoesNotCopyTheSink) {
@@ -330,7 +343,106 @@ TEST_F(RecorderSinkTest, RowSumResidueAtTheFloorIsClassified) {
             upd(10'000, {{true, 99, 0}}),
             tick(130'000)},
            tee);
-    EXPECT_GE(lastRows.underflowAtFloor, 1u);
+    EXPECT_GE(lastRows.underflowTieRecords, 1u);
     EXPECT_EQ(lastRows.underflowMismatches, 0u);
+}
+} // namespace
+
+namespace {
+// An off-grid price whose rounded key holds the same size changes nothing in the
+// book, so no onLevel: it must still be visible.
+TEST_F(RecorderSinkTest, SameSizeCollisionIsStillReported) {
+    Tee tee;
+    std::vector<size_t> marks;
+    verify({snap(0, kBook), upd(10'000, {{true, 99.004, 2}})}, tee, &marks);
+    EXPECT_EQ(std::vector<std::string>(tee.log.begin() + marks[0], tee.log.begin() + marks[1]),
+              (std::vector<std::string>{"imprecise b 9900 2 offgrid @10000", "applied v1 o1 @10000"}));
+    EXPECT_EQ(tee.ref.counts.offGrid, 1u);
+}
+
+std::string decimal(int64_t units, int decimals) {
+    std::string s = std::to_string(units);
+    if (s.size() <= size_t(decimals)) s.insert(0, size_t(decimals) + 1 - s.size(), '0');
+    s.insert(s.size() - size_t(decimals), ".");
+    return s;
+}
+RecorderSink::Precision judge(const std::string &text, double scale, int64_t *unitsOut = nullptr) {
+    const double price = std::strtod(text.c_str(), nullptr);
+    const auto units = *priceUnits(price, scale);
+    if (unitsOut) *unitsOut = units;
+    return pricePrecision(price, units, scale);
+}
+TEST(PricePrecision, DecimalBoundaryLargeUnitsAndPepeScale) {
+    using P = RecorderSink::Precision;
+    EXPECT_EQ(judge("99.01", 100), P::OnGrid);
+    EXPECT_EQ(judge("99.005", 100), P::OffGrid); // 9900.499999999998 rounds to 9900
+    EXPECT_EQ(judge("99.0001", 100), P::OffGrid);
+    EXPECT_EQ(judge("97.1", 100), P::OnGrid);    // product is 9710.000000000002
+    int64_t units = 0;
+    EXPECT_EQ(judge("10995116.27775", 1e5, &units), P::OnGrid);
+    EXPECT_EQ(units, kPriceUnitsDomain - 1);
+    EXPECT_EQ(judge("10995116.277741", 1e5), P::OffGrid); // 0.1 unit off, top of the domain
+    EXPECT_EQ(judge("10995116.27776", 1e5), P::OutsideDomain);
+    // Above the domain an on-grid decimal can round to the wrong key: unknown, never OnGrid.
+    EXPECT_EQ(judge("4357.433857363632", 1e12), P::OutsideDomain);
+    EXPECT_EQ(judge("0.00000428", 1e8), P::OnGrid);
+    EXPECT_EQ(judge("0.000004285", 1e8), P::OffGrid);
+}
+// No false positive on any on-grid decimal, and every decimal at least 0.01 unit
+// off the grid is flagged, across the domain at BTC and PEPE scales.
+TEST(PricePrecision, RandomDecimalsInTheDomain) {
+    std::mt19937_64 rng(11);
+    for (const int decimals : {2, 8}) {
+        const double scale = std::pow(10.0, decimals);
+        for (int i = 0; i < 200'000; ++i) {
+            const int64_t n = int64_t(rng() % uint64_t(kPriceUnitsDomain - 1)) + 1;
+            ASSERT_EQ(judge(decimal(n, decimals), scale), RecorderSink::Precision::OnGrid) << decimal(n, decimals);
+            const auto off = decimal(n, decimals) + std::to_string(1 + rng() % 98); // >= 0.01 unit off
+            if (judge(off, scale) != RecorderSink::Precision::OffGrid) ADD_FAILURE() << off;
+        }
+    }
+}
+
+// A minute whose finalisation throws is reported once, after it succeeds; the
+// failure itself is an onInvalid.
+TEST_F(RecorderSinkTest, FailedMinuteFinalisationIsNotReported) {
+    Tee tee;
+    auto c = config(dirOn.path().toStdString());
+    c.sink = &tee;
+    int failures = 1;
+    c.beforeMinuteFinalizeForTest = [&](int64_t bucket) {
+        if (bucket == kEpoch && failures-- > 0) throw std::runtime_error("injected finalisation failure");
+    };
+    BookRecorder rec(c);
+    for (const auto &s : std::vector<Step>{snap(0, kBook), upd(30'000, {{true, 99, 5}}), tick(65'000),
+                                           snap(70'000, kBook), tick(200'000)}) {
+        feed(rec, s);
+        rec.drainForTest();
+    }
+    const auto count = [&](const std::string &prefix) {
+        return std::count_if(tee.log.begin(), tee.log.end(), [&](const auto &l) { return l.rfind(prefix, 0) == 0; });
+    };
+    EXPECT_EQ(count("minute 0 "), 1) << "a failed minute must not be reported before it is finalised";
+    EXPECT_EQ(count("invalid worker exception u0 @60000"), 1);
+    EXPECT_EQ(count("minute 60000 "), 1);
+    EXPECT_GT(rec.stats().diskErrors, 0u);
+}
+
+// The checker itself: an entry with a nonzero code where no native level has
+// any integral is a failure, not an off-by-one tolerance.
+TEST(RowCheckItself, ZeroIntegralWithNonzeroCodeFails) {
+    Hmc2Record r;
+    r.header.layer = "near";
+    r.header.rowTickUnits = 100;
+    r.observedMs = 60'000;
+    r.bidRowLo = r.askRowLo = 0;
+    r.bidRowHi = r.askRowHi = 1000;
+    r.entries.push_back({99, false, 1, 1, 0});
+    ReferenceConsumer::Minute m;
+    m.coveredMs = m.eventObservedMs = 60'000;
+    RowCheck rc;
+    rc.check(r, m);
+    EXPECT_EQ(rc.zeroNonzeroMismatches, 1u);
+    EXPECT_FALSE(rc.clean());
 }
 } // namespace

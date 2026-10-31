@@ -42,7 +42,7 @@ class ReferenceConsumer final : public RecorderSink {
     };
     struct Counts {
         uint64_t resets = 0, levels = 0, applied = 0, invalid = 0, upstreamInvalid = 0, minutes = 0,
-                 inexact = 0, runsClosed = 0, suspensions = 0, resumptions = 0, validations = 0,
+                 offGrid = 0, outsideDomain = 0, runsClosed = 0, suspensions = 0, resumptions = 0, validations = 0,
                  minutesNotStored = 0;
     };
 
@@ -59,10 +59,12 @@ class ReferenceConsumer final : public RecorderSink {
         ++counts.resets;
         clearBook(b, clock);
     }
+    void onImprecise(const std::string &, int64_t, const LevelChange &c) noexcept override {
+        ++(c.precision == Precision::OutsideDomain ? counts.outsideDomain : counts.offGrid);
+    }
     void onLevel(const std::string &symbol, int64_t clock, const LevelChange &c) noexcept override {
         auto &b = at(symbol, clock);
         ++counts.levels;
-        if (!c.exact) ++counts.inexact;
         const int side = c.isBid ? 0 : 1;
         auto [it, added] = b.side[side].try_emplace(c.units);
         auto &l = it->second;
@@ -170,32 +172,38 @@ class ReferenceConsumer final : public RecorderSink {
 };
 
 // HMC2 row equation: for each minute row, sum over native levels in the row of
-// size x observed ms / observedMs equals the entry within code quantisation.
+// size x observed ms / observedMs equals the entry. Both sides use the same
+// encoder; the only tolerated difference is one code, from summation order (the
+// recorder keeps a running row sum, this sums native levels), counted separately.
+// A zero integral must encode as code 0 and a nonzero one as code >= 1. Peaks
+// are not reconstructed: peak and underflow completeness stay unproven.
 struct RowCheck {
-    uint64_t records = 0, entries = 0, rowsCompared = 0, underflowRows = 0, codeMismatches = 0, missingEntries = 0,
-             observedMismatches = 0, flagMismatches = 0, underflowMismatches = 0, underflowAtFloor = 0,
-             unmatchedRecords = 0;
-    double minFloorTieRatio = 0; // smallest native-sum twap / floor among floor-tie entries
+    uint64_t records = 0, entries = 0, rowsCompared = 0, codeExact = 0, codeOffByOne = 0, codeMismatches = 0,
+             zeroNonzeroMismatches = 0, missingEntries = 0, observedMismatches = 0, flagMismatches = 0,
+             underflowRows = 0, underflowRecords = 0, underflowTieRecords = 0, underflowPeakOnlyRecords = 0,
+             underflowMismatches = 0, unmatchedRecords = 0;
     double maxRelError = 0;
     std::vector<std::string> first;
     void note(const std::string &what) {
         if (first.size() < 8) first.push_back(what);
     }
     bool clean() const {
-        return !codeMismatches && !missingEntries && !observedMismatches && !flagMismatches &&
-               !underflowMismatches && !unmatchedRecords;
+        return !codeMismatches && !zeroNonzeroMismatches && !missingEntries && !observedMismatches &&
+               !flagMismatches && !underflowMismatches && !unmatchedRecords;
     }
     nlohmann::json json() const {
-        return {{"records", records},           {"entries", entries},
-                {"rowsCompared", rowsCompared}, {"underflowRows", underflowRows}, {"maxRelError", maxRelError},
-                {"codeMismatches", codeMismatches}, {"missingEntries", missingEntries},
-                {"observedMismatches", observedMismatches}, {"flagMismatches", flagMismatches},
-                {"underflowMismatches", underflowMismatches}, {"underflowAtFloor", underflowAtFloor},
-                {"minFloorTieRatio", minFloorTieRatio}, {"unmatchedRecords", unmatchedRecords},
+        return {{"records", records}, {"entries", entries}, {"rowsCompared", rowsCompared},
+                {"codeExact", codeExact}, {"codeOffByOne", codeOffByOne}, {"codeMismatches", codeMismatches},
+                {"zeroNonzeroMismatches", zeroNonzeroMismatches}, {"maxRelError", maxRelError},
+                {"missingEntries", missingEntries}, {"observedMismatches", observedMismatches},
+                {"flagMismatches", flagMismatches}, {"underflowRows", underflowRows},
+                {"underflowRecords", underflowRecords}, {"underflowTieRecords", underflowTieRecords},
+                {"underflowPeakOnlyRecordsUnproven", underflowPeakOnlyRecords},
+                {"underflowMismatches", underflowMismatches}, {"unmatchedRecords", unmatchedRecords},
                 {"first", first}};
     }
-    // Minute records only. Returns false when the consumer has no such minute.
-    bool check(const Hmc2Record &r, const ReferenceConsumer::Minute &m) {
+    // Minute records only.
+    void check(const Hmc2Record &r, const ReferenceConsumer::Minute &m) {
         ++records;
         const auto at = r.header.layer + "@" + std::to_string(r.bucketStartMs);
         if (r.observedMs != m.eventObservedMs || r.observedMs != m.coveredMs) {
@@ -218,54 +226,57 @@ struct RowCheck {
         const auto inWindow = [&](int64_t row, bool ask) {
             return ask ? row >= r.askRowLo && row <= r.askRowHi : row >= r.bidRowLo && row <= r.bidRowHi;
         };
-        bool underflow = false, floorTie = false;
         const double floor = r.header.sizeScale.floor;
+        bool underflow = false, tieRow = false, peakCode1 = false;
         for (const auto &e : r.entries) {
             ++entries;
+            ++rowsCompared;
             const auto it = rows.find({e.row, e.isAsk});
             const long double expected = it == rows.end() ? 0 : it->second / r.observedMs;
-            if (expected > 0 && expected < r.header.sizeScale.floor) {
-                underflow = true;
-                ++underflowRows;
+            const int twap = e.twapCode & kMaxCode;
+            if (expected > 0 && expected < floor) { underflow = true; ++underflowRows; }
+            // Per row: the recorder's running row sum can sit just below the floor
+            // where the native levels sum to exactly the floor; it then encodes code 1.
+            if (twap == 1 && expected >= floor && expected <= floor * (1 + 1e-9)) tieRow = true;
+            if ((e.peakCode & kMaxCode) == 1) peakCode1 = true;
+            if ((expected == 0) != (twap == 0)) {
+                ++zeroNonzeroMismatches;
+                note("zero/nonzero " + at + " row=" + std::to_string(e.row) + " code=" + std::to_string(twap));
+                continue;
             }
-            // A row whose native levels sum to exactly the floor (or a code-1 peak) can
-            // carry a running-sum residue just below it in the recorder's row size.
-            if ((expected >= floor && expected <= floor * (1 + 1e-9)) || (e.peakCode & kMaxCode) == 1) {
-                floorTie = true;
-                if (expected > 0)
-                    minFloorTieRatio = minFloorTieRatio == 0 ? double(expected / floor)
-                                                             : std::min(minFloorTieRatio, double(expected / floor));
-            }
-            const auto code = encodeSize(static_cast<double>(expected), r.header.sizeScale);
-            if (std::abs(int(code) - int(e.twapCode)) > 1) {
+            const int code = encodeSize(static_cast<double>(expected), r.header.sizeScale);
+            const int diff = std::abs(code - twap);
+            if (diff == 0) ++codeExact;
+            else if (diff == 1) ++codeOffByOne;
+            else {
                 ++codeMismatches;
                 note("twap " + at + " row=" + std::to_string(e.row) + " ask=" + std::to_string(e.isAsk) +
-                     " code=" + std::to_string(e.twapCode) + " expected=" + std::to_string(code));
+                     " code=" + std::to_string(twap) + " expected=" + std::to_string(code));
             }
-            if (expected >= r.header.sizeScale.floor) // below the floor the code saturates at 1
+            if (expected >= floor) // below the floor the code saturates at 1
                 maxRelError = std::max(maxRelError,
                     static_cast<double>(std::abs(decodeSize(e.twapCode, r.header.sizeScale) - expected) / expected));
-            ++rowsCompared;
         }
         for (const auto &[key, integral] : rows) {
             if (integral <= 0 || !inWindow(key.first, key.second)) continue;
             const std::pair<int64_t, bool> k{key.first, key.second};
             const auto pos = std::lower_bound(r.entries.begin(), r.entries.end(), k,
                 [](const Hmc2Entry &a, const std::pair<int64_t, bool> &b) { return std::pair(a.row, a.isAsk) < b; });
-            const bool found = pos != r.entries.end() && pos->row == k.first && pos->isAsk == k.second;
-            if (!found) {
+            if (pos == r.entries.end() || pos->row != k.first || pos->isAsk != k.second) {
                 ++missingEntries;
                 note("missing " + at + " row=" + std::to_string(key.first));
             }
         }
         const bool hmc2Underflow = (r.flags & kUnderflow) != 0;
-        if (hmc2Underflow && !underflow && floorTie) {
-            ++underflowAtFloor;
-        } else if (underflow != hmc2Underflow) {
+        if (hmc2Underflow) ++underflowRecords;
+        if (underflow && !hmc2Underflow) {
             ++underflowMismatches;
-            note("underflow " + at);
+            note("underflow missing " + at);
+        } else if (hmc2Underflow && !underflow) {
+            if (tieRow) ++underflowTieRecords;
+            else if (peakCode1) ++underflowPeakOnlyRecords; // a peak below the floor: not reconstructed
+            else { ++underflowMismatches; note("underflow unexplained " + at); }
         }
-        return true;
     }
 };
 

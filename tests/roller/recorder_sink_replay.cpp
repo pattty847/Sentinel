@@ -23,6 +23,7 @@ constexpr int64_t kDay = 86'400'000;
 
 struct NoopSink final : RecorderSink {
     void onReset(const std::string &, int64_t) noexcept override {}
+    void onImprecise(const std::string &, int64_t, const LevelChange &) noexcept override {}
     void onLevel(const std::string &, int64_t, const LevelChange &) noexcept override {}
     void onApplied(const std::string &, int64_t, bool, bool) noexcept override {}
     void onInvalid(const std::string &, int64_t, const std::string &, bool) noexcept override {}
@@ -283,33 +284,54 @@ int main(int argc, char **argv) {
                     if (firstBookError.empty()) firstBookError = e;
                 }
                 levelsCompared += levels;
-                // State a C backend would add to this anchor (estimate): per live level its run
-                // start; runs closed at or after the committed minute watermark; per-level
-                // open-minute integrals (live or removed this minute).
+                // Estimated C additions for a resumable checkpoint (document only). Integrals
+                // are normalised to the checkpoint clock, so no lazy `since` is stored.
+                // Inherited from exportState: book (units, size), clock, minute, offset,
+                // observed, flags, validity, row peaks. Added: per live level run start and
+                // open-minute integral; removed levels that still hold an integral; runs
+                // closed since the committed watermark; finished-but-unverified minutes;
+                // the covered-time cursor.
                 const int64_t committed = r.watermarks(product, "near").minuteThroughMs;
                 const auto bit = consumer.books.find(product);
-                json add = {{"runStart", json::array()}, {"tail", json::array()}, {"acc", json::array()}};
-                uint64_t live = 0, accEntries = 0, tail = 0;
+                json add = {{"live", json::array()}, {"removed", json::array()}, {"tail", json::array()},
+                            {"pending", json::array()}, {"cursor", json::array()}};
+                uint64_t live = 0, removed = 0, tail = 0, pendingLevels = 0;
                 int64_t clock = 0;
                 if (bit != consumer.books.end()) {
-                    clock = bit->second.clock;
-                    for (const auto &side : bit->second.side)
-                        for (const auto &[units, l] : side) {
-                            if (l.size > 0) { ++live; add["runStart"].push_back(clock - l.runStart); }
-                            if (l.integral > 0) { ++accEntries; add["acc"].push_back(static_cast<double>(l.integral)); }
+                    const auto &b = bit->second;
+                    clock = b.clock;
+                    for (int sd = 0; sd < 2; ++sd)
+                        for (const auto &[units, l] : b.side[sd]) {
+                            const long double integral =
+                                l.integral + (b.observing && clock > l.since ? (long double)l.size * (clock - l.since) : 0);
+                            if (l.size > 0) {
+                                ++live;
+                                add["live"].push_back({clock - l.runStart, double(integral)});
+                            } else if (integral > 0) {
+                                ++removed;
+                                add["removed"].push_back({sd, units, double(integral)});
+                            }
                         }
+                    add["cursor"] = {b.observing, clock - b.obsSince, b.covered};
                 }
                 for (const auto &run : consumer.runs)
                     if (run.end >= committed) {
                         ++tail;
                         add["tail"].push_back({run.isBid, run.units, clock - run.start, clock - run.end, run.size});
                     }
+                for (const auto &[key, m] : consumer.minutes) {
+                    json levels = json::array();
+                    for (const auto &[isBid, units, integral] : m.integrals) levels.push_back({isBid, units, double(integral)});
+                    pendingLevels += m.integrals.size();
+                    add["pending"].push_back({key.second, m.eventObservedMs, m.flags, std::move(levels)});
+                }
                 consumer.runs.clear();
                 if (truth) t.compareAnchor(state);
                 const auto addCbor = json::to_cbor(add);
                 anchors.push_back({{"clock", clock}, {"committedMs", committed}, {"liveLevels", live},
-                                   {"recorderLevels", levels}, {"tailRuns", tail}, {"openAccumulators", accEntries},
-                                   {"addRawBytes", live * 8 + tail * 32 + accEntries * 8},
+                                   {"recorderLevels", levels}, {"tailRuns", tail}, {"removedWithIntegral", removed},
+                                   {"pendingMinutes", consumer.minutes.size()}, {"pendingMinuteLevels", pendingLevels},
+                                   {"addRawBytes", live * 16 + removed * 17 + tail * 33 + pendingLevels * 17 + 24},
                                    {"addCborBytes", addCbor.size()}, {"addZstdBytes", zstdSize(addCbor)},
                                    {"recorderStateBytes", state.size()}, {"recorderStateZstdBytes", zstdSize(state)}});
                 return state;
@@ -351,6 +373,7 @@ int main(int argc, char **argv) {
         const double cpu0 = processCpuMs();
         const auto wall0 = std::chrono::steady_clock::now();
         auto report = sentinel::roller::roll(o);
+        if (truth) t.indep.finish();
         const double wallMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wall0).count();
         const double cpuMs = processCpuMs() - cpu0;
 
@@ -364,7 +387,7 @@ int main(int argc, char **argv) {
             const auto &c = consumer.counts;
             result["events"] = {{"reset", c.resets}, {"level", c.levels}, {"applied", c.applied},
                                 {"invalid", c.invalid}, {"invalidUpstream", c.upstreamInvalid},
-                                {"minute", c.minutes}, {"inexactPrices", c.inexact}, {"runsClosed", c.runsClosed},
+                                {"minute", c.minutes}, {"offGridPrices", c.offGrid}, {"outsideDomainPrices", c.outsideDomain}, {"runsClosed", c.runsClosed},
                                 {"suspensions", c.suspensions}, {"resumptions", c.resumptions},
                                 {"validations", c.validations}};
             result["rowCheck"] = rows.json();

@@ -216,6 +216,9 @@ target_include_directories(candle_fixture_server PRIVATE ${CMAKE_SOURCE_DIR}/lib
 target_link_libraries(candle_fixture_server PRIVATE sentinel_core Qt6::Core Qt6::Network)
 
 # Sink interface cost on the recorder worker (synthetic stream; not a ctest).
+# Mach thread CPU accounting: macOS only.
+if(APPLE)
 add_executable(recorder_sink_bench recorder_sink_bench.cpp)
 target_include_directories(recorder_sink_bench PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(recorder_sink_bench PRIVATE sentinel_core Qt6::Core)
+endif()

@@ -679,9 +679,7 @@ struct BookRecorder::Impl {
         if (attempted) s.lastPublish = s.clock;
     }
     void finishMinute(Symbol &s) {
-        if (cfg.sink)
-            cfg.sink->onMinute(s.layers.front().header.symbol, s.minute, s.observed,
-                               s.flags | (s.observed < kMinute ? kPartial : 0));
+        if (cfg.beforeMinuteFinalizeForTest) cfg.beforeMinuteFinalizeForTest(s.minute);
         for (size_t li = 0; li < s.layers.size(); ++li) {
             auto &layer = s.layers[li];
             Hmc2Record r;
@@ -732,8 +730,11 @@ struct BookRecorder::Impl {
                 s.observed += static_cast<uint32_t>(end - s.clock);
             s.clock = end;
             finishMinute(s);
+            const int64_t finished = s.minute;
+            const uint32_t observed = s.observed, flags = s.flags | (observed < kMinute ? kPartial : 0);
             s.minute = end;
             resetMinute(s);
+            if (cfg.sink) cfg.sink->onMinute(s.layers.front().header.symbol, finished, observed, flags);
             commit(s);
             // Skip unknown gaps in O(1). Never materialize zero-observation columns.
             if (!s.observing && target >= s.minute + kMinute) {
@@ -998,6 +999,12 @@ struct BookRecorder::Impl {
             l.touched.clear();
         for (const auto &level : m.levels) {
             const int64_t units = *priceUnits(level.price, cfg.priceScale);
+            auto precision = RecorderSink::Precision::OnGrid;
+            if (sink) {
+                precision = pricePrecision(level.price, units, cfg.priceScale);
+                if (precision != RecorderSink::Precision::OnGrid)
+                    sink->onImprecise(m.symbol(), s.clock, {level.isBid, units, level.price, level.size, precision});
+            }
             auto &book = level.isBid ? s.bids : s.asks;
             const auto old = book.find(units);
             const double oldSize = old == book.end() ? 0 : old->second;
@@ -1013,9 +1020,7 @@ struct BookRecorder::Impl {
             else
                 book.emplace(units, level.size);
             if (sink)
-                sink->onLevel(m.symbol(), s.clock,
-                              {level.isBid, units, level.price, level.size,
-                               static_cast<double>(units) / cfg.priceScale == level.price});
+                sink->onLevel(m.symbol(), s.clock, {level.isBid, units, level.price, level.size, precision});
             for (auto &l : s.layers) {
                 auto [it, added] = l.rows.try_emplace({floorDiv(units, l.header.rowTickUnits), !level.isBid});
                 auto &row = it->second;

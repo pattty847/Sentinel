@@ -64,6 +64,9 @@ class IndependentBook {
     bool apply(const sentinel::roller::JournalRecord &in) {
         ++counts.records;
         const auto &r = in.record;
+        nowMs_ = r.time.systemNs / 1'000'000;
+        ++frameIndex_;
+        evaluateHorizons();
         bool gap = false;
         if (started_ && in.gapBefore) { ++counts.journalGaps; gap = true; }
         if (!started_ || in.gapBefore || run_ != in.pos.run || connection_ != r.connection) {
@@ -101,7 +104,6 @@ class IndependentBook {
         }
         ++counts.frames;
         ++(in.version == 1 ? counts.v1Frames : counts.v2Frames);
-        if (watchLeft_ && !--watchLeft_) watch_.clear();
         const auto j = nlohmann::json::parse(r.payload, nullptr, false);
         if (!j.is_object()) { ++counts.malformed; invalidate(); return gap; }
         if (const auto s = j.find("sequence_num"); s != j.end() && s->is_number_integer()) {
@@ -129,8 +131,10 @@ class IndependentBook {
                 ++counts.snapshots;
                 std::map<std::string, std::string> next[2];
                 const bool ok = applyLevels(*updates, next, nullptr);
-                if (valid && ok) diagnose(*updates, next, j);
+                closeFork("interrupted by snapshot");
+                if (valid && ok) diagnose(*updates, next, j, in);
                 side[0].swap(next[0]); side[1].swap(next[1]);
+                last_[0].clear(); last_[1].clear(); // stamps describe one book segment only
                 valid = ok;
                 if (!valid) invalidate();
             } else if (type == "update") {
@@ -141,45 +145,125 @@ class IndependentBook {
                     continue;
                 }
                 ++counts.updateEvents;
+                if (fork_.active) {
+                    const auto levels = counts.levels;
+                    applyLevels(*updates, fork_.side, nullptr);
+                    counts.levels = levels;
+                }
                 if (!applyLevels(*updates, side, &j)) invalidate();
             }
         }
         return gap;
     }
 
+    // End of replay: levels never updated again and unfinished horizons say so.
+    void finish() {
+        closeWatch("none before end of replay");
+        closeFork("replay ended");
+    }
+
   private:
     std::string product_, run_;
-    uint64_t connection_ = 0, updateIndex_ = 0;
+    uint64_t connection_ = 0, updateIndex_ = 0, frameIndex_ = 0;
+    int64_t nowMs_ = 0;
     bool started_ = false;
     std::optional<uint64_t> sequence_;
-    std::map<std::string, std::string> last_[2]; // price -> last update (event time, size, sequence)
-    std::set<std::pair<int, std::string>> watch_;
-    uint64_t watchLeft_ = 0;
+    std::map<std::string, std::string> last_[2]; // price -> last update in this book segment
+    // Differing levels of the newest valid-book snapshot -> index in its "levels"; each
+    // gets its first later update (no frame cap) or the reason none was seen.
+    std::map<std::pair<int, std::string>, size_t> watch_;
+    struct Snap {
+        int64_t receiveMs = 0;
+        uint64_t frame = 0;
+    } watchFrom_;
+    // Controlled temporal test: the pre-snapshot book, never given the snapshot,
+    // keeps taking the same updates; compared with the installed book at horizons.
+    struct Fork {
+        bool active = false;
+        int64_t startMs = 0;
+        size_t diag = 0, next = 0;
+        std::map<std::string, std::string> side[2];
+        std::set<std::pair<int, std::string>> initial;
+    } fork_;
+    static constexpr int64_t kHorizonsMs[3] = {5'000, 15'000, 60'000};
     void invalidate() {
+        closeWatch("none before invalidation");
+        closeFork("interrupted by invalidation");
         valid = false;
         side[0].clear(); side[1].clear();
+        last_[0].clear(); last_[1].clear();
     }
-    // Snapshot taken while the book is valid: per-level differences, each with the
-    // level's last update before the snapshot; later updates to them are watched.
+    void closeWatch(const char *why) {
+        for (const auto &[key, index] : watch_)
+            diagnostics.back()["levels"][index]["next"] = {{"none", why}, {"secondsWatched", (nowMs_ - watchFrom_.receiveMs) / 1e3}};
+        watch_.clear();
+    }
+    nlohmann::json forkDiff() const {
+        uint64_t differing = 0, initialStill = 0;
+        for (int sd = 0; sd < 2; ++sd) {
+            const auto differs = [&](const std::string &p) {
+                const auto a = side[sd].find(p), b = fork_.side[sd].find(p);
+                return (a == side[sd].end()) != (b == fork_.side[sd].end()) ||
+                       (a != side[sd].end() && a->second != b->second);
+            };
+            std::set<std::string> prices;
+            for (const auto &[p, q] : side[sd]) prices.insert(p);
+            for (const auto &[p, q] : fork_.side[sd]) prices.insert(p);
+            for (const auto &p : prices) {
+                if (!differs(p)) continue;
+                ++differing;
+                if (fork_.initial.contains({sd, p})) ++initialStill;
+            }
+        }
+        return {{"differing", differing}, {"initialStillDiffering", initialStill},
+                {"initialConverged", fork_.initial.size() - initialStill}, {"newDiffering", differing - initialStill}};
+    }
+    void evaluateHorizons() {
+        while (fork_.active && fork_.next < 3 && nowMs_ >= fork_.startMs + kHorizonsMs[fork_.next]) {
+            auto h = forkDiff();
+            h["horizonS"] = kHorizonsMs[fork_.next] / 1000;
+            diagnostics[fork_.diag]["horizons"].push_back(std::move(h));
+            if (++fork_.next == 3) fork_.active = false;
+        }
+    }
+    void closeFork(const char *why) {
+        if (!fork_.active) return;
+        for (; fork_.next < 3; ++fork_.next)
+            diagnostics[fork_.diag]["horizons"].push_back({{"horizonS", kHorizonsMs[fork_.next] / 1000}, {"not reached", why}});
+        fork_.active = false;
+    }
+    // Snapshot taken while the book is valid: every differing level, uncapped, with
+    // its last update in this segment and (filled later) its first later update.
     void diagnose(const nlohmann::json &updates, const std::map<std::string, std::string> (&next)[2],
-                  const nlohmann::json &frame) {
+                  const nlohmann::json &frame, const sentinel::roller::JournalRecord &in) {
+        closeWatch("superseded by a later snapshot");
         std::map<std::string, std::string> eventTime[2];
         for (const auto &u : updates) {
             const auto p = canonDecimal(u.value("price_level", ""));
             if (p) eventTime[u.value("side", "") == "bid" ? 0 : 1][*p] = u.value("event_time", "");
         }
         nlohmann::json d = {{"timestamp", frame.value("timestamp", "")}, {"sequence", frame.value("sequence_num", uint64_t{0})},
-                            {"onlyBook", 0}, {"onlySnapshot", 0}, {"sizeMismatch", 0},
-                            {"levels", nlohmann::json::array()}, {"after", nlohmann::json::array()}};
-        watch_.clear();
+                            {"channel", frame.value("channel", "")}, {"run", in.pos.run}, {"block", in.pos.block},
+                            {"record", in.pos.record}, {"connection", in.record.connection}, {"version", in.version},
+                            {"receiveMs", nowMs_}, {"onlyBook", 0}, {"onlySnapshot", 0}, {"sizeMismatch", 0},
+                            {"levels", nlohmann::json::array()}, {"horizons", nlohmann::json::array()}};
+        diagnostics.push_back(std::move(d));
+        auto &out = diagnostics.back();
+        fork_ = {};
+        fork_.active = true;
+        fork_.startMs = nowMs_;
+        fork_.diag = diagnostics.size() - 1;
+        fork_.side[0] = side[0];
+        fork_.side[1] = side[1];
+        watchFrom_ = {nowMs_, frameIndex_};
         for (int sd = 0; sd < 2; ++sd) {
             const auto note = [&](const std::string &price, const char *kind, const std::string &book, const std::string &snap) {
-                d[kind] = d[kind].get<int>() + 1;
-                watch_.insert({sd, price});
-                if (d["levels"].size() < 40)
-                    d["levels"].push_back({{"side", sd ? "ask" : "bid"}, {"price", price}, {"kind", kind}, {"book", book},
-                                           {"snapshot", snap}, {"snapshotEventTime", eventTime[sd][price]},
-                                           {"lastUpdate", last_[sd].contains(price) ? last_[sd].at(price) : ""}});
+                out[kind] = out[kind].get<int>() + 1;
+                watch_[{sd, price}] = out["levels"].size();
+                fork_.initial.insert({sd, price});
+                out["levels"].push_back({{"side", sd ? "ask" : "bid"}, {"price", price}, {"kind", kind}, {"book", book},
+                                         {"snapshot", snap}, {"snapshotEventTime", eventTime[sd][price]},
+                                         {"lastUpdateThisSegment", last_[sd].contains(price) ? last_[sd].at(price) : ""}});
             };
             for (const auto &[p, q] : side[sd]) {
                 const auto it = next[sd].find(p);
@@ -189,8 +273,6 @@ class IndependentBook {
             for (const auto &[p, q] : next[sd])
                 if (!side[sd].contains(p)) note(p, "onlySnapshot", "", q);
         }
-        watchLeft_ = watch_.empty() ? 0 : 5000; // frames
-        diagnostics.push_back(std::move(d));
     }
     bool applyLevels(const nlohmann::json &updates, std::map<std::string, std::string> (&target)[2],
                      const nlohmann::json *frame) {
@@ -208,9 +290,13 @@ class IndependentBook {
             if (frame) {
                 const std::string stamp = u.value("event_time", "") + " size=" + *size + " seq=" +
                                           std::to_string(frame->value("sequence_num", uint64_t{0}));
-                if (watch_.erase({index, *price}) && !diagnostics.empty() && diagnostics.back()["after"].size() < 40)
-                    diagnostics.back()["after"].push_back({{"side", index ? "ask" : "bid"}, {"price", *price},
-                                                           {"update", stamp}, {"framesAfter", 5000 - watchLeft_}});
+                if (const auto w = watch_.find({index, *price}); w != watch_.end()) {
+                    diagnostics.back()["levels"][w->second]["next"] = {
+                        {"update", stamp}, {"recordsAfter", frameIndex_ - watchFrom_.frame},
+                        {"secondsAfter", (nowMs_ - watchFrom_.receiveMs) / 1e3},
+                        {"equalsSnapshot", diagnostics.back()["levels"][w->second]["snapshot"] == (*size == "0" ? "" : *size)}};
+                    watch_.erase(w);
+                }
                 last_[index][*price] = stamp;
             }
             if (*size == "0") target[index].erase(*price);
