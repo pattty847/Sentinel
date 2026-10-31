@@ -131,35 +131,47 @@ AGENTS.md. Remove a note here when it stops being true.
 
 ## Codex CLI
 
-Verified 2026-09-27 with codex-cli 0.158; 0.160 was installed by 2026-10-05. Re-check
-`~/.codex/models_cache.json` before relying on a model.
+Launch through the main checkout's trusted `scripts/dev/codex-exec.sh`:
 
-- Models that answered: `gpt-6.1-sol` (2026-10-06; use it for Sol work), `gpt-6-sol` (config default), `gpt-6-astra`. Also listed: `gpt-5.6-sol`, `gpt-5.6-terra`,
-  `gpt-5.6-luna`, `gpt-5.5`. Effort `low`..`max`, plus `ultra` on 6-astra and 5.6-sol/terra.
-- Run: `codex exec -C <dir> -s read-only|workspace-write -m gpt-6-sol -c model_reasoning_effort='"high"'
-  -c approval_policy='"never"' --json -o <last-message.txt> "<prompt>" < /dev/null`. Without
-  `approval_policy="never"` the owner's config (`on-request`, `approvals_reviewer="auto_review"`) lets a headless
-  run ask to leave the sandbox and another model may approve.
-- Sandbox: `workspace-write` has network (localhost, HTTPS, Coinbase WebSockets) and can read the whole home
-  directory; it only limits writes. No window server or Metal. `.git` stays read-only even inside a writable
-  root, so it cannot stage, commit or rebase in a linked worktree (`index.lock: Operation not permitted`).
-  Writers do not need `_agent/` write access: they propose entries as `MEMORY:` hand-off lines.
-  Tested 2026-10-06 with `codex sandbox` (no model use): adding `<repo>/.git` to `writable_roots` is still
-  blocked, but a clone made with `git clone --shared --separate-git-dir=<dir not named .git>` commits when that
-  dir is a writable root, and it still cannot write the main repo, push to it or repoint its `.git` file.
-  Not adopted yet (needs `agent-worktree.sh` create/land support; the conductor must only fetch from such a
-  clone, never run git inside it, because its config and hooks are agent-writable).
-- Thread id: the first JSONL event is `{"type":"thread.started","thread_id":"<uuid>"}`. Continue with
-  `codex exec resume <uuid> -m <same model> -c model_reasoning_effort='"high"' -c sandbox_mode='"workspace-write"'
-  -c approval_policy='"never"' "<follow-up>"` (or `--last`); add
-  `-c sandbox_workspace_write.writable_roots=[...]` when needed.
-- `codex exec review` runs a code review of the current repo.
-- A sub-agent spawned inside an interactive Codex session (multi-agent v2) cannot be resumed with
-  `codex exec resume`: it fails with "cannot resume an unloaded multi-agent v2 sub-agent through its parent"
-  (2026-10-06). For fix rounds a different conductor can reach, launch writers with `codex exec`, not as sub-agents.
-- Never put backticks in a double-quoted prompt (the shell eats them); use a heredoc or a prompt file.
-- Model-capacity errors can interrupt a run mid-draft: keep the draft and resume the same thread with an
-  available model; keep a different-provider reviewer.
+```bash
+scripts/dev/codex-exec.sh --worktree /path/to/linked-worktree --role writer \
+  --model gpt-6-astra --prompt-file /path/to/task.txt
+scripts/dev/codex-exec.sh --worktree /path/to/linked-worktree --role writer \
+  --resume <thread-id> --prompt-file /path/to/fix.txt
+```
+
+- `scripts/dev/agents.env` contains the binary, model, effort, approval and log defaults. Override with
+  `CODEX_BIN`, `CODEX_MODEL`, `CODEX_EFFORT`, `CODEX_APPROVAL`, `CODEX_LOG_DIR`, then with the corresponding
+  `--codex`, `--model`, `--effort`, `--approval`, `--log-dir` flags. Approval defaults to `never`; an explicit
+  override is available. `--dry-run` prints one argv entry per line and reports the working directory on stderr.
+- Writer = `workspace-write`; reviewer = `read-only`. `--no-commit` omits the writer's Git grants;
+  repeatable `--add-dir` adds explicit writer roots. `--image` is repeatable. Supply `--prompt-file` or pipe
+  stdin; the wrapper redirects a prompt file and never waits for terminal input. JSONL events and the final
+  message go to timestamped `.jsonl`/`.last.txt` logs; the first `thread.started` id prints immediately.
+- Verified outside temporary directories on 2026-10-30, codex-cli 0.165: a linked writer can commit when
+  granted exactly its absolute worktree gitdir, common `objects`, and common `refs/heads/<prefix>` and
+  `logs/refs/heads/<prefix>`. The common Git root, config, hooks, main checkout and other branch prefixes
+  remain protected. The wrapper resolves real paths, requires a namespaced branch, and refuses the main
+  worktree, main/master, detached HEAD and sandbox bypasses. Temporary directories are writable by default,
+  so tests under `/tmp` do not establish sandbox isolation. Writers propose `_agent/` changes as `MEMORY:` lines.
+- Inside the sandbox, permission errors for `packed-refs.lock` after commits (`git gc --auto` trying
+  `pack-refs`; the commit still succeeds), `git gc`, `git stash` (`refs/stash` is outside the grant),
+  `git branch -d` of a packed ref, and `git fetch` are expected, not sandbox bugs.
+- `--resume <thread-id>` or `--last` re-passes model, effort, sandbox and approval and changes directory first.
+  Resume has no `--add-dir`; the wrapper supplies `sandbox_workspace_write.writable_roots` through `-c`.
+  Live resume verification belongs to the conductor. Re-check `~/.codex/models_cache.json` for available models.
+- The writable worktree gitdir must pass `agent-worktree.sh verify-gitdir <branch>` before any unsandboxed
+  Git command in that worktree. Use the main checkout's trusted script. The check rejects unexpected files,
+  config, rebase state, symlinks, broken reciprocal pointers and object alternates; it never repairs them.
+  The wrapper checks before and after every run (including failure); `land` checks before worktree Git.
+- `land` requires nonempty `Writer:`, `Reviewer:` and `Risk:` trailers before rebase/build. After landing the
+  hook, the conductor runs `scripts/dev/install-hooks.sh` from main. It pins an absolute main-checkout hooks
+  path and an initial `workflow.pushBaseline`, preserved on reinstall. The pre-push hook rejects non-fast-forward
+  main updates and checks new first-parent commits beyond that baseline: merges need those three trailers;
+  direct commits may touch only the exact whitespace-separated `workflow.directPaths` (default
+  `docs/STATUS.md docs/TODO.md`). Rejections name offending commits. `--no-verify` can bypass this client hook.
+- Interactive multi-agent sub-agents cannot be resumed through `codex exec resume`; use the wrapper for
+  resumable writer threads. For capacity errors, preserve the draft and resume with an available model.
 
 ## Claude from a shell
 
@@ -173,8 +185,6 @@ Verified 2026-09-27 with codex-cli 0.158; 0.160 was installed by 2026-10-05. Re-
 ## Lessons still in force
 - Input tests use events shaped as the platform delivers them, taken from the Qt source for our Qt version (`qnsview_mouse.mm`, `qwindowspointerhandler.cpp`, `qxcbconnection_xi2.cpp`), not idealized ones. A2 synthesized mouse notches with a null pixelDelta; macOS gives a plain mouse wheel a pixelDelta, so every real notch took the trackpad path for a day of owner testing. macOS also shares one QPointingDevice between mouse and trackpad and flips its type to TouchPad for good: use the per-event source and scroll phase, never the device type (2026-10-09).
 - Sandboxed Codex cannot write the shared ccache: set `CCACHE_DIR` to a scratch dir under `/tmp` for its builds. Never add the shared ccache as a writable root: main-checkout builds and deploys read it, so a writable cache would let an agent plant objects that get deployed (2026-10-09).
-- Run `codex exec resume` from the writer's worktree (`cd <worktree> && codex exec resume ...`): resume has no `-C`, and the current directory becomes the writable workspace, so a resume started in the main checkout makes the main checkout writable (2026-10-07).
-- Sandboxed Codex can resolve merge conflicts: the conductor runs `git cherry-pick --no-commit <sha>` (or a rebase) in the writer's worktree, the writer edits the conflicted files, and the conductor checks that no `<<<<<<<` markers remain, then commits (2026-10-07, anchors phase B).
 - Open writer screenshots before accepting a visual claim. Never describe a "before" image as a spec: a misread fan-dominated screenshot became a wrong colour default (2026-10-07, volume profile).
 - Run `scripts/dev/budget.sh` before every dispatch, small follow-ups included; when Claude is tight, Codex writes and Claude only reviews and conducts.
 - `ma-panel`: always match cards by Codex thread id or Claude agent id; a label-only card for an existing agent shows up twice.

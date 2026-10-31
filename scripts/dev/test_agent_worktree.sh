@@ -53,7 +53,55 @@ EOF
     git -C "$wt" commit -q -am "feature"
 }
 
-land() { (cd "$repo" && scripts/dev/agent-worktree.sh land feat/x "$@") > "$T/land.out" 2>&1; }
+land() { (cd "$repo" && scripts/dev/agent-worktree.sh land feat/x --trailer "Writer: fixture" --trailer "Reviewer: fixture" --trailer "Risk: high" "$@") > "$T/land.out" 2>&1; }
+
+# Security preflight uses filesystem reads before worktree Git loads any config.
+setup_case gitdir
+verify() { (cd "$repo" && scripts/dev/agent-worktree.sh verify-gitdir feat/x) > "$T/verify.out" 2>&1; }
+gd=$(git -C "$wt" rev-parse --absolute-git-dir)
+git -C "$repo" config extensions.worktreeConfig true
+expect "fresh gitdir passes" verify
+"$wt/scripts/dev/agent-worktree.sh" --export-gitdir-check > "$T/linked.out" 2>&1
+expect "linked tooling checkout refused" [ "$?" -ne 0 ]
+expect "linked tooling refusal explains required checkout" grep -q 'run from the main checkout' "$T/linked.out"
+printf '[core]\n fsmonitor = touch %s/executed\n' "$T" > "$gd/config.worktree"
+verify; expect "config.worktree rejected" [ "$?" -ne 0 ]
+expect "config named" grep -q config.worktree "$T/verify.out"
+land; expect "land rejects config" [ "$?" -ne 0 ]
+expect "config not executed" [ ! -e "$T/executed" ]
+expect "land names config" grep -q config.worktree "$T/land.out"
+expect "rebase not reached" [ ! -d "$gd/rebase-merge" ]
+rm "$gd/config.worktree"
+mkdir "$gd/rebase-merge"
+verify; expect "rebase state rejected" [ "$?" -ne 0 ]
+rmdir "$gd/rebase-merge"
+cp "$gd/commondir" "$T/common.saved"
+echo "$T" > "$gd/commondir"
+verify; expect "rewritten commondir rejected" [ "$?" -ne 0 ]
+cp "$T/common.saved" "$gd/commondir"
+touch "$repo/.git/objects/info/alternates"
+verify; expect "alternates rejected" [ "$?" -ne 0 ]
+rm "$repo/.git/objects/info/alternates"
+cp "$gd/gitdir" "$T/gitdir.saved"
+echo "$repo/.git" > "$gd/gitdir"
+verify; expect "rewritten backlink rejected" [ "$?" -ne 0 ]
+cp "$T/gitdir.saved" "$gd/gitdir"
+rm -f "$gd/ORIG_HEAD"
+ln -s "$T/common.saved" "$gd/ORIG_HEAD"
+verify; expect "symlink rejected" [ "$?" -ne 0 ]
+rm "$gd/ORIG_HEAD"
+expect "restored gitdir passes" verify
+original_main=$(git -C "$repo" rev-parse main)
+for missing in Writer Reviewer Risk all; do
+    args=()
+    for key in Writer Reviewer Risk; do
+        [[ "$key" == "$missing" || "$missing" == all ]] || args+=(--trailer "$key: fixture")
+    done
+    (cd "$repo" && scripts/dev/agent-worktree.sh land feat/x "${args[@]}") > "$T/missing.out" 2>&1
+    expect "missing $missing exits 2" [ "$?" -eq 2 ]
+    expect "missing keys named" grep -q 'missing required land trailers:' "$T/missing.out"
+    expect "main unchanged" [ "$(git -C "$repo" rev-parse main)" = "$original_main" ]
+done
 
 # Doc-health breaches block land; only exit 1 can be waived.
 setup_case doc-health
@@ -99,7 +147,7 @@ expect "landing.json exists" [ -f "$rec" ]
 expect "outcome landed" [ "$(jget "$rec" 'v["outcome"]')" = landed ]
 expect "merge_sha is main" [ "$(jget "$rec" 'v["merge_sha"]')" = "$(git -C "$repo" rev-parse main)" ]
 expect "schema 1" [ "$(jget "$rec" 'v["schema"]')" = 1 ]
-expect "trailers" [ "$(jget "$rec" 'v["trailers"]')" = '["Slice: S1", "Risk: medium"]' ]
+expect "trailers" [ "$(jget "$rec" 'v["trailers"]')" = '["Writer: fixture", "Reviewer: fixture", "Risk: high", "Slice: S1", "Risk: medium"]' ]
 expect "ctest summary" [ "$(jget "$rec" 'v["ctest_summary"]')" = "100% tests passed, 0 tests failed out of 2" ]
 expect "build log kept" [ -s "${dirs[0]:-/missing}/build.log" ]
 expect "ctest log kept" grep -q "tests passed" "${dirs[0]:-/missing}/ctest.log"

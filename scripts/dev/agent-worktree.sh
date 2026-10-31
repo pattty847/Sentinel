@@ -3,6 +3,7 @@
 #
 #   scripts/dev/agent-worktree.sh create <branch> [base-ref]   # default base: main
 #   scripts/dev/agent-worktree.sh remove <branch> [--force]
+#   scripts/dev/agent-worktree.sh verify-gitdir <branch>
 #   scripts/dev/agent-worktree.sh land <branch> [--yes] [-m <message>] [--trailer 'Key: value']...
 #   scripts/dev/agent-worktree.sh list
 #
@@ -28,7 +29,13 @@
 # Non-interactive shells lack VCPKG_ROOT; this script supplies it.
 set -euo pipefail
 
-COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir)
+# Discover from the script's checkout without loading agent-writable Git config.
+SCRIPT_REPO=$(cd "$(dirname "$0")/../.." && pwd -P)
+[[ -d "$SCRIPT_REPO/.git" && ! -L "$SCRIPT_REPO/.git" ]] || {
+    echo 'agent-worktree: run from the main checkout' >&2
+    exit 2
+}
+COMMON_DIR=$(cd "$SCRIPT_REPO/.git" && pwd -P)
 REPO=$(dirname "$COMMON_DIR")
 EXTERNAL_ROOT=${SENTINEL_WORKTREE_ROOT:-/Volumes/T7/sentinel-worktrees}
 export VCPKG_ROOT=${VCPKG_ROOT:-$HOME/vcpkg}
@@ -56,6 +63,105 @@ path_of_branch() {
     git -C "$REPO" worktree list --porcelain |
         awk -v b="refs/heads/$1" '/^worktree /{p=substr($0,10)} $0=="branch " b {print p}'
 }
+
+# This checker uses only filesystem reads. Keep it self-contained: codex-exec
+# snapshots this function before launch so an agent cannot replace its exit check.
+verify_gitdir() {
+    python3 -I - "$COMMON_DIR" "$@" <<'PYVERIFY'
+import os, pathlib, stat, sys
+
+def fail(reason):
+    sys.exit('verify-gitdir: ' + reason)
+
+def regular(p):
+    try:
+        mode = p.lstat().st_mode
+    except OSError as e:
+        fail(str(e))
+    if not stat.S_ISREG(mode):
+        fail(str(p) + ': expected regular file (no symlinks)')
+    return p.read_text().strip()
+
+def real(p):
+    return p.resolve(strict=True)
+
+try:
+    common = real(pathlib.Path(sys.argv[1]))
+    selector = sys.argv[2]
+    expected = real(pathlib.Path(sys.argv[3])) if len(sys.argv) > 3 else None
+    if selector == '--path':
+        if expected is None:
+            fail('--path requires a worktree')
+        pointer = regular(expected / '.git')
+        if not pointer.startswith('gitdir: '):
+            fail('invalid .git pointer: ' + str(expected / '.git'))
+        gd = real(expected / pointer[8:])
+        if gd.parent != common / 'worktrees':
+            fail('worktree gitdir is outside ' + str(common / 'worktrees'))
+    else:
+        matches = []
+        for candidate in (common / 'worktrees').iterdir():
+            if candidate.is_symlink():
+                fail('symlinked gitdir: ' + str(candidate))
+            head = candidate / 'HEAD'
+            if head.exists() and regular(head) == 'ref: refs/heads/' + selector:
+                matches.append(candidate)
+        if len(matches) != 1:
+            fail('expected one worktree for branch ' + selector)
+        gd = matches[0]
+    allowed_files = {'HEAD', 'ORIG_HEAD', 'index', 'commondir', 'gitdir', 'locked',
+                     'COMMIT_EDITMSG', 'MERGE_RR', 'AUTO_MERGE'}
+    for p in gd.iterdir():
+        if p.name in {'logs', 'refs'}:
+            if p.is_symlink() or not p.is_dir():
+                fail(str(p) + ': expected directory (no symlinks)')
+            for base, dirs, files in os.walk(p, followlinks=False):
+                for name in dirs + files:
+                    child = pathlib.Path(base) / name
+                    mode = child.lstat().st_mode
+                    if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+                        fail(str(child) + ': unexpected file type')
+        elif p.name in allowed_files:
+            if not stat.S_ISREG(p.lstat().st_mode):
+                fail(str(p) + ': expected regular file (no symlinks)')
+        else:
+            fail('unexpected gitdir entry: ' + str(p))
+    if real(gd / regular(gd / 'commondir')) != common:
+        fail('commondir does not resolve to ' + str(common))
+    backlink = pathlib.Path(regular(gd / 'gitdir'))
+    if not backlink.is_absolute():
+        backlink = gd / backlink
+    if backlink.name != '.git':
+        fail('gitdir backlink does not name <worktree>/.git')
+    wt = real(backlink.parent)
+    if expected and wt != expected:
+        fail('gitdir backlink does not point to ' + str(expected / '.git'))
+    pointer = regular(wt / '.git')
+    if not pointer.startswith('gitdir: ') or real(wt / pointer[8:]) != gd:
+        fail('worktree .git does not point back to ' + str(gd))
+    # No alternates are provisioned. Existence (even an empty file or dangling
+    # symlink) is a change; never adopt an agent-supplied baseline.
+    for name in ('alternates', 'http-alternates'):
+        p = common / 'objects' / 'info' / name
+        if os.path.lexists(p):
+            fail('unexpected object alternates: ' + str(p))
+    head = regular(gd / 'HEAD')
+    if not head.startswith('ref: refs/heads/'):
+        fail('detached HEAD in ' + str(gd))
+    branch = head[len('ref: refs/heads/'):]
+    if selector != '--path' and branch != selector:
+        fail('HEAD branch changed')
+    print(wt)
+except (OSError, ValueError, UnicodeError) as e:
+    fail(str(e))
+PYVERIFY
+}
+
+# The wrapper sources only the checker definition, not the command dispatcher.
+if [[ "${1:-}" == --export-gitdir-check ]]; then
+    declare -f verify_gitdir
+    exit 0
+fi
 
 # Land evidence. JSON work (landing.json, event transfer, Codex session scan,
 # retention) is in this one Python block; the land flow below stays in bash.
@@ -333,6 +439,10 @@ land_finish() {  # EXIT trap of land: outcome event and final landing.json for e
 
 cmd=${1:-}
 case "$cmd" in
+    verify-gitdir)
+        shift
+        verify_gitdir "$@"
+        ;;
     create)
         branch=${2:?usage: create <branch> [base-ref]}
         base=${3:-main}
@@ -406,13 +516,17 @@ case "$cmd" in
                 *) echo "error: unknown option $1" >&2; exit 2 ;;
             esac
         done
+        missing=""
+        for key in Writer Reviewer Risk; do
+            grep -Eq "^$key: [^[:space:]].*$" <<< "$trailers" || missing+=" $key"
+        done
+        [[ -z "$missing" ]] || { echo "error: missing required land trailers:$missing" >&2; exit 2; }
         gate preflight
         [[ "$(git -C "$REPO" symbolic-ref --short HEAD)" == "main" ]] ||
             { echo "error: $REPO is not on main" >&2; exit 1; }
         git -C "$REPO" diff --quiet && git -C "$REPO" diff --cached --quiet ||
             { echo "error: main checkout has uncommitted changes to tracked files" >&2; exit 1; }
-        dir=$(path_of_branch "$branch")
-        [[ -z "$dir" ]] && { echo "error: no worktree for branch $branch" >&2; exit 1; }
+        dir=$(verify_gitdir "$branch")
         [[ -z "$(git -C "$dir" status --porcelain --untracked-files=no)" ]] ||
             { echo "error: $dir has uncommitted changes" >&2; exit 1; }
         main_tip=$(git -C "$REPO" rev-parse main)
