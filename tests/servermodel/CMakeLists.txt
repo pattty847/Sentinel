@@ -56,6 +56,13 @@ foreach(name IN ITEMS book_recorder hmc2_store)
     add_dependencies(servermodel_tests test_${name})
 endforeach()
 add_dependencies(servermodel_tests test_recording_codec)
+
+add_executable(test_recorder_sink test_recorder_sink.cpp)
+target_include_directories(test_recorder_sink PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_recorder_sink PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+add_test(NAME RecorderSinkTests COMMAND test_recorder_sink)
+set_tests_properties(RecorderSinkTests PROPERTIES LABELS "servermodel")
+add_dependencies(servermodel_tests test_recorder_sink)
 set_tests_properties(RecordingCodecTests PROPERTIES LABELS "servermodel")
 
 # Corruption fixtures construct/recompress raw HMC2 frames independently.
@@ -207,3 +214,8 @@ add_dependencies(servermodel_tests test_candle_wire)
 add_executable(candle_fixture_server candle_fixture_server.cpp)
 target_include_directories(candle_fixture_server PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(candle_fixture_server PRIVATE sentinel_core Qt6::Core Qt6::Network)
+
+# Sink interface cost on the recorder worker (synthetic stream; not a ctest).
+add_executable(recorder_sink_bench recorder_sink_bench.cpp)
+target_include_directories(recorder_sink_bench PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(recorder_sink_bench PRIVATE sentinel_core Qt6::Core)

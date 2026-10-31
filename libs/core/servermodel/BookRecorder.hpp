@@ -16,6 +16,40 @@ struct LayerConfig {
     double highMult;
     bool hourlyRollup;
 };
+// The recorder's own book, observation and integration-clock decisions, called
+// synchronously on the worker thread in decision order. `clock` is the symbol's
+// integration clock (never decreases; backward and late envelopes are clamped).
+// Order within one message: onMinute for each minute advance() finishes, then:
+//   Tick: nothing more. Invalid: onInvalid(upstream=true).
+//   Snapshot/update applied: [onReset] onLevel* then exactly one of onApplied or
+//   onInvalid (malformed batch: onInvalid only, before any level; one-sided,
+//   crossed or overflowing snapshot: onInvalid after its levels).
+//   Update while invalid: nothing (the recorder drops it).
+// onLevel reports each accepted change in input order, after the book holds it.
+// onReset and onInvalid clear the book; after onInvalid nothing integrates until
+// an accepted snapshot. Time integrates only while observing (onApplied); minutes
+// that onMinute does not report observed nothing. importState and forkLead emit
+// nothing. Implementations must not throw or block and must outlive the recorder.
+class RecorderSink {
+  public:
+    struct LevelChange {
+        bool isBid;
+        int64_t units; // nearest price unit at priceScale, the book key
+        double price;  // as received
+        double size;   // new size, 0 removes the level
+        bool exact;    // units / priceScale == price; false: finer than priceScale, rounded
+    };
+    virtual ~RecorderSink() = default;
+    virtual void onReset(const std::string &symbol, int64_t clock) noexcept = 0;
+    virtual void onLevel(const std::string &symbol, int64_t clock, const LevelChange &level) noexcept = 0;
+    virtual void onApplied(const std::string &symbol, int64_t clock, bool valid, bool observing) noexcept = 0;
+    virtual void onInvalid(const std::string &symbol, int64_t clock, const std::string &reason,
+                           bool upstream) noexcept = 0;
+    // bucketStartMs + 60 s == clock. flags as HMC2 minute flags, without the
+    // per-layer kUnderflow encoding bit.
+    virtual void onMinute(const std::string &symbol, int64_t bucketStartMs, uint32_t observedMs,
+                          uint32_t flags) noexcept = 0;
+};
 struct RecorderConfig {
     std::filesystem::path root;
     double priceScale = 100.0;
@@ -53,6 +87,8 @@ struct RecorderConfig {
     // claim (committedThroughMs 0); normally created by forkLead().
     enum class Publication { Finals = 1, Lead = 2 };
     Publication publication = Publication::Finals;
+    // Optional decision feed (RecorderSink). Not policy; forkLead does not copy it.
+    RecorderSink *sink = nullptr;
 };
 struct Level {
     bool isBid;

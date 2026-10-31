@@ -26,6 +26,8 @@ struct RollOptions {
     // History publication: committed minutes only (Publication::Finals). Not
     // part of the checkpoint policy hash.
     std::function<void(std::shared_ptr<const recording::Hmc2Record>)> publisher;
+    // History recorder decision feed (RecorderSink); must outlive roll(). Not policy.
+    recording::RecorderSink* recorderSink = nullptr;
     // Live-lead seam, on the calling thread: the day's recorder and journal feed
     // once both exist, then (nullptr, nullptr, 0) before either is destroyed.
     std::function<void(recording::BookRecorder*, const JournalFeed*, int64_t dayEndMs)> onRecorder;
