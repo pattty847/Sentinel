@@ -69,7 +69,7 @@ void JournalFeed::attachUpdateDecimals(const nlohmann::json& event, std::vector<
     // parseUpdates succeeded: one level per update, in order, each with a string price.
     const auto& updates = event["updates"];
     for (size_t i = 0; i < levels.size(); ++i)
-        levels[i].decimal = recording::parsePriceDecimal(updates[i].find("price_level")->get_ref<const std::string&>());
+        levels[i].decimal = recording::priceDecimalWithText(updates[i].find("price_level")->get_ref<const std::string&>());
 }
 void JournalFeed::attachSnapshotDecimals(const nlohmann::json& event, std::vector<recording::Level>& levels,
                                          size_t bidCount) {
@@ -85,7 +85,7 @@ void JournalFeed::attachSnapshotDecimals(const nlohmann::json& event, std::vecto
             for (auto& l : levels) l.decimal = {};
             return;
         }
-        levels[at].decimal = recording::parsePriceDecimal(update.find("price_level")->get_ref<const std::string&>());
+        levels[at].decimal = recording::priceDecimalWithText(update.find("price_level")->get_ref<const std::string&>());
     }
 }
 bool JournalFeed::rememberTradeId(const std::string& id) {

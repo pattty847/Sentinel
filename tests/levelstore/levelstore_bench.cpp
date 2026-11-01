@@ -2,6 +2,9 @@
 //   levelstore_bench sink [messages] [pairs]
 //     Recorder worker CPU per accepted level change: sink null vs LevelRecorder (output
 //     discarded), the same synthetic stream, ABBA-interleaved pairs, as recorder_sink_bench.
+//   levelstore_bench burst [messages] [reps]
+//     One minute that grows to N messages: worker CPU per message, uninterrupted and
+//     continued after an export/import; the minute's output must be identical.
 //   levelstore_bench feed RAW_ROOT PRODUCT FROM_ISO HOURS [reps]
 //     JournalFeed on real RAWL2 records held in memory: total apply time per L2 level;
 //     the decimal pass alone over already parsed (cold) JSON; and, in context, the parse
@@ -130,6 +133,71 @@ int sinkBench(int messages, int pairs) {
     return 0;
 }
 
+// One minute that keeps growing: N update messages, each adding a new level, all in
+// one minute (the open block grows to N messages and N changes). Worker CPU of the
+// first and second half, uninterrupted and with an export/import between the halves;
+// the minute's output must be byte-identical.
+int burstBench(int messages, int reps) {
+    const int64_t t0 = kHmc2MinMs + 86'400'000;
+    const auto once = [&](bool restore, double &firstNs, double &secondNs) {
+        TempDir dir;
+        RecorderConfig cfg;
+        cfg.root = dir.path;
+        cfg.priceScale = 100;
+        cfg.layers = {{"near", 100, .95, 1.05, false}, {"deep", 500, .25, 4., true}};
+        cfg.deterministicResume = true;
+        Capture out;
+        const DayBinding bind{"BTC-USD", t0, t0 + 86'400'000, 2};
+        auto c = std::make_unique<LevelRecorder>(bind, &out);
+        cfg.sink = c.get();
+        auto r = std::make_unique<BookRecorder>(cfg);
+        r->onSnapshotAt("BTC-USD", t0, t0, {L(true, "99000", 1), L(false, "101000", 1)});
+        r->drainForTest();
+        const auto feed = [&](int from, int to) {
+            const int64_t before = threadCpuNs("book-recorder");
+            for (int i = from; i < to; ++i) {
+                const int64_t t = t0 + 1 + int64_t(i) * 50'000 / messages;
+                r->onUpdatesAt("BTC-USD", t, t, {L(true, centsText(9'800'000 - i).c_str(), 1.0)});
+            }
+            r->drainForTest();
+            return double(threadCpuNs("book-recorder") - before);
+        };
+        firstNs = feed(0, messages / 2);
+        if (restore) {
+            const auto bytes = r->exportState();
+            const auto clock = r->checkpointClock("BTC-USD");
+            const auto blob = c->exportState(clock, bytes);
+            r.reset();
+            c = std::make_unique<LevelRecorder>(bind, &out);
+            cfg.sink = c.get();
+            r = std::make_unique<BookRecorder>(cfg);
+            r->importState(bytes);
+            if (!c->importState(blob, r->checkpointClock("BTC-USD"), bytes).ok) throw std::runtime_error("import refused");
+        }
+        secondNs = feed(messages / 2, messages);
+        r->onTick(t0 + 61'000);
+        r->drainForTest();
+        return out.bytes();
+    };
+    std::vector<double> a1, a2, b1, b2;
+    bool identical = true;
+    for (int i = 0; i < reps; ++i) {
+        double f = 0, g = 0, h = 0, k = 0;
+        const auto plain = once(false, f, g);
+        const auto restored = once(true, h, k);
+        identical = identical && plain == restored;
+        a1.push_back(f / (messages / 2)); a2.push_back(g / (messages / 2));
+        b1.push_back(h / (messages / 2)); b2.push_back(k / (messages / 2));
+    }
+    std::cout << json({{"bench", "burst"}, {"messagesInOneMinute", messages}, {"reps", reps},
+                       {"uninterruptedFirstHalfNsPerMessage", median(a1)}, {"uninterruptedSecondHalfNsPerMessage", median(a2)},
+                       {"restoredFirstHalfNsPerMessage", median(b1)}, {"afterRestoreSecondHalfNsPerMessage", median(b2)},
+                       {"outputIdentical", identical}})
+                     .dump()
+              << "\n";
+    return identical ? 0 : 3;
+}
+
 int feedBench(const fs::path &raw, const std::string &product, const std::string &from, int hours, int reps) {
     using namespace sentinel::roller;
     const int64_t start = parseTime(from), end = start + int64_t(hours) * 3'600'000;
@@ -248,9 +316,11 @@ int main(int argc, char **argv) {
     try {
         if (argc >= 2 && std::string(argv[1]) == "sink")
             return sinkBench(argc > 2 ? std::atoi(argv[2]) : 400'000, argc > 3 ? std::atoi(argv[3]) : 10);
+        if (argc >= 2 && std::string(argv[1]) == "burst")
+            return burstBench(argc > 2 ? std::atoi(argv[2]) : 40'000, argc > 3 ? std::atoi(argv[3]) : 3);
         if (argc >= 6 && std::string(argv[1]) == "feed")
             return feedBench(argv[2], argv[3], argv[4], std::atoi(argv[5]), argc > 6 ? std::atoi(argv[6]) : 6);
-        std::cerr << "usage: levelstore_bench sink [messages] [pairs] | feed RAW PRODUCT FROM_ISO HOURS [reps]\n";
+        std::cerr << "usage: levelstore_bench sink [messages] [pairs] | burst [messages] [reps] | feed RAW PRODUCT FROM_ISO HOURS [reps]\n";
         return 2;
     } catch (const std::exception &e) {
         std::cerr << "levelstore_bench: " << e.what() << '\n';

@@ -658,7 +658,7 @@ TEST(Checkpoint, CorruptVersionedForeignAndUnpairedBlobsAreRefusedAndFailClosed)
     refused({}, "no state");
     refused(std::vector<uint8_t>(blob.begin(), blob.end() - 1), "");
     auto v = blob; // a future version with a valid CRC
-    v[4] = 2;
+    v[4] = uint8_t(LevelRecorder::kStateVersion + 1);
     const auto crc = sentinel::crc32(v.data(), v.size() - 4);
     for (int i = 0; i < 4; ++i) v[v.size() - 4 + size_t(i)] = uint8_t(crc >> (8 * i));
     refused(v, "version");
@@ -786,4 +786,184 @@ TEST(Failure, AClockRegressionFailsClosedAndForeignSymbolsAreIgnored) {
     c.onApplied(kSym, kFloor + 500, true, true); // behind
     EXPECT_EQ(c.unobserved(), LevelRecorder::Unobserved::Failed);
     EXPECT_EQ(c.openBlock().messages.back().clear, ClearCause::Failed);
+}
+
+// Round 1 (review B1): two genuinely valid recorder exports at the same clock with
+// different books must not pair with each other's C state.
+TEST(Checkpoint, TwoValidRecorderStatesAtTheSameClockAreNotInterchangeable) {
+    TempDir dir;
+    Capture out;
+    Pipeline p(dir.path, out);
+    p.step(snap(1'000, book4()));
+    const auto bytesA = p.r->exportState();
+    const auto clockA = p.r->checkpointClock(kSym);
+    const auto blobA = p.c->exportState(clockA, bytesA);
+    p.step(upd(1'000, {L(true, "99", 5)})); // same millisecond: the clock does not move
+    const auto bytesB = p.r->exportState();
+    const auto clockB = p.r->checkpointClock(kSym);
+    const auto blobB = p.c->exportState(clockB, bytesB);
+    ASSERT_EQ(clockA, clockB);
+    ASSERT_NE(bytesA, bytesB);
+    // Both are valid exports: their CRC over the whole blob is the same residue.
+    EXPECT_EQ(sentinel::crc32(bytesA.data(), bytesA.size()), sentinel::crc32(bytesB.data(), bytesB.size()));
+    const auto import = [&](const std::vector<uint8_t> &blob, const std::vector<uint8_t> &state) {
+        Capture o;
+        LevelRecorder c(binding(), &o);
+        return c.importState(blob, clockA, state);
+    };
+    EXPECT_TRUE(import(blobA, bytesA).ok);
+    EXPECT_TRUE(import(blobB, bytesB).ok);
+    EXPECT_FALSE(import(blobA, bytesB).ok);
+    EXPECT_FALSE(import(blobB, bytesA).ok);
+    // An invalid recorder state can be neither exported against nor paired with.
+    auto broken = bytesA;
+    broken.back() ^= 1;
+    EXPECT_THROW((void)p.c->exportState(clockA, broken), std::logic_error);
+    const auto r = import(blobA, broken);
+    EXPECT_FALSE(r.ok);
+    EXPECT_NE(r.reason.find("not a valid export"), std::string::npos) << r.reason;
+}
+
+// Round 1 (review B2): the reader never sees a lost minute, which may have held the
+// clear that emptied C's book. The first retained output must clear the reader's
+// book whatever C's own book is, so levels a later snapshot omits never come back:
+// after an invalidation or an unsupported price, after two lost minutes in a row,
+// and across a checkpoint export/import.
+TEST(Failure, ALostMinuteThatClearedTheBookNeverResurrectsItsLevels) {
+    enum Variant { Invalidation, Unsupported, TwoLost, AcrossRestore };
+    for (const Variant v : {Invalidation, Unsupported, TwoLost, AcrossRestore}) {
+        TempDir dir;
+        Capture out;
+        Pipeline p(dir.path, out);
+        p.step(snap(1'000, book4()));
+        p.step(tick(kMin + 1'000)); // minute 0 emitted with all four levels
+        if (v == Unsupported) p.step(upd(kMin + 5'000, {L(true, "97.10000000000001", 1)}));
+        else p.step(inv(kMin + 5'000));
+        EXPECT_EQ(p.c->liveLevels(), 0u);
+        out.failBlocks = v == TwoLost ? 2 : 1;
+        p.step(tick(2 * kMin + 1'000)); // minute 1 (the clear) is lost
+        if (v == TwoLost) p.step(tick(3 * kMin + 1'000)); // and minute 2
+        if (v == AcrossRestore) ASSERT_TRUE(p.restore().ok);
+        const int64_t at = v == TwoLost ? 3 * kMin + 5'000 : 2 * kMin + 5'000;
+        p.step(snap(at, {L(true, "99", 2), L(false, "101", 4)})); // 98 and 102 omitted
+        EXPECT_TRUE(p.c->observed()) << v;
+        p.step(tick(6 * kMin));
+        ASSERT_FALSE(out.blocks.empty());
+        const auto &first = out.blocks[1]; // the first retained block after the loss
+        ASSERT_FALSE(first.messages.empty()) << v;
+        EXPECT_EQ(first.messages.front().clear, ClearCause::Failed) << v;
+        EXPECT_EQ(first.messages.front().timeMs, first.bucketStartMs) << v;
+        const auto swept = sweep(out);
+        ASSERT_EQ(swept.size(), out.blocks.size());
+        for (size_t m = 1; m < swept.size(); ++m)
+            for (const auto &r : swept[m].rows) {
+                EXPECT_FALSE(r.bin == 9800 || r.bin == 10200)
+                    << "variant " << v << " minute " << m << " resurrected " << r.bin << " presence " << r.presenceMs;
+            }
+        // The recovered minute observes exactly the snapshot's two levels.
+        const auto &last = swept.back();
+        EXPECT_EQ(last.covered, kMin);
+        EXPECT_EQ(last.rows.size(), 2u) << v;
+    }
+}
+
+namespace {
+// A checkpoint blob in the v2 layout with a recomputed checksum (malformed payloads).
+std::vector<uint8_t> forge(int64_t clock, const std::vector<uint8_t> &recorder,
+                           const std::function<void(ByteWriter &)> &bookAndOpen) {
+    ByteWriter w;
+    for (char m : {'L', 'S', 'C', '1'}) w.u8(uint8_t(m));
+    w.u8(uint8_t(LevelRecorder::kStateVersion));
+    w.u8(uint8_t(LevelRecorder::kStateVersion >> 8));
+    const auto b = binding();
+    w.str(b.symbol);
+    w.svarint(b.floorMs);
+    w.svarint(b.ceilingMs);
+    w.svarint(b.priceDigits);
+    w.u8(1);
+    w.svarint(clock);
+    uint32_t trailer = 0;
+    for (int i = 0; i < 4; ++i) trailer |= uint32_t(recorder[recorder.size() - 4 + size_t(i)]) << (8 * i);
+    w.fixed64(recorder.size());
+    w.fixed32(trailer);
+    w.u8(1 | 2 | 4 | 8); // day started, valid, recorder observing, observed
+    w.u8(0);
+    w.u8(1);
+    w.svarint(clock);
+    for (int i = 0; i < 10; ++i) w.varint(0);
+    bookAndOpen(w);
+    w.fixed32(sentinel::crc32(w.bytes.data(), w.bytes.size()));
+    return std::move(w.bytes);
+}
+void emptyOpen(ByteWriter &w, int64_t clock) { encodeBlock(w, MinuteBlock{clock - clock % kMin, 0, 0, true, false, {}, {}}); }
+} // namespace
+
+// Round 1 (review M1): a payload with a valid checksum is still validated: every
+// decoded delta is added with overflow checks and the results are range-checked.
+TEST(Checkpoint, MalformedDeltasWithAValidChecksumAreRefused) {
+    TempDir dir;
+    Capture out;
+    Pipeline p(dir.path, out);
+    p.step(snap(1'000, book4()));
+    const auto bytes = p.r->exportState();
+    const int64_t clock = *p.r->checkpointClock(kSym);
+    const auto import = [&](const std::vector<uint8_t> &blob) {
+        Capture o;
+        LevelRecorder c(binding(), &o);
+        return c.importState(blob, clock, bytes);
+    };
+    // Control: the forger writes an acceptable blob.
+    const auto good = import(forge(clock, bytes, [&](ByteWriter &w) {
+        w.varint(2); w.svarint(9800); w.f64(3); w.svarint(100); w.f64(2);
+        w.varint(1); w.svarint(10100); w.f64(4);
+        emptyOpen(w, clock);
+    }));
+    ASSERT_TRUE(good.ok) << good.reason;
+    // Book keys: INT64_MAX then +1 overflows.
+    auto r = import(forge(clock, bytes, [&](ByteWriter &w) {
+        w.varint(2); w.svarint(INT64_MAX); w.f64(3); w.svarint(1); w.f64(2);
+        w.varint(0);
+        emptyOpen(w, clock);
+    }));
+    EXPECT_FALSE(r.ok);
+    EXPECT_NE(r.reason.find("overflow"), std::string::npos) << r.reason;
+    // Open-minute message times: a delta that overflows.
+    r = import(forge(clock, bytes, [&](ByteWriter &w) {
+        w.varint(0); w.varint(0);
+        w.svarint(kFloor); w.varint(0); w.varint(0); w.u8(1);
+        w.varint(2);
+        w.svarint(1'000); w.u8(1);
+        w.svarint(INT64_MAX); w.u8(1);
+        w.varint(0);
+    }));
+    EXPECT_FALSE(r.ok);
+    EXPECT_NE(r.reason.find("overflow"), std::string::npos) << r.reason;
+    // Open-minute change keys: INT64_MAX then +1.
+    r = import(forge(clock, bytes, [&](ByteWriter &w) {
+        w.varint(0); w.varint(0);
+        w.svarint(kFloor); w.varint(0); w.varint(0); w.u8(1);
+        w.varint(1);
+        w.svarint(1'000); w.u8(1);
+        w.varint(2);
+        w.varint(0); w.u8(1); w.svarint(INT64_MAX); w.f64(1);
+        w.varint(0); w.u8(1); w.svarint(1); w.f64(1);
+    }));
+    EXPECT_FALSE(r.ok);
+    EXPECT_NE(r.reason.find("overflow"), std::string::npos) << r.reason;
+    // A message time below any recorder time (a negative delta is refused before).
+    r = import(forge(clock, bytes, [&](ByteWriter &w) {
+        w.varint(0); w.varint(0);
+        w.svarint(0); w.varint(0); w.varint(0); w.u8(1);
+        w.varint(1);
+        w.svarint(5); w.u8(1);
+        w.varint(0);
+    }));
+    EXPECT_FALSE(r.ok);
+    // The day image decoder checks its deltas too.
+    ByteWriter img;
+    img.svarint(kFloor); img.u8(1); img.varint(2);
+    img.u8(1); img.svarint(INT64_MAX); img.f64(1);
+    img.u8(1); img.svarint(1); img.f64(1);
+    ByteReader reader(img.bytes);
+    EXPECT_THROW(decodeImage(reader), std::runtime_error);
 }

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <optional>
 #include <stdexcept>
 
 // Lifecycle (each case is handled at the place named here and tested in
@@ -47,6 +48,32 @@ constexpr uint8_t kMagic[4] = {'L', 'S', 'C', '1'};
 void require(bool ok, const char *what) {
     if (!ok) throw std::runtime_error(what);
 }
+// The paired recorder checkpoint's identity: its length and its own payload CRC32
+// (BookRecorder::exportState appends CRC32(payload) little-endian), validated here.
+// A CRC over the whole blob including that trailer would be the same constant
+// residue for every valid export, so it could not tell two checkpoints apart.
+struct RecorderDigest {
+    uint64_t size = 0;
+    uint32_t crc = 0;
+};
+std::optional<RecorderDigest> recorderDigest(const std::vector<uint8_t> &state) {
+    if (state.size() < 5) return std::nullopt;
+    uint32_t trailer = 0;
+    for (int i = 0; i < 4; ++i) trailer |= static_cast<uint32_t>(state[state.size() - 4 + size_t(i)]) << (8 * i);
+    if (sentinel::crc32(state.data(), state.size() - 4) != trailer) return std::nullopt;
+    return RecorderDigest{state.size(), trailer};
+}
+// Capacity for `extra` more elements, growing geometrically: an exact-size reserve
+// per message would copy the whole minute's timeline on every append.
+template <class T> void reserveMore(std::vector<T> &v, size_t extra) {
+    const size_t need = v.size() + extra;
+    if (need > v.capacity()) v.reserve(std::max(need, std::max<size_t>(64, v.capacity() * 2)));
+}
+int64_t checkedAdd(int64_t a, int64_t b, const char *what) {
+    int64_t out = 0;
+    if (__builtin_add_overflow(a, b, &out)) throw std::runtime_error(what);
+    return out;
+}
 } // namespace
 
 const char *unobservedName(LevelRecorder::Unobserved u) noexcept {
@@ -62,7 +89,9 @@ const char *unobservedName(LevelRecorder::Unobserved u) noexcept {
 std::string decimalText(const recording::RecorderSink::LevelChange &level) {
     char buf[96];
     if (!level.decimal.exact) {
-        std::snprintf(buf, sizeof buf, "<no plain decimal text> price=%.17g", level.price);
+        // The original text, when the producer kept it (JournalFeed always does).
+        if (const auto text = recording::UnsupportedPriceTexts::find(level.decimal.digits)) return *text;
+        std::snprintf(buf, sizeof buf, "<no price text> price=%.17g", level.price);
         return buf;
     }
     std::string digits = std::to_string(static_cast<uint64_t>(level.decimal.digits));
@@ -260,8 +289,8 @@ void LevelRecorder::endMessage(int64_t clock, bool valid, bool observing, bool i
         });
     // Reserve before any append, so an allocation failure never leaves a change
     // that points at a missing message.
-    open_.changes.reserve(open_.changes.size() + touched_.size());
-    open_.messages.reserve(open_.messages.size() + 1);
+    reserveMore(open_.changes, touched_.size());
+    reserveMore(open_.messages, 1);
     const auto message = static_cast<uint32_t>(open_.messages.size());
     const size_t firstChange = open_.changes.size();
     for (const auto &t : touched_) {
@@ -315,7 +344,7 @@ void LevelRecorder::onMinute(const std::string &symbol, int64_t bucketStartMs, u
         // After a lost minute the reader's book is stale: the next minute must not
         // claim to start observed (fail() then records the clear at its start).
         open_.observedAtStart = observed_ && !lost;
-        if (lost) fail("output failed; minute lost", end, false);
+        if (lost) fail("output failed; minute lost", end, true);
     } catch (const std::exception &e) {
         fail(e.what(), end);
     } catch (...) {
@@ -332,8 +361,12 @@ void LevelRecorder::clearBook() noexcept {
 // Failure: C cannot trust its book. It records a clear and stays unobserved until a
 // valid exact snapshot. A failure inside an event may have lost part of the minute's
 // timeline (the failing message itself), so that minute is marked damaged: readers
-// take it as unobserved. A lost output minute damages nothing that is still emitted.
-void LevelRecorder::fail(const char *what, int64_t clock, bool damagesMinute) noexcept {
+// take it as unobserved. A lost output minute damages nothing that is still emitted,
+// but the reader never saw it (it may have held a clear, a reset or any change), so
+// the next retained output always starts with a clear, whatever C's own book is now.
+// The clear sits in the open minute, so it survives repeated failures (each lost
+// minute adds one to the next) and checkpoint export/import.
+void LevelRecorder::fail(const char *what, int64_t clock, bool lostOutput) noexcept {
     ++stats_.failures;
     const bool had = liveLevels() > 0 || observed_;
     inMessage_ = messageReset_ = messageUnsupported_ = false;
@@ -346,8 +379,8 @@ void LevelRecorder::fail(const char *what, int64_t clock, bool damagesMinute) no
     } catch (...) {
     }
     unobserved_ = Unobserved::Failed;
-    if (damagesMinute && dayStarted_) open_.damaged = true;
-    if (!had || !dayStarted_) return;
+    if (!lostOutput && dayStarted_) open_.damaged = true;
+    if (!dayStarted_ || !(had || lostOutput)) return;
     try {
         const int64_t at = open_.messages.empty() ? clock : std::max(clock, open_.messages.back().timeMs);
         open_.messages.push_back({at, false, false, ClearCause::Failed});
@@ -399,9 +432,9 @@ void LevelRecorder::resetFresh() noexcept {
     stats_ = {};
 }
 
-// Blob v1: "LSC1", u16 version, binding, the paired recorder checkpoint (clock and the
-// CRC32 of its exportState bytes), flags, episode, clock, stats, book, open minute,
-// then a CRC32 of everything before it. No floating-point accumulators: sizes are the
+// Blob v2: "LSC1", u16 version, binding, the paired recorder checkpoint (its clock, and
+// the length and validated payload CRC32 of its exportState bytes), flags, episode,
+// clock, stats, book, open minute, then a CRC32 of everything before it. No floating-point accumulators: sizes are the
 // recorder's doubles stored bit-exact, times are integers.
 std::vector<uint8_t> LevelRecorder::exportState(std::optional<int64_t> recorderClock,
                                                 const std::vector<uint8_t> &recorderState) const {
@@ -418,7 +451,10 @@ std::vector<uint8_t> LevelRecorder::exportState(std::optional<int64_t> recorderC
     w.svarint(binding_.priceDigits);
     w.u8(recorderClock ? 1 : 0);
     w.svarint(recorderClock.value_or(0));
-    w.fixed32(sentinel::crc32(recorderState.data(), recorderState.size()));
+    const auto digest = recorderDigest(recorderState);
+    if (!digest) throw std::logic_error("LevelRecorder::exportState: the paired recorder state is not a valid export");
+    w.fixed64(digest->size);
+    w.fixed32(digest->crc);
     w.u8(static_cast<uint8_t>((dayStarted_ ? 1 : 0) | (valid_ ? 2 : 0) | (recorderObserving_ ? 4 : 0) |
                               (observed_ ? 8 : 0)));
     w.u8(static_cast<uint8_t>(unobserved_));
@@ -471,8 +507,11 @@ LevelRecorder::ImportResult LevelRecorder::importState(const std::vector<uint8_t
         const int64_t clock = r.svarint();
         require(hasClock <= 1 && (hasClock ? std::optional<int64_t>(clock) : std::nullopt) == recorderClock,
                 "state checkpoint clock differs from the recorder's");
-        require(r.fixed32() == sentinel::crc32(recorderState.data(), recorderState.size()),
-                "state is not paired with this recorder state");
+        const auto digest = recorderDigest(recorderState);
+        require(digest.has_value(), "the recorder state it would be paired with is not a valid export");
+        const uint64_t pairedSize = r.fixed64();
+        const uint32_t pairedCrc = r.fixed32();
+        require(pairedSize == digest->size && pairedCrc == digest->crc, "state is not paired with this recorder state");
         const uint8_t flags = r.u8();
         require(flags <= 15, "state flags");
         const uint8_t episode = r.u8();
@@ -493,7 +532,7 @@ LevelRecorder::ImportResult LevelRecorder::importState(const std::vector<uint8_t
             for (uint64_t i = 0; i < n; ++i) {
                 const int64_t d = r.svarint();
                 require(d > 0, "state book order");
-                units += d;
+                units = checkedAdd(units, d, "state book key overflow");
                 const double size = r.f64();
                 require(std::isfinite(size) && size > 0, "state book size");
                 sides[isBid].emplace(units, Slot{size, 0});
@@ -506,7 +545,9 @@ LevelRecorder::ImportResult LevelRecorder::importState(const std::vector<uint8_t
         require(!recorderObserving || valid, "state observation without validity");
         require(observed == (recorderObserving && unobserved == Unobserved::None), "state observation");
         require(unobserved == Unobserved::None || (sides[0].empty() && sides[1].empty()), "state episode with a book");
-        require(open.messages.empty() || (hasLast && open.messages.back().timeMs <= last), "state open minute clock");
+        require(open.messages.empty() || (hasLast && open.messages.back().timeMs <= last &&
+                                          open.messages.front().timeMs >= recording::kHmc2MinMs),
+                "state open minute clock");
         require(open.changes.empty() || open.changes.back().message < open.messages.size(), "state open minute");
         require(dayStarted || open.messages.empty() || !recorderClock || *recorderClock < binding_.floorMs,
                 "state warmup");

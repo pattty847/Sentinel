@@ -59,7 +59,7 @@ class LevelRecorder final : public recording::RecorderSink {
         uint64_t foreignEvents = 0;     // events for another symbol, ignored
         bool operator==(const Stats &) const = default;
     };
-    static constexpr uint16_t kStateVersion = 1;
+    static constexpr uint16_t kStateVersion = 2;
 
     LevelRecorder(DayBinding binding, LevelOutput *output);
 
@@ -123,7 +123,7 @@ class LevelRecorder final : public recording::RecorderSink {
     void unsupported(const LevelChange &level, int64_t clock);
     void endMessage(int64_t clock, bool valid, bool observing, bool invalidated);
     void startDay();
-    void fail(const char *what, int64_t clock, bool damagesMinute = true) noexcept;
+    void fail(const char *what, int64_t clock, bool lostOutput = false) noexcept;
     void clearBook() noexcept;
     void resetFresh() noexcept;
 

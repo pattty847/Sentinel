@@ -9,6 +9,11 @@ void require(bool ok, const char *what) {
     if (!ok) throw std::runtime_error(std::string("levelstore decode: ") + what);
 }
 constexpr uint8_t kObserved = 1, kReset = 2;
+int64_t checkedAdd(int64_t a, int64_t b, const char *what) {
+    int64_t out = 0;
+    require(!__builtin_add_overflow(a, b, &out), what);
+    return out;
+}
 constexpr unsigned kClearShift = 2;
 } // namespace
 
@@ -119,7 +124,7 @@ MinuteBlock decodeBlock(ByteReader &r) {
     for (auto &m : b.messages) {
         const int64_t d = r.svarint();
         require(d >= 0, "message time order");
-        t += d;
+        t = checkedAdd(t, d, "message time overflow");
         m.timeMs = t;
         const uint8_t f = r.u8();
         const uint8_t clear = f >> kClearShift;
@@ -141,7 +146,7 @@ MinuteBlock decodeBlock(ByteReader &r) {
         const uint8_t side = r.u8();
         require(side <= 1, "change side");
         c.isBid = side == 1;
-        units += r.svarint();
+        units = checkedAdd(units, r.svarint(), "change units overflow");
         require(units > 0, "change units");
         c.units = units;
         c.size = r.f64();
@@ -176,7 +181,7 @@ BookImage decodeImage(ByteReader &r) {
         const uint8_t side = r.u8();
         require(side <= 1, "image side");
         l.isBid = side == 1;
-        units += r.svarint();
+        units = checkedAdd(units, r.svarint(), "image units overflow");
         l.units = units;
         l.size = r.f64();
         require(l.units > 0 && std::isfinite(l.size) && l.size > 0, "image level");

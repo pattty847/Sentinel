@@ -339,3 +339,50 @@ TEST(LevelRoll, UnsupportedPriceIsLoggedOncePerEpisodeWithItsSourceAndCounted) {
         for (const auto &m : blk.messages)
             if (m.timeMs >= Epoch + fix.unsupportedMs) EXPECT_FALSE(m.observed);
 }
+
+// Round 1 (review m2): the warning carries the original text of an unsupported
+// price, also when it is not a plain decimal (exponent, trailing garbage that
+// strtod ignores, too many significant digits). Each recovers at a valid exact
+// snapshot, so each starts its own episode and logs once.
+TEST(LevelRoll, UnsupportedPriceLogKeepsTheOriginalText) {
+    TempDir tmp;
+    Capture out;
+    LevelRecorder c(DayBinding{kProduct, Epoch, Epoch + Day, 2}, &out);
+    recording::RecorderConfig cfg = deriveGrid(metadata()["product_metadata"], 100000).config(tmp.path);
+    cfg.sink = &c;
+    recording::BookRecorder recorder(cfg);
+    JournalFeed feed(kProduct);
+    feed.onSnapshot = [&](int64_t e, int64_t l, std::vector<recording::Level> v) {
+        recorder.onSnapshotAt(kProduct, e, l, std::move(v), feed.sequence());
+    };
+    feed.onUpdates = [&](int64_t e, int64_t l, std::vector<recording::Level> v) {
+        recorder.onUpdatesAt(kProduct, e, l, std::move(v), feed.sequence());
+    };
+    uint64_t seq = 0;
+    uint32_t record = 0;
+    const auto apply = [&](int64_t ms, const char *type, json updates) {
+        feed.apply(JournalRecord{{capture::Kind::Frame, {(Epoch + ms) * 1'000'000, 0}, 1, frame(++seq, type, std::move(updates))},
+                                 {kProduct, "run", 0, record++}, metadata()["product_metadata"], false, 1});
+    };
+    const std::vector<std::string> texts = {"1e5", "99999.5abc", "99999.500000000000000001"};
+    logLines.clear();
+    const auto previous = qInstallMessageHandler(captureLog);
+    apply(1'000, "snapshot", fullBook(0));
+    int64_t t = 2'000;
+    for (const auto &text : texts) {
+        apply(t, "update", json::array({level("bid", text, "1")}));
+        apply(t + 500, "snapshot", fullBook(0)); // recovers: the next text starts a new episode
+        t += 1'000;
+    }
+    recorder.drainForTest();
+    qInstallMessageHandler(previous);
+    std::vector<std::string> warnings;
+    for (const auto &l : logLines)
+        if (l.find("levelstore: unsupported price") != std::string::npos) warnings.push_back(l);
+    ASSERT_EQ(warnings.size(), texts.size());
+    for (size_t i = 0; i < texts.size(); ++i) {
+        EXPECT_NE(warnings[i].find("decimal=" + texts[i] + " "), std::string::npos) << warnings[i];
+        EXPECT_NE(warnings[i].find("identity=no-decimal-text"), std::string::npos) << warnings[i];
+    }
+    EXPECT_EQ(c.stats().unsupportedEpisodes, texts.size());
+}
