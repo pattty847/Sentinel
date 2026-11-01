@@ -78,7 +78,8 @@ struct Pipeline {
         r->drainForTest();
     }
     // Export both at this drained position, destroy both, import into fresh ones.
-    LevelRecorder::ImportResult restore(const std::function<void(std::vector<uint8_t> &)> &corrupt = {}) {
+    LevelRecorder::ImportResult restore(const std::function<void(std::vector<uint8_t> &)> &corrupt = {},
+                                        const std::function<void(LevelRecorder &)> &beforeImport = {}) {
         const auto bytes = r->exportState();
         const auto clock = r->checkpointClock(kSym);
         auto blob = c->exportState(clock, bytes);
@@ -89,6 +90,7 @@ struct Pipeline {
         cfg.sink = c.get();
         r = std::make_unique<BookRecorder>(cfg);
         r->importState(bytes);
+        if (beforeImport) beforeImport(*c);
         return c->importState(blob, r->checkpointClock(kSym), bytes);
     }
 };
@@ -851,7 +853,8 @@ TEST(Failure, ALostMinuteThatClearedTheBookNeverResurrectsItsLevels) {
         ASSERT_FALSE(out.blocks.empty());
         const auto &first = out.blocks[1]; // the first retained block after the loss
         ASSERT_FALSE(first.messages.empty()) << v;
-        EXPECT_EQ(first.messages.front().clear, ClearCause::Failed) << v;
+        // A clear at the block start; its cause is the clear the reader missed.
+        EXPECT_NE(first.messages.front().clear, ClearCause::None) << v;
         EXPECT_EQ(first.messages.front().timeMs, first.bucketStartMs) << v;
         const auto swept = sweep(out);
         ASSERT_EQ(swept.size(), out.blocks.size());
@@ -889,6 +892,7 @@ std::vector<uint8_t> forge(int64_t clock, const std::vector<uint8_t> &recorder,
     w.u8(1 | 2 | 4 | 8); // day started, valid, recorder observing, observed
     w.u8(0);             // episode
     w.u8(0);             // pending reader clear
+    w.u8(0);             // reader flags
     w.u8(1);
     w.svarint(clock);
     for (int i = 0; i < 10; ++i) w.varint(0);
@@ -985,7 +989,7 @@ TEST(Failure, ALostMinuteBeforeSkippedMinutesClearsTheNextOutputAndOutputResumes
         p.step(inv(65'000));
         out.failBlocks = 1;
         p.step(tick(5 * kMin + 1'000)); // minute 1 lost; minutes 2-4 skipped (unobserved)
-        EXPECT_EQ(p.c->pendingClear(), ClearCause::Failed) << v;
+        EXPECT_EQ(p.c->pendingClear(), ClearCause::Invalid) << v; // the lost minute held the invalidation's clear
         if (v == AcrossRestore) ASSERT_TRUE(p.restore().ok);
         p.step(snap(5 * kMin + 5'000, {L(true, "99", 2), L(false, "101", 4)})); // 98 and 102 omitted
         int64_t resumed = 5 * kMin;
@@ -1000,7 +1004,7 @@ TEST(Failure, ALostMinuteBeforeSkippedMinutesClearsTheNextOutputAndOutputResumes
         const auto &first = out.blocks[1];
         EXPECT_EQ(first.bucketStartMs, kFloor + resumed) << v;
         ASSERT_FALSE(first.messages.empty());
-        EXPECT_EQ(first.messages.front(), (TimelineMessage{kFloor + resumed, false, false, ClearCause::Failed})) << v;
+        EXPECT_EQ(first.messages.front(), (TimelineMessage{kFloor + resumed, false, false, ClearCause::Invalid})) << v;
         EXPECT_EQ(out.blocks.back().bucketStartMs, kFloor + 8 * kMin) << v; // output resumed through minute 8
         EXPECT_EQ(p.c->stats().failures, v == LoseAgain ? 2u : 1u) << v;
         EXPECT_EQ(p.c->pendingClear(), ClearCause::None);
@@ -1060,4 +1064,90 @@ TEST(PriceDecimal, DiagnosticTextKeepsHeadTailAndLength) {
     EXPECT_EQ(d.substr(0, 6), "99999.");
     EXPECT_NE(d.find("[609 chars, middle omitted]"), std::string::npos) << d;
     EXPECT_EQ(d.substr(d.size() - 3), "XYZ");
+}
+
+// Round 3 (review B2, structural): every clear is first a persistent requirement and
+// only then an allocating append. When the append (or the later prepend) cannot
+// allocate, the open minute is dropped whole and the clear goes at the start of the
+// next block output: the reader never keeps levels C no longer has. The reader held
+// 98/99/101/102 and saw 98 change earlier in the failing minute; recovery omits 98
+// and 102. Every variant also runs with a checkpoint export/import before recovery.
+TEST(Failure, AClearThatCannotBeAllocatedStillClearsTheReader) {
+    enum Site { InvalidClear, UnsupportedClear, FailureClear, RefusedRestoreClear, LostMinutePrepend, SuspendedInvalid };
+    for (const Site site : {InvalidClear, UnsupportedClear, FailureClear, RefusedRestoreClear, LostMinutePrepend, SuspendedInvalid})
+        for (const bool restore : {false, true}) {
+            const std::string what = "site " + std::to_string(site) + (restore ? " with restore" : "");
+            TempDir dir;
+            Capture out;
+            Pipeline p(dir.path, out);
+            std::map<std::string, int> failOnce; // site -> remaining injected failures
+            const auto arm = [&](LevelRecorder &c) {
+                c.failAllocationForTest = [&failOnce](const char *s) {
+                    auto it = failOnce.find(s);
+                    if (it == failOnce.end() || it->second == 0) return false;
+                    --it->second;
+                    return true;
+                };
+            };
+            arm(*p.c);
+            p.step(snap(1'000, book4()));
+            p.step(tick(kMin + 1'000)); // minute 0 output: the reader holds 98/99/101/102
+            p.step(upd(kMin + 3'000, {L(true, "98", 3.5)})); // earlier in the failing minute
+            switch (site) {
+            case InvalidClear:
+                failOnce["clear"] = 1;
+                p.step(inv(kMin + 5'000));
+                break;
+            case UnsupportedClear:
+                failOnce["clear"] = 1;
+                p.step(upd(kMin + 5'000, {L(true, "97.10000000000001", 1)}));
+                break;
+            case FailureClear: // a failure inside an event, whose own clear fails too
+                failOnce["changes"] = 1;
+                failOnce["clear"] = 1;
+                p.step(upd(kMin + 5'000, {L(true, "97", 1)}));
+                EXPECT_EQ(p.c->stats().failures, 1u) << what;
+                break;
+            case RefusedRestoreClear:
+                failOnce["clear"] = 1;
+                EXPECT_FALSE(p.restore([](std::vector<uint8_t> &b) { b[7] ^= 1; }, arm).ok) << what;
+                break;
+            case LostMinutePrepend: // a lost minute, then the prepend of its clear fails once
+                p.step(inv(kMin + 5'000));
+                out.failBlocks = 1;
+                p.step(tick(2 * kMin + 1'000));
+                failOnce["prepend"] = 1;
+                p.step(tick(3 * kMin + 1'000));
+                break;
+            case SuspendedInvalid: // one-sided: C unobserved while the reader holds levels
+                p.step(upd(kMin + 4'000, {L(false, "101", 0), L(false, "102", 0)}));
+                failOnce["clear"] = 1;
+                p.step(inv(kMin + 5'000));
+                break;
+            }
+            EXPECT_NE(p.c->pendingClear(), ClearCause::None) << what;
+            if (restore) {
+                const auto r = p.restore({}, arm);
+                ASSERT_TRUE(r.ok) << what << " " << r.reason;
+                EXPECT_NE(p.c->pendingClear(), ClearCause::None) << what;
+            }
+            const int64_t at = 4 * kMin + 5'000;
+            p.step(snap(at, {L(true, "99", 2), L(false, "101", 4)})); // 98 and 102 omitted
+            p.step(tick(7 * kMin));
+            EXPECT_EQ(p.c->pendingClear(), ClearCause::None) << what;
+            EXPECT_TRUE(p.c->observed()) << what;
+            const auto swept = sweep(out);
+            ASSERT_GE(swept.size(), 3u) << what;
+            bool recovered = false;
+            for (size_t m = 0; m < swept.size(); ++m) {
+                if (out.blocks[m].bucketStartMs < kFloor + kMin) continue;
+                for (const auto &r : swept[m].rows)
+                    EXPECT_FALSE((r.bin == 9800 || r.bin == 10200) && (r.presenceMs > 0 || r.peak > 0 || r.last > 0))
+                        << what << ": minute " << (out.blocks[m].bucketStartMs - kFloor) / kMin << " resurrected " << r.bin;
+                recovered = recovered || out.blocks[m].bucketStartMs >= kFloor + 4 * kMin;
+            }
+            EXPECT_TRUE(recovered) << what;
+            EXPECT_EQ(swept.back().covered, kMin) << what;
+            EXPECT_EQ(swept.back().rows.size(), 2u) << what;
+        }
 }

@@ -44,8 +44,9 @@ public:
     // Sequence number of the frame being applied (inside a callback) or last
     // applied; 0 when none. Diagnostics only (RecorderSink LevelChange::sequence).
     uint64_t sequence() const { return sequence_.value_or(0); }
-    // Inside onSnapshot/onUpdates: the original text of the event's first price that is
-    // not an exact plain decimal (empty when none), moved out for the recorder message.
+    // Inside onSnapshot/onUpdates: the original text of the price that is not an exact
+    // plain decimal with the lowest index in the levels handed to the callback (empty
+    // when none), moved out for the recorder message.
     recording::PriceText takePriceText() { return std::exchange(priceText_, {}); }
     // Read-only view of the retained nonempty IDs (at most the window capacity);
     // copy it to keep it past further apply() calls.

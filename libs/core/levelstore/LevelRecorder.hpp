@@ -16,6 +16,7 @@ them the worker does not touch this object). Never throws from a callback.
 #include "LevelTimeline.hpp"
 #include "servermodel/BookRecorder.hpp"
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -59,7 +60,7 @@ class LevelRecorder final : public recording::RecorderSink {
         uint64_t foreignEvents = 0;     // events for another symbol, ignored
         bool operator==(const Stats &) const = default;
     };
-    static constexpr uint16_t kStateVersion = 3;
+    static constexpr uint16_t kStateVersion = 4;
 
     LevelRecorder(DayBinding binding, LevelOutput *output);
 
@@ -104,6 +105,10 @@ class LevelRecorder final : public recording::RecorderSink {
     std::vector<BookLevel> book() const; // sorted as BookImage::levels
     const MinuteBlock &openBlock() const { return open_; }
     ClearCause pendingClear() const { return pendingClear_; }
+    // Deterministic allocation-failure seam, tests only: called at the allocating sites
+    // of the clear and output paths ("clear", "prepend", "changes"); true throws
+    // std::bad_alloc there. Unset in production: one empty-function check per site.
+    std::function<bool(const char *site)> failAllocationForTest;
     size_t memoryBytes() const; // estimate of the open state's heap use
 
   private:
@@ -126,6 +131,9 @@ class LevelRecorder final : public recording::RecorderSink {
     void startDay();
     void fail(const char *what, int64_t clock, bool lostOutput = false) noexcept;
     void loseMinute(const char *what, int64_t end) noexcept;
+    void requireClear(ClearCause cause, std::optional<int64_t> at) noexcept;
+    void dropOpenMinute(bool damaged) noexcept;
+    void allocationSeam(const char *site);
     void clearBook() noexcept;
     void resetFresh() noexcept;
 
@@ -135,10 +143,11 @@ class LevelRecorder final : public recording::RecorderSink {
     std::vector<Touch> touched_;
     uint32_t serial_ = 0;
     bool inMessage_ = false, messageReset_ = false, messageUnsupported_ = false;
-    size_t levelsBefore_ = 0;
     bool dayStarted_ = false, valid_ = false, recorderObserving_ = false, observed_ = false;
     Unobserved unobserved_ = Unobserved::None;
-    ClearCause pendingClear_ = ClearCause::None; // the next output block must start with this clear
+    ClearCause pendingClear_ = ClearCause::None; // a clear the reader has not received yet
+    bool clearInOpen_ = false;          // that clear is already placed in the open minute
+    bool readerMayHoldLevels_ = false;  // C's output so far may leave the reader holding levels
     int64_t lastClock_ = INT64_MIN;
     MinuteBlock open_;
     Stats stats_;

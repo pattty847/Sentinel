@@ -510,3 +510,31 @@ TEST(LevelRoll, UnsupportedPriceTextSurvivesBigMessagesDelayedConsumersAndLength
     }
     EXPECT_NE(warnings[0].find("TAIL") + warnings[1].find("TAIL"), 2 * std::string::npos); // the suffix is kept
 }
+
+// Round 3 (review m2): a snapshot lists levels in any order, but the recorder sees all
+// bids before all asks. The kept text is the one of the first unsupported level in
+// that final order, so the once-per-episode warning has it.
+TEST(LevelRoll, SnapshotDiagnosticFollowsTheRecorderLevelOrder) {
+    TempDir tmp;
+    Capture out;
+    LevelRecorder c(DayBinding{kProduct, Epoch, Epoch + Day, 2}, &out);
+    recording::RecorderConfig cfg = deriveGrid(metadata()["product_metadata"], 100000).config(tmp.path);
+    cfg.sink = &c;
+    recording::BookRecorder recorder(cfg);
+    JournalFeed feed(kProduct);
+    feed.onSnapshot = [&](int64_t e, int64_t l, std::vector<recording::Level> v) {
+        recorder.onSnapshotAt(kProduct, e, l, std::move(v), feed.sequence(), feed.takePriceText());
+    };
+    logLines.clear();
+    const auto previous = qInstallMessageHandler(captureLog);
+    feed.apply(JournalRecord{{capture::Kind::Frame, {(Epoch + 1'000) * 1'000'000, 0}, 1,
+                              frame(1, "snapshot", json::array({level("offer", "100001.5ask", "1"), level("offer", "100002", "1"),
+                                                                level("bid", "99999", "2"), level("bid", "99998.5bid", "1")}))},
+                             {kProduct, "run", 0, 0}, metadata()["product_metadata"], false, 1});
+    recorder.drainForTest();
+    qInstallMessageHandler(previous);
+    const auto warnings = unsupportedWarnings();
+    ASSERT_EQ(warnings.size(), 1u);
+    EXPECT_NE(warnings[0].find("decimal=99998.5bid "), std::string::npos) << warnings[0];
+    EXPECT_NE(warnings[0].find("side=bid"), std::string::npos) << warnings[0];
+}

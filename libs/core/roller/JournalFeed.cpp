@@ -69,7 +69,9 @@ std::optional<uint64_t> numericTradeId(const std::string& id) {
 // message (priceText_, taken by the callback's consumer): the only allocation here.
 void JournalFeed::attachDecimal(recording::Level& level, size_t index, const std::string& text) {
     level.decimal = recording::parsePriceDecimal(text);
-    if (!level.decimal.exact && priceText_.level == UINT32_MAX && index < UINT32_MAX)
+    // The recorder sees the levels in their final order (a snapshot: all bids, then all
+    // asks), so keep the lowest final index: at most one replacement per snapshot side.
+    if (!level.decimal.exact && index < priceText_.level)
         priceText_ = {static_cast<uint32_t>(index), recording::diagnosticPriceText(text)};
 }
 void JournalFeed::attachUpdateDecimals(const nlohmann::json& event, std::vector<recording::Level>& levels) {
