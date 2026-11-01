@@ -3,11 +3,13 @@
 //     Recorder worker CPU per accepted level change: sink null vs LevelRecorder (output
 //     discarded), the same synthetic stream, ABBA-interleaved pairs, as recorder_sink_bench.
 //   levelstore_bench feed RAW_ROOT PRODUCT FROM_ISO HOURS [reps]
-//     JournalFeed on real RAWL2 records held in memory: total apply time per L2 level,
-//     and the added exact-decimal pass alone (the same text lookups and parse), timed on
-//     the same frames, interleaved.
+//     JournalFeed on real RAWL2 records held in memory: total apply time per L2 level;
+//     the decimal pass alone over already parsed (cold) JSON; and, in context, the parse
+//     plus parseSnapshot/parseUpdates loop with and without the decimal pass on the same
+//     warm nodes, ABBA-interleaved (the added cost).
 #include "LevelTestSupport.hpp"
 #include "roller/JournalFeed.hpp"
+#include "marketdata/dispatch/BookParser.hpp"
 #include "roller/Roller.hpp"
 #include <QCoreApplication>
 #include <mach/mach.h>
@@ -174,16 +176,67 @@ int feedBench(const fs::path &raw, const std::string &product, const std::string
         if (!exact) std::cerr << "no exact decimal\n";
         return ns;
     };
-    std::vector<double> total, pass;
+    // In context: JournalFeed's own per-frame work (JSON parse from the payload, then
+    // parseSnapshot/parseUpdates), without and with the decimal pass on the same warm
+    // nodes, in the same loop. The difference is the added cost.
+    std::vector<std::string> payloads;
+    for (const auto &rec : records)
+        if (rec.record.kind == sentinel::capture::Kind::Frame && rec.record.payload.find("\"l2_data\"") != std::string::npos)
+            payloads.push_back(rec.record.payload);
+    const auto contextOnce = [&](bool decimals) {
+        uint64_t sink = 0;
+        std::vector<OrderBookLevel> bids, asks;
+        std::vector<BookLevelUpdate> updates;
+        const auto t0 = std::chrono::steady_clock::now();
+        for (const auto &payload : payloads) {
+            const auto j = nlohmann::json::parse(payload);
+            for (const auto &event : j["events"]) {
+                if (event.value("product_id", "") != product) continue;
+                const auto type = event.value("type", "");
+                if (type == "snapshot") {
+                    bids.clear();
+                    asks.clear();
+                    sink += sentinel::dispatch::parseSnapshot(event, bids, asks) + bids.size() + asks.size();
+                    if (decimals)
+                        for (const auto &u : event["updates"]) {
+                            bool isBid; double price, size;
+                            if (!sentinel::dispatch::parseLevel(u, isBid, price, size) || !(size > 0)) continue;
+                            sink += parsePriceDecimal(u.find("price_level")->get_ref<const std::string &>()).digits;
+                        }
+                } else if (type == "update" && sentinel::dispatch::parseUpdates(event, updates)) {
+                    sink += updates.size();
+                    if (decimals) {
+                        const auto &u = event["updates"];
+                        for (size_t i = 0; i < updates.size(); ++i)
+                            sink += parsePriceDecimal(u[i].find("price_level")->get_ref<const std::string &>()).digits;
+                    }
+                }
+            }
+        }
+        const double ns = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count();
+        if (!sink) std::cerr << "empty\n";
+        return ns;
+    };
+    std::vector<double> total, pass, without, with, deltas;
     for (int i = 0; i < reps; ++i) {
         if (i % 2) { pass.push_back(decimalOnce()); total.push_back(feedOnce()); }
         else { total.push_back(feedOnce()); pass.push_back(decimalOnce()); }
+        double a = 0, b = 0;
+        if (i % 2) { b = contextOnce(true); a = contextOnce(false); }
+        else { a = contextOnce(false); b = contextOnce(true); }
+        without.push_back(a);
+        with.push_back(b);
+        deltas.push_back((b - a) / double(levels));
     }
     const double perLevelTotal = median(total) / double(levels), perLevelPass = median(pass) / double(levels);
     std::cout << json({{"bench", "feed"}, {"product", product}, {"from", from}, {"hours", hours}, {"records", records.size()},
                        {"l2Frames", frames}, {"levels", levels}, {"reps", reps},
                        {"applyNsPerLevelMedian", perLevelTotal}, {"decimalPassNsPerLevelMedian", perLevelPass},
-                       {"decimalPassShareOfApply", perLevelPass / perLevelTotal}})
+                       {"decimalPassShareOfApply", perLevelPass / perLevelTotal},
+                       {"inContextParseNsPerLevelMedian", median(without) / double(levels)},
+                       {"inContextWithDecimalsNsPerLevelMedian", median(with) / double(levels)},
+                       {"inContextPairedDeltaNsPerLevelMedian", median(deltas)},
+                       {"inContextPairedDeltaShareOfApply", median(deltas) / perLevelTotal}})
                      .dump()
               << "\n";
     return 0;
