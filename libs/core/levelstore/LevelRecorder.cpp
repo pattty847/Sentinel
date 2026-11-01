@@ -548,7 +548,8 @@ std::vector<uint8_t> LevelRecorder::exportState(std::optional<int64_t> recorderC
 LevelRecorder::ImportResult LevelRecorder::importState(const std::vector<uint8_t> &blob,
                                                        std::optional<int64_t> recorderClock,
                                                        const std::vector<uint8_t> &recorderState) noexcept {
-    std::string reason;
+    // Fixed storage: copying the reason must not allocate inside this noexcept path.
+    char reason[192] = "unknown exception";
     try {
         require(lastClock_ == INT64_MIN && !dayStarted_ && !inMessage_ && liveLevels() == 0 &&
                     open_.messages.empty() && stats_ == Stats{},
@@ -635,9 +636,9 @@ LevelRecorder::ImportResult LevelRecorder::importState(const std::vector<uint8_t
         stats_ = s;
         return {true, {}};
     } catch (const std::exception &e) {
-        reason = e.what();
+        std::snprintf(reason, sizeof reason, "%s", e.what());
     } catch (...) {
-        reason = "unknown exception";
+        std::snprintf(reason, sizeof reason, "%s", "unknown exception");
     }
     // Refused: start empty and unobserved; never continue from a guessed state.
     resetFresh();
@@ -658,7 +659,12 @@ LevelRecorder::ImportResult LevelRecorder::importState(const std::vector<uint8_t
                      << " recorderClock=" << recorderClock.value_or(-1));
     } catch (...) {
     }
-    return {false, reason};
+    ImportResult refused;
+    try {
+        refused.reason = reason;
+    } catch (...) { // the reason is diagnostics only
+    }
+    return refused;
 }
 
 } // namespace sentinel::levelstore
