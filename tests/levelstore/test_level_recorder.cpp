@@ -1073,8 +1073,10 @@ TEST(PriceDecimal, DiagnosticTextKeepsHeadTailAndLength) {
 // 98/99/101/102 and saw 98 change earlier in the failing minute; recovery omits 98
 // and 102. Every variant also runs with a checkpoint export/import before recovery.
 TEST(Failure, AClearThatCannotBeAllocatedStillClearsTheReader) {
-    enum Site { InvalidClear, UnsupportedClear, FailureClear, RefusedRestoreClear, LostMinutePrepend, SuspendedInvalid };
-    for (const Site site : {InvalidClear, UnsupportedClear, FailureClear, RefusedRestoreClear, LostMinutePrepend, SuspendedInvalid})
+    enum Site { InvalidClear, UnsupportedClear, FailureClear, RefusedRestoreClear, LostMinutePrepend, SuspendedInvalid,
+                SuspendedRestoredInvalid };
+    for (const Site site : {InvalidClear, UnsupportedClear, FailureClear, RefusedRestoreClear, LostMinutePrepend, SuspendedInvalid,
+                            SuspendedRestoredInvalid})
         for (const bool restore : {false, true}) {
             const std::string what = "site " + std::to_string(site) + (restore ? " with restore" : "");
             TempDir dir;
@@ -1124,6 +1126,12 @@ TEST(Failure, AClearThatCannotBeAllocatedStillClearsTheReader) {
                 failOnce["clear"] = 1;
                 p.step(inv(kMin + 5'000));
                 break;
+            case SuspendedRestoredInvalid: // the same, with a checkpoint between suspension and
+                // invalidation: only the restored "reader may hold levels" asks for the clear
+                p.step(upd(kMin + 4'000, {L(false, "101", 0), L(false, "102", 0)}));
+                ASSERT_TRUE(p.restore({}, arm).ok) << what;
+                p.step(inv(kMin + 5'000));
+                break;
             }
             EXPECT_NE(p.c->pendingClear(), ClearCause::None) << what;
             if (restore) {
@@ -1141,8 +1149,12 @@ TEST(Failure, AClearThatCannotBeAllocatedStillClearsTheReader) {
             bool recovered = false;
             for (size_t m = 0; m < swept.size(); ++m) {
                 if (out.blocks[m].bucketStartMs < kFloor + kMin) continue;
+                // In the minute of the clear they may have been present before it, but
+                // are gone at its end; in every later minute they do not exist at all.
+                const bool clearMinute = out.blocks[m].bucketStartMs == kFloor + kMin;
                 for (const auto &r : swept[m].rows)
-                    EXPECT_FALSE((r.bin == 9800 || r.bin == 10200) && (r.presenceMs > 0 || r.peak > 0 || r.last > 0))
+                    EXPECT_FALSE((r.bin == 9800 || r.bin == 10200) &&
+                                 (r.last > 0 || (!clearMinute && (r.presenceMs > 0 || r.peak > 0))))
                         << what << ": minute " << (out.blocks[m].bucketStartMs - kFloor) / kMin << " resurrected " << r.bin;
                 recovered = recovered || out.blocks[m].bucketStartMs >= kFloor + 4 * kMin;
             }
