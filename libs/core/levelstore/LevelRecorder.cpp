@@ -69,11 +69,6 @@ template <class T> void reserveMore(std::vector<T> &v, size_t extra) {
     const size_t need = v.size() + extra;
     if (need > v.capacity()) v.reserve(std::max(need, std::max<size_t>(64, v.capacity() * 2)));
 }
-int64_t checkedAdd(int64_t a, int64_t b, const char *what) {
-    int64_t out = 0;
-    if (__builtin_add_overflow(a, b, &out)) throw std::runtime_error(what);
-    return out;
-}
 } // namespace
 
 const char *unobservedName(LevelRecorder::Unobserved u) noexcept {
@@ -89,8 +84,9 @@ const char *unobservedName(LevelRecorder::Unobserved u) noexcept {
 std::string decimalText(const recording::RecorderSink::LevelChange &level) {
     char buf[96];
     if (!level.decimal.exact) {
-        // The original text, when the producer kept it (JournalFeed always does).
-        if (const auto text = recording::UnsupportedPriceTexts::find(level.decimal.digits)) return *text;
+        // The original text, carried with the recorder message (JournalFeed keeps the
+        // first such price of each message).
+        if (!level.priceText.empty()) return std::string(level.priceText);
         std::snprintf(buf, sizeof buf, "<no price text> price=%.17g", level.price);
         return buf;
     }
@@ -320,6 +316,23 @@ void LevelRecorder::onMinute(const std::string &symbol, int64_t bucketStartMs, u
             throw std::logic_error("message outside its minute");
         lastClock_ = end;
         bool lost = false;
+        const auto output = [&] {
+            // A minute lost earlier (its output failed, or it was inconsistent and
+            // dropped) may have held a clear, a reset or any change the reader never
+            // saw: the next block actually output starts with a clear at its own start,
+            // whatever C's book is now and however many minutes the recorder skipped.
+            if (pendingClear_ != ClearCause::None) {
+                reserveMore(open_.messages, 1);
+                open_.messages.insert(open_.messages.begin(), {bucketStartMs, false, false, pendingClear_});
+                for (auto &c : open_.changes) ++c.message;
+                open_.observedAtStart = false;
+                ++stats_.messages;
+                ++stats_.clears;
+            }
+            output_->onBlock(binding_, open_);
+            pendingClear_ = ClearCause::None;
+            ++stats_.blocks;
+        };
         if (bucketStartMs < binding_.floorMs) {
             // Warmup minute: builds the book only.
             if (end >= binding_.floorMs && !dayStarted_) startDay();
@@ -331,8 +344,7 @@ void LevelRecorder::onMinute(const std::string &symbol, int64_t bucketStartMs, u
                 open_.recorderObservedMs = observedMs;
                 open_.recorderFlags = flags;
                 try {
-                    output_->onBlock(binding_, open_);
-                    ++stats_.blocks;
+                    output();
                 } catch (...) {
                     lost = true;
                 }
@@ -341,15 +353,25 @@ void LevelRecorder::onMinute(const std::string &symbol, int64_t bucketStartMs, u
         open_.messages.clear();
         open_.changes.clear();
         open_.damaged = false;
-        // After a lost minute the reader's book is stale: the next minute must not
-        // claim to start observed (fail() then records the clear at its start).
-        open_.observedAtStart = observed_ && !lost;
-        if (lost) fail("output failed; minute lost", end, true);
+        open_.observedAtStart = observed_;
+        if (lost) loseMinute("output failed; minute lost", end);
     } catch (const std::exception &e) {
-        fail(e.what(), end);
+        loseMinute(e.what(), end);
     } catch (...) {
-        fail("unknown exception", end);
+        loseMinute("unknown exception", end);
     }
+}
+
+// The open minute cannot be output (its output failed, or it is inconsistent): drop
+// it entirely, so nothing in it can reach a later minute, and require a clear at the
+// start of the next block output (onMinute output).
+void LevelRecorder::loseMinute(const char *what, int64_t end) noexcept {
+    open_.messages.clear();
+    open_.changes.clear();
+    open_.damaged = false;
+    open_.observedAtStart = false;
+    if (dayStarted_) pendingClear_ = ClearCause::Failed;
+    fail(what, end, true);
 }
 
 void LevelRecorder::clearBook() noexcept {
@@ -364,8 +386,9 @@ void LevelRecorder::clearBook() noexcept {
 // take it as unobserved. A lost output minute damages nothing that is still emitted,
 // but the reader never saw it (it may have held a clear, a reset or any change), so
 // the next retained output always starts with a clear, whatever C's own book is now.
-// The clear sits in the open minute, so it survives repeated failures (each lost
-// minute adds one to the next) and checkpoint export/import.
+// That requirement is pendingClear_, not a timestamped message: the recorder may skip
+// unobserved minutes, so the next output minute is unknown here. It survives repeated
+// losses and checkpoint export/import.
 void LevelRecorder::fail(const char *what, int64_t clock, bool lostOutput) noexcept {
     ++stats_.failures;
     const bool had = liveLevels() > 0 || observed_;
@@ -379,10 +402,13 @@ void LevelRecorder::fail(const char *what, int64_t clock, bool lostOutput) noexc
     } catch (...) {
     }
     unobserved_ = Unobserved::Failed;
-    if (!lostOutput && dayStarted_) open_.damaged = true;
-    if (!dayStarted_ || !(had || lostOutput)) return;
+    if (lostOutput || !dayStarted_) return; // loseMinute set pendingClear_
+    open_.damaged = true;
+    if (!had) return;
     try {
-        const int64_t at = open_.messages.empty() ? clock : std::max(clock, open_.messages.back().timeMs);
+        // Inside the current open minute: never before C's latest clock or message.
+        int64_t at = std::max(clock, lastClock_);
+        if (!open_.messages.empty()) at = std::max(at, open_.messages.back().timeMs);
         open_.messages.push_back({at, false, false, ClearCause::Failed});
         ++stats_.messages;
         ++stats_.clears;
@@ -421,6 +447,7 @@ void LevelRecorder::resetFresh() noexcept {
     levelsBefore_ = 0;
     dayStarted_ = valid_ = recorderObserving_ = observed_ = false;
     unobserved_ = Unobserved::None;
+    pendingClear_ = ClearCause::None;
     lastClock_ = INT64_MIN;
     open_.messages.clear();
     open_.changes.clear();
@@ -432,9 +459,9 @@ void LevelRecorder::resetFresh() noexcept {
     stats_ = {};
 }
 
-// Blob v2: "LSC1", u16 version, binding, the paired recorder checkpoint (its clock, and
-// the length and validated payload CRC32 of its exportState bytes), flags, episode,
-// clock, stats, book, open minute, then a CRC32 of everything before it. No floating-point accumulators: sizes are the
+// Blob v3: "LSC1", u16 version, binding, the paired recorder checkpoint (its clock, and
+// the length and validated payload CRC32 of its exportState bytes), flags, episode, the
+// pending reader clear, clock, stats, book, open minute, then a CRC32 of everything before it. No floating-point accumulators: sizes are the
 // recorder's doubles stored bit-exact, times are integers.
 std::vector<uint8_t> LevelRecorder::exportState(std::optional<int64_t> recorderClock,
                                                 const std::vector<uint8_t> &recorderState) const {
@@ -458,6 +485,7 @@ std::vector<uint8_t> LevelRecorder::exportState(std::optional<int64_t> recorderC
     w.u8(static_cast<uint8_t>((dayStarted_ ? 1 : 0) | (valid_ ? 2 : 0) | (recorderObserving_ ? 4 : 0) |
                               (observed_ ? 8 : 0)));
     w.u8(static_cast<uint8_t>(unobserved_));
+    w.u8(static_cast<uint8_t>(pendingClear_));
     w.u8(lastClock_ == INT64_MIN ? 0 : 1);
     w.svarint(lastClock_ == INT64_MIN ? 0 : lastClock_);
     for (uint64_t v : {stats_.messages, stats_.changes, stats_.blocks, stats_.resets, stats_.clears,
@@ -516,6 +544,8 @@ LevelRecorder::ImportResult LevelRecorder::importState(const std::vector<uint8_t
         require(flags <= 15, "state flags");
         const uint8_t episode = r.u8();
         require(episode <= static_cast<uint8_t>(Unobserved::RestoreRefused), "state episode");
+        const uint8_t pending = r.u8();
+        require(pending <= static_cast<uint8_t>(ClearCause::RestoreRefused), "state pending clear");
         const uint8_t hasLast = r.u8();
         const int64_t last = r.svarint();
         require(hasLast <= 1 && (!hasLast || (recorderClock && last <= *recorderClock)), "state clock");
@@ -551,6 +581,7 @@ LevelRecorder::ImportResult LevelRecorder::importState(const std::vector<uint8_t
         require(open.changes.empty() || open.changes.back().message < open.messages.size(), "state open minute");
         require(dayStarted || open.messages.empty() || !recorderClock || *recorderClock < binding_.floorMs,
                 "state warmup");
+        require(pending == 0 || dayStarted, "state pending clear before the day");
         book_[0].swap(sides[0]);
         book_[1].swap(sides[1]);
         open_ = std::move(open);
@@ -559,6 +590,7 @@ LevelRecorder::ImportResult LevelRecorder::importState(const std::vector<uint8_t
         recorderObserving_ = recorderObserving;
         observed_ = observed;
         unobserved_ = unobserved;
+        pendingClear_ = static_cast<ClearCause>(pending);
         lastClock_ = hasLast ? last : INT64_MIN;
         stats_ = s;
         return {true, {}};

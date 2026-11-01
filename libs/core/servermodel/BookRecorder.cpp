@@ -403,6 +403,7 @@ struct BookRecorder::Impl {
         int64_t time = 0, local = 0;
         std::vector<Level> levels;
         uint64_t sequence = 0; // journal frame sequence for sink diagnostics only
+        PriceText priceText;   // owned until this message is processed; diagnostics only
     };
     // Only the producer accesses this map. Queued messages keep names alive
     // for the recorder lifetime; data enqueues do not allocate symbol strings.
@@ -1000,8 +1001,10 @@ struct BookRecorder::Impl {
         ++s.serial;
         for (auto &l : s.layers)
             l.touched.clear();
-        for (const auto &level : m.levels) {
+        for (size_t index = 0; index < m.levels.size(); ++index) {
+            const auto &level = m.levels[index];
             const int64_t units = *priceUnits(level.price, cfg.priceScale);
+            const std::string_view text = index == m.priceText.level ? std::string_view(m.priceText.text) : std::string_view{};
             auto precision = RecorderSink::Precision::OnGrid;
             auto identity = DecimalIdentity::NoText;
             if (sink) {
@@ -1009,7 +1012,7 @@ struct BookRecorder::Impl {
                 identity = decimalIdentity(level.decimal, priceDigits, units);
                 if (precision != RecorderSink::Precision::OnGrid || identity != DecimalIdentity::Exact)
                     sink->onImprecise(m.symbol(), s.clock, {level.isBid, units, level.price, level.size, precision,
-                                                            level.decimal, identity, m.time, m.sequence});
+                                                            level.decimal, identity, m.time, m.sequence, text});
             }
             auto &book = level.isBid ? s.bids : s.asks;
             const auto old = book.find(units);
@@ -1027,7 +1030,7 @@ struct BookRecorder::Impl {
                 book.emplace(units, level.size);
             if (sink)
                 sink->onLevel(m.symbol(), s.clock, {level.isBid, units, level.price, level.size, precision,
-                                                    level.decimal, identity, m.time, m.sequence});
+                                                    level.decimal, identity, m.time, m.sequence, text});
             for (auto &l : s.layers) {
                 auto [it, added] = l.rows.try_emplace({floorDiv(units, l.header.rowTickUnits), !level.isBid});
                 auto &row = it->second;
@@ -1162,12 +1165,14 @@ BookRecorder::BookRecorder(RecorderConfig cfg) : impl_(std::make_unique<Impl>(st
 BookRecorder::~BookRecorder() = default;
 void BookRecorder::requestStop() { impl_->requestStop(); }
 void BookRecorder::onSnapshotAt(const std::string &symbol, int64_t time, int64_t local, std::vector<Level> levels,
-                                uint64_t sequence) {
-    impl_->enqueue({Impl::Kind::Snapshot, impl_->internSymbol(symbol), {}, time, local, std::move(levels), sequence});
+                                uint64_t sequence, PriceText priceText) {
+    impl_->enqueue({Impl::Kind::Snapshot, impl_->internSymbol(symbol), {}, time, local, std::move(levels), sequence,
+                    std::move(priceText)});
 }
 void BookRecorder::onUpdatesAt(const std::string &symbol, int64_t time, int64_t local, std::vector<Level> levels,
-                               uint64_t sequence) {
-    impl_->enqueue({Impl::Kind::Updates, impl_->internSymbol(symbol), {}, time, local, std::move(levels), sequence});
+                               uint64_t sequence, PriceText priceText) {
+    impl_->enqueue({Impl::Kind::Updates, impl_->internSymbol(symbol), {}, time, local, std::move(levels), sequence,
+                    std::move(priceText)});
 }
 void BookRecorder::onInvalid(const std::string &symbol, int64_t local, std::string reason) {
     impl_->enqueue({Impl::Kind::Invalid, impl_->internSymbol(symbol), std::move(reason), local, local, {}});

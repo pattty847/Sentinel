@@ -10,7 +10,10 @@
 #include <QtGlobal>
 #include <fstream>
 #include <map>
+#include <algorithm>
+#include <condition_variable>
 #include <mutex>
+#include <thread>
 
 using namespace sentinel;
 using namespace sentinel::roller;
@@ -353,10 +356,10 @@ TEST(LevelRoll, UnsupportedPriceLogKeepsTheOriginalText) {
     recording::BookRecorder recorder(cfg);
     JournalFeed feed(kProduct);
     feed.onSnapshot = [&](int64_t e, int64_t l, std::vector<recording::Level> v) {
-        recorder.onSnapshotAt(kProduct, e, l, std::move(v), feed.sequence());
+        recorder.onSnapshotAt(kProduct, e, l, std::move(v), feed.sequence(), feed.takePriceText());
     };
     feed.onUpdates = [&](int64_t e, int64_t l, std::vector<recording::Level> v) {
-        recorder.onUpdatesAt(kProduct, e, l, std::move(v), feed.sequence());
+        recorder.onUpdatesAt(kProduct, e, l, std::move(v), feed.sequence(), feed.takePriceText());
     };
     uint64_t seq = 0;
     uint32_t record = 0;
@@ -385,4 +388,125 @@ TEST(LevelRoll, UnsupportedPriceLogKeepsTheOriginalText) {
         EXPECT_NE(warnings[i].find("identity=no-decimal-text"), std::string::npos) << warnings[i];
     }
     EXPECT_EQ(c.stats().unsupportedEpisodes, texts.size());
+}
+
+namespace {
+std::string frameFor(const std::string &product, uint64_t sequence, const char *type, json updates) {
+    return json({{"channel", "l2_data"}, {"sequence_num", sequence},
+                 {"events", json::array({{{"type", type}, {"product_id", product}, {"updates", std::move(updates)}}})}})
+        .dump();
+}
+json metadataFor(const std::string &product) {
+    return {{"product_id", product}, {"quote_increment", "0.01"}, {"base_increment", "0.00000001"}};
+}
+// The first sink event (the snapshot's reset) blocks until released: the worker
+// consumes nothing while the producers run.
+struct Gate final : recording::RecorderSink {
+    recording::RecorderSink &next;
+    std::mutex m;
+    std::condition_variable cv;
+    bool open = false;
+    explicit Gate(recording::RecorderSink &n) : next(n) {}
+    void release() {
+        { std::lock_guard l(m); open = true; }
+        cv.notify_all();
+    }
+    void onReset(const std::string &s, int64_t c) noexcept override {
+        std::unique_lock l(m);
+        cv.wait(l, [&] { return open; });
+        l.unlock();
+        next.onReset(s, c);
+    }
+    void onImprecise(const std::string &s, int64_t c, const LevelChange &x) noexcept override { next.onImprecise(s, c, x); }
+    void onLevel(const std::string &s, int64_t c, const LevelChange &x) noexcept override { next.onLevel(s, c, x); }
+    void onApplied(const std::string &s, int64_t c, bool v, bool o) noexcept override { next.onApplied(s, c, v, o); }
+    void onInvalid(const std::string &s, int64_t c, const std::string &r, bool u) noexcept override { next.onInvalid(s, c, r, u); }
+    void onMinute(const std::string &s, int64_t b, uint32_t o, uint32_t f) noexcept override { next.onMinute(s, b, o, f); }
+};
+std::vector<std::string> unsupportedWarnings() {
+    std::lock_guard l(logMutex);
+    std::vector<std::string> out;
+    for (const auto &line : logLines)
+        if (line.find("levelstore: unsupported price") != std::string::npos) out.push_back(line);
+    return out;
+}
+} // namespace
+
+// Round 2 (review m2): the text lives with its recorder message, so it survives any
+// number of unsupported prices in one message, consumers that run late, several
+// producers, and overlong text (head and tail kept, the length stated).
+TEST(LevelRoll, UnsupportedPriceTextSurvivesBigMessagesDelayedConsumersAndLength) {
+    TempDir tmp;
+    logLines.clear();
+    const auto previous = qInstallMessageHandler(captureLog);
+    struct Lane {
+        std::string product;
+        std::unique_ptr<Capture> out = std::make_unique<Capture>();
+        std::unique_ptr<LevelRecorder> c;
+        std::unique_ptr<Gate> gate;
+        std::unique_ptr<recording::BookRecorder> r;
+        std::unique_ptr<JournalFeed> feed;
+        std::string firstText;
+    };
+    std::vector<Lane> lanes(2);
+    lanes[0].product = "BTC-USD";
+    lanes[1].product = "ETH-USD";
+    for (size_t i = 0; i < lanes.size(); ++i) {
+        auto &lane = lanes[i];
+        lane.c = std::make_unique<LevelRecorder>(DayBinding{lane.product, Epoch, Epoch + Day, 2}, lane.out.get());
+        lane.gate = std::make_unique<Gate>(*lane.c);
+        auto cfg = deriveGrid(metadataFor(lane.product), 100000).config(tmp.path / lane.product);
+        cfg.sink = lane.gate.get();
+        lane.r = std::make_unique<recording::BookRecorder>(cfg);
+        lane.feed = std::make_unique<JournalFeed>(lane.product);
+        auto *r = lane.r.get();
+        auto *f = lane.feed.get();
+        const auto product = lane.product;
+        f->onSnapshot = [r, f, product](int64_t e, int64_t l, std::vector<recording::Level> v) {
+            r->onSnapshotAt(product, e, l, std::move(v), f->sequence(), f->takePriceText());
+        };
+        f->onUpdates = [r, f, product](int64_t e, int64_t l, std::vector<recording::Level> v) {
+            r->onUpdatesAt(product, e, l, std::move(v), f->sequence(), f->takePriceText());
+        };
+    }
+    // Lane 0: one message with 1,100 unsupported prices (more than the old ring held),
+    // then 300 more messages. Lane 1: 700 messages, the first with an overlong text.
+    // Both workers are blocked until every producer has finished.
+    lanes[0].firstText = "99999.5first";
+    lanes[1].firstText = "99999." + std::string(600, '7') + "TAIL";
+    std::vector<std::thread> producers;
+    for (size_t i = 0; i < lanes.size(); ++i)
+        producers.emplace_back([&, i] {
+            auto &lane = lanes[i];
+            uint64_t seq = 0;
+            uint32_t record = 0;
+            const auto apply = [&](int64_t ms, const char *type, json updates) {
+                lane.feed->apply(JournalRecord{{capture::Kind::Frame, {(Epoch + ms) * 1'000'000, 0}, 1,
+                                                frameFor(lane.product, ++seq, type, std::move(updates))},
+                                               {lane.product, "run", 0, record++}, metadataFor(lane.product), false, 1});
+            };
+            apply(1'000, "snapshot", fullBook(0));
+            json first = json::array({level("bid", lane.firstText, "1")});
+            if (i == 0)
+                for (int k = 1; k < 1'100; ++k) first.push_back(level("bid", "99999.5other" + std::to_string(k), "1"));
+            apply(2'000, "update", first);
+            for (int k = 0; k < (i == 0 ? 300 : 699); ++k)
+                apply(3'000 + k, "update", json::array({level("bid", "99998.5x" + std::to_string(k), "1")}));
+        });
+    for (auto &t : producers) t.join();
+    for (auto &lane : lanes) lane.gate->release();
+    for (auto &lane : lanes) lane.r->drainForTest();
+    qInstallMessageHandler(previous);
+    const auto warnings = unsupportedWarnings();
+    ASSERT_EQ(warnings.size(), 2u); // one episode per product
+    for (const auto &lane : lanes) {
+        const auto w = std::find_if(warnings.begin(), warnings.end(),
+                                    [&](const std::string &x) { return x.find("symbol=" + lane.product) != std::string::npos; });
+        ASSERT_NE(w, warnings.end()) << lane.product;
+        const auto expected = recording::diagnosticPriceText(lane.firstText);
+        EXPECT_NE(w->find("decimal=" + expected + " "), std::string::npos) << *w;
+        EXPECT_EQ(lane.c->stats().unsupportedEpisodes, 1u);
+        EXPECT_EQ(lane.c->stats().unsupportedPrices, lane.product == "BTC-USD" ? 1'100u + 300u : 700u);
+    }
+    EXPECT_NE(warnings[0].find("TAIL") + warnings[1].find("TAIL"), 2 * std::string::npos); // the suffix is kept
 }

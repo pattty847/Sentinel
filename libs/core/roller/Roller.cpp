@@ -247,11 +247,11 @@ json roll(const RollOptions& o) {
                 if (o.onLevelRecorder && level) o.onLevelRecorder(level.get());
                 claimProvenance();
             }
-            if (recorder) recorder->onSnapshotAt(o.product,exchange,local,std::move(levels),feed.sequence());
+            if (recorder) recorder->onSnapshotAt(o.product,exchange,local,std::move(levels),feed.sequence(),feed.takePriceText());
         };
         feed.onUpdates = [&](int64_t t,int64_t local,std::vector<recording::Level> levels) {
             if (!o.anchorBook) book.apply(t,levels);
-            if (recorder) recorder->onUpdatesAt(o.product,t,local,std::move(levels),feed.sequence());
+            if (recorder) recorder->onUpdatesAt(o.product,t,local,std::move(levels),feed.sequence(),feed.takePriceText());
         };
         feed.onInvalid = [&](int64_t t,const std::string& reason) { if (!o.anchorBook) book.clear(); if (o.onInvalid) o.onInvalid(reason); if (recorder) recorder->onInvalid(o.product,t,reason); };
         feed.onTick = [&](int64_t t) { if (recorder) recorder->onTick(t); };

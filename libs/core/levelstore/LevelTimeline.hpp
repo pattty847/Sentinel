@@ -10,7 +10,9 @@ Threading: plain data and pure functions.
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -65,6 +67,14 @@ struct BookImage {
     std::vector<BookLevel> levels; // bids ascending units, then asks ascending units
     bool operator==(const BookImage &) const = default;
 };
+
+// a + b, or std::runtime_error(what) when the sum leaves int64. Portable: checked
+// before the addition (MSVC has no __builtin_add_overflow; cf. DomGrouping mulOverflows).
+inline int64_t checkedAdd(int64_t a, int64_t b, const char *what) {
+    if ((b > 0 && a > std::numeric_limits<int64_t>::max() - b) || (b < 0 && a < std::numeric_limits<int64_t>::min() - b))
+        throw std::runtime_error(what);
+    return a + b;
+}
 
 // Little-endian byte writer/reader with varints. The reader throws std::runtime_error
 // on truncated or malformed input; callers that must not throw catch it.

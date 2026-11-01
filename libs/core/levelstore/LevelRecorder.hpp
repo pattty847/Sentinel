@@ -59,7 +59,7 @@ class LevelRecorder final : public recording::RecorderSink {
         uint64_t foreignEvents = 0;     // events for another symbol, ignored
         bool operator==(const Stats &) const = default;
     };
-    static constexpr uint16_t kStateVersion = 2;
+    static constexpr uint16_t kStateVersion = 3;
 
     LevelRecorder(DayBinding binding, LevelOutput *output);
 
@@ -103,6 +103,7 @@ class LevelRecorder final : public recording::RecorderSink {
     size_t liveLevels() const { return book_[0].size() + book_[1].size(); }
     std::vector<BookLevel> book() const; // sorted as BookImage::levels
     const MinuteBlock &openBlock() const { return open_; }
+    ClearCause pendingClear() const { return pendingClear_; }
     size_t memoryBytes() const; // estimate of the open state's heap use
 
   private:
@@ -124,6 +125,7 @@ class LevelRecorder final : public recording::RecorderSink {
     void endMessage(int64_t clock, bool valid, bool observing, bool invalidated);
     void startDay();
     void fail(const char *what, int64_t clock, bool lostOutput = false) noexcept;
+    void loseMinute(const char *what, int64_t end) noexcept;
     void clearBook() noexcept;
     void resetFresh() noexcept;
 
@@ -136,6 +138,7 @@ class LevelRecorder final : public recording::RecorderSink {
     size_t levelsBefore_ = 0;
     bool dayStarted_ = false, valid_ = false, recorderObserving_ = false, observed_ = false;
     Unobserved unobserved_ = Unobserved::None;
+    ClearCause pendingClear_ = ClearCause::None; // the next output block must start with this clear
     int64_t lastClock_ = INT64_MIN;
     MinuteBlock open_;
     Stats stats_;

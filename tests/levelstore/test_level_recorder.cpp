@@ -167,7 +167,7 @@ TEST(PriceDecimal, ParsesPlainDecimalsExactly) {
 TEST(PriceDecimal, MalformedLongAndExponentTextIsNeverExact) {
     // Coinbase sends plain decimals only; anything else has no guessed identity.
     for (const char *t : {"", ".5", "5.", "1e5", "1E-7", "1.5e2", "-1", "+1", " 1", "1 ", "1.2.3", "1,5", "0x1p3",
-                          "inf", "nan", "1_000", "١"})
+                          "inf", "nan", "1_000", "\xD9\xA1"})
         EXPECT_FALSE(parsePriceDecimal(t).exact) << t;
     EXPECT_FALSE(parsePriceDecimal("123456789012345678").exact);    // 18 significant digits
     EXPECT_FALSE(parsePriceDecimal("1.00000000000000001").exact);   // 18 significant digits
@@ -887,7 +887,8 @@ std::vector<uint8_t> forge(int64_t clock, const std::vector<uint8_t> &recorder,
     w.fixed64(recorder.size());
     w.fixed32(trailer);
     w.u8(1 | 2 | 4 | 8); // day started, valid, recorder observing, observed
-    w.u8(0);
+    w.u8(0);             // episode
+    w.u8(0);             // pending reader clear
     w.u8(1);
     w.svarint(clock);
     for (int i = 0; i < 10; ++i) w.varint(0);
@@ -966,4 +967,97 @@ TEST(Checkpoint, MalformedDeltasWithAValidChecksumAreRefused) {
     img.u8(1); img.svarint(1); img.f64(1);
     ByteReader reader(img.bytes);
     EXPECT_THROW(decodeImage(reader), std::runtime_error);
+}
+
+// Round 2 (review B2): the recorder can skip unobserved minutes without any sink
+// callback, so a lost minute's clear cannot be timestamped in advance. It is put at
+// the start of the next block actually output: output resumes, omitted levels stay
+// absent and no failure repeats. Also with a checkpoint between the loss and the
+// recovery, and with the first block after the gap lost as well.
+TEST(Failure, ALostMinuteBeforeSkippedMinutesClearsTheNextOutputAndOutputResumes) {
+    enum Variant { Plain, AcrossRestore, LoseAgain };
+    for (const Variant v : {Plain, AcrossRestore, LoseAgain}) {
+        TempDir dir;
+        Capture out;
+        Pipeline p(dir.path, out);
+        p.step(snap(1'000, book4()));
+        p.step(tick(kMin + 1'000)); // minute 0 emitted
+        p.step(inv(65'000));
+        out.failBlocks = 1;
+        p.step(tick(5 * kMin + 1'000)); // minute 1 lost; minutes 2-4 skipped (unobserved)
+        EXPECT_EQ(p.c->pendingClear(), ClearCause::Failed) << v;
+        if (v == AcrossRestore) ASSERT_TRUE(p.restore().ok);
+        p.step(snap(5 * kMin + 5'000, {L(true, "99", 2), L(false, "101", 4)})); // 98 and 102 omitted
+        int64_t resumed = 5 * kMin;
+        if (v == LoseAgain) {
+            out.failBlocks = 1;
+            p.step(tick(6 * kMin + 1'000)); // minute 5 lost too: C fails again, unobserved
+            p.step(snap(6 * kMin + 5'000, {L(true, "99", 2), L(false, "101", 4)}));
+            resumed = 6 * kMin;
+        }
+        p.step(tick(9 * kMin));
+        ASSERT_GE(out.blocks.size(), 3u) << v;
+        const auto &first = out.blocks[1];
+        EXPECT_EQ(first.bucketStartMs, kFloor + resumed) << v;
+        ASSERT_FALSE(first.messages.empty());
+        EXPECT_EQ(first.messages.front(), (TimelineMessage{kFloor + resumed, false, false, ClearCause::Failed})) << v;
+        EXPECT_EQ(out.blocks.back().bucketStartMs, kFloor + 8 * kMin) << v; // output resumed through minute 8
+        EXPECT_EQ(p.c->stats().failures, v == LoseAgain ? 2u : 1u) << v;
+        EXPECT_EQ(p.c->pendingClear(), ClearCause::None);
+        const auto swept = sweep(out);
+        for (size_t m = 1; m < swept.size(); ++m)
+            for (const auto &r : swept[m].rows)
+                EXPECT_FALSE(r.bin == 9800 || r.bin == 10200) << "variant " << v << " resurrected " << r.bin;
+        EXPECT_EQ(swept.back().covered, kMin);
+        EXPECT_EQ(swept.back().rows.size(), 2u);
+    }
+}
+
+// Round 2: a minute that cannot be output for any reason is dropped whole, so none
+// of its entries can reach a later minute; the next block starts with the clear.
+TEST(Failure, AnInconsistentMinuteIsDroppedAndOutputResumes) {
+    Capture out;
+    LevelRecorder c(binding(), &out);
+    const auto change = [](const char *price, double size) {
+        RecorderSink::LevelChange l{true, 0, 0, size, RecorderSink::Precision::OnGrid, parsePriceDecimal(price),
+                                    DecimalIdentity::Exact, 0, 0};
+        l.units = *decimalUnits(l.decimal, 2);
+        return l;
+    };
+    c.onReset(kSym, kFloor + 1'000);
+    c.onLevel(kSym, kFloor + 1'000, change("99", 1));
+    c.onApplied(kSym, kFloor + 1'000, true, true);
+    c.onMinute(kSym, kFloor, 59'000, 0);
+    c.onLevel(kSym, kFloor + 70'000, change("99", 2));
+    c.onApplied(kSym, kFloor + 70'000, true, true);
+    // A finish for a later minute while the open minute holds a message of minute 1.
+    c.onMinute(kSym, kFloor + 3 * kMin, 60'000, 0);
+    EXPECT_EQ(c.stats().failures, 1u);
+    EXPECT_EQ(c.pendingClear(), ClearCause::Failed);
+    EXPECT_TRUE(c.openBlock().messages.empty());
+    c.onReset(kSym, kFloor + 3 * kMin + 5'000);
+    c.onLevel(kSym, kFloor + 3 * kMin + 5'000, change("98", 1));
+    c.onApplied(kSym, kFloor + 3 * kMin + 5'000, true, true);
+    c.onMinute(kSym, kFloor + 3 * kMin, 55'000, 0);
+    c.onMinute(kSym, kFloor + 4 * kMin, 60'000, 0);
+    EXPECT_EQ(c.stats().failures, 1u);
+    ASSERT_EQ(out.blocks.size(), 3u);
+    EXPECT_EQ(out.blocks[1].bucketStartMs, kFloor + 3 * kMin);
+    EXPECT_EQ(out.blocks[1].messages.front().clear, ClearCause::Failed);
+    EXPECT_TRUE(out.blocks[1].messages[1].reset);
+    const auto swept = sweep(out);
+    ASSERT_EQ(swept.size(), 3u);
+    EXPECT_EQ(swept[2].rows.size(), 1u); // only 98: 99 is gone
+}
+
+// Round 2 (review m2): the diagnostic text is whole up to 256 characters, else its
+// head and tail with an explicit marker and the original length.
+TEST(PriceDecimal, DiagnosticTextKeepsHeadTailAndLength) {
+    EXPECT_EQ(diagnosticPriceText("99999.5abc"), "99999.5abc");
+    const std::string longText = "99999." + std::string(600, '1') + "XYZ";
+    const auto d = diagnosticPriceText(longText);
+    EXPECT_LE(d.size(), kMaxPriceText + 48);
+    EXPECT_EQ(d.substr(0, 6), "99999.");
+    EXPECT_NE(d.find("[609 chars, middle omitted]"), std::string::npos) << d;
+    EXPECT_EQ(d.substr(d.size() - 3), "XYZ");
 }

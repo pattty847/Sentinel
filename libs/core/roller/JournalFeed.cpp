@@ -65,16 +65,25 @@ std::optional<uint64_t> numericTradeId(const std::string& id) {
 // Additive decimal identity: the double price and every parse decision above
 // stay exactly as dispatch::parseSnapshot/parseUpdates made them. These passes
 // only read each kept level's price text again and attach its exact decimal.
+// The first price that is not an exact plain decimal keeps its original text with the
+// message (priceText_, taken by the callback's consumer): the only allocation here.
+void JournalFeed::attachDecimal(recording::Level& level, size_t index, const std::string& text) {
+    level.decimal = recording::parsePriceDecimal(text);
+    if (!level.decimal.exact && priceText_.level == UINT32_MAX && index < UINT32_MAX)
+        priceText_ = {static_cast<uint32_t>(index), recording::diagnosticPriceText(text)};
+}
 void JournalFeed::attachUpdateDecimals(const nlohmann::json& event, std::vector<recording::Level>& levels) {
     // parseUpdates succeeded: one level per update, in order, each with a string price.
+    priceText_ = {};
     const auto& updates = event["updates"];
     for (size_t i = 0; i < levels.size(); ++i)
-        levels[i].decimal = recording::priceDecimalWithText(updates[i].find("price_level")->get_ref<const std::string&>());
+        attachDecimal(levels[i], i, updates[i].find("price_level")->get_ref<const std::string&>());
 }
 void JournalFeed::attachSnapshotDecimals(const nlohmann::json& event, std::vector<recording::Level>& levels,
                                          size_t bidCount) {
     // parseSnapshot kept the levels with size > 0 and split them by side in input
     // order; repeat exactly that selection with the same level parser.
+    priceText_ = {};
     size_t bid = 0, ask = bidCount;
     for (const auto& update : event["updates"]) {
         bool isBid; double price, size;
@@ -83,9 +92,10 @@ void JournalFeed::attachSnapshotDecimals(const nlohmann::json& event, std::vecto
         if (at >= levels.size() || levels[at].isBid != isBid || levels[at].price != price) {
             // Unreachable while parseSnapshot keeps its selection; never guess an identity.
             for (auto& l : levels) l.decimal = {};
+            priceText_ = {};
             return;
         }
-        levels[at].decimal = recording::priceDecimalWithText(update.find("price_level")->get_ref<const std::string&>());
+        attachDecimal(levels[at], at, update.find("price_level")->get_ref<const std::string&>());
     }
 }
 bool JournalFeed::rememberTradeId(const std::string& id) {

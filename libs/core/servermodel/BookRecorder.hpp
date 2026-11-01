@@ -63,6 +63,9 @@ class RecorderSink {
         DecimalIdentity identity = DecimalIdentity::NoText; // decimal vs units at priceScale
         int64_t envelopeMs = 0;                 // the message's exchange time as received
         uint64_t sequence = 0;                  // the message's journal frame sequence, 0 = unknown
+        std::string_view priceText = {};        // the original price text when the producer kept it
+                                                // (a price that is not an exact plain decimal); valid
+                                                // during the callback only
     };
     virtual ~RecorderSink() = default;
     virtual void onReset(const std::string &symbol, int64_t clock) noexcept = 0;
@@ -148,12 +151,13 @@ class BookRecorder {
     ~BookRecorder(); // Drains accepted work; drops the open minute and uncommitted lateness tail.
     BookRecorder(const BookRecorder &) = delete;
     BookRecorder &operator=(const BookRecorder &) = delete;
-    // sequence: the journal frame's sequence number (0 = unknown); diagnostics only,
-    // reported to the sink with each level and never part of any decision.
+    // sequence: the journal frame's sequence number (0 = unknown); priceText: the original
+    // text of one level's price that is not an exact plain decimal (JournalFeed::takePriceText).
+    // Diagnostics only: reported to the sink and never part of any decision.
     void onSnapshotAt(const std::string &symbol, int64_t envelopeMs, int64_t localMs, std::vector<Level> levels,
-                      uint64_t sequence = 0);
+                      uint64_t sequence = 0, PriceText priceText = {});
     void onUpdatesAt(const std::string &symbol, int64_t envelopeMs, int64_t localMs, std::vector<Level> levels,
-                     uint64_t sequence = 0);
+                     uint64_t sequence = 0, PriceText priceText = {});
     // Cancel blocked journal admission before joining producers and destroying.
     // The destructor also requests stop; callers must not race object destruction.
     void requestStop();
