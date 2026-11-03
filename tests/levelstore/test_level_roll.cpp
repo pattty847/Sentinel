@@ -371,7 +371,7 @@ TEST(LevelRoll, UnsupportedPriceIsLoggedOncePerEpisodeWithItsSourceAndCounted) {
             if (m.timeMs >= Epoch + fix.unsupportedMs) EXPECT_FALSE(m.observed);
 }
 
-// Round 1 (review m2): the warning carries the original text of an unsupported
+// The warning carries the original text of an unsupported
 // price, also when it is not a plain decimal (exponent, trailing garbage that
 // strtod ignores, too many significant digits). Each recovers at a valid exact
 // snapshot, so each starts its own episode and logs once.
@@ -460,7 +460,7 @@ std::vector<std::string> unsupportedWarnings() {
 }
 } // namespace
 
-// Round 2 (review m2): the text lives with its recorder message, so it survives any
+// The text lives with its recorder message, so it survives any
 // number of unsupported prices in one message, consumers that run late, several
 // producers, and overlong text (head and tail kept, the length stated).
 TEST(LevelRoll, UnsupportedPriceTextSurvivesBigMessagesDelayedConsumersAndLength) {
@@ -539,7 +539,7 @@ TEST(LevelRoll, UnsupportedPriceTextSurvivesBigMessagesDelayedConsumersAndLength
     EXPECT_NE(warnings[0].find("TAIL") + warnings[1].find("TAIL"), 2 * std::string::npos); // the suffix is kept
 }
 
-// Round 3 (review m2): a snapshot lists levels in any order, but the recorder sees all
+// A snapshot lists levels in any order, but the recorder sees all
 // bids before all asks. The kept text is the one of the first unsupported level in
 // that final order, so the once-per-episode warning has it.
 TEST(LevelRoll, SnapshotDiagnosticFollowsTheRecorderLevelOrder) {

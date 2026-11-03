@@ -553,6 +553,38 @@ TEST(Lifecycle, ResetsInvalidPeriodsSuspensionsAndTheCeiling) {
     EXPECT_EQ(swept.size(), out.blocks.size());
 }
 
+// Suspension stops observation while retaining bids. A later invalidation must
+// clear the delivered timeline, including when the suspended book was restored.
+TEST(Lifecycle, SuspendedBookInvalidationPublishesAClearAcrossRestore) {
+    for (const bool restore : {false, true}) {
+        SCOPED_TRACE(restore);
+        TempDir dir;
+        Capture out;
+        Pipeline p(dir.path, out);
+        p.step(snap(1'000, book4()));
+        p.step(tick(61'000));
+        p.step(upd(64'000, {L(false, "101", 0), L(false, "102", 0)}));
+        ASSERT_TRUE(p.c->recorderValid());
+        ASSERT_FALSE(p.c->observed());
+        ASSERT_EQ(p.c->liveLevels(), 2u);
+        if (restore) ASSERT_TRUE(p.restore().ok);
+        p.step(inv(65'000));
+        p.step(tick(121'000));
+        p.step(snap(125'000, {L(true, "99", 2), L(false, "101", 4)}));
+        p.step(tick(181'000));
+        ASSERT_EQ(out.blocks.size(), 3u);
+        const auto &messages = out.blocks[1].messages;
+        EXPECT_EQ(std::count(messages.begin(), messages.end(),
+                             TimelineMessage{kFloor + 65'000, false, false, ClearCause::Invalid}), 1);
+        const auto swept = sweep(out);
+        ASSERT_EQ(swept.size(), 3u);
+        // The recovering snapshot omits 98 and 102. Neither can survive in the reader.
+        for (const auto &row : swept[2].rows) EXPECT_FALSE(row.bin == 9800 || row.bin == 10200);
+        EXPECT_EQ(p.c->stats().failures, 0u);
+        EXPECT_EQ(p.c->stats().restoreRefusals, 0u);
+    }
+}
+
 TEST(Lifecycle, ForkLeadNeverFeedsC) {
     TempDir dir;
     Capture out;
@@ -779,7 +811,7 @@ TEST(Failure, AClockRegressionFailsClosedAndForeignSymbolsAreIgnored) {
     EXPECT_EQ(c.stats().failures, 1u);
 }
 
-// Round 1 (review B1): two genuinely valid recorder exports at the same clock with
+// Two genuinely valid recorder exports at the same clock with
 // different books must not pair with each other's C state.
 TEST(Checkpoint, TwoValidRecorderStatesAtTheSameClockAreNotInterchangeable) {
     TempDir dir;
@@ -909,7 +941,7 @@ std::vector<uint8_t> forge(int64_t clock, const std::vector<uint8_t> &recorder,
 void emptyOpen(ByteWriter &w, int64_t clock) { encodeBlock(w, MinuteBlock{clock - clock % kMin, 0, 0, true, {}, {}}); }
 } // namespace
 
-// Round 1 (review M1): a payload with a valid checksum is still validated: every
+// A payload with a valid checksum is still validated: every
 // decoded delta is added with overflow checks and the results are range-checked.
 TEST(Checkpoint, MalformedDeltasWithAValidChecksumAreRefused) {
     TempDir dir;
@@ -1012,7 +1044,7 @@ TEST(Failure, AnInconsistentMinutePermanentlyStopsOutput) {
     EXPECT_EQ(c.openBlock(), partial);
 }
 
-// Round 2 (review m2): the diagnostic text is whole up to 256 characters, else its
+// The diagnostic text is whole up to 256 characters, else its
 // head and tail with an explicit marker and the original length.
 TEST(PriceDecimal, DiagnosticTextKeepsHeadTailAndLength) {
     EXPECT_EQ(diagnosticPriceText("99999.5abc"), "99999.5abc");
