@@ -21,7 +21,6 @@ MinuteSweep::Key MinuteSweep::keyOf(bool isBid, int64_t units) const {
 
 void MinuteSweep::start(const BookImage &image) {
     previousBucket_ = INT64_MIN;
-    previousDamaged_ = damaged_ = false;
     levels_[0].clear();
     levels_[1].clear();
     bins_.clear();
@@ -45,7 +44,7 @@ MinuteSweep::Bin &MinuteSweep::at(const Key &k) {
         b.minute = minute_;
         b.integral = 0;
         b.presence = 0;
-        b.peak = observed_ && !damaged_ ? b.sum : 0;
+        b.peak = observed_ ? b.sum : 0;
         b.lastT = minuteStart_;
         touched_.push_back(k);
     }
@@ -53,7 +52,7 @@ MinuteSweep::Bin &MinuteSweep::at(const Key &k) {
 }
 
 void MinuteSweep::accrue(Bin &b, int64_t t) const {
-    if (observed_ && !damaged_ && t > b.lastT) {
+    if (observed_ && t > b.lastT) {
         b.integral += b.sum * static_cast<long double>(t - b.lastT);
         if (b.count > 0) b.presence += t - b.lastT;
     }
@@ -68,12 +67,9 @@ void MinuteSweep::accrueLive(int64_t t) {
 void MinuteSweep::apply(const MinuteBlock &block, std::vector<BinRow> &rows, int64_t &coveredMs) {
     require(started_, "not started");
     require(block.bucketStartMs % kMinute == 0 && block.bucketStartMs > previousBucket_, "block order");
-    const bool continues = previousBucket_ != INT64_MIN && block.bucketStartMs == previousBucket_ + kMinute &&
-                           !previousDamaged_;
-    require(!continues || block.damaged || block.observedAtStart == observed_, "observation does not continue");
+    const bool continues = previousBucket_ != INT64_MIN && block.bucketStartMs == previousBucket_ + kMinute;
+    require(!continues || block.observedAtStart == observed_, "observation does not continue");
     observed_ = block.observedAtStart;
-    damaged_ = block.damaged;
-    previousDamaged_ = block.damaged;
     previousBucket_ = block.bucketStartMs;
     rows.clear();
     touched_.clear();
@@ -138,10 +134,10 @@ void MinuteSweep::apply(const MinuteBlock &block, std::vector<BinRow> &rows, int
                     b.sum = binUnits_ == 1 ? static_cast<long double>(size) : b.sum + size;
                 }
         }
-        if (observed_ && !m.observed && !damaged_) covered += t - since;
+        if (observed_ && !m.observed) covered += t - since;
         if (!observed_ && m.observed) since = t;
         observed_ = m.observed;
-        if (observed_ && !damaged_) {
+        if (observed_) {
             // The state after the whole message: every live bin when observation
             // starts or a snapshot replaced the book, else the bins it changed.
             if (transition || m.reset) {
@@ -156,7 +152,7 @@ void MinuteSweep::apply(const MinuteBlock &block, std::vector<BinRow> &rows, int
         }
     }
     require(c == block.changes.size(), "dangling change");
-    if (observed_ && !damaged_) covered += end - since;
+    if (observed_) covered += end - since;
     for (auto &[k, b] : bins_)
         if (b.count > 0) at(k);
     rows.reserve(touched_.size());

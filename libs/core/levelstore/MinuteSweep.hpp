@@ -42,11 +42,9 @@ class MinuteSweep {
     explicit MinuteSweep(int64_t binUnits = 1);
     void start(const BookImage &image);
     // Folds one block in order. rows: every bin with a nonzero metric, bids first,
-    // ascending bin. A damaged block is read as unobserved (no integral, presence,
-    // peak or covered; its changes and clears apply). A block's observedAtStart is
-    // taken as given after a damaged block or a missing minute (C skips unobserved
-    // minutes and loses a minute whose output failed); otherwise it must continue the
-    // sweep, and a block that does not (time order, observation) throws std::runtime_error.
+    // ascending bin. A block's observedAtStart is taken as given after a missing
+    // unobserved minute; otherwise it must continue the sweep. Inconsistent time
+    // order or observation throws std::runtime_error. Internal failures emit no blocks.
     void apply(const MinuteBlock &block, std::vector<BinRow> &rows, int64_t &coveredMs);
     bool observed() const { return observed_; }
     size_t levels() const { return levels_[0].size() + levels_[1].size(); }
@@ -72,7 +70,7 @@ class MinuteSweep {
     Key keyOf(bool isBid, int64_t units) const;
 
     int64_t binUnits_;
-    bool started_ = false, observed_ = false, damaged_ = false, previousDamaged_ = false;
+    bool started_ = false, observed_ = false;
     int64_t previousBucket_ = INT64_MIN;
     std::unordered_map<int64_t, double> levels_[2]; // [isBid]
     std::unordered_map<Key, Bin, KeyHash> bins_;

@@ -514,7 +514,6 @@ TEST(Lifecycle, ResetsInvalidPeriodsSuspensionsAndTheCeiling) {
     for (const auto &b : out.blocks) {
         EXPECT_GE(b.bucketStartMs, kFloor);
         EXPECT_LT(b.bucketStartMs, kCeiling); // the next day's minutes are dropped
-        EXPECT_FALSE(b.damaged);
     }
     const auto find = [&](int64_t at) -> std::pair<const MinuteBlock *, uint32_t> {
         for (const auto &b : out.blocks)
@@ -644,13 +643,14 @@ TEST(Checkpoint, CorruptVersionedForeignAndUnpairedBlobsAreRefusedAndFailClosed)
         EXPECT_EQ(c.unobserved(), LevelRecorder::Unobserved::RestoreRefused);
         EXPECT_EQ(c.liveLevels(), 0u);
         EXPECT_EQ(c.stats().restoreRefusals, 1u);
-        // Once its day has started, the reader is told to drop its book at the checkpoint.
-        const int64_t checkpoint = at ? *at : *clock;
-        if (checkpoint >= bind.floorMs)
-            EXPECT_EQ(c.openBlock().messages,
-                      (std::vector<TimelineMessage>{{checkpoint, false, false, ClearCause::RestoreRefused}}));
-        else
-            EXPECT_TRUE(c.openBlock().messages.empty());
+        EXPECT_TRUE(c.openBlock().messages.empty());
+        EXPECT_THROW(c.exportState(clock, bytes), std::runtime_error);
+        c.onReset(kSym, kFloor + 10'000);
+        c.onApplied(kSym, kFloor + 10'000, true, true);
+        c.onMinute(kSym, kFloor, 50'000, 0);
+        EXPECT_EQ(o.dayStarts, 0);
+        EXPECT_TRUE(o.blocks.empty());
+
     };
     for (size_t i = 0; i < blob.size(); ++i) {
         auto b = blob;
@@ -678,7 +678,7 @@ TEST(Checkpoint, CorruptVersionedForeignAndUnpairedBlobsAreRefusedAndFailClosed)
     EXPECT_FALSE(p.c->importState(blob, clock, bytes).ok);
 }
 
-TEST(Checkpoint, ARefusedRestoreStaysUnobservedUntilAValidExactSnapshot) {
+TEST(Checkpoint, ARefusedRestorePermanentlyStopsTheAttempt) {
     TempDir dir;
     Capture out;
     Pipeline p(dir.path, out);
@@ -687,63 +687,57 @@ TEST(Checkpoint, ARefusedRestoreStaysUnobservedUntilAValidExactSnapshot) {
     const auto r = p.restore([](std::vector<uint8_t> &b) { b[7] ^= 0x40; });
     EXPECT_FALSE(r.ok);
     EXPECT_NE(r.reason.find("CRC"), std::string::npos);
-    p.step(upd(3'000, {L(true, "98", 9)})); // ignored: the book is unknown
-    EXPECT_EQ(p.c->liveLevels(), 0u);
-    p.step(snap(4'000, {L(true, "99", 1), L(true, "99.005", 1), L(false, "101", 1)})); // not exact
-    EXPECT_FALSE(p.c->observed());
+    const auto before = out.bytes();
+    p.step(upd(3'000, {L(true, "98", 9)}));
+    p.step(snap(4'000, {L(true, "99", 1), L(true, "99.005", 1), L(false, "101", 1)}));
     p.step(snap(5'000, book4()));
-    EXPECT_TRUE(p.c->observed());
-    EXPECT_EQ(p.c->unobserved(), LevelRecorder::Unobserved::None);
-    p.step(tick(2 * kMin));
-    ASSERT_EQ(out.blocks.size(), 2u);
-    const auto &b = out.blocks[0];
-    // The pre-checkpoint messages were in the lost open minute (refused state); the
-    // block starts with the clear at the checkpoint clock, then the recovering reset.
-    ASSERT_EQ(b.messages.size(), 2u);
-    EXPECT_EQ(b.messages[0], (TimelineMessage{kFloor + 2'000, false, false, ClearCause::RestoreRefused}));
-    EXPECT_EQ(b.messages[1], (TimelineMessage{kFloor + 5'000, true, true, ClearCause::None}));
-    // The minute's part before the checkpoint is lost: the block says so and is
-    // read as unobserved; the next minute continues normally.
-    EXPECT_TRUE(b.damaged);
-    EXPECT_FALSE(b.observedAtStart);
-    EXPECT_FALSE(out.blocks[1].damaged);
-    const auto swept = sweep(out);
-    ASSERT_EQ(swept.size(), 2u);
-    EXPECT_EQ(swept[0].covered, 0);
-    for (const auto &r : swept[0].rows) EXPECT_EQ(std::tuple(r.integral, r.presenceMs, r.peak), std::tuple(0.0L, int64_t{0}, 0.0L));
-    EXPECT_EQ(swept[1].covered, kMin);
+    p.step(inv(6'000));
+    p.step(tick(3 * kMin));
+    EXPECT_EQ(p.c->unobserved(), LevelRecorder::Unobserved::RestoreRefused);
+    EXPECT_EQ(p.c->stats().restoreRefusals, 1u);
+    EXPECT_FALSE(p.c->observed());
+    EXPECT_EQ(out.bytes(), before);
+    EXPECT_THROW(p.restore(), std::runtime_error);
+    EXPECT_FALSE(p.c->importState({}, {}, {}).ok); // cannot reset a failed instance
+    EXPECT_EQ(p.c->stats().restoreRefusals, 1u);
 }
 
-TEST(Failure, OutputFailureLosesTheMinuteClearsAndRecoversAtAValidExactSnapshot) {
-    TempDir dir;
-    Capture out;
-    Pipeline p(dir.path, out);
-    p.step(snap(1'000, book4()));
-    out.failNextBlock = true;
-    p.step(tick(kMin + 1'000)); // minute 0's output fails
-    EXPECT_EQ(p.c->unobserved(), LevelRecorder::Unobserved::Failed);
-    EXPECT_EQ(p.c->stats().failures, 1u);
-    p.step(upd(kMin + 2'000, {L(true, "99", 5)}));
-    p.step(snap(kMin + 3'000, book4()));
-    EXPECT_TRUE(p.c->observed());
-    p.step(tick(3 * kMin));
-    ASSERT_EQ(out.blocks.size(), 2u);
-    EXPECT_EQ(out.blocks[0].bucketStartMs, kFloor + kMin); // minute 0 is missing, never fabricated
-    EXPECT_EQ(out.blocks[0].messages[0], (TimelineMessage{kFloor + kMin, false, false, ClearCause::Failed}));
-    EXPECT_TRUE(out.blocks[0].messages[1].reset);
-    // The reader's book is stale after the lost minute: the next one starts unobserved.
-    EXPECT_FALSE(out.blocks[0].observedAtStart);
-    EXPECT_FALSE(out.blocks[0].damaged);
-    const auto swept = sweep(out);
-    ASSERT_EQ(swept.size(), 2u);
-    EXPECT_EQ(swept[0].covered, kMin - 3'000); // observed from the recovering snapshot
+TEST(Failure, ImageAndBlockFailuresStopBeforeAnyLaterPublication) {
+    for (const bool image : {false, true}) for (const bool afterAccept : {false, true}) {
+        SCOPED_TRACE(testing::PrintToString(std::make_pair(image, afterAccept)));
+        TempDir dir;
+        Capture out;
+        out.failAfterAccept = afterAccept;
+        out.failDayStart = image;
+        Pipeline p(dir.path, out);
+        p.step(snap(1'000, book4()));
+        if (!image) out.failNextBlock = true;
+        p.step(tick(kMin + 1'000));
+        ASSERT_EQ(p.c->unobserved(), LevelRecorder::Unobserved::Failed);
+        EXPECT_EQ(p.c->stats().failures, 1u);
+        const auto frozen = out.bytes();
+        const auto partial = p.c->openBlock();
+        const auto stats = p.c->stats();
+        p.step(upd(kMin + 2'000, {L(true, "99", 5)}));
+        p.step(snap(kMin + 3'000, book4()));
+        p.step(inv(kMin + 4'000));
+        p.step(tick(20 * kMin));
+        EXPECT_EQ(out.bytes(), frozen);
+        EXPECT_EQ(out.dayStarts, 1);
+        EXPECT_EQ(out.blockCalls, image ? 0 : 1);
+        EXPECT_EQ(p.c->stats(), stats);
+        EXPECT_EQ(p.c->openBlock(), partial);
+        EXPECT_FALSE(p.c->observed());
+        EXPECT_THROW(p.restore(), std::runtime_error);
+        EXPECT_EQ(out.blocks.size(), !image && afterAccept ? 1u : 0u);
+    }
 }
 
 // A reader enforces observation continuity between consecutive whole minutes; it
-// accepts a block's own start state only after a damaged block or a missing minute.
-TEST(MessageStates, SweepContinuityDamagedBlocksAndGaps) {
+// accepts a block's own start state only after a missing unobserved minute.
+TEST(MessageStates, SweepContinuityAndGaps) {
     BookImage image{kFloor, true, {{true, 9900, 2}}};
-    MinuteBlock a{kFloor, 60'000, 0, true, false, {}, {}};
+    MinuteBlock a{kFloor, 60'000, 0, true, {}, {}};
     MinuteBlock b = a;
     b.bucketStartMs = kFloor + kMin;
     b.observedAtStart = false; // does not continue a
@@ -760,17 +754,6 @@ TEST(MessageStates, SweepContinuityDamagedBlocksAndGaps) {
     b.bucketStartMs = kFloor + 2 * kMin;
     gap.apply(b, rows, covered);
     EXPECT_EQ(covered, 0);
-    MinuteSweep damaged; // a damaged block is unobserved and frees the next start state
-    damaged.start(image);
-    a.damaged = true;
-    damaged.apply(a, rows, covered);
-    EXPECT_EQ(covered, 0);
-    ASSERT_EQ(rows.size(), 1u);
-    EXPECT_EQ(std::tuple(rows[0].integral, rows[0].presenceMs, rows[0].peak, rows[0].last),
-              std::tuple(0.0L, int64_t{0}, 0.0L, 2.0L));
-    b.bucketStartMs = kFloor + kMin;
-    damaged.apply(b, rows, covered);
-    EXPECT_FALSE(damaged.observed());
 }
 
 TEST(Failure, AClockRegressionFailsClosedAndForeignSymbolsAreIgnored) {
@@ -787,7 +770,13 @@ TEST(Failure, AClockRegressionFailsClosedAndForeignSymbolsAreIgnored) {
     EXPECT_TRUE(c.observed());
     c.onApplied(kSym, kFloor + 500, true, true); // behind
     EXPECT_EQ(c.unobserved(), LevelRecorder::Unobserved::Failed);
-    EXPECT_EQ(c.openBlock().messages.back().clear, ClearCause::Failed);
+    const auto before = c.openBlock();
+    c.onReset(kSym, kFloor + 2'000);
+    c.onApplied(kSym, kFloor + 2'000, true, true);
+    c.onMinute(kSym, kFloor, 59'000, 0);
+    EXPECT_EQ(c.openBlock(), before);
+    EXPECT_TRUE(out.blocks.empty());
+    EXPECT_EQ(c.stats().failures, 1u);
 }
 
 // Round 1 (review B1): two genuinely valid recorder exports at the same clock with
@@ -826,52 +815,71 @@ TEST(Checkpoint, TwoValidRecorderStatesAtTheSameClockAreNotInterchangeable) {
     EXPECT_NE(r.reason.find("not a valid export"), std::string::npos) << r.reason;
 }
 
-// Round 1 (review B2): the reader never sees a lost minute, which may have held the
-// clear that emptied C's book. The first retained output must clear the reader's
-// book whatever C's own book is, so levels a later snapshot omits never come back:
-// after an invalidation or an unsupported price, after two lost minutes in a row,
-// and across a checkpoint export/import.
-TEST(Failure, ALostMinuteThatClearedTheBookNeverResurrectsItsLevels) {
-    enum Variant { Invalidation, Unsupported, TwoLost, AcrossRestore };
-    for (const Variant v : {Invalidation, Unsupported, TwoLost, AcrossRestore}) {
+// Lost invalidation, unsupported-price and skipped-minute scenarios, including the
+// later-clear/same-timestamp sequence that previously fabricated omitted levels.
+TEST(Failure, AFailedClearMinuteCannotPublishLaterPhantomLevels) {
+    for (const bool unsupported : {false, true}) for (const bool skipped : {false, true})
+        for (const bool sameTime : {false, true}) for (const bool restoreBefore : {false, true}) {
+            SCOPED_TRACE(testing::PrintToString(std::make_tuple(unsupported, skipped, sameTime, restoreBefore)));
+            TempDir dir;
+            Capture out;
+            Pipeline p(dir.path, out);
+            p.step(snap(1'000, book4()));
+            p.step(tick(61'000));
+            if (unsupported) p.step(upd(65'000, {L(true, "97.10000000000001", 1)}));
+            else p.step(inv(65'000));
+            if (restoreBefore) ASSERT_TRUE(p.restore().ok);
+            out.failBlocks = 2; // no second output attempt is allowed
+            p.step(tick(skipped ? 301'000 : 121'000));
+            ASSERT_EQ(p.c->stats().failures, 1u);
+            EXPECT_THROW(p.restore(), std::runtime_error);
+            const auto at = skipped ? 305'000 : 125'000;
+            p.step(snap(at, {L(true, "99", 2), L(false, "101", 4)}));
+            p.step(inv(sameTime ? at : at + 5'000));
+            p.step(tick(9 * kMin));
+            EXPECT_EQ(out.blocks.size(), 1u); // only the healthy minute 0
+            EXPECT_EQ(out.blockCalls, 2);
+            EXPECT_EQ(out.failBlocks, 1);
+            EXPECT_EQ(p.c->stats().failures, 1u);
+        }
+}
+
+TEST(Failure, ExplicitReplayFromPairedStateAndOutputPrefixMatchesUninterruptedHistory) {
+    const std::vector<Step> prefix{snap(1'000, book4()), tick(61'000), inv(65'000)};
+    for (const bool afterAccept : {false, true}) for (const bool sameTime : {false, true}) {
+        SCOPED_TRACE(testing::PrintToString(std::make_pair(afterAccept, sameTime)));
+        const std::vector<Step> suffix{tick(121'000), snap(125'000, {L(true, "99", 2), L(false, "101", 4)}),
+                                      inv(sameTime ? 125'000 : 130'000), tick(181'000),
+                                      snap(185'000, book4()), tick(241'000)};
         TempDir dir;
-        Capture out;
-        Pipeline p(dir.path, out);
-        p.step(snap(1'000, book4()));
-        p.step(tick(kMin + 1'000)); // minute 0 emitted with all four levels
-        if (v == Unsupported) p.step(upd(kMin + 5'000, {L(true, "97.10000000000001", 1)}));
-        else p.step(inv(kMin + 5'000));
-        EXPECT_EQ(p.c->liveLevels(), 0u);
-        out.failBlocks = v == TwoLost ? 2 : 1;
-        p.step(tick(2 * kMin + 1'000)); // minute 1 (the clear) is lost
-        if (v == TwoLost) p.step(tick(3 * kMin + 1'000)); // and minute 2
-        if (v == AcrossRestore) ASSERT_TRUE(p.restore().ok);
-        const int64_t at = v == TwoLost ? 3 * kMin + 5'000 : 2 * kMin + 5'000;
-        p.step(snap(at, {L(true, "99", 2), L(false, "101", 4)})); // 98 and 102 omitted
-        EXPECT_TRUE(p.c->observed()) << v;
-        p.step(tick(6 * kMin));
-        ASSERT_FALSE(out.blocks.empty());
-        const auto &first = out.blocks[1]; // the first retained block after the loss
-        ASSERT_FALSE(first.messages.empty()) << v;
-        // A clear at the block start; its cause is the clear the reader missed.
-        EXPECT_NE(first.messages.front().clear, ClearCause::None) << v;
-        EXPECT_EQ(first.messages.front().timeMs, first.bucketStartMs) << v;
-        const auto swept = sweep(out);
-        ASSERT_EQ(swept.size(), out.blocks.size());
-        for (size_t m = 1; m < swept.size(); ++m)
-            for (const auto &r : swept[m].rows) {
-                EXPECT_FALSE(r.bin == 9800 || r.bin == 10200)
-                    << "variant " << v << " minute " << m << " resurrected " << r.bin << " presence " << r.presenceMs;
-            }
-        // The recovered minute observes exactly the snapshot's two levels.
-        const auto &last = swept.back();
-        EXPECT_EQ(last.covered, kMin);
-        EXPECT_EQ(last.rows.size(), 2u) << v;
+        Capture reference, failed;
+        Pipeline uninterrupted(dir.path / "reference", reference);
+        Pipeline attempt(dir.path / "attempt", failed);
+        for (const auto &step : prefix) { uninterrupted.step(step); attempt.step(step); }
+        const auto recorderBytes = attempt.r->exportState();
+        const auto clock = attempt.r->checkpointClock(kSym);
+        const auto levelBytes = attempt.c->exportState(clock, recorderBytes);
+        Capture restoredOutput = failed; // explicit rollback to the matching accepted prefix
+        failed.failNextBlock = true;
+        failed.failAfterAccept = afterAccept;
+        for (const auto &step : suffix) { uninterrupted.step(step); attempt.step(step); }
+        EXPECT_EQ(attempt.c->stats().failures, 1u);
+        EXPECT_THROW(attempt.c->exportState(clock, recorderBytes), std::runtime_error);
+        // Use fresh output storage. Neither the producer nor import can undo sink side effects.
+        Pipeline replay(dir.path / "replay", restoredOutput);
+        replay.r->importState(recorderBytes);
+        ASSERT_TRUE(replay.c->importState(levelBytes, replay.r->checkpointClock(kSym), recorderBytes).ok);
+        for (const auto &step : suffix) replay.step(step);
+        EXPECT_EQ(replay.c->stats().failures, 0u);
+        EXPECT_EQ(restoredOutput.bytes(), reference.bytes());
+        const auto rows = sweep(restoredOutput);
+        ASSERT_GE(rows.size(), 3u);
+        for (const auto &row : rows[2].rows) EXPECT_FALSE(row.bin == 9800 || row.bin == 10200);
     }
 }
 
 namespace {
-// A checkpoint blob in the v2 layout with a recomputed checksum (malformed payloads).
+// A checkpoint blob in the current layout with a recomputed checksum (malformed payloads).
 std::vector<uint8_t> forge(int64_t clock, const std::vector<uint8_t> &recorder,
                            const std::function<void(ByteWriter &)> &bookAndOpen) {
     ByteWriter w;
@@ -891,8 +899,6 @@ std::vector<uint8_t> forge(int64_t clock, const std::vector<uint8_t> &recorder,
     w.fixed32(trailer);
     w.u8(1 | 2 | 4 | 8); // day started, valid, recorder observing, observed
     w.u8(0);             // episode
-    w.u8(0);             // pending reader clear
-    w.u8(0);             // reader flags
     w.u8(1);
     w.svarint(clock);
     for (int i = 0; i < 10; ++i) w.varint(0);
@@ -900,7 +906,7 @@ std::vector<uint8_t> forge(int64_t clock, const std::vector<uint8_t> &recorder,
     w.fixed32(sentinel::crc32(w.bytes.data(), w.bytes.size()));
     return std::move(w.bytes);
 }
-void emptyOpen(ByteWriter &w, int64_t clock) { encodeBlock(w, MinuteBlock{clock - clock % kMin, 0, 0, true, false, {}, {}}); }
+void emptyOpen(ByteWriter &w, int64_t clock) { encodeBlock(w, MinuteBlock{clock - clock % kMin, 0, 0, true, {}, {}}); }
 } // namespace
 
 // Round 1 (review M1): a payload with a valid checksum is still validated: every
@@ -973,53 +979,10 @@ TEST(Checkpoint, MalformedDeltasWithAValidChecksumAreRefused) {
     EXPECT_THROW(decodeImage(reader), std::runtime_error);
 }
 
-// Round 2 (review B2): the recorder can skip unobserved minutes without any sink
-// callback, so a lost minute's clear cannot be timestamped in advance. It is put at
-// the start of the next block actually output: output resumes, omitted levels stay
-// absent and no failure repeats. Also with a checkpoint between the loss and the
-// recovery, and with the first block after the gap lost as well.
-TEST(Failure, ALostMinuteBeforeSkippedMinutesClearsTheNextOutputAndOutputResumes) {
-    enum Variant { Plain, AcrossRestore, LoseAgain };
-    for (const Variant v : {Plain, AcrossRestore, LoseAgain}) {
-        TempDir dir;
-        Capture out;
-        Pipeline p(dir.path, out);
-        p.step(snap(1'000, book4()));
-        p.step(tick(kMin + 1'000)); // minute 0 emitted
-        p.step(inv(65'000));
-        out.failBlocks = 1;
-        p.step(tick(5 * kMin + 1'000)); // minute 1 lost; minutes 2-4 skipped (unobserved)
-        EXPECT_EQ(p.c->pendingClear(), ClearCause::Invalid) << v; // the lost minute held the invalidation's clear
-        if (v == AcrossRestore) ASSERT_TRUE(p.restore().ok);
-        p.step(snap(5 * kMin + 5'000, {L(true, "99", 2), L(false, "101", 4)})); // 98 and 102 omitted
-        int64_t resumed = 5 * kMin;
-        if (v == LoseAgain) {
-            out.failBlocks = 1;
-            p.step(tick(6 * kMin + 1'000)); // minute 5 lost too: C fails again, unobserved
-            p.step(snap(6 * kMin + 5'000, {L(true, "99", 2), L(false, "101", 4)}));
-            resumed = 6 * kMin;
-        }
-        p.step(tick(9 * kMin));
-        ASSERT_GE(out.blocks.size(), 3u) << v;
-        const auto &first = out.blocks[1];
-        EXPECT_EQ(first.bucketStartMs, kFloor + resumed) << v;
-        ASSERT_FALSE(first.messages.empty());
-        EXPECT_EQ(first.messages.front(), (TimelineMessage{kFloor + resumed, false, false, ClearCause::Invalid})) << v;
-        EXPECT_EQ(out.blocks.back().bucketStartMs, kFloor + 8 * kMin) << v; // output resumed through minute 8
-        EXPECT_EQ(p.c->stats().failures, v == LoseAgain ? 2u : 1u) << v;
-        EXPECT_EQ(p.c->pendingClear(), ClearCause::None);
-        const auto swept = sweep(out);
-        for (size_t m = 1; m < swept.size(); ++m)
-            for (const auto &r : swept[m].rows)
-                EXPECT_FALSE(r.bin == 9800 || r.bin == 10200) << "variant " << v << " resurrected " << r.bin;
-        EXPECT_EQ(swept.back().covered, kMin);
-        EXPECT_EQ(swept.back().rows.size(), 2u);
-    }
-}
 
-// Round 2: a minute that cannot be output for any reason is dropped whole, so none
-// of its entries can reach a later minute; the next block starts with the clear.
-TEST(Failure, AnInconsistentMinuteIsDroppedAndOutputResumes) {
+
+// Inconsistent callback ordering is an internal failure, never a market gap.
+TEST(Failure, AnInconsistentMinutePermanentlyStopsOutput) {
     Capture out;
     LevelRecorder c(binding(), &out);
     const auto change = [](const char *price, double size) {
@@ -1037,21 +1000,16 @@ TEST(Failure, AnInconsistentMinuteIsDroppedAndOutputResumes) {
     // A finish for a later minute while the open minute holds a message of minute 1.
     c.onMinute(kSym, kFloor + 3 * kMin, 60'000, 0);
     EXPECT_EQ(c.stats().failures, 1u);
-    EXPECT_EQ(c.pendingClear(), ClearCause::Failed);
-    EXPECT_TRUE(c.openBlock().messages.empty());
+    const auto partial = c.openBlock();
+    EXPECT_FALSE(partial.messages.empty());
     c.onReset(kSym, kFloor + 3 * kMin + 5'000);
     c.onLevel(kSym, kFloor + 3 * kMin + 5'000, change("98", 1));
     c.onApplied(kSym, kFloor + 3 * kMin + 5'000, true, true);
     c.onMinute(kSym, kFloor + 3 * kMin, 55'000, 0);
     c.onMinute(kSym, kFloor + 4 * kMin, 60'000, 0);
     EXPECT_EQ(c.stats().failures, 1u);
-    ASSERT_EQ(out.blocks.size(), 3u);
-    EXPECT_EQ(out.blocks[1].bucketStartMs, kFloor + 3 * kMin);
-    EXPECT_EQ(out.blocks[1].messages.front().clear, ClearCause::Failed);
-    EXPECT_TRUE(out.blocks[1].messages[1].reset);
-    const auto swept = sweep(out);
-    ASSERT_EQ(swept.size(), 3u);
-    EXPECT_EQ(swept[2].rows.size(), 1u); // only 98: 99 is gone
+    ASSERT_EQ(out.blocks.size(), 1u);
+    EXPECT_EQ(c.openBlock(), partial);
 }
 
 // Round 2 (review m2): the diagnostic text is whole up to 256 characters, else its
@@ -1066,100 +1024,38 @@ TEST(PriceDecimal, DiagnosticTextKeepsHeadTailAndLength) {
     EXPECT_EQ(d.substr(d.size() - 3), "XYZ");
 }
 
-// Round 3 (review B2, structural): every clear is first a persistent requirement and
-// only then an allocating append. When the append (or the later prepend) cannot
-// allocate, the open minute is dropped whole and the clear goes at the start of the
-// next block output: the reader never keeps levels C no longer has. The reader held
-// 98/99/101/102 and saw 98 change earlier in the failing minute; recovery omits 98
-// and 102. Every variant also runs with a checkpoint export/import before recovery.
-TEST(Failure, AClearThatCannotBeAllocatedStillClearsTheReader) {
-    enum Site { InvalidClear, UnsupportedClear, FailureClear, RefusedRestoreClear, LostMinutePrepend, SuspendedInvalid,
-                SuspendedRestoredInvalid };
-    for (const Site site : {InvalidClear, UnsupportedClear, FailureClear, RefusedRestoreClear, LostMinutePrepend, SuspendedInvalid,
-                            SuspendedRestoredInvalid})
-        for (const bool restore : {false, true}) {
-            const std::string what = "site " + std::to_string(site) + (restore ? " with restore" : "");
-            TempDir dir;
-            Capture out;
-            Pipeline p(dir.path, out);
-            std::map<std::string, int> failOnce; // site -> remaining injected failures
-            const auto arm = [&](LevelRecorder &c) {
-                c.failAllocationForTest = [&failOnce](const char *s) {
-                    auto it = failOnce.find(s);
-                    if (it == failOnce.end() || it->second == 0) return false;
-                    --it->second;
-                    return true;
-                };
-            };
-            arm(*p.c);
-            p.step(snap(1'000, book4()));
-            p.step(tick(kMin + 1'000)); // minute 0 output: the reader holds 98/99/101/102
-            p.step(upd(kMin + 3'000, {L(true, "98", 3.5)})); // earlier in the failing minute
-            switch (site) {
-            case InvalidClear:
-                failOnce["clear"] = 1;
-                p.step(inv(kMin + 5'000));
-                break;
-            case UnsupportedClear:
-                failOnce["clear"] = 1;
-                p.step(upd(kMin + 5'000, {L(true, "97.10000000000001", 1)}));
-                break;
-            case FailureClear: // a failure inside an event, whose own clear fails too
-                failOnce["changes"] = 1;
-                failOnce["clear"] = 1;
-                p.step(upd(kMin + 5'000, {L(true, "97", 1)}));
-                EXPECT_EQ(p.c->stats().failures, 1u) << what;
-                break;
-            case RefusedRestoreClear:
-                failOnce["clear"] = 1;
-                EXPECT_FALSE(p.restore([](std::vector<uint8_t> &b) { b[7] ^= 1; }, arm).ok) << what;
-                break;
-            case LostMinutePrepend: // a lost minute, then the prepend of its clear fails once
-                p.step(inv(kMin + 5'000));
-                out.failBlocks = 1;
-                p.step(tick(2 * kMin + 1'000));
-                failOnce["prepend"] = 1;
-                p.step(tick(3 * kMin + 1'000));
-                break;
-            case SuspendedInvalid: // one-sided: C unobserved while the reader holds levels
-                p.step(upd(kMin + 4'000, {L(false, "101", 0), L(false, "102", 0)}));
-                failOnce["clear"] = 1;
-                p.step(inv(kMin + 5'000));
-                break;
-            case SuspendedRestoredInvalid: // the same, with a checkpoint between suspension and
-                // invalidation: only the restored "reader may hold levels" asks for the clear
-                p.step(upd(kMin + 4'000, {L(false, "101", 0), L(false, "102", 0)}));
-                ASSERT_TRUE(p.restore({}, arm).ok) << what;
-                p.step(inv(kMin + 5'000));
-                break;
-            }
-            EXPECT_NE(p.c->pendingClear(), ClearCause::None) << what;
-            if (restore) {
-                const auto r = p.restore({}, arm);
-                ASSERT_TRUE(r.ok) << what << " " << r.reason;
-                EXPECT_NE(p.c->pendingClear(), ClearCause::None) << what;
-            }
-            const int64_t at = 4 * kMin + 5'000;
-            p.step(snap(at, {L(true, "99", 2), L(false, "101", 4)})); // 98 and 102 omitted
-            p.step(tick(7 * kMin));
-            EXPECT_EQ(p.c->pendingClear(), ClearCause::None) << what;
-            EXPECT_TRUE(p.c->observed()) << what;
-            const auto swept = sweep(out);
-            ASSERT_GE(swept.size(), 3u) << what;
-            bool recovered = false;
-            for (size_t m = 0; m < swept.size(); ++m) {
-                if (out.blocks[m].bucketStartMs < kFloor + kMin) continue;
-                // In the minute of the clear they may have been present before it, but
-                // are gone at its end; in every later minute they do not exist at all.
-                const bool clearMinute = out.blocks[m].bucketStartMs == kFloor + kMin;
-                for (const auto &r : swept[m].rows)
-                    EXPECT_FALSE((r.bin == 9800 || r.bin == 10200) &&
-                                 (r.last > 0 || (!clearMinute && (r.presenceMs > 0 || r.peak > 0))))
-                        << what << ": minute " << (out.blocks[m].bucketStartMs - kFloor) / kMin << " resurrected " << r.bin;
-                recovered = recovered || out.blocks[m].bucketStartMs >= kFloor + 4 * kMin;
-            }
-            EXPECT_TRUE(recovered) << what;
-            EXPECT_EQ(swept.back().covered, kMin) << what;
-            EXPECT_EQ(swept.back().rows.size(), 2u) << what;
-        }
+TEST(Failure, AllocationFailureStopsInsteadOfCreatingARepairClear) {
+    enum Site { InvalidClear, UnsupportedClear, Changes, SuspendedInvalid, SuspendedRestoredInvalid };
+    for (const Site site : {InvalidClear, UnsupportedClear, Changes, SuspendedInvalid, SuspendedRestoredInvalid}) {
+        SCOPED_TRACE(site);
+        TempDir dir;
+        Capture out;
+        Pipeline p(dir.path, out);
+        p.step(snap(1'000, book4()));
+        p.step(tick(61'000));
+        p.step(upd(62'000, {L(true, "98", 7)}));
+        if (site == SuspendedInvalid || site == SuspendedRestoredInvalid)
+            p.step(upd(64'000, {L(false, "101", 0), L(false, "102", 0)}));
+        if (site == SuspendedRestoredInvalid) ASSERT_TRUE(p.restore().ok);
+        int faults = 0;
+        p.c->failAllocationForTest = [&](const char *at) {
+            if (std::string_view(at) != (site == Changes ? "changes" : "clear")) return false;
+            ++faults;
+            return true;
+        };
+        if (site == Changes) p.step(upd(65'000, {L(true, "97", 1)}));
+        else if (site == UnsupportedClear) p.step(upd(65'000, {L(true, "97.10000000000001", 1)}));
+        else p.step(inv(65'000));
+        EXPECT_EQ(faults, 1);
+        EXPECT_EQ(p.c->stats().failures, 1u);
+        const auto partial = p.c->openBlock();
+        EXPECT_THROW(p.restore(), std::runtime_error);
+        p.step(snap(125'000, {L(true, "99", 2), L(false, "101", 4)}));
+        p.step(inv(130'000));
+        p.step(tick(7 * kMin));
+        EXPECT_EQ(out.blocks.size(), 1u);
+        EXPECT_EQ(p.c->openBlock(), partial);
+        EXPECT_EQ(faults, 1); // no allocation attempts for compensating clears
+        EXPECT_EQ(p.c->stats().failures, 1u);
+    }
 }

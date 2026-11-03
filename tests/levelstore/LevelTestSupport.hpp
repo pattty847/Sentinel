@@ -39,13 +39,19 @@ struct Capture final : LevelOutput {
     std::vector<MinuteBlock> blocks;
     int dayStarts = 0;
     bool failNextBlock = false;
+    bool failDayStart = false, failAfterAccept = false;
+    int blockCalls = 0;
     int failBlocks = 0; // the next N blocks throw
     void onDayStart(const DayBinding &, const BookImage &i) override {
         ++dayStarts;
+        if (failDayStart && !failAfterAccept) throw std::runtime_error("injected image failure");
         image = i;
+        if (failDayStart) throw std::runtime_error("injected image failure after accept");
     }
     void onBlock(const DayBinding &, const MinuteBlock &b) override {
+        ++blockCalls;
         if (failNextBlock || failBlocks > 0) {
+            if (failAfterAccept) blocks.push_back(b);
             failNextBlock = false;
             if (failBlocks > 0) --failBlocks;
             throw std::runtime_error("injected output failure");

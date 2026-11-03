@@ -33,9 +33,11 @@ struct RollOptions {
     // Architecture C (libs/core/levelstore). When set, roll() gives each day's history
     // recorder its own LevelRecorder as its sink (recorderSink is then not used), bound
     // to that day's floor, ceiling and price scale, created before and destroyed after
-    // that recorder. Its output must outlive roll(). Not policy. C's state is
-    // not in durable anchors yet, so a durable anchor restore refuses C's import and C
-    // stays unobserved until a valid exact snapshot (LevelRecorder::importState).
+    // that recorder. Its output must outlive roll(). Not policy. Internal C failure
+    // aborts roll before the next checkpoint/anchor success. C has no durable paired
+    // state/output yet: existing checkpoints or requested HMC2-only anchor restores
+    // are refused. Replay into fresh output; a throwing output callback may have
+    // side effects, so retrying against its uncertain suffix is unsafe.
     levelstore::LevelOutput* levelOutput = nullptr;
     // The day's LevelRecorder once its recorder exists (after onRecorder), and nullptr
     // before it is destroyed. Calling thread.

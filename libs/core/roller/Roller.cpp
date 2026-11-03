@@ -102,6 +102,8 @@ json roll(const RollOptions& o) {
     JournalReader inventory(o.journalRoot, o.product);
     const auto cpPath = o.outputRoot/o.product/"roller.json";
     json cp = {{"rollerVersion",Version},{"product",o.product},{"days",json::object()}};
+    if (o.levelOutput && fs::exists(cpPath))
+        throw std::runtime_error("C durable resume requires paired C state/output; use a fresh output root");
     if (fs::exists(cpPath)) {
         std::ifstream in(cpPath); in >> cp;
         if (cp.at("rollerVersion") != Version || cp.at("product") != o.product) throw std::runtime_error("checkpoint version/product mismatch");
@@ -263,6 +265,8 @@ json roll(const RollOptions& o) {
             catch (const std::exception& e) { anchorFailure("Read",day,e.what()); }
             catch (...) { anchorFailure("Read",day,"unknown exception"); }
         }
+        if (o.levelOutput && o.useAnchors && !o.dryRun && !candidates.empty())
+            throw std::runtime_error("C cannot restore HMC2-only anchors; replay with useAnchors=false into fresh output");
         if (o.useAnchors && !o.dryRun) for (const auto& file : candidates) {
             // Canonical names encode UTC boundaries. Filter future candidates
             // before decompressing megabytes of recorder state.
@@ -365,10 +369,6 @@ json roll(const RollOptions& o) {
                 if (candidateLevel) candidateConfig.sink = candidateLevel.get();
                 auto candidate = std::make_unique<recording::BookRecorder>(std::move(candidateConfig));
                 candidate->importState(a.recorder.bytes);
-                // Durable anchors do not carry C state yet: C refuses (logged, counted)
-                // and stays unobserved until a valid exact snapshot. Never a silent restart.
-                if (candidateLevel)
-                    candidateLevel->importState({},candidate->checkpointClock(o.product),a.recorder.bytes);
                 // Everything above is validation on fresh, unpublished objects.
                 // Preserve installed callbacks: importing never invokes them.
                 feed.importState(state.at("feed"));
@@ -452,6 +452,7 @@ json roll(const RollOptions& o) {
             const auto t3 = clock::now();
             levelstore::LevelRecorder::ImportResult imported{true, {}};
             if (freshLevel) imported = freshLevel->importState(levelBytes,fresh->checkpointClock(o.product),recorderBytes);
+            if (freshLevel) freshLevel->throwIfFailed();
             const auto t4 = clock::now();
             level = std::move(freshLevel); recorder = std::move(fresh);
             if (o.onRecorder) o.onRecorder(recorder.get(), &feed, end);
@@ -469,6 +470,10 @@ json roll(const RollOptions& o) {
             // or an older cache with a different committed prefix.
             if (!o.writeAnchors || !recorder || boundary < savedThrough ||
                 (boundary == day && recorderFloor != from)) return;
+            if (level) {
+                recorder->drain();
+                level->throwIfFailed(); // must not be swallowed by optional-anchor error handling
+            }
             bool degraded = false;
             std::vector<uint8_t> exported;
             try {
@@ -511,6 +516,7 @@ json roll(const RollOptions& o) {
         const auto fence = [&] {
             if (!recorder) return;
             recorder->drain();
+            if (level) level->throwIfFailed();
             const auto stats = recorder->stats();
             if (stats.diskErrors) throw std::runtime_error("roller recorder failed; checkpoint not advanced");
             if (!o.productWriterLease && stats.columnsWritten == checkpointColumns) return;

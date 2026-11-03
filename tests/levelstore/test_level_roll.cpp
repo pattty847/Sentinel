@@ -233,68 +233,96 @@ TEST(LevelRoll, DayRecreationAndInProcessRestoresMatchTheUninterruptedRun) {
     EXPECT_TRUE(sawClear);
 }
 
-// A durable anchor restore has no C state in E1b-1: C refuses, says so, and stays
-// unobserved until a valid exact snapshot; never a silent fresh start. Midnight
-// (refused during warmup: the day starts empty and unobserved) and intraday (the
-// output records the refusal's clear at the checkpoint clock).
-TEST(LevelRoll, DurableAnchorRestoreRefusesCUntilTheNextValidSnapshot) {
-    for (const bool intraday : {false, true}) {
-        TempDir tmp;
-        writeFixture(tmp.path / "raw");
-        DayCapture first, resumed;
-        auto o = options(tmp.path / "raw", tmp.path / "out");
-        o.fromMs = Epoch;
-        o.toMs = Epoch + 4 * Hour;
-        o.levelOutput = &first;
-        bool stop = false;
-        o.cancelled = [&] { return stop; };
-        o.onApplied = [&](const JournalRecord &r) { stop = stop || r.record.time.systemNs / 1'000'000 >= Epoch + 2 * Hour + 20'000; };
-        roll(o);
-        // Keep only the newest anchor (intraday) or only midnight.
-        std::vector<fs::path> anchors;
-        for (const auto &e : fs::recursive_directory_iterator(tmp.path / "out"))
-            if (e.path().extension() == ".anchor") anchors.push_back(e.path());
-        std::sort(anchors.begin(), anchors.end());
-        ASSERT_GE(anchors.size(), 3u);
-        for (size_t i = 0; i < anchors.size(); ++i)
-            if (intraday ? i + 1 != anchors.size() : i != 0) fs::remove(anchors[i]);
-        o.cancelled = {};
-        o.onApplied = {};
-        o.useAnchors = true;
+// Durable HMC2 progress alone says nothing about C's output prefix.
+TEST(LevelRoll, DurableResumeWithoutPairedCStateIsRefusedBeforeOutput) {
+    TempDir tmp;
+    writeFixture(tmp.path / "raw");
+    auto o = options(tmp.path / "raw", tmp.path / "out");
+    o.fromMs = Epoch;
+    o.toMs = Epoch + 20 * Minute;
+    roll(o); // existing HMC2-only checkpoints and anchors
+    const auto files = hmc2Files(tmp.path / "out");
+    for (const bool useAnchors : {false, true}) {
+        DayCapture resumed;
+        o.useAnchors = useAnchors;
         o.levelOutput = &resumed;
-        std::vector<LevelRecorder::Stats> stats;
-        o.onLevelRecorder = [&](LevelRecorder *c) { if (c) stats.push_back(c->stats()); };
-        const auto report = roll(o);
-        ASSERT_TRUE(report["days"][0].contains("anchorBoundaryMs")) << report.dump();
-        EXPECT_EQ(report["days"][0]["anchorBoundaryMs"].get<int64_t>() > Epoch, intraday) << report.dump();
-        ASSERT_FALSE(stats.empty());
-        EXPECT_EQ(stats.front().restoreRefusals, 1u);
-        ASSERT_EQ(resumed.days.size(), 1u);
-        const auto &day = resumed.days.begin()->second;
-        ASSERT_FALSE(day.blocks.empty());
-        if (!intraday) {
-            ASSERT_TRUE(day.image);
-            EXPECT_EQ(*day.image, (BookImage{Epoch, false, {}}));
-        } else {
-            EXPECT_FALSE(day.image); // the resumed instance does not restart the day
-            ASSERT_FALSE(day.blocks.front().messages.empty());
-            EXPECT_EQ(day.blocks.front().messages.front().clear, ClearCause::RestoreRefused);
-        }
-        bool recovered = false;
-        for (const auto &blk : day.blocks) {
-            for (const auto &m : blk.messages) {
-                if (m.timeMs < Epoch + 3 * Hour + 2 * Minute) EXPECT_FALSE(m.observed);
-                else if (m.reset) {
-                    EXPECT_TRUE(m.observed);
-                    recovered = true;
-                    break;
-                }
-            }
-            if (recovered) break;
-            EXPECT_TRUE(blk.changes.empty()); // nothing tracked while unobserved
-        }
-        EXPECT_TRUE(recovered);
+        EXPECT_THROW(roll(o), std::runtime_error);
+        EXPECT_TRUE(resumed.days.empty());
+        EXPECT_EQ(hmc2Files(tmp.path / "out"), files);
     }
+    // A separate anchor cache is also insufficient, even with an empty output root.
+    o.anchorRoot = tmp.path / "out";
+    o.outputRoot = tmp.path / "fresh";
+    DayCapture fresh;
+    o.levelOutput = &fresh;
+    EXPECT_THROW(roll(o), std::runtime_error);
+    EXPECT_TRUE(fresh.days.empty());
+    // Explicit full replay into fresh output remains available.
+    o.useAnchors = false;
+    o.writeAnchors = false;
+    EXPECT_NO_THROW(roll(o));
+    EXPECT_FALSE(fresh.days.empty());
+}
+
+TEST(LevelRoll, OutputFailureAbortsWithoutReportingSuccessfulProgress) {
+    TempDir tmp;
+    writeFixture(tmp.path / "raw");
+    for (const bool image : {false, true}) for (const bool afterAccept : {false, true}) {
+        SCOPED_TRACE(testing::PrintToString(std::make_pair(image, afterAccept)));
+        Capture output;
+        output.failDayStart = image;
+        output.failNextBlock = !image;
+        output.failAfterAccept = afterAccept;
+        auto o = options(tmp.path / "raw", tmp.path / (std::to_string(image) + std::to_string(afterAccept)));
+        o.fromMs = Epoch;
+        o.toMs = Epoch + 20 * Minute;
+        o.levelOutput = &output;
+        int commits = 0;
+        o.onCommitted = [&](int64_t) { ++commits; };
+        EXPECT_THROW(roll(o), std::runtime_error);
+        EXPECT_EQ(commits, 0);
+        EXPECT_EQ(output.dayStarts, 1);
+        EXPECT_EQ(output.blockCalls, image ? 0 : 1);
+        EXPECT_FALSE(fs::exists(o.outputRoot / kProduct / "roller.json"));
+    }
+}
+
+TEST(LevelRoll, InternalFailureCannotBeSwallowedAsAnOptionalAnchorFailure) {
+    TempDir tmp;
+    writeFixture(tmp.path / "raw");
+    DayCapture output;
+    auto o = options(tmp.path / "raw", tmp.path / "out");
+    o.fromMs = Epoch;
+    o.toMs = Epoch + 20 * Minute;
+    o.levelOutput = &output;
+    recording::BookRecorder *recorder = nullptr;
+    LevelRecorder *levelRecorder = nullptr;
+    bool injected = false;
+    int commitsAfterFailure = 0, anchorsAfterFailure = 0;
+    std::string checkpointBefore;
+    const auto checkpoint = o.outputRoot / kProduct / "roller.json";
+    const auto readCheckpoint = [&] {
+        std::ifstream in(checkpoint);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    o.onRecorder = [&](auto *r, const auto *, int64_t) { recorder = r; };
+    o.onLevelRecorder = [&](auto *c) { levelRecorder = c; };
+    o.onApplied = [&](const JournalRecord &r) {
+        if (injected || !recorder || r.record.time.systemNs / 1'000'000 < Epoch + 15 * Minute) return;
+        recorder->drain();
+        // A deterministic internal invariant fault at the anchor boundary.
+        levelRecorder->onApplied(kProduct, Epoch - 1, true, true);
+        ASSERT_EQ(levelRecorder->stats().failures, 1u);
+        injected = true;
+        checkpointBefore = readCheckpoint();
+    };
+    o.onCommitted = [&](int64_t) { commitsAfterFailure += injected; };
+    o.afterAnchorForTest = [&](int64_t) { anchorsAfterFailure += injected; };
+    EXPECT_THROW(roll(o), std::runtime_error);
+    EXPECT_TRUE(injected);
+    EXPECT_EQ(anchorsAfterFailure, 0);
+    EXPECT_EQ(commitsAfterFailure, 0);
+    EXPECT_EQ(readCheckpoint(), checkpointBefore);
 }
 
 namespace {

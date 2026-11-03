@@ -129,13 +129,11 @@ void LevelRecorder::begin(int64_t clock) {
 // Warmup ends here: the first BookImage is C's state at the floor instant (nothing
 // changes between the last earlier event and the floor). Earlier minutes are dropped.
 void LevelRecorder::startDay() {
-    dayStarted_ = true;
     open_.messages.clear();
     open_.changes.clear();
-    open_.damaged = false;
     open_.observedAtStart = observed_;
-    readerMayHoldLevels_ = liveLevels() > 0;
     output_->onDayStart(binding_, BookImage{binding_.floorMs, observed_, book()});
+    dayStarted_ = true;
 }
 
 void LevelRecorder::touch(bool isBid, int64_t units, double size) {
@@ -161,7 +159,7 @@ void LevelRecorder::unsupported(const LevelChange &level, int64_t clock) {
 }
 
 void LevelRecorder::onReset(const std::string &symbol, int64_t clock) noexcept {
-    if (!mine(symbol)) return;
+    if (failed() || !mine(symbol)) return;
     try {
         begin(clock);
         messageReset_ = true;
@@ -183,7 +181,7 @@ void LevelRecorder::onReset(const std::string &symbol, int64_t clock) noexcept {
 }
 
 void LevelRecorder::onImprecise(const std::string &symbol, int64_t clock, const LevelChange &level) noexcept {
-    if (!mine(symbol)) return;
+    if (failed() || !mine(symbol)) return;
     try {
         begin(clock);
         if (level.identity == DecimalIdentity::Exact) return; // the double was judged OffGrid/Outside only
@@ -197,7 +195,7 @@ void LevelRecorder::onImprecise(const std::string &symbol, int64_t clock, const 
 }
 
 void LevelRecorder::onLevel(const std::string &symbol, int64_t clock, const LevelChange &level) noexcept {
-    if (!mine(symbol)) return;
+    if (failed() || !mine(symbol)) return;
     try {
         begin(clock);
         if (level.identity != DecimalIdentity::Exact) { // counted in onImprecise, which precedes it
@@ -215,7 +213,7 @@ void LevelRecorder::onLevel(const std::string &symbol, int64_t clock, const Leve
 }
 
 void LevelRecorder::onApplied(const std::string &symbol, int64_t clock, bool valid, bool observing) noexcept {
-    if (!mine(symbol)) return;
+    if (failed() || !mine(symbol)) return;
     try {
         begin(clock);
         endMessage(clock, valid, observing, false);
@@ -227,7 +225,7 @@ void LevelRecorder::onApplied(const std::string &symbol, int64_t clock, bool val
 }
 
 void LevelRecorder::onInvalid(const std::string &symbol, int64_t clock, const std::string &, bool) noexcept {
-    if (!mine(symbol)) return;
+    if (failed() || !mine(symbol)) return;
     try {
         begin(clock);
         endMessage(clock, false, false, true);
@@ -240,6 +238,7 @@ void LevelRecorder::onInvalid(const std::string &symbol, int64_t clock, const st
 
 void LevelRecorder::endMessage(int64_t clock, bool valid, bool observing, bool invalidated) {
     const bool wasObserved = observed_;
+    const bool hadLevels = unobserved_ == Unobserved::None && liveLevels() > 0;
     valid_ = valid;
     recorderObserving_ = valid && observing;
     ClearCause clear = ClearCause::None;
@@ -250,7 +249,7 @@ void LevelRecorder::endMessage(int64_t clock, bool valid, bool observing, bool i
     } else if (invalidated) {
         clear = ClearCause::Invalid;
     } else if (unobserved_ != Unobserved::None) {
-        // INTERIM recovery rule: only a snapshot with all prices exact that the recorder
+        // Only a snapshot with all prices exact that the recorder
         // applied as a valid book (onApplied valid after onReset) ends the episode.
         if (messageReset_ && valid) {
             sLog_Data("levelstore: observed again at a valid exact snapshot symbol=" << binding_.symbol
@@ -270,10 +269,15 @@ void LevelRecorder::endMessage(int64_t clock, bool valid, bool observing, bool i
         return;
     }
     if (clear != ClearCause::None) {
+        // Clears are ordinary input events. Internal failure never resumes output,
+        // so there is no separate reader state or deferred clear to reconcile.
+        if (dayStarted_ && (wasObserved || hadLevels)) {
+            allocationSeam("clear");
+            open_.messages.push_back({clock, false, false, clear});
+            ++stats_.messages;
+            ++stats_.clears;
+        }
         clearBook();
-        // Whether the reader may hold levels is C's record of what it output, never
-        // C's current book (which can be empty while the reader still holds levels).
-        if (readerMayHoldLevels_ || wasObserved) requireClear(clear, clock);
         return;
     }
     // Snapshot diffs come from hash order: sort them into the canonical book order.
@@ -294,7 +298,6 @@ void LevelRecorder::endMessage(int64_t clock, bool valid, bool observing, bool i
         const double now = it->second.size;
         if (now != t.before) {
             open_.changes.push_back({message, t.isBid, t.units, now});
-            readerMayHoldLevels_ = readerMayHoldLevels_ || now > 0;
         }
         if (now == 0) side.erase(it);
     }
@@ -309,7 +312,7 @@ void LevelRecorder::endMessage(int64_t clock, bool valid, bool observing, bool i
 
 void LevelRecorder::onMinute(const std::string &symbol, int64_t bucketStartMs, uint32_t observedMs,
                              uint32_t flags) noexcept {
-    if (!mine(symbol)) return;
+    if (failed() || !mine(symbol)) return;
     const int64_t end = bucketStartMs + kMinute;
     try {
         if (inMessage_) throw std::logic_error("minute inside a message");
@@ -317,27 +320,6 @@ void LevelRecorder::onMinute(const std::string &symbol, int64_t bucketStartMs, u
         if (!open_.messages.empty() && open_.messages.front().timeMs < bucketStartMs)
             throw std::logic_error("message outside its minute");
         lastClock_ = end;
-        bool lost = false;
-        const auto output = [&] {
-            // A minute lost earlier (its output failed, or it was inconsistent and
-            // dropped) may have held a clear, a reset or any change the reader never
-            // saw: the next block actually output starts with a clear at its own start,
-            // whatever C's book is now and however many minutes the recorder skipped.
-            if (pendingClear_ != ClearCause::None && !clearInOpen_) {
-                allocationSeam("prepend");
-                reserveMore(open_.messages, 1);
-                open_.messages.insert(open_.messages.begin(), {bucketStartMs, false, false, pendingClear_});
-                for (auto &c : open_.changes) ++c.message;
-                open_.observedAtStart = false;
-                ++stats_.messages;
-                ++stats_.clears;
-            }
-            output_->onBlock(binding_, open_);
-            // Released only now: the clear is in output the reader has received.
-            pendingClear_ = ClearCause::None;
-            clearInOpen_ = false;
-            ++stats_.blocks;
-        };
         if (bucketStartMs < binding_.floorMs) {
             // Warmup minute: builds the book only.
             if (end >= binding_.floorMs && !dayStarted_) startDay();
@@ -348,66 +330,18 @@ void LevelRecorder::onMinute(const std::string &symbol, int64_t bucketStartMs, u
                 open_.bucketStartMs = bucketStartMs;
                 open_.recorderObservedMs = observedMs;
                 open_.recorderFlags = flags;
-                try {
-                    output();
-                } catch (...) {
-                    lost = true;
-                }
+                output_->onBlock(binding_, open_);
+                ++stats_.blocks;
             }
         }
         open_.messages.clear();
         open_.changes.clear();
-        open_.damaged = false;
         open_.observedAtStart = observed_;
-        if (lost) loseMinute("output failed; minute lost", end);
     } catch (const std::exception &e) {
-        loseMinute(e.what(), end);
+        fail(e.what(), end);
     } catch (...) {
-        loseMinute("unknown exception", end);
+        fail("unknown exception", end);
     }
-}
-
-// The open minute cannot be output (its output failed, or it is inconsistent): drop
-// it entirely, so nothing in it can reach a later minute, and require a clear at the
-// start of the next block output (onMinute output).
-void LevelRecorder::loseMinute(const char *what, int64_t end) noexcept {
-    dropOpenMinute(false); // gone whole: it is never output, so nothing in it is "damaged"
-    requireClear(ClearCause::Failed, std::nullopt);
-    fail(what, end, true);
-}
-
-// The only owner of clears (invalidation, unsupported price, failure, refused restore,
-// lost minute). Order matters: first the persistent, non-allocating requirement
-// (pendingClear_, carried in the checkpoint), then the attempt to place the clear
-// inside the open minute at `at`. The requirement is released only once a block that
-// contains the clear has been output (onMinute). If placing it fails, or there is no
-// time to place it at (a lost minute: the next output minute is unknown), the open
-// minute's retained content is dropped whole, so nothing in it can repopulate levels
-// after the clear, and the clear goes at the start of the next block that is output.
-void LevelRecorder::requireClear(ClearCause cause, std::optional<int64_t> at) noexcept {
-    if (!dayStarted_) return; // nothing has been output: the day's image is C's own book
-    if (pendingClear_ == ClearCause::None) pendingClear_ = cause;
-    clearInOpen_ = false;
-    readerMayHoldLevels_ = false; // after the clear, wherever it lands
-    if (!at) return;
-    try {
-        allocationSeam("clear");
-        reserveMore(open_.messages, 1);
-        open_.messages.push_back({*at, false, false, cause});
-        clearInOpen_ = true;
-        ++stats_.messages;
-        ++stats_.clears;
-    } catch (...) {
-        dropOpenMinute(true);
-    }
-}
-
-void LevelRecorder::dropOpenMinute(bool damaged) noexcept {
-    open_.messages.clear();
-    open_.changes.clear();
-    open_.damaged = damaged; // a minute still output without its earlier part: read as unobserved
-    open_.observedAtStart = false;
-    clearInOpen_ = false;
 }
 
 void LevelRecorder::allocationSeam(const char *site) {
@@ -420,34 +354,23 @@ void LevelRecorder::clearBook() noexcept {
     touched_.clear();
 }
 
-// Failure: C cannot trust its book. It records a clear and stays unobserved until a
-// valid exact snapshot. A failure inside an event may have lost part of the minute's
-// timeline (the failing message itself), so that minute is marked damaged: readers
-// take it as unobserved. A lost output minute damages nothing that is still emitted,
-// but the reader never saw it (it may have held a clear, a reset or any change), so
-// the next retained output always starts with a clear, whatever C's own book is now.
-// That requirement is pendingClear_, not a timestamped message: the recorder may skip
-// unobserved minutes, so the next output minute is unknown here. It survives repeated
-// losses and checkpoint export/import.
-void LevelRecorder::fail(const char *what, int64_t clock, bool lostOutput) noexcept {
+// Internal failure ends this attempt. Retain partial state for diagnosis only;
+// no snapshot, later callback or checkpoint can turn it into usable history.
+void LevelRecorder::fail(const char *what, int64_t clock) noexcept {
+    if (failed()) return;
     ++stats_.failures;
-    inMessage_ = messageReset_ = messageUnsupported_ = false;
-    clearBook();
+    unobserved_ = Unobserved::Failed;
     observed_ = false;
+    std::snprintf(failureReason_, sizeof failureReason_, "%s", what);
     try {
-        if (unobserved_ != Unobserved::Failed)
-            sLog_Warning("levelstore: failed, product unobserved until a valid exact snapshot symbol="
-                         << binding_.symbol << " error=" << what << " clock=" << clock);
+        sLog_Warning("levelstore: processing stopped symbol=" << binding_.symbol
+                     << " error=" << failureReason_ << " clock=" << clock);
     } catch (...) {
     }
-    unobserved_ = Unobserved::Failed;
-    if (lostOutput || !dayStarted_) return; // loseMinute already required the clear
-    // The failing message itself is lost: this minute is damaged, and the reader is
-    // cleared inside the open minute, never before C's latest clock or message.
-    open_.damaged = true;
-    int64_t at = std::max(clock, lastClock_);
-    if (!open_.messages.empty()) at = std::max(at, open_.messages.back().timeMs);
-    requireClear(ClearCause::Failed, at);
+}
+
+void LevelRecorder::throwIfFailed() const {
+    if (failed()) throw std::runtime_error("levelstore processing stopped: " + binding_.symbol + ": " + failureReason_);
 }
 
 std::vector<BookLevel> LevelRecorder::book() const {
@@ -473,33 +396,12 @@ size_t LevelRecorder::memoryBytes() const {
     return bytes;
 }
 
-void LevelRecorder::resetFresh() noexcept {
-    clearBook();
-    serial_ = 0;
-    inMessage_ = messageReset_ = messageUnsupported_ = false;
-    dayStarted_ = valid_ = recorderObserving_ = observed_ = false;
-    unobserved_ = Unobserved::None;
-    pendingClear_ = ClearCause::None;
-    clearInOpen_ = false;
-    readerMayHoldLevels_ = false;
-    lastClock_ = INT64_MIN;
-    open_.messages.clear();
-    open_.changes.clear();
-    open_.damaged = false;
-    open_.observedAtStart = false;
-    open_.bucketStartMs = 0;
-    open_.recorderObservedMs = 0;
-    open_.recorderFlags = 0;
-    stats_ = {};
-}
-
-// Blob v4: "LSC1", u16 version, binding, the paired recorder checkpoint (its clock, and
-// the length and validated payload CRC32 of its exportState bytes), flags, episode, the
-// pending reader clear and the reader flags (clear placed in the open minute, reader may
-// hold levels), clock, stats, book, open minute, then a CRC32 of everything before it. No floating-point accumulators: sizes are the
-// recorder's doubles stored bit-exact, times are integers.
+// Blob v5: "LSC1", u16 version, binding, paired recorder clock/length/payload CRC,
+// flags, observation episode, clock, stats, book, open minute and payload CRC.
+// Only healthy state is exportable. Sizes are bit-exact doubles; times are integers.
 std::vector<uint8_t> LevelRecorder::exportState(std::optional<int64_t> recorderClock,
                                                 const std::vector<uint8_t> &recorderState) const {
+    throwIfFailed();
     if (inMessage_) throw std::logic_error("LevelRecorder::exportState inside a message (recorder not drained)");
     if (recorderClock ? *recorderClock < lastClock_ : lastClock_ != INT64_MIN)
         throw std::logic_error("LevelRecorder::exportState: checkpoint clock behind C's last event");
@@ -520,8 +422,6 @@ std::vector<uint8_t> LevelRecorder::exportState(std::optional<int64_t> recorderC
     w.u8(static_cast<uint8_t>((dayStarted_ ? 1 : 0) | (valid_ ? 2 : 0) | (recorderObserving_ ? 4 : 0) |
                               (observed_ ? 8 : 0)));
     w.u8(static_cast<uint8_t>(unobserved_));
-    w.u8(static_cast<uint8_t>(pendingClear_));
-    w.u8(static_cast<uint8_t>((clearInOpen_ ? 1 : 0) | (readerMayHoldLevels_ ? 2 : 0)));
     w.u8(lastClock_ == INT64_MIN ? 0 : 1);
     w.svarint(lastClock_ == INT64_MIN ? 0 : lastClock_);
     for (uint64_t v : {stats_.messages, stats_.changes, stats_.blocks, stats_.resets, stats_.clears,
@@ -551,6 +451,7 @@ LevelRecorder::ImportResult LevelRecorder::importState(const std::vector<uint8_t
     // Fixed storage: copying the reason must not allocate inside this noexcept path.
     char reason[192] = "unknown exception";
     try {
+        throwIfFailed();
         require(lastClock_ == INT64_MIN && !dayStarted_ && !inMessage_ && liveLevels() == 0 &&
                     open_.messages.empty() && stats_ == Stats{},
                 "import requires a fresh LevelRecorder");
@@ -580,11 +481,7 @@ LevelRecorder::ImportResult LevelRecorder::importState(const std::vector<uint8_t
         const uint8_t flags = r.u8();
         require(flags <= 15, "state flags");
         const uint8_t episode = r.u8();
-        require(episode <= static_cast<uint8_t>(Unobserved::RestoreRefused), "state episode");
-        const uint8_t pending = r.u8();
-        require(pending <= static_cast<uint8_t>(ClearCause::RestoreRefused), "state pending clear");
-        const uint8_t readerBits = r.u8();
-        require(readerBits <= 3 && (pending != 0 || !(readerBits & 1)), "state reader flags");
+        require(episode <= static_cast<uint8_t>(Unobserved::Unsupported), "state episode");
         const uint8_t hasLast = r.u8();
         const int64_t last = r.svarint();
         require(hasLast <= 1 && (!hasLast || (recorderClock && last <= *recorderClock)), "state clock");
@@ -620,7 +517,6 @@ LevelRecorder::ImportResult LevelRecorder::importState(const std::vector<uint8_t
         require(open.changes.empty() || open.changes.back().message < open.messages.size(), "state open minute");
         require(dayStarted || open.messages.empty() || !recorderClock || *recorderClock < binding_.floorMs,
                 "state warmup");
-        require(pending == 0 || dayStarted, "state pending clear before the day");
         book_[0].swap(sides[0]);
         book_[1].swap(sides[1]);
         open_ = std::move(open);
@@ -629,9 +525,6 @@ LevelRecorder::ImportResult LevelRecorder::importState(const std::vector<uint8_t
         recorderObserving_ = recorderObserving;
         observed_ = observed;
         unobserved_ = unobserved;
-        pendingClear_ = static_cast<ClearCause>(pending);
-        clearInOpen_ = readerBits & 1;
-        readerMayHoldLevels_ = readerBits & 2;
         lastClock_ = hasLast ? last : INT64_MIN;
         stats_ = s;
         return {true, {}};
@@ -640,24 +533,17 @@ LevelRecorder::ImportResult LevelRecorder::importState(const std::vector<uint8_t
     } catch (...) {
         std::snprintf(reason, sizeof reason, "%s", "unknown exception");
     }
-    // Refused: start empty and unobserved; never continue from a guessed state.
-    resetFresh();
-    unobserved_ = Unobserved::RestoreRefused;
-    stats_.restoreRefusals = 1;
-    lastClock_ = recorderClock.value_or(INT64_MIN);
-    dayStarted_ = recorderClock && *recorderClock >= binding_.floorMs;
-    if (dayStarted_) {
-        // The part of this minute before the checkpoint was in the refused state, and
-        // the reader may hold anything the refused state had output.
-        open_.damaged = true;
-        readerMayHoldLevels_ = true;
-        requireClear(ClearCause::RestoreRefused, *recorderClock);
-    }
-    try {
-        sLog_Warning("levelstore: checkpoint state refused, product unobserved until a valid exact snapshot symbol="
-                     << binding_.symbol << " reason=" << reason << " bytes=" << blob.size()
-                     << " recorderClock=" << recorderClock.value_or(-1));
-    } catch (...) {
+    if (!failed()) {
+        unobserved_ = Unobserved::RestoreRefused;
+        observed_ = false;
+        ++stats_.restoreRefusals;
+        std::snprintf(failureReason_, sizeof failureReason_, "%s", reason);
+        try {
+            sLog_Warning("levelstore: checkpoint state refused; processing stopped symbol="
+                         << binding_.symbol << " reason=" << reason << " bytes=" << blob.size()
+                         << " recorderClock=" << recorderClock.value_or(-1));
+        } catch (...) {
+        }
     }
     ImportResult refused;
     try {

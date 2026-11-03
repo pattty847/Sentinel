@@ -18,8 +18,6 @@ const char *clearCauseName(ClearCause c) noexcept {
     case ClearCause::None: return "none";
     case ClearCause::Invalid: return "invalid";
     case ClearCause::Unsupported: return "unsupported-price";
-    case ClearCause::Failed: return "failed";
-    case ClearCause::RestoreRefused: return "restore-refused";
     }
     return "?";
 }
@@ -81,7 +79,7 @@ void encodeBlock(ByteWriter &w, const MinuteBlock &b) {
     w.svarint(b.bucketStartMs);
     w.varint(b.recorderObservedMs);
     w.varint(b.recorderFlags);
-    w.u8(static_cast<uint8_t>((b.observedAtStart ? 1 : 0) | (b.damaged ? 2 : 0)));
+    w.u8(static_cast<uint8_t>(b.observedAtStart ? 1 : 0));
     w.varint(b.messages.size());
     int64_t t = b.bucketStartMs;
     for (const auto &m : b.messages) {
@@ -110,9 +108,8 @@ MinuteBlock decodeBlock(ByteReader &r) {
     b.recorderObservedMs = static_cast<uint32_t>(observed);
     b.recorderFlags = static_cast<uint32_t>(flags);
     const uint8_t bits = r.u8();
-    require(bits <= 3, "block flags");
+    require(bits <= 1, "block flags");
     b.observedAtStart = bits & 1;
-    b.damaged = bits & 2;
     const uint64_t n = r.varint();
     require(n <= r.remaining(), "message count");
     b.messages.resize(static_cast<size_t>(n));
@@ -124,7 +121,7 @@ MinuteBlock decodeBlock(ByteReader &r) {
         m.timeMs = t;
         const uint8_t f = r.u8();
         const uint8_t clear = f >> kClearShift;
-        require(clear <= static_cast<uint8_t>(ClearCause::RestoreRefused), "message flags");
+        require(clear <= static_cast<uint8_t>(ClearCause::Unsupported), "message flags");
         m.observed = f & kObserved;
         m.reset = f & kReset;
         m.clear = static_cast<ClearCause>(clear);

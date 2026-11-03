@@ -35,7 +35,9 @@ struct DayBinding {
 };
 
 // Receives C's output on the recorder worker. A throw is a C failure (see
-// LevelRecorder "Failure"), never propagated to the recorder.
+// LevelRecorder::throwIfFailed), never propagated from a sink callback. A throw
+// may follow partial output: abandon/reset the uncertain attempt before replay.
+// This interface provides neither atomic publication nor durable recovery.
 class LevelOutput {
   public:
     virtual ~LevelOutput() = default;
@@ -45,7 +47,7 @@ class LevelOutput {
 
 class LevelRecorder final : public recording::RecorderSink {
   public:
-    // Why C is unobserved while the recorder may still observe.
+    // Unsupported is an input episode; Failed/RestoreRefused permanently stop the instance.
     enum class Unobserved : uint8_t { None = 0, Unsupported = 1, Failed = 2, RestoreRefused = 3 };
     struct Stats {
         uint64_t messages = 0;          // timeline messages recorded (all buckets)
@@ -60,7 +62,7 @@ class LevelRecorder final : public recording::RecorderSink {
         uint64_t foreignEvents = 0;     // events for another symbol, ignored
         bool operator==(const Stats &) const = default;
     };
-    static constexpr uint16_t kStateVersion = 4;
+    static constexpr uint16_t kStateVersion = 5;
 
     LevelRecorder(DayBinding binding, LevelOutput *output);
 
@@ -76,17 +78,13 @@ class LevelRecorder final : public recording::RecorderSink {
     // Checkpoint, producer thread, recorder drained (BookRecorder::exportState drains):
     // recorderClock is BookRecorder::checkpointClock(symbol) and recorderState the
     // bytes exportState() returned at this same drained position (INV-192). The blob
-    // binds to both, so it can only be imported next to that recorder state. Throws
-    // std::logic_error if called inside a message or with a clock behind C's.
+    // binds to both, so it can only be imported next to that recorder state.
+    // Throws on terminal failure, or if called inside a message or with a clock behind C's.
     std::vector<uint8_t> exportState(std::optional<int64_t> recorderClock,
                                      const std::vector<uint8_t> &recorderState) const;
     // Restore into a fresh instance, before the restored recorder processes anything.
-    // Never throws. A blob that is corrupt, of another version, another day or
-    // binding, or not paired with exactly this recorder state is refused: C starts
-    // empty and unobserved (Unobserved::RestoreRefused), records a clear at the
-    // checkpoint clock once the day has started, logs a warning and counts it. It
-    // becomes observed again only at a valid exact snapshot (as Unsupported). The
-    // minute that contains the checkpoint is marked damaged (its earlier part is lost).
+    // Never throws. Invalid/unpaired state or a non-fresh target permanently fails
+    // this instance. No output or snapshot recovery follows a refused import.
     struct ImportResult {
         bool ok = false;
         std::string reason;
@@ -94,7 +92,10 @@ class LevelRecorder final : public recording::RecorderSink {
     ImportResult importState(const std::vector<uint8_t> &blob, std::optional<int64_t> recorderClock,
                              const std::vector<uint8_t> &recorderState) noexcept;
 
-    // Producer thread while drained.
+    // Producer thread while drained. Failure is terminal; book/openBlock after a
+    // failure are diagnostic partial state, not a usable replay boundary.
+    bool failed() const { return unobserved_ == Unobserved::Failed || unobserved_ == Unobserved::RestoreRefused; }
+    void throwIfFailed() const; // caller must check after drain, before reporting progress
     const DayBinding &binding() const { return binding_; }
     const Stats &stats() const { return stats_; }
     Unobserved unobserved() const { return unobserved_; }
@@ -104,9 +105,8 @@ class LevelRecorder final : public recording::RecorderSink {
     size_t liveLevels() const { return book_[0].size() + book_[1].size(); }
     std::vector<BookLevel> book() const; // sorted as BookImage::levels
     const MinuteBlock &openBlock() const { return open_; }
-    ClearCause pendingClear() const { return pendingClear_; }
     // Deterministic allocation-failure seam, tests only: called at the allocating sites
-    // of the clear and output paths ("clear", "prepend", "changes"); true throws
+    // of the clear and output paths ("clear", "changes"); true throws
     // std::bad_alloc there. Unset in production: one empty-function check per site.
     std::function<bool(const char *site)> failAllocationForTest;
     size_t memoryBytes() const; // estimate of the open state's heap use
@@ -129,13 +129,9 @@ class LevelRecorder final : public recording::RecorderSink {
     void unsupported(const LevelChange &level, int64_t clock);
     void endMessage(int64_t clock, bool valid, bool observing, bool invalidated);
     void startDay();
-    void fail(const char *what, int64_t clock, bool lostOutput = false) noexcept;
-    void loseMinute(const char *what, int64_t end) noexcept;
-    void requireClear(ClearCause cause, std::optional<int64_t> at) noexcept;
-    void dropOpenMinute(bool damaged) noexcept;
+    void fail(const char *what, int64_t clock) noexcept;
     void allocationSeam(const char *site);
     void clearBook() noexcept;
-    void resetFresh() noexcept;
 
     DayBinding binding_;
     LevelOutput *output_;
@@ -145,9 +141,7 @@ class LevelRecorder final : public recording::RecorderSink {
     bool inMessage_ = false, messageReset_ = false, messageUnsupported_ = false;
     bool dayStarted_ = false, valid_ = false, recorderObserving_ = false, observed_ = false;
     Unobserved unobserved_ = Unobserved::None;
-    ClearCause pendingClear_ = ClearCause::None; // a clear the reader has not received yet
-    bool clearInOpen_ = false;          // that clear is already placed in the open minute
-    bool readerMayHoldLevels_ = false;  // C's output so far may leave the reader holding levels
+    char failureReason_[192] = {}; // latched without allocation on the noexcept failure path
     int64_t lastClock_ = INT64_MIN;
     MinuteBlock open_;
     Stats stats_;

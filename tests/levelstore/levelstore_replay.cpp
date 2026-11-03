@@ -234,11 +234,10 @@ struct LayerSweeps {
     std::map<int64_t, Minute> minutes;
     RowCheck check;
     bool inEpisode = false;
-    uint64_t messages = 0, changes = 0, resets = 0, damaged = 0;
+    uint64_t messages = 0, changes = 0, resets = 0;
     std::map<std::string, uint64_t> clears;
     void sweep(const MinuteBlock &b) {
-        // Minutes in which C was unobserved by its own decision (an unsupported price,
-        // a failure or a refused restore) at any time: its covered is legitimately lower.
+        // Unsupported-price episodes may legitimately have lower coverage than HMC2.
         Minute m{b, {}, inEpisode};
         for (const auto &msg : b.messages) {
             ++messages;
@@ -249,9 +248,7 @@ struct LayerSweeps {
                 if (msg.clear != ClearCause::Invalid) m.episode = inEpisode = true;
             }
         }
-        m.episode = m.episode || b.damaged;
         changes += b.changes.size();
-        damaged += b.damaged;
         for (auto &[name, s] : sweeps) {
             auto &[rows, covered] = m.layers[name];
             s->apply(b, rows, covered);
@@ -407,8 +404,7 @@ json compare(const fs::path &aDir, const fs::path &bDir) {
         const auto ba = decodeBlock(ya), bb = decodeBlock(yb);
         ++blocks;
         const bool header = ba.bucketStartMs == bb.bucketStartMs && ba.recorderObservedMs == bb.recorderObservedMs &&
-                            ba.recorderFlags == bb.recorderFlags && ba.observedAtStart == bb.observedAtStart &&
-                            ba.damaged == bb.damaged;
+                            ba.recorderFlags == bb.recorderFlags && ba.observedAtStart == bb.observedAtStart;
         if (!header) { ++headerDiffs; note("block header " + std::to_string(ba.bucketStartMs)); }
         messages += ba.messages.size();
         changes += ba.changes.size();
@@ -631,8 +627,7 @@ int main(int argc, char **argv) {
                                           {"unsupportedEpisodes", s.unsupportedEpisodes}, {"failures", s.failures},
                                           {"restoreRefusals", s.restoreRefusals}, {"foreignEvents", s.foreignEvents}}},
                                {"timeline", {{"messages", layers.messages}, {"changes", layers.changes},
-                                             {"resets", layers.resets}, {"clears", layers.clears},
-                                             {"damagedBlocks", layers.damaged}}}};
+                                             {"resets", layers.resets}, {"clears", layers.clears}}}};
             result["rowCheck"] = layers.check.report();
             result["uncheckedMinutes"] = layers.minutes.size(); // finalised but never committed (the day end)
             result["heldRecords"] = layers.pendingRecords.size();
@@ -640,7 +635,7 @@ int main(int argc, char **argv) {
                                     {"importMs", summary(importMs)}, {"memoryBytes", summary(memory)},
                                     {"liveLevels", summary(liveLevels)}, {"openMessages", summary(openMessages)},
                                     {"roundTripMismatches", roundTripMismatches}, {"scratchRefusals", scratchRefusals}};
-            pass = pass && layers.check.clean() && s.failures == 0 && s.restoreRefusals == 0 && layers.damaged == 0 &&
+            pass = pass && layers.check.clean() && s.failures == 0 && s.restoreRefusals == 0 &&
                    file->images == 1 && roundTripMismatches == 0 && scratchRefusals == 0 && layers.minutes.empty() &&
                    layers.pendingRecords.empty() && layers.check.records > 0;
         }
