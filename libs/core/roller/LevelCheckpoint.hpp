@@ -13,11 +13,11 @@ inline levelstore::DayBinding levelBinding(const nlohmann::json& j) {
     return {j.at("symbol"),j.at("floor"),j.at("ceiling"),j.at("digits")};
 }
 inline nlohmann::json levelFence(levelstore::LevelRecorder& level, levelstore::LevelLog& log,
-        std::optional<int64_t> clock, const std::vector<uint8_t>& recorder, const std::function<void(const char*,double)>& timing = {}) {
+        std::optional<int64_t> clock, const std::vector<uint8_t>& recorder, const std::function<void(const char*,double)>& timing = {}, const char* syncName = "sync") {
     auto state = level.exportState(clock,recorder);
     const auto start = std::chrono::steady_clock::now();
     log.sync();
-    if (timing) timing("sync",std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
+    if (timing) timing(syncName,std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
     const auto tail = log.durableTail();
     nlohmann::json j = {{"version",1},{"binding",levelBinding(level.binding())},{"state",state},
         {"clock",clock ? nlohmann::json(*clock) : nlohmann::json()},{"tail",nullptr}};

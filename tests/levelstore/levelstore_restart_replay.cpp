@@ -1,5 +1,6 @@
 // Offline restart evidence; RAWL2 is opened read-only by the roller.
 #include "roller/Roller.hpp"
+#include "roller/CheckpointBytes.hpp"
 #include "levelstore/LevelLog.hpp"
 #include <nlohmann/json.hpp>
 #include <chrono>
@@ -96,7 +97,26 @@ int main(int argc,char** argv) {
             if (ready && point==p) ::kill(::getpid(),SIGKILL);
 #endif
         };
+        recording::BookRecorder* recorder=nullptr;
+        levelstore::LevelRecorder* consumer=nullptr;
+        std::vector<uint8_t> finalState;
+        o.onRecorder=[&](auto* p,auto*,int64_t) { recorder=p; };
+        o.onLevelRecorder=[&](auto* p) {
+            if (!p && consumer && recorder) {
+                try {
+                    const auto bytes=recorder->exportState();
+                    finalState=consumer->exportState(recorder->checkpointClock(o.product),bytes);
+                } catch (...) { finalState.clear(); }
+            }
+            consumer=p;
+        };
         report["roll"]=roller::roll(o);
+        if (!o.levelLogRoot.empty()) {
+            std::ifstream in(o.outputRoot/o.product/"roller.json"); json cp; in>>cp;
+            const auto saved=roller::unpackCheckpointBytes(cp.at("days").at(std::to_string(o.fromMs)).at("level").at("state").get<std::string>());
+            if (finalState.empty() || saved!=finalState) throw std::runtime_error("live final C state differs from checkpoint");
+            report["finalLiveStateMatchesCheckpoint"]=true;
+        }
         for (auto& [name,v] : costs) {
             std::sort(v.begin(),v.end());
             if (!v.empty()) report["timingsMs"][name]={{"count",v.size()},{"p50",v[size_t(.5*(v.size()-1))]},

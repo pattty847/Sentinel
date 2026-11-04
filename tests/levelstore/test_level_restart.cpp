@@ -32,6 +32,34 @@ std::map<std::string,std::string> tree(const fs::path& p, const char* extension)
             result[fs::relative(f.path(),p).string()]=contents(f.path());
     return result;
 }
+json checkedRoll(RollOptions o) {
+    recording::BookRecorder* recorder=nullptr;
+    LevelRecorder* level=nullptr;
+    std::vector<uint8_t> finalState;
+    const auto recorderHook=o.onRecorder;
+    const auto levelHook=o.onLevelRecorder;
+    o.onRecorder=[&](auto* p,auto* feed,int64_t end) {
+        recorder=p; if (recorderHook) recorderHook(p,feed,end);
+    };
+    o.onLevelRecorder=[&](auto* p) {
+        if (!p && level && recorder) {
+            try {
+                const auto bytes=recorder->exportState();
+                finalState=level->exportState(recorder->checkpointClock(o.product),bytes);
+            } catch (...) { finalState.clear(); }
+        }
+        level=p; if (levelHook) levelHook(p);
+    };
+    auto result=sentinel::roller::roll(o);
+    if (!o.levelLogRoot.empty()) {
+        if (finalState.empty()) throw std::runtime_error("successful roll has no live final C state");
+        const auto cp=json::parse(contents(o.outputRoot/o.product/"roller.json"));
+        const auto day=std::to_string((o.toMs-1)/86'400'000*86'400'000);
+        const auto saved=unpackCheckpointBytes(cp.at("days").at(day).at("level").at("state").get<std::string>());
+        if (saved!=finalState) throw std::runtime_error("live final C state differs from persisted checkpoint");
+    }
+    return result;
+}
 RollOptions options(const fs::path& raw, const fs::path& root) {
     RollOptions o{raw,root/"hmc","BTC-USD",Epoch,Epoch+90*Minute};
     o.levelLogRoot=root/"log"; return o;
@@ -71,36 +99,36 @@ struct FaultFiles : LevelLogFiles {
 TEST(LevelRestart, GrowingJournalMatchesOneRoll) {
     TempDir t; RestartJournal journal(t.path/"raw");
     auto stepped=options(t.path/"raw",t.path/"stepped");
-    for (int m : {20,40,60,90}) { journal.grow(m); ASSERT_NO_THROW(roll(stepped)); }
-    ASSERT_NO_THROW(roll(options(t.path/"raw",t.path/"one")));
+    for (int m : {20,40,60,90}) { journal.grow(m); ASSERT_NO_THROW(checkedRoll(stepped)); }
+    ASSERT_NO_THROW(checkedRoll(options(t.path/"raw",t.path/"one")));
     equal(t.path/"one",t.path/"stepped");
     auto baseline=options(t.path/"raw",t.path/"baseline"); baseline.levelLogRoot.clear();
-    ASSERT_NO_THROW(roll(baseline));
+    ASSERT_NO_THROW(checkedRoll(baseline));
     EXPECT_EQ(tree(baseline.outputRoot,".hmc2"),tree(t.path/"one/hmc",".hmc2"));
 }
 TEST(LevelRestart, RetryAfterFailedCUsesProcessRestartPath) {
     TempDir t; RestartJournal journal(t.path/"raw"); journal.grow(90);
-    ASSERT_NO_THROW(roll(options(t.path/"raw",t.path/"one")));
+    ASSERT_NO_THROW(checkedRoll(options(t.path/"raw",t.path/"one")));
     auto o=options(t.path/"raw",t.path/"retry");
     auto fault=std::make_shared<FaultFiles>(); o.levelLogFiles=fault;
     o.onApplied=[&](const JournalRecord& r) { if (r.record.time.systemNs/1'000'000>=Epoch+35*Minute) fault->armed=true; };
-    EXPECT_THROW(roll(o),std::exception);
+    EXPECT_THROW(checkedRoll(o),std::exception);
     o.onApplied={}; o.levelLogFiles={};
-    ASSERT_NO_THROW(roll(o)); equal(t.path/"one",t.path/"retry");
+    ASSERT_NO_THROW(checkedRoll(o)); equal(t.path/"one",t.path/"retry");
 }
 TEST(LevelRestart, HmcOnlyResumeRefusesBeforeOutput) {
     TempDir t; RestartJournal journal(t.path/"raw"); journal.grow(90);
-    auto o=options(t.path/"raw",t.path/"attempt"); o.levelLogRoot.clear(); roll(o);
+    auto o=options(t.path/"raw",t.path/"attempt"); o.levelLogRoot.clear(); checkedRoll(o);
     o.levelLogRoot=t.path/"log";
-    EXPECT_THROW(roll(o),std::exception); EXPECT_FALSE(fs::exists(o.levelLogRoot));
+    EXPECT_THROW(sentinel::roller::roll(o),std::exception); EXPECT_FALSE(fs::exists(o.levelLogRoot));
     fs::remove(o.outputRoot/"BTC-USD/roller.json");
     // Keep anchors but avoid the independent HMC2 provenance check.
     o.anchorRoot=o.outputRoot; o.outputRoot=t.path/"fresh";
-    EXPECT_THROW(roll(o),std::exception); EXPECT_FALSE(fs::exists(o.levelLogRoot));
+    EXPECT_THROW(sentinel::roller::roll(o),std::exception); EXPECT_FALSE(fs::exists(o.levelLogRoot));
 }
 TEST(LevelRestart, PairedCheckpointMismatchRefusesBeforeCut) {
     TempDir t; RestartJournal journal(t.path/"raw"); journal.grow(90);
-    auto o=options(t.path/"raw",t.path/"attempt"); roll(o);
+    auto o=options(t.path/"raw",t.path/"attempt"); checkedRoll(o);
     const auto path=o.outputRoot/"BTC-USD/roller.json";
     const auto original=contents(path); const auto before=tree(o.levelLogRoot,".lcl");
     for (bool length : {false,true}) {
@@ -113,7 +141,7 @@ TEST(LevelRestart, PairedCheckpointMismatchRefusesBeforeCut) {
         for (int i=0;i<4;++i) payload.push_back(uint8_t(crc>>(8*i)));
         bytes=packCheckpointBytes(payload);
         std::ofstream(path)<<cp.dump();
-        try { roll(o); FAIL()<<"accepted mismatched recorder pair"; }
+        try { checkedRoll(o); FAIL()<<"accepted mismatched recorder pair"; }
         catch (const std::exception& e) { EXPECT_NE(std::string(e.what()).find("not paired"),std::string::npos)<<e.what(); }
         EXPECT_EQ(tree(o.levelLogRoot,".lcl"),before);
     }
@@ -121,7 +149,7 @@ TEST(LevelRestart, PairedCheckpointMismatchRefusesBeforeCut) {
 #ifndef _WIN32
 TEST(LevelRestart, KillAndRestartMatchesAllBytes) {
     TempDir t; RestartJournal journal(t.path/"raw"); journal.grow(90);
-    ASSERT_NO_THROW(roll(options(t.path/"raw",t.path/"one")));
+    ASSERT_NO_THROW(checkedRoll(options(t.path/"raw",t.path/"one")));
     for (const std::string point : {"initial-append","append","checkpoint-synced","checkpoint-mid-write","anchor-mid-write","cut"}) {
         SCOPED_TRACE(point); const auto root=t.path/point;
         const auto child=::fork(); ASSERT_GE(child,0);
@@ -134,7 +162,7 @@ TEST(LevelRestart, KillAndRestartMatchesAllBytes) {
                     if (ready && (point=="initial-append" || point=="append" || point=="cut")) f->armed=true;
                 };
                 o.persistencePointForTest=[&](const char* p) { if (ready && point==p) ::kill(::getpid(),SIGKILL); };
-                roll(o); ::_exit(3);
+                checkedRoll(o); ::_exit(3);
             } catch (const std::exception& e) { std::fprintf(stderr,"restart child: %s\n",e.what()); ::_exit(4); }
         }
         int status=0; ASSERT_EQ(::waitpid(child,&status,0),child);
@@ -143,12 +171,12 @@ TEST(LevelRestart, KillAndRestartMatchesAllBytes) {
             const auto cutting=::fork(); ASSERT_GE(cutting,0);
             if (!cutting) {
                 try { auto o=options(t.path/"raw",root); auto f=std::make_shared<FaultFiles>();
-                    f->killCut=true; o.levelLogFiles=f; roll(o); ::_exit(3); } catch (const std::exception& e) { std::fprintf(stderr,"restart child: %s\n",e.what()); ::_exit(4); }
+                    f->killCut=true; o.levelLogFiles=f; checkedRoll(o); ::_exit(3); } catch (const std::exception& e) { std::fprintf(stderr,"restart child: %s\n",e.what()); ::_exit(4); }
             }
             ASSERT_EQ(::waitpid(cutting,&status,0),cutting);
             ASSERT_TRUE(WIFSIGNALED(status)); ASSERT_EQ(WTERMSIG(status),SIGKILL);
         }
-        ASSERT_NO_THROW(roll(options(t.path/"raw",root))); equal(t.path/"one",root);
+        ASSERT_NO_THROW(checkedRoll(options(t.path/"raw",root))); equal(t.path/"one",root);
     }
 }
 #endif
@@ -156,16 +184,16 @@ TEST(LevelRestart, KillAndRestartMatchesAllBytes) {
 TEST(LevelRestart, GrowingRangeAndBeforeFirstQuarterMatchOneRoll) {
     TempDir t; RestartJournal journal(t.path/"raw"); journal.grow(90);
     auto o=options(t.path/"raw",t.path/"stepped"); o.allowGrowingEnd=true;
-    for (int m : {15,30,60,90}) { o.toMs=Epoch+m*Minute; ASSERT_NO_THROW(roll(o)); }
-    auto one=options(t.path/"raw",t.path/"one"); one.allowGrowingEnd=true; roll(one);
+    for (int m : {15,30,60,90}) { o.toMs=Epoch+m*Minute; ASSERT_NO_THROW(checkedRoll(o)); }
+    auto one=options(t.path/"raw",t.path/"one"); one.allowGrowingEnd=true; checkedRoll(one);
     equal(t.path/"one",t.path/"stepped");
     auto shortRoll=options(t.path/"raw",t.path/"short"); shortRoll.fromMs=Epoch+7*Minute; shortRoll.toMs=Epoch+9*Minute;
-    roll(shortRoll); const auto before=tree(shortRoll.levelLogRoot,".lcl");
-    ASSERT_NO_THROW(roll(shortRoll)); EXPECT_EQ(tree(shortRoll.levelLogRoot,".lcl"),before);
+    checkedRoll(shortRoll); const auto before=tree(shortRoll.levelLogRoot,".lcl");
+    ASSERT_NO_THROW(checkedRoll(shortRoll)); EXPECT_EQ(tree(shortRoll.levelLogRoot,".lcl"),before);
 }
 TEST(LevelRestart, PairedAnchorMismatchRefusesBeforeCut) {
     TempDir t; RestartJournal journal(t.path/"raw"); journal.grow(90);
-    auto o=options(t.path/"raw",t.path/"attempt"); roll(o);
+    auto o=options(t.path/"raw",t.path/"attempt"); checkedRoll(o);
     const auto candidates=AnchorStore::candidates(o.outputRoot,"BTC-USD",Epoch);
     ASSERT_FALSE(candidates.empty());
     auto a=AnchorStore::load(candidates.front());
@@ -175,12 +203,12 @@ TEST(LevelRestart, PairedAnchorMismatchRefusesBeforeCut) {
     for (int i=0;i<4;++i) a.recorder.bytes.push_back(uint8_t(crc>>(8*i)));
     AnchorStore::write(o.outputRoot,a);
     const auto before=tree(o.levelLogRoot,".lcl");
-    EXPECT_THROW(roll(o),std::exception); EXPECT_EQ(tree(o.levelLogRoot,".lcl"),before);
+    EXPECT_THROW(checkedRoll(o),std::exception); EXPECT_EQ(tree(o.levelLogRoot,".lcl"),before);
 }
 
 TEST(LevelRestart, LegacyAnchorEnvelopeRemainsReadableWithoutC) {
     TempDir t; RestartJournal journal(t.path/"raw"); journal.grow(90);
-    auto o=options(t.path/"raw",t.path/"old"); o.levelLogRoot.clear(); roll(o);
+    auto o=options(t.path/"raw",t.path/"old"); o.levelLogRoot.clear(); checkedRoll(o);
     const auto path=AnchorStore::candidates(o.outputRoot,"BTC-USD",Epoch).front();
     auto encoded=AnchorStore::encode(AnchorStore::load(path));
     const auto word=[&](size_t at) { uint32_t n=0; for (int i=0;i<4;++i) n|=uint32_t(encoded[at+i])<<(8*i); return n; };
@@ -197,19 +225,28 @@ TEST(LevelRestart, LegacyAnchorEnvelopeRemainsReadableWithoutC) {
     put(sentinel::crc32(encoded.data(),encoded.size()));
     EXPECT_TRUE(AnchorStore::decode(encoded).level.is_null());
     std::ofstream out(path,std::ios::binary); out.write(reinterpret_cast<const char*>(encoded.data()),encoded.size()); out.close();
-    ASSERT_NO_THROW(roll(o));
+    ASSERT_NO_THROW(checkedRoll(o));
 }
 
 TEST(LevelRestart, EmptyAndImageFencesDiscardUnverifiedSuffixBeforeOpen) {
     for (bool warmup : {false,true}) {
         SCOPED_TRACE(warmup); TempDir t; RestartJournal journal(t.path/"raw",warmup); journal.grow(90);
-        roll(options(t.path/"raw",t.path/"one"));
+        checkedRoll(options(t.path/"raw",t.path/"one"));
         auto o=options(t.path/"raw",t.path/"restart");
         o.afterAnchorForTest=[](int64_t boundary) { if (boundary==Epoch) throw std::runtime_error("stop at first anchor"); };
-        ASSERT_THROW(roll(o),std::exception);
+        ASSERT_THROW(checkedRoll(o),std::exception);
         const auto file=LevelLogReader::hourPath(o.levelLogRoot,"BTC-USD",Epoch);
         fs::create_directories(file.parent_path());
         std::ofstream broken(file,std::ios::binary|std::ios::app); broken<<std::string(256,'\0'); broken.close();
-        o.afterAnchorForTest={}; ASSERT_NO_THROW(roll(o)); equal(t.path/"one",t.path/"restart");
+        o.afterAnchorForTest={}; ASSERT_NO_THROW(checkedRoll(o)); equal(t.path/"one",t.path/"restart");
     }
+}
+
+TEST(LevelRestart, CompletedCheckpointDoesNotConsumePastItsPosition) {
+    TempDir t; RestartJournal journal(t.path/"raw"); journal.grow(100);
+    auto o=options(t.path/"raw",t.path/"attempt"); o.allowGrowingEnd=true;
+    ASSERT_NO_THROW(checkedRoll(o));
+    const auto original=state(t.path/"attempt");
+    ASSERT_NO_THROW(checkedRoll(o));
+    EXPECT_EQ(state(t.path/"attempt"),original);
 }

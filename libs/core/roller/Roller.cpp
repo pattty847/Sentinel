@@ -191,6 +191,7 @@ json roll(const RollOptions& o) {
         } detach{o};
         uint64_t hash = 0, checkpointColumns = 0, importedColumns = 0;
         bool gridReady = false, recoveryComplete = false;
+        bool checkpointReplayed = !checkpoint;
         int64_t latenessMs = recording::RecorderConfig{}.latenessMs;
         int64_t savedThrough = from, lastFence = -1, lastTailFence = -1;
         json dayReport = {{"day",QDateTime::fromMSecsSinceEpoch(day,QTimeZone::UTC).toString("yyyy-MM-dd").toStdString()}};
@@ -423,6 +424,7 @@ json roll(const RollOptions& o) {
                 gridReady = true; hash = expectedHash; recorderFloor = floor;
                 referenceMid = a.referenceMid; gridSnapshot = a.gridSnapshot; gridMetadata = a.metadata;
                 applied = a.pos; restoreCursor = cursorPos; restoreCursorApplied = !before;
+                checkpointReplayed = !checkpoint || (!before && a.pos == *checkpoint);
                 nextBoundary = a.boundaryMs + Quarter;
                 receiveThrough = candidateReceive; restoreLocal = lastLocal;
                 if (checkpoint) savedThrough = cp["days"][key].at("committedThroughMs");
@@ -454,7 +456,7 @@ json roll(const RollOptions& o) {
             if (o.onAnchorRestore) o.onAnchorRestore(restoreCursor,book,bookUp,restoreCursorApplied,restoreLocal);
             if (o.onRecorder) o.onRecorder(recorder.get(), &feed, end);
             if (o.onLevelRecorder && level) o.onLevelRecorder(level.get());
-            if (log && checkpoint && receiveThrough >= targetBoundary) {
+            if (log && checkpointReplayed && checkpoint && receiveThrough >= targetBoundary) {
                 point("recovery-replayed"); recoveryComplete = true;
             }
             // A restore exactly at the checkpoint can reach the socket tip
@@ -563,7 +565,7 @@ json roll(const RollOptions& o) {
                     {"resumeAt",resume ? json(resume->pos) : json()},{"resumeGap",resume && resume->gapBefore}});
                 const auto exportMs = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
                 if (log) {
-                    a.level = levelFence(*level,*log,recorder->checkpointClock(o.product),a.recorder.bytes,o.levelTiming);
+                    a.level = levelFence(*level,*log,recorder->checkpointClock(o.product),a.recorder.bytes,o.levelTiming,"anchor-sync");
                     point("anchor-synced");
                 }
                 const auto written = AnchorStore::write(anchorRoot,a,[&] { point("anchor-mid-write"); });
@@ -595,9 +597,10 @@ json roll(const RollOptions& o) {
             if (level) level->throwIfFailed();
             const auto stats = recorder->stats();
             if (stats.diskErrors) throw std::runtime_error("roller recorder failed; checkpoint not advanced");
-            if (log && checkpoint && !recoveryComplete && receiveThrough >= targetBoundary) {
+            if (log && checkpointReplayed && checkpoint && !recoveryComplete && receiveThrough >= targetBoundary) {
                 point("recovery-replayed"); recoveryComplete = true;
             }
+            if (log && !checkpointReplayed) return;
             if (!o.productWriterLease && stats.columnsWritten == checkpointColumns) return;
             auto through = end;
             for (const auto* layer : {"near","deep"})
@@ -610,14 +613,19 @@ json roll(const RollOptions& o) {
             if (log) {
                 const auto recorderBytes = recorder->exportState();
                 cp["days"][key]["recorder"] = recorderBytes;
-                cp["days"][key]["level"] = levelFence(*level,*log,recorder->checkpointClock(o.product),recorderBytes,o.levelTiming);
+                cp["days"][key]["level"] = levelFence(*level,*log,recorder->checkpointClock(o.product),recorderBytes,o.levelTiming,"checkpoint-sync");
                 point("checkpoint-synced");
             }
             writeCheckpoint(cpPath,cp,[&] { point("checkpoint-mid-write"); });
             savedThrough = through; checkpointColumns = stats.columnsWritten;
             if (o.onCommitted) o.onCommitted(through);
         };
-        while ((!recorder || log || o.nextRecord || savedThrough < end) && (!o.cancelled || !o.cancelled()) &&
+        const auto needsCReplay = [&] {
+            return log && (!checkpointReplayed || !recorder ||
+                recorder->watermarks(o.product,"near").minuteThroughMs < end ||
+                recorder->watermarks(o.product,"deep").minuteThroughMs < end);
+        };
+        while ((!recorder || needsCReplay() || o.nextRecord || savedThrough < end) && (!o.cancelled || !o.cancelled()) &&
                (o.nextRecord ? o.nextRecord(*reader, input) : reader->next(input))) {
             // No synthetic EOF tick: only actual journal records prove elapsed time.
             // Warmup is read in journal order; receipt clock need not be monotonic.
@@ -629,6 +637,8 @@ json roll(const RollOptions& o) {
                 saveAnchor(day,&input); nextBoundary += Quarter;
             }
             feed.apply(input); applied = input.pos; ++records;
+            const bool reachedCheckpoint = log && checkpoint && applied == *checkpoint;
+            if (reachedCheckpoint) checkpointReplayed = true;
             receiveThrough = std::max(receiveThrough,input.record.time.systemNs / 1'000'000);
             if (o.onApplied) o.onApplied(input);
             if (input.record.kind == capture::Kind::Frame) bytes += input.record.payload.size();
@@ -649,18 +659,18 @@ json roll(const RollOptions& o) {
             // The lateness tail normally closes seconds after the range. Waiting
             // for the next minute fence adds an unnecessary minute to restart.
             const bool tailFence = second >= end / 1000 && second != lastTailFence;
-            if (minute != lastFence || tailFence) {
+            if (minute != lastFence || tailFence || reachedCheckpoint) {
                 fence(); lastFence = minute;
                 if (tailFence) lastTailFence = second;
             }
             // Receive time can lead the recorder's envelope-based integration
             // clock. Only a drained, committed watermark proves range completion.
-            if (recorder && savedThrough >= end && (!log ||
-                (recorder->watermarks(o.product,"near").minuteThroughMs >= end &&
-                 recorder->watermarks(o.product,"deep").minuteThroughMs >= end))) break;
+            if (recorder && savedThrough >= end && !needsCReplay()) break;
             // Dry runs retain their receive-time scan bound, without claiming commits.
             if (o.dryRun && input.record.time.systemNs / 1'000'000 >= end + latenessMs) break;
         }
+        if (log && !checkpointReplayed)
+            throw std::runtime_error("C checkpoint journal position was not replayed");
         fence();
         if (o.allowGrowingEnd && savedThrough >= end && end < day + Day)
             saveAnchor(end);
