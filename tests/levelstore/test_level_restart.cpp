@@ -314,8 +314,13 @@ TEST(LevelRestart, GrowingUnalignedJournalAcrossDayBoundary) {
     journal.grow(1440); checkedRoll(o);
     auto one=options(t.path/"raw",t.path/"one"); one.allowGrowingEnd=true; one.toMs=o.toMs; checkedRoll(one);
     equal(t.path/"one",t.path/"stepped");
+    const auto dayOneLog=tree(o.levelLogRoot,".lcl");
     o.fromMs=o.toMs; o.toMs+=86'400'000;
     journal.grow(1460); checkedRoll(o); journal.grow(1480); checkedRoll(o);
+    const auto bothDays=tree(o.levelLogRoot,".lcl");
+    for (const auto& [file,bytes] : dayOneLog) {
+        ASSERT_TRUE(bothDays.contains(file))<<file; EXPECT_EQ(bothDays.at(file),bytes)<<file;
+    }
     one.fromMs=o.fromMs; one.toMs=o.toMs; checkedRoll(one);
     equal(t.path/"one",t.path/"stepped");
     checkedRoll(o); equal(t.path/"one",t.path/"stepped");
