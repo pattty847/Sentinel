@@ -2,6 +2,8 @@
 #include "Grid.hpp"
 #include "JournalFeed.hpp"
 
+namespace sentinel::levelstore { class LevelOutput; class LevelRecorder; }
+
 namespace sentinel::roller {
 struct RollOptions {
     std::filesystem::path journalRoot, outputRoot;
@@ -28,6 +30,26 @@ struct RollOptions {
     std::function<void(std::shared_ptr<const recording::Hmc2Record>)> publisher;
     // History recorder decision feed (RecorderSink); must outlive roll(). Not policy.
     recording::RecorderSink* recorderSink = nullptr;
+    // Architecture C (libs/core/levelstore). When set, roll() gives each day's history
+    // recorder its own LevelRecorder as its sink (recorderSink is then not used), bound
+    // to that day's floor, ceiling and price scale, created before and destroyed after
+    // that recorder. Its output must outlive roll(). Not policy. Internal C failure
+    // aborts roll before the next checkpoint/anchor success. C has no durable paired
+    // state/output yet: existing checkpoints or requested HMC2-only anchor restores
+    // are refused. Replay into fresh output; a throwing output callback may have
+    // side effects, so retrying against its uncertain suffix is unsafe.
+    levelstore::LevelOutput* levelOutput = nullptr;
+    // The day's LevelRecorder once its recorder exists (after onRecorder), and nullptr
+    // before it is destroyed. Calling thread.
+    std::function<void(levelstore::LevelRecorder*)> onLevelRecorder;
+    // In-process checkpoint seam (tests and evidence only). Return true to export the
+    // day's recorder and LevelRecorder at this drained position, destroy both and
+    // continue with fresh ones imported from those bytes before the next record:
+    // after a quarter or midnight anchor export (its boundary), or after any processed
+    // record. onInProcessRestore reports each restore (sizes, times, import result).
+    std::function<bool(int64_t boundaryMs)> restoreAtAnchorForTest;
+    std::function<bool(const JournalRecord&)> restoreAfterRecordForTest;
+    std::function<void(const nlohmann::json&)> onInProcessRestoreForTest;
     // Live-lead seam, on the calling thread: the day's recorder and journal feed
     // once both exist, then (nullptr, nullptr, 0) before either is destroyed.
     std::function<void(recording::BookRecorder*, const JournalFeed*, int64_t dayEndMs)> onRecorder;
