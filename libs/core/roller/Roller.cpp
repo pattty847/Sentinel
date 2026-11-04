@@ -210,6 +210,19 @@ json roll(const RollOptions& o) {
         JournalBook book;
         bool bookUp = true;
         int64_t recorderFloor = from, nextBoundary = day, receiveThrough = 0;
+        const auto completeRecovery = [&] {
+            if (checkpointReplayed && checkpoint && !recoveryComplete && receiveThrough >= targetBoundary) {
+                if (log) {
+                    if (applied != *checkpoint)
+                        throw std::logic_error("C checkpoint fence requires its exact journal position");
+                    const auto restored = syncLevelFence(*level,*log,recorder->checkpointClock(o.product),o.levelTiming,"recovery-sync");
+                    const auto& saved = cp.at("days").at(key).at("level");
+                    for (const auto* field : {"binding","clock","tail"})
+                        if (restored.at(field) != saved.at(field)) throw std::runtime_error("C replay differs from checkpoint fence");
+                }
+                point("recovery-replayed"); recoveryComplete = true;
+            }
+        };
         const auto configure = [&](const Grid& grid, int64_t floor) {
             auto cfg = grid.config(o.outputRoot);
             if (o.productWriterLease) cfg.writerProduct = o.product;
@@ -460,9 +473,7 @@ json roll(const RollOptions& o) {
             if (o.onAnchorRestore) o.onAnchorRestore(restoreCursor,book,bookUp,restoreCursorApplied,restoreLocal);
             if (o.onRecorder) o.onRecorder(recorder.get(), &feed, end);
             if (o.onLevelRecorder && level) o.onLevelRecorder(level.get());
-            if (!log && checkpointReplayed && checkpoint && receiveThrough >= targetBoundary) {
-                point("recovery-replayed"); recoveryComplete = true;
-            }
+            completeRecovery();
             // A restore exactly at the checkpoint can reach the socket tip
             // without processing another record. Reaffirm that durable progress
             // so serving readiness need not wait for a future minute commit.
@@ -602,17 +613,7 @@ json roll(const RollOptions& o) {
             if (level) level->throwIfFailed();
             const auto stats = recorder->stats();
             if (stats.diskErrors) throw std::runtime_error("roller recorder failed; checkpoint not advanced");
-            if (checkpointReplayed && checkpoint && !recoveryComplete && receiveThrough >= targetBoundary) {
-                if (log) {
-                    if (applied != *checkpoint)
-                        throw std::logic_error("C checkpoint fence requires its exact journal position");
-                    const auto restored = syncLevelFence(*level,*log,recorder->checkpointClock(o.product),o.levelTiming,"recovery-sync");
-                    const auto& saved = cp.at("days").at(key).at("level");
-                    for (const auto* field : {"binding","clock","tail"})
-                        if (restored.at(field) != saved.at(field)) throw std::runtime_error("C replay differs from checkpoint fence");
-                }
-                point("recovery-replayed"); recoveryComplete = true;
-            }
+            completeRecovery();
             if (log && !checkpointReplayed) return;
             if (!o.productWriterLease && stats.columnsWritten == checkpointColumns) return;
             auto through = end;
