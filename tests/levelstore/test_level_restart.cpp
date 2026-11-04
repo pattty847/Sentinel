@@ -339,6 +339,16 @@ TEST(LevelRestart, PairDigestDistinguishesEqualLengthChecksummedPayloads) {
     EXPECT_EQ(pairDigest(a).at("crc"),sentinel::crc32(a.data(),a.size()-4));
 }
 
+TEST(LevelRestart, HmcOnlyCancellationRetainsDayProgress) {
+    TempDir t; RestartJournal journal(t.path/"raw"); journal.grow(90);
+    auto o=options(t.path/"raw",t.path/"attempt"); o.levelLogRoot.clear(); bool stop=false;
+    o.onApplied=[&](const JournalRecord& r) { stop=r.record.time.systemNs/1'000'000>=Epoch+35*Minute; };
+    o.cancelled=[&] { return stop; };
+    const auto report=checkedRoll(o);
+    ASSERT_TRUE(stop); ASSERT_EQ(report.at("days").size(),1u);
+    EXPECT_GT(report.at("days")[0].at("committedThroughMs").get<int64_t>(),Epoch);
+}
+
 int main(int argc,char** argv) {
     executable=fs::absolute(argv[0]).string();
 #ifndef _WIN32

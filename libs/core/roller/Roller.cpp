@@ -668,7 +668,7 @@ json roll(const RollOptions& o) {
             // Dry runs retain their receive-time scan bound, without claiming commits.
             if (o.dryRun && input.record.time.systemNs / 1'000'000 >= end + latenessMs) break;
         }
-        if (o.cancelled && o.cancelled()) break;
+        if (log && o.cancelled && o.cancelled()) break;
         if (log && !checkpointReplayed)
             throw std::runtime_error("C checkpoint journal position was not replayed");
         fence();
