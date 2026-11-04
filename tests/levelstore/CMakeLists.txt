@@ -12,6 +12,16 @@ target_link_libraries(test_level_roll PRIVATE sentinel_core GTest::gtest_main Qt
 add_test(NAME LevelRollTests COMMAND test_level_roll)
 set_tests_properties(LevelRollTests PROPERTIES LABELS "levelstore")
 
+# The GoogleTest JSON report gate that evidence drivers use (gtest_report.py), checked
+# by its own unit tests. -B keeps __pycache__ out of the source tree.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME GtestReportGateTests
+             COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/test_gtest_report.py
+             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    set_tests_properties(GtestReportGateTests PROPERTIES LABELS "levelstore")
+endif()
+
 # Offline evidence (real RAWL2, read-only), never part of ctest.
 if(APPLE)
     add_executable(levelstore_replay levelstore_replay.cpp)

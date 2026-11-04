@@ -128,6 +128,7 @@ class LevelRecorder final : public recording::RecorderSink {
     void touch(bool isBid, int64_t units, double size);
     void unsupported(const LevelChange &level, int64_t clock);
     void endMessage(int64_t clock, bool valid, bool observing, bool invalidated);
+    bool readerHadLevels() const noexcept; // inside a message: did the published book hold a level?
     void startDay();
     void fail(const char *what, int64_t clock) noexcept;
     void allocationSeam(const char *site);

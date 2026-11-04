@@ -238,7 +238,7 @@ void LevelRecorder::onInvalid(const std::string &symbol, int64_t clock, const st
 
 void LevelRecorder::endMessage(int64_t clock, bool valid, bool observing, bool invalidated) {
     const bool wasObserved = observed_;
-    const bool hadLevels = unobserved_ == Unobserved::None && liveLevels() > 0;
+    const bool wasTracking = unobserved_ == Unobserved::None; // while unobserved the published book is empty
     valid_ = valid;
     recorderObserving_ = valid && observing;
     ClearCause clear = ClearCause::None;
@@ -270,8 +270,11 @@ void LevelRecorder::endMessage(int64_t clock, bool valid, bool observing, bool i
     }
     if (clear != ClearCause::None) {
         // Clears are ordinary input events. Internal failure never resumes output,
-        // so there is no separate reader state or deferred clear to reconcile.
-        if (dayStarted_ && (wasObserved || hadLevels)) {
+        // so there is no separate reader state or deferred clear to reconcile. A
+        // clear is recorded only when it changes the published state: the reader was
+        // observed, or it held a level before this message (a level this same message
+        // added, as in a snapshot the recorder then rejected, was never published).
+        if (dayStarted_ && (wasObserved || (wasTracking && readerHadLevels()))) {
             allocationSeam("clear");
             open_.messages.push_back({clock, false, false, clear});
             ++stats_.messages;
@@ -343,6 +346,16 @@ void LevelRecorder::onMinute(const std::string &symbol, int64_t bucketStartMs, u
     } catch (...) {
         fail("unknown exception", end);
     }
+}
+
+// Every slot present when a message starts has size > 0 (zero sizes are erased at
+// the end of each message), so an untouched slot is a published level, and a touched
+// slot was published iff its size before this message was > 0. Clear path only.
+bool LevelRecorder::readerHadLevels() const noexcept {
+    if (liveLevels() > touched_.size()) return true;
+    for (const auto &t : touched_)
+        if (t.before > 0) return true;
+    return false;
 }
 
 void LevelRecorder::allocationSeam(const char *site) {

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <map>
 #include <random>
 
@@ -580,6 +581,117 @@ TEST(Lifecycle, SuspendedBookInvalidationPublishesAClearAcrossRestore) {
         ASSERT_EQ(swept.size(), 3u);
         // The recovering snapshot omits 98 and 102. Neither can survive in the reader.
         for (const auto &row : swept[2].rows) EXPECT_FALSE(row.bin == 9800 || row.bin == 10200);
+        EXPECT_EQ(p.c->stats().failures, 0u);
+        EXPECT_EQ(p.c->stats().restoreRefusals, 0u);
+    }
+}
+
+// A snapshot the recorder rejects after delivering its levels (one-sided, crossed)
+// invalidates again. When the published book was already empty and unobserved,
+// nothing changes for the reader, so no clear is recorded: the levels that message
+// added were never published.
+TEST(Lifecycle, ARejectedSnapshotOnAnEmptyUnobservedReaderRecordsNoClear) {
+    for (const bool restore : {false, true}) {
+        SCOPED_TRACE(restore);
+        TempDir dir;
+        Capture out;
+        Pipeline p(dir.path, out);
+        p.step(snap(1'000, book4()));
+        p.step(inv(2'000)); // the one clear the reader needs
+        if (restore) ASSERT_TRUE(p.restore().ok);
+        p.step(snap(3'000, {L(true, "99", 2)})); // one-sided: rejected after its level
+        EXPECT_FALSE(p.c->recorderValid());
+        EXPECT_EQ(p.c->liveLevels(), 0u);
+        p.step(snap(4'000, {L(true, "99", 2), L(false, "98", 1)})); // crossed: rejected after its levels
+        EXPECT_FALSE(p.c->recorderValid());
+        EXPECT_EQ(p.c->liveLevels(), 0u);
+        p.step(snap(5'000, {L(true, "99", 2), L(false, "101", 4)})); // accepted
+        p.step(tick(61'000));
+        ASSERT_EQ(out.blocks.size(), 1u);
+        EXPECT_EQ(out.blocks[0].messages,
+                  (std::vector<TimelineMessage>{{kFloor + 1'000, true, true, ClearCause::None},
+                                                {kFloor + 2'000, false, false, ClearCause::Invalid},
+                                                {kFloor + 5'000, true, true, ClearCause::None}}));
+        EXPECT_EQ(p.c->stats().clears, 1u);
+        const auto swept = sweep(out);
+        ASSERT_EQ(swept.size(), 1u);
+        for (const auto &row : swept[0].rows) EXPECT_TRUE(row.last == 0 || row.bin == 9900 || row.bin == 10100) << row.bin;
+        EXPECT_EQ(p.c->stats().failures, 0u);
+        EXPECT_EQ(p.c->stats().restoreRefusals, 0u);
+    }
+}
+
+// The recorder's own invalidation after it delivered a message's levels ("row size
+// overflow": the row sum of two sizes leaves the finite range) is ordinary input to
+// C: one Invalid clear, the partial message never published, recovery at the next
+// accepted snapshot. With a 64-bit long double (Apple arm64, MSVC) the overflow is
+// reachable from finite inputs; with an 80-bit long double it is not, the recorder
+// keeps both levels, and the same reader assertions follow the healthy path.
+TEST(Lifecycle, RecorderRowOverflowIsAnOrdinaryInvalidationAndTheReaderDropsEveryLevel) {
+    constexpr bool overflows =
+        std::numeric_limits<long double>::max_exponent == std::numeric_limits<double>::max_exponent;
+    const double huge = std::numeric_limits<double>::max();
+    for (const bool restore : {false, true}) {
+        SCOPED_TRACE(restore);
+        TempDir dir;
+        Capture out;
+        Pipeline p(dir.path, out);
+        p.step(snap(1'000, book4()));
+        p.step(tick(61'000));
+        if (restore) ASSERT_TRUE(p.restore().ok);
+        p.step(upd(65'000, {L(true, "99", huge), L(true, "99.5", huge)})); // one near row of 100 units
+        EXPECT_EQ(p.c->recorderValid(), !overflows);
+        EXPECT_EQ(p.c->liveLevels(), overflows ? 0u : 5u);
+        p.step(upd(66'000, {L(true, "98", 9)})); // dropped while invalid, applied otherwise
+        p.step(snap(70'000, {L(true, "99", 2), L(false, "101", 4)}));
+        p.step(tick(121'000));
+        ASSERT_EQ(out.blocks.size(), 2u);
+        const auto &b = out.blocks[1];
+        const auto clears = std::count_if(b.messages.begin(), b.messages.end(),
+                                          [](const TimelineMessage &m) { return m.clear == ClearCause::Invalid; });
+        EXPECT_EQ(clears, overflows ? 1 : 0);
+        if (overflows) {
+            ASSERT_GE(b.messages.size(), 2u);
+            EXPECT_EQ(b.messages[0], (TimelineMessage{kFloor + 65'000, false, false, ClearCause::Invalid}));
+            for (const auto &c : b.changes) EXPECT_NE(c.size, huge); // the rejected message was never published
+        }
+        const auto swept = sweep(out);
+        ASSERT_EQ(swept.size(), 2u);
+        for (const auto &row : swept[1].rows) EXPECT_TRUE(row.last == 0 || row.bin == 9900 || row.bin == 10100) << row.bin;
+        EXPECT_EQ(p.c->stats().failures, 0u);
+        EXPECT_EQ(p.c->stats().restoreRefusals, 0u);
+    }
+}
+
+// A message whose timestamp is outside the recorder's domain is rejected before any
+// symbol and invalidates every symbol at its current clock (RecorderSink contract).
+// For C that is one Invalid clear in the same millisecond as the previous message, a
+// zero-duration state; the reader keeps no level and C stays healthy.
+TEST(Lifecycle, ARejectedTimestampInvalidatesAtTheCurrentClockAndTheReaderDropsEveryLevel) {
+    for (const bool restore : {false, true}) {
+        SCOPED_TRACE(restore);
+        TempDir dir;
+        Capture out;
+        Pipeline p(dir.path, out);
+        p.step(snap(1'000, book4()));
+        p.step(tick(61'000));
+        p.step(upd(62'000, {L(true, "99", 5)}));
+        if (restore) ASSERT_TRUE(p.restore().ok);
+        p.step(upd(-6 * kMin, {L(true, "98", 9)})); // envelope before kHmc2MinMs: rejected
+        EXPECT_FALSE(p.c->recorderValid());
+        EXPECT_EQ(p.c->liveLevels(), 0u);
+        p.step(upd(63'000, {L(true, "98", 9)})); // dropped while invalid
+        p.step(snap(70'000, {L(true, "99", 2), L(false, "101", 4)}));
+        p.step(tick(121'000));
+        ASSERT_EQ(out.blocks.size(), 2u);
+        EXPECT_EQ(out.blocks[1].messages,
+                  (std::vector<TimelineMessage>{{kFloor + 62'000, true, false, ClearCause::None},
+                                                {kFloor + 62'000, false, false, ClearCause::Invalid},
+                                                {kFloor + 70'000, true, true, ClearCause::None}}));
+        const auto swept = sweep(out);
+        ASSERT_EQ(swept.size(), 2u);
+        for (const auto &row : swept[1].rows) EXPECT_TRUE(row.last == 0 || row.bin == 9900 || row.bin == 10100) << row.bin;
+        EXPECT_EQ(swept[1].covered, 2'000 + 50'000);
         EXPECT_EQ(p.c->stats().failures, 0u);
         EXPECT_EQ(p.c->stats().restoreRefusals, 0u);
     }

@@ -1,7 +1,7 @@
-"""The evidence gate must reject missing, skipped, crashed or unexpectedly passing tests."""
+"""The report gate must reject missing, skipped, crashed or unexpectedly passing tests."""
 import copy
 import unittest
-from failure_contract_checks import validate_report
+from gtest_report import validate_report
 
 
 def report(failed=True):
@@ -12,7 +12,7 @@ def report(failed=True):
             'testsuites': [{'name': 'Suite', 'testsuite': [test]}]}
 
 
-class EvidenceGate(unittest.TestCase):
+class ReportGate(unittest.TestCase):
     def test_named_assertion_failure_is_required(self):
         self.assertEqual(validate_report(report(), ['Suite.Case'], ['Suite.Case'])['failed'], ['Suite.Case'])
         with self.assertRaises(RuntimeError):
