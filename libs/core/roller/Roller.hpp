@@ -2,7 +2,7 @@
 #include "Grid.hpp"
 #include "JournalFeed.hpp"
 
-namespace sentinel::levelstore { class LevelOutput; class LevelRecorder; }
+namespace sentinel::levelstore { class LevelOutput; class LevelRecorder; class LevelLogFiles; }
 
 namespace sentinel::roller {
 struct RollOptions {
@@ -33,12 +33,17 @@ struct RollOptions {
     // Architecture C (libs/core/levelstore). When set, roll() gives each day's history
     // recorder its own LevelRecorder as its sink (recorderSink is then not used), bound
     // to that day's floor, ceiling and price scale, created before and destroyed after
-    // that recorder. Its output must outlive roll(). Not policy. Internal C failure
-    // aborts roll before the next checkpoint/anchor success. C has no durable paired
-    // state/output yet: existing checkpoints or requested HMC2-only anchor restores
-    // are refused. Replay into fresh output; a throwing output callback may have
-    // side effects, so retrying against its uncertain suffix is unsafe.
+    // that recorder. Its output must outlive roll(). Internal failure aborts roll.
+    // Arbitrary outputs support fresh replay only; durable recovery uses levelLogRoot.
     levelstore::LevelOutput* levelOutput = nullptr;
+    // Opt-in durable C output, mutually exclusive with levelOutput. Each roll owns a
+    // fresh writer and restores the paired quarter anchor before replay. Calling roll
+    // again after failure is the same restart path as a new process; no automatic retry.
+    std::filesystem::path levelLogRoot;
+    std::shared_ptr<levelstore::LevelLogFiles> levelLogFiles;
+    std::function<void(const char*)> persistencePointForTest;
+    // Optional drained-fence timing observer, milliseconds on the calling thread.
+    std::function<void(const char*, double)> levelTiming;
     // The day's LevelRecorder once its recorder exists (after onRecorder), and nullptr
     // before it is destroyed. Calling thread.
     std::function<void(levelstore::LevelRecorder*)> onLevelRecorder;
@@ -76,7 +81,7 @@ struct RollOptions {
 };
 void registerAnchorMetrics(metrics::MetricsRegistry&, const std::string& product);
 // Atomically replace and fsync a checkpoint in an already durable parent.
-void writeCheckpoint(const std::filesystem::path&, const nlohmann::json&);
+void writeCheckpoint(const std::filesystem::path&, const nlohmann::json&, const std::function<void()>& midWrite = {});
 void validateOutputProduct(const std::filesystem::path& root, const std::string& product);
 nlohmann::json roll(const RollOptions& options);
 nlohmann::json diff(const std::filesystem::path& a, const std::filesystem::path& b,

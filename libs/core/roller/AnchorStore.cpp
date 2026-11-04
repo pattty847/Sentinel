@@ -67,10 +67,11 @@ std::filesystem::path AnchorStore::path(const std::filesystem::path& root, const
 std::vector<uint8_t> AnchorStore::encode(const ReplayAnchor& a) {
     validate(a);
     const auto& i = a.identity;
-    const json j = {{"product",i.product},{"day",i.dayMs},{"from",i.fromMs},{"to",i.toMs},
+    json j = {{"product",i.product},{"day",i.dayMs},{"from",i.fromMs},{"to",i.toMs},
         {"configHash",i.configHash},{"boundary",a.boundaryMs},{"pos",a.pos},
         {"gridSnapshot",a.gridSnapshot},{"referenceMid",a.referenceMid},{"metadata",a.metadata},
         {"feed",section(a.feed)},{"book",section(a.book)},{"recorder",section(a.recorder)}};
+    j["level"] = a.level;
     const auto raw = json::to_cbor(j);
     require(raw.size() <= MaxBytes, "payload too large");
     std::vector<uint8_t> compressed(ZSTD_compressBound(raw.size()));
@@ -84,7 +85,7 @@ std::vector<uint8_t> AnchorStore::encode(const ReplayAnchor& a) {
 }
 ReplayAnchor AnchorStore::decode(const std::vector<uint8_t>& bytes) {
     require(bytes.size() >= 24 && bytes.size() <= MaxBytes + 24, "file size");
-    require(std::equal(Magic.begin(), Magic.end(), bytes.begin()) && get(bytes,8) == Version, "magic/version");
+    require(std::equal(Magic.begin(), Magic.end(), bytes.begin()) && (get(bytes,8) == 1 || get(bytes,8) == Version), "magic/version");
     const auto rawSize = get(bytes,12), packedSize = get(bytes,16);
     require(rawSize && rawSize <= MaxBytes && packedSize == bytes.size()-24, "payload length");
     require(get(bytes,bytes.size()-4) == sentinel::crc32(bytes.data(),bytes.size()-4), "CRC mismatch");
@@ -98,10 +99,11 @@ ReplayAnchor AnchorStore::decode(const std::vector<uint8_t>& bytes) {
     a.gridSnapshot = j.at("gridSnapshot").get<JournalPos>();
     a.referenceMid = j.at("referenceMid"); a.metadata = j.at("metadata");
     a.feed = section(j.at("feed")); a.book = section(j.at("book")); a.recorder = section(j.at("recorder"));
+    if (get(bytes,8) == Version) a.level = j.at("level");
     validate(a);
     return a;
 }
-AnchorStore::WriteStats AnchorStore::write(const std::filesystem::path& root, const ReplayAnchor& a) {
+AnchorStore::WriteStats AnchorStore::write(const std::filesystem::path& root, const ReplayAnchor& a, const std::function<void()>& midWrite) {
     const auto started = std::chrono::steady_clock::now();
     const auto bytes = encode(a); // validate before even creating directories
     const auto encoded = std::chrono::steady_clock::now();
@@ -116,8 +118,12 @@ AnchorStore::WriteStats AnchorStore::write(const std::filesystem::path& root, co
                 "directory fsync failed");
     QSaveFile out(QString::fromStdString(file.string()));
     out.setDirectWriteFallback(false);
-    require(out.open(QIODevice::WriteOnly) &&
-        out.write(reinterpret_cast<const char*>(bytes.data()),qint64(bytes.size())) == qint64(bytes.size()) && out.flush(),
+    require(out.open(QIODevice::WriteOnly), "temporary open failed");
+    const auto half = bytes.size()/2;
+    require(out.write(reinterpret_cast<const char*>(bytes.data()),qint64(half)) == qint64(half) && out.flush(),
+        "temporary write failed");
+    if (midWrite) midWrite();
+    require(out.write(reinterpret_cast<const char*>(bytes.data()+half),qint64(bytes.size()-half)) == qint64(bytes.size()-half) && out.flush(),
         "temporary write failed");
 #ifndef _WIN32
     require(persistence::syncFileDescriptor(out.handle(),error), "temporary fsync failed");

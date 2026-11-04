@@ -22,10 +22,11 @@ struct ReplayAnchor {
     double referenceMid = 0;
     nlohmann::json metadata; // original snapshot's product metadata
     AnchorSection feed, book, recorder;
+    nlohmann::json level = nullptr; // paired C state and durable output fence
 };
 class AnchorStore {
 public:
-    static constexpr uint32_t Version = 1;
+    static constexpr uint32_t Version = 2;
     static constexpr size_t MaxBytes = 128 * 1024 * 1024;
     static std::filesystem::path path(const std::filesystem::path& root, const ReplayAnchor&);
     static std::vector<uint8_t> encode(const ReplayAnchor&);
@@ -39,7 +40,7 @@ public:
     // Journal-time retention: midnight survives forever. Never traverses other stores.
     static std::error_code prune(const std::filesystem::path& root, const std::string& product, int64_t nowMs);
     struct WriteStats { uint64_t encodedBytes; double encodeMs, writeMs; };
-    static WriteStats write(const std::filesystem::path& root, const ReplayAnchor&);
+    static WriteStats write(const std::filesystem::path& root, const ReplayAnchor&, const std::function<void()>& midWrite = {});
     // Missing/corrupt/incompatible cache is a miss, with an explicit reason.
     // Cross-run ceiling ordering belongs to the journal inventory: conservatively
     // reject a different run here when a ceiling is supplied.
