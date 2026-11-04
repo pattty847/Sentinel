@@ -40,7 +40,8 @@ public:
     // Journal-time retention: midnight survives forever. Never traverses other stores.
     static std::error_code prune(const std::filesystem::path& root, const std::string& product, int64_t nowMs);
     struct WriteStats { uint64_t encodedBytes; double encodeMs, writeMs; };
-    static WriteStats write(const std::filesystem::path& root, const ReplayAnchor&, const std::function<void()>& midWrite = {});
+    static WriteStats write(const std::filesystem::path& root, const ReplayAnchor&, const std::function<void()>& midWrite = {},
+        const std::function<void(const char*)>& persistencePoint = {});
     // Missing/corrupt/incompatible cache is a miss, with an explicit reason.
     // Cross-run ceiling ordering belongs to the journal inventory: conservatively
     // reject a different run here when a ceiling is supplied.

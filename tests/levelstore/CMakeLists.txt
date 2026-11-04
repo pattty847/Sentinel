@@ -50,3 +50,9 @@ set_tests_properties(LevelRestartTests PROPERTIES LABELS "levelstore" TIMEOUT 60
 add_executable(levelstore_restart_replay levelstore_restart_replay.cpp)
 target_include_directories(levelstore_restart_replay PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(levelstore_restart_replay PRIVATE sentinel_core)
+
+add_executable(test_level_restart_sweep test_level_restart_sweep.cpp RestartJournal.cpp)
+target_include_directories(test_level_restart_sweep PRIVATE ${CMAKE_SOURCE_DIR}/libs/core ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(test_level_restart_sweep PRIVATE sentinel_core GTest::gtest_main)
+add_test(NAME LevelRestartSweepTests COMMAND test_level_restart_sweep)
+set_tests_properties(LevelRestartSweepTests PROPERTIES LABELS "levelstore" TIMEOUT 600)

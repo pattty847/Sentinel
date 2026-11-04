@@ -8,6 +8,7 @@ struct RestartJournal {
     ~RestartJournal();
     void grow(int minutes);
     void restart(int second);
+    void at(int second); // One durable update at an explicit receipt time.
     struct Impl;
     std::unique_ptr<Impl> impl;
 };

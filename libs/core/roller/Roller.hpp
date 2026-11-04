@@ -85,7 +85,8 @@ struct RollOptions {
 };
 void registerAnchorMetrics(metrics::MetricsRegistry&, const std::string& product);
 // Atomically replace and fsync a checkpoint in an already durable parent.
-void writeCheckpoint(const std::filesystem::path&, const nlohmann::json&, const std::function<void()>& midWrite = {});
+void writeCheckpoint(const std::filesystem::path&, const nlohmann::json&, const std::function<void()>& midWrite = {},
+        const std::function<void(const char*)>& persistencePoint = {});
 void validateOutputProduct(const std::filesystem::path& root, const std::string& product);
 nlohmann::json roll(const RollOptions& options);
 nlohmann::json diff(const std::filesystem::path& a, const std::filesystem::path& b,

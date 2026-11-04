@@ -38,3 +38,9 @@ void RestartJournal::restart(int second) {
     impl.reset();
     impl=std::make_unique<Impl>(root,second);
 }
+
+void RestartJournal::at(int second) {
+    impl->second=second;
+    impl->append(capture::Kind::Frame,impl->frame("update",2+((second/5)%7+7)%7));
+    impl->writer.flush();
+}

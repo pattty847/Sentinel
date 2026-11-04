@@ -103,7 +103,9 @@ ReplayAnchor AnchorStore::decode(const std::vector<uint8_t>& bytes) {
     validate(a);
     return a;
 }
-AnchorStore::WriteStats AnchorStore::write(const std::filesystem::path& root, const ReplayAnchor& a, const std::function<void()>& midWrite) {
+AnchorStore::WriteStats AnchorStore::write(const std::filesystem::path& root, const ReplayAnchor& a, const std::function<void()>& midWrite,
+                                                const std::function<void(const char*)>& persistencePoint) {
+    const auto point = [&](const char* name) { if (persistencePoint) persistencePoint(name); };
     const auto started = std::chrono::steady_clock::now();
     const auto bytes = encode(a); // validate before even creating directories
     const auto encoded = std::chrono::steady_clock::now();
@@ -113,9 +115,12 @@ AnchorStore::WriteStats AnchorStore::write(const std::filesystem::path& root, co
     while (!std::filesystem::exists(parent)) { missing.push_back(parent); parent = parent.parent_path(); }
     std::filesystem::create_directories(file.parent_path());
     int error = 0;
-    for (auto it = missing.rbegin(); it != missing.rend(); ++it)
-        require(persistence::syncDirectory(*it,error) && persistence::syncDirectory(it->parent_path(),error),
-                "directory fsync failed");
+    for (auto it = missing.rbegin(); it != missing.rend(); ++it) {
+        require(persistence::syncDirectory(*it,error), "directory fsync failed");
+        point("anchor-create-directory-synced");
+        require(persistence::syncDirectory(it->parent_path(),error), "directory fsync failed");
+        point("anchor-parent-directory-synced");
+    }
     QSaveFile out(QString::fromStdString(file.string()));
     out.setDirectWriteFallback(false);
     require(out.open(QIODevice::WriteOnly), "temporary open failed");
@@ -125,14 +130,19 @@ AnchorStore::WriteStats AnchorStore::write(const std::filesystem::path& root, co
     if (midWrite) midWrite();
     require(out.write(reinterpret_cast<const char*>(bytes.data()+half),qint64(bytes.size()-half)) == qint64(bytes.size()-half) && out.flush(),
         "temporary write failed");
+    point("anchor-temp-written");
 #ifndef _WIN32
     require(persistence::syncFileDescriptor(out.handle(),error), "temporary fsync failed");
 #else
     require(::_commit(out.handle()) == 0, "temporary fsync failed");
 #endif
+    point("anchor-temp-synced");
     require(out.commit(), "rename failed");
-    require(persistence::syncFilePath(file,error) && persistence::syncDirectory(file.parent_path(),error),
-            "durable rename failed");
+    point("anchor-renamed");
+    require(persistence::syncFilePath(file,error), "durable rename failed");
+    point("anchor-file-synced");
+    require(persistence::syncDirectory(file.parent_path(),error), "durable rename failed");
+    point("anchor-directory-synced");
     const auto done = std::chrono::steady_clock::now();
     return {bytes.size(),std::chrono::duration<double,std::milli>(encoded-started).count(),
         std::chrono::duration<double,std::milli>(done-encoded).count()};

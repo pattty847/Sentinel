@@ -38,7 +38,9 @@ void registerAnchorMetrics(metrics::MetricsRegistry& registry, const std::string
     registry.counterFn(name,"Failed anchor writes, degraded skips, reads or pruning attempts.",{{"product",product}},
         [counter] { return static_cast<double>(counter->value()); });
 }
-void writeCheckpoint(const fs::path& path, const json& j, const std::function<void()>& midWrite) {
+void writeCheckpoint(const fs::path& path, const json& j, const std::function<void()>& midWrite,
+                     const std::function<void(const char*)>& persistencePoint) {
+    const auto point = [&](const char* name) { if (persistencePoint) persistencePoint(name); };
     // Hmc2Store has already durably created this product's parent and files.
     QSaveFile out(QString::fromStdString(path.string()));
     out.setDirectWriteFallback(false);
@@ -49,14 +51,19 @@ void writeCheckpoint(const fs::path& path, const json& j, const std::function<vo
     if (midWrite) midWrite();
     if (out.write(bytes.data()+half, qint64(bytes.size()-half)) != qint64(bytes.size()-half) || !out.flush())
         throw std::runtime_error("checkpoint temporary write failed");
+    point("checkpoint-temp-written");
 #ifndef _WIN32
     int error = 0;
     if (!persistence::syncFileDescriptor(out.handle(), error)) throw std::runtime_error("checkpoint fsync failed");
 #endif
+    point("checkpoint-temp-synced");
     if (!out.commit()) throw std::runtime_error("checkpoint rename failed");
+    point("checkpoint-renamed");
     int error2 = 0;
-    if (!persistence::syncFilePath(path, error2) || !persistence::syncDirectory(path.parent_path(), error2))
-        throw std::runtime_error("checkpoint durable rename failed");
+    if (!persistence::syncFilePath(path, error2)) throw std::runtime_error("checkpoint durable rename failed");
+    point("checkpoint-file-synced");
+    if (!persistence::syncDirectory(path.parent_path(), error2)) throw std::runtime_error("checkpoint durable rename failed");
+    point("checkpoint-directory-synced");
 }
 namespace {
 uint64_t configHash(const recording::RecorderConfig& c) {
@@ -565,7 +572,7 @@ json roll(const RollOptions& o) {
                     a.level = levelFence(*level,*log,recorder->checkpointClock(o.product),a.recorder.bytes,o.levelTiming,"anchor-sync");
                     point("anchor-synced");
                 }
-                const auto written = AnchorStore::write(anchorRoot,a,[&] { point("anchor-mid-write"); });
+                const auto written = AnchorStore::write(anchorRoot,a,[&] { point("anchor-mid-write"); },point);
                 if (log) pairedAnchor = anchorPair(a);
                 dayReport["anchorBytes"] = written.encodedBytes;
                 sLog_Data("Roller anchor written product=" << o.product << " boundaryMs=" << boundary
@@ -623,7 +630,7 @@ json roll(const RollOptions& o) {
                 cp["days"][key]["level"] = std::move(c);
                 point("checkpoint-synced");
             }
-            writeCheckpoint(cpPath,cp,[&] { point("checkpoint-mid-write"); });
+            writeCheckpoint(cpPath,cp,[&] { point("checkpoint-mid-write"); },point);
             if (o.levelTiming) o.levelTiming("checkpoint-total",
                 std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-checkpointStart).count());
             point("checkpoint-written");
