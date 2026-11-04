@@ -31,3 +31,13 @@ if(APPLE)
     target_include_directories(levelstore_bench PRIVATE ${CMAKE_SOURCE_DIR}/libs/core ${CMAKE_SOURCE_DIR}/tests)
     target_link_libraries(levelstore_bench PRIVATE sentinel_core Qt6::Core)
 endif()
+
+add_executable(test_level_log test_level_log.cpp)
+target_include_directories(test_level_log PRIVATE ${CMAKE_SOURCE_DIR}/libs/core ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(test_level_log PRIVATE sentinel_core GTest::gtest_main)
+add_test(NAME LevelLogTests COMMAND test_level_log)
+set_tests_properties(LevelLogTests PROPERTIES LABELS "levelstore" TIMEOUT 180)
+
+add_executable(levelstore_log_replay levelstore_log_replay.cpp)
+target_include_directories(levelstore_log_replay PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(levelstore_log_replay PRIVATE sentinel_core Qt6::Core)
