@@ -464,13 +464,13 @@ json roll(const RollOptions& o) {
                 // Before the first quarter fence, replay from the original floor.
                 // Preserve only an explicitly fenced preceding day's output.
                 if (!logPrepared) {
-                    json previous = nullptr;
+                    const json* previous = nullptr;
                     int64_t previousDay = -1;
                     for (const auto& [date,saved] : cp.at("days").items()) {
                         const auto d = std::stoll(date);
-                        if (d < day && d > previousDay) { previous = saved.at("level"); previousDay = d; }
+                        if (d < day && d > previousDay) { previous = &saved; previousDay = d; }
                     }
-                    cutLevelFence(*log,previous);
+                    cutLevelFence(*log,previous ? previous->at("level") : json());
                 }
                 logPrepared = true;
             }
