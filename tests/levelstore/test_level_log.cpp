@@ -142,7 +142,6 @@ TEST(LevelLog, RoundTripOpenHourAndLargeBook) {
 }
 
 TEST(LevelLog, EveryAppendAndSyncFailurePoisonsAndPreservesSyncedPrefix) {
-    const std::vector<LevelLogRecord> expected{{binding(), image()}, {binding(), block(0)}, {binding(), block(hour)}};
     std::vector<std::string> points;
     {
         TempDir t; seed(t.path);
@@ -151,16 +150,19 @@ TEST(LevelLog, EveryAppendAndSyncFailurePoisonsAndPreservesSyncedPrefix) {
         w.onBlock(binding(), block(hour)); w.sync(); points = io->calls;
         EXPECT_EQ(points, (std::vector<std::string>{"open", "write", "write", "write", "close", "file-sync", "dir-sync"}));
     }
-    for (size_t at = 0; at < points.size(); ++at) {
-        for (bool shortWrite : {false, true}) {
-            if (shortWrite && points[at] != "write") continue;
-            SCOPED_TRACE("point=" + std::to_string(at) + " op=" + points[at] + " short=" + std::to_string(shortWrite));
-            TempDir t; seed(t.path);
-            auto io = std::make_shared<Inject>(); LevelLog w(t.path, "BTC-USD", io);
-            w.open(); io->calls.clear(); io->failAt = at; io->shortWrite = shortWrite;
-            EXPECT_THROW({ w.onBlock(binding(), block(hour)); w.sync(); }, std::runtime_error);
-            unchangedPoison(w, *io);
-            assertPrefix(t.path, expected, 2);
+    for (const int64_t nextMinute : {int64_t(60'000), hour}) {
+        const std::vector<LevelLogRecord> expected{{binding(), image()}, {binding(), block(0)}, {binding(), block(nextMinute)}};
+        for (size_t at = 0; at < points.size(); ++at) {
+            for (bool shortWrite : {false, true}) {
+                if (shortWrite && points[at] != "write") continue;
+                SCOPED_TRACE("point=" + std::to_string(at) + " op=" + points[at] + " short=" + std::to_string(shortWrite) + " minute=" + std::to_string(nextMinute));
+                TempDir t; seed(t.path);
+                auto io = std::make_shared<Inject>(); LevelLog w(t.path, "BTC-USD", io);
+                w.open(); io->calls.clear(); io->failAt = at; io->shortWrite = shortWrite;
+                EXPECT_THROW({ w.onBlock(binding(), block(nextMinute)); w.sync(); }, std::runtime_error);
+                unchangedPoison(w, *io);
+                assertPrefix(t.path, expected, 2);
+            }
         }
     }
     RecordProperty("operation_points", points.size());
@@ -197,9 +199,11 @@ TEST(LevelLog, CorruptionNeverTruncatesLaterData) {
     { LevelLog w(t.path, "BTC-USD"); w.onBlock(binding(), block(60'000)); w.sync(); }
     const auto p = LevelLogReader::hourPath(t.path, "BTC-USD", 0);
     const auto original = bytes(p);
+    ByteReader firstHeader(std::span<const uint8_t>(original).subspan(8, 4));
+    const auto middle = 12 + firstHeader.fixed32() + 4;
     for (int mutation : {0, 1, 2, 3}) {
         auto damaged = original;
-        if (mutation == 0) damaged[18] ^= 0x40; // first payload
+        if (mutation == 0) damaged[middle + 15] ^= 0x40; // middle frame payload, with a valid frame after it
         if (mutation == 1) { // believable oversized length concealing later valid frames
             damaged[8] = 0; damaged[9] = 0; damaged[10] = 1; damaged[11] = 0;
         }
@@ -305,6 +309,7 @@ TEST(LevelLog, SeededHardKillsAtOperationsAndMidFrame) {
     for (int attempt = 0; attempt < kills; ++attempt) {
         SCOPED_TRACE(attempt);
         TempDir t; seed(t.path);
+        const int64_t nextMinute = attempt % 2 == 0 ? 60'000 : hour;
         const bool midFrame = attempt < 16;
         const int point = midFrame ? int(rng() % 3) : (attempt - 16) % 8;
         int ready[2]; ASSERT_EQ(pipe(ready), 0);
@@ -335,7 +340,7 @@ TEST(LevelLog, SeededHardKillsAtOperationsAndMidFrame) {
             auto io = std::make_shared<KillFiles>(); io->middle = midFrame; io->target = point; io->stop = stop;
             try {
                 LevelLog w(t.path, "BTC-USD", io); w.open(); io->active = true;
-                w.onBlock(binding(), block(hour)); w.sync();
+                w.onBlock(binding(), block(nextMinute)); w.sync();
                 stop(); // after successful durability fence
             } catch (...) { _exit(3); }
             _exit(4);
@@ -348,7 +353,7 @@ TEST(LevelLog, SeededHardKillsAtOperationsAndMidFrame) {
         int status = 0; ASSERT_EQ(waitpid(pid, &status, 0), pid);
         ASSERT_TRUE(WIFSIGNALED(status)); EXPECT_EQ(WTERMSIG(status), SIGKILL);
         const size_t required = !midFrame && point >= 6 ? 3 : 2;
-        assertPrefix(t.path, {{binding(), image()}, {binding(), block(0)}, {binding(), block(hour)}}, required);
+        assertPrefix(t.path, {{binding(), image()}, {binding(), block(0)}, {binding(), block(nextMinute)}}, required);
     }
     RecordProperty("kill_points", kills);
 }
