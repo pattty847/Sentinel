@@ -71,6 +71,8 @@ std::map<std::string,std::string> tree(const fs::path& root, const std::string& 
             result[fs::relative(f.path(),root).string()] = contents(f.path());
     return result;
 }
+// Full checkpoint equality requires finishing beyond the next quarter after
+// floor fallback: inside that window the resumed checkpoint has anchor == null.
 void same(const fs::path& actual, const fs::path& expected) {
     EXPECT_EQ(tree(actual,".lcl"),tree(expected,".lcl"));
     EXPECT_EQ(tree(actual,".hmc2"),tree(expected,".hmc2"));

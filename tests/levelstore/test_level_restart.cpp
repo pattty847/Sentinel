@@ -368,6 +368,63 @@ TEST(LevelRestart, CaptureRestartBetweenAnchorAndCheckpointReplaysFromFloor) {
     EXPECT_EQ(tree(hmc.outputRoot,".hmc2"),tree(o.outputRoot,".hmc2"));
 }
 
+TEST(LevelRestart, NullAnchorCheckpointRestartsAtGrowingJournalEof) {
+    TempDir t; RestartJournal journal(t.path/"raw"); journal.grow(25);
+    journal.restart(25*60+10); journal.grow(28);
+    const auto root=t.path/"stepped";
+    auto o=options(t.path/"raw",root);
+    const auto checkpoint=o.outputRoot/"BTC-USD/roller.json";
+    const auto savedDay=[&] { return json::parse(contents(checkpoint)).at("days").at(std::to_string(Epoch)); };
+    ASSERT_NO_THROW(checkedRoll(o));
+    const auto first=savedDay();
+    ASSERT_EQ(first.at("level").at("anchor").at("boundary"),Epoch+15*Minute);
+    ASSERT_NE(first.at("pos").get<JournalPos>().run,
+              first.at("level").at("anchor").at("pos").get<JournalPos>().run);
+
+    journal.grow(29);
+    ASSERT_NO_THROW(checkedRoll(o)); // The run-A anchor is skipped; EOF is before the next quarter.
+    const auto day=savedDay();
+    ASSERT_TRUE(day.at("level").at("anchor").is_null());
+    ASSERT_EQ(day.at("receiveThroughMs"),Epoch+29*Minute+5'000);
+    const auto position=day.at("pos").get<JournalPos>();
+    const auto beforeCheckpoint=json::parse(contents(checkpoint));
+    const auto beforeLog=tree(o.levelLogRoot,".lcl");
+    const auto beforeHmc=tree(o.outputRoot,".hmc2");
+    const auto beforeState=contents(root/"final.state");
+    ASSERT_FALSE(beforeLog.empty()); ASSERT_FALSE(beforeHmc.empty()); ASSERT_FALSE(beforeState.empty());
+
+    journal.grow(29); // No new records: floor replay must validate this exact EOF checkpoint.
+    JournalPos last; unsigned restored=0, validated=0;
+    o.onApplied=[&](const JournalRecord& record) { last=record.pos; };
+    o.onAnchorRestore=[&](const auto&,const auto&,bool,bool,int64_t) { ++restored; };
+    o.persistencePointForTest=[&](const char* point) {
+        if (std::string_view(point)=="recovery-replayed") { ++validated; EXPECT_EQ(last,position); }
+    };
+    ASSERT_NO_THROW(checkedRoll(o));
+    EXPECT_EQ(restored,0u); EXPECT_EQ(validated,1u);
+    EXPECT_TRUE(savedDay().at("level").at("anchor").is_null());
+    EXPECT_EQ(tree(o.levelLogRoot,".lcl"),beforeLog);
+    EXPECT_EQ(tree(o.outputRoot,".hmc2"),beforeHmc);
+    EXPECT_EQ(contents(root/"final.state"),beforeState);
+    EXPECT_EQ(json::parse(contents(checkpoint)),beforeCheckpoint);
+    o.onApplied={}; o.onAnchorRestore={}; o.persistencePointForTest={};
+
+    for (const int minute : {31,90}) {
+        SCOPED_TRACE(minute);
+        journal.grow(minute);
+        ASSERT_NO_THROW(checkedRoll(o));
+        ASSERT_FALSE(savedDay().at("level").at("anchor").is_null());
+        if (minute==31) EXPECT_EQ(savedDay().at("level").at("anchor").at("boundary"),Epoch+30*Minute);
+        const auto fresh=t.path/("fresh"+std::to_string(minute));
+        ASSERT_NO_THROW(checkedRoll(options(t.path/"raw",fresh)));
+        equal(root,fresh);
+        // Full metadata agrees again after a quarter is republished. Inside the
+        // fallback window only the resumed run intentionally has anchor == null.
+        EXPECT_EQ(json::parse(contents(checkpoint)),json::parse(contents(fresh/"hmc/BTC-USD/roller.json")));
+        ASSERT_FALSE(HasFailure());
+    }
+}
+
 TEST(LevelRestart, SkippedCrossRunAnchorStillRequiresMatchingReadablePair) {
     TempDir t; RestartJournal journal(t.path/"raw"); journal.grow(25);
     journal.restart(25*60+10); journal.grow(28);
