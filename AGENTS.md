@@ -172,8 +172,8 @@ Always-on services (recorder `com.sentinel.recorder`, capture `com.sentinel.capt
 
 Changes here require performance caution and small diffs:
 - `DataProcessor`
-- `HeatmapTwapStreamer`
-- `HeatmapLabelRenderer`
+- `BookRecorder` (every book message on the recorder worker; `RecorderSink` callbacks such as `LevelRecorder` run inside it)
+- `HeatmapGpuLayer` and `HeatmapGpuBinner` (render thread, every frame)
 - QSG geometry updates
 
 Before editing hot paths, explicitly check for per-frame risk:
@@ -272,7 +272,7 @@ Per feature, 1 + 1:
 
 Limits on the 16 GB Mac:
 - At most two active writers across all features; one queued build/test at a time (`-j 6`); one hosted GUI session.
-- Hot files (`MainWindowGpu.cpp`, `DataProcessor.cpp`, `HeatmapTwapStreamer.cpp`, `MarketDataCoreEngine.cpp`, `UnifiedGridRenderer.cpp`) belong to one branch at a time; serialize or split tasks that need the same one.
+- Hot files (`MainWindowGpu.cpp`, `DataProcessor.cpp`, `BookRecorder.cpp`, `HeatmapGpuLayer.cpp`, `MarketDataCoreEngine.cpp`, `UnifiedGridRenderer.cpp`) belong to one branch at a time; serialize or split tasks that need the same one.
 - At most 2-3 items wait on the owner at once, sent in one digest.
 - Run `scripts/dev/budget.sh` (CodexBar) before a dispatch batch and route to the subscription with room. Tell the owner when Codex is near 0 (they hold reset credits). Exact token and agent status come from the owner's local `ma-panel` (`.claude/skills/ma-panel/`); agents build no other usage tracking.
 - Conductor: report the plan, dispatches, phase changes, review findings and landings to the panel with `workflow_update` (intent, not numbers); STATUS stays the durable record.
