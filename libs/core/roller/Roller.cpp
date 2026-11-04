@@ -610,6 +610,7 @@ json roll(const RollOptions& o) {
             cp["days"][key] = {{"pos",applied},{"committedThroughMs",through},{"configHash",hash},{"fromMs",from},{"receiveThroughMs",receiveThrough}};
             // Also expose the newest checkpoint in the plan's flat schema.
             cp["pos"] = applied; cp["committedThroughMs"] = through; cp["configHash"] = hash;
+            const auto checkpointStart = std::chrono::steady_clock::now();
             if (log) {
                 const auto recorderBytes = recorder->exportState();
                 cp["days"][key]["recorder"] = recorderBytes;
@@ -617,6 +618,9 @@ json roll(const RollOptions& o) {
                 point("checkpoint-synced");
             }
             writeCheckpoint(cpPath,cp,[&] { point("checkpoint-mid-write"); });
+            if (o.levelTiming) o.levelTiming("checkpoint-total",
+                std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-checkpointStart).count());
+            point("checkpoint-written");
             savedThrough = through; checkpointColumns = stats.columnsWritten;
             if (o.onCommitted) o.onCommitted(through);
         };

@@ -73,7 +73,18 @@ int main(int argc,char** argv) {
         int64_t appliedMinute=-1, cpuMinute=-1, cpuBefore=-1;
         files->cut=point=="cut";
         std::map<std::string,std::vector<double>> costs;
-        o.levelTiming=[&](const char* name,double ms) { costs[name].push_back(ms); };
+        json minuteSamples=json::array();
+        o.levelTiming=[&](const char* name,double ms) {
+            costs[name].push_back(ms);
+            if (std::string_view(name)=="checkpoint-total") {
+                json sample={{"minute",appliedMinute-o.fromMs/60'000},{"fenceMs",ms}};
+#ifdef __APPLE__
+                rusage usage{}; getrusage(RUSAGE_SELF,&usage); sample["peakRssBytes"]=usage.ru_maxrss;
+#endif
+                minuteSamples.push_back(std::move(sample));
+            }
+        };
+        if (point=="measure-prefix") o.cancelled=[&] { return appliedMinute>=o.fromMs/60'000+minute; };
         const auto start=Clock::now();
         o.onApplied=[&](const roller::JournalRecord& r) {
             auto ms=r.record.time.systemNs/1'000'000;
@@ -84,7 +95,7 @@ int main(int argc,char** argv) {
         };
         o.persistencePointForTest=[&](const char* p) {
 #ifdef __APPLE__
-            if (std::string_view(p)=="checkpoint-synced") {
+            if (std::string_view(p)=="checkpoint-written") {
                 const auto cpu=workerCpuNs();
                 if (cpu>=0 && cpuBefore>=0 && appliedMinute>cpuMinute)
                     costs["worker-cpu-per-journal-minute"].push_back(double(cpu-cpuBefore)/1e6/double(appliedMinute-cpuMinute));
@@ -117,6 +128,7 @@ int main(int argc,char** argv) {
             if (finalState.empty() || saved!=finalState) throw std::runtime_error("live final C state differs from checkpoint");
             report["finalLiveStateMatchesCheckpoint"]=true;
         }
+        report["minuteSamples"]=minuteSamples;
         for (auto& [name,v] : costs) {
             std::sort(v.begin(),v.end());
             if (!v.empty()) report["timingsMs"][name]={{"count",v.size()},{"p50",v[size_t(.5*(v.size()-1))]},
@@ -127,11 +139,12 @@ int main(int argc,char** argv) {
             if (e.is_regular_file() && e.path().extension()==".lcl") bytes+=e.file_size();
         report["durableBytesPerProductDay"]=bytes; report["levelAppendBytesWritten"]=files->written;
 #ifdef __APPLE__
+        rusage peak{}; getrusage(RUSAGE_SELF,&peak); report["peakRssBytes"]=peak.ru_maxrss;
         rusage_info_v4 usage{};
         if (proc_pid_rusage(getpid(),RUSAGE_INFO_V4,reinterpret_cast<rusage_info_t*>(&usage))==0)
             report["processDiskBytesWritten"]=usage.ri_diskio_byteswritten;
 #endif
-        report["pass"]=report["roll"]["days"][0]["committedThroughMs"]==o.toMs;
+        report["pass"]=point=="measure-prefix" || report["roll"]["days"][0]["committedThroughMs"]==o.toMs;
     } catch (const std::exception& e) { report["error"]=e.what(); }
     std::ofstream(argv[5])<<report.dump(2)<<'\n'; std::cout<<report.dump()<<'\n';
     return report["pass"].get<bool>()?0:1;
