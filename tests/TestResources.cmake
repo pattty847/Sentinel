@@ -91,3 +91,23 @@ foreach(_sentinel_area IN ITEMS core marketdata capture roller render agentapi
             PROPERTIES LABELS "${_sentinel_labels}")
     endforeach()
 endforeach()
+
+# Native fsync/replay loops and large directory inventories contend on the same
+# disk even when their fixtures have separate roots. Keep other tests parallel.
+set(_sentinel_disk_heavy_tests
+    CaptureVerifierScaleTests RawCaptureTests
+    LevelRestartTests LevelRestartSweepTests LevelLogTests LevelRollTests
+    RollerTests ShadowRollerTests RollerCorruptBlockTests JournalAnchorTests
+    Hmc2StoreTests)
+foreach(_sentinel_area IN ITEMS capture levelstore roller servermodel)
+    set(_sentinel_dir "${CMAKE_SOURCE_DIR}/tests/${_sentinel_area}")
+    get_property(_sentinel_tests DIRECTORY "${_sentinel_dir}" PROPERTY TESTS)
+    foreach(_sentinel_test IN LISTS _sentinel_tests)
+        if(_sentinel_test IN_LIST _sentinel_disk_heavy_tests)
+            get_property(_sentinel_locks TEST "${_sentinel_test}" DIRECTORY "${_sentinel_dir}" PROPERTY RESOURCE_LOCK)
+            list(APPEND _sentinel_locks disk_heavy)
+            set_tests_properties("${_sentinel_test}" DIRECTORY "${_sentinel_dir}"
+                PROPERTIES RESOURCE_LOCK "${_sentinel_locks}")
+        endif()
+    endforeach()
+endforeach()

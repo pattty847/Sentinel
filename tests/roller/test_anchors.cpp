@@ -80,7 +80,7 @@ TEST(AnchorStore, RejectsCorruptionVersionsIdentityAndFuturePositions) {
     AnchorStore::write(root,a); const auto path=AnchorStore::path(root,a);
     auto b=AnchorStore::encode(a); b.resize(b.size()-1); EXPECT_THROW(AnchorStore::decode(b),std::runtime_error);
     b=AnchorStore::encode(a); b[b.size()-1]^=1; EXPECT_THROW(AnchorStore::decode(b),std::runtime_error);
-    b=AnchorStore::encode(a); b[8]=2; EXPECT_THROW(AnchorStore::decode(b),std::runtime_error);
+    b=AnchorStore::encode(a); b[8]=AnchorStore::Version+1; EXPECT_THROW(AnchorStore::decode(b),std::runtime_error);
     b=AnchorStore::encode(a); b[0]^=1; EXPECT_THROW(AnchorStore::decode(b),std::runtime_error);
     b=AnchorStore::encode(a); b.push_back(0); EXPECT_THROW(AnchorStore::decode(b),std::runtime_error);
     auto expected=a.identity; ++expected.configHash; EXPECT_FALSE(AnchorStore::read(path,expected,a.boundaryMs));

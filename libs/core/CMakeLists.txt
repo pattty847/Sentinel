@@ -4,6 +4,10 @@ add_subdirectory(marketdata/analytics)
 
 add_library(sentinel_core
     roller/AnchorStore.cpp
+    levelstore/LevelLog.cpp
+    levelstore/LevelLogFormat.cpp
+    levelstore/LevelLog.hpp
+    levelstore/LevelLogFormat.hpp
     levelstore/LevelRecorder.cpp
     levelstore/LevelRecorder.hpp
     levelstore/LevelTimeline.cpp
