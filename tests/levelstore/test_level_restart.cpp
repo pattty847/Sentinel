@@ -326,6 +326,19 @@ TEST(LevelRestart, GrowingUnalignedJournalAcrossDayBoundary) {
     checkedRoll(o); equal(t.path/"one",t.path/"stepped");
 }
 
+TEST(LevelRestart, PairDigestDistinguishesEqualLengthChecksummedPayloads) {
+    auto checked=[](std::vector<uint8_t> bytes) {
+        const auto crc=sentinel::crc32(bytes.data(),bytes.size());
+        for (int i=0;i<4;++i) bytes.push_back(uint8_t(crc>>(8*i)));
+        return bytes;
+    };
+    const auto a=checked({1,2,3}), b=checked({4,5,6});
+    ASSERT_EQ(a.size(),b.size());
+    EXPECT_EQ(pairDigest(a).at("length"),a.size());
+    EXPECT_NE(pairDigest(a).at("crc"),pairDigest(b).at("crc"));
+    EXPECT_EQ(pairDigest(a).at("crc"),sentinel::crc32(a.data(),a.size()-4));
+}
+
 int main(int argc,char** argv) {
     executable=fs::absolute(argv[0]).string();
 #ifndef _WIN32

@@ -33,7 +33,8 @@ inline nlohmann::json levelFence(levelstore::LevelRecorder& level, levelstore::L
     return j;
 }
 inline nlohmann::json pairDigest(const std::vector<uint8_t>& bytes) {
-    return {{"length",bytes.size()},{"crc",sentinel::crc32(bytes.data(),bytes.size())}};
+    if (bytes.size() < 4) throw std::runtime_error("C pair digest requires a checksummed blob");
+    return {{"length",bytes.size()},{"crc",sentinel::crc32(bytes.data(),bytes.size()-4)}};
 }
 inline nlohmann::json anchorPair(const ReplayAnchor& a) {
     return {{"boundary",a.boundaryMs},{"pos",a.pos},{"binding",a.level.at("binding")},
