@@ -261,7 +261,9 @@ json roll(const RollOptions& o) {
                 int error = 0;
                 if (!persistence::syncDirectory(o.outputRoot, error))
                     throw std::runtime_error("shadow product directory sync failed");
-                writeCheckpoint(cpPath, cp);
+                point("provenance-directory-synced");
+                writeCheckpoint(cpPath,cp,[&] { point("checkpoint-mid-write"); },point);
+                point("checkpoint-written");
             }
         };
         feed.onSnapshot = [&](int64_t exchange, int64_t local, std::vector<recording::Level> levels) {

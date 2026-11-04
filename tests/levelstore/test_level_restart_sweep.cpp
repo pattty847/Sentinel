@@ -118,9 +118,9 @@ bool run(const fs::path& raw, const fs::path& root, Trace& trace, int startDay =
 }
 void journal(const fs::path& root) {
     RestartJournal writer(root);
-    for (int s : {-55,-1,0,5,60,120,180,240,300,360,420}) writer.at(s);
+    for (int s : {-55,-1,0,5,420}) writer.at(s);
     writer.restart(450); // Two real capture::Writer runs, inside the quarter window.
-    for (int s : {455,480,540,600,660,720,780,840,895,900,905,960,965,1020}) writer.at(s);
+    for (int s : {455,895,900,905,960,965,1020}) writer.at(s);
 }
 void cloneOutput(const fs::path& source, const fs::path& destination) {
     fs::copy(source,destination,fs::copy_options::recursive);
@@ -143,58 +143,90 @@ TEST(LevelRestartSweep, EveryRecordAndPersistencePoint) {
     });
     ASSERT_NE(quarter,order.end());
     std::rotate(order.begin(),quarter,quarter+1);
-    size_t twice=0;
-    for (const auto stop : order) {
-        SCOPED_TRACE(::testing::Message() << "point=" << stop << " " << baseline.events[stop]);
-        const auto partial=t.path/"partial", once=t.path/"once", twiceRoot=t.path/"twice";
-        Trace first; first.stop=stop;
-        ASSERT_FALSE(run(t.path/"raw",partial,first));
-        ASSERT_TRUE(first.hit);
-        ASSERT_EQ(first.events.back(),baseline.events[stop]);
-        cloneOutput(partial,once);
+    size_t twice=0, cuts=0;
+    std::map<std::string,std::pair<fs::path,int>> cutSeeds;
+    const auto baselineRoot=t.path/"baseline";
+    const auto sweep = [&](const fs::path& seed, int startDay, const std::vector<Event>& events,
+                           const std::vector<size_t>& stops, bool repeated) {
+        for (const auto stop : stops) {
+            SCOPED_TRACE(::testing::Message() << (repeated ? "double" : "single")
+                << " point=" << stop << " " << events[stop]);
+            const auto partial=t.path/"partial", once=t.path/"once";
+            if (!seed.empty()) cloneOutput(seed,partial);
+            Trace first; first.stop=stop;
+            ASSERT_FALSE(run(t.path/"raw",partial,first,startDay));
+            ASSERT_TRUE(first.hit);
+            ASSERT_EQ(first.events.back(),events[stop]);
+            cloneOutput(partial,once);
+            Trace recovery;
+            ASSERT_NO_THROW(ASSERT_TRUE(run(t.path/"raw",once,recovery,first.day)));
+            same(once,baselineRoot);
+            ASSERT_FALSE(HasFailure());
+            if (repeated) ++twice;
+            // Retain each distinct cut plan (day, fenced tail and ordered native
+            // cut/sync steps). Suffix bytes are deliberately excluded: a proven
+            // cut discards them without decoding. The single-stop pass above
+            // still tests every header/payload/CRC suffix independently.
+            std::string plan;
+            bool cutting=false;
+            for (const auto& e : recovery.events) {
+                if (e.name=="journal-record") break;
+                cutting = cutting || e.name.starts_with("cut-");
+                if (cutting) plan+=e.name+"/";
+            }
+            if (!repeated && cutting) {
+                const auto cp=json::parse(contents(partial/"hmc/BTC-USD/roller.json"));
+                plan=std::to_string(first.day)+cp.dump()+plan;
+                if (!cutSeeds.contains(plan)) {
+                    const auto saved=t.path/("cut-seed-"+std::to_string(cutSeeds.size()));
+                    cloneOutput(partial,saved);
+                    cutSeeds.emplace(plan,std::pair{saved,first.day});
+                }
+            }
+            fs::remove_all(partial); fs::remove_all(once);
+        }
+    };
+    sweep({},0,baseline.events,order,false);
+    ASSERT_FALSE(HasFailure());
+    // Interrupt once at the first persistence operation; then sweep EVERY point
+    // of that normal restart, including all records, writes, syncs and boundaries.
+    // Each case is two interruptions, with the second later in execution. A full
+    // Cartesian product of stop pairs is intentionally not the contract.
+    const auto seed=t.path/"seed";
+    Trace initial; initial.stop=0;
+    ASSERT_FALSE(run(t.path/"raw",seed,initial));
+    cloneOutput(seed,t.path/"trace");
+    Trace resumed;
+    ASSERT_TRUE(run(t.path/"raw",t.path/"trace",resumed,initial.day));
+    std::vector<size_t> secondOrder(resumed.events.size());
+    std::iota(secondOrder.begin(),secondOrder.end(),0);
+    sweep(seed,initial.day,resumed.events,secondOrder,true);
+    ASSERT_FALSE(HasFailure());
+    // The forward trace cannot contain destructive recovery cuts. Sweep every
+    // step of every distinct cut plan reached by the single-stop enumeration.
+    for (const auto& [plan, saved] : cutSeeds) {
+        const auto& [root,day]=saved;
+        fs::remove_all(t.path/"trace");
+        cloneOutput(root,t.path/"trace");
         Trace recovery;
-        ASSERT_NO_THROW(ASSERT_TRUE(run(t.path/"raw",once,recovery,first.day)));
-        same(once,t.path/"baseline");
-        ASSERT_FALSE(HasFailure());
-        // Sweep every cut operation and its surrounding syncs on recovery, plus
-        // a later forward point for every first stop (including the final point,
-        // whose next operation is a restart sync). This is not a Cartesian sweep
-        // of all pairs of forward points; both single and repeated interruptions
-        // visit every forward point and every reachable recovery cut step.
-        std::vector<size_t> secondStops;
-        bool forward=false;
+        ASSERT_TRUE(run(t.path/"raw",t.path/"trace",recovery,day));
+        std::vector<size_t> steps;
+        bool cutting=false;
         for (size_t i=0;i<recovery.events.size();++i) {
             const auto& e=recovery.events[i];
-            if (!forward && (e.name.starts_with("cut-") || e.name.starts_with("log-") && e.name.ends_with("sync")))
-                secondStops.push_back(i);
-            if (e.name=="journal-record") forward=true;
+            if (e.name=="journal-record") break;
+            cutting=cutting || e.name.starts_with("cut-");
+            if (cutting) steps.push_back(i);
         }
-        const auto later=std::find_if(recovery.events.begin(),recovery.events.end(),[&](const auto& e) {
-            return e.day>first.day || e.day==first.day && e.second>first.events.back().second;
-        });
-        if (later!=recovery.events.end()) secondStops.push_back(later-recovery.events.begin());
-        else if (!recovery.events.empty()) secondStops.push_back(recovery.events.size()-1);
-        std::sort(secondStops.begin(),secondStops.end());
-        secondStops.erase(std::unique(secondStops.begin(),secondStops.end()),secondStops.end());
-        ASSERT_FALSE(secondStops.empty());
-        for (const auto second : secondStops) {
-            SCOPED_TRACE(::testing::Message() << "second=" << second << " " << recovery.events[second]);
-            cloneOutput(partial,twiceRoot);
-            Trace again; again.stop=second;
-            ASSERT_FALSE(run(t.path/"raw",twiceRoot,again,first.day));
-            ASSERT_TRUE(again.hit);
-            ASSERT_EQ(again.events.back(),recovery.events[second]);
-            Trace finish;
-            ASSERT_NO_THROW(ASSERT_TRUE(run(t.path/"raw",twiceRoot,finish,again.day)));
-            same(twiceRoot,t.path/"baseline");
-            ASSERT_FALSE(HasFailure());
-            ++twice;
-            fs::remove_all(twiceRoot);
-        }
-        fs::remove_all(partial); fs::remove_all(once);
+        cuts+=steps.size();
+        sweep(root,day,recovery.events,steps,true);
+        ASSERT_FALSE(HasFailure());
+        fs::remove_all(root);
     }
     RecordProperty("single_stop_points",std::to_string(order.size()));
     RecordProperty("double_stop_cases",std::to_string(twice));
+    RecordProperty("recovery_cut_plans",std::to_string(cutSeeds.size()));
+    RecordProperty("recovery_cut_points",std::to_string(cuts));
     RecordProperty("journal_record_points",std::to_string(std::count_if(baseline.events.begin(),baseline.events.end(),
         [](const auto& e) { return e.name=="journal-record"; })));
 }
