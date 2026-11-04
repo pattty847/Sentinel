@@ -120,7 +120,7 @@ void journal(const fs::path& root) {
     RestartJournal writer(root);
     for (int s : {-55,-1,0,5,420}) writer.at(s);
     writer.restart(450); // Two real capture::Writer runs, inside the quarter window.
-    for (int s : {455,895,900,905,960,965,1020}) writer.at(s);
+    for (int s : {455,840,895,900,905,960,965,1020}) writer.at(s);
 }
 void cloneOutput(const fs::path& source, const fs::path& destination) {
     fs::copy(source,destination,fs::copy_options::recursive);
