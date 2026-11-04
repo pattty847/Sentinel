@@ -28,7 +28,7 @@ RestartJournal::~RestartJournal() = default;
 void RestartJournal::grow(int minutes) {
     while (impl->second < minutes*60+5) {
         impl->second+=5;
-        impl->append(capture::Kind::Frame,impl->frame("update",2+(impl->second/5)%7));
+        impl->append(capture::Kind::Frame,impl->frame("update",2+((impl->second/5)%7+7)%7));
     }
     impl->writer.flush();
 }

@@ -42,7 +42,10 @@ json state(const fs::path& root) {
 void equal(const fs::path& a, const fs::path& b) {
     EXPECT_EQ(tree(a/"log",".lcl"),tree(b/"log",".lcl"));
     EXPECT_EQ(tree(a/"hmc",".hmc2"),tree(b/"hmc",".hmc2"));
+    ASSERT_TRUE(state(a).is_object());
+    ASSERT_TRUE(state(b).is_object());
     EXPECT_EQ(state(a),state(b));
+    EXPECT_FALSE(tree(a/"hmc",".hmc2").empty());
 }
 struct FaultFiles : LevelLogFiles {
     std::atomic<bool> armed{false};
@@ -132,7 +135,7 @@ TEST(LevelRestart, KillAndRestartMatchesAllBytes) {
                 };
                 o.persistencePointForTest=[&](const char* p) { if (ready && point==p) ::kill(::getpid(),SIGKILL); };
                 roll(o); ::_exit(3);
-            } catch (...) { ::_exit(4); }
+            } catch (const std::exception& e) { std::fprintf(stderr,"restart child: %s\n",e.what()); ::_exit(4); }
         }
         int status=0; ASSERT_EQ(::waitpid(child,&status,0),child);
         ASSERT_TRUE(WIFSIGNALED(status)); ASSERT_EQ(WTERMSIG(status),SIGKILL);
@@ -140,7 +143,7 @@ TEST(LevelRestart, KillAndRestartMatchesAllBytes) {
             const auto cutting=::fork(); ASSERT_GE(cutting,0);
             if (!cutting) {
                 try { auto o=options(t.path/"raw",root); auto f=std::make_shared<FaultFiles>();
-                    f->killCut=true; o.levelLogFiles=f; roll(o); ::_exit(3); } catch (...) { ::_exit(4); }
+                    f->killCut=true; o.levelLogFiles=f; roll(o); ::_exit(3); } catch (const std::exception& e) { std::fprintf(stderr,"restart child: %s\n",e.what()); ::_exit(4); }
             }
             ASSERT_EQ(::waitpid(cutting,&status,0),cutting);
             ASSERT_TRUE(WIFSIGNALED(status)); ASSERT_EQ(WTERMSIG(status),SIGKILL);
