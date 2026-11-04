@@ -317,7 +317,8 @@ void LevelRecorder::onMinute(const std::string &symbol, int64_t bucketStartMs, u
     try {
         if (inMessage_) throw std::logic_error("minute inside a message");
         if (end < lastClock_) throw std::logic_error("minute behind the clock");
-        if (!open_.messages.empty() && open_.messages.front().timeMs < bucketStartMs)
+        if (!open_.messages.empty() &&
+            (open_.messages.front().timeMs < bucketStartMs || open_.messages.back().timeMs >= end))
             throw std::logic_error("message outside its minute");
         lastClock_ = end;
         if (bucketStartMs < binding_.floorMs) {

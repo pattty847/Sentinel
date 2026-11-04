@@ -1013,6 +1013,52 @@ TEST(Checkpoint, MalformedDeltasWithAValidChecksumAreRefused) {
 
 
 
+// A failed finalisation leaves the recorder clock at the minute end. Its
+// invalidation must never escape in a block whose exclusive end is that clock.
+TEST(Failure, RecorderFinalisationFailureCannotPublishAnEndBoundaryMessage) {
+    TempDir dir;
+    Capture out;
+    LevelRecorder c(binding(), &out);
+    auto cfg = config(dir.path);
+    cfg.sink = &c;
+    bool injected = false;
+    cfg.beforeMinuteFinalizeForTest = [&](int64_t bucket) {
+        if (bucket == kFloor && !injected) {
+            injected = true;
+            throw std::bad_alloc();
+        }
+    };
+    BookRecorder rec(cfg);
+    rec.onSnapshotAt(kSym, kFloor + 1'000, kFloor + 1'000, book4());
+    rec.drainForTest();
+    const auto before = out.bytes();
+    rec.onTick(kFloor + 61'000);
+    rec.drainForTest();
+    ASSERT_TRUE(injected);
+    ASSERT_EQ(rec.stats().diskErrors, 1u);
+    ASSERT_FALSE(c.openBlock().messages.empty());
+    EXPECT_EQ(c.openBlock().messages.back().timeMs, kFloor + kMin);
+    EXPECT_EQ(c.openBlock().messages.back().clear, ClearCause::Invalid);
+    EXPECT_EQ(out.bytes(), before);
+
+    // Retrying the same minute must stop C before the malformed block is offered.
+    rec.onTick(kFloor + 62'000);
+    rec.drainForTest();
+    EXPECT_EQ(c.unobserved(), LevelRecorder::Unobserved::Failed);
+    EXPECT_EQ(c.stats().failures, 1u);
+    EXPECT_EQ(out.blockCalls, 0);
+    EXPECT_EQ(out.bytes(), before);
+    const auto partial = c.openBlock();
+    rec.onSnapshotAt(kSym, kFloor + 65'000, kFloor + 65'000, book4());
+    rec.onTick(kFloor + 181'000);
+    rec.drainForTest();
+    EXPECT_EQ(c.stats().failures, 1u);
+    EXPECT_EQ(c.openBlock(), partial);
+    EXPECT_EQ(out.blockCalls, 0);
+    EXPECT_EQ(out.bytes(), before);
+    EXPECT_THROW(c.exportState(rec.checkpointClock(kSym), rec.exportState()), std::runtime_error);
+}
+
 // Inconsistent callback ordering is an internal failure, never a market gap.
 TEST(Failure, AnInconsistentMinutePermanentlyStopsOutput) {
     Capture out;
