@@ -21,6 +21,9 @@ struct RollOptions {
     // A false return is cancellation/EOF, never a synthetic tick.
     std::function<bool(JournalReader&, JournalRecord&)> nextRecord;
     std::function<void(int64_t)> onCommitted;
+    // A cancelled durable-C day omits its report and pruning: a cut/replayed prefix
+    // may not yet match the saved checkpoint. Defer progress reporting and anchor
+    // maintenance until a subsequent roll has validated that checkpoint again.
     std::function<bool()> cancelled;
     bool productWriterLease = false;
     std::function<void(const std::string&)> onInvalid;

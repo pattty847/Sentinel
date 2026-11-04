@@ -140,6 +140,7 @@ json roll(const RollOptions& o) {
         std::optional<JournalPos> checkpoint;
         int64_t targetBoundary = day;
         json pairedAnchor = nullptr;
+        bool pairedAnchorSkipped = false;
         if (cp["days"].contains(key)) {
             const auto& saved = cp["days"][key];
             checkpoint = saved.at("pos").get<JournalPos>();
@@ -334,9 +335,15 @@ json roll(const RollOptions& o) {
                     // Conservative across runs: an older-run candidate falls
                     // back unless a same-run anchor is available.
                     if (cursorPos.run != checkpoint->run || std::pair(cursorPos.block,cursorPos.record) >
-                            std::pair(checkpoint->block,checkpoint->record)) continue;
+                            std::pair(checkpoint->block,checkpoint->record)) {
+                        if (log) { validateAnchorPair(a,pairedAnchor); pairedAnchorSkipped = true; }
+                        continue;
+                    }
                 }
-                if (o.anchorAllowed && !o.anchorAllowed(cursorPos)) continue;
+                if (o.anchorAllowed && !o.anchorAllowed(cursorPos)) {
+                    if (log && checkpoint) { validateAnchorPair(a,pairedAnchor); pairedAnchorSkipped = true; }
+                    continue;
+                }
                 auto candidateReader = o.anchorReaderForTest ? o.anchorReaderForTest(cursorPos) :
                     std::make_unique<JournalReader>(o.journalRoot,o.product,cursorPos);
                 JournalRecord cursor;
@@ -460,8 +467,10 @@ json roll(const RollOptions& o) {
         }
         if (!reader) {
             if (log) {
-                if (!pairedAnchor.is_null()) throw std::runtime_error("C checkpoint paired anchor unavailable");
-                // Before the first quarter fence, replay from the original floor.
+                if (!pairedAnchor.is_null() && !pairedAnchorSkipped)
+                    throw std::runtime_error("C checkpoint paired anchor unavailable");
+                pairedAnchor = nullptr;
+                // Without an eligible paired anchor, replay from the original floor.
                 // Preserve only an explicitly fenced preceding day's output.
                 if (!logPrepared) {
                     const json* previous = nullptr;
@@ -588,6 +597,8 @@ json roll(const RollOptions& o) {
             if (stats.diskErrors) throw std::runtime_error("roller recorder failed; checkpoint not advanced");
             if (checkpointReplayed && checkpoint && !recoveryComplete && receiveThrough >= targetBoundary) {
                 if (log) {
+                    if (applied != *checkpoint)
+                        throw std::logic_error("C checkpoint fence requires its exact journal position");
                     const auto restored = syncLevelFence(*level,*log,recorder->checkpointClock(o.product),o.levelTiming,"recovery-sync");
                     const auto& saved = cp.at("days").at(key).at("level");
                     for (const auto* field : {"binding","clock","tail"})

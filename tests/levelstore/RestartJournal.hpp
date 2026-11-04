@@ -7,6 +7,7 @@ struct RestartJournal {
     explicit RestartJournal(const std::filesystem::path&, bool warmup = true);
     ~RestartJournal();
     void grow(int minutes);
+    void restart(int second);
     struct Impl;
     std::unique_ptr<Impl> impl;
 };

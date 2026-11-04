@@ -349,6 +349,71 @@ TEST(LevelRestart, HmcOnlyCancellationRetainsDayProgress) {
     EXPECT_GT(report.at("days")[0].at("committedThroughMs").get<int64_t>(),Epoch);
 }
 
+TEST(LevelRestart, CaptureRestartBetweenAnchorAndCheckpointReplaysFromFloor) {
+    TempDir t; RestartJournal journal(t.path/"raw"); journal.grow(25);
+    journal.restart(25*60+10); journal.grow(28);
+    auto o=options(t.path/"raw",t.path/"stepped"); checkedRoll(o);
+    const auto cp=json::parse(contents(o.outputRoot/"BTC-USD/roller.json"));
+    const auto& saved=cp.at("days").at(std::to_string(Epoch));
+    ASSERT_NE(saved.at("pos").get<JournalPos>().run,saved.at("level").at("anchor").at("pos").get<JournalPos>().run);
+    ASSERT_EQ(saved.at("level").at("anchor").at("boundary"),Epoch+15*Minute);
+    ASSERT_FALSE(tree(o.levelLogRoot,".lcl").empty());
+    journal.grow(40);
+    ASSERT_NO_THROW(checkedRoll(o));
+    checkedRoll(options(t.path/"raw",t.path/"prefix")); equal(t.path/"prefix",t.path/"stepped");
+    ASSERT_NO_THROW(checkedRoll(o)); equal(t.path/"prefix",t.path/"stepped");
+    journal.grow(90); ASSERT_NO_THROW(checkedRoll(o));
+    checkedRoll(options(t.path/"raw",t.path/"one")); equal(t.path/"one",t.path/"stepped");
+    auto hmc=options(t.path/"raw",t.path/"hmc-only"); hmc.levelLogRoot.clear(); checkedRoll(hmc);
+    EXPECT_EQ(tree(hmc.outputRoot,".hmc2"),tree(o.outputRoot,".hmc2"));
+}
+
+TEST(LevelRestart, SkippedCrossRunAnchorStillRequiresMatchingReadablePair) {
+    TempDir t; RestartJournal journal(t.path/"raw"); journal.grow(25);
+    journal.restart(25*60+10); journal.grow(28);
+    auto o=options(t.path/"raw",t.path/"attempt"); checkedRoll(o); journal.grow(40);
+    const auto checkpoint=o.outputRoot/"BTC-USD/roller.json"; const auto cp=contents(checkpoint);
+    const auto anchor=AnchorStore::candidates(o.outputRoot,"BTC-USD",Epoch).front();
+    const auto bytes=contents(anchor); const auto before=tree(o.levelLogRoot,".lcl");
+    for (const std::string fault : {"digest","unreadable","missing"}) {
+        SCOPED_TRACE(fault);
+        if (fault=="digest") {
+            auto changed=json::parse(cp);
+            auto& crc=changed["days"][std::to_string(Epoch)]["level"]["anchor"]["recorder"]["crc"];
+            crc=crc.get<uint32_t>()^1u; std::ofstream(checkpoint)<<changed.dump();
+        } else if (fault=="unreadable") std::ofstream(anchor)<<"bad anchor";
+        else fs::remove(anchor);
+        EXPECT_THROW(checkedRoll(o),std::exception);
+        EXPECT_EQ(tree(o.levelLogRoot,".lcl"),before);
+        std::ofstream(checkpoint)<<cp; std::ofstream(anchor,std::ios::binary)<<bytes;
+    }
+}
+
+TEST(LevelRestart, DisallowedPairedAnchorUsesFloorReplay) {
+    TempDir t; RestartJournal journal(t.path/"raw"); journal.grow(40);
+    auto o=options(t.path/"raw",t.path/"stepped"); checkedRoll(o);
+    journal.grow(90); o.anchorAllowed=[](const JournalPos&) { return false; };
+    ASSERT_NO_THROW(checkedRoll(o));
+    checkedRoll(options(t.path/"raw",t.path/"one")); equal(t.path/"one",t.path/"stepped");
+}
+
+TEST(LevelRestart, RecoveryFenceRunsAtExactMidMinuteCheckpoint) {
+    TempDir t; RestartJournal journal(t.path/"raw"); journal.grow(40);
+    auto o=options(t.path/"raw",t.path/"stepped"); checkedRoll(o);
+    const auto cp=json::parse(contents(o.outputRoot/"BTC-USD/roller.json"));
+    const auto pos=cp.at("days").at(std::to_string(Epoch)).at("pos").get<JournalPos>();
+    JournalReader reader(o.journalRoot,o.product,pos); JournalRecord record;
+    ASSERT_TRUE(reader.next(record)); ASSERT_EQ(record.pos,pos);
+    ASSERT_NE(record.record.time.systemNs/1'000'000%Minute,0);
+    journal.grow(90); JournalPos last; unsigned validated=0;
+    o.onApplied=[&](const JournalRecord& r) { last=r.pos; };
+    o.persistencePointForTest=[&](const char* point) {
+        if (std::string_view(point)=="recovery-replayed") { ++validated; EXPECT_EQ(last,pos); }
+    };
+    ASSERT_NO_THROW(checkedRoll(o)); EXPECT_EQ(validated,1u);
+    checkedRoll(options(t.path/"raw",t.path/"one")); equal(t.path/"one",t.path/"stepped");
+}
+
 int main(int argc,char** argv) {
     executable=fs::absolute(argv[0]).string();
 #ifndef _WIN32
