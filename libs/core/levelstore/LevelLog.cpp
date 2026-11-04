@@ -3,7 +3,6 @@
 #include "SentinelLogging.hpp"
 #include "servermodel/PersistenceIo.hpp"
 #include <array>
-#include <map>
 #include <set>
 
 namespace sentinel::levelstore {
@@ -35,6 +34,7 @@ void LevelLogFiles::sync(const fs::path &p, bool directory) {
     check(ok, "sync path=" + p.string() + " directory=" + std::to_string(directory) + " error=" + std::to_string(error));
 }
 void LevelLogFiles::truncate(const fs::path &p, uint64_t size) { fs::resize_file(p, size); }
+void LevelLogFiles::remove(const fs::path &p) { check(fs::remove(p), "remove path=" + p.string()); }
 
 struct LevelLog::Impl {
     fs::path root;
@@ -42,6 +42,7 @@ struct LevelLog::Impl {
     std::shared_ptr<LevelLogFiles> files;
     bool poisoned = false, opened = false;
     ScanResult state;
+    std::optional<LevelLogTail> durable;
     std::set<fs::path> dirty;
 
     template <class F> void guard(F action) {
@@ -59,8 +60,7 @@ struct LevelLog::Impl {
             throw;
         }
     }
-    void initialize() {
-        if (opened) return;
+    void prepareDirectories() {
         validateProduct(product);
         check(bool(files), "missing file operations");
         root = fs::absolute(root).lexically_normal();
@@ -71,6 +71,10 @@ struct LevelLog::Impl {
         for (auto i = missing.rbegin(); i != missing.rend(); ++i) files->createDirectory(*i);
         // Existing entries may have been left unsynced by a failed former writer.
         for (auto at = dir; at != at.parent_path(); at = at.parent_path()) files->sync(at.parent_path(), true);
+    }
+    void initialize() {
+        if (opened) return;
+        prepareDirectories();
         state = scan(root, product, {});
         if (state.tail) {
             const auto tail = *state.tail;
@@ -82,7 +86,8 @@ struct LevelLog::Impl {
         }
         // Re-establish durability of inherited files (including an earlier failed create).
         for (const auto &p : paths(root, product)) files->sync(p, false);
-        files->sync(dir, true);
+        files->sync(root / product, true);
+        durable = state.last;
         opened = true;
         sLog_Data("LevelLog: opened product=" << product << " root=" << root.string());
     }
@@ -124,24 +129,36 @@ struct LevelLog::Impl {
         // File contents precede publication of newly created directory entries.
         files->sync(root / product, true);
         dirty.clear();
+        durable = state.last;
         sLog_Probe("levelstore.log.sync", "product=" << product);
     }
-    void cut(int64_t minute) {
-        initialize();
+    void cut(int64_t minute, CutImageAtBoundary image) {
         check(minute >= 0 && minute % 60'000 == 0, "unaligned cut point");
-        std::map<fs::path, uint64_t> cuts;
-        scan(root, product, [&](const LevelLogRecord &r, const Position &p) {
-            if (r.minute() >= minute) cuts.try_emplace(p.path, p.offset);
-        });
-        // Persist removal of later records before changing an earlier file.
-        for (auto i = cuts.rbegin(); i != cuts.rend(); ++i) {
-            files->truncate(i->first, i->second);
-            files->sync(i->first, false);
+        if (!opened) prepareDirectories();
+        auto plan = planCut(root, product, minute, image);
+        // Validate the entire retained prefix before the first destructive operation.
+        // Persist removal of later files before changing an earlier file.
+        for (auto i = plan.files.rbegin(); i != plan.files.rend(); ++i) {
+            if (i->at.offset == 0) {
+                files->remove(i->at.path);
+                files->sync(root / product, true);
+            } else {
+                files->truncate(i->at.path, i->at.offset);
+                files->sync(i->at.path, false);
+            }
+            sLog_Warning("LevelLog: discarded suffix path=" << i->at.path.string() << " offset=" << i->at.offset
+                         << " bytes=" << i->oldSize - i->at.offset << " reason=anchor-cut minute=" << minute);
         }
-        commit();
-        state = scan(root, product, {});
-        sLog_Data("LevelLog: cut product=" << product << " minute=" << minute << " files=" << cuts.size());
+        // Adopt the surviving prefix as durable, including previously unsynced entries.
+        for (const auto &p : paths(root, product)) files->sync(p, false);
+        files->sync(root / product, true);
+        state = std::move(plan.retained);
+        durable = state.last;
+        dirty.clear();
+        opened = true;
+        sLog_Data("LevelLog: cut product=" << product << " minute=" << minute << " files=" << plan.files.size());
     }
+
 };
 LevelLog::LevelLog(fs::path root, std::string product, std::shared_ptr<LevelLogFiles> files)
     : impl_(std::make_unique<Impl>()) {
@@ -154,6 +171,10 @@ void LevelLog::open() { impl_->guard([&] { impl_->initialize(); }); }
 void LevelLog::onDayStart(const DayBinding &b, const BookImage &i) { impl_->guard([&] { impl_->append({b, i}); }); }
 void LevelLog::onBlock(const DayBinding &b, const MinuteBlock &m) { impl_->guard([&] { impl_->append({b, m}); }); }
 void LevelLog::sync() { impl_->guard([&] { impl_->commit(); }); }
-void LevelLog::truncateAfter(int64_t m) { impl_->guard([&] { impl_->cut(m); }); }
+void LevelLog::truncateAfter(int64_t m, CutImageAtBoundary image) { impl_->guard([&] { impl_->cut(m, image); }); }
+std::optional<LevelLogTail> LevelLog::durableTail() const {
+    check(!impl_->poisoned && impl_->opened, "tail requires an open healthy writer");
+    return impl_->durable;
+}
 bool LevelLog::failed() const { return impl_->poisoned; }
 } // namespace sentinel::levelstore

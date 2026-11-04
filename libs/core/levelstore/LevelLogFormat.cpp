@@ -23,7 +23,7 @@ void validateRecord(const LevelLogRecord &r) {
     const auto &b = r.binding;
     validateProduct(b.symbol);
     check(b.floorMs >= 0 && b.floorMs % 60'000 == 0 && b.ceilingMs > b.floorMs &&
-              b.ceilingMs % 60'000 == 0 && b.priceDigits >= -1 && b.priceDigits <= 18,
+              b.priceDigits >= -1 && b.priceDigits <= 18,
           "invalid binding");
     const auto t = r.minute();
     check(t >= b.floorMs && t < b.ceilingMs && t % 60'000 == 0, "minute outside binding");
@@ -40,6 +40,7 @@ void advance(ScanResult &s, const LevelLogRecord &r) {
         check(!s.lastMinute || r.minute() > *s.lastMinute, "unordered minute");
         s.lastMinute = r.minute();
     }
+    s.last = LevelLogTail{r.binding, r.minute(), std::holds_alternative<BookImage>(r.value)};
 }
 ByteWriter payload(const LevelLogRecord &r) {
     ByteWriter w;
@@ -69,7 +70,7 @@ std::vector<fs::path> paths(const fs::path &root, const std::string &product) {
     if (!fs::exists(dir)) return result;
     for (const auto &entry : fs::directory_iterator(dir)) {
         const auto name = entry.path().filename().string();
-        if (entry.path().extension() != ".lcl") continue;
+        if (name.starts_with("._") || entry.path().extension() != ".lcl") continue;
         check(name.size() == 24 && std::all_of(name.begin(), name.begin() + 20,
                   [](char c) { return c >= '0' && c <= '9'; }) && entry.is_regular_file(),
               "invalid hour path=" + entry.path().string());
@@ -177,6 +178,55 @@ ScanResult scan(const fs::path &root, const std::string &product,
         }
     }
     return state;
+}
+// A validated predecessor proves the next byte is disposable without reading it.
+// If a gap prevents this proof, decode until a valid record establishes the cut;
+// damage in that ambiguous region fails closed rather than guessing its timestamp.
+CutPlan planCut(const fs::path &root, const std::string &product, int64_t minute, CutImageAtBoundary image) {
+    CutPlan plan;
+    const auto cutPath = LevelLogReader::hourPath(root, product, minute);
+    bool reached = false, keptImage = false;
+    for (const auto &path : paths(root, product)) {
+        const auto end = fs::file_size(path);
+        if (reached || path > cutPath ||
+            (path == cutPath && minute % kHour == 0 && image == CutImageAtBoundary::Remove) || end == 0) {
+            plan.files.push_back({{path, 0}, end});
+            continue;
+        }
+        std::ifstream f(path, std::ios::binary);
+        check(f.is_open(), "open path=" + path.string());
+        uint64_t pos = 0;
+        try {
+            while (pos < end) {
+                const auto next = frame(f, pos, end);
+                check(!next.incomplete, "incomplete frame before cut boundary");
+                check(next.record.binding.symbol == product, "product mismatch");
+                check(LevelLogReader::hourPath(root, product, next.record.minute()) == path, "hour mismatch");
+                const bool keepImage = image == CutImageAtBoundary::Keep &&
+                    next.record.minute() == minute && std::holds_alternative<BookImage>(next.record.value);
+                if (next.record.minute() >= minute && !keepImage) {
+                    reached = true;
+                    break;
+                }
+                advance(plan.retained, next.record);
+                pos = next.end;
+                keptImage = keptImage || keepImage;
+                if (keepImage || (image == CutImageAtBoundary::Remove &&
+                    std::holds_alternative<MinuteBlock>(next.record.value) && next.record.minute() == minute - 60'000)) {
+                    reached = true;
+                    break;
+                }
+            }
+            if (pos < end) plan.files.push_back({{path, pos}, end});
+        } catch (const std::exception &e) {
+            const auto why = "path=" + path.string() + " offset=" + std::to_string(pos) + " reason=" + e.what();
+            sLog_Error("LevelLog: corrupt retained prefix " << why);
+            throw std::runtime_error(why);
+        }
+    }
+    check(image != CutImageAtBoundary::Keep || keptImage,
+          "path=" + cutPath.string() + " offset=0 required image at cut is absent");
+    return plan;
 }
 } // namespace log_detail
 int64_t LevelLogRecord::minute() const {

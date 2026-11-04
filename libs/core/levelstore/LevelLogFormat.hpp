@@ -14,7 +14,17 @@ struct ScanResult {
     std::optional<Position> tail;
     std::optional<DayBinding> binding;
     std::optional<int64_t> lastMinute;
+    std::optional<LevelLogTail> last;
 };
+struct CutFile {
+    Position at;
+    uint64_t oldSize = 0;
+};
+struct CutPlan {
+    ScanResult retained;
+    std::vector<CutFile> files;
+};
+CutPlan planCut(const fs::path &, const std::string &, int64_t, CutImageAtBoundary);
 void check(bool, const std::string &);
 void validateProduct(const std::string &);
 void validateRecord(const LevelLogRecord &);

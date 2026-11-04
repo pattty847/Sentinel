@@ -1,10 +1,13 @@
 #include "LevelTestSupport.hpp"
+#include "LevelLogReplayOutput.hpp"
+#include <algorithm>
 #include "levelstore/LevelLog.hpp"
 #include "Crc32.hpp"
 #include <gtest/gtest.h>
 #include <array>
 #include <fstream>
 #include <numeric>
+#include <map>
 #ifndef _WIN32
 #include <csignal>
 #include <sys/wait.h>
@@ -87,6 +90,9 @@ struct Inject : LevelLogFiles {
         const auto op = dir ? "dir-sync" : "file-sync";
         point(op); LevelLogFiles::sync(p, dir); done(op);
     }
+    void remove(const fs::path &p) override {
+        point("remove"); LevelLogFiles::remove(p); done("remove");
+    }
     void truncate(const fs::path &p, uint64_t n) override {
         point("truncate"); LevelLogFiles::truncate(p, n); done("truncate");
     }
@@ -101,6 +107,7 @@ void unchangedPoison(LevelLog &w, Inject &io) {
     ASSERT_TRUE(w.failed());
     const auto n = io.calls.size();
     EXPECT_THROW(w.open(), std::runtime_error);
+    EXPECT_THROW(w.durableTail(), std::runtime_error);
     EXPECT_THROW(w.onDayStart(binding(day), image(day)), std::runtime_error);
     EXPECT_THROW(w.onBlock(binding(), block(120'000)), std::runtime_error);
     EXPECT_THROW(w.sync(), std::runtime_error);
@@ -276,9 +283,10 @@ TEST(LevelLog, CutWithinHourAcrossHoursAndAtDayStartThenAppend) {
 
 TEST(LevelLog, EveryCutFailurePoisonsAndLeavesPrefix) {
     const std::vector<LevelLogRecord> expected{{binding(), image()}, {binding(), block(0)},
-        {binding(), block(hour)}, {binding(day), image(day)}, {binding(day), block(day)}};
+        {binding(), block(60'000)}, {binding(), block(hour)}, {binding(day), image(day)}, {binding(day), block(day)}};
     auto setup = [&](const fs::path &p) {
         seed(p); LevelLog w(p, "BTC-USD");
+        w.onBlock(binding(), block(60'000));
         w.onBlock(binding(), block(hour)); w.onDayStart(binding(day), image(day));
         w.onBlock(binding(day), block(day)); w.sync();
     };
@@ -287,7 +295,7 @@ TEST(LevelLog, EveryCutFailurePoisonsAndLeavesPrefix) {
         TempDir t; setup(t.path);
         auto io = std::make_shared<Inject>(); LevelLog w(t.path, "BTC-USD", io); w.open();
         io->calls.clear(); w.truncateAfter(60'000); points = io->calls;
-        EXPECT_EQ(points, (std::vector<std::string>{"truncate", "file-sync", "truncate", "file-sync", "dir-sync"}));
+        EXPECT_EQ(points, (std::vector<std::string>{"remove", "dir-sync", "remove", "dir-sync", "truncate", "file-sync", "file-sync", "dir-sync"}));
     }
     for (size_t at = 0; at < points.size(); ++at) {
         SCOPED_TRACE("point=" + std::to_string(at) + " op=" + points[at]);
@@ -406,5 +414,221 @@ TEST(LevelLog, InvalidOrderingAndForeignBindingsPoisonBeforeWriting) {
             EXPECT_THROW(w.onBlock(b, block(mutation == 0 ? 0 : 60'000)), std::runtime_error);
         }
         EXPECT_TRUE(w.failed()); EXPECT_EQ(bytes(p), original);
+    }
+}
+
+namespace {
+using FileTree = std::map<std::string, std::vector<uint8_t>>;
+FileTree tree(const fs::path &root) {
+    FileTree result;
+    if (!fs::exists(root / "BTC-USD")) return result;
+    for (const auto &e : fs::directory_iterator(root / "BTC-USD"))
+        if (e.path().extension() == ".lcl") result.emplace(e.path().filename().string(), bytes(e.path()));
+    return result;
+}
+void powerLossTail(const fs::path &root, int shape) {
+    seed(root);
+    const auto p = LevelLogReader::hourPath(root, "BTC-USD", 0);
+    auto prefix = bytes(p);
+    if (shape == 1) {
+        { LevelLog w(root, "BTC-USD"); w.onBlock(binding(), block(60'000)); }
+        auto damaged = bytes(p);
+        std::fill(damaged.begin() + prefix.size() + 12, damaged.end() - 4, uint8_t(0));
+        put(p, damaged);
+    } else if (shape == 2) {
+        prefix.resize(prefix.size() + 4096, 0);
+        put(p, prefix);
+    } else {
+        { LevelLog w(root, "BTC-USD"); w.onBlock(binding(), block(hour)); w.sync(); }
+        prefix.insert(prefix.end(), {'L', 'C', 'L', 'G', 1, 2, 0, 0, 9, 0, 0, 0, 1});
+        put(p, prefix);
+    }
+}
+void checkAnchorRecovery(int shape) {
+    TempDir t, expected;
+    powerLossTail(t.path, shape);
+    seed(expected.path);
+    // Strict process-crash recovery remains fail-closed for these shapes.
+    LevelLog strict(t.path, "BTC-USD");
+    EXPECT_THROW(strict.open(), std::runtime_error);
+    EXPECT_THROW(strict.truncateAfter(60'000), std::runtime_error);
+    LevelLog restart(t.path, "BTC-USD");
+    ASSERT_NO_THROW(restart.truncateAfter(60'000)); // no strict open first
+    EXPECT_EQ(tree(t.path), tree(expected.path));
+    restart.onBlock(binding(), block(60'000)); restart.sync();
+    { LevelLog ref(expected.path, "BTC-USD"); ref.onBlock(binding(), block(60'000)); ref.sync(); }
+    EXPECT_EQ(tree(t.path), tree(expected.path));
+}
+} // namespace
+
+TEST(LevelLog, AnchorCutDiscardsD1ZeroedCompletePayload) { checkAnchorRecovery(1); }
+TEST(LevelLog, AnchorCutDiscardsD2ZeroExtent) { checkAnchorRecovery(2); }
+TEST(LevelLog, AnchorCutDiscardsD4TornEarlierHourAndLaterData) { checkAnchorRecovery(4); }
+
+TEST(LevelLog, AnchorCutRejectsDamageBeforeBoundaryWithoutChangingAnyFile) {
+    for (int shape : {1, 2, 4}) {
+        SCOPED_TRACE(shape);
+        TempDir t; powerLossTail(t.path, shape);
+        const auto before = tree(t.path);
+        LevelLog w(t.path, "BTC-USD");
+        try { w.truncateAfter(120'000); FAIL() << "damaged retained minute accepted"; }
+        catch (const std::runtime_error &e) {
+            EXPECT_NE(std::string(e.what()).find("path="), std::string::npos);
+            EXPECT_NE(std::string(e.what()).find("offset="), std::string::npos);
+        }
+        EXPECT_TRUE(w.failed()); EXPECT_EQ(tree(t.path), before);
+    }
+}
+
+TEST(LevelLog, CutRemovesEmptyHourFilesAndSyncsDirectory) {
+    for (int64_t cut : std::array<int64_t, 3>{60'000, hour, 0}) {
+        TempDir t; seed(t.path);
+        auto io = std::make_shared<Inject>(); LevelLog w(t.path, "BTC-USD", io);
+        w.onBlock(binding(), block(hour)); w.sync(); io->calls.clear();
+        w.truncateAfter(cut);
+        EXPECT_FALSE(fs::exists(LevelLogReader::hourPath(t.path, "BTC-USD", hour)));
+        for (const auto &[name, v] : tree(t.path)) EXPECT_FALSE(v.empty()) << name;
+        if (cut == 0) EXPECT_TRUE(tree(t.path).empty());
+        const auto removed = std::find(io->calls.begin(), io->calls.end(), "remove");
+        ASSERT_NE(removed, io->calls.end());
+        ASSERT_NE(removed + 1, io->calls.end()); EXPECT_EQ(*(removed + 1), "dir-sync");
+        EXPECT_EQ(io->calls.back(), "dir-sync");
+    }
+}
+
+TEST(LevelLog, CutAndReplayMatchesUninterruptedFileTree) {
+    std::vector<LevelLogRecord> all{{binding(), image(0, 1000)}};
+    for (int64_t m = 0; m < 126; ++m) all.push_back({binding(), block(m * 60'000, m % 7 == 0)});
+    all.push_back({binding(day), image(day, 1000)});
+    all.push_back({binding(day), block(day)});
+    all.push_back({binding(day), block(day + 60'000)});
+    auto append = [](LevelLog &w, const LevelLogRecord &r) {
+        if (const auto *i = std::get_if<BookImage>(&r.value)) w.onDayStart(r.binding, *i);
+        else w.onBlock(r.binding, std::get<MinuteBlock>(r.value));
+    };
+    TempDir reference;
+    { LevelLog w(reference.path, "BTC-USD"); for (const auto &r : all) append(w, r); w.sync(); }
+    for (int64_t cut : std::array<int64_t, 7>{0, 45 * 60'000, hour, 119 * 60'000, 2 * hour, day, day + 60'000}) {
+        SCOPED_TRACE(cut);
+        TempDir t, prefix;
+        { LevelLog w(t.path, "BTC-USD"); for (const auto &r : all) append(w, r); w.sync(); }
+        const auto p = LevelLogReader::hourPath(t.path, "BTC-USD", day);
+        auto torn = bytes(p); torn.insert(torn.end(), {'L', 'C'}); put(p, torn);
+        LevelLog restart(t.path, "BTC-USD"); restart.truncateAfter(cut);
+        { LevelLog w(prefix.path, "BTC-USD"); for (const auto &r : all) if (r.minute() < cut) append(w, r); w.sync(); }
+        EXPECT_EQ(tree(t.path), tree(prefix.path)); // includes file names, before replay reaches future hours
+        for (const auto &r : all) if (r.minute() >= cut) append(restart, r);
+        restart.sync();
+        EXPECT_EQ(tree(t.path), tree(reference.path));
+    }
+}
+
+TEST(LevelLog, DurableTailAdvancesOnlyAtSuccessfulFences) {
+    TempDir t; LevelLog w(t.path, "BTC-USD");
+    EXPECT_THROW(w.durableTail(), std::runtime_error);
+    w.open(); EXPECT_FALSE(w.durableTail());
+    w.onDayStart(binding(), image()); EXPECT_FALSE(w.durableTail());
+    w.sync(); EXPECT_EQ(w.durableTail(), (LevelLogTail{binding(), 0, true}));
+    w.onBlock(binding(), block(0));
+    EXPECT_EQ(w.durableTail(), (LevelLogTail{binding(), 0, true}));
+    w.sync(); EXPECT_EQ(w.durableTail(), (LevelLogTail{binding(), 0, false}));
+    w.onDayStart(binding(day), image(day));
+    EXPECT_EQ(w.durableTail(), (LevelLogTail{binding(), 0, false}));
+    w.sync(); EXPECT_EQ(w.durableTail(), (LevelLogTail{binding(day), day, true}));
+    w.truncateAfter(day); EXPECT_EQ(w.durableTail(), (LevelLogTail{binding(), 0, false}));
+    w.truncateAfter(0); EXPECT_FALSE(w.durableTail());
+    w.onDayStart(binding(), image()); // not fenced by this instance
+    LevelLog reopen(t.path, "BTC-USD"); reopen.open(); // explicitly adopts and syncs inherited complete records
+    EXPECT_EQ(reopen.durableTail(), (LevelLogTail{binding(), 0, true}));
+}
+
+TEST(LevelLog, AnchorCutImagePolicyMatchesRestoredDayStartedState) {
+    for (int64_t floor : {int64_t(0), day, int64_t(30 * 60'000)}) {
+        for (const auto policy : {CutImageAtBoundary::Remove, CutImageAtBoundary::Keep}) {
+            TempDir t; auto b = binding(floor);
+            { LevelLog w(t.path, "BTC-USD"); w.onDayStart(b, image(floor)); w.onBlock(b, block(floor)); w.sync(); }
+            // The image-only anchor must not validate a damaged first minute it will replay.
+            const auto path = LevelLogReader::hourPath(t.path, "BTC-USD", floor);
+            auto damaged = bytes(path); damaged.back() ^= 1; put(path, damaged);
+            LevelLog restart(t.path, "BTC-USD"); restart.truncateAfter(floor, policy);
+            if (policy == CutImageAtBoundary::Keep) {
+                EXPECT_EQ(restart.durableTail(), (LevelLogTail{b, floor, true}));
+                ASSERT_EQ(records(t.path).size(), 1u);
+            } else {
+                EXPECT_FALSE(restart.durableTail()); EXPECT_TRUE(tree(t.path).empty());
+                restart.onDayStart(b, image(floor));
+            }
+            restart.onBlock(b, block(floor)); restart.sync();
+            ASSERT_EQ(records(t.path).size(), 2u);
+        }
+    }
+    TempDir t; seed(t.path);
+    const auto before = tree(t.path);
+    LevelLog w(t.path, "BTC-USD");
+    EXPECT_THROW(w.truncateAfter(60'000, CutImageAtBoundary::Keep), std::runtime_error);
+    EXPECT_EQ(tree(t.path), before); // a required image may not silently disappear
+}
+
+TEST(LevelLog, LogAndRecorderAcceptUnalignedCeiling) {
+    for (int64_t ceiling : {1LL, 30'000LL, 60'001LL}) {
+        TempDir t; auto b = binding(); b.ceilingMs = ceiling;
+        LevelLog w(t.path, "BTC-USD"); LevelRecorder c(b, &w);
+        c.onMinute(b.symbol, 0, 0, 0);
+        ASSERT_NO_THROW(c.throwIfFailed()); w.sync();
+        const auto v = records(t.path); ASSERT_EQ(v.size(), 2u);
+        EXPECT_EQ(v[0].binding, b); EXPECT_EQ(v[1].binding, b);
+    }
+}
+
+TEST(LevelLog, AppleDoubleSidecarsAreIgnoredByReadOpenAndCut) {
+    TempDir t; seed(t.path);
+    const auto p = LevelLogReader::hourPath(t.path, "BTC-USD", 0);
+    const auto sidecar = p.parent_path() / ("._" + p.filename().string());
+    put(sidecar, {0, 0, 0, 1});
+    EXPECT_EQ(records(t.path).size(), 2u);
+    LevelLog w(t.path, "BTC-USD"); ASSERT_NO_THROW(w.open());
+    w.truncateAfter(0); EXPECT_TRUE(records(t.path).empty());
+    EXPECT_EQ(bytes(sidecar), (std::vector<uint8_t>{0, 0, 0, 1}));
+}
+
+TEST(LevelLog, ResyncFindsValidatedFrameAcrossChunkBoundary) {
+    TempDir t; seed(t.path);
+    const auto p = LevelLogReader::hourPath(t.path, "BTC-USD", 0);
+    const auto prefix = bytes(p);
+    { LevelLog w(t.path, "BTC-USD"); w.onBlock(binding(), block(60'000)); w.sync(); }
+    const auto complete = bytes(p);
+    const std::vector<uint8_t> valid(complete.begin() + prefix.size(), complete.end());
+    auto damaged = prefix;
+    damaged.insert(damaged.end(), valid.begin(), valid.begin() + 12);
+    const uint32_t pastEof = 300'000;
+    for (size_t i = 0; i < 4; ++i) damaged[prefix.size() + 8 + i] = uint8_t(pastEof >> (8 * i));
+    damaged.resize(prefix.size() + 65'534, 0); // candidate magic straddles the first resync chunk's end
+    damaged.insert(damaged.end(), valid.begin(), valid.end());
+    put(p, damaged);
+    LevelLog w(t.path, "BTC-USD"); EXPECT_THROW(w.open(), std::runtime_error);
+    EXPECT_EQ(bytes(p), damaged);
+}
+
+TEST(LevelLog, LargeTornImageWithoutResyncCandidateRepairs) {
+    TempDir t;
+    { LevelLog w(t.path, "BTC-USD"); w.onDayStart(binding(), image(0, 100'000)); w.sync(); }
+    const auto p = LevelLogReader::hourPath(t.path, "BTC-USD", 0);
+    auto torn = bytes(p); ASSERT_GT(torn.size(), 65'536u); torn.pop_back(); put(p, torn);
+    LevelLog w(t.path, "BTC-USD"); ASSERT_NO_THROW(w.open());
+    EXPECT_FALSE(w.durableTail()); EXPECT_TRUE(records(t.path).empty());
+    w.onDayStart(binding(), image()); w.sync(); EXPECT_EQ(records(t.path).size(), 1u);
+}
+
+TEST(LevelLog, ReplayMeasuresEveryDayImage) {
+    TempDir t;
+    LogReplayOutput output(t.path, "BTC-USD");
+    output.onDayStart(binding(), image());
+    output.onDayStart(binding(day), image(day));
+    ASSERT_EQ(output.imageCosts.size(), 2u);
+    EXPECT_EQ(output.imageCosts[0]["atMs"], 0);
+    EXPECT_EQ(output.imageCosts[1]["atMs"], day);
+    for (const auto &cost : output.imageCosts) {
+        EXPECT_EQ(cost["symbol"], "BTC-USD");
+        EXPECT_GE(cost["appendSyncMs"].get<double>(), 0);
     }
 }
