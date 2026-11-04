@@ -3,6 +3,7 @@
 #include "roller/Roller.hpp"
 #include "levelstore/LevelLog.hpp"
 #include <gtest/gtest.h>
+#include <exception>
 #include <fstream>
 #include <map>
 #include <mutex>
@@ -91,7 +92,7 @@ bool run(const fs::path& raw, const fs::path& root, Trace& trace, int startDay =
         o.persistencePointForTest=[&](const char* name) { trace.point(name); };
         o.onRecorder=[&](auto* p,auto*,int64_t) { recorder=p; };
         o.onLevelRecorder=[&](auto* p) {
-            if (!p && level && recorder && !trace.hit) {
+            if (!p && level && recorder && !trace.hit && std::uncaught_exceptions()==0) {
                 const auto bytes=recorder->exportState();
                 state=level->exportState(recorder->checkpointClock(o.product),bytes);
             }
@@ -157,6 +158,12 @@ TEST(LevelRestartSweep, EveryRecordAndPersistencePoint) {
             ASSERT_FALSE(run(t.path/"raw",partial,first,startDay));
             ASSERT_TRUE(first.hit);
             ASSERT_EQ(first.events.back(),events[stop]);
+            if (events[stop]==Event{"checkpoint-written",1,900}) {
+                const auto cp=json::parse(contents(partial/"hmc/BTC-USD/roller.json"));
+                const auto& day=cp.at("days").at(std::to_string(Epoch));
+                ASSERT_EQ(day.at("pos"),day.at("level").at("anchor").at("pos"));
+                ASSERT_EQ(day.at("level").at("anchor").at("boundary"),Epoch+15*Minute);
+            }
             cloneOutput(partial,once);
             Trace recovery;
             ASSERT_NO_THROW(ASSERT_TRUE(run(t.path/"raw",once,recovery,first.day)));
@@ -223,6 +230,22 @@ TEST(LevelRestartSweep, EveryRecordAndPersistencePoint) {
         ASSERT_FALSE(HasFailure());
         fs::remove_all(root);
     }
+    json counts=json::object(), trace=json::array();
+    for (const auto& e : baseline.events) {
+        counts[e.name]=counts.value(e.name,0)+1;
+        trace.push_back({{"day",e.day},{"second",e.second},{"point",e.name}});
+    }
+    for (const auto* name : {"log-write","log-file-sync","log-directory-sync",
+             "checkpoint-mid-write","checkpoint-temp-written","checkpoint-temp-synced",
+             "checkpoint-renamed","checkpoint-file-synced","checkpoint-directory-synced",
+             "checkpoint-written","anchor-mid-write","anchor-temp-written","anchor-temp-synced",
+             "anchor-renamed","anchor-file-synced","anchor-directory-synced","anchor-written"})
+        ASSERT_GT(counts.value(name,0),0) << name;
+    ASSERT_GT(cuts,0u);
+    ASSERT_EQ(resumed.events.size(),baseline.events.size());
+    ASSERT_EQ(counts.at("journal-record"),21);
+    RecordProperty("forward_point_counts",counts.dump());
+    RecordProperty("forward_trace",trace.dump());
     RecordProperty("single_stop_points",std::to_string(order.size()));
     RecordProperty("double_stop_cases",std::to_string(twice));
     RecordProperty("recovery_cut_plans",std::to_string(cutSeeds.size()));
