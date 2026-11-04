@@ -1,7 +1,6 @@
 #include "Roller.hpp"
 #include "AnchorStore.hpp"
 #include "LevelCheckpoint.hpp"
-#include "CheckpointBytes.hpp"
 #include "levelstore/LevelRecorder.hpp"
 #include "metrics/MetricsRegistry.hpp"
 #include <map>
@@ -43,15 +42,7 @@ void writeCheckpoint(const fs::path& path, const json& j, const std::function<vo
     // Hmc2Store has already durably created this product's parent and files.
     QSaveFile out(QString::fromStdString(path.string()));
     out.setDirectWriteFallback(false);
-    auto stored = j;
-    if (stored.value("rollerVersion",0) == 2) {
-        stored["stateEncoding"] = "zstd-hex-v1";
-        for (auto& day : stored.at("days")) {
-            day["recorder"] = packCheckpointBytes(day.at("recorder").get<std::vector<uint8_t>>());
-            day["level"]["state"] = packCheckpointBytes(day.at("level").at("state").get<std::vector<uint8_t>>());
-        }
-    }
-    const auto bytes = stored.dump(2) + "\n";
+    const auto bytes = j.dump(2) + "\n";
     const auto half = bytes.size()/2;
     if (!out.open(QIODevice::WriteOnly) || out.write(bytes.data(), qint64(half)) != qint64(half) || !out.flush())
         throw std::runtime_error("checkpoint temporary write failed");
@@ -118,34 +109,24 @@ json roll(const RollOptions& o) {
     const auto point = [&](const char* name) { if (o.persistencePointForTest) o.persistencePointForTest(name); };
     if (o.fromMs < recording::kHmc2MinMs || o.toMs <= o.fromMs || o.toMs >= recording::kHmc2EndMs ||
         o.fromMs % Minute || o.toMs % Minute) throw std::runtime_error("roll range must contain complete UTC minutes");
+    if (log && o.fromMs / Day != (o.toMs-1) / Day)
+        throw std::runtime_error("durable C roll requires one UTC day per call");
     capture::validateSymbol(o.product);
     const auto started = std::chrono::steady_clock::now();
     JournalReader inventory(o.journalRoot, o.product);
     const auto cpPath = o.outputRoot/o.product/"roller.json";
-    json cp = {{"rollerVersion",log ? 2 : Version},{"product",o.product},{"days",json::object()}};
+    json cp = {{"rollerVersion",log ? 3 : Version},{"product",o.product},{"days",json::object()}};
     if (o.levelOutput && fs::exists(cpPath))
         throw std::runtime_error("non-durable C output cannot resume; use levelLogRoot");
     if (fs::exists(cpPath)) {
         std::ifstream in(cpPath); in >> cp;
-        if (cp.at("rollerVersion") == 2) {
-            if (cp.at("stateEncoding") != "zstd-hex-v1") throw std::runtime_error("C checkpoint state encoding mismatch");
-            for (auto& day : cp.at("days")) {
-                day["recorder"] = unpackCheckpointBytes(day.at("recorder").get<std::string>());
-                day["level"]["state"] = unpackCheckpointBytes(day.at("level").at("state").get<std::string>());
-            }
-        }
-        if ((cp.at("rollerVersion") != Version && cp.at("rollerVersion") != 2) || cp.at("product") != o.product) throw std::runtime_error("checkpoint version/product mismatch");
+        if ((cp.at("rollerVersion") != Version && cp.at("rollerVersion") != 3) || cp.at("product") != o.product) throw std::runtime_error("checkpoint version/product mismatch");
     }
-    if (log && cp.at("rollerVersion") != 2) throw std::runtime_error("C resume requires paired C state; HMC2-only checkpoint");
-    if (!log && cp.at("rollerVersion") == 2) throw std::runtime_error("C checkpoint requires durable C output");
+    if (log && cp.at("rollerVersion") != 3) throw std::runtime_error("C resume requires paired C state; HMC2-only checkpoint");
+    if (!log && cp.at("rollerVersion") == 3) throw std::runtime_error("C checkpoint requires durable C output");
     if (log) for (const auto& saved : cp.at("days")) {
         if (saved.at("committedThroughMs").get<int64_t>() > o.toMs)
             throw std::runtime_error("C resume range would discard later fenced output");
-        const auto& c = saved.at("level");
-        levelstore::LevelRecorder check(levelBinding(c.at("binding")),log.get());
-        std::optional<int64_t> clock;
-        if (!c.at("clock").is_null()) clock = c.at("clock").get<int64_t>();
-        importLevelFence(check,c,clock,saved.at("recorder").get<std::vector<uint8_t>>());
     }
     bool logPrepared = false;
     uint64_t records = 0, bytes = 0, columns = 0, decoded = 0;
@@ -158,9 +139,14 @@ json roll(const RollOptions& o) {
         const auto key = std::to_string(day);
         std::optional<JournalPos> checkpoint;
         int64_t targetBoundary = day;
+        json pairedAnchor = nullptr;
         if (cp["days"].contains(key)) {
             const auto& saved = cp["days"][key];
             checkpoint = saved.at("pos").get<JournalPos>();
+            if (log) {
+                if (saved.at("level").at("version") != 2) throw std::runtime_error("C checkpoint fence version mismatch");
+                pairedAnchor = saved.at("level").at("anchor");
+            }
             if (saved.contains("receiveThroughMs")) targetBoundary = saved.at("receiveThroughMs");
             else {
                 // Old checkpoints have no receive high-water. A bounded cursor
@@ -314,6 +300,8 @@ json roll(const RollOptions& o) {
             const auto name = file.stem().string();
             const auto time = QTime::fromString(QString::fromStdString(name),"HHmm");
             if (!time.isValid() || day + time.msecsSinceStartOfDay() > targetBoundary) continue;
+            if (log && checkpoint && (pairedAnchor.is_null() ||
+                day + time.msecsSinceStartOfDay() != pairedAnchor.at("boundary").get<int64_t>())) continue;
             uint64_t candidateDecoded = 0;
             bool rejectedPrefix = false;
             try {
@@ -412,6 +400,8 @@ json roll(const RollOptions& o) {
                 candidate->importState(a.recorder.bytes);
                 if (log) {
                     importLevelFence(*candidateLevel,a.level,candidate->checkpointClock(o.product),a.recorder.bytes);
+                    if (checkpoint) validateAnchorPair(a,pairedAnchor);
+                    pairedAnchor = anchorPair(a);
                     cutLevelFence(*log,a.level);
                     logPrepared = true;
                 }
@@ -456,7 +446,7 @@ json roll(const RollOptions& o) {
             if (o.onAnchorRestore) o.onAnchorRestore(restoreCursor,book,bookUp,restoreCursorApplied,restoreLocal);
             if (o.onRecorder) o.onRecorder(recorder.get(), &feed, end);
             if (o.onLevelRecorder && level) o.onLevelRecorder(level.get());
-            if (log && checkpointReplayed && checkpoint && receiveThrough >= targetBoundary) {
+            if (!log && checkpointReplayed && checkpoint && receiveThrough >= targetBoundary) {
                 point("recovery-replayed"); recoveryComplete = true;
             }
             // A restore exactly at the checkpoint can reach the socket tip
@@ -470,9 +460,7 @@ json roll(const RollOptions& o) {
         }
         if (!reader) {
             if (log) {
-                for (const auto& file : candidates)
-                    if (AnchorStore::load(file).level.is_null())
-                        throw std::runtime_error("C resume requires paired C state; HMC2-only anchor");
+                if (!pairedAnchor.is_null()) throw std::runtime_error("C checkpoint paired anchor unavailable");
                 // Before the first quarter fence, replay from the original floor.
                 // Preserve only an explicitly fenced preceding day's output.
                 if (!logPrepared) {
@@ -569,6 +557,7 @@ json roll(const RollOptions& o) {
                     point("anchor-synced");
                 }
                 const auto written = AnchorStore::write(anchorRoot,a,[&] { point("anchor-mid-write"); });
+                if (log) pairedAnchor = anchorPair(a);
                 dayReport["anchorBytes"] = written.encodedBytes;
                 sLog_Data("Roller anchor written product=" << o.product << " boundaryMs=" << boundary
                     << " exportMs=" << exportMs << " encodeMs=" << written.encodeMs
@@ -592,12 +581,18 @@ json roll(const RollOptions& o) {
             if (!recorder) return;
             const auto drainStart = std::chrono::steady_clock::now();
             recorder->drain();
-            if (log && o.levelTiming) o.levelTiming("worker-drain",
+            if (o.levelTiming) o.levelTiming("worker-drain",
                 std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-drainStart).count());
             if (level) level->throwIfFailed();
             const auto stats = recorder->stats();
             if (stats.diskErrors) throw std::runtime_error("roller recorder failed; checkpoint not advanced");
-            if (log && checkpointReplayed && checkpoint && !recoveryComplete && receiveThrough >= targetBoundary) {
+            if (checkpointReplayed && checkpoint && !recoveryComplete && receiveThrough >= targetBoundary) {
+                if (log) {
+                    const auto restored = syncLevelFence(*level,*log,recorder->checkpointClock(o.product),o.levelTiming,"recovery-sync");
+                    const auto& saved = cp.at("days").at(key).at("level");
+                    for (const auto* field : {"binding","clock","tail"})
+                        if (restored.at(field) != saved.at(field)) throw std::runtime_error("C replay differs from checkpoint fence");
+                }
                 point("recovery-replayed"); recoveryComplete = true;
             }
             if (log && !checkpointReplayed) return;
@@ -612,9 +607,9 @@ json roll(const RollOptions& o) {
             cp["pos"] = applied; cp["committedThroughMs"] = through; cp["configHash"] = hash;
             const auto checkpointStart = std::chrono::steady_clock::now();
             if (log) {
-                const auto recorderBytes = recorder->exportState();
-                cp["days"][key]["recorder"] = recorderBytes;
-                cp["days"][key]["level"] = levelFence(*level,*log,recorder->checkpointClock(o.product),recorderBytes,o.levelTiming,"checkpoint-sync");
+                auto c = syncLevelFence(*level,*log,recorder->checkpointClock(o.product),o.levelTiming,"checkpoint-sync");
+                c["anchor"] = pairedAnchor;
+                cp["days"][key]["level"] = std::move(c);
                 point("checkpoint-synced");
             }
             writeCheckpoint(cpPath,cp,[&] { point("checkpoint-mid-write"); });
@@ -641,7 +636,7 @@ json roll(const RollOptions& o) {
                 saveAnchor(day,&input); nextBoundary += Quarter;
             }
             feed.apply(input); applied = input.pos; ++records;
-            const bool reachedCheckpoint = log && checkpoint && applied == *checkpoint;
+            const bool reachedCheckpoint = checkpoint && applied == *checkpoint;
             if (reachedCheckpoint) checkpointReplayed = true;
             receiveThrough = std::max(receiveThrough,input.record.time.systemNs / 1'000'000);
             if (o.onApplied) o.onApplied(input);
@@ -663,7 +658,7 @@ json roll(const RollOptions& o) {
             // The lateness tail normally closes seconds after the range. Waiting
             // for the next minute fence adds an unnecessary minute to restart.
             const bool tailFence = second >= end / 1000 && second != lastTailFence;
-            if (minute != lastFence || tailFence || reachedCheckpoint) {
+            if (minute != lastFence || tailFence || (log && reachedCheckpoint)) {
                 fence(); lastFence = minute;
                 if (tailFence) lastTailFence = second;
             }
@@ -673,9 +668,11 @@ json roll(const RollOptions& o) {
             // Dry runs retain their receive-time scan bound, without claiming commits.
             if (o.dryRun && input.record.time.systemNs / 1'000'000 >= end + latenessMs) break;
         }
+        if (o.cancelled && o.cancelled()) break;
         if (log && !checkpointReplayed)
             throw std::runtime_error("C checkpoint journal position was not replayed");
         fence();
+        if (checkpoint && !recoveryComplete) point("recovery-replayed");
         if (o.allowGrowingEnd && savedThrough >= end && end < day + Day)
             saveAnchor(end);
         if (recorder) columns += recorder->stats().columnsWritten - importedColumns;

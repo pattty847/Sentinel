@@ -39,6 +39,7 @@ struct RollOptions {
     // Opt-in durable C output, mutually exclusive with levelOutput. Each roll owns a
     // fresh writer and restores the paired quarter anchor before replay. Calling roll
     // again after failure is the same restart path as a new process; no automatic retry.
+    // A durable C call must stay within a single UTC day.
     std::filesystem::path levelLogRoot;
     std::shared_ptr<levelstore::LevelLogFiles> levelLogFiles;
     std::function<void(const char*)> persistencePointForTest;

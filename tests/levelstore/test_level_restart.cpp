@@ -1,7 +1,7 @@
 #include "LevelTestSupport.hpp"
 #include "RestartJournal.hpp"
 #include "Crc32.hpp"
-#include "roller/CheckpointBytes.hpp"
+#include "roller/LevelCheckpoint.hpp"
 #include "roller/Roller.hpp"
 #include "roller/AnchorStore.hpp"
 #include "levelstore/LevelLog.hpp"
@@ -14,6 +14,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <signal.h>
+#include <spawn.h>
+extern char** environ;
 #endif
 using namespace sentinel;
 using namespace sentinel::roller;
@@ -22,6 +24,7 @@ using nlohmann::json;
 namespace {
 constexpr auto Epoch = RestartJournal::Epoch;
 constexpr int64_t Minute = 60'000;
+std::string executable;
 std::string contents(const fs::path& p) {
     std::ifstream in(p,std::ios::binary); return {std::istreambuf_iterator<char>(in),{}};
 }
@@ -53,10 +56,8 @@ json checkedRoll(RollOptions o) {
     auto result=sentinel::roller::roll(o);
     if (!o.levelLogRoot.empty()) {
         if (finalState.empty()) throw std::runtime_error("successful roll has no live final C state");
-        const auto cp=json::parse(contents(o.outputRoot/o.product/"roller.json"));
-        const auto day=std::to_string((o.toMs-1)/86'400'000*86'400'000);
-        const auto saved=unpackCheckpointBytes(cp.at("days").at(day).at("level").at("state").get<std::string>());
-        if (saved!=finalState) throw std::runtime_error("live final C state differs from persisted checkpoint");
+        std::ofstream out(o.outputRoot.parent_path()/"final.state",std::ios::binary);
+        out.write(reinterpret_cast<const char*>(finalState.data()),finalState.size());
     }
     return result;
 }
@@ -73,6 +74,7 @@ void equal(const fs::path& a, const fs::path& b) {
     ASSERT_TRUE(state(a).is_object());
     ASSERT_TRUE(state(b).is_object());
     EXPECT_EQ(state(a),state(b));
+    EXPECT_EQ(contents(a/"final.state"),contents(b/"final.state"));
     EXPECT_FALSE(tree(a/"hmc",".hmc2").empty());
 }
 struct FaultFiles : LevelLogFiles {
@@ -132,14 +134,9 @@ TEST(LevelRestart, PairedCheckpointMismatchRefusesBeforeCut) {
     const auto path=o.outputRoot/"BTC-USD/roller.json";
     const auto original=contents(path); const auto before=tree(o.levelLogRoot,".lcl");
     for (bool length : {false,true}) {
-        auto cp=json::parse(original); auto& bytes=cp["days"][std::to_string(Epoch)]["recorder"];
-        auto payload=unpackCheckpointBytes(bytes.get<std::string>()); payload.resize(payload.size()-4);
-        auto decoded=json::from_cbor(payload);
-        decoded["stats"][1]=length ? 65536 : 1;
-        payload=json::to_cbor(decoded);
-        const auto crc=sentinel::crc32(payload.data(),payload.size());
-        for (int i=0;i<4;++i) payload.push_back(uint8_t(crc>>(8*i)));
-        bytes=packCheckpointBytes(payload);
+        auto cp=json::parse(original);
+        auto& digest=cp["days"][std::to_string(Epoch)]["level"]["anchor"]["recorder"];
+        digest[length ? "length" : "crc"]=digest[length ? "length" : "crc"].get<uint64_t>()+1;
         std::ofstream(path)<<cp.dump();
         try { checkedRoll(o); FAIL()<<"accepted mismatched recorder pair"; }
         catch (const std::exception& e) { EXPECT_NE(std::string(e.what()).find("not paired"),std::string::npos)<<e.what(); }
@@ -150,32 +147,22 @@ TEST(LevelRestart, PairedCheckpointMismatchRefusesBeforeCut) {
 TEST(LevelRestart, KillAndRestartMatchesAllBytes) {
     TempDir t; RestartJournal journal(t.path/"raw"); journal.grow(90);
     ASSERT_NO_THROW(checkedRoll(options(t.path/"raw",t.path/"one")));
-    for (const std::string point : {"initial-append","append","checkpoint-synced","checkpoint-mid-write","anchor-mid-write","cut"}) {
+    for (const std::string point : {"initial-append","append","checkpoint-synced","checkpoint-mid-write","anchor-synced","anchor-mid-write","cut"}) {
         SCOPED_TRACE(point); const auto root=t.path/point;
-        const auto child=::fork(); ASSERT_GE(child,0);
-        if (!child) {
-            try {
-                auto o=options(t.path/"raw",root); auto f=std::make_shared<FaultFiles>(); o.levelLogFiles=f;
-                bool ready=false; f->killWrite=true;
-                o.onApplied=[&](const JournalRecord& r) {
-                    ready=r.record.time.systemNs/1'000'000>=Epoch+(point=="initial-append" ? 0 : 35*Minute);
-                    if (ready && (point=="initial-append" || point=="append" || point=="cut")) f->armed=true;
-                };
-                o.persistencePointForTest=[&](const char* p) { if (ready && point==p) ::kill(::getpid(),SIGKILL); };
-                checkedRoll(o); ::_exit(3);
-            } catch (const std::exception& e) { std::fprintf(stderr,"restart child: %s\n",e.what()); ::_exit(4); }
-        }
-        int status=0; ASSERT_EQ(::waitpid(child,&status,0),child);
-        ASSERT_TRUE(WIFSIGNALED(status)); ASSERT_EQ(WTERMSIG(status),SIGKILL);
-        if (point=="cut") {
-            const auto cutting=::fork(); ASSERT_GE(cutting,0);
-            if (!cutting) {
-                try { auto o=options(t.path/"raw",root); auto f=std::make_shared<FaultFiles>();
-                    f->killCut=true; o.levelLogFiles=f; checkedRoll(o); ::_exit(3); } catch (const std::exception& e) { std::fprintf(stderr,"restart child: %s\n",e.what()); ::_exit(4); }
-            }
-            ASSERT_EQ(::waitpid(cutting,&status,0),cutting);
-            ASSERT_TRUE(WIFSIGNALED(status)); ASSERT_EQ(WTERMSIG(status),SIGKILL);
-        }
+        const auto spawn = [&](const std::string& mode) {
+            std::vector<std::string> args={executable,"--restart-child",(t.path/"raw").string(),root.string(),mode};
+            std::vector<char*> argv; for (auto& arg : args) argv.push_back(arg.data()); argv.push_back(nullptr);
+            pid_t child=-1;
+            const auto error=::posix_spawn(&child,executable.c_str(),nullptr,nullptr,argv.data(),environ);
+            EXPECT_EQ(error,0);
+            if (error) return -1;
+            int status=0;
+            EXPECT_EQ(::waitpid(child,&status,0),child);
+            EXPECT_TRUE(WIFSIGNALED(status));
+            return WIFSIGNALED(status) ? WTERMSIG(status) : -1;
+        };
+        ASSERT_EQ(spawn(point),SIGKILL);
+        if (point=="cut") ASSERT_EQ(spawn("mid-cut"),SIGKILL);
         ASSERT_NO_THROW(checkedRoll(options(t.path/"raw",root))); equal(t.path/"one",root);
     }
 }
@@ -247,6 +234,110 @@ TEST(LevelRestart, CompletedCheckpointDoesNotConsumePastItsPosition) {
     auto o=options(t.path/"raw",t.path/"attempt"); o.allowGrowingEnd=true;
     ASSERT_NO_THROW(checkedRoll(o));
     const auto original=state(t.path/"attempt");
+    const auto live=contents(t.path/"attempt/final.state");
     ASSERT_NO_THROW(checkedRoll(o));
     EXPECT_EQ(state(t.path/"attempt"),original);
+    EXPECT_EQ(contents(t.path/"attempt/final.state"),live);
+}
+
+TEST(LevelRestart, CompactCheckpointReferencesBinaryAnchor) {
+    TempDir t; RestartJournal journal(t.path/"raw"); journal.grow(90);
+    auto o=options(t.path/"raw",t.path/"one"); checkedRoll(o);
+    const auto bytes=contents(o.outputRoot/"BTC-USD/roller.json");
+    const auto cp=json::parse(bytes); const auto& day=cp.at("days").at(std::to_string(Epoch));
+    EXPECT_LT(bytes.size(),4096u);
+    EXPECT_FALSE(day.contains("recorder")); EXPECT_FALSE(day.at("level").contains("state"));
+    const auto a=AnchorStore::load(AnchorStore::candidates(o.outputRoot,"BTC-USD",Epoch).front());
+    ASSERT_TRUE(a.level.at("state").is_binary());
+    EXPECT_EQ(day.at("level").at("anchor"),anchorPair(a));
+}
+TEST(LevelRestart, MultidayRangeRefusesBeforeChangingOutput) {
+    TempDir t; RestartJournal journal(t.path/"raw"); journal.grow(24*60+20);
+    auto o=options(t.path/"raw",t.path/"attempt"); o.toMs=Epoch+2*86'400'000;
+    auto refuse=[&] {
+        try { sentinel::roller::roll(o); FAIL()<<"accepted multi-day C range"; }
+        catch (const std::exception& e) { EXPECT_NE(std::string(e.what()).find("one UTC day"),std::string::npos)<<e.what(); }
+    };
+    refuse(); EXPECT_FALSE(fs::exists(o.levelLogRoot)); EXPECT_FALSE(fs::exists(o.outputRoot));
+    auto daily=o; daily.toMs=Epoch+86'400'000; checkedRoll(daily);
+    daily.fromMs=daily.toMs; daily.toMs+=86'400'000; checkedRoll(daily);
+    const auto logs=tree(o.levelLogRoot,".lcl"), hmc=tree(o.outputRoot,".hmc2");
+    const auto cp=contents(o.outputRoot/"BTC-USD/roller.json");
+    refuse(); EXPECT_EQ(tree(o.levelLogRoot,".lcl"),logs); EXPECT_EQ(tree(o.outputRoot,".hmc2"),hmc);
+    EXPECT_EQ(contents(o.outputRoot/"BTC-USD/roller.json"),cp);
+}
+TEST(LevelRestart, ReplayedCheckpointValidatesClockAndTail) {
+    TempDir t; RestartJournal journal(t.path/"raw"); journal.grow(40);
+    auto o=options(t.path/"raw",t.path/"attempt"); checkedRoll(o);
+    const auto path=o.outputRoot/"BTC-USD/roller.json"; const auto original=contents(path);
+    for (const char* field : {"clock","tail"}) {
+        auto cp=json::parse(original); auto& c=cp["days"][std::to_string(Epoch)]["level"];
+        if (std::string_view(field)=="clock") c["clock"]=c["clock"].get<int64_t>()+1;
+        else c["tail"]["minute"]=c["tail"]["minute"].get<int64_t>()-Minute;
+        std::ofstream(path)<<cp.dump(); EXPECT_THROW(checkedRoll(o),std::exception);
+    }
+}
+TEST(LevelRestart, CancellationDuringCheckpointReplayReturnsCleanly) {
+    TempDir t; RestartJournal journal(t.path/"raw"); journal.grow(40);
+    auto o=options(t.path/"raw",t.path/"attempt"); checkedRoll(o);
+    const auto cp=contents(o.outputRoot/"BTC-USD/roller.json"); bool cancelled=false;
+    o.onApplied=[&](const JournalRecord&) { cancelled=true; }; o.cancelled=[&] { return cancelled; };
+    EXPECT_NO_THROW(sentinel::roller::roll(o)); EXPECT_TRUE(cancelled);
+    EXPECT_EQ(contents(o.outputRoot/"BTC-USD/roller.json"),cp);
+    o.onApplied={}; o.cancelled={}; journal.grow(90); checkedRoll(o);
+    checkedRoll(options(t.path/"raw",t.path/"one")); equal(t.path/"one",t.path/"attempt");
+}
+TEST(LevelRestart, IgnoresUnusedDaysAndFutureCandidates) {
+    TempDir t; RestartJournal journal(t.path/"raw"); journal.grow(9);
+    auto o=options(t.path/"raw",t.path/"attempt"); o.fromMs+=7*Minute; o.toMs=Epoch+9*Minute; checkedRoll(o);
+    const auto path=o.outputRoot/"BTC-USD/roller.json";
+    auto cp=json::parse(contents(path)); cp["days"][std::to_string(Epoch-2*86'400'000)]={{"committedThroughMs",Epoch-86'400'000}};
+    // A newer preceding day with an empty fence is all this replay needs.
+    cp["days"][std::to_string(Epoch-86'400'000)]={{"committedThroughMs",Epoch},{"level",{{"tail",nullptr}}}};
+    std::ofstream(path)<<cp.dump();
+    const auto anchors=o.outputRoot/"BTC-USD/anchors/2027-01-01"; fs::create_directories(anchors);
+    std::ofstream(anchors/"2345.anchor")<<"unused future corrupt anchor";
+    EXPECT_NO_THROW(checkedRoll(o));
+}
+TEST(LevelRestart, HmcOnlyReportsDrainAndRecoveryTiming) {
+    TempDir t; RestartJournal journal(t.path/"raw"); journal.grow(40);
+    auto o=options(t.path/"raw",t.path/"attempt"); o.levelLogRoot.clear(); checkedRoll(o);
+    unsigned drains=0, recoveries=0;
+    o.levelTiming=[&](const char* name,double) { if (std::string_view(name)=="worker-drain") ++drains; };
+    o.persistencePointForTest=[&](const char* name) { if (std::string_view(name)=="recovery-replayed") ++recoveries; };
+    journal.grow(90); EXPECT_NO_THROW(checkedRoll(o)); EXPECT_GT(drains,0u); EXPECT_EQ(recoveries,1u);
+}
+TEST(LevelRestart, GrowingUnalignedJournalAcrossDayBoundary) {
+    TempDir t; RestartJournal journal(t.path/"raw");
+    auto o=options(t.path/"raw",t.path/"stepped"); o.allowGrowingEnd=true; o.toMs=Epoch+86'400'000;
+    journal.grow(1439); checkedRoll(o); // EOF is 23:59:05, not a minute or day boundary.
+    journal.grow(1440); checkedRoll(o);
+    auto one=options(t.path/"raw",t.path/"one"); one.allowGrowingEnd=true; one.toMs=o.toMs; checkedRoll(one);
+    equal(t.path/"one",t.path/"stepped");
+    o.fromMs=o.toMs; o.toMs+=86'400'000;
+    journal.grow(1460); checkedRoll(o); journal.grow(1480); checkedRoll(o);
+    one.fromMs=o.fromMs; one.toMs=o.toMs; checkedRoll(one);
+    equal(t.path/"one",t.path/"stepped");
+    checkedRoll(o); equal(t.path/"one",t.path/"stepped");
+}
+
+int main(int argc,char** argv) {
+    executable=fs::absolute(argv[0]).string();
+#ifndef _WIN32
+    if (argc==5 && std::string_view(argv[1])=="--restart-child") {
+        try {
+            const std::string point=argv[4];
+            auto o=options(argv[2],argv[3]); auto f=std::make_shared<FaultFiles>(); o.levelLogFiles=f;
+            bool ready=false; f->killWrite=true; f->killCut=point=="mid-cut";
+            o.onApplied=[&](const JournalRecord& r) {
+                ready=r.record.time.systemNs/1'000'000>=Epoch+(point=="initial-append" ? 0 : 35*Minute);
+                if (ready && (point=="initial-append" || point=="append" || point=="cut")) f->armed=true;
+            };
+            o.persistencePointForTest=[&](const char* p) { if (ready && point==p) ::kill(::getpid(),SIGKILL); };
+            checkedRoll(o); return 3;
+        } catch (const std::exception& e) { std::fprintf(stderr,"restart child: %s\n",e.what()); return 4; }
+    }
+#endif
+    ::testing::InitGoogleTest(&argc,argv);
+    return RUN_ALL_TESTS();
 }

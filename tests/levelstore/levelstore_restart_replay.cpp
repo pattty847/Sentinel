@@ -1,6 +1,5 @@
 // Offline restart evidence; RAWL2 is opened read-only by the roller.
 #include "roller/Roller.hpp"
-#include "roller/CheckpointBytes.hpp"
 #include "levelstore/LevelLog.hpp"
 #include <nlohmann/json.hpp>
 #include <chrono>
@@ -123,10 +122,10 @@ int main(int argc,char** argv) {
         };
         report["roll"]=roller::roll(o);
         if (!o.levelLogRoot.empty()) {
-            std::ifstream in(o.outputRoot/o.product/"roller.json"); json cp; in>>cp;
-            const auto saved=roller::unpackCheckpointBytes(cp.at("days").at(std::to_string(o.fromMs)).at("level").at("state").get<std::string>());
-            if (finalState.empty() || saved!=finalState) throw std::runtime_error("live final C state differs from checkpoint");
-            report["finalLiveStateMatchesCheckpoint"]=true;
+            if (finalState.empty()) throw std::runtime_error("missing live final C state");
+            std::ofstream state(out/"final.state",std::ios::binary);
+            state.write(reinterpret_cast<const char*>(finalState.data()),finalState.size());
+            report["finalLiveStateBytes"]=finalState.size();
         }
         report["minuteSamples"]=minuteSamples;
         for (auto& [name,v] : costs) {
