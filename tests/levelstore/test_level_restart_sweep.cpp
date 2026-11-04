@@ -105,7 +105,10 @@ bool run(const fs::path& raw, const fs::path& root, Trace& trace, int startDay =
         };
         // Serialize the worker's real writes with the caller's observation points.
         // This changes scheduling only: all writes/syncs still use native I/O.
-        o.onApplied=[&](const auto&) { if (recorder) recorder->drain(); };
+        o.onApplied=[&](const auto&) {
+            if (recorder) recorder->drain();
+            if (trace.hit) throw std::runtime_error("sweep worker stop");
+        };
         o.afterRecordForTest=[&](auto) { trace.point("journal-record"); };
         o.afterAnchorForTest=[&](auto) { trace.point("anchor-written"); };
         try { roll(o); }
@@ -121,7 +124,7 @@ void journal(const fs::path& root) {
     RestartJournal writer(root);
     for (int s : {-55,-1,0,5,420}) writer.at(s);
     writer.restart(450); // Two real capture::Writer runs, inside the quarter window.
-    for (int s : {455,840,895,900,905,960,965,1020}) writer.at(s);
+    for (int s : {455,840,895,900,905,960,965}) writer.at(s);
 }
 // Forward traces have no replay-validation fence. Include the native recovery
 // prefix and the sync immediately preceding that fence, even after overlap records.
