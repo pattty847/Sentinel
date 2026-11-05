@@ -23,16 +23,16 @@
 //   validity and observation and any unobserved episode, so a restore during an
 //   invalid period, right after a reset, during warmup or at midnight continues
 //   exactly as without it.
-// - Snapshot resets (onReset): every level not re-sent ends, the rest continue
-//   unchanged if their size did not change (diffed in endMessage).
+// - Snapshot resets (onReset): replace the exact book atomically with the full
+//   source snapshot, retaining all source values separately from book changes.
 // - Observation-invalid periods (onInvalid): every level ends (the recorder cleared
-//   its book) and nothing is observed; updates while invalid never reach the sink.
+//   its book) and nothing is observed. Dropped-source notifications check that
+//   the exact consumer agrees with the recorder's invalid state.
 // - forkLead: the lead recorder has no sink (BookRecorder::forkLead), so speculative
 //   live replay never reaches C.
 
 namespace sentinel::levelstore {
 namespace {
-using recording::DecimalIdentity;
 constexpr int64_t kMinute = 60'000;
 constexpr size_t kMaxSymbol = 256;
 constexpr uint8_t kMagic[4] = {'L', 'S', 'C', '1'};
@@ -123,7 +123,8 @@ void LevelRecorder::startDay() {
     open_.changes.clear();
     open_.inputs.clear();
     open_.observedAtStart = observed_;
-    open_.priceDigits = priceDigits_; open_.sizeDigits = sizeDigits_;
+    open_.priceDigits = priceDigits_;
+    open_.sizeDigits = sizeDigits_;
     output_->onDayStart(binding_, BookImage{binding_.floorMs, observed_, book(), priceDigits_, sizeDigits_});
     dayStarted_ = true;
 }
@@ -139,10 +140,12 @@ void LevelRecorder::touch(bool isBid, int64_t units, int64_t size) {
 }
 
 void LevelRecorder::onReset(const std::string &symbol, int64_t clock) noexcept {
-    if (failed() || halted_ || !mine(symbol)) return;
+    if (failed() || halted_ || !mine(symbol))
+        return;
     try {
         begin(clock);
-        if (prepared_ && messageReset_) return;
+        if (prepared_ && messageReset_)
+            return;
         messageReset_ = true;
         clearBook();
     } catch (const std::exception &e) {
@@ -152,20 +155,30 @@ void LevelRecorder::onReset(const std::string &symbol, int64_t clock) noexcept {
     }
 }
 
-void LevelRecorder::onImprecise(const std::string&, int64_t, const LevelChange&) noexcept {}
-void LevelRecorder::onLevel(const std::string& symbol, int64_t clock, const LevelChange&) noexcept {
-    if (failed() || halted_ || !mine(symbol)) return;
-    if (!prepared_ && !malformedSource_) fail("missing exact source", clock);
+void LevelRecorder::onImprecise(const std::string &, int64_t, const LevelChange &) noexcept {}
+void LevelRecorder::onLevel(const std::string &symbol, int64_t clock, const LevelChange &) noexcept {
+    if (failed() || halted_ || !mine(symbol))
+        return;
+    if (!prepared_ && !malformedSource_)
+        fail("missing exact source", clock);
 }
 
 void LevelRecorder::onApplied(const std::string &symbol, int64_t clock, bool valid, bool observing) noexcept {
-    if (failed() || halted_ || !mine(symbol)) return;
+    if (failed() || halted_ || !mine(symbol))
+        return;
     try {
         begin(clock);
-        if (valid && malformedSource_) { halt("legacy accepted malformed decimal input"); return; }
-        if (valid && observing != exactUsable()) { halt("legacy observation contradicts exact book"); return; }
+        if (valid && malformedSource_) {
+            halt("legacy accepted malformed decimal input");
+            return;
+        }
+        if (valid && observing != exactUsable()) {
+            halt("legacy observation contradicts exact book");
+            return;
+        }
         endMessage(clock, valid, observing, false);
-        prepared_ = false; source_ = nullptr;
+        prepared_ = false;
+        source_ = nullptr;
     } catch (const std::exception &e) {
         fail(e.what(), clock);
     } catch (...) {
@@ -173,14 +186,23 @@ void LevelRecorder::onApplied(const std::string &symbol, int64_t clock, bool val
     }
 }
 
-void LevelRecorder::onInvalid(const std::string &symbol, int64_t clock, const std::string &reason, bool upstream) noexcept {
-    if (failed() || halted_ || !mine(symbol)) return;
+void LevelRecorder::onInvalid(const std::string &symbol, int64_t clock, const std::string &reason,
+                              bool upstream) noexcept {
+    if (failed() || halted_ || !mine(symbol))
+        return;
     try {
         begin(clock);
-        if (reason == "worker exception") { fail("recorder worker exception", clock); return; }
-        if (!upstream && !malformedSource_ && exactUsable()) { halt("legacy invalidation contradicts exact book"); return; }
+        if (reason == "worker exception") {
+            fail("recorder worker exception", clock);
+            return;
+        }
+        if (!upstream && !malformedSource_ && exactUsable()) {
+            halt("legacy invalidation contradicts exact book");
+            return;
+        }
         endMessage(clock, false, false, true);
-        prepared_ = false; source_ = nullptr;
+        prepared_ = false;
+        source_ = nullptr;
     } catch (const std::exception &e) {
         fail(e.what(), clock);
     } catch (...) {
@@ -194,15 +216,13 @@ void LevelRecorder::endMessage(int64_t clock, bool valid, bool observing, bool i
     valid_ = valid;
     recorderObserving_ = valid && observing;
     ClearCause clear = ClearCause::None;
-    bool reset = false, discard = false;
-    if (invalidated) clear = ClearCause::Invalid;
-    else reset = messageReset_;
+    bool reset = false;
+    if (invalidated)
+        clear = ClearCause::Invalid;
+    else
+        reset = messageReset_;
     observed_ = recorderObserving_ && unobserved_ == Unobserved::None;
     inMessage_ = false;
-    if (discard) {
-        clearBook();
-        return;
-    }
     if (clear != ClearCause::None) {
         // Clears are ordinary input events. Internal failure never resumes output,
         // so there is no separate reader state or deferred clear to reconcile. A
@@ -250,7 +270,8 @@ void LevelRecorder::endMessage(int64_t clock, bool valid, bool observing, bool i
 
 void LevelRecorder::onMinute(const std::string &symbol, int64_t bucketStartMs, uint32_t observedMs,
                              uint32_t flags) noexcept {
-    if (failed() || halted_ || !mine(symbol)) return;
+    if (failed() || halted_ || !mine(symbol))
+        return;
     const int64_t end = bucketStartMs + kMinute;
     try {
         if (inMessage_) throw std::logic_error("minute inside a message");
@@ -275,11 +296,16 @@ void LevelRecorder::onMinute(const std::string &symbol, int64_t bucketStartMs, u
         }
         open_.messages.clear();
         open_.changes.clear();
-    open_.inputs.clear();
+        open_.inputs.clear();
         open_.observedAtStart = observed_;
-    open_.priceDigits = priceDigits_; open_.sizeDigits = sizeDigits_;
+        open_.priceDigits = priceDigits_;
+        open_.sizeDigits = sizeDigits_;
     } catch (const std::overflow_error &e) {
-        try { halt(e.what()); } catch (const std::exception& persistenceError) { fail(persistenceError.what(), end); }
+        try {
+            halt(e.what());
+        } catch (const std::exception &persistenceError) {
+            fail(persistenceError.what(), end);
+        }
     } catch (const std::exception &e) {
         fail(e.what(), end);
     } catch (...) {
@@ -302,7 +328,8 @@ void LevelRecorder::allocationSeam(const char *site) {
 }
 
 void LevelRecorder::clearBook() noexcept {
-    legacyKeys_[0].clear(); legacyKeys_[1].clear();
+    legacyKeys_[0].clear();
+    legacyKeys_[1].clear();
     book_[0].clear();
     book_[1].clear();
     touched_.clear();
@@ -344,7 +371,8 @@ size_t LevelRecorder::memoryBytes() const {
     // unordered_map: one node (key, slot, next pointer, cached hash) per level plus
     // one bucket pointer per bucket; vectors by capacity.
     size_t bytes = 0;
-    for (const auto &side : book_) bytes += side.size() * 64;
+    for (const auto &side : book_)
+        bytes += side.size() * 64;
     bytes += touched_.capacity() * sizeof(Touch);
     bytes += open_.messages.capacity() * sizeof(TimelineMessage) + open_.changes.capacity() * sizeof(TimelineChange);
     return bytes;
@@ -356,7 +384,8 @@ size_t LevelRecorder::memoryBytes() const {
 std::vector<uint8_t> LevelRecorder::exportState(std::optional<int64_t> recorderClock,
                                                 const std::vector<uint8_t> &recorderState) const {
     throwIfFailed();
-    if (halted_) throw std::runtime_error("halted C cannot export state");
+    if (halted_)
+        throw std::runtime_error("halted C cannot export state");
     if (inMessage_) throw std::logic_error("LevelRecorder::exportState inside a message (recorder not drained)");
     if (recorderClock ? *recorderClock < lastClock_ : lastClock_ != INT64_MIN)
         throw std::logic_error("LevelRecorder::exportState: checkpoint clock behind C's last event");
@@ -368,17 +397,24 @@ std::vector<uint8_t> LevelRecorder::exportState(std::optional<int64_t> recorderC
     w.svarint(binding_.floorMs);
     w.svarint(binding_.ceilingMs);
     w.svarint(binding_.priceDigits);
-    w.fixed32(priceDigits_); w.fixed32(sizeDigits_);
+    w.fixed32(priceDigits_);
+    w.fixed32(sizeDigits_);
     w.f64(legacyPriceScale_);
     nlohmann::json provenance = nullptr;
     if (sourceOwner_) {
-        const auto& src = *sourceOwner_;
-        provenance = {{"file",src.file},{"run",src.run},{"block",src.block},{"record",src.record},
-            {"sequence",src.sequence},{"priceIncrement",src.priceIncrement},{"sizeIncrement",src.sizeIncrement},
-            {"snapshot",src.snapshot},{"malformed",src.malformed}};
+        const auto &src = *sourceOwner_;
+        provenance = {{"file", src.file},
+                      {"run", src.run},
+                      {"block", src.block},
+                      {"record", src.record},
+                      {"sequence", src.sequence},
+                      {"priceIncrement", src.priceIncrement},
+                      {"sizeIncrement", src.sizeIncrement},
+                      {"snapshot", src.snapshot},
+                      {"malformed", src.malformed}};
         if (!src.levels.empty()) {
-            const auto& first = src.levels.front();
-            provenance["level"] = {{"bid",first.isBid},{"price",first.priceText},{"size",first.sizeText}};
+            const auto &first = src.levels.front();
+            provenance["level"] = {{"bid", first.isBid}, {"price", first.priceText}, {"size", first.sizeText}};
         }
     }
     w.str(provenance.dump());
@@ -393,9 +429,9 @@ std::vector<uint8_t> LevelRecorder::exportState(std::optional<int64_t> recorderC
     w.u8(static_cast<uint8_t>(unobserved_));
     w.u8(lastClock_ == INT64_MIN ? 0 : 1);
     w.svarint(lastClock_ == INT64_MIN ? 0 : lastClock_);
-    for (uint64_t v : {stats_.messages, stats_.changes, stats_.blocks, stats_.resets, stats_.clears,
-                       stats_.offGridValues, stats_.halts, stats_.failures, stats_.restoreRefusals,
-                       stats_.foreignEvents})
+    for (uint64_t v :
+         {stats_.messages, stats_.changes, stats_.blocks, stats_.resets, stats_.clears, stats_.offGridValues,
+          stats_.halts, stats_.failures, stats_.restoreRefusals, stats_.foreignEvents})
         w.varint(v);
     const auto levels = book();
     for (bool isBid : {true, false}) {
@@ -443,16 +479,26 @@ LevelRecorder::ImportResult LevelRecorder::importState(const std::vector<uint8_t
         recording::ExactSourcePtr sourceOwner;
         if (!provenance.is_null()) {
             auto src = std::make_shared<recording::ExactSource>();
-            src->file=provenance.at("file");src->run=provenance.at("run");src->block=provenance.at("block");
-            src->record=provenance.at("record");src->sequence=provenance.at("sequence");
-            src->priceIncrement=provenance.at("priceIncrement");src->sizeIncrement=provenance.at("sizeIncrement");
-            src->snapshot=provenance.at("snapshot");src->malformed=provenance.at("malformed");
+            src->file = provenance.at("file");
+            src->run = provenance.at("run");
+            src->block = provenance.at("block");
+            src->record = provenance.at("record");
+            src->sequence = provenance.at("sequence");
+            src->priceIncrement = provenance.at("priceIncrement");
+            src->sizeIncrement = provenance.at("sizeIncrement");
+            src->snapshot = provenance.at("snapshot");
+            src->malformed = provenance.at("malformed");
             if (provenance.contains("level")) {
-                const auto& level=provenance.at("level");
-                recording::ExactSourceLevel l;l.isBid=level.at("bid");l.priceText=level.at("price");l.sizeText=level.at("size");
-                l.price=parseDecimal(l.priceText);l.size=parseDecimal(l.sizeText);src->levels.push_back(std::move(l));
+                const auto &level = provenance.at("level");
+                recording::ExactSourceLevel l;
+                l.isBid = level.at("bid");
+                l.priceText = level.at("price");
+                l.sizeText = level.at("size");
+                l.price = parseDecimal(l.priceText);
+                l.size = parseDecimal(l.sizeText);
+                src->levels.push_back(std::move(l));
             }
-            sourceOwner=std::move(src);
+            sourceOwner = std::move(src);
         }
         require(std::isfinite(legacyScale) && legacyScale > 0, "legacy scale");
         require(b == binding_, "state belongs to another product-day binding");
@@ -473,8 +519,8 @@ LevelRecorder::ImportResult LevelRecorder::importState(const std::vector<uint8_t
         const int64_t last = r.svarint();
         require(hasLast <= 1 && (!hasLast || (recorderClock && last <= *recorderClock)), "state clock");
         Stats s;
-        for (uint64_t *v : {&s.messages, &s.changes, &s.blocks, &s.resets, &s.clears, &s.offGridValues,
-                            &s.halts, &s.failures, &s.restoreRefusals, &s.foreignEvents})
+        for (uint64_t *v : {&s.messages, &s.changes, &s.blocks, &s.resets, &s.clears, &s.offGridValues, &s.halts,
+                            &s.failures, &s.restoreRefusals, &s.foreignEvents})
             *v = r.varint();
         Side sides[2];
         for (bool isBid : {true, false}) {
@@ -514,13 +560,16 @@ LevelRecorder::ImportResult LevelRecorder::importState(const std::vector<uint8_t
         lastClock_ = hasLast ? last : INT64_MIN;
         stats_ = s;
         sourceOwner_ = std::move(sourceOwner);
-        priceDigits_ = priceDigits; sizeDigits_ = sizeDigits; legacyPriceScale_ = legacyScale;
-        for (bool bid : {false, true}) for (const auto& [p, q] : book_[bid]) {
-            const auto text = decimalText(ExactDecimal{p, priceDigits_});
-            const auto key = recording::priceUnits(std::strtod(text.c_str(), nullptr), legacyPriceScale_);
-            require(key.has_value(), "restored unkeyable price");
-            require(legacyKeys_[bid].emplace(*key, p).second, "restored price collision");
-        }
+        priceDigits_ = priceDigits;
+        sizeDigits_ = sizeDigits;
+        legacyPriceScale_ = legacyScale;
+        for (bool bid : {false, true})
+            for (const auto &[p, q] : book_[bid]) {
+                const auto text = decimalText(ExactDecimal{p, priceDigits_});
+                const auto key = recording::priceUnits(std::strtod(text.c_str(), nullptr), legacyPriceScale_);
+                require(key.has_value(), "restored unkeyable price");
+                require(legacyKeys_[bid].emplace(*key, p).second, "restored price collision");
+            }
         return {true, {}};
     } catch (const std::exception &e) {
         std::snprintf(reason, sizeof reason, "%s", e.what());

@@ -37,7 +37,7 @@ struct TimelineChange {
     uint32_t message = 0; // index into MinuteBlock::messages
     bool isBid = false;
     int64_t units = 0;    // exact price units at 10^priceDigits
-    int64_t size = 0;      // the size the recorder applied; 0 ends the level
+    int64_t size = 0;     // the size the recorder applied; 0 ends the level
     bool operator==(const TimelineChange &) const = default;
 };
 // One finalised minute [bucketStartMs, +60 s): emitted when the recorder finishes it.

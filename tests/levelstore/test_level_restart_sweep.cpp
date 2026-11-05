@@ -276,28 +276,117 @@ TEST(LevelRestartSweep, EveryRecordAndPersistencePoint) {
 }
 
 TEST(LevelRestartSweep, EveryHourSealPointRestartsWithPairedAnchorIdentity) {
-    TempDir t;RestartJournal writer(t.path/"raw");
-    for(int s=0;s<=45*60;s+=5)writer.at(s);
+    TempDir t;
+    RestartJournal writer(t.path / "raw");
+    for (int s = 0; s <= 45 * 60; s += 5)
+        writer.at(s);
     std::vector<std::string> points;
-    const auto runSeal=[&](const fs::path& root,size_t stop){
-        size_t index=0;bool hit=false;recording::BookRecorder* recorder=nullptr;
-        RollOptions o{t.path/"raw",root/"hmc","BTC-USD",Epoch,Epoch+75*Minute};o.levelLogRoot=root/"log";
-        o.onRecorder=[&](auto* r,auto*,int64_t){recorder=r;};
-        o.onApplied=[&](const auto&){recorder->drain();if(hit)throw std::runtime_error("seal worker stop");};
-        o.persistencePointForTest=[&](const char* name){if(!std::string_view(name).starts_with("seal-")||hit)return;
-            if(root.filename()=="baseline-seal")points.push_back(name);
-            if(index++==stop){hit=true;throw std::runtime_error("seal stop");}};
-        try{roll(o);}catch(...){if(!hit)throw;}
+    const auto runSeal = [&](const fs::path &root, size_t stop) {
+        size_t index = 0;
+        bool hit = false;
+        recording::BookRecorder *recorder = nullptr;
+        RollOptions o{t.path / "raw", root / "hmc", "BTC-USD", Epoch, Epoch + 75 * Minute};
+        o.levelLogRoot = root / "log";
+        o.onRecorder = [&](auto *r, auto *, int64_t) { recorder = r; };
+        o.onApplied = [&](const auto &) {
+            recorder->drain();
+            if (hit)
+                throw std::runtime_error("seal worker stop");
+        };
+        o.persistencePointForTest = [&](const char *name) {
+            if (!std::string_view(name).starts_with("seal-") || hit)
+                return;
+            if (root.filename() == "baseline-seal")
+                points.push_back(name);
+            if (index++ == stop) {
+                hit = true;
+                throw std::runtime_error("seal stop");
+            }
+        };
+        try {
+            roll(o);
+        } catch (...) {
+            if (!hit)
+                throw;
+        }
         return hit;
     };
-    ASSERT_FALSE(runSeal(t.path/"growing-seal",SIZE_MAX));
-    for(int s=45*60+5;s<=76*60;s+=5)writer.at(s);
-    ASSERT_FALSE(runSeal(t.path/"baseline-seal",SIZE_MAX));ASSERT_FALSE(points.empty());
-    const auto everyFile=[&](const fs::path& root){std::map<std::string,std::string> files;
-        for(const auto& e:fs::recursive_directory_iterator(root))if(e.is_regular_file())files[fs::relative(e.path(),root).string()]=contents(e.path());return files;};
-    const auto wanted=everyFile(t.path/"baseline-seal");
-    for(size_t i=0;i<points.size();++i){SCOPED_TRACE(::testing::Message()<<i<<" "<<points[i]);
-        const auto out=t.path/("seal-stop-"+std::to_string(i));ASSERT_TRUE(runSeal(out,i));ASSERT_FALSE(runSeal(out,SIZE_MAX));EXPECT_EQ(everyFile(out),wanted);ASSERT_FALSE(HasFailure());}
-    ASSERT_FALSE(runSeal(t.path/"growing-seal",SIZE_MAX));EXPECT_EQ(everyFile(t.path/"growing-seal"),wanted);
-    RecordProperty("seal_points",nlohmann::json(points).dump());
+    ASSERT_FALSE(runSeal(t.path / "growing-seal", SIZE_MAX));
+    for (int s = 45 * 60 + 5; s <= 76 * 60; s += 5)
+        writer.at(s);
+    ASSERT_FALSE(runSeal(t.path / "baseline-seal", SIZE_MAX));
+    ASSERT_FALSE(points.empty());
+    const auto everyFile = [&](const fs::path &root) {
+        std::map<std::string, std::string> files;
+        for (const auto &e : fs::recursive_directory_iterator(root))
+            if (e.is_regular_file())
+                files[fs::relative(e.path(), root).string()] = contents(e.path());
+        return files;
+    };
+    const auto wanted = everyFile(t.path / "baseline-seal");
+    for (size_t i = 0; i < points.size(); ++i) {
+        SCOPED_TRACE(::testing::Message() << i << " " << points[i]);
+        const auto out = t.path / ("seal-stop-" + std::to_string(i));
+        ASSERT_TRUE(runSeal(out, i));
+        ASSERT_FALSE(runSeal(out, SIZE_MAX));
+        EXPECT_EQ(everyFile(out), wanted);
+        ASSERT_FALSE(HasFailure());
+    }
+    ASSERT_FALSE(runSeal(t.path / "growing-seal", SIZE_MAX));
+    EXPECT_EQ(everyFile(t.path / "growing-seal"), wanted);
+    RecordProperty("seal_points", nlohmann::json(points).dump());
+}
+
+TEST(LevelRestartSweep, AbandonedRecorderTempsAreRemovedWithoutChangingCommittedFiles) {
+    TempDir t;
+    journal(t.path / "raw");
+    Trace baseline;
+    ASSERT_TRUE(run(t.path / "raw", t.path / "expected", baseline));
+    const auto everyFile = [&](const fs::path &root) {
+        std::map<std::string, std::string> files;
+        for (const auto &e : fs::recursive_directory_iterator(root))
+            if (fs::is_regular_file(e.symlink_status()))
+                files[e.path().lexically_relative(root).string()] = contents(e.path());
+        return files;
+    };
+    const auto add = [](const fs::path &p) {
+        fs::create_directories(p.parent_path());
+        std::ofstream(p) << "uncommitted temporary bytes";
+    };
+    const std::vector<fs::path> unrelated = {
+        "hmc/BTC-USD/roller.json.backup-file", "hmc/BTC-USD/roller.json.a!2345",
+        "hmc/BTC-USD/anchors/2026-10-05/0001.anchor.abc123",
+        "hmc/BTC-USD/anchors/2026-02-30/0000.anchor.abc123",
+        "hmc/BTC-USD/anchors/notes/0000.anchor.abc123"};
+    for (const auto &p : unrelated)
+        add(t.path / "expected" / p);
+    const auto wanted = everyFile(t.path / "expected");
+    for (bool interrupt : {false, true}) {
+        const auto output = t.path / (interrupt ? "interrupted" : "resumed");
+        cloneOutput(t.path / "expected", output);
+        add(output / "hmc/BTC-USD/roller.json.LtOKuo");
+        add(output / "hmc/BTC-USD/anchors/2026-10-05/0015.anchor.Ab123z");
+        const auto link = output / "hmc/BTC-USD/roller.json.Sym123";
+        fs::create_symlink("roller.json", link);
+        Trace recovery;
+        if (interrupt) {
+            // The first cleanup is followed by a durable directory sync. Simulate
+            // another crash there; retry must remove the remaining temp safely.
+            // Locate the cleanup seam from a normal restart, then inject there.
+            const auto probe = t.path / "probe";
+            cloneOutput(output, probe);
+            Trace trace;
+            ASSERT_TRUE(run(t.path / "raw", probe, trace, 1));
+            const auto found = std::find_if(trace.events.begin(), trace.events.end(), [](const auto &e) {
+                return e.name == "c-recovery-temp-removed";
+            });
+            ASSERT_NE(found, trace.events.end());
+            recovery.stop = size_t(found - trace.events.begin());
+            ASSERT_FALSE(run(t.path / "raw", output, recovery, 1));
+        }
+        Trace retry;
+        ASSERT_TRUE(run(t.path / "raw", output, retry, 1));
+        EXPECT_EQ(everyFile(output), wanted);
+        EXPECT_TRUE(fs::is_symlink(fs::symlink_status(link)));
+    }
 }

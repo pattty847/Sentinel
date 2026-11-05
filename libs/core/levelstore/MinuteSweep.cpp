@@ -12,7 +12,8 @@ void require(bool ok, const char *what) {
 }
 } // namespace
 
-MinuteSweep::MinuteSweep(int64_t binUnits, bool nativeUnits) : binUnits_(binUnits), nativeUnits_(nativeUnits && binUnits == 1) {
+MinuteSweep::MinuteSweep(int64_t binUnits, bool nativeUnits)
+    : binUnits_(binUnits), nativeUnits_(nativeUnits && binUnits == 1) {
     if (binUnits_ <= 0) throw std::invalid_argument("MinuteSweep: binUnits");
 }
 
@@ -68,38 +69,52 @@ void MinuteSweep::accrueLive(int64_t t) {
 }
 
 void MinuteSweep::changeScale(uint32_t priceDigits, uint32_t sizeDigits) {
-    if (priceDigits == priceDigits_ && sizeDigits == sizeDigits_) return;
+    if (priceDigits == priceDigits_ && sizeDigits == sizeDigits_)
+        return;
     require(priceDigits >= priceDigits_ && sizeDigits >= sizeDigits_, "coarser period scale");
     const auto bin = decimalAtScale({binUnits_, priceDigits_}, priceDigits);
-    if(!bin)throw std::overflow_error("bin scale overflow");
+    if (!bin)
+        throw std::overflow_error("bin scale overflow");
     std::unordered_map<int64_t, int64_t> next[2];
-    for (bool bid : {false, true}) for (const auto& [p, q] : levels_[bid]) {
-        const auto px = decimalAtScale({p, priceDigits_}, priceDigits);
-        const auto qty = decimalAtScale({q, sizeDigits_}, sizeDigits);
-        if(!px||!qty)throw std::overflow_error("book scale overflow");
-        next[bid].emplace(*px, *qty);
-    }
+    for (bool bid : {false, true})
+        for (const auto &[p, q] : levels_[bid]) {
+            const auto px = decimalAtScale({p, priceDigits_}, priceDigits);
+            const auto qty = decimalAtScale({q, sizeDigits_}, sizeDigits);
+            if (!px || !qty)
+                throw std::overflow_error("book scale overflow");
+            next[bid].emplace(*px, *qty);
+        }
     binUnits_ = nativeUnits_ ? 1 : *bin;
-    levels_[0].swap(next[0]); levels_[1].swap(next[1]);
+    levels_[0].swap(next[0]);
+    levels_[1].swap(next[1]);
     Wide factor = 1;
-    for (auto d = sizeDigits_; d < sizeDigits; ++d) factor *= 10;
+    for (auto d = sizeDigits_; d < sizeDigits; ++d)
+        factor *= 10;
     std::unordered_map<Key, Bin, KeyHash> rebased;
-    for (const auto& entry : bins_) {
-        auto k = entry.first; auto b = entry.second;
+    for (const auto &entry : bins_) {
+        auto k = entry.first;
+        auto b = entry.second;
         if (nativeUnits_) {
             const auto price = decimalAtScale({k.bin, priceDigits_}, priceDigits);
-            if(!price)throw std::overflow_error("bin price overflow");
+            if (!price)
+                throw std::overflow_error("bin price overflow");
             k.bin = *price;
         }
-        b.sum *= factor; b.integral *= factor; b.peak *= factor;
+        b.sum *= factor;
+        b.integral *= factor;
+        b.peak *= factor;
         rebased.emplace(k, std::move(b));
     }
     bins_.swap(rebased);
-    for (auto& k : touched_) if (nativeUnits_) {
-        const auto price = decimalAtScale({k.bin, priceDigits_}, priceDigits);
-        if(!price)throw std::overflow_error("touched bin price overflow"); k.bin = *price;
-    }
-    priceDigits_ = priceDigits; sizeDigits_ = sizeDigits;
+    for (auto &k : touched_)
+        if (nativeUnits_) {
+            const auto price = decimalAtScale({k.bin, priceDigits_}, priceDigits);
+            if (!price)
+                throw std::overflow_error("touched bin price overflow");
+            k.bin = *price;
+        }
+    priceDigits_ = priceDigits;
+    sizeDigits_ = sizeDigits;
 }
 
 void MinuteSweep::apply(const MinuteBlock &block, std::vector<BinRow> &rows, int64_t &coveredMs) {
@@ -127,8 +142,12 @@ void MinuteSweep::apply(const MinuteBlock &block, std::vector<BinRow> &rows, int
         ++message_;
         messageBins.clear();
         const bool scaleChange = m.priceDigits != priceDigits_ || m.sizeDigits != sizeDigits_;
-        if (transition || m.reset || m.clear != ClearCause::None || scaleChange) accrueLive(t);
-        if (m.reset) { levels_[0].clear(); levels_[1].clear(); }
+        if (transition || m.reset || m.clear != ClearCause::None || scaleChange)
+            accrueLive(t);
+        if (m.reset) {
+            levels_[0].clear();
+            levels_[1].clear();
+        }
         changeScale(m.priceDigits, m.sizeDigits);
         if (m.clear != ClearCause::None) {
             for (auto &[k, b] : bins_)

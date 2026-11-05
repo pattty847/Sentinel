@@ -39,6 +39,7 @@ struct Capture final : LevelOutput {
     std::vector<MinuteBlock> blocks;
     int dayStarts = 0;
     bool failNextBlock = false;
+    bool overflowNextBlock = false;
     bool failDayStart = false, failAfterAccept = false;
     int blockCalls = 0;
     int failBlocks = 0; // the next N blocks throw
@@ -50,6 +51,10 @@ struct Capture final : LevelOutput {
     }
     void onBlock(const DayBinding &, const MinuteBlock &b) override {
         ++blockCalls;
+        if (overflowNextBlock) {
+            overflowNextBlock = false;
+            requireEncodingSize(2, 1);
+        }
         if (failNextBlock || failBlocks > 0) {
             if (failAfterAccept) blocks.push_back(b);
             failNextBlock = false;

@@ -20,7 +20,8 @@ constexpr int64_t hour = 3'600'000, day = 86'400'000;
 DayBinding binding(int64_t floor = 0) { return {"BTC-USD", floor, floor + day, 2}; }
 BookImage image(int64_t floor = 0, int n = 0) {
     BookImage i{floor, true, {}};
-    for (int j = 0; j < n; ++j) i.levels.push_back({true, j + 1, (j + 1) * 125});
+    for (int j = 0; j < n; ++j)
+        i.levels.push_back({true, j + 1, (j + 1) * 125});
     return i;
 }
 MinuteBlock block(int64_t minute, bool empty = false) {
@@ -390,7 +391,8 @@ TEST(LevelLog, ValidChecksumCannotHideInvalidCanonicalPayload) {
     const auto n = h.fixed32();
     ByteReader payload(std::span<const uint8_t>(b).subspan(12, n));
     (void)payload.str(256); (void)payload.svarint(); (void)payload.svarint(); (void)payload.svarint();
-    (void)payload.fixed32(); (void)payload.fixed32(); // image decimal scales
+    (void)payload.fixed32();
+    (void)payload.fixed32(); // image decimal scales
     (void)payload.svarint(); // image timestamp
     b[12 + n - payload.remaining()] = 2; // invalid image observed flag
     const auto crc = sentinel::crc32(b.data(), 12 + n);

@@ -69,20 +69,25 @@ int main(int argc,char** argv) {
         fs::create_directories(out);
         roller::RollOptions o{raw,out/"hmc2",argv[3],roller::parseTime(argv[4]),roller::parseTime(argv[4])+86'400'000};
         auto files=std::make_shared<Files>();
-        if (std::string(argv[8])!="null") { o.levelLogRoot=out/"log"; o.levelLogFiles=files; }
-        o.levelSeals=std::string(argv[8])!="log";
-        if(std::string(argv[8])=="C1h")o.levelLogRetentionMs=3600000;
+        if (std::string(argv[8]) != "null") {
+            o.levelLogRoot = out / "log";
+            o.levelLogFiles = files;
+        }
+        o.levelSeals = std::string(argv[8]) != "log";
+        if (std::string(argv[8]) == "C1h")
+            o.levelLogRetentionMs = 3600000;
         const std::string point=argv[6]; const int minute=std::stoi(argv[7]);
         std::atomic<bool> ready{false};
-        const bool audit=point=="audit";
+        const bool audit = point == "audit";
         std::ofstream source;
-        int64_t sourceHour=-1;
-        uint64_t sourceCount=0;
+        int64_t sourceHour = -1;
+        uint64_t sourceCount = 0;
         std::atomic<int64_t> auditNs{0};
-        const auto auditRoot=fs::path(std::string(argv[5])+".source");
-        if(audit)fs::create_directories(auditRoot);
-        bool savedSeed=false, savedPruneSeed=false;
-        std::map<std::string,Clock::time_point> sealStarts;
+        const auto auditRoot = fs::path(std::string(argv[5]) + ".source");
+        if (audit)
+            fs::create_directories(auditRoot);
+        bool savedSeed = false, savedPruneSeed = false;
+        std::map<std::string, Clock::time_point> sealStarts;
 
         int64_t appliedMinute=-1, cpuMinute=-1, cpuBefore=-1;
         files->cut=point=="cut";
@@ -107,31 +112,40 @@ int main(int argc,char** argv) {
             if (ready && point=="append") files->armed=true;
 
         };
-        o.persistencePointForTest=[&](const char* p) {
-            for(const std::string kind:{"seal-hour","seal-day"}) {
-                if(std::string(p)==kind+"-begin")sealStarts[kind]=Clock::now();
-                if(std::string(p)==kind+"-end")costs[kind].push_back(std::chrono::duration<double,std::milli>(Clock::now()-sealStarts.at(kind)).count());
+        o.persistencePointForTest = [&](const char *p) {
+            for (const std::string kind : {"seal-hour", "seal-day"}) {
+                if (std::string(p) == kind + "-begin")
+                    sealStarts[kind] = Clock::now();
+                if (std::string(p) == kind + "-end")
+                    costs[kind].push_back(
+                        std::chrono::duration<double, std::milli>(Clock::now() - sealStarts.at(kind)).count());
             }
 #ifdef __APPLE__
             if (std::string_view(p)=="checkpoint-written") {
                 const auto cpu=workerCpuNs();
                 if (cpu>=0 && cpuBefore>=0 && appliedMinute>cpuMinute)
                     costs["worker-cpu-per-journal-minute"].push_back(double(cpu-cpuBefore)/1e6/double(appliedMinute-cpuMinute));
-                cpuBefore=cpu; cpuMinute=appliedMinute;
+                cpuBefore = cpu;
+                cpuMinute = appliedMinute;
             }
 #endif
-            if(std::string_view(p)=="checkpoint-written" && audit && !savedPruneSeed && appliedMinute>=o.fromMs/60000+45) {
-                fs::copy(out,fs::path(std::string(argv[5])+".prune-seed"),fs::copy_options::recursive);savedPruneSeed=true;
+            if (std::string_view(p) == "checkpoint-written" && audit && !savedPruneSeed &&
+                appliedMinute >= o.fromMs / 60000 + 45) {
+                fs::copy(out, fs::path(std::string(argv[5]) + ".prune-seed"), fs::copy_options::recursive);
+                savedPruneSeed = true;
             }
-            if(std::string_view(p)=="checkpoint-written" && audit && !savedSeed && appliedMinute>=o.fromMs/60000+1365) {
+            if (std::string_view(p) == "checkpoint-written" && audit && !savedSeed &&
+                appliedMinute >= o.fromMs / 60000 + 1365) {
                 // Called after a durable, drained fence; copying is outside worker CPU.
-                const auto seed=fs::path(std::string(argv[5])+".seed");
-                fs::copy(out,seed,fs::copy_options::recursive);savedSeed=true;
+                const auto seed = fs::path(std::string(argv[5]) + ".seed");
+                fs::copy(out, seed, fs::copy_options::recursive);
+                savedSeed = true;
             }
             if (std::string_view(p)=="recovery-replayed")
                 report["recoveryOpenCutReplayMs"]=std::chrono::duration<double,std::milli>(Clock::now()-start).count();
 #ifndef _WIN32
-            if (ready && point==p) ::kill(::getpid(),SIGKILL);
+            if (ready && point == p)
+                ::kill(::getpid(), SIGKILL);
 #endif
         };
         recording::BookRecorder* recorder=nullptr;
@@ -146,12 +160,20 @@ int main(int argc,char** argv) {
                 } catch (...) { finalState.clear(); }
             }
             consumer=p;
-            if(p && audit)p->exactInputForTest=[&](int64_t clock,const recording::ExactSourceLevel& level){
-                const auto begin=Clock::now();const auto hour=clock/3600000*3600000;
-                if(hour!=sourceHour){source.close();source.open(auditRoot/(std::to_string(hour)+".txt"),std::ios::app);source.exceptions(std::ios::badbit|std::ios::failbit);sourceHour=hour;}
-                source<<clock<<' '<<level.isBid<<' '<<level.priceText<<' '<<level.sizeText<<'\n';++sourceCount;
-                auditNs+=std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now()-begin).count();
-            };
+            if (p && audit)
+                p->exactInputForTest = [&](int64_t clock, const recording::ExactSourceLevel &level) {
+                    const auto begin = Clock::now();
+                    const auto hour = clock / 3600000 * 3600000;
+                    if (hour != sourceHour) {
+                        source.close();
+                        source.open(auditRoot / (std::to_string(hour) + ".txt"), std::ios::app);
+                        source.exceptions(std::ios::badbit | std::ios::failbit);
+                        sourceHour = hour;
+                    }
+                    source << clock << ' ' << level.isBid << ' ' << level.priceText << ' ' << level.sizeText << '\n';
+                    ++sourceCount;
+                    auditNs += std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - begin).count();
+                };
         };
         report["roll"]=roller::roll(o);
         if (!o.levelLogRoot.empty()) {
@@ -161,42 +183,93 @@ int main(int argc,char** argv) {
             report["finalLiveStateBytes"]=finalState.size();
         }
         source.close();
-        report["sourceCaptureWorkerMs"]=double(auditNs.load())/1e6;
-        report["rollWallMs"]=std::chrono::duration<double,std::milli>(Clock::now()-start).count();
-        if(audit){
-            levelstore::SealStore seals(out/"log",o.product);uint64_t compared=0,blocks=0;
+        report["sourceCaptureWorkerMs"] = double(auditNs.load()) / 1e6;
+        report["rollWallMs"] = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+        if (audit) {
+            levelstore::SealStore seals(out / "log", o.product);
+            uint64_t compared = 0, blocks = 0;
             // Independent decimal oracle: unbounded integer digits, then cross
             // multiplication; never parse or compare a binary floating value.
-            const auto exact=[](const std::string& text,int64_t units,uint32_t digits){
-                boost::multiprecision::cpp_int n=0,encoded=units;uint32_t places=0;bool dot=false;
-                for(char c:text){if(c=='.'){if(dot)throw std::runtime_error("source grammar");dot=true;continue;}
-                    if(c<'0'||c>'9')throw std::runtime_error("source grammar");n=n*10+(c-'0');if(dot)++places;}
-                for(uint32_t i=0;i<digits;++i)n*=10;for(uint32_t i=0;i<places;++i)encoded*=10;
-                if(n!=encoded)throw std::runtime_error("source/D2 decimal mismatch");
+            const auto exact = [](const std::string &text, int64_t units, uint32_t digits) {
+                boost::multiprecision::cpp_int n = 0, encoded = units;
+                uint32_t places = 0;
+                bool dot = false;
+                for (char c : text) {
+                    if (c == '.') {
+                        if (dot)
+                            throw std::runtime_error("source grammar");
+                        dot = true;
+                        continue;
+                    }
+                    if (c < '0' || c > '9')
+                        throw std::runtime_error("source grammar");
+                    n = n * 10 + (c - '0');
+                    if (dot)
+                        ++places;
+                }
+                for (uint32_t i = 0; i < digits; ++i)
+                    n *= 10;
+                for (uint32_t i = 0; i < places; ++i)
+                    encoded *= 10;
+                if (n != encoded)
+                    throw std::runtime_error("source/D2 decimal mismatch");
             };
-            std::map<int64_t,levelstore::D2Hour> logged;
-            levelstore::BookImage image;bool have=false;
-            levelstore::LevelLogReader(out/"log",o.product).read([&](const auto& record){
-                if(auto* start=std::get_if<levelstore::BookImage>(&record.value)){image=*start;have=true;return;}
-                const auto& b=std::get<levelstore::MinuteBlock>(record.value);const auto hour=b.bucketStartMs/3600000*3600000;
-                auto& h=logged[hour];if(h.blocks.empty()){if(!have)throw std::runtime_error("no log image");h.start=image;}
-                h.blocks.push_back(b);if(h.blocks.size()==60)image=levelstore::endImage(h);
+            std::map<int64_t, levelstore::D2Hour> logged;
+            levelstore::BookImage image;
+            bool have = false;
+            levelstore::LevelLogReader(out / "log", o.product).read([&](const auto &record) {
+                if (auto *start = std::get_if<levelstore::BookImage>(&record.value)) {
+                    image = *start;
+                    have = true;
+                    return;
+                }
+                const auto &b = std::get<levelstore::MinuteBlock>(record.value);
+                const auto hour = b.bucketStartMs / 3600000 * 3600000;
+                auto &h = logged[hour];
+                if (h.blocks.empty()) {
+                    if (!have)
+                        throw std::runtime_error("no log image");
+                    h.start = image;
+                }
+                h.blocks.push_back(b);
+                if (h.blocks.size() == 60)
+                    image = levelstore::endImage(h);
             });
-            uint64_t d2Bytes=0,summaryBytes=0;
-            for(auto& [hour,h]:logged){const auto decoded=seals.read(hour);if(decoded.timeline!=h)throw std::runtime_error("log/D2 mismatch");
-                d2Bytes+=levelstore::encodeD2(decoded.timeline).size();summaryBytes+=levelstore::encodeSummary(decoded.summaries).size();
-                std::ifstream expected(auditRoot/(std::to_string(hour)+".txt"));
-                for(const auto& b:decoded.timeline.blocks){++blocks;for(const auto& input:b.inputs){int64_t clock;bool bid;std::string price,qty;
-                    if(!(expected>>clock>>bid>>price>>qty))throw std::runtime_error("missing source update");
-                    const auto& msg=b.messages.at(input.message);
-                    if(clock!=msg.timeMs||bid!=input.isBid)throw std::runtime_error("source/D2 order");
-                    exact(price,input.units,msg.priceDigits);exact(qty,input.size,msg.sizeDigits);++compared;}}
-                std::string extra;if(expected>>extra)throw std::runtime_error("unencoded source update");
+            uint64_t d2Bytes = 0, summaryBytes = 0;
+            for (auto &[hour, h] : logged) {
+                const auto decoded = seals.read(hour);
+                if (decoded.timeline != h)
+                    throw std::runtime_error("log/D2 mismatch");
+                d2Bytes += levelstore::encodeD2(decoded.timeline).size();
+                summaryBytes += levelstore::encodeSummary(decoded.summaries).size();
+                std::ifstream expected(auditRoot / (std::to_string(hour) + ".txt"));
+                for (const auto &b : decoded.timeline.blocks) {
+                    ++blocks;
+                    for (const auto &input : b.inputs) {
+                        int64_t clock;
+                        bool bid;
+                        std::string price, qty;
+                        if (!(expected >> clock >> bid >> price >> qty))
+                            throw std::runtime_error("missing source update");
+                        const auto &msg = b.messages.at(input.message);
+                        if (clock != msg.timeMs || bid != input.isBid)
+                            throw std::runtime_error("source/D2 order");
+                        exact(price, input.units, msg.priceDigits);
+                        exact(qty, input.size, msg.sizeDigits);
+                        ++compared;
+                    }
+                }
+                std::string extra;
+                if (expected >> extra)
+                    throw std::runtime_error("unencoded source update");
             }
             seals.verifyDay(o.fromMs);
-            if(compared!=sourceCount||blocks!=1440)throw std::runtime_error("source audit coverage");
-            report["exactSourceUpdatesCompared"]=compared;report["losslessMinutesCompared"]=blocks;
-            report["D2BytesBeforeOuterCompression"]=d2Bytes;report["hourSummaryBytesBeforeOuterCompression"]=summaryBytes;
+            if (compared != sourceCount || blocks != 1440)
+                throw std::runtime_error("source audit coverage");
+            report["exactSourceUpdatesCompared"] = compared;
+            report["losslessMinutesCompared"] = blocks;
+            report["D2BytesBeforeOuterCompression"] = d2Bytes;
+            report["hourSummaryBytesBeforeOuterCompression"] = summaryBytes;
         }
         report["minuteSamples"]=minuteSamples;
         for (auto& [name,v] : costs) {
@@ -207,10 +280,12 @@ int main(int argc,char** argv) {
         uint64_t bytes=0;
         if (!o.levelLogRoot.empty()) for (const auto& e : fs::recursive_directory_iterator(o.levelLogRoot))
             if (e.is_regular_file() && e.path().extension()==".lcl") bytes+=e.file_size();
-        report["bytesByExtension"]=json::object();
-        for(const auto& e:fs::recursive_directory_iterator(out))if(e.is_regular_file()) {
-            const auto ext=e.path().extension().string();report["bytesByExtension"][ext]=report["bytesByExtension"].value(ext,uint64_t(0))+e.file_size();
-        }
+        report["bytesByExtension"] = json::object();
+        for (const auto &e : fs::recursive_directory_iterator(out))
+            if (e.is_regular_file()) {
+                const auto ext = e.path().extension().string();
+                report["bytesByExtension"][ext] = report["bytesByExtension"].value(ext, uint64_t(0)) + e.file_size();
+            }
         report["durableBytesPerProductDay"]=bytes; report["levelAppendBytesWritten"]=files->written;
 #ifdef __APPLE__
         rusage peak{}; getrusage(RUSAGE_SELF,&peak); report["peakRssBytes"]=peak.ru_maxrss;

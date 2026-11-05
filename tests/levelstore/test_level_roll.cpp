@@ -219,7 +219,8 @@ TEST(LevelRoll, DayRecreationAndInProcessRestoresMatchTheUninterruptedRun) {
     for (const auto &blk : d1.blocks) s.apply(blk, rows, covered);
     std::vector<BookLevel> end;
     for (const auto &r : rows)
-        if (r.last > 0) end.push_back({r.isBid, r.bin, r.last.convert_to<int64_t>()});
+        if (r.last > 0)
+            end.push_back({r.isBid, r.bin, r.last.convert_to<int64_t>()});
     EXPECT_EQ(end, d2.image->levels);
     EXPECT_EQ(s.observed(), d2.image->observed);
     // The invalid period is a clear, and nothing is observed until the next snapshot.
@@ -328,24 +329,88 @@ TEST(LevelRoll, InternalFailureCannotBeSwallowedAsAnOptionalAnchorFailure) {
 #include "levelstore/HaltRecord.hpp"
 #include "levelstore/LevelLog.hpp"
 TEST(LevelRoll, MalformedSourcePreservesLegacyInvalidationAndDetectsLegacyAcceptance) {
-    std::vector<std::pair<json,bool>> cases;
-    for(const auto* text:{"-1","","abc"})cases.push_back({level("bid","99999.99",text),false});
-    cases.push_back({level("bid","-1","1"),false});
-    auto numeric=level("bid","99999.99","1");numeric["new_quantity"]=1;cases.push_back({numeric,false});
-    auto missing=level("bid","99999.99","1");missing.erase("new_quantity");cases.push_back({missing,false});
-    for(const auto* text:{"1e0","1junk"})cases.push_back({level("bid","99999.99",text),true});
-    for(const auto& [bad,divergence]:cases){SCOPED_TRACE(bad.dump());TempDir t;
-        capture::WriterConfig config;config.root=QString::fromStdString((t.path/"raw").string());config.fsyncBlocks=0;
-        {capture::Writer writer(config,metadata());
-            const auto append=[&](int64_t ms,std::string data){writer.append({capture::Kind::Frame,{ms*1000000,ms*1000000},1,std::move(data)});};
-            append(Epoch-60000,frame(1,"snapshot",fullBook(0)));
-            append(Epoch+1000,frame(2,"update",json::array({bad})));
-            append(Epoch+4*Minute,frame(3,"snapshot",fullBook(0)));writer.close();}
-        RollOptions c{t.path/"raw",t.path/"combined","BTC-USD",Epoch,Epoch+3*Minute};c.levelLogRoot=t.path/"log";
-        ASSERT_NO_THROW(roll(c));EXPECT_EQ(bool(readHalt(c.levelLogRoot,"BTC-USD")),divergence);
-        auto plain=c;plain.outputRoot=t.path/"plain";plain.levelLogRoot.clear();ASSERT_NO_THROW(roll(plain));
-        EXPECT_EQ(hmc2Files(c.outputRoot),hmc2Files(plain.outputRoot));
-        if(!divergence){size_t clears=0;LevelLogReader(c.levelLogRoot,"BTC-USD").read([&](const auto& record){
-            if(auto b=std::get_if<MinuteBlock>(&record.value))for(const auto& m:b->messages)clears+=m.clear==ClearCause::Invalid;});EXPECT_GT(clears,0u);}
+    std::vector<std::pair<json, bool>> cases;
+    for (const auto *text : {"-1", "", "abc"})
+        cases.push_back({level("bid", "99999.99", text), false});
+    cases.push_back({level("bid", "-1", "1"), false});
+    auto numeric = level("bid", "99999.99", "1");
+    numeric["new_quantity"] = 1;
+    cases.push_back({numeric, false});
+    auto missing = level("bid", "99999.99", "1");
+    missing.erase("new_quantity");
+    cases.push_back({missing, false});
+    for (const auto *text : {"1e0", "1junk"})
+        cases.push_back({level("bid", "99999.99", text), true});
+    for (const auto &[bad, divergence] : cases) {
+        SCOPED_TRACE(bad.dump());
+        TempDir t;
+        capture::WriterConfig config;
+        config.root = QString::fromStdString((t.path / "raw").string());
+        config.fsyncBlocks = 0;
+        {
+            capture::Writer writer(config, metadata());
+            const auto append = [&](int64_t ms, std::string data) {
+                writer.append({capture::Kind::Frame, {ms * 1000000, ms * 1000000}, 1, std::move(data)});
+            };
+            append(Epoch - 60000, frame(1, "snapshot", fullBook(0)));
+            append(Epoch + 1000, frame(2, "update", json::array({bad})));
+            append(Epoch + 4 * Minute, frame(3, "snapshot", fullBook(0)));
+            writer.close();
+        }
+        RollOptions c{t.path / "raw", t.path / "combined", "BTC-USD", Epoch, Epoch + 3 * Minute};
+        c.levelLogRoot = t.path / "log";
+        ASSERT_NO_THROW(roll(c));
+        EXPECT_EQ(bool(readHalt(c.levelLogRoot, "BTC-USD")), divergence);
+        auto plain = c;
+        plain.outputRoot = t.path / "plain";
+        plain.levelLogRoot.clear();
+        ASSERT_NO_THROW(roll(plain));
+        EXPECT_EQ(hmc2Files(c.outputRoot), hmc2Files(plain.outputRoot));
+        if (!divergence) {
+            size_t clears = 0;
+            LevelLogReader(c.levelLogRoot, "BTC-USD").read([&](const auto &record) {
+                if (auto b = std::get_if<MinuteBlock>(&record.value))
+                    for (const auto &m : b->messages)
+                        clears += m.clear == ClearCause::Invalid;
+            });
+            EXPECT_GT(clears, 0u);
+        }
     }
+}
+
+TEST(LevelRoll, ExactSourceTracksEachFilesHeaderIncrementsAndOriginalFields) {
+    JournalFeed feed(kProduct);
+    feed.retainExactSource = true;
+    std::vector<recording::ExactSourcePtr> sources;
+    feed.onSnapshot = [&](auto, auto, auto) { sources.push_back(feed.takeExactSource()); };
+    feed.onUpdates = [&](auto, auto, auto) { sources.push_back(feed.takeExactSource()); };
+    for (int i = 0; i < 2; ++i) {
+        JournalRecord r{{capture::Kind::Frame,
+                         {(Epoch + i * 1000) * 1000000, 0},
+                         1,
+                         frame(i + 1, i ? "update" : "snapshot",
+                               json::array({level("bid", i ? "98.123" : "99.00", i ? "0.0001" : "1.00")}))},
+                        {kProduct, "run", uint64_t(i + 5), uint32_t(i)},
+                        metadata()["product_metadata"],
+                        false,
+                        1};
+        r.file = i ? "second.rawl2" : "first.rawl2";
+        if (i) {
+            r.metadata["quote_increment"] = "0.001";
+            r.metadata["base_increment"] = "0.0001";
+        }
+        feed.apply(r);
+    }
+    ASSERT_EQ(sources.size(), 2);
+    EXPECT_EQ(sources[0]->priceIncrement, "0.01");
+    EXPECT_EQ(sources[1]->priceIncrement, "0.001");
+    EXPECT_EQ(sources[1]->sizeIncrement, "0.0001");
+    EXPECT_EQ(sources[1]->file, "second.rawl2");
+    EXPECT_EQ(sources[1]->block, 6);
+    EXPECT_EQ(sources[1]->record, 1);
+    EXPECT_EQ(sources[1]->sequence, 2);
+    EXPECT_EQ(sources[1]->levels[0].priceText, "98.123");
+    EXPECT_EQ(sources[1]->levels[0].sizeText, "0.0001");
+    EXPECT_EQ(sources[1]->levels[0].price.value, (ExactDecimal{98123, 3}));
+    EXPECT_EQ(sources[1]->levels[0].size.value, (ExactDecimal{1, 4}));
 }

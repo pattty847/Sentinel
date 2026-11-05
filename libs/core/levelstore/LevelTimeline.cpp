@@ -50,7 +50,10 @@ uint64_t ByteReader::varint() {
         const uint8_t byte = u8();
         require(shift < 63 || (byte & 0xFE) == 0, "overlong varint");
         v |= static_cast<uint64_t>(byte & 0x7F) << shift;
-        if (!(byte & 0x80)) { require(shift == 0 || byte != 0, "noncanonical varint"); return v; }
+        if (!(byte & 0x80)) {
+            require(shift == 0 || byte != 0, "noncanonical varint");
+            return v;
+        }
     }
     require(false, "overlong varint");
     return 0;
@@ -88,7 +91,8 @@ void encodeBlock(ByteWriter &w, const MinuteBlock &b) {
         t = m.timeMs;
         w.u8(static_cast<uint8_t>((m.observed ? kObserved : 0) | (m.reset ? kReset : 0) |
                                   (static_cast<uint8_t>(m.clear) << kClearShift)));
-        w.fixed32(m.priceDigits); w.fixed32(m.sizeDigits);
+        w.fixed32(m.priceDigits);
+        w.fixed32(m.sizeDigits);
     }
     w.varint(b.changes.size());
     uint32_t message = 0;
@@ -102,8 +106,10 @@ void encodeBlock(ByteWriter &w, const MinuteBlock &b) {
         w.varint(static_cast<uint64_t>(c.size));
     }
     w.varint(b.inputs.size());
-    for (const auto& c : b.inputs) {
-        w.varint(c.message); w.u8(c.isBid); w.varint(static_cast<uint64_t>(c.units));
+    for (const auto &c : b.inputs) {
+        w.varint(c.message);
+        w.u8(c.isBid);
+        w.varint(static_cast<uint64_t>(c.units));
         w.varint(static_cast<uint64_t>(c.size));
     }
 }
@@ -135,7 +141,8 @@ MinuteBlock decodeBlock(ByteReader &r) {
         m.observed = f & kObserved;
         m.reset = f & kReset;
         m.clear = static_cast<ClearCause>(clear);
-        m.priceDigits = r.fixed32(); m.sizeDigits = r.fixed32();
+        m.priceDigits = r.fixed32();
+        m.sizeDigits = r.fixed32();
     }
     const uint64_t k = r.varint();
     require(k <= r.remaining(), "change count");
@@ -161,7 +168,9 @@ MinuteBlock decodeBlock(ByteReader &r) {
     const auto inputs = r.varint();
     require(inputs <= r.remaining(), "input count");
     for (uint64_t i = 0; i < inputs; ++i) {
-        const auto m = r.varint(); const auto side = r.u8(); const auto p = r.varint(), q = r.varint();
+        const auto m = r.varint();
+        const auto side = r.u8();
+        const auto p = r.varint(), q = r.varint();
         require(m < b.messages.size() && side <= 1 && p > 0 && p <= INT64_MAX && q <= INT64_MAX, "input value");
         require(b.inputs.empty() || b.inputs.back().message <= m, "input order");
         b.inputs.push_back({static_cast<uint32_t>(m), side != 0, static_cast<int64_t>(p), static_cast<int64_t>(q)});

@@ -1,4 +1,5 @@
 #include "LevelLogFormat.hpp"
+#include "ExactArithmetic.hpp"
 #include "Crc32.hpp"
 #include "SentinelLogging.hpp"
 #include <algorithm>
@@ -50,7 +51,7 @@ ByteWriter payload(const LevelLogRecord &r) {
     w.svarint(r.binding.priceDigits);
     if (const auto *i = std::get_if<BookImage>(&r.value)) encodeImage(w, *i);
     else encodeBlock(w, std::get<MinuteBlock>(r.value));
-    check(w.bytes.size() <= kMaxPayload, "payload too large");
+    requireEncodingSize(w.bytes.size(), kMaxPayload);
     return w;
 }
 ByteWriter header(uint8_t type, size_t length) {

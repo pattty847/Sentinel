@@ -5,7 +5,7 @@
 #include <string>
 struct RestartJournal {
     static constexpr int64_t Epoch = 1'798'761'600'000;
-    explicit RestartJournal(const std::filesystem::path&, bool warmup = true, std::string product = "BTC-USD");
+    explicit RestartJournal(const std::filesystem::path &, bool warmup = true, std::string product = "BTC-USD");
     ~RestartJournal();
     void grow(int minutes);
     void restart(int second);

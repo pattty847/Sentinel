@@ -1022,7 +1022,8 @@ struct BookRecorder::Impl {
             const double oldSize = old == book.end() ? 0 : old->second;
             const long double delta = static_cast<long double>(level.size) - oldSize;
             if (delta == 0) {
-                if (sink && m.exactSource) sink->onSuppressed(m.symbol(), s.clock, level.sourceIndex);
+                if (sink && m.exactSource)
+                    sink->onSuppressed(m.symbol(), s.clock, level.sourceIndex);
                 continue;
             }
             const int levelDelta = (level.size > 0 ? 1 : 0) - (oldSize > 0 ? 1 : 0);
@@ -1112,11 +1113,13 @@ struct BookRecorder::Impl {
     }
     void process(const Message &m) {
         if (m.kind == Kind::RejectedSource) {
-            if (cfg.sink && m.exactSource) cfg.sink->onRejectedSource(m.symbol(), m.local, m.exactSource);
+            if (cfg.sink && m.exactSource)
+                cfg.sink->onRejectedSource(m.symbol(), m.local, m.exactSource);
             return;
         }
         if (m.time < kHmc2MinMs || m.time > kMaxTime || m.local < kHmc2MinMs || m.local > kMaxTime) {
-            if (cfg.sink && m.exactSource) cfg.sink->onRejectedSource(m.symbol(), m.local, m.exactSource);
+            if (cfg.sink && m.exactSource)
+                cfg.sink->onRejectedSource(m.symbol(), m.local, m.exactSource);
             sLog_Warning("BookRecorder: rejected timestamp time=" << m.time);
             for (auto &[name, s] : symbols)
                 invalidate(name, *s, "invalid timestamp");
@@ -1178,19 +1181,34 @@ BookRecorder::~BookRecorder() = default;
 void BookRecorder::requestStop() { impl_->requestStop(); }
 void BookRecorder::onSnapshotAt(const std::string &symbol, int64_t time, int64_t local, std::vector<Level> levels,
                                 uint64_t sequence, PriceText priceText, ExactSourcePtr exactSource) {
-    impl_->enqueue({Impl::Kind::Snapshot, impl_->internSymbol(symbol), {}, time, local, std::move(levels), sequence,
-                    std::move(priceText), std::move(exactSource)});
+    impl_->enqueue({Impl::Kind::Snapshot,
+                    impl_->internSymbol(symbol),
+                    {},
+                    time,
+                    local,
+                    std::move(levels),
+                    sequence,
+                    std::move(priceText),
+                    std::move(exactSource)});
 }
 void BookRecorder::onUpdatesAt(const std::string &symbol, int64_t time, int64_t local, std::vector<Level> levels,
                                uint64_t sequence, PriceText priceText, ExactSourcePtr exactSource) {
-    impl_->enqueue({Impl::Kind::Updates, impl_->internSymbol(symbol), {}, time, local, std::move(levels), sequence,
-                    std::move(priceText), std::move(exactSource)});
+    impl_->enqueue({Impl::Kind::Updates,
+                    impl_->internSymbol(symbol),
+                    {},
+                    time,
+                    local,
+                    std::move(levels),
+                    sequence,
+                    std::move(priceText),
+                    std::move(exactSource)});
 }
 void BookRecorder::onInvalid(const std::string &symbol, int64_t local, std::string reason) {
     impl_->enqueue({Impl::Kind::Invalid, impl_->internSymbol(symbol), std::move(reason), local, local, {}});
 }
 void BookRecorder::onRejectedSourceAt(const std::string &symbol, int64_t local, ExactSourcePtr source) {
-    impl_->enqueue({Impl::Kind::RejectedSource, impl_->internSymbol(symbol), {}, local, local, {}, 0, {}, std::move(source)});
+    impl_->enqueue(
+        {Impl::Kind::RejectedSource, impl_->internSymbol(symbol), {}, local, local, {}, 0, {}, std::move(source)});
 }
 void BookRecorder::onTick(int64_t local) {
     impl_->enqueue({Impl::Kind::Tick, {}, {}, local, local, {}});

@@ -73,7 +73,7 @@ private:
     bool rememberTradeId(const std::string& id);
     recording::PriceText priceText_;
     recording::ExactSourcePtr exactSource_;
-    void prepareExactSource(const nlohmann::json&, const JournalRecord&, bool);
+    void prepareExactSource(const nlohmann::json &, const JournalRecord &, bool);
     void rejectExactSource(int64_t local);
     void attachDecimal(recording::Level& level, size_t index, const std::string& text);
     void attachUpdateDecimals(const nlohmann::json& event, std::vector<recording::Level>& levels);
