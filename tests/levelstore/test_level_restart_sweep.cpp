@@ -274,3 +274,30 @@ TEST(LevelRestartSweep, EveryRecordAndPersistencePoint) {
     RecordProperty("journal_record_points",std::to_string(std::count_if(baseline.events.begin(),baseline.events.end(),
         [](const auto& e) { return e.name=="journal-record"; })));
 }
+
+TEST(LevelRestartSweep, EveryHourSealPointRestartsWithPairedAnchorIdentity) {
+    TempDir t;RestartJournal writer(t.path/"raw");
+    for(int s=0;s<=45*60;s+=5)writer.at(s);
+    std::vector<std::string> points;
+    const auto runSeal=[&](const fs::path& root,size_t stop){
+        size_t index=0;bool hit=false;recording::BookRecorder* recorder=nullptr;
+        RollOptions o{t.path/"raw",root/"hmc","BTC-USD",Epoch,Epoch+75*Minute};o.levelLogRoot=root/"log";
+        o.onRecorder=[&](auto* r,auto*,int64_t){recorder=r;};
+        o.onApplied=[&](const auto&){recorder->drain();if(hit)throw std::runtime_error("seal worker stop");};
+        o.persistencePointForTest=[&](const char* name){if(!std::string_view(name).starts_with("seal-")||hit)return;
+            if(root.filename()=="baseline-seal")points.push_back(name);
+            if(index++==stop){hit=true;throw std::runtime_error("seal stop");}};
+        try{roll(o);}catch(...){if(!hit)throw;}
+        return hit;
+    };
+    ASSERT_FALSE(runSeal(t.path/"growing-seal",SIZE_MAX));
+    for(int s=45*60+5;s<=76*60;s+=5)writer.at(s);
+    ASSERT_FALSE(runSeal(t.path/"baseline-seal",SIZE_MAX));ASSERT_FALSE(points.empty());
+    const auto everyFile=[&](const fs::path& root){std::map<std::string,std::string> files;
+        for(const auto& e:fs::recursive_directory_iterator(root))if(e.is_regular_file())files[fs::relative(e.path(),root).string()]=contents(e.path());return files;};
+    const auto wanted=everyFile(t.path/"baseline-seal");
+    for(size_t i=0;i<points.size();++i){SCOPED_TRACE(::testing::Message()<<i<<" "<<points[i]);
+        const auto out=t.path/("seal-stop-"+std::to_string(i));ASSERT_TRUE(runSeal(out,i));ASSERT_FALSE(runSeal(out,SIZE_MAX));EXPECT_EQ(everyFile(out),wanted);ASSERT_FALSE(HasFailure());}
+    ASSERT_FALSE(runSeal(t.path/"growing-seal",SIZE_MAX));EXPECT_EQ(everyFile(t.path/"growing-seal"),wanted);
+    RecordProperty("seal_points",nlohmann::json(points).dump());
+}

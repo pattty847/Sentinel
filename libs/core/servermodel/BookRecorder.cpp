@@ -391,7 +391,7 @@ std::unique_ptr<Symbol> unpackSymbol(const StateJson& j, const std::string& name
 struct BookRecorder::Impl {
     RecorderConfig cfg;
     std::optional<Hmc2Store> store; // absent for Publication::Lead
-    enum class Kind { Snapshot, Updates, Invalid, Tick };
+    enum class Kind { Snapshot, Updates, Invalid, Tick, RejectedSource };
     struct Message {
         Kind kind = Kind::Tick;
         std::shared_ptr<const std::string> symbolName;
@@ -404,6 +404,7 @@ struct BookRecorder::Impl {
         std::vector<Level> levels;
         uint64_t sequence = 0; // journal frame sequence for sink diagnostics only
         PriceText priceText;   // owned until this message is processed; diagnostics only
+        ExactSourcePtr exactSource;
     };
     // Only the producer accesses this map. Queued messages keep names alive
     // for the recorder lifetime; data enqueues do not allocate symbol strings.
@@ -973,6 +974,8 @@ struct BookRecorder::Impl {
         }
     }
     void apply(Symbol &s, const Message &m) {
+        if (cfg.sink && m.exactSource)
+            cfg.sink->onSource(m.symbol(), s.clock, m.exactSource, cfg.priceScale, true);
         // Validate the complete message before changing any level. A malformed
         // batch invalidates continuity; skipping only its bad levels invents a book.
         for (const auto &level : m.levels) {
@@ -1018,8 +1021,10 @@ struct BookRecorder::Impl {
             const auto old = book.find(units);
             const double oldSize = old == book.end() ? 0 : old->second;
             const long double delta = static_cast<long double>(level.size) - oldSize;
-            if (delta == 0)
+            if (delta == 0) {
+                if (sink && m.exactSource) sink->onSuppressed(m.symbol(), s.clock, level.sourceIndex);
                 continue;
+            }
             const int levelDelta = (level.size > 0 ? 1 : 0) - (oldSize > 0 ? 1 : 0);
             if (level.size == 0) {
                 if (old != book.end())
@@ -1106,7 +1111,12 @@ struct BookRecorder::Impl {
         if (sink) sink->onApplied(m.symbol(), s.clock, s.valid, s.observing);
     }
     void process(const Message &m) {
+        if (m.kind == Kind::RejectedSource) {
+            if (cfg.sink && m.exactSource) cfg.sink->onRejectedSource(m.symbol(), m.local, m.exactSource);
+            return;
+        }
         if (m.time < kHmc2MinMs || m.time > kMaxTime || m.local < kHmc2MinMs || m.local > kMaxTime) {
+            if (cfg.sink && m.exactSource) cfg.sink->onRejectedSource(m.symbol(), m.local, m.exactSource);
             sLog_Warning("BookRecorder: rejected timestamp time=" << m.time);
             for (auto &[name, s] : symbols)
                 invalidate(name, *s, "invalid timestamp");
@@ -1156,6 +1166,8 @@ struct BookRecorder::Impl {
             s.flags |= kLateEvents;
         if (m.kind == Kind::Snapshot || s.valid)
             apply(s, m);
+        else if (cfg.sink && m.exactSource)
+            cfg.sink->onSource(m.symbol(), s.clock, m.exactSource, cfg.priceScale, false);
         publishOpen(s);
         sLog_Probe("recording.event", "symbol=" << m.symbol() << " envelope=" << m.time << " clock=" << s.clock
                                                 << " valid=" << s.valid << " levels=" << m.levels.size());
@@ -1165,17 +1177,20 @@ BookRecorder::BookRecorder(RecorderConfig cfg) : impl_(std::make_unique<Impl>(st
 BookRecorder::~BookRecorder() = default;
 void BookRecorder::requestStop() { impl_->requestStop(); }
 void BookRecorder::onSnapshotAt(const std::string &symbol, int64_t time, int64_t local, std::vector<Level> levels,
-                                uint64_t sequence, PriceText priceText) {
+                                uint64_t sequence, PriceText priceText, ExactSourcePtr exactSource) {
     impl_->enqueue({Impl::Kind::Snapshot, impl_->internSymbol(symbol), {}, time, local, std::move(levels), sequence,
-                    std::move(priceText)});
+                    std::move(priceText), std::move(exactSource)});
 }
 void BookRecorder::onUpdatesAt(const std::string &symbol, int64_t time, int64_t local, std::vector<Level> levels,
-                               uint64_t sequence, PriceText priceText) {
+                               uint64_t sequence, PriceText priceText, ExactSourcePtr exactSource) {
     impl_->enqueue({Impl::Kind::Updates, impl_->internSymbol(symbol), {}, time, local, std::move(levels), sequence,
-                    std::move(priceText)});
+                    std::move(priceText), std::move(exactSource)});
 }
 void BookRecorder::onInvalid(const std::string &symbol, int64_t local, std::string reason) {
     impl_->enqueue({Impl::Kind::Invalid, impl_->internSymbol(symbol), std::move(reason), local, local, {}});
+}
+void BookRecorder::onRejectedSourceAt(const std::string &symbol, int64_t local, ExactSourcePtr source) {
+    impl_->enqueue({Impl::Kind::RejectedSource, impl_->internSymbol(symbol), {}, local, local, {}, 0, {}, std::move(source)});
 }
 void BookRecorder::onTick(int64_t local) {
     impl_->enqueue({Impl::Kind::Tick, {}, {}, local, local, {}});

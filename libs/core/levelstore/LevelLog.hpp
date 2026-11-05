@@ -58,9 +58,12 @@ class LevelLog final : public LevelOutput {
     LevelLog(const LevelLog &) = delete;
     LevelLog &operator=(const LevelLog &) = delete;
     void open();
+    void enableSeals(int64_t retentionMs = 172800000, std::function<void(const char*)> point = {});
     void onDayStart(const DayBinding &, const BookImage &) override;
     void onBlock(const DayBinding &, const MinuteBlock &) override;
     void sync();
+    void onHalt(const nlohmann::json&) override;
+    void setCheckpointPath(std::filesystem::path path);
     // Anchor recovery: call on a fresh instance BEFORE open(). Validates only the
     // retained prefix, discards the suffix, syncs it and leaves this writer open.
     // Also valid on an already-open, healthy writer. A failed instance stays poisoned.

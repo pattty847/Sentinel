@@ -19,7 +19,8 @@ them the worker does not touch this object). Never throws from a callback.
 #include <functional>
 #include <optional>
 #include <string>
-#include <unordered_map>
+#include <map>
+#include <nlohmann/json.hpp>
 #include <vector>
 
 namespace sentinel::levelstore {
@@ -43,29 +44,39 @@ class LevelOutput {
     virtual ~LevelOutput() = default;
     virtual void onDayStart(const DayBinding &, const BookImage &) = 0;
     virtual void onBlock(const DayBinding &, const MinuteBlock &) = 0;
+    virtual void onHalt(const nlohmann::json &) {}
 };
 
 class LevelRecorder final : public recording::RecorderSink {
   public:
-    // Unsupported is an input episode; Failed/RestoreRefused permanently stop the instance.
-    enum class Unobserved : uint8_t { None = 0, Unsupported = 1, Failed = 2, RestoreRefused = 3 };
+    // Transient processing failure/refused restore permanently stop this attempt.
+    enum class Unobserved : uint8_t { None = 0, Failed = 2, RestoreRefused = 3 };
     struct Stats {
         uint64_t messages = 0;          // timeline messages recorded (all buckets)
         uint64_t changes = 0;           // level changes recorded
         uint64_t blocks = 0;            // minute blocks emitted
         uint64_t resets = 0;            // snapshot resets recorded
         uint64_t clears = 0;            // clears recorded
-        uint64_t unsupportedPrices = 0; // THE counter: input levels whose price C cannot represent
-        uint64_t unsupportedEpisodes = 0;
+        uint64_t offGridValues = 0; // prices and quantities outside their applicable increments
+        uint64_t halts = 0;
         uint64_t failures = 0;
         uint64_t restoreRefusals = 0;
         uint64_t foreignEvents = 0;     // events for another symbol, ignored
         bool operator==(const Stats &) const = default;
     };
-    static constexpr uint16_t kStateVersion = 5;
+    static constexpr uint16_t kStateVersion = 6;
 
     LevelRecorder(DayBinding binding, LevelOutput *output);
 
+    static constexpr uint32_t kRepresentationVersion = 1;
+    uint32_t representationVersion = kRepresentationVersion;
+    uint32_t scaleCapForTest = UINT32_MAX;
+    std::function<void(int64_t, const recording::ExactSourceLevel&)> exactInputForTest;
+    bool halted() const { return halted_; }
+    const nlohmann::json& haltRecord() const { return haltRecord_; }
+    void onSource(const std::string&, int64_t, const recording::ExactSourcePtr&, double, bool) noexcept override;
+    void onSuppressed(const std::string&, int64_t, size_t) noexcept override;
+    void onRejectedSource(const std::string&, int64_t, const recording::ExactSourcePtr&) noexcept override;
     void onReset(const std::string &symbol, int64_t clock) noexcept override;
     void onImprecise(const std::string &symbol, int64_t clock, const LevelChange &level) noexcept override;
     void onLevel(const std::string &symbol, int64_t clock, const LevelChange &level) noexcept override;
@@ -113,20 +124,30 @@ class LevelRecorder final : public recording::RecorderSink {
 
   private:
     struct Slot {
-        double size = 0;
+        int64_t size = 0;
         uint32_t touched = 0; // message serial of the last touch
     };
     struct Touch {
         bool isBid;
         int64_t units;
-        double before;
+        int64_t before;
     };
-    using Side = std::unordered_map<int64_t, Slot>;
+    using Side = std::map<int64_t, Slot>;
 
     bool mine(const std::string &symbol) noexcept;
     void begin(int64_t clock);
-    void touch(bool isBid, int64_t units, double size);
-    void unsupported(const LevelChange &level, int64_t clock);
+    void touch(bool isBid, int64_t units, int64_t size);
+    void halt(const char* reason, size_t inputIndex = 0);
+    void changeScale(uint32_t priceDigits, uint32_t sizeDigits);
+    bool exactUsable() const;
+    bool halted_ = false, prepared_ = false, malformedSource_ = false;
+    nlohmann::json haltRecord_;
+    recording::ExactSourcePtr sourceOwner_;
+    const recording::ExactSource* source_ = nullptr; // only during the worker message
+    uint32_t priceDigits_ = 0, sizeDigits_ = 0;
+    std::vector<bool> expectedChanges_;
+    std::map<int64_t, int64_t> legacyKeys_[2];
+    double legacyPriceScale_ = 1;
     void endMessage(int64_t clock, bool valid, bool observing, bool invalidated);
     bool readerHadLevels() const noexcept; // inside a message: did the published book hold a level?
     void startDay();
@@ -139,7 +160,7 @@ class LevelRecorder final : public recording::RecorderSink {
     Side book_[2]; // [0] asks, [1] bids (index = isBid)
     std::vector<Touch> touched_;
     uint32_t serial_ = 0;
-    bool inMessage_ = false, messageReset_ = false, messageUnsupported_ = false;
+    bool inMessage_ = false, messageReset_ = false;
     bool dayStarted_ = false, valid_ = false, recorderObserving_ = false, observed_ = false;
     Unobserved unobserved_ = Unobserved::None;
     char failureReason_[192] = {}; // latched without allocation on the noexcept failure path

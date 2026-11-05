@@ -1,6 +1,7 @@
 #pragma once
 #include "Hmc2Store.hpp"
 #include "PriceDecimal.hpp"
+#include "ExactSource.hpp"
 #include <cmath>
 #include <filesystem>
 #include <functional>
@@ -68,6 +69,11 @@ class RecorderSink {
                                                 // during the callback only
     };
     virtual ~RecorderSink() = default;
+    // Additive exact-input diagnostics, before legacy validation/keying. The
+    // consumer may halt its own output; it never changes the recorder decision.
+    virtual void onSource(const std::string &, int64_t, const ExactSourcePtr &, double, bool) noexcept {}
+    virtual void onSuppressed(const std::string &, int64_t, size_t) noexcept {}
+    virtual void onRejectedSource(const std::string &, int64_t, const ExactSourcePtr &) noexcept {}
     virtual void onReset(const std::string &symbol, int64_t clock) noexcept = 0;
     // Every input level whose price is not OnGrid or whose decimal identity is not
     // Exact, before the zero-change check: also when its rounded key collides with
@@ -139,6 +145,7 @@ struct Level {
     double price;
     double size;
     PriceDecimal decimal = {}; // exact decimal of the price text; absent (exact 0) without text
+    uint32_t sourceIndex = UINT32_MAX;
 };
 class BookRecorder {
   public:
@@ -155,14 +162,15 @@ class BookRecorder {
     // text of one level's price that is not an exact plain decimal (JournalFeed::takePriceText).
     // Diagnostics only: reported to the sink and never part of any decision.
     void onSnapshotAt(const std::string &symbol, int64_t envelopeMs, int64_t localMs, std::vector<Level> levels,
-                      uint64_t sequence = 0, PriceText priceText = {});
+                      uint64_t sequence = 0, PriceText priceText = {}, ExactSourcePtr exactSource = {});
     void onUpdatesAt(const std::string &symbol, int64_t envelopeMs, int64_t localMs, std::vector<Level> levels,
-                     uint64_t sequence = 0, PriceText priceText = {});
+                     uint64_t sequence = 0, PriceText priceText = {}, ExactSourcePtr exactSource = {});
     // Cancel blocked journal admission before joining producers and destroying.
     // The destructor also requests stop; callers must not race object destruction.
     void requestStop();
     void drain(); // production fence: all preceding calls and durable writes completed
     void onInvalid(const std::string &symbol, int64_t localMs, std::string reason);
+    void onRejectedSourceAt(const std::string &symbol, int64_t localMs, ExactSourcePtr source);
     void onTick(int64_t localNowMs);
     // Producer thread only: drains, then returns a Publication::Lead recorder
     // whose books and minute state equal this recorder's after every accepted

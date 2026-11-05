@@ -45,6 +45,10 @@ struct RollOptions {
     // A durable C call must stay within a single UTC day.
     std::filesystem::path levelLogRoot;
     std::shared_ptr<levelstore::LevelLogFiles> levelLogFiles;
+    uint32_t levelRepresentationVersionForTest = 0;
+    bool levelSeals = true;
+    int64_t levelLogRetentionMs = 172800000;
+    uint32_t levelScaleCapForTest = UINT32_MAX;
     // Caller-thread stop seam after explicit checkpoint/anchor writes, syncs and
     // renames (including initial provenance). Throw to unwind at that boundary.
     std::function<void(const char*)> persistencePointForTest;

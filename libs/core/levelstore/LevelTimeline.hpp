@@ -22,7 +22,6 @@ namespace sentinel::levelstore {
 enum class ClearCause : uint8_t {
     None = 0,
     Invalid = 1,        // the recorder invalidated the book (it cleared its own)
-    Unsupported = 2,    // a price C cannot represent exactly (interim fail-closed policy)
 };
 const char *clearCauseName(ClearCause c) noexcept;
 
@@ -31,13 +30,14 @@ struct TimelineMessage {
     bool observed = false;           // C's observation after the message
     bool reset = false;              // a snapshot the recorder accepted as a valid book
     ClearCause clear = ClearCause::None; // != None: every level ended here, before `changes`
+    uint32_t priceDigits = 0, sizeDigits = 0;
     bool operator==(const TimelineMessage &) const = default;
 };
 struct TimelineChange {
     uint32_t message = 0; // index into MinuteBlock::messages
     bool isBid = false;
     int64_t units = 0;    // exact price units at 10^priceDigits
-    double size = 0;      // the size the recorder applied; 0 ends the level
+    int64_t size = 0;      // the size the recorder applied; 0 ends the level
     bool operator==(const TimelineChange &) const = default;
 };
 // One finalised minute [bucketStartMs, +60 s): emitted when the recorder finishes it.
@@ -48,12 +48,14 @@ struct MinuteBlock {
     bool observedAtStart = false;    // C's observation at bucketStartMs
     std::vector<TimelineMessage> messages; // ascending timeMs (equal times are distinct states)
     std::vector<TimelineChange> changes;   // ascending message; one change per level per message
+    uint32_t priceDigits = 0, sizeDigits = 0;
+    std::vector<TimelineChange> inputs; // source order, including intra-message replacements and no-ops
     bool operator==(const MinuteBlock &) const = default;
 };
 struct BookLevel {
     bool isBid = false;
     int64_t units = 0;
-    double size = 0;
+    int64_t size = 0;
     bool operator==(const BookLevel &) const = default;
 };
 // C's book at the day floor: the state the first minute block starts from.
@@ -61,6 +63,7 @@ struct BookImage {
     int64_t atMs = 0;
     bool observed = false;
     std::vector<BookLevel> levels; // bids ascending units, then asks ascending units
+    uint32_t priceDigits = 0, sizeDigits = 0;
     bool operator==(const BookImage &) const = default;
 };
 

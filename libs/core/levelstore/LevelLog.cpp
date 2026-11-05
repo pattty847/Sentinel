@@ -1,4 +1,6 @@
 #include "LevelLogFormat.hpp"
+#include "HaltRecord.hpp"
+#include "SealStore.hpp"
 #include "Crc32.hpp"
 #include "SentinelLogging.hpp"
 #include "servermodel/PersistenceIo.hpp"
@@ -37,13 +39,36 @@ void LevelLogFiles::truncate(const fs::path &p, uint64_t size) { fs::resize_file
 void LevelLogFiles::remove(const fs::path &p) { check(fs::remove(p), "remove path=" + p.string()); }
 
 struct LevelLog::Impl {
-    fs::path root;
+    fs::path root, checkpoint;
     std::string product;
     std::shared_ptr<LevelLogFiles> files;
     bool poisoned = false, opened = false;
     ScanResult state;
     std::optional<LevelLogTail> durable;
     std::set<fs::path> dirty;
+    std::unique_ptr<SealStore> seals;
+    std::optional<BookImage> sealStart;
+    std::vector<MinuteBlock> sealBlocks;
+    int64_t retentionMs = 172800000;
+    void sealRecord(const LevelLogRecord& record) {
+        if (!seals) return;
+        if (const auto* image = std::get_if<BookImage>(&record.value)) {
+            sealStart = *image; sealBlocks.clear(); return;
+        }
+        check(sealStart.has_value(), "seal requires starting image");
+        const auto& block = std::get<MinuteBlock>(record.value);
+        sealBlocks.push_back(block);
+        if ((block.bucketStartMs + 60000) % kHour) return;
+        D2Hour hour{*sealStart, std::move(sealBlocks)};
+        auto next = endImage(hour);
+        if (hour.start.atMs % kHour == 0 && hour.blocks.size() == 60) seals->publish(hour);
+        sealStart = std::move(next); sealBlocks.clear();
+    }
+    void rebuildSeals() {
+        if (!seals) return;
+        sealStart.reset(); sealBlocks.clear();
+        scan(root, product, [&](const auto& record, const auto&) { sealRecord(record); });
+    }
 
     template <class F> void guard(F action) {
         check(!poisoned, "writer poisoned product=" + product);
@@ -75,6 +100,7 @@ struct LevelLog::Impl {
     void initialize() {
         if (opened) return;
         prepareDirectories();
+        if (seals) seals->recoverRetention();
         state = scan(root, product, {});
         if (state.tail) {
             const auto tail = *state.tail;
@@ -89,6 +115,7 @@ struct LevelLog::Impl {
         files->sync(root / product, true);
         durable = state.last;
         opened = true;
+        rebuildSeals();
         sLog_Data("LevelLog: opened product=" << product << " root=" << root.string());
     }
     void append(const LevelLogRecord &r) {
@@ -135,7 +162,9 @@ struct LevelLog::Impl {
     void cut(int64_t minute, CutImageAtBoundary image) {
         check(minute >= 0 && minute % 60'000 == 0, "unaligned cut point");
         if (!opened) prepareDirectories();
+        if (seals) { seals->requireRetained(minute); seals->recoverRetention(); }
         auto plan = planCut(root, product, minute, image);
+        if (seals) seals->cut(minute);
         // Validate the entire retained prefix before the first destructive operation.
         // Persist removal of later files before changing an earlier file.
         for (auto i = plan.files.rbegin(); i != plan.files.rend(); ++i) {
@@ -156,6 +185,7 @@ struct LevelLog::Impl {
         durable = state.last;
         dirty.clear();
         opened = true;
+        rebuildSeals();
         sLog_Data("LevelLog: cut product=" << product << " minute=" << minute << " files=" << plan.files.size());
     }
 
@@ -168,8 +198,18 @@ LevelLog::LevelLog(fs::path root, std::string product, std::shared_ptr<LevelLogF
 }
 LevelLog::~LevelLog() = default; // no implicit durability promise
 void LevelLog::open() { impl_->guard([&] { impl_->initialize(); }); }
-void LevelLog::onDayStart(const DayBinding &b, const BookImage &i) { impl_->guard([&] { impl_->append({b, i}); }); }
-void LevelLog::onBlock(const DayBinding &b, const MinuteBlock &m) { impl_->guard([&] { impl_->append({b, m}); }); }
+void LevelLog::onDayStart(const DayBinding &b, const BookImage &i) { impl_->guard([&] { impl_->append({b, i}); impl_->sealRecord({b, i}); }); }
+void LevelLog::onBlock(const DayBinding &b, const MinuteBlock &m) { impl_->guard([&] {
+    impl_->append({b, m});
+    if (impl_->seals && (m.bucketStartMs + 60000) % kHour == 0) impl_->commit();
+    impl_->sealRecord({b, m});
+    if (impl_->seals && (m.bucketStartMs + 60000) % kHour == 0) impl_->seals->prune(m.bucketStartMs + 60000, impl_->retentionMs);
+}); }
+void LevelLog::enableSeals(int64_t retentionMs, std::function<void(const char*)> point) {
+    check(!impl_->opened && retentionMs >= 0, "seal configuration requires fresh writer");
+    impl_->retentionMs = retentionMs;
+    impl_->seals = std::make_unique<SealStore>(impl_->root, impl_->product, std::move(point));
+}
 void LevelLog::sync() { impl_->guard([&] { impl_->commit(); }); }
 void LevelLog::truncateAfter(int64_t m, CutImageAtBoundary image) { impl_->guard([&] { impl_->cut(m, image); }); }
 std::optional<LevelLogTail> LevelLog::durableTail() const {
@@ -178,3 +218,10 @@ std::optional<LevelLogTail> LevelLog::durableTail() const {
 }
 bool LevelLog::failed() const { return impl_->poisoned; }
 } // namespace sentinel::levelstore
+
+namespace sentinel::levelstore {
+void LevelLog::setCheckpointPath(std::filesystem::path path) { impl_->checkpoint = std::move(path); }
+void LevelLog::onHalt(const nlohmann::json& record) {
+    writeHalt(impl_->root, impl_->product, record, impl_->checkpoint);
+}
+}

@@ -122,7 +122,7 @@ bool JournalReader::next(JournalRecord& out) {
                 if (pos != *start_) throw std::runtime_error("journal position missing record");
                 start_.reset();
             }
-            out = {std::move(record), std::move(pos), f.header.at("product_metadata"), std::exchange(gap_, false), f.header.at("format_version").get<int>()};
+            out = {std::move(record), std::move(pos), f.header.at("product_metadata"), std::exchange(gap_, false), f.header.at("format_version").get<int>(), f.path.string()};
             return true;
         }
         const auto& result = reader_->result();

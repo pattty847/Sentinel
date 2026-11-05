@@ -17,7 +17,6 @@ const char *clearCauseName(ClearCause c) noexcept {
     switch (c) {
     case ClearCause::None: return "none";
     case ClearCause::Invalid: return "invalid";
-    case ClearCause::Unsupported: return "unsupported-price";
     }
     return "?";
 }
@@ -51,7 +50,7 @@ uint64_t ByteReader::varint() {
         const uint8_t byte = u8();
         require(shift < 63 || (byte & 0xFE) == 0, "overlong varint");
         v |= static_cast<uint64_t>(byte & 0x7F) << shift;
-        if (!(byte & 0x80)) return v;
+        if (!(byte & 0x80)) { require(shift == 0 || byte != 0, "noncanonical varint"); return v; }
     }
     require(false, "overlong varint");
     return 0;
@@ -76,6 +75,8 @@ std::string ByteReader::str(size_t maxSize) {
 }
 
 void encodeBlock(ByteWriter &w, const MinuteBlock &b) {
+    w.fixed32(b.priceDigits);
+    w.fixed32(b.sizeDigits);
     w.svarint(b.bucketStartMs);
     w.varint(b.recorderObservedMs);
     w.varint(b.recorderFlags);
@@ -87,6 +88,7 @@ void encodeBlock(ByteWriter &w, const MinuteBlock &b) {
         t = m.timeMs;
         w.u8(static_cast<uint8_t>((m.observed ? kObserved : 0) | (m.reset ? kReset : 0) |
                                   (static_cast<uint8_t>(m.clear) << kClearShift)));
+        w.fixed32(m.priceDigits); w.fixed32(m.sizeDigits);
     }
     w.varint(b.changes.size());
     uint32_t message = 0;
@@ -97,11 +99,19 @@ void encodeBlock(ByteWriter &w, const MinuteBlock &b) {
         w.u8(c.isBid ? 1 : 0);
         w.svarint(c.units - units);
         units = c.units;
-        w.f64(c.size);
+        w.varint(static_cast<uint64_t>(c.size));
+    }
+    w.varint(b.inputs.size());
+    for (const auto& c : b.inputs) {
+        w.varint(c.message); w.u8(c.isBid); w.varint(static_cast<uint64_t>(c.units));
+        w.varint(static_cast<uint64_t>(c.size));
     }
 }
+
 MinuteBlock decodeBlock(ByteReader &r) {
     MinuteBlock b;
+    b.priceDigits = r.fixed32();
+    b.sizeDigits = r.fixed32();
     b.bucketStartMs = r.svarint();
     const uint64_t observed = r.varint(), flags = r.varint();
     require(observed <= 60'000 && flags <= UINT32_MAX, "block header");
@@ -121,10 +131,11 @@ MinuteBlock decodeBlock(ByteReader &r) {
         m.timeMs = t;
         const uint8_t f = r.u8();
         const uint8_t clear = f >> kClearShift;
-        require(clear <= static_cast<uint8_t>(ClearCause::Unsupported), "message flags");
+        require(clear <= static_cast<uint8_t>(ClearCause::Invalid), "message flags");
         m.observed = f & kObserved;
         m.reset = f & kReset;
         m.clear = static_cast<ClearCause>(clear);
+        m.priceDigits = r.fixed32(); m.sizeDigits = r.fixed32();
     }
     const uint64_t k = r.varint();
     require(k <= r.remaining(), "change count");
@@ -142,12 +153,24 @@ MinuteBlock decodeBlock(ByteReader &r) {
         units = checkedAdd(units, r.svarint(), "levelstore decode: change units overflow");
         require(units > 0, "change units");
         c.units = units;
-        c.size = r.f64();
-        require(std::isfinite(c.size) && c.size >= 0, "change size");
+        const auto size = r.varint();
+        require(size <= INT64_MAX, "quantity overflow");
+        c.size = static_cast<int64_t>(size);
+        require(c.size >= 0, "change size");
+    }
+    const auto inputs = r.varint();
+    require(inputs <= r.remaining(), "input count");
+    for (uint64_t i = 0; i < inputs; ++i) {
+        const auto m = r.varint(); const auto side = r.u8(); const auto p = r.varint(), q = r.varint();
+        require(m < b.messages.size() && side <= 1 && p > 0 && p <= INT64_MAX && q <= INT64_MAX, "input value");
+        require(b.inputs.empty() || b.inputs.back().message <= m, "input order");
+        b.inputs.push_back({static_cast<uint32_t>(m), side != 0, static_cast<int64_t>(p), static_cast<int64_t>(q)});
     }
     return b;
 }
 void encodeImage(ByteWriter &w, const BookImage &image) {
+    w.fixed32(image.priceDigits);
+    w.fixed32(image.sizeDigits);
     w.svarint(image.atMs);
     w.u8(image.observed ? 1 : 0);
     w.varint(image.levels.size());
@@ -156,11 +179,13 @@ void encodeImage(ByteWriter &w, const BookImage &image) {
         w.u8(l.isBid ? 1 : 0);
         w.svarint(l.units - units);
         units = l.units;
-        w.f64(l.size);
+        w.varint(static_cast<uint64_t>(l.size));
     }
 }
 BookImage decodeImage(ByteReader &r) {
     BookImage image;
+    image.priceDigits = r.fixed32();
+    image.sizeDigits = r.fixed32();
     image.atMs = r.svarint();
     const uint8_t observed = r.u8();
     require(observed <= 1, "image flags");
@@ -176,8 +201,10 @@ BookImage decodeImage(ByteReader &r) {
         l.isBid = side == 1;
         units = checkedAdd(units, r.svarint(), "levelstore decode: image units overflow");
         l.units = units;
-        l.size = r.f64();
-        require(l.units > 0 && std::isfinite(l.size) && l.size > 0, "image level");
+        const auto size = r.varint();
+        require(size <= INT64_MAX, "quantity overflow");
+        l.size = static_cast<int64_t>(size);
+        require(l.units > 0 && l.size > 0, "image level");
         // Bids first, then asks; strictly ascending units within a side.
         require(!previous || (previous->isBid && !l.isBid) ||
                     (previous->isBid == l.isBid && previous->units < l.units), "image order");

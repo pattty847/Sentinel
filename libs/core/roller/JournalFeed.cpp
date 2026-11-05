@@ -78,8 +78,10 @@ void JournalFeed::attachUpdateDecimals(const nlohmann::json& event, std::vector<
     // parseUpdates succeeded: one level per update, in order, each with a string price.
     priceText_ = {};
     const auto& updates = event["updates"];
-    for (size_t i = 0; i < levels.size(); ++i)
+    for (size_t i = 0; i < levels.size(); ++i) {
+        levels[i].sourceIndex = static_cast<uint32_t>(i);
         attachDecimal(levels[i], i, updates[i].find("price_level")->get_ref<const std::string&>());
+    }
 }
 void JournalFeed::attachSnapshotDecimals(const nlohmann::json& event, std::vector<recording::Level>& levels,
                                          size_t bidCount) {
@@ -87,7 +89,9 @@ void JournalFeed::attachSnapshotDecimals(const nlohmann::json& event, std::vecto
     // order; repeat exactly that selection with the same level parser.
     priceText_ = {};
     size_t bid = 0, ask = bidCount;
+    uint32_t sourceIndex = 0;
     for (const auto& update : event["updates"]) {
+        const auto sourceAt = sourceIndex++;
         bool isBid; double price, size;
         if (!dispatch::parseLevel(update, isBid, price, size) || !(size > 0)) continue;
         const size_t at = isBid ? bid++ : ask++;
@@ -97,8 +101,49 @@ void JournalFeed::attachSnapshotDecimals(const nlohmann::json& event, std::vecto
             priceText_ = {};
             return;
         }
+        levels[at].sourceIndex = sourceAt;
         attachDecimal(levels[at], at, update.find("price_level")->get_ref<const std::string&>());
     }
+}
+void JournalFeed::prepareExactSource(const nlohmann::json& event, const JournalRecord& input, bool snapshot) {
+    exactSource_.reset();
+    if (!retainExactSource) return;
+    auto source = std::make_shared<recording::ExactSource>();
+    source->file = input.file;
+    source->run = input.pos.run;
+    source->block = input.pos.block;
+    source->record = input.pos.record;
+    source->sequence = sequence();
+    source->snapshot = snapshot;
+    source->priceIncrement = input.metadata.value("price_increment", input.metadata.value("quote_increment", ""));
+    source->sizeIncrement = input.metadata.value("base_increment", "");
+    if (!event.contains("updates") || !event["updates"].is_array()) source->malformed = true;
+    else {
+        source->levels.reserve(event["updates"].size());
+        for (const auto& u : event["updates"]) {
+            if (!u.is_object() || !u.contains("side") || !u["side"].is_string() ||
+                !u.contains("price_level") || !u["price_level"].is_string() ||
+                !u.contains("new_quantity") || !u["new_quantity"].is_string()) {
+                source->malformed = true;
+                continue;
+            }
+            const auto side = side_norm::normalize(u["side"].get<std::string>());
+            if (side != "bid" && side != "ask") source->malformed = true;
+            recording::ExactSourceLevel l;
+            l.isBid = side == "bid";
+            l.priceText = u["price_level"].get<std::string>();
+            l.sizeText = u["new_quantity"].get<std::string>();
+            l.price = levelstore::parseDecimal(l.priceText);
+            l.size = levelstore::parseDecimal(l.sizeText);
+            if (l.price.status == levelstore::DecimalStatus::Invalid || l.size.status == levelstore::DecimalStatus::Invalid ||
+                (l.price.status == levelstore::DecimalStatus::Exact && l.price.value.mantissa == 0)) source->malformed = true;
+            source->levels.push_back(std::move(l));
+        }
+    }
+    exactSource_ = std::move(source);
+}
+void JournalFeed::rejectExactSource(int64_t local) {
+    if (onRejectedExactSource && exactSource_) onRejectedExactSource(local, takeExactSource());
 }
 bool JournalFeed::rememberTradeId(const std::string& id) {
     // Missing IDs cannot identify a repeat; opaque nonempty IDs still dedupe.
@@ -177,7 +222,11 @@ void JournalFeed::apply(const JournalRecord& input) {
                     std::vector<recording::Level> levels;
                     if (type == "snapshot") {
                         std::vector<OrderBookLevel> bids, asks;
-                        if (dispatch::parseSnapshot(event, bids, asks)) throw std::runtime_error("malformed snapshot");
+                        prepareExactSource(event, input, true);
+                        if (dispatch::parseSnapshot(event, bids, asks)) {
+                            rejectExactSource(local);
+                            throw std::runtime_error("malformed snapshot");
+                        }
                         levels.reserve(bids.size() + asks.size());
                         for (const auto& l : bids) levels.push_back({true,l.price,l.size});
                         for (const auto& l : asks) levels.push_back({false,l.price,l.size});
@@ -189,7 +238,11 @@ void JournalFeed::apply(const JournalRecord& input) {
                         anchored_ = true;
                     } else if (type == "update") {
                         std::vector<BookLevelUpdate> updates;
-                        if (!dispatch::parseUpdates(event, updates)) throw std::runtime_error("malformed update");
+                        prepareExactSource(event, input, false);
+                        if (!dispatch::parseUpdates(event, updates)) {
+                            rejectExactSource(local);
+                            throw std::runtime_error("malformed update");
+                        }
                         if (!anchored_ || updates.empty()) continue;
                         levels.reserve(updates.size());
                         for (const auto& l : updates) levels.push_back({l.isBid,l.price,l.quantity});

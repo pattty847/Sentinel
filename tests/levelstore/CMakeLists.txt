@@ -28,16 +28,6 @@ if(Python3_Interpreter_FOUND)
     set_tests_properties(GtestReportGateTests PROPERTIES LABELS "levelstore")
 endif()
 
-# Offline evidence (real RAWL2, read-only), never part of ctest.
-if(APPLE)
-    add_executable(levelstore_replay levelstore_replay.cpp)
-    target_include_directories(levelstore_replay PRIVATE ${CMAKE_SOURCE_DIR}/libs/core ${CMAKE_SOURCE_DIR}/tests)
-    target_link_libraries(levelstore_replay PRIVATE sentinel_core Qt6::Core)
-    add_executable(levelstore_bench levelstore_bench.cpp)
-    target_include_directories(levelstore_bench PRIVATE ${CMAKE_SOURCE_DIR}/libs/core ${CMAKE_SOURCE_DIR}/tests)
-    target_link_libraries(levelstore_bench PRIVATE sentinel_core Qt6::Core)
-endif()
-
 add_executable(test_level_log test_level_log.cpp)
 target_include_directories(test_level_log PRIVATE ${CMAKE_SOURCE_DIR}/libs/core ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(test_level_log PRIVATE sentinel_core GTest::gtest_main)
@@ -68,3 +58,25 @@ add_executable(decimal_domain_survey decimal_domain_survey.cpp ${CMAKE_SOURCE_DI
 target_include_directories(decimal_domain_survey PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(decimal_domain_survey PRIVATE nlohmann_json::nlohmann_json
     $<IF:$<TARGET_EXISTS:zstd::libzstd_shared>,zstd::libzstd_shared,zstd::libzstd_static>)
+
+add_executable(test_d2_codec test_d2_codec.cpp)
+target_include_directories(test_d2_codec PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_d2_codec PRIVATE sentinel_core GTest::gtest_main)
+add_test(NAME D2CodecTests COMMAND test_d2_codec)
+set_tests_properties(D2CodecTests PROPERTIES LABELS "levelstore;fast")
+
+add_executable(test_level_halt test_level_halt.cpp RestartJournal.cpp)
+target_include_directories(test_level_halt PRIVATE ${CMAKE_SOURCE_DIR}/libs/core ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(test_level_halt PRIVATE sentinel_core GTest::gtest_main)
+add_test(NAME LevelHaltTests COMMAND test_level_halt)
+set_tests_properties(LevelHaltTests PROPERTIES LABELS "levelstore" TIMEOUT 600)
+
+add_executable(test_seal_store test_seal_store.cpp)
+target_include_directories(test_seal_store PRIVATE ${CMAKE_SOURCE_DIR}/libs/core ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(test_seal_store PRIVATE sentinel_core GTest::gtest_main)
+add_test(NAME SealStoreTests COMMAND test_seal_store)
+set_tests_properties(SealStoreTests PROPERTIES LABELS "levelstore" TIMEOUT 600)
+
+add_executable(levelstore_bench levelstore_bench.cpp)
+target_include_directories(levelstore_bench PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(levelstore_bench PRIVATE nlohmann_json::nlohmann_json)

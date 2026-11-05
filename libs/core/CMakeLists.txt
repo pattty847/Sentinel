@@ -8,6 +8,11 @@ add_library(sentinel_core
     levelstore/LevelLogFormat.cpp
     levelstore/LevelLog.hpp
     levelstore/LevelLogFormat.hpp
+    levelstore/D2Codec.cpp
+    levelstore/BalSummary.cpp
+    levelstore/SealStore.cpp
+    levelstore/HaltRecord.cpp
+    levelstore/LevelRecorderExact.cpp
     levelstore/LevelRecorder.cpp
     levelstore/LevelRecorder.hpp
     levelstore/LevelTimeline.cpp

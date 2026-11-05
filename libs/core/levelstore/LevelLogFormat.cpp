@@ -56,7 +56,7 @@ ByteWriter payload(const LevelLogRecord &r) {
 ByteWriter header(uint8_t type, size_t length) {
     ByteWriter w;
     for (auto c : kMagic) w.u8(c);
-    w.u8(1); // format version
+    w.u8(2); // integer quantities and explicit period scales
     w.u8(type);
     w.u8(0);
     w.u8(0);
@@ -100,7 +100,7 @@ Frame frame(std::ifstream &f, uint64_t pos, uint64_t end) {
     if (h.size() < kHeader) return {true, end, {}};
     ByteReader hr(h);
     (void)hr.fixed32();
-    check(hr.u8() == 1, "unsupported version");
+    check(hr.u8() == 2, "unsupported version");
     const auto type = hr.u8();
     check(type == 1 || type == 2, "bad record type");
     check(hr.u8() == 0 && hr.u8() == 0, "reserved header bits");

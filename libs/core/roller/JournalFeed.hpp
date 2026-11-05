@@ -35,6 +35,9 @@ public:
     // never exported, imported or replayed by itself.
     std::function<void()> onConnectionChange;
     void apply(const JournalRecord& input);
+    bool retainExactSource = false;
+    recording::ExactSourcePtr takeExactSource() { return std::exchange(exactSource_, {}); }
+    std::function<void(int64_t, recording::ExactSourcePtr)> onRejectedExactSource;
     // Boundary-only, validated before installation; never emits an event.
     nlohmann::json exportState() const;
     void importState(const nlohmann::json&);
@@ -69,6 +72,9 @@ private:
     std::vector<PendingTrade> frameTrades_; // Reuse storage across frames.
     bool rememberTradeId(const std::string& id);
     recording::PriceText priceText_;
+    recording::ExactSourcePtr exactSource_;
+    void prepareExactSource(const nlohmann::json&, const JournalRecord&, bool);
+    void rejectExactSource(int64_t local);
     void attachDecimal(recording::Level& level, size_t index, const std::string& text);
     void attachUpdateDecimals(const nlohmann::json& event, std::vector<recording::Level>& levels);
     void attachSnapshotDecimals(const nlohmann::json& event, std::vector<recording::Level>& levels,
