@@ -59,15 +59,17 @@ struct LevelLog::Impl {
             sealBlocks.clear();
             return;
         }
-        check(sealStart.has_value(), "seal requires starting image");
+        encodingCheck(sealStart.has_value(), "seal requires starting image");
         const auto &block = std::get<MinuteBlock>(record.value);
         sealBlocks.push_back(block);
         if ((block.bucketStartMs + 60000) % kHour)
             return;
         D2Hour hour{*sealStart, std::move(sealBlocks)};
-        auto next = endImage(hour);
+        auto next = encoding("hour=" + std::to_string(hour.start.atMs) + " check=end image", [&] { return endImage(hour); });
         if (hour.start.atMs % kHour == 0 && hour.blocks.size() == 60)
             seals->publish(hour);
+        else
+            seals->warnPartialDay(hour.start.atMs);
         sealStart = std::move(next);
         sealBlocks.clear();
     }
@@ -109,8 +111,6 @@ struct LevelLog::Impl {
     void initialize() {
         if (opened) return;
         prepareDirectories();
-        if (seals)
-            seals->recoverRetention();
         state = scan(root, product, {});
         if (state.tail) {
             const auto tail = *state.tail;
@@ -126,22 +126,29 @@ struct LevelLog::Impl {
         durable = state.last;
         opened = true;
         rebuildSeals();
+        if (seals) {
+            seals->recoverRetention();
+            state = scan(root, product, {});
+            durable = state.last;
+        }
         sLog_Data("LevelLog: opened product=" << product << " root=" << root.string());
     }
     void append(const LevelLogRecord &r) {
         initialize();
         check(r.binding.symbol == product, "foreign product");
         auto next = state;
-        advance(next, r);
-        const auto p = payload(r);
-        // Validate caller-owned structures before any byte reaches the file.
-        ByteReader validation(p.bytes);
-        (void)validation.str(256);
-        (void)validation.svarint();
-        (void)validation.svarint();
-        (void)validation.svarint();
-        if (std::holds_alternative<BookImage>(r.value)) (void)decodeImage(validation);
-        else (void)decodeBlock(validation);
+        const auto p = encoding("hour=" + std::to_string(r.minute() / kHour * kHour) + " check=log canonical", [&] {
+            advance(next, r);
+            auto encoded = payload(r);
+            ByteReader validation(encoded.bytes);
+            (void)validation.str(256);
+            (void)validation.svarint();
+            (void)validation.svarint();
+            (void)validation.svarint();
+            if (std::holds_alternative<BookImage>(r.value)) (void)decodeImage(validation);
+            else (void)decodeBlock(validation);
+            return encoded;
+        });
         const auto h = header(std::holds_alternative<BookImage>(r.value) ? 1 : 2, p.bytes.size());
         ByteWriter trailer;
         trailer.fixed32(sentinel::crc32Update(sentinel::crc32(h.bytes.data(), h.bytes.size()), p.bytes.data(), p.bytes.size()));
@@ -174,7 +181,6 @@ struct LevelLog::Impl {
         if (!opened) prepareDirectories();
         if (seals) {
             seals->requireRetained(minute);
-            seals->recoverRetention();
         }
         auto plan = planCut(root, product, minute, image);
         if (seals)
@@ -200,6 +206,11 @@ struct LevelLog::Impl {
         dirty.clear();
         opened = true;
         rebuildSeals();
+        if (seals) {
+            seals->recoverRetention();
+            state = scan(root, product, {});
+            durable = state.last;
+        }
         sLog_Data("LevelLog: cut product=" << product << " minute=" << minute << " files=" << plan.files.size());
     }
 
@@ -252,20 +263,17 @@ void LevelLog::discardRecorderTemps(const fs::path &anchors, const std::function
                        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
                    });
         };
+        std::vector<fs::path> abandoned;
         const auto discard = [&](const fs::directory_entry &entry) {
             if (!fs::is_regular_file(entry.symlink_status()))
                 return;
-            impl_->files->remove(entry.path());
-            impl_->files->sync(entry.path().parent_path(), true);
-            if (point)
-                point("c-recovery-temp-removed");
+            abandoned.push_back(entry.path());
         };
         if (fs::is_directory(impl_->checkpoint.parent_path()))
             for (const auto &entry : fs::directory_iterator(impl_->checkpoint.parent_path()))
                 if (suffix(entry.path().filename().string(), "roller.json."))
                     discard(entry);
-        if (!fs::is_directory(fs::symlink_status(anchors)))
-            return;
+        if (fs::is_directory(fs::symlink_status(anchors)))
         for (const auto &day : fs::directory_iterator(anchors)) {
             const auto date = day.path().filename().string();
             if (!fs::is_directory(day.symlink_status()) || date.size() != 10 || date[4] != '-' || date[7] != '-')
@@ -294,6 +302,11 @@ void LevelLog::discardRecorderTemps(const fs::path &anchors, const std::function
                 if (hour >= 0 && hour < 24 && minute >= 0 && minute < 60 && minute % 15 == 0)
                     discard(entry);
             }
+        }
+        for (const auto &path : abandoned) {
+            impl_->files->remove(path);
+            impl_->files->sync(path.parent_path(), true);
+            if (point) point("c-recovery-temp-removed");
         }
     });
 }

@@ -1118,11 +1118,11 @@ struct BookRecorder::Impl {
             return;
         }
         if (m.time < kHmc2MinMs || m.time > kMaxTime || m.local < kHmc2MinMs || m.local > kMaxTime) {
-            if (cfg.sink && m.exactSource)
-                cfg.sink->onRejectedSource(m.symbol(), m.local, m.exactSource);
             sLog_Warning("BookRecorder: rejected timestamp time=" << m.time);
-            for (auto &[name, s] : symbols)
+            for (auto &[name, s] : symbols) {
+                if (cfg.sink) cfg.sink->onMessageRejected(name);
                 invalidate(name, *s, "invalid timestamp");
+            }
             return;
         }
         workerLocal = m.local;

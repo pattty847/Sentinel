@@ -76,6 +76,9 @@ class LevelRecorder final : public recording::RecorderSink {
     const nlohmann::json &haltRecord() const { return haltRecord_; }
     void onSource(const std::string &, int64_t, const recording::ExactSourcePtr &, double, bool) noexcept override;
     void onSuppressed(const std::string &, int64_t, size_t) noexcept override;
+    void onMessageRejected(const std::string &symbol) noexcept override {
+        if (symbol == binding_.symbol) malformedSource_ = true;
+    }
     void onRejectedSource(const std::string &, int64_t, const recording::ExactSourcePtr &) noexcept override;
     void onReset(const std::string &symbol, int64_t clock) noexcept override;
     void onImprecise(const std::string &symbol, int64_t clock, const LevelChange &level) noexcept override;
@@ -111,6 +114,8 @@ class LevelRecorder final : public recording::RecorderSink {
     const Stats &stats() const { return stats_; }
     Unobserved unobserved() const { return unobserved_; }
     bool observed() const { return observed_; }
+    uint32_t priceDigits() const { return priceDigits_; }
+    uint32_t sizeDigits() const { return sizeDigits_; }
     bool recorderValid() const { return valid_; }
     bool dayStarted() const { return dayStarted_; }
     size_t liveLevels() const { return book_[0].size() + book_[1].size(); }

@@ -226,9 +226,9 @@ void LevelRecorder::endMessage(int64_t clock, bool valid, bool observing, bool i
     if (clear != ClearCause::None) {
         // Clears are ordinary input events. Internal failure never resumes output,
         // so there is no separate reader state or deferred clear to reconcile. A
-        // clear is recorded only when it changes the published state: the reader was
-        // observed, or it held a level before this message (a level this same message
-        // added, as in a snapshot the recorder then rejected, was never published).
+        // clear is recorded when source inputs need a message, or when it changes
+        // the published state. A rejected snapshot's inputs remain attached to its
+        // invalidation even if the reader's book was already empty.
         if (prepared_ || (dayStarted_ && (wasObserved || (wasTracking && readerHadLevels())))) {
             allocationSeam("clear");
             open_.messages.push_back({clock, false, false, clear, priceDigits_, sizeDigits_});
@@ -302,7 +302,9 @@ void LevelRecorder::onMinute(const std::string &symbol, int64_t bucketStartMs, u
         open_.sizeDigits = sizeDigits_;
     } catch (const std::overflow_error &e) {
         try {
-            halt(e.what());
+            const auto reason = "hour=" + std::to_string(bucketStartMs / 3600000 * 3600000) +
+                                " check=minute encode/verify: " + e.what();
+            halt(reason.c_str());
         } catch (const std::exception &persistenceError) {
             fail(persistenceError.what(), end);
         }

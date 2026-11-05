@@ -73,6 +73,7 @@ class RecorderSink {
     // consumer may halt its own output; it never changes the recorder decision.
     virtual void onSource(const std::string &, int64_t, const ExactSourcePtr &, double, bool) noexcept {}
     virtual void onSuppressed(const std::string &, int64_t, size_t) noexcept {}
+    virtual void onMessageRejected(const std::string &) noexcept {}
     virtual void onRejectedSource(const std::string &, int64_t, const ExactSourcePtr &) noexcept {}
     virtual void onReset(const std::string &symbol, int64_t clock) noexcept = 0;
     // Every input level whose price is not OnGrid or whose decimal identity is not

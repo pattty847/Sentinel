@@ -306,8 +306,7 @@ json roll(const RollOptions& o) {
                             ask = std::min(ask, l.price);
                     }
                 if (!(bid > 0) || !std::isfinite(ask)) {
-                    if (feed.onRejectedExactSource)
-                        feed.onRejectedExactSource(local, feed.takeExactSource());
+                    (void)feed.takeExactSource();
                     return;
                 }
                 referenceMid = std::midpoint(bid,ask);

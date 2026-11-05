@@ -1,6 +1,7 @@
 #include "LevelTestSupport.hpp"
 #include "levelstore/HaltRecord.hpp"
 #include "levelstore/LevelLog.hpp"
+#include "levelstore/SealStore.hpp"
 #include <gtest/gtest.h>
 #include <fstream>
 #include <map>
@@ -19,9 +20,9 @@ struct Pipe {
     std::unique_ptr<LevelRecorder> c;
     std::unique_ptr<BookRecorder> r;
     uint64_t sequence = 0;
-    explicit Pipe(bool exact = true) {
+    explicit Pipe(bool exact = true, LevelOutput *output = nullptr, int minutes = 10) {
         if (exact)
-            c = std::make_unique<LevelRecorder>(DayBinding{"BTC-USD", Epoch, Epoch + 10 * Minute, 2}, &out);
+            c = std::make_unique<LevelRecorder>(DayBinding{"BTC-USD", Epoch, Epoch + minutes * Minute, 2}, output ? output : &out);
         RecorderConfig cfg;
         cfg.root = dir.path;
         cfg.priceScale = 100;
@@ -297,7 +298,7 @@ TEST(LevelRecorder, EncodingFrameLimitHaltsInsteadOfRetrying) {
     ASSERT_TRUE(a.c->halted());
     EXPECT_FALSE(a.c->failed());
     EXPECT_TRUE(a.out.blocks.empty());
-    EXPECT_EQ(a.c->haltRecord()["reason"], "encoding frame exceeds representation limit");
+    EXPECT_NE(a.c->haltRecord()["reason"].get<std::string>().find("encoding frame exceeds representation limit"), std::string::npos);
     EXPECT_NO_THROW(requireEncodingSize(512ULL * 1024 * 1024, 512ULL * 1024 * 1024));
     EXPECT_THROW(requireEncodingSize(512ULL * 1024 * 1024 + 1, 512ULL * 1024 * 1024), std::overflow_error);
 }
@@ -334,4 +335,55 @@ TEST(LevelRecorder, AllocationFailureStopsWithoutHaltOrRepairGap) {
         EXPECT_TRUE(a.out.blocks.empty());
         EXPECT_THROW(a.c->exportState(a.r->checkpointClock("BTC-USD"), a.r->exportState()), std::runtime_error);
     }
+}
+
+TEST(LevelRecorder, EncodedHourMismatchDurablyHaltsInsteadOfFailing) {
+    TempDir dir;
+    struct Output : LevelOutput {
+        fs::path root;
+        SealStore store;
+        D2Hour hour;
+        explicit Output(fs::path p) : root(p), store(p, "BTC-USD") {
+            store.verificationInputForTest = [](D2Hour &h) { ++h.blocks[0].inputs[0].size; };
+        }
+        void onDayStart(const DayBinding &, const BookImage &i) override { hour.start = i; }
+        void onBlock(const DayBinding &, const MinuteBlock &b) override {
+            hour.blocks.push_back(b);
+            if (hour.blocks.size() == 60) store.publish(hour);
+        }
+        void onHalt(const nlohmann::json &record) override { writeHalt(root, "BTC-USD", record, {}); }
+    } output(dir.path);
+    Pipe p(true, &output, 120);
+    p.start();
+    for (int i = 1; i <= 61; ++i) p.input(i*Minute, false, {{true,"99","1"}});
+    ASSERT_TRUE(p.c->halted());
+    EXPECT_FALSE(p.c->failed());
+    const auto halt = readHalt(dir.path,"BTC-USD");
+    ASSERT_TRUE(halt);
+    const auto reason = halt->at("reason").get<std::string>();
+    EXPECT_NE(reason.find("hour=" + std::to_string(Epoch)), std::string::npos);
+    EXPECT_NE(reason.find("D2 lossless verification failed"), std::string::npos);
+    for (const auto *key : {"symbol","representationVersion","file","run","block","record","sequence",
+                           "priceIncrement","sizeIncrement","priceDigits","sizeDigits","priceText","sizeText",
+                           "committedCheckpoint"}) EXPECT_TRUE(halt->contains(key)) << key;
+    EXPECT_EQ(halt->at("priceText"), "99");
+    EXPECT_EQ(halt->at("sizeText"), "1");
+}
+TEST(LevelRecorder, EnvelopeTimestampRejectionDoesNotHalt) {
+    Pipe a, b(false); a.start(); b.start();
+    for (auto *p : {&a,&b}) p->input(-Epoch-1, false, {{true,"99","2"}});
+    EXPECT_FALSE(a.c->halted()); EXPECT_FALSE(a.c->failed());
+    EXPECT_FALSE(a.c->observed()); EXPECT_EQ(a.c->liveLevels(), 0);
+    for (auto *p : {&a,&b}) p->input(2000, true, {{true,"99","1"},{false,"101","2"}});
+    sameHmc(a,b);
+}
+TEST(LevelRecorder, MalformedAcceptedSourceUsesItsOwnHaltReason) {
+    Pipe p; p.start();
+    auto source = std::make_shared<ExactSource>();
+    source->malformed = true; source->priceIncrement="0.01"; source->sizeIncrement="0.00000001";
+    source->levels.push_back({true,"99","1e0",parseDecimal("99"),parseDecimal("1e0")});
+    p.r->onUpdatesAt("BTC-USD",Epoch+1000,Epoch+1000,{{true,99,1,parsePriceDecimal("99"),0}},0,{},source);
+    p.r->drainForTest();
+    ASSERT_TRUE(p.c->halted());
+    EXPECT_EQ(p.c->haltRecord()["reason"], "legacy accepted malformed decimal input");
 }

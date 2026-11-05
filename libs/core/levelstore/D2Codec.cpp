@@ -80,7 +80,7 @@ Runs runs(const D2Hour &hour) {
                 set(result[key(c.isBid, c.units, m.priceDigits)], ordinal, c.size, m.sizeDigits);
             }
         }
-        check(change == b.changes.size(), "D2 dangling canonical change");
+        encodingCheck(change == b.changes.size(), "D2 dangling canonical change");
     }
     return result;
 }
@@ -123,51 +123,54 @@ Key getKey(ByteReader &r) {
 }
 } // namespace
 std::vector<uint8_t> encodeD2(const D2Hour &hour) {
-    const auto levels = runs(hour);
-    ByteWriter meta;
-    auto image = hour.start;
-    for (auto &l : image.levels)
-        l.size = 1;
-    encodeImage(meta, image);
-    meta.varint(hour.blocks.size());
-    for (auto b : hour.blocks) {
-        for (auto &c : b.changes)
-            c.size = 0;
-        encodeBlock(meta, b);
-    }
-    ByteWriter w;
-    w.fixed32(0x34443253);
-    w.fixed32(4);
-    section(w, meta.bytes);
-    std::vector<ByteWriter> pages;
-    std::vector<std::pair<Key, Key>> bounds;
-    for (const auto &[k, r] : levels) {
-        if (pages.empty() || pages.back().bytes.size() >= 32768 || bounds.back().second.bid != k.bid) {
-            pages.emplace_back();
-            bounds.push_back({k, k});
+    return encoding("D2 encode", [&]() -> std::vector<uint8_t> {
+        const auto levels = runs(hour);
+        ByteWriter meta;
+        auto image = hour.start;
+        for (auto &l : image.levels)
+            l.size = 1;
+        encodeImage(meta, image);
+        meta.varint(hour.blocks.size());
+        for (auto b : hour.blocks) {
+            for (auto &c : b.changes)
+                c.size = 0;
+            encodeBlock(meta, b);
         }
-        bounds.back().second = k;
-        auto &page = pages.back();
-        putKey(page, k);
-        page.varint(r.initial);
-        page.varint(r.events.size());
-        uint64_t previous = 0;
-        for (const auto &e : r.events) {
-            page.varint(e.ordinal - previous);
-            previous = e.ordinal;
-            page.varint(e.quantity);
-            page.fixed32(e.digits);
+        ByteWriter w;
+        w.fixed32(0x34443253);
+        w.fixed32(4);
+        section(w, meta.bytes);
+        std::vector<ByteWriter> pages;
+        std::vector<std::pair<Key, Key>> bounds;
+        for (const auto &[k, r] : levels) {
+            if (pages.empty() || pages.back().bytes.size() >= 32768 || bounds.back().second.bid != k.bid) {
+                pages.emplace_back();
+                bounds.push_back({k, k});
+            }
+            bounds.back().second = k;
+            auto &page = pages.back();
+            putKey(page, k);
+            page.varint(r.initial);
+            page.varint(r.events.size());
+            uint64_t previous = 0;
+            for (const auto &e : r.events) {
+                page.varint(e.ordinal - previous);
+                previous = e.ordinal;
+                page.varint(e.quantity);
+                page.fixed32(e.digits);
+            }
         }
-    }
-    w.varint(pages.size());
-    for (size_t i = 0; i < pages.size(); ++i) {
-        putKey(w, bounds[i].first);
-        putKey(w, bounds[i].second);
-        section(w, pages[i].bytes);
-    }
-    w.fixed32(sentinel::crc32(w.bytes.data(), w.bytes.size()));
-    return std::move(w.bytes);
+        w.varint(pages.size());
+        for (size_t i = 0; i < pages.size(); ++i) {
+            putKey(w, bounds[i].first);
+            putKey(w, bounds[i].second);
+            section(w, pages[i].bytes);
+        }
+        w.fixed32(sentinel::crc32(w.bytes.data(), w.bytes.size()));
+        return std::move(w.bytes);
+    });
 }
+
 D2Hour decodeD2(std::span<const uint8_t> bytes) {
     check(bytes.size() >= 12, "D2 truncated header");
     ByteReader footer(bytes.last(4));
@@ -242,37 +245,39 @@ D2Hour decodeD2(std::span<const uint8_t> bytes) {
     }
     // Validate decoded runs, independent of the zstd version used to publish.
     const auto expected = runs(hour);
-    check(expected.size() == levels.size(), "D2 extra runs");
+    encodingCheck(expected.size() == levels.size(), "D2 extra runs");
     for (const auto &[key, run] : expected) {
         const auto it = levels.find(key);
-        check(it != levels.end() && it->second.initial == run.initial && it->second.events == run.events,
+        encodingCheck(it != levels.end() && it->second.initial == run.initial && it->second.events == run.events,
               "D2 noncanonical runs");
     }
     return hour;
 }
 BookImage endImage(const D2Hour &hour) {
-    const auto levels = runs(hour);
-    BookImage image = hour.start;
-    image.levels.clear();
-    if (!hour.blocks.empty()) {
-        const auto &last = hour.blocks.back();
-        image.atMs = last.bucketStartMs + 60000;
-        image.observed = last.observedAtStart;
-        image.priceDigits = last.priceDigits;
-        image.sizeDigits = last.sizeDigits;
-        for (const auto &m : last.messages) {
-            image.observed = m.observed;
-            image.priceDigits = m.priceDigits;
-            image.sizeDigits = m.sizeDigits;
+    return encoding("D2 end image", [&]() -> BookImage {
+        const auto levels = runs(hour);
+        BookImage image = hour.start;
+        image.levels.clear();
+        if (!hour.blocks.empty()) {
+            const auto &last = hour.blocks.back();
+            image.atMs = last.bucketStartMs + 60000;
+            image.observed = last.observedAtStart;
+            image.priceDigits = last.priceDigits;
+            image.sizeDigits = last.sizeDigits;
+            for (const auto &m : last.messages) {
+                image.observed = m.observed;
+                image.priceDigits = m.priceDigits;
+                image.sizeDigits = m.sizeDigits;
+            }
         }
-    }
-    for (const auto &[k, r] : levels)
-        if (r.current.mantissa) {
-            const auto p = decimalAtScale(k.price, image.priceDigits), q = decimalAtScale(r.current, image.sizeDigits);
-            if (!p || !q)
-                throw std::overflow_error("D2 terminal scale overflow");
-            image.levels.push_back({k.bid, *p, *q});
-        }
-    return image;
+        for (const auto &[k, r] : levels)
+            if (r.current.mantissa) {
+                const auto p = decimalAtScale(k.price, image.priceDigits), q = decimalAtScale(r.current, image.sizeDigits);
+                if (!p || !q)
+                    throw std::overflow_error("D2 terminal scale overflow");
+                image.levels.push_back({k.bid, *p, *q});
+            }
+        return image;
+    });
 }
 } // namespace sentinel::levelstore

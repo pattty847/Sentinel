@@ -96,7 +96,7 @@ endforeach()
 # disk even when their fixtures have separate roots. Keep other tests parallel.
 set(_sentinel_disk_heavy_tests
     CaptureVerifierScaleTests RawCaptureTests
-    LevelRestartTests LevelRestartSweepTests LevelLogTests LevelRollTests LevelHaltTests SealStoreTests
+    LevelRecorderTests LevelRestartTests LevelRestartSweepTests LevelLogTests LevelRollTests LevelHaltTests SealStoreTests
     RollerTests ShadowRollerTests RollerCorruptBlockTests JournalAnchorTests
     Hmc2StoreTests)
 foreach(_sentinel_area IN ITEMS capture levelstore roller servermodel)

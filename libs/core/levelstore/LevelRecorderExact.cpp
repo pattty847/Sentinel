@@ -100,6 +100,7 @@ void LevelRecorder::onSource(const std::string &symbol, int64_t clock, const rec
             return;
         }
         prepared_ = false;
+        expectedChanges_.clear();
         malformedSource_ = source.malformed;
         if (source.malformed)
             return; // Let the recorder apply its existing invalid-input decision.
@@ -193,6 +194,7 @@ void LevelRecorder::onSuppressed(const std::string &symbol, int64_t clock, size_
     if (failed() || halted_ || !mine(symbol))
         return;
     try {
+        if (malformedSource_) return;
         if (index >= expectedChanges_.size()) {
             halt("missing exact source index");
             return;

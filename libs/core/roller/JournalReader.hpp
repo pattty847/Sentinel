@@ -28,6 +28,7 @@ struct JournalFile {
     std::filesystem::path path;
     nlohmann::json header;
     bool superseded = false;
+    std::shared_ptr<const std::string> relativePath;
 };
 struct JournalRecord {
     capture::Record record;
@@ -35,7 +36,7 @@ struct JournalRecord {
     nlohmann::json metadata;
     bool gapBefore = false;
     int version = 1;
-    std::string file; // source path, for exact-value halt diagnostics
+    std::shared_ptr<const std::string> file; // shared root-relative source path
 };
 // One product, header order (run start, run id, segment), one decoded block at
 // a time. Reopen at a saved position to poll an open file; EOF is not a tick.

@@ -18,6 +18,8 @@ std::optional<nlohmann::json> readHalt(const fs::path &root, const std::string &
     const auto p = path(root, product);
     if (!fs::exists(p))
         return {};
+    if (fs::file_size(p) > kMaxHaltBytes)
+        throw std::runtime_error("halt record exceeds 64 MiB bound");
     std::ifstream in(p);
     nlohmann::json envelope;
     in >> envelope;
@@ -43,10 +45,13 @@ void writeHalt(const fs::path &root, const std::string &product, nlohmann::json 
     const auto body = record.dump();
     const nlohmann::json envelope = {
         {"version", 1}, {"record", record}, {"crc32", sentinel::crc32(body.data(), body.size())}};
+    const auto encoded = envelope.dump() + "\n";
+    if (encoded.size() > kMaxHaltBytes)
+        throw std::runtime_error("halt record exceeds 64 MiB bound");
     {
         std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
         out.exceptions(std::ios::badbit | std::ios::failbit);
-        out << envelope.dump() << '\n';
+        out << encoded;
         out.close();
     }
     sync(tmp, false);

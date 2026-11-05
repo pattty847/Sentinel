@@ -2,8 +2,24 @@
 #include <boost/multiprecision/cpp_int.hpp>
 #include <cstddef>
 #include <stdexcept>
+#include <string>
+#include <utility>
 
 namespace sentinel::levelstore {
+class EncodingError : public std::overflow_error {
+  public:
+    explicit EncodingError(const std::string &why) : std::overflow_error(why) {}
+};
+inline void encodingCheck(bool ok, const std::string &why) {
+    if (!ok) throw EncodingError(why);
+}
+// Only wrap in-memory work. File operations must remain outside this boundary.
+// bad_alloc is deliberately not a runtime_error or logic_error: it stays transient.
+template<class F> decltype(auto) encoding(const std::string &context, F &&work) {
+    try { return std::forward<F>(work)(); }
+    catch (const std::runtime_error &e) { throw EncodingError(context + ": " + e.what()); }
+    catch (const std::logic_error &e) { throw EncodingError(context + ": " + e.what()); }
+}
 // A valid in-memory value can exceed a format's bounded frame. Classify this
 // separately from I/O and allocation failure so the product halts deterministically.
 inline void requireEncodingSize(size_t bytes, size_t maximum) {

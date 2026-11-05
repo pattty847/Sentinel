@@ -394,7 +394,7 @@ TEST(LevelRoll, ExactSourceTracksEachFilesHeaderIncrementsAndOriginalFields) {
                         metadata()["product_metadata"],
                         false,
                         1};
-        r.file = i ? "second.rawl2" : "first.rawl2";
+        r.file = std::make_shared<const std::string>(i ? "second.rawl2" : "first.rawl2");
         if (i) {
             r.metadata["quote_increment"] = "0.001";
             r.metadata["base_increment"] = "0.0001";
@@ -413,4 +413,40 @@ TEST(LevelRoll, ExactSourceTracksEachFilesHeaderIncrementsAndOriginalFields) {
     EXPECT_EQ(sources[1]->levels[0].sizeText, "0.0001");
     EXPECT_EQ(sources[1]->levels[0].price.value, (ExactDecimal{98123, 3}));
     EXPECT_EQ(sources[1]->levels[0].size.value, (ExactDecimal{1, 4}));
+}
+
+TEST(LevelRoll, OneSidedSnapshotBeforeGridIsSkippedAndUnalignedRangeIsRejected) {
+    TempDir t;
+    capture::WriterConfig config;
+    config.root = QString::fromStdString((t.path / "raw").string());
+    config.fsyncBlocks = 0;
+    capture::Writer writer(config, metadata());
+    const auto append = [&](int second, uint64_t seq, const char *type, json updates) {
+        writer.append({capture::Kind::Frame, {(Epoch + second*1000)*1000000, second*1000000000LL}, 1,
+                       frame(seq, type, std::move(updates))});
+    };
+    append(0, 1, "snapshot", json::array({level("bid", "99", "2")}));
+    append(2, 2, "snapshot", fullBook(0));
+    append(61, 3, "update", fullBook(1));
+    append(121, 4, "update", fullBook(2));
+    writer.close();
+    JournalReader inventory(t.path / "raw", kProduct);
+    JournalRecord first, second;
+    ASSERT_TRUE(inventory.next(first));
+    ASSERT_TRUE(inventory.next(second));
+    ASSERT_TRUE(first.file);
+    EXPECT_EQ(first.file.get(), second.file.get()); // One shared path per file, no per-record string allocation.
+    EXPECT_FALSE(fs::path(*first.file).is_absolute());
+    RollOptions o{t.path / "raw", t.path / "combined", kProduct, Epoch, Epoch + 2*Minute};
+    o.levelLogRoot = t.path / "log";
+    EXPECT_FALSE(roll(o).at("cHalted"));
+    o.outputRoot = t.path / "hmc-only";
+    o.levelLogRoot.clear();
+    roll(o);
+    EXPECT_EQ(hmc2Files(t.path / "combined"), hmc2Files(t.path / "hmc-only"));
+    o.outputRoot = t.path / "unaligned";
+    o.levelLogRoot = t.path / "unaligned-log";
+    ++o.fromMs;
+    try { roll(o); FAIL(); }
+    catch (const std::runtime_error &e) { EXPECT_EQ(std::string(e.what()), "roll range must contain complete UTC minutes"); }
 }

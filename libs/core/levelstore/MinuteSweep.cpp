@@ -8,7 +8,7 @@ namespace {
 constexpr int64_t kMinute = 60'000;
 int64_t floorDiv(int64_t v, int64_t d) { return v / d - (v % d < 0 ? 1 : 0); }
 void require(bool ok, const char *what) {
-    if (!ok) throw std::runtime_error(std::string("MinuteSweep: ") + what);
+    if (!ok) throw EncodingError(std::string("MinuteSweep: ") + what);
 }
 } // namespace
 

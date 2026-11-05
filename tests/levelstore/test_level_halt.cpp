@@ -36,13 +36,27 @@ roller::RollOptions options(const fs::path &raw, const fs::path &root) {
 TEST(LevelHalt, DurableHaltAndFreshRootRebuildMatchEveryFile) {
     TempDir raw, baseline, resumed, hmconly, rebuilt;
     RestartJournal journal(raw.path);
+    // The halted root contains a preceding UTC day. Recovery must not resume it.
+    journal.at(-1);
+    auto previous = options(raw.path, resumed.path);
+    previous.fromMs = RestartJournal::Epoch - 60000;
+    previous.toMs = RestartJournal::Epoch;
+    roller::roll(previous);
+    auto priorHmc = previous;
+    priorHmc.outputRoot = hmconly.path / "hmc";
+    priorHmc.levelLogRoot.clear();
+    roller::roll(priorHmc);
     journal.grow(30);
+    auto normal = options(raw.path, baseline.path);
+    normal.levelRepresentationVersionForTest = 2;
+    roller::roll(normal); // The never-halted control has an incremental history.
     auto paused = options(raw.path, resumed.path);
     auto first = roller::roll(paused);
     const auto before = checkpoint(resumed.path);
     ASSERT_FALSE(first.at("cHalted"));
     ASSERT_TRUE(before.at("days").at(std::to_string(RestartJournal::Epoch)).contains("level"));
-    journal.grow(92);
+    journal.grow(45);
+    roller::roll(normal);
     paused.levelScaleCapForTest = 7;
     const auto stopped = roller::roll(paused);
     ASSERT_TRUE(stopped.at("cHalted"));
@@ -54,9 +68,14 @@ TEST(LevelHalt, DurableHaltAndFreshRootRebuildMatchEveryFile) {
           "sizeIncrement", "priceDigits", "sizeDigits", "priceText", "sizeText", "reason", "committedCheckpoint"})
         EXPECT_TRUE(halt->contains(key)) << key;
     EXPECT_EQ(halt->at("committedCheckpoint"), before);
+    EXPECT_FALSE(fs::path(halt->at("file").get<std::string>()).is_absolute());
     EXPECT_EQ(checkpoint(resumed.path).at("days").at(std::to_string(RestartJournal::Epoch)).at("level"),
               before.at("days").at(std::to_string(RestartJournal::Epoch)).at("level"));
     const auto frozen = tree(paused.levelLogRoot, ".lcl");
+    const auto stoppedHmc = tree(resumed.path, ".hmc2");
+    const auto stoppedBoundary = checkpoint(resumed.path);
+    journal.grow(92); // New RAWL2 arrives after C halted, before the same-version restart.
+    roller::roll(normal);
     int cCreated = 0;
     paused.onLevelRecorder = [&](auto *c) {
         if (c)
@@ -64,6 +83,10 @@ TEST(LevelHalt, DurableHaltAndFreshRootRebuildMatchEveryFile) {
     };
     EXPECT_TRUE(roller::roll(paused).at("cHalted"));
     EXPECT_EQ(cCreated, 0);
+    EXPECT_NE(tree(resumed.path, ".hmc2"), stoppedHmc);
+    EXPECT_NE(checkpoint(resumed.path), stoppedBoundary);
+    EXPECT_EQ(checkpoint(resumed.path).at("days").at(std::to_string(RestartJournal::Epoch)).at("level"),
+              before.at("days").at(std::to_string(RestartJournal::Epoch)).at("level"));
     EXPECT_EQ(tree(paused.levelLogRoot, ".lcl"), frozen);
     EXPECT_EQ(readHalt(paused.levelLogRoot, "BTC-USD"), halt);
     auto h = options(raw.path, hmconly.path);
@@ -75,12 +98,12 @@ TEST(LevelHalt, DurableHaltAndFreshRootRebuildMatchEveryFile) {
     paused.levelRepresentationVersionForTest = 2;
     EXPECT_TRUE(roller::roll(paused).at("cHalted"));
     EXPECT_EQ(tree(resumed.path, ""), haltedTree);
-    auto fixed = options(raw.path, rebuilt.path);
+    TempDir movedRaw;
+    fs::copy(raw.path, movedRaw.path, fs::copy_options::recursive | fs::copy_options::overwrite_existing);
+    auto fixed = options(movedRaw.path, rebuilt.path);
     fixed.levelRepresentationVersionForTest = 2;
     EXPECT_FALSE(roller::roll(fixed).at("cHalted"));
-    auto normal = options(raw.path, baseline.path);
-    normal.levelRepresentationVersionForTest = 2;
-    roller::roll(normal);
+    EXPECT_EQ(fixed.fromMs % 86400000, 0); // Rebuild starts at the affected UTC day start.
     EXPECT_EQ(tree(rebuilt.path, ""), tree(baseline.path, ""));
     EXPECT_EQ(tree(resumed.path, ""), haltedTree);
     EXPECT_EQ(readHalt(paused.levelLogRoot, "BTC-USD"), halt);
@@ -94,4 +117,14 @@ TEST(LevelHalt, DurableHaltAndFreshRootRebuildMatchEveryFile) {
     EXPECT_FALSE(roller::roll(control).at("cHalted"));
     EXPECT_EQ(tree(resumed.path / "hmc/ETH-USD", ""), tree(baseline.path / "hmc/ETH-USD", ""));
     EXPECT_EQ(tree(resumed.path / "log/ETH-USD", ""), tree(baseline.path / "log/ETH-USD", ""));
+}
+
+TEST(LevelHalt, OversizedRecordIsRejectedBeforeParsing) {
+    TempDir t;
+    fs::create_directories(t.path / "BTC-USD");
+    const auto p = t.path / "BTC-USD/halt.json";
+    std::ofstream(p).close();
+    fs::resize_file(p, kMaxHaltBytes + 1);
+    try { (void)readHalt(t.path, "BTC-USD"); FAIL(); }
+    catch (const std::runtime_error &e) { EXPECT_EQ(std::string(e.what()), "halt record exceeds 64 MiB bound"); }
 }

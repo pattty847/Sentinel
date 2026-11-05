@@ -173,3 +173,39 @@ TEST(SealStore, EveryDayAndRetentionWritePointRetriesToEveryFileIdentity) {
     sealer.publishDay(0);
     EXPECT_NO_THROW(sealer.verifyDay(0));
 }
+
+TEST(SealStore, InterruptedPruneRepairsRemainingSealBeforeFinishingRetention) {
+    TempDir dir;
+    DayBinding binding{"BTC-USD", 0, Day, 2};
+    {
+        LevelLog log(dir.path, "BTC-USD");
+        log.enableSeals();
+        log.onDayStart(binding, hour(0).start);
+        for (int h = 0; h < 24; ++h)
+            for (const auto &b : hour(h * Hour).blocks) log.onBlock(binding, b);
+        log.sync();
+    }
+    bool stopped = false;
+    SealStore fault(dir.path, "BTC-USD", [&](const char *point) {
+        if (std::string_view(point) == "seal-log-pruned") { stopped = true; throw std::runtime_error("prune stop"); }
+    });
+    EXPECT_THROW(fault.prune(4*Day), std::runtime_error);
+    ASSERT_TRUE(stopped);
+    ASSERT_TRUE(fs::exists(LevelLogReader::hourPath(dir.path, "BTC-USD", 0)));
+    { std::ofstream out(dir.path / "BTC-USD/seals/0.hour", std::ios::trunc); out << "corrupt remaining seal"; }
+    LevelLog resumed(dir.path, "BTC-USD");
+    resumed.enableSeals();
+    EXPECT_NO_THROW(resumed.open());
+    EXPECT_EQ(SealStore(dir.path, "BTC-USD").read(0).timeline, hour(0));
+    for (int h = 0; h < 24; ++h)
+        EXPECT_FALSE(fs::exists(LevelLogReader::hourPath(dir.path, "BTC-USD", h*Hour)));
+}
+TEST(SealStore, OversizedFileIsRejectedBeforeReading) {
+    TempDir dir;
+    fs::create_directories(dir.path / "BTC-USD/seals");
+    const auto path = dir.path / "BTC-USD/seals/0.hour";
+    std::ofstream(path).close();
+    fs::resize_file(path, 1024ULL*1024*1024 + 8ULL*1024*1024 + 1);
+    try { (void)SealStore(dir.path, "BTC-USD").read(0); FAIL(); }
+    catch (const std::runtime_error &e) { EXPECT_EQ(std::string(e.what()), "seal stored size bound"); }
+}

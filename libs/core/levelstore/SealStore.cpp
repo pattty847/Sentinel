@@ -1,10 +1,12 @@
 #include "SealStore.hpp"
 #include "LevelLog.hpp"
 #include "Crc32.hpp"
+#include "SentinelLogging.hpp"
 #include "servermodel/PersistenceIo.hpp"
 #include <zstd.h>
 #include <fstream>
 #include <map>
+#include <array>
 #include <stdexcept>
 namespace sentinel::levelstore {
 namespace fs = std::filesystem;
@@ -20,11 +22,26 @@ void sync(const fs::path &path, bool directory) {
           "seal fsync failure");
 }
 std::vector<uint8_t> load(const fs::path &path) {
+    // 1 GiB raw plus zstd compressBound overhead and container framing.
+    check(fs::file_size(path) <= 1024ULL * 1024 * 1024 + 8ULL * 1024 * 1024, "seal stored size bound");
     std::ifstream in(path, std::ios::binary);
     check(bool(in), "seal missing");
     std::vector<uint8_t> result{std::istreambuf_iterator<char>(in), {}};
     check(!in.bad(), "seal read failure");
     return result;
+}
+std::pair<uint64_t, uint32_t> fileDigest(const fs::path &path) {
+    std::ifstream in(path, std::ios::binary);
+    check(bool(in), "log digest open failure");
+    std::array<char, 65536> buffer;
+    uint64_t size = 0;
+    uint32_t crc = 0;
+    while (in.read(buffer.data(), buffer.size()) || in.gcount()) {
+        size += in.gcount();
+        crc = sentinel::crc32Update(crc, buffer.data(), in.gcount());
+    }
+    check(in.eof() && !in.bad(), "log digest read failure");
+    return {size, crc};
 }
 void bytes(ByteWriter &w, std::span<const uint8_t> data) {
     w.varint(data.size());
@@ -101,7 +118,9 @@ void SealStore::atomic(const fs::path &path, std::span<const uint8_t> data, cons
     point("seal-renamed");
     sync(dir_, true);
     point("seal-directory-synced");
-    check(load(path) == std::vector<uint8_t>(data.begin(), data.end()), "seal read-back bytes");
+    const auto reread = load(path); // I/O failure is transient; an encoded-byte mismatch is not.
+    encodingCheck(reread == std::vector<uint8_t>(data.begin(), data.end()),
+                  "hour=" + path.stem().string() + " check=seal read-back bytes");
     point("seal-read-back");
 }
 SealedHour SealStore::read(int64_t hour) const {
@@ -112,36 +131,52 @@ SealedHour SealStore::read(int64_t hour) const {
     check(r.done(), "seal suffix");
     SealedHour result{decodeD2(d2), decodeSummary(summary)};
     check(result.timeline.start.atMs == hour && result.timeline.blocks.size() == 60, "seal incomplete hour");
-    check(buildSummary({result.timeline}, levels(product_, false)) == result.summaries,
-          "seal summary disagrees with D2");
+    encoding("hour=" + std::to_string(hour) + " check=summary verification", [&] {
+        encodingCheck(buildSummary({result.timeline}, levels(product_, false)) == result.summaries,
+                      "seal summary disagrees with D2");
+    });
     return result;
 }
 void SealStore::publish(const D2Hour &h) {
     point("seal-hour-begin");
-    check(h.start.atMs % Hour == 0 && h.blocks.size() == 60 &&
-              h.blocks.back().bucketStartMs == h.start.atMs + Hour - 60000,
-          "seal requires full hour");
-    const auto d2 = encodeD2(h);
-    const auto restored = decodeD2(d2);
-    check(restored == h, "D2 lossless verification failed");
-    const auto summary = buildSummary({restored}, levels(product_, false));
-    ByteWriter w;
-    w.str(product_);
-    w.svarint(h.start.atMs);
-    bytes(w, d2);
-    bytes(w, encodeSummary(summary));
-    const auto data = pack(w.bytes);
+    const auto [data, summary] = encoding("hour=" + std::to_string(h.start.atMs) + " check=hour encode/verify", [&] {
+        encodingCheck(h.start.atMs % Hour == 0 && h.blocks.size() == 60 &&
+                      h.blocks.back().bucketStartMs == h.start.atMs + Hour - 60000, "seal requires full hour");
+        std::optional<D2Hour> altered;
+        if (verificationInputForTest) { altered = h; verificationInputForTest(*altered); }
+        const auto d2 = encodeD2(altered ? *altered : h);
+        const auto restored = decodeD2(d2);
+        encodingCheck(restored == h, "D2 lossless verification failed");
+        const auto summary = buildSummary({restored}, levels(product_, false));
+        ByteWriter w;
+        w.str(product_);
+        w.svarint(h.start.atMs);
+        bytes(w, d2);
+        bytes(w, encodeSummary(summary));
+        return std::pair{pack(w.bytes), summary};
+    });
     const auto path = dir_ / (std::to_string(h.start.atMs) + ".hour");
     bool valid = false;
     if (fs::exists(path)) {
         try {
             valid = read(h.start.atMs) == SealedHour{h, summary};
-        } catch (const std::exception &) {
+        } catch (const std::bad_alloc &) {
+            throw;
+        } catch (const std::exception &e) {
+            sLog_Warning("SealStore: rewriting unreadable seal product=" << product_ << " hour=" << h.start.atMs
+                         << " reason=" << e.what());
         }
     }
-    if (!valid)
+    if (!valid) {
+        const bool rebuilding = fs::exists(path);
         atomic(path, data, "seal-segment-written");
-    check(read(h.start.atMs) == SealedHour{h, summary}, "seal read-back lossless failure");
+        sLog_Data("SealStore: " << (rebuilding ? "rebuilt" : "published") << " product=" << product_
+                  << " hour=" << h.start.atMs << " bytes=" << data.size()
+                  << " crc=" << sentinel::crc32(data.data(), data.size() - 4));
+    }
+    const auto verified = read(h.start.atMs);
+    encodingCheck(verified == SealedHour{h, summary},
+                  "hour=" + std::to_string(h.start.atMs) + " check=seal read-back lossless failure");
     ByteWriter marker;
     marker.fixed32(4);
     marker.fixed64(data.size());
@@ -160,20 +195,28 @@ void SealStore::publishDay(int64_t day) {
     for (int i = 0; i < 24; ++i) {
         const auto time = day + i * Hour;
         const auto path = dir_ / (std::to_string(time) + ".hour");
-        if (!fs::exists(path))
+        if (!fs::exists(path)) {
+            warnPartialDay(day);
             return;
+        }
         auto h = read(time);
         if (!hours.empty())
-            check(endImage(hours.back()) == h.timeline.start, "seal hour discontinuity");
+            encodingCheck(endImage(hours.back()) == h.timeline.start,
+                          "hour=" + std::to_string(time) + " check=seal hour discontinuity");
         hours.push_back(std::move(h.timeline));
         const auto data = load(path);
         manifest.fixed64(data.size());
         manifest.fixed32(sentinel::crc32(data.data(), data.size()));
     }
-    bytes(manifest, encodeSummary(buildSummary(hours, levels(product_, true))));
-    const auto encoded = pack(manifest.bytes);
+    const auto encoded = encoding("hour=" + std::to_string(day) + " check=day encode/verify", [&] {
+        bytes(manifest, encodeSummary(buildSummary(hours, levels(product_, true))));
+        return pack(manifest.bytes);
+    });
     atomic(dir_ / (std::to_string(day) + ".day"), encoded, "seal-day-manifest-written");
-    check(unpack(load(dir_ / (std::to_string(day) + ".day"))) == manifest.bytes, "day manifest read-back");
+    const auto reread = unpack(load(dir_ / (std::to_string(day) + ".day")));
+    encodingCheck(reread == manifest.bytes, "hour=" + std::to_string(day) + " check=day manifest read-back");
+    sLog_Data("SealStore: published day product=" << product_ << " hour=" << day << " bytes=" << encoded.size()
+              << " crc=" << sentinel::crc32(encoded.data(), encoded.size() - 4));
     point("seal-day-end");
 }
 void SealStore::verifyDay(int64_t day) const {
@@ -188,12 +231,13 @@ void SealStore::verifyDay(int64_t day) const {
               "day seal hour mismatch");
         auto h = read(time);
         if (!hours.empty())
-            check(endImage(hours.back()) == h.timeline.start, "day continuity");
+            encodingCheck(endImage(hours.back()) == h.timeline.start, "hour=" + std::to_string(time) + " check=day continuity");
         hours.push_back(std::move(h.timeline));
     }
     const auto summary = bytes(r);
     check(r.done(), "day seal suffix");
-    check(decodeSummary(summary) == buildSummary(hours, levels(product_, true)), "day summaries disagree with D2");
+    encodingCheck(decodeSummary(summary) == buildSummary(hours, levels(product_, true)),
+                  "hour=" + std::to_string(day) + " check=day summaries disagree with D2");
 }
 void SealStore::requireRetained(int64_t minute) const {
     const auto path = dir_ / "retained";
@@ -209,21 +253,21 @@ void SealStore::cut(int64_t minute) {
     if (!fs::exists(dir_))
         return;
     const auto hour = minute / Hour * Hour, day = minute / Day * Day;
+    std::vector<fs::path> remove;
     for (const auto &e : fs::directory_iterator(dir_)) {
         const auto ext = e.path().extension();
-        if (ext != ".hour" && ext != ".verified" && ext != ".day" && ext != ".tmp")
-            continue;
-        if (ext == ".tmp") {
-            fs::remove(e.path());
-            continue;
-        }
-        const auto time = std::stoll(e.path().stem().string());
-        if (time >= (ext == ".day" ? day : hour)) {
-            fs::remove(e.path());
-            sync(dir_, true);
-            point("seal-cut");
+        if (ext == ".tmp") remove.push_back(e.path());
+        else if (ext == ".hour" || ext == ".verified" || ext == ".day") {
+            const auto time = std::stoll(e.path().stem().string());
+            if (time >= (ext == ".day" ? day : hour)) remove.push_back(e.path());
         }
     }
+    for (const auto &path : remove) {
+        fs::remove(path);
+        sync(dir_, true);
+        if (path.extension() != ".tmp") point("seal-cut");
+    }
+
 }
 void SealStore::recoverRetention() {
     const auto path = dir_ / "retained";
@@ -261,8 +305,10 @@ void SealStore::prune(int64_t through, int64_t windowMs) {
             if (!fs::exists(dir_ / (std::to_string(hour) + ".verified")))
                 complete = false;
         }
-        if (!complete)
+        if (!complete) {
+            warnPartialDay(day);
             continue;
+        }
         for (const auto &path : paths) {
             const auto hour = std::stoll(path.stem().string()) * Hour;
             (void)read(hour);
@@ -279,12 +325,24 @@ void SealStore::prune(int64_t through, int64_t windowMs) {
         return;
     ByteWriter retained;
     retained.svarint(before);
-    atomic(dir_ / "retained", pack(retained.bytes), "seal-retention-fence");
+    const auto fence = pack(retained.bytes);
+    atomic(dir_ / "retained", fence, "seal-retention-fence");
+    sLog_Data("SealStore: retention fence product=" << product_ << " hour=" << before
+              << " bytes=" << fence.size() << " crc=" << sentinel::crc32(fence.data(), fence.size() - 4));
+    std::sort(removable.rbegin(), removable.rend());
     for (const auto &path : removable) {
         point("seal-before-prune");
+        const auto [size, crc] = fileDigest(path);
         check(fs::remove(path), "C log prune failed");
+        sLog_Data("SealStore: deleted log product=" << product_ << " hour=" << std::stoll(path.stem().string()) * Hour
+                  << " bytes=" << size << " crc=" << crc);
         sync(root_ / product_, true);
         point("seal-log-pruned");
     }
+}
+void SealStore::warnPartialDay(int64_t hour) {
+    const auto day = hour / Day * Day;
+    if (warnedDays_.insert(day).second)
+        sLog_Warning("SealStore: partial day cannot seal or prune product=" << product_ << " day=" << day);
 }
 } // namespace sentinel::levelstore

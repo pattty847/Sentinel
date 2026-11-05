@@ -70,11 +70,13 @@ void registerJournalMetrics(metrics::MetricsRegistry& registry, const std::strin
 JournalReader::JournalReader(std::filesystem::path root, std::string product, std::optional<JournalPos> start)
     : product_(std::move(product)), start_(std::move(start)) {
     capture::validateSymbol(product_);
+    const auto journalRoot = root;
     if (std::filesystem::is_directory(root / product_)) root /= product_;
     for (const auto& e : std::filesystem::recursive_directory_iterator(root)) {
         if (!e.is_regular_file() || e.path().extension() != ".rawl2") continue;
         auto h = capture::readHeader(QString::fromStdString(e.path().string()));
-        if (h.at("product_metadata").at("product_id") == product_) files_.push_back({e.path(), std::move(h)});
+        if (h.at("product_metadata").at("product_id") == product_) files_.push_back({e.path(), std::move(h), false,
+            std::make_shared<const std::string>(e.path().lexically_relative(journalRoot).generic_string())});
     }
     std::sort(files_.begin(), files_.end(), [](const auto& a, const auto& b) { return order(a.header) < order(b.header); });
     if (files_.empty()) throw NoJournalFiles(product_);
@@ -127,7 +129,7 @@ bool JournalReader::next(JournalRecord& out) {
                    f.header.at("product_metadata"),
                    std::exchange(gap_, false),
                    f.header.at("format_version").get<int>(),
-                   f.path.string()};
+                   f.relativePath};
             return true;
         }
         const auto& result = reader_->result();

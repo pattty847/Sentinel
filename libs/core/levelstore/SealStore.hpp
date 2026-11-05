@@ -2,6 +2,7 @@
 #include "BalSummary.hpp"
 #include <filesystem>
 #include <functional>
+#include <set>
 namespace sentinel::levelstore {
 struct SealedHour {
     D2Hour timeline;
@@ -21,11 +22,14 @@ class SealStore {
     void prune(int64_t through, int64_t windowMs = 172800000);
     void recoverRetention();
     void requireRetained(int64_t minute) const;
+    void warnPartialDay(int64_t hour);
+    std::function<void(D2Hour &)> verificationInputForTest;
 
   private:
     std::filesystem::path root_, dir_;
     std::string product_;
     Point point_;
+    std::set<int64_t> warnedDays_;
     void point(const char *) const;
     void atomic(const std::filesystem::path &, std::span<const uint8_t>, const char *);
 };

@@ -6,7 +6,7 @@ target_link_libraries(test_exact_decimal PRIVATE GTest::gtest_main)
 add_test(NAME ExactDecimalTests COMMAND test_exact_decimal)
 set_tests_properties(ExactDecimalTests PROPERTIES LABELS "levelstore;fast")
 
-add_executable(test_level_recorder test_level_recorder.cpp)
+add_executable(test_level_recorder test_level_recorder.cpp test_level_coverage.cpp)
 target_include_directories(test_level_recorder PRIVATE ${CMAKE_SOURCE_DIR}/libs/core ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(test_level_recorder PRIVATE sentinel_core GTest::gtest_main)
 add_test(NAME LevelRecorderTests COMMAND test_level_recorder)
@@ -51,7 +51,7 @@ add_executable(test_level_restart_sweep test_level_restart_sweep.cpp RestartJour
 target_include_directories(test_level_restart_sweep PRIVATE ${CMAKE_SOURCE_DIR}/libs/core ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(test_level_restart_sweep PRIVATE sentinel_core GTest::gtest_main)
 add_test(NAME LevelRestartSweepTests COMMAND test_level_restart_sweep)
-set_tests_properties(LevelRestartSweepTests PROPERTIES LABELS "levelstore" TIMEOUT 600)
+set_tests_properties(LevelRestartSweepTests PROPERTIES LABELS "levelstore" TIMEOUT 1800)
 
 find_package(zstd CONFIG REQUIRED)
 add_executable(decimal_domain_survey decimal_domain_survey.cpp ${CMAKE_SOURCE_DIR}/libs/core/Crc32.cpp)

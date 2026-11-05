@@ -110,7 +110,7 @@ void JournalFeed::prepareExactSource(const nlohmann::json &event, const JournalR
     if (!retainExactSource)
         return;
     auto source = std::make_shared<recording::ExactSource>();
-    source->file = input.file;
+    source->file = input.file ? *input.file : std::string{};
     source->run = input.pos.run;
     source->block = input.pos.block;
     source->record = input.pos.record;

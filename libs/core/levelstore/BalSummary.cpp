@@ -13,7 +13,7 @@ void check(bool ok, const char *reason) {
         throw std::runtime_error(reason);
 }
 Wide factor(uint32_t from, uint32_t to) {
-    check(to >= from, "summary scale regression");
+    encodingCheck(to >= from, "summary scale regression");
     Wide f = 1;
     while (from++ < to)
         f *= 10;
@@ -25,7 +25,7 @@ int64_t narrow(const Wide &value) {
     return value.convert_to<int64_t>();
 }
 void putWide(ByteWriter &w, Wide n) {
-    check(n >= 0, "negative summary scalar");
+    encodingCheck(n >= 0, "negative summary scalar");
     while (n >= 128) {
         w.u8(static_cast<uint8_t>((n & 127).convert_to<unsigned>()) | 128);
         n >>= 7;
@@ -147,143 +147,147 @@ std::vector<SummaryLevel> bal1mLevels(const std::string &product) {
     return out;
 }
 std::vector<SummaryNode> buildSummary(const std::vector<D2Hour> &hours, const std::vector<SummaryLevel> &levels) {
-    if (hours.empty())
-        return {};
-    const auto mids = midRanges(hours);
-    std::vector<SummaryNode> result;
-    for (const auto &level : levels) {
-        check(level.durationMs > 0 && level.durationMs % 60000 == 0 && level.bandBp < 10000, "summary level");
-        auto start = hours.front().start;
-        const auto resolution = decimalAtScale(level.resolution, start.priceDigits);
-        if (!resolution || *resolution <= 0)
-            throw std::overflow_error("summary resolution not representable");
-        MinuteSweep sweep(*resolution, false);
-        sweep.start(start);
-        SummaryNode node;
-        std::map<std::pair<bool, int64_t>, BinRow> rows;
-        MidRange mid;
-        size_t index = 0;
-        int64_t expected = start.atMs;
-        for (const auto &h : hours)
-            for (const auto &b : h.blocks) {
-                check(b.bucketStartMs == expected, "summary incomplete minutes");
-                expected += 60000;
-                if (b.bucketStartMs % level.durationMs == 0) {
-                    node = {level, b.bucketStartMs, 0, b.priceDigits, b.sizeDigits, 0, 0, {}};
-                    rows.clear();
-                    mid = {};
-                    mid.digits = b.priceDigits;
-                }
-                std::vector<BinRow> minute;
-                int64_t covered = 0;
-                sweep.apply(b, minute, covered);
-                const auto pd = b.messages.empty() ? b.priceDigits : b.messages.back().priceDigits;
-                const auto qd = b.messages.empty() ? b.sizeDigits : b.messages.back().sizeDigits;
-                const auto qfactor = factor(node.sizeDigits, qd);
-                for (auto &[key, row] : rows) {
-                    row.integral *= qfactor;
-                    row.peak *= qfactor;
-                    row.last = 0;
-                }
-                for (const auto &row : minute) {
-                    auto &target = rows[{row.isBid, row.bin}];
-                    target.isBid = row.isBid;
-                    target.bin = row.bin;
-                    target.integral += row.integral;
-                    target.presenceMs += row.presenceMs;
-                    target.peak = std::max(target.peak, row.peak);
-                    target.last = row.last;
-                }
-                node.coveredMs += covered;
-                node.priceDigits = pd;
-                node.sizeDigits = qd;
-                const auto &mr = mids.at(index++);
-                mid.lo *= factor(mid.digits, pd);
-                mid.hi *= factor(mid.digits, pd);
-                mid.digits = pd;
-                if (mr.set) {
-                    if (!mid.set) {
-                        mid = mr;
-                    } else {
-                        mid.lo = std::min(mid.lo, mr.lo);
-                        mid.hi = std::max(mid.hi, mr.hi);
+    return encoding("summary build", [&]() -> std::vector<SummaryNode> {
+        if (hours.empty())
+            return {};
+        const auto mids = midRanges(hours);
+        std::vector<SummaryNode> result;
+        for (const auto &level : levels) {
+            encodingCheck(level.durationMs > 0 && level.durationMs % 60000 == 0 && level.bandBp < 10000, "summary level");
+            auto start = hours.front().start;
+            const auto resolution = decimalAtScale(level.resolution, start.priceDigits);
+            if (!resolution || *resolution <= 0)
+                throw std::overflow_error("summary resolution not representable");
+            MinuteSweep sweep(*resolution, false);
+            sweep.start(start);
+            SummaryNode node;
+            std::map<std::pair<bool, int64_t>, BinRow> rows;
+            MidRange mid;
+            size_t index = 0;
+            int64_t expected = start.atMs;
+            for (const auto &h : hours)
+                for (const auto &b : h.blocks) {
+                    encodingCheck(b.bucketStartMs == expected, "summary incomplete minutes");
+                    expected += 60000;
+                    if (b.bucketStartMs % level.durationMs == 0) {
+                        node = {level, b.bucketStartMs, 0, b.priceDigits, b.sizeDigits, 0, 0, {}};
+                        rows.clear();
+                        mid = {};
+                        mid.digits = b.priceDigits;
                     }
-                    mid.set = true;
-                }
-                if (expected % level.durationMs)
-                    continue;
-                if (node.startMs % level.durationMs || expected - node.startMs != level.durationMs)
-                    continue;
-                if (level.bandBp && mid.set) {
-                    const auto r = decimalAtScale(level.resolution, pd);
-                    if (!r || *r <= 0)
-                        throw std::overflow_error("summary resolution overflow");
-                    const Wide low = mid.lo * (10000 - level.bandBp) / 10000;
-                    const Wide high = (mid.hi * (10000 + level.bandBp) + 9999) / 10000;
-                    node.bandLo = narrow(low / *r);
-                    node.bandHi = narrow(high / *r + 1);
-                }
-                for (auto &[key, row] : rows)
-                    if (!level.bandBp || (row.bin >= node.bandLo && row.bin < node.bandHi)) {
-                        if (level.twapOnly) {
-                            row.peak = 0;
-                            row.presenceMs = 0;
+                    std::vector<BinRow> minute;
+                    int64_t covered = 0;
+                    sweep.apply(b, minute, covered);
+                    const auto pd = b.messages.empty() ? b.priceDigits : b.messages.back().priceDigits;
+                    const auto qd = b.messages.empty() ? b.sizeDigits : b.messages.back().sizeDigits;
+                    const auto qfactor = factor(node.sizeDigits, qd);
+                    for (auto &[key, row] : rows) {
+                        row.integral *= qfactor;
+                        row.peak *= qfactor;
+                        row.last = 0;
+                    }
+                    for (const auto &row : minute) {
+                        auto &target = rows[{row.isBid, row.bin}];
+                        target.isBid = row.isBid;
+                        target.bin = row.bin;
+                        target.integral += row.integral;
+                        target.presenceMs += row.presenceMs;
+                        target.peak = std::max(target.peak, row.peak);
+                        target.last = row.last;
+                    }
+                    node.coveredMs += covered;
+                    node.priceDigits = pd;
+                    node.sizeDigits = qd;
+                    const auto &mr = mids.at(index++);
+                    mid.lo *= factor(mid.digits, pd);
+                    mid.hi *= factor(mid.digits, pd);
+                    mid.digits = pd;
+                    if (mr.set) {
+                        if (!mid.set) {
+                            mid = mr;
+                        } else {
+                            mid.lo = std::min(mid.lo, mr.lo);
+                            mid.hi = std::max(mid.hi, mr.hi);
                         }
-                        node.rows.push_back(row);
+                        mid.set = true;
                     }
-                std::sort(node.rows.begin(), node.rows.end(),
-                          [](const auto &a, const auto &b) { return a.isBid != b.isBid ? a.isBid : a.bin < b.bin; });
-                result.push_back(std::move(node));
-            }
-    }
-    return result;
+                    if (expected % level.durationMs)
+                        continue;
+                    if (node.startMs % level.durationMs || expected - node.startMs != level.durationMs)
+                        continue;
+                    if (level.bandBp && mid.set) {
+                        const auto r = decimalAtScale(level.resolution, pd);
+                        if (!r || *r <= 0)
+                            throw std::overflow_error("summary resolution overflow");
+                        const Wide low = mid.lo * (10000 - level.bandBp) / 10000;
+                        const Wide high = (mid.hi * (10000 + level.bandBp) + 9999) / 10000;
+                        node.bandLo = narrow(low / *r);
+                        node.bandHi = narrow(high / *r + 1);
+                    }
+                    for (auto &[key, row] : rows)
+                        if (!level.bandBp || (row.bin >= node.bandLo && row.bin < node.bandHi)) {
+                            if (level.twapOnly) {
+                                row.peak = 0;
+                                row.presenceMs = 0;
+                            }
+                            node.rows.push_back(row);
+                        }
+                    std::sort(node.rows.begin(), node.rows.end(),
+                              [](const auto &a, const auto &b) { return a.isBid != b.isBid ? a.isBid : a.bin < b.bin; });
+                    result.push_back(std::move(node));
+                }
+        }
+        return result;
+    });
 }
 std::vector<uint8_t> encodeSummary(const std::vector<SummaryNode> &nodes) {
-    ByteWriter w;
-    w.fixed32(0x344e5343);
-    w.fixed32(4);
-    w.varint(nodes.size());
-    for (const auto &n : nodes) {
-        w.svarint(n.startMs);
-        w.varint(n.level.durationMs);
-        w.varint(n.level.resolution.mantissa);
-        w.fixed32(n.level.resolution.digits);
-        w.fixed32(n.level.bandBp);
-        w.u8(n.level.twapOnly);
-        w.varint(n.coveredMs);
-        w.fixed32(n.priceDigits);
-        w.fixed32(n.sizeDigits);
-        w.varint(n.bandLo);
-        w.varint(n.bandHi);
-        w.varint(n.rows.size());
-        int64_t previous = 0;
-        bool side = true;
-        for (const auto &r : n.rows) {
-            if (r.isBid != side) {
-                previous = 0;
-                side = r.isBid;
-            }
-            check(!n.level.twapOnly || (r.peak == 0 && r.presenceMs == 0), "TWAP-only metrics");
-            const bool constant =
-                n.coveredMs > 0 && r.integral == r.last * n.coveredMs &&
-                (n.level.twapOnly || (r.peak == r.last && r.presenceMs == (r.last > 0 ? n.coveredMs : 0)));
-            w.u8((r.isBid ? 1 : 0) | (constant ? 2 : 0));
-            w.svarint(r.bin - previous);
-            previous = r.bin;
-            if (constant)
-                putWide(w, r.last);
-            else {
-                putWide(w, r.integral);
-                if (!n.level.twapOnly) {
-                    putWide(w, r.peak);
-                    w.varint(r.presenceMs);
+    return encoding("summary encode", [&]() -> std::vector<uint8_t> {
+        ByteWriter w;
+        w.fixed32(0x344e5343);
+        w.fixed32(4);
+        w.varint(nodes.size());
+        for (const auto &n : nodes) {
+            w.svarint(n.startMs);
+            w.varint(n.level.durationMs);
+            w.varint(n.level.resolution.mantissa);
+            w.fixed32(n.level.resolution.digits);
+            w.fixed32(n.level.bandBp);
+            w.u8(n.level.twapOnly);
+            w.varint(n.coveredMs);
+            w.fixed32(n.priceDigits);
+            w.fixed32(n.sizeDigits);
+            w.varint(n.bandLo);
+            w.varint(n.bandHi);
+            w.varint(n.rows.size());
+            int64_t previous = 0;
+            bool side = true;
+            for (const auto &r : n.rows) {
+                if (r.isBid != side) {
+                    previous = 0;
+                    side = r.isBid;
                 }
-                putWide(w, r.last);
+                encodingCheck(!n.level.twapOnly || (r.peak == 0 && r.presenceMs == 0), "TWAP-only metrics");
+                const bool constant =
+                    n.coveredMs > 0 && r.integral == r.last * n.coveredMs &&
+                    (n.level.twapOnly || (r.peak == r.last && r.presenceMs == (r.last > 0 ? n.coveredMs : 0)));
+                w.u8((r.isBid ? 1 : 0) | (constant ? 2 : 0));
+                w.svarint(r.bin - previous);
+                previous = r.bin;
+                if (constant)
+                    putWide(w, r.last);
+                else {
+                    putWide(w, r.integral);
+                    if (!n.level.twapOnly) {
+                        putWide(w, r.peak);
+                        w.varint(r.presenceMs);
+                    }
+                    putWide(w, r.last);
+                }
             }
         }
-    }
-    w.fixed32(sentinel::crc32(w.bytes.data(), w.bytes.size()));
-    return std::move(w.bytes);
+        w.fixed32(sentinel::crc32(w.bytes.data(), w.bytes.size()));
+        return std::move(w.bytes);
+    });
 }
 std::vector<SummaryNode> decodeSummary(std::span<const uint8_t> bytes) {
     check(bytes.size() >= 12, "summary truncated");
@@ -345,7 +349,7 @@ std::vector<SummaryNode> decodeSummary(std::span<const uint8_t> bytes) {
         result.push_back(std::move(n));
     }
     check(r.done(), "summary trailing bytes");
-    check(encodeSummary(result) == std::vector<uint8_t>(bytes.begin(), bytes.end()), "summary noncanonical");
+    encodingCheck(encodeSummary(result) == std::vector<uint8_t>(bytes.begin(), bytes.end()), "summary noncanonical");
     return result;
 }
 } // namespace sentinel::levelstore

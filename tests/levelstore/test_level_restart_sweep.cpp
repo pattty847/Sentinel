@@ -2,6 +2,7 @@
 #include "RestartJournal.hpp"
 #include "roller/Roller.hpp"
 #include "levelstore/LevelLog.hpp"
+#include "levelstore/SealStore.hpp"
 #include <gtest/gtest.h>
 #include <exception>
 #include <fstream>
@@ -389,4 +390,95 @@ TEST(LevelRestartSweep, AbandonedRecorderTempsAreRemovedWithoutChangingCommitted
         EXPECT_EQ(everyFile(output), wanted);
         EXPECT_TRUE(fs::is_symlink(fs::symlink_status(link)));
     }
+}
+
+TEST(LevelRestartSweep, DayManifestRetentionAndVerifiedMarkerWithMessagesEveryMinute) {
+    constexpr int64_t Hour = 60*Minute, Day = 24*Hour;
+    TempDir t;
+    RestartJournal writer(t.path / "raw");
+    using Tree = std::map<std::string, std::string>;
+    const auto everyFile = [&](const fs::path &root) {
+        Tree result;
+        for (const auto &e : fs::recursive_directory_iterator(root))
+            if (e.is_regular_file()) result[e.path().lexically_relative(root).string()] = contents(e.path());
+        return result;
+    };
+    struct RunResult { bool hit = false; std::vector<std::string> points; int liveHours = 0; };
+    const auto runDay = [&](const fs::path &root, int day, size_t stop = SIZE_MAX) {
+        RunResult result;
+        recording::BookRecorder *recorder = nullptr;
+        LevelRecorder *level = nullptr;
+        RollOptions o{t.path / "raw", root / "hmc", "BTC-USD", Epoch+day*Day,
+                      Epoch+day*Day+(day ? 75*Minute : Day)};
+        o.levelLogRoot = root / "log";
+        o.levelLogRetentionMs = Hour;
+        o.onRecorder = [&](auto *r, auto *, int64_t) { recorder = r; };
+        o.onLevelRecorder = [&](auto *c) { level = c; };
+        o.onApplied = [&](const auto &) {
+            if (recorder) recorder->drain();
+            if (result.hit) throw std::runtime_error("day sweep worker stop");
+        };
+        o.persistencePointForTest = [&](const char *name) {
+            if (!std::string_view(name).starts_with("seal-") || result.hit) return;
+            if (std::string_view(name) == "seal-hour-end" && level && level->openBlock().bucketStartMs >= o.fromMs) {
+                const auto hourStart = level->openBlock().bucketStartMs / Hour * Hour;
+                const auto sealed = SealStore(o.levelLogRoot, o.product).read(hourStart);
+                EXPECT_EQ(endImage(sealed.timeline), (BookImage{hourStart+Hour, level->observed(), level->book(),
+                                                               level->priceDigits(), level->sizeDigits()}));
+                ++result.liveHours;
+            }
+            // Recovery re-verifies earlier seals too. Sweep the forward publication
+            // of the final hour, including all marker/day/fence/unlink seams.
+            if (!level || level->openBlock().bucketStartMs < o.fromMs + (day ? 59 : 1439)*Minute) return;
+            result.points.emplace_back(name);
+            if (result.points.size()-1 == stop) {
+                result.hit = true;
+                throw std::runtime_error("day persistence stop");
+            }
+        };
+        try { roll(o); } catch (...) { if (!result.hit) throw; }
+        return result;
+    };
+    for (int m = 0; m <= 1425; ++m) writer.at(m*60+2);
+    ASSERT_FALSE(runDay(t.path/"seed-day", 0).hit);
+    for (int m = 1426; m <= 1485; ++m) writer.at(m*60+2);
+    cloneOutput(t.path/"seed-day", t.path/"seed-retention");
+    ASSERT_FALSE(runDay(t.path/"seed-retention", 0).hit);
+    ASSERT_FALSE(runDay(t.path/"seed-retention", 1).hit);
+    for (int m = 1486; m <= 1516; ++m) writer.at(m*60+2);
+    auto first = runDay(t.path/"baseline-day", 0);
+    auto second = runDay(t.path/"baseline-day", 1);
+    ASSERT_EQ(first.liveHours, 24);
+    ASSERT_EQ(second.liveHours, 1);
+    const auto wanted = everyFile(t.path/"baseline-day");
+    int cases = 0;
+    for (int day : {0, 1}) {
+        const auto seed = t.path/(day ? "seed-retention" : "seed-day");
+        const auto probe = t.path/(day ? "probe-retention" : "probe-day");
+        cloneOutput(seed, probe);
+        const auto trace = runDay(probe, day);
+        ASSERT_FALSE(trace.hit);
+        ASSERT_FALSE(trace.points.empty());
+        if (day) EXPECT_EQ(std::count(trace.points.begin(), trace.points.end(), "seal-log-pruned"), 24);
+        else EXPECT_EQ(std::count(trace.points.begin(), trace.points.end(), "seal-day-manifest-written"), 1);
+        EXPECT_EQ(std::count(trace.points.begin(), trace.points.end(), "seal-marked-verified"), 1);
+        for (size_t stop = 0; stop < trace.points.size(); ++stop) {
+            SCOPED_TRACE(::testing::Message() << "day=" << day << " stop=" << stop << " " << trace.points[stop]);
+            const auto out = t.path/"attempt-day";
+            cloneOutput(seed, out);
+            auto interrupted = runDay(out, day, stop);
+            ASSERT_TRUE(interrupted.hit);
+            ASSERT_EQ(interrupted.points.back(), trace.points[stop]);
+            ASSERT_FALSE(runDay(out, day).hit);
+            if (!day) ASSERT_FALSE(runDay(out, 1).hit);
+            EXPECT_EQ(everyFile(out), wanted);
+            ASSERT_FALSE(HasFailure());
+            fs::remove_all(out);
+            ++cases;
+        }
+        RecordProperty(day ? "retention_points" : "day_manifest_points", json(trace.points).dump());
+    }
+    RecordProperty("day_retention_cases", cases);
+    RecordProperty("live_hour_images_compared", first.liveHours+second.liveHours);
+    RecordProperty("journal_minutes_with_real_updates", 1517);
 }
