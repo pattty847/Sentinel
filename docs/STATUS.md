@@ -29,7 +29,7 @@ Pre-land evidence for chart slices: native `SENTINEL_REQUIRE_GPU=1` run of Chart
 
 ## In flight
 
-- **Arch C E1b-2d Option B: Fable review r1** of `lt-astra/c-e1b2d-seals` `9e963a1c` (halt on rounded/exact divergence; exact validity gates cutover; halt recovery = fresh-root RAWL2 rebuild). Astra `01a1a944-610f-7a10-a464-890a5b583327`; no landing. `/Volumes/T7/sentinel-datalab/e1b2d/`.
+- **Arch C E1b-2d Option B: fix r1** (Fable r1 REVISE on `9e963a1c`, 0/2/11) of `lt-astra/c-e1b2d-seals` (divergence halts; exact validity gates cutover; halt recovery = fresh-root rebuild). Astra `01a1a944-610f-7a10-a464-890a5b583327`; no landing. `/Volumes/T7/sentinel-datalab/e1b2d/`.
 - **Arch C E1b-2a + E1b-2b: landed `c2891461`, pushed** (Fable PASS; 486-case sweep; 7 real kills byte-identical; gate 129/129). Evidence `/Volumes/T7/sentinel-datalab/e1b2{a,b}/`. Open: MSVC, power loss.
 
 - **Arch C E1a: landed `70e82dfd`, pushed** (Opus writer; Astra high `01a18ffe-0698-78e1-bf24-68f3e40c97ed` r3 PASS WITH CONDITIONS 0/0/1; 123/123 at land and clean `git archive` rebuild; HMC2 byte-identical to `3135e7dd`, 3 days; INV-191/192). `RecorderConfig::sink` null by default, no production caller. Handoff, reviewer conditions and the Coinbase snapshot test proposal (needs owner yes): `../Sentinel-Private/research/2026-10-31-arch-c-e1b-handoff.md`. Evidence `/Volumes/T7/sentinel-datalab/e1a/E1A-EVIDENCE.md` (round 3 current). Open: mid-connection snapshots disagree with the journal book, cause unproven.
