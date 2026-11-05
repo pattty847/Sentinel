@@ -71,8 +71,9 @@ int main(int argc,char** argv) {
         auto files=std::make_shared<Files>();
         if (std::string(argv[8])!="null") { o.levelLogRoot=out/"log"; o.levelLogFiles=files; }
         o.levelSeals=std::string(argv[8])!="log";
+        if(std::string(argv[8])=="C1h")o.levelLogRetentionMs=3600000;
         const std::string point=argv[6]; const int minute=std::stoi(argv[7]);
-        bool ready=false;
+        std::atomic<bool> ready{false};
         const bool audit=point=="audit";
         std::ofstream source;
         int64_t sourceHour=-1;
@@ -80,7 +81,7 @@ int main(int argc,char** argv) {
         std::atomic<int64_t> auditNs{0};
         const auto auditRoot=fs::path(std::string(argv[5])+".source");
         if(audit)fs::create_directories(auditRoot);
-        bool savedSeed=false;
+        bool savedSeed=false, savedPruneSeed=false;
         std::map<std::string,Clock::time_point> sealStarts;
 
         int64_t appliedMinute=-1, cpuMinute=-1, cpuBefore=-1;
@@ -119,6 +120,9 @@ int main(int argc,char** argv) {
                 cpuBefore=cpu; cpuMinute=appliedMinute;
             }
 #endif
+            if(std::string_view(p)=="checkpoint-written" && audit && !savedPruneSeed && appliedMinute>=o.fromMs/60000+45) {
+                fs::copy(out,fs::path(std::string(argv[5])+".prune-seed"),fs::copy_options::recursive);savedPruneSeed=true;
+            }
             if(std::string_view(p)=="checkpoint-written" && audit && !savedSeed && appliedMinute>=o.fromMs/60000+1365) {
                 // Called after a durable, drained fence; copying is outside worker CPU.
                 const auto seed=fs::path(std::string(argv[5])+".seed");
