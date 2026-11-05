@@ -1,5 +1,11 @@
 # Architecture C (libs/core/levelstore). test_level_recorder includes no Qt header;
 # test_level_roll uses QtCore only through the capture writer's fixture config.
+add_executable(test_exact_decimal test_exact_decimal.cpp)
+target_include_directories(test_exact_decimal PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_exact_decimal PRIVATE GTest::gtest_main)
+add_test(NAME ExactDecimalTests COMMAND test_exact_decimal)
+set_tests_properties(ExactDecimalTests PROPERTIES LABELS "levelstore;fast")
+
 add_executable(test_level_recorder test_level_recorder.cpp)
 target_include_directories(test_level_recorder PRIVATE ${CMAKE_SOURCE_DIR}/libs/core ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(test_level_recorder PRIVATE sentinel_core GTest::gtest_main)
@@ -56,3 +62,9 @@ target_include_directories(test_level_restart_sweep PRIVATE ${CMAKE_SOURCE_DIR}/
 target_link_libraries(test_level_restart_sweep PRIVATE sentinel_core GTest::gtest_main)
 add_test(NAME LevelRestartSweepTests COMMAND test_level_restart_sweep)
 set_tests_properties(LevelRestartSweepTests PROPERTIES LABELS "levelstore" TIMEOUT 600)
+
+find_package(zstd CONFIG REQUIRED)
+add_executable(decimal_domain_survey decimal_domain_survey.cpp ${CMAKE_SOURCE_DIR}/libs/core/Crc32.cpp)
+target_include_directories(decimal_domain_survey PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(decimal_domain_survey PRIVATE nlohmann_json::nlohmann_json
+    $<IF:$<TARGET_EXISTS:zstd::libzstd_shared>,zstd::libzstd_shared,zstd::libzstd_static>)
