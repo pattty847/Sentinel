@@ -4,16 +4,6 @@ add_subdirectory(marketdata/analytics)
 
 add_library(sentinel_core
     roller/AnchorStore.cpp
-    levelstore/LevelLog.cpp
-    levelstore/LevelLogFormat.cpp
-    levelstore/LevelLog.hpp
-    levelstore/LevelLogFormat.hpp
-    levelstore/LevelRecorder.cpp
-    levelstore/LevelRecorder.hpp
-    levelstore/LevelTimeline.cpp
-    levelstore/LevelTimeline.hpp
-    levelstore/MinuteSweep.cpp
-    levelstore/MinuteSweep.hpp
     roller/JournalReader.cpp
     roller/JournalFeed.cpp
     roller/CandleRestore.cpp
@@ -68,7 +58,6 @@ add_library(sentinel_core
     Crc32.cpp
     servermodel/BookRecorder.cpp
     servermodel/BookRecorder.hpp
-    servermodel/PriceDecimal.hpp
     servermodel/RecorderStallMonitor.hpp
     servermodel/RecordingLive.cpp
     servermodel/RecordingLive.hpp

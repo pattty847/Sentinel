@@ -172,7 +172,7 @@ Always-on services (recorder `com.sentinel.recorder`, capture `com.sentinel.capt
 
 Changes here require performance caution and small diffs:
 - `DataProcessor`
-- `BookRecorder` (every book message on the recorder worker; `RecorderSink` callbacks such as `LevelRecorder` run inside it)
+- `BookRecorder` (every book message on the recorder worker)
 - `HeatmapGpuLayer` and `HeatmapGpuBinner` (render thread, every frame)
 - QSG geometry updates
 

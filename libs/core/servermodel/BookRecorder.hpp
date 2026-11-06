@@ -1,11 +1,8 @@
 #pragma once
 #include "Hmc2Store.hpp"
-#include "PriceDecimal.hpp"
-#include <cmath>
 #include <filesystem>
 #include <functional>
 #include <memory>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -19,79 +16,6 @@ struct LayerConfig {
     double highMult;
     bool hourlyRollup;
 };
-// The recorder's own book, observation and integration-clock decisions, called
-// synchronously on the worker thread in decision order. `clock` is the symbol's
-// integration clock (never decreases; backward and late envelopes are clamped).
-// Order within one message: onMinute for each minute advance() finishes, then:
-//   Tick: nothing more. Invalid: onInvalid(upstream=true).
-//   Snapshot/update applied: [onReset] then per input level [onImprecise] [onLevel],
-//   then exactly one of onApplied or onInvalid. A malformed batch gets onInvalid
-//   only, before any level; a one-sided or crossed snapshot, or a row overflow,
-//   gets onInvalid after its levels. A one-sided or crossed update only stops
-//   observation (onApplied observing=false). An update while invalid: nothing.
-//   A rejected timestamp or a worker exception invalidates every symbol
-//   (onInvalid upstream=false), possibly after some of the message's onLevel calls.
-// onLevel reports each accepted change (size differs) after the book holds it.
-// onReset and onInvalid clear the book; after onInvalid nothing integrates until
-// an accepted snapshot. Time integrates only while observing (onApplied).
-// onMinute fires after the minute is finalised (pending record built, clock and
-// minute advanced), before the next minute's events: once per bucket at most. A
-// failed finalisation reports onInvalid instead and the minute stays open. Minutes
-// it never reports observed nothing. importState and forkLead emit nothing.
-// Implementations must not throw or block and must outlive the recorder.
-//
-// Price domain: binary64 prices parsed from exchange decimal text and a priceScale
-// that is an exactly representable integer (the grid uses 10^k <= 1e15). Levels key
-// on llround(price * priceScale); that arithmetic is unchanged. pricePrecision() judges
-// the double only: OnGrid never flags an on-grid decimal; for units < kPriceUnitsDomain
-// every price more than 2^-9 of a unit off the grid is OffGrid; units >= kPriceUnitsDomain
-// are OutsideDomain (unknown). It cannot see the text ("97.10000000000001" at scale 100
-// passes as OnGrid). Decimal identity is judged from the text instead: JournalFeed
-// parses each price text into Level::decimal before binary64 conversion, and the
-// recorder reports LevelChange::identity (decimalIdentity against its key). onImprecise
-// fires for every input level that is not OnGrid OR whose identity is not Exact.
-class RecorderSink {
-  public:
-    enum class Precision : uint8_t { OnGrid, OffGrid, OutsideDomain };
-    struct LevelChange {
-        bool isBid;
-        int64_t units; // nearest price unit at priceScale, the book key
-        double price;  // as received
-        double size;   // new size, 0 removes the level
-        Precision precision;
-        PriceDecimal decimal = {};              // the price text's exact decimal (Level::decimal)
-        DecimalIdentity identity = DecimalIdentity::NoText; // decimal vs units at priceScale
-        int64_t envelopeMs = 0;                 // the message's exchange time as received
-        uint64_t sequence = 0;                  // the message's journal frame sequence, 0 = unknown
-        std::string_view priceText = {};        // the original price text when the producer kept it
-                                                // (a price that is not an exact plain decimal); valid
-                                                // during the callback only
-    };
-    virtual ~RecorderSink() = default;
-    virtual void onReset(const std::string &symbol, int64_t clock) noexcept = 0;
-    // Every input level whose price is not OnGrid or whose decimal identity is not
-    // Exact, before the zero-change check: also when its rounded key collides with
-    // an equal-size level and the book does not change.
-    virtual void onImprecise(const std::string &symbol, int64_t clock, const LevelChange &level) noexcept = 0;
-    virtual void onLevel(const std::string &symbol, int64_t clock, const LevelChange &level) noexcept = 0;
-    virtual void onApplied(const std::string &symbol, int64_t clock, bool valid, bool observing) noexcept = 0;
-    virtual void onInvalid(const std::string &symbol, int64_t clock, const std::string &reason,
-                           bool upstream) noexcept = 0;
-    // bucketStartMs + 60 s == clock. flags as HMC2 minute flags, without the
-    // per-layer kUnderflow encoding bit.
-    virtual void onMinute(const std::string &symbol, int64_t bucketStartMs, uint32_t observedMs,
-                          uint32_t flags) noexcept = 0;
-};
-inline constexpr int64_t kPriceUnitsDomain = int64_t{1} << 40;
-// An on-grid decimal's binary64 product is within 2^-52 |scaled| of its units
-// (input and product rounding); the 2^-50 bound leaves a 4x margin.
-inline RecorderSink::Precision pricePrecision(double price, int64_t units, double priceScale) {
-    if (units >= kPriceUnitsDomain) return RecorderSink::Precision::OutsideDomain;
-    const double scaled = price * priceScale;
-    return std::abs(scaled - static_cast<double>(units)) <= std::ldexp(std::abs(scaled), -50)
-               ? RecorderSink::Precision::OnGrid
-               : RecorderSink::Precision::OffGrid;
-}
 struct RecorderConfig {
     std::filesystem::path root;
     double priceScale = 100.0;
@@ -109,8 +33,6 @@ struct RecorderConfig {
     // Deterministic allocation-failure seam, before building any publication
     // (open-minute records and pending/committed copies). Tests only.
     std::function<void(bool provisional)> beforePublicationForTest;
-    // Deterministic minute-finalisation failure seam (bucket start). Tests only.
-    std::function<void(int64_t bucketStartMs)> beforeMinuteFinalizeForTest;
     // Continuous empty, one-sided or crossed books stay reconstructible but unobserved.
     // After this integration-clock duration, request a precautionary snapshot.
     int64_t oneSidedSuspectMs = 30'000;
@@ -131,14 +53,11 @@ struct RecorderConfig {
     // claim (committedThroughMs 0); normally created by forkLead().
     enum class Publication { Finals = 1, Lead = 2 };
     Publication publication = Publication::Finals;
-    // Optional decision feed (RecorderSink). Not policy; forkLead does not copy it.
-    RecorderSink *sink = nullptr;
 };
 struct Level {
     bool isBid;
     double price;
     double size;
-    PriceDecimal decimal = {}; // exact decimal of the price text; absent (exact 0) without text
 };
 class BookRecorder {
   public:
@@ -151,13 +70,8 @@ class BookRecorder {
     ~BookRecorder(); // Drains accepted work; drops the open minute and uncommitted lateness tail.
     BookRecorder(const BookRecorder &) = delete;
     BookRecorder &operator=(const BookRecorder &) = delete;
-    // sequence: the journal frame's sequence number (0 = unknown); priceText: the original
-    // text of one level's price that is not an exact plain decimal (JournalFeed::takePriceText).
-    // Diagnostics only: reported to the sink and never part of any decision.
-    void onSnapshotAt(const std::string &symbol, int64_t envelopeMs, int64_t localMs, std::vector<Level> levels,
-                      uint64_t sequence = 0, PriceText priceText = {});
-    void onUpdatesAt(const std::string &symbol, int64_t envelopeMs, int64_t localMs, std::vector<Level> levels,
-                     uint64_t sequence = 0, PriceText priceText = {});
+    void onSnapshotAt(const std::string &symbol, int64_t envelopeMs, int64_t localMs, std::vector<Level> levels);
+    void onUpdatesAt(const std::string &symbol, int64_t envelopeMs, int64_t localMs, std::vector<Level> levels);
     // Cancel blocked journal admission before joining producers and destroying.
     // The destructor also requests stop; callers must not race object destruction.
     void requestStop();
@@ -177,10 +91,6 @@ class BookRecorder {
     // Empty export means diskErrors made this state ineligible for caching.
     std::vector<uint8_t> exportState();
     void importState(const std::vector<uint8_t>& state);
-    // Producer-only, drains first: the symbol's integration clock, which is the clock
-    // exportState() records for it (INV-192). nullopt before the symbol's first snapshot.
-    // A sink consumer checkpoints its own state against this clock.
-    std::optional<int64_t> checkpointClock(const std::string &symbol);
     struct Stats {
         uint64_t columnsWritten, lateEvents, backwardSteps, invalidations, diskErrors;
     };
