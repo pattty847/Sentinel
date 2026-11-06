@@ -165,11 +165,8 @@ bool validState(const ChunkFrame& frame) {
         }
         return true;
     }
-    // Sealed minute chunks never change (revision 0). A sealed rollup chunk's
-    // revision orders a rebuild from changed minutes after the chunk it replaces.
     if (frame.state.sealed)
-        return (frame.state.revision == 0 || frame.key.levelMs != kMinuteMs) &&
-               frame.state.committedThroughMs >= frame.columns.endMs &&
+        return frame.state.revision == 0 && frame.state.committedThroughMs >= frame.columns.endMs &&
                frame.columns.scannedRanges.size() == 1 &&
                frame.columns.scannedRanges.front() ==
                    SparseColumns::TimeRange{frame.columns.startMs, frame.columns.endMs};
@@ -187,7 +184,7 @@ std::vector<uint8_t> encodeControl(const ChunkFrame& frame) {
     putMagic(w, frame.kind);
     if (frame.kind == ChunkKind::NotModified) {
         if (!validKey(frame.key) ||
-            (frame.state.sealed && frame.state.revision != 0 && frame.key.levelMs == kMinuteMs)) fail();
+            (frame.state.sealed && frame.state.revision != 0)) fail();
         w.u(uint8_t(frame.state.sealed));
         w.str(frame.key.symbol); w.str(frame.key.source);
         w.i(frame.key.levelMs); w.i(frame.key.startMs);
@@ -208,7 +205,7 @@ ChunkFrame decodeControl(Reader& r, ChunkFrame& out) {
         out.key.levelMs = r.i(); out.key.startMs = r.i();
         out.state.committedThroughMs = r.i(); out.state.revision = r.u<uint64_t>();
         out.contentHash = r.u<uint64_t>();
-        if (!validKey(out.key) || (sealed && out.state.revision != 0 && out.key.levelMs == kMinuteMs)) fail();
+        if (!validKey(out.key) || (sealed && out.state.revision != 0)) fail();
     } else {
         out.key.symbol = r.str(); out.key.source = r.str();
         out.key.levelMs = r.i(); out.key.startMs = r.i();

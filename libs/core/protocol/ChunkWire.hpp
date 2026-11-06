@@ -121,9 +121,6 @@ struct GridInfo {
 struct LevelInfo {
     int64_t levelMs = 0, chunkSpanMs = 0, committedThroughMs = 0;
     int64_t oldestMs = 0, latestMs = 0; // bucket starts
-    // Rollup levels: the store epoch (revisions compare only within one) and
-    // content generation (rises when some day's stored cells changed). 0 for 1m.
-    uint64_t contentEpoch = 0, contentGeneration = 0;
 };
 struct SourceInfo {
     std::string id;
@@ -146,9 +143,7 @@ inline nlohmann::json buildAvailability(const std::string& symbol,
         for (const auto& l : s.levels) {
             levels.push_back({{"level_ms", l.levelMs}, {"chunk_span_ms", l.chunkSpanMs},
                               {"oldest_ms", *l.oldestMs}, {"latest_ms", l.latestMs.value_or(*l.oldestMs)},
-                              {"committed_through_ms", l.committedThroughMs},
-                              {"content_epoch", hashHex(l.contentEpoch)},
-                              {"content_generation", l.contentGeneration}});
+                              {"committed_through_ms", l.committedThroughMs}});
             oldest = oldest ? std::min(oldest, *l.oldestMs) : *l.oldestMs;
             latest = std::max(latest, l.latestMs.value_or(*l.oldestMs));
         }
@@ -193,13 +188,7 @@ inline Availability parseAvailability(const nlohmann::json& j) {
         for (const auto& l : s.at("levels"))
             info.levels.push_back({l.at("level_ms").get<int64_t>(), l.at("chunk_span_ms").get<int64_t>(),
                                    l.at("committed_through_ms").get<int64_t>(),
-                                   l.at("oldest_ms").get<int64_t>(), l.at("latest_ms").get<int64_t>(),
-                                   [&] {
-                                       const auto epoch = parseHashHex(l.at("content_epoch").get<std::string>());
-                                       if (!epoch) throw std::invalid_argument("bad content_epoch");
-                                       return *epoch;
-                                   }(),
-                                   l.at("content_generation").get<uint64_t>()});
+                                   l.at("oldest_ms").get<int64_t>(), l.at("latest_ms").get<int64_t>()});
         out.sources.push_back(std::move(info));
     }
     return out;

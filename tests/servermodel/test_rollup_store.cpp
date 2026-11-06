@@ -278,7 +278,7 @@ TEST_F(RollupTest, KilledBuildLeavesNoServedPartialFile) {
         EXPECT_TRUE(reply.fallback);
         ReadControl control;
         EXPECT_EQ(*reply.wire, encodeHourFrame("BTC-USD", composeDay(reader, "BTC-USD", "deep", day0 + 2 * day, control),
-                                               day0 + 2 * day, store.contentGeneration()));
+                                               day0 + 2 * day));
     }
     // Restart: the stray temp file is removed and the day is built.
     RollupStore store(options());
@@ -555,135 +555,40 @@ TEST_F(RollupTest, SuspectDayStaysMarkedUntilReplaced) {
 // A closed day's minute files rewritten with other cells: the day is rebuilt,
 // the level's content revision rises (clients revalidate), and the rebuilt
 // sealed chunk carries a higher revision than the one it replaces.
-// Content identity: a persisted random epoch per store directory and a
-// monotonic content generation, bumped only when a rebuilt day's frames differ.
-// Minute-file times only decide whether to rebuild, never the revision.
-class RollupContent : public RollupTest {
-protected:
-    // Replaces deep day 1's minute files with the variant that has one more
-    // recorded hour, giving the copies `time` as their modification time.
-    void changeDayOne(fs::file_time_type time) {
-        for (const auto& entry : fs::directory_iterator(changedTree() / "BTC-USD" / "deep-60000")) {
-            const auto target = hmc2() / "BTC-USD" / "deep-60000" / entry.path().filename();
-            fs::copy_file(entry.path(), target, fs::copy_options::overwrite_existing);
-            fs::last_write_time(target, time);
-        }
-    }
-    fs::file_time_type dayOneTime() {
-        return fs::last_write_time(Hmc2Store::filePath(hmc2(), record("deep", day0 + day).header, day0 + day));
-    }
-    ChunkFrame serve(RollupStore& store, const ChunkKey& key) {
-        Hmc2Reader reader(hmc2());
-        return decodeChunk(*store.serve(key, reader).wire);
-    }
-    const ChunkKey hourKey{"BTC-USD", "hmc2.deep", hour, day0 + day};
-    const ChunkKey dayKey{"BTC-USD", "hmc2.deep", day, chunkStartOf(day, day0)};
-};
-
-void expectGeneration(RollupStore& store, uint64_t generation) {
-    for (const auto* layer : {"near", "deep"})
-        for (const auto& level : store.levels("BTC-USD", layer)) {
-            EXPECT_EQ(level.contentEpoch, store.epoch());
-            EXPECT_EQ(level.contentGeneration, std::string(layer) == "deep" ? generation : 0u) << layer;
-        }
-}
-
-TEST_F(RollupContent, FirstBuildCreatesAnEpochAtGenerationZeroThatSurvivesARestart) {
-    uint64_t epoch = 0;
-    {
-        RollupStore store(options());
-        EXPECT_EQ(store.epoch(), 0u) << "no identity before the first pass";
-        store.runPass();
-        epoch = store.epoch();
-        EXPECT_NE(epoch, 0u);
-        expectGeneration(store, 0);
-        EXPECT_EQ(serve(store, hourKey).state.revision, 0u);
-    }
-    RollupStore restarted(options());
-    EXPECT_EQ(restarted.epoch(), epoch);
-    restarted.runPass();
-    EXPECT_EQ(restarted.epoch(), epoch);
-    expectGeneration(restarted, 0);
-}
-
-// The original mtime is preserved (same second, a restored backup, or a clock
-// rolled back): only the size and content differ. Still a new generation.
-TEST_F(RollupContent, ChangedCellsWithAPreservedTimestampBumpTheGeneration) {
+// Changed minute files of a closed day (a backfill or repair): the next pass
+// rebuilds the day from its fingerprint, and a new request (a new GUI) gets
+// the new picture. Sealed rollup chunks keep revision 0: a running GUI keeps
+// what it has until it restarts (its chunk cache is in memory only).
+TEST_F(RollupTest, ChangedMinuteFilesGiveANewRequestTheRebuiltPicture) {
     RollupStore store(options());
     store.runPass();
-    const auto old = serve(store, hourKey), oldDay = serve(store, dayKey);
+    const ChunkKey key{"BTC-USD", "hmc2.deep", hour, day0 + day};
+    Hmc2Reader before(hmc2());
+    const auto old = decodeChunk(*store.serve(key, before).wire);
     EXPECT_EQ(bucketState(old.columns, day0 + day + 7 * hour), BucketState::Gap);
-    const auto generation = store.generation();
-    changeDayOne(dayOneTime());
+    for (const auto& entry : fs::directory_iterator(changedTree() / "BTC-USD" / "deep-60000")) {
+        const auto target = hmc2() / "BTC-USD" / "deep-60000" / entry.path().filename();
+        const auto time = fs::exists(target) ? fs::last_write_time(target) : fs::file_time_type::clock::now();
+        fs::copy_file(entry.path(), target, fs::copy_options::overwrite_existing);
+        fs::last_write_time(target, time); // even a preserved timestamp: the size differs
+    }
     EXPECT_EQ(store.runPass().built, 1u);
-    EXPECT_EQ(store.contentGeneration(), 1u);
-    EXPECT_GT(store.generation(), generation) << "availability fingerprint";
-    expectGeneration(store, 1);
-    const auto rebuilt = serve(store, hourKey), rebuiltDay = serve(store, dayKey);
+    Hmc2Reader after(hmc2());
+    const auto rebuilt = decodeChunk(*store.serve(key, after).wire);
     EXPECT_TRUE(rebuilt.state.sealed);
-    EXPECT_EQ(rebuilt.state.revision, 1u);
+    EXPECT_EQ(rebuilt.state.revision, 0u);
     EXPECT_NE(rebuilt.contentHash, old.contentHash);
     EXPECT_EQ(bucketState(rebuilt.columns, day0 + day + 7 * hour), BucketState::Present);
-    EXPECT_EQ(rebuiltDay.state.revision, 1u);
-    EXPECT_GT(rebuiltDay.state.revision, oldDay.state.revision);
-    // Unchanged days keep revision 0.
-    EXPECT_EQ(serve(store, {"BTC-USD", "hmc2.deep", hour, day0 + 2 * day}).state.revision, 0u);
-    // A restart keeps the generation (persisted before the frames).
-    RollupStore restarted(options());
-    restarted.runPass();
-    EXPECT_EQ(restarted.contentGeneration(), 1u);
-    expectGeneration(restarted, 1);
 }
 
-// Built and served shortly after the day closed, repaired half an hour later
-// with a timestamp far in the past of the first build (clock rollback): the
-// repair still reaches clients through the generation.
-TEST_F(RollupContent, RepairAfterPublishBumpsTheGenerationWhateverItsTimestamp) {
+// The documented procedure for a rewrite the fingerprint cannot see (same
+// names, sizes and modification times): the rewriting tool deletes that day's
+// rollup files, and the next pass rebuilds them from the minutes.
+TEST_F(RollupTest, DeletingADaysRollupFilesRebuildsIt) {
     RollupStore store(options());
     store.runPass();
-    (void)serve(store, hourKey); // published
-    changeDayOne(fs::file_time_type::clock::now() - std::chrono::hours(24 * 365));
+    fs::remove(store.filePath("BTC-USD", "near", hour, day0 + 2 * day));
+    fs::remove(store.filePath("BTC-USD", "near", day, day0 + 2 * day));
     EXPECT_EQ(store.runPass().built, 1u);
-    expectGeneration(store, 1);
-    EXPECT_EQ(serve(store, hourKey).state.revision, 1u);
-    RollupStore copy(options()); // the persisted identity, as after a restart
-    EXPECT_EQ(copy.contentGeneration(), 1u);
+    EXPECT_TRUE(fs::exists(store.filePath("BTC-USD", "near", hour, day0 + 2 * day)));
 }
-
-// A touch (or an identical rebuild) changes the fingerprint but not the
-// content: the day is rebuilt, but nothing a client sees changes.
-TEST_F(RollupContent, TouchOnlyRebuildKeepsRevisionAndBytes) {
-    RollupStore store(options());
-    store.runPass();
-    const auto path = store.filePath("BTC-USD", "deep", hour, day0 + day);
-    const auto before = serve(store, hourKey);
-    const auto minutes = Hmc2Store::filePath(hmc2(), record("deep", day0 + day).header, day0 + day);
-    fs::last_write_time(minutes, fs::last_write_time(minutes) + std::chrono::seconds(90));
-    const auto generation = store.generation();
-    EXPECT_EQ(store.runPass().built, 1u);
-    EXPECT_EQ(store.contentGeneration(), 0u);
-    EXPECT_EQ(store.generation(), generation) << "no availability churn";
-    const auto after = serve(store, hourKey);
-    EXPECT_EQ(after.contentHash, before.contentHash);
-    EXPECT_EQ(after.state.revision, before.state.revision);
-    EXPECT_TRUE(fs::exists(path));
-}
-
-// Deleting the store directory starts a new epoch at generation 0: a client
-// compares nothing across epochs and revalidates.
-TEST_F(RollupContent, DeletedStoreDirectoryIsANewEpoch) {
-    RollupStore store(options());
-    store.runPass();
-    changeDayOne(dayOneTime());
-    store.runPass();
-    const auto epoch = store.epoch();
-    ASSERT_EQ(store.contentGeneration(), 1u);
-    fs::remove_all(rollupRoot());
-    store.runPass();
-    EXPECT_NE(store.epoch(), epoch);
-    EXPECT_NE(store.epoch(), 0u);
-    EXPECT_EQ(store.contentGeneration(), 0u);
-    expectGeneration(store, 0);
-    EXPECT_EQ(serve(store, hourKey).state.revision, 0u);
-}
-

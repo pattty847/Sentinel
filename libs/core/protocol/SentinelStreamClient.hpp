@@ -263,9 +263,6 @@ private:
     // Decoder dependency also lets tests pause an in-progress decode deterministically.
     std::function<heatmap::ChunkEnvelope(std::span<const uint8_t>)> m_chunkDecoder = heatmap::decodeChunkEnvelope;
     std::map<std::tuple<std::string, std::string, int64_t, int64_t>, ChunkOrder> m_chunkOrder;
-    // Rollup store epoch per (symbol, source, level), guarded by m_chunkOrderMutex.
-    std::map<std::tuple<std::string, std::string, int64_t>, uint64_t> m_contentEpochs;
-    void noteContentEpochs(const protocol::chunkwire::Availability& availability);
     static constexpr size_t kMaxChunkOrderKeys = 65536;
     // One thread: decodes stay FIFO in arrival order. Declared last so it is
     // joined (in the destructor) before anything it touches is destroyed.

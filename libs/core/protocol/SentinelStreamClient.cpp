@@ -212,7 +212,6 @@ void SentinelStreamClient::connectToServer() {
         m_acceptChunkFrames = true;
         m_decodeRefusals = 0;
         m_chunkOrder.clear();
-        m_contentEpochs.clear();
     }
     m_ioc.restart();
     m_isConnected = false;
@@ -315,7 +314,6 @@ void SentinelStreamClient::failConnection(const QString& reason) {
         ++m_connectionEpoch;
         m_acceptChunkFrames = false;
         m_chunkOrder.clear();
-        m_contentEpochs.clear();
     }
     {
         std::lock_guard lock(m_bookDeliveryMutex);
@@ -334,7 +332,6 @@ void SentinelStreamClient::disconnectFromServer() {
         ++m_connectionEpoch;
         m_acceptChunkFrames = false;
         m_chunkOrder.clear();
-        m_contentEpochs.clear();
     }
     if (m_running) {
         sLog_Data("SentinelStreamClient disconnecting: host=" << m_host << " port=" << m_port
@@ -530,25 +527,6 @@ void SentinelStreamClient::decodeBinaryMessage(const std::vector<uint8_t>& frame
 
 // Replies for one key can finish out of order on the server's workers. Keep the
 // newest: sealed beats open, then (revision, committedThroughMs) must not go back.
-// A sealed rollup chunk rebuilt with changed content carries a higher revision
-// (content generation): a sealed reply with a lower revision than the one held
-// is older. Revisions compare only within one store epoch (noteContentEpochs).
-void SentinelStreamClient::noteContentEpochs(const protocol::chunkwire::Availability& availability) {
-    std::lock_guard lock(m_chunkOrderMutex);
-    for (const auto& source : availability.sources)
-        for (const auto& level : source.levels) {
-            if (level.levelMs == heatmap::kMinuteMs) continue;
-            auto& epoch = m_contentEpochs[{availability.symbol, source.id, level.levelMs}];
-            if (epoch == level.contentEpoch) continue;
-            // A new store epoch: its revisions do not compare with the old ones.
-            epoch = level.contentEpoch;
-            std::erase_if(m_chunkOrder, [&](const auto& entry) {
-                return std::get<0>(entry.first) == availability.symbol && std::get<1>(entry.first) == source.id &&
-                       std::get<2>(entry.first) == level.levelMs;
-            });
-        }
-}
-
 bool SentinelStreamClient::acceptChunkOrder(const heatmap::ChunkFrame& frame) {
     const ChunkOrder incoming{frame.state.sealed, frame.state.revision, frame.state.committedThroughMs};
     // Caller holds m_chunkOrderMutex through publication.
@@ -560,7 +538,6 @@ bool SentinelStreamClient::acceptChunkOrder(const heatmap::ChunkFrame& frame) {
             std::tie(incoming.revision, incoming.committedThroughMs) <
                 std::tie(prev.revision, prev.committedThroughMs)))
             return false;
-        if (incoming.sealed && prev.sealed && incoming.revision < prev.revision) return false;
         it->second = incoming;
         return true;
     }
@@ -837,9 +814,7 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                     emit errorOccurred(QStringLiteral("heatmap chunk wire version mismatch"));
                     return;
                 }
-                const auto availability = protocol::chunkwire::parseAvailability(msg);
-                noteContentEpochs(availability);
-                emit heatmapAvailabilityReceived(availability);
+                emit heatmapAvailabilityReceived(protocol::chunkwire::parseAvailability(msg));
                 return;
             }
             case protocol::MessageType::CandleHistoryChunk:

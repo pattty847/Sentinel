@@ -192,8 +192,7 @@ void ChunkFetcher::want(ChartId chart, const std::vector<ChunkKey> &keys, int pr
         // live-tail want repeats every frame and must preserve terminal failure.
         if (chart) d.failed = false;
         const auto cached = store_.peek(key);
-        if (!d.failed && !d.request && (!cached || (!cached->sealed && !current_.contains(key)) || stale(key)))
-            d.pending = true;
+        if (!d.failed && !d.request && (!cached || (!cached->sealed && !current_.contains(key)))) d.pending = true;
     }
     schedule();
 }
@@ -253,7 +252,6 @@ void ChunkFetcher::clear() {
     disconnected();
     connected_ = wasConnected;
     store_.clear();
-    validated_.clear();
     for (auto &[symbol, interest] : live_) {
         interest.edges.clear();
         interest.sources.clear();
@@ -275,20 +273,6 @@ void ChunkFetcher::wireVersionMismatch() {
 std::optional<ChunkAvailability> ChunkFetcher::availability(const std::string &symbol) const {
     const auto it = availability_.find(symbol);
     return it == availability_.end() ? std::nullopt : std::optional(it->second);
-}
-std::optional<ChunkFetcher::ContentToken> ChunkFetcher::contentToken(const ChunkKey &key) const {
-    if (key.levelMs == kMinuteMs) return std::nullopt;
-    if (const auto it = availability_.find(key.symbol); it != availability_.end())
-        for (const auto &s : it->second.sources) if (s.id == key.source)
-            for (const auto &l : s.levels)
-                if (l.levelMs == key.levelMs) return ContentToken{l.contentEpoch, l.contentGeneration};
-    return std::nullopt;
-}
-bool ChunkFetcher::stale(const ChunkKey &key) const {
-    const auto token = contentToken(key);
-    if (!token || !store_.cached(key)) return false; // unknown now: decided when availability arrives
-    const auto it = validated_.find(key);
-    return it == validated_.end() || !(it->second == *token);
 }
 int64_t ChunkFetcher::committedThrough(const ChunkKey &key) const {
     int64_t through = 0;
@@ -326,14 +310,6 @@ void ChunkFetcher::onAvailability(ChunkAvailability value) {
     }
     sLog_Probe("chunks.fetch.availability", "symbol=" << value.symbol << " advances=" << advanced.size());
     availability_[value.symbol] = value;
-    // Rollup chunks validated under another store epoch or content generation
-    // (including before a reconnect, or while no chart wanted them) are
-    // revalidated before reuse; have_hash makes unchanged ones a not_modified.
-    for (auto &[key, d] : demands_) {
-        if (key.symbol != value.symbol || !stale(key)) continue;
-        current_.erase(key);
-        if (!d.charts.empty() && !d.request && !d.failed) d.pending = true;
-    }
     for (const auto &key : advanced) {
         current_.erase(key);
         const auto cached = store_.cached(key);
@@ -397,7 +373,6 @@ void ChunkFetcher::pump() {
         d.estimate = bytes;
         d.pending = false;
         d.refresh = false;
-        d.token = contentToken(key);
         ++stats_.inFlightChunks;
         stats_.inFlightBytes += bytes;
         admitted.push_back(key);
@@ -473,11 +448,7 @@ void ChunkFetcher::onReceived(quint64 request, ChunkFramePtr frame) {
             return;
         }
         current_.insert(frame->key);
-        if (d.token) validated_[frame->key] = *d.token;
-        else validated_.erase(frame->key);
-        // stale(): the level's content identity changed while this reply was in flight.
-        d.pending = (d.refresh && !stored->sealed && stored->committedThroughMs < committedThrough(frame->key)) ||
-                    stale(frame->key);
+        d.pending = d.refresh && !stored->sealed && stored->committedThroughMs < committedThrough(frame->key);
         d.busyCount = 0;
         d.storeAttempts = 0;
         d.dueMs = 0;

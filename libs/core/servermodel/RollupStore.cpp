@@ -4,7 +4,6 @@
 #include "SentinelLogging.hpp"
 #include <algorithm>
 #include <cstdio>
-#include <random>
 #include <stdexcept>
 #if defined(__APPLE__)
 #include <fcntl.h>
@@ -32,7 +31,7 @@ namespace {
 using heatmap::kDayMs;
 using heatmap::kHourMs;
 using heatmap::kMinuteMs;
-constexpr uint16_t kRollupFileVersion = 2;
+constexpr uint16_t kRollupFileVersion = 1;
 constexpr uint64_t kMaxRollupFrameBytes = 64u * 1024u * 1024u;
 
 uint64_t fnv(uint64_t h, uint64_t v) {
@@ -106,7 +105,7 @@ std::optional<RollupFileHeader> parseHeader(std::span<const uint8_t> bytes, uint
     };
     if (bytes[0] != 'S' || bytes[1] != 'H' || bytes[2] != 'R' || bytes[3] != '1' ||
         get(4, 2) != kRollupFileVersion || get(6, 2) != 0) return std::nullopt;
-    RollupFileHeader h{get(8, 8), get(16, 8), get(24, 8)};
+    RollupFileHeader h{get(8, 8), get(16, 8)};
     if (!h.frameBytes || h.frameBytes > kMaxRollupFrameBytes || fileBytes != kRollupHeaderBytes + h.frameBytes)
         return std::nullopt;
     return h;
@@ -197,35 +196,32 @@ DayRollup composeDay(Hmc2Reader& reader, const std::string& symbol, const std::s
     return {heatmap::compose(span, kHourMs, options), heatmap::compose(span, kDayMs, options)};
 }
 
-std::vector<uint8_t> encodeHourFrame(const std::string& symbol, const DayRollup& rollup, int64_t dayMs,
-                                     uint64_t revision) {
+std::vector<uint8_t> encodeHourFrame(const std::string& symbol, const DayRollup& rollup, int64_t dayMs) {
     heatmap::ChunkFrame frame;
     frame.key = {symbol, sourceFor(rollup.hour.layer), kHourMs, dayMs};
-    frame.state = {true, dayMs + kDayMs, revision};
+    frame.state = {true, dayMs + kDayMs, 0};
     frame.columns = rollup.hour;
     return heatmap::encodeChunk(frame);
 }
-std::vector<uint8_t> encodeDayPiece(const std::string& symbol, const DayRollup& rollup, int64_t dayMs,
-                                    uint64_t revision) {
+std::vector<uint8_t> encodeDayPiece(const std::string& symbol, const DayRollup& rollup, int64_t dayMs) {
     const int64_t span = heatmap::chunkSpanMs(kDayMs);
     const int64_t chunk = heatmap::chunkStartOf(kDayMs, dayMs);
     heatmap::ChunkFrame frame;
     frame.key = {symbol, sourceFor(rollup.day.layer), kDayMs, chunk};
-    frame.state = {false, dayMs + kDayMs, revision};
+    frame.state = {false, dayMs + kDayMs, 1};
     frame.columns = rollup.day;
     frame.columns.startMs = chunk;
     frame.columns.endMs = chunk + span;
     return heatmap::encodeChunk(frame);
 }
 
-std::vector<uint8_t> encodeRollupFile(uint64_t sourceFingerprint, uint64_t revision, std::span<const uint8_t> frame) {
+std::vector<uint8_t> encodeRollupFile(uint64_t sourceFingerprint, std::span<const uint8_t> frame) {
     if (frame.empty() || frame.size() > kMaxRollupFrameBytes) throw std::invalid_argument("invalid rollup frame");
     std::vector<uint8_t> out{'S', 'H', 'R', '1'};
     auto put = [&](uint64_t v, size_t n) { for (size_t i = 0; i < n; ++i) out.push_back(uint8_t(v >> (8 * i))); };
     put(kRollupFileVersion, 2);
     put(0, 2);
     put(sourceFingerprint, 8);
-    put(revision, 8);
     put(frame.size(), 8);
     out.insert(out.end(), frame.begin(), frame.end());
     return out;
@@ -296,88 +292,8 @@ RollupStore::RollupStore(Options options) : options_(std::move(options)) {
     const auto root = rollupRootFor(options_.root.string(), options_.hmc2Root);
     if (root.empty()) throw std::invalid_argument("rollup store root must be disjoint from the HMC2 tree");
     options_.root = root;
-    loadIdentity(false);
 }
 
-namespace {
-constexpr size_t kIdentityBytes = 24; // "SHRS", u16 1, u16 0, u64 epoch, u64 content generation
-}
-void RollupStore::loadIdentity(bool create) {
-    const auto bytes = readFile(options_.root / "STORE", 64);
-    auto get = [&](size_t at, size_t n) {
-        uint64_t v = 0;
-        for (size_t i = 0; i < n; ++i) v |= uint64_t(bytes[at + i]) << (8 * i);
-        return v;
-    };
-    if (bytes.size() == kIdentityBytes && bytes[0] == 'S' && bytes[1] == 'H' && bytes[2] == 'R' && bytes[3] == 'S' &&
-        get(4, 2) == 1 && get(6, 2) == 0 && get(8, 8) != 0) {
-        const auto previous = epoch_.exchange(get(8, 8), std::memory_order_acq_rel);
-        contentGeneration_.store(get(16, 8), std::memory_order_release);
-        if (previous && previous != get(8, 8)) {
-            std::lock_guard lock(indexMutex_);
-            index_.clear();
-            generation_.fetch_add(1, std::memory_order_acq_rel);
-        }
-        return;
-    }
-    if (!create) {
-        epoch_.store(0, std::memory_order_release);
-        contentGeneration_.store(0, std::memory_order_release);
-        return;
-    }
-    // A new (or deleted) store directory: a new epoch. Clients holding chunks
-    // of another epoch revalidate them; revisions never compare across epochs.
-    std::random_device random;
-    uint64_t epoch = 0;
-    while (!epoch)
-        epoch = (uint64_t(random()) << 32 | random()) ^
-                uint64_t(std::chrono::system_clock::now().time_since_epoch().count());
-    persistIdentity(epoch, 0);
-    {
-        std::lock_guard lock(indexMutex_);
-        index_.clear(); // every day's revision belongs to the old epoch
-    }
-    generation_.fetch_add(1, std::memory_order_acq_rel);
-    sLog_Data("Rollup store identity created root=" << options_.root.string() << " epoch=" << epoch);
-}
-void RollupStore::persistIdentity(uint64_t epoch, uint64_t generation) {
-    std::vector<uint8_t> out{'S', 'H', 'R', 'S'};
-    auto put = [&](uint64_t v, size_t n) { for (size_t i = 0; i < n; ++i) out.push_back(uint8_t(v >> (8 * i))); };
-    put(1, 2);
-    put(0, 2);
-    put(epoch, 8);
-    put(generation, 8);
-    writeAtomically(options_.root / "STORE", out); // durable before any frame carries the generation
-    epoch_.store(epoch, std::memory_order_release);
-    contentGeneration_.store(generation, std::memory_order_release);
-}
-uint64_t RollupStore::revisionFor(const std::string& symbol, const std::string& layer, int64_t day,
-                                  const DayRollup& rollup) {
-    // Content unchanged (each old frame byte-identical when re-encoded at its
-    // own revision): keep that revision, so a touch or an identical rebuild
-    // changes nothing a client sees. Otherwise a new generation.
-    bool changed = false;
-    std::optional<uint64_t> kept;
-    const auto source = sourceFor(layer);
-    const ChunkKey hourKey{symbol, source, kHourMs, day}, dayKey{symbol, source, kDayMs, heatmap::chunkStartOf(kDayMs, day)};
-    for (const auto& [level, key] : {std::pair{kHourMs, hourKey}, std::pair{kDayMs, dayKey}}) {
-        const auto path = filePath(symbol, layer, level, day);
-        const auto header = readRollupHeader(path);
-        const auto old = header ? readRollupFrame(path, key) : std::nullopt;
-        if (!old) continue; // unknown predecessor
-        const auto fresh = level == kHourMs ? encodeHourFrame(symbol, rollup, day, header->revision)
-                                            : encodeDayPiece(symbol, rollup, day, header->revision);
-        if (fresh != *old || (kept && *kept != header->revision)) changed = true;
-        kept = std::max(kept.value_or(0), header->revision);
-    }
-    const uint64_t generation = contentGeneration();
-    if (!changed) return kept.value_or(generation);
-    const uint64_t next = std::max(generation, *kept) + 1;
-    persistIdentity(epoch(), next);
-    sLog_Data("Rollup content changed symbol=" << symbol << " layer=" << layer << " day=" << dayString(day)
-              << " generation=" << next);
-    return next;
-}
 RollupStore::~RollupStore() { stop(); }
 
 std::filesystem::path RollupStore::filePath(const std::string& symbol, const std::string& layer, int64_t levelMs,
@@ -431,18 +347,6 @@ uint64_t RollupStore::removeStaleTemps() const {
                     if (std::filesystem::remove(it->path(), entryError)) ++removed;
                 }
             }
-    // An interrupted identity write: "STORE.tmp-<pid>-<n>" in the root only.
-    std::error_code ec;
-    for (std::filesystem::directory_iterator it(options_.root, ec), end; !ec && it != end; it.increment(ec)) {
-        const auto name = it->path().filename().string();
-        std::error_code entryError;
-        const auto status = it->symlink_status(entryError);
-        if (entryError || !std::filesystem::is_regular_file(status) || name.rfind("STORE.tmp-", 0) != 0 ||
-            name.size() == 10 || !std::all_of(name.begin() + 10, name.end(), [](char c) {
-                return (c >= '0' && c <= '9') || c == '-';
-            })) continue;
-        if (std::filesystem::remove(it->path(), entryError)) ++removed;
-    }
     return removed;
 }
 
@@ -504,7 +408,6 @@ void RollupStore::setSymbols(std::vector<std::string> symbols) {
 RollupStore::PassResult RollupStore::runPass(std::stop_token stop) {
     std::lock_guard pass(passMutex_);
     PassResult result;
-    loadIdentity(options_.buildMissing); // a deleted store directory starts a new epoch
     Hmc2Reader reader(options_.hmc2Root);
     for (const auto& symbol : options_.symbols)
         for (const auto* layer : {"near", "deep"}) {
@@ -531,7 +434,7 @@ void RollupStore::passSeries(Hmc2Reader& reader, const std::string& symbol, cons
         throw std::runtime_error("minute availability scan incomplete");
     }
     if (!available.oldestMs) { publish(symbol, layer, {}); return; }
-    Series s{*available.oldestMs, 0, 0, 0};
+    Series s{*available.oldestMs, 0, 0};
     const int64_t firstDay = dayFloor(*available.oldestMs);
     const int64_t closedEnd = dayFloor(options_.minuteThrough(symbol, layer));
     // A suspect day stays marked until its replacement is written.
@@ -546,15 +449,12 @@ void RollupStore::passSeries(Hmc2Reader& reader, const std::string& symbol, cons
         const auto it = days.find(day);
         return it == days.end() ? MinuteDay{} : it->second;
     };
-    // The day's frame revision when both files are current, else nullopt.
-    auto current = [&](int64_t day, uint64_t fp) -> std::optional<uint64_t> {
-        uint64_t revision = 0;
+    auto current = [&](int64_t day, uint64_t fp) {
         for (const int64_t level : {kHourMs, kDayMs}) {
             const auto header = readRollupHeader(filePath(symbol, layer, level, day));
-            if (!header || header->sourceFingerprint != fp) return std::nullopt;
-            revision = std::max(revision, header->revision);
+            if (!header || header->sourceFingerprint != fp) return false;
         }
-        return revision;
+        return true;
     };
     // Mid-pass, publish only growth of the advertised run (a backfill becomes
     // visible day by day); the pass's final run, which may be shorter, is
@@ -574,9 +474,7 @@ void RollupStore::passSeries(Hmc2Reader& reader, const std::string& symbol, cons
         const auto fp = minutes.fingerprint;
         // A day without minute files is a recorder gap: it needs no files (a
         // request composes it, all gaps, from the absent minutes at no cost).
-        std::optional<uint64_t> revision;
-        if (fp && !suspects.contains(day)) revision = current(day, fp);
-        bool built = !fp || revision.has_value();
+        bool built = !fp || (!suspects.contains(day) && current(day, fp));
         if (!built && options_.buildMissing) {
             const auto started = std::chrono::steady_clock::now();
             try {
@@ -586,11 +484,10 @@ void RollupStore::passSeries(Hmc2Reader& reader, const std::string& symbol, cons
                 // A minute file that changed while it was read is retried next pass.
                 if (minuteDay(minuteFingerprints(options_.hmc2Root, symbol, layer), day).fingerprint != fp)
                     throw std::runtime_error("minute files changed during the build");
-                revision = revisionFor(symbol, layer, day, rollup);
-                const auto hour = encodeHourFrame(symbol, rollup, day, *revision);
-                const auto piece = encodeDayPiece(symbol, rollup, day, *revision);
-                writeAtomically(filePath(symbol, layer, kHourMs, day), encodeRollupFile(fp, *revision, hour));
-                writeAtomically(filePath(symbol, layer, kDayMs, day), encodeRollupFile(fp, *revision, piece));
+                const auto hour = encodeHourFrame(symbol, rollup, day);
+                const auto piece = encodeDayPiece(symbol, rollup, day);
+                writeAtomically(filePath(symbol, layer, kHourMs, day), encodeRollupFile(fp, hour));
+                writeAtomically(filePath(symbol, layer, kDayMs, day), encodeRollupFile(fp, piece));
                 {
                     std::lock_guard lock(indexMutex_);
                     suspect_.erase({symbol, layer, day});
@@ -604,7 +501,6 @@ void RollupStore::passSeries(Hmc2Reader& reader, const std::string& symbol, cons
                 sLog_Probe("rollup.build", "symbol=" << symbol << " layer=" << layer << " day=" << dayString(day)
                            << " ms=" << micros / 1000 << " hourBytes=" << hour.size() << " dayBytes=" << piece.size());
             } catch (const std::exception& e) {
-                revision.reset();
                 if (stop.stop_requested()) { result.stopped = true; break; }
                 ++result.failed;
                 counters_.buildFailures.fetch_add(1, std::memory_order_relaxed);
@@ -613,9 +509,8 @@ void RollupStore::passSeries(Hmc2Reader& reader, const std::string& symbol, cons
         }
         if (built) {
             const bool joins = !s.runEnd || (contiguous && day + kDayMs == s.runStart);
-            if (!s.runEnd) s = {s.firstMinuteMs, day, day + kDayMs, 0};
+            if (!s.runEnd) s = {s.firstMinuteMs, day, day + kDayMs};
             else if (joins) s.runStart = day;
-            if (joins) s.contentGeneration = std::max(s.contentGeneration, revision.value_or(0));
             publishGrowth();
         } else {
             ++result.pending;
@@ -671,8 +566,7 @@ void RollupStore::writeAtomically(const std::filesystem::path& path, const std::
 void RollupStore::publish(const std::string& symbol, const std::string& layer, const Series& s) {
     std::lock_guard lock(indexMutex_);
     auto& current = index_[{symbol, layer}];
-    if (current.firstMinuteMs == s.firstMinuteMs && current.runStart == s.runStart && current.runEnd == s.runEnd &&
-        current.contentGeneration == s.contentGeneration)
+    if (current.firstMinuteMs == s.firstMinuteMs && current.runStart == s.runStart && current.runEnd == s.runEnd)
         return;
     current = s;
     generation_.fetch_add(1, std::memory_order_acq_rel);
@@ -699,11 +593,10 @@ std::vector<RollupStore::LevelRange> RollupStore::levels(const std::string& symb
     // cached 1d chunk never lacks days that the run later gains.
     const bool complete = s.runStart <= dayFloor(s.firstMinuteMs);
     std::vector<LevelRange> out;
-    out.push_back({kHourMs, complete ? floorDiv(s.firstMinuteMs, kHourMs) * kHourMs : s.runStart, s.runEnd,
-                   epoch(), s.contentGeneration});
+    out.push_back({kHourMs, complete ? floorDiv(s.firstMinuteMs, kHourMs) * kHourMs : s.runStart, s.runEnd});
     const int64_t span = heatmap::chunkSpanMs(kDayMs);
     const int64_t dayOldest = complete ? dayFloor(s.firstMinuteMs) : heatmap::chunkStartOf(kDayMs, s.runStart + span - 1);
-    if (dayOldest < s.runEnd) out.push_back({kDayMs, dayOldest, s.runEnd, epoch(), s.contentGeneration});
+    if (dayOldest < s.runEnd) out.push_back({kDayMs, dayOldest, s.runEnd});
     return out;
 }
 
@@ -738,12 +631,9 @@ RollupStore::Reply RollupStore::serveHour(const ChunkKey& key, const std::string
     }
     // Missing or corrupt: the day's minutes give the same picture.
     const auto minutes = expectFile(key, layer, day);
-    // Unknown predecessor: the current generation is at least any revision
-    // this store gave the day (revisions only come from the generation).
     ReadControl control;
     const auto rollup = composeDay(reader, key.symbol, layer, day, control);
-    return {std::make_shared<const std::vector<uint8_t>>(
-                encodeHourFrame(key.symbol, rollup, day, contentGeneration())),
+    return {std::make_shared<const std::vector<uint8_t>>(encodeHourFrame(key.symbol, rollup, day)),
             heatmap::ChunkError::BuildFailed, {}, minutes.fingerprint != 0};
 }
 
@@ -773,19 +663,14 @@ RollupStore::Reply RollupStore::serveDay(const ChunkKey& key, const std::string&
     frame.columns = {key.symbol, layer, kDayMs, start, end};
     if (scanTo > scanFrom) frame.columns.scannedRanges.push_back({scanFrom, scanTo});
     bool fallback = false;
-    uint64_t revision = 0; // the newest minute change of any scanned day
     for (const auto& [day, id] : days) {
         std::optional<heatmap::SparseColumns> piece;
         if (id)
-            if (const auto bytes = readRollupFrame(filePath(key.symbol, layer, kDayMs, day), key)) {
-                auto decoded = heatmap::decodeChunk(*bytes);
-                revision = std::max(revision, decoded.state.revision);
-                piece = std::move(decoded.columns);
-            }
+            if (const auto bytes = readRollupFrame(filePath(key.symbol, layer, kDayMs, day), key))
+                piece = heatmap::decodeChunk(*bytes).columns;
         if (!piece) {
             const auto minutes = expectFile(key, layer, day);
             fallback = fallback || minutes.fingerprint;
-            revision = std::max(revision, contentGeneration());
             ReadControl control;
             piece = std::move(composeDay(reader, key.symbol, layer, day, control).day);
         }
@@ -794,9 +679,8 @@ RollupStore::Reply RollupStore::serveDay(const ChunkKey& key, const std::string&
                 frame.columns.columns.push_back(std::move(column));
     }
     const bool sealed = scanFrom == start && scanTo == end;
-    // The revision orders a rebuilt (changed) chunk after the one it replaces;
-    // an open chunk's growth is ordered by its cutoff.
-    frame.state = {sealed, sealed ? end : s.runEnd, revision};
+    // Sealed: immutable, revision 0 (like 1m). Open: 1 + scanned days, ordered with its cutoff.
+    frame.state = {sealed, sealed ? end : s.runEnd, sealed ? 0 : 1 + uint64_t((scanTo - scanFrom) / kDayMs)};
     auto wire = std::make_shared<const std::vector<uint8_t>>(heatmap::encodeChunk(frame));
     if (allPresent && !fallback) remember(key, identity, wire);
     return {std::move(wire), heatmap::ChunkError::BuildFailed, {}, fallback};
