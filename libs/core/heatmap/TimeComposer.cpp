@@ -29,8 +29,17 @@ NativeColumn combine(std::span<const NativeColumn* const> sources, detail::Decod
     out.observedMs = rows.observedMs;
     out.coverage = std::move(rows.coverage);
     out.baseRow = rows.rows.empty() ? 0 : rows.rows.front().row;
-    out.entries.reserve(rows.rows.size() * 2);
-    out.numerators.reserve(rows.rows.size() * 2);
+    size_t entryCount = 0;
+    std::array<size_t, 2> countRunIndex{};
+    for (const auto& row : rows.rows) for (size_t side = 0; side < 2; ++side) {
+        if (!row.numerator[side]) continue;
+        const auto& runs = out.coverage[side];
+        auto& i = countRunIndex[side];
+        while (i < runs.size() && runs[i].hi < row.row) ++i;
+        if (i < runs.size() && runs[i].lo <= row.row && runs[i].coveredMs) ++entryCount;
+    }
+    out.entries.reserve(entryCount);
+    out.numerators.reserve(entryCount);
     std::array<size_t, 2> runIndex{};
     for (const auto& row : rows.rows) for (size_t side = 0; side < 2; ++side) {
         if (!row.numerator[side]) continue;
@@ -41,11 +50,6 @@ NativeColumn combine(std::span<const NativeColumn* const> sources, detail::Decod
         if (!duration) continue;
         out.entries.push_back({packRowSide(row.row, out.baseRow, side),
             recording::encodeSize(static_cast<double>(row.numerator[side] / duration), out.sizeScale)});
-        if (duration != out.observedMs && out.entryCoveredMs.empty()) {
-            out.entryCoveredMs.reserve(rows.rows.size() * 2);
-            out.entryCoveredMs.resize(out.entries.size() - 1, out.observedMs);
-        }
-        if (duration != out.observedMs || !out.entryCoveredMs.empty()) out.entryCoveredMs.push_back(duration);
         out.numerators.push_back(row.numerator[side]);
     }
     return out;

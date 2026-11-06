@@ -1,4 +1,5 @@
 #include "heatmap/BinCell.hpp"
+#include "heatmap/ChunkStore.hpp"
 #include "heatmap/HeatmapResolution.hpp"
 #include "heatmap/RecordingLoader.hpp"
 #include "heatmap/TimeComposer.hpp"
@@ -415,6 +416,109 @@ TEST(HeatmapModelRows, SparseMergeAndWholeColumnBinningMatchCellOracle) {
     auto broken = minutes;
     std::swap(broken.columns[0].native[0].entries[0], broken.columns[0].native[0].entries[1]);
     EXPECT_THROW(heatmap::validate(broken), std::invalid_argument);
+}
+
+TEST(HeatmapModelRows, ComposedEntriesReserveOnlyTheRowsAndSidesProduced) {
+    std::vector<heatmap::SparseColumn> columns;
+    for (int64_t i = 0; i < 5; ++i) {
+        auto r = makeMinute(i, "near");
+        r.bidRowLo = r.askRowLo = 100'000;
+        r.bidRowHi = r.askRowHi = 100'003;
+        r.entries = {{100'000, false, 10000, 10000, r.observedMs},
+                     {100'001, false, 11000, 11000, r.observedMs},
+                     {100'002, false, 12000, 12000, r.observedMs}};
+        if (i == 2) r.entries.push_back({100'002, true, 13000, 13000, r.observedMs});
+        columns.push_back(heatmap::fromRecording(r));
+    }
+    const heatmap::SparseColumns minutes{"BTC-USD", "near", minute, epoch, epoch + 5 * minute,
+        std::move(columns), {{epoch, epoch + 5 * minute}}};
+    const auto five = heatmap::compose(minutes, 5 * minute);
+    ASSERT_EQ(five.columns.size(), 1u);
+    const auto& n = five.columns[0].native[0];
+    ASSERT_EQ(n.entries.size(), 4u);
+    EXPECT_EQ(n.entries.capacity(), n.entries.size());
+    EXPECT_EQ(n.numerators.capacity(), n.numerators.size());
+    EXPECT_TRUE(n.entryCoveredMs.empty());
+}
+
+TEST(HeatmapModelRows, ComposedSidecarIsUnneededForBinningAndRecomposition) {
+    std::vector<heatmap::SparseColumn> columns;
+    for (int64_t i = 0; i < 60; ++i) {
+        auto r = makeMinute(i, "near");
+        r.observedMs = i % 7 == 0 ? 17'123 : minute;
+        r.bidRowLo = i % 4 == 0 ? 100'001 : 100'000; r.bidRowHi = 100'003;
+        r.askRowLo = 100'001; r.askRowHi = 100'002;
+        r.entries = {{100'001, false, uint16_t(11000 + i), uint16_t(11000 + i), r.observedMs},
+                     {100'002, false, uint16_t(12000 + i), uint16_t(12000 + i), r.observedMs}};
+        if (r.bidRowLo == 100'000)
+            r.entries.insert(r.entries.begin(), {100'000, false, uint16_t(10000 + i), uint16_t(10000 + i), r.observedMs});
+        if (i % 11 == 0) r.entries.push_back({100'002, true, 13000, 13000, r.observedMs});
+        columns.push_back(heatmap::fromRecording(r));
+    }
+    const heatmap::SparseColumns minutes{"BTC-USD", "near", minute, epoch, epoch + hour,
+        std::move(columns), {{epoch, epoch + hour}}};
+    const auto five = heatmap::compose(minutes, 5 * minute);
+    auto withSidecars = five;
+    bool partialCoverage = false;
+    for (auto& column : withSidecars.columns) for (auto& n : column.native) {
+        ASSERT_TRUE(n.composed);
+        ASSERT_TRUE(n.entryCoveredMs.empty());
+        for (const auto& entry : n.entries) {
+            const auto duration = heatmap::coveredMs(n.coverage[entry.isAsk()], n.baseRow + entry.row());
+            n.entryCoveredMs.push_back(duration);
+            partialCoverage |= duration != n.observedMs;
+        }
+    }
+    ASSERT_TRUE(partialCoverage);
+    auto sameCells = [](const heatmap::SparseColumn& a, const heatmap::SparseColumn& b) {
+        for (double tick : {1., 5., 50.}) {
+            const auto left = heatmap::binColumn(a, 100'000, 100'050, tick);
+            const auto right = heatmap::binColumn(b, 100'000, 100'050, tick);
+            ASSERT_EQ(left.size(), right.size());
+            for (size_t i = 0; i < left.size(); ++i) {
+                EXPECT_EQ(left[i].valid, right[i].valid);
+                EXPECT_EQ(left[i].code, right[i].code);
+                EXPECT_EQ(left[i].dominantAsk, right[i].dominantAsk);
+                EXPECT_EQ(left[i].bid, right[i].bid);
+                EXPECT_EQ(left[i].ask, right[i].ask);
+            }
+        }
+    };
+    for (size_t i = 0; i < five.columns.size(); ++i) sameCells(five.columns[i], withSidecars.columns[i]);
+    std::vector<const heatmap::SparseColumn*> pointers;
+    for (const auto& column : withSidecars.columns) pointers.push_back(&column);
+    const auto recomposedWithSidecars = heatmap::composeColumn(pointers, epoch, hour);
+    const auto recomposed = heatmap::compose(five, hour);
+    ASSERT_EQ(recomposed.columns.size(), 1u);
+    sameCells(recomposed.columns[0], recomposedWithSidecars);
+    for (const auto& n : recomposed.columns[0].native) EXPECT_TRUE(n.entryCoveredMs.empty());
+}
+
+TEST(HeatmapModelMemory, DISABLED_RecordedBtcDeepDayReportsComposedHourBytes) {
+    const auto start = QDateTime::fromString("2026-11-04T00:00:00Z", Qt::ISODate).toMSecsSinceEpoch();
+    recording::Hmc2Reader reader("/Volumes/T7/sentinel-data/hmc2");
+    const auto minutes = heatmap::loadRecording(reader, "BTC-USD", "deep", minute, start, start + day);
+    const auto hours = heatmap::compose(minutes, hour);
+    ASSERT_EQ(hours.columns.size(), 24u);
+    const size_t after = heatmap::sparseBytes(hours);
+    size_t before = after;
+    for (const auto& column : hours.columns) for (const auto& n : column.native) {
+        size_t rows = 0;
+        uint32_t previous = UINT32_MAX;
+        bool sidecar = false;
+        for (const auto& entry : n.entries) {
+            if (entry.row() != previous) { ++rows; previous = entry.row(); }
+            sidecar |= heatmap::coveredMs(n.coverage[entry.isAsk()], n.baseRow + entry.row()) != n.observedMs;
+        }
+        const size_t oldCapacity = rows * 2;
+        ASSERT_GE(oldCapacity, n.entries.capacity());
+        before += (oldCapacity - n.entries.capacity()) * sizeof(heatmap::SparseEntry);
+        before += (oldCapacity - n.numerators.capacity()) * sizeof(long double);
+        if (sidecar) before += oldCapacity * sizeof(uint64_t);
+    }
+    std::cout << "BTC-USD deep 2026-11-04 composed 1h day: before_bytes=" << before
+              << " after_bytes=" << after << " columns=" << hours.columns.size() << '\n';
+    EXPECT_LT(after, before);
 }
 
 TEST(HeatmapModelTiming, DISABLED_SyntheticMonthOfDeepHoursReportsComposeMilliseconds) {
