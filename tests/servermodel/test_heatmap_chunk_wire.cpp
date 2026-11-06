@@ -427,7 +427,8 @@ TEST_F(ChunkWire, BinaryChunksDecodeExactlyAndHashMatchesGiveNotModified) {
         const std::string layer = std::string(source) == "hmc2.deep" ? "deep" : "near";
         EXPECT_EQ(reencode(*inbox.chunksFor(hourReq)[0]),
                   recording::encodeHourFrame("BTC-USD", recording::composeDay(reader, "BTC-USD", layer, kEpoch, control),
-                                             kEpoch));
+                                             kEpoch,
+                                             recording::minuteFingerprints(root(), "BTC-USD", layer)[kEpoch].modifiedSec));
     }
 
     // have_hash: match -> not_modified (no payload), mismatch -> full chunk.
@@ -538,6 +539,24 @@ TEST_F(ChunkWire, OpenChunksCarryCommittedThroughAndOrderedRevisions) {
     EXPECT_EQ(inbox.chunksFor(9003).size(), 1u);
     ASSERT_EQ(inbox.errorsFor(9004).size(), 1u);
     EXPECT_EQ(inbox.errorsFor(9004)[0].code, "superseded");
+    // Sealed rollup chunks: a rebuild carries a higher revision; a sealed reply
+    // built before it (lower revision) never replaces it.
+    auto sealedHour = [&](uint64_t revision) {
+        auto f = std::make_shared<heatmap::ChunkFrame>();
+        f->key = {"BTC-USD", "hmc2.near", kHour, kEpoch};
+        f->state = {true, kEpoch + kDay, revision};
+        f->columns = {"BTC-USD", "near", kHour, kEpoch, kEpoch + kDay};
+        f->columns.scannedRanges = {{kEpoch, kEpoch + kDay}};
+        return std::shared_ptr<const heatmap::ChunkFrame>(f);
+    };
+    HeatmapChunkWireTest::clientBinary(*client, frame(sealedHour(5), 9005));
+    HeatmapChunkWireTest::clientBinary(*client, frame(sealedHour(4), 9006));
+    HeatmapChunkWireTest::clientBinary(*client, frame(sealedHour(6), 9007));
+    ASSERT_TRUE(inbox.waitReplies(9007, 1));
+    EXPECT_EQ(inbox.chunksFor(9005).size(), 1u);
+    ASSERT_EQ(inbox.errorsFor(9006).size(), 1u);
+    EXPECT_EQ(inbox.errorsFor(9006)[0].code, "superseded");
+    EXPECT_EQ(inbox.chunksFor(9007).size(), 1u);
 }
 
 TEST_F(ChunkWire, AvailabilityOnSubscribeAndOnChange) {

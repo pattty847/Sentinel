@@ -76,7 +76,17 @@ protected:
             store.append(record("near", t));
             store.append(record("deep", t));
         }
+        // The same deep day 1 with one more recorded hour (07:00): a closed
+        // day whose minute files a later backfill rewrites with other cells.
+        Hmc2Store changed(fs::path(fixture->path().toStdString()) / "changed");
+        for (int64_t t = day0 + day; t < day0 + 2 * day; t += minute) {
+            const int64_t hourOfDay = ((t - day0) % day) / hour;
+            if (hourOfDay % 5 != 0 && hourOfDay != 13 && hourOfDay != 14 && hourOfDay != 23 && hourOfDay != 7) continue;
+            if (hourOfDay != 7 && !recorded(t)) continue;
+            changed.append(record("deep", t));
+        }
     }
+    static fs::path changedTree() { return fs::path(fixture->path().toStdString()) / "changed"; }
     static void TearDownTestSuite() { fixture.reset(); }
     QTemporaryDir temp;
     fs::path hmc2() const { return fs::path(temp.path().toStdString()) / "hmc2"; }
@@ -268,7 +278,8 @@ TEST_F(RollupTest, KilledBuildLeavesNoServedPartialFile) {
         EXPECT_TRUE(reply.fallback);
         ReadControl control;
         EXPECT_EQ(*reply.wire, encodeHourFrame("BTC-USD", composeDay(reader, "BTC-USD", "deep", day0 + 2 * day, control),
-                                               day0 + 2 * day));
+                                               day0 + 2 * day,
+                                               minuteFingerprints(hmc2(), "BTC-USD", "deep")[day0 + 2 * day].modifiedSec));
     }
     // Restart: the stray temp file is removed and the day is built.
     RollupStore store(options());
@@ -444,10 +455,137 @@ TEST_F(RollupTest, ChunkServiceAdvertisesAndServesStoredLevels) {
               ChunkKind::Error) << "unaligned";
 }
 
-TEST(RollupRoot, SiblingByDefaultAndNeverInsideTheTree) {
+TEST(RollupRoot, DisjointFromTheTreeInBothDirectionsAndResolved) {
     EXPECT_EQ(rollupRootFor("", "/data/hmc2"), fs::path("/data/hmc2-rollups"));
-    EXPECT_EQ(rollupRootFor("", "/data/hmc2/"), fs::path("/data/hmc2-rollups"));
-    EXPECT_EQ(rollupRootFor("/other/rollups", "/data/hmc2"), fs::path("/other/rollups"));
-    EXPECT_TRUE(rollupRootFor("/data/hmc2/rollups", "/data/hmc2").empty());
-    EXPECT_TRUE(rollupRootFor("/data/hmc2", "/data/hmc2").empty());
+    EXPECT_EQ(rollupRootFor("", "/data/hmc2/"), fs::path("/data/hmc2-rollups")) << "trailing slash";
+    EXPECT_EQ(rollupRootFor("/other/rollups/", "/data/hmc2"), fs::path("/other/rollups"));
+    EXPECT_TRUE(rollupRootFor("/data/hmc2/rollups", "/data/hmc2").empty()) << "inside the tree";
+    EXPECT_TRUE(rollupRootFor("/data/hmc2", "/data/hmc2").empty()) << "the tree itself";
+    EXPECT_TRUE(rollupRootFor("/data/hmc2/../hmc2/x", "/data/hmc2").empty()) << "inside, after normalization";
+    EXPECT_TRUE(rollupRootFor("/data", "/data/hmc2").empty()) << "an ancestor of the tree";
+    EXPECT_TRUE(rollupRootFor("/", "/data/hmc2").empty()) << "the filesystem root";
+    EXPECT_TRUE(rollupRootFor("x", "").empty()) << "unresolvable tree";
+    // Relative paths resolve against the working directory.
+    EXPECT_EQ(rollupRootFor("rel-rollups", "/data/hmc2"),
+              fs::weakly_canonical(fs::absolute("rel-rollups")));
+    EXPECT_TRUE(rollupRootFor(".", fs::current_path() / "hmc2").empty()) << "relative ancestor";
+    // Symlinks are followed: a link into the tree is inside it.
+    QTemporaryDir temp;
+    const fs::path base = fs::weakly_canonical(fs::path(temp.path().toStdString()));
+    fs::create_directories(base / "hmc2");
+    fs::create_directory_symlink(base / "hmc2", base / "link");
+    EXPECT_TRUE(rollupRootFor((base / "link" / "rollups").string(), base / "hmc2").empty());
+    fs::create_directory_symlink(base, base / "up");
+    EXPECT_TRUE(rollupRootFor((base / "up").string(), base / "hmc2").empty()) << "a link to an ancestor";
+    EXPECT_EQ(rollupRootFor("", base / "link"), base / "hmc2-rollups") << "the tree's real path decides";
+    RollupStore::Options o;
+    o.hmc2Root = base / "hmc2";
+    o.root = base / "link" / "r";
+    o.minuteThrough = [](const std::string&, const std::string&) { return int64_t(0); };
+    EXPECT_THROW(RollupStore{o}, std::invalid_argument);
 }
+
+TEST_F(RollupTest, NeverWritesThroughALinkBelowTheRoot) {
+    const fs::path outside = fs::path(temp.path().toStdString()) / "outside";
+    fs::create_directories(outside);
+    fs::create_directories(rollupRoot() / "BTC-USD");
+    fs::create_directory_symlink(outside, rollupRoot() / "BTC-USD" / "near");
+    RollupStore store(options());
+    const auto pass = store.runPass();
+    EXPECT_EQ(pass.failed, 4u) << "every closed near day";
+    EXPECT_EQ(pass.built, 4u) << "deep is unaffected";
+    EXPECT_TRUE(fs::is_empty(outside));
+    EXPECT_TRUE(store.levels("BTC-USD", "near").empty());
+}
+
+TEST_F(RollupTest, StartupCleanupRemovesOnlyOwnedTempsAndSurvivesLinkLoops) {
+    RollupStore(options()).runPass();
+    const auto dir = rollupRoot() / "BTC-USD" / "deep" / std::to_string(hour);
+    const auto owned = dir / "2000-01-15.shr.tmp-123-4";
+    std::ofstream(owned) << "partial";
+    std::ofstream(dir / "notes.tmp-1") << "not ours";
+    std::ofstream(rollupRoot() / "2000-01-15.shr.tmp-1-2") << "not in a level directory";
+    const fs::path outsideFile = fs::path(temp.path().toStdString()) / "keep.txt";
+    std::ofstream(outsideFile) << "keep";
+    fs::create_symlink(outsideFile, dir / "2000-01-16.shr.tmp-5-6"); // owned name, but a link
+    fs::create_symlink(dir / "loop", dir / "loop");                  // ELOOP when followed
+    fs::create_directory_symlink(dir, rollupRoot() / "BTC-USD" / "near" / "loop");
+    RollupStore store(options());
+    store.start(); // cleanup runs on the builder thread; a throw there would terminate the test
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+    while (fs::exists(owned) && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    store.stop();
+    EXPECT_FALSE(fs::exists(owned));
+    EXPECT_TRUE(fs::exists(dir / "notes.tmp-1"));
+    EXPECT_TRUE(fs::exists(rollupRoot() / "2000-01-15.shr.tmp-1-2"));
+    EXPECT_TRUE(fs::is_symlink(dir / "2000-01-16.shr.tmp-5-6"));
+    EXPECT_TRUE(fs::exists(outsideFile));
+}
+
+// A suspect (payload-corrupt) day stays marked until its replacement is
+// written: one failed replacement, then a pass with no serve in between.
+TEST_F(RollupTest, SuspectDayStaysMarkedUntilReplaced) {
+    bool failRename = false;
+    auto o = options();
+    o.beforeRename = [&](const fs::path&, const fs::path&) {
+        if (failRename) throw std::runtime_error("disk full");
+    };
+    RollupStore store(o);
+    store.runPass();
+    Hmc2Reader reader(hmc2());
+    const ChunkKey key{"BTC-USD", "hmc2.deep", hour, day0 + day};
+    const auto good = store.serve(key, reader);
+    const auto path = store.filePath("BTC-USD", "deep", hour, day0 + day);
+    auto corrupt = bytes(path);
+    ASSERT_FALSE(corrupt.empty());
+    corrupt[corrupt.size() / 2] ^= 0x5a; // header intact: only a full read notices
+    std::ofstream(path, std::ios::binary | std::ios::trunc).write(reinterpret_cast<const char*>(corrupt.data()),
+                                                                   std::streamsize(corrupt.size()));
+    EXPECT_TRUE(store.serve(key, reader).fallback);
+    failRename = true;
+    EXPECT_EQ(store.runPass().failed, 1u);
+    failRename = false;
+    EXPECT_EQ(store.runPass().built, 1u) << "the mark survived the failed replacement";
+    const auto repaired = store.serve(key, reader);
+    EXPECT_FALSE(repaired.fallback);
+    EXPECT_EQ(*repaired.wire, *good.wire);
+    EXPECT_EQ(store.runPass().built, 0u) << "the mark is cleared once replaced";
+}
+
+// A closed day's minute files rewritten with other cells: the day is rebuilt,
+// the level's content revision rises (clients revalidate), and the rebuilt
+// sealed chunk carries a higher revision than the one it replaces.
+TEST_F(RollupTest, ChangedCellsRebuildWithAHigherRevision) {
+    RollupStore store(options());
+    store.runPass();
+    Hmc2Reader before(hmc2());
+    const ChunkKey key{"BTC-USD", "hmc2.deep", hour, day0 + day};
+    const auto old = decodeChunk(*store.serve(key, before).wire);
+    const auto oldRevision = store.levels("BTC-USD", "deep").front().contentRevision;
+    const ChunkKey dayKey{"BTC-USD", "hmc2.deep", day, chunkStartOf(day, day0)};
+    const auto oldDay = decodeChunk(*store.serve(dayKey, before).wire);
+    EXPECT_EQ(bucketState(old.columns, day0 + day + 7 * hour), BucketState::Gap);
+    const auto later = fs::file_time_type::clock::now() + std::chrono::seconds(30);
+    for (const auto& entry : fs::directory_iterator(changedTree() / "BTC-USD" / "deep-60000")) {
+        const auto target = hmc2() / "BTC-USD" / "deep-60000" / entry.path().filename();
+        fs::copy_file(entry.path(), target, fs::copy_options::overwrite_existing);
+        fs::last_write_time(target, later);
+    }
+    const auto generation = store.generation();
+    EXPECT_EQ(store.runPass().built, 1u);
+    EXPECT_GT(store.generation(), generation);
+    for (const auto& level : store.levels("BTC-USD", "deep")) EXPECT_GT(level.contentRevision, oldRevision);
+    Hmc2Reader after(hmc2());
+    const auto rebuilt = decodeChunk(*store.serve(key, after).wire);
+    EXPECT_TRUE(rebuilt.state.sealed);
+    EXPECT_GT(rebuilt.state.revision, old.state.revision);
+    EXPECT_NE(rebuilt.contentHash, old.contentHash);
+    EXPECT_EQ(bucketState(rebuilt.columns, day0 + day + 7 * hour), BucketState::Present);
+    // The 1d chunk holding it orders after its old version too.
+    const auto newDay = decodeChunk(*store.serve(dayKey, after).wire);
+    EXPECT_EQ(newDay.state.sealed, oldDay.state.sealed);
+    EXPECT_GT(newDay.state.revision, oldDay.state.revision);
+    EXPECT_NE(newDay.contentHash, oldDay.contentHash);
+}
+

@@ -837,7 +837,7 @@ TEST(HeatmapGpuParity, RealRecordingOptIn) {
     for (const Case c : {Case{"deep", minute}, Case{"deep", 5 * minute}, Case{"deep", hour}, Case{"near", minute}}) {
         SparseColumns data;
         try {
-            data = compose(loadRecordingLevels(reader, "BTC-USD", c.layer, start, end, c.tf), c.tf);
+            data = compose(loadRecording(reader, "BTC-USD", c.layer, kMinuteMs, start, end), c.tf);
         } catch (const std::exception &e) {
             std::cout << "real " << c.layer << " " << c.tf / minute << "m: skipped (" << e.what() << ")\n";
             continue;

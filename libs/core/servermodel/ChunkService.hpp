@@ -43,6 +43,7 @@ public:
     struct LevelAvailability {
         int64_t levelMs = 0, chunkSpanMs = 0, committedThroughMs = 0;
         std::optional<int64_t> oldestMs, latestMs; // bucket starts on disk
+        uint64_t contentRevision = 0; // rollup levels: RollupStore::LevelRange::contentRevision
     };
     struct SourceAvailability {
         std::string id;

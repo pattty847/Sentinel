@@ -1,5 +1,6 @@
 #include "../protocol/SentinelStreamClient.hpp" // shared-frame metatype declaration
 #include "ChunkFetcher.hpp"
+#include <set>
 #include "../SentinelLogging.hpp"
 #include <QThread>
 #include <QDateTime>
@@ -294,16 +295,31 @@ void ChunkFetcher::onAvailability(ChunkAvailability value) {
     if (!connected_) return;
     if (value.chunkWireVersion != kChunkWireVersion) { wireVersionMismatch(); return; }
     compatible_ = true;
+    // Levels whose stored content changed (a rollup rebuilt from changed
+    // minutes): every held chunk of the level is revalidated, sealed included
+    // (have_hash makes unchanged ones a not_modified).
+    std::set<std::pair<std::string, int64_t>> changed;
+    if (const auto old = availability_.find(value.symbol); old != availability_.end())
+        for (const auto &s : value.sources)
+            for (const auto &l : s.levels)
+                for (const auto &o : old->second.sources) if (o.id == s.id)
+                    for (const auto &ol : o.levels)
+                        if (ol.levelMs == l.levelMs && l.contentRevision > ol.contentRevision)
+                            changed.insert({s.id, l.levelMs});
+    auto contentChanged = [&](const ChunkKey &key) { return changed.contains({key.source, key.levelMs}); };
     std::vector<ChunkKey> advanced;
     for (const auto &key : current_) {
         if (key.symbol != value.symbol) continue;
+        bool advance = contentChanged(key);
         for (const auto &s : value.sources) if (s.id == key.source)
             for (const auto &l : s.levels)
-                if (l.levelMs == key.levelMs && l.committedThroughMs > committedThrough(key)) advanced.push_back(key);
+                if (l.levelMs == key.levelMs && l.committedThroughMs > committedThrough(key)) advance = true;
+        if (advance) advanced.push_back(key);
     }
     // Also track advances while the first body for a key is in flight.
     for (auto &[key, d] : demands_) {
         if (key.symbol != value.symbol || !d.request) continue;
+        if (contentChanged(key)) d.reload = true;
         for (const auto &s : value.sources) if (s.id == key.source)
             for (const auto &l : s.levels)
                 if (l.levelMs == key.levelMs && l.committedThroughMs > committedThrough(key)) d.refresh = true;
@@ -314,7 +330,8 @@ void ChunkFetcher::onAvailability(ChunkAvailability value) {
         current_.erase(key);
         const auto cached = store_.cached(key);
         auto it = demands_.find(key);
-        if (it == demands_.end() || it->second.charts.empty() || (cached && cached->sealed)) continue;
+        if (it == demands_.end() || it->second.charts.empty() || (cached && cached->sealed && !contentChanged(key)))
+            continue;
         if (it->second.request) it->second.refresh = true;
         else it->second.pending = true;
     }
@@ -373,6 +390,7 @@ void ChunkFetcher::pump() {
         d.estimate = bytes;
         d.pending = false;
         d.refresh = false;
+        d.reload = false;
         ++stats_.inFlightChunks;
         stats_.inFlightBytes += bytes;
         admitted.push_back(key);
@@ -448,7 +466,9 @@ void ChunkFetcher::onReceived(quint64 request, ChunkFramePtr frame) {
             return;
         }
         current_.insert(frame->key);
-        d.pending = d.refresh && !stored->sealed && stored->committedThroughMs < committedThrough(frame->key);
+        d.pending = (d.refresh && !stored->sealed && stored->committedThroughMs < committedThrough(frame->key)) ||
+                    d.reload; // the level's content changed while this reply was in flight
+        d.reload = false;
         d.busyCount = 0;
         d.storeAttempts = 0;
         d.dueMs = 0;

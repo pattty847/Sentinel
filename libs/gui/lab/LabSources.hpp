@@ -34,8 +34,8 @@ struct LabSource {
 double medianRecentPrice(const heatmap::SparseColumns &data);
 
 // Range [endMs - hours, endMs) ending at the newest recorded minute, aligned to
-// tfMs. Deep hour multiples use persisted hours plus the open hour's minute tail
-// (heatmap::loadRecordingLevels); everything else composes minutes. `loadHours`
+// tfMs. Every timeframe composes minutes (the picture the served 1h/1d rollup
+// levels store). `loadHours`
 // may be smaller than `hours` to load just the recent part first; the source
 // then advertises the rest as available-but-not-loaded (drawn as "loading").
 // An empty `root` means recordingRoot(); throws when that is unset or missing.

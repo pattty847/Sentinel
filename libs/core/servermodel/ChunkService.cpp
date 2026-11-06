@@ -107,7 +107,7 @@ std::vector<ChunkService::SourceAvailability> ChunkService::availability(const s
         if (rollups_)
             for (const auto& level : rollups_->levels(symbol, layer))
                 item.levels.push_back({level.levelMs, heatmap::chunkSpanMs(level.levelMs), level.throughMs,
-                                       level.oldestMs, level.throughMs - level.levelMs});
+                                       level.oldestMs, level.throughMs - level.levelMs, level.contentRevision});
         out.push_back(std::move(item));
     }
     return out;

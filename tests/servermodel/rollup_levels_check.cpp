@@ -52,7 +52,7 @@ int build(const fs::path& hmc2, const fs::path& out, const std::string& symbol, 
             ReadControl control;
             const auto rollup = composeDay(reader, symbol, layer, d, control);
             const double composeMs = ms(started);
-            const auto hour = encodeHourFrame(symbol, rollup, d), piece = encodeDayPiece(symbol, rollup, d);
+            const auto hour = encodeHourFrame(symbol, rollup, d, 0), piece = encodeDayPiece(symbol, rollup, d, 0);
             emit({{"phase", "build_day"}, {"layer", layer}, {"day", d}, {"compose_ms", composeMs},
                   {"total_ms", ms(started)}, {"hour_bytes", hour.size() + kRollupHeaderBytes},
                   {"day_bytes", piece.size() + kRollupHeaderBytes}, {"hour_columns", rollup.hour.columns.size()},

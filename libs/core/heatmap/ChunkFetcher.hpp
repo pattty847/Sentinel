@@ -66,6 +66,7 @@ private:
     struct Demand {
         std::map<ChartId, int> charts;
         bool pending = false, refresh = false, failed = false;
+        bool reload = false; // the level's stored content changed while in flight: request again
         quint64 request = 0;
         uint64_t order = 0;
         int64_t dueMs = 0;

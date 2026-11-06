@@ -527,6 +527,8 @@ void SentinelStreamClient::decodeBinaryMessage(const std::vector<uint8_t>& frame
 
 // Replies for one key can finish out of order on the server's workers. Keep the
 // newest: sealed beats open, then (revision, committedThroughMs) must not go back.
+// A sealed rollup chunk rebuilt from changed minutes carries a higher revision:
+// a sealed reply with a lower revision than the one held is older.
 bool SentinelStreamClient::acceptChunkOrder(const heatmap::ChunkFrame& frame) {
     const ChunkOrder incoming{frame.state.sealed, frame.state.revision, frame.state.committedThroughMs};
     // Caller holds m_chunkOrderMutex through publication.
@@ -538,6 +540,7 @@ bool SentinelStreamClient::acceptChunkOrder(const heatmap::ChunkFrame& frame) {
             std::tie(incoming.revision, incoming.committedThroughMs) <
                 std::tie(prev.revision, prev.committedThroughMs)))
             return false;
+        if (incoming.sealed && prev.sealed && incoming.revision < prev.revision) return false;
         it->second = incoming;
         return true;
     }

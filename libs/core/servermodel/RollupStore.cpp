@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <stdexcept>
 #if defined(__APPLE__)
+#include <fcntl.h>
 #include <pthread.h>
 #include <sys/qos.h>
 #include <unistd.h>
@@ -20,6 +21,7 @@
 #include <process.h>
 #include <windows.h>
 #else
+#include <fcntl.h>
 #include <sys/resource.h>
 #include <unistd.h>
 #endif
@@ -48,6 +50,9 @@ uint64_t fnv(uint64_t h, std::string_view s) {
 }
 constexpr uint64_t kFnvSeed = 14695981039346656037ull;
 int64_t dayFloor(int64_t ms) { return floorDiv(ms, kDayMs) * kDayMs; }
+// Minute files last modified this long after their day ended were changed
+// after the day closed (a backfill or repair), not written live.
+constexpr int64_t kLateChangeMs = kHourMs;
 
 std::string dayString(int64_t dayMs) {
     int64_t y = 0;
@@ -107,14 +112,54 @@ std::optional<RollupFileHeader> parseHeader(std::span<const uint8_t> bytes, uint
         return std::nullopt;
     return h;
 }
-void lowerThreadPriority() {
+// True when the calling thread now runs at background priority.
+bool lowerThreadPriority() {
 #if defined(__APPLE__)
-    pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0); // CPU and I/O throttled
+    return pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0) == 0; // CPU and I/O throttled
 #elif defined(_WIN32)
-    SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+    return SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) != 0;
 #else
-    (void)setpriority(PRIO_PROCESS, 0, 19); // the calling thread on Linux
+    return setpriority(PRIO_PROCESS, 0, 19) == 0; // the calling thread on Linux
 #endif
+}
+// Makes a rename durable (POSIX); best effort elsewhere.
+void syncDirectory(const std::filesystem::path& dir) {
+#if !defined(_WIN32)
+    const int fd = ::open(dir.string().c_str(), O_RDONLY);
+    if (fd < 0) throw std::runtime_error("cannot open directory " + dir.string());
+    const bool ok = ::fsync(fd) == 0;
+    ::close(fd);
+    if (!ok) throw std::runtime_error("cannot sync directory " + dir.string());
+#else
+    (void)dir;
+#endif
+}
+// The store's own temp files: "<YYYY-MM-DD>.shr.tmp-<pid>-<n>".
+bool isOwnedTemp(const std::string& name) {
+    constexpr std::string_view mid = ".shr.tmp-";
+    if (name.size() < 10 + mid.size() + 3 || !parseDay(name) || name.compare(10, mid.size(), mid) != 0) return false;
+    const auto rest = name.substr(10 + mid.size());
+    const auto dash = rest.find('-');
+    if (dash == std::string::npos || dash == 0 || dash + 1 == rest.size()) return false;
+    return std::all_of(rest.begin(), rest.end(), [](char c) { return (c >= '0' && c <= '9') || c == '-'; }) &&
+           rest.find('-', dash + 1) == std::string::npos;
+}
+// a is b or inside b (both absolute, normalized).
+bool within(const std::filesystem::path& a, const std::filesystem::path& b) {
+    const auto rel = a.lexically_relative(b);
+    return !rel.empty() && *rel.begin() != "..";
+}
+std::optional<std::filesystem::path> resolved(const std::filesystem::path& p) {
+    if (p.empty()) return std::nullopt;
+    std::error_code ec;
+    const auto absolute = std::filesystem::absolute(p, ec);
+    if (ec) return std::nullopt;
+    auto canonical = std::filesystem::weakly_canonical(absolute, ec);
+    if (ec) return std::nullopt;
+    canonical = canonical.lexically_normal();
+    if (!canonical.has_filename() && canonical.has_parent_path() && canonical != canonical.root_path())
+        canonical = canonical.parent_path(); // "x/hmc2/" -> "x/hmc2"
+    return canonical;
 }
 uint64_t processId() {
 #if defined(_WIN32)
@@ -123,7 +168,6 @@ uint64_t processId() {
     return uint64_t(getpid());
 #endif
 }
-bool isTemp(const std::filesystem::path& path) { return path.filename().string().find(".tmp-") != std::string::npos; }
 std::string sourceFor(const std::string& layer) {
     const auto* source = heatmap::chunkSourceForHmc2Layer(layer);
     if (!source) throw std::invalid_argument("unknown rollup layer");
@@ -154,19 +198,21 @@ DayRollup composeDay(Hmc2Reader& reader, const std::string& symbol, const std::s
     return {heatmap::compose(span, kHourMs, options), heatmap::compose(span, kDayMs, options)};
 }
 
-std::vector<uint8_t> encodeHourFrame(const std::string& symbol, const DayRollup& rollup, int64_t dayMs) {
+std::vector<uint8_t> encodeHourFrame(const std::string& symbol, const DayRollup& rollup, int64_t dayMs,
+                                     uint64_t revision) {
     heatmap::ChunkFrame frame;
     frame.key = {symbol, sourceFor(rollup.hour.layer), kHourMs, dayMs};
-    frame.state = {true, dayMs + kDayMs, 0};
+    frame.state = {true, dayMs + kDayMs, revision};
     frame.columns = rollup.hour;
     return heatmap::encodeChunk(frame);
 }
-std::vector<uint8_t> encodeDayPiece(const std::string& symbol, const DayRollup& rollup, int64_t dayMs) {
+std::vector<uint8_t> encodeDayPiece(const std::string& symbol, const DayRollup& rollup, int64_t dayMs,
+                                    uint64_t revision) {
     const int64_t span = heatmap::chunkSpanMs(kDayMs);
     const int64_t chunk = heatmap::chunkStartOf(kDayMs, dayMs);
     heatmap::ChunkFrame frame;
     frame.key = {symbol, sourceFor(rollup.day.layer), kDayMs, chunk};
-    frame.state = {false, dayMs + kDayMs, 1};
+    frame.state = {false, dayMs + kDayMs, revision};
     frame.columns = rollup.day;
     frame.columns.startMs = chunk;
     frame.columns.endMs = chunk + span;
@@ -208,9 +254,10 @@ std::optional<std::vector<uint8_t>> readRollupFrame(const std::filesystem::path&
     return frame;
 }
 
-std::map<int64_t, uint64_t> minuteFingerprints(const std::filesystem::path& hmc2Root, const std::string& symbol,
-                                               const std::string& layer) {
+std::map<int64_t, MinuteDay> minuteFingerprints(const std::filesystem::path& hmc2Root, const std::string& symbol,
+                                                const std::string& layer) {
     std::map<int64_t, std::vector<std::tuple<std::string, uint64_t, int64_t>>> files;
+    std::map<int64_t, uint64_t> modified;
     std::error_code ec;
     const auto dir = hmc2Root / symbol / (layer + "-60000");
     for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
@@ -223,35 +270,40 @@ std::map<int64_t, uint64_t> minuteFingerprints(const std::filesystem::path& hmc2
         const auto time = it->last_write_time(fileError);
         if (fileError) continue;
         files[*day].emplace_back(name, uint64_t(size), int64_t(time.time_since_epoch().count()));
+        modified[*day] = std::max(modified[*day], uint64_t(std::max<int64_t>(0,
+            std::chrono::duration_cast<std::chrono::seconds>(time.time_since_epoch()).count())));
     }
-    std::map<int64_t, uint64_t> out;
+    std::map<int64_t, MinuteDay> out;
     for (auto& [day, list] : files) {
         std::sort(list.begin(), list.end());
         uint64_t h = kFnvSeed;
         for (const auto& [name, size, time] : list) h = fnv(fnv(fnv(h, name), size), uint64_t(time));
-        out[day] = h | 1; // nonzero: 0 means "no minute files"
+        out[day] = {h | 1, modified[day]}; // nonzero: 0 means "no minute files"
     }
     return out;
 }
 
+uint64_t lateRevision(int64_t dayMs, const MinuteDay& minutes) {
+    const int64_t modifiedMs = int64_t(std::min<uint64_t>(minutes.modifiedSec, uint64_t(INT64_MAX / 1000))) * 1000;
+    return modifiedMs > dayMs + kDayMs + kLateChangeMs ? minutes.modifiedSec : 0;
+}
+
 std::filesystem::path rollupRootFor(const std::string& configured, const std::filesystem::path& hmc2Root) {
-    auto tree = hmc2Root.lexically_normal();
-    if (!tree.has_filename()) tree = tree.parent_path(); // "hmc2/" -> "hmc2"
-    std::filesystem::path root = configured.empty() ? std::filesystem::path(tree.string() + "-rollups")
-                                                    : std::filesystem::path(configured).lexically_normal();
-    const auto absolute = [](const std::filesystem::path& p) {
-        std::error_code ec;
-        const auto a = std::filesystem::weakly_canonical(p, ec);
-        return ec ? p : a;
-    };
-    const auto rel = absolute(root).lexically_relative(absolute(tree));
-    if (!rel.empty() && *rel.begin() != "..") return {}; // the tree itself or inside it
-    return root;
+    // Fail closed: both paths resolve (symlinks included) and are disjoint in
+    // both directions, so deleting or cleaning the store never touches the tree.
+    const auto tree = resolved(hmc2Root);
+    if (!tree || !tree->has_filename()) return {};
+    const auto root = configured.empty() ? resolved(tree->string() + "-rollups") : resolved(configured);
+    if (!root || !root->has_filename() || within(*root, *tree) || within(*tree, *root)) return {};
+    return *root;
 }
 
 RollupStore::RollupStore(Options options) : options_(std::move(options)) {
     if (!options_.minuteThrough) throw std::invalid_argument("rollup store needs a minute watermark");
     if (options_.root.empty() || options_.hmc2Root.empty()) throw std::invalid_argument("rollup store needs roots");
+    const auto root = rollupRootFor(options_.root.string(), options_.hmc2Root);
+    if (root.empty()) throw std::invalid_argument("rollup store root must be disjoint from the HMC2 tree");
+    options_.root = root;
 }
 RollupStore::~RollupStore() { stop(); }
 
@@ -283,19 +335,65 @@ void RollupStore::wake() {
     wakeCv_.notify_all();
 }
 
-void RollupStore::builderLoop(std::stop_token stop) {
-    sentinel::logging::setCurrentThreadName("rollup-builder");
-    lowerThreadPriority();
-    // A build killed between write and rename leaves a temp file; never served.
-    std::error_code ec;
+uint64_t RollupStore::removeStaleTemps() const {
+    // Only the store's own temp files, only in its own level directories, never
+    // following a link: a build killed between write and rename leaves one.
     uint64_t removed = 0;
-    for (std::filesystem::recursive_directory_iterator it(options_.root, ec), end; !ec && it != end; it.increment(ec))
-        if (it->is_regular_file() && isTemp(it->path())) {
-            std::error_code removeError;
-            if (std::filesystem::remove(it->path(), removeError)) ++removed;
+    std::vector<std::string> symbols;
+    {
+        std::lock_guard pass(passMutex_);
+        symbols = options_.symbols;
+    }
+    for (const auto& symbol : symbols)
+        for (const auto* layer : {"near", "deep"})
+            for (const int64_t level : {kHourMs, kDayMs}) {
+                const auto dir = options_.root / symbol / layer / std::to_string(level);
+                std::error_code ec;
+                if (!ownedDirectory(dir)) continue;
+                for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+                    std::error_code entryError;
+                    const auto status = it->symlink_status(entryError);
+                    if (entryError || !std::filesystem::is_regular_file(status) ||
+                        !isOwnedTemp(it->path().filename().string())) continue;
+                    if (std::filesystem::remove(it->path(), entryError)) ++removed;
+                }
+            }
+    return removed;
+}
+
+bool RollupStore::ownedDirectory(const std::filesystem::path& dir) const {
+    // Every existing component below the root is a real directory (no links).
+    std::filesystem::path at = options_.root;
+    std::error_code ec;
+    const auto rootStatus = std::filesystem::symlink_status(at, ec);
+    if (!ec && std::filesystem::is_symlink(rootStatus)) return false;
+    for (const auto& part : dir.lexically_relative(options_.root)) {
+        if (part == ".." ) return false;
+        if (part == ".") continue;
+        at /= part;
+        const auto status = std::filesystem::symlink_status(at, ec);
+        if (ec || status.type() == std::filesystem::file_type::not_found) return true; // created later
+        if (!std::filesystem::is_directory(status)) return false;
+    }
+    return true;
+}
+
+void RollupStore::builderLoop(std::stop_token stop) {
+    // Nothing may leave a std::thread entry function (std::terminate would take
+    // down the recorder-hosting process).
+    try {
+        sentinel::logging::setCurrentThreadName("rollup-builder");
+        if (!lowerThreadPriority()) sLog_Warning("Rollup builder could not lower its thread priority");
+        uint64_t removed = 0;
+        try {
+            removed = removeStaleTemps();
+        } catch (const std::exception& e) {
+            sLog_Warning("Rollup temp cleanup failed error=" << e.what());
         }
-    sLog_Data("Rollup builder started root=" << options_.root.string() << " symbols=" << options_.symbols.size()
-              << " staleTempsRemoved=" << removed);
+        sLog_Data("Rollup builder started root=" << options_.root.string() << " symbols=" << options_.symbols.size()
+                  << " staleTempsRemoved=" << removed);
+    } catch (...) {
+    }
     while (!stop.stop_requested()) {
         try {
             const auto result = runPass(stop);
@@ -304,6 +402,8 @@ void RollupStore::builderLoop(std::stop_token stop) {
                           << " pending=" << result.pending << " stopped=" << result.stopped);
         } catch (const std::exception& e) {
             sLog_Error("Rollup pass failed error=" << e.what());
+        } catch (...) {
+            sLog_Error("Rollup pass failed with an unknown exception");
         }
         std::unique_lock lock(wakeMutex_);
         wakeCv_.wait_for(lock, options_.rescan, [&] { return woken_ || stop.stop_requested(); });
@@ -345,23 +445,20 @@ void RollupStore::passSeries(Hmc2Reader& reader, const std::string& symbol, cons
         throw std::runtime_error("minute availability scan incomplete");
     }
     if (!available.oldestMs) { publish(symbol, layer, {}); return; }
-    Series s{*available.oldestMs, 0, 0};
+    Series s{*available.oldestMs, 0, 0, 0};
     const int64_t firstDay = dayFloor(*available.oldestMs);
     const int64_t closedEnd = dayFloor(options_.minuteThrough(symbol, layer));
+    // A suspect day stays marked until its replacement is written.
     std::set<int64_t> suspects;
     {
         std::lock_guard lock(indexMutex_);
-        for (auto it = suspect_.begin(); it != suspect_.end();) {
-            if (std::get<0>(*it) == symbol && std::get<1>(*it) == layer) {
-                suspects.insert(std::get<2>(*it));
-                it = suspect_.erase(it);
-            } else ++it;
-        }
+        for (const auto& [suspectSymbol, suspectLayer, day] : suspect_)
+            if (suspectSymbol == symbol && suspectLayer == layer) suspects.insert(day);
     }
     const auto fingerprints = minuteFingerprints(options_.hmc2Root, symbol, layer);
-    auto fingerprint = [&](const std::map<int64_t, uint64_t>& fps, int64_t day) {
-        const auto it = fps.find(day);
-        return it == fps.end() ? uint64_t(0) : it->second;
+    auto minuteDay = [&](const std::map<int64_t, MinuteDay>& days, int64_t day) {
+        const auto it = days.find(day);
+        return it == days.end() ? MinuteDay{} : it->second;
     };
     auto current = [&](int64_t day, uint64_t fp) {
         for (const int64_t level : {kHourMs, kDayMs}) {
@@ -384,7 +481,8 @@ void RollupStore::passSeries(Hmc2Reader& reader, const std::string& symbol, cons
     bool contiguous = true;
     for (int64_t day = closedEnd - kDayMs; day >= firstDay; day -= kDayMs) {
         if (stop.stop_requested()) { result.stopped = true; break; }
-        const auto fp = fingerprint(fingerprints, day);
+        const auto minutes = minuteDay(fingerprints, day);
+        const auto fp = minutes.fingerprint;
         // A day without minute files is a recorder gap: it needs no files (a
         // request composes it, all gaps, from the absent minutes at no cost).
         bool built = !fp || (!suspects.contains(day) && current(day, fp));
@@ -394,13 +492,17 @@ void RollupStore::passSeries(Hmc2Reader& reader, const std::string& symbol, cons
                 ReadControl read;
                 read.stop = stop;
                 const auto rollup = composeDay(reader, symbol, layer, day, read);
-                const auto hour = encodeHourFrame(symbol, rollup, day);
-                const auto piece = encodeDayPiece(symbol, rollup, day);
+                const auto hour = encodeHourFrame(symbol, rollup, day, minutes.modifiedSec);
+                const auto piece = encodeDayPiece(symbol, rollup, day, minutes.modifiedSec);
                 // A minute file that changed while it was read is retried next pass.
-                if (fingerprint(minuteFingerprints(options_.hmc2Root, symbol, layer), day) != fp)
+                if (minuteDay(minuteFingerprints(options_.hmc2Root, symbol, layer), day).fingerprint != fp)
                     throw std::runtime_error("minute files changed during the build");
                 writeAtomically(filePath(symbol, layer, kHourMs, day), encodeRollupFile(fp, hour));
                 writeAtomically(filePath(symbol, layer, kDayMs, day), encodeRollupFile(fp, piece));
+                {
+                    std::lock_guard lock(indexMutex_);
+                    suspect_.erase({symbol, layer, day});
+                }
                 const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now() - started).count();
                 counters_.daysBuilt.fetch_add(1, std::memory_order_relaxed);
@@ -417,8 +519,10 @@ void RollupStore::passSeries(Hmc2Reader& reader, const std::string& symbol, cons
             }
         }
         if (built) {
-            if (!s.runEnd) s = {s.firstMinuteMs, day, day + kDayMs};
-            else if (contiguous && day + kDayMs == s.runStart) s.runStart = day;
+            const bool joins = !s.runEnd || (contiguous && day + kDayMs == s.runStart);
+            if (!s.runEnd) s = {s.firstMinuteMs, day, day + kDayMs, 0};
+            else if (joins) s.runStart = day;
+            if (joins) s.contentRevision = std::max(s.contentRevision, lateRevision(day, minutes));
             publishGrowth();
         } else {
             ++result.pending;
@@ -433,10 +537,14 @@ void RollupStore::passSeries(Hmc2Reader& reader, const std::string& symbol, cons
 
 void RollupStore::writeAtomically(const std::filesystem::path& path, const std::vector<uint8_t>& bytes) const {
     static std::atomic<uint64_t> counter{0};
-    std::filesystem::create_directories(path.parent_path());
+    // Never write through a link below the root (it could point into the tree).
+    const auto dir = path.parent_path();
+    if (!ownedDirectory(dir)) throw std::runtime_error("rollup directory is not a plain directory: " + dir.string());
+    std::filesystem::create_directories(dir);
+    if (!ownedDirectory(dir)) throw std::runtime_error("rollup directory is not a plain directory: " + dir.string());
     auto temp = path;
     temp += ".tmp-" + std::to_string(processId()) + "-" + std::to_string(counter.fetch_add(1));
-    std::FILE* f = std::fopen(temp.string().c_str(), "wb");
+    std::FILE* f = std::fopen(temp.string().c_str(), "wbx"); // exclusive: never opens an existing file or link
     if (!f) throw std::runtime_error("cannot create " + temp.string());
     bool ok = std::fwrite(bytes.data(), 1, bytes.size(), f) == bytes.size() && std::fflush(f) == 0;
 #if defined(_WIN32)
@@ -449,17 +557,19 @@ void RollupStore::writeAtomically(const std::filesystem::path& path, const std::
     try {
         if (!ok) throw std::runtime_error("cannot write " + temp.string());
         if (options_.beforeRename) options_.beforeRename(temp, path);
-        std::filesystem::rename(temp, path);
+        std::filesystem::rename(temp, path); // replaces a link itself, never its target
     } catch (...) {
         std::filesystem::remove(temp, ec);
         throw;
     }
+    syncDirectory(dir);
 }
 
 void RollupStore::publish(const std::string& symbol, const std::string& layer, const Series& s) {
     std::lock_guard lock(indexMutex_);
     auto& current = index_[{symbol, layer}];
-    if (current.firstMinuteMs == s.firstMinuteMs && current.runStart == s.runStart && current.runEnd == s.runEnd)
+    if (current.firstMinuteMs == s.firstMinuteMs && current.runStart == s.runStart && current.runEnd == s.runEnd &&
+        current.contentRevision == s.contentRevision)
         return;
     current = s;
     generation_.fetch_add(1, std::memory_order_acq_rel);
@@ -486,10 +596,11 @@ std::vector<RollupStore::LevelRange> RollupStore::levels(const std::string& symb
     // cached 1d chunk never lacks days that the run later gains.
     const bool complete = s.runStart <= dayFloor(s.firstMinuteMs);
     std::vector<LevelRange> out;
-    out.push_back({kHourMs, complete ? floorDiv(s.firstMinuteMs, kHourMs) * kHourMs : s.runStart, s.runEnd});
+    out.push_back({kHourMs, complete ? floorDiv(s.firstMinuteMs, kHourMs) * kHourMs : s.runStart, s.runEnd,
+                   s.contentRevision});
     const int64_t span = heatmap::chunkSpanMs(kDayMs);
     const int64_t dayOldest = complete ? dayFloor(s.firstMinuteMs) : heatmap::chunkStartOf(kDayMs, s.runStart + span - 1);
-    if (dayOldest < s.runEnd) out.push_back({kDayMs, dayOldest, s.runEnd});
+    if (dayOldest < s.runEnd) out.push_back({kDayMs, dayOldest, s.runEnd, s.contentRevision});
     return out;
 }
 
@@ -523,11 +634,12 @@ RollupStore::Reply RollupStore::serveHour(const ChunkKey& key, const std::string
         }
     }
     // Missing or corrupt: the day's minutes give the same picture.
-    const bool fallback = expectFile(key, layer, day);
+    const auto minutes = expectFile(key, layer, day);
     ReadControl control;
     const auto rollup = composeDay(reader, key.symbol, layer, day, control);
-    return {std::make_shared<const std::vector<uint8_t>>(encodeHourFrame(key.symbol, rollup, day)),
-            heatmap::ChunkError::BuildFailed, {}, fallback};
+    return {std::make_shared<const std::vector<uint8_t>>(
+                encodeHourFrame(key.symbol, rollup, day, minutes.modifiedSec)),
+            heatmap::ChunkError::BuildFailed, {}, minutes.fingerprint != 0};
 }
 
 RollupStore::Reply RollupStore::serveDay(const ChunkKey& key, const std::string& layer, Hmc2Reader& reader) {
@@ -556,13 +668,19 @@ RollupStore::Reply RollupStore::serveDay(const ChunkKey& key, const std::string&
     frame.columns = {key.symbol, layer, kDayMs, start, end};
     if (scanTo > scanFrom) frame.columns.scannedRanges.push_back({scanFrom, scanTo});
     bool fallback = false;
+    uint64_t revision = 0; // the newest minute change of any scanned day
     for (const auto& [day, id] : days) {
         std::optional<heatmap::SparseColumns> piece;
         if (id)
-            if (const auto bytes = readRollupFrame(filePath(key.symbol, layer, kDayMs, day), key))
-                piece = heatmap::decodeChunk(*bytes).columns;
+            if (const auto bytes = readRollupFrame(filePath(key.symbol, layer, kDayMs, day), key)) {
+                auto decoded = heatmap::decodeChunk(*bytes);
+                revision = std::max(revision, decoded.state.revision);
+                piece = std::move(decoded.columns);
+            }
         if (!piece) {
-            fallback = expectFile(key, layer, day) || fallback;
+            const auto minutes = expectFile(key, layer, day);
+            fallback = fallback || minutes.fingerprint;
+            revision = std::max(revision, minutes.modifiedSec);
             ReadControl control;
             piece = std::move(composeDay(reader, key.symbol, layer, day, control).day);
         }
@@ -571,20 +689,24 @@ RollupStore::Reply RollupStore::serveDay(const ChunkKey& key, const std::string&
                 frame.columns.columns.push_back(std::move(column));
     }
     const bool sealed = scanFrom == start && scanTo == end;
-    frame.state = {sealed, sealed ? end : s.runEnd, sealed ? 0 : 1 + uint64_t((scanTo - scanFrom) / kDayMs)};
+    // The revision orders a rebuilt (changed) chunk after the one it replaces;
+    // an open chunk's growth is ordered by its cutoff.
+    frame.state = {sealed, sealed ? end : s.runEnd, revision};
     auto wire = std::make_shared<const std::vector<uint8_t>>(heatmap::encodeChunk(frame));
     if (allPresent && !fallback) remember(key, identity, wire);
     return {std::move(wire), heatmap::ChunkError::BuildFailed, {}, fallback};
 }
 
-bool RollupStore::expectFile(const ChunkKey& key, const std::string& layer, int64_t dayMs) {
+MinuteDay RollupStore::expectFile(const ChunkKey& key, const std::string& layer, int64_t dayMs) {
+    const auto days = minuteFingerprints(options_.hmc2Root, key.symbol, layer);
+    const auto it = days.find(dayMs);
     // A recorder-gap day (no minute files) has no rollup files by design.
-    if (!minuteFingerprints(options_.hmc2Root, key.symbol, layer).contains(dayMs)) return false;
+    if (it == days.end()) return {};
     markSuspect(key.symbol, layer, dayMs);
     counters_.fallbackServes.fetch_add(1, std::memory_order_relaxed);
     sLog_Warning("Rollup file missing or corrupt; composing minutes symbol=" << key.symbol << " layer=" << layer
                  << " level=" << key.levelMs << " day=" << dayString(dayMs));
-    return true;
+    return it->second;
 }
 
 std::shared_ptr<const std::vector<uint8_t>> RollupStore::cached(const ChunkKey& key, uint64_t identity) {

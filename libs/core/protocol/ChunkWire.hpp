@@ -121,6 +121,7 @@ struct GridInfo {
 struct LevelInfo {
     int64_t levelMs = 0, chunkSpanMs = 0, committedThroughMs = 0;
     int64_t oldestMs = 0, latestMs = 0; // bucket starts
+    uint64_t contentRevision = 0; // rises when stored (rollup) content of the level changed
 };
 struct SourceInfo {
     std::string id;
@@ -143,7 +144,8 @@ inline nlohmann::json buildAvailability(const std::string& symbol,
         for (const auto& l : s.levels) {
             levels.push_back({{"level_ms", l.levelMs}, {"chunk_span_ms", l.chunkSpanMs},
                               {"oldest_ms", *l.oldestMs}, {"latest_ms", l.latestMs.value_or(*l.oldestMs)},
-                              {"committed_through_ms", l.committedThroughMs}});
+                              {"committed_through_ms", l.committedThroughMs},
+                              {"content_revision", l.contentRevision}});
             oldest = oldest ? std::min(oldest, *l.oldestMs) : *l.oldestMs;
             latest = std::max(latest, l.latestMs.value_or(*l.oldestMs));
         }
@@ -182,7 +184,8 @@ inline Availability parseAvailability(const nlohmann::json& j) {
         for (const auto& l : s.at("levels"))
             info.levels.push_back({l.at("level_ms").get<int64_t>(), l.at("chunk_span_ms").get<int64_t>(),
                                    l.at("committed_through_ms").get<int64_t>(),
-                                   l.at("oldest_ms").get<int64_t>(), l.at("latest_ms").get<int64_t>()});
+                                   l.at("oldest_ms").get<int64_t>(), l.at("latest_ms").get<int64_t>(),
+                                   l.at("content_revision").get<uint64_t>()});
         out.sources.push_back(std::move(info));
     }
     return out;
