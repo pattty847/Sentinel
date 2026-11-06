@@ -552,13 +552,10 @@ TEST_F(RollupTest, SuspectDayStaysMarkedUntilReplaced) {
     EXPECT_EQ(store.runPass().built, 0u) << "the mark is cleared once replaced";
 }
 
-// A closed day's minute files rewritten with other cells: the day is rebuilt,
-// the level's content revision rises (clients revalidate), and the rebuilt
-// sealed chunk carries a higher revision than the one it replaces.
 // Changed minute files of a closed day (a backfill or repair): the next pass
 // rebuilds the day from its fingerprint, and a new request (a new GUI) gets
-// the new picture. Sealed rollup chunks keep revision 0: a running GUI keeps
-// what it has until it restarts (its chunk cache is in memory only).
+// the new picture. Sealed rollup chunks keep revision 0: a running GUI does
+// not revalidate what it holds; a restart guarantees a fresh fetch.
 TEST_F(RollupTest, ChangedMinuteFilesGiveANewRequestTheRebuiltPicture) {
     RollupStore store(options());
     store.runPass();
