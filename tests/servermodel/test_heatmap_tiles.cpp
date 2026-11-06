@@ -227,7 +227,8 @@ TEST(HeatmapTiles, ChunkPlanUsesHoursBeforeTheWatermarkAndMinutesAfter) {
     EXPECT_EQ(keys[0].levelMs, minute);
     keys = chunksFor("BTC-USD", "hmc2.deep", 5 * minute, epoch + 2 * day + 2 * hour, epoch + 3 * day, a);
     EXPECT_TRUE(keys.empty()) << "nothing recorded after availability.endMs";
-    EXPECT_TRUE(chunksFor("BTC-USD", "hmc2.unknown", hour, epoch, epoch + day, a).empty());
+    // Source ids are opaque: any id plans from what it advertises.
+    EXPECT_EQ(chunksFor("BTC-USD", "other", hour, epoch, epoch + 3 * day, a).size(), 4u);
 }
 
 // The widest views of the stored levels over a closed range: 1h and 4h read

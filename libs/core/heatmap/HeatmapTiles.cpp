@@ -36,7 +36,9 @@ std::vector<ChunkKey> chunksFor(const std::string &symbol, const std::string &so
                                 int64_t startMs, int64_t endMs, const Availability &availability) {
     std::vector<ChunkKey> out;
     const int64_t lo = std::max(startMs, availability.oldestMs), hi = std::min(endMs, availability.endMs);
-    if (hi <= lo || tfMs <= 0 || !findChunkSource(source)) return out;
+    // Source ids are opaque data here (HeatmapSpanPlanner.hpp): the plan never
+    // depends on which source it is, only on what the source advertises.
+    if (hi <= lo || tfMs <= 0) return out;
     const int64_t minuteOldest = std::max(availability.oldestMs, availability.minuteOldestMs);
     struct Level { int64_t levelMs, oldestMs, throughMs; };
     // Coarsest first; a level serves only timeframes it divides.
