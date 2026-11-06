@@ -3,7 +3,6 @@
 #include "marketdata/model/TradeData.h"
 #include "servermodel/BookRecorder.hpp"
 #include <unordered_set>
-#include <utility>
 
 namespace sentinel::roller {
 // Native-price durable book, also used by the journal model tap. Boundary
@@ -41,13 +40,6 @@ public:
     // 16K IDs cover many 100-trade reconnect snapshots while capping per-product memory.
     static constexpr size_t TradeIdWindowCapacity = 16'384;
     size_t retainedTradeIds() const { return tradeIds_.size(); }
-    // Sequence number of the frame being applied (inside a callback) or last
-    // applied; 0 when none. Diagnostics only (RecorderSink LevelChange::sequence).
-    uint64_t sequence() const { return sequence_.value_or(0); }
-    // Inside onSnapshot/onUpdates: the original text of the price that is not an exact
-    // plain decimal with the lowest index in the levels handed to the callback (empty
-    // when none), moved out for the recorder message.
-    recording::PriceText takePriceText() { return std::exchange(priceText_, {}); }
     // Read-only view of the retained nonempty IDs (at most the window capacity);
     // copy it to keep it past further apply() calls.
     const std::unordered_set<std::string>& tradeIds() const { return tradeIds_; }
@@ -68,11 +60,6 @@ private:
     };
     std::vector<PendingTrade> frameTrades_; // Reuse storage across frames.
     bool rememberTradeId(const std::string& id);
-    recording::PriceText priceText_;
-    void attachDecimal(recording::Level& level, size_t index, const std::string& text);
-    void attachUpdateDecimals(const nlohmann::json& event, std::vector<recording::Level>& levels);
-    void attachSnapshotDecimals(const nlohmann::json& event, std::vector<recording::Level>& levels,
-                                size_t bidCount);
     void invalid(int64_t local, const std::string& reason);
 };
 } // namespace sentinel::roller
