@@ -100,7 +100,8 @@ ChunkAvailability LocalChunkTransport::Worker::readAvailability(const std::strin
             (void)rollups->runPass(stop); // index only: this store never builds
             for (const auto &level : rollups->levels(symbol, layer))
                 info.levels.push_back({level.levelMs, chunkSpanMs(level.levelMs), level.throughMs, level.oldestMs,
-                                       level.throughMs - level.levelMs, level.contentRevision});
+                                       level.throughMs - level.levelMs, level.contentEpoch,
+                                       level.contentGeneration});
         }
         out.sources.push_back(std::move(info));
     }
@@ -120,8 +121,8 @@ bool sameAvailability(const ChunkAvailability &a, const ChunkAvailability &b) {
         }
         for (size_t j = 0; j < x.levels.size(); ++j) {
             const auto &l = x.levels[j], &r = y.levels[j];
-            if (std::tie(l.levelMs, l.chunkSpanMs, l.committedThroughMs, l.oldestMs, l.latestMs, l.contentRevision) !=
-                std::tie(r.levelMs, r.chunkSpanMs, r.committedThroughMs, r.oldestMs, r.latestMs, r.contentRevision))
+            if (std::tie(l.levelMs, l.chunkSpanMs, l.committedThroughMs, l.oldestMs, l.latestMs, l.contentEpoch, l.contentGeneration) !=
+                std::tie(r.levelMs, r.chunkSpanMs, r.committedThroughMs, r.oldestMs, r.latestMs, r.contentEpoch, r.contentGeneration))
                 return false;
         }
     }

@@ -66,7 +66,8 @@ private:
     struct Demand {
         std::map<ChartId, int> charts;
         bool pending = false, refresh = false, failed = false;
-        bool reload = false; // the level's stored content changed while in flight: request again
+        // Content identity of the level when the request was admitted (rollups).
+        std::optional<std::pair<uint64_t, uint64_t>> token;
         quint64 request = 0;
         uint64_t order = 0;
         int64_t dueMs = 0;
@@ -115,6 +116,13 @@ private:
     void prune(const ChunkKey &key);
     bool ready(const ChunkKey &key) const;
     int64_t committedThrough(const ChunkKey &key) const;
+    // Rollup levels: (store epoch, content generation) of the current availability.
+    using ContentToken = std::pair<uint64_t, uint64_t>;
+    std::optional<ContentToken> contentToken(const ChunkKey &key) const;
+    // A held rollup chunk last validated under another content identity. The
+    // mark survives disconnects and released interest; only a fetch clears it.
+    bool stale(const ChunkKey &key) const;
+    std::unordered_map<ChunkKey, ContentToken, ChunkKeyHash> validated_;
     size_t estimate(const ChunkKey &key) const;
 };
 } // namespace heatmap

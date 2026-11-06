@@ -339,51 +339,99 @@ TEST_F(Fetcher, CommittedThroughAdvanceRefreshesOnlyWantedOpenChunksOfThatLevel)
     transport.push(available(epoch + 31 * kMinuteMs)); drain();
     EXPECT_EQ(transport.requests.size(), requests.size() + 1) << "same cutoff is not an advance";
 }
-// A rollup level whose stored content changed (content_revision rises): held
-// sealed chunks of that level are revalidated and the rebuilt body replaces
-// the cached one; an unchanged revision or another level requests nothing.
-TEST_F(Fetcher, ContentRevisionRevalidatesHeldSealedRollupChunks) {
-    online();
-    const auto hourKey = key(0, "hmc2.deep", kHourMs), minuteKey = key();
-    fetcher->want(1, {hourKey, minuteKey}); drain();
-    const auto sealed = body(hourKey, 24 * 60);
-    ASSERT_TRUE(sealed->state.sealed);
-    for (const auto &r : std::vector(transport.requests))
-        for (size_t i = 0; i < r.starts.size(); ++i)
-            transport.reply(r.id, r.key(i) == hourKey ? sealed : body(r.key(i), 60));
-    drain();
-    const auto held = store.peek(hourKey);
-    ASSERT_TRUE(held && held->sealed);
-    const auto count = transport.requests.size();
-    auto bump = [](ChunkAvailability a, int64_t level, uint64_t revision) {
-        for (auto &s : a.sources) for (auto &l : s.levels) if (l.levelMs == level) l.contentRevision = revision;
-        return a;
-    };
-    transport.push(bump(available(), kHourMs, 0)); drain();
-    EXPECT_EQ(transport.requests.size(), count) << "same content revision";
-    transport.push(bump(available(), kHourMs, 7)); drain();
-    ASSERT_EQ(transport.requests.size(), count + 1);
-    const auto refresh = transport.requests.back();
-    EXPECT_EQ(refresh.levelMs, kHourMs);
-    ASSERT_EQ(refresh.starts, std::vector<int64_t>{hourKey.startMs});
-    EXPECT_EQ(refresh.hashes.at(0), std::optional<uint64_t>(sealed->contentHash)) << "unchanged days: not_modified";
-    auto rebuilt = std::make_shared<ChunkFrame>(*body(hourKey, 24 * 60, 1)); // other cells
-    rebuilt->state.revision = 7;
-    rebuilt->contentHash = chunkContentHash(encodeChunk(*rebuilt));
-    transport.reply(refresh.id, rebuilt); drain();
-    const auto now = store.peek(hourKey);
-    ASSERT_TRUE(now);
-    EXPECT_EQ(now->contentHash, rebuilt->contentHash);
-    EXPECT_NE(now->generation, held->generation);
-    transport.push(bump(available(), kHourMs, 7)); drain();
-    EXPECT_EQ(transport.requests.size(), count + 1) << "no repeat for the same revision";
-    // A bump while the reply is in flight requests the key once more.
-    transport.push(bump(available(), kHourMs, 8)); drain();
-    ASSERT_EQ(transport.requests.size(), count + 2);
-    transport.push(bump(available(), kHourMs, 9)); drain();
-    EXPECT_EQ(transport.requests.size(), count + 2) << "one request in flight per key";
-    transport.reply(transport.requests.back().id, rebuilt); drain();
-    EXPECT_EQ(transport.requests.size(), count + 3) << "the in-flight reply may predate revision 9";
+// Rollup content identity: (store epoch, content generation) per level. A held
+// rollup chunk validated under another identity is revalidated (have_hash)
+// before reuse: on a change, after a reconnect, and after interest was released.
+ChunkAvailability content(uint64_t storeEpoch, uint64_t generation, int64_t through = epoch + 30 * kMinuteMs) {
+    auto a = available(through);
+    for (auto &s : a.sources)
+        for (auto &l : s.levels)
+            if (l.levelMs != kMinuteMs) { l.contentEpoch = storeEpoch; l.contentGeneration = generation; }
+    return a;
+}
+ChunkFramePtr rebuilt(const ChunkKey &key, uint64_t revision, uint64_t salt) {
+    auto f = std::make_shared<ChunkFrame>(*body(key, 24 * 60, salt)); // sealed, other cells per salt
+    f->state.revision = revision;
+    f->contentHash = chunkContentHash(encodeChunk(*f));
+    return f;
+}
+class RollupFetch : public Fetcher {
+protected:
+    const ChunkKey hourKey = key(0, "hmc2.deep", kHourMs);
+    ChunkFramePtr first;
+    void holdSealed() {
+        online(content(11, 0));
+        fetcher->want(1, {hourKey}); drain();
+        ASSERT_EQ(transport.requests.size(), 1u);
+        first = rebuilt(hourKey, 0, 0);
+        transport.reply(transport.requests.back().id, first); drain();
+        ASSERT_TRUE(store.peek(hourKey) && store.peek(hourKey)->sealed);
+    }
+    void expectRevalidation(size_t requests) {
+        ASSERT_EQ(transport.requests.size(), requests);
+        const auto &r = transport.requests.back();
+        EXPECT_EQ(r.levelMs, kHourMs);
+        ASSERT_EQ(r.starts, std::vector<int64_t>{hourKey.startMs});
+        EXPECT_EQ(r.hashes.at(0), std::optional<uint64_t>(first->contentHash)) << "unchanged: not_modified";
+    }
+};
+TEST_F(RollupFetch, GenerationChangeRevalidatesAndTheRebuiltBodyReplacesTheHeldOne) {
+    holdSealed();
+    transport.push(content(11, 0, epoch + 31 * kMinuteMs)); drain();
+    EXPECT_EQ(transport.requests.size(), 1u) << "same identity, other cutoff: nothing";
+    transport.push(content(11, 1)); drain();
+    expectRevalidation(2);
+    const auto changed = rebuilt(hourKey, 1, 1);
+    const auto before = store.peek(hourKey)->generation;
+    transport.reply(transport.requests.back().id, changed); drain();
+    EXPECT_EQ(store.peek(hourKey)->contentHash, changed->contentHash);
+    EXPECT_NE(store.peek(hourKey)->generation, before);
+    transport.push(content(11, 1)); drain();
+    EXPECT_EQ(transport.requests.size(), 2u) << "validated under generation 1";
+}
+TEST_F(RollupFetch, UnchangedAnswersNotModifiedAndKeepsTheBody) {
+    holdSealed();
+    transport.push(content(11, 4)); drain(); // another day's change
+    expectRevalidation(2);
+    const auto generation = store.peek(hourKey)->generation;
+    transport.reply(transport.requests.back().id, unchanged(first)); drain();
+    EXPECT_EQ(store.peek(hourKey)->generation, generation);
+    transport.push(content(11, 4)); drain();
+    EXPECT_EQ(transport.requests.size(), 2u);
+}
+TEST_F(RollupFetch, ReconnectWithAChangeRevalidates) {
+    holdSealed();
+    transport.goOffline(); drain();
+    transport.goOnline(); transport.push(content(11, 0)); drain();
+    EXPECT_EQ(transport.requests.size(), 1u) << "reconnect without a change: the sealed body stays";
+    transport.goOffline(); drain();
+    transport.goOnline(); transport.push(content(11, 2)); drain();
+    expectRevalidation(2);
+}
+TEST_F(RollupFetch, NewEpochRevalidates) {
+    holdSealed();
+    transport.push(content(12, 0)); drain(); // the store directory was recreated
+    expectRevalidation(2);
+}
+TEST_F(RollupFetch, ReleaseThenChangeThenWantRevalidatesBeforeReuse) {
+    holdSealed();
+    fetcher->release(1, {hourKey}); drain();
+    transport.push(content(11, 3)); drain();
+    EXPECT_EQ(transport.requests.size(), 1u) << "nobody wants it now";
+    ASSERT_TRUE(store.peek(hourKey)) << "still cached";
+    fetcher->want(2, {hourKey}); drain();
+    expectRevalidation(2);
+}
+TEST_F(RollupFetch, ChangeWhileInFlightRequestsAgain) {
+    holdSealed();
+    transport.push(content(11, 5)); drain();
+    expectRevalidation(2);
+    transport.push(content(11, 6)); drain();
+    EXPECT_EQ(transport.requests.size(), 2u) << "one request in flight per key";
+    transport.reply(transport.requests.back().id, rebuilt(hourKey, 5, 5)); drain();
+    ASSERT_EQ(transport.requests.size(), 3u) << "the reply may predate generation 6";
+    transport.reply(transport.requests.back().id, rebuilt(hourKey, 6, 6)); drain();
+    EXPECT_EQ(transport.requests.size(), 3u);
 }
 TEST_F(Fetcher, AdvanceDuringFlightSchedulesOneFollowupForOlderBody) {
     online(); fetcher->want(1, {key()}); drain();

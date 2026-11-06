@@ -36,19 +36,19 @@ DayRollup composeDay(Hmc2Reader& reader, const std::string& symbol, const std::s
                      ReadControl& control);
 // The SHC1 frames a day contributes: the sealed 1h day chunk, and the day's 1d
 // piece (an open frame of its kDayChunkDays chunk that scans only that day).
-// `revision` is the day's MinuteDay::modifiedSec: a rebuild from changed minute
-// files carries a higher revision, which orders it after the chunk it replaces.
+// `revision` is the store content generation at which this content was
+// produced (RollupStore): a changed rebuild carries a higher one.
 std::vector<uint8_t> encodeHourFrame(const std::string& symbol, const DayRollup& rollup, int64_t dayMs,
                                      uint64_t revision);
 std::vector<uint8_t> encodeDayPiece(const std::string& symbol, const DayRollup& rollup, int64_t dayMs,
                                     uint64_t revision);
 
-// File container: "SHR1", u16 version, u16 zero, u64 source fingerprint, u64
-// frame length, then the SHC1 frame. Little-endian.
-inline constexpr size_t kRollupHeaderBytes = 24;
-std::vector<uint8_t> encodeRollupFile(uint64_t sourceFingerprint, std::span<const uint8_t> frame);
+// File container: "SHR1", u16 version 2, u16 zero, u64 source fingerprint,
+// u64 frame revision, u64 frame length, then the SHC1 frame. Little-endian.
+inline constexpr size_t kRollupHeaderBytes = 32;
+std::vector<uint8_t> encodeRollupFile(uint64_t sourceFingerprint, uint64_t revision, std::span<const uint8_t> frame);
 struct RollupFileHeader {
-    uint64_t sourceFingerprint = 0, frameBytes = 0;
+    uint64_t sourceFingerprint = 0, revision = 0, frameBytes = 0;
 };
 // Header and length check only (no frame decode); nullopt when missing or torn.
 std::optional<RollupFileHeader> readRollupHeader(const std::filesystem::path& path);
@@ -58,18 +58,13 @@ std::optional<std::vector<uint8_t>> readRollupFrame(const std::filesystem::path&
 
 // A series' recorded minute files for one UTC day,
 // <hmc2Root>/<symbol>/<layer>-60000/<day>*.hmc2: `fingerprint` hashes their
-// names, sizes and modification times (a rollup built from other files is
-// stale; 0 = no files); `modifiedSec` is the newest modification time in
-// seconds (file clock), the day's content revision. Keyed by day start.
+// names, sizes and modification times. It only decides whether a day is
+// rebuilt (0 = no files); content revisions never derive from it. Keyed by day start.
 struct MinuteDay {
-    uint64_t fingerprint = 0, modifiedSec = 0;
+    uint64_t fingerprint = 0;
 };
 std::map<int64_t, MinuteDay> minuteFingerprints(const std::filesystem::path& hmc2Root, const std::string& symbol,
                                                 const std::string& layer);
-// The content revision a series advertises for a day: its modifiedSec when the
-// minute files changed more than an hour after the day ended (a backfill or
-// repair after the day closed), else 0. Live-written days never raise it.
-uint64_t lateRevision(int64_t dayMs, const MinuteDay& minutes);
 
 // The store directory, resolved (absolute, symlinks followed): `configured`, or
 // "<hmc2Root>-rollups" when empty. Empty (refused) when either path cannot be
@@ -95,9 +90,11 @@ public:
     };
     struct LevelRange {
         int64_t levelMs = 0, oldestMs = 0, throughMs = 0; // bucket starts in [oldest, through)
-        // Rises when a day inside the interval was rebuilt from minute files
-        // changed after it closed: clients refetch the level's cached chunks.
-        uint64_t contentRevision = 0;
+        // Content identity: the store epoch (random, new with a new store
+        // directory) and the newest content generation of the interval's days.
+        // Revisions compare only within one epoch; a rise means some day's
+        // cells changed, so clients revalidate the level's held chunks.
+        uint64_t contentEpoch = 0, contentGeneration = 0;
     };
     struct Counters {
         std::atomic<uint64_t> daysBuilt{0}, buildFailures{0}, buildMicros{0}, fallbackServes{0};
@@ -143,12 +140,15 @@ public:
                                    int64_t dayMs) const;
     const std::filesystem::path& root() const { return options_.root; }
     const Counters& counters() const { return counters_; }
+    // Current store epoch (0 until the store's identity file exists) and content generation.
+    uint64_t epoch() const { return epoch_.load(std::memory_order_acquire); }
+    uint64_t contentGeneration() const { return contentGeneration_.load(std::memory_order_acquire); }
 
 private:
     struct Series {
         int64_t firstMinuteMs = 0; // oldest recorded minute bucket (0: none)
         int64_t runStart = 0, runEnd = 0; // contiguous built days ending at the newest built day
-        uint64_t contentRevision = 0;      // max lateRevision over the run's days
+        uint64_t contentGeneration = 0;    // max frame revision over the run's days
     };
     struct CacheEntry {
         ChunkKey key;
@@ -161,6 +161,15 @@ private:
     std::map<std::pair<std::string, std::string>, Series> index_;
     std::set<std::tuple<std::string, std::string, int64_t>> suspect_; // days to rebuild (corrupt at serve)
     std::atomic<uint64_t> generation_{1};
+    // Store identity (<root>/STORE): a random epoch and the monotonic content
+    // generation, persisted before any frame that carries it is written.
+    std::atomic<uint64_t> epoch_{0}, contentGeneration_{0};
+    void loadIdentity(bool create);
+    void persistIdentity(uint64_t epoch, uint64_t generation);
+    // The frame revision for a day's new content: the old revision when both
+    // frames are byte-identical at it (content unchanged), else a new generation.
+    uint64_t revisionFor(const std::string& symbol, const std::string& layer, int64_t day,
+                         const DayRollup& rollup);
     mutable std::mutex passMutex_;
     std::mutex cacheMutex_;
     std::list<CacheEntry> cache_;
