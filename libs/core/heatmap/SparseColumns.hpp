@@ -33,7 +33,8 @@ struct NativeColumn {
     uint64_t observedMs = 0;
     std::array<std::vector<CoverageRun>, 2> coverage;
     std::vector<SparseEntry> entries;
-    // Empty means observedMs for every entry (always empty for minute records).
+    // Empty means observedMs for every native entry; composed columns use
+    // numerators and coverage runs instead (always empty for minute records).
     std::vector<uint64_t> entryCoveredMs;
     bool composed = false;
     // Composed columns only: decoded mean * covered duration, parallel to entries.

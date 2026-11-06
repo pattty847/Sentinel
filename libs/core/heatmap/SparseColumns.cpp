@@ -75,7 +75,8 @@ void validate(const SparseColumns& data) {
                 }
             }
             require(native.composed ? native.numerators.size() == native.entries.size() : native.numerators.empty());
-            require(native.entryCoveredMs.empty() || native.entryCoveredMs.size() == native.entries.size());
+            require(native.composed ? native.entryCoveredMs.empty() :
+                    (native.entryCoveredMs.empty() || native.entryCoveredMs.size() == native.entries.size()));
             // The scale is monotone: one bound check avoids decoding every raw
             // entry during validation and again during aggregation.
             require(std::isfinite(recording::decodeSize(recording::kMaxCode, native.sizeScale)));
@@ -86,9 +87,9 @@ void validate(const SparseColumns& data) {
                 const auto key = (uint64_t(entry.row()) << 1) | entry.isAsk();
                 require(!i || key > previousKey);
                 previousKey = key;
-                require(entry.code <= recording::kMaxCode && entryCoveredMs(native, i) > 0 &&
-                        entryCoveredMs(native, i) <= native.observedMs);
+                require(entry.code <= recording::kMaxCode);
                 if (native.composed) require(std::isfinite(native.numerators[i]) && native.numerators[i] >= 0);
+                else require(entryCoveredMs(native, i) > 0 && entryCoveredMs(native, i) <= native.observedMs);
             }
         }
         require(observed == column.observedMs);
